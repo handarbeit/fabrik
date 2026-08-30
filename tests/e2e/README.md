@@ -993,6 +993,63 @@ oversubscription: it's the GraphQL cost of the ADR-1270/ADR-1208 settle-scan
 pattern, not bed contention. See "The two-mode gate's 'on' leg: a separate,
 larger cost driver (#1527)" above.
 
+#### Hang hardening (#1676): `E2E_GH_API_TIMEOUT`, `E2E_POST_SUITE_WATCHDOG`, `E2E_STALL_WARN_MINUTES`
+
+The v0.0.81 cut hung for **17h19m** — with its log untouched for the last
+~19 of them, and the `e2e.test` binary long gone — because the two `gh api
+rate_limit` budget-probe calls in `switch_and_run` (`budget_before`/
+`budget_after`) had no timeout at all: `|| echo ""` only guards a *failing*
+call, not a *hanging* one. `run.sh` now guards against a repeat at three
+independent layers (see the script's own header comment, "Hang hardening",
+for the full mechanism):
+
+- **`E2E_GH_API_TIMEOUT`** (default `30`, seconds) — every ancillary network
+  call (currently: the two `gh api rate_limit` budget probes) is wrapped in
+  a `with_timeout` helper and killed — whole process group — if it exceeds
+  this. These are lightweight REST metadata calls (see "GraphQL budget
+  exhaustion detection" above), so 30s is generous, not tight.
+- **`E2E_POST_SUITE_WATCHDOG`** (default `300`, seconds) — a background
+  watchdog, armed the instant `go test` exits, aborts the script loudly
+  (a distinct exit code, `POST_SUITE_WATCHDOG_EXIT=6`) with a diagnostic
+  naming the stuck step if `switch_and_run`'s own post-suite bookkeeping
+  (the budget probe, timing/outcome reports, the backoff scan — normally
+  seconds, not minutes) hasn't finished within this window. This is the
+  exact failure mode from the v0.0.81 incident: `go test` long gone, no
+  watchdog to say so.
+- **`E2E_STALL_WARN_MINUTES`** (default `15`, minutes) — independently of
+  the watchdog above, warns (never aborts) if the suite's own combined
+  output has gone quiet for this long *while `go test` is still running*,
+  naming the last completed scenario. Purely advisory: a real scenario can
+  legitimately wait on Claude for extended periods (see the `E2E_TIMEOUT`
+  derivation above), so silence alone is never treated as a hang — it's
+  only surfaced, so it's never mistaken for progress either.
+
+**Defaults kept as proposed, not further tuned.** Nothing in the
+post-`go test` tail this watchdog covers (a couple of REST calls plus `jq`
+parsing over the JSON log) plausibly approaches minutes, so `300s` is a
+generous backstop relative to normal completion time. For the stall
+detector, the one measured real-world inter-event gap already on record in
+this file — **5½ minutes**, `TestReviewAuthorityClearsOnApproval`, in a
+multi-scenario "on" leg (see "How the timeout/parallelism defaults are
+derived" above) — sits comfortably under the 15-minute default, so nothing
+found during Research/Plan indicted the issue's own starting-point values.
+
+**Expected warning on the isolated `TestMergeTrainRunawayGuardPausesBatch`
+leg.** This scenario runs alone (see `run.sh`'s own dispatch-guard comment),
+deliberately queuing poison members until a 1-hour-windowed runaway guard
+fires, with no other parallel scenario keeping the combined output stream
+busy in the meantime. The stall detector is expected to warn during this
+leg on every healthy run — that is not a regression, and the warning text
+is worded to read as informational rather than alarming.
+
+Composition with `E2E_GH_API_TIMEOUT`: a single hung `gh api` call is
+bounded well within the post-suite watchdog's own window (30s default vs.
+300s default), so in the common case the watchdog should never actually
+fire — `E2E_GH_API_TIMEOUT` already removes the only two calls known to
+cause the original hang. The watchdog exists as a backstop against a
+*future* regression (a call added to that tail without routing through
+`with_timeout`), not the expected path.
+
 #### Timeout & failure reporting
 
 On a non-zero exit, `run.sh` classifies every top-level test by the last

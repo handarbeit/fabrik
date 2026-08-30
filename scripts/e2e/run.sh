@@ -222,6 +222,56 @@
 # concretely, a compiled `*.test` binary) running headless. See run_reaped's
 # own doc comment for the mechanism and why it traps INT/TERM only, never
 # EXIT.
+#
+# Hang hardening (R1-R3, #1676): the v0.0.81 cut hung for 17h19m AFTER `go
+# test` had already exited — the two `gh api rate_limit` budget-probe calls
+# in switch_and_run had no timeout at all (`|| echo ""` only guards a
+# *failing* call, not a *hanging* one). Three independent layers now guard
+# against this:
+#
+#   E2E_GH_API_TIMEOUT=<secs>     (R1, default 30) — every ancillary network
+#                          call (currently: the two `gh api rate_limit`
+#                          budget-probe calls) is wrapped in the with_timeout
+#                          helper (defined below, near run_reaped) and killed
+#                          — whole process group — if it exceeds this. THIS IS
+#                          THE REQUIRED ROUTING POINT for any future network
+#                          call added to this script or one it sources; see
+#                          with_timeout's own comment.
+#
+#   E2E_POST_SUITE_WATCHDOG=<secs> (R2, default 300) — a background watchdog,
+#                          armed the instant `go test` exits, aborts the
+#                          script loudly (exit $POST_SUITE_WATCHDOG_EXIT, see
+#                          below) with a diagnostic naming the stuck step
+#                          (budget probe / timing report / outcome
+#                          classification / backoff scan) if switch_and_run's
+#                          own post-suite bookkeeping tail — normally seconds,
+#                          not minutes — hasn't finished within this window.
+#                          This is the exact failure mode from the v0.0.81
+#                          incident: go test long gone, no watchdog to say so.
+#                          A backstop against a future regression, not the
+#                          expected path — R1 already removes the only two
+#                          calls known to cause it.
+#
+#   E2E_STALL_WARN_MINUTES=<mins> (R3, default 15) — independently of R2,
+#                          warns (never aborts) if the suite's own combined
+#                          output has gone quiet for this long WHILE go test
+#                          is still running, naming the last completed
+#                          scenario. Purely advisory: a real scenario can
+#                          legitimately wait on Claude for extended periods
+#                          (see the TIMEOUT derivation above), so silence
+#                          alone is never treated as a hang — only surfaced,
+#                          so it's never mistaken for progress either. The
+#                          isolated TestMergeTrainRunawayGuardPausesBatch leg
+#                          (run alone, deliberately idle for long stretches)
+#                          is expected to trigger this on every healthy run —
+#                          see tests/e2e/README.md.
+#
+# R4 (non-gating): the budget probe is a report, never a gate — a timeout
+# under R1 degrades exactly like the pre-existing "call failed" case (the
+# `budget_before=""`/`budget_after=""` fallback), never affecting the suite's
+# own exit code. R3's stall warning is likewise purely advisory and never
+# touches $rc. See switch_and_run's own comments for the full mechanism, and
+# tests/e2e/README.md for the defaults' derivation.
 
 set -euo pipefail
 set -m
@@ -264,6 +314,15 @@ readonly PREFLIGHT_FAILED_EXIT=4
 # (e.g. cut-release.sh) can tell "cheap layer caught it, saved you the live
 # run" apart from "live e2e itself failed" or "GraphQL budget exhausted."
 readonly PREGATE_FAILED_EXIT=5
+
+# Distinct exit code for R2's post-suite watchdog (#1676) firing — go test
+# exited but switch_and_run's own post-suite bookkeeping (budget probe,
+# timing/outcome reports, backoff scan) stalled past E2E_POST_SUITE_WATCHDOG.
+# Distinct from every code above so a caller (e.g. cut-release.sh) can tell
+# "the runner itself hung after the suite finished" apart from a real
+# regression, a budget exhaustion, or a preflight/pre-gate failure. See
+# switch_and_run's own comment and "Hang hardening" in the header above.
+readonly POST_SUITE_WATCHDOG_EXIT=6
 
 # ---------------------------------------------------------------------------
 # run_reaped (R3, #1624): run "$@" as a backgrounded job in its own process
@@ -314,6 +373,159 @@ run_reaped() {
   wait "$pid" || rc=$?
   trap - INT TERM
   return "$rc"
+}
+
+# ---------------------------------------------------------------------------
+# disarm_deadline_signal <watcher_pid> (#1676): group-kill and reap a
+# still-pending deadline-watcher job (the backgrounded `sleep <n>` + a
+# conditional `kill`, as armed inline by with_timeout and switch_and_run's
+# post-suite watchdog below), so it can't fire a stale, late signal against
+# a since-recycled PID once the thing it was guarding has already finished
+# or been otherwise handled — the same class of leak run_reaped's own
+# comment (above) documents for its single backgrounded job, applied here to
+# this second kind of backgrounded job.
+#
+# NOTE: the watcher itself is armed inline at each call site (`( sleep ...;
+# if ...; then ...; fi ) &`), NOT via a shared "arm" function that returns
+# the watcher's PID through `$(...)`: command substitution ALWAYS runs its
+# command list in a subshell, and — confirmed empirically during Implement —
+# `set -m` job control's one-process-group-per-background-job behavior does
+# NOT apply inside that subshell, regardless of `set -m` being active in the
+# calling shell. A job backgrounded there keeps the SUBSHELL's own process
+# group instead of getting one of its own, so a later `kill -TERM -"$pid"`
+# (a negative PGID) targets a process group that was never actually created
+# and silently fails (`kill` exits 1, "No such process") — the guarded
+# command is never killed and just runs to completion (or hangs forever)
+# on its own, defeating the timeout entirely without any visible error. This
+# is *why* with_timeout's own call sites below capture output via a temp
+# file instead of `$(with_timeout ...)` — see with_timeout's own comment.
+# Backgrounding directly in the caller's own (non-substituted) function body,
+# as both call sites below do, doesn't have this problem — only the teardown
+# half (an already-known PID, no substitution needed to obtain it) is safely
+# shareable, hence this function exists but its counterpart does not.
+disarm_deadline_signal() {
+  local watcher_pid="$1"
+  kill -TERM -"$watcher_pid" 2>/dev/null || true
+  wait "$watcher_pid" 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------------------
+# with_timeout <seconds> <cmd...> (R1, #1676): run "$@", killing it (and its
+# whole process group) if it hasn't finished within <seconds>. Returns 124
+# (matching GNU timeout(1)'s own convention) if the deadline was hit,
+# otherwise the command's own exit code.
+#
+# THIS IS THE REQUIRED ROUTING POINT for any future network call added to
+# the release/e2e script path (this file, or any script it sources). The
+# v0.0.81 cut hung for 17h19m — with `go test` long gone — because the two
+# `gh api rate_limit` budget-probe calls below had no timeout at all; `||
+# echo ""` only guards a *failing* call, not a *hanging* one. A bare `gh
+# api`/`curl`/`wget` call added later without this wrapper can reproduce that
+# exact incident. See the header comment's "Hang hardening" section.
+#
+# CALLERS MUST NOT INVOKE THIS VIA `$(with_timeout ...)` (command
+# substitution). Confirmed empirically during Implement: command
+# substitution always runs its command list in a subshell, and `set -m`
+# job control's one-process-group-per-background-job behavior does not
+# apply inside that subshell — the guarded command backgrounded below keeps
+# the SUBSHELL's own process group rather than getting one of its own, so
+# the deadline watcher's group-kill (`kill -TERM -"$pid"`, a negative PGID)
+# silently fails against a process group that was never created (`kill`
+# exits 1), and the guarded command just runs to completion — or hangs
+# forever — on its own, defeating the timeout entirely with no visible
+# error. Capture output via a temp file instead (see the budget-probe call
+# sites below for the pattern) — invoked as a plain foreground statement,
+# not inside `$(...)`, with_timeout runs in the caller's own shell, where
+# `set -m` correctly assigns each backgrounded job its own process group.
+# See disarm_deadline_signal's own comment above for the full account of
+# this finding.
+#
+# Implemented as portable bash job control (background the command under
+# `set -m`, which gives it its own process group; a second backgrounded
+# `sleep <seconds>` watcher enforces the deadline) rather than via
+# perl/python3 or GNU coreutils' timeout(1) — the latter isn't shipped on
+# macOS (confirmed: `command not found` on the release-cut machine) and the
+# former would introduce this script's first interpreter dependency where
+# run_reaped/stop_bed_instance already establish this same "background job +
+# deadline" idiom without one.
+#
+# A marker file (inside a `mktemp -d` scratch dir, not `mktemp -u` — same
+# race-avoidance rationale as switch_and_run's $fifo_dir) is how the deadline
+# watcher tells the main path "I actually fired" rather than inferring it
+# from the guarded command's own exit status: a command that happens to exit
+# with a raw 128+signum status of its own (unusual, but not impossible) must
+# not be misreported as a timeout it didn't actually hit.
+#
+# Group-kills on timeout (`kill -TERM -"$pid"`): the guarded command may fork
+# its own children (e.g. `gh`'s underlying transport), and a plain `kill`
+# would leave such a child running headless — the exact orphan class
+# run_reaped's own R3 (#1624) discipline exists to avoid, applied here to a
+# second kind of backgrounded job. The watcher itself is torn down via
+# disarm_deadline_signal (above) once no longer needed.
+# ---------------------------------------------------------------------------
+with_timeout() {
+  local timeout_secs="$1"
+  shift
+  local marker_dir
+  marker_dir="$(mktemp -d)"
+  "$@" &
+  local pid=$!
+  # The watcher's own stdout/stderr are redirected away — it never produces
+  # useful output of its own (its `kill` is already `2>/dev/null`), so
+  # nothing is lost by closing these fds, and it keeps the watcher from
+  # holding open anything the caller might itself have redirected.
+  (
+    sleep "$timeout_secs"
+    if kill -0 "$pid" 2>/dev/null; then
+      : > "$marker_dir/fired"
+      kill -TERM -"$pid" 2>/dev/null
+    fi
+  ) >/dev/null 2>&1 &
+  local watcher_pid=$!
+  local rc=0
+  wait "$pid" 2>/dev/null || rc=$?
+  disarm_deadline_signal "$watcher_pid"
+  if [ -f "$marker_dir/fired" ]; then
+    echo "with_timeout: command exceeded ${timeout_secs}s, killed: $*" >&2
+    rm -rf "$marker_dir"
+    return 124
+  fi
+  rm -rf "$marker_dir"
+  return "$rc"
+}
+
+# _report_gh_probe_failure <stderr_file> <label> (#1676, found during
+# Review, external feedback): relay a failed gh-api-rate_limit probe's
+# captured stderr as a warning, one line at a time — including
+# with_timeout's own "command exceeded Ns, killed: ..." diagnostic when the
+# failure was an enforced R1 timeout rather than an ordinary gh error.
+#
+# Exists because both real call sites below route with_timeout's entire
+# invocation through a caller-side stderr redirect (previously `2>/dev/null`,
+# now a captured temp file passed in as $1 here): a redirect on a
+# function-call command applies to everything the function's body does, not
+# just the wrapped subprocess it backgrounds — confirmed empirically:
+# `f() { echo diag >&2; return 1; }; f 2>/dev/null` produces no stderr
+# output at all. So the old `2>/dev/null` didn't just suppress a failing
+# `gh`'s own error text (the original, intended behavior, unchanged since
+# before this issue) — it also silently discarded with_timeout's OWN
+# diagnostic on an actual timeout, degrading the one case this whole PR
+# exists to make loud (a `gh api rate_limit` call that genuinely hung and
+# got killed by the deadline watcher) into the exact same generic "could not
+# read GraphQL rate_limit" message as an ordinary API failure, with nothing
+# in the log distinguishing a caught hang from a normal error — defeating
+# this mechanism's diagnosability goal at the only two call sites that exist
+# today.
+#
+# Never touches $rc — this is visibility only (R4, #1676: these probes
+# remain purely a report, never a gate, whether they fail via an ordinary
+# error or a with_timeout-enforced kill).
+_report_gh_probe_failure() {
+  local errfile="$1"
+  local label="$2"
+  if [ -s "$errfile" ]; then
+    sed "s/^/warning: ${label} probe: /" "$errfile" >&2
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -622,6 +834,29 @@ PARALLEL="${E2E_PARALLEL:-4}"
 # header comment's "on"-leg-specific parallelism cap section (#1527).
 PARALLEL_ON="${E2E_PARALLEL_ON:-2}"
 
+# Timeout for the ancillary `gh api rate_limit` budget-report calls (R1,
+# #1676) — see with_timeout's own comment above. These are lightweight REST
+# metadata calls (see "GraphQL budget exhaustion detection" above), so 30s is
+# generous, not tight; override with E2E_GH_API_TIMEOUT.
+GH_API_TIMEOUT="${E2E_GH_API_TIMEOUT:-30}"
+
+# Window for R2's post-suite watchdog (#1676) — see switch_and_run's own
+# comment for the full mechanism. Everything the watchdog covers (draining
+# the tee/jq consumer, the now-with_timeout-bounded budget probe, the
+# timing/outcome reports, the backoff scan) is normally seconds, not
+# minutes, so 5 minutes is a generous backstop; override with
+# E2E_POST_SUITE_WATCHDOG.
+POST_SUITE_WATCHDOG="${E2E_POST_SUITE_WATCHDOG:-300}"
+
+# Window for R3's stall detector (#1676), converted from minutes to seconds
+# — E2E_STALL_WARN_MINUTES is documented in minutes, matching the issue's own
+# phrasing. The one measured real-world inter-event gap on record (5.5
+# minutes, TestReviewAuthorityClearsOnApproval, multi-scenario "on" leg — see
+# "How the timeout/parallelism defaults are derived" in tests/e2e/README.md)
+# sits comfortably under this 15-minute default; override with
+# E2E_STALL_WARN_MINUTES.
+STALL_WARN_SECS=$(( ${E2E_STALL_WARN_MINUTES:-15} * 60 ))
+
 # report_test_outcomes prints a completed/still-running/never-started
 # breakdown of every top-level test from a `go test -json` log, so a killed
 # run's partial state is legible instead of a bare FAIL indistinguishable
@@ -695,6 +930,29 @@ report_test_timings() {
         | [(.elapsed | tostring) + "s", .result, .test] | @tsv
       ' \
     | { column -t -s "$(printf '\t')" 2>/dev/null || cat; }
+}
+
+# last_completed_test_name prints the most recently observed pass/fail/skip
+# top-level test name from $1 (a `go test -json` log), or "(none yet)" if
+# none have completed (or the log doesn't exist/parse). Reuses the same
+# terminal-action jq filter as report_test_timings (pass/fail/skip only —
+# run/cont/pause carry no useful "completed" signal), but keeps stream order
+# rather than sorting by elapsed, so `.[-1]` is the chronologically last
+# completion. Extracted into its own function — mirroring
+# detect_rate_limit_backoff's precedent — specifically so
+# scripts/e2e/hang_hardening_test.sh can exercise it directly against
+# fixtures, independent of an actual gate run.
+#
+# Used by R3's stall detector (#1676) to name what the suite was last making
+# progress on when its own output went quiet — see switch_and_run below.
+last_completed_test_name() {
+  local jsonlog="$1"
+  jq -R 'fromjson? // empty' "$jsonlog" 2>/dev/null \
+    | jq -s -r '
+        [ .[] | select(.Test != null and (.Test | contains("/") | not)
+            and (.Action == "pass" or .Action == "fail" or .Action == "skip")) ]
+        | if length == 0 then "(none yet)" else .[-1].Test end
+      ' 2>/dev/null || echo "(unknown — log parse error)"
 }
 
 # detect_rate_limit_backoff scans $1 (a fabrik.log path) for the engine's
@@ -803,6 +1061,107 @@ detect_rate_limit_backoff() {
 # short-circuit any remaining leg immediately rather than let the two-mode
 # gate continue on to a second leg against a bed whose GraphQL budget is
 # already compromised for the current hour.
+#
+# Hang hardening (R1-R3, #1676): the two `gh api rate_limit` budget-probe
+# calls below are wrapped in with_timeout; a background stall detector warns
+# (never aborts) if the suite's own output goes quiet for too long while go
+# test is still alive; and a background post-suite watchdog aborts loudly,
+# naming the stuck step, if go test has exited but this function's own
+# bookkeeping tail stalls past its own window. See each mechanism's own
+# comment further down for the full detail, and the header comment's "Hang
+# hardening" section for the incident this all exists to prevent.
+
+# stop_post_suite_watchdog tears down R2's background watcher (see
+# switch_and_run below, arm_deadline_signal above) and clears the INT/TERM
+# trap it (temporarily) owns for the post-suite tail. Called at every one of
+# switch_and_run's own exit points (both normal returns and the
+# BUDGET_EXHAUSTED_EXIT path) so a not-yet-fired watcher from one leg can
+# never survive into, and misfire against, a later leg's unrelated activity
+# — switch_and_run runs once per leg, up to 3x per invocation (off, on-main,
+# on-isolated).
+stop_post_suite_watchdog() {
+  local wpid="$1"
+  local wdir="$2"
+  trap - INT TERM
+  disarm_deadline_signal "$wpid"
+  rm -rf "$wdir" 2>/dev/null || true
+}
+
+# _post_suite_watchdog_signal <exit_code_if_external> (#1676): shared TERM/INT
+# handler for R2's post-suite watchdog window, installed by switch_and_run
+# below for the duration of its own post-suite tail. Relies on bash's dynamic
+# scoping of `local` variables — $mode/$suite_pid/$consumer_pid/$fifo_dir/
+# $watchdog_dir/$watchdog_pid/$suite_exit_epoch are all still in scope from
+# the still-executing switch_and_run call this trap fires inside of, exactly
+# as the inline trap body it replaces already relied on for the same
+# variables.
+#
+# Distinguishes "this is our own watchdog firing" (the $watchdog_dir/fired
+# marker is present) from "some other signal landed in this window" (marker
+# absent — a real Ctrl-C, or an external `kill` of the whole script), but
+# BOTH branches now tear down the same set of resources before exiting
+# (found during Review, #1676 — two rounds of external review feedback, see
+# below): $suite_pid/$consumer_pid are group-killed, $watchdog_pid is
+# disarmed, and $fifo_dir/$watchdog_dir are removed, regardless of which
+# branch is taken. Earlier revisions diverged on this:
+#
+#   - The FIRED branch alone used to skip the suite/consumer group-kill
+#     entirely, just printing the diagnostic and exiting. That is backwards:
+#     the fired branch is the realistic "actually stuck" case this watchdog
+#     exists to catch — the checkpoint file's own text ("waiting for tee/jq
+#     consumer to drain") shows the most likely stuck step is the tee/jq
+#     consumer drain itself, and every OTHER step in this tail is either
+#     already timeout-bounded via with_timeout or a fast local jq/grep call —
+#     so $consumer_pid is exactly the process most likely to still be alive
+#     and wedged at the moment this branch runs, and leaving it running
+#     headless after the script exits is precisely the orphan class
+#     run_reaped's own R3 (#1624) discipline exists to avoid.
+#   - Neither branch used to disarm $watchdog_pid itself: an earlier
+#     revision's TERM-only trap left the still-sleeping watchdog timer
+#     running whenever its "external signal" branch fired (its own kill
+#     target is this script's now-exiting PID, so the leaked job would
+#     eventually no-op after its own sleep rather than misfire, but it was
+#     still an unreaped background job for up to $POST_SUITE_WATCHDOG
+#     seconds) — and was never wired to INT at all, so a Ctrl-C landing in
+#     this exact window fell through to switch_and_run's EARLIER INT trap
+#     (installed before the consumer wait, for the suite/consumer-drain
+#     phase), which has no idea $watchdog_pid or $watchdog_dir exist and left
+#     both behind.
+#
+# Installed for both signals below so INT and TERM behave identically here,
+# matching this whole mechanism's own "process-group discipline should
+# extend to any new backgrounded watcher job" design constraint (see
+# with_timeout's and disarm_deadline_signal's own comments).
+_post_suite_watchdog_signal() {
+  local external_exit="$1"
+  local fired=0
+  [ -f "$watchdog_dir/fired" ] && fired=1
+
+  if [ "$fired" -eq 1 ]; then
+    {
+      echo ""
+      echo "############################################################"
+      echo "## POST-SUITE WATCHDOG (leg: ${mode}): go test exited $(( $(date +%s) - suite_exit_epoch ))s ago,"
+      echo "## but the script has not progressed past its post-suite steps"
+      echo "## within ${POST_SUITE_WATCHDOG}s (E2E_POST_SUITE_WATCHDOG)."
+      echo "## Stuck in: $(cat "$watchdog_dir/checkpoint" 2>/dev/null || echo "(unknown step)")"
+      echo "## Last engine log line: $(tail -n1 "$ENGINE_LOG" 2>/dev/null || echo "(unavailable)")"
+      echo "############################################################"
+    } >&2
+  fi
+
+  kill -TERM -"$suite_pid" 2>/dev/null || true
+  kill -TERM -"$consumer_pid" 2>/dev/null || true
+  disarm_deadline_signal "$watchdog_pid"
+  rm -rf "$fifo_dir" 2>/dev/null || true
+  rm -rf "$watchdog_dir" 2>/dev/null || true
+
+  if [ "$fired" -eq 1 ]; then
+    exit "$POST_SUITE_WATCHDOG_EXIT"
+  fi
+  exit "$external_exit"
+}
+
 switch_and_run() {
   local mode="$1"
   local parallel="$2"
@@ -833,13 +1192,31 @@ switch_and_run() {
   # purely for the A3 cost report, which should reflect the suite's own
   # consumption, not the restart step's (unlike the backoff scan below, which
   # deliberately covers the restart too — see its own comment for why the two
-  # have different windows). Guarded with `|| echo ...` so a transient `gh`
-  # failure degrades to a skipped report rather than aborting the script
-  # under `set -e`.
+  # have different windows). Wrapped in with_timeout (R1, #1676) so a hung
+  # `gh api` call can never block the script — see with_timeout's own
+  # comment above. Captured via a temp file, NOT `$(with_timeout ...)` —
+  # with_timeout's own comment explains why command substitution would
+  # silently defeat its group-kill entirely. A failed `with_timeout` (gh
+  # error OR an enforced kill) both degrade to a skipped report rather than
+  # aborting the script under `set -e` (R4, #1676: this probe is a report,
+  # never a gate) — but, unlike stdout, stderr is captured to a temp file
+  # rather than discarded (`2>/dev/null` would also silently swallow
+  # with_timeout's own timeout diagnostic — see _report_gh_probe_failure's
+  # own comment, found during Review, #1676) and relayed as a warning on
+  # failure.
   local budget_before budget_after
   budget_before=""
   if [ -n "$BED_TOKEN" ]; then
-    budget_before=$(GH_TOKEN="$BED_TOKEN" gh api rate_limit --jq '.resources.graphql.remaining' 2>/dev/null || echo "")
+    local budget_before_tmp budget_before_err
+    budget_before_tmp="$(mktemp)"
+    budget_before_err="$(mktemp)"
+    if with_timeout "$GH_API_TIMEOUT" env "GH_TOKEN=$BED_TOKEN" gh api rate_limit --jq '.resources.graphql.remaining' \
+        > "$budget_before_tmp" 2>"$budget_before_err"; then
+      budget_before="$(cat "$budget_before_tmp" 2>/dev/null || echo "")"
+    else
+      _report_gh_probe_failure "$budget_before_err" "budget_before (leg: ${mode})"
+    fi
+    rm -f "$budget_before_tmp" "$budget_before_err"
   fi
 
   # The consumer (tee | jq) is fed via a named pipe and backgrounded as its
@@ -863,7 +1240,8 @@ switch_and_run() {
   # this a signal landing between `mkfifo` and the unconditional `rm -f
   # "$fifo"` below (normal-path cleanup, after the writer end opens) would
   # leave a stray named pipe behind in $TMPDIR — a minor leak, not a process
-  # orphan, but avoidable the same way.
+  # orphan, but avoidable the same way. $stall_pid (R3, #1676 — see below) is
+  # declared and added to the same trap for the identical reason.
   #
   # $fifo lives inside its own `mktemp -d` directory rather than being named
   # directly by `mktemp -u` (found during Review): `-u` only reserves a
@@ -878,10 +1256,11 @@ switch_and_run() {
   fifo="$fifo_dir/fifo"
   mkfifo "$fifo"
   local suite_pid=""
+  local stall_pid=""
   { tee "$jsonlog" | { jq -R -r 'fromjson? // empty | select(.Action=="output") | .Output' 2>/dev/null || true; }; } < "$fifo" &
   local consumer_pid=$!
-  trap 'kill -TERM -"$suite_pid" 2>/dev/null || true; kill -TERM -"$consumer_pid" 2>/dev/null || true; rm -rf "$fifo_dir" 2>/dev/null || true; exit 130' INT
-  trap 'kill -TERM -"$suite_pid" 2>/dev/null || true; kill -TERM -"$consumer_pid" 2>/dev/null || true; rm -rf "$fifo_dir" 2>/dev/null || true; exit 143' TERM
+  trap 'kill -TERM -"$suite_pid" 2>/dev/null || true; kill -TERM -"$consumer_pid" 2>/dev/null || true; kill -TERM -"$stall_pid" 2>/dev/null || true; rm -rf "$fifo_dir" 2>/dev/null || true; exit 130' INT
+  trap 'kill -TERM -"$suite_pid" 2>/dev/null || true; kill -TERM -"$consumer_pid" 2>/dev/null || true; kill -TERM -"$stall_pid" 2>/dev/null || true; rm -rf "$fifo_dir" 2>/dev/null || true; exit 143' TERM
   exec 3> "$fifo"
   rm -rf "$fifo_dir"
 
@@ -889,18 +1268,161 @@ switch_and_run() {
       ./tests/e2e/... "$@" >&3 2>&1 &
   suite_pid=$!
   exec 3>&-
-  wait "$suite_pid" || rc=$?
-  # Wait for the consumer to drain and finish writing $jsonlog before any of
-  # it is read below — see the comment above. Still under the INT/TERM trap
-  # (not cleared until after this), so a kill of this script while the
-  # consumer is draining reaps its whole group too, rather than leaving this
-  # wait unbounded with no signal path.
-  wait "$consumer_pid" 2>/dev/null || true
-  trap - INT TERM
 
+  # R3 (#1676): stall detector. Independently of whether go test itself has
+  # exited (that's R2, below), warn if the suite's own combined output has
+  # gone quiet for E2E_STALL_WARN_MINUTES while go test is still running —
+  # a real scenario can legitimately wait on Claude for extended periods
+  # (see the header comment's TIMEOUT derivation), so silence alone must
+  # never be mistaken for either progress or a hang. This only ever warns —
+  # it never touches $rc or aborts anything (R4-adjacent: non-gating,
+  # mirroring the budget probe's own requirement even though R4's text is
+  # written specifically about that probe).
+  #
+  # Polls $jsonlog's mtime (not the terminal/tee output a human might be
+  # watching) every 60s while `kill -0 "$suite_pid"` still succeeds — mtime
+  # is the only reliable "is this still producing output" signal for a
+  # stopped/redirected run (`bash scripts/e2e/run.sh &`, matching the
+  # v0.0.81 incident's own `ps` evidence), where no one is watching a
+  # terminal. On a full E2E_STALL_WARN_MINUTES of no mtime change, logs a
+  # warning naming the last completed scenario (via last_completed_test_name)
+  # and the silence duration, then resets its own counter — so a run that
+  # stays quiet for a long time (e.g. the isolated
+  # TestMergeTrainRunawayGuardPausesBatch leg — see tests/e2e/README.md)
+  # warns once per window rather than once ever or on every single poll.
+  (
+    prev_mtime=0
+    stall_secs=0
+    check_interval=60
+    while kill -0 "$suite_pid" 2>/dev/null; do
+      sleep "$check_interval"
+      kill -0 "$suite_pid" 2>/dev/null || break
+      cur_mtime=$(stat -f %m "$jsonlog" 2>/dev/null || stat -c %Y "$jsonlog" 2>/dev/null || echo 0)
+      if [ "$cur_mtime" = "$prev_mtime" ]; then
+        stall_secs=$((stall_secs + check_interval))
+      else
+        stall_secs=0
+      fi
+      prev_mtime="$cur_mtime"
+      if [ "$stall_secs" -ge "$STALL_WARN_SECS" ]; then
+        echo "== STALL WARNING (leg: ${mode}): no new suite output for ${stall_secs}s (E2E_STALL_WARN_MINUTES=$((STALL_WARN_SECS / 60))) — go test is still running. Last completed scenario: $(last_completed_test_name "$jsonlog") ==" >&2
+        stall_secs=0
+      fi
+    done
+  ) &
+  stall_pid=$!
+
+  wait "$suite_pid" || rc=$?
+  # go test has exited — stop the stall detector immediately (its own scope
+  # is "while go test is still running", nothing further for it to watch)
+  # rather than waiting up to 60s for its own loop condition to notice.
+  kill -TERM -"$stall_pid" 2>/dev/null || true
+  wait "$stall_pid" 2>/dev/null || true
+
+  # R2 (#1676): post-suite watchdog. go test itself has now exited — from
+  # here through this function's return/exit is bookkeeping (draining the
+  # consumer, the now-with_timeout-bounded budget probe, timing/outcome
+  # reports, the backoff scan) that should normally take seconds. The
+  # v0.0.81 cut hung for ~17 hours inside exactly this tail (the unwrapped
+  # `gh api rate_limit` calls, fixed by R1 above) with go test long gone and
+  # no watchdog to say so. In the common case this should never fire — R1
+  # already removes the only two calls known to cause it — it exists as a
+  # backstop against a future regression (a call added to this tail without
+  # routing through with_timeout), not the expected path.
+  #
+  # Mechanism: a scratch dir holds a `checkpoint` file (updated as this tail
+  # progresses below) and a `fired` marker a directly-backgrounded watcher
+  # touches only if it actually times out (armed inline here, NOT via a
+  # shared "arm" function returning a PID through `$(...)` — command
+  # substitution's subshell semantics make a background job started inside
+  # it block the substitution until that job finishes, defeating the whole
+  # point; see disarm_deadline_signal's own comment above for the full
+  # account of this, found empirically during Implement). The watcher
+  # signals the whole running script's PID ($$), not a process group —
+  # there's nothing group-shaped to kill here, just this function's own trap
+  # to invoke. The TERM and INT traps installed for this window (both routed
+  # through the shared _post_suite_watchdog_signal, defined above) check
+  # `fired` at fire time: if present, this was our own watchdog — it prints
+  # a diagnostic naming the elapsed time and the last checkpoint reached,
+  # THEN (found during Review, #1676, second round of external feedback)
+  # group-kills $suite_pid/$consumer_pid exactly like the non-watchdog branch
+  # below, before exiting $POST_SUITE_WATCHDOG_EXIT: an earlier revision
+  # skipped that teardown specifically in the fired branch, which is
+  # backwards — the checkpoint text ("waiting for tee/jq consumer to drain")
+  # and every other step in this tail being either with_timeout-bounded or a
+  # fast local jq/grep call means $consumer_pid is exactly the process most
+  # likely to still be alive and wedged at the moment this branch actually
+  # runs, so skipping its group-kill left the one realistic "stuck" case
+  # orphaning the very pipeline the watchdog was built to catch. If `fired`
+  # is absent, this was some other TERM/INT (e.g. an external kill, or
+  # Ctrl-C) landing in this same window, and it runs the identical
+  # suite/consumer-group-kill teardown this function already had here before
+  # this watchdog existed — both branches now also disarm $watchdog_pid
+  # itself (found during Review, #1676, first round: neither the original
+  # TERM-only trap's fallback branch nor, for INT specifically, any trap in
+  # this window at all used to do this, leaking the watchdog's background
+  # timer job). An external signal during this window behaves exactly as it
+  # did before, it just also gets diagnosed correctly against a genuine
+  # watchdog firing, and neither branch leaks a background job doing so.
+  # These traps stay installed for the whole remaining tail (unlike the old
+  # suite/consumer traps they replace, which were cleared right after the
+  # consumer wait) — by design, since the watched window is the whole tail,
+  # not just the consumer drain.
+  local watchdog_dir
+  watchdog_dir="$(mktemp -d)"
+  echo "waiting for tee/jq consumer to drain" > "$watchdog_dir/checkpoint"
+  local suite_exit_epoch
+  # Only referenced from inside the single-quoted TERM trap below,
+  # re-expanded at signal-delivery time — invisible to shellcheck's static
+  # analysis, same as $mode/$watchdog_dir in that trap.
+  # shellcheck disable=SC2034
+  suite_exit_epoch=$(date +%s)
+  local watchdog_main_pid=$$
+  # Stdout/stderr explicitly redirected away, mirroring with_timeout's own
+  # watcher (see its comment) — this function isn't currently called via
+  # command substitution, but there's nothing useful in this watcher's own
+  # output anyway (its `kill` is already `2>/dev/null`), so closing these
+  # fds costs nothing and avoids the same class of pipe-holds-open hazard
+  # if that ever changes.
+  (
+    sleep "$POST_SUITE_WATCHDOG"
+    if kill -0 "$watchdog_main_pid" 2>/dev/null; then
+      : > "$watchdog_dir/fired"
+      kill -TERM "$watchdog_main_pid" 2>/dev/null
+    fi
+  ) >/dev/null 2>&1 &
+  local watchdog_pid=$!
+  # Installed for BOTH signals (found during Review, #1676 — see
+  # _post_suite_watchdog_signal's own comment above): an INT (Ctrl-C) landing
+  # in this exact window must be handled identically to a TERM, not silently
+  # fall through to the earlier suite/consumer-drain-phase INT trap installed
+  # above, which knows nothing about $watchdog_pid/$watchdog_dir.
+  trap '_post_suite_watchdog_signal 143' TERM
+  trap '_post_suite_watchdog_signal 130' INT
+
+  # Wait for the consumer to drain and finish writing $jsonlog before any of
+  # it is read below — see the comment above. Still under a TERM trap (the
+  # post-suite watchdog's, installed just above), so a stuck drain is still
+  # covered by R2 rather than left unbounded with no signal path.
+  wait "$consumer_pid" 2>/dev/null || true
+
+  echo "gh api rate_limit budget_after probe" > "$watchdog_dir/checkpoint"
   budget_after=""
   if [ -n "$BED_TOKEN" ]; then
-    budget_after=$(GH_TOKEN="$BED_TOKEN" gh api rate_limit --jq '.resources.graphql.remaining' 2>/dev/null || echo "")
+    # Captured via a temp file, NOT `$(with_timeout ...)` — same rationale
+    # as budget_before above; see with_timeout's own comment. stderr is also
+    # captured (not discarded) and relayed on failure — same rationale as
+    # budget_before above; see _report_gh_probe_failure's own comment.
+    local budget_after_tmp budget_after_err
+    budget_after_tmp="$(mktemp)"
+    budget_after_err="$(mktemp)"
+    if with_timeout "$GH_API_TIMEOUT" env "GH_TOKEN=$BED_TOKEN" gh api rate_limit --jq '.resources.graphql.remaining' \
+        > "$budget_after_tmp" 2>"$budget_after_err"; then
+      budget_after="$(cat "$budget_after_tmp" 2>/dev/null || echo "")"
+    else
+      _report_gh_probe_failure "$budget_after_err" "budget_after (leg: ${mode})"
+    fi
+    rm -f "$budget_after_tmp" "$budget_after_err"
   fi
   if [ -n "$budget_before" ] && [ -n "$budget_after" ]; then
     if [ "$budget_after" -le "$budget_before" ]; then
@@ -912,10 +1434,12 @@ switch_and_run() {
     echo "warning: could not read GraphQL rate_limit before/after leg ${mode} (gh api call failed) — skipping budget report" >&2
   fi
 
+  echo "report_test_timings" > "$watchdog_dir/checkpoint"
   report_test_timings "$jsonlog" "$mode" \
     || echo "warning: failed to compute test timings (jq error) — inspect the raw JSON log directly: $jsonlog" >&2
 
   if [ "$rc" -ne 0 ]; then
+    echo "failure classification / teardown (leg ${mode} failed, rc=${rc})" > "$watchdog_dir/checkpoint"
     echo "== suite FAILED (leg: ${mode}, exit ${rc}) — classifying test outcomes ==" >&2
     echo "JSON log: $jsonlog" >&2
     report_test_outcomes "$jsonlog" >&2 \
@@ -941,15 +1465,18 @@ switch_and_run() {
     fi
   fi
 
-  # R2 (#1527): check whether the engine's own rate-limit backoff engaged at
-  # any point during this leg, regardless of $rc — a throttled run can just
-  # as easily present as a pass (if timeouts happened to land after the
-  # relevant waits already succeeded) as a fail, so this must not be
-  # conditioned on the leg having failed. See detect_rate_limit_backoff's own
-  # comment (above its definition) for why this scans the whole current
-  # fabrik.log rather than a captured byte offset — extracted into its own
-  # function so scripts/e2e/backoff_detection_test.sh can exercise it
-  # directly against fixtures without running an actual gate leg.
+  # R2 (#1527, NOT this issue's #1676 post-suite-watchdog R2 above — the two
+  # numbering schemes collide by coincidence): check whether the engine's own
+  # rate-limit backoff engaged at any point during this leg, regardless of
+  # $rc — a throttled run can just as easily present as a pass (if timeouts
+  # happened to land after the relevant waits already succeeded) as a fail,
+  # so this must not be conditioned on the leg having failed. See
+  # detect_rate_limit_backoff's own comment (above its definition) for why
+  # this scans the whole current fabrik.log rather than a captured byte
+  # offset — extracted into its own function so
+  # scripts/e2e/backoff_detection_test.sh can exercise it directly against
+  # fixtures without running an actual gate leg.
+  echo "detect_rate_limit_backoff scan" > "$watchdog_dir/checkpoint"
   if detect_rate_limit_backoff "$ENGINE_LOG"; then
     {
       echo ""
@@ -965,8 +1492,11 @@ switch_and_run() {
       echo "## (E2E_PARALLEL_ON, splitting the leg across budget windows)."
       echo "############################################################"
     } >&2
+    stop_post_suite_watchdog "$watchdog_pid" "$watchdog_dir"
     exit "$BUDGET_EXHAUSTED_EXIT"
   fi
+
+  stop_post_suite_watchdog "$watchdog_pid" "$watchdog_dir"
 
   if [ "$rc" -ne 0 ]; then
     return "$rc"
