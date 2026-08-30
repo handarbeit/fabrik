@@ -137,6 +137,24 @@ case "$msg" in
 esac
 assert_eq "exit 5 classified as failure" "1" "$rc"
 
+# --- exit 7 (PRECONDITION_FAILED_EXIT, #1684: competing token consumer or
+# unreachable Pruefer) must NOT be conflated with a fidelity-drift regression
+# either — same bug class exit 4 above guards against. (Renumbered from 6 to
+# 7 during a rebase onto #1676, which claimed 6 first for
+# POST_SUITE_WATCHDOG_EXIT — see scripts/e2e/run.sh's own exit-code
+# constants.) ---
+msg="$(interpret_e2e_exit_code 7)"; rc=$?
+case "$msg" in
+  *"operational problem"*"NOT a regression"*"NOT a fidelity-drift case"*)
+    echo "PASS: exit 7 message is distinct and explicitly disclaims fidelity-drift" ;;
+  *) echo "FAIL: exit 7 message does not distinctly disclaim fidelity-drift: $msg"; FAILED=1 ;;
+esac
+case "$msg" in
+  *"FIDELITY-DRIFT"*) echo "FAIL: exit 7 message wrongly mentions the fidelity-drift procedure"; FAILED=1 ;;
+  *) echo "PASS: exit 7 message does not mention the fidelity-drift procedure" ;;
+esac
+assert_eq "exit 7 classified as failure" "1" "$rc"
+
 msg="$(interpret_e2e_exit_code 1)"; rc=$?
 case "$msg" in
   *"FIDELITY-DRIFT"*) echo "PASS: exit 1 (real regression) message mentions the fidelity-drift procedure" ;;

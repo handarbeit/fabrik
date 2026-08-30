@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -472,6 +473,32 @@ func TestDaemonRun_LockPreventsSecondInstance(t *testing.T) {
 	case <-errCh:
 	case <-time.After(5 * time.Second):
 		t.Fatal("first Daemon.Run did not exit after context cancellation")
+	}
+}
+
+// TestAcquireLock_WritesPID covers the diagnostic PID write added to
+// acquireLock (#1684 R2): scripts/e2e/run.sh's check_reviewer_reachable
+// depends on pruefer.lock actually containing the acquiring process's PID
+// to `kill -0` against — a silent regression here (e.g. a refactor that
+// drops the Fprintf, or writes it in the wrong format) would break that
+// external liveness check without any Go test catching it, since acquiring
+// the lock itself would still succeed.
+func TestAcquireLock_WritesPID(t *testing.T) {
+	dir := t.TempDir()
+	lockFile, err := acquireLock(dir)
+	if err != nil {
+		t.Fatalf("acquireLock: %v", err)
+	}
+	defer releaseLock(lockFile)
+
+	contents, err := os.ReadFile(lockFile.Name())
+	if err != nil {
+		t.Fatalf("reading lock file: %v", err)
+	}
+	got := strings.TrimSpace(string(contents))
+	want := strconv.Itoa(os.Getpid())
+	if got != want {
+		t.Errorf("lock file contents = %q, want PID %q", got, want)
 	}
 }
 

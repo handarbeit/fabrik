@@ -195,8 +195,11 @@ export_pregate_verified_sha() {
 # falling through to the generic "real regression, check fidelity-drift"
 # branch, which would wrongly send an operator investigating a stuck lock or
 # an unreachable SSH remote down the fidelity-drift procedure instead.
-# Mirrors scripts/e2e/run.sh's own exit-code convention (3/4/5) exactly — see
-# that script's header comment for where each code originates.
+# Mirrors scripts/e2e/run.sh's own exit-code convention (3/4/5/7) exactly —
+# see that script's header comment for where each code originates. (Exit 6,
+# POST_SUITE_WATCHDOG_EXIT (#1676), has no dedicated case here yet — it falls
+# through to the generic branch below; a pre-existing gap from #1676, not
+# introduced by this issue and left as-is.)
 interpret_e2e_exit_code() {
   local rc="$1"
   case "$rc" in
@@ -211,6 +214,9 @@ interpret_e2e_exit_code() {
       ;;
     5)
       echo "live e2e integration suite aborted: its own sim/wire-contract pre-gate failed (exit 5) inside scripts/e2e/run.sh. Unexpected: this script's own pre-gate step (step 3) already passed against the same tree, and R5's FABRIK_PREGATE_VERIFIED_SHA (#1624) should have made run.sh skip re-running it rather than fail it a second time — investigate the discrepancy (different ref? dirty tree in the bed? the SHA guard itself misfiring) before retrying."
+      ;;
+    7)
+      echo "live e2e integration suite aborted: an operational precondition was not met (exit 7, PRECONDITION_FAILED_EXIT) inside scripts/e2e/run.sh — either a competing local Fabrik instance is sharing the bed's @arbeithand GraphQL token, or the review bot (Pruefer) is confidently unreachable. This is an operational problem, NOT a regression and NOT a fidelity-drift case — see scripts/e2e/run.sh's own output above for which precondition failed and what it found, fix it (stop the competing instance, or start Pruefer), and re-run scripts/cut-release.sh $VERSION. See tests/e2e/README.md's 'Operational up/down contract' (#1684) for the full mechanism."
       ;;
     *)
       echo "live e2e integration suite FAILED (exit $rc) — see scripts/e2e/run.sh output above. This is a real regression; do not retry with --skip-integration to work around it. FIDELITY-DRIFT CHECK (R4, #1454): this script's own sim + wire-contract pre-gate (step 3) already passed against this same tree, so whatever the live suite just caught is exactly the case that policy covers — file a fidelity issue, add the scenario to tests/sim, and update tests/sim/simgh/FIDELITY.md (see tests/sim/README.md's 'Fidelity-drift policy' section) once the underlying regression itself is fixed."
