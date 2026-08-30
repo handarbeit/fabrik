@@ -27,9 +27,14 @@
 #   3. Sim suite + github wire-contract tests — unconditional pre-gate (R1/R2, #1454).
 #      Exports FABRIK_PREGATE_VERIFIED_SHA on success so step 5 doesn't pay for the
 #      identical pre-gate a second time (R5, #1624) — see export_pregate_verified_sha.
-#   4. go build + go test -race (skippable with --skip-tests; the pre-gate above never is)
+#   4. go build + go test -race, -parallel capped via scripts/lib/parallel.sh
+#      (REQ3, #1677 — same cap scripts/sim/run.sh uses, since this run covers
+#      the same git-forking tests/sim package; skippable with --skip-tests,
+#      the pre-gate above never is)
 #   5. Live e2e integration gate — mandatory by default; --skip-integration=<reason> is the
-#      one sanctioned, loud, release-notes-recorded escape hatch (R2, #1454).
+#      one sanctioned, loud, release-notes-recorded escape hatch (R2, #1454). Always
+#      passes --clean (REQ1, #1677) to reset the shared bed first — a release cut and
+#      concurrent manual e2e testing on the bed can no longer safely overlap.
 #      FIDELITY-DRIFT CHECK (R4, #1454): if this step fails on something step 3's
 #      pre-gate passed, that's a fidelity bug in the sim, not just a live regression —
 #      file it and fix it in tests/sim too (procedure: tests/sim/README.md's
@@ -68,6 +73,9 @@ BOT_EMAIL="handarbeit@handarbeit.io"
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
+
+# shellcheck source=lib/parallel.sh
+source "$REPO_ROOT/scripts/lib/parallel.sh"
 
 step() { printf '\n\033[1;34m▶ %s\033[0m\n' "$*"; }
 ok()   { printf '  \033[1;32m✓\033[0m %s\n' "$*"; }
@@ -113,27 +121,68 @@ insert_notes_line() {
   fi
 }
 
-# export_pregate_verified_sha exports FABRIK_PREGATE_VERIFIED_SHA as the
-# exact commit this invocation's own sim + wire-contract pre-gate (step 3,
-# below) just verified. Called right after that step passes, while HEAD is
-# still guaranteed unchanged (this script commits nothing until step 6, well
+# allowed_dirty_regex prints the single grep -E pattern of tracked-file
+# changes this script itself is expected to leave uncommitted at various
+# points in a run, parameterized on $1 (VERSION). Two call sites share this
+# one definition rather than maintaining two separate lists (#1677):
+#   - step 1's own pre-flight DIRTY check (below) — unchanged behavior,
+#     just no longer a second, hand-copied regex.
+#   - run_pregate's dirty-tree check (scripts/e2e/run.sh), via the exported
+#     FABRIK_PREGATE_ALLOWED_DIRTY_REGEX — see export_pregate_verified_sha.
+#
+# release-notes/<version>.md is written before step 1 even runs (a
+# prerequisite, not a self-write) but is still expected dirty on a repeat
+# invocation; plugin/known_embedded_versions.go is step 4's own conditional
+# write (only when a new plugin hash isn't already recorded); the
+# plugin/*/.claude-plugin/plugin.json pattern covers step 6b's marketplace
+# version bumps (not yet run when this fires for run_pregate's purposes,
+# but a retry after a partial step 6b could legitimately see it dirty too).
+# Nothing outside this declared, named set is ever treated as expected —
+# any other dirty file still fails both checks exactly as before this was
+# extracted (see run_pregate's own comment on the TOCTOU gap this
+# preserves).
+allowed_dirty_regex() {
+  local version="$1"
+  printf '%s' "^\\?\\? release-notes/${version}\\.md\$| M release-notes/${version}\\.md\$|^M  release-notes/${version}\\.md\$| M plugin/known_embedded_versions\\.go\$|^M  plugin/known_embedded_versions\\.go\$| M plugin/[^/]+/\\.claude-plugin/plugin\\.json\$|^M  plugin/[^/]+/\\.claude-plugin/plugin\\.json\$"
+}
+
+# export_pregate_verified_sha exports FABRIK_PREGATE_VERIFIED_SHA (and
+# FABRIK_PREGATE_ALLOWED_DIRTY_REGEX, REQ7 #1677 — see below) as the exact
+# commit this invocation's own sim + wire-contract pre-gate (step 3, below)
+# just verified. Called right after that step passes, while HEAD is still
+# guaranteed unchanged (this script commits nothing until step 6, well
 # after step 5's live e2e gate runs) — so the value names the exact tree
 # that was checked, not merely "some release."
 #
-# scripts/e2e/run.sh's own pre-gate (run_pregate) checks this against a
-# freshly-resolved `git rev-parse HEAD` of its own before deciding whether
-# to re-run the identical sim + wire-contract checks (R5, #1624) — see that
-# function's own comment. An exported env var, not a file marker: run.sh is
-# invoked as this script's direct child process (step 5), so there is no
-# on-disk staleness/cleanup concern, and the value is naturally scoped to
-# exactly this invocation (env vars do not outlive the child process) —
-# unlike E2E_SKIP_PREGATE, a blanket opt-out this script deliberately never
-# sets (see step 5's own comment), this is a narrow, tree-scoped signal that
-# a standalone `scripts/e2e/run.sh` invocation never sees and so still pays
-# the full pre-gate price, exactly as before this existed.
+# scripts/e2e/run.sh's own pre-gate (run_pregate) checks FABRIK_PREGATE_VERIFIED_SHA
+# against a freshly-resolved `git rev-parse HEAD` of its own before deciding
+# whether to re-run the identical sim + wire-contract checks (R5, #1624) —
+# see that function's own comment. An exported env var, not a file marker:
+# run.sh is invoked as this script's direct child process (step 5), so
+# there is no on-disk staleness/cleanup concern, and the value is naturally
+# scoped to exactly this invocation (env vars do not outlive the child
+# process) — unlike E2E_SKIP_PREGATE, a blanket opt-out this script
+# deliberately never sets (see step 5's own comment), this is a narrow,
+# tree-scoped signal that a standalone `scripts/e2e/run.sh` invocation
+# never sees and so still pays the full pre-gate price, exactly as before
+# this existed.
+#
+# REQ7 (#1677): the SHA match alone was never sufficient on a real release —
+# step 4's "Record embedded plugin hash" write to
+# plugin/known_embedded_versions.go lands on disk, uncommitted, between
+# this function running (end of step 3) and run_pregate's own dirty-tree
+# check (step 5), so the tree was dirty on essentially every real release
+# and the SHA guard never actually engaged. FABRIK_PREGATE_ALLOWED_DIRTY_REGEX
+# tells run_pregate which specific, already-known-benign self-writes to
+# disregard when deciding "dirty" — the same allowlist step 1's own
+# preflight already trusts, not a new or wider one. A standalone
+# scripts/e2e/run.sh invocation never sets this var, so its dirty-tree
+# check remains exactly as strict as before this existed.
 export_pregate_verified_sha() {
   FABRIK_PREGATE_VERIFIED_SHA="$(git rev-parse HEAD)"
   export FABRIK_PREGATE_VERIFIED_SHA
+  FABRIK_PREGATE_ALLOWED_DIRTY_REGEX="$(allowed_dirty_regex "$VERSION")"
+  export FABRIK_PREGATE_ALLOWED_DIRTY_REGEX
 }
 
 # interpret_e2e_exit_code prints the operator-facing message for a given
@@ -237,7 +286,7 @@ ok "on main"
 # does not need to be tightened; the built-artifact VCS check lives in
 # .goreleaser.yaml/release.yml instead (see
 # adrs/071-release-artifact-vcs-verification.md).
-DIRTY=$(git status --porcelain | grep -Ev "^\?\? release-notes/${VERSION}\.md$| M release-notes/${VERSION}\.md$|^M  release-notes/${VERSION}\.md$| M plugin/known_embedded_versions\.go$|^M  plugin/known_embedded_versions\.go$| M plugin/[^/]+/\.claude-plugin/plugin\.json$|^M  plugin/[^/]+/\.claude-plugin/plugin\.json$" || true)
+DIRTY=$(git status --porcelain | grep -Ev "$(allowed_dirty_regex "$VERSION")" || true)
 [ -z "$DIRTY" ] || die "working tree dirty:
 $DIRTY"
 ok "working tree acceptable"
@@ -341,11 +390,23 @@ if [ "$SKIP_TESTS" -eq 1 ]; then
   warn "--skip-tests was passed; go test -race ./... was NOT run (the sim + wire-contract pre-gate above still ran unconditionally)"
 else
   step "Race-tested suite"
-  if ! go test -race ./... >/tmp/cut-release-test.log 2>&1; then
+  # -parallel capped (REQ3, #1677): this repo-wide invocation includes the
+  # same git-forking tests/sim package that scripts/sim/run.sh's own
+  # SIM_PARALLEL caps — left uncapped here, it inherits GOMAXPROCS (28 on
+  # the host that produced #1677) and reliably reproduces the TSan
+  # fork/exec SIGSEGV #1624's cap was meant to prevent, just via a
+  # different entry point. FABRIK_RACE_PARALLEL is a narrow override (for
+  # experimentation); default_race_parallel (scripts/lib/parallel.sh) is
+  # the same helper scripts/sim/run.sh uses, so the two never drift into
+  # incoherent caps for overlapping concurrency. -timeout matches
+  # scripts/sim/run.sh's own SIM_TIMEOUT rationale — see that script's
+  # header comment.
+  RACE_PARALLEL="${FABRIK_RACE_PARALLEL:-$(default_race_parallel)}"
+  if ! go test -race -parallel "$RACE_PARALLEL" -timeout 20m ./... >/tmp/cut-release-test.log 2>&1; then
     tail -40 /tmp/cut-release-test.log >&2
     die "go test -race ./... failed (full log: /tmp/cut-release-test.log)"
   fi
-  ok "all tests pass with -race"
+  ok "all tests pass with -race (-parallel $RACE_PARALLEL)"
 fi
 
 # Capture the previous release tag now, before this release's tag exists,
@@ -370,6 +431,19 @@ PREV_TAG="$(git describe --tags --abbrev=0 --match='v*' 2>/dev/null || true)"
 # the SAME release-notes commit rather than needing a second push, and (c)
 # since scripts/e2e/run.sh fetches origin/main by default, this tests
 # exactly the commit about to ship, right before it ships.
+#
+# --clean (REQ1, #1677): every invocation now resets the shared bed via
+# scripts/e2e/reset.sh before the gate runs — this was previously never
+# passed, so bed state (closed-but-still-labeled board items, stale
+# branches, accumulated sessions/logs) accrued release over release until
+# TestSwitchTrainMode's lock-timeout check failed against a bed slow enough
+# from that accumulated backlog to blow its wait window (#1677's own
+# ten-attempt v0.0.81 incident). scripts/e2e/reset.sh is already destructive
+# by design (closes all open PRs/issues, deletes fabrik/* branches, drains
+# the board) — this is not new destructive capability, just the missing
+# call site — but it does mean a release cut and any concurrent manual e2e
+# testing on this shared bed can no longer safely overlap. Do not run this
+# script while someone else is using ~/dev/fabrik-test by hand.
 step "Live e2e integration gate"
 if [ "$SKIP_INTEGRATION" -eq 1 ]; then
   cat >&2 <<EOF
@@ -386,9 +460,9 @@ EOF
   insert_notes_line "$NOTES_FILE" "- ⚠️ Live e2e integration suite SKIPPED for this release: $INTEGRATION_SKIP_REASON"
   warn "live e2e integration suite SKIPPED — reason recorded in $NOTES_FILE"
 else
-  echo "   running scripts/e2e/run.sh against origin/main (this can take hours — see tests/e2e/README.md)"
+  echo "   running scripts/e2e/run.sh --clean against origin/main (this can take hours — see tests/e2e/README.md)"
   E2E_RC=0
-  "$REPO_ROOT/scripts/e2e/run.sh" || E2E_RC=$?
+  "$REPO_ROOT/scripts/e2e/run.sh" --clean || E2E_RC=$?
   E2E_MSG="$(interpret_e2e_exit_code "$E2E_RC")"
   if [ "$E2E_RC" -eq 0 ]; then
     ok "$E2E_MSG"
