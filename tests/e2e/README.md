@@ -898,8 +898,8 @@ before any live GitHub/Claude call, ahead of the sim+wire-contract pre-gate
   on acquisition. **Refuses** when `PRUEFER_DIR` exists but the lock is
   missing or names a dead process (confidently down); **warns only** (never
   blocks) when `PRUEFER_DIR` itself doesn't exist, since a remote Pruefer
-  deployment (see the SSH-tunnel setup referenced in "Reviewer topology"
-  above) is undeterminable from here, not confirmed-down. Automatically
+  deployment (see `cmd/pruefer/README.md`'s SSH-tunnel setup section) is
+  undeterminable from here, not confirmed-down. Automatically
   skipped when the invocation includes `-run`/`--run`, since a narrowed
   scenario subset may not include any review-gated scenario — left to the
   operator's judgment rather than inferred. Escape hatch:

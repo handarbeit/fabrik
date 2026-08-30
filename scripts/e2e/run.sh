@@ -46,8 +46,8 @@
 #   lock is missing/dead (a confident "down" signal); only WARNS (never
 #   blocks) when PRUEFER_DIR itself doesn't exist, since that's undeterminable
 #   rather than confirmed-down — a genuinely remote Pruefer deployment (see
-#   README's SSH-tunnel setup) must never be permanently blocked by a
-#   local-only check.
+#   cmd/pruefer/README.md's SSH-tunnel setup section) must never be
+#   permanently blocked by a local-only check.
 #
 #     PRUEFER_DIR=<dir>       Pruefer's deployment directory (default:
 #                              $HOME/dev/fabrik — the observed co-located
