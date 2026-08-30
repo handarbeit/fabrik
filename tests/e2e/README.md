@@ -90,6 +90,11 @@ These tests assume:
    (Backlog, Specify, Research, Plan, Implement, Review, Validate, Done).
 4. **No other Fabrik instance is using the `@arbeithand` token's GraphQL
    budget concurrently** (or use `--max-concurrent 1` if you have to share).
+   As of #1684, `scripts/e2e/run.sh` checks this automatically before any
+   live call and refuses (rather than silently discovering it via backoff 78
+   minutes in) if it finds a competing local instance — see "Operational
+   up/down contract" below for the full mechanism and escape hatch
+   (`E2E_SKIP_TOKEN_CHECK=1`).
 
 See `~/fabrik-oss-launch-notes.md` (under "Files and where they live") for
 the canonical setup.
@@ -843,6 +848,68 @@ reviewer topology is:
   change the underlying risk: Pruefer going silent (dispatch dropped,
   daemon down, etc.) is still a single point of failure for every scenario
   that depends on an organic review landing.
+
+### Operational up/down contract (#1684)
+
+The two sections above describe two operational requirements that, before
+this issue, existed only in operators' heads — getting either wrong costs an
+hour or more per mistake. Both were hit during the v0.0.81 cut, and one
+directly caused the other: Pruefer was stopped to free budget, which broke
+every review-gated scenario.
+
+**Must be UP: Pruefer.** Every scenario that drives a PR through the organic
+Review gate depends on Pruefer (see "Reviewer topology" above) actually
+submitting a review. If it's down, PRs sit with zero reviews and review-gated
+scenarios fail ~10 minutes in with a timeout that looks like a Fabrik defect,
+not an ops gap.
+
+**Must be DOWN (non-competing): every other Fabrik instance authenticated as
+`@arbeithand`.** The bed and this suite share one `@arbeithand` PAT with a
+5,000/hour GraphQL bucket (see "GraphQL budget" above), and a single live leg
+consumes ~4,000 of it. Any other poller on that token — most commonly an
+operator's own always-on production Fabrik instance — pushes the run into
+backoff, which invalidates it *after* it has already spent an hour and
+appeared to pass.
+
+**The trap: stopping Pruefer to save budget breaks the suite, and saves
+nothing.** Pruefer authenticates as a GitHub App with its own
+per-installation rate-limit bucket (ADR-1113, ADR-1253) — it never draws on
+the shared `@arbeithand` user PAT at all. Stopping it does not free a single
+point of the 5,000/hour budget the gate actually needs; it only guarantees
+every review-gated scenario times out. The oscillation between "stop it for
+budget" and "start it for reviews" was the symptom this issue exists to
+eliminate — the two constraints are independent, not in tension.
+
+**Automated preflight (`scripts/e2e/run.sh`):** both facts are now checked
+before any live GitHub/Claude call, ahead of the sim+wire-contract pre-gate
+(#1454) and the bed preflight:
+
+- `check_competing_token_consumers` (R1) enumerates locally-running `fabrik`
+  processes, resolves each one's working directory, and compares its `.env`
+  `FABRIK_TOKEN` against the bed's own — excluding the bed's own directory
+  (already budgeted into the ~4,000/5,000 estimate). **Refuses by default**
+  on a match, naming the offending PID(s) and directory/directories: a silent
+  proceed-into-backoff is strictly worse than one operator round-trip.
+  Escape hatch: `E2E_SKIP_TOKEN_CHECK=1`.
+- `check_reviewer_reachable` (R2) checks Pruefer's own liveness via
+  `$PRUEFER_DIR/.pruefer/pruefer.lock` (default `PRUEFER_DIR`:
+  `$HOME/dev/fabrik`, matching the observed co-located deployment
+  convention) — `kill -0` against the PID Pruefer writes into that lock file
+  on acquisition. **Refuses** when `PRUEFER_DIR` exists but the lock is
+  missing or names a dead process (confidently down); **warns only** (never
+  blocks) when `PRUEFER_DIR` itself doesn't exist, since a remote Pruefer
+  deployment (see the SSH-tunnel setup referenced in "Reviewer topology"
+  above) is undeterminable from here, not confirmed-down. Automatically
+  skipped when the invocation includes `-run`/`--run`, since a narrowed
+  scenario subset may not include any review-gated scenario — left to the
+  operator's judgment rather than inferred. Escape hatch:
+  `E2E_SKIP_REVIEWER_CHECK=1`.
+
+Both checks are local-only and make no live GitHub/Claude call themselves
+(process/file inspection only), so they add negligible wall-clock ahead of
+the checks they front-run. See `scripts/e2e/run.sh`'s own header comment for
+the full mechanism, and `scripts/e2e/token_consumer_check_test.sh` /
+`scripts/e2e/reviewer_reachable_check_test.sh` for their regression coverage.
 
 ## Running
 
