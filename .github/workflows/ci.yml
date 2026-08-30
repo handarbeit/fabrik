@@ -108,6 +108,26 @@ jobs:
       - name: pre-gate regression test (#1454)
         run: bash scripts/e2e/pregate_test.sh
 
+      # R1's competing-token-consumer preflight (scripts/e2e/run.sh's
+      # check_competing_token_consumers, #1684) exists so a gate run refuses
+      # (rather than silently burning an hour into backoff) when another
+      # local Fabrik instance shares the bed's @arbeithand GraphQL token.
+      # Regression coverage for the pure filter (find_competing_token_consumers)
+      # plus the orchestration wrapper's skip/degrade paths, following the
+      # same sourced-fixture pattern as the two tests above: no fake
+      # binaries, no live competing process, no network.
+      - name: competing-token-consumer regression test (#1684)
+        run: bash scripts/e2e/token_consumer_check_test.sh
+
+      # R2's review-bot-reachable preflight (scripts/e2e/run.sh's
+      # check_reviewer_reachable, #1684) exists so a gate run fails fast when
+      # Pruefer is confidently down, instead of every review-gated scenario
+      # timing out ~10 minutes in. Regression coverage exercises real PIDs
+      # ($$ for "alive", an unused PID for "dead") against a fixture
+      # .pruefer/pruefer.lock — no live Pruefer deployment, no network.
+      - name: reviewer-reachable regression test (#1684)
+        run: bash scripts/e2e/reviewer_reachable_check_test.sh
+
       # cut-release.sh's flag parsing — in particular --skip-integration's
       # validation (R2, #1454) — sourced and exercised directly via
       # parse_args(), never reaching main() (the real publish sequence). No
