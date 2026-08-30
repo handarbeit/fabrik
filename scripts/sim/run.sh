@@ -35,31 +35,43 @@
 # run, and this script also prints its own total wall-clock time below — ask
 # the runner, not a comment, if you want to know how long it currently takes.
 #
-# Parallelism cap (R1, #1624): `go test`'s default `-parallel` is
-# `GOMAXPROCS`, i.e. every core the host has. On a high-core-count machine
-# (28 cores, the one that produced #1624) that means dozens of concurrent
-# `t.Parallel()` scenarios each spawning real `git` children at once —
-# high-concurrency `fork/exec` from a heavily multi-threaded Go process,
-# which #1624 documents causing three distinct failure modes: a wedged
-# fork/exec that strands a scenario's `gitMu` until the suite-wide test
-# timeout, a child `git` killed outright (SIGSEGV), and even a `-race`
-# (ThreadSanitizer) runtime abort. None of that is proportional to how much
-# real work the suite is doing — it's purely a function of host core count —
-# so leaving `-parallel` at its default makes the gate's reliability depend
-# on which machine happens to run it, which is backwards: a bigger machine
-# should never make the same suite *less* reliable. SIM_PARALLEL therefore
-# pins an explicit cap rather than inheriting GOMAXPROCS uncapped — but the
-# default is `min(8, host cores)`, not a flat 8 (found during Review,
-# #1624): a flat 8 would *increase* concurrent git-spawning, versus the
-# previous GOMAXPROCS-derived default, on any host with fewer than 8 cores
-# (a modest laptop or CI runner) — the exact mechanism this cap exists to
-# guard against, just at smaller absolute scale. Capping at the host's own
-# core count when that's lower than 8 preserves the "never worse than
-# before" property while still bounding every host at 8 regardless of how
-# many cores it has above that. Override via the environment for
-# experimentation, but the pre-gate (scripts/e2e/run.sh's run_pregate, and
-# scripts/cut-release.sh transitively) always goes through this one script,
-# so there is exactly one place this number lives.
+# Parallelism cap (R1, #1624; ceiling lowered and extended repo-wide, #1677):
+# `go test`'s default `-parallel` is `GOMAXPROCS`, i.e. every core the host
+# has. On a high-core-count machine (28 cores, the one that produced both
+# #1624 and #1677) that means dozens of concurrent `t.Parallel()` scenarios
+# each spawning real `git` children at once — high-concurrency `fork/exec`
+# from a heavily multi-threaded Go process, which #1624 documents causing
+# three distinct failure modes: a wedged fork/exec that strands a
+# scenario's `gitMu` until the suite-wide test timeout, a child `git`
+# killed outright (SIGSEGV), and even a `-race` (ThreadSanitizer) runtime
+# abort. None of that is proportional to how much real work the suite is
+# doing — it's purely a function of host core count — so leaving
+# `-parallel` at its default makes the gate's reliability depend on which
+# machine happens to run it, which is backwards: a bigger machine should
+# never make the same suite *less* reliable. SIM_PARALLEL therefore pins an
+# explicit cap rather than inheriting GOMAXPROCS uncapped.
+#
+# The default comes from scripts/lib/parallel.sh's default_race_parallel
+# (`min(4, host cores)`) — lowered from #1624's original `min(8, host
+# cores)` after #1677's own measurement on the 28-core host found 8 still
+# reproduces the TSan fork/exec SIGSEGV roughly 1 run in 5, not reliable
+# enough for a release gate, while 4 showed zero SIGSEGVs across multiple
+# consecutive runs (only exceeding the previously-undeclared 10-minute `go
+# test` default timeout, hence SIM_TIMEOUT below). That helper is shared —
+# not duplicated — with cut-release.sh step 4's repo-wide `go test -race
+# ./...` and the CI workflow's equivalent step, since both exercise the
+# same git-forking tests/sim package `./...` includes; see that file's own
+# header comment. Override via the environment for experimentation, but the
+# pre-gate (scripts/e2e/run.sh's run_pregate, and scripts/cut-release.sh
+# transitively) always goes through this one script, so there is exactly
+# one place the sim suite's own number lives.
+#
+# Suite timeout (R4/REQ6, #1677): `-parallel 4` measured ~661s (~11m) on the
+# 28-core host — over Go's undocumented 10-minute default `-timeout`, which
+# is what made `-parallel 4` look nonviable before this was made explicit.
+# SIM_TIMEOUT (default 20m) gives the lower, reliable parallelism value
+# enough headroom to actually finish, rather than raising parallelism back
+# into SIGSEGV territory to chase a hidden default.
 #
 # Process-group reap (R3, #1624): `go test` is launched as a backgrounded job
 # (not via `exec`, which would replace this shell and leave nothing able to
@@ -80,24 +92,17 @@ set -m
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
-# Default is min(8, host cores) — see the "Parallelism cap" comment above
-# for why a flat 8 is wrong on a sub-8-core host. getconf _NPROCESSORS_ONLN
-# is POSIX and portable across macOS and Linux; nproc is a GNU-coreutils
-# fallback for the rare shell where getconf lacks that variable, and 8
-# itself is the last-resort fallback if neither reports a usable count.
-sim_default_parallel() {
-  local cores
-  cores="$(getconf _NPROCESSORS_ONLN 2>/dev/null || true)"
-  if ! [ "${cores:-}" -gt 0 ] 2>/dev/null; then
-    cores="$(nproc 2>/dev/null || true)"
-  fi
-  if [ "${cores:-}" -gt 0 ] 2>/dev/null && [ "$cores" -lt 8 ]; then
-    echo "$cores"
-  else
-    echo 8
-  fi
-}
-SIM_PARALLEL="${SIM_PARALLEL:-$(sim_default_parallel)}"
+# shellcheck source=../lib/parallel.sh
+source "$REPO_ROOT/scripts/lib/parallel.sh"
+
+# Default is min(4, host cores) — see the "Parallelism cap" comment above,
+# and scripts/lib/parallel.sh's own header, for the full rationale and why
+# this helper is shared rather than duplicated per call site.
+SIM_PARALLEL="${SIM_PARALLEL:-$(default_race_parallel)}"
+
+# See the "Suite timeout" comment above for why this is no longer left at
+# go test's undocumented 10-minute default.
+SIM_TIMEOUT="${SIM_TIMEOUT:-20m}"
 
 TARGET="./tests/sim"
 if [ "${1:-}" = "--all" ]; then
@@ -105,7 +110,7 @@ if [ "${1:-}" = "--all" ]; then
   shift
 fi
 
-echo "== sim suite: go test -race -count=1 -parallel $SIM_PARALLEL $TARGET $* =="
+echo "== sim suite: go test -race -count=1 -parallel $SIM_PARALLEL -timeout $SIM_TIMEOUT $TARGET $* =="
 
 START_TS=$(date +%s)
 # GO_TEST_PID is declared and the trap installed BEFORE backgrounding, not
@@ -118,7 +123,7 @@ START_TS=$(date +%s)
 # `|| true`.
 GO_TEST_PID=""
 trap 'kill -TERM -"$GO_TEST_PID" 2>/dev/null || true' EXIT INT TERM
-go test -race -count=1 -parallel "$SIM_PARALLEL" "$TARGET" "$@" &
+go test -race -count=1 -parallel "$SIM_PARALLEL" -timeout "$SIM_TIMEOUT" "$TARGET" "$@" &
 GO_TEST_PID=$!
 
 set +e

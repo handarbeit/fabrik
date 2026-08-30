@@ -158,6 +158,64 @@ assert_eq "export_pregate_verified_sha sets FABRIK_PREGATE_VERIFIED_SHA to HEAD"
 CHILD_VISIBLE="$(bash -c 'echo "$FABRIK_PREGATE_VERIFIED_SHA"')"
 assert_eq "export_pregate_verified_sha's value is visible to a child process" "$EXPECTED_SHA" "$CHILD_VISIBLE"
 
+# --- allowed_dirty_regex (REQ7, #1677): a single grep -E pattern shared by
+# step 1's own DIRTY preflight filter and, exported as
+# FABRIK_PREGATE_ALLOWED_DIRTY_REGEX, scripts/e2e/run.sh's run_pregate — so
+# there's exactly one place this "files this script itself is expected to
+# leave dirty" list is maintained, not two hand-copied ones that can drift.
+# Asserted against a sample VERSION by piping representative git-status
+# -porcelain lines through it, mirroring how both real call sites use it. ---
+SAMPLE_VERSION="v0.0.77"
+REGEX="$(allowed_dirty_regex "$SAMPLE_VERSION")"
+
+allowed_line_survives() {
+  # Returns "kept" if $1 (a porcelain line) is NOT filtered out by the
+  # allowlist (i.e. grep -Ev finds it, so it would still count as dirty),
+  # "filtered" if the allowlist swallows it.
+  local line="$1"
+  if printf '%s\n' "$line" | grep -Eqv "$REGEX"; then
+    echo "kept"
+  else
+    echo "filtered"
+  fi
+}
+
+assert_eq "allowed_dirty_regex: untracked release-notes/<version>.md is filtered (allowed)" \
+  "filtered" "$(allowed_line_survives "?? release-notes/${SAMPLE_VERSION}.md")"
+assert_eq "allowed_dirty_regex: modified release-notes/<version>.md is filtered (allowed)" \
+  "filtered" "$(allowed_line_survives " M release-notes/${SAMPLE_VERSION}.md")"
+assert_eq "allowed_dirty_regex: modified plugin/known_embedded_versions.go is filtered (allowed)" \
+  "filtered" "$(allowed_line_survives " M plugin/known_embedded_versions.go")"
+assert_eq "allowed_dirty_regex: modified plugin/*/.claude-plugin/plugin.json is filtered (allowed)" \
+  "filtered" "$(allowed_line_survives " M plugin/entwurf/.claude-plugin/plugin.json")"
+assert_eq "allowed_dirty_regex: an unrelated dirty file is NOT filtered (still counts as dirty)" \
+  "kept" "$(allowed_line_survives " M engine/poll.go")"
+assert_eq "allowed_dirty_regex: a different version's release-notes is NOT filtered" \
+  "kept" "$(allowed_line_survives "?? release-notes/v0.0.1.md")"
+
+# export_pregate_verified_sha must also export FABRIK_PREGATE_ALLOWED_DIRTY_REGEX
+# (alongside FABRIK_PREGATE_VERIFIED_SHA, asserted above) so run_pregate can
+# apply the same allowlist without a second, separately-maintained copy.
+unset FABRIK_PREGATE_ALLOWED_DIRTY_REGEX
+VERSION="$SAMPLE_VERSION"
+export_pregate_verified_sha
+assert_eq "export_pregate_verified_sha sets FABRIK_PREGATE_ALLOWED_DIRTY_REGEX" \
+  "$(allowed_dirty_regex "$SAMPLE_VERSION")" "$FABRIK_PREGATE_ALLOWED_DIRTY_REGEX"
+CHILD_REGEX_VISIBLE="$(bash -c 'echo "$FABRIK_PREGATE_ALLOWED_DIRTY_REGEX"')"
+assert_eq "FABRIK_PREGATE_ALLOWED_DIRTY_REGEX is visible to a child process" \
+  "$(allowed_dirty_regex "$SAMPLE_VERSION")" "$CHILD_REGEX_VISIBLE"
+
+# --- Static check (REQ1, #1677): step 5 must invoke scripts/e2e/run.sh with
+# --clean, unconditionally, on the non-skip path — this is what resets the
+# shared bed before the live gate runs. A plain grep rather than exercising
+# main() (which would require a real bed, network, and publish path). ---
+if grep -Eq '"\$REPO_ROOT/scripts/e2e/run\.sh"[[:space:]]+--clean([[:space:]]|$)' "$REPO_ROOT/scripts/cut-release.sh"; then
+  echo "PASS: step 5 invokes scripts/e2e/run.sh with --clean"
+else
+  echo "FAIL: step 5 does not invoke scripts/e2e/run.sh with --clean"
+  FAILED=1
+fi
+
 # --- insert_notes_line: exercised directly against a scratch file, proving
 # the helper both call sites (plugin-bump changelog, --skip-integration
 # recorded-skip line) now share behaves identically to the pre-refactor
