@@ -536,6 +536,13 @@ func (d *Daemon) lockPath() string {
 // githubauth.Reconcile (which mutates on-disk credentials and can talk to
 // GitHub) and not just Daemon.Run's poll loop — see Daemon.preAcquiredLock
 // and this function's call sites in both places.
+//
+// Once the flock is held, our PID is written into the file for diagnostics
+// — not used for locking (flock handles that) — mirroring engine/poll.go's
+// identical fabrik.lock idiom exactly. This is what makes the lock file
+// externally inspectable (e.g. scripts/e2e/run.sh's check_reviewer_reachable,
+// #1684 R2): a liveness check needs a PID to `kill -0`, and prior to this the
+// file's content was never written at all.
 func acquireLock(fabrikDir string) (*os.File, error) {
 	dir := fabrikDir
 	if dir == "" {
@@ -555,6 +562,11 @@ func acquireLock(fabrikDir string) (*os.File, error) {
 		}
 		return nil, fmt.Errorf("another pruefer instance is already running (lock file: %s)", lockPath)
 	}
+	// Best-effort diagnostic write — a failure here doesn't affect the lock
+	// itself, so it's not treated as fatal.
+	lockFile.Truncate(0)
+	lockFile.Seek(0, 0)
+	fmt.Fprintf(lockFile, "%d\n", os.Getpid())
 	return lockFile, nil
 }
 
