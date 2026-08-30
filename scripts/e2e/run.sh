@@ -13,10 +13,54 @@
 # --clean (if given, must be the first argument) runs scripts/e2e/reset.sh for a
 # clean-slate bed before the run. Anything else is passed to `go test`.
 #
-# Pre-gate (R1, #1454): before ANY of the above — before bed preflight, before
-# the build, before a single live GitHub/Claude call — this script runs the
-# free, fast layers first (scripts/sim/run.sh --all, then the github/
-# wire-contract tests) and aborts with a distinct exit code if either fails.
+# Preconditions (R1/R2, #1684): before even the pre-gate below, this script
+# checks two operational facts that were previously tribal knowledge only —
+# getting either wrong costs an hour or more, discovered only after the run
+# has already spent its budget. See tests/e2e/README.md's "Operational
+# up/down contract" section for the full incident history and measured
+# numbers.
+#
+#   R1 — competing consumer of the shared @arbeithand GraphQL token. The bed
+#   and this suite share one 5,000/hour bucket, and a single live leg consumes
+#   ~4,000 of it — any OTHER Fabrik instance authenticated as @arbeithand
+#   polling concurrently (most commonly: your own always-on production
+#   instance) pushes the run into backoff, invalidating it after it already
+#   spent an hour. check_competing_token_consumers() enumerates local `fabrik`
+#   processes, resolves each one's cwd, and compares its .env FABRIK_TOKEN
+#   against the bed's own — refusing (not warning) on a match, since a silent
+#   proceed-into-backoff is strictly worse than one operator round-trip.
+#
+#     E2E_SKIP_TOKEN_CHECK=1   skip this check entirely (iteration-only
+#                              escape hatch, same shape as E2E_SKIP_PREGATE)
+#
+#   R2 — review bot (Pruefer) unreachable. Review-gated scenarios depend on
+#   Pruefer actually submitting a review; if it's down, they fail ~10 minutes
+#   in on a review timeout that looks like a Fabrik defect, not an ops gap.
+#   check_reviewer_reachable() checks Pruefer's own `.pruefer/pruefer.lock`
+#   (PID liveness, mirroring stop_bed_instance's fabrik.lock idiom exactly —
+#   `kill -0` against the PID Pruefer writes into its lock file on
+#   acquisition, see pruefer/daemon.go's acquireLock). Skipped automatically
+#   when the caller supplies -run/--run (a narrowed subset may not include any
+#   review-gated scenario — the issue's own stated assumption; left to the
+#   operator rather than inferred). Refuses when PRUEFER_DIR exists but the
+#   lock is missing/dead (a confident "down" signal); only WARNS (never
+#   blocks) when PRUEFER_DIR itself doesn't exist, since that's undeterminable
+#   rather than confirmed-down — a genuinely remote Pruefer deployment (see
+#   README's SSH-tunnel setup) must never be permanently blocked by a
+#   local-only check.
+#
+#     PRUEFER_DIR=<dir>       Pruefer's deployment directory (default:
+#                              $HOME/dev/fabrik — the observed co-located
+#                              convention; override for a different or remote
+#                              topology)
+#     E2E_SKIP_REVIEWER_CHECK=1   skip this check entirely (same escape-hatch
+#                              shape as E2E_SKIP_TOKEN_CHECK above)
+#
+# Pre-gate (R1, #1454): after the #1684 preconditions above, but still before
+# bed preflight, before the build, before a single live GitHub/Claude call —
+# this script runs the free, fast layers first (scripts/sim/run.sh --all,
+# then the github/ wire-contract tests) and aborts with a distinct exit code
+# if either fails.
 # Spending GraphQL quota and Claude tokens to discover a bug the sim or the
 # wire-contract tests already caught for $0 is exactly the waste this ordering
 # exists to remove. See run_pregate below for the full rationale.
@@ -315,10 +359,23 @@ ENGINE_LOG="$TEST_BED/.fabrik/fabrik.log"
 # report an unrelated budget. A missing/unreadable token only degrades the
 # budget report (skipped, warned) — unlike reset.sh, nothing else in this
 # script depends on it, so it's not fatal here.
+#
+# Also read by check_competing_token_consumers (R1, #1684) to compare
+# against other local Fabrik instances' own tokens — same
+# degrade-gracefully-on-missing-token behavior applies there too (warned,
+# not fatal).
 BED_TOKEN=$( { grep '^FABRIK_TOKEN=' "$TEST_BED/.env" 2>/dev/null | head -1 | cut -d= -f2-; } || echo "")
 if [ -z "$BED_TOKEN" ]; then
-  echo "warning: could not read FABRIK_TOKEN from $TEST_BED/.env — GraphQL budget reporting will be skipped" >&2
+  echo "warning: could not read FABRIK_TOKEN from $TEST_BED/.env — GraphQL budget reporting and the competing-token-consumer check will be skipped" >&2
 fi
+
+# Pruefer's deployment directory (R2, #1684) — where its own
+# .pruefer/pruefer.lock lives. Defaults to the observed co-located deployment
+# convention (Pruefer running self-hosted alongside a full Fabrik checkout);
+# override for a different or remote topology. A directory that doesn't
+# exist is not fatal here — check_reviewer_reachable degrades to a warning,
+# since that's undeterminable, not confirmed-down (see its own comment).
+PRUEFER_DIR="${PRUEFER_DIR:-$HOME/dev/fabrik}"
 
 # Distinct exit code for a run invalidated by GraphQL budget exhaustion — see
 # "GraphQL budget exhaustion detection" in the header comment above.
@@ -345,6 +402,22 @@ readonly PREGATE_FAILED_EXIT=5
 # regression, a budget exhaustion, or a preflight/pre-gate failure. See
 # switch_and_run's own comment and "Hang hardening" in the header above.
 readonly POST_SUITE_WATCHDOG_EXIT=6
+
+# Distinct exit code for an unmet operational precondition (R1/R2, #1684): a
+# competing consumer of the shared @arbeithand GraphQL token, or the review
+# bot (Pruefer) being confidently unreachable. Both are the same failure
+# class — an operational fact the operator must fix before any live spend,
+# never a test failure or a bed-state problem — distinct from
+# PREFLIGHT_FAILED_EXIT (4, bed state), PREGATE_FAILED_EXIT (5, free-layer
+# test failure), BUDGET_EXHAUSTED_EXIT (3, a live-run budget problem), and
+# POST_SUITE_WATCHDOG_EXIT (6, #1676, which claimed this issue's originally
+# chosen value first during a rebase — renumbered here to 7 to avoid the
+# collision rather than reuse 6 for two unrelated failure classes). One
+# shared code for both R1 and R2, rather than two near-identical ones, since
+# a caller only needs to distinguish "an operational precondition wasn't met"
+# from the other failure classes, not which precondition specifically
+# (that's in the message itself).
+readonly PRECONDITION_FAILED_EXIT=7
 
 # ---------------------------------------------------------------------------
 # run_reaped (R3, #1624): run "$@" as a backgrounded job in its own process
@@ -548,6 +621,212 @@ _report_gh_probe_failure() {
   if [ -s "$errfile" ]; then
     sed "s/^/warning: ${label} probe: /" "$errfile" >&2
   fi
+}
+
+# ---------------------------------------------------------------------------
+# R1 (#1684): detect a competing consumer of the shared @arbeithand GraphQL
+# token before this run spends any of its own budget. See the header
+# comment's "Preconditions" section for the full rationale.
+#
+# resolve_pid_cwd / discover_fabrik_process_dirs are the OS-dependent,
+# untested-by-design glue (mirroring preflight_bed's own untested OS-
+# sensitive parts) — they shell out to /proc or lsof to enumerate real,
+# currently-running processes, which a fixture-based unit test can't fake
+# without a real process to point at. find_competing_token_consumers below is
+# the pure half, and IS covered by scripts/e2e/token_consumer_check_test.sh.
+# ---------------------------------------------------------------------------
+
+# resolve_pid_cwd echoes the current working directory of process $1, or
+# nothing if it can't be determined (process gone, permission denied,
+# unsupported platform). Linux resolves it directly via /proc; macOS has no
+# /proc, so it shells out to lsof (already an accepted dependency in this
+# script's own README-documented prerequisites) asking only for the process's
+# "cwd" file descriptor in the `-F` machine-readable format, whose `n` lines
+# carry the path.
+resolve_pid_cwd() {
+  local pid="$1"
+  case "$(uname -s)" in
+    Linux)
+      readlink "/proc/$pid/cwd" 2>/dev/null
+      ;;
+    *)
+      # macOS (and best-effort anywhere else lsof exists): -a ANDs -p (this
+      # pid) with -d cwd (only the cwd file descriptor); -Fn restricts output
+      # to name fields, each prefixed with the literal letter 'n' — stripped
+      # below. A process that exited between pgrep and here, or one this
+      # user can't inspect, simply produces no 'n' line — empty output, not
+      # an error.
+      if command -v lsof >/dev/null 2>&1; then
+        lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | tail -1
+      fi
+      ;;
+  esac
+}
+
+# discover_fabrik_process_dirs enumerates locally-running `fabrik` processes
+# (exact name match via `pgrep -x`, so `fabrik-test`/`fabrik-workflows`-named
+# things are never candidates) and echoes one "PID<TAB>DIR" line per process
+# whose cwd could be resolved. This is the untested OS-dependent half;
+# find_competing_token_consumers (below) is what actually gets exercised
+# against fixtures.
+discover_fabrik_process_dirs() {
+  local pids pid dir
+  pids="$(pgrep -x fabrik 2>/dev/null || true)"
+  [ -z "$pids" ] && return 0
+  for pid in $pids; do
+    [ "$pid" = "$$" ] && continue
+    dir="$(resolve_pid_cwd "$pid")"
+    [ -n "$dir" ] && printf '%s\t%s\n' "$pid" "$dir"
+  done
+}
+
+# find_competing_token_consumers is the pure filter at the heart of R1: given
+# the bed's own directory ($1), the bed's own token ($2), and a newline-
+# separated list of "PID<TAB>DIR" candidates ($3, as produced by
+# discover_fabrik_process_dirs, or fixture data in tests), it prints one
+# "PID<TAB>DIR" line per candidate that (a) is NOT the bed's own directory
+# (compared by resolved absolute path, per AC4 — the bed's own instance is
+# already budgeted into the ~4,000/5,000 estimate and must never be reported
+# as a competitor) and (b) has a readable .env FABRIK_TOKEN equal to the
+# bed's. Returns 0 if at least one match was printed, 1 otherwise — mirroring
+# detect_rate_limit_backoff's grep-like exit-code convention — so callers can
+# branch without re-parsing their own output.
+#
+# A candidate whose directory doesn't exist, or has no .env, or whose .env
+# has no FABRIK_TOKEN line, is silently excluded (not an error) — the same
+# degrade-gracefully idiom BED_TOKEN's own resolution above uses.
+find_competing_token_consumers() {
+  local bed_dir="$1" bed_token="$2" candidates="$3"
+  [ -z "$candidates" ] && return 1
+  local bed_dir_abs
+  bed_dir_abs="$( (cd "$bed_dir" 2>/dev/null && pwd -P) || printf '%s' "$bed_dir")"
+  local found=1
+  local pid dir dir_abs candidate_token
+  while IFS=$'\t' read -r pid dir; do
+    [ -z "$pid" ] && continue
+    [ -z "$dir" ] && continue
+    dir_abs="$( (cd "$dir" 2>/dev/null && pwd -P) || printf '%s' "$dir")"
+    if [ "$dir_abs" = "$bed_dir_abs" ]; then
+      continue # the bed's own instance — already budgeted, never a competitor
+    fi
+    candidate_token=$( { grep '^FABRIK_TOKEN=' "$dir/.env" 2>/dev/null | head -1 | cut -d= -f2-; } || echo "")
+    if [ -n "$candidate_token" ] && [ "$candidate_token" = "$bed_token" ]; then
+      printf '%s\t%s\n' "$pid" "$dir"
+      found=0
+    fi
+  done <<<"$candidates"
+  return "$found"
+}
+
+# check_competing_token_consumers is the orchestration wrapper: honors
+# E2E_SKIP_TOKEN_CHECK, degrades to a warning (never a block) when BED_TOKEN
+# itself couldn't be read (nothing to compare against), and otherwise
+# discovers candidates and refuses with PRECONDITION_FAILED_EXIT — naming
+# every competing PID/directory found — on a match. Refuse-by-default: a
+# silent proceed-into-backoff (the pre-#1684 status quo) costs an hour or
+# more of already-spent budget, strictly worse than one operator round-trip.
+check_competing_token_consumers() {
+  if [ -n "${E2E_SKIP_TOKEN_CHECK:-}" ]; then
+    echo "== competing-token-consumer check skipped (E2E_SKIP_TOKEN_CHECK set) =="
+    return 0
+  fi
+  if [ -z "$BED_TOKEN" ]; then
+    echo "warning: BED_TOKEN unreadable — skipping competing-token-consumer check (R1, #1684): nothing to compare candidate processes' tokens against" >&2
+    return 0
+  fi
+
+  echo "== checking for competing consumers of the bed's GraphQL token (R1, #1684) =="
+  local candidates matches
+  candidates="$(discover_fabrik_process_dirs)"
+  matches="$(find_competing_token_consumers "$TEST_BED" "$BED_TOKEN" "$candidates" || true)"
+  if [ -n "$matches" ]; then
+    {
+      echo ""
+      echo "############################################################"
+      echo "## PRECONDITION FAILED: competing consumer(s) of the shared @arbeithand"
+      echo "## GraphQL token found."
+      echo "##"
+      echo "## The following local Fabrik process(es) have an .env FABRIK_TOKEN"
+      echo "## identical to this test bed's ($TEST_BED):"
+      echo "##"
+      printf '%s\n' "$matches" | while IFS=$'\t' read -r pid dir; do
+        echo "##   pid $pid   dir $dir"
+      done
+      echo "##"
+      echo "## Any GraphQL calls that process makes come out of the SAME"
+      echo "## 5,000/hour bucket this gate run needs (~4,000 pts/leg) — see"
+      echo "## tests/e2e/README.md's 'Operational up/down contract'. Stop it, or"
+      echo "## re-run with E2E_SKIP_TOKEN_CHECK=1 to proceed anyway (not"
+      echo "## recommended — you'll likely lose the run to backoff after it has"
+      echo "## already spent an hour)."
+      echo "############################################################"
+    } >&2
+    exit "$PRECONDITION_FAILED_EXIT"
+  fi
+  echo "   no competing token consumers found"
+}
+
+# ---------------------------------------------------------------------------
+# R2 (#1684): check the review bot (Pruefer) is reachable before a run that
+# needs it. See the header comment's "Preconditions" section for the full
+# rationale.
+#
+# check_reviewer_reachable takes "$@" (this script's own arguments) purely to
+# detect a caller-supplied -run/--run and skip automatically — a narrowed
+# scenario subset may not include any review-gated scenario, and inferring
+# that precisely would need matching against the actual set of
+# wait_for_reviews-gated scenario names, which risks false negatives; leaving
+# it to the operator (via the -run they already supplied) is simpler and
+# conservative in the safe direction.
+# ---------------------------------------------------------------------------
+check_reviewer_reachable() {
+  if [ -n "${E2E_SKIP_REVIEWER_CHECK:-}" ]; then
+    echo "== reviewer-reachable check skipped (E2E_SKIP_REVIEWER_CHECK set) =="
+    return 0
+  fi
+
+  local a
+  for a in "$@"; do
+    case "$a" in
+      -run | -run=* | --run | --run=*)
+        echo "== reviewer-reachable check skipped (-run/--run supplied — a narrowed scenario subset may not include any review-gated scenario; operator's call) =="
+        return 0
+        ;;
+    esac
+  done
+
+  if [ ! -d "$PRUEFER_DIR" ]; then
+    echo "warning: PRUEFER_DIR ($PRUEFER_DIR) does not exist — cannot verify Pruefer's liveness locally (assuming a remote or other topology); proceeding. If Pruefer is not actually reachable, every review-gated scenario will fail ~10 min later on a review timeout. Set PRUEFER_DIR to Pruefer's deployment directory, or E2E_SKIP_REVIEWER_CHECK=1 to silence this warning." >&2
+    return 0
+  fi
+
+  local lock="$PRUEFER_DIR/.pruefer/pruefer.lock"
+  if [ ! -f "$lock" ]; then
+    {
+      echo "PRECONDITION FAILED: Pruefer's lock file not found at $lock."
+      echo "PRUEFER_DIR ($PRUEFER_DIR) exists, so this is treated as confidently down, not merely undeterminable."
+      echo "Every review-gated scenario in this suite will time out waiting for a review that never arrives."
+      echo "Start Pruefer, or re-run with E2E_SKIP_REVIEWER_CHECK=1 if this run genuinely doesn't need it."
+    } >&2
+    exit "$PRECONDITION_FAILED_EXIT"
+  fi
+
+  # The PID Pruefer writes into its own lock file on acquisition (see
+  # pruefer/daemon.go's acquireLock) — mirrors stop_bed_instance's identical
+  # fabrik.lock idiom. `tr -dc '0-9'` guards against a lock file whose
+  # content is stale/garbled rather than trusting it verbatim.
+  local pid
+  pid="$(head -1 "$lock" 2>/dev/null | tr -dc '0-9')"
+  if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+    {
+      echo "PRECONDITION FAILED: Pruefer's lock file ($lock) exists but names no live process (pid='${pid:-<empty>}')."
+      echo "Every review-gated scenario in this suite will time out waiting for a review that never arrives."
+      echo "Start Pruefer, or re-run with E2E_SKIP_REVIEWER_CHECK=1 if this run genuinely doesn't need it."
+    } >&2
+    exit "$PRECONDITION_FAILED_EXIT"
+  fi
+
+  echo "== reviewer-reachable check passed: Pruefer alive (pid $pid, lock: $lock) =="
 }
 
 # ---------------------------------------------------------------------------
@@ -1555,7 +1834,14 @@ switch_and_run() {
 # `bash run.sh`), BASH_SOURCE[0] equals $0, so this still dispatches exactly
 # as before this guard existed.
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
-  # Pre-gate FIRST (R1, #1454) — strictly before any bed preflight, build,
+  # Preconditions FIRST (R1/R2, #1684) — strictly before even the pre-gate
+  # below, let alone any bed preflight, build, restart, or live GitHub/Claude
+  # call. See the header comment's "Preconditions" section and each
+  # function's own comment for the full rationale.
+  check_competing_token_consumers
+  check_reviewer_reachable "$@"
+
+  # Pre-gate NEXT (R1, #1454) — strictly before any bed preflight, build,
   # restart, or live GitHub/Claude call. See run_pregate's own comment for
   # why this ordering is the mechanism, not a runtime check.
   run_pregate
