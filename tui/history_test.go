@@ -311,6 +311,33 @@ func TestViewHistory_TurnLimitClassification(t *testing.T) {
 			want:  "✓",
 			unwnt: []string{"(error)", "(turn limit)", "(retry)", "(input needed)"},
 		},
+		{
+			// A comment pass never emits FABRIK_STAGE_COMPLETE — every
+			// fabrik-*-comment skill forbids it — so Completed is false for all of
+			// them. Rendering that as "(retry)" mislabelled every comment row in
+			// the history pane; a successful comment pass is simply done.
+			name:  "comment pass is complete, not a retry",
+			entry: HistoryEntry{IssueNumber: 6, StageName: "Review", IsComment: true, Success: true, TurnLimited: false, Completed: false},
+			want:  "✓",
+			unwnt: []string{"(error)", "(turn limit)", "(retry)", "(input needed)"},
+		},
+		{
+			// A comment pass CAN genuinely hit the turn cap (the comment skills
+			// have their own "If You Hit the Turn Limit" section), so that case
+			// must keep reporting it rather than being swallowed by the above.
+			name:  "turn-capped comment pass still reports the cap",
+			entry: HistoryEntry{IssueNumber: 7, StageName: "Review", IsComment: true, Success: true, TurnLimited: true, Completed: false},
+			want:  "(turn limit)",
+			unwnt: []string{"(error)", "(retry)"},
+		},
+		{
+			// The stage-run path is unchanged: a stage that ends without the
+			// marker really will be re-dispatched.
+			name:  "stage run without the marker still shows retry",
+			entry: HistoryEntry{IssueNumber: 8, StageName: "Implement", IsComment: false, Success: true, TurnLimited: false, Completed: false},
+			want:  "(retry)",
+			unwnt: []string{"(error)", "(turn limit)"},
+		},
 	}
 
 	for _, tc := range cases {
