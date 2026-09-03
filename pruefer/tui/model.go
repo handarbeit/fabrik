@@ -219,27 +219,123 @@ func (m *Model) prepareDetailItem() {
 	m.detail.SetVisible(m.detailPanel)
 }
 
+// minPaneRows is the floor a flexible pane keeps even when the terminal is too
+// short to satisfy both. Below this a pane conveys nothing, so shrinking
+// further only wastes the rows.
+const minPaneRows = 3
+
+// paneChrome is the non-content height every bordered pane costs: a title row
+// plus the top and bottom border.
+const paneChrome = 3
+
+// allocateRows divides the height left over after the fixed panes between the
+// two flexible ones (#1674 R1).
+//
+// The rule, stated so it is a decision rather than an accident: **the changing
+// pane is served first.** Completed Reviews gets what its content needs up to
+// the available space; Watched Repos takes the remainder. Watched Repos is
+// static and grows with the repo count, so letting it win would push the panes
+// an operator is actually watching off the screen — which is the defect this
+// addresses. Both keep minPaneRows, and whichever cannot fit its content
+// windows with a "… N more" line.
+//
+// avail is content rows available to both panes combined (chrome already
+// deducted). wantHistory/wantRepos are their unconstrained content heights.
+func allocateRows(avail, wantHistory, wantRepos int) (history, repos int) {
+	if avail < 2*minPaneRows {
+		// Too short to satisfy both floors: split what there is, still giving
+		// the changing pane the larger half.
+		history = avail / 2
+		if history < 1 {
+			history = 1
+		}
+		repos = avail - history
+		if repos < 1 {
+			repos = 1
+		}
+		return history, repos
+	}
+	history = wantHistory
+	if history > avail-minPaneRows {
+		history = avail - minPaneRows
+	}
+	if history < minPaneRows {
+		history = minPaneRows
+	}
+	repos = avail - history
+	// Hand back anything Completed Reviews does not need.
+	if repos > wantRepos {
+		repos = wantRepos
+		if extra := avail - repos - history; extra > 0 {
+			history += extra
+		}
+	}
+	if repos < minPaneRows {
+		repos = minPaneRows
+	}
+	return history, repos
+}
+
 // View renders the full TUI.
+//
+// Panel order (#1674 R4): the panes that change — In-Flight and Completed —
+// sit above the static Watched Repos list, which grows with the repo count and
+// previously pushed them down the screen.
 func (m Model) View() string {
 	if m.width == 0 {
 		return "Loading..."
 	}
 
-	var sections []string
-	sections = append(sections, m.header.View(m.width))
-	sections = append(sections, m.repos.View(m.width))
-	sections = append(sections, m.active.View(m.width))
+	header := m.header.View(m.width)
+	active := m.active.View(m.width)
+	footer := m.footer.View(m.width)
 
+	detail := ""
 	if m.detailPanel {
-		if detail := m.detail.View(m.width); detail != "" {
-			sections = append(sections, detail)
-		}
+		detail = m.detail.View(m.width)
 	}
 
+	// Budget the remaining height between the two flexible panes. m.height is
+	// 0 until the first WindowSizeMsg, in which case each pane falls back to
+	// its own default and the layout behaves as it did before #1674.
+	if m.height > 0 {
+		fixed := lineCount(header) + lineCount(active) + lineCount(footer)
+		if detail != "" {
+			fixed += lineCount(detail)
+		}
+		avail := m.height - fixed - 2*paneChrome
+		wantHistory := len(m.history.visibleEntries())
+		if wantHistory == 0 {
+			wantHistory = 1
+		}
+		wantRepos := len(m.repos.order) + len(m.repos.provenanceNotes())
+		if wantRepos == 0 {
+			wantRepos = 1
+		}
+		hRows, rRows := allocateRows(avail, wantHistory, wantRepos)
+		m.history.SetMaxRows(hRows)
+		m.repos.SetMaxRows(rRows)
+	}
+
+	var sections []string
+	sections = append(sections, header)
+	sections = append(sections, active)
+	if detail != "" {
+		sections = append(sections, detail)
+	}
 	sections = append(sections, m.history.View(m.width))
-	sections = append(sections, m.footer.View(m.width))
+	sections = append(sections, m.repos.View(m.width))
+	sections = append(sections, footer)
 
 	return strings.Join(sections, "\n")
+}
+
+// lineCount returns the rendered height of a section in terminal rows.
+func lineCount(s string) int {
+	if s == "" {
+		return 0
+	}
+	return strings.Count(s, "\n") + 1
 }
 
 // FocusedPaneName returns the name of the currently focused pane, for tests.
