@@ -135,6 +135,22 @@ git diff "origin/$base_branch"..HEAD
 - Do tests cover error paths, not just happy paths?
 - Are tests actually testing behavior, not just exercising code?
 - Run the test suite: do all tests pass?
+- (#1687, R1) If a test's purpose is to prove a specific guard rejects, does its
+  assertion distinguish that guard's rejection from every other possible rejection
+  reason — not just a boolean/exit-code outcome that any rejection would satisfy? See
+  `tests/sim/README.md`'s "Guard-testing convention" for the worked example and fix
+  pattern.
+- (#1687, R2) If a guard is deliberately redundant with another (defence-in-depth), does
+  the code or its test state how the guard's loss would be detected — either via a
+  directly-testable extracted predicate, or an explicit unreachable-by-construction note?
+  See `tests/sim/README.md`'s same section.
+- (#1687, R3) Does every new guard have at least one test exercising its call site end to
+  end (not only a unit test of the guard's own logic in isolation) — proving the
+  orchestrator actually invokes the guard and observably acts on its result?
+- (#1687, R4 — neutralization in review) For any change adding a new guard: does the PR
+  description or review notes state which mutation the new test catches? Confirm that
+  mutation was actually run against the guard and observed to turn the test red — not
+  merely reasoned about. A guard test that hasn't been neutralized hasn't been trusted.
 
 **Security**:
 - No command injection, SQL injection, XSS, or path traversal

@@ -837,6 +837,77 @@ first, not a defect in the refund mechanism itself.
   `CommentReviewCompleted` (both of which commit), mirroring
   `simclaude/scripts.go`'s existing naming convention.
 
+## Guard-testing convention (R1–R4, #1687)
+
+Three times in one working session, a guard (a check that rejects, refuses, or falls
+through under some condition) was deletable with no test failing. In every case the
+guard's *logic* was thoroughly tested while the *wiring that invokes it* was not — the
+neutralization discipline this package's own `nonvacuity.sh` (below) already applies at
+package scale, just never asked of an individual guard's own test. None of the three
+underlying guards were ever wrong; this is about whether a regression in one would be
+noticed, and none would have been caught by reading the tests — every suite looked
+thorough until someone actually ran the mutation.
+
+The convention below (R1–R3; R4 is a review-time obligation and lives in the
+`fabrik-review` skill instead) applies identically whether the guard is a Go function
+returning `(bool, string)` or a bash function with an exit code and stdout — it is not
+specific to this package's own Go-and-`simgh` regime.
+
+**R1 — Assert the reason, not just the outcome.** A test proving a specific guard
+rejects must distinguish that guard's rejection from every other possible rejection
+reason — e.g. via a shared fixture that makes every earlier condition pass, so the guard
+under test is the only thing that can reject, plus an assertion on the returned
+reason/error string, not only the boolean/exit-code outcome.
+
+*Worked example:* `engine/merge_train_test.go`'s
+`TestSingletonFastPathEligible_BaseNotAncestor_FallsThrough` (part of the
+`singletonFastPathEligible` battery, `engine/merge_train.go`) originally asserted only
+`eligible == false` — true for *any* rejection. Its own fixture defaulted to zero check
+runs, which rejects via an unrelated arm, so deleting the ancestry guard's own
+`if behind > 0 { return false }` left the test green: it passed for the wrong reason. The
+fix (now in place) rebuilds the fixture so every other guard passes and the ancestry
+check is the only thing that can reject, then asserts `strings.Contains(reason, ...)` on
+the specific rejection string. Every sibling test in that same battery follows the
+identical shape.
+
+**R2 — Make deliberate redundancy accountable.** When a guard is deliberately redundant
+with another (defence-in-depth), the code or its test must state how the guard's loss
+would be detected. If the honest answer is "it wouldn't," either extract it into a
+directly-testable predicate, or record explicitly that it is unreachable-by-construction
+and therefore untested.
+
+*Worked example:* the merge train's R8 fail-closed identity check
+(`shouldCloseStaleTrainPR`, `engine/merge_train.go`) is deliberately redundant with R7 —
+removing either alone changes no observable behavior, which is the point, and which made
+the loss of one layer undetectable by outcome alone. It was extracted into its own
+directly-testable predicate specifically so it can be asserted in isolation:
+`engine/merge_train_test.go`'s test carries the comment "deleting
+`shouldCloseStaleTrainPR`'s identity check turns this test red (AC1)" — stating exactly
+how the guard's loss would be caught, per this rule.
+
+**R3 — Test the wiring, not only the unit.** Every guard needs at least one test case
+where the orchestrator/call site is exercised end to end and the guard's effect is
+observable — not only a unit test of the guard's own logic in isolation.
+
+*Worked example:* `scripts/e2e/run.sh`'s `check_competing_token_consumers` orchestrator
+wraps a well-tested pure detection function (`find_competing_token_consumers`, six cases
+in `scripts/e2e/token_consumer_check_test.sh`) but, until #1687, had no test exercising
+its own match→refuse path — replacing its body with `return 0` left every existing case
+green. The fix added a case that overrides the untestable OS-dependent half
+(`discover_fabrik_process_dirs`) with a canned candidate, then asserts the orchestrator
+itself detects the match and exits `PRECONDITION_FAILED_EXIT` — proving the wiring, not
+just the detection logic it calls.
+
+**Neutralize before trusting a guard test.** The only way any of the three gaps above
+were found was by actually running the mutation the test claims to catch and observing
+whether it stayed green — not by reading the test. `tests/sim/simgh/nonvacuity.sh`
+applies the identical discipline at package scale (neutralize each modeled `simgh`
+behavior in turn, fail loudly if any leaves the suite green); treat a new guard test the
+same way before trusting it. The review-time version of this obligation (R4 — state which
+mutation a new guard's test catches, and show it turning the test red) is a
+`fabrik-review` skill checklist item, not a sim-bed one, since it's an author obligation
+applied during review, not a testing-layer property.
+
 ## Running it
 
 ```bash
