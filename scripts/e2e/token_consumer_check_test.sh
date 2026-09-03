@@ -112,6 +112,47 @@ assert_eq "E2E_SKIP_TOKEN_CHECK=1 exits 0" "0" "$rc"
 rc=$?
 assert_eq "empty BED_TOKEN degrades to a pass (warning only)" "0" "$rc"
 
+# --- Case 9 (#1687, R3): wiring-level coverage of
+# check_competing_token_consumers' match->refuse path itself. Cases 1-6
+# above only prove find_competing_token_consumers (the pure detection unit)
+# works in isolation; cases 7-8 only exercise check_competing_token_consumers
+# paths that never reach the match/refuse logic. Nothing before this proved
+# the orchestrator actually calls discover_fabrik_process_dirs, feeds its
+# output through find_competing_token_consumers, and exit()s
+# PRECONDITION_FAILED_EXIT on a positive match — replacing
+# check_competing_token_consumers' body with `return 0` left every prior
+# case green. Here discover_fabrik_process_dirs (the untestable,
+# OS-dependent half) is overridden with a canned candidate so the
+# orchestrator's own match-handling can be exercised deterministically,
+# without a real competing process.
+#
+# Left intentionally un-restored: this is the last case in the file, so the
+# override can't leak into a later one — a future editor appending Case 10+
+# after this should redefine discover_fabrik_process_dirs back to its
+# original body first (or move this case to the end again).
+discover_fabrik_process_dirs() { printf '9999\t%s\n' "$OTHER_DIR"; }
+out="$( ( TEST_BED="$BED_DIR" BED_TOKEN="shared-token-abc" check_competing_token_consumers ) 2>&1 )"
+rc=$?
+assert_eq "orchestrator match: exits PRECONDITION_FAILED_EXIT" "$PRECONDITION_FAILED_EXIT" "$rc"
+if ! printf '%s' "$out" | grep -q "PRECONDITION FAILED"; then
+  echo "FAIL: orchestrator match: output names PRECONDITION FAILED"
+  FAILED=1
+else
+  echo "PASS: orchestrator match: output names PRECONDITION FAILED"
+fi
+if ! printf '%s' "$out" | grep -q "9999"; then
+  echo "FAIL: orchestrator match: output names competing PID"
+  FAILED=1
+else
+  echo "PASS: orchestrator match: output names competing PID"
+fi
+if ! printf '%s' "$out" | grep -qF "$OTHER_DIR"; then
+  echo "FAIL: orchestrator match: output names competing dir"
+  FAILED=1
+else
+  echo "PASS: orchestrator match: output names competing dir"
+fi
+
 if [ "$FAILED" -ne 0 ]; then
   echo "=== token_consumer_check_test.sh: FAILED ==="
   exit 1
