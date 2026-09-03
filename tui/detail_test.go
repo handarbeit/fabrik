@@ -65,6 +65,51 @@ func TestDetailPanel_TurnLimitStatus(t *testing.T) {
 	}
 }
 
+// TestDetailPanel_CommentPassStatus is the detail-panel half of the comment-pass
+// fix (the history-pane half is TestViewHistory_TurnLimitClassification's
+// comment cases). The two are separate implementations rather than shared code,
+// so each needs its own coverage — a regression in one would not be caught by
+// the other.
+//
+// Comment processing never emits FABRIK_STAGE_COMPLETE: every fabrik-*-comment
+// skill forbids it ("Do NOT output FABRIK_STAGE_COMPLETE ... returns control to
+// the engine without advancing the pipeline"). Completed is therefore false for
+// every comment invocation by design, and reporting that as "incomplete"
+// mislabels all of them.
+func TestDetailPanel_CommentPassStatus(t *testing.T) {
+	var d DetailPanelComponent
+	d.SetVisible(true)
+	d.SetWidth(80)
+
+	// A comment pass that succeeded, was not blocked, and did not hit the turn
+	// cap is complete — not "incomplete".
+	d.SetItem(&DetailItem{IssueNumber: 1, StageName: "Review", IsComment: true, Success: true, TurnLimited: false, Completed: false})
+	view := d.View(80)
+	if !strings.Contains(view, "Status:   success") {
+		t.Errorf("expected %q for a completed comment pass, got: %q", "Status:   success", view)
+	}
+	if strings.Contains(view, "incomplete") {
+		t.Errorf("comment pass must not render as incomplete, got: %q", view)
+	}
+
+	// A comment pass CAN genuinely exhaust its turn budget — the comment skills
+	// carry their own "If You Hit the Turn Limit" section — so that must still
+	// be reported rather than swallowed by the branch above.
+	d.SetItem(&DetailItem{IssueNumber: 2, StageName: "Review", IsComment: true, Success: true, TurnLimited: true, Completed: false})
+	view = d.View(80)
+	if !strings.Contains(view, "incomplete (turn limit)") {
+		t.Errorf("expected %q for a turn-capped comment pass, got: %q", "incomplete (turn limit)", view)
+	}
+
+	// The stage-run path is unchanged: a stage that ends without the marker
+	// really will be re-dispatched.
+	d.SetItem(&DetailItem{IssueNumber: 3, StageName: "Implement", IsComment: false, Success: true, TurnLimited: false, Completed: false})
+	view = d.View(80)
+	if !strings.Contains(view, "Status:   incomplete") || strings.Contains(view, "turn limit") {
+		t.Errorf("stage run without the marker must still render as incomplete, got: %q", view)
+	}
+}
+
 // TestUpdate_EnterKey_ActivePane_TogglesDetailPanel verifies enter in active pane toggles the detail panel.
 func TestUpdate_EnterKey_ActivePane_TogglesDetailPanel(t *testing.T) {
 	m := New(30, ProjectInfo{}, "", nil, nil, 0, false)
