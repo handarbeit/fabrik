@@ -854,6 +854,7 @@ func (m *Model) prepareDetailItem() {
 			Title:          entry.Title,
 			StageName:      entry.StageName,
 			StageModel:     entry.StageModel,
+			IsComment:      entry.IsComment,
 			Success:        entry.Success,
 			TurnLimited:    entry.TurnLimited,
 			Completed:      entry.Completed,

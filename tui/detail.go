@@ -16,6 +16,7 @@ type DetailItem struct {
 	StageName      string
 	StageModel     string
 	IsActive       bool // true for in-flight jobs, false for history entries
+	IsComment      bool // comment-processing invocation rather than a stage run
 	Elapsed        time.Duration
 	Duration       time.Duration
 	Success        bool
@@ -71,6 +72,12 @@ func (d DetailPanelComponent) View(width int) string {
 		} else if !item.Completed {
 			if item.TurnLimited {
 				statusStr = "incomplete (turn limit)"
+			} else if item.IsComment {
+				// Comment processing never emits FABRIK_STAGE_COMPLETE by design —
+				// see the same guard in tui/history.go's rebuildViewportContent for
+				// the full reasoning. "incomplete" would be wrong for every comment
+				// pass, not just some of them.
+				statusStr = "success"
 			} else {
 				statusStr = "incomplete"
 			}

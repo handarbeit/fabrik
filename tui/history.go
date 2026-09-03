@@ -247,10 +247,22 @@ func (h *HistoryPaneComponent) rebuildViewportContent(innerWidth int) {
 			status = activeStyle.Render("?")
 			result = dimStyle.Render("  (input needed)")
 		} else if !he.Completed {
-			status = dimStyle.Render("↻")
 			if he.TurnLimited {
+				status = dimStyle.Render("↻")
 				result = dimStyle.Render("  (turn limit)")
+			} else if he.IsComment {
+				// Comment processing never emits FABRIK_STAGE_COMPLETE — every
+				// fabrik-*-comment skill forbids it outright ("Do NOT output
+				// FABRIK_STAGE_COMPLETE ... returns control to the engine without
+				// advancing the pipeline"), because a comment pass answers a comment
+				// rather than completing a stage. So Completed is false for every
+				// comment invocation by design, and reading it as "incomplete, will
+				// be retried" mislabels every one of them. A comment pass that
+				// succeeded, was not blocked on input and did not hit the turn cap
+				// did exactly what it was asked to do.
+				status = successStyle.Render("✓")
 			} else {
+				status = dimStyle.Render("↻")
 				result = dimStyle.Render("  (retry)")
 			}
 		} else {
