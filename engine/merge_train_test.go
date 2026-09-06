@@ -3989,14 +3989,39 @@ func TestFinishSingletonFastPathLanding_PostsLandedComment(t *testing.T) {
 
 	client := &mockGitHubClient{}
 	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, wm)
+	events := make(chan tui.Event, 64)
+	eng.events = events
 	state := &mergeTrainWorkerState{projectID: "PVT_test"}
-	p := trialParams{owner: "owner", repo: "repo", baseBranch: "main", baseSHA: "base-sha", wm: wm, holdingStg: holdingStage(eng.cfg)}
+	p := trialParams{owner: "owner", repo: "repo", baseBranch: "main", baseSHA: "base-sha", trainKey: "owner/repo", wm: wm, holdingStg: holdingStage(eng.cfg)}
 	m := trainMember{
 		item:  gh.ProjectItem{Number: 7, Title: "Issue Seven", ItemID: "item-7", Repo: "owner/repo", Status: "Queued"},
 		prNum: 70,
 	}
 
 	eng.finishSingletonFastPathLanding(state, p, m)
+
+	// The repo-level "landing complete" line the e2e suite and the TUI job row
+	// both key off (tests/e2e: WaitForLogLine "landing complete"). Asserted on
+	// the repo-scoped event specifically — a per-issue log line would not reach
+	// the train's job row, so routing is part of the contract, not incidental.
+	close(events)
+	var sawLandingComplete bool
+	for ev := range events {
+		le, ok := ev.(tui.LogEvent)
+		if !ok || !strings.Contains(le.Message, "landing complete") {
+			continue
+		}
+		if le.Repo != "owner/repo" || le.IssueNumber != 0 {
+			t.Errorf("landing-complete event routed as issue #%d/repo %q, want repo-scoped owner/repo", le.IssueNumber, le.Repo)
+		}
+		if !strings.Contains(le.Message, "singleton fast path") {
+			t.Errorf("landing-complete event does not name the fast path: %q", le.Message)
+		}
+		sawLandingComplete = true
+	}
+	if !sawLandingComplete {
+		t.Error("expected a repo-level \"landing complete\" event from the fast path — without it a fast-path landing is indistinguishable in the log from a train that started and never finished")
+	}
 
 	client.mu.Lock()
 	defer client.mu.Unlock()

@@ -1747,6 +1747,20 @@ func (e *Engine) finishSingletonFastPathLanding(state *mergeTrainWorkerState, p 
 
 	e.resetEjectionCount(p.owner, p.repo, m.item.Number)
 	e.resetTrialCounter(p.trainKey)
+
+	// The repo-level "landing complete" line landMergeTrainBatch emits: the
+	// train's terminal progress signal on its TUI job row, and the only
+	// log-visible statement that a train actually reached a landing. Omitting it
+	// left a fast-path landing looking, from the log alone, like a train that
+	// started and never finished. Shape deliberately parallels the batch path's,
+	// naming the mechanism and the member's own PR in place of the integration PR
+	// that does not exist here — member count is always 1 by construction.
+	//
+	// Unlike the landed comment above this is emitted unconditionally, not gated
+	// on the landing-verification label: a repeat on re-entry is accurate (the
+	// landing did complete) and, being a log line rather than a durable artifact,
+	// costs nothing and is itself the signal that a re-entry happened.
+	e.logfRepo(p.repoKey(), "merge-train", "landing complete for %s (singleton fast path, PR #%d, 1 member)\n", p.trainKey, m.prNum)
 }
 
 // trySingletonFastPath is runMergeTrainWorker's re-form-loop guard (#1644),
