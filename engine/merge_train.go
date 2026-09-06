@@ -1700,20 +1700,25 @@ func (e *Engine) finishSingletonFastPathLanding(state *mergeTrainWorkerState, p 
 	// legitimate for this path — it is the fast path working as designed
 	// (ADR-1644), not the direct-merge regression that shape would indicate
 	// under the trial paths.
-	// Guarded on awaitingLandingVerificationLabel — unlike landSingleton/
-	// landMergeTrainBatch, which close the member's PR immediately after
-	// commenting and so can never re-enter, this path leaves the PR to
-	// GitHub's own merge-close and can legitimately be re-entered while the
-	// member is still Queued (the pr.Merged restart branch, and a retry after
-	// a failed advance). The label is applied on every path that records a
-	// completed landing, so its presence means the comment already posted.
-	if m.prNum != 0 && !hasLabel(m.item.Labels, awaitingLandingVerificationLabel) {
-		landedComment := fmt.Sprintf("🏭 **Fabrik merge-train** — Landed via singleton fast path PR #%d. "+
-			"That is this PR: the pinned base was already an ancestor of this head, this PR was mergeable, "+
-			"and its own CI was green and complete, so it was landed directly — no trial branch was "+
-			"assembled and no separate integration PR exists. See ADR-1644.", m.prNum)
-		e.addLandedCommentWithRetry(p.owner, p.repo, m.item.Number, m.prNum, landedComment)
-	}
+	// Posted below, not here, and strictly in lockstep with
+	// awaitingLandingVerificationLabel — see postFastPathLandedComment's call
+	// sites. Unlike landSingleton/landMergeTrainBatch, which close the member's
+	// PR immediately after commenting and so can never re-enter, this path
+	// leaves the PR to GitHub's own merge-close and can legitimately be
+	// re-entered while the member is still Queued.
+	//
+	// The label's absence alone is NOT a sufficient guard, which an earlier
+	// revision of this function got wrong (found in review). The label is
+	// applied only *after* recordAdvanceOutcome succeeds, so on a failed
+	// advance — a missing board Status option, say, the case
+	// awaitingAdvanceLabel exists to retry (§6.17) — the member stays Queued
+	// with its PR already merged, re-enters here via trySingletonFastPath's
+	// pr.Merged branch every poll, and finds the guard still open: one
+	// duplicate landed comment per poll until MaxRetries escalates to
+	// fabrik:paused. Tying the comment to the same successful-label condition
+	// instead closes that window: no advance, no label, no comment, and the
+	// retry that eventually advances posts exactly one.
+	landed := false
 
 	if m.item.Status != "Done" {
 		var advErr error
@@ -1735,6 +1740,7 @@ func (e *Engine) finishSingletonFastPathLanding(state *mergeTrainWorkerState, p 
 		e.closeIssueIfNonDefaultBase(m.item, m.prNum)
 		if advErr == nil {
 			e.addLabel(m.item, awaitingLandingVerificationLabel)
+			landed = true
 		}
 	} else {
 		// Restart safety: already Done from a prior partial run (e.g. crashed
@@ -1743,6 +1749,36 @@ func (e *Engine) finishSingletonFastPathLanding(state *mergeTrainWorkerState, p 
 		// landMergeTrainBatch's identical "already Done" restart branch.
 		e.closeIssueIfNonDefaultBase(m.item, m.prNum)
 		e.addLabel(m.item, awaitingLandingVerificationLabel)
+		landed = true
+	}
+
+	// The member-scoped landing record every other landing path posts
+	// (landMergeTrainBatch, landSingleton). Without it the fast path lands
+	// silently: the PR merges with no explanation of which mechanism merged it
+	// or why — the one audit-trail record #1275 calls "the sole
+	// cross-landing-path, member-scoped record of which integration/singleton
+	// PR actually landed the change".
+	//
+	// Two conditions, and both are load-bearing. `landed` means this call
+	// actually recorded a completed landing (see the note above on why the
+	// label's absence alone is not enough). The label's absence in the item's
+	// own snapshot means no *earlier* call already did — the restart branch
+	// above re-applies the label idempotently on every re-entry, so without
+	// this half a crashed-then-resumed member would be re-commented each poll.
+	//
+	// The wording deliberately differs from the other two paths: here the
+	// landing PR IS the member's own PR, so it says so explicitly rather than
+	// naming a separate integration/singleton PR that does not exist. Anything
+	// reading these comments must therefore treat "landing PR == member PR" as
+	// legitimate for this path — the fast path working as designed (ADR-1644),
+	// not the direct-merge regression that shape would indicate under the
+	// trial paths.
+	if landed && m.prNum != 0 && !hasLabel(m.item.Labels, awaitingLandingVerificationLabel) {
+		landedComment := fmt.Sprintf("🏭 **Fabrik merge-train** — Landed via singleton fast path PR #%d. "+
+			"That is this PR: the pinned base was already an ancestor of this head, this PR was mergeable, "+
+			"and its own CI was green and complete, so it was landed directly — no trial branch was "+
+			"assembled and no separate integration PR exists. See ADR-1644.", m.prNum)
+		e.addLandedCommentWithRetry(p.owner, p.repo, m.item.Number, m.prNum, landedComment)
 	}
 
 	e.resetEjectionCount(p.owner, p.repo, m.item.Number)

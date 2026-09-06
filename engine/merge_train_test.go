@@ -4078,6 +4078,74 @@ func TestFinishSingletonFastPathLanding_AlreadyVerified_SkipsDuplicateComment(t 
 	}
 }
 
+// TestFinishSingletonFastPathLanding_FailedAdvanceRetry_PostsNoDuplicate is the
+// gap review found in the first revision of the landed-comment guard (PR #1692).
+// Keying the guard on awaitingLandingVerificationLabel's absence alone is not
+// enough: that label is applied only *after* recordAdvanceOutcome succeeds, so
+// on a failed advance (a missing board Status option, say — the case
+// awaitingAdvanceLabel exists to retry) the member stays Queued with its PR
+// already merged, re-enters via trySingletonFastPath's pr.Merged branch every
+// poll, and finds the guard still open. That posted one duplicate landed comment
+// per poll until MaxRetries escalated to fabrik:paused.
+//
+// The member's labels deliberately stay empty across both calls: that is exactly
+// what the real board snapshot looks like on the retry poll, since the failed
+// advance never applied the landing-verification label.
+func TestFinishSingletonFastPathLanding_FailedAdvanceRetry_PostsNoDuplicate(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+
+	client := &mockGitHubClient{
+		updateProjectItemStatusFn: func(projectID, itemID, statusFieldID, statusOptionID string) error {
+			return fmt.Errorf("no such status option")
+		},
+	}
+	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, wm)
+	state := &mergeTrainWorkerState{projectID: "PVT_test"}
+	p := trialParams{owner: "owner", repo: "repo", baseBranch: "main", baseSHA: "base-sha", trainKey: "owner/repo", wm: wm, holdingStg: holdingStage(eng.cfg)}
+	m := trainMember{
+		item:  gh.ProjectItem{Number: 11, Title: "Issue Eleven", ItemID: "item-11", Repo: "owner/repo", Status: "Queued"},
+		prNum: 110,
+	}
+
+	// Two polls, both with the advance failing — the shape the retry loop
+	// produces until it succeeds or escalates.
+	eng.finishSingletonFastPathLanding(state, p, m)
+	eng.finishSingletonFastPathLanding(state, p, m)
+
+	client.mu.Lock()
+	landedCount := 0
+	for _, c := range client.addCommentCalls {
+		if strings.Contains(c.body, "Landed via singleton fast path") {
+			landedCount++
+		}
+	}
+	client.mu.Unlock()
+	if landedCount > 1 {
+		t.Errorf("posted %d landed comments across two failed-advance polls — the guard must not repost on retry", landedCount)
+	}
+
+	// Once the advance succeeds, the landing is recorded exactly once. This is
+	// the other half of the contract: suppressing the duplicate must not
+	// suppress the comment permanently.
+	client.mu.Lock()
+	client.updateProjectItemStatusFn = nil
+	client.mu.Unlock()
+	eng.finishSingletonFastPathLanding(state, p, m)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	landedCount = 0
+	for _, c := range client.addCommentCalls {
+		if strings.Contains(c.body, "Landed via singleton fast path") {
+			landedCount++
+		}
+	}
+	if landedCount != 1 {
+		t.Errorf("after the advance finally succeeded, got %d landed comments, want exactly 1", landedCount)
+	}
+}
+
 // TestMergeTrainWorker_SingletonWithPendingReviewEject_EjectsInsteadOfFastPath
 // guards against a gap found in review: applyPendingReviewEjects (#1208) was
 // historically consumed only at three checkpoints, all downstream of
