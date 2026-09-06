@@ -99,16 +99,33 @@ func TestYoloAutoMergeLabel(t *testing.T) {
 			// harmlessly 404/422s (see #1271). CLOSED only happens when the
 			// trial needed conflict resolution. Do NOT "fix" this back to a
 			// CLOSED-only assertion: both are legitimate terminal states. The
-			// invariant that actually matters — that the member's own PR was
-			// never the merge vehicle — is verified below by confirming a
-			// DISTINCT integration/singleton PR is the one GitHub reports
-			// MERGED.
-			landingPRNum := waitForLandingPRNumber(t, env, env.RepoAlpha, prNum, 5*time.Minute)
-			if landingPRNum == prNum {
-				t.Fatalf("member PR #%d cites itself as the landing PR — the member's own PR was the merge vehicle, not a separate integration/singleton PR (this would indicate a direct-merge regression)", prNum)
+			// invariant that actually matters — that the merge went through the
+			// train and not around it — is verified below from the engine's own
+			// landed comment, which names the path that merged it.
+			//
+			// Two landing shapes are legitimate. Under the trial paths the
+			// landing PR is a DISTINCT integration/singleton PR, and the
+			// member's own PR citing itself would be a direct-merge regression.
+			// Under the singleton fast path (#1644) the member's own PR IS the
+			// landing PR by design — it is landed directly once the pinned base
+			// is already its ancestor, it is mergeable, and its own CI is green
+			// and complete. The comment distinguishes the two, so this asserts
+			// on the path rather than on distinctness alone: an unvalidated
+			// direct merge posts no landed comment at all and still fails, at
+			// waitForLandingPRDetail's own timeout.
+			landingPRNum, viaFastPath := waitForLandingPRDetail(t, env, env.RepoAlpha, prNum, 5*time.Minute)
+			if landingPRNum == prNum && !viaFastPath {
+				t.Fatalf("member PR #%d cites itself as the landing PR on a non-fast-path landing — the member's own PR was the merge vehicle, not a separate integration/singleton PR (this would indicate a direct-merge regression)", prNum)
+			}
+			if landingPRNum != prNum && viaFastPath {
+				t.Fatalf("singleton fast path cited PR #%d as the landing PR, but that path lands the member's own PR #%d — the comment and the mechanism disagree", landingPRNum, prNum)
 			}
 			assertPRMerged(t, env, env.RepoAlpha, landingPRNum)
-			t.Logf("distinct integration/singleton PR #%d confirmed MERGED — train landing contract verified", landingPRNum)
+			if viaFastPath {
+				t.Logf("member PR #%d confirmed MERGED via the singleton fast path — train landing contract verified", landingPRNum)
+			} else {
+				t.Logf("distinct integration/singleton PR #%d confirmed MERGED — train landing contract verified", landingPRNum)
+			}
 
 			waitForPRClosed(t, env, env.RepoAlpha, prNum, 5*time.Minute)
 			t.Logf("member PR #%d reached a terminal state (closed or merged-by-ancestry)", prNum)
