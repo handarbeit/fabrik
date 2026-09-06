@@ -282,7 +282,14 @@ func pollSleep(base time.Duration) {
 // Override with E2E_POLL_INTERVAL (any time.ParseDuration value) to tune without
 // a code change — e.g. E2E_POLL_INTERVAL=15s to restore the old cadence when
 // running a single scenario in isolation, where budget is not a constraint.
-const defaultPollBase = 30 * time.Second
+// Raised 30s -> 60s after the v0.0.82 gate (#1695). The suite and the bed
+// engine share one 5,000/hour GraphQL budget; the off leg tripped the engine's
+// own 20% backoff and was invalidated after every one of its 47 tests had
+// already passed. This is the suite's half of that fix — the bed engine's half
+// is defaultBedPollSeconds in lifecycle.go. Neither alone was enough: the
+// v0.0.81 cut set E2E_POLL_INTERVAL=60s and still hit backoff, because the
+// engine kept polling at 30s throughout.
+const defaultPollBase = 60 * time.Second
 
 func pollBase() time.Duration {
 	if s := os.Getenv("E2E_POLL_INTERVAL"); s != "" {

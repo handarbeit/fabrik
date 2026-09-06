@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -152,6 +153,37 @@ func StopFabrikTestBed(t *testing.T, env *Env) {
 	}
 }
 
+// defaultBedPollSeconds is the bed engine's poll cadence for e2e runs, passed
+// explicitly as -poll rather than left to the engine's own 30s default.
+//
+// The bed and this suite share one 5,000/hour GraphQL budget, and the engine is
+// the larger consumer: measured from its own inline rateLimit telemetry during
+// the v0.0.82 gate, ~1,320 points/hour while a leg is active (~310/hour idle,
+// where the idle-upgrade backoff already stretches the cadence). Over a ~70
+// minute leg that is ~1,500 points before the suite's own calls are counted,
+// which is what put the off leg into the engine's 20% backoff and invalidated
+// it. Halving the cadence halves that share.
+//
+// Passed as a flag, not left to FABRIK_POLL in the bed's .env: the flag is
+// visible in `ps`, travels with the repo rather than with one machine's
+// untracked .env, and cannot be silently lost when the bed is re-provisioned.
+// cmd/root.go only consults FABRIK_POLL when -poll is still at its default, so
+// an explicit flag deliberately wins over the .env.
+//
+// Override with E2E_BED_POLL_SECONDS, mirroring E2E_POLL_INTERVAL's convention
+// — e.g. to restore the 30s cadence for a single scenario in isolation, where
+// budget is not a constraint and detection latency matters more.
+const defaultBedPollSeconds = "60"
+
+func bedPollSeconds() string {
+	if s := os.Getenv("E2E_BED_POLL_SECONDS"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 {
+			return s
+		}
+	}
+	return defaultBedPollSeconds
+}
+
 // StartFabrikTestBed launches a fresh detached bed from the bed's own binary and
 // waits for it to acquire the lock. No-op if already running.
 func StartFabrikTestBed(t *testing.T, env *Env) {
@@ -165,7 +197,7 @@ func StartFabrikTestBed(t *testing.T, env *Env) {
 		t.Fatalf("bed binary not found at %s: %v", bin, err)
 	}
 
-	cmd := exec.Command(bin, "-notui")
+	cmd := exec.Command(bin, "-notui", "-poll", bedPollSeconds())
 	cmd.Dir = env.FabrikTestDir
 	// Strip GITHUB_TOKEN so Fabrik uses FABRIK_TOKEN (@arbeithand) from the bed's
 	// .env — an ambient token must not hijack the bed's identity.
