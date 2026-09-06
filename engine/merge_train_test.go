@@ -3971,6 +3971,88 @@ func TestFinishSingletonFastPathLanding_NonDefaultBase_ClosesIssue(t *testing.T)
 	}
 }
 
+// TestFinishSingletonFastPathLanding_PostsLandedComment guards the fast path's
+// share of #1275's audit trail: every other landing path posts a "Landed ..."
+// comment on the member's own PR naming the mechanism that merged it, and the
+// fast path shipped (#1644) without one — so it landed silently, leaving the
+// member PR merged with no member-scoped record of why.
+//
+// The assertions are on the comment's identifying content, not merely on some
+// comment existing: it must name the fast path (so the mechanism is
+// distinguishable from the batch and one-at-a-time paths, which is the whole
+// point of the record) and must cite the member's own PR number in the shared
+// "PR #<n>." shape the other two paths use, since that is what makes the
+// landing PR machine-resolvable from the comment.
+func TestFinishSingletonFastPathLanding_PostsLandedComment(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+
+	client := &mockGitHubClient{}
+	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, wm)
+	state := &mergeTrainWorkerState{projectID: "PVT_test"}
+	p := trialParams{owner: "owner", repo: "repo", baseBranch: "main", baseSHA: "base-sha", wm: wm, holdingStg: holdingStage(eng.cfg)}
+	m := trainMember{
+		item:  gh.ProjectItem{Number: 7, Title: "Issue Seven", ItemID: "item-7", Repo: "owner/repo", Status: "Queued"},
+		prNum: 70,
+	}
+
+	eng.finishSingletonFastPathLanding(state, p, m)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+
+	var landed *addCommentCall
+	for i := range client.addCommentCalls {
+		if strings.Contains(client.addCommentCalls[i].body, "Fabrik merge-train") &&
+			strings.Contains(client.addCommentCalls[i].body, "Landed") {
+			landed = &client.addCommentCalls[i]
+		}
+	}
+	if landed == nil {
+		t.Fatalf("expected a landed comment on the member's PR, got %d comments: %+v", len(client.addCommentCalls), client.addCommentCalls)
+	}
+	if landed.issueNumber != 70 {
+		t.Errorf("landed comment posted on #%d, want the member's own PR #70", landed.issueNumber)
+	}
+	if !strings.Contains(landed.body, "Landed via singleton fast path PR #70.") {
+		t.Errorf("landed comment does not name the fast path and cite PR #70 in the shared \"PR #<n>.\" shape; got: %q", landed.body)
+	}
+}
+
+// TestFinishSingletonFastPathLanding_AlreadyVerified_SkipsDuplicateComment is
+// the idempotency half of the above. Unlike landSingleton/landMergeTrainBatch,
+// which close the member's PR immediately after commenting and so can never be
+// re-entered for the same member, the fast path leaves the PR to GitHub's own
+// merge-close — so a member can legitimately re-enter it while still Queued
+// (the pr.Merged restart branch, or a retry after a failed advance). Without a
+// guard that reposts the landed comment every poll.
+func TestFinishSingletonFastPathLanding_AlreadyVerified_SkipsDuplicateComment(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+
+	client := &mockGitHubClient{}
+	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, wm)
+	state := &mergeTrainWorkerState{projectID: "PVT_test"}
+	p := trialParams{owner: "owner", repo: "repo", baseBranch: "main", baseSHA: "base-sha", wm: wm, holdingStg: holdingStage(eng.cfg)}
+	m := trainMember{
+		item: gh.ProjectItem{
+			Number: 8, Title: "Issue Eight", ItemID: "item-8", Repo: "owner/repo", Status: "Done",
+			Labels: []string{awaitingLandingVerificationLabel},
+		},
+		prNum: 80,
+	}
+
+	eng.finishSingletonFastPathLanding(state, p, m)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	for _, c := range client.addCommentCalls {
+		if strings.Contains(c.body, "Landed via singleton fast path") {
+			t.Fatalf("landed comment reposted on a member already carrying %s: %q", awaitingLandingVerificationLabel, c.body)
+		}
+	}
+}
+
 // TestMergeTrainWorker_SingletonWithPendingReviewEject_EjectsInsteadOfFastPath
 // guards against a gap found in review: applyPendingReviewEjects (#1208) was
 // historically consumed only at three checkpoints, all downstream of

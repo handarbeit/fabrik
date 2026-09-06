@@ -1686,6 +1686,35 @@ func (e *Engine) singletonFastPathEligible(p trialParams, m trainMember, pr *gh.
 // why that label exists only for merge-train's other two landing paths, whose
 // credited PR is never the member's own).
 func (e *Engine) finishSingletonFastPathLanding(state *mergeTrainWorkerState, p trialParams, m trainMember) {
+	// Record the landing on the member's PR, as every other landing path does
+	// (landMergeTrainBatch, landSingleton). Without this the fast path lands
+	// silently: the PR merges with no member-scoped explanation of which
+	// mechanism merged it or why, which is the one audit-trail record #1275
+	// calls "the sole cross-landing-path, member-scoped record of which
+	// integration/singleton PR actually landed the change".
+	//
+	// The wording deliberately differs from the other two paths: here the
+	// landing PR IS the member's own PR, so it says so explicitly rather than
+	// naming a separate integration/singleton PR that does not exist. Anything
+	// reading these comments must therefore treat "landing PR == member PR" as
+	// legitimate for this path — it is the fast path working as designed
+	// (ADR-1644), not the direct-merge regression that shape would indicate
+	// under the trial paths.
+	// Guarded on awaitingLandingVerificationLabel — unlike landSingleton/
+	// landMergeTrainBatch, which close the member's PR immediately after
+	// commenting and so can never re-enter, this path leaves the PR to
+	// GitHub's own merge-close and can legitimately be re-entered while the
+	// member is still Queued (the pr.Merged restart branch, and a retry after
+	// a failed advance). The label is applied on every path that records a
+	// completed landing, so its presence means the comment already posted.
+	if m.prNum != 0 && !hasLabel(m.item.Labels, awaitingLandingVerificationLabel) {
+		landedComment := fmt.Sprintf("🏭 **Fabrik merge-train** — Landed via singleton fast path PR #%d. "+
+			"That is this PR: the pinned base was already an ancestor of this head, this PR was mergeable, "+
+			"and its own CI was green and complete, so it was landed directly — no trial branch was "+
+			"assembled and no separate integration PR exists. See ADR-1644.", m.prNum)
+		e.addLandedCommentWithRetry(p.owner, p.repo, m.item.Number, m.prNum, landedComment)
+	}
+
 	if m.item.Status != "Done" {
 		var advErr error
 		if e.statusField == nil {

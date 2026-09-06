@@ -343,12 +343,19 @@ func waitForPRClosed(t *testing.T, env *Env, repo string, prNumber int, timeout 
 	}
 }
 
-// landedPRPattern matches the engine-posted "landed" comment both landing
-// paths post on the member's OWN PR (engine/merge_train.go: landSingleton's
-// "Landed one-at-a-time via singleton PR #%d." and landMergeTrainBatch's
-// "Landed via batch PR #%d."), capturing the distinct integration/singleton
-// PR number the change actually landed through.
-var landedPRPattern = regexp.MustCompile(`Landed (?:via batch|one-at-a-time via singleton) PR #(\d+)\.`)
+// landedPRPattern matches the engine-posted "landed" comment every landing
+// path posts on the member's OWN PR (engine/merge_train.go: landSingleton's
+// "Landed one-at-a-time via singleton PR #%d.", landMergeTrainBatch's "Landed
+// via batch PR #%d.", and finishSingletonFastPathLanding's "Landed via
+// singleton fast path PR #%d."), capturing the PR number the change actually
+// landed through.
+//
+// For the first two that number is a DISTINCT integration/singleton PR. For
+// the fast path (#1644) it is the member's own PR, because that path lands the
+// member PR directly rather than minting a landing PR — so callers comparing
+// the captured number against the member PR must treat equality as legitimate
+// there. See waitForLandingPRNumber's contract below.
+var landedPRPattern = regexp.MustCompile(`Landed (?:via batch|one-at-a-time via singleton|via singleton fast path) PR #(\d+)\.`)
 
 // waitForLandingPRNumber polls the member's own PR comments (memberPRNum) for
 // the engine's "landed via ..." comment and returns the distinct
@@ -378,7 +385,22 @@ var landedPRPattern = regexp.MustCompile(`Landed (?:via batch|one-at-a-time via 
 // %s" (engine/merge_train.go:1786, repo-only — ambiguous under concurrent
 // merge-train activity), even though landSingleton's own log line happens to
 // be ("merged singleton landing PR #%d for #%d", engine/merge_train.go:796).
+// waitForLandingPRNumber returns just the landing PR number, for callers that
+// do not need to distinguish which landing path posted the comment. Callers
+// that assert on the landing PR being DISTINCT from the member's own PR must
+// use waitForLandingPRDetail instead: that invariant does not hold for the
+// singleton fast path (#1644), where the member's own PR legitimately is the
+// landing PR.
 func waitForLandingPRNumber(t *testing.T, env *Env, repo string, memberPRNum int, timeout time.Duration) int {
+	t.Helper()
+	n, _ := waitForLandingPRDetail(t, env, repo, memberPRNum, timeout)
+	return n
+}
+
+// waitForLandingPRDetail is waitForLandingPRNumber plus the path indicator:
+// viaFastPath reports whether the comment found was the singleton fast path's
+// (#1644), in which case the returned PR number IS memberPRNum by design.
+func waitForLandingPRDetail(t *testing.T, env *Env, repo string, memberPRNum int, timeout time.Duration) (landingPR int, viaFastPath bool) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for {
@@ -390,15 +412,17 @@ func waitForLandingPRNumber(t *testing.T, env *Env, repo string, memberPRNum int
 			// authoritative — landing PR number, not a stale one from an
 			// earlier partial run.
 			found := 0
+			fast := false
 			for _, b := range bodies {
 				if m := landedPRPattern.FindStringSubmatch(b); m != nil {
 					if n, aerr := strconv.Atoi(m[1]); aerr == nil && n > 0 {
 						found = n
+						fast = strings.Contains(m[0], "via singleton fast path")
 					}
 				}
 			}
 			if found > 0 {
-				return found
+				return found, fast
 			}
 		} else {
 			t.Logf("waitForLandingPRNumber: transient error reading PR #%d comments on %s: %v (will retry)", memberPRNum, repo, err)
