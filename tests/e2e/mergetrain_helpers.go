@@ -328,8 +328,7 @@ func waitForPRClosed(t *testing.T, env *Env, repo string, prNumber int, timeout 
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for {
-		out, err := ghOutput(env, "pr", "view", fmt.Sprint(prNumber), "-R", repo,
-			"--json", "state", "--jq", ".state")
+		out, err := restPRState(env, repo, prNumber)
 		if err == nil {
 			switch strings.TrimSpace(out) {
 			case "CLOSED", "MERGED":
@@ -440,8 +439,7 @@ func waitForLandingPRDetail(t *testing.T, env *Env, repo string, memberPRNum int
 // assertPRMerged fails unless the PR is in the MERGED state.
 func assertPRMerged(t *testing.T, env *Env, repo string, prNumber int) {
 	t.Helper()
-	out, err := ghOutput(env, "pr", "view", fmt.Sprint(prNumber), "-R", repo,
-		"--json", "state", "--jq", ".state")
+	out, err := restPRState(env, repo, prNumber)
 	if err != nil {
 		t.Fatalf("could not read state of integration PR #%d: %v\n%s", prNumber, err, out)
 	}

@@ -350,13 +350,10 @@ func WaitForIssueLabel(t *testing.T, env *Env, repo string, issueNumber int, lab
 // IssueLabels returns the current labels on the issue.
 func IssueLabels(t *testing.T, env *Env, repo string, issueNumber int) []string {
 	t.Helper()
-	out, err := ghOutput(env, "issue", "view", fmt.Sprint(issueNumber), "-R", repo,
-		"--json", "labels", "--jq", "[.labels[].name]")
+	labels, err := restIssueLabels(env, repo, issueNumber)
 	if err != nil {
 		t.Fatalf("read labels for %s#%d: %v", repo, issueNumber, err)
 	}
-	var labels []string
-	_ = json.Unmarshal([]byte(strings.TrimSpace(out)), &labels)
 	return labels
 }
 
@@ -593,25 +590,12 @@ func WaitForLabelAbsent(t *testing.T, env *Env, repo string, issueNumber int, la
 // instead of t.Fatalf'ing. Used by long-running pollers so a single transient
 // gh failure doesn't kill an otherwise-healthy multi-minute wait.
 func tryIssueState(env *Env, repo string, issueNumber int) (string, error) {
-	out, err := ghOutput(env, "issue", "view", fmt.Sprint(issueNumber), "-R", repo, "--json", "state", "--jq", ".state")
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(out), nil
+	return restIssueState(env, repo, issueNumber)
 }
 
 // tryIssueLabels is the non-fatal counterpart to IssueLabels.
 func tryIssueLabels(env *Env, repo string, issueNumber int) ([]string, error) {
-	out, err := ghOutput(env, "issue", "view", fmt.Sprint(issueNumber), "-R", repo,
-		"--json", "labels", "--jq", "[.labels[].name]")
-	if err != nil {
-		return nil, err
-	}
-	var labels []string
-	if uerr := json.Unmarshal([]byte(strings.TrimSpace(out)), &labels); uerr != nil {
-		return nil, fmt.Errorf("parse labels: %w", uerr)
-	}
-	return labels, nil
+	return restIssueLabels(env, repo, issueNumber)
 }
 
 // AssertLabelWasApplied queries the issue's timeline events and asserts the
@@ -758,8 +742,7 @@ func CreateThrowawayBaseBranch(t *testing.T, env *Env, repo, branchName string) 
 // to the repo default.
 func PRBaseRef(t *testing.T, env *Env, repo string, prNumber int) string {
 	t.Helper()
-	out, err := ghOutput(env, "pr", "view", fmt.Sprint(prNumber), "-R", repo,
-		"--json", "baseRefName", "--jq", ".baseRefName")
+	out, err := restPRField(env, repo, prNumber, ".base.ref")
 	if err != nil {
 		t.Fatalf("read base ref of PR #%d in %s: %v\n%s", prNumber, repo, err, out)
 	}
@@ -777,7 +760,7 @@ func mapKeys(m map[string]bool) []string {
 // IssueState returns "OPEN" or "CLOSED".
 func IssueState(t *testing.T, env *Env, repo string, issueNumber int) string {
 	t.Helper()
-	out, err := ghOutput(env, "issue", "view", fmt.Sprint(issueNumber), "-R", repo, "--json", "state", "--jq", ".state")
+	out, err := restIssueState(env, repo, issueNumber)
 	if err != nil {
 		t.Fatalf("read state for %s#%d: %v", repo, issueNumber, err)
 	}
@@ -1127,6 +1110,95 @@ func ghOutput(env *Env, args ...string) (string, error) {
 	cmd.Env = append(os.Environ(), "GH_TOKEN="+env.GHToken)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
+}
+
+// ---------------------------------------------------------------------------
+// REST read helpers (#1695)
+//
+// `gh issue view`, `gh pr view`, `gh issue list` and `gh pr list` are served by
+// GitHub's GraphQL API and cost ~1 GraphQL point per call. `gh api <path>` is
+// REST, which has its own separate 5,000/hour bucket that these runs leave
+// almost entirely idle. Measured on the bed's token, 10 calls each:
+//
+//   gh issue view --json labels        -> ~10 GraphQL points
+//   gh api repos/{o}/{r}/issues/{n}    ->   0 GraphQL points
+//
+// The suite and the bed engine share the one GraphQL budget, and the engine
+// cannot be moved off it (ProjectV2 and much of its work is GraphQL-only). The
+// suite's polling loops can be, and they are the larger share: ~20 scenarios
+// each polling labels every 30-60s across a ~70 minute leg is thousands of
+// points spent on reads REST serves for free. That is what pushed the v0.0.82
+// off leg into the engine's own rate-limit backoff.
+//
+// These helpers exist so the gh-vs-REST field-shape differences are handled
+// once. They are NOT cosmetic — each was verified against live data, and two
+// of them are outright traps:
+//
+//	gh --json field   REST equivalent                               verified
+//	state (issue)     .state, uppercased        CLOSED vs closed    yes
+//	state (PR)        .merged ? MERGED : upper  REST /pulls .state  yes
+//	                  never reports MERGED — merged-ness is a
+//	                  separate boolean, so a naive .state mapping
+//	                  makes every merge assertion silently wrong
+//	baseRefName       .base.ref                                     yes
+//	headRefName       .head.ref                                     yes
+//	author.login      .user.login                                   yes
+//	isDraft           .draft                                        yes
+//	createdAt         .created_at                                   yes
+//	labels[].name     labels[].name             (identical)         yes
+//
+// tryPRComments already used REST before this change and is the precedent.
+// ---------------------------------------------------------------------------
+
+// restIssueState returns the issue's state in gh's uppercase form (OPEN/CLOSED).
+func restIssueState(env *Env, repo string, issueNumber int) (string, error) {
+	owner, name, ok := splitRepo(repo)
+	if !ok {
+		return "", fmt.Errorf("bad repo: %q", repo)
+	}
+	out, err := ghOutput(env, "api", fmt.Sprintf("repos/%s/%s/issues/%d", owner, name, issueNumber),
+		"--jq", ".state | ascii_upcase")
+	return strings.TrimSpace(out), err
+}
+
+// restIssueLabels returns the issue's label names.
+func restIssueLabels(env *Env, repo string, issueNumber int) ([]string, error) {
+	owner, name, ok := splitRepo(repo)
+	if !ok {
+		return nil, fmt.Errorf("bad repo: %q", repo)
+	}
+	out, err := ghOutput(env, "api", fmt.Sprintf("repos/%s/%s/issues/%d", owner, name, issueNumber),
+		"--jq", "[.labels[].name]")
+	if err != nil {
+		return nil, fmt.Errorf("%v: %s", err, strings.TrimSpace(out))
+	}
+	var labels []string
+	if uerr := json.Unmarshal([]byte(strings.TrimSpace(out)), &labels); uerr != nil {
+		return nil, fmt.Errorf("parse labels: %w", uerr)
+	}
+	return labels, nil
+}
+
+// restPRState returns the PR's state in gh's form: OPEN, CLOSED, or MERGED.
+// REST's own .state is only open/closed — see the trap note above.
+func restPRState(env *Env, repo string, prNumber int) (string, error) {
+	owner, name, ok := splitRepo(repo)
+	if !ok {
+		return "", fmt.Errorf("bad repo: %q", repo)
+	}
+	out, err := ghOutput(env, "api", fmt.Sprintf("repos/%s/%s/pulls/%d", owner, name, prNumber),
+		"--jq", `if .merged then "MERGED" else (.state | ascii_upcase) end`)
+	return strings.TrimSpace(out), err
+}
+
+// restPRField returns a single jq-selected field from the PR's REST object.
+func restPRField(env *Env, repo string, prNumber int, jq string) (string, error) {
+	owner, name, ok := splitRepo(repo)
+	if !ok {
+		return "", fmt.Errorf("bad repo: %q", repo)
+	}
+	out, err := ghOutput(env, "api", fmt.Sprintf("repos/%s/%s/pulls/%d", owner, name, prNumber), "--jq", jq)
+	return strings.TrimSpace(out), err
 }
 
 func lastNonEmpty(s string) string {
@@ -2020,7 +2092,7 @@ func AssertPRAuthorIsExpectedIdentity(t *testing.T, env *Env, repo string, prNum
 	if !ok {
 		t.Fatalf("bad repo: %q", repo)
 	}
-	out, err := ghOutput(env, "pr", "view", fmt.Sprint(prNumber), "-R", repo, "--json", "author", "--jq", ".author.login")
+	out, err := restPRField(env, repo, prNumber, ".user.login")
 	if err != nil {
 		t.Fatalf("read author of %s/%s PR #%d: %v\n%s", owner, name, prNumber, err, out)
 	}
