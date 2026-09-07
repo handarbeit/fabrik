@@ -262,11 +262,12 @@
 # present as a pass just as easily as a fail — and short-circuits any
 # remaining legs immediately (exit, not return).
 #
-# This is a log-scrape, not a live `gh api rate_limit` polling loop: it needs
-# zero new API calls against the very budget being protected, and the log
-# line already fires at the moment of interest. Each leg is also bracketed
-# with a `gh api rate_limit` call before/after (a REST metadata call, free
-# against the GraphQL budget), scoped to the bed's own FABRIK_TOKEN (read
+# This is a log-scrape, not a live budget-polling loop: it needs zero new API
+# calls against the very budget being protected, and the log line already
+# fires at the moment of interest. Each leg is also bracketed with a
+# graphql_budget_remaining call before/after (an inline `rateLimit` query
+# costing 1 point each — see that function for why the REST endpoint cannot
+# be used despite being free), scoped to the bed's own FABRIK_TOKEN (read
 # from $TEST_BED/.env into $BED_TOKEN, mirroring reset.sh's gh_() token-
 # scoping precedent — the ambient `gh` CLI's own auth is very likely a
 # different identity than the bed's @arbeithand token and would silently
@@ -1079,8 +1080,14 @@ preflight_bed_start() {
 
   # No --auto-upgrade: it would replace this freshly built binary with a
   # release mid-suite (README item 17).
-  echo "== preflight: starting bed instance (-notui, no --auto-upgrade) =="
-  ( cd "$TEST_BED" && nohup ./fabrik -notui > "$TEST_BED/bed-run.log" 2>&1 & )
+  #
+  # -poll is passed explicitly, matching StartFabrikTestBed's own launch (see
+  # defaultBedPollSeconds in tests/e2e/lifecycle.go for the measured budget
+  # rationale). Both launch sites must agree: switch_and_run restarts the bed
+  # through the Go path on every mode switch, so a cadence set only here would
+  # be silently reverted for the legs that actually matter.
+  echo "== preflight: starting bed instance (-notui -poll ${BED_POLL_SECONDS}s, no --auto-upgrade) =="
+  ( cd "$TEST_BED" && nohup ./fabrik -notui -poll "$BED_POLL_SECONDS" > "$TEST_BED/bed-run.log" 2>&1 & )
 
   # The startup banner goes to the engine's STDOUT (captured in bed-run.log),
   # while ENGINE_LOG holds the structured per-item log — which never contains
@@ -1155,11 +1162,43 @@ PARALLEL="${E2E_PARALLEL:-4}"
 # header comment's "on"-leg-specific parallelism cap section (#1527).
 PARALLEL_ON="${E2E_PARALLEL_ON:-2}"
 
-# Timeout for the ancillary `gh api rate_limit` budget-report calls (R1,
-# #1676) — see with_timeout's own comment above. These are lightweight REST
-# metadata calls (see "GraphQL budget exhaustion detection" above), so 30s is
-# generous, not tight; override with E2E_GH_API_TIMEOUT.
+# Timeout for the ancillary budget-report calls (R1, #1676) — see
+# with_timeout's own comment above. These are single lightweight GraphQL
+# queries (see graphql_budget_remaining below), so 30s is generous, not
+# tight; override with E2E_GH_API_TIMEOUT.
 GH_API_TIMEOUT="${E2E_GH_API_TIMEOUT:-30}"
+
+# Bed engine poll cadence, passed as -poll to both launch sites. Kept in sync
+# with defaultBedPollSeconds in tests/e2e/lifecycle.go, which carries the
+# measured budget rationale and honours the same E2E_BED_POLL_SECONDS override.
+BED_POLL_SECONDS="${E2E_BED_POLL_SECONDS:-60}"
+
+# graphql_budget_remaining prints the caller-scoped token's actual remaining
+# GraphQL budget, via GraphQL's own inline `rateLimit` field.
+#
+# It does NOT use `gh api rate_limit` (the REST endpoint), which this script
+# used until it was measured: for the bed's token that endpoint reports a
+# permanently full bucket. Observed 2026-09-06, same token, seconds apart:
+#
+#   inline rateLimit : 4248 remaining, reset 15:44   (5 board queries -> 4243)
+#   REST rate_limit  : 5000 remaining, reset 16:33   (5 board queries -> 5000)
+#
+# The REST figure never moved. Every "GraphQL budget (leg: X): 5000 -> 5000
+# remaining (consumed 0 pts)" line this script has ever printed was that dead
+# gauge, including for legs that demonstrably burned thousands of points and
+# for the off leg of the v0.0.82 gate, which tripped the engine's own 20%
+# backoff while this probe was still reporting a full bucket. A budget report
+# that cannot go down is worse than no report: it was read as evidence of
+# headroom before launching runs that then exhausted the budget.
+#
+# The inline query costs 1 point per call (2 per leg, before + after). That
+# is the price of the report being true, and is negligible against a leg.
+# Takes the token as $1 and scopes GH_TOKEN itself, rather than being wrapped
+# in `env GH_TOKEN=... `: `env` execs a binary and cannot invoke a shell
+# function. (with_timeout runs "$@" & in-shell, so it invokes this fine.)
+graphql_budget_remaining() {
+  GH_TOKEN="$1" gh api graphql -f query='query { rateLimit { remaining } }' --jq '.data.rateLimit.remaining'
+}
 
 # Window for R2's post-suite watchdog (#1676) — see switch_and_run's own
 # comment for the full mechanism. Everything the watchdog covers (draining
@@ -1531,7 +1570,7 @@ switch_and_run() {
     local budget_before_tmp budget_before_err
     budget_before_tmp="$(mktemp)"
     budget_before_err="$(mktemp)"
-    if with_timeout "$GH_API_TIMEOUT" env "GH_TOKEN=$BED_TOKEN" gh api rate_limit --jq '.resources.graphql.remaining' \
+    if with_timeout "$GH_API_TIMEOUT" graphql_budget_remaining "$BED_TOKEN" \
         > "$budget_before_tmp" 2>"$budget_before_err"; then
       budget_before="$(cat "$budget_before_tmp" 2>/dev/null || echo "")"
     else
@@ -1737,7 +1776,7 @@ switch_and_run() {
     local budget_after_tmp budget_after_err
     budget_after_tmp="$(mktemp)"
     budget_after_err="$(mktemp)"
-    if with_timeout "$GH_API_TIMEOUT" env "GH_TOKEN=$BED_TOKEN" gh api rate_limit --jq '.resources.graphql.remaining' \
+    if with_timeout "$GH_API_TIMEOUT" graphql_budget_remaining "$BED_TOKEN" \
         > "$budget_after_tmp" 2>"$budget_after_err"; then
       budget_after="$(cat "$budget_after_tmp" 2>/dev/null || echo "")"
     else

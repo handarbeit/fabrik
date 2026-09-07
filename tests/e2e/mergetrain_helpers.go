@@ -288,10 +288,23 @@ func WaitForIssueComment(t *testing.T, env *Env, repo string, issueNumber int, s
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for {
-		out, err := ghOutput(env, "issue", "view", fmt.Sprint(issueNumber), "-R", repo,
-			"--json", "comments", "--jq", ".comments[].body")
-		if err == nil && strings.Contains(out, substring) {
-			return
+		// REST, via tryPRComments: GitHub numbers issues and PRs in one space
+		// and serves both from repos/{o}/{r}/issues/{n}/comments, so this is
+		// the same endpoint for an issue as for a PR despite the helper's
+		// name. Verified against live issues (not PRs) with comments: bodies
+		// identical to `gh issue view --json comments`.
+		//
+		// This loop is why it matters: 10s interval for up to 25 minutes in
+		// mergetrain_bisect_test.go is ~150 GraphQL points per use on the old
+		// path (found in review — it was missed in the first pass, not
+		// deliberately left).
+		bodies, err := tryPRComments(env, repo, issueNumber)
+		if err == nil {
+			for _, b := range bodies {
+				if strings.Contains(b, substring) {
+					return
+				}
+			}
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("timed out waiting for comment containing %q on %s#%d", substring, repo, issueNumber)
@@ -328,8 +341,7 @@ func waitForPRClosed(t *testing.T, env *Env, repo string, prNumber int, timeout 
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for {
-		out, err := ghOutput(env, "pr", "view", fmt.Sprint(prNumber), "-R", repo,
-			"--json", "state", "--jq", ".state")
+		out, err := restPRState(env, repo, prNumber)
 		if err == nil {
 			switch strings.TrimSpace(out) {
 			case "CLOSED", "MERGED":
@@ -440,8 +452,7 @@ func waitForLandingPRDetail(t *testing.T, env *Env, repo string, memberPRNum int
 // assertPRMerged fails unless the PR is in the MERGED state.
 func assertPRMerged(t *testing.T, env *Env, repo string, prNumber int) {
 	t.Helper()
-	out, err := ghOutput(env, "pr", "view", fmt.Sprint(prNumber), "-R", repo,
-		"--json", "state", "--jq", ".state")
+	out, err := restPRState(env, repo, prNumber)
 	if err != nil {
 		t.Fatalf("could not read state of integration PR #%d: %v\n%s", prNumber, err, out)
 	}
