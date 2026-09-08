@@ -413,9 +413,15 @@ mkfifo "$drain_fifo"
 { tee "$drain_json" >/dev/null; } < "$drain_fifo" &
 drain_consumer=$!
 exec 4> "$drain_fifo"
+drain_holder_pidfile="$drain_dir/holder.pid"
 (
   echo '{"Action":"output","Output":"hello"}' >&4
   ( sleep 60 ) >&4 2>/dev/null &     # the "bed": outlives go test holding fd 4
+  # Record it: this is a GRANDchild, reparented the moment its parent subshell
+  # exits, so neither this case's own cleanup nor the trailing `pkill -P $$`
+  # can reach it by process tree. Without the pidfile it lingers as an orphan
+  # for the full 60s after the script finishes (found in review).
+  echo $! > "$drain_holder_pidfile"
 ) &
 drain_suite=$!
 exec 4>&-
@@ -454,6 +460,9 @@ fi
 # #1694 hung the gate — turning a legible FAIL into an unexplained stall.
 kill -TERM "$drain_consumer" 2>/dev/null || true
 wait "$drain_consumer" 2>/dev/null || true
+# Read the pidfile BEFORE rm -rf takes the directory with it.
+drain_holder="$(cat "$drain_holder_pidfile" 2>/dev/null || echo "")"
+[ -n "$drain_holder" ] && kill -TERM "$drain_holder" 2>/dev/null
 pkill -P $$ >/dev/null 2>&1 || true
 rm -rf "$drain_dir"
 
