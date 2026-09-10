@@ -946,6 +946,11 @@ run_pregate() {
 # ---------------------------------------------------------------------------
 preflight_bed() {
   local ref="${E2E_BED_REF:-origin/main}"
+  # $ref is always fully-qualified as origin/<name> (see header comment above
+  # and both E2E_BED_REF doc blocks) — strip only the literal "origin/"
+  # prefix, not the last path segment, since branch names can themselves
+  # contain slashes (e.g. "fabrik/my-branch").
+  local ref_name="${ref#origin/}"
 
   echo "== preflight: bed at $TEST_BED, target ref $ref =="
 
@@ -969,12 +974,19 @@ preflight_bed() {
 
   # Wrapped, not bare: under `set -e` a bare fetch aborts the script with git's
   # own exit code (128) and git's own message, so the run looks like it died of
-  # nothing in particular. The most common cause is an SSH key that is not
-  # loaded or no longer accepted, which reads as "Permission denied
-  # (publickey)" with no indication it came from the bed preflight.
-  if ! ( cd "$TEST_BED" && git fetch origin --quiet ); then
+  # nothing in particular. Fetch with an explicit destination refspec
+  # (<name>:refs/remotes/origin/<name>) rather than a bare `git fetch origin` —
+  # the bed checkout is a single-branch clone (fetch refspec
+  # +refs/heads/main:refs/remotes/origin/main), so a bare fetch only ever
+  # updates origin/main and silently fails to resolve any other ref. An
+  # explicit destination writes to that ref regardless of the remote's
+  # configured refspec, and for the default ref (origin/main) this is a
+  # harmless, byte-for-byte equivalent of the old bare fetch.
+  if ! ( cd "$TEST_BED" && git fetch origin --quiet "$ref_name:refs/remotes/origin/$ref_name" ); then
     echo "preflight: git fetch failed in $TEST_BED — cannot resolve $ref." >&2
-    echo "  Most likely the SSH key for the remote is not loaded: try 'ssh-add' (see 'ssh-add -l')." >&2
+    echo "  Two likely causes:" >&2
+    echo "  - The SSH key for the remote is not loaded: try 'ssh-add' (see 'ssh-add -l')." >&2
+    echo "  - '$ref_name' does not exist on origin (e.g. not pushed, or misspelled)." >&2
     echo "  The bed is untouched; nothing was stopped, rebuilt, or reset." >&2
     exit "$PREFLIGHT_FAILED_EXIT"
   fi
