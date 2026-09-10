@@ -981,8 +981,13 @@ preflight_bed() {
   # updates origin/main and silently fails to resolve any other ref. An
   # explicit destination writes to that ref regardless of the remote's
   # configured refspec, and for the default ref (origin/main) this is a
-  # harmless, byte-for-byte equivalent of the old bare fetch.
-  if ! ( cd "$TEST_BED" && git fetch origin --quiet "$ref_name:refs/remotes/origin/$ref_name" ); then
+  # harmless, byte-for-byte equivalent of the old bare fetch. The leading `+`
+  # is load-bearing, not decorative: without it, fetch refuses a non-fast-forward
+  # update, whereas the remote's own configured refspec (above) is `+`-prefixed
+  # and would force-update — so a rebased/force-pushed upstream ref (main or a
+  # feature branch) would fail here instead of updating as it did before this
+  # fix (caught in review, see PR #1700).
+  if ! ( cd "$TEST_BED" && git fetch origin --quiet "+$ref_name:refs/remotes/origin/$ref_name" ); then
     echo "preflight: git fetch failed in $TEST_BED — cannot resolve $ref." >&2
     echo "  Two likely causes:" >&2
     echo "  - The SSH key for the remote is not loaded: try 'ssh-add' (see 'ssh-add -l')." >&2

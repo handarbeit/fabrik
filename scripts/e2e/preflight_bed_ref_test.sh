@@ -121,6 +121,29 @@ OUTPUT="$( ( E2E_BED_REF=origin/feature E2E_BED_NO_BUILD=1 preflight_bed ) 2>&1 
 assert_contains "never-fetched branch resolves to its short SHA" "$OUTPUT" "$FEATURE_SHORT"
 assert_not_contains "never-fetched branch: no fetch-failure message" "$OUTPUT" "git fetch failed in"
 
+# --- Scenario (review finding, PR #1700): a ref the bed already fetched once
+# gets rewritten upstream (rebase/force-push) — the destination-refspec fetch
+# must still succeed. This requires the leading `+` (force) marker on the
+# refspec: the remote's own configured single-branch refspec is
+# `+refs/heads/main:refs/remotes/origin/main`, and without matching that with
+# `+` on our explicit destination refspec too, git refuses the update as
+# non-fast-forward (exit 1) — which the wrapping here would then misreport as
+# an SSH-key or nonexistent-ref failure, neither of which is the real cause.
+# "feature" was already fetched into the bed by the scenario above (at
+# FEATURE_SHA); rewrite it on origin to a divergent sibling commit before
+# fetching it again. ---
+git -C "$SEED_DIR" checkout -q feature
+git -C "$SEED_DIR" reset -q --hard HEAD~1
+git -C "$SEED_DIR" commit -q --allow-empty -m "feature commit rewritten"
+git -C "$SEED_DIR" push -q -f origin feature
+git -C "$SEED_DIR" checkout -q main
+FEATURE_REWRITTEN_SHA="$(git -C "$SEED_DIR" rev-parse feature)"
+FEATURE_REWRITTEN_SHORT="${FEATURE_REWRITTEN_SHA:0:7}"
+
+OUTPUT="$( ( E2E_BED_REF=origin/feature E2E_BED_NO_BUILD=1 preflight_bed ) 2>&1 )"
+assert_contains "rewritten (force-pushed) branch still resolves to its new short SHA" "$OUTPUT" "$FEATURE_REWRITTEN_SHORT"
+assert_not_contains "rewritten branch: no fetch-failure message" "$OUTPUT" "git fetch failed in"
+
 # --- Scenario R2 (#1693): a ref that doesn't exist on origin at all fails
 # with a preflight-context message naming the ref and $TEST_BED, exiting via
 # PREFLIGHT_FAILED_EXIT — not git's raw, unwrapped message escaping under
