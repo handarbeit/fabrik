@@ -128,6 +128,19 @@ jobs:
       - name: reviewer-reachable regression test (#1684)
         run: bash scripts/e2e/reviewer_reachable_check_test.sh
 
+      # E2E_BED_REF resolution (scripts/e2e/run.sh's preflight_bed, #1693)
+      # exists so a gate run against a non-main ref actually tests that ref,
+      # instead of silently building the bed from origin/main while go test
+      # ran assertions for the intended ref — a confidently wrong result.
+      # Regression coverage against two scratch git repos (a bare "origin"
+      # and a single-branch "bed" clone matching the real bed's refspec
+      # shape) exercises the fetch/resolve step directly: a never-fetched
+      # branch resolves, a bogus ref fails with a wrapped preflight-context
+      # message (not git's raw error), and the unset-default path (origin/main)
+      # is unaffected. No network, no real ~/dev/fabrik-test involved.
+      - name: preflight_bed ref resolution regression test (#1693)
+        run: bash scripts/e2e/preflight_bed_ref_test.sh
+
       # cut-release.sh's flag parsing — in particular --skip-integration's
       # validation (R2, #1454) — sourced and exercised directly via
       # parse_args(), never reaching main() (the real publish sequence). No
