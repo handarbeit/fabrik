@@ -184,6 +184,34 @@ func bedPollSeconds() string {
 	return defaultBedPollSeconds
 }
 
+// markInheritedFDsCloseOnExec marks every descriptor above stdio close-on-exec,
+// so processes this test spawns from here on do not inherit descriptors this
+// test itself inherited — most importantly run.sh's JSON pipe (see the call
+// site in StartFabrikTestBed for the full #1694 history).
+//
+// Marking a descriptor close-on-exec does not affect this process's own use of
+// it: the flag is consulted only at exec(2). fds we do not own are left
+// readable and writable here and simply stop crossing an exec boundary, which
+// is the correct default for all of them — nothing this suite spawns has any
+// business holding the runner's descriptors.
+//
+// The scan is bounded by RLIMIT_NOFILE (capped, since that can be enormous or
+// unlimited). fcntl on an unopened descriptor returns EBADF, which is the
+// expected result for most of the range and is deliberately ignored — there is
+// no portable way to enumerate only the open ones, and the syscall is cheap.
+func markInheritedFDsCloseOnExec() {
+	max := 4096
+	var rl syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rl); err == nil {
+		if cur := int(rl.Cur); cur > 0 && cur < max {
+			max = cur
+		}
+	}
+	for fd := 3; fd < max; fd++ {
+		syscall.CloseOnExec(fd)
+	}
+}
+
 // StartFabrikTestBed launches a fresh detached bed from the bed's own binary and
 // waits for it to acquire the lock. No-op if already running.
 func StartFabrikTestBed(t *testing.T, env *Env) {
@@ -208,6 +236,28 @@ func StartFabrikTestBed(t *testing.T, env *Env) {
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = devnull, devnull, devnull
 		defer devnull.Close()
 	}
+	// Setting stdio to /dev/null covers fds 0-2 only. Every OTHER descriptor
+	// this test process inherited is still passed to the child: os/exec sets
+	// up ProcAttr.Files and ExtraFiles but does not close arbitrary inherited
+	// fds, and descriptors created by a parent shell are not close-on-exec.
+	//
+	// That leaked scripts/e2e/run.sh's JSON pipe into a daemon designed to
+	// outlive the run, and wedged the gate (#1694). run.sh feeds `go test`'s
+	// output through a FIFO — `exec 3> "$fifo"`, `go test ... >&3`, then
+	// `exec 3>&-` to drop the shell's own copy — and afterwards waits for the
+	// consumer to drain, which requires EOF, which requires every write end to
+	// be closed. `go test` inherits fd 3, the test binary inherits it, and
+	// this detached bed inherited it too and then held it open indefinitely.
+	// Confirmed by lsof against a bed still running hours after its run:
+	//
+	//   fabrik 13897 bpja 3w FIFO ... /tmp.xHMuUtjYKA/fifo
+	//
+	// The consumer therefore never saw EOF, the post-suite wait blocked, and
+	// the #1676 watchdog aborted the script — silently skipping the isolated
+	// runaway-guard leg that should have run next. It only ever bit the "on"
+	// leg because that is where the bed is (re)started from inside a `go test`
+	// invocation rather than by run.sh before the pipe exists.
+	markInheritedFDsCloseOnExec()
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start bed Fabrik (%s): %v", bin, err)
 	}

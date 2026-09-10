@@ -1168,6 +1168,41 @@ PARALLEL_ON="${E2E_PARALLEL_ON:-2}"
 # tight; override with E2E_GH_API_TIMEOUT.
 GH_API_TIMEOUT="${E2E_GH_API_TIMEOUT:-30}"
 
+# How long the post-suite output drain may take before it is abandoned (R1/R2,
+# #1694). Deliberately well under E2E_POST_SUITE_WATCHDOG (300s), so a stuck
+# drain is reported and stepped over by this bound rather than escalating into
+# the watchdog killing the whole script and skipping its remaining legs. A
+# healthy drain finishes in well under a second.
+POST_SUITE_DRAIN_TIMEOUT="${E2E_POST_SUITE_DRAIN_TIMEOUT:-30}"
+
+# drain_output_consumer waits up to $2 seconds for the output consumer ($1) to
+# finish draining, then gives up loudly and terminates it. Returns 0 if it
+# drained on its own, 1 if it had to be abandoned.
+#
+# A FUNCTION, not inline in switch_and_run, specifically so
+# hang_hardening_test.sh can exercise the real implementation against a real
+# wedged consumer. An earlier revision of this fix left it inline and guarded
+# it with a `grep POST_SUITE_DRAIN_TIMEOUT run.sh` check — which passed even
+# with the bound removed, because the string still appeared in the surrounding
+# comment. That is precisely the vacuous-guard shape #1687 was filed about, and
+# it is why this is shaped to be callable.
+drain_output_consumer() {
+  local pid="$1" timeout_secs="$2" mode="${3:-?}"
+  local deadline=$((SECONDS + timeout_secs))
+  while kill -0 "$pid" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ]; do
+    sleep 1
+  done
+  if ! kill -0 "$pid" 2>/dev/null; then
+    return 0
+  fi
+  echo "warning: output consumer did not drain within ${timeout_secs}s after go test exited (leg: ${mode})." >&2
+  echo "         Something that outlived go test is holding the output pipe open — find it with" >&2
+  echo "         'lsof -p <pid> | grep FIFO'. go test has already exited, so its JSON log is" >&2
+  echo "         complete and this leg's results are unaffected; continuing to the next leg." >&2
+  kill -TERM -"$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+  return 1
+}
+
 # Bed engine poll cadence, passed as -poll to both launch sites. Kept in sync
 # with defaultBedPollSeconds in tests/e2e/lifecycle.go, which carries the
 # measured budget rationale and honours the same E2E_BED_POLL_SECONDS override.
@@ -1761,9 +1796,23 @@ switch_and_run() {
   trap '_post_suite_watchdog_signal 130' INT
 
   # Wait for the consumer to drain and finish writing $jsonlog before any of
-  # it is read below — see the comment above. Still under a TERM trap (the
-  # post-suite watchdog's, installed just above), so a stuck drain is still
-  # covered by R2 rather than left unbounded with no signal path.
+  # it is read below — see the comment above.
+  #
+  # BOUNDED, not a bare `wait` (R1/R2, #1694). The consumer only exits on EOF,
+  # which needs every write end of the fifo closed; a descendant of `go test`
+  # that outlives it and inherited fd 3 keeps it open forever. That is exactly
+  # what the detached bed did (fixed at source in tests/e2e/lifecycle.go's
+  # markInheritedFDsCloseOnExec), and a bare `wait` turned it into a wedge: the
+  # post-suite watchdog aborted the whole script, which silently skipped the
+  # remaining legs — on the default gate path, the isolated runaway-guard leg
+  # never ran and nothing said so.
+  #
+  # This is the defence-in-depth half: whatever leaks the descriptor next, the
+  # drain gives up, says so, and lets the run continue to its remaining legs
+  # rather than wedging. go test has already exited by here, so its JSON is
+  # complete on disk even when the consumer is stuck holding the pipe open —
+  # the classification below reads $jsonlog, not the consumer.
+  drain_output_consumer "$consumer_pid" "$POST_SUITE_DRAIN_TIMEOUT" "$mode"
   wait "$consumer_pid" 2>/dev/null || true
 
   echo "gh api rate_limit budget_after probe" > "$watchdog_dir/checkpoint"

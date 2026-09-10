@@ -394,6 +394,101 @@ else
 fi
 rm -f "$probe_err"
 
+# Case 16 (#1694): the post-suite output drain must be BOUNDED, and this guard
+# must exercise run.sh's REAL drain_output_consumer — not a local copy of the
+# pattern, and not a grep for a string that also appears in a comment. The
+# first attempt at this guard did exactly that and passed with the bound
+# removed; see drain_output_consumer's own comment.
+#
+# Mechanism being modelled: the consumer only exits on EOF, which needs every
+# write end of the fifo closed. A descendant of `go test` that outlives it
+# holding fd 3 keeps it open forever — which is what the detached bed did. A
+# bare `wait` then blocks until the post-suite watchdog kills the whole script,
+# silently skipping the remaining legs (on the default gate path, the isolated
+# runaway-guard leg never ran and nothing said so).
+drain_dir="$(mktemp -d)"
+drain_fifo="$drain_dir/fifo"
+drain_json="$drain_dir/out.json"
+mkfifo "$drain_fifo"
+{ tee "$drain_json" >/dev/null; } < "$drain_fifo" &
+drain_consumer=$!
+exec 4> "$drain_fifo"
+drain_holder_pidfile="$drain_dir/holder.pid"
+(
+  echo '{"Action":"output","Output":"hello"}' >&4
+  ( sleep 60 ) >&4 2>/dev/null &     # the "bed": outlives go test holding fd 4
+  # Record it: this is a GRANDchild, reparented the moment its parent subshell
+  # exits, so neither this case's own cleanup nor the trailing `pkill -P $$`
+  # can reach it by process tree. Without the pidfile it lingers as an orphan
+  # for the full 60s after the script finishes (found in review).
+  echo $! > "$drain_holder_pidfile"
+) &
+drain_suite=$!
+exec 4>&-
+wait "$drain_suite" 2>/dev/null || true
+
+# Sanity first: the wedge must actually exist, or this case proves nothing.
+sleep 1
+if ! kill -0 "$drain_consumer" 2>/dev/null; then
+  fail "consumer exited on its own despite a descendant holding the fifo open — this case no longer reproduces #1694's mechanism and would not catch its return"
+else
+  drain_started=$SECONDS
+  # Called under with_timeout so that an UNBOUNDED implementation (the #1694
+  # bug: a bare `wait`) fails this case legibly instead of hanging the whole
+  # test script — verified by neutralization: without the bound this branch
+  # reports rc=124 rather than the suite wedging.
+  with_timeout 15 drain_output_consumer "$drain_consumer" 3 "test" 2>/dev/null
+  drain_rc=$?
+  if [ "$drain_rc" -eq 124 ]; then
+    fail "drain_output_consumer did not return within 15s against a wedged consumer — its bound is not being enforced (this is #1694: a bare wait blocks until the post-suite watchdog kills the script, silently skipping the remaining legs)"
+  elif [ "$drain_rc" -eq 0 ]; then
+    fail "drain_output_consumer reported a clean drain against a deliberately wedged consumer — it is not detecting the wedge"
+  else
+    drain_elapsed=$((SECONDS - drain_started))
+    if [ "$drain_elapsed" -gt 10 ]; then
+      fail "drain_output_consumer took ${drain_elapsed}s against a 3s bound — the bound is not being enforced"
+    elif [ ! -s "$drain_json" ]; then
+      fail "drain abandoned but the JSON log is empty — the premise that a leg's results survive an abandoned drain does not hold"
+    else
+      pass "drain_output_consumer bounds a wedged drain (gave up after ${drain_elapsed}s against a 3s bound) and go test's JSON is already complete ($(wc -c < "$drain_json" | tr -d ' ') bytes) — the leg's results survive"
+    fi
+  fi
+fi
+# Unconditional cleanup: on the failure paths above (an implementation that
+# never bounds, or never abandons) the consumer is still alive and still
+# wedged, so a bare `wait` here would hang this script for the same reason
+# #1694 hung the gate — turning a legible FAIL into an unexplained stall.
+kill -TERM "$drain_consumer" 2>/dev/null || true
+wait "$drain_consumer" 2>/dev/null || true
+# Read the pidfile BEFORE rm -rf takes the directory with it.
+drain_holder="$(cat "$drain_holder_pidfile" 2>/dev/null || echo "")"
+[ -n "$drain_holder" ] && kill -TERM "$drain_holder" 2>/dev/null
+pkill -P $$ >/dev/null 2>&1 || true
+rm -rf "$drain_dir"
+
+# Case 17 (#1694): the healthy path must not be slowed or misreported — a
+# consumer that drains normally returns success, promptly.
+healthy_dir="$(mktemp -d)"
+mkfifo "$healthy_dir/fifo"
+{ tee "$healthy_dir/out.json" >/dev/null; } < "$healthy_dir/fifo" &
+healthy_consumer=$!
+exec 4> "$healthy_dir/fifo"
+echo '{"Action":"output","Output":"bye"}' >&4
+exec 4>&-
+healthy_started=$SECONDS
+if drain_output_consumer "$healthy_consumer" 30 "test"; then
+  healthy_elapsed=$((SECONDS - healthy_started))
+  if [ "$healthy_elapsed" -le 3 ]; then
+    pass "drain_output_consumer returns success promptly (${healthy_elapsed}s) when the consumer drains normally — the bound costs a healthy run nothing"
+  else
+    fail "drain_output_consumer took ${healthy_elapsed}s on a healthy drain — the bound is adding latency to every leg"
+  fi
+else
+  fail "drain_output_consumer reported failure on a consumer that drained normally — a false positive here prints a scary warning on every healthy run"
+fi
+wait "$healthy_consumer" 2>/dev/null || true
+rm -rf "$healthy_dir"
+
 if [ "$FAILED" -ne 0 ]; then
   echo "=== hang_hardening_test.sh: FAILED ==="
   exit 1
