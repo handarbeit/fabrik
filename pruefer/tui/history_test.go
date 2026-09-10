@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -19,7 +20,12 @@ var allSkipReasons = []string{
 	"diff exceeds max_diff_bytes",
 }
 
-func TestHistoryPane_AllSkipReasonsRenderInHistory(t *testing.T) {
+// TestHistoryPane_SkipsAreFilteredButCounted pins #1674 R2. This test replaces
+// an earlier one that asserted every skip reason rendered in the pane — that
+// was the behavior being changed, not a regression: at 15 watched repos the
+// steady state is almost entirely "already reviewed at this head SHA", which
+// evicted the rows that carry information. Skips are now counted, not listed.
+func TestHistoryPane_SkipsAreFilteredButCounted(t *testing.T) {
 	var h HistoryPaneComponent
 	for i, reason := range allSkipReasons {
 		comp, _ := h.Update(ReviewCompletedEvent{
@@ -28,14 +34,40 @@ func TestHistoryPane_AllSkipReasonsRenderInHistory(t *testing.T) {
 		})
 		h = comp.(HistoryPaneComponent)
 	}
+	// Retention is unchanged — the entries are still held and selectable.
 	if h.Count() != len(allSkipReasons) {
 		t.Fatalf("Count() = %d, want %d", h.Count(), len(allSkipReasons))
 	}
+
 	view := h.View(120)
 	for _, reason := range allSkipReasons {
-		if !strings.Contains(view, reason) {
-			t.Errorf("View() does not contain skip reason %q:\n%s", reason, view)
+		if strings.Contains(view, reason) {
+			t.Errorf("View() still lists skip reason %q; skips should be counted, not listed:\n%s", reason, view)
 		}
+	}
+	if want := fmt.Sprintf("%d skipped", len(allSkipReasons)); !strings.Contains(view, want) {
+		t.Errorf("View() does not disclose %q:\n%s", want, view)
+	}
+}
+
+// TestHistoryPane_ErroredSkipIsNeverFiltered guards the trap in R2: an entry
+// carrying an error must survive the skip filter. A failed review is the most
+// important row on this pane, and sweeping it away with the skips is the
+// obvious way to implement the filter wrongly.
+func TestHistoryPane_ErroredSkipIsNeverFiltered(t *testing.T) {
+	var h HistoryPaneComponent
+	comp, _ := h.Update(ReviewCompletedEvent{
+		Repo: "handarbeit/fabrik", PRNumber: 7, Skipped: true, Reason: "draft",
+		Err: "fetching diff: boom", CompletedAt: time.Now(),
+	})
+	h = comp.(HistoryPaneComponent)
+
+	view := h.View(120)
+	if !strings.Contains(view, "fetching diff: boom") {
+		t.Errorf("errored entry was filtered out with the skips:\n%s", view)
+	}
+	if strings.Contains(view, "0 completed") {
+		t.Errorf("errored entry not counted as visible:\n%s", view)
 	}
 }
 
