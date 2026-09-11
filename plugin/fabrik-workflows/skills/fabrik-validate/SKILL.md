@@ -388,17 +388,39 @@ Both signals mean the PR has merge conflicts that must be resolved before merge.
 
 ### Step 3 — Include rebase outcome and merge state in the summary
 
-When writing the `FABRIK_SUMMARY_BEGIN`/`FABRIK_SUMMARY_END` block, always include Step 1's rebase outcome (one of `rebased`, `skipped-in-queue`, `skipped-detection-failed`, `skipped-up-to-date`, `skipped-ci-fresh`) alongside the PR merge state, so an operator reading the stage comment can tell a deliberate skip from a forgotten one:
+**Report observed values, never a verdict.** The same discipline that applies to narrating a rebase/reset outcome (see the "describe only what you actually did … describe the observed state without attributing one" rule earlier in this document) applies here too: this summary must state what was actually observed — `mergeable`, `mergeStateStatus`, and each required check's own reported `bucket` — never paraphrase those observations into a verdict phrase like "All checks pass" or "Validation passed." A required check whose `bucket` is not `pass` is a fact to state, not a gap to paper over with an optimistic summary. **Never assert that checks pass while any required check's `bucket` is not `pass`** — say plainly that it hasn't, and that the engine's own CI gate (`wait_for_ci` / `fabrik:awaiting-ci`) is what decides next, not this prose.
+
+Gather per-check state immediately after Step 2's `gh pr view`, unconditionally (this runs regardless of which Step 1 outcome applied):
+
+```bash
+gh pr checks --required --json name,bucket,state 2>/dev/null
+```
+
+`bucket` (`pass`, `fail`, `pending`, `skipping`, `cancel`) gives one consistent vocabulary across both the legacy Status API and the modern Checks API — report `bucket`, not raw `state`. If the command returns an empty list, say so explicitly: `"no required checks configured"` — don't just omit the field, since an omitted field reads ambiguously as "didn't check" rather than "checked, none required."
+
+**A non-zero exit here is expected, not a read failure.** `gh pr checks` exits non-zero whenever a required check is pending (documented exit code 8) or failing — exactly the states this step exists to report — while still printing valid JSON to stdout. Parse that JSON regardless of exit code; only treat the read as failed if stdout is empty or doesn't parse (in which case report `"required-check state unavailable"` rather than guessing).
+
+When writing the `FABRIK_SUMMARY_BEGIN`/`FABRIK_SUMMARY_END` block, always include Step 1's rebase outcome (one of `rebased`, `skipped-in-queue`, `skipped-detection-failed`, `skipped-up-to-date`, `skipped-ci-fresh`) alongside the observed PR merge state and required-check state, so an operator reading the stage comment can tell a deliberate rebase-skip from a forgotten one, and an observed CI state from an asserted one.
+
+**Example — every required check has reported `pass`:**
 
 ```
 FABRIK_SUMMARY_BEGIN
-Validation passed. Rebase: skipped-up-to-date. PR mergeable: MERGEABLE, mergeStateStatus: CLEAN. All N requirements verified, tests pass (M packages), no regressions.
+Rebase: skipped-up-to-date. PR mergeable: MERGEABLE, mergeStateStatus: CLEAN. Required checks: Analyze (go): pass, Verify llms-full.txt is up to date: pass. Requirements: N/N verified against issue spec. Local test suite: N tests across M packages, all passed.
 FABRIK_SUMMARY_END
 ```
 
-If no linked PR exists, say so: `"No linked PR found."` — and skip both the rebase outcome and merge-state fields, since neither check ran.
+**Example — a required check has not reported a conclusion:**
 
-This gives operators reading the issue comment a fast signal about merge readiness without opening the PR.
+```
+FABRIK_SUMMARY_BEGIN
+Rebase: rebased. PR mergeable: MERGEABLE, mergeStateStatus: CLEAN. Required checks: Analyze (go): pass, Verify llms-full.txt is up to date: pending. Verify llms-full.txt is up to date has not yet reported a conclusion; the engine's CI gate will decide whether this PR advances. Requirements: N/N verified against issue spec. Local test suite: N tests across M packages, all passed.
+FABRIK_SUMMARY_END
+```
+
+If no linked PR exists, say so: `"No linked PR found."` — and skip the rebase outcome, merge-state, and required-check fields, since none of those checks ran.
+
+This gives operators reading the issue comment an accurate, fact-based signal about merge readiness without opening the PR — never an assertion the checks themselves haven't yet earned.
 
 ## Fixing Issues
 
