@@ -393,10 +393,12 @@ Both signals mean the PR has merge conflicts that must be resolved before merge.
 Gather per-check state immediately after Step 2's `gh pr view`, unconditionally (this runs regardless of which Step 1 outcome applied):
 
 ```bash
-gh pr checks --required --json name,bucket,state
+gh pr checks --required --json name,bucket,state 2>/dev/null
 ```
 
 `bucket` (`pass`, `fail`, `pending`, `skipping`, `cancel`) gives one consistent vocabulary across both the legacy Status API and the modern Checks API — report `bucket`, not raw `state`. If the command returns an empty list, say so explicitly: `"no required checks configured"` — don't just omit the field, since an omitted field reads ambiguously as "didn't check" rather than "checked, none required."
+
+**A non-zero exit here is expected, not a read failure.** `gh pr checks` exits non-zero whenever a required check is pending (documented exit code 8) or failing — exactly the states this step exists to report — while still printing valid JSON to stdout. Parse that JSON regardless of exit code; only treat the read as failed if stdout is empty or doesn't parse (in which case report `"required-check state unavailable"` rather than guessing).
 
 When writing the `FABRIK_SUMMARY_BEGIN`/`FABRIK_SUMMARY_END` block, always include Step 1's rebase outcome (one of `rebased`, `skipped-in-queue`, `skipped-detection-failed`, `skipped-up-to-date`, `skipped-ci-fresh`) alongside the observed PR merge state and required-check state, so an operator reading the stage comment can tell a deliberate rebase-skip from a forgotten one, and an observed CI state from an asserted one.
 
@@ -412,7 +414,7 @@ FABRIK_SUMMARY_END
 
 ```
 FABRIK_SUMMARY_BEGIN
-Rebase: skipped-ci-fresh. PR mergeable: MERGEABLE, mergeStateStatus: CLEAN. Required checks: Analyze (go): pass, Verify llms-full.txt is up to date: pending. Verify llms-full.txt is up to date has not yet reported a conclusion; the engine's CI gate will decide whether this PR advances. Requirements: N/N verified against issue spec. Local test suite: N tests across M packages, all passed.
+Rebase: rebased. PR mergeable: MERGEABLE, mergeStateStatus: CLEAN. Required checks: Analyze (go): pass, Verify llms-full.txt is up to date: pending. Verify llms-full.txt is up to date has not yet reported a conclusion; the engine's CI gate will decide whether this PR advances. Requirements: N/N verified against issue spec. Local test suite: N tests across M packages, all passed.
 FABRIK_SUMMARY_END
 ```
 
