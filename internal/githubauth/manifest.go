@@ -85,12 +85,16 @@ func PrueferRequiredPermissions() map[string]string {
 }
 
 // buildManifest returns the JSON manifest GitHub's App-creation-from-manifest
-// flow expects, scoped to requiredPermissions (see its doc comment).
-// hook_attributes.active is always false and no default_events are
-// requested — Pruefer V1 is polling-only (ADR-1113 §1, ADR-032); enabling
-// webhook delivery is a separate, out-of-scope future issue this manifest
-// must never enable. redirectURL is the loopback callback server's own URL,
-// assigned only after it starts listening (see runManifestCallbackServer).
+// flow expects, scoped to requiredPermissions (see its doc comment). No
+// default_events are requested and hook_attributes is omitted entirely —
+// Pruefer V1 is polling-only (ADR-1113 §1, ADR-032), so there's no webhook
+// URL to supply, and GitHub requires hook_attributes.url whenever
+// hook_attributes is present at all, rejecting the whole manifest otherwise
+// (the top-level "url" field above is unrelated — GitHub's rejection message
+// for a url-less hook_attributes, `"url" wasn't supplied`, reads as though
+// that field is the problem, which made this defect hard to diagnose; see
+// #1711). redirectURL is the loopback callback server's own URL, assigned
+// only after it starts listening (see runManifestCallbackServer).
 func buildManifest(redirectURL string) map[string]interface{} {
 	return map[string]interface{}{
 		"name":                defaultAppName,
@@ -99,9 +103,6 @@ func buildManifest(redirectURL string) map[string]interface{} {
 		"public":              false,
 		"default_permissions": PrueferRequiredPermissions(),
 		"default_events":      []string{},
-		"hook_attributes": map[string]interface{}{
-			"active": false,
-		},
 	}
 }
 
