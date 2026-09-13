@@ -215,12 +215,13 @@ func TestExecute_NoStages(t *testing.T) {
 func TestExecute_GitHubAppAuthConfigured_SkipsTokenRequirement(t *testing.T) {
 	resetFlags()
 	stagesDir := t.TempDir()
+	keyPath := filepath.Join(t.TempDir(), "nonexistent-key.pem")
 	t.Setenv("GITHUB_TOKEN", "")
 	t.Setenv("FABRIK_TOKEN", "")
 	os.Args = []string{
 		"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u",
 		"--stages", stagesDir,
-		"--github-app-id", "123", "--github-app-private-key-path", "/tmp/nonexistent-key.pem", "--github-app-installation-id", "456",
+		"--github-app-id", "123", "--github-app-private-key-path", keyPath, "--github-app-installation-id", "456",
 	}
 
 	err := Execute()

@@ -94,7 +94,7 @@ func TestValidateGitHubAppConfig_UnconfiguredIsPATMode(t *testing.T) {
 }
 
 func TestValidateGitHubAppConfig_FullyConfiguredIsValid(t *testing.T) {
-	cfg := Config{GitHubAppID: 1, GitHubAppPrivateKeyPath: "/tmp/key.pem", GitHubAppInstallationID: 2}
+	cfg := Config{GitHubAppID: 1, GitHubAppPrivateKeyPath: filepath.Join(t.TempDir(), "key.pem"), GitHubAppInstallationID: 2}
 	if err := validateGitHubAppConfig(cfg); err != nil {
 		t.Errorf("validateGitHubAppConfig(fully configured) = %v, want nil", err)
 	}
@@ -107,7 +107,7 @@ func TestValidateGitHubAppConfig_PartialConfig_NamesEachMissingField(t *testing.
 		wantMsg []string
 	}{
 		{"onlyAppID", Config{GitHubAppID: 1}, []string{"github_app_private_key_path", "github_app_installation_id"}},
-		{"onlyKeyPath", Config{GitHubAppPrivateKeyPath: "/tmp/key.pem"}, []string{"github_app_id", "github_app_installation_id"}},
+		{"onlyKeyPath", Config{GitHubAppPrivateKeyPath: filepath.Join(t.TempDir(), "key.pem")}, []string{"github_app_id", "github_app_installation_id"}},
 		{"onlyInstallationID", Config{GitHubAppInstallationID: 2}, []string{"github_app_id", "github_app_private_key_path"}},
 		{"missingOnlyKeyPath", Config{GitHubAppID: 1, GitHubAppInstallationID: 2}, []string{"github_app_private_key_path"}},
 	}
