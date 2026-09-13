@@ -255,6 +255,13 @@ func (e *Engine) ensurePRLinksIssue(item gh.ProjectItem, prNumber int) {
 // If no PR exists yet (e.g., ensureDraftPR failed earlier because there were no commits),
 // it attempts to create one before marking it ready.
 // knownPR is the PR number from ensureDraftPR (avoids search API race); 0 falls back to search.
+//
+// A failed client.MarkPRReady call — non-transient, or after this function's own
+// 3-attempt retry budget is exhausted — durably records the outstanding call via
+// fabrik:awaiting-pr-ready (markPRReadyOutstanding) so settlePRReadyScan retries it
+// on a later poll, surviving an engine restart. This function's void signature and
+// logging style are otherwise unchanged (per #599); the marker is the only new
+// side effect. See ADR-1582.
 func (e *Engine) markPRReady(item gh.ProjectItem, knownPR int) {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	wm := e.worktreesFor(item.Repo)
@@ -288,10 +295,14 @@ func (e *Engine) markPRReady(item gh.ProjectItem, knownPR int) {
 				e.webhookMgr.RegisterEcho("pull_request", "ready_for_review", fmt.Sprintf("%s/%s#pr%d", owner, repo, prNumber))
 			}
 			e.logf(item.Number, "pr", "marked PR #%d ready-for-review\n", prNumber)
+			if hasLabel(item.Labels, prReadyAwaitingLabel) {
+				e.clearPRReadyMarker(item, owner, repo)
+			}
 			return
 		}
 		if !isTransientError(err) {
 			e.logf(item.Number, "warn", "could not mark PR #%d ready: %v\n", prNumber, err)
+			e.markPRReadyOutstanding(item, owner, repo)
 			return
 		}
 		lastErr = err
@@ -300,6 +311,7 @@ func (e *Engine) markPRReady(item gh.ProjectItem, knownPR int) {
 		}
 	}
 	e.logf(item.Number, "warn", "could not mark PR #%d ready after %d attempts: %v\n", prNumber, maxAttempts, lastErr)
+	e.markPRReadyOutstanding(item, owner, repo)
 }
 
 // postOutputToPR posts detailed output on the linked PR and a brief summary on the issue.

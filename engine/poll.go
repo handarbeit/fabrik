@@ -1538,6 +1538,16 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	// not "reached Done."
 	e.settleNonDefaultBaseLinkageNotice(board)
 
+	// Mark-PR-Ready durable retry settle scan (ADR-1582): retries the outstanding
+	// client.MarkPRReady call for any item carrying fabrik:awaiting-pr-ready — a
+	// stage completed with mark_pr_ready_on_complete: true but the draft→ready
+	// transition failed after markPRReady's own in-process retry was exhausted.
+	// Runs unconditionally every poll, independent of itemMayNeedWork/itemNeedsWork
+	// dispatch. Unlike most of this settle-scan family, the item is NOT necessarily
+	// terminal here — it continues advancing through later stages normally while
+	// this marker is outstanding; see prReadyAwaitingLabel's doc comment.
+	e.settlePRReadyScan(board)
+
 	// Landing verification settle scan (#1616): the post-Done backstop that verifies
 	// a merge-attributable Done transition's credited PR actually merged, for any
 	// item carrying fabrik:awaiting-landing-verification. Runs unconditionally every

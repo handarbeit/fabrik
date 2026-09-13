@@ -889,6 +889,17 @@ func TestMarkPRReady_AllTransientExhausted(t *testing.T) {
 	if len(client.markPRReadyCalls) != 3 {
 		t.Fatalf("expected 3 MarkPRReady calls (all transient exhausted), got %d", len(client.markPRReadyCalls))
 	}
+	// ADR-1582: retry-exhausted must durably mark the outstanding call for
+	// settlePRReadyScan to pick up on a later poll.
+	found := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == prReadyAwaitingLabel {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected %s applied after retry exhaustion, got labels: %v", prReadyAwaitingLabel, client.addLabelCalls)
+	}
 }
 
 // TestProcessItem_PostToPR_CreatesDraftPRBeforePosting verifies that when a stage
@@ -1053,6 +1064,70 @@ func TestMarkPRReady_NonTransientNoRetry(t *testing.T) {
 
 	if len(client.markPRReadyCalls) != 1 {
 		t.Fatalf("expected 1 MarkPRReady call (non-transient, no retry), got %d", len(client.markPRReadyCalls))
+	}
+	// ADR-1582: a non-transient error must durably mark the outstanding call
+	// for settlePRReadyScan to pick up on a later poll.
+	found := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == prReadyAwaitingLabel {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected %s applied after a non-transient error, got labels: %v", prReadyAwaitingLabel, client.addLabelCalls)
+	}
+}
+
+// TestMarkPRReady_Success_NoMarkerApplied verifies the common-case success path
+// never applies the durable retry marker.
+func TestMarkPRReady_Success_NoMarkerApplied(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManagerWithRoot(repoDir, repoDir+"/.fabrik/worktrees")
+
+	client := &mockGitHubClient{}
+	eng := NewWithDeps(
+		Config{Owner: "owner", Repo: "repo", User: "u", Token: "t", Stages: testStages()},
+		client, &mockClaudeInvoker{}, wm,
+	)
+
+	item := gh.ProjectItem{Number: 15, Title: "test"}
+	eng.markPRReady(item, 155)
+
+	for _, c := range client.addLabelCalls {
+		if c.labelName == prReadyAwaitingLabel {
+			t.Errorf("did not expect %s applied on success, got labels: %v", prReadyAwaitingLabel, client.addLabelCalls)
+		}
+	}
+}
+
+// TestMarkPRReady_SuccessAfterPriorFailure_ClearsMarker verifies that a
+// markPRReady call succeeding directly (e.g. after an operator un-pauses a
+// previously escalated issue and the stage naturally re-dispatches) clears
+// any stale fabrik:awaiting-pr-ready marker itself, rather than waiting for
+// the settle scan to notice.
+func TestMarkPRReady_SuccessAfterPriorFailure_ClearsMarker(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManagerWithRoot(repoDir, repoDir+"/.fabrik/worktrees")
+
+	client := &mockGitHubClient{}
+	eng := NewWithDeps(
+		Config{Owner: "owner", Repo: "repo", User: "u", Token: "t", Stages: testStages()},
+		client, &mockClaudeInvoker{}, wm,
+	)
+
+	item := gh.ProjectItem{Number: 16, Title: "test", Labels: []string{prReadyAwaitingLabel}}
+	eng.markPRReady(item, 166)
+
+	found := false
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == prReadyAwaitingLabel {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected %s cleared on direct success, got removeLabelCalls: %v", prReadyAwaitingLabel, client.removeLabelCalls)
 	}
 }
 
