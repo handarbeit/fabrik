@@ -667,7 +667,7 @@ query($id: ID!) {
         nodes { login }
       }
       blockedBy(first: 10) {
-        pageInfo { hasNextPage }
+        pageInfo { hasNextPage endCursor }
         nodes {
           number
           state
@@ -799,7 +799,8 @@ type fetchItemDetailsNode struct {
 	} `json:"assignees"`
 	BlockedBy *struct {
 		PageInfo struct {
-			HasNextPage bool `json:"hasNextPage"`
+			HasNextPage bool   `json:"hasNextPage"`
+			EndCursor   string `json:"endCursor"`
 		} `json:"pageInfo"`
 		Nodes []blockedByNode `json:"nodes"`
 	} `json:"blockedBy"`
@@ -922,7 +923,9 @@ func (c *Client) FetchItemDetails(item *ProjectItem) error {
 	if err := c.applyLabels(item, node); err != nil {
 		return err
 	}
-	c.applyBlockedBy(item, node)
+	if err := c.applyBlockedBy(item, node); err != nil {
+		return err
+	}
 	if err := c.applyComments(item, node); err != nil {
 		return err
 	}
@@ -951,16 +954,26 @@ func (c *Client) applyLabels(item *ProjectItem, node *fetchItemDetailsNode) erro
 }
 
 // applyBlockedBy resets and repopulates item.BlockedBy (Issues only; PRs will
-// have a nil BlockedBy node).
-func (c *Client) applyBlockedBy(item *ProjectItem, node *fetchItemDetailsNode) {
+// have a nil BlockedBy node). Paginates past the initial first-10 page the
+// same way applyLabels does for labels — a parent issue block-spawning more
+// than 10 children (ADR-1583) would otherwise have its later blockedBy edges
+// silently dropped, which can make a resumed spawn's already-linked check
+// wrongly report "not linked" and re-issue AddBlockedByIssue for an edge
+// that's already wired (see #1583 review discussion).
+func (c *Client) applyBlockedBy(item *ProjectItem, node *fetchItemDetailsNode) error {
 	item.BlockedBy = nil
 	if node.BlockedBy == nil {
-		return
+		return nil
 	}
+	nodes := node.BlockedBy.Nodes
 	if node.BlockedBy.PageInfo.HasNextPage {
-		fmt.Printf("[deep-fetch] #%d: blockedBy has more than 10 entries; only first 10 are used\n", item.Number)
+		extra, err := c.fetchNodeBlockedBy(item.ID, node.BlockedBy.PageInfo.EndCursor)
+		if err != nil {
+			return err
+		}
+		nodes = append(nodes, extra...)
 	}
-	for _, dep := range node.BlockedBy.Nodes {
+	for _, dep := range nodes {
 		d := Dependency{
 			Number: dep.Number,
 			State:  dep.State,
@@ -970,6 +983,7 @@ func (c *Client) applyBlockedBy(item *ProjectItem, node *fetchItemDetailsNode) {
 		}
 		item.BlockedBy = append(item.BlockedBy, d)
 	}
+	return nil
 }
 
 // applyComments resets item.Comments and repopulates it from the item's own
@@ -1265,6 +1279,73 @@ func (c *Client) fetchNodeLabels(nodeID, startCursor string) ([]string, error) {
 		cursor = page.PageInfo.EndCursor
 	}
 	return allLabels, nil
+}
+
+// fetchNodeBlockedByQuery is the GraphQL query used by fetchNodeBlockedBy.
+const fetchNodeBlockedByQuery = `
+query($id: ID!, $cursor: String) {
+  node(id: $id) {
+    ... on Issue {
+      blockedBy(first: 100, after: $cursor) {
+        nodes {
+          number
+          state
+          repository { nameWithOwner }
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
+    }
+  }
+}`
+
+// fetchNodeBlockedBy fetches all remaining blockedBy dependencies for an
+// issue node, starting from the given cursor. Mirrors fetchNodeLabels.
+func (c *Client) fetchNodeBlockedBy(nodeID, startCursor string) ([]blockedByNode, error) {
+	query := fetchNodeBlockedByQuery
+
+	var allDeps []blockedByNode
+	cursor := startCursor
+	for {
+		vars := map[string]interface{}{
+			"id":     nodeID,
+			"cursor": cursor,
+		}
+
+		var result struct {
+			Data struct {
+				Node *struct {
+					BlockedBy struct {
+						Nodes    []blockedByNode `json:"nodes"`
+						PageInfo struct {
+							HasNextPage bool   `json:"hasNextPage"`
+							EndCursor   string `json:"endCursor"`
+						} `json:"pageInfo"`
+					} `json:"blockedBy"`
+				} `json:"node"`
+			} `json:"data"`
+		}
+
+		if err := c.graphqlRequest(query, vars, &result); err != nil {
+			return nil, fmt.Errorf("fetching blockedBy for node %s: %w", nodeID, err)
+		}
+		if result.Data.Node == nil {
+			return nil, fmt.Errorf("fetching blockedBy for node %s: node not found or unsupported type", nodeID)
+		}
+
+		page := result.Data.Node.BlockedBy
+		allDeps = append(allDeps, page.Nodes...)
+		if !page.PageInfo.HasNextPage {
+			break
+		}
+		if page.PageInfo.EndCursor == "" {
+			return nil, fmt.Errorf("fetching blockedBy for node %s: hasNextPage=true but endCursor is empty", nodeID)
+		}
+		cursor = page.PageInfo.EndCursor
+	}
+	return allDeps, nil
 }
 
 func parseTime(s string) (time.Time, error) {

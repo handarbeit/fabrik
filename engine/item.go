@@ -1404,9 +1404,19 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 	// same e.spawnChildren every other spawn origin uses, so board
 	// registration, assignment, and the blocked_by edge are identical
 	// regardless of which stage originated the spawn (requirement 2).
+	//
+	// resumable=false (ADR-1583): unlike Plan's immutable, already-posted
+	// comment, output here is this dispatch's own fresh Claude generation. A
+	// retry of a failed mid-flight spawn redispatches Claude rather than
+	// reparsing stored content, so blocks is not guaranteed stable in count,
+	// order, or title across that retry — keying a resume marker on
+	// blockIndex alone would risk silently resuming the wrong child under a
+	// same-numbered but different block (caught in review, PR #1708). This
+	// origin therefore always takes the fresh-CreateIssue path, unchanged
+	// from before ADR-1583.
 	if (stage.Name == "Review" || stage.Name == "Validate") && output != "" {
 		if blocks := ParseSpawnBlocks(output); len(blocks) > 0 {
-			spawnedIDs, _, spawnErr := e.spawnChildren(p.ctx, p.board, item, owner, repo, blocks)
+			spawnedIDs, _, spawnErr := e.spawnChildren(p.ctx, p.board, item, owner, repo, blocks, false)
 			if spawnErr != nil {
 				// spawnChildren already paused the issue and posted its own
 				// failure comment — do not also post this stage's own output.
