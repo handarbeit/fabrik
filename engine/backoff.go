@@ -32,6 +32,31 @@ const maxIdleBackoff = 5 * time.Minute
 // reset timestamp is second-granular and clocks may differ slightly).
 const rateLimitResetBuffer = 5 * time.Second
 
+// minPollInterval is R3's defense-in-depth floor: the minimum time
+// PollWithBackoff will allow between two actual poll attempts, regardless of
+// what triggered the call (ticker or wake). It is not itself the fix for
+// #1716's wake-path bypass (that's Run()'s wakeBlockedByRateLimitBackoff gate,
+// below) — it's a backstop against any future bypass of that gate, turning an
+// unbounded-rate loop into a bounded-rate one. Chosen with a 2x safety margin
+// below the lowest realistic --poll value (1s, tests/sim's own default): a
+// deployment configuring --poll below ~1s would need to revisit this. A fixed
+// unexported constant, not a CLI flag — this is not a tunable operational
+// knob, it's a guard against a defect class.
+//
+// Interaction with the recovery self-wake: this floor can, in principle,
+// swallow the immediate re-poll the legitimate rate-limit-recovery self-wake
+// (see wakeBlockedByRateLimitBackoff's doc comment) is trying to trigger, if
+// e.poll() and the rest of that PollWithBackoff call complete in under
+// minPollInterval — plausible for a fast response. This is not a starvation
+// bug: doPollCycle (poll.go) calls ticker.Reset(result.NextInterval)
+// unconditionally after every PollWithBackoff call, wake-triggered or not,
+// and a floor-blocked call returns NextInterval == minPollInterval-elapsed —
+// so the floor-blocked recovery wake is recovered by the ticker firing again
+// within, at most, minPollInterval (500ms), not the next backed-off tick.
+// "Immediate probe" in that doc comment means "within one poll-rate-floor
+// window," not "with zero delay."
+const minPollInterval = 500 * time.Millisecond
+
 // shouldPauseForRESTRateLimit reports whether the engine should skip the entire
 // poll work phase because the REST/core budget is exhausted and has not yet
 // reset. Unlike GraphQL — which the poll read consumes and which the interval
@@ -84,6 +109,40 @@ func nextRateLimitLow(current bool, ratio float64) bool {
 // limit (within rateLimitNearZeroPercent). Returns false when limit is 0.
 func isRateLimitNearZero(remaining, limit int) bool {
 	return limit > 0 && remaining*100 <= limit*rateLimitNearZeroPercent
+}
+
+// wakeBlockedByRateLimitBackoff reports whether Run()'s wake path
+// (case <-e.wakeCh:) should drop the wake instead of triggering an immediate
+// poll (R1, #1716). True while either GraphQL rate-limit backoff
+// (e.backoffRateLimitLow) or the REST hard gate (e.backoffRestPaused) is
+// active — both are Engine fields PollWithBackoff already persists across
+// calls (ADR-1592), so this is a pure read, no new state of its own.
+//
+// A blocked wake is not re-armed: it is simply dropped, and the ticker —
+// already reset to the correct backed-off NextInterval by the prior
+// PollWithBackoff call — is what eventually triggers the next poll. This
+// deliberately avoids a "pending wake, fire the instant backoff clears" flag:
+// that would reintroduce exactly the "hang if the gate is mishandled" risk a
+// dropped-with-no-re-arm bug would be silent about, for a benefit (avoiding
+// up to one ticker interval of latency on a webhook-driven change arriving
+// mid-backoff) that's already the same bound the ticker itself has.
+//
+// This must NOT filter out the legitimate rate-limit-recovery self-wake
+// (poll.go's e.wakeCh <- struct{}{} send, fired the moment GraphQL is
+// observed to have recovered from a near-zero state). It doesn't, by
+// construction of the call ordering: PollWithBackoff runs synchronously to
+// completion — including the e.backoffRateLimitLow = newRateLimitLow
+// reassignment, which happens after the recovery wake is sent — before
+// control returns to doPollCycle, which itself returns before Run()'s select
+// loop re-evaluates and can consume the queued wake. So by the time this
+// method is actually called for that wake, e.backoffRateLimitLow has already
+// settled to false. A genuine mid-backoff wake (arriving from a webhook while
+// e.backoffRateLimitLow is still true) sees the field still true and is
+// blocked, exactly as intended. This is an ordering PROPERTY of the current
+// single-goroutine code, not an enforced invariant — see
+// TestPollWithBackoff_RecoverySelfWake_NotBlockedByBackoffGate for the regression guard.
+func (e *Engine) wakeBlockedByRateLimitBackoff() bool {
+	return e.backoffRateLimitLow || e.backoffRestPaused
 }
 
 // effectiveIdleCap returns the idle backoff cap based on webhook stream health.

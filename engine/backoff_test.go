@@ -268,3 +268,29 @@ func TestShouldPauseForRESTRateLimit(t *testing.T) {
 		}
 	}
 }
+
+// TestWakeBlockedByRateLimitBackoff is a table-driven test over the four
+// (backoffRateLimitLow, backoffRestPaused) combinations — R1's gate must
+// block the wake whenever either backoff mechanism is active.
+func TestWakeBlockedByRateLimitBackoff(t *testing.T) {
+	cases := []struct {
+		name         string
+		rateLimitLow bool
+		restPaused   bool
+		wantBlocked  bool
+	}{
+		{"neither active -> not blocked", false, false, false},
+		{"graphql backoff only -> blocked", true, false, true},
+		{"rest hard gate only -> blocked", false, true, true},
+		{"both active -> blocked", true, true, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			e := &Engine{backoffRateLimitLow: c.rateLimitLow, backoffRestPaused: c.restPaused}
+			if got := e.wakeBlockedByRateLimitBackoff(); got != c.wantBlocked {
+				t.Errorf("wakeBlockedByRateLimitBackoff() with rateLimitLow=%v restPaused=%v = %v, want %v",
+					c.rateLimitLow, c.restPaused, got, c.wantBlocked)
+			}
+		})
+	}
+}

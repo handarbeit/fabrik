@@ -27,11 +27,23 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 	if err != nil {
 		_, graphqlStats := e.client.RateLimitStats()
 		if graphqlStats.Limit > 0 && (graphqlStats.Remaining == 0 || float64(graphqlStats.Remaining)/float64(graphqlStats.Limit) < rateLimitBackoffThreshold) {
+			// R2 (#1716): this probe attempt was rejected for rate limit, but
+			// this function has no suspension mechanism of its own and cannot
+			// see whether the poll loop's actual backoff (PollWithBackoff's
+			// GraphQL hysteresis, computed AFTER this call returns for this
+			// cycle, and R1's wake-path gate one layer up in Run()) is active.
+			// The old wording ("polling suspended") claimed a stand-down this
+			// call site does not control — worse than silence, since it
+			// directs an operator away from the actual running fault. State
+			// only what happened here: this one probe attempt was rejected;
+			// the poll loop's own backoff (not this function) governs when
+			// the next attempt happens.
 			retryStr := "retrying soon"
-			if !graphqlStats.Reset.IsZero() && graphqlStats.Reset.After(time.Now()) {
+			if !graphqlStats.Reset.IsZero() && graphqlStats.Reset.After(e.now()) {
 				retryStr = fmt.Sprintf("retrying after %s (local)", graphqlStats.Reset.Local().Format("15:04"))
 			}
-			e.logf(0, "warn", "rate limited — polling suspended, %s: %v\n", retryStr, err)
+			e.logfThrottled("probe-rate-limited", 0, "warn",
+				"probe rejected — rate limited, %s: %v\n", retryStr, err)
 			e.emitStructural(tui.RateLimitAlertEvent{Bucket: tui.RateLimitBucketGraphQL, Exhausted: true, Reset: graphqlStats.Reset})
 		} else {
 			e.logf(0, "cache", "probe refresh failed (using prior cache state): %v\n", err)
