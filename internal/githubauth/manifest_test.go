@@ -43,6 +43,43 @@ func TestBuildManifest_ScopedPermissions(t *testing.T) {
 	}
 }
 
+// TestBuildManifest_MatchesPrueferRequiredPermissions guards #1709's
+// single-source-of-truth fix: buildManifest's requested permissions and
+// PrueferRequiredPermissions' required-for-grant-verification set must be
+// byte-identical, since they now both read from the same requiredPermissions
+// var — the exact drift (a manifest requesting issues: write while nothing
+// ever checked an installation actually held it) this issue exists to catch
+// earlier next time.
+func TestBuildManifest_MatchesPrueferRequiredPermissions(t *testing.T) {
+	m := buildManifest("http://127.0.0.1:12345/callback")
+	manifestPerms, ok := m["default_permissions"].(map[string]string)
+	if !ok {
+		t.Fatal("expected default_permissions to be present")
+	}
+	required := PrueferRequiredPermissions()
+	if len(manifestPerms) != len(required) {
+		t.Fatalf("buildManifest permissions = %+v, PrueferRequiredPermissions = %+v", manifestPerms, required)
+	}
+	for k, v := range required {
+		if manifestPerms[k] != v {
+			t.Errorf("buildManifest[%q] = %q, PrueferRequiredPermissions[%q] = %q", k, manifestPerms[k], k, v)
+		}
+	}
+}
+
+// TestPrueferRequiredPermissions_ReturnsDefensiveCopy guards against a
+// caller's mutation of the returned map corrupting this package's own
+// requiredPermissions var for every subsequent caller (including a later
+// buildManifest call).
+func TestPrueferRequiredPermissions_ReturnsDefensiveCopy(t *testing.T) {
+	first := PrueferRequiredPermissions()
+	first["issues"] = "corrupted"
+	second := PrueferRequiredPermissions()
+	if second["issues"] != "write" {
+		t.Fatalf("mutating a returned map corrupted a later call: second[issues] = %q, want %q", second["issues"], "write")
+	}
+}
+
 func TestBuildManifest_RedirectURLPropagated(t *testing.T) {
 	m := buildManifest("http://127.0.0.1:9999/callback")
 	if m["redirect_url"] != "http://127.0.0.1:9999/callback" {
