@@ -463,6 +463,51 @@ func TestLoadConfig_MaxDerivedReposDefaultsAndPrecedence(t *testing.T) {
 	}
 }
 
+// TestLoadConfig_ServedAccountsDefaultsAndPrecedence mirrors
+// TestLoadConfig_MaxDerivedReposDefaultsAndPrecedence's shape for the new
+// R4/R5 allowlist key (handarbeit/fabrik#1722): absent by default (no
+// allowlist configured), then flag > env > YAML precedence, same as
+// watched_repos' own -repos/PRUEFER_REPOS/watched_repos triple.
+func TestLoadConfig_ServedAccountsDefaultsAndPrecedence(t *testing.T) {
+	dir := t.TempDir()
+	cfg, err := LoadConfig([]string{"-config", filepath.Join(dir, "missing.yaml")})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if len(cfg.ServedAccounts) != 0 {
+		t.Errorf("ServedAccounts = %v, want empty (no allowlist configured by default)", cfg.ServedAccounts)
+	}
+
+	path := writeYAMLConfig(t, dir, `
+served_accounts:
+  - handarbeit
+`)
+	cfg, err = LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if len(cfg.ServedAccounts) != 1 || cfg.ServedAccounts[0] != "handarbeit" {
+		t.Errorf("ServedAccounts = %v, want [handarbeit] (from YAML)", cfg.ServedAccounts)
+	}
+
+	t.Setenv("PRUEFER_SERVED_ACCOUNTS", "handarbeit,verveguy")
+	cfg, err = LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if len(cfg.ServedAccounts) != 2 || cfg.ServedAccounts[0] != "handarbeit" || cfg.ServedAccounts[1] != "verveguy" {
+		t.Errorf("ServedAccounts = %v, want [handarbeit verveguy] (env should override YAML)", cfg.ServedAccounts)
+	}
+
+	cfg, err = LoadConfig([]string{"-config", path, "-served-accounts", "onlyme"})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if len(cfg.ServedAccounts) != 1 || cfg.ServedAccounts[0] != "onlyme" {
+		t.Errorf("ServedAccounts = %v, want [onlyme] (flag should override env)", cfg.ServedAccounts)
+	}
+}
+
 // TestLoadConfig_RepoRederivationIntervalDefaultsAndPrecedence mirrors
 // TestLoadConfig_ReconciliationPrecedence's duration-string handling for
 // repo_rederivation_interval (#1641/R2).

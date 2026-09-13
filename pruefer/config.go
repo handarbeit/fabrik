@@ -532,6 +532,9 @@ func LoadConfig(args []string) (Config, error) {
 	if explicit["repos"] {
 		cfg.WatchedRepos = splitCSV(fv.repos)
 	}
+	if explicit["served-accounts"] {
+		cfg.ServedAccounts = splitCSV(fv.servedAccounts)
+	}
 	if explicit["poll-interval"] {
 		cfg.PollInterval = time.Duration(fv.pollIntervalSec) * time.Second
 	}
@@ -638,6 +641,9 @@ func LoadConfig(args []string) (Config, error) {
 func applyEnv(cfg *Config) {
 	if v := os.Getenv("PRUEFER_REPOS"); v != "" {
 		cfg.WatchedRepos = splitCSV(v)
+	}
+	if v := os.Getenv("PRUEFER_SERVED_ACCOUNTS"); v != "" {
+		cfg.ServedAccounts = splitCSV(v)
 	}
 	if v := os.Getenv("PRUEFER_POLL_INTERVAL"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
