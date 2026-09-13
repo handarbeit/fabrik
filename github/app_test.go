@@ -74,7 +74,13 @@ func TestParseAppPrivateKey_InvalidPEM(t *testing.T) {
 
 func TestBuildAppJWT_WellFormed(t *testing.T) {
 	key, _ := testAppPrivateKey(t)
-	tok, err := BuildAppJWT(12345, key)
+	// int64(...): every real call site passes an already-int64-typed
+	// variable (e.g. reconciler.go's appID), which boxes into BuildAppJWT's
+	// `any` parameter unchanged — but an untyped integer literal like 12345
+	// defaults to plain `int` when boxed into an interface{} parameter, not
+	// int64, so it must be cast explicitly here to match what production
+	// call sites actually pass.
+	tok, err := BuildAppJWT(int64(12345), key)
 	if err != nil {
 		t.Fatalf("BuildAppJWT: %v", err)
 	}
@@ -119,6 +125,64 @@ func TestBuildAppJWT_WellFormed(t *testing.T) {
 	now := time.Now().Unix()
 	if claims.Iat > now || claims.Iat < now-120 {
 		t.Errorf("iat = %d, want within [now-120, now] (now=%d)", claims.Iat, now)
+	}
+}
+
+// TestBuildAppJWT_StringIssuer is the AC3 regression test for #1712: GitHub
+// now recommends the App's Client ID (a string, e.g. "Iv23li…") over the
+// numeric App ID as the JWT issuer, and BuildAppJWT must produce a
+// well-formed JWT with a string "iss" claim when given one.
+func TestBuildAppJWT_StringIssuer(t *testing.T) {
+	key, _ := testAppPrivateKey(t)
+	tok, err := BuildAppJWT("Iv23liExampleClientID", key)
+	if err != nil {
+		t.Fatalf("BuildAppJWT: %v", err)
+	}
+	parts := strings.Split(tok, ".")
+	if len(parts) != 3 {
+		t.Fatalf("expected 3 JWT segments, got %d: %q", len(parts), tok)
+	}
+
+	claimsJSON, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatalf("decoding claims: %v", err)
+	}
+	var claims struct {
+		Iat int64  `json:"iat"`
+		Exp int64  `json:"exp"`
+		Iss string `json:"iss"`
+	}
+	if err := json.Unmarshal(claimsJSON, &claims); err != nil {
+		t.Fatalf("unmarshaling claims: %v", err)
+	}
+	if claims.Iss != "Iv23liExampleClientID" {
+		t.Errorf("iss = %q, want %q", claims.Iss, "Iv23liExampleClientID")
+	}
+	if claims.Exp <= claims.Iat {
+		t.Errorf("exp (%d) must be after iat (%d)", claims.Exp, claims.Iat)
+	}
+}
+
+// TestBuildAppJWT_EmptyStringIssuerRejected guards against an empty Client
+// ID silently producing a JWT GitHub would reject anyway — fail fast here
+// instead.
+func TestBuildAppJWT_EmptyStringIssuerRejected(t *testing.T) {
+	key, _ := testAppPrivateKey(t)
+	if _, err := BuildAppJWT("", key); err == nil {
+		t.Fatal("expected an error for an empty string issuer, got nil")
+	}
+}
+
+// TestBuildAppJWT_InvalidIssuerTypeRejected guards against a caller passing
+// some other numeric type (e.g. int, int32) silently doing the wrong thing —
+// only int64 (App ID) and string (Client ID) are accepted.
+func TestBuildAppJWT_InvalidIssuerTypeRejected(t *testing.T) {
+	key, _ := testAppPrivateKey(t)
+	if _, err := BuildAppJWT(int64(12345), key); err != nil {
+		t.Fatalf("sanity check: int64 issuer should still work: %v", err)
+	}
+	if _, err := BuildAppJWT(int32(12345), key); err == nil {
+		t.Fatal("expected an error for an int32 issuer (only int64 and string are accepted), got nil")
 	}
 }
 

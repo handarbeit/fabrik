@@ -1403,6 +1403,123 @@ func TestReconcile_AppDeletedExternally_StateFileAppID_ReentersManifestFlow(t *t
 	}
 }
 
+// TestReconcile_ManifestFlowOptionsForwardedIdentically is the #1712
+// regression test guarding against the two ManifestFlowOptions{...}
+// construction sites in reconciler.go (first-run bootstrap and the
+// self-heal re-manifest path) silently diverging on AppName/AppHomepageURL/
+// RequiredPermissions: it drives both paths with the same non-default
+// Options values and asserts the ManifestFlowOptions runManifestFlow
+// actually receives are identical on the fields this issue added.
+func TestReconcile_ManifestFlowOptionsForwardedIdentically(t *testing.T) {
+	wantName := "fabrik-engine"
+	wantHomepage := "https://example.com/fabrik"
+	wantPerms := map[string]string{
+		"metadata":              "read",
+		"contents":              "write",
+		"organization_projects": "write",
+	}
+
+	captureStub := func(t *testing.T, appID int64, slug string, captured *ManifestFlowOptions) func(ctx context.Context, opts ManifestFlowOptions) (Credentials, error) {
+		return func(ctx context.Context, opts ManifestFlowOptions) (Credentials, error) {
+			*captured = opts
+			if err := savePrivateKey(opts.PrivateKeyPath, writeTestPrivateKeyPEM(t)); err != nil {
+				t.Fatalf("savePrivateKey in stub: %v", err)
+			}
+			creds := Credentials{AppID: appID, Slug: slug}
+			if err := saveCredentials(opts.AppStatePath, creds); err != nil {
+				t.Fatalf("saveCredentials in stub: %v", err)
+			}
+			return creds, nil
+		}
+	}
+
+	// First-run bootstrap path (loadOrBootstrapCredentials): no local
+	// credentials exist at all.
+	var firstRunOpts ManifestFlowOptions
+	func() {
+		dir := t.TempDir()
+		pemPath := filepath.Join(dir, "app-private-key.pem")
+		statePath := filepath.Join(dir, "app-state.json")
+
+		oldFlow := runManifestFlow
+		runManifestFlow = captureStub(t, 111, "first-run-app", &firstRunOpts)
+		defer func() { runManifestFlow = oldFlow }()
+
+		srv, _ := newFakeAppServer("first-run-app", []gh.AppInstallation{{ID: 1, Account: "handarbeit"}}, func() time.Time {
+			return time.Now().Add(time.Hour)
+		})
+		defer srv.Close()
+
+		if _, err := Reconcile(context.Background(), Options{
+			AppPrivateKeyPath: pemPath, AppStatePath: statePath, BaseURL: srv.URL,
+			AppName: wantName, AppHomepageURL: wantHomepage, RequiredPermissions: wantPerms,
+		}); err != nil {
+			t.Fatalf("Reconcile (first-run): %v", err)
+		}
+	}()
+
+	// Self-heal re-manifest path: AppID resolved from AppStatePath (not
+	// pinned), and identity validation fails (App deleted externally).
+	var selfHealOpts ManifestFlowOptions
+	func() {
+		dir := t.TempDir()
+		keyPath := filepath.Join(dir, "app-private-key.pem")
+		if err := savePrivateKey(keyPath, writeTestPrivateKeyPEM(t)); err != nil {
+			t.Fatalf("savePrivateKey: %v", err)
+		}
+		statePath := filepath.Join(dir, "app-state.json")
+		if err := saveCredentials(statePath, Credentials{AppID: 42, Slug: "old-app"}); err != nil {
+			t.Fatalf("saveCredentials: %v", err)
+		}
+
+		var appCalls int
+		mux := http.NewServeMux()
+		mux.HandleFunc("/app", func(w http.ResponseWriter, r *http.Request) {
+			appCalls++
+			if appCalls == 1 {
+				w.WriteHeader(http.StatusUnauthorized)
+				w.Write([]byte(`{"message":"app not found"}`))
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]interface{}{"slug": "self-healed-app"})
+		})
+		mux.HandleFunc("/app/installations", func(w http.ResponseWriter, r *http.Request) {
+			json.NewEncoder(w).Encode([]map[string]interface{}{})
+		})
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+
+		oldFlow := runManifestFlow
+		runManifestFlow = captureStub(t, 222, "self-healed-app", &selfHealOpts)
+		defer func() { runManifestFlow = oldFlow }()
+
+		if _, err := Reconcile(context.Background(), Options{
+			AppPrivateKeyPath: keyPath, AppStatePath: statePath, BaseURL: srv.URL,
+			AppName: wantName, AppHomepageURL: wantHomepage, RequiredPermissions: wantPerms,
+		}); err != nil {
+			t.Fatalf("Reconcile (self-heal): %v", err)
+		}
+	}()
+
+	if firstRunOpts.AppName != wantName || selfHealOpts.AppName != wantName {
+		t.Errorf("AppName: first-run=%q self-heal=%q, want both %q", firstRunOpts.AppName, selfHealOpts.AppName, wantName)
+	}
+	if firstRunOpts.AppHomepageURL != wantHomepage || selfHealOpts.AppHomepageURL != wantHomepage {
+		t.Errorf("AppHomepageURL: first-run=%q self-heal=%q, want both %q", firstRunOpts.AppHomepageURL, selfHealOpts.AppHomepageURL, wantHomepage)
+	}
+	if len(firstRunOpts.RequiredPermissions) != len(wantPerms) || len(selfHealOpts.RequiredPermissions) != len(wantPerms) {
+		t.Fatalf("RequiredPermissions: first-run=%+v self-heal=%+v, want both %+v", firstRunOpts.RequiredPermissions, selfHealOpts.RequiredPermissions, wantPerms)
+	}
+	for k, v := range wantPerms {
+		if firstRunOpts.RequiredPermissions[k] != v {
+			t.Errorf("first-run RequiredPermissions[%q] = %q, want %q", k, firstRunOpts.RequiredPermissions[k], v)
+		}
+		if selfHealOpts.RequiredPermissions[k] != v {
+			t.Errorf("self-heal RequiredPermissions[%q] = %q, want %q", k, selfHealOpts.RequiredPermissions[k], v)
+		}
+	}
+}
+
 // TestReconcile_StaleKeyAfterInterruptedSelfHeal_ReturnsRepairErrorNeverLoops
 // is the regression test for a review finding: RunManifestFlow persists
 // app-state.json (carrying the new AppID and PrivateKeyFingerprint) before

@@ -75,23 +75,44 @@ func base64URLEncode(data []byte) string {
 }
 
 // BuildAppJWT constructs and signs a short-lived (9 minute) RS256 JWT
-// asserting the given GitHub App ID, per GitHub's App-authentication flow
+// asserting the given GitHub App identity, per GitHub's App-authentication
+// flow
 // (https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app).
 // This JWT authenticates as the App itself — it is exchanged for a
 // per-installation access token via MintInstallationToken, never used
 // directly against ordinary REST/GraphQL endpoints.
 //
+// issuer must be either an int64 (the App's numeric ID) or a non-empty
+// string (the App's Client ID, e.g. "Iv23li…") — GitHub accepts both as the
+// JWT's "iss" claim (verified live 2026-09-13). Any other type, or an empty
+// string, is rejected before signing. Widening this parameter to `any`
+// (rather than a typed issuer value) keeps every existing int64 call site
+// compiling and behaving identically with zero source changes — see #1712.
+//
 // Hand-rolled rather than via a JWT library: GitHub's App-auth flow needs
 // exactly one fixed-shape token (header.payload signed with RS256), which
 // stdlib crypto/rsa + encoding/json + encoding/base64 covers directly,
 // consistent with this module's "minimize external dependencies" convention.
-func BuildAppJWT(appID int64, privateKey *rsa.PrivateKey) (string, error) {
+func BuildAppJWT(issuer any, privateKey *rsa.PrivateKey) (string, error) {
+	var iss any
+	switch v := issuer.(type) {
+	case int64:
+		iss = v
+	case string:
+		if v == "" {
+			return "", fmt.Errorf("BuildAppJWT: issuer string must not be empty")
+		}
+		iss = v
+	default:
+		return "", fmt.Errorf("BuildAppJWT: issuer must be an int64 App ID or a string Client ID, got %T", issuer)
+	}
+
 	now := time.Now()
 	header := map[string]string{"alg": "RS256", "typ": "JWT"}
-	claims := map[string]int64{
+	claims := map[string]any{
 		"iat": now.Add(-jwtClockSkew).Unix(),
 		"exp": now.Add(jwtValidity).Unix(),
-		"iss": appID,
+		"iss": iss,
 	}
 	headerJSON, err := json.Marshal(header)
 	if err != nil {

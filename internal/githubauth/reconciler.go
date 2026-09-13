@@ -134,6 +134,15 @@ type Options struct {
 	// BaseURL selects GitHub's API host. "" = production; tests point it at
 	// an httptest server.
 	BaseURL string
+	// AppName and AppHomepageURL are forwarded to RunManifestFlow's
+	// ManifestFlowOptions at both construction sites below (first-run
+	// bootstrap and the self-heal re-manifest path), unchanged. Empty
+	// (Pruefer's own default, unset) yields buildManifest's Pruefer-shaped
+	// defaults — see manifest.go's doc comment. A second caller (e.g. the
+	// engine, #1712) sets these to get its own App name/homepage instead of
+	// Pruefer's.
+	AppName        string
+	AppHomepageURL string
 	// RequiredPermissions is the permission set (#1709, R2) every
 	// installation Reconcile discovers or pins is checked against —
 	// compared to that installation's actually-granted permissions
@@ -663,6 +672,7 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 			creds, bootErr := runManifestFlow(ctx, ManifestFlowOptions{
 				BaseURL: opts.BaseURL, NoBrowser: opts.NoBrowser,
 				PrivateKeyPath: opts.AppPrivateKeyPath, AppStatePath: opts.AppStatePath, Logf: logf,
+				AppName: opts.AppName, AppHomepageURL: opts.AppHomepageURL, RequiredPermissions: opts.RequiredPermissions,
 			})
 			if bootErr != nil {
 				return nil, fmt.Errorf("app identity validation failed (%w) and re-creating the App also failed: %v", err, bootErr)
@@ -984,6 +994,7 @@ func loadOrBootstrapCredentials(ctx context.Context, opts Options, logf func(str
 		creds, err := runManifestFlow(ctx, ManifestFlowOptions{
 			BaseURL: opts.BaseURL, NoBrowser: opts.NoBrowser,
 			PrivateKeyPath: opts.AppPrivateKeyPath, AppStatePath: opts.AppStatePath, Logf: logf,
+			AppName: opts.AppName, AppHomepageURL: opts.AppHomepageURL, RequiredPermissions: opts.RequiredPermissions,
 		})
 		if err != nil {
 			return 0, nil, false, fmt.Errorf("first-run GitHub App setup: %w", err)

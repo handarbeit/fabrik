@@ -24,18 +24,21 @@ const defaultGitHubBaseURL = "https://api.github.com"
 const maxManifestExchangeResponseBytes = 1 << 20 // 1 MiB
 
 // defaultAppName is the name prefilled on GitHub's manifest-confirmation
-// page. GitHub lets the user rename it there before creating the App, so
-// this is a sensible default rather than a configurable option — see the
-// Plan's "no manifest-name config override" decision.
+// page for Pruefer's own default — a second caller (e.g. the engine, #1712)
+// overrides it via Options.AppName/ManifestFlowOptions.AppName. GitHub lets
+// the user rename it there before creating the App regardless, so even
+// Pruefer's own default is just a sensible starting point, not enforced.
 const defaultAppName = "pruefer"
 
 // defaultAppHomepageURL is the manifest's "url" field — the App's public
-// homepage link, shown on its GitHub App settings page. This is distinct
-// from "redirect_url" (the loopback callback), which stops existing the
-// moment the local manifest-flow server shuts down; reusing it here would
-// leave the created App's homepage permanently dead. No config knob for
-// this, matching the "no manifest-name config override" precedent above —
-// GitHub's own create page lets the user edit it before creating the App.
+// homepage link, shown on its GitHub App settings page — for Pruefer's own
+// default; a second caller overrides it via
+// Options.AppHomepageURL/ManifestFlowOptions.AppHomepageURL. This is
+// distinct from "redirect_url" (the loopback callback), which stops
+// existing the moment the local manifest-flow server shuts down; reusing it
+// here would leave the created App's homepage permanently dead. GitHub's
+// own create page lets the user edit the homepage before creating the App
+// regardless.
 const defaultAppHomepageURL = "https://github.com/handarbeit/fabrik"
 
 // manifestHTTPClient is package-level so tests can leave it as the default
@@ -85,8 +88,19 @@ func PrueferRequiredPermissions() map[string]string {
 }
 
 // buildManifest returns the JSON manifest GitHub's App-creation-from-manifest
-// flow expects, scoped to requiredPermissions (see its doc comment). No
-// default_events are requested and hook_attributes is omitted entirely —
+// flow expects. appName, appHomepageURL and permissions are caller-supplied
+// (Options.AppName/AppHomepageURL/RequiredPermissions, threaded through
+// ManifestFlowOptions — see RunManifestFlow); an empty appName, an empty
+// appHomepageURL, or a nil/empty permissions map falls back to
+// defaultAppName, defaultAppHomepageURL, or PrueferRequiredPermissions()
+// respectively, so Pruefer's own call sites (which never set these fields)
+// produce exactly today's manifest (R1/AC2). Reusing
+// Options.RequiredPermissions as the manifest's requested-permission set,
+// rather than a separate field, keeps "what a fresh App requests" and "what
+// an existing installation is verified against" (#1709's grant-verification
+// check) a single value per caller — see doc.go and #1712.
+//
+// No default_events are requested and hook_attributes is omitted entirely —
 // Pruefer V1 is polling-only (ADR-1113 §1, ADR-032), so there's no webhook
 // URL to supply, and GitHub requires hook_attributes.url whenever
 // hook_attributes is present at all, rejecting the whole manifest otherwise
@@ -95,13 +109,22 @@ func PrueferRequiredPermissions() map[string]string {
 // that field is the problem, which made this defect hard to diagnose; see
 // #1711). redirectURL is the loopback callback server's own URL, assigned
 // only after it starts listening (see runManifestCallbackServer).
-func buildManifest(redirectURL string) map[string]interface{} {
+func buildManifest(redirectURL, appName, appHomepageURL string, permissions map[string]string) map[string]interface{} {
+	if appName == "" {
+		appName = defaultAppName
+	}
+	if appHomepageURL == "" {
+		appHomepageURL = defaultAppHomepageURL
+	}
+	if len(permissions) == 0 {
+		permissions = PrueferRequiredPermissions()
+	}
 	return map[string]interface{}{
-		"name":                defaultAppName,
-		"url":                 defaultAppHomepageURL,
+		"name":                appName,
+		"url":                 appHomepageURL,
 		"redirect_url":        redirectURL,
 		"public":              false,
-		"default_permissions": PrueferRequiredPermissions(),
+		"default_permissions": permissions,
 		"default_events":      []string{},
 	}
 }
