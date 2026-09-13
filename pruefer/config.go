@@ -107,7 +107,26 @@ type Config struct {
 	// never needs a new token for an already-known owner — but it is a live
 	// call to GitHub (re-listing every installation's accessible repos),
 	// not a local re-intersection against a cached result.
-	WatchedRepos   []string      `reload:"live"` // "owner/repo"
+	WatchedRepos []string `reload:"live"` // "owner/repo"
+	// ServedAccounts is the R4/R5 allowlist of accounts this deployment is
+	// authorized to serve (handarbeit/fabrik#1722) — a new, independent key,
+	// deliberately never derived from WatchedRepos (which is optional and
+	// can legitimately be empty in "all-installations" mode while an
+	// operator still wants this allowlist active). When non-empty, an App
+	// installation whose account isn't in this list is actively removed
+	// (DELETE /app/installations/{id}) — not merely left unminted. Absent
+	// (the default) means no allowlist is configured: an installation
+	// outside watched_repos' named owners is still reported prominently
+	// (falling back to watched_repos as a report-only signal) but never
+	// deleted. Must include every account the operator wants served,
+	// including their own — there is no implicit self-exemption. See
+	// internal/githubauth.Options.ServedAccounts and
+	// adrs/1722-app-installation-trust-boundary.md.
+	//
+	// Tagged "live": a SIGHUP-triggered change triggers a fresh
+	// re-derivation (daemon.triggerRederivation), exactly like a
+	// WatchedRepos/MaxDerivedRepos edit — see execute.go's handleReload.
+	ServedAccounts []string      `reload:"live"` // "owner" (account login, not "owner/repo")
 	PollInterval   time.Duration `reload:"live"`
 	Model          string        `reload:"live"`
 	Effort         string        `reload:"live"`
@@ -248,6 +267,7 @@ type Config struct {
 // numeric fields, mirroring config.ProjectConfig's convention.
 type yamlConfig struct {
 	WatchedRepos            []string `yaml:"watched_repos"`
+	ServedAccounts          []string `yaml:"served_accounts"`
 	PollIntervalSec         *int     `yaml:"poll_interval_seconds"`
 	Model                   string   `yaml:"model"`
 	Effort                  string   `yaml:"effort"`
@@ -309,6 +329,7 @@ func loadYAMLConfig(path string) (yamlConfig, error) {
 // flagValues holds the raw values parsed by LoadConfig's flag.FlagSet.
 type flagValues struct {
 	repos                   string
+	servedAccounts          string
 	pollIntervalSec         int
 	model                   string
 	effort                  string
@@ -350,6 +371,7 @@ func LoadConfig(args []string) (Config, error) {
 	fs := flag.NewFlagSet("pruefer", flag.ContinueOnError)
 	var fv flagValues
 	fs.StringVar(&fv.repos, "repos", "", "Comma-separated list of owner/repo to watch")
+	fs.StringVar(&fv.servedAccounts, "served-accounts", "", "Comma-separated list of account logins this deployment is authorized to serve; an App installation outside this list is deleted (R4). Empty (default) means no allowlist is configured — an unrecognized installation is reported, never deleted")
 	fs.IntVar(&fv.pollIntervalSec, "poll-interval", 0, "Poll interval in seconds")
 	fs.StringVar(&fv.model, "model", "", "Claude model to use for reviews")
 	fs.StringVar(&fv.effort, "effort", "", "Claude thinking effort level (low, medium, high, max)")
@@ -402,6 +424,7 @@ func LoadConfig(args []string) (Config, error) {
 
 	cfg := Config{
 		WatchedRepos:      yc.WatchedRepos,
+		ServedAccounts:    yc.ServedAccounts,
 		PollInterval:      DefaultPollInterval,
 		Model:             DefaultModel,
 		Effort:            DefaultEffort,
