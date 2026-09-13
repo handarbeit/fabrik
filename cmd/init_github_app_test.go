@@ -323,6 +323,25 @@ func TestRunInit_GitHubApp_AdoptPairMismatch(t *testing.T) {
 	}
 }
 
+func TestRunInit_GitHubApp_RejectsProjectURL(t *testing.T) {
+	dir := t.TempDir()
+	chdirTest(t, dir)
+
+	// Review finding (PR #1731): --github-app sets owner from --owner, same
+	// as --create-board does — combining it with a project-URL positional
+	// argument (which names its own, possibly different, owner) risked
+	// silently writing a .fabrik/config.yaml whose owner and project belong
+	// to different accounts. No network call should happen — this must be
+	// rejected by flag validation before runGitHubAppSetup ever runs.
+	err := runInit([]string{"--github-app", "--owner", "myorg", "https://github.com/orgs/otherorg/projects/5"})
+	if err == nil {
+		t.Fatal("expected an error when --github-app is combined with a <project-url> argument")
+	}
+	if !strings.Contains(err.Error(), "--github-app") || !strings.Contains(err.Error(), "project-url") {
+		t.Errorf("error %q should name both --github-app and the project-url argument", err.Error())
+	}
+}
+
 func TestRunInit_GitHubAppFlags_RequireGitHubApp(t *testing.T) {
 	dir := t.TempDir()
 	chdirTest(t, dir)

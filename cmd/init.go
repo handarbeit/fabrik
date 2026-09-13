@@ -318,7 +318,8 @@ func runInit(args []string) error {
 		fmt.Fprintf(fset.Output(), "                   A GitHub Enterprise Server host is also accepted when\n")
 		fmt.Fprintf(fset.Output(), "                   --ghes-host or FABRIK_GHES_HOST is set.\n")
 		fmt.Fprintf(fset.Output(), "                   Not used together with --create-board, which creates a\n")
-		fmt.Fprintf(fset.Output(), "                   board rather than linking to an existing one.\n\n")
+		fmt.Fprintf(fset.Output(), "                   board rather than linking to an existing one, or with --github-app,\n")
+		fmt.Fprintf(fset.Output(), "                   which sets owner/project from --owner instead.\n\n")
 		fmt.Fprintf(fset.Output(), "                   --github-app drives guided GitHub App auth setup (register via\n")
 		fmt.Fprintf(fset.Output(), "                   the manifest flow, or adopt an existing App with --github-app-id/\n")
 		fmt.Fprintf(fset.Output(), "                   --github-app-private-key-path), verifies the installation's\n")
@@ -337,6 +338,11 @@ func runInit(args []string) error {
 	}
 	if *createBoard && fset.NArg() == 1 {
 		return fmt.Errorf("init: --create-board creates a new project board and cannot be combined with a <project-url> argument, which links to an existing one")
+	}
+	if *githubApp && fset.NArg() == 1 {
+		return fmt.Errorf("init: --github-app sets owner/project from --owner (and, with --create-board, from the board it creates) and cannot be combined with a <project-url> argument — " +
+			"the two could name different owners, silently writing a .fabrik/config.yaml whose owner and project belong to different accounts; run `fabrik init --github-app --owner <org> ...` " +
+			"first, then `fabrik init <project-url>` separately (with --force) to link an existing board under the same owner")
 	}
 	if *createBoard && *ownerFlag == "" {
 		return fmt.Errorf("init: --create-board requires --owner")
