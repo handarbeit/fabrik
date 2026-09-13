@@ -114,6 +114,8 @@ func Execute() error {
 		AppInstallationID:   cfg.AppInstallationID,
 		AppPrivateKeyPath:   cfg.AppPrivateKeyPath,
 		AppStatePath:        cfg.AppStatePath,
+		AppName:             cfg.AppName,
+		AppHomepageURL:      cfg.AppHomepageURL,
 		WatchedRepos:        cfg.WatchedRepos,
 		ServedAccounts:      cfg.ServedAccounts,
 		MaxDerivedRepos:     cfg.MaxDerivedRepos,

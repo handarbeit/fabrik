@@ -200,6 +200,23 @@ type Config struct {
 	// AppStatePath is where the auth reconciler persists its own non-key
 	// metadata — see DefaultAppStatePath.
 	AppStatePath string `reload:"restart"`
+	// AppName is the display name requested when a manifest-flow-created
+	// App is registered with GitHub. Empty (the default) falls back to
+	// internal/githubauth's own defaultAppName ("pruefer") — see
+	// Options.AppName. GitHub App names are globally unique: an operator
+	// running more than one Pruefer deployment must set a distinct value
+	// per deployment, or the second App's manifest creation collides with
+	// the first (see adrs/1722-app-installation-trust-boundary.md).
+	// Restart-only: it governs which App identity Reconcile resolves (and,
+	// on first run, which name the manifest flow requests) at startup, not
+	// something a reload can safely re-derive.
+	AppName string `reload:"restart"`
+	// AppHomepageURL is the homepage URL requested when a manifest-flow-
+	// created App is registered with GitHub. Empty (the default) falls
+	// back to internal/githubauth's own defaultAppHomepageURL — see
+	// Options.AppHomepageURL. Restart-only, for the same reason as AppName
+	// above.
+	AppHomepageURL string `reload:"restart"`
 	// NoBrowser skips attempting to open a local browser during first-run
 	// GitHub App manifest setup — the setup URL is always printed
 	// regardless. Set this in headless/SSH/CI environments where no local
@@ -282,6 +299,8 @@ type yamlConfig struct {
 	AppPrivateKeyPath       string   `yaml:"github_app_private_key_path"`
 	AppInstallationID       *int64   `yaml:"github_app_installation_id"`
 	AppStatePath            string   `yaml:"github_app_state_path"`
+	AppName                 string   `yaml:"github_app_name"`
+	AppHomepageURL          string   `yaml:"github_app_homepage_url"`
 	NoBrowser               *bool    `yaml:"no_browser"`
 	TUI                     *bool    `yaml:"tui"`
 	LogFile                 *string  `yaml:"log_file"`
@@ -496,6 +515,16 @@ func LoadConfig(args []string) (Config, error) {
 	}
 	if yc.AppStatePath != "" {
 		cfg.AppStatePath = yc.AppStatePath
+	}
+	if yc.AppName != "" {
+		trimmed := strings.TrimSpace(yc.AppName)
+		if trimmed == "" {
+			return Config{}, fmt.Errorf("github_app_name: must not be empty or whitespace-only")
+		}
+		cfg.AppName = trimmed
+	}
+	if yc.AppHomepageURL != "" {
+		cfg.AppHomepageURL = yc.AppHomepageURL
 	}
 	if yc.NoBrowser != nil {
 		cfg.NoBrowser = *yc.NoBrowser
