@@ -112,7 +112,9 @@ func BuildAppJWT(appID int64, privateKey *rsa.PrivateKey) (string, error) {
 }
 
 // AppInstallation represents a single installation of a GitHub App, as
-// returned by GET /app/installations.
+// returned by both GET /app/installations (list) and
+// GET /app/installations/{id} (single) — GitHub returns the same resource
+// shape from either endpoint.
 type AppInstallation struct {
 	ID      int64  // Installation ID, needed to mint an installation access token.
 	Account string // Login of the org/user the App is installed on.
@@ -121,6 +123,16 @@ type AppInstallation struct {
 	// actual subset is only discoverable via FetchInstallationRepositories,
 	// which requires an installation access token (not the App's JWT).
 	RepositorySelection string
+	// Permissions is the installation's actually-granted permission set
+	// (e.g. {"issues": "write", "contents": "read"}), as reported by
+	// GitHub — distinct from GET /app's permissions, which report only what
+	// the App *requests*. An App's requested permissions do not take effect
+	// on an existing installation until the installation owner approves the
+	// resulting permission-change request, so this field (not GET /app's)
+	// is the only reliable source for "what can this installation's token
+	// actually do." See internal/githubauth's grant-verification check
+	// (ADR-1709).
+	Permissions map[string]string
 }
 
 // appRequest performs a JWT-authenticated GitHub App API request (installation
@@ -199,6 +211,28 @@ func fetchAppPaginated[T any](fetchPage func(page int) ([]T, error)) (items []T,
 	return items, true, nil
 }
 
+// rawInstallation is the wire shape GitHub returns for one installation from
+// both GET /app/installations (list) and GET /app/installations/{id}
+// (single) — shared so both endpoints decode identically and can never drift
+// on which fields are read.
+type rawInstallation struct {
+	ID      int64 `json:"id"`
+	Account struct {
+		Login string `json:"login"`
+	} `json:"account"`
+	RepositorySelection string            `json:"repository_selection"`
+	Permissions         map[string]string `json:"permissions"`
+}
+
+func (raw rawInstallation) toAppInstallation() AppInstallation {
+	return AppInstallation{
+		ID:                  raw.ID,
+		Account:             raw.Account.Login,
+		RepositorySelection: raw.RepositorySelection,
+		Permissions:         raw.Permissions,
+	}
+}
+
 // FetchAppInstallations lists every installation of the GitHub App
 // authenticated by jwt via GET /app/installations. Used for dynamic
 // installation discovery: Pruefer watches whatever repos the App is
@@ -215,13 +249,6 @@ func fetchAppPaginated[T any](fetchPage func(page int) ([]T, error)) (items []T,
 // spurious guided-install prompt — callers must check truncated rather than
 // assume completeness.
 func FetchAppInstallations(baseURL, jwt string) ([]AppInstallation, bool, error) {
-	type rawInstallation struct {
-		ID      int64 `json:"id"`
-		Account struct {
-			Login string `json:"login"`
-		} `json:"account"`
-		RepositorySelection string `json:"repository_selection"`
-	}
 	raw, truncated, err := fetchAppPaginated(func(page int) ([]rawInstallation, error) {
 		var chunk []rawInstallation
 		path := fmt.Sprintf("/app/installations?per_page=%d&page=%d", appFetchPageSize, page)
@@ -238,9 +265,28 @@ func FetchAppInstallations(baseURL, jwt string) ([]AppInstallation, bool, error)
 	}
 	out := make([]AppInstallation, len(raw))
 	for i, inst := range raw {
-		out[i] = AppInstallation{ID: inst.ID, Account: inst.Account.Login, RepositorySelection: inst.RepositorySelection}
+		out[i] = inst.toAppInstallation()
 	}
 	return out, truncated, nil
+}
+
+// FetchAppInstallation fetches a single installation by ID via
+// GET /app/installations/{installation_id}, JWT-authenticated. Unlike
+// FetchAppInstallations (the list endpoint), this is the only call shape
+// that works for a caller that already knows one specific installation ID
+// without enumerating every installation the App has — notably Pruefer's
+// pinned-installation compat mode (github_app_installation_id), which never
+// calls the list endpoint at all. Returns the installation's granted
+// Permissions alongside its other fields — see AppInstallation's doc
+// comment on why that field, not GET /app's, is the one that matters for
+// grant verification.
+func FetchAppInstallation(baseURL, jwt string, installationID int64) (AppInstallation, error) {
+	var raw rawInstallation
+	path := fmt.Sprintf("/app/installations/%d", installationID)
+	if err := appRequest("GET", baseURL, path, jwt, &raw); err != nil {
+		return AppInstallation{}, fmt.Errorf("fetching installation %d: %w", installationID, err)
+	}
+	return raw.toAppInstallation(), nil
 }
 
 // FetchInstallationRepositories lists the repositories an installation
