@@ -1,13 +1,19 @@
 package cmd
 
 import (
+	"encoding/json"
+	"fmt"
+	"io"
 	"io/fs"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	gh "github.com/handarbeit/fabrik/github"
 	fabrikplugin "github.com/handarbeit/fabrik/plugin"
 	"github.com/handarbeit/fabrik/stages"
 )
@@ -353,6 +359,104 @@ func TestRunInit_RejectsInvalidURL(t *testing.T) {
 		if err := runInit(tc.args); err == nil {
 			t.Errorf("expected error for %s (%v), got nil", tc.desc, tc.args)
 		}
+	}
+}
+
+func TestRunInit_CreateBoardFlagValidation(t *testing.T) {
+	cases := []struct {
+		args []string
+		desc string
+	}{
+		{[]string{"--create-board", "https://github.com/orgs/foo/projects/1"}, "create-board combined with project URL"},
+		{[]string{"--create-board"}, "create-board missing --owner and --repo"},
+		{[]string{"--create-board", "--owner", "acme"}, "create-board missing --repo"},
+		{[]string{"--create-board", "--repo", "widgets"}, "create-board missing --owner"},
+	}
+	for _, tc := range cases {
+		if err := runInit(tc.args); err == nil {
+			t.Errorf("expected error for %s (%v), got nil", tc.desc, tc.args)
+		}
+	}
+}
+
+// TestRunInit_CreateBoardRefusedWhenAlreadyConfigured is the regression test
+// for the review finding on PR #1718: without a pre-flight check,
+// --create-board would create a brand-new GitHub Project even when
+// .fabrik/config.yaml already points at one, then either silently skip
+// writing the new board's details (writeConfigTemplate's own
+// no-op-without-force) or, on a repeat run, create yet another duplicate
+// board. The refusal must fire before any network call — this test supplies
+// no token and no reachable GitHub client, so a network attempt would fail
+// with a different, token-related error rather than the refusal message.
+func TestRunInit_CreateBoardRefusedWhenAlreadyConfigured(t *testing.T) {
+	dir := t.TempDir()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(orig) //nolint
+
+	if err := os.MkdirAll(".fabrik", 0755); err != nil {
+		t.Fatal(err)
+	}
+	existing := "owner: acme\nproject: 5\n"
+	if err := os.WriteFile(".fabrik/config.yaml", []byte(existing), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	err = runInit([]string{"--create-board", "--owner", "acme", "--repo", "widgets"})
+	if err == nil {
+		t.Fatal("expected --create-board to be refused when .fabrik/config.yaml is already configured, got nil")
+	}
+	if !strings.Contains(err.Error(), "already configures") {
+		t.Errorf("error %q does not explain the refusal", err.Error())
+	}
+
+	got, readErr := os.ReadFile(".fabrik/config.yaml")
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != existing {
+		t.Errorf("existing config.yaml was modified despite the refusal; want %q, got %q", existing, string(got))
+	}
+}
+
+// TestRunInit_CreateBoardForceOverridesAlreadyConfiguredRefusal confirms
+// --force opts back into the pre-#1718-review behavior: the refusal above is
+// bypassed and --create-board proceeds (immediately hitting the
+// token-loading step here, since no real GitHub credentials are available in
+// this test — proving the guard, not the full create flow, is what --force
+// disables).
+func TestRunInit_CreateBoardForceOverridesAlreadyConfiguredRefusal(t *testing.T) {
+	dir := t.TempDir()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(orig) //nolint
+
+	t.Setenv("FABRIK_TOKEN", "")
+	t.Setenv("GITHUB_TOKEN", "")
+
+	if err := os.MkdirAll(".fabrik", 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(".fabrik/config.yaml", []byte("owner: acme\nproject: 5\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	err = runInit([]string{"--force", "--create-board", "--owner", "acme", "--repo", "widgets"})
+	if err == nil {
+		t.Fatal("expected an error (no GitHub token available in test), got nil")
+	}
+	if strings.Contains(err.Error(), "already configures") {
+		t.Errorf("--force should have bypassed the already-configured refusal, got: %v", err)
 	}
 }
 
@@ -798,5 +902,223 @@ func TestRunInit_HaltsOnGitExcludeFailure(t *testing.T) {
 
 	if err := runInit([]string{}); err == nil {
 		t.Fatal("expected runInit to fail when writeGitExclude fails")
+	}
+}
+
+// createBoardTestServer returns an httptest server that fakes just enough of
+// the GraphQL surface createBoardCore drives, routing on a substring of the
+// query text (each call site's query shape is distinct enough to
+// disambiguate). ownerTypename is "Organization" or "User", letting tests
+// exercise both R7 branches. createCalled, if non-nil, records whether
+// createProjectV2 fired — used to prove a local (no-network) failure never
+// creates a board (the orphan-resource review finding on PR #1718).
+func createBoardTestServer(t *testing.T, ownerTypename string, statusOptions []map[string]interface{}, createCalled *bool) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Query string `json:"query"`
+		}
+		data, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(data, &body)
+
+		var resp map[string]interface{}
+		switch {
+		case strings.Contains(body.Query, "repositoryOwner(login:"):
+			resp = map[string]interface{}{
+				"data": map[string]interface{}{
+					"repositoryOwner": map[string]interface{}{
+						"__typename": ownerTypename,
+						"id":         "O_OWNER1",
+					},
+				},
+			}
+		case strings.Contains(body.Query, "repository(owner: $owner, name: $name)"):
+			resp = map[string]interface{}{
+				"data": map[string]interface{}{
+					"repository": map[string]interface{}{"id": "R_REPO1"},
+				},
+			}
+		case strings.Contains(body.Query, "createProjectV2(input:"):
+			if createCalled != nil {
+				*createCalled = true
+			}
+			resp = map[string]interface{}{
+				"data": map[string]interface{}{
+					"createProjectV2": map[string]interface{}{
+						"projectV2": map[string]interface{}{"id": "PVT_NEW1", "number": 42},
+					},
+				},
+			}
+		case strings.Contains(body.Query, "shortDescription: $shortDescription"):
+			resp = map[string]interface{}{
+				"data": map[string]interface{}{
+					"updateProjectV2": map[string]interface{}{
+						"projectV2": map[string]interface{}{"id": "PVT_NEW1"},
+					},
+				},
+			}
+		case strings.Contains(body.Query, "field(name: \"Status\")"):
+			resp = map[string]interface{}{
+				"data": map[string]interface{}{
+					"node": map[string]interface{}{
+						"field": map[string]interface{}{
+							"id":      "FIELD_STATUS",
+							"options": statusOptions,
+						},
+					},
+				},
+			}
+		case strings.Contains(body.Query, "updateProjectV2Field(input:"):
+			resp = map[string]interface{}{
+				"data": map[string]interface{}{
+					"updateProjectV2Field": map[string]interface{}{
+						"projectV2Field": map[string]interface{}{"id": "FIELD_STATUS"},
+					},
+				},
+			}
+		default:
+			t.Fatalf("unexpected GraphQL query: %s", body.Query)
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+}
+
+func writeMinimalStage(t *testing.T, dir, name string, order int) {
+	t.Helper()
+	content := fmt.Sprintf("name: %s\norder: %d\nprompt: do the thing\n", name, order)
+	if err := os.WriteFile(filepath.Join(dir, strings.ToLower(name)+".yaml"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCreateBoardCore_Success(t *testing.T) {
+	srv := createBoardTestServer(t, "Organization", []map[string]interface{}{
+		{"id": "OPT_1", "name": "Todo", "color": "GRAY", "description": ""},
+		{"id": "OPT_2", "name": "In Progress", "color": "BLUE", "description": ""},
+		{"id": "OPT_3", "name": "Done", "color": "GREEN", "description": ""},
+	}, nil)
+	defer srv.Close()
+
+	stagesDir := t.TempDir()
+	writeMinimalStage(t, stagesDir, "Specify", 0)
+	writeMinimalStage(t, stagesDir, "Implement", 1)
+
+	client := gh.NewClientWithBaseURL("token", srv.URL)
+	project, ownerType, err := createBoardCore(client, "acme", "widgets", "", stagesDir)
+	if err != nil {
+		t.Fatalf("createBoardCore: %v", err)
+	}
+	if project != "42" {
+		t.Errorf("project = %q, want 42", project)
+	}
+	if ownerType != "organization" {
+		t.Errorf("ownerType = %q, want organization", ownerType)
+	}
+}
+
+func TestCreateBoardCore_RefusesUserOwned(t *testing.T) {
+	srv := createBoardTestServer(t, "User", nil, nil)
+	defer srv.Close()
+
+	stagesDir := t.TempDir()
+	writeMinimalStage(t, stagesDir, "Specify", 0)
+
+	client := gh.NewClientWithBaseURL("token", srv.URL)
+	if _, _, err := createBoardCore(client, "someuser", "widgets", "", stagesDir); err == nil {
+		t.Fatal("expected refusal for user-owned target")
+	} else if !strings.Contains(err.Error(), "organization-only") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// TestCreateBoardCore_NoStageConfigs is the orphan-resource review finding
+// (PR #1718): a missing/empty stage configs directory is a purely local,
+// no-network condition, and must be caught before CreateProjectV2 ever
+// fires — otherwise a real project gets created on GitHub with nothing
+// pointing back at it (runInit never reaches writeConfigTemplate on error)
+// and no guard against a retry creating a second, separate project.
+func TestCreateBoardCore_NoStageConfigs(t *testing.T) {
+	var created bool
+	srv := createBoardTestServer(t, "Organization", []map[string]interface{}{
+		{"id": "OPT_1", "name": "Todo", "color": "GRAY", "description": ""},
+	}, &created)
+	defer srv.Close()
+
+	stagesDir := t.TempDir()
+	// No stage YAML files written — requiredStageColumnNames returns empty.
+
+	client := gh.NewClientWithBaseURL("token", srv.URL)
+	if _, _, err := createBoardCore(client, "acme", "widgets", "", stagesDir); err == nil {
+		t.Fatal("expected error when no stage configs are present")
+	}
+	if created {
+		t.Error("createProjectV2 must not be called when there are no stage configs — this would orphan a real board")
+	}
+}
+
+// TestCreateBoardCore_PostCreateFailureNamesTheOrphanedBoard covers the
+// remaining orphan-resource case that can't be avoided by reordering (a
+// network failure genuinely occurring after the project already exists):
+// the returned error must name the board's number/URL and steer the
+// operator at the existing `fabrik init <project-url>` link-to-existing-
+// board flow, rather than reporting a bare underlying error with no trace
+// of the board GitHub actually created (review finding, PR #1718).
+func TestCreateBoardCore_PostCreateFailureNamesTheOrphanedBoard(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Query string `json:"query"`
+		}
+		data, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(data, &body)
+
+		var resp map[string]interface{}
+		switch {
+		case strings.Contains(body.Query, "repositoryOwner(login:"):
+			resp = map[string]interface{}{
+				"data": map[string]interface{}{
+					"repositoryOwner": map[string]interface{}{"__typename": "Organization", "id": "O_OWNER1"},
+				},
+			}
+		case strings.Contains(body.Query, "repository(owner: $owner, name: $name)"):
+			resp = map[string]interface{}{
+				"data": map[string]interface{}{"repository": map[string]interface{}{"id": "R_REPO1"}},
+			}
+		case strings.Contains(body.Query, "createProjectV2(input:"):
+			resp = map[string]interface{}{
+				"data": map[string]interface{}{
+					"createProjectV2": map[string]interface{}{
+						"projectV2": map[string]interface{}{"id": "PVT_NEW1", "number": 42},
+					},
+				},
+			}
+		case strings.Contains(body.Query, "shortDescription: $shortDescription"):
+			resp = map[string]interface{}{
+				"data": map[string]interface{}{"updateProjectV2": map[string]interface{}{"projectV2": map[string]interface{}{"id": "PVT_NEW1"}}},
+			}
+		case strings.Contains(body.Query, "field(name: \"Status\")"):
+			// Simulate a transient failure fetching the Status field of the
+			// board that was already created above.
+			w.WriteHeader(500)
+			w.Write([]byte("server error"))
+			return
+		default:
+			t.Fatalf("unexpected GraphQL query: %s", body.Query)
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	stagesDir := t.TempDir()
+	writeMinimalStage(t, stagesDir, "Specify", 0)
+
+	client := gh.NewClientWithBaseURL("token", srv.URL)
+	_, _, err := createBoardCore(client, "acme", "widgets", "", stagesDir)
+	if err == nil {
+		t.Fatal("expected error from FetchStatusField failure")
+	}
+	for _, want := range []string{"#42", "https://github.com/orgs/acme/projects/42", "fabrik init", "do not re-run --create-board"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should name the orphaned board and steer to the link-existing-board flow (missing %q): %v", want, err)
+		}
 	}
 }

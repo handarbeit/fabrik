@@ -86,6 +86,13 @@ var wireContractRegistry = []wireOperation{
 	{"archiveProjectItemMutation", []string{archiveProjectItemMutation}},
 	{"fetchStatusFieldQuery", []string{fetchStatusFieldQuery}},
 
+	// project_admin.go
+	{"repositoryOwnerQuery", []string{repositoryOwnerQuery}},
+	{"repositoryIDForBoardQuery", []string{repositoryIDForBoardQuery}},
+	{"createProjectV2Mutation", []string{createProjectV2Mutation}},
+	{"updateProjectV2ShortDescriptionMutation", []string{updateProjectV2ShortDescriptionMutation}},
+	{"updateProjectV2FieldMutation", []string{updateProjectV2FieldMutation}},
+
 	// comments.go
 	{"resolveReviewThreadMutation", []string{resolveReviewThreadMutation}},
 }

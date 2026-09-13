@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/handarbeit/fabrik/config"
+	gh "github.com/handarbeit/fabrik/github"
 	fabrikplugin "github.com/handarbeit/fabrik/plugin"
 	"github.com/handarbeit/fabrik/stages"
 	"github.com/mattn/go-isatty"
@@ -129,7 +130,10 @@ func splitPathSegments(p string) []string {
 }
 
 // writeConfigTemplate writes the .fabrik/config.yaml template.
-// owner, project, ownerType, user are pre-populated values (from a URL or flag).
+// owner, repoFlag, project, ownerType, user are pre-populated values (from a
+// URL or flag). repoFlag is only known on the --create-board path (a project
+// URL carries no repo); the plain URL-provided flow always passes "" for it,
+// same as before this parameter existed.
 // ghesHost is the resolved --ghes-host/FABRIK_GHES_HOST value, or "" if none
 // configured; it is persisted into the written config regardless of which
 // branch below runs, so an operator who supplies it once to `init` does not
@@ -137,7 +141,7 @@ func splitPathSegments(p string) []string {
 // If any are empty and stdin is a TTY, the user is prompted for missing values.
 // When owner is non-empty (URL provided), only user is prompted (if empty and TTY).
 // When owner is empty, the full interactive prompt runs for all four fields.
-func writeConfigTemplate(owner, project, ownerType, user, ghesHost string, force bool) error {
+func writeConfigTemplate(owner, repoFlag, project, ownerType, user, ghesHost string, force bool) error {
 	configPath := ".fabrik/config.yaml"
 
 	if !force {
@@ -153,11 +157,12 @@ func writeConfigTemplate(owner, project, ownerType, user, ghesHost string, force
 
 	switch {
 	case owner != "":
-		// URL-provided flow: owner/project/ownerType are known; only prompt for user.
+		// URL-provided (or --create-board) flow: owner/project/ownerType are
+		// known; only prompt for user.
 		if user == "" && isTTY {
 			user = promptForUser()
 		}
-		content = buildConfigWithValues(owner, "", project, ownerType, user, ghesHost)
+		content = buildConfigWithValues(owner, repoFlag, project, ownerType, user, ghesHost)
 	case isTTY:
 		// Full interactive flow: prompt for all four required fields.
 		o, repo, proj, u := promptRequiredValues()
@@ -255,6 +260,11 @@ func runInit(args []string) error {
 	force := fset.Bool("force", false, "Overwrite existing files")
 	userFlag := fset.String("user", "", "Your GitHub username")
 	ghesHostFlag := fset.String("ghes-host", "", "GitHub Enterprise Server hostname, e.g. github.example.com (also FABRIK_GHES_HOST)")
+	createBoard := fset.Bool("create-board", false, "Create a new GitHub Project (v2) board from the just-extracted stage configs, linked to --owner/--repo. Organization-owned repos only (see #770). Mutually exclusive with the positional <project-url> argument.")
+	ownerFlag := fset.String("owner", "", "GitHub org (owner) to create the board under; required with --create-board")
+	repoFlag := fset.String("repo", "", "GitHub repository to link the new board to; required with --create-board")
+	titleFlag := fset.String("title", "", "Project board title for --create-board (default: \"<repo> Fabrik Pipeline\")")
+	tokenFlag := fset.String("token", "", "GitHub token for --create-board (or FABRIK_TOKEN / GITHUB_TOKEN)")
 
 	fset.Usage = func() {
 		fmt.Fprintf(fset.Output(), "Usage: fabrik init [<project-url>] [flags]\n\n")
@@ -264,7 +274,9 @@ func runInit(args []string) error {
 		fmt.Fprintf(fset.Output(), "                   Forms: https://github.com/orgs/<org>/projects/<N>\n")
 		fmt.Fprintf(fset.Output(), "                          https://github.com/users/<user>/projects/<N>\n")
 		fmt.Fprintf(fset.Output(), "                   A GitHub Enterprise Server host is also accepted when\n")
-		fmt.Fprintf(fset.Output(), "                   --ghes-host or FABRIK_GHES_HOST is set.\n\n")
+		fmt.Fprintf(fset.Output(), "                   --ghes-host or FABRIK_GHES_HOST is set.\n")
+		fmt.Fprintf(fset.Output(), "                   Not used together with --create-board, which creates a\n")
+		fmt.Fprintf(fset.Output(), "                   board rather than linking to an existing one.\n\n")
 		fmt.Fprintf(fset.Output(), "Flags:\n")
 		fset.PrintDefaults()
 	}
@@ -275,6 +287,40 @@ func runInit(args []string) error {
 	if fset.NArg() > 1 {
 		return fmt.Errorf("init: too many positional arguments (expected at most one project URL)")
 	}
+	if *createBoard && fset.NArg() == 1 {
+		return fmt.Errorf("init: --create-board creates a new project board and cannot be combined with a <project-url> argument, which links to an existing one")
+	}
+	if *createBoard && *ownerFlag == "" {
+		return fmt.Errorf("init: --create-board requires --owner")
+	}
+	if *createBoard && *repoFlag == "" {
+		return fmt.Errorf("init: --create-board requires --repo")
+	}
+	if *createBoard && !*force {
+		// R1 review finding (PR #1718): without this guard, a repo that's
+		// already onboarded (owner/project already set) would still create a
+		// brand-new GitHub Project — and then either silently skip writing it
+		// into .fabrik/config.yaml (writeConfigTemplate's own no-op-without
+		// --force below leaves the new board dangling, pointed at only by a
+		// stdout line) or, on a second run, create a second, separate board.
+		// Refuse before any network call fires; --force opts into overwriting
+		// the existing config with the new board's details.
+		existing, err := config.LoadProjectConfig()
+		if err != nil {
+			return err
+		}
+		if existing.Owner != "" || existing.ProjectNum != nil {
+			projectDesc := "unset"
+			if existing.ProjectNum != nil {
+				projectDesc = strconv.Itoa(*existing.ProjectNum)
+			}
+			return fmt.Errorf("init: --create-board refused — .fabrik/config.yaml already configures owner=%q project=%s; "+
+				"creating a new board here would either be silently discarded (config left pointing at the old board) or, "+
+				"on a repeat run, create yet another duplicate board; pass --force to create the new board and overwrite "+
+				"the existing config with it, or drop --create-board and edit .fabrik/config.yaml by hand to link an "+
+				"existing board instead", existing.Owner, projectDesc)
+		}
+	}
 
 	// Resolve GHES host from flag > FABRIK_GHES_HOST env var. No config.yaml
 	// fallback — it doesn't exist yet at init time — so a zero-value
@@ -282,7 +328,7 @@ func runInit(args []string) error {
 	ghesHost := resolveGHESHost(*ghesHostFlag, config.ProjectConfig{})
 
 	// Parse URL if provided — must happen before any filesystem writes.
-	var owner, project, ownerType string
+	var owner, project, ownerType, repo string
 	if fset.NArg() == 1 {
 		var err error
 		owner, project, ownerType, err = parseProjectURL(fset.Arg(0), ghesHost)
@@ -378,8 +424,23 @@ func runInit(args []string) error {
 		fmt.Printf("  plugin: %d skill files written\n", pluginWrote)
 	}
 
+	// R1: create a fully-configured board from the stage configs just
+	// written above, before .fabrik/config.yaml is generated so its
+	// owner/project/owner_type can be pre-filled from the result — the same
+	// role the URL-provided flow's owner/project/ownerType play below.
+	if *createBoard {
+		number, resolvedOwnerType, err := runCreateBoard(*ownerFlag, *repoFlag, *titleFlag, ghesHost, *tokenFlag, stagesDir)
+		if err != nil {
+			return fmt.Errorf("--create-board: %w", err)
+		}
+		owner = *ownerFlag
+		repo = *repoFlag
+		project = number
+		ownerType = resolvedOwnerType
+	}
+
 	// Generate .fabrik/config.yaml template
-	if err := writeConfigTemplate(owner, project, ownerType, *userFlag, ghesHost, *force); err != nil {
+	if err := writeConfigTemplate(owner, repo, project, ownerType, *userFlag, ghesHost, *force); err != nil {
 		return err
 	}
 
@@ -393,6 +454,120 @@ func runInit(args []string) error {
 	fmt.Println("\nFabrik is ready. Stage configs and plugin skills are in .fabrik/")
 	fmt.Println("Edit .fabrik/config.yaml with your project settings, then run fabrik.")
 	return nil
+}
+
+// runCreateBoard implements R1: it creates a new GitHub Project (v2) board
+// under owner, linked to owner/repo, with Status options set from the stage
+// configs already written to stagesDir (by the caller, before this runs) —
+// in stage Order, so the board and config can never disagree from minute
+// one. title defaults to "<repo> Fabrik Pipeline" when empty.
+//
+// Organization-only (R7): the owner is resolved fresh via ResolveOwner (a
+// brand-new board has no existing project to read OwnerType from, unlike
+// repair's path) and refused before any mutation is attempted.
+//
+// The freshly created board's default Status field (Todo/In Progress/Done,
+// GitHub's own project template) is replaced outright rather than repaired:
+// unlike repairBoardCore's existing-board path, a brand-new project has no
+// items yet, so there is nothing for R4's id-preservation contract to
+// protect here — every option is created fresh, deliberately not reusing
+// SetStatusFieldOptions's id-echo contract (StatusOptionInput.ID left nil
+// for every entry).
+//
+// Returns the new project's number (as a string, for direct use in
+// .fabrik/config.yaml's project: key) and the resolved owner type
+// ("organization" — refuseIfUserOwnedBoard already rejected "user").
+func runCreateBoard(owner, repo, title, ghesHost, tokenFlag, stagesDir string) (project, ownerType string, err error) {
+	token, err := loadGitHubToken(tokenFlag)
+	if err != nil {
+		return "", "", err
+	}
+	client := newBoardGHClient(token, ghesHost)
+	return createBoardCore(client, owner, repo, title, stagesDir)
+}
+
+// createBoardCore is the testable core of runCreateBoard, taking an
+// already-constructed *gh.Client so tests can supply an httptest-backed one
+// (mirroring refreshStagesWithReader's CLI-wrapper/testable-core split).
+func createBoardCore(client *gh.Client, owner, repo, title, stagesDir string) (project, ownerType string, err error) {
+	ownerID, ownerType, err := client.ResolveOwner(owner)
+	if err != nil {
+		return "", "", fmt.Errorf("resolving owner %q: %w", owner, err)
+	}
+	if err := refuseIfUserOwnedBoard(ownerType); err != nil {
+		return "", "", err
+	}
+
+	repoID, err := client.FetchRepositoryID(owner, repo)
+	if err != nil {
+		return "", "", fmt.Errorf("resolving repository %s/%s: %w", owner, repo, err)
+	}
+
+	// Load stage configs and compute the required column set BEFORE creating
+	// anything on GitHub. Both checks below are purely local (no network) —
+	// deferring them until after CreateProjectV2, as originally written,
+	// meant a missing/empty stages directory left a freshly created project
+	// orphaned on GitHub: no .fabrik/config.yaml entry pointing at it (that's
+	// only written by the caller after this function returns successfully)
+	// and no idempotency guard against a retry creating a second, separate
+	// project (review finding on PR #1718).
+	allStages, err := stages.LoadAll(stagesDir)
+	if err != nil {
+		return "", "", fmt.Errorf("loading stage configs from %s: %w", stagesDir, err)
+	}
+	names := requiredStageColumnNames(allStages)
+	if len(names) == 0 {
+		return "", "", fmt.Errorf("no stage configs with board columns found in %s — nothing to create Status columns for", stagesDir)
+	}
+
+	if title == "" {
+		title = repo + " Fabrik Pipeline"
+	}
+
+	projectID, number, err := client.CreateProjectV2(ownerID, title, repoID)
+	if err != nil {
+		return "", "", fmt.Errorf("creating project board: %w", err)
+	}
+	// refuseIfUserOwnedBoard above already rejected "user", so ownerType is
+	// always "organization" here — the /orgs/ URL form is always correct.
+	boardURL := fmt.Sprintf("https://github.com/orgs/%s/projects/%d", owner, number)
+	fmt.Printf("  board: created %q (#%d) — %s\n", title, number, boardURL)
+
+	// From this point on, the project already exists on GitHub. A failure
+	// below must not be reported as if nothing happened: wrap it with the
+	// board's own URL so the operator has a durable pointer to it (not just
+	// the stdout line above, which may have scrolled past), and steer them
+	// at the existing link-to-an-existing-board flow (`fabrik init
+	// <project-url>`) to finish setup — rather than a bare retry of
+	// --create-board, which would create a second, separate project.
+	wrapPostCreateErr := func(step string, causeErr error) error {
+		return fmt.Errorf("%s: %w — board %q (#%d) was already created at %s; fix the error, then run "+
+			"`fabrik init %s` to link .fabrik/config.yaml to it (do not re-run --create-board, which would create a duplicate)",
+			step, causeErr, title, number, boardURL, boardURL)
+	}
+
+	desc := fmt.Sprintf("Managed by Fabrik — https://github.com/%s/%s (see .fabrik/stages/)", owner, repo)
+	if err := client.SetProjectDescription(projectID, desc); err != nil {
+		// Non-fatal: the board is usable without a description. Fail loud
+		// but continue — R1 does not require a description to succeed.
+		fmt.Fprintf(os.Stderr, "  warning: could not set project description: %v\n", err)
+	}
+
+	sf, err := client.FetchStatusField(projectID)
+	if err != nil {
+		return "", "", wrapPostCreateErr("fetching Status field of newly created board", err)
+	}
+
+	options := make([]gh.StatusOptionInput, 0, len(names))
+	for _, name := range names {
+		options = append(options, gh.StatusOptionInput{Name: name, Color: "GRAY", Description: ""})
+	}
+	if err := client.SetStatusFieldOptions(sf.FieldID, options); err != nil {
+		return "", "", wrapPostCreateErr("setting Status columns on newly created board", err)
+	}
+	fmt.Printf("  board: Status columns set: %s\n", strings.Join(names, ", "))
+
+	return strconv.Itoa(number), ownerType, nil
 }
 
 // writeGitExclude adds Fabrik working directories to .git/info/exclude
