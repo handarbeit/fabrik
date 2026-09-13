@@ -43,7 +43,9 @@ func TestApplyBlockedBy_NilNode(t *testing.T) {
 	item := &ProjectItem{ID: "I_1", Number: 1, BlockedBy: []Dependency{{Number: 99}}}
 	node := &fetchItemDetailsNode{}
 
-	c.applyBlockedBy(item, node)
+	if err := c.applyBlockedBy(item, node); err != nil {
+		t.Fatalf("applyBlockedBy: %v", err)
+	}
 	if item.BlockedBy != nil {
 		t.Fatalf("expected nil BlockedBy for PR item, got %v", item.BlockedBy)
 	}
@@ -55,7 +57,8 @@ func TestApplyBlockedBy_MapsDependencies(t *testing.T) {
 	node := &fetchItemDetailsNode{}
 	node.BlockedBy = &struct {
 		PageInfo struct {
-			HasNextPage bool `json:"hasNextPage"`
+			HasNextPage bool   `json:"hasNextPage"`
+			EndCursor   string `json:"endCursor"`
 		} `json:"pageInfo"`
 		Nodes []blockedByNode `json:"nodes"`
 	}{}
@@ -66,7 +69,9 @@ func TestApplyBlockedBy_MapsDependencies(t *testing.T) {
 		NameWithOwner string `json:"nameWithOwner"`
 	}{NameWithOwner: "owner/repo"}
 
-	c.applyBlockedBy(item, node)
+	if err := c.applyBlockedBy(item, node); err != nil {
+		t.Fatalf("applyBlockedBy: %v", err)
+	}
 	if len(item.BlockedBy) != 1 {
 		t.Fatalf("expected 1 dependency, got %d", len(item.BlockedBy))
 	}

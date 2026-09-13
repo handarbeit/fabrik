@@ -132,6 +132,88 @@ func TestFetchItemDetails_CommentOverflow(t *testing.T) {
 	}
 }
 
+// TestFetchItemDetails_BlockedByOverflow pins the fix for #1583's review
+// finding: blockedBy previously capped at the first 10 entries with no
+// further pagination (unlike labels/comments), which could make a resumed
+// spawn's already-linked check (blockedByContainsChild) wrongly report "not
+// linked" for a dependency edge truncated out of view — for a spawn batch of
+// more than 10 children, this could cause a duplicate AddBlockedByIssue call
+// on retry. Confirms FetchItemDetails now fetches the remaining page via
+// fetchNodeBlockedBy, mirroring the comment/label overflow behavior above.
+func TestFetchItemDetails_BlockedByOverflow(t *testing.T) {
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		vars := readVars(r)
+		callCount++
+
+		if _, hasCursor := vars["cursor"]; !hasCursor || vars["cursor"] == nil {
+			// First call: FetchItemDetails main query
+			resp := map[string]interface{}{
+				"data": map[string]interface{}{
+					"node": map[string]interface{}{
+						"blockedBy": map[string]interface{}{
+							"nodes": []interface{}{
+								map[string]interface{}{"number": 1, "state": "OPEN", "repository": map[string]interface{}{"nameWithOwner": "owner/repo"}},
+							},
+							"pageInfo": map[string]interface{}{
+								"hasNextPage": true,
+								"endCursor":   "b_overflow",
+							},
+						},
+						"comments": map[string]interface{}{
+							"nodes":    []interface{}{},
+							"pageInfo": map[string]interface{}{"hasNextPage": false, "endCursor": ""},
+						},
+					},
+				},
+			}
+			json.NewEncoder(w).Encode(resp)
+		} else {
+			// Overflow query
+			cursor, _ := vars["cursor"].(string)
+			if cursor != "b_overflow" {
+				t.Errorf("unexpected cursor: %q", cursor)
+			}
+			resp := map[string]interface{}{
+				"data": map[string]interface{}{
+					"node": map[string]interface{}{
+						"blockedBy": map[string]interface{}{
+							"nodes": []interface{}{
+								map[string]interface{}{"number": 2, "state": "OPEN", "repository": map[string]interface{}{"nameWithOwner": "owner/repo"}},
+							},
+							"pageInfo": map[string]interface{}{
+								"hasNextPage": false,
+								"endCursor":   "",
+							},
+						},
+					},
+				},
+			}
+			json.NewEncoder(w).Encode(resp)
+		}
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	item := &ProjectItem{ID: "I_1", Number: 1}
+	if err := c.FetchItemDetails(item); err != nil {
+		t.Fatalf("FetchItemDetails: %v", err)
+	}
+
+	if callCount != 2 {
+		t.Errorf("expected 2 API calls (main + overflow), got %d", callCount)
+	}
+	if len(item.BlockedBy) != 2 {
+		t.Fatalf("expected 2 blockedBy dependencies (1 main + 1 overflow), got %d: %+v", len(item.BlockedBy), item.BlockedBy)
+	}
+	if item.BlockedBy[0].Number != 1 {
+		t.Errorf("BlockedBy[0].Number = %d", item.BlockedBy[0].Number)
+	}
+	if item.BlockedBy[1].Number != 2 || item.BlockedBy[1].Repo != "owner/repo" {
+		t.Errorf("BlockedBy[1] = %+v", item.BlockedBy[1])
+	}
+}
+
 func TestFetchItemDetails_LinkedPRCommentOverflow(t *testing.T) {
 	callCount := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
