@@ -12,15 +12,19 @@
 // (ClientForRepo, BotLogin) — it never sees PEMs, JWTs, installation IDs,
 // browser flows, or refresh loops.
 //
-// That said, unlike internal/selfupgrade, this package is not yet fully
-// caller-agnostic in practice: manifest.go's defaultAppName ("pruefer"),
-// defaultAppHomepageURL (github.com/handarbeit/fabrik), and the specific
-// permission set buildManifest requests are all Pruefer-shaped constants,
-// not Options/ManifestFlowOptions fields a second caller could override. A
-// future second self-hosted daemon reusing this package today would get an
-// App named "pruefer", homepaged at fabrik's repo, and scoped to exactly
-// Pruefer's permissions — parameterizing those three is follow-up work, not
-// something this package already does.
+// As of #1712, this package is caller-agnostic in the same sense as
+// internal/selfupgrade: manifest.go's defaultAppName ("pruefer"),
+// defaultAppHomepageURL (github.com/handarbeit/fabrik), and the permission
+// set buildManifest requests are all just Pruefer's own defaults now —
+// Options.AppName, Options.AppHomepageURL and Options.RequiredPermissions
+// (threaded through ManifestFlowOptions) let a second caller (e.g. the
+// engine, #770) override all three and get its own App name, homepage, and
+// permission set instead. Options.RequiredPermissions doubles as both "what
+// a fresh App's manifest requests" and "what an existing installation is
+// verified against" (#1709) — one field per caller, not two that could
+// silently drift. Wiring a second caller's actual identity/permissions in
+// is separate follow-up work; this package only makes the mechanism
+// pluggable.
 //
 // See adrs/1253-github-app-manifest-auth-reconciler.md for the design
 // rationale, including why a manifest-created App supersedes (while still
