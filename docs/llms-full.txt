@@ -162,6 +162,11 @@ and `project` scopes, same as the daemon itself. On success it writes the new pr
 number, owner, and owner type into `.fabrik/config.yaml` for you. `--title` sets the
 board's title (default: `"<repo> Fabrik Pipeline"`).
 
+If `.fabrik/config.yaml` already has an `owner`/`project` configured — this repo has
+already been onboarded — `--create-board` refuses rather than creating a second board
+your config wouldn't end up pointing at; pass `--force` if you really do want a fresh
+board and are prepared to overwrite the existing config with its details.
+
 This works with an ordinary personal access token as well as a GitHub App token, so it
 is available to every user today — it does **not** depend on GitHub App support (#770).
 It is **organization-owned repos only**: Fabrik refuses explicitly, naming the reason,
