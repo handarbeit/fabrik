@@ -449,9 +449,15 @@ func TestRun_WakeDuringRateLimitBackoff_DropsWake(t *testing.T) {
 	if !eng.backoffRateLimitLow {
 		t.Fatal("expected backoffRateLimitLow=true after poll cycle 1 (near-zero GraphQL budget)")
 	}
+	// baseline is whatever fetchCount landed on once cycle 1's
+	// PollCompletedEvent fired — not asserted to a literal value, since
+	// Run() also fetches the board once during its own pre-loop
+	// checkStageColumnAlignment startup check (engine/startup.go),
+	// independent of PollWithBackoff. What matters for this test is that
+	// the wake burst below adds nothing further to it.
 	baseline := atomic.LoadInt32(&fetchCount)
-	if baseline != 1 {
-		t.Fatalf("fetchCount after cycle 1 = %d, want 1", baseline)
+	if baseline < 1 {
+		t.Fatalf("fetchCount after cycle 1 = %d, want at least 1", baseline)
 	}
 
 	// Burst wakes across a window comfortably longer than minPollInterval
