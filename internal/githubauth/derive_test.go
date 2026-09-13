@@ -239,6 +239,103 @@ func TestDerive_PinnedMode_GrantVerificationLogsShortfall(t *testing.T) {
 	}
 }
 
+// TestDerive_NonPinnedMode_ShortfallLoggedDespiteRepoListError is the
+// regression test for a review finding on this PR: PermissionShortfalls is
+// computed from inst.Permissions (the installations-list response),
+// independent of whether that round's FetchInstallationRepositories call
+// succeeded — but logDerivedSet used to `continue` past the
+// shortfall-logging line whenever RepoListError was set, so a genuine
+// permission shortfall silently went unlogged for any round where an
+// installation's (unrelated) repo listing also transiently failed. Both
+// conditions are forced simultaneously here to prove the shortfall is still
+// surfaced.
+func TestDerive_NonPinnedMode_ShortfallLoggedDespiteRepoListError(t *testing.T) {
+	oldFlow := runManifestFlow
+	runManifestFlow = failingRunManifestFlow(t)
+	defer func() { runManifestFlow = oldFlow }()
+
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	srv, fake := newFakeAppServer("pruefer-bot", []gh.AppInstallation{
+		{ID: 111, Account: "handarbeit", Permissions: map[string]string{"issues": "read"}},
+	}, func() time.Time { return time.Now().Add(time.Hour) })
+	fake.failRepoList = func(installationID int64) bool { return installationID == 111 }
+	defer srv.Close()
+
+	logf, lines := newLogCollector()
+	r, err := Reconcile(context.Background(), Options{
+		AppID: 42, AppPrivateKeyPath: keyPath, AppStatePath: filepath.Join(dir, "app-state.json"),
+		BaseURL:             srv.URL,
+		RequiredPermissions: map[string]string{"issues": "write"},
+		Logf:                logf,
+	})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	set := r.LastDerived()
+	if got := set.Installations[0].RepoListError; got == "" {
+		t.Fatal("test setup broken: expected RepoListError to be set")
+	}
+	if got := set.Installations[0].PermissionShortfalls; len(got) != 1 {
+		t.Fatalf("expected 1 shortfall despite RepoListError, got %+v", got)
+	}
+	found := false
+	for _, l := range lines() {
+		if strings.Contains(l, "111") && strings.Contains(l, "issues") && strings.Contains(l, "\"write\"") && strings.Contains(l, "\"read\"") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected the shortfall to be logged even though repo-listing also failed this round, got: %v", lines())
+	}
+}
+
+// TestDerive_NonPinnedMode_ShortfallLoggedDespiteMintError is the sibling
+// regression case to the RepoListError test above: inst.Permissions comes
+// from the already-fetched installations list, independent of whether
+// mintAuth itself succeeded this round, so a shortfall must still be
+// computed (and logged) on the mint-failure branch too.
+func TestDerive_NonPinnedMode_ShortfallLoggedDespiteMintError(t *testing.T) {
+	oldFlow := runManifestFlow
+	runManifestFlow = failingRunManifestFlow(t)
+	defer func() { runManifestFlow = oldFlow }()
+
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	srv, fake := newFakeAppServer("pruefer-bot", []gh.AppInstallation{
+		{ID: 111, Account: "handarbeit", Permissions: map[string]string{"issues": "read"}},
+	}, func() time.Time { return time.Now().Add(time.Hour) })
+	fake.failMint = func(installationID int64) bool { return installationID == 111 }
+	defer srv.Close()
+
+	logf, lines := newLogCollector()
+	r, err := Reconcile(context.Background(), Options{
+		AppID: 42, AppPrivateKeyPath: keyPath, AppStatePath: filepath.Join(dir, "app-state.json"),
+		BaseURL:             srv.URL,
+		RequiredPermissions: map[string]string{"issues": "write"},
+		Logf:                logf,
+	})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	set := r.LastDerived()
+	if got := set.Installations[0].MintError; got == "" {
+		t.Fatal("test setup broken: expected MintError to be set")
+	}
+	if got := set.Installations[0].PermissionShortfalls; len(got) != 1 {
+		t.Fatalf("expected 1 shortfall despite MintError, got %+v", got)
+	}
+	found := false
+	for _, l := range lines() {
+		if strings.Contains(l, "111") && strings.Contains(l, "issues") && strings.Contains(l, "\"write\"") && strings.Contains(l, "\"read\"") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected the shortfall to be logged even though minting also failed this round, got: %v", lines())
+	}
+}
+
 // TestDerive_MaxDerivedReposCapsDeterministically is R5/AC6's regression
 // test: a synthetic installation granting far more repos than
 // max_derived_repos must be capped, with Capped/CapApplied reported, and the

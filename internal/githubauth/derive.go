@@ -67,9 +67,12 @@ type DerivedInstallation struct {
 	// installation's actually-granted permissions don't meet, as determined
 	// by checkGrantedPermissions against the Reconciler's requiredPermissions
 	// (Options.RequiredPermissions). Empty when requiredPermissions is
-	// nil/empty (no check configured) or every requirement is met. Not
-	// populated when MintError is set — a shortfall against no usable client
-	// this round would be redundant with the mint failure already reported.
+	// nil/empty (no check configured) or every requirement is met. Computed
+	// from inst.Permissions (the installations-list response), independent
+	// of whether minting a client or listing repos succeeded this round —
+	// still populated when MintError or RepoListError is set, since a
+	// genuine permission shortfall must not go unreported just because it
+	// coincides with an unrelated transient error this round.
 	PermissionShortfalls []RequiredPermissionShortfall
 }
 
@@ -285,6 +288,12 @@ func (r *Reconciler) derive(ctx context.Context, filter []string, maxRepos int, 
 					Account: inst.Account, InstallationID: inst.ID,
 					RepositorySelection: inst.RepositorySelection,
 					MintError:           err.Error(),
+					// inst.Permissions comes from the already-fetched
+					// installations list, independent of whether minting a
+					// token succeeded this round — so a shortfall is still
+					// computable (and worth surfacing) even when the
+					// installation's client couldn't be minted.
+					PermissionShortfalls: checkGrantedPermissions(inst.Permissions, requiredPermissions),
 				})
 				continue
 			}
@@ -383,15 +392,20 @@ func (r *Reconciler) derive(ctx context.Context, filter []string, maxRepos int, 
 // once per Reconcile/Derive round (initial and every re-derivation trigger).
 func logDerivedSet(set DerivedRepoSet, logf func(format string, args ...any)) {
 	for _, inst := range set.Installations {
-		if inst.MintError != "" {
+		// Permission shortfalls are logged regardless of which branch below
+		// fires: PermissionShortfalls is derived from inst.Permissions (the
+		// installations-list response), never from whether minting or
+		// repo-listing succeeded this round — a genuine shortfall must not
+		// go unlogged just because it coincides with an unrelated transient
+		// error (review finding on #1709's own PR).
+		switch {
+		case inst.MintError != "":
 			logf("! installation %d (%s, repository_selection=%s): minting a token failed this round (%s) — the installation exists but is not yet usable; retry reconciliation", inst.InstallationID, inst.Account, inst.RepositorySelection, inst.MintError)
-			continue
-		}
-		if inst.RepoListError != "" {
+		case inst.RepoListError != "":
 			logf("✓ installation %d (%s, repository_selection=%s): repo-access verification was skipped this round (listing failed — see error above); the installation is still authorized", inst.InstallationID, inst.Account, inst.RepositorySelection)
-			continue
+		default:
+			logf("✓ installation %d (%s, repository_selection=%s): %d repo(s) accessible", inst.InstallationID, inst.Account, inst.RepositorySelection, inst.RepoCount)
 		}
-		logf("✓ installation %d (%s, repository_selection=%s): %d repo(s) accessible", inst.InstallationID, inst.Account, inst.RepositorySelection, inst.RepoCount)
 		logPermissionShortfalls(inst.InstallationID, inst.Account, inst.PermissionShortfalls, logf)
 	}
 	if len(set.Installations) == 0 {
