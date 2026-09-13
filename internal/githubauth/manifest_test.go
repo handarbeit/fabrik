@@ -10,14 +10,69 @@ import (
 	"time"
 )
 
-func TestBuildManifest_NoActiveWebhook(t *testing.T) {
-	m := buildManifest("http://127.0.0.1:12345/callback")
-	hook, ok := m["hook_attributes"].(map[string]interface{})
-	if !ok {
-		t.Fatal("expected hook_attributes to be present")
+// manifestContractViolations checks m against GitHub's documented
+// App-manifest contract (docs.github.com/en/apps/sharing-github-apps/
+// registering-a-github-app-from-a-manifest): the top-level "url" field is
+// always required, and "hook_attributes" — itself optional — requires a
+// non-empty "url" sub-key whenever it is present at all. GitHub rejects the
+// entire manifest when a present-but-incomplete hook_attributes is
+// submitted, with a rejection message ("url" wasn't supplied) that reads as
+// though the (present, correct) top-level "url" is the problem — see #1711.
+// Returns a human-readable violation per problem found, or nil if m
+// satisfies the contract.
+func manifestContractViolations(m map[string]interface{}) []string {
+	var violations []string
+
+	if topURL, _ := m["url"].(string); topURL == "" {
+		violations = append(violations, `top-level "url" must be a non-empty string`)
 	}
-	if active, _ := hook["active"].(bool); active {
-		t.Error("expected hook_attributes.active to be false — Pruefer V1 is polling-only")
+
+	if raw, present := m["hook_attributes"]; present {
+		hook, ok := raw.(map[string]interface{})
+		if !ok {
+			violations = append(violations, `"hook_attributes" must be an object`)
+		} else if hookURL, _ := hook["url"].(string); hookURL == "" {
+			violations = append(violations, `"hook_attributes" is present but its "url" sub-key is missing or empty — GitHub rejects the whole manifest in this shape`)
+		}
+	}
+
+	return violations
+}
+
+func TestBuildManifest_NoHookAttributes(t *testing.T) {
+	m := buildManifest("http://127.0.0.1:12345/callback")
+	if _, present := m["hook_attributes"]; present {
+		t.Error("expected hook_attributes to be absent — Pruefer V1 is polling-only and GitHub rejects the manifest when hook_attributes is present without a url")
+	}
+	if violations := manifestContractViolations(m); len(violations) != 0 {
+		t.Errorf("buildManifest output violates GitHub's documented manifest contract: %v", violations)
+	}
+}
+
+// TestManifestContract_CatchesHookAttributesWithoutURL is the guard test for
+// R4/#1711: it proves manifestContractViolations actually detects the
+// defect class this issue fixed, so a future regression that reintroduces a
+// url-less hook_attributes is caught here even if TestBuildManifest_
+// NoHookAttributes's simpler presence check is ever weakened.
+func TestManifestContract_CatchesHookAttributesWithoutURL(t *testing.T) {
+	m := buildManifest("http://127.0.0.1:12345/callback")
+	m["hook_attributes"] = map[string]interface{}{"active": false}
+	if violations := manifestContractViolations(m); len(violations) == 0 {
+		t.Error("expected a violation for hook_attributes present without url, got none")
+	}
+}
+
+// TestManifestContract_AllowsHookAttributesWithURL proves the guard doesn't
+// over-reject a legitimate future webhook addition: hook_attributes with a
+// non-empty url is a valid manifest shape per GitHub's documented contract.
+func TestManifestContract_AllowsHookAttributesWithURL(t *testing.T) {
+	m := buildManifest("http://127.0.0.1:12345/callback")
+	m["hook_attributes"] = map[string]interface{}{
+		"url":    "https://example.com/webhook",
+		"active": true,
+	}
+	if violations := manifestContractViolations(m); len(violations) != 0 {
+		t.Errorf("expected no violations for hook_attributes with a non-empty url, got: %v", violations)
 	}
 }
 
