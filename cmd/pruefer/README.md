@@ -91,6 +91,14 @@ Registering the App yourself is still fully supported — this is also how Pruef
 
 Once `github_app_id` and the PEM are both in place, the reconciler recognizes them as valid local credentials on the very next run and never attempts the manifest flow.
 
+**Verifying granted permissions.** GitHub App permission changes never apply to an existing installation automatically — raising a permission on the App's settings page (or matching the manifest-requested set above) only takes effect once the resulting permission-change request is approved separately, per installation, at `https://github.com/settings/installations/<installation-id>`. Every Pruefer run checks each installation's actually-*granted* permissions against the four above and logs a loud, explicit line if any are missing or insufficient — for example:
+
+```
+! installation 12345678 (your-org): permission "issues" is granted "read" but "write" is required — some features will fail (403) the first time they're used; raise the App's permission and approve it on this installation to fix
+```
+
+If you see this, the fix is the two-step GitHub process above (raise on the App, then approve on the installation) — not a Pruefer config change. The check re-runs on every reconciliation (including the periodic `repo_rederivation_interval` re-derivation, so there's nothing to restart), so the log line disappears on its own once the approval lands.
+
 ### Place the private key
 
 Put the private key `.pem` file (however it was produced — manifest flow or manual registration) at `.pruefer/app-private-key.pem` (the default `github_app_private_key_path`), or point `github_app_private_key_path` at a different location. **Never** put the key's contents directly in `.env` or the YAML config — Pruefer only ever takes a file path.
