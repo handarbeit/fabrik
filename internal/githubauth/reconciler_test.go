@@ -2228,6 +2228,144 @@ func TestReconcile_PinnedInstallation_GrantVerificationSilentWhenSatisfied(t *te
 	}
 }
 
+// TestReconciler_VerifyGrants_ReturnsShortfallsRatherThanLogging is
+// VerifyGrants' positive case: a pinned installation with an insufficient
+// permission must produce a returned shortfall, not merely a log line —
+// the fail-hard sibling of verifyPinnedGrants (#1713 R3).
+func TestReconciler_VerifyGrants_ReturnsShortfallsRatherThanLogging(t *testing.T) {
+	oldFlow := runManifestFlow
+	runManifestFlow = failingRunManifestFlow(t)
+	defer func() { runManifestFlow = oldFlow }()
+
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	srv, _ := newFakeAppServer("engine-bot", []gh.AppInstallation{
+		{ID: 999, Account: "handarbeit", Permissions: map[string]string{
+			"metadata": "read", "issues": "read",
+		}},
+	}, func() time.Time { return time.Now().Add(time.Hour) })
+	defer srv.Close()
+
+	r, err := Reconcile(context.Background(), Options{
+		AppID: 42, AppPrivateKeyPath: keyPath, AppInstallationID: 999,
+		AppStatePath: filepath.Join(dir, "app-state.json"),
+		WatchedRepos: []string{"handarbeit/fabrik"},
+		BaseURL:      srv.URL,
+		// Deliberately no RequiredPermissions here — VerifyGrants is called
+		// with its own required set below, independent of what (if anything)
+		// Reconcile's own soft check was configured with.
+	})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	required := map[string]string{"metadata": "read", "issues": "write"}
+	shortfalls, err := r.VerifyGrants(required)
+	if err != nil {
+		t.Fatalf("VerifyGrants: %v", err)
+	}
+	if len(shortfalls) != 1 || shortfalls[0].Permission != "issues" {
+		t.Fatalf("VerifyGrants shortfalls = %+v, want exactly one shortfall for %q", shortfalls, "issues")
+	}
+	if shortfalls[0].Required != "write" || shortfalls[0].Granted != "read" {
+		t.Errorf("shortfall = %+v, want Required=write Granted=read", shortfalls[0])
+	}
+}
+
+// TestReconciler_VerifyGrants_NoShortfallWhenSatisfied is the negative case:
+// every required permission met returns an empty, non-error shortfall list.
+func TestReconciler_VerifyGrants_NoShortfallWhenSatisfied(t *testing.T) {
+	oldFlow := runManifestFlow
+	runManifestFlow = failingRunManifestFlow(t)
+	defer func() { runManifestFlow = oldFlow }()
+
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	required := map[string]string{"metadata": "read", "issues": "write"}
+	srv, _ := newFakeAppServer("engine-bot", []gh.AppInstallation{
+		{ID: 999, Account: "handarbeit", Permissions: required},
+	}, func() time.Time { return time.Now().Add(time.Hour) })
+	defer srv.Close()
+
+	r, err := Reconcile(context.Background(), Options{
+		AppID: 42, AppPrivateKeyPath: keyPath, AppInstallationID: 999,
+		AppStatePath: filepath.Join(dir, "app-state.json"),
+		WatchedRepos: []string{"handarbeit/fabrik"},
+		BaseURL:      srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	shortfalls, err := r.VerifyGrants(required)
+	if err != nil {
+		t.Fatalf("VerifyGrants: %v", err)
+	}
+	if len(shortfalls) != 0 {
+		t.Errorf("VerifyGrants shortfalls = %+v, want none", shortfalls)
+	}
+}
+
+// TestReconciler_VerifyGrants_NonPinnedReturnsExplicitError confirms
+// VerifyGrants refuses to guess which installation to check for a
+// discovery-mode (non-pinned) Reconciler, rather than silently checking an
+// arbitrary one.
+func TestReconciler_VerifyGrants_NonPinnedReturnsExplicitError(t *testing.T) {
+	oldFlow := runManifestFlow
+	runManifestFlow = failingRunManifestFlow(t)
+	defer func() { runManifestFlow = oldFlow }()
+
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	srv, _ := newFakeAppServer("engine-bot", []gh.AppInstallation{
+		{ID: 111, Account: "handarbeit"},
+	}, func() time.Time { return time.Now().Add(time.Hour) })
+	defer srv.Close()
+
+	r, err := Reconcile(context.Background(), Options{
+		AppID: 42, AppPrivateKeyPath: keyPath, AppStatePath: filepath.Join(dir, "app-state.json"),
+		BaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	if _, err := r.VerifyGrants(map[string]string{"metadata": "read"}); err == nil {
+		t.Fatal("expected VerifyGrants to error for a non-pinned (discovery-mode) Reconciler")
+	}
+}
+
+// TestReconciler_VerifyGrants_EmptyRequiredIsNoOp confirms an empty/nil
+// required set skips the check entirely (no error, no API call needed),
+// mirroring every other RequiredPermissions-gated check in this package.
+func TestReconciler_VerifyGrants_EmptyRequiredIsNoOp(t *testing.T) {
+	oldFlow := runManifestFlow
+	runManifestFlow = failingRunManifestFlow(t)
+	defer func() { runManifestFlow = oldFlow }()
+
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	srv, _ := newFakeAppServer("engine-bot", []gh.AppInstallation{
+		{ID: 999, Account: "handarbeit"},
+	}, func() time.Time { return time.Now().Add(time.Hour) })
+	defer srv.Close()
+
+	r, err := Reconcile(context.Background(), Options{
+		AppID: 42, AppPrivateKeyPath: keyPath, AppInstallationID: 999,
+		AppStatePath: filepath.Join(dir, "app-state.json"),
+		WatchedRepos: []string{"handarbeit/fabrik"},
+		BaseURL:      srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	shortfalls, err := r.VerifyGrants(nil)
+	if err != nil || shortfalls != nil {
+		t.Errorf("VerifyGrants(nil) = (%+v, %v), want (nil, nil)", shortfalls, err)
+	}
+}
+
 // TestReconcile_InitialDiscovery_DoesNotDoubleStartRefreshLoops is the
 // regression test for a review finding: Derive's own mint+commit path
 // (invoked internally by Reconcile's non-pinned discovery) used to start a
