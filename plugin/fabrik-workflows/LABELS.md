@@ -257,12 +257,18 @@ and should recognize.
 - **`fabrik:spawned-child:<blockIndex>:<childNumber>`** — Durable,
   restart-surviving marker on the *parent*, written immediately after a
   spawn block's child issue is created, recording that block's child by
-  1-based index and issue number. Lets a retried spawn (operator
-  un-pause, or an engine restart mid-batch) recognize and resume an
-  already-created child instead of duplicating it, rather than
-  requiring the manual orphan cleanup `fabrik:children-spawned` above
-  still describes for a *completed* spawn. Removed once the whole batch
-  succeeds — steady state carries none of these. See ADR-1583.
+  1-based index and issue number. Lets a retried Plan-driven spawn
+  (operator un-pause, or an engine restart mid-batch) recognize and
+  resume an already-created child instead of duplicating it, rather
+  than requiring the manual orphan cleanup `fabrik:children-spawned`
+  above still describes for a *completed* spawn. Removed once the whole
+  batch succeeds — steady state carries none of these. **Plan/Implement
+  origin only** — the Review/Validate mid-flight spawn never writes
+  this marker, since its block list comes from that dispatch's own
+  fresh Claude output rather than an immutable stored comment and so
+  can't be trusted to reparse identically on a retry that redispatches
+  Claude; that origin keeps the pre-ADR-1583 always-create behavior.
+  See ADR-1583.
 - **`fabrik:claude-limit`** — Set when a Claude invocation exits because
   the account's usage limit was hit (detected structurally from the CLI's
   own result payload, never from output text). The stage attempt still
