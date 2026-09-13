@@ -376,6 +376,25 @@ func MintInstallationToken(baseURL, jwt string, installationID int64) (token str
 	return result.Token, result.ExpiresAt, nil
 }
 
+// DeleteAppInstallation removes an installation of the App entirely via
+// DELETE /app/installations/{installation_id}, JWT-authenticated — the R4
+// mechanism a caller uses to actively remove an installation outside its
+// configured served-accounts allowlist, rather than merely refusing to mint
+// a token for it (see internal/githubauth's Derive). This is irreversible
+// from the caller's side: the installer would need to reinstall the App to
+// restore it. errors.Is(err, ErrNotFound) reports the installation was
+// already gone (e.g. the installer uninstalled it independently, or a prior
+// call already deleted it) — callers should treat that as a converged
+// success, not a failure, mirroring GitHub's own idempotent-DELETE
+// semantics for this endpoint.
+func DeleteAppInstallation(baseURL, jwt string, installationID int64) error {
+	path := fmt.Sprintf("/app/installations/%d", installationID)
+	if err := appRequest("DELETE", baseURL, path, jwt, nil); err != nil {
+		return fmt.Errorf("deleting installation %d: %w", installationID, err)
+	}
+	return nil
+}
+
 // FetchAppSlug returns the App's own slug (e.g. "my-reviewer") via GET /app,
 // JWT-authenticated. The App's bot identity login on issues/PRs/reviews is
 // always "<slug>[bot]" — used by Pruefer to recognize its own comments and
