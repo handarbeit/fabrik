@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -54,6 +55,11 @@ const configYAMLTemplate = `# .fabrik/config.yaml — project-level configuratio
 # tui: false                    # Disable the interactive TUI dashboard (enabled by default when a real terminal is detected).
 # debug_output: false           # Save raw Claude output to .fabrik/debug/ for diagnosing prompt issues.
 # version: ""                   # Project version shown in TUI footer. Auto-inferred from package.json/go.mod if not set.
+
+# GitHub App authentication (alternative to FABRIK_TOKEN; see fabrik init --github-app):
+# github_app_id: 0                          # GitHub App ID.
+# github_app_private_key_path: ""           # Path to the App's private key PEM.
+# github_app_installation_id: 0             # Installation ID pinned for this org.
 `
 
 // parseProjectURL parses a GitHub Project URL and returns owner, project number
@@ -129,19 +135,42 @@ func splitPathSegments(p string) []string {
 	return segs
 }
 
-// writeConfigTemplate writes the .fabrik/config.yaml template.
-// owner, repoFlag, project, ownerType, user are pre-populated values (from a
-// URL or flag). repoFlag is only known on the --create-board path (a project
-// URL carries no repo); the plain URL-provided flow always passes "" for it,
-// same as before this parameter existed.
-// ghesHost is the resolved --ghes-host/FABRIK_GHES_HOST value, or "" if none
-// configured; it is persisted into the written config regardless of which
-// branch below runs, so an operator who supplies it once to `init` does not
-// have to supply it again to every subsequent `fabrik` invocation.
-// If any are empty and stdin is a TTY, the user is prompted for missing values.
-// When owner is non-empty (URL provided), only user is prompted (if empty and TTY).
-// When owner is empty, the full interactive prompt runs for all four fields.
-func writeConfigTemplate(owner, repoFlag, project, ownerType, user, ghesHost string, force bool) error {
+// configValues holds every value writeConfigTemplate/buildConfigWithValues
+// can write into .fabrik/config.yaml — a struct rather than positional
+// string/int64 params because the set has grown past what's readable
+// positionally (owner/repo/project/ownerType/user/ghesHost, plus the three
+// GitHub App auth fields #1715 adds below).
+type configValues struct {
+	Owner     string
+	Repo      string // only known on the --create-board path; a plain project URL carries no repo.
+	Project   string
+	OwnerType string
+	User      string
+	// GHESHost is the resolved --ghes-host/FABRIK_GHES_HOST value, or "" if
+	// none configured; persisted regardless of which writeConfigTemplate
+	// branch runs, so an operator who supplies it once to `init` does not
+	// have to supply it again to every subsequent `fabrik` invocation.
+	GHESHost string
+	// GitHubAppID, GitHubAppPrivateKeyPath, and GitHubAppInstallationID are
+	// populated only by `fabrik init --github-app` (#1715), once its setup
+	// flow has resolved a client — see runGitHubAppSetup. Zero/"" means
+	// unset, matching config.ProjectConfig's own nil-means-unset convention
+	// for the first and third (though these are plain int64/string here,
+	// not pointers — writeConfigTemplate only ever adds these fields, never
+	// clears an existing config's values, so there's no "explicitly zero"
+	// case to distinguish from "not given this run").
+	GitHubAppID             int64
+	GitHubAppPrivateKeyPath string
+	GitHubAppInstallationID int64
+}
+
+// writeConfigTemplate writes the .fabrik/config.yaml template from v.
+// If any of v.Owner/v.Repo/v.Project/v.User are empty and stdin is a TTY,
+// the user is prompted for missing values.
+// When v.Owner is non-empty (URL provided, or --create-board/--github-app),
+// only user is prompted (if empty and TTY). When v.Owner is empty, the full
+// interactive prompt runs for all four fields.
+func writeConfigTemplate(v configValues, force bool) error {
 	configPath := ".fabrik/config.yaml"
 
 	if !force {
@@ -156,24 +185,25 @@ func writeConfigTemplate(owner, repoFlag, project, ownerType, user, ghesHost str
 	isTTY := isatty.IsTerminal(os.Stdin.Fd()) || isatty.IsCygwinTerminal(os.Stdin.Fd())
 
 	switch {
-	case owner != "":
-		// URL-provided (or --create-board) flow: owner/project/ownerType are
-		// known; only prompt for user.
-		if user == "" && isTTY {
-			user = promptForUser()
+	case v.Owner != "":
+		// URL-provided (or --create-board/--github-app) flow: owner/project/
+		// ownerType are known; only prompt for user.
+		if v.User == "" && isTTY {
+			v.User = promptForUser()
 		}
-		content = buildConfigWithValues(owner, repoFlag, project, ownerType, user, ghesHost)
+		content = buildConfigWithValues(v)
 	case isTTY:
 		// Full interactive flow: prompt for all four required fields.
 		o, repo, proj, u := promptRequiredValues()
-		if o != "" || repo != "" || proj != "" || u != "" || ghesHost != "" {
-			content = buildConfigWithValues(o, repo, proj, "", u, ghesHost)
+		if o != "" || repo != "" || proj != "" || u != "" || v.GHESHost != "" {
+			v.Owner, v.Repo, v.Project, v.OwnerType, v.User = o, repo, proj, "", u
+			content = buildConfigWithValues(v)
 		}
-	case ghesHost != "":
+	case v.GHESHost != "":
 		// No project URL and no TTY to prompt, but a GHES host was still
 		// resolved from --ghes-host/FABRIK_GHES_HOST — persist it so it
 		// doesn't need to be supplied again on every subsequent run.
-		content = buildConfigWithValues("", "", "", "", "", ghesHost)
+		content = buildConfigWithValues(v)
 	}
 
 	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
@@ -209,26 +239,32 @@ func promptRequiredValues() (owner, repo, project, user string) {
 	return
 }
 
-// buildConfigWithValues returns a config.yaml where the supplied values are
-// written as uncommented entries; unset values remain commented out.
-// ownerType and ghesHost are written into the optional section when non-empty.
-func buildConfigWithValues(owner, repo, project, ownerType, user, ghesHost string) string {
+// buildConfigWithValues returns a config.yaml where v's non-zero values are
+// written as uncommented entries; unset (zero-value) fields remain commented
+// out.
+func buildConfigWithValues(v configValues) string {
 	lines := strings.Split(configYAMLTemplate, "\n")
 	var out []string
 	for _, line := range lines {
 		switch {
-		case strings.HasPrefix(line, "# owner:") && owner != "":
-			out = append(out, "owner: "+owner)
-		case strings.HasPrefix(line, "# repo:") && repo != "":
-			out = append(out, "repo: "+repo)
-		case strings.HasPrefix(line, "# project:") && project != "":
-			out = append(out, "project: "+project)
-		case strings.HasPrefix(line, "# user:") && user != "":
-			out = append(out, "user: "+user)
-		case strings.HasPrefix(line, "# owner_type:") && ownerType != "":
-			out = append(out, "owner_type: "+ownerType)
-		case strings.HasPrefix(line, "# ghes_host:") && ghesHost != "":
-			out = append(out, "ghes_host: "+ghesHost)
+		case strings.HasPrefix(line, "# owner:") && v.Owner != "":
+			out = append(out, "owner: "+v.Owner)
+		case strings.HasPrefix(line, "# repo:") && v.Repo != "":
+			out = append(out, "repo: "+v.Repo)
+		case strings.HasPrefix(line, "# project:") && v.Project != "":
+			out = append(out, "project: "+v.Project)
+		case strings.HasPrefix(line, "# user:") && v.User != "":
+			out = append(out, "user: "+v.User)
+		case strings.HasPrefix(line, "# owner_type:") && v.OwnerType != "":
+			out = append(out, "owner_type: "+v.OwnerType)
+		case strings.HasPrefix(line, "# ghes_host:") && v.GHESHost != "":
+			out = append(out, "ghes_host: "+v.GHESHost)
+		case strings.HasPrefix(line, "# github_app_id:") && v.GitHubAppID != 0:
+			out = append(out, fmt.Sprintf("github_app_id: %d", v.GitHubAppID))
+		case strings.HasPrefix(line, "# github_app_private_key_path:") && v.GitHubAppPrivateKeyPath != "":
+			out = append(out, "github_app_private_key_path: "+v.GitHubAppPrivateKeyPath)
+		case strings.HasPrefix(line, "# github_app_installation_id:") && v.GitHubAppInstallationID != 0:
+			out = append(out, fmt.Sprintf("github_app_installation_id: %d", v.GitHubAppInstallationID))
 		default:
 			out = append(out, line)
 		}
@@ -261,10 +297,16 @@ func runInit(args []string) error {
 	userFlag := fset.String("user", "", "Your GitHub username")
 	ghesHostFlag := fset.String("ghes-host", "", "GitHub Enterprise Server hostname, e.g. github.example.com (also FABRIK_GHES_HOST)")
 	createBoard := fset.Bool("create-board", false, "Create a new GitHub Project (v2) board from the just-extracted stage configs, linked to --owner/--repo. Organization-owned repos only (see #770). Mutually exclusive with the positional <project-url> argument.")
-	ownerFlag := fset.String("owner", "", "GitHub org (owner) to create the board under; required with --create-board")
+	ownerFlag := fset.String("owner", "", "GitHub org (owner) to create the board under; required with --create-board and --github-app")
 	repoFlag := fset.String("repo", "", "GitHub repository to link the new board to; required with --create-board")
 	titleFlag := fset.String("title", "", "Project board title for --create-board (default: \"<repo> Fabrik Pipeline\")")
 	tokenFlag := fset.String("token", "", "GitHub token for --create-board (or FABRIK_TOKEN / GITHUB_TOKEN)")
+	githubApp := fset.Bool("github-app", false, "Guided GitHub App auth setup: register a new App via the manifest flow (or adopt an existing one with --github-app-id/--github-app-private-key-path), verify its granted permissions, and populate github_app_* in .fabrik/config.yaml. Requires --owner. Organization-owned targets only (see #770).")
+	githubAppIDFlag := fset.Int64("github-app-id", 0, "Adopt an existing GitHub App by ID instead of creating one via the manifest flow; requires --github-app-private-key-path (also FABRIK_GITHUB_APP_ID)")
+	githubAppKeyPathFlag := fset.String("github-app-private-key-path", "", "Path to an existing GitHub App's private key PEM, for --github-app-id adoption; requires --github-app-id (also FABRIK_GITHUB_APP_PRIVATE_KEY_PATH)")
+	githubAppInstallationIDFlag := fset.Int64("github-app-installation-id", 0, "Explicit installation ID to pin, skipping discovery (optional; also FABRIK_GITHUB_APP_INSTALLATION_ID)")
+	webhooksFlag := fset.Bool("webhooks", false, "Include webhook-management permission in the App's manifest/verification, matching a --webhooks engine deployment")
+	noBrowserFlag := fset.Bool("no-browser", false, "Skip automatic browser launch during --github-app setup; auto-enabled when stdin is not a terminal")
 
 	fset.Usage = func() {
 		fmt.Fprintf(fset.Output(), "Usage: fabrik init [<project-url>] [flags]\n\n")
@@ -277,6 +319,12 @@ func runInit(args []string) error {
 		fmt.Fprintf(fset.Output(), "                   --ghes-host or FABRIK_GHES_HOST is set.\n")
 		fmt.Fprintf(fset.Output(), "                   Not used together with --create-board, which creates a\n")
 		fmt.Fprintf(fset.Output(), "                   board rather than linking to an existing one.\n\n")
+		fmt.Fprintf(fset.Output(), "                   --github-app drives guided GitHub App auth setup (register via\n")
+		fmt.Fprintf(fset.Output(), "                   the manifest flow, or adopt an existing App with --github-app-id/\n")
+		fmt.Fprintf(fset.Output(), "                   --github-app-private-key-path), verifies the installation's\n")
+		fmt.Fprintf(fset.Output(), "                   granted permissions, and populates github_app_* in\n")
+		fmt.Fprintf(fset.Output(), "                   .fabrik/config.yaml. Combine with --create-board to also create\n")
+		fmt.Fprintf(fset.Output(), "                   the board using the App's own client.\n\n")
 		fmt.Fprintf(fset.Output(), "Flags:\n")
 		fset.PrintDefaults()
 	}
@@ -320,6 +368,22 @@ func runInit(args []string) error {
 				"the existing config with it, or drop --create-board and edit .fabrik/config.yaml by hand to link an "+
 				"existing board instead", existing.Owner, projectDesc)
 		}
+	}
+	if *githubApp && *ownerFlag == "" {
+		return fmt.Errorf("init: --github-app requires --owner (the org to register/adopt the App on and discover its installation for)")
+	}
+	adoptID := *githubAppIDFlag != 0
+	adoptKey := *githubAppKeyPathFlag != ""
+	if adoptID != adoptKey {
+		return fmt.Errorf("init: --github-app-id and --github-app-private-key-path must be given together (adopting an " +
+			"existing App) or not at all (creating a new one via the manifest flow) — giving only one risks a fresh " +
+			"manifest bootstrap silently overwriting whatever file already sits at the given key path")
+	}
+	if (adoptID || adoptKey) && !*githubApp {
+		return fmt.Errorf("init: --github-app-id/--github-app-private-key-path require --github-app")
+	}
+	if *githubAppInstallationIDFlag != 0 && !*githubApp {
+		return fmt.Errorf("init: --github-app-installation-id requires --github-app")
 	}
 
 	// Resolve GHES host from flag > FABRIK_GHES_HOST env var. No config.yaml
@@ -424,12 +488,42 @@ func runInit(args []string) error {
 		fmt.Printf("  plugin: %d skill files written\n", pluginWrote)
 	}
 
+	// --github-app (#1715): register or adopt a GitHub App installation and
+	// verify its granted permissions, before --create-board below so a
+	// combined `--github-app --create-board` invocation creates the board
+	// with the App's own freshly-minted client instead of demanding a
+	// second --token — the App auth this flow just set up already carries
+	// organization_projects:write, exactly what board creation needs.
+	var appSetup *githubAppSetupResult
+	if *githubApp {
+		noBrowser := *noBrowserFlag || !(isatty.IsTerminal(os.Stdin.Fd()) || isatty.IsCygwinTerminal(os.Stdin.Fd()))
+		res, err := runGitHubAppSetup(context.Background(), githubAppSetupOptions{
+			Owner:          *ownerFlag,
+			AppID:          *githubAppIDFlag,
+			PrivateKeyPath: *githubAppKeyPathFlag,
+			InstallationID: *githubAppInstallationIDFlag,
+			Webhooks:       *webhooksFlag,
+			NoBrowser:      noBrowser,
+		})
+		if err != nil {
+			return fmt.Errorf("--github-app: %w", err)
+		}
+		appSetup = res
+		owner = *ownerFlag
+	}
+
 	// R1: create a fully-configured board from the stage configs just
 	// written above, before .fabrik/config.yaml is generated so its
 	// owner/project/owner_type can be pre-filled from the result — the same
 	// role the URL-provided flow's owner/project/ownerType play below.
 	if *createBoard {
-		number, resolvedOwnerType, err := runCreateBoard(*ownerFlag, *repoFlag, *titleFlag, ghesHost, *tokenFlag, stagesDir)
+		var number, resolvedOwnerType string
+		var err error
+		if appSetup != nil {
+			number, resolvedOwnerType, err = createBoardCore(appSetup.Client, *ownerFlag, *repoFlag, *titleFlag, stagesDir)
+		} else {
+			number, resolvedOwnerType, err = runCreateBoard(*ownerFlag, *repoFlag, *titleFlag, ghesHost, *tokenFlag, stagesDir)
+		}
 		if err != nil {
 			return fmt.Errorf("--create-board: %w", err)
 		}
@@ -440,7 +534,13 @@ func runInit(args []string) error {
 	}
 
 	// Generate .fabrik/config.yaml template
-	if err := writeConfigTemplate(owner, repo, project, ownerType, *userFlag, ghesHost, *force); err != nil {
+	cv := configValues{Owner: owner, Repo: repo, Project: project, OwnerType: ownerType, User: *userFlag, GHESHost: ghesHost}
+	if appSetup != nil {
+		cv.GitHubAppID = appSetup.AppID
+		cv.GitHubAppPrivateKeyPath = appSetup.PrivateKeyPath
+		cv.GitHubAppInstallationID = appSetup.InstallationID
+	}
+	if err := writeConfigTemplate(cv, *force); err != nil {
 		return err
 	}
 
