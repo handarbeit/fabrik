@@ -409,6 +409,83 @@ A few advisory-only, non-gating features still hardcode `github.com` and have no
 
 None of these affect correctness — they may just show a `github.com`-shaped link or an inapplicable advisory message on a GHES deployment. Webhook support and `projects_v2_item` availability on GHES are also unverified; Fabrik always falls back to polling when webhooks aren't available, so this is not a blocker.
 
+### GitHub App Authentication
+
+Fabrik can authenticate to GitHub as a **GitHub App installation** instead of a personal access token. This is a second, **co-equal** authentication path — not a replacement, not a recommended upgrade, and not a deprecation of PAT mode. A user-owned project board can never use App auth at all (see "Organization boards only" below), so a personal access token remains the only option in that case, permanently.
+
+App auth gives the engine its own rate-limit bucket (separate from any human's PAT, and larger — GitHub scales installation limits with the organization's repo and user count) and a stable `fabrik[bot]` identity on every issue/PR/comment it creates, instead of appearing as whichever human's token happens to be configured.
+
+**This is compat mode only.** Fabrik consumes an App ID, private key, and installation ID for a GitHub App you have already created and installed — manually via GitHub's own App-creation UI, or via another tool's bootstrap flow. Fabrik does not walk you through creating or installing the App itself; that guided setup is tracked as a separate, future `fabrik init --github-app` enhancement.
+
+#### Configuring App auth
+
+Set all three of the following together via any of the usual precedence layers (flag > `FABRIK_GITHUB_APP_*` env var > `.fabrik/config.yaml`):
+
+```bash
+# Flags
+fabrik --github-app-id 123456 \
+  --github-app-private-key-path /path/to/private-key.pem \
+  --github-app-installation-id 789012 \
+  --owner myorg --project 5 --user me
+
+# Environment variables
+export FABRIK_GITHUB_APP_ID=123456
+export FABRIK_GITHUB_APP_PRIVATE_KEY_PATH=/path/to/private-key.pem
+export FABRIK_GITHUB_APP_INSTALLATION_ID=789012
+
+# .fabrik/config.yaml
+github_app_id: 123456
+github_app_private_key_path: /path/to/private-key.pem
+github_app_installation_id: 789012
+```
+
+**All three must be set together, or none at all.** A partial set (e.g. an App ID with no private key path) fails startup immediately with a message naming exactly which field is missing — never a silent fallback to PAT mode:
+
+```
+GitHub App authentication is partially configured — missing github_app_private_key_path;
+github_app_id, github_app_private_key_path, and github_app_installation_id must all be set
+together to authenticate as a GitHub App installation, or none of them at all to use a
+personal access token (FABRIK_TOKEN) instead. See docs/USER_GUIDE.md
+```
+
+**When none of the three are set, nothing changes** — Fabrik authenticates with `--token`/`FABRIK_TOKEN`/`GITHUB_TOKEN` exactly as it always has. No existing `.env` needs modification to keep working.
+
+#### Organization boards only
+
+GitHub strips organization-scoped permissions — including Projects v2 access — from a GitHub App installation on a **user** account; only an **organization**-owned installation ever receives them. Fabrik detects this at startup and refuses explicitly, before attempting to fetch the board:
+
+```
+refusing: GitHub App authentication requires an organization-owned project board — "someuser" is
+a user account, and GitHub strips organization-scoped permissions (including Projects v2 access)
+from user-account installations (see #770); use a personal access token (FABRIK_TOKEN) for a
+user-owned board instead — App auth is not available for this case, permanently
+```
+
+Without this check, the failure would otherwise be silent and confusing: the board fetch would return empty, and Fabrik's ordinary startup board-column validation would report "stage names missing from board" — sending you chasing a configuration typo that doesn't exist. If your board is user-owned, use a personal access token; there is no App-auth path around this GitHub-side restriction.
+
+#### Startup permission verification
+
+After minting the installation's first token, Fabrik reads the installation's actually-**granted** permissions (not merely what the App itself *requests* — the two can diverge silently, e.g. after an App's permission requirements were raised but the installation's owner never approved the change) and compares them against what the engine's own GitHub API usage requires. Any shortfall fails startup, naming every missing permission:
+
+```
+GitHub App installation 789012 is missing required permissions: organization_projects
+(required "write", granted "none") — grant these permissions to the installation
+(App settings → Install App → Configure) and restart Fabrik
+```
+
+The engine currently requires: `metadata:read`, `organization_projects:write`, `issues:write`, `pull_requests:write`, `checks:read`, `statuses:read` — plus `webhooks:write` when `--webhooks` is enabled.
+
+#### Worker `gh` CLI authentication
+
+Built-in stage skills (e.g. `fabrik-validate`'s Pre-Completion Gate) shell out to the `gh` CLI directly. Under App auth, each Claude worker invocation is given a live, freshly-refreshed installation token as `GH_TOKEN`/`GITHUB_TOKEN` — read directly off the same client the engine's own API calls use, riding its background refresh loop — rather than a token copied once at startup. **Known limitation:** a single stage invocation whose wall time exceeds the installation token's ~1-hour lifetime can still see a now-expired value for the remainder of that one invocation, since a running child process's environment cannot be updated after it starts. This is a narrow edge case (`max_wall_time` at or beyond roughly an hour) and is not fully solved here — see [ADR-1713](../adrs/1713-engine-github-app-auth.md).
+
+#### Known limitations
+
+- **Not combinable with GHES.** `--ghes-host`/`FABRIK_GHES_HOST` and GitHub App auth cannot be configured together — refused explicitly at startup, naming the incompatibility. The underlying App-auth client construction does not yet derive GHES's independent REST/GraphQL endpoints correctly; use a personal access token against a GHES instance instead.
+- **One installation, one account.** The engine holds a single GitHub client scoped to one App installation (one organization). A cross-organization spawn target (a Plan/Review/Validate stage spawning a child issue in a different GitHub account or organization) is unreachable under App auth — this mirrors a GitHub App installation's own strict account-scoping, not a Fabrik design choice.
+- **Git operations are unaffected.** Fabrik's git clone/push machinery uses ambient SSH or a credential helper today, regardless of authentication mode — App auth changes only the engine's own GitHub API calls and the worker `gh` CLI environment above, not git itself.
+- **No secret material is ever logged**, at any verbosity — neither the private key nor any minted installation token.
+
 ### Auto-upgrade
 
 The `--auto-upgrade` flag enables Fabrik to upgrade itself automatically. It checks for a newer version in two places:
@@ -710,6 +787,15 @@ user: your-github-username
 # minimum supported version (3.19).
 # ghes_host: ""
 
+# GitHub App authentication — a second, co-equal auth path alongside a PAT
+# (FABRIK_TOKEN/GITHUB_TOKEN), not a replacement. All three must be set
+# together or none at all (absent, the default, means PAT mode — byte-
+# identical to today's behavior). Requires an organization-owned project
+# board — see "GitHub App Authentication" above.
+# github_app_id: 123456
+# github_app_private_key_path: /path/to/private-key.pem
+# github_app_installation_id: 789012
+
 # Path to stage YAML configs directory.
 # stages: ./.fabrik/stages
 
@@ -924,6 +1010,9 @@ FABRIK_USER=my-personal-username
 | `--debug-output` | Save Claude stage output to `.fabrik/debug/` | `false` |
 | `--symlink-env` | Create a relative symlink at `<worktree>/.env` pointing to the fabrikDir `.env` file at worktree setup time. Enables stage code to read credentials (e.g. `ANTHROPIC_API_KEY`) from `.env` without copying secrets. No-op when source `.env` is absent; never overwrites an existing `.env` in the worktree; also excluded from git stash via the worktree's git exclude file. Also `FABRIK_SYMLINK_ENV` | `false` |
 | `--ghes-host` | GitHub Enterprise Server hostname (no scheme, no trailing slash), e.g. `github.example.com`. Governs the REST/GraphQL API endpoints, bare-clone URLs, commit-author noreply email, `GH_HOST` in stage-worker environments, and the startup minimum-version preflight. Absent (default) means github.com, byte-identical to today's behavior. Also `FABRIK_GHES_HOST`. See [GitHub Enterprise Server Support](#github-enterprise-server-support). | `""` (github.com) |
+| `--github-app-id` | GitHub App ID for App-installation auth — co-equal with `--token`, not a replacement. Must be set together with `--github-app-private-key-path` and `--github-app-installation-id`, or not at all. Also `FABRIK_GITHUB_APP_ID`. See [GitHub App Authentication](#github-app-authentication). | `0` (PAT mode) |
+| `--github-app-private-key-path` | Path to the GitHub App's private key PEM file. Also `FABRIK_GITHUB_APP_PRIVATE_KEY_PATH`. | `""` |
+| `--github-app-installation-id` | GitHub App installation ID to authenticate as. Also `FABRIK_GITHUB_APP_INSTALLATION_ID`. | `0` |
 
 #### Unrecognized `config.yaml` Key Warnings
 
@@ -995,6 +1084,9 @@ The flag/env suggestion is derived mechanically from Fabrik's snake_case (`confi
 | `FABRIK_ANTHROPIC_API_KEY` | *(no config.yaml key)* | Explicit opt-in for API billing: when set and non-empty, translated into `ANTHROPIC_API_KEY` on every Claude worker invocation. The only supported way to obtain API billing through this variable — an ambient `ANTHROPIC_API_KEY` in the engine's own environment is scrubbed and never reaches the worker on its own. Never forwarded to the worker itself; a one-time `[startup]` notice fires when active. See "Anthropic Auth Namespace Scrub & `apiKeyHelper` Refusal" below. | -- |
 | `FABRIK_ANTHROPIC_ENV_PASSTHROUGH` | *(no config.yaml key)* | Comma-separated exact variable names to re-inherit unchanged from the engine's ambient environment into the worker, overriding the Anthropic auth namespace scrub for only those names (e.g. Bedrock/Vertex selectors). Never forwarded to the worker itself; a one-time `[startup]` notice names which variables were passed through when non-empty. See "Anthropic Auth Namespace Scrub & `apiKeyHelper` Refusal" below. | -- |
 | `FABRIK_GHES_HOST` | `ghes_host` | GitHub Enterprise Server hostname (no scheme, no trailing slash). Absent means github.com, byte-identical to today's behavior. See [GitHub Enterprise Server Support](#github-enterprise-server-support). | `""` (github.com) |
+| `FABRIK_GITHUB_APP_ID` | `github_app_id` | GitHub App ID for App-installation auth — co-equal with `FABRIK_TOKEN`/`GITHUB_TOKEN`, not a replacement. Must be set together with `FABRIK_GITHUB_APP_PRIVATE_KEY_PATH` and `FABRIK_GITHUB_APP_INSTALLATION_ID`, or not at all. See [GitHub App Authentication](#github-app-authentication). | `0` (PAT mode) |
+| `FABRIK_GITHUB_APP_PRIVATE_KEY_PATH` | `github_app_private_key_path` | Path to the GitHub App's private key PEM file. | `""` |
+| `FABRIK_GITHUB_APP_INSTALLATION_ID` | `github_app_installation_id` | GitHub App installation ID to authenticate as. | `0` |
 
 Token precedence: `--token` flag > `FABRIK_TOKEN` > `GITHUB_TOKEN`
 
@@ -2971,7 +3063,12 @@ happened to be set first. `GH_HOST` is only emitted when a GHES host is configur
 (`ghes_host` / `FABRIK_GHES_HOST`) — see [GitHub Enterprise Server
 Support](#github-enterprise-server-support); it is a Fabrik-computed override, not
 part of the Anthropic auth namespace, so it is never subject to the scrub described
-below. Everything else — anything outside the scrubbed namespace and
+below. `GH_TOKEN`/`GITHUB_TOKEN` is `--token`/`FABRIK_TOKEN`/`GITHUB_TOKEN` verbatim
+in PAT mode; under [GitHub App Authentication](#github-app-authentication) it is
+instead read live from the engine's own installation client at each invocation's
+env-build time, riding that client's background refresh loop — see that section's
+"Worker `gh` CLI authentication" for the one known edge case this doesn't cover.
+Everything else — anything outside the scrubbed namespace and
 not on the shadowed-keys list — passes through untouched. If you want a
 stage-specific variable to reach Claude reliably regardless of what's ambient,
 pass it explicitly via your stage YAML or a shell wrapper script rather than
@@ -3470,6 +3567,18 @@ Fabrik requires a **classic** personal access token (`ghp_...`). Fine-grained to
 On every startup, Fabrik fetches the project board and compares stage names in `.fabrik/stages/*.yaml` to the column names on the board. If any non-cleanup stage is missing from the board, Fabrik exits with an error listing the mismatched names.
 
 To fix: on an organization-owned board, run `fabrik repair-board --apply` (see [Repairing an Existing Board](#repairing-an-existing-board)) to add the missing columns without disturbing any item's current Status. Otherwise, ensure stage YAML `name` fields match board column names exactly (case-sensitive) — if you renamed a column on the board, update the matching stage YAML instead. Extra board columns (with no matching stage) produce a warning but don't block startup.
+
+**If you're using GitHub App authentication and see this**, check [GitHub App Authentication § Organization boards only](#github-app-authentication) first — a user-owned board under App auth produces its own explicit refusal, not this message; seeing *this* message under App auth against an organization board more likely means a genuine stage/column name mismatch, same as under PAT mode.
+
+### GitHub App Authentication Startup Failures
+
+Three startup checks are specific to [GitHub App Authentication](#github-app-authentication) — all three fail loudly with a message naming the exact problem, never a silent fallback to PAT mode or an empty/broken board:
+
+- **Partial configuration** — only some of `github_app_id`/`github_app_private_key_path`/`github_app_installation_id` are set. Fix: set all three, or remove all three to use a PAT instead.
+- **User-owned board** — App auth was configured against a project board owned by a GitHub user account rather than an organization. Fix: use a personal access token for this board instead — there is no App-auth path around GitHub's own restriction here.
+- **Missing granted permissions** — the installation's actually-granted permissions (checked live at startup) are narrower than what the engine requires. Fix: go to the App's installation settings (Install App → Configure) and grant the named permission(s), then restart Fabrik.
+
+See [GitHub App Authentication](#github-app-authentication) for example messages and full detail on each.
 
 ### Stage YAML Drift Warning
 

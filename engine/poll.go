@@ -272,6 +272,27 @@ func (e *Engine) Run() error {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+
+	// GitHub App auth refresh loop (#1713): only started when e.ghAppAuth was
+	// wired in New() (App-auth mode). waitGitHubAppRefreshLoops is a no-op in
+	// PAT mode. Registered as a defer BEFORE cancel's own defer immediately
+	// below so that, on unwind, cancel() runs FIRST (LIFO — the
+	// most-recently-registered defer runs first) — stopping every
+	// refresh-loop goroutine — and only then does this wait() block until
+	// they've actually exited, before the log-file-close defer above
+	// (registered earlier in this function, so it unwinds even later) runs.
+	// Mirrors pruefer/execute.go's Reconcile → RunRefreshLoops → defer
+	// waitRefreshLoops-before-closeLog ordering.
+	waitGitHubAppRefreshLoops := func() {}
+	if e.ghAppAuth != nil {
+		waitGitHubAppRefreshLoops = e.ghAppAuth.RunRefreshLoops(ctx, func(installationID int64) func(format string, args ...any) {
+			prefix := fmt.Sprintf("installation %d: ", installationID)
+			return func(format string, args ...any) {
+				e.logf(0, "github-app", prefix+format, args...)
+			}
+		})
+	}
+	defer waitGitHubAppRefreshLoops()
 	defer cancel()
 
 	// drainComplete is closed when Run() is about to return, for any reason —

@@ -553,6 +553,53 @@ func verifyPinnedGrants(baseURL string, appID int64, privateKey *rsa.PrivateKey,
 	logPermissionShortfalls(installationID, inst.Account, shortfalls, logf)
 }
 
+// VerifyGrants is the fail-hard sibling of verifyPinnedGrants (ADR-1709): it
+// builds an App JWT, fetches the pinned installation's actually-granted
+// permissions live (GET /app/installations/{id}, never GET /app's merely-
+// requested ones), and returns every shortfall found instead of only logging
+// it. verifyPinnedGrants is soft by design for Pruefer — a missing
+// permission there is non-fatal until the feature needing it is first used
+// — but a caller whose own severity policy requires startup to fail on a
+// shortfall (e.g. the engine, #1713 R3) needs the comparison result back as
+// data, not just a log line. Both share the same underlying primitives
+// (checkGrantedPermissions, gh.FetchAppInstallation); this is additive-only
+// — Pruefer's own soft check is untouched.
+//
+// Only meaningful for a Reconciler built from a pinned installation
+// (opts.AppInstallationID != 0 at Reconcile time) — returns an error for a
+// non-pinned Reconciler, since a non-pinned Reconciler's installations are
+// discovered dynamically across however many owners it watches, and there is
+// no single "the installation" this call could check.
+//
+// required == nil/empty returns (nil, nil) — no check performed, mirroring
+// every other RequiredPermissions-gated check in this package (a caller that
+// never configured a required set gets no verification, not a failure).
+func (r *Reconciler) VerifyGrants(required map[string]string) ([]RequiredPermissionShortfall, error) {
+	if len(required) == 0 {
+		return nil, nil
+	}
+	r.mu.Lock()
+	pinnedID := r.pinnedInstallationID
+	appID := r.appID
+	privateKey := r.privateKey
+	baseURL := r.baseURL
+	r.mu.Unlock()
+
+	if pinnedID == 0 {
+		return nil, fmt.Errorf("VerifyGrants is only supported for a Reconciler built from a pinned installation (github_app_installation_id) — this Reconciler was constructed via installation discovery, which has no single installation to verify")
+	}
+
+	jwt, err := gh.BuildAppJWT(appID, privateKey)
+	if err != nil {
+		return nil, fmt.Errorf("building app JWT to verify installation %d's granted permissions: %w", pinnedID, err)
+	}
+	inst, err := gh.FetchAppInstallation(baseURL, jwt, pinnedID)
+	if err != nil {
+		return nil, fmt.Errorf("fetching installation %d to verify granted permissions: %w", pinnedID, err)
+	}
+	return checkGrantedPermissions(inst.Permissions, required), nil
+}
+
 // runManifestFlow is a package var (not a direct call to RunManifestFlow)
 // so tests can assert it is never invoked on the backward-compat path —
 // existing valid local credentials must skip the manifest flow entirely,
