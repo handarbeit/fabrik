@@ -415,7 +415,52 @@ Fabrik can authenticate to GitHub as a **GitHub App installation** instead of a 
 
 App auth gives the engine its own rate-limit bucket (separate from any human's PAT, and larger — GitHub scales installation limits with the organization's repo and user count) and a stable `fabrik[bot]` identity on every issue/PR/comment it creates, instead of appearing as whichever human's token happens to be configured.
 
-**This is compat mode only.** Fabrik consumes an App ID, private key, and installation ID for a GitHub App you have already created and installed — manually via GitHub's own App-creation UI, or via another tool's bootstrap flow. Fabrik does not walk you through creating or installing the App itself; that guided setup is tracked as a separate, future `fabrik init --github-app` enhancement.
+**The engine itself is compat mode only.** It consumes an App ID, private key, and installation ID for a GitHub App you have already created and installed — manually via GitHub's own App-creation UI, or via `fabrik init --github-app` below. The engine never runs the manifest/browser bootstrap flow itself; that's `fabrik init --github-app`'s job.
+
+#### Setting up App auth
+
+`fabrik init --github-app` drives setup end to end: register a new App via GitHub's manifest flow (or adopt an existing one), resolve its installation on your organization, verify the installation's granted permissions, and populate `.fabrik/config.yaml` — no manual credential copying or board editing required.
+
+**Creating a new App:**
+
+```bash
+fabrik init --github-app --owner myorg
+```
+
+This opens (or, headless, prints) GitHub's App-creation page pre-filled with the exact permission set the engine requires. Confirm creation on GitHub, and the flow resumes automatically: it exchanges the resulting code for the App's credentials, writes the private key to `.fabrik/github-app-key.pem` (see "Key storage" below), discovers the installation on `myorg` (installing the App there first if it isn't installed yet — the flow prints the guided-install URL and exits non-zero, safely re-runnable once you've installed it), verifies granted permissions, and writes `github_app_id`/`github_app_private_key_path`/`github_app_installation_id` into `.fabrik/config.yaml`.
+
+**Adopting an existing App** — one you already created by hand or via another tool — using the same `--github-app-id`/`--github-app-private-key-path` flag names the engine's own runtime config uses:
+
+```bash
+fabrik init --github-app --owner myorg \
+  --github-app-id 123456 \
+  --github-app-private-key-path /path/to/private-key.pem
+```
+
+Both flags must be given together, or neither — giving only one is refused, since a bare `--github-app-private-key-path` on the create path would risk a fresh manifest bootstrap silently overwriting whatever file already sits there. Add `--github-app-installation-id` to pin a specific installation and skip discovery entirely (useful when the App is installed on more than one account and you want a specific one, or to avoid an extra discovery round trip).
+
+**Creating the board in the same run:** combine with `--create-board` (see [Create a Project Board](#create-a-project-board)) to also create a fully-configured project board, using the App's own freshly-minted client — no separate `--token` needed, since App auth already carries `organization_projects:write`:
+
+```bash
+fabrik init --github-app --create-board --owner myorg --repo myrepo
+```
+
+**Organization-only, at setup time too.** The same restriction [Organization boards only](#organization-boards-only) describes for the running engine applies during setup: `fabrik init --github-app` refuses a user-owned `--owner` outright, before attempting anything else, with the identical wording.
+
+**Permission verification at setup time.** Immediately after minting the installation's first token, setup runs the exact same granted-permission check the engine's own startup performs (see [Startup permission verification](#startup-permission-verification)) — so a shortfall is caught here, not on the engine's first run. If you're **adopting** an App whose installation predates a permission the engine now requires, GitHub never applies a permission increase to an existing installation automatically — an org admin must approve it explicitly:
+
+```
+GitHub App installation 789012 is missing required permissions: organization_projects
+(required "write", granted "none") — approve the permission change at
+https://github.com/settings/installations/789012 (an org admin may be required),
+then re-run `fabrik init --github-app`
+```
+
+**`--webhooks`.** If you plan to run the engine with `--webhooks` enabled, pass `--webhooks` to setup too, so the manifest/verification includes webhook-management permission from the start. Enabling `--webhooks` on the engine later without having set this at App-creation time means the installation is missing that permission and needs the same admin-approval step above.
+
+**Key storage.** A freshly created App's private key is written to `.fabrik/github-app-key.pem` (0600, parent directory 0700, written atomically) unless `--github-app-private-key-path` names a different location (adopt path only — see above). Non-key App metadata (App ID, slug, webhook secret, client ID/secret) is written to the fixed, non-configurable `.fabrik/github-app-state.json` — the same file the engine's own compat-mode client construction reads diagnostics-only state from. **Re-keying:** rotate the key on the App's GitHub settings page, then replace the file at your configured `github_app_private_key_path`; the engine's own startup detects a key that doesn't match its recorded fingerprint and fails loudly with a repair-needed error rather than silently misauthenticating.
+
+**Non-interactive use.** In a headless environment (no TTY on stdin), browser auto-launch is skipped automatically — the App-creation URL is always printed regardless, so you can open it yourself. Every other wait in the flow (installation not yet performed, permissions not yet approved) is a single-shot check, not a poll loop: it fails immediately with the exact next step and exits non-zero, safe to re-run once you've completed that step. Pass `--no-browser` explicitly to force this behavior even on a TTY.
 
 #### Configuring App auth
 
