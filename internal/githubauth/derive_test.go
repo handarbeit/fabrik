@@ -78,6 +78,264 @@ func TestDerive_FutureRepoPickup(t *testing.T) {
 	}
 }
 
+// TestDerive_NonPinnedMode_PopulatesPermissionShortfalls is #1709's R2/AC2
+// regression test for the discovery-mode wiring: an installation granted
+// less than RequiredPermissions requires must surface a named shortfall on
+// its DerivedInstallation entry, sourced entirely from the already-fetched
+// /app/installations list response (no extra API call).
+func TestDerive_NonPinnedMode_PopulatesPermissionShortfalls(t *testing.T) {
+	oldFlow := runManifestFlow
+	runManifestFlow = failingRunManifestFlow(t)
+	defer func() { runManifestFlow = oldFlow }()
+
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	srv, _ := newFakeAppServer("pruefer-bot", []gh.AppInstallation{
+		{ID: 111, Account: "handarbeit", Permissions: map[string]string{
+			"metadata": "read", "pull_requests": "write", "contents": "read", "issues": "read",
+		}},
+	}, func() time.Time { return time.Now().Add(time.Hour) })
+	defer srv.Close()
+
+	r, err := Reconcile(context.Background(), Options{
+		AppID: 42, AppPrivateKeyPath: keyPath, AppStatePath: filepath.Join(dir, "app-state.json"),
+		BaseURL:             srv.URL,
+		RequiredPermissions: map[string]string{"issues": "write", "contents": "read"},
+	})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	set := r.LastDerived()
+	if len(set.Installations) != 1 {
+		t.Fatalf("expected 1 installation, got %d", len(set.Installations))
+	}
+	shortfalls := set.Installations[0].PermissionShortfalls
+	if len(shortfalls) != 1 {
+		t.Fatalf("expected 1 shortfall, got %+v", shortfalls)
+	}
+	if shortfalls[0].Permission != "issues" || shortfalls[0].Required != "write" || shortfalls[0].Granted != "read" {
+		t.Errorf("shortfall = %+v", shortfalls[0])
+	}
+}
+
+// TestDerive_NonPinnedMode_NoShortfallWhenGrantedExceedsRequired guards the
+// ordinal-comparison false-positive case at the Derive level (not just
+// checkGrantedPermissions' own unit tests): an installation granted "admin"
+// on a scope requiring only "write" must produce no shortfall.
+func TestDerive_NonPinnedMode_NoShortfallWhenGrantedExceedsRequired(t *testing.T) {
+	oldFlow := runManifestFlow
+	runManifestFlow = failingRunManifestFlow(t)
+	defer func() { runManifestFlow = oldFlow }()
+
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	srv, _ := newFakeAppServer("pruefer-bot", []gh.AppInstallation{
+		{ID: 111, Account: "handarbeit", Permissions: map[string]string{"issues": "admin"}},
+	}, func() time.Time { return time.Now().Add(time.Hour) })
+	defer srv.Close()
+
+	r, err := Reconcile(context.Background(), Options{
+		AppID: 42, AppPrivateKeyPath: keyPath, AppStatePath: filepath.Join(dir, "app-state.json"),
+		BaseURL:             srv.URL,
+		RequiredPermissions: map[string]string{"issues": "write"},
+	})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	set := r.LastDerived()
+	if got := set.Installations[0].PermissionShortfalls; len(got) != 0 {
+		t.Errorf("expected no shortfalls when granted (admin) exceeds required (write), got %+v", got)
+	}
+}
+
+// TestDerive_PinnedMode_GrantVerificationRerunsWithoutRestart is #1709's R3
+// regression test: a pinned-installation Reconciler's grant check must
+// re-run on a later Derive call (not just Reconcile's own initial call), so
+// re-running the check after a manual App-permission raise in production —
+// R3's literal scenario — doesn't require restarting Pruefer.
+func TestDerive_PinnedMode_GrantVerificationRerunsWithoutRestart(t *testing.T) {
+	oldFlow := runManifestFlow
+	runManifestFlow = failingRunManifestFlow(t)
+	defer func() { runManifestFlow = oldFlow }()
+
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	srv, fake := newFakeAppServer("pruefer-bot", []gh.AppInstallation{
+		{ID: 999, Account: "handarbeit", Permissions: map[string]string{"issues": "read"}},
+	}, func() time.Time { return time.Now().Add(time.Hour) })
+	defer srv.Close()
+
+	r, err := Reconcile(context.Background(), Options{
+		AppID: 42, AppPrivateKeyPath: keyPath, AppInstallationID: 999,
+		AppStatePath:        filepath.Join(dir, "app-state.json"),
+		WatchedRepos:        []string{"handarbeit/fabrik"},
+		BaseURL:             srv.URL,
+		RequiredPermissions: map[string]string{"issues": "write"},
+	})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	// Simulate the operator applying the manual fix (R1's out-of-scope
+	// operational step) between the initial Reconcile and a later
+	// re-derivation trigger.
+	fake.installations[0].Permissions = map[string]string{"issues": "write"}
+
+	var logged []string
+	_, _, err = r.Derive(context.Background(), []string{"handarbeit/fabrik"}, 0, func(format string, args ...any) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	})
+	if err != nil {
+		t.Fatalf("Derive: %v", err)
+	}
+	for _, l := range logged {
+		if strings.Contains(l, "issues") {
+			t.Errorf("expected no shortfall logged after the permission was raised, got: %q", l)
+		}
+	}
+}
+
+// TestDerive_PinnedMode_GrantVerificationLogsShortfall confirms the negative
+// of the test above: an unaddressed shortfall must actually be logged (by
+// name) on a pinned Reconciler's Derive call, not merely "not erroring."
+func TestDerive_PinnedMode_GrantVerificationLogsShortfall(t *testing.T) {
+	oldFlow := runManifestFlow
+	runManifestFlow = failingRunManifestFlow(t)
+	defer func() { runManifestFlow = oldFlow }()
+
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	srv, _ := newFakeAppServer("pruefer-bot", []gh.AppInstallation{
+		{ID: 999, Account: "handarbeit", Permissions: map[string]string{"issues": "read"}},
+	}, func() time.Time { return time.Now().Add(time.Hour) })
+	defer srv.Close()
+
+	r, err := Reconcile(context.Background(), Options{
+		AppID: 42, AppPrivateKeyPath: keyPath, AppInstallationID: 999,
+		AppStatePath:        filepath.Join(dir, "app-state.json"),
+		WatchedRepos:        []string{"handarbeit/fabrik"},
+		BaseURL:             srv.URL,
+		RequiredPermissions: map[string]string{"issues": "write"},
+	})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	var logged []string
+	_, _, err = r.Derive(context.Background(), []string{"handarbeit/fabrik"}, 0, func(format string, args ...any) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	})
+	if err != nil {
+		t.Fatalf("Derive: %v", err)
+	}
+	found := false
+	for _, l := range logged {
+		if strings.Contains(l, "999") && strings.Contains(l, "issues") && strings.Contains(l, "write") && strings.Contains(l, "read") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a shortfall log line naming installation 999, permission issues, required write, granted read; got %v", logged)
+	}
+}
+
+// TestDerive_NonPinnedMode_ShortfallLoggedDespiteRepoListError is the
+// regression test for a review finding on this PR: PermissionShortfalls is
+// computed from inst.Permissions (the installations-list response),
+// independent of whether that round's FetchInstallationRepositories call
+// succeeded — but logDerivedSet used to `continue` past the
+// shortfall-logging line whenever RepoListError was set, so a genuine
+// permission shortfall silently went unlogged for any round where an
+// installation's (unrelated) repo listing also transiently failed. Both
+// conditions are forced simultaneously here to prove the shortfall is still
+// surfaced.
+func TestDerive_NonPinnedMode_ShortfallLoggedDespiteRepoListError(t *testing.T) {
+	oldFlow := runManifestFlow
+	runManifestFlow = failingRunManifestFlow(t)
+	defer func() { runManifestFlow = oldFlow }()
+
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	srv, fake := newFakeAppServer("pruefer-bot", []gh.AppInstallation{
+		{ID: 111, Account: "handarbeit", Permissions: map[string]string{"issues": "read"}},
+	}, func() time.Time { return time.Now().Add(time.Hour) })
+	fake.failRepoList = func(installationID int64) bool { return installationID == 111 }
+	defer srv.Close()
+
+	logf, lines := newLogCollector()
+	r, err := Reconcile(context.Background(), Options{
+		AppID: 42, AppPrivateKeyPath: keyPath, AppStatePath: filepath.Join(dir, "app-state.json"),
+		BaseURL:             srv.URL,
+		RequiredPermissions: map[string]string{"issues": "write"},
+		Logf:                logf,
+	})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	set := r.LastDerived()
+	if got := set.Installations[0].RepoListError; got == "" {
+		t.Fatal("test setup broken: expected RepoListError to be set")
+	}
+	if got := set.Installations[0].PermissionShortfalls; len(got) != 1 {
+		t.Fatalf("expected 1 shortfall despite RepoListError, got %+v", got)
+	}
+	found := false
+	for _, l := range lines() {
+		if strings.Contains(l, "111") && strings.Contains(l, "issues") && strings.Contains(l, "\"write\"") && strings.Contains(l, "\"read\"") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected the shortfall to be logged even though repo-listing also failed this round, got: %v", lines())
+	}
+}
+
+// TestDerive_NonPinnedMode_ShortfallLoggedDespiteMintError is the sibling
+// regression case to the RepoListError test above: inst.Permissions comes
+// from the already-fetched installations list, independent of whether
+// mintAuth itself succeeded this round, so a shortfall must still be
+// computed (and logged) on the mint-failure branch too.
+func TestDerive_NonPinnedMode_ShortfallLoggedDespiteMintError(t *testing.T) {
+	oldFlow := runManifestFlow
+	runManifestFlow = failingRunManifestFlow(t)
+	defer func() { runManifestFlow = oldFlow }()
+
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	srv, fake := newFakeAppServer("pruefer-bot", []gh.AppInstallation{
+		{ID: 111, Account: "handarbeit", Permissions: map[string]string{"issues": "read"}},
+	}, func() time.Time { return time.Now().Add(time.Hour) })
+	fake.failMint = func(installationID int64) bool { return installationID == 111 }
+	defer srv.Close()
+
+	logf, lines := newLogCollector()
+	r, err := Reconcile(context.Background(), Options{
+		AppID: 42, AppPrivateKeyPath: keyPath, AppStatePath: filepath.Join(dir, "app-state.json"),
+		BaseURL:             srv.URL,
+		RequiredPermissions: map[string]string{"issues": "write"},
+		Logf:                logf,
+	})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	set := r.LastDerived()
+	if got := set.Installations[0].MintError; got == "" {
+		t.Fatal("test setup broken: expected MintError to be set")
+	}
+	if got := set.Installations[0].PermissionShortfalls; len(got) != 1 {
+		t.Fatalf("expected 1 shortfall despite MintError, got %+v", got)
+	}
+	found := false
+	for _, l := range lines() {
+		if strings.Contains(l, "111") && strings.Contains(l, "issues") && strings.Contains(l, "\"write\"") && strings.Contains(l, "\"read\"") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected the shortfall to be logged even though minting also failed this round, got: %v", lines())
+	}
+}
+
 // TestDerive_MaxDerivedReposCapsDeterministically is R5/AC6's regression
 // test: a synthetic installation granting far more repos than
 // max_derived_repos must be capped, with Capped/CapApplied reported, and the

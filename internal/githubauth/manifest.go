@@ -43,35 +43,62 @@ const defaultAppHomepageURL = "https://github.com/handarbeit/fabrik"
 // parameter is overridden, pointed at an httptest server).
 var manifestHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
-// buildManifest returns the JSON manifest GitHub's App-creation-from-manifest
-// flow expects, scoped to exactly the permissions Pruefer's code paths use
-// (matching cmd/pruefer/README.md's manual-setup permission list):
-// Metadata: read, Pull requests: write, Contents: read, Issues: write.
+// requiredPermissions is the single source of truth for exactly the
+// permissions Pruefer's code paths use (matching cmd/pruefer/README.md's
+// manual-setup permission list): Metadata: read, Pull requests: write,
+// Contents: read, Issues: write. Both buildManifest (what a freshly
+// manifest-created App requests) and PrueferRequiredPermissions (what
+// internal/githubauth's grant-verification check, #1709, requires an
+// installation to have actually granted) read from this one map, so the
+// two can no longer independently drift the way they had before #1709 —
+// the exact defect (issues: write requested by neither the manifest nor
+// any check, while the hand-created live App silently held issues: read)
+// this issue exists to catch earlier next time.
+//
 // Issues is "write", not "read": pruefer/comment.go's
 // AcknowledgeForceReview/MarkForceReviewsProcessed POST to
 // /repos/{owner}/{repo}/issues/comments/{id}/reactions (github/comments.go's
 // AddCommentReaction) to leave the eyes/rocket acknowledgment on a
 // "/pruefer review" comment — GitHub's Issue Comments API requires "issues:
 // write" to create a reaction, not "read"; "read" only covers listing
-// comments. hook_attributes.active is always false and no default_events
-// are requested — Pruefer V1 is polling-only (ADR-1113 §1, ADR-032);
-// enabling webhook delivery is a separate, out-of-scope future issue this
-// manifest must never enable. redirectURL is the loopback callback server's
-// own URL, assigned only after it starts listening (see
-// runManifestCallbackServer).
+// comments.
+var requiredPermissions = map[string]string{
+	"metadata":      "read",
+	"pull_requests": "write",
+	"contents":      "read",
+	"issues":        "write",
+}
+
+// PrueferRequiredPermissions returns the permission set Pruefer's code paths
+// require an installation to have actually granted — the same set
+// buildManifest requests for a freshly created App (see requiredPermissions'
+// doc comment for why they're one map, not two). Intended as the
+// Options.RequiredPermissions value Pruefer's own execute.go passes into
+// Reconcile for R2's grant-verification check. Returns a fresh copy so a
+// caller mutating the result can never corrupt this package's own copy.
+func PrueferRequiredPermissions() map[string]string {
+	out := make(map[string]string, len(requiredPermissions))
+	for k, v := range requiredPermissions {
+		out[k] = v
+	}
+	return out
+}
+
+// buildManifest returns the JSON manifest GitHub's App-creation-from-manifest
+// flow expects, scoped to requiredPermissions (see its doc comment).
+// hook_attributes.active is always false and no default_events are
+// requested — Pruefer V1 is polling-only (ADR-1113 §1, ADR-032); enabling
+// webhook delivery is a separate, out-of-scope future issue this manifest
+// must never enable. redirectURL is the loopback callback server's own URL,
+// assigned only after it starts listening (see runManifestCallbackServer).
 func buildManifest(redirectURL string) map[string]interface{} {
 	return map[string]interface{}{
-		"name":         defaultAppName,
-		"url":          defaultAppHomepageURL,
-		"redirect_url": redirectURL,
-		"public":       false,
-		"default_permissions": map[string]string{
-			"metadata":      "read",
-			"pull_requests": "write",
-			"contents":      "read",
-			"issues":        "write",
-		},
-		"default_events": []string{},
+		"name":                defaultAppName,
+		"url":                 defaultAppHomepageURL,
+		"redirect_url":        redirectURL,
+		"public":              false,
+		"default_permissions": PrueferRequiredPermissions(),
+		"default_events":      []string{},
 		"hook_attributes": map[string]interface{}{
 			"active": false,
 		},

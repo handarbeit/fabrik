@@ -104,11 +104,36 @@ func newFakeAppServer(slug string, installations []gh.AppInstallation, tokenExpi
 			raw[i] = map[string]interface{}{
 				"id": inst.ID, "account": map[string]string{"login": inst.Account},
 				"repository_selection": inst.RepositorySelection,
+				"permissions":          inst.Permissions,
 			}
 		}
 		json.NewEncoder(w).Encode(raw)
 	})
+	// /app/installations/{id} (GET, no suffix) and
+	// /app/installations/{id}/access_tokens (POST) share this prefix — routed
+	// by method and whether the path has an "/access_tokens" suffix, rather
+	// than two separate mux patterns (net/http's ServeMux can't distinguish
+	// "/app/installations/{id}" from "/app/installations/{id}/access_tokens"
+	// without either overlapping registrations or manual path inspection).
 	mux.HandleFunc("/app/installations/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && !strings.HasSuffix(r.URL.Path, "/access_tokens") {
+			var instID int64
+			fmt.Sscanf(r.URL.Path, "/app/installations/%d", &instID)
+			for _, inst := range f.installations {
+				if inst.ID == instID {
+					json.NewEncoder(w).Encode(map[string]interface{}{
+						"id": inst.ID, "account": map[string]string{"login": inst.Account},
+						"repository_selection": inst.RepositorySelection,
+						"permissions":          inst.Permissions,
+					})
+					return
+				}
+			}
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte(`{"message":"installation not found"}`))
+			return
+		}
+
 		var instID int64
 		fmt.Sscanf(r.URL.Path, "/app/installations/%d/access_tokens", &instID)
 
