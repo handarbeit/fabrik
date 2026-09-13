@@ -1,8 +1,11 @@
 package engine
 
 import (
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/handarbeit/fabrik/tui"
 )
 
 func TestLogThrottleState_ShouldLog_FirstOccurrenceAlwaysLogs(t *testing.T) {
@@ -106,7 +109,29 @@ func TestEngine_LogfThrottledByInterval_MessageChangeDoesNotForceLog(t *testing.
 	}
 
 	// logfThrottledByInterval itself must not panic and must be safe to call
-	// repeatedly with varying content at the same instant.
+	// repeatedly with varying content at the same instant — and, per review
+	// finding, the second call's varying content (count: 2) must actually be
+	// suppressed at the logf-wrapper level, not just at the underlying
+	// shouldLog primitive already covered above. Captures via the events
+	// channel, following poll_test.go's established "drain LogEvent" idiom
+	// rather than asserting only "does not panic."
+	events := make(chan tui.Event, 8)
+	eng.events = events
 	eng.logfThrottledByInterval("interval-key-2", 0, "poll", "count: %d\n", 1)
 	eng.logfThrottledByInterval("interval-key-2", 0, "poll", "count: %d\n", 2)
+	close(events)
+	eng.events = nil
+
+	var logged []tui.LogEvent
+	for ev := range events {
+		if le, ok := ev.(tui.LogEvent); ok {
+			logged = append(logged, le)
+		}
+	}
+	if len(logged) != 1 {
+		t.Fatalf("expected exactly 1 log event (second call suppressed by the interval throttle), got %d: %v", len(logged), logged)
+	}
+	if !strings.Contains(logged[0].Message, "count: 1") {
+		t.Errorf("expected the surviving log event to carry the first call's message (count: 1), got %q", logged[0].Message)
+	}
 }
