@@ -110,14 +110,15 @@ func Execute() error {
 	}()
 
 	auth, err := githubauth.Reconcile(ctx, githubauth.Options{
-		AppID:             cfg.AppID,
-		AppInstallationID: cfg.AppInstallationID,
-		AppPrivateKeyPath: cfg.AppPrivateKeyPath,
-		AppStatePath:      cfg.AppStatePath,
-		WatchedRepos:      cfg.WatchedRepos,
-		MaxDerivedRepos:   cfg.MaxDerivedRepos,
-		NoBrowser:         cfg.NoBrowser,
-		Logf:              func(format string, args ...any) { logf(0, "auth", format+"\n", args...) },
+		AppID:               cfg.AppID,
+		AppInstallationID:   cfg.AppInstallationID,
+		AppPrivateKeyPath:   cfg.AppPrivateKeyPath,
+		AppStatePath:        cfg.AppStatePath,
+		WatchedRepos:        cfg.WatchedRepos,
+		MaxDerivedRepos:     cfg.MaxDerivedRepos,
+		NoBrowser:           cfg.NoBrowser,
+		RequiredPermissions: githubauth.PrueferRequiredPermissions(),
+		Logf:                func(format string, args ...any) { logf(0, "auth", format+"\n", args...) },
 	})
 	if err != nil {
 		return fmt.Errorf("reconciling GitHub App auth: %w", err)
