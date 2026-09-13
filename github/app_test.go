@@ -268,6 +268,99 @@ func TestFetchAppInstallations_DecodesRepositorySelection(t *testing.T) {
 	}
 }
 
+// TestFetchAppInstallations_DecodesPermissions guards the field
+// FetchAppInstallations previously discarded entirely: GitHub's installation
+// resource includes a "permissions" object reporting what was actually
+// granted (distinct from GET /app's requested permissions) — see #1709.
+func TestFetchAppInstallations_DecodesPermissions(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode([]map[string]interface{}{
+			{
+				"id": 111, "account": map[string]string{"login": "handarbeit"},
+				"permissions": map[string]string{"issues": "read", "contents": "read"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	installs, _, err := FetchAppInstallations(srv.URL, "test-jwt")
+	if err != nil {
+		t.Fatalf("FetchAppInstallations: %v", err)
+	}
+	if len(installs) != 1 {
+		t.Fatalf("expected 1 installation, got %d", len(installs))
+	}
+	if got := installs[0].Permissions["issues"]; got != "read" {
+		t.Errorf("Permissions[issues] = %q, want %q", got, "read")
+	}
+	if got := installs[0].Permissions["contents"]; got != "read" {
+		t.Errorf("Permissions[contents] = %q, want %q", got, "read")
+	}
+}
+
+func TestFetchAppInstallation(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/app/installations/111" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		if r.Method != "GET" {
+			t.Errorf("method = %s, want GET", r.Method)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer test-jwt" {
+			t.Errorf("Authorization = %q, want Bearer test-jwt", got)
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"id": 111, "account": map[string]string{"login": "handarbeit"},
+			"repository_selection": "all",
+			"permissions":          map[string]string{"issues": "write", "contents": "read"},
+		})
+	}))
+	defer srv.Close()
+
+	inst, err := FetchAppInstallation(srv.URL, "test-jwt", 111)
+	if err != nil {
+		t.Fatalf("FetchAppInstallation: %v", err)
+	}
+	if inst.ID != 111 || inst.Account != "handarbeit" || inst.RepositorySelection != "all" {
+		t.Errorf("inst = %+v", inst)
+	}
+	if got := inst.Permissions["issues"]; got != "write" {
+		t.Errorf("Permissions[issues] = %q, want %q", got, "write")
+	}
+}
+
+func TestFetchAppInstallation_UnauthorizedWrapsErrAppUnauthorized(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		w.Write([]byte(`{"message":"forbidden"}`))
+	}))
+	defer srv.Close()
+
+	_, err := FetchAppInstallation(srv.URL, "test-jwt", 111)
+	if err == nil {
+		t.Fatal("expected an error for a 403 response")
+	}
+	if !errors.Is(err, ErrAppUnauthorized) {
+		t.Errorf("err = %v, want errors.Is(err, ErrAppUnauthorized)", err)
+	}
+}
+
+func TestFetchAppInstallation_NotFoundWrapsErrNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"message":"not found"}`))
+	}))
+	defer srv.Close()
+
+	_, err := FetchAppInstallation(srv.URL, "test-jwt", 111)
+	if err == nil {
+		t.Fatal("expected an error for a 404 response")
+	}
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("err = %v, want errors.Is(err, ErrNotFound)", err)
+	}
+}
+
 func TestFetchInstallationRepositories(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/installation/repositories" {
