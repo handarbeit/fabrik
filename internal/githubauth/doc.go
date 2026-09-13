@@ -26,6 +26,13 @@
 // is separate follow-up work; this package only makes the mechanism
 // pluggable.
 //
+// As of #1722, Options.ServedAccounts is caller-agnostic the same way:
+// whichever caller constructs Options decides which accounts its own
+// deployment is authorized to serve, and Derive's account-recognition gate
+// (R4/R5) is driven entirely by that field plus the pre-existing
+// Options.WatchedRepos — this package never hardcodes Pruefer's or any other
+// caller's account list.
+//
 // See adrs/1253-github-app-manifest-auth-reconciler.md for the design
 // rationale, including why a manifest-created App supersedes (while still
 // supporting as a compat mode) the single shared public App described in

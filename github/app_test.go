@@ -583,6 +583,67 @@ func TestMintInstallationToken(t *testing.T) {
 	}
 }
 
+func TestDeleteAppInstallation(t *testing.T) {
+	var gotMethod, gotPath, gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	if err := DeleteAppInstallation(srv.URL, "test-jwt", 999); err != nil {
+		t.Fatalf("DeleteAppInstallation: %v", err)
+	}
+	if gotMethod != http.MethodDelete {
+		t.Errorf("method = %s, want DELETE", gotMethod)
+	}
+	if gotPath != "/app/installations/999" {
+		t.Errorf("path = %s", gotPath)
+	}
+	if gotAuth != "Bearer test-jwt" {
+		t.Errorf("Authorization header = %q, want %q", gotAuth, "Bearer test-jwt")
+	}
+}
+
+// TestDeleteAppInstallation_NotFoundWrapsErrNotFound guards the
+// idempotent-success contract callers (internal/githubauth's R4 deletion
+// path) rely on: an installation already gone (e.g. the installer removed it
+// independently, or a previous call already deleted it) must be
+// distinguishable via errors.Is, not just any generic 4xx.
+func TestDeleteAppInstallation_NotFoundWrapsErrNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"message":"not found"}`))
+	}))
+	defer srv.Close()
+
+	err := DeleteAppInstallation(srv.URL, "test-jwt", 999)
+	if err == nil {
+		t.Fatal("expected error for a 404 response, got nil")
+	}
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("error = %v, want errors.Is(err, ErrNotFound)", err)
+	}
+}
+
+func TestDeleteAppInstallation_ErrorStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"message":"boom"}`))
+	}))
+	defer srv.Close()
+
+	err := DeleteAppInstallation(srv.URL, "test-jwt", 999)
+	if err == nil {
+		t.Fatal("expected error for a 500 response, got nil")
+	}
+	if !strings.Contains(err.Error(), "deleting installation 999") {
+		t.Errorf("error = %v, want it to name the installation being deleted", err)
+	}
+}
+
 func TestFetchAppSlug(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/app" {

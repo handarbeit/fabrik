@@ -61,7 +61,9 @@ With no usable local App credentials, Pruefer walks you through GitHub's **App M
 
    Follow the printed link and install the App on whichever repo, org, or account you want reviewed — no restart needed: Pruefer picks up the new installation on its own within `repo_rederivation_interval` (default 10m), or immediately on the next `installation`/`installation_repositories` webhook event in `event_source: hookdeck` mode. See [Installation-derived repo discovery](#installation-derived-repo-discovery) below for the full model, including how to narrow what gets reviewed with `watched_repos`.
 
-The App this flow creates is **yours** — owned by whichever GitHub account performs the manifest flow, installable only where you choose to install it. This is not a shared, publicly-installable App: each user who sets up their own Pruefer instance this way gets their own dedicated App, with no credential ever shared between instances.
+The App this flow creates is **yours** — owned by whichever GitHub account performs the manifest flow, and **private** (the manifest requests `"public": false`, unconditionally — there is no config knob to change this). A private App can only ever be installed on the account that owns it — not "wherever you choose," but specifically that one account. This is not a shared, publicly-installable App: each user who sets up their own Pruefer instance this way gets their own dedicated App, with no credential ever shared between instances.
+
+**If you need to review repos across more than one account** (a personal account plus an org, or several orgs), see [The per-account model](#the-per-account-model-multiple-accounts--multiple-apps) below — the supported answer is one App and one Pruefer daemon per account, not one App spanning several. **Making the App public so a single instance can span accounts is a discouraged, actively-unsafe choice** — see that section for why, and for the migration path if you're already running that way.
 
 ### Subsequent runs
 
@@ -86,7 +88,7 @@ Registering the App yourself is still fully supported — this is also how Pruef
 4. **Where can this GitHub App be installed?**: your choice — "Only on this account" is simplest for a single org.
 5. Click **Create GitHub App**. Note the **App ID** shown on the app's settings page.
 6. Scroll to **Private keys** and click **Generate a private key**. This downloads a `.pem` file — save it somewhere outside version control (Pruefer's default config gitignores `.pruefer/*.pem`).
-7. Click **Install App** (left sidebar) and install it on every repo, org, or account you want reviewed — a single App installed on multiple orgs/accounts is exactly the multi-org setup this section leads into.
+7. Click **Install App** (left sidebar) and install it on the repo(s) you want reviewed **within this one account**. If you need another account reviewed too, register a **separate** App for it and run a **separate** Pruefer daemon — see [The per-account model](#the-per-account-model-multiple-accounts--multiple-apps) below. Do not install one App across multiple orgs/accounts to avoid a second setup — that requires making the App public, which this README explicitly discourages.
 8. Set `github_app_id` in `.pruefer/config.yaml` (or `PRUEFER_GITHUB_APP_ID` / `--github-app-id`) and place the downloaded key per "Place the private key" below.
 
 Once `github_app_id` and the PEM are both in place, the reconciler recognizes them as valid local credentials on the very next run and never attempts the manifest flow.
@@ -123,6 +125,8 @@ max_diff_bytes: 500000
 # watched_repos:                    # optional narrowing filter — see "Installation-derived repo discovery" below
 #   - your-org/repo-one
 #   - another-org/repo-three        # a different owner works too
+# served_accounts:                  # optional allowlist — an installation outside it is deleted, not just reported
+#   - your-org
 # max_derived_repos: 200            # cap on how many repos a single derivation may yield; <= 0 disables the cap
 # repo_rederivation_interval: 10m   # how often to re-derive the repo set from installations on a timer
 
@@ -138,13 +142,47 @@ Which repos Pruefer reviews is decided by where the GitHub App is installed, not
 
 **`watched_repos` is an optional narrowing filter, not the primary input.** Absent (or empty, the default), Pruefer reviews everything its installations grant. Present, it narrows the derived set to the intersection — it can only ever *exclude* a repo the installation grants, never *include* one it doesn't; a `watched_repos` entry naming a repo no installation covers is reported in the log and TUI, not silently dropped or added. Use it to keep the App installed broadly (e.g. an entire org) while still holding a repo or two out of review, without uninstalling the App from just that repo.
 
-**The containment boundary is the operator's own dedicated App identity (see [Setup](#setup) above), not `watched_repos` membership.** Every installation of *your* App is derived and authorized regardless of whether `watched_repos` names it — a stranger installing their own separate App on their own account is structurally never contacted, because `GET /app/installations` is scoped to the calling App's identity by GitHub's own API contract. This is different from Pruefer's original shared-App model (see ADR-1233), where `watched_repos` itself was the containment boundary; since each operator now runs their own dedicated App (ADR-1253), that boundary comes from App identity instead, and `watched_repos` is free to become what it always felt like it should be — operator preference, not safety-critical config.
+**The containment boundary is the operator's own dedicated App identity (see [Setup](#setup) above) plus that App being *private*, not `watched_repos` membership.** For a private App, `GET /app/installations` is scoped to the calling App's identity by GitHub's own API contract, and a private App can only be installed on the account that owns it — so there is nothing else that could install it. This is different from Pruefer's original shared-App model (see ADR-1233), where `watched_repos` itself was the containment boundary; since each operator now runs their own dedicated App (ADR-1253), that boundary comes from App identity instead, and `watched_repos` is free to be operator preference (which repos to review), not safety-critical config.
 
-**Runtime re-derivation (no restart needed):** installing/uninstalling the App, or changing its repository selection, is picked up automatically — via the `installation`/`installation_repositories` webhook event in `event_source: hookdeck` mode, or on a timer (`repo_rederivation_interval`, default `10m`) in every mode, including plain polling. The daemon logs, and the TUI's Watched Repos pane shows, exactly which repos it derived, from which installation, and any `watched_repos` entry that wasn't covered — see [Terminal UI](#terminal-ui) below.
+**This assumption fails for a *public* App** — and it is not hypothetical: `handarbeit-pruefer` was public (a hand-made choice at App-creation time, since a private App has no in-design way to serve more than one account — see [The per-account model](#the-per-account-model-multiple-accounts--multiple-apps) below), and a stranger's org (`kolfadser1`) installed it on 2026-08-24, unnoticed for three weeks despite being logged 831 times, because installation enumeration doesn't distinguish "this is who I meant to serve" from "this is who happened to install my public App." **Defense in depth, for exactly this failure mode:**
+
+- **R3 — no token for an unwatched installation.** When `watched_repos` is non-empty, an installation whose account isn't named anywhere in it never has a token minted (or kept minted) for it at all — not merely excluded from review. An installation like `kolfadser1`'s, granting a repo nobody asked to watch, is refused custody entirely.
+- **R4/R5 — `served_accounts`: an explicit allowlist, with removal or reporting.** A new, independent config key (deliberately never derived from `watched_repos`, which is optional-by-design and can legitimately be empty): the account logins this deployment is authorized to serve.
+  - **Configured:** an installation outside it is **removed** (`DELETE /app/installations/{id}`) and the removal is logged loudly, naming the account and installation id.
+  - **Not configured (the default):** nothing is deleted, but an installation not named anywhere in `watched_repos` is still **reported prominently** — a distinct, grep-able `UNRECOGNIZED-INSTALLATION` log marker (and a footer banner in the TUI), so it can't blend into hundreds of routine enumeration lines the way `kolfadser1` did.
+
+  ```yaml
+  # served_accounts:                  # optional allowlist (R4) — accounts this deployment is authorized to serve
+  #   - your-org                      # an installation outside this list is deleted, not merely ignored
+  ```
+
+  `served_accounts` must name every account you want served, **including your own** — there is no implicit self-exemption. It has no effect in `github_app_installation_id`-pinned mode (see below): that mode never enumerates installations at all, so there's nothing to allowlist.
+
+**Runtime re-derivation (no restart needed):** installing/uninstalling the App, or changing its repository selection, is picked up automatically — via the `installation`/`installation_repositories` webhook event in `event_source: hookdeck` mode, or on a timer (`repo_rederivation_interval`, default `10m`) in every mode, including plain polling. The same trigger re-evaluates `watched_repos`/`served_accounts`, so a config edit to either takes effect with no restart (see [Config reload](#config-reload-sighup) below). The daemon logs, and the TUI's Watched Repos pane shows, exactly which repos it derived, from which installation, and any `watched_repos` entry that wasn't covered — see [Terminal UI](#terminal-ui) below.
 
 **Bounding a large installation (`max_derived_repos`, default `200`):** an org-level install on an account with hundreds of repos would otherwise make every one of them pollable at once, multiplying poll cost, GraphQL budget, and `concurrency_cap` contention with no warning. Once the derived set (after any `watched_repos` filter) exceeds this cap, Pruefer sorts it deterministically (`owner/repo` ascending) and keeps only the first `max_derived_repos` — the same repos are dropped consistently across re-derivations, not an arbitrary API-order cut — and logs a loud warning naming the cap. Raise `max_derived_repos`, or narrow with `watched_repos`, to cover the rest. Set it to `0` or a negative value to disable the cap entirely (an explicit, deliberate opt-out — not the default).
 
-`github_app_installation_id` is a **legacy pin/escape hatch**, not a requirement. Leave it at `0` (or unset) to let Pruefer derive from installations automatically. Set it explicitly only to force every review through one specific installation's token regardless of owner (the old single-installation behavior, preserved byte-for-byte for existing single-org deployments) — installation-derived discovery does not apply in this mode; the pinned installation's repos are trusted wholesale.
+`github_app_installation_id` is a **legacy pin/escape hatch**, not a requirement. Leave it at `0` (or unset) to let Pruefer derive from installations automatically. Set it explicitly only to force every review through one specific installation's token regardless of owner (the old single-installation behavior, preserved byte-for-byte for existing single-org deployments) — installation-derived discovery does not apply in this mode; the pinned installation's repos are trusted wholesale, and neither R3's mint-refusal nor R4/R5's allowlist/reporting apply (there is no installation enumeration to apply them to).
+
+### The per-account model (multiple accounts → multiple Apps)
+
+**One App, one Pruefer daemon, per account you want reviewed — this is the supported answer for an operator serving several accounts**, not a single App spanning them. Running several daemons is deliberately cheap, and buys you more than isolation:
+
+- **Separate rate-limit budgets.** GitHub's primary limits are per *installation*, so each App/installation pair gets its own REST and GraphQL budget, independent of every other daemon's.
+- **Separate Claude accounts.** Each daemon can point `CLAUDE_CONFIG_DIR` at a different logged-in profile, billing to a different subscription and isolating usage limits per account.
+
+To add a second account: repeat [First run: automatic setup](#first-run-automatic-setup-recommended) (or [Manual setup](#manual-setup-compat-mode)) in a **separate working directory**, with its own `.pruefer/` state — this naturally produces its own App, its own key, and its own `served_accounts`/`watched_repos`. No code or config sharing is needed or supported between the two.
+
+**Prohibition: never configure Pruefer with a single App whose private key you distribute to other users.** A shared distributed key would hand every holder control over *every* installation of that one App — the exact shared-secret model this whole document exists to steer you away from. It's superficially attractive because it makes onboarding a one-liner ("just use this key"), which is precisely why it's written down here as forbidden rather than left to be re-discovered as a shortcut: each deployment registers (or is handed a manifest flow to register) its **own** App, full stop. See [ADR-1253](../../adrs/1253-github-app-manifest-auth-reconciler.md).
+
+**Migrating an existing public, multi-account App (e.g. `handarbeit-pruefer`'s own history) to one-App-per-account:** GitHub refuses to flip a public App to private while it's installed on any account other than its owner — so this cannot be done in a single step. The sequence:
+
+1. **Register a new, private App per additional account** — run [First run: automatic setup](#first-run-automatic-setup-recommended) once per account, each in its own working directory. Each gets its own key and its own `.pruefer/app-state.json`.
+2. **Stand up a daemon per new App** — each pointed at its own working directory, `served_accounts` set to exactly that one account.
+3. **Move each account across**: uninstall the old public App from that account, confirm the new daemon picks up its repos (installation-derived discovery — no `watched_repos` edit needed unless you're also narrowing scope), then repeat for the next account.
+4. **Once every non-owner account has moved off the old App**, GitHub will now permit flipping it to private (or retiring it entirely) — do so once no installation but the owner's own remains.
+
+Do not attempt to flip the old App to private before every non-owner installation is gone — GitHub will refuse the change outright.
 
 ### Run it
 
@@ -228,6 +266,7 @@ When run with a real terminal attached (both stdin and stdout), Pruefer launches
 - Skipped PRs with their reason, covering every skip category Pruefer tracks (draft, self-authored, excluded author/label/path, already reviewed at this head SHA, diff too large).
 - Errors, plus GitHub REST API rate-limit state and a running session-total cost/turn count.
 - In `event_source: hookdeck` mode: a per-category breakdown of dropped deliveries (signature failures, unwatched-repo/owner, dedupe hits, other), and a signature-drift banner when signature verification has been failing on every delivery for a sustained stretch — see [Detecting a total protocol break](#detecting-a-total-protocol-break) below.
+- A `⚠ UNRECOGNIZED INSTALLATION: <account(s)>` banner while any App installation is currently unrecognized (R5) — naming the account(s) so it's visible without reading the log, clearing itself the moment a later re-derivation no longer finds one. See [Installation-derived repo discovery](#installation-derived-repo-discovery).
 
 Keyboard: `q` or `ctrl+c` to quit, `tab` to switch panes, `↑`/`↓` or `j`/`k` to scroll and select an entry, `enter` to view its detail.
 
@@ -250,6 +289,8 @@ The log file is append-only across restarts — it is never truncated on daemon 
 
 A `warn`-tagged line fires when a review's summary doesn't follow the `PRUEFER_SUMMARY_BEGIN`/`PRUEFER_SUMMARY_END` delimiter contract: either the markers were missing (or malformed) entirely, or a well-formed pair was found but some preamble text ahead of the opening marker had to be discarded. Neither is fatal — the review still submits — but either is a sign the model drifted from the prompt's output contract and is worth a look.
 
+An `UNRECOGNIZED-INSTALLATION` marker appears on any line about an App installation this deployment doesn't recognize as its own (R5) — grep for it directly (`grep UNRECOGNIZED-INSTALLATION .pruefer/pruefer.log`) rather than scanning routine `derive`-tagged enumeration lines, which fire at the same tag/level on every re-derivation and can run to hundreds of lines over a few weeks with nothing else to set an actionable one apart. See [Installation-derived repo discovery](#installation-derived-repo-discovery).
+
 ## Config reload (SIGHUP)
 
 Send `SIGHUP` to a running daemon (`kill -HUP <pid>`) to reload `.pruefer/config.yaml` without a restart. Pruefer re-resolves the full flag > environment variable > YAML config file > default precedence chain (the same one `LoadConfig` uses at startup — see [Configuration reference](#configuration-reference)), validates it in full, and applies whichever fields are safe to change on a live daemon. A running review is never cancelled, the Hookdeck WebSocket session (in `event_source: hookdeck` mode) is never dropped, and the dedupe ring is never reset by a reload.
@@ -260,7 +301,8 @@ Every field is classified as either **live** (applied immediately) or **restart-
 
 | YAML key | Reload |
 |---|---|
-| `watched_repos` | Live. A changed filter triggers an immediate re-derivation of the reviewed set (see [Installation-derived repo discovery](#installation-derived-repo-discovery)) rather than waiting for the next timer tick — no owner's installation token is minted or removed by this alone, since every installation is already authorized independently of `watched_repos`. A review already in flight for a repo the new filter excludes is allowed to finish — it is never cancelled. |
+| `watched_repos` | Live. A changed filter triggers an immediate re-derivation of the reviewed set (see [Installation-derived repo discovery](#installation-derived-repo-discovery)) rather than waiting for the next timer tick — dropping an owner from `watched_repos` also detaches its installation's token (R3), not merely its repos from the reviewed set. A review already in flight for a repo the new filter excludes is allowed to finish — it is never cancelled. |
+| `served_accounts` | Live. A changed allowlist triggers an immediate re-derivation, same as `watched_repos` — an account newly outside it is deleted (or, with the allowlist unset, reported) on that same cycle. |
 | `max_derived_repos` | Live. A lowered or raised cap takes effect on the next re-derivation, triggered immediately by the same change. |
 | `repo_rederivation_interval` | Live, effective starting the next tick. |
 | `poll_interval_seconds` | Live, effective starting the next cycle. |
@@ -339,7 +381,7 @@ A repo's config can only **narrow** the operator's settings — it can never wid
 | `excluded_authors` | Yes | Union, same as above. |
 | `max_diff_bytes` | Yes, narrowing only | A repo may only **lower** the operator's cap, never raise it or uncap it. |
 | `request_changes_threshold` | Yes, narrowing only | A repo may only move it to an **equal-or-stricter** severity tier than the operator's — including turning it on (any tier) when the operator left it off — never to a more lenient tier, and never back to off if the operator configured one. See [Severity-gated REQUEST_CHANGES](#severity-gated-request_changes) for tier ordering. |
-| Everything else | No | `model`, `effort`, `concurrency_cap`, `poll_interval_seconds`, `max_wall_time_seconds`, `tui`, `auto_upgrade`, `no_browser`, `github_app_*`, `event_source`, `hookdeck.*`, `reconciliation.*`, `log_file`, `watched_repos`, `max_derived_repos`, `repo_rederivation_interval`, and any unrecognized key — all operator-scoped (cost, credentials, capability, or discovery/resource-management knobs), and all silently ignored with a logged warning if a repo sets them. |
+| Everything else | No | `model`, `effort`, `concurrency_cap`, `poll_interval_seconds`, `max_wall_time_seconds`, `tui`, `auto_upgrade`, `no_browser`, `github_app_*`, `event_source`, `hookdeck.*`, `reconciliation.*`, `log_file`, `watched_repos`, `served_accounts`, `max_derived_repos`, `repo_rederivation_interval`, and any unrecognized key — all operator-scoped (cost, credentials, capability, or discovery/resource-management knobs), and all silently ignored with a logged warning if a repo sets them. |
 
 A rejected widening attempt (e.g. a repo trying to raise `max_diff_bytes` or unset an operator-configured `request_changes_threshold`) is logged and ignored for that field alone — the operator's value holds, and the rest of the repo's config (any other, valid narrowing) still applies.
 
@@ -364,6 +406,7 @@ Precedence, highest to lowest: **flag > environment variable > YAML config file 
 | Flag | Env var | YAML key | Default | Notes |
 |---|---|---|---|---|
 | `--repos` | `PRUEFER_REPOS` | `watched_repos` | (none — optional) | Comma-separated `owner/repo` list; an optional intersection filter over the installation-derived set, never the primary input — see [Installation-derived repo discovery](#installation-derived-repo-discovery) |
+| `--served-accounts` | `PRUEFER_SERVED_ACCOUNTS` | `served_accounts` | (none — optional) | Comma-separated account-login allowlist (R4); an installation outside it is deleted. Unset means no allowlist — an unrecognized installation is reported, never deleted. See [Installation-derived repo discovery](#installation-derived-repo-discovery) |
 | `--max-derived-repos` | `PRUEFER_MAX_DERIVED_REPOS` | `max_derived_repos` | `200` | Caps a single derivation's result (R5); `<= 0` disables the cap. See [Installation-derived repo discovery](#installation-derived-repo-discovery) |
 | `--repo-rederivation-interval` | `PRUEFER_REPO_REDERIVATION_INTERVAL` | `repo_rederivation_interval` | `10m` | Go duration; how often to re-derive the repo set from installations on a timer, independent of any installation webhook event |
 | `--poll-interval` | `PRUEFER_POLL_INTERVAL` | `poll_interval_seconds` | `120` | Seconds |

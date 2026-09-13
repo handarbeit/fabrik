@@ -163,3 +163,28 @@ type SignatureDriftEvent struct {
 }
 
 func (SignatureDriftEvent) tuiEvent() {}
+
+// UnrecognizedInstallationsEvent reports the current set of App
+// installations this deployment does not recognize as its own
+// (handarbeit/fabrik#1722, R4/R5) — either outside a configured
+// served_accounts allowlist (and thus removed) or, with no allowlist
+// configured, merely not named in watched_repos (report-only). Emitted
+// alongside DerivedRepoSetEvent on every re-derivation cycle (startup,
+// ticker, webhook, SIGHUP), carrying the current snapshot rather than a
+// delta — Count == 0 means none are currently unrecognized, which is what
+// lets the footer banner clear the moment a re-derivation confirms the
+// condition has resolved (e.g. the installation was removed, or the operator
+// widened watched_repos/served_accounts to cover it), mirroring
+// SignatureDriftEvent's own level-triggered (not edge-triggered) shape.
+type UnrecognizedInstallationsEvent struct {
+	// Accounts lists every currently-unrecognized installation's account
+	// login, for display — deliberately not richer per-installation detail
+	// (installation ID, whether it was deleted): the full picture is only
+	// ever in the log (see the UNRECOGNIZED-INSTALLATION marker), this event
+	// exists solely to drive a "something needs your attention" banner.
+	Accounts []string
+	Count    int
+	At       time.Time
+}
+
+func (UnrecognizedInstallationsEvent) tuiEvent() {}

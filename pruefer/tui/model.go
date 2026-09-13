@@ -171,6 +171,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		comp, _ := m.footer.Update(msg)
 		m.footer = comp.(FooterComponent)
 		return m, nil
+
+	case UnrecognizedInstallationsEvent:
+		comp, _ := m.footer.Update(msg)
+		m.footer = comp.(FooterComponent)
+		return m, nil
 	}
 
 	return m, nil

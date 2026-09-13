@@ -166,3 +166,40 @@ func TestFooter_SignatureDriftBannerAppearsOnlyWhileActive(t *testing.T) {
 		t.Errorf("View() still shows the drift banner after recovery:\n%s", f.View(120))
 	}
 }
+
+// TestFooter_UnrecognizedInstallationsBannerAppearsOnlyWhileCount is
+// #1722's R5 escalation surface: the banner must show the affected
+// account(s) while Count > 0 and disappear the moment a later event reports
+// Count back to 0 — mirroring TestFooter_SignatureDriftBannerAppearsOnlyWhileActive's
+// level-triggered (not edge-triggered) shape.
+func TestFooter_UnrecognizedInstallationsBannerAppearsOnlyWhileCount(t *testing.T) {
+	var f FooterComponent
+	if got := f.UnrecognizedInstallationsCount(); got != 0 {
+		t.Fatalf("UnrecognizedInstallationsCount() = %d, want 0 before any event", got)
+	}
+	if strings.Contains(f.View(120), "UNRECOGNIZED INSTALLATION") {
+		t.Errorf("View() shows the unrecognized-installation banner before any event:\n%s", f.View(120))
+	}
+
+	comp, _ := f.Update(UnrecognizedInstallationsEvent{Accounts: []string{"kolfadser1"}, Count: 1})
+	f = comp.(FooterComponent)
+	if got := f.UnrecognizedInstallationsCount(); got != 1 {
+		t.Fatalf("UnrecognizedInstallationsCount() = %d, want 1 after the event", got)
+	}
+	view := f.View(120)
+	if !strings.Contains(view, "UNRECOGNIZED INSTALLATION") {
+		t.Errorf("View() does not show the banner while Count > 0:\n%s", view)
+	}
+	if !strings.Contains(view, "kolfadser1") {
+		t.Errorf("View() does not name the affected account:\n%s", view)
+	}
+
+	comp, _ = f.Update(UnrecognizedInstallationsEvent{Count: 0})
+	f = comp.(FooterComponent)
+	if got := f.UnrecognizedInstallationsCount(); got != 0 {
+		t.Fatalf("UnrecognizedInstallationsCount() = %d, want 0 after the condition clears", got)
+	}
+	if strings.Contains(f.View(120), "UNRECOGNIZED INSTALLATION") {
+		t.Errorf("View() still shows the banner after the condition clears:\n%s", f.View(120))
+	}
+}

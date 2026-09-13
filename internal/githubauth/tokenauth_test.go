@@ -78,10 +78,17 @@ type fakeAppServer struct {
 
 	mintCount atomic.Int32
 
-	mu               sync.Mutex
-	mintCountByInst  map[int64]int
-	installTokenToID map[string]int64
-	installationHits []int64 // access_tokens calls, in order, for assertion
+	// failDelete, if set, is consulted before every DELETE
+	// /app/installations/{id} call for a given installation ID; returning
+	// true fails that deletion (simulating a transient GitHub API error)
+	// without affecting any other installation.
+	failDelete func(installationID int64) bool
+
+	mu                sync.Mutex
+	mintCountByInst   map[int64]int
+	installTokenToID  map[string]int64
+	installationHits  []int64 // access_tokens calls, in order, for assertion
+	deletedInstallIDs []int64 // successful DELETE /app/installations/{id} calls, in order
 }
 
 func newFakeAppServer(slug string, installations []gh.AppInstallation, tokenExpiry func() time.Time) (*httptest.Server, *fakeAppServer) {
@@ -131,6 +138,33 @@ func newFakeAppServer(slug string, installations []gh.AppInstallation, tokenExpi
 			}
 			w.WriteHeader(http.StatusNotFound)
 			w.Write([]byte(`{"message":"installation not found"}`))
+			return
+		}
+
+		if r.Method == http.MethodDelete {
+			var instID int64
+			fmt.Sscanf(r.URL.Path, "/app/installations/%d", &instID)
+			if f.failDelete != nil && f.failDelete(instID) {
+				w.WriteHeader(http.StatusInternalServerError)
+				w.Write([]byte(`{"message":"simulated delete failure"}`))
+				return
+			}
+			found := false
+			for _, inst := range f.installations {
+				if inst.ID == instID {
+					found = true
+					break
+				}
+			}
+			if !found {
+				w.WriteHeader(http.StatusNotFound)
+				w.Write([]byte(`{"message":"installation not found"}`))
+				return
+			}
+			f.mu.Lock()
+			f.deletedInstallIDs = append(f.deletedInstallIDs, instID)
+			f.mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 
@@ -191,6 +225,19 @@ func (f *fakeAppServer) mintCountFor(instID int64) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.mintCountByInst[instID]
+}
+
+// wasDeleted reports whether DELETE /app/installations/{instID} was ever
+// called successfully against this fake server.
+func (f *fakeAppServer) wasDeleted(instID int64) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, id := range f.deletedInstallIDs {
+		if id == instID {
+			return true
+		}
+	}
+	return false
 }
 
 func (f *fakeAppServer) hitInstallations() []int64 {

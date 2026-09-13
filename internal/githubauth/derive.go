@@ -2,6 +2,7 @@ package githubauth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -74,6 +75,42 @@ type DerivedInstallation struct {
 	// genuine permission shortfall must not go unreported just because it
 	// coincides with an unrelated transient error this round.
 	PermissionShortfalls []RequiredPermissionShortfall
+	// NotServingWatchedRepos is true when this installation's account is not
+	// named as an owner anywhere in watched_repos (R3) — only ever set when
+	// watched_repos is non-empty (an operator-imposed narrowing; ADR-1641
+	// made an empty watched_repos mean "review everything the installations
+	// grant," in which case every installation trivially serves it). No
+	// token is minted for such an installation (AC1) — it never held one
+	// before this round either, if this is not its first time being seen as
+	// unneeded (see derive's unified detachment loop). This is
+	// account-granularity matching, not the finer per-repo question
+	// verifyRepoAccess already answers post-mint.
+	NotServingWatchedRepos bool
+	// Unrecognized is true when this installation's account is outside the
+	// set of accounts this deployment recognizes as its own (R4/R5) — either
+	// explicitly, because ServedAccounts is configured and doesn't name it,
+	// or as a softer fallback signal when ServedAccounts is unset but
+	// watched_repos is non-empty and doesn't name it either (AC3's "still
+	// reportable with no allowlist configured" case). See
+	// resolveRecognizedAccounts. Never set when neither ServedAccounts nor
+	// watched_repos carries any signal at all (the deliberate
+	// "all-installations mode" default, where every installation is
+	// trusted).
+	Unrecognized bool
+	// DeletionAttempted is true when this installation was Unrecognized
+	// under an explicit ServedAccounts allowlist (R4) and this round called
+	// gh.DeleteAppInstallation for it. Never true when Unrecognized is only
+	// the softer watched_repos-fallback signal (R5) — that case is
+	// report-only, never destructive (AC3).
+	DeletionAttempted bool
+	// DeletionError is non-empty when DeletionAttempted is true and the
+	// delete call itself failed (a transient GitHub API error, distinct from
+	// gh.ErrNotFound — an already-gone installation is treated as converged
+	// success, not an error, so it never sets this field). No token is
+	// minted for this installation this round regardless of whether the
+	// deletion succeeded — a failed deletion is retried on the next
+	// re-derivation, not treated as "well, we tried, mint it anyway."
+	DeletionError string
 }
 
 // DerivedRepoSet is the result of one Reconciler.Derive call: every repo the
@@ -166,6 +203,56 @@ func derivedSetForPinned(filter []string, pinnedInstallationID int64) DerivedRep
 	return DerivedRepoSet{Repos: repos}
 }
 
+// neededOwnersFromFilter returns the set of lower-cased owners named
+// anywhere in filter (watched_repos) — R3's account-granularity mint gate.
+// Returns nil when filter is empty, which callers must treat as "no
+// filter — every account is needed" (ADR-1641's "all-installations mode"),
+// never as "the empty set — nothing is needed." A malformed filter entry
+// (not "owner/repo") contributes nothing; it's already reported elsewhere
+// (distinctOwnersLogging, DerivedRepoSet.FilteredOut) and must not silently
+// widen or narrow this set.
+func neededOwnersFromFilter(filter []string) map[string]bool {
+	if len(filter) == 0 {
+		return nil
+	}
+	needed := make(map[string]bool, len(filter))
+	for _, spec := range filter {
+		if owner, _, ok := splitOwnerRepo(spec); ok {
+			needed[strings.ToLower(owner)] = true
+		}
+	}
+	return needed
+}
+
+// resolveRecognizedAccounts computes R4/R5's "is this account one we
+// recognize as ours" set from served (Options.ServedAccounts) and watched
+// (Options.WatchedRepos), each case-insensitively. Three regimes:
+//
+//   - served is non-empty: recognized is exactly served's account set, and
+//     explicit is true — an account outside it is a confirmed R4 deletion
+//     candidate, never merely a soft report.
+//   - served is empty but watched is non-empty: recognized is watched's
+//     distinct owner set (R5's fallback signal — this is what makes AC3's
+//     "still reportable with no allowlist configured" possible without a
+//     third config key), explicit is false — an account outside it is
+//     logged, never deleted.
+//   - both are empty: hasSignal is false — every account is trusted (the
+//     deliberate "all-installations mode" default) and recognized/explicit
+//     are meaningless; callers must check hasSignal first.
+func resolveRecognizedAccounts(served, watched []string) (recognized map[string]bool, hasSignal, explicit bool) {
+	if len(served) > 0 {
+		set := make(map[string]bool, len(served))
+		for _, a := range served {
+			set[strings.ToLower(a)] = true
+		}
+		return set, true, true
+	}
+	if len(watched) > 0 {
+		return neededOwnersFromFilter(watched), true, false
+	}
+	return nil, false, false
+}
+
 func sortDerivedRepos(repos []DerivedRepo) {
 	sort.Slice(repos, func(i, j int) bool {
 		return strings.ToLower(repos[i].Repo) < strings.ToLower(repos[j].Repo)
@@ -232,6 +319,7 @@ func (r *Reconciler) derive(ctx context.Context, filter []string, maxRepos int, 
 	baseURL := r.baseURL
 	botLogin := r.botLogin
 	requiredPermissions := r.requiredPermissions
+	servedAccounts := r.servedAccounts
 	existingClients := make(map[string]*gh.Client, len(r.clients))
 	for k, v := range r.clients {
 		existingClients[k] = v
@@ -265,13 +353,88 @@ func (r *Reconciler) derive(ctx context.Context, filter []string, maxRepos int, 
 		byAccount[strings.ToLower(inst.Account)] = inst
 	}
 
+	// R3/R4/R5's account-level gates, resolved once per derive call: which
+	// accounts are needed (named in watched_repos, when non-empty) and which
+	// are recognized (served_accounts, falling back to watched_repos for a
+	// softer report-only signal). See both helpers' doc comments.
+	neededOwners := neededOwnersFromFilter(filter)
+	recognized, hasAccountSignal, explicitAllowlist := resolveRecognizedAccounts(servedAccounts, filter)
+
+	// A truncated installation list means an installation past the
+	// pagination ceiling was never evaluated against either gate this round
+	// — every installation actually *returned* is still enforced below
+	// (the safer failure mode: a known-bad installation must never get an
+	// indefinite pass merely because pagination truncated elsewhere in the
+	// list), but the sweep itself may be incomplete.
+	if instTruncated && hasAccountSignal {
+		logf("! app installation enumeration hit a pagination ceiling while served_accounts/watched_repos enforcement is active — every installation returned above is still checked, but one beyond the ceiling was not evaluated this round and won't be recognized/removed until a future round enumerates it")
+	}
+
 	var allRepos []DerivedRepo
 	var instSummaries []DerivedInstallation
 	truncated := instTruncated
 	newMintErrors := make(map[string]error)
+	// wantOwners records every account this round actually wants a client
+	// for — i.e. it passed both the R4 recognition gate and the R3
+	// need gate. Used below to unify detachment: an owner still installed
+	// (present in byAccount) but not in wantOwners loses its client exactly
+	// like one whose installation disappeared entirely.
+	wantOwners := make(map[string]bool, len(installations))
 
 	for _, inst := range installations {
 		key := strings.ToLower(inst.Account)
+		unrecognized := hasAccountSignal && !recognized[key]
+
+		if unrecognized && explicitAllowlist {
+			logf("! installation %d (account %q) is not in the configured served_accounts allowlist — removing it (R4)", inst.ID, inst.Account)
+			delErr := gh.DeleteAppInstallation(baseURL, jwt, inst.ID)
+			summary := DerivedInstallation{
+				Account: inst.Account, InstallationID: inst.ID,
+				RepositorySelection: inst.RepositorySelection,
+				Unrecognized:        true,
+				DeletionAttempted:   true,
+				// inst.Permissions comes from the already-fetched
+				// installations list — still worth recording even for an
+				// installation being removed, in case the deletion itself
+				// fails and it lingers.
+				PermissionShortfalls: checkGrantedPermissions(inst.Permissions, requiredPermissions),
+			}
+			switch {
+			case delErr != nil && errors.Is(delErr, gh.ErrNotFound):
+				logf("✓ installation %d (account %q) was already removed", inst.ID, inst.Account)
+			case delErr != nil:
+				logf("! removing installation %d (account %q) failed: %v — will retry on the next re-derivation; no token will be minted for it meanwhile", inst.ID, inst.Account, delErr)
+				summary.DeletionError = delErr.Error()
+			default:
+				logf("✓ removed installation %d (account %q) — it was not in the configured served_accounts allowlist", inst.ID, inst.Account)
+			}
+			instSummaries = append(instSummaries, summary)
+			continue
+		}
+		if unrecognized {
+			logf("! installation %d (account %q, repository_selection=%s) is not named in watched_repos and no served_accounts allowlist is configured — reporting only, not removing; configure served_accounts to enable automatic removal (see cmd/pruefer/README.md)", inst.ID, inst.Account, inst.RepositorySelection)
+		}
+
+		if neededOwners != nil && !neededOwners[key] {
+			// R3: this installation's account isn't named anywhere in
+			// watched_repos — no token is minted for it (AC1). Note this is
+			// the only branch reached for the softer watched_repos-fallback
+			// "unrecognized" signal above (R5 with no served_accounts
+			// configured): that fallback's recognized set is built from this
+			// exact same filter, so an account unrecognized that way is, by
+			// construction, always also not-needed here.
+			instSummaries = append(instSummaries, DerivedInstallation{
+				Account: inst.Account, InstallationID: inst.ID,
+				RepositorySelection:    inst.RepositorySelection,
+				NotServingWatchedRepos: true,
+				Unrecognized:           unrecognized,
+				PermissionShortfalls:   checkGrantedPermissions(inst.Permissions, requiredPermissions),
+			})
+			continue
+		}
+
+		wantOwners[key] = true
+
 		client, ok := existingClients[key]
 		if !ok {
 			a, err := mintAuth(appID, inst.ID, botLogin, privateKey, baseURL)
@@ -328,12 +491,23 @@ func (r *Reconciler) derive(ctx context.Context, filter []string, maxRepos int, 
 		})
 	}
 
-	// Owners that had a client before this call but no longer have a
-	// matching installation lose it now — the mirror image of the mint-new
-	// branch above. Detached, not stopped: see RemoveOwners' doc comment.
+	// Owners that had a client before this call lose it now if either: (a)
+	// their installation no longer exists at all (the original mirror image
+	// of the mint-new branch above), or (b) their installation still exists
+	// but this round decided it's no longer wanted — removed via R4
+	// (deleted or awaiting deletion), unrecognized-and-report-only via R5's
+	// fallback, or no longer needed via R3's watched_repos narrowing.
+	// Unified into one loop (rather than a separate pass per reason) since
+	// the effect — drop the client, detach the Auth for the caller to
+	// drain-then-stop — is identical regardless of which gate fired.
+	// Detached, not stopped: see RemoveOwners' doc comment.
 	var goneOwners []string
 	for owner := range existingClients {
 		if _, ok := byAccount[owner]; !ok {
+			goneOwners = append(goneOwners, owner)
+			continue
+		}
+		if !wantOwners[owner] {
 			goneOwners = append(goneOwners, owner)
 		}
 	}
@@ -392,13 +566,27 @@ func (r *Reconciler) derive(ctx context.Context, filter []string, maxRepos int, 
 // once per Reconcile/Derive round (initial and every re-derivation trigger).
 func logDerivedSet(set DerivedRepoSet, logf func(format string, args ...any)) {
 	for _, inst := range set.Installations {
-		// Permission shortfalls are logged regardless of which branch below
-		// fires: PermissionShortfalls is derived from inst.Permissions (the
-		// installations-list response), never from whether minting or
-		// repo-listing succeeded this round — a genuine shortfall must not
-		// go unlogged just because it coincides with an unrelated transient
-		// error (review finding on #1709's own PR).
+		// The first three branches below fire on the "UNRECOGNIZED-INSTALLATION"
+		// marker — a fixed, grep-able tag reserved exclusively for this class
+		// of event (R5/AC4), so it reads distinctly from the routine
+		// enumeration lines every other branch below produces, no matter how
+		// many hundreds of enumeration cycles pass between one appearance and
+		// the next. Permission shortfalls are deliberately not logged for
+		// these three (or for a just-deleted installation there is nothing
+		// further to act on) — an account this deployment doesn't recognize
+		// isn't a scope worth reporting granted-permission detail for.
 		switch {
+		case inst.DeletionAttempted && inst.DeletionError != "":
+			logf("! UNRECOGNIZED-INSTALLATION: installation %d (%s) is outside the configured served_accounts allowlist — removing it failed this round (%s); will retry on the next re-derivation, no token minted meanwhile", inst.InstallationID, inst.Account, inst.DeletionError)
+			continue
+		case inst.DeletionAttempted:
+			logf("! UNRECOGNIZED-INSTALLATION: installation %d (%s) was outside the configured served_accounts allowlist — removed", inst.InstallationID, inst.Account)
+			continue
+		case inst.Unrecognized:
+			logf("! UNRECOGNIZED-INSTALLATION: installation %d (%s, repository_selection=%s) is not named in watched_repos and no served_accounts allowlist is configured — no token minted for it; configure served_accounts to enable automatic removal", inst.InstallationID, inst.Account, inst.RepositorySelection)
+			continue
+		case inst.NotServingWatchedRepos:
+			logf("installation %d (%s, repository_selection=%s): not named in watched_repos — no token minted for it (R3)", inst.InstallationID, inst.Account, inst.RepositorySelection)
 		case inst.MintError != "":
 			logf("! installation %d (%s, repository_selection=%s): minting a token failed this round (%s) — the installation exists but is not yet usable; retry reconciliation", inst.InstallationID, inst.Account, inst.RepositorySelection, inst.MintError)
 		case inst.RepoListError != "":
@@ -406,6 +594,13 @@ func logDerivedSet(set DerivedRepoSet, logf func(format string, args ...any)) {
 		default:
 			logf("✓ installation %d (%s, repository_selection=%s): %d repo(s) accessible", inst.InstallationID, inst.Account, inst.RepositorySelection, inst.RepoCount)
 		}
+		// Permission shortfalls are logged regardless of which of the
+		// remaining branches above fires: PermissionShortfalls is derived
+		// from inst.Permissions (the installations-list response), never
+		// from whether minting or repo-listing succeeded this round — a
+		// genuine shortfall must not go unlogged just because it coincides
+		// with an unrelated transient error (review finding on #1709's own
+		// PR).
 		logPermissionShortfalls(inst.InstallationID, inst.Account, inst.PermissionShortfalls, logf)
 	}
 	if len(set.Installations) == 0 {

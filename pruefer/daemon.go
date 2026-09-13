@@ -966,6 +966,12 @@ func (d *Daemon) rederiveRepos(ctx context.Context) {
 		CapApplied:    set.CapApplied,
 		At:            time.Now(),
 	})
+	unrecognized := unrecognizedInstallationAccounts(set)
+	d.emit(ptui.UnrecognizedInstallationsEvent{
+		Accounts: unrecognized,
+		Count:    len(unrecognized),
+		At:       time.Now(),
+	})
 
 	// Owners that lost their installation between this and the previous
 	// derivation are drained-then-stopped exactly like a SIGHUP-removed
@@ -980,13 +986,34 @@ func (d *Daemon) rederiveRepos(ctx context.Context) {
 // logRederivedRepos logs the derived set's contents and provenance (R4) —
 // the failure mode this prevents is a repo silently joining or leaving the
 // review set with no record (the same class of invisibility as #1428/#1563).
+//
+// As of #1722, the first three branches below fire on the
+// "UNRECOGNIZED-INSTALLATION" marker (mirroring internal/githubauth's own
+// logDerivedSet) — a fixed, grep-able tag reserved exclusively for R5's
+// class of event, distinct from every routine enumeration line this
+// function otherwise produces on every re-derivation cycle (AC4). Deletion/
+// unrecognized-fallback events are already logged once, inline, by
+// Reconciler.derive itself via the logf callback passed to Derive (see
+// rederiveRepos) — this is a second, summary-pass line, matching the
+// existing double-logging convention MintError already has here (an
+// installation whose mint failed is likewise logged once inline in derive
+// and again in this summary).
 func logRederivedRepos(set githubauth.DerivedRepoSet) {
 	for _, inst := range set.Installations {
-		if inst.MintError != "" {
+		switch {
+		case inst.DeletionAttempted && inst.DeletionError != "":
+			logf(0, "derive", "UNRECOGNIZED-INSTALLATION: installation %d (%s) is outside the configured served_accounts allowlist — removing it failed this round (%s); will retry on the next re-derivation, no token minted meanwhile\n", inst.InstallationID, inst.Account, inst.DeletionError)
+		case inst.DeletionAttempted:
+			logf(0, "derive", "UNRECOGNIZED-INSTALLATION: installation %d (%s) was outside the configured served_accounts allowlist — removed\n", inst.InstallationID, inst.Account)
+		case inst.Unrecognized:
+			logf(0, "derive", "UNRECOGNIZED-INSTALLATION: installation %d (%s, repository_selection=%s) is not named in watched_repos and no served_accounts allowlist is configured — no token minted for it; configure served_accounts to enable automatic removal\n", inst.InstallationID, inst.Account, inst.RepositorySelection)
+		case inst.NotServingWatchedRepos:
+			logf(0, "derive", "installation %d (%s, repository_selection=%s): not named in watched_repos — no token minted for it (R3)\n", inst.InstallationID, inst.Account, inst.RepositorySelection)
+		case inst.MintError != "":
 			logf(0, "derive", "installation %d (%s, repository_selection=%s): minting a token failed this round (%s) — the installation exists but is not yet usable; retry reconciliation\n", inst.InstallationID, inst.Account, inst.RepositorySelection, inst.MintError)
-			continue
+		default:
+			logf(0, "derive", "installation %d (%s, repository_selection=%s): %d repo(s) accessible\n", inst.InstallationID, inst.Account, inst.RepositorySelection, inst.RepoCount)
 		}
-		logf(0, "derive", "installation %d (%s, repository_selection=%s): %d repo(s) accessible\n", inst.InstallationID, inst.Account, inst.RepositorySelection, inst.RepoCount)
 	}
 	suffix := ""
 	if set.Capped {
@@ -999,6 +1026,25 @@ func logRederivedRepos(set githubauth.DerivedRepoSet) {
 	for _, f := range set.FilteredOut {
 		logf(0, "derive", "watched_repos entry %q is not covered by any installation's grant — excluded\n", f)
 	}
+}
+
+// unrecognizedInstallationAccounts extracts every currently-unrecognized
+// installation's account login from set (#1722, R5) — the level-triggered
+// snapshot ptui.UnrecognizedInstallationsEvent carries on every
+// re-derivation cycle, so the TUI footer banner clears the moment a later
+// round no longer finds any (e.g. the installation was removed, or the
+// operator widened watched_repos/served_accounts to cover it). A deleted
+// installation (DeletionAttempted) is included too — until it's actually
+// gone (confirmed by its absence from a later round), it's still worth
+// surfacing.
+func unrecognizedInstallationAccounts(set githubauth.DerivedRepoSet) []string {
+	var accounts []string
+	for _, inst := range set.Installations {
+		if inst.Unrecognized || inst.DeletionAttempted {
+			accounts = append(accounts, inst.Account)
+		}
+	}
+	return accounts
 }
 
 // derivedRepoNames extracts set.Repos' "owner/repo" names, for
