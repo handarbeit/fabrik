@@ -394,6 +394,27 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 			e.logf(item.Number, "claude-limit", "claude comment review hit the account usage limit; not counted toward the comment circuit breaker\n")
 			return nil
 		}
+		// A tool-permission-denial exit (#1523/#1704) is deterministic — a
+		// "don't ask mode" denial short-circuits allowlist evaluation, so no
+		// retry and no comment breaker cadence can converge it. Classify and
+		// bound it here exactly like finalizeStageOutcome does for the
+		// stage-dispatch path (R1), reusing the same
+		// ToolsDeniedRetries/MaxToolsDeniedRetries counter (R2) so a mode
+		// denial escalates on consecutive detections regardless of which
+		// invocation type (ordinary comment review, ci-fix-reinvoke,
+		// review-reinvoke) hit it (R3) — never on the comment breaker's
+		// frequency-based thresholds, which stay unchanged (R2, Acceptance).
+		// This early return bypasses checkNoOpCommentCycle/checkCommentBreaker
+		// entirely for this cycle, mirroring the usage-limit exclusion above.
+		var toolsDeniedErr *claudeToolsDeniedError
+		if errors.As(err, &toolsDeniedErr) {
+			toolsDeniedCount, willEscalate := e.recordToolsDeniedDetection(item, stage, toolsDeniedErr.ToolNames)
+			e.logf(item.Number, "tools-denied", "comment review's tool call(s) denied by permission configuration: %s\n", strings.Join(toolsDeniedErr.ToolNames, ", "))
+			if willEscalate {
+				e.pauseForToolsDeniedLimit(item, stage, toolsDeniedCount, e.cfg.MaxToolsDeniedRetries, toolsDeniedErr.ToolNames)
+			}
+			return err
+		}
 		// Deliberately NO exclusion for *claudeResumeFailureError here (#1414),
 		// unlike the usage-limit exclusion immediately above: a resume failure
 		// is specific to this issue's own session, not an account-wide

@@ -126,7 +126,12 @@ func (a AlertBannerComponent) View(width int) string {
 			text += " " + countdown
 		}
 	default:
-		text = "⚠ GraphQL rate limit exhausted — polling suspended."
+		// #1716 (R2): unlike REST exhaustion, which genuinely hard-pauses all
+		// poll work (see the restVisible case above), GraphQL exhaustion is
+		// governed by the poll loop's own backoff — it slows and gates polls,
+		// it does not stop them. "Polling suspended" here would claim a
+		// stand-down that is not happening.
+		text = "⚠ GraphQL rate limit exhausted — polling backed off."
 		if countdown := fmtBannerCountdown(a.graphql.reset, a.now); countdown != "" {
 			text += " " + countdown
 		}

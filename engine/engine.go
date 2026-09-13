@@ -154,6 +154,19 @@ type Engine struct {
 	backoffRateLimitRatio float64
 	backoffLastRemaining  int
 	backoffRestPaused     bool
+	// lastPollAttemptAt records when PollWithBackoff last actually attempted a
+	// poll (i.e. reached the REST gate check) — R3's minimum-interval floor
+	// (see backoff.go's minPollInterval), guarding against any wake-path bypass
+	// (present or future) driving unbounded immediate polls. Zero value means
+	// "no attempt yet", so the very first call is never floor-blocked.
+	// Unguarded like its backoff* siblings above — single-goroutine-only in
+	// production (only Run()'s own goroutine calls PollWithBackoff there).
+	lastPollAttemptAt time.Time
+	// logThrottle is the shared dedup state behind logfThrottled (R4,
+	// logthrottle.go) — collapses repeated identical log lines (e.g. the
+	// per-poll rate-limit stats lines) into one emission per throttle window
+	// instead of one per poll cycle. Zero-value ready.
+	logThrottle logThrottleState
 	// stalenessCompareFn overrides selfupgrade.CompareDevBuild when non-nil.
 	// Used by tests to inject a synthetic DevBuildStatus without real git
 	// subprocesses. Production leaves this nil.
