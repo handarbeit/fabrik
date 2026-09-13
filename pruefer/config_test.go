@@ -803,6 +803,63 @@ no_browser: true
 	}
 }
 
+func TestLoadConfig_AppNameAndHomepageURLOmitted(t *testing.T) {
+	dir := t.TempDir()
+	path := writeYAMLConfig(t, dir, `github_app_id: 123`)
+
+	cfg, err := LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.AppName != "" {
+		t.Errorf("AppName = %q, want empty when omitted (falls back to githubauth's default)", cfg.AppName)
+	}
+	if cfg.AppHomepageURL != "" {
+		t.Errorf("AppHomepageURL = %q, want empty when omitted (falls back to githubauth's default)", cfg.AppHomepageURL)
+	}
+}
+
+func TestLoadConfig_AppNameAndHomepageURLSet(t *testing.T) {
+	dir := t.TempDir()
+	path := writeYAMLConfig(t, dir, `
+github_app_name: my-pruefer
+github_app_homepage_url: https://example.com/my-pruefer
+`)
+
+	cfg, err := LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.AppName != "my-pruefer" {
+		t.Errorf("AppName = %q, want my-pruefer", cfg.AppName)
+	}
+	if cfg.AppHomepageURL != "https://example.com/my-pruefer" {
+		t.Errorf("AppHomepageURL = %q, want https://example.com/my-pruefer", cfg.AppHomepageURL)
+	}
+}
+
+func TestLoadConfig_AppNameRejectsWhitespaceOnly(t *testing.T) {
+	dir := t.TempDir()
+	path := writeYAMLConfig(t, dir, `github_app_name: "   "`)
+
+	if _, err := LoadConfig([]string{"-config", path}); err == nil {
+		t.Fatal("LoadConfig: expected an error for a whitespace-only github_app_name, got nil")
+	}
+}
+
+func TestLoadConfig_AppNameTrimmed(t *testing.T) {
+	dir := t.TempDir()
+	path := writeYAMLConfig(t, dir, `github_app_name: "  my-app  "`)
+
+	cfg, err := LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.AppName != "my-app" {
+		t.Errorf("AppName = %q, want trimmed my-app", cfg.AppName)
+	}
+}
+
 func TestSplitCSV(t *testing.T) {
 	cases := []struct {
 		in   string

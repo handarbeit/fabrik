@@ -114,6 +114,8 @@ Create `.pruefer/config.yaml` (or use flags/env vars — see Configuration below
 # github_app_private_key_path: .pruefer/app-private-key.pem  # default shown
 # github_app_installation_id: 0  # 0 = derive from installations (see "Installation-derived repo discovery" below)
 # github_app_state_path: .pruefer/app-state.json  # default shown — reconciler-owned; never hand-edit this file
+# github_app_name: pruefer  # default shown — GitHub App names are globally unique; set a distinct value per deployment (see below)
+# github_app_homepage_url: https://github.com/handarbeit/fabrik  # default shown
 # no_browser: false  # true = never attempt to open a local browser during first-run setup
 
 poll_interval_seconds: 120
@@ -320,6 +322,8 @@ Every field is classified as either **live** (applied immediately) or **restart-
 | `github_app_id` | Restart-only. |
 | `github_app_private_key_path` | Restart-only. |
 | `github_app_installation_id` | Restart-only. |
+| `github_app_name` | Restart-only. |
+| `github_app_homepage_url` | Restart-only. |
 | `tui` | Restart-only — the interactive dashboard is started once, before the daemon begins running. |
 | `log_file` | Restart-only. |
 | `event_source` | Restart-only — switching between `poll` and `hookdeck` means constructing or tearing down a whole event source, including its WebSocket session and dedupe ring. |
@@ -423,6 +427,8 @@ Precedence, highest to lowest: **flag > environment variable > YAML config file 
 | `--github-app-private-key-path` | `PRUEFER_GITHUB_APP_PRIVATE_KEY_PATH` | `github_app_private_key_path` | `.pruefer/app-private-key.pem` | Read from and written to by both manifest and manual setup |
 | `--github-app-installation-id` | `PRUEFER_GITHUB_APP_INSTALLATION_ID` | `github_app_installation_id` | `0` (derive from installations) | Legacy pin: set to force every review through one specific installation, regardless of owner — installation-derived discovery does not apply in this mode |
 | `--github-app-state-path` | `PRUEFER_GITHUB_APP_STATE_PATH` | `github_app_state_path` | `.pruefer/app-state.json` | Reconciler-owned (App ID once manifest-created, slug, webhook secret, client ID/secret); never hand-edit this file |
+| — | — | `github_app_name` | `pruefer` | Display name requested when a manifest-flow-created App is registered with GitHub. **GitHub App names are globally unique** — any operator running more than one Pruefer deployment must set a distinct value per deployment, or the second App's manifest creation collides with the first |
+| — | — | `github_app_homepage_url` | `https://github.com/handarbeit/fabrik` | Homepage URL requested when a manifest-flow-created App is registered with GitHub |
 | `--no-browser` | `PRUEFER_NO_BROWSER` | `no_browser` | `false` | Skip attempting to open a local browser during first-run manifest setup — the setup URL is always printed regardless |
 | `--config` | `PRUEFER_CONFIG` | — | `.pruefer/config.yaml` | Path to the YAML config file itself |
 | `-notui` | `PRUEFER_TUI` | `tui` | `true` | Set `-notui` / `PRUEFER_TUI=0` / `tui: false` to disable the interactive TUI and fall back to console logging. The TUI is further gated on a real terminal being detected on both stdin and stdout, regardless of this setting. |
