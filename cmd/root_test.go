@@ -78,6 +78,73 @@ func TestResolveGHESHost_Normalized(t *testing.T) {
 	}
 }
 
+func TestResolveGitHubAppConfig_FlagWins(t *testing.T) {
+	t.Setenv("FABRIK_GITHUB_APP_ID", "999")
+	t.Setenv("FABRIK_GITHUB_APP_PRIVATE_KEY_PATH", "/env/key.pem")
+	t.Setenv("FABRIK_GITHUB_APP_INSTALLATION_ID", "888")
+	pc := config.ProjectConfig{}
+	cfg := &Config{GitHubAppID: 1, GitHubAppPrivateKeyPath: "/flag/key.pem", GitHubAppInstallationID: 2}
+	if err := resolveGitHubAppConfig(cfg, pc); err != nil {
+		t.Fatalf("resolveGitHubAppConfig: %v", err)
+	}
+	if cfg.GitHubAppID != 1 || cfg.GitHubAppPrivateKeyPath != "/flag/key.pem" || cfg.GitHubAppInstallationID != 2 {
+		t.Errorf("flag values were overridden: %+v", cfg)
+	}
+}
+
+func TestResolveGitHubAppConfig_EnvBeatsConfig(t *testing.T) {
+	t.Setenv("FABRIK_GITHUB_APP_ID", "999")
+	t.Setenv("FABRIK_GITHUB_APP_PRIVATE_KEY_PATH", "/env/key.pem")
+	t.Setenv("FABRIK_GITHUB_APP_INSTALLATION_ID", "888")
+	cfgID := int64(1)
+	cfgInst := int64(2)
+	pc := config.ProjectConfig{GitHubAppID: &cfgID, GitHubAppPrivateKeyPath: "/config/key.pem", GitHubAppInstallationID: &cfgInst}
+	cfg := &Config{}
+	if err := resolveGitHubAppConfig(cfg, pc); err != nil {
+		t.Fatalf("resolveGitHubAppConfig: %v", err)
+	}
+	if cfg.GitHubAppID != 999 || cfg.GitHubAppPrivateKeyPath != "/env/key.pem" || cfg.GitHubAppInstallationID != 888 {
+		t.Errorf("env values did not win: %+v", cfg)
+	}
+}
+
+func TestResolveGitHubAppConfig_ConfigFallback(t *testing.T) {
+	t.Setenv("FABRIK_GITHUB_APP_ID", "")
+	t.Setenv("FABRIK_GITHUB_APP_PRIVATE_KEY_PATH", "")
+	t.Setenv("FABRIK_GITHUB_APP_INSTALLATION_ID", "")
+	cfgID := int64(1)
+	cfgInst := int64(2)
+	pc := config.ProjectConfig{GitHubAppID: &cfgID, GitHubAppPrivateKeyPath: "/config/key.pem", GitHubAppInstallationID: &cfgInst}
+	cfg := &Config{}
+	if err := resolveGitHubAppConfig(cfg, pc); err != nil {
+		t.Fatalf("resolveGitHubAppConfig: %v", err)
+	}
+	if cfg.GitHubAppID != 1 || cfg.GitHubAppPrivateKeyPath != "/config/key.pem" || cfg.GitHubAppInstallationID != 2 {
+		t.Errorf("config.yaml fallback did not apply: %+v", cfg)
+	}
+}
+
+func TestResolveGitHubAppConfig_AllUnsetStaysZero(t *testing.T) {
+	t.Setenv("FABRIK_GITHUB_APP_ID", "")
+	t.Setenv("FABRIK_GITHUB_APP_PRIVATE_KEY_PATH", "")
+	t.Setenv("FABRIK_GITHUB_APP_INSTALLATION_ID", "")
+	cfg := &Config{}
+	if err := resolveGitHubAppConfig(cfg, config.ProjectConfig{}); err != nil {
+		t.Fatalf("resolveGitHubAppConfig: %v", err)
+	}
+	if cfg.GitHubAppID != 0 || cfg.GitHubAppPrivateKeyPath != "" || cfg.GitHubAppInstallationID != 0 {
+		t.Errorf("expected zero values (PAT mode) when nothing configured, got %+v", cfg)
+	}
+}
+
+func TestResolveGitHubAppConfig_InvalidEnvIntReturnsError(t *testing.T) {
+	t.Setenv("FABRIK_GITHUB_APP_ID", "not-a-number")
+	cfg := &Config{}
+	if err := resolveGitHubAppConfig(cfg, config.ProjectConfig{}); err == nil {
+		t.Fatal("expected an error for a non-integer FABRIK_GITHUB_APP_ID")
+	}
+}
+
 func TestExecute_MissingRequiredFlags(t *testing.T) {
 	resetFlags()
 	os.Args = []string{"fabrik"}
@@ -135,6 +202,33 @@ func TestExecute_NoStages(t *testing.T) {
 	err := Execute()
 	if err == nil {
 		t.Fatal("expected error for empty stages dir")
+	}
+}
+
+// TestExecute_GitHubAppAuthConfigured_SkipsTokenRequirement is R1/AC1's
+// negative-of-the-negative: configuring GitHub App auth fields with no
+// token at all must not trip the "GitHub credentials required" error.
+// stagesDir is deliberately empty so Execute fails at the (earlier,
+// network-free) "no stage configurations found" check rather than
+// reaching engine.New()'s real GitHub App reconciliation — this test only
+// needs to prove the credential-requirement gate itself was satisfied.
+func TestExecute_GitHubAppAuthConfigured_SkipsTokenRequirement(t *testing.T) {
+	resetFlags()
+	stagesDir := t.TempDir()
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("FABRIK_TOKEN", "")
+	os.Args = []string{
+		"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u",
+		"--stages", stagesDir,
+		"--github-app-id", "123", "--github-app-private-key-path", "/tmp/nonexistent-key.pem", "--github-app-installation-id", "456",
+	}
+
+	err := Execute()
+	if err == nil {
+		t.Fatal("expected error (no stages)")
+	}
+	if strings.Contains(err.Error(), "GitHub credentials required") {
+		t.Errorf("App-auth config should have satisfied the credential requirement, got: %v", err)
 	}
 }
 
