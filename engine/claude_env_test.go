@@ -423,6 +423,78 @@ func TestBuildClaudeEnv_AnthropicEnvPassthrough(t *testing.T) {
 	})
 }
 
+// TestBuildClaudeEnv_GHTokenOverride covers #1713's claudeGHTokenOverrideFn:
+// GitHub App auth mode has no static token to copy into claudeGHToken, so
+// buildClaudeEnv instead reads a live value from this override function
+// (set by Engine.New() to Client.Token(), riding that client's background
+// refresh loop) when it is non-nil. nil (the default, and always true in
+// PAT mode) must leave the pre-existing claudeGHToken injection exactly as
+// it was.
+func TestBuildClaudeEnv_GHTokenOverride(t *testing.T) {
+	resetAnthropicEnvVars(t)
+
+	t.Run("nil override: claudeGHToken is used exactly as before (PAT mode, R1/AC2)", func(t *testing.T) {
+		oldToken, oldOverride := claudeGHToken, claudeGHTokenOverrideFn
+		claudeGHToken = "pat-token"
+		claudeGHTokenOverrideFn = nil
+		t.Cleanup(func() { claudeGHToken, claudeGHTokenOverrideFn = oldToken, oldOverride })
+
+		got := constructedEnv(nil, InvokeOptions{})
+		if !containsExact(got, "GH_TOKEN=pat-token") || !containsExact(got, "GITHUB_TOKEN=pat-token") {
+			t.Errorf("expected claudeGHToken's value injected when no override is set, got %v", got)
+		}
+	})
+
+	t.Run("non-nil override wins over claudeGHToken (App-auth mode)", func(t *testing.T) {
+		oldToken, oldOverride := claudeGHToken, claudeGHTokenOverrideFn
+		claudeGHToken = "stale-pat-token"
+		claudeGHTokenOverrideFn = func() string { return "live-installation-token" }
+		t.Cleanup(func() { claudeGHToken, claudeGHTokenOverrideFn = oldToken, oldOverride })
+
+		got := constructedEnv(nil, InvokeOptions{})
+		if !containsExact(got, "GH_TOKEN=live-installation-token") || !containsExact(got, "GITHUB_TOKEN=live-installation-token") {
+			t.Errorf("expected the override's value injected, got %v", got)
+		}
+		if containsPrefix(got, "GH_TOKEN=stale-pat-token") {
+			t.Errorf("expected claudeGHToken's value not to appear when an override is set, got %v", got)
+		}
+	})
+
+	t.Run("override is re-read on every call (live, not cached)", func(t *testing.T) {
+		oldToken, oldOverride := claudeGHToken, claudeGHTokenOverrideFn
+		claudeGHToken = ""
+		calls := 0
+		values := []string{"first-token", "second-token"}
+		claudeGHTokenOverrideFn = func() string {
+			v := values[calls]
+			calls++
+			return v
+		}
+		t.Cleanup(func() { claudeGHToken, claudeGHTokenOverrideFn = oldToken, oldOverride })
+
+		first := constructedEnv(nil, InvokeOptions{})
+		if !containsExact(first, "GH_TOKEN=first-token") {
+			t.Errorf("expected first-token on first call, got %v", first)
+		}
+		second := constructedEnv(nil, InvokeOptions{})
+		if !containsExact(second, "GH_TOKEN=second-token") {
+			t.Errorf("expected second-token on second call (proving the override is re-read, not cached), got %v", second)
+		}
+	})
+
+	t.Run("override returning empty string omits GH_TOKEN/GITHUB_TOKEN entirely, even when claudeGHToken is non-empty", func(t *testing.T) {
+		oldToken, oldOverride := claudeGHToken, claudeGHTokenOverrideFn
+		claudeGHToken = "should-be-superseded"
+		claudeGHTokenOverrideFn = func() string { return "" }
+		t.Cleanup(func() { claudeGHToken, claudeGHTokenOverrideFn = oldToken, oldOverride })
+
+		got := constructedEnv(nil, InvokeOptions{})
+		if containsPrefix(got, "GH_TOKEN=") || containsPrefix(got, "GITHUB_TOKEN=") {
+			t.Errorf("expected no GH_TOKEN/GITHUB_TOKEN when the override returns empty, got %v", got)
+		}
+	})
+}
+
 func TestParseAnthropicEnvPassthrough(t *testing.T) {
 	cases := []struct {
 		name string
