@@ -488,7 +488,7 @@ func TestWriteConfigTemplate_CreatesNewFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := writeConfigTemplate("", "", "", "", "", false); err != nil {
+	if err := writeConfigTemplate("", "", "", "", "", "", false); err != nil {
 		t.Fatalf("writeConfigTemplate: %v", err)
 	}
 	content, err := os.ReadFile(".fabrik/config.yaml")

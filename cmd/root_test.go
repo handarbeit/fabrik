@@ -609,7 +609,7 @@ func TestExecute_HelpIncludesSubcommands(t *testing.T) {
 		t.Errorf("expected flag.ErrHelp, got %v", err)
 	}
 	output := buf.String()
-	for _, want := range []string{"init", "watch", "resume", "upgrade", "stream-filter", "refresh-stages"} {
+	for _, want := range []string{"init", "watch", "resume", "upgrade", "stream-filter", "refresh-stages", "repair-board"} {
 		if !strings.Contains(output, want) {
 			t.Errorf("usage output missing %q; got:\n%s", want, output)
 		}

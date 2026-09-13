@@ -175,9 +175,9 @@ func TestFetchStatusField_Success(t *testing.T) {
 					"field": map[string]interface{}{
 						"id": "FIELD_STATUS",
 						"options": []interface{}{
-							map[string]interface{}{"id": "OPT_1", "name": "Todo"},
-							map[string]interface{}{"id": "OPT_2", "name": "In Progress"},
-							map[string]interface{}{"id": "OPT_3", "name": "Done"},
+							map[string]interface{}{"id": "OPT_1", "name": "Todo", "color": "GRAY", "description": "todo desc"},
+							map[string]interface{}{"id": "OPT_2", "name": "In Progress", "color": "BLUE", "description": ""},
+							map[string]interface{}{"id": "OPT_3", "name": "Done", "color": "GREEN", "description": "done desc"},
 						},
 					},
 				},
@@ -212,6 +212,17 @@ func TestFetchStatusField_Success(t *testing.T) {
 		if sf.OrderedOptionNames[i] != name {
 			t.Errorf("OrderedOptionNames[%d] = %q, want %q", i, sf.OrderedOptionNames[i], name)
 		}
+	}
+	if len(sf.OptionDetails) != 3 {
+		t.Fatalf("OptionDetails count = %d, want 3", len(sf.OptionDetails))
+	}
+	todo := sf.OptionDetails["Todo"]
+	if todo.ID != "OPT_1" || todo.Name != "Todo" || todo.Color != "GRAY" || todo.Description != "todo desc" {
+		t.Errorf("OptionDetails[Todo] = %+v", todo)
+	}
+	done := sf.OptionDetails["Done"]
+	if done.ID != "OPT_3" || done.Color != "GREEN" || done.Description != "done desc" {
+		t.Errorf("OptionDetails[Done] = %+v", done)
 	}
 }
 
