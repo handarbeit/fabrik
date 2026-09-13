@@ -1003,6 +1003,12 @@ max_wall_time: "45m"      # Optional. Wall-clock deadline for a single Claude in
                           #   2x turns -> 2x wall time for that invocation only) — size this
                           #   field for the ordinary case; the extended case gets
                           #   proportionate headroom for free. See fabrik:extend-turns below.
+                          #   Exception: a holding stage's merge-train conflict-resolution
+                          #   invocations never run with a zero deadline — a 30-minute
+                          #   fallback applies automatically when this field is left unset
+                          #   on the holding stage, so a stuck-but-still-emitting-output
+                          #   conflict resolution is still bounded even without setting
+                          #   this field explicitly.
 kill_grace:               # Optional. Per-signal grace windows for the kill sequence.
   sigint: "10s"           #   How long to wait after SIGINT before escalating to SIGTERM.
                           #   Empty or absent = inherit engine default (10s).
@@ -1128,7 +1134,7 @@ Fabrik applies two complementary timeout mechanisms to every Claude invocation t
 
 1. **`max_wall_time` (per-stage, opt-in):** A hard wall-clock deadline. When the deadline expires, Fabrik sends `SIGINT` to the Claude process group (which includes any background children spawned during the session), waits the `kill_grace.sigint` window (default 10 s), then `SIGTERM`, then the `kill_grace.sigterm` window (default 10 s), then `SIGKILL` to any surviving processes. Recommended: `"45m"` for Implement and Review stages in production. Legitimately long stages (e.g., a 90-minute Review on a large PR) should either set a higher limit or leave this field unset. **Scaled automatically when `fabrik:extend-turns` pre-grants a larger turn budget:** the label-gated first invocation of a stage (or comment-review pass) that receives 2× the configured turn budget also gets `max_wall_time` scaled by the same 2× factor for that invocation — the deadline stays proportionate to the work granted rather than cutting off a legitimately-progressing extended run on a clock sized for the ordinary case. Size this field for the ordinary (1×) case; you don't need to inflate it to cover the rare extended one.
 
-2. **15-minute inactivity timeout (global, always active):** If no streamed output is received from Claude for 15 consecutive minutes, the process group is killed using the same SIGINT → `kill_grace.sigint` window (default 10 s) → SIGTERM → `kill_grace.sigterm` window (default 10 s) → SIGKILL sequence. This catches sessions that are stuck on a hung background task even when `max_wall_time` is not set — as long as Claude is actively producing output, it continues indefinitely. The threshold is hardcoded and cannot be configured.
+2. **15-minute inactivity timeout (global, always active):** If no streamed output is received from Claude for 15 consecutive minutes, the process group is killed using the same SIGINT → `kill_grace.sigint` window (default 10 s) → SIGTERM → `kill_grace.sigterm` window (default 10 s) → SIGKILL sequence. This catches sessions that are stuck on a hung background task even when `max_wall_time` is not set — as long as Claude is actively producing output, it continues indefinitely for ordinary stage dispatch. Exception: a holding stage's merge-train conflict-resolution invocations always get a nonzero `max_wall_time` deadline (a 30-minute fallback applies when the holding stage's own value is unset), so they're never left to rely solely on this inactivity backstop. The threshold is hardcoded and cannot be configured.
 
 In both cases, if `FABRIK_STAGE_COMPLETE` was emitted before the kill (visible in the streamed `assistant` turns), the stage is treated as successfully completed without retrying. Both timeouts apply equally to main-stage invocations and comment-processing invocations.
 

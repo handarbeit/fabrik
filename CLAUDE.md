@@ -177,8 +177,15 @@ unmanaged: false                # Declares a recognized "parking column" (e.g. B
 max_wall_time: "45m"            # Optional: wall-clock deadline for a single Claude invocation (e.g. "30m", "1h").
                                 # When exceeded, SIGTERM → 10s → SIGKILL sent to the process group. Output
                                 # collected before the kill is scanned for FABRIK_STAGE_COMPLETE so completed
-                                # stages are not re-run. Absent or zero = no cap. A hardcoded 15-minute
-                                # inactivity timeout (no output received) applies to every invocation regardless.
+                                # stages are not re-run. Absent or zero = no cap for ordinary stage dispatch —
+                                # a hardcoded 15-minute inactivity timeout (no output received) still applies
+                                # to every invocation regardless, but never fires while output keeps arriving.
+                                # Exception: a holding stage's merge-train conflict-resolution invocations
+                                # (resolveConflictWithClaude, engine/merge_train.go) never run with a zero
+                                # deadline — conflictResolutionStage substitutes a 30-minute fallback whenever
+                                # the holding stage leaves this unset, via a non-shared copy (the holding
+                                # stage's own *stages.Stage is never mutated in place, since it's shared by
+                                # every concurrent merge-train worker per ADR-1648). See ADR-1500.
 disable_adaptive_thinking: true # Disable Claude Code's adaptive (auto-reduced) thinking budget. Default: true.
 effort_level: max               # Claude Code thinking effort: low, medium, high, max. Default: high.
 review_authority: authoritative # Optional: advisory (default) | authoritative. Only meaningful alongside
