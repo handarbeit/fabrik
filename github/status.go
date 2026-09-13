@@ -7,6 +7,22 @@ type StatusField struct {
 	FieldID            string
 	Options            map[string]string // status name -> option ID
 	OrderedOptionNames []string          // option names in API-returned order (first = leftmost column)
+	// OptionDetails carries the full option shape (id, color, description) per
+	// status name, additively alongside Options/OrderedOptionNames (#1714).
+	// updateProjectV2Field's singleSelectOptions input requires color and
+	// description on every option, including ones whose id is being echoed
+	// back unchanged to preserve item Status assignments — Options alone
+	// (id-only) is not enough to safely reconstruct that payload.
+	OptionDetails map[string]StatusOption
+}
+
+// StatusOption holds one Status field option's full shape, as needed to
+// safely echo it back in an updateProjectV2Field repair mutation (#1714).
+type StatusOption struct {
+	ID          string
+	Name        string
+	Color       string
+	Description string
 }
 
 // updateProjectItemStatusMutation is the GraphQL mutation used by UpdateProjectItemStatus.
@@ -76,6 +92,8 @@ query($projectId: ID!) {
           options {
             id
             name
+            color
+            description
           }
         }
       }
@@ -96,8 +114,10 @@ func (c *Client) FetchStatusField(projectID string) (*StatusField, error) {
 				Field *struct {
 					ID      string `json:"id"`
 					Options []struct {
-						ID   string `json:"id"`
-						Name string `json:"name"`
+						ID          string `json:"id"`
+						Name        string `json:"name"`
+						Color       string `json:"color"`
+						Description string `json:"description"`
 					} `json:"options"`
 				} `json:"field"`
 			} `json:"node"`
@@ -113,12 +133,19 @@ func (c *Client) FetchStatusField(projectID string) (*StatusField, error) {
 	}
 
 	sf := &StatusField{
-		FieldID: result.Data.Node.Field.ID,
-		Options: make(map[string]string),
+		FieldID:       result.Data.Node.Field.ID,
+		Options:       make(map[string]string),
+		OptionDetails: make(map[string]StatusOption),
 	}
 	for _, opt := range result.Data.Node.Field.Options {
 		sf.Options[opt.Name] = opt.ID
 		sf.OrderedOptionNames = append(sf.OrderedOptionNames, opt.Name)
+		sf.OptionDetails[opt.Name] = StatusOption{
+			ID:          opt.ID,
+			Name:        opt.Name,
+			Color:       opt.Color,
+			Description: opt.Description,
+		}
 	}
 
 	return sf, nil
