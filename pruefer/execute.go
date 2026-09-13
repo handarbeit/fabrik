@@ -115,6 +115,7 @@ func Execute() error {
 		AppPrivateKeyPath:   cfg.AppPrivateKeyPath,
 		AppStatePath:        cfg.AppStatePath,
 		WatchedRepos:        cfg.WatchedRepos,
+		ServedAccounts:      cfg.ServedAccounts,
 		MaxDerivedRepos:     cfg.MaxDerivedRepos,
 		NoBrowser:           cfg.NoBrowser,
 		RequiredPermissions: githubauth.PrueferRequiredPermissions(),
@@ -238,19 +239,17 @@ func Execute() error {
 // LoadConfig(args), merges it against daemon's currently running config
 // (applyConfigReload), and applies the merged config to daemon.
 //
-// Since #1641, this no longer mints or removes any owner's installation
-// auth itself: every installation of the operator's own App is already
-// minted unconditionally by Reconciler.Derive (called from rederiveRepos),
-// regardless of whether watched_repos names it — a watched_repos edit only
-// changes which of those already-authorized repos are *reviewed*, not which
-// owners have a client. So a changed WatchedRepos or MaxDerivedRepos
-// triggers a fresh re-derivation (daemon.triggerRederivation) instead: this
-// does still make a live call to re-list each installation's accessible
-// repos (a WatchedRepos-only edit doesn't strictly need to re-mint any
-// token, since Derive reuses an already-known owner's client unchanged —
-// see its own doc comment), but requires no bespoke owner-diff/mint/detach
-// logic here, reusing the exact same re-derivation path installation events
-// and the periodic ticker already use.
+// This never mints or removes any owner's installation auth itself — that
+// happens inside Reconciler.Derive (called from rederiveRepos), which as of
+// #1722 gates minting on WatchedRepos/ServedAccounts membership (R3/R4)
+// rather than minting every installation unconditionally (#1641's original,
+// since-amended behavior — see adrs/1722-app-installation-trust-boundary.md).
+// So a changed WatchedRepos, ServedAccounts, or MaxDerivedRepos triggers a
+// fresh re-derivation (daemon.triggerRederivation) instead: this makes a
+// live call to re-list each installation's accessible repos and re-evaluate
+// which accounts are needed/recognized, requiring no bespoke owner-diff/
+// mint/detach logic here — reusing the exact same re-derivation path
+// installation events and the periodic ticker already use.
 func handleReload(ctx context.Context, args []string, daemon *Daemon) {
 	cand, err := LoadConfig(args)
 	if err != nil {
@@ -274,8 +273,9 @@ func handleReload(ctx context.Context, args []string, daemon *Daemon) {
 	daemon.ApplyReload(merged, nil, nil)
 	logReloadSummary(diff)
 
-	if len(diff.ReposAdded) > 0 || len(diff.ReposRemoved) > 0 || fieldChanged(diff.FieldsChanged, "MaxDerivedRepos") {
-		logf(0, "reload", "watched_repos/max_derived_repos changed — re-deriving the effective repo set\n")
+	if len(diff.ReposAdded) > 0 || len(diff.ReposRemoved) > 0 ||
+		fieldChanged(diff.FieldsChanged, "MaxDerivedRepos") || fieldChanged(diff.FieldsChanged, "ServedAccounts") {
+		logf(0, "reload", "watched_repos/served_accounts/max_derived_repos changed — re-deriving the effective repo set\n")
 		daemon.triggerRederivation(ctx)
 	}
 }

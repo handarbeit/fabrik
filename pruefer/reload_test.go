@@ -544,6 +544,13 @@ func TestHandleReload_MalformedConfigLeavesRunningConfigUntouched(t *testing.T) 
 // previously named in watched_repos) needs no new mint at all — it becomes
 // part of the derived, reviewed set as soon as the reload's triggered
 // re-derivation completes.
+// TestHandleReload_WatchedRepoUnderAlreadyInstalledOwner_BecomesReviewable
+// covers the mirror image of R3's mint-refusal: an installed owner not yet
+// named in watched_repos has no client at all (AC1 — updated by #1722 from
+// this test's pre-existing "already minted regardless" precondition, which
+// asserted ADR-1641's now-amended behavior), and gaining a watched_repos
+// entry for it triggers a fresh mint and makes it reviewable — with no
+// restart needed.
 func TestHandleReload_WatchedRepoUnderAlreadyInstalledOwner_BecomesReviewable(t *testing.T) {
 	dir := t.TempDir()
 	keyPath := writeTestPrivateKey(t, dir)
@@ -560,15 +567,15 @@ func TestHandleReload_WatchedRepoUnderAlreadyInstalledOwner_BecomesReviewable(t 
 	fake.selectedRepos[111] = []string{"handarbeit/fabrik"}
 	fake.selectedRepos[222] = []string{"newowner/repo"}
 
-	// newowner's installation already existed and was already minted by the
-	// initial Derive call (setupReloadDaemon) — confirm the precondition
-	// this test's whole point rests on: no new mint should be needed.
+	// newowner's installation exists but isn't named in watched_repos yet —
+	// confirm the precondition this test's whole point rests on: R3 refuses
+	// to mint for it (AC1).
 	mintsBefore := fake.mintCountFor(222)
-	if mintsBefore == 0 {
-		t.Fatal("precondition failed: newowner should already have been minted by the initial derivation")
+	if mintsBefore != 0 {
+		t.Fatalf("precondition failed: newowner should not have been minted yet (R3), got %d mints", mintsBefore)
 	}
-	if _, ok := daemon.client("newowner"); !ok {
-		t.Fatal("precondition failed: newowner should already be servable before watched_repos ever named it")
+	if _, ok := daemon.client("newowner"); ok {
+		t.Fatal("precondition failed: newowner should not be servable before watched_repos names it")
 	}
 
 	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("watched_repos:\n  - handarbeit/fabrik\n  - newowner/repo\n"), 0600); err != nil {
@@ -590,8 +597,11 @@ func TestHandleReload_WatchedRepoUnderAlreadyInstalledOwner_BecomesReviewable(t 
 		t.Fatalf("derived set = %+v, want newowner/repo included", daemon.derivedSet().Repos)
 	}
 
-	if got := fake.mintCountFor(222); got != mintsBefore {
-		t.Errorf("mintCountFor(222 = newowner) = %d, want unchanged from %d — no re-mint needed for an already-known installation", got, mintsBefore)
+	if got := fake.mintCountFor(222); got != mintsBefore+1 {
+		t.Errorf("mintCountFor(222 = newowner) = %d, want %d — a fresh mint once watched_repos names it", got, mintsBefore+1)
+	}
+	if _, ok := daemon.client("newowner"); !ok {
+		t.Error("expected newowner to become servable after being added to watched_repos")
 	}
 	got := daemon.config()
 	if len(got.WatchedRepos) != 2 {
@@ -694,7 +704,18 @@ func TestHandleReload_LogsDiffSummary(t *testing.T) {
 // servable through the daemon, just excluded from the reviewed set. This is
 // a deliberate behavior change from the pre-#1641 model this test used to
 // assert the opposite of.
-func TestHandleReload_RemovedWatchedRepo_NoLongerReviewed_ButInstallationStaysAuthorized(t *testing.T) {
+// TestHandleReload_RemovedWatchedRepo_NoLongerReviewed_AndInstallationDetached
+// replaces the pre-#1722
+// TestHandleReload_RemovedWatchedRepo_NoLongerReviewed_ButInstallationStaysAuthorized,
+// which asserted the *opposite* of what this issue's R3 amendment requires:
+// that a watched_repos edit dropping an owner leaves that owner's
+// installation minted and servable regardless (containment being purely
+// structural, per ADR-1641 Decision 8). AC1 requires the opposite — an
+// installation serving no watched repository never has a token minted (or
+// kept minted) for it — so dropping verveguy from watched_repos must detach
+// its client, not merely narrow what's reviewed. See
+// adrs/1722-app-installation-trust-boundary.md.
+func TestHandleReload_RemovedWatchedRepo_NoLongerReviewed_AndInstallationDetached(t *testing.T) {
 	dir := t.TempDir()
 	keyPath := writeTestPrivateKey(t, dir)
 	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("watched_repos:\n  - handarbeit/fabrik\n  - verveguy/otherrepo\n"), 0600); err != nil {
@@ -716,7 +737,6 @@ func TestHandleReload_RemovedWatchedRepo_NoLongerReviewed_ButInstallationStaysAu
 	if _, ok := daemon.client("verveguy"); !ok {
 		t.Fatal("expected verveguy to be servable before the reload")
 	}
-	beforeInstallationCount := reconciler.InstallationCount()
 
 	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("watched_repos:\n  - handarbeit/fabrik\n"), 0600); err != nil {
 		t.Fatalf("writing updated config: %v", err)
@@ -730,14 +750,14 @@ func TestHandleReload_RemovedWatchedRepo_NoLongerReviewed_ButInstallationStaysAu
 		}
 	}
 
-	if _, ok := daemon.client("verveguy"); !ok {
-		t.Error("expected verveguy to remain servable — its installation is untouched by a watched_repos edit (R3 is a review-scope filter, not containment)")
+	if _, ok := daemon.client("verveguy"); ok {
+		t.Error("expected verveguy to no longer be servable — R3 detaches an installation once it's dropped from watched_repos (AC1)")
 	}
-	if _, err := reconciler.ClientForRepo(context.Background(), "verveguy", ""); err != nil {
-		t.Errorf("expected reconciler to still have a client for verveguy: %v", err)
+	if _, err := reconciler.ClientForRepo(context.Background(), "verveguy", ""); err == nil {
+		t.Error("expected reconciler to no longer have a client for verveguy")
 	}
-	if got := reconciler.InstallationCount(); got != beforeInstallationCount {
-		t.Errorf("InstallationCount() = %d, want unchanged %d — a watched_repos edit must never detach an installation", got, beforeInstallationCount)
+	if got := reconciler.InstallationCount(); got != 1 {
+		t.Errorf("InstallationCount() = %d, want 1 — verveguy's installation must be detached once it's no longer named in watched_repos", got)
 	}
 	if _, ok := daemon.client("handarbeit"); !ok {
 		t.Error("expected handarbeit (still watched) to remain servable")
