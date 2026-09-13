@@ -47,6 +47,7 @@
 tmp/
 *.out
 engine/.fabrik/
+cmd/.fabrik/
 tests/sim/.fabrik/
 .fabrik/debug-footer.bin
 

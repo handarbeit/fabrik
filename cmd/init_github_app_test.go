@@ -151,6 +151,7 @@ func fullPermissions() map[string]string {
 
 func TestRunGitHubAppSetup_AdoptPinnedInstallation_Success(t *testing.T) {
 	dir := t.TempDir()
+	chdirTest(t, dir) // runGitHubAppSetup resolves AppStatePath relative to cwd — never write into the source tree
 	keyPath := writeCmdTestAppKey(t, dir)
 	srv := newFakeGitHubAppSetupServer(t,
 		[]gh.AppInstallation{{ID: 555, Account: "handarbeit", Permissions: fullPermissions()}},
@@ -179,6 +180,7 @@ func TestRunGitHubAppSetup_AdoptPinnedInstallation_Success(t *testing.T) {
 
 func TestRunGitHubAppSetup_Discovery_FindsInstallation(t *testing.T) {
 	dir := t.TempDir()
+	chdirTest(t, dir) // runGitHubAppSetup resolves AppStatePath relative to cwd — never write into the source tree
 	keyPath := writeCmdTestAppKey(t, dir)
 	srv := newFakeGitHubAppSetupServer(t,
 		[]gh.AppInstallation{
@@ -201,6 +203,7 @@ func TestRunGitHubAppSetup_Discovery_FindsInstallation(t *testing.T) {
 
 func TestRunGitHubAppSetup_Discovery_NoInstallationFound(t *testing.T) {
 	dir := t.TempDir()
+	chdirTest(t, dir) // runGitHubAppSetup resolves AppStatePath relative to cwd — never write into the source tree
 	keyPath := writeCmdTestAppKey(t, dir)
 	srv := newFakeGitHubAppSetupServer(t,
 		[]gh.AppInstallation{{ID: 111, Account: "someone-else", Permissions: fullPermissions()}},
@@ -220,6 +223,7 @@ func TestRunGitHubAppSetup_Discovery_NoInstallationFound(t *testing.T) {
 
 func TestRunGitHubAppSetup_UserOwnedBoard_Refused(t *testing.T) {
 	dir := t.TempDir()
+	chdirTest(t, dir) // runGitHubAppSetup resolves AppStatePath relative to cwd — never write into the source tree
 	keyPath := writeCmdTestAppKey(t, dir)
 	srv := newFakeGitHubAppSetupServer(t,
 		[]gh.AppInstallation{{ID: 555, Account: "someuser", Permissions: fullPermissions()}},
@@ -239,6 +243,7 @@ func TestRunGitHubAppSetup_UserOwnedBoard_Refused(t *testing.T) {
 
 func TestRunGitHubAppSetup_PermissionShortfall_ReportsApprovalURL(t *testing.T) {
 	dir := t.TempDir()
+	chdirTest(t, dir) // runGitHubAppSetup resolves AppStatePath relative to cwd — never write into the source tree
 	keyPath := writeCmdTestAppKey(t, dir)
 	partial := fullPermissions()
 	delete(partial, "issues")
@@ -264,6 +269,7 @@ func TestRunGitHubAppSetup_PermissionShortfall_ReportsApprovalURL(t *testing.T) 
 
 func TestRunGitHubAppSetup_Webhooks_ExpandsRequiredPermissions(t *testing.T) {
 	dir := t.TempDir()
+	chdirTest(t, dir) // runGitHubAppSetup resolves AppStatePath relative to cwd — never write into the source tree
 	keyPath := writeCmdTestAppKey(t, dir)
 	granted := fullPermissions() // no "webhooks" entry
 	srv := newFakeGitHubAppSetupServer(t,
