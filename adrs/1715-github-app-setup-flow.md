@@ -129,6 +129,69 @@ introducing a third, unverified one. Documented in `docs/USER_GUIDE.md` without 
 it is the definitive deep-link — an org admin landing on the installation's settings
 page can always navigate to the permission-approval prompt from there.
 
+### `RequiredPermissions` is set, unlike the engine's own Reconcile call
+
+Review found `baseOpts` (the `githubauth.Options` `runGitHubAppSetup` passes to
+`Reconcile`) never set `RequiredPermissions`. The engine's own `setUpGitHubAppAuth`
+deliberately leaves it unset on its one (always-pinned) `Reconcile` call, to avoid a
+redundant `GET /app/installations/{id}` round trip on every startup/poll — its explicit
+`VerifyGrants` call moments later covers the same ground. That reasoning does not
+transfer to the setup flow: on the **create** path (`opts.AppID == 0`), this same field
+is what `buildManifest` uses to decide what permission set a freshly manifest-created App
+actually requests. Leaving it unset meant a fresh App's manifest fell back to
+`PrueferRequiredPermissions()` instead of `engine.RequiredGitHubAppPermissions` —
+guaranteeing it would always be missing `organization_projects:write` (the permission
+this whole feature exists to grant) and fail its own R3 check immediately after
+creation, forcing a manual App-settings edit before `--github-app` could ever succeed on
+the create path it was built to support. Fixed by computing `required :=
+engine.RequiredGitHubAppPermissions(opts.Webhooks)` once and setting it on `baseOpts`
+(reused for the final `VerifyGrants(required)` call too, so there is only one
+computation to keep in sync). The accepted trade-off — an extra soft
+`verifyPinnedGrants` round trip when the call ends up pinned — is a one-time cost for a
+one-shot CLI command, not a per-poll cost like the engine's case, so correctness wins
+here. Not reachable end-to-end by a `cmd`-level test (same browser-driven limitation as
+the create path generally — see Consequences), but its effect on the *pinned* case
+(`verifyPinnedGrants`'s log-only check) is observable and is what
+`TestRunGitHubAppSetup_SetsRequiredPermissionsOnReconcileOptions` asserts as a proxy.
+
+### Three additional setup-time refusals added on review
+
+Three more gaps surfaced in review, each mirroring an existing guard elsewhere in the
+codebase rather than inventing new wording:
+
+- **Existing `.fabrik/config.yaml` without `--force`.** Without this, `runGitHubAppSetup`
+  would still run to completion — registering/adopting a real App, minting an
+  installation token, writing the private key to disk — and then
+  `writeConfigTemplate`'s own no-op-when-file-exists gate would silently discard the
+  resolved `github_app_*` fields. Mirrors `--create-board`'s identical R1/#1718 guard
+  (same file, a few lines above), checked via a plain `os.Stat` rather than
+  `config.LoadProjectConfig`'s content-based check, because `writeConfigTemplate`'s own
+  gate is file-existence-based — a fresh, all-commented-out template file would still
+  trigger it.
+- **`--ghes-host`/`FABRIK_GHES_HOST` combined with `--github-app`.** The engine refuses
+  this combination unconditionally at startup (`refuseGHESWithGitHubApp`, now exported as
+  `RefuseGHESWithGitHubApp(ghesHost string)` — re-parameterized to take the resolved host
+  string directly rather than a whole `Config`, since `cmd/init.go` has no
+  `engine.Config` to construct). Without a setup-time check, `--github-app` would happily
+  register/adopt an App against production github.com regardless of `--ghes-host` (its
+  `BaseURL` is never derived from it), then write a `ghes_host` + `github_app_*`
+  combination the engine refuses on its very next startup — a confusing failure
+  discovered only after setup already reported success.
+- **`FABRIK_GITHUB_APP_ID`/`FABRIK_GITHUB_APP_PRIVATE_KEY_PATH`/
+  `FABRIK_GITHUB_APP_INSTALLATION_ID` env-var fallback for the identically-named `init`
+  flags.** Their help text already claimed this fallback (copied from the top-level
+  `fabrik` command's flags), but `runInit` never read the env vars — an operator relying
+  on them would silently fall through to the create-a-new-App path instead of adopting,
+  registering a duplicate App. Fixed by `resolveGitHubAppInitFlagsFromEnv`, mirroring
+  `resolveGitHubAppConfig`'s (`cmd/root.go`) flag > env precedence minus its
+  `config.yaml` tier, which doesn't exist yet at init time.
+- A fourth review finding — the App's default private key
+  (`defaultGitHubAppPrivateKeyPath`) and state file (`engine.GitHubAppStatePath`) were
+  never added to `writeGitExclude`'s entries — is fixed the same way: both are now
+  unconditionally added to `.git/info/exclude`, alongside the pre-existing entries,
+  referencing the same constant/function `cmd/init_github_app.go` itself uses rather
+  than a second copy of the literal paths.
+
 ### Board hand-off uses the App's own client, not a second `--token`
 
 When `--github-app` and `--create-board` are both given, `cmd/init.go` calls
@@ -144,11 +207,13 @@ pure friction with no security benefit.
   authentication; manual App creation and manual `.fabrik/config.yaml` editing remain
   possible (compat mode never required the guided flow) but are no longer the only
   documented path.
-- The four exported `engine` identifiers (`RequiredGitHubAppPermissions`,
+- Five exported `engine` identifiers (`RequiredGitHubAppPermissions`,
   `RefuseUserOwnedBoardForAppAuth`, `GitHubAppStatePath`, `FormatPermissionShortfalls`,
-  plus the two exported name/homepage constants) are now part of `engine`'s public
-  surface for a second caller (`cmd`) — any future change to the engine's required
-  permission set or user-owned-board refusal wording automatically applies to setup-time
+  `RefuseGHESWithGitHubApp` — the last added during review, re-parameterized to take a
+  plain `ghesHost string` rather than a whole `Config` — plus the two exported
+  name/homepage constants) are now part of `engine`'s public surface for a second caller
+  (`cmd`) — any future change to the engine's required permission set, user-owned-board
+  refusal wording, or GHES-combination refusal automatically applies to setup-time
   verification too, with no separate update needed.
 - The manifest-flow **create** path (an operator confirming App creation in a real
   browser against real github.com) is not covered by this issue's automated tests — it

@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/handarbeit/fabrik/config"
+	"github.com/handarbeit/fabrik/engine"
 	gh "github.com/handarbeit/fabrik/github"
 	fabrikplugin "github.com/handarbeit/fabrik/plugin"
 	"github.com/handarbeit/fabrik/stages"
@@ -272,6 +273,42 @@ func buildConfigWithValues(v configValues) string {
 	return strings.Join(out, "\n")
 }
 
+// resolveGitHubAppInitFlagsFromEnv fills in idFlag/keyPathFlag/
+// installationIDFlag from FABRIK_GITHUB_APP_ID/FABRIK_GITHUB_APP_PRIVATE_KEY_PATH/
+// FABRIK_GITHUB_APP_INSTALLATION_ID for any flag left at its zero value —
+// flag > env, mirroring resolveGitHubAppConfig's precedence (cmd/root.go)
+// minus its config.yaml layer, which doesn't exist yet at init time. Mutates
+// the flag values in place (like resolveGitHubAppConfig mutates cfg) so
+// every subsequent check in runInit (the adopt-pair all-or-nothing
+// validation, runGitHubAppSetup itself) sees the fully-resolved value
+// without needing to know whether it came from a flag or the environment.
+func resolveGitHubAppInitFlagsFromEnv(idFlag *int64, keyPathFlag *string, installationIDFlag *int64) error {
+	if *idFlag == 0 {
+		if v := os.Getenv("FABRIK_GITHUB_APP_ID"); v != "" {
+			n, err := strconv.ParseInt(v, 10, 64)
+			if err != nil {
+				return fmt.Errorf("FABRIK_GITHUB_APP_ID=%q is invalid (must be an integer)", v)
+			}
+			*idFlag = n
+		}
+	}
+	if *keyPathFlag == "" {
+		if v := os.Getenv("FABRIK_GITHUB_APP_PRIVATE_KEY_PATH"); v != "" {
+			*keyPathFlag = v
+		}
+	}
+	if *installationIDFlag == 0 {
+		if v := os.Getenv("FABRIK_GITHUB_APP_INSTALLATION_ID"); v != "" {
+			n, err := strconv.ParseInt(v, 10, 64)
+			if err != nil {
+				return fmt.Errorf("FABRIK_GITHUB_APP_INSTALLATION_ID=%q is invalid (must be an integer)", v)
+			}
+			*installationIDFlag = n
+		}
+	}
+	return nil
+}
+
 // runInit implements the `fabrik init` subcommand.
 // It extracts the embedded default stage YAML files into .fabrik/stages/
 // and the Fabrik plugin into .fabrik/plugin/ in the current directory.
@@ -333,6 +370,21 @@ func runInit(args []string) error {
 	if err := fset.Parse(args); err != nil {
 		return err
 	}
+	// Review finding (PR #1731): the three --github-app-id/--github-app-
+	// private-key-path/--github-app-installation-id flags' help text claims
+	// FABRIK_GITHUB_APP_* env-var fallback, matching the wording used for
+	// the top-level `fabrik` command's identically-named flags (which
+	// genuinely fall back via resolveGitHubAppConfig, cmd/root.go) — but
+	// nothing here previously read those env vars. An operator who already
+	// sets them for the engine and expects the same behavior from `fabrik
+	// init --github-app` would otherwise silently fall through to the
+	// create-a-new-App path instead of adopting, registering a duplicate
+	// App. Only flag > env is needed here (no config.yaml layer — it
+	// doesn't exist yet at init time), mirroring resolveGHESHost's own
+	// zero-value-ProjectConfig treatment below.
+	if err := resolveGitHubAppInitFlagsFromEnv(githubAppIDFlag, githubAppKeyPathFlag, githubAppInstallationIDFlag); err != nil {
+		return err
+	}
 	if fset.NArg() > 1 {
 		return fmt.Errorf("init: too many positional arguments (expected at most one project URL)")
 	}
@@ -391,11 +443,47 @@ func runInit(args []string) error {
 	if *githubAppInstallationIDFlag != 0 && !*githubApp {
 		return fmt.Errorf("init: --github-app-installation-id requires --github-app")
 	}
+	if *githubApp && !*force {
+		// Review finding (PR #1731): without this guard, runGitHubAppSetup
+		// below still runs to completion — registering/adopting a real App
+		// on GitHub, minting an installation token, writing the private key
+		// to disk — but writeConfigTemplate's own no-op-when-file-exists gate
+		// (mirrored here exactly, since that's the actual condition that bites)
+		// then silently discards the resolved github_app_id/
+		// github_app_private_key_path/github_app_installation_id instead of
+		// persisting them. The operator is left believing setup succeeded —
+		// and, on the create path, with a live App now registered on GitHub —
+		// while .fabrik/config.yaml never gains what's needed to use it.
+		// Refuse before any network call fires, mirroring --create-board's
+		// analogous guard above.
+		if _, err := os.Stat(".fabrik/config.yaml"); err == nil {
+			return fmt.Errorf("init: --github-app refused — .fabrik/config.yaml already exists; completing App " +
+				"setup now would register/adopt a real GitHub App and mint credentials, then silently discard the " +
+				"resolved github_app_id/github_app_private_key_path/github_app_installation_id (writeConfigTemplate " +
+				"skips writing when the file already exists and --force is not given); pass --force to overwrite " +
+				"the existing config with the new values, or run --github-app once to see the resolved values and " +
+				"add the three github_app_* fields to the existing file by hand")
+		}
+	}
 
 	// Resolve GHES host from flag > FABRIK_GHES_HOST env var. No config.yaml
 	// fallback — it doesn't exist yet at init time — so a zero-value
 	// ProjectConfig is passed deliberately, not loaded from disk.
 	ghesHost := resolveGHESHost(*ghesHostFlag, config.ProjectConfig{})
+	if *githubApp {
+		// Review finding (PR #1731): the engine refuses GHES host +
+		// GitHub-App-auth unconditionally at startup (RefuseGHESWithGitHubApp,
+		// engine/github_app_auth.go) because internal/githubauth's client
+		// construction doesn't yet derive correct GHES endpoints. Without this
+		// check, setup would happily register/adopt an App against production
+		// github.com (its BaseURL is never derived from ghesHost) and write a
+		// ghes_host + github_app_* combination the engine then refuses
+		// unconditionally on its very next startup — a confusing failure to
+		// discover only after setup already reported success.
+		if err := engine.RefuseGHESWithGitHubApp(ghesHost); err != nil {
+			return fmt.Errorf("--github-app: %w", err)
+		}
+	}
 
 	// Parse URL if provided — must happen before any filesystem writes.
 	var owner, project, ownerType, repo string
@@ -691,6 +779,20 @@ func writeGitExclude() error {
 		".fabrik/debug/",
 		".fabrik/history.json",
 		".fabrik/warnings.json",
+		// Bot review finding (PR #1731): a fresh `--github-app` manifest run
+		// writes the App's private key to defaultGitHubAppPrivateKeyPath and
+		// its non-key metadata (App ID, slug, webhook secret, client
+		// ID/secret) to engine.GitHubAppStatePath's default — unlike
+		// .fabrik/config.yaml, which is deliberately committed, both of these
+		// are per-operator secrets that must never enter the repo's history.
+		// Added unconditionally, like every other entry above, regardless of
+		// whether --github-app was used this run — cheap now, and protects
+		// a later run that adds them without needing to re-run this step.
+		// Referencing the same constant/func init_github_app.go itself uses
+		// (rather than a second copy of the literal path) so the two can
+		// never silently drift apart.
+		defaultGitHubAppPrivateKeyPath,
+		engine.GitHubAppStatePath("."),
 	}
 
 	existing, _ := os.ReadFile(excludePath)

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/handarbeit/fabrik/engine"
 	gh "github.com/handarbeit/fabrik/github"
 )
 
@@ -267,6 +269,66 @@ func TestRunGitHubAppSetup_PermissionShortfall_ReportsApprovalURL(t *testing.T) 
 	}
 }
 
+// TestRunGitHubAppSetup_SetsRequiredPermissionsOnReconcileOptions is a bot
+// review finding (PR #1731): baseOpts never set githubauth.Options.
+// RequiredPermissions, so on the create-new-App path (opts.AppID == 0),
+// buildManifest would fall back to PrueferRequiredPermissions() instead of
+// engine.RequiredGitHubAppPermissions — a freshly created App would always
+// be missing organization_projects:write and fail its own R3 check
+// immediately after creation. That code path (a real manifest/browser
+// exchange) isn't reachable from a cmd-level test (see the ADR's disclosed
+// limitation) — but Options.RequiredPermissions is the same field
+// Reconcile's own verifyPinnedGrants (a soft, log-only check that only
+// fires when the field is non-nil and the call is pinned) consults, so its
+// effect IS observable here: this test captures stdout during a pinned
+// adopt-path call with a known permission shortfall and asserts the
+// resulting "[github-app] !" warning line appears — proof the field
+// reached Reconcile, not just the explicit VerifyGrants call afterward
+// (which uses a separately-computed value and would still report the
+// shortfall correctly even if baseOpts.RequiredPermissions regressed to
+// nil, making the returned-error assertions in the sibling
+// PermissionShortfall test above unable to catch this specific regression
+// by themselves).
+func TestRunGitHubAppSetup_SetsRequiredPermissionsOnReconcileOptions(t *testing.T) {
+	dir := t.TempDir()
+	chdirTest(t, dir)
+	keyPath := writeCmdTestAppKey(t, dir)
+	partial := fullPermissions()
+	delete(partial, "issues")
+	srv := newFakeGitHubAppSetupServer(t,
+		[]gh.AppInstallation{{ID: 555, Account: "handarbeit", Permissions: partial}},
+		map[string]string{"handarbeit": "organization"},
+	)
+
+	origStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+
+	_, setupErr := runGitHubAppSetup(context.Background(), githubAppSetupOptions{
+		Owner: "handarbeit", AppID: 42, PrivateKeyPath: keyPath, InstallationID: 555, BaseURL: srv.URL,
+	})
+
+	w.Close()
+	os.Stdout = origStdout
+	var buf strings.Builder
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatal(err)
+	}
+	captured := buf.String()
+
+	if setupErr == nil {
+		t.Fatal("expected a permission-shortfall error")
+	}
+	if !strings.Contains(captured, `permission "issues" is granted "none"`) {
+		t.Errorf("expected Reconcile's own soft verifyPinnedGrants check to log the missing \"issues\" permission — "+
+			"its absence means baseOpts.RequiredPermissions was nil, the exact regression this test guards against. "+
+			"captured output:\n%s", captured)
+	}
+}
+
 func TestRunGitHubAppSetup_Webhooks_ExpandsRequiredPermissions(t *testing.T) {
 	dir := t.TempDir()
 	chdirTest(t, dir) // runGitHubAppSetup resolves AppStatePath relative to cwd — never write into the source tree
@@ -378,5 +440,144 @@ func TestBuildConfigWithValues_GitHubAppFields_UnsetStayCommented(t *testing.T) 
 		if !strings.Contains(result, want) {
 			t.Errorf("expected %q to remain commented when unset:\n%s", want, result)
 		}
+	}
+}
+
+// ── review fixes (PR #1731) ──────────────────────────────────────────────
+
+// TestWriteGitExclude_CoversGitHubAppSecrets is a bot review finding: a
+// fresh `--github-app` manifest run writes the App's private key and state
+// file under .fabrik/, but writeGitExclude's entry list didn't cover either
+// — a routine `git add .` in the operator's own repo could commit the
+// private key. Confirms both paths land in .git/info/exclude.
+func TestWriteGitExclude_CoversGitHubAppSecrets(t *testing.T) {
+	dir := t.TempDir()
+	chdirTest(t, dir)
+	if err := os.Mkdir(".git", 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(".git", "info"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeGitExclude(); err != nil {
+		t.Fatalf("writeGitExclude: %v", err)
+	}
+
+	content, err := os.ReadFile(filepath.Join(".git", "info", "exclude"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{defaultGitHubAppPrivateKeyPath, engine.GitHubAppStatePath(".")} {
+		if !strings.Contains(string(content), want) {
+			t.Errorf(".git/info/exclude missing %q:\n%s", want, content)
+		}
+	}
+}
+
+// TestRunInit_GitHubApp_RefusesExistingConfigWithoutForce is a review
+// finding: without this guard, runGitHubAppSetup would run to completion —
+// registering/adopting a real App, minting an installation token, writing
+// the private key to disk — and then writeConfigTemplate's own
+// no-op-when-file-exists gate would silently discard the resolved
+// github_app_* fields instead of persisting them. No network call should
+// happen — this must be rejected by flag validation before
+// runGitHubAppSetup ever runs.
+func TestRunInit_GitHubApp_RefusesExistingConfigWithoutForce(t *testing.T) {
+	dir := t.TempDir()
+	chdirTest(t, dir)
+	if err := os.MkdirAll(".fabrik", 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(".fabrik", "config.yaml"), []byte("owner: acme\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := runInit([]string{"--github-app", "--owner", "myorg"})
+	if err == nil {
+		t.Fatal("expected an error when --github-app runs against an existing .fabrik/config.yaml without --force")
+	}
+	if !strings.Contains(err.Error(), "--force") || !strings.Contains(err.Error(), "config.yaml") {
+		t.Errorf("error %q should mention --force and .fabrik/config.yaml", err.Error())
+	}
+}
+
+// TestRunInit_GitHubApp_RefusesGHESHost is a review finding: the engine
+// refuses GHES host + GitHub-App-auth unconditionally at startup
+// (engine.RefuseGHESWithGitHubApp), because internal/githubauth's client
+// construction doesn't yet derive correct GHES endpoints. Without this
+// setup-time check, --github-app would register/adopt an App against
+// production github.com regardless of --ghes-host, then write a
+// ghes_host + github_app_* combination the engine refuses on its very next
+// startup. No network call should happen.
+func TestRunInit_GitHubApp_RefusesGHESHost(t *testing.T) {
+	dir := t.TempDir()
+	chdirTest(t, dir)
+
+	err := runInit([]string{"--github-app", "--owner", "myorg", "--ghes-host", "ghes.example.com"})
+	if err == nil {
+		t.Fatal("expected an error when --github-app is combined with --ghes-host")
+	}
+	if !strings.Contains(err.Error(), "ghes.example.com") || !strings.Contains(err.Error(), "Enterprise Server") {
+		t.Errorf("error %q should name the GHES host and explain the refusal", err.Error())
+	}
+}
+
+// Note: the composed "env vars satisfy the adopt-pair check inside runInit"
+// behavior is deliberately not tested end-to-end through runInit — doing so
+// would require a real network call, since --github-app has no BaseURL
+// test-injection point in runInit (see cmd/init_github_app.go's BaseURL doc
+// comment; mirrors --create-board's identical gap). Depending on external
+// network for a test is against this repo's own testing convention
+// (.claude/rules/golang.md). The dedicated resolveGitHubAppInitFlagsFromEnv
+// unit tests below, combined with TestRunInit_GitHubApp_AdoptPairMismatch's
+// existing coverage of the mismatch check itself (both consult the exact
+// same *githubAppIDFlag/*githubAppKeyPathFlag values), together prove the
+// composed behavior without needing a live round trip.
+
+// TestResolveGitHubAppInitFlagsFromEnv_FlagWins confirms flag values take
+// precedence over env vars when both are given (flag > env, no config.yaml
+// layer — mirrors resolveGitHubAppConfig's precedence minus its third tier,
+// which doesn't exist yet at init time).
+func TestResolveGitHubAppInitFlagsFromEnv_FlagWins(t *testing.T) {
+	t.Setenv("FABRIK_GITHUB_APP_ID", "999")
+	t.Setenv("FABRIK_GITHUB_APP_PRIVATE_KEY_PATH", "/env/path.pem")
+	t.Setenv("FABRIK_GITHUB_APP_INSTALLATION_ID", "888")
+
+	id, keyPath, instID := int64(42), "/flag/path.pem", int64(555)
+	if err := resolveGitHubAppInitFlagsFromEnv(&id, &keyPath, &instID); err != nil {
+		t.Fatalf("resolveGitHubAppInitFlagsFromEnv: %v", err)
+	}
+	if id != 42 || keyPath != "/flag/path.pem" || instID != 555 {
+		t.Errorf("flag values overridden by env: id=%d keyPath=%q instID=%d", id, keyPath, instID)
+	}
+}
+
+// TestResolveGitHubAppInitFlagsFromEnv_EnvFillsZeroValues confirms env vars
+// are used only when the corresponding flag is left at its zero value.
+func TestResolveGitHubAppInitFlagsFromEnv_EnvFillsZeroValues(t *testing.T) {
+	t.Setenv("FABRIK_GITHUB_APP_ID", "999")
+	t.Setenv("FABRIK_GITHUB_APP_PRIVATE_KEY_PATH", "/env/path.pem")
+	t.Setenv("FABRIK_GITHUB_APP_INSTALLATION_ID", "888")
+
+	var id, instID int64
+	var keyPath string
+	if err := resolveGitHubAppInitFlagsFromEnv(&id, &keyPath, &instID); err != nil {
+		t.Fatalf("resolveGitHubAppInitFlagsFromEnv: %v", err)
+	}
+	if id != 999 || keyPath != "/env/path.pem" || instID != 888 {
+		t.Errorf("env vars not applied: id=%d keyPath=%q instID=%d", id, keyPath, instID)
+	}
+}
+
+// TestResolveGitHubAppInitFlagsFromEnv_InvalidIntEnv confirms a malformed
+// integer env var is surfaced as an error, not silently ignored or panicking.
+func TestResolveGitHubAppInitFlagsFromEnv_InvalidIntEnv(t *testing.T) {
+	t.Setenv("FABRIK_GITHUB_APP_ID", "not-a-number")
+
+	var id, instID int64
+	var keyPath string
+	if err := resolveGitHubAppInitFlagsFromEnv(&id, &keyPath, &instID); err == nil {
+		t.Fatal("expected an error for a malformed FABRIK_GITHUB_APP_ID")
 	}
 }

@@ -130,7 +130,7 @@ func validateGitHubAppConfig(cfg Config) error {
 		strings.Join(missing, ", "))
 }
 
-// refuseGHESWithGitHubApp refuses the GHES-host + GitHub-App-auth
+// RefuseGHESWithGitHubApp refuses the GHES-host + GitHub-App-auth
 // combination outright rather than silently attempting it: internal/
 // githubauth's client construction (mintAuth) unconditionally builds a
 // gh.NewClientWithBaseURL client, which is documented as deriving an
@@ -139,14 +139,23 @@ func validateGitHubAppConfig(cfg Config) error {
 // paths). This is a pre-existing gap in internal/githubauth this issue does
 // not fix — the safe move is a loud config-time refusal, not a client that
 // fails obscurely later against the wrong endpoint.
-func refuseGHESWithGitHubApp(cfg Config) error {
-	if cfg.GHESHost == "" {
+//
+// Exported (review finding, PR #1731) alongside RequiredGitHubAppPermissions/
+// RefuseUserOwnedBoardForAppAuth so `fabrik init --github-app` (#1715) can
+// refuse this combination at setup time too — without it, setup would
+// register/adopt an App against github.com even when --ghes-host is set,
+// then write a github_app_*/ghes_host combination the engine refuses
+// unconditionally on its very next startup. Takes the resolved ghesHost
+// string directly, not a Config, since cmd/init.go has no engine.Config to
+// hand it — resolveGitHubAppAuth below passes cfg.GHESHost.
+func RefuseGHESWithGitHubApp(ghesHost string) error {
+	if ghesHost == "" {
 		return nil
 	}
 	return fmt.Errorf("GitHub App authentication cannot be combined with a GitHub Enterprise Server host "+
 		"(ghes_host %q) — internal/githubauth's client construction does not yet derive the correct GHES "+
 		"endpoints; remove ghes_host to use GitHub App auth against github.com, or remove the GitHub App "+
-		"config to use a personal access token against this GHES instance instead", cfg.GHESHost)
+		"config to use a personal access token against this GHES instance instead", ghesHost)
 }
 
 // FormatPermissionShortfalls renders R3's "name each missing permission"
@@ -279,7 +288,7 @@ func resolveGitHubAppAuth(ctx context.Context, cfg Config, fabrikDir, baseURL st
 	if !gitHubAppAuthConfigured(cfg) {
 		return nil, nil, nil
 	}
-	if err := refuseGHESWithGitHubApp(cfg); err != nil {
+	if err := RefuseGHESWithGitHubApp(cfg.GHESHost); err != nil {
 		return nil, nil, err
 	}
 	// Both a PAT and a full GitHub App config can be present at once (e.g.

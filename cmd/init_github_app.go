@@ -82,7 +82,9 @@ type githubAppSetupResult struct {
 //     call pins the discovered installation ID — VerifyGrants only works on
 //     a pinned Reconciler. When opts.InstallationID WAS given up front, the
 //     first call is already pinned and this second call never happens —
-//     the shape then matches the engine's own setUpGitHubAppAuth exactly.
+//     the shape then otherwise matches the engine's own setUpGitHubAppAuth,
+//     except that Options.RequiredPermissions IS set here (unlike the
+//     engine's call) — see the doc comment above baseOpts below for why.
 func runGitHubAppSetup(ctx context.Context, opts githubAppSetupOptions) (*githubAppSetupResult, error) {
 	privateKeyPath := opts.PrivateKeyPath
 	if privateKeyPath == "" {
@@ -91,17 +93,35 @@ func runGitHubAppSetup(ctx context.Context, opts githubAppSetupOptions) (*github
 
 	logf := func(format string, args ...any) { fmt.Printf("[github-app] "+format+"\n", args...) }
 
+	// Review finding (PR #1731): RequiredPermissions must be set here, unlike
+	// the engine's own setUpGitHubAppAuth (which deliberately leaves it unset
+	// on its one Reconcile call to avoid a redundant GET /app/installations/{id}
+	// round trip on every startup/poll — VerifyGrants below covers it anyway).
+	// That reasoning doesn't transfer here: on the create path (opts.AppID == 0),
+	// this same field is what buildManifest uses to decide what permission set
+	// a freshly manifest-created App actually requests — leaving it unset falls
+	// back to PrueferRequiredPermissions() instead of the set VerifyGrants
+	// checks moments later, guaranteeing a freshly created App is missing
+	// organization_projects:write (and checks:read/statuses:read/webhooks:write)
+	// and fails its own R3 check immediately after creation. The trade-off this
+	// accepts — an extra soft verifyPinnedGrants round trip when the call ends
+	// up pinned (explicit --github-app-installation-id, or Call 2 below after
+	// discovery) — is a one-time cost for a one-shot setup command, not a
+	// per-poll cost like the engine's case, so correctness wins here.
+	required := engine.RequiredGitHubAppPermissions(opts.Webhooks)
+
 	baseOpts := githubauth.Options{
-		AppID:             opts.AppID,
-		AppInstallationID: opts.InstallationID,
-		AppPrivateKeyPath: privateKeyPath,
-		AppStatePath:      engine.GitHubAppStatePath("."),
-		WatchedRepos:      []string{opts.Owner + "/*"},
-		NoBrowser:         opts.NoBrowser,
-		BaseURL:           opts.BaseURL,
-		AppName:           engine.GitHubAppName,
-		AppHomepageURL:    engine.GitHubAppHomepageURL,
-		Logf:              logf,
+		AppID:               opts.AppID,
+		AppInstallationID:   opts.InstallationID,
+		AppPrivateKeyPath:   privateKeyPath,
+		AppStatePath:        engine.GitHubAppStatePath("."),
+		WatchedRepos:        []string{opts.Owner + "/*"},
+		NoBrowser:           opts.NoBrowser,
+		BaseURL:             opts.BaseURL,
+		AppName:             engine.GitHubAppName,
+		AppHomepageURL:      engine.GitHubAppHomepageURL,
+		RequiredPermissions: required,
+		Logf:                logf,
 	}
 
 	reconciler, err := githubauth.Reconcile(ctx, baseOpts)
@@ -153,7 +173,6 @@ func runGitHubAppSetup(ctx context.Context, opts githubAppSetupOptions) (*github
 		return nil, err
 	}
 
-	required := engine.RequiredGitHubAppPermissions(opts.Webhooks)
 	shortfalls, err := reconciler.VerifyGrants(required)
 	if err != nil {
 		return nil, fmt.Errorf("verifying GitHub App installation's granted permissions: %w", err)

@@ -127,10 +127,10 @@ func TestValidateGitHubAppConfig_PartialConfig_NamesEachMissingField(t *testing.
 }
 
 func TestRefuseGHESWithGitHubApp(t *testing.T) {
-	if err := refuseGHESWithGitHubApp(Config{}); err != nil {
-		t.Errorf("refuseGHESWithGitHubApp(no GHES) = %v, want nil", err)
+	if err := RefuseGHESWithGitHubApp(""); err != nil {
+		t.Errorf("RefuseGHESWithGitHubApp(no GHES) = %v, want nil", err)
 	}
-	err := refuseGHESWithGitHubApp(Config{GHESHost: "github.example.com"})
+	err := RefuseGHESWithGitHubApp("github.example.com")
 	if err == nil {
 		t.Fatal("expected an error refusing GHES + GitHub App auth combination")
 	}
