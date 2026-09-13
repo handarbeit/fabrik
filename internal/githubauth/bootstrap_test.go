@@ -4,15 +4,46 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+var manifestValueRe = regexp.MustCompile(`name="manifest" value="([^"]*)"`)
+
+// fetchStartAndExtractManifest fetches the /start page and extracts the
+// generated manifest JSON from its hidden form field, HTML-unescaping it
+// first (renderManifestForm uses html/template, which auto-escapes the
+// value attribute).
+func fetchStartAndExtractManifest(t *testing.T, startURL string) map[string]interface{} {
+	t.Helper()
+	resp, err := http.Get(startURL)
+	if err != nil {
+		t.Fatalf("GET %s: %v", startURL, err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading start page body: %v", err)
+	}
+	m := manifestValueRe.FindStringSubmatch(string(body))
+	if m == nil {
+		t.Fatalf("could not find manifest field in start page: %s", body)
+	}
+	var manifest map[string]interface{}
+	if err := json.Unmarshal([]byte(html.UnescapeString(m[1])), &manifest); err != nil {
+		t.Fatalf("unmarshaling manifest JSON: %v", err)
+	}
+	return manifest
+}
 
 type manifestFlowResult struct {
 	creds Credentials
@@ -99,6 +130,89 @@ func TestRunManifestFlow_HappyPath(t *testing.T) {
 	}
 	if want := privateKeyFingerprint(pemOnDisk); stateOnDisk.PrivateKeyFingerprint != want {
 		t.Errorf("persisted PrivateKeyFingerprint = %q, want %q (fingerprint of the persisted PEM)", stateOnDisk.PrivateKeyFingerprint, want)
+	}
+}
+
+// TestRunManifestFlow_NonDefaultOptionsReachManifest is the AC1 regression
+// test for #1712 at the RunManifestFlow layer (manifest_test.go covers
+// buildManifest directly): a caller (e.g. the engine) supplying non-default
+// AppName, AppHomepageURL and RequiredPermissions on ManifestFlowOptions
+// must see the generated manifest — the one actually served to the browser
+// at /start — reflect those values, not Pruefer's defaults.
+func TestRunManifestFlow_NonDefaultOptionsReachManifest(t *testing.T) {
+	dir := t.TempDir()
+	pemPath := filepath.Join(dir, "app-private-key.pem")
+	statePath := filepath.Join(dir, "app-state.json")
+
+	srv := newManifestExchangeServer(t, 4242, "fabrik-engine-app")
+	defer srv.Close()
+
+	oldBrowser := openBrowser
+	defer func() { openBrowser = oldBrowser }()
+	browserOpened := make(chan string, 1)
+	openBrowser = func(url string) error {
+		browserOpened <- url
+		return nil
+	}
+
+	wantPerms := map[string]string{
+		"metadata":              "read",
+		"contents":              "write",
+		"organization_projects": "write",
+	}
+
+	resultCh := make(chan manifestFlowResult, 1)
+	go func() {
+		creds, err := RunManifestFlow(context.Background(), ManifestFlowOptions{
+			BaseURL: srv.URL, PrivateKeyPath: pemPath, AppStatePath: statePath,
+			AppName: "fabrik-engine", AppHomepageURL: "https://example.com/fabrik",
+			RequiredPermissions: wantPerms,
+		})
+		resultCh <- manifestFlowResult{creds, err}
+	}()
+
+	var startURL string
+	select {
+	case startURL = <-browserOpened:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for browser open")
+	}
+
+	manifest := fetchStartAndExtractManifest(t, startURL)
+	if manifest["name"] != "fabrik-engine" {
+		t.Errorf(`manifest["name"] = %v, want "fabrik-engine"`, manifest["name"])
+	}
+	if manifest["url"] != "https://example.com/fabrik" {
+		t.Errorf(`manifest["url"] = %v, want "https://example.com/fabrik"`, manifest["url"])
+	}
+	perms, ok := manifest["default_permissions"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected default_permissions to be present")
+	}
+	if len(perms) != len(wantPerms) {
+		t.Fatalf("default_permissions = %+v, want %+v", perms, wantPerms)
+	}
+	for k, v := range wantPerms {
+		if perms[k] != v {
+			t.Errorf("default_permissions[%q] = %v, want %q", k, perms[k], v)
+		}
+	}
+
+	state := fetchStartAndExtractState(t, startURL)
+	callbackURL := strings.TrimSuffix(startURL, "/start") + "/callback?state=" + state + "&code=abc123"
+	resp, err := http.Get(callbackURL)
+	if err != nil {
+		t.Fatalf("GET callback: %v", err)
+	}
+	resp.Body.Close()
+
+	select {
+	case res := <-resultCh:
+		if res.err != nil {
+			t.Fatalf("RunManifestFlow: %v", res.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for RunManifestFlow to return")
 	}
 }
 
