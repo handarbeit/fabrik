@@ -2007,6 +2007,87 @@ func TestReconcile_NoWatchedRepos_DerivesFromInstallations(t *testing.T) {
 	}
 }
 
+// TestReconcile_PinnedInstallation_GrantVerificationLogsShortfallAtStartup
+// is #1709's AC2/AC3 regression test: starting Reconcile against a pinned
+// installation whose granted permissions are narrower than
+// RequiredPermissions must produce an explicit, named log line — not a
+// silent success indistinguishable from a fully-granted installation — and
+// it must be driven by the installation's own granted permissions
+// (GET /app/installations/{id}), not GET /app's requested ones (which this
+// fake server doesn't even populate with "issues", guarding against the
+// check accidentally reading the wrong endpoint and passing for the wrong
+// reason).
+func TestReconcile_PinnedInstallation_GrantVerificationLogsShortfallAtStartup(t *testing.T) {
+	oldFlow := runManifestFlow
+	runManifestFlow = failingRunManifestFlow(t)
+	defer func() { runManifestFlow = oldFlow }()
+
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	srv, _ := newFakeAppServer("pruefer-bot", []gh.AppInstallation{
+		{ID: 999, Account: "handarbeit", Permissions: map[string]string{
+			"metadata": "read", "pull_requests": "write", "contents": "read", "issues": "read",
+		}},
+	}, func() time.Time { return time.Now().Add(time.Hour) })
+	defer srv.Close()
+
+	var logged []string
+	_, err := Reconcile(context.Background(), Options{
+		AppID: 42, AppPrivateKeyPath: keyPath, AppInstallationID: 999,
+		AppStatePath:        filepath.Join(dir, "app-state.json"),
+		WatchedRepos:        []string{"handarbeit/fabrik"},
+		BaseURL:             srv.URL,
+		RequiredPermissions: PrueferRequiredPermissions(),
+		Logf:                func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) },
+	})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	found := false
+	for _, l := range logged {
+		if strings.Contains(l, "999") && strings.Contains(l, "issues") && strings.Contains(l, "\"write\"") && strings.Contains(l, "\"read\"") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a shortfall log line naming installation 999's insufficient issues permission at Reconcile/startup time, got %v", logged)
+	}
+}
+
+// TestReconcile_PinnedInstallation_GrantVerificationSilentWhenSatisfied is
+// the negative of the test above: a pinned installation that already meets
+// every required permission must produce no shortfall log line.
+func TestReconcile_PinnedInstallation_GrantVerificationSilentWhenSatisfied(t *testing.T) {
+	oldFlow := runManifestFlow
+	runManifestFlow = failingRunManifestFlow(t)
+	defer func() { runManifestFlow = oldFlow }()
+
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	srv, _ := newFakeAppServer("pruefer-bot", []gh.AppInstallation{
+		{ID: 999, Account: "handarbeit", Permissions: PrueferRequiredPermissions()},
+	}, func() time.Time { return time.Now().Add(time.Hour) })
+	defer srv.Close()
+
+	var logged []string
+	_, err := Reconcile(context.Background(), Options{
+		AppID: 42, AppPrivateKeyPath: keyPath, AppInstallationID: 999,
+		AppStatePath:        filepath.Join(dir, "app-state.json"),
+		WatchedRepos:        []string{"handarbeit/fabrik"},
+		BaseURL:             srv.URL,
+		RequiredPermissions: PrueferRequiredPermissions(),
+		Logf:                func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) },
+	})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	for _, l := range logged {
+		if strings.Contains(l, "is granted") {
+			t.Errorf("expected no shortfall log line when every requirement is met, got: %q", l)
+		}
+	}
+}
+
 // TestReconcile_InitialDiscovery_DoesNotDoubleStartRefreshLoops is the
 // regression test for a review finding: Derive's own mint+commit path
 // (invoked internally by Reconcile's non-pinned discovery) used to start a
