@@ -296,6 +296,31 @@ func runInit(args []string) error {
 	if *createBoard && *repoFlag == "" {
 		return fmt.Errorf("init: --create-board requires --repo")
 	}
+	if *createBoard && !*force {
+		// R1 review finding (PR #1718): without this guard, a repo that's
+		// already onboarded (owner/project already set) would still create a
+		// brand-new GitHub Project — and then either silently skip writing it
+		// into .fabrik/config.yaml (writeConfigTemplate's own no-op-without
+		// --force below leaves the new board dangling, pointed at only by a
+		// stdout line) or, on a second run, create a second, separate board.
+		// Refuse before any network call fires; --force opts into overwriting
+		// the existing config with the new board's details.
+		existing, err := config.LoadProjectConfig()
+		if err != nil {
+			return err
+		}
+		if existing.Owner != "" || existing.ProjectNum != nil {
+			projectDesc := "unset"
+			if existing.ProjectNum != nil {
+				projectDesc = strconv.Itoa(*existing.ProjectNum)
+			}
+			return fmt.Errorf("init: --create-board refused — .fabrik/config.yaml already configures owner=%q project=%s; "+
+				"creating a new board here would either be silently discarded (config left pointing at the old board) or, "+
+				"on a repeat run, create yet another duplicate board; pass --force to create the new board and overwrite "+
+				"the existing config with it, or drop --create-board and edit .fabrik/config.yaml by hand to link an "+
+				"existing board instead", existing.Owner, projectDesc)
+		}
+	}
 
 	// Resolve GHES host from flag > FABRIK_GHES_HOST env var. No config.yaml
 	// fallback — it doesn't exist yet at init time — so a zero-value

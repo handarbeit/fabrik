@@ -379,6 +379,87 @@ func TestRunInit_CreateBoardFlagValidation(t *testing.T) {
 	}
 }
 
+// TestRunInit_CreateBoardRefusedWhenAlreadyConfigured is the regression test
+// for the review finding on PR #1718: without a pre-flight check,
+// --create-board would create a brand-new GitHub Project even when
+// .fabrik/config.yaml already points at one, then either silently skip
+// writing the new board's details (writeConfigTemplate's own
+// no-op-without-force) or, on a repeat run, create yet another duplicate
+// board. The refusal must fire before any network call — this test supplies
+// no token and no reachable GitHub client, so a network attempt would fail
+// with a different, token-related error rather than the refusal message.
+func TestRunInit_CreateBoardRefusedWhenAlreadyConfigured(t *testing.T) {
+	dir := t.TempDir()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(orig) //nolint
+
+	if err := os.MkdirAll(".fabrik", 0755); err != nil {
+		t.Fatal(err)
+	}
+	existing := "owner: acme\nproject: 5\n"
+	if err := os.WriteFile(".fabrik/config.yaml", []byte(existing), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	err = runInit([]string{"--create-board", "--owner", "acme", "--repo", "widgets"})
+	if err == nil {
+		t.Fatal("expected --create-board to be refused when .fabrik/config.yaml is already configured, got nil")
+	}
+	if !strings.Contains(err.Error(), "already configures") {
+		t.Errorf("error %q does not explain the refusal", err.Error())
+	}
+
+	got, readErr := os.ReadFile(".fabrik/config.yaml")
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != existing {
+		t.Errorf("existing config.yaml was modified despite the refusal; want %q, got %q", existing, string(got))
+	}
+}
+
+// TestRunInit_CreateBoardForceOverridesAlreadyConfiguredRefusal confirms
+// --force opts back into the pre-#1718-review behavior: the refusal above is
+// bypassed and --create-board proceeds (immediately hitting the
+// token-loading step here, since no real GitHub credentials are available in
+// this test — proving the guard, not the full create flow, is what --force
+// disables).
+func TestRunInit_CreateBoardForceOverridesAlreadyConfiguredRefusal(t *testing.T) {
+	dir := t.TempDir()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(orig) //nolint
+
+	t.Setenv("FABRIK_TOKEN", "")
+	t.Setenv("GITHUB_TOKEN", "")
+
+	if err := os.MkdirAll(".fabrik", 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(".fabrik/config.yaml", []byte("owner: acme\nproject: 5\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	err = runInit([]string{"--force", "--create-board", "--owner", "acme", "--repo", "widgets"})
+	if err == nil {
+		t.Fatal("expected an error (no GitHub token available in test), got nil")
+	}
+	if strings.Contains(err.Error(), "already configures") {
+		t.Errorf("--force should have bypassed the already-configured refusal, got: %v", err)
+	}
+}
+
 func TestParseProjectURL(t *testing.T) {
 	cases := []struct {
 		rawURL        string
