@@ -307,6 +307,126 @@ func childFooter(parentOwner, parentRepo string, parentNumber int) string {
 		parentOwner, parentRepo, parentNumber)
 }
 
+// spawnChildLabelPrefix is the durable per-child resume marker spawnChildren
+// writes on the PARENT issue immediately after each child issue is created
+// (before any of the per-child steps that follow CreateIssue), encoding
+// blockIndex:childNumber. It is the only restart-surviving record of "this
+// block's child already exists" — itemstate.Store is in-memory only — so a
+// retried spawn (whether from an operator removing fabrik:paused, or an
+// engine restart) can recognize and reuse an already-created child instead
+// of creating a duplicate with the same title. See ADR-1583.
+const spawnChildLabelPrefix = "fabrik:spawned-child:"
+
+// spawnChildLabelRE matches a well-formed spawnChildLabelPrefix marker,
+// capturing the 1-based block index and the created child's issue number.
+var spawnChildLabelRE = regexp.MustCompile(`^` + regexp.QuoteMeta(spawnChildLabelPrefix) + `(\d+):(\d+)$`)
+
+// spawnChildLabel formats the durable resume marker recording that
+// blockIndex's child issue was created as childNumber. blockIndex is
+// 1-based, matching the existing DEPENDS_ON convention — the owner/repo is
+// deliberately not encoded: it is always re-derivable from
+// blocks[blockIndex-1].Repo, which is itself deterministically reparsed from
+// the same immutable Plan comment (or mid-flight output) on every retry,
+// keeping the label well clear of GitHub's 50-char label-name limit
+// regardless of repo name length (see TestSpawnChildLabelLength).
+func spawnChildLabel(blockIndex, childNumber int) string {
+	return fmt.Sprintf("%s%d:%d", spawnChildLabelPrefix, blockIndex, childNumber)
+}
+
+// parseSpawnChildLabels extracts every spawnChildLabelPrefix marker present
+// in labels into a 1-based blockIndex -> childNumber map — recovering
+// exactly which children (if any) a previous, interrupted spawnChildren
+// attempt already created for this parent.
+func parseSpawnChildLabels(labels []string) map[int]int {
+	out := make(map[int]int)
+	for _, l := range labels {
+		m := spawnChildLabelRE.FindStringSubmatch(l)
+		if m == nil {
+			continue
+		}
+		idx, err := strconv.Atoi(m[1])
+		if err != nil {
+			continue
+		}
+		num, err := strconv.Atoi(m[2])
+		if err != nil {
+			continue
+		}
+		out[idx] = num
+	}
+	return out
+}
+
+// blockedByContainsChild reports whether deps (typically the parent item's
+// own BlockedBy) already contains an edge to childOwner/childRepo#childNumber.
+// It resolves gh.Dependency's "Repo == \"\" means same repo as the issue the
+// list belongs to" convention against parentOwner/parentRepo, since deps here
+// always belongs to the parent issue.
+func blockedByContainsChild(deps []gh.Dependency, parentOwner, parentRepo, childOwner, childRepo string, childNumber int) bool {
+	for _, d := range deps {
+		if d.Number != childNumber {
+			continue
+		}
+		depOwner, depRepo := parentOwner, parentRepo
+		if d.Repo != "" {
+			o, r, ok := parseOwnerRepoStr(d.Repo)
+			if !ok {
+				continue
+			}
+			depOwner, depRepo = o, r
+		}
+		if depOwner == childOwner && depRepo == childRepo {
+			return true
+		}
+	}
+	return false
+}
+
+// refreshForSpawnResume re-reads item live via FetchItemDetails so a resumed
+// spawnChildren call (alreadyCreated non-empty) sees item.BlockedBy fresh
+// rather than trusting a possibly-stale snapshot — BlockedBy is a "deep
+// field" not populated by the bulk board fetch, mirroring
+// recoverMissingPlanComment's identical reasoning for the Plan comment. Only
+// called when resuming; a fresh (never-before-attempted) spawn never pays
+// this cost.
+//
+// A per-item cooldown throttles repeated live-read attempts during a
+// sustained failure window, mirroring recoverMissingPlanComment's own
+// cooldown. On an active cooldown or a live-read failure, returns
+// errPreImplementDeferred without pausing the parent — a transient read
+// failure defers to the next poll exactly like recoverMissingPlanComment
+// already does, rather than escalating to a hard pause.
+func (e *Engine) refreshForSpawnResume(item *gh.ProjectItem) error {
+	const cooldownReason = "spawn-resume-deferred"
+
+	if snap, err := e.store.Get(item.Repo, item.Number); err == nil {
+		if cooldown := snap.CooldownAt(cooldownReason); !cooldown.IsZero() && e.now().Before(cooldown) {
+			e.logf(item.Number, "spawn", "resume: spawn-resume cooldown active — deferring without a live re-read\n")
+			return errPreImplementDeferred
+		}
+	}
+
+	if err := e.client.FetchItemDetails(item); err != nil {
+		e.logf(item.Number, "spawn", "resume: live re-read failed (%v) — deferring to next poll\n", err)
+		e.store.Apply(itemstate.CooldownRecorded{
+			Repo:   item.Repo,
+			Number: item.Number,
+			Reason: cooldownReason,
+			Until:  e.now().Add(time.Duration(e.cfg.PollSeconds*10) * time.Second),
+		})
+		return errPreImplementDeferred
+	}
+	return nil
+}
+
+// spawnRetryInstruction is the shared recovery instruction appended to every
+// per-child spawn-failure pause message (CreateIssue, AddProjectV2ItemById,
+// AddBlockedByIssue, and the sibling DEPENDS_ON wiring pass). Replaces the
+// pre-ADR-1583 "manually close any orphaned children" instruction, which is
+// no longer accurate: already-created children are now durably tracked
+// (spawnChildLabelPrefix) and reused automatically on retry, not orphaned.
+const spawnRetryInstruction = "Remove `fabrik:paused`, then re-advance to retry — Fabrik tracks already-created children and will resume from where the previous attempt stopped, rather than re-creating them."
+
 // resolveSpecifyOptionID returns the project Status option ID for the "Specify"
 // column, or the first non-unmanaged, non-terminal column as a fallback. Returns
 // "" when no suitable option exists or sf is nil (caller skips the status-set).
@@ -541,63 +661,133 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 	sf := e.statusField
 	e.mu.Unlock()
 
+	// Resume support (ADR-1583): recover which blocks (if any) already had
+	// their child created by a previous, interrupted attempt — the only
+	// durable, restart-surviving record of that fact. When non-empty, refresh
+	// item live first: BlockedBy is a "deep field" the bulk board fetch never
+	// populates, and the per-child loop below needs it fresh to tell whether
+	// an already-created child was also already linked. A live-read failure
+	// or active cooldown defers to the next poll without pausing the parent.
+	alreadyCreated := parseSpawnChildLabels(item.Labels)
+	if len(alreadyCreated) > 0 {
+		if err := e.refreshForSpawnResume(&item); err != nil {
+			return nil, false, err
+		}
+		alreadyCreated = parseSpawnChildLabels(item.Labels)
+	}
+
 	// Spawn children in order, retaining the block-index -> child node-ID
 	// mapping so the sibling-wiring pass below can resolve DEPENDS_ON
 	// references after all children exist.
 	var spawned []string
 	childNodeIDs := make([]string, len(blocks))
+	childNumbers := make([]int, len(blocks))
 	for i, block := range blocks {
+		blockIndex := i + 1
 		childOwner, childRepo, ok := parseOwnerRepoStr(block.Repo)
 		if !ok {
 			msg := fmt.Sprintf("🏭 **Fabrik — spawn failed**\n\nInvalid repo in spawn block #%d: `%s`. Created so far: %s\n\nRemove `fabrik:paused` after fixing the output to retry.",
-				i+1, block.Repo, formatSpawnedList(spawned))
+				blockIndex, block.Repo, formatSpawnedList(spawned))
 			e.pauseIssue(item, msg, pauseOpts{
 				labelEcho: true,
 			})
-			return spawned, false, fmt.Errorf("spawn: invalid repo %q in block %d", block.Repo, i+1)
+			return spawned, false, fmt.Errorf("spawn: invalid repo %q in block %d", block.Repo, blockIndex)
 		}
 
-		// Every spawned child is assigned to cfg.User — the user of the
-		// instance meant to process it (requirement 4). Folded into the same
-		// CreateIssue POST rather than a separate call, so a bad/misconfigured
-		// user still fails loud through this single, already-fail-loud path.
-		fullBody := block.Body + childFooter(owner, repo, item.Number)
-		childNumber, childNodeID, err := e.client.CreateIssue(childOwner, childRepo, block.Title, fullBody, []string{e.cfg.User})
-		if err != nil {
-			msg := fmt.Sprintf("🏭 **Fabrik — spawn failed**\n\nFailed to create child issue %d/%d in `%s`: `%v`\n\nCreated so far: %s\n\nManually close any orphaned children, remove `fabrik:paused`, then re-advance to retry.",
-				i+1, len(blocks), block.Repo, err, formatSpawnedList(spawned))
-			e.pauseIssue(item, msg, pauseOpts{
-				labelEcho: true,
-			})
-			return spawned, false, fmt.Errorf("spawn: creating child %d: %w", i+1, err)
+		resuming := false
+		var childNumber int
+		var childNodeID string
+		if n, ok := alreadyCreated[blockIndex]; ok {
+			// This block's child was already created by a previous attempt —
+			// resolve its node ID instead of creating a duplicate.
+			resuming = true
+			childNumber = n
+			pi, err := e.client.FetchProjectItem(childOwner, childRepo, childNumber)
+			if err != nil || pi == nil || pi.ID == "" {
+				msg := fmt.Sprintf("🏭 **Fabrik — spawn failed**\n\nPreviously created child `%s#%d` (spawn block #%d) could not be found: `%v`. It may have been deleted.\n\nCreated so far: %s\n\nIf the child was deleted, remove the `%s` label to force re-creation of this one block, then remove `fabrik:paused` and re-advance to retry. Otherwise this may be a transient error — try removing `fabrik:paused` again.",
+					block.Repo, childNumber, blockIndex, err, formatSpawnedList(spawned), spawnChildLabel(blockIndex, childNumber))
+				e.pauseIssue(item, msg, pauseOpts{
+					labelEcho: true,
+				})
+				return spawned, false, fmt.Errorf("spawn: resuming block %d (child %s#%d): %w", blockIndex, block.Repo, childNumber, err)
+			}
+			childNodeID = pi.ID
+			e.logf(item.Number, "spawn", "resuming block %d: child %s/%s#%d already created\n", blockIndex, childOwner, childRepo, childNumber)
+		} else {
+			// Every spawned child is assigned to cfg.User — the user of the
+			// instance meant to process it (requirement 4). Folded into the same
+			// CreateIssue POST rather than a separate call, so a bad/misconfigured
+			// user still fails loud through this single, already-fail-loud path.
+			fullBody := block.Body + childFooter(owner, repo, item.Number)
+			n, nodeID, err := e.client.CreateIssue(childOwner, childRepo, block.Title, fullBody, []string{e.cfg.User})
+			if err != nil {
+				msg := fmt.Sprintf("🏭 **Fabrik — spawn failed**\n\nFailed to create child issue %d/%d in `%s`: `%v`\n\nCreated so far: %s\n\n%s",
+					blockIndex, len(blocks), block.Repo, err, formatSpawnedList(spawned), spawnRetryInstruction)
+				e.pauseIssue(item, msg, pauseOpts{
+					labelEcho: true,
+				})
+				return spawned, false, fmt.Errorf("spawn: creating child %d: %w", blockIndex, err)
+			}
+			childNumber, childNodeID = n, nodeID
+			e.logf(item.Number, "spawn", "created child %s/%s#%d\n", childOwner, childRepo, childNumber)
+
+			// Durable resume marker: best-effort (addLabelChecked's error is
+			// logged, not fatal). A dropped write only regresses this one
+			// child to the pre-ADR-1583 behavior if a later step in this same
+			// attempt also fails — strictly narrower than the bug being fixed.
+			if lerr := e.addLabelChecked(item, spawnChildLabel(blockIndex, childNumber)); lerr != nil {
+				e.logf(item.Number, "warn", "could not write spawn resume marker for block %d (child %s#%d): %v — a later failure in this attempt could duplicate this child on retry\n", blockIndex, block.Repo, childNumber, lerr)
+			}
 		}
-		e.logf(item.Number, "spawn", "created child %s/%s#%d\n", childOwner, childRepo, childNumber)
 		spawned = append(spawned, fmt.Sprintf("%s#%d", block.Repo, childNumber))
 		childNodeIDs[i] = childNodeID
+		childNumbers[i] = childNumber
 
-		// Add child to the project board.
-		childItemID, err := e.client.AddProjectV2ItemById(board.ProjectID, childNodeID)
-		if err != nil {
-			msg := fmt.Sprintf("🏭 **Fabrik — spawn failed**\n\nFailed to add child %s/%s#%d to project board: `%v`\n\nCreated so far: %s\n\nManually close any orphaned children, remove `fabrik:paused`, then re-advance to retry.",
-				childOwner, childRepo, childNumber, err, formatSpawnedList(spawned))
-			e.pauseIssue(item, msg, pauseOpts{
-				labelEcho: true,
-			})
-			return spawned, false, fmt.Errorf("spawn: adding child %s#%d to project: %w", block.Repo, childNumber, err)
+		// Add child to the project board. When resuming, check first rather
+		// than assume AddProjectV2ItemById is safe to call twice (unconfirmed
+		// against real GitHub — see ADR-1583); a fresh child takes the
+		// unchanged direct-call path. existingStatus, when known, also gates
+		// the placement step below.
+		var childItemID, existingStatus string
+		addedAlready := false
+		if resuming {
+			id, status, lerr := e.client.LookupIssueProjectItem(board.ProjectID, block.Repo, childNumber)
+			if lerr != nil {
+				e.logf(item.Number, "warn", "spawn resume: could not check existing board membership for %s#%d: %v — attempting AddProjectV2ItemById anyway\n", block.Repo, childNumber, lerr)
+			} else if id != "" {
+				childItemID, existingStatus, addedAlready = id, status, true
+			}
+		}
+		if !addedAlready {
+			id, err := e.client.AddProjectV2ItemById(board.ProjectID, childNodeID)
+			if err != nil {
+				msg := fmt.Sprintf("🏭 **Fabrik — spawn failed**\n\nFailed to add child %s/%s#%d to project board: `%v`\n\nCreated so far: %s\n\n%s",
+					childOwner, childRepo, childNumber, err, formatSpawnedList(spawned), spawnRetryInstruction)
+				e.pauseIssue(item, msg, pauseOpts{
+					labelEcho: true,
+				})
+				return spawned, false, fmt.Errorf("spawn: adding child %s#%d to project: %w", block.Repo, childNumber, err)
+			}
+			childItemID = id
 		}
 
-		// Link child as a blockedBy dependency of the parent.
+		// Link child as a blockedBy dependency of the parent. When resuming,
+		// check item's (freshly refreshed) BlockedBy first, for the same
+		// unconfirmed-idempotency reason as the board-add above.
 		// item.ID is the parent issue's GraphQL node ID.
-		if err := e.client.AddBlockedByIssue(item.ID, childNodeID); err != nil {
-			msg := fmt.Sprintf("🏭 **Fabrik — spawn failed**\n\nFailed to link child %s/%s#%d as blocked-by of parent: `%v`\n\nCreated so far: %s\n\nManually close any orphaned children, remove `fabrik:paused`, then re-advance to retry.",
-				childOwner, childRepo, childNumber, err, formatSpawnedList(spawned))
-			e.pauseIssue(item, msg, pauseOpts{
-				labelEcho: true,
-			})
-			return spawned, false, fmt.Errorf("spawn: linking child %s#%d as blocked-by: %w", block.Repo, childNumber, err)
+		alreadyLinked := resuming && blockedByContainsChild(item.BlockedBy, owner, repo, childOwner, childRepo, childNumber)
+		if !alreadyLinked {
+			if err := e.client.AddBlockedByIssue(item.ID, childNodeID); err != nil {
+				msg := fmt.Sprintf("🏭 **Fabrik — spawn failed**\n\nFailed to link child %s/%s#%d as blocked-by of parent: `%v`\n\nCreated so far: %s\n\n%s",
+					childOwner, childRepo, childNumber, err, formatSpawnedList(spawned), spawnRetryInstruction)
+				e.pauseIssue(item, msg, pauseOpts{
+					labelEcho: true,
+				})
+				return spawned, false, fmt.Errorf("spawn: linking child %s#%d as blocked-by: %w", block.Repo, childNumber, err)
+			}
 		}
 
-		// Apply fabrik:sub-issue label to child (for human-visible filtering; no engine semantics).
+		// Apply fabrik:sub-issue label to child (idempotent add; for human-visible filtering; no engine semantics).
 		if err := e.client.AddLabelToIssue(childOwner, childRepo, childNumber, "fabrik:sub-issue"); err != nil {
 			e.logf(item.Number, "warn", "could not add fabrik:sub-issue to %s#%d: %v\n", block.Repo, childNumber, err)
 		}
@@ -609,7 +799,15 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 		// so ordinary dispatch (itemMayNeedWork/itemNeedsWork) would never revisit it.
 		// recordChildPlacementFailure writes a durable marker so the settle scan in
 		// poll.go retries the placement independent of stage dispatch (see spawn_settle.go).
-		if optionID := resolveSpecifyOptionID(sf, e.cfg.Stages); optionID != "" {
+		//
+		// When resuming a child that already carries a non-empty Status,
+		// placement is skipped entirely rather than re-run: the child may
+		// have already progressed past Specify under its own pipeline while
+		// the parent sat paused, and blindly re-setting its column would
+		// clobber that real progress (ADR-1583).
+		if resuming && existingStatus != "" {
+			e.logf(item.Number, "spawn", "resume: %s#%d already has project status %q — leaving placement alone\n", block.Repo, childNumber, existingStatus)
+		} else if optionID := resolveSpecifyOptionID(sf, e.cfg.Stages); optionID != "" {
 			if err := e.client.UpdateProjectItemStatus(board.ProjectID, childItemID, sf.FieldID, optionID); err != nil {
 				e.logf(item.Number, "warn", "could not set project status on %s#%d: %v\n", block.Repo, childNumber, err)
 				e.recordChildPlacementFailure(childOwner, childRepo, childNumber)
@@ -622,7 +820,7 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 			e.recordChildPlacementFailure(childOwner, childRepo, childNumber)
 		}
 
-		// Inherit fabrik:yolo and fabrik:cruise from parent (enables autonomous child pipeline).
+		// Inherit fabrik:yolo and fabrik:cruise from parent (idempotent add; enables autonomous child pipeline).
 		if hasLabel(item.Labels, "fabrik:yolo") {
 			if err := e.client.AddLabelToIssue(childOwner, childRepo, childNumber, "fabrik:yolo"); err != nil {
 				e.logf(item.Number, "warn", "could not add fabrik:yolo to %s#%d: %v\n", block.Repo, childNumber, err)
@@ -645,8 +843,8 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 		}
 		blockerIdx := block.DependsOn - 1
 		if err := e.client.AddBlockedByIssue(childNodeIDs[i], childNodeIDs[blockerIdx]); err != nil {
-			msg := fmt.Sprintf("🏭 **Fabrik — spawn failed**\n\nFailed to link sibling dependency for spawn block #%d (DEPENDS_ON: %d): `%v`\n\nCreated so far: %s\n\nManually close any orphaned children, remove `fabrik:paused`, then re-advance to retry.",
-				i+1, block.DependsOn, err, formatSpawnedList(spawned))
+			msg := fmt.Sprintf("🏭 **Fabrik — spawn failed**\n\nFailed to link sibling dependency for spawn block #%d (DEPENDS_ON: %d): `%v`\n\nCreated so far: %s\n\n%s",
+				i+1, block.DependsOn, err, formatSpawnedList(spawned), spawnRetryInstruction)
 			e.pauseIssue(item, msg, pauseOpts{
 				labelEcho: true,
 			})
@@ -655,11 +853,23 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 		e.logf(item.Number, "spawn", "linked sibling dependency: block %d depends on block %d\n", i+1, block.DependsOn)
 	}
 
-	// All children spawned and sibling dependencies wired — mark parent with
-	// idempotency guard. This must come after the sibling-wiring pass so the
-	// guard covers the full two-phase operation: a wiring failure retries
-	// from scratch on the next attempt, consistent with the existing
-	// "v1 does not skip already-created children on retry" behavior.
+	// All children spawned and sibling dependencies wired — remove the
+	// per-child resume markers (steady state carries none of them; they only
+	// exist transiently during an interrupted/in-progress spawn) before
+	// marking the parent with the idempotency guard, so a poll racing this
+	// exact instant never observes fabrik:children-spawned alongside a
+	// stale marker. Both are best-effort: a dropped removal here is
+	// harmless clutter, not a correctness issue (parseSpawnChildLabels is
+	// only ever consulted before fabrik:children-spawned is set — see
+	// preImplement's idempotency-guard-first check).
+	for i := range blocks {
+		e.removeLabel(item, spawnChildLabel(i+1, childNumbers[i]))
+	}
+
+	// Mark parent with idempotency guard. This must come after the
+	// sibling-wiring pass so the guard covers the full two-phase operation: a
+	// wiring failure retries (now resuming every already-created child rather
+	// than duplicating them) on the next attempt.
 	// No webhook echo here — preserving prior behavior (never echoed at this site).
 	e.applyLabelAdd(item, "fabrik:children-spawned", false)
 

@@ -74,6 +74,7 @@ type mockGitHubClient struct {
 	fetchIssueFn                  func(owner, repo string, issueNumber int) (*gh.IssueData, error)
 	createPRFn                    func(owner, repo, title, head, base, body string) (int, error)
 	listPRsFn                     func(owner, repo string) ([]gh.PRDetails, error)
+	fetchProjectItemFn            func(owner, repo string, issueNumber int) (*gh.ProjectItem, error)
 
 	// Track call counts for FetchProjectItemStatus
 	fetchProjectItemStatusCalls []string
@@ -83,6 +84,9 @@ type mockGitHubClient struct {
 
 	// Track calls for LookupIssueProjectItem
 	lookupIssueProjectItemCalls []lookupIssueProjectItemCall
+
+	// Track calls for FetchProjectItem
+	fetchProjectItemCalls []fetchProjectItemCall
 
 	// Track calls for FetchLabelAppliedAt
 	fetchLabelAppliedAtCalls []fetchLabelAppliedAtCall
@@ -139,6 +143,11 @@ type reviewRequestCall struct {
 type lookupIssueProjectItemCall struct {
 	projectID   string
 	repo        string
+	issueNumber int
+}
+
+type fetchProjectItemCall struct {
+	owner, repo string
 	issueNumber int
 }
 
@@ -706,6 +715,13 @@ func (m *mockGitHubClient) FetchPRsForSHA(owner, repo, sha string) ([]int, error
 }
 
 func (m *mockGitHubClient) FetchProjectItem(owner, repo string, issueNumber int) (*gh.ProjectItem, error) {
+	m.mu.Lock()
+	m.fetchProjectItemCalls = append(m.fetchProjectItemCalls, fetchProjectItemCall{owner, repo, issueNumber})
+	fn := m.fetchProjectItemFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(owner, repo, issueNumber)
+	}
 	return nil, nil
 }
 
