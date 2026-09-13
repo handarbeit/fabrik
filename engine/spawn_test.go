@@ -2423,6 +2423,63 @@ FABRIK_SPAWN_CHILD_END
 	}
 }
 
+// TestSpawnChildren_Resume_TruncatedShallowLabels_StillLiveRefreshes covers a
+// gap found in review of PR #1708: the shallow board-fetch caps labels at 30
+// (github/project.go), so a parent with that many (or more) labels could have
+// its fabrik:spawned-child:* marker truncated out of the snapshot passed into
+// spawnChildren. Before the fix, parseSpawnChildLabels would then find
+// nothing, the live refresh (which reads the full, authoritative label set)
+// would never fire, and the block would silently take the fresh-CreateIssue
+// path — reproducing the exact duplicate-child bug this function exists to
+// fix. This pins the fix: hitting the shallowFetchLabelLimit forces a live
+// refresh even when zero markers were found in the shallow snapshot.
+func TestSpawnChildren_Resume_TruncatedShallowLabels_StillLiveRefreshes(t *testing.T) {
+	markerLabel := spawnChildLabel(1, 101)
+	var fetchItemDetailsCalls int
+	client := &mockGitHubClient{
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			fetchItemDetailsCalls++
+			// Simulate the authoritative, fully-paginated re-read recovering
+			// the marker the shallow snapshot had truncated out of view.
+			item.Labels = append(item.Labels, markerLabel)
+			return nil
+		},
+		fetchProjectItemFn: func(owner, repo string, issueNumber int) (*gh.ProjectItem, error) {
+			return &gh.ProjectItem{ID: "I_child1", Number: issueNumber, Repo: owner + "/" + repo}, nil
+		},
+		createIssueFn: func(owner, repo, title, body string, assignees []string) (int, string, error) {
+			t.Fatal("CreateIssue must not be called — the marker exists, just past the shallow-fetch cap")
+			return 0, "", nil
+		},
+	}
+	eng := spawnTestEngine(t, client)
+
+	item := planItemWithBlocks(`
+FABRIK_SPAWN_CHILD_BEGIN owner/child
+TITLE: Child one
+Body one.
+FABRIK_SPAWN_CHILD_END
+`)
+	// Pad to exactly shallowFetchLabelLimit entries, none of which is the
+	// real marker — standing in for the shallow fetch's "labels(first: 30)"
+	// cap having cut the marker off before it was returned.
+	for len(item.Labels) < shallowFetchLabelLimit {
+		item.Labels = append(item.Labels, fmt.Sprintf("filler-label-%d", len(item.Labels)))
+	}
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	spawned, err := eng.preImplement(context.Background(), board, item)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !spawned {
+		t.Fatal("expected spawned=true")
+	}
+	if fetchItemDetailsCalls != 1 {
+		t.Errorf("expected exactly 1 live refresh triggered by the at-cap label count, got %d", fetchItemDetailsCalls)
+	}
+}
+
 // ---- #1263 regression: prose mentions must not destroy real blocks ----
 
 // TestParseSpawnBlocks_ProseMentionDoesNotConsumeRealBlock reproduces the

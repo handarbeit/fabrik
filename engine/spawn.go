@@ -333,6 +333,17 @@ func spawnChildLabel(blockIndex, childNumber int) string {
 	return fmt.Sprintf("%s%d:%d", spawnChildLabelPrefix, blockIndex, childNumber)
 }
 
+// shallowFetchLabelLimit mirrors the "labels(first: 30)" cap the bulk
+// board-fetch GraphQL query uses for both Issue and PullRequest content
+// (github/project.go — two occurrences, kept in sync manually; the shallow
+// query doesn't request labels' pageInfo at all, so hasNextPage isn't
+// observable from here). A shallow-fetched item.Labels slice at exactly this
+// length may have silently dropped a fabrik:spawned-child:* marker that sorts
+// past the cap — parseSpawnChildLabels can't tell "no marker" from "marker
+// truncated out of view" by looking at a short list alone. See
+// TestSpawnChildren_Resume_TruncatedShallowLabels_StillLiveRefreshes.
+const shallowFetchLabelLimit = 30
+
 // parseSpawnChildLabels extracts every spawnChildLabelPrefix marker present
 // in labels into a 1-based blockIndex -> childNumber map — recovering
 // exactly which children (if any) a previous, interrupted spawnChildren
@@ -683,11 +694,13 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 
 	// Resume support (ADR-1583): recover which blocks (if any) already had
 	// their child created by a previous, interrupted attempt — the only
-	// durable, restart-surviving record of that fact. When non-empty, refresh
-	// item live first: BlockedBy is a "deep field" the bulk board fetch never
-	// populates, and the per-child loop below needs it fresh to tell whether
-	// an already-created child was also already linked. A live-read failure
-	// or active cooldown defers to the next poll without pausing the parent.
+	// durable, restart-surviving record of that fact. When found (or when the
+	// shallow snapshot can't be trusted to have found them — see below),
+	// refresh item live first: BlockedBy is a "deep field" the bulk board
+	// fetch never populates, and the per-child loop below needs it fresh to
+	// tell whether an already-created child was also already linked. A
+	// live-read failure or active cooldown defers to the next poll without
+	// pausing the parent.
 	//
 	// Gated on resumable (see this function's doc comment): a non-resumable
 	// origin (Review/Validate mid-flight) never consults an existing marker,
@@ -696,7 +709,15 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 	alreadyCreated := map[int]int{}
 	if resumable {
 		alreadyCreated = parseSpawnChildLabels(item.Labels)
-		if len(alreadyCreated) > 0 {
+		// item.Labels here may be the shallow board-fetch's capped set (found
+		// in review of PR #1708): if it's at exactly shallowFetchLabelLimit, a
+		// fabrik:spawned-child:* marker could have been truncated out of view,
+		// so alreadyCreated would wrongly read as empty and this block would
+		// silently take the fresh-CreateIssue path — reproducing the exact
+		// duplicate-child bug this function exists to fix. Live-refresh
+		// whenever a marker was already found (unchanged) OR whenever the
+		// snapshot's length hits the cap, even with none found yet.
+		if len(alreadyCreated) > 0 || len(item.Labels) >= shallowFetchLabelLimit {
 			if err := e.refreshForSpawnResume(&item); err != nil {
 				return nil, false, err
 			}
