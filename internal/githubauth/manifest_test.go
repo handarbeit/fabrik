@@ -40,7 +40,7 @@ func manifestContractViolations(m map[string]interface{}) []string {
 }
 
 func TestBuildManifest_NoHookAttributes(t *testing.T) {
-	m := buildManifest("http://127.0.0.1:12345/callback")
+	m := buildManifest("http://127.0.0.1:12345/callback", "", "", nil)
 	if _, present := m["hook_attributes"]; present {
 		t.Error("expected hook_attributes to be absent — Pruefer V1 is polling-only and GitHub rejects the manifest when hook_attributes is present without a url")
 	}
@@ -55,7 +55,7 @@ func TestBuildManifest_NoHookAttributes(t *testing.T) {
 // url-less hook_attributes is caught here even if TestBuildManifest_
 // NoHookAttributes's simpler presence check is ever weakened.
 func TestManifestContract_CatchesHookAttributesWithoutURL(t *testing.T) {
-	m := buildManifest("http://127.0.0.1:12345/callback")
+	m := buildManifest("http://127.0.0.1:12345/callback", "", "", nil)
 	m["hook_attributes"] = map[string]interface{}{"active": false}
 	if violations := manifestContractViolations(m); len(violations) == 0 {
 		t.Error("expected a violation for hook_attributes present without url, got none")
@@ -66,7 +66,7 @@ func TestManifestContract_CatchesHookAttributesWithoutURL(t *testing.T) {
 // over-reject a legitimate future webhook addition: hook_attributes with a
 // non-empty url is a valid manifest shape per GitHub's documented contract.
 func TestManifestContract_AllowsHookAttributesWithURL(t *testing.T) {
-	m := buildManifest("http://127.0.0.1:12345/callback")
+	m := buildManifest("http://127.0.0.1:12345/callback", "", "", nil)
 	m["hook_attributes"] = map[string]interface{}{
 		"url":    "https://example.com/webhook",
 		"active": true,
@@ -77,7 +77,7 @@ func TestManifestContract_AllowsHookAttributesWithURL(t *testing.T) {
 }
 
 func TestBuildManifest_ScopedPermissions(t *testing.T) {
-	m := buildManifest("http://127.0.0.1:12345/callback")
+	m := buildManifest("http://127.0.0.1:12345/callback", "", "", nil)
 	perms, ok := m["default_permissions"].(map[string]string)
 	if !ok {
 		t.Fatal("expected default_permissions to be present")
@@ -106,7 +106,7 @@ func TestBuildManifest_ScopedPermissions(t *testing.T) {
 // ever checked an installation actually held it) this issue exists to catch
 // earlier next time.
 func TestBuildManifest_MatchesPrueferRequiredPermissions(t *testing.T) {
-	m := buildManifest("http://127.0.0.1:12345/callback")
+	m := buildManifest("http://127.0.0.1:12345/callback", "", "", nil)
 	manifestPerms, ok := m["default_permissions"].(map[string]string)
 	if !ok {
 		t.Fatal("expected default_permissions to be present")
@@ -136,7 +136,7 @@ func TestPrueferRequiredPermissions_ReturnsDefensiveCopy(t *testing.T) {
 }
 
 func TestBuildManifest_RedirectURLPropagated(t *testing.T) {
-	m := buildManifest("http://127.0.0.1:9999/callback")
+	m := buildManifest("http://127.0.0.1:9999/callback", "", "", nil)
 	if m["redirect_url"] != "http://127.0.0.1:9999/callback" {
 		t.Errorf("redirect_url = %v, want the passed-in redirectURL", m["redirect_url"])
 	}
@@ -150,12 +150,93 @@ func TestBuildManifest_RedirectURLPropagated(t *testing.T) {
 // the created App's homepage link permanently dead.
 func TestBuildManifest_HomepageURLIsStableNotEphemeralCallback(t *testing.T) {
 	redirectURL := "http://127.0.0.1:54321/callback"
-	m := buildManifest(redirectURL)
+	m := buildManifest(redirectURL, "", "", nil)
 	if m["url"] == redirectURL {
 		t.Error("manifest \"url\" must not be the ephemeral loopback redirectURL — it would be a dead link once local setup finishes")
 	}
 	if m["url"] != defaultAppHomepageURL {
 		t.Errorf("manifest \"url\" = %v, want %v", m["url"], defaultAppHomepageURL)
+	}
+}
+
+// TestBuildManifest_DefaultsAreByteIdenticalToPruefer is the AC2 regression
+// test for #1712: calling buildManifest with all three new parameters at
+// their zero values must yield exactly Pruefer's own manifest — the whole
+// point of parameterizing these fields is that an unset caller (Pruefer's
+// own call sites) sees no behavior change at all.
+func TestBuildManifest_DefaultsAreByteIdenticalToPruefer(t *testing.T) {
+	m := buildManifest("http://127.0.0.1:12345/callback", "", "", nil)
+	if m["name"] != defaultAppName {
+		t.Errorf(`m["name"] = %v, want %v`, m["name"], defaultAppName)
+	}
+	if m["url"] != defaultAppHomepageURL {
+		t.Errorf(`m["url"] = %v, want %v`, m["url"], defaultAppHomepageURL)
+	}
+	perms, ok := m["default_permissions"].(map[string]string)
+	if !ok {
+		t.Fatal("expected default_permissions to be present")
+	}
+	want := PrueferRequiredPermissions()
+	if len(perms) != len(want) {
+		t.Fatalf("default_permissions = %+v, want %+v", perms, want)
+	}
+	for k, v := range want {
+		if perms[k] != v {
+			t.Errorf("default_permissions[%q] = %q, want %q", k, perms[k], v)
+		}
+	}
+}
+
+// TestBuildManifest_CallerSuppliedValuesReflected is the AC1 regression test
+// for #1712: a second caller (e.g. the engine) supplying its own App name,
+// homepage URL and permission set must see the generated manifest reflect
+// exactly those values, not Pruefer's defaults.
+func TestBuildManifest_CallerSuppliedValuesReflected(t *testing.T) {
+	perms := map[string]string{
+		"metadata":              "read",
+		"contents":              "write",
+		"organization_projects": "write",
+	}
+	m := buildManifest("http://127.0.0.1:12345/callback", "fabrik-engine", "https://example.com/fabrik", perms)
+	if m["name"] != "fabrik-engine" {
+		t.Errorf(`m["name"] = %v, want "fabrik-engine"`, m["name"])
+	}
+	if m["url"] != "https://example.com/fabrik" {
+		t.Errorf(`m["url"] = %v, want "https://example.com/fabrik"`, m["url"])
+	}
+	got, ok := m["default_permissions"].(map[string]string)
+	if !ok {
+		t.Fatal("expected default_permissions to be present")
+	}
+	if len(got) != len(perms) {
+		t.Fatalf("default_permissions = %+v, want %+v", got, perms)
+	}
+	for k, v := range perms {
+		if got[k] != v {
+			t.Errorf("default_permissions[%q] = %q, want %q", k, got[k], v)
+		}
+	}
+}
+
+// TestBuildManifest_NeverRequestsOrganizationProjectsAdmin is the AC4
+// regression test for #1712: buildManifest's own default (Pruefer's, which
+// doesn't touch organization_projects at all) must never request
+// organization_projects: admin — R4 forbids requesting admin anywhere, and
+// verified live (2026-09-13) that "write" is sufficient for every operation
+// a caller like the engine needs.
+func TestBuildManifest_NeverRequestsOrganizationProjectsAdmin(t *testing.T) {
+	m := buildManifest("http://127.0.0.1:12345/callback", "", "", nil)
+	perms, ok := m["default_permissions"].(map[string]string)
+	if !ok {
+		t.Fatal("expected default_permissions to be present")
+	}
+	if v, present := perms["organization_projects"]; present && v == "admin" {
+		t.Error(`default_permissions["organization_projects"] = "admin", want anything but "admin" (R4)`)
+	}
+	for k, v := range perms {
+		if v == "admin" {
+			t.Errorf("default_permissions[%q] = %q, want no permission ever defaulting to admin", k, v)
+		}
 	}
 }
 

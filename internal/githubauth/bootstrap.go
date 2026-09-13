@@ -20,7 +20,15 @@ type ManifestFlowOptions struct {
 	NoBrowser      bool
 	PrivateKeyPath string
 	AppStatePath   string
-	Logf           func(format string, args ...any)
+	// AppName, AppHomepageURL and RequiredPermissions are forwarded into
+	// buildManifest (see its doc comment for the exact fallback rule): an
+	// empty AppName/AppHomepageURL or a nil/empty RequiredPermissions
+	// yields Pruefer's own defaults, so Pruefer's call sites (which never
+	// set these) are unaffected — see #1712 R1/AC1/AC2.
+	AppName             string
+	AppHomepageURL      string
+	RequiredPermissions map[string]string
+	Logf                func(format string, args ...any)
 }
 
 // RunManifestFlow drives GitHub's App Manifest flow end to end: starts a
@@ -45,7 +53,10 @@ func RunManifestFlow(ctx context.Context, opts ManifestFlowOptions) (Credentials
 		logf = func(string, ...any) {}
 	}
 
-	startURL, results, shutdown, err := runManifestCallbackServer(buildManifest, logf)
+	buildManifestFn := func(redirectURL string) map[string]interface{} {
+		return buildManifest(redirectURL, opts.AppName, opts.AppHomepageURL, opts.RequiredPermissions)
+	}
+	startURL, results, shutdown, err := runManifestCallbackServer(buildManifestFn, logf)
 	if err != nil {
 		return Credentials{}, fmt.Errorf("starting manifest callback listener: %w", err)
 	}
