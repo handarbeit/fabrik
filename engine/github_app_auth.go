@@ -277,5 +277,22 @@ func resolveGitHubAppAuth(ctx context.Context, cfg Config, fabrikDir, baseURL st
 	if err := refuseGHESWithGitHubApp(cfg); err != nil {
 		return nil, nil, err
 	}
+	// Both a PAT and a full GitHub App config can be present at once (e.g.
+	// an operator migrating from one to the other without yet clearing
+	// FABRIK_TOKEN). App auth always wins in that case — cfg.Token is never
+	// referenced again for the engine's own GitHub client or worker gh auth
+	// (releaseUpgradeToken's use of it is a separate, unrelated concern).
+	// This is a deliberate precedence, not an ambiguous config R5 should
+	// refuse (unlike a partial App config, "both fully set" is unambiguous
+	// — App auth is the more specific, more recently configured intent) —
+	// but silently ignoring a still-valid credential with no trace in the
+	// log is exactly the kind of surprise the "co-equal, not a silent
+	// fallback" framing elsewhere in this file wants to avoid. So it's
+	// logged, not silent.
+	if cfg.Token != "" {
+		fmt.Printf("[startup] github-app: GitHub App authentication is configured and takes precedence over the " +
+			"configured personal access token (FABRIK_TOKEN) — the PAT will not be used for GitHub API calls or " +
+			"worker gh CLI auth\n")
+	}
 	return setUpGitHubAppAuth(ctx, cfg, fabrikDir, baseURL)
 }

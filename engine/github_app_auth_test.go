@@ -219,6 +219,66 @@ func TestSetUpGitHubAppAuth_Success_WiresClientAndReconciler(t *testing.T) {
 	}
 }
 
+// TestResolveGitHubAppAuth_BothConfigured_AppAuthWinsAndLogsPrecedence covers
+// handarbeit-pruefer's PR review finding: when both a PAT (cfg.Token) and a
+// full GitHub App config are present, App auth silently won with no trace
+// that the PAT was ignored. This asserts both halves of the fix — App auth
+// still wins (unchanged behavior) — and a precedence line is now logged to
+// stdout, so an operator migrating between the two isn't left wondering why
+// a still-valid FABRIK_TOKEN has no effect.
+func TestResolveGitHubAppAuth_BothConfigured_AppAuthWinsAndLogsPrecedence(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := writeEngineTestAppKey(t, dir)
+	srv := newFakeGitHubAppServer(t, 999, "handarbeit", "organization", engineRequiredGitHubAppPermissions(false))
+
+	cfg := Config{
+		Owner: "handarbeit", Repo: "fabrik", Token: "ghp_still_valid_pat",
+		GitHubAppID: 42, GitHubAppPrivateKeyPath: keyPath, GitHubAppInstallationID: 999,
+	}
+
+	var client *gh.Client
+	var reconciler *githubauth.Reconciler
+	var err error
+	output := captureStdout(func() {
+		client, reconciler, err = resolveGitHubAppAuth(context.Background(), cfg, dir, srv.URL)
+	})
+	if err != nil {
+		t.Fatalf("resolveGitHubAppAuth: %v", err)
+	}
+	if client == nil || reconciler == nil {
+		t.Fatal("expected App auth to win (non-nil client and reconciler) even with a PAT also configured")
+	}
+	if !strings.Contains(output, "takes precedence over the configured personal access token") {
+		t.Errorf("expected a precedence-logging line naming the ignored PAT, got output: %q", output)
+	}
+}
+
+// TestResolveGitHubAppAuth_NoPAT_NoPrecedenceLogLine confirms the log line
+// added above is conditional on cfg.Token being set — the common case (App
+// auth configured, no PAT at all) must not gain a spurious log line about a
+// credential that was never present.
+func TestResolveGitHubAppAuth_NoPAT_NoPrecedenceLogLine(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := writeEngineTestAppKey(t, dir)
+	srv := newFakeGitHubAppServer(t, 999, "handarbeit", "organization", engineRequiredGitHubAppPermissions(false))
+
+	cfg := Config{
+		Owner: "handarbeit", Repo: "fabrik",
+		GitHubAppID: 42, GitHubAppPrivateKeyPath: keyPath, GitHubAppInstallationID: 999,
+	}
+
+	var err error
+	output := captureStdout(func() {
+		_, _, err = resolveGitHubAppAuth(context.Background(), cfg, dir, srv.URL)
+	})
+	if err != nil {
+		t.Fatalf("resolveGitHubAppAuth: %v", err)
+	}
+	if strings.Contains(output, "takes precedence over the configured personal access token") {
+		t.Errorf("did not expect a PAT-precedence log line when no PAT was configured, got output: %q", output)
+	}
+}
+
 func TestSetUpGitHubAppAuth_UserOwnedBoard_RefusedExplicitly(t *testing.T) {
 	dir := t.TempDir()
 	keyPath := writeEngineTestAppKey(t, dir)
