@@ -828,8 +828,10 @@ func TestRunInit_HaltsOnGitExcludeFailure(t *testing.T) {
 // the GraphQL surface createBoardCore drives, routing on a substring of the
 // query text (each call site's query shape is distinct enough to
 // disambiguate). ownerTypename is "Organization" or "User", letting tests
-// exercise both R7 branches.
-func createBoardTestServer(t *testing.T, ownerTypename string, statusOptions []map[string]interface{}) *httptest.Server {
+// exercise both R7 branches. createCalled, if non-nil, records whether
+// createProjectV2 fired — used to prove a local (no-network) failure never
+// creates a board (the orphan-resource review finding on PR #1718).
+func createBoardTestServer(t *testing.T, ownerTypename string, statusOptions []map[string]interface{}, createCalled *bool) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
@@ -856,6 +858,9 @@ func createBoardTestServer(t *testing.T, ownerTypename string, statusOptions []m
 				},
 			}
 		case strings.Contains(body.Query, "createProjectV2(input:"):
+			if createCalled != nil {
+				*createCalled = true
+			}
 			resp = map[string]interface{}{
 				"data": map[string]interface{}{
 					"createProjectV2": map[string]interface{}{
@@ -910,7 +915,7 @@ func TestCreateBoardCore_Success(t *testing.T) {
 		{"id": "OPT_1", "name": "Todo", "color": "GRAY", "description": ""},
 		{"id": "OPT_2", "name": "In Progress", "color": "BLUE", "description": ""},
 		{"id": "OPT_3", "name": "Done", "color": "GREEN", "description": ""},
-	})
+	}, nil)
 	defer srv.Close()
 
 	stagesDir := t.TempDir()
@@ -931,7 +936,7 @@ func TestCreateBoardCore_Success(t *testing.T) {
 }
 
 func TestCreateBoardCore_RefusesUserOwned(t *testing.T) {
-	srv := createBoardTestServer(t, "User", nil)
+	srv := createBoardTestServer(t, "User", nil, nil)
 	defer srv.Close()
 
 	stagesDir := t.TempDir()
@@ -945,10 +950,17 @@ func TestCreateBoardCore_RefusesUserOwned(t *testing.T) {
 	}
 }
 
+// TestCreateBoardCore_NoStageConfigs is the orphan-resource review finding
+// (PR #1718): a missing/empty stage configs directory is a purely local,
+// no-network condition, and must be caught before CreateProjectV2 ever
+// fires — otherwise a real project gets created on GitHub with nothing
+// pointing back at it (runInit never reaches writeConfigTemplate on error)
+// and no guard against a retry creating a second, separate project.
 func TestCreateBoardCore_NoStageConfigs(t *testing.T) {
+	var created bool
 	srv := createBoardTestServer(t, "Organization", []map[string]interface{}{
 		{"id": "OPT_1", "name": "Todo", "color": "GRAY", "description": ""},
-	})
+	}, &created)
 	defer srv.Close()
 
 	stagesDir := t.TempDir()
@@ -957,5 +969,75 @@ func TestCreateBoardCore_NoStageConfigs(t *testing.T) {
 	client := gh.NewClientWithBaseURL("token", srv.URL)
 	if _, _, err := createBoardCore(client, "acme", "widgets", "", stagesDir); err == nil {
 		t.Fatal("expected error when no stage configs are present")
+	}
+	if created {
+		t.Error("createProjectV2 must not be called when there are no stage configs — this would orphan a real board")
+	}
+}
+
+// TestCreateBoardCore_PostCreateFailureNamesTheOrphanedBoard covers the
+// remaining orphan-resource case that can't be avoided by reordering (a
+// network failure genuinely occurring after the project already exists):
+// the returned error must name the board's number/URL and steer the
+// operator at the existing `fabrik init <project-url>` link-to-existing-
+// board flow, rather than reporting a bare underlying error with no trace
+// of the board GitHub actually created (review finding, PR #1718).
+func TestCreateBoardCore_PostCreateFailureNamesTheOrphanedBoard(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Query string `json:"query"`
+		}
+		data, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(data, &body)
+
+		var resp map[string]interface{}
+		switch {
+		case strings.Contains(body.Query, "repositoryOwner(login:"):
+			resp = map[string]interface{}{
+				"data": map[string]interface{}{
+					"repositoryOwner": map[string]interface{}{"__typename": "Organization", "id": "O_OWNER1"},
+				},
+			}
+		case strings.Contains(body.Query, "repository(owner: $owner, name: $name)"):
+			resp = map[string]interface{}{
+				"data": map[string]interface{}{"repository": map[string]interface{}{"id": "R_REPO1"}},
+			}
+		case strings.Contains(body.Query, "createProjectV2(input:"):
+			resp = map[string]interface{}{
+				"data": map[string]interface{}{
+					"createProjectV2": map[string]interface{}{
+						"projectV2": map[string]interface{}{"id": "PVT_NEW1", "number": 42},
+					},
+				},
+			}
+		case strings.Contains(body.Query, "shortDescription: $shortDescription"):
+			resp = map[string]interface{}{
+				"data": map[string]interface{}{"updateProjectV2": map[string]interface{}{"projectV2": map[string]interface{}{"id": "PVT_NEW1"}}},
+			}
+		case strings.Contains(body.Query, "field(name: \"Status\")"):
+			// Simulate a transient failure fetching the Status field of the
+			// board that was already created above.
+			w.WriteHeader(500)
+			w.Write([]byte("server error"))
+			return
+		default:
+			t.Fatalf("unexpected GraphQL query: %s", body.Query)
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	stagesDir := t.TempDir()
+	writeMinimalStage(t, stagesDir, "Specify", 0)
+
+	client := gh.NewClientWithBaseURL("token", srv.URL)
+	_, _, err := createBoardCore(client, "acme", "widgets", "", stagesDir)
+	if err == nil {
+		t.Fatal("expected error from FetchStatusField failure")
+	}
+	for _, want := range []string{"#42", "https://github.com/orgs/acme/projects/42", "fabrik init", "do not re-run --create-board"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should name the orphaned board and steer to the link-existing-board flow (missing %q): %v", want, err)
+		}
 	}
 }

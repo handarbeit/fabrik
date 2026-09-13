@@ -478,6 +478,23 @@ func createBoardCore(client *gh.Client, owner, repo, title, stagesDir string) (p
 		return "", "", fmt.Errorf("resolving repository %s/%s: %w", owner, repo, err)
 	}
 
+	// Load stage configs and compute the required column set BEFORE creating
+	// anything on GitHub. Both checks below are purely local (no network) —
+	// deferring them until after CreateProjectV2, as originally written,
+	// meant a missing/empty stages directory left a freshly created project
+	// orphaned on GitHub: no .fabrik/config.yaml entry pointing at it (that's
+	// only written by the caller after this function returns successfully)
+	// and no idempotency guard against a retry creating a second, separate
+	// project (review finding on PR #1718).
+	allStages, err := stages.LoadAll(stagesDir)
+	if err != nil {
+		return "", "", fmt.Errorf("loading stage configs from %s: %w", stagesDir, err)
+	}
+	names := requiredStageColumnNames(allStages)
+	if len(names) == 0 {
+		return "", "", fmt.Errorf("no stage configs with board columns found in %s — nothing to create Status columns for", stagesDir)
+	}
+
 	if title == "" {
 		title = repo + " Fabrik Pipeline"
 	}
@@ -486,7 +503,23 @@ func createBoardCore(client *gh.Client, owner, repo, title, stagesDir string) (p
 	if err != nil {
 		return "", "", fmt.Errorf("creating project board: %w", err)
 	}
-	fmt.Printf("  board: created %q (#%d)\n", title, number)
+	// refuseIfUserOwnedBoard above already rejected "user", so ownerType is
+	// always "organization" here — the /orgs/ URL form is always correct.
+	boardURL := fmt.Sprintf("https://github.com/orgs/%s/projects/%d", owner, number)
+	fmt.Printf("  board: created %q (#%d) — %s\n", title, number, boardURL)
+
+	// From this point on, the project already exists on GitHub. A failure
+	// below must not be reported as if nothing happened: wrap it with the
+	// board's own URL so the operator has a durable pointer to it (not just
+	// the stdout line above, which may have scrolled past), and steer them
+	// at the existing link-to-an-existing-board flow (`fabrik init
+	// <project-url>`) to finish setup — rather than a bare retry of
+	// --create-board, which would create a second, separate project.
+	wrapPostCreateErr := func(step string, causeErr error) error {
+		return fmt.Errorf("%s: %w — board %q (#%d) was already created at %s; fix the error, then run "+
+			"`fabrik init %s` to link .fabrik/config.yaml to it (do not re-run --create-board, which would create a duplicate)",
+			step, causeErr, title, number, boardURL, boardURL)
+	}
 
 	desc := fmt.Sprintf("Managed by Fabrik — https://github.com/%s/%s (see .fabrik/stages/)", owner, repo)
 	if err := client.SetProjectDescription(projectID, desc); err != nil {
@@ -497,16 +530,7 @@ func createBoardCore(client *gh.Client, owner, repo, title, stagesDir string) (p
 
 	sf, err := client.FetchStatusField(projectID)
 	if err != nil {
-		return "", "", fmt.Errorf("fetching Status field of newly created board: %w", err)
-	}
-
-	allStages, err := stages.LoadAll(stagesDir)
-	if err != nil {
-		return "", "", fmt.Errorf("loading stage configs from %s: %w", stagesDir, err)
-	}
-	names := requiredStageColumnNames(allStages)
-	if len(names) == 0 {
-		return "", "", fmt.Errorf("no stage configs with board columns found in %s — nothing to create Status columns for", stagesDir)
+		return "", "", wrapPostCreateErr("fetching Status field of newly created board", err)
 	}
 
 	options := make([]gh.StatusOptionInput, 0, len(names))
@@ -514,7 +538,7 @@ func createBoardCore(client *gh.Client, owner, repo, title, stagesDir string) (p
 		options = append(options, gh.StatusOptionInput{Name: name, Color: "GRAY", Description: ""})
 	}
 	if err := client.SetStatusFieldOptions(sf.FieldID, options); err != nil {
-		return "", "", fmt.Errorf("setting Status columns on newly created board: %w", err)
+		return "", "", wrapPostCreateErr("setting Status columns on newly created board", err)
 	}
 	fmt.Printf("  board: Status columns set: %s\n", strings.Join(names, ", "))
 
