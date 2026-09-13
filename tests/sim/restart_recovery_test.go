@@ -287,19 +287,14 @@ func TestRestartRecovery_KillAfterPRCreatedBeforeReady(t *testing.T) {
 // TestRestartRecovery_KillDuringSpawnSequence faults spawnChildren's
 // AddBlockedByIssue call (engine/spawn.go) after the child issue itself has
 // already been created — the child exists on GitHub, unlinked. spawnChildren
-// has no settle-scan-owned recovery marker for this step (unlike the six
-// R1-property scans): it pauses the parent hard, with an explicit
-// human-recovery instruction ("remove fabrik:paused ... re-advance to
-// retry"). This scenario proves that instruction is followed faithfully —
-// once an operator (simulated here via a direct label removal, mirroring
-// what clicking "remove label" on GitHub does) clears fabrik:paused, the
-// engine reattempts the spawn — and pins the genuinely-unrecoverable-without-
-// awareness shape this reveals: since fabrik:children-spawned was never
-// applied, the retry re-runs spawnChildren from scratch and creates a
-// SECOND child issue, per spawnChildren's own doc comment ("v1 does not
-// skip already-created children on retry"). This is exactly the kind of
-// as-found defect R4 asks to be pinned with a comment and a linked
-// follow-up rather than fixed here — filed as #1583. Shared vehicle with
+// pauses the parent hard, with an explicit human-recovery instruction
+// ("remove fabrik:paused ... re-advance to retry"). This scenario proves
+// that instruction is followed faithfully — once an operator (simulated
+// here via a direct label removal, mirroring what clicking "remove label"
+// on GitHub does) clears fabrik:paused, the engine reattempts the spawn —
+// and, since ADR-1583, that retry recognizes the already-created child via
+// its durable fabrik:spawned-child:<blockIndex>:<childNumber> marker and
+// resumes it instead of creating a duplicate. Shared vehicle with
 // partial_mutation_test.go's own coverage of this same sequence (see that
 // file's enumeration).
 func TestRestartRecovery_KillDuringSpawnSequence(t *testing.T) {
@@ -326,6 +321,12 @@ func TestRestartRecovery_KillDuringSpawnSequence(t *testing.T) {
 	if childrenBefore != 1 {
 		t.Fatalf("expected exactly 1 child issue created before the fault fired, got %d", childrenBefore)
 	}
+	// The durable resume marker must already be present — it is written
+	// immediately after CreateIssue, before the faulted AddBlockedByIssue
+	// call, so it survives even a process kill at this exact point.
+	if !hasSpawnResumeMarker(IssueLabels(t, env, parent)) {
+		t.Fatal("parent missing its fabrik:spawned-child:* resume marker despite CreateIssue having already succeeded")
+	}
 	t.Logf("parent #%d paused mid-spawn: child created, blockedBy edge missing", parent)
 
 	restarted := RestartEnv(t, env)
@@ -343,15 +344,31 @@ func TestRestartRecovery_KillDuringSpawnSequence(t *testing.T) {
 		t.Fatal("parent still has no blockedBy edge after the retried spawn")
 	}
 
-	// Pin the as-found duplicate-child defect: the retried spawn has no
-	// memory of the child already created before the restart, so it creates
-	// a second one with the same title.
+	// ADR-1583: the retried spawn recognizes the already-created child via
+	// its durable marker and resumes it — exactly 1 child issue exists, not
+	// a duplicate.
 	childrenAfter := countChildIssuesTitled(t, restarted, "sim restart spawn child")
-	if childrenAfter == 1 {
-		t.Log("NOTE: exactly 1 child issue exists after the retried spawn — the as-found duplicate-child gap this scenario pins may have been fixed; if so, update/close #1583.")
-	} else {
-		t.Logf("as-found confirmed: %d child issues exist after the retried spawn (expected exactly 1 in a fully-recovered world) — spawnChildren's retry has no memory of a prior partial attempt (pinned, see #1583)", childrenAfter)
+	if childrenAfter != 1 {
+		t.Errorf("expected exactly 1 child issue after the retried spawn (resume, not duplicate), got %d", childrenAfter)
 	}
+
+	// The resume marker is removed once the spawn completes successfully —
+	// steady state carries none of them.
+	if hasSpawnResumeMarker(IssueLabels(t, restarted, parent)) {
+		t.Error("fabrik:spawned-child:* marker still present after a successful spawn — should have been cleaned up")
+	}
+}
+
+// hasSpawnResumeMarker reports whether labels contains any
+// fabrik:spawned-child:<blockIndex>:<childNumber> durable resume marker
+// (ADR-1583).
+func hasSpawnResumeMarker(labels []string) bool {
+	for _, l := range labels {
+		if strings.HasPrefix(l, "fabrik:spawned-child:") {
+			return true
+		}
+	}
+	return false
 }
 
 // countChildIssuesTitled counts successful CreateIssue calls in env's

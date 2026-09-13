@@ -19,8 +19,8 @@ import (
 //	addCompleteLabelAndRemoveCI (engine/ci.go)    | 1st call (AddLabelToIssue)   | recoverable  | restart_recovery_test.go: TestRestartRecovery_KillBeforeFirstLabelWrite
 //	addCompleteLabelAndRemoveCI                   | 2nd call (RemoveLabelFromIssue) | recoverable | restart_recovery_test.go: TestRestartRecovery_KillBetweenLabelPair
 //	ensureDraftPR -> markPRReady (engine/pr.go)   | MarkPRReady (post-PR-creation) | UNRECOVERABLE (pinned, #1582) | restart_recovery_test.go: TestRestartRecovery_KillAfterPRCreatedBeforeReady
-//	spawnChildren (engine/spawn.go)               | AddProjectV2ItemById         | UNRECOVERABLE (pinned, #1583) | TestPartialMutation_SpawnChildren_ProjectAddFails (this file)
-//	spawnChildren                                 | AddBlockedByIssue            | UNRECOVERABLE (pinned, #1583) | restart_recovery_test.go: TestRestartRecovery_KillDuringSpawnSequence
+//	spawnChildren (engine/spawn.go)               | AddProjectV2ItemById         | recoverable (ADR-1583) | TestPartialMutation_SpawnChildren_ProjectAddFails (this file)
+//	spawnChildren                                 | AddBlockedByIssue            | recoverable (ADR-1583) | restart_recovery_test.go: TestRestartRecovery_KillDuringSpawnSequence
 //	spawnChildren                                 | UpdateProjectItemStatus (placement) | recoverable | settle_scan_escalation_test.go: TestSettleScan_AwaitingPlacement
 //	landSingleton (engine/merge_train.go)         | (not covered)                 | out of scope — merge-train landing is sibling issue #1452's territory (real git assembly), not this issue's (see this issue's own Scope section)
 //
@@ -40,14 +40,11 @@ import (
 // TestRestartRecovery_KillDuringSpawnSequence's AddBlockedByIssue fault.
 // The child issue is created (a real, durable GitHub mutation) but never
 // added to the project board and never linked as blockedBy. spawnChildren
-// pauses the parent hard with the same "manually close orphaned children,
-// remove fabrik:paused, then re-advance to retry" instruction it uses for
-// every per-child failure — this scenario proves that instruction's
-// "re-advance to retry" half reproduces the exact same unrecoverable-without-
-// awareness shape TestRestartRecovery_KillDuringSpawnSequence already pinned
-// for the next step in the sequence: retrying from scratch has no memory of
-// the already-created (but board-orphaned) child, so it creates a second
-// child issue rather than resuming the first one's placement.
+// pauses the parent hard; since ADR-1583, the retried spawn recognizes the
+// already-created child via its durable fabrik:spawned-child:<blockIndex>:
+// <childNumber> marker, resolves it via FetchProjectItem, and resumes
+// exactly where the previous attempt stopped — reusing the original
+// (previously board-orphaned) child rather than creating a second one.
 func TestPartialMutation_SpawnChildren_ProjectAddFails(t *testing.T) {
 	t.Parallel()
 	env := NewEnv(t, EnvOptions{Stages: crossRepoSpawnStages()})
@@ -67,6 +64,9 @@ func TestPartialMutation_SpawnChildren_ProjectAddFails(t *testing.T) {
 	if childrenBefore != 1 {
 		t.Fatalf("expected exactly 1 child issue created before the fault fired, got %d", childrenBefore)
 	}
+	if !hasSpawnResumeMarker(IssueLabels(t, env, parent)) {
+		t.Fatal("parent missing its fabrik:spawned-child:* resume marker despite CreateIssue having already succeeded")
+	}
 	t.Logf("parent #%d paused mid-spawn: child created, never added to the project board", parent)
 
 	env.Sim.Faults().Clear("AddProjectV2ItemById")
@@ -81,20 +81,15 @@ func TestPartialMutation_SpawnChildren_ProjectAddFails(t *testing.T) {
 		t.Fatal("parent still has no blockedBy edge after the retried spawn")
 	}
 
+	// ADR-1583: the retried spawn resumes the original, previously
+	// board-orphaned child rather than creating a duplicate — exactly 1
+	// child issue exists.
 	childrenAfter := countChildIssuesTitled(t, env, "sim partial-mutation spawn child")
-	if childrenAfter == 1 {
-		t.Log("NOTE: exactly 1 child issue exists after the retried spawn — the as-found duplicate-child gap this scenario pins may have been fixed; if so, update/close #1583.")
-	} else {
-		t.Logf("as-found confirmed: %d child issues exist after the retried spawn (expected exactly 1 in a fully-recovered world) — same root cause as TestRestartRecovery_KillDuringSpawnSequence, one step earlier in the sequence (pinned, see #1583)", childrenAfter)
+	if childrenAfter != 1 {
+		t.Errorf("expected exactly 1 child issue after the retried spawn (the original, now placed on the board — not a duplicate), got %d", childrenAfter)
 	}
 
-	// The first (board-orphaned) child is a genuinely leaked issue — never
-	// placed on the board, never linked, and now permanently unreachable by
-	// normal dispatch. Confirming its continued existence (rather than
-	// somehow having been garbage-collected) is part of pinning the defect
-	// accurately: this is not just "a duplicate," it's an orphan plus a
-	// duplicate.
-	if childrenAfter < 2 {
-		t.Errorf("expected at least 2 child issues (the original board-orphaned one, plus the retried spawn's own) — got %d, meaning the orphan from before the fault no longer exists, which would itself be worth understanding", childrenAfter)
+	if hasSpawnResumeMarker(IssueLabels(t, env, parent)) {
+		t.Error("fabrik:spawned-child:* marker still present after a successful spawn — should have been cleaned up")
 	}
 }
