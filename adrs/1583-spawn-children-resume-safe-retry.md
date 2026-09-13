@@ -51,12 +51,47 @@ fabrik:spawned-child:<blockIndex>:<childNumber>
 (matching the existing `DEPENDS_ON` convention); `childNumber` is the created
 child issue's number. The child's `owner/repo` is deliberately **not**
 encoded — it's always re-derivable from `blocks[blockIndex-1].Repo`, which is
-itself deterministically reparsed from the same immutable Plan comment (or,
-for a Review/Validate mid-flight spawn, the same dispatch's own `output`) on
+itself deterministically reparsed from the same immutable Plan comment on
 every retry. This keeps the label comfortably inside GitHub's 50-character
 label-name limit regardless of repo name length (`fabrik:spawned-child:` is
 21 characters; even a 4-digit block index and a 10-digit issue number stay at
 36 — see `TestSpawnChildLabelLength`).
+
+### Scope: gated to origins where `blocks` reparses deterministically (`resumable`)
+
+`spawnChildren` takes a `resumable bool` parameter that gates the entire
+mechanism above — the marker is read, written, and cleaned up only when
+`resumable` is true. It is true for `preImplement` and
+`recoverMissingPlanComment` (both re-derive `blocks` from the same immutable,
+already-posted Plan comment on every call, so `blockIndex` is guaranteed
+stable across a retry) and **false** for the Review/Validate mid-flight spawn
+origin (`engine/item.go`, ADR-1419).
+
+This distinction was missed in the original design of this ADR, which assumed
+`blocks[blockIndex-1].Repo` was "deterministically reparsed from the same
+immutable Plan comment (or, for a Review/Validate mid-flight spawn, the same
+dispatch's own `output`) on every retry" — treating the two origins as
+equivalent. They are not: a mid-flight spawn's `blocks` comes from
+`ParseSpawnBlocks(output)`, where `output` is that one Claude dispatch's own
+fresh generation. A retry of a *failed* mid-flight spawn (operator removes
+`fabrik:paused`, re-advances) does not replay stored content — since the
+stage never completed, it redispatches Claude, which is not guaranteed to
+reproduce the same block count, order, repo, or title. A `blockIndex`-keyed
+marker would then risk resuming an unrelated, already-created child under a
+same-numbered but semantically different block on the new dispatch — silent
+mis-wiring (the wrong child linked to the wrong block), which is strictly
+worse than the duplicate-child bug this ADR set out to fix. Caught in review
+on PR #1708 before merge.
+
+With `resumable` false, the mid-flight origin's behavior is unchanged from
+before this ADR: every block always takes the fresh-`CreateIssue` path, no
+marker is ever read, written, or left behind, and this origin's own
+(already-documented, lower-severity) duplicate-on-retry exposure is carried
+forward rather than traded for the worse failure mode above. Closing that
+exposure for the mid-flight origin — e.g. via a marker keyed on stable block
+*content* (repo + title) rather than position, which tolerates reordering but
+not a genuinely different title on retry — is a candidate follow-up, not
+attempted here.
 
 Rejected alternatives:
 - **A machine-readable progress comment.** No existing convention in this
@@ -193,10 +228,14 @@ resumed block — paid only on an actual resume, never on the happy path.
 
 - Following `spawnChildren`'s own printed recovery instruction ("remove
   `fabrik:paused`, then re-advance to retry") no longer creates a duplicate
-  child at any of the three previously-unsafe steps.
+  child at any of the three previously-unsafe steps — for the `resumable`
+  origins (Plan/`preImplement`). The Review/Validate mid-flight origin is
+  unaffected by this fix (`resumable=false`): its pre-existing
+  duplicate-on-retry exposure is unchanged, not worsened, not fixed.
 - The parent temporarily carries one `fabrik:spawned-child:<i>:<n>` label per
-  created child during an in-progress or interrupted spawn; steady state
-  (spawn complete) carries none.
+  created child during an in-progress or interrupted spawn, for a `resumable`
+  origin only; steady state (spawn complete) carries none. A mid-flight
+  origin's spawn never writes this marker at all.
 - `docs/state-machine.md` §6.7/§6.7.2's prior statement that there is "no
   change to `spawnChildren`'s own idempotency guard" for individual children
   is superseded by this ADR — updated in the same change set.

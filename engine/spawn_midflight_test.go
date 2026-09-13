@@ -345,3 +345,69 @@ func TestFinalizeStageOutcome_ReviewSpawn_Failure_PausesParentSuppressesCompleti
 		t.Error("expected a spawn-failure comment to be posted")
 	}
 }
+
+// TestFinalizeStageOutcome_ReviewSpawn_NoResumeMarkerWritten guards ADR-1583's
+// resumable=false gating for the mid-flight Review/Validate spawn origin
+// (pruefer review finding on PR #1708): a child issue is created here (unlike
+// the CreateIssue-fails test above), but no fabrik:spawned-child:<i>:<n>
+// marker must ever be written for this origin — output comes from a fresh
+// Claude dispatch on every retry, not an immutable stored comment, so a
+// blockIndex-keyed marker could resume the wrong child under a same-numbered
+// but semantically different block on a redispatched retry.
+func TestFinalizeStageOutcome_ReviewSpawn_NoResumeMarkerWritten(t *testing.T) {
+	skipIfNoGit(t)
+
+	origLock := lockVerifyDelay
+	lockVerifyDelay = 0
+	t.Cleanup(func() { lockVerifyDelay = origLock })
+
+	client := &mockGitHubClient{
+		findPRForIssueFn: func(owner, repo string, issueNumber int) (int, error) {
+			return 46, nil
+		},
+		createIssueFn: func(owner, repo, title, body string, assignees []string) (int, string, error) {
+			return 301, "I_midflight301", nil
+		},
+		addProjectV2ItemByIdFn: func(projectID, contentNodeID string) (string, error) {
+			return "", errors.New("github: 500 internal server error")
+		},
+	}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			output := "FABRIK_SPAWN_CHILD_BEGIN owner/repo\n" +
+				"TITLE: Created but board-add fails\n" +
+				"Body.\n" +
+				"FABRIK_SPAWN_CHILD_END\n" +
+				"FABRIK_STAGE_COMPLETE\n"
+			return output, true, TokenUsage{TurnsUsed: 3, MaxTurns: 30}, nil
+		},
+	}
+	eng, _ := testEngineWithRepoAndStages(t, client, claude, reviewStages())
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{ID: "I_parent_marker", Number: 106, Title: "Parent whose board-add fails", Status: "Review", ItemID: "PVTI_106"}
+
+	if err := eng.processItem(t.Context(), board, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+
+	if len(client.createIssueCalls) != 1 {
+		t.Fatalf("expected 1 CreateIssue call (child created before the board-add failure), got %d", len(client.createIssueCalls))
+	}
+
+	for _, c := range client.addLabelCalls {
+		if strings.HasPrefix(c.labelName, spawnChildLabelPrefix) {
+			t.Errorf("mid-flight spawn origin must never write a resume marker, got label %q", c.labelName)
+		}
+	}
+
+	var pausedAdded bool
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			pausedAdded = true
+		}
+	}
+	if !pausedAdded {
+		t.Error("expected fabrik:paused when the mid-flight spawn fails after CreateIssue")
+	}
+}

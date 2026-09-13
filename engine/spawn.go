@@ -506,7 +506,7 @@ func (e *Engine) preImplement(ctx context.Context, board *gh.ProjectBoard, item 
 		return false, nil
 	}
 
-	_, ok, err := e.spawnChildren(ctx, board, item, owner, repo, blocks)
+	_, ok, err := e.spawnChildren(ctx, board, item, owner, repo, blocks, true)
 	return ok, err
 }
 
@@ -561,7 +561,7 @@ func (e *Engine) recoverMissingPlanComment(ctx context.Context, board *gh.Projec
 	}
 
 	e.logf(item.Number, "spawn", "pre-Implement: live re-read recovered %d child(ren) missed by stale snapshot — proceeding to spawn\n", len(blocks))
-	_, ok, err := e.spawnChildren(ctx, board, fresh, owner, repo, blocks)
+	_, ok, err := e.spawnChildren(ctx, board, fresh, owner, repo, blocks, true)
 	return ok, err
 }
 
@@ -593,6 +593,26 @@ func (e *Engine) spawnTargetServedByThisInstance(childOwner, childRepo string) b
 // recovery path, and finalizeStageOutcome's Review/Validate mid-flight hook —
 // so every origin gets identical wiring through a single code path (ADR-1419).
 //
+// resumable gates the ADR-1583 per-child resume machinery (the
+// fabrik:spawned-child:<blockIndex>:<childNumber> marker: written, read back,
+// and used to skip CreateIssue/AddProjectV2ItemById/AddBlockedByIssue on a
+// retry). It must be true only when blocks is guaranteed to reparse
+// byte-for-byte identically on every retry — true for preImplement and
+// recoverMissingPlanComment, which both reparse the same immutable, already-
+// posted Plan comment. It is false for the Review/Validate mid-flight origin
+// (engine/item.go): blocks there comes from ParseSpawnBlocks(output), and
+// output is a fresh Claude dispatch's own generation — a retry (operator
+// removes fabrik:paused, the stage redispatches) invokes Claude again and is
+// not guaranteed to reproduce the same block count, order, or content. Keying
+// a resume marker on blockIndex alone would then risk resuming the wrong
+// child under a same-numbered but semantically different block — silent
+// mis-wiring, not merely a duplicate (caught in review, PR #1708). When
+// resumable is false, every block always takes the fresh-CreateIssue path,
+// matching this function's pre-ADR-1583 behavior exactly: no marker is read,
+// written, or left behind, so this origin's own (already-documented, lower-
+// severity) duplicate-on-retry exposure is unchanged rather than traded for
+// this worse failure mode.
+//
 // Returns (spawned, true, nil) when children were spawned, where spawned lists
 // each child as "owner/repo#N". For the Implement dispatch caller specifically,
 // this also means the Implement Claude invocation must be skipped in this
@@ -600,7 +620,7 @@ func (e *Engine) spawnTargetServedByThisInstance(childOwner, childRepo string) b
 // Returns (partial, false, err) on any fatal error; the parent is paused
 // before returning. partial lists whatever children were created before the
 // failure, for error-message purposes.
-func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, owner, repo string, blocks []SpawnBlock) ([]string, bool, error) {
+func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, owner, repo string, blocks []SpawnBlock, resumable bool) ([]string, bool, error) {
 	e.logf(item.Number, "spawn", "found %d child(ren) to spawn\n", len(blocks))
 
 	// Validate DEPENDS_ON headers upfront, before any GitHub mutation. This is
@@ -668,12 +688,20 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 	// populates, and the per-child loop below needs it fresh to tell whether
 	// an already-created child was also already linked. A live-read failure
 	// or active cooldown defers to the next poll without pausing the parent.
-	alreadyCreated := parseSpawnChildLabels(item.Labels)
-	if len(alreadyCreated) > 0 {
-		if err := e.refreshForSpawnResume(&item); err != nil {
-			return nil, false, err
-		}
+	//
+	// Gated on resumable (see this function's doc comment): a non-resumable
+	// origin (Review/Validate mid-flight) never consults an existing marker,
+	// so alreadyCreated stays empty and every block below takes the fresh-
+	// CreateIssue path, exactly as it did before ADR-1583.
+	alreadyCreated := map[int]int{}
+	if resumable {
 		alreadyCreated = parseSpawnChildLabels(item.Labels)
+		if len(alreadyCreated) > 0 {
+			if err := e.refreshForSpawnResume(&item); err != nil {
+				return nil, false, err
+			}
+			alreadyCreated = parseSpawnChildLabels(item.Labels)
+		}
 	}
 
 	// Spawn children in order, retaining the block-index -> child node-ID
@@ -731,12 +759,21 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 			childNumber, childNodeID = n, nodeID
 			e.logf(item.Number, "spawn", "created child %s/%s#%d\n", childOwner, childRepo, childNumber)
 
-			// Durable resume marker: best-effort (addLabelChecked's error is
-			// logged, not fatal). A dropped write only regresses this one
-			// child to the pre-ADR-1583 behavior if a later step in this same
-			// attempt also fails — strictly narrower than the bug being fixed.
-			if lerr := e.addLabelChecked(item, spawnChildLabel(blockIndex, childNumber)); lerr != nil {
-				e.logf(item.Number, "warn", "could not write spawn resume marker for block %d (child %s#%d): %v — a later failure in this attempt could duplicate this child on retry\n", blockIndex, block.Repo, childNumber, lerr)
+			// Durable resume marker: only written for a resumable origin (see
+			// this function's doc comment) — for a non-resumable origin
+			// (Review/Validate mid-flight), writing it would create a marker
+			// that is never consulted (alreadyCreated is always empty there)
+			// and never cleaned up on a subsequent failed+retried attempt,
+			// since the cleanup loop below only targets the current attempt's
+			// own child numbers. Best-effort when written (addLabelChecked's
+			// error is logged, not fatal): a dropped write only regresses this
+			// one child to the pre-ADR-1583 behavior if a later step in this
+			// same attempt also fails — strictly narrower than the bug being
+			// fixed.
+			if resumable {
+				if lerr := e.addLabelChecked(item, spawnChildLabel(blockIndex, childNumber)); lerr != nil {
+					e.logf(item.Number, "warn", "could not write spawn resume marker for block %d (child %s#%d): %v — a later failure in this attempt could duplicate this child on retry\n", blockIndex, block.Repo, childNumber, lerr)
+				}
 			}
 		}
 		spawned = append(spawned, fmt.Sprintf("%s#%d", block.Repo, childNumber))
@@ -861,9 +898,13 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 	// stale marker. Both are best-effort: a dropped removal here is
 	// harmless clutter, not a correctness issue (parseSpawnChildLabels is
 	// only ever consulted before fabrik:children-spawned is set — see
-	// preImplement's idempotency-guard-first check).
-	for i := range blocks {
-		e.removeLabel(item, spawnChildLabel(i+1, childNumbers[i]))
+	// preImplement's idempotency-guard-first check). Skipped entirely for a
+	// non-resumable origin, which never wrote any marker to begin with (see
+	// this function's doc comment).
+	if resumable {
+		for i := range blocks {
+			e.removeLabel(item, spawnChildLabel(i+1, childNumbers[i]))
+		}
 	}
 
 	// Mark parent with idempotency guard. This must come after the
