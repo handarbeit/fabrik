@@ -86,6 +86,19 @@ part of the normal happy path, not an error condition.
   engine-initiated close failed after its Done-advance already happened
   (`awaiting-close`). Both retried every poll until the issue is confirmed
   closed, then escalate to `fabrik:paused` after `MaxRetries`.
+- **`fabrik:awaiting-pr-ready`** — A stage configured with
+  `mark_pr_ready_on_complete: true` completed, but its draft PR never
+  transitioned to ready-for-review — the `MarkPRReady` call failed
+  non-transiently, or exhausted its own in-process 3-attempt retry.
+  Applied only in `markPRReady`'s failure branches. **Unlike every other
+  label in this section, it does NOT suppress dispatch** — the item keeps
+  advancing through later stages normally while it's outstanding, since
+  nothing about a later stage depends on the PR being ready. Retried every
+  poll by a settle scan that re-resolves the PR live and clears the
+  marker once it's found ready, closed, merged, or missing, without
+  calling the API again; escalates to `fabrik:paused` after `MaxRetries`
+  with a comment naming the draft PR and the manual `gh pr ready <N>` fix.
+  See ADR-1582.
 - **`fabrik:awaiting-advance`** — A terminal advance (moving the
   project-board Status forward once a stage's PR has merged) failed —
   most commonly because the target Status column doesn't exist on the
