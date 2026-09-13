@@ -19,6 +19,7 @@ import (
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/githubauth"
+	ptui "github.com/handarbeit/fabrik/pruefer/tui"
 )
 
 // writeTestPrivateKey generates a small (test-only) RSA key, writes it as a
@@ -761,6 +762,80 @@ func TestHandleReload_RemovedWatchedRepo_NoLongerReviewed_AndInstallationDetache
 	}
 	if _, ok := daemon.client("handarbeit"); !ok {
 		t.Error("expected handarbeit (still watched) to remain servable")
+	}
+}
+
+// TestRederiveRepos_EmitsUnrecognizedInstallationsEvent is #1722's R5
+// TUI-wiring regression test: a re-derivation cycle that finds an
+// unrecognized installation (here, the watched_repos-fallback case — no
+// served_accounts configured) must emit ptui.UnrecognizedInstallationsEvent
+// naming it, and clear it (Count back to 0) once a later cycle no longer
+// finds it unrecognized — exactly the "fires on every re-derivation
+// trigger, no special-casing" property rederiveRepos already gives every
+// other signal for free (startup, ticker, webhook, SIGHUP all converge on
+// this one function).
+func TestRederiveRepos_EmitsUnrecognizedInstallationsEvent(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("watched_repos:\n  - handarbeit/fabrik\n"), 0600); err != nil {
+		t.Fatalf("writing initial config: %v", err)
+	}
+
+	args, _, daemon, _, fake, closeLog := setupReloadDaemon(t, dir, keyPath, []gh.AppInstallation{
+		{ID: 111, Account: "handarbeit"},
+		{ID: 222, Account: "kolfadser1"},
+	})
+	defer closeLog()
+	captureLogf(t)
+	fake.selectedRepos[111] = []string{"handarbeit/fabrik"}
+	fake.selectedRepos[222] = []string{"kolfadser1/cluster_40pvihou_1787546401"}
+
+	var mu sync.Mutex
+	var events []ptui.Event
+	daemon.Emit = func(ev ptui.Event) {
+		mu.Lock()
+		events = append(events, ev)
+		mu.Unlock()
+	}
+
+	daemon.rederiveRepos(context.Background())
+
+	mu.Lock()
+	var found *ptui.UnrecognizedInstallationsEvent
+	for i := range events {
+		if ev, ok := events[i].(ptui.UnrecognizedInstallationsEvent); ok {
+			found = &ev
+		}
+	}
+	mu.Unlock()
+	if found == nil {
+		t.Fatal("expected an UnrecognizedInstallationsEvent to be emitted")
+	}
+	if found.Count != 1 || len(found.Accounts) != 1 || found.Accounts[0] != "kolfadser1" {
+		t.Errorf("UnrecognizedInstallationsEvent = %+v, want Count=1 Accounts=[kolfadser1]", *found)
+	}
+
+	// Widening watched_repos to cover kolfadser1 must clear the condition on
+	// the very next re-derivation.
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("watched_repos:\n  - handarbeit/fabrik\n  - kolfadser1/cluster_40pvihou_1787546401\n"), 0600); err != nil {
+		t.Fatalf("writing updated config: %v", err)
+	}
+	handleReload(context.Background(), args, daemon)
+	waitForRederivationDone(t, daemon)
+
+	mu.Lock()
+	found = nil
+	for i := range events {
+		if ev, ok := events[i].(ptui.UnrecognizedInstallationsEvent); ok {
+			found = &ev
+		}
+	}
+	mu.Unlock()
+	if found == nil {
+		t.Fatal("expected a follow-up UnrecognizedInstallationsEvent after widening watched_repos")
+	}
+	if found.Count != 0 {
+		t.Errorf("UnrecognizedInstallationsEvent.Count = %d after widening watched_repos, want 0 (condition resolved)", found.Count)
 	}
 }
 
