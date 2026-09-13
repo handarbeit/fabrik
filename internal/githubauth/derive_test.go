@@ -461,6 +461,314 @@ func TestDerive_PreCapCount_ReflectsPostFilterNotTotalGrant(t *testing.T) {
 	}
 }
 
+// --- #1722 R3/R4/R5: app installation trust boundary ---
+
+// containsSubstring reports whether any line contains substr — used with
+// newLogCollector (see reconciler_test.go) for tests asserting on log
+// content (AC2's "the deletion is logged with the account name and
+// installation id", AC4's distinct marker).
+func containsSubstring(lines []string, substr string) bool {
+	for _, l := range lines {
+		if strings.Contains(l, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestDerive_R3_SkipsMintForUnwatchedOwner is AC1's core regression test —
+// the kolfadser1 incident itself: an installation whose account isn't named
+// anywhere in a non-empty watched_repos must never have a token minted for
+// it at all.
+func TestDerive_R3_SkipsMintForUnwatchedOwner(t *testing.T) {
+	oldFlow := runManifestFlow
+	runManifestFlow = failingRunManifestFlow(t)
+	defer func() { runManifestFlow = oldFlow }()
+
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	srv, fake := newFakeAppServer("pruefer-bot", []gh.AppInstallation{
+		{ID: 111, Account: "handarbeit"},
+		{ID: 222, Account: "kolfadser1"},
+	}, func() time.Time { return time.Now().Add(time.Hour) })
+	fake.selectedRepos = map[int64][]string{
+		111: {"handarbeit/fabrik"},
+		222: {"kolfadser1/cluster_40pvihou_1787546401"},
+	}
+	defer srv.Close()
+
+	r, err := Reconcile(context.Background(), Options{
+		AppID: 42, AppPrivateKeyPath: keyPath, AppStatePath: filepath.Join(dir, "app-state.json"),
+		WatchedRepos: []string{"handarbeit/fabrik"}, BaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if got := fake.mintCountFor(222); got != 0 {
+		t.Errorf("mintCountFor(222) = %d, want 0 — no token should ever be minted for an installation outside watched_repos (AC1)", got)
+	}
+	if _, err := r.ClientForRepo(context.Background(), "kolfadser1", "cluster_40pvihou_1787546401"); err == nil {
+		t.Error("expected no client for kolfadser1 — it isn't named in watched_repos")
+	}
+	set := r.LastDerived()
+	var found bool
+	for _, inst := range set.Installations {
+		if inst.Account != "kolfadser1" {
+			continue
+		}
+		found = true
+		if !inst.NotServingWatchedRepos {
+			t.Errorf("expected NotServingWatchedRepos on kolfadser1's summary, got %+v", inst)
+		}
+	}
+	if !found {
+		t.Error("expected kolfadser1's installation to still be reported in Installations")
+	}
+}
+
+// TestDerive_R3_DetachesOwnerRemovedFromWatchedRepos covers the live
+// re-derivation path: an owner already minted (because it was previously
+// named in watched_repos) must be detached — not merely excluded from
+// review — the moment a watched_repos edit removes it, mirroring how an
+// owner whose installation disappears entirely is already detached.
+func TestDerive_R3_DetachesOwnerRemovedFromWatchedRepos(t *testing.T) {
+	oldFlow := runManifestFlow
+	runManifestFlow = failingRunManifestFlow(t)
+	defer func() { runManifestFlow = oldFlow }()
+
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	srv, fake := newFakeAppServer("pruefer-bot", []gh.AppInstallation{
+		{ID: 111, Account: "handarbeit"},
+		{ID: 222, Account: "verveguy"},
+	}, func() time.Time { return time.Now().Add(time.Hour) })
+	fake.selectedRepos = map[int64][]string{
+		111: {"handarbeit/fabrik"},
+		222: {"verveguy/otherrepo"},
+	}
+	defer srv.Close()
+
+	r, err := Reconcile(context.Background(), Options{
+		AppID: 42, AppPrivateKeyPath: keyPath, AppStatePath: filepath.Join(dir, "app-state.json"),
+		WatchedRepos: []string{"handarbeit/fabrik", "verveguy/otherrepo"}, BaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if _, err := r.ClientForRepo(context.Background(), "verveguy", "otherrepo"); err != nil {
+		t.Fatalf("expected verveguy to have a client before the watched_repos edit: %v", err)
+	}
+
+	// watched_repos is narrowed to drop verveguy entirely.
+	_, detached, err := r.Derive(context.Background(), []string{"handarbeit/fabrik"}, 0, func(string, ...any) {})
+	if err != nil {
+		t.Fatalf("Derive (second call): %v", err)
+	}
+	foundDetached := false
+	for _, d := range detached {
+		if d.Owner == "verveguy" {
+			foundDetached = true
+		}
+	}
+	if !foundDetached {
+		t.Errorf("expected verveguy to be detached after being dropped from watched_repos, got %+v", detached)
+	}
+	if _, err := r.ClientForRepo(context.Background(), "verveguy", "otherrepo"); err == nil {
+		t.Error("expected no client for verveguy after it was dropped from watched_repos")
+	}
+}
+
+// TestDerive_R4_DeletesUnrecognizedInstallationWhenAllowlistConfigured is
+// AC2: with an account allowlist configured, an installation outside it is
+// deleted, and the deletion is logged with the account name and
+// installation id.
+func TestDerive_R4_DeletesUnrecognizedInstallationWhenAllowlistConfigured(t *testing.T) {
+	oldFlow := runManifestFlow
+	runManifestFlow = failingRunManifestFlow(t)
+	defer func() { runManifestFlow = oldFlow }()
+
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	srv, fake := newFakeAppServer("pruefer-bot", []gh.AppInstallation{
+		{ID: 111, Account: "handarbeit"},
+		{ID: 222, Account: "kolfadser1"},
+	}, func() time.Time { return time.Now().Add(time.Hour) })
+	fake.selectedRepos = map[int64][]string{
+		111: {"handarbeit/fabrik"},
+		222: {"kolfadser1/cluster_40pvihou_1787546401"},
+	}
+	defer srv.Close()
+
+	logf, lines := newLogCollector()
+	r, err := Reconcile(context.Background(), Options{
+		AppID: 42, AppPrivateKeyPath: keyPath, AppStatePath: filepath.Join(dir, "app-state.json"),
+		ServedAccounts: []string{"handarbeit"}, BaseURL: srv.URL, Logf: logf,
+	})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if !fake.wasDeleted(222) {
+		t.Error("expected installation 222 (kolfadser1) to be deleted — it is outside the configured served_accounts allowlist")
+	}
+	if fake.mintCountFor(222) != 0 {
+		t.Error("expected no token ever minted for the deleted installation")
+	}
+	if !containsSubstring(lines(), "kolfadser1") || !containsSubstring(lines(), "222") {
+		t.Errorf("expected a log line naming both the account and installation id, got: %v", lines())
+	}
+	if !containsSubstring(lines(), "UNRECOGNIZED-INSTALLATION") {
+		t.Errorf("expected the deletion to be logged with the UNRECOGNIZED-INSTALLATION marker (AC4), got: %v", lines())
+	}
+	set := r.LastDerived()
+	for _, inst := range set.Installations {
+		if inst.Account == "kolfadser1" {
+			if !inst.DeletionAttempted {
+				t.Errorf("expected DeletionAttempted on kolfadser1's summary, got %+v", inst)
+			}
+			if inst.DeletionError != "" {
+				t.Errorf("expected no DeletionError, got %q", inst.DeletionError)
+			}
+		}
+	}
+}
+
+// TestDerive_R4_NeverDeletesWithoutAllowlist is AC3: with no served_accounts
+// allowlist configured, an unrecognized installation is reported
+// prominently but never deleted, even though watched_repos already
+// excludes it.
+func TestDerive_R4_NeverDeletesWithoutAllowlist(t *testing.T) {
+	oldFlow := runManifestFlow
+	runManifestFlow = failingRunManifestFlow(t)
+	defer func() { runManifestFlow = oldFlow }()
+
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	srv, fake := newFakeAppServer("pruefer-bot", []gh.AppInstallation{
+		{ID: 111, Account: "handarbeit"},
+		{ID: 222, Account: "kolfadser1"},
+	}, func() time.Time { return time.Now().Add(time.Hour) })
+	fake.selectedRepos = map[int64][]string{
+		111: {"handarbeit/fabrik"},
+		222: {"kolfadser1/cluster_40pvihou_1787546401"},
+	}
+	defer srv.Close()
+
+	logf, lines := newLogCollector()
+	_, err := Reconcile(context.Background(), Options{
+		AppID: 42, AppPrivateKeyPath: keyPath, AppStatePath: filepath.Join(dir, "app-state.json"),
+		WatchedRepos: []string{"handarbeit/fabrik"}, BaseURL: srv.URL, Logf: logf,
+		// Deliberately no ServedAccounts configured.
+	})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if fake.wasDeleted(222) {
+		t.Error("expected installation 222 (kolfadser1) to never be deleted with no served_accounts allowlist configured (AC3)")
+	}
+	if !containsSubstring(lines(), "UNRECOGNIZED-INSTALLATION") {
+		t.Errorf("expected the unrecognized installation to still be reported prominently, got: %v", lines())
+	}
+}
+
+// TestDerive_R4_DeletionFailureStillRefusesMint covers the case where
+// gh.DeleteAppInstallation itself fails (a transient GitHub API error): no
+// token may be minted for the installation this round regardless — a failed
+// deletion is retried on the next re-derivation, never treated as license to
+// mint anyway.
+func TestDerive_R4_DeletionFailureStillRefusesMint(t *testing.T) {
+	oldFlow := runManifestFlow
+	runManifestFlow = failingRunManifestFlow(t)
+	defer func() { runManifestFlow = oldFlow }()
+
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	srv, fake := newFakeAppServer("pruefer-bot", []gh.AppInstallation{
+		{ID: 111, Account: "handarbeit"},
+		{ID: 222, Account: "kolfadser1"},
+	}, func() time.Time { return time.Now().Add(time.Hour) })
+	fake.selectedRepos = map[int64][]string{
+		111: {"handarbeit/fabrik"},
+		222: {"kolfadser1/cluster_40pvihou_1787546401"},
+	}
+	fake.failDelete = func(instID int64) bool { return instID == 222 }
+	defer srv.Close()
+
+	logf, lines := newLogCollector()
+	r, err := Reconcile(context.Background(), Options{
+		AppID: 42, AppPrivateKeyPath: keyPath, AppStatePath: filepath.Join(dir, "app-state.json"),
+		ServedAccounts: []string{"handarbeit"}, BaseURL: srv.URL, Logf: logf,
+	})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if fake.wasDeleted(222) {
+		t.Error("expected the simulated delete failure to actually prevent deletion")
+	}
+	if fake.mintCountFor(222) != 0 {
+		t.Error("expected no token minted for an installation whose deletion just failed")
+	}
+	if !containsSubstring(lines(), "UNRECOGNIZED-INSTALLATION") {
+		t.Errorf("expected a loud deletion-failure log line, got: %v", lines())
+	}
+	set := r.LastDerived()
+	for _, inst := range set.Installations {
+		if inst.Account == "kolfadser1" {
+			if inst.DeletionError == "" {
+				t.Errorf("expected DeletionError to be populated, got %+v", inst)
+			}
+		}
+	}
+}
+
+// TestDerive_TruncatedInstallationList_StillEnforcesReturnedEntries covers
+// the pagination-ceiling case: every installation actually returned must
+// still be enforced against R3/R4 — a truncated round must never give a
+// known-bad installation an indefinite pass just because pagination
+// truncated elsewhere in the list.
+func TestDerive_TruncatedInstallationList_StillEnforcesReturnedEntries(t *testing.T) {
+	oldFlow := runManifestFlow
+	runManifestFlow = failingRunManifestFlow(t)
+	defer func() { runManifestFlow = oldFlow }()
+
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	// 100 matches github.appFetchPageSize (unexported) — mirrors the
+	// existing TestReconcile_TruncatedInstallationsListYieldsAmbiguousNotFoundMessage
+	// precedent for forcing FetchAppInstallations to hit its pagination
+	// ceiling via neverShortPage below.
+	installations := make([]gh.AppInstallation, 100)
+	installations[0] = gh.AppInstallation{ID: 111, Account: "handarbeit"}
+	installations[1] = gh.AppInstallation{ID: 222, Account: "kolfadser1"}
+	for i := 2; i < len(installations); i++ {
+		installations[i] = gh.AppInstallation{ID: int64(1000 + i), Account: fmt.Sprintf("filler-%d", i)}
+	}
+	srv, fake := newFakeAppServer("pruefer-bot", installations, func() time.Time { return time.Now().Add(time.Hour) })
+	fake.neverShortPage = true // forces FetchAppInstallations to hit the pagination ceiling
+	fake.selectedRepos = map[int64][]string{111: {"handarbeit/fabrik"}}
+	defer srv.Close()
+
+	logf, lines := newLogCollector()
+	r, err := Reconcile(context.Background(), Options{
+		AppID: 42, AppPrivateKeyPath: keyPath, AppStatePath: filepath.Join(dir, "app-state.json"),
+		ServedAccounts: []string{"handarbeit"}, BaseURL: srv.URL, Logf: logf,
+	})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	set := r.LastDerived()
+	if !set.Truncated {
+		t.Fatal("expected Truncated = true")
+	}
+	// kolfadser1 was actually returned (it's within the first page) — it
+	// must still be enforced (deleted) despite the round being truncated.
+	if !fake.wasDeleted(222) {
+		t.Error("expected kolfadser1 (an installation actually returned) to still be deleted despite the truncated round")
+	}
+	if !containsSubstring(lines(), "pagination ceiling") {
+		t.Errorf("expected a loud warning that the sweep may be incomplete, got: %v", lines())
+	}
+}
+
 // --- AC7 containment regression: two distinct App identities ---
 
 // jwtIssuer decodes the "iss" claim (App ID) from an unverified JWT — good
