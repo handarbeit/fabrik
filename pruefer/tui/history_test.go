@@ -188,3 +188,23 @@ func TestHistoryPane_EmptyView(t *testing.T) {
 		t.Errorf("Height() = %d, want 4", h.Height())
 	}
 }
+
+// TestHistoryPane_AllSkipsEmptyStateShowsCount pins AC3: a history of skips
+// alone must not render the same bare placeholder as a genuinely empty pane
+// (TestHistoryPane_EmptyView above) — that would misrepresent an actively
+// working daemon as an idle one. The empty-content line discloses the count
+// instead.
+func TestHistoryPane_AllSkipsEmptyStateShowsCount(t *testing.T) {
+	var h HistoryPaneComponent
+	for i, reason := range allSkipReasons {
+		comp, _ := h.Update(ReviewCompletedEvent{
+			Repo: "o/r", PRNumber: i, Skipped: true, Reason: reason, CompletedAt: time.Now(),
+		})
+		h = comp.(HistoryPaneComponent)
+	}
+	view := h.View(80)
+	want := fmt.Sprintf("no completed reviews yet (%d skipped)", len(allSkipReasons))
+	if !strings.Contains(view, want) {
+		t.Errorf("View() = %q, want it to contain %q", view, want)
+	}
+}
