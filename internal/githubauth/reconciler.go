@@ -155,7 +155,26 @@ type Options struct {
 	// doc.go), so the required set is always caller-supplied; Pruefer's own
 	// execute.go passes PrueferRequiredPermissions().
 	RequiredPermissions map[string]string
-	Logf                func(format string, args ...any)
+	// ServedAccounts is the R4 allowlist of accounts this deployment is
+	// authorized to serve — a new, independent config key, deliberately
+	// never derived from WatchedRepos (which is optional-by-design, R3, and
+	// can legitimately be empty in "all-installations" mode while an
+	// operator still wants the allowlist gate active; coupling deletion to
+	// an optional narrowing filter would make an empty WatchedRepos either
+	// delete every installation or none, unpredictably). When non-empty
+	// (case-insensitive match against an installation's Account), an
+	// installation whose account is not in this list is actively removed
+	// (gh.DeleteAppInstallation) rather than merely left unminted — see
+	// derive.go's resolveRecognizedAccounts. Nil/empty (the default) means
+	// no allowlist is configured: an installation outside WatchedRepos'
+	// named owners is still reported (R5, falling back to WatchedRepos as
+	// the visibility-only signal) but never deleted (AC3). This field must
+	// include every account the operator wants served, including their own
+	// — there is no implicit self-exemption for the App's own owning
+	// account, since FetchAppInstallations returns it indistinguishably
+	// from any other installation.
+	ServedAccounts []string
+	Logf           func(format string, args ...any)
 }
 
 // GitHubAuth is the narrow interface the rest of a caller (e.g. Pruefer's
@@ -225,6 +244,12 @@ type Reconciler struct {
 	// the non-pinned discovery loop (derive) can run the same grant check
 	// without a caller needing to pass it in twice. Nil/empty means no check.
 	requiredPermissions map[string]string
+
+	// servedAccounts mirrors Options.ServedAccounts (R4) — captured once in
+	// Reconcile, consulted by derive's per-installation loop on every
+	// re-derivation trigger. Nil/empty means no allowlist is configured (the
+	// default, AC3's "log, don't delete" case).
+	servedAccounts []string
 
 	// lastDerived is the result of the most recent Derive call (including
 	// the one Reconcile itself performs) — see LastDerived and Derive's own
@@ -727,6 +752,7 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 		baseURL:              opts.BaseURL,
 		pinnedInstallationID: opts.AppInstallationID,
 		requiredPermissions:  opts.RequiredPermissions,
+		servedAccounts:       opts.ServedAccounts,
 	}
 
 	// Compat path: a pinned installation ID skips discovery entirely,

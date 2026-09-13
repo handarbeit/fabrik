@@ -244,18 +244,20 @@ func TestReconcile_PinnedInstallation_CacheWriteFailureIsNonFatal(t *testing.T) 
 	}
 }
 
+// TestReconcile_MultiOwner_WatchedReposNarrowsAndRefusesUnneededMint is
+// handarbeit/fabrik#1722's R3 amendment to ADR-1641 Decision 8: the
+// kolfadser1 incident (an unrecognized installation minted a token every 10
+// minutes for three weeks) is exactly what this issue's R3 exists to stop.
+// This test replaces
 // TestReconcile_MultiOwner_WatchedReposNarrowsButEveryInstalledOwnerGetsAClient
-// replaces the pre-#1641 TestReconcile_BackwardCompat_MultiOwnerNeverTouchesStranger,
-// which asserted the *opposite* of what this issue intentionally inverts:
-// under the old (ADR-1233) model, watched_repos was the containment
-// boundary, so an installed-but-unwatched owner ("stranger" below) was never
-// even contacted. Post-#1253/#1641, containment comes from the operator's
-// own dedicated App identity, not from watched_repos membership — every
-// installation of *this* App is now derived and minted regardless of
-// whether watched_repos names it, and watched_repos (R3) only narrows which
-// of those repos are *reviewed*, never which owners get a client. See the
-// issue body's own "safety property that makes this hard" section.
-func TestReconcile_MultiOwner_WatchedReposNarrowsButEveryInstalledOwnerGetsAClient(t *testing.T) {
+// (pre-#1722), which asserted the *opposite*: that every installation of the
+// operator's own App is minted regardless of watched_repos membership. That
+// was ADR-1641's deliberate inversion of ADR-1233's original allowlist
+// discipline — this issue reinstates a scoped version of it: an installed
+// account not named anywhere in a non-empty watched_repos never gets a
+// token minted for it at all (AC1), not merely "minted but excluded from
+// review." See adrs/1722-app-installation-trust-boundary.md.
+func TestReconcile_MultiOwner_WatchedReposNarrowsAndRefusesUnneededMint(t *testing.T) {
 	oldFlow := runManifestFlow
 	runManifestFlow = failingRunManifestFlow(t)
 	defer func() { runManifestFlow = oldFlow }()
@@ -293,10 +295,10 @@ func TestReconcile_MultiOwner_WatchedReposNarrowsButEveryInstalledOwnerGetsAClie
 		t.Error("expected distinct tokens for distinct owners")
 	}
 	// stranger's installation belongs to the SAME App this operator
-	// authenticated as — it is minted like any other, since R1 derives from
-	// installations, not from watched_repos.
-	if _, err := r.ClientForRepo(context.Background(), "stranger", "repo"); err != nil {
-		t.Errorf("expected a client for stranger's installation too (it's this same App's own installation): %v", err)
+	// authenticated as, but it is NOT named in watched_repos (R3) — AC1: no
+	// token is ever minted for it.
+	if _, err := r.ClientForRepo(context.Background(), "stranger", "repo"); err == nil {
+		t.Error("expected no client for stranger's installation — it isn't named in watched_repos (R3)")
 	}
 	strangerHit := false
 	for _, instID := range fake.hitInstallations() {
@@ -304,19 +306,40 @@ func TestReconcile_MultiOwner_WatchedReposNarrowsButEveryInstalledOwnerGetsAClie
 			strangerHit = true
 		}
 	}
-	if !strangerHit {
-		t.Error("expected installation 333 (stranger) to be minted a token — it's this App's own installation")
+	if strangerHit {
+		t.Error("expected installation 333 (stranger) to never be minted a token — it isn't named in watched_repos (R3/AC1)")
 	}
-	if r.InstallationCount() != 3 {
-		t.Errorf("InstallationCount() = %d, want 3 (every installation of this App, regardless of watched_repos)", r.InstallationCount())
+	if r.InstallationCount() != 2 {
+		t.Errorf("InstallationCount() = %d, want 2 (only the installations actually named in watched_repos)", r.InstallationCount())
 	}
-	// watched_repos still narrows the *derived, reviewed* set (R3): stranger's
-	// repo is minted/authorized but excluded from what's actually reviewed.
+	// watched_repos still narrows the derived (reviewed) set — stranger's
+	// repo is excluded from it, same as before.
 	derived := r.LastDerived()
 	for _, dr := range derived.Repos {
 		if dr.Owner == "stranger" {
 			t.Errorf("expected stranger/repo to be excluded from the derived (reviewed) set by the watched_repos filter, found: %+v", dr)
 		}
+	}
+	// The unnamed installation is still reported (R5's watched_repos-fallback
+	// signal, since no served_accounts allowlist is configured here) —
+	// visible, not silently absent — but never deleted (AC3).
+	foundUnrecognized := false
+	for _, inst := range derived.Installations {
+		if inst.Account == "stranger" {
+			foundUnrecognized = true
+			if !inst.NotServingWatchedRepos {
+				t.Errorf("expected stranger's installation summary to report NotServingWatchedRepos, got %+v", inst)
+			}
+			if !inst.Unrecognized {
+				t.Errorf("expected stranger's installation summary to report Unrecognized (watched_repos fallback signal), got %+v", inst)
+			}
+			if inst.DeletionAttempted {
+				t.Errorf("expected no deletion attempt with no served_accounts allowlist configured, got %+v", inst)
+			}
+		}
+	}
+	if !foundUnrecognized {
+		t.Errorf("expected stranger's installation to still appear in Installations (reported, not silently dropped), got %+v", derived.Installations)
 	}
 }
 
