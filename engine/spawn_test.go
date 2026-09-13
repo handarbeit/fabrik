@@ -1958,6 +1958,471 @@ FABRIK_SPAWN_CHILD_END
 	}
 }
 
+// ---- resume-safe retry tests (#1583) ----
+//
+// spawnChildren durably records each created child via a
+// fabrik:spawned-child:<blockIndex>:<childNumber> marker on the parent, so a
+// retried spawn recognizes and reuses an already-created child instead of
+// duplicating it. See ADR-1583.
+
+// TestSpawnChildren_Resume_SkipsCreateIssue verifies that a block already
+// recorded via a spawnChildLabel marker skips CreateIssue entirely, resolves
+// the existing child via FetchProjectItem, still completes the remaining
+// per-child steps, and removes the marker once the whole spawn succeeds.
+func TestSpawnChildren_Resume_SkipsCreateIssue(t *testing.T) {
+	client := &mockGitHubClient{
+		createIssueFn: func(owner, repo, title, body string, assignees []string) (int, string, error) {
+			t.Fatal("CreateIssue must not be called for an already-recorded block")
+			return 0, "", nil
+		},
+		fetchProjectItemFn: func(owner, repo string, issueNumber int) (*gh.ProjectItem, error) {
+			if owner == "owner" && repo == "child" && issueNumber == 101 {
+				return &gh.ProjectItem{ID: "I_child101", Number: 101, Repo: "owner/child"}, nil
+			}
+			return nil, fmt.Errorf("unexpected FetchProjectItem(%s/%s#%d)", owner, repo, issueNumber)
+		},
+	}
+	eng := spawnTestEngine(t, client)
+
+	item := planItemWithBlocks(`
+FABRIK_SPAWN_CHILD_BEGIN owner/child
+TITLE: Child one
+Body one.
+FABRIK_SPAWN_CHILD_END
+`)
+	item.Labels = append(item.Labels, spawnChildLabel(1, 101))
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	spawned, err := eng.preImplement(context.Background(), board, item)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !spawned {
+		t.Fatal("expected spawned=true")
+	}
+
+	if len(client.createIssueCalls) != 0 {
+		t.Errorf("expected 0 CreateIssue calls, got %d", len(client.createIssueCalls))
+	}
+	if len(client.addProjectV2ItemCalls) != 1 {
+		t.Fatalf("expected 1 AddProjectV2ItemById call, got %d", len(client.addProjectV2ItemCalls))
+	}
+	if client.addProjectV2ItemCalls[0].contentNodeID != "I_child101" {
+		t.Errorf("AddProjectV2ItemById contentNodeID = %q, want I_child101", client.addProjectV2ItemCalls[0].contentNodeID)
+	}
+	if len(client.addBlockedByIssueCalls) != 1 {
+		t.Errorf("expected 1 AddBlockedByIssue call, got %d", len(client.addBlockedByIssueCalls))
+	}
+
+	var spawnedLabelAdded bool
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:children-spawned" {
+			spawnedLabelAdded = true
+		}
+	}
+	if !spawnedLabelAdded {
+		t.Error("fabrik:children-spawned label not added")
+	}
+
+	var markerRemoved bool
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == spawnChildLabel(1, 101) {
+			markerRemoved = true
+		}
+	}
+	if !markerRemoved {
+		t.Error("resume marker not removed after successful completion")
+	}
+}
+
+// TestSpawnChildren_Resume_SkipsProjectAdd_WhenAlreadyOnBoard verifies that a
+// resumed child already on the project board (per LookupIssueProjectItem)
+// skips AddProjectV2ItemById, and that placement still proceeds when the
+// recovered Status is empty (never placed).
+func TestSpawnChildren_Resume_SkipsProjectAdd_WhenAlreadyOnBoard(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchProjectItemFn: func(owner, repo string, issueNumber int) (*gh.ProjectItem, error) {
+			return &gh.ProjectItem{ID: "I_child101", Number: 101, Repo: "owner/child"}, nil
+		},
+		lookupIssueProjectItemFn: func(projectID, repo string, issueNumber int) (string, string, error) {
+			return "PVTI_existing", "", nil
+		},
+		addProjectV2ItemByIdFn: func(projectID, contentNodeID string) (string, error) {
+			t.Fatal("AddProjectV2ItemById must not be called when the child is already on the board")
+			return "", nil
+		},
+	}
+	eng := spawnTestEngineWithSpecify(t, client)
+
+	item := planItemWithBlocks(`
+FABRIK_SPAWN_CHILD_BEGIN owner/child
+TITLE: Child one
+Body one.
+FABRIK_SPAWN_CHILD_END
+`)
+	item.Labels = append(item.Labels, spawnChildLabel(1, 101))
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	spawned, err := eng.preImplement(context.Background(), board, item)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !spawned {
+		t.Fatal("expected spawned=true")
+	}
+
+	if len(client.addProjectV2ItemCalls) != 0 {
+		t.Errorf("expected 0 AddProjectV2ItemById calls, got %d", len(client.addProjectV2ItemCalls))
+	}
+	if len(client.updateStatusCalls) != 1 {
+		t.Fatalf("expected 1 UpdateProjectItemStatus call (recovered Status was empty), got %d", len(client.updateStatusCalls))
+	}
+	if client.updateStatusCalls[0].itemID != "PVTI_existing" {
+		t.Errorf("UpdateProjectItemStatus itemID = %q, want PVTI_existing (recovered via LookupIssueProjectItem)", client.updateStatusCalls[0].itemID)
+	}
+}
+
+// TestSpawnChildren_Resume_SkipsPlacement_WhenAlreadyPlaced verifies that a
+// resumed child whose recovered Status is already non-empty is left alone —
+// re-running UpdateProjectItemStatus could clobber real progress the child
+// made under its own pipeline while the parent sat paused.
+func TestSpawnChildren_Resume_SkipsPlacement_WhenAlreadyPlaced(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchProjectItemFn: func(owner, repo string, issueNumber int) (*gh.ProjectItem, error) {
+			return &gh.ProjectItem{ID: "I_child101", Number: 101, Repo: "owner/child"}, nil
+		},
+		lookupIssueProjectItemFn: func(projectID, repo string, issueNumber int) (string, string, error) {
+			return "PVTI_existing", "Implement", nil
+		},
+		updateProjectItemStatusFn: func(projectID, itemID, statusFieldID, statusOptionID string) error {
+			t.Fatal("UpdateProjectItemStatus must not be called when the child already has a non-empty project status")
+			return nil
+		},
+	}
+	eng := spawnTestEngineWithSpecify(t, client)
+
+	item := planItemWithBlocks(`
+FABRIK_SPAWN_CHILD_BEGIN owner/child
+TITLE: Child one
+Body one.
+FABRIK_SPAWN_CHILD_END
+`)
+	item.Labels = append(item.Labels, spawnChildLabel(1, 101))
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	spawned, err := eng.preImplement(context.Background(), board, item)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !spawned {
+		t.Fatal("expected spawned=true")
+	}
+	if len(client.updateStatusCalls) != 0 {
+		t.Errorf("expected 0 UpdateProjectItemStatus calls, got %d", len(client.updateStatusCalls))
+	}
+}
+
+// TestSpawnChildren_Resume_SkipsBlockedByLink_WhenAlreadyLinked verifies that
+// a resumed child already present in the (freshly refreshed) parent's
+// BlockedBy list skips AddBlockedByIssue.
+func TestSpawnChildren_Resume_SkipsBlockedByLink_WhenAlreadyLinked(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchProjectItemFn: func(owner, repo string, issueNumber int) (*gh.ProjectItem, error) {
+			return &gh.ProjectItem{ID: "I_child101", Number: 101, Repo: "owner/child"}, nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			item.BlockedBy = []gh.Dependency{{Number: 101, Repo: "owner/child"}}
+			return nil
+		},
+		addBlockedByIssueFn: func(issueNodeID, blockerNodeID string) error {
+			t.Fatal("AddBlockedByIssue must not be called when the parent is already linked to the child")
+			return nil
+		},
+	}
+	eng := spawnTestEngine(t, client)
+
+	item := planItemWithBlocks(`
+FABRIK_SPAWN_CHILD_BEGIN owner/child
+TITLE: Child one
+Body one.
+FABRIK_SPAWN_CHILD_END
+`)
+	item.Labels = append(item.Labels, spawnChildLabel(1, 101))
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	spawned, err := eng.preImplement(context.Background(), board, item)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !spawned {
+		t.Fatal("expected spawned=true")
+	}
+	if len(client.addBlockedByIssueCalls) != 0 {
+		t.Errorf("expected 0 AddBlockedByIssue calls, got %d", len(client.addBlockedByIssueCalls))
+	}
+}
+
+// TestSpawnChildren_MarkerWriteFailure_LogsAndContinues verifies that a
+// failed durable-marker write (right after a successful CreateIssue) is
+// logged, not fatal — the spawn proceeds and completes normally.
+func TestSpawnChildren_MarkerWriteFailure_LogsAndContinues(t *testing.T) {
+	client := &mockGitHubClient{
+		createIssueFn: func(owner, repo, title, body string, assignees []string) (int, string, error) {
+			return 101, "I_child101", nil
+		},
+		addLabelToIssueFn: func(owner, repo string, issueNumber int, labelName string) error {
+			if strings.HasPrefix(labelName, spawnChildLabelPrefix) {
+				return fmt.Errorf("simulated label-write failure")
+			}
+			return nil
+		},
+	}
+	eng := spawnTestEngine(t, client)
+
+	item := planItemWithBlocks(`
+FABRIK_SPAWN_CHILD_BEGIN owner/child
+TITLE: Child one
+Body one.
+FABRIK_SPAWN_CHILD_END
+`)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	spawned, err := eng.preImplement(context.Background(), board, item)
+	if err != nil {
+		t.Fatalf("expected the marker write failure to be logged and non-fatal, got error: %v", err)
+	}
+	if !spawned {
+		t.Fatal("expected spawned=true despite the marker write failure")
+	}
+	if len(client.createIssueCalls) != 1 {
+		t.Errorf("expected 1 CreateIssue call, got %d", len(client.createIssueCalls))
+	}
+
+	var spawnedLabelAdded bool
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:children-spawned" {
+			spawnedLabelAdded = true
+		}
+	}
+	if !spawnedLabelAdded {
+		t.Error("fabrik:children-spawned label not added despite the marker write failure being non-fatal")
+	}
+}
+
+// TestSpawnChildren_Resume_MissingChild_PausesWithLabelRemovalInstruction
+// verifies that a recorded child that can no longer be found (e.g. deleted)
+// pauses the parent with an explicit instruction naming the specific marker
+// label to remove to force re-creation of that one block.
+func TestSpawnChildren_Resume_MissingChild_PausesWithLabelRemovalInstruction(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchProjectItemFn: func(owner, repo string, issueNumber int) (*gh.ProjectItem, error) {
+			return nil, fmt.Errorf("github: 404 not found")
+		},
+		createIssueFn: func(owner, repo, title, body string, assignees []string) (int, string, error) {
+			t.Fatal("CreateIssue must not be called when resuming — even on a resolution failure")
+			return 0, "", nil
+		},
+	}
+	eng := spawnTestEngine(t, client)
+
+	item := planItemWithBlocks(`
+FABRIK_SPAWN_CHILD_BEGIN owner/child
+TITLE: Child one
+Body one.
+FABRIK_SPAWN_CHILD_END
+`)
+	item.Labels = append(item.Labels, spawnChildLabel(1, 101))
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	spawned, err := eng.preImplement(context.Background(), board, item)
+	if err == nil {
+		t.Fatal("expected an error when the recorded child cannot be found")
+	}
+	if spawned {
+		t.Error("expected spawned=false")
+	}
+
+	var pausedAdded bool
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			pausedAdded = true
+		}
+	}
+	if !pausedAdded {
+		t.Fatal("fabrik:paused not added")
+	}
+	if len(client.addCommentCalls) == 0 {
+		t.Fatal("expected a pause comment")
+	}
+	msg := client.addCommentCalls[len(client.addCommentCalls)-1].body
+	wantLabel := spawnChildLabel(1, 101)
+	if !strings.Contains(msg, wantLabel) {
+		t.Errorf("pause comment does not name the marker label %q to remove: %q", wantLabel, msg)
+	}
+}
+
+// TestSpawnChildren_Resume_LiveReadFailure_DefersWithoutPausing mirrors
+// TestPreImplement_RecoveryFails_DefersWithoutPausing for the resume path's
+// own live-read (refreshForSpawnResume): a failed re-read must defer to the
+// next poll, not pause the parent.
+func TestSpawnChildren_Resume_LiveReadFailure_DefersWithoutPausing(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			return errors.New("simulated GraphQL failure")
+		},
+		createIssueFn: func(owner, repo, title, body string, assignees []string) (int, string, error) {
+			t.Fatal("CreateIssue must not be called when the resume live-read fails")
+			return 0, "", nil
+		},
+	}
+	eng := spawnTestEngine(t, client)
+
+	item := planItemWithBlocks(`
+FABRIK_SPAWN_CHILD_BEGIN owner/child
+TITLE: Child one
+Body one.
+FABRIK_SPAWN_CHILD_END
+`)
+	item.Labels = append(item.Labels, spawnChildLabel(1, 101))
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	spawned, err := eng.preImplement(context.Background(), board, item)
+	if !errors.Is(err, errPreImplementDeferred) {
+		t.Fatalf("expected errPreImplementDeferred, got %v", err)
+	}
+	if spawned {
+		t.Error("expected spawned=false on deferred resume")
+	}
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			t.Error("fabrik:paused must not be added on the deferred outcome")
+		}
+	}
+}
+
+// TestSpawnChildren_Resume_CooldownSkipsLiveRead mirrors
+// TestPreImplement_RecoveryDeferred_CooldownSkipsLiveRead for the resume
+// path's own cooldown reason ("spawn-resume-deferred").
+func TestSpawnChildren_Resume_CooldownSkipsLiveRead(t *testing.T) {
+	var fetchCalls int
+	client := &mockGitHubClient{
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			fetchCalls++
+			return nil
+		},
+	}
+	eng := spawnTestEngine(t, client)
+	eng.store.Apply(itemstate.CooldownRecorded{
+		Repo:   "owner/repo",
+		Number: 42,
+		Reason: "spawn-resume-deferred",
+		Until:  time.Now().Add(10 * time.Minute),
+	})
+
+	item := planItemWithBlocks(`
+FABRIK_SPAWN_CHILD_BEGIN owner/child
+TITLE: Child one
+Body one.
+FABRIK_SPAWN_CHILD_END
+`)
+	item.Labels = append(item.Labels, spawnChildLabel(1, 101))
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	spawned, err := eng.preImplement(context.Background(), board, item)
+	if !errors.Is(err, errPreImplementDeferred) {
+		t.Fatalf("expected errPreImplementDeferred, got %v", err)
+	}
+	if spawned {
+		t.Error("expected spawned=false while cooldown is active")
+	}
+	if fetchCalls != 0 {
+		t.Errorf("expected live re-read to be skipped while cooldown is active, got %d calls", fetchCalls)
+	}
+}
+
+// TestSpawnChildren_RetryAfterAddBlockedByIssueFailure_DoesNotDuplicateChild
+// is the unit-level reproduction of the issue's own pinned defect
+// (tests/sim/restart_recovery_test.go's TestRestartRecovery_KillDuringSpawnSequence):
+// AddBlockedByIssue fails after CreateIssue succeeds; simulating the
+// operator's "remove fabrik:paused, re-advance" recovery instruction must
+// resume the same child rather than creating a second one.
+func TestSpawnChildren_RetryAfterAddBlockedByIssueFailure_DoesNotDuplicateChild(t *testing.T) {
+	var createCalls int
+	failBlockedBy := true
+	client := &mockGitHubClient{
+		createIssueFn: func(owner, repo, title, body string, assignees []string) (int, string, error) {
+			createCalls++
+			return 100 + createCalls, fmt.Sprintf("I_child%d", createCalls), nil
+		},
+		fetchProjectItemFn: func(owner, repo string, issueNumber int) (*gh.ProjectItem, error) {
+			return &gh.ProjectItem{ID: fmt.Sprintf("I_child%d", issueNumber-100), Number: issueNumber, Repo: owner + "/" + repo}, nil
+		},
+		addBlockedByIssueFn: func(issueNodeID, blockerNodeID string) error {
+			if failBlockedBy {
+				return fmt.Errorf("simulated AddBlockedByIssue failure")
+			}
+			return nil
+		},
+	}
+	eng := spawnTestEngine(t, client)
+
+	item := planItemWithBlocks(`
+FABRIK_SPAWN_CHILD_BEGIN owner/child
+TITLE: sim restart spawn child
+Body one.
+FABRIK_SPAWN_CHILD_END
+`)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	spawned, err := eng.preImplement(context.Background(), board, item)
+	if err == nil {
+		t.Fatal("expected an error from the injected AddBlockedByIssue failure")
+	}
+	if spawned {
+		t.Error("expected spawned=false")
+	}
+	if createCalls != 1 {
+		t.Fatalf("expected exactly 1 CreateIssue call before the fault fired, got %d", createCalls)
+	}
+
+	// Recover the resume marker the failed attempt wrote, and simulate the
+	// operator's "remove fabrik:paused" recovery instruction by constructing
+	// the next dispatch's item the way a live re-fetch would present it.
+	var markerLabel string
+	for _, c := range client.addLabelCalls {
+		if strings.HasPrefix(c.labelName, spawnChildLabelPrefix) {
+			markerLabel = c.labelName
+		}
+	}
+	if markerLabel == "" {
+		t.Fatal("expected a spawn resume marker to have been written before the fault fired")
+	}
+
+	failBlockedBy = false
+	retryItem := planItemWithBlocks(`
+FABRIK_SPAWN_CHILD_BEGIN owner/child
+TITLE: sim restart spawn child
+Body one.
+FABRIK_SPAWN_CHILD_END
+`)
+	retryItem.Labels = append(retryItem.Labels, markerLabel)
+
+	spawned, err = eng.preImplement(context.Background(), board, retryItem)
+	if err != nil {
+		t.Fatalf("unexpected error on retry: %v", err)
+	}
+	if !spawned {
+		t.Fatal("expected spawned=true on retry")
+	}
+
+	if createCalls != 1 {
+		t.Errorf("expected CreateIssue to still have been called exactly once after the retry (no duplicate child) — got %d", createCalls)
+	}
+	if len(client.addBlockedByIssueCalls) != 2 {
+		t.Errorf("expected 2 AddBlockedByIssue attempts total (1 failed + 1 succeeded), got %d", len(client.addBlockedByIssueCalls))
+	}
+}
+
 // ---- #1263 regression: prose mentions must not destroy real blocks ----
 
 // TestParseSpawnBlocks_ProseMentionDoesNotConsumeRealBlock reproduces the
