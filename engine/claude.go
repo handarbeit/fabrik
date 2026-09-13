@@ -279,6 +279,14 @@ var claudeGHToken string
 // the token's ~1h lifetime can still see a now-expired value for its
 // remaining `gh` calls, since a running child process's environment can't
 // be updated after the fact. See adrs/1713-engine-github-app-auth.md.
+//
+// Single-Engine-per-process assumption: like claudeGHToken/claudeGHHost/
+// claudeAnthropicAPIKey below, this is a package-level global rather than an
+// Engine field — two Engine instances running in the same process would
+// stomp each other's value. That was already true for the plain-scalar vars
+// above; this one is the first to close over per-instance state (a
+// *gh.Client) rather than a plain string, so the same assumption is worth
+// spelling out here explicitly rather than leaving it implicit.
 var claudeGHTokenOverrideFn func() string
 
 // claudeGHHost is the engine's resolved GHES host (Config.GHESHost). Set by
