@@ -63,6 +63,14 @@ type DerivedInstallation struct {
 	// already made this same distinction for the "no client" case —
 	// Installations must make it too, for the same reason.
 	MintError string
+	// PermissionShortfalls (#1709, R2) lists every required permission this
+	// installation's actually-granted permissions don't meet, as determined
+	// by checkGrantedPermissions against the Reconciler's requiredPermissions
+	// (Options.RequiredPermissions). Empty when requiredPermissions is
+	// nil/empty (no check configured) or every requirement is met. Not
+	// populated when MintError is set — a shortfall against no usable client
+	// this round would be redundant with the mint failure already reported.
+	PermissionShortfalls []RequiredPermissionShortfall
 }
 
 // DerivedRepoSet is the result of one Reconciler.Derive call: every repo the
@@ -220,6 +228,7 @@ func (r *Reconciler) derive(ctx context.Context, filter []string, maxRepos int, 
 	privateKey := r.privateKey
 	baseURL := r.baseURL
 	botLogin := r.botLogin
+	requiredPermissions := r.requiredPermissions
 	existingClients := make(map[string]*gh.Client, len(r.clients))
 	for k, v := range r.clients {
 		existingClients[k] = v
@@ -231,6 +240,11 @@ func (r *Reconciler) derive(ctx context.Context, filter []string, maxRepos int, 
 		r.mu.Lock()
 		r.lastDerived = set
 		r.mu.Unlock()
+		// #1709 R3: re-run on every re-derivation trigger, not just
+		// Reconcile's own initial call — this is how a manual App-permission
+		// raise in production gets verified without a restart, since a
+		// pinned Reconciler never reaches the non-pinned loop below.
+		verifyPinnedGrants(baseURL, appID, privateKey, pinnedID, requiredPermissions, logf)
 		return set, nil, nil
 	}
 
@@ -300,7 +314,8 @@ func (r *Reconciler) derive(ctx context.Context, filter []string, maxRepos int, 
 		instSummaries = append(instSummaries, DerivedInstallation{
 			Account: inst.Account, InstallationID: inst.ID,
 			RepositorySelection: inst.RepositorySelection, RepoCount: len(repos),
-			RepoListError: repoListErr,
+			RepoListError:        repoListErr,
+			PermissionShortfalls: checkGrantedPermissions(inst.Permissions, requiredPermissions),
 		})
 	}
 
@@ -377,6 +392,7 @@ func logDerivedSet(set DerivedRepoSet, logf func(format string, args ...any)) {
 			continue
 		}
 		logf("✓ installation %d (%s, repository_selection=%s): %d repo(s) accessible", inst.InstallationID, inst.Account, inst.RepositorySelection, inst.RepoCount)
+		logPermissionShortfalls(inst.InstallationID, inst.Account, inst.PermissionShortfalls, logf)
 	}
 	if len(set.Installations) == 0 {
 		return

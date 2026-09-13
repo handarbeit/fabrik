@@ -134,7 +134,19 @@ type Options struct {
 	// BaseURL selects GitHub's API host. "" = production; tests point it at
 	// an httptest server.
 	BaseURL string
-	Logf    func(format string, args ...any)
+	// RequiredPermissions is the permission set (#1709, R2) every
+	// installation Reconcile discovers or pins is checked against —
+	// compared to that installation's actually-granted permissions
+	// (GET /app/installations[/{id}], never GET /app's merely-requested
+	// ones). A shortfall is logged loudly but never fails Reconcile (see
+	// verifyPinnedGrants and Derive's non-pinned loop) — matching every
+	// other soft, discovery-path verification step in this package
+	// (verifyRepoAccess, logDerivedSet's own warnings). Nil/empty means no
+	// check is performed — this package must never import pruefer (see
+	// doc.go), so the required set is always caller-supplied; Pruefer's own
+	// execute.go passes PrueferRequiredPermissions().
+	RequiredPermissions map[string]string
+	Logf                func(format string, args ...any)
 }
 
 // GitHubAuth is the narrow interface the rest of a caller (e.g. Pruefer's
@@ -197,6 +209,13 @@ type Reconciler struct {
 	// Reconciler's lifetime (restart-only, see above), so this is set once
 	// in Reconcile and never itself changes.
 	pinnedInstallationID int64
+
+	// requiredPermissions mirrors Options.RequiredPermissions (#1709, R2) —
+	// captured once in Reconcile so both the pinned branch (verifyPinnedGrants,
+	// called from Reconcile itself and again from every later derive call) and
+	// the non-pinned discovery loop (derive) can run the same grant check
+	// without a caller needing to pass it in twice. Nil/empty means no check.
+	requiredPermissions map[string]string
 
 	// lastDerived is the result of the most recent Derive call (including
 	// the one Reconcile itself performs) — see LastDerived and Derive's own
@@ -463,6 +482,43 @@ func (r *Reconciler) InstallationCount() int {
 	return len(r.auths)
 }
 
+// verifyPinnedGrants runs #1709's R2 grant-verification check for a
+// pinned-installation Reconciler (opts.AppInstallationID != 0) — the mode
+// derive's own non-pinned discovery loop never covers, since that loop is
+// entirely skipped for a pinned Reconciler (see derivedSetForPinned). Called
+// from two sites so both AC2's "starting Pruefer" wording and R3's "re-run
+// without restart" requirement hold for pinned mode: once from Reconcile
+// itself (startup) and again from derive's own pinned branch (every later
+// re-derivation trigger — the periodic ticker, SIGHUP, an installation
+// webhook).
+//
+// Builds its own JWT and calls gh.FetchAppInstallation directly rather than
+// reusing any already-minted installation token: the installation token is
+// scoped to ordinary REST/GraphQL calls, not the App-JWT-authenticated
+// /app/installations/{id} endpoint. Soft/non-fatal like every other
+// verification step in this package's discovery path — a fetch failure
+// here (transient network error, or the App-auth call itself failing) is
+// logged and swallowed, never propagated, since this issue's own framing
+// treats a permission shortfall (and, by extension, a failure to even check
+// for one) as non-fatal by design; required == nil/empty is a no-op.
+func verifyPinnedGrants(baseURL string, appID int64, privateKey *rsa.PrivateKey, installationID int64, required map[string]string, logf func(format string, args ...any)) {
+	if len(required) == 0 {
+		return
+	}
+	jwt, err := gh.BuildAppJWT(appID, privateKey)
+	if err != nil {
+		logf("! could not verify installation %d's granted permissions: building app JWT failed: %v", installationID, err)
+		return
+	}
+	inst, err := gh.FetchAppInstallation(baseURL, jwt, installationID)
+	if err != nil {
+		logf("! could not verify installation %d's granted permissions: %v", installationID, err)
+		return
+	}
+	shortfalls := checkGrantedPermissions(inst.Permissions, required)
+	logPermissionShortfalls(installationID, inst.Account, shortfalls, logf)
+}
+
 // runManifestFlow is a package var (not a direct call to RunManifestFlow)
 // so tests can assert it is never invoked on the backward-compat path —
 // existing valid local credentials must skip the manifest flow entirely,
@@ -660,6 +716,7 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 		privateKey:           privateKey,
 		baseURL:              opts.BaseURL,
 		pinnedInstallationID: opts.AppInstallationID,
+		requiredPermissions:  opts.RequiredPermissions,
 	}
 
 	// Compat path: a pinned installation ID skips discovery entirely,
@@ -710,6 +767,7 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 		}
 		r.auths = []*Auth{a}
 		r.lastDerived = derivedSetForPinned(opts.WatchedRepos, opts.AppInstallationID)
+		verifyPinnedGrants(opts.BaseURL, appID, privateKey, opts.AppInstallationID, opts.RequiredPermissions, logf)
 		saveInstallationRepoCache(opts.AppStatePath, opts.AppPrivateKeyPath, appID, slug, repoCache, logf)
 		// Unlike the discovery path below (verifyRepoAccess), minting a
 		// token here is the only check this compat path performs — it
