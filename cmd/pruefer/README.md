@@ -215,13 +215,13 @@ To add a second account: repeat [First run: automatic setup](#first-run-automati
 
    Keep the resulting list of `owner/repo` + stage-file pairs at hand — it's the checklist for step 5 below. **If you see an issue pause with no obvious cause shortly after a later step in this runbook, a missed repo from this enumeration is the first thing to check.**
 
-3. **Register a new, private App per additional account (one App per account, per [ADR-1722](../../adrs/1722-app-installation-trust-boundary.md)).** The owning account (`handarbeit`, for the shared App's own history) keeps the original App; every other account (e.g. `verveguy`, `liminisapp`, `shadoworg`) gets its own. For each: run [First run: automatic setup](#first-run-automatic-setup-recommended) in its own working directory, giving it a distinct, globally-unique `github_app_name` (e.g. `verveguy-pruefer`) and a matching `github_app_homepage_url` (see [Configuration reference](#configuration-reference) — `github_app_name` defaults to `pruefer`, which collides across deployments if left unset).
+3. **Register a new, private App per additional account (one App per account, per [ADR-1722](../../adrs/1722-app-installation-trust-boundary.md)).** The owning account (`handarbeit`, for the shared App's own history) keeps the original App; every other account (e.g. `verveguy`, `liminisapp`, `shadoworg`) gets its own. For each: run [First run: automatic setup](#first-run-automatic-setup-recommended) in its own working directory, giving it a distinct, globally-unique `github_app_name` (e.g. `verveguy-pruefer`) and a matching `github_app_homepage_url` (see [Configuration reference](#configuration-reference) — `github_app_name` defaults to `pruefer`, which collides across deployments if left unset). That flow's own last action is to print an install link and have you follow it — going ahead and installing the new App on the target account at this point is fine; installing early creates no hazard on its own (see step 5's note below on what the actual hazard is).
 
-   *Rollback:* the old App is still installed on this account and still reviewing it — nothing about this account's review coverage has changed yet.
+   *Rollback:* the old App is still installed on this account and still reviewing it — nothing about this account's review coverage has changed yet, whether or not the new App has also been installed.
 
 4. **Stand up a daemon per new App.** Each daemon needs its own working directory, its own `.pruefer/app-private-key.pem` and `.pruefer/app-state.json`, its own `github_app_id` (or manifest-created credentials from step 3), and a `served_accounts`/`watched_repos` scoped to that one account only — see [The per-account model](#the-per-account-model-multiple-accounts--multiple-apps) above for the full layout and its rationale (separate rate-limit budgets, separate Claude accounts).
 
-   *Rollback:* same as step 3 — the new daemon isn't reviewing anything yet because its App isn't installed anywhere real yet.
+   *Rollback:* the old App is still installed on this account and still doing all the reviewing — the new daemon isn't yet declared in any `expected_reviewers` list, so nothing depends on it working yet, regardless of whether its App happens to already be installed.
 
 5. **Dual-list `expected_reviewers` for that account's repos — before touching that account's installation.** For every repo step 2 found belonging to the account being migrated, add the new App's bot login *alongside* the old one; do not replace it yet:
 
@@ -236,7 +236,7 @@ To add a second account: repeat [First run: automatic setup](#first-run-automati
 
    In this repo specifically, that means editing `.fabrik/stages/review.yaml:12` and `.fabrik/stages/validate.yaml:12` — but not yet: the new bot login doesn't exist until step 3 has actually run for the account this repo belongs to, so that edit is deferred to when an operator executes this runbook for real, not part of any prior PR's diff.
 
-   **This step must happen before step 6 for the same account, never after** — installing the new App or uninstalling the old one first would briefly leave a stale-only declaration, reproducing the exact hazard dual-listing exists to prevent.
+   **This step must happen before step 6 (uninstalling the old App) for the same account, never after** — uninstalling the old App before dual-listing would briefly leave a stale-only declaration, reproducing the exact hazard dual-listing exists to prevent. Installing the *new* App early (as step 3's manifest flow does by design) is not the hazard: the old App is still installed and still reviewing, so its login alone keeps satisfying the gate until step 6. Only the old App's removal needs to wait.
 
    *Rollback:* this edit alone changes nothing observable — the old App is still installed and still the only one actually reviewing until step 6.
 
@@ -265,7 +265,7 @@ To add a second account: repeat [First run: automatic setup](#first-run-automati
 
 10. **Repeat steps 3–9 for each remaining non-owner account.**
 
-11. **Destroy last — final, irreversible.** Only once *every* non-owner account has moved and step 8 has confirmed a real-PR review for each, delete the old App: **Settings → Developer settings → GitHub Apps → your app → Delete GitHub App.** There is no code path anywhere in this repo that performs this — it is exclusively a manual GitHub UI action. Deletion removes every remaining installation with it, with no undo. Before proceeding, confirm an itemized checklist, one line per account:
+11. **Destroy last — final, irreversible.** Steps 3–10 only migrate *non-owner* accounts — the owning account (`handarbeit`) never gets a replacement App under this runbook, so once every non-owner account has moved, the old App's **only remaining installation is the owner's own**, and every repo still relying on `handarbeit-pruefer` (including this repo's `expected_reviewers`) depends on that installation still working. Before proceeding, confirm an itemized checklist, one line per non-owner account:
 
     ```
     ✅ verveguy    — moved, verveguy-pruefer[bot] reviewed PR #123
@@ -273,7 +273,9 @@ To add a second account: repeat [First run: automatic setup](#first-run-automati
     ✅ shadoworg   — moved, shadoworg-pruefer[bot] reviewed PR #789
     ```
 
-    Only once every account on that checklist is checked off should you delete the old App (or, if GitHub now permits it, flip it to private instead — either is acceptable once no installation but the owner's own remains). Do not attempt to flip it to private before every non-owner installation is gone; GitHub will refuse the change outright.
+    Once every account on that checklist is checked off, **flip the old App to private** (GitHub now permits this, since no non-owner installation remains) — this is the correct default final action: the App keeps its one remaining installation (the owner's), satisfying ADR-1722's one-App-per-account model without touching anything the owner's repos depend on.
+
+    **Deleting the App instead — Settings → Developer settings → GitHub Apps → your app → Delete GitHub App — is *not* equivalent to flipping it to private**, and should only be done if the owner account has *also* been independently migrated (steps 3–9 repeated for `handarbeit` itself, registering a separate new App for it). There is no code path anywhere in this repo that performs deletion — it is exclusively a manual GitHub UI action, and it removes every remaining installation with it, with no undo. At this point in the runbook that remaining installation is the owner's own: deleting without first giving the owner account a replacement App strands every repo that still declares only `handarbeit-pruefer` in `expected_reviewers` — including this repo — with a reviewer identity that can no longer review, the exact hazard this whole runbook exists to prevent, at the one step with no way back.
 
     *There is no rollback past this point* — this is the one step in this runbook where that's true.
 
