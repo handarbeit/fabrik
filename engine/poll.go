@@ -592,6 +592,23 @@ func (e *Engine) Run() error {
 					e.logf(0, "warn", "poll error: %v\n", err)
 				}
 			case <-e.wakeCh:
+				// R1 (#1716): a wake arriving while GraphQL or REST rate-limit
+				// backoff is active must not trigger an immediate poll — that
+				// was the wake-path bypass that turned a throttle into a
+				// self-sustaining outage. Drop the wake; the ticker (already
+				// reset to the correct backed-off interval by the last
+				// PollWithBackoff call) is what eventually re-polls. See
+				// wakeBlockedByRateLimitBackoff's doc comment for why the
+				// legitimate rate-limit-recovery self-wake is unaffected by
+				// this gate. Deliberately does NOT drain ticker.C here (unlike
+				// the non-blocked case below) — an already-pending tick must
+				// still fire on the next loop iteration rather than being
+				// silently discarded along with the dropped wake.
+				if e.wakeBlockedByRateLimitBackoff() {
+					e.logfThrottled("wake-dropped-rate-limit-backoff", 0, "poll",
+						"wake requested — dropped, rate-limit backoff active\n")
+					continue
+				}
 				select {
 				case <-ticker.C:
 				default:
@@ -936,6 +953,22 @@ type PollBackoffResult struct {
 // own ticker and resets it from the returned NextInterval; a test driving
 // this repeatedly has no ticker to reset in the first place.
 func (e *Engine) PollWithBackoff(ctx context.Context, configuredInterval time.Duration) (PollBackoffResult, error) {
+	// R3 (#1716) minimum-poll-interval floor: defense-in-depth against any
+	// wake source — present or future — driving unbounded immediate polls,
+	// independent of R1's wake-path gate above (which this method has no way
+	// to know was even bypassed, by design — see minPollInterval's doc
+	// comment). Placed before the REST gate below so a floor-blocked call
+	// spends nothing: no RateLimitStats() call, no e.poll(). Uses e.now(),
+	// not time.Now(), to stay controllable from tests/sim's injected Clock.
+	if !e.lastPollAttemptAt.IsZero() {
+		if elapsed := e.now().Sub(e.lastPollAttemptAt); elapsed < minPollInterval {
+			e.logfThrottled("poll-floor-blocked", 0, "poll",
+				"poll attempt within %v of the last one — floor-blocked (min interval %v)\n", elapsed, minPollInterval)
+			return PollBackoffResult{NextInterval: minPollInterval - elapsed}, nil
+		}
+	}
+	e.lastPollAttemptAt = e.now()
+
 	// REST/core rate-limit hard gate. The GraphQL-driven interval backoff below
 	// conserves the GraphQL budget (spent by the poll read) but does nothing for
 	// the REST/core budget, which is spent by per-item mutations (reactions,
