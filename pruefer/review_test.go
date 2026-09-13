@@ -43,6 +43,19 @@ type fakeReviewer struct {
 	// head must have zero effect on the review.
 	repoConfigOnlyAtRef string
 
+	// repoSkillData/repoSkillErr/repoSkillOnlyAtRef control FetchFileAtRef's
+	// response for #1446's review-guidance skill path
+	// (DefaultReviewSkillPath), independent of the repoConfig* fields above
+	// (which govern .pruefer/config.yaml, DefaultConfigPath, per #1642) —
+	// ReviewPR now issues one FetchFileAtRef call per path, so a test that
+	// only sets one set of fields must not accidentally "return" the other.
+	// Semantics mirror repoConfig*'s exactly: nil data (the default) means
+	// gh.ErrNotFound (no skill present); repoSkillOnlyAtRef, when non-empty,
+	// restricts repoSkillData to the matching ref only.
+	repoSkillData      []byte
+	repoSkillErr       error
+	repoSkillOnlyAtRef string
+
 	mu             sync.Mutex
 	submitCalls    []submitCall
 	diffCalls      int
@@ -67,16 +80,32 @@ func (f *fakeReviewer) FetchFileAtRef(owner, repo, path, ref string) ([]byte, er
 	f.mu.Lock()
 	f.fileAtRefCalls = append(f.fileAtRefCalls, fileAtRefCall{owner, repo, path, ref})
 	f.mu.Unlock()
-	if f.repoConfigErr != nil {
-		return nil, f.repoConfigErr
-	}
-	if f.repoConfigOnlyAtRef != "" && ref != f.repoConfigOnlyAtRef {
+	switch path {
+	case DefaultConfigPath:
+		if f.repoConfigErr != nil {
+			return nil, f.repoConfigErr
+		}
+		if f.repoConfigOnlyAtRef != "" && ref != f.repoConfigOnlyAtRef {
+			return nil, gh.ErrNotFound
+		}
+		if f.repoConfigData == nil {
+			return nil, gh.ErrNotFound
+		}
+		return f.repoConfigData, nil
+	case DefaultReviewSkillPath:
+		if f.repoSkillErr != nil {
+			return nil, f.repoSkillErr
+		}
+		if f.repoSkillOnlyAtRef != "" && ref != f.repoSkillOnlyAtRef {
+			return nil, gh.ErrNotFound
+		}
+		if f.repoSkillData == nil {
+			return nil, gh.ErrNotFound
+		}
+		return f.repoSkillData, nil
+	default:
 		return nil, gh.ErrNotFound
 	}
-	if f.repoConfigData == nil {
-		return nil, gh.ErrNotFound
-	}
-	return f.repoConfigData, nil
 }
 
 func (f *fakeReviewer) fileAtRefCallArgs() []fileAtRefCall {
@@ -796,14 +825,24 @@ func TestReviewPR_ResolvesRepoConfigAtBaseRef_NotHead(t *testing.T) {
 	}
 
 	calls := client.fileAtRefCallArgs()
-	if len(calls) != 1 {
-		t.Fatalf("FetchFileAtRef called %d times, want 1", len(calls))
+	// ReviewPR now fetches both the repo-resident config (#1642) and the
+	// review-guidance skill (#1446) via FetchFileAtRef — two calls, one per
+	// path, both required to target the base ref.
+	if len(calls) != 2 {
+		t.Fatalf("FetchFileAtRef called %d times, want 2 (repo config + review skill)", len(calls))
 	}
-	if calls[0].ref != "main" {
-		t.Errorf("FetchFileAtRef called with ref = %q, want the PR's BaseRef %q (never HeadSHA)", calls[0].ref, "main")
+	seenPaths := map[string]bool{}
+	for _, c := range calls {
+		if c.ref != "main" {
+			t.Errorf("FetchFileAtRef(%q) called with ref = %q, want the PR's BaseRef %q (never HeadSHA)", c.path, c.ref, "main")
+		}
+		seenPaths[c.path] = true
 	}
-	if calls[0].path != DefaultConfigPath {
-		t.Errorf("FetchFileAtRef called with path = %q, want %q", calls[0].path, DefaultConfigPath)
+	if !seenPaths[DefaultConfigPath] {
+		t.Errorf("FetchFileAtRef was never called with path %q", DefaultConfigPath)
+	}
+	if !seenPaths[DefaultReviewSkillPath] {
+		t.Errorf("FetchFileAtRef was never called with path %q", DefaultReviewSkillPath)
 	}
 }
 

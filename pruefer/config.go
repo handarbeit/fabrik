@@ -26,7 +26,15 @@ const (
 	DefaultConcurrencyCap = 3
 	DefaultMaxDiffBytes   = 500_000 // 500 KB
 	DefaultConfigPath     = ".pruefer/config.yaml"
-	DefaultPrivateKeyPath = ".pruefer/app-private-key.pem"
+	// DefaultReviewSkillPath is where Pruefer looks for a repo-resident
+	// review-guidance skill (#1446), resolved at the PR's base ref via the
+	// same FetchFileAtRef primitive and base-ref doctrine as
+	// DefaultConfigPath (#1642) — see adrs/1446-pruefer-review-guidance-skill.md.
+	// Deliberately a distinct sub-path from DefaultConfigPath: the skill is
+	// freeform prose guidance, not a narrowing config schema, and mirrors
+	// Fabrik's own plugin skill layout (skills/<name>/SKILL.md).
+	DefaultReviewSkillPath = ".pruefer/skills/review/SKILL.md"
+	DefaultPrivateKeyPath  = ".pruefer/app-private-key.pem"
 	// DefaultAppStatePath is where the auth reconciler persists its own
 	// non-key metadata (App ID once manifest-created, slug, webhook secret,
 	// client ID/secret, installation cache) — see internal/githubauth.
@@ -168,6 +176,26 @@ type Config struct {
 	// severityRank's doc comment).
 	RequestChangesThreshold Severity `reload:"live"`
 
+	// ReviewGuidance is the operator-level override layer of #1446's review
+	// guidance composition (R3) — a middle layer between the embedded
+	// default guidance in claude.go and a repo's own
+	// .pruefer/skills/review/SKILL.md. Empty (the default) means no
+	// operator override is configured, leaving the embedded default as the
+	// base layer unchanged. Unlike the repo skill (untrusted-ish input,
+	// always degrades — see reviewguidance.go), this is operator-authored
+	// config: LoadConfig validates ReviewGuidanceMode and fails loud on an
+	// unrecognized value, the same treatment RequestChangesThreshold above
+	// already gets.
+	ReviewGuidance string `reload:"live"`
+	// ReviewGuidanceMode governs how ReviewGuidance composes onto the
+	// embedded default guidance: GuidanceModeAppend (the default when
+	// empty) concatenates it after the default; GuidanceModeReplace
+	// substitutes the default entirely. Never affects the Go-owned contract
+	// half (no-approval-language rule, output format) or Go-supplied
+	// dynamic context (PR body, base branch, prior review threads) — see
+	// resolveGuidance in claude.go and adrs/1446-pruefer-review-guidance-skill.md.
+	ReviewGuidanceMode string `reload:"live"`
+
 	// TUI controls whether Execute launches the bubbletea dashboard. Default
 	// true; -notui / PRUEFER_TUI=0 / config.yaml's `tui: false` disable it,
 	// mirroring cmd/root.go's --notui/FABRIK_TUI convention. Execute further
@@ -295,17 +323,21 @@ type yamlConfig struct {
 	ExcludedPaths           []string `yaml:"excluded_paths"`
 	ExcludedLabels          []string `yaml:"excluded_labels"`
 	RequestChangesThreshold string   `yaml:"request_changes_threshold"`
-	AppID                   *int64   `yaml:"github_app_id"`
-	AppPrivateKeyPath       string   `yaml:"github_app_private_key_path"`
-	AppInstallationID       *int64   `yaml:"github_app_installation_id"`
-	AppStatePath            string   `yaml:"github_app_state_path"`
-	AppName                 string   `yaml:"github_app_name"`
-	AppHomepageURL          string   `yaml:"github_app_homepage_url"`
-	NoBrowser               *bool    `yaml:"no_browser"`
-	TUI                     *bool    `yaml:"tui"`
-	LogFile                 *string  `yaml:"log_file"`
-	AutoUpgrade             *bool    `yaml:"auto_upgrade"`
-	MaxDerivedRepos         *int     `yaml:"max_derived_repos"`
+	// ReviewGuidance/ReviewGuidanceMode are #1446's operator-level review
+	// guidance override — see Config.ReviewGuidance's doc comment.
+	ReviewGuidance     string  `yaml:"review_guidance"`
+	ReviewGuidanceMode string  `yaml:"review_guidance_mode"`
+	AppID              *int64  `yaml:"github_app_id"`
+	AppPrivateKeyPath  string  `yaml:"github_app_private_key_path"`
+	AppInstallationID  *int64  `yaml:"github_app_installation_id"`
+	AppStatePath       string  `yaml:"github_app_state_path"`
+	AppName            string  `yaml:"github_app_name"`
+	AppHomepageURL     string  `yaml:"github_app_homepage_url"`
+	NoBrowser          *bool   `yaml:"no_browser"`
+	TUI                *bool   `yaml:"tui"`
+	LogFile            *string `yaml:"log_file"`
+	AutoUpgrade        *bool   `yaml:"auto_upgrade"`
+	MaxDerivedRepos    *int    `yaml:"max_derived_repos"`
 	// RepoRederivationInterval is a Go duration string (e.g. "10m"),
 	// matching reconciliation.fallback_interval's own convention below,
 	// unlike this file's other duration fields (which use a "_seconds" int
@@ -359,6 +391,8 @@ type flagValues struct {
 	excludedPaths           string
 	excludedLabels          string
 	requestChangesThreshold string
+	reviewGuidance          string
+	reviewGuidanceMode      string
 	appID                   int64
 	appPrivateKeyPath       string
 	appInstallationID       int64
@@ -401,6 +435,8 @@ func LoadConfig(args []string) (Config, error) {
 	fs.StringVar(&fv.excludedPaths, "excluded-paths", "", "Comma-separated path globs, filtered per file before max_diff_bytes is measured; a PR is skipped whole only if all touched paths match")
 	fs.StringVar(&fv.excludedLabels, "excluded-labels", "", "Comma-separated labels to skip (any match)")
 	fs.StringVar(&fv.requestChangesThreshold, "request-changes-threshold", "", "Severity tier (low, medium, high, critical) at or above which Pruefer submits REQUEST_CHANGES instead of COMMENT; empty disables severity-gated REQUEST_CHANGES entirely")
+	fs.StringVar(&fv.reviewGuidance, "review-guidance", "", "Operator-level review guidance text, composed onto the embedded default (and, per repo, a repo's own .pruefer/skills/review/SKILL.md) per -review-guidance-mode")
+	fs.StringVar(&fv.reviewGuidanceMode, "review-guidance-mode", "", "How -review-guidance composes onto the embedded default guidance: append (default) or replace")
 	fs.Int64Var(&fv.appID, "github-app-id", 0, "GitHub App ID")
 	fs.StringVar(&fv.appPrivateKeyPath, "github-app-private-key-path", "", "Path to the GitHub App's PEM private key")
 	fs.Int64Var(&fv.appInstallationID, "github-app-installation-id", 0, "GitHub App installation ID (0 = auto-discover)")
@@ -469,6 +505,12 @@ func LoadConfig(args []string) (Config, error) {
 	}
 	if yc.RequestChangesThreshold != "" {
 		cfg.RequestChangesThreshold = Severity(yc.RequestChangesThreshold)
+	}
+	if yc.ReviewGuidance != "" {
+		cfg.ReviewGuidance = yc.ReviewGuidance
+	}
+	if yc.ReviewGuidanceMode != "" {
+		cfg.ReviewGuidanceMode = yc.ReviewGuidanceMode
 	}
 	if yc.TUI != nil {
 		cfg.TUI = *yc.TUI
@@ -594,6 +636,12 @@ func LoadConfig(args []string) (Config, error) {
 	if explicit["request-changes-threshold"] {
 		cfg.RequestChangesThreshold = Severity(fv.requestChangesThreshold)
 	}
+	if explicit["review-guidance"] {
+		cfg.ReviewGuidance = fv.reviewGuidance
+	}
+	if explicit["review-guidance-mode"] {
+		cfg.ReviewGuidanceMode = fv.reviewGuidanceMode
+	}
 	if explicit["github-app-id"] {
 		cfg.AppID = fv.appID
 	}
@@ -662,6 +710,14 @@ func LoadConfig(args []string) (Config, error) {
 		return Config{}, fmt.Errorf("request_changes_threshold: %q is not a recognized severity tier (must be one of low, medium, high, critical, or empty to disable)", cfg.RequestChangesThreshold)
 	}
 
+	// ReviewGuidanceMode is operator-authored config, not untrusted repo
+	// content — a typo is worth catching at startup (fail loud), unlike the
+	// repo skill's own mode value, which always degrades instead (see
+	// reviewguidance.go's normalizeGuidanceMode).
+	if cfg.ReviewGuidanceMode != "" && cfg.ReviewGuidanceMode != GuidanceModeAppend && cfg.ReviewGuidanceMode != GuidanceModeReplace {
+		return Config{}, fmt.Errorf("review_guidance_mode: %q is not recognized (must be %q, %q, or empty to default to %q)", cfg.ReviewGuidanceMode, GuidanceModeAppend, GuidanceModeReplace, GuidanceModeAppend)
+	}
+
 	return cfg, nil
 }
 
@@ -711,6 +767,12 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("PRUEFER_REQUEST_CHANGES_THRESHOLD"); v != "" {
 		cfg.RequestChangesThreshold = Severity(v)
+	}
+	if v := os.Getenv("PRUEFER_REVIEW_GUIDANCE"); v != "" {
+		cfg.ReviewGuidance = v
+	}
+	if v := os.Getenv("PRUEFER_REVIEW_GUIDANCE_MODE"); v != "" {
+		cfg.ReviewGuidanceMode = v
 	}
 	if v := os.Getenv("PRUEFER_GITHUB_APP_ID"); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
