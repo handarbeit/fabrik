@@ -53,10 +53,13 @@ func engineGitHubAppStatePath(fabrikDir string) string {
 //
 // This is a hand-maintained correspondence with the engine's actual API
 // usage (mirroring internal/githubauth's own requiredPermissions doc
-// comment) — verified against a real installation's granted-permissions
-// JSON per #770's methodology; if the engine starts using a new GitHub API
-// needing a permission not yet listed here, this check will pass while a
-// genuinely new gap goes undetected until that feature's first use.
+// comment), derived from engine.GitHubClient's method set rather than
+// confirmed against a real installation's granted-permissions JSON per
+// #770's methodology — that verification is a tracked follow-up, not yet
+// done (see #1713's PR description). If the engine starts using a new
+// GitHub API needing a permission not yet listed here, this check will
+// pass while a genuinely new gap goes undetected until that feature's
+// first use — the same is true if any key below turns out to be wrong.
 func engineRequiredGitHubAppPermissions(webhooksEnabled bool) map[string]string {
 	perms := map[string]string{
 		"metadata":              "read",
@@ -204,17 +207,25 @@ func refuseUserOwnedBoardForAppAuth(client *gh.Client, owner string) error {
 func setUpGitHubAppAuth(ctx context.Context, cfg Config, fabrikDir, baseURL string) (*gh.Client, *githubauth.Reconciler, error) {
 	required := engineRequiredGitHubAppPermissions(cfg.Webhooks)
 
+	// Options.RequiredPermissions is deliberately left unset here (rather
+	// than passed required): Reconcile's own verifyPinnedGrants would only
+	// use it for ADR-1709's soft, log-only check — a second
+	// GET /app/installations/{id} round trip whose entire effect (logging a
+	// shortfall) is strictly subsumed by VerifyGrants' fail-hard check
+	// below, which runs moments later against the same required set and
+	// fails startup outright instead of merely logging. Skipping it here
+	// avoids minting a redundant JWT and making a duplicate API call on
+	// every startup for no additional coverage.
 	reconciler, err := githubauth.Reconcile(ctx, githubauth.Options{
-		AppID:               cfg.GitHubAppID,
-		AppInstallationID:   cfg.GitHubAppInstallationID,
-		AppPrivateKeyPath:   cfg.GitHubAppPrivateKeyPath,
-		AppStatePath:        engineGitHubAppStatePath(fabrikDir),
-		WatchedRepos:        []string{cfg.Owner + "/*"},
-		BaseURL:             baseURL, // "" in production (github.com); tests point this at an httptest server
-		AppName:             engineGitHubAppName,
-		AppHomepageURL:      engineGitHubAppHomepageURL,
-		RequiredPermissions: required,
-		Logf:                func(format string, args ...any) { fmt.Printf("[startup] github-app: "+format+"\n", args...) },
+		AppID:             cfg.GitHubAppID,
+		AppInstallationID: cfg.GitHubAppInstallationID,
+		AppPrivateKeyPath: cfg.GitHubAppPrivateKeyPath,
+		AppStatePath:      engineGitHubAppStatePath(fabrikDir),
+		WatchedRepos:      []string{cfg.Owner + "/*"},
+		BaseURL:           baseURL, // "" in production (github.com); tests point this at an httptest server
+		AppName:           engineGitHubAppName,
+		AppHomepageURL:    engineGitHubAppHomepageURL,
+		Logf:              func(format string, args ...any) { fmt.Printf("[startup] github-app: "+format+"\n", args...) },
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("reconciling GitHub App auth: %w", err)
