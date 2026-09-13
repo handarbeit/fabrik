@@ -145,11 +145,58 @@ FABRIK_TOKEN=ghp_...
 
 ### Create a Project Board
 
-Create a GitHub Project (v2) for your repository. Add board columns that correspond to
+**Recommended (organization-owned repos): let Fabrik create it.** Fabrik's most common
+onboarding failure has always been a hand-built board whose column names don't exactly
+match the stage names in `.fabrik/stages/*.yaml` — a human retyping nine names into
+GitHub's UI. `fabrik init --create-board` removes that step entirely: it creates a fully
+configured Project (v2) board directly from the stage configs it just extracted, in
+stage order, linked to your repository, so the board and your stage configs can never
+disagree.
+
+```bash
+./fabrik init --create-board --owner your-org --repo your-repo
+```
+
+This requires a GitHub token (`--token`, `FABRIK_TOKEN`, or `GITHUB_TOKEN`) with `repo`
+and `project` scopes, same as the daemon itself. On success it writes the new project's
+number, owner, and owner type into `.fabrik/config.yaml` for you. `--title` sets the
+board's title (default: `"<repo> Fabrik Pipeline"`).
+
+This works with an ordinary personal access token as well as a GitHub App token, so it
+is available to every user today — it does **not** depend on GitHub App support (#770).
+It is **organization-owned repos only**: Fabrik refuses explicitly, naming the reason,
+if `--owner` resolves to a user account rather than an organization (see [Repairing an
+Existing Board](#repairing-an-existing-board) below for the same restriction on repair).
+
+**Manual setup (user-owned repos, or if you prefer to build it by hand):** create a
+GitHub Project (v2) for your repository yourself. Add board columns that correspond to
 your stage names -- the column name must match the `name` field in each stage YAML file
 exactly (case-sensitive). The default pipeline uses:
 
 `Backlog` -> `Specify` -> `Research` -> `Plan` -> `Implement` -> `Review` -> `Validate` -> `Done`
+
+Then edit `.fabrik/config.yaml`'s `owner`, `repo`, `project`, and `owner_type` to point at
+it (see [First Run](#first-run) below).
+
+### Repairing an Existing Board
+
+If you add a stage after your board was already created — or your board predates a
+`fabrik init` that would have created it with every stage's column — `fabrik
+repair-board` adds the missing columns without disturbing anything already on the
+board:
+
+```bash
+./fabrik repair-board          # dry run: prints which columns are missing, changes nothing
+./fabrik repair-board --apply   # adds the missing columns
+```
+
+Repair never removes a column and never reorders existing ones. Most importantly, it
+never regenerates an existing column's underlying id — doing so would silently clear
+every item's Status, since GitHub's `updateProjectV2Field` mutation replaces the entire
+option list in one call. Repair always echoes back every existing option's id
+unchanged and only appends the columns your stage configs are missing, so no item ever
+loses its place in the pipeline. Like board creation, repair is organization-owned
+repos only, and refuses explicitly on a user-owned board.
 
 ### Compatibility Notes
 
@@ -442,7 +489,7 @@ fetch`.
 
 On startup, Fabrik attempts to fetch the project board and status field so it can compare stage names in your YAML configs against the column names on the board. When that metadata is fetched successfully, any non-cleanup stage missing from the board causes Fabrik to exit with a detailed error listing the mismatched names — catching config drift before any work begins. Extra board columns without a matching stage produce a warning but do not block startup. If Fabrik cannot fetch the board or status field, it logs a warning and continues without blocking startup.
 
-See [§11 Troubleshooting → Startup Board Validation Failure](#startup-board-validation-failure) if validation succeeds and reports a mismatch.
+See [§11 Troubleshooting → Startup Board Validation Failure](#startup-board-validation-failure) if validation succeeds and reports a mismatch — `fabrik repair-board --apply` (see [Repairing an Existing Board](#repairing-an-existing-board)) is the fastest fix for a missing-column report on an organization-owned board.
 
 **Board-drift warning scan:** In addition to name-matching, Fabrik scans all board items on startup and checks for cards that carry a cleanup-stage complete label (e.g. `stage:Done:complete`) but whose current board column does not yet reflect the completed stage. For each such item, Fabrik emits a warning log line:
 
@@ -3415,7 +3462,7 @@ Fabrik requires a **classic** personal access token (`ghp_...`). Fine-grained to
 
 On every startup, Fabrik fetches the project board and compares stage names in `.fabrik/stages/*.yaml` to the column names on the board. If any non-cleanup stage is missing from the board, Fabrik exits with an error listing the mismatched names.
 
-To fix: ensure stage YAML `name` fields match board column names exactly (case-sensitive). If you renamed a column on the board, update the matching stage YAML. Extra board columns (with no matching stage) produce a warning but don't block startup.
+To fix: on an organization-owned board, run `fabrik repair-board --apply` (see [Repairing an Existing Board](#repairing-an-existing-board)) to add the missing columns without disturbing any item's current Status. Otherwise, ensure stage YAML `name` fields match board column names exactly (case-sensitive) — if you renamed a column on the board, update the matching stage YAML instead. Extra board columns (with no matching stage) produce a warning but don't block startup.
 
 ### Stage YAML Drift Warning
 
