@@ -1239,13 +1239,16 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	e.logf(0, "poll", "found %d items on board\n", len(board.Items))
 
 	// Report rate limit stats when we have seen at least one response.
+	// R4 (#1716): throttled — these three lines otherwise repeat verbatim on
+	// every single poll cycle, which is exactly the alternating-line spam a
+	// rate-limited daemon produced (39 lines/sec sustained, 14 MB/hour).
 	restStats, graphqlStats := e.client.RateLimitStats()
 	if restStats.Limit > 0 {
 		resetStr := "unknown"
 		if !restStats.Reset.IsZero() {
 			resetStr = restStats.Reset.Local().Format("15:04")
 		}
-		e.logf(0, "poll", "rate limit REST: %d/%d remaining, resets at %s\n",
+		e.logfThrottled("poll-rate-limit-rest", 0, "poll", "rate limit REST: %d/%d remaining, resets at %s\n",
 			restStats.Remaining, restStats.Limit, resetStr)
 	}
 	if graphqlStats.Limit > 0 {
@@ -1253,10 +1256,11 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		if !graphqlStats.Reset.IsZero() {
 			resetStr = graphqlStats.Reset.Local().Format("15:04")
 		}
-		e.logf(0, "poll", "rate limit GraphQL: %d/%d remaining, resets at %s\n",
+		e.logfThrottled("poll-rate-limit-graphql", 0, "poll", "rate limit GraphQL: %d/%d remaining, resets at %s\n",
 			graphqlStats.Remaining, graphqlStats.Limit, resetStr)
 		if float64(graphqlStats.Remaining)/float64(graphqlStats.Limit) < rateLimitBackoffThreshold {
-			e.logf(0, "warn", "GraphQL rate limit is low (%d/%d remaining, %.0f%% threshold) — consider reducing poll frequency\n",
+			e.logfThrottled("poll-rate-limit-graphql-low", 0, "warn",
+				"GraphQL rate limit is low (%d/%d remaining, %.0f%% threshold) — consider reducing poll frequency\n",
 				graphqlStats.Remaining, graphqlStats.Limit, rateLimitBackoffThreshold*100)
 		}
 	}
