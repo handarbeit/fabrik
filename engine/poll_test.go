@@ -3873,3 +3873,129 @@ func TestLogClaudeConfigDir_UnreadableAccountDegradesToDirectoryOnly(t *testing.
 		})
 	}
 }
+
+// TestPollWithBackoff_MinPollIntervalFloor is the R3 unit test (#1716): two
+// PollWithBackoff calls at the identical injected clock time must not both
+// reach e.poll() — the second is floor-blocked. A third call after
+// minPollInterval has elapsed must go through normally.
+func TestPollWithBackoff_MinPollIntervalFloor(t *testing.T) {
+	var fetchCount int32
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			atomic.AddInt32(&fetchCount, 1)
+			return &gh.ProjectBoard{}, nil
+		},
+		rateLimitStatsFn: func() (gh.RateLimitStats, gh.RateLimitStats) {
+			healthy := gh.RateLimitStats{Remaining: 5000, Limit: 5000, Reset: time.Now().Add(time.Hour)}
+			return healthy, healthy
+		},
+	}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	fixed := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	eng.SetClock(stubClock{t: fixed})
+
+	result, err := eng.PollWithBackoff(context.Background(), 30*time.Second)
+	if err != nil {
+		t.Fatalf("first PollWithBackoff: %v", err)
+	}
+	if got := atomic.LoadInt32(&fetchCount); got != 1 {
+		t.Fatalf("after first call, fetchCount = %d, want 1", got)
+	}
+
+	// Same injected time as the first call — floor-blocked.
+	result, err = eng.PollWithBackoff(context.Background(), 30*time.Second)
+	if err != nil {
+		t.Fatalf("second (floor-blocked) PollWithBackoff: %v", err)
+	}
+	if got := atomic.LoadInt32(&fetchCount); got != 1 {
+		t.Errorf("after second call at the same instant, fetchCount = %d, want 1 (floor should have blocked it)", got)
+	}
+	if result.NextInterval != minPollInterval {
+		t.Errorf("floor-blocked NextInterval = %v, want %v (zero elapsed since last attempt)", result.NextInterval, minPollInterval)
+	}
+
+	// Advance past the floor — the third call must go through.
+	eng.SetClock(stubClock{t: fixed.Add(minPollInterval + time.Millisecond)})
+	_, err = eng.PollWithBackoff(context.Background(), 30*time.Second)
+	if err != nil {
+		t.Fatalf("third PollWithBackoff: %v", err)
+	}
+	if got := atomic.LoadInt32(&fetchCount); got != 2 {
+		t.Errorf("after third call past the floor, fetchCount = %d, want 2", got)
+	}
+}
+
+// TestPollWithBackoff_RecoverySelfWake_NotBlockedByBackoffGate guards the
+// ordering property wakeBlockedByRateLimitBackoff's doc comment relies on:
+// by the time the legitimate rate-limit-recovery self-wake (sent inside
+// PollWithBackoff's own GraphQL hysteresis block) could be consumed by
+// Run()'s select loop, e.backoffRateLimitLow has already settled to false —
+// so R1's gate does not block it. Drives PollWithBackoff directly, twice
+// (per the Plan's stated approach), rather than the full Run() goroutine —
+// this is a property of PollWithBackoff's own synchronous state transitions,
+// not of Run()'s scheduling.
+func TestPollWithBackoff_RecoverySelfWake_NotBlockedByBackoffGate(t *testing.T) {
+	// rateLimitStatsFn is called twice per PollWithBackoff cycle (once for
+	// the REST gate, before e.poll() runs; once for the GraphQL hysteresis,
+	// after). fetchCount — incremented inside e.poll()'s board fetch, which
+	// runs strictly between those two reads — is used as an implicit clock
+	// to tell them apart: fetchCount==1 means "the GraphQL read immediately
+	// following poll cycle 1", fetchCount==2 means "...following cycle 2".
+	var fetchCount int32
+	future := time.Now().Add(time.Hour)
+	healthy := gh.RateLimitStats{Remaining: 5000, Limit: 5000, Reset: future}
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			atomic.AddInt32(&fetchCount, 1)
+			return &gh.ProjectBoard{}, nil
+		},
+		rateLimitStatsFn: func() (gh.RateLimitStats, gh.RateLimitStats) {
+			graphql := healthy
+			switch atomic.LoadInt32(&fetchCount) {
+			case 1:
+				// GraphQL read following cycle 1's poll: near-zero — activates backoff.
+				graphql = gh.RateLimitStats{Remaining: 0, Limit: 5000, Reset: future}
+			case 2:
+				// GraphQL read following cycle 2's poll: recovered — triggers the
+				// clear transition and, since the last-seen remaining was
+				// near-zero, the recovery self-wake.
+				graphql = gh.RateLimitStats{Remaining: 4500, Limit: 5000, Reset: future}
+			}
+			return healthy, graphql
+		},
+	}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	wakeCh := make(chan struct{}, 1)
+	eng.SetWakeCh(wakeCh)
+
+	fixed := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	eng.SetClock(stubClock{t: fixed})
+	if _, err := eng.PollWithBackoff(context.Background(), 30*time.Second); err != nil {
+		t.Fatalf("first PollWithBackoff: %v", err)
+	}
+	if !eng.backoffRateLimitLow {
+		t.Fatal("expected backoffRateLimitLow=true after first (near-zero) call")
+	}
+
+	// Advance the clock past the R3 floor before the second call.
+	eng.SetClock(stubClock{t: fixed.Add(minPollInterval + time.Millisecond)})
+	if _, err := eng.PollWithBackoff(context.Background(), 30*time.Second); err != nil {
+		t.Fatalf("second PollWithBackoff: %v", err)
+	}
+	if eng.backoffRateLimitLow {
+		t.Fatal("expected backoffRateLimitLow=false after second (recovered) call")
+	}
+
+	select {
+	case <-wakeCh:
+	default:
+		t.Fatal("expected a recovery self-wake to have been queued on wakeCh")
+	}
+
+	// This is the property Run()'s select loop actually relies on: by the
+	// time a queued wake would be consumed, the gate must already read as
+	// unblocked.
+	if eng.wakeBlockedByRateLimitBackoff() {
+		t.Error("wakeBlockedByRateLimitBackoff() is true after recovery — the legitimate recovery wake would be incorrectly dropped")
+	}
+}

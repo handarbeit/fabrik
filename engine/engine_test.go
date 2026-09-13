@@ -8,12 +8,14 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/itemstate"
+	"github.com/handarbeit/fabrik/tui"
 )
 
 func TestItemNeedsWork_SkipsPaused(t *testing.T) {
@@ -347,6 +349,128 @@ func TestRun_ShutdownOnSignal(t *testing.T) {
 
 	// Wait for Run to register signal handlers before sending SIGINT.
 	<-readyCh
+	p, _ := os.FindProcess(os.Getpid())
+	p.Signal(syscall.SIGINT)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not shut down in time")
+	}
+}
+
+// TestRun_WakeDuringRateLimitBackoff_DropsWake is #1716's acceptance test
+// (R1): with GraphQL rate-limit backoff active, a burst of wake signals must
+// produce no additional polls until the backoff interval elapses. Drives the
+// real Run() goroutine (not PollWithBackoff directly) so the assertion
+// exercises the actual production wiring — Run()'s select loop — rather
+// than just the gate function in isolation (covered separately by
+// TestWakeBlockedByRateLimitBackoff and the PollWithBackoff-direct tests in
+// poll_test.go).
+//
+// Neutralization: this test is red if wakeBlockedByRateLimitBackoff's check
+// is removed from Run()'s case <-e.wakeCh: branch — confirmed by hand while
+// writing this test (temporarily reverting the poll.go gate reproduces a
+// fetchCount > 1 failure here), not asserted by the test itself, since a
+// self-disabling guard can't prove its own necessity.
+//
+// The wake burst spans longer than minPollInterval (R3's independent 500ms
+// floor) specifically so this test cannot pass merely because R3 also
+// happens to suppress the same window — if R1's gate were removed, a wake
+// sent after the floor has cleared would still reach doPollCycle and
+// increment fetchCount, going red.
+func TestRun_WakeDuringRateLimitBackoff_DropsWake(t *testing.T) {
+	var fetchCount int32
+	future := time.Now().Add(time.Hour)
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			atomic.AddInt32(&fetchCount, 1)
+			return &gh.ProjectBoard{}, nil
+		},
+		rateLimitStatsFn: func() (gh.RateLimitStats, gh.RateLimitStats) {
+			rest := gh.RateLimitStats{Remaining: 5000, Limit: 5000, Reset: future}
+			graphql := gh.RateLimitStats{Remaining: 0, Limit: 5000, Reset: future} // near-zero, sustained
+			return rest, graphql
+		},
+	}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	eng.cfg.PollSeconds = 300 // long enough the ticker itself won't fire during the test
+
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	eng.fabrikDir = dir
+
+	readyCh := make(chan struct{})
+	eng.cfg.ReadyCh = readyCh
+
+	// Drain events so PollWithBackoff's blocking emitStructural(PollCompletedEvent)
+	// never stalls Run(), and to detect when poll cycle 1 (which activates
+	// backoff) has finished.
+	events := make(chan tui.Event, 32)
+	eng.events = events
+	firstPollDone := make(chan struct{})
+	var once sync.Once
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for {
+			select {
+			case ev := <-events:
+				if _, ok := ev.(tui.PollCompletedEvent); ok {
+					once.Do(func() { close(firstPollDone) })
+				}
+			case <-stop:
+				return
+			}
+		}
+	}()
+
+	wakeCh := make(chan struct{}, 1)
+	eng.SetWakeCh(wakeCh)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- eng.Run()
+	}()
+
+	<-readyCh
+
+	select {
+	case <-firstPollDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("poll cycle 1 (establishing rate-limit backoff) did not complete in time")
+	}
+
+	if !eng.backoffRateLimitLow {
+		t.Fatal("expected backoffRateLimitLow=true after poll cycle 1 (near-zero GraphQL budget)")
+	}
+	baseline := atomic.LoadInt32(&fetchCount)
+	if baseline != 1 {
+		t.Fatalf("fetchCount after cycle 1 = %d, want 1", baseline)
+	}
+
+	// Burst wakes across a window comfortably longer than minPollInterval
+	// (500ms) — see the neutralization note above for why.
+	burstDeadline := time.Now().Add(900 * time.Millisecond)
+	for time.Now().Before(burstDeadline) {
+		select {
+		case wakeCh <- struct{}{}:
+		default:
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	// Give any wrongly-triggered poll time to actually run and record itself.
+	time.Sleep(200 * time.Millisecond)
+
+	if got := atomic.LoadInt32(&fetchCount); got != baseline {
+		t.Errorf("fetchCount after wake burst during active backoff = %d, want %d (no poll should have occurred)", got, baseline)
+	}
+
 	p, _ := os.FindProcess(os.Getpid())
 	p.Signal(syscall.SIGINT)
 
