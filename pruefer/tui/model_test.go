@@ -148,6 +148,15 @@ func TestModel_SignatureDriftRoutesToFooter(t *testing.T) {
 	}
 }
 
+func TestModel_UnrecognizedInstallationsRoutesToFooter(t *testing.T) {
+	m := New(nil, time.Now())
+	next, _ := m.Update(UnrecognizedInstallationsEvent{Accounts: []string{"kolfadser1"}, Count: 1})
+	m = next.(Model)
+	if got := m.footer.UnrecognizedInstallationsCount(); got != 1 {
+		t.Errorf("footer.UnrecognizedInstallationsCount() = %d, want 1 after routing UnrecognizedInstallationsEvent", got)
+	}
+}
+
 func TestModel_TickAdvancesHeaderClock(t *testing.T) {
 	start := time.Now()
 	m := New(nil, start)

@@ -26,6 +26,13 @@ type FooterComponent struct {
 
 	dropCounts     map[string]int
 	sigDriftActive bool
+
+	// unrecognizedAccounts/unrecognizedCount mirror the most recently
+	// received UnrecognizedInstallationsEvent (#1722, R5) — a level, not a
+	// delta, so the banner clears the moment a re-derivation reports the
+	// count back to zero.
+	unrecognizedAccounts []string
+	unrecognizedCount    int
 }
 
 // Drop-reason category strings mirroring events.DropReason's constants
@@ -72,6 +79,9 @@ func (f FooterComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
 		f.dropCounts[ev.Reason] = ev.Total
 	case SignatureDriftEvent:
 		f.sigDriftActive = ev.Active
+	case UnrecognizedInstallationsEvent:
+		f.unrecognizedAccounts = append([]string(nil), ev.Accounts...)
+		f.unrecognizedCount = ev.Count
 	}
 	return f, nil
 }
@@ -127,6 +137,18 @@ func (f FooterComponent) driftBannerSegment() string {
 	return failStyle.Bold(true).Render("⚠ SIGNATURE DRIFT — check webhook secret")
 }
 
+// unrecognizedInstallationsBannerSegment renders a high-contrast banner
+// while any App installation is currently unrecognized (#1722, R5), naming
+// the affected account(s) so an operator sees it without reading the log —
+// mirroring driftBannerSegment's shape. "" when unrecognizedCount is 0.
+func (f FooterComponent) unrecognizedInstallationsBannerSegment() string {
+	if f.unrecognizedCount == 0 {
+		return ""
+	}
+	plain := fmt.Sprintf("⚠ UNRECOGNIZED INSTALLATION: %s", strings.Join(f.unrecognizedAccounts, ", "))
+	return failStyle.Bold(true).Render(plain)
+}
+
 func (f FooterComponent) View(width int) string {
 	leftPlain := fmt.Sprintf("session: %d reviewed  ·  %d turns  ·  $%.4f", f.reviewedCount, f.totalTurns, f.totalCostUSD)
 	left := dimStyle.Render(leftPlain)
@@ -134,6 +156,9 @@ func (f FooterComponent) View(width int) string {
 	var rightParts []string
 	if drift := f.driftBannerSegment(); drift != "" {
 		rightParts = append(rightParts, drift)
+	}
+	if unrecognized := f.unrecognizedInstallationsBannerSegment(); unrecognized != "" {
+		rightParts = append(rightParts, unrecognized)
 	}
 	if breakdown := f.dropBreakdownSegment(); breakdown != "" {
 		rightParts = append(rightParts, breakdown)
@@ -224,4 +249,10 @@ func (f FooterComponent) DropCount(reason string) int {
 // is currently shown.
 func (f FooterComponent) SignatureDriftActive() bool {
 	return f.sigDriftActive
+}
+
+// UnrecognizedInstallationsCount reports the most recently reported count of
+// currently-unrecognized App installations (#1722, R5).
+func (f FooterComponent) UnrecognizedInstallationsCount() int {
+	return f.unrecognizedCount
 }
