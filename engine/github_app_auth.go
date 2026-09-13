@@ -17,34 +17,39 @@ import (
 // whatever means (manually or via Pruefer's manifest flow) — it never runs
 // internal/githubauth's manifest/browser bootstrap flow itself. PAT mode is
 // permanent and co-equal (R2), not deprecated: a user-owned board can never
-// use App auth at all (see refuseUserOwnedBoardForAppAuth below), so PAT
+// use App auth at all (see RefuseUserOwnedBoardForAppAuth below), so PAT
 // remains the only option for that case. See adrs/1713-engine-github-app-
 // auth.md.
 
-// engineGitHubAppName and engineGitHubAppHomepageURL are forwarded to
-// Reconcile's ManifestFlowOptions identity fields. Compat-mode config
-// (AppID + AppInstallationID both pinned) makes Reconcile's manifest/browser
-// bootstrap path structurally unreachable — a pinned AppID always takes the
-// explicit-repair-error branch instead of self-healing via manifest — so
-// these are never actually used to create anything; setting them anyway is
-// cheap, correct defensive hygiene, not load-bearing.
+// GitHubAppName and GitHubAppHomepageURL are forwarded to
+// Reconcile's ManifestFlowOptions identity fields. In the engine's own
+// compat-mode config (AppID + AppInstallationID both pinned), Reconcile's
+// manifest/browser bootstrap path is structurally unreachable — a pinned
+// AppID always takes the explicit-repair-error branch instead of
+// self-healing via manifest — so these are never actually used there to
+// create anything; setting them anyway is cheap, correct defensive hygiene,
+// not load-bearing. `fabrik init --github-app` (#1715) is the first code
+// path that actually exercises App creation with this identity — see
+// cmd/init_github_app.go.
 const (
-	engineGitHubAppName        = "fabrik"
-	engineGitHubAppHomepageURL = "https://github.com/handarbeit/fabrik"
+	GitHubAppName        = "fabrik"
+	GitHubAppHomepageURL = "https://github.com/handarbeit/fabrik"
 )
 
-// engineGitHubAppStatePath is the fixed, non-configurable path Reconcile uses
-// for reconciler-owned diagnostics state (its installation-repo cache).
-// Compat-mode-only usage means the manifest flow never runs and nothing
-// meaningful is ever read back from this file — it exists solely because
-// Reconcile's internal saveInstallationRepoCache needs some path to write
-// to. Not exposed as a config key: if a future fabrik init --github-app
-// bootstrap flow needs it exposed, that is its own decision.
-func engineGitHubAppStatePath(fabrikDir string) string {
+// GitHubAppStatePath is the fixed, non-configurable path Reconcile uses
+// for reconciler-owned diagnostics state (its installation-repo cache) —
+// and, for a fresh App the manifest flow creates, the App ID/slug/secrets
+// themselves. In the engine's own compat-mode usage the manifest flow never
+// runs and nothing meaningful is ever read back from this file — it exists
+// solely because Reconcile's internal saveInstallationRepoCache needs some
+// path to write to. Exported (not itself a config key) so `fabrik init
+// --github-app` (#1715) points its own Reconcile calls at the exact same
+// path the engine will read at startup — see cmd/init_github_app.go.
+func GitHubAppStatePath(fabrikDir string) string {
 	return filepath.Join(fabrikDir, ".fabrik", "github-app-state.json")
 }
 
-// engineRequiredGitHubAppPermissions returns the GitHub App permission set
+// RequiredGitHubAppPermissions returns the GitHub App permission set
 // the engine's own GitHubClient code paths require (R3) — the set an
 // installation's actually-granted permissions are compared against at
 // startup. webhooksEnabled adds the repo-webhook-management permission only
@@ -60,7 +65,7 @@ func engineGitHubAppStatePath(fabrikDir string) string {
 // GitHub API needing a permission not yet listed here, this check will
 // pass while a genuinely new gap goes undetected until that feature's
 // first use — the same is true if any key below turns out to be wrong.
-func engineRequiredGitHubAppPermissions(webhooksEnabled bool) map[string]string {
+func RequiredGitHubAppPermissions(webhooksEnabled bool) map[string]string {
 	perms := map[string]string{
 		"metadata":              "read",
 		"organization_projects": "write",
@@ -144,10 +149,10 @@ func refuseGHESWithGitHubApp(cfg Config) error {
 		"config to use a personal access token against this GHES instance instead", cfg.GHESHost)
 }
 
-// formatPermissionShortfalls renders R3's "name each missing permission"
+// FormatPermissionShortfalls renders R3's "name each missing permission"
 // requirement as one human-readable, deterministically-ordered string —
 // checkGrantedPermissions already sorts shortfalls by permission name.
-func formatPermissionShortfalls(shortfalls []githubauth.RequiredPermissionShortfall) string {
+func FormatPermissionShortfalls(shortfalls []githubauth.RequiredPermissionShortfall) string {
 	parts := make([]string, len(shortfalls))
 	for i, s := range shortfalls {
 		granted := s.Granted
@@ -159,7 +164,7 @@ func formatPermissionShortfalls(shortfalls []githubauth.RequiredPermissionShortf
 	return strings.Join(parts, "; ")
 }
 
-// refuseUserOwnedBoardForAppAuth is R4: a user-owned board must be refused
+// RefuseUserOwnedBoardForAppAuth is R4: a user-owned board must be refused
 // explicitly under App auth, not left to fail silently. Without this check,
 // GitHub simply strips organization-scoped permissions (including Projects
 // v2 access) from a user-account installation, the board fetch then returns
@@ -173,7 +178,7 @@ func formatPermissionShortfalls(shortfalls []githubauth.RequiredPermissionShortf
 // Mirrors cmd/board_admin.go's refuseIfUserOwnedBoard wording — duplicated
 // rather than shared, since engine cannot import cmd (cmd imports engine);
 // a future edit to one should check the other for drift.
-func refuseUserOwnedBoardForAppAuth(client *gh.Client, owner string) error {
+func RefuseUserOwnedBoardForAppAuth(client *gh.Client, owner string) error {
 	_, ownerType, err := client.ResolveOwner(owner)
 	if err != nil {
 		return fmt.Errorf("resolving owner %q to check organization/user type: %w", owner, err)
@@ -205,7 +210,7 @@ func refuseUserOwnedBoardForAppAuth(client *gh.Client, owner string) error {
 // owns the project board — including in multi-repo mode, where cfg.Repo may
 // be empty but cfg.Owner names the board's own organization.
 func setUpGitHubAppAuth(ctx context.Context, cfg Config, fabrikDir, baseURL string) (*gh.Client, *githubauth.Reconciler, error) {
-	required := engineRequiredGitHubAppPermissions(cfg.Webhooks)
+	required := RequiredGitHubAppPermissions(cfg.Webhooks)
 
 	// Options.RequiredPermissions is deliberately left unset here (rather
 	// than passed required): Reconcile's own verifyPinnedGrants would only
@@ -220,11 +225,11 @@ func setUpGitHubAppAuth(ctx context.Context, cfg Config, fabrikDir, baseURL stri
 		AppID:             cfg.GitHubAppID,
 		AppInstallationID: cfg.GitHubAppInstallationID,
 		AppPrivateKeyPath: cfg.GitHubAppPrivateKeyPath,
-		AppStatePath:      engineGitHubAppStatePath(fabrikDir),
+		AppStatePath:      GitHubAppStatePath(fabrikDir),
 		WatchedRepos:      []string{cfg.Owner + "/*"},
 		BaseURL:           baseURL, // "" in production (github.com); tests point this at an httptest server
-		AppName:           engineGitHubAppName,
-		AppHomepageURL:    engineGitHubAppHomepageURL,
+		AppName:           GitHubAppName,
+		AppHomepageURL:    GitHubAppHomepageURL,
 		Logf:              func(format string, args ...any) { fmt.Printf("[startup] github-app: "+format+"\n", args...) },
 	})
 	if err != nil {
@@ -242,7 +247,7 @@ func setUpGitHubAppAuth(ctx context.Context, cfg Config, fabrikDir, baseURL stri
 	// organization_projects" message instead of naming the actual, more
 	// fundamental cause. Checking ownership first gives the clearer,
 	// more actionable error.
-	if err := refuseUserOwnedBoardForAppAuth(client, cfg.Owner); err != nil {
+	if err := RefuseUserOwnedBoardForAppAuth(client, cfg.Owner); err != nil {
 		return nil, nil, err
 	}
 
@@ -253,7 +258,7 @@ func setUpGitHubAppAuth(ctx context.Context, cfg Config, fabrikDir, baseURL stri
 	if len(shortfalls) > 0 {
 		return nil, nil, fmt.Errorf("GitHub App installation %d is missing required permissions: %s — "+
 			"grant these permissions to the installation (App settings → Install App → Configure) and "+
-			"restart Fabrik", cfg.GitHubAppInstallationID, formatPermissionShortfalls(shortfalls))
+			"restart Fabrik", cfg.GitHubAppInstallationID, FormatPermissionShortfalls(shortfalls))
 	}
 
 	fmt.Printf("[startup] authenticated as %s (GitHub App installation, organization %q)\n", reconciler.BotLogin(), cfg.Owner)

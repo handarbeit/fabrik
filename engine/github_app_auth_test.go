@@ -144,7 +144,7 @@ func TestFormatPermissionShortfalls_NamesEachOne(t *testing.T) {
 		{Permission: "issues", Required: "write", Granted: "read"},
 		{Permission: "organization_projects", Required: "write", Granted: ""},
 	}
-	msg := formatPermissionShortfalls(shortfalls)
+	msg := FormatPermissionShortfalls(shortfalls)
 	if !strings.Contains(msg, "issues") || !strings.Contains(msg, `required "write"`) || !strings.Contains(msg, `granted "read"`) {
 		t.Errorf("message %q missing issues shortfall detail", msg)
 	}
@@ -195,7 +195,7 @@ func TestResolveGitHubAppAuth_GHESCombination_Refused(t *testing.T) {
 func TestSetUpGitHubAppAuth_Success_WiresClientAndReconciler(t *testing.T) {
 	dir := t.TempDir()
 	keyPath := writeEngineTestAppKey(t, dir)
-	srv := newFakeGitHubAppServer(t, 999, "handarbeit", "organization", engineRequiredGitHubAppPermissions(false))
+	srv := newFakeGitHubAppServer(t, 999, "handarbeit", "organization", RequiredGitHubAppPermissions(false))
 
 	cfg := Config{
 		Owner: "handarbeit", Repo: "fabrik",
@@ -229,7 +229,7 @@ func TestSetUpGitHubAppAuth_Success_WiresClientAndReconciler(t *testing.T) {
 func TestResolveGitHubAppAuth_BothConfigured_AppAuthWinsAndLogsPrecedence(t *testing.T) {
 	dir := t.TempDir()
 	keyPath := writeEngineTestAppKey(t, dir)
-	srv := newFakeGitHubAppServer(t, 999, "handarbeit", "organization", engineRequiredGitHubAppPermissions(false))
+	srv := newFakeGitHubAppServer(t, 999, "handarbeit", "organization", RequiredGitHubAppPermissions(false))
 
 	cfg := Config{
 		Owner: "handarbeit", Repo: "fabrik", Token: "ghp_still_valid_pat",
@@ -260,7 +260,7 @@ func TestResolveGitHubAppAuth_BothConfigured_AppAuthWinsAndLogsPrecedence(t *tes
 func TestResolveGitHubAppAuth_NoPAT_NoPrecedenceLogLine(t *testing.T) {
 	dir := t.TempDir()
 	keyPath := writeEngineTestAppKey(t, dir)
-	srv := newFakeGitHubAppServer(t, 999, "handarbeit", "organization", engineRequiredGitHubAppPermissions(false))
+	srv := newFakeGitHubAppServer(t, 999, "handarbeit", "organization", RequiredGitHubAppPermissions(false))
 
 	cfg := Config{
 		Owner: "handarbeit", Repo: "fabrik",
@@ -282,7 +282,7 @@ func TestResolveGitHubAppAuth_NoPAT_NoPrecedenceLogLine(t *testing.T) {
 func TestSetUpGitHubAppAuth_UserOwnedBoard_RefusedExplicitly(t *testing.T) {
 	dir := t.TempDir()
 	keyPath := writeEngineTestAppKey(t, dir)
-	srv := newFakeGitHubAppServer(t, 999, "someuser", "user", engineRequiredGitHubAppPermissions(false))
+	srv := newFakeGitHubAppServer(t, 999, "someuser", "user", RequiredGitHubAppPermissions(false))
 
 	cfg := Config{
 		Owner: "someuser", Repo: "fabrik",
@@ -329,7 +329,7 @@ func TestSetUpGitHubAppAuth_GrantShortfall_NamesEachMissingPermission(t *testing
 func TestRun_ShutdownOnSignal_WithGitHubAppAuth_WaitsForRefreshLoop(t *testing.T) {
 	dir := t.TempDir()
 	keyPath := writeEngineTestAppKey(t, dir)
-	srv := newFakeGitHubAppServer(t, 999, "handarbeit", "organization", engineRequiredGitHubAppPermissions(false))
+	srv := newFakeGitHubAppServer(t, 999, "handarbeit", "organization", RequiredGitHubAppPermissions(false))
 
 	reconciler, err := githubauth.Reconcile(context.Background(), githubauth.Options{
 		AppID: 42, AppInstallationID: 999, AppPrivateKeyPath: keyPath,
@@ -375,11 +375,11 @@ func TestRun_ShutdownOnSignal_WithGitHubAppAuth_WaitsForRefreshLoop(t *testing.T
 }
 
 func TestEngineRequiredGitHubAppPermissions_WebhooksAddsScope(t *testing.T) {
-	without := engineRequiredGitHubAppPermissions(false)
+	without := RequiredGitHubAppPermissions(false)
 	if _, ok := without["webhooks"]; ok {
 		t.Error("webhooks permission should not be required when cfg.Webhooks is false")
 	}
-	with := engineRequiredGitHubAppPermissions(true)
+	with := RequiredGitHubAppPermissions(true)
 	if with["webhooks"] != "write" {
 		t.Errorf("webhooks permission = %q, want %q when cfg.Webhooks is true", with["webhooks"], "write")
 	}
