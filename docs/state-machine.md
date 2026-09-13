@@ -73,6 +73,7 @@ These labels define distinct states (their presence changes what the engine does
 | `fabrik:awaiting-done` | Gate | Yes — a `FABRIK_NO_WORK_NEEDED` decision has been made; the Done board move and/or issue close is still outstanding and is retried every poll, independent of `item.Status` |
 | `fabrik:awaiting-placement` | Gate | Yes — a spawned child's initial project-board Status placement is still outstanding; retried every poll, independent of `item.Status`/`stages.FindStage` resolving a stage for the child's current column |
 | `fabrik:awaiting-close` | Gate | Yes — `closeIssueIfNonDefaultBase`'s explicit `CloseIssue` call (ADR-1096) failed; the close is still outstanding and is retried every poll, independent of `item.Status` |
+| `fabrik:awaiting-pr-ready` | Gate | Yes, but does **not** suppress dispatch — `markPRReady`'s `client.MarkPRReady` call (§5.2, ADR-1582) failed non-transiently or exhausted its in-process retry; the mark-ready is still outstanding and is retried every poll, independent of `item.Status`. Unlike most of this table's other Gate rows, the item continues advancing through later stages normally while this label is present (§6.22) |
 | `fabrik:nondefault-base-pr-noted` | Informational | No — does not gate dispatch or suppress anything; marks that the one-time non-default-base linkage notice (§6.21, ADR-1649) has already been posted (or attempted) for this item |
 | `fabrik:awaiting-advance` | Gate | Yes — a terminal advance (`advanceToNextStage`, called from `advanceValidateTerminalItem`'s merged-PR path or `advanceConvergedPRToDone`) failed to move the project-board Status forward — most commonly a missing target Status option; the advance is still outstanding and is retried every poll, independent of `item.Status` |
 | `fabrik:awaiting-runaway-alert` | Gate | Yes — the merge-train runaway guard (ADR-059 D8) already paused this member (`fabrik:paused` + `fabrik:awaiting-input` applied), but its `AddComment` alert call failed; the alert is still outstanding and is retried every poll, independent of `item.Status` (ADR-1533) |
@@ -1216,6 +1217,8 @@ FABRIK_STAGE_COMPLETE received
 1. Push the issue branch
 2. Find PR number (uses `knownPR` from `ensureDraftPR` if available, else `FindPRForIssue()`)
 3. `MarkPRReady()` transitions draft → ready-for-review; retries up to 3 times on transient 5xx errors with exponential backoff (500ms / 1s / 2s); non-transient errors (4xx, including 429) are logged immediately without retry
+
+**Durable retry beyond this in-process budget (ADR-1582):** if the `MarkPRReady()` call is still failing once this 3-attempt budget is exhausted — or fails non-transiently on the first attempt — `markPRReady` durably records the outstanding call via `fabrik:awaiting-pr-ready`, retried by a dedicated per-poll settle scan (`settlePRReadyScan`) independent of this stage ever being re-dispatched. See §6.22 for the full mechanism.
 
 **Note:** This triggers external review bots and populates `LinkedPRReviewRequests`, which is why the review gate in `handleStageComplete()` (Path 1) is always optimistic — reviewer data is stale at that point.
 
@@ -2746,6 +2749,46 @@ Unlike the other two paths, this one is **guarded**, rather than posted uncondit
 | Default-base item (no `base:` label) | Settle pass reaches step 2 | Unchanged | — | — |
 
 **References:** [ADR-1649: Non-Default-Base Linkage Notice](../adrs/1649-nondefault-base-linkage-notice.md), [ADR-1096: Explicit Close on Non-Default-Base Merge](../adrs/1096-explicit-close-on-nondefault-base-merge.md) / [ADR-1097: Non-Default-Base Close Retry](../adrs/1097-non-default-base-close-retry.md) / §6.13 (the closing half of this same gap, and the structural precedent this feature's base-resolution logic reuses verbatim), issue #1646 (the original community report), issue #1649 (this feature).
+
+### 6.22 Mark-PR-Ready Durable Retry (ADR-1582)
+
+**Trigger:** `markPRReady` (§5.2, `engine/pr.go`) calls `e.client.MarkPRReady` as the final step of transitioning a stage's draft PR to ready-for-review, after its own in-process 3-attempt retry (#599). This call fails non-transiently, or exhausts that retry budget. `handleStageComplete` proceeds regardless — `stage:<name>:complete` is granted whether or not the PR ever became ready — and, before this feature, nothing ever retried the call again: the PR could remain draft forever, which `attemptMergeOnValidate`'s direct-merge fallback treats as unconditionally not-CI-clean (`mergeable_state == "draft"`, checked ahead of any check-run/dirty logic), permanently blocking the issue from reaching Done via that path.
+
+**Key difference from §6.13's `fabrik:awaiting-close`:** structurally the same single-at-risk-call shape, but this marker is **not terminal-only**. `mark_pr_ready_on_complete: true` can be configured on a non-terminal stage (e.g. Implement, with Review and Validate still ahead), so the marker can be written while the item is still mid-pipeline — and it is deliberately left free to keep advancing through subsequent stages while the marker is outstanding, since nothing about a later stage's dispatch depends on the PR being ready.
+
+**Durable marker (`fabrik:awaiting-pr-ready`), written only on failure, inline inside `markPRReady`.** `markPRReadyOutstanding` adds the label (idempotently — a no-op if already present) in exactly the two places `markPRReady` previously just logged and returned: the non-transient-error branch, and the retry-exhausted fallthrough at the end of its loop. No signature change and no call-site changes were needed at any of `markPRReady`'s three callers (`engine/item.go` ×2, `engine/comments.go`) — every value the marker write needs (`item`, `owner`, `repo`, the resolved `prNumber`) was already in scope at both failure points. `markPRReady`'s success path also calls `clearPRReadyMarker` when the marker happens to already be present, so an issue previously escalated and un-paused self-heals the moment its own next `markPRReady` call succeeds directly, without waiting for the settle scan below to notice.
+
+**No dispatch-suppression wiring — deliberately, and unlike most of this family.** This marker is **not** checked by `itemMayNeedWork`/`itemNeedsWork`, and is **not** added to `transientLifecycleLabels`. Unlike `fabrik:awaiting-close` (§6.13) or `fabrik:awaiting-member-close` (§6.10), which only ever exist after the item has already reached Done, this marker can be present on an item still actively progressing through later stages — gating stage completion on `MarkPRReady` succeeding was explicitly out of scope for #1582 (a bigger change to the conjunctive-gate model than the bug called for).
+
+**Code path:** `markPRReady` (`engine/pr.go`, writes the marker on failure, clears it on a direct success) — and, on retry, `settlePRReadyScan` → `settlePRReady` (both `engine/pr_ready_settle.go`; `settlePRReadyScan` is called from `poll()` in `poll.go`) directly.
+
+**Retry-owner: `settlePRReadyScan` (`engine/pr_ready_settle.go`; called from `poll()` in `poll.go`).** Runs unconditionally once per poll. It iterates the **raw `board.Items`** (not `deepFetchCandidates` — this scan has no dependency on the deep-fetch/terminal-skip machinery at all). For every item carrying `fabrik:awaiting-pr-ready` and not `fabrik:paused` (mirroring every other settle scan's own paused-item guard), it calls `settlePRReady`.
+
+**`settlePRReady` flow — idempotent; safe to call repeatedly. Re-resolves the PR live every pass** (via `FetchLinkedPR`) rather than trusting a stashed PR number — a GitHub label carries no payload, and this scan runs on a completely independent poll cadence from when the marker was written:
+1. No linked PR found at all → clear the marker (nothing left to mark ready — the PR was deleted, or the marker survived a scenario that no longer applies).
+2. PR closed or merged → clear the marker (the issue was abandoned, or it landed via a path that never called `markPRReady`).
+3. PR found and already not-draft → clear the marker without calling `MarkPRReady` again (self-healed by a later stage's own `markPRReady` call, or a human clicking "Ready for review" manually).
+4. Otherwise (genuinely still draft and open): call `e.client.MarkPRReady` again — safe regardless of how many times this fires, since GitHub's `markPullRequestReadyForReview` mutation is a documented no-op success on an already-ready PR. On success, clear the marker. On failure, record a retry and stop — the next settle pass re-attempts.
+5. A `FetchLinkedPR` API error (distinct from "no PR found") retries without clearing the marker — the scan cannot tell whether the PR is still draft, so it must not assume either outcome.
+
+**Retry counting and escalation.** Every failed settle pass calls `recordPRReadyRetry`, which increments the existing `itemstate.StageRetryIncremented`/`Attempts` counter — keyed by the dedicated constant `"__awaiting_pr_ready__"` (same double-underscore-wrapped, YAML-unrepresentable shape as its siblings, so it can never collide with a configured stage's own counter). `MaxRetries <= 0` means unlimited retries, never escalate (same guard as every sibling counter). Once `Attempts("__awaiting_pr_ready__") >= e.cfg.MaxRetries`, `escalatePRReadyFailure` fires — mirroring `escalateNonDefaultBaseCloseFailure`: adds `fabrik:paused`, removes `fabrik:awaiting-pr-ready`, posts an explanatory comment naming the draft PR (`item.LinkedPRNumber`, when non-zero) with the manual recovery step (`gh pr ready <N>`), and applies `itemstate.EnginePaused`.
+
+**Marker clearing.** `fabrik:awaiting-pr-ready` is removed in three places: `clearPRReadyMarker` via a fully successful settle pass (PR found not-draft, closed, merged, or not found at all — the normal, expected path), `markPRReady`'s own success path (a direct self-heal, without waiting for the settle scan), and `escalatePRReadyFailure` (giving up after `MaxRetries`).
+
+**Scope:** this mechanism covers only `markPRReady`'s own `client.MarkPRReady` call (`engine/pr.go`, called from `engine/item.go` and `engine/comments.go` for any stage configured with `mark_pr_ready_on_complete: true`). The merge-train's own inline `MarkPRReady` call (`engine/merge_train.go`, promoting a reused draft integration PR to ready before landing) is out of scope — a failure there already leaves the affected members in `Queued` and is retried naturally on the worker's own next iteration. The generic `recordSettleRetry`/`escalateSettle`/`clearSettleMarker` helpers (`engine/settle.go`) this mechanism reuses are the same ones backing `fabrik:awaiting-done` (§6.8), `fabrik:awaiting-member-close` (§6.10), and `fabrik:awaiting-close` (§6.13).
+
+**Interaction with `attemptMergeOnValidate`: no change needed.** That function already retries indefinitely on every poll while un-gated. Once `settlePRReadyScan` flips the PR out of draft, the very next poll's existing merge attempt sees a non-draft `mergeable_state` and proceeds normally — fixing retryability at the source is sufficient to unblock the direct-merge fallback described in this section's Trigger.
+
+**State transitions:**
+
+| Before | Trigger | After | Labels Added | Labels Removed |
+|---|---|---|---|---|
+| Any stage, `mark_pr_ready_on_complete: true` | `markPRReady`'s `client.MarkPRReady` call fails (non-transient, or retry-exhausted) | Same stage, awaiting pr-ready (marker present); item continues advancing normally | `fabrik:awaiting-pr-ready` | — |
+| Awaiting pr-ready | Settle pass succeeds (PR marked ready, or found already not-draft/closed/merged/missing) | Settled | — | `fabrik:awaiting-pr-ready` |
+| Awaiting pr-ready | A later `markPRReady` call succeeds directly (self-heal) | Settled | — | `fabrik:awaiting-pr-ready` |
+| Awaiting pr-ready | Settle pass fails `Attempts >= MaxRetries` times | Paused | `fabrik:paused` | `fabrik:awaiting-pr-ready` |
+
+**References:** [ADR-1582: Durable Mark-PR-Ready Retry](../adrs/1582-durable-pr-ready-retry.md), [ADR-1097: Non-Default-Base Explicit Close Retry](../adrs/1097-non-default-base-close-retry.md) (§6.13, the closest structural precedent), [ADR-061: Merge-Train Singleton Member-Issue Close Retry](../adrs/061-merge-train-member-close-retry.md), issue #599 (the in-process retry this feature's durable follow-up builds on), issue #1582 (this feature).
 
 ---
 

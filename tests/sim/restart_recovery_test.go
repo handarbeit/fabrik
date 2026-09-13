@@ -202,15 +202,13 @@ func TestRestartRecovery_KillBetweenLabelPair(t *testing.T) {
 // distinct PR numbers in simgh's model, which is the non-vacuity check
 // below.
 //
-// markPRReady (engine/pr.go) does not itself leave any durable
-// fabrik:awaiting-* marker on failure — it logs a warning and lets
-// handleStageComplete proceed regardless (stage:Implement:complete is
-// still granted even though the PR never became ready). No settle scan
-// exists to retry a failed MarkPRReady call once that has happened. This
-// scenario pins that as-found: the PR is confirmed to remain in draft state
-// after restart, matching R4's own "if a step is found genuinely
-// unrecoverable, pin the behavior as-found with a comment naming the
-// follow-up" allowance. Filed as follow-up: #1582.
+// markPRReady (engine/pr.go) durably records the outstanding call via
+// fabrik:awaiting-pr-ready (markPRReadyOutstanding) when it fails, so
+// settlePRReadyScan retries it on a later poll — surviving exactly the
+// engine restart this scenario drives through. This was previously an
+// as-found gap (no settle scan retried a failed MarkPRReady call, leaving
+// the PR permanently draft and the issue stuck at Validate); fixed by
+// #1582 (ADR-1582).
 func TestRestartRecovery_KillAfterPRCreatedBeforeReady(t *testing.T) {
 	t.Parallel()
 	env := NewEnv(t, EnvOptions{Stages: smokeStages()})
@@ -243,15 +241,23 @@ func TestRestartRecovery_KillAfterPRCreatedBeforeReady(t *testing.T) {
 	WaitForIssueLabel(t, env, num, "stage:Implement:complete", 40)
 	t.Logf("#%d: PR #%d created, still draft after the injected MarkPRReady failure — Implement nonetheless completed", num, firstPRNumber)
 
+	// The non-transient injected fault must have durably marked the
+	// outstanding call before restart — this is the marker RestartEnv's
+	// persisted-label snapshot carries across, and what settlePRReadyScan
+	// keys on after restart.
+	WaitForIssueLabel(t, env, num, "fabrik:awaiting-pr-ready", 10)
+
 	restarted := RestartEnv(t, env)
 	restarted.Sim.Faults().Clear("MarkPRReady")
 
-	// Drive further polls (bounded — see below for why this scenario does
-	// NOT expect eventual closure) and confirm no duplicate PR is ever
-	// created — the recovery-doesn't-duplicate-work half of the assertion,
-	// provable independent of whether the stuck-draft gap below is ever
-	// resolved.
-	RunPolls(t, restarted, 20)
+	// Recovery: the settle scan retries the outstanding MarkPRReady call on
+	// its own, without re-dispatching Implement, and the PR transitions out
+	// of draft.
+	AdvanceUntil(t, restarted, func(env *Env) bool {
+		pr, err := env.Sim.FetchLinkedPR(env.Owner, env.Repo, num)
+		return err == nil && pr != nil && !pr.Draft
+	}, 40)
+
 	finalPR, err := restarted.Sim.FetchLinkedPR(restarted.Owner, restarted.Repo, num)
 	if err != nil {
 		t.Fatalf("FetchLinkedPR (final): %v", err)
@@ -262,23 +268,53 @@ func TestRestartRecovery_KillAfterPRCreatedBeforeReady(t *testing.T) {
 	if got := restarted.Claude.StageCallCount("Implement"); got != 1 {
 		t.Errorf("StageCallCount(Implement) after restart = %d, want 1 — Implement must not be re-dispatched merely to retry MarkPRReady", got)
 	}
-
-	// Pin the as-found gap: nothing in the pipeline ever retries a failed
-	// MarkPRReady call, and a draft PR's mergeable_state is unconditionally
-	// "draft" (tests/sim/simgh/prs.go's deriveMergeableState — checked before
-	// any check-run/dirty logic), which attemptMergeOnValidate's direct-merge
-	// fallback treats as permanently not-CI-clean. The issue is therefore
-	// genuinely stuck at Validate after this restart — not a slow
-	// convergence, a structurally unrecoverable one — which is exactly the
-	// class of defect R4 asks to be pinned with a comment and a linked
-	// follow-up rather than fixed here — filed as #1582.
-	if !finalPR.Draft {
-		t.Log("NOTE: final PR unexpectedly not draft — the as-found gap this scenario pins (no settle scan retries a failed MarkPRReady) may have been fixed; if so, update/close #1582.")
-	} else {
-		t.Logf("as-found confirmed: PR #%d remains draft after restart+recovery polls with no mechanism ever retrying the lost MarkPRReady call, permanently blocking the direct-merge fallback (pinned, see #1582)", firstPRNumber)
+	if finalPR.Draft {
+		t.Fatal("expected PR to be marked ready by settlePRReadyScan after restart")
 	}
-	if item := projectItem(t, restarted, num); item.IsClosed {
-		t.Error("issue unexpectedly closed — the stuck-draft-PR gap this scenario pins appears to have been resolved; update this scenario's doc comment and the tracking follow-up accordingly")
+	t.Logf("recovered: PR #%d marked ready by the settle scan after restart, without a second Implement dispatch", firstPRNumber)
+	WaitForLabelAbsent(t, restarted, num, "fabrik:awaiting-pr-ready", 10)
+
+	// Once the PR is no longer draft, attemptMergeOnValidate's existing
+	// every-poll retry (unchanged by #1582) sees a non-draft mergeable_state
+	// and proceeds to land the issue normally — confirming the fix is
+	// sufficient on its own, with no change needed to the Validate merge
+	// gate.
+	WaitForProjectStatus(t, restarted, num, "Done", 80)
+	WaitForIssueClosed(t, restarted, num, 10)
+}
+
+// TestRestartRecovery_MarkPRReadyEscalatesAfterMaxRetries drives the same
+// lost-MarkPRReady scenario as above, but with the fault persisting forever
+// (never cleared) — the settle scan's bounded retry budget must eventually
+// exhaust and escalate (fabrik:paused, fabrik:awaiting-pr-ready removed,
+// explanatory comment posted) rather than retrying silently forever. See
+// ADR-1582.
+func TestRestartRecovery_MarkPRReadyEscalatesAfterMaxRetries(t *testing.T) {
+	t.Parallel()
+	env := NewEnv(t, EnvOptions{
+		Stages:       smokeStages(),
+		ConfigureCfg: func(cfg *engine.Config) { cfg.MaxRetries = 2 },
+	})
+	env.Sim.Sim().SeedRepoAccess(env.OwnerRepo, gh.RepoAccess{AllowAutoMerge: false, CanPush: true})
+	if err := env.Sim.Sim().Err(); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	num := FileIssue(t, env, "restart kill after PR created, MarkPRReady never recovers", "Prove the settle scan escalates once its retry budget is exhausted.", "Implement", "stage:Plan:complete")
+
+	env.Sim.Faults().FailWhen("MarkPRReady",
+		func(a simgh.Args) bool { return true },
+		1000, errInjectedSettleFault)
+
+	AdvanceUntil(t, env, func(env *Env) bool {
+		pr, err := env.Sim.FetchLinkedPR(env.Owner, env.Repo, num)
+		return err == nil && pr != nil && pr.Number != 0
+	}, 40)
+	WaitForIssueLabel(t, env, num, "fabrik:awaiting-pr-ready", 10)
+
+	WaitForIssueLabel(t, env, num, "fabrik:paused", 40)
+	if hasLabel(projectItem(t, env, num).Labels, "fabrik:awaiting-pr-ready") {
+		t.Error("expected fabrik:awaiting-pr-ready removed once escalated to fabrik:paused")
 	}
 }
 
