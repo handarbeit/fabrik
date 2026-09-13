@@ -1,0 +1,14 @@
+{
+  "app_id": 42,
+  "slug": "fabrik",
+  "installation_repo_cache": {
+    "handarbeit": [
+      "handarbeit/*"
+    ],
+    "someone-else": [],
+    "someuser": [
+      "someuser/*"
+    ]
+  },
+  "private_key_fingerprint": "4d6a5076069d21893d02820094bc41e43ba3afa1628c76f3d9fb280e1c086641"
+}
