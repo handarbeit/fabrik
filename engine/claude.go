@@ -262,6 +262,25 @@ var claudeKillGraceSigTerm = 10 * time.Second
 // of the launching shell's ambient environment. Empty skips injection.
 var claudeGHToken string
 
+// claudeGHTokenOverrideFn, when non-nil, supplies the worker's GH_TOKEN/
+// GITHUB_TOKEN value instead of claudeGHToken — set by Engine.New() only in
+// GitHub App auth mode (#1713), where there is no static token to copy:
+// AppID/AppPrivateKeyPath/AppInstallationID mint a ~1h installation token
+// that a background refresh loop keeps current for the engine's own API
+// calls. Reading it live here (typically Client.Token(), riding that same
+// refresh loop) means a worker's `gh` invocations (e.g. fabrik-validate's
+// Pre-Completion Gate) authenticate as the same installation the engine
+// itself uses, without a second minting path. nil (the default, and always
+// true in PAT mode) leaves buildClaudeEnv's claudeGHToken injection exactly
+// as it was — R1/AC2 byte-identical behavior.
+//
+// Residual, accepted limitation: the value is read once, at this
+// invocation's env-build time — a single invocation whose wall time exceeds
+// the token's ~1h lifetime can still see a now-expired value for its
+// remaining `gh` calls, since a running child process's environment can't
+// be updated after the fact. See adrs/1713-engine-github-app-auth.md.
+var claudeGHTokenOverrideFn func() string
+
 // claudeGHHost is the engine's resolved GHES host (Config.GHESHost). Set by
 // the Engine during construction, mirroring claudeGHToken's package-var
 // pattern. Injected into every Claude worker's environment as GH_HOST so the
@@ -765,8 +784,12 @@ func buildClaudeEnv(stage *stages.Stage, issue gh.ProjectItem, workDir string, o
 		level = "high"
 	}
 	env = append(env, "CLAUDE_CODE_EFFORT_LEVEL="+level)
-	if claudeGHToken != "" {
-		env = append(env, "GH_TOKEN="+claudeGHToken, "GITHUB_TOKEN="+claudeGHToken)
+	ghToken := claudeGHToken
+	if claudeGHTokenOverrideFn != nil {
+		ghToken = claudeGHTokenOverrideFn()
+	}
+	if ghToken != "" {
+		env = append(env, "GH_TOKEN="+ghToken, "GITHUB_TOKEN="+ghToken)
 	}
 	if claudeGHHost != "" {
 		env = append(env, "GH_HOST="+claudeGHHost)

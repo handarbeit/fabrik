@@ -87,6 +87,17 @@ type Config struct {
 	ArchiveAfter              string // Go duration string; "" means use default (168h = 1 week); also FABRIK_ARCHIVE_AFTER
 	ArchiveDone               string // on or off; "" means use default (on); also FABRIK_ARCHIVE_DONE
 	GHESHost                  string // GitHub Enterprise Server hostname, e.g. "github.example.com"; "" means github.com (also FABRIK_GHES_HOST)
+	// GitHubAppID, GitHubAppPrivateKeyPath, and GitHubAppInstallationID
+	// together configure GitHub App authentication (#1713) as a second,
+	// co-equal path alongside Token — all three must be set together or
+	// none at all (enforced by engine.New()); the zero value (all unset,
+	// the default) means PAT mode, byte-identical to pre-#1713 behavior.
+	// Also FABRIK_GITHUB_APP_ID / FABRIK_GITHUB_APP_PRIVATE_KEY_PATH /
+	// FABRIK_GITHUB_APP_INSTALLATION_ID and their config.yaml equivalents
+	// (github_app_id / github_app_private_key_path / github_app_installation_id).
+	GitHubAppID             int64
+	GitHubAppPrivateKeyPath string
+	GitHubAppInstallationID int64
 }
 
 func Execute() error {
@@ -204,6 +215,9 @@ func Execute() error {
 	flag.StringVar(&cfg.ArchiveAfter, "archive-after", "", "Grace period since an item settled into Done before it is auto-archived off the project board (Go duration: 168h, 24h; also FABRIK_ARCHIVE_AFTER; default 168h = 1 week)")
 	flag.StringVar(&cfg.ArchiveDone, "archive-done", "", "Auto-archive Done items after archive-after elapses: on or off (also FABRIK_ARCHIVE_DONE; default on)")
 	flag.StringVar(&cfg.GHESHost, "ghes-host", "", "GitHub Enterprise Server hostname, e.g. github.example.com (also FABRIK_GHES_HOST; default: unset, meaning github.com)")
+	flag.Int64Var(&cfg.GitHubAppID, "github-app-id", 0, "GitHub App ID for App-installation auth, co-equal with --token (also FABRIK_GITHUB_APP_ID; must be set together with --github-app-private-key-path and --github-app-installation-id, or not at all)")
+	flag.StringVar(&cfg.GitHubAppPrivateKeyPath, "github-app-private-key-path", "", "Path to the GitHub App's private key PEM file (also FABRIK_GITHUB_APP_PRIVATE_KEY_PATH)")
+	flag.Int64Var(&cfg.GitHubAppInstallationID, "github-app-installation-id", 0, "GitHub App installation ID to authenticate as (also FABRIK_GITHUB_APP_INSTALLATION_ID)")
 
 	if err := flag.CommandLine.Parse(os.Args[1:]); err != nil {
 		return err
@@ -303,6 +317,9 @@ func Execute() error {
 		cfg.GitSSH = resolveBool("FABRIK_GIT_SSH", pc.GitSSH)
 	}
 	cfg.GHESHost = resolveGHESHost(cfg.GHESHost, pc)
+	if err := resolveGitHubAppConfig(cfg, pc); err != nil {
+		return err
+	}
 	if cfg.PollSeconds == 30 {
 		if v := os.Getenv("FABRIK_POLL"); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
@@ -707,8 +724,15 @@ func Execute() error {
 		return fmt.Errorf("missing required config: owner and project (use flags or .env file)")
 	}
 
-	if cfg.Token == "" {
-		return fmt.Errorf("GitHub token required: use --token, FABRIK_TOKEN, or GITHUB_TOKEN")
+	// A token is required unless GitHub App auth is configured instead
+	// (#1713 R1/AC2) — any of the three GitHubApp* fields being set means
+	// the operator intends App-auth mode; engine.New() enforces the
+	// all-or-nothing validation (R5) and fails loudly on a partial set, so
+	// this check only needs to avoid demanding a token when App auth was
+	// clearly intended.
+	githubAppAuthIntended := cfg.GitHubAppID != 0 || cfg.GitHubAppPrivateKeyPath != "" || cfg.GitHubAppInstallationID != 0
+	if cfg.Token == "" && !githubAppAuthIntended {
+		return fmt.Errorf("GitHub credentials required: use --token, FABRIK_TOKEN, or GITHUB_TOKEN, or configure GitHub App authentication (--github-app-id/--github-app-private-key-path/--github-app-installation-id)")
 	}
 
 	if strings.HasPrefix(cfg.Token, "github_pat_") {
@@ -845,6 +869,9 @@ func Execute() error {
 		ArchiveAfter:              archiveAfter(cfg.ArchiveAfter),
 		ArchiveDone:               archiveDoneMode(cfg.ArchiveDone),
 		GHESHost:                  cfg.GHESHost,
+		GitHubAppID:               cfg.GitHubAppID,
+		GitHubAppPrivateKeyPath:   cfg.GitHubAppPrivateKeyPath,
+		GitHubAppInstallationID:   cfg.GitHubAppInstallationID,
 		ReadyCh:                   testReadyCh,
 	})
 	if err != nil {
@@ -922,6 +949,51 @@ func resolveGHESHost(flagVal string, pc config.ProjectConfig) string {
 		}
 	}
 	return config.NormalizeGHESHost(host)
+}
+
+// resolveGitHubAppConfig fills in cfg's GitHubApp* fields from
+// FABRIK_GITHUB_APP_* env vars, then config.yaml, for any field whose flag
+// was left at its zero value — mirroring resolveGHESHost's flag > env >
+// config.yaml precedence. Mutates cfg directly (unlike resolveGHESHost,
+// which returns a single value) since three independent fields need this
+// same precedence chain applied.
+//
+// This does NOT perform the all-or-nothing partial-configuration check
+// (R5) — that runs later, in engine.New(), against the fully-resolved
+// config, so it sees flag+env+config.yaml as one merged value rather than
+// this function needing to reason about partial state mid-resolution. The
+// only error this returns is a malformed integer env var.
+func resolveGitHubAppConfig(cfg *Config, pc config.ProjectConfig) error {
+	if cfg.GitHubAppID == 0 {
+		if v := os.Getenv("FABRIK_GITHUB_APP_ID"); v != "" {
+			n, err := strconv.ParseInt(v, 10, 64)
+			if err != nil {
+				return fmt.Errorf("FABRIK_GITHUB_APP_ID=%q is invalid (must be an integer)", v)
+			}
+			cfg.GitHubAppID = n
+		} else if pc.GitHubAppID != nil {
+			cfg.GitHubAppID = *pc.GitHubAppID
+		}
+	}
+	if cfg.GitHubAppPrivateKeyPath == "" {
+		if v := os.Getenv("FABRIK_GITHUB_APP_PRIVATE_KEY_PATH"); v != "" {
+			cfg.GitHubAppPrivateKeyPath = v
+		} else if pc.GitHubAppPrivateKeyPath != "" {
+			cfg.GitHubAppPrivateKeyPath = pc.GitHubAppPrivateKeyPath
+		}
+	}
+	if cfg.GitHubAppInstallationID == 0 {
+		if v := os.Getenv("FABRIK_GITHUB_APP_INSTALLATION_ID"); v != "" {
+			n, err := strconv.ParseInt(v, 10, 64)
+			if err != nil {
+				return fmt.Errorf("FABRIK_GITHUB_APP_INSTALLATION_ID=%q is invalid (must be an integer)", v)
+			}
+			cfg.GitHubAppInstallationID = n
+		} else if pc.GitHubAppInstallationID != nil {
+			cfg.GitHubAppInstallationID = *pc.GitHubAppInstallationID
+		}
+	}
+	return nil
 }
 
 // resolveInt resolves an integer config value from an environment variable

@@ -1,0 +1,298 @@
+package engine
+
+import (
+	"context"
+	"fmt"
+	"path/filepath"
+	"strings"
+
+	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/githubauth"
+)
+
+// This file wires the engine onto a GitHub App installation as a second,
+// co-equal authentication path alongside the existing PAT (Config.Token) —
+// see #1713. It is compat-mode only: it consumes an App ID + private key +
+// installation ID an operator has already created and installed, by
+// whatever means (manually or via Pruefer's manifest flow) — it never runs
+// internal/githubauth's manifest/browser bootstrap flow itself. PAT mode is
+// permanent and co-equal (R2), not deprecated: a user-owned board can never
+// use App auth at all (see refuseUserOwnedBoardForAppAuth below), so PAT
+// remains the only option for that case. See adrs/1713-engine-github-app-
+// auth.md.
+
+// engineGitHubAppName and engineGitHubAppHomepageURL are forwarded to
+// Reconcile's ManifestFlowOptions identity fields. Compat-mode config
+// (AppID + AppInstallationID both pinned) makes Reconcile's manifest/browser
+// bootstrap path structurally unreachable — a pinned AppID always takes the
+// explicit-repair-error branch instead of self-healing via manifest — so
+// these are never actually used to create anything; setting them anyway is
+// cheap, correct defensive hygiene, not load-bearing.
+const (
+	engineGitHubAppName        = "fabrik"
+	engineGitHubAppHomepageURL = "https://github.com/handarbeit/fabrik"
+)
+
+// engineGitHubAppStatePath is the fixed, non-configurable path Reconcile uses
+// for reconciler-owned diagnostics state (its installation-repo cache).
+// Compat-mode-only usage means the manifest flow never runs and nothing
+// meaningful is ever read back from this file — it exists solely because
+// Reconcile's internal saveInstallationRepoCache needs some path to write
+// to. Not exposed as a config key: if a future fabrik init --github-app
+// bootstrap flow needs it exposed, that is its own decision.
+func engineGitHubAppStatePath(fabrikDir string) string {
+	return filepath.Join(fabrikDir, ".fabrik", "github-app-state.json")
+}
+
+// engineRequiredGitHubAppPermissions returns the GitHub App permission set
+// the engine's own GitHubClient code paths require (R3) — the set an
+// installation's actually-granted permissions are compared against at
+// startup. webhooksEnabled adds the repo-webhook-management permission only
+// when cfg.Webhooks is on (DeleteForwardingHooks manages repo hooks; the
+// engine never touches that API otherwise).
+//
+// This is a hand-maintained correspondence with the engine's actual API
+// usage (mirroring internal/githubauth's own requiredPermissions doc
+// comment), derived from engine.GitHubClient's method set rather than
+// confirmed against a real installation's granted-permissions JSON per
+// #770's methodology — that verification is a tracked follow-up, not yet
+// done (see #1713's PR description). If the engine starts using a new
+// GitHub API needing a permission not yet listed here, this check will
+// pass while a genuinely new gap goes undetected until that feature's
+// first use — the same is true if any key below turns out to be wrong.
+func engineRequiredGitHubAppPermissions(webhooksEnabled bool) map[string]string {
+	perms := map[string]string{
+		"metadata":              "read",
+		"organization_projects": "write",
+		"issues":                "write",
+		"pull_requests":         "write",
+		"checks":                "read",
+		"statuses":              "read",
+	}
+	if webhooksEnabled {
+		perms["webhooks"] = "write"
+	}
+	return perms
+}
+
+// gitHubAppFieldsSet reports which of the three GitHub App compat-mode
+// config fields are non-empty, for the all-or-nothing check below (R5).
+func gitHubAppFieldsSet(cfg Config) (id, key, inst bool) {
+	return cfg.GitHubAppID != 0, cfg.GitHubAppPrivateKeyPath != "", cfg.GitHubAppInstallationID != 0
+}
+
+// gitHubAppAuthConfigured reports whether the engine should authenticate as
+// a GitHub App installation rather than a PAT — true only when all three
+// compat-mode fields are set (see validateGitHubAppConfig for the partial
+// case).
+func gitHubAppAuthConfigured(cfg Config) bool {
+	id, key, inst := gitHubAppFieldsSet(cfg)
+	return id && key && inst
+}
+
+// validateGitHubAppConfig enforces R5: partial App configuration (e.g. a
+// Client ID with no private key) must fail at startup with a clear message,
+// never silently fall back to PAT. Compat-mode-only usage means the engine
+// must never let a partially-configured set reach githubauth.Reconcile,
+// which would otherwise treat a missing AppID as "run the manifest/browser
+// bootstrap flow" — entirely wrong for a headless daemon and not what R5
+// (or this issue's explicitly-out-of-scope bootstrap UX) wants.
+//
+// Returns nil for both the fully-unconfigured case (PAT mode, unchanged
+// behavior — R1/AC2) and the fully-configured case (App-auth mode).
+func validateGitHubAppConfig(cfg Config) error {
+	id, key, inst := gitHubAppFieldsSet(cfg)
+	if !id && !key && !inst {
+		return nil
+	}
+	if id && key && inst {
+		return nil
+	}
+	var missing []string
+	if !id {
+		missing = append(missing, "github_app_id")
+	}
+	if !key {
+		missing = append(missing, "github_app_private_key_path")
+	}
+	if !inst {
+		missing = append(missing, "github_app_installation_id")
+	}
+	return fmt.Errorf("GitHub App authentication is partially configured — missing %s; "+
+		"github_app_id, github_app_private_key_path, and github_app_installation_id must all be set "+
+		"together to authenticate as a GitHub App installation, or none of them at all to use a "+
+		"personal access token (FABRIK_TOKEN) instead. See docs/USER_GUIDE.md",
+		strings.Join(missing, ", "))
+}
+
+// refuseGHESWithGitHubApp refuses the GHES-host + GitHub-App-auth
+// combination outright rather than silently attempting it: internal/
+// githubauth's client construction (mintAuth) unconditionally builds a
+// gh.NewClientWithBaseURL client, which is documented as deriving an
+// incorrect GraphQL endpoint for a GHES host (NewClientForHost exists
+// specifically because GHES needs independently-derived REST/GraphQL
+// paths). This is a pre-existing gap in internal/githubauth this issue does
+// not fix — the safe move is a loud config-time refusal, not a client that
+// fails obscurely later against the wrong endpoint.
+func refuseGHESWithGitHubApp(cfg Config) error {
+	if cfg.GHESHost == "" {
+		return nil
+	}
+	return fmt.Errorf("GitHub App authentication cannot be combined with a GitHub Enterprise Server host "+
+		"(ghes_host %q) — internal/githubauth's client construction does not yet derive the correct GHES "+
+		"endpoints; remove ghes_host to use GitHub App auth against github.com, or remove the GitHub App "+
+		"config to use a personal access token against this GHES instance instead", cfg.GHESHost)
+}
+
+// formatPermissionShortfalls renders R3's "name each missing permission"
+// requirement as one human-readable, deterministically-ordered string —
+// checkGrantedPermissions already sorts shortfalls by permission name.
+func formatPermissionShortfalls(shortfalls []githubauth.RequiredPermissionShortfall) string {
+	parts := make([]string, len(shortfalls))
+	for i, s := range shortfalls {
+		granted := s.Granted
+		if granted == "" {
+			granted = "none"
+		}
+		parts[i] = fmt.Sprintf("%s (required %q, granted %q)", s.Permission, s.Required, granted)
+	}
+	return strings.Join(parts, "; ")
+}
+
+// refuseUserOwnedBoardForAppAuth is R4: a user-owned board must be refused
+// explicitly under App auth, not left to fail silently. Without this check,
+// GitHub simply strips organization-scoped permissions (including Projects
+// v2 access) from a user-account installation, the board fetch then returns
+// empty, and startup board validation reports a confusing "stage names
+// missing from board" — sending an operator chasing a config error that
+// does not exist. ownerType is resolved live via (*gh.Client).ResolveOwner
+// (ADR-1714's primitive), not ProjectBoard.OwnerType, which is merely an
+// echo of a caller-supplied argument in the common case and would only
+// catch a mismatch that happened to already be reflected in config.
+//
+// Mirrors cmd/board_admin.go's refuseIfUserOwnedBoard wording — duplicated
+// rather than shared, since engine cannot import cmd (cmd imports engine);
+// a future edit to one should check the other for drift.
+func refuseUserOwnedBoardForAppAuth(client *gh.Client, owner string) error {
+	_, ownerType, err := client.ResolveOwner(owner)
+	if err != nil {
+		return fmt.Errorf("resolving owner %q to check organization/user type: %w", owner, err)
+	}
+	if ownerType != "user" {
+		return nil
+	}
+	return fmt.Errorf("refusing: GitHub App authentication requires an organization-owned project board — "+
+		"%q is a user account, and GitHub strips organization-scoped permissions (including Projects v2 "+
+		"access) from user-account installations (see #770); use a personal access token (FABRIK_TOKEN) "+
+		"for a user-owned board instead — App auth is not available for this case, permanently", owner)
+}
+
+// setUpGitHubAppAuth performs R1/R3/R4's App-auth construction: reconciling
+// the pinned installation (skipping discovery/manifest entirely — see
+// Reconcile's compat-mode pin), obtaining a single owner-scoped client (the
+// engine holds one client, not Pruefer's per-owner map — see the engine's
+// own single e.client field), refusing a user-owned board (R4), and failing
+// hard on any granted-permission shortfall (R3). Returns the minted client
+// and the Reconciler whose refresh loop the caller must run for the
+// engine's lifetime (see poll.go's Run()).
+//
+// cfg.Owner + "/*" is passed as Options.WatchedRepos: the pinned branch of
+// Reconcile populates its client map from the *owners* named there — the
+// repo half of each entry is never consulted for that purpose (only for a
+// diagnostics-only repo cache) — and the engine has no watched-repo concept
+// of its own to supply instead. cfg.Owner is always non-empty by the time
+// New() runs (cmd/root.go requires it), and it is always the login that
+// owns the project board — including in multi-repo mode, where cfg.Repo may
+// be empty but cfg.Owner names the board's own organization.
+func setUpGitHubAppAuth(ctx context.Context, cfg Config, fabrikDir, baseURL string) (*gh.Client, *githubauth.Reconciler, error) {
+	required := engineRequiredGitHubAppPermissions(cfg.Webhooks)
+
+	// Options.RequiredPermissions is deliberately left unset here (rather
+	// than passed required): Reconcile's own verifyPinnedGrants would only
+	// use it for ADR-1709's soft, log-only check — a second
+	// GET /app/installations/{id} round trip whose entire effect (logging a
+	// shortfall) is strictly subsumed by VerifyGrants' fail-hard check
+	// below, which runs moments later against the same required set and
+	// fails startup outright instead of merely logging. Skipping it here
+	// avoids minting a redundant JWT and making a duplicate API call on
+	// every startup for no additional coverage.
+	reconciler, err := githubauth.Reconcile(ctx, githubauth.Options{
+		AppID:             cfg.GitHubAppID,
+		AppInstallationID: cfg.GitHubAppInstallationID,
+		AppPrivateKeyPath: cfg.GitHubAppPrivateKeyPath,
+		AppStatePath:      engineGitHubAppStatePath(fabrikDir),
+		WatchedRepos:      []string{cfg.Owner + "/*"},
+		BaseURL:           baseURL, // "" in production (github.com); tests point this at an httptest server
+		AppName:           engineGitHubAppName,
+		AppHomepageURL:    engineGitHubAppHomepageURL,
+		Logf:              func(format string, args ...any) { fmt.Printf("[startup] github-app: "+format+"\n", args...) },
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("reconciling GitHub App auth: %w", err)
+	}
+
+	client, err := reconciler.ClientForRepo(ctx, cfg.Owner, cfg.Repo)
+	if err != nil {
+		return nil, nil, fmt.Errorf("obtaining GitHub App installation client for owner %q: %w", cfg.Owner, err)
+	}
+
+	// R4 before R3 (deliberately): GitHub never grants organization_projects
+	// to a user-account installation, so a user-owned board would also fail
+	// the R3 grant check below — but with a confusing "missing
+	// organization_projects" message instead of naming the actual, more
+	// fundamental cause. Checking ownership first gives the clearer,
+	// more actionable error.
+	if err := refuseUserOwnedBoardForAppAuth(client, cfg.Owner); err != nil {
+		return nil, nil, err
+	}
+
+	shortfalls, err := reconciler.VerifyGrants(required)
+	if err != nil {
+		return nil, nil, fmt.Errorf("verifying GitHub App installation's granted permissions: %w", err)
+	}
+	if len(shortfalls) > 0 {
+		return nil, nil, fmt.Errorf("GitHub App installation %d is missing required permissions: %s — "+
+			"grant these permissions to the installation (App settings → Install App → Configure) and "+
+			"restart Fabrik", cfg.GitHubAppInstallationID, formatPermissionShortfalls(shortfalls))
+	}
+
+	fmt.Printf("[startup] authenticated as %s (GitHub App installation, organization %q)\n", reconciler.BotLogin(), cfg.Owner)
+	return client, reconciler, nil
+}
+
+// resolveGitHubAppAuth is New()'s single entry point for everything in this
+// file: validates config (R5), refuses an unsupported GHES combination, and
+// — only when App auth is actually configured — performs the full R1/R3/R4
+// construction. Returns (nil, nil, nil) for PAT mode (the unconfigured
+// case), which New() interprets as "build the client from cfg.Token exactly
+// as before" (R1/AC2). baseURL is "" in production (github.com); tests pass
+// an httptest server URL to exercise this without a real GitHub App.
+func resolveGitHubAppAuth(ctx context.Context, cfg Config, fabrikDir, baseURL string) (*gh.Client, *githubauth.Reconciler, error) {
+	if err := validateGitHubAppConfig(cfg); err != nil {
+		return nil, nil, err
+	}
+	if !gitHubAppAuthConfigured(cfg) {
+		return nil, nil, nil
+	}
+	if err := refuseGHESWithGitHubApp(cfg); err != nil {
+		return nil, nil, err
+	}
+	// Both a PAT and a full GitHub App config can be present at once (e.g.
+	// an operator migrating from one to the other without yet clearing
+	// FABRIK_TOKEN). App auth always wins in that case — cfg.Token is never
+	// referenced again for the engine's own GitHub client or worker gh auth
+	// (releaseUpgradeToken's use of it is a separate, unrelated concern).
+	// This is a deliberate precedence, not an ambiguous config R5 should
+	// refuse (unlike a partial App config, "both fully set" is unambiguous
+	// — App auth is the more specific, more recently configured intent) —
+	// but silently ignoring a still-valid credential with no trace in the
+	// log is exactly the kind of surprise the "co-equal, not a silent
+	// fallback" framing elsewhere in this file wants to avoid. So it's
+	// logged, not silent.
+	if cfg.Token != "" {
+		fmt.Printf("[startup] github-app: GitHub App authentication is configured and takes precedence over the " +
+			"configured personal access token (FABRIK_TOKEN) — the PAT will not be used for GitHub API calls or " +
+			"worker gh CLI auth\n")
+	}
+	return setUpGitHubAppAuth(ctx, cfg, fabrikDir, baseURL)
+}

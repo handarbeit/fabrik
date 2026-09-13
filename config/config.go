@@ -53,6 +53,15 @@ type ProjectConfig struct {
 	// default) means github.com — no behavior change from before GHES
 	// support existed. See NormalizeGHESHost.
 	GHESHost string `yaml:"ghes_host"`
+	// GitHubAppID, GitHubAppPrivateKeyPath, and GitHubAppInstallationID
+	// together configure GitHub App authentication (#1713) as a second,
+	// co-equal path alongside a PAT (Token()) — all three must be set
+	// together or none at all (enforced by engine.New(), not here). Nil
+	// (the default) means unset — distinct from 0, which would be a
+	// malformed value if ever encountered.
+	GitHubAppID             *int64 `yaml:"github_app_id"`
+	GitHubAppPrivateKeyPath string `yaml:"github_app_private_key_path"`
+	GitHubAppInstallationID *int64 `yaml:"github_app_installation_id"`
 	// RequiredStatusContexts lists, per "owner/repo", the status/check-run
 	// context names that must report a confirmed success on a PR's exact head
 	// SHA before the ci-gate will clear it. Unconfigured repos get no

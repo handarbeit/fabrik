@@ -12,6 +12,7 @@ import (
 
 	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/githubauth"
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/internal/selfupgrade"
 	"github.com/handarbeit/fabrik/stages"
@@ -79,6 +80,20 @@ type Config struct {
 	ArchiveAfter              time.Duration // Grace period since stage:<Done>:complete was applied before a Done item is archived (default 168h = 1 week; ADR-068)
 	ArchiveDone               string        // "on" (default) or "off" to fully disable Done-item auto-archival (also FABRIK_ARCHIVE_DONE; ADR-068)
 	GHESHost                  string        // GitHub Enterprise Server hostname (e.g. "github.example.com"); "" (default) = github.com, byte-identical to pre-GHES behavior (also FABRIK_GHES_HOST; ADR-1391)
+	// GitHubAppID, GitHubAppPrivateKeyPath, and GitHubAppInstallationID
+	// together configure a GitHub App installation as a second, co-equal
+	// authentication path alongside Token (#1713) — compat-mode only,
+	// consuming an App ID + private key + installation ID that already
+	// exist (an operator has already created and installed the App by
+	// whatever means). All three must be set together or none at all
+	// (enforced at startup — see validateGitHubAppConfig); the zero value
+	// (all unset, the default) means PAT mode, byte-identical to pre-#1713
+	// behavior. Also FABRIK_GITHUB_APP_ID / FABRIK_GITHUB_APP_PRIVATE_KEY_PATH
+	// / FABRIK_GITHUB_APP_INSTALLATION_ID and their config.yaml equivalents.
+	// See engine/github_app_auth.go and adrs/1713-engine-github-app-auth.md.
+	GitHubAppID             int64
+	GitHubAppPrivateKeyPath string
+	GitHubAppInstallationID int64
 	// ReadyCh is closed once Run() has registered signal handlers. Tests use
 	// this to avoid sending SIGINT before signal.Notify is installed.
 	ReadyCh chan struct{}
@@ -106,9 +121,10 @@ type cloneCall struct {
 type Engine struct {
 	cfg                      Config
 	client                   GitHubClient
-	releaseClient            GitHubClient          // always github.com, regardless of cfg.GHESHost — Fabrik's own self-upgrade release lives on github.com/handarbeit/fabrik, never on a customer's GHES instance (see checkReleaseUpgrade). Equal to client whenever no GHES host is configured (including all NewWithDeps-constructed test engines), so this is a no-op on the default path.
-	hostClient               *gh.Client            // same host as client, concretely typed; used only by the GHES-only startup version-floor preflight (checkGHESVersionFloor), which needs FetchInstalledVersion and isn't worth adding to the GitHubClient interface for one startup-only call. nil outside New() (e.g. NewWithDeps-constructed test engines); checkGHESVersionFloor is a standalone function tested directly against a *gh.Client, not through the Engine.
-	readClient               boardcache.ReadClient // read-only GitHub calls; may be CacheImpl or GitHubAdapter
+	releaseClient            GitHubClient           // always github.com, regardless of cfg.GHESHost — Fabrik's own self-upgrade release lives on github.com/handarbeit/fabrik, never on a customer's GHES instance (see checkReleaseUpgrade). Equal to client whenever no GHES host is configured (including all NewWithDeps-constructed test engines), so this is a no-op on the default path.
+	hostClient               *gh.Client             // same host as client, concretely typed; used only by the GHES-only startup version-floor preflight (checkGHESVersionFloor), which needs FetchInstalledVersion and isn't worth adding to the GitHubClient interface for one startup-only call. nil outside New() (e.g. NewWithDeps-constructed test engines); checkGHESVersionFloor is a standalone function tested directly against a *gh.Client, not through the Engine.
+	ghAppAuth                *githubauth.Reconciler // non-nil only when Config.GitHubApp* fields configure App-auth (#1713); nil in PAT mode (the default). Run() starts and, on shutdown, joins its refresh-loop goroutines when non-nil — see poll.go's Run().
+	readClient               boardcache.ReadClient  // read-only GitHub calls; may be CacheImpl or GitHubAdapter
 	claude                   ClaudeInvoker
 	statusField              *gh.StatusField
 	worktreeManagers         map[string]*WorktreeManager // key: "owner/repo"; one WM per discovered repo
@@ -298,13 +314,40 @@ func New(cfg Config) (*Engine, error) {
 
 	worktreeRoot := filepath.Join(fabrikDir, ".fabrik", "worktrees")
 	sharedStore := itemstate.NewStore(nil)
+
+	// GitHub App auth (#1713): resolved before the ordinary PAT-based client
+	// construction below, since a configured App-auth client takes its
+	// place entirely. Runs synchronously here, in New() rather than Run(),
+	// because e.readClient (further below) captures whichever concrete
+	// client is live at construction time — doing this later would leave it
+	// wrapping a stale PAT-based client. Only the resulting Reconciler's
+	// refresh-loop goroutines need a real, cancellable ctx; that part is
+	// started later, from Run(). See engine/github_app_auth.go.
+	ghAppClient, ghAppReconciler, err := resolveGitHubAppAuth(context.Background(), cfg, fabrikDir, "")
+	if err != nil {
+		return nil, err
+	}
+
 	var ghClient *gh.Client
-	if cfg.GHESHost != "" {
+	if ghAppClient != nil {
+		ghClient = ghAppClient
+	} else if cfg.GHESHost != "" {
 		ghClient = gh.NewClientForHost(cfg.Token, cfg.GHESHost)
 	} else {
 		ghClient = gh.NewClient(cfg.Token)
 	}
 	ghClient.SetMergeStrategy(cfg.AutoMergeStrategy)
+	// Worker gh CLI auth (constraint from #1713's research): in App-auth
+	// mode there is no static token to inject — read the live, already-
+	// refreshed installation token off the minted client instead, riding
+	// the same background refresh loop that keeps the engine's own API
+	// calls fresh. nil in PAT mode, leaving buildClaudeEnv's existing
+	// claudeGHToken path exactly as it was (R1/AC2).
+	if ghAppClient != nil {
+		claudeGHTokenOverrideFn = ghAppClient.Token
+	} else {
+		claudeGHTokenOverrideFn = nil
+	}
 	// Fabrik's own release always lives on github.com/handarbeit/fabrik, never
 	// on a customer's GHES instance, so self-upgrade needs a dedicated client
 	// pinned to github.com regardless of cfg.GHESHost (see checkReleaseUpgrade).
@@ -318,6 +361,7 @@ func New(cfg Config) (*Engine, error) {
 		client:                    ghClient,
 		releaseClient:             releaseClient,
 		hostClient:                ghClient,
+		ghAppAuth:                 ghAppReconciler,
 		claude:                    &RealClaudeInvoker{DebugOutput: cfg.DebugOutput},
 		worktreeManagers:          make(map[string]*WorktreeManager),
 		fabrikDir:                 fabrikDir,
