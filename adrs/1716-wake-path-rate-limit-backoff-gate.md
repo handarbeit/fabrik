@@ -160,14 +160,33 @@ suspended") is correct as-is and unchanged — REST exhaustion genuinely skips a
 `Engine.logfThrottled` (`engine/logthrottle.go`) wraps `logf` with a dedup check: a message
 logs on first occurrence under a given key, on any occurrence where the message text differs
 from the last emission under that key, or once a fixed interval has elapsed since the last
-emission — whichever comes first. Applied to `runProbeAndDeepFetch`'s rate-limited log line
-and the three unconditional per-poll rate-limit stats/warning lines inside `poll()`, none of
-which previously had any repeat-suppression (unlike `PollWithBackoff`'s own REST/GraphQL
-pause/resume logs, which were already transition-gated on `backoffRestPaused`/
+emission — whichever comes first. Applied to `runProbeAndDeepFetch`'s rate-limited log line,
+none of which previously had any repeat-suppression (unlike `PollWithBackoff`'s own
+REST/GraphQL pause/resume logs, which were already transition-gated on `backoffRestPaused`/
 `backoffRateLimitLow` flips — an existing in-repo model this generalizes rather than
 replaces). This collapses the alternating-line spam a sustained rate-limited condition
 produces from once-per-poll-cycle down to once per throttle window, addressing the 14 MB/hour
 log-growth component of the incident independent of the wake-path fix itself.
+
+**Follow-up (review finding): `logfThrottledByInterval` for content that changes every
+call.** The three unconditional per-poll rate-limit stats/warning lines inside `poll()` (REST
+remaining, GraphQL remaining, GraphQL-low warning) were initially also routed through
+`logfThrottled` — but their interpolated remaining-count changes on nearly every poll in
+*routine* (non-rate-limited) operation, and `shouldLog`'s "message change forces a log" rule
+is deliberately unconditional. The result: in the ordinary case (the case R4 most needed to
+cover, since it's the common one), these lines kept logging every cycle exactly as before —
+the throttle only actually collapsed repeats in the static-value backoff-storm scenario this
+PR targets. Fixed by adding `Engine.logfThrottledByInterval`, a variant that checks `shouldLog`
+against a constant surrogate (the throttle key itself) instead of the real formatted message,
+so it throttles purely by elapsed time and is immune to content changes. `logfThrottled`
+remains correct and unchanged for the wake-dropped log (a fixed string) and
+`runProbeAndDeepFetch`'s probe-rejected log (minute-granular reset time, stable error string
+through one episode) — content genuinely stable for an episode's duration, where a
+message-change *should* force an early re-emission (a real state transition, not per-call
+numeric noise). R3's own floor-blocked log was found to have the identical defect — it
+interpolates `elapsed`, which differs on nearly every floor-blocked call in a tight burst — so
+it moved to `logfThrottledByInterval` alongside the three stats lines. The two helpers now
+serve deliberately distinct cases rather than one doing double duty.
 
 ## Consequences
 

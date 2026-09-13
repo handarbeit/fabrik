@@ -42,6 +42,19 @@ const rateLimitResetBuffer = 5 * time.Second
 // deployment configuring --poll below ~1s would need to revisit this. A fixed
 // unexported constant, not a CLI flag — this is not a tunable operational
 // knob, it's a guard against a defect class.
+//
+// Interaction with the recovery self-wake: this floor can, in principle,
+// swallow the immediate re-poll the legitimate rate-limit-recovery self-wake
+// (see wakeBlockedByRateLimitBackoff's doc comment) is trying to trigger, if
+// e.poll() and the rest of that PollWithBackoff call complete in under
+// minPollInterval — plausible for a fast response. This is not a starvation
+// bug: doPollCycle (poll.go) calls ticker.Reset(result.NextInterval)
+// unconditionally after every PollWithBackoff call, wake-triggered or not,
+// and a floor-blocked call returns NextInterval == minPollInterval-elapsed —
+// so the floor-blocked recovery wake is recovered by the ticker firing again
+// within, at most, minPollInterval (500ms), not the next backed-off tick.
+// "Immediate probe" in that doc comment means "within one poll-rate-floor
+// window," not "with zero delay."
 const minPollInterval = 500 * time.Millisecond
 
 // shouldPauseForRESTRateLimit reports whether the engine should skip the entire
@@ -127,7 +140,7 @@ func isRateLimitNearZero(remaining, limit int) bool {
 // e.backoffRateLimitLow is still true) sees the field still true and is
 // blocked, exactly as intended. This is an ordering PROPERTY of the current
 // single-goroutine code, not an enforced invariant — see
-// TestRun_RecoverySelfWake_NotBlockedByBackoffGate for the regression guard.
+// TestPollWithBackoff_RecoverySelfWake_NotBlockedByBackoffGate for the regression guard.
 func (e *Engine) wakeBlockedByRateLimitBackoff() bool {
 	return e.backoffRateLimitLow || e.backoffRestPaused
 }

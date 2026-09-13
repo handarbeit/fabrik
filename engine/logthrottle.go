@@ -64,3 +64,24 @@ func (e *Engine) logfThrottled(key string, issueNumber int, tag, format string, 
 	}
 	e.logf(issueNumber, tag, "%s", msg)
 }
+
+// logfThrottledByInterval is logfThrottled's variant for a periodic status
+// line whose interpolated content (a remaining-count, an elapsed duration)
+// differs on nearly every call in the routine case — shouldLog's
+// "message-change forces a log" rule (correct for a line reporting a real
+// state transition) would defeat throttling entirely for a line like that,
+// since it would treat every fluctuating count as a new state to announce.
+// This variant throttles purely by elapsed time under key: it checks
+// shouldLog against a constant surrogate (key itself) instead of the real
+// formatted message, so content changes never bypass the interval, while
+// still logging the real message text when it does fire. Use this for
+// informational per-poll stats lines; keep logfThrottled for lines whose
+// content changing IS the signal worth an early re-emission (e.g. an
+// activation/clearance transition). See #1716 review discussion.
+func (e *Engine) logfThrottledByInterval(key string, issueNumber int, tag, format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	if !e.logThrottle.shouldLog(key, key, e.now(), logThrottleMinInterval) {
+		return
+	}
+	e.logf(issueNumber, tag, "%s", msg)
+}

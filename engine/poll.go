@@ -962,7 +962,11 @@ func (e *Engine) PollWithBackoff(ctx context.Context, configuredInterval time.Du
 	// not time.Now(), to stay controllable from tests/sim's injected Clock.
 	if !e.lastPollAttemptAt.IsZero() {
 		if elapsed := e.now().Sub(e.lastPollAttemptAt); elapsed < minPollInterval {
-			e.logfThrottled("poll-floor-blocked", 0, "poll",
+			// logfThrottledByInterval, not logfThrottled: elapsed differs on
+			// nearly every floor-blocked call, which would defeat a
+			// message-equality throttle entirely during a tight burst (#1716
+			// review finding).
+			e.logfThrottledByInterval("poll-floor-blocked", 0, "poll",
 				"poll attempt within %v of the last one — floor-blocked (min interval %v)\n", elapsed, minPollInterval)
 			return PollBackoffResult{NextInterval: minPollInterval - elapsed}, nil
 		}
@@ -1242,13 +1246,19 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	// R4 (#1716): throttled — these three lines otherwise repeat verbatim on
 	// every single poll cycle, which is exactly the alternating-line spam a
 	// rate-limited daemon produced (39 lines/sec sustained, 14 MB/hour).
+	// logfThrottledByInterval, not logfThrottled: the remaining-count and
+	// reset-time text embedded here change on essentially every poll in
+	// routine (non-rate-limited) operation, which would defeat a
+	// message-equality throttle for the very case it needs to cover (#1716
+	// review finding) — these are periodic status lines whose repetition,
+	// not content, is what needs collapsing.
 	restStats, graphqlStats := e.client.RateLimitStats()
 	if restStats.Limit > 0 {
 		resetStr := "unknown"
 		if !restStats.Reset.IsZero() {
 			resetStr = restStats.Reset.Local().Format("15:04")
 		}
-		e.logfThrottled("poll-rate-limit-rest", 0, "poll", "rate limit REST: %d/%d remaining, resets at %s\n",
+		e.logfThrottledByInterval("poll-rate-limit-rest", 0, "poll", "rate limit REST: %d/%d remaining, resets at %s\n",
 			restStats.Remaining, restStats.Limit, resetStr)
 	}
 	if graphqlStats.Limit > 0 {
@@ -1256,10 +1266,10 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		if !graphqlStats.Reset.IsZero() {
 			resetStr = graphqlStats.Reset.Local().Format("15:04")
 		}
-		e.logfThrottled("poll-rate-limit-graphql", 0, "poll", "rate limit GraphQL: %d/%d remaining, resets at %s\n",
+		e.logfThrottledByInterval("poll-rate-limit-graphql", 0, "poll", "rate limit GraphQL: %d/%d remaining, resets at %s\n",
 			graphqlStats.Remaining, graphqlStats.Limit, resetStr)
 		if float64(graphqlStats.Remaining)/float64(graphqlStats.Limit) < rateLimitBackoffThreshold {
-			e.logfThrottled("poll-rate-limit-graphql-low", 0, "warn",
+			e.logfThrottledByInterval("poll-rate-limit-graphql-low", 0, "warn",
 				"GraphQL rate limit is low (%d/%d remaining, %.0f%% threshold) — consider reducing poll frequency\n",
 				graphqlStats.Remaining, graphqlStats.Limit, rateLimitBackoffThreshold*100)
 		}

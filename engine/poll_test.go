@@ -3999,3 +3999,75 @@ func TestPollWithBackoff_RecoverySelfWake_NotBlockedByBackoffGate(t *testing.T) 
 		t.Error("wakeBlockedByRateLimitBackoff() is true after recovery — the legitimate recovery wake would be incorrectly dropped")
 	}
 }
+
+// TestPollWithBackoff_RecoverySelfWake_FloorBlockedCallSelfHealsQuickly
+// covers a case the test above deliberately sidesteps (it advances the clock
+// past minPollInterval before the follow-up call specifically to isolate the
+// wakeBlockedByRateLimitBackoff property). In real Run() timing, the
+// recovery self-wake's follow-up doPollCycle() call can land within
+// minPollInterval of the call that queued it (#1716 review finding: R3's
+// floor and R1's gate are independent mechanisms that don't coordinate, so a
+// fast e.poll() could mean the wake's own "immediate probe" is itself
+// floor-blocked). This is not a starvation bug — doPollCycle unconditionally
+// resets the ticker to the returned NextInterval regardless of which branch
+// called it, so a floor-blocked call still causes a re-poll within
+// minPollInterval, not the next long backed-off tick. Assert that bound
+// directly: a call landing at the same instant as the recovery call returns
+// NextInterval <= minPollInterval, never the (much larger) rate-limit-backoff
+// interval that was active moments before recovery.
+func TestPollWithBackoff_RecoverySelfWake_FloorBlockedCallSelfHealsQuickly(t *testing.T) {
+	var fetchCount int32
+	future := time.Now().Add(time.Hour)
+	healthy := gh.RateLimitStats{Remaining: 5000, Limit: 5000, Reset: future}
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			atomic.AddInt32(&fetchCount, 1)
+			return &gh.ProjectBoard{}, nil
+		},
+		rateLimitStatsFn: func() (gh.RateLimitStats, gh.RateLimitStats) {
+			graphql := healthy
+			switch atomic.LoadInt32(&fetchCount) {
+			case 1:
+				graphql = gh.RateLimitStats{Remaining: 0, Limit: 5000, Reset: future} // activates backoff
+			case 2:
+				graphql = gh.RateLimitStats{Remaining: 4500, Limit: 5000, Reset: future} // recovers
+			}
+			return healthy, graphql
+		},
+	}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	wakeCh := make(chan struct{}, 1)
+	eng.SetWakeCh(wakeCh)
+
+	fixed := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	eng.SetClock(stubClock{t: fixed})
+	if _, err := eng.PollWithBackoff(context.Background(), 30*time.Second); err != nil {
+		t.Fatalf("first PollWithBackoff: %v", err)
+	}
+
+	// Second call recovers, well past the floor from the first call.
+	recoveredAt := fixed.Add(minPollInterval + time.Millisecond)
+	eng.SetClock(stubClock{t: recoveredAt})
+	if _, err := eng.PollWithBackoff(context.Background(), 30*time.Second); err != nil {
+		t.Fatalf("second (recovering) PollWithBackoff: %v", err)
+	}
+	if eng.backoffRateLimitLow {
+		t.Fatal("expected backoffRateLimitLow=false after second (recovered) call")
+	}
+
+	// Third call: simulates Run()'s select loop immediately consuming the
+	// queued recovery wake and calling doPollCycle() again, without letting
+	// real wall-clock time advance past the floor — the worst case for the
+	// interaction under test.
+	result, err := eng.PollWithBackoff(context.Background(), 30*time.Second)
+	if err != nil {
+		t.Fatalf("third (recovery follow-up) PollWithBackoff: %v", err)
+	}
+	if got := atomic.LoadInt32(&fetchCount); got != 2 {
+		t.Errorf("fetchCount after third call = %d, want 2 (floor should have blocked this attempt)", got)
+	}
+	if result.NextInterval > minPollInterval {
+		t.Errorf("floor-blocked recovery follow-up NextInterval = %v, want <= %v (must self-heal quickly, not wait out a long backed-off interval)",
+			result.NextInterval, minPollInterval)
+	}
+}
