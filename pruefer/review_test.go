@@ -630,6 +630,35 @@ func TestReviewPR_ForceReview_BypassesAlreadyReviewed(t *testing.T) {
 	}
 }
 
+// TestReviewPR_ForceReview_BypassesLocalTracker is the #1631 counterpart to
+// TestReviewPR_ForceReview_BypassesAlreadyReviewed above, which only ever
+// exercises the bypass with a nil tracker — never proving forceReview
+// actually overrides a *populated* ReviewTracker. Plan's own constraint
+// ("ForceReview must still bypass the new backstop") is otherwise
+// unverified: the tracker.Recall check in ReviewPR sits ahead of
+// FetchPRReviews, gated on `!forceReview`, and this is the only test that
+// pre-records an entry in a real tracker and confirms a subsequent
+// /pruefer review comment still triggers a fresh review of that exact head
+// instead of being silently swallowed by Pruefer's own memory of the first.
+func TestReviewPR_ForceReview_BypassesLocalTracker(t *testing.T) {
+	client := newFakeReviewer()
+	client.comments = []gh.Comment{{DatabaseID: 42, Body: "/pruefer review"}}
+	claude := &mockClaudeInvoker{}
+	clone, cloneCalls := fakeClone(t, nil)
+	tracker := NewReviewTracker()
+	tracker.Record("owner", "repo", 1, "sha1")
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr, tracker)
+
+	if !outcome.Reviewed {
+		t.Fatalf("outcome = %+v, want Reviewed=true — /pruefer review must bypass a populated local tracker, not just the GitHub-derived guard", outcome)
+	}
+	if cloneCalls.Load() != 1 || claude.callCount() != 1 || client.submitCallCount() != 1 {
+		t.Error("forced re-review must clone, invoke claude, and submit exactly one review even though the local tracker already recorded this head")
+	}
+}
+
 // TestReviewPR_DiffTooLarge_Skipped covers the pathological-exhaustion case:
 // "x diff content" has no "diff --git" header at all, so splitDiffFiles
 // puts every byte into the unattributed preamble — nothing to exclude,
