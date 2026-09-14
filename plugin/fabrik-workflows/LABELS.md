@@ -86,6 +86,19 @@ part of the normal happy path, not an error condition.
   engine-initiated close failed after its Done-advance already happened
   (`awaiting-close`). Both retried every poll until the issue is confirmed
   closed, then escalate to `fabrik:paused` after `MaxRetries`.
+- **`fabrik:awaiting-pr-ready`** — A stage configured with
+  `mark_pr_ready_on_complete: true` completed, but its draft PR never
+  transitioned to ready-for-review — the `MarkPRReady` call failed
+  non-transiently, or exhausted its own in-process 3-attempt retry.
+  Applied only in `markPRReady`'s failure branches. **Unlike every other
+  label in this section, it does NOT suppress dispatch** — the item keeps
+  advancing through later stages normally while it's outstanding, since
+  nothing about a later stage depends on the PR being ready. Retried every
+  poll by a settle scan that re-resolves the PR live and clears the
+  marker once it's found ready, closed, merged, or missing, without
+  calling the API again; escalates to `fabrik:paused` after `MaxRetries`
+  with a comment naming the draft PR and the manual `gh pr ready <N>` fix.
+  See ADR-1582.
 - **`fabrik:awaiting-advance`** — A terminal advance (moving the
   project-board Status forward once a stage's PR has merged) failed —
   most commonly because the target Status column doesn't exist on the
@@ -249,11 +262,26 @@ and should recognize.
   see below), assigned, and linked as `blockedBy` dependencies. For
   Plan-declared spawns, this is also the idempotency guard consulted by
   the pre-Implement spawn step — while present, that step is a no-op.
-  Remove manually (and close any orphaned children) to force a fresh
-  Plan-driven spawn. A mid-flight spawn from Review/Validate applies
-  this same label on success but needs no equivalent guard of its own —
-  each dispatch's output is fresh and parsed exactly once, never
-  replayed (ADR-1419).
+  Remove manually (children created under the completed spawn must be
+  closed by hand first) to force a fresh Plan-driven spawn. A mid-flight
+  spawn from Review/Validate applies this same label on success but
+  needs no equivalent guard of its own — each dispatch's output is
+  fresh and parsed exactly once, never replayed (ADR-1419).
+- **`fabrik:spawned-child:<blockIndex>:<childNumber>`** — Durable,
+  restart-surviving marker on the *parent*, written immediately after a
+  spawn block's child issue is created, recording that block's child by
+  1-based index and issue number. Lets a retried Plan-driven spawn
+  (operator un-pause, or an engine restart mid-batch) recognize and
+  resume an already-created child instead of duplicating it, rather
+  than requiring the manual orphan cleanup `fabrik:children-spawned`
+  above still describes for a *completed* spawn. Removed once the whole
+  batch succeeds — steady state carries none of these. **Plan/Implement
+  origin only** — the Review/Validate mid-flight spawn never writes
+  this marker, since its block list comes from that dispatch's own
+  fresh Claude output rather than an immutable stored comment and so
+  can't be trusted to reparse identically on a retry that redispatches
+  Claude; that origin keeps the pre-ADR-1583 always-create behavior.
+  See ADR-1583.
 - **`fabrik:claude-limit`** — Set when a Claude invocation exits because
   the account's usage limit was hit (detected structurally from the CLI's
   own result payload, never from output text). The stage attempt still

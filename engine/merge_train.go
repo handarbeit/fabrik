@@ -605,6 +605,38 @@ func mergeTrainMaxTurnsOverride(holdingStg *stages.Stage, extendTurns bool) int 
 	return base * 2
 }
 
+// mergeTrainConflictWallTimeFallback is the wall-clock deadline conflictResolutionStage
+// substitutes for a holding stage that leaves max_wall_time unset. It's a var, not a
+// const, mirroring claudeWaitDelay/claudeKillGraceSigInt/claudeKillGraceSigTerm
+// (engine/claude.go) — the established convention for a timing constant a test needs to
+// shrink to get fast, deterministic real-subprocess coverage. 30 minutes matches every
+// other real stage's max_wall_time in this repo's own config (specify.yaml,
+// research.yaml, plan.yaml, implement.yaml, review.yaml, validate.yaml); see ADR-1500.
+var mergeTrainConflictWallTimeFallback = 30 * time.Minute
+
+// conflictResolutionStage returns the *stages.Stage to actually pass to
+// resolveConflictWithClaude's InvokeForComments call. holdingStage(e.cfg) returns the
+// single, process-wide *stages.Stage shared by every (repo, base) merge-train worker
+// (ADR-1648) and read by other call sites (e.g. advanceToNextStage) — so this function
+// never mutates holdingStg in place; doing so would be a data race across concurrently
+// running workers and would leak the fallback into every other reader of the same
+// pointer. When holdingStg.MaxWallTime is already set, holdingStg itself is returned
+// unchanged (no copy needed). Otherwise it returns a freshly allocated shallow copy with
+// MaxWallTime set to mergeTrainConflictWallTimeFallback — sufficient because
+// stages.Stage's slice/pointer fields are never written by this substitution. The
+// fallback value flows into the existing scaledWallTime(stage.MaxWallTime, ...) call
+// inside InvokeClaudeForComments with no further wiring, so fabrik:extend-turns scaling
+// (mergeTrainMaxTurnsOverride, above) applies to it exactly as it would to an explicit
+// YAML value. See ADR-1500.
+func conflictResolutionStage(holdingStg *stages.Stage) *stages.Stage {
+	if holdingStg == nil || holdingStg.MaxWallTime > 0 {
+		return holdingStg
+	}
+	cp := *holdingStg
+	cp.MaxWallTime = mergeTrainConflictWallTimeFallback
+	return &cp
+}
+
 // prepareTrainWorker performs all one-time setup for a merge-train worker: semaphore
 // acquisition, repo readiness, holding-stage lookup, extend-turns computation,
 // trialParams construction, restart-time state reconstruction (ADR-059 D5,
@@ -2024,7 +2056,7 @@ func (e *Engine) resolveConflictWithClaude(ctx context.Context, memberItem gh.Pr
 
 	comment := buildTrainConflictComment(memberItem, prSHA, generatedPaths)
 
-	_, _, _, err := e.claude.InvokeForComments(ctx, holdingStg, memberItem, []gh.Comment{comment}, trainWorkDir, opts)
+	_, _, _, err := e.claude.InvokeForComments(ctx, conflictResolutionStage(holdingStg), memberItem, []gh.Comment{comment}, trainWorkDir, opts)
 	var limitErr *claudeUsageLimitError
 	if errors.As(err, &limitErr) {
 		e.activateClaudeSuspension(memberItem.Number, limitErr.ResetTime, time.Now())

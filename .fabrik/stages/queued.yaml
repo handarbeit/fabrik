@@ -1,3 +1,4 @@
 name: Queued
 order: 6
 holding_stage: true
+max_wall_time: "30m"

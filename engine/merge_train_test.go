@@ -8738,3 +8738,139 @@ func TestMergeTrainMaxTurnsOverride_UsesCommentMaxTurnsBase(t *testing.T) {
 		})
 	}
 }
+
+// TestConflictResolutionStage covers #1500: resolveConflictWithClaude's
+// InvokeForComments call must never dispatch with a zero MaxWallTime, even when the
+// configured holding stage (this repo's real queued.yaml among them) leaves
+// max_wall_time unset — the only remaining backstop would otherwise be the 15-minute
+// inactivity timeout, which never fires while output keeps arriving. It also verifies
+// the ADR-1648 no-in-place-mutation invariant: holdingStage(e.cfg) returns the single,
+// process-wide *stages.Stage shared by every concurrently running (repo, base)
+// merge-train worker, so conflictResolutionStage must never write through the pointer
+// it's handed.
+func TestConflictResolutionStage(t *testing.T) {
+	origFallback := mergeTrainConflictWallTimeFallback
+	mergeTrainConflictWallTimeFallback = 42 * time.Minute
+	defer func() { mergeTrainConflictWallTimeFallback = origFallback }()
+
+	t.Run("explicit max_wall_time is preserved and the same pointer is returned", func(t *testing.T) {
+		holdingStg := &stages.Stage{Name: "Queued", HoldingStage: true, MaxWallTime: 15 * time.Minute}
+		got := conflictResolutionStage(holdingStg)
+		if got != holdingStg {
+			t.Errorf("expected the same *stages.Stage pointer back when MaxWallTime is already set, got a different pointer")
+		}
+		if got.MaxWallTime != 15*time.Minute {
+			t.Errorf("MaxWallTime = %v, want unchanged 15m", got.MaxWallTime)
+		}
+	})
+
+	t.Run("unset max_wall_time gets the fallback substituted via a fresh copy", func(t *testing.T) {
+		// Mirrors this repo's real queued.yaml before this fix: a bare holding stage
+		// with no max_wall_time configured.
+		holdingStg := &stages.Stage{Name: "Queued", HoldingStage: true}
+		got := conflictResolutionStage(holdingStg)
+		if got == holdingStg {
+			t.Fatalf("expected a fresh copy, got the original pointer back")
+		}
+		if got.MaxWallTime != mergeTrainConflictWallTimeFallback {
+			t.Errorf("MaxWallTime = %v, want fallback %v", got.MaxWallTime, mergeTrainConflictWallTimeFallback)
+		}
+		if got.Name != holdingStg.Name || got.HoldingStage != holdingStg.HoldingStage {
+			t.Errorf("expected the copy to preserve other fields: got %+v, from %+v", got, holdingStg)
+		}
+		// The defining invariant: the original, process-wide pointer must never be
+		// mutated in place — it's read concurrently by every other (repo, base)
+		// merge-train worker (ADR-1648) and by other call sites like
+		// advanceToNextStage.
+		if holdingStg.MaxWallTime != 0 {
+			t.Errorf("original holdingStg.MaxWallTime was mutated in place: got %v, want 0", holdingStg.MaxWallTime)
+		}
+	})
+
+	t.Run("nil holding stage is returned unchanged", func(t *testing.T) {
+		if got := conflictResolutionStage(nil); got != nil {
+			t.Errorf("expected nil back for a nil holding stage, got %+v", got)
+		}
+	})
+}
+
+// TestResolveConflictWithClaude_FallbackKillsUnboundedInvocation covers #1500's
+// requirement that a merge-train conflict-resolution invocation is actually killed
+// within a bounded deadline when the configured holding stage has no max_wall_time —
+// exactly this repo's real queued.yaml shape before this fix, and the scenario in which
+// TestInvokeClaudeForComments_MergeTrainOverrideScalesWallTime's own doc comment notes
+// the sibling #1472 bug (and, by the same token, this gap) is inert. Modeled on that
+// test's real-subprocess harness: a fake `claude` binary that sleeps far longer than
+// the (shrunk) fallback deadline, asserting resolveConflictWithClaude returns within a
+// bounded window rather than running unbounded, and that the shared holdingStg pointer
+// is never mutated by the call.
+func TestResolveConflictWithClaude_FallbackKillsUnboundedInvocation(t *testing.T) {
+	t.Chdir(t.TempDir())
+	binDir := t.TempDir()
+	fakeClaude := filepath.Join(binDir, "claude")
+	script := "#!/bin/sh\n" +
+		"cat >/dev/null\n" +
+		"sleep 60\n"
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	origFallback := mergeTrainConflictWallTimeFallback
+	mergeTrainConflictWallTimeFallback = 800 * time.Millisecond
+	defer func() { mergeTrainConflictWallTimeFallback = origFallback }()
+
+	origDelay := claudeWaitDelay
+	claudeWaitDelay = 1 * time.Second
+	defer func() { claudeWaitDelay = origDelay }()
+
+	origSigInt := claudeKillGraceSigInt
+	origSigTerm := claudeKillGraceSigTerm
+	claudeKillGraceSigInt = 100 * time.Millisecond
+	claudeKillGraceSigTerm = 100 * time.Millisecond
+	defer func() {
+		claudeKillGraceSigInt = origSigInt
+		claudeKillGraceSigTerm = origSigTerm
+	}()
+
+	// Bare holding stage — no MaxWallTime set, mirroring this repo's real queued.yaml
+	// shape prior to this fix's belt-and-suspenders config edit.
+	holdingStg := &stages.Stage{Name: "Queued", HoldingStage: true}
+
+	eng := NewWithDeps(Config{}, &mockGitHubClient{}, nil, nil)
+	eng.claude = &RealClaudeInvoker{}
+
+	trainWorkDir := t.TempDir()
+	if err := exec.Command("git", "-C", trainWorkDir, "init").Run(); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	memberItem := gh.ProjectItem{Number: 99, Title: "FallbackKillsUnboundedInvocation"}
+
+	type result struct {
+		resolved bool
+		err      error
+	}
+	ch := make(chan result, 1)
+	start := time.Now()
+	go func() {
+		resolved, err := eng.resolveConflictWithClaude(context.Background(), memberItem, trainWorkDir, holdingStg, "deadbeef", nil, "deadbeef", InvokeOptions{})
+		ch <- result{resolved, err}
+	}()
+
+	select {
+	case res := <-ch:
+		elapsed := time.Since(start)
+		if res.resolved {
+			t.Errorf("expected resolved=false — the invocation was killed before Claude could produce a resolution")
+		}
+		if elapsed > 6*time.Second {
+			t.Errorf("resolveConflictWithClaude took %v — the fallback deadline (%v) was not honored, invocation ran effectively unbounded", elapsed, mergeTrainConflictWallTimeFallback)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("resolveConflictWithClaude did not return within 15s of the fallback deadline")
+	}
+
+	if holdingStg.MaxWallTime != 0 {
+		t.Errorf("shared holdingStg.MaxWallTime was mutated in place: got %v, want 0", holdingStg.MaxWallTime)
+	}
+}

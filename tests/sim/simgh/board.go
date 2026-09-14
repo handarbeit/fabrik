@@ -403,7 +403,18 @@ func (s *Sim) FetchItemDetails(item *gh.ProjectItem) error {
 }
 
 // FetchProjectItem returns the board card for an issue, searching every
-// seeded project. Returns nil when the issue is not on any board.
+// seeded project. When the issue exists but has not (yet) been added to any
+// project board, it falls back to a minimal projection built directly from
+// the issue record — mirroring real GitHub's behavior, since production's
+// own Client.FetchProjectItem (github/project.go) wraps a plain REST GET
+// /repos/{owner}/{repo}/issues/{number} that has no board-membership
+// precondition at all. That fallback deliberately does not populate any of
+// the board/PR/comment fields the richer, board-derived path below carries
+// (Status, ItemID, BlockedBy, LinkedPR*, Comments) — a plain issue GET
+// doesn't return those either. Returns nil when the issue does not exist in
+// any seeded repo, board membership aside (see #1583, whose resume-safe
+// spawnChildren retry depends on resolving a child created but not yet
+// added to any board — this fallback closes exactly that fidelity gap).
 func (s *Sim) FetchProjectItem(owner, repo string, issueNumber int) (*gh.ProjectItem, error) {
 	ownerRepo := repoKey(owner, repo)
 
@@ -425,11 +436,33 @@ func (s *Sim) FetchProjectItem(owner, repo string, issueNumber int) (*gh.Project
 			break
 		}
 	}
+	if project == nil {
+		r, ok := s.repos[ownerRepo]
+		if !ok {
+			s.mu.Unlock()
+			return nil, nil
+		}
+		iss, ok := r.issues[issueNumber]
+		if !ok {
+			s.mu.Unlock()
+			return nil, nil
+		}
+		item := &gh.ProjectItem{
+			ID:        iss.nodeID(ownerRepo),
+			Number:    iss.number,
+			Title:     iss.title,
+			Body:      iss.body,
+			IsClosed:  iss.state == "CLOSED",
+			URL:       fmt.Sprintf("https://github.com/%s/issues/%d", ownerRepo, iss.number),
+			Repo:      ownerRepo,
+			Labels:    cloneStrings(iss.labels),
+			Assignees: cloneStrings(iss.assignees),
+		}
+		s.mu.Unlock()
+		return item, nil
+	}
 	s.mu.Unlock()
 
-	if project == nil {
-		return nil, nil
-	}
 	return s.buildProjectItem(project, ref)
 }
 

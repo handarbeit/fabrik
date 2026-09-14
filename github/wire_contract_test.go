@@ -64,6 +64,7 @@ var wireContractRegistry = []wireOperation{
 	{"fetchItemDetailsQuery", []string{fetchItemDetailsQuery}},
 	{"fetchNodeCommentsQuery", []string{fetchNodeCommentsQuery}},
 	{"fetchNodeLabelsQuery", []string{fetchNodeLabelsQuery}},
+	{"fetchNodeBlockedByQuery", []string{fetchNodeBlockedByQuery}},
 	{"fetchProjectUpdatedAtQuery", []string{fetchProjectUpdatedAtQuery}},
 	{"fetchProjectItemStatusQuery", []string{fetchProjectItemStatusQuery}},
 	{"fetchProjectItemStatusBatchQuery", []string{fetchProjectItemStatusBatchQuery}},
