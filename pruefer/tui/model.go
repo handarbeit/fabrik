@@ -276,6 +276,11 @@ func allocateRows(avail, wantHistory, wantRepos int) (history, repos int) {
 		}
 	}
 	if repos < minPaneRows {
+		// Raising repos back to its floor must come out of history's share,
+		// or the two sums exceed avail and the render overflows the terminal
+		// (review finding: allocateRows(20, 5, 1) returned history=19,
+		// repos=3 — a sum of 22 against an avail of 20).
+		history -= minPaneRows - repos
 		repos = minPaneRows
 	}
 	return history, repos

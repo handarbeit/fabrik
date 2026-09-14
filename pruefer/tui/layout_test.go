@@ -112,6 +112,57 @@ func TestAllocateRows_ServesChangingPaneFirst(t *testing.T) {
 	}
 }
 
+// TestAllocateRows_RepoFloorDoesNotOverflow is the regression test for a
+// review finding: when repos wants fewer than minPaneRows (e.g. 1-2 watched
+// repos with no provenance notes), the final floor-clamp raised repos back up
+// to minPaneRows without taking the row back out of history, so the two sums
+// exceeded avail. allocateRows(20, 5, 1) previously returned history=19,
+// repos=3 — a sum of 22 against an avail of 20.
+func TestAllocateRows_RepoFloorDoesNotOverflow(t *testing.T) {
+	for _, tc := range []struct{ avail, wantHistory, wantRepos int }{
+		{20, 5, 1},
+		{20, 5, 0},
+		{40, 30, 1},
+		{100, 4, 2},
+	} {
+		h, r := allocateRows(tc.avail, tc.wantHistory, tc.wantRepos)
+		if h+r > tc.avail {
+			t.Errorf("allocateRows(%d, %d, %d) = history=%d repos=%d, sum %d > avail %d",
+				tc.avail, tc.wantHistory, tc.wantRepos, h, r, h+r, tc.avail)
+		}
+		if r != minPaneRows {
+			t.Errorf("allocateRows(%d, %d, %d): repos=%d, want the floor %d (wantRepos was below it)",
+				tc.avail, tc.wantHistory, tc.wantRepos, r, minPaneRows)
+		}
+	}
+}
+
+// TestLayout_VeryShortTerminalNeverOverflows is the regression test for a
+// review finding: SetMaxRows unconditionally floored its input to
+// minPaneRows, defeating allocateRows' dedicated "too short for both floors"
+// branch — which deliberately returns values below minPaneRows so
+// history+repos still sums to what's available. Before the fix, Model.View()
+// rendered a constant 18 rows regardless of terminal height once it dropped
+// below ~18 rows, overflowing every height in this table.
+//
+// The range tested is [14, 17]: with 0 in-flight reviews, header(1) +
+// active(4) + footer(1) + 2*paneChrome(6) = 12 non-content rows, plus the
+// 1-row-each floor allocateRows' degrade branch still guarantees history and
+// repos, puts the hard structural minimum this design can render into at 14
+// — header/active/footer/detail are documented as never truncated (R1's
+// stated priority), so a shorter terminal cannot avoid overflowing no matter
+// what history/repos do, and isn't this test's concern. 14-17 is exactly the
+// window the old constant-18 bug overflowed but a correctly degrading layout
+// should not.
+func TestLayout_VeryShortTerminalNeverOverflows(t *testing.T) {
+	for _, h := range []int{14, 15, 16, 17} {
+		m := seedModel(t, 120, h, 15, 40, 0)
+		if got := lineCount(m.View()); got > h {
+			t.Errorf("height=%d: rendered %d rows, overflows the terminal", h, got)
+		}
+	}
+}
+
 // TestLayout_PanelOrder pins R4: the changing panes sit above the static
 // Watched Repos list.
 func TestLayout_PanelOrder(t *testing.T) {

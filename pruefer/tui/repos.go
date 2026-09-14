@@ -139,13 +139,19 @@ func (r RepoPaneComponent) View(width int) string {
 	}
 	// Window to the granted row budget (#1674 R1). Provenance notes are part
 	// of the content and window with it rather than being pinned.
+	//
+	// At budget <= 1 there is no room for a content row alongside the "… N
+	// more" marker (a fixed "shown = b-1, floor 1" would render 2 rows into a
+	// 1-row budget, the same Height()/View() mismatch already fixed once in
+	// this file's history pane sibling) — show the marker alone instead.
 	if b := r.rowBudget(); len(lines) > b {
-		shown := b - 1
-		if shown < 1 {
-			shown = 1
+		if b <= 1 {
+			lines = []string{dimStyle.Render(fmt.Sprintf("  … %d more", len(lines)))}
+		} else {
+			shown := b - 1
+			hidden := len(lines) - shown
+			lines = append(lines[:shown:shown], dimStyle.Render(fmt.Sprintf("  … %d more", hidden)))
 		}
-		hidden := len(lines) - shown
-		lines = append(lines[:shown:shown], dimStyle.Render(fmt.Sprintf("  … %d more", hidden)))
 	}
 
 	if r.maxRows > 0 {
@@ -167,9 +173,14 @@ func (r RepoPaneComponent) rowBudget() int {
 }
 
 // SetMaxRows sets the row budget granted by the layout (#1674 R1).
+//
+// Floors at 1, not minPaneRows — see HistoryPaneComponent.SetMaxRows for why:
+// allocateRows' short-terminal degrade branch deliberately returns values
+// below minPaneRows, and re-clamping here would defeat it and overflow the
+// terminal. maxRows == 0 remains the "unset" sentinel rowBudget checks for.
 func (r *RepoPaneComponent) SetMaxRows(n int) {
-	if n < minPaneRows {
-		n = minPaneRows
+	if n < 1 {
+		n = 1
 	}
 	r.maxRows = n
 }

@@ -189,6 +189,42 @@ func TestHistoryPane_EmptyView(t *testing.T) {
 	}
 }
 
+// TestHistoryPane_SelectionAtTailStaysVisible is the regression test for a
+// review finding: the window-around-selection logic computed start against
+// the pre-decrement row budget, then shrank the budget for the "… N more"
+// marker without re-clamping start — so a selection sitting at the tail of a
+// list that overflows the budget (total=10, budget=5, idx=9 in the reported
+// repro) could land just outside the resulting window and disappear from the
+// rendered pane entirely, even though Selected() still reported it as chosen.
+func TestHistoryPane_SelectionAtTailStaysVisible(t *testing.T) {
+	var h HistoryPaneComponent
+	for i := 0; i < 10; i++ {
+		comp, _ := h.Update(ReviewCompletedEvent{
+			Repo: "o/r", PRNumber: 100 + i, Reviewed: true, CompletedAt: time.Now(),
+		})
+		h = comp.(HistoryPaneComponent)
+	}
+	h.SetFocused(true)
+	h.SetMaxRows(5) // total (10) > budget (5): windowing kicks in.
+
+	// Navigate to the oldest (last) visible entry — more downs than entries
+	// so this doesn't depend on the exact count.
+	for i := 0; i < 15; i++ {
+		comp, _ := h.Update(keyMsg("down"))
+		h = comp.(HistoryPaneComponent)
+	}
+
+	sel := h.Selected()
+	if sel == nil {
+		t.Fatal("expected a selection after navigating to the end")
+	}
+	key := activeReviewKey(sel.Repo, sel.PRNumber)
+	view := stripANSI(h.View(120))
+	if !strings.Contains(view, key) {
+		t.Errorf("selected entry %q is not visible in the rendered pane:\n%s", key, view)
+	}
+}
+
 // TestHistoryPane_AllSkipsEmptyStateShowsCount pins AC3: a history of skips
 // alone must not render the same bare placeholder as a genuinely empty pane
 // (TestHistoryPane_EmptyView above) — that would misrepresent an actively

@@ -85,9 +85,17 @@ func (h HistoryPaneComponent) rowBudget() int {
 }
 
 // SetMaxRows sets the row budget granted by the layout (#1674 R1).
+//
+// Floors at 1, not minPaneRows: allocateRows has a dedicated "too short for
+// both floors" branch that deliberately returns values below minPaneRows so
+// history+repos still sums to the available space on a very short terminal.
+// Re-clamping back up to minPaneRows here would defeat that degrade and
+// overflow the terminal (review finding — a constant 18-row render regardless
+// of terminal height once it dropped below ~18 rows). maxRows == 0 remains
+// the "unset" sentinel rowBudget checks for; allocateRows never returns 0.
 func (h *HistoryPaneComponent) SetMaxRows(n int) {
-	if n < minPaneRows {
-		n = minPaneRows
+	if n < 1 {
+		n = 1
 	}
 	h.maxRows = n
 }
@@ -239,22 +247,36 @@ func (h HistoryPaneComponent) View(width int) string {
 	budget := h.rowBudget()
 	total := len(lines)
 	if total > budget {
-		maxRows := budget
-		start := h.idx - maxRows/2
-		if start < 0 {
-			start = 0
-		}
-		if start+maxRows > total {
-			start = total - maxRows
-		}
-		if start > 0 || start+maxRows < total {
-			maxRows--
-		}
-		windowed := lines[start : start+maxRows]
-		if start > 0 || start+maxRows < total {
+		// total > budget means a full-budget window can never cover every
+		// line, so the "… N more" marker is always needed here — reserve its
+		// row up front and compute start against the *final* maxRows.
+		//
+		// Review finding: the previous version computed start against the
+		// pre-decrement budget, then shrank maxRows for the marker without
+		// re-clamping start — so a selection sitting at the tail (e.g.
+		// total=10, budget=5, idx=9) could land just outside the resulting
+		// window and disappear from view entirely while still being the
+		// pane's "selected" entry per Selected().
+		//
+		// At budget <= 1 there is no room for a content row alongside the
+		// marker itself (maxRows := budget-1 would floor to 1, rendering 2
+		// rows into a 1-row budget — the Height()/View() mismatch this file
+		// has already had once) — show the marker alone instead.
+		if budget <= 1 {
+			lines = []string{dimStyle.Render(fmt.Sprintf("  … %d more", total))}
+		} else {
+			maxRows := budget - 1
+			start := h.idx - maxRows/2
+			if start < 0 {
+				start = 0
+			}
+			if start+maxRows > total {
+				start = total - maxRows
+			}
+			windowed := lines[start : start+maxRows]
 			windowed = append(windowed, dimStyle.Render(fmt.Sprintf("  … %d more", total-maxRows)))
+			lines = windowed
 		}
-		lines = windowed
 	}
 	// Stretch to the granted budget so the layout fills the terminal instead
 	// of leaving dead space below it (#1674 R1). Only when a budget was
