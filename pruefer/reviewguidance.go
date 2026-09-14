@@ -90,11 +90,17 @@ type RepoSkillProvenance struct {
 func parseSkillFrontmatter(data []byte) (mode, body string, ok bool) {
 	text := string(data)
 	lines := strings.SplitAfter(text, "\n")
-	if len(lines) == 0 || strings.TrimRight(lines[0], "\n") != frontmatterDelim {
+	// TrimRight cuts both "\r" and "\n" (not just "\n") so a CRLF-terminated
+	// delimiter line (a Windows-authored SKILL.md) is recognized identically
+	// to an LF one — otherwise "---\r\n" survives as "---\r", never equals
+	// frontmatterDelim, and the entire frontmatter block (fences and mode
+	// declaration alike) silently leaks into the guidance body as literal
+	// text instead of being parsed.
+	if len(lines) == 0 || strings.TrimRight(lines[0], "\r\n") != frontmatterDelim {
 		return "", text, true
 	}
 	for i := 1; i < len(lines); i++ {
-		if strings.TrimRight(lines[i], "\n") != frontmatterDelim {
+		if strings.TrimRight(lines[i], "\r\n") != frontmatterDelim {
 			continue
 		}
 		var fm skillFrontmatter

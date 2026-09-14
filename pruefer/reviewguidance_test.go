@@ -49,6 +49,32 @@ func TestParseSkillFrontmatter_ValidFrontmatter_ReplaceMode(t *testing.T) {
 	}
 }
 
+// TestParseSkillFrontmatter_CRLFLineEndings_RecognizesFrontmatter guards
+// against a Windows-authored SKILL.md (CRLF line endings): the delimiter
+// check must strip both "\r" and "\n", not "\n" alone, or a "---\r\n" line
+// never equals frontmatterDelim and the whole frontmatter block (fences and
+// mode declaration alike) leaks into the guidance body as literal text
+// instead of being parsed — found in review (handarbeit-pruefer). Non-
+// vacuous: reverting the fix to strings.TrimRight(lines[i], "\n") makes this
+// fail, since the returned "body" would then contain the literal "---\r"
+// fence lines and mode would come back empty instead of "append".
+func TestParseSkillFrontmatter_CRLFLineEndings_RecognizesFrontmatter(t *testing.T) {
+	data := "---\r\nmode: append\r\n---\r\nCheck for %w error wrapping.\r\n"
+	mode, body, ok := parseSkillFrontmatter([]byte(data))
+	if !ok {
+		t.Fatal("expected ok=true for valid CRLF-terminated frontmatter")
+	}
+	if mode != "append" {
+		t.Errorf("mode = %q, want %q — CRLF delimiter lines must be recognized", mode, "append")
+	}
+	if strings.Contains(body, "---") || strings.Contains(body, "mode:") {
+		t.Errorf("body = %q, want the frontmatter fences/declaration stripped, not leaked into the guidance text", body)
+	}
+	if !strings.Contains(body, "Check for %w error wrapping.") {
+		t.Errorf("body = %q, want the guidance text after the closing delimiter", body)
+	}
+}
+
 func TestParseSkillFrontmatter_EmptyFrontmatter_EmptyMode(t *testing.T) {
 	data := "---\n---\nJust guidance, no mode declared.\n"
 	mode, body, ok := parseSkillFrontmatter([]byte(data))
