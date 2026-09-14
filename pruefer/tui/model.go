@@ -250,6 +250,27 @@ func allocateRows(avail, wantHistory, wantRepos int) (history, repos int) {
 	if avail < 2*minPaneRows {
 		// Too short to satisfy both floors: split what there is, still giving
 		// the changing pane the larger half.
+		//
+		// Review finding: when avail drops below 2 (including negative —
+		// header/active/footer/an open detail panel are never truncated per
+		// R1's priority, and their combined height can exceed the terminal
+		// on its own), this floors *both* sides up to 1 regardless of how
+		// negative avail is, so the render overflows the terminal. That
+		// overflow is bounded, not runaway, though: history+repos is always
+		// exactly 2 here — never more — so the overflow is exactly `2 -
+		// avail`, shrinking to 0 as avail rises to 2 and growing no worse
+		// than however far avail itself is below the structural floor
+		// (never worse "because of" this branch). This is the same category
+		// of degradation TestLayout_VeryShortTerminalNeverOverflows already
+		// accepts below its own (detail-closed) structural minimum of 14 —
+		// an open detail panel simply raises that minimum further, since
+		// its height is added to the same non-negotiable "fixed" budget.
+		// Actually eliminating the overflow would mean one of the two panes
+		// rendering zero content rows, which SetMaxRows deliberately refuses
+		// (floors at 1, not 0 — see its own comment) to avoid reintroducing
+		// the Height()/View() mismatch this file has already had twice; so
+		// this is documented and bounded rather than "fixed" outright. See
+		// TestAllocateRows_DegradeBranchBoundedByTwo.
 		history = avail / 2
 		if history < 1 {
 			history = 1

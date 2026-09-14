@@ -137,6 +137,65 @@ func TestAllocateRows_RepoFloorDoesNotOverflow(t *testing.T) {
 	}
 }
 
+// TestAllocateRows_DegradeBranchBoundedByTwo is the regression test for a
+// review finding: when avail drops below 2 — reachable at ordinary terminal
+// heights once the detail panel is open, since its height joins the
+// never-truncated "fixed" budget — the degrade branch floors both panes to 1
+// regardless of how negative avail is, overflowing the terminal by `2 -
+// avail`. That's a real, understood limitation (see allocateRows' comment),
+// not a fixable one without letting a pane render zero content rows, which
+// SetMaxRows deliberately refuses. What this pins instead: the overflow is
+// bounded at exactly 2 — never worse, no matter how far avail drops — so a
+// future change can't quietly make a bad terminal size render even more rows
+// than it does today.
+func TestAllocateRows_DegradeBranchBoundedByTwo(t *testing.T) {
+	for _, avail := range []int{1, 0, -1, -3, -10, -100} {
+		h, r := allocateRows(avail, 30, 30)
+		if sum := h + r; sum != 2 {
+			t.Errorf("allocateRows(%d, 30, 30) = history=%d repos=%d, sum %d, want the bounded sum 2",
+				avail, h, r, sum)
+		}
+	}
+}
+
+// TestLayout_DetailOpenShortTerminalPinnedAtItsFloor reproduces the review
+// finding's exact repro (detail panel opened on a short terminal) at the
+// Model level. header/active/footer/an open detail panel are never
+// truncated (R1's priority), so this configuration has a higher structural
+// minimum than TestLayout_VeryShortTerminalNeverOverflows' detail-closed 14
+// — the open detail panel adds to the same never-truncated fixed budget.
+// Below that minimum the render does overflow (same accepted category as
+// heights below 14), but what this pins is that the overflow does not keep
+// getting worse as the terminal keeps shrinking: allocateRows' degrade
+// branch always returns a fixed sum of 2 once avail drops below it (see
+// TestAllocateRows_DegradeBranchBoundedByTwo), so the total render is pinned
+// at this configuration's floor no matter how far below it h drops — and at
+// or above that floor, there is no overflow at all.
+func TestLayout_DetailOpenShortTerminalPinnedAtItsFloor(t *testing.T) {
+	seed := func(h int) Model {
+		m := seedModel(t, 120, h, 15, 40, 10)
+		upd, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		m = upd.(Model)
+		if !m.DetailVisible() {
+			t.Fatalf("height=%d: detail panel did not open", h)
+		}
+		return m
+	}
+
+	floor := lineCount(seed(1).View())
+	for _, h := range []int{5, 10, 14} {
+		if got := lineCount(seed(h).View()); got != floor {
+			t.Errorf("height=%d: rendered %d rows, want the pinned floor %d (from height=1)", h, got, floor)
+		}
+	}
+
+	for _, h := range []int{floor, floor + 1, floor + 5} {
+		if got := lineCount(seed(h).View()); got > h {
+			t.Errorf("height=%d: rendered %d rows, overflows a terminal at or above the structural floor %d", h, got, floor)
+		}
+	}
+}
+
 // TestLayout_VeryShortTerminalNeverOverflows is the regression test for a
 // review finding: SetMaxRows unconditionally floored its input to
 // minPaneRows, defeating allocateRows' dedicated "too short for both floors"
