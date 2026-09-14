@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -19,7 +20,12 @@ var allSkipReasons = []string{
 	"diff exceeds max_diff_bytes",
 }
 
-func TestHistoryPane_AllSkipReasonsRenderInHistory(t *testing.T) {
+// TestHistoryPane_SkipsAreFilteredButCounted pins #1674 R2. This test replaces
+// an earlier one that asserted every skip reason rendered in the pane — that
+// was the behavior being changed, not a regression: at 15 watched repos the
+// steady state is almost entirely "already reviewed at this head SHA", which
+// evicted the rows that carry information. Skips are now counted, not listed.
+func TestHistoryPane_SkipsAreFilteredButCounted(t *testing.T) {
 	var h HistoryPaneComponent
 	for i, reason := range allSkipReasons {
 		comp, _ := h.Update(ReviewCompletedEvent{
@@ -28,14 +34,40 @@ func TestHistoryPane_AllSkipReasonsRenderInHistory(t *testing.T) {
 		})
 		h = comp.(HistoryPaneComponent)
 	}
+	// Retention is unchanged — the entries are still held and selectable.
 	if h.Count() != len(allSkipReasons) {
 		t.Fatalf("Count() = %d, want %d", h.Count(), len(allSkipReasons))
 	}
+
 	view := h.View(120)
 	for _, reason := range allSkipReasons {
-		if !strings.Contains(view, reason) {
-			t.Errorf("View() does not contain skip reason %q:\n%s", reason, view)
+		if strings.Contains(view, reason) {
+			t.Errorf("View() still lists skip reason %q; skips should be counted, not listed:\n%s", reason, view)
 		}
+	}
+	if want := fmt.Sprintf("%d skipped", len(allSkipReasons)); !strings.Contains(view, want) {
+		t.Errorf("View() does not disclose %q:\n%s", want, view)
+	}
+}
+
+// TestHistoryPane_ErroredSkipIsNeverFiltered guards the trap in R2: an entry
+// carrying an error must survive the skip filter. A failed review is the most
+// important row on this pane, and sweeping it away with the skips is the
+// obvious way to implement the filter wrongly.
+func TestHistoryPane_ErroredSkipIsNeverFiltered(t *testing.T) {
+	var h HistoryPaneComponent
+	comp, _ := h.Update(ReviewCompletedEvent{
+		Repo: "handarbeit/fabrik", PRNumber: 7, Skipped: true, Reason: "draft",
+		Err: "fetching diff: boom", CompletedAt: time.Now(),
+	})
+	h = comp.(HistoryPaneComponent)
+
+	view := h.View(120)
+	if !strings.Contains(view, "fetching diff: boom") {
+		t.Errorf("errored entry was filtered out with the skips:\n%s", view)
+	}
+	if strings.Contains(view, "0 completed") {
+		t.Errorf("errored entry not counted as visible:\n%s", view)
 	}
 }
 
@@ -154,5 +186,61 @@ func TestHistoryPane_EmptyView(t *testing.T) {
 	}
 	if h.Height() != 4 { // 1 placeholder line + 3
 		t.Errorf("Height() = %d, want 4", h.Height())
+	}
+}
+
+// TestHistoryPane_SelectionAtTailStaysVisible is the regression test for a
+// review finding: the window-around-selection logic computed start against
+// the pre-decrement row budget, then shrank the budget for the "… N more"
+// marker without re-clamping start — so a selection sitting at the tail of a
+// list that overflows the budget (total=10, budget=5, idx=9 in the reported
+// repro) could land just outside the resulting window and disappear from the
+// rendered pane entirely, even though Selected() still reported it as chosen.
+func TestHistoryPane_SelectionAtTailStaysVisible(t *testing.T) {
+	var h HistoryPaneComponent
+	for i := 0; i < 10; i++ {
+		comp, _ := h.Update(ReviewCompletedEvent{
+			Repo: "o/r", PRNumber: 100 + i, Reviewed: true, CompletedAt: time.Now(),
+		})
+		h = comp.(HistoryPaneComponent)
+	}
+	h.SetFocused(true)
+	h.SetMaxRows(5) // total (10) > budget (5): windowing kicks in.
+
+	// Navigate to the oldest (last) visible entry — more downs than entries
+	// so this doesn't depend on the exact count.
+	for i := 0; i < 15; i++ {
+		comp, _ := h.Update(keyMsg("down"))
+		h = comp.(HistoryPaneComponent)
+	}
+
+	sel := h.Selected()
+	if sel == nil {
+		t.Fatal("expected a selection after navigating to the end")
+	}
+	key := activeReviewKey(sel.Repo, sel.PRNumber)
+	view := stripANSI(h.View(120))
+	if !strings.Contains(view, key) {
+		t.Errorf("selected entry %q is not visible in the rendered pane:\n%s", key, view)
+	}
+}
+
+// TestHistoryPane_AllSkipsEmptyStateShowsCount pins AC3: a history of skips
+// alone must not render the same bare placeholder as a genuinely empty pane
+// (TestHistoryPane_EmptyView above) — that would misrepresent an actively
+// working daemon as an idle one. The empty-content line discloses the count
+// instead.
+func TestHistoryPane_AllSkipsEmptyStateShowsCount(t *testing.T) {
+	var h HistoryPaneComponent
+	for i, reason := range allSkipReasons {
+		comp, _ := h.Update(ReviewCompletedEvent{
+			Repo: "o/r", PRNumber: i, Skipped: true, Reason: reason, CompletedAt: time.Now(),
+		})
+		h = comp.(HistoryPaneComponent)
+	}
+	view := h.View(80)
+	want := fmt.Sprintf("no completed reviews yet (%d skipped)", len(allSkipReasons))
+	if !strings.Contains(view, want) {
+		t.Errorf("View() = %q, want it to contain %q", view, want)
 	}
 }

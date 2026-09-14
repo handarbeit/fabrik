@@ -37,6 +37,10 @@ type RepoPaneComponent struct {
 	truncated     bool
 	capped        bool
 	capApplied    int
+
+	// maxRows is the row budget the layout has granted this pane, set by
+	// Model.View from the terminal height (#1674 R1). Zero means unset.
+	maxRows int
 }
 
 func (r RepoPaneComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
@@ -133,9 +137,58 @@ func (r RepoPaneComponent) View(width int) string {
 	for _, note := range r.provenanceNotes() {
 		lines = append(lines, note)
 	}
+	// Window to the granted row budget (#1674 R1). Provenance notes are part
+	// of the content and window with it rather than being pinned.
+	//
+	// At budget <= 1 there is no room for a content row alongside the "… N
+	// more" marker (a fixed "shown = b-1, floor 1" would render 2 rows into a
+	// 1-row budget, the same Height()/View() mismatch already fixed once in
+	// this file's history pane sibling) — show the marker alone instead.
+	if b := r.rowBudget(); len(lines) > b {
+		if b <= 1 {
+			lines = []string{dimStyle.Render(fmt.Sprintf("  … %d more", len(lines)))}
+		} else {
+			shown := b - 1
+			hidden := len(lines) - shown
+			lines = append(lines[:shown:shown], dimStyle.Render(fmt.Sprintf("  … %d more", hidden)))
+		}
+	}
+
+	if r.maxRows > 0 {
+		for len(lines) < r.rowBudget() {
+			lines = append(lines, "")
+		}
+	}
+
 	content := title + "\n" + strings.Join(lines, "\n")
 	return borderStyle.Width(width - 4).Render(content)
 }
+
+// rowBudget is the number of content rows this pane may render.
+func (r RepoPaneComponent) rowBudget() int {
+	if r.maxRows > 0 {
+		return r.maxRows
+	}
+	return defaultRepoRows
+}
+
+// SetMaxRows sets the row budget granted by the layout (#1674 R1).
+//
+// Floors at 1, not minPaneRows — see HistoryPaneComponent.SetMaxRows for why:
+// allocateRows' short-terminal degrade branch deliberately returns values
+// below minPaneRows, and re-clamping here would defeat it and overflow the
+// terminal. maxRows == 0 remains the "unset" sentinel rowBudget checks for.
+func (r *RepoPaneComponent) SetMaxRows(n int) {
+	if n < 1 {
+		n = 1
+	}
+	r.maxRows = n
+}
+
+// defaultRepoRows is the budget used before the layout has granted one. Large
+// enough that a typical repo set renders whole in tests and before the first
+// WindowSizeMsg.
+const defaultRepoRows = 40
 
 // provenanceNotes renders the derived set's provenance/warning lines (R4):
 // a truncated-enumeration warning, a max_derived_repos cap warning, and a
@@ -158,11 +211,18 @@ func (r RepoPaneComponent) provenanceNotes() []string {
 }
 
 func (r RepoPaneComponent) Height() int {
-	n := len(r.order)
+	// See HistoryPaneComponent.Height: a granted budget is padded to in View.
+	if r.maxRows > 0 {
+		return r.rowBudget() + 3
+	}
+	n := len(r.order) + len(r.provenanceNotes())
 	if n == 0 {
 		n = 1
 	}
-	return n + 3 + len(r.provenanceNotes())
+	if b := r.rowBudget(); n > b {
+		n = b
+	}
+	return n + 3
 }
 
 // SetFocused updates the focused state.
