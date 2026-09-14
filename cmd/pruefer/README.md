@@ -177,14 +177,107 @@ To add a second account: repeat [First run: automatic setup](#first-run-automati
 
 **Prohibition: never configure Pruefer with a single App whose private key you distribute to other users.** A shared distributed key would hand every holder control over *every* installation of that one App — the exact shared-secret model this whole document exists to steer you away from. It's superficially attractive because it makes onboarding a one-liner ("just use this key"), which is precisely why it's written down here as forbidden rather than left to be re-discovered as a shortcut: each deployment registers (or is handed a manifest flow to register) its **own** App, full stop. See [ADR-1253](../../adrs/1253-github-app-manifest-auth-reconciler.md).
 
-**Migrating an existing public, multi-account App (e.g. `handarbeit-pruefer`'s own history) to one-App-per-account:** GitHub refuses to flip a public App to private while it's installed on any account other than its owner — so this cannot be done in a single step. The sequence:
+#### Migration runbook: public multi-account App → private per-account Apps
 
-1. **Register a new, private App per additional account** — run [First run: automatic setup](#first-run-automatic-setup-recommended) once per account, each in its own working directory. Each gets its own key and its own `.pruefer/app-state.json`.
-2. **Stand up a daemon per new App** — each pointed at its own working directory, `served_accounts` set to exactly that one account.
-3. **Move each account across**: uninstall the old public App from that account, confirm the new daemon picks up its repos (installation-derived discovery — no `watched_repos` edit needed unless you're also narrowing scope), then repeat for the next account.
-4. **Once every non-owner account has moved off the old App**, GitHub will now permit flipping it to private (or retiring it entirely) — do so once no installation but the owner's own remains.
+**Migrating an existing public, multi-account App (e.g. `handarbeit-pruefer`'s own history) to one-App-per-account:** GitHub refuses to flip a public App to private while it's installed on any account other than its owner — so this cannot be done in a single step, and it is not a settings toggle: the old App must be drained account by account, then retired, not converted. See [ADR-1722](../../adrs/1722-app-installation-trust-boundary.md) for the target model this runbook migrates toward.
 
-Do not attempt to flip the old App to private before every non-owner installation is gone — GitHub will refuse the change outright.
+**Rollback position, stated once up front:** every step below through step 10 is safely reversible or pausable — the old App keeps its existing installations and keeps reviewing PRs on every account it's still installed on, right up until step 11 actually acts on it. If a new daemon misbehaves mid-migration, you can stop, leave both identities dual-listed, and re-install the old App on any account you backed out of. Step 11's default action — flipping the old App to private — is itself reversible (a private App can be flipped back to public); only its optional delete branch, reachable solely if the owner account has also been independently migrated, is a true point of no return. See step 11 for the distinction.
+
+**The other hazard this sequence exists to prevent:** each new App gets its own bot login (`<app-slug>[bot]`), and Fabrik's review gate targets reviewers **by login**, declared in stage YAML (`expected_reviewers:` in `.fabrik/stages/review.yaml`/`validate.yaml` — see [ADR-1283](../../adrs/1283-declared-unrequested-reviewers.md)). The instant an old identity stops being able to review, every repo still declaring only that login waits out the full review-wait timeout and then pauses, with nothing naming a retired bot as the cause. This runbook interleaves Fabrik's `expected_reviewers` cutover with Pruefer's own App/daemon migration so that a login is never removed from `expected_reviewers` before its replacement is proven working, and a new App's installation never replaces an old one before its login has already been added.
+
+1. **Rebuild and verify.** Any Pruefer binary older than [#1711](https://github.com/handarbeit/fabrik/issues/1711) (the manifest-flow fix) and [#1712](https://github.com/handarbeit/fabrik/issues/1712) (App-identity parameterization) cannot create an App via the manifest flow at all. Rebuild from `main` first:
+
+   ```bash
+   git pull --ff-only
+   go build -o bin/pruefer ./cmd/pruefer
+   ```
+
+   Verify the rebuilt binary's manifest flow actually works before relying on it for the real migration — run [First run: automatic setup](#first-run-automatic-setup-recommended) once against a disposable or low-stakes account and confirm an App is created. The flow is idempotent and safe to abandon or retry (see "Subsequent runs" above), so there's no cost to a throwaway attempt.
+
+   *Rollback:* nothing has touched the live App yet. If the rebuilt binary misbehaves, fix it and re-verify before proceeding — there is no cutover risk at this step.
+
+2. **Enumerate every `expected_reviewers` declaration, in every managed repo, before cutting anything.** A missed repo fails silently — it doesn't error, it waits out the review-wait timeout and then pauses, with nothing in the pause reason naming a retired bot identity as the cause. Run both of the following; treat this as complete coverage, not either one alone:
+
+   Primary — local bare clones (fast, zero API cost, complete for every repo the running Fabrik engine has already cloned):
+
+   ```bash
+   for d in .fabrik/repos/*.git; do
+     echo "== $d =="
+     git --git-dir="$d" grep -n "expected_reviewers" HEAD -- '.fabrik/stages/*.yaml'
+   done
+   ```
+
+   Backstop — hosted code search (clone-state-agnostic; catches a repo the board has discovered but Fabrik hasn't dispatched to yet, at the cost of GitHub's own search-index lag; requires `gh` authenticated against every account in scope):
+
+   ```bash
+   gh search code "expected_reviewers" --owner handarbeit --owner verveguy --owner liminisapp --owner shadoworg -- path:.fabrik/stages
+   ```
+
+   Keep the resulting list of `owner/repo` + stage-file pairs at hand — it's the checklist for step 5 below. **If you see an issue pause with no obvious cause shortly after a later step in this runbook, a missed repo from this enumeration is the first thing to check.**
+
+3. **Register a new, private App per additional account (one App per account, per [ADR-1722](../../adrs/1722-app-installation-trust-boundary.md)).** The owning account (`handarbeit`, for the shared App's own history) keeps the original App; every other account (e.g. `verveguy`, `liminisapp`, `shadoworg`) gets its own. For each: run [First run: automatic setup](#first-run-automatic-setup-recommended) in its own working directory, giving it a distinct, globally-unique `github_app_name` (e.g. `verveguy-pruefer`) and a matching `github_app_homepage_url` (see [Configuration reference](#configuration-reference) — `github_app_name` defaults to `pruefer`, which collides across deployments if left unset). That flow's own last action is to print an install link and have you follow it — going ahead and installing the new App on the target account at this point is fine; installing early creates no hazard on its own (see step 5's note below on what the actual hazard is).
+
+   *Rollback:* the old App is still installed on this account and still reviewing it — nothing about this account's review coverage has changed yet, whether or not the new App has also been installed.
+
+4. **Stand up a daemon per new App.** Each daemon needs its own working directory, its own `.pruefer/app-private-key.pem` and `.pruefer/app-state.json`, its own `github_app_id` (or manifest-created credentials from step 3), and a `served_accounts`/`watched_repos` scoped to that one account only — see [The per-account model](#the-per-account-model-multiple-accounts--multiple-apps) above for the full layout and its rationale (separate rate-limit budgets, separate Claude accounts).
+
+   *Rollback:* the old App is still installed on this account and still doing all the reviewing — the new daemon isn't yet declared in any `expected_reviewers` list, so nothing depends on it working yet, regardless of whether its App happens to already be installed.
+
+5. **Dual-list `expected_reviewers` for that account's repos — before touching that account's installation.** For every repo step 2 found belonging to the account being migrated, add the new App's bot login *alongside* the old one; do not replace it yet:
+
+   ```yaml
+   # .fabrik/stages/review.yaml, .fabrik/stages/validate.yaml
+   expected_reviewers:
+     - handarbeit-pruefer
+     - verveguy-pruefer   # new — do not remove the old entry yet
+   ```
+
+   This is safe because `expected_reviewers` is matched any-of-N (ADR-1283): either login alone satisfies the gate, so declaring both never requires both to respond. **A single-entry flag day is unsafe**: the new bot's login can't review anything until its App exists *and* is installed on that account, so swapping the old entry for the new one in a single edit — rather than adding alongside it — creates a window where the repo has zero working declared reviewer identities. No flag day; dual-list first.
+
+   In this repo specifically, that means editing `.fabrik/stages/review.yaml:12` and `.fabrik/stages/validate.yaml:12` — but not yet: the new bot login doesn't exist until step 3 has actually run for the account this repo belongs to, so that edit is deferred to when an operator executes this runbook for real, not part of any prior PR's diff.
+
+   **This step must happen before step 6 (uninstalling the old App) for the same account, never after** — uninstalling the old App before dual-listing would briefly leave a stale-only declaration, reproducing the exact hazard dual-listing exists to prevent. Installing the *new* App early (as step 3's manifest flow does by design) is not the hazard: the old App is still installed and still reviewing, so its login alone keeps satisfying the gate until step 6. Only the old App's removal needs to wait.
+
+   *Rollback:* this edit alone changes nothing observable — the old App is still installed and still the only one actually reviewing until step 6.
+
+6. **Move the account: uninstall the old App, confirm the new one picks up its repos.** Uninstall the old public App from this one account, then confirm the new daemon's installation-derived discovery has picked up its repos (no `watched_repos` edit needed unless you're also narrowing scope — see [Installation-derived repo discovery](#installation-derived-repo-discovery)).
+
+   *Rollback:* if the new daemon misbehaves here, reinstalling the old App on this account and leaving both `expected_reviewers` entries in place fully reverts this step — the old App was never deleted, only uninstalled from this one account.
+
+7. **Verify granted permissions on the new installation — reading installation grants, not App-requested permissions.** Per [ADR-1709](../../adrs/1709-github-app-grant-verification.md), `GET /app` reports what the App *requests*; only `GET /app/installations/{id}` reports what a given installation has actually *granted*, and the two can diverge silently. Pruefer's own reconciler already performs this check automatically on every run and logs a loud line if any of the four required permissions — `issues: write`, `pull_requests: write`, `contents: read`, `metadata: read` — are missing or insufficient (see "Verifying granted permissions" under [Manual setup (compat mode)](#manual-setup-compat-mode) above for the exact log format). Confirm the new installation logs no such line — there's nothing to restart to trigger a fresh check; the reconciler re-runs it on every reconciliation, so one poll cycle (or `repo_rederivation_interval`) after installation is enough.
+
+   There is no plain `gh api` substitute for an on-demand check here: `GET /app/installations/{id}` requires the App's own JWT (RS256, signed with its private key), not a `gh`-CLI user/OAuth token — `gh api /app/installations/<id>` run as an operator fails auth, since that endpoint is exactly the call shape `github.FetchAppInstallation` (`internal/githubauth/reconciler.go`) uses internally instead of ordinary token auth. Trust the reconciler's own log line rather than trying to replicate the call by hand.
+
+   *Rollback:* same as step 6 — a grant shortfall here means fixing the installation's approved permissions before trusting it, not proceeding.
+
+8. **Confirm the new App has actually reviewed a real PR before removing the old identity.** This is the concrete gate for step 9, and, once satisfied for every account, for step 11 (destroy-last):
+
+   ```bash
+   gh pr view <PR-number> --repo <owner>/<repo> --json reviews \
+     --jq '.reviews[] | select(.author.login == "verveguy-pruefer[bot]")'
+   ```
+
+   *Rollback:* same as step 6 — until this returns a review, don't proceed to step 9.
+
+9. **Remove the old identity from `expected_reviewers`.** Only after step 8 passes for that account's repos, remove the old `handarbeit-pruefer` entry from each one, leaving only the new login. This closes the dual-listing window opened in step 5.
+
+   *Rollback:* if removed prematurely and the new App turns out not to be reviewing reliably, re-add the old entry — no irreversible action has occurred yet.
+
+10. **Repeat steps 3–9 for each remaining non-owner account.**
+
+11. **Retire the old App last — reversible by default, irreversible only if you choose to delete.** Steps 3–10 only migrate *non-owner* accounts — the owning account (`handarbeit`) never gets a replacement App under this runbook, so once every non-owner account has moved, the old App's **only remaining installation is the owner's own**, and every repo still relying on `handarbeit-pruefer` (including this repo's `expected_reviewers`) depends on that installation still working. Before proceeding, confirm an itemized checklist, one line per non-owner account:
+
+    ```
+    ✅ verveguy    — moved, verveguy-pruefer[bot] reviewed PR #123
+    ✅ liminisapp  — moved, liminisapp-pruefer[bot] reviewed PR #456
+    ✅ shadoworg   — moved, shadoworg-pruefer[bot] reviewed PR #789
+    ```
+
+    Once every account on that checklist is checked off, **flip the old App to private** (GitHub now permits this, since no non-owner installation remains) — this is the correct default final action: the App keeps its one remaining installation (the owner's), satisfying ADR-1722's one-App-per-account model without touching anything the owner's repos depend on.
+
+    **Deleting the App instead — Settings → Developer settings → GitHub Apps → your app → Delete GitHub App — is *not* equivalent to flipping it to private**, and should only be done if the owner account has *also* been independently migrated (steps 3–9 repeated for `handarbeit` itself, registering a separate new App for it). There is no code path anywhere in this repo that performs deletion — it is exclusively a manual GitHub UI action, and it removes every remaining installation with it, with no undo. At this point in the runbook that remaining installation is the owner's own: deleting without first giving the owner account a replacement App strands every repo that still declares only `handarbeit-pruefer` in `expected_reviewers` — including this repo — with a reviewer identity that can no longer review, the exact hazard this whole runbook exists to prevent, at the one step with no way back.
+
+    *Flipping to private is reversible* — the App can be flipped back to public later if needed, so this default action is not the point of no return the rest of this runbook has been building toward. *Deleting it instead has no rollback* — that branch, and only that branch, is the one truly irreversible action in this runbook.
 
 ### Run it
 
