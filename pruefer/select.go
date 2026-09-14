@@ -15,11 +15,11 @@ import (
 type SkipReason string
 
 const (
-	SkipDraft           SkipReason = "draft"
-	SkipSelfAuthored    SkipReason = "self-authored: PR author is the review identity"
-	SkipExcludedAuthor  SkipReason = "excluded author"
-	SkipExcludedLabel   SkipReason = "excluded label"
-	SkipExcludedPath    SkipReason = "excluded path: every touched file matches an exclusion glob"
+	SkipDraft          SkipReason = "draft"
+	SkipSelfAuthored   SkipReason = "self-authored: PR author is the review identity"
+	SkipExcludedAuthor SkipReason = "excluded author"
+	SkipExcludedLabel  SkipReason = "excluded label"
+	SkipExcludedPath   SkipReason = "excluded path: every touched file matches an exclusion glob"
 	// SkipAlreadyReviewed is reported by two independent checks (#1631): the
 	// GitHub-derived alreadyReviewedAtHead below, and — checked first, in
 	// ReviewPR, before alreadyReviewedAtHead is even reachable —

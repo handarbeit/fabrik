@@ -16,12 +16,12 @@ import (
 type fakeReviewer struct {
 	*fakeCommenter
 
-	diff             string
-	diffErr          error
-	filesResult      []string
-	filesErr         error
-	reviews          []gh.PRReview
-	reviewsErr       error
+	diff        string
+	diffErr     error
+	filesResult []string
+	filesErr    error
+	reviews     []gh.PRReview
+	reviewsErr  error
 	// alwaysReturnEmptyReviews (#1631), when true, makes FetchPRReviews
 	// unconditionally return (nil, nil) regardless of f.reviews — including
 	// entries SubmitPRReview itself appended. Simulates both "the
@@ -31,12 +31,12 @@ type fakeReviewer struct {
 	// current head (AC5) — from ReviewPR's point of view the two are the
 	// same observable shape.
 	alwaysReturnEmptyReviews bool
-	threads          []gh.PRReviewThread
-	threadsTruncated bool
-	threadsErr       error
-	submitErr        error
-	token            string
-	botLogin         string
+	threads                  []gh.PRReviewThread
+	threadsTruncated         bool
+	threadsErr               error
+	submitErr                error
+	token                    string
+	botLogin                 string
 
 	// repoConfigData/repoConfigErr control FetchFileAtRef's response.
 	// Default (both zero) is gh.ErrNotFound — "no repo config" — so every
