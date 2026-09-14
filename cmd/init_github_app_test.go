@@ -581,3 +581,40 @@ func TestResolveGitHubAppInitFlagsFromEnv_InvalidIntEnv(t *testing.T) {
 		t.Fatal("expected an error for a malformed FABRIK_GITHUB_APP_ID")
 	}
 }
+
+// TestRunInit_PlainInvocation_IgnoresGitHubAppEnvVars is the regression test
+// for the bot review finding on PR #1731 (second pass): an operator who
+// exports FABRIK_GITHUB_APP_ID/FABRIK_GITHUB_APP_PRIVATE_KEY_PATH/
+// FABRIK_GITHUB_APP_INSTALLATION_ID in their shell (exactly what the
+// top-level `fabrik` command's own flag help text encourages) must still be
+// able to run a plain `fabrik init` with no GitHub-App-related flags at
+// all. Before the fix, resolveGitHubAppInitFlagsFromEnv ran unconditionally
+// and pulled these into the flag variables regardless of --github-app,
+// tripping the "requires --github-app" validation and failing outright.
+func TestRunInit_PlainInvocation_IgnoresGitHubAppEnvVars(t *testing.T) {
+	dir := t.TempDir()
+	chdirTest(t, dir)
+
+	t.Setenv("FABRIK_GITHUB_APP_ID", "999")
+	t.Setenv("FABRIK_GITHUB_APP_PRIVATE_KEY_PATH", "/env/path.pem")
+	t.Setenv("FABRIK_GITHUB_APP_INSTALLATION_ID", "888")
+
+	if err := runInit([]string{}); err != nil {
+		t.Fatalf("runInit with no GitHub-App flags should ignore FABRIK_GITHUB_APP_* env vars, got error: %v", err)
+	}
+}
+
+// TestRunInit_PlainInvocation_IgnoresMalformedGitHubAppEnvVar is the same
+// regression, for the harder case: a malformed FABRIK_GITHUB_APP_ID must
+// not fail a plain `fabrik init` either, since resolveGitHubAppInitFlagsFromEnv
+// (and its parse error) should never run without --github-app.
+func TestRunInit_PlainInvocation_IgnoresMalformedGitHubAppEnvVar(t *testing.T) {
+	dir := t.TempDir()
+	chdirTest(t, dir)
+
+	t.Setenv("FABRIK_GITHUB_APP_ID", "not-a-number")
+
+	if err := runInit([]string{}); err != nil {
+		t.Fatalf("runInit with no GitHub-App flags should ignore a malformed FABRIK_GITHUB_APP_ID, got error: %v", err)
+	}
+}

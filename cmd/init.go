@@ -382,8 +382,23 @@ func runInit(args []string) error {
 	// App. Only flag > env is needed here (no config.yaml layer — it
 	// doesn't exist yet at init time), mirroring resolveGHESHost's own
 	// zero-value-ProjectConfig treatment below.
-	if err := resolveGitHubAppInitFlagsFromEnv(githubAppIDFlag, githubAppKeyPathFlag, githubAppInstallationIDFlag); err != nil {
-		return err
+	//
+	// Bot review finding (PR #1731, second pass): this must run only when
+	// --github-app was actually given. Run unconditionally, an operator who
+	// simply has FABRIK_GITHUB_APP_ID/FABRIK_GITHUB_APP_PRIVATE_KEY_PATH/
+	// FABRIK_GITHUB_APP_INSTALLATION_ID exported in their shell (the exact
+	// setup the top-level `fabrik` command's own help text encourages) would
+	// see those values pulled into the flag variables on a plain `fabrik
+	// init` with no GitHub-App flags at all — tripping the "requires
+	// --github-app" validation below and failing the most basic command
+	// outright. A malformed FABRIK_GITHUB_APP_ID would fail it even harder
+	// (a hard parse error, again with --github-app never mentioned). Gating
+	// on *githubApp makes this resolution — and its validation — exist only
+	// in the context it was designed for.
+	if *githubApp {
+		if err := resolveGitHubAppInitFlagsFromEnv(githubAppIDFlag, githubAppKeyPathFlag, githubAppInstallationIDFlag); err != nil {
+			return err
+		}
 	}
 	if fset.NArg() > 1 {
 		return fmt.Errorf("init: too many positional arguments (expected at most one project URL)")
