@@ -418,6 +418,162 @@ func TestReviewPR_RepollSameSHA_DoesNotReReview(t *testing.T) {
 	}
 }
 
+// TestReviewPR_FiveConsecutivePolls_OnlyFirstReviews is AC1's literal
+// coverage: a PR whose head SHA never changes must receive no further
+// reviews across at least 5 consecutive poll cycles. Starts with no prior
+// reviews (unlike TestReviewPR_RepollSameSHA_DoesNotReReview above, which
+// pins the already-reviewed-from-the-start case) so the first call submits
+// and every later call observes that submission and skips — exercising the
+// full "review once, then hold" flow the existing GitHub-derived guard
+// (alreadyReviewedAtHead) already provides on a healthy API.
+// TestReviewPR_WithoutTracker_BrokenGuardReReviewsIndefinitely proves this
+// is non-vacuous by breaking that guard and observing the re-review return.
+func TestReviewPR_FiveConsecutivePolls_OnlyFirstReviews(t *testing.T) {
+	client := newFakeReviewer()
+	claude := &mockClaudeInvoker{}
+	clone, _ := fakeClone(t, nil)
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	for i := 1; i <= 5; i++ {
+		outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr, nil)
+		if i == 1 {
+			if !outcome.Reviewed || outcome.Err != nil {
+				t.Fatalf("poll %d: outcome = %+v, want Reviewed=true, Err=nil", i, outcome)
+			}
+			continue
+		}
+		if !outcome.Skipped || outcome.Reason != SkipAlreadyReviewed {
+			t.Fatalf("poll %d: outcome = %+v, want Skipped with SkipAlreadyReviewed", i, outcome)
+		}
+	}
+	if client.submitCallCount() != 1 {
+		t.Fatalf("submitCallCount = %d, want exactly 1 across 5 consecutive polls of an unchanged head", client.submitCallCount())
+	}
+}
+
+// TestReviewPR_WithoutTracker_BrokenGuardReReviewsIndefinitely proves
+// TestReviewPR_FiveConsecutivePolls_OnlyFirstReviews above is non-vacuous
+// (AC1's own instruction: "prove non-vacuous by breaking the guard... and
+// observing the re-review return"). alwaysReturnEmptyReviews simulates the
+// GitHub-derived guard going blind to the bot's own prior submissions —
+// the confirmed #1631 root cause. With no tracker (nil) to fall back on,
+// both consecutive calls submit a fresh review for the same unchanged head.
+func TestReviewPR_WithoutTracker_BrokenGuardReReviewsIndefinitely(t *testing.T) {
+	client := newFakeReviewer()
+	client.alwaysReturnEmptyReviews = true
+	claude := &mockClaudeInvoker{}
+	clone, _ := fakeClone(t, nil)
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	outcome1 := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr, nil)
+	outcome2 := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr, nil)
+
+	if !outcome1.Reviewed || outcome1.Err != nil {
+		t.Fatalf("first outcome = %+v, want Reviewed=true, Err=nil", outcome1)
+	}
+	if !outcome2.Reviewed || outcome2.Err != nil {
+		t.Fatalf("second outcome = %+v, want Reviewed=true, Err=nil — proves the guard-break is real: absent the #1631 tracker backstop, a blind FetchPRReviews re-reviews an unchanged head indefinitely", outcome2)
+	}
+	if client.submitCallCount() != 2 {
+		t.Fatalf("submitCallCount = %d, want 2", client.submitCallCount())
+	}
+}
+
+// TestReviewPR_LocalTrackerBoundsLoopWhenGuardBroken is AC3: R2's backstop
+// bounds the loop even with the primary GitHub-derived guard disabled.
+// Same broken-guard fake client as the test above, but now a real,
+// shared *ReviewTracker is threaded through 5 consecutive ReviewPR calls
+// for the same unchanged head — consecutive reviews must stop at 1 rather
+// than continuing indefinitely.
+func TestReviewPR_LocalTrackerBoundsLoopWhenGuardBroken(t *testing.T) {
+	client := newFakeReviewer()
+	client.alwaysReturnEmptyReviews = true
+	claude := &mockClaudeInvoker{}
+	clone, _ := fakeClone(t, nil)
+	tracker := NewReviewTracker()
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	for i := 1; i <= 5; i++ {
+		outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr, tracker)
+		if i == 1 {
+			if !outcome.Reviewed || outcome.Err != nil {
+				t.Fatalf("poll %d: outcome = %+v, want Reviewed=true, Err=nil", i, outcome)
+			}
+			continue
+		}
+		if !outcome.Skipped || outcome.Reason != SkipAlreadyReviewed {
+			t.Fatalf("poll %d: outcome = %+v, want Skipped with SkipAlreadyReviewed (local tracker bound) even though FetchPRReviews stays blind", i, outcome)
+		}
+	}
+	if client.submitCallCount() != 1 {
+		t.Fatalf("submitCallCount = %d, want exactly 1 — the local tracker must bound the loop at the cap even with the GitHub-derived guard disabled", client.submitCallCount())
+	}
+}
+
+// TestReviewPR_LocalTrackerSurvivesDegradedFetchPRReviews is AC5's literal
+// scenario: this is the confirmed #1631 root cause itself, not merely an
+// analogous one — a FetchPRReviews call that returns HTTP-200-successful
+// but partial data omitting the bot's own latest review at the current
+// head (simulated identically to the AC3 test above via
+// alwaysReturnEmptyReviews, since from ReviewPR's point of view a
+// permanently-blind guard and a transiently-degraded one during an outage
+// are the same observable shape). The local tracker must still refuse to
+// re-review (fail-closed) once it has recorded the first submission.
+func TestReviewPR_LocalTrackerSurvivesDegradedFetchPRReviews(t *testing.T) {
+	client := newFakeReviewer()
+	client.alwaysReturnEmptyReviews = true // GitHub is "up" (no error) but never reports the bot's own review back
+	claude := &mockClaudeInvoker{}
+	clone, _ := fakeClone(t, nil)
+	tracker := NewReviewTracker()
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	first := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr, tracker)
+	if !first.Reviewed || first.Err != nil {
+		t.Fatalf("first outcome = %+v, want Reviewed=true, Err=nil", first)
+	}
+
+	second := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr, tracker)
+	if !second.Skipped || second.Reason != SkipAlreadyReviewed {
+		t.Fatalf("second outcome = %+v, want Skipped with SkipAlreadyReviewed — a successful-but-partial FetchPRReviews response must not be treated as \"no prior review exists\" once the local tracker knows better", second)
+	}
+	if client.submitCallCount() != 1 {
+		t.Fatalf("submitCallCount = %d, want exactly 1", client.submitCallCount())
+	}
+}
+
+// TestReviewPR_FetchPRReviewsHardError_FailsClosedNoReview is AC2's
+// regression pin: with FetchPRReviews returning a hard error, no review is
+// submitted (fail-closed). This behavior already existed before #1631
+// (review.go's existing `if err != nil { return ReviewOutcome{Err: ...} }`
+// guard) — Research confirmed it was already correct — so this test adds
+// coverage for an existing code path rather than exercising new production
+// code.
+func TestReviewPR_FetchPRReviewsHardError_FailsClosedNoReview(t *testing.T) {
+	client := newFakeReviewer()
+	client.reviewsErr = fmt.Errorf("simulated GitHub API failure")
+	claude := &mockClaudeInvoker{}
+	clone, cloneCalls := fakeClone(t, nil)
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr, nil)
+
+	if outcome.Err == nil {
+		t.Fatal("outcome.Err = nil, want a non-nil error when FetchPRReviews fails outright")
+	}
+	if outcome.Reviewed {
+		t.Error("outcome.Reviewed = true, want false when FetchPRReviews fails outright (fail-closed)")
+	}
+	if cloneCalls.Load() != 0 {
+		t.Error("expected no clone when FetchPRReviews fails outright")
+	}
+	if claude.callCount() != 0 {
+		t.Error("expected no claude invocation when FetchPRReviews fails outright")
+	}
+	if client.submitCallCount() != 0 {
+		t.Error("submitCallCount != 0, want 0 — a hard FetchPRReviews error must never result in a submitted review")
+	}
+}
+
 func TestReviewPR_DraftPR_Skipped(t *testing.T) {
 	client := newFakeReviewer()
 	claude := &mockClaudeInvoker{}
