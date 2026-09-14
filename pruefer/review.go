@@ -276,6 +276,13 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 		threadsTruncated = false
 	}
 
+	// #1446: resolve the repo's review-guidance skill, at the PR's base ref
+	// (never the head — C1), advisory prompt content exactly like the
+	// thread fetch above — a fetch failure or malformed file degrades to no
+	// repo guidance rather than failing the review (R4).
+	repoGuidance, repoGuidanceMode, guidanceProv := fetchRepoGuidance(client, owner, repo, pr.BaseRef)
+	logReviewGuidanceResolution(pr.Number, owner, repo, guidanceProv)
+
 	dir, cleanup, err := clone(ctx, owner, repo, client.Token(), pr.Number)
 	if err != nil {
 		return ReviewOutcome{Err: fmt.Errorf("cloning PR head: %w", err)}
@@ -287,6 +294,8 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 		HeadSHA: pr.HeadSHA, BaseBranch: pr.BaseRef, Model: cfg.Model, Effort: cfg.Effort,
 		WorkDir: dir, MaxWallTime: cfg.MaxWallTime, ReviewThreads: threads, ReviewThreadsTruncated: threadsTruncated,
 		OmittedExcludedPaths: omittedExcludedPaths, OmittedTrimmedPaths: omittedTrimmedPaths,
+		OperatorGuidance: cfg.ReviewGuidance, OperatorGuidanceMode: cfg.ReviewGuidanceMode,
+		RepoGuidance: repoGuidance, RepoGuidanceMode: repoGuidanceMode,
 	})
 	if err != nil {
 		logf(pr.Number, "claude", "review invocation failed for %s/%s#%d: %v — posting nothing\n", owner, repo, pr.Number, err)

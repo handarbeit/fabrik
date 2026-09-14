@@ -90,6 +90,21 @@ type ReviewRequest struct {
 	// model so it never silently assumes it saw the whole change — see
 	// renderOmittedPaths.
 	OmittedTrimmedPaths []string
+	// OperatorGuidance/OperatorGuidanceMode carry #1446's operator-level
+	// review-guidance override (Config.ReviewGuidance/ReviewGuidanceMode),
+	// composed onto the embedded default guidance by resolveGuidance before
+	// RepoGuidance is composed on top of that result. Empty
+	// OperatorGuidance is a no-op regardless of mode.
+	OperatorGuidance     string
+	OperatorGuidanceMode string
+	// RepoGuidance/RepoGuidanceMode carry #1446's repo-resident
+	// review-guidance skill (.pruefer/skills/review/SKILL.md, resolved at
+	// the PR's base ref — never the head, see C1/ADR-1446), composed by
+	// resolveGuidance as the last (outermost) guidance layer. Empty
+	// RepoGuidance is a no-op regardless of mode — the common case, since
+	// most repos have no skill file at all.
+	RepoGuidance     string
+	RepoGuidanceMode string
 }
 
 // ClaudeInvoker defines the interface for invoking Claude Code to produce
@@ -281,22 +296,88 @@ func shellQuotePathspec(pathspec string) string {
 	return "'" + strings.ReplaceAll(pathspec, "'", `'\''`) + "'"
 }
 
-// buildReviewPrompt constructs the prompt sent to claude via stdin.
-func buildReviewPrompt(req ReviewRequest) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "You are Pruefer, an automated code reviewer for pull request %s/%s#%d: %q.\n\n", req.Owner, req.Repo, req.PRNumber, req.Title)
+// defaultReviewGuidance is the embedded default review-guidance text (C2):
+// what to look for and how to weigh findings. This is the base layer of
+// #1446's guidance composition — the only layer that is always present, and
+// exactly the text buildReviewPrompt wrote inline before this issue split
+// it out, so a zero-config ReviewRequest still produces a byte-identical
+// prompt (AC1). Deliberately excludes the output contract and no-approval-
+// language rule (C5, see renderContract) and all Go-supplied dynamic
+// context (C7, see renderDynamicContext) — those are never part of any
+// guidance layer, so a repo or operator override can never touch them.
+const defaultReviewGuidance = `Write a code review as you would comment on the pull request: call out bugs, correctness issues, security concerns, and significant design problems. On a large PR, raise the bar for a "low"-severity finding: it must be something a reviewer would actually act on, not merely true — skip nitpicks, style preferences, and fidelity observations against test fixtures unless they matter.`
+
+// resolveGuidance composes #1446's three guidance layers — embedded default,
+// operator override, repo skill — into the single guidance string
+// buildReviewPrompt emits between the dynamic-context and contract halves.
+// Each overridable layer folds onto the result of the layer below it via
+// composeGuidanceLayer, with its own independent append/replace mode (R3's
+// "each layer able to append or (explicitly) replace the one below" —
+// per-layer, not one global mode): the operator layer folds onto the
+// embedded default first, then the repo layer folds onto whatever the
+// operator layer produced. An absent layer (empty guidance text) is a
+// no-op regardless of its mode — see composeGuidanceLayer.
+func resolveGuidance(req ReviewRequest) string {
+	guidance := defaultReviewGuidance
+	guidance = composeGuidanceLayer(guidance, req.OperatorGuidance, req.OperatorGuidanceMode)
+	guidance = composeGuidanceLayer(guidance, req.RepoGuidance, req.RepoGuidanceMode)
+	return guidance
+}
+
+// composeGuidanceLayer folds overlay onto base according to mode (R2/R4):
+// GuidanceModeReplace substitutes base entirely with overlay;
+// GuidanceModeAppend (and any value normalizeGuidanceMode has already
+// reduced to it, including the empty default) concatenates overlay after
+// base, separated by a blank line. An empty (or all-whitespace) overlay is
+// always a no-op — the layer is treated as absent — regardless of mode,
+// since there is nothing to append or to replace with; this is what makes
+// AC1's zero-config prompt byte-identical to the pre-#1446 output despite
+// resolveGuidance always calling this function twice.
+func composeGuidanceLayer(base, overlay, mode string) string {
+	if strings.TrimSpace(overlay) == "" {
+		return base
+	}
+	if mode == GuidanceModeReplace {
+		return overlay
+	}
+	if base == "" {
+		return overlay
+	}
+	return base + "\n\n" + overlay
+}
+
+// renderDynamicContext writes buildReviewPrompt's Go-supplied dynamic
+// context (C7): the reviewer-identity/instructions preamble, the base-branch
+// diff instruction, omitted-paths disclosure, the PR body, and prior review-
+// thread context. None of this is "guidance" in the R2 sense — it is
+// per-review runtime data — so it is never affected by any guidance layer or
+// mode; buildReviewPrompt calls this unconditionally, before resolveGuidance
+// is even consulted. Moved verbatim from the pre-#1446 buildReviewPrompt, no
+// behavior change.
+func renderDynamicContext(b *strings.Builder, req ReviewRequest) {
+	fmt.Fprintf(b, "You are Pruefer, an automated code reviewer for pull request %s/%s#%d: %q.\n\n", req.Owner, req.Repo, req.PRNumber, req.Title)
 	b.WriteString("The PR's head commit is already checked out in your working directory. Use git (diff, log, show, blame, grep, status), Read, Grep, and Glob to inspect the change and any surrounding code you need for context — you have no write access and no other tools.\n\n")
 	if req.BaseBranch != "" {
-		fmt.Fprintf(&b, "The PR's base branch is %q; compare against it (e.g. `git diff %s...HEAD`) to see only this PR's changes.\n\n", req.BaseBranch, req.BaseBranch)
+		fmt.Fprintf(b, "The PR's base branch is %q; compare against it (e.g. `git diff %s...HEAD`) to see only this PR's changes.\n\n", req.BaseBranch, req.BaseBranch)
 	}
-	renderOmittedPaths(&b, req.BaseBranch, req.OmittedExcludedPaths, req.OmittedTrimmedPaths)
+	renderOmittedPaths(b, req.BaseBranch, req.OmittedExcludedPaths, req.OmittedTrimmedPaths)
 	if req.Body != "" {
 		b.WriteString("## PR description\n\n")
 		b.WriteString(req.Body)
 		b.WriteString("\n\n")
 	}
-	renderReviewThreads(&b, req.ReviewThreads, req.ReviewThreadsTruncated)
-	b.WriteString("Write a code review as you would comment on the pull request: call out bugs, correctness issues, security concerns, and significant design problems. On a large PR, raise the bar for a \"low\"-severity finding: it must be something a reviewer would actually act on, not merely true — skip nitpicks, style preferences, and fidelity observations against test fixtures unless they matter.\n\n")
+	renderReviewThreads(b, req.ReviewThreads, req.ReviewThreadsTruncated)
+}
+
+// renderContract writes the Go-owned, never-overridable output-contract half
+// of the review prompt (C5): the no-approval-language rule and the two-part
+// output format (PRUEFER_SUMMARY_BEGIN/END delimiters, the fenced JSON
+// findings schema, the severity enum, and line-anchoring rules). No
+// guidance layer — embedded default, operator override, or repo skill, in
+// either append or replace mode — can reach this function's output;
+// buildReviewPrompt calls it unconditionally, after resolveGuidance. Moved
+// verbatim from the pre-#1446 buildReviewPrompt, no behavior change.
+func renderContract(b *strings.Builder) {
 	b.WriteString("You do not decide whether this PR is approved or blocked — that is computed automatically from the severity you assign each finding below, never from anything you write in prose. Do not use approval/rejection language such as \"LGTM\" or \"requesting changes\" in your summary; just describe what you found.\n\n")
 	b.WriteString("Output has two parts, in this exact order:\n\n")
 	b.WriteString("1. A short prose summary: what you reviewed and your overall assessment. This is the only text GitHub shows outside of inline comments, so it must stand on its own. Wrap it in PRUEFER_SUMMARY_BEGIN and PRUEFER_SUMMARY_END marker lines, each alone on its own line, with nothing else on those lines. Nothing — no narration, no meta-commentary, no investigation notes — may appear before PRUEFER_SUMMARY_BEGIN; anything there is discarded and never shown to anyone. The ```json findings block described in part 2 below must come after PRUEFER_SUMMARY_END, never between the two markers. For example:\n\n")
@@ -310,6 +391,19 @@ func buildReviewPrompt(req ReviewRequest) string {
 	b.WriteString("- \"critical\": a security vulnerability, data loss, or severe correctness bug.\n\n")
 	b.WriteString("Each entry's \"path\" must be a file path exactly as it appears in the diff, and \"line\" must be a line number in the new (post-change) version of that file — i.e. a line you can see in `git diff` output prefixed with `+` or unprefixed (context), never a line that only existed in the old version. If you have no findings, emit an empty array `[]`. Do not put findings only in the prose — every specific, actionable finding belongs in the JSON array so it can be attached to its exact line; use the prose summary for overall assessment only. Report each distinct underlying finding once — if the same defect is visible at more than one line, pick the most relevant anchor rather than emitting a separate entry per line.\n\n")
 	b.WriteString("Output ONLY the review text itself: no preamble, no meta-commentary about what you are about to do.\n")
+}
+
+// buildReviewPrompt constructs the prompt sent to claude via stdin, in three
+// sequential parts (#1446): Go-supplied dynamic context, the composed
+// guidance layers, then the Go-owned output contract — the same order the
+// monolithic pre-#1446 function wrote them in, so a zero-config
+// ReviewRequest produces a byte-identical prompt (AC1/C2).
+func buildReviewPrompt(req ReviewRequest) string {
+	var b strings.Builder
+	renderDynamicContext(&b, req)
+	b.WriteString(resolveGuidance(req))
+	b.WriteString("\n\n")
+	renderContract(&b)
 	return b.String()
 }
 
