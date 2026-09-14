@@ -261,6 +261,14 @@ type Reconciler struct {
 // author (always "<slug>[bot]").
 func (r *Reconciler) BotLogin() string { return r.botLogin }
 
+// AppID returns the numeric GitHub App ID this Reconciler authenticated as —
+// whatever Reconcile actually resolved it to (an explicit Options.AppID, one
+// read back from Options.AppStatePath, or one just minted by a first-run
+// manifest-flow bootstrap). No caller needed this before #1715's setup flow,
+// which must persist the resolved App ID into config after a fresh
+// manifest-created App (where the caller never knew it up front).
+func (r *Reconciler) AppID() int64 { return r.appID }
+
 // ClientForRepo returns the *github.Client scoped to owner's installation.
 // repo is accepted (per the issue's literal interface requirement) but
 // unused today — every client is owner-scoped, not repo-scoped, matching

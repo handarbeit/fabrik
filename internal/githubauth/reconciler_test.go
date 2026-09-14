@@ -73,6 +73,9 @@ func TestReconcile_BackwardCompat_SingleOwnerAutoDiscovered(t *testing.T) {
 	if r.BotLogin() != "pruefer-bot[bot]" {
 		t.Errorf("BotLogin = %q, want pruefer-bot[bot]", r.BotLogin())
 	}
+	if r.AppID() != 42 {
+		t.Errorf("AppID() = %d, want 42 (the pinned Options.AppID)", r.AppID())
+	}
 	client, err := r.ClientForRepo(context.Background(), "handarbeit", "fabrik")
 	if err != nil {
 		t.Fatalf("ClientForRepo: %v", err)
@@ -1332,6 +1335,9 @@ func TestReconcile_NoCredentialsAtAll_RunsManifestFlow(t *testing.T) {
 	}
 	if r.BotLogin() != "fresh-app[bot]" {
 		t.Errorf("BotLogin = %q, want fresh-app[bot]", r.BotLogin())
+	}
+	if r.AppID() != 314 {
+		t.Errorf("AppID() = %d, want 314 (the manifest flow's freshly-minted App ID, never passed in via Options.AppID)", r.AppID())
 	}
 }
 
