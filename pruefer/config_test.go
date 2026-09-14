@@ -760,6 +760,78 @@ func TestLoadConfig_RequestChangesThresholdRejectsUnrecognizedValue(t *testing.T
 	}
 }
 
+func TestLoadConfig_ReviewGuidanceDefaultEmpty(t *testing.T) {
+	dir := t.TempDir()
+	cfg, err := LoadConfig([]string{"-config", filepath.Join(dir, "missing.yaml")})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.ReviewGuidance != "" || cfg.ReviewGuidanceMode != "" {
+		t.Errorf("ReviewGuidance/Mode = %q/%q, want both empty by default", cfg.ReviewGuidance, cfg.ReviewGuidanceMode)
+	}
+}
+
+// TestLoadConfig_ReviewGuidancePrecedence pins R3's flag > env > YAML >
+// default chain for #1446's operator-level review-guidance override,
+// mirroring TestLoadConfig_RequestChangesThresholdPrecedence's shape.
+func TestLoadConfig_ReviewGuidancePrecedence(t *testing.T) {
+	dir := t.TempDir()
+	path := writeYAMLConfig(t, dir, `
+review_guidance: "Always check error wrapping uses %w."
+review_guidance_mode: append
+`)
+
+	cfg, err := LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.ReviewGuidance != "Always check error wrapping uses %w." {
+		t.Errorf("ReviewGuidance = %q, want the YAML value", cfg.ReviewGuidance)
+	}
+	if cfg.ReviewGuidanceMode != "append" {
+		t.Errorf("ReviewGuidanceMode = %q, want append (from YAML)", cfg.ReviewGuidanceMode)
+	}
+
+	t.Setenv("PRUEFER_REVIEW_GUIDANCE", "From env instead.")
+	t.Setenv("PRUEFER_REVIEW_GUIDANCE_MODE", "replace")
+	cfg, err = LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.ReviewGuidance != "From env instead." {
+		t.Errorf("ReviewGuidance = %q, want the env value to override YAML", cfg.ReviewGuidance)
+	}
+	if cfg.ReviewGuidanceMode != "replace" {
+		t.Errorf("ReviewGuidanceMode = %q, want replace (env should override YAML)", cfg.ReviewGuidanceMode)
+	}
+
+	cfg, err = LoadConfig([]string{"-config", path, "-review-guidance", "From flag.", "-review-guidance-mode", "append"})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.ReviewGuidance != "From flag." {
+		t.Errorf("ReviewGuidance = %q, want the flag value to override env", cfg.ReviewGuidance)
+	}
+	if cfg.ReviewGuidanceMode != "append" {
+		t.Errorf("ReviewGuidanceMode = %q, want append (flag should override env)", cfg.ReviewGuidanceMode)
+	}
+}
+
+// TestLoadConfig_ReviewGuidanceModeRejectsUnrecognizedValue pins the
+// "operator mode is validated at LoadConfig, fail loud" decision (distinct
+// from the repo skill's own mode, which always degrades — see
+// reviewguidance_test.go): a mistyped review_guidance_mode is an operator
+// error worth catching at startup, mirroring
+// TestLoadConfig_RequestChangesThresholdRejectsUnrecognizedValue.
+func TestLoadConfig_ReviewGuidanceModeRejectsUnrecognizedValue(t *testing.T) {
+	dir := t.TempDir()
+	path := writeYAMLConfig(t, dir, `review_guidance_mode: replce`)
+
+	if _, err := LoadConfig([]string{"-config", path}); err == nil {
+		t.Fatal("LoadConfig: expected an error for an unrecognized review_guidance_mode value, got nil")
+	}
+}
+
 func TestLoadConfig_AppStatePathAndNoBrowserPrecedence(t *testing.T) {
 	dir := t.TempDir()
 	path := writeYAMLConfig(t, dir, `
