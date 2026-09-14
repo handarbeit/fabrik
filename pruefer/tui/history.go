@@ -261,9 +261,25 @@ func (h HistoryPaneComponent) View(width int) string {
 		// At budget <= 1 there is no room for a content row alongside the
 		// marker itself (maxRows := budget-1 would floor to 1, rendering 2
 		// rows into a 1-row budget — the Height()/View() mismatch this file
-		// has already had once) — show the marker alone instead.
+		// has already had once).
+		//
+		// Review finding: showing the marker alone here dropped the
+		// selected row entirely — the same class of bug fixed just below
+		// for the tail-selection case, just at the more extreme squeeze of
+		// a single-row budget. lines[k] is exactly the row at display
+		// position k (built by the loop above), so the fix is to show that
+		// one row instead of the marker: there's no room left for both, and
+		// keeping Selected() and View() in agreement matters more here than
+		// disclosing the hidden count.
 		if budget <= 1 {
-			lines = []string{dimStyle.Render(fmt.Sprintf("  … %d more", total))}
+			idx := h.idx
+			if idx < 0 {
+				idx = 0
+			}
+			if idx >= len(lines) {
+				idx = len(lines) - 1
+			}
+			lines = []string{lines[idx]}
 		} else {
 			maxRows := budget - 1
 			start := h.idx - maxRows/2

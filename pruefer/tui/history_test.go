@@ -225,6 +225,45 @@ func TestHistoryPane_SelectionAtTailStaysVisible(t *testing.T) {
 	}
 }
 
+// TestHistoryPane_SelectionVisibleAtSingleRowBudget is the regression test
+// for a review finding: at a granted budget of exactly 1 row (reachable from
+// allocateRows' documented short-terminal degrade path, e.g. an open detail
+// panel on a short terminal), View() substituted a "… N more" marker for all
+// content — the same class of bug TestHistoryPane_SelectionAtTailStaysVisible
+// fixes above, just at the more extreme squeeze where there's no room left
+// for both a content row and the marker. The selected entry must still be
+// the one row shown.
+func TestHistoryPane_SelectionVisibleAtSingleRowBudget(t *testing.T) {
+	var h HistoryPaneComponent
+	for i := 0; i < 5; i++ {
+		comp, _ := h.Update(ReviewCompletedEvent{
+			Repo: "o/r", PRNumber: 100 + i, Reviewed: true, CompletedAt: time.Now(),
+		})
+		h = comp.(HistoryPaneComponent)
+	}
+	h.SetFocused(true)
+	h.SetMaxRows(1) // total (5) > budget (1): the budget<=1 marker-only path.
+
+	// Navigate down to a selection that isn't the default (newest, idx=0).
+	comp, _ := h.Update(keyMsg("down"))
+	h = comp.(HistoryPaneComponent)
+	comp, _ = h.Update(keyMsg("down"))
+	h = comp.(HistoryPaneComponent)
+
+	sel := h.Selected()
+	if sel == nil {
+		t.Fatal("expected a selection after navigating down")
+	}
+	key := activeReviewKey(sel.Repo, sel.PRNumber)
+	view := stripANSI(h.View(120))
+	if !strings.Contains(view, key) {
+		t.Errorf("selected entry %q is not visible at a 1-row budget:\n%s", key, view)
+	}
+	if strings.Contains(view, "more") {
+		t.Errorf("expected the selected row, not the '… N more' marker, at a 1-row budget:\n%s", view)
+	}
+}
+
 // TestHistoryPane_AllSkipsEmptyStateShowsCount pins AC3: a history of skips
 // alone must not render the same bare placeholder as a genuinely empty pane
 // (TestHistoryPane_EmptyView above) — that would misrepresent an actively
