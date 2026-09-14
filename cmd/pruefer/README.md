@@ -410,6 +410,8 @@ Every field is classified as either **live** (applied immediately) or **restart-
 | `excluded_paths` | Live. |
 | `excluded_labels` | Live. |
 | `request_changes_threshold` | Live. |
+| `review_guidance` | Live. |
+| `review_guidance_mode` | Live. |
 | `auto_upgrade` | Live, effective starting the next poll boundary. |
 | `reconciliation.fallback_interval` | Live (event-driven mode only). |
 | `github_app_id` | Restart-only. |
