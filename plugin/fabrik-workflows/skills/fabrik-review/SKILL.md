@@ -337,7 +337,7 @@ See `../../LABELS.md` for the full label reference.
 When you receive this comment:
 1. Inspect failing checks via the Checks API rather than `gh run` — under GitHub App auth, `gh run list`/`gh run view --log-failed` need `actions: read`, which is not granted and 403s; the Checks API below runs on `checks: read`, which is:
    ```
-   gh api repos/{owner}/{repo}/commits/$(git rev-parse HEAD)/check-runs \
+   gh api --paginate repos/{owner}/{repo}/commits/$(git rev-parse HEAD)/check-runs \
      --jq '.check_runs[] | select(.conclusion=="failure" or .conclusion=="timed_out") | {id,name}'
    ```
    For each failing check run id, pull its detail and any file/line annotations the job emitted:
