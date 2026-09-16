@@ -71,6 +71,18 @@ type Daemon struct {
 	Config   Config
 	BotLogin string
 
+	// Tracker (#1631) is the local, process-lifetime backstop against a
+	// re-review loop driven by a degraded-but-successful FetchPRReviews
+	// response (see ReviewTracker's doc comment). Shared across every
+	// dispatch path — poll()'s per-cycle fan-out and ReviewFromEvent's
+	// webhook-triggered dispatch both funnel through executeReview below,
+	// which passes this same instance to every ReviewPR call, mirroring
+	// prGates' existing per-Daemon sharing. nil-safe: an unset Tracker (any
+	// hand-built test Daemon{} literal that predates #1631) makes ReviewPR's
+	// tracker check a no-op, preserving pre-#1631 behavior exactly.
+	// NewDaemon always constructs one.
+	Tracker *ReviewTracker
+
 	// Reconciler is the installation-derived discovery engine (#1641):
 	// rederiveRepos calls its Derive method to re-fetch the App's current
 	// installation grant and re-populate derived/Clients below. nil (only
@@ -470,6 +482,7 @@ func NewDaemon(cfg Config, clients map[string]GitHubLister, claude ClaudeInvoker
 		Clone:    clone,
 		Config:   cfg,
 		BotLogin: botLogin,
+		Tracker:  NewReviewTracker(),
 	}
 
 	return d, wireLogf(cfg, useTUI(cfg))
@@ -1256,7 +1269,7 @@ func (d *Daemon) executeReview(ctx context.Context, client GitHubLister, owner, 
 	// happens after dispatch (ADR-1640's R3). The only thing that needs
 	// protecting is this read itself, against a concurrent ApplyReload
 	// write.
-	outcome := ReviewPR(ctx, client, d.Claude, d.Clone, d.config(), d.BotLogin, owner, repo, pr)
+	outcome := ReviewPR(ctx, client, d.Claude, d.Clone, d.config(), d.BotLogin, owner, repo, pr, d.Tracker)
 	if outcome.Err != nil {
 		logf(pr.Number, "warn", "reviewing %s/%s#%d: %v\n", owner, repo, pr.Number, outcome.Err)
 	}

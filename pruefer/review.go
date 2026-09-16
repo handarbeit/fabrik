@@ -75,6 +75,18 @@ type ReviewOutcome struct {
 // triggers the FetchPRDiff call used for the size guard and path exclusion,
 // so a skip never costs an extra network round-trip.
 //
+// tracker (#1631) is a second, independent, GitHub-independent source of
+// truth for "have I already reviewed this exact head" — consulted
+// immediately after PendingForceReview and before FetchPRReviews is even
+// called. It exists because FetchPRReviews' own read can come back
+// successful but partial during a provider degradation (the confirmed
+// #1631 root cause: an outage caused GitHub to return HTTP 200 with a
+// review list that omitted the bot's own prior submission, so the
+// GitHub-derived alreadyReviewedAtHead check correctly, but wrongly,
+// reported "no prior review" on every poll for the outage's duration). A
+// nil tracker disables this backstop entirely — see ReviewTracker's doc
+// comment and adrs/1631-pruefer-local-review-tracker-backstop.md.
+//
 // When FetchPRDiff returns gh.ErrDiffTooLarge — GitHub's deterministic 406
 // refusal to render a diff exceeding its 20,000-line ceiling — ReviewPR
 // degrades rather than blocks (R3): it falls back to FetchPRFiles (the
@@ -108,7 +120,7 @@ type ReviewOutcome struct {
 // R5). diff is rebound to the filtered/trimmed text before validRightAnchors
 // is called below, so R6 (a finding can never anchor to an omitted file)
 // holds with no separate anchor-scrubbing logic.
-func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, clone CloneFunc, cfg Config, botLogin, owner, repo string, pr gh.PRDetails) ReviewOutcome {
+func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, clone CloneFunc, cfg Config, botLogin, owner, repo string, pr gh.PRDetails, tracker *ReviewTracker) ReviewOutcome {
 	// R1/R2 (#1642): resolve owner/repo's repo-resident .pruefer/config.yaml
 	// at the PR's base ref — never the head, so a PR can never change how it
 	// is itself reviewed (mirrors --setting-sources user's "the PR head is
@@ -132,6 +144,18 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 	if err != nil {
 		logf(pr.Number, "warn", "checking for /pruefer review command on %s/%s#%d: %v\n", owner, repo, pr.Number, err)
 		forceReview = false // not fatal to the poll cycle — treat as no forced review this round
+	}
+
+	// #1631 R2/R3: the local tracker backstop, checked before FetchPRReviews
+	// is ever called — a confirmed-duplicate head costs zero further GitHub
+	// API calls, and (unlike the GitHub-derived check below) this decision
+	// can never be fooled by a successful-but-partial FetchPRReviews
+	// response, since it depends on nothing GitHub reports back. Bypassed by
+	// forceReview, exactly like alreadyReviewedAtHead's own bypass — a
+	// human-requested "/pruefer review" must still get a fresh review.
+	if !forceReview && tracker.Recall(owner, repo, pr.Number, pr.HeadSHA) {
+		logf(pr.Number, "select", "skipping %s/%s#%d: %s (local tracker: already reviewed this head this process, independent of FetchPRReviews)\n", owner, repo, pr.Number, SkipAlreadyReviewed)
+		return ReviewOutcome{Skipped: true, Reason: SkipAlreadyReviewed}
 	}
 
 	reviews, err := client.FetchPRReviews(owner, repo, pr.Number)
@@ -312,6 +336,7 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 	if _, err := client.SubmitPRReview(owner, repo, pr.Number, pr.HeadSHA, body, event, comments); err != nil {
 		return ReviewOutcome{Err: fmt.Errorf("submitting review: %w", err)}
 	}
+	tracker.Record(owner, repo, pr.Number, pr.HeadSHA)
 
 	if forceReview {
 		if err := MarkForceReviewsProcessed(client, owner, repo, pr.Number); err != nil {

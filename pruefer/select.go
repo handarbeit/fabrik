@@ -15,11 +15,19 @@ import (
 type SkipReason string
 
 const (
-	SkipDraft           SkipReason = "draft"
-	SkipSelfAuthored    SkipReason = "self-authored: PR author is the review identity"
-	SkipExcludedAuthor  SkipReason = "excluded author"
-	SkipExcludedLabel   SkipReason = "excluded label"
-	SkipExcludedPath    SkipReason = "excluded path: every touched file matches an exclusion glob"
+	SkipDraft          SkipReason = "draft"
+	SkipSelfAuthored   SkipReason = "self-authored: PR author is the review identity"
+	SkipExcludedAuthor SkipReason = "excluded author"
+	SkipExcludedLabel  SkipReason = "excluded label"
+	SkipExcludedPath   SkipReason = "excluded path: every touched file matches an exclusion glob"
+	// SkipAlreadyReviewed is reported by two independent checks (#1631): the
+	// GitHub-derived alreadyReviewedAtHead below, and — checked first, in
+	// ReviewPR, before alreadyReviewedAtHead is even reachable —
+	// ReviewTracker's local, process-lifetime record of Pruefer's own past
+	// submissions. The latter exists because a degraded-but-successful
+	// FetchPRReviews response can omit the bot's own prior review, which
+	// this reason string alone doesn't distinguish; see the "local tracker"
+	// wording in ReviewPR's own skip log line for that.
 	SkipAlreadyReviewed SkipReason = "already reviewed at this head SHA"
 	SkipDiffTooLarge    SkipReason = "diff exceeds max_diff_bytes"
 )

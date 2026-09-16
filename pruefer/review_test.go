@@ -16,18 +16,27 @@ import (
 type fakeReviewer struct {
 	*fakeCommenter
 
-	diff             string
-	diffErr          error
-	filesResult      []string
-	filesErr         error
-	reviews          []gh.PRReview
-	reviewsErr       error
-	threads          []gh.PRReviewThread
-	threadsTruncated bool
-	threadsErr       error
-	submitErr        error
-	token            string
-	botLogin         string
+	diff        string
+	diffErr     error
+	filesResult []string
+	filesErr    error
+	reviews     []gh.PRReview
+	reviewsErr  error
+	// alwaysReturnEmptyReviews (#1631), when true, makes FetchPRReviews
+	// unconditionally return (nil, nil) regardless of f.reviews — including
+	// entries SubmitPRReview itself appended. Simulates both "the
+	// GitHub-derived guard is blind" (AC3: alreadyReviewedAtHead forced
+	// false) and the confirmed #1631 root cause, a successful-but-partial
+	// FetchPRReviews response that omits the bot's own latest review at the
+	// current head (AC5) — from ReviewPR's point of view the two are the
+	// same observable shape.
+	alwaysReturnEmptyReviews bool
+	threads                  []gh.PRReviewThread
+	threadsTruncated         bool
+	threadsErr               error
+	submitErr                error
+	token                    string
+	botLogin                 string
 
 	// repoConfigData/repoConfigErr control FetchFileAtRef's response.
 	// Default (both zero) is gh.ErrNotFound — "no repo config" — so every
@@ -148,6 +157,9 @@ func (f *fakeReviewer) FetchPRReviews(owner, repo string, prNumber int) ([]gh.PR
 	if f.reviewsErr != nil {
 		return nil, f.reviewsErr
 	}
+	if f.alwaysReturnEmptyReviews {
+		return nil, nil
+	}
 	return f.reviews, nil
 }
 
@@ -219,7 +231,7 @@ func TestReviewPR_EligiblePR_SubmitsExactlyOneReview(t *testing.T) {
 	clone, cloneCalls := fakeClone(t, nil)
 
 	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1", Title: "Add feature"}
-	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr)
+	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr, nil)
 
 	if !outcome.Reviewed {
 		t.Fatalf("outcome = %+v, want Reviewed=true", outcome)
@@ -259,7 +271,7 @@ func TestReviewPR_SeverityAboveThreshold_SubmitsRequestChanges(t *testing.T) {
 
 	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
 	cfg := Config{RequestChangesThreshold: SeverityHigh}
-	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr)
+	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr, nil)
 
 	if !outcome.Reviewed || outcome.Err != nil {
 		t.Fatalf("outcome = %+v, want Reviewed=true, Err=nil", outcome)
@@ -281,7 +293,7 @@ func TestReviewPR_SeverityBelowThreshold_SubmitsComment(t *testing.T) {
 
 	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
 	cfg := Config{RequestChangesThreshold: SeverityHigh}
-	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr)
+	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr, nil)
 
 	if !outcome.Reviewed || outcome.Err != nil {
 		t.Fatalf("outcome = %+v, want Reviewed=true, Err=nil", outcome)
@@ -302,7 +314,7 @@ func TestReviewPR_ToggleOff_CriticalFindingStillSubmitsComment(t *testing.T) {
 	clone, _ := fakeClone(t, nil)
 
 	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
-	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr)
+	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr, nil)
 
 	if !outcome.Reviewed || outcome.Err != nil {
 		t.Fatalf("outcome = %+v, want Reviewed=true, Err=nil", outcome)
@@ -337,13 +349,13 @@ func TestReviewPR_FixedThenReReviewed_DoesNotReBlock(t *testing.T) {
 	cfg := Config{RequestChangesThreshold: SeverityHigh}
 
 	pr1 := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
-	outcome1 := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr1)
+	outcome1 := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr1, nil)
 	if !outcome1.Reviewed || outcome1.Err != nil {
 		t.Fatalf("first outcome = %+v, want Reviewed=true, Err=nil", outcome1)
 	}
 
 	pr2 := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha2"}
-	outcome2 := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr2)
+	outcome2 := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr2, nil)
 	if !outcome2.Reviewed || outcome2.Err != nil {
 		t.Fatalf("second outcome = %+v, want Reviewed=true, Err=nil", outcome2)
 	}
@@ -366,7 +378,7 @@ func TestReviewPR_PopulatesBaseBranchAndMaxWallTime(t *testing.T) {
 
 	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1", BaseRef: "main"}
 	cfg := Config{MaxWallTime: 10 * time.Minute}
-	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr)
+	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr, nil)
 
 	if !outcome.Reviewed {
 		t.Fatalf("outcome = %+v, want Reviewed=true", outcome)
@@ -390,7 +402,7 @@ func TestReviewPR_RepollSameSHA_DoesNotReReview(t *testing.T) {
 	clone, cloneCalls := fakeClone(t, nil)
 
 	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
-	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr)
+	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr, nil)
 
 	if !outcome.Skipped || outcome.Reason != SkipAlreadyReviewed {
 		t.Fatalf("outcome = %+v, want Skipped with SkipAlreadyReviewed", outcome)
@@ -406,13 +418,169 @@ func TestReviewPR_RepollSameSHA_DoesNotReReview(t *testing.T) {
 	}
 }
 
+// TestReviewPR_FiveConsecutivePolls_OnlyFirstReviews is AC1's literal
+// coverage: a PR whose head SHA never changes must receive no further
+// reviews across at least 5 consecutive poll cycles. Starts with no prior
+// reviews (unlike TestReviewPR_RepollSameSHA_DoesNotReReview above, which
+// pins the already-reviewed-from-the-start case) so the first call submits
+// and every later call observes that submission and skips — exercising the
+// full "review once, then hold" flow the existing GitHub-derived guard
+// (alreadyReviewedAtHead) already provides on a healthy API.
+// TestReviewPR_WithoutTracker_BrokenGuardReReviewsIndefinitely proves this
+// is non-vacuous by breaking that guard and observing the re-review return.
+func TestReviewPR_FiveConsecutivePolls_OnlyFirstReviews(t *testing.T) {
+	client := newFakeReviewer()
+	claude := &mockClaudeInvoker{}
+	clone, _ := fakeClone(t, nil)
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	for i := 1; i <= 5; i++ {
+		outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr, nil)
+		if i == 1 {
+			if !outcome.Reviewed || outcome.Err != nil {
+				t.Fatalf("poll %d: outcome = %+v, want Reviewed=true, Err=nil", i, outcome)
+			}
+			continue
+		}
+		if !outcome.Skipped || outcome.Reason != SkipAlreadyReviewed {
+			t.Fatalf("poll %d: outcome = %+v, want Skipped with SkipAlreadyReviewed", i, outcome)
+		}
+	}
+	if client.submitCallCount() != 1 {
+		t.Fatalf("submitCallCount = %d, want exactly 1 across 5 consecutive polls of an unchanged head", client.submitCallCount())
+	}
+}
+
+// TestReviewPR_WithoutTracker_BrokenGuardReReviewsIndefinitely proves
+// TestReviewPR_FiveConsecutivePolls_OnlyFirstReviews above is non-vacuous
+// (AC1's own instruction: "prove non-vacuous by breaking the guard... and
+// observing the re-review return"). alwaysReturnEmptyReviews simulates the
+// GitHub-derived guard going blind to the bot's own prior submissions —
+// the confirmed #1631 root cause. With no tracker (nil) to fall back on,
+// both consecutive calls submit a fresh review for the same unchanged head.
+func TestReviewPR_WithoutTracker_BrokenGuardReReviewsIndefinitely(t *testing.T) {
+	client := newFakeReviewer()
+	client.alwaysReturnEmptyReviews = true
+	claude := &mockClaudeInvoker{}
+	clone, _ := fakeClone(t, nil)
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	outcome1 := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr, nil)
+	outcome2 := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr, nil)
+
+	if !outcome1.Reviewed || outcome1.Err != nil {
+		t.Fatalf("first outcome = %+v, want Reviewed=true, Err=nil", outcome1)
+	}
+	if !outcome2.Reviewed || outcome2.Err != nil {
+		t.Fatalf("second outcome = %+v, want Reviewed=true, Err=nil — proves the guard-break is real: absent the #1631 tracker backstop, a blind FetchPRReviews re-reviews an unchanged head indefinitely", outcome2)
+	}
+	if client.submitCallCount() != 2 {
+		t.Fatalf("submitCallCount = %d, want 2", client.submitCallCount())
+	}
+}
+
+// TestReviewPR_LocalTrackerBoundsLoopWhenGuardBroken is AC3: R2's backstop
+// bounds the loop even with the primary GitHub-derived guard disabled.
+// Same broken-guard fake client as the test above, but now a real,
+// shared *ReviewTracker is threaded through 5 consecutive ReviewPR calls
+// for the same unchanged head — consecutive reviews must stop at 1 rather
+// than continuing indefinitely.
+func TestReviewPR_LocalTrackerBoundsLoopWhenGuardBroken(t *testing.T) {
+	client := newFakeReviewer()
+	client.alwaysReturnEmptyReviews = true
+	claude := &mockClaudeInvoker{}
+	clone, _ := fakeClone(t, nil)
+	tracker := NewReviewTracker()
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	for i := 1; i <= 5; i++ {
+		outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr, tracker)
+		if i == 1 {
+			if !outcome.Reviewed || outcome.Err != nil {
+				t.Fatalf("poll %d: outcome = %+v, want Reviewed=true, Err=nil", i, outcome)
+			}
+			continue
+		}
+		if !outcome.Skipped || outcome.Reason != SkipAlreadyReviewed {
+			t.Fatalf("poll %d: outcome = %+v, want Skipped with SkipAlreadyReviewed (local tracker bound) even though FetchPRReviews stays blind", i, outcome)
+		}
+	}
+	if client.submitCallCount() != 1 {
+		t.Fatalf("submitCallCount = %d, want exactly 1 — the local tracker must bound the loop at the cap even with the GitHub-derived guard disabled", client.submitCallCount())
+	}
+}
+
+// TestReviewPR_LocalTrackerSurvivesDegradedFetchPRReviews is AC5's literal
+// scenario: this is the confirmed #1631 root cause itself, not merely an
+// analogous one — a FetchPRReviews call that returns HTTP-200-successful
+// but partial data omitting the bot's own latest review at the current
+// head (simulated identically to the AC3 test above via
+// alwaysReturnEmptyReviews, since from ReviewPR's point of view a
+// permanently-blind guard and a transiently-degraded one during an outage
+// are the same observable shape). The local tracker must still refuse to
+// re-review (fail-closed) once it has recorded the first submission.
+func TestReviewPR_LocalTrackerSurvivesDegradedFetchPRReviews(t *testing.T) {
+	client := newFakeReviewer()
+	client.alwaysReturnEmptyReviews = true // GitHub is "up" (no error) but never reports the bot's own review back
+	claude := &mockClaudeInvoker{}
+	clone, _ := fakeClone(t, nil)
+	tracker := NewReviewTracker()
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	first := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr, tracker)
+	if !first.Reviewed || first.Err != nil {
+		t.Fatalf("first outcome = %+v, want Reviewed=true, Err=nil", first)
+	}
+
+	second := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr, tracker)
+	if !second.Skipped || second.Reason != SkipAlreadyReviewed {
+		t.Fatalf("second outcome = %+v, want Skipped with SkipAlreadyReviewed — a successful-but-partial FetchPRReviews response must not be treated as \"no prior review exists\" once the local tracker knows better", second)
+	}
+	if client.submitCallCount() != 1 {
+		t.Fatalf("submitCallCount = %d, want exactly 1", client.submitCallCount())
+	}
+}
+
+// TestReviewPR_FetchPRReviewsHardError_FailsClosedNoReview is AC2's
+// regression pin: with FetchPRReviews returning a hard error, no review is
+// submitted (fail-closed). This behavior already existed before #1631
+// (review.go's existing `if err != nil { return ReviewOutcome{Err: ...} }`
+// guard) — Research confirmed it was already correct — so this test adds
+// coverage for an existing code path rather than exercising new production
+// code.
+func TestReviewPR_FetchPRReviewsHardError_FailsClosedNoReview(t *testing.T) {
+	client := newFakeReviewer()
+	client.reviewsErr = fmt.Errorf("simulated GitHub API failure")
+	claude := &mockClaudeInvoker{}
+	clone, cloneCalls := fakeClone(t, nil)
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr, nil)
+
+	if outcome.Err == nil {
+		t.Fatal("outcome.Err = nil, want a non-nil error when FetchPRReviews fails outright")
+	}
+	if outcome.Reviewed {
+		t.Error("outcome.Reviewed = true, want false when FetchPRReviews fails outright (fail-closed)")
+	}
+	if cloneCalls.Load() != 0 {
+		t.Error("expected no clone when FetchPRReviews fails outright")
+	}
+	if claude.callCount() != 0 {
+		t.Error("expected no claude invocation when FetchPRReviews fails outright")
+	}
+	if client.submitCallCount() != 0 {
+		t.Error("submitCallCount != 0, want 0 — a hard FetchPRReviews error must never result in a submitted review")
+	}
+}
+
 func TestReviewPR_DraftPR_Skipped(t *testing.T) {
 	client := newFakeReviewer()
 	claude := &mockClaudeInvoker{}
 	clone, cloneCalls := fakeClone(t, nil)
 
 	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1", Draft: true}
-	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr)
+	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr, nil)
 
 	if !outcome.Skipped || outcome.Reason != SkipDraft {
 		t.Fatalf("outcome = %+v, want Skipped with SkipDraft", outcome)
@@ -431,7 +599,7 @@ func TestReviewPR_SelfAuthored_Skipped(t *testing.T) {
 	clone, _ := fakeClone(t, nil)
 
 	pr := gh.PRDetails{Number: 1, Author: "pruefer-bot[bot]", HeadSHA: "sha1"}
-	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr)
+	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr, nil)
 
 	if !outcome.Skipped || outcome.Reason != SkipSelfAuthored {
 		t.Fatalf("outcome = %+v, want Skipped with SkipSelfAuthored", outcome)
@@ -449,7 +617,7 @@ func TestReviewPR_ForceReview_BypassesAlreadyReviewed(t *testing.T) {
 	clone, cloneCalls := fakeClone(t, nil)
 
 	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
-	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr)
+	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr, nil)
 
 	if !outcome.Reviewed {
 		t.Fatalf("outcome = %+v, want Reviewed=true (forced re-review)", outcome)
@@ -459,6 +627,35 @@ func TestReviewPR_ForceReview_BypassesAlreadyReviewed(t *testing.T) {
 	}
 	if !client.comments[0].HasReaction("ROCKET") {
 		t.Error("expected the /pruefer review comment to be marked processed (ROCKET reaction)")
+	}
+}
+
+// TestReviewPR_ForceReview_BypassesLocalTracker is the #1631 counterpart to
+// TestReviewPR_ForceReview_BypassesAlreadyReviewed above, which only ever
+// exercises the bypass with a nil tracker — never proving forceReview
+// actually overrides a *populated* ReviewTracker. Plan's own constraint
+// ("ForceReview must still bypass the new backstop") is otherwise
+// unverified: the tracker.Recall check in ReviewPR sits ahead of
+// FetchPRReviews, gated on `!forceReview`, and this is the only test that
+// pre-records an entry in a real tracker and confirms a subsequent
+// /pruefer review comment still triggers a fresh review of that exact head
+// instead of being silently swallowed by Pruefer's own memory of the first.
+func TestReviewPR_ForceReview_BypassesLocalTracker(t *testing.T) {
+	client := newFakeReviewer()
+	client.comments = []gh.Comment{{DatabaseID: 42, Body: "/pruefer review"}}
+	claude := &mockClaudeInvoker{}
+	clone, cloneCalls := fakeClone(t, nil)
+	tracker := NewReviewTracker()
+	tracker.Record("owner", "repo", 1, "sha1")
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr, tracker)
+
+	if !outcome.Reviewed {
+		t.Fatalf("outcome = %+v, want Reviewed=true — /pruefer review must bypass a populated local tracker, not just the GitHub-derived guard", outcome)
+	}
+	if cloneCalls.Load() != 1 || claude.callCount() != 1 || client.submitCallCount() != 1 {
+		t.Error("forced re-review must clone, invoke claude, and submit exactly one review even though the local tracker already recorded this head")
 	}
 }
 
@@ -479,7 +676,7 @@ func TestReviewPR_DiffTooLarge_Skipped(t *testing.T) {
 
 	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
 	cfg := Config{MaxDiffBytes: 5} // "x diff content" is well over 5 bytes
-	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr)
+	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr, nil)
 
 	if !outcome.Skipped || outcome.Reason != SkipDiffTooLarge {
 		t.Fatalf("outcome = %+v, want Skipped with SkipDiffTooLarge", outcome)
@@ -500,7 +697,7 @@ func TestReviewPR_ExcludedPath_Skipped(t *testing.T) {
 
 	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
 	cfg := Config{ExcludedPaths: []string{"docs/*"}}
-	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr)
+	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr, nil)
 
 	if !outcome.Skipped || outcome.Reason != SkipExcludedPath {
 		t.Fatalf("outcome = %+v, want Skipped with SkipExcludedPath", outcome)
@@ -518,7 +715,7 @@ func TestReviewPR_ClaudeFailure_PostsNothing(t *testing.T) {
 	clone, cloneCalls := fakeClone(t, nil)
 
 	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
-	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr)
+	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr, nil)
 
 	if outcome.Err == nil {
 		t.Fatal("expected a non-nil error when claude invocation fails")
@@ -537,7 +734,7 @@ func TestReviewPR_CloneFailure_PostsNothing(t *testing.T) {
 	clone, _ := fakeClone(t, fmt.Errorf("clone failed"))
 
 	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
-	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr)
+	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr, nil)
 
 	if outcome.Err == nil {
 		t.Fatal("expected a non-nil error when cloning fails")
@@ -557,7 +754,7 @@ func TestReviewPR_SubmitFailure_ReturnsError(t *testing.T) {
 	clone, _ := fakeClone(t, nil)
 
 	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
-	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr)
+	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr, nil)
 
 	if outcome.Err == nil {
 		t.Fatal("expected a non-nil error when SubmitPRReview fails")
@@ -580,7 +777,7 @@ func TestReviewPR_DiffTooLarge_FallbackAlsoFails_SkippedNoErr(t *testing.T) {
 	clone, cloneCalls := fakeClone(t, nil)
 
 	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
-	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr)
+	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr, nil)
 
 	if !outcome.Skipped {
 		t.Errorf("outcome.Skipped = false, want true")
@@ -612,7 +809,7 @@ func TestReviewPR_DiffTooLarge_FallbackAlsoFails_PostsNoticeOnce(t *testing.T) {
 
 	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
 	for i := 0; i < 3; i++ {
-		outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr)
+		outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr, nil)
 		if !outcome.Skipped || outcome.Reason != SkipDiffTooLarge {
 			t.Fatalf("call %d: outcome = %+v, want Skipped with SkipDiffTooLarge", i, outcome)
 		}
@@ -636,7 +833,7 @@ func TestReviewPR_DiffTooLarge_FallbackSucceeds_ReviewsUsingFallbackPaths(t *tes
 	clone, cloneCalls := fakeClone(t, nil)
 
 	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
-	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr)
+	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr, nil)
 
 	if !outcome.Reviewed {
 		t.Fatalf("outcome = %+v, want Reviewed=true", outcome)
@@ -665,7 +862,7 @@ func TestReviewPR_DiffTooLarge_FallbackSucceeds_ExcludedPathsSkip(t *testing.T) 
 
 	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
 	cfg := Config{ExcludedPaths: []string{"docs/*"}}
-	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr)
+	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr, nil)
 
 	if !outcome.Skipped || outcome.Reason != SkipExcludedPath {
 		t.Fatalf("outcome = %+v, want Skipped with SkipExcludedPath", outcome)
@@ -689,7 +886,7 @@ func TestReviewPR_GenericDiffFetchError_StillReturnsErr(t *testing.T) {
 	clone, _ := fakeClone(t, nil)
 
 	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
-	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr)
+	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr, nil)
 
 	if outcome.Err == nil {
 		t.Fatal("expected a non-nil Err for a generic (non-ErrDiffTooLarge) diff fetch failure")
@@ -714,7 +911,7 @@ func TestReviewPR_FetchedThreadsReachReviewRequest(t *testing.T) {
 	clone, _ := fakeClone(t, nil)
 
 	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
-	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr)
+	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr, nil)
 
 	if !outcome.Reviewed || outcome.Err != nil {
 		t.Fatalf("outcome = %+v, want Reviewed=true, Err=nil", outcome)
@@ -742,7 +939,7 @@ func TestReviewPR_ThreadsTruncatedReachesReviewRequest(t *testing.T) {
 	clone, _ := fakeClone(t, nil)
 
 	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
-	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr)
+	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr, nil)
 
 	if !outcome.Reviewed || outcome.Err != nil {
 		t.Fatalf("outcome = %+v, want Reviewed=true, Err=nil", outcome)
@@ -768,7 +965,7 @@ func TestReviewPR_ThreadFetchError_DegradesWithoutFailingReview(t *testing.T) {
 	clone, _ := fakeClone(t, nil)
 
 	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
-	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr)
+	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr, nil)
 
 	if !outcome.Reviewed {
 		t.Errorf("outcome.Reviewed = false, want true (a thread-fetch error must not fail the review)")
@@ -795,7 +992,7 @@ func TestReviewPR_ExcludedAuthor_Skipped(t *testing.T) {
 
 	pr := gh.PRDetails{Number: 1, Author: "dependabot[bot]", HeadSHA: "sha1"}
 	cfg := Config{ExcludedAuthors: []string{"dependabot[bot]"}}
-	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr)
+	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr, nil)
 
 	if !outcome.Skipped || outcome.Reason != SkipExcludedAuthor {
 		t.Fatalf("outcome = %+v, want Skipped with SkipExcludedAuthor", outcome)
@@ -818,7 +1015,7 @@ func TestReviewPR_ResolvesRepoConfigAtBaseRef_NotHead(t *testing.T) {
 	clone, _ := fakeClone(t, nil)
 
 	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "head-sha-only", BaseRef: "main"}
-	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr)
+	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr, nil)
 
 	if !outcome.Reviewed {
 		t.Fatalf("outcome = %+v, want Reviewed=true — a repo config present only at the head must have no effect", outcome)
@@ -866,7 +1063,7 @@ repo_rederivation_interval: 1s
 
 	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1", BaseRef: "main"}
 	operatorCfg := Config{Model: "sonnet", Effort: "high", WatchedRepos: []string{"owner/repo"}, MaxDerivedRepos: 200}
-	outcome := ReviewPR(context.Background(), client, claude, clone, operatorCfg, "pruefer-bot[bot]", "owner", "repo", pr)
+	outcome := ReviewPR(context.Background(), client, claude, clone, operatorCfg, "pruefer-bot[bot]", "owner", "repo", pr, nil)
 
 	if !outcome.Reviewed {
 		t.Fatalf("outcome = %+v, want Reviewed=true", outcome)
@@ -910,7 +1107,7 @@ func TestReviewPR_ResolvesReviewSkillAtBaseRef_NotHead(t *testing.T) {
 	clone, _ := fakeClone(t, nil)
 
 	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "head-sha-only", BaseRef: "main"}
-	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr)
+	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr, nil)
 
 	if !outcome.Reviewed || outcome.Err != nil {
 		t.Fatalf("outcome = %+v, want Reviewed=true, Err=nil — a review skill present only at the head must have no effect", outcome)
@@ -950,7 +1147,7 @@ func TestReviewPR_ReviewSkillAndGuidanceReachReviewRequest(t *testing.T) {
 
 	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1", BaseRef: "main"}
 	cfg := Config{ReviewGuidance: "Prefer table-driven tests.", ReviewGuidanceMode: GuidanceModeAppend}
-	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr)
+	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr, nil)
 
 	if !outcome.Reviewed || outcome.Err != nil {
 		t.Fatalf("outcome = %+v, want Reviewed=true, Err=nil", outcome)
@@ -985,7 +1182,7 @@ func TestReviewPR_ReviewSkillFetchError_DegradesWithoutFailingReview(t *testing.
 	clone, _ := fakeClone(t, nil)
 
 	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1", BaseRef: "main"}
-	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr)
+	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr, nil)
 
 	if !outcome.Reviewed || outcome.Err != nil {
 		t.Fatalf("outcome = %+v, want Reviewed=true, Err=nil (a review-skill fetch error must not fail the review)", outcome)
@@ -1031,7 +1228,7 @@ func TestReviewPR_FindingsMappedToChangedLines_PostsInlineComments(t *testing.T)
 	clone, _ := fakeClone(t, nil)
 
 	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
-	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr)
+	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr, nil)
 
 	if !outcome.Reviewed || outcome.Err != nil {
 		t.Fatalf("outcome = %+v, want Reviewed=true, Err=nil", outcome)
@@ -1063,7 +1260,7 @@ func TestReviewPR_UnanchorableFinding_DemotedToBody(t *testing.T) {
 	clone, _ := fakeClone(t, nil)
 
 	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
-	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr)
+	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr, nil)
 
 	if !outcome.Reviewed || outcome.Err != nil {
 		t.Fatalf("outcome = %+v, want Reviewed=true, Err=nil", outcome)
@@ -1086,7 +1283,7 @@ func TestReviewPR_NoAnchorableFindings_BodyOnly(t *testing.T) {
 	clone, _ := fakeClone(t, nil)
 
 	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
-	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr)
+	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr, nil)
 
 	if !outcome.Reviewed || outcome.Err != nil {
 		t.Fatalf("outcome = %+v, want Reviewed=true, Err=nil", outcome)
@@ -1115,7 +1312,7 @@ func TestReviewPR_UnanchorableFinding_NeverPassedToSubmit(t *testing.T) {
 	clone, _ := fakeClone(t, nil)
 
 	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
-	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr)
+	outcome := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr, nil)
 
 	if !outcome.Reviewed || outcome.Err != nil {
 		t.Fatalf("outcome = %+v, want Reviewed=true, Err=nil (unanchorable finding must not fail the review)", outcome)
@@ -1267,7 +1464,7 @@ func TestReviewPR_HugeExcludedFile_RemainderReviewed(t *testing.T) {
 
 	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
 	cfg := Config{MaxDiffBytes: 1000, ExcludedPaths: []string{"data/corpus.jsonl"}}
-	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr)
+	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr, nil)
 
 	if !outcome.Reviewed {
 		t.Fatalf("outcome = %+v, want Reviewed=true — the excluded huge file must not suppress review of the rest (AC1)", outcome)
@@ -1303,7 +1500,7 @@ func TestReviewPR_PartialExclusion_ReviewsSurvivors(t *testing.T) {
 
 	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
 	cfg := Config{ExcludedPaths: []string{"vendor/**"}}
-	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr)
+	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr, nil)
 
 	if !outcome.Reviewed || outcome.Err != nil {
 		t.Fatalf("outcome = %+v, want Reviewed=true, Err=nil (AC2)", outcome)
@@ -1332,7 +1529,7 @@ func TestReviewPR_AllPathsExcluded_MultiFile_StillSkips(t *testing.T) {
 
 	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
 	cfg := Config{ExcludedPaths: []string{"docs/*"}}
-	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr)
+	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr, nil)
 
 	if !outcome.Skipped || outcome.Reason != SkipExcludedPath {
 		t.Fatalf("outcome = %+v, want Skipped with SkipExcludedPath (AC3)", outcome)
@@ -1385,7 +1582,7 @@ func TestReviewPR_AmbiguousPath_TerminalCheckAgreesWithPerFileFilter(t *testing.
 
 	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
 	cfg := Config{ExcludedPaths: []string{"weird b/*"}}
-	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr)
+	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr, nil)
 
 	if !outcome.Skipped || outcome.Reason != SkipExcludedPath {
 		t.Fatalf("outcome = %+v, want Skipped with SkipExcludedPath — the terminal check must resolve %q the same way the per-file filter does", outcome, path)
@@ -1409,7 +1606,7 @@ func TestReviewPR_SizeOnlyTrim_NoExcludedPaths_ReviewsSurvivors(t *testing.T) {
 
 	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
 	cfg := Config{MaxDiffBytes: 1000} // no ExcludedPaths at all
-	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr)
+	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr, nil)
 
 	if !outcome.Reviewed || outcome.Err != nil {
 		t.Fatalf("outcome = %+v, want Reviewed=true, Err=nil (size-only trim, no excluded_paths configured)", outcome)
@@ -1436,7 +1633,7 @@ func TestReviewPR_OmittedPaths_DisclosedInPromptAndNotice(t *testing.T) {
 
 	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
 	cfg := Config{MaxDiffBytes: 1000, ExcludedPaths: []string{"data/corpus.jsonl"}}
-	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr)
+	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr, nil)
 
 	if !outcome.Reviewed {
 		t.Fatalf("outcome = %+v, want Reviewed=true", outcome)
@@ -1471,7 +1668,7 @@ func TestReviewPR_CrossPathNoticeIdempotency(t *testing.T) {
 	clone, _ := fakeClone(t, nil)
 
 	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
-	outcome1 := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr)
+	outcome1 := ReviewPR(context.Background(), client, claude, clone, Config{}, "pruefer-bot[bot]", "owner", "repo", pr, nil)
 	if !outcome1.Skipped || outcome1.Reason != SkipDiffTooLarge {
 		t.Fatalf("first outcome = %+v, want Skipped SkipDiffTooLarge (diff-unavailable path)", outcome1)
 	}
@@ -1486,7 +1683,7 @@ func TestReviewPR_CrossPathNoticeIdempotency(t *testing.T) {
 	client.diffErr = nil
 	client.diff = "x diff content that is definitely over the cap for this test"
 	cfg := Config{MaxDiffBytes: 5}
-	outcome2 := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr)
+	outcome2 := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr, nil)
 	if !outcome2.Skipped || outcome2.Reason != SkipDiffTooLarge {
 		t.Fatalf("second outcome = %+v, want Skipped SkipDiffTooLarge (diff-too-large-after-fetch path)", outcome2)
 	}
@@ -1512,7 +1709,7 @@ func TestReviewPR_FindingOnExcludedFile_DemotedNotAnchored(t *testing.T) {
 
 	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
 	cfg := Config{ExcludedPaths: []string{"vendor/**"}}
-	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr)
+	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr, nil)
 
 	if !outcome.Reviewed || outcome.Err != nil {
 		t.Fatalf("outcome = %+v, want Reviewed=true, Err=nil", outcome)
@@ -1545,7 +1742,7 @@ func TestReviewPR_SizeSkip_LogsSelfDiagnosingMessage(t *testing.T) {
 
 	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
 	cfg := Config{MaxDiffBytes: 5}
-	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr)
+	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr, nil)
 	if !outcome.Skipped || outcome.Reason != SkipDiffTooLarge {
 		t.Fatalf("outcome = %+v, want Skipped SkipDiffTooLarge", outcome)
 	}
@@ -1590,7 +1787,7 @@ func TestReviewPR_TrimSuccess_LogsSelfDiagnosingMessage(t *testing.T) {
 
 	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
 	cfg := Config{MaxDiffBytes: 1000, ExcludedPaths: []string{"vendor/**"}}
-	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr)
+	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr, nil)
 	if !outcome.Reviewed {
 		t.Fatalf("outcome = %+v, want Reviewed=true", outcome)
 	}
