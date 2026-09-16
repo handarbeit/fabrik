@@ -539,6 +539,34 @@ GitHub App installation 789012 is missing required permissions: organization_pro
 
 The engine currently requires: `metadata:read`, `organization_projects:write`, `issues:write`, `pull_requests:write`, `checks:read`, `statuses:read`, `contents:read`. (`--webhooks` cannot be combined with App auth at all — see Known limitations below — so no webhook-management permission is ever required here.) Notably absent: `actions` and `contents:write` — see "Worker git under App auth" below for what that means for worker `git`/`gh run` usage.
 
+#### Per-repo access coverage
+
+Permission verification above confirms the installation has the right *kinds* of access — it says nothing about *which repos* it covers. If your installation's **Repository access** is set to "Only select repositories" (`repository_selection: selected`), every repo tracked on your project board must be explicitly included in that selection, or Fabrik cannot dispatch work for it.
+
+**Why this matters:** under a personal access token, "can Fabrik push to this repo" and "can Fabrik call the GitHub API for this repo" both come from the same credential, so one check covers both. A GitHub App installation token doesn't carry a per-repo push permission at all (see "Git operations are unaffected" under [Known limitations](#known-limitations) below) — GitHub's REST `permissions` object comes back all-`false` for an installation token regardless of what's actually granted, since it describes a *user's* access, not an installation's. Fabrik instead determines dispatch eligibility from the installation's own accessible-repository list (`GET /installation/repositories`), fetched once at startup.
+
+**A confirmed zero-repo installation refuses to start:**
+
+```
+GitHub App installation 789012 has no accessible repositories (GET /installation/repositories
+returned an empty list) — grant it access to at least one repository at
+https://github.com/settings/installations/789012, or verify github_app_installation_id is correct
+```
+
+This is treated as a structural misconfiguration, not a warning — an installation covering nothing would never dispatch anything, ever, and previously this failure mode produced no error at all (the engine ran, discovered board items, and silently dispatched nothing — see [ADR-1750](../adrs/1750-app-auth-repo-access-signal.md)).
+
+**A specific board repo missing from an otherwise-populated selection** is not fatal — other repos your installation does cover keep working normally — but it is surfaced persistently in the TUI Warnings panel (not just a single startup log line), naming the repo and pointing at the installation's settings page so you can add it:
+
+```
+owner/repo: no write access — items from this repo will not be processed
+```
+
+Fix by adding the repo to the installation's "Only select repositories" list at `https://github.com/settings/installations/<id>` (Configure → Repository access), or switching the installation to "All repositories" if that better matches your intent.
+
+**Ambiguous answers never silently stop dispatch.** If the accessible-repository fetch itself fails at startup (network error, transient GitHub API error), Fabrik logs a prominent warning and falls back to admitting every repo — the same fail-open posture PAT mode already uses for its own probe errors. A repo missing from a *truncated* list (an installation covering more than 100 repos) is treated the same way, since it may simply be beyond the page Fabrik fetched rather than genuinely excluded.
+
+**`allow_auto_merge` cannot be checked under App auth.** GitHub only returns a repo's real `allow_auto_merge` setting to a caller with `administration:read` access, which this App deliberately does not request (see "The engine currently requires" above) — an installation token gets back `null` unconditionally. Rather than misreport that as "disabled" or widen the App's permission footprint for one advisory check, Fabrik skips the `allow_auto_merge` warning entirely under App auth. If `fabrik:yolo` PRs on an App-auth-managed repo aren't auto-merging, check `allow_auto_merge` on that repo directly (`gh api repos/<owner>/<repo> --jq .allow_auto_merge`) — Fabrik won't warn you about it under this auth mode.
+
 #### Worker `gh` CLI authentication
 
 Built-in stage skills (e.g. `fabrik-validate`'s Pre-Completion Gate) shell out to the `gh` CLI directly. Under App auth, each Claude worker invocation is given a live, freshly-refreshed installation token as `GH_TOKEN`/`GITHUB_TOKEN` — read directly off the same client the engine's own API calls use, riding its background refresh loop — rather than a token copied once at startup. **Known limitation:** a single stage invocation whose wall time exceeds the installation token's ~1-hour lifetime can still see a now-expired value for the remainder of that one invocation, since a running child process's environment cannot be updated after it starts. This is a narrow edge case (`max_wall_time` at or beyond roughly an hour) and is not fully solved here — see [ADR-1713](../adrs/1713-engine-github-app-auth.md).
