@@ -334,7 +334,7 @@ func TestRunGitHubAppSetup_Webhooks_ExpandsRequiredPermissions(t *testing.T) {
 	dir := t.TempDir()
 	chdirTest(t, dir) // runGitHubAppSetup resolves AppStatePath relative to cwd — never write into the source tree
 	keyPath := writeCmdTestAppKey(t, dir)
-	granted := fullPermissions() // no "webhooks" entry
+	granted := fullPermissions() // no "repository_hooks" entry
 	srv := newFakeGitHubAppSetupServer(t,
 		[]gh.AppInstallation{{ID: 555, Account: "handarbeit", Permissions: granted}},
 		map[string]string{"handarbeit": "organization"},
@@ -344,10 +344,10 @@ func TestRunGitHubAppSetup_Webhooks_ExpandsRequiredPermissions(t *testing.T) {
 		Owner: "handarbeit", AppID: 42, PrivateKeyPath: keyPath, InstallationID: 555, Webhooks: true, BaseURL: srv.URL,
 	})
 	if err == nil {
-		t.Fatal("expected a shortfall for the missing webhooks permission when --webhooks is set")
+		t.Fatal("expected a shortfall for the missing repository_hooks permission when --webhooks is set")
 	}
-	if !strings.Contains(err.Error(), "webhooks") {
-		t.Errorf("error %q should name the missing webhooks permission", err.Error())
+	if !strings.Contains(err.Error(), "repository_hooks") {
+		t.Errorf("error %q should name the missing repository_hooks permission", err.Error())
 	}
 }
 

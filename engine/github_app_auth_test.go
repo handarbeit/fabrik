@@ -171,6 +171,19 @@ func TestRefuseHTTPSWorkerGitUnderAppAuth(t *testing.T) {
 	}
 }
 
+func TestRefuseWebhooksWithGitHubApp(t *testing.T) {
+	if err := RefuseWebhooksWithGitHubApp(false); err != nil {
+		t.Errorf("RefuseWebhooksWithGitHubApp(no webhooks) = %v, want nil", err)
+	}
+	err := RefuseWebhooksWithGitHubApp(true)
+	if err == nil {
+		t.Fatal("expected an error refusing --webhooks + GitHub App auth combination")
+	}
+	if !strings.Contains(err.Error(), "webhooks") {
+		t.Errorf("error %q does not name --webhooks", err.Error())
+	}
+}
+
 func TestFormatPermissionShortfalls_NamesEachOne(t *testing.T) {
 	shortfalls := []githubauth.RequiredPermissionShortfall{
 		{Permission: "issues", Required: "write", Granted: "read"},
@@ -221,6 +234,22 @@ func TestResolveGitHubAppAuth_GHESCombination_Refused(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "GHES") && !strings.Contains(err.Error(), "Enterprise Server") {
 		t.Errorf("error %q does not explain the GHES refusal", err.Error())
+	}
+}
+
+func TestResolveGitHubAppAuth_WebhooksCombination_Refused(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := writeEngineTestAppKey(t, dir)
+	cfg := Config{
+		Owner: "handarbeit", Webhooks: true,
+		GitHubAppID: 1, GitHubAppPrivateKeyPath: keyPath, GitHubAppInstallationID: 2,
+	}
+	_, _, err := resolveGitHubAppAuth(context.Background(), cfg, dir, "http://127.0.0.1:1")
+	if err == nil {
+		t.Fatal("expected --webhooks + GitHub App auth combination to be refused")
+	}
+	if !strings.Contains(err.Error(), "webhooks") {
+		t.Errorf("error %q does not explain the webhooks refusal", err.Error())
 	}
 }
 
@@ -413,11 +442,11 @@ func TestRun_ShutdownOnSignal_WithGitHubAppAuth_WaitsForRefreshLoop(t *testing.T
 
 func TestEngineRequiredGitHubAppPermissions_WebhooksAddsScope(t *testing.T) {
 	without := RequiredGitHubAppPermissions(false)
-	if _, ok := without["webhooks"]; ok {
-		t.Error("webhooks permission should not be required when cfg.Webhooks is false")
+	if _, ok := without["repository_hooks"]; ok {
+		t.Error("repository_hooks permission should not be required when cfg.Webhooks is false")
 	}
 	with := RequiredGitHubAppPermissions(true)
-	if with["webhooks"] != "write" {
-		t.Errorf("webhooks permission = %q, want %q when cfg.Webhooks is true", with["webhooks"], "write")
+	if with["repository_hooks"] != "write" {
+		t.Errorf("repository_hooks permission = %q, want %q when cfg.Webhooks is true", with["repository_hooks"], "write")
 	}
 }
