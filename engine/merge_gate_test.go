@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -812,6 +813,41 @@ func TestPauseForConvergenceFailed_PostsComment_AppliesLabels(t *testing.T) {
 	}
 	if !foundRemove {
 		t.Error("expected fabrik:auto-merge-enabled to be removed on convergence failure")
+	}
+}
+
+// TestPauseForConvergenceFailed_FetchCommitsBehindError_RendersUnknown verifies
+// that a FetchCommitsBehind error (e.g. a missing-permission 403 under App auth,
+// #1755) renders "unknown" in the pause comment's commits-behind cell rather than
+// silently rendering the zero value, which would falsely claim the branch is not
+// behind base.
+func TestPauseForConvergenceFailed_FetchCommitsBehindError_RendersUnknown(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchCommitsBehindFn: func(owner, repo, base, head string) (int, error) {
+			return 0, errors.New("403: Resource not accessible by integration")
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.ConvergenceBudget = 30 * time.Minute
+	item := gh.ProjectItem{Number: 42, Repo: "owner/repo", Labels: []string{"fabrik:auto-merge-enabled"}}
+	stage := &stages.Stage{Name: "Validate"}
+	elapsed := 45 * time.Minute
+	settle := PRSettleResult{
+		Status: PRMergeConflicting,
+		PR:     &gh.PRDetails{Number: 10, State: "open", MergeableState: "dirty", HeadSHA: "abc123"},
+	}
+
+	eng.pauseForConvergenceFailed(context.Background(), &gh.ProjectBoard{}, item, stage, settle, elapsed)
+
+	if len(client.addCommentCalls) == 0 {
+		t.Fatal("expected a comment to be posted")
+	}
+	body := client.addCommentCalls[0].body
+	if !strings.Contains(body, "Commits behind base | unknown") {
+		t.Errorf("comment should render 'unknown' for commits behind on FetchCommitsBehind error, got: %q", body)
+	}
+	if strings.Contains(body, "Commits behind base | 0") {
+		t.Errorf("comment must not falsely render 0 commits behind on FetchCommitsBehind error, got: %q", body)
 	}
 }
 

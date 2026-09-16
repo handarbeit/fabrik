@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
@@ -511,7 +512,7 @@ func (e *Engine) pauseForConvergenceFailed(_ context.Context, _ *gh.ProjectBoard
 
 	pr := settle.PR
 	var mergeableState, headSHA, latestCI string
-	var commitsBehind int
+	commitsBehindStr := "unknown"
 	if pr != nil && pr.Number != 0 {
 		mergeableState = pr.MergeableState
 		headSHA = pr.HeadSHA
@@ -521,7 +522,9 @@ func (e *Engine) pauseForConvergenceFailed(_ context.Context, _ *gh.ProjectBoard
 		if baseBranch == "" {
 			baseBranch = "main"
 		}
-		commitsBehind, _ = e.client.FetchCommitsBehind(owner, repo, baseBranch, headSHA)
+		if n, err := e.client.FetchCommitsBehind(owner, repo, baseBranch, headSHA); err == nil {
+			commitsBehindStr = strconv.Itoa(n)
+		}
 		latestCI = summarizeCIRuns(settle.CheckRuns)
 	}
 
@@ -541,7 +544,7 @@ func (e *Engine) pauseForConvergenceFailed(_ context.Context, _ *gh.ProjectBoard
 			"|---|---|\n"+
 			"| Elapsed | %s |\n"+
 			"| Rebase reinvokes dispatched | %d |\n"+
-			"| Commits behind base | %d |\n"+
+			"| Commits behind base | %s |\n"+
 			"| PR `mergeable_state` | `%s` |\n"+
 			"| Latest CI (SHA `%s`) | %s |\n\n"+
 			"**Next steps — choose one:**\n"+
@@ -549,7 +552,7 @@ func (e *Engine) pauseForConvergenceFailed(_ context.Context, _ *gh.ProjectBoard
 			"2. **Switch to cruise**: Remove `fabrik:paused` + `fabrik:yolo`, add `fabrik:cruise`. Fabrik will keep the branch rebased against main but leave merging to you.\n"+
 			"3. **Leave as-is**: Remove `fabrik:paused` when ready. Fabrik will retry auto-merge from the current state.",
 		elapsedStr, budgetStr,
-		elapsedStr, rebaseCycles, commitsBehind,
+		elapsedStr, rebaseCycles, commitsBehindStr,
 		mergeableState, headSHA, latestCI,
 	)
 
