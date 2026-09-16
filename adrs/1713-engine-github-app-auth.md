@@ -185,11 +185,12 @@ genuinely new gap goes undetected until that feature's first use.
   receive the installation token as `GH_TOKEN`/`GITHUB_TOKEN`, per Decision above) never
   actually consult a credential helper for the HTTPS remote. Under the *default* HTTPS
   clone mode with neither of those in effect, this claim does not hold: a worker `git
-  fetch`/`push` resolves credentials through a helper (e.g. one registered by `gh auth
-  setup-git`) that prefers `GH_TOKEN`/`GITHUB_TOKEN` — the installation token, which is not
-  granted `contents` — and would 403. This was corrected, and the gap closed with a
-  startup-time refusal rather than a silent dependency on host git config, by #1756 — see
-  ADR-1756 for the git-under-App-auth decision.
+  push` resolves credentials through a helper (e.g. one registered by `gh auth
+  setup-git`) that prefers `GH_TOKEN`/`GITHUB_TOKEN` — the installation token, which is
+  granted `contents:read` but not `contents:write` — and would 403 (fetch alone would
+  likely succeed). This was corrected, and the gap closed with a startup-time refusal
+  rather than a silent dependency on host git config, by #1756 — see ADR-1756 for the
+  git-under-App-auth decision.
 - A future `fabrik init --github-app` bootstrap issue would need to parameterize
   `internal/githubauth`'s manifest-bootstrap path (`defaultAppName`,
   `defaultAppHomepageURL`) for the engine's own identity, mirroring what ADR-1712 already

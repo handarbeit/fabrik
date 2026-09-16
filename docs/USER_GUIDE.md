@@ -530,14 +530,14 @@ The installation token is not granted `actions:read`, so `gh run list`/`gh run v
 
 #### Worker git under App auth
 
-Worktrees clone over HTTPS by default (`git_ssh: false`). On a machine where a git credential helper is registered to prefer `GH_TOKEN`/`GITHUB_TOKEN` from the environment (e.g. one installed by `gh auth setup-git`), a worker's `git fetch`/`git push` would resolve credentials to the installation token above — which is not granted `contents` access, and would 403. Fabrik refuses this combination explicitly at startup rather than letting it fail mid-stage:
+Worktrees clone over HTTPS by default (`git_ssh: false`). On a machine where a git credential helper is registered to prefer `GH_TOKEN`/`GITHUB_TOKEN` from the environment (e.g. one installed by `gh auth setup-git`), a worker's `git fetch`/`git push` would resolve credentials to the installation token above — which is granted `contents:read` but not `contents:write`, so fetch would likely succeed but `git push` (which every managed stage does — see CLAUDE.md's "commit frequently" convention) would 403. Fabrik refuses this combination explicitly at startup rather than letting it fail mid-stage:
 
 ```
 GitHub App authentication is configured with default HTTPS git cloning — under App auth,
 stage workers authenticate gh/git via the installation token (see RequiredGitHubAppPermissions),
-which is not granted `contents` access, so a worker's git fetch/push over the default HTTPS
-remote would 403 as soon as any git credential helper ... resolves credentials from the
-GH_TOKEN/GITHUB_TOKEN environment. Fix by either setting git_ssh: true (or --ssh) in
+which is granted contents:read but not contents:write, so a worker's git push over the
+default HTTPS remote would 403 as soon as any git credential helper ... resolves credentials
+from the GH_TOKEN/GITHUB_TOKEN environment. Fix by either setting git_ssh: true (or --ssh) in
 .fabrik/config.yaml so worktrees clone over SSH instead, or configuring a global
 url.git@github.com:.insteadOf = https://github.com/ rewrite ...
 ```

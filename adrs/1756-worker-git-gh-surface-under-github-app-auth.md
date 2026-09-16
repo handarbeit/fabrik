@@ -25,14 +25,16 @@ deferred follow-up, closing two gaps found by an audit of the worker-facing `gh`
   (`buildCloneURL`, `engine/worktree.go`). A worker's `git fetch`/`push` over that HTTPS
   remote resolves credentials through whatever credential helper is registered (e.g. one
   installed by `gh auth setup-git`) — which prefers `GH_TOKEN`/`GITHUB_TOKEN` from the
-  environment, now the installation token. `RequiredGitHubAppPermissions` grants no
-  `contents` permission, so that git operation would 403. This is masked whenever
-  `git_ssh: true`/`--ssh` is set (the clone protocol is SSH, no HTTPS credential helper is
-  ever consulted) or a global `url.git@github.com:.insteadOf = https://github.com/` rewrite
-  is active (the HTTPS remote is transparently redirected to SSH before any credential
-  helper runs) — neither of which is the default, so a fresh install is exposed even though
-  the investigating machine (and the e2e bed, which inherits the operator's own git config)
-  was not.
+  environment, now the installation token. `RequiredGitHubAppPermissions` grants
+  `contents:read` (added independently by #1755, for the engine's own compare/merge calls)
+  but not `contents:write`, so `git fetch` would likely succeed while `git push`/
+  `--force-with-lease` — which every managed stage does, per CLAUDE.md's "commit
+  frequently" convention — would still 403. This is masked whenever `git_ssh: true`/`--ssh`
+  is set (the clone protocol is SSH, no HTTPS credential helper is ever consulted) or a
+  global `url.git@github.com:.insteadOf = https://github.com/` rewrite is active (the HTTPS
+  remote is transparently redirected to SSH before any credential helper runs) — neither of
+  which is the default, so a fresh install is exposed even though the investigating machine
+  (and the e2e bed, which inherits the operator's own git config) was not.
 
 ## Decisions
 
@@ -74,12 +76,12 @@ Two other options were considered and rejected:
   behavior too (the bare clone's URL is shared between engine and worker for a given repo;
   there is no per-invocation way to give only the worker a different protocol), for a
   problem this issue frames as worker-specific.
-- **Inject the installation token into worker git explicitly, granting `contents`.**
-  Rejected: `git push --force-with-lease` needs `contents:write`, not just `read` —
-  broadening the installation's granted scope beyond what's currently justified, and
-  overlapping with the engine's own separate, deliberately out-of-scope `contents` gap for
-  its compare/merge calls (#1750-adjacent, not this issue). Conflating the two would make
-  the grant's scope harder to reason about independently.
+- **Inject the installation token into worker git explicitly, granting `contents:write`.**
+  Rejected: `git push --force-with-lease` needs `contents:write`, not the `contents:read`
+  #1755 already added for the engine's own compare/merge calls — broadening the
+  installation's granted scope beyond what's currently justified, and conflating this
+  issue's worker-git-only concern with that separate, deliberately out-of-scope `contents`
+  gap (#1750-adjacent, not this issue).
 
 Refuse-loudly is the only option that adds zero new permission surface and never silently
 trades one 403 for a different failure mode. Its cost — a one-time manual step
