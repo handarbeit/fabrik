@@ -30,6 +30,19 @@ const (
 	// wording in ReviewPR's own skip log line for that.
 	SkipAlreadyReviewed SkipReason = "already reviewed at this head SHA"
 	SkipDiffTooLarge    SkipReason = "diff exceeds max_diff_bytes"
+	// SkipCadenceOnce is reported by Eligible when Cadence == CadenceOnce
+	// and the bot has already submitted a review on this PR — at any head
+	// SHA, not just the current one, and regardless of whether that review
+	// was automatic or itself a forced "/pruefer review" (see
+	// alreadyReviewedAtAll and adrs/1610-pruefer-review-cadence.md). Never
+	// reported when ForceReview is true — R4's override always still works.
+	SkipCadenceOnce SkipReason = "cadence=once: PR already received its one automatic review"
+	// SkipCadenceOnRequest is reported when Cadence == CadenceOnRequest and
+	// no forced "/pruefer review" is pending — checked earlier in ReviewPR
+	// (before FetchPRReviews is even called), so Eligible itself never sees
+	// this case in practice; kept here for parity/observability alongside
+	// SkipCadenceOnce and any future direct callers of Eligible.
+	SkipCadenceOnRequest SkipReason = "cadence=on-request: no /pruefer review command pending"
 )
 
 // EligibilityInput bundles everything Eligible needs to decide whether a PR
@@ -52,6 +65,11 @@ type EligibilityInput struct {
 	// requests a fresh review of the current head regardless of prior
 	// review state.
 	ForceReview bool
+	// Cadence is the effective cadence mode (#1610) for this PR's repo —
+	// CadenceEveryPush, CadenceOnce, or CadenceOnRequest, resolved by
+	// effectiveCadence. Only CadenceOnce is acted on here; CadenceOnRequest
+	// is gated earlier, in ReviewPR, before Eligible is ever called.
+	Cadence string
 }
 
 // Eligible reports whether a PR should be reviewed, and if not, why.
@@ -80,6 +98,19 @@ func Eligible(in EligibilityInput) (bool, SkipReason) {
 	}
 	if len(in.ExcludedPaths) > 0 && allPathsExcluded(in.ChangedPaths, in.ExcludedPaths) {
 		return false, SkipExcludedPath
+	}
+	if in.Cadence == CadenceOnce {
+		reviewedBefore := alreadyReviewedAtAll(in.ExistingReviews, in.BotLogin)
+		outcome := "proceeding"
+		if reviewedBefore && !in.ForceReview {
+			outcome = "skipping"
+		} else if reviewedBefore && in.ForceReview {
+			outcome = "proceeding (force review)"
+		}
+		logf(in.PR.Number, "select", "cadence=once check for %s: already-reviewed-any-sha=%v outcome=%s\n", in.BotLogin, reviewedBefore, outcome)
+		if reviewedBefore && !in.ForceReview {
+			return false, SkipCadenceOnce
+		}
 	}
 	matched, foundSHA := alreadyReviewedAtHead(in.ExistingReviews, in.BotLogin, in.PR.HeadSHA)
 	// Defense-in-depth (R3): this decision depends entirely on FetchPRReviews
@@ -178,6 +209,25 @@ func alreadyReviewedAtHead(reviews []gh.PRReview, botLogin, headSHA string) (mat
 		}
 	}
 	return false, foundSHA
+}
+
+// alreadyReviewedAtAll reports whether reviews contains any review authored
+// by botLogin, regardless of which head SHA it was submitted against — the
+// question a CadenceOnce check needs answered, distinct from
+// alreadyReviewedAtHead's per-SHA question. Per adrs/1610-pruefer-review-cadence.md,
+// this counts a review submitted via a forced "/pruefer review" exactly like
+// an automatic one: GitHub's review data carries no record of why a review
+// was submitted, and Pruefer stores no separate state to distinguish them.
+func alreadyReviewedAtAll(reviews []gh.PRReview, botLogin string) bool {
+	if botLogin == "" {
+		return false
+	}
+	for _, r := range reviews {
+		if strings.EqualFold(r.Author, botLogin) {
+			return true
+		}
+	}
+	return false
 }
 
 // diffGitHeaderRE matches a unified diff's per-file header line:
