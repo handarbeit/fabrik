@@ -115,6 +115,24 @@ unreadable value as `false` and widening the App's permission footprint for one
 advisory check, which would contradict the narrow-scope design `RequiredGitHubAppPermissions`
 already establishes.
 
+**The App-auth skip also clears any pre-existing `allow_auto_merge` warning, not just
+suppresses new ones — a follow-up finding raised on the issue after the initial skip
+landed.** Before this fix, `resolveRepoAccess` cached `CanPush: false` for every
+App-mode repo, and `checkAllowAutoMerge`'s existing `!CanPush` early return cleared any
+`allow_auto_merge` warning as a side effect (ADR-1347's own stale-warning-clearing
+behavior) — so the warning was structurally invisible under App auth even before this
+issue's fix existed to skip it deliberately. An operator who had a real
+`allow_auto_merge`-disabled warning recorded under PAT auth and then migrated to App
+auth would otherwise find that warning stuck forever the instant `resolveRepoAccess`
+started correctly resolving `CanPush: true` for the repo: nothing else clears an
+`allow_auto_merge:<repo>` entry for a repo still on the board
+(`sweepStaleAllowAutoMergeWarnings` only clears entries for repos that have left the
+board entirely). `checkAllowAutoMerge`'s App-auth branch therefore clears the warning
+(once per repo per process run, after the existing dedup check, same as every other
+branch) rather than merely returning early — closing the exact gap the issue's own fix
+would otherwise have unmasked, without ever calling `resolveRepoAccess` (preserving the
+"no PAT-only probe under App auth" guarantee for this function too).
+
 ## Consequences
 
 - App-auth dispatch works: a repo covered by the pinned installation's accessible-repo

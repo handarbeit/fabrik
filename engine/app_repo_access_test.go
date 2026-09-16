@@ -275,3 +275,49 @@ func TestCheckAllowAutoMerge_AppMode_NoOp(t *testing.T) {
 		t.Errorf("expected no output from checkAllowAutoMerge under App auth; got: %q", out)
 	}
 }
+
+// TestCheckAllowAutoMerge_AppMode_ClearsStaleWarning is the fix for a
+// follow-up defect an operator flagged on #1750 after the initial App-auth
+// skip landed: before this issue's fix, resolveRepoAccess cached
+// CanPush: false for every App-mode repo, and checkAllowAutoMerge's
+// !CanPush branch cleared any allow_auto_merge warning as a side effect —
+// so an operator who migrated from PAT auth (where a real
+// allow_auto_merge-disabled warning may have been recorded) to App auth
+// would find that warning stuck forever the moment CanPush started
+// resolving true, since nothing else clears an allow_auto_merge warning for
+// a repo still on the board. checkAllowAutoMerge must clear it, not just
+// skip re-raising it — and without ever probing repo access to do so.
+func TestCheckAllowAutoMerge_AppMode_ClearsStaleWarning(t *testing.T) {
+	warnings.WarningsPathOverride = filepath.Join(t.TempDir(), "warnings.json")
+	t.Cleanup(func() { warnings.WarningsPathOverride = "" })
+
+	if err := warnings.Record(warnings.Entry{
+		Key:    "allow_auto_merge:owner/repo",
+		Type:   "allow_auto_merge",
+		Title:  "allow_auto_merge disabled on owner/repo",
+		Detail: "stale entry from a prior run under PAT auth, before migrating to App auth",
+	}); err != nil {
+		t.Fatalf("seeding stale warning: %v", err)
+	}
+
+	client := &mockGitHubClient{
+		fetchRepoAccessFn: func(owner, repo string) (gh.RepoAccess, error) {
+			t.Error("checkAllowAutoMerge must not probe repo access at all under App auth (R5)")
+			return gh.RepoAccess{}, nil
+		},
+	}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	eng.ghAppAuth = &githubauth.Reconciler{}
+
+	eng.checkAllowAutoMerge("owner", "repo")
+
+	entries, err := warnings.Load()
+	if err != nil {
+		t.Fatalf("loading warnings: %v", err)
+	}
+	for _, e := range entries {
+		if e.Key == "allow_auto_merge:owner/repo" {
+			t.Errorf("expected stale allow_auto_merge warning to be cleared under App auth; still present: %+v", e)
+		}
+	}
+}

@@ -520,25 +520,43 @@ func (e *Engine) repoAccessWarningDetail(key string) string {
 // .fabrik/warnings.json forever, since !CanPush never reaches this function's
 // own Clear branch below again.
 //
-// Skips entirely under App auth (#1750 R5): GitHub only returns a real
-// allow_auto_merge value to a caller with administration read access, which
-// RequiredGitHubAppPermissions deliberately does not request (a narrow-scope
-// design choice, not an oversight) — an installation token gets back null
-// unconditionally, indistinguishable from "actually disabled." Since the
-// only consumer of RepoAccess.AllowAutoMerge is this function's own warning,
-// the correct fix is to not attempt it rather than either widen the App's
-// permission footprint for one advisory check or misreport an unknowable
-// value as false.
+// Skips the probe entirely under App auth (#1750 R5): GitHub only returns a
+// real allow_auto_merge value to a caller with administration read access,
+// which RequiredGitHubAppPermissions deliberately does not request (a
+// narrow-scope design choice, not an oversight) — an installation token
+// gets back null unconditionally, indistinguishable from "actually
+// disabled." Since the only consumer of RepoAccess.AllowAutoMerge is this
+// function's own warning, the correct fix is to not attempt it rather than
+// either widen the App's permission footprint for one advisory check or
+// misreport an unknowable value as false.
+//
+// Still clears a pre-existing warning under App auth (a follow-up finding
+// on #1750, raised after the initial App-auth skip landed): before this
+// issue's fix, resolveRepoAccess cached CanPush: false for every App-mode
+// repo, and checkAllowAutoMerge's own !CanPush branch cleared any
+// allow_auto_merge warning as a side effect — so the warning was
+// structurally invisible under App auth even before this function's App-
+// auth skip existed. An operator who used a real allow_auto_merge-disabled
+// warning under PAT auth and then migrated to App auth would otherwise be
+// left with that warning stuck forever the moment this early return
+// replaced the old !CanPush branch as App auth's exit path — nothing else
+// clears an `allow_auto_merge:<repo>` entry for a repo still on the board
+// (sweepStaleAllowAutoMergeWarnings only clears entries for repos that have
+// left the board entirely). Clearing here, once per repo per process run
+// like every other branch of this function, closes that gap without ever
+// calling resolveRepoAccess (AC3's "no PAT-only probe under App auth" guard
+// extends to this function too).
 func (e *Engine) checkAllowAutoMerge(owner, repo string) {
-	if e.ghAppAuth != nil {
-		return
-	}
 	key := owner + "/" + repo
 	e.mu.Lock()
 	already := e.checkedAutoMergeRepos[key]
 	e.checkedAutoMergeRepos[key] = true
 	e.mu.Unlock()
 	if already {
+		return
+	}
+	if e.ghAppAuth != nil {
+		_ = warnings.Clear("allow_auto_merge:" + key)
 		return
 	}
 	access := e.resolveRepoAccess(owner, repo)
