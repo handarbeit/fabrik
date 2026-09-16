@@ -520,6 +520,14 @@ func (e *Engine) Run() error {
 		if err := wm.Start(ctx, e.cfg.WebhookPort); err == nil {
 			e.webhookMgr = wm
 			defer wm.Stop()
+			// R5 startup assertion (#1142): verify a forwarding hook actually
+			// exists for each managed repo, warning (never failing startup) on
+			// any gap. Best-effort here — on a fresh multi-repo board, wm's repo
+			// set isn't populated until the first UpdateRepos call during poll,
+			// so this startup pass only reliably covers single-repo boards; the
+			// periodic reconcileLoop check (engine/reconcile.go) re-runs it once
+			// the full managed set is known and on every tick thereafter.
+			e.checkWebhookHookCoverage(wm)
 		}
 		// NOTE: the reconcile ticker is intentionally NOT started here. It is the
 		// poll-only correctness backstop and must run whether or not the webhook

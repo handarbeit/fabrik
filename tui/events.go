@@ -122,6 +122,12 @@ func (TurnProgressEvent) tuiEvent() {}
 type WebhookStatusEvent struct {
 	State       string         // WebhookHealthState as string to avoid import cycle
 	EventCounts map[string]int // per-event-type received counts
+	// CoverageNote is a short, human-readable note distinct from State/health
+	// connectivity — it describes whether the active ingestion transport
+	// (gh webhook forward or, in future, Hookdeck) actually covers every
+	// managed repo, e.g. "partial: 1/3 repos" or "hook missing: 2 repos".
+	// Empty when coverage is full or not yet known. See #1142.
+	CoverageNote string
 }
 
 func (WebhookStatusEvent) tuiEvent() {}

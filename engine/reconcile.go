@@ -29,6 +29,12 @@ func (e *Engine) reconcileLoop(ctx context.Context, cacheImpl *boardcache.CacheI
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			// R5 periodic hook-coverage re-check (#1142): a hook deleted (or a
+			// newly-managed repo added) mid-run should be caught here, not just
+			// at startup. Best-effort; never blocks or fails the reconcile pass.
+			if wm != nil {
+				e.checkWebhookHookCoverage(wm)
+			}
 			driftCount, driftedKeys, freshBoard, err := cacheImpl.LightReconcile(
 				e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum, e.cfg.OwnerType,
 			)

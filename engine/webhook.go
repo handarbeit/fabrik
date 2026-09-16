@@ -137,6 +137,17 @@ type webhookManager struct {
 	// missHistory records timestamps of echo misses for rolling-window detection.
 	pendingEchoes map[string]time.Time
 	missHistory   []time.Time
+
+	// R5 coverage notes (#1142), protected by mu — distinct from wm.state
+	// (subprocess connectivity): a stream can be perfectly "healthy" while
+	// covering only a fraction of the managed repos. subscriptionNote
+	// reflects gh webhook forward's structural one-effective-repo limit
+	// (set in supervise, from effectiveSubscriptionMessage); hookNote
+	// reflects the live GET-hooks coverage assertion (set by
+	// checkForwardingHookCoverage's caller). Both surfaced together via
+	// emitCurrentState/CoverageNote.
+	subscriptionNote string
+	hookNote         string
 }
 
 func newWebhookManager(
@@ -458,6 +469,72 @@ func effectiveSubscriptionMessage(org string, repos []string) string {
 	)
 }
 
+// subscriptionCoverageNote is the short-form counterpart to
+// effectiveSubscriptionMessage, for surfacing in health/TUI state (Task 7,
+// #1142) rather than the log. Empty string means full coverage (org mode,
+// or a single managed repo).
+func subscriptionCoverageNote(org string, repos []string) string {
+	if org != "" || len(repos) <= 1 {
+		return ""
+	}
+	return fmt.Sprintf("partial: %d/%d repos (gh webhook forward)", 1, len(repos))
+}
+
+// forwardingHookChecker is the minimal surface checkForwardingHookCoverage
+// needs from the GitHub client — satisfied by engine.GitHubClient.
+type forwardingHookChecker interface {
+	HasForwardingHook(owner, repo string) (bool, error)
+}
+
+// checkForwardingHookCoverage is the R5 startup+periodic assertion (#1142):
+// for every repo in repos, verify a `gh webhook forward` hook actually
+// exists (GET /repos/{o}/{r}/hooks). Returns the sorted list of repos
+// missing a hook — always non-fatal; callers log/surface it, never fail on
+// it. A lookup error for one repo is logged and treated the same as "no
+// hook found" (fail toward warning, not toward silently skipping a repo
+// that could genuinely be missing coverage).
+func checkForwardingHookCoverage(client forwardingHookChecker, repos []string, logFn func(issueNumber int, tag, format string, args ...any)) []string {
+	var missing []string
+	for _, r := range repos {
+		owner, repo := parseOwnerRepo(r)
+		if owner == "" {
+			logFn(0, "webhook", "skipping malformed repo in hook-coverage check: %q\n", r)
+			continue
+		}
+		found, err := client.HasForwardingHook(owner, repo)
+		if err != nil {
+			logFn(0, "webhook", "WARNING: hook-coverage check failed for %s: %v — treating as missing\n", r, err)
+			missing = append(missing, r)
+			continue
+		}
+		if !found {
+			missing = append(missing, r)
+		}
+	}
+	sort.Strings(missing)
+	return missing
+}
+
+// checkWebhookHookCoverage runs the R5 startup/periodic hook-existence
+// assertion (#1142) against wm's currently managed repos and records the
+// result on wm for health/TUI surfacing. Skipped entirely when org mode is
+// the active subscription strategy: org mode registers a single org-level
+// hook, not a per-repo one, so this repo-scoped GET would otherwise
+// misreport every managed repo as missing. Always non-fatal.
+func (e *Engine) checkWebhookHookCoverage(wm *webhookManager) {
+	repos, orgModeActive := wm.ManagedRepos()
+	if orgModeActive || len(repos) == 0 {
+		wm.setHookCoverageNote(nil)
+		return
+	}
+	missing := checkForwardingHookCoverage(e.client, repos, e.logf)
+	if len(missing) > 0 {
+		e.logf(0, "webhook", "WARNING: no forwarding hook found for %d of %d managed repo(s): %s — these repos are receiving no webhooks (poll-only); see #1142\n",
+			len(missing), len(repos), strings.Join(missing, ", "))
+	}
+	wm.setHookCoverageNote(missing)
+}
+
 // startListener binds the HTTP listener on 127.0.0.1:<port> (0 = OS-assigned).
 func startListener(port int) (net.Listener, int, error) {
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
@@ -542,6 +619,36 @@ func (wm *webhookManager) IsHealthyOrStartingUp() bool {
 	wm.mu.Lock()
 	defer wm.mu.Unlock()
 	return wm.state == WebhookStreamStartingUp || wm.state == WebhookStreamHealthy
+}
+
+// ManagedRepos returns a sorted snapshot of the currently non-quarantined
+// managed-repo set (i.e. wm.repos — the set UpdateRepos is actively trying
+// to subscribe, excluding repos already known-unsubscribable this session),
+// along with whether org mode is currently the active subscription strategy
+// (mirroring supervise()'s own org-mode computation). Used by the R5
+// hook-existence coverage assertion (#1142) — the per-repo check only
+// applies when per-repo mode is active; an active org subscription covers
+// every repo via a single org-level hook that this repo-scoped check would
+// otherwise misreport as "missing" for every managed repo.
+func (wm *webhookManager) ManagedRepos() (repos []string, orgModeActive bool) {
+	wm.mu.Lock()
+	repos = make([]string, 0, len(wm.repos))
+	for r := range wm.repos {
+		repos = append(repos, r)
+	}
+	orgModeFailed := wm.orgModeFailed
+	wm.mu.Unlock()
+	sort.Strings(repos)
+	if !orgModeFailed {
+		reposMap := make(map[string]bool, len(repos))
+		for _, r := range repos {
+			reposMap[r] = true
+		}
+		if _, ok := detectOrgMode(reposMap); ok {
+			orgModeActive = true
+		}
+	}
+	return repos, orgModeActive
 }
 
 // UpdateRepos is called after each board poll. When new repos appear, the subprocess
@@ -699,6 +806,7 @@ func (wm *webhookManager) supervise(ctx context.Context) {
 		wm.mu.Lock()
 		wm.currentCmd = cmd
 		wm.state = WebhookStreamStartingUp
+		wm.subscriptionNote = subscriptionCoverageNote(org, repos)
 		wm.mu.Unlock()
 		wm.emitCurrentState()
 
@@ -1020,11 +1128,48 @@ func (wm *webhookManager) emitCurrentState() {
 	for k, v := range wm.eventCounts {
 		counts[k] = v
 	}
+	note := combineCoverageNotes(wm.subscriptionNote, wm.hookNote)
 	wm.mu.Unlock()
 	wm.emitFn(tui.WebhookStatusEvent{
-		State:       state,
-		EventCounts: counts,
+		State:        state,
+		EventCounts:  counts,
+		CoverageNote: note,
 	})
+}
+
+// combineCoverageNotes joins the two independent R5 coverage signals
+// (#1142) — the structural gh-webhook-forward subscription limit, and the
+// live hook-existence check — into one human-readable string. Either or
+// both may be empty (full coverage on that axis).
+func combineCoverageNotes(subscription, hook string) string {
+	switch {
+	case subscription == "" && hook == "":
+		return ""
+	case subscription == "":
+		return hook
+	case hook == "":
+		return subscription
+	default:
+		return subscription + "; " + hook
+	}
+}
+
+// setHookCoverageNote records the result of the R5 hook-existence coverage
+// assertion (#1142) and re-emits the current state so the TUI/health
+// surface picks up the change immediately, not just on the next
+// state-transition or event-count update.
+func (wm *webhookManager) setHookCoverageNote(missing []string) {
+	var note string
+	if len(missing) > 0 {
+		note = fmt.Sprintf("hook missing: %d repo(s) (%s)", len(missing), strings.Join(missing, ", "))
+	}
+	wm.mu.Lock()
+	changed := wm.hookNote != note
+	wm.hookNote = note
+	wm.mu.Unlock()
+	if changed {
+		wm.emitCurrentState()
+	}
 }
 
 // transitionHealthState updates wm.state to newState if it differs, logs the transition,

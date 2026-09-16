@@ -1192,3 +1192,251 @@ func TestSupervise_CleanupFailurePreservesCounter(t *testing.T) {
 		t.Fatal("timeout waiting for subprocess start")
 	}
 }
+
+// TestBuildGhArgs_RepoOrderPreserved verifies buildGhArgs emits --repo= flags
+// in the order given — determinism is supervise()'s job (sort.Strings before
+// calling), not buildGhArgs's; this just confirms the function doesn't
+// itself reorder or dedupe.
+func TestBuildGhArgs_RepoOrderPreserved(t *testing.T) {
+	args := buildGhArgs("", []string{"a/one", "b/two", "c/three"}, 1234, "secret", []string{"issues"})
+	want := []string{
+		"webhook", "forward",
+		"--secret=secret",
+		"--url=http://127.0.0.1:1234/",
+		"--repo=a/one", "--repo=b/two", "--repo=c/three",
+		"--events=issues",
+	}
+	if len(args) != len(want) {
+		t.Fatalf("buildGhArgs args = %v, want %v", args, want)
+	}
+	for i := range want {
+		if args[i] != want[i] {
+			t.Errorf("buildGhArgs args[%d] = %q, want %q", i, args[i], want[i])
+		}
+	}
+}
+
+// TestEffectiveSubscriptionMessage covers the org/single/multi-repo cases of
+// the R5 effective-subscription log message (#1142) — in particular that
+// the reported "effective" repo is the *last* entry of an already-sorted
+// slice, matching buildGhArgs's own last-flag-wins behavior.
+func TestEffectiveSubscriptionMessage(t *testing.T) {
+	tests := []struct {
+		name  string
+		org   string
+		repos []string
+		want  string
+	}{
+		{"org mode", "myorg", nil, "effective subscription: org myorg (org mode covers all repos)"},
+		{"no repos", "", nil, "effective subscription: none (no repos)"},
+		{"single repo", "", []string{"a/one"}, "effective subscription: a/one (1 of 1 managed repos)"},
+		{
+			"multi repo — last sorted wins", "", []string{"a/one", "b/two", "c/three"},
+			"effective subscription: c/three (1 of 3 managed repos — gh webhook forward's --repo flag is not repeatable; the other 2 receive no webhooks, poll-only; see #1142)",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := effectiveSubscriptionMessage(tc.org, tc.repos)
+			if got != tc.want {
+				t.Errorf("effectiveSubscriptionMessage(%q, %v) = %q, want %q", tc.org, tc.repos, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSubscriptionCoverageNote mirrors TestEffectiveSubscriptionMessage's
+// cases for the short-form TUI/health note variant.
+func TestSubscriptionCoverageNote(t *testing.T) {
+	if got := subscriptionCoverageNote("myorg", nil); got != "" {
+		t.Errorf("subscriptionCoverageNote(org mode) = %q, want empty", got)
+	}
+	if got := subscriptionCoverageNote("", []string{"a/one"}); got != "" {
+		t.Errorf("subscriptionCoverageNote(single repo) = %q, want empty", got)
+	}
+	got := subscriptionCoverageNote("", []string{"a/one", "b/two", "c/three"})
+	want := "partial: 1/3 repos (gh webhook forward)"
+	if got != want {
+		t.Errorf("subscriptionCoverageNote(multi repo) = %q, want %q", got, want)
+	}
+}
+
+// TestCombineCoverageNotes covers all four combinations of the two
+// independent R5 coverage signals (#1142).
+func TestCombineCoverageNotes(t *testing.T) {
+	tests := []struct{ subscription, hook, want string }{
+		{"", "", ""},
+		{"partial: 1/3 repos", "", "partial: 1/3 repos"},
+		{"", "hook missing: 1 repo(s) (a/one)", "hook missing: 1 repo(s) (a/one)"},
+		{"partial: 1/3 repos", "hook missing: 1 repo(s) (a/one)", "partial: 1/3 repos; hook missing: 1 repo(s) (a/one)"},
+	}
+	for _, tc := range tests {
+		if got := combineCoverageNotes(tc.subscription, tc.hook); got != tc.want {
+			t.Errorf("combineCoverageNotes(%q, %q) = %q, want %q", tc.subscription, tc.hook, got, tc.want)
+		}
+	}
+}
+
+// fakeHookChecker is a minimal forwardingHookChecker for testing
+// checkForwardingHookCoverage without a real GitHub client.
+type fakeHookChecker struct {
+	hasHook map[string]bool // key: "owner/repo"
+	errFor  map[string]error
+}
+
+func (f *fakeHookChecker) HasForwardingHook(owner, repo string) (bool, error) {
+	key := owner + "/" + repo
+	if err, ok := f.errFor[key]; ok {
+		return false, err
+	}
+	return f.hasHook[key], nil
+}
+
+// TestCheckForwardingHookCoverage_AllPresent verifies an empty missing list
+// when every repo has a hook.
+func TestCheckForwardingHookCoverage_AllPresent(t *testing.T) {
+	client := &fakeHookChecker{hasHook: map[string]bool{"a/one": true, "b/two": true}}
+	missing := checkForwardingHookCoverage(client, []string{"a/one", "b/two"}, func(_ int, _, _ string, _ ...any) {})
+	if len(missing) != 0 {
+		t.Errorf("missing = %v, want empty", missing)
+	}
+}
+
+// TestCheckForwardingHookCoverage_SomeMissing verifies the exact repos
+// lacking a hook are reported, sorted, and repos with a hook are excluded —
+// this is the direct regression test for the #1142 silent-single-repo bug's
+// detection mechanism.
+func TestCheckForwardingHookCoverage_SomeMissing(t *testing.T) {
+	client := &fakeHookChecker{hasHook: map[string]bool{"a/one": true, "b/two": false, "c/three": false}}
+	missing := checkForwardingHookCoverage(client, []string{"c/three", "a/one", "b/two"}, func(_ int, _, _ string, _ ...any) {})
+	want := []string{"b/two", "c/three"}
+	if len(missing) != len(want) {
+		t.Fatalf("missing = %v, want %v", missing, want)
+	}
+	for i := range want {
+		if missing[i] != want[i] {
+			t.Errorf("missing[%d] = %q, want %q", i, missing[i], want[i])
+		}
+	}
+}
+
+// TestCheckForwardingHookCoverage_LookupErrorTreatedAsMissing verifies a
+// per-repo lookup error is conservatively treated as "missing" rather than
+// silently skipped, per checkForwardingHookCoverage's fail-toward-warning
+// posture.
+func TestCheckForwardingHookCoverage_LookupErrorTreatedAsMissing(t *testing.T) {
+	client := &fakeHookChecker{
+		hasHook: map[string]bool{"a/one": true},
+		errFor:  map[string]error{"b/two": fmt.Errorf("network error")},
+	}
+	var loggedWarning bool
+	logFn := func(_ int, tag, format string, args ...any) {
+		if tag == "webhook" && len(format) > 0 {
+			loggedWarning = true
+		}
+	}
+	missing := checkForwardingHookCoverage(client, []string{"a/one", "b/two"}, logFn)
+	if len(missing) != 1 || missing[0] != "b/two" {
+		t.Errorf("missing = %v, want [b/two]", missing)
+	}
+	if !loggedWarning {
+		t.Error("expected a warning to be logged for the lookup error")
+	}
+}
+
+// TestCheckForwardingHookCoverage_MalformedRepoSkipped verifies a malformed
+// "owner/repo" entry is skipped (logged, not treated as missing) rather than
+// producing a bogus GitHub API call.
+func TestCheckForwardingHookCoverage_MalformedRepoSkipped(t *testing.T) {
+	client := &fakeHookChecker{hasHook: map[string]bool{"a/one": true}}
+	missing := checkForwardingHookCoverage(client, []string{"a/one", "malformed"}, func(_ int, _, _ string, _ ...any) {})
+	if len(missing) != 0 {
+		t.Errorf("missing = %v, want empty (malformed entry skipped, not reported missing)", missing)
+	}
+}
+
+// TestManagedRepos_OrgModeDetected verifies ManagedRepos reports org-mode
+// active when every managed repo shares an owner and org mode hasn't
+// previously failed — the condition under which the R5 hook-coverage check
+// must skip itself (org mode uses one org-level hook, not per-repo ones).
+func TestManagedRepos_OrgModeDetected(t *testing.T) {
+	wm, _ := newTestWebhookManager(t)
+	wm.mu.Lock()
+	wm.repos = map[string]bool{"myorg/one": true, "myorg/two": true}
+	wm.mu.Unlock()
+
+	repos, orgActive := wm.ManagedRepos()
+	if !orgActive {
+		t.Error("orgModeActive = false, want true (single-owner repo set)")
+	}
+	if len(repos) != 2 || repos[0] != "myorg/one" || repos[1] != "myorg/two" {
+		t.Errorf("repos = %v, want sorted [myorg/one myorg/two]", repos)
+	}
+}
+
+// TestManagedRepos_OrgModeFailedFallsBackToPerRepo verifies that once
+// orgModeFailed is set, ManagedRepos reports org mode inactive even for a
+// single-owner repo set — mirroring supervise()'s own fallback logic.
+func TestManagedRepos_OrgModeFailedFallsBackToPerRepo(t *testing.T) {
+	wm, _ := newTestWebhookManager(t)
+	wm.mu.Lock()
+	wm.repos = map[string]bool{"myorg/one": true, "myorg/two": true}
+	wm.orgModeFailed = true
+	wm.mu.Unlock()
+
+	_, orgActive := wm.ManagedRepos()
+	if orgActive {
+		t.Error("orgModeActive = true, want false after orgModeFailed")
+	}
+}
+
+// TestCheckWebhookHookCoverage_SkipsOrgMode verifies the Engine-level
+// wrapper skips the per-repo GET-hooks check entirely when org mode is
+// active, rather than misreporting every managed repo as missing.
+func TestCheckWebhookHookCoverage_SkipsOrgMode(t *testing.T) {
+	wm, events := newTestWebhookManager(t)
+	wm.mu.Lock()
+	wm.repos = map[string]bool{"myorg/one": true, "myorg/two": true}
+	wm.emitFn = func(e tui.Event) { events <- e }
+	wm.mu.Unlock()
+
+	var calls int
+	client := &mockGitHubClient{
+		hasForwardingHookFn: func(owner, repo string) (bool, error) {
+			calls++
+			return false, nil
+		},
+	}
+	e := &Engine{client: client}
+	e.checkWebhookHookCoverage(wm)
+
+	if calls != 0 {
+		t.Errorf("HasForwardingHook called %d times in org mode, want 0", calls)
+	}
+}
+
+// TestCheckWebhookHookCoverage_SetsNoteOnMissing verifies the Engine-level
+// wrapper surfaces missing repos via wm's hook coverage note.
+func TestCheckWebhookHookCoverage_SetsNoteOnMissing(t *testing.T) {
+	wm, events := newTestWebhookManager(t)
+	wm.mu.Lock()
+	wm.repos = map[string]bool{"a/one": true, "b/two": true}
+	wm.emitFn = func(e tui.Event) { events <- e }
+	wm.mu.Unlock()
+
+	client := &mockGitHubClient{
+		hasForwardingHookFn: func(owner, repo string) (bool, error) {
+			return owner == "a", nil // only a/one has a hook
+		},
+	}
+	e := &Engine{client: client}
+	e.checkWebhookHookCoverage(wm)
+
+	wm.mu.Lock()
+	note := wm.hookNote
+	wm.mu.Unlock()
+	want := "hook missing: 1 repo(s) (b/two)"
+	if note != want {
+		t.Errorf("hookNote = %q, want %q", note, want)
+	}
+}

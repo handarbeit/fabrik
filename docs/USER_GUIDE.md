@@ -3662,7 +3662,25 @@ On multi-repo boards, Fabrik uses a single `gh webhook forward` subprocess:
 
 > **Known limitation — one webhook session per GitHub account.** `gh webhook forward` appears to support only one active forwarding session per authenticated user, not one per repo. Running several Fabrik instances under the same GitHub identity therefore gives webhooks to only *one* of them; the rest must run with `webhooks: false` and rely on polling. This is observed behaviour — it is not documented upstream in `cli/gh-webhook` — so verify it against your own setup before designing around it.
 >
-> Related: Fabrik passes one `--repo=` flag per managed repo, but `gh webhook forward` declares `--repo` as a single value, so only the last one takes effect. On a multi-repo board without org mode, this means **only one repo is actually subscribed**, while the webhook stream still reports healthy. Check `.fabrik/fabrik.log` for `[webhook] event:` lines and confirm you see every repo you expect. Tracked in issue #1142.
+> Related: Fabrik passes one `--repo=` flag per managed repo, but `gh webhook forward` declares `--repo` as a single value, so only the last one takes effect. On a multi-repo board without org mode, this means **only one repo is actually subscribed**, while the webhook stream still reports healthy. Tracked in issue #1142.
+>
+> **This is no longer silent.** Every time the `gh webhook forward` subprocess (re)starts in per-repo mode, Fabrik logs which repo is actually effective:
+>
+> ```
+> [webhook] effective subscription: handarbeit/fabrik (1 of 3 managed repos — gh webhook forward's
+>           --repo flag is not repeatable; the other 2 receive no webhooks, poll-only; see #1142)
+> ```
+>
+> and the same fact is surfaced as a "partial: 1/3 repos" coverage note next to the webhook health indicator (TUI footer, and the `WebhookStatusEvent.CoverageNote` field for programmatic consumers) whenever more than one repo is managed and org mode isn't active. In org mode this note is always empty — a single org-level subscription genuinely covers every repo, so there is no partial-coverage case to report.
+>
+> Fabrik also actively verifies coverage rather than just reporting its own intent: at startup (once the managed-repo set is known) and on every periodic reconcile tick (default every 3 minutes), it checks GitHub directly (`GET /repos/{owner}/{repo}/hooks`) for each managed repo and warns on any repo lacking a forwarding hook:
+>
+> ```
+> [webhook] WARNING: no forwarding hook found for 2 of 3 managed repo(s): handarbeit/fabrik-test-alpha,
+>           handarbeit/fabrik-test-beta — these repos are receiving no webhooks (poll-only); see #1142
+> ```
+>
+> This check is skipped when org mode is active (an org-level subscription has no per-repo hook to look for) and never fails startup or the poll cycle — it is purely diagnostic, matching webhooks' general "optimization, not requirement" posture. The same missing-repo list also appears in the coverage note (e.g. `"hook missing: 2 repo(s) (handarbeit/fabrik-test-alpha, handarbeit/fabrik-test-beta)"`), combined with the subscription-limit note above when both apply.
 
 **Per-repo failure isolation.** When Fabrik is in per-repo subscription mode, auth-shaped quick exits (permission errors, missing `admin:repo_hook` scope, etc.) are conservatively attributed to all repos in the current subscription set. Each repo tracks its own consecutive failure count; a repo is quarantined for the session once it reaches the threshold (3 consecutive auth-shaped exits). Because failures are attributed across all repos, a single misconfigured repo will cause all repos to reach the threshold together over time. Quarantined repos fall back to the safety-net poll (same cadence as polling-only mode). To recover: fix the underlying issue (re-add token scopes, restore repo access) and restart Fabrik. The next startup re-attempts subscription for all repos, including any previously quarantined ones.
 
