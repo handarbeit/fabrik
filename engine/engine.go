@@ -72,14 +72,31 @@ type Config struct {
 	Webhooks                  bool
 	WebhookPort               int
 	WebhookEvents             []string
-	ProjectStatusPollSeconds  int           // Layer 2 status-only sweep cadence in seconds; default 15 s (gate runs every poll cycle; field retained for config compatibility)
-	JanitorIntervalHours      int           // Periodic worktree janitor cadence in hours; 0 disables the janitor (default 1)
-	LogRetentionDays          int           // Log files older than this many days are pruned; 0 disables age-based pruning (default 14)
-	LogMaxBytes               int64         // Total size cap for .fabrik/logs/; oldest files deleted first after age prune; 0 disables (default 2 GiB)
-	SessionRetentionDays      int           // .session files older than this many days are pruned; 0 disables age-based pruning (default 14)
-	ArchiveAfter              time.Duration // Grace period since stage:<Done>:complete was applied before a Done item is archived (default 168h = 1 week; ADR-068)
-	ArchiveDone               string        // "on" (default) or "off" to fully disable Done-item auto-archival (also FABRIK_ARCHIVE_DONE; ADR-068)
-	GHESHost                  string        // GitHub Enterprise Server hostname (e.g. "github.example.com"); "" (default) = github.com, byte-identical to pre-GHES behavior (also FABRIK_GHES_HOST; ADR-1391)
+	// EventSource selects the ingestion transport: EventSourcePoll (default,
+	// "" or "poll") or EventSourceHookdeck ("hookdeck"). Deliberately a
+	// separate axis from Webhooks above — event_source: hookdeck is an
+	// App-auth-only opt-in that can never be combined with Webhooks (refused
+	// at startup by RefuseHookdeckWithWebhooks) or used without App auth
+	// (refused by RefuseHookdeckWithoutGitHubApp), and #1752's
+	// RefuseWebhooksWithGitHubApp never has to know this field exists. See
+	// engine/github_app_auth.go and adrs/1142-hookdeck-ingestion-for-app-auth.md.
+	EventSource string
+	// HookdeckAPIKeyEnv/HookdeckWebhookSecretEnv each name an environment
+	// variable holding the actual secret — indirection, not the secret
+	// itself — mirroring pruefer/config.go's hookdeck.api_key_env /
+	// hookdeck.webhook_secret_env convention. Only consulted when
+	// EventSource == EventSourceHookdeck; empty means use
+	// DefaultHookdeckAPIKeyEnv / DefaultHookdeckWebhookSecretEnv.
+	HookdeckAPIKeyEnv        string
+	HookdeckWebhookSecretEnv string
+	ProjectStatusPollSeconds int           // Layer 2 status-only sweep cadence in seconds; default 15 s (gate runs every poll cycle; field retained for config compatibility)
+	JanitorIntervalHours     int           // Periodic worktree janitor cadence in hours; 0 disables the janitor (default 1)
+	LogRetentionDays         int           // Log files older than this many days are pruned; 0 disables age-based pruning (default 14)
+	LogMaxBytes              int64         // Total size cap for .fabrik/logs/; oldest files deleted first after age prune; 0 disables (default 2 GiB)
+	SessionRetentionDays     int           // .session files older than this many days are pruned; 0 disables age-based pruning (default 14)
+	ArchiveAfter             time.Duration // Grace period since stage:<Done>:complete was applied before a Done item is archived (default 168h = 1 week; ADR-068)
+	ArchiveDone              string        // "on" (default) or "off" to fully disable Done-item auto-archival (also FABRIK_ARCHIVE_DONE; ADR-068)
+	GHESHost                 string        // GitHub Enterprise Server hostname (e.g. "github.example.com"); "" (default) = github.com, byte-identical to pre-GHES behavior (also FABRIK_GHES_HOST; ADR-1391)
 	// GitHubAppID, GitHubAppPrivateKeyPath, and GitHubAppInstallationID
 	// together configure a GitHub App installation as a second, co-equal
 	// authentication path alongside Token (#1713) — compat-mode only,
