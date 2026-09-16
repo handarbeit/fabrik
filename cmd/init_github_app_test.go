@@ -524,6 +524,28 @@ func TestRunInit_GitHubApp_RefusesGHESHost(t *testing.T) {
 	}
 }
 
+// TestRunInit_GitHubApp_RefusesWebhooks is the regression test for a bot
+// review finding on this PR (#1752): the engine refuses --webhooks +
+// GitHub-App-auth unconditionally at startup (engine.RefuseWebhooksWithGitHubApp),
+// because gh webhook forward is feature-gated to user tokens and refuses an
+// installation token outright. Without this setup-time check, `--github-app
+// --webhooks` would register/adopt a real App, verify repository_hooks
+// permission, and persist github_app_* + FABRIK_WEBHOOKS=true, only for the
+// engine to refuse to start on every subsequent run. No network call should
+// happen — mirrors TestRunInit_GitHubApp_RefusesGHESHost exactly.
+func TestRunInit_GitHubApp_RefusesWebhooks(t *testing.T) {
+	dir := t.TempDir()
+	chdirTest(t, dir)
+
+	err := runInit([]string{"--github-app", "--owner", "myorg", "--webhooks"})
+	if err == nil {
+		t.Fatal("expected an error when --github-app is combined with --webhooks")
+	}
+	if !strings.Contains(err.Error(), "--webhooks") || !strings.Contains(err.Error(), "gh webhook forward") {
+		t.Errorf("error %q should name --webhooks and explain the refusal", err.Error())
+	}
+}
+
 // Note: the composed "env vars satisfy the adopt-pair check inside runInit"
 // behavior is deliberately not tested end-to-end through runInit — doing so
 // would require a real network call, since --github-app has no BaseURL
