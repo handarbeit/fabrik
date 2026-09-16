@@ -389,10 +389,24 @@ func (e *Engine) Run() error {
 		return err
 	}
 
-	// Advisory startup checks: detect URL rewrites first so the HTTPS credential
-	// helper warning can be suppressed when HTTPS GitHub URLs are transparently
-	// rewritten to SSH by the user's git config.
+	// Detect URL rewrites first so both the advisory HTTPS credential helper
+	// warning below and the hard App-auth-git refusal (#1756) can use the
+	// same computed value — HTTPS GitHub URLs transparently rewritten to SSH
+	// by the user's git config need neither.
 	httpsToSSH := e.checkURLRewrite()
+
+	// App-auth + default-HTTPS worker git preflight (#1756, R2): a hard
+	// refusal, unlike the advisory checkHTTPSCredentials below, because under
+	// App auth the failure mode isn't "may prompt for credentials" — it's a
+	// guaranteed 403 the first time a worker's git resolves credentials
+	// through a helper that prefers GH_TOKEN/GITHUB_TOKEN. Gated on
+	// e.ghAppAuth != nil so PAT mode never sees this check (AC5).
+	if e.ghAppAuth != nil {
+		if err := RefuseHTTPSWorkerGitUnderAppAuth(e.cfg.GitSSH, httpsToSSH); err != nil {
+			return err
+		}
+	}
+
 	e.checkHTTPSCredentials(httpsToSSH)
 	if e.cfg.Repo != "" {
 		e.checkAllowAutoMerge(e.cfg.Owner, e.cfg.Repo)
