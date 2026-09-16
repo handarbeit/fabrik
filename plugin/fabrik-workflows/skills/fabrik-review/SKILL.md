@@ -335,7 +335,17 @@ See `../../LABELS.md` for the full label reference.
 - The base branch CI status for comparison
 
 When you receive this comment:
-1. Run `gh run list --branch fabrik/issue-<N> --limit 5` then `gh run view <run-id> --log-failed` to inspect logs
+1. Inspect failing checks via the Checks API rather than `gh run` — under GitHub App auth, `gh run list`/`gh run view --log-failed` need `actions: read`, which is not granted and 403s; the Checks API below runs on `checks: read`, which is:
+   ```
+   gh api repos/{owner}/{repo}/commits/$(git rev-parse HEAD)/check-runs \
+     --jq '.check_runs[] | select(.conclusion=="failure" or .conclusion=="timed_out") | {id,name}'
+   ```
+   For each failing check run id, pull its detail and any file/line annotations the job emitted:
+   ```
+   gh api repos/{owner}/{repo}/check-runs/<id> --jq '{name,conclusion,summary:.output.summary,text:.output.text,details_url}'
+   gh api repos/{owner}/{repo}/check-runs/<id>/annotations
+   ```
+   If neither the output text nor the annotations give enough detail to pinpoint the regression, say so explicitly in your output rather than guessing — name the check and point at its `details_url` as a browsable fallback for a human.
 2. Fix only **NEW REGRESSION** failures — do not attempt to fix pre-existing base-branch failures
 3. Commit and push your fixes
 4. **Do NOT emit `FABRIK_STAGE_COMPLETE`** — the engine will advance once CI passes on the next poll
