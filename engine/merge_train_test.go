@@ -5928,8 +5928,8 @@ func TestTrialBehind(t *testing.T) {
 	if e := mk(func(_, _, _, _ string) (int, error) { return 0, nil }); e.trialBehind("o", "r", "main", "fabrik/merge-train/x") {
 		t.Error("trialBehind should be false when behind_by == 0")
 	}
-	if e := mk(func(_, _, _, _ string) (int, error) { return 0, fmt.Errorf("boom") }); e.trialBehind("o", "r", "main", "fabrik/merge-train/x") {
-		t.Error("trialBehind should be false (fail-safe) on probe error")
+	if e := mk(func(_, _, _, _ string) (int, error) { return 0, fmt.Errorf("boom") }); !e.trialBehind("o", "r", "main", "fabrik/merge-train/x") {
+		t.Error("trialBehind should be true (fail-closed) on probe error — #1755")
 	}
 }
 
@@ -6094,6 +6094,57 @@ func TestLandGreenBatch_BehindOnceThenLands(t *testing.T) {
 	}
 	// The in-flight marker itself is cleared by runMergeTrainWorker's top-level
 	// defer, not by landGreenBatch/landMergeTrainBatch (ADR-067).
+}
+
+// TestLandGreenBatch_FetchCommitsBehindError_TriggersRebaseNotDirectLand verifies
+// AC3 (#1755): a FetchCommitsBehind error on the landing-gate check must never be
+// treated as "not behind" — it must force the same rebase-and-revalidate path as a
+// genuine main-moved detection, rather than landing the already-green trial
+// unrevalidated. Mirrors TestLandGreenBatch_BehindOnceThenLands's shape, but the
+// first landing-gate check errors instead of reporting a genuine behind-by count.
+func TestLandGreenBatch_FetchCommitsBehindError_TriggersRebaseNotDirectLand(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	eng, client, rv := seamTrainEngine(t, wm, func(map[int]bool) bool { return false }) // always green
+
+	// Error on the first landing-gate check (must fail closed → treated as behind),
+	// up to date thereafter (post-rebase).
+	var mu sync.Mutex
+	behindCalls := 0
+	client.fetchCommitsBehindFn = func(_, _, _, _ string) (int, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		behindCalls++
+		if behindCalls == 1 {
+			return 0, fmt.Errorf("403: Resource not accessible by integration")
+		}
+		return 0, nil // caught up after rebase
+	}
+
+	survivors := []trainMember{makeQueuedMember(1, 101, "One"), makeQueuedMember(2, 102, "Two")}
+	state := &mergeTrainWorkerState{trialName: "merge-train-main-1", projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
+	p := trialParams{owner: "owner", repo: "repo", baseBranch: "main", wm: wm, nextTrialName: trialNameGen("merge-train-main-1")}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	eng.landGreenBatch(ctx, state, p, survivors)
+
+	// A FetchCommitsBehind error must trigger exactly one rebase-and-revalidate
+	// cycle — never a direct land of the unrevalidated trial.
+	if got := rv.count(); got != 1 {
+		t.Errorf("expected exactly 1 re-validation triggered by the fail-closed error, got %d", got)
+	}
+	client.mu.Lock()
+	merges := len(client.mergePRCalls)
+	advances := len(client.updateStatusCalls)
+	client.mu.Unlock()
+	if merges != 1 {
+		t.Errorf("expected the batch to land only after re-validation (1 merge), got %d", merges)
+	}
+	if advances != 2 {
+		t.Errorf("expected 2 members advanced to Done after landing, got %d", advances)
+	}
 }
 
 // TestLandGreenBatch_PendingReviewEjectDuringRebase_DiscardsTrialWithoutLanding

@@ -1647,10 +1647,9 @@ func (e *Engine) landSingleton(ctx context.Context, state *mergeTrainWorkerState
 // branch that cannot positively confirm a condition returns (false, reason) —
 // there is no code path that returns true except by every check having been
 // positively satisfied. An API error is always "not confirmed," never "assumed
-// fine" — the opposite polarity from trialBehind's "assume up to date on error,"
-// which exists for a different, lower-stakes decision (FR-2 main-moved
-// detection during an already-green trial, not an unattended skip-the-trial
-// decision).
+// fine" — the same fail-closed polarity trialBehind now uses (#1755): an
+// unknown FetchCommitsBehind result is never treated as "safe to proceed" by
+// either decision.
 func (e *Engine) singletonFastPathEligible(p trialParams, m trainMember, pr *gh.PRDetails) (bool, string) {
 	if pr.HeadSHA != m.headSHA {
 		return false, fmt.Sprintf("live PR head %s no longer matches the batch-formation snapshot %s", pr.HeadSHA, m.headSHA)
@@ -3202,11 +3201,21 @@ func filterBatchByNumbers(batch []gh.ProjectItem, nums []int) []gh.ProjectItem {
 // i.e. main advanced (via an external direct push) since the trial forked (ADR-059
 // D5, FR-2). It uses the PR-independent GitHub compare API (FetchCommitsBehind), so
 // it works under the membership-keyed test seam via the mocked fetchCommitsBehindFn.
+//
+// Fails closed on error (#1755): this is a load-bearing gate, not a diagnostic —
+// its one caller, landGreenBatch, decides whether an already-green trial lands
+// as-is or is rebased and re-validated against a live base first. Returning
+// "up to date" on an unknown result would land an unrevalidated trial exactly
+// when the safety net is most needed. Reporting "behind" on error instead routes
+// through landGreenBatch's existing bounded rebase-and-revalidate loop (capped by
+// MaxTrainRebaseCycles → dissolveBatch), matching the fail-closed convention
+// singletonFastPathEligible already established (ADR-1644) — worst case is one
+// extra rebase-and-revalidate cycle per persistent error, not an unbounded loop.
 func (e *Engine) trialBehind(owner, repo, baseBranch, trialBranch string) bool {
 	behind, err := e.client.FetchCommitsBehind(owner, repo, baseBranch, trialBranch)
 	if err != nil {
-		e.logfRepo(owner+"/"+repo, "merge-train", "warn: FetchCommitsBehind(%s...%s) failed: %v — assuming up to date\n", baseBranch, trialBranch, err)
-		return false
+		e.logfRepo(owner+"/"+repo, "merge-train", "warn: FetchCommitsBehind(%s...%s) failed: %v — assuming behind (fail closed)\n", baseBranch, trialBranch, err)
+		return true
 	}
 	return behind > 0
 }
