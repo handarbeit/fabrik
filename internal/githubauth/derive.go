@@ -628,7 +628,17 @@ func logDerivedSet(set DerivedRepoSet, logf func(format string, args ...any)) {
 // entirely (AC1's primary case — installations are the sole input) and no
 // installation exists at all, a single "install the app somewhere" hint is
 // logged instead, since there is no specific owner name to guide toward.
+//
+// The actual browser-open call goes through opts.OpenBrowser when non-nil
+// (#1763) — it takes precedence over the package-level openBrowser var so an
+// external caller's test can stub it without touching opts.NoBrowser, whose
+// zero value is unsafe for this purpose (false = "attempt to open a
+// browser").
 func guideMissingInstallations(opts Options, slug string, set DerivedRepoSet, logf func(format string, args ...any)) {
+	opener := openBrowser
+	if opts.OpenBrowser != nil {
+		opener = opts.OpenBrowser
+	}
 	installURL := fmt.Sprintf("https://github.com/apps/%s/installations/new", slug)
 
 	if len(opts.WatchedRepos) == 0 {
@@ -660,7 +670,7 @@ func guideMissingInstallations(opts Options, slug string, set DerivedRepoSet, lo
 		}
 		if !opts.NoBrowser && !openedInstallBrowser {
 			logf("! %s %s → opening %s …", owner, notFoundDesc, installURL)
-			if err := openBrowser(installURL); err != nil {
+			if err := opener(installURL); err != nil {
 				logf("could not open browser automatically (%v) — visit the URL above manually", err)
 			}
 			openedInstallBrowser = true

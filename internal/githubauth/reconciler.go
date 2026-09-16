@@ -129,8 +129,27 @@ type Options struct {
 	// after the installation-grant union and any WatchedRepos filter. <= 0
 	// means no cap.
 	MaxDerivedRepos int
-	// NoBrowser is forwarded to RunManifestFlow unchanged.
+	// NoBrowser gates two independent browser-open call sites: it is
+	// forwarded to RunManifestFlow unchanged (the first-run manifest
+	// bootstrap flow), and it also gates guideMissingInstallations'
+	// guided-install browser-open (the non-pinned discovery branch of
+	// Reconcile). Its zero value (false) means "attempt to open a
+	// browser" — safe for Pruefer's own first-run-setup default, but
+	// unsafe for any caller (e.g. an external test) that constructs
+	// Options{} without deliberately setting NoBrowser: true. OpenBrowser
+	// below is the zero-value-safe alternative for exactly that case.
 	NoBrowser bool
+	// OpenBrowser, when non-nil, overrides both browser-open call sites
+	// (guideMissingInstallations and RunManifestFlow) in preference to the
+	// package-level openBrowser var and independently of NoBrowser — the
+	// seam that lets a caller outside this package (e.g. engine's own
+	// tests, #1763) exercise Reconcile's non-pinned discovery path with
+	// zero side effects on the developer's desktop, without needing to
+	// know about NoBrowser's unsafe zero value at all. A caller that wants
+	// "never open a browser, and I don't care to be told about it" can set
+	// this to a no-op func(string) error { return nil } instead of relying
+	// on NoBrowser.
+	OpenBrowser func(url string) error
 	// BaseURL selects GitHub's API host. "" = production; tests point it at
 	// an httptest server.
 	BaseURL string
