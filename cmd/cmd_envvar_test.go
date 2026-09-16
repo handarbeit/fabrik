@@ -318,6 +318,82 @@ func TestExecute_GHESHostNormalized(t *testing.T) {
 	}
 }
 
+// TestExecute_NoBrowserDefaultTrue is #1763's R2 regression test: with no
+// flag, env var, or config.yaml key set, the engine's own NoBrowser default
+// must resolve to true (suppressed) — the inverse of Pruefer's own
+// no_browser default, since the engine is a daemon rather than a first-run
+// setup flow.
+func TestExecute_NoBrowserDefaultTrue(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}
+
+	cfg := executeWithConfigHook(t)
+	if !cfg.NoBrowser {
+		t.Error("cfg.NoBrowser = false, want true (suppressed) by default")
+	}
+}
+
+func TestExecute_NoBrowserFlagReEnables(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir, "--no-browser=false"}
+
+	cfg := executeWithConfigHook(t)
+	if cfg.NoBrowser {
+		t.Error("cfg.NoBrowser = true, want false (re-enabled) with --no-browser=false")
+	}
+}
+
+func TestExecute_NoBrowserEnvReEnables(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	t.Setenv("FABRIK_NO_BROWSER", "false")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}
+
+	cfg := executeWithConfigHook(t)
+	if cfg.NoBrowser {
+		t.Error("cfg.NoBrowser = true, want false (re-enabled) with FABRIK_NO_BROWSER=false")
+	}
+}
+
+func TestExecute_NoBrowserConfigYAMLReEnables(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755)
+	os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte("no_browser: false\n"), 0644)
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}
+
+	cfg := executeWithConfigHook(t)
+	if cfg.NoBrowser {
+		t.Error("cfg.NoBrowser = true, want false (re-enabled) with config.yaml no_browser: false")
+	}
+}
+
+func TestExecute_NoBrowserFlagBeatsEnvAndConfig(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755)
+	os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte("no_browser: false\n"), 0644)
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	t.Setenv("FABRIK_NO_BROWSER", "false")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir, "--no-browser=true"}
+
+	cfg := executeWithConfigHook(t)
+	if !cfg.NoBrowser {
+		t.Error("cfg.NoBrowser = false, want true (flag should win over env and config.yaml, even though both request re-enabling)")
+	}
+}
+
 func TestExecute_MergeTrainConfigOnly(t *testing.T) {
 	dir, stagesDir := setupValidStages(t)
 	chdirTest(t, dir)

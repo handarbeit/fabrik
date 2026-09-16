@@ -62,6 +62,13 @@ type ProjectConfig struct {
 	GitHubAppID             *int64 `yaml:"github_app_id"`
 	GitHubAppPrivateKeyPath string `yaml:"github_app_private_key_path"`
 	GitHubAppInstallationID *int64 `yaml:"github_app_installation_id"`
+	// NoBrowser controls whether App auth's guided-install browser-open
+	// (internal/githubauth's Options.NoBrowser) is suppressed. *bool, not
+	// bool, because the engine's own default (true, suppressed — #1763,
+	// R2) is the inverse of the zero value, mirroring TUI's tri-state
+	// pattern above: nil means "unset, use the default", distinct from an
+	// explicit false (re-enable browser-opening, AC2).
+	NoBrowser *bool `yaml:"no_browser"`
 	// RequiredStatusContexts lists, per "owner/repo", the status/check-run
 	// context names that must report a confirmed success on a PR's exact head
 	// SHA before the ci-gate will clear it. Unconfigured repos get no
