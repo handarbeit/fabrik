@@ -148,6 +148,7 @@ func fullPermissions() map[string]string {
 		"pull_requests":         "write",
 		"checks":                "read",
 		"statuses":              "read",
+		"contents":              "read",
 	}
 }
 

@@ -65,6 +65,13 @@ func GitHubAppStatePath(fabrikDir string) string {
 // GitHub API needing a permission not yet listed here, this check will
 // pass while a genuinely new gap goes undetected until that feature's
 // first use — the same is true if any key below turns out to be wrong.
+//
+// "contents": "read" is the one exception to the above: it is
+// measurement-backed, not inferred. FetchCommitsBehind's compare endpoint
+// (GET /repos/.../compare/{base}...{head}) was confirmed to 403 under App
+// auth without it (2026-09-16, bed installation 162085522, see #1755).
+// "contents: write" (needed, if at all, for PR merge) remains unmeasured
+// and is deliberately not added here — see #1755's scope notes.
 func RequiredGitHubAppPermissions(webhooksEnabled bool) map[string]string {
 	perms := map[string]string{
 		"metadata":              "read",
@@ -73,6 +80,7 @@ func RequiredGitHubAppPermissions(webhooksEnabled bool) map[string]string {
 		"pull_requests":         "write",
 		"checks":                "read",
 		"statuses":              "read",
+		"contents":              "read",
 	}
 	if webhooksEnabled {
 		perms["webhooks"] = "write"
