@@ -1414,10 +1414,11 @@ func (e *Engine) buildReviewBodyCommentsFromReviews(item gh.ProjectItem, reviews
 // that would suppress delivery, but it also must not panic a nil-map read at
 // the call site.
 //
-// Only scans comments authored by e.cfg.User (the Fabrik identity the marker
-// is always posted under — formatReviewFeedbackComment's caller uses
-// AddComment via the engine's own token) — the same author-scoping
-// findBlockedComment already uses for "is this our own comment" lookups.
+// Only scans comments authored by e.selfLogin() (Fabrik's own GitHub-facing
+// identity — the login the marker is always posted under, since
+// formatReviewFeedbackComment's caller uses AddComment via the engine's own
+// token) — the same author-scoping findBlockedComment already uses for "is
+// this our own comment" lookups.
 // Without this check, any PR commenter could post a comment containing the
 // literal marker text naming an arbitrary review DatabaseID and cause that
 // review's feedback to be silently treated as already addressed — both
@@ -1443,7 +1444,7 @@ func (e *Engine) durablyAddressedReviewIDs(item gh.ProjectItem) map[int]bool {
 		return addressed
 	}
 	for _, c := range comments {
-		if c.Author != e.cfg.User {
+		if c.Author != e.selfLogin() {
 			continue
 		}
 		for _, id := range parseReviewIDsAddressedMarker(c.Body) {
@@ -1709,36 +1710,63 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 			if item.LinkedPRNumber > 0 {
 				prRef = fmt.Sprintf("PR #%d", item.LinkedPRNumber)
 			}
-			// The self-review caveat is only true when Fabrik actually knows
-			// (or can't rule out) that a self-COMMENT won't be enough: that's
-			// exactly when authorityLine is non-empty — authoritative mode is
-			// active and currently blocking, whether because branch
-			// protection requires an approval or because the verdict
-			// couldn't be read. When authorityLine is empty (advisory mode,
-			// or authoritative with a confirmed non-blocking verdict), a
-			// self-review is known to satisfy the gate outright, so stating
-			// the caveat would contradict the PR's own "say what Fabrik
-			// actually knows to be true right now" goal (#1268 review
-			// thread).
-			selfReviewCaveat := ""
-			if authorityLine != "" {
-				selfReviewCaveat = ", unless this stage is `authoritative` and the repo requires approving reviews, " +
-					"in which case an approval from another account is needed"
+			// remedyA is the "(a)" bullet text and varies by auth mode: under
+			// PAT, the operator's own login is the PR author (PR opened
+			// under cfg.User's token), so a review the operator posts is a
+			// genuine self-review — GitHub forbids self-*approval*, but a
+			// COMMENTED self-review still satisfies the gate, unless
+			// authoritative mode requires an actual approval, in which case
+			// only another account can supply it (selfReviewCaveat below).
+			// Under App auth, the PR is opened under the installation's bot
+			// identity (e.selfLogin()), never the operator's — so the
+			// operator's own review is structurally never a self-review, and
+			// GitHub raises no self-approval restriction: a full `APPROVED`
+			// review from the operator satisfies even an authoritative gate,
+			// with no caveat needed. See #1754 S4.
+			var remedyA string
+			if e.ghAppAuth == nil {
+				// The self-review caveat is only true when Fabrik actually
+				// knows (or can't rule out) that a self-COMMENT won't be
+				// enough: that's exactly when authorityLine is non-empty —
+				// authoritative mode is active and currently blocking,
+				// whether because branch protection requires an approval or
+				// because the verdict couldn't be read. When authorityLine
+				// is empty (advisory mode, or authoritative with a
+				// confirmed non-blocking verdict), a self-review is known to
+				// satisfy the gate outright, so stating the caveat would
+				// contradict the PR's own "say what Fabrik actually knows
+				// to be true right now" goal (#1268 review thread).
+				selfReviewCaveat := ""
+				if authorityLine != "" {
+					selfReviewCaveat = ", unless this stage is `authoritative` and the repo requires approving reviews, " +
+						"in which case an approval from another account is needed"
+				}
+				remedyA = fmt.Sprintf(
+					"post a review on %s yourself — a `COMMENTED` self-review from the PR author satisfies "+
+						"the gate, even though GitHub forbids self-approval%s",
+					prRef, selfReviewCaveat,
+				)
+			} else {
+				remedyA = fmt.Sprintf(
+					"post a review on %s yourself — the PR was opened under Fabrik's own GitHub App identity, "+
+						"not your account, so your review is not a self-review; a full `APPROVED` review satisfies "+
+						"the gate even in `authoritative` mode",
+					prRef,
+				)
 			}
 			msg = fmt.Sprintf(
 				"🏭 **Fabrik — review wait timeout**\n\n"+
 					"The review gate for stage **%s** timed out. No reviewer was ever requested on %s, and no review "+
 					"has been submitted. Whether one is ever coming is declarable rather than unknowable — see remedy (b) below.%s\n\n"+
 					"Fabrik has paused this issue. To resume, either:\n"+
-					"- (a) post a review on %s yourself — a `COMMENTED` self-review from the PR author satisfies "+
-					"the gate, even though GitHub forbids self-approval%s,\n"+
+					"- (a) %s,\n"+
 					"- (b) set `expected_reviewers: []` in the %s stage YAML to declare that no *unrequested* "+
 					"reviewer is expected here — an explicitly requested reviewer is still honored,\n"+
 					"- (c) set `wait_for_reviews: false` in the %s stage YAML to disable the review gate entirely "+
 					"if this repo has no reviewer,\n"+
 					"- (d) merge %s manually, or\n"+
 					"- (e) remove `fabrik:paused` to let the engine wait again.",
-				stage.Name, prRef, authorityLine, prRef, selfReviewCaveat, stage.Name, stage.Name, prRef,
+				stage.Name, prRef, authorityLine, remedyA, stage.Name, stage.Name, prRef,
 			)
 		} else if pendingLine == "" && hasReviews && authorityLine != "" {
 			// No reviewer is currently outstanding, but a review does exist —

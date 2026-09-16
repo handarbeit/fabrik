@@ -282,6 +282,33 @@ func setUpGitHubAppAuth(ctx context.Context, cfg Config, fabrikDir, baseURL stri
 	return client, reconciler, nil
 }
 
+// selfLogin returns Fabrik's own GitHub-facing identity: the login every
+// comment/review the engine itself posts actually carries as author on the
+// wire. Under App auth this is the installation's bot login
+// (e.ghAppAuth.BotLogin(), "<app-slug>[bot]"); under PAT mode it is the
+// operator's login (e.cfg.User) — true by construction, since PAT mode
+// posts under the operator's own account.
+//
+// Every "is this comment/review mine?" comparison and every cache
+// author write-through MUST route through this accessor rather than
+// testing e.cfg.User directly — e.cfg.User only coincides with Fabrik's
+// actual posting identity in PAT mode. See issue #1754 (S1-S3): four call
+// sites tested e.cfg.User directly and silently misbehaved under App auth
+// (durable review-suppression went permanently inert, the blocked-
+// dependencies comment was never updated, and cached comments read as
+// "human" pre-refetch but "bot" post-refetch).
+//
+// Exception: fabrik:locked:<user> and itemstate.LocalLockAcquired are
+// deliberately about which *operator* holds a local advisory lock, not
+// about Fabrik's own posting identity — they must keep using e.cfg.User
+// directly and must never be routed through this accessor.
+func (e *Engine) selfLogin() string {
+	if e.ghAppAuth != nil {
+		return e.ghAppAuth.BotLogin()
+	}
+	return e.cfg.User
+}
+
 // resolveGitHubAppAuth is New()'s single entry point for everything in this
 // file: validates config (R5), refuses an unsupported GHES combination, and
 // — only when App auth is actually configured — performs the full R1/R3/R4

@@ -2154,6 +2154,42 @@ func TestPauseForReviewTimeout_NoReviewersRequested_ListsRemedies(t *testing.T) 
 	}
 }
 
+// TestPauseForReviewTimeout_AppAuth_NoReviewersRequested_RemedyNotSelfReview
+// is the R6/AC4 regression test for S4 (issue #1754): under App auth the PR
+// is opened under the bot identity (e.selfLogin()), never the operator's,
+// so the operator's own review is structurally never a self-review — the
+// remedy text must say so and must not claim GitHub forbids self-approval
+// (a PAT-mode-only fact) or that another account is needed.
+func TestPauseForReviewTimeout_AppAuth_NoReviewersRequested_RemedyNotSelfReview(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(t, client)
+	eng.ghAppAuth = appAuthTestReconciler(t)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		Labels:         []string{"fabrik:awaiting-review"},
+		LinkedPRNumber: 42,
+	}
+	stage := &stages.Stage{Name: "Review", WaitForReviews: boolPtr(true)}
+
+	eng.pauseForReviewTimeout(board, item, stage)
+
+	if len(client.addCommentCalls) != 1 {
+		t.Fatalf("expected 1 comment, got %d", len(client.addCommentCalls))
+	}
+	body := client.addCommentCalls[0].body
+	if !containsAll(body, "not a self-review", "APPROVED", "Fabrik's own GitHub App identity") {
+		t.Errorf("pause comment should explain the operator's review is not a self-review under App auth and that a full APPROVED review satisfies the gate; got:\n%s", body)
+	}
+	if strings.Contains(body, "GitHub forbids self-approval") {
+		t.Errorf("pause comment must not claim GitHub forbids self-approval under App auth — the operator is not the PR author, so no such restriction applies; got:\n%s", body)
+	}
+	if strings.Contains(body, "another account") {
+		t.Errorf("pause comment must not claim another account is needed under App auth — the operator's own review already satisfies even an authoritative gate; got:\n%s", body)
+	}
+}
+
 // FR-4: multiple declared reviewers with a partial response — the pause
 // message must report per-reviewer status so the gap is diagnosable.
 func TestPauseForReviewTimeout_ExpectedReviewers_PartialResponse_ReportsPerReviewerStatus(t *testing.T) {

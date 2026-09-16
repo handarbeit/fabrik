@@ -232,7 +232,7 @@ func (e *Engine) postComment(item gh.ProjectItem, body string, react, echo bool)
 	}
 	if c := e.cache(); c != nil {
 		c.ApplyCommentAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), gh.Comment{
-			DatabaseID: dbID, Body: body, Author: e.cfg.User, CreatedAt: time.Now(),
+			DatabaseID: dbID, Body: body, Author: e.selfLogin(), CreatedAt: time.Now(),
 		})
 	}
 	// AddComment already succeeded (the error path returned above), so the

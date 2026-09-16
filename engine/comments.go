@@ -129,11 +129,16 @@ func filterBotServiceNotices(comments []gh.Comment) []gh.Comment {
 // treated as non-human rather than silently defeating a pause).
 //
 // Deliberately does NOT also exclude e.cfg.User: that is the operator's own
-// GitHub login, not Fabrik's bot identity, and in the common (currently only
-// supported — see #671) single-account deployment Fabrik posts under that
-// same account. Excluding it here would filter out the operator's own
-// resume reply. Fabrik's own comments are already fully excluded upstream by
-// findNewComments' 🏭 **Fabrik body-prefix check, independent of author.
+// GitHub login, not Fabrik's own posting identity — under PAT mode (#671)
+// the two happen to be the same account, but under GitHub App auth (#1713)
+// Fabrik posts under the installation's bot login (e.selfLogin(), matching
+// gh.IsBotLogin's "<slug>[bot]" pattern) while cfg.User remains the
+// operator's separate human login. Excluding cfg.User here would filter out
+// the operator's own resume reply in either mode. Fabrik's own comments are
+// excluded from both directions: gh.IsBotLogin already catches them by
+// author whenever the cache correctly records e.selfLogin() as Author
+// (#1754), and independently, findNewComments' 🏭 **Fabrik body-prefix
+// check excludes them upstream regardless of author.
 func filterHuman(comments []gh.Comment) []gh.Comment {
 	var human []gh.Comment
 	for _, c := range comments {
