@@ -42,20 +42,76 @@ func writeEngineTestAppKey(t *testing.T, dir string) string {
 	return path
 }
 
+// fakeGitHubAppServerConfig is newFakeGitHubAppServer's optional extension
+// point (#1750) for tests exercising Reconciler.AccessibleRepos/
+// resolveAppAccessibleRepos — every existing call site (5 positional args,
+// no options) is unaffected, since the zero value of this struct reproduces
+// the server's pre-#1750 behavior exactly (an empty repositories list, no
+// simulated failure).
+type fakeGitHubAppServerConfig struct {
+	accessibleRepos []string // full_name entries served by /installation/repositories
+	reposTruncated  bool     // when true, never returns a short page — forces the pagination ceiling
+	failRepoList    bool     // when true, /installation/repositories always 500s
+}
+
+// fakeGitHubAppServerOption configures fakeGitHubAppServerConfig — see
+// withAccessibleRepos/withReposTruncated/withFailRepoList below.
+type fakeGitHubAppServerOption func(*fakeGitHubAppServerConfig)
+
+// withAccessibleRepos makes the fake server's /installation/repositories
+// endpoint return repos as the installation's accessible-repo list.
+func withAccessibleRepos(repos ...string) fakeGitHubAppServerOption {
+	return func(c *fakeGitHubAppServerConfig) { c.accessibleRepos = repos }
+}
+
+// withReposTruncated forces /installation/repositories to hit
+// FetchInstallationRepositories' pagination ceiling (never returns a short
+// page), mirroring internal/githubauth/tokenauth_test.go's neverShortPage.
+func withReposTruncated() fakeGitHubAppServerOption {
+	return func(c *fakeGitHubAppServerConfig) { c.reposTruncated = true }
+}
+
+// withFailRepoList makes /installation/repositories always fail with a 500,
+// simulating a transient listing error independent of installation-token
+// minting (which still succeeds).
+func withFailRepoList() fakeGitHubAppServerOption {
+	return func(c *fakeGitHubAppServerConfig) { c.failRepoList = true }
+}
+
 // newFakeGitHubAppServer serves just enough of the GitHub App + GraphQL
 // surface for setUpGitHubAppAuth/resolveGitHubAppAuth to run end-to-end
 // against an httptest server: /app (identity), /app/installations (list —
 // #1763, needed only by the non-pinned discovery path; AppInstallationID
 // pinned callers never hit it), /app/installations/{id} (granted
 // permissions), /app/installations/{id}/access_tokens (token mint),
-// /installation/repositories (#1763, called unconditionally by the
-// non-pinned discovery path for every installation regardless of
-// repository_selection — see internal/githubauth/derive.go), and /graphql
-// (ResolveOwner's repositoryOwner query, answered from ownerType —
+// /installation/repositories (accessible-repo enumeration — used
+// unconditionally by the non-pinned discovery path per #1763, and
+// configurable via opts for #1750's pinned-path coverage tests), and
+// /graphql (ResolveOwner's repositoryOwner query, answered from ownerType —
 // "organization" or "user").
-func newFakeGitHubAppServer(t *testing.T, installationID int64, account, ownerType string, permissions map[string]string) *httptest.Server {
+func newFakeGitHubAppServer(t *testing.T, installationID int64, account, ownerType string, permissions map[string]string, opts ...fakeGitHubAppServerOption) *httptest.Server {
 	t.Helper()
+	var cfg fakeGitHubAppServerConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
 	mux := http.NewServeMux()
+	mux.HandleFunc("/installation/repositories", func(w http.ResponseWriter, r *http.Request) {
+		if cfg.failRepoList {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{"message":"simulated repo-list failure"}`))
+			return
+		}
+		if !cfg.reposTruncated && r.URL.Query().Get("page") != "" && r.URL.Query().Get("page") != "1" {
+			json.NewEncoder(w).Encode(map[string]interface{}{"repositories": []map[string]interface{}{}})
+			return
+		}
+		out := make([]map[string]interface{}, len(cfg.accessibleRepos))
+		for i, full := range cfg.accessibleRepos {
+			out[i] = map[string]interface{}{"full_name": full}
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{"repositories": out})
+	})
 	mux.HandleFunc("/app", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]interface{}{"slug": "fabrik", "id": 1})
 	})
@@ -82,13 +138,6 @@ func newFakeGitHubAppServer(t *testing.T, installationID int64, account, ownerTy
 			"account":              map[string]string{"login": account},
 			"repository_selection": "all",
 			"permissions":          permissions,
-		})
-	})
-	mux.HandleFunc("/installation/repositories", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"repositories": []map[string]interface{}{
-				{"full_name": account + "/some-repo"},
-			},
 		})
 	})
 	mux.HandleFunc("/graphql", func(w http.ResponseWriter, r *http.Request) {

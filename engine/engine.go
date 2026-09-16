@@ -148,6 +148,21 @@ type Engine struct {
 	seededRepos              map[string]bool          // key: "owner/repo"; in-memory guard to avoid re-seeding on every poll
 	checkedAutoMergeRepos    map[string]bool          // key: "owner/repo"; guard to emit allow_auto_merge warning at most once per run
 	repoAccess               map[string]gh.RepoAccess // key: "owner/repo"; resolveRepoAccess's cache — single source of truth for seeding, the allow_auto_merge check, and itemMayNeedWork's dispatch gate (ADR-1347)
+	// appAccessibleRepos, appAccessibleReposTrunc, and appAccessibleReposReady
+	// are the App-auth counterpart of the PAT-mode permissions.push signal
+	// resolveRepoAccess otherwise reads (#1750): under App auth, permissions.push
+	// is always false for an installation token (it describes a user's access,
+	// not an installation's), so resolveAppRepoAccess consults these instead.
+	// Populated exactly once, eagerly, in New() — before any worker goroutine
+	// exists — by a single GET /installation/repositories call
+	// (Reconciler.AccessibleRepos), so they need no mutex: write-once during
+	// single-threaded startup, read-only for the rest of the process. nil/false
+	// zero values (PAT mode, or an App-mode fetch that failed at startup) make
+	// resolveAppRepoAccess treat every repo as ambiguous, which resolveRepoAccess's
+	// existing fail-open branch then admits (R3) — never a silent fail-closed.
+	appAccessibleRepos      map[string]bool // key: lower-cased "owner/repo"; the installation's own accessible-repo list
+	appAccessibleReposTrunc bool            // true if the accessible-repo list hit FetchInstallationRepositories' pagination ceiling — a repo missing from a truncated list is ambiguous, not confirmed-excluded
+	appAccessibleReposReady bool            // true once the single startup fetch above has succeeded; false (the zero value) means "unknown" — never treated as "no repos"
 	idleCount                int                      // consecutive idle polls; triggers self-upgrade at threshold
 	idleStart                time.Time                // when consecutive idle polls began; zero value = not idle
 	pollsUntilStalenessCheck int                      // countdown to next checkSourceStaleness; 0 fires on next poll (#1464)
@@ -402,6 +417,44 @@ func New(cfg Config) (*Engine, error) {
 		pauseIssueMu:              make(map[string]*pauseIssueMuEntry),
 		backoffPrevMultiplier:     1,
 		backoffRateLimitRatio:     1.0,
+	}
+
+	// App-auth's per-repo access signal (#1750 R1): fetched once, eagerly,
+	// here — rather than lazily inside resolveRepoAccess — so this single API
+	// call can both prime the process-lifetime cache and serve as the one
+	// place resolveAppAccessibleRepos' R4 zero-repos hard refusal can run
+	// without a second round trip. Skipped entirely in PAT mode
+	// (ghAppReconciler == nil), in which case appAccessibleReposReady stays
+	// false — resolveAppRepoAccess is never called there.
+	if ghAppReconciler != nil {
+		result, err := resolveAppAccessibleRepos(ghAppReconciler, cfg.GitHubAppInstallationID)
+		if err != nil {
+			var noRepos *noAccessibleReposError
+			if errors.As(err, &noRepos) {
+				// Confirmed, unambiguous misconfiguration (R4): nothing this
+				// installation covers will ever dispatch. Refuse startup
+				// outright rather than let it run and silently do nothing —
+				// mirrors RefuseUserOwnedBoardForAppAuth's precedent for a
+				// different structural App-auth misconfiguration.
+				return nil, err
+			}
+			// Any other failure (network error, transient 5xx) is ambiguous,
+			// not a definitive "no access" — fail open (R3) by leaving
+			// appAccessibleReposReady false, exactly like resolveRepoAccess's
+			// own probe-error branch does for PAT mode. Loud rather than a
+			// single startup line (R4): this is the entire signal
+			// resolveAppRepoAccess will have for every repo until the next
+			// restart.
+			fmt.Printf("[startup] WARNING: could not list GitHub App installation %d's accessible repositories: %v — "+
+				"falling back to fail-open dispatch (assuming every repo is writable) for the rest of this process run\n",
+				cfg.GitHubAppInstallationID, err)
+		} else {
+			eng.appAccessibleRepos = result.repos
+			eng.appAccessibleReposTrunc = result.truncated
+			eng.appAccessibleReposReady = true
+			fmt.Printf("[startup] github-app: installation %d covers %d accessible repositories\n",
+				cfg.GitHubAppInstallationID, len(result.repos))
+		}
 	}
 
 	// Migrate any old-style worktrees (issue-N/) to the new per-repo layout.

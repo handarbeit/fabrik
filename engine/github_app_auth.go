@@ -402,6 +402,63 @@ func (e *Engine) selfLogin() string {
 	return e.cfg.User
 }
 
+// appAccessibleReposResult is resolveAppAccessibleRepos' success outcome:
+// the lower-cased "owner/repo" set an App-auth Engine should treat as
+// covered by its pinned installation (#1750), and whether that set is
+// possibly incomplete (FetchInstallationRepositories hit its pagination
+// ceiling — see AccessibleRepos' own doc comment).
+type appAccessibleReposResult struct {
+	repos     map[string]bool
+	truncated bool
+}
+
+// noAccessibleReposError is resolveAppAccessibleRepos' distinguishing error
+// type for a confirmed-empty installation (R4) — New() type-asserts on this
+// (via errors.As) to tell "hard-refuse startup" apart from every other
+// error this function can return (a fetch failure, which New() instead
+// treats as ambiguous and fails open per R3).
+type noAccessibleReposError struct {
+	installationID int64
+}
+
+func (e *noAccessibleReposError) Error() string {
+	return fmt.Sprintf("GitHub App installation %d has no accessible repositories (GET /installation/repositories "+
+		"returned an empty list) — grant it access to at least one repository at "+
+		"https://github.com/settings/installations/%d, or verify github_app_installation_id is correct",
+		e.installationID, e.installationID)
+}
+
+// resolveAppAccessibleRepos performs #1750 R1/R4's single startup fetch:
+// enumerates the pinned installation's accessible repos via
+// Reconciler.AccessibleRepos, lower-casing each "owner/repo" full name for
+// resolveAppRepoAccess's later case-insensitive lookups, and reports a
+// *noAccessibleReposError when the installation is confirmed to cover zero
+// repos — an unambiguous "nothing to do, ever" misconfiguration distinct
+// from an ordinary fetch failure.
+//
+// Factored out of New() so it is directly testable against a Reconciler
+// built from a fake App server, without New() itself needing a baseURL
+// override seam — New()'s own call to resolveGitHubAppAuth is hardcoded to
+// "" (production github.com) and isn't overridable from a test; this
+// function takes an already-constructed *githubauth.Reconciler instead,
+// mirroring how TestRun_ShutdownOnSignal_WithGitHubAppAuth_WaitsForRefreshLoop
+// already builds one directly via githubauth.Reconcile against a fake
+// server for a different engine seam.
+func resolveAppAccessibleRepos(reconciler *githubauth.Reconciler, installationID int64) (*appAccessibleReposResult, error) {
+	repos, truncated, err := reconciler.AccessibleRepos()
+	if err != nil {
+		return nil, err
+	}
+	if len(repos) == 0 {
+		return nil, &noAccessibleReposError{installationID: installationID}
+	}
+	set := make(map[string]bool, len(repos))
+	for _, r := range repos {
+		set[strings.ToLower(r)] = true
+	}
+	return &appAccessibleReposResult{repos: set, truncated: truncated}, nil
+}
+
 // resolveGitHubAppAuth is New()'s single entry point for everything in this
 // file: validates config (R5), refuses an unsupported GHES combination, and
 // — only when App auth is actually configured — performs the full R1/R3/R4
