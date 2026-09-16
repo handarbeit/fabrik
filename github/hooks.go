@@ -48,3 +48,28 @@ func (c *Client) DeleteForwardingHooks(owner, repo string) error {
 	}
 	return nil
 }
+
+// HasForwardingHook reports whether owner/repo currently has a `gh webhook
+// forward` hook registered (config.url == webhookForwarderURL). Used by the
+// engine's R5 startup/periodic coverage assertion (#1142) to detect the
+// singular-`--repo`-flag failure mode: a managed repo silently receiving no
+// webhooks while the stream is otherwise reported healthy. A 404 listing
+// hooks (e.g. insufficient permission) is treated as "no hook found" rather
+// than an error, mirroring DeleteForwardingHooks's own 404-is-success
+// posture — this check is advisory, never fatal.
+func (c *Client) HasForwardingHook(owner, repo string) (bool, error) {
+	url := fmt.Sprintf("%s/repos/%s/%s/hooks?per_page=100", c.baseURL, owner, repo)
+	var hooks []repoHook
+	if err := c.restGetJSON(url, &hooks); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return false, nil
+		}
+		return false, fmt.Errorf("listing hooks for %s/%s: %w", owner, repo, err)
+	}
+	for _, h := range hooks {
+		if h.Config.URL == webhookForwarderURL {
+			return true, nil
+		}
+	}
+	return false, nil
+}

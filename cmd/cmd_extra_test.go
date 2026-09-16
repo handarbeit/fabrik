@@ -166,6 +166,9 @@ func (m *testGitHubUpgradeClient) ProbeProjectBoard(owner, repo string, projectN
 	return nil, "", nil
 }
 func (m *testGitHubUpgradeClient) DeleteForwardingHooks(owner, repo string) error { return nil }
+func (m *testGitHubUpgradeClient) HasForwardingHook(owner, repo string) (bool, error) {
+	return false, nil
+}
 func (m *testGitHubUpgradeClient) EnablePullRequestAutoMerge(owner, repo string, prNumber int, strategy string) error {
 	return nil
 }

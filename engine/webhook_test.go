@@ -18,85 +18,11 @@ import (
 	"github.com/handarbeit/fabrik/tui"
 )
 
-// TestVerifySignature validates HMAC-SHA256 webhook signature checking.
-func TestVerifySignature(t *testing.T) {
-	secret := "testsecret"
-	body := []byte(`{"action":"created"}`)
-
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write(body)
-	validSig := "sha256=" + hex.EncodeToString(mac.Sum(nil))
-
-	tests := []struct {
-		name   string
-		body   []byte
-		sig    string
-		secret string
-		want   bool
-	}{
-		{
-			name:   "valid signature",
-			body:   body,
-			sig:    validSig,
-			secret: secret,
-			want:   true,
-		},
-		{
-			name:   "wrong secret",
-			body:   body,
-			sig:    validSig,
-			secret: "wrongsecret",
-			want:   false,
-		},
-		{
-			name:   "malformed header — no prefix",
-			body:   body,
-			sig:    hex.EncodeToString(mac.Sum(nil)),
-			secret: secret,
-			want:   false,
-		},
-		{
-			name:   "malformed header — invalid hex",
-			body:   body,
-			sig:    "sha256=zzz",
-			secret: secret,
-			want:   false,
-		},
-		{
-			name:   "empty signature",
-			body:   body,
-			sig:    "",
-			secret: secret,
-			want:   false,
-		},
-		{
-			name: "empty body valid sig",
-			body: []byte{},
-			sig: func() string {
-				m := hmac.New(sha256.New, []byte(secret))
-				return "sha256=" + hex.EncodeToString(m.Sum(nil))
-			}(),
-			secret: secret,
-			want:   true,
-		},
-		{
-			name:   "body mismatch",
-			body:   []byte(`{"action":"deleted"}`),
-			sig:    validSig,
-			secret: secret,
-			want:   false,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := verifySignature(tc.body, tc.sig, tc.secret)
-			if got != tc.want {
-				t.Errorf("verifySignature() = %v, want %v", got, tc.want)
-			}
-		})
-	}
-}
+// Full HMAC-SHA256 signature-verification coverage lives in
+// internal/events/signature_test.go, against the shared
+// internal/events.VerifySignature this package now calls (#1142). The tests
+// below that build a signed request (e.g. TestHandleWebhook*) are the
+// call-site coverage confirming this package wires that function correctly.
 
 // TestSemverAtLeast covers version comparison edge cases.
 func TestSemverAtLeast(t *testing.T) {

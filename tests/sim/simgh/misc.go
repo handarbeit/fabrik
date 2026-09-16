@@ -95,3 +95,19 @@ func (s *Sim) DeleteForwardingHooks(owner, repo string) error {
 	}
 	return nil
 }
+
+// HasForwardingHook reports whether a hook exists for owner/repo.
+//
+// The model has no webhook subsystem (see DeleteForwardingHooks above), so
+// this always reports true for a seeded repo — the sim bed's webhook health
+// is not something #1142's R5 coverage assertion is characterized against
+// here; that gap is recorded in FIDELITY.md alongside DeleteForwardingHooks's
+// own.
+func (s *Sim) HasForwardingHook(owner, repo string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := s.lookupRepo(owner, repo); err != nil {
+		return false, fmt.Errorf("simgh: HasForwardingHook: %w", err)
+	}
+	return true, nil
+}

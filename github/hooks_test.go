@@ -137,3 +137,97 @@ func TestDeleteForwardingHooks_DELETE404TreatedAsSuccess(t *testing.T) {
 		t.Fatalf("DeleteForwardingHooks: got error on 404 DELETE, want nil: %v", err)
 	}
 }
+
+// TestHasForwardingHook_Found verifies true is returned when a hook matching
+// webhookForwarderURL is present among the repo's hooks.
+func TestHasForwardingHook_Found(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hooks := []repoHook{
+			hookJSON(1, "https://example.com/other"),
+			hookJSON(42, webhookForwarderURL),
+		}
+		json.NewEncoder(w).Encode(hooks)
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("test-token", srv.URL)
+	found, err := c.HasForwardingHook("owner", "repo")
+	if err != nil {
+		t.Fatalf("HasForwardingHook: %v", err)
+	}
+	if !found {
+		t.Error("HasForwardingHook = false, want true")
+	}
+}
+
+// TestHasForwardingHook_NotFound verifies false is returned when no hook
+// matches webhookForwarderURL — the exact condition the R5 startup/periodic
+// coverage assertion (#1142) is checking for.
+func TestHasForwardingHook_NotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hooks := []repoHook{hookJSON(1, "https://example.com/other")}
+		json.NewEncoder(w).Encode(hooks)
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("test-token", srv.URL)
+	found, err := c.HasForwardingHook("owner", "repo")
+	if err != nil {
+		t.Fatalf("HasForwardingHook: %v", err)
+	}
+	if found {
+		t.Error("HasForwardingHook = true, want false")
+	}
+}
+
+// TestHasForwardingHook_NoHooksAtAll verifies false, nil on an empty hook list.
+func TestHasForwardingHook_NoHooksAtAll(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode([]repoHook{})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("test-token", srv.URL)
+	found, err := c.HasForwardingHook("owner", "repo")
+	if err != nil {
+		t.Fatalf("HasForwardingHook: %v", err)
+	}
+	if found {
+		t.Error("HasForwardingHook = true, want false")
+	}
+}
+
+// TestHasForwardingHook_404TreatedAsNotFound verifies a 404 listing hooks
+// (e.g. insufficient permission) is treated as "not found," not an error —
+// this check is advisory only and must never be fatal.
+func TestHasForwardingHook_404TreatedAsNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"message":"Not Found"}`))
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("test-token", srv.URL)
+	found, err := c.HasForwardingHook("owner", "repo")
+	if err != nil {
+		t.Fatalf("HasForwardingHook: got error on 404 GET, want nil: %v", err)
+	}
+	if found {
+		t.Error("HasForwardingHook = true, want false")
+	}
+}
+
+// TestHasForwardingHook_GETFails verifies a non-404 GET failure propagates as an error.
+func TestHasForwardingHook_GETFails(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("internal server error"))
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("test-token", srv.URL)
+	_, err := c.HasForwardingHook("owner", "repo")
+	if err == nil {
+		t.Fatal("expected error when GET fails, got nil")
+	}
+}

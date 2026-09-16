@@ -479,6 +479,11 @@ func (in *Instrumented) DeleteForwardingHooks(owner, repo string) error {
 		func() error { return in.sim.DeleteForwardingHooks(owner, repo) })
 }
 
+func (in *Instrumented) HasForwardingHook(owner, repo string) (bool, error) {
+	return do1(in, "HasForwardingHook", false, Args{Owner: owner, Repo: repo},
+		func() (bool, error) { return in.sim.HasForwardingHook(owner, repo) })
+}
+
 // RateLimitStats is logged but never faulted: it is the one interface method
 // with no error return, so there is no channel through which a fault could
 // surface. Registering one panics (see fault.go). This wrapper still exists —

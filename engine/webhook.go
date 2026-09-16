@@ -2,9 +2,7 @@ package engine
 
 import (
 	"context"
-	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -12,11 +10,13 @@ import (
 	"net"
 	"net/http"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/handarbeit/fabrik/internal/events"
 	"github.com/handarbeit/fabrik/tui"
 )
 
@@ -206,22 +206,6 @@ func generateSecret() (string, error) {
 		return "", fmt.Errorf("generating webhook secret: %w", err)
 	}
 	return hex.EncodeToString(b), nil
-}
-
-// verifySignature checks the HMAC-SHA256 signature on a webhook payload.
-// sig is the value of the X-Hub-Signature-256 header (format: "sha256=<hex>").
-func verifySignature(body []byte, sig, secret string) bool {
-	if !strings.HasPrefix(sig, "sha256=") {
-		return false
-	}
-	sigHex := sig[len("sha256="):]
-	sigBytes, err := hex.DecodeString(sigHex)
-	if err != nil {
-		return false
-	}
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write(body)
-	return hmac.Equal(mac.Sum(nil), sigBytes)
 }
 
 // ghVersionCheck verifies gh is installed and meets the minimum version (≥ 2.32.0).
@@ -450,6 +434,30 @@ func buildGhArgs(org string, repos []string, port int, secret string, events []s
 	return args
 }
 
+// effectiveSubscriptionMessage describes which repo(s) gh webhook forward is
+// actually delivering events for, as opposed to the intended/managed set.
+// In org mode, org coverage is exhaustive. In per-repo mode, `gh webhook
+// forward` declares --repo as a singular string (not a slice like --events),
+// so repeated --repo= flags overwrite and only the last one buildGhArgs
+// emitted — repos's own last element, since repos is sorted before this is
+// called — actually ends up subscribed. See #1142.
+func effectiveSubscriptionMessage(org string, repos []string) string {
+	if org != "" {
+		return fmt.Sprintf("effective subscription: org %s (org mode covers all repos)", org)
+	}
+	if len(repos) == 0 {
+		return "effective subscription: none (no repos)"
+	}
+	effective := repos[len(repos)-1]
+	if len(repos) == 1 {
+		return fmt.Sprintf("effective subscription: %s (1 of 1 managed repos)", effective)
+	}
+	return fmt.Sprintf(
+		"effective subscription: %s (1 of %d managed repos — gh webhook forward's --repo flag is not repeatable; the other %d receive no webhooks, poll-only; see #1142)",
+		effective, len(repos), len(repos)-1,
+	)
+}
+
 // startListener binds the HTTP listener on 127.0.0.1:<port> (0 = OS-assigned).
 func startListener(port int) (net.Listener, int, error) {
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
@@ -632,6 +640,11 @@ func (wm *webhookManager) supervise(ctx context.Context) {
 		for r := range wm.repos {
 			repos = append(repos, r)
 		}
+		// Deterministic order: buildGhArgs's repeated --repo= flags all get
+		// overwritten by gh webhook forward except the last one (the
+		// singular-flag bug — see #1142), so which repo ends up effectively
+		// subscribed must not depend on Go's randomized map iteration order.
+		sort.Strings(repos)
 		events := wm.events
 		port := wm.port
 		orgModeFailed := wm.orgModeFailed
@@ -681,6 +694,7 @@ func (wm *webhookManager) supervise(ctx context.Context) {
 			continue
 		}
 		backoff = time.Second // reset on successful start
+		wm.logFn(0, "webhook", "%s\n", effectiveSubscriptionMessage(org, repos))
 
 		wm.mu.Lock()
 		wm.currentCmd = cmd
@@ -1065,7 +1079,7 @@ func (wm *webhookManager) handleWebhook(w http.ResponseWriter, r *http.Request) 
 	wm.mu.Unlock()
 
 	sig := r.Header.Get("X-Hub-Signature-256")
-	if !verifySignature(body, sig, secret) {
+	if !events.VerifySignature(body, sig, secret) {
 		wm.mu.Lock()
 		now := time.Now()
 		// Reset the failure window when it has elapsed so spread-out failures
