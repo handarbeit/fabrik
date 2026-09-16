@@ -8,7 +8,7 @@ import (
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
-	"github.com/handarbeit/fabrik/pruefer/events"
+	"github.com/handarbeit/fabrik/internal/events"
 )
 
 // fakeEventSource is a test events.EventSource. When runFn is nil, Run

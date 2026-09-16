@@ -8,7 +8,7 @@ import (
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
-	"github.com/handarbeit/fabrik/pruefer/events"
+	"github.com/handarbeit/fabrik/internal/events"
 )
 
 var errFetchPRDetailsBoom = errors.New("boom: fetching PR details failed")
