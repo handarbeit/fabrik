@@ -1089,6 +1089,29 @@ stop_bed_instance() {
   fi
 }
 
+# write_isolated_bed_gitconfig writes a bed-local git config file at $1
+# containing only the operating user's credential.* entries (helper
+# registrations, host-scoped overrides) copied verbatim from their real
+# --global config — never any url.*.insteadOf rewrite (#1756/R5). Launching
+# the bed daemon with GIT_CONFIG_GLOBAL pointed at this file (plus
+# GIT_CONFIG_NOSYSTEM=1) isolates the bed's git behavior from the operator's
+# own ~/.gitconfig: a naive `GIT_CONFIG_GLOBAL=/dev/null` port of
+# tests/sim/simgh/git.go's isolation precedent would also strip
+# credential.helper and break the bed's own PAT-mode HTTPS git — this keeps
+# exactly the piece PAT mode needs while dropping the piece that has, until
+# now, silently masked the App-auth+HTTPS worker-git 403 this issue fixes
+# (an insteadOf rewrite sends the bed's HTTPS remotes over SSH, so no
+# credential helper — and therefore no ungranted installation token — is
+# ever consulted; see ADR-1756). AC4.
+write_isolated_bed_gitconfig() {
+  local out="$1"
+  : >"$out"
+  while read -r key value; do
+    [ -n "$key" ] || continue
+    git config --file "$out" --add "$key" "$value"
+  done < <(git config --global --get-regexp '^credential\.' 2>/dev/null || true)
+}
+
 # preflight_bed_start brings the bed engine up on the freshly built binary and
 # refuses to continue unless its own startup banner names the ref under test.
 # Runs after any --clean reset, since reset.sh requires a stopped instance.
@@ -1103,8 +1126,19 @@ preflight_bed_start() {
   # rationale). Both launch sites must agree: switch_and_run restarts the bed
   # through the Go path on every mode switch, so a cadence set only here would
   # be silently reverted for the legs that actually matter.
+  # Isolate the daemon's git behavior from the operator's own ~/.gitconfig
+  # (#1756/R5, AC4) — most importantly any url.*.insteadOf rewrite, which
+  # would otherwise silently mask an App-auth+HTTPS worker-git failure the
+  # same way it does on an operator's own machine (see ADR-1756).
+  # GIT_CONFIG_GLOBAL/GIT_CONFIG_NOSYSTEM apply to the daemon process and
+  # everything it spawns, including worker git and worker gh invocations.
+  local isolated_gitconfig="$TEST_BED/.fabrik/git-config-isolated"
+  mkdir -p "$TEST_BED/.fabrik"
+  write_isolated_bed_gitconfig "$isolated_gitconfig"
+
   echo "== preflight: starting bed instance (-notui -poll ${BED_POLL_SECONDS}s, no --auto-upgrade) =="
-  ( cd "$TEST_BED" && nohup ./fabrik -notui -poll "$BED_POLL_SECONDS" > "$TEST_BED/bed-run.log" 2>&1 & )
+  ( cd "$TEST_BED" && GIT_CONFIG_GLOBAL="$isolated_gitconfig" GIT_CONFIG_NOSYSTEM=1 \
+      nohup ./fabrik -notui -poll "$BED_POLL_SECONDS" > "$TEST_BED/bed-run.log" 2>&1 & )
 
   # The startup banner goes to the engine's STDOUT (captured in bed-run.log),
   # while ENGINE_LOG holds the structured per-item log — which never contains

@@ -139,6 +139,38 @@ func TestRefuseGHESWithGitHubApp(t *testing.T) {
 	}
 }
 
+func TestRefuseHTTPSWorkerGitUnderAppAuth(t *testing.T) {
+	tests := []struct {
+		name          string
+		gitSSH        bool
+		hasSSHRewrite bool
+		wantErr       bool
+	}{
+		{name: "https, no rewrite: refused", gitSSH: false, hasSSHRewrite: false, wantErr: true},
+		{name: "git_ssh true: allowed", gitSSH: true, hasSSHRewrite: false, wantErr: false},
+		{name: "SSH rewrite active: allowed", gitSSH: false, hasSSHRewrite: true, wantErr: false},
+		{name: "both git_ssh and rewrite: allowed", gitSSH: true, hasSSHRewrite: true, wantErr: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := RefuseHTTPSWorkerGitUnderAppAuth(tt.gitSSH, tt.hasSSHRewrite)
+			if tt.wantErr && err == nil {
+				t.Fatal("expected a refusal error, got nil")
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("expected nil, got %v", err)
+			}
+			if tt.wantErr {
+				for _, want := range []string{"git_ssh", "insteadOf", "contents"} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("error %q missing expected substring %q", err.Error(), want)
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestFormatPermissionShortfalls_NamesEachOne(t *testing.T) {
 	shortfalls := []githubauth.RequiredPermissionShortfall{
 		{Permission: "issues", Required: "write", Granted: "read"},
@@ -348,6 +380,11 @@ func TestRun_ShutdownOnSignal_WithGitHubAppAuth_WaitsForRefreshLoop(t *testing.T
 	}
 	eng := testEngine(t, client, &mockClaudeInvoker{})
 	eng.cfg.PollSeconds = 300
+	// GitSSH avoids tripping the #1756 App-auth+HTTPS-worker-git startup
+	// refusal added to Run() — this test is about refresh-loop shutdown
+	// wiring, not the git story, and must not depend on the host's own git
+	// config for an insteadOf rewrite.
+	eng.cfg.GitSSH = true
 	eng.ghAppAuth = reconciler
 	if err := os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755); err != nil {
 		t.Fatal(err)

@@ -141,6 +141,19 @@ jobs:
       - name: preflight_bed ref resolution regression test (#1693)
         run: bash scripts/e2e/preflight_bed_ref_test.sh
 
+      # Bed git-config isolation (scripts/e2e/run.sh's
+      # write_isolated_bed_gitconfig, #1756/R5) exists so the live e2e bed's
+      # git behavior does not depend on the operator's own ~/.gitconfig —
+      # specifically, so a url.*.insteadOf SSH rewrite can no longer mask an
+      # App-auth+HTTPS worker-git 403 (see ADR-1756) the way it does on an
+      # operator's own machine. Regression coverage sources run.sh for the
+      # function definition only (the sourcing guard prevents an actual gate
+      # run) and drives it against a synthetic host gitconfig via
+      # GIT_CONFIG_GLOBAL — no live bed, network, or real ~/.gitconfig
+      # involved.
+      - name: bed git-config isolation regression test (#1756)
+        run: bash scripts/e2e/bed_gitconfig_isolation_test.sh
+
       # cut-release.sh's flag parsing — in particular --skip-integration's
       # validation (R2, #1454) — sourced and exercised directly via
       # parse_args(), never reaching main() (the real publish sequence). No

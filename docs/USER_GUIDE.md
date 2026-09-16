@@ -520,17 +520,35 @@ GitHub App installation 789012 is missing required permissions: organization_pro
 (App settings → Install App → Configure) and restart Fabrik
 ```
 
-The engine currently requires: `metadata:read`, `organization_projects:write`, `issues:write`, `pull_requests:write`, `checks:read`, `statuses:read`, `contents:read` — plus `webhooks:write` when `--webhooks` is enabled.
+The engine currently requires: `metadata:read`, `organization_projects:write`, `issues:write`, `pull_requests:write`, `checks:read`, `statuses:read`, `contents:read` — plus `webhooks:write` when `--webhooks` is enabled. Notably absent: `actions` and `contents:write` — see "Worker git under App auth" below for what that means for worker `git`/`gh run` usage.
 
 #### Worker `gh` CLI authentication
 
 Built-in stage skills (e.g. `fabrik-validate`'s Pre-Completion Gate) shell out to the `gh` CLI directly. Under App auth, each Claude worker invocation is given a live, freshly-refreshed installation token as `GH_TOKEN`/`GITHUB_TOKEN` — read directly off the same client the engine's own API calls use, riding its background refresh loop — rather than a token copied once at startup. **Known limitation:** a single stage invocation whose wall time exceeds the installation token's ~1-hour lifetime can still see a now-expired value for the remainder of that one invocation, since a running child process's environment cannot be updated after it starts. This is a narrow edge case (`max_wall_time` at or beyond roughly an hour) and is not fully solved here — see [ADR-1713](../adrs/1713-engine-github-app-auth.md).
 
+The installation token is not granted `actions:read`, so `gh run list`/`gh run view --log-failed` 403 under App auth. The built-in CI-fix instructions (`fabrik-review`/`fabrik-validate`) use the Checks API (`gh api repos/{owner}/{repo}/commits/<sha>/check-runs` + `.../check-runs/<id>/annotations`) instead, which runs on the already-granted `checks:read` scope — see [ADR-1756](../adrs/1756-worker-git-gh-surface-under-github-app-auth.md).
+
+#### Worker git under App auth
+
+Worktrees clone over HTTPS by default (`git_ssh: false`). On a machine where a git credential helper is registered to prefer `GH_TOKEN`/`GITHUB_TOKEN` from the environment (e.g. one installed by `gh auth setup-git`), a worker's `git fetch`/`git push` would resolve credentials to the installation token above — which is granted `contents:read` but not `contents:write`, so fetch would likely succeed but `git push` (which every managed stage does — see CLAUDE.md's "commit frequently" convention) would 403. Fabrik refuses this combination explicitly at startup rather than letting it fail mid-stage:
+
+```
+GitHub App authentication is configured with default HTTPS git cloning — under App auth,
+stage workers authenticate gh/git via the installation token (see RequiredGitHubAppPermissions),
+which is granted contents:read but not contents:write, so a worker's git push over the
+default HTTPS remote would 403 as soon as any git credential helper ... resolves credentials
+from the GH_TOKEN/GITHUB_TOKEN environment. Fix by either setting git_ssh: true (or --ssh) in
+.fabrik/config.yaml so worktrees clone over SSH instead, or configuring a global
+url.git@github.com:.insteadOf = https://github.com/ rewrite ...
+```
+
+Fix by doing one of the two things it names: set `git_ssh: true` (or pass `--ssh`) so worktrees clone over SSH instead, or configure a global `url.git@github.com:.insteadOf = https://github.com/` rewrite so HTTPS remotes are transparently redirected to SSH before any credential helper is consulted. Either is sufficient; this check never fires in PAT mode. See [ADR-1756](../adrs/1756-worker-git-gh-surface-under-github-app-auth.md).
+
 #### Known limitations
 
 - **Not combinable with GHES.** `--ghes-host`/`FABRIK_GHES_HOST` and GitHub App auth cannot be configured together — refused explicitly at startup, naming the incompatibility. The underlying App-auth client construction does not yet derive GHES's independent REST/GraphQL endpoints correctly; use a personal access token against a GHES instance instead.
 - **One installation, one account.** The engine holds a single GitHub client scoped to one App installation (one organization). A cross-organization spawn target (a Plan/Review/Validate stage spawning a child issue in a different GitHub account or organization) is unreachable under App auth — this mirrors a GitHub App installation's own strict account-scoping, not a Fabrik design choice.
-- **Git operations are unaffected.** Fabrik's git clone/push machinery uses ambient SSH or a credential helper today, regardless of authentication mode — App auth changes only the engine's own GitHub API calls and the worker `gh` CLI environment above, not git itself.
+- **Git operations depend on `git_ssh`/an SSH rewrite.** The engine's own git clone/push machinery always uses ambient SSH or a credential helper, regardless of authentication mode — but worker git (the worktree a stage operates in) is only safe under App auth's default-HTTPS mode if `git_ssh: true` or an `insteadOf` rewrite is configured; see "Worker git under App auth" above. Fabrik refuses to start otherwise rather than leaving this to silent host-config dependence.
 - **No secret material is ever logged**, at any verbosity — neither the private key nor any minted installation token.
 
 ### Auto-upgrade
