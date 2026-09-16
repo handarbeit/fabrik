@@ -458,7 +458,7 @@ https://github.com/settings/installations/789012 (an org admin may be required),
 then re-run `fabrik init --github-app`
 ```
 
-**`--webhooks`.** If you plan to run the engine with `--webhooks` enabled, pass `--webhooks` to setup too, so the manifest/verification includes webhook-management permission from the start. Enabling `--webhooks` on the engine later without having set this at App-creation time means the installation is missing that permission and needs the same admin-approval step above.
+**`--webhooks`.** GitHub App auth and `--webhooks` cannot currently be combined — see "Not combinable with `--webhooks`" under Known limitations below. `fabrik init --github-app --webhooks` is refused outright at setup time, before any network call, with the same explanation the engine's own startup gives; there's no need to discover the incompatibility later by watching the engine refuse to start. Run the engine with polling (`--reconcile-interval`) instead.
 
 **Key storage.** A freshly created App's private key is written to `.fabrik/github-app-key.pem` (0600, parent directory 0700, written atomically) unless `--github-app-private-key-path` names a different location (adopt path only — see above). Non-key App metadata (App ID, slug, webhook secret, client ID/secret) is written to the fixed, non-configurable `.fabrik/github-app-state.json` — the same file the engine's own compat-mode client construction reads diagnostics-only state from. **Re-keying:** rotate the key on the App's GitHub settings page, then replace the file at your configured `github_app_private_key_path`; the engine's own startup detects a key that doesn't match its recorded fingerprint and fails loudly with a repair-needed error rather than silently misauthenticating. Both default paths are added to `.git/info/exclude` by `fabrik init` (alongside the other Fabrik working directories it already excludes) so a routine `git add .` in your project can't accidentally commit the private key — unlike `.fabrik/config.yaml`, which is meant to be committed, these are per-operator secrets. A custom `--github-app-private-key-path` outside `.fabrik/` is not auto-excluded; add it to your own `.gitignore` if needed.
 
@@ -537,7 +537,7 @@ GitHub App installation 789012 is missing required permissions: organization_pro
 (App settings → Install App → Configure) and restart Fabrik
 ```
 
-The engine currently requires: `metadata:read`, `organization_projects:write`, `issues:write`, `pull_requests:write`, `checks:read`, `statuses:read`, `contents:read` — plus `webhooks:write` when `--webhooks` is enabled. Notably absent: `actions` and `contents:write` — see "Worker git under App auth" below for what that means for worker `git`/`gh run` usage.
+The engine currently requires: `metadata:read`, `organization_projects:write`, `issues:write`, `pull_requests:write`, `checks:read`, `statuses:read`, `contents:read`. (`--webhooks` cannot be combined with App auth at all — see Known limitations below — so no webhook-management permission is ever required here.) Notably absent: `actions` and `contents:write` — see "Worker git under App auth" below for what that means for worker `git`/`gh run` usage.
 
 #### Worker `gh` CLI authentication
 
@@ -564,6 +564,7 @@ Fix by doing one of the two things it names: set `git_ssh: true` (or pass `--ssh
 #### Known limitations
 
 - **Not combinable with GHES.** `--ghes-host`/`FABRIK_GHES_HOST` and GitHub App auth cannot be configured together — refused explicitly at startup, naming the incompatibility. The underlying App-auth client construction does not yet derive GHES's independent REST/GraphQL endpoints correctly; use a personal access token against a GHES instance instead.
+- **Not combinable with `--webhooks`.** `--webhooks`/`FABRIK_WEBHOOKS` and GitHub App auth cannot be configured together — refused explicitly at startup, naming both settings. `gh webhook forward` (the mechanism `--webhooks` uses to deliver events) is feature-gated to user tokens by GitHub CLI itself and refuses an installation token outright ("you do not have access to this feature") — no App permission grant fixes this. Drop `--webhooks` to use App auth with `--reconcile-interval` polling instead, or drop the GitHub App config to use `--webhooks` with a personal access token.
 - **One installation, one account.** The engine holds a single GitHub client scoped to one App installation (one organization). A cross-organization spawn target (a Plan/Review/Validate stage spawning a child issue in a different GitHub account or organization) is unreachable under App auth — this mirrors a GitHub App installation's own strict account-scoping, not a Fabrik design choice.
 - **Git operations depend on `git_ssh`/an SSH rewrite.** The engine's own git clone/push machinery always uses ambient SSH or a credential helper, regardless of authentication mode — but worker git (the worktree a stage operates in) is only safe under App auth's default-HTTPS mode if `git_ssh: true` or an `insteadOf` rewrite is configured; see "Worker git under App auth" above. Fabrik refuses to start otherwise rather than leaving this to silent host-config dependence.
 - **No secret material is ever logged**, at any verbosity — neither the private key nor any minted installation token.
@@ -3674,11 +3675,12 @@ To fix: on an organization-owned board, run `fabrik repair-board --apply` (see [
 
 ### GitHub App Authentication Startup Failures
 
-Three startup checks are specific to [GitHub App Authentication](#github-app-authentication) — all three fail loudly with a message naming the exact problem, never a silent fallback to PAT mode or an empty/broken board:
+Several startup checks are specific to [GitHub App Authentication](#github-app-authentication) — all fail loudly with a message naming the exact problem, never a silent fallback to PAT mode or an empty/broken board:
 
 - **Partial configuration** — only some of `github_app_id`/`github_app_private_key_path`/`github_app_installation_id` are set. Fix: set all three, or remove all three to use a PAT instead.
 - **User-owned board** — App auth was configured against a project board owned by a GitHub user account rather than an organization. Fix: use a personal access token for this board instead — there is no App-auth path around GitHub's own restriction here.
 - **Missing granted permissions** — the installation's actually-granted permissions (checked live at startup) are narrower than what the engine requires. Fix: go to the App's installation settings (Install App → Configure) and grant the named permission(s), then restart Fabrik.
+- **`--webhooks` combined with App auth** — `gh webhook forward` cannot work under a GitHub App installation token, so the combination is refused rather than silently falling back to polling. Fix: drop `--webhooks` to use App auth with `--reconcile-interval` polling, or drop the GitHub App config to use `--webhooks` with a personal access token.
 
 See [GitHub App Authentication](#github-app-authentication) for example messages and full detail on each.
 

@@ -54,24 +54,51 @@ func GitHubAppStatePath(fabrikDir string) string {
 // installation's actually-granted permissions are compared against at
 // startup. webhooksEnabled adds the repo-webhook-management permission only
 // when cfg.Webhooks is on (DeleteForwardingHooks manages repo hooks; the
-// engine never touches that API otherwise).
+// engine never touches that API otherwise) — though as of #1752,
+// RefuseWebhooksWithGitHubApp means neither shipped CLI path can reach this
+// with webhooksEnabled true anymore: the engine's own runtime path
+// (resolveGitHubAppAuth) refuses first, and so does cmd/init.go's
+// `--github-app --webhooks` setup path, before ever calling
+// runGitHubAppSetup. It stays reachable with true only via direct,
+// unit-level calls to runGitHubAppSetup itself (as
+// TestRunGitHubAppSetup_Webhooks_ExpandsRequiredPermissions does), not
+// through any command an operator actually runs. See that function's doc
+// comment and DeleteForwardingHooks' for the full unreachable-under-App-auth
+// chain.
 //
 // This is a hand-maintained correspondence with the engine's actual API
 // usage (mirroring internal/githubauth's own requiredPermissions doc
 // comment), derived from engine.GitHubClient's method set rather than
 // confirmed against a real installation's granted-permissions JSON per
 // #770's methodology — that verification is a tracked follow-up, not yet
-// done (see #1713's PR description). If the engine starts using a new
-// GitHub API needing a permission not yet listed here, this check will
-// pass while a genuinely new gap goes undetected until that feature's
-// first use — the same is true if any key below turns out to be wrong.
+// done (see #1713's PR description) for every key below *except*
+// "repository_hooks" and "contents", both confirmed by direct measurement
+// rather than inference:
 //
-// "contents": "read" is the one exception to the above: it is
-// measurement-backed, not inferred. FetchCommitsBehind's compare endpoint
-// (GET /repos/.../compare/{base}...{head}) was confirmed to 403 under App
-// auth without it (2026-09-16, bed installation 162085522, see #1755).
+// "repository_hooks": #1752 confirmed that spelling (GitHub has no
+// "webhooks" permission key — the pre-#1752 value here was wrong) two ways:
+// first against five real, recorded GitHub App permissions objects in
+// github/testdata/recordings/fetch_check_runs.json (a different App's own
+// granted-permissions payload, not literally a GET /app/installations/{id}
+// response for this repo's own App, but real and non-documentation,
+// drawing from the same permission-key namespace); then, during Validate
+// review (2026-09-16), against a live `GET /orgs/handarbeit/installations`
+// response for the `claude` App's own installation on this repo's org,
+// whose granted `perms` carried `"repository_hooks": "write"` directly —
+// #770's exact methodology, just via a different App on the same org
+// rather than this repo's own `fabrik` App. The spelling is now confirmed,
+// not merely corroborated.
+//
+// "contents": "read" was confirmed when FetchCommitsBehind's compare
+// endpoint (GET /repos/.../compare/{base}...{head}) was found to 403 under
+// App auth without it (2026-09-16, bed installation 162085522, see #1755).
 // "contents: write" (needed, if at all, for PR merge) remains unmeasured
 // and is deliberately not added here — see #1755's scope notes.
+//
+// If the engine starts using a new GitHub API needing a permission not yet
+// listed here, this check will pass while a genuinely new gap goes
+// undetected until that feature's first use — the same is true if any of
+// the other keys below turns out to be wrong.
 func RequiredGitHubAppPermissions(webhooksEnabled bool) map[string]string {
 	perms := map[string]string{
 		"metadata":              "read",
@@ -83,7 +110,7 @@ func RequiredGitHubAppPermissions(webhooksEnabled bool) map[string]string {
 		"contents":              "read",
 	}
 	if webhooksEnabled {
-		perms["webhooks"] = "write"
+		perms["repository_hooks"] = "write"
 	}
 	return perms
 }
@@ -209,6 +236,26 @@ func RefuseHTTPSWorkerGitUnderAppAuth(gitSSH, hasSSHRewrite bool) error {
 		".fabrik/config.yaml so worktrees clone over SSH instead, or configuring a global " +
 		"url.git@github.com:.insteadOf = https://github.com/ rewrite so HTTPS remotes are transparently sent " +
 		"over SSH. See ADR-1756 and docs/USER_GUIDE.md")
+}
+
+// RefuseWebhooksWithGitHubApp refuses the --webhooks + GitHub-App-auth
+// combination outright rather than letting it silently degrade to polling
+// (#1752): `gh webhook forward` (engine/webhook.go's webhookManager) is
+// feature-gated to user tokens by GitHub CLI itself — an installation token
+// gets "you do not have access to this feature", measured directly against
+// a real App installation, not a documented claim. No App permission grant
+// fixes this; it is not a permission problem. Mirrors RefuseGHESWithGitHubApp
+// above exactly: nil for the compatible case, a descriptive error otherwise
+// naming both settings and both ways out.
+func RefuseWebhooksWithGitHubApp(webhooksEnabled bool) error {
+	if !webhooksEnabled {
+		return nil
+	}
+	return fmt.Errorf("GitHub App authentication cannot be combined with --webhooks (FABRIK_WEBHOOKS) — " +
+		"gh webhook forward is feature-gated to user tokens and refuses a GitHub App installation token " +
+		"outright (\"you do not have access to this feature\"); no App permission grant fixes this. " +
+		"Remove --webhooks to use GitHub App auth with --reconcile-interval polling instead, or remove the " +
+		"GitHub App config to use --webhooks with a personal access token (FABRIK_TOKEN)")
 }
 
 // FormatPermissionShortfalls renders R3's "name each missing permission"
@@ -370,6 +417,9 @@ func resolveGitHubAppAuth(ctx context.Context, cfg Config, fabrikDir, baseURL st
 		return nil, nil, nil
 	}
 	if err := RefuseGHESWithGitHubApp(cfg.GHESHost); err != nil {
+		return nil, nil, err
+	}
+	if err := RefuseWebhooksWithGitHubApp(cfg.Webhooks); err != nil {
 		return nil, nil, err
 	}
 	// Both a PAT and a full GitHub App config can be present at once (e.g.

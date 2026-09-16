@@ -342,7 +342,7 @@ func runInit(args []string) error {
 	githubAppIDFlag := fset.Int64("github-app-id", 0, "Adopt an existing GitHub App by ID instead of creating one via the manifest flow; requires --github-app-private-key-path (also FABRIK_GITHUB_APP_ID)")
 	githubAppKeyPathFlag := fset.String("github-app-private-key-path", "", "Path to an existing GitHub App's private key PEM, for --github-app-id adoption; requires --github-app-id (also FABRIK_GITHUB_APP_PRIVATE_KEY_PATH)")
 	githubAppInstallationIDFlag := fset.Int64("github-app-installation-id", 0, "Explicit installation ID to pin, skipping discovery (optional; also FABRIK_GITHUB_APP_INSTALLATION_ID)")
-	webhooksFlag := fset.Bool("webhooks", false, "Include webhook-management permission in the App's manifest/verification, matching a --webhooks engine deployment")
+	webhooksFlag := fset.Bool("webhooks", false, "Refused together with --github-app (#1752): gh webhook forward does not work under a GitHub App installation token, so this combination is rejected before any setup network call fires")
 	noBrowserFlag := fset.Bool("no-browser", false, "Skip automatic browser launch during --github-app setup; auto-enabled when stdin is not a terminal")
 
 	fset.Usage = func() {
@@ -496,6 +496,19 @@ func runInit(args []string) error {
 		// unconditionally on its very next startup — a confusing failure to
 		// discover only after setup already reported success.
 		if err := engine.RefuseGHESWithGitHubApp(ghesHost); err != nil {
+			return fmt.Errorf("--github-app: %w", err)
+		}
+		// Bot review finding (#1752): the engine refuses --webhooks +
+		// GitHub-App-auth unconditionally at startup (RefuseWebhooksWithGitHubApp,
+		// engine/github_app_auth.go) because gh webhook forward is feature-gated
+		// to user tokens and refuses an installation token outright. Without
+		// this check, `init --github-app --webhooks` would happily register/
+		// adopt a real App, verify repository_hooks permission, and persist
+		// github_app_* + FABRIK_WEBHOOKS=true — only for the engine to refuse
+		// to start on every subsequent run. Same "setup succeeds, startup
+		// unconditionally fails" surprise the GHES guard above exists to
+		// prevent; refuse it here too, before any network call fires.
+		if err := engine.RefuseWebhooksWithGitHubApp(*webhooksFlag); err != nil {
 			return fmt.Errorf("--github-app: %w", err)
 		}
 	}
