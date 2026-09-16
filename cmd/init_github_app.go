@@ -102,7 +102,7 @@ func runGitHubAppSetup(ctx context.Context, opts githubAppSetupOptions) (*github
 	// a freshly manifest-created App actually requests — leaving it unset falls
 	// back to PrueferRequiredPermissions() instead of the set VerifyGrants
 	// checks moments later, guaranteeing a freshly created App is missing
-	// organization_projects:write (and checks:read/statuses:read/webhooks:write)
+	// organization_projects:write (and checks:read/statuses:read/repository_hooks:write)
 	// and fails its own R3 check immediately after creation. The trade-off this
 	// accepts — an extra soft verifyPinnedGrants round trip when the call ends
 	// up pinned (explicit --github-app-installation-id, or Call 2 below after
