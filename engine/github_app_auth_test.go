@@ -44,15 +44,30 @@ func writeEngineTestAppKey(t *testing.T, dir string) string {
 
 // newFakeGitHubAppServer serves just enough of the GitHub App + GraphQL
 // surface for setUpGitHubAppAuth/resolveGitHubAppAuth to run end-to-end
-// against an httptest server: /app (identity), /app/installations/{id}
-// (granted permissions), /app/installations/{id}/access_tokens (token
-// mint), and /graphql (ResolveOwner's repositoryOwner query, answered from
-// ownerType — "organization" or "user").
+// against an httptest server: /app (identity), /app/installations (list —
+// #1763, needed only by the non-pinned discovery path; AppInstallationID
+// pinned callers never hit it), /app/installations/{id} (granted
+// permissions), /app/installations/{id}/access_tokens (token mint),
+// /installation/repositories (#1763, called unconditionally by the
+// non-pinned discovery path for every installation regardless of
+// repository_selection — see internal/githubauth/derive.go), and /graphql
+// (ResolveOwner's repositoryOwner query, answered from ownerType —
+// "organization" or "user").
 func newFakeGitHubAppServer(t *testing.T, installationID int64, account, ownerType string, permissions map[string]string) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/app", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]interface{}{"slug": "fabrik", "id": 1})
+	})
+	mux.HandleFunc("/app/installations", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode([]map[string]interface{}{
+			{
+				"id":                   installationID,
+				"account":              map[string]string{"login": account},
+				"repository_selection": "all",
+				"permissions":          permissions,
+			},
+		})
 	})
 	mux.HandleFunc("/app/installations/", func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/access_tokens") {
@@ -67,6 +82,13 @@ func newFakeGitHubAppServer(t *testing.T, installationID int64, account, ownerTy
 			"account":              map[string]string{"login": account},
 			"repository_selection": "all",
 			"permissions":          permissions,
+		})
+	})
+	mux.HandleFunc("/installation/repositories", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"repositories": []map[string]interface{}{
+				{"full_name": account + "/some-repo"},
+			},
 		})
 	})
 	mux.HandleFunc("/graphql", func(w http.ResponseWriter, r *http.Request) {
@@ -348,6 +370,49 @@ func TestSetUpGitHubAppAuth_GrantShortfall_NamesEachMissingPermission(t *testing
 	}
 	if !strings.Contains(err.Error(), "organization_projects") {
 		t.Errorf("error %q does not name the missing organization_projects permission", err.Error())
+	}
+}
+
+// TestReconcile_NonPinnedDiscovery_NoBrowserOpensViaOptionsSeam is the
+// R6/AC3 regression test for #1763: a test in the engine package must be
+// able to exercise githubauth.Reconcile's non-pinned discovery path (a
+// watched-but-uninstalled owner) with zero side effects on the developer's
+// desktop, without needing to know that Options.NoBrowser's zero value
+// (false) is otherwise unsafe. It deliberately leaves NoBrowser unset and
+// relies solely on Options.OpenBrowser (R3's seam) to prove the seam itself
+// is what makes this test safe — not a NoBrowser: true a test author would
+// have to remember to set. The fake server's only installation is under
+// "handarbeit"; watching "notinstalled/otherrepo" reaches
+// guideMissingInstallations for the "notinstalled" owner.
+func TestReconcile_NonPinnedDiscovery_NoBrowserOpensViaOptionsSeam(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := writeEngineTestAppKey(t, dir)
+	srv := newFakeGitHubAppServer(t, 111, "handarbeit", "organization", RequiredGitHubAppPermissions(false))
+
+	var openedURLs []string
+	stubOpenBrowser := func(url string) error {
+		openedURLs = append(openedURLs, url)
+		return nil
+	}
+
+	_, err := githubauth.Reconcile(context.Background(), githubauth.Options{
+		AppID: 42, AppPrivateKeyPath: keyPath,
+		AppStatePath: filepath.Join(dir, "app-state.json"),
+		WatchedRepos: []string{"notinstalled/otherrepo"},
+		BaseURL:      srv.URL,
+		OpenBrowser:  stubOpenBrowser,
+		// NoBrowser deliberately left unset (its unsafe zero value) — the
+		// point of this test is that OpenBrowser alone is enough.
+	})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	if len(openedURLs) != 1 {
+		t.Fatalf("stub OpenBrowser called %d times, want exactly 1 (proves the non-pinned discovery path reached guideMissingInstallations, safely, via the Options seam rather than a real browser)", len(openedURLs))
+	}
+	if !strings.Contains(openedURLs[0], "/apps/fabrik/installations/new") {
+		t.Errorf("opened URL = %q, want it to name the App's guided-install page", openedURLs[0])
 	}
 }
 

@@ -292,6 +292,7 @@ func setUpGitHubAppAuth(ctx context.Context, cfg Config, fabrikDir, baseURL stri
 		BaseURL:           baseURL, // "" in production (github.com); tests point this at an httptest server
 		AppName:           GitHubAppName,
 		AppHomepageURL:    GitHubAppHomepageURL,
+		NoBrowser:         cfg.NoBrowser, // #1763, R1/R2: cmd/root.go resolves this to true by default for the engine
 		Logf:              func(format string, args ...any) { fmt.Printf("[startup] github-app: "+format+"\n", args...) },
 	})
 	if err != nil {
