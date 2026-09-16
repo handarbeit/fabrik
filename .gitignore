@@ -58,3 +58,19 @@ release-notes.md
 # identities, and token-handling procedures — never publish to the repo or site.
 notes/private/
 SITE-OPS.md
+
+# GitHub App credentials for engine App-installation auth (#1715). The private
+# key, and the state file that carries the App ID/slug plus — for a fresh
+# manifest-created App — its webhook secret and client secret. Unlike
+# .fabrik/config.yaml, which is deliberately committed, these are per-operator
+# secrets that must never enter history.
+#
+# `fabrik init` already adds both paths to .git/info/exclude (see
+# writeGitExclude in cmd/init.go), but that is per-clone and does not travel:
+# an operator who configures App auth by hand, or who clones fresh, gets no
+# protection from it. These tracked rules do travel. The *.pem wildcard also
+# covers a key placed at a non-default --github-app-private-key-path; no .pem
+# is tracked today, and a legitimate future fixture can be added with -f.
+.fabrik/github-app-key.pem
+.fabrik/github-app-state.json
+*.pem
