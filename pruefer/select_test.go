@@ -212,6 +212,62 @@ func TestEligible(t *testing.T) {
 			wantOK:     false,
 			wantReason: SkipAlreadyReviewed,
 		},
+		{
+			// #1610: default Cadence ("") behaves exactly like
+			// CadenceEveryPush — a prior review at a *different* SHA never
+			// blocks a new one when Cadence is unset, preserving R2's
+			// byte-for-byte default behavior.
+			name: "cadence unset: prior review at a different SHA does not block (every-push default)",
+			in: EligibilityInput{
+				PR:              gh.PRDetails{Author: "alice", HeadSHA: "new-sha"},
+				BotLogin:        "pruefer-bot[bot]",
+				ExistingReviews: baseReviews,
+			},
+			wantOK: true,
+		},
+		{
+			name: "cadence=once: never reviewed before is eligible",
+			in: EligibilityInput{
+				PR:       gh.PRDetails{Author: "alice", HeadSHA: "sha1"},
+				BotLogin: "pruefer-bot[bot]",
+				Cadence:  CadenceOnce,
+			},
+			wantOK: true,
+		},
+		{
+			name: "cadence=once: already reviewed at a DIFFERENT sha is still skipped",
+			in: EligibilityInput{
+				PR:              gh.PRDetails{Author: "alice", HeadSHA: "new-sha"},
+				BotLogin:        "pruefer-bot[bot]",
+				ExistingReviews: baseReviews, // reviewed at "old-sha", not "new-sha"
+				Cadence:         CadenceOnce,
+			},
+			wantOK:     false,
+			wantReason: SkipCadenceOnce,
+		},
+		{
+			name: "cadence=once: forced re-review bypasses the once quota",
+			in: EligibilityInput{
+				PR:              gh.PRDetails{Author: "alice", HeadSHA: "new-sha"},
+				BotLogin:        "pruefer-bot[bot]",
+				ExistingReviews: baseReviews,
+				Cadence:         CadenceOnce,
+				ForceReview:     true,
+			},
+			wantOK: true,
+		},
+		{
+			name: "cadence=once: a review by a different author does not spend the quota",
+			in: EligibilityInput{
+				PR:       gh.PRDetails{Author: "alice", HeadSHA: "sha1"},
+				BotLogin: "pruefer-bot[bot]",
+				ExistingReviews: []gh.PRReview{
+					{Author: "some-human", CommitID: "sha1"},
+				},
+				Cadence: CadenceOnce,
+			},
+			wantOK: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -295,6 +351,28 @@ func TestEligible_LogsDistinguishesCompareFromFound(t *testing.T) {
 	}
 	if !strings.Contains(lines[0], "proceeding") {
 		t.Errorf("log line %q does not record the proceed outcome", lines[0])
+	}
+}
+
+func TestAlreadyReviewedAtAll(t *testing.T) {
+	reviews := []gh.PRReview{
+		{Author: "some-human", CommitID: "sha1"},
+		{Author: "pruefer-bot[bot]", CommitID: "stale-sha"},
+	}
+	if !alreadyReviewedAtAll(reviews, "pruefer-bot[bot]") {
+		t.Error("alreadyReviewedAtAll() = false, want true — bot has a review at a non-current SHA")
+	}
+	if !alreadyReviewedAtAll(reviews, "Pruefer-Bot[bot]") {
+		t.Error("alreadyReviewedAtAll() = false, want true — comparison must be case-insensitive")
+	}
+	if alreadyReviewedAtAll(reviews, "other-bot[bot]") {
+		t.Error("alreadyReviewedAtAll() = true, want false — no review from this author")
+	}
+	if alreadyReviewedAtAll(nil, "pruefer-bot[bot]") {
+		t.Error("alreadyReviewedAtAll() = true, want false — no reviews at all")
+	}
+	if alreadyReviewedAtAll(reviews, "") {
+		t.Error("alreadyReviewedAtAll() = true, want false — empty botLogin never matches")
 	}
 }
 
