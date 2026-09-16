@@ -518,7 +518,7 @@ GitHub App installation 789012 is missing required permissions: organization_pro
 (App settings → Install App → Configure) and restart Fabrik
 ```
 
-The engine currently requires: `metadata:read`, `organization_projects:write`, `issues:write`, `pull_requests:write`, `checks:read`, `statuses:read` — plus `webhooks:write` when `--webhooks` is enabled.
+The engine currently requires: `metadata:read`, `organization_projects:write`, `issues:write`, `pull_requests:write`, `checks:read`, `statuses:read`, `contents:read` — plus `webhooks:write` when `--webhooks` is enabled.
 
 #### Worker `gh` CLI authentication
 
