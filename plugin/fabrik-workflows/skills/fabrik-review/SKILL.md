@@ -343,7 +343,7 @@ When you receive this comment:
    For each failing check run id, pull its detail and any file/line annotations the job emitted:
    ```
    gh api repos/{owner}/{repo}/check-runs/<id> --jq '{name,conclusion,summary:.output.summary,text:.output.text,details_url}'
-   gh api repos/{owner}/{repo}/check-runs/<id>/annotations
+   gh api --paginate repos/{owner}/{repo}/check-runs/<id>/annotations
    ```
    If neither the output text nor the annotations give enough detail to pinpoint the regression, say so explicitly in your output rather than guessing — name the check and point at its `details_url` as a browsable fallback for a human.
 2. Fix only **NEW REGRESSION** failures — do not attempt to fix pre-existing base-branch failures
