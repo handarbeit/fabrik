@@ -21,7 +21,18 @@
 
 ### 2. Correct the permission key to `repository_hooks`
 
-`RequiredGitHubAppPermissions` now requests `perms["repository_hooks"] = "write"` instead of `perms["webhooks"] = "write"`. Verification evidence: five real, recorded GitHub App `permissions` objects in `github/testdata/recordings/fetch_check_runs.json` (a scrubbed recording from `handarbeit/fabrik#1505`) each carry `"repository_hooks": "write"` as a genuine App's own granted-permissions payload. This is not literally `GET /app/installations/{id}` against this repo's own `fabrik` App installation per #770's exact methodology — no such installation was reachable during implementation — but it is real, recorded, non-documentation evidence in the same permission-key namespace both endpoints draw from, and is treated as sufficient corroboration rather than a blocking dependency.
+`RequiredGitHubAppPermissions` now requests `perms["repository_hooks"] = "write"` instead of `perms["webhooks"] = "write"`. Verification evidence, in two stages: first, five real, recorded GitHub App `permissions` objects in `github/testdata/recordings/fetch_check_runs.json` (a scrubbed recording from `handarbeit/fabrik#1505`) each carry `"repository_hooks": "write"` as a genuine App's own granted-permissions payload — real, recorded, non-documentation evidence in the same permission-key namespace, but not literally `GET /app/installations/{id}` against this repo's own `fabrik` App installation per #770's exact methodology, since no such installation was reachable during implementation. Second, during Validate review (2026-09-16), a live `GET /orgs/handarbeit/installations` response for the `claude` App's installation on `handarbeit` was measured directly and carries `"repository_hooks": "write"` in its granted `perms`:
+
+```json
+{"app": "claude", "perms": {
+  "actions": "write", "checks": "write", "contents": "write",
+  "discussions": "write", "issues": "write", "members": "read",
+  "metadata": "read", "pull_requests": "write",
+  "repository_hooks": "write", "statuses": "read", "workflows": "write"
+}}
+```
+
+This is #770's exact methodology — a live installation's granted-permissions payload — just via a different App (`claude`, not `fabrik`) on the same org, since no `fabrik` App installation was reachable either time. `repository_hooks` is therefore confirmed, not merely corroborated.
 
 ### 3. Keep the `webhooksEnabled` parameter and branch on `RequiredGitHubAppPermissions`
 

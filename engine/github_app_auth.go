@@ -71,12 +71,18 @@ func GitHubAppStatePath(fabrikDir string) string {
 // rather than inference:
 //
 // "repository_hooks": #1752 confirmed that spelling (GitHub has no
-// "webhooks" permission key — the pre-#1752 value here was wrong) against
-// five real, recorded GitHub App permissions objects in
+// "webhooks" permission key — the pre-#1752 value here was wrong) two ways:
+// first against five real, recorded GitHub App permissions objects in
 // github/testdata/recordings/fetch_check_runs.json (a different App's own
 // granted-permissions payload, not literally a GET /app/installations/{id}
 // response for this repo's own App, but real and non-documentation,
-// drawing from the same permission-key namespace).
+// drawing from the same permission-key namespace); then, during Validate
+// review (2026-09-16), against a live `GET /orgs/handarbeit/installations`
+// response for the `claude` App's own installation on this repo's org,
+// whose granted `perms` carried `"repository_hooks": "write"` directly —
+// #770's exact methodology, just via a different App on the same org
+// rather than this repo's own `fabrik` App. The spelling is now confirmed,
+// not merely corroborated.
 //
 // "contents": "read" was confirmed when FetchCommitsBehind's compare
 // endpoint (GET /repos/.../compare/{base}...{head}) was found to 403 under
