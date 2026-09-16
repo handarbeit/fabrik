@@ -74,6 +74,12 @@ func TestLoadConfig_DefaultsWhenNothingSet(t *testing.T) {
 	if cfg.ReconciliationFallbackInterval != DefaultReconciliationFallbackInterval {
 		t.Errorf("ReconciliationFallbackInterval = %v, want %v", cfg.ReconciliationFallbackInterval, DefaultReconciliationFallbackInterval)
 	}
+	if cfg.Cadence != DefaultCadence {
+		t.Errorf("Cadence = %q, want %q", cfg.Cadence, DefaultCadence)
+	}
+	if len(cfg.RepoCadence) != 0 {
+		t.Errorf("RepoCadence = %v, want empty", cfg.RepoCadence)
+	}
 }
 
 func TestLoadConfig_LogFilePrecedence(t *testing.T) {
@@ -832,6 +838,130 @@ func TestLoadConfig_ReviewGuidanceModeRejectsUnrecognizedValue(t *testing.T) {
 	}
 }
 
+// TestLoadConfig_CadenceDefaultEveryPush pins R2: an unconfigured deployment
+// resolves Cadence to every-push, not empty — the value effectiveCadence and
+// every downstream cadence check compare against.
+func TestLoadConfig_CadenceDefaultEveryPush(t *testing.T) {
+	dir := t.TempDir()
+	cfg, err := LoadConfig([]string{"-config", filepath.Join(dir, "missing.yaml")})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.Cadence != CadenceEveryPush {
+		t.Errorf("Cadence = %q, want %q (default)", cfg.Cadence, CadenceEveryPush)
+	}
+}
+
+// TestLoadConfig_CadencePrecedence pins the flag > env > YAML > default
+// chain for #1610's cadence setting, mirroring
+// TestLoadConfig_RequestChangesThresholdPrecedence's shape.
+func TestLoadConfig_CadencePrecedence(t *testing.T) {
+	dir := t.TempDir()
+	path := writeYAMLConfig(t, dir, `cadence: once`)
+
+	cfg, err := LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.Cadence != CadenceOnce {
+		t.Errorf("Cadence = %q, want %q (from YAML)", cfg.Cadence, CadenceOnce)
+	}
+
+	t.Setenv("PRUEFER_CADENCE", "on-request")
+	cfg, err = LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.Cadence != CadenceOnRequest {
+		t.Errorf("Cadence = %q, want %q (env should override YAML)", cfg.Cadence, CadenceOnRequest)
+	}
+
+	cfg, err = LoadConfig([]string{"-config", path, "-cadence", "every-push"})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.Cadence != CadenceEveryPush {
+		t.Errorf("Cadence = %q, want %q (flag should override env)", cfg.Cadence, CadenceEveryPush)
+	}
+}
+
+// TestLoadConfig_CadenceRejectsUnrecognizedValue mirrors
+// TestLoadConfig_RequestChangesThresholdRejectsUnrecognizedValue: a typo'd
+// cadence is an operator error worth catching at startup.
+func TestLoadConfig_CadenceRejectsUnrecognizedValue(t *testing.T) {
+	dir := t.TempDir()
+	path := writeYAMLConfig(t, dir, `cadence: sometimes`)
+
+	if _, err := LoadConfig([]string{"-config", path}); err == nil {
+		t.Fatal("LoadConfig: expected an error for an unrecognized cadence value, got nil")
+	}
+}
+
+// TestLoadConfig_RepoCadenceYAMLOnly pins that repo_cadence is a structured,
+// YAML-only setting (no flag/env), mirroring hookdeck.*/reconciliation.*'s
+// own convention, and that it resolves per exact "owner/repo" key.
+func TestLoadConfig_RepoCadenceYAMLOnly(t *testing.T) {
+	dir := t.TempDir()
+	path := writeYAMLConfig(t, dir, `
+cadence: every-push
+repo_cadence:
+  acme/noisy-repo: once
+  acme/quiet-repo: on-request
+`)
+
+	cfg, err := LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	want := map[string]string{"acme/noisy-repo": "once", "acme/quiet-repo": "on-request"}
+	if !reflect.DeepEqual(cfg.RepoCadence, want) {
+		t.Errorf("RepoCadence = %v, want %v", cfg.RepoCadence, want)
+	}
+}
+
+// TestLoadConfig_RepoCadenceRejectsUnrecognizedValue pins that every
+// repo_cadence entry is validated exactly like the global cadence default —
+// a per-repo typo must fail loud at startup, not silently resolve to
+// every-push for that one repo.
+func TestLoadConfig_RepoCadenceRejectsUnrecognizedValue(t *testing.T) {
+	dir := t.TempDir()
+	path := writeYAMLConfig(t, dir, `
+repo_cadence:
+  acme/noisy-repo: sometimes
+`)
+
+	if _, err := LoadConfig([]string{"-config", path}); err == nil {
+		t.Fatal("LoadConfig: expected an error for an unrecognized repo_cadence value, got nil")
+	}
+}
+
+// TestEffectiveCadence_RepoOverrideWinsOverGlobalDefault pins effectiveCadence's
+// resolution order (R3): a repo_cadence entry always wins over the global
+// default when present, falls back to the global default otherwise, and
+// falls back further to DefaultCadence when called against a Config built
+// directly (not via LoadConfig) with an empty Cadence field — so the
+// "unconfigured behaves as every-push" guarantee (R2) holds for direct
+// Config construction too (e.g. in review_test.go's table-driven cases).
+func TestEffectiveCadence_RepoOverrideWinsOverGlobalDefault(t *testing.T) {
+	cfg := Config{
+		Cadence: CadenceEveryPush,
+		RepoCadence: map[string]string{
+			"acme/special": CadenceOnce,
+		},
+	}
+	if got := effectiveCadence(cfg, "acme", "special"); got != CadenceOnce {
+		t.Errorf("effectiveCadence(special) = %q, want %q (repo override)", got, CadenceOnce)
+	}
+	if got := effectiveCadence(cfg, "acme", "ordinary"); got != CadenceEveryPush {
+		t.Errorf("effectiveCadence(ordinary) = %q, want %q (global default)", got, CadenceEveryPush)
+	}
+
+	var zero Config
+	if got := effectiveCadence(zero, "acme", "ordinary"); got != DefaultCadence {
+		t.Errorf("effectiveCadence(zero Config) = %q, want %q (DefaultCadence fallback)", got, DefaultCadence)
+	}
+}
+
 func TestLoadConfig_AppStatePathAndNoBrowserPrecedence(t *testing.T) {
 	dir := t.TempDir()
 	path := writeYAMLConfig(t, dir, `
@@ -1073,6 +1203,51 @@ func TestApplyConfigReload_MixOfLiveAndRestartOnlyBothReported(t *testing.T) {
 	}
 	if len(diff.FieldsChanged) != 1 || len(diff.RestartOnlyChanged) != 1 {
 		t.Errorf("FieldsChanged=%v RestartOnlyChanged=%v, want exactly one of each", diff.FieldsChanged, diff.RestartOnlyChanged)
+	}
+}
+
+// TestApplyConfigReload_CadenceAndRepoCadenceLiveApplied confirms both new
+// #1610 fields are live-reloadable, and specifically that the generic
+// reflection loop in applyConfigReload correctly diffs/applies a
+// map[string]string field (RepoCadence) via reflect.DeepEqual — unlike
+// WatchedRepos, which needs its own special-cased diffRepos handling,
+// RepoCadence needs no such special case (see the field's own doc comment).
+func TestApplyConfigReload_CadenceAndRepoCadenceLiveApplied(t *testing.T) {
+	old := Config{
+		Cadence:     CadenceEveryPush,
+		RepoCadence: map[string]string{"acme/repo1": CadenceOnce},
+	}
+	cand := Config{
+		Cadence:     CadenceOnce,
+		RepoCadence: map[string]string{"acme/repo1": CadenceOnce, "acme/repo2": CadenceOnRequest},
+	}
+
+	merged, diff := applyConfigReload(old, cand)
+
+	if merged.Cadence != CadenceOnce {
+		t.Errorf("merged.Cadence = %q, want %q", merged.Cadence, CadenceOnce)
+	}
+	if !reflect.DeepEqual(merged.RepoCadence, cand.RepoCadence) {
+		t.Errorf("merged.RepoCadence = %v, want %v", merged.RepoCadence, cand.RepoCadence)
+	}
+
+	var fieldNames []string
+	for _, c := range diff.FieldsChanged {
+		fieldNames = append(fieldNames, c.Field)
+	}
+	for _, want := range []string{"Cadence", "RepoCadence"} {
+		found := false
+		for _, n := range fieldNames {
+			if n == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("FieldsChanged = %v, missing %q", fieldNames, want)
+		}
+	}
+	if len(diff.RestartOnlyChanged) != 0 {
+		t.Errorf("RestartOnlyChanged = %v, want empty — both fields are live", diff.RestartOnlyChanged)
 	}
 }
 
