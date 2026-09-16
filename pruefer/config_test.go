@@ -962,6 +962,24 @@ func TestEffectiveCadence_RepoOverrideWinsOverGlobalDefault(t *testing.T) {
 	}
 }
 
+// TestEffectiveCadence_RepoCadenceCaseInsensitive is the regression test for
+// effectiveCadence's sibling to isWatchedRepo's own case-sensitivity bug
+// (daemon.go): an operator's repo_cadence casing and the owner/repo strings
+// ReviewPR is actually called with (ultimately GitHub-derived) have
+// different provenance and can diverge, so the lookup must be
+// case-insensitive or the override silently never applies.
+func TestEffectiveCadence_RepoCadenceCaseInsensitive(t *testing.T) {
+	cfg := Config{
+		Cadence: CadenceEveryPush,
+		RepoCadence: map[string]string{
+			"Acme/Special": CadenceOnce,
+		},
+	}
+	if got := effectiveCadence(cfg, "acme", "special"); got != CadenceOnce {
+		t.Errorf("effectiveCadence(acme/special) = %q, want %q (case-insensitive repo_cadence match)", got, CadenceOnce)
+	}
+}
+
 func TestLoadConfig_AppStatePathAndNoBrowserPrecedence(t *testing.T) {
 	dir := t.TempDir()
 	path := writeYAMLConfig(t, dir, `

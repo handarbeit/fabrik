@@ -933,9 +933,19 @@ func validCadence(s string) bool {
 // (e.g. in tests) without going through LoadConfig's own default-filling,
 // preserving R2's "unconfigured behaves as every-push" guarantee everywhere,
 // not just for the CLI entry point.
+//
+// The RepoCadence lookup is case-insensitive (strings.EqualFold), matching
+// every other owner/repo comparison in this package: an operator's
+// repo_cadence casing and the owner/repo strings ReviewPR is called with
+// (ultimately GitHub-derived, via ReviewFromEvent's webhook payload or
+// poll()'s derived repo set) have different provenance and can diverge — see
+// daemon.go's isWatchedRepo, which had and fixed this exact bug.
 func effectiveCadence(cfg Config, owner, repo string) string {
-	if v, ok := cfg.RepoCadence[owner+"/"+repo]; ok && v != "" {
-		return v
+	target := owner + "/" + repo
+	for repoKey, v := range cfg.RepoCadence {
+		if v != "" && strings.EqualFold(repoKey, target) {
+			return v
+		}
 	}
 	if cfg.Cadence != "" {
 		return cfg.Cadence
