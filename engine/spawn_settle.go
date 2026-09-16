@@ -109,7 +109,7 @@ func (e *Engine) escalateChildPlacementFailure(item gh.ProjectItem) {
 		} else {
 			if c := e.cache(); c != nil {
 				c.ApplyCommentAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), gh.Comment{
-					DatabaseID: dbID, Body: comment, Author: e.cfg.User,
+					DatabaseID: dbID, Body: comment, Author: e.selfLogin(),
 				})
 			}
 			if e.webhookMgr != nil {

@@ -251,13 +251,13 @@ func (e *Engine) checkDependencies(board *gh.ProjectBoard, item gh.ProjectItem, 
 		e.applyLabelAdd(item, "fabrik:blocked", false)
 	} else {
 		// Already blocked: edit the existing comment in-place if the dep list changed.
-		existing := findBlockedComment(item.Comments, e.cfg.User)
+		existing := findBlockedComment(item.Comments, e.selfLogin())
 		if existing != nil && existing.Body != newComment {
 			if err := e.client.UpdateComment(owner, repo, existing.DatabaseID, newComment); err != nil {
 				e.logf(item.Number, "warn", "could not update blocked comment: %v\n", err)
 			} else if c := e.cache(); c != nil {
 				c.ApplyCommentAdded(boardcache.ItemKey(itemRepo, item.Number), gh.Comment{
-					DatabaseID: existing.DatabaseID, Body: newComment, Author: e.cfg.User, CreatedAt: time.Now(),
+					DatabaseID: existing.DatabaseID, Body: newComment, Author: e.selfLogin(), CreatedAt: time.Now(),
 				})
 			}
 		}
