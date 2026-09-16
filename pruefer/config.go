@@ -26,6 +26,13 @@ const (
 	DefaultConcurrencyCap = 3
 	DefaultMaxDiffBytes   = 500_000 // 500 KB
 	DefaultConfigPath     = ".pruefer/config.yaml"
+	// CadenceEveryPush, CadenceOnce, and CadenceOnRequest are the three
+	// recognized Config.Cadence/RepoCadence values (#1610) — see
+	// Config.Cadence's doc comment and adrs/1610-pruefer-review-cadence.md.
+	CadenceEveryPush = "every-push"
+	CadenceOnce      = "once"
+	CadenceOnRequest = "on-request"
+	DefaultCadence   = CadenceEveryPush
 	// DefaultReviewSkillPath is where Pruefer looks for a repo-resident
 	// review-guidance skill (#1446), resolved at the PR's base ref via the
 	// same FetchFileAtRef primitive and base-ref doctrine as
@@ -196,6 +203,43 @@ type Config struct {
 	// resolveGuidance in claude.go and adrs/1446-pruefer-review-guidance-skill.md.
 	ReviewGuidanceMode string `reload:"live"`
 
+	// Cadence governs how often Pruefer automatically reviews a PR (#1610).
+	// Operator-only, never settable from a reviewed repo's own resident
+	// config (unlike RequestChangesThreshold/ExcludedPaths above) — cadence
+	// is scrutiny *over time*, and reducing it is a widening of what can
+	// reach main unreviewed, not a narrowing of scope the way a smaller
+	// excluded_paths/max_diff_bytes is. See
+	// adrs/1610-pruefer-review-cadence.md.
+	//
+	// CadenceEveryPush (default; empty resolves to this via
+	// effectiveCadence, so an unconfigured deployment's behavior is
+	// byte-for-byte unchanged — R2): one automatic review per pushed head
+	// SHA, today's behavior. CadenceOnce: at most one automatic review per
+	// PR lifetime — a forced "/pruefer review" also counts toward that
+	// one-time quota (see select.go's alreadyReviewedAtAll), but
+	// "/pruefer review" itself always still works regardless of whether the
+	// quota is already spent (R4). CadenceOnRequest: no automatic review is
+	// ever triggered; only "/pruefer review" reviews the PR. LoadConfig
+	// fails loud on any other value.
+	//
+	// Per-repo override: see RepoCadence below; resolved together by
+	// effectiveCadence.
+	Cadence string `reload:"live"`
+
+	// RepoCadence is an operator-authored, per-repo override of Cadence,
+	// keyed by exact "owner/repo" (matching WatchedRepos' own convention —
+	// no fuzzy matching). A new, independent map rather than a field on
+	// WatchedRepos entries: since #1641, WatchedRepos is only an optional
+	// narrowing *filter* over installation-derived discovery and may be
+	// empty even for a repo Pruefer actively reviews, so tying a cadence
+	// override to it would be unreachable for exactly the deployments #1641
+	// was designed to make simplest (no explicit repo enumeration needed).
+	// YAML-only (no flag/env) — a structured, occasional-use setting,
+	// mirroring hookdeck.*/reconciliation.*'s own YAML-only convention.
+	// Absent/nil means no repo has an override. See
+	// adrs/1610-pruefer-review-cadence.md.
+	RepoCadence map[string]string `reload:"live"`
+
 	// TUI controls whether Execute launches the bubbletea dashboard. Default
 	// true; -notui / PRUEFER_TUI=0 / config.yaml's `tui: false` disable it,
 	// mirroring cmd/root.go's --notui/FABRIK_TUI convention. Execute further
@@ -325,19 +369,26 @@ type yamlConfig struct {
 	RequestChangesThreshold string   `yaml:"request_changes_threshold"`
 	// ReviewGuidance/ReviewGuidanceMode are #1446's operator-level review
 	// guidance override — see Config.ReviewGuidance's doc comment.
-	ReviewGuidance     string  `yaml:"review_guidance"`
-	ReviewGuidanceMode string  `yaml:"review_guidance_mode"`
-	AppID              *int64  `yaml:"github_app_id"`
-	AppPrivateKeyPath  string  `yaml:"github_app_private_key_path"`
-	AppInstallationID  *int64  `yaml:"github_app_installation_id"`
-	AppStatePath       string  `yaml:"github_app_state_path"`
-	AppName            string  `yaml:"github_app_name"`
-	AppHomepageURL     string  `yaml:"github_app_homepage_url"`
-	NoBrowser          *bool   `yaml:"no_browser"`
-	TUI                *bool   `yaml:"tui"`
-	LogFile            *string `yaml:"log_file"`
-	AutoUpgrade        *bool   `yaml:"auto_upgrade"`
-	MaxDerivedRepos    *int    `yaml:"max_derived_repos"`
+	ReviewGuidance     string `yaml:"review_guidance"`
+	ReviewGuidanceMode string `yaml:"review_guidance_mode"`
+	// Cadence/RepoCadence are #1610's operator-only review cadence setting —
+	// see Config.Cadence/RepoCadence's doc comments. Deliberately absent
+	// from yamlRepoConfig (reporeconfig.go): a repo-resident config has no
+	// field to land either key in, so an attempt surfaces only as a logged,
+	// ignored RepoConfigProvenance.UnknownKeys entry (R3).
+	Cadence           string            `yaml:"cadence"`
+	RepoCadence       map[string]string `yaml:"repo_cadence"`
+	AppID             *int64            `yaml:"github_app_id"`
+	AppPrivateKeyPath string            `yaml:"github_app_private_key_path"`
+	AppInstallationID *int64            `yaml:"github_app_installation_id"`
+	AppStatePath      string            `yaml:"github_app_state_path"`
+	AppName           string            `yaml:"github_app_name"`
+	AppHomepageURL    string            `yaml:"github_app_homepage_url"`
+	NoBrowser         *bool             `yaml:"no_browser"`
+	TUI               *bool             `yaml:"tui"`
+	LogFile           *string           `yaml:"log_file"`
+	AutoUpgrade       *bool             `yaml:"auto_upgrade"`
+	MaxDerivedRepos   *int              `yaml:"max_derived_repos"`
 	// RepoRederivationInterval is a Go duration string (e.g. "10m"),
 	// matching reconciliation.fallback_interval's own convention below,
 	// unlike this file's other duration fields (which use a "_seconds" int
@@ -393,6 +444,7 @@ type flagValues struct {
 	requestChangesThreshold string
 	reviewGuidance          string
 	reviewGuidanceMode      string
+	cadence                 string
 	appID                   int64
 	appPrivateKeyPath       string
 	appInstallationID       int64
@@ -437,6 +489,7 @@ func LoadConfig(args []string) (Config, error) {
 	fs.StringVar(&fv.requestChangesThreshold, "request-changes-threshold", "", "Severity tier (low, medium, high, critical) at or above which Pruefer submits REQUEST_CHANGES instead of COMMENT; empty disables severity-gated REQUEST_CHANGES entirely")
 	fs.StringVar(&fv.reviewGuidance, "review-guidance", "", "Operator-level review guidance text, composed onto the embedded default (and, per repo, a repo's own .pruefer/skills/review/SKILL.md) per -review-guidance-mode")
 	fs.StringVar(&fv.reviewGuidanceMode, "review-guidance-mode", "", "How -review-guidance composes onto the embedded default guidance: append (default) or replace")
+	fs.StringVar(&fv.cadence, "cadence", "", "Review cadence: every-push (default, one automatic review per pushed head SHA), once (at most one automatic review per PR), or on-request (no automatic review; only /pruefer review triggers one)")
 	fs.Int64Var(&fv.appID, "github-app-id", 0, "GitHub App ID")
 	fs.StringVar(&fv.appPrivateKeyPath, "github-app-private-key-path", "", "Path to the GitHub App's PEM private key")
 	fs.Int64Var(&fv.appInstallationID, "github-app-installation-id", 0, "GitHub App installation ID (0 = auto-discover)")
@@ -488,6 +541,8 @@ func LoadConfig(args []string) (Config, error) {
 		ExcludedAuthors:   yc.ExcludedAuthors,
 		ExcludedPaths:     yc.ExcludedPaths,
 		ExcludedLabels:    yc.ExcludedLabels,
+		Cadence:           DefaultCadence,
+		RepoCadence:       yc.RepoCadence,
 		AppPrivateKeyPath: DefaultPrivateKeyPath,
 		AppStatePath:      DefaultAppStatePath,
 		TUI:               true,
@@ -511,6 +566,9 @@ func LoadConfig(args []string) (Config, error) {
 	}
 	if yc.ReviewGuidanceMode != "" {
 		cfg.ReviewGuidanceMode = yc.ReviewGuidanceMode
+	}
+	if yc.Cadence != "" {
+		cfg.Cadence = yc.Cadence
 	}
 	if yc.TUI != nil {
 		cfg.TUI = *yc.TUI
@@ -642,6 +700,9 @@ func LoadConfig(args []string) (Config, error) {
 	if explicit["review-guidance-mode"] {
 		cfg.ReviewGuidanceMode = fv.reviewGuidanceMode
 	}
+	if explicit["cadence"] {
+		cfg.Cadence = fv.cadence
+	}
 	if explicit["github-app-id"] {
 		cfg.AppID = fv.appID
 	}
@@ -718,6 +779,15 @@ func LoadConfig(args []string) (Config, error) {
 		return Config{}, fmt.Errorf("review_guidance_mode: %q is not recognized (must be %q, %q, or empty to default to %q)", cfg.ReviewGuidanceMode, GuidanceModeAppend, GuidanceModeReplace, GuidanceModeAppend)
 	}
 
+	if !validCadence(cfg.Cadence) {
+		return Config{}, fmt.Errorf("cadence: %q is not a recognized cadence mode (must be %q, %q, or %q)", cfg.Cadence, CadenceEveryPush, CadenceOnce, CadenceOnRequest)
+	}
+	for repoKey, c := range cfg.RepoCadence {
+		if !validCadence(c) {
+			return Config{}, fmt.Errorf("repo_cadence[%q]: %q is not a recognized cadence mode (must be %q, %q, or %q)", repoKey, c, CadenceEveryPush, CadenceOnce, CadenceOnRequest)
+		}
+	}
+
 	return cfg, nil
 }
 
@@ -773,6 +843,9 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("PRUEFER_REVIEW_GUIDANCE_MODE"); v != "" {
 		cfg.ReviewGuidanceMode = v
+	}
+	if v := os.Getenv("PRUEFER_CADENCE"); v != "" {
+		cfg.Cadence = v
 	}
 	if v := os.Getenv("PRUEFER_GITHUB_APP_ID"); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
@@ -841,6 +914,33 @@ func applyEnv(cfg *Config) {
 			cfg.ReconciliationFallbackInterval = d
 		}
 	}
+}
+
+// validCadence reports whether s is one of the three recognized cadence
+// modes (#1610). Unlike RequestChangesThreshold's validSeverity, there is no
+// "empty means off" state here — LoadConfig always resolves cfg.Cadence to
+// DefaultCadence before this is ever checked, so an empty value reaching
+// here (e.g. an explicit --cadence="" or PRUEFER_CADENCE="") is rejected
+// exactly like any other unrecognized value.
+func validCadence(s string) bool {
+	return s == CadenceEveryPush || s == CadenceOnce || s == CadenceOnRequest
+}
+
+// effectiveCadence resolves the cadence mode that applies to owner/repo:
+// RepoCadence's per-repo override (R3) wins when present, else the global
+// Cadence default. Falls back to DefaultCadence when cfg.Cadence is empty —
+// this makes the function safe to call against a Config built directly
+// (e.g. in tests) without going through LoadConfig's own default-filling,
+// preserving R2's "unconfigured behaves as every-push" guarantee everywhere,
+// not just for the CLI entry point.
+func effectiveCadence(cfg Config, owner, repo string) string {
+	if v, ok := cfg.RepoCadence[owner+"/"+repo]; ok && v != "" {
+		return v
+	}
+	if cfg.Cadence != "" {
+		return cfg.Cadence
+	}
+	return DefaultCadence
 }
 
 // splitCSV splits a comma-separated string into a trimmed, non-empty slice.
