@@ -75,6 +75,15 @@ type ReviewOutcome struct {
 // triggers the FetchPRDiff call used for the size guard and path exclusion,
 // so a skip never costs an extra network round-trip.
 //
+// #1610: cfg.Cadence/RepoCadence (resolved here via effectiveCadence) gate
+// automatic reviews. CadenceOnRequest short-circuits immediately after
+// forceReview is known, ahead of even the local tracker check, since it
+// needs nothing else. CadenceOnce is enforced inside Eligible(), which
+// already has ExistingReviews in scope. Both are bypassed by forceReview,
+// exactly like the existing alreadyReviewedAtHead/tracker checks — a human-
+// requested "/pruefer review" always still reviews the PR (R4). See
+// adrs/1610-pruefer-review-cadence.md.
+//
 // tracker (#1631) is a second, independent, GitHub-independent source of
 // truth for "have I already reviewed this exact head" — consulted
 // immediately after PendingForceReview and before FetchPRReviews is even
@@ -146,6 +155,19 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 		forceReview = false // not fatal to the poll cycle — treat as no forced review this round
 	}
 
+	// #1610 R1/R4: cadence == on-request means no automatic review is ever
+	// triggered — only a pending "/pruefer review" command does. Gated here,
+	// immediately after forceReview is resolved and before the local tracker
+	// check or FetchPRReviews, since this decision needs nothing but the
+	// force-review boolean and costs zero further GitHub calls when it
+	// fires. CadenceOnce is handled later, inside Eligible(), where the
+	// already-fetched ExistingReviews it needs are in scope.
+	cadence := effectiveCadence(cfg, owner, repo)
+	if !forceReview && cadence == CadenceOnRequest {
+		logf(pr.Number, "select", "skipping %s/%s#%d: %s\n", owner, repo, pr.Number, SkipCadenceOnRequest)
+		return ReviewOutcome{Skipped: true, Reason: SkipCadenceOnRequest}
+	}
+
 	// #1631 R2/R3: the local tracker backstop, checked before FetchPRReviews
 	// is ever called — a confirmed-duplicate head costs zero further GitHub
 	// API calls, and (unlike the GitHub-derived check below) this decision
@@ -170,6 +192,7 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 		ExcludedLabels:  cfg.ExcludedLabels,
 		ExistingReviews: reviews,
 		ForceReview:     forceReview,
+		Cadence:         cadence,
 	}
 	if ok, reason := Eligible(cheapCheck); !ok {
 		logf(pr.Number, "select", "skipping %s/%s#%d: %s\n", owner, repo, pr.Number, reason)

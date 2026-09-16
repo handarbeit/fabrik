@@ -659,6 +659,157 @@ func TestReviewPR_ForceReview_BypassesLocalTracker(t *testing.T) {
 	}
 }
 
+// TestReviewPR_CadenceOnRequest_SkipsWithoutForceReview pins #1610's
+// on-request mode: with no pending "/pruefer review" comment, ReviewPR must
+// skip before ever calling FetchPRReviews, FetchPRDiff, cloning, or invoking
+// claude — the whole point of gating this immediately after forceReview is
+// resolved.
+func TestReviewPR_CadenceOnRequest_SkipsWithoutForceReview(t *testing.T) {
+	client := newFakeReviewer()
+	claude := &mockClaudeInvoker{}
+	clone, cloneCalls := fakeClone(t, nil)
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	cfg := Config{Cadence: CadenceOnRequest}
+	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr, nil)
+
+	if !outcome.Skipped || outcome.Reason != SkipCadenceOnRequest {
+		t.Fatalf("outcome = %+v, want Skipped with SkipCadenceOnRequest", outcome)
+	}
+	if cloneCalls.Load() != 0 || claude.callCount() != 0 || client.submitCallCount() != 0 {
+		t.Error("cadence=on-request without a pending force review must never clone, invoke claude, or submit")
+	}
+}
+
+// TestReviewPR_CadenceOnRequest_ForceReviewStillWorks pins R4: a pending
+// "/pruefer review" command still triggers a full review under on-request,
+// exactly as it does under every-push/once.
+func TestReviewPR_CadenceOnRequest_ForceReviewStillWorks(t *testing.T) {
+	client := newFakeReviewer()
+	client.comments = []gh.Comment{{DatabaseID: 42, Body: "/pruefer review"}}
+	claude := &mockClaudeInvoker{}
+	clone, cloneCalls := fakeClone(t, nil)
+
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	cfg := Config{Cadence: CadenceOnRequest}
+	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr, nil)
+
+	if !outcome.Reviewed {
+		t.Fatalf("outcome = %+v, want Reviewed=true — /pruefer review must still work under cadence=on-request", outcome)
+	}
+	if cloneCalls.Load() != 1 || claude.callCount() != 1 || client.submitCallCount() != 1 {
+		t.Error("forced review under on-request must clone, invoke claude, and submit exactly once")
+	}
+	if !client.comments[0].HasReaction("ROCKET") {
+		t.Error("expected the /pruefer review comment to be marked processed (ROCKET reaction)")
+	}
+}
+
+// TestReviewPR_CadenceOnce_SecondAutomaticPushIsSkipped pins #1610's once
+// mode end-to-end: the first eligible head is reviewed automatically, and a
+// subsequent push to a NEW head SHA (which every-push would review again)
+// is skipped instead, since the PR has already received its one automatic
+// review.
+func TestReviewPR_CadenceOnce_SecondAutomaticPushIsSkipped(t *testing.T) {
+	client := newFakeReviewer()
+	claude := &mockClaudeInvoker{fn: func(req ReviewRequest) (ReviewResult, error) {
+		return ReviewResult{Text: "Looks fine."}, nil
+	}}
+	clone, cloneCalls := fakeClone(t, nil)
+	cfg := Config{Cadence: CadenceOnce}
+
+	pr1 := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	first := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr1, nil)
+	if !first.Reviewed {
+		t.Fatalf("first ReviewPR outcome = %+v, want Reviewed=true", first)
+	}
+
+	pr2 := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha2"} // a new push
+	second := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr2, nil)
+	if !second.Skipped || second.Reason != SkipCadenceOnce {
+		t.Fatalf("second ReviewPR outcome = %+v, want Skipped with SkipCadenceOnce", second)
+	}
+
+	if cloneCalls.Load() != 1 || claude.callCount() != 1 || client.submitCallCount() != 1 {
+		t.Errorf("cadence=once must review exactly once across both pushes; got clones=%d claude=%d submits=%d",
+			cloneCalls.Load(), claude.callCount(), client.submitCallCount())
+	}
+}
+
+// TestReviewPR_CadenceOnce_ForcedReviewThenAutomaticPushIsSkipped pins the
+// ADR-1610 decision that a forced "/pruefer review" consumes the once quota
+// exactly like an automatic review would: after a forced review, a later
+// automatic push to a new head is skipped, but a second forced review still
+// works (R4).
+func TestReviewPR_CadenceOnce_ForcedReviewThenAutomaticPushIsSkipped(t *testing.T) {
+	client := newFakeReviewer()
+	client.comments = []gh.Comment{{DatabaseID: 42, Body: "/pruefer review"}}
+	claude := &mockClaudeInvoker{}
+	clone, cloneCalls := fakeClone(t, nil)
+	cfg := Config{Cadence: CadenceOnce}
+
+	pr1 := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	forced := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr1, nil)
+	if !forced.Reviewed {
+		t.Fatalf("forced ReviewPR outcome = %+v, want Reviewed=true", forced)
+	}
+
+	pr2 := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha2"}
+	automatic := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr2, nil)
+	if !automatic.Skipped || automatic.Reason != SkipCadenceOnce {
+		t.Fatalf("automatic ReviewPR outcome = %+v, want Skipped with SkipCadenceOnce — a forced review must consume the once quota", automatic)
+	}
+
+	if cloneCalls.Load() != 1 || claude.callCount() != 1 || client.submitCallCount() != 1 {
+		t.Error("only the forced review should have run")
+	}
+}
+
+// TestReviewPR_RepoCadence_OverridesGlobalDefault pins effectiveCadence's
+// per-repo resolution wired all the way through ReviewPR: a repo_cadence
+// entry for this exact owner/repo overrides the global Cadence, while a
+// different repo not named in the map still uses the global default.
+func TestReviewPR_RepoCadence_OverridesGlobalDefault(t *testing.T) {
+	cfg := Config{
+		Cadence:     CadenceEveryPush,
+		RepoCadence: map[string]string{"owner/quiet-repo": CadenceOnRequest},
+	}
+
+	t.Run("named repo uses its override", func(t *testing.T) {
+		client := newFakeReviewer()
+		claude := &mockClaudeInvoker{}
+		clone, cloneCalls := fakeClone(t, nil)
+		pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+
+		outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "quiet-repo", pr, nil)
+
+		if !outcome.Skipped || outcome.Reason != SkipCadenceOnRequest {
+			t.Fatalf("outcome = %+v, want Skipped with SkipCadenceOnRequest (repo_cadence override)", outcome)
+		}
+		if cloneCalls.Load() != 0 || claude.callCount() != 0 {
+			t.Error("the overridden repo must never clone or invoke claude automatically")
+		}
+	})
+
+	t.Run("unlisted repo keeps the global default", func(t *testing.T) {
+		client := newFakeReviewer()
+		claude := &mockClaudeInvoker{fn: func(req ReviewRequest) (ReviewResult, error) {
+			return ReviewResult{Text: "Looks fine."}, nil
+		}}
+		clone, cloneCalls := fakeClone(t, nil)
+		pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+
+		outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "other-repo", pr, nil)
+
+		if !outcome.Reviewed {
+			t.Fatalf("outcome = %+v, want Reviewed=true (global every-push default applies)", outcome)
+		}
+		if cloneCalls.Load() != 1 || claude.callCount() != 1 {
+			t.Error("the unlisted repo must review normally under the global default")
+		}
+	})
+}
+
 // TestReviewPR_DiffTooLarge_Skipped covers the pathological-exhaustion case:
 // "x diff content" has no "diff --git" header at all, so splitDiffFiles
 // puts every byte into the unattributed preamble — nothing to exclude,

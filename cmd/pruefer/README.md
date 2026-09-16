@@ -413,6 +413,8 @@ Every field is classified as either **live** (applied immediately) or **restart-
 | `request_changes_threshold` | Live. |
 | `review_guidance` | Live. |
 | `review_guidance_mode` | Live. |
+| `cadence` | Live. |
+| `repo_cadence` | Live. A changed map is diffed and applied like any other live field (`reflect.DeepEqual`), rendered in the reload log as a plain before/after map dump rather than a per-repo added/removed summary. |
 | `auto_upgrade` | Live, effective starting the next poll boundary. |
 | `reconciliation.fallback_interval` | Live (event-driven mode only). |
 | `github_app_id` | Restart-only. |
@@ -434,6 +436,33 @@ Every reload — successful or not — logs a diff-style summary to `.pruefer/pr
 ## On-demand re-review
 
 Comment `/pruefer review` on any watched PR to force a fresh review of the current head, even if that SHA was already reviewed. Pruefer acknowledges the command with a 👀 reaction when it picks it up and a 🚀 reaction once the review has been submitted — the same idempotency convention Fabrik uses for its own comment processing.
+
+`/pruefer review` works regardless of `cadence` (see [Review cadence](#review-cadence) below) — it is the one way to get a review on a PR under `cadence: on-request`, and it still works after `cadence: once` has already spent its automatic quota.
+
+## Review cadence
+
+By default (`cadence: every-push`), Pruefer reviews a PR's head SHA on every push — unchanged since V1, and the byte-for-byte default for any deployment that doesn't set this. Two other modes let an operator reduce review noise/cost on a repo without changing what Pruefer looks for or how strict it is:
+
+| Mode | Behavior |
+|---|---|
+| `every-push` (default) | One automatic review per pushed head SHA — today's behavior. |
+| `once` | At most one automatic review per PR lifetime. The first eligible head is reviewed; later pushes to the same PR are not. Reopening a PR does not reset this. |
+| `on-request` | No automatic review at all. Only `/pruefer review` reviews the PR. |
+
+**A forced `/pruefer review` also consumes `once`'s one-time quota.** GitHub's review data carries no record of *why* a review was submitted, and Pruefer does not add new local state to distinguish "automatic" from "forced." Concretely: if you run `/pruefer review` on a PR under `cadence: once`, that counts as the PR's one automatic review — a later push to that PR will not trigger another one automatically, though `/pruefer review` will always still work. See [adrs/1610-pruefer-review-cadence.md](../../adrs/1610-pruefer-review-cadence.md) for the full rationale.
+
+**Operator-only, per-repo overridable — never repo-narrowable.** `cadence` (global default) and `repo_cadence` (per-repo override, keyed by exact `owner/repo`) both live exclusively in the *operator's* `.pruefer/config.yaml`:
+
+```yaml
+cadence: every-push       # global default; every-push, once, or on-request
+repo_cadence:
+  acme/high-traffic-repo: once
+  acme/experimental-repo: on-request
+```
+
+`repo_cadence` is independent of `watched_repos` — it applies to any repo Pruefer reviews, whether or not that repo is also named in `watched_repos` (see [Installation-derived repo discovery](#installation-derived-repo-discovery)). It is YAML-only (no flag or environment variable), matching `hookdeck.*`/`reconciliation.*`'s own structured-config convention.
+
+Cadence is deliberately **not** one of the settings a reviewed repo can narrow for itself in its own resident `.pruefer/config.yaml` (see [What a repo may and may not set](#what-a-repo-may-and-may-not-set) below) — unlike `excluded_paths` or `max_diff_bytes`, reducing review frequency widens what can reach `main` unreviewed rather than narrowing scope, and it spends the *operator's* Claude budget. See [adrs/1610-pruefer-review-cadence.md](../../adrs/1610-pruefer-review-cadence.md) for the full argument.
 
 ## Severity-gated REQUEST_CHANGES
 
@@ -481,6 +510,7 @@ A repo's config can only **narrow** the operator's settings — it can never wid
 | `excluded_authors` | Yes | Union, same as above. |
 | `max_diff_bytes` | Yes, narrowing only | A repo may only **lower** the operator's cap, never raise it or uncap it. |
 | `request_changes_threshold` | Yes, narrowing only | A repo may only move it to an **equal-or-stricter** severity tier than the operator's — including turning it on (any tier) when the operator left it off — never to a more lenient tier, and never back to off if the operator configured one. See [Severity-gated REQUEST_CHANGES](#severity-gated-request_changes) for tier ordering. |
+| `cadence` / `repo_cadence` | No | Operator-only, never repo-narrowable — reducing review cadence is a *widening* of what can reach `main` unreviewed, not a narrowing of scope, and it spends the operator's own Claude budget. See [Review cadence](#review-cadence) and [adrs/1610-pruefer-review-cadence.md](../../adrs/1610-pruefer-review-cadence.md). |
 | Everything else | No | `model`, `effort`, `concurrency_cap`, `poll_interval_seconds`, `max_wall_time_seconds`, `tui`, `auto_upgrade`, `no_browser`, `github_app_*`, `event_source`, `hookdeck.*`, `reconciliation.*`, `log_file`, `watched_repos`, `served_accounts`, `max_derived_repos`, `repo_rederivation_interval`, and any unrecognized key — all operator-scoped (cost, credentials, capability, or discovery/resource-management knobs), and all silently ignored with a logged warning if a repo sets them. |
 
 A rejected widening attempt (e.g. a repo trying to raise `max_diff_bytes` or unset an operator-configured `request_changes_threshold`) is logged and ignored for that field alone — the operator's value holds, and the rest of the repo's config (any other, valid narrowing) still applies.
@@ -567,6 +597,8 @@ Precedence, highest to lowest: **flag > environment variable > YAML config file 
 | `--request-changes-threshold` | `PRUEFER_REQUEST_CHANGES_THRESHOLD` | `request_changes_threshold` | (none — disabled) | `low`, `medium`, `high`, or `critical`; submits `REQUEST_CHANGES` when a finding's severity meets or exceeds this tier. See [Severity-gated REQUEST_CHANGES](#severity-gated-request_changes). |
 | `--review-guidance` | `PRUEFER_REVIEW_GUIDANCE` | `review_guidance` | (none) | Operator-level review guidance text, composed onto the embedded default (and, per repo, a repo's own skill file) per `review_guidance_mode`. See [Review guidance skill](#review-guidance-skill-prueferskillsreviewskillmd-in-the-reviewed-repo). |
 | `--review-guidance-mode` | `PRUEFER_REVIEW_GUIDANCE_MODE` | `review_guidance_mode` | `append` | `append` or `replace`; how `review_guidance` composes onto the embedded default guidance. An unrecognized value fails `LoadConfig` at startup (operator-authored config is validated strictly, unlike the repo skill's own mode, which degrades instead). |
+| `--cadence` | `PRUEFER_CADENCE` | `cadence` | `every-push` | `every-push`, `once`, or `on-request`. Operator-only; see [Review cadence](#review-cadence). An unrecognized value fails `LoadConfig` at startup. |
+| — | — | `repo_cadence` | (none) | YAML-only map of exact `owner/repo` → cadence mode, overriding `cadence` for that repo. See [Review cadence](#review-cadence). |
 | `--github-app-id` | `PRUEFER_GITHUB_APP_ID` | `github_app_id` | (none) | Only needed for manual/compat setup — omit it to let first-run manifest setup create and track its own App ID in `github_app_state_path` instead |
 | `--github-app-private-key-path` | `PRUEFER_GITHUB_APP_PRIVATE_KEY_PATH` | `github_app_private_key_path` | `.pruefer/app-private-key.pem` | Read from and written to by both manifest and manual setup |
 | `--github-app-installation-id` | `PRUEFER_GITHUB_APP_INSTALLATION_ID` | `github_app_installation_id` | `0` (derive from installations) | Legacy pin: set to force every review through one specific installation, regardless of owner — installation-derived discovery does not apply in this mode |
