@@ -631,6 +631,52 @@ func (r *Reconciler) VerifyGrants(required map[string]string) ([]RequiredPermiss
 	return checkGrantedPermissions(inst.Permissions, required), nil
 }
 
+// AccessibleRepos returns the full set of "owner/repo" full names the pinned
+// installation can act on (GET /installation/repositories, ADR-1641's
+// FetchInstallationRepositories) — the per-repo counterpart to VerifyGrants'
+// per-permission check (handarbeit/fabrik#1750). A caller cannot derive
+// "does this installation cover repo X" from VerifyGrants alone: that call
+// answers only "does the installation have issues:write/pull_requests:write
+// at all," which is an installation-wide grant, not a per-repo one — a
+// repository_selection: selected installation can hold every required
+// permission while still excluding a specific repo the engine's board
+// tracks.
+//
+// truncated mirrors FetchInstallationRepositories' own signal: true means
+// the 100-repos-per-page pagination ceiling was hit, so a repo missing from
+// the returned list is not necessarily excluded — it may simply be beyond
+// the page ceiling. Callers must treat a truncated result as ambiguous, not
+// as a definitive exclusion (see #1750 R3's fail-open posture).
+//
+// Only meaningful for a Reconciler built from a pinned installation
+// (opts.AppInstallationID != 0 at Reconcile time) — returns an error for a
+// non-pinned Reconciler, exactly like VerifyGrants above, since there is no
+// single "the installation" to enumerate for one that discovers
+// installations dynamically per owner.
+func (r *Reconciler) AccessibleRepos() (repos []string, truncated bool, err error) {
+	r.mu.Lock()
+	pinnedID := r.pinnedInstallationID
+	baseURL := r.baseURL
+	var pinnedAuth *Auth
+	if pinnedID != 0 && len(r.auths) > 0 {
+		pinnedAuth = r.auths[0]
+	}
+	r.mu.Unlock()
+
+	if pinnedID == 0 {
+		return nil, false, fmt.Errorf("AccessibleRepos is only supported for a Reconciler built from a pinned installation (github_app_installation_id) — this Reconciler was constructed via installation discovery, which has no single installation to enumerate")
+	}
+	if pinnedAuth == nil {
+		return nil, false, fmt.Errorf("no pinned installation auth available for installation %d", pinnedID)
+	}
+
+	repos, truncated, err = gh.FetchInstallationRepositories(baseURL, pinnedAuth.client.Token())
+	if err != nil {
+		return nil, false, fmt.Errorf("listing accessible repositories for installation %d: %w", pinnedID, err)
+	}
+	return repos, truncated, nil
+}
+
 // runManifestFlow is a package var (not a direct call to RunManifestFlow)
 // so tests can assert it is never invoked on the backward-compat path —
 // existing valid local credentials must skip the manifest flow entirely,
