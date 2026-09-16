@@ -94,6 +94,16 @@ type Config struct {
 	GitHubAppID             int64
 	GitHubAppPrivateKeyPath string
 	GitHubAppInstallationID int64
+	// NoBrowser suppresses githubauth's guided-install browser-open
+	// (Options.NoBrowser) when App auth's non-pinned discovery path is
+	// reached. Defaults to true (suppressed) for the engine — unlike
+	// Pruefer's own NoBrowser, whose default is false because its
+	// first-run setup flow makes an automatic browser-open the point. A
+	// long-running daemon is frequently headless, containerized, or on a
+	// remote box, so opening a browser must be opt-in here (#1763, R2).
+	// Also --no-browser / FABRIK_NO_BROWSER / config.yaml's no_browser
+	// (AC2, re-enables it). See engine/github_app_auth.go.
+	NoBrowser bool
 	// ReadyCh is closed once Run() has registered signal handlers. Tests use
 	// this to avoid sending SIGINT before signal.Notify is installed.
 	ReadyCh chan struct{}

@@ -2595,3 +2595,57 @@ func TestReconcile_JustBootstrapped_ContextCanceledDuringRetryBackoff_DoesNotCla
 		t.Errorf("error = %v, contains %q %d times, want exactly once (not redundantly restated)", err, "canceled", n)
 	}
 }
+
+// TestReconcile_GuidedInstallURL_UsesSlugNotAppName is the R4 regression
+// test for issue #1763's D3 (voided by Research's full-history trace):
+// guideMissingInstallations' installURL must always be built from the
+// live-fetched App slug (gh.FetchAppSlug), never from Options.AppName (a
+// manifest-creation-time default consumed only by buildManifest, a
+// structurally separate code path). AppName is deliberately set to a value
+// clearly distinguishable from the fake server's slug so a substring-based
+// assertion can't pass vacuously.
+func TestReconcile_GuidedInstallURL_UsesSlugNotAppName(t *testing.T) {
+	oldFlow := runManifestFlow
+	runManifestFlow = failingRunManifestFlow(t)
+	defer func() { runManifestFlow = oldFlow }()
+
+	oldBrowser := openBrowser
+	openBrowser = func(url string) error { return nil }
+	defer func() { openBrowser = oldBrowser }()
+
+	const (
+		liveSlug        = "live-fetched-slug"
+		distinctAppName = "totally-different-app-name"
+	)
+
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	srv, _ := newFakeAppServer(liveSlug, []gh.AppInstallation{
+		{ID: 111, Account: "handarbeit"},
+	}, func() time.Time { return time.Now().Add(time.Hour) })
+	defer srv.Close()
+
+	logf, lines := newLogCollector()
+	_, err := Reconcile(context.Background(), Options{
+		AppID: 42, AppPrivateKeyPath: keyPath, AppStatePath: filepath.Join(dir, "app-state.json"),
+		WatchedRepos: []string{"notinstalled/otherrepo"}, BaseURL: srv.URL,
+		AppName: distinctAppName, NoBrowser: true, Logf: logf,
+	})
+	if err != nil {
+		t.Fatalf("Reconcile should not hard-fail on a missing owner installation, got: %v", err)
+	}
+
+	wantURL := fmt.Sprintf("https://github.com/apps/%s/installations/new", liveSlug)
+	found := false
+	for _, l := range lines() {
+		if strings.Contains(l, wantURL) {
+			found = true
+		}
+		if strings.Contains(l, distinctAppName) {
+			t.Errorf("log line references Options.AppName (%q), which must never feed the guided-install URL: %q", distinctAppName, l)
+		}
+	}
+	if !found {
+		t.Errorf("expected a guided-install log line containing %q, got: %v", wantURL, lines())
+	}
+}

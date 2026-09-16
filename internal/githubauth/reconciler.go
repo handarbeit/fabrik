@@ -129,8 +129,31 @@ type Options struct {
 	// after the installation-grant union and any WatchedRepos filter. <= 0
 	// means no cap.
 	MaxDerivedRepos int
-	// NoBrowser is forwarded to RunManifestFlow unchanged.
+	// NoBrowser gates two independent browser-open call sites: it is
+	// forwarded to RunManifestFlow unchanged (the first-run manifest
+	// bootstrap flow), and it also gates guideMissingInstallations'
+	// guided-install browser-open (the non-pinned discovery branch of
+	// Reconcile). Its zero value (false) means "attempt to open a
+	// browser" — safe for Pruefer's own first-run-setup default, but
+	// unsafe for any caller (e.g. an external test) that constructs
+	// Options{} without deliberately setting NoBrowser: true. OpenBrowser
+	// below is the zero-value-safe alternative for exactly that case.
 	NoBrowser bool
+	// OpenBrowser, when non-nil, is consulted by guideMissingInstallations
+	// only — never by RunManifestFlow, which is driven by the separate
+	// ManifestFlowOptions struct and has no equivalent field (#1763 leaves
+	// that call site out of scope; see ADR-1763 Decision 3). It replaces
+	// which function guideMissingInstallations calls, in preference to the
+	// package-level openBrowser var, but does not bypass the NoBrowser
+	// gate: NoBrowser still decides whether a browser-open is attempted at
+	// all, OpenBrowser only decides what runs when it is. This is the
+	// seam that lets a caller outside this package (e.g. engine's own
+	// tests, #1763) exercise Reconcile's non-pinned discovery path with
+	// zero side effects on the developer's desktop, without needing to
+	// know about NoBrowser's unsafe zero value — leaving NoBrowser at its
+	// zero value (false) is what lets the call reach OpenBrowser in the
+	// first place; see TestReconcile_NonPinnedDiscovery_NoBrowserOpensViaOptionsSeam.
+	OpenBrowser func(url string) error
 	// BaseURL selects GitHub's API host. "" = production; tests point it at
 	// an httptest server.
 	BaseURL string

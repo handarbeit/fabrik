@@ -98,6 +98,12 @@ type Config struct {
 	GitHubAppID             int64
 	GitHubAppPrivateKeyPath string
 	GitHubAppInstallationID int64
+	// NoBrowser suppresses App auth's guided-install browser-open. Default
+	// true (suppressed) — the inverse of Pruefer's own no_browser default,
+	// since the engine is a daemon rather than a first-run setup flow
+	// (#1763, R2). Also --no-browser=false / FABRIK_NO_BROWSER=false /
+	// config.yaml's no_browser: false (AC2, re-enables it).
+	NoBrowser bool
 }
 
 func Execute() error {
@@ -218,6 +224,7 @@ func Execute() error {
 	flag.Int64Var(&cfg.GitHubAppID, "github-app-id", 0, "GitHub App ID for App-installation auth, co-equal with --token (also FABRIK_GITHUB_APP_ID; must be set together with --github-app-private-key-path and --github-app-installation-id, or not at all)")
 	flag.StringVar(&cfg.GitHubAppPrivateKeyPath, "github-app-private-key-path", "", "Path to the GitHub App's private key PEM file (also FABRIK_GITHUB_APP_PRIVATE_KEY_PATH)")
 	flag.Int64Var(&cfg.GitHubAppInstallationID, "github-app-installation-id", 0, "GitHub App installation ID to authenticate as (also FABRIK_GITHUB_APP_INSTALLATION_ID)")
+	flag.BoolVar(&cfg.NoBrowser, "no-browser", true, "Suppress automatic browser-opening for GitHub App guided-install prompts under App auth (also FABRIK_NO_BROWSER; default true — this is a daemon, opening a browser is opt-in; use --no-browser=false to re-enable, mirroring Pruefer's own no_browser)")
 
 	if err := flag.CommandLine.Parse(os.Args[1:]); err != nil {
 		return err
@@ -319,6 +326,14 @@ func Execute() error {
 	cfg.GHESHost = resolveGHESHost(cfg.GHESHost, pc)
 	if err := resolveGitHubAppConfig(cfg, pc); err != nil {
 		return err
+	}
+	if !explicitFlags["no-browser"] {
+		if v := os.Getenv("FABRIK_NO_BROWSER"); v != "" {
+			lv := strings.ToLower(v)
+			cfg.NoBrowser = lv == "true" || lv == "1" || lv == "yes"
+		} else if pc.NoBrowser != nil {
+			cfg.NoBrowser = *pc.NoBrowser
+		}
 	}
 	if cfg.PollSeconds == 30 {
 		if v := os.Getenv("FABRIK_POLL"); v != "" {
@@ -872,6 +887,7 @@ func Execute() error {
 		GitHubAppID:               cfg.GitHubAppID,
 		GitHubAppPrivateKeyPath:   cfg.GitHubAppPrivateKeyPath,
 		GitHubAppInstallationID:   cfg.GitHubAppInstallationID,
+		NoBrowser:                 cfg.NoBrowser,
 		ReadyCh:                   testReadyCh,
 	})
 	if err != nil {

@@ -497,6 +497,23 @@ personal access token (FABRIK_TOKEN) instead. See docs/USER_GUIDE.md
 
 **When none of the three are set, nothing changes** — Fabrik authenticates with `--token`/`FABRIK_TOKEN`/`GITHUB_TOKEN` exactly as it always has. No existing `.env` needs modification to keep working.
 
+#### Browser-opening during reconcile
+
+Separately from the one-shot `fabrik init --github-app --no-browser` setup flag above (which controls whether App *creation* opens a browser), the running engine daemon has its own `--no-browser` control, gated by the same precedence layers (flag > `FABRIK_NO_BROWSER` env var > `.fabrik/config.yaml`'s `no_browser`):
+
+```bash
+# Flags
+fabrik --no-browser=false ...   # re-enable browser-opening (default: suppressed)
+
+# Environment variable
+export FABRIK_NO_BROWSER=false
+
+# .fabrik/config.yaml
+no_browser: false
+```
+
+**The engine's default is the opposite of the setup flow's and of Pruefer's own `no_browser`: browser-opening is suppressed by default.** The engine is a long-running daemon, frequently headless, containerized, or on a remote box — popping a browser window automatically is rarely wanted there, unlike the setup flow's one-time interactive App creation. This control only matters if App auth ever reconciles without a pinned `github_app_installation_id` (a discovery mode `github_app_id`/`github_app_private_key_path`/`github_app_installation_id`'s all-or-nothing requirement above doesn't currently permit for the engine); when it does, an owner named in your watched repos with no matching installation gets a guided-install URL — logged either way, and opened in a browser only when `--no-browser=false`.
+
 #### Organization boards only
 
 GitHub strips organization-scoped permissions — including Projects v2 access — from a GitHub App installation on a **user** account; only an **organization**-owned installation ever receives them. Fabrik detects this at startup and refuses explicitly, before attempting to fetch the board:
@@ -1078,6 +1095,7 @@ FABRIK_USER=my-personal-username
 | `--github-app-id` | GitHub App ID for App-installation auth — co-equal with `--token`, not a replacement. Must be set together with `--github-app-private-key-path` and `--github-app-installation-id`, or not at all. Also `FABRIK_GITHUB_APP_ID`. See [GitHub App Authentication](#github-app-authentication). | `0` (PAT mode) |
 | `--github-app-private-key-path` | Path to the GitHub App's private key PEM file. Also `FABRIK_GITHUB_APP_PRIVATE_KEY_PATH`. | `""` |
 | `--github-app-installation-id` | GitHub App installation ID to authenticate as. Also `FABRIK_GITHUB_APP_INSTALLATION_ID`. | `0` |
+| `--no-browser` | Suppress automatic browser-opening for GitHub App guided-install prompts during reconcile. Also `FABRIK_NO_BROWSER`. See [Browser-opening during reconcile](#browser-opening-during-reconcile). Distinct from `fabrik init --github-app --no-browser`'s setup-time flag, whose default is unchanged. | `true` (suppressed) |
 
 #### Unrecognized `config.yaml` Key Warnings
 
@@ -1152,6 +1170,7 @@ The flag/env suggestion is derived mechanically from Fabrik's snake_case (`confi
 | `FABRIK_GITHUB_APP_ID` | `github_app_id` | GitHub App ID for App-installation auth — co-equal with `FABRIK_TOKEN`/`GITHUB_TOKEN`, not a replacement. Must be set together with `FABRIK_GITHUB_APP_PRIVATE_KEY_PATH` and `FABRIK_GITHUB_APP_INSTALLATION_ID`, or not at all. See [GitHub App Authentication](#github-app-authentication). | `0` (PAT mode) |
 | `FABRIK_GITHUB_APP_PRIVATE_KEY_PATH` | `github_app_private_key_path` | Path to the GitHub App's private key PEM file. | `""` |
 | `FABRIK_GITHUB_APP_INSTALLATION_ID` | `github_app_installation_id` | GitHub App installation ID to authenticate as. | `0` |
+| `FABRIK_NO_BROWSER` | `no_browser` | Suppress automatic browser-opening for GitHub App guided-install prompts during reconcile. See [Browser-opening during reconcile](#browser-opening-during-reconcile). | `true` (suppressed) |
 
 Token precedence: `--token` flag > `FABRIK_TOKEN` > `GITHUB_TOKEN`
 
