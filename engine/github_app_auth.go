@@ -55,11 +55,16 @@ func GitHubAppStatePath(fabrikDir string) string {
 // startup. webhooksEnabled adds the repo-webhook-management permission only
 // when cfg.Webhooks is on (DeleteForwardingHooks manages repo hooks; the
 // engine never touches that API otherwise) — though as of #1752,
-// RefuseWebhooksWithGitHubApp means the engine's own runtime path
-// (resolveGitHubAppAuth) never calls this with webhooksEnabled true anymore;
-// it stays reachable with true only via cmd/init_github_app.go's own
-// --webhooks setup flag. See that function's doc comment and
-// DeleteForwardingHooks' for the full unreachable-under-App-auth chain.
+// RefuseWebhooksWithGitHubApp means neither shipped CLI path can reach this
+// with webhooksEnabled true anymore: the engine's own runtime path
+// (resolveGitHubAppAuth) refuses first, and so does cmd/init.go's
+// `--github-app --webhooks` setup path, before ever calling
+// runGitHubAppSetup. It stays reachable with true only via direct,
+// unit-level calls to runGitHubAppSetup itself (as
+// TestRunGitHubAppSetup_Webhooks_ExpandsRequiredPermissions does), not
+// through any command an operator actually runs. See that function's doc
+// comment and DeleteForwardingHooks' for the full unreachable-under-App-auth
+// chain.
 //
 // This is a hand-maintained correspondence with the engine's actual API
 // usage (mirroring internal/githubauth's own requiredPermissions doc
