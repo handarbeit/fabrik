@@ -61,3 +61,35 @@ func (e *Engine) sweepStaleAllowAutoMergeWarnings(seenRepos map[string]bool) {
 		e.logf(0, "poll", "cleared stale warning %s: repo no longer on the board\n", key)
 	}
 }
+
+// sweepStaleRepoAccessWarnings is sweepStaleAllowAutoMergeWarnings' exact
+// counterpart for the "repo_access" warning type resolveRepoAccess records
+// (#1750 R4): a repo_access warning has no path to being cleared once its
+// subject repo leaves the board — resolveRepoAccess is never called again
+// for a repo no longer referenced by any board item — so without this sweep
+// it would be immortal in .fabrik/warnings.json/the TUI, the same
+// durable-state-leak shape #1348 already fixed for allow_auto_merge. Both
+// warning types key their entries identically ("<type>:owner/repo"), so the
+// same seenRepos/defaultRepo()-unioned present set applies unchanged; see
+// sweepStaleAllowAutoMergeWarnings's doc comment for the full reasoning
+// (single-repo defaultRepo() exemption, zero-seenRepos no-op, cost).
+func (e *Engine) sweepStaleRepoAccessWarnings(seenRepos map[string]bool) {
+	present := make(map[string]bool, len(seenRepos)+1)
+	for r := range seenRepos {
+		present[r] = true
+	}
+	if dr := e.defaultRepo(); dr != "" {
+		present[dr] = true
+	}
+	if len(present) == 0 {
+		return
+	}
+	cleared, err := warnings.ClearMissing("repo_access", present)
+	if err != nil {
+		e.logf(0, "warn", "stale repo_access warning sweep failed: %v\n", err)
+		return
+	}
+	for _, key := range cleared {
+		e.logf(0, "poll", "cleared stale warning %s: repo no longer on the board\n", key)
+	}
+}
