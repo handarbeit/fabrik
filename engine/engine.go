@@ -126,6 +126,23 @@ type Config struct {
 	ReadyCh chan struct{}
 }
 
+// EventSource values and defaults for the Hookdeck (App-auth-only) ingestion
+// transport (#1142). Mirrors pruefer/config.go's own EventSourcePoll/
+// EventSourceHookdeck/Default* constants by name and shape — the same
+// indirection (a config field naming an env var, not holding the secret
+// itself) — so an operator already running Pruefer with Hookdeck recognizes
+// this immediately. The literal default env var names differ from Pruefer's
+// own (FABRIK_-prefixed here, since this is Fabrik's own secret, not a
+// value Pruefer's process also reads) — see adrs/1142-hookdeck-ingestion-for-app-auth.md.
+const (
+	EventSourcePoll     = "poll"
+	EventSourceHookdeck = "hookdeck"
+
+	DefaultEventSource              = EventSourcePoll
+	DefaultHookdeckAPIKeyEnv        = "HOOKDECK_API_KEY"
+	DefaultHookdeckWebhookSecretEnv = "FABRIK_GITHUB_WEBHOOK_SECRET"
+)
+
 // cloneCall coordinates concurrent bare-clone attempts for the same repo.
 // The first caller to store one in cloneInFlight performs the clone; subsequent
 // callers wait on done and share the result.
@@ -371,6 +388,18 @@ func New(cfg Config) (*Engine, error) {
 
 	worktreeRoot := filepath.Join(fabrikDir, ".fabrik", "worktrees")
 	sharedStore := itemstate.NewStore(nil)
+
+	// event_source: hookdeck (#1142) validation runs here, alongside (not
+	// inside) resolveGitHubAppAuth's own App-auth-specific checks below —
+	// deliberately a separate call so RefuseWebhooksWithGitHubApp (#1752)
+	// never has to know EventSource exists, and vice versa. Both refusals
+	// are cheap, local config checks, so they run before any network call.
+	if err := RefuseHookdeckWithoutGitHubApp(cfg.EventSource, gitHubAppAuthConfigured(cfg)); err != nil {
+		return nil, err
+	}
+	if err := RefuseHookdeckWithWebhooks(cfg.EventSource, cfg.Webhooks); err != nil {
+		return nil, err
+	}
 
 	// GitHub App auth (#1713): resolved before the ordinary PAT-based client
 	// construction below, since a configured App-auth client takes its
