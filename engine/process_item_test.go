@@ -1757,15 +1757,21 @@ func TestProcessItem_StallDetection_ArmsCorrectiveHintOnCappedThenDeclining(t *t
 	}
 }
 
-// TestProcessItem_StallDetection_NoArmWithoutPriorCap verifies the false-positive
-// guard: a declining turn count alone, without a turn-capped predecessor, must never
-// arm a corrective hint. A shrinking retry can simply mean less work remained.
-func TestProcessItem_StallDetection_NoArmWithoutPriorCap(t *testing.T) {
+// TestProcessItem_StallDetection_ArmsOnUncappedDecliningPredecessor reproduces
+// #1142's production shape (AC1): the worker recognizes it's waiting on a
+// backgrounded command and ends its turn early, well under budget, on both of the
+// first two attempts (45/100, then 20/100 — never turn-capped). Before #1767,
+// detectAndArmStallHint required the predecessor to have hit its turn limit, so
+// this exact declining-uncapped pattern — the cleanest and most common real form
+// of the #1077 stall — was invisible to the detector, and #1142 burned all 3
+// Validate attempts with no corrective hint ever injected. This test must fail
+// before the #1767 fix and pass after.
+func TestProcessItem_StallDetection_ArmsOnUncappedDecliningPredecessor(t *testing.T) {
 	skipIfNoGit(t)
 	repoDir := initBareRepo(t)
 	wm := NewWorktreeManager(repoDir)
 
-	callTurns := []int{20, 10, 5} // declining, but never hit the 50-turn cap
+	callTurns := []int{45, 20, 7} // uncapped, declining, declining again — #1142's shape
 	callIdx := 0
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{
@@ -1783,8 +1789,8 @@ func TestProcessItem_StallDetection_NoArmWithoutPriorCap(t *testing.T) {
 			ProjectNum: 1,
 			User:       "testuser",
 			Token:      "token",
-			MaxRetries: 5,
-			Stages:     stallDetectionStages(50),
+			MaxRetries: 5, // enough headroom to observe all three calls without escalation cutting the sequence short
+			Stages:     stallDetectionStages(100),
 		},
 		client,
 		claude,
@@ -1792,7 +1798,7 @@ func TestProcessItem_StallDetection_NoArmWithoutPriorCap(t *testing.T) {
 	)
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
-	item := gh.ProjectItem{Number: 21, Title: "No false-positive test", Status: "Research", ItemID: "PVTI_21"}
+	item := gh.ProjectItem{Number: 21, Title: "Uncapped-predecessor stall test", Status: "Research", ItemID: "PVTI_21"}
 
 	for i := 0; i < 3; i++ {
 		if err := eng.processItem(context.Background(), board, item); err != nil {
@@ -1800,15 +1806,30 @@ func TestProcessItem_StallDetection_NoArmWithoutPriorCap(t *testing.T) {
 		}
 	}
 
-	for i, call := range claude.calls {
-		if call.opts.CorrectiveHint != "" {
-			t.Errorf("call %d: CorrectiveHint = %q, want empty (no turn-capped predecessor)", i+1, call.opts.CorrectiveHint)
-		}
+	if len(claude.calls) != 3 {
+		t.Fatalf("expected 3 Claude invocations, got %d", len(claude.calls))
 	}
+	if got := claude.calls[0].opts.CorrectiveHint; got != "" {
+		t.Errorf("call 1 (uncapped, first attempt): CorrectiveHint = %q, want empty", got)
+	}
+	if got := claude.calls[1].opts.CorrectiveHint; got != "" {
+		t.Errorf("call 2 (uncapped, declining, arms hint for next call): CorrectiveHint = %q, want empty", got)
+	}
+	if got := claude.calls[2].opts.CorrectiveHint; got == "" {
+		t.Error("call 3: CorrectiveHint = empty, want the armed corrective hint (uncapped-then-declining pattern from calls 1-2, #1142)")
+	}
+
+	foundStallComment := false
 	for _, call := range client.addCommentCalls {
 		if strings.Contains(call.body, "possible stall detected") {
-			t.Error("unexpected stall-detection comment without a turn-capped predecessor")
+			foundStallComment = true
+			if strings.Contains(call.body, "hit its turn limit") {
+				t.Errorf("stall comment misdescribes an uncapped predecessor as having hit its turn limit: %q", call.body)
+			}
 		}
+	}
+	if !foundStallComment {
+		t.Error("expected a stall-detection comment to be posted after call 2")
 	}
 }
 
@@ -2024,6 +2045,70 @@ func TestDetectAndArmStallHint_NoArmWhenCurrentAttemptAlsoCapped(t *testing.T) {
 		if strings.Contains(call.body, "possible stall detected") {
 			t.Error("unexpected stall-detection comment when the current attempt is also turn-capped")
 		}
+	}
+}
+
+// TestDetectAndArmStallHint_ArmsAtMostOncePerEpisode is AC4's guard: a
+// multi-attempt declining sequence (uncapped 45 -> 20 -> 7, all clean) must arm
+// the corrective hint exactly once, not on every subsequent declining
+// comparison. Before #1767, this was an emergent side effect of gating on
+// prevCapped — the arming attempt was itself always uncapped, which cleared the
+// precondition for the very next comparison. Loosening arming to "predecessor
+// was clean" (capped or not) removes that emergent property, since the arming
+// attempt is now itself clean too — so the explicit StallEpisodeArmed guard
+// introduced by #1767 is what this test verifies.
+func TestDetectAndArmStallHint_ArmsAtMostOncePerEpisode(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := NewWithDeps(
+		Config{
+			Owner:      "owner",
+			Repo:       "repo",
+			ProjectNum: 1,
+			User:       "testuser",
+			Token:      "token",
+			MaxRetries: 5,
+			Stages:     stallDetectionStages(100),
+		},
+		client,
+		claude,
+		wm,
+	)
+
+	item := gh.ProjectItem{Number: 31, Title: "one-shot-per-episode", Status: "Research", ItemID: "PVTI_31"}
+	stage := eng.cfg.Stages[0]
+	repoStr := "owner/repo"
+
+	// Attempt 1: uncapped, no predecessor recorded yet — cannot arm.
+	eng.detectAndArmStallHint(item, stage, repoStr, TokenUsage{TurnsUsed: 45, MaxTurns: 100}, true)
+	// Attempt 2: uncapped, declining relative to attempt 1 — arms the hint.
+	eng.detectAndArmStallHint(item, stage, repoStr, TokenUsage{TurnsUsed: 20, MaxTurns: 100}, true)
+	// Attempt 3: uncapped, still declining relative to attempt 2 — must NOT re-arm;
+	// the episode already armed once.
+	eng.detectAndArmStallHint(item, stage, repoStr, TokenUsage{TurnsUsed: 7, MaxTurns: 100}, true)
+
+	snap, err := eng.store.Get(repoStr, item.Number)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if !snap.StallHintPending(stage.Name) {
+		t.Error("expected the hint armed at attempt 2 to still be pending")
+	}
+	if !snap.StallEpisodeArmed(stage.Name) {
+		t.Error("expected StallEpisodeArmed to be set after arming")
+	}
+
+	stallComments := 0
+	for _, call := range client.addCommentCalls {
+		if strings.Contains(call.body, "possible stall detected") {
+			stallComments++
+		}
+	}
+	if stallComments != 1 {
+		t.Errorf("expected exactly 1 stall-detection comment across the declining sequence, got %d", stallComments)
 	}
 }
 
