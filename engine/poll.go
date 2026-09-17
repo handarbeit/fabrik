@@ -532,6 +532,71 @@ func (e *Engine) Run() error {
 		// NOTE: the reconcile ticker is intentionally NOT started here. It is the
 		// poll-only correctness backstop and must run whether or not the webhook
 		// manager started (#955) — it is launched unconditionally below.
+	} else if e.cfg.EventSource == EventSourceHookdeck {
+		// event_source: hookdeck (#1142) — the App-auth-only alternative
+		// transport. Mutually exclusive with the cfg.Webhooks branch above:
+		// RefuseHookdeckWithWebhooks (engine/github_app_auth.go) refuses the
+		// combination at startup, so this is a clean if/else-if rather than
+		// a fallthrough that could ever run both.
+		apiKeyEnv := e.cfg.HookdeckAPIKeyEnv
+		if apiKeyEnv == "" {
+			apiKeyEnv = DefaultHookdeckAPIKeyEnv
+		}
+		secretEnv := e.cfg.HookdeckWebhookSecretEnv
+		if secretEnv == "" {
+			secretEnv = DefaultHookdeckWebhookSecretEnv
+		}
+		apiKey := os.Getenv(apiKeyEnv)
+		webhookSecret := os.Getenv(secretEnv)
+		if apiKey == "" || webhookSecret == "" {
+			var missing []string
+			if apiKey == "" {
+				missing = append(missing, apiKeyEnv)
+			}
+			if webhookSecret == "" {
+				missing = append(missing, secretEnv)
+			}
+			e.logf(0, "hookdeck", "event_source: hookdeck requires %s to be set — falling back to polling only\n",
+				strings.Join(missing, " and "))
+		} else {
+			var initialRepos map[string]bool
+			if e.cfg.Owner != "" && e.cfg.Repo != "" {
+				initialRepos = map[string]bool{e.cfg.Owner + "/" + e.cfg.Repo: true}
+			}
+			var deltaFn func(string, []byte)
+			if cacheImpl != nil {
+				deltaFn = func(eventType string, payload []byte) {
+					cacheImpl.ApplyDelta(eventType, payload)
+					e.applyLayer1StatusRefresh(eventType, payload, cacheImpl)
+				}
+			}
+			hm := newHookdeckManager(e.logf, e.emit, initialRepos, deltaFn, apiKey, webhookSecret)
+			// Bootstrap the cache before accepting events, mirroring the
+			// cfg.Webhooks branch above so no delta is dropped into an empty
+			// cache during the startup window.
+			if cacheImpl != nil {
+				probeItems, projectID, probeErr := e.client.ProbeProjectBoard(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum, e.cfg.OwnerType)
+				if probeErr != nil {
+					e.logf(0, "cache", "startup probe failed — cache will be populated on first poll: %v\n", probeErr)
+				} else if projectID != "" && len(probeItems) > 0 {
+					cacheImpl.BootstrapFromProbe(probeItems, projectID)
+					e.seedTerminalFromProbeItems(probeItems)
+				} else if projectID != "" {
+					e.logf(0, "cache", "startup probe returned 0 items — deferring to first poll\n")
+				}
+			}
+			hm.Start(ctx)
+			e.webhookMgr = hm
+			defer hm.Stop()
+			e.logf(0, "hookdeck", "event_source: hookdeck — API key from $%s, webhook secret from $%s\n", apiKeyEnv, secretEnv)
+			// R5 startup assertion (#1142): verify the App installation's
+			// granted-repo set covers every managed repo, warning (never
+			// failing startup) on any gap — the App-mode analogue of the
+			// cfg.Webhooks branch's checkWebhookHookCoverage call above.
+			e.checkHookdeckInstallationCoverage(hm)
+		}
+		// NOTE: as with the cfg.Webhooks branch, the reconcile ticker is
+		// intentionally NOT started here — it is launched unconditionally below.
 	}
 
 	// Reconcile ticker: the poll-only correctness backstop that re-syncs the cache

@@ -260,7 +260,7 @@ type Engine struct {
 	events                      chan tui.Event                // nil in tests / plain-text mode; TUI goroutine consumes
 	logFile                     *os.File                      // persistent log file at .fabrik/fabrik.log; nil if not opened
 	logMu                       sync.Mutex                    // serializes concurrent writes to logFile
-	webhookMgr                  *webhookManager               // nil when webhooks are disabled
+	webhookMgr                  eventIngestionManager         // nil when no event-ingestion transport is active (#1142)
 	// heartbeatIntervalOverride overrides the package-level heartbeatInterval constant
 	// when non-zero. Used by tests to reduce the heartbeat period to sub-millisecond.
 	heartbeatIntervalOverride time.Duration
