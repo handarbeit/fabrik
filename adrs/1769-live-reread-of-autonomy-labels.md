@@ -106,8 +106,9 @@ The bound is on concurrency within a pass, not on the fetch recurring over an it
   honoured on multi-repo instances, where it was previously silently broken.
 - Both advance paths are structurally guaranteed to agree, since they share one helper rather than
   two independent (and, before this fix, differently-broken) re-fetch implementations.
-- No new per-poll or per-item-per-poll GitHub API cost — the fetch is bounded to the existing
-  completion/catch-up decision points, exactly as D1's original (broken) re-fetch already was.
+- The added cost is bounded, not unbounded: at most one live `FetchLabels` call per item per poll,
+  since `handleStageComplete` and `runCatchUpPhase2` are mutually exclusive admission for the same
+  item in the same pass (see "Cost bound" above) — the fix does not multiply per-gate.
 
 **Negative / Trade-offs:**
 - `runCatchUpPhase2` now performs one additional live REST call per invocation that it did not
