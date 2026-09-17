@@ -1750,6 +1750,14 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 // must be reached immediately, not deferred to the next poll — applies
 // regardless of which of the two owns a given item's admission this poll.
 func (e *Engine) runCatchUpPhase2(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, advancedItems map[string]bool) {
+	// Live re-read before any autonomy-label decision (#1769, D2): item.Labels
+	// here is not guaranteed fresh even immediately after a deep fetch in the
+	// same poll pass — Labels is not part of the deep-fetch cache contract
+	// (copyDeepFieldsFromState). Without this, an operator removing
+	// fabrik:yolo/fabrik:cruise mid-run would not be observed until the next
+	// full board refresh. See refreshAutonomyLabels' own doc comment.
+	e.refreshAutonomyLabels(&item)
+
 	// Gate: yolo (cfg or label), cruise label, or stage-level auto_advance:true.
 	isAutoAdvance := hasYoloLabel(item) || hasCruiseLabel(item)
 	if !e.cfg.Yolo && !isAutoAdvance && !(stage.AutoAdvance != nil && *stage.AutoAdvance) {

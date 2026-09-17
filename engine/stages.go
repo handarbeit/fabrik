@@ -44,6 +44,48 @@ func hasUnrestrictedLabel(item gh.ProjectItem) bool {
 	return false
 }
 
+// refreshAutonomyLabels re-reads item.Labels live from GitHub, in place, so
+// that a fabrik:yolo/fabrik:cruise change made while a stage was running (an
+// operator adding OR removing either label mid-run) is observed at the
+// moment the advance decision is actually made, rather than at the next full
+// board refresh (#1769). It is the single shared helper both handleStageComplete
+// (D1) and runCatchUpPhase2 (D2) must call, before either reads
+// hasYoloLabel/hasCruiseLabel — mirroring effectiveReviewAuthority/
+// effectiveExpectedReviewers' "one shared helper, every gate" precedent
+// (ADR-1250, ADR-1283, engine/reviews.go), except — unlike those two, which
+// only resolve a label already present on the snapshot — this helper
+// performs the live fetch itself.
+//
+// Uses the item's own resolved owner/repo (itemOwnerRepo), never
+// e.cfg.Owner/e.cfg.Repo, which is empty in multi-repo mode and, on a
+// single-repo instance, would target whichever issue happens to hold this
+// item's number in the configured repo rather than the item's actual repo
+// (R1). Must bypass any cache — a label change made moments ago may not
+// have an applied webhook delta yet — so this always calls e.client (the
+// raw GitHubClient), never e.readClient.
+//
+// On a fetch error, item.Labels is left untouched and a warning naming the
+// item and the error is logged (R2) — silent fallback is what hid #1769,
+// and must not survive the fix. On success, item.Labels is replaced
+// unconditionally: a fetch that legitimately returns zero labels is real
+// data, not a failure, and must not be discarded (R3).
+//
+// Because attemptMergeOnValidate receives item by value from both callers,
+// and both callers invoke this helper before attemptMergeOnValidate is ever
+// called, one fetch per handleStageComplete/runCatchUpPhase2 invocation
+// covers every downstream hasYoloLabel/hasCruiseLabel read, including the
+// one inside attemptMergeOnValidate — satisfying R5's "must not fetch
+// twice."
+func (e *Engine) refreshAutonomyLabels(item *gh.ProjectItem) {
+	owner, repo := itemOwnerRepo(*item, e.defaultRepo())
+	freshLabels, err := e.client.FetchLabels(owner, repo, item.Number)
+	if err != nil {
+		e.logf(item.Number, "warn", "refreshAutonomyLabels: could not re-fetch labels for %s/%s#%d: %v\n", owner, repo, item.Number, err)
+		return
+	}
+	item.Labels = freshLabels
+}
+
 func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) {
 	e.logf(item.Number, "done", "stage %q complete\n", stage.Name)
 
@@ -58,11 +100,10 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 	e.removeFailedLabel(owner, repo, item.Number, stage.Name)
 
 	// Re-fetch labels so we see changes made while the stage was running
-	// (e.g., fabrik:yolo added mid-run). Must bypass cache — the webhook for a
-	// label added mid-run may not have been applied yet. On error, keep existing labels.
-	if freshLabels, err := e.client.FetchLabels(e.cfg.Owner, e.cfg.Repo, item.Number); err == nil && len(freshLabels) > 0 {
-		item.Labels = freshLabels
-	}
+	// (e.g., fabrik:yolo/fabrik:cruise added or removed mid-run) before any
+	// autonomy-label read below (#1769). See refreshAutonomyLabels' own doc
+	// comment for the full rationale.
+	e.refreshAutonomyLabels(&item)
 
 	// Clear any orphaned fabrik:awaiting-input label. It is added by blockOnInput
 	// when Claude emits FABRIK_BLOCKED_ON_INPUT; if the user manually removes
@@ -269,6 +310,13 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 
 	// cruise > yolo: when cruise is present, auto-merge is suppressed regardless of yolo.
 	// cruise auto-advances through stages but leaves the PR for human merge at Validate.
+	//
+	// Freshness invariant (#1769): this check relies on item.Labels already being
+	// live — attemptMergeOnValidate performs no re-fetch of its own. Both callers
+	// (handleStageComplete, runCatchUpPhase2) call e.refreshAutonomyLabels upstream
+	// of every attemptMergeOnValidate call site, so item.Labels is guaranteed fresh
+	// by the time execution reaches here. A future edit to either caller must not
+	// reorder a new label check ahead of that refresh, or this check goes stale again.
 	if hasCruiseLabel(item) {
 		return false, false, nil
 	}

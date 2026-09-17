@@ -571,6 +571,163 @@ func TestHandleStageComplete_NoAwaitingInput_NoSpuriousRemove(t *testing.T) {
 	}
 }
 
+// ── autonomy-label live re-read (#1769) ──────────────────────────────────────
+
+// TestHandleStageComplete_MultiRepo_CruiseRemovedMidRun_NoAdvance is Acceptance
+// Criterion 2: on a multi-repo instance (cfg.Repo == ""), an operator removes
+// fabrik:cruise from an item while a non-wait_for_ci stage is running. The
+// dispatch-time snapshot passed to handleStageComplete still carries the
+// now-stale fabrik:cruise label; a live re-fetch targeting the item's own repo
+// must observe the removal and NOT advance.
+//
+// This must fail against the current, unfixed handleStageComplete (D1):
+// the broken re-fetch targets e.cfg.Owner/e.cfg.Repo ("owner", "") instead of
+// the item's own repo ("owner", "repoA"), so fetchLabelsFn's owner/repo check
+// below causes it to return an error, the stale snapshot survives, and the
+// item wrongly advances.
+func TestHandleStageComplete_MultiRepo_CruiseRemovedMidRun_NoAdvance(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLabelsFn: func(owner, repo string, issueNumber int) ([]string, error) {
+			if owner != "owner" || repo != "repoA" {
+				return nil, fmt.Errorf("wrong target: %s/%s", owner, repo)
+			}
+			// Operator removed fabrik:cruise; the live fetch reflects that.
+			return []string{}, nil
+		},
+	}
+	stgs := testStagesWithValidate()
+	eng := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "", // multi-repo mode
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 5,
+			Stages:        stgs,
+		},
+		client,
+		&mockClaudeInvoker{},
+		NewWorktreeManager(t.TempDir()),
+	)
+	opts := make(map[string]string)
+	for _, s := range stgs {
+		opts[s.Name] = "OPT_" + s.Name
+	}
+	eng.statusField = &gh.StatusField{FieldID: "FIELD_1", Options: opts}
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	// Stale dispatch-time snapshot still shows fabrik:cruise (already removed
+	// by the operator by the time the stage finishes).
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Repo: "owner/repoA", Labels: []string{"fabrik:cruise"}}
+	stage := &stages.Stage{Name: "Research"}
+
+	eng.handleStageComplete(context.Background(), board, item, stage)
+
+	if len(client.updateStatusCalls) != 0 {
+		t.Errorf("expected no advance after cruise was removed mid-run (observed via live re-fetch), got %d status updates", len(client.updateStatusCalls))
+	}
+}
+
+// TestHandleStageComplete_MultiRepo_RefetchTargetsItemOwnRepo is Acceptance
+// Criterion 1: with cfg.Repo == "" (multi-repo) and an item on owner/repoA,
+// the re-fetch inside handleStageComplete must target owner/repoA — asserted
+// on the request the client receives, not inferred from behaviour (R1).
+func TestHandleStageComplete_MultiRepo_RefetchTargetsItemOwnRepo(t *testing.T) {
+	var gotOwner, gotRepo string
+	var gotIssueNumber int
+	client := &mockGitHubClient{
+		fetchLabelsFn: func(owner, repo string, issueNumber int) ([]string, error) {
+			gotOwner, gotRepo, gotIssueNumber = owner, repo, issueNumber
+			return nil, nil
+		},
+	}
+	stgs := testStagesWithValidate()
+	eng := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "", // multi-repo mode
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 5,
+			Stages:        stgs,
+		},
+		client,
+		&mockClaudeInvoker{},
+		NewWorktreeManager(t.TempDir()),
+	)
+	opts := make(map[string]string)
+	for _, s := range stgs {
+		opts[s.Name] = "OPT_" + s.Name
+	}
+	eng.statusField = &gh.StatusField{FieldID: "FIELD_1", Options: opts}
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 7, ItemID: "PVTI_1", Repo: "owner/repoA"}
+	stage := &stages.Stage{Name: "Research"}
+
+	eng.handleStageComplete(context.Background(), board, item, stage)
+
+	if gotOwner != "owner" || gotRepo != "repoA" {
+		t.Errorf("FetchLabels called with (%q, %q), want (\"owner\", \"repoA\") — must target the item's own repo, never cfg.Owner/cfg.Repo", gotOwner, gotRepo)
+	}
+	if gotIssueNumber != 7 {
+		t.Errorf("FetchLabels called with issueNumber %d, want 7", gotIssueNumber)
+	}
+}
+
+// TestHandleStageComplete_MultiRepo_YoloAddedMidRun_StillHonoured is
+// Acceptance Criterion 4: fabrik:yolo added mid-run (the original intent of
+// the re-fetch) must still be honoured on a multi-repo instance — currently
+// also broken by D1's wrong-target bug, since the broken re-fetch's error
+// was silently swallowed and the addition was never observed.
+func TestHandleStageComplete_MultiRepo_YoloAddedMidRun_StillHonoured(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLabelsFn: func(owner, repo string, issueNumber int) ([]string, error) {
+			if owner != "owner" || repo != "repoA" {
+				return nil, fmt.Errorf("wrong target: %s/%s", owner, repo)
+			}
+			// Operator added fabrik:yolo mid-run; the live fetch reflects that.
+			return []string{"fabrik:yolo"}, nil
+		},
+	}
+	stgs := testStagesWithValidate()
+	eng := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "", // multi-repo mode
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 5,
+			Stages:        stgs,
+		},
+		client,
+		&mockClaudeInvoker{},
+		NewWorktreeManager(t.TempDir()),
+	)
+	opts := make(map[string]string)
+	for _, s := range stgs {
+		opts[s.Name] = "OPT_" + s.Name
+	}
+	eng.statusField = &gh.StatusField{FieldID: "FIELD_1", Options: opts}
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	// Stale dispatch-time snapshot has no autonomy label.
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Repo: "owner/repoA"}
+	stage := &stages.Stage{Name: "Research"}
+
+	eng.handleStageComplete(context.Background(), board, item, stage)
+
+	if len(client.updateStatusCalls) != 1 {
+		t.Fatalf("expected 1 advance via mid-run yolo addition, got %d", len(client.updateStatusCalls))
+	}
+	if client.updateStatusCalls[0].optionID != "OPT_Plan" {
+		t.Errorf("advanced to wrong stage: %s", client.updateStatusCalls[0].optionID)
+	}
+}
+
 // TestHandleStageComplete_ReviewGate_BlocksImmediateMergeTrainAdvance covers the
 // wait_for_ci-independent instance of #1216. With wait_for_reviews: true and no
 // wait_for_ci, handleStageComplete calls attemptMergeOnValidate at the top of the
