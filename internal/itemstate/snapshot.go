@@ -290,15 +290,33 @@ func (s Snapshot) LastTurnsUsed(stageName string) int {
 }
 
 // LastTurnsCapped reports whether the most recent incomplete invocation of a stage
-// hit its turn cap without completing (#1146).
+// hit its turn cap without completing (#1146). Used only for message phrasing
+// (capped vs. uncapped predecessor) — not part of the stall-arming precondition
+// since #1767; see LastTurnsClean.
 func (s Snapshot) LastTurnsCapped(stageName string) bool {
 	return s.state.StageState.LastTurnsCapped[stageName]
+}
+
+// LastTurnsClean reports whether the most recent incomplete invocation of a stage
+// stopped cleanly (err == nil or a turn-cap exit), as opposed to erroring out
+// partway through. This is the arming-eligibility signal for stall detection
+// (#1146, #1767): a clean incomplete predecessor is arm-eligible whether or not it
+// was turn-capped.
+func (s Snapshot) LastTurnsClean(stageName string) bool {
+	return s.state.StageState.LastTurnsClean[stageName]
 }
 
 // StallHintPending reports whether a stall was detected for a stage and its next
 // invocation should receive a corrective hint (#1146).
 func (s Snapshot) StallHintPending(stageName string) bool {
 	return s.state.StageState.StallHintPending[stageName]
+}
+
+// StallEpisodeArmed reports whether a corrective hint has already been armed once
+// during the current retry episode for a stage (#1767) — the explicit guard that
+// keeps stall-hint arming to at most once per episode.
+func (s Snapshot) StallEpisodeArmed(stageName string) bool {
+	return s.state.StageState.StallEpisodeArmed[stageName]
 }
 
 // CommentBreakerInvocationsAt returns a copy of the recorded comment-processing
@@ -414,6 +432,8 @@ func copyStageState(s StageState) StageState {
 		LinkageHealAttempted: copyMap(s.LinkageHealAttempted),
 		LastTurnsUsed:        copyMap(s.LastTurnsUsed),
 		LastTurnsCapped:      copyMap(s.LastTurnsCapped),
+		LastTurnsClean:       copyMap(s.LastTurnsClean),
 		StallHintPending:     copyMap(s.StallHintPending),
+		StallEpisodeArmed:    copyMap(s.StallEpisodeArmed),
 	}
 }

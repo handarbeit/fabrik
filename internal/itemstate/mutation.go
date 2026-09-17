@@ -853,25 +853,36 @@ type LinkageHealAttempted struct {
 func (LinkageHealAttempted) isMutation()       {}
 func (m LinkageHealAttempted) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
-// StageTurnUsageRecorded records the TurnsUsed/capped status of the invocation that
-// just finalized as incomplete for a stage (#1146). Applied once per incomplete
-// invocation, always overwriting the prior value — this is what makes stall
-// detection self-limiting: the very attempt that triggers detection (a decline) is
-// itself uncapped, so it clears the precondition for a subsequent re-arm.
+// StageTurnUsageRecorded records the TurnsUsed/capped/clean status of the
+// invocation that just finalized as incomplete for a stage (#1146). Applied once
+// per incomplete invocation, always overwriting the prior value. Clean records
+// whether this attempt stopped cleanly (err == nil or a turn-cap exit) rather than
+// erroring out partway through; a non-clean attempt is recorded with Clean=false
+// regardless of its TurnsUsed, which invalidates the arming precondition for the
+// next comparison (see StageState.LastTurnsClean). Prior to #1767, arming rode on
+// Capped instead: the very attempt that triggered detection was itself uncapped,
+// which cleared the precondition for a subsequent re-arm as a side effect. Arming
+// now instead requires Clean, which the arming attempt also satisfies — so that
+// implicit self-limiting no longer applies; see StallHintArmed/StallEpisodeArmed
+// for the explicit guard that replaces it.
 type StageTurnUsageRecorded struct {
 	Repo      string
 	Number    int
 	StageName string
 	TurnsUsed int
 	Capped    bool
+	Clean     bool
 }
 
 func (StageTurnUsageRecorded) isMutation()       {}
 func (m StageTurnUsageRecorded) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
-// StallHintArmed records that a stall was detected for a stage (a turn-capped
-// attempt followed by an incomplete attempt using strictly fewer turns) and the
-// next invocation of that stage should receive a corrective hint (#1146).
+// StallHintArmed records that a stall was detected for a stage (a clean incomplete
+// predecessor — capped or not — followed by an incomplete, uncapped attempt using
+// strictly fewer turns, #1146/#1767) and the next invocation of that stage should
+// receive a corrective hint. Also sets StageState.StallEpisodeArmed, the explicit
+// R4 guard that keeps arming to at most once per retry episode now that the old
+// prevCapped-driven self-limiting no longer applies (see StageTurnUsageRecorded).
 type StallHintArmed struct {
 	Repo      string
 	Number    int
