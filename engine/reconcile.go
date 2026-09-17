@@ -75,12 +75,21 @@ func (e *Engine) reconcileLoop(ctx context.Context, cacheImpl *boardcache.CacheI
 // concrete ingestion transport mgr holds (or is a no-op when mgr is nil or an
 // unrecognized type). Not part of eventIngestionManager itself — see
 // reconcileLoop's doc comment for why.
+//
+// webhookManager takes newState directly: its health state has no other
+// independently-driven condition to preserve. hookdeckManager instead goes
+// through reconcileHint, which re-derives Healthy from hm's own
+// connHealth/sigDriftActive rather than accepting reconcileLoop's "no cache
+// drift" signal as an unconditional override — otherwise a drift-free
+// reconcile tick would silently clear an active signature-drift escalation
+// (R4), the exact condition it exists to make loud. See hookdeckManager.
+// reconcileHint's doc comment.
 func transitionMgrHealthState(mgr eventIngestionManager, newState WebhookHealthState, reason string) {
 	switch m := mgr.(type) {
 	case *webhookManager:
 		m.transitionHealthState(newState, reason)
 	case *hookdeckManager:
-		m.transitionHealthState(newState, reason)
+		m.reconcileHint(newState == WebhookStreamHealthy, reason)
 	}
 }
 

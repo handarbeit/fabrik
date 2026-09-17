@@ -73,7 +73,13 @@ func (f FooterComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
 		if ev.EventCounts != nil {
 			f.webhookCounts = ev.EventCounts
 		}
-		f.webhookCoverageNote = ev.CoverageNote
+		// nil means this event's origin doesn't track coverage at all (e.g.
+		// the cache-pause/resume observer in poll.go) — leave the
+		// previously-known note alone rather than wiping an active warning
+		// on an unrelated pause/resume transition (#1142 PR review finding).
+		if ev.CoverageNote != nil {
+			f.webhookCoverageNote = *ev.CoverageNote
+		}
 	}
 	return f, nil
 }

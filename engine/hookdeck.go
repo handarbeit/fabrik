@@ -271,6 +271,24 @@ func (hm *hookdeckManager) transitionHealthState(newState WebhookHealthState, re
 	hm.emitCurrentState()
 }
 
+// reconcileHint applies a reconcileLoop-derived health suggestion (cache
+// drift found/absent) without letting it mask an active signature-drift
+// episode (#1142 PR review finding): reconcileLoop's own "no drift" signal
+// is a proxy for transport health, computed independently of hm's own
+// connHealth/sigDriftActive state, so a direct transitionHealthState(Healthy)
+// call here would silently clear the Unhealthy state
+// handleSignatureDrift(true) set, masking exactly the misconfigured-secret
+// condition R4 exists to escalate. A "drift found" hint is always safe to
+// apply directly — it can only escalate toward Unhealthy, never mask an
+// existing Unhealthy reason.
+func (hm *hookdeckManager) reconcileHint(healthy bool, reason string) {
+	if healthy {
+		hm.recomputeHealthState()
+		return
+	}
+	hm.transitionHealthState(WebhookStreamUnhealthy, reason)
+}
+
 // recordDrop implements hookdeck.Config.OnDrop (R4, ADR-1563): accumulates
 // a cumulative per-reason count and logs it, mirroring Pruefer's
 // Daemon.recordDrop but without a TUI DropEvent channel of its own — the
@@ -332,7 +350,7 @@ func (hm *hookdeckManager) emitCurrentState() {
 	hm.emitFn(tui.WebhookStatusEvent{
 		State:        state,
 		EventCounts:  counts,
-		CoverageNote: note,
+		CoverageNote: &note,
 	})
 }
 

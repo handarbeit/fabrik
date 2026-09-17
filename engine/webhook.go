@@ -1133,7 +1133,7 @@ func (wm *webhookManager) emitCurrentState() {
 	wm.emitFn(tui.WebhookStatusEvent{
 		State:        state,
 		EventCounts:  counts,
-		CoverageNote: note,
+		CoverageNote: &note,
 	})
 }
 
