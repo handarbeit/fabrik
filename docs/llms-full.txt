@@ -4444,7 +4444,7 @@ Note: within `checkDependencies()`, for each blocker the engine first consults `
 **Effect varies by label:**
 - Adding `fabrik:paused` → engine skips the item (unless a human comment arrives)
 - Removing `fabrik:paused` from a failed issue → `clearFailedStage()` resets retry state
-- Adding `fabrik:yolo` or `fabrik:cruise` → enables auto-advance (even mid-run, due to label re-fetch in `handleStageComplete()`)
+- Adding **or removing** `fabrik:yolo` or `fabrik:cruise` → takes effect at the next advance decision, even mid-run, on both advance paths (`handleStageComplete()` and the catch-up loop's `runCatchUpPhase2()`) — both call the shared `refreshAutonomyLabels()` helper, which performs a live, item-scoped `FetchLabels()` immediately before either reads `hasYoloLabel`/`hasCruiseLabel` (#1769; see §6.23 / Appendix A for the full rationale, including why *removal* previously went unobserved on both paths)
 - Adding `model:<name>` or `effort:<level>` → takes effect on next Claude invocation
 
 ### 2.8 Issue Closed
@@ -4697,7 +4697,7 @@ This table shows the normal flow when an issue progresses through the pipeline w
 4. If `stage.AutoAdvance != nil` AND neither `fabrik:yolo` nor `fabrik:cruise` label is present: `shouldAdvance = *stage.AutoAdvance` — this means `auto_advance: false` in YAML overrides `cfg.Yolo` (the `--yolo` flag), but explicit yolo/cruise labels override `auto_advance: false`
 5. If `hasCruiseLabel(item) && stage.Name == "Validate"`: `shouldAdvance = false` — cruise stops at Validate. Note the **raw label**, not `cruiseActive`: this fires even when yolo is also present, which is what makes cruise win the stop-at-Validate decision.
 
-**Catch-up loop `shouldAdvance` resolution (Path 2):** The catch-up loop first checks `cfg.Yolo || hasYoloLabel(item) || hasCruiseLabel(item)` — items without any of these are skipped entirely. Then: if neither yolo nor cruise LABEL is present and `stage.AutoAdvance` is explicitly false, the item is skipped. This produces the same behavior as Path 1.
+**Catch-up loop `shouldAdvance` resolution (Path 2):** `runCatchUpPhase2` calls `refreshAutonomyLabels(&item)` first (#1769, §6.23) — mirroring Path 1's step 1 — so this decision also reads live label state, not whatever the item snapshot happened to carry into the catch-up loop. It then checks `cfg.Yolo || hasYoloLabel(item) || hasCruiseLabel(item)` — items without any of these are skipped entirely. Then: if neither yolo nor cruise LABEL is present and `stage.AutoAdvance` is explicitly false, the item is skipped. This produces the same behavior as Path 1.
 
 > **Self-advance wake guarantee (Fix B, #544):** When `advanceToNextStage` runs, two independent wake events fire: the new column status (`LocalStatusUpdated → StatusChanged`) and the worker exit (`WorkerExited → WorkerLifecycleChanged`). Both flags are in `wakeChFlags`. When `wakeCh != nil` (TUI mode or any wake-channel-enabled setup), the `wakeChObserver` fires and the dispatcher re-evaluates within milliseconds, without waiting for cooldown expiry. In headless runs (`--notui` or any configuration without a wake channel), re-evaluation occurs within `PollSeconds` via the next ticker poll. This eliminates the previous race where the departing worker was still alive when the post-advance dispatch loop ran, causing the item to receive a 150s `CooldownAt("periodic-re-eval")` stamp and wait the full cooldown window before the next stage was dispatched.
 >
@@ -6756,6 +6756,29 @@ Unlike the other two paths, this one is **guarded**, rather than posted uncondit
 
 **References:** [ADR-1582: Durable Mark-PR-Ready Retry](../adrs/1582-durable-pr-ready-retry.md), [ADR-1097: Non-Default-Base Explicit Close Retry](../adrs/1097-non-default-base-close-retry.md) (§6.13, the closest structural precedent), [ADR-061: Merge-Train Singleton Member-Issue Close Retry](../adrs/061-merge-train-member-close-retry.md), issue #599 (the in-process retry this feature's durable follow-up builds on), issue #1582 (this feature).
 
+### 6.23 Autonomy-Label Live Re-Read at Both Advance Decisions (#1769)
+
+**Trigger:** An operator adds or removes `fabrik:yolo`/`fabrik:cruise` on an issue while a stage is in flight, intending to change the advance/auto-merge decision the engine is about to make for that issue.
+
+**The problem this section fixes.** Two independent advance paths read `hasYoloLabel(item)`/`hasCruiseLabel(item)` off `item.Labels` at the moment they decide whether to advance the stage (and, at Validate, whether to enable auto-merge):
+
+- **Path 1 — `handleStageComplete`** (`engine/stages.go`), which runs synchronously right after a stage's `FABRIK_STAGE_COMPLETE`. `item` here is the pre-invocation dispatch-time snapshot, which can be stale by tens of minutes on a long-running stage.
+- **Path 2 — the catch-up loop's `runCatchUpPhase2`** (`engine/poll.go`), reached whenever `stage:<name>:complete` is already present — which is every `wait_for_ci: true` stage, since `handleStageComplete` defers to the catch-up loop there (§6.5) rather than reaching its own advance logic. On the default stage set this is **Validate**, where advancing under withdrawn authority means auto-merging the PR.
+
+Before this fix, Path 1 *attempted* a mid-run label re-fetch but targeted `e.cfg.Owner`/`e.cfg.Repo` — empty in multi-repo mode (a 404, silently swallowed by an `err == nil &&` guard) and, on a single-repo instance whose config repo differs from the item's own, the wrong issue's labels entirely. Path 2 performed no re-fetch at all: `item.Labels` is not part of the deep-fetch cache contract (`copyDeepFieldsFromState` excludes `Labels`), so even an item that went through a "fresh" deep fetch earlier in the same poll pass could still carry stale autonomy labels at the point `runCatchUpPhase2` reads them. Both defects meant a label *removal* made mid-run was never observed by either path — the stage would complete and auto-advance (or auto-merge) under authority the operator had already withdrawn, only picking up the change on the next full board refresh.
+
+**The fix: one shared helper, consulted by both paths.** `refreshAutonomyLabels(item *gh.ProjectItem)` (`engine/stages.go`) performs a live `FetchLabels` call scoped to the item's own resolved `owner, repo` (`itemOwnerRepo`, never `e.cfg.Owner`/`e.cfg.Repo`) via `e.client` (the raw, uncached `GitHubClient` — never `e.readClient`, since `Labels` is not part of that cache's deep-field contract regardless), and mutates `item.Labels` in place. Both `handleStageComplete` and `runCatchUpPhase2` call it as the very first step of their autonomy-decision logic, before any `hasYoloLabel`/`hasCruiseLabel` read — mirroring `effectiveReviewAuthority`/`effectiveExpectedReviewers`'s "one shared helper, every gate" precedent (ADR-1250, ADR-1283, `engine/reviews.go`), except — unlike those two, which only resolve a label already present on the snapshot — this helper performs the fetch itself.
+
+On a fetch error, `item.Labels` is left untouched and a warning naming the item and the error is logged — silent fallback is exactly what hid this defect, and does not survive the fix. On a successful fetch, `item.Labels` is replaced unconditionally, including when the fresh result is an empty label set: a real fetch returning zero labels is data, not a failure, and must not be discarded the way the old `len(freshLabels) > 0` guard discarded it.
+
+**One fetch covers every downstream read.** `attemptMergeOnValidate` (the single landing-decision function both paths call — ADR-1216) receives `item` by value and performs its own `hasCruiseLabel(item)` check with no live re-read of its own. Because both callers invoke `refreshAutonomyLabels` upstream of every `attemptMergeOnValidate` call site, that check is automatically fresh too, without a second REST call — bounding the cost to exactly one live `FetchLabels` per `handleStageComplete`/`runCatchUpPhase2` invocation (i.e. at most once per item per poll, since the two paths are mutually exclusive admission for the same item in the same pass).
+
+**Code path:** `refreshAutonomyLabels` (`engine/stages.go`); called from `handleStageComplete` (`engine/stages.go`) and `runCatchUpPhase2` (`engine/poll.go`).
+
+**Precedent:** this is the same class of fix as `checkDependencies`'s live `BlockedBy` re-read (ADR-1419) and `reviewGateBlocksLanding`'s live review-state re-read (ADR-1216) — a decision with real consequences (advance, or at Validate, merge) must not be made on a cached snapshot that a concurrent operator action can invalidate.
+
+**References:** [ADR-1769: Live Re-Read of Autonomy Labels at Both Advance Decision Points](../adrs/1769-live-reread-of-autonomy-labels.md), [ADR-1419: Cross-Repo Spawn Servability and Mid-flight Recognition](../adrs/1419-cross-repo-spawn-servability-and-midflight-recognition.md), [ADR-1216: Review Gate at Landing Decision](../adrs/1216-review-gate-at-landing-decision.md), [ADR-1250: Review Authority Orthogonal to Autonomy](../adrs/1250-review-authority-orthogonal-to-autonomy.md), [ADR-1283: Declared Unrequested Reviewers](../adrs/1283-declared-unrequested-reviewers.md), issue #1768 (originating report), issue #1769 (this fix).
+
 ---
 
 ## 7. Edge Case States
@@ -8297,11 +8320,11 @@ Stage advancement can occur through two code paths:
 | **Triggered by** | Claude outputs FABRIK_STAGE_COMPLETE | Poll cycle finds `stage:<X>:complete` label |
 | **Review data** | Stale (just ran MarkPRReady) | Fresh (from FetchItemDetails) |
 | **Review gate** | Optimistic: applies `fabrik:awaiting-review`, returns | Real: calls `checkReviewGate()`, evaluates timeout |
-| **Label freshness** | Re-fetched (handles mid-run yolo/cruise) | Already fresh from deep fetch |
+| **Label freshness** | Re-fetched via `refreshAutonomyLabels()` | Re-fetched via `refreshAutonomyLabels()` |
 | **Merge at Validate** | `attemptMergeOnValidate()` called directly | `attemptMergeOnValidate()` called from catch-up (yolo only) |
 | **Advancement** | `advanceToNextStage()` if should advance and no gate | `advanceToNextStage()` after Phase 2 gate (yolo/cruise/auto_advance) |
 
-**Label re-fetch in Path 1:** At `stages.go:55`, `handleStageComplete()` calls `FetchLabels()` to pick up changes made while the stage was running (e.g., `fabrik:yolo` added mid-run). This ensures the advancement decision uses current label state, not the stale snapshot from dispatch time.
+**Autonomy-label re-fetch, both paths (#1769, §6.23).** `handleStageComplete()` and `runCatchUpPhase2()` each call the shared `refreshAutonomyLabels()` helper (`engine/stages.go`) as the first step of their autonomy-decision logic, before either reads `hasYoloLabel`/`hasCruiseLabel`. This row previously read "Already fresh from deep fetch" for Path 2 — that was **false**: `Labels` is not part of the deep-fetch cache contract (`copyDeepFieldsFromState` excludes it), so an item that went through a "fresh" deep fetch earlier in the same poll pass could still carry a stale `fabrik:yolo`/`fabrik:cruise` from before an operator removed it. Both paths now perform the same live, item-scoped `FetchLabels()` call (never `e.cfg.Owner`/`e.cfg.Repo`, which is empty in multi-repo mode) immediately before the autonomy decision, so a mid-run add *or remove* of either label is observed by whichever path makes the next advance decision — see §6.23 for the full rationale and the D1/D2 defects this replaced.
 
 **Path 2 is split into two phases:**
 
