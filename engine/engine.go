@@ -131,9 +131,11 @@ type Config struct {
 // EventSourceHookdeck/Default* constants by name and shape — the same
 // indirection (a config field naming an env var, not holding the secret
 // itself) — so an operator already running Pruefer with Hookdeck recognizes
-// this immediately. The literal default env var names differ from Pruefer's
-// own (FABRIK_-prefixed here, since this is Fabrik's own secret, not a
-// value Pruefer's process also reads) — see adrs/1142-hookdeck-ingestion-for-app-auth.md.
+// this immediately. DefaultHookdeckWebhookSecretEnv is FABRIK_-prefixed,
+// since it names Fabrik's own GitHub App webhook secret, not a value
+// Pruefer's process also reads; DefaultHookdeckAPIKeyEnv reuses Hookdeck's
+// own conventional env var name unprefixed, matching Pruefer's own
+// default — see adrs/1142-hookdeck-ingestion-for-app-auth.md.
 const (
 	EventSourcePoll     = "poll"
 	EventSourceHookdeck = "hookdeck"
@@ -166,7 +168,7 @@ type Engine struct {
 	cfg                   Config
 	client                GitHubClient
 	releaseClient         GitHubClient           // always github.com, regardless of cfg.GHESHost — Fabrik's own self-upgrade release lives on github.com/handarbeit/fabrik, never on a customer's GHES instance (see checkReleaseUpgrade). Equal to client whenever no GHES host is configured (including all NewWithDeps-constructed test engines), so this is a no-op on the default path.
-	hostClient            *gh.Client             // same host as client, concretely typed; used only by the GHES-only startup version-floor preflight (checkGHESVersionFloor), which needs FetchInstalledVersion and isn't worth adding to the GitHubClient interface for one startup-only call. nil outside New() (e.g. NewWithDeps-constructed test engines); checkGHESVersionFloor is a standalone function tested directly against a *gh.Client, not through the Engine.
+	hostClient            *gh.Client             // same host as client, concretely typed; used by the GHES-only startup version-floor preflight (checkGHESVersionFloor), which needs FetchInstalledVersion and isn't worth adding to the GitHubClient interface for one startup-only call, and by checkHookdeckInstallationCoverage (#1142), which needs a live installation token via Token() for the R5 App-mode coverage check. nil outside New() (e.g. NewWithDeps-constructed test engines); checkGHESVersionFloor is a standalone function tested directly against a *gh.Client, not through the Engine.
 	ghAppAuth             *githubauth.Reconciler // non-nil only when Config.GitHubApp* fields configure App-auth (#1713); nil in PAT mode (the default). Run() starts and, on shutdown, joins its refresh-loop goroutines when non-nil — see poll.go's Run().
 	readClient            boardcache.ReadClient  // read-only GitHub calls; may be CacheImpl or GitHubAdapter
 	claude                ClaudeInvoker
