@@ -570,6 +570,31 @@ func (e *Engine) SetTrainCIPollIntervalForTest(d time.Duration) {
 	e.trainCIPollInterval = d
 }
 
+// SetGitHubAppModeForTest puts e into App-auth mode for the App-auth
+// dispatch-admission path (resolveRepoAccess/resolveAppRepoAccess,
+// engine/startup.go) without a real JWT, a fake installation-repositories
+// HTTP server, or any network call. It sets e.ghAppAuth to a zero-value
+// *githubauth.Reconciler (legal from any package; the dispatch-admission
+// path only ever checks it for non-nil — it never calls a Reconciler
+// method at request time, see resolveAppRepoAccess) and writes
+// accessibleRepos/truncated directly into e.appAccessibleRepos/
+// e.appAccessibleReposTrunc, marking e.appAccessibleReposReady true —
+// mirroring the exact field-write pattern engine/app_repo_access_test.go
+// already uses from inside this package. accessibleRepos keys are
+// lower-cased "owner/repo", matching appAccessibleRepos' own convention.
+//
+// Test seam only (ADR-1449, tests/sim, #1751); production only ever
+// populates these fields via New()'s resolveGitHubAppAuth/
+// resolveAppAccessibleRepos. Not re-applied by RestartEnv — a scenario
+// that rebuilds the Engine across a restart must call this again on the
+// new instance.
+func (e *Engine) SetGitHubAppModeForTest(accessibleRepos map[string]bool, truncated bool) {
+	e.ghAppAuth = &githubauth.Reconciler{}
+	e.appAccessibleRepos = accessibleRepos
+	e.appAccessibleReposTrunc = truncated
+	e.appAccessibleReposReady = true
+}
+
 // trainCIPollIntervalOrDefault returns the test-overridden CI poll interval
 // when set, otherwise the production default of 30 seconds.
 func (e *Engine) trainCIPollIntervalOrDefault() time.Duration {
