@@ -544,3 +544,63 @@ func TestViewFooter_NoAccountUnchanged(t *testing.T) {
 		t.Errorf("footer overflowed: %q", ansi.Strip(got))
 	}
 }
+
+// TestWebhookIndicator_CoverageNoteRendered verifies the R5 coverage note
+// (#1142) is surfaced next to the webhook health indicator, even when the
+// underlying connectivity state is "healthy" — the exact case this issue
+// is about: a stream can be reported healthy while covering only a
+// fraction of the managed repos, and that gap must never be silent in the
+// TUI, not just in the log line.
+func TestWebhookIndicator_CoverageNoteRendered(t *testing.T) {
+	f := FooterComponent{
+		webhookState:        "healthy",
+		webhookCounts:       map[string]int{"issues": 5},
+		webhookCoverageNote: "partial: 1/3 repos (gh webhook forward)",
+	}
+	got := ansi.Strip(f.webhookIndicator())
+	if !strings.Contains(got, "webhook (5)") {
+		t.Errorf("webhookIndicator() = %q, want it to contain the health indicator", got)
+	}
+	if !strings.Contains(got, "partial: 1/3 repos (gh webhook forward)") {
+		t.Errorf("webhookIndicator() = %q, want it to contain the coverage note", got)
+	}
+}
+
+// TestWebhookIndicator_NoCoverageNoteWhenEmpty verifies full coverage (the
+// common case) renders no bracketed note at all.
+func TestWebhookIndicator_NoCoverageNoteWhenEmpty(t *testing.T) {
+	f := FooterComponent{
+		webhookState:  "healthy",
+		webhookCounts: map[string]int{"issues": 5},
+	}
+	got := ansi.Strip(f.webhookIndicator())
+	if strings.Contains(got, "[") {
+		t.Errorf("webhookIndicator() = %q, want no bracketed coverage note when CoverageNote is empty", got)
+	}
+}
+
+// TestFooterUpdate_WebhookStatusEventSetsCoverageNote verifies Update wires
+// WebhookStatusEvent.CoverageNote into the field webhookIndicator reads —
+// the actual R5 wiring gap this issue's PR review found: CoverageNote was
+// added to the event and populated by both ingestion transports, but never
+// read by FooterComponent.Update, so it never reached the rendered TUI.
+func TestFooterUpdate_WebhookStatusEventSetsCoverageNote(t *testing.T) {
+	f := FooterComponent{}
+	updated, _ := f.Update(WebhookStatusEvent{
+		State:        "healthy",
+		EventCounts:  map[string]int{"issues": 1},
+		CoverageNote: "hook missing: 1 repo(s) (a/one)",
+	})
+	fc := updated.(FooterComponent)
+	if fc.webhookCoverageNote != "hook missing: 1 repo(s) (a/one)" {
+		t.Errorf("webhookCoverageNote = %q after Update, want the event's CoverageNote", fc.webhookCoverageNote)
+	}
+
+	// A subsequent event with an empty CoverageNote (coverage restored)
+	// must clear the note, not leave the stale one in place.
+	cleared, _ := fc.Update(WebhookStatusEvent{State: "healthy", EventCounts: map[string]int{"issues": 2}})
+	fc2 := cleared.(FooterComponent)
+	if fc2.webhookCoverageNote != "" {
+		t.Errorf("webhookCoverageNote = %q after a no-note event, want empty (cleared)", fc2.webhookCoverageNote)
+	}
+}
