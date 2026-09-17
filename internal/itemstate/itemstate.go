@@ -340,16 +340,37 @@ type StageState struct {
 	LastTurnsUsed map[string]int
 	// LastTurnsCapped records whether the most recently completed invocation for a
 	// stage was turn-capped (TurnsUsed >= MaxTurns without completing). Overwritten
-	// on every invocation, which makes stall detection self-limiting to a single
-	// corrective hint per episode (#1146): the declining attempt that triggers
-	// detection is itself uncapped, so it immediately clears the precondition for
-	// the next comparison.
+	// on every invocation. Used only to phrase the stall hint/comment correctly
+	// (capped vs. uncapped predecessor) — no longer part of the arming precondition
+	// itself (#1767; previously it was, see ADR-1146).
 	LastTurnsCapped map[string]bool
+	// LastTurnsClean records whether the most recently completed incomplete
+	// invocation for a stage stopped cleanly (err == nil or a turn-cap exit,
+	// as opposed to a generic error partway through). Overwritten on every
+	// invocation, clean or not — a non-clean attempt is recorded with
+	// LastTurnsClean=false, which invalidates the arming precondition for the
+	// next comparison exactly as LastTurnsCapped=false did for the pre-#1767
+	// prevCapped precondition (ADR-1146's "Why must a non-clean attempt still
+	// be recorded"). Replaces LastTurnsCapped as the "was the predecessor
+	// arm-eligible" signal for stall detection (#1146, #1767): a clean
+	// incomplete predecessor is arm-eligible whether or not it was turn-capped.
+	LastTurnsClean map[string]bool
 	// StallHintPending marks a stage for which a stall was detected and a
 	// corrective hint should be injected into the next invocation's prompt. Cleared
 	// (consumed) as soon as that invocation is dispatched. In-memory only — does
 	// not survive restart (#1146).
 	StallHintPending map[string]bool
+	// StallEpisodeArmed marks a stage for which a corrective hint has already been
+	// armed once during the current retry episode (#1767). Since loosening the
+	// arming precondition from "predecessor turn-capped" to "predecessor clean"
+	// removed the old mechanism's emergent self-limiting property (the arming
+	// attempt is no longer guaranteed to reset the precondition — see ADR-1146
+	// Consequences), this is the explicit R4 guard: detectAndArmStallHint checks
+	// it before arming and skips if already set, preventing re-arming on every
+	// subsequent declining attempt within the same episode. Cleared by
+	// StageRetryCleared alongside the other stall-detection fields, at the same
+	// episode boundary (stage success or operator unpause).
+	StallEpisodeArmed map[string]bool
 }
 
 // LockState describes who holds the fabrik:locked:<user> label on this issue.

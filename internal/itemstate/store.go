@@ -412,7 +412,9 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		delete(item.StageState.PRCreationFailed, v.StageName)
 		delete(item.StageState.LastTurnsUsed, v.StageName)
 		delete(item.StageState.LastTurnsCapped, v.StageName)
+		delete(item.StageState.LastTurnsClean, v.StageName)
 		delete(item.StageState.StallHintPending, v.StageName)
+		delete(item.StageState.StallEpisodeArmed, v.StageName)
 		return StageStateChanged
 
 	case SliceRetryIncremented:
@@ -515,11 +517,13 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		ensureStageStateMaps(item)
 		item.StageState.LastTurnsUsed[v.StageName] = v.TurnsUsed
 		item.StageState.LastTurnsCapped[v.StageName] = v.Capped
+		item.StageState.LastTurnsClean[v.StageName] = v.Clean
 		return StageStateChanged
 
 	case StallHintArmed:
 		ensureStageStateMaps(item)
 		item.StageState.StallHintPending[v.StageName] = true
+		item.StageState.StallEpisodeArmed[v.StageName] = true
 		return StageStateChanged
 
 	case StallHintConsumed:
@@ -1274,7 +1278,13 @@ func ensureStageStateMaps(item *ItemState) {
 	if ss.LastTurnsCapped == nil {
 		ss.LastTurnsCapped = make(map[string]bool)
 	}
+	if ss.LastTurnsClean == nil {
+		ss.LastTurnsClean = make(map[string]bool)
+	}
 	if ss.StallHintPending == nil {
 		ss.StallHintPending = make(map[string]bool)
+	}
+	if ss.StallEpisodeArmed == nil {
+		ss.StallEpisodeArmed = make(map[string]bool)
 	}
 }

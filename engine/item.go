@@ -1735,12 +1735,12 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 		// attempts being *compared* stopped cleanly — genuinely ran out of runway rather
 		// than erroring out partway through. But recording must still happen for a
 		// non-clean attempt (network blip, git-push failure, malformed CLI output) —
-		// otherwise its predecessor's turn-usage/capped state survives untouched, and a
+		// otherwise its predecessor's turn-usage/clean state survives untouched, and a
 		// later clean attempt would wrongly compare against a non-consecutive prior
 		// clean attempt across the gap, misattributing an intervening crash as part of a
 		// declining-turns stall (see adrs/1146-*.md "Consequences" for the incident that
 		// prompted this). detectAndArmStallHint always records this attempt's own turn
-		// usage with Capped=false when !clean, which invalidates the "previous capped"
+		// usage with Clean=false when !clean, which invalidates the "previous clean"
 		// precondition for the very next comparison — arming itself still only ever
 		// considers a clean current attempt. clean is not simply err == nil: a turn-cap
 		// exit is itself reported as a non-nil *claudeTurnLimitError (see claude.go /
@@ -1776,39 +1776,55 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 // through (network blip, git-push failure, malformed CLI output). Recording
 // (StageTurnUsageRecorded) always happens, clean or not, so that a non-clean
 // attempt is never silently invisible to the trend: it is recorded with
-// Capped=false regardless of its actual turn count, which invalidates the
-// "previous capped" precondition for the next comparison. Without this, a
-// generic-error attempt between two clean ones would leave the last clean
-// attempt's turns/capped state untouched, and a later clean attempt would
-// wrongly compare against that non-consecutive predecessor across the gap —
+// Capped=false and Clean=false regardless of its actual turn count, which
+// invalidates the "previous clean" precondition (below) for the next comparison.
+// Without this, a generic-error attempt between two clean ones would leave the
+// last clean attempt's turns/clean state untouched, and a later clean attempt
+// would wrongly compare against that non-consecutive predecessor across the gap —
 // misattributing an intervening crash as part of a declining-turns stall. Arming
 // itself is skipped entirely when !clean: an errored attempt cannot be the
 // "declining, no completion" half of the pattern this feature targets.
 //
-// The signature (for a clean attempt): a turn-capped predecessor (TurnsUsed >=
-// MaxTurns, did not complete) followed by an incomplete, NOT-capped attempt using
-// strictly fewer turns. A genuinely progressing retry does not shrink like that —
-// remaining work only running out of turns faster than a fuller attempt is a
-// strong indicator the worker re-derived the same stall (e.g. backgrounded a long
-// command and waited for a notification that never arrives) rather than making
-// less progress toward completion. The current attempt must NOT itself be capped:
-// the pre-existing progress-based turn-extension loop (runInvocationWithExtension)
-// can widen the effective budget on one dispatch (e.g. to 2x/3x stage.MaxTurns)
-// without that widening persisting to the next, separate dispatch — so two
-// consecutive capped attempts can show a smaller absolute TurnsUsed on the second
-// purely because its budget reset lower, not because it "declined" in the stalled
-// sense this pattern is meant to catch.
+// The signature (for a clean attempt): a clean incomplete predecessor — capped
+// (TurnsUsed >= MaxTurns) or not — followed by an incomplete, NOT-capped attempt
+// using strictly fewer turns (#1767; originally the predecessor had to be
+// turn-capped, see ADR-1146). A genuinely progressing retry does not shrink like
+// that — remaining work only running out of turns faster than a fuller attempt is
+// a strong indicator the worker re-derived the same stall (e.g. backgrounded a
+// long command and waited for a notification that never arrives) rather than
+// making less progress toward completion. This is true whether the predecessor
+// burned its full budget before giving up or, more subtly, recognized the stall
+// and stopped deliberately under budget — the latter is textually the #1142
+// incident that #1767 fixes: a worker that says "I'll wait for the background
+// test run to complete" and ends its turn early never hit a turn cap, so gating
+// on predecessor capped-ness alone made this exact case invisible. The current
+// attempt must NOT itself be capped: the pre-existing progress-based
+// turn-extension loop (runInvocationWithExtension) can widen the effective
+// budget on one dispatch (e.g. to 2x/3x stage.MaxTurns) without that widening
+// persisting to the next, separate dispatch — so two consecutive capped attempts
+// can show a smaller absolute TurnsUsed on the second purely because its budget
+// reset lower, not because it "declined" in the stalled sense this pattern is
+// meant to catch.
 //
-// Self-limiting to a single corrective hint per episode: StageTurnUsageRecorded
-// always overwrites LastTurnsCapped with this attempt's own capped status, and
-// arming requires the current attempt to be uncapped — so the precondition for a
-// re-arm is cleared immediately, without needing a separate one-shot guard.
+// One-shot per episode: unlike the pre-#1767 mechanism (whose self-limiting was
+// an emergent side effect of requiring a capped predecessor — the arming attempt
+// was itself always uncapped, which cleared the precondition for the very next
+// comparison), a clean predecessor is arm-eligible whether capped or not, so the
+// arming attempt no longer clears its own precondition automatically. alreadyArmed
+// (StageState.StallEpisodeArmed) is the explicit replacement guard: set the first
+// time a hint arms, checked before arming again, and cleared only by
+// StageRetryCleared — the same episode boundary (stage success or operator
+// unpause) every other field in this feature already uses.
 func (e *Engine) detectAndArmStallHint(item gh.ProjectItem, stage *stages.Stage, repoStr string, usage TokenUsage, clean bool) {
 	var prevTurns int
 	var prevCapped bool
+	var prevClean bool
+	var alreadyArmed bool
 	if snap, err := e.store.Get(repoStr, item.Number); err == nil {
 		prevTurns = snap.LastTurnsUsed(stage.Name)
 		prevCapped = snap.LastTurnsCapped(stage.Name)
+		prevClean = snap.LastTurnsClean(stage.Name)
+		alreadyArmed = snap.StallEpisodeArmed(stage.Name)
 	}
 
 	capped := clean && usage.MaxTurns > 0 && usage.TurnsUsed >= usage.MaxTurns
@@ -1818,17 +1834,22 @@ func (e *Engine) detectAndArmStallHint(item gh.ProjectItem, stage *stages.Stage,
 		StageName: stage.Name,
 		TurnsUsed: usage.TurnsUsed,
 		Capped:    capped,
+		Clean:     clean,
 	})
 
-	if !clean || !prevCapped || capped || usage.TurnsUsed <= 0 || usage.TurnsUsed >= prevTurns {
+	if !clean || !prevClean || alreadyArmed || capped || usage.TurnsUsed <= 0 || usage.TurnsUsed >= prevTurns {
 		return
 	}
 
 	e.store.Apply(itemstate.StallHintArmed{Repo: repoStr, Number: item.Number, StageName: stage.Name})
-	e.logf(item.Number, "stall", "detected likely stall on stage %q (turns %d capped -> %d, declining) — arming corrective hint for next attempt\n", stage.Name, prevTurns, usage.TurnsUsed)
+	e.logf(item.Number, "stall", "detected likely stall on stage %q (turns %d -> %d, declining) — arming corrective hint for next attempt\n", stage.Name, prevTurns, usage.TurnsUsed)
+	predecessorDesc := fmt.Sprintf("stopped after %d turns", prevTurns)
+	if prevCapped {
+		predecessorDesc = fmt.Sprintf("hit its turn limit (%d turns)", prevTurns)
+	}
 	stallComment := fmt.Sprintf(
-		"🏭 **Fabrik — possible stall detected**\n\nStage **%s** hit its turn limit (%d turns) without completing, and the following attempt used only %d turns without completing either. This pattern often indicates the worker backgrounded a long-running command and stalled waiting for a completion notification that never arrives in this headless environment. The next invocation will receive a corrective hint to run any long-running command in the foreground instead.",
-		stage.Name, prevTurns, usage.TurnsUsed,
+		"🏭 **Fabrik — possible stall detected**\n\nStage **%s** %s without completing, and the following attempt used only %d turns without completing either. This pattern often indicates the worker backgrounded a long-running command and stalled waiting for a completion notification that never arrives in this headless environment. The next invocation will receive a corrective hint to run any long-running command in the foreground instead.",
+		stage.Name, predecessorDesc, usage.TurnsUsed,
 	)
 	e.postItemComment(item, stallComment, true)
 }

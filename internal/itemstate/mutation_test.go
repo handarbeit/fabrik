@@ -665,13 +665,16 @@ func TestApplyEnqueueCycleIncremented(t *testing.T) {
 
 func TestApplyStageTurnUsageRecorded(t *testing.T) {
 	s := newStoreWithItem(t, testRepo, 1)
-	applyExpect(t, s, StageTurnUsageRecorded{Repo: testRepo, Number: 1, StageName: "Implement", TurnsUsed: 51, Capped: true}, StageStateChanged)
+	applyExpect(t, s, StageTurnUsageRecorded{Repo: testRepo, Number: 1, StageName: "Implement", TurnsUsed: 51, Capped: true, Clean: true}, StageStateChanged)
 	st := getItem(t, s, testRepo, 1)
 	if st.StageState.LastTurnsUsed["Implement"] != 51 {
 		t.Errorf("LastTurnsUsed[Implement] = %d, want 51", st.StageState.LastTurnsUsed["Implement"])
 	}
 	if !st.StageState.LastTurnsCapped["Implement"] {
 		t.Error("LastTurnsCapped[Implement] not set")
+	}
+	if !st.StageState.LastTurnsClean["Implement"] {
+		t.Error("LastTurnsClean[Implement] not set")
 	}
 	snap, _ := s.Get(testRepo, 1)
 	if got := snap.LastTurnsUsed("Implement"); got != 51 {
@@ -680,15 +683,27 @@ func TestApplyStageTurnUsageRecorded(t *testing.T) {
 	if !snap.LastTurnsCapped("Implement") {
 		t.Error("Snapshot.LastTurnsCapped() = false, want true")
 	}
-	// A later, uncapped, declining invocation overwrites both fields — this is what
-	// makes stall detection self-limiting to a single corrective hint per episode.
-	applyExpect(t, s, StageTurnUsageRecorded{Repo: testRepo, Number: 1, StageName: "Implement", TurnsUsed: 12, Capped: false}, StageStateChanged)
+	if !snap.LastTurnsClean("Implement") {
+		t.Error("Snapshot.LastTurnsClean() = false, want true")
+	}
+	// A later, uncapped, declining, clean invocation overwrites all three fields.
+	applyExpect(t, s, StageTurnUsageRecorded{Repo: testRepo, Number: 1, StageName: "Implement", TurnsUsed: 12, Capped: false, Clean: true}, StageStateChanged)
 	st = getItem(t, s, testRepo, 1)
 	if st.StageState.LastTurnsUsed["Implement"] != 12 {
 		t.Errorf("LastTurnsUsed[Implement] = %d, want 12 after overwrite", st.StageState.LastTurnsUsed["Implement"])
 	}
 	if st.StageState.LastTurnsCapped["Implement"] {
 		t.Error("LastTurnsCapped[Implement] should be false after an uncapped attempt")
+	}
+	if !st.StageState.LastTurnsClean["Implement"] {
+		t.Error("LastTurnsClean[Implement] should still be true after a clean attempt")
+	}
+	// A non-clean invocation is still recorded, with Clean=false — this is what
+	// keeps a generic-error attempt from being silently invisible to the trend.
+	applyExpect(t, s, StageTurnUsageRecorded{Repo: testRepo, Number: 1, StageName: "Implement", TurnsUsed: 8, Capped: false, Clean: false}, StageStateChanged)
+	snap, _ = s.Get(testRepo, 1)
+	if snap.LastTurnsClean("Implement") {
+		t.Error("LastTurnsClean(Implement) = true, want false after a non-clean attempt")
 	}
 }
 
@@ -701,20 +716,26 @@ func TestSnapshot_LastTurnsUsed_ZeroWhenUnset(t *testing.T) {
 	if snap.LastTurnsCapped("Implement") {
 		t.Error("LastTurnsCapped() = true, want false when never recorded")
 	}
+	if snap.LastTurnsClean("Implement") {
+		t.Error("LastTurnsClean() = true, want false when never recorded")
+	}
 }
 
 func TestStageTurnUsageSnapshotIsDeepCopy(t *testing.T) {
 	s := newStoreWithItem(t, testRepo, 1)
-	held := applyExpect(t, s, StageTurnUsageRecorded{Repo: testRepo, Number: 1, StageName: "Implement", TurnsUsed: 51, Capped: true}, StageStateChanged)
+	held := applyExpect(t, s, StageTurnUsageRecorded{Repo: testRepo, Number: 1, StageName: "Implement", TurnsUsed: 51, Capped: true, Clean: true}, StageStateChanged)
 	if held.LastTurnsUsed("Implement") != 51 {
 		t.Fatalf("precondition: held snapshot LastTurnsUsed = %d, want 51", held.LastTurnsUsed("Implement"))
 	}
-	s.Apply(StageTurnUsageRecorded{Repo: testRepo, Number: 1, StageName: "Implement", TurnsUsed: 12, Capped: false})
+	s.Apply(StageTurnUsageRecorded{Repo: testRepo, Number: 1, StageName: "Implement", TurnsUsed: 12, Capped: false, Clean: false})
 	if held.LastTurnsUsed("Implement") != 51 {
 		t.Errorf("held snapshot mutated by later record: LastTurnsUsed = %d, want 51", held.LastTurnsUsed("Implement"))
 	}
 	if !held.LastTurnsCapped("Implement") {
 		t.Error("held snapshot mutated by later record: LastTurnsCapped = false, want true")
+	}
+	if !held.LastTurnsClean("Implement") {
+		t.Error("held snapshot mutated by later record: LastTurnsClean = false, want true")
 	}
 }
 
@@ -727,20 +748,32 @@ func TestApplyStallHintArmedAndConsumed(t *testing.T) {
 	if !snap.StallHintPending("Implement") {
 		t.Error("StallHintPending(Implement) = false, want true after arming")
 	}
+	if !snap.StallEpisodeArmed("Implement") {
+		t.Error("StallEpisodeArmed(Implement) = false, want true after arming")
+	}
 	// Arming one stage must not leak to another.
 	if snap.StallHintPending("Review") {
 		t.Error("StallHintPending(Review) = true, want false (per-stage isolation)")
+	}
+	if snap.StallEpisodeArmed("Review") {
+		t.Error("StallEpisodeArmed(Review) = true, want false (per-stage isolation)")
 	}
 	applyExpect(t, s, StallHintConsumed{Repo: testRepo, Number: 1, StageName: "Implement"}, StageStateChanged)
 	snap, _ = s.Get(testRepo, 1)
 	if snap.StallHintPending("Implement") {
 		t.Error("StallHintPending(Implement) = true, want false after consuming")
 	}
+	// Consuming the hint does not clear the episode guard — StallEpisodeArmed
+	// persists until StageRetryCleared, so arming stays one-shot per episode even
+	// after the pending hint itself has been delivered.
+	if !snap.StallEpisodeArmed("Implement") {
+		t.Error("StallEpisodeArmed(Implement) = false, want true (persists past consumption until episode ends)")
+	}
 }
 
 func TestApplyStageRetryClearedClearsStallState(t *testing.T) {
 	s := newStoreWithItem(t, testRepo, 1)
-	s.Apply(StageTurnUsageRecorded{Repo: testRepo, Number: 1, StageName: "Implement", TurnsUsed: 51, Capped: true})
+	s.Apply(StageTurnUsageRecorded{Repo: testRepo, Number: 1, StageName: "Implement", TurnsUsed: 51, Capped: true, Clean: true})
 	s.Apply(StallHintArmed{Repo: testRepo, Number: 1, StageName: "Implement"})
 	applyExpect(t, s, StageRetryCleared{Repo: testRepo, Number: 1, StageName: "Implement"}, StageStateChanged)
 	snap, _ := s.Get(testRepo, 1)
@@ -750,8 +783,14 @@ func TestApplyStageRetryClearedClearsStallState(t *testing.T) {
 	if snap.LastTurnsCapped("Implement") {
 		t.Error("LastTurnsCapped not cleared by StageRetryCleared")
 	}
+	if snap.LastTurnsClean("Implement") {
+		t.Error("LastTurnsClean not cleared by StageRetryCleared")
+	}
 	if snap.StallHintPending("Implement") {
 		t.Error("StallHintPending not cleared by StageRetryCleared")
+	}
+	if snap.StallEpisodeArmed("Implement") {
+		t.Error("StallEpisodeArmed not cleared by StageRetryCleared")
 	}
 }
 

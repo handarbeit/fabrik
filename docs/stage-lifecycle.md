@@ -603,7 +603,7 @@ When `FABRIK_BLOCKED_ON_INPUT` is detected (and Claude ran without error):
 2. Branch pushed
 3. Cooldown timer: `pollSeconds * 10` seconds
 4. Lock held through cooldown
-5. Stall detection (`detectAndArmStallHint`, #1146): this attempt's turn usage is compared against the previous incomplete attempt's. A turn-capped predecessor followed by a strictly-declining, still-incomplete attempt arms a one-shot corrective hint — consumed by the *next* invocation of this stage, injected into its prompt via `InvokeOptions.CorrectiveHint` — and posts an informational comment. See `docs/state-machine.md` §7.10 for the full detection and injection rule.
+5. Stall detection (`detectAndArmStallHint`, #1146, #1767): this attempt's turn usage is compared against the previous incomplete attempt's. A clean incomplete predecessor — capped or not — followed by a strictly-declining, still-incomplete, uncapped attempt arms a one-shot-per-episode corrective hint — consumed by the *next* invocation of this stage, injected into its prompt via `InvokeOptions.CorrectiveHint` — and posts an informational comment. See `docs/state-machine.md` §7.10 for the full detection and injection rule.
 6. Retry count incremented; after `max_retries`: `fabrik:paused` + `stage:<name>:failed`, lock released
 
 ### Claude Usage-Limit Path
