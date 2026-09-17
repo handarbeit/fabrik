@@ -243,6 +243,32 @@ only a disregardable suggestion in the false-positive case.
 - The live backgrounding-then-silence signal remains unimplemented; a stall that produces a *single*
   capped attempt with no subsequent declining retry (e.g. it stalls again at the same or a higher turn
   count) is not caught by this detector alone.
+- **Gap fixed by #1767 (2026-09-17):** requiring the predecessor to be turn-capped turned out to be the
+  wrong precondition, not merely an over-strict one. It assumed a stalling worker burns its full turn
+  budget before giving up — true when the worker keeps trying things until turns run out, false when the
+  worker *correctly* recognizes it is waiting on a backgrounded command and ends its turn early,
+  deliberately, well under budget. The better a worker's self-assessment, the further under budget it
+  stops, and the more invisible the stall became to this detector — the exact inverse of what the
+  detector was meant to catch. Confirmed in production on `#1142`'s Validate stage: three consecutive
+  clean, uncapped, declining attempts (45/100 -> 20/100 -> 7/100, `max_turns: 100`, each ending with the
+  worker explicitly stating it was waiting for a background test run) never armed the hint, and the
+  stage burned all three retries before escalating.
+
+  #1767 widened the arming signature from "turn-capped predecessor, incomplete uncapped attempt using
+  strictly fewer turns" to "**clean** incomplete predecessor — capped or not — followed by an incomplete
+  uncapped attempt using strictly fewer turns." The "not itself capped" precondition (this Decision,
+  step 4) and the `err == nil || turnLimited` clean-chain-break protection (Rationale, "Why gate arming
+  on `err == nil || turnLimited`") are both unchanged by this widening.
+
+  This also retired the "Self-limiting by construction" mechanism described above: that one-shot
+  property was an emergent side effect of gating on a capped predecessor specifically — the arming
+  attempt was itself always uncapped, which cleared `LastTurnsCapped` (the old precondition) for the
+  very next comparison automatically. Once a clean-but-uncapped predecessor became arm-eligible, the
+  arming attempt no longer clears its own precondition just by being uncapped (it's clean, which is now
+  what's checked, and the arming attempt is clean too). #1767 therefore added an explicit guard —
+  `StageState.StallEpisodeArmed`, set by `StallHintArmed` and checked before arming, cleared by
+  `StageRetryCleared` at the same episode boundary as every other field in this feature — so arming
+  remains one-shot per retry episode rather than firing on every subsequent declining comparison.
 
 ## Explicitly Out of Scope (possible follow-up)
 
