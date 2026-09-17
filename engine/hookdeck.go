@@ -336,6 +336,14 @@ func (hm *hookdeckManager) emitCurrentState() {
 	})
 }
 
+// fetchInstallationRepositoriesFn overrides gh.FetchInstallationRepositories
+// in tests, mirroring webhookManager's killFn/startSubprocessFn override
+// convention — the real function issues a live HTTP call keyed on a base
+// URL (always "" in production; GHES is refused for App auth entirely) and
+// an installation token, neither of which a test can point at an httptest
+// server without this seam.
+var fetchInstallationRepositoriesFn = gh.FetchInstallationRepositories
+
 // checkHookdeckInstallationCoverage runs the R5 startup/periodic App-mode
 // coverage assertion (#1142): compares hm's currently managed repos against
 // the GitHub App installation's actual granted-repo set (fetched live via
@@ -355,7 +363,7 @@ func (e *Engine) checkHookdeckInstallationCoverage(hm *hookdeckManager) {
 	if e.hostClient == nil {
 		return
 	}
-	granted, _, err := gh.FetchInstallationRepositories("", e.hostClient.Token())
+	granted, _, err := fetchInstallationRepositoriesFn("", e.hostClient.Token())
 	if err != nil {
 		e.logf(0, "hookdeck", "WARNING: installation-repo-coverage check failed: %v — leaving prior coverage note in place\n", err)
 		return
