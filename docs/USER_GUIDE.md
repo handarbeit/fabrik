@@ -594,10 +594,61 @@ url.git@github.com:.insteadOf = https://github.com/ rewrite ...
 
 Fix by doing one of the two things it names: set `git_ssh: true` (or pass `--ssh`) so worktrees clone over SSH instead, or configure a global `url.git@github.com:.insteadOf = https://github.com/` rewrite so HTTPS remotes are transparently redirected to SSH before any credential helper is consulted. Either is sufficient; this check never fires in PAT mode. See [ADR-1756](../adrs/1756-worker-git-gh-surface-under-github-app-auth.md).
 
+#### Event-Driven Ingestion via Hookdeck (App Auth)
+
+`gh webhook forward` (the mechanism behind `--webhooks`) cannot be used under App auth at all — see "Not combinable with `--webhooks`" below. `event_source: hookdeck` is the App-auth-compatible alternative: a GitHub App has exactly **one** webhook URL and **one** secret covering every repo the installation is granted (unlike a PAT-mode subscription, which is per-repo), so there is no `--repo`-is-singular problem to work around — adding a repo to the installation simply starts delivering events for it. This is a separate, independent config axis from `--webhooks`/`FABRIK_WEBHOOKS` — the two can never be combined (see Known limitations) and `event_source: hookdeck` requires App auth to already be configured.
+
+**Configuration:**
+
+```bash
+# Flags
+fabrik --event-source hookdeck \
+  --hookdeck-api-key-env HOOKDECK_API_KEY \
+  --hookdeck-webhook-secret-env FABRIK_GITHUB_WEBHOOK_SECRET \
+  --github-app-id 123456 --github-app-private-key-path /path/to/key.pem --github-app-installation-id 789012 \
+  --owner myorg --project 5 --user me
+
+# Environment variables
+export FABRIK_EVENT_SOURCE=hookdeck
+export FABRIK_HOOKDECK_API_KEY_ENV=HOOKDECK_API_KEY
+export FABRIK_HOOKDECK_WEBHOOK_SECRET_ENV=FABRIK_GITHUB_WEBHOOK_SECRET
+
+# .fabrik/config.yaml
+event_source: hookdeck
+hookdeck_api_key_env: HOOKDECK_API_KEY
+hookdeck_webhook_secret_env: FABRIK_GITHUB_WEBHOOK_SECRET
+```
+
+`hookdeck_api_key_env`/`hookdeck_webhook_secret_env` each **name an environment variable that holds the actual secret** — the same indirection Pruefer's own `hookdeck.api_key_env`/`hookdeck.webhook_secret_env` config uses, so an operator already running Pruefer with Hookdeck recognizes the shape immediately. Neither field is itself the secret. Both default when unset (`HOOKDECK_API_KEY` and `FABRIK_GITHUB_WEBHOOK_SECRET` respectively); the environment variables they name must actually be set with real values, or Fabrik logs a warning at startup and falls back to polling only (never fatal — event-driven ingestion is a trigger, not a requirement, exactly like `--webhooks`).
+
+**Manual prerequisite — this part happens outside Fabrik.** Before `event_source: hookdeck` can deliver anything, you must:
+
+1. Enable the GitHub App's webhook in its own settings page (App settings → General → Webhook), and set the webhook URL to a Hookdeck-provided endpoint plus a webhook secret of your choosing.
+2. Set that same secret as the value of the environment variable named by `hookdeck_webhook_secret_env`.
+3. Obtain a Hookdeck API key from your Hookdeck account and set it as the value of the environment variable named by `hookdeck_api_key_env`.
+
+Fabrik has no code path that performs any of these three steps for you — `fabrik init --github-app` does not configure a webhook, and there is no Fabrik-side Hookdeck account integration. This is the same manual setup Pruefer's own `event_source: hookdeck` users already do.
+
+**Never silent about coverage gaps (R5).** Just as the PAT-mode transport verifies a forwarding hook actually exists per managed repo, the Hookdeck transport verifies that the GitHub App installation's granted-repo set actually covers every managed repo — at startup and on every periodic reconcile tick:
+
+```
+[hookdeck] WARNING: GitHub App installation does not cover 1 of 3 managed repo(s):
+           handarbeit/fabrik-test-alpha — these repos are receiving no webhooks
+           (poll-only); grant the installation access to them (App settings →
+           Install App → Configure); see #1142
+```
+
+The same gap is surfaced as a coverage note next to the webhook health indicator (TUI footer, and `WebhookStatusEvent.CoverageNote`), identically to the PAT-mode "hook missing" note.
+
+**Drop accounting and signature-drift escalation.** Every dropped delivery (a missing/invalid signature, a malformed frame, a duplicate delivery ID) is logged with a cumulative per-reason count: `[hookdeck] dropped delivery: signature_invalid (cumulative: 3)`. A sustained run of consecutive signature failures with no interleaved success (20 in a row) is treated as a misconfigured webhook secret or a Hookdeck wire-format change — not a transient blip — and forces the health indicator to unhealthy until verification recovers: `[hookdeck] signature verification drift: 20 consecutive failures with no interleaved success — possible misconfigured webhook secret or a Hookdeck wire-format change`.
+
+**Poll is still the correctness backstop.** As with `--webhooks`, Hookdeck delivery is a trigger only — `--reconcile-interval` polling remains the sole source of truth and continues running unconditionally regardless of Hookdeck's connectivity.
+
 #### Known limitations
 
 - **Not combinable with GHES.** `--ghes-host`/`FABRIK_GHES_HOST` and GitHub App auth cannot be configured together — refused explicitly at startup, naming the incompatibility. The underlying App-auth client construction does not yet derive GHES's independent REST/GraphQL endpoints correctly; use a personal access token against a GHES instance instead.
-- **Not combinable with `--webhooks`.** `--webhooks`/`FABRIK_WEBHOOKS` and GitHub App auth cannot be configured together — refused explicitly at startup, naming both settings. `gh webhook forward` (the mechanism `--webhooks` uses to deliver events) is feature-gated to user tokens by GitHub CLI itself and refuses an installation token outright ("you do not have access to this feature") — no App permission grant fixes this. Drop `--webhooks` to use App auth with `--reconcile-interval` polling instead, or drop the GitHub App config to use `--webhooks` with a personal access token.
+- **Not combinable with `--webhooks`.** `--webhooks`/`FABRIK_WEBHOOKS` and GitHub App auth cannot be configured together — refused explicitly at startup, naming both settings. `gh webhook forward` (the mechanism `--webhooks` uses to deliver events) is feature-gated to user tokens by GitHub CLI itself and refuses an installation token outright ("you do not have access to this feature") — no App permission grant fixes this. Drop `--webhooks` to use App auth with `--reconcile-interval` polling instead, or use `event_source: hookdeck` (see [Event-Driven Ingestion via Hookdeck](#event-driven-ingestion-via-hookdeck-app-auth) above) for real-time delivery under App auth, or drop the GitHub App config to use `--webhooks` with a personal access token.
+- **`event_source: hookdeck` requires App auth, and cannot be combined with `--webhooks` either.** Both combinations are refused explicitly at startup, naming both settings: `event_source: hookdeck` with no GitHub App configured (Hookdeck has no PAT-mode equivalent — it consumes the App's own webhook), and `event_source: hookdeck` together with `--webhooks` (the two are mutually exclusive ingestion transports). See [Event-Driven Ingestion via Hookdeck](#event-driven-ingestion-via-hookdeck-app-auth) above.
 - **One installation, one account.** The engine holds a single GitHub client scoped to one App installation (one organization). A cross-organization spawn target (a Plan/Review/Validate stage spawning a child issue in a different GitHub account or organization) is unreachable under App auth — this mirrors a GitHub App installation's own strict account-scoping, not a Fabrik design choice.
 - **Git operations depend on `git_ssh`/an SSH rewrite.** The engine's own git clone/push machinery always uses ambient SSH or a credential helper, regardless of authentication mode — but worker git (the worktree a stage operates in) is only safe under App auth's default-HTTPS mode if `git_ssh: true` or an `insteadOf` rewrite is configured; see "Worker git under App auth" above. Fabrik refuses to start otherwise rather than leaving this to silent host-config dependence.
 - **No secret material is ever logged**, at any verbosity — neither the private key nor any minted installation token.
@@ -3514,6 +3565,8 @@ behavior layered on top of this account-wide gate.
 ## 10. Webhook Mode
 
 Webhook mode is an optional feature that dramatically reduces GraphQL usage and cuts event latency from up to 30 seconds to near-zero. When enabled, Fabrik receives GitHub events within seconds of them occurring instead of waiting for the next poll tick.
+
+**Which transport applies to which auth mode.** This entire section describes `--webhooks` (`gh webhook forward`), which requires a personal access token — it **cannot** be used under [GitHub App Authentication](#github-app-authentication) at all, since `gh webhook forward` itself refuses installation tokens outright. If you're running with App auth and want real-time event delivery, use `event_source: hookdeck` instead — see [Event-Driven Ingestion via Hookdeck](#event-driven-ingestion-via-hookdeck-app-auth). Polling (`--reconcile-interval`) always works regardless of auth mode and remains the sole correctness backstop under either webhook transport.
 
 ### How It Works
 
