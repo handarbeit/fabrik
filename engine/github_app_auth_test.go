@@ -255,6 +255,41 @@ func TestRefuseWebhooksWithGitHubApp(t *testing.T) {
 	}
 }
 
+// TestRefuseUnknownEventSource is the direct regression test for the PR
+// review finding (#1142): before this fix, an EventSource typo (e.g.
+// "Hookdeck", "hook-deck") silently compared unequal to EventSourceHookdeck
+// everywhere and degraded to plain polling with no error and no log
+// message, even though the operator explicitly opted into event-driven
+// ingestion.
+func TestRefuseUnknownEventSource(t *testing.T) {
+	tests := []struct {
+		name        string
+		eventSource string
+		wantErr     bool
+	}{
+		{name: "empty (unset): allowed", eventSource: "", wantErr: false},
+		{name: "poll: allowed", eventSource: EventSourcePoll, wantErr: false},
+		{name: "hookdeck: allowed", eventSource: EventSourceHookdeck, wantErr: false},
+		{name: "wrong case: refused", eventSource: "Hookdeck", wantErr: true},
+		{name: "typo: refused", eventSource: "hook-deck", wantErr: true},
+		{name: "garbage: refused", eventSource: "webhook", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := RefuseUnknownEventSource(tt.eventSource)
+			if tt.wantErr && err == nil {
+				t.Fatalf("expected an error refusing event_source %q, got nil", tt.eventSource)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("RefuseUnknownEventSource(%q) = %v, want nil", tt.eventSource, err)
+			}
+			if tt.wantErr && !strings.Contains(err.Error(), tt.eventSource) {
+				t.Errorf("error %q does not name the offending value %q", err.Error(), tt.eventSource)
+			}
+		})
+	}
+}
+
 func TestRefuseHookdeckWithoutGitHubApp(t *testing.T) {
 	tests := []struct {
 		name              string

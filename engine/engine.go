@@ -396,6 +396,14 @@ func New(cfg Config) (*Engine, error) {
 	// deliberately a separate call so RefuseWebhooksWithGitHubApp (#1752)
 	// never has to know EventSource exists, and vice versa. Both refusals
 	// are cheap, local config checks, so they run before any network call.
+	// RefuseUnknownEventSource runs first: a typo'd value must fail loud
+	// here rather than silently comparing unequal to EventSourceHookdeck in
+	// every check below and in poll.go's dispatch, which would otherwise
+	// degrade to plain polling with no error and no log message (PR review
+	// finding).
+	if err := RefuseUnknownEventSource(cfg.EventSource); err != nil {
+		return nil, err
+	}
 	if err := RefuseHookdeckWithoutGitHubApp(cfg.EventSource, gitHubAppAuthConfigured(cfg)); err != nil {
 		return nil, err
 	}

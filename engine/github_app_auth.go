@@ -258,6 +258,25 @@ func RefuseWebhooksWithGitHubApp(webhooksEnabled bool) error {
 		"GitHub App config to use --webhooks with a personal access token (FABRIK_TOKEN)")
 }
 
+// RefuseUnknownEventSource refuses any Config.EventSource value other than
+// the empty string (unset, defaults to poll), EventSourcePoll, or
+// EventSourceHookdeck (#1142 PR review finding). Without this check, a typo
+// like "Hookdeck" or "hook-deck" would silently fail every equality check
+// this package and poll.go make against the exact string EventSourceHookdeck
+// — RefuseHookdeckWithoutGitHubApp/RefuseHookdeckWithWebhooks would both
+// treat it as compatible (since neither refusal fires for a value that
+// isn't EventSourceHookdeck), and poll.go's own `else if e.cfg.EventSource
+// == EventSourceHookdeck` dispatch would silently fall through to plain
+// polling — an operator who explicitly opted into event-driven ingestion
+// would get no error and no log message, only silent poll-only delivery.
+func RefuseUnknownEventSource(eventSource string) error {
+	if eventSource == "" || eventSource == EventSourcePoll || eventSource == EventSourceHookdeck {
+		return nil
+	}
+	return fmt.Errorf("event_source: %q (FABRIK_EVENT_SOURCE) is not a recognized value — must be %q, %q, or "+
+		"omitted entirely (default: %q)", eventSource, EventSourcePoll, EventSourceHookdeck, EventSourcePoll)
+}
+
 // RefuseHookdeckWithoutGitHubApp refuses event_source: hookdeck (#1142)
 // configured without GitHub App auth. Unlike gh webhook forward, Hookdeck
 // ingestion has no PAT-mode analogue at all: it consumes a GitHub App's own
