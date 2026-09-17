@@ -414,6 +414,29 @@ Two things close that gap, and neither is replaced by this layer:
 Do not read "the sim scenarios pass" as "this works". Read it as "the state
 machine behaves, assuming the wire layer does what we think".
 
+**GitHub App auth, beyond dispatch admission.** #1751 gave this layer a way
+to construct an `Engine` in App-auth mode and covers the one path that
+shipped broken (#1750): the dispatch-admission gate (`resolveRepoAccess` →
+`resolveAppRepoAccess`, see "GitHub App auth: dispatch-admission coverage"
+below). Everything else App-auth touches remains an honest blind spot here:
+
+- **`checkAllowAutoMerge`'s App-auth skip** (#1750 R5) — under App auth this
+  check is a no-op (the real value is unreadable without administration
+  scope the App deliberately doesn't request), and nothing in this package
+  asserts that skip either fires or stays silent.
+- **ADR-1750's first escalation tier** — a hard startup refusal when an
+  App-auth installation has zero accessible repos at all
+  (`resolveAppAccessibleRepos`'s `noAccessibleReposError` branch) — lives
+  entirely inside `New()`, which `NewWithDeps`/`tests/sim` never call by
+  design (no real JWT, no network). Structurally unreachable from this
+  package, not merely untested.
+- **Everything `Run()`-only**: the webhooks-refused-under-App-auth check
+  (#1752), the GHES-floor and HTTPS-worker-git refusals (#1756), the App-auth
+  token refresh loop (`Reconciler.RunRefreshLoops`, #1713), and
+  `selfLogin`/`BotLogin` comment-authorship identity — none of these are
+  reachable from `Engine.PollOnce`, which is the only entry point
+  `tests/sim` drives the engine through.
+
 ## Runtime and the `sim` tag decision (R8/AC9)
 
 **This file does not record a current runtime.** `go test`'s own per-package
@@ -836,6 +859,62 @@ first, not a defect in the refund mechanism itself.
   mechanisms key off. Named distinctly from `DefaultCommentScript`/
   `CommentReviewCompleted` (both of which commit), mirroring
   `simclaude/scripts.go`'s existing naming convention.
+
+## GitHub App auth: dispatch-admission coverage (#1751)
+
+`tests/sim` builds its `Engine` via `engine.NewWithDeps`, which never calls
+`resolveGitHubAppAuth` — every sim `Engine` was, until #1751, unconditionally
+PAT-shaped (`ghAppAuth == nil`), so no scenario could ever exercise the
+App-auth branch of `resolveRepoAccess`. That gap let #1750 — an App-auth
+installation token's REST `permissions` object reporting `push: false` for
+every field, which the dispatch-admission gate (ADR-1347) then read as
+"no write access", gating out every item — ship with the entire sim suite
+green.
+
+`Engine.SetGitHubAppModeForTest(accessibleRepos map[string]bool, truncated
+bool)` (`engine/engine.go`) closes this without a real JWT, a fake
+installation-repositories HTTP server, or any network call. Research
+established that `resolveAppRepoAccess` reads only three plain `Engine`
+fields at request time (`ghAppAuth`, `appAccessibleRepos`,
+`appAccessibleReposReady`/`appAccessibleReposTrunc`) — it never calls a
+`*githubauth.Reconciler` method — so the seam is two in-memory field writes,
+mirroring the exact pattern `engine/app_repo_access_test.go` already uses
+from inside the `engine` package. Call it on `env.Engine` after `NewEnv`
+returns, before filing the issue under test.
+
+`github_app_auth_test.go` has two scenarios:
+
+- **`TestGitHubAppAuth_DispatchAdmission_ListedRepoDispatches`** (R3/AC2) —
+  a plain item in a repo the installation covers still dispatches at the
+  first stage. Non-vacuity: the repo is also seeded, via the existing
+  PAT-shaped `Sim.SeedRepoAccess`, with the exact all-false shape that
+  caused #1750 (`gh.RepoAccess{CanPush: false, AllowAutoMerge: false}`) —
+  the current engine never reads that value once `e.ghAppAuth != nil`, but
+  a regression back to unconditionally calling `FetchRepoAccess` would see
+  it and fail the dispatch, flipping this test's outcome. Manually
+  confirmed by temporarily neutralizing the auth-mode branch in
+  `resolveRepoAccess` and observing the test fail, then reverting.
+- **`TestGitHubAppAuth_DispatchAdmission_ExcludedRepoBlocksAndWarns`**
+  (R4/AC3) — a repo genuinely excluded from the installation's accessible-repo
+  list never dispatches, and a `warnings.Record` entry (`Type: "repo_access"`,
+  keyed `"repo_access:<owner>/<repo>"`, `Detail` naming the installation ID)
+  is asserted directly, not merely inferred from the absence of dispatch.
+  Manually confirmed by neutralizing `resolveAppRepoAccess`'s exclusion
+  branch and observing the test fail on all three assertions, then
+  reverting. Deliberately omits `t.Parallel()`: asserting a real
+  `warnings.Load()` read requires pointing the package-level
+  `warnings.WarningsPathOverride` global at a `t.TempDir()` path, and every
+  scenario in this package's first poll for a new repo already calls
+  `warnings.Record`/`warnings.Clear` against whatever that global currently
+  holds — running this test concurrently with any `t.Parallel()` sibling
+  would be a live `-race` hazard on the global itself, not merely a flaky
+  assertion. Go completes every serial top-level test in a package before
+  starting the paused parallel batch, so omitting `t.Parallel()` here is
+  sufficient on its own.
+
+Only ADR-1750's second escalation tier (one excluded repo → `warnings.Record`)
+is reachable this way — see "What this layer is permanently blind to" above
+for the tier and the other App-auth behavior this does not cover.
 
 ## Guard-testing convention (R1–R4, #1687)
 
