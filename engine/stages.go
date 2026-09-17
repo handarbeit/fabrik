@@ -312,11 +312,21 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 	// cruise auto-advances through stages but leaves the PR for human merge at Validate.
 	//
 	// Freshness invariant (#1769): this check relies on item.Labels already being
-	// live — attemptMergeOnValidate performs no re-fetch of its own. Both callers
-	// (handleStageComplete, runCatchUpPhase2) call e.refreshAutonomyLabels upstream
-	// of every attemptMergeOnValidate call site, so item.Labels is guaranteed fresh
-	// by the time execution reaches here. A future edit to either caller must not
-	// reorder a new label check ahead of that refresh, or this check goes stale again.
+	// live. Both callers (handleStageComplete, runCatchUpPhase2) call
+	// e.refreshAutonomyLabels upstream of every attemptMergeOnValidate call site,
+	// so item.Labels is guaranteed fresh by the time execution reaches here. A
+	// future edit to either caller must not reorder a new label check ahead of
+	// that refresh, or this check goes stale again.
+	//
+	// Note: the dependency guard below (FetchItemDetails, ADR-1419) performs its
+	// own live re-read for an unrelated purpose (BlockedBy), and as a side effect
+	// of its GraphQL query also resets item.Labels — overwriting the REST-fresh
+	// snapshot refreshAutonomyLabels just produced. That's harmless today because
+	// this check and the fabrik:auto-merge-enabled check just below it both run
+	// before that overwrite, and nothing in this function reads
+	// hasYoloLabel/hasCruiseLabel afterward — but a future label check added
+	// after the dependency guard must not assume it's reading the REST-fresh
+	// snapshot; it would actually see the GraphQL-refetched one instead.
 	if hasCruiseLabel(item) {
 		return false, false, nil
 	}

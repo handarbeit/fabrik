@@ -68,10 +68,20 @@ itself. A future reader should not assume it is fetch-free by analogy to its sib
 
 `attemptMergeOnValidate` — the single landing-decision function both paths call into (ADR-1216) —
 is not modified beyond a comment. It receives `item` by value from both callers and performs its
-own `hasCruiseLabel(item)` check with no live re-read of its own; because both callers now call
-`refreshAutonomyLabels` upstream of every `attemptMergeOnValidate` call site, that check is
-automatically fresh too, at zero additional cost. Adding a second, independent fetch inside
-`attemptMergeOnValidate` itself would violate the cost bound below and was rejected.
+own `hasCruiseLabel(item)` check; because both callers now call `refreshAutonomyLabels` upstream of
+every `attemptMergeOnValidate` call site, that check is fresh too, at zero *additional* fetch cost
+from this fix. Adding a second, independent autonomy-label fetch inside `attemptMergeOnValidate`
+itself would have violated the cost bound below and was rejected.
+
+Note: `attemptMergeOnValidate` already performs a live re-read of its own for an unrelated purpose
+— its pre-existing ADR-1419 dependency guard (`FetchItemDetails`, called for `BlockedBy`) — and that
+call's GraphQL query resets `item.Labels` as a side effect, overwriting the REST-fresh snapshot
+`refreshAutonomyLabels` just produced. This is harmless: the guard runs after both the
+`hasCruiseLabel` check above and the `fabrik:auto-merge-enabled` idempotency check, and nothing in
+the function reads `hasYoloLabel`/`hasCruiseLabel` afterward. But on the Validate/yolo merge path,
+`item.Labels` is genuinely fetched twice per invocation — once via `refreshAutonomyLabels` (REST),
+once via the dependency guard (GraphQL) — not once. A future label check added after the dependency
+guard must not assume it is reading the REST-fresh snapshot.
 
 ### Cost bound
 
