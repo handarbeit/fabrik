@@ -391,10 +391,18 @@ func (e *Engine) checkHTTPSCredentials(hasSSHRewrite bool) {
 // (ADR-1347) — whichever of those calls it first for a given repo is the one
 // that fetches and logs.
 //
-// Fails open (CanPush: true) on a probe error (network failure, transient
-// 5xx), matching this codebase's prior error posture for the same GET
-// request: a genuinely managed repo should not lose dispatch/seeding for the
-// rest of the process lifetime over a transient blip.
+// The probe itself branches on auth mode (#1750 R1/R2): PAT mode is
+// unchanged — the token-holder's REST permissions.push field, via
+// FetchRepoAccess. App mode instead consults resolveAppRepoAccess, since
+// permissions.push describes a user's access and is always false for an
+// installation token, regardless of what the installation actually grants.
+//
+// Both branches funnel through the same fail-open handling (R3): a probe
+// error — including resolveAppRepoAccess's own ambiguous-answer cases
+// (fetch never succeeded, or a truncated list didn't contain the repo) —
+// never produces CanPush: false. Only a definitive answer (a real
+// permissions.push value, or a repo confirmed absent from a complete
+// installation repo list) is cached as-is.
 func (e *Engine) resolveRepoAccess(owner, repo string) gh.RepoAccess {
 	key := owner + "/" + repo
 	e.mu.Lock()
@@ -404,7 +412,12 @@ func (e *Engine) resolveRepoAccess(owner, repo string) gh.RepoAccess {
 		return access
 	}
 
-	access, err := e.client.FetchRepoAccess(owner, repo)
+	var err error
+	if e.ghAppAuth != nil {
+		access, err = e.resolveAppRepoAccess(owner, repo)
+	} else {
+		access, err = e.client.FetchRepoAccess(owner, repo)
+	}
 	if err != nil {
 		e.logf(0, "warn", "could not determine repo access for %s: %v (assuming writable)\n", key, err)
 		access = gh.RepoAccess{AllowAutoMerge: true, CanPush: true}
@@ -419,10 +432,78 @@ func (e *Engine) resolveRepoAccess(owner, repo string) gh.RepoAccess {
 	}
 	e.mu.Unlock()
 
-	if !already && !access.CanPush {
-		e.logf(0, "startup", "%s: no write access — skipping label seeding and allow_auto_merge check; items from this repo will not be processed\n", key)
+	// A confirmed access determination — positive or negative — gets a
+	// warnings.Record entry (R4): a total work stoppage deserves more than
+	// the one-line startup log below, which a busy operator scanning forty
+	// other lines can easily miss (the exact gap this issue's Root Cause
+	// section describes). Recorded/cleared identically for both auth modes,
+	// with mode-specific wording in the Detail field.
+	if !already {
+		warnKey := "repo_access:" + key
+		if !access.CanPush {
+			e.logf(0, "startup", "%s: no write access — skipping label seeding and allow_auto_merge check; items from this repo will not be processed\n", key)
+			_ = warnings.Record(warnings.Entry{
+				Key:    warnKey,
+				Type:   "repo_access",
+				Title:  fmt.Sprintf("%s: no write access — items from this repo will not be processed", key),
+				Detail: e.repoAccessWarningDetail(key),
+			})
+		} else {
+			_ = warnings.Clear(warnKey)
+		}
 	}
 	return access
+}
+
+// resolveAppRepoAccess is resolveRepoAccess's App-auth branch (#1750 R1):
+// determines write access from the pinned installation's own accessible-repo
+// list (Engine.appAccessibleRepos, populated once at startup by
+// Reconciler.AccessibleRepos — see New()) rather than the PAT-shaped
+// permissions.push field, which is structurally meaningless for an
+// installation token: GitHub returns it all-false regardless of what the
+// installation is actually granted, since permissions.push describes a
+// user's access, not an installation's.
+//
+// Returns an error whenever the answer is ambiguous, routing the caller
+// through resolveRepoAccess's existing fail-open branch (R3) rather than a
+// new one: the startup fetch never succeeded (appAccessibleReposReady ==
+// false), or the fetched list was truncated and the repo wasn't found in it
+// (a repo beyond FetchInstallationRepositories' pagination ceiling is
+// indistinguishable from a genuinely excluded one). Only a repo found in the
+// list produces CanPush: true, and only a repo absent from a complete,
+// successfully-fetched list produces a confirmed CanPush: false.
+//
+// AllowAutoMerge is deliberately left false/unset on every return here —
+// checkAllowAutoMerge skips its own check entirely under App auth (R5),
+// since the real value is unreadable without administration scope the App
+// deliberately doesn't request — so nothing ever consults this field for an
+// App-mode RepoAccess.
+func (e *Engine) resolveAppRepoAccess(owner, repo string) (gh.RepoAccess, error) {
+	key := strings.ToLower(owner + "/" + repo)
+	if e.appAccessibleRepos[key] {
+		return gh.RepoAccess{CanPush: true}, nil
+	}
+	if !e.appAccessibleReposReady {
+		return gh.RepoAccess{}, fmt.Errorf("the GitHub App installation's accessible-repo list was never successfully fetched at startup")
+	}
+	if e.appAccessibleReposTrunc {
+		return gh.RepoAccess{}, fmt.Errorf("%s was not found in the GitHub App installation's accessible-repo list, but that list hit its pagination ceiling — this may be a pagination gap rather than a genuine exclusion", key)
+	}
+	return gh.RepoAccess{CanPush: false}, nil
+}
+
+// repoAccessWarningDetail builds the Detail text for a confirmed
+// !CanPush warnings.Record entry, worded for whichever auth mode determined
+// it — an operator's remedy differs entirely between "grant this
+// installation access to this repo" and "this token has no push access."
+func (e *Engine) repoAccessWarningDetail(key string) string {
+	if e.ghAppAuth != nil {
+		return fmt.Sprintf("GitHub App installation %d does not include %s in its accessible repositories. "+
+			"Grant it access at https://github.com/settings/installations/%d (Configure → Repository access), "+
+			"or add %s if the installation is scoped to \"Only select repositories.\"",
+			e.cfg.GitHubAppInstallationID, key, e.cfg.GitHubAppInstallationID, key)
+	}
+	return fmt.Sprintf("The configured personal access token (FABRIK_TOKEN) does not have push access to %s.", key)
 }
 
 // checkAllowAutoMerge queries the GitHub API for the allow_auto_merge setting on
@@ -438,6 +519,33 @@ func (e *Engine) resolveRepoAccess(owner, repo string) gh.RepoAccess {
 // otherwise keep an unfixable, now-moot warning immortal in
 // .fabrik/warnings.json forever, since !CanPush never reaches this function's
 // own Clear branch below again.
+//
+// Skips the probe entirely under App auth (#1750 R5): GitHub only returns a
+// real allow_auto_merge value to a caller with administration read access,
+// which RequiredGitHubAppPermissions deliberately does not request (a
+// narrow-scope design choice, not an oversight) — an installation token
+// gets back null unconditionally, indistinguishable from "actually
+// disabled." Since the only consumer of RepoAccess.AllowAutoMerge is this
+// function's own warning, the correct fix is to not attempt it rather than
+// either widen the App's permission footprint for one advisory check or
+// misreport an unknowable value as false.
+//
+// Still clears a pre-existing warning under App auth (a follow-up finding
+// on #1750, raised after the initial App-auth skip landed): before this
+// issue's fix, resolveRepoAccess cached CanPush: false for every App-mode
+// repo, and checkAllowAutoMerge's own !CanPush branch cleared any
+// allow_auto_merge warning as a side effect — so the warning was
+// structurally invisible under App auth even before this function's App-
+// auth skip existed. An operator who used a real allow_auto_merge-disabled
+// warning under PAT auth and then migrated to App auth would otherwise be
+// left with that warning stuck forever the moment this early return
+// replaced the old !CanPush branch as App auth's exit path — nothing else
+// clears an `allow_auto_merge:<repo>` entry for a repo still on the board
+// (sweepStaleAllowAutoMergeWarnings only clears entries for repos that have
+// left the board entirely). Clearing here, once per repo per process run
+// like every other branch of this function, closes that gap without ever
+// calling resolveRepoAccess (AC3's "no PAT-only probe under App auth" guard
+// extends to this function too).
 func (e *Engine) checkAllowAutoMerge(owner, repo string) {
 	key := owner + "/" + repo
 	e.mu.Lock()
@@ -445,6 +553,10 @@ func (e *Engine) checkAllowAutoMerge(owner, repo string) {
 	e.checkedAutoMergeRepos[key] = true
 	e.mu.Unlock()
 	if already {
+		return
+	}
+	if e.ghAppAuth != nil {
+		_ = warnings.Clear("allow_auto_merge:" + key)
 		return
 	}
 	access := e.resolveRepoAccess(owner, repo)

@@ -2372,6 +2372,126 @@ func TestReconciler_VerifyGrants_EmptyRequiredIsNoOp(t *testing.T) {
 	}
 }
 
+// TestReconciler_AccessibleRepos_ReturnsPinnedInstallationRepos is
+// AccessibleRepos' positive case (#1750): a pinned installation's own
+// /installation/repositories list is returned verbatim, with truncated
+// false when the fake server returns the full list in one page.
+func TestReconciler_AccessibleRepos_ReturnsPinnedInstallationRepos(t *testing.T) {
+	oldFlow := runManifestFlow
+	runManifestFlow = failingRunManifestFlow(t)
+	defer func() { runManifestFlow = oldFlow }()
+
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	srv, fake := newFakeAppServer("engine-bot", []gh.AppInstallation{
+		{ID: 999, Account: "handarbeit"},
+	}, func() time.Time { return time.Now().Add(time.Hour) })
+	fake.selectedRepos = map[int64][]string{999: {"handarbeit/fabrik", "handarbeit/fabrik-test-alpha"}}
+	defer srv.Close()
+
+	r, err := Reconcile(context.Background(), Options{
+		AppID: 42, AppPrivateKeyPath: keyPath, AppInstallationID: 999,
+		AppStatePath: filepath.Join(dir, "app-state.json"),
+		WatchedRepos: []string{"handarbeit/fabrik"},
+		BaseURL:      srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	repos, truncated, err := r.AccessibleRepos()
+	if err != nil {
+		t.Fatalf("AccessibleRepos: %v", err)
+	}
+	if truncated {
+		t.Error("expected truncated=false for a full single-page result")
+	}
+	want := map[string]bool{"handarbeit/fabrik": true, "handarbeit/fabrik-test-alpha": true}
+	if len(repos) != len(want) {
+		t.Fatalf("AccessibleRepos() = %v, want %v", repos, want)
+	}
+	for _, r := range repos {
+		if !want[r] {
+			t.Errorf("unexpected repo %q in AccessibleRepos() result", r)
+		}
+	}
+}
+
+// TestReconciler_AccessibleRepos_PlumbsThroughTruncated confirms the
+// truncated signal from FetchInstallationRepositories's pagination ceiling
+// is surfaced rather than swallowed — callers (#1750 R3) must be able to
+// treat a truncated result as ambiguous rather than a definitive exclusion.
+func TestReconciler_AccessibleRepos_PlumbsThroughTruncated(t *testing.T) {
+	oldFlow := runManifestFlow
+	runManifestFlow = failingRunManifestFlow(t)
+	defer func() { runManifestFlow = oldFlow }()
+
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	// 100 matches github.appFetchPageSize (unexported) — mirrors the
+	// existing TestReconcile_TruncatedInstallationsListYieldsAmbiguousNotFoundMessage
+	// precedent for forcing a paginated fetch to hit its ceiling via
+	// neverShortPage below (a page shorter than the page size ends
+	// pagination normally, regardless of neverShortPage).
+	repos := make([]string, 100)
+	for i := range repos {
+		repos[i] = fmt.Sprintf("handarbeit/repo-%03d", i)
+	}
+	srv, fake := newFakeAppServer("engine-bot", []gh.AppInstallation{
+		{ID: 999, Account: "handarbeit"},
+	}, func() time.Time { return time.Now().Add(time.Hour) })
+	fake.selectedRepos = map[int64][]string{999: repos}
+	fake.neverShortPage = true // forces FetchInstallationRepositories to hit its pagination ceiling
+	defer srv.Close()
+
+	r, err := Reconcile(context.Background(), Options{
+		AppID: 42, AppPrivateKeyPath: keyPath, AppInstallationID: 999,
+		AppStatePath: filepath.Join(dir, "app-state.json"),
+		WatchedRepos: []string{"handarbeit/fabrik"},
+		BaseURL:      srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	_, truncated, err := r.AccessibleRepos()
+	if err != nil {
+		t.Fatalf("AccessibleRepos: %v", err)
+	}
+	if !truncated {
+		t.Error("expected truncated=true when the fake server never returns a short page")
+	}
+}
+
+// TestReconciler_AccessibleRepos_NonPinnedReturnsExplicitError mirrors
+// VerifyGrants' non-pinned refusal: a discovery-mode Reconciler has no
+// single installation to enumerate, so AccessibleRepos must error rather
+// than guess one.
+func TestReconciler_AccessibleRepos_NonPinnedReturnsExplicitError(t *testing.T) {
+	oldFlow := runManifestFlow
+	runManifestFlow = failingRunManifestFlow(t)
+	defer func() { runManifestFlow = oldFlow }()
+
+	dir := t.TempDir()
+	keyPath := writeTestPrivateKey(t, dir)
+	srv, _ := newFakeAppServer("engine-bot", []gh.AppInstallation{
+		{ID: 111, Account: "handarbeit"},
+	}, func() time.Time { return time.Now().Add(time.Hour) })
+	defer srv.Close()
+
+	r, err := Reconcile(context.Background(), Options{
+		AppID: 42, AppPrivateKeyPath: keyPath, AppStatePath: filepath.Join(dir, "app-state.json"),
+		BaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	if _, _, err := r.AccessibleRepos(); err == nil {
+		t.Fatal("expected AccessibleRepos to error for a non-pinned (discovery-mode) Reconciler")
+	}
+}
+
 // TestReconcile_InitialDiscovery_DoesNotDoubleStartRefreshLoops is the
 // regression test for a review finding: Derive's own mint+commit path
 // (invoked internally by Reconcile's non-pinned discovery) used to start a

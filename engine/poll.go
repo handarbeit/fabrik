@@ -1373,10 +1373,12 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		e.logf(0, "poll", "repos on board: %v\n", repos)
 	}
 
-	// Clear any allow_auto_merge warning whose subject repo has left the
-	// board entirely — see sweepStaleAllowAutoMergeWarnings for why this
-	// can't be reached by checkAllowAutoMerge's own Clear branch (#1348).
+	// Clear any allow_auto_merge/repo_access warning whose subject repo has
+	// left the board entirely — see sweepStaleAllowAutoMergeWarnings and
+	// sweepStaleRepoAccessWarnings for why neither can be reached by their
+	// own function's Clear branch alone (#1348, #1750).
 	e.sweepStaleAllowAutoMergeWarnings(seenRepos)
+	e.sweepStaleRepoAccessWarnings(seenRepos)
 
 	// Seed labels on repos discovered for the first time this process run.
 	// seededRepos is guarded by e.mu; the poll loop is single-goroutine but
