@@ -48,11 +48,21 @@ type hookdeckManager struct {
 	// health (protected by mu) — connHealth reflects Source's own transport
 	// connectivity (Config.OnHealth); sigDriftActive reflects a sustained
 	// signature-verification failure streak (Config.OnSignatureDrift, R4);
-	// state is the combined, externally-reported value (sigDriftActive
-	// forces Unhealthy regardless of connHealth — see recomputeHealthState).
-	state          WebhookHealthState
-	connHealth     WebhookHealthState
-	sigDriftActive bool
+	// cacheDriftActive/cacheDriftReason mirror sigDriftActive's sticky shape
+	// for reconcileLoop's own cache-drift-found signal (reconcileHint,
+	// #1142 PR review third pass): without a persistent flag, the "drift
+	// found" Unhealthy transition could be silently cleared by a concurrent
+	// connHealth/sigDriftActive-only recompute (handleHealth/
+	// handleSignatureDrift firing while cacheImpl.Reconcile is still
+	// running) before the drift repair actually completes. state is the
+	// combined, externally-reported value — sigDriftActive or
+	// cacheDriftActive force Unhealthy regardless of connHealth — see
+	// recomputeHealthState.
+	state            WebhookHealthState
+	connHealth       WebhookHealthState
+	sigDriftActive   bool
+	cacheDriftActive bool
+	cacheDriftReason string
 
 	// per-event-type received counts (protected by mu), mirroring
 	// webhookManager.eventCounts for TUI/log parity.
@@ -242,6 +252,14 @@ func (hm *hookdeckManager) recomputeHealthState() {
 		newState = WebhookStreamStartingUp
 	}
 	reason := ""
+	// cacheDriftActive is checked before sigDriftActive so a genuine
+	// misconfigured-secret signature-drift episode's reason always wins
+	// when both are (rarely) active at once — it's the more operator-
+	// actionable condition of the two.
+	if hm.cacheDriftActive {
+		newState = WebhookStreamUnhealthy
+		reason = hm.cacheDriftReason
+	}
 	if hm.sigDriftActive {
 		newState = WebhookStreamUnhealthy
 		reason = "signature verification drift"
@@ -272,21 +290,33 @@ func (hm *hookdeckManager) transitionHealthState(newState WebhookHealthState, re
 }
 
 // reconcileHint applies a reconcileLoop-derived health suggestion (cache
-// drift found/absent) without letting it mask an active signature-drift
-// episode (#1142 PR review finding): reconcileLoop's own "no drift" signal
-// is a proxy for transport health, computed independently of hm's own
-// connHealth/sigDriftActive state, so a direct transitionHealthState(Healthy)
-// call here would silently clear the Unhealthy state
-// handleSignatureDrift(true) set, masking exactly the misconfigured-secret
-// condition R4 exists to escalate. A "drift found" hint is always safe to
-// apply directly — it can only escalate toward Unhealthy, never mask an
-// existing Unhealthy reason.
+// drift found/absent) without letting it mask, or be masked by, an
+// independently-driven health condition (#1142 PR review, second and third
+// passes):
+//
+//   - A "healthy" hint (no cache drift) must not silently clear an active
+//     signature-drift episode: reconcileLoop's own "no drift" signal is a
+//     proxy for transport health, computed independently of hm's own
+//     connHealth/sigDriftActive state, so accepting it as an unconditional
+//     override would mask exactly the misconfigured-secret condition R4
+//     exists to escalate.
+//   - Symmetrically, an "unhealthy" hint (drift found) must persist as a
+//     sticky condition (cacheDriftActive), not a one-shot direct
+//     transitionHealthState call — otherwise a connectivity event firing
+//     while cacheImpl.Reconcile is still running (handleHealth/
+//     handleSignatureDrift, which recompute from connHealth/sigDriftActive
+//     alone) could silently clear the drift-in-progress Unhealthy state
+//     before the repair actually completes.
+//
+// Both directions go through recomputeHealthState so the combined state is
+// always derived from the full, current set of independently-tracked
+// conditions rather than any single caller's transient view of it.
 func (hm *hookdeckManager) reconcileHint(healthy bool, reason string) {
-	if healthy {
-		hm.recomputeHealthState()
-		return
-	}
-	hm.transitionHealthState(WebhookStreamUnhealthy, reason)
+	hm.mu.Lock()
+	hm.cacheDriftActive = !healthy
+	hm.cacheDriftReason = reason
+	hm.mu.Unlock()
+	hm.recomputeHealthState()
 }
 
 // recordDrop implements hookdeck.Config.OnDrop (R4, ADR-1563): accumulates

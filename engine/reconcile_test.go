@@ -224,3 +224,49 @@ func TestTransitionMgrHealthState_HookdeckDriftFreeReconcileDoesNotMaskSignature
 		t.Error("transitionMgrHealthState(Unhealthy) must report unhealthy")
 	}
 }
+
+// TestTransitionMgrHealthState_HookdeckCacheDriftSurvivesConcurrentHealthEvent
+// is the direct regression test for the PR-review-found bug (third pass,
+// #1142): before this fix, reconcileLoop's "cache drift found" signal set
+// hm.state to Unhealthy via a one-shot transitionHealthState call with no
+// persistent backing flag — so a connectivity event firing while
+// cacheImpl.Reconcile was still running (handleHealth/handleSignatureDrift,
+// which recompute purely from connHealth/sigDriftActive) could silently
+// clear the drift-in-progress Unhealthy state before the repair actually
+// completed. reconcileHint must record the condition as sticky
+// (cacheDriftActive) so recomputeHealthState continues to honor it
+// regardless of what triggered the recompute.
+func TestTransitionMgrHealthState_HookdeckCacheDriftSurvivesConcurrentHealthEvent(t *testing.T) {
+	hm := newHookdeckManager(
+		func(int, string, string, ...any) {},
+		func(tui.Event) {},
+		nil, nil, "key", "secret",
+	)
+	hm.handleHealth(events.HealthEvent{State: events.HealthConnected})
+	if !hm.IsHealthyOrStartingUp() {
+		t.Fatal("expected healthy after HealthConnected")
+	}
+
+	// reconcileLoop finds cache drift and reports it — this must persist as
+	// Unhealthy for the duration of the (simulated) repair, not just for
+	// the instant this call runs.
+	transitionMgrHealthState(hm, WebhookStreamUnhealthy, "5 item(s) drifted")
+	if hm.IsHealthyOrStartingUp() {
+		t.Fatal("expected unhealthy immediately after a drift-found hint")
+	}
+
+	// A connectivity event fires while the (simulated) cache repair is
+	// still in flight — e.g. a brief reconnect blip unrelated to the cache
+	// drift. This must NOT clear the drift-in-progress Unhealthy state.
+	hm.handleHealth(events.HealthEvent{State: events.HealthConnected})
+	if hm.IsHealthyOrStartingUp() {
+		t.Error("a concurrent HealthConnected event must not clear an in-progress cache-drift Unhealthy state")
+	}
+
+	// Once the repair completes, reconcileLoop's "drift reconciled" hint
+	// correctly clears it.
+	transitionMgrHealthState(hm, WebhookStreamHealthy, "drift reconciled")
+	if !hm.IsHealthyOrStartingUp() {
+		t.Error("transitionMgrHealthState(Healthy, \"drift reconciled\") should clear the cache-drift condition")
+	}
+}
