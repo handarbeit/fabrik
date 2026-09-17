@@ -88,12 +88,14 @@ guard must not assume it is reading the REST-fresh snapshot.
 The helper always fetches, once, unconditionally — there is no "already fresh" fast path, since
 `Labels` is never part of the deep-fetch cache contract for either caller regardless of how
 recently a deep fetch ran. This is deliberately simple: reasoning about cache staleness here would
-buy nothing, since the answer is always "not fresh." The bound this satisfies is one live REST call
-per stage completion (per `handleStageComplete` invocation) and one per catch-up advance evaluation
-(per `runCatchUpPhase2` invocation) — never per-poll or per-item-per-poll, since the two paths are
-mutually exclusive admission for the same item in the same pass, and every downstream
-`hasYoloLabel`/`hasCruiseLabel` read (including the one inside `attemptMergeOnValidate`) is covered
-by that one call.
+buy nothing, since the answer is always "not fresh." The bound this satisfies is at most one live
+REST call per item per poll: `handleStageComplete` and `runCatchUpPhase2` are mutually exclusive
+admission for the same item in the same pass, so at most one of them runs per item per poll, and
+every downstream `hasYoloLabel`/`hasCruiseLabel` read (including the one inside
+`attemptMergeOnValidate`) is covered by that one call. This is *not* "never per-poll" — an item
+that keeps reaching `runCatchUpPhase2` unclaimed across many poll cycles (e.g. a cruise item parked
+at Validate awaiting human merge) incurs a fresh `FetchLabels` call on every one of those passes.
+The bound is on concurrency within a pass, not on the fetch recurring over an item's lifetime.
 
 ## Consequences
 
