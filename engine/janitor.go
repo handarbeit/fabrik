@@ -359,6 +359,28 @@ func (e *Engine) runSessionJanitor(ctx context.Context) {
 	)
 }
 
+// runProcessSweepJanitor is #1798's R3 backstop sweep: catches session-scoped
+// worker descendants that escaped both the PGID-scoped killProcGroup and the
+// per-invocation reapTrackedDescendants call in runClaude — most notably
+// orphans left behind by a previous engine run, since the durable descendant
+// registry (.fabrik/state/descendants.json) survives a restart while
+// runClaude's own in-memory tracking does not. Disabled when
+// JanitorIntervalHours == 0 (same gate as its three siblings). Called from
+// poll.go at startup and on every periodic janitor tick, alongside the
+// worktree, log, and session janitors — same cadence, no new scheduler
+// (AC3's "within one sweep interval" is satisfied by construction).
+//
+// sweepStaleDescendants itself only ever acts on an entry whose recorded
+// WorkerPID is no longer alive (see its own doc comment) and re-verifies
+// each candidate's identity fingerprint immediately before killing it (R5) —
+// this janitor wrapper adds no additional gating beyond the shared
+// JanitorIntervalHours check, matching its siblings' shape.
+func (e *Engine) runProcessSweepJanitor(ctx context.Context) {
+	_ = ctx // reserved for future use; sweepStaleDescendants performs no cancellable I/O
+	scanned, reaped, skipped := sweepStaleDescendants()
+	e.logf(0, "proc-janitor", "cycle complete: scanned %d registry entries, reaped %d, skipped %d\n", scanned, reaped, skipped)
+}
+
 // pruneSessions walks root (.fabrik/sessions/) and removes ".session" files
 // whose mtime is older than retentionDays. Handles both directory layouts
 // produced by engine/claude.go:

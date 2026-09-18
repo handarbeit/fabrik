@@ -4585,6 +4585,45 @@ At the end of each cycle the janitor emits an INFO-level log line:
 The `reasons` field tallies distinct skip reasons (e.g. `issue open ×3`, `dirty worktree`,
 `in-flight worker`). Each reaped worktree is also logged individually at reap time.
 
+### 11.7 Process-Sweep Janitor (#1798 R3)
+
+A fourth periodic janitor, `runProcessSweepJanitor`, runs alongside the worktree/log/session
+janitors above — same schedule (§11.2: startup scan, then hourly), same
+`JanitorIntervalHours != 0` gate, no separate config knob. Unlike the other three, it does
+not scan `.fabrik/worktrees/` at all: it sweeps the durable session-scoped descendant
+registry (`.fabrik/state/descendants.json`) for orphans that escaped both the PGID-scoped
+grandchild cleanup and the per-invocation session-scoped reap — see
+[stage-lifecycle.md § Session-Scoped Descendant Reaping](stage-lifecycle.md#session-scoped-descendant-reaping)
+for the full mechanism, and [ADR 1798](../adrs/1798-session-scoped-descendant-reaper.md) for
+the design rationale.
+
+**Sweep condition**: a registry entry is only ever acted on when its recorded worker PID is
+confirmed dead — a live signal-0 probe *and* an identity re-check against the worker's own
+`comm`/`lstart` fingerprint (recorded alongside the entry at discovery time). A live PID whose
+fingerprint no longer matches means the original worker exited and the OS has since reused its
+PID for an unrelated process; treating that PID as "still alive" without the identity re-check
+would leave the entry unswept forever, not merely delayed. An entry whose worker is still alive
+*and* still the same worker is left untouched — that invocation is still in flight, and the
+per-invocation reap will handle it at its own invocation end. This means the sweep only ever
+reaps genuine orphans: descendants of a worker that crashed before reaching its own
+invocation-end reap, descendants left behind by a *previous engine run entirely* (the case this
+janitor exists for, since the registry is a JSON file on disk and survives a restart while the
+engine's own in-memory dispatch state does not), or descendants whose worker PID was reused.
+
+**Identity re-verification (R5)**: immediately before killing any entry, its recorded
+`comm`+`lstart` identity fingerprint is re-checked against the live process at that PID. A
+mismatch — the process already exited, or the PID was reused for something unrelated since it
+was recorded — means the entry is dropped from the registry and never signalled.
+
+**Summary log**:
+
+```
+[proc-janitor] cycle complete: scanned N registry entries, reaped K, skipped M
+```
+
+Each reaped PID is also logged individually, via the existing `[#N kill]` convention, at
+sweep time.
+
 ---
 
 ## Appendix A: Two Paths to Stage Advancement

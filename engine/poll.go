@@ -668,6 +668,7 @@ func (e *Engine) Run() error {
 			e.runWorktreeJanitor(ctx)
 			e.runLogJanitor(ctx)
 			e.runSessionJanitor(ctx)
+			e.runProcessSweepJanitor(ctx)
 		}
 	}
 
@@ -676,8 +677,10 @@ func (e *Engine) Run() error {
 	e.startWorkerDetector(ctx)
 
 	// Start periodic janitor goroutine. On each tick: reaps orphaned worktrees for
-	// closed, off-board issues, prunes .fabrik/logs/ by age and total size, and
-	// prunes .fabrik/sessions/ by age. Disabled when JanitorIntervalHours == 0.
+	// closed, off-board issues, prunes .fabrik/logs/ by age and total size,
+	// prunes .fabrik/sessions/ by age, and sweeps the durable descendant
+	// registry for orphaned session-scoped worker descendants (#1798 R3).
+	// Disabled when JanitorIntervalHours == 0.
 	if e.cfg.JanitorIntervalHours > 0 {
 		go func() {
 			ticker := time.NewTicker(time.Duration(e.cfg.JanitorIntervalHours) * time.Hour)
@@ -690,6 +693,7 @@ func (e *Engine) Run() error {
 					e.runWorktreeJanitor(ctx)
 					e.runLogJanitor(ctx)
 					e.runSessionJanitor(ctx)
+					e.runProcessSweepJanitor(ctx)
 				}
 			}
 		}()

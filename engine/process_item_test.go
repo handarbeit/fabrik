@@ -38,6 +38,13 @@ import (
 // — os.Args is never parsed by the flag/testing machinery on this path (we
 // os.Exit before m.Run() does that), so the extra tokens survive into the
 // process's argv exactly as passed.
+//
+// A fourth subprocess mode (FABRIK_TEST_DETACH_HELPER, #1798 AC9) self-detaches
+// into a brand-new process group (setpgid(0, 0)) immediately on start, then
+// sleeps until killed — simulating a descendant that has already left its
+// worker's process group (so killProcGroup's PGID-scoped kill cannot reach
+// it) while remaining in the worker's session (so the new session-scoped
+// reaper still can).
 func TestMain(m *testing.M) {
 	if sentinel := os.Getenv("FABRIK_TEST_SIGINT_SENTINEL"); sentinel != "" {
 		go io.Copy(io.Discard, os.Stdin)
@@ -57,6 +64,12 @@ func TestMain(m *testing.M) {
 		// unlike a signal-wait, which the runtime treats as externally
 		// unblockable and never flags. Loop-sleep instead; the test kills
 		// this process explicitly via SIGKILL.
+		for {
+			time.Sleep(time.Hour)
+		}
+	}
+	if os.Getenv("FABRIK_TEST_DETACH_HELPER") == "1" {
+		detachHelperSetpgid() // moves self into a brand-new process group
 		for {
 			time.Sleep(time.Hour)
 		}
