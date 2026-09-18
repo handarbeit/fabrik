@@ -462,6 +462,7 @@ So: prefer making steady, committed progress over racing to finish inside one sl
 - **`fabrik:auto-merge-enabled` / `fabrik:yolo` / `fabrik:cruise`** — drive what happens after you emit `FABRIK_STAGE_COMPLETE`: `yolo` (non-cruise) triggers GitHub-native auto-merge and applies `fabrik:auto-merge-enabled`; `cruise` stops the pipeline at Validate completion without merging, even if `yolo` is also present.
 - **`fabrik:revalidate`** — the operator recovery path for a stuck Validate item: forces re-entry into this stage by stripping completion/gate labels and re-dispatching. You don't act on it directly; it's why you might be invoked again on an issue you'd already completed.
 
+- **`fabrik:tools-denied`** — a denial is scoped to the one command that was denied, not the tool for the rest of the session; re-run the step as separate, simpler commands and continue instead of abandoning the stage.
 See `../../LABELS.md` for the full label reference.
 
 ## Engine Context

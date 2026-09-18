@@ -72,6 +72,7 @@ After making any code changes:
 - **`fabrik:awaiting-ci`** — may be present if you're processing a comment during an active CI-fix cycle; relevant to any "re-run checks" request in the user's comment.
 - **`fabrik:rebase-needed`** — may be present if a mergeability conflict is what's being discussed; resolving it clears the label on the next successful rebase, same as in the main Validate flow.
 
+- **`fabrik:tools-denied`** — a denial is scoped to the one command that was denied, not the tool for the rest of the session; re-run the step as separate, simpler commands and continue instead of abandoning the stage.
 See `../../LABELS.md` for the full label reference.
 
 ## Completion

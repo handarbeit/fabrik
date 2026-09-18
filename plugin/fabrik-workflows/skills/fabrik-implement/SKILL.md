@@ -223,6 +223,7 @@ Out-of-scope work in the same Fabrik run belongs to a sibling issue's worktree, 
 - **`fabrik:unrestricted`** — if present, you were launched with `--dangerously-skip-permissions` instead of the default tool allowlist; explains why tools beyond the normal default set are available.
 - **`fabrik:children-spawned` / `fabrik:sub-issue`** — applied by the engine's pre-Implement step, before your first invocation, if the Plan stage declared sub-issue decomposition. You don't act on these; they're already-settled state by the time you start.
 
+- **`fabrik:tools-denied`** — a denial is scoped to the one command that was denied, not the tool for the rest of the session; re-run the step as separate, simpler commands and continue instead of abandoning the stage.
 See `../../LABELS.md` for the full label reference.
 
 ## Engine Context
