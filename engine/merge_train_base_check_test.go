@@ -226,6 +226,66 @@ func TestLandMergeTrainBatch_BaseContradiction_RefusesToOpenPR(t *testing.T) {
 	}
 }
 
+// TestLandMergeTrainBatch_AlreadyMergedPR_SkipsBaseCheck is a regression test for a
+// finding raised on PR #1774 (Pruefer): the base-contradiction check must not run when
+// the found integration PR is already merged (the FR-2 restart-safety path exercised by
+// TestLandMergeTrainBatch_AlreadyMergedPR_SkipsFR2). That state has nothing left to open
+// or reuse — the merge already happened — so a transient FetchLabels error or a label
+// edited after the merge must never strand an already-landed batch in Queued by refusing
+// before FR-3's advance-to-Done/close-PR logic ever runs. This is on the default
+// partition (unlike TestLandMergeTrainBatch_AlreadyMergedPR_SkipsFR2, which uses a
+// non-default trainKey that never triggers the check either way — see its own R5 no-op),
+// with a fetchLabelsFn that would refuse if the check fired, proving the skip is real.
+func TestLandMergeTrainBatch_AlreadyMergedPR_SkipsBaseCheck(t *testing.T) {
+	survivors := []trainMember{makeQueuedMember(1, 10, "Issue One")}
+	trainKey := defaultTrainKey("owner", "repo")
+
+	mergePRCalled := false
+	client := &mockGitHubClient{
+		listPRsFn: func(owner, repo string) ([]gh.PRDetails, error) {
+			return []gh.PRDetails{
+				{Number: 300, State: "closed", Merged: true, HeadRefName: trainBranchPrefix + "merge-train-main-12345", Body: mergeTrainBatchMarker + " #1"},
+			}, nil
+		},
+		mergePRFn: func(owner, repo string, prNumber int) error {
+			mergePRCalled = true
+			return nil
+		},
+		fetchLabelsFn: func(owner, repo string, issueNumber int) ([]string, error) {
+			// Would cause a refusal if the check ran — proves the skip, not a
+			// coincidental pass.
+			return []string{"base:develop"}, nil
+		},
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
+			return 1, nil
+		},
+	}
+
+	claude := &mockClaudeInvoker{}
+	wm := NewWorktreeManager(t.TempDir())
+	eng := trainTestEngine(t, client, claude, wm)
+	state := &mergeTrainWorkerState{trialName: "merge-train-main-12345", projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store(trainKey, state)
+
+	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", trainKey, survivors, wm)
+
+	if mergePRCalled {
+		t.Error("MergePR must not be called when integration PR is already merged (FR-2 skip)")
+	}
+
+	client.mu.Lock()
+	advanced := len(client.updateStatusCalls)
+	closed := len(client.closeIssueCalls)
+	client.mu.Unlock()
+
+	if advanced != 1 {
+		t.Errorf("expected the already-merged batch to still advance to Done (FR-3) despite a contradicting live label, got %d board status updates", advanced)
+	}
+	if closed != 2 {
+		t.Errorf("expected 2 closes — member PR #10 + member issue #1, got %d", closed)
+	}
+}
+
 // TestLandMergeTrainBatch_AgreeingNonDefaultBase_ProceedsNormally is Acceptance #3:
 // pinned base equals the members' declared non-default base — the check must never
 // fire (it only triggers on the default partition), and the PR opens normally.

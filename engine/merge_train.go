@@ -3583,9 +3583,16 @@ func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorke
 	// #1773 R1/R3: refuse to open OR reuse an integration PR whose pinned base
 	// contradicts what the batch's members declare live, rather than repairing or
 	// proceeding. Sits ahead of both the reuse and create branches below, per R1's
-	// "opens (or reuses)" wording. See refuseIfBaseContradictsMembers's doc comment.
-	if e.refuseIfBaseContradictsMembers(owner, repo, baseBranch, trainKey, survivors) {
-		return
+	// "opens (or reuses)" wording. Skipped when integrationPR is already merged
+	// (Pruefer, PR #1774): that restart-safety state has nothing left to open or
+	// reuse — the merge already happened — so refusing here would only strand an
+	// already-landed batch in Queued forever (a transient FetchLabels error, or a
+	// label edited after the merge, would never let FR-3's advance-to-Done/close-PR
+	// logic run), which is a worse outcome than the check exists to prevent.
+	if !(integrationPR != nil && integrationPR.Merged) {
+		if e.refuseIfBaseContradictsMembers(owner, repo, baseBranch, trainKey, survivors) {
+			return
+		}
 	}
 
 	var integrationPRNum int

@@ -38,8 +38,16 @@ members []trainMember) bool`, is called from both sites:
 - In `landMergeTrainBatch`, immediately after the closed-unmerged-trial escalation and before the
   `if integrationPR != nil { reuse } else { create }` split — covering both the PR-open and the
   PR-reuse branch uniformly, per the issue's own "opens (or reuses)" wording. A reused PR is just as
-  capable of carrying a stale/wrong base as a freshly-created one.
-- In `landSingleton`, immediately before its own `CreatePR` call.
+  capable of carrying a stale/wrong base as a freshly-created one. **Skipped, however, when the found
+  `integrationPR` is already merged** (`integrationPR != nil && integrationPR.Merged` — the FR-2
+  restart-safety state covered by `TestLandMergeTrainBatch_AlreadyMergedPR_SkipsFR2`): nothing is
+  being opened or reused there — the merge already happened — so refusing would only strand an
+  already-landed batch in Queued forever on a transient `FetchLabels` error or a label edited after
+  the merge, blocking FR-3's advance-to-Done/close-PR logic for no protective benefit. Found during
+  PR review (Pruefer) and fixed in the same PR; see `TestLandMergeTrainBatch_AlreadyMergedPR_SkipsBaseCheck`.
+- In `landSingleton`, immediately before its own `CreatePR` call. `landSingleton` never searches for
+  or reuses an existing PR (see its own doc comment — deliberately, to avoid the ADR-059 D4
+  data-loss bug), so it has no equivalent already-merged state to guard against.
 
 The singleton *fast path* (`trySingletonFastPath`/`singletonFastPathEligible`) is confirmed out of
 scope and left untouched: it merges the member's own existing PR via `MergePRAtHeadSHA`, which
@@ -106,7 +114,10 @@ natural follow-up if operational experience shows repeated refusals need surfaci
 ## Consequences
 
 - Both merge-train landing paths that can mint a new integration/landing PR are now guarded by the
-  same check; the singleton fast path is confirmed structurally exempt.
+  same check; the singleton fast path is confirmed structurally exempt. `landMergeTrainBatch`'s guard
+  additionally excludes its own already-merged-PR restart-safety state (see Decision §1), so the
+  check never interferes with FR-3 continuing to run against a batch whose integration PR already
+  landed.
 - The check is a no-op — no network call at all — for any partition other than the default one,
   preserving R5 for the overwhelming common case (a repo with only default-base Queued members) and
   for every existing `base:<branch>`-partitioned test in this file.
