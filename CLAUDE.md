@@ -305,9 +305,13 @@ PRs introducing new as-built behavioral docs should also add an entry here.
 
 Instead:
 
-- **Keep the report as the canonical thread** — human-owned. Confirm the repro there, then comment linking to the work issue; keep it open until the fix lands.
+- **Keep the report as the canonical thread** — human-owned. Confirm the repro there, then comment linking to the work issue; keep it open until a **release containing the fix has shipped**, then close it by hand with a comment naming that release.
 - **Create a separate spec-kit WORK issue** (authored as the bot identity, on the engine project board) that restates the report as Problem / Requirements / Scope / Acceptance and references it. **One report maps to 1..N work issues.**
-- **Linkage:** the work issue's PR carries `Closes #<work-issue>` (Fabrik's own discovery relies on it) **and** `Fixes #<report>` (so GitHub auto-closes the report and the reporter sees the resolution land).
+- **Linkage:** the work issue's PR carries `Closes #<work-issue>` (Fabrik's own discovery relies on it) and mentions the report **by bare number only**.
+  - **Never put a closing keyword (`Closes`/`Fixes`/`Resolves`) near a report's number.** GitHub would close the report on **merge** — typically weeks before the fix is **released** — leaving the reporter a silently-closed thread and a fix they cannot yet install. This is not hypothetical: a PR once carried a closing keyword for a report alongside `Closes` for its work issue, and merging closed the community report two seconds later, unexplained and unreleased.
+  - **Spec wording must be explicit**: *"mention #N in the PR body; do NOT use a closing keyword (`Closes`/`Fixes`/`Resolves`)"*. Saying merely "reference #N" is read by the Implement stage as licence to use one.
+  - **The keyword fires inside a negation too** — GitHub parses adjacency, not grammar. A PR body disclaiming the link (*"this does not \<keyword\> #N's actual subject"*) still matched and auto-closed that report as COMPLETED, stamping a declined report as shipped. Safe phrasings: *"#N is out of scope here"*, *"this does not address #N's subject"*, *"mentioned for context: #N"*.
+  - **Reports are closed by hand**, with a comment naming the release — never by a PR.
 - **Multi-part fixes:** create a **chain of self-contained spec-kit work issues** (`blockedBy`-linked, **no epic/tracking issue**), all referencing the report. Do **not** rely on the in-pipeline child-spawn (`FABRIK_SPAWN_CHILD`) for a *known* decomposition — that path is for decomposition Plan *discovers* mid-flight; pre-decompose into chained issues when you already know the shape.
 - **Exception:** only pipeline the issue itself when it is your own internal issue, already spec-kit-shaped, a single fix, and reshaping it is acceptable. Community-filed reports are always handled as a separate work issue.
 
