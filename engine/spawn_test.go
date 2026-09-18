@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
@@ -1070,6 +1071,262 @@ FABRIK_SPAWN_CHILD_END
 	}
 }
 
+// ---- post-spawn dispatch gate tests (#1783) ----
+//
+// These tests exercise the actual gap #1783 fixes: whether the parent's
+// BlockedBy edges are visible to a dispatch decision made on a *subsequent*
+// board fetch, not just within the same spawnChildren call. spawnTestEngine's
+// bare mockGitHubClient readClient can't demonstrate this — it never goes
+// through a board reconstruction at all. spawnTestEngineWithCache wires the
+// same *boardcache.CacheImpl reconstruction production uses, so
+// FetchProjectBoard's output is exactly what checkDependencies would see on
+// the engine's very next dispatch attempt for this parent.
+
+// spawnTestEngineWithCache mirrors spawnTestEngine but additionally wires a
+// live *boardcache.CacheImpl (backed by the same eng.store spawnChildren
+// writes to) as eng.readClient, so FetchProjectBoard reconstructs its output
+// from the Store exactly as production does.
+func spawnTestEngineWithCache(t *testing.T, client *mockGitHubClient) (*Engine, *boardcache.CacheImpl) {
+	t.Helper()
+	eng := spawnTestEngine(t, client)
+	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
+	eng.readClient = cache
+	return eng, cache
+}
+
+func twoChildSpawnItem() gh.ProjectItem {
+	return planItemWithBlocks(`
+FABRIK_SPAWN_CHILD_BEGIN owner/child
+TITLE: Child one
+Child one body.
+FABRIK_SPAWN_CHILD_END
+
+FABRIK_SPAWN_CHILD_BEGIN owner/child
+TITLE: Child two
+Child two body.
+FABRIK_SPAWN_CHILD_END
+`)
+}
+
+// TestPreImplement_BlockedByEdgesVisibleInNextBoardFetch is the Acceptance-#1
+// regression test ("reproduced red against main first"): before #1783's fix,
+// spawnChildren never wrote the new blockedBy edges into the Store, so the
+// very next FetchProjectBoard call (exactly what the engine's own next
+// dispatch attempt for this parent would see) still reported an empty
+// BlockedBy — the race #1659 reported. With the fix, the edges are visible
+// immediately, deterministically, with zero additional live FetchItemDetails
+// calls (this is what makes the guarantee structural rather than a race
+// against deep-fetch/cycleSet timing).
+func TestPreImplement_BlockedByEdgesVisibleInNextBoardFetch(t *testing.T) {
+	childCounter := 0
+	client := &mockGitHubClient{
+		createIssueFn: func(owner, repo, title, body string, assignees []string) (int, string, error) {
+			childCounter++
+			return 100 + childCounter, fmt.Sprintf("I_child%d", childCounter), nil
+		},
+	}
+	eng, cache := spawnTestEngineWithCache(t, client)
+
+	item := twoChildSpawnItem()
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	spawned, err := eng.preImplement(context.Background(), board, item)
+	if err != nil {
+		t.Fatalf("preImplement: %v", err)
+	}
+	if !spawned {
+		t.Fatal("expected spawned=true")
+	}
+
+	rebuilt, err := cache.FetchProjectBoard("owner", "repo", 1, "organization")
+	if err != nil {
+		t.Fatalf("FetchProjectBoard: %v", err)
+	}
+	var parent *gh.ProjectItem
+	for i := range rebuilt.Items {
+		if rebuilt.Items[i].Repo == "owner/repo" && rebuilt.Items[i].Number == item.Number {
+			parent = &rebuilt.Items[i]
+		}
+	}
+	if parent == nil {
+		t.Fatalf("parent owner/repo#%d not found in rebuilt board: %+v", item.Number, rebuilt.Items)
+	}
+	if len(parent.BlockedBy) != 2 {
+		t.Fatalf("parent.BlockedBy = %+v; want 2 edges", parent.BlockedBy)
+	}
+	wantNumbers := map[int]bool{101: false, 102: false}
+	for _, d := range parent.BlockedBy {
+		if d.Repo != "owner/child" {
+			t.Errorf("BlockedBy edge repo = %q; want owner/child", d.Repo)
+		}
+		if d.State != "OPEN" {
+			t.Errorf("BlockedBy edge state = %q; want OPEN", d.State)
+		}
+		if _, ok := wantNumbers[d.Number]; !ok {
+			t.Errorf("unexpected BlockedBy edge number %d", d.Number)
+		}
+		wantNumbers[d.Number] = true
+	}
+	for n, seen := range wantNumbers {
+		if !seen {
+			t.Errorf("missing BlockedBy edge for child #%d", n)
+		}
+	}
+
+	// The whole point of the synchronous Store write: zero live re-fetches were
+	// needed to make this board reconstruction correct.
+	if len(client.fetchItemDetailsCalls) != 0 {
+		t.Errorf("fetchItemDetailsCalls = %v; want none — the edge must be visible without a live re-fetch", client.fetchItemDetailsCalls)
+	}
+}
+
+// TestPreImplement_DispatchGate_BlocksClaudeUntilChildrenClose is Acceptance
+// #1's stronger claim: the dispatch decision itself (not just the BlockedBy
+// data) must reflect the spawn, and processItem must not invoke Claude for
+// this parent immediately after the spawn.
+func TestPreImplement_DispatchGate_BlocksClaudeUntilChildrenClose(t *testing.T) {
+	childCounter := 0
+	client := &mockGitHubClient{
+		createIssueFn: func(owner, repo, title, body string, assignees []string) (int, string, error) {
+			childCounter++
+			return 100 + childCounter, fmt.Sprintf("I_child%d", childCounter), nil
+		},
+	}
+	eng, cache := spawnTestEngineWithCache(t, client)
+	eng.cfg.Stages = testStages() // Research, Plan, Implement
+
+	item := twoChildSpawnItem()
+	item.Status = "Implement"
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	spawned, err := eng.preImplement(context.Background(), board, item)
+	if err != nil {
+		t.Fatalf("preImplement: %v", err)
+	}
+	if !spawned {
+		t.Fatal("expected spawned=true")
+	}
+
+	rebuilt, err := cache.FetchProjectBoard("owner", "repo", 1, "organization")
+	if err != nil {
+		t.Fatalf("FetchProjectBoard: %v", err)
+	}
+	var parentItem gh.ProjectItem
+	for _, it := range rebuilt.Items {
+		if it.Repo == "owner/repo" && it.Number == item.Number {
+			parentItem = it
+		}
+	}
+	if parentItem.Number != item.Number {
+		t.Fatalf("parent not found in rebuilt board")
+	}
+
+	stage := &stages.Stage{Name: "Implement"}
+	blocked := eng.checkDependencies(rebuilt, parentItem, stage)
+	if !blocked {
+		t.Fatal("expected checkDependencies to report blocked")
+	}
+	var blockedLabelAdded bool
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:blocked" {
+			blockedLabelAdded = true
+		}
+	}
+	if !blockedLabelAdded {
+		t.Error("expected fabrik:blocked to be added")
+	}
+
+	// Re-fetch once more (mirroring the engine's own next poll) so the
+	// dispatch decision below sees the just-applied fabrik:blocked label,
+	// exactly as processItem would on its very next attempt for this parent.
+	rebuilt2, err := cache.FetchProjectBoard("owner", "repo", 1, "organization")
+	if err != nil {
+		t.Fatalf("FetchProjectBoard (2nd): %v", err)
+	}
+	var blockedParent gh.ProjectItem
+	for _, it := range rebuilt2.Items {
+		if it.Repo == "owner/repo" && it.Number == item.Number {
+			blockedParent = it
+		}
+	}
+
+	claude := &mockClaudeInvoker{}
+	eng.claude = claude
+	if err := eng.processItem(context.Background(), rebuilt2, blockedParent); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+	if len(claude.calls) != 0 {
+		t.Errorf("expected no Claude invocations while parent is blocked on its children, got %d", len(claude.calls))
+	}
+}
+
+// TestPreImplement_DispatchGate_UnblocksWhenChildrenClose verifies the other
+// direction: once every spawned child is closed, checkDependencies clears
+// fabrik:blocked on the same edge data this fix writes — confirming the gate
+// is not one-way. R4's actual post-unblock routing (empty-coordinator vs.
+// hybrid parent) is unchanged by this fix and already covered by
+// TestFinalizeStageOutcome_EmptyCoordinator_AdvancesToDone and its siblings;
+// this test only pins that the gate itself releases correctly.
+func TestPreImplement_DispatchGate_UnblocksWhenChildrenClose(t *testing.T) {
+	childCounter := 0
+	client := &mockGitHubClient{
+		createIssueFn: func(owner, repo, title, body string, assignees []string) (int, string, error) {
+			childCounter++
+			return 100 + childCounter, fmt.Sprintf("I_child%d", childCounter), nil
+		},
+	}
+	eng, cache := spawnTestEngineWithCache(t, client)
+
+	item := twoChildSpawnItem()
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	if _, err := eng.preImplement(context.Background(), board, item); err != nil {
+		t.Fatalf("preImplement: %v", err)
+	}
+
+	rebuilt, err := cache.FetchProjectBoard("owner", "repo", 1, "organization")
+	if err != nil {
+		t.Fatalf("FetchProjectBoard: %v", err)
+	}
+	var parentItem gh.ProjectItem
+	for _, it := range rebuilt.Items {
+		if it.Repo == "owner/repo" && it.Number == item.Number {
+			parentItem = it
+		}
+	}
+
+	stage := &stages.Stage{Name: "Implement"}
+	if !eng.checkDependencies(rebuilt, parentItem, stage) {
+		t.Fatal("expected checkDependencies to report blocked before children close")
+	}
+
+	// Close both children in the Store — mirrors what the ordinary board
+	// reconcile/webhook-delta path does when GitHub reports the issues closed.
+	eng.store.Apply(itemstate.IssueClosed{Repo: "owner/child", Number: 101})
+	eng.store.Apply(itemstate.IssueClosed{Repo: "owner/child", Number: 102})
+
+	// alreadyBlocked=true on this next call, so checkDependencies does its own
+	// live re-read (FetchItemDetails) — supply the fresh state via the mock.
+	client.fetchItemDetailsFn = func(it *gh.ProjectItem) error {
+		it.BlockedBy = parentItem.BlockedBy
+		return nil
+	}
+	parentItem.Labels = append(append([]string{}, parentItem.Labels...), "fabrik:blocked")
+
+	if eng.checkDependencies(rebuilt, parentItem, stage) {
+		t.Error("expected checkDependencies to report unblocked once both children are closed")
+	}
+	var blockedLabelRemoved bool
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == "fabrik:blocked" {
+			blockedLabelRemoved = true
+		}
+	}
+	if !blockedLabelRemoved {
+		t.Error("expected fabrik:blocked to be removed once children are closed")
+	}
+}
+
 // TestPreImplement_CloneFailure replaces the old TestPreImplement_UnmanagedRepo.
 // With on-demand initialization, an unregistered target repo triggers a clone
 // attempt. This test verifies the failure path when the clone cannot succeed.
@@ -1282,6 +1539,82 @@ FABRIK_SPAWN_CHILD_END
 	}
 	if spawnedLabelCount != 1 {
 		t.Errorf("expected fabrik:children-spawned added exactly once, got %d", spawnedLabelCount)
+	}
+}
+
+// TestPreImplement_DependsOnChain_SiblingEdgeVisibleInStore is a bot-review
+// regression guard (#1783 follow-up): the sibling DEPENDS_ON wiring pass must
+// write its edge into the Store too, keyed on the dependent CHILD's own
+// (repo, number) — not just the parent's edge, which
+// TestPreImplement_BlockedByEdgesVisibleInNextBoardFetch already covers.
+// Without this, a dependent child's first Store entry could arrive via a
+// shallow reconcile (which never populates BlockedBy) rather than a live
+// deep-fetch, and checkDependencies would see an empty BlockedBy and dispatch
+// the child before its sibling closes — the identical race #1783 closes for
+// the parent, one level down.
+func TestPreImplement_DependsOnChain_SiblingEdgeVisibleInStore(t *testing.T) {
+	childCounter := 0
+	client := &mockGitHubClient{
+		createIssueFn: func(owner, repo, title, body string, assignees []string) (int, string, error) {
+			childCounter++
+			return 400 + childCounter, fmt.Sprintf("I_chain%d", childCounter), nil
+		},
+		addProjectV2ItemByIdFn: func(projectID, contentNodeID string) (string, error) {
+			return "PVTI_" + contentNodeID, nil
+		},
+	}
+	eng, cache := spawnTestEngineWithCache(t, client)
+
+	item := planItemWithBlocks(`
+FABRIK_SPAWN_CHILD_BEGIN owner/child
+TITLE: Slice one
+Slice one body.
+FABRIK_SPAWN_CHILD_END
+
+FABRIK_SPAWN_CHILD_BEGIN owner/child
+TITLE: Slice two
+DEPENDS_ON: 1
+Slice two body.
+FABRIK_SPAWN_CHILD_END
+`)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	spawned, err := eng.preImplement(context.Background(), board, item)
+	if err != nil {
+		t.Fatalf("preImplement: %v", err)
+	}
+	if !spawned {
+		t.Fatal("expected spawned=true")
+	}
+
+	rebuilt, err := cache.FetchProjectBoard("owner", "repo", 1, "organization")
+	if err != nil {
+		t.Fatalf("FetchProjectBoard: %v", err)
+	}
+	var child2 *gh.ProjectItem
+	for i := range rebuilt.Items {
+		if rebuilt.Items[i].Repo == "owner/child" && rebuilt.Items[i].Number == 402 {
+			child2 = &rebuilt.Items[i]
+		}
+	}
+	if child2 == nil {
+		t.Fatalf("child owner/child#402 not found in rebuilt board: %+v", rebuilt.Items)
+	}
+	if len(child2.BlockedBy) != 1 {
+		t.Fatalf("child 2's BlockedBy = %+v; want exactly 1 edge (its sibling)", child2.BlockedBy)
+	}
+	if d := child2.BlockedBy[0]; d.Repo != "owner/child" || d.Number != 401 || d.State != "OPEN" {
+		t.Errorf("child 2's BlockedBy[0] = %+v; want {owner/child, 401, OPEN}", d)
+	}
+
+	// The blocking sibling (child 1) must not have picked up a spurious
+	// self-referential or reversed edge.
+	for i := range rebuilt.Items {
+		if rebuilt.Items[i].Repo == "owner/child" && rebuilt.Items[i].Number == 401 {
+			if len(rebuilt.Items[i].BlockedBy) != 0 {
+				t.Errorf("child 1's BlockedBy = %+v; want none (it is the blocker, not the blocked)", rebuilt.Items[i].BlockedBy)
+			}
+		}
 	}
 }
 
@@ -1554,6 +1887,20 @@ FABRIK_SPAWN_CHILD_END
 	}
 	if !pausedAdded {
 		t.Error("fabrik:paused not added on partial failure")
+	}
+
+	// The first child (which succeeded before the second's CreateIssue failed)
+	// must already be reflected in the Store's BlockedBy — #1783's synchronous
+	// write is unconditional per-child, so a partial spawn's already-linked
+	// children are not lost even though the spawn as a whole is paused rather
+	// than completed (R5 non-regression).
+	snap, err := eng.store.Get("owner/repo", item.Number)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	deps := snap.State().BlockedBy
+	if len(deps) != 1 || deps[0].Repo != "owner/child" || deps[0].Number != 101 {
+		t.Errorf("BlockedBy = %+v; want exactly one edge to owner/child#101 (the successfully-linked first child)", deps)
 	}
 }
 

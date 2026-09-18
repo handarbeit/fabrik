@@ -1928,7 +1928,7 @@ FABRIK_SPAWN_CHILD_END
 
 `DEPENDS_ON: 2` means "this block depends on block 2 of this same Plan output" — a 1-based index into the blocks as emitted, not an issue number. The engine wires it as an additional `blockedBy` edge between the two children (alongside the unchanged parent edge), so the dependent child carries `fabrik:blocked` until its sibling closes — exactly like any other dependency Fabrik tracks. References must point to a strictly earlier block; an out-of-range or non-forward `DEPENDS_ON` value fails the spawn step loudly (the parent is paused with an explanatory comment) rather than being silently dropped. Without this, ordering could only be expressed as prose in the child's body ("Depends on: Slice 2") — invisible to Fabrik's dependency gate, so nothing would stop the sibling worktrees from running concurrently and colliding on shared files.
 
-After spawning, the parent waits at Implement with `fabrik:blocked` until all children close. When the last child closes, the parent's Implement Claude invocation fires — for coordinator-only parents (no own implementation work), Claude completes with nothing to commit, and the engine detects the empty-coordinator case (zero commits ahead of base) and moves the parent directly to Done without attempting a PR.
+Once children are spawned, the parent is done for this dispatch — it does not run Implement against the full, undecomposed issue. The parent's dependency on its own children is recorded deterministically at spawn time (not discovered on some later poll), so the very next time Fabrik looks at the parent it already sees `fabrik:blocked` with the new children listed, and it waits there until all of them close. When the last child closes, the parent's Implement Claude invocation fires — for coordinator-only parents (no own implementation work), Claude completes with nothing to commit, and the engine detects the empty-coordinator case (zero commits ahead of base) and moves the parent directly to Done without attempting a PR.
 
 #### What You Observe
 
@@ -4176,6 +4176,16 @@ A regeneration failure (non-zero exit, inability to stage, conflict markers stil
 
 **Landing sequence (FR-1 through FR-5):**
 
+**Pre-FR-1 — base sanity check (#1773).** Immediately before FR-1's `if integrationPR != nil {
+reuse } else { create }` split — covering both the open and reuse branches uniformly —
+`landMergeTrainBatch` (and, at its own equivalent `CreatePR` call, `landSingleton`) calls
+`refuseIfBaseContradictsMembers`. On the default-base partition only, it reads each member's
+`base:<branch>` label **live** (never the cached snapshot) and refuses to open or reuse the PR if
+any member's live label declares a different base, or if the live read itself errors — leaving
+members in Queued rather than landing against a base that contradicts what they declare. See §6.24
+for the full mechanism; this is a no-op on any non-default-base partition and on a healthy
+default-base batch.
+
 1. **FR-1 — Open integration PR**: `landMergeTrainBatch` calls `CreatePR` (non-draft) with title `[merge-train] batch: #N1, #N2, …` and a body containing the idempotency marker `<!-- fabrik-merge-train-batch -->`. The body lists all batch members (issue number + title) **and a `Closes #N` line per member**. The member PRs are closed-not-merged (the change lands via this integration PR), so a member PR's own `Closes #N` never fires — the integration PR's `Closes #N` is what restores issue↔landing-PR connectivity and auto-closes each member issue when the integration PR merges **into the default branch**. (For a non-default base, or on auto-close lag, FR-3's explicit `CloseIssue` is the fallback.) The same `Closes #N` lines are carried on the trial *draft CI PR* body from assembly, since that draft PR IS the landing PR when reused (FR-5).
 
 2. **FR-2 — Poll and merge**: `pollForMergeable` polls the integration PR with the same 30s interval as `pollTrainCI`, using `FetchPRDetails` (mergeable_state **and** head SHA in one call) and `classifyLandingCI` (ADR-1441, #1441) — the merge-train landing counterpart to `pollTrainCI`'s own check-run-aware classification, built from the same shared primitives (`gh.ClassifyCheckRuns`, `e.classifyRequiredContexts`, `describeCheckRuns`, `gh.MergeableStateAccepted`). `mergeable_state == "dirty"` rejects immediately with no check-run fetch; otherwise check runs on the head SHA are fetched and classified: a confirmed failure or required-context failure rejects; a check still pending keeps polling; an all-clear (plus required contexts satisfied) lands. Only with **zero check runs at all** does an accepted `mergeable_state` (`clean`/`unstable`, `gh.MergeableStateAccepted`) become load-bearing by itself — mirroring `pollTrainCI`'s own zero-check-runs fallback. Before ADR-1441, this step accepted `mergeable_state ∈ {"clean", "unstable"}` outright with no check-run awareness at all — the merge-train landing counterpart to the single-PR advance gate's pre-ADR-1441 shortcut, left unfixed by ADR-1153 and explicitly flagged there as a "candidate fast-follow." Once `classifyLandingCI` judges the PR landable, `MergePR` is called (no admin bypass). `MergePR` itself independently re-checks `mergeable_state` against the `clean`/`unstable` allowlist before merging (see "`MergePR`'s own CI precondition (ADR-933)" in §5, after §5.3) — normally a no-op here since `pollForMergeable` already judged the PR acceptable, but it closes a narrow TOCTOU window if the state flips between the two checks; this merge-side check is deliberately unchanged by ADR-1441 (its R3 decision: the merge path continues to defer to branch protection alone, per ADR-072's operator note). On timeout, a warning comment is posted on the first batch member and the function returns without advancing members (they remain in Queued for the next train cycle). On merge API failure — including `gh.ErrNotMergeableCI` from that TOCTOU window — an error comment is posted and landing aborts, leaving members in Queued to retry on the next train cycle; this is not escalated to a pause and does not touch `fabrik:rebase-needed`.
@@ -4299,6 +4309,7 @@ Reconstruction reads only durable state (never the map) and never launches a gor
 | `fabrik:clear-claude-limit` | operator | Applied manually to any open board item to clear an active account-wide Claude usage-limit suspension without an engine restart | `settleClaudeLimitClearRequests`, the same poll cycle it was observed on | Consumed immediately — the scan clears the suspension once and removes the label from every carrying item in the same pass | One-shot command label, mirroring `fabrik:revalidate`. Not scoped to items also carrying `fabrik:claude-limit` — the suspension it clears is account-wide, not per-issue. See §7.3 and ADR-1183. |
 | `fabrik:api-key-helper-detected` | `handleAPIKeyHelperDetected` | On a Claude invocation skipped because the worktree's own `.claude/settings.json` or `settings.local.json` sets `apiKeyHelper` (`apiKeyHelperDetectedError`, returned by `runInvocationWithExtension` before Claude is ever invoked — a repo-resident setting Fabrik cannot see until the worktree exists, distinct from the startup-time `checkAPIKeyHelper` preflight covering the managed-policy/user/`fabrikDir`-project layers), gated on the label's own absence (idempotent — comment posted only on the absent→present transition) | The non-detection path in `finalizeStageOutcome`, unconditionally, alongside the `fabrik:claude-limit` clear — fires for success, blocked-on-input, no-work-needed, genuine failure/retry, and PR-creation failure alike; `cleanupClosedIssueTransientLabels` (defensive sweep, via `transientLifecycleLabels`) | On the next invocation that is not itself classified as a usage-limit exit or an `apiKeyHelper` detection; or when issue is closed (defensive sweep) | Mirrors `fabrik:claude-limit`'s "stage never ran" shape exactly: `StageAttempted` is recorded (normal dispatch cooldown applies) but `StageRetryIncremented` is deliberately never called — does not count against `max_retries`. Neither `stage:<name>:failed` nor `fabrik:paused` is applied. Unlike `fabrik:claude-limit`, there is no account-wide settle sweep — the condition is inherently per-worktree, self-resolving once a human removes `apiKeyHelper` from the repo. See ADR-1346, R13. |
 | `fabrik:tools-denied` | Inline in `finalizeStageOutcome`'s final `else` branch (the `toolsDenied` case) — the stage-dispatch path; **and**, identically (#1704), a mirroring `errors.As(err, &toolsDeniedErr)` branch in `processComments`'s error handling — the shared funnel for ordinary comment review and all three reinvoke dispatchers (`dispatchCIFixReinvoke`, `dispatchReviewReinvoke`, `dispatchRebaseReinvoke`). Both call the same `recordToolsDeniedDetection` helper, so the label/comment/counter bookkeeping cannot drift between the two consumers of `interpretClaudeResult`'s shared classification | On a Claude invocation whose tool call(s) were denied by the CLI's own permission layer (`claudeToolsDeniedError`, detected structurally in `interpretClaudeResult`'s clean-exit path from a non-empty `resp.PermissionDenials` array, gated on `!completed` — never from output prose), gated on the label's own absence (idempotent — comment posted only on the absent→present transition) | The non-denial path in `finalizeStageOutcome`, gated on `!toolsDenied` (unlike `fabrik:claude-limit`/`fabrik:api-key-helper-detected`, this invocation itself may BE the condition — the classification does not short-circuit, so the clear must not fire on the very detection it would erase); `cleanupClosedIssueTransientLabels` (defensive sweep, via `transientLifecycleLabels`) | On the next invocation that is not itself classified as a tools-denied exit; or when issue is closed (defensive sweep) | Structurally unlike its two siblings: the CLI exits cleanly (`is_error: false`, `terminal_reason: "completed"`) and real work may have happened before the denial, so this does NOT short-circuit `finalizeStageOutcome` — `commitWIP`, the branch push, and `markCommentsSeenByStage` all still run, mirroring `claudeTurnLimitError`/`claudeResumeFailureError`'s continue-processing shape rather than the did-not-run family's early return. `StageAttempted` is recorded (normal dispatch cooldown applies) but `StageRetryIncremented` is deliberately never called — does not count against `max_retries`. Bounded instead by its own `ToolsDeniedRetries`/`MaxToolsDeniedRetries` counter (default 3) — shared across both consumers, so a denial on `ci-fix-reinvoke` and a denial on the stage path accumulate against the same per-stage counter; at the bound, `pauseForToolsDeniedLimit` applies `fabrik:paused` + `fabrik:awaiting-input` (never `stage:<name>:failed` — the condition is never treated as a stage failure, even at the bound), reused unforked from either call site. Because classification is expressed as a non-nil `error` from `interpretClaudeResult`, `blockedOnInput := err == nil && ...` is structurally unreachable for a detected denial — the outcome is identical whether or not the worker also emits `FABRIK_BLOCKED_ON_INPUT`. On the comment/reinvoke path, the new branch sits ahead of `checkNoOpCommentCycle`/`checkCommentBreaker` and returns before either runs, so a mode denial is bounded exclusively by `MaxToolsDeniedRetries`, never by the comment breaker's frequency-based thresholds (which stay unchanged). See §7.3b, §7.3c, and ADR-1523/#1704. |
+| `fabrik:toolchain-stale` | `checkToolchainDrift` (`engine/toolchain.go`) — called from both `runInvocationWithExtension` (stage dispatch, immediately after the `apiKeyHelper` check) and `processComments` (comment review, right after context files are written) against the same shared implementation, so the two invocation paths cannot drift (#1786) | On a comparable declared-vs-resolved toolchain mismatch (`.nvmrc`, `package.json` `engines.node`, `go.mod` `toolchain`/`go` directive, or `.tool-versions`, compared against the binary version actually resolved on the daemon's own inherited `PATH` via `node --version`/`go version`), gated on the label's own absence (idempotent — comment posted only on the absent→present transition). Detection never returns an error and is never routed through `finalizeStageOutcome` — unlike `fabrik:claude-limit`/`fabrik:api-key-helper-detected`, it never skips the invocation; the stage/comment-review call proceeds exactly as it would have regardless of what it finds | `checkToolchainDrift` itself, the next time it runs for that issue and finds no comparable mismatch (declaration file fixed, or the daemon restarted with a corrected `PATH`); `cleanupClosedIssueTransientLabels` (defensive sweep, via `transientLifecycleLabels`) | On the next invocation (stage dispatch or comment review) that observes no comparable mismatch; or when issue is closed (defensive sweep) | Warn-and-continue, not a gate: `StageAttempted`/`StageRetryIncremented`/`max_retries` bookkeeping is entirely untouched, and neither `stage:<name>:failed` nor `fabrik:paused` is applied. Comparison is deliberately narrow and fails closed on ambiguity (an `.nvmrc` alias, a complex `engines` range, an unparseable `.tool-versions` line, or a binary missing from `PATH` are all "not comparable" — silence, never a false-positive warning); `.nvmrc`/`.tool-versions`/`engines.node` compare at major-version granularity, `go.mod`'s `toolchain`/`go` directive at major.minor using minimum-version semantics. A successful resolution is memoized process-wide per tool for the daemon's own lifetime (`resolveToolVersion`) — sound specifically because the bug this label exists to catch is that this `PATH` cannot change without a restart; a resolution *failure* (timeout, transient exec error) is deliberately never cached, since a failure carries no such invariance guarantee — caching it would permanently and silently disable detection for that tool after a single bad moment. No dedicated settle scan: this is a fire-once informational label, structurally identical to `fabrik:api-key-helper-detected`. See ADR-1786. |
 | `fabrik:awaiting-done` | `handleNoWorkNeeded` | As the very first mutation, the instant `processItem` decides `completed && noWorkNeeded` — before the `fabrik:awaiting-input` clear, before the emitting stage's completion label, before anything else (idempotent: a no-op if already present) | `clearNoWorkNeededMarker` (after a fully successful `settleNoWorkNeeded` pass — status moved to Done and issue closed); `escalateNoWorkNeededFailure` (after `MaxRetries` failed settle passes) | When the Done move and issue close have both succeeded (or were already true), or when escalated (`fabrik:paused` takes over dispatch suppression instead) | Suppresses dispatch of every non-cleanup stage in `itemMayNeedWork`/`itemNeedsWork`, independent of `item.Status` — the outstanding board move is exactly what may be failing, so the item can be observed sitting at any column while this label is present. Retried every poll by the no-work-needed settle scan, `settleNoWorkNeededScan` (`engine/poll_settle.go`; called from `poll()` in `engine/poll.go`, immediately after `runValidatePRTerminalAdvance`), which resolves the current stage via `stages.FindStage(e.cfg.Stages, item.Status)` and calls `settleNoWorkNeeded`. **Deliberately excluded from `cleanupClosedIssueTransientLabels`'s closed-issue defensive sweep** — unlike other gate labels, stripping it before the settle scan has finished would silently resurrect the bug this label exists to prevent (§6.8, ADR-060) |
 | `fabrik:awaiting-member-close` | `markMergeTrainMemberCloseOutstanding` (`landSingleton`) | Only in the failure branch of `landSingleton`'s member-issue `CloseIssue` call — after the PR merge, Done-move, and member-PR close have already run (idempotent: a no-op if already present) | `clearMergeTrainMemberCloseMarker` (after a fully successful `settleMergeTrainMemberClose` pass — issue confirmed closed); `escalateMergeTrainMemberCloseFailure` (after `MaxRetries` failed settle passes) | When the member issue is confirmed closed (by us or by GitHub's own `Closes #N` auto-close), or when escalated (`fabrik:paused` takes over instead) | **Not** wired into `itemMayNeedWork`/`itemNeedsWork` or `transientLifecycleLabels` — by the time this label can be written, the item has already reached its terminal singleton-landing outcome, so there is no per-stage redispatch risk to guard against (§6.10, ADR-061). Retried every poll by `settleMergeTrainMemberCloses` (`engine/merge_train_member_close_settle.go`; called from `poll()` in `engine/poll.go`, immediately after `handleMergeTrainBatch`), which scans raw `board.Items` directly — independent of `merge_train: on/off`, `deepFetchCandidates`, and the terminal-skip optimization (#689) |
 | `fabrik:awaiting-close` | `markNonDefaultBaseCloseOutstanding` (`closeIssueIfNonDefaultBase`) | Only in the failure branch of `closeIssueIfNonDefaultBase`'s explicit `CloseIssue` call — after the caller's Done-advance has already run (idempotent: a no-op if already present) | `clearNonDefaultBaseCloseMarker` (after a fully successful `settleNonDefaultBaseClose` pass — issue confirmed closed); `escalateNonDefaultBaseCloseFailure` (after `MaxRetries` failed settle passes) | When the issue is confirmed closed (by us or by any other actor), or when escalated (`fabrik:paused` takes over instead) | **Not** wired into `itemMayNeedWork`/`itemNeedsWork` or `transientLifecycleLabels` — structurally identical to `fabrik:awaiting-member-close`: by the time this label can be written, the item has already reached Done, so there is no per-stage redispatch risk to guard against (§6.13, ADR-1097). Retried every poll by `settleNonDefaultBaseCloses` (`engine/close_nondefault_base_settle.go`; called from `poll()` in `engine/poll.go`, immediately after `settleMergeTrainMemberCloses`), which scans raw `board.Items` directly |
@@ -5936,16 +5947,18 @@ These blocks persist in the Plan stage comment — they are data, not consumed-a
    - `UpdateProjectItemStatus(board.ProjectID, childItemID, sf.FieldID, specifyOptionID)` — moves child to the `Specify` column (or first non-Backlog, non-terminal column as fallback). **Non-fatal**: if the call fails, `e.statusField` is nil (startup fetch failed), or no viable column exists, the child lands in Backlog, a warning is logged, spawn continues — and `recordChildPlacementFailure` writes the durable `fabrik:awaiting-placement` marker on the child so the board-placement settle scan retries it (§6.9, ADR-062). **When resuming a block whose `LookupIssueProjectItem` check (above) found a non-empty Status**, this call is skipped entirely rather than re-run — the child may have already progressed under its own pipeline while the parent sat paused, and blindly re-placing it into `Specify` would clobber that progress (ADR-1583).
    - Conditional `AddLabelToIssue` for `fabrik:yolo` on the child if the parent has `fabrik:yolo`; conditional `AddLabelToIssue` for `fabrik:cruise` if the parent has `fabrik:cruise`. Both are **non-fatal** (failure logs a warning, spawn continues). `base:<branch>` labels are **not** inherited.
    - On any failure in the fatal steps (CreateIssue, AddProjectV2ItemById, AddBlockedByIssue, or resolving a marked-but-now-missing child): post error comment naming completed and failed children, add `fabrik:paused` to parent, stop without adding `fabrik:children-spawned`. The comment no longer instructs closing orphaned children (ADR-1583) — it states that already-created children are tracked and will be resumed, not recreated, on the next retry.
-5. **Sibling-wiring pass** (second pass, after all children in step 4 exist): for each block that declared `DEPENDS_ON`, call `AddBlockedByIssue(childNodeIDs[ownIndex], childNodeIDs[dependsOnIndex])` — the same primitive used for the parent edge in step 4, now linking two children. A block may depend on any earlier sibling regardless of where in step 4 its own creation happened to land. On failure: post an error comment (all children created so far are listed), add `fabrik:paused` to parent, stop without adding `fabrik:children-spawned` — the same partial-creation-on-failure shape step 4 already uses, not a new failure mode.
+5. **Sibling-wiring pass** (second pass, after all children in step 4 exist): for each block that declared `DEPENDS_ON`, call `AddBlockedByIssue(childNodeIDs[ownIndex], childNodeIDs[dependsOnIndex])` — the same primitive used for the parent edge in step 4, now linking two children. Immediately on success, apply `BlockedByEdgeAdded` to the Store too — keyed on the **dependent child's own** `(repo, number)`, not the parent's, mirroring step 4's parent-edge write (#1783 follow-up) so a dependent child is not exposed to the same stale-`BlockedBy` race this ADR closes for the parent. A block may depend on any earlier sibling regardless of where in step 4 its own creation happened to land. On failure: post an error comment (all children created so far are listed), add `fabrik:paused` to parent, stop without adding `fabrik:children-spawned` — the same partial-creation-on-failure shape step 4 already uses, not a new failure mode.
 6. After all children are created, linked to the parent, **and** all declared sibling edges are wired: best-effort remove every `fabrik:spawned-child:<blockIndex>:<childNumber>` marker this call knows about (ADR-1583 — steady state carries none of them, they exist only transiently during an interrupted/in-progress spawn), then add `fabrik:children-spawned` to the parent. The idempotency guard is applied for the full two-phase operation (steps 4+5) — after both, not immediately-after-step-4 — specifically so a sibling-wiring failure is retried on the next attempt rather than silently accepted as "done."
 
-**After spawn:** `spawnChildren` returns `(spawned, true, nil)`, where `spawned` lists each child as `owner/repo#N`. From `preImplement`'s call site, `processItem` returns without invoking Claude. On the next poll cycle, `checkDependencies` sees the new `blockedBy` edges — both parent edges and any sibling edges — and adds `fabrik:blocked`, gating the parent until all children close. `checkDependencies` and `PushUnblockObserver` require **no changes** for sibling edges: both already operate generically over any `item.BlockedBy` entry regardless of whether it originated from the parent-wiring step or the sibling-wiring step.
+**After spawn:** `spawnChildren` returns `(spawned, true, nil)`, where `spawned` lists each child as `owner/repo#N`. From `preImplement`'s call site, `processItem` returns without invoking Claude — decomposition is a terminal outcome for that dispatch (R1, #1783).
+
+**The dispatch gate is a synchronous Store write, not a race against deep-fetch/cycleSet timing (#1783, ADR-1783).** Before #1783, the only thing that could stop a *later* dispatch attempt from running Claude on the full parent was `fabrik:blocked`, and `fabrik:blocked` depended on `checkDependencies` seeing a freshly deep-fetched `BlockedBy` — which required a `LabelsChanged` change (from `fabrik:children-spawned`) to populate `cycleSet`, which required a subsequent poll's `selectDeepFetchCandidates` to admit the item for a real `FetchItemDetails` call. Under GraphQL rate-limit pressure or a transient deep-fetch failure, that chain could take several poll cycles to complete — or, if the item was admitted to dispatch by some other route in the interim (e.g. a comment) while `BlockedBy` was still stale-empty, `checkDependencies` would report "not blocked" and Implement would build the whole parent as a monolith minutes after the children were filed (the #1659 report). Immediately after each child is linked via `AddBlockedByIssue`, `spawnChildren` now also applies a `BlockedByEdgeAdded` mutation (`internal/itemstate`) directly to the engine's own `Store`, appending that one dependency edge with no other deep field touched. Because `boardcache.CacheImpl.FetchProjectBoard` reconstructs every item's `BlockedBy` straight from the Store on every call (`snapshotToProjectItem`), the very next board fetch — this poll's own continuation or the next poll, whichever comes first — already carries the correct edges, with zero dependency on `cycleSet` wake timing, deep-fetch admission, or a live re-fetch succeeding. `checkDependencies` then sees the new `blockedBy` edges — both parent edges and any sibling edges — on that board and adds `fabrik:blocked`, gating the parent until all children close. `checkDependencies` and `PushUnblockObserver` require **no changes** for sibling edges: both already operate generically over any `item.BlockedBy` entry regardless of whether it originated from the parent-wiring step or the sibling-wiring step. The `BlockedByEdgeAdded` write is unconditional per child — it fires whether the edge was freshly linked or found already-linked on an ADR-1583 resume — so a partial (paused) spawn's already-linked children are reflected in the Store even though the batch as a whole did not complete (R5 non-regression).
 
 **Partial spawn failure:** `fabrik:children-spawned` is NOT applied if any step fails — including a `DEPENDS_ON` validation failure (step 1, before any child exists), a board-servability refusal (step 2, before any child exists), or a sibling-wiring failure (step 5, after all children exist but some sibling edges may be unwired). On retry (after user removes `fabrik:paused`), the caller re-runs `spawnChildren` from the beginning — but **resume-safe as of ADR-1583**: any block already recorded via a `fabrik:spawned-child:<blockIndex>:<childNumber>` marker (step 4, above) is recognized and resumed rather than recreated. Users no longer need to manually close orphaned children before re-advancing for the three per-child steps this covers (`CreateIssue`, `AddProjectV2ItemById`, `AddBlockedByIssue`); the sibling `DEPENDS_ON` wiring pass (step 5) itself is unchanged — a raw re-call on every retry, deliberately out of this ADR's scope (its own `AddBlockedByIssue` calls are expected, but not confirmed, to no-op on a repeat).
 
 **Recursive decomposition:** A child issue created by `preImplement` runs the full Fabrik pipeline. If the child's own Plan emits `FABRIK_SPAWN_CHILD_*` blocks, the child's Implement dispatch triggers another `preImplement` — grandchildren are created identically. There is no depth limit.
 
-**References:** [ADR-048: Engine-Side Pre-Implement Spawn](../adrs/048-spawn-child-engine-side.md), [ADR-1583: Spawn-Children Resume-Safe Retry via Durable Per-Child Markers](../adrs/1583-spawn-children-resume-safe-retry.md)
+**References:** [ADR-048: Engine-Side Pre-Implement Spawn](../adrs/048-spawn-child-engine-side.md), [ADR-1583: Spawn-Children Resume-Safe Retry via Durable Per-Child Markers](../adrs/1583-spawn-children-resume-safe-retry.md), [ADR-1783: Deterministic Post-Spawn Dependency Gate](../adrs/1783-deterministic-post-spawn-dependency-gate.md)
 
 ### 6.7.1 Empty-Coordinator Completion
 
@@ -6781,6 +6794,102 @@ On a fetch error, `item.Labels` is left untouched and a warning naming the item 
 
 ---
 
+### 6.24 Merge-Train Base Sanity Check (#1773)
+
+**Trigger:** In #1688, the merge train opened an integration PR against a protected `main` while
+every member of the batch carried `base:develop`, and it self-merged nine minutes later with no
+human in the loop — a production incident. #1772 fixes the specific cause (an unhydrated member
+silently partitioning to the default base at grouping time). This is a deliberately independent
+second line of defence: a check on the *outcome* the train is about to act on, immediately before
+it acts, rather than another cause-specific fix — this is already the second time this class of
+defect (ADR-1647/ADR-1648 fixed the first, #1637/#1646) has reached production, so a check that
+catches the outcome regardless of cause is warranted.
+
+**Mechanism: fires only on the default partition, reads live, refuses rather than repairs.**
+`refuseIfBaseContradictsMembers(owner, repo, baseBranch, trainKey string, members []trainMember)
+bool` (`engine/merge_train.go`) is called immediately before either of the two landing paths that
+can mint a new integration/landing PR:
+
+1. `isDefaultPartitionKey(owner, repo, trainKey)` — `trainKey == owner+"/"+repo` — decides whether
+   the pinned base is the repository default. This is exactly `mergeTrainKey`'s own default-sentinel
+   condition (§ above, ADR-1648), not an approximation of it, so it needs no additional git call and
+   costs nothing on a `base:<branch>`-partitioned train (R5): the check returns immediately, false,
+   without touching `e.client` at all.
+2. Only when triggered, each member's labels are read **live** via `e.client.FetchLabels` — never
+   `e.readClient` (`boardcache.CacheImpl.FetchLabels` serves the cached snapshot whenever the cache
+   isn't paused) and never the member's own cached `trainMember.item.Labels`. This is the entire
+   point of the check (R2): the #1688 incident shape is exactly a cached/stale label disagreeing
+   with a live one, so a check reusing either cached path would have passed cleanly in that
+   incident.
+3. `nonDefaultBaseLabelValue(labels []string, pinnedBase string) string` scans for a `base:<branch>`
+   label whose value is non-empty and differs from `pinnedBase`. It deliberately does not resolve
+   remote branch existence or fall back to a default the way `baseBranchForItem` (§6.13/§6.21) does
+   — R3 forbids repairing a contradiction found here, only refusing.
+4. Any contradiction, or any per-member `FetchLabels` error (treated identically — fail-closed,
+   matching #1772's own posture), causes the caller to refuse: no PR is opened or reused, the
+   member(s) stay in Queued, and `e.logfRepo` names the pinned base and every contradicting member
+   with its declared base (R4). A healthy train — including the ordinary all-default-base case —
+   produces no new log output at all.
+
+**Both `CreatePR` sites that can mint a new PR are covered; the singleton fast path is exempt by
+construction.** `landMergeTrainBatch` calls the check immediately after the closed-unmerged-trial
+escalation and before its `if integrationPR != nil { reuse } else { create }` split — covering both
+the PR-open and PR-reuse branches uniformly, since a reused PR (a promoted draft CI PR) is just as
+capable of carrying a stale pinned base as a freshly-created one. **The check is skipped, however,
+when the found `integrationPR` is already merged** (`integrationPR != nil && integrationPR.Merged`
+— the FR-2 restart-safety state, e.g. an engine restart between merging the integration PR and
+advancing its members to Done): nothing is being opened or reused in that state, so refusing there
+would only strand an already-landed batch in Queued forever on a transient `FetchLabels` error or a
+label edited after the merge, blocking FR-3's advance-to-Done/close-PR logic for no protective
+benefit — found during PR review and fixed in the same PR (`TestLandMergeTrainBatch_AlreadyMergedPR_SkipsBaseCheck`).
+`landSingleton` (the FR-5 one-at-a-time fallback, not a rare corner case — any bisection failure
+routes through it) calls the check immediately before its own `CreatePR` call; it never searches for
+or reuses an existing PR at all (by design — see the ADR-059 D4 data-loss note in its own doc
+comment), so it has no equivalent already-merged state to guard against. The singleton *fast path*
+(`trySingletonFastPath`/`finishSingletonFastPathLanding`, §6.20) never calls `CreatePR` at all — it
+merges the member's own existing PR via `MergePRAtHeadSHA`, targeting whatever base that PR was
+already opened against — so it structurally cannot reproduce this contradiction and needs no
+equivalent check.
+
+**Self-healing, not sticky.** The check carries no state of its own across polls — a refusal simply
+returns without opening or reusing a PR, leaving the batch's members in Queued exactly as they were.
+The next poll re-forms the batch and re-runs the check from scratch; once the underlying label
+disagreement resolves (by any means — a human fixing a stale label, a cache entry expiring, or
+#1772 preventing the bad partition in the first place), the very next attempt proceeds normally.
+
+**No new label, no escalation machinery.** Unlike most of this file's other guard mechanisms, a
+refusal here is not durably marked on the board — an operator distinguishes it from ordinary
+merge-train activity by the `merge-train`-tagged log line alone. This is a deliberate, narrower
+scope than the pattern most `fabrik:awaiting-*` siblings follow (§6.9–§6.22): the acceptance
+criteria for this feature are fully satisfiable with logging and self-healing alone, and building a
+durable repeat-counter + `fabrik:paused` escalation now would be speculative state for a scope not
+yet shown to need it (see ADR-1773's Rejected Alternatives).
+
+**Independent of #1772, deliberately.** #1772 fixes the partition-time cause of a member ending up
+in the wrong batch; this check fires at landing time, downstream of and structurally unrelated to
+that fix, sharing no code. With #1772 also applied, a member it excludes at partition time never
+reaches this check at all (there is nothing left to contradict); this check still fires for any
+*other* cause of the same pinned-base-vs-declared-base disagreement, including causes not yet
+discovered — which is the entire reason this is a second, independent line of defence rather than a
+refactor of the first.
+
+**Code path:** `refuseIfBaseContradictsMembers`, `isDefaultPartitionKey`, `nonDefaultBaseLabelValue`
+(`engine/merge_train.go`), called from `landMergeTrainBatch` and `landSingleton`.
+
+**State transitions:**
+
+| Before | Trigger | After | Labels Added | Labels Removed |
+|---|---|---|---|---|
+| Queued batch, pinned base == repo default, all members agree (or genuinely default-base) | `refuseIfBaseContradictsMembers` returns `false` | Landing proceeds normally (open or reuse the integration/landing PR) | — | — |
+| Queued batch, pinned base == a non-default partition base | `isDefaultPartitionKey` is false — check never fires | Landing proceeds normally, no `FetchLabels` calls made | — | — |
+| Queued batch, pinned base == repo default, ≥1 member's live label declares a different base | `refuseIfBaseContradictsMembers` returns `true` | No PR opened or reused; members remain in Queued; loud log line naming base + members | — | — |
+| Queued batch, pinned base == repo default, a member's live `FetchLabels` call errors | `refuseIfBaseContradictsMembers` returns `true` (fail-closed) | No PR opened or reused; members remain in Queued; loud log line naming base + members | — | — |
+| `landMergeTrainBatch` found an existing integration PR that is already merged (FR-2 restart-safety state) | `integrationPR != nil && integrationPR.Merged` — the check is skipped entirely, regardless of member labels | FR-3 (advance to Done, close member PR/issue) proceeds normally; no `FetchLabels` calls made, no refusal possible | — | — |
+
+**References:** [ADR-1773: Merge-Train Base Sanity Check at Landing Time](../adrs/1773-merge-train-base-sanity-check.md), [ADR-1647: Merge-Train Non-Default-Base Exclusion](../adrs/1647-merge-train-non-default-base-exclusion.md), [ADR-1648: Merge-Train Batches Partitioned Per (Repo, Base)](../adrs/1648-merge-train-per-base-partitioning.md), §6.13 (`baseBranchForItem`'s remote-resolution semantics, deliberately not reused here), §6.20 (the singleton fast path, confirmed exempt), issue #1688 (the community report that motivated this issue), issue #1773 (this feature).
+
+---
+
 ## 7. Edge Case States
 
 ### 7.1 Cooldown Retry
@@ -7220,6 +7329,56 @@ all tool restrictions, not just the denied tool) is stated alongside it.
 
 See ADR-1704 and #1704, #1657, #1523.
 
+### 7.3d Toolchain Declaration Drift Detection
+
+A long-lived daemon inherits `PATH` once, from whatever shell hosted it at process start. A worktree
+can later declare a toolchain version (`.nvmrc`, `package.json` `engines.node`, `go.mod`'s
+`toolchain`/`go` directive, or `.tool-versions`) newer than what that inherited `PATH` resolves, and
+nothing notices — workers keep running the stale toolchain silently, indefinitely; restarting `fabrik`
+itself does not help, since it re-inherits the same `PATH` from the same parent shell. Reported in
+#1658: a daemon whose hosting shell started 2026-08-11 kept resolving Node 20.20.2 after the repo
+pinned Node 24 via `.nvmrc` on 2026-08-23, producing 36 `Unsupported engine` warnings in a single
+issue's worker logs before the mismatch was noticed.
+
+**Detection is structurally unlike every other exemption in this section (§7.3–§7.3c): it never skips
+the invocation.** `checkToolchainDrift` (`engine/toolchain.go`) is a direct, best-effort side-effecting
+call at the top of both invocation paths — `runInvocationWithExtension` (stage dispatch, immediately
+after the `apiKeyHelper` check) and `processComments` (comment review, right after context files are
+written) — never routed through `finalizeStageOutcome`, never returning an error, never touching
+`StageAttempted`/`StageRetryIncremented`/`max_retries`. There is nothing for Fabrik to do about a
+detected mismatch except tell someone: re-resolving `PATH` or driving a version manager (`nvm use`,
+`asdf install`, …) is explicitly out of scope (#1786 R3).
+
+1. `detectToolchainDrift` reads whichever declaration files exist in the worktree and, for each
+   comparable declaration, resolves the corresponding binary (`node --version`/`go version`) via
+   `exec.LookPath` against the daemon's own inherited `PATH`. A binary entirely absent from `PATH` is
+   "cannot compare" — a distinct, pre-existing condition, never a mismatch. A successful resolution is
+   memoized process-wide per tool for the daemon's lifetime (`resolveToolVersion`): since the bug's own
+   premise is that this `PATH` cannot change without a restart, a second check for the same tool, on
+   any issue, is a cache hit rather than a second shell-out. A resolution *failure* (subprocess timeout,
+   transient exec error) is deliberately never cached — a failure carries no such invariance guarantee,
+   so caching it would permanently and silently disable detection for that tool after a single bad
+   moment; every invocation with a matching declaration retries an uncached failure instead.
+2. Comparison is deliberately narrow and fails closed on ambiguity: `.nvmrc`, `package.json`
+   `engines.node`, and `.tool-versions` compare at major-version granularity only (an `.nvmrc` alias
+   like `lts/*`, or an `engines` range using `||`/`x`/multiple clauses, is "not comparable" — silence,
+   never a false-positive warning); `go.mod`'s `toolchain`/`go` directive compares at major.minor
+   granularity using minimum-version (`>=`) semantics, since a `go.mod` directive states a floor, not a
+   pin — and `GOTOOLCHAIN=auto` (the Go 1.21+ default) already self-corrects in the common case, so this
+   format mainly catches the `GOTOOLCHAIN=local`/auto-download-disabled edge case.
+3. On any comparable mismatch, gated on `fabrik:toolchain-stale`'s own absence: an explanatory comment
+   naming every mismatched declaration (source, declared version, resolved version) is posted and the
+   label applied — once per episode (per issue), not once per invocation (#1786 R5).
+4. If no comparable mismatch is found and the label is present, it is cleared — self-resolving once a
+   worktree's declaration file is fixed, or the daemon is restarted with a corrected `PATH`.
+
+A daemon/worktree whose resolved toolchain already satisfies every declaration sees no new behavior and
+no new output at all (#1786 R4) — no comment, no label, no added latency worth noticing beyond a few
+small file reads and, at most once per tool per daemon lifetime, a version-check subprocess.
+
+See §1.4's `fabrik:toolchain-stale` row, `docs/stage-lifecycle.md`'s "Toolchain Declaration Drift
+Detection (Worktree)", and [ADR-1786](../adrs/1786-toolchain-declaration-drift-detection.md).
+
 ### 7.4 Multi-Instance Lock Protocol
 
 Per [ADR-007](../adrs/007-label-based-locking.md):
@@ -7244,7 +7403,7 @@ Closed issues are normally skipped by `itemMayNeedWork()` and `itemNeedsWork()`.
 
 **Stale lock cleanup:** `cleanupClosedIssueLocks()` runs every poll cycle and removes `fabrik:locked:<user>` labels from any closed issues on the board. This handles stale locks left when an issue was closed while a stage was in-flight.
 
-**Transient label sweep:** `cleanupClosedIssueTransientLabels()` runs every poll cycle (immediately after `cleanupClosedIssueLocks`) and removes the labels in `transientLifecycleLabels` (`fabrik:awaiting-review`, `fabrik:awaiting-ci`, `fabrik:auto-merge-enabled`, `fabrik:awaiting-input`, `fabrik:rebase-needed`, `fabrik:bot-reprompted`, `fabrik:revalidate`, `fabrik:claude-limit`, `fabrik:clear-claude-limit`, `fabrik:api-key-helper-detected`, `fabrik:tools-denied`) from any closed issues. These labels have no meaning once an issue is closed and leaving them behind can cause confusion. The sweep is idempotent (treats `ErrNotFound` as success) and non-fatal (API errors are logged as warnings and processing continues). Operates on cache data from `e.readClient.FetchProjectBoard(...)` — labels come from the most recent deep-fetch (`FetchItemDetails`, up to 20 labels). Items never deep-fetched carry no labels in the store (probe-based bootstrap does not populate labels). In practice, closed terminal items are seeded by `seedTerminalFromProbeItems` (called after `BootstrapFromProbe`) and skipped by `runProbeAndDeepFetch`, so they will not be deep-fetched; the sweep sees empty label sets for these items and skips them (no matching transient labels to remove). Active items receive labels on the first deep-fetch cycle. A one-shot startup scan (`runStartupTransientLabelScan`) runs after the first successful poll to handle stale labels on closed issues that may have been missed during a prior crash — it scans the Store directly, no extra GitHub call needed.
+**Transient label sweep:** `cleanupClosedIssueTransientLabels()` runs every poll cycle (immediately after `cleanupClosedIssueLocks`) and removes the labels in `transientLifecycleLabels` (`fabrik:awaiting-review`, `fabrik:awaiting-ci`, `fabrik:auto-merge-enabled`, `fabrik:awaiting-input`, `fabrik:rebase-needed`, `fabrik:bot-reprompted`, `fabrik:revalidate`, `fabrik:claude-limit`, `fabrik:clear-claude-limit`, `fabrik:api-key-helper-detected`, `fabrik:tools-denied`, `fabrik:toolchain-stale`) from any closed issues. These labels have no meaning once an issue is closed and leaving them behind can cause confusion. The sweep is idempotent (treats `ErrNotFound` as success) and non-fatal (API errors are logged as warnings and processing continues). Operates on cache data from `e.readClient.FetchProjectBoard(...)` — labels come from the most recent deep-fetch (`FetchItemDetails`, up to 20 labels). Items never deep-fetched carry no labels in the store (probe-based bootstrap does not populate labels). In practice, closed terminal items are seeded by `seedTerminalFromProbeItems` (called after `BootstrapFromProbe`) and skipped by `runProbeAndDeepFetch`, so they will not be deep-fetched; the sweep sees empty label sets for these items and skips them (no matching transient labels to remove). Active items receive labels on the first deep-fetch cycle. A one-shot startup scan (`runStartupTransientLabelScan`) runs after the first successful poll to handle stale labels on closed issues that may have been missed during a prior crash — it scans the Store directly, no extra GitHub call needed.
 
 ### 7.6 In-Memory vs Durable State
 
@@ -9406,6 +9565,54 @@ worktree's `.claude/settings.json` and letting the next poll reach Claude succes
 self-resolve; no manual label removal is required. Unlike `fabrik:claude-limit`, there is no
 account-wide settle sweep for this label — the condition is inherently per-worktree, not
 account-wide. See [ADR-1346](../adrs/1346-scrub-anthropic-auth-env-namespace.md).
+
+### Toolchain Declaration Drift Detection (Worktree)
+
+A sixth check, `checkToolchainDrift` (`engine/toolchain.go`), runs at both invocation entry points —
+`runInvocationWithExtension` (stage dispatch, immediately after the `apiKeyHelper` check above) and
+`processComments` (comment review, right after context files are written) — closing the gap the
+`apiKeyHelper` check leaves on the comment-review path (#1786 R5 explicitly names both cycles).
+
+**Unlike every check above, this one never skips the invocation.** A long-lived daemon inherits `PATH`
+once, from whatever shell hosted it at startup; a worktree can declare a toolchain version
+(`.nvmrc`, `package.json` `engines.node`, `go.mod`'s `toolchain`/`go` directive, or `.tool-versions`)
+newer than what that inherited `PATH` resolves, and nothing before this check ever notices — workers
+keep running the stale toolchain silently, indefinitely, restarting `fabrik` itself does not help
+(it re-inherits the same `PATH` from the same parent shell). Re-resolving `PATH` or driving a version
+manager (`nvm use`, `asdf install`, …) is explicitly out of scope; this is a warn-and-continue signal,
+not a gate, so it returns nothing — `finalizeStageOutcome` is never involved, `StageAttempted`/
+`StageRetryIncremented` bookkeeping is untouched, and the invocation proceeds exactly as it would have.
+
+1. `detectToolchainDrift` reads whichever declaration files exist in `workDir` and, for each
+   comparable declaration, resolves the corresponding binary (`node --version` / `go version`) via
+   `exec.LookPath` against the daemon's own inherited `PATH`. A binary entirely absent from `PATH` is
+   "cannot compare" (a distinct, pre-existing condition — not this check's concern), never a mismatch.
+   A successful resolution is cached process-wide per tool for the daemon's lifetime
+   (`resolveToolVersion`) — since the entire premise of the bug is that this `PATH` is invariant until
+   a restart, a second check for the same tool is a cache hit, not a second shell-out. A resolution
+   *failure* (subprocess timeout, transient exec error) is never cached, since unlike `PATH` itself a
+   failure carries no invariance guarantee — caching it would permanently and silently disable
+   detection for that tool after a single bad moment.
+2. Comparison is deliberately narrow and fails closed: `.nvmrc`, `package.json` `engines.node`, and
+   `.tool-versions` are compared at **major-version granularity only** (an alias like `lts/*`, a
+   complex semver range using `||`/`x`/multiple clauses, or any other unparseable content is "not
+   comparable" — silence, never a false-positive warning); `go.mod`'s `toolchain`/`go` directive is
+   compared at **major.minor granularity**, using minimum-version (`>=`) semantics, since a `go.mod`
+   declares a floor, not a pin (and `GOTOOLCHAIN=auto`, the Go 1.21+ default, already self-corrects in
+   the common case — this only catches the `GOTOOLCHAIN=local` / auto-download-disabled edge case).
+3. On any comparable mismatch, if `fabrik:toolchain-stale` is absent: an explanatory comment naming
+   every mismatched declaration (source, declared version, resolved version) is posted and the label
+   is applied — gated on the label's own absence, so the warning fires once per episode (per issue),
+   not once per invocation (#1786 R5), matching `fabrik:claude-limit`/`fabrik:api-key-helper-detected`.
+4. If no comparable mismatch is found and `fabrik:toolchain-stale` is present, the label is cleared —
+   self-resolving once a worktree's declaration file is fixed (or, in practice, the daemon is restarted
+   with a corrected `PATH`), exactly like `fabrik:api-key-helper-detected`. No dedicated settle scan:
+   this is a fire-once informational label, added to `transientLifecycleLabels` for closed-issue sweep.
+
+A daemon/worktree whose resolved toolchain already satisfies every declaration sees no new behavior and
+no new output at all (#1786 R4) — no comment, no label, no added latency worth noticing beyond a few
+small file reads and, at most once per tool per daemon lifetime, a version-check subprocess. See
+[ADR-1786](../adrs/1786-toolchain-declaration-drift-detection.md).
 
 ### Branch Pushing
 

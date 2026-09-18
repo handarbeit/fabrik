@@ -298,6 +298,11 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	// Write context files (all stages including current) before Claude runs.
 	e.writeContextFiles(item, stage, workDir, true)
 
+	// #1786: same warn-and-continue toolchain drift check as the stage-dispatch
+	// path (runInvocationWithExtension) — R5 explicitly covers comment-review
+	// cycles too, closing the gap the apiKeyHelper precedent left open here.
+	e.checkToolchainDrift(ctx, item, workDir)
+
 	// Step 4: Invoke Claude with the comment review prompt
 	modelOverride := e.extractModelOverride(item.Number, item.Labels)
 	if modelOverride != "" {

@@ -430,6 +430,40 @@ func TestIssuesOpenedIdempotent(t *testing.T) {
 	}
 }
 
+// TestIssuesOpened_PreservesPreSeededBlockedBy is a bot-review regression
+// guard (#1783 follow-up): spawnChildren writes a child's BlockedBy edge into
+// the Store synchronously, before GitHub's own "issues.opened" webhook for
+// that freshly-created child is guaranteed to have arrived. Since a webhook
+// payload never carries Issue Dependency data, applying it naively would wipe
+// the pre-seeded edge back to empty on out-of-order delivery — reopening the
+// exact stale-Store race #1783 closes, one level down. This pins that the
+// "opened" handler's PreserveBlockedBy write-through keeps the edge intact.
+func TestIssuesOpened_PreservesPreSeededBlockedBy(t *testing.T) {
+	c := NewCacheImpl(&mockClient{}, itemstate.NewStore(nil), nopLog)
+	testBootstrapFromBoard(c, &gh.ProjectBoard{ProjectID: "P"})
+
+	// Simulate spawnChildren's synchronous write landing before the child's
+	// own "opened" webhook is delivered.
+	c.store.Apply(itemstate.BlockedByEdgeAdded{
+		Repo:   "owner/repo",
+		Number: 99,
+		Dep:    gh.Dependency{Repo: "owner/other-child", Number: 100, State: "OPEN"},
+	})
+
+	payload := issuesOpenedPayloadJSON("owner/repo", 99, "I_99", "New Child", "body text",
+		[]string{"fabrik:sub-issue"}, nil)
+	c.ApplyDelta("issues", payload)
+
+	s := testGetState(t, c, "owner/repo", 99)
+	if len(s.BlockedBy) != 1 || s.BlockedBy[0].Repo != "owner/other-child" || s.BlockedBy[0].Number != 100 {
+		t.Fatalf("BlockedBy = %+v; want the pre-seeded edge to survive the opened webhook", s.BlockedBy)
+	}
+	// The webhook's own data must still apply normally alongside the preserved edge.
+	if s.Title != "New Child" {
+		t.Errorf("Title: want %q, got %q", "New Child", s.Title)
+	}
+}
+
 func TestIssuesClosed(t *testing.T) {
 	c := seedCache(t)
 	c.ApplyDelta("issues", issuesActionPayloadJSON("closed", "owner/repo", 1))

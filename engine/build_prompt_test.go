@@ -403,6 +403,42 @@ func TestBuildCommentReviewPrompt_SyntheticReviewBodyComment_GetsFindingMarker(t
 	}
 }
 
+// TestBuildCommentReviewPrompt_SecurityFindingPreemptsConformanceRebuttal
+// regression-tests the literal incident shape from #1785 (reported in #1643):
+// a security bot flags a missing persist-credentials: false control and
+// explicitly pre-empts the spec-conformance rebuttal a worker might reach for.
+// This only proves the plumbing delivers the finding's full text (including
+// the pre-emption) verbatim into the prompt with the [Bot Review Finding]
+// marker — whether the worker actually honors the security-merit-bar guidance
+// in the skill prose is not something Go can assert; see #1785's Risks.
+func TestBuildCommentReviewPrompt_SecurityFindingPreemptsConformanceRebuttal(t *testing.T) {
+	stage := &stages.Stage{Name: "Review"}
+	item := gh.ProjectItem{Number: 42, Title: "My PR", IsPR: true}
+	comments := []gh.Comment{
+		{
+			ID:     "review-body:1643",
+			Author: "handarbeit-pruefer[bot]",
+			Body: "Missing `persist-credentials: false` on the actions/checkout step. " +
+				"This leaves the git credential persisted in the local config for the " +
+				"remainder of the job, exposing it to any subsequent step. The PR's " +
+				"rationale explains the design choice but doesn't mitigate the exposure.",
+			CreatedAt: time.Date(2026, 1, 15, 10, 30, 0, 0, time.UTC),
+		},
+	}
+
+	prompt := buildCommentReviewPrompt(stage, item, comments, "")
+
+	if !strings.Contains(prompt, "[Bot Review Finding]") {
+		t.Error("expected [Bot Review Finding] marker for the security finding")
+	}
+	if !strings.Contains(prompt, "persist-credentials: false") {
+		t.Error("expected the finding's specific security detail to appear verbatim in the prompt")
+	}
+	if !strings.Contains(prompt, "doesn't mitigate the exposure") {
+		t.Error("expected the finding's conformance-rebuttal pre-emption to reach the prompt verbatim")
+	}
+}
+
 func TestBuildCommentReviewPrompt_ReviewThreadComment_ZeroLine(t *testing.T) {
 	stage := &stages.Stage{Name: "Review"}
 	item := gh.ProjectItem{Number: 42, Title: "My PR", IsPR: true}

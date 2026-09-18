@@ -845,6 +845,22 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 			}
 		}
 
+		// Write the edge into the Store synchronously, in-process — the same
+		// moment GitHub itself learns of it — so the very next CacheImpl-backed
+		// board rebuild already reflects it. Unconditional (fires whether the
+		// edge was freshly linked above or found already-linked on resume) so
+		// Store correctness at the end of this function never depends on
+		// refreshForSpawnResume's own write-through. This is what makes R1's
+		// dispatch gate structural rather than a race against deep-fetch/
+		// cycleSet timing (#1783, ADR-1783) — checkDependencies reads
+		// item.BlockedBy from whatever board snapshot it was handed, and that
+		// snapshot is reconstructed directly from the Store on every call.
+		e.store.Apply(itemstate.BlockedByEdgeAdded{
+			Repo:   fmt.Sprintf("%s/%s", owner, repo),
+			Number: item.Number,
+			Dep:    gh.Dependency{Repo: block.Repo, Number: childNumber, State: "OPEN"},
+		})
+
 		// Apply fabrik:sub-issue label to child (idempotent add; for human-visible filtering; no engine semantics).
 		if err := e.client.AddLabelToIssue(childOwner, childRepo, childNumber, "fabrik:sub-issue"); err != nil {
 			e.logf(item.Number, "warn", "could not add fabrik:sub-issue to %s#%d: %v\n", block.Repo, childNumber, err)
@@ -909,6 +925,32 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 			return spawned, false, fmt.Errorf("spawn: linking sibling dependency for block %d: %w", i+1, err)
 		}
 		e.logf(item.Number, "spawn", "linked sibling dependency: block %d depends on block %d\n", i+1, block.DependsOn)
+
+		// Mirror the parent-edge write above: apply the sibling edge to the
+		// Store too, keyed on the dependent CHILD's own (repo, number) rather
+		// than the parent's — this is the item that must show fabrik:blocked
+		// until its sibling closes. Without this, a dependent child is exposed
+		// to the identical stale-Store race #1783 closes for the parent: its
+		// first Store entry can arrive via a shallow reconcile (which never
+		// populates BlockedBy) rather than a live deep-fetch, leaving
+		// checkDependencies to see an empty BlockedBy and dispatch the child
+		// before its sibling has closed. getOrCreate's lazy-stub semantics
+		// (internal/itemstate/store.go) make this safe to apply even before
+		// the child is otherwise known to the Store: BlockedBy is a deep field
+		// no shallow/probe apply ever touches, so this pre-seeded edge is
+		// never clobbered when the child is later discovered that way. It can
+		// still race the child's own GitHub-side "issues.opened" webhook
+		// delivery (this child was just created a few lines up) — that path
+		// is separately guarded by IssueOpened's PreserveBlockedBy flag
+		// (internal/itemstate/mutation.go, boardcache/delta.go's "opened"
+		// case), since a bare webhook payload never carries dependency data
+		// and would otherwise wipe this pre-seeded edge on out-of-order
+		// delivery (#1783 follow-up, bot review finding).
+		e.store.Apply(itemstate.BlockedByEdgeAdded{
+			Repo:   block.Repo,
+			Number: childNumbers[i],
+			Dep:    gh.Dependency{Repo: blocks[blockerIdx].Repo, Number: childNumbers[blockerIdx], State: "OPEN"},
+		})
 	}
 
 	// All children spawned and sibling dependencies wired — remove the
