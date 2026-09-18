@@ -3537,6 +3537,214 @@ func TestGroupQueuedByRepoAndBase_LabeledItem_NoRegisteredWM_ExcludedNotDropped(
 	}
 }
 
+// ── #1772: fail closed on an unhydrated cache entry ──────────────────────────
+
+// collectGroupLogs captures the tui.LogEvents emitted by a single call to
+// groupQueuedByRepoAndBase (a synchronous, non-goroutine-spawning call, unlike
+// collectPollLogs's full eng.poll — no eng.wg drain is needed here).
+func collectGroupLogs(eng *Engine, items []gh.ProjectItem, holdingStatus, defaultRepo string) ([]queuedRepoGroup, []tui.LogEvent) {
+	events := make(chan tui.Event, 256)
+	eng.events = events
+	groups := eng.groupQueuedByRepoAndBase(items, holdingStatus, defaultRepo)
+	var logs []tui.LogEvent
+	for {
+		select {
+		case ev := <-events:
+			if le, ok := ev.(tui.LogEvent); ok {
+				logs = append(logs, le)
+			}
+		default:
+			return groups, logs
+		}
+	}
+}
+
+// TestGroupQueuedByRepoAndBase_UnhydratedItem_ExcludedNotPinned is the AC1/AC2
+// regression guard for #1772: a Queued member whose board-cache entry has never
+// been deep-fetched must be excluded from batching entirely, never silently
+// pinned to defaultPartitionBase. A cold Store snapshot's Labels slice is empty
+// — indistinguishable, to itemHasBaseLabel, from a genuinely label-free item —
+// which is exactly how #1688 reached production: an integration PR opened
+// against a protected default branch, ignoring the member's real base: label,
+// self-merged nine minutes later. Run against the pre-#1772 fix, this test
+// fails: the unhydrated item lands in the single default partition instead of
+// being excluded.
+func TestGroupQueuedByRepoAndBase_UnhydratedItem_ExcludedNotPinned(t *testing.T) {
+	eng := NewWithDeps(Config{Owner: "owner", Repo: "repo", MaxConcurrent: 1, Stages: testStages()}, &mockGitHubClient{}, &mockClaudeInvoker{}, nil)
+	cache := boardcache.NewCacheImpl(&mockGitHubClient{}, eng.store, func(string, ...any) {})
+	eng.readClient = cache
+	cache.BootstrapFromProbe([]gh.BoardProbeItem{
+		{ContentID: "I_001", ItemID: "PVTI_001", Number: 1, Repo: "owner/repo", Status: "BatchHold"},
+	}, "PVT_1")
+
+	// Mirrors exactly what a cold Store snapshot yields: no Labels, no Title.
+	items := []gh.ProjectItem{
+		{Number: 1, Status: "BatchHold", Repo: "owner/repo"},
+	}
+	groups := eng.groupQueuedByRepoAndBase(items, "BatchHold", "owner/repo")
+	for _, g := range groups {
+		for _, it := range g.items {
+			if it.Number == 1 {
+				t.Fatalf("expected unhydrated #1 to be excluded from every partition this poll, found it in partition base=%q", g.base)
+			}
+		}
+	}
+}
+
+// TestGroupQueuedByRepoAndBase_HydratedNoLabel_DefaultPartition is the R5/AC4
+// no-regression guard: once an item has actually been deep-fetched and
+// genuinely carries no base: label, it must still partition to
+// defaultPartitionBase exactly as before #1772's fix.
+func TestGroupQueuedByRepoAndBase_HydratedNoLabel_DefaultPartition(t *testing.T) {
+	eng := NewWithDeps(Config{Owner: "owner", Repo: "repo", MaxConcurrent: 1, Stages: testStages()}, &mockGitHubClient{}, &mockClaudeInvoker{}, nil)
+	cache := boardcache.NewCacheImpl(&mockGitHubClient{}, eng.store, func(string, ...any) {})
+	eng.readClient = cache
+
+	item := gh.ProjectItem{Number: 1, Status: "BatchHold", Repo: "owner/repo"}
+	eng.store.Apply(itemstate.ItemDeepFetched{Repo: "owner/repo", Number: 1, FreshState: item})
+
+	groups := eng.groupQueuedByRepoAndBase([]gh.ProjectItem{item}, "BatchHold", "owner/repo")
+	if len(groups) != 1 {
+		t.Fatalf("expected 1 partition for a hydrated no-label item, got %d: %+v", len(groups), groups)
+	}
+	if groups[0].base != defaultPartitionBase {
+		t.Errorf("expected the default sentinel base, got %q", groups[0].base)
+	}
+	if len(groups[0].items) != 1 || groups[0].items[0].Number != 1 {
+		t.Errorf("expected #1 in the default partition, got %+v", groups[0].items)
+	}
+}
+
+// TestGroupQueuedByRepoAndBase_HydratedWithBaseLabel_CorrectPartition is the
+// AC5 no-regression guard: a hydrated item genuinely carrying base:develop
+// must still resolve to the develop partition — #1772's hydration guard must
+// not interfere with #1648's existing base-label resolution once data has
+// actually loaded.
+func TestGroupQueuedByRepoAndBase_HydratedWithBaseLabel_CorrectPartition(t *testing.T) {
+	_, _, worktreeRoot, wm := setupTrainRepo(t)
+	sha := strings.TrimSpace(gitOutputDir(t, wm.baseDir, "rev-parse", "HEAD"))
+	mustGitDir(t, wm.baseDir, "update-ref", "refs/remotes/origin/develop", sha)
+
+	eng := NewWithDeps(Config{Owner: "owner", Repo: "repo", MaxConcurrent: 1, Stages: testStages()}, &mockGitHubClient{}, &mockClaudeInvoker{}, nil)
+	eng.registerWorktrees("owner/repo", wm.baseDir, worktreeRoot)
+	cache := boardcache.NewCacheImpl(&mockGitHubClient{}, eng.store, func(string, ...any) {})
+	eng.readClient = cache
+
+	item := gh.ProjectItem{Number: 1, Status: "BatchHold", Repo: "owner/repo", Labels: []string{"base:develop"}}
+	eng.store.Apply(itemstate.ItemDeepFetched{Repo: "owner/repo", Number: 1, FreshState: item})
+
+	groups := eng.groupQueuedByRepoAndBase([]gh.ProjectItem{item}, "BatchHold", "owner/repo")
+	if len(groups) != 1 {
+		t.Fatalf("expected 1 partition, got %d: %+v", len(groups), groups)
+	}
+	if groups[0].base != "develop" {
+		t.Errorf("expected the develop partition, got %q", groups[0].base)
+	}
+	if len(groups[0].items) != 1 || groups[0].items[0].Number != 1 {
+		t.Errorf("expected #1 in the develop partition, got %+v", groups[0].items)
+	}
+}
+
+// TestGroupQueuedByRepoAndBase_UnhydratedItem_SelfHeals is the AC3 end-to-end
+// guard: an item excluded while its cache entry is cold is picked up warm, in
+// its correct (non-default) partition, once the ordinary deep-fetch catch-up
+// path has hydrated it on a later poll — no operator action required.
+func TestGroupQueuedByRepoAndBase_UnhydratedItem_SelfHeals(t *testing.T) {
+	_, _, worktreeRoot, wm := setupTrainRepo(t)
+	sha := strings.TrimSpace(gitOutputDir(t, wm.baseDir, "rev-parse", "HEAD"))
+	mustGitDir(t, wm.baseDir, "update-ref", "refs/remotes/origin/develop", sha)
+
+	eng := NewWithDeps(Config{Owner: "owner", Repo: "repo", MaxConcurrent: 1, Stages: testStages()}, &mockGitHubClient{}, &mockClaudeInvoker{}, nil)
+	eng.registerWorktrees("owner/repo", wm.baseDir, worktreeRoot)
+	cache := boardcache.NewCacheImpl(&mockGitHubClient{}, eng.store, func(string, ...any) {})
+	eng.readClient = cache
+	cache.BootstrapFromProbe([]gh.BoardProbeItem{
+		{ContentID: "I_001", ItemID: "PVTI_001", Number: 1, Repo: "owner/repo", Status: "BatchHold"},
+	}, "PVT_1")
+
+	// Poll N: the cache is cold for #1 — the board-derived item still carries no
+	// Labels, mirroring the confirmed #1688 shape even though #1's real base:
+	// label hasn't loaded yet.
+	coldItem := gh.ProjectItem{Number: 1, Status: "BatchHold", Repo: "owner/repo"}
+	groups := eng.groupQueuedByRepoAndBase([]gh.ProjectItem{coldItem}, "BatchHold", "owner/repo")
+	if len(groups) != 0 {
+		t.Fatalf("expected #1 excluded while cold, got %d partitions: %+v", len(groups), groups)
+	}
+
+	// Poll N+1: the ordinary deep-fetch catch-up path has since hydrated #1,
+	// revealing its real base:develop label.
+	hydrated := gh.ProjectItem{Number: 1, Status: "BatchHold", Repo: "owner/repo", Labels: []string{"base:develop"}}
+	eng.store.Apply(itemstate.ItemDeepFetched{Repo: "owner/repo", Number: 1, FreshState: hydrated})
+
+	groups = eng.groupQueuedByRepoAndBase([]gh.ProjectItem{hydrated}, "BatchHold", "owner/repo")
+	if len(groups) != 1 {
+		t.Fatalf("expected #1 to self-heal into exactly 1 partition, got %d: %+v", len(groups), groups)
+	}
+	if groups[0].base != "develop" {
+		t.Errorf("expected the develop partition after self-heal, got %q", groups[0].base)
+	}
+	if len(groups[0].items) != 1 || groups[0].items[0].Number != 1 {
+		t.Errorf("expected #1 present after self-heal, got %+v", groups[0].items)
+	}
+}
+
+// TestGroupQueuedByRepoAndBase_PerItemHydration_NotGlobalFlag is the AC7 guard
+// pinning down that the hydration check is per-(repo,number), never a global
+// "cache is bootstrapped" flag. Both #1 and #2 are bootstrapped into the same
+// cache — so a global flag like CacheImpl.IsBootstrapped (true the instant any
+// item exists) would incorrectly treat #2 as hydrated too — but only #1 is
+// actually deep-fetched. A single-bootstrapped-item test cannot distinguish a
+// correct per-item implementation from an incorrect global one, since both
+// would exclude in that shape; this construction requires two.
+func TestGroupQueuedByRepoAndBase_PerItemHydration_NotGlobalFlag(t *testing.T) {
+	eng := NewWithDeps(Config{Owner: "owner", Repo: "repo", MaxConcurrent: 1, Stages: testStages()}, &mockGitHubClient{}, &mockClaudeInvoker{}, nil)
+	cache := boardcache.NewCacheImpl(&mockGitHubClient{}, eng.store, func(string, ...any) {})
+	eng.readClient = cache
+	cache.BootstrapFromProbe([]gh.BoardProbeItem{
+		{ContentID: "I_001", ItemID: "PVTI_001", Number: 1, Repo: "owner/repo", Status: "BatchHold"},
+		{ContentID: "I_002", ItemID: "PVTI_002", Number: 2, Repo: "owner/repo", Status: "BatchHold"},
+	}, "PVT_1")
+
+	item1 := gh.ProjectItem{Number: 1, Status: "BatchHold", Repo: "owner/repo"}
+	eng.store.Apply(itemstate.ItemDeepFetched{Repo: "owner/repo", Number: 1, FreshState: item1})
+	item2 := gh.ProjectItem{Number: 2, Status: "BatchHold", Repo: "owner/repo"} // deliberately never deep-fetched
+
+	groups := eng.groupQueuedByRepoAndBase([]gh.ProjectItem{item1, item2}, "BatchHold", "owner/repo")
+	if len(groups) != 1 {
+		t.Fatalf("expected exactly 1 partition (only #1 hydrated), got %d: %+v", len(groups), groups)
+	}
+	if len(groups[0].items) != 1 || groups[0].items[0].Number != 1 {
+		t.Errorf("expected only hydrated #1 in the surviving partition, got %+v", groups[0].items)
+	}
+}
+
+// TestGroupQueuedByRepoAndBase_UnhydratedItem_LogsExclusionReason is the AC6
+// guard: excluding an unhydrated item must emit a merge-train-tagged log line
+// naming the item and the reason, matching the two adjacent fail-closed
+// guards' logging shape (WM-not-registered, baseBranchForItem error) — a
+// silent skip would make the next occurrence as hard to find as #1688 was.
+func TestGroupQueuedByRepoAndBase_UnhydratedItem_LogsExclusionReason(t *testing.T) {
+	eng := NewWithDeps(Config{Owner: "owner", Repo: "repo", MaxConcurrent: 1, Stages: testStages()}, &mockGitHubClient{}, &mockClaudeInvoker{}, nil)
+	cache := boardcache.NewCacheImpl(&mockGitHubClient{}, eng.store, func(string, ...any) {})
+	eng.readClient = cache
+	cache.BootstrapFromProbe([]gh.BoardProbeItem{
+		{ContentID: "I_001", ItemID: "PVTI_001", Number: 1, Repo: "owner/repo", Status: "BatchHold"},
+	}, "PVT_1")
+
+	items := []gh.ProjectItem{{Number: 1, Status: "BatchHold", Repo: "owner/repo"}}
+	_, logs := collectGroupLogs(eng, items, "BatchHold", "owner/repo")
+
+	var found bool
+	for _, le := range logs {
+		if le.Tag == "merge-train" && le.IssueNumber == 1 && strings.Contains(le.Message, "not yet hydrated") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a merge-train log line naming #1 and the hydration-exclusion reason, got %+v", logs)
+	}
+}
+
 // ── #1216: review gate armed at the landing decision ─────────────────────────
 
 // reviewGateLandingClient builds a mock board where a single Validate item sits in
