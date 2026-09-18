@@ -746,7 +746,7 @@ func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem
 	extraEnv := buildClaudeEnv(stage, issue, workDir, opts, os.Environ())
 	sigIntGrace, sigTermGrace := effectiveKillGrace(opts.SigIntGrace, opts.SigTermGrace)
 	wallTime := scaledWallTime(stage.MaxWallTime, effectiveBudget, stage.MaxTurns)
-	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name, sessFilePath, ld, extraEnv, wallTime, effectiveBudget, opts.OnPIDReady, sigIntGrace, sigTermGrace, resumeSessionID, opts.MaxResumeFailures)
+	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name, issue.Repo, sessFilePath, ld, extraEnv, wallTime, effectiveBudget, opts.OnPIDReady, sigIntGrace, sigTermGrace, resumeSessionID, opts.MaxResumeFailures)
 	usage.MaxTurns = effectiveBudget
 	if err != nil {
 		return output, completed, usage, err
@@ -792,7 +792,7 @@ func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.
 	extraEnv := buildClaudeEnv(stage, issue, workDir, opts, os.Environ())
 	sigIntGrace, sigTermGrace := effectiveKillGrace(opts.SigIntGrace, opts.SigTermGrace)
 	wallTime := scaledWallTime(stage.MaxWallTime, limit, base)
-	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name+"-comment-review", sessFilePath, ld, extraEnv, wallTime, limit, opts.OnPIDReady, sigIntGrace, sigTermGrace, resumeSessionID, opts.MaxResumeFailures)
+	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name+"-comment-review", issue.Repo, sessFilePath, ld, extraEnv, wallTime, limit, opts.OnPIDReady, sigIntGrace, sigTermGrace, resumeSessionID, opts.MaxResumeFailures)
 	usage.MaxTurns = limit
 	return output, completed, usage, err
 }
@@ -1306,7 +1306,7 @@ type claudeResponse struct {
 	} `json:"usage"`
 }
 
-func runClaude(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string, sessFilePath string, logDir string, extraEnv []string, maxWallTime time.Duration, maxTurns int, onPIDReady func(int), sigIntGrace, sigTermGrace time.Duration, resumeSessionID string, maxResumeFailures int) (string, bool, TokenUsage, error) {
+func runClaude(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string, repo string, sessFilePath string, logDir string, extraEnv []string, maxWallTime time.Duration, maxTurns int, onPIDReady func(int), sigIntGrace, sigTermGrace time.Duration, resumeSessionID string, maxResumeFailures int) (string, bool, TokenUsage, error) {
 	claudeLog(issueNumber, "claude", "invoking (%s) in %s\n", label, workDir)
 
 	// Best-effort HEAD capture, before/after the invocation, so a tools-denied
@@ -1413,6 +1413,15 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 		onPIDReady(pid)
 	}
 
+	// Session-scoped descendant tracking (#1798 R1): observes the process tree
+	// WHILE the invocation is live, recording (in the durable registry) every
+	// process whose session ID equals this worker's own PID — including ones
+	// that later detach (nohup/disown, backgrounding) and get reparented to
+	// init on a sub-second timescale, well before a post-hoc walk at teardown
+	// could see the transient ancestry. Stopped via watchdogCtx alongside the
+	// inactivity watchdog below.
+	go trackWorkerDescendants(watchdogCtx, pid, issueNumber, repo, label)
+
 	// Inactivity watchdog: kills the process group if no stdout is received for
 	// claudeInactivityTimeout, indicating a stuck session regardless of wall time.
 	// Stopped via watchdogCtx after cmd.Wait returns.
@@ -1438,8 +1447,15 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 	}(pid)
 
 	runErr := cmd.Wait()
-	watchdogCancel() // stop the watchdog goroutine promptly
+	watchdogCancel() // stop the watchdog goroutine promptly (and trackWorkerDescendants with it)
 	killProcGroup(cmd, issueNumber, label)
+	// R2: reap any session-scoped descendant that survived killProcGroup's
+	// PGID-scoped kill (e.g. detached via nohup/disown, or otherwise no
+	// longer a member of the worker's process group) — unconditional, on
+	// every invocation end, clean exit or not.
+	if reaped, _ := reapTrackedDescendants(pid, issueNumber); reaped > 0 {
+		claudeLog(issueNumber, "kill", "reaped %d session-scoped descendant(s) at invocation end\n", reaped)
+	}
 	rawOutput := stdout.Bytes()
 
 	// wasTimedOut is true when this process was terminated by our own timeout
