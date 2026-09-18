@@ -219,6 +219,16 @@ func trackWorkerDescendants(ctx context.Context, workerPID, issueNumber int, rep
 // such entries are dropped, never signalled), and SIGKILLs the survivors.
 // Every kill (and the reason it matched) is logged via the existing
 // "[#N kill]" convention (R6).
+//
+// A registry entry is only ever dropped (added to processed) on a positive
+// signal — confirmed dead via isProcessAlive, or confirmed a mismatch via a
+// successful pidFingerprintFn call whose comm/lstart differ. A pidFingerprintFn
+// error for a PID isProcessAlive still reports as alive is treated as a
+// transient ps-subprocess failure (e.g. sentinelProbeTimeout expiring under
+// the exact host contention this reaper exists to handle) — mirroring
+// trackWorkerDescendants's own transient-failure handling, the entry is left
+// in the registry rather than being silently and permanently dropped; the R3
+// backstop sweep will retry it once this worker is confirmed dead.
 func reapTrackedDescendants(workerPID, issueNumber int) (reaped, skipped int) {
 	entries, err := descendantsForWorker(workerPID)
 	if err != nil || len(entries) == 0 {
@@ -226,11 +236,25 @@ func reapTrackedDescendants(workerPID, issueNumber int) (reaped, skipped int) {
 	}
 	var processed []int
 	for _, d := range entries {
-		processed = append(processed, d.PID)
-		comm, lstart, ferr := pidFingerprint(d.PID)
-		if ferr != nil || comm != d.Comm || lstart != d.LStart {
-			// Process already gone, or the PID was reused for something
-			// else since we recorded it — fail closed, never signal.
+		if !isProcessAlive(d.PID) {
+			// Confirmed dead via a cheap signal-0 probe, not subject to
+			// pidFingerprintFn's ps-subprocess timeout — safe to drop.
+			processed = append(processed, d.PID)
+			skipped++
+			continue
+		}
+		comm, lstart, ferr := pidFingerprintFn(d.PID)
+		if ferr != nil {
+			// Alive (confirmed above) but the fingerprint lookup itself
+			// failed transiently — do not drop the entry; retry later.
+			skipped++
+			continue
+		}
+		if comm != d.Comm || lstart != d.LStart {
+			// A different process now occupies this PID — the original
+			// descendant already exited and the PID was reused. Confirmed
+			// mismatch, safe to drop.
+			processed = append(processed, d.PID)
 			skipped++
 			continue
 		}
@@ -238,6 +262,7 @@ func reapTrackedDescendants(workerPID, issueNumber int) (reaped, skipped int) {
 		if err := syscall.Kill(d.PID, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
 			claudeLog(issueNumber, "warn", "reapTrackedDescendants: could not kill PID %d (%s): %v\n", d.PID, comm, err)
 		}
+		processed = append(processed, d.PID)
 		reaped++
 	}
 	_ = removeTrackedDescendants(processed)
@@ -278,7 +303,10 @@ func workerIdentityStillMatches(d trackedDescendant) bool {
 // its own R2 reap, from a prior engine run entirely, or whose PID was
 // reused) are eligible here. Every eligible entry's own identity fingerprint
 // is then re-verified immediately before killing it (R5), exactly as
-// reapTrackedDescendants does.
+// reapTrackedDescendants does — including that function's same fail-open
+// handling of a transient pidFingerprintFn error on a confirmed-alive PID
+// (see its doc comment): the entry is left for a later sweep pass rather
+// than being dropped on an inconclusive probe.
 func sweepStaleDescendants() (scanned, reaped, skipped int) {
 	entries, err := allTrackedDescendants()
 	if err != nil {
@@ -291,9 +319,18 @@ func sweepStaleDescendants() (scanned, reaped, skipped int) {
 			// Owning invocation still in flight — leave it for R2.
 			continue
 		}
-		processed = append(processed, d.PID)
-		comm, lstart, ferr := pidFingerprint(d.PID)
-		if ferr != nil || comm != d.Comm || lstart != d.LStart {
+		if !isProcessAlive(d.PID) {
+			processed = append(processed, d.PID)
+			skipped++
+			continue
+		}
+		comm, lstart, ferr := pidFingerprintFn(d.PID)
+		if ferr != nil {
+			skipped++
+			continue
+		}
+		if comm != d.Comm || lstart != d.LStart {
+			processed = append(processed, d.PID)
 			skipped++
 			continue
 		}
@@ -301,6 +338,7 @@ func sweepStaleDescendants() (scanned, reaped, skipped int) {
 		if err := syscall.Kill(d.PID, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
 			claudeLog(d.IssueNumber, "warn", "sweepStaleDescendants: could not kill PID %d (%s): %v\n", d.PID, comm, err)
 		}
+		processed = append(processed, d.PID)
 		reaped++
 	}
 	_ = removeTrackedDescendants(processed)

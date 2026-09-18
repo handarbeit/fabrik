@@ -758,3 +758,135 @@ func TestInvokeClaude_ReapWaitsForTrackerGoroutine(t *testing.T) {
 		t.Errorf("descendant PID %d, discovered mid-tick right at invocation end, was not reaped — reapTrackedDescendants must have run before trackWorkerDescendants finished persisting it to the registry (missing wait for the tracker goroutine to actually stop)", childPID)
 	}
 }
+
+// TestReapTrackedDescendants_TransientProbeFailure_EntryRetained pins a fifth
+// review finding: reapTrackedDescendants used to add every entry's PID to
+// the to-be-removed list unconditionally, before checking pidFingerprint's
+// result — so a transient probe failure (e.g. the ps-subprocess timeout
+// under exactly the host contention this reaper exists to handle) was
+// treated identically to "confirmed gone or reused," permanently dropping
+// the registry entry for a descendant that is actually still alive and
+// still correctly identified. That silently defeats R3's backstop for
+// exactly the descendants R3 exists to eventually catch.
+//
+// Neutralization: reverting the fix (unconditionally appending to processed
+// before the fingerprint check) turns this test red — the entry is dropped
+// from the registry despite the descendant remaining alive and correctly
+// identified.
+func TestReapTrackedDescendants_TransientProbeFailure_EntryRetained(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	descendant := exec.Command("sleep", "30")
+	if err := descendant.Start(); err != nil {
+		t.Fatalf("starting descendant: %v", err)
+	}
+	defer func() {
+		_ = descendant.Process.Kill()
+		_ = descendant.Wait()
+	}()
+	pid := descendant.Process.Pid
+
+	comm, lstart, err := pidFingerprint(pid)
+	if err != nil {
+		t.Fatalf("pidFingerprint(descendant): %v", err)
+	}
+
+	fakeWorkerPID := 999999998 // implausible PID, never a real process
+	if err := upsertTrackedDescendant(trackedDescendant{
+		PID: pid, Comm: comm, LStart: lstart,
+		WorkerPID: fakeWorkerPID, IssueNumber: 1798,
+	}); err != nil {
+		t.Fatalf("upsertTrackedDescendant: %v", err)
+	}
+
+	origFn := pidFingerprintFn
+	pidFingerprintFn = func(p int) (string, string, error) {
+		if p == pid {
+			return "", "", context.DeadlineExceeded // simulated transient ps timeout
+		}
+		return origFn(p)
+	}
+	defer func() { pidFingerprintFn = origFn }()
+
+	reaped, skipped := reapTrackedDescendants(fakeWorkerPID, 1798)
+	if reaped != 0 {
+		t.Errorf("expected 0 reaped (a transient probe failure must never authorize a kill), got %d", reaped)
+	}
+	if skipped != 1 {
+		t.Errorf("expected 1 skipped, got %d", skipped)
+	}
+	if !pidAlive(pid) {
+		t.Fatal("descendant process was killed despite a transient (not confirmed) fingerprint failure")
+	}
+
+	remaining, err := descendantsForWorker(fakeWorkerPID)
+	if err != nil {
+		t.Fatalf("descendantsForWorker: %v", err)
+	}
+	if len(remaining) != 1 {
+		t.Errorf("expected the entry to be RETAINED after a transient probe failure (for a later retry), got %d remaining entries", len(remaining))
+	}
+}
+
+// TestSweepStaleDescendants_TransientProbeFailure_EntryRetained is
+// TestReapTrackedDescendants_TransientProbeFailure_EntryRetained's sibling
+// for the R3 backstop sweep: sweepStaleDescendants had the identical
+// unconditional-append-before-fingerprint-check defect for the descendant's
+// own PID (the worker-liveness gate above it was already fixed separately).
+func TestSweepStaleDescendants_TransientProbeFailure_EntryRetained(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	descendant := exec.Command("sleep", "30")
+	if err := descendant.Start(); err != nil {
+		t.Fatalf("starting descendant: %v", err)
+	}
+	defer func() {
+		_ = descendant.Process.Kill()
+		_ = descendant.Wait()
+	}()
+	pid := descendant.Process.Pid
+
+	comm, lstart, err := pidFingerprint(pid)
+	if err != nil {
+		t.Fatalf("pidFingerprint(descendant): %v", err)
+	}
+
+	fakeWorkerPID := 999999997 // implausible PID — sweep treats its owner as dead
+	if err := upsertTrackedDescendant(trackedDescendant{
+		PID: pid, Comm: comm, LStart: lstart,
+		WorkerPID: fakeWorkerPID, IssueNumber: 1798,
+	}); err != nil {
+		t.Fatalf("upsertTrackedDescendant: %v", err)
+	}
+
+	origFn := pidFingerprintFn
+	pidFingerprintFn = func(p int) (string, string, error) {
+		if p == pid {
+			return "", "", context.DeadlineExceeded // simulated transient ps timeout
+		}
+		return origFn(p)
+	}
+	defer func() { pidFingerprintFn = origFn }()
+
+	scanned, reaped, skipped := sweepStaleDescendants()
+	if scanned != 1 {
+		t.Errorf("expected scanned=1, got %d", scanned)
+	}
+	if reaped != 0 {
+		t.Errorf("expected 0 reaped (a transient probe failure must never authorize a kill), got %d", reaped)
+	}
+	if skipped != 1 {
+		t.Errorf("expected 1 skipped, got %d", skipped)
+	}
+	if !pidAlive(pid) {
+		t.Fatal("descendant process was killed despite a transient (not confirmed) fingerprint failure")
+	}
+
+	remaining, err := allTrackedDescendants()
+	if err != nil {
+		t.Fatalf("allTrackedDescendants: %v", err)
+	}
+	if len(remaining) != 1 {
+		t.Errorf("expected the entry to be RETAINED after a transient probe failure (for a later sweep retry), got %d remaining entries", len(remaining))
+	}
+}
