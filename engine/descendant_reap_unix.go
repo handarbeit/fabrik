@@ -242,7 +242,6 @@ func trackWorkerDescendants(ctx context.Context, workerPID, issueNumber int, rep
 					// retry risk exists either way.
 					continue
 				}
-				seen[pid] = true
 				d := trackedDescendant{
 					PID:          pid,
 					Comm:         comm,
@@ -255,7 +254,20 @@ func trackWorkerDescendants(ctx context.Context, workerPID, issueNumber int, rep
 					Stage:        stage,
 					DiscoveredAt: time.Now(),
 				}
-				_ = upsertTrackedDescendant(d)
+				if err := upsertTrackedDescendant(d); err != nil {
+					// Same rationale as the pidFingerprintFn error handling
+					// above, applied to the write side instead of the read
+					// side: a transient registry-write failure (e.g. a
+					// momentarily unwritable .fabrik/state/ under the same
+					// host contention this reaper exists to handle) must not
+					// permanently mark this PID seen — that would silently
+					// and permanently drop it from tracking for the rest of
+					// the invocation, since it would never be reprocessed on
+					// a later tick. Leave it unmarked so the next tick
+					// retries the upsert.
+					continue
+				}
+				seen[pid] = true
 				if !workerIdentityKnown {
 					pendingIdentityBackfill = append(pendingIdentityBackfill, d)
 				}

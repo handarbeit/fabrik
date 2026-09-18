@@ -1049,3 +1049,93 @@ func TestTrackWorkerDescendants_ConcurrentInvocationsShareProcessTableScan(t *te
 		t.Error("listProcessArgvFn was never called — test setup is broken (expected at least one real scan)")
 	}
 }
+
+// TestTrackWorkerDescendants_TransientRegistryWriteFailureRetried pins a
+// review finding (handarbeit-pruefer, PR #1806): seen[pid] was set
+// unconditionally, immediately before upsertTrackedDescendant's error was
+// discarded (`_ = upsertTrackedDescendant(d)`). If the durable write fails —
+// e.g. .fabrik/state/ briefly unwritable under the same host contention this
+// reaper exists to handle elsewhere in this same function — the descendant
+// was never actually persisted to the registry, yet seen[pid] permanently
+// prevented it from ever being reprocessed on a later tick for the rest of
+// the invocation. That made it invisible to both reapTrackedDescendants (R2)
+// and sweepStaleDescendants (R3) — the exact "transient failure permanently
+// and silently defeats tracking" failure mode this function's
+// pidFingerprintFn error handling (a few lines above) already guards against,
+// recurring here on the write side instead of the read side.
+//
+// Neutralization: reverting the fix (seen[pid] = true unconditionally, write
+// error discarded) turns this test red — the descendant is never recorded
+// even after the registry write path becomes writable again, since the first
+// (failed) attempt already marked it seen.
+func TestTrackWorkerDescendants_TransientRegistryWriteFailureRetried(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	// Block the registry write with a local-path trick (no network/fault
+	// library needed, per this repo's testing conventions): create
+	// ".fabrik/state" as a regular file, so saveDescendantRegistry's
+	// os.MkdirAll(".fabrik/state", ...) fails with ENOTDIR.
+	if err := os.MkdirAll(filepath.Join(dir, ".fabrik"), 0700); err != nil {
+		t.Fatalf("mkdir .fabrik: %v", err)
+	}
+	blockerPath := filepath.Join(dir, ".fabrik", "state")
+	if err := os.WriteFile(blockerPath, []byte("blocking"), 0600); err != nil {
+		t.Fatalf("writing blocker file: %v", err)
+	}
+
+	origScan := descendantScanInterval
+	descendantScanInterval = 20 * time.Millisecond
+	defer func() { descendantScanInterval = origScan }()
+
+	// Session-leading "worker" shell with a real descendant in its session —
+	// mirrors TestTrackWorkerDescendants_TransientFingerprintFailureRetried's
+	// setup.
+	shell := exec.Command("/bin/sh", "-c", "sleep 5 & wait")
+	setCmdProcAttr(shell)
+	if err := shell.Start(); err != nil {
+		t.Fatalf("starting shell: %v", err)
+	}
+	defer func() {
+		_ = shell.Process.Kill()
+		_ = shell.Wait()
+	}()
+	workerPID := shell.Process.Pid
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		trackWorkerDescendants(ctx, workerPID, 1798, "", "Implement")
+		close(done)
+	}()
+
+	// Give the tracker several ticks to discover the descendant and attempt
+	// (and fail) the registry write while the write path is blocked.
+	time.Sleep(120 * time.Millisecond)
+
+	// Unblock: remove the blocking file so a later upsert's os.MkdirAll can
+	// succeed.
+	if err := os.Remove(blockerPath); err != nil {
+		t.Fatalf("removing blocker file: %v", err)
+	}
+
+	var got []trackedDescendant
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		entries, err := descendantsForWorker(workerPID)
+		if err != nil {
+			t.Fatalf("descendantsForWorker: %v", err)
+		}
+		if len(entries) > 0 {
+			got = entries
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	if len(got) == 0 {
+		t.Fatal("descendant was never recorded even after the registry write path became writable again — a transient write failure permanently dropped tracking for the rest of the invocation")
+	}
+}
