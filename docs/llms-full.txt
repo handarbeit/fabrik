@@ -3353,8 +3353,13 @@ self-describing identity in `ps` output — `ps aux | grep -- "--name fabrik:"` 
 every worker on the host, and the sentinel itself names which repo, issue, and stage
 each one is serving. The flag is gated on a one-time startup probe of the installed
 `claude` binary's `--help` output; on older binaries that predate the flag, it's
-omitted and workers run exactly as before. It is observability-only — the engine
-never reads or branches on it. See [stage-lifecycle.md § Worker Session Naming](stage-lifecycle.md#worker-session-naming---name)
+omitted and workers run exactly as before. Originally observability-only for humans
+running that `ps | grep`, the engine now also uses it as a liveness-verification
+signal: before clearing a worker whose PID was never recorded (the stale-timeout
+path — see `docs/state-machine.md` §9.7), it probes for a live process still
+carrying that worker's sentinel rather than clearing blind, and the dispatcher
+independently refuses to start a second worker while a cleared worker's sentinel is
+still live. See [stage-lifecycle.md § Worker Session Naming](stage-lifecycle.md#worker-session-naming---name)
 for the full as-built mechanism.
 
 ### Rate Limit Monitoring
@@ -7767,9 +7772,22 @@ The "both conditions" requirement prevents spurious clearing of live workers who
 
 **`WorkerStaleTimeout`** (default **5 minutes**) is configurable via `--worker-stale-timeout <N>` (minutes) or `FABRIK_WORKER_STALE_TIMEOUT=N`. Must be longer than `heartbeatInterval × 2` (currently > 60 s).
 
-**PID=0 skip:** Workers with `PID == 0` (PID not yet set) are skipped regardless of heartbeat age — they are in the narrow window between `LocalLockAcquired` and `cmd.Start()`.
+**PID<=0 timeout-based clear (issue #1303):** Workers with `PID <= 0` (PID not yet set, or invalid) are in the narrow window between `LocalLockAcquired` and `cmd.Start()` — signal-0 has no PID to target, so the ordinary confirmed-dead check cannot run for them at all. An unconditional skip here would let a dispatch goroutine that hangs *before* `onPIDReady` fires (e.g. stuck in `ensureRepoReady`, before the child process is even started) outlive its own `WorkerEntered` marker indefinitely — and the `fabrik:locked:<user>` / `stage:<name>:in_progress` labels it gates — permanently suppressing dispatch for the item. Instead, the detector applies `WorkerStaleTimeout` against `Worker.StartedAt` (not `LastSignAt`, which may never have started ticking for a worker that hung before `acquireLockAndVerify` started the heartbeat goroutine): once a `PID<=0` worker has been running longer than `WorkerStaleTimeout`, it is a *candidate* for a timeout-based clear — not a confirmed-dead clear, since nothing here has verified the process is actually gone.
 
-**Signal-0 liveness check** (`syscall.Kill(pid, 0)`):
+**Sentinel-probe verification tier (issue #1779):** Before a `PID<=0` worker past the threshold is actually cleared, the detector probes for a live process carrying that worker's deterministic `sessionNameSentinel` (`fabrik:<owner>/<repo>#<issue>:<stage>` — see "Worker Session Naming" in `docs/USER_GUIDE.md`/`docs/stage-lifecycle.md`), already passed as `--name` on every worker invocation. This closes the gap #1303 left open: a real `claude` subprocess can be alive and progressing (the reported incident: cleared after 5 minutes, ran a further 1h36m, authored five files) even though the engine's own `Worker.PID` field was never updated — the two facts are unrelated once the subprocess has actually started. `handleUnverifiablePIDWorker` (`engine/worker_liveness.go`) implements this as a three-way branch, gated on `claudeNameFlagSupported` (a one-time, process-lifetime capability probe — if the installed `claude` binary predates `--name` support, no worker in this process could ever carry a sentinel, so the probe is skipped entirely and behavior falls straight through to the plain #1303 clear below):
+
+| Probe outcome | Action |
+|---|---|
+| Sentinel found live | Mirror the PID-recorded path's posture: log `[#N worker-liveness] sentinel "…" found live … — adopting PID, signal-0 liveness now governs` (or "waiting for natural exit" if no PID was recovered) and do **not** clear. When the probe also yields the OS PID, `WorkerPIDSet{PID}` adopts it into the handle and a fresh `WorkerHeartbeat{At: now}` is applied, so the item's `Worker.PID > 0` on the very next scan cycle and ordinary signal-0 liveness governs from then on. |
+| Sentinel affirmatively not found | Clear exactly as the plain #1303 timeout path: `store.Apply(WorkerExited{})` + label removal + log `[#N worker-liveness] worker never reached PID assignment (started T ago) — clearing, could not verify liveness (sentinel "…" not found)`. |
+| Probe itself failed (unsupported platform, `ps` error, non-zero exit, timeout) | Neither clear nor defer forever: a per-`(repo, issue)` consecutive-failure counter (`Engine.sentinelProbeFailures`, in-memory, scan-goroutine-local — not `itemstate.Store` state) is incremented and compared against `sentinelProbeUnverifiableCycleLimit` (currently 3, ~3 scan cycles ≈ 3 minutes on top of `WorkerStaleTimeout`). Below the bound: log `sentinel probe unverifiable (…) — deferring clear` and leave the worker alone. At the bound: clear, logged as `clearing UNVERIFIED after N consecutive sentinel-probe failures: <err>`. The counter is cleared whenever the worker leaves this state — sentinel found live, sentinel confirmed not found, cleared at the bound, or a real PID reaches the store via the ordinary `onPIDReady` callback. |
+| `claudeNameFlagSupported == false` | Probe skipped entirely (never invoked); clears exactly as the plain #1303 timeout path, logged without the "(sentinel … not found)" suffix. |
+
+The probe (`probeSentinelLive`, unix-only; a Windows build-tag stub always reports itself unsupported, routing Windows through the bounded-unverifiable row above — the same posture `isProcessAlive`'s Windows stub takes for signal-0) shells out to `ps -eo pid=,args= -w -w` (no shell, short timeout) and matches the sentinel as a whole argv token — never a substring — so a sentinel for issue `#2966` cannot match a decoy carrying `#29660`.
+
+**Dispatch-time backstop (R5, issue #1779):** R1/R2 above are meant to make "two workers on one worktree" unreachable, but `dispatchCandidates` (`engine/poll.go`) asserts it independently rather than relying on that alone: immediately after the existing `snap.Worker() != nil` in-flight guard (which only catches an item this process still *thinks* is in-flight), it re-probes the same sentinel for the item's resolved stage. A `Live` result refuses dispatch (logged `refusing dispatch: sentinel "…" still live for a cleared worker`) without ever applying `WorkerEntered`; "not found" or a probe error both fall through to ordinary dispatch — the guard fails *open* on a probe error, since treating an unverifiable probe as a hard block would let a broken `ps` wedge dispatch for every item on every poll, a strictly worse failure mode than the rare duplicate-writer it exists to prevent. Scoped to the main stage-dispatch path only; the structurally identical `snap.Worker() != nil` guards in the reinvoke dispatchers (`reinvoke.go`, `reviews.go`, `ci.go`, `merge_gate.go`) do not get this check.
+
+**Signal-0 liveness check** (`syscall.Kill(pid, 0)`, for workers with `PID > 0` — whether from the ordinary `onPIDReady` callback or adopted via the sentinel probe above):
 
 | Outcome | Action |
 |---------|--------|
@@ -7779,7 +7797,7 @@ The "both conditions" requirement prevents spurious clearing of live workers who
 
 `StageName` for label construction is taken from `Worker.StageName`, which was set at dispatch time.
 
-**Windows note:** `isProcessAlive` always returns `true` on Windows (signal-0 is unsupported). The detector never clears stale workers on Windows; the startup cleanup pass handles the restart case instead.
+**Windows note:** `isProcessAlive` always returns `true` on Windows (signal-0 is unsupported). The detector never clears stale workers on Windows via the signal-0 path; a `PID<=0` worker on Windows always falls through the sentinel probe's unsupported stub to the bounded-unverifiable row above. The startup cleanup pass handles the restart case on any platform.
 
 #### Janitor Integration (Stale-Worker Awareness)
 
@@ -9045,7 +9063,12 @@ The stage-name component is passed through `sanitizeSentinelComponent`, which co
 
 **Interaction with `--resume`.** `--name` is passed unconditionally whenever the capability probe passes, resume or not — live verification during Research confirmed `--name` and `--resume` combine cleanly on the installed CLI (same, unforked `session_id` across a resumed invocation), so there is no conditional-omit branch on the resume path.
 
-**Observability only.** Nothing in the engine reads, parses, or branches on the sentinel — it never appears in prompts or context files, and no engine behavior is keyed off it. Its only consumers are external: a human reading `ps`/the session picker/terminal title, or a future `/fabrik:status` detector (tracked separately, not implemented by this mechanism).
+**Also a liveness-verification signal (#1779).** The sentinel never appears in prompts or context files, and its original human-facing uses — `ps`/the session picker/terminal title — are unchanged. But the engine itself now reads it back in two places, both in `engine/worker_liveness.go`/`engine/sentinel_probe*.go`:
+
+- `runWorkerDetectorScan`'s `PID<=0` branch: before clearing a worker whose PID was never recorded (the pre-#1779 timeout-only clear from #1303 — see `docs/state-machine.md` §9.7), it probes for a live process still carrying that worker's sentinel via `ps`, exact-argv-token match. A live sentinel is treated like a live PID (log and wait, adopting the discovered PID so ordinary signal-0 liveness governs afterward); an affirmatively-absent sentinel clears exactly as before; a probe that itself cannot run (unsupported platform, `ps` error) defers the clear for a bounded number of scan cycles before falling back to the plain clear, logged as unverified.
+- `dispatchCandidates` (`engine/poll.go`): independently refuses to start a second worker for an (issue, stage) whose sentinel is still live, even if a prior worker's handle was already cleared — the exact "two workers on one worktree" shape the mechanism exists to close, asserted at the dispatch site itself rather than relying solely on the scan above having caught it first.
+
+Both call sites share one probe implementation (`sentinelProbeFn`, package-level function-var seam for tests) and are gated on `claudeNameFlagSupported` — an older `claude` binary that never got `--name` means no worker in this process could carry a sentinel, so the probe is skipped rather than spawning `ps` for a guaranteed miss.
 
 ### Worker Environment: GitHub Identity
 
