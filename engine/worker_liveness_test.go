@@ -851,3 +851,293 @@ func TestWorkerStaleTimeoutDefault(t *testing.T) {
 		t.Errorf("configured workerStaleTimeout = %v, want 10m", got)
 	}
 }
+
+// withSentinelProbe overrides claudeNameFlagSupported and sentinelProbeFn for
+// the duration of a test, restoring both on cleanup — mirroring the existing
+// save/restore convention for claudeNameFlagSupported elsewhere in this
+// package (engine_test.go, invoke_claude_test.go).
+func withSentinelProbe(t *testing.T, supported bool, fn func(sentinel string) sentinelProbeResult) {
+	t.Helper()
+	origSupported := claudeNameFlagSupported
+	origFn := sentinelProbeFn
+	claudeNameFlagSupported = supported
+	sentinelProbeFn = fn
+	t.Cleanup(func() {
+		claudeNameFlagSupported = origSupported
+		sentinelProbeFn = origFn
+	})
+}
+
+// TestDetectorSentinelLive_KeepsWorkerAndAdoptsPID is the R1/R2/Acceptance-1,3
+// case: a PID<=0 worker past workerStaleTimeout whose sentinel IS found live
+// must NOT be cleared, and the discovered PID must be adopted into the
+// worker handle so ordinary signal-0 liveness governs from then on.
+func TestDetectorSentinelLive_KeepsWorkerAndAdoptsPID(t *testing.T) {
+	client := &mockGitHubClient{}
+	e := testEngine(t, client, &mockClaudeInvoker{})
+
+	const adoptedPID = 424242
+	var probedSentinel string
+	withSentinelProbe(t, true, func(sentinel string) sentinelProbeResult {
+		probedSentinel = sentinel
+		return sentinelProbeResult{Live: true, PID: adoptedPID}
+	})
+
+	bootstrapItem(t, e, 60, []string{"fabrik:locked:testuser", "stage:Implement:in_progress"})
+	staleStart := time.Now().Add(-10 * time.Minute)
+	e.store.Apply(itemstate.LocalLockAcquired{
+		Repo:       "owner/repo",
+		Number:     60,
+		User:       e.cfg.User,
+		AcquiredAt: staleStart,
+		Worker: &itemstate.WorkerHandle{
+			PID:        0,
+			StageName:  "Implement",
+			StartedAt:  staleStart,
+			LastSignAt: staleStart,
+		},
+	})
+
+	e.runWorkerDetectorScan()
+
+	wantSentinel := sessionNameSentinel("owner/repo", 60, "Implement")
+	if probedSentinel != wantSentinel {
+		t.Errorf("probed sentinel = %q, want %q", probedSentinel, wantSentinel)
+	}
+
+	w := getWorker(t, e, 60)
+	if w == nil {
+		t.Fatal("expected Worker to remain non-nil when sentinel is found live")
+	}
+	if w.PID != adoptedPID {
+		t.Errorf("Worker.PID = %d, want %d (adopted from probe)", w.PID, adoptedPID)
+	}
+
+	removed := removeLabelsCalled(client, 60)
+	if len(removed) > 0 {
+		t.Errorf("expected no labels removed when sentinel is found live; got: %v", removed)
+	}
+
+	// The item must not be re-dispatchable while its Worker is still present —
+	// R5's dispatch guard is asserted independently in poll_helpers_test.go,
+	// but this confirms the store-level precondition it depends on.
+	snap, err := e.store.Get("owner/repo", 60)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if snap.Worker() == nil {
+		t.Fatal("expected snap.Worker() != nil after sentinel-live keep (dispatch guard precondition)")
+	}
+}
+
+// TestDetectorSentinelNotFound_ClearsWorker is R3/Acceptance-2's sibling with
+// the sentinel probe actually engaged (claudeNameFlagSupported=true): an
+// affirmative "not found" result must clear exactly like the plain #1303
+// timeout path. TestDetectorClearsPIDNeverSetAfterStartedAtTimeout covers the
+// claudeNameFlagSupported=false (probe-skipped) variant of this same
+// regression guard.
+func TestDetectorSentinelNotFound_ClearsWorker(t *testing.T) {
+	client := &mockGitHubClient{}
+	e := testEngine(t, client, &mockClaudeInvoker{})
+
+	var probeCalled bool
+	withSentinelProbe(t, true, func(sentinel string) sentinelProbeResult {
+		probeCalled = true
+		return sentinelProbeResult{Live: false}
+	})
+
+	bootstrapItem(t, e, 61, []string{"fabrik:locked:testuser", "stage:Implement:in_progress"})
+	staleStart := time.Now().Add(-10 * time.Minute)
+	e.store.Apply(itemstate.LocalLockAcquired{
+		Repo:       "owner/repo",
+		Number:     61,
+		User:       e.cfg.User,
+		AcquiredAt: staleStart,
+		Worker: &itemstate.WorkerHandle{
+			PID:        0,
+			StageName:  "Implement",
+			StartedAt:  staleStart,
+			LastSignAt: staleStart,
+		},
+	})
+
+	e.runWorkerDetectorScan()
+
+	if !probeCalled {
+		t.Fatal("expected sentinel probe to be invoked when claudeNameFlagSupported is true")
+	}
+	if w := getWorker(t, e, 61); w != nil {
+		t.Errorf("expected Worker == nil after sentinel-not-found cleanup, got PID=%d", w.PID)
+	}
+	removed := removeLabelsCalled(client, 61)
+	if !hasRemovedLabel(removed, "fabrik:locked:testuser") {
+		t.Errorf("expected lock label to be removed; got: %v", removed)
+	}
+	if !hasRemovedLabel(removed, "stage:Implement:in_progress") {
+		t.Errorf("expected in_progress label to be removed; got: %v", removed)
+	}
+}
+
+// TestDetectorSentinelUnsupportedCLI_SkipsProbe verifies that when
+// claudeNameFlagSupported is false (an older installed claude binary), the
+// scan never invokes the sentinel probe at all — it degrades straight to the
+// plain #1303 clear, since no worker in this process could ever carry a
+// sentinel and probing would only ever waste a subprocess spawn.
+func TestDetectorSentinelUnsupportedCLI_SkipsProbe(t *testing.T) {
+	client := &mockGitHubClient{}
+	e := testEngine(t, client, &mockClaudeInvoker{})
+
+	var probeCalled bool
+	withSentinelProbe(t, false, func(sentinel string) sentinelProbeResult {
+		probeCalled = true
+		return sentinelProbeResult{Live: true, PID: 1}
+	})
+
+	bootstrapItem(t, e, 62, []string{"fabrik:locked:testuser", "stage:Implement:in_progress"})
+	staleStart := time.Now().Add(-10 * time.Minute)
+	e.store.Apply(itemstate.LocalLockAcquired{
+		Repo:       "owner/repo",
+		Number:     62,
+		User:       e.cfg.User,
+		AcquiredAt: staleStart,
+		Worker: &itemstate.WorkerHandle{
+			PID:        0,
+			StageName:  "Implement",
+			StartedAt:  staleStart,
+			LastSignAt: staleStart,
+		},
+	})
+
+	e.runWorkerDetectorScan()
+
+	if probeCalled {
+		t.Error("expected sentinel probe NOT to be invoked when claudeNameFlagSupported is false")
+	}
+	if w := getWorker(t, e, 62); w != nil {
+		t.Errorf("expected Worker == nil after plain timeout cleanup, got PID=%d", w.PID)
+	}
+}
+
+// TestDetectorSentinelProbeError_DefersThenClearsAfterBound is the R4/
+// Acceptance-4 case: a probe that itself fails (ps error, unsupported
+// platform, timeout) must not clear immediately, but must not defer forever
+// either — after sentinelProbeUnverifiableCycleLimit consecutive scan-cycle
+// failures, the worker is cleared, distinctly logged as unverified.
+func TestDetectorSentinelProbeError_DefersThenClearsAfterBound(t *testing.T) {
+	client := &mockGitHubClient{}
+	e := testEngine(t, client, &mockClaudeInvoker{})
+
+	probeErr := errSentinelProbeUnsupported
+	withSentinelProbe(t, true, func(sentinel string) sentinelProbeResult {
+		return sentinelProbeResult{Err: probeErr}
+	})
+
+	bootstrapItem(t, e, 63, []string{"fabrik:locked:testuser", "stage:Implement:in_progress"})
+	staleStart := time.Now().Add(-10 * time.Minute)
+	e.store.Apply(itemstate.LocalLockAcquired{
+		Repo:       "owner/repo",
+		Number:     63,
+		User:       e.cfg.User,
+		AcquiredAt: staleStart,
+		Worker: &itemstate.WorkerHandle{
+			PID:        0,
+			StageName:  "Implement",
+			StartedAt:  staleStart,
+			LastSignAt: staleStart,
+		},
+	})
+
+	for i := 1; i < sentinelProbeUnverifiableCycleLimit; i++ {
+		e.runWorkerDetectorScan()
+		if w := getWorker(t, e, 63); w == nil {
+			t.Fatalf("expected Worker to remain non-nil before the R4 bound is reached (cycle %d/%d)", i, sentinelProbeUnverifiableCycleLimit)
+		}
+		removed := removeLabelsCalled(client, 63)
+		if len(removed) > 0 {
+			t.Fatalf("expected no labels removed before the R4 bound is reached (cycle %d/%d); got: %v", i, sentinelProbeUnverifiableCycleLimit, removed)
+		}
+	}
+
+	// The Nth cycle reaches the bound and clears.
+	e.runWorkerDetectorScan()
+	if w := getWorker(t, e, 63); w != nil {
+		t.Errorf("expected Worker == nil once the R4 bound is reached, got PID=%d", w.PID)
+	}
+	removed := removeLabelsCalled(client, 63)
+	if !hasRemovedLabel(removed, "fabrik:locked:testuser") {
+		t.Errorf("expected lock label to be removed once the R4 bound is reached; got: %v", removed)
+	}
+	if !hasRemovedLabel(removed, "stage:Implement:in_progress") {
+		t.Errorf("expected in_progress label to be removed once the R4 bound is reached; got: %v", removed)
+	}
+}
+
+// TestDetectorSentinelProbeError_RecoveryResetsFailureCount verifies that a
+// probe which fails and then succeeds (finding the sentinel live) resets the
+// R4 consecutive-failure count — a later run of failures must again get the
+// full sentinelProbeUnverifiableCycleLimit grace period, not an
+// already-partially-consumed one.
+func TestDetectorSentinelProbeError_RecoveryResetsFailureCount(t *testing.T) {
+	client := &mockGitHubClient{}
+	e := testEngine(t, client, &mockClaudeInvoker{})
+
+	var live bool
+	withSentinelProbe(t, true, func(sentinel string) sentinelProbeResult {
+		if live {
+			return sentinelProbeResult{Live: true, PID: 777}
+		}
+		return sentinelProbeResult{Err: errSentinelProbeUnsupported}
+	})
+
+	bootstrapItem(t, e, 64, []string{"fabrik:locked:testuser", "stage:Implement:in_progress"})
+	staleStart := time.Now().Add(-10 * time.Minute)
+	e.store.Apply(itemstate.LocalLockAcquired{
+		Repo:       "owner/repo",
+		Number:     64,
+		User:       e.cfg.User,
+		AcquiredAt: staleStart,
+		Worker: &itemstate.WorkerHandle{
+			PID:        0,
+			StageName:  "Implement",
+			StartedAt:  staleStart,
+			LastSignAt: staleStart,
+		},
+	})
+
+	// Accumulate failures right up to (but not reaching) the bound.
+	for i := 1; i < sentinelProbeUnverifiableCycleLimit; i++ {
+		e.runWorkerDetectorScan()
+	}
+	if w := getWorker(t, e, 64); w == nil {
+		t.Fatal("expected Worker to remain non-nil before the bound is reached")
+	}
+
+	// Now the probe recovers (sentinel found live) — resets the counter, adopts the PID.
+	live = true
+	e.runWorkerDetectorScan()
+	w := getWorker(t, e, 64)
+	if w == nil {
+		t.Fatal("expected Worker to remain non-nil once the sentinel is found live")
+	}
+	if w.PID != 777 {
+		t.Errorf("Worker.PID = %d, want 777 (adopted on recovery)", w.PID)
+	}
+
+	// Probe fails again. If the counter had NOT been reset, this single
+	// failure would already be at/over the bound and clear immediately.
+	// Since PID is now 777 (>0), the scan takes the ordinary signal-0 path,
+	// not the sentinel-probe path at all — so instead directly verify the
+	// failure map was cleared via a fresh unverifiable episode from scratch.
+	live = false
+	e.store.Apply(itemstate.WorkerPIDSet{Repo: "owner/repo", Number: 64, PID: 0})
+	for i := 1; i < sentinelProbeUnverifiableCycleLimit; i++ {
+		e.runWorkerDetectorScan()
+		if w := getWorker(t, e, 64); w == nil {
+			t.Fatalf("expected Worker to remain non-nil on fresh episode cycle %d/%d (counter should have reset on recovery)", i, sentinelProbeUnverifiableCycleLimit)
+		}
+	}
+	e.runWorkerDetectorScan()
+	if w := getWorker(t, e, 64); w != nil {
+		t.Errorf("expected Worker == nil once the fresh episode reaches the bound, got PID=%d", w.PID)
+	}
+}

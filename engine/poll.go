@@ -1818,6 +1818,12 @@ func (e *Engine) dispatchCandidates(ctx context.Context, board *gh.ProjectBoard,
 		if !e.itemNeedsWork(item) {
 			continue
 		}
+		// Capture stage name up front — both the Worker() != nil guard below (R5)
+		// and job tracking further down need it.
+		var stageName string
+		if s := stages.FindStage(e.cfg.Stages, item.Status); s != nil {
+			stageName = s.Name
+		}
 		// Skip issues already being processed by a previous poll cycle's worker.
 		// Use the Store-backed Worker field (set by WorkerEntered before goroutine launch)
 		// so this check is consistent with the observer pipeline.
@@ -1832,17 +1838,30 @@ func (e *Engine) dispatchCandidates(ctx context.Context, board *gh.ProjectBoard,
 		if snap, err := e.store.Get(itemRepo, item.Number); err == nil && snap.Worker() != nil {
 			continue
 		}
+		// R5 (#1779): the item's own Worker() == nil at this point, but a prior
+		// worker for this (issue, stage) may have just been cleared by
+		// worker-liveness's timeout path (R3/R4) while a real process carrying
+		// its sentinel is still alive — the exact "second worker on one
+		// worktree" shape #1749 reported. This is an independent backstop:
+		// R1/R2 should make it unreachable, but dispatch must never rely on
+		// that alone. Skipped when claudeNameFlagSupported is false (no worker
+		// could ever carry a sentinel) and fails OPEN on a probe error — a
+		// broken `ps` must not wedge dispatch for every item on every poll,
+		// which would be a strictly worse failure mode than the rare
+		// duplicate-writer this check exists to prevent.
+		if claudeNameFlagSupported && stageName != "" {
+			sentinel := sessionNameSentinel(itemRepo, item.Number, stageName)
+			if result := sentinelProbeFn(sentinel); result.Err == nil && result.Live {
+				e.logf(item.Number, "worker-liveness", "refusing dispatch: sentinel %q still live for a cleared worker\n", sentinel)
+				continue
+			}
+		}
 		// Acquire semaphore slot, but abort if the context is cancelled so we
 		// don't block indefinitely when all slots are taken at shutdown time.
 		select {
 		case e.sem <- struct{}{}:
 		case <-ctx.Done():
 			return dispatched
-		}
-		// Capture stage name and start time for job tracking.
-		var stageName string
-		if s := stages.FindStage(e.cfg.Stages, item.Status); s != nil {
-			stageName = s.Name
 		}
 		startTime := time.Now()
 		// Apply WorkerEntered synchronously before the goroutine starts so that

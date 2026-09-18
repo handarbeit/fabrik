@@ -159,3 +159,91 @@ func TestDispatchCandidates_SkipsInFlightWorker(t *testing.T) {
 		t.Errorf("dispatched = %d, want 0 (item already has an in-flight worker)", dispatched)
 	}
 }
+
+// TestDispatchCandidates_RefusesLiveSentinelAfterClear is the R5/Acceptance-5
+// regression: reproduces the reported shape — a prior worker for this
+// (issue, stage) was cleared (Worker() == nil in the store, exactly as
+// worker-liveness leaves it after a timeout-based clear), but a real process
+// carrying that worker's sentinel is still live. Dispatch must refuse to
+// start a second worker even though the store-level in-flight guard alone
+// would have let it through.
+func TestDispatchCandidates_RefusesLiveSentinelAfterClear(t *testing.T) {
+	claude := &mockClaudeInvoker{}
+	eng := testEngine(t, &mockGitHubClient{}, claude)
+	eng.cfg.MaxConcurrent = 1
+	eng.sem = make(chan struct{}, 1)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 12, Title: "Test", Status: "Research"}
+	// No Worker in the store — mirrors the state right after worker-liveness
+	// clears a worker (WorkerExited already applied).
+
+	var probedSentinel string
+	withSentinelProbe(t, true, func(sentinel string) sentinelProbeResult {
+		probedSentinel = sentinel
+		return sentinelProbeResult{Live: true, PID: 55555}
+	})
+
+	dispatched := eng.dispatchCandidates(context.Background(), board, []gh.ProjectItem{item})
+	eng.wg.Wait()
+
+	if dispatched != 0 {
+		t.Errorf("dispatched = %d, want 0 (a live sentinel must refuse dispatch even with Worker() == nil)", dispatched)
+	}
+	wantSentinel := sessionNameSentinel(itemOwnerRepoString(item, eng.defaultRepo()), item.Number, "Research")
+	if probedSentinel != wantSentinel {
+		t.Errorf("probed sentinel = %q, want %q", probedSentinel, wantSentinel)
+	}
+	if snap, err := eng.store.Get(itemOwnerRepoString(item, eng.defaultRepo()), item.Number); err == nil && snap.Worker() != nil {
+		t.Error("expected no WorkerEntered mutation to have been applied for a refused dispatch")
+	}
+}
+
+// TestDispatchCandidates_DispatchesWhenSentinelNotFound verifies the R5
+// guard's complement: when the probe affirmatively finds no live sentinel,
+// dispatch proceeds normally.
+func TestDispatchCandidates_DispatchesWhenSentinelNotFound(t *testing.T) {
+	claude := &mockClaudeInvoker{}
+	eng := testEngine(t, &mockGitHubClient{}, claude)
+	eng.cfg.MaxConcurrent = 1
+	eng.sem = make(chan struct{}, 1)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 13, Title: "Test", Status: "Research"}
+
+	withSentinelProbe(t, true, func(sentinel string) sentinelProbeResult {
+		return sentinelProbeResult{Live: false}
+	})
+
+	dispatched := eng.dispatchCandidates(context.Background(), board, []gh.ProjectItem{item})
+	eng.wg.Wait()
+
+	if dispatched != 1 {
+		t.Errorf("dispatched = %d, want 1 (no live sentinel found — dispatch must proceed)", dispatched)
+	}
+}
+
+// TestDispatchCandidates_DispatchesOnProbeError verifies R5 fails OPEN on a
+// probe error: a broken `ps` must not wedge dispatch for every item on every
+// poll, which would be a strictly worse failure mode than the rare
+// duplicate-writer this guard exists to prevent.
+func TestDispatchCandidates_DispatchesOnProbeError(t *testing.T) {
+	claude := &mockClaudeInvoker{}
+	eng := testEngine(t, &mockGitHubClient{}, claude)
+	eng.cfg.MaxConcurrent = 1
+	eng.sem = make(chan struct{}, 1)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 14, Title: "Test", Status: "Research"}
+
+	withSentinelProbe(t, true, func(sentinel string) sentinelProbeResult {
+		return sentinelProbeResult{Err: errSentinelProbeUnsupported}
+	})
+
+	dispatched := eng.dispatchCandidates(context.Background(), board, []gh.ProjectItem{item})
+	eng.wg.Wait()
+
+	if dispatched != 1 {
+		t.Errorf("dispatched = %d, want 1 (a probe error must fail open, not block dispatch)", dispatched)
+	}
+}
