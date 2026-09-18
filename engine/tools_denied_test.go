@@ -489,6 +489,63 @@ func TestToolsDenied_CommentNamesFirstDeniedCommand(t *testing.T) {
 	}
 }
 
+// TestToolsDenied_MultiToolScopeNamesOwningTool covers a Pruefer review
+// finding on #1775 (PR #1790): when two distinct tools are denied in the
+// same invocation, the "scoped to that one command, not to X" sentence must
+// name the specific tool the shown command belongs to (Bash), not the full
+// joined tool list ("Bash, Write") — the command is Bash's, so pairing it
+// with "not to Bash, Write" misstates which tool the scope sentence is
+// contrasting against. Reverting the scopeTool fix in
+// recordToolsDeniedDetection back to toolsJoined makes this fail (AC8).
+func TestToolsDenied_MultiToolScopeNamesOwningTool(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			return "", false, TokenUsage{}, &claudeToolsDeniedError{
+				ToolNames: []string{"Bash", "Write"},
+				Denials: []toolDenial{
+					{ToolName: "Bash", Command: "base_branch=$(gh pr view --json baseRefName)"},
+					{ToolName: "Write"},
+				},
+			}
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{Owner: "owner", Repo: "repo", ProjectNum: 1, User: "testuser", Token: "token",
+			MaxRetries: 2, MaxToolsDeniedRetries: 3, Stages: testStages()},
+		client, claude, wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 410, Title: "tools-denied multi-tool scope", Status: "Research", ItemID: "PVTI_410"}
+
+	if err := eng.processItem(context.Background(), board, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+
+	if len(client.addCommentCalls) != 1 {
+		t.Fatalf("expected exactly 1 comment, got %d", len(client.addCommentCalls))
+	}
+	body := client.addCommentCalls[0].body
+	// The header still names both denied tools.
+	if !strings.Contains(body, "Bash, Write") {
+		t.Errorf("expected comment header to name both denied tools, got: %s", body)
+	}
+	// But the per-command scope sentence must name only Bash — the tool the
+	// shown command actually belongs to — not the joined "Bash, Write" list.
+	if !strings.Contains(body, "not to Bash for the rest of the session") {
+		t.Errorf("expected scope sentence to name the owning tool (Bash) alone, got: %s", body)
+	}
+	if strings.Contains(body, "not to Bash, Write for the rest of the session") {
+		t.Errorf("scope sentence must not use the full joined tool list, got: %s", body)
+	}
+}
+
 // TestToolsDenied_DegradesToToolNameOnlyWithoutCommand covers AC2: when no
 // denial carries a decodable command (the classification only ever populated
 // ToolNames, exactly like every pre-#1775 test fixture), the comment must

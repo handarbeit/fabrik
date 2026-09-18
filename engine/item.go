@@ -1988,14 +1988,16 @@ func (e *Engine) recordToolsDeniedDetection(item gh.ProjectItem, stage *stages.S
 	if !hasLabel(item.Labels, "fabrik:tools-denied") {
 		toolsJoined := strings.Join(toolNames, ", ")
 		commandDetail := ""
-		if _, command, ok := firstToolsDeniedCommand(denials); ok {
+		scopeTool := toolsJoined
+		if toolName, command, ok := firstToolsDeniedCommand(denials); ok {
 			commandDetail = fmt.Sprintf(" (command: `%s`)", command)
+			scopeTool = toolName
 		}
 		comment := fmt.Sprintf(
 			"🏭 **Fabrik — tool permission denied**\n\nStage **%s** had a tool call denied by the CLI's permission configuration: **%s**%s. This is not a stage failure — it does not count against `max_retries`.\n\n"+
 				"The denial is scoped to that one command, not to %s for the rest of the session — other calls to the same tool are unaffected. Re-running the step as separate, simpler commands (or adding a matching `allowed_tools` rule) usually resolves it; `fabrik:unrestricted` is available as a last resort, but it removes all tool restrictions, not just the denied one.\n\n"+
 				"Fabrik will keep retrying (bounded independently, up to %d consecutive detections) before pausing for human intervention. The `fabrik:tools-denied` label clears automatically on the next invocation not classified this way.",
-			stage.Name, toolsJoined, commandDetail, toolsJoined, e.cfg.MaxToolsDeniedRetries,
+			stage.Name, toolsJoined, commandDetail, scopeTool, e.cfg.MaxToolsDeniedRetries,
 		)
 		e.postItemComment(item, comment, false)
 		e.addLabel(item, "fabrik:tools-denied")
@@ -2033,7 +2035,7 @@ func (e *Engine) pauseForToolsDeniedLimit(item gh.ProjectItem, stage *stages.Sta
 	comment := fmt.Sprintf(
 		"🏭 **Fabrik — tool permission denial limit reached**\n\nStage **%s** has had a tool call denied by the CLI's permission configuration (%s)%s %d consecutive time(s), which has reached the configured limit of %d "+
 			"(override with `--max-tools-denied-retries` or `FABRIK_MAX_TOOLS_DENIED_RETRIES`).\n\n"+
-			"This is not a stage failure. Each denial is scoped to the specific command that was denied, not the tool for the rest of the session — but %d consecutive detections suggests the same command shape keeps recurring. "+
+			"This is not a stage failure. Each denial is scoped to the specific command that was denied, not to that tool for the rest of the session — but %d consecutive detections suggests the same command shape keeps recurring. "+
 			"Try re-running the step as separate, simpler commands, or add a matching `allowed_tools` rule for the command that keeps getting denied. "+
 			"If neither resolves it, add the `fabrik:unrestricted` label as a last resort — it removes all tool restrictions for future invocations "+
 			"(caveat: it bypasses the default tool allowlist entirely, not just the denied tool, so use it deliberately).\n\n"+
