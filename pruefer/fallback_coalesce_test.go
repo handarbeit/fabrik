@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/handarbeit/fabrik/pruefer/events"
+	"github.com/handarbeit/fabrik/internal/events"
 )
 
 // blockingEventSource stands in for a live EventSource: it never returns until

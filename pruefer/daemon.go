@@ -12,8 +12,8 @@ import (
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/events"
 	"github.com/handarbeit/fabrik/internal/githubauth"
-	"github.com/handarbeit/fabrik/pruefer/events"
 	ptui "github.com/handarbeit/fabrik/pruefer/tui"
 )
 

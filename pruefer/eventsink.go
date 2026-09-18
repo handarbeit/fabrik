@@ -4,7 +4,7 @@ import (
 	"context"
 	"strconv"
 
-	"github.com/handarbeit/fabrik/pruefer/events"
+	"github.com/handarbeit/fabrik/internal/events"
 )
 
 // ReviewFromEvent resolves owner/repo to its owner-scoped GitHubLister

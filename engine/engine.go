@@ -72,14 +72,31 @@ type Config struct {
 	Webhooks                  bool
 	WebhookPort               int
 	WebhookEvents             []string
-	ProjectStatusPollSeconds  int           // Layer 2 status-only sweep cadence in seconds; default 15 s (gate runs every poll cycle; field retained for config compatibility)
-	JanitorIntervalHours      int           // Periodic worktree janitor cadence in hours; 0 disables the janitor (default 1)
-	LogRetentionDays          int           // Log files older than this many days are pruned; 0 disables age-based pruning (default 14)
-	LogMaxBytes               int64         // Total size cap for .fabrik/logs/; oldest files deleted first after age prune; 0 disables (default 2 GiB)
-	SessionRetentionDays      int           // .session files older than this many days are pruned; 0 disables age-based pruning (default 14)
-	ArchiveAfter              time.Duration // Grace period since stage:<Done>:complete was applied before a Done item is archived (default 168h = 1 week; ADR-068)
-	ArchiveDone               string        // "on" (default) or "off" to fully disable Done-item auto-archival (also FABRIK_ARCHIVE_DONE; ADR-068)
-	GHESHost                  string        // GitHub Enterprise Server hostname (e.g. "github.example.com"); "" (default) = github.com, byte-identical to pre-GHES behavior (also FABRIK_GHES_HOST; ADR-1391)
+	// EventSource selects the ingestion transport: EventSourcePoll (default,
+	// "" or "poll") or EventSourceHookdeck ("hookdeck"). Deliberately a
+	// separate axis from Webhooks above — event_source: hookdeck is an
+	// App-auth-only opt-in that can never be combined with Webhooks (refused
+	// at startup by RefuseHookdeckWithWebhooks) or used without App auth
+	// (refused by RefuseHookdeckWithoutGitHubApp), and #1752's
+	// RefuseWebhooksWithGitHubApp never has to know this field exists. See
+	// engine/github_app_auth.go and adrs/1142-hookdeck-ingestion-for-app-auth.md.
+	EventSource string
+	// HookdeckAPIKeyEnv/HookdeckWebhookSecretEnv each name an environment
+	// variable holding the actual secret — indirection, not the secret
+	// itself — mirroring pruefer/config.go's hookdeck.api_key_env /
+	// hookdeck.webhook_secret_env convention. Only consulted when
+	// EventSource == EventSourceHookdeck; empty means use
+	// DefaultHookdeckAPIKeyEnv / DefaultHookdeckWebhookSecretEnv.
+	HookdeckAPIKeyEnv        string
+	HookdeckWebhookSecretEnv string
+	ProjectStatusPollSeconds int           // Layer 2 status-only sweep cadence in seconds; default 15 s (gate runs every poll cycle; field retained for config compatibility)
+	JanitorIntervalHours     int           // Periodic worktree janitor cadence in hours; 0 disables the janitor (default 1)
+	LogRetentionDays         int           // Log files older than this many days are pruned; 0 disables age-based pruning (default 14)
+	LogMaxBytes              int64         // Total size cap for .fabrik/logs/; oldest files deleted first after age prune; 0 disables (default 2 GiB)
+	SessionRetentionDays     int           // .session files older than this many days are pruned; 0 disables age-based pruning (default 14)
+	ArchiveAfter             time.Duration // Grace period since stage:<Done>:complete was applied before a Done item is archived (default 168h = 1 week; ADR-068)
+	ArchiveDone              string        // "on" (default) or "off" to fully disable Done-item auto-archival (also FABRIK_ARCHIVE_DONE; ADR-068)
+	GHESHost                 string        // GitHub Enterprise Server hostname (e.g. "github.example.com"); "" (default) = github.com, byte-identical to pre-GHES behavior (also FABRIK_GHES_HOST; ADR-1391)
 	// GitHubAppID, GitHubAppPrivateKeyPath, and GitHubAppInstallationID
 	// together configure a GitHub App installation as a second, co-equal
 	// authentication path alongside Token (#1713) — compat-mode only,
@@ -109,6 +126,25 @@ type Config struct {
 	ReadyCh chan struct{}
 }
 
+// EventSource values and defaults for the Hookdeck (App-auth-only) ingestion
+// transport (#1142). Mirrors pruefer/config.go's own EventSourcePoll/
+// EventSourceHookdeck/Default* constants by name and shape — the same
+// indirection (a config field naming an env var, not holding the secret
+// itself) — so an operator already running Pruefer with Hookdeck recognizes
+// this immediately. DefaultHookdeckWebhookSecretEnv is FABRIK_-prefixed,
+// since it names Fabrik's own GitHub App webhook secret, not a value
+// Pruefer's process also reads; DefaultHookdeckAPIKeyEnv reuses Hookdeck's
+// own conventional env var name unprefixed, matching Pruefer's own
+// default — see adrs/1142-hookdeck-ingestion-for-app-auth.md.
+const (
+	EventSourcePoll     = "poll"
+	EventSourceHookdeck = "hookdeck"
+
+	DefaultEventSource              = EventSourcePoll
+	DefaultHookdeckAPIKeyEnv        = "HOOKDECK_API_KEY"
+	DefaultHookdeckWebhookSecretEnv = "FABRIK_GITHUB_WEBHOOK_SECRET"
+)
+
 // cloneCall coordinates concurrent bare-clone attempts for the same repo.
 // The first caller to store one in cloneInFlight performs the clone; subsequent
 // callers wait on done and share the result.
@@ -132,7 +168,7 @@ type Engine struct {
 	cfg                   Config
 	client                GitHubClient
 	releaseClient         GitHubClient           // always github.com, regardless of cfg.GHESHost — Fabrik's own self-upgrade release lives on github.com/handarbeit/fabrik, never on a customer's GHES instance (see checkReleaseUpgrade). Equal to client whenever no GHES host is configured (including all NewWithDeps-constructed test engines), so this is a no-op on the default path.
-	hostClient            *gh.Client             // same host as client, concretely typed; used only by the GHES-only startup version-floor preflight (checkGHESVersionFloor), which needs FetchInstalledVersion and isn't worth adding to the GitHubClient interface for one startup-only call. nil outside New() (e.g. NewWithDeps-constructed test engines); checkGHESVersionFloor is a standalone function tested directly against a *gh.Client, not through the Engine.
+	hostClient            *gh.Client             // same host as client, concretely typed; used by the GHES-only startup version-floor preflight (checkGHESVersionFloor), which needs FetchInstalledVersion and isn't worth adding to the GitHubClient interface for one startup-only call, and by checkHookdeckInstallationCoverage (#1142), which needs a live installation token via Token() for the R5 App-mode coverage check. nil outside New() (e.g. NewWithDeps-constructed test engines); checkGHESVersionFloor is a standalone function tested directly against a *gh.Client, not through the Engine.
 	ghAppAuth             *githubauth.Reconciler // non-nil only when Config.GitHubApp* fields configure App-auth (#1713); nil in PAT mode (the default). Run() starts and, on shutdown, joins its refresh-loop goroutines when non-nil — see poll.go's Run().
 	readClient            boardcache.ReadClient  // read-only GitHub calls; may be CacheImpl or GitHubAdapter
 	claude                ClaudeInvoker
@@ -226,7 +262,7 @@ type Engine struct {
 	events                      chan tui.Event                // nil in tests / plain-text mode; TUI goroutine consumes
 	logFile                     *os.File                      // persistent log file at .fabrik/fabrik.log; nil if not opened
 	logMu                       sync.Mutex                    // serializes concurrent writes to logFile
-	webhookMgr                  *webhookManager               // nil when webhooks are disabled
+	webhookMgr                  eventIngestionManager         // nil when no event-ingestion transport is active (#1142)
 	// heartbeatIntervalOverride overrides the package-level heartbeatInterval constant
 	// when non-zero. Used by tests to reduce the heartbeat period to sub-millisecond.
 	heartbeatIntervalOverride time.Duration
@@ -354,6 +390,43 @@ func New(cfg Config) (*Engine, error) {
 
 	worktreeRoot := filepath.Join(fabrikDir, ".fabrik", "worktrees")
 	sharedStore := itemstate.NewStore(nil)
+
+	// validateGitHubAppConfig runs first, ahead of the event_source:
+	// hookdeck checks below: it is the more specific diagnosis for a
+	// partially-configured GitHub App (e.g. github_app_id set with no
+	// private key), naming exactly which field is missing. Without this
+	// ordering, a partial App config combined with event_source: hookdeck
+	// would instead fail on RefuseHookdeckWithoutGitHubApp's coarser
+	// "requires GitHub App authentication" message — technically correct
+	// (gitHubAppAuthConfigured requires all three fields) but less
+	// actionable than naming the specific missing field (PR review
+	// finding). resolveGitHubAppAuth calls validateGitHubAppConfig again
+	// itself a few lines below; calling it here too is intentionally
+	// redundant — cheap, local, and returns the identical error, so the
+	// only user-visible effect is which of the two checks reports first.
+	if err := validateGitHubAppConfig(cfg); err != nil {
+		return nil, err
+	}
+
+	// event_source: hookdeck (#1142) validation runs here, alongside (not
+	// inside) resolveGitHubAppAuth's own App-auth-specific checks below —
+	// deliberately a separate call so RefuseWebhooksWithGitHubApp (#1752)
+	// never has to know EventSource exists, and vice versa. Both refusals
+	// are cheap, local config checks, so they run before any network call.
+	// RefuseUnknownEventSource runs first: a typo'd value must fail loud
+	// here rather than silently comparing unequal to EventSourceHookdeck in
+	// every check below and in poll.go's dispatch, which would otherwise
+	// degrade to plain polling with no error and no log message (PR review
+	// finding).
+	if err := RefuseUnknownEventSource(cfg.EventSource); err != nil {
+		return nil, err
+	}
+	if err := RefuseHookdeckWithoutGitHubApp(cfg.EventSource, gitHubAppAuthConfigured(cfg)); err != nil {
+		return nil, err
+	}
+	if err := RefuseHookdeckWithWebhooks(cfg.EventSource, cfg.Webhooks); err != nil {
+		return nil, err
+	}
 
 	// GitHub App auth (#1713): resolved before the ordinary PAT-based client
 	// construction below, since a configured App-auth client takes its

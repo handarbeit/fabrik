@@ -1,10 +1,17 @@
 // Package events defines the transport-agnostic boundary between a webhook
-// source and Pruefer's event-driven review dispatch: the normalized
-// GitHubEvent type, the EventSource/EventSink interfaces, and shared
-// per-webhook mechanics (signature verification, delivery-ID dedupe) that
-// any GitHub-webhook-forwarding transport can reuse. No transport-specific
-// concept (e.g. Hookdeck) may appear here or leak into pruefer's
+// source and a consumer's event-driven dispatch: the normalized GitHubEvent
+// type, the EventSource/EventSink interfaces, and shared per-webhook
+// mechanics (signature verification, delivery-ID dedupe) that any
+// GitHub-webhook-forwarding transport can reuse. No transport-specific
+// concept (e.g. Hookdeck) may appear here or leak into a caller's own
 // review/domain code — see adrs/1254-*.md.
+//
+// Originally built inside pruefer/events as a Pruefer-only package (per
+// ADR-1254's "de-risk before touching Fabrik's own webhook infrastructure"
+// intent) and extracted here in #1142 so the engine can consume it too,
+// following the internal/selfupgrade and internal/githubauth extraction
+// precedent: callers supply their own identity, config, and logging — this
+// package hardcodes nothing about either caller. See adrs/1142-*.md.
 package events
 
 import (

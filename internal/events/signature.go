@@ -14,9 +14,15 @@ import (
 // API-key-scoped session) is not a substitute for verifying the payload
 // actually came from GitHub.
 //
-// Implemented independently from engine/webhook.go's verifySignature, not
-// imported from it — see adrs/1113-pruefer-v1-architecture.md's "no shared
-// Go imports with engine" constraint.
+// Historical note: before #1142's extraction, this logic was independently
+// duplicated in engine/webhook.go's own verifySignature, kept deliberately
+// unshared per adrs/1113-pruefer-v1-architecture.md's "no shared Go imports
+// with engine" constraint. That constraint was never absolute — it always
+// meant "no direct pruefer<->engine imports," and internal/selfupgrade and
+// internal/githubauth had already established the "share via internal/,
+// import neither package from the other" pattern. engine/webhook.go now
+// calls this function directly rather than carrying its own copy; see
+// adrs/1142-hookdeck-ingestion-for-app-auth.md.
 func VerifySignature(body []byte, sig, secret string) bool {
 	if !strings.HasPrefix(sig, "sha256=") {
 		return false

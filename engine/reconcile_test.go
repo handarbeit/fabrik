@@ -9,7 +9,9 @@ import (
 
 	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/events"
 	"github.com/handarbeit/fabrik/internal/itemstate"
+	"github.com/handarbeit/fabrik/tui"
 )
 
 // ---------------------------------------------------------------------------
@@ -170,5 +172,101 @@ func TestReconcileLoop_RunsWithoutWebhookManager(t *testing.T) {
 			t.Fatalf("reconcileLoop did not sync fabrik:awaiting-ci within 2s (nil wm); labels = %v", labels)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestTransitionMgrHealthState_HookdeckDriftFreeReconcileDoesNotMaskSignatureDrift
+// is the direct regression test for the PR-review-found bug (#1142): before
+// the fix, reconcileLoop's "no cache drift found" signal called
+// hookdeckManager.transitionHealthState(Healthy) directly, unconditionally
+// overriding an active signature-drift episode (R4, ADR-1563) — silently
+// clearing the exact misconfigured-secret warning that mechanism exists to
+// surface. transitionMgrHealthState must route a "healthy" hint through
+// reconcileHint/recomputeHealthState instead, which re-derives the state
+// from hm's own connHealth/sigDriftActive rather than accepting reconcile's
+// signal as an unconditional override.
+func TestTransitionMgrHealthState_HookdeckDriftFreeReconcileDoesNotMaskSignatureDrift(t *testing.T) {
+	hm := newHookdeckManager(
+		func(int, string, string, ...any) {},
+		func(tui.Event) {},
+		nil, nil, "key", "secret",
+	)
+	// Transport is connected...
+	hm.handleHealth(events.HealthEvent{State: events.HealthConnected})
+	if !hm.IsHealthyOrStartingUp() {
+		t.Fatal("expected healthy after HealthConnected")
+	}
+	// ...but an active signature-drift episode forces Unhealthy.
+	hm.handleSignatureDrift(true)
+	if hm.IsHealthyOrStartingUp() {
+		t.Fatal("expected unhealthy while signature drift is active")
+	}
+
+	// reconcileLoop's own "no cache drift found" signal must NOT clear the
+	// signature-drift-forced Unhealthy state.
+	transitionMgrHealthState(hm, WebhookStreamHealthy, "")
+	if hm.IsHealthyOrStartingUp() {
+		t.Error("transitionMgrHealthState(Healthy) from reconcileLoop must not mask an active signature-drift episode")
+	}
+
+	// Once the drift episode clears, the same hint correctly reports Healthy
+	// again (connHealth was never lost).
+	hm.handleSignatureDrift(false)
+	transitionMgrHealthState(hm, WebhookStreamHealthy, "")
+	if !hm.IsHealthyOrStartingUp() {
+		t.Error("transitionMgrHealthState(Healthy) after drift recovery should report healthy again")
+	}
+
+	// A drift-found hint (cache drift, not signature drift) is always safe
+	// to apply directly — it only escalates toward Unhealthy.
+	transitionMgrHealthState(hm, WebhookStreamUnhealthy, "3 item(s) drifted")
+	if hm.IsHealthyOrStartingUp() {
+		t.Error("transitionMgrHealthState(Unhealthy) must report unhealthy")
+	}
+}
+
+// TestTransitionMgrHealthState_HookdeckCacheDriftSurvivesConcurrentHealthEvent
+// is the direct regression test for the PR-review-found bug (third pass,
+// #1142): before this fix, reconcileLoop's "cache drift found" signal set
+// hm.state to Unhealthy via a one-shot transitionHealthState call with no
+// persistent backing flag — so a connectivity event firing while
+// cacheImpl.Reconcile was still running (handleHealth/handleSignatureDrift,
+// which recompute purely from connHealth/sigDriftActive) could silently
+// clear the drift-in-progress Unhealthy state before the repair actually
+// completed. reconcileHint must record the condition as sticky
+// (cacheDriftActive) so recomputeHealthState continues to honor it
+// regardless of what triggered the recompute.
+func TestTransitionMgrHealthState_HookdeckCacheDriftSurvivesConcurrentHealthEvent(t *testing.T) {
+	hm := newHookdeckManager(
+		func(int, string, string, ...any) {},
+		func(tui.Event) {},
+		nil, nil, "key", "secret",
+	)
+	hm.handleHealth(events.HealthEvent{State: events.HealthConnected})
+	if !hm.IsHealthyOrStartingUp() {
+		t.Fatal("expected healthy after HealthConnected")
+	}
+
+	// reconcileLoop finds cache drift and reports it — this must persist as
+	// Unhealthy for the duration of the (simulated) repair, not just for
+	// the instant this call runs.
+	transitionMgrHealthState(hm, WebhookStreamUnhealthy, "5 item(s) drifted")
+	if hm.IsHealthyOrStartingUp() {
+		t.Fatal("expected unhealthy immediately after a drift-found hint")
+	}
+
+	// A connectivity event fires while the (simulated) cache repair is
+	// still in flight — e.g. a brief reconnect blip unrelated to the cache
+	// drift. This must NOT clear the drift-in-progress Unhealthy state.
+	hm.handleHealth(events.HealthEvent{State: events.HealthConnected})
+	if hm.IsHealthyOrStartingUp() {
+		t.Error("a concurrent HealthConnected event must not clear an in-progress cache-drift Unhealthy state")
+	}
+
+	// Once the repair completes, reconcileLoop's "drift reconciled" hint
+	// correctly clears it.
+	transitionMgrHealthState(hm, WebhookStreamHealthy, "drift reconciled")
+	if !hm.IsHealthyOrStartingUp() {
+		t.Error("transitionMgrHealthState(Healthy, \"drift reconciled\") should clear the cache-drift condition")
 	}
 }

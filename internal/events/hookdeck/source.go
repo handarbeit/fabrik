@@ -13,7 +13,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/handarbeit/fabrik/pruefer/events"
+	"github.com/handarbeit/fabrik/internal/events"
 )
 
 const (

@@ -233,6 +233,37 @@ func TestNew(t *testing.T) {
 	}
 }
 
+// TestNew_PartialGitHubAppConfigWithHookdeckReportsSpecificError verifies
+// the ordering PR review flagged on #1142: validateGitHubAppConfig must run
+// before RefuseHookdeckWithoutGitHubApp, so a partially-configured GitHub
+// App (here, github_app_id set with no private key or installation ID)
+// combined with event_source: hookdeck fails with validateGitHubAppConfig's
+// specific "missing X" diagnosis rather than RefuseHookdeckWithoutGitHubApp's
+// coarser "requires GitHub App authentication" message — both are correct
+// (gitHubAppAuthConfigured requires all three fields), but only one names
+// the actual fix.
+func TestNew_PartialGitHubAppConfigWithHookdeckReportsSpecificError(t *testing.T) {
+	skipIfNoGit(t)
+	origSupported := claudeNameFlagSupported
+	defer func() { claudeNameFlagSupported = origSupported }()
+	t.Setenv("PATH", t.TempDir())
+
+	cfg := Config{
+		Owner:       "o",
+		Repo:        "r",
+		Token:       "tok",
+		EventSource: EventSourceHookdeck,
+		GitHubAppID: 123, // private key path and installation ID deliberately left unset
+	}
+	_, err := New(cfg)
+	if err == nil {
+		t.Fatal("New: want error for partial GitHub App config, got nil")
+	}
+	if !strings.Contains(err.Error(), "partially configured") {
+		t.Errorf("New err = %q, want validateGitHubAppConfig's specific diagnosis (\"partially configured\") to win over RefuseHookdeckWithoutGitHubApp's coarser message", err.Error())
+	}
+}
+
 func TestNew_WiresMergeStrategy(t *testing.T) {
 	skipIfNoGit(t)
 	// See TestNew: save/restore claudeNameFlagSupported and isolate PATH so

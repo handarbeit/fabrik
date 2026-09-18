@@ -10,8 +10,8 @@ import (
 
 	"github.com/handarbeit/fabrik/config"
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/events/hookdeck"
 	"github.com/handarbeit/fabrik/internal/githubauth"
-	"github.com/handarbeit/fabrik/pruefer/events/hookdeck"
 )
 
 // Execute is Pruefer's entry point: loads .env, resolves configuration,

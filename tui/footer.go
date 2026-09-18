@@ -36,6 +36,15 @@ type FooterComponent struct {
 	now           time.Time
 	webhookState  string         // "", "starting_up", "healthy", "unhealthy"
 	webhookCounts map[string]int // per-type event counts
+	// webhookCoverageNote mirrors WebhookStatusEvent.CoverageNote (#1142) —
+	// distinct from webhookState/connectivity: a stream can be reported
+	// healthy while covering only a fraction of the managed repos (gh
+	// webhook forward's singular --repo flag, or an App installation
+	// missing granted repos under the Hookdeck transport). Rendered next to
+	// the health indicator so this never goes silent in the TUI the way
+	// #1142 was originally filed about — see docs/USER_GUIDE.md's "Never
+	// silent about coverage gaps" framing.
+	webhookCoverageNote string
 
 	// GraphQL burn-rate estimation state (#1510). haveSample/lastSample track
 	// the most recent PollCompletedEvent observation; haveBurnRate/burnRatePerMin
@@ -63,6 +72,13 @@ func (f FooterComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
 		f.webhookState = ev.State
 		if ev.EventCounts != nil {
 			f.webhookCounts = ev.EventCounts
+		}
+		// nil means this event's origin doesn't track coverage at all (e.g.
+		// the cache-pause/resume observer in poll.go) — leave the
+		// previously-known note alone rather than wiping an active warning
+		// on an unrelated pause/resume transition (#1142 PR review finding).
+		if ev.CoverageNote != nil {
+			f.webhookCoverageNote = *ev.CoverageNote
 		}
 	}
 	return f, nil
@@ -171,16 +187,25 @@ func (f FooterComponent) webhookIndicator() string {
 	for _, n := range f.webhookCounts {
 		total += n
 	}
+	var base string
 	switch f.webhookState {
 	case "healthy":
-		return successStyle.Render(fmt.Sprintf("● webhook (%d)", total))
+		base = successStyle.Render(fmt.Sprintf("● webhook (%d)", total))
 	case "starting_up":
-		return infoStyle.Render(fmt.Sprintf("○ webhook (%d)", total))
+		base = infoStyle.Render(fmt.Sprintf("○ webhook (%d)", total))
 	case "unhealthy":
-		return activeStyle.Render(fmt.Sprintf("◌ webhook (%d)", total))
+		base = activeStyle.Render(fmt.Sprintf("◌ webhook (%d)", total))
 	default:
 		return ""
 	}
+	// A stream can report connectivity-healthy while covering only a
+	// fraction of the managed repos (#1142) — always rendered in the
+	// warning color regardless of base's own health-derived color, since a
+	// coverage gap is a warning independent of connectivity state.
+	if f.webhookCoverageNote != "" {
+		base += " " + activeStyle.Render(fmt.Sprintf("[%s]", f.webhookCoverageNote))
+	}
+	return base
 }
 
 // supportsOSC8 returns true when the terminal is known to support OSC 8 hyperlinks.

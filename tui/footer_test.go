@@ -544,3 +544,93 @@ func TestViewFooter_NoAccountUnchanged(t *testing.T) {
 		t.Errorf("footer overflowed: %q", ansi.Strip(got))
 	}
 }
+
+// TestWebhookIndicator_CoverageNoteRendered verifies the R5 coverage note
+// (#1142) is surfaced next to the webhook health indicator, even when the
+// underlying connectivity state is "healthy" — the exact case this issue
+// is about: a stream can be reported healthy while covering only a
+// fraction of the managed repos, and that gap must never be silent in the
+// TUI, not just in the log line.
+func TestWebhookIndicator_CoverageNoteRendered(t *testing.T) {
+	f := FooterComponent{
+		webhookState:        "healthy",
+		webhookCounts:       map[string]int{"issues": 5},
+		webhookCoverageNote: "partial: 1/3 repos (gh webhook forward)",
+	}
+	got := ansi.Strip(f.webhookIndicator())
+	if !strings.Contains(got, "webhook (5)") {
+		t.Errorf("webhookIndicator() = %q, want it to contain the health indicator", got)
+	}
+	if !strings.Contains(got, "partial: 1/3 repos (gh webhook forward)") {
+		t.Errorf("webhookIndicator() = %q, want it to contain the coverage note", got)
+	}
+}
+
+// TestWebhookIndicator_NoCoverageNoteWhenEmpty verifies full coverage (the
+// common case) renders no bracketed note at all.
+func TestWebhookIndicator_NoCoverageNoteWhenEmpty(t *testing.T) {
+	f := FooterComponent{
+		webhookState:  "healthy",
+		webhookCounts: map[string]int{"issues": 5},
+	}
+	got := ansi.Strip(f.webhookIndicator())
+	if strings.Contains(got, "[") {
+		t.Errorf("webhookIndicator() = %q, want no bracketed coverage note when CoverageNote is empty", got)
+	}
+}
+
+// stringPtr returns a pointer to s, for constructing WebhookStatusEvent
+// literals in tests (CoverageNote is *string — see its doc comment for why).
+func stringPtr(s string) *string { return &s }
+
+// TestFooterUpdate_WebhookStatusEventSetsCoverageNote verifies Update wires
+// WebhookStatusEvent.CoverageNote into the field webhookIndicator reads —
+// the actual R5 wiring gap this issue's PR review found: CoverageNote was
+// added to the event and populated by both ingestion transports, but never
+// read by FooterComponent.Update, so it never reached the rendered TUI.
+func TestFooterUpdate_WebhookStatusEventSetsCoverageNote(t *testing.T) {
+	f := FooterComponent{}
+	updated, _ := f.Update(WebhookStatusEvent{
+		State:        "healthy",
+		EventCounts:  map[string]int{"issues": 1},
+		CoverageNote: stringPtr("hook missing: 1 repo(s) (a/one)"),
+	})
+	fc := updated.(FooterComponent)
+	if fc.webhookCoverageNote != "hook missing: 1 repo(s) (a/one)" {
+		t.Errorf("webhookCoverageNote = %q after Update, want the event's CoverageNote", fc.webhookCoverageNote)
+	}
+
+	// A subsequent event that explicitly confirms full coverage (a non-nil
+	// pointer to "") must clear the note.
+	cleared, _ := fc.Update(WebhookStatusEvent{State: "healthy", EventCounts: map[string]int{"issues": 2}, CoverageNote: stringPtr("")})
+	fc2 := cleared.(FooterComponent)
+	if fc2.webhookCoverageNote != "" {
+		t.Errorf("webhookCoverageNote = %q after an explicit empty-note event, want empty (cleared)", fc2.webhookCoverageNote)
+	}
+}
+
+// TestFooterUpdate_NilCoverageNotePreservesExisting is the direct regression
+// test for the PR-review-found bug: an event whose origin doesn't track
+// coverage at all (nil CoverageNote — e.g. poll.go's cache-pause/resume
+// observer) must never wipe an active coverage warning. Before the fix,
+// Update copied ev.CoverageNote unconditionally (unlike the EventCounts
+// nil-guard immediately above it in the same switch case), so any
+// unrelated WebhookStatusEvent — most commonly the pause/resume event
+// reconcileLoop's own cache-drift handling fires in the very same tick
+// that just recomputed the real coverage note — silently cleared it.
+func TestFooterUpdate_NilCoverageNotePreservesExisting(t *testing.T) {
+	f := FooterComponent{}
+	withNote, _ := f.Update(WebhookStatusEvent{
+		State:        "healthy",
+		CoverageNote: stringPtr("installation missing: 1 repo(s) (b/two)"),
+	})
+	fc := withNote.(FooterComponent)
+
+	// Simulate an unrelated pause/resume WebhookStatusEvent that carries no
+	// coverage information at all (nil, not a pointer to "").
+	unrelated, _ := fc.Update(WebhookStatusEvent{State: "unhealthy"})
+	fc2 := unrelated.(FooterComponent)
+	if fc2.webhookCoverageNote != "installation missing: 1 repo(s) (b/two)" {
+		t.Errorf("webhookCoverageNote = %q after an unrelated nil-CoverageNote event, want the note preserved", fc2.webhookCoverageNote)
+	}
+}

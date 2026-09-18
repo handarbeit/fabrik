@@ -78,6 +78,7 @@ type GitHubClient interface {
 	SeedLabels(owner, repo string, stageNames []string, lockedUser string) error
 	RateLimitStats() (rest, graphql gh.RateLimitStats)
 	DeleteForwardingHooks(owner, repo string) error
+	HasForwardingHook(owner, repo string) (bool, error)
 	FetchProjectItemStatus(itemID string) (string, error)
 	FetchProjectItemStatusBatch(projectID string) (map[string]string, error)
 	FetchProjectUpdatedAt(projectID string) (time.Time, error)
