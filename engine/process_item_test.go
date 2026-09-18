@@ -30,6 +30,14 @@ import (
 // exits via the real force-quit os.Exit(1) path when sent two SIGINT/SIGTERM
 // signals — see TestForceQuit_DuringCleanStop_AC4, which cannot exercise
 // this path in-process because it terminates the test binary itself.
+//
+// A third subprocess mode (FABRIK_TEST_SENTINEL_HELPER, #1779) just sleeps
+// until killed. sentinel_probe_unix_test.go re-execs this same test binary
+// with an arbitrary extra argv tail (a fake "--name <sentinel>" pair, plus
+// padding tokens) so probeSentinelLive has a real, ps-visible process to find
+// — os.Args is never parsed by the flag/testing machinery on this path (we
+// os.Exit before m.Run() does that), so the extra tokens survive into the
+// process's argv exactly as passed.
 func TestMain(m *testing.M) {
 	if sentinel := os.Getenv("FABRIK_TEST_SIGINT_SENTINEL"); sentinel != "" {
 		go io.Copy(io.Discard, os.Stdin)
@@ -42,6 +50,16 @@ func TestMain(m *testing.M) {
 	if os.Getenv("FABRIK_TEST_FORCE_QUIT_HELPER") == "1" {
 		runForceQuitHelperProcess()
 		os.Exit(4) // runForceQuitHelperProcess always exits itself; unreachable in practice
+	}
+	if os.Getenv("FABRIK_TEST_SENTINEL_HELPER") == "1" {
+		// A bare "select {}" here would trip Go's runtime deadlock detector
+		// (all goroutines asleep, nothing left that could ever unblock it) —
+		// unlike a signal-wait, which the runtime treats as externally
+		// unblockable and never flags. Loop-sleep instead; the test kills
+		// this process explicitly via SIGKILL.
+		for {
+			time.Sleep(time.Hour)
+		}
 	}
 	lockVerifyDelay = 0
 	os.Exit(m.Run())
