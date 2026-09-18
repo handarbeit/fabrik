@@ -212,6 +212,16 @@ A regeneration failure (non-zero exit, inability to stage, conflict markers stil
 
 **Landing sequence (FR-1 through FR-5):**
 
+**Pre-FR-1 — base sanity check (#1773).** Immediately before FR-1's `if integrationPR != nil {
+reuse } else { create }` split — covering both the open and reuse branches uniformly —
+`landMergeTrainBatch` (and, at its own equivalent `CreatePR` call, `landSingleton`) calls
+`refuseIfBaseContradictsMembers`. On the default-base partition only, it reads each member's
+`base:<branch>` label **live** (never the cached snapshot) and refuses to open or reuse the PR if
+any member's live label declares a different base, or if the live read itself errors — leaving
+members in Queued rather than landing against a base that contradicts what they declare. See §6.23
+for the full mechanism; this is a no-op on any non-default-base partition and on a healthy
+default-base batch.
+
 1. **FR-1 — Open integration PR**: `landMergeTrainBatch` calls `CreatePR` (non-draft) with title `[merge-train] batch: #N1, #N2, …` and a body containing the idempotency marker `<!-- fabrik-merge-train-batch -->`. The body lists all batch members (issue number + title) **and a `Closes #N` line per member**. The member PRs are closed-not-merged (the change lands via this integration PR), so a member PR's own `Closes #N` never fires — the integration PR's `Closes #N` is what restores issue↔landing-PR connectivity and auto-closes each member issue when the integration PR merges **into the default branch**. (For a non-default base, or on auto-close lag, FR-3's explicit `CloseIssue` is the fallback.) The same `Closes #N` lines are carried on the trial *draft CI PR* body from assembly, since that draft PR IS the landing PR when reused (FR-5).
 
 2. **FR-2 — Poll and merge**: `pollForMergeable` polls the integration PR with the same 30s interval as `pollTrainCI`, using `FetchPRDetails` (mergeable_state **and** head SHA in one call) and `classifyLandingCI` (ADR-1441, #1441) — the merge-train landing counterpart to `pollTrainCI`'s own check-run-aware classification, built from the same shared primitives (`gh.ClassifyCheckRuns`, `e.classifyRequiredContexts`, `describeCheckRuns`, `gh.MergeableStateAccepted`). `mergeable_state == "dirty"` rejects immediately with no check-run fetch; otherwise check runs on the head SHA are fetched and classified: a confirmed failure or required-context failure rejects; a check still pending keeps polling; an all-clear (plus required contexts satisfied) lands. Only with **zero check runs at all** does an accepted `mergeable_state` (`clean`/`unstable`, `gh.MergeableStateAccepted`) become load-bearing by itself — mirroring `pollTrainCI`'s own zero-check-runs fallback. Before ADR-1441, this step accepted `mergeable_state ∈ {"clean", "unstable"}` outright with no check-run awareness at all — the merge-train landing counterpart to the single-PR advance gate's pre-ADR-1441 shortcut, left unfixed by ADR-1153 and explicitly flagged there as a "candidate fast-follow." Once `classifyLandingCI` judges the PR landable, `MergePR` is called (no admin bypass). `MergePR` itself independently re-checks `mergeable_state` against the `clean`/`unstable` allowlist before merging (see "`MergePR`'s own CI precondition (ADR-933)" in §5, after §5.3) — normally a no-op here since `pollForMergeable` already judged the PR acceptable, but it closes a narrow TOCTOU window if the state flips between the two checks; this merge-side check is deliberately unchanged by ADR-1441 (its R3 decision: the merge path continues to defer to branch protection alone, per ADR-072's operator note). On timeout, a warning comment is posted on the first batch member and the function returns without advancing members (they remain in Queued for the next train cycle). On merge API failure — including `gh.ErrNotMergeableCI` from that TOCTOU window — an error comment is posted and landing aborts, leaving members in Queued to retry on the next train cycle; this is not escalated to a pause and does not touch `fabrik:rebase-needed`.
@@ -2814,6 +2824,93 @@ On a fetch error, `item.Labels` is left untouched and a warning naming the item 
 **Precedent:** this is the same class of fix as `checkDependencies`'s live `BlockedBy` re-read (ADR-1419) and `reviewGateBlocksLanding`'s live review-state re-read (ADR-1216) — a decision with real consequences (advance, or at Validate, merge) must not be made on a cached snapshot that a concurrent operator action can invalidate.
 
 **References:** [ADR-1769: Live Re-Read of Autonomy Labels at Both Advance Decision Points](../adrs/1769-live-reread-of-autonomy-labels.md), [ADR-1419: Cross-Repo Spawn Servability and Mid-flight Recognition](../adrs/1419-cross-repo-spawn-servability-and-midflight-recognition.md), [ADR-1216: Review Gate at Landing Decision](../adrs/1216-review-gate-at-landing-decision.md), [ADR-1250: Review Authority Orthogonal to Autonomy](../adrs/1250-review-authority-orthogonal-to-autonomy.md), [ADR-1283: Declared Unrequested Reviewers](../adrs/1283-declared-unrequested-reviewers.md), issue #1768 (originating report), issue #1769 (this fix).
+
+---
+
+### 6.23 Merge-Train Base Sanity Check (#1773)
+
+**Trigger:** In #1688, the merge train opened an integration PR against a protected `main` while
+every member of the batch carried `base:develop`, and it self-merged nine minutes later with no
+human in the loop — a production incident. #1772 fixes the specific cause (an unhydrated member
+silently partitioning to the default base at grouping time). This is a deliberately independent
+second line of defence: a check on the *outcome* the train is about to act on, immediately before
+it acts, rather than another cause-specific fix — this is already the second time this class of
+defect (ADR-1647/ADR-1648 fixed the first, #1637/#1646) has reached production, so a check that
+catches the outcome regardless of cause is warranted.
+
+**Mechanism: fires only on the default partition, reads live, refuses rather than repairs.**
+`refuseIfBaseContradictsMembers(owner, repo, baseBranch, trainKey string, members []trainMember)
+bool` (`engine/merge_train.go`) is called immediately before either of the two landing paths that
+can mint a new integration/landing PR:
+
+1. `isDefaultPartitionKey(owner, repo, trainKey)` — `trainKey == owner+"/"+repo` — decides whether
+   the pinned base is the repository default. This is exactly `mergeTrainKey`'s own default-sentinel
+   condition (§ above, ADR-1648), not an approximation of it, so it needs no additional git call and
+   costs nothing on a `base:<branch>`-partitioned train (R5): the check returns immediately, false,
+   without touching `e.client` at all.
+2. Only when triggered, each member's labels are read **live** via `e.client.FetchLabels` — never
+   `e.readClient` (`boardcache.CacheImpl.FetchLabels` serves the cached snapshot whenever the cache
+   isn't paused) and never the member's own cached `trainMember.item.Labels`. This is the entire
+   point of the check (R2): the #1688 incident shape is exactly a cached/stale label disagreeing
+   with a live one, so a check reusing either cached path would have passed cleanly in that
+   incident.
+3. `nonDefaultBaseLabelValue(labels []string, pinnedBase string) string` scans for a `base:<branch>`
+   label whose value is non-empty and differs from `pinnedBase`. It deliberately does not resolve
+   remote branch existence or fall back to a default the way `baseBranchForItem` (§6.13/§6.21) does
+   — R3 forbids repairing a contradiction found here, only refusing.
+4. Any contradiction, or any per-member `FetchLabels` error (treated identically — fail-closed,
+   matching #1772's own posture), causes the caller to refuse: no PR is opened or reused, the
+   member(s) stay in Queued, and `e.logfRepo` names the pinned base and every contradicting member
+   with its declared base (R4). A healthy train — including the ordinary all-default-base case —
+   produces no new log output at all.
+
+**Both `CreatePR` sites that can mint a new PR are covered; the singleton fast path is exempt by
+construction.** `landMergeTrainBatch` calls the check immediately after the closed-unmerged-trial
+escalation and before its `if integrationPR != nil { reuse } else { create }` split — covering both
+the PR-open and PR-reuse branches uniformly, since a reused PR (a promoted draft CI PR) is just as
+capable of carrying a stale pinned base as a freshly-created one. `landSingleton` (the FR-5
+one-at-a-time fallback, not a rare corner case — any bisection failure routes through it) calls the
+check immediately before its own `CreatePR` call. The singleton *fast path*
+(`trySingletonFastPath`/`finishSingletonFastPathLanding`, §6.20) never calls `CreatePR` at all — it
+merges the member's own existing PR via `MergePRAtHeadSHA`, targeting whatever base that PR was
+already opened against — so it structurally cannot reproduce this contradiction and needs no
+equivalent check.
+
+**Self-healing, not sticky.** The check carries no state of its own across polls — a refusal simply
+returns without opening or reusing a PR, leaving the batch's members in Queued exactly as they were.
+The next poll re-forms the batch and re-runs the check from scratch; once the underlying label
+disagreement resolves (by any means — a human fixing a stale label, a cache entry expiring, or
+#1772 preventing the bad partition in the first place), the very next attempt proceeds normally.
+
+**No new label, no escalation machinery.** Unlike most of this file's other guard mechanisms, a
+refusal here is not durably marked on the board — an operator distinguishes it from ordinary
+merge-train activity by the `merge-train`-tagged log line alone. This is a deliberate, narrower
+scope than the pattern most `fabrik:awaiting-*` siblings follow (§6.9–§6.22): the acceptance
+criteria for this feature are fully satisfiable with logging and self-healing alone, and building a
+durable repeat-counter + `fabrik:paused` escalation now would be speculative state for a scope not
+yet shown to need it (see ADR-1773's Rejected Alternatives).
+
+**Independent of #1772, deliberately.** #1772 fixes the partition-time cause of a member ending up
+in the wrong batch; this check fires at landing time, downstream of and structurally unrelated to
+that fix, sharing no code. With #1772 also applied, a member it excludes at partition time never
+reaches this check at all (there is nothing left to contradict); this check still fires for any
+*other* cause of the same pinned-base-vs-declared-base disagreement, including causes not yet
+discovered — which is the entire reason this is a second, independent line of defence rather than a
+refactor of the first.
+
+**Code path:** `refuseIfBaseContradictsMembers`, `isDefaultPartitionKey`, `nonDefaultBaseLabelValue`
+(`engine/merge_train.go`), called from `landMergeTrainBatch` and `landSingleton`.
+
+**State transitions:**
+
+| Before | Trigger | After | Labels Added | Labels Removed |
+|---|---|---|---|---|
+| Queued batch, pinned base == repo default, all members agree (or genuinely default-base) | `refuseIfBaseContradictsMembers` returns `false` | Landing proceeds normally (open or reuse the integration/landing PR) | — | — |
+| Queued batch, pinned base == a non-default partition base | `isDefaultPartitionKey` is false — check never fires | Landing proceeds normally, no `FetchLabels` calls made | — | — |
+| Queued batch, pinned base == repo default, ≥1 member's live label declares a different base | `refuseIfBaseContradictsMembers` returns `true` | No PR opened or reused; members remain in Queued; loud log line naming base + members | — | — |
+| Queued batch, pinned base == repo default, a member's live `FetchLabels` call errors | `refuseIfBaseContradictsMembers` returns `true` (fail-closed) | No PR opened or reused; members remain in Queued; loud log line naming base + members | — | — |
+
+**References:** [ADR-1773: Merge-Train Base Sanity Check at Landing Time](../adrs/1773-merge-train-base-sanity-check.md), [ADR-1647: Merge-Train Non-Default-Base Exclusion](../adrs/1647-merge-train-non-default-base-exclusion.md), [ADR-1648: Merge-Train Batches Partitioned Per (Repo, Base)](../adrs/1648-merge-train-per-base-partitioning.md), §6.13 (`baseBranchForItem`'s remote-resolution semantics, deliberately not reused here), §6.20 (the singleton fast path, confirmed exempt), issue #1688 (the community report that motivated this issue), issue #1773 (this feature).
 
 ---
 
