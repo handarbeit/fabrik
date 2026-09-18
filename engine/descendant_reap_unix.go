@@ -113,20 +113,53 @@ func trackWorkerDescendants(ctx context.Context, workerPID, issueNumber int, rep
 	ticker := time.NewTicker(descendantScanInterval)
 	defer ticker.Stop()
 	seen := make(map[int]bool)
-	// The worker's own identity fingerprint, fetched once (it cannot change
-	// for the life of this PID) and stamped onto every discovered descendant.
-	// This is what lets sweepStaleDescendants (R3) tell "this worker PID is
-	// still the same worker" apart from "this worker PID was reused by an
-	// unrelated process after the original worker died" (R5) — isProcessAlive
-	// alone cannot make that distinction, since it only checks liveness, not
-	// identity. Best-effort: if the worker has already exited by the first
-	// tick, these stay empty and the sweep falls back to liveness-only.
-	workerComm, workerLStart, _ := pidFingerprintFn(workerPID)
+	// The worker's own identity fingerprint, stamped onto every discovered
+	// descendant. This is what lets sweepStaleDescendants (R3) tell "this
+	// worker PID is still the same worker" apart from "this worker PID was
+	// reused by an unrelated process after the original worker died" (R5) —
+	// isProcessAlive alone cannot make that distinction, since it only
+	// checks liveness, not identity.
+	//
+	// It cannot change for the life of workerPID, so once successfully
+	// fetched it is never re-fetched — but the fetch itself is retried every
+	// tick until it succeeds, rather than attempted only once: a transient
+	// failure on a single attempt (the same host-contention condition this
+	// reaper exists to handle) must not permanently and silently degrade
+	// every descendant of this invocation to the liveness-only fallback for
+	// the invocation's entire lifetime. Until it succeeds, workerComm/
+	// workerLStart stay empty and newly-discovered descendants are recorded
+	// with that fallback.
+	//
+	// A descendant can be discovered on the very same tick the worker's own
+	// fingerprint attempt fails (they race within one tick body, and a
+	// descendant's own fingerprint call can succeed independently of the
+	// worker's) — so "self-correcting on a later tick" is not automatic:
+	// without an explicit backfill, that descendant's registry entry would
+	// keep its empty WorkerComm/WorkerLStart forever, since seen[pid] stops
+	// it from ever being reprocessed. pendingIdentityBackfill tracks exactly
+	// the descendants this invocation itself recorded before the worker's
+	// identity became known, and is re-upserted with the correct fingerprint
+	// the moment it does.
+	var workerComm, workerLStart string
+	workerIdentityKnown := false
+	var pendingIdentityBackfill []trackedDescendant
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			if !workerIdentityKnown {
+				if c, l, ferr := pidFingerprintFn(workerPID); ferr == nil {
+					workerComm, workerLStart = c, l
+					workerIdentityKnown = true
+					for _, d := range pendingIdentityBackfill {
+						d.WorkerComm = workerComm
+						d.WorkerLStart = workerLStart
+						_ = upsertTrackedDescendant(d)
+					}
+					pendingIdentityBackfill = nil
+				}
+			}
 			pids, err := sessionScopedDescendants(workerPID)
 			if err != nil {
 				continue // transient ps failure; try again next tick
@@ -156,7 +189,7 @@ func trackWorkerDescendants(ctx context.Context, workerPID, issueNumber int, rep
 					continue
 				}
 				seen[pid] = true
-				_ = upsertTrackedDescendant(trackedDescendant{
+				d := trackedDescendant{
 					PID:          pid,
 					Comm:         comm,
 					LStart:       lstart,
@@ -167,7 +200,11 @@ func trackWorkerDescendants(ctx context.Context, workerPID, issueNumber int, rep
 					Repo:         repo,
 					Stage:        stage,
 					DiscoveredAt: time.Now(),
-				})
+				}
+				_ = upsertTrackedDescendant(d)
+				if !workerIdentityKnown {
+					pendingIdentityBackfill = append(pendingIdentityBackfill, d)
+				}
 			}
 		}
 	}

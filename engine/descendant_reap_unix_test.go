@@ -624,3 +624,87 @@ func TestTrackWorkerDescendants_TransientFingerprintFailureRetried(t *testing.T)
 		t.Fatalf("expected at least 2 injected failures to have been consumed before the eventual success, got %d — test setup issue, not confirming the retry behavior", failuresInjected)
 	}
 }
+
+// TestTrackWorkerDescendants_WorkerFingerprintTransientFailureRetried pins a
+// second review finding on the same theme: the worker's OWN identity
+// fingerprint (workerComm/workerLStart, stamped onto every discovered
+// descendant so sweepStaleDescendants can later tell "still the same worker"
+// apart from "PID reused") must also be retried on transient failure, not
+// fetched once with the error discarded. A single bad `ps` call at the
+// moment trackWorkerDescendants starts (the same host-contention condition
+// this reaper exists to handle) must not silently and permanently degrade
+// every descendant of this invocation to the liveness-only fallback for the
+// invocation's entire lifetime.
+//
+// Neutralization: before the fix (a single un-retried fetch before the
+// loop), this test fails — the injected failures land on that one fetch
+// attempt, so workerComm/workerLStart stay empty forever and the recorded
+// descendant's WorkerComm/WorkerLStart never become non-empty.
+func TestTrackWorkerDescendants_WorkerFingerprintTransientFailureRetried(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	origScan := descendantScanInterval
+	descendantScanInterval = 20 * time.Millisecond
+	defer func() { descendantScanInterval = origScan }()
+
+	shell := exec.Command("/bin/sh", "-c", "sleep 5 & wait")
+	setCmdProcAttr(shell)
+	if err := shell.Start(); err != nil {
+		t.Fatalf("starting shell: %v", err)
+	}
+	defer func() {
+		_ = shell.Process.Kill()
+		_ = shell.Wait()
+	}()
+	workerPID := shell.Process.Pid
+
+	origFn := pidFingerprintFn
+	var mu sync.Mutex
+	workerFailuresInjected := 0
+	pidFingerprintFn = func(pid int) (string, string, error) {
+		if pid != workerPID {
+			return origFn(pid) // don't interfere with the descendant's own fingerprint
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if workerFailuresInjected < 2 {
+			workerFailuresInjected++
+			return "", "", context.DeadlineExceeded // simulated transient ps timeout
+		}
+		return origFn(pid)
+	}
+	defer func() { pidFingerprintFn = origFn }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		trackWorkerDescendants(ctx, workerPID, 1798, "", "Implement")
+		close(done)
+	}()
+
+	found := false
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		entries, err := descendantsForWorker(workerPID)
+		if err != nil {
+			t.Fatalf("descendantsForWorker: %v", err)
+		}
+		if len(entries) > 0 && entries[0].WorkerComm != "" && entries[0].WorkerLStart != "" {
+			found = true
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	if !found {
+		t.Fatal("descendant's WorkerComm/WorkerLStart never became non-empty despite the injected transient worker-fingerprint failures eventually clearing — the retry behavior did not happen")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if workerFailuresInjected < 2 {
+		t.Fatalf("expected at least 2 injected worker-fingerprint failures to have been consumed before the eventual success, got %d — test setup issue, not confirming the retry behavior", workerFailuresInjected)
+	}
+}
