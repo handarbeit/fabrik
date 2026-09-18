@@ -3,6 +3,8 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net"
 	"strings"
 	"sync"
 	"testing"
@@ -636,5 +638,65 @@ func TestProcessComments_Rework_EnsureWorktreeFailure_RestoresCompleteLabel(t *t
 	}
 	if len(claude.calls) != 0 || len(claude.forCommentsCalls) != 0 {
 		t.Error("claude should never be invoked when worktree setup fails")
+	}
+}
+
+// TestRemoveReworkingLabelRetrying_TransientRetrySucceeds mirrors
+// TestRemoveEditingLabel_TransientRetrySucceeds (label_helpers_test.go):
+// verifies endStageRework's final fabrik:reworking removal gets the same
+// bounded retry-with-backoff as fabrik:editing's removal, rather than giving
+// up on the first transient error and leaving the marker dangling live.
+func TestRemoveReworkingLabelRetrying_TransientRetrySucceeds(t *testing.T) {
+	orig := editingLabelRetryDelay
+	editingLabelRetryDelay = 0
+	t.Cleanup(func() { editingLabelRetryDelay = orig })
+	var calls int
+	client := &mockGitHubClient{
+		removeLabelFromIssueFn: func(owner, repo string, issueNumber int, labelName string) error {
+			if labelName == "fabrik:reworking" {
+				calls++
+				if calls < 3 {
+					return fmt.Errorf("executing request: %w", &net.OpError{Op: "read", Net: "tcp"})
+				}
+				return nil
+			}
+			return nil
+		},
+	}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	item := gh.ProjectItem{Number: 42, Repo: "owner/repo"}
+
+	eng.removeReworkingLabelRetrying(item)
+
+	if calls != 3 {
+		t.Errorf("expected 3 calls (2 transient then success), got %d", calls)
+	}
+}
+
+// TestRemoveReworkingLabelRetrying_TransientExhausted verifies that 3
+// consecutive transient errors exhaust the retry budget: exactly 3 calls are
+// made, no panic occurs, and the marker is simply left in place (logged) —
+// recoverable later by runStartupCleanup's startup-only pass.
+func TestRemoveReworkingLabelRetrying_TransientExhausted(t *testing.T) {
+	orig := editingLabelRetryDelay
+	editingLabelRetryDelay = 0
+	t.Cleanup(func() { editingLabelRetryDelay = orig })
+	var calls int
+	client := &mockGitHubClient{
+		removeLabelFromIssueFn: func(owner, repo string, issueNumber int, labelName string) error {
+			if labelName == "fabrik:reworking" {
+				calls++
+				return fmt.Errorf("executing request: %w", &net.OpError{Op: "read", Net: "tcp"})
+			}
+			return nil
+		},
+	}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	item := gh.ProjectItem{Number: 43, Repo: "owner/repo"}
+
+	eng.removeReworkingLabelRetrying(item)
+
+	if calls != 3 {
+		t.Errorf("expected 3 attempts, got %d", calls)
 	}
 }

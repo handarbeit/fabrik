@@ -584,7 +584,43 @@ func (e *Engine) endStageRework(item gh.ProjectItem, stage *stages.Stage, wasRew
 			return
 		}
 	}
-	e.removeLabel(item, "fabrik:reworking")
+	e.removeReworkingLabelRetrying(item)
+}
+
+// removeReworkingLabelRetrying removes fabrik:reworking with the same bounded
+// retry-with-backoff as removeEditingLabel: a single best-effort attempt
+// would leave the marker dangling live (visible until the next
+// runStartupCleanup pass, i.e. the next process restart) whenever the final
+// RemoveLabelFromIssue call hits a transient error — reintroducing, for the
+// marker itself, exactly the class of stale/misleading label this whole
+// mechanism exists to eliminate. By the time this runs, stage:<Stage>:complete
+// (or fabrik:awaiting-ci) has already durably landed, so nothing is at risk
+// beyond the marker's own cosmetic staleness — but it's cheap to close.
+func (e *Engine) removeReworkingLabelRetrying(item gh.ProjectItem) {
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	const maxAttempts = 3
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:reworking")
+		if err == nil {
+			e.syncLabelRemoval(item, "fabrik:reworking", true)
+			return
+		}
+		if errors.Is(err, gh.ErrNotFound) {
+			e.syncLabelRemoval(item, "fabrik:reworking", false)
+			return
+		}
+		if !isTransientError(err) {
+			e.logf(item.Number, "warn", "could not remove fabrik:reworking marker: %v\n", err)
+			return
+		}
+		lastErr = err
+		if attempt < maxAttempts-1 {
+			delay := editingLabelRetryDelay << attempt
+			time.Sleep(delay)
+		}
+	}
+	e.logf(item.Number, "warn", "could not remove fabrik:reworking marker after %d attempts: %v\n", maxAttempts, lastErr)
 }
 
 // lastCommentAuthor returns the author of the last comment in comments, or ""

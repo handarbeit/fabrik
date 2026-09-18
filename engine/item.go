@@ -25,8 +25,9 @@ import (
 // var (not const) so tests can set it to 0 without a 2-second sleep per test.
 var lockVerifyDelay = 2 * time.Second
 
-// editingLabelRetryDelay is the base delay for removeEditingLabel retry backoff.
-// Declared as a var so tests can set it to 0 to avoid sleeping.
+// editingLabelRetryDelay is the base delay for removeEditingLabel's and
+// removeReworkingLabelRetrying's retry backoff. Declared as a var so tests
+// can set it to 0 to avoid sleeping.
 var editingLabelRetryDelay = 500 * time.Millisecond
 
 // isEngineManagedPath returns true for paths that are written by the Fabrik
