@@ -538,23 +538,31 @@ func (e *Engine) Run() error {
 		// RefuseHookdeckWithWebhooks (engine/github_app_auth.go) refuses the
 		// combination at startup, so this is a clean if/else-if rather than
 		// a fallthrough that could ever run both.
-		apiKeyEnv := e.cfg.HookdeckAPIKeyEnv
-		if apiKeyEnv == "" {
-			apiKeyEnv = DefaultHookdeckAPIKeyEnv
+		// apiKeyEnvName/secretEnvName hold the *names* of the environment
+		// variables, never their values: the secrets themselves (apiKey,
+		// webhookSecret below) go only to newHookdeckManager and are never
+		// logged. The explicit "...Name" suffix keeps that distinction plain
+		// to readers, and to CodeQL, whose clear-text-logging heuristic read
+		// the earlier apiKeyEnv/secretEnv spellings as sensitive values
+		// flowing into the log call below - a false positive, since what is
+		// logged is the variable name (e.g. "$HOOKDECK_API_KEY").
+		apiKeyEnvName := e.cfg.HookdeckAPIKeyEnv
+		if apiKeyEnvName == "" {
+			apiKeyEnvName = DefaultHookdeckAPIKeyEnv
 		}
-		secretEnv := e.cfg.HookdeckWebhookSecretEnv
-		if secretEnv == "" {
-			secretEnv = DefaultHookdeckWebhookSecretEnv
+		secretEnvName := e.cfg.HookdeckWebhookSecretEnv
+		if secretEnvName == "" {
+			secretEnvName = DefaultHookdeckWebhookSecretEnv
 		}
-		apiKey := os.Getenv(apiKeyEnv)
-		webhookSecret := os.Getenv(secretEnv)
+		apiKey := os.Getenv(apiKeyEnvName)
+		webhookSecret := os.Getenv(secretEnvName)
 		if apiKey == "" || webhookSecret == "" {
 			var missing []string
 			if apiKey == "" {
-				missing = append(missing, apiKeyEnv)
+				missing = append(missing, apiKeyEnvName)
 			}
 			if webhookSecret == "" {
-				missing = append(missing, secretEnv)
+				missing = append(missing, secretEnvName)
 			}
 			e.logf(0, "hookdeck", "event_source: hookdeck requires %s to be set — falling back to polling only\n",
 				strings.Join(missing, " and "))
@@ -588,7 +596,7 @@ func (e *Engine) Run() error {
 			hm.Start(ctx)
 			e.webhookMgr = hm
 			defer hm.Stop()
-			e.logf(0, "hookdeck", "event_source: hookdeck — API key from $%s, webhook secret from $%s\n", apiKeyEnv, secretEnv)
+			e.logf(0, "hookdeck", "event_source: hookdeck — API key from $%s, webhook secret from $%s\n", apiKeyEnvName, secretEnvName)
 			// R5 startup assertion (#1142): verify the App installation's
 			// granted-repo set covers every managed repo, warning (never
 			// failing startup) on any gap — the App-mode analogue of the
