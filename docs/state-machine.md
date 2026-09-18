@@ -218,7 +218,7 @@ reuse } else { create }` split — covering both the open and reuse branches uni
 `refuseIfBaseContradictsMembers`. On the default-base partition only, it reads each member's
 `base:<branch>` label **live** (never the cached snapshot) and refuses to open or reuse the PR if
 any member's live label declares a different base, or if the live read itself errors — leaving
-members in Queued rather than landing against a base that contradicts what they declare. See §6.23
+members in Queued rather than landing against a base that contradicts what they declare. See §6.24
 for the full mechanism; this is a no-op on any non-default-base partition and on a healthy
 default-base batch.
 
@@ -2827,7 +2827,7 @@ On a fetch error, `item.Labels` is left untouched and a warning naming the item 
 
 ---
 
-### 6.23 Merge-Train Base Sanity Check (#1773)
+### 6.24 Merge-Train Base Sanity Check (#1773)
 
 **Trigger:** In #1688, the merge train opened an integration PR against a protected `main` while
 every member of the batch carried `base:develop`, and it self-merged nine minutes later with no
