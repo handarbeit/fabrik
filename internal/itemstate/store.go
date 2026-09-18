@@ -394,6 +394,15 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		item.LastDeepFetchFailureAt = time.Time{} // clear failure on success
 		return flags | DeepFetchChanged
 
+	case BlockedByEdgeAdded:
+		for _, d := range item.BlockedBy {
+			if d.Repo == v.Dep.Repo && d.Number == v.Dep.Number {
+				return 0
+			}
+		}
+		item.BlockedBy = append(item.BlockedBy, v.Dep)
+		return BlockedByChanged
+
 	case StageAttempted:
 		ensureStageStateMaps(item)
 		item.StageState.LastAttemptAt[v.StageName] = v.At

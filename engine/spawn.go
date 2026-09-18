@@ -845,6 +845,22 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 			}
 		}
 
+		// Write the edge into the Store synchronously, in-process — the same
+		// moment GitHub itself learns of it — so the very next CacheImpl-backed
+		// board rebuild already reflects it. Unconditional (fires whether the
+		// edge was freshly linked above or found already-linked on resume) so
+		// Store correctness at the end of this function never depends on
+		// refreshForSpawnResume's own write-through. This is what makes R1's
+		// dispatch gate structural rather than a race against deep-fetch/
+		// cycleSet timing (#1783, ADR-1783) — checkDependencies reads
+		// item.BlockedBy from whatever board snapshot it was handed, and that
+		// snapshot is reconstructed directly from the Store on every call.
+		e.store.Apply(itemstate.BlockedByEdgeAdded{
+			Repo:   fmt.Sprintf("%s/%s", owner, repo),
+			Number: item.Number,
+			Dep:    gh.Dependency{Repo: block.Repo, Number: childNumber, State: "OPEN"},
+		})
+
 		// Apply fabrik:sub-issue label to child (idempotent add; for human-visible filtering; no engine semantics).
 		if err := e.client.AddLabelToIssue(childOwner, childRepo, childNumber, "fabrik:sub-issue"); err != nil {
 			e.logf(item.Number, "warn", "could not add fabrik:sub-issue to %s#%d: %v\n", block.Repo, childNumber, err)
