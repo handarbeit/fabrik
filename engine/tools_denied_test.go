@@ -438,3 +438,153 @@ func testToolsDeniedMarkerIndependence(t *testing.T, output string, issueNumber 
 		t.Error("expected one comment to explain the tools-denied condition, naming the denied tool")
 	}
 }
+
+// TestToolsDenied_CommentNamesFirstDeniedCommand covers #1775 R2/AC1: when
+// the classification carries a decodable Bash command, the initial-detection
+// comment must name it, truncated. Neutralizing firstToolsDeniedCommand's
+// call site in recordToolsDeniedDetection (or reverting to ToolNames-only
+// wording) makes this fail (AC8).
+func TestToolsDenied_CommentNamesFirstDeniedCommand(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			return "", false, TokenUsage{}, &claudeToolsDeniedError{
+				ToolNames: []string{"Bash"},
+				Denials:   []toolDenial{{ToolName: "Bash", Command: "base_branch=$(gh pr view --json baseRefName)"}},
+			}
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{Owner: "owner", Repo: "repo", ProjectNum: 1, User: "testuser", Token: "token",
+			MaxRetries: 2, MaxToolsDeniedRetries: 3, Stages: testStages()},
+		client, claude, wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 407, Title: "tools-denied command naming", Status: "Research", ItemID: "PVTI_407"}
+
+	if err := eng.processItem(context.Background(), board, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+
+	if len(client.addCommentCalls) != 1 {
+		t.Fatalf("expected exactly 1 comment, got %d", len(client.addCommentCalls))
+	}
+	body := client.addCommentCalls[0].body
+	if !strings.Contains(body, "base_branch=$(gh pr view") {
+		t.Errorf("expected comment to name the denied command, got: %s", body)
+	}
+	// R3: the comment must state the denial is per-command, not tool-wide.
+	if !strings.Contains(body, "scoped to that one command") {
+		t.Errorf("expected comment to state the per-command scope (R3), got: %s", body)
+	}
+	// R4: the "no retry can fix" premise must be gone.
+	if strings.Contains(body, "no retry can fix") {
+		t.Errorf("comment must not assert irrecoverability (R4), got: %s", body)
+	}
+}
+
+// TestToolsDenied_DegradesToToolNameOnlyWithoutCommand covers AC2: when no
+// denial carries a decodable command (the classification only ever populated
+// ToolNames, exactly like every pre-#1775 test fixture), the comment must
+// still read sensibly — naming the tool, never an empty command string or a
+// panic.
+func TestToolsDenied_DegradesToToolNameOnlyWithoutCommand(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			return "", false, TokenUsage{}, &claudeToolsDeniedError{ToolNames: []string{"Write"}}
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{Owner: "owner", Repo: "repo", ProjectNum: 1, User: "testuser", Token: "token",
+			MaxRetries: 2, MaxToolsDeniedRetries: 3, Stages: testStages()},
+		client, claude, wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 408, Title: "tools-denied no command", Status: "Research", ItemID: "PVTI_408"}
+
+	if err := eng.processItem(context.Background(), board, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+
+	if len(client.addCommentCalls) != 1 {
+		t.Fatalf("expected exactly 1 comment, got %d", len(client.addCommentCalls))
+	}
+	body := client.addCommentCalls[0].body
+	if !strings.Contains(body, "Write") {
+		t.Errorf("expected comment to name the denied tool, got: %s", body)
+	}
+	if strings.Contains(body, "command: ``") || strings.Contains(body, "(command: `)") {
+		t.Errorf("expected no empty command detail rendered, got: %s", body)
+	}
+}
+
+// TestToolsDenied_EscalationComment_RemediationOrderAndScope covers R3/R4/AC5:
+// the escalation (pause) comment must state per-command scope, must not
+// assert "no retry can fix this on its own", and must offer the
+// simple-commands/allowed_tools remedy before naming fabrik:unrestricted as
+// the last resort.
+func TestToolsDenied_EscalationComment_RemediationOrderAndScope(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			return "", false, TokenUsage{}, &claudeToolsDeniedError{
+				ToolNames: []string{"Bash"},
+				Denials:   []toolDenial{{ToolName: "Bash", Command: "gh pr view --json baseRefName"}},
+			}
+		},
+	}
+
+	const maxToolsDeniedRetries = 1
+	eng := NewWithDeps(
+		Config{Owner: "owner", Repo: "repo", ProjectNum: 1, User: "testuser", Token: "token",
+			MaxRetries: 10, MaxToolsDeniedRetries: maxToolsDeniedRetries, Stages: testStages()},
+		client, claude, wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 409, Title: "tools-denied escalation wording", Status: "Research", ItemID: "PVTI_409"}
+
+	if err := eng.processItem(context.Background(), board, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+
+	if len(client.addCommentCalls) == 0 {
+		t.Fatal("expected at least one comment")
+	}
+	lastBody := client.addCommentCalls[len(client.addCommentCalls)-1].body
+
+	if strings.Contains(lastBody, "no retry can fix") {
+		t.Errorf("escalation comment must not assert irrecoverability (R4), got: %s", lastBody)
+	}
+	if !strings.Contains(lastBody, "scoped to the specific command") {
+		t.Errorf("expected escalation comment to state per-command scope (R3), got: %s", lastBody)
+	}
+	simpleIdx := strings.Index(lastBody, "separate, simpler commands")
+	unrestrictedIdx := strings.Index(lastBody, "fabrik:unrestricted")
+	if simpleIdx == -1 || unrestrictedIdx == -1 {
+		t.Fatalf("expected both remediation options present, got: %s", lastBody)
+	}
+	if simpleIdx > unrestrictedIdx {
+		t.Errorf("expected simple-commands remedy to appear before fabrik:unrestricted (R4/AC5), got: %s", lastBody)
+	}
+	if !strings.Contains(lastBody, "gh pr view --json baseRefName") {
+		t.Errorf("expected escalation comment to name the denied command, got: %s", lastBody)
+	}
+}
