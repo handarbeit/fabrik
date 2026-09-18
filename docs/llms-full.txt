@@ -2680,8 +2680,16 @@ comparison on every upgrade:
 |-------|-----------|----------|
 | Up to date | disk == installed == embedded | No-op |
 | Upgrade available | disk == installed, embedded changed | Auto-refresh (non-TTY) or `y/N` prompt (TTY) |
-| Custom workflow | disk != installed | Block refresh; show `[u] custom workflow` badge |
+| Custom workflow | disk != installed, installed == embedded | Block refresh; show `[u] custom workflow` badge |
+| Custom workflow **and** stale | disk != installed **and** installed != embedded | Block refresh; show both signals — `[u] custom workflow (N stale)` badge, naming the drifted skill files, both pointing at `fabrik upgrade --reconcile` |
 | First run (migration) | `.installed-version` absent | Seeds fingerprint from current disk; no refresh this cycle |
+
+Customization (`disk != installed`) and staleness (`installed != embedded`) are two
+independent facts about `.fabrik/plugin/` — a customized install can also be behind
+what's embedded in the current binary, and Fabrik reports both when both are true
+rather than letting the customization warning silently suppress the staleness signal.
+This combined state is common: a downstream project that customized `.fabrik/plugin/`
+once and then upgraded Fabrik several times without reconciling will show both.
 
 When customizations are detected, Fabrik refuses to overwrite them silently.
 Use one of:
@@ -2693,9 +2701,12 @@ fabrik upgrade --reconcile  # Print a Claude Code prompt for guided reconciliati
 
 The `--reconcile` output is a prompt you can paste into Claude Code to diff your
 customizations against the new embedded version and preserve non-conflicting changes.
+When the plugin is also stale, reconciling addresses both — there is no separate
+"resolve staleness first" step.
 
-In the TUI, pressing `u` when the `[u] custom workflow` badge is shown opens the
-same three options interactively.
+In the TUI, pressing `u` when the `[u] custom workflow` (or combined
+`[u] custom workflow (N stale)`) badge is shown opens the same three options
+interactively; the status line additionally names the stale count when present.
 
 ### Skill vs Prompt
 
@@ -2826,6 +2837,17 @@ Claude Code's `/plugin update` detects a new plugin release by comparing the cac
   ```
 
 Don't be surprised to see a second `@arbeithand` commit on `main` after a release that touched plugin source — this is expected, not a sign something went wrong.
+
+**`plugin/fabrik-workflows`'s `plugin.json` `version` field is not a staleness
+signal — don't read it as one.** Unlike `plugin/fabrik` above, nothing in Fabrik ever
+consults `plugin/fabrik-workflows/.claude-plugin/plugin.json`'s `version` field to
+detect staleness or drive an upgrade decision. It has stayed at its original value
+since the file was introduced and is expected to. The actual staleness signal for
+this plugin is the `.installed-version` content fingerprint (SHA256 over the embedded
+skill files, described in [Upgrade protection for customized
+skills](#upgrade-protection-for-customized-skills)) — it tracks content changes
+precisely, so no version-bump automation is needed or planned for this plugin's
+manifest.
 
 #### Release-artifact verification guard
 
@@ -3070,6 +3092,10 @@ operator to press `u` to upgrade. When Fabrik detects that the on-disk skills
 differ from the last installed version (indicating operator customizations), the
 badge changes to `[u] custom workflow` and pressing `u` opens a three-option
 dialog instead of a simple y/N prompt (see [Customizing Skills](#customizing-skills)).
+Customization and staleness are independent facts and can both be true at once — in
+that case the badge combines into `[u] custom workflow (N stale)`, and the
+three-option dialog's status line also names the stale count, rather than one signal
+silently hiding the other.
 
 ### Keyboard Shortcuts
 
@@ -3089,7 +3115,7 @@ dialog instead of a simple y/N prompt (see [Customizing Skills](#customizing-ski
 | `D` | **Dismiss / undismiss** selected warning (Warnings pane only) — sticky across restarts; dismissed entries are hidden by default |
 | `S` | **Show / hide dismissed** warnings (Warnings pane only) |
 | `a` | Open abtop AI session monitor (shows token usage, context window, rate limits for all Claude sessions) |
-| `u` | Upgrade plugin skills. When the `[u] skills out of date` badge is shown (embedded changed, no local edits), pressing `u` shows a `y/N` confirmation and applies the upgrade. When the `[u] custom workflow` badge is shown (local edits detected), pressing `u` opens a three-option dialog: **[1] Reconcile** — quits the TUI and prints a Claude Code prompt to stderr for merging customizations; **[2] Overwrite** — prompts you to type `OVERWRITE` to confirm destructive reset; **[3] Cancel** — dismisses the dialog. Active stage invocations pick up new files on next run. |
+| `u` | Upgrade plugin skills. When the `[u] skills out of date` badge is shown (embedded changed, no local edits), pressing `u` shows a `y/N` confirmation and applies the upgrade. When the `[u] custom workflow` (or combined `[u] custom workflow (N stale)`) badge is shown (local edits detected, possibly also stale), pressing `u` opens a three-option dialog: **[1] Reconcile** — quits the TUI and prints a Claude Code prompt to stderr for merging customizations; **[2] Overwrite** — prompts you to type `OVERWRITE` to confirm destructive reset; **[3] Cancel** — dismisses the dialog. When also stale, the dialog's status line names the stale count so reconciling is known to also pick up upstream changes. Active stage invocations pick up new files on next run. |
 | `w` | Wake: reset idle backoff and poll immediately |
 | `ctrl+r` | Force refresh: drain in-flight workers and restart in place (same as SIGHUP — see [Recovering from Wedged State](#recovering-from-wedged-state)) |
 | `?` | Toggle help panel (keybindings and labels reference) |
@@ -4027,7 +4053,9 @@ plugin-skills upgrade check — when no local customizations are detected, skill
 refreshed automatically without prompting (a brief status line is written to stderr),
 so the restart never hangs waiting for user confirmation. When local customizations are
 present, the refresh is skipped entirely to preserve your edits; the `[u] custom workflow`
-badge appears on next TUI startup instead of silently overwriting your changes.
+badge (or combined `[u] custom workflow (N stale)` badge, when the install is also behind
+the newly-started binary's embedded skills) appears on next TUI startup instead of
+silently overwriting your changes.
 
 **What is cleared:**
 
