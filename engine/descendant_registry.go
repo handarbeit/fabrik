@@ -20,6 +20,8 @@ type trackedDescendant struct {
 	Comm         string    `json:"comm"`
 	LStart       string    `json:"lstart"`
 	WorkerPID    int       `json:"worker_pid"`
+	WorkerComm   string    `json:"worker_comm,omitempty"`
+	WorkerLStart string    `json:"worker_lstart,omitempty"`
 	IssueNumber  int       `json:"issue_number"`
 	Repo         string    `json:"repo,omitempty"`
 	Stage        string    `json:"stage"`

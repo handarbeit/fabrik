@@ -386,10 +386,18 @@ func TestSweepStaleDescendants_LiveWorkerDescendantLeftAlone(t *testing.T) {
 		t.Fatalf("pidFingerprint(bystander): %v", err)
 	}
 
-	// WorkerPID = our own test process — very much alive.
+	// WorkerPID = our own test process — very much alive, with its own
+	// genuine identity fingerprint recorded too (as trackWorkerDescendants
+	// would in production), so this exercises the same-worker match path,
+	// not just the old-format (empty WorkerComm/WorkerLStart) fallback.
+	workerComm, workerLStart, err := pidFingerprint(os.Getpid())
+	if err != nil {
+		t.Fatalf("pidFingerprint(self): %v", err)
+	}
 	if err := upsertTrackedDescendant(trackedDescendant{
 		PID: bystander.Process.Pid, Comm: comm, LStart: lstart,
-		WorkerPID: os.Getpid(), IssueNumber: 1798,
+		WorkerPID: os.Getpid(), WorkerComm: workerComm, WorkerLStart: workerLStart,
+		IssueNumber: 1798,
 	}); err != nil {
 		t.Fatalf("upsertTrackedDescendant: %v", err)
 	}
@@ -403,6 +411,61 @@ func TestSweepStaleDescendants_LiveWorkerDescendantLeftAlone(t *testing.T) {
 	}
 	if !pidAlive(bystander.Process.Pid) {
 		t.Fatal("bystander process was killed even though its worker is still alive")
+	}
+}
+
+// TestSweepStaleDescendants_WorkerPIDReused_TreatedAsDead pins R5's PID-reuse
+// guard on the WorkerPID side (as opposed to TestReapTrackedDescendants_R5_
+// MismatchedFingerprintNeverSignalled, which covers the descendant's own PID
+// reuse): a registry entry recorded against a worker whose PID has since
+// been reassigned to a wholly unrelated live process must not be treated as
+// "invocation still in flight" merely because *a* process exists at that PID
+// number. Without re-verifying the worker's own identity fingerprint, such
+// an entry would be skipped by every future sweep forever — a PID-reuse
+// permanent leak, not merely a delayed reap.
+func TestSweepStaleDescendants_WorkerPIDReused_TreatedAsDead(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	orphan := exec.Command("sleep", "30")
+	if err := orphan.Start(); err != nil {
+		t.Fatalf("starting orphan: %v", err)
+	}
+	waitDone := make(chan struct{})
+	go func() {
+		_ = orphan.Wait()
+		close(waitDone)
+	}()
+	defer func() {
+		_ = orphan.Process.Kill()
+		<-waitDone
+	}()
+	comm, lstart, err := pidFingerprint(orphan.Process.Pid)
+	if err != nil {
+		t.Fatalf("pidFingerprint(orphan): %v", err)
+	}
+
+	// A live, real process (our own test binary) stands in for "the PID the
+	// original dead worker used to have, now reused by something else" —
+	// deliberately recorded with a fingerprint that does NOT match what's
+	// actually running there now, simulating reuse since the original
+	// worker (whatever it was) exited.
+	if err := upsertTrackedDescendant(trackedDescendant{
+		PID: orphan.Process.Pid, Comm: comm, LStart: lstart,
+		WorkerPID: os.Getpid(), WorkerComm: "not-the-real-worker-comm", WorkerLStart: "not-the-real-worker-lstart",
+		IssueNumber: 1798,
+	}); err != nil {
+		t.Fatalf("upsertTrackedDescendant: %v", err)
+	}
+
+	scanned, reaped, skipped := sweepStaleDescendants()
+	if scanned != 1 {
+		t.Errorf("expected scanned=1, got %d", scanned)
+	}
+	if reaped != 1 {
+		t.Errorf("expected 1 reaped (worker PID's fingerprint mismatch must NOT be trusted as 'still in flight'), got %d (skipped=%d)", reaped, skipped)
+	}
+	if !waitUntilDead(t, orphan.Process.Pid, 5*time.Second) {
+		t.Error("orphan still alive after sweepStaleDescendants — worker-PID-reuse guard did not trigger a reap")
 	}
 }
 

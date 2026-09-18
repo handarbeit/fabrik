@@ -106,6 +106,15 @@ func trackWorkerDescendants(ctx context.Context, workerPID, issueNumber int, rep
 	ticker := time.NewTicker(descendantScanInterval)
 	defer ticker.Stop()
 	seen := make(map[int]bool)
+	// The worker's own identity fingerprint, fetched once (it cannot change
+	// for the life of this PID) and stamped onto every discovered descendant.
+	// This is what lets sweepStaleDescendants (R3) tell "this worker PID is
+	// still the same worker" apart from "this worker PID was reused by an
+	// unrelated process after the original worker died" (R5) — isProcessAlive
+	// alone cannot make that distinction, since it only checks liveness, not
+	// identity. Best-effort: if the worker has already exited by the first
+	// tick, these stay empty and the sweep falls back to liveness-only.
+	workerComm, workerLStart, _ := pidFingerprint(workerPID)
 	for {
 		select {
 		case <-ctx.Done():
@@ -132,6 +141,8 @@ func trackWorkerDescendants(ctx context.Context, workerPID, issueNumber int, rep
 					Comm:         comm,
 					LStart:       lstart,
 					WorkerPID:    workerPID,
+					WorkerComm:   workerComm,
+					WorkerLStart: workerLStart,
 					IssueNumber:  issueNumber,
 					Repo:         repo,
 					Stage:        stage,
@@ -176,18 +187,41 @@ func reapTrackedDescendants(workerPID, issueNumber int) (reaped, skipped int) {
 	return reaped, skipped
 }
 
+// workerIdentityStillMatches reports whether the live process at d.WorkerPID
+// is still plausibly the same worker that discovered d — not a different
+// process the OS has since reused that PID number for. A registry entry
+// recorded before this field existed (WorkerComm/WorkerLStart both empty)
+// falls back to liveness-only, matching this sweep's pre-existing behavior
+// rather than treating an old-format entry as a mismatch.
+func workerIdentityStillMatches(d trackedDescendant) bool {
+	if d.WorkerComm == "" && d.WorkerLStart == "" {
+		return true
+	}
+	comm, lstart, err := pidFingerprint(d.WorkerPID)
+	if err != nil {
+		return false
+	}
+	return comm == d.WorkerComm && lstart == d.WorkerLStart
+}
+
 // sweepStaleDescendants is R3's backstop: called periodically (the janitor's
 // existing JanitorIntervalHours cadence) to catch orphans that escaped R1/R2
 // — including ones left behind by a previous engine run, since the durable
 // registry survives a restart while in-memory state does not.
 //
-// An entry whose WorkerPID is still alive is left alone: that invocation is
+// An entry whose WorkerPID is still alive — and still the *same* worker, per
+// its recorded identity fingerprint (R5) — is left alone: that invocation is
 // still in flight and R2 will reap its descendants at its own invocation end
 // — sweeping it early risks killing a subprocess the worker still genuinely
-// needs. Only entries whose worker has already exited (crashed before
-// reaching its own R2 reap, or from a prior engine run entirely) are
-// eligible here. Every eligible entry's identity fingerprint is re-verified
-// immediately before killing it (R5), exactly as reapTrackedDescendants does.
+// needs. A live PID whose fingerprint no longer matches means the original
+// worker exited and this PID was since reused for something unrelated — R5
+// requires identity be reverified, not assumed from the PID number alone, so
+// that case is treated as "worker gone" rather than trusted at face value.
+// Only entries whose worker has genuinely exited (crashed before reaching
+// its own R2 reap, from a prior engine run entirely, or whose PID was
+// reused) are eligible here. Every eligible entry's own identity fingerprint
+// is then re-verified immediately before killing it (R5), exactly as
+// reapTrackedDescendants does.
 func sweepStaleDescendants() (scanned, reaped, skipped int) {
 	entries, err := allTrackedDescendants()
 	if err != nil {
@@ -196,7 +230,7 @@ func sweepStaleDescendants() (scanned, reaped, skipped int) {
 	scanned = len(entries)
 	var processed []int
 	for _, d := range entries {
-		if isProcessAlive(d.WorkerPID) {
+		if isProcessAlive(d.WorkerPID) && workerIdentityStillMatches(d) {
 			// Owning invocation still in flight — leave it for R2.
 			continue
 		}
