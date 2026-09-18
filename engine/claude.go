@@ -1453,6 +1453,24 @@ func interpretClaudeResult(ctx context.Context, issueNumber int, rawOutput []byt
 				text = block + "\n" + text
 			}
 		}
+		// General artifact-harvest fallback (#1782/R1/R2): the CLI's terminal
+		// "result" field is whichever text the agent emitted in its very last
+		// turn — if that turn was a wrap-up following one more tool call after
+		// the real artifact, resp.Result carries the marker but no content.
+		// artifactMissingOnComplete gates on !CheckNoWorkNeeded, so a
+		// legitimate artifact-free completion is never scanned into. When it
+		// fires, recover the last assistant turn that has real content beyond
+		// the bare control markers — deliberately not "the turn containing the
+		// marker," since the reported case's marker-bearing turn contains only
+		// the marker itself (see ADR-1782).
+		if artifactMissingOnComplete(text) {
+			if artifact := extractLastSubstantialAssistantTurn(rawOutput); artifact != "" {
+				claudeLog(issueNumber, "warn", "stage-complete marker present but terminal result carried no artifact — recovered %d bytes from an earlier assistant turn\n", len(artifact))
+				text = artifact + "\n" + text
+			} else {
+				claudeLog(issueNumber, "warn", "stage-complete marker present but no artifact could be harvested from the terminal result or any assistant turn\n")
+			}
+		}
 		usage = tokenUsageFromResponse(resp)
 		if runErr != nil {
 			claudeLog(issueNumber, "claude", "used %d turns, $%.4f\n", resp.NumTurns, resp.CostUSD)
@@ -1483,7 +1501,10 @@ func interpretClaudeResult(ctx context.Context, issueNumber int, rawOutput []byt
 		// Check whether the agent emitted the completion marker before the error.
 		// This handles: (a) normal completion followed by extra work that ends non-zero,
 		// and (b) timeout kills where FABRIK_STAGE_COMPLETE appeared in streamed output.
-		if stageCompleteRE.MatchString(text) {
+		// artifactMissingOnComplete (R3): a marker with no harvestable artifact
+		// anywhere is not evidence of a healthy completion — fall through to
+		// the classifiers below instead of returning completed=true.
+		if stageCompleteRE.MatchString(text) && !artifactMissingOnComplete(text) {
 			claudeLog(issueNumber, "warn", "stage completed (marker found) but Claude exited with error: %v\n", runErr)
 			// Completed is completed — the strongest possible evidence the
 			// session is healthy, regardless of the trailing error. Reset the
@@ -1547,7 +1568,11 @@ func interpretClaudeResult(ctx context.Context, issueNumber int, rawOutput []byt
 	// ran without a structural break, even if the stage itself didn't finish
 	// (no FABRIK_STAGE_COMPLETE). Reset the resume-failure counter (#1414).
 	resetResumeFailureCount(sessFilePath)
-	completed := stageCompleteRE.MatchString(text)
+	// artifactMissingOnComplete (R3): never label a stage complete when the
+	// marker is present but no artifact could be harvested anywhere (and this
+	// isn't a legitimate FABRIK_NO_WORK_NEEDED completion) — that is the exact
+	// #1632/#1782 defect, discovered only a stage later before this guard.
+	completed := stageCompleteRE.MatchString(text) && !artifactMissingOnComplete(text)
 	// Gated on !completed: a denial the model worked around and still
 	// completed the stage is ordinary success — no exemption, no label. See
 	// classifyToolsDenied's doc comment and ADR-1523.
@@ -1988,6 +2013,62 @@ func stripLine(output, line string) string {
 		}
 	}
 	return strings.Join(result, "\n")
+}
+
+// fabrikControlMarkerLines are the bare marker lines stripped by
+// hasArtifactContent to decide whether text carries anything beyond Fabrik's
+// own control vocabulary. Mirrors the marker set finalizeStageOutcome strips
+// before posting (engine/item.go's postOutput computation) — kept in sync
+// deliberately, since both are answering the same question ("is there
+// anything here besides control markers?").
+var fabrikControlMarkerLines = []string{
+	"FABRIK_STAGE_COMPLETE",
+	"FABRIK_BLOCKED_ON_INPUT",
+	"FABRIK_NO_WORK_NEEDED",
+	"FABRIK_SUMMARY_BEGIN",
+	"FABRIK_SUMMARY_END",
+}
+
+// hasArtifactContent reports whether text carries anything beyond Fabrik's
+// own bare control-marker lines (FABRIK_STAGE_COMPLETE and friends). Used by
+// artifactMissingOnComplete (R3) and extractLastSubstantialAssistantTurn
+// (R1/R2) to decide whether a given piece of text is "real content" or just
+// control-plane chatter — see #1782.
+func hasArtifactContent(text string) bool {
+	for _, line := range fabrikControlMarkerLines {
+		text = stripLine(text, line)
+	}
+	return strings.TrimSpace(text) != ""
+}
+
+// artifactMissingOnComplete reports whether text signals FABRIK_STAGE_COMPLETE
+// but carries no harvestable artifact — the #1632/#1782 defect: a trailing
+// tool call after the real content leaves the CLI's terminal result field
+// (or, on a timeout/parse-failure path, the recovered assistant-turn text)
+// holding nothing but the bare marker. Excludes the documented,
+// legitimate artifact-free completion (FABRIK_NO_WORK_NEEDED co-occurring
+// with FABRIK_STAGE_COMPLETE — R3's exclusion) so that path is never treated
+// as this defect, and never triggers the assistant-turn scan below.
+func artifactMissingOnComplete(text string) bool {
+	return stageCompleteRE.MatchString(text) && !CheckNoWorkNeeded(text) && !hasArtifactContent(text)
+}
+
+// extractLastSubstantialAssistantTurn scans raw NDJSON output for the last
+// assistant turn whose text survives hasArtifactContent's stripping
+// non-empty — i.e. the last turn with real content, independent of which
+// turn (if any) happens to carry the FABRIK_STAGE_COMPLETE marker itself.
+// This is deliberate: in the reported shape, the marker-bearing turn
+// contains only the marker, so anchoring the selection on "the turn with the
+// marker" would still fail (R2, see ADR-1782). Returns "" if no assistant
+// turn has any content beyond control markers.
+func extractLastSubstantialAssistantTurn(rawOutput []byte) string {
+	var last string
+	forEachAssistantText(rawOutput, func(text string) {
+		if hasArtifactContent(text) {
+			last = text
+		}
+	})
+	return last
 }
 
 // degenerateAtRefRE matches a bare "@some/path" reference with no other content —
