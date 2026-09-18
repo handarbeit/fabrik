@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -15,7 +16,9 @@ import (
 
 // descendantScanInterval is how often trackWorkerDescendants polls the
 // process table for new session-scoped descendants of a live worker.
-// Test-overridable (mirrors claudeInactivityTimeout's pattern).
+// Test-overridable (mirrors claudeInactivityTimeout's pattern). Also used as
+// sharedProcessTableScan's cache TTL (see below), so shrinking it in tests
+// keeps both the ticker cadence and the cache freshness window in lockstep.
 var descendantScanInterval = 3 * time.Second
 
 // pidFingerprintFn is a package-level function-var seam (mirroring
@@ -25,8 +28,48 @@ var descendantScanInterval = 3 * time.Second
 // reassign this outside tests.
 var pidFingerprintFn = pidFingerprint
 
-// sessionScopedDescendants returns the PID of every live process (other than
-// workerPID itself) whose session ID equals workerPID.
+// sharedProcessTableMu guards the cache sharedProcessTableScan reads and
+// writes.
+var sharedProcessTableMu sync.Mutex
+var sharedProcessTableAt time.Time
+var sharedProcessTableProcs []procArgvEntry
+var sharedProcessTableErr error
+
+// sharedProcessTableScan returns a process-table snapshot, reusing one taken
+// within the last descendantScanInterval instead of shelling out to `ps`
+// again. trackWorkerDescendants runs one independent goroutine per in-flight
+// Claude invocation, each ticking on the same descendantScanInterval; without
+// this, MaxConcurrent invocations in flight meant MaxConcurrent redundant
+// full-table `ps -eo pid=,args=` scans every tick — the same class of `ps`
+// cost R4 found responsible for real CPU spikes elsewhere in this PR (#1805).
+// Review finding on PR #1806.
+//
+// Mirrors dispatchCandidates's existing "fetch once, reuse across many
+// checks" shape (poll.go, via listProcessArgvFn) but as a time-based cache
+// rather than a single-call memoization, since here the sharing is across
+// concurrently-running, independently-ticking goroutines over the life of
+// several invocations rather than within one function call.
+//
+// Deliberately not used by sessionScopedDescendants's own direct callers
+// (this file's tests, which spawn a specific process and expect an
+// immediately fresh scan to find it) — only trackWorkerDescendants's ticker
+// loop goes through this cache, via sessionScopedDescendantsFromProcs below.
+func sharedProcessTableScan() ([]procArgvEntry, error) {
+	sharedProcessTableMu.Lock()
+	defer sharedProcessTableMu.Unlock()
+	if time.Since(sharedProcessTableAt) < descendantScanInterval {
+		return sharedProcessTableProcs, sharedProcessTableErr
+	}
+	procs, err := listProcessArgvFn()
+	sharedProcessTableProcs, sharedProcessTableErr, sharedProcessTableAt = procs, err, time.Now()
+	return procs, err
+}
+
+// sessionScopedDescendantsFromProcs filters an already-fetched process table
+// down to the PIDs of every live process (other than workerPID itself) whose
+// session ID equals workerPID. Split out from sessionScopedDescendants so
+// trackWorkerDescendants can supply a shared, cached scan (sharedProcessTableScan)
+// instead of triggering its own independent `ps` call every tick.
 //
 // This deliberately does not use `ps`'s own session-ID column (`sid=` on
 // GNU/Linux, `sess=` on BSD/macOS): on a recent macOS release tested during
@@ -34,15 +77,10 @@ var pidFingerprintFn = pidFingerprint
 // including PID 1 — evidently masked at the ps-output layer rather than
 // genuinely unset. The underlying getsid(2) syscall is not masked (verified
 // directly: it returns real, distinct session IDs on the same host where
-// `ps`'s own SESS/sess column reads uniformly 0), so this walks the live PID
-// list from listProcessArgv (already-portable, already-tested — see
-// sentinel_probe_unix.go) and calls unix.Getsid per candidate instead of
-// parsing it out of `ps`.
-func sessionScopedDescendants(workerPID int) ([]int, error) {
-	procs, err := listProcessArgv()
-	if err != nil {
-		return nil, err
-	}
+// `ps`'s own SESS/sess column reads uniformly 0), so this walks the given
+// process list and calls unix.Getsid per candidate instead of parsing it out
+// of `ps`.
+func sessionScopedDescendantsFromProcs(procs []procArgvEntry, workerPID int) []int {
 	var pids []int
 	for _, p := range procs {
 		if p.PID == workerPID {
@@ -56,7 +94,22 @@ func sessionScopedDescendants(workerPID int) ([]int, error) {
 			pids = append(pids, p.PID)
 		}
 	}
-	return pids, nil
+	return pids
+}
+
+// sessionScopedDescendants returns the PID of every live process (other than
+// workerPID itself) whose session ID equals workerPID, via a fresh,
+// uncached `ps` scan. Used directly by this file's own tests, which spawn a
+// specific process and need an immediately up-to-date result rather than a
+// possibly-stale shared cache entry from an unrelated earlier scan.
+// trackWorkerDescendants's own ticker loop does not call this — see
+// sharedProcessTableScan's doc comment.
+func sessionScopedDescendants(workerPID int) ([]int, error) {
+	procs, err := listProcessArgv()
+	if err != nil {
+		return nil, err
+	}
+	return sessionScopedDescendantsFromProcs(procs, workerPID), nil
 }
 
 // pidFingerprint returns a single live process's command name and start time
@@ -160,10 +213,11 @@ func trackWorkerDescendants(ctx context.Context, workerPID, issueNumber int, rep
 					pendingIdentityBackfill = nil
 				}
 			}
-			pids, err := sessionScopedDescendants(workerPID)
+			procs, err := sharedProcessTableScan()
 			if err != nil {
 				continue // transient ps failure; try again next tick
 			}
+			pids := sessionScopedDescendantsFromProcs(procs, workerPID)
 			for _, pid := range pids {
 				if seen[pid] {
 					continue

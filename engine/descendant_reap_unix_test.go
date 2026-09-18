@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -975,5 +976,61 @@ func TestSweepStaleDescendants_WorkerFingerprintTransientFailure_LeftAlone(t *te
 	}
 	if len(remaining) != 1 {
 		t.Errorf("expected the entry to be RETAINED (owning worker still in flight), got %d remaining entries", len(remaining))
+	}
+}
+
+// TestTrackWorkerDescendants_ConcurrentInvocationsShareProcessTableScan pins
+// a review finding (Pruefer, PR #1806): trackWorkerDescendants used to call
+// sessionScopedDescendants directly, which shells out to `ps` on every tick
+// of every concurrently-running invocation's own independent goroutine. With
+// MaxConcurrent invocations in flight, that meant MaxConcurrent redundant
+// full-process-table scans every descendantScanInterval — the same class of
+// `ps`/`lsof` CPU cost R4 found responsible for real spikes elsewhere in this
+// PR (#1805). sharedProcessTableScan's TTL cache should coalesce those N
+// independent scans down to roughly one per interval, regardless of how many
+// invocations are concurrently tracking.
+func TestTrackWorkerDescendants_ConcurrentInvocationsShareProcessTableScan(t *testing.T) {
+	origScan := descendantScanInterval
+	descendantScanInterval = 30 * time.Millisecond
+	defer func() { descendantScanInterval = origScan }()
+
+	origFn := listProcessArgvFn
+	var calls atomic.Int64
+	listProcessArgvFn = func() ([]procArgvEntry, error) {
+		calls.Add(1)
+		return []procArgvEntry{}, nil
+	}
+	defer func() { listProcessArgvFn = origFn }()
+
+	// Force the shared cache cold so an earlier test's fresh entry can't make
+	// this test spuriously pass with zero real calls.
+	sharedProcessTableMu.Lock()
+	sharedProcessTableAt = time.Time{}
+	sharedProcessTableMu.Unlock()
+
+	const numInvocations = 5
+	const runDuration = 220 * time.Millisecond // ~7 ticks at 30ms
+	ctx, cancel := context.WithTimeout(context.Background(), runDuration)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	for i := 0; i < numInvocations; i++ {
+		wg.Add(1)
+		go func(workerPID int) {
+			defer wg.Done()
+			trackWorkerDescendants(ctx, workerPID, 1798, "owner/repo", "Validate")
+		}(100000 + i) // implausible PIDs — sessionScopedDescendantsFromProcs finds nothing, which is fine; only call count matters here
+	}
+	wg.Wait()
+
+	got := calls.Load()
+	expectedTicks := int64(runDuration/descendantScanInterval) + 2 // +2 slack for start/stop jitter
+	maxAcceptable := expectedTicks * 2                             // well under numInvocations(5)x if sharing works; would be ~numInvocations*expectedTicks if it didn't
+	if got > maxAcceptable {
+		t.Errorf("listProcessArgvFn called %d times across %d concurrent invocations over ~%d ticks — expected roughly one shared scan per tick (<=%d), not one per invocation per tick (independent scanning would give up to ~%d)",
+			got, numInvocations, expectedTicks, maxAcceptable, expectedTicks*numInvocations)
+	}
+	if got == 0 {
+		t.Error("listProcessArgvFn was never called — test setup is broken (expected at least one real scan)")
 	}
 }
