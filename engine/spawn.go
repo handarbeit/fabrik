@@ -938,7 +938,14 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 		// (internal/itemstate/store.go) make this safe to apply even before
 		// the child is otherwise known to the Store: BlockedBy is a deep field
 		// no shallow/probe apply ever touches, so this pre-seeded edge is
-		// never clobbered when the child is later discovered normally.
+		// never clobbered when the child is later discovered that way. It can
+		// still race the child's own GitHub-side "issues.opened" webhook
+		// delivery (this child was just created a few lines up) — that path
+		// is separately guarded by IssueOpened's PreserveBlockedBy flag
+		// (internal/itemstate/mutation.go, boardcache/delta.go's "opened"
+		// case), since a bare webhook payload never carries dependency data
+		// and would otherwise wipe this pre-seeded edge on out-of-order
+		// delivery (#1783 follow-up, bot review finding).
 		e.store.Apply(itemstate.BlockedByEdgeAdded{
 			Repo:   block.Repo,
 			Number: childNumbers[i],

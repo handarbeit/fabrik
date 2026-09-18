@@ -391,6 +391,55 @@ func TestApplyBlockedByEdgeAdded_LeavesOtherDeepFieldsUntouched(t *testing.T) {
 	}
 }
 
+// ---- IssueOpened.PreserveBlockedBy ----
+
+// TestApplyIssueOpened_PreserveBlockedBy_KeepsPreSeededEdge is a bot-review
+// regression guard (#1783 follow-up): a dependency edge written synchronously
+// via BlockedByEdgeAdded (e.g. spawnChildren, for a child it just created)
+// must survive a subsequent IssueOpened apply whose Item carries no
+// BlockedBy data of its own — the shape of a genuine "issues.opened" webhook
+// payload, which never carries Issue Dependency data.
+func TestApplyIssueOpened_PreserveBlockedBy_KeepsPreSeededEdge(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	applyExpect(t, s, BlockedByEdgeAdded{
+		Repo: testRepo, Number: 1,
+		Dep: gh.Dependency{Repo: "owner/child-repo", Number: 42, State: "OPEN"},
+	}, BlockedByChanged)
+
+	pi := testProjectItem(testRepo, 1)
+	pi.BlockedBy = nil // webhook payloads never carry this
+	s.Apply(IssueOpened{Item: pi, PreserveBlockedBy: true})
+
+	st := getItem(t, s, testRepo, 1)
+	if len(st.BlockedBy) != 1 || st.BlockedBy[0].Repo != "owner/child-repo" || st.BlockedBy[0].Number != 42 {
+		t.Fatalf("BlockedBy = %+v; want the pre-seeded edge preserved", st.BlockedBy)
+	}
+}
+
+// TestApplyIssueOpened_WithoutPreserveBlockedBy_StillOverwrites pins the
+// default (PreserveBlockedBy: false) behavior unchanged: a genuine deep-fetch
+// caller (e.g. applyProjectsV2ItemDelta's "created" case, which resolves the
+// authoritative current BlockedBy via FetchItemDetails) must still be able to
+// clear a since-removed dependency — PreserveBlockedBy must not be applied
+// generically to every IssueOpened, only to the webhook-sourced caller that
+// opts in.
+func TestApplyIssueOpened_WithoutPreserveBlockedBy_StillOverwrites(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	applyExpect(t, s, BlockedByEdgeAdded{
+		Repo: testRepo, Number: 1,
+		Dep: gh.Dependency{Repo: "owner/child-repo", Number: 42, State: "OPEN"},
+	}, BlockedByChanged)
+
+	pi := testProjectItem(testRepo, 1)
+	pi.BlockedBy = nil // authoritative fetch found no open dependencies
+	s.Apply(IssueOpened{Item: pi})
+
+	st := getItem(t, s, testRepo, 1)
+	if len(st.BlockedBy) != 0 {
+		t.Errorf("BlockedBy = %+v; want cleared (default IssueOpened is still authoritative)", st.BlockedBy)
+	}
+}
+
 // ---- SelfWriteObserved ----
 
 func TestApplySelfWriteObserved(t *testing.T) {

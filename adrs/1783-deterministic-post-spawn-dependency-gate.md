@@ -133,13 +133,47 @@ e.store.Apply(itemstate.BlockedByEdgeAdded{
 
 This write can land before the child is otherwise known to the Store (a
 freshly created child has no prior entry) — safe by the same `getOrCreate`
-lazy-stub reasoning as the parent case: `BlockedBy` is a deep field no
-shallow/probe apply ever touches, so a pre-seeded edge on an as-yet-unknown
-item is never clobbered when that item is later discovered normally, and a
-`gh.ProjectItem` with mostly-zero fields showing up transiently in a board
-snapshot before that discovery is indistinguishable from any other item
-sitting in a Status the configured stages don't recognize (`FindStage`
-already returns nil for those without incident).
+lazy-stub reasoning as the parent case against a *shallow or probe* discovery
+of that child: `BlockedBy` is a deep field neither applier ever touches, so a
+pre-seeded edge on an as-yet-unknown item is never clobbered when that item
+is later discovered that way, and a `gh.ProjectItem` with mostly-zero fields
+showing up transiently in a board snapshot before that discovery is
+indistinguishable from any other item sitting in a Status the configured
+stages don't recognize (`FindStage` already returns nil for those without
+incident).
+
+That reasoning does **not** extend to `IssueOpened` — a PR review caught this
+gap in the sibling-edge write specifically (the parent-edge write is
+unaffected, since the parent already exists and its own "opened" webhook, if
+any, fired long before this spawn). The child this edge is written onto was
+itself created moments earlier in the same `spawnChildren` call, and
+GitHub's `issues.opened` webhook for it is not guaranteed to have been
+delivered yet. `boardcache`'s `"opened"` handler
+(`boardcache/delta.go`) applies `itemstate.IssueOpened` unconditionally, with
+no existence check — unlike the `"closed"` case's `ensureIssueInStore` — and
+routes through `applyProjectItem`, which *does* overwrite `BlockedBy`
+whenever it differs from the stored value. Since a webhook payload
+structurally never carries Issue Dependency data, an `IssueOpened` apply
+sourced from one always carries an empty `BlockedBy`, so an out-of-order
+delivery (plausible: this write happens only after several more GitHub
+round-trips past the child's creation) would silently wipe the pre-seeded
+sibling edge — reopening the identical stale-Store race this ADR closes for
+the parent, one level down and via a different trigger.
+
+The fix is a new `IssueOpened.PreserveBlockedBy` flag
+(`internal/itemstate/mutation.go`), set only by `boardcache/delta.go`'s
+`"opened"` handler: when true, `applyToItem` keeps the existing item's
+`BlockedBy` instead of overwriting it from `Item`'s (always-empty) value.
+It is deliberately **not** applied to every `IssueOpened` caller — the other
+production caller whose `Item.BlockedBy` is unconditionally applied,
+`applyProjectsV2ItemDelta`'s `"created"` case, resolves its `Item` via a
+genuine `FetchItemDetails` deep-fetch and must remain free to clear a
+since-removed dependency; forcing preservation there would let a stale edge
+outlive its removal on GitHub. The remaining `IssueOpened` call sites
+(`boardcache.go`'s `Reconcile`, `delta.go`'s `ensureIssueInStore`,
+`engine/terminal.go`'s probe-seed path, `Store.Get`'s cache-miss fallback)
+are all gated on the item not already being in the Store, so preservation
+vs. overwrite is moot for them — there is nothing yet to preserve.
 
 ### Rejected alternative: extend `checkDependencies`'s live-re-read
 

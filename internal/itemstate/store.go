@@ -279,6 +279,12 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		// (stale) creation-time label list from the webhook payload.
 		merged := v.Item
 		merged.Labels = unionStrings(item.Labels, v.Item.Labels)
+		if v.PreserveBlockedBy {
+			// v.Item.BlockedBy is always empty here (webhook payloads never
+			// carry dependency data) — keep whatever the Store already knows
+			// rather than letting applyProjectItem wipe it (#1783 follow-up).
+			merged.BlockedBy = item.BlockedBy
+		}
 		return applyProjectItem(item, merged)
 
 	case IssueLabeled:

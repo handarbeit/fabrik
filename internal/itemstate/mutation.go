@@ -26,6 +26,18 @@ type Mutation interface {
 // is the full per-item representation used throughout Fabrik.
 type IssueOpened struct {
 	Item gh.ProjectItem
+
+	// PreserveBlockedBy is set by callers whose Item.BlockedBy is known to be
+	// incomplete rather than genuinely empty — specifically, a GitHub
+	// "issues.opened" webhook payload, which structurally never carries Issue
+	// Dependency data. When true, applyToItem keeps the existing item's
+	// BlockedBy instead of overwriting it with Item's (always-empty) value —
+	// protecting a dependency edge written synchronously via
+	// BlockedByEdgeAdded (#1783) moments earlier for a newly-created item
+	// from being wiped by an out-of-order "opened" webhook delivery. Callers
+	// whose Item.BlockedBy comes from a genuine deep-fetch (authoritative)
+	// must leave this false so a since-removed dependency is still cleared.
+	PreserveBlockedBy bool
 }
 
 func (IssueOpened) isMutation() {}
