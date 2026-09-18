@@ -161,7 +161,9 @@ func (e *Engine) humanNewComments(item gh.ProjectItem) []gh.Comment {
 }
 
 // processComments handles new user comments on an issue.
-// Flow: 👀 reactions → editing label → invoke Claude → perform actions / update issue body → remove editing label → 🚀 reactions
+// Flow: 👀 reactions → editing label → clear stale stage:<Stage>:complete (#1802) →
+// invoke Claude → perform actions / update issue body → restore/re-derive
+// stage:<Stage>:complete → remove editing label → 🚀 reactions
 func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, comments []gh.Comment, onPIDReady ...func(int)) error {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 
@@ -267,10 +269,17 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		e.syncLabelAdd(item, "fabrik:editing", true)
 	}
 
+	// #1802: clear stage's stale completion claim for the duration of this
+	// rework, strictly inside the fabrik:editing bracket just opened above
+	// (R4) — restored (or re-derived via handleStageComplete) on every exit
+	// path below via endStageRework.
+	wasReworking := e.beginStageRework(item, stage)
+
 	// Step 3: Ensure worktree
 	wm := e.worktreesFor(item.Repo)
 	baseBranch, err := e.baseBranchForItem(item, wm)
 	if err != nil {
+		e.endStageRework(item, stage, wasReworking, false)
 		e.removeEditingLabel(owner, repo, item.Number)
 		if !e.checkNoOpCommentCycle(item, stage, false, lastCommentAuthor(comments)) {
 			e.checkCommentBreaker(item, fmt.Sprintf("resolving the base branch failed: %v", err))
@@ -283,6 +292,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	skipUpdate := prInMergeQueue(item) || e.suppressPreemptiveRebase(item)
 	workDir, err := wm.EnsureWorktree(item.Number, baseBranch, skipUpdate)
 	if err != nil {
+		e.endStageRework(item, stage, wasReworking, false)
 		e.removeEditingLabel(owner, repo, item.Number)
 		if !e.checkNoOpCommentCycle(item, stage, false, lastCommentAuthor(comments)) {
 			e.checkCommentBreaker(item, fmt.Sprintf("setting up the worktree failed: %v", err))
@@ -389,6 +399,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	// completion. The error is already recorded via Errored above. On engine shutdown,
 	// invCompleted is false (see engine/claude.go), so that case still bails here.
 	if err != nil && !completed {
+		e.endStageRework(item, stage, wasReworking, false)
 		e.removeEditingLabel(owner, repo, item.Number)
 		if ctx.Err() != nil {
 			e.logf(item.Number, "skip", "cancelled during claude comment review\n")
@@ -452,7 +463,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 
 	summary := e.publishCommentOutput(owner, repo, item, stage, comments, output, workDir, baseBranch)
 
-	e.finalizeComments(ctx, board, item, stage, comments, owner, repo, baseBranch, completed, summary)
+	e.finalizeComments(ctx, board, item, stage, comments, owner, repo, baseBranch, completed, wasReworking, summary)
 
 	// Checked last so any reset applied above (stage-complete inside
 	// finalizeComments, or an issue-body update inside publishCommentOutput)
@@ -477,6 +488,74 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	}
 
 	return nil
+}
+
+// beginStageRework clears stage's stale completion claim for the duration of a
+// comment re-entry (#1802, R1): a stage being reworked must not keep
+// advertising stage:<Stage>:complete for the whole rework window, since that
+// misreports an actively-reworked stage as finished, distinguishable from a
+// genuinely finished one only by the reader already knowing fabrik:editing
+// silently overrides it.
+//
+// No-ops (returns false) when stage:<Stage>:complete isn't present on item —
+// the common mid-flight-rework case (e.g. the stage never completed yet, or a
+// prior rework already cleared it) has nothing to lie about, so nothing is
+// marked or cleared.
+//
+// Mark-first-then-clear ordering is deliberate: fabrik:reworking is added
+// before stage:<Stage>:complete is removed, so "fabrik:reworking present" is
+// always the correct, unambiguous trigger for crash recovery (R3) to restore
+// the completion label — regardless of which of the two mutations actually
+// landed before a crash. The reverse order would leave a crash window with no
+// durable signal that a restore is owed, which is exactly the "silently
+// re-run a finished stage" failure R2 says is worse than the pre-fix lie.
+//
+// Must only be called strictly inside the fabrik:editing bracket (R4): every
+// dispatch-admission gate (itemNeedsWork) already refuses to act while
+// fabrik:editing is present, so clearing/restoring stage:<Stage>:complete
+// inside that window cannot change any gating decision.
+func (e *Engine) beginStageRework(item gh.ProjectItem, stage *stages.Stage) bool {
+	completeLabel := "stage:" + stage.Name + ":complete"
+	if !hasLabel(item.Labels, completeLabel) {
+		return false
+	}
+	e.addLabel(item, "fabrik:reworking")
+	e.removeLabel(item, completeLabel)
+	return true
+}
+
+// endStageRework is beginStageRework's exit-path counterpart, called at every
+// non-completing and completing exit of a comment re-entry that began a
+// rework window (R2). No-ops when wasReworking is false — nothing was ever
+// marked or cleared, so nothing needs restoring.
+//
+// When completedThisCycle is true, stage:<Stage>:complete is deliberately NOT
+// re-added directly here — the re-entry itself re-signaled completion, so
+// finalizeComments' call to handleStageComplete (unmodified) re-derives the
+// correct label from scratch, including its wait_for_ci deferral. Restoring
+// it here too would just be redundant (AddLabelToIssue is idempotent) but
+// duplicates the single source of truth for "what does complete mean" in two
+// places, so it's deliberately left to that flow alone.
+//
+// When completedThisCycle is false, stage:<Stage>:complete is restored
+// directly — the rework didn't re-signal completion this cycle (error,
+// blocked-on-input, tools-denied, setup failure, or exhausted turns), and no
+// other flow will restore it, so a direct re-add is the only way the
+// stage's completion claim survives the cycle.
+//
+// fabrik:reworking is always removed last (mirroring beginStageRework's
+// mark-first-then-clear invariant in reverse): the completion label lands (or
+// is deliberately deferred to handleStageComplete) before the marker that
+// says "a restore is owed" is cleared, so a crash between the two still
+// leaves the correct, safe-to-retry signal for startup recovery.
+func (e *Engine) endStageRework(item gh.ProjectItem, stage *stages.Stage, wasReworking, completedThisCycle bool) {
+	if !wasReworking {
+		return
+	}
+	if !completedThisCycle {
+		e.addLabel(item, "stage:"+stage.Name+":complete")
+	}
+	e.removeLabel(item, "fabrik:reworking")
 }
 
 // lastCommentAuthor returns the author of the last comment in comments, or ""
@@ -680,12 +759,15 @@ func (e *Engine) publishCommentOutput(owner, repo string, item gh.ProjectItem, s
 	return summary
 }
 
-// finalizeComments removes the editing label, reacts with 🚀 to all processed
-// comments (resolving any addressed review threads), marks the comments as
-// processed so they won't be retried, and — if comment processing resolved
-// the stage — creates/marks-ready the draft PR and advances to the next
-// stage. This avoids an unnecessary extra stage invocation after unblocking.
-func (e *Engine) finalizeComments(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, comments []gh.Comment, owner, repo, baseBranch string, completed bool, summary string) {
+// finalizeComments restores or re-derives the rework-cleared stage:<Stage>:complete
+// label (#1802, R2 — see endStageRework), removes the editing label, reacts
+// with 🚀 to all processed comments (resolving any addressed review threads),
+// marks the comments as processed so they won't be retried, and — if comment
+// processing resolved the stage — creates/marks-ready the draft PR and
+// advances to the next stage. This avoids an unnecessary extra stage
+// invocation after unblocking.
+func (e *Engine) finalizeComments(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, comments []gh.Comment, owner, repo, baseBranch string, completed, wasReworking bool, summary string) {
+	e.endStageRework(item, stage, wasReworking, completed)
 	e.removeEditingLabel(owner, repo, item.Number)
 
 	resolvedThreads := make(map[string]bool)

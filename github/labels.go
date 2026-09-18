@@ -43,6 +43,7 @@ var staticLabelDefs = []labelDef{
 	// --- neutral / transient labels (grey) ---
 	{"fabrik:auto-merge-enabled", "GitHub auto-merge enabled on linked PR; engine awaiting GitHub atomic merge", "cfd3d7"},
 	{"fabrik:editing", "Issue is being edited by the user; processing deferred", "cfd3d7"},
+	{"fabrik:reworking", "Current stage's :complete is cleared for an active comment re-entry rework; restored on exit", "cfd3d7"},
 	{"fabrik:children-spawned", "Pre-Implement spawned sub-issues; idempotency guard — remove to re-trigger spawn", "cfd3d7"},
 	{"fabrik:sub-issue", "Created by Fabrik's pre-Implement spawn step; no engine-gate semantics", "cfd3d7"},
 
