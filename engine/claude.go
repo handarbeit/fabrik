@@ -268,6 +268,7 @@ var defaultAllowedTools = []string{
 	"Bash(git:*)", "Bash(gh:*)", "Bash(go:*)", "Bash(npm:*)", "Bash(npx:*)", "Bash(yarn:*)", "Bash(pnpm:*)",
 	"Bash(make:*)", "Bash(cargo:*)", "Bash(python:*)", "Bash(pip:*)", "Bash(uv:*)", "Bash(pytest:*)",
 	"Bash(ls:*)", "Bash(cat:*)", "Bash(rm:*)", "Bash(cp:*)", "Bash(mv:*)", "Bash(mkdir:*)", "Bash(find:*)",
+	"Bash(date:*)",
 }
 
 // disallowedTools lists harness tools that must never reach a headless Fabrik
