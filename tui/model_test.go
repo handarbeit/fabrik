@@ -1393,8 +1393,6 @@ func TestUpdate_PluginUpgradeResultMsg_Error(t *testing.T) {
 	}
 }
 
-// TestUpdate_CustomWorkflowEvent verifies that CustomWorkflowEvent sets the
-// customWorkflow badge and clears skillsStaleCount.
 // TestUpdate_CustomWorkflowEvent verifies #1787: CustomWorkflowEvent and
 // skillsStaleCount are independent facts. A pre-existing skillsStaleCount
 // must be preserved (not zeroed) when CustomWorkflowEvent arrives — before
@@ -1616,8 +1614,6 @@ func TestUKey_OverwriteConfirm_Esc(t *testing.T) {
 	}
 }
 
-// TestUpdate_SkillsStaleEvent_Zero_ClearsCustomWorkflow verifies that
-// SkillsStaleEvent{Count:0} clears the customWorkflow badge.
 // TestUpdate_SkillsStaleEvent_Zero_PreservesCustomWorkflow verifies #1787:
 // SkillsStaleEvent{Count: 0} does not imply the plugin is no longer
 // customized — before #1787 this cleared customWorkflow, which is wrong: a

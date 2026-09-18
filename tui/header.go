@@ -119,6 +119,14 @@ func (h HeaderComponent) View(width int) string {
 		left = title + status
 		leftWidth = lipgloss.Width(left)
 	}
+	// Even with status cleared, a badge — especially the combined
+	// "custom workflow (N stale)" form (#1787), which is longer than either
+	// badge alone — may still not fit a narrow terminal. Drop it rather than
+	// let it overflow; the title and timer must always stay visible.
+	if badge != "" && leftWidth+timerWidth+badgeWidth > available {
+		badge = ""
+		badgeWidth = 0
+	}
 	if badge != "" {
 		left = left + badge
 		leftWidth += badgeWidth
