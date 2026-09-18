@@ -2140,12 +2140,32 @@ func groupQueuedByRepo(items []gh.ProjectItem, holdingStatus, defaultRepo string
 // correctness issue (AC2 cares about landing target, not partition count) —
 // accepted in exchange for the default partition never depending on git at
 // grouping time at all.
+//
+// A third fail-closed guard runs before either of the above, ahead of
+// itemHasBaseLabel: an item whose board-cache entry has never been deep-fetched
+// (CacheImpl.IsItemDeepFetched) carries no real Labels — a cold Store snapshot's
+// Labels slice is empty, which is indistinguishable from a genuinely label-free
+// item unless hydration is checked directly. Treating that absence as "no
+// base: label" would silently pin the item to defaultPartitionBase regardless
+// of its real base — the #1688/#1772 production defect (an integration PR
+// opened against a protected default branch nine minutes before a human
+// promotion gate could intervene). The check is per-item (never a global
+// "cache is bootstrapped" flag, which is true the instant any item exists and
+// says nothing about this one) and fails open when no CacheImpl is wired
+// (e.cache() == nil): a GitHubAdapter-backed engine always reads live, full
+// data, so there is no "unhydrated" state possible in that mode. An excluded
+// item is simply left in Queued and picked up warm on a later poll once
+// hydrated — no operator action required. See ADR-1772.
 func (e *Engine) groupQueuedByRepoAndBase(items []gh.ProjectItem, holdingStatus, defaultRepo string) []queuedRepoGroup {
 	var out []queuedRepoGroup
 	for _, rg := range groupQueuedByRepo(items, holdingStatus, defaultRepo) {
 		var baseOrder []string
 		byBase := make(map[string][]gh.ProjectItem)
 		for _, item := range rg.items {
+			if c := e.cache(); c != nil && !c.IsItemDeepFetched(rg.repoKey, item.Number) {
+				e.logf(item.Number, "merge-train", "cache entry for #%d not yet hydrated (no deep-fetch recorded) — excluding from batching this poll, will retry\n", item.Number)
+				continue
+			}
 			base := defaultPartitionBase
 			if itemHasBaseLabel(item) {
 				e.mu.Lock()
