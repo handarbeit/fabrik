@@ -3135,8 +3135,10 @@ one entry per denial (`tool_name`, `tool_use_id`, `tool_input`), on an otherwise
 exit.
 
 **Detection:** `classifyToolsDenied(resp claudeResponse)` (`engine/claude.go`) returns the
-deduplicated, first-seen-order list of denied tool names whenever `len(resp.PermissionDenials) > 0`.
-`interpretClaudeResult` consults it only in the clean-exit path (`runErr == nil`), gated on
+deduplicated, first-seen-order list of denied tool names, alongside a per-denial (not deduplicated)
+`[]toolDenial` carrying each denial's tool name plus — for `Bash` only, best-effort decoded from the
+CLI's `tool_input` — the specific command that was denied (#1775; see §7.3d). `interpretClaudeResult`
+consults it only in the clean-exit path (`runErr == nil`), gated on
 `!completed` — a denial the model worked around and still completed the stage is ordinary success,
 with no exemption and no label, exactly matching every incident report and this section's own
 empirical reproduction. When the gate matches, `interpretClaudeResult` returns a
@@ -3161,11 +3163,12 @@ edits. In the final escalation block, `toolsDenied` is a fourth branch alongside
    deliberately **not** `StageRetryIncremented` (R2) — so a tool-permission denial never counts
    against `MaxRetries`.
 2. If `fabrik:tools-denied` is absent, posts an explanatory comment naming the denied tool(s)
-   (`toolsDeniedErr.ToolNames`, joined) and pointing at the permission configuration (e.g. a stray
-   `PreToolUse` hook, or an org/user-level `permissions` "ask" rule with no interactive prompt
-   available) as the thing to check, then applies the label — gated on the label's own absence, the
-   same once-per-episode idiom as `fabrik:claude-limit`/`fabrik:awaiting-ci`. A repeated detection
-   within the same episode posts neither a duplicate comment nor a duplicate label-add.
+   (`toolsDeniedErr.ToolNames`, joined) — plus the first denied command when the CLI's `tool_input`
+   made one decodable (`firstToolsDeniedCommand`/`sanitizeToolsDeniedCommand`, #1775) — stating that
+   the denial is scoped to that one command, not the tool for the rest of the session, then applies
+   the label — gated on the label's own absence, the same once-per-episode idiom as
+   `fabrik:claude-limit`/`fabrik:awaiting-ci`. A repeated detection within the same episode posts
+   neither a duplicate comment nor a duplicate label-add.
 3. Compares the running count against `MaxToolsDeniedRetries` (default **3** — see "The
    `MaxToolsDeniedRetries` bound" below); at the bound, `pauseForToolsDeniedLimit` applies
    `fabrik:paused` + `fabrik:awaiting-input` (via the shared `pauseIssue`/`EnginePaused` primitives,
@@ -3194,8 +3197,10 @@ cannot recur.
 
 **The `MaxToolsDeniedRetries` bound (R5, ADR-1523):** defaults to 3 (`--max-tools-denied-retries` /
 `FABRIK_MAX_TOOLS_DENIED_RETRIES`), lower than `MaxSliceRetries` (10 — a turn-cap preemption is
-routine and self-resolving by construction) since a permission misconfiguration does not resolve
-itself the way slicing does — no retry can fix a broken permission profile — but higher than
+routine and self-resolving by construction). A denial is command-scoped and often self-resolves once
+the worker reshapes the offending command (#1775, §7.3d) — unlike a genuine permission
+misconfiguration, which would recur identically — but a handful of cycles is still a reasonable place
+to draw the line before asking a human to look, higher than
 `MaxResumeFailures` (2) since the explanatory comment already reaches the operator on the very first
 detection (R4); the extra cycles before escalating guard only against a single spurious/flaky
 denial, never against expecting a retry to fix the underlying cause. An exempt condition that never
@@ -3248,13 +3253,67 @@ identical regardless of which invocation type detected it (R3). No change was ne
 itself — `dispatchReinvoke`'s error handling only logs whatever `processComments` returns; the
 classification, accounting, and escalation are already complete by the time control returns there.
 
-**Remedy naming (R4):** `pauseForToolsDeniedLimit`'s escalation comment additionally names
-`fabrik:unrestricted` as the actionable remedy, alongside the pre-existing "check the permission
-configuration" text — a headless worker has no interactive prompt to grant the denied tool, so
-"check the permission configuration" alone is not actionable in that context; the caveat (it removes
-all tool restrictions, not just the denied tool) is stated alongside it.
+**Remedy naming (R4, corrected by #1775 — see §7.3d):** `pauseForToolsDeniedLimit`'s escalation
+comment states the per-command scope, then offers remediation in order: try re-running the step as
+separate, simpler commands, or add a matching `allowed_tools` rule for the command that keeps getting
+denied, first; `fabrik:unrestricted` is named only as a last resort — a headless worker has no
+interactive prompt to grant a denied tool, so it is the fallback once the command-scoped fixes have
+been tried — with its trade-off (it removes all tool restrictions, not just the denied one) stated
+alongside it.
 
 See ADR-1704 and #1704, #1657, #1523.
+
+### 7.3d Command-Scoped Messaging and Measured Progress Wording (#1775, #1743)
+
+Two corrections to the messaging §7.3b/§7.3c describe, both landing in #1775 since #1743 targets the
+same log line #1775 already touches:
+
+**Denials are command-scoped, not tool- or session-scoped.** ADR-1523's original reasoning — that a
+tool missing from `--allowedTools` "self-reports it unavailable, with no `permission_denials` entry,"
+so a real denial "most plausibly involved a hook" — was explicitly flagged in that ADR's own text as
+"by strong inference," never observed. A community report (#1741) directly contradicts it: within one
+session, an ordinary `git status && …` `Bash` call ran, and a later, differently-shaped
+`base_branch=$(gh pr view …)` `Bash` call was denied — impossible if a hook or mode had disabled `Bash`
+session-wide. The reporter's own 745-denial census attributes denials to command *shape* (`/tmp`
+redirects, unallowed binaries, env-prefix/variable-assignment forms, `cd`-chains, conditionals), not to
+session or tool. **ADR-1775 supersedes this specific piece of ADR-1523's reasoning** (and ADR-1704's
+repetition of the related `decision_reason_type: "mode"` framing) without rewriting either — both
+remain as accurate historical records of the decisions as made at the time.
+
+Consequently: `classifyToolsDenied` now also returns per-denial `[]toolDenial` (tool name plus, for
+`Bash` only, a best-effort `tool_input.command` decode — `decodeToolCommand`, silently degrading to
+`""` for absent/non-Bash/malformed input, never a panic). `sanitizeToolsDeniedCommand` renders a
+denied command safely for inline display: embedded newlines collapse to spaces, backticks become
+straight quotes, and the result is truncated via the existing `truncateMiddle` convention
+(`engine/merge_train.go`) with short constants sized for a single command line rather than
+`truncateMiddle`'s CI-log-sized defaults. Both `recordToolsDeniedDetection`'s initial comment and
+`pauseForToolsDeniedLimit`'s escalation comment name the first available command this way, state the
+per-command scope explicitly, and no longer contain "no retry can fix this on its own" — the phrase
+this section's earlier text described, now removed from both the comment templates and
+`claudeerr.ToolsDeniedError`'s doc comment. `ToolsDeniedError` gained an additive `Denials
+[]ToolDenial` field alongside the pre-existing `ToolNames`; every construction site that only ever set
+`ToolNames` keeps compiling and behaving unchanged.
+
+**The tools-denied log line no longer asserts unmeasured progress (#1743).** Independently of the
+command-scoping fix, `interpretClaudeResult`'s tools-denied branch previously logged "stage did not
+make progress" — a claim derived purely from `!completed` (the absence of `FABRIK_STAGE_COMPLETE`),
+never from checking the worktree. This directly contradicted this document's own §7.3b text ("real,
+committable work may have happened before the denial") and `plugin/fabrik-workflows/LABELS.md`'s
+shipped `fabrik:tools-denied` entry (which already correctly says commits and pushes still happen). A
+reported instance: an Implement comment-review invocation made three commits (the entire fix, pushed),
+spent 80 turns, and was logged as having made no progress — the next run then treated the review
+comment as already handled and did nothing. The fix: `runClaude` captures the worktree's `HEAD` before
+starting the Claude process and again immediately after `cmd.Wait()` returns (best-effort,
+`gitHeadSHA`, mirroring the existing `headBefore`/`headAfter` pattern `dispatchReviewReinvoke` uses for
+review-reinvoke, #1045), computes a commit count between them (`gitCommitCountBetween`, `git rev-list
+--count`) when both SHAs are non-empty and differ, and passes that count into
+`interpretClaudeResult` as a new parameter. The tools-denied branch reports "N commit(s) pushed, stage
+did not signal completion" when a positive count was measured, or "stage did not signal completion"
+— exactly what `!completed` actually establishes — when it wasn't; it never asserts an unmeasured
+claim, and never prints "0 commit(s)". The string "did not make progress" no longer appears anywhere in
+the engine.
+
+See adrs/1775-command-scoped-tools-denied-messaging.md, #1775, #1741, #1743.
 
 ### 7.4 Multi-Instance Lock Protocol
 
