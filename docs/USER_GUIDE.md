@@ -3367,8 +3367,13 @@ self-describing identity in `ps` output — `ps aux | grep -- "--name fabrik:"` 
 every worker on the host, and the sentinel itself names which repo, issue, and stage
 each one is serving. The flag is gated on a one-time startup probe of the installed
 `claude` binary's `--help` output; on older binaries that predate the flag, it's
-omitted and workers run exactly as before. It is observability-only — the engine
-never reads or branches on it. See [stage-lifecycle.md § Worker Session Naming](stage-lifecycle.md#worker-session-naming---name)
+omitted and workers run exactly as before. Originally observability-only for humans
+running that `ps | grep`, the engine now also uses it as a liveness-verification
+signal: before clearing a worker whose PID was never recorded (the stale-timeout
+path — see `docs/state-machine.md` §9.7), it probes for a live process still
+carrying that worker's sentinel rather than clearing blind, and the dispatcher
+independently refuses to start a second worker while a cleared worker's sentinel is
+still live. See [stage-lifecycle.md § Worker Session Naming](stage-lifecycle.md#worker-session-naming---name)
 for the full as-built mechanism.
 
 ### Rate Limit Monitoring

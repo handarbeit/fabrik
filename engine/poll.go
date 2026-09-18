@@ -1811,6 +1811,19 @@ func (e *Engine) runCatchUpPhase2(ctx context.Context, board *gh.ProjectBoard, i
 func (e *Engine) dispatchCandidates(ctx context.Context, board *gh.ProjectBoard, deepFetchCandidates []gh.ProjectItem) int {
 	var dispatched int
 
+	// R5's sentinel check (below) fetches the live process table at most once
+	// per call to dispatchCandidates, lazily on first need, and reuses it for
+	// every dispatch-eligible item in this pass — not once per item. A poll
+	// with many simultaneously dispatch-eligible items (a startup burst, or a
+	// wide cooldown-expiry window) would otherwise serialize one `ps`
+	// subprocess spawn per item before any of them could be dispatched
+	// (review finding on #1779).
+	var (
+		procListFetched bool
+		procList        []procArgvEntry
+		procListErr     error
+	)
+
 	for _, item := range deepFetchCandidates {
 		item := item
 		iKey := issueKey(item, e.defaultRepo())
@@ -1818,6 +1831,12 @@ func (e *Engine) dispatchCandidates(ctx context.Context, board *gh.ProjectBoard,
 		// Full check including comments (populated by deep fetch above).
 		if !e.itemNeedsWork(item) {
 			continue
+		}
+		// Capture stage name up front — both the Worker() != nil guard below (R5)
+		// and job tracking further down need it.
+		var stageName string
+		if s := stages.FindStage(e.cfg.Stages, item.Status); s != nil {
+			stageName = s.Name
 		}
 		// Skip issues already being processed by a previous poll cycle's worker.
 		// Use the Store-backed Worker field (set by WorkerEntered before goroutine launch)
@@ -1833,17 +1852,40 @@ func (e *Engine) dispatchCandidates(ctx context.Context, board *gh.ProjectBoard,
 		if snap, err := e.store.Get(itemRepo, item.Number); err == nil && snap.Worker() != nil {
 			continue
 		}
+		// R5 (#1779): the item's own Worker() == nil at this point, but a prior
+		// worker for this (issue, stage) may have just been cleared by
+		// worker-liveness's timeout path (R3/R4) while a real process carrying
+		// its sentinel is still alive — the exact "second worker on one
+		// worktree" shape #1749 reported. This is an independent backstop:
+		// R1/R2 should make it unreachable, but dispatch must never rely on
+		// that alone. Skipped when claudeNameFlagSupported is false (no worker
+		// could ever carry a sentinel) and fails OPEN on a probe error — a
+		// broken `ps` must not wedge dispatch for every item on every poll,
+		// which would be a strictly worse failure mode than the rare
+		// duplicate-writer this check exists to prevent.
+		if claudeNameFlagSupported && stageName != "" {
+			if !procListFetched {
+				procList, procListErr = listProcessArgvFn()
+				procListFetched = true
+			}
+			sentinel := sessionNameSentinel(itemRepo, item.Number, stageName)
+			var result sentinelProbeResult
+			if procListErr != nil {
+				result = sentinelProbeResult{Err: procListErr}
+			} else {
+				result = matchSentinelInArgvList(sentinel, procList)
+			}
+			if result.Err == nil && result.Live {
+				e.logf(item.Number, "worker-liveness", "refusing dispatch: sentinel %q still live for a cleared worker\n", sentinel)
+				continue
+			}
+		}
 		// Acquire semaphore slot, but abort if the context is cancelled so we
 		// don't block indefinitely when all slots are taken at shutdown time.
 		select {
 		case e.sem <- struct{}{}:
 		case <-ctx.Done():
 			return dispatched
-		}
-		// Capture stage name and start time for job tracking.
-		var stageName string
-		if s := stages.FindStage(e.cfg.Stages, item.Status); s != nil {
-			stageName = s.Name
 		}
 		startTime := time.Now()
 		// Apply WorkerEntered synchronously before the goroutine starts so that

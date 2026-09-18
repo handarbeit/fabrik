@@ -159,3 +159,173 @@ func TestDispatchCandidates_SkipsInFlightWorker(t *testing.T) {
 		t.Errorf("dispatched = %d, want 0 (item already has an in-flight worker)", dispatched)
 	}
 }
+
+// TestDispatchCandidates_RefusesLiveSentinelAfterClear is the R5/Acceptance-5
+// regression: reproduces the reported shape — a prior worker for this
+// (issue, stage) was cleared (Worker() == nil in the store, exactly as
+// worker-liveness leaves it after a timeout-based clear), but a real process
+// carrying that worker's sentinel is still live. Dispatch must refuse to
+// start a second worker even though the store-level in-flight guard alone
+// would have let it through.
+func TestDispatchCandidates_RefusesLiveSentinelAfterClear(t *testing.T) {
+	claude := &mockClaudeInvoker{}
+	eng := testEngine(t, &mockGitHubClient{}, claude)
+	eng.cfg.MaxConcurrent = 1
+	eng.sem = make(chan struct{}, 1)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 12, Title: "Test", Status: "Research"}
+	// No Worker in the store — mirrors the state right after worker-liveness
+	// clears a worker (WorkerExited already applied).
+
+	// The fake process table carries the item's own sentinel — proving both
+	// that dispatchCandidates constructs the expected sentinel value AND that
+	// the batched match finds it: if the wrong sentinel were computed, this
+	// fake process wouldn't match it and dispatch would proceed (dispatched
+	// would be 1, failing the assertion below).
+	wantSentinel := sessionNameSentinel(itemOwnerRepoString(item, eng.defaultRepo()), item.Number, "Research")
+	withProcessListProbe(t, true, []procArgvEntry{{PID: 55555, Argv: []string{"--name", wantSentinel}}}, nil)
+
+	dispatched := eng.dispatchCandidates(context.Background(), board, []gh.ProjectItem{item})
+	eng.wg.Wait()
+
+	if dispatched != 0 {
+		t.Errorf("dispatched = %d, want 0 (a live sentinel must refuse dispatch even with Worker() == nil)", dispatched)
+	}
+	if snap, err := eng.store.Get(itemOwnerRepoString(item, eng.defaultRepo()), item.Number); err == nil && snap.Worker() != nil {
+		t.Error("expected no WorkerEntered mutation to have been applied for a refused dispatch")
+	}
+}
+
+// TestDispatchCandidates_DispatchesWhenSentinelNotFound verifies the R5
+// guard's complement: when the probe affirmatively finds no live sentinel,
+// dispatch proceeds normally.
+func TestDispatchCandidates_DispatchesWhenSentinelNotFound(t *testing.T) {
+	claude := &mockClaudeInvoker{}
+	eng := testEngine(t, &mockGitHubClient{}, claude)
+	eng.cfg.MaxConcurrent = 1
+	eng.sem = make(chan struct{}, 1)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 13, Title: "Test", Status: "Research"}
+
+	withProcessListProbe(t, true, nil, nil)
+
+	dispatched := eng.dispatchCandidates(context.Background(), board, []gh.ProjectItem{item})
+	eng.wg.Wait()
+
+	if dispatched != 1 {
+		t.Errorf("dispatched = %d, want 1 (no live sentinel found — dispatch must proceed)", dispatched)
+	}
+}
+
+// TestDispatchCandidates_DispatchesOnProbeError verifies R5 fails OPEN on a
+// probe error: a broken `ps` must not wedge dispatch for every item on every
+// poll, which would be a strictly worse failure mode than the rare
+// duplicate-writer this guard exists to prevent.
+func TestDispatchCandidates_DispatchesOnProbeError(t *testing.T) {
+	claude := &mockClaudeInvoker{}
+	eng := testEngine(t, &mockGitHubClient{}, claude)
+	eng.cfg.MaxConcurrent = 1
+	eng.sem = make(chan struct{}, 1)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 14, Title: "Test", Status: "Research"}
+
+	withProcessListProbe(t, true, nil, errSentinelProbeUnsupported)
+
+	dispatched := eng.dispatchCandidates(context.Background(), board, []gh.ProjectItem{item})
+	eng.wg.Wait()
+
+	if dispatched != 1 {
+		t.Errorf("dispatched = %d, want 1 (a probe error must fail open, not block dispatch)", dispatched)
+	}
+}
+
+// TestDispatchCandidates_BatchesProcessListFetchAcrossCandidates is the
+// review-finding regression for #1779: the R5 sentinel check must fetch the
+// live process table at most once per dispatchCandidates call, reusing it
+// for every dispatch-eligible item, not once per item — the original
+// implementation spawned one `ps` subprocess per candidate, serially, before
+// any of them could be dispatched. Neutralizing the batching (reverting to a
+// per-item fetch) makes fetchCount == 3 instead of 1, failing this test.
+func TestDispatchCandidates_BatchesProcessListFetchAcrossCandidates(t *testing.T) {
+	claude := &mockClaudeInvoker{}
+	eng := testEngine(t, &mockGitHubClient{}, claude)
+	eng.cfg.MaxConcurrent = 5
+	eng.sem = make(chan struct{}, 5)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	items := []gh.ProjectItem{
+		{Number: 20, Title: "A", Status: "Research"},
+		{Number: 21, Title: "B", Status: "Research"},
+		{Number: 22, Title: "C", Status: "Research"},
+	}
+
+	var fetchCount int
+	origSupported := claudeNameFlagSupported
+	origFn := listProcessArgvFn
+	claudeNameFlagSupported = true
+	listProcessArgvFn = func() ([]procArgvEntry, error) {
+		fetchCount++
+		return nil, nil
+	}
+	t.Cleanup(func() {
+		claudeNameFlagSupported = origSupported
+		listProcessArgvFn = origFn
+	})
+
+	dispatched := eng.dispatchCandidates(context.Background(), board, items)
+	eng.wg.Wait()
+
+	if dispatched != 3 {
+		t.Fatalf("dispatched = %d, want 3", dispatched)
+	}
+	if fetchCount != 1 {
+		t.Errorf("listProcessArgvFn called %d time(s) for 3 dispatch-eligible items, want 1 (process table must be fetched once per dispatchCandidates call, not once per item)", fetchCount)
+	}
+}
+
+// TestDispatchCandidates_SkipsProcessListFetchWhenNoCandidatesNeedIt verifies
+// the fetch stays lazy: when every candidate already has an in-flight worker
+// (never reaches the R5 check), listProcessArgvFn must not be invoked at all.
+func TestDispatchCandidates_SkipsProcessListFetchWhenNoCandidatesNeedIt(t *testing.T) {
+	claude := &mockClaudeInvoker{}
+	eng := testEngine(t, &mockGitHubClient{}, claude)
+	eng.cfg.MaxConcurrent = 5
+	eng.sem = make(chan struct{}, 5)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 23, Title: "Test", Status: "Research"}
+	itemRepo := itemOwnerRepoString(item, eng.defaultRepo())
+	eng.store.Apply(itemstate.LocalLockAcquired{
+		Repo:       itemRepo,
+		Number:     item.Number,
+		User:       eng.cfg.User,
+		AcquiredAt: time.Now(),
+		Worker:     &itemstate.WorkerHandle{StageName: "Research", StartedAt: time.Now(), LastSignAt: time.Now()},
+	})
+
+	var fetchCount int
+	origSupported := claudeNameFlagSupported
+	origFn := listProcessArgvFn
+	claudeNameFlagSupported = true
+	listProcessArgvFn = func() ([]procArgvEntry, error) {
+		fetchCount++
+		return nil, nil
+	}
+	t.Cleanup(func() {
+		claudeNameFlagSupported = origSupported
+		listProcessArgvFn = origFn
+	})
+
+	dispatched := eng.dispatchCandidates(context.Background(), board, []gh.ProjectItem{item})
+	eng.wg.Wait()
+
+	if dispatched != 0 {
+		t.Fatalf("dispatched = %d, want 0 (item already has an in-flight worker)", dispatched)
+	}
+	if fetchCount != 0 {
+		t.Errorf("listProcessArgvFn called %d time(s), want 0 (no candidate reached the R5 check)", fetchCount)
+	}
+}
