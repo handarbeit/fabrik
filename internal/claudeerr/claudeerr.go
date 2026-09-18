@@ -144,6 +144,15 @@ func (e *ResumeFailureError) Unwrap() error {
 // org/user-level "ask" permission rule with no interactive prompt available,
 // etc.), not a genuine defect in the stage's work. See #1523.
 //
+// Each denial is scoped to the specific command that was denied, not to the
+// tool for the rest of the session (confirmed by direct observation in
+// #1741: a later, differently-shaped Bash command ran successfully in the
+// same session after an earlier one was denied) — so a bound retry that
+// reshapes the offending command, or re-runs the step as separate simpler
+// commands, is often exactly what resolves it. See adrs/1775-*.md, which
+// supersedes ADR-1523's "by strong inference" allowlist reasoning without
+// rewriting that ADR.
+//
 // Structurally unlike UsageLimitError/APIErrorExit: the CLI exits cleanly
 // (is_error=false, terminal_reason="completed") and real, committable work
 // may have happened before the denial — so this does NOT short-circuit
@@ -152,14 +161,32 @@ func (e *ResumeFailureError) Unwrap() error {
 // commitWIP, push, and markCommentsSeenByStage all still run, so a
 // late-invocation denial never discards earlier valid edits. It IS exempted
 // from StageRetryIncremented (mirroring the did-not-run family's max_retries
-// exemption) because no retry can fix an environmental permission
-// misconfiguration — see handleToolsDeniedExit in engine/item.go, the sole
-// consumer (via errors.As), and ADR-1523.
+// exemption), bounded instead by its own independent counter — see
+// handleToolsDeniedExit in engine/item.go, the sole consumer (via
+// errors.As), and ADR-1523.
 type ToolsDeniedError struct {
 	// ToolNames lists the distinct tool names the CLI reported as denied
-	// (resp.permission_denials[].tool_name), for the R4 explanatory comment
-	// and for logging. Never empty when this error is constructed.
+	// (resp.permission_denials[].tool_name), deduplicated, for the R4
+	// explanatory comment and for logging. Never empty when this error is
+	// constructed.
 	ToolNames []string
+	// Denials carries one entry per raw denial (not deduplicated), including
+	// the command detail decoded from the CLI's tool_input where available
+	// (Bash only — see engine's decodeToolCommand). May be nil for a caller
+	// that only ever populated ToolNames (e.g. older test fixtures); consumers
+	// must degrade to tool-name-only wording when empty rather than assume a
+	// command is always present.
+	Denials []ToolDenial
+}
+
+// ToolDenial is a single denied tool call: the tool name the CLI reported,
+// and — when decodable — the specific command that was denied. Command is
+// "" when the tool wasn't Bash, or the CLI's tool_input for this denial
+// couldn't be decoded; callers must treat that as "no command available,"
+// never as an empty command string worth displaying.
+type ToolDenial struct {
+	ToolName string
+	Command  string
 }
 
 func (e *ToolsDeniedError) Error() string {

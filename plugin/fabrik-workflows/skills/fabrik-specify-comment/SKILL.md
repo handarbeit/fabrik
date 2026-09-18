@@ -71,6 +71,7 @@ Include the ENTIRE body — not just changed sections.
 
 - **`fabrik:paused` + `fabrik:awaiting-input`** — the engine cleared these to invoke you (a human comment is what resumes a blocked-on-input issue). You don't set or remove them yourself.
 
+- **`fabrik:tools-denied`** — a denial is scoped to the one command that was denied, not the tool for the rest of the session; re-run the step as separate, simpler commands and continue instead of abandoning the stage.
 See `../../LABELS.md` for the full label reference.
 
 ## Completion

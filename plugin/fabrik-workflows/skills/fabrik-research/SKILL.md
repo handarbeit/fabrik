@@ -131,6 +131,7 @@ This paragraph's CI-gating language is generic boilerplate shared across stages:
 - **`fabrik:paused` + `fabrik:awaiting-input`** — applied by the engine when you emit `FABRIK_BLOCKED_ON_INPUT`; cleared automatically when the user comments. You never set or remove these yourself.
 - **`model:opus`** — you don't apply this label directly, but the Complexity Assessment below has you *recommend* it as an open question when the issue warrants a more capable model for Implement/Review.
 
+- **`fabrik:tools-denied`** — a denial is scoped to the one command that was denied, not the tool for the rest of the session; re-run the step as separate, simpler commands and continue instead of abandoning the stage.
 See `../../LABELS.md` for the full label reference.
 
 ## Engine Context

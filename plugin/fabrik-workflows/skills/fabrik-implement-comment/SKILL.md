@@ -80,6 +80,7 @@ Then update the relevant checkbox in the comment body.
 - **`fabrik:extend-turns`** — if present, this and future comment-processing invocations get a pre-granted 2× turn budget.
 - **`fabrik:paused`** — repeated non-advancing comment-processing invocations can trip a circuit breaker that applies this label; you don't set it yourself, but it's why comment processing might stop being dispatched.
 
+- **`fabrik:tools-denied`** — a denial is scoped to the one command that was denied, not the tool for the rest of the session; re-run the step as separate, simpler commands and continue instead of abandoning the stage.
 See `../../LABELS.md` for the full label reference.
 
 ## Completion

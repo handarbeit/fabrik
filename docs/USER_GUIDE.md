@@ -1738,35 +1738,41 @@ failed label, reset the retry count, and try again immediately.
 > mutating tool calls during the invocation — reported structurally by the
 > CLI (`permission_denials` on the result object), never inferred from
 > anything the assistant wrote. This is not a stage failure: the worker was
-> simply unable to write files, so it does not consume a `--max-retries`
-> slot. Fabrik posts one explanatory comment naming the denied tool(s) the
-> first time this is detected on an issue (not on every retry), then keeps
-> retrying on the normal dispatch cooldown, bounded independently by
-> `--max-tools-denied-retries` (default 3) — since no retry can fix a broken
-> permission configuration on its own, this bound is intentionally lower than
-> `--max-slice-retries`. **This bound applies uniformly across every
-> invocation type** — the ordinary stage dispatch, `ci-fix-reinvoke`,
-> review-reinvoke, and comment review all accumulate against the same
-> per-stage counter, so a mode denial cannot loop indefinitely just because it
-> happened to land on a reinvoke path rather than the main stage dispatch
-> (#1704) — most notably `ci-fix-reinvoke`, which is itself the designed CI
-> repair path: without this, a denial there would otherwise retry forever at
-> the reinvoke cadence, never bounded by the (much less frequent) stage-path
-> counter. After the bound, Fabrik pauses with `fabrik:paused` +
-> `fabrik:awaiting-input` (never `stage:<name>:failed` — the work itself was
-> never judged, only blocked). To resolve: **add the `fabrik:unrestricted`
-> label** — in a headless worker there is no interactive prompt to grant the
-> denied tool, so this is usually the actionable fix; it removes all tool
-> restrictions for future invocations on this issue, not just the denied
-> tool, so apply it deliberately. Alternatively, check the permission
-> configuration outside Fabrik's control — most commonly a `PreToolUse` hook,
-> or an org/user-level `permissions` "ask" rule with no interactive prompt
-> available in this headless context — if you'd rather fix the underlying
-> cause. Then remove `fabrik:paused` and `fabrik:awaiting-input` to resume;
-> `fabrik:tools-denied` itself clears automatically on the next invocation
-> that isn't denied. The outcome is identical whether or not the worker also
-> emitted `FABRIK_BLOCKED_ON_INPUT` in its own output — Fabrik's
-> classification does not depend on it. See #1523, #1704.
+> simply unable to run that call, so it does not consume a `--max-retries`
+> slot. **Each denial is scoped to the specific command that was denied, not
+> the tool for the rest of the session** — a later, differently-shaped call to
+> the same tool is unaffected (confirmed by direct observation: a session
+> where one `Bash` call was denied and a later, differently-shaped `Bash` call
+> in the same session ran normally; see #1741 and ADR-1775, which supersedes
+> ADR-1523's earlier "by strong inference" allowlist reasoning). Fabrik posts
+> one explanatory comment the first time this is detected on an issue (not on
+> every retry) — naming the first denied command when the CLI's `tool_input`
+> makes one decodable (Bash only, truncated and rendered safely), falling back
+> to naming just the tool otherwise — then keeps retrying on the normal
+> dispatch cooldown, bounded independently by `--max-tools-denied-retries`
+> (default 3). **This bound applies uniformly across every invocation type**
+> — the ordinary stage dispatch, `ci-fix-reinvoke`, review-reinvoke, and
+> comment review all accumulate against the same per-stage counter, so a
+> denial cannot loop indefinitely just because it happened to land on a
+> reinvoke path rather than the main stage dispatch (#1704) — most notably
+> `ci-fix-reinvoke`, which is itself the designed CI repair path: without
+> this, a denial there would otherwise retry forever at the reinvoke cadence,
+> never bounded by the (much less frequent) stage-path counter. After the
+> bound, Fabrik pauses with `fabrik:paused` + `fabrik:awaiting-input` (never
+> `stage:<name>:failed` — the work itself was never judged, only blocked). To
+> resolve: since the denial is command-scoped, **the first thing to try is
+> re-running the step as separate, simpler commands, or adding a matching
+> `allowed_tools` rule** for the specific command that keeps getting denied —
+> this is often enough on its own. If that doesn't resolve it, **add the
+> `fabrik:unrestricted` label** as a last resort — in a headless worker there
+> is no interactive prompt to grant a denied tool, so this removes the
+> friction entirely, but it removes all tool restrictions for future
+> invocations on this issue, not just the denied one, so apply it
+> deliberately. Then remove `fabrik:paused` and `fabrik:awaiting-input` to
+> resume; `fabrik:tools-denied` itself clears automatically on the next
+> invocation that isn't denied. The outcome is identical whether or not the
+> worker also emitted `FABRIK_BLOCKED_ON_INPUT` in its own output — Fabrik's
+> classification does not depend on it. See #1523, #1704, ADR-1775.
 
 ### Stages Waiting for Input
 
@@ -2876,7 +2882,7 @@ For developing the plugin itself, use `--plugin-dir` to point at your working co
 | `fabrik:awaiting-member-close` | Set by the merge-train singleton-landing path (`landSingleton`) when a member issue's `CloseIssue` call fails after its PR has already merged and the board moved to Done — most likely on a non-default base branch, where GitHub's `Closes #N` never auto-fires. Retried every poll. Cleared once the issue is confirmed closed (by Fabrik or by GitHub's own auto-close). Escalates to `fabrik:paused` after `--max-retries` failed attempts, with an explanatory comment posted on the issue (ADR-061). |
 | `fabrik:nondefault-base-pr-noted` | Set once, best-effort, on a `base:<branch>` item after Fabrik posts a one-time comment naming its discovered PR — because GitHub creates no Development-panel issue↔PR link at all for a PR targeting a non-default base branch (distinct from the auto-close gap `fabrik:awaiting-close` covers). Applied unconditionally right after the post attempt, whether or not the comment actually succeeded — **informational only, no retry, no escalation**. Never applied to a default-base item. See [§6.21 Non-Default-Base Linkage Notice](state-machine.md#621-non-default-base-linkage-notice-1649) (ADR-1649). |
 | `fabrik:api-key-helper-detected` | Set when a stage invocation is skipped because the worktree's own `.claude/settings.json` sets `apiKeyHelper` — a repo-resident setting Fabrik cannot see until the worktree exists. Does not count against `max_retries`; no `fabrik:paused` or `stage:<name>:failed` applied. Clears automatically once `apiKeyHelper` is removed from the file and a later invocation reaches Claude successfully — no manual removal needed. See [Anthropic Auth Namespace Scrub & `apiKeyHelper` Refusal](#anthropic-auth-namespace-scrub--apikeyhelper-refusal). |
-| `fabrik:tools-denied` | Set when Claude's own permission layer denies one or more mutating tool calls during an invocation, detected structurally from the CLI's `permission_denials` result field — applies uniformly whether the denial was detected on the ordinary stage dispatch, `ci-fix-reinvoke`, review-reinvoke, or comment review, all of which accumulate against the same per-stage counter (#1704). Does not count against `max_retries`; bounded instead by its own `--max-tools-denied-retries` counter (default 3), at which point `fabrik:paused` + `fabrik:awaiting-input` are applied — never `stage:<name>:failed`. Clears automatically on the next invocation that isn't itself classified as tools-denied. See the "Troubleshooting: an issue carries `fabrik:tools-denied`" note under [Retry and Escalation](#retry-and-escalation). |
+| `fabrik:tools-denied` | Set when Claude's own permission layer denies one or more mutating tool calls during an invocation, detected structurally from the CLI's `permission_denials` result field — applies uniformly whether the denial was detected on the ordinary stage dispatch, `ci-fix-reinvoke`, review-reinvoke, or comment review, all of which accumulate against the same per-stage counter (#1704). Each denial is scoped to the specific command denied, not the tool for the rest of the session (ADR-1775); the explanatory comment names it when decodable. Does not count against `max_retries`; bounded instead by its own `--max-tools-denied-retries` counter (default 3), at which point `fabrik:paused` + `fabrik:awaiting-input` are applied — never `stage:<name>:failed`. Clears automatically on the next invocation that isn't itself classified as tools-denied. See the "Troubleshooting: an issue carries `fabrik:tools-denied`" note under [Retry and Escalation](#retry-and-escalation). |
 | `fabrik:awaiting-runaway-alert` | Set when the merge-train runaway guard (ADR-059 D8) pauses a `Queued` member (`fabrik:paused` + `fabrik:awaiting-input` applied unconditionally) but its `AddComment` alert call fails. Retried every poll by a settle scan, independent of `fabrik:paused`'s presence, until the alert succeeds or a fallback comment lands. Cleared only once some explanation is confirmed delivered — a persistent comment-post outage leaves the marker in place indefinitely rather than erasing the last diagnostic signal. See [§6.18 Runaway Guard Alert Retry](state-machine.md#618-runaway-guard-alert-retry-adr-1533) (ADR-1533). |
 | `fabrik:awaiting-landing-verification` | Set immediately after a Done transition attributable to a merge (merge-train batch/singleton landing, or the ordinary auto-merge path) succeeds. The post-Done settle scan confirms the credited PR actually reached `MERGED`. Clears automatically once confirmed. See [§6.19 Post-Done Landing Verification](state-machine.md#619-post-done-landing-verification-adr-1616) (ADR-1616). |
 | `fabrik:credited-pr:<N>` | Set alongside `fabrik:awaiting-landing-verification`, but only by the two merge-train landing paths, recording which PR (the integration/singleton PR, distinct from the member's own closed-not-merged PR) was credited for the Done transition. Clears whenever `fabrik:awaiting-landing-verification` clears. See §6.19. |

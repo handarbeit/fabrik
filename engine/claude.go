@@ -108,6 +108,42 @@ func classifyUsageLimitExit(resp claudeResponse, usage TokenUsage) (msg string, 
 	return fmt.Sprintf("terminal_reason=%q", resp.TerminalReason), true
 }
 
+// permissionDenial is one entry of the CLI's "permission_denials" array on
+// the terminal result line. Named (rather than left as an anonymous inline
+// struct) so tool_input can be decoded without forcing every construction
+// site — including test fixtures — to redeclare the widened shape. ToolInput
+// is decoded lazily and best-effort (see decodeToolCommand): its JSON shape
+// is CLI-version-specific and undocumented (ADR-1523), so this type only
+// declares what's needed to reach it, not its contents.
+type permissionDenial struct {
+	ToolName  string          `json:"tool_name"`
+	ToolInput json.RawMessage `json:"tool_input"`
+}
+
+// decodeToolCommand best-effort extracts a Bash tool_input's .command field.
+// Returns "" for absent input, a decode failure, or a non-string/missing
+// command field — never panics, never fabricates a value. Callers gate this
+// on ToolName == "Bash" (see classifyToolsDenied): no captured evidence
+// exists for other tools' tool_input shapes, so this is not attempted for
+// them.
+func decodeToolCommand(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var v struct {
+		Command string `json:"command"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return ""
+	}
+	return v.Command
+}
+
+// toolDenial is engine's working alias for claudeerr.ToolDenial — one denied
+// tool call, with command detail when decodable. See claudeerr.ToolDenial's
+// doc comment.
+type toolDenial = claudeerr.ToolDenial
+
 // classifyToolsDenied determines whether a Claude invocation was blocked from
 // making progress by the CLI's own permission layer denying one or more
 // mutating tool calls, using only the CLI's own structured result object
@@ -130,23 +166,97 @@ func classifyUsageLimitExit(resp claudeResponse, usage TokenUsage) (msg string, 
 //
 // toolNames is deduplicated (preserving first-seen order) so a tool denied
 // repeatedly across multiple attempts within the same invocation is named
-// once in the R4 explanatory comment, not once per denial.
-func classifyToolsDenied(resp claudeResponse) (toolNames []string, detected bool) {
+// once in the R4 explanatory comment, not once per denial. denials carries
+// one entry per raw PermissionDenials entry (not deduplicated) with command
+// detail decoded only for ToolName == "Bash" — see #1775.
+func classifyToolsDenied(resp claudeResponse) (toolNames []string, denials []toolDenial, detected bool) {
 	if len(resp.PermissionDenials) == 0 {
-		return nil, false
+		return nil, nil, false
 	}
 	seen := make(map[string]bool, len(resp.PermissionDenials))
 	for _, d := range resp.PermissionDenials {
-		if d.ToolName == "" || seen[d.ToolName] {
+		if d.ToolName == "" {
+			continue
+		}
+		command := ""
+		if d.ToolName == "Bash" {
+			command = decodeToolCommand(d.ToolInput)
+		}
+		denials = append(denials, toolDenial{ToolName: d.ToolName, Command: command})
+		if seen[d.ToolName] {
 			continue
 		}
 		seen[d.ToolName] = true
 		toolNames = append(toolNames, d.ToolName)
 	}
 	if len(toolNames) == 0 {
-		return nil, false
+		return nil, nil, false
 	}
-	return toolNames, true
+	return toolNames, denials, true
+}
+
+// toolsDeniedCommandMaxLen/HeadLen/TailLen size sanitizeToolsDeniedCommand's
+// truncation for a denied Bash command — a single logical line, realistically
+// tens to a few hundred chars — distinct from merge_train.go's
+// trainDiagPerCheck* constants, which are sized for multi-KB CI output
+// blocks. Reuses truncateMiddle itself (the established in-repo convention
+// for rendering untrusted/variable-length text in a comment), just not its
+// CI-sized constants.
+const (
+	toolsDeniedCommandMaxLen  = 200
+	toolsDeniedCommandHeadLen = 140
+	toolsDeniedCommandTailLen = 40
+)
+
+// sanitizeToolsDeniedCommand renders a denied command safely for a
+// single-line inline code span: embedded newlines are collapsed to spaces
+// (a multi-line command would otherwise break a one-line comment sentence,
+// or a log line), backticks are replaced with a straight quote (an embedded
+// backtick would otherwise prematurely close the inline code span), and the
+// result is truncated via truncateMiddle. truncateMiddle's own omission
+// marker embeds newlines (correct for its fenced-block callers in
+// merge_train.go) — those are collapsed too, so the final result is always
+// single-line regardless of input. See R2/AC3.
+func sanitizeToolsDeniedCommand(cmd string) string {
+	if cmd == "" {
+		return ""
+	}
+	replacer := strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ", "`", "'")
+	sanitized := strings.TrimSpace(replacer.Replace(cmd))
+	if sanitized == "" {
+		return ""
+	}
+	truncated := truncateMiddle(sanitized, toolsDeniedCommandMaxLen, toolsDeniedCommandHeadLen, toolsDeniedCommandTailLen)
+	return strings.ReplaceAll(truncated, "\n", " ")
+}
+
+// firstToolsDeniedCommand returns the tool name and sanitized command of the
+// first denial in denials that carries a non-empty command, and ok=true. When
+// no denial carries a command (nil/empty denials, or every entry's Command is
+// ""), ok is false and callers must degrade to tool-name-only wording — never
+// an empty string standing in for a command (R2/AC2).
+func firstToolsDeniedCommand(denials []toolDenial) (toolName, command string, ok bool) {
+	for _, d := range denials {
+		if d.Command == "" {
+			continue
+		}
+		sanitized := sanitizeToolsDeniedCommand(d.Command)
+		if sanitized == "" {
+			continue
+		}
+		return d.ToolName, sanitized, true
+	}
+	return "", "", false
+}
+
+// toolsDeniedLogSummary renders the "tools=X" or "tools=X; first: `cmd`"
+// fragment shared by both classifyToolsDenied log lines (R2/R9).
+func toolsDeniedLogSummary(toolNames []string, denials []toolDenial) string {
+	summary := fmt.Sprintf("tools=%s", strings.Join(toolNames, ", "))
+	if _, command, ok := firstToolsDeniedCommand(denials); ok {
+		summary += fmt.Sprintf("; first: `%s`", command)
+	}
+	return summary
 }
 
 // defaultAllowedTools is the comprehensive set of tools Fabrik permits by default
@@ -1175,9 +1285,7 @@ type claudeResponse struct {
 	// PreToolUse hook or an "ask" permission rule with no interactive prompt
 	// available). Populated on an otherwise clean exit — see
 	// classifyToolsDenied and ADR-1523.
-	PermissionDenials []struct {
-		ToolName string `json:"tool_name"`
-	} `json:"permission_denials"`
+	PermissionDenials []permissionDenial `json:"permission_denials"`
 	// ModelUsage contains per-model accumulated token counts for the full session.
 	// These are more accurate than the top-level "usage" field, which reflects only
 	// the last API call rather than the entire multi-turn session.
@@ -1196,6 +1304,14 @@ type claudeResponse struct {
 
 func runClaude(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string, sessFilePath string, logDir string, extraEnv []string, maxWallTime time.Duration, maxTurns int, onPIDReady func(int), sigIntGrace, sigTermGrace time.Duration, resumeSessionID string, maxResumeFailures int) (string, bool, TokenUsage, error) {
 	claudeLog(issueNumber, "claude", "invoking (%s) in %s\n", label, workDir)
+
+	// Best-effort HEAD capture, before/after the invocation, so a tools-denied
+	// classification below can report a measured commit count instead of
+	// asserting "did not make progress" without having checked (#1743). Errors
+	// are conventionally discarded here exactly as gitHeadSHA's other callers
+	// already do (dispatchReviewReinvoke, engine/ci.go) — an empty headBefore
+	// degrades interpretClaudeResult to the no-count wording, never a panic.
+	headBefore, _ := gitHeadSHA(workDir)
 
 	// Set up stderr: in TUI mode discard; in plain mode forward to os.Stderr.
 	// Stderr is diagnostic noise from Claude CLI itself (not the structured output).
@@ -1328,7 +1444,20 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 	// we still process whatever output was collected before the kill.
 	wasTimedOut := inactivityFired.Load() || (stageCtx.Err() == context.DeadlineExceeded && ctx.Err() == nil)
 
-	return interpretClaudeResult(ctx, issueNumber, rawOutput, runErr, wasTimedOut, sessFilePath, logDir, resumeSessionID, maxResumeFailures)
+	// Best-effort commit-count measurement (#1743): -1 means "not measured,"
+	// consumed only by interpretClaudeResult's tools-denied branch. Requires
+	// both SHAs and a genuine change between them — a fresh worktree with no
+	// prior commits, or a gitHeadSHA failure on either side, degrades cleanly
+	// to -1 rather than a spurious "0 commit(s)".
+	commitsPushed := -1
+	headAfter, _ := gitHeadSHA(workDir)
+	if headBefore != "" && headAfter != "" && headBefore != headAfter {
+		if n, err := gitCommitCountBetween(workDir, headBefore, headAfter); err == nil {
+			commitsPushed = n
+		}
+	}
+
+	return interpretClaudeResult(ctx, issueNumber, rawOutput, runErr, wasTimedOut, sessFilePath, logDir, resumeSessionID, maxResumeFailures, commitsPushed)
 }
 
 // openStageLog opens (creating logDir if necessary) a new timestamped .log
@@ -1425,7 +1554,15 @@ func classifyResumeFailure(issueNumber int, sessFilePath, resumeSessionID string
 // if this was a cold start) and maxResumeFailures is the effective
 // MaxResumeFailures threshold — both threaded through from the caller's
 // InvokeOptions purely to drive classifyResumeFailure; see #1414.
-func interpretClaudeResult(ctx context.Context, issueNumber int, rawOutput []byte, runErr error, wasTimedOut bool, sessFilePath, logDir string, resumeSessionID string, maxResumeFailures int) (string, bool, TokenUsage, error) {
+//
+// commitsPushed is the number of commits the caller measured between the
+// worktree's HEAD before and after this invocation (runClaude's
+// headBefore/headAfter, via gitCommitCountBetween), or -1 when not
+// measured/measurable. It is consulted only by the tools-denied branch below
+// (#1743, R8), to report a measured "N commit(s) pushed" instead of
+// asserting "did not make progress" — a claim interpretClaudeResult never
+// actually checked.
+func interpretClaudeResult(ctx context.Context, issueNumber int, rawOutput []byte, runErr error, wasTimedOut bool, sessFilePath, logDir string, resumeSessionID string, maxResumeFailures int, commitsPushed int) (string, bool, TokenUsage, error) {
 	if errors.Is(runErr, exec.ErrWaitDelay) && ctx.Err() == nil {
 		claudeLog(issueNumber, "warn", "WaitDelay fired: Claude exited but grandchild processes held stdout pipe open; processing buffered output (%d bytes)\n", len(rawOutput))
 		runErr = nil
@@ -1561,8 +1698,8 @@ func interpretClaudeResult(ctx context.Context, issueNumber int, rawOutput []byt
 			// classifyToolsDenied's doc comment), but if permission_denials
 			// ever shows up alongside a non-zero exit too, log it for future
 			// evidence rather than silently discarding it. Never classifies.
-			if toolNames, detected := classifyToolsDenied(resp); detected {
-				claudeLog(issueNumber, "claude", "permission_denials present on non-clean exit (tools=%s, terminal_reason=%q) — not classified here, evidence only\n", strings.Join(toolNames, ", "), resp.TerminalReason)
+			if toolNames, denials, detected := classifyToolsDenied(resp); detected {
+				claudeLog(issueNumber, "claude", "permission_denials present on non-clean exit (%s, terminal_reason=%q) — not classified here, evidence only\n", toolsDeniedLogSummary(toolNames, denials), resp.TerminalReason)
 			}
 		}
 		// None of the classifiers above matched — the generic fallthrough.
@@ -1586,9 +1723,21 @@ func interpretClaudeResult(ctx context.Context, issueNumber int, rawOutput []byt
 	// completed the stage is ordinary success — no exemption, no label. See
 	// classifyToolsDenied's doc comment and ADR-1523.
 	if !completed && ok {
-		if toolNames, detected := classifyToolsDenied(resp); detected {
-			claudeLog(issueNumber, "claude", "tool permission denial(s) detected (tools=%s) — stage did not make progress, not charged against max_retries\n", strings.Join(toolNames, ", "))
-			return text, false, usage, &claudeToolsDeniedError{ToolNames: toolNames}
+		if toolNames, denials, detected := classifyToolsDenied(resp); detected {
+			// "did not signal completion" is exactly what !completed
+			// establishes — free to state, always true on this branch. Unlike
+			// its predecessor's "did not make progress," it is never asserted
+			// without having been measured (#1743): commitsPushed > 0 upgrades
+			// this to the measured form when the caller could determine one
+			// (see runClaude's headBefore/headAfter capture); -1 or 0 means
+			// "not measured" or "no commits," and the wording degrades to the
+			// completion-only phrasing rather than printing "0 commit(s)".
+			progress := "stage did not signal completion"
+			if commitsPushed > 0 {
+				progress = fmt.Sprintf("%d commit(s) pushed, stage did not signal completion", commitsPushed)
+			}
+			claudeLog(issueNumber, "claude", "tool permission denial(s) detected (%s) — %s; not charged against max_retries\n", toolsDeniedLogSummary(toolNames, denials), progress)
+			return text, false, usage, &claudeToolsDeniedError{ToolNames: toolNames, Denials: denials}
 		}
 	}
 	return text, completed, usage, nil

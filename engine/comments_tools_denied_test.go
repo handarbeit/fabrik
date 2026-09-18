@@ -180,6 +180,41 @@ func TestProcessComments_ToolsDenied_PauseCommentNamesUnrestrictedRemedy(t *test
 	}
 }
 
+// TestProcessComments_ToolsDenied_CommentNamesFirstDeniedCommand verifies R2
+// on the comment-review path specifically: recordToolsDeniedDetection/
+// pauseForToolsDeniedLimit are shared unforked between finalizeStageOutcome
+// and processComments (#1704), so a denial with command detail surfaced via
+// this path must be named identically to the stage-dispatch path.
+func TestProcessComments_ToolsDenied_CommentNamesFirstDeniedCommand(t *testing.T) {
+	skipIfNoGit(t)
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeForCommentsFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			return "", false, TokenUsage{}, &claudeToolsDeniedError{
+				ToolNames: []string{"Bash"},
+				Denials:   []toolDenial{{ToolName: "Bash", Command: "cd sub && go test ./..."}},
+			}
+		},
+	}
+	eng := testEngineWithRepo(t, client, claude)
+	eng.cfg.MaxToolsDeniedRetries = 3
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	stage := &stages.Stage{Name: "Review", Order: 1, Completion: stages.CompletionCriteria{Type: "claude"}}
+	item := gh.ProjectItem{Number: 504, Body: "spec"}
+	comments := []gh.Comment{{ID: "C_1", DatabaseID: 1, Author: "some-user", Body: "please fix"}}
+
+	_ = eng.processComments(context.Background(), board, item, stage, comments)
+
+	if len(client.addCommentCalls) == 0 {
+		t.Fatal("expected at least one comment")
+	}
+	body := client.addCommentCalls[len(client.addCommentCalls)-1].body
+	if !strings.Contains(body, "cd sub && go test ./...") {
+		t.Errorf("expected comment to name the denied command, got: %s", body)
+	}
+}
+
 // TestProcessComments_ToolsDenied_DoesNotTripCommentBreaker verifies R2 and
 // the Acceptance criterion "the comment breaker's own thresholds are
 // unchanged": driving more tools-denied detections than

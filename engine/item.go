@@ -1715,7 +1715,7 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 				// (#1704) via recordToolsDeniedDetection, so the two
 				// consumers of interpretClaudeResult's classification can
 				// never drift.
-				toolsDeniedCount, willEscalateToolsDenied = e.recordToolsDeniedDetection(item, stage, toolsDeniedErr.ToolNames)
+				toolsDeniedCount, willEscalateToolsDenied = e.recordToolsDeniedDetection(item, stage, toolsDeniedErr.ToolNames, toolsDeniedErr.Denials)
 			} else if e.cfg.MaxRetries > 0 {
 				e.store.Apply(itemstate.StageRetryIncremented{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 				var count int
@@ -1793,7 +1793,7 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 			e.pauseForSliceLimit(item, stage, sliceCount, e.cfg.MaxSliceRetries)
 			releaseLock() // permanently giving up — release the lock
 		} else if willEscalateToolsDenied {
-			e.pauseForToolsDeniedLimit(item, stage, toolsDeniedCount, e.cfg.MaxToolsDeniedRetries, toolsDeniedErr.ToolNames)
+			e.pauseForToolsDeniedLimit(item, stage, toolsDeniedCount, e.cfg.MaxToolsDeniedRetries, toolsDeniedErr.ToolNames, toolsDeniedErr.Denials)
 			releaseLock() // permanently giving up — release the lock
 		}
 	}
@@ -2014,16 +2014,25 @@ func (e *Engine) pauseForSliceLimit(item gh.ProjectItem, stage *stages.Stage, sl
 // cannot drift between the two consumers of interpretClaudeResult's shared
 // classification — pauseForToolsDeniedLimit itself stays unforked; callers
 // decide independently whether to invoke it once willEscalate is true.
-func (e *Engine) recordToolsDeniedDetection(item gh.ProjectItem, stage *stages.Stage, toolNames []string) (count int, willEscalate bool) {
+func (e *Engine) recordToolsDeniedDetection(item gh.ProjectItem, stage *stages.Stage, toolNames []string, denials []toolDenial) (count int, willEscalate bool) {
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
 	e.store.Apply(itemstate.ToolsDeniedRetryIncremented{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 	if snap, snapErr := e.store.Get(repoStr, item.Number); snapErr == nil {
 		count = snap.ToolsDeniedRetries(stage.Name)
 	}
 	if !hasLabel(item.Labels, "fabrik:tools-denied") {
+		toolsJoined := strings.Join(toolNames, ", ")
+		commandDetail := ""
+		scopeTool := toolsJoined
+		if toolName, command, ok := firstToolsDeniedCommand(denials); ok {
+			commandDetail = fmt.Sprintf(" (command: `%s`)", command)
+			scopeTool = toolName
+		}
 		comment := fmt.Sprintf(
-			"🏭 **Fabrik — tool permission denied**\n\nStage **%s** was blocked because Claude's tool call(s) were denied by the CLI's permission configuration: **%s**. This is not a stage failure — it does not count against `max_retries`. Check the permission configuration (e.g. a stray `PreToolUse` hook, or an org/user-level `permissions` \"ask\" rule with no interactive prompt available) — no retry can fix this on its own. Fabrik will keep retrying (bounded independently, up to %d consecutive detections) before pausing for human intervention. The `fabrik:tools-denied` label clears automatically on the next invocation not classified this way.",
-			stage.Name, strings.Join(toolNames, ", "), e.cfg.MaxToolsDeniedRetries,
+			"🏭 **Fabrik — tool permission denied**\n\nStage **%s** had a tool call denied by the CLI's permission configuration: **%s**%s. This is not a stage failure — it does not count against `max_retries`.\n\n"+
+				"The denial is scoped to that one command, not to %s for the rest of the session — other calls to the same tool are unaffected. Re-running the step as separate, simpler commands (or adding a matching `allowed_tools` rule) usually resolves it; `fabrik:unrestricted` is available as a last resort, but it removes all tool restrictions, not just the denied one.\n\n"+
+				"Fabrik will keep retrying (bounded independently, up to %d consecutive detections) before pausing for human intervention. The `fabrik:tools-denied` label clears automatically on the next invocation not classified this way.",
+			stage.Name, toolsJoined, commandDetail, scopeTool, e.cfg.MaxToolsDeniedRetries,
 		)
 		e.postItemComment(item, comment, false)
 		e.addLabel(item, "fabrik:tools-denied")
@@ -2035,8 +2044,10 @@ func (e *Engine) recordToolsDeniedDetection(item gh.ProjectItem, stage *stages.S
 }
 
 // pauseForToolsDeniedLimit pauses the issue when a stage has hit a
-// tool-permission-denial exit (claudeToolsDeniedError) too many times in a
-// row — an environmental permission misconfiguration that no retry can fix,
+// tool-permission-denial exit (claudeToolsDeniedError) too many consecutive
+// times — each denial is scoped to the specific command denied (#1775), so a
+// bound retry ladder that reshapes the command or adds an allowlist rule is
+// often enough on its own, but repeated hits still warrant a human look,
 // bounded independently of MaxRetries by ToolsDeniedRetries/
 // MaxToolsDeniedRetries (R5). Modeled directly on pauseForSliceLimit: a
 // distinct, independently-bounded counter with its own non-failure message,
@@ -2048,20 +2059,23 @@ func (e *Engine) recordToolsDeniedDetection(item gh.ProjectItem, stage *stages.S
 // Called identically from the stage-dispatch path (finalizeStageOutcome) and
 // the reinvoke/comment-review family (processComments, #1704) — the outcome
 // of a mode denial does not depend on which invocation type detected it (R3).
-func (e *Engine) pauseForToolsDeniedLimit(item gh.ProjectItem, stage *stages.Stage, toolsDeniedCount, maxToolsDeniedRetries int, toolNames []string) {
+func (e *Engine) pauseForToolsDeniedLimit(item gh.ProjectItem, stage *stages.Stage, toolsDeniedCount, maxToolsDeniedRetries int, toolNames []string, denials []toolDenial) {
 	e.logf(item.Number, "tools-denied-limit", "tools-denied limit %d reached for stage %q — pausing (not a failure)\n", maxToolsDeniedRetries, stage.Name)
 
+	toolsJoined := strings.Join(toolNames, ", ")
+	commandDetail := ""
+	if _, command, ok := firstToolsDeniedCommand(denials); ok {
+		commandDetail = fmt.Sprintf(" (command: `%s`)", command)
+	}
 	comment := fmt.Sprintf(
-		"🏭 **Fabrik — tool permission denial limit reached**\n\nStage **%s** has had its tool call(s) denied by the CLI's permission configuration (%s) %d consecutive time(s), which has reached the configured limit of %d "+
+		"🏭 **Fabrik — tool permission denial limit reached**\n\nStage **%s** has had a tool call denied by the CLI's permission configuration (%s)%s %d consecutive time(s), which has reached the configured limit of %d "+
 			"(override with `--max-tools-denied-retries` or `FABRIK_MAX_TOOLS_DENIED_RETRIES`).\n\n"+
-			"This is not a stage failure — it is an environmental permission misconfiguration that no retry can fix on its own. "+
-			"In a headless worker there is no interactive prompt to grant the denied tool(s), so the working remedy is to add the "+
-			"`fabrik:unrestricted` label to this issue — it removes all tool restrictions for future invocations (caveat: it bypasses "+
-			"the default tool allowlist entirely, not just the denied tool, so use it deliberately). Alternatively, check the permission "+
-			"configuration (e.g. a stray `PreToolUse` hook, or an org/user-level `permissions` \"ask\" rule with no interactive prompt "+
-			"available) if you'd rather fix the underlying cause.\n\n"+
+			"This is not a stage failure. Each denial is scoped to the specific command that was denied, not to that tool for the rest of the session — but %d consecutive detections suggests the same command shape keeps recurring. "+
+			"Try re-running the step as separate, simpler commands, or add a matching `allowed_tools` rule for the command that keeps getting denied. "+
+			"If neither resolves it, add the `fabrik:unrestricted` label as a last resort — it removes all tool restrictions for future invocations "+
+			"(caveat: it bypasses the default tool allowlist entirely, not just the denied tool, so use it deliberately).\n\n"+
 			"Fabrik has paused this issue. Once resolved, remove the `fabrik:paused` and `fabrik:awaiting-input` labels to resume.",
-		stage.Name, strings.Join(toolNames, ", "), toolsDeniedCount, maxToolsDeniedRetries,
+		stage.Name, toolsJoined, commandDetail, toolsDeniedCount, maxToolsDeniedRetries, toolsDeniedCount,
 	)
 	e.pauseIssue(item, comment, pauseOpts{
 		awaitingInput: true,
@@ -2615,6 +2629,25 @@ func gitHeadSHA(dir string) (string, error) {
 		return "", fmt.Errorf("git rev-parse HEAD: %w", err)
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// gitCommitCountBetween returns the number of commits reachable from after
+// but not from before — i.e. how many commits landed on dir's branch between
+// two HEAD captures. Used by runClaude (#1743) to report a measured commit
+// count for a tools-denied invocation instead of asserting no progress was
+// made without having checked.
+func gitCommitCountBetween(dir, before, after string) (int, error) {
+	cmd := exec.Command("git", "rev-list", "--count", before+".."+after)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		return 0, fmt.Errorf("git rev-list --count %s..%s: %w", before, after, err)
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return 0, fmt.Errorf("parsing git rev-list output: %w", err)
+	}
+	return n, nil
 }
 
 // isWorkingTreeDirty returns true if dir has uncommitted changes other than
