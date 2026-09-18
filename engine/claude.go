@@ -1414,6 +1414,18 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 		onPIDReady(pid)
 	}
 
+	// watchdogWG lets the caller wait for every watchdogCtx-scoped goroutine
+	// below to actually observe cancellation and return, before either
+	// reaping descendants or letting runClaude return to a caller that may
+	// immediately re-mutate a package-level test seam (e.g. a subsequent
+	// test overwriting claudeInactivityTimeout). Without this wait, a
+	// goroutine that hasn't yet been scheduled to run its first statement by
+	// the time runClaude returns can still race a later test's write to the
+	// same variable — confirmed via -race across repeated runs (2/8) on this
+	// package, 0/20 on origin/main before this wait covered the inactivity
+	// watchdog too.
+	var watchdogWG sync.WaitGroup
+
 	// Session-scoped descendant tracking (#1798 R1): observes the process tree
 	// WHILE the invocation is live, recording (in the durable registry) every
 	// process whose session ID equals this worker's own PID — including ones
@@ -1422,18 +1434,18 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 	// could see the transient ancestry. Stopped via watchdogCtx alongside the
 	// inactivity watchdog below.
 	//
-	// trackWG lets the caller wait for this goroutine to actually observe
-	// watchdogCtx cancellation and return before reapTrackedDescendants runs
-	// (below): without that wait, a goroutine mid-tick (e.g. blocked inside
-	// pidFingerprintFn for a just-discovered descendant) could persist a new
-	// registry entry for this workerPID *after* reapTrackedDescendants has
-	// already read and cleared them, silently deferring that descendant's
-	// reap from "unconditional at invocation end" (R2) to the next R3
-	// backstop sweep — bounded by JanitorIntervalHours, potentially hours.
-	var trackWG sync.WaitGroup
-	trackWG.Add(1)
+	// Waiting for this goroutine to actually observe watchdogCtx cancellation
+	// and return, before reapTrackedDescendants runs (below), matters
+	// independently of the race described above: without it, a goroutine
+	// mid-tick (e.g. blocked inside pidFingerprintFn for a just-discovered
+	// descendant) could persist a new registry entry for this workerPID
+	// *after* reapTrackedDescendants has already read and cleared them,
+	// silently deferring that descendant's reap from "unconditional at
+	// invocation end" (R2) to the next R3 backstop sweep — bounded by
+	// JanitorIntervalHours, potentially hours.
+	watchdogWG.Add(1)
 	go func() {
-		defer trackWG.Done()
+		defer watchdogWG.Done()
 		trackWorkerDescendants(watchdogCtx, pid, issueNumber, repo, label)
 	}()
 
@@ -1441,7 +1453,9 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 	// claudeInactivityTimeout, indicating a stuck session regardless of wall time.
 	// Stopped via watchdogCtx after cmd.Wait returns.
 	var inactivityFired atomic.Bool
+	watchdogWG.Add(1)
 	go func(pid int) {
+		defer watchdogWG.Done()
 		timer := time.NewTimer(claudeInactivityTimeout)
 		defer timer.Stop()
 		for {
@@ -1462,14 +1476,13 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 	}(pid)
 
 	runErr := cmd.Wait()
-	watchdogCancel() // stop the watchdog goroutine promptly (and trackWorkerDescendants with it)
-	// Wait for trackWorkerDescendants to actually observe the cancellation
-	// and return before reaping below — otherwise a goroutine mid-tick could
-	// still be writing a newly-discovered descendant to the registry after
-	// reapTrackedDescendants has already read and cleared it (see trackWG's
-	// doc comment above). Bounded by pidFingerprintFn's own internal timeout
-	// (sentinelProbeTimeout), so this cannot hang.
-	trackWG.Wait()
+	watchdogCancel() // stop both watchdog goroutines promptly
+	// Wait for both watchdogCtx-scoped goroutines above to actually observe
+	// the cancellation and return — see watchdogWG's doc comment. Bounded by
+	// pidFingerprintFn's own internal timeout (sentinelProbeTimeout) for the
+	// tracker goroutine, and by an immediate ctx.Done() check for the
+	// inactivity-watchdog goroutine, so this cannot hang.
+	watchdogWG.Wait()
 	killProcGroup(cmd, issueNumber, label)
 	// R2: reap any session-scoped descendant that survived killProcGroup's
 	// PGID-scoped kill (e.g. detached via nohup/disown, or otherwise no
