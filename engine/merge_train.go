@@ -1543,6 +1543,86 @@ func (e *Engine) addLandedCommentWithRetry(owner, repo string, issueNumber, prNu
 	e.logf(issueNumber, "merge-train", "warn: could not post landed comment on PR #%d after %d attempts: %v\n", prNum, maxAttempts, lastErr)
 }
 
+// nonDefaultBaseLabelValue scans labels (fetched live — see refuseIfBaseContradictsMembers,
+// which is the only caller) for a "base:<branch>" label whose value is non-empty and differs
+// from pinnedBase. Returns the first such declared branch, or "" if every base: label (if
+// any) agrees with pinnedBase or carries no value. Deliberately does not resolve remote
+// branch existence or fall back to a default the way baseBranchForItem does (engine/item.go)
+// — R3 forbids repairing a contradiction found here, only refusing.
+func nonDefaultBaseLabelValue(labels []string, pinnedBase string) string {
+	const prefix = "base:"
+	for _, label := range labels {
+		if !strings.HasPrefix(label, prefix) {
+			continue
+		}
+		branch := strings.TrimPrefix(label, prefix)
+		if branch == "" || branch == pinnedBase {
+			continue
+		}
+		return branch
+	}
+	return ""
+}
+
+// isDefaultPartitionKey reports whether trainKey identifies the default-base partition for
+// owner/repo — i.e. whether mergeTrainKey(owner+"/"+repo, defaultPartitionBase) produced it.
+// This is exactly the condition under which prepareTrainWorker resolved baseBranch through
+// wm.DefaultBaseBranch() rather than a base: label (see mergeTrainKey's doc comment).
+// refuseIfBaseContradictsMembers uses this to decide whether the pinned base is the
+// repository default without an extra git round-trip, and without breaking on a wm built
+// over a bare temp directory with no real .git (as most of this file's tests do).
+func isDefaultPartitionKey(owner, repo, trainKey string) bool {
+	return trainKey == owner+"/"+repo
+}
+
+// refuseIfBaseContradictsMembers is the outcome-level sanity check (#1773) run immediately
+// before a merge-train landing path opens or reuses an integration PR. It exists as a second,
+// independent line of defence against the #1688 incident class: a cause-specific fix
+// (partition-time, #1772) can only ever catch causes already known; this instead checks the
+// outcome the train is about to act on, regardless of cause.
+//
+// R1: it fires only when the pinned base is the repository default (isDefaultPartitionKey) —
+// a train partitioned onto an explicit base: branch has nothing to contradict, so this
+// returns false immediately without touching the network (R5, zero-cost on the common path).
+//
+// R2: when triggered, it reads each member's labels LIVE via e.client.FetchLabels — never
+// e.readClient (boardcache-backed; CacheImpl.FetchLabels serves the cached snapshot whenever
+// the cache isn't paused) and never the member's own cached item.Labels. This is deliberate:
+// the #1688 incident shape is exactly a cached/stale label disagreeing with a live one, and a
+// check that reused either cached path would have passed cleanly in that incident.
+//
+// R3: on any contradiction (or a label-read error, treated identically — fail-closed, matching
+// #1772's posture and this issue's own accepted risk that a spurious refusal is safe) it
+// refuses — returns true — logging the pinned base and every contradicting member so callers
+// can leave their batch in Queued and return without opening/reusing a PR. It never re-pins
+// or repairs.
+func (e *Engine) refuseIfBaseContradictsMembers(owner, repo, baseBranch, trainKey string, members []trainMember) bool {
+	if !isDefaultPartitionKey(owner, repo, trainKey) {
+		return false
+	}
+
+	var contradictions []string
+	for _, m := range members {
+		labels, err := e.client.FetchLabels(owner, repo, m.item.Number)
+		if err != nil {
+			contradictions = append(contradictions, fmt.Sprintf("#%d (label read failed: %v)", m.item.Number, err))
+			continue
+		}
+		if declared := nonDefaultBaseLabelValue(labels, baseBranch); declared != "" {
+			contradictions = append(contradictions, fmt.Sprintf("#%d (declares base:%s)", m.item.Number, declared))
+		}
+	}
+
+	if len(contradictions) == 0 {
+		return false
+	}
+
+	repoKey := owner + "/" + repo
+	e.logfRepo(repoKey, "merge-train", "REFUSING to open/reuse integration PR for %s: pinned base %q is the repository default but %d member(s) declare a contradicting base — leaving members in Queued: %s\n",
+		repoKey, baseBranch, len(contradictions), strings.Join(contradictions, ", "))
+	return true
+}
+
 // landSingleton lands a single member from its own validated-green trial branch. It creates a
 // dedicated integration PR WITHOUT the shared batch marker — sequential singleton lands must
 // not collide on findIntegrationPR (which matches merged PRs via ListPRs state=all), which
@@ -1552,6 +1632,13 @@ func (e *Engine) addLandedCommentWithRetry(owner, repo string, issueNumber, prNu
 func (e *Engine) landSingleton(ctx context.Context, state *mergeTrainWorkerState, p trialParams, m trainMember, trialName string) {
 	trialBranch := "fabrik/merge-train/" + trialName
 	defer e.cleanupTrialArtifacts(p.repoKey(), p.wm, trialName)
+
+	// #1773 R1/R3: refuse to open a landing PR whose pinned base contradicts what this
+	// member declares live, rather than repairing or proceeding. See
+	// refuseIfBaseContradictsMembers's doc comment.
+	if e.refuseIfBaseContradictsMembers(p.owner, p.repo, p.baseBranch, p.trainKey, []trainMember{m}) {
+		return
+	}
 
 	title := fmt.Sprintf("[merge-train] singleton: #%d", m.item.Number)
 	body := fmt.Sprintf("🏭 **Fabrik merge-train singleton landing PR**\n\n"+
@@ -3490,6 +3577,14 @@ func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorke
 	if integrationPR != nil && integrationPR.State == "closed" && !integrationPR.Merged {
 		e.logfRepo(repoKey, "merge-train", "integration PR #%d for %s is closed and unmerged — trial failed to land, escalating %d survivor(s)\n", integrationPR.Number, repoKey, len(survivors))
 		e.escalateClosedUnmergedTrial(state.projectID, owner, repo, integrationPR.Number, survivors)
+		return
+	}
+
+	// #1773 R1/R3: refuse to open OR reuse an integration PR whose pinned base
+	// contradicts what the batch's members declare live, rather than repairing or
+	// proceeding. Sits ahead of both the reuse and create branches below, per R1's
+	// "opens (or reuses)" wording. See refuseIfBaseContradictsMembers's doc comment.
+	if e.refuseIfBaseContradictsMembers(owner, repo, baseBranch, trainKey, survivors) {
 		return
 	}
 
