@@ -708,3 +708,53 @@ func TestTrackWorkerDescendants_WorkerFingerprintTransientFailureRetried(t *test
 		t.Fatalf("expected at least 2 injected worker-fingerprint failures to have been consumed before the eventual success, got %d — test setup issue, not confirming the retry behavior", workerFailuresInjected)
 	}
 }
+
+// TestInvokeClaude_ReapWaitsForTrackerGoroutine pins a fourth review finding:
+// at invocation end, watchdogCancel() must not be immediately followed by
+// reapTrackedDescendants — the goroutine running trackWorkerDescendants must
+// actually observe the cancellation and return first. If it is mid-tick
+// (blocked inside pidFingerprintFn for a just-discovered descendant) when
+// cancellation fires, that descendant can be persisted to the registry
+// *after* reapTrackedDescendants has already read and cleared the worker's
+// entries — silently deferring its reap from "unconditional at invocation
+// end" (R2) to the next R3 backstop sweep, bounded by JanitorIntervalHours
+// (potentially hours).
+//
+// Neutralization: an injected delay on every pidFingerprintFn call widens
+// the race window so the fake claude process reliably exits (triggering
+// watchdogCancel and, pre-fix, the immediate reap) while trackWorkerDescendants
+// is still mid-tick discovering the descendant backgrounded moments earlier.
+// Before the fix (reapTrackedDescendants called with no wait for the tracker
+// goroutine to actually stop), this test is reliably red: the descendant is
+// discovered but not yet persisted to the registry when the reap runs, so it
+// survives past invocation end and this test's deadline.
+func TestInvokeClaude_ReapWaitsForTrackerGoroutine(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "child.pid")
+	script := "#!/bin/sh\n" +
+		"cat >/dev/null\n" +
+		"set -m\n" +
+		"sleep 30 >/dev/null 2>&1 &\n" +
+		"echo $! > '" + pidFile + "'\n" +
+		"disown 2>/dev/null || true\n" +
+		"sleep 0.15\n" +
+		"printf '%s\\n' '" + fakeClaudeCompleteJSON + "'\n"
+
+	origFn := pidFingerprintFn
+	pidFingerprintFn = func(pid int) (string, string, error) {
+		// Delays every fingerprint lookup in trackWorkerDescendants's tick
+		// body (both the worker's own and each descendant's) so a tick that
+		// starts before the fake script exits is still in flight when
+		// cmd.Wait() returns and watchdogCancel() fires — reproducing the
+		// exact "mid-tick at invocation end" race the fix addresses.
+		time.Sleep(400 * time.Millisecond)
+		return origFn(pid)
+	}
+	defer func() { pidFingerprintFn = origFn }()
+
+	invokeClaudeFakeScript(t, script)
+
+	childPID := readPIDFile(t, pidFile)
+	if !waitUntilDead(t, childPID, 5*time.Second) {
+		t.Errorf("descendant PID %d, discovered mid-tick right at invocation end, was not reaped — reapTrackedDescendants must have run before trackWorkerDescendants finished persisting it to the registry (missing wait for the tracker goroutine to actually stop)", childPID)
+	}
+}

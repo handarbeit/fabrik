@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -1420,7 +1421,21 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 	// init on a sub-second timescale, well before a post-hoc walk at teardown
 	// could see the transient ancestry. Stopped via watchdogCtx alongside the
 	// inactivity watchdog below.
-	go trackWorkerDescendants(watchdogCtx, pid, issueNumber, repo, label)
+	//
+	// trackWG lets the caller wait for this goroutine to actually observe
+	// watchdogCtx cancellation and return before reapTrackedDescendants runs
+	// (below): without that wait, a goroutine mid-tick (e.g. blocked inside
+	// pidFingerprintFn for a just-discovered descendant) could persist a new
+	// registry entry for this workerPID *after* reapTrackedDescendants has
+	// already read and cleared them, silently deferring that descendant's
+	// reap from "unconditional at invocation end" (R2) to the next R3
+	// backstop sweep — bounded by JanitorIntervalHours, potentially hours.
+	var trackWG sync.WaitGroup
+	trackWG.Add(1)
+	go func() {
+		defer trackWG.Done()
+		trackWorkerDescendants(watchdogCtx, pid, issueNumber, repo, label)
+	}()
 
 	// Inactivity watchdog: kills the process group if no stdout is received for
 	// claudeInactivityTimeout, indicating a stuck session regardless of wall time.
@@ -1448,6 +1463,13 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 
 	runErr := cmd.Wait()
 	watchdogCancel() // stop the watchdog goroutine promptly (and trackWorkerDescendants with it)
+	// Wait for trackWorkerDescendants to actually observe the cancellation
+	// and return before reaping below — otherwise a goroutine mid-tick could
+	// still be writing a newly-discovered descendant to the registry after
+	// reapTrackedDescendants has already read and cleared it (see trackWG's
+	// doc comment above). Bounded by pidFingerprintFn's own internal timeout
+	// (sentinelProbeTimeout), so this cannot hang.
+	trackWG.Wait()
 	killProcGroup(cmd, issueNumber, label)
 	// R2: reap any session-scoped descendant that survived killProcGroup's
 	// PGID-scoped kill (e.g. detached via nohup/disown, or otherwise no
