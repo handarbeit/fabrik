@@ -107,6 +107,40 @@ dependency node resolves) — so a synthetic edge from this write and a
 subsequent genuine deep-fetch's edge are byte-identical, never a
 representational mismatch a future comparison could trip on.
 
+### Sibling `DEPENDS_ON` edges get the identical treatment
+
+`spawnChildren`'s second pass wires any declared `DEPENDS_ON` header as a
+sibling `blockedBy` edge between two children (ADR-1337), via the same
+`AddBlockedByIssue` primitive used for the parent edge. A PR review caught
+that this pass originally applied `AddBlockedByIssue` on GitHub without a
+matching `BlockedByEdgeAdded` write — leaving a dependent child exposed to
+the identical stale-Store race this ADR closes for the parent, just one level
+down: the child's first Store entry can arrive via a shallow reconcile
+(which never populates `BlockedBy`) rather than a live deep-fetch, and
+`checkDependencies` would see an empty `BlockedBy` and dispatch the child
+before its sibling closes. The fix is symmetric — immediately after each
+sibling `AddBlockedByIssue` call succeeds, `spawnChildren` also applies
+`BlockedByEdgeAdded` keyed on the **dependent child's own** `(repo, number)`,
+not the parent's:
+
+```go
+e.store.Apply(itemstate.BlockedByEdgeAdded{
+    Repo:   block.Repo, // the dependent child's own owner/repo
+    Number: childNumbers[i],
+    Dep:    gh.Dependency{Repo: blocks[blockerIdx].Repo, Number: childNumbers[blockerIdx], State: "OPEN"},
+})
+```
+
+This write can land before the child is otherwise known to the Store (a
+freshly created child has no prior entry) — safe by the same `getOrCreate`
+lazy-stub reasoning as the parent case: `BlockedBy` is a deep field no
+shallow/probe apply ever touches, so a pre-seeded edge on an as-yet-unknown
+item is never clobbered when that item is later discovered normally, and a
+`gh.ProjectItem` with mostly-zero fields showing up transiently in a board
+snapshot before that discovery is indistinguishable from any other item
+sitting in a Status the configured stages don't recognize (`FindStage`
+already returns nil for those without incident).
+
 ### Rejected alternative: extend `checkDependencies`'s live-re-read
 
 The other candidate considered was widening `checkDependencies`'s existing

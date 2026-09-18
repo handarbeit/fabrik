@@ -1542,6 +1542,82 @@ FABRIK_SPAWN_CHILD_END
 	}
 }
 
+// TestPreImplement_DependsOnChain_SiblingEdgeVisibleInStore is a bot-review
+// regression guard (#1783 follow-up): the sibling DEPENDS_ON wiring pass must
+// write its edge into the Store too, keyed on the dependent CHILD's own
+// (repo, number) — not just the parent's edge, which
+// TestPreImplement_BlockedByEdgesVisibleInNextBoardFetch already covers.
+// Without this, a dependent child's first Store entry could arrive via a
+// shallow reconcile (which never populates BlockedBy) rather than a live
+// deep-fetch, and checkDependencies would see an empty BlockedBy and dispatch
+// the child before its sibling closes — the identical race #1783 closes for
+// the parent, one level down.
+func TestPreImplement_DependsOnChain_SiblingEdgeVisibleInStore(t *testing.T) {
+	childCounter := 0
+	client := &mockGitHubClient{
+		createIssueFn: func(owner, repo, title, body string, assignees []string) (int, string, error) {
+			childCounter++
+			return 400 + childCounter, fmt.Sprintf("I_chain%d", childCounter), nil
+		},
+		addProjectV2ItemByIdFn: func(projectID, contentNodeID string) (string, error) {
+			return "PVTI_" + contentNodeID, nil
+		},
+	}
+	eng, cache := spawnTestEngineWithCache(t, client)
+
+	item := planItemWithBlocks(`
+FABRIK_SPAWN_CHILD_BEGIN owner/child
+TITLE: Slice one
+Slice one body.
+FABRIK_SPAWN_CHILD_END
+
+FABRIK_SPAWN_CHILD_BEGIN owner/child
+TITLE: Slice two
+DEPENDS_ON: 1
+Slice two body.
+FABRIK_SPAWN_CHILD_END
+`)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	spawned, err := eng.preImplement(context.Background(), board, item)
+	if err != nil {
+		t.Fatalf("preImplement: %v", err)
+	}
+	if !spawned {
+		t.Fatal("expected spawned=true")
+	}
+
+	rebuilt, err := cache.FetchProjectBoard("owner", "repo", 1, "organization")
+	if err != nil {
+		t.Fatalf("FetchProjectBoard: %v", err)
+	}
+	var child2 *gh.ProjectItem
+	for i := range rebuilt.Items {
+		if rebuilt.Items[i].Repo == "owner/child" && rebuilt.Items[i].Number == 402 {
+			child2 = &rebuilt.Items[i]
+		}
+	}
+	if child2 == nil {
+		t.Fatalf("child owner/child#402 not found in rebuilt board: %+v", rebuilt.Items)
+	}
+	if len(child2.BlockedBy) != 1 {
+		t.Fatalf("child 2's BlockedBy = %+v; want exactly 1 edge (its sibling)", child2.BlockedBy)
+	}
+	if d := child2.BlockedBy[0]; d.Repo != "owner/child" || d.Number != 401 || d.State != "OPEN" {
+		t.Errorf("child 2's BlockedBy[0] = %+v; want {owner/child, 401, OPEN}", d)
+	}
+
+	// The blocking sibling (child 1) must not have picked up a spurious
+	// self-referential or reversed edge.
+	for i := range rebuilt.Items {
+		if rebuilt.Items[i].Repo == "owner/child" && rebuilt.Items[i].Number == 401 {
+			if len(rebuilt.Items[i].BlockedBy) != 0 {
+				t.Errorf("child 1's BlockedBy = %+v; want none (it is the blocker, not the blocked)", rebuilt.Items[i].BlockedBy)
+			}
+		}
+	}
+}
+
 // TestPreImplement_NoDependsOn_MatchesTodaysCallsExactly is the regression
 // guard for requirement 4 / acceptance criterion 3: a Plan with no DEPENDS_ON
 // headers must produce exactly today's parent-only edges, byte-identical to

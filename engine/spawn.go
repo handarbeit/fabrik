@@ -925,6 +925,25 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 			return spawned, false, fmt.Errorf("spawn: linking sibling dependency for block %d: %w", i+1, err)
 		}
 		e.logf(item.Number, "spawn", "linked sibling dependency: block %d depends on block %d\n", i+1, block.DependsOn)
+
+		// Mirror the parent-edge write above: apply the sibling edge to the
+		// Store too, keyed on the dependent CHILD's own (repo, number) rather
+		// than the parent's — this is the item that must show fabrik:blocked
+		// until its sibling closes. Without this, a dependent child is exposed
+		// to the identical stale-Store race #1783 closes for the parent: its
+		// first Store entry can arrive via a shallow reconcile (which never
+		// populates BlockedBy) rather than a live deep-fetch, leaving
+		// checkDependencies to see an empty BlockedBy and dispatch the child
+		// before its sibling has closed. getOrCreate's lazy-stub semantics
+		// (internal/itemstate/store.go) make this safe to apply even before
+		// the child is otherwise known to the Store: BlockedBy is a deep field
+		// no shallow/probe apply ever touches, so this pre-seeded edge is
+		// never clobbered when the child is later discovered normally.
+		e.store.Apply(itemstate.BlockedByEdgeAdded{
+			Repo:   block.Repo,
+			Number: childNumbers[i],
+			Dep:    gh.Dependency{Repo: blocks[blockerIdx].Repo, Number: childNumbers[blockerIdx], State: "OPEN"},
+		})
 	}
 
 	// All children spawned and sibling dependencies wired — remove the
