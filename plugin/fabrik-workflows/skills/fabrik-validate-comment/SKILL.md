@@ -24,6 +24,21 @@ If `wait_for_reviews` is configured for Validate, a comment may carry a `[Bot Re
 
 If, after evaluating a bot review's findings or a user's comment, you conclude there is **nothing actionable** — no valid finding to fix, no change the codebase needs — then **change nothing and complete**. Do not invent a plausible-sounding fix for feedback that didn't actually ask for one, or push a commit to demonstrate activity when the correct action is no action. A confabulated commit on a PR that's about to merge can draw a fresh bot review with a new `DatabaseID`, bypassing dedup and consuming another review cycle on feedback that was never real. "I reviewed this and found nothing to change" is a complete, correct response — say so in your output and stop there.
 
+## Security-Tagged Findings
+
+When a finding — whether a `[Bot Review Finding]`-marked comment you're evaluating autonomously, or a human's feedback on a prior finding — concerns security (credential/secret exposure, injection, authn/authz gaps, permission escalation, insecure defaults, or similar), treat it as security-relevant based on what it actually describes, not on whether it uses the literal word "security." This applies on top of, not instead of, the ordinary feedback handling below.
+
+Before any conformance argument ("the spec says X", "the reference implementation does it this way", "already decided") may be raised in response, you must first state:
+- what is reachable/exploitable,
+- under which trigger or condition, and
+- what mitigations (existing config, defaults, tooling behavior) already reduce the exposure.
+
+An answer that cites only a spec requirement, a reference implementation, or "already reviewed" provenance — without addressing the above — does not satisfy this bar, no matter how many times that spec point was previously discussed. Provenance (where a requirement came from) is a distinct claim from mitigation (whether the resulting state is safe) and must not substitute for it. **This is exactly the reasoning chain that failed in a real incident**: dismissing a missing `persist-credentials: false` finding because "it contradicts FR-020, which was already reviewed twice" cites provenance, not mitigation — the exposure was never actually assessed.
+
+If the exposure assessment genuinely conflicts with an explicit spec decision — the finding is real and the spec forbids the fix — that conflict is for a human to resolve, not for you to arbitrate by picking a side. State the tension plainly in your stage output (both the spec requirement in conflict and the security exposure it creates), and do not treat stating the tension as equivalent to resolving it. This is deliberately non-blocking: the existing review-reinvoke loop stays engaged on unresolved feedback every poll, and `MaxReviewCycles`/the non-convergence pause fallback is the existing escalation path if the tension never converges — no new engine mechanism is needed.
+
+This bar applies only once a finding is judged security-relevant by its substance — it does not turn every superficially security-adjacent comment into a mandatory exposure-assessment ritual, and it does not change the No-Op Contract or the ordinary feedback handling for findings that aren't security-relevant.
+
 ## What You Do
 
 ### Act on the user's feedback
@@ -55,6 +70,7 @@ Read the user's comment carefully to understand what they're requesting:
 
 **Issue is resolved**: The user explicitly indicates validation is complete and the issue can close.
 - See Completion section below
+- **If a security-relevant finding is still open** (see "Security-Tagged Findings" above) and the user's "resolved"/"close it out" instruction gives only conformance grounds ("contradicts FR-N," "already decided," or similar, without a reachability/trigger/mitigation rationale) — an instruction to close is not itself a risk rationale. Ask the user for a one-line risk rationale before treating the finding as closed or resolving its thread; do not signal completion on a conformance-only instruction alone while a security-tagged finding remains open.
 
 **Never end a turn waiting on a background task or a CI run.** Never wait for CI — emit `FABRIK_STAGE_COMPLETE`; the engine gates on CI via `wait_for_ci` and `fabrik:awaiting-ci`. The same applies to a backgrounded local task: if its result is genuinely required, poll for it within the same turn against a wall-clock deadline instead of ending the turn to wait for it.
 
@@ -112,3 +128,5 @@ Prefer committing incremental progress over trying to finish everything in one s
   Write all stage output to stdout only. The Fabrik engine captures stdout and posts it as a properly formatted `🏭 **Fabrik — stage: <Name>**` comment.
 
   **Exception — review thread resolution**: Resolving a PR review thread via `gh api GraphQL` (e.g., the `resolveReviewThread` mutation) is permitted. Only *comment creation* is prohibited, not *thread resolution*.
+
+  **Security-tagged threads are conditioned further.** Resolving a thread for a finding you've judged security-relevant (see "Security-Tagged Findings" above) requires that, in this turn, either a code change addressing the finding was made, or you stated an explicit risk rationale covering reachability/exploitability, trigger/condition, and existing mitigations — including when the impetus is an explicit human "resolved"/"close it out" decision. Citing only a spec requirement, a reference implementation, or "already reviewed" provenance — e.g. "it contradicts FR-020, which was already reviewed twice" — does not satisfy this bar and does not justify resolving the thread, regardless of how many times that spec point was previously discussed, and regardless of whether a human told you to close it. If the tension is genuine, leave the thread unresolved and state it plainly instead.
