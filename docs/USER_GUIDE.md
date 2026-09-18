@@ -36,9 +36,9 @@ For the authoritative engine state-machine spec (label semantics, review gate tr
 
 - Go 1.26.1+
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
-- GitHub **classic** personal access token (`ghp_...`) with `repo`, `project`, and `workflow` scopes
-  - Fine-grained tokens (`github_pat_...`) are **not supported** — GitHub Projects v2 GraphQL requires a classic PAT
-  - Create one at: https://github.com/settings/tokens (select "Tokens (classic)")
+- A GitHub token with `repo`, `project`, and `workflow` scopes
+  - Fine-grained tokens (`github_pat_...`) are **not supported** — GitHub Projects v2 GraphQL doesn't work with them
+  - A classic personal access token (`ghp_...`) and a `gh` CLI OAuth token (`gho_...`, via `gh auth token`) both work. The shortest path, given `gh auth login` is already required below, is `FABRIK_TOKEN=$(gh auth token)` — note this rotates on re-auth. Create a classic PAT instead at: https://github.com/settings/tokens (select "Tokens (classic)")
   - If a fine-grained token is detected at startup, Fabrik prints a `[warn]` message and subsequent API calls include an actionable hint; see [GitHub API Returns 401 or Fine-Grained Token Warning](#github-api-returns-401-or-fine-grained-token-warning)
 - A GitHub Project (v2) with board columns matching your stage names
 
@@ -78,8 +78,9 @@ Then initialize:
 #   .fabrik/config.yaml   — project config template (edit this)
 # Updates:
 #   .git/info/exclude     — adds .fabrik/repos/, .fabrik/worktrees/, .fabrik/debug/,
-#                           and .fabrik/history.json so they don't appear as untracked
-#                           in git status (local excludes, not committed to the repo)
+#                           .fabrik/history.json, and .fabrik/warnings.json so they
+#                           don't appear as untracked in git status (local excludes,
+#                           not committed to the repo)
 ```
 
 Pass your GitHub Project URL to auto-populate `owner`, `project`, and `owner_type` in
@@ -127,9 +128,11 @@ GitHub token to a gitignored `.env` file:
 
 ```
 # .env (gitignored — keep secrets here)
-# Use a CLASSIC personal access token (ghp_...) — not a fine-grained token (github_pat_...)
 # Required scopes: repo, project, workflow
-# Create at: https://github.com/settings/tokens (select "Tokens (classic)")
+# A classic PAT (ghp_...) or a `gh` CLI OAuth token (gho_..., via `gh auth token`) both
+# work — fine-grained tokens (github_pat_...) do not. Shortest path if `gh auth login`
+# is already done: FABRIK_TOKEN=$(gh auth token) — rotates on re-auth. Otherwise create
+# a classic PAT at: https://github.com/settings/tokens (select "Tokens (classic)")
 FABRIK_TOKEN=ghp_...
 
 # Optional: run this instance's Claude invocations against a different Claude
@@ -180,7 +183,9 @@ GitHub Project (v2) for your repository yourself. Add board columns that corresp
 your stage names -- the column name must match the `name` field in each stage YAML file
 exactly (case-sensitive). The default pipeline uses:
 
-`Backlog` -> `Specify` -> `Research` -> `Plan` -> `Implement` -> `Review` -> `Validate` -> `Done`
+`Backlog` -> `Specify` -> `Research` -> `Plan` -> `Implement` -> `Review` -> `Validate` -> `Queued` -> `Done`
+
+`Queued` is a holding column, not a pipeline stage — it's used only when [merge-train](#merge-train--queued) is enabled, but `fabrik init` extracts its stage YAML unconditionally, so it's still part of the required column set from the start.
 
 Then edit `.fabrik/config.yaml`'s `owner`, `repo`, `project`, and `owner_type` to point at
 it (see [First Run](#first-run) below).
@@ -1056,7 +1061,8 @@ Keep only secrets here. When a `.git/` directory is present, Fabrik refuses to s
 
 ```
 # .env (gitignored)
-# Classic personal access token (ghp_...) required — see https://github.com/settings/tokens
+# Classic PAT (ghp_...) or `gh` CLI OAuth token (gho_..., via `gh auth token`) — not a
+# fine-grained token (github_pat_...). See https://github.com/settings/tokens
 FABRIK_TOKEN=ghp_...         # Preferred token env var (needs repo, project, workflow scopes)
 GITHUB_TOKEN=ghp_...         # Fallback token env var
 ```
@@ -1143,8 +1149,8 @@ The flag/env suggestion is derived mechanically from Fabrik's snake_case (`confi
 
 | Variable | `config.yaml` key | Description | Default |
 |----------|-------------------|-------------|---------|
-| `FABRIK_TOKEN` | *(secrets only)* | GitHub **classic** personal access token (`ghp_...`) with `repo`, `project`, `workflow` scopes (preferred) | required |
-| `GITHUB_TOKEN` | *(secrets only)* | GitHub **classic** personal access token (`ghp_...`) — fallback when `FABRIK_TOKEN` is unset | required |
+| `FABRIK_TOKEN` | *(secrets only)* | GitHub token with `repo`, `project`, `workflow` scopes — classic PAT (`ghp_...`) or `gh` CLI OAuth token (`gho_...`, via `gh auth token`); fine-grained tokens (`github_pat_...`) not supported (preferred) | required |
+| `GITHUB_TOKEN` | *(secrets only)* | Same token requirements as `FABRIK_TOKEN` — fallback when `FABRIK_TOKEN` is unset | required |
 | `FABRIK_OWNER` | `owner` | GitHub repo owner | -- |
 | `FABRIK_REPO` | `repo` | GitHub repo name; optional — omitting enables multi-repo mode (all repos on the board) | -- |
 | `FABRIK_PROJECT_NUMBER` | `project` | GitHub Project (v2) number | -- |
@@ -3682,16 +3688,17 @@ Fabrik probes org mode each time the webhook subprocess starts or restarts. If t
 
 ### GitHub API Returns 401 or "Fine-Grained Token" Warning
 
-Fabrik requires a **classic** personal access token (`ghp_...`). Fine-grained tokens (`github_pat_...`) are **not supported** because GitHub Projects v2 GraphQL — which Fabrik uses for status updates and board queries — is not available to fine-grained PATs.
+Fine-grained tokens (`github_pat_...`) are **not supported** because GitHub Projects v2 GraphQL — which Fabrik uses for status updates and board queries — is not available to fine-grained PATs. A classic personal access token (`ghp_...`) or a `gh` CLI OAuth token (`gho_...`, via `gh auth token`) both work fine.
 
 **Symptoms:**
 - Startup warning: `[warn] Fine-grained personal access tokens (github_pat_...) do not support GitHub Projects v2 GraphQL...`
 - Error on first API call: `GitHub API returned 401: ... If you used a fine-grained access token...`
 
 **Fix:**
-1. Go to https://github.com/settings/tokens and select **"Tokens (classic)"**
-2. Generate a new token with scopes: `repo`, `project`, `workflow`
-3. Update `FABRIK_TOKEN` in your `.env` file with the new `ghp_...` token
+1. If `gh auth status` shows you're logged in, the simplest fix is `FABRIK_TOKEN=$(gh auth token)` — note this value rotates whenever you re-run `gh auth login`/`gh auth refresh`.
+2. Otherwise, go to https://github.com/settings/tokens and select **"Tokens (classic)"**, generate a new token with scopes `repo`, `project`, `workflow`, and update `FABRIK_TOKEN` in your `.env` file with the new `ghp_...` token.
+
+**A token that looks right but still fails as `NOT_FOUND: Could not resolve to a ProjectV2`** may belong to the wrong GitHub account — this is easy to hit if you copied `FABRIK_TOKEN` from another Fabrik project's `.env`. The token can be classic and correctly scoped and still fail this way, since the error reads like a wrong project number rather than a wrong identity. Check `gh api graphql -f query='{ viewer { login } }'` against `user:` in `config.yaml` to confirm they match.
 
 ### Startup Board Validation Failure
 
