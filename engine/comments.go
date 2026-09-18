@@ -535,7 +535,12 @@ func (e *Engine) beginStageRework(item gh.ProjectItem, stage *stages.Stage) bool
 // correct label from scratch, including its wait_for_ci deferral. Restoring
 // it here too would just be redundant (AddLabelToIssue is idempotent) but
 // duplicates the single source of truth for "what does complete mean" in two
-// places, so it's deliberately left to that flow alone.
+// places, so it's deliberately left to that flow alone. Only fabrik:reworking
+// is removed on this path — and the caller (finalizeComments) MUST NOT call
+// this until after handleStageComplete has already run: removing the marker
+// any earlier would leave a crash window with no durable signal that a
+// restore is owed, between a rework's completion and the label write that
+// records it. See that call site and ADR-1802.
 //
 // When completedThisCycle is false, stage:<Stage>:complete is restored
 // directly — the rework didn't re-signal completion this cycle (error,
@@ -767,7 +772,14 @@ func (e *Engine) publishCommentOutput(owner, repo string, item gh.ProjectItem, s
 // advances to the next stage. This avoids an unnecessary extra stage
 // invocation after unblocking.
 func (e *Engine) finalizeComments(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, comments []gh.Comment, owner, repo, baseBranch string, completed, wasReworking bool, summary string) {
-	e.endStageRework(item, stage, wasReworking, completed)
+	// On a non-completing exit there is nothing further in this function that
+	// will restore stage:<Stage>:complete, so do it immediately. On a
+	// completing exit, restoring fabrik:reworking's marker removal is
+	// deferred until after handleStageComplete below has made its durable
+	// completion decision (#1802) — see that call site for why.
+	if !completed {
+		e.endStageRework(item, stage, wasReworking, false)
+	}
 	e.removeEditingLabel(owner, repo, item.Number)
 
 	resolvedThreads := make(map[string]bool)
@@ -816,6 +828,20 @@ func (e *Engine) finalizeComments(ctx context.Context, board *gh.ProjectBoard, i
 			e.markPRReady(item, prNumber)
 		}
 		e.handleStageComplete(ctx, board, item, stage)
+		// Only now — after handleStageComplete has durably written
+		// stage:<Stage>:complete, deferred to fabrik:awaiting-ci, or (a
+		// Validate yolo-merge failure) written neither, all outcomes the
+		// normal, non-rework dispatch path also produces — is it safe to drop
+		// the fabrik:reworking marker. Removing it any earlier (as a
+		// single call at the top of this function, alongside the
+		// non-completing branch above) would leave a crash window, spanning
+		// every network call between here and there, where the rework's
+		// stale-completion-claim marker is already gone but no completion
+		// signal has landed yet: exactly the "silently re-run a finished
+		// stage" failure R2 says is worse than the pre-fix lie. See ADR-1802
+		// and the matching crash-recovery check in
+		// runStartupCleanup (engine/worker_liveness.go).
+		e.endStageRework(item, stage, wasReworking, true)
 	} else {
 		e.logf(item.Number, "done", "comment processing complete\n")
 	}

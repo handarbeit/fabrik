@@ -290,6 +290,53 @@ func TestProcessComments_Rework_CompletingExit_DeferredToHandleStageComplete(t *
 	}
 }
 
+// TestProcessComments_Rework_CompletingExit_MarkerRemovedAfterHandleStageComplete
+// verifies the ordering invariant added to close the second crash window
+// (#1802): on a completing exit, fabrik:reworking must be removed AFTER
+// handleStageComplete has already (re-)written stage:<Stage>:complete, never
+// before. Removing it earlier would leave a crash window where the marker
+// that says "a restore is owed" is gone but no completion signal has landed
+// yet.
+func TestProcessComments_Rework_CompletingExit_MarkerRemovedAfterHandleStageComplete(t *testing.T) {
+	skipIfNoGit(t)
+
+	client := &mockGitHubClient{}
+	log, _ := orderedLabelLog(client)
+	claude := &mockClaudeInvoker{
+		invokeForCommentsFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			return "fixed it\nFABRIK_STAGE_COMPLETE\n", true, TokenUsage{}, nil
+		},
+	}
+	eng := testEngineWithRepo(t, client, claude)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	stage := &stages.Stage{Name: "Research", Order: 1, Completion: stages.CompletionCriteria{Type: "claude"}}
+	item := gh.ProjectItem{
+		Number: 26,
+		Body:   "spec",
+		Labels: []string{"stage:Research:complete"},
+	}
+	comments := []gh.Comment{{ID: "C_1", DatabaseID: 101, Author: "testuser", Body: "please redo this"}}
+
+	if err := eng.processComments(context.Background(), board, item, stage, comments); err != nil {
+		t.Fatalf("processComments: %v", err)
+	}
+
+	// item.Labels already carries stage:Research:complete going in (cleared by
+	// beginStageRework's remove, never an add) — so the only "add" of this
+	// label in the log is handleStageComplete's own re-derivation.
+	restoreIdx := indexOf(*log, "add:stage:Research:complete")
+	removeMarkerIdx := indexOf(*log, "remove:fabrik:reworking")
+	if restoreIdx == -1 {
+		t.Fatalf("stage:Research:complete was never (re-)added by handleStageComplete; log=%v", *log)
+	}
+	if removeMarkerIdx == -1 {
+		t.Fatalf("fabrik:reworking was never removed; log=%v", *log)
+	}
+	if restoreIdx > removeMarkerIdx {
+		t.Errorf("fabrik:reworking removed before handleStageComplete's completion write: complete added at index %d, marker removed at index %d; log=%v", restoreIdx, removeMarkerIdx, *log)
+	}
+}
+
 // TestProcessComments_Rework_WaitForCI_NoDirectComplete verifies the
 // wait_for_ci deferral is preserved through a rework: when the re-entered
 // stage completes this cycle but is configured with wait_for_ci, the item

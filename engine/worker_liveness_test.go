@@ -696,6 +696,64 @@ func TestRunStartupCleanup_ReworkingLabel_UnresolvableStatus(t *testing.T) {
 	}
 }
 
+// TestRunStartupCleanup_ReworkingLabel_AlreadyComplete verifies the second
+// crash point (#1802): a crash landing AFTER finalizeComments' call to
+// handleStageComplete already wrote stage:<Status>:complete, but BEFORE
+// fabrik:reworking was removed. The third pass must not treat this as the
+// "never settled" case — it should just remove the now-stale marker rather
+// than issuing a redundant (if harmless) restore.
+func TestRunStartupCleanup_ReworkingLabel_AlreadyComplete(t *testing.T) {
+	orig := editingLabelRetryDelay
+	editingLabelRetryDelay = 0
+	t.Cleanup(func() { editingLabelRetryDelay = orig })
+	client := &mockGitHubClient{}
+	e := testEngine(t, client, &mockClaudeInvoker{})
+
+	// bootstrapItem seeds Status: "Implement".
+	bootstrapItem(t, e, 33, []string{"fabrik:reworking", "stage:Implement:complete"})
+
+	e.runStartupCleanup()
+
+	for _, c := range client.addLabelCalls {
+		if c.issueNumber == 33 && c.labelName == "stage:Implement:complete" {
+			t.Errorf("expected no restore attempt when stage:Implement:complete is already present; addLabelCalls=%v", client.addLabelCalls)
+		}
+	}
+	removed := removeLabelsCalled(client, 33)
+	if !hasRemovedLabel(removed, "fabrik:reworking") {
+		t.Errorf("expected fabrik:reworking to be removed even when already settled; got: %v", removed)
+	}
+}
+
+// TestRunStartupCleanup_ReworkingLabel_AlreadyAwaitingCI verifies the second
+// crash point (#1802) for a wait_for_ci stage: a crash landing after
+// handleStageComplete already deferred to fabrik:awaiting-ci, but before
+// fabrik:reworking was removed. The third pass must NOT restore
+// stage:<Status>:complete in this case — doing so would bypass the CI gate
+// handleStageComplete deliberately deferred.
+func TestRunStartupCleanup_ReworkingLabel_AlreadyAwaitingCI(t *testing.T) {
+	orig := editingLabelRetryDelay
+	editingLabelRetryDelay = 0
+	t.Cleanup(func() { editingLabelRetryDelay = orig })
+	client := &mockGitHubClient{}
+	e := testEngine(t, client, &mockClaudeInvoker{})
+
+	// bootstrapItem seeds Status: "Implement".
+	bootstrapItem(t, e, 34, []string{"fabrik:reworking", "fabrik:awaiting-ci"})
+
+	e.runStartupCleanup()
+
+	for _, c := range client.addLabelCalls {
+		if c.issueNumber == 34 && c.labelName == "stage:Implement:complete" {
+			t.Errorf("stage:Implement:complete was restored despite fabrik:awaiting-ci already present — this bypasses the CI gate; addLabelCalls=%v", client.addLabelCalls)
+		}
+	}
+	removed := removeLabelsCalled(client, 34)
+	if !hasRemovedLabel(removed, "fabrik:reworking") {
+		t.Errorf("expected fabrik:reworking to be removed even when already settled; got: %v", removed)
+	}
+}
+
 // TestDetectorSkipsFreshWorker (SC-3) verifies that the detector does NOT clear
 // a worker whose heartbeat is fresh (within WorkerStaleTimeout), regardless of
 // the PID's liveness. A long-running stage with a healthy heartbeat must never

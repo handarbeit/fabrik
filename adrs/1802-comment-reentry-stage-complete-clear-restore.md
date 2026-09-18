@@ -78,6 +78,35 @@ context cancellation already excluded by its own early return, tools-denied, the
 setup-failure early returns, and an exhausted extension loop) restore
 `stage:<Stage>:complete` directly, since no other flow will restore it for those.
 
+**`fabrik:reworking`'s removal on a completing exit happens strictly *after*
+`handleStageComplete` runs, not before it.** `finalizeComments` calls
+`e.handleStageComplete(...)` and only then calls `endStageRework(..., completedThisCycle:
+true)` to drop the marker — never the other way around. `handleStageComplete`'s own
+completion decision is itself made across several network calls (label writes, an
+optional draft-PR/PR-ready path for `CreateDraftPR`/`MarkPRReadyOnComplete` stages, the
+`wait_for_ci` deferral, or — for a Validate `yolo` merge failure — no label write at all,
+identical to the non-rework dispatch path). Removing `fabrik:reworking` *before* that
+decision is durably written, rather than after, would reopen exactly the crash window
+R3 exists to close: a crash landing anywhere in that span leaves the marker gone and no
+completion label recorded, so a genuinely-completed rework looks like the stage was never
+attempted at all on restart — silently re-running a finished stage (R2) after all, just
+relocated to a different, still-real window instead of the immediately-obvious one this
+issue set out to fix. See the doc comments on `finalizeComments` and `endStageRework`
+(`engine/comments.go`) for the call-site detail.
+
+**Crash recovery is not "restore unconditionally" — it checks for an already-settled
+outcome first.** Deferring the marker's removal to after `handleStageComplete` opens a
+second, narrower crash point: the completion decision (`stage:<Stage>:complete`, or
+`fabrik:awaiting-ci` for a `wait_for_ci` stage) can land successfully and *then* the
+process crashes before the marker itself is removed. `runStartupCleanup`'s third pass
+(`engine/worker_liveness.go`) checks whether `stage:<Status>:complete` or
+`fabrik:awaiting-ci` is already present before restoring anything — if either is found,
+the rework already settled correctly and only the now-stale marker needs cleaning up. An
+unconditional restore here would be merely redundant in the `:complete` case
+(`AddLabelToIssue` is idempotent) but actively wrong in the `fabrik:awaiting-ci` case: it
+would add `stage:<Status>:complete` on top of a stage the engine deliberately parked
+pending CI, bypassing that gate on restart.
+
 **Fail-open on the mutation itself.** If the `fabrik:reworking` add or the
 `stage:<Stage>:complete` remove/restore fails transiently, the existing `addLabel`/
 `removeLabel` idiom logs a warning and the cycle proceeds regardless — consistent with

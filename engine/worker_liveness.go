@@ -358,6 +358,18 @@ func (e *Engine) runStartupCleanup() {
 	// (beginStageRework) guarantees the marker's mere presence is always a safe,
 	// idempotent restore trigger — regardless of whether the paired removal of
 	// stage:<Stage>:complete ever actually landed before the crash.
+	//
+	// fabrik:reworking's removal is deferred (finalizeComments, engine/comments.go)
+	// until after handleStageComplete has made its durable completion decision on
+	// a completing exit, so a crash can also land AFTER that decision was written
+	// but BEFORE the marker was cleared. In that case stage:<Stage>:complete (or,
+	// for a wait_for_ci stage, fabrik:awaiting-ci) is already correctly present —
+	// blindly re-adding stage:<Stage>:complete here would either be harmless
+	// (already-present case) or, for the wait_for_ci case, actively wrong: it
+	// would bypass the CI gate that handleStageComplete deliberately deferred.
+	// Checking for either settled signal first and skipping the restore when one
+	// is found makes this pass correct for both crash points, not just the
+	// earlier (never-settled) one.
 	var cleanedReworking int
 	e.forEachStaleUnworkedItem("fabrik:reworking", func(snap itemstate.Snapshot, owner, repoName string, number int) {
 		status := snap.Status()
@@ -370,13 +382,19 @@ func (e *Engine) runStartupCleanup() {
 			return
 		}
 		completeLabel := "stage:" + status + ":complete"
-		e.logf(number, "startup", "found stale reworking label from prior crash — restoring %q\n", completeLabel)
-		if err := e.client.AddLabelToIssue(owner, repoName, number, completeLabel); err != nil {
-			e.logf(number, "warn", "could not restore label %q: %v\n", completeLabel, err)
-			return
-		}
-		if c := e.cache(); c != nil {
-			c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repoName, number), completeLabel)
+		labels := snap.Labels()
+		alreadySettled := hasLabel(labels, completeLabel) || hasLabel(labels, "fabrik:awaiting-ci")
+		if alreadySettled {
+			e.logf(number, "startup", "found stale reworking label from prior crash, but %q is already settled — removing marker only\n", status)
+		} else {
+			e.logf(number, "startup", "found stale reworking label from prior crash — restoring %q\n", completeLabel)
+			if err := e.client.AddLabelToIssue(owner, repoName, number, completeLabel); err != nil {
+				e.logf(number, "warn", "could not restore label %q: %v\n", completeLabel, err)
+				return
+			}
+			if c := e.cache(); c != nil {
+				c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repoName, number), completeLabel)
+			}
 		}
 		if err := e.client.RemoveLabelFromIssue(owner, repoName, number, "fabrik:reworking"); err != nil && !errors.Is(err, gh.ErrNotFound) {
 			e.logf(number, "warn", "could not remove stale reworking label: %v\n", err)
