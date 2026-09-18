@@ -404,7 +404,7 @@ After `cmd.Run()` returns, two cleanup steps run unconditionally:
    SIGKILL
    ```
 
-   Claude is started in its own process group (`Setpgid: true` on Unix). All three signals are sent to the entire process group via `syscall.Kill(-pgid, sig)`.
+   Claude is started as its own session leader (`Setsid: true` on Unix, #1798 — previously `Setpgid: true` only). `setsid()` also makes the caller its own process-group leader (PGID = own PID), exactly as `Setpgid: true` already provided, so this section's PGID-scoped signaling is unaffected: all three signals are still sent to the entire process group via `syscall.Kill(-pgid, sig)`. The session-leader change exists for an independent mechanism — see "Session-Scoped Descendant Reaping" below.
 
    Each step is logged as `[#N kill] sending SIG<X> to PGID <pid> (reason=<reason>)`. Reason codes: `max_wall_time`, `inactivity_timeout`, `daemon_shutdown`, `supplant_by_new_invocation`, `context_cancel`.
 
@@ -418,7 +418,29 @@ After `cmd.Run()` returns, two cleanup steps run unconditionally:
 
 2. **WaitDelay bound**: `cmd.WaitDelay` is set to 30s (configurable via `--claude-wait-delay` / `FABRIK_CLAUDE_WAIT_DELAY`). When grandchild processes hold the stdout pipe open after Claude exits, Go's `cmd.Wait()` would otherwise block indefinitely. With `WaitDelay`, Go forcibly closes its end of the pipe after the deadline and returns `exec.ErrWaitDelay`. The engine detects this error, logs a diagnostic warning, clears the error, and processes the buffered output normally — including any `FABRIK_STAGE_COMPLETE` marker. This prevents the worker goroutine from being permanently stuck when Claude uses `run_in_background` or the Monitor tool.
 
+### Session-Scoped Descendant Reaping
+
+The PGID-scoped grandchild cleanup above (item 1) and the cwd-rooted worktree-teardown reaper (below) each leave a gap: a descendant that leaves the worker's process group (e.g. a job-control-enabled shell's `setpgid()` call on a backgrounded job — confirmed by direct reproduction: `set -m; nohup cmd & disown` produces a child in a brand-new PGID) escapes the first, and a descendant whose cwd is outside the worktree (a Go test's `t.TempDir()` fixture, the dominant real-world shape per #1798) escapes the second regardless of when it runs. Neither gap is closed by running either mechanism more often or earlier — the target simply isn't reachable by either primitive.
+
+`engine/descendant_reap_unix.go` (`!windows`) adds a third, independent mechanism keyed on session ID (SID) rather than process-group membership or cwd:
+
+- **Discovery, live during the invocation**: `trackWorkerDescendants` runs as a goroutine parallel to the inactivity watchdog (same lifecycle, stopped via the same `watchdogCtx`), ticking every `descendantScanInterval` (3s in production, test-overridable). Each tick, `sessionScopedDescendants` lists every live process whose session ID equals the worker's own PID — via `golang.org/x/sys/unix.Getsid`, called per candidate PID rather than parsed from `ps` output (see below for why) — and records any not already seen into a durable registry with an identity fingerprint (`comm` + `lstart`, from a single-PID `ps -p <pid> -o comm=,lstart=` query).
+
+  This must observe the tree *while the invocation is live*, not just once at teardown: a `nohup`/`disown`-detached descendant is reparented to init on a sub-second timescale — well before any post-hoc walk could see the transient worker→…→child PPID chain. Session ID does not have this problem: POSIX guarantees it is assigned once at process creation and inherited unchanged across `fork()`, changing only via an explicit `setsid()` call by the descendant itself (reparenting does not touch it) — so a descendant discovered at any later tick is still correctly attributed to the worker, no matter how quickly its intermediate parent exited.
+
+  **Why `getsid(2)` directly, not `ps`'s own session-ID column**: on at least one macOS release, `ps -eo pid=,ppid=,sess=` (the BSD equivalent of GNU/Linux's `sid=`) reports `0` for every process unconditionally, apparently masked at the `ps`-output layer. The underlying `getsid(2)` syscall is not masked — verified directly on the same host — so discovery goes through it instead. See ADR 1798.
+
+- **Reap at invocation end (R2)**: immediately after the pre-existing unconditional grandchild-cleanup `SIGKILL` (item 1 above) — the same already-unconditional call site, not a new hook — `reapTrackedDescendants` loads every registry entry recorded against the worker's PID, re-verifies each one's `comm`+`lstart` fingerprint immediately before killing it (a mismatch means the process already exited or the PID was reused for something unrelated since it was recorded — the entry is dropped, never signalled), and `SIGKILL`s the survivors. Logged via the existing `[#N kill] sending SIGKILL to PID <pid> (<comm>) — session-scoped descendant of worker PID <workerPID> (reason=invocation_end)` line.
+
+- **Backstop sweep (R3)**: `runProcessSweepJanitor` (`engine/janitor.go`) is a fourth periodic janitor, wired into the same `JanitorIntervalHours`-gated call sites (startup, and the hourly ticker) as the worktree/log/session janitors — no new config knob. It calls `sweepStaleDescendants`, which loads the *entire* durable registry (every worker, including ones from a previous engine run — the registry lives at `.fabrik/state/descendants.json` and survives a restart) and, for each entry whose recorded worker PID is confirmed dead (a live signal-0 probe), re-verifies its fingerprint and kills it exactly as the invocation-end reap does. An entry whose worker is still alive is left alone — that invocation is still in flight and R2 will reap it — so the sweep only ever acts on orphans that genuinely escaped R1/R2, including ones left behind by a prior engine run.
+
+**Kill scope**: both reap paths signal the descendant's own PID directly (`syscall.Kill(pid, SIGKILL)`), not a process group — matching the worktree-teardown reaper's own `killWorktreeProcess` precedent.
+
+**Known gaps** (see ADR 1798 Consequences): a descendant that calls its own `setsid()` is not caught (its SID permanently diverges from the worker's — this is the cwd-rooted reaper's domain instead); a detached descendant that itself forks further descendants is reaped only at the recorded leaf, not recursively.
+
 ### Worktree Teardown Process Reaping
+
+*(Complementary to, not superseded by, "Session-Scoped Descendant Reaping" above — the two catch different failure classes: this one is cwd-based and runs only at worktree removal; the other is session-based and runs on every invocation end plus a periodic backstop. See ADR 1798.)*
 
 The grandchild cleanup above is **PGID-scoped**: it can only reach descendants that stayed in the worker's process group. A descendant that calls `setsid()` — exactly what Claude Code's background-bash tool does to keep a backgrounded process (e.g. `npm run dev`) alive across tool calls — leaves the worker's process group entirely, taking on a fresh PGID equal to its own PID. `kill(-workerPGID, SIGKILL)` cannot reach it, so it survives Claude's exit and outlives the worktree directory it was started in.
 
