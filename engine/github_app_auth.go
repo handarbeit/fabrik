@@ -258,6 +258,64 @@ func RefuseWebhooksWithGitHubApp(webhooksEnabled bool) error {
 		"GitHub App config to use --webhooks with a personal access token (FABRIK_TOKEN)")
 }
 
+// RefuseUnknownEventSource refuses any Config.EventSource value other than
+// the empty string (unset, defaults to poll), EventSourcePoll, or
+// EventSourceHookdeck (#1142 PR review finding). Without this check, a typo
+// like "Hookdeck" or "hook-deck" would silently fail every equality check
+// this package and poll.go make against the exact string EventSourceHookdeck
+// — RefuseHookdeckWithoutGitHubApp/RefuseHookdeckWithWebhooks would both
+// treat it as compatible (since neither refusal fires for a value that
+// isn't EventSourceHookdeck), and poll.go's own `else if e.cfg.EventSource
+// == EventSourceHookdeck` dispatch would silently fall through to plain
+// polling — an operator who explicitly opted into event-driven ingestion
+// would get no error and no log message, only silent poll-only delivery.
+func RefuseUnknownEventSource(eventSource string) error {
+	if eventSource == "" || eventSource == EventSourcePoll || eventSource == EventSourceHookdeck {
+		return nil
+	}
+	return fmt.Errorf("event_source: %q (FABRIK_EVENT_SOURCE) is not a recognized value — must be %q, %q, or "+
+		"omitted entirely (default: %q)", eventSource, EventSourcePoll, EventSourceHookdeck, EventSourcePoll)
+}
+
+// RefuseHookdeckWithoutGitHubApp refuses event_source: hookdeck (#1142)
+// configured without GitHub App auth. Unlike gh webhook forward, Hookdeck
+// ingestion has no PAT-mode analogue at all: it consumes a GitHub App's own
+// webhook (App-manifest-level, one URL/secret for every granted repo — see
+// #1722), which does not exist for a PAT-mode installation. There is no
+// "remove event_source to fall back to a PAT-compatible transport" story
+// here beyond falling back to --webhooks or plain polling, which this error
+// names explicitly. A structurally separate config axis from Webhooks
+// (see Config.EventSource's doc comment) — deliberately never checked
+// inside RefuseWebhooksWithGitHubApp above, so #1752's refusal and this
+// issue's new mode can never collide (adrs/1142-hookdeck-ingestion-for-app-auth.md).
+func RefuseHookdeckWithoutGitHubApp(eventSource string, appAuthConfigured bool) error {
+	if eventSource != EventSourceHookdeck || appAuthConfigured {
+		return nil
+	}
+	return fmt.Errorf("event_source: hookdeck (FABRIK_EVENT_SOURCE) requires GitHub App authentication — " +
+		"Hookdeck ingestion consumes a GitHub App's own webhook (one URL/secret covering every granted repo), " +
+		"which has no PAT-mode equivalent. Configure github_app_id/github_app_private_key_path/" +
+		"github_app_installation_id to use event_source: hookdeck, or remove event_source (default: poll) to " +
+		"use PAT-mode --webhooks or plain polling instead")
+}
+
+// RefuseHookdeckWithWebhooks refuses event_source: hookdeck (#1142)
+// combined with --webhooks (FABRIK_WEBHOOKS) outright: the two are mutually
+// exclusive ingestion transports (R6/R7 of #1142) — gh webhook forward is
+// PAT-mode-only and Hookdeck is App-auth-only, so a config enabling both is
+// always contradictory, never additive. Mirrors RefuseWebhooksWithGitHubApp's
+// shape exactly: nil for the compatible case, a descriptive error otherwise
+// naming both settings and both ways out.
+func RefuseHookdeckWithWebhooks(eventSource string, webhooksEnabled bool) error {
+	if eventSource != EventSourceHookdeck || !webhooksEnabled {
+		return nil
+	}
+	return fmt.Errorf("event_source: hookdeck (FABRIK_EVENT_SOURCE) cannot be combined with --webhooks " +
+		"(FABRIK_WEBHOOKS) — they are mutually exclusive ingestion transports (gh webhook forward is PAT-mode-" +
+		"only; Hookdeck is App-auth-only). Remove --webhooks to use event_source: hookdeck, or remove " +
+		"event_source to use --webhooks instead")
+}
+
 // FormatPermissionShortfalls renders R3's "name each missing permission"
 // requirement as one human-readable, deterministically-ordered string —
 // checkGrantedPermissions already sorts shortfalls by permission name.

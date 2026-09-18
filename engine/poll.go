@@ -520,10 +520,91 @@ func (e *Engine) Run() error {
 		if err := wm.Start(ctx, e.cfg.WebhookPort); err == nil {
 			e.webhookMgr = wm
 			defer wm.Stop()
+			// R5 startup assertion (#1142): verify a forwarding hook actually
+			// exists for each managed repo, warning (never failing startup) on
+			// any gap. Best-effort here — on a fresh multi-repo board, wm's repo
+			// set isn't populated until the first UpdateRepos call during poll,
+			// so this startup pass only reliably covers single-repo boards; the
+			// periodic reconcileLoop check (engine/reconcile.go) re-runs it once
+			// the full managed set is known and on every tick thereafter.
+			e.checkWebhookHookCoverage(wm)
 		}
 		// NOTE: the reconcile ticker is intentionally NOT started here. It is the
 		// poll-only correctness backstop and must run whether or not the webhook
 		// manager started (#955) — it is launched unconditionally below.
+	} else if e.cfg.EventSource == EventSourceHookdeck {
+		// event_source: hookdeck (#1142) — the App-auth-only alternative
+		// transport. Mutually exclusive with the cfg.Webhooks branch above:
+		// RefuseHookdeckWithWebhooks (engine/github_app_auth.go) refuses the
+		// combination at startup, so this is a clean if/else-if rather than
+		// a fallthrough that could ever run both.
+		// apiKeyEnvName/secretEnvName hold the *names* of the environment
+		// variables, never their values: the secrets themselves (apiKey,
+		// webhookSecret below) go only to newHookdeckManager and are never
+		// logged. The explicit "...Name" suffix keeps that distinction plain
+		// to readers, and to CodeQL, whose clear-text-logging heuristic read
+		// the earlier apiKeyEnv/secretEnv spellings as sensitive values
+		// flowing into the log call below - a false positive, since what is
+		// logged is the variable name (e.g. "$HOOKDECK_API_KEY").
+		apiKeyEnvName := e.cfg.HookdeckAPIKeyEnv
+		if apiKeyEnvName == "" {
+			apiKeyEnvName = DefaultHookdeckAPIKeyEnv
+		}
+		secretEnvName := e.cfg.HookdeckWebhookSecretEnv
+		if secretEnvName == "" {
+			secretEnvName = DefaultHookdeckWebhookSecretEnv
+		}
+		apiKey := os.Getenv(apiKeyEnvName)
+		webhookSecret := os.Getenv(secretEnvName)
+		if apiKey == "" || webhookSecret == "" {
+			var missing []string
+			if apiKey == "" {
+				missing = append(missing, apiKeyEnvName)
+			}
+			if webhookSecret == "" {
+				missing = append(missing, secretEnvName)
+			}
+			e.logf(0, "hookdeck", "event_source: hookdeck requires %s to be set — falling back to polling only\n",
+				strings.Join(missing, " and "))
+		} else {
+			var initialRepos map[string]bool
+			if e.cfg.Owner != "" && e.cfg.Repo != "" {
+				initialRepos = map[string]bool{e.cfg.Owner + "/" + e.cfg.Repo: true}
+			}
+			var deltaFn func(string, []byte)
+			if cacheImpl != nil {
+				deltaFn = func(eventType string, payload []byte) {
+					cacheImpl.ApplyDelta(eventType, payload)
+					e.applyLayer1StatusRefresh(eventType, payload, cacheImpl)
+				}
+			}
+			hm := newHookdeckManager(e.logf, e.emit, initialRepos, deltaFn, apiKey, webhookSecret)
+			// Bootstrap the cache before accepting events, mirroring the
+			// cfg.Webhooks branch above so no delta is dropped into an empty
+			// cache during the startup window.
+			if cacheImpl != nil {
+				probeItems, projectID, probeErr := e.client.ProbeProjectBoard(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum, e.cfg.OwnerType)
+				if probeErr != nil {
+					e.logf(0, "cache", "startup probe failed — cache will be populated on first poll: %v\n", probeErr)
+				} else if projectID != "" && len(probeItems) > 0 {
+					cacheImpl.BootstrapFromProbe(probeItems, projectID)
+					e.seedTerminalFromProbeItems(probeItems)
+				} else if projectID != "" {
+					e.logf(0, "cache", "startup probe returned 0 items — deferring to first poll\n")
+				}
+			}
+			hm.Start(ctx)
+			e.webhookMgr = hm
+			defer hm.Stop()
+			e.logf(0, "hookdeck", "event_source: hookdeck — API key from $%s, webhook secret from $%s\n", apiKeyEnvName, secretEnvName)
+			// R5 startup assertion (#1142): verify the App installation's
+			// granted-repo set covers every managed repo, warning (never
+			// failing startup) on any gap — the App-mode analogue of the
+			// cfg.Webhooks branch's checkWebhookHookCoverage call above.
+			e.checkHookdeckInstallationCoverage(hm)
+		}
+		// NOTE: as with the cfg.Webhooks branch, the reconcile ticker is
+		// intentionally NOT started here — it is launched unconditionally below.
 	}
 
 	// Reconcile ticker: the poll-only correctness backstop that re-syncs the cache

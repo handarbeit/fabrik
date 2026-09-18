@@ -78,6 +78,9 @@ type Config struct {
 	Webhooks                  bool
 	WebhookPort               int
 	WebhookEvents             string // comma-separated; empty means default event set
+	EventSource               string // "" or "poll" (default), or "hookdeck" — see engine.Config.EventSource
+	HookdeckAPIKeyEnv         string // env var name holding the Hookdeck API key; "" = use default
+	HookdeckWebhookSecretEnv  string // env var name holding the GitHub App webhook secret; "" = use default
 	StatusPollSeconds         int    // Layer 2 status-only sweep cadence in seconds; 0 = use default (15)
 	ReconcileInterval         int    // seconds; 0 means use default (180 = 3 min); also FABRIK_RECONCILE_INTERVAL
 	JanitorIntervalHours      int    // hours; 1 = default; 0 disables the janitor
@@ -209,6 +212,9 @@ func Execute() error {
 	flag.BoolVar(&cfg.Webhooks, "webhooks", false, "Enable webhook-driven event delivery via gh webhook forward (requires gh ≥ 2.32.0; also FABRIK_WEBHOOKS)")
 	flag.IntVar(&cfg.WebhookPort, "webhook-port", 0, "Local port for the webhook HTTP listener (0 = OS-assigned; also FABRIK_WEBHOOK_PORT)")
 	flag.StringVar(&cfg.WebhookEvents, "webhook-events", "", "Comma-separated list of GitHub event types to subscribe to (default: all supported events; also FABRIK_WEBHOOK_EVENTS)")
+	flag.StringVar(&cfg.EventSource, "event-source", "", "Event ingestion transport: 'poll' (default) or 'hookdeck'. hookdeck requires GitHub App auth and is mutually exclusive with --webhooks (also FABRIK_EVENT_SOURCE; #1142)")
+	flag.StringVar(&cfg.HookdeckAPIKeyEnv, "hookdeck-api-key-env", "", "Name of the environment variable holding the Hookdeck API key (only used when --event-source=hookdeck; default HOOKDECK_API_KEY; also FABRIK_HOOKDECK_API_KEY_ENV)")
+	flag.StringVar(&cfg.HookdeckWebhookSecretEnv, "hookdeck-webhook-secret-env", "", "Name of the environment variable holding the GitHub App's webhook secret (only used when --event-source=hookdeck; default FABRIK_GITHUB_WEBHOOK_SECRET; also FABRIK_HOOKDECK_WEBHOOK_SECRET_ENV)")
 	flag.IntVar(&cfg.StatusPollSeconds, "status-poll", 0, "Retained for config compatibility; the Layer 2 updatedAt gate now runs every poll cycle (~15 s) regardless of this value. Also FABRIK_STATUS_POLL.")
 	flag.IntVar(&cfg.ReconcileInterval, "reconcile-interval", 0, "Seconds between periodic light-reconcile drift checks (0 = use default of 180; also FABRIK_RECONCILE_INTERVAL). Always active — this is the sole correctness backstop in poll-only mode; when --webhooks is enabled it also drives webhook stream-health transitions.")
 	flag.IntVar(&cfg.JanitorIntervalHours, "janitor-interval", 1, "Worktree janitor scan interval in hours; 0 disables the janitor (also FABRIK_JANITOR_INTERVAL)")
@@ -718,6 +724,27 @@ func Execute() error {
 			cfg.WebhookEvents = v
 		}
 	}
+	if !explicitFlags["event-source"] {
+		if v := os.Getenv("FABRIK_EVENT_SOURCE"); v != "" {
+			cfg.EventSource = v
+		} else if pc.EventSource != "" {
+			cfg.EventSource = pc.EventSource
+		}
+	}
+	if !explicitFlags["hookdeck-api-key-env"] {
+		if v := os.Getenv("FABRIK_HOOKDECK_API_KEY_ENV"); v != "" {
+			cfg.HookdeckAPIKeyEnv = v
+		} else if pc.HookdeckAPIKeyEnv != "" {
+			cfg.HookdeckAPIKeyEnv = pc.HookdeckAPIKeyEnv
+		}
+	}
+	if !explicitFlags["hookdeck-webhook-secret-env"] {
+		if v := os.Getenv("FABRIK_HOOKDECK_WEBHOOK_SECRET_ENV"); v != "" {
+			cfg.HookdeckWebhookSecretEnv = v
+		} else if pc.HookdeckWebhookSecretEnv != "" {
+			cfg.HookdeckWebhookSecretEnv = pc.HookdeckWebhookSecretEnv
+		}
+	}
 	if !explicitFlags["status-poll"] {
 		if v := os.Getenv("FABRIK_STATUS_POLL"); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
@@ -875,6 +902,9 @@ func Execute() error {
 		Webhooks:                  cfg.Webhooks,
 		WebhookPort:               cfg.WebhookPort,
 		WebhookEvents:             webhookEvents,
+		EventSource:               cfg.EventSource,
+		HookdeckAPIKeyEnv:         cfg.HookdeckAPIKeyEnv,
+		HookdeckWebhookSecretEnv:  cfg.HookdeckWebhookSecretEnv,
 		ProjectStatusPollSeconds:  statusPollSeconds(cfg.StatusPollSeconds),
 		ReconcileInterval:         reconcileIntervalDuration(cfg.ReconcileInterval),
 		JanitorIntervalHours:      cfg.JanitorIntervalHours,

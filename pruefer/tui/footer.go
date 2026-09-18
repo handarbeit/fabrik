@@ -36,9 +36,9 @@ type FooterComponent struct {
 }
 
 // Drop-reason category strings mirroring events.DropReason's constants
-// (pruefer/events) — duplicated as plain strings rather than importing
+// (internal/events) — duplicated as plain strings rather than importing
 // that package, matching DropEvent.Reason's own "plain string, no
-// pruefer/events dependency" convention.
+// internal/events dependency" convention.
 const (
 	dropReasonSignatureMissing = "signature_missing"
 	dropReasonSignatureInvalid = "signature_invalid"

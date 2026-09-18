@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/handarbeit/fabrik/pruefer/events"
+	"github.com/handarbeit/fabrik/internal/events"
 )
 
 // minPayload is the minimal set of fields read from a raw GitHub webhook

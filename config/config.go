@@ -13,41 +13,55 @@ import (
 // ProjectConfig holds the non-secret, project-level settings read from
 // .fabrik/config.yaml. All fields are optional; absent fields stay zero/nil.
 type ProjectConfig struct {
-	Owner                     string   `yaml:"owner"`
-	Repo                      string   `yaml:"repo"`
-	ProjectNum                *int     `yaml:"project"`
-	OwnerType                 string   `yaml:"owner_type"`
-	User                      string   `yaml:"user"`
-	StagesDir                 string   `yaml:"stages"`
-	Poll                      *int     `yaml:"poll"`
-	MaxConcurrent             *int     `yaml:"max_concurrent"`
-	MaxRetries                *int     `yaml:"max_retries"`
-	Yolo                      bool     `yaml:"yolo"`
-	AutoUpgrade               bool     `yaml:"auto_upgrade"`
-	GitSSH                    bool     `yaml:"git_ssh"`
-	TUI                       *bool    `yaml:"tui"`
-	DebugOutput               bool     `yaml:"debug_output"`
-	SymlinkEnv                bool     `yaml:"symlink_env"`
-	WorktreeBoundaryAudit     bool     `yaml:"worktree_boundary_audit"`
-	Version                   string   `yaml:"version"`
-	Webhooks                  bool     `yaml:"webhooks"`
-	WebhookPort               *int     `yaml:"webhook_port"`
-	WebhookEvents             []string `yaml:"webhook_events"`
-	StatusPoll                *int     `yaml:"status_poll"`
-	JanitorIntervalHours      *int     `yaml:"janitor_interval_hours"`
-	LogRetentionDays          *int     `yaml:"log_retention_days"`
-	LogMaxBytes               *int64   `yaml:"log_max_bytes"`
-	SessionRetentionDays      *int     `yaml:"session_retention_days"`
-	MergeTrain                string   `yaml:"merge_train"`
-	AutoMergeStrategy         string   `yaml:"auto_merge_strategy"`
-	MaxBatchSize              *int     `yaml:"max_batch_size"`
-	MaxBisectValidations      *int     `yaml:"max_bisect_validations"`
-	MaxTrainRebaseCycles      *int     `yaml:"max_train_rebase_cycles"`
-	MaxTrainTrialsPerWindow   *int     `yaml:"max_train_trials_per_window"`
-	TrainTrialWindow          *int     `yaml:"train_trial_window"`
-	MaxCommentCyclesPerWindow *int     `yaml:"max_comment_cycles_per_window"`
-	CommentCycleWindow        *int     `yaml:"comment_cycle_window"`
-	MaxNoOpCommentCycles      *int     `yaml:"max_no_op_comment_cycles"`
+	Owner                 string   `yaml:"owner"`
+	Repo                  string   `yaml:"repo"`
+	ProjectNum            *int     `yaml:"project"`
+	OwnerType             string   `yaml:"owner_type"`
+	User                  string   `yaml:"user"`
+	StagesDir             string   `yaml:"stages"`
+	Poll                  *int     `yaml:"poll"`
+	MaxConcurrent         *int     `yaml:"max_concurrent"`
+	MaxRetries            *int     `yaml:"max_retries"`
+	Yolo                  bool     `yaml:"yolo"`
+	AutoUpgrade           bool     `yaml:"auto_upgrade"`
+	GitSSH                bool     `yaml:"git_ssh"`
+	TUI                   *bool    `yaml:"tui"`
+	DebugOutput           bool     `yaml:"debug_output"`
+	SymlinkEnv            bool     `yaml:"symlink_env"`
+	WorktreeBoundaryAudit bool     `yaml:"worktree_boundary_audit"`
+	Version               string   `yaml:"version"`
+	Webhooks              bool     `yaml:"webhooks"`
+	WebhookPort           *int     `yaml:"webhook_port"`
+	WebhookEvents         []string `yaml:"webhook_events"`
+	// EventSource selects the ingestion transport: "poll" (default, unset) or
+	// "hookdeck". Distinct from Webhooks/WebhookPort/WebhookEvents above,
+	// which configure the gh-webhook-forward (PAT-mode) transport only —
+	// event_source: hookdeck is a separate, App-auth-only opt-in, deliberately
+	// kept structurally independent so it can never collide with the
+	// Webhooks+App-auth refusal (#1752). See adrs/1142-hookdeck-ingestion-for-app-auth.md.
+	EventSource string `yaml:"event_source"`
+	// HookdeckAPIKeyEnv/HookdeckWebhookSecretEnv each name an environment
+	// variable holding the actual secret (indirection, not the secret
+	// itself) — mirroring pruefer/config.go's hookdeck.api_key_env /
+	// hookdeck.webhook_secret_env convention exactly, so an operator already
+	// running Pruefer with Hookdeck recognizes the shape immediately.
+	HookdeckAPIKeyEnv         string `yaml:"hookdeck_api_key_env"`
+	HookdeckWebhookSecretEnv  string `yaml:"hookdeck_webhook_secret_env"`
+	StatusPoll                *int   `yaml:"status_poll"`
+	JanitorIntervalHours      *int   `yaml:"janitor_interval_hours"`
+	LogRetentionDays          *int   `yaml:"log_retention_days"`
+	LogMaxBytes               *int64 `yaml:"log_max_bytes"`
+	SessionRetentionDays      *int   `yaml:"session_retention_days"`
+	MergeTrain                string `yaml:"merge_train"`
+	AutoMergeStrategy         string `yaml:"auto_merge_strategy"`
+	MaxBatchSize              *int   `yaml:"max_batch_size"`
+	MaxBisectValidations      *int   `yaml:"max_bisect_validations"`
+	MaxTrainRebaseCycles      *int   `yaml:"max_train_rebase_cycles"`
+	MaxTrainTrialsPerWindow   *int   `yaml:"max_train_trials_per_window"`
+	TrainTrialWindow          *int   `yaml:"train_trial_window"`
+	MaxCommentCyclesPerWindow *int   `yaml:"max_comment_cycles_per_window"`
+	CommentCycleWindow        *int   `yaml:"comment_cycle_window"`
+	MaxNoOpCommentCycles      *int   `yaml:"max_no_op_comment_cycles"`
 	// GHESHost is the hostname of a GitHub Enterprise Server instance (e.g.
 	// "github.example.com"), with no scheme or trailing slash. Empty (the
 	// default) means github.com — no behavior change from before GHES

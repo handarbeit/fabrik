@@ -75,6 +75,7 @@ type mockGitHubClient struct {
 	createPRFn                    func(owner, repo, title, head, base, body string) (int, error)
 	listPRsFn                     func(owner, repo string) ([]gh.PRDetails, error)
 	fetchProjectItemFn            func(owner, repo string, issueNumber int) (*gh.ProjectItem, error)
+	hasForwardingHookFn           func(owner, repo string) (bool, error)
 
 	// Track call counts for FetchProjectItemStatus
 	fetchProjectItemStatusCalls []string
@@ -738,6 +739,13 @@ func (m *mockGitHubClient) FetchProjectItem(owner, repo string, issueNumber int)
 
 func (m *mockGitHubClient) DeleteForwardingHooks(owner, repo string) error {
 	return nil
+}
+
+func (m *mockGitHubClient) HasForwardingHook(owner, repo string) (bool, error) {
+	if m.hasForwardingHookFn != nil {
+		return m.hasForwardingHookFn(owner, repo)
+	}
+	return true, nil
 }
 
 func (m *mockGitHubClient) RateLimitStats() (gh.RateLimitStats, gh.RateLimitStats) {

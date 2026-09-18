@@ -122,6 +122,22 @@ func (TurnProgressEvent) tuiEvent() {}
 type WebhookStatusEvent struct {
 	State       string         // WebhookHealthState as string to avoid import cycle
 	EventCounts map[string]int // per-event-type received counts
+	// CoverageNote is a short, human-readable note distinct from State/health
+	// connectivity — it describes whether the active ingestion transport
+	// (gh webhook forward, or Hookdeck under GitHub App auth) actually
+	// covers every managed repo, e.g. "partial: 1/3 repos" or "hook
+	// missing: 2 repos". A nil pointer means this event's origin doesn't
+	// track coverage at all (e.g. the cache-pause/resume observer in
+	// poll.go) and the previously-known note must be left alone; a
+	// non-nil pointer to "" means the origin actively confirms full
+	// coverage right now. Only the two coverage-aware emitters
+	// (webhookManager/hookdeckManager's emitCurrentState) ever set this to
+	// non-nil — never conflate "don't know" with "known-empty," or an
+	// unrelated event (e.g. a cache pause triggered by cache drift, which
+	// fires in the same reconcile tick that just recomputed the real
+	// coverage note) silently wipes an active coverage warning from the
+	// TUI. See #1142.
+	CoverageNote *string
 }
 
 func (WebhookStatusEvent) tuiEvent() {}

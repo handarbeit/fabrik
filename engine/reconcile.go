@@ -12,12 +12,20 @@ import (
 // reconcileLoop is the poll-only correctness backstop for cache/GitHub divergence.
 // It periodically runs LightReconcile (a fresh shallow board fetch + drift compare)
 // and, on drift, reconciles the cache — re-syncing shallow fields including the
-// fabrik-managed label set. It MUST run whether or not the webhook manager started
-// (#955): a webhook-less (or webhook-failed) deployment must still self-heal, so
-// this loop is launched unconditionally rather than nested in the webhook-start
-// path. wm may be nil (webhooks off/failed); webhook health-state transitions are
-// skipped in that case, but drift detection and repair still run.
-func (e *Engine) reconcileLoop(ctx context.Context, cacheImpl *boardcache.CacheImpl, wm *webhookManager) {
+// fabrik-managed label set. It MUST run whether or not an event-ingestion
+// transport started (#955): a webhook-less/hookdeck-less (or failed) deployment
+// must still self-heal, so this loop is launched unconditionally rather than
+// nested in either transport's start path. mgr may be nil (no transport active
+// or it failed to start); transport-specific coverage checks and health-state
+// transitions are skipped in that case, but drift detection and repair still run.
+//
+// mgr is the interface-typed eventIngestionManager (#1142) rather than a
+// concrete *webhookManager: the two transport-specific behaviors below
+// (hook-coverage re-check, health-state transitions) are not part of that
+// shared interface (Decision #3 — see engine/ingestion.go), so this loop
+// recovers the concrete type via a type assertion for each transport it
+// knows about, rather than growing the shared interface to fit them.
+func (e *Engine) reconcileLoop(ctx context.Context, cacheImpl *boardcache.CacheImpl, mgr eventIngestionManager) {
 	reconcileInterval := e.cfg.ReconcileInterval
 	if reconcileInterval <= 0 {
 		reconcileInterval = lightReconcileInterval
@@ -29,6 +37,15 @@ func (e *Engine) reconcileLoop(ctx context.Context, cacheImpl *boardcache.CacheI
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			// R5 periodic coverage re-check (#1142): a hook deleted (or a
+			// newly-managed repo added, or an installation's granted-repo set
+			// changed) mid-run should be caught here, not just at startup.
+			// Best-effort; never blocks or fails the reconcile pass.
+			if wm, ok := mgr.(*webhookManager); ok {
+				e.checkWebhookHookCoverage(wm)
+			} else if hm, ok := mgr.(*hookdeckManager); ok {
+				e.checkHookdeckInstallationCoverage(hm)
+			}
 			driftCount, driftedKeys, freshBoard, err := cacheImpl.LightReconcile(
 				e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum, e.cfg.OwnerType,
 			)
@@ -37,9 +54,7 @@ func (e *Engine) reconcileLoop(ctx context.Context, cacheImpl *boardcache.CacheI
 				continue
 			}
 			if driftCount == 0 {
-				if wm != nil {
-					wm.transitionHealthState(WebhookStreamHealthy, "")
-				}
+				transitionMgrHealthState(mgr, WebhookStreamHealthy, "")
 				continue
 			}
 			keyStr := fmt.Sprintf("%v", driftedKeys)
@@ -47,16 +62,34 @@ func (e *Engine) reconcileLoop(ctx context.Context, cacheImpl *boardcache.CacheI
 				keyStr = fmt.Sprintf("%v … %d more", driftedKeys[:5], len(driftedKeys)-5)
 			}
 			e.logf(0, "reconcile", "light reconcile: %d item(s) drifted (%s) — reconciling cache\n", driftCount, keyStr)
-			if wm != nil {
-				wm.transitionHealthState(WebhookStreamUnhealthy, fmt.Sprintf("%d item(s) drifted", driftCount))
-			}
+			transitionMgrHealthState(mgr, WebhookStreamUnhealthy, fmt.Sprintf("%d item(s) drifted", driftCount))
 			cacheImpl.Pause()
 			cacheImpl.Reconcile(freshBoard)
 			cacheImpl.Resume()
-			if wm != nil {
-				wm.transitionHealthState(WebhookStreamHealthy, "drift reconciled")
-			}
+			transitionMgrHealthState(mgr, WebhookStreamHealthy, "drift reconciled")
 		}
+	}
+}
+
+// transitionMgrHealthState applies a health-state transition to whichever
+// concrete ingestion transport mgr holds (or is a no-op when mgr is nil or an
+// unrecognized type). Not part of eventIngestionManager itself — see
+// reconcileLoop's doc comment for why.
+//
+// webhookManager takes newState directly: its health state has no other
+// independently-driven condition to preserve. hookdeckManager instead goes
+// through reconcileHint, which re-derives Healthy from hm's own
+// connHealth/sigDriftActive rather than accepting reconcileLoop's "no cache
+// drift" signal as an unconditional override — otherwise a drift-free
+// reconcile tick would silently clear an active signature-drift escalation
+// (R4), the exact condition it exists to make loud. See hookdeckManager.
+// reconcileHint's doc comment.
+func transitionMgrHealthState(mgr eventIngestionManager, newState WebhookHealthState, reason string) {
+	switch m := mgr.(type) {
+	case *webhookManager:
+		m.transitionHealthState(newState, reason)
+	case *hookdeckManager:
+		m.reconcileHint(newState == WebhookStreamHealthy, reason)
 	}
 }
 

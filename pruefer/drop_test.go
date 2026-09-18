@@ -4,7 +4,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/handarbeit/fabrik/pruefer/events"
+	"github.com/handarbeit/fabrik/internal/events"
 	ptui "github.com/handarbeit/fabrik/pruefer/tui"
 )
 
