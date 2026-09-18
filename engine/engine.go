@@ -213,6 +213,8 @@ type Engine struct {
 	mergeTrainRunawayAlerted    map[string]int                // key: "trainKey#N" (trainKey a mergeTrainKey "owner/repo:baseBranch" since #1648, was bare "owner/repo#N"); value: the trial count in effect when this member was last alerted. A later call is treated as already-alerted only while its own count is <= the recorded value — trials cannot increase while the guard keeps the queue paused, so an increase can only mean an operator manually resumed the member (removing fabrik:paused) and it genuinely tripped again, which must produce a fresh alert (#1533 review, finding 2). Also cleared wholesale per-trainKey by resetTrialCounter (the guard's own "episode ends" signal — a successful land) (#1533)
 	queuedReviewEjectsMu        sync.Mutex                    // guards queuedReviewEjects
 	queuedReviewEjects          map[string]map[int]int        // key: "owner/repo" -> issue number -> unresolved finding count; pending-eject signal a settle scan leaves for an in-flight merge-train worker to consume at its own checkpoints (#1208). Deliberately NOT re-keyed by base (#1648): keyed by issue number within the repo bucket, and an issue belongs to exactly one partition's live batch at a time, so two workers sharing this repo-level map never collide.
+	sentinelProbeFailuresMu     sync.Mutex                    // guards sentinelProbeFailures
+	sentinelProbeFailures       map[string]int                // key: "owner/repo#N"; consecutive scan cycles in which probeSentinelLive itself failed (R4, #1779) for a PID<=0 worker whose sentinel could not be verified either way. Bounded by sentinelProbeUnverifiableCycleLimit before falling back to the plain timeout clear, logged as unverified. Scan-goroutine-local bookkeeping, mirroring mergeTrainRunawayAlerted's per-episode map shape rather than itemstate.Store state — nothing outside the scan needs to observe it. Cleared whenever the worker leaves the unverifiable state: found live (PID adopted), found dead (cleared), or itself cleared.
 	issueCtxs                   sync.Map                      // key: issueKey string, value: issueCtxEntry; per-issue context for kill-reason propagation
 	pauseIssueMuGuard           sync.Mutex                    // guards pauseIssueMu itself (creation, refcounting, deletion) — distinct from the per-issue *sync.Mutex each entry embeds
 	pauseIssueMu                map[string]*pauseIssueMuEntry // key: issueKey string; refcounted per-issue mutex serializing concurrent pauseInterruptedIssue calls for the same issue (ADR-1393 — a TUI stop and a daemon shutdown pause can race for the same in-flight issue). Entries are deleted once no caller holds a reference, so this does not grow unboundedly over the daemon's lifetime (review finding on #1393).
@@ -415,6 +417,7 @@ func New(cfg Config) (*Engine, error) {
 		mergeTrainRunawayAlerted:  make(map[string]int),
 		queuedReviewEjects:        make(map[string]map[int]int),
 		pauseIssueMu:              make(map[string]*pauseIssueMuEntry),
+		sentinelProbeFailures:     make(map[string]int),
 		backoffPrevMultiplier:     1,
 		backoffRateLimitRatio:     1.0,
 	}
@@ -516,6 +519,7 @@ func NewWithDeps(cfg Config, client GitHubClient, claude ClaudeInvoker, worktree
 		mergeTrainRunawayAlerted:  make(map[string]int),
 		queuedReviewEjects:        make(map[string]map[int]int),
 		pauseIssueMu:              make(map[string]*pauseIssueMuEntry),
+		sentinelProbeFailures:     make(map[string]int),
 		backoffPrevMultiplier:     1,
 		backoffRateLimitRatio:     1.0,
 	}

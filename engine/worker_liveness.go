@@ -116,11 +116,14 @@ func (e *Engine) runWorkerDetectorScan() {
 			if time.Since(w.StartedAt) > threshold {
 				repo := snap.Repo()
 				number := snap.Number()
-				e.logf(number, "worker-liveness", "worker never reached PID assignment (started %v ago) — clearing, could not verify liveness\n", time.Since(w.StartedAt).Round(time.Second))
-				e.cleanupStaleWorker(repo, number, lockLabel, w.StageName)
+				e.handleUnverifiablePIDWorker(repo, number, lockLabel, w, threshold)
 			}
 			continue
 		}
+		// A real PID is now known — this item can no longer be in the R4
+		// unverifiable-cycles bookkeeping state (#1779), whether it got here via
+		// the normal onPIDReady callback or via sentinel-probe PID adoption below.
+		e.clearSentinelProbeFailures(snap.Repo(), snap.Number())
 		if time.Since(w.LastSignAt) <= threshold {
 			continue
 		}
@@ -138,6 +141,98 @@ func (e *Engine) runWorkerDetectorScan() {
 	}
 }
 
+// handleUnverifiablePIDWorker is reached once a PID<=0 worker has exceeded
+// workerStaleTimeout against its StartedAt (#1303's original trigger). Before
+// clearing it blind, it probes for a live process carrying the worker's
+// deterministic sessionNameSentinel (R1, #1779) — the same --name value
+// passed on every worker invocation (claude.go), previously observational
+// only. Three outcomes:
+//   - sentinel found live (R2): mirror the PID-recorded path's posture — log
+//     and wait for natural exit, adopting the discovered PID (if any) into
+//     the worker handle so ordinary signal-0 liveness governs from the next
+//     scan cycle onward.
+//   - sentinel affirmatively not found (R3): clear exactly as before #1779 —
+//     the #1303 regression guard.
+//   - the probe itself failed, e.g. no `ps`, non-zero exit, timeout, or an
+//     unsupported platform (R4): defer the clear for a bounded number of
+//     consecutive scan cycles (sentinelProbeUnverifiableCycleLimit) rather
+//     than clearing immediately or deferring forever; once the bound is
+//     reached, clear anyway, logged as unverified.
+//
+// When no worker in this process could ever carry a sentinel at all
+// (claudeNameFlagSupported == false, a one-time process-lifetime capability
+// probe — see claude.go), the sentinel probe is skipped entirely: it could
+// only ever report "not found," so skipping avoids a needless subprocess
+// spawn every scan cycle and falls straight through to R3's plain clear.
+func (e *Engine) handleUnverifiablePIDWorker(repo string, number int, lockLabel string, w *itemstate.WorkerHandle, threshold time.Duration) {
+	elapsed := time.Since(w.StartedAt).Round(time.Second)
+	if !claudeNameFlagSupported {
+		e.logf(number, "worker-liveness", "worker never reached PID assignment (started %v ago) — clearing, could not verify liveness\n", elapsed)
+		e.cleanupStaleWorker(repo, number, lockLabel, w.StageName)
+		return
+	}
+
+	sentinel := sessionNameSentinel(repo, number, w.StageName)
+	result := sentinelProbeFn(sentinel)
+
+	switch {
+	case result.Err != nil:
+		failures := e.recordSentinelProbeFailure(repo, number)
+		if failures < sentinelProbeUnverifiableCycleLimit {
+			e.logf(number, "worker-liveness", "sentinel probe unverifiable (worker started %v ago, %d/%d consecutive failures) — deferring clear: %v\n", elapsed, failures, sentinelProbeUnverifiableCycleLimit, result.Err)
+			return
+		}
+		e.logf(number, "worker-liveness", "worker never reached PID assignment (started %v ago) — clearing UNVERIFIED after %d consecutive sentinel-probe failures: %v\n", elapsed, failures, result.Err)
+		e.cleanupStaleWorker(repo, number, lockLabel, w.StageName)
+	case result.Live:
+		e.clearSentinelProbeFailures(repo, number)
+		if result.PID > 0 {
+			e.store.Apply(itemstate.WorkerPIDSet{Repo: repo, Number: number, PID: result.PID})
+			// Give the newly-adopted PID a fresh heartbeat baseline so the
+			// ordinary signal-0 path (which requires BOTH a stale heartbeat
+			// AND a failed signal-0) does not immediately treat it as
+			// already-stale on the very next scan cycle.
+			e.store.Apply(itemstate.WorkerHeartbeat{Repo: repo, Number: number, At: time.Now()})
+			e.logf(number, "worker-liveness", "sentinel %q found live (pid=%d, worker started %v ago) — adopting PID, signal-0 liveness now governs\n", sentinel, result.PID, elapsed)
+		} else {
+			e.logf(number, "worker-liveness", "sentinel %q found live (worker started %v ago) — waiting for natural exit\n", sentinel, elapsed)
+		}
+	default:
+		e.clearSentinelProbeFailures(repo, number)
+		e.logf(number, "worker-liveness", "worker never reached PID assignment (started %v ago) — clearing, could not verify liveness (sentinel %q not found)\n", elapsed, sentinel)
+		e.cleanupStaleWorker(repo, number, lockLabel, w.StageName)
+	}
+}
+
+// sentinelProbeFailureKey builds the sentinelProbeFailures map key for a
+// given (repo, issueNumber) pair.
+func sentinelProbeFailureKey(repo string, number int) string {
+	return fmt.Sprintf("%s#%d", repo, number)
+}
+
+// recordSentinelProbeFailure increments and returns the consecutive
+// sentinel-probe-failure count for (repo, number) — see sentinelProbeFailures'
+// doc comment on the Engine struct (R4, #1779).
+func (e *Engine) recordSentinelProbeFailure(repo string, number int) int {
+	key := sentinelProbeFailureKey(repo, number)
+	e.sentinelProbeFailuresMu.Lock()
+	defer e.sentinelProbeFailuresMu.Unlock()
+	e.sentinelProbeFailures[key]++
+	return e.sentinelProbeFailures[key]
+}
+
+// clearSentinelProbeFailures resets the consecutive sentinel-probe-failure
+// count for (repo, number). Safe to call unconditionally (harmless no-op) —
+// called whenever a worker leaves the unverifiable state: sentinel found
+// live, sentinel confirmed not found, cleared after the R4 bound, or a real
+// PID reaches the store via the ordinary onPIDReady callback.
+func (e *Engine) clearSentinelProbeFailures(repo string, number int) {
+	key := sentinelProbeFailureKey(repo, number)
+	e.sentinelProbeFailuresMu.Lock()
+	defer e.sentinelProbeFailuresMu.Unlock()
+	delete(e.sentinelProbeFailures, key)
+}
+
 // cleanupStaleWorker removes the lock and in-progress labels for a dead worker
 // and clears the Worker and Lock entries in the store.
 func (e *Engine) cleanupStaleWorker(repo string, number int, lockLabel string, stageName string) {
@@ -145,6 +240,10 @@ func (e *Engine) cleanupStaleWorker(repo string, number int, lockLabel string, s
 	// Also release the lock state so cleanupLockedIssues() on graceful shutdown
 	// does not try to remove already-absent labels and log spurious warnings.
 	e.store.Apply(itemstate.LocalLockReleased{Repo: repo, Number: number})
+	// Every clear path terminates this worker's R4 unverifiable-cycles bookkeeping
+	// (#1779), whether the clear originated from confirmed-dead signal-0, the
+	// #1303 plain timeout, a confirmed-not-found sentinel, or the R4 bound itself.
+	e.clearSentinelProbeFailures(repo, number)
 
 	owner, repoName := parseOwnerRepo(repo)
 	e.removeLockLabel(owner, repoName, number, lockLabel)
