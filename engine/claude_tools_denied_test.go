@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"testing"
@@ -25,17 +26,13 @@ func TestClassifyToolsDenied(t *testing.T) {
 			wantDetected: false,
 		},
 		{
-			name: "empty PermissionDenials does not detect",
-			resp: claudeResponse{PermissionDenials: []struct {
-				ToolName string `json:"tool_name"`
-			}{}},
+			name:         "empty PermissionDenials does not detect",
+			resp:         claudeResponse{PermissionDenials: []permissionDenial{}},
 			wantDetected: false,
 		},
 		{
 			name: "single denial detects",
-			resp: claudeResponse{PermissionDenials: []struct {
-				ToolName string `json:"tool_name"`
-			}{
+			resp: claudeResponse{PermissionDenials: []permissionDenial{
 				{ToolName: "Write"},
 			}},
 			wantDetected:  true,
@@ -43,9 +40,7 @@ func TestClassifyToolsDenied(t *testing.T) {
 		},
 		{
 			name: "multiple distinct tool names detects, order preserved",
-			resp: claudeResponse{PermissionDenials: []struct {
-				ToolName string `json:"tool_name"`
-			}{
+			resp: claudeResponse{PermissionDenials: []permissionDenial{
 				{ToolName: "Write"},
 				{ToolName: "Edit"},
 				{ToolName: "Bash"},
@@ -55,9 +50,7 @@ func TestClassifyToolsDenied(t *testing.T) {
 		},
 		{
 			name: "duplicate tool names are deduped, first-seen order preserved",
-			resp: claudeResponse{PermissionDenials: []struct {
-				ToolName string `json:"tool_name"`
-			}{
+			resp: claudeResponse{PermissionDenials: []permissionDenial{
 				{ToolName: "Write"},
 				{ToolName: "Edit"},
 				{ToolName: "Write"},
@@ -68,9 +61,7 @@ func TestClassifyToolsDenied(t *testing.T) {
 		},
 		{
 			name: "entries with empty tool_name are skipped",
-			resp: claudeResponse{PermissionDenials: []struct {
-				ToolName string `json:"tool_name"`
-			}{
+			resp: claudeResponse{PermissionDenials: []permissionDenial{
 				{ToolName: ""},
 			}},
 			wantDetected: false,
@@ -79,12 +70,98 @@ func TestClassifyToolsDenied(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			toolNames, detected := classifyToolsDenied(tt.resp)
+			toolNames, _, detected := classifyToolsDenied(tt.resp)
 			if detected != tt.wantDetected {
 				t.Fatalf("detected = %v, want %v", detected, tt.wantDetected)
 			}
 			if detected && !reflect.DeepEqual(toolNames, tt.wantToolNames) {
 				t.Errorf("toolNames = %v, want %v", toolNames, tt.wantToolNames)
+			}
+		})
+	}
+}
+
+// TestClassifyToolsDenied_CommandDecode covers #1775's R1/R2: a Bash denial's
+// tool_input.command is decoded and surfaced per-denial (not deduped, unlike
+// toolNames); a non-Bash denial's tool_input is never consulted even when it
+// happens to contain a command-shaped field (proving the Bash gate, not just
+// "no crash" — Research's flagged risk, no captured evidence for other
+// tools' tool_input shapes); and a Bash denial with absent/malformed
+// tool_input degrades to an empty Command, never a panic.
+func TestClassifyToolsDenied_CommandDecode(t *testing.T) {
+	tests := []struct {
+		name           string
+		resp           claudeResponse
+		wantDenials    []toolDenial
+		wantToolsNames []string
+	}{
+		{
+			name: "Bash denial with decodable command",
+			resp: claudeResponse{PermissionDenials: []permissionDenial{
+				{ToolName: "Bash", ToolInput: json.RawMessage(`{"command":"git status"}`)},
+			}},
+			wantDenials:    []toolDenial{{ToolName: "Bash", Command: "git status"}},
+			wantToolsNames: []string{"Bash"},
+		},
+		{
+			name: "Bash denial with absent tool_input degrades to empty command",
+			resp: claudeResponse{PermissionDenials: []permissionDenial{
+				{ToolName: "Bash"},
+			}},
+			wantDenials:    []toolDenial{{ToolName: "Bash", Command: ""}},
+			wantToolsNames: []string{"Bash"},
+		},
+		{
+			name: "Bash denial with malformed tool_input degrades to empty command, no panic",
+			resp: claudeResponse{PermissionDenials: []permissionDenial{
+				{ToolName: "Bash", ToolInput: json.RawMessage(`not valid json`)},
+			}},
+			wantDenials:    []toolDenial{{ToolName: "Bash", Command: ""}},
+			wantToolsNames: []string{"Bash"},
+		},
+		{
+			name: "Bash denial with non-string command field degrades to empty command",
+			resp: claudeResponse{PermissionDenials: []permissionDenial{
+				{ToolName: "Bash", ToolInput: json.RawMessage(`{"command":123}`)},
+			}},
+			wantDenials:    []toolDenial{{ToolName: "Bash", Command: ""}},
+			wantToolsNames: []string{"Bash"},
+		},
+		{
+			name: "non-Bash denial's command-shaped tool_input is never surfaced",
+			resp: claudeResponse{PermissionDenials: []permissionDenial{
+				{ToolName: "Write", ToolInput: json.RawMessage(`{"command":"should never appear"}`)},
+			}},
+			wantDenials:    []toolDenial{{ToolName: "Write", Command: ""}},
+			wantToolsNames: []string{"Write"},
+		},
+		{
+			name: "multiple Bash denials with different commands are not deduped",
+			resp: claudeResponse{PermissionDenials: []permissionDenial{
+				{ToolName: "Bash", ToolInput: json.RawMessage(`{"command":"cmd one"}`)},
+				{ToolName: "Bash", ToolInput: json.RawMessage(`{"command":"cmd two"}`)},
+			}},
+			// AC6: toolNames still dedups to a single "Bash", but denials
+			// carries both commands.
+			wantDenials: []toolDenial{
+				{ToolName: "Bash", Command: "cmd one"},
+				{ToolName: "Bash", Command: "cmd two"},
+			},
+			wantToolsNames: []string{"Bash"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			toolNames, denials, detected := classifyToolsDenied(tt.resp)
+			if !detected {
+				t.Fatalf("detected = false, want true")
+			}
+			if !reflect.DeepEqual(toolNames, tt.wantToolsNames) {
+				t.Errorf("toolNames = %v, want %v", toolNames, tt.wantToolsNames)
+			}
+			if !reflect.DeepEqual(denials, tt.wantDenials) {
+				t.Errorf("denials = %+v, want %+v", denials, tt.wantDenials)
 			}
 		})
 	}
@@ -98,7 +175,7 @@ func TestClassifyToolsDenied(t *testing.T) {
 func TestInterpretClaudeResult_ToolsDenied_ReturnsSentinelError(t *testing.T) {
 	raw := []byte(`{"result":"I could not write the file — permission denied.","session_id":"sid-1","is_error":false,"subtype":"success","terminal_reason":"completed","num_turns":3,"total_cost_usd":0.05,"permission_denials":[{"tool_name":"Write","tool_use_id":"toolu_1","tool_input":{}}]}`)
 
-	text, completed, usage, err := interpretClaudeResult(context.Background(), 1, raw, nil, false, t.TempDir()+"/sess", t.TempDir(), "", 2)
+	text, completed, usage, err := interpretClaudeResult(context.Background(), 1, raw, nil, false, t.TempDir()+"/sess", t.TempDir(), "", 2, -1)
 
 	if err == nil {
 		t.Fatalf("expected error, got nil")
@@ -127,7 +204,7 @@ func TestInterpretClaudeResult_ToolsDenied_ReturnsSentinelError(t *testing.T) {
 func TestInterpretClaudeResult_ToolsDenied_MarkerTakesPrecedence(t *testing.T) {
 	raw := []byte(`{"result":"worked around the denial\nFABRIK_STAGE_COMPLETE","is_error":false,"subtype":"success","terminal_reason":"completed","permission_denials":[{"tool_name":"Write"}]}`)
 
-	_, completed, _, err := interpretClaudeResult(context.Background(), 1, raw, nil, false, t.TempDir()+"/sess", t.TempDir(), "", 2)
+	_, completed, _, err := interpretClaudeResult(context.Background(), 1, raw, nil, false, t.TempDir()+"/sess", t.TempDir(), "", 2, -1)
 
 	if err != nil {
 		t.Fatalf("expected nil error (marker present), got %v", err)
@@ -146,7 +223,7 @@ func TestInterpretClaudeResult_ToolsDenied_MarkerTakesPrecedence(t *testing.T) {
 func TestInterpretClaudeResult_ToolsDenied_UnparseableJSON_NotClassified(t *testing.T) {
 	raw := []byte("not valid json, but mentions permission_denials anyway")
 
-	_, completed, _, err := interpretClaudeResult(context.Background(), 1, raw, nil, false, t.TempDir()+"/sess", t.TempDir(), "", 2)
+	_, completed, _, err := interpretClaudeResult(context.Background(), 1, raw, nil, false, t.TempDir()+"/sess", t.TempDir(), "", 2, -1)
 
 	if err != nil {
 		var toolsErr *claudeToolsDeniedError
@@ -169,7 +246,7 @@ func TestInterpretClaudeResult_ToolsDenied_UnparseableJSON_NotClassified(t *test
 func TestInterpretClaudeResult_ToolsDenied_MarkerIndependence(t *testing.T) {
 	raw := []byte(`{"result":"Permission to use Edit has been denied because Claude Code is running in don't ask mode.\nFABRIK_BLOCKED_ON_INPUT","is_error":false,"subtype":"success","terminal_reason":"completed","permission_denials":[{"tool_name":"Edit"}]}`)
 
-	_, completed, _, err := interpretClaudeResult(context.Background(), 1, raw, nil, false, t.TempDir()+"/sess", t.TempDir(), "", 2)
+	_, completed, _, err := interpretClaudeResult(context.Background(), 1, raw, nil, false, t.TempDir()+"/sess", t.TempDir(), "", 2, -1)
 
 	if err == nil {
 		t.Fatalf("expected error even though output text also contains FABRIK_BLOCKED_ON_INPUT")

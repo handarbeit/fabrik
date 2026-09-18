@@ -2582,6 +2582,25 @@ func gitHeadSHA(dir string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// gitCommitCountBetween returns the number of commits reachable from after
+// but not from before — i.e. how many commits landed on dir's branch between
+// two HEAD captures. Used by runClaude (#1743) to report a measured commit
+// count for a tools-denied invocation instead of asserting no progress was
+// made without having checked.
+func gitCommitCountBetween(dir, before, after string) (int, error) {
+	cmd := exec.Command("git", "rev-list", "--count", before+".."+after)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		return 0, fmt.Errorf("git rev-list --count %s..%s: %w", before, after, err)
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return 0, fmt.Errorf("parsing git rev-list output: %w", err)
+	}
+	return n, nil
+}
+
 // isWorkingTreeDirty returns true if dir has uncommitted changes other than
 // engine-managed files (.fabrik-context/, .fabrik/issue.md).
 func isWorkingTreeDirty(dir string) (bool, error) {
