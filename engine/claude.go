@@ -108,6 +108,42 @@ func classifyUsageLimitExit(resp claudeResponse, usage TokenUsage) (msg string, 
 	return fmt.Sprintf("terminal_reason=%q", resp.TerminalReason), true
 }
 
+// permissionDenial is one entry of the CLI's "permission_denials" array on
+// the terminal result line. Named (rather than left as an anonymous inline
+// struct) so tool_input can be decoded without forcing every construction
+// site — including test fixtures — to redeclare the widened shape. ToolInput
+// is decoded lazily and best-effort (see decodeToolCommand): its JSON shape
+// is CLI-version-specific and undocumented (ADR-1523), so this type only
+// declares what's needed to reach it, not its contents.
+type permissionDenial struct {
+	ToolName  string          `json:"tool_name"`
+	ToolInput json.RawMessage `json:"tool_input"`
+}
+
+// decodeToolCommand best-effort extracts a Bash tool_input's .command field.
+// Returns "" for absent input, a decode failure, or a non-string/missing
+// command field — never panics, never fabricates a value. Callers gate this
+// on ToolName == "Bash" (see classifyToolsDenied): no captured evidence
+// exists for other tools' tool_input shapes, so this is not attempted for
+// them.
+func decodeToolCommand(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var v struct {
+		Command string `json:"command"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return ""
+	}
+	return v.Command
+}
+
+// toolDenial is engine's working alias for claudeerr.ToolDenial — one denied
+// tool call, with command detail when decodable. See claudeerr.ToolDenial's
+// doc comment.
+type toolDenial = claudeerr.ToolDenial
+
 // classifyToolsDenied determines whether a Claude invocation was blocked from
 // making progress by the CLI's own permission layer denying one or more
 // mutating tool calls, using only the CLI's own structured result object
@@ -130,23 +166,97 @@ func classifyUsageLimitExit(resp claudeResponse, usage TokenUsage) (msg string, 
 //
 // toolNames is deduplicated (preserving first-seen order) so a tool denied
 // repeatedly across multiple attempts within the same invocation is named
-// once in the R4 explanatory comment, not once per denial.
-func classifyToolsDenied(resp claudeResponse) (toolNames []string, detected bool) {
+// once in the R4 explanatory comment, not once per denial. denials carries
+// one entry per raw PermissionDenials entry (not deduplicated) with command
+// detail decoded only for ToolName == "Bash" — see #1775.
+func classifyToolsDenied(resp claudeResponse) (toolNames []string, denials []toolDenial, detected bool) {
 	if len(resp.PermissionDenials) == 0 {
-		return nil, false
+		return nil, nil, false
 	}
 	seen := make(map[string]bool, len(resp.PermissionDenials))
 	for _, d := range resp.PermissionDenials {
-		if d.ToolName == "" || seen[d.ToolName] {
+		if d.ToolName == "" {
+			continue
+		}
+		command := ""
+		if d.ToolName == "Bash" {
+			command = decodeToolCommand(d.ToolInput)
+		}
+		denials = append(denials, toolDenial{ToolName: d.ToolName, Command: command})
+		if seen[d.ToolName] {
 			continue
 		}
 		seen[d.ToolName] = true
 		toolNames = append(toolNames, d.ToolName)
 	}
 	if len(toolNames) == 0 {
-		return nil, false
+		return nil, nil, false
 	}
-	return toolNames, true
+	return toolNames, denials, true
+}
+
+// toolsDeniedCommandMaxLen/HeadLen/TailLen size sanitizeToolsDeniedCommand's
+// truncation for a denied Bash command — a single logical line, realistically
+// tens to a few hundred chars — distinct from merge_train.go's
+// trainDiagPerCheck* constants, which are sized for multi-KB CI output
+// blocks. Reuses truncateMiddle itself (the established in-repo convention
+// for rendering untrusted/variable-length text in a comment), just not its
+// CI-sized constants.
+const (
+	toolsDeniedCommandMaxLen  = 200
+	toolsDeniedCommandHeadLen = 140
+	toolsDeniedCommandTailLen = 40
+)
+
+// sanitizeToolsDeniedCommand renders a denied command safely for a
+// single-line inline code span: embedded newlines are collapsed to spaces
+// (a multi-line command would otherwise break a one-line comment sentence,
+// or a log line), backticks are replaced with a straight quote (an embedded
+// backtick would otherwise prematurely close the inline code span), and the
+// result is truncated via truncateMiddle. truncateMiddle's own omission
+// marker embeds newlines (correct for its fenced-block callers in
+// merge_train.go) — those are collapsed too, so the final result is always
+// single-line regardless of input. See R2/AC3.
+func sanitizeToolsDeniedCommand(cmd string) string {
+	if cmd == "" {
+		return ""
+	}
+	replacer := strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ", "`", "'")
+	sanitized := strings.TrimSpace(replacer.Replace(cmd))
+	if sanitized == "" {
+		return ""
+	}
+	truncated := truncateMiddle(sanitized, toolsDeniedCommandMaxLen, toolsDeniedCommandHeadLen, toolsDeniedCommandTailLen)
+	return strings.ReplaceAll(truncated, "\n", " ")
+}
+
+// firstToolsDeniedCommand returns the tool name and sanitized command of the
+// first denial in denials that carries a non-empty command, and ok=true. When
+// no denial carries a command (nil/empty denials, or every entry's Command is
+// ""), ok is false and callers must degrade to tool-name-only wording — never
+// an empty string standing in for a command (R2/AC2).
+func firstToolsDeniedCommand(denials []toolDenial) (toolName, command string, ok bool) {
+	for _, d := range denials {
+		if d.Command == "" {
+			continue
+		}
+		sanitized := sanitizeToolsDeniedCommand(d.Command)
+		if sanitized == "" {
+			continue
+		}
+		return d.ToolName, sanitized, true
+	}
+	return "", "", false
+}
+
+// toolsDeniedLogSummary renders the "tools=X" or "tools=X; first: `cmd`"
+// fragment shared by both classifyToolsDenied log lines (R2/R9).
+func toolsDeniedLogSummary(toolNames []string, denials []toolDenial) string {
+	summary := fmt.Sprintf("tools=%s", strings.Join(toolNames, ", "))
+	if _, command, ok := firstToolsDeniedCommand(denials); ok {
+		summary += fmt.Sprintf("; first: `%s`", command)
+	}
+	return summary
 }
 
 // defaultAllowedTools is the comprehensive set of tools Fabrik permits by default
@@ -640,7 +750,16 @@ func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem
 	if err != nil {
 		return output, completed, usage, err
 	}
-	return output, checkCompletion(stage, output), usage, nil
+	// AND, never overwrite: checkCompletion re-derives completion from the
+	// stage's configured Completion.Type (a no-op re-match of the same marker
+	// for the "claude"/"" type every real stage uses today, but `false` for
+	// any other type — a config-driven signal orthogonal to what runClaude
+	// just decided). completed already carries interpretClaudeResult's R3
+	// guard (artifactMissingOnComplete) — blindly replacing it with
+	// checkCompletion's marker-only regex would silently discard that guard
+	// for this exact call path, since the bare FABRIK_STAGE_COMPLETE line is
+	// never stripped from output before this point (#1782).
+	return output, completed && checkCompletion(stage, output), usage, nil
 }
 
 // InvokeClaudeForComments runs Claude Code with a comment-review prompt.
@@ -1080,11 +1199,14 @@ func sanitizeSentinelComponent(s string) string {
 
 // sessionNameSentinel builds the --name value passed to every worker
 // invocation: fabrik:<owner>/<repo>#<issue>:<stage>. It is deterministic for a
-// given (repo, issueNumber, stageName) and purely observational — nothing in
-// the engine parses it back or branches on it. repo is expected to already be
-// "owner/repo" (as populated from the GitHub GraphQL response on real board
-// items); an empty repo falls back to the literal "unknown/repo" rather than
-// producing a malformed sentinel.
+// given (repo, issueNumber, stageName). Originally purely observational (a
+// human `ps | grep` aid), it is now also a liveness-verification signal
+// (#1779): runWorkerDetectorScan (worker_liveness.go) and dispatchCandidates
+// (poll.go) both probe the process table for this exact value and branch on
+// whether it's found — see sentinel_probe.go and docs/state-machine.md §9.7.
+// repo is expected to already be "owner/repo" (as populated from the GitHub
+// GraphQL response on real board items); an empty repo falls back to the
+// literal "unknown/repo" rather than producing a malformed sentinel.
 func sessionNameSentinel(repo string, issueNumber int, stageName string) string {
 	if repo == "" {
 		repo = "unknown/repo"
@@ -1166,9 +1288,7 @@ type claudeResponse struct {
 	// PreToolUse hook or an "ask" permission rule with no interactive prompt
 	// available). Populated on an otherwise clean exit — see
 	// classifyToolsDenied and ADR-1523.
-	PermissionDenials []struct {
-		ToolName string `json:"tool_name"`
-	} `json:"permission_denials"`
+	PermissionDenials []permissionDenial `json:"permission_denials"`
 	// ModelUsage contains per-model accumulated token counts for the full session.
 	// These are more accurate than the top-level "usage" field, which reflects only
 	// the last API call rather than the entire multi-turn session.
@@ -1187,6 +1307,14 @@ type claudeResponse struct {
 
 func runClaude(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string, sessFilePath string, logDir string, extraEnv []string, maxWallTime time.Duration, maxTurns int, onPIDReady func(int), sigIntGrace, sigTermGrace time.Duration, resumeSessionID string, maxResumeFailures int) (string, bool, TokenUsage, error) {
 	claudeLog(issueNumber, "claude", "invoking (%s) in %s\n", label, workDir)
+
+	// Best-effort HEAD capture, before/after the invocation, so a tools-denied
+	// classification below can report a measured commit count instead of
+	// asserting "did not make progress" without having checked (#1743). Errors
+	// are conventionally discarded here exactly as gitHeadSHA's other callers
+	// already do (dispatchReviewReinvoke, engine/ci.go) — an empty headBefore
+	// degrades interpretClaudeResult to the no-count wording, never a panic.
+	headBefore, _ := gitHeadSHA(workDir)
 
 	// Set up stderr: in TUI mode discard; in plain mode forward to os.Stderr.
 	// Stderr is diagnostic noise from Claude CLI itself (not the structured output).
@@ -1319,7 +1447,20 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 	// we still process whatever output was collected before the kill.
 	wasTimedOut := inactivityFired.Load() || (stageCtx.Err() == context.DeadlineExceeded && ctx.Err() == nil)
 
-	return interpretClaudeResult(ctx, issueNumber, rawOutput, runErr, wasTimedOut, sessFilePath, logDir, resumeSessionID, maxResumeFailures)
+	// Best-effort commit-count measurement (#1743): -1 means "not measured,"
+	// consumed only by interpretClaudeResult's tools-denied branch. Requires
+	// both SHAs and a genuine change between them — a fresh worktree with no
+	// prior commits, or a gitHeadSHA failure on either side, degrades cleanly
+	// to -1 rather than a spurious "0 commit(s)".
+	commitsPushed := -1
+	headAfter, _ := gitHeadSHA(workDir)
+	if headBefore != "" && headAfter != "" && headBefore != headAfter {
+		if n, err := gitCommitCountBetween(workDir, headBefore, headAfter); err == nil {
+			commitsPushed = n
+		}
+	}
+
+	return interpretClaudeResult(ctx, issueNumber, rawOutput, runErr, wasTimedOut, sessFilePath, logDir, resumeSessionID, maxResumeFailures, commitsPushed)
 }
 
 // openStageLog opens (creating logDir if necessary) a new timestamped .log
@@ -1416,7 +1557,15 @@ func classifyResumeFailure(issueNumber int, sessFilePath, resumeSessionID string
 // if this was a cold start) and maxResumeFailures is the effective
 // MaxResumeFailures threshold — both threaded through from the caller's
 // InvokeOptions purely to drive classifyResumeFailure; see #1414.
-func interpretClaudeResult(ctx context.Context, issueNumber int, rawOutput []byte, runErr error, wasTimedOut bool, sessFilePath, logDir string, resumeSessionID string, maxResumeFailures int) (string, bool, TokenUsage, error) {
+//
+// commitsPushed is the number of commits the caller measured between the
+// worktree's HEAD before and after this invocation (runClaude's
+// headBefore/headAfter, via gitCommitCountBetween), or -1 when not
+// measured/measurable. It is consulted only by the tools-denied branch below
+// (#1743, R8), to report a measured "N commit(s) pushed" instead of
+// asserting "did not make progress" — a claim interpretClaudeResult never
+// actually checked.
+func interpretClaudeResult(ctx context.Context, issueNumber int, rawOutput []byte, runErr error, wasTimedOut bool, sessFilePath, logDir string, resumeSessionID string, maxResumeFailures int, commitsPushed int) (string, bool, TokenUsage, error) {
 	if errors.Is(runErr, exec.ErrWaitDelay) && ctx.Err() == nil {
 		claudeLog(issueNumber, "warn", "WaitDelay fired: Claude exited but grandchild processes held stdout pipe open; processing buffered output (%d bytes)\n", len(rawOutput))
 		runErr = nil
@@ -1453,6 +1602,24 @@ func interpretClaudeResult(ctx context.Context, issueNumber int, rawOutput []byt
 				text = block + "\n" + text
 			}
 		}
+		// General artifact-harvest fallback (#1782/R1/R2): the CLI's terminal
+		// "result" field is whichever text the agent emitted in its very last
+		// turn — if that turn was a wrap-up following one more tool call after
+		// the real artifact, resp.Result carries the marker but no content.
+		// artifactMissingOnComplete gates on !CheckNoWorkNeeded, so a
+		// legitimate artifact-free completion is never scanned into. When it
+		// fires, recover the last assistant turn that has real content beyond
+		// the bare control markers — deliberately not "the turn containing the
+		// marker," since the reported case's marker-bearing turn contains only
+		// the marker itself (see ADR-1782).
+		if artifactMissingOnComplete(text) {
+			if artifact := extractLastSubstantialAssistantTurn(rawOutput); artifact != "" {
+				claudeLog(issueNumber, "warn", "stage-complete marker present but terminal result carried no artifact — recovered %d bytes from an earlier assistant turn\n", len(artifact))
+				text = artifact + "\n" + text
+			} else {
+				claudeLog(issueNumber, "warn", "stage-complete marker present but no artifact could be harvested from the terminal result or any assistant turn\n")
+			}
+		}
 		usage = tokenUsageFromResponse(resp)
 		if runErr != nil {
 			claudeLog(issueNumber, "claude", "used %d turns, $%.4f\n", resp.NumTurns, resp.CostUSD)
@@ -1483,7 +1650,10 @@ func interpretClaudeResult(ctx context.Context, issueNumber int, rawOutput []byt
 		// Check whether the agent emitted the completion marker before the error.
 		// This handles: (a) normal completion followed by extra work that ends non-zero,
 		// and (b) timeout kills where FABRIK_STAGE_COMPLETE appeared in streamed output.
-		if stageCompleteRE.MatchString(text) {
+		// artifactMissingOnComplete (R3): a marker with no harvestable artifact
+		// anywhere is not evidence of a healthy completion — fall through to
+		// the classifiers below instead of returning completed=true.
+		if stageCompleteRE.MatchString(text) && !artifactMissingOnComplete(text) {
 			claudeLog(issueNumber, "warn", "stage completed (marker found) but Claude exited with error: %v\n", runErr)
 			// Completed is completed — the strongest possible evidence the
 			// session is healthy, regardless of the trailing error. Reset the
@@ -1531,8 +1701,8 @@ func interpretClaudeResult(ctx context.Context, issueNumber int, rawOutput []byt
 			// classifyToolsDenied's doc comment), but if permission_denials
 			// ever shows up alongside a non-zero exit too, log it for future
 			// evidence rather than silently discarding it. Never classifies.
-			if toolNames, detected := classifyToolsDenied(resp); detected {
-				claudeLog(issueNumber, "claude", "permission_denials present on non-clean exit (tools=%s, terminal_reason=%q) — not classified here, evidence only\n", strings.Join(toolNames, ", "), resp.TerminalReason)
+			if toolNames, denials, detected := classifyToolsDenied(resp); detected {
+				claudeLog(issueNumber, "claude", "permission_denials present on non-clean exit (%s, terminal_reason=%q) — not classified here, evidence only\n", toolsDeniedLogSummary(toolNames, denials), resp.TerminalReason)
 			}
 		}
 		// None of the classifiers above matched — the generic fallthrough.
@@ -1547,14 +1717,30 @@ func interpretClaudeResult(ctx context.Context, issueNumber int, rawOutput []byt
 	// ran without a structural break, even if the stage itself didn't finish
 	// (no FABRIK_STAGE_COMPLETE). Reset the resume-failure counter (#1414).
 	resetResumeFailureCount(sessFilePath)
-	completed := stageCompleteRE.MatchString(text)
+	// artifactMissingOnComplete (R3): never label a stage complete when the
+	// marker is present but no artifact could be harvested anywhere (and this
+	// isn't a legitimate FABRIK_NO_WORK_NEEDED completion) — that is the exact
+	// #1632/#1782 defect, discovered only a stage later before this guard.
+	completed := stageCompleteRE.MatchString(text) && !artifactMissingOnComplete(text)
 	// Gated on !completed: a denial the model worked around and still
 	// completed the stage is ordinary success — no exemption, no label. See
 	// classifyToolsDenied's doc comment and ADR-1523.
 	if !completed && ok {
-		if toolNames, detected := classifyToolsDenied(resp); detected {
-			claudeLog(issueNumber, "claude", "tool permission denial(s) detected (tools=%s) — stage did not make progress, not charged against max_retries\n", strings.Join(toolNames, ", "))
-			return text, false, usage, &claudeToolsDeniedError{ToolNames: toolNames}
+		if toolNames, denials, detected := classifyToolsDenied(resp); detected {
+			// "did not signal completion" is exactly what !completed
+			// establishes — free to state, always true on this branch. Unlike
+			// its predecessor's "did not make progress," it is never asserted
+			// without having been measured (#1743): commitsPushed > 0 upgrades
+			// this to the measured form when the caller could determine one
+			// (see runClaude's headBefore/headAfter capture); -1 or 0 means
+			// "not measured" or "no commits," and the wording degrades to the
+			// completion-only phrasing rather than printing "0 commit(s)".
+			progress := "stage did not signal completion"
+			if commitsPushed > 0 {
+				progress = fmt.Sprintf("%d commit(s) pushed, stage did not signal completion", commitsPushed)
+			}
+			claudeLog(issueNumber, "claude", "tool permission denial(s) detected (%s) — %s; not charged against max_retries\n", toolsDeniedLogSummary(toolNames, denials), progress)
+			return text, false, usage, &claudeToolsDeniedError{ToolNames: toolNames, Denials: denials}
 		}
 	}
 	return text, completed, usage, nil
@@ -1988,6 +2174,68 @@ func stripLine(output, line string) string {
 		}
 	}
 	return strings.Join(result, "\n")
+}
+
+// fabrikControlMarkerLines are the bare marker lines stripped by
+// hasArtifactContent to decide whether text carries anything beyond Fabrik's
+// own control vocabulary. Mirrors the marker set finalizeStageOutcome strips
+// before posting (engine/item.go's postOutput computation) — kept in sync
+// deliberately, since both are answering the same question ("is there
+// anything here besides control markers?").
+var fabrikControlMarkerLines = []string{
+	"FABRIK_STAGE_COMPLETE",
+	"FABRIK_BLOCKED_ON_INPUT",
+	"FABRIK_NO_WORK_NEEDED",
+	"FABRIK_SUMMARY_BEGIN",
+	"FABRIK_SUMMARY_END",
+	// FABRIK_ISSUE_UPDATE_BEGIN/END are structural delimiters, not content —
+	// without stripping them too, an empty update block ("BEGIN\nEND" with no
+	// body between) would survive as two bare lines and make
+	// hasArtifactContent report content that isn't actually there.
+	"FABRIK_ISSUE_UPDATE_BEGIN",
+	"FABRIK_ISSUE_UPDATE_END",
+}
+
+// hasArtifactContent reports whether text carries anything beyond Fabrik's
+// own bare control-marker lines (FABRIK_STAGE_COMPLETE and friends). Used by
+// artifactMissingOnComplete (R3) and extractLastSubstantialAssistantTurn
+// (R1/R2) to decide whether a given piece of text is "real content" or just
+// control-plane chatter — see #1782.
+func hasArtifactContent(text string) bool {
+	for _, line := range fabrikControlMarkerLines {
+		text = stripLine(text, line)
+	}
+	return strings.TrimSpace(text) != ""
+}
+
+// artifactMissingOnComplete reports whether text signals FABRIK_STAGE_COMPLETE
+// but carries no harvestable artifact — the #1632/#1782 defect: a trailing
+// tool call after the real content leaves the CLI's terminal result field
+// (or, on a timeout/parse-failure path, the recovered assistant-turn text)
+// holding nothing but the bare marker. Excludes the documented,
+// legitimate artifact-free completion (FABRIK_NO_WORK_NEEDED co-occurring
+// with FABRIK_STAGE_COMPLETE — R3's exclusion) so that path is never treated
+// as this defect, and never triggers the assistant-turn scan below.
+func artifactMissingOnComplete(text string) bool {
+	return stageCompleteRE.MatchString(text) && !CheckNoWorkNeeded(text) && !hasArtifactContent(text)
+}
+
+// extractLastSubstantialAssistantTurn scans raw NDJSON output for the last
+// assistant turn whose text survives hasArtifactContent's stripping
+// non-empty — i.e. the last turn with real content, independent of which
+// turn (if any) happens to carry the FABRIK_STAGE_COMPLETE marker itself.
+// This is deliberate: in the reported shape, the marker-bearing turn
+// contains only the marker, so anchoring the selection on "the turn with the
+// marker" would still fail (R2, see ADR-1782). Returns "" if no assistant
+// turn has any content beyond control markers.
+func extractLastSubstantialAssistantTurn(rawOutput []byte) string {
+	var last string
+	forEachAssistantText(rawOutput, func(text string) {
+		if hasArtifactContent(text) {
+			last = text
+		}
+	})
+	return last
 }
 
 // degenerateAtRefRE matches a bare "@some/path" reference with no other content —

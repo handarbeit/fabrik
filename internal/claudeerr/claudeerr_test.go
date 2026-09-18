@@ -53,6 +53,32 @@ func TestResumeFailureError_ErrorFormatAndUnwrap(t *testing.T) {
 	}
 }
 
+// TestToolsDeniedError_DenialsIsAdditive verifies #1775's R1: a construction
+// site that only ever populated ToolNames (every existing one, pre-#1775)
+// still compiles and behaves — Denials defaults to nil, never required. A
+// caller that does populate Denials sees it round-trip unchanged; Error()'s
+// string shape (pinned since before #1775) is untouched by the addition.
+func TestToolsDeniedError_DenialsIsAdditive(t *testing.T) {
+	legacy := &ToolsDeniedError{ToolNames: []string{"Write"}}
+	if legacy.Denials != nil {
+		t.Errorf("Denials = %v, want nil for a ToolNames-only construction", legacy.Denials)
+	}
+	if got, want := legacy.Error(), "claude tool call(s) denied by permission configuration: Write"; got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
+	}
+
+	withCommand := &ToolsDeniedError{
+		ToolNames: []string{"Bash"},
+		Denials:   []ToolDenial{{ToolName: "Bash", Command: "git status"}},
+	}
+	if got, want := len(withCommand.Denials), 1; got != want {
+		t.Fatalf("len(Denials) = %d, want %d", got, want)
+	}
+	if got, want := withCommand.Denials[0].Command, "git status"; got != want {
+		t.Errorf("Denials[0].Command = %q, want %q", got, want)
+	}
+}
+
 // TestErrorsAs_MatchesConcreteTypes confirms these types are ordinary
 // errors.As-matchable values — the property engine/item.go's five call sites
 // rely on, and that a type alias (rather than a rename) preserves for the

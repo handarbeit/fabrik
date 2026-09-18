@@ -26,7 +26,7 @@ func TestClassifyResumeFailure_BelowThreshold_IncrementsWithoutDeletingSession(t
 	}
 
 	raw := []byte(genericFailureRaw)
-	_, completed, _, err := interpretClaudeResult(context.Background(), 1, raw, errors.New("exit status 1"), false, sessPath, t.TempDir(), "resumed-sid", 3)
+	_, completed, _, err := interpretClaudeResult(context.Background(), 1, raw, errors.New("exit status 1"), false, sessPath, t.TempDir(), "resumed-sid", 3, -1)
 	if completed {
 		t.Errorf("expected completed=false")
 	}
@@ -63,7 +63,7 @@ func TestClassifyResumeFailure_AtThreshold_AbandonsSessionAndResetsSidecar(t *te
 	writeResumeFailureCount(1, sessPath, 1)
 
 	raw := []byte(genericFailureRaw)
-	_, _, _, err := interpretClaudeResult(context.Background(), 1, raw, errors.New("exit status 1"), false, sessPath, t.TempDir(), "resumed-sid", 2)
+	_, _, _, err := interpretClaudeResult(context.Background(), 1, raw, errors.New("exit status 1"), false, sessPath, t.TempDir(), "resumed-sid", 2, -1)
 
 	var resumeErr *claudeResumeFailureError
 	if !errors.As(err, &resumeErr) {
@@ -92,7 +92,7 @@ func TestClassifyResumeFailure_Success_ResetsExistingCount(t *testing.T) {
 	writeResumeFailureCount(1, sessPath, 1)
 
 	raw := []byte(`{"result":"work done\nFABRIK_STAGE_COMPLETE","session_id":"sid-healthy","num_turns":3,"total_cost_usd":0.5}`)
-	_, completed, _, err := interpretClaudeResult(context.Background(), 1, raw, nil, false, sessPath, t.TempDir(), "resumed-sid", 2)
+	_, completed, _, err := interpretClaudeResult(context.Background(), 1, raw, nil, false, sessPath, t.TempDir(), "resumed-sid", 2, -1)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestClassifyResumeFailure_CompletedDespiteError_ResetsExistingCount(t *test
 	writeResumeFailureCount(1, sessPath, 1)
 
 	raw := []byte(`{"result":"work done\nFABRIK_STAGE_COMPLETE","session_id":"sid-4"}`)
-	_, completed, _, err := interpretClaudeResult(context.Background(), 1, raw, errors.New("exit 1"), false, sessPath, t.TempDir(), "resumed-sid", 2)
+	_, completed, _, err := interpretClaudeResult(context.Background(), 1, raw, errors.New("exit 1"), false, sessPath, t.TempDir(), "resumed-sid", 2, -1)
 	if err == nil {
 		t.Fatalf("expected error to be returned alongside completed=true")
 	}
@@ -127,7 +127,7 @@ func TestClassifyResumeFailure_TurnCapExit_ResetsExistingCount(t *testing.T) {
 
 	raw := []byte(`{"type":"result","subtype":"error_max_turns","terminal_reason":"max_turns",` +
 		`"session_id":"sid-1114","errors":["Reached maximum number of turns (50)"],"is_error":true,"num_turns":51}`)
-	_, _, _, err := interpretClaudeResult(context.Background(), 1114, raw, errors.New("exit status 1"), false, sessPath, t.TempDir(), "resumed-sid", 2)
+	_, _, _, err := interpretClaudeResult(context.Background(), 1114, raw, errors.New("exit status 1"), false, sessPath, t.TempDir(), "resumed-sid", 2, -1)
 
 	var turnLimitErr *claudeTurnLimitError
 	if !errors.As(err, &turnLimitErr) {
@@ -147,7 +147,7 @@ func TestClassifyResumeFailure_UsageLimitExit_LeavesCountUntouched(t *testing.T)
 	writeResumeFailureCount(1, sessPath, 1)
 
 	raw := []byte(`{"result":"","session_id":"sid-1","terminal_reason":"blocking_limit","is_error":true,"num_turns":0,"total_cost_usd":0}`)
-	_, _, _, err := interpretClaudeResult(context.Background(), 1, raw, errors.New("exit status 1"), false, sessPath, t.TempDir(), "resumed-sid", 2)
+	_, _, _, err := interpretClaudeResult(context.Background(), 1, raw, errors.New("exit status 1"), false, sessPath, t.TempDir(), "resumed-sid", 2, -1)
 
 	var limitErr *claudeUsageLimitError
 	if !errors.As(err, &limitErr) {
@@ -167,7 +167,7 @@ func TestClassifyResumeFailure_APIErrorExit_LeavesCountUntouched(t *testing.T) {
 	writeResumeFailureCount(1, sessPath, 1)
 
 	raw := []byte(`{"result":"","session_id":"sid-1","terminal_reason":"api_error","is_error":true,"num_turns":1,"total_cost_usd":0}`)
-	_, _, _, err := interpretClaudeResult(context.Background(), 1, raw, errors.New("exit status 1"), false, sessPath, t.TempDir(), "resumed-sid", 2)
+	_, _, _, err := interpretClaudeResult(context.Background(), 1, raw, errors.New("exit status 1"), false, sessPath, t.TempDir(), "resumed-sid", 2, -1)
 
 	var apiErr *claudeAPIErrorExit
 	if !errors.As(err, &apiErr) {
@@ -189,7 +189,7 @@ func TestClassifyResumeFailure_ColdStartFailure_NotWrappedAndResetsStaleCount(t 
 	writeResumeFailureCount(1, sessPath, 1)
 
 	raw := []byte(genericFailureRaw)
-	_, _, _, err := interpretClaudeResult(context.Background(), 1, raw, errors.New("exit status 1"), false, sessPath, t.TempDir(), "" /* cold start */, 2)
+	_, _, _, err := interpretClaudeResult(context.Background(), 1, raw, errors.New("exit status 1"), false, sessPath, t.TempDir(), "" /* cold start */, 2, -1)
 
 	var resumeErr *claudeResumeFailureError
 	if errors.As(err, &resumeErr) {
@@ -207,7 +207,7 @@ func TestClassifyResumeFailure_ThresholdDisabled_NeverWraps(t *testing.T) {
 	sessPath := filepath.Join(t.TempDir(), "Implement.session")
 
 	raw := []byte(genericFailureRaw)
-	_, _, _, err := interpretClaudeResult(context.Background(), 1, raw, errors.New("exit status 1"), false, sessPath, t.TempDir(), "resumed-sid", 0)
+	_, _, _, err := interpretClaudeResult(context.Background(), 1, raw, errors.New("exit status 1"), false, sessPath, t.TempDir(), "resumed-sid", 0, -1)
 
 	var resumeErr *claudeResumeFailureError
 	if errors.As(err, &resumeErr) {
@@ -233,7 +233,7 @@ func TestClassifyResumeFailure_AlternatingPaths_StillReachesThreshold(t *testing
 	raw := []byte(genericFailureRaw)
 
 	// Call 1: "stage path" resume fails.
-	_, _, _, err1 := interpretClaudeResult(context.Background(), 1, raw, errors.New("exit status 1"), false, sessPath, t.TempDir(), "shared-sid", threshold)
+	_, _, _, err1 := interpretClaudeResult(context.Background(), 1, raw, errors.New("exit status 1"), false, sessPath, t.TempDir(), "shared-sid", threshold, -1)
 	var resumeErr1 *claudeResumeFailureError
 	if !errors.As(err1, &resumeErr1) {
 		t.Fatalf("call 1: expected *claudeResumeFailureError, got %T: %v", err1, err1)
@@ -248,7 +248,7 @@ func TestClassifyResumeFailure_AlternatingPaths_StillReachesThreshold(t *testing
 	// Call 2: "comment-review path" resume fails against the SAME session
 	// file — this is what resolveResumeSessionID would have returned for
 	// InvokeClaudeForComments too, since it reads the identical sessFilePath.
-	_, _, _, err2 := interpretClaudeResult(context.Background(), 1, raw, errors.New("exit status 1"), false, sessPath, t.TempDir(), "shared-sid", threshold)
+	_, _, _, err2 := interpretClaudeResult(context.Background(), 1, raw, errors.New("exit status 1"), false, sessPath, t.TempDir(), "shared-sid", threshold, -1)
 	var resumeErr2 *claudeResumeFailureError
 	if !errors.As(err2, &resumeErr2) {
 		t.Fatalf("call 2: expected *claudeResumeFailureError, got %T: %v", err2, err2)

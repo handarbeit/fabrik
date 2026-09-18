@@ -305,13 +305,21 @@ and should recognize.
   from the CLI's `permission_denials` result field, never from output
   text) — a blocked worker, not a failed stage. Unlike its two siblings
   above, the invocation may have made real progress before the denial, so
-  it does not short-circuit: commits and pushes still happen. Does not
-  count against `max_retries` (bounded independently, default 3
-  consecutive detections, before pausing with `fabrik:paused` +
-  `fabrik:awaiting-input` — never `stage:<name>:failed`). Clears
-  automatically once the permission configuration is fixed and a later
-  invocation isn't denied — no manual removal needed. The outcome is
-  identical whether or not the worker also emits `FABRIK_BLOCKED_ON_INPUT`.
+  it does not short-circuit: commits and pushes still happen. **Each
+  denial is scoped to the specific command that was denied, not the tool
+  for the rest of the session** — a later, differently-shaped call to the
+  same tool is unaffected (confirmed by direct observation, #1741/#1775).
+  The explanatory comment names the first denied command when decodable;
+  the first remedy to try is re-running the step as separate, simpler
+  commands, or adding a matching `allowed_tools` rule — `fabrik:unrestricted`
+  is a last resort, not the headline fix, since it removes all tool
+  restrictions rather than just the denied one. Does not count against
+  `max_retries` (bounded independently, default 3 consecutive detections,
+  before pausing with `fabrik:paused` + `fabrik:awaiting-input` — never
+  `stage:<name>:failed`). Clears automatically once the permission
+  configuration is fixed and a later invocation isn't denied — no manual
+  removal needed. The outcome is identical whether or not the worker also
+  emits `FABRIK_BLOCKED_ON_INPUT`.
 - **`fabrik:toolchain-stale`** — Set when a worktree declares a toolchain
   version (`.nvmrc`, `package.json` `engines.node`, `go.mod`
   `toolchain`/`go` directive, or `.tool-versions`) that the resolved

@@ -277,3 +277,95 @@ func TestExtractUpdatedBody(t *testing.T) {
 		})
 	}
 }
+
+func TestHasArtifactContent(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+		want bool
+	}{
+		{"real content plus marker", "Here is the plan.\nFABRIK_STAGE_COMPLETE", true},
+		{"bare completion marker only", "FABRIK_STAGE_COMPLETE", false},
+		{"bare completion and no-work markers only", "FABRIK_STAGE_COMPLETE\nFABRIK_NO_WORK_NEEDED", false},
+		{"bare blocked marker only", "FABRIK_BLOCKED_ON_INPUT", false},
+		{"summary markers with real content between them", "FABRIK_SUMMARY_BEGIN\nNeed input on X.\nFABRIK_SUMMARY_END\nFABRIK_BLOCKED_ON_INPUT", true},
+		{"empty string", "", false},
+		{"whitespace only", "   \n\t", false},
+		// Pruefer review finding (#1782): an empty ISSUE_UPDATE_BEGIN/END pair
+		// is a structural delimiter with no body, not content — must not make
+		// hasArtifactContent report true, or R3's guard would miss an
+		// artifact-free Specify completion carrying only an empty update block.
+		{"empty issue-update block plus marker", "FABRIK_ISSUE_UPDATE_BEGIN\nFABRIK_ISSUE_UPDATE_END\nFABRIK_STAGE_COMPLETE", false},
+		{"issue-update block with real body content", "FABRIK_ISSUE_UPDATE_BEGIN\nUpdated spec body.\nFABRIK_ISSUE_UPDATE_END\nFABRIK_STAGE_COMPLETE", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hasArtifactContent(tt.text); got != tt.want {
+				t.Errorf("hasArtifactContent(%q) = %v, want %v", tt.text, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestArtifactMissingOnComplete(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+		want bool
+	}{
+		{"marker with content", "Real content here.\nFABRIK_STAGE_COMPLETE", false},
+		{"bare marker only", "FABRIK_STAGE_COMPLETE", true},
+		{"no-work-needed exclusion", "FABRIK_STAGE_COMPLETE\nFABRIK_NO_WORK_NEEDED", false},
+		{"no marker at all", "still working, no marker here", false},
+		{"blocked marker, not stage-complete", "FABRIK_BLOCKED_ON_INPUT", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := artifactMissingOnComplete(tt.text); got != tt.want {
+				t.Errorf("artifactMissingOnComplete(%q) = %v, want %v", tt.text, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestExtractLastSubstantialAssistantTurn_LastWins mirrors
+// TestExtractIssueUpdateFromAssistantTurns_MultipleBlocks_LastUsed's "last
+// wins" convention (R2), but for the general prose case: the marker-bearing
+// turn (last in the transcript) contains only the marker, so the correct
+// pick is the earlier, substantial turn — not "whichever turn is last" and
+// not "whichever turn has the marker."
+func TestExtractLastSubstantialAssistantTurn_LastWins(t *testing.T) {
+	ndjson := `{"type":"assistant","message":{"content":[{"type":"text","text":"First draft of the plan."}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Second, more complete draft of the plan."}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"FABRIK_STAGE_COMPLETE"}]}}
+{"type":"result","subtype":"success","result":"FABRIK_STAGE_COMPLETE","session_id":"s","num_turns":3}
+`
+	got := extractLastSubstantialAssistantTurn([]byte(ndjson))
+	want := "Second, more complete draft of the plan."
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestExtractLastSubstantialAssistantTurn_ToolUseTurnSkipped(t *testing.T) {
+	ndjson := `{"type":"assistant","message":{"content":[{"type":"text","text":"The real artifact content.\nFABRIK_STAGE_COMPLETE"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","text":""}]}}
+{"type":"result","subtype":"success","result":"FABRIK_STAGE_COMPLETE","session_id":"s","num_turns":2}
+`
+	got := extractLastSubstantialAssistantTurn([]byte(ndjson))
+	want := "The real artifact content.\nFABRIK_STAGE_COMPLETE"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestExtractLastSubstantialAssistantTurn_NonePresent(t *testing.T) {
+	ndjson := `{"type":"assistant","message":{"content":[{"type":"text","text":"FABRIK_STAGE_COMPLETE"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","text":""}]}}
+{"type":"result","subtype":"success","result":"FABRIK_STAGE_COMPLETE","session_id":"s","num_turns":2}
+`
+	got := extractLastSubstantialAssistantTurn([]byte(ndjson))
+	if got != "" {
+		t.Errorf("expected empty string, got %q", got)
+	}
+}

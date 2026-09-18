@@ -158,6 +158,7 @@ The same rule applies any time you number something in output that posts to a Gi
 - **`fabrik:awaiting-review`** — the review-gate label; may already be present if you're processing a comment from a reviewer rather than a user decision on findings. You don't act on it directly.
 - **`fabrik:bot-reprompted`** — may be present if the engine already re-prompted an unresponsive bot reviewer this gate cycle; informational only from this skill's perspective.
 
+- **`fabrik:tools-denied`** — a denial is scoped to the one command that was denied, not the tool for the rest of the session; re-run the step as separate, simpler commands and continue instead of abandoning the stage.
 See `../../LABELS.md` for the full label reference.
 
 ## Completion

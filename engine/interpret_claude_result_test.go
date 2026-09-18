@@ -15,7 +15,7 @@ import (
 
 func TestInterpretClaudeResult_SuccessWithCompletionMarker(t *testing.T) {
 	raw := []byte(`{"result":"work done\nFABRIK_STAGE_COMPLETE","session_id":"sid-1","num_turns":3,"total_cost_usd":0.5}`)
-	text, completed, usage, err := interpretClaudeResult(context.Background(), 1, raw, nil, false, t.TempDir()+"/sess", t.TempDir(), "", 2)
+	text, completed, usage, err := interpretClaudeResult(context.Background(), 1, raw, nil, false, t.TempDir()+"/sess", t.TempDir(), "", 2, -1)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -32,7 +32,7 @@ func TestInterpretClaudeResult_SuccessWithCompletionMarker(t *testing.T) {
 
 func TestInterpretClaudeResult_SuccessNoCompletionMarker(t *testing.T) {
 	raw := []byte(`{"result":"still working","session_id":"sid-2"}`)
-	_, completed, _, err := interpretClaudeResult(context.Background(), 1, raw, nil, false, t.TempDir()+"/sess", t.TempDir(), "", 2)
+	_, completed, _, err := interpretClaudeResult(context.Background(), 1, raw, nil, false, t.TempDir()+"/sess", t.TempDir(), "", 2, -1)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -45,7 +45,7 @@ func TestInterpretClaudeResult_RunErrWithoutMarker_EngineShutdown(t *testing.T) 
 	raw := []byte(`{"result":"partial","session_id":"sid-3"}`)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // simulate engine shutdown: ctx.Err() != nil
-	_, completed, _, err := interpretClaudeResult(ctx, 1, raw, errors.New("boom"), false, t.TempDir()+"/sess", t.TempDir(), "", 2)
+	_, completed, _, err := interpretClaudeResult(ctx, 1, raw, errors.New("boom"), false, t.TempDir()+"/sess", t.TempDir(), "", 2, -1)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -56,7 +56,7 @@ func TestInterpretClaudeResult_RunErrWithoutMarker_EngineShutdown(t *testing.T) 
 
 func TestInterpretClaudeResult_RunErrWithMarker_TreatedAsCompleted(t *testing.T) {
 	raw := []byte(`{"result":"work done\nFABRIK_STAGE_COMPLETE","session_id":"sid-4"}`)
-	_, completed, _, err := interpretClaudeResult(context.Background(), 1, raw, errors.New("exit 1"), false, t.TempDir()+"/sess", t.TempDir(), "", 2)
+	_, completed, _, err := interpretClaudeResult(context.Background(), 1, raw, errors.New("exit 1"), false, t.TempDir()+"/sess", t.TempDir(), "", 2, -1)
 	if err == nil {
 		t.Fatalf("expected error to be returned alongside completed=true")
 	}
@@ -67,7 +67,7 @@ func TestInterpretClaudeResult_RunErrWithMarker_TreatedAsCompleted(t *testing.T)
 
 func TestInterpretClaudeResult_ParseFailure_NotTimedOut(t *testing.T) {
 	raw := []byte(`not json at all`)
-	text, completed, _, err := interpretClaudeResult(context.Background(), 1, raw, nil, false, t.TempDir()+"/sess", "/some/log/dir", "", 2)
+	text, completed, _, err := interpretClaudeResult(context.Background(), 1, raw, nil, false, t.TempDir()+"/sess", "/some/log/dir", "", 2, -1)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestInterpretClaudeResult_ParseFailure_NotTimedOut(t *testing.T) {
 
 func TestInterpretClaudeResult_ParseFailure_TimedOut_ExtractsAssistantText(t *testing.T) {
 	raw := []byte(`{"type":"assistant","message":{"content":[{"type":"text","text":"partial output\nFABRIK_STAGE_COMPLETE"}]}}` + "\n")
-	text, completed, _, err := interpretClaudeResult(context.Background(), 1, raw, nil, true, t.TempDir()+"/sess", t.TempDir(), "", 2)
+	text, completed, _, err := interpretClaudeResult(context.Background(), 1, raw, nil, true, t.TempDir()+"/sess", t.TempDir(), "", 2, -1)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestInterpretClaudeResult_ParseFailure_TimedOut_ExtractsAssistantText(t *te
 
 func TestInterpretClaudeResult_WaitDelayOverride_TreatedAsCleanExit(t *testing.T) {
 	raw := []byte(`{"result":"done\nFABRIK_STAGE_COMPLETE","session_id":"sid-5"}`)
-	_, completed, _, err := interpretClaudeResult(context.Background(), 1, raw, exec.ErrWaitDelay, false, t.TempDir()+"/sess", t.TempDir(), "", 2)
+	_, completed, _, err := interpretClaudeResult(context.Background(), 1, raw, exec.ErrWaitDelay, false, t.TempDir()+"/sess", t.TempDir(), "", 2, -1)
 	if err != nil {
 		t.Fatalf("expected WaitDelay to be treated as clean exit, got error: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestInterpretClaudeResult_StaleSession_DeletesFileAndDoesNotResave(t *testi
 		`"session_id":"3fefda47-9ea5-422a-9cdb-33da6e13244d","is_error":true,` +
 		`"errors":["No conversation found with session ID: 3fefda47-9ea5-422a-9cdb-33da6e13244d"]}`)
 
-	text, completed, _, err := interpretClaudeResult(context.Background(), 815, raw, nil, false, sessPath, t.TempDir(), "", 2)
+	text, completed, _, err := interpretClaudeResult(context.Background(), 815, raw, nil, false, sessPath, t.TempDir(), "", 2, -1)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestInterpretClaudeResult_NonStaleError_StillSavesSession(t *testing.T) {
 	raw := []byte(`{"subtype":"error_during_execution","is_error":true,"session_id":"sid-live",` +
 		`"errors":["rate limit exceeded"]}`)
 
-	_, _, _, err := interpretClaudeResult(context.Background(), 1, raw, nil, false, sessPath, t.TempDir(), "", 2)
+	_, _, _, err := interpretClaudeResult(context.Background(), 1, raw, nil, false, sessPath, t.TempDir(), "", 2, -1)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestInterpretClaudeResult_TurnCapExit_ClassifiedAsTurnLimitError(t *testing
 	raw := []byte(`{"type":"result","subtype":"error_max_turns","terminal_reason":"max_turns",` +
 		`"session_id":"sid-1114","errors":["Reached maximum number of turns (50)"],"is_error":true,"num_turns":51}`)
 
-	_, completed, _, err := interpretClaudeResult(context.Background(), 1114, raw, errors.New("exit status 1"), false, t.TempDir()+"/sess", t.TempDir(), "", 2)
+	_, completed, _, err := interpretClaudeResult(context.Background(), 1114, raw, errors.New("exit status 1"), false, t.TempDir()+"/sess", t.TempDir(), "", 2, -1)
 	if err == nil {
 		t.Fatalf("expected error to be returned")
 	}
@@ -202,7 +202,7 @@ func TestInterpretClaudeResult_GenuineError_NotClassifiedAsTurnLimit(t *testing.
 	raw := []byte(`{"type":"result","subtype":"error_during_execution","session_id":"3fefda47-9ea5-422a-9cdb-33da6e13244d",` +
 		`"errors":["No conversation found with session ID: 3fefda47-…"],"is_error":true,"num_turns":0}`)
 
-	_, completed, _, err := interpretClaudeResult(context.Background(), 1128, raw, errors.New("exit status 1"), false, t.TempDir()+"/sess", t.TempDir(), "", 2)
+	_, completed, _, err := interpretClaudeResult(context.Background(), 1128, raw, errors.New("exit status 1"), false, t.TempDir()+"/sess", t.TempDir(), "", 2, -1)
 	if err == nil {
 		t.Fatalf("expected error to be returned")
 	}
@@ -222,7 +222,7 @@ func TestInterpretClaudeResult_GenuineError_NotClassifiedAsTurnLimit(t *testing.
 func TestInterpretClaudeResult_IncompleteWithoutCap_NotClassifiedAsTurnLimit(t *testing.T) {
 	raw := []byte(`{"result":"partial work, no marker","session_id":"sid-6"}`)
 
-	_, completed, _, err := interpretClaudeResult(context.Background(), 1, raw, errors.New("exit status 1"), false, t.TempDir()+"/sess", t.TempDir(), "", 2)
+	_, completed, _, err := interpretClaudeResult(context.Background(), 1, raw, errors.New("exit status 1"), false, t.TempDir()+"/sess", t.TempDir(), "", 2, -1)
 	if err == nil {
 		t.Fatalf("expected error to be returned")
 	}
@@ -235,6 +235,90 @@ func TestInterpretClaudeResult_IncompleteWithoutCap_NotClassifiedAsTurnLimit(t *
 	}
 }
 
+// TestInterpretClaudeResult_ArtifactInEarlierTurn_TrailingToolCall pins the
+// #1632/#1782 reported shape: the agent emits its real artifact plus
+// FABRIK_STAGE_COMPLETE in an assistant turn, then makes one more tool call,
+// and the CLI's terminal "result" field ends up carrying nothing but the bare
+// marker. Before the fix (R1/R2), `text` was `resp.Result` verbatim — the
+// artifact was silently discarded even though completed was (correctly) true.
+// After the fix, the artifact must be recovered from the earlier turn (AC1).
+func TestInterpretClaudeResult_ArtifactInEarlierTurn_TrailingToolCall(t *testing.T) {
+	ndjson := `{"type":"assistant","message":{"content":[{"type":"text","text":"## Plan\n\nHere is the full implementation plan with all the detail a reviewer needs.\nFABRIK_STAGE_COMPLETE"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","text":""}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","content":"true"}]}}
+{"type":"result","subtype":"success","result":"FABRIK_STAGE_COMPLETE","session_id":"sid-1632","num_turns":38,"total_cost_usd":1.55}
+`
+	text, completed, _, err := interpretClaudeResult(context.Background(), 1632, []byte(ndjson), nil, false, t.TempDir()+"/sess", t.TempDir(), "", 2, -1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !completed {
+		t.Fatalf("expected completed=true (marker present)")
+	}
+	if !strings.Contains(text, "Here is the full implementation plan") {
+		t.Errorf("text = %q, want recovered artifact from the earlier assistant turn", text)
+	}
+}
+
+// TestInterpretClaudeResult_NoWorkNeeded_NoHarvestAttempted confirms the R3
+// exclusion: a legitimate artifact-free completion (FABRIK_STAGE_COMPLETE +
+// FABRIK_NO_WORK_NEEDED, nothing else) must NOT be treated as a missing
+// artifact — completed stays true and no assistant-turn scan is needed to get
+// there (unrelated turn content must not leak in).
+func TestInterpretClaudeResult_NoWorkNeeded_NoHarvestAttempted(t *testing.T) {
+	ndjson := `{"type":"assistant","message":{"content":[{"type":"text","text":"Some unrelated reasoning from an earlier turn that must not leak into the output."}]}}
+{"type":"result","subtype":"success","result":"FABRIK_STAGE_COMPLETE\nFABRIK_NO_WORK_NEEDED","session_id":"sid-now","num_turns":2}
+`
+	text, completed, _, err := interpretClaudeResult(context.Background(), 1, []byte(ndjson), nil, false, t.TempDir()+"/sess", t.TempDir(), "", 2, -1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !completed {
+		t.Errorf("expected completed=true for a legitimate no-work-needed completion")
+	}
+	if strings.Contains(text, "unrelated reasoning") {
+		t.Errorf("text = %q, must not have harvested unrelated turn content for a no-work-needed completion", text)
+	}
+}
+
+// TestInterpretClaudeResult_NoArtifactAnywhere_ForcedIncomplete covers R3's
+// guard proper: FABRIK_STAGE_COMPLETE is present, but neither the terminal
+// result nor any assistant turn carries anything beyond control markers. This
+// must never be labelled complete — it falls through to the ordinary
+// retry/escalate path instead (completed=false, no error).
+func TestInterpretClaudeResult_NoArtifactAnywhere_ForcedIncomplete(t *testing.T) {
+	ndjson := `{"type":"assistant","message":{"content":[{"type":"text","text":"FABRIK_STAGE_COMPLETE"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","text":""}]}}
+{"type":"result","subtype":"success","result":"FABRIK_STAGE_COMPLETE","session_id":"sid-empty","num_turns":5}
+`
+	_, completed, _, err := interpretClaudeResult(context.Background(), 1, []byte(ndjson), nil, false, t.TempDir()+"/sess", t.TempDir(), "", 2, -1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if completed {
+		t.Errorf("expected completed=false — no artifact was harvestable anywhere (R3)")
+	}
+}
+
+// TestInterpretClaudeResult_OrdinaryCase_ByteIdentical is AC4: when the
+// artifact is already present in the terminal result (the ordinary case, no
+// trailing tool call), the harvest/guard machinery must not alter text or
+// completed at all.
+func TestInterpretClaudeResult_OrdinaryCase_ByteIdentical(t *testing.T) {
+	raw := []byte(`{"result":"## Research Findings\n\nSome real content.\nFABRIK_STAGE_COMPLETE","session_id":"sid-ordinary","num_turns":5,"total_cost_usd":0.25}`)
+	text, completed, _, err := interpretClaudeResult(context.Background(), 1, raw, nil, false, t.TempDir()+"/sess", t.TempDir(), "", 2, -1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !completed {
+		t.Errorf("expected completed=true")
+	}
+	want := "## Research Findings\n\nSome real content.\nFABRIK_STAGE_COMPLETE"
+	if text != want {
+		t.Errorf("text = %q, want byte-identical %q", text, want)
+	}
+}
+
 // TestInterpretClaudeResult_HealthyResume_SessionIDSaved confirms the
 // ordinary success path (no IsError) still persists the session ID —
 // the resave guard must not regress normal resume behavior.
@@ -243,7 +327,7 @@ func TestInterpretClaudeResult_HealthyResume_SessionIDSaved(t *testing.T) {
 
 	raw := []byte(`{"result":"work done\nFABRIK_STAGE_COMPLETE","session_id":"sid-healthy","num_turns":3,"total_cost_usd":0.5}`)
 
-	_, completed, _, err := interpretClaudeResult(context.Background(), 1, raw, nil, false, sessPath, t.TempDir(), "", 2)
+	_, completed, _, err := interpretClaudeResult(context.Background(), 1, raw, nil, false, sessPath, t.TempDir(), "", 2, -1)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

@@ -30,6 +30,14 @@ import (
 // exits via the real force-quit os.Exit(1) path when sent two SIGINT/SIGTERM
 // signals — see TestForceQuit_DuringCleanStop_AC4, which cannot exercise
 // this path in-process because it terminates the test binary itself.
+//
+// A third subprocess mode (FABRIK_TEST_SENTINEL_HELPER, #1779) just sleeps
+// until killed. sentinel_probe_unix_test.go re-execs this same test binary
+// with an arbitrary extra argv tail (a fake "--name <sentinel>" pair, plus
+// padding tokens) so probeSentinelLive has a real, ps-visible process to find
+// — os.Args is never parsed by the flag/testing machinery on this path (we
+// os.Exit before m.Run() does that), so the extra tokens survive into the
+// process's argv exactly as passed.
 func TestMain(m *testing.M) {
 	if sentinel := os.Getenv("FABRIK_TEST_SIGINT_SENTINEL"); sentinel != "" {
 		go io.Copy(io.Discard, os.Stdin)
@@ -42,6 +50,16 @@ func TestMain(m *testing.M) {
 	if os.Getenv("FABRIK_TEST_FORCE_QUIT_HELPER") == "1" {
 		runForceQuitHelperProcess()
 		os.Exit(4) // runForceQuitHelperProcess always exits itself; unreachable in practice
+	}
+	if os.Getenv("FABRIK_TEST_SENTINEL_HELPER") == "1" {
+		// A bare "select {}" here would trip Go's runtime deadlock detector
+		// (all goroutines asleep, nothing left that could ever unblock it) —
+		// unlike a signal-wait, which the runtime treats as externally
+		// unblockable and never flags. Loop-sleep instead; the test kills
+		// this process explicitly via SIGKILL.
+		for {
+			time.Sleep(time.Hour)
+		}
 	}
 	lockVerifyDelay = 0
 	os.Exit(m.Run())
@@ -733,6 +751,102 @@ func TestProcessItem_DegenerateOutput_BareAtRef(t *testing.T) {
 
 func TestProcessItem_DegenerateOutput_BarePath(t *testing.T) {
 	testProcessItemDegenerateOutputEscalates(t, 21, "/var/data/foo.md")
+}
+
+// TestProcessItem_NoArtifactHarvested_EscalatesWithDistinctCause covers R3 at
+// the finalizeStageOutcome level (#1782): the mock simulates exactly what
+// interpretClaudeResult now produces upstream for the #1632 shape —
+// FABRIK_STAGE_COMPLETE present, completed already forced to false because no
+// artifact could be harvested anywhere. Asserts: stage:<name>:complete is
+// never applied, a first-detection comment posts once (distinct from the
+// degenerate-output one), and the eventual escalation names the no-artifact
+// cause rather than the (unrelated) bare-file-reference one.
+func TestProcessItem_NoArtifactHarvested_EscalatesWithDistinctCause(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			// completed=false mirrors interpretClaudeResult's own R3 forcing —
+			// this test exercises finalizeStageOutcome's downstream messaging,
+			// not the upstream harvest/guard (covered by
+			// TestInterpretClaudeResult_NoArtifactAnywhere_ForcedIncomplete).
+			return "FABRIK_STAGE_COMPLETE", false, TokenUsage{}, nil
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{
+			Owner:      "owner",
+			Repo:       "repo",
+			ProjectNum: 1,
+			User:       "testuser",
+			Token:      "token",
+			MaxRetries: 2,
+			Stages:     testStages(),
+		},
+		client, claude, wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 23, Title: "NoArtifact", Status: "Research", ItemID: "PVTI_23"}
+
+	if err := eng.processItem(context.Background(), board, item); err != nil {
+		t.Fatalf("processItem (first call): %v", err)
+	}
+	if err := eng.processItem(context.Background(), board, item); err != nil {
+		t.Fatalf("processItem (second call): %v", err)
+	}
+
+	for _, call := range client.addLabelCalls {
+		if call.labelName == "stage:Research:complete" {
+			t.Errorf("stage:Research:complete label applied despite no harvestable artifact")
+		}
+	}
+
+	foundFirstDetection := false
+	for _, call := range client.addCommentCalls {
+		if strings.Contains(call.body, "no artifact harvested") {
+			foundFirstDetection = true
+		}
+	}
+	if !foundFirstDetection {
+		t.Error("expected a first-detection 'no artifact harvested' comment")
+	}
+
+	foundPaused, foundFailed := false, false
+	for _, call := range client.addLabelCalls {
+		if call.labelName == "fabrik:paused" {
+			foundPaused = true
+		}
+		if call.labelName == "stage:Research:failed" {
+			foundFailed = true
+		}
+	}
+	if !foundPaused || !foundFailed {
+		t.Errorf("expected fabrik:paused and stage:Research:failed after max retries, paused=%v failed=%v", foundPaused, foundFailed)
+	}
+
+	foundDistinctCause, foundWrongCause := false, false
+	for _, call := range client.addCommentCalls {
+		if !strings.Contains(call.body, "stage failed") {
+			continue
+		}
+		if strings.Contains(call.body, "no harvestable artifact was found") {
+			foundDistinctCause = true
+		}
+		if strings.Contains(call.body, "bare file reference") {
+			foundWrongCause = true
+		}
+	}
+	if !foundDistinctCause {
+		t.Error("expected escalation comment to name the no-artifact cause")
+	}
+	if foundWrongCause {
+		t.Error("escalation comment must not misattribute this to the (unrelated) bare-file-reference cause")
+	}
 }
 
 // TestProcessItem_LegitimateShortOutput_StillAdvances is a regression guard proving

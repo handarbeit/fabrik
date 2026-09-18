@@ -36,9 +36,9 @@ For the authoritative engine state-machine spec (label semantics, review gate tr
 
 - Go 1.26.1+
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
-- GitHub **classic** personal access token (`ghp_...`) with `repo`, `project`, and `workflow` scopes
-  - Fine-grained tokens (`github_pat_...`) are **not supported** — GitHub Projects v2 GraphQL requires a classic PAT
-  - Create one at: https://github.com/settings/tokens (select "Tokens (classic)")
+- A GitHub token with `repo`, `project`, and `workflow` scopes
+  - Fine-grained tokens (`github_pat_...`) are **not supported** — GitHub Projects v2 GraphQL doesn't work with them
+  - A classic personal access token (`ghp_...`) and a `gh` CLI OAuth token (`gho_...`, via `gh auth token`) both work. The shortest path, given `gh auth login` is already required below, is `FABRIK_TOKEN=$(gh auth token)` — note this rotates on re-auth. Create a classic PAT instead at: https://github.com/settings/tokens (select "Tokens (classic)")
   - If a fine-grained token is detected at startup, Fabrik prints a `[warn]` message and subsequent API calls include an actionable hint; see [GitHub API Returns 401 or Fine-Grained Token Warning](#github-api-returns-401-or-fine-grained-token-warning)
 - A GitHub Project (v2) with board columns matching your stage names
 
@@ -78,8 +78,9 @@ Then initialize:
 #   .fabrik/config.yaml   — project config template (edit this)
 # Updates:
 #   .git/info/exclude     — adds .fabrik/repos/, .fabrik/worktrees/, .fabrik/debug/,
-#                           and .fabrik/history.json so they don't appear as untracked
-#                           in git status (local excludes, not committed to the repo)
+#                           .fabrik/history.json, and .fabrik/warnings.json so they
+#                           don't appear as untracked in git status (local excludes,
+#                           not committed to the repo)
 ```
 
 Pass your GitHub Project URL to auto-populate `owner`, `project`, and `owner_type` in
@@ -127,9 +128,11 @@ GitHub token to a gitignored `.env` file:
 
 ```
 # .env (gitignored — keep secrets here)
-# Use a CLASSIC personal access token (ghp_...) — not a fine-grained token (github_pat_...)
 # Required scopes: repo, project, workflow
-# Create at: https://github.com/settings/tokens (select "Tokens (classic)")
+# A classic PAT (ghp_...) or a `gh` CLI OAuth token (gho_..., via `gh auth token`) both
+# work — fine-grained tokens (github_pat_...) do not. Shortest path if `gh auth login`
+# is already done: FABRIK_TOKEN=$(gh auth token) — rotates on re-auth. Otherwise create
+# a classic PAT at: https://github.com/settings/tokens (select "Tokens (classic)")
 FABRIK_TOKEN=ghp_...
 
 # Optional: run this instance's Claude invocations against a different Claude
@@ -180,7 +183,9 @@ GitHub Project (v2) for your repository yourself. Add board columns that corresp
 your stage names -- the column name must match the `name` field in each stage YAML file
 exactly (case-sensitive). The default pipeline uses:
 
-`Backlog` -> `Specify` -> `Research` -> `Plan` -> `Implement` -> `Review` -> `Validate` -> `Done`
+`Backlog` -> `Specify` -> `Research` -> `Plan` -> `Implement` -> `Review` -> `Validate` -> `Queued` -> `Done`
+
+`Queued` is a holding column, not a pipeline stage — it's used only when [merge-train](#merge-train--queued) is enabled, but `fabrik init` extracts its stage YAML unconditionally, so it's still part of the required column set from the start.
 
 Then edit `.fabrik/config.yaml`'s `owner`, `repo`, `project`, and `owner_type` to point at
 it (see [First Run](#first-run) below).
@@ -1056,7 +1061,8 @@ Keep only secrets here. When a `.git/` directory is present, Fabrik refuses to s
 
 ```
 # .env (gitignored)
-# Classic personal access token (ghp_...) required — see https://github.com/settings/tokens
+# Classic PAT (ghp_...) or `gh` CLI OAuth token (gho_..., via `gh auth token`) — not a
+# fine-grained token (github_pat_...). See https://github.com/settings/tokens
 FABRIK_TOKEN=ghp_...         # Preferred token env var (needs repo, project, workflow scopes)
 GITHUB_TOKEN=ghp_...         # Fallback token env var
 ```
@@ -1143,8 +1149,8 @@ The flag/env suggestion is derived mechanically from Fabrik's snake_case (`confi
 
 | Variable | `config.yaml` key | Description | Default |
 |----------|-------------------|-------------|---------|
-| `FABRIK_TOKEN` | *(secrets only)* | GitHub **classic** personal access token (`ghp_...`) with `repo`, `project`, `workflow` scopes (preferred) | required |
-| `GITHUB_TOKEN` | *(secrets only)* | GitHub **classic** personal access token (`ghp_...`) — fallback when `FABRIK_TOKEN` is unset | required |
+| `FABRIK_TOKEN` | *(secrets only)* | GitHub token with `repo`, `project`, `workflow` scopes — classic PAT (`ghp_...`) or `gh` CLI OAuth token (`gho_...`, via `gh auth token`); fine-grained tokens (`github_pat_...`) not supported (preferred) | required |
+| `GITHUB_TOKEN` | *(secrets only)* | Same token requirements as `FABRIK_TOKEN` — fallback when `FABRIK_TOKEN` is unset | required |
 | `FABRIK_OWNER` | `owner` | GitHub repo owner | -- |
 | `FABRIK_REPO` | `repo` | GitHub repo name; optional — omitting enables multi-repo mode (all repos on the board) | -- |
 | `FABRIK_PROJECT_NUMBER` | `project` | GitHub Project (v2) number | -- |
@@ -1732,35 +1738,41 @@ failed label, reset the retry count, and try again immediately.
 > mutating tool calls during the invocation — reported structurally by the
 > CLI (`permission_denials` on the result object), never inferred from
 > anything the assistant wrote. This is not a stage failure: the worker was
-> simply unable to write files, so it does not consume a `--max-retries`
-> slot. Fabrik posts one explanatory comment naming the denied tool(s) the
-> first time this is detected on an issue (not on every retry), then keeps
-> retrying on the normal dispatch cooldown, bounded independently by
-> `--max-tools-denied-retries` (default 3) — since no retry can fix a broken
-> permission configuration on its own, this bound is intentionally lower than
-> `--max-slice-retries`. **This bound applies uniformly across every
-> invocation type** — the ordinary stage dispatch, `ci-fix-reinvoke`,
-> review-reinvoke, and comment review all accumulate against the same
-> per-stage counter, so a mode denial cannot loop indefinitely just because it
-> happened to land on a reinvoke path rather than the main stage dispatch
-> (#1704) — most notably `ci-fix-reinvoke`, which is itself the designed CI
-> repair path: without this, a denial there would otherwise retry forever at
-> the reinvoke cadence, never bounded by the (much less frequent) stage-path
-> counter. After the bound, Fabrik pauses with `fabrik:paused` +
-> `fabrik:awaiting-input` (never `stage:<name>:failed` — the work itself was
-> never judged, only blocked). To resolve: **add the `fabrik:unrestricted`
-> label** — in a headless worker there is no interactive prompt to grant the
-> denied tool, so this is usually the actionable fix; it removes all tool
-> restrictions for future invocations on this issue, not just the denied
-> tool, so apply it deliberately. Alternatively, check the permission
-> configuration outside Fabrik's control — most commonly a `PreToolUse` hook,
-> or an org/user-level `permissions` "ask" rule with no interactive prompt
-> available in this headless context — if you'd rather fix the underlying
-> cause. Then remove `fabrik:paused` and `fabrik:awaiting-input` to resume;
-> `fabrik:tools-denied` itself clears automatically on the next invocation
-> that isn't denied. The outcome is identical whether or not the worker also
-> emitted `FABRIK_BLOCKED_ON_INPUT` in its own output — Fabrik's
-> classification does not depend on it. See #1523, #1704.
+> simply unable to run that call, so it does not consume a `--max-retries`
+> slot. **Each denial is scoped to the specific command that was denied, not
+> the tool for the rest of the session** — a later, differently-shaped call to
+> the same tool is unaffected (confirmed by direct observation: a session
+> where one `Bash` call was denied and a later, differently-shaped `Bash` call
+> in the same session ran normally; see #1741 and ADR-1775, which supersedes
+> ADR-1523's earlier "by strong inference" allowlist reasoning). Fabrik posts
+> one explanatory comment the first time this is detected on an issue (not on
+> every retry) — naming the first denied command when the CLI's `tool_input`
+> makes one decodable (Bash only, truncated and rendered safely), falling back
+> to naming just the tool otherwise — then keeps retrying on the normal
+> dispatch cooldown, bounded independently by `--max-tools-denied-retries`
+> (default 3). **This bound applies uniformly across every invocation type**
+> — the ordinary stage dispatch, `ci-fix-reinvoke`, review-reinvoke, and
+> comment review all accumulate against the same per-stage counter, so a
+> denial cannot loop indefinitely just because it happened to land on a
+> reinvoke path rather than the main stage dispatch (#1704) — most notably
+> `ci-fix-reinvoke`, which is itself the designed CI repair path: without
+> this, a denial there would otherwise retry forever at the reinvoke cadence,
+> never bounded by the (much less frequent) stage-path counter. After the
+> bound, Fabrik pauses with `fabrik:paused` + `fabrik:awaiting-input` (never
+> `stage:<name>:failed` — the work itself was never judged, only blocked). To
+> resolve: since the denial is command-scoped, **the first thing to try is
+> re-running the step as separate, simpler commands, or adding a matching
+> `allowed_tools` rule** for the specific command that keeps getting denied —
+> this is often enough on its own. If that doesn't resolve it, **add the
+> `fabrik:unrestricted` label** as a last resort — in a headless worker there
+> is no interactive prompt to grant a denied tool, so this removes the
+> friction entirely, but it removes all tool restrictions for future
+> invocations on this issue, not just the denied one, so apply it
+> deliberately. Then remove `fabrik:paused` and `fabrik:awaiting-input` to
+> resume; `fabrik:tools-denied` itself clears automatically on the next
+> invocation that isn't denied. The outcome is identical whether or not the
+> worker also emitted `FABRIK_BLOCKED_ON_INPUT` in its own output — Fabrik's
+> classification does not depend on it. See #1523, #1704, ADR-1775.
 
 ### Stages Waiting for Input
 
@@ -2870,7 +2882,7 @@ For developing the plugin itself, use `--plugin-dir` to point at your working co
 | `fabrik:awaiting-member-close` | Set by the merge-train singleton-landing path (`landSingleton`) when a member issue's `CloseIssue` call fails after its PR has already merged and the board moved to Done — most likely on a non-default base branch, where GitHub's `Closes #N` never auto-fires. Retried every poll. Cleared once the issue is confirmed closed (by Fabrik or by GitHub's own auto-close). Escalates to `fabrik:paused` after `--max-retries` failed attempts, with an explanatory comment posted on the issue (ADR-061). |
 | `fabrik:nondefault-base-pr-noted` | Set once, best-effort, on a `base:<branch>` item after Fabrik posts a one-time comment naming its discovered PR — because GitHub creates no Development-panel issue↔PR link at all for a PR targeting a non-default base branch (distinct from the auto-close gap `fabrik:awaiting-close` covers). Applied unconditionally right after the post attempt, whether or not the comment actually succeeded — **informational only, no retry, no escalation**. Never applied to a default-base item. See [§6.21 Non-Default-Base Linkage Notice](state-machine.md#621-non-default-base-linkage-notice-1649) (ADR-1649). |
 | `fabrik:api-key-helper-detected` | Set when a stage invocation is skipped because the worktree's own `.claude/settings.json` sets `apiKeyHelper` — a repo-resident setting Fabrik cannot see until the worktree exists. Does not count against `max_retries`; no `fabrik:paused` or `stage:<name>:failed` applied. Clears automatically once `apiKeyHelper` is removed from the file and a later invocation reaches Claude successfully — no manual removal needed. See [Anthropic Auth Namespace Scrub & `apiKeyHelper` Refusal](#anthropic-auth-namespace-scrub--apikeyhelper-refusal). |
-| `fabrik:tools-denied` | Set when Claude's own permission layer denies one or more mutating tool calls during an invocation, detected structurally from the CLI's `permission_denials` result field — applies uniformly whether the denial was detected on the ordinary stage dispatch, `ci-fix-reinvoke`, review-reinvoke, or comment review, all of which accumulate against the same per-stage counter (#1704). Does not count against `max_retries`; bounded instead by its own `--max-tools-denied-retries` counter (default 3), at which point `fabrik:paused` + `fabrik:awaiting-input` are applied — never `stage:<name>:failed`. Clears automatically on the next invocation that isn't itself classified as tools-denied. See the "Troubleshooting: an issue carries `fabrik:tools-denied`" note under [Retry and Escalation](#retry-and-escalation). |
+| `fabrik:tools-denied` | Set when Claude's own permission layer denies one or more mutating tool calls during an invocation, detected structurally from the CLI's `permission_denials` result field — applies uniformly whether the denial was detected on the ordinary stage dispatch, `ci-fix-reinvoke`, review-reinvoke, or comment review, all of which accumulate against the same per-stage counter (#1704). Each denial is scoped to the specific command denied, not the tool for the rest of the session (ADR-1775); the explanatory comment names it when decodable. Does not count against `max_retries`; bounded instead by its own `--max-tools-denied-retries` counter (default 3), at which point `fabrik:paused` + `fabrik:awaiting-input` are applied — never `stage:<name>:failed`. Clears automatically on the next invocation that isn't itself classified as tools-denied. See the "Troubleshooting: an issue carries `fabrik:tools-denied`" note under [Retry and Escalation](#retry-and-escalation). |
 | `fabrik:awaiting-runaway-alert` | Set when the merge-train runaway guard (ADR-059 D8) pauses a `Queued` member (`fabrik:paused` + `fabrik:awaiting-input` applied unconditionally) but its `AddComment` alert call fails. Retried every poll by a settle scan, independent of `fabrik:paused`'s presence, until the alert succeeds or a fallback comment lands. Cleared only once some explanation is confirmed delivered — a persistent comment-post outage leaves the marker in place indefinitely rather than erasing the last diagnostic signal. See [§6.18 Runaway Guard Alert Retry](state-machine.md#618-runaway-guard-alert-retry-adr-1533) (ADR-1533). |
 | `fabrik:awaiting-landing-verification` | Set immediately after a Done transition attributable to a merge (merge-train batch/singleton landing, or the ordinary auto-merge path) succeeds. The post-Done settle scan confirms the credited PR actually reached `MERGED`. Clears automatically once confirmed. See [§6.19 Post-Done Landing Verification](state-machine.md#619-post-done-landing-verification-adr-1616) (ADR-1616). |
 | `fabrik:credited-pr:<N>` | Set alongside `fabrik:awaiting-landing-verification`, but only by the two merge-train landing paths, recording which PR (the integration/singleton PR, distinct from the member's own closed-not-merged PR) was credited for the Done transition. Clears whenever `fabrik:awaiting-landing-verification` clears. See §6.19. |
@@ -3355,8 +3367,13 @@ self-describing identity in `ps` output — `ps aux | grep -- "--name fabrik:"` 
 every worker on the host, and the sentinel itself names which repo, issue, and stage
 each one is serving. The flag is gated on a one-time startup probe of the installed
 `claude` binary's `--help` output; on older binaries that predate the flag, it's
-omitted and workers run exactly as before. It is observability-only — the engine
-never reads or branches on it. See [stage-lifecycle.md § Worker Session Naming](stage-lifecycle.md#worker-session-naming---name)
+omitted and workers run exactly as before. Originally observability-only for humans
+running that `ps | grep`, the engine now also uses it as a liveness-verification
+signal: before clearing a worker whose PID was never recorded (the stale-timeout
+path — see `docs/state-machine.md` §9.7), it probes for a live process still
+carrying that worker's sentinel rather than clearing blind, and the dispatcher
+independently refuses to start a second worker while a cleared worker's sentinel is
+still live. See [stage-lifecycle.md § Worker Session Naming](stage-lifecycle.md#worker-session-naming---name)
 for the full as-built mechanism.
 
 ### Rate Limit Monitoring
@@ -3682,16 +3699,17 @@ Fabrik probes org mode each time the webhook subprocess starts or restarts. If t
 
 ### GitHub API Returns 401 or "Fine-Grained Token" Warning
 
-Fabrik requires a **classic** personal access token (`ghp_...`). Fine-grained tokens (`github_pat_...`) are **not supported** because GitHub Projects v2 GraphQL — which Fabrik uses for status updates and board queries — is not available to fine-grained PATs.
+Fine-grained tokens (`github_pat_...`) are **not supported** because GitHub Projects v2 GraphQL — which Fabrik uses for status updates and board queries — is not available to fine-grained PATs. A classic personal access token (`ghp_...`) or a `gh` CLI OAuth token (`gho_...`, via `gh auth token`) both work fine.
 
 **Symptoms:**
 - Startup warning: `[warn] Fine-grained personal access tokens (github_pat_...) do not support GitHub Projects v2 GraphQL...`
 - Error on first API call: `GitHub API returned 401: ... If you used a fine-grained access token...`
 
 **Fix:**
-1. Go to https://github.com/settings/tokens and select **"Tokens (classic)"**
-2. Generate a new token with scopes: `repo`, `project`, `workflow`
-3. Update `FABRIK_TOKEN` in your `.env` file with the new `ghp_...` token
+1. If `gh auth status` shows you're logged in, the simplest fix is `FABRIK_TOKEN=$(gh auth token)` — note this value rotates whenever you re-run `gh auth login`/`gh auth refresh`.
+2. Otherwise, go to https://github.com/settings/tokens and select **"Tokens (classic)"**, generate a new token with scopes `repo`, `project`, `workflow`, and update `FABRIK_TOKEN` in your `.env` file with the new `ghp_...` token.
+
+**A token that looks right but still fails as `NOT_FOUND: Could not resolve to a ProjectV2`** may belong to the wrong GitHub account — this is easy to hit if you copied `FABRIK_TOKEN` from another Fabrik project's `.env`. The token can be classic and correctly scoped and still fail this way, since the error reads like a wrong project number rather than a wrong identity. Check `gh api graphql -f query='{ viewer { login } }'` against `user:` in `config.yaml` to confirm they match.
 
 ### Startup Board Validation Failure
 

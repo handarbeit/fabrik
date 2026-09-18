@@ -282,6 +282,7 @@ Plans typically complete in a single pass. If the spec and research are solid, t
 - **`fabrik:awaiting-done`** — applied by the engine the instant you emit `FABRIK_STAGE_COMPLETE` + `FABRIK_NO_WORK_NEEDED` (see "No Work Needed" above); it's the durable record of that decision until the Done move and issue close both succeed.
 - **`fabrik:children-spawned` / `fabrik:sub-issue`** — engine-applied consequences of the `FABRIK_SPAWN_CHILD_*` blocks you emit (see "Sub-issue Decomposition" above): `children-spawned` goes on this (parent) issue once all children are created and linked; `sub-issue` goes on each new child.
 
+- **`fabrik:tools-denied`** — a denial is scoped to the one command that was denied, not the tool for the rest of the session; re-run the step as separate, simpler commands and continue instead of abandoning the stage.
 See `../../LABELS.md` for the full label reference.
 
 ## Engine Context

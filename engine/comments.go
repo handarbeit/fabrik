@@ -418,10 +418,10 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		// entirely for this cycle, mirroring the usage-limit exclusion above.
 		var toolsDeniedErr *claudeToolsDeniedError
 		if errors.As(err, &toolsDeniedErr) {
-			toolsDeniedCount, willEscalate := e.recordToolsDeniedDetection(item, stage, toolsDeniedErr.ToolNames)
-			e.logf(item.Number, "tools-denied", "comment review's tool call(s) denied by permission configuration: %s\n", strings.Join(toolsDeniedErr.ToolNames, ", "))
+			toolsDeniedCount, willEscalate := e.recordToolsDeniedDetection(item, stage, toolsDeniedErr.ToolNames, toolsDeniedErr.Denials)
+			e.logf(item.Number, "tools-denied", "comment review's tool call(s) denied by permission configuration: %s\n", toolsDeniedLogSummary(toolsDeniedErr.ToolNames, toolsDeniedErr.Denials))
 			if willEscalate {
-				e.pauseForToolsDeniedLimit(item, stage, toolsDeniedCount, e.cfg.MaxToolsDeniedRetries, toolsDeniedErr.ToolNames)
+				e.pauseForToolsDeniedLimit(item, stage, toolsDeniedCount, e.cfg.MaxToolsDeniedRetries, toolsDeniedErr.ToolNames, toolsDeniedErr.Denials)
 			}
 			return err
 		}

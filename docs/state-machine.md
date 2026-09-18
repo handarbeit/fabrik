@@ -480,6 +480,10 @@ Note: within `checkDependencies()`, for each blocker the engine first consults `
 
 **Invocation-level kill paths:** The `max_wall_time` and inactivity timeout mechanisms (see §7.7) can terminate the Claude process before it writes a clean `{"type":"result"}` line. After such a kill, `runClaude()` retroactively scans the already-buffered output for `FABRIK_STAGE_COMPLETE` in intermediate `{"type":"assistant"}` NDJSON lines via `extractTextFromAssistantTurns()`. If found, `completed=true` is returned and the invocation is treated identically to a live `FABRIK_STAGE_COMPLETE`. If not found, `completed=false` is returned and the invocation routes to the cooldown/retry path. These kills are distinguished from engine-shutdown cancellation by the `wasTimedOut` flag, so they do not trigger the hard-error path.
 
+**Assistant-turn artifact harvest and no-artifact completion guard (#1782):** Earlier still — inside `interpretClaudeResult()`, before `finalizeStageOutcome()` or `processComments()` ever see the output — the engine addresses a related but distinct defect: the CLI's terminal `result` field reflects only the agent's *very last* turn, which can be a near-empty wrap-up if one more tool call followed the turn that produced the real artifact. `artifactMissingOnComplete()` detects this (`FABRIK_STAGE_COMPLETE` present, `FABRIK_NO_WORK_NEEDED` absent, and the text carries nothing beyond Fabrik's own bare control-marker lines — `hasArtifactContent()`). When it fires, `extractLastSubstantialAssistantTurn()` re-scans the raw NDJSON for the last assistant turn with real content (not necessarily the marker-bearing turn — the reported case's marker turn contained only the marker) and prepends it to the result text. If nothing is found, or the harvest recovers only more control-marker-only text, `artifactMissingOnComplete()` still holds against the (now harvested) text, and both places `interpretClaudeResult()` would otherwise return `completed=true` are gated on its negation — the invocation returns `completed=false` instead, indistinguishable at this level from an ordinary incomplete run. `FABRIK_NO_WORK_NEEDED` co-occurring with `FABRIK_STAGE_COMPLETE` is excluded from both the scan and the guard (a legitimate artifact-free completion, not this defect).
+
+Because this runs upstream of both invocation paths, `completed=false` arrives at `finalizeStageOutcome()`/`processComments()` exactly as it would for any other incomplete run — the comment-review path needs no dedicated handling beyond its existing no-progress machinery. The stage-dispatch path additionally recomputes `artifactMissingOnComplete()` against the pre-strip output (`engine/item.go`) purely to drive distinct messaging: a one-time first-detection comment ("no artifact harvested") on first occurrence, and — like the degenerate-output guard below — counts against `MaxRetries` (the invocation did real work) rather than being exempted the way a usage-limit or tools-denied exit is, escalating via `escalateFailedStage()` at the limit with a cause note naming this defect distinctly from the unrelated bare-file-reference one. See ADR-1782.
+
 **Degenerate-output guard:** Before any of the marker-dispatch branches above run, `finalizeStageOutcome()` checks the stripped/trimmed output (`postOutput`) against `isDegenerateOutput()` — a conservative check for a single-line body that is nothing but a bare `@file` reference or an absolute filesystem path (e.g. `@/tmp/plan.md`, `/tmp/plan.md`). This catches a model writing its real stage output to a file and returning a dangling reference instead of emitting it inline (issue #1065). If it trips, regardless of which marker was present: the output is not posted as a comment, and `completed` is forced to `false` before the branches above evaluate — so `FABRIK_STAGE_COMPLETE` (with or without `FABRIK_NO_WORK_NEEDED`) cannot advance the stage on a degenerate body. The invocation instead falls through to the "None of the above" cooldown-retry path and, on the first detection, an explanatory comment is posted immediately (rather than staying silent until `MaxRetries`); at the retry limit it escalates via the normal `escalateFailedStage()` path (see §7.2), whose pause comment names the offending reference. The detector requires an unambiguous signal (`@`-prefix or a leading absolute path with ≥2 segments) and only ever matches single-line output — ordinary short prose (`N/A`, `TBD`, a one-sentence completion note, or a sentence that merely mentions a path) is not flagged.
 
 ### 2.7 Manual Label Change
@@ -879,6 +883,7 @@ In the conjunctive gate design (ADR 032), `stage:X:complete` is **withheld** unt
 | Column `<X>`, Locked + In Progress | Inactivity timeout (15m) | No streamed output for 15 consecutive minutes; no `FABRIK_STAGE_COMPLETE` in buffered stream | Same column, Cooldown | | | `wasTimedOut=true`; routes to cooldown/retry; lock NOT released |
 | Column `<X>`, Locked + In Progress | No marker in output | `claudeRan` is true (includes both error-free runs and runs that errored mid-execution; excludes only start failures like binary-not-found) | Same column, Cooldown | | | `CooldownAt("periodic-re-eval")` recorded (via `CooldownRecorded`); cooldown = `PollSeconds * 10`; lock NOT released (stays locked through retries) |
 | Column `<X>`, Locked + In Progress | `FABRIK_STAGE_COMPLETE` present, but stripped output is degenerate (bare `@file`/absolute-path reference, §2.6) | `isDegenerateOutput(postOutput)` is true | Same column, Cooldown | | | Output not posted; `completed` forced to `false` before the marker-dispatch branches run; treated identically to "no marker in output" for retry purposes; first detection posts an immediate explanatory comment |
+| Column `<X>`, Locked + In Progress | `FABRIK_STAGE_COMPLETE` present, but no artifact harvestable anywhere (§2.6, #1782) | `artifactMissingOnComplete(text)` is true inside `interpretClaudeResult()` (upstream of this row, before `finalizeStageOutcome()` runs) | Same column, Cooldown | | | `completed` already `false` on arrival; treated identically to "no marker in output" for retry purposes; first detection posts an immediate "no artifact harvested" comment; excluded when `FABRIK_NO_WORK_NEEDED` co-occurs |
 | Same column, Cooldown | Poll tick | Cooldown expired | Same column, Locked + In Progress (retry) | | `stage:<X>:failed` (if present from prior escalation) | Claude re-invoked with `resume=true` |
 | Same column, Cooldown | Retry count ≥ MaxRetries | `claudeRan && !turnLimited && MaxRetries > 0` (genuine error, or a clean run that never emitted `FABRIK_STAGE_COMPLETE` — see §7.12 for why the latter counts here rather than as a slice) | Same column, Paused + Failed | `fabrik:paused`, `stage:<X>:failed` | `fabrik:locked:<user>`, `stage:<X>:in_progress` | `escalateFailedStage()` posts comment; lock released; `Attempts` incremented via `StageRetryIncremented` (#1199 — `turnLimited` outcomes never reach this row; see the row below) |
 | Same column, Cooldown | Slice count ≥ MaxSliceRetries | `claudeRan && turnLimited && MaxSliceRetries > 0` | Same column, Paused + Awaiting Input | `fabrik:paused`, `fabrik:awaiting-input` | `fabrik:locked:<user>`, `stage:<X>:in_progress` | `pauseForSliceLimit()` posts a slice-budget comment (never "failed"); `SliceRetries` incremented via `SliceRetryIncremented`; **no** `stage:<X>:failed` — the stage has not failed (#1199, §7.12) |
@@ -2948,7 +2953,9 @@ When a stage fails `MaxRetries` times (default: configurable, 0 disables):
 3. Sets `PausedByEngine(stageName)` via `itemstate.EnginePaused` mutation
 4. Releases the lock
 
-**Degenerate output as a failure trigger:** A stage whose stripped output trips the degenerate-output guard (§2.6 — a bare `@file` reference or absolute path, e.g. `@/tmp/plan.md`) counts as a non-completion for retry purposes, identical to "no marker present." `escalateFailedStage()` takes an optional `reason` string; when the failure was caused by degenerate output, `reason` carries the offending reference and is appended to the pause comment as a `**Cause:**` paragraph naming it. On the first detection (before `MaxRetries` is reached), a one-time explanatory comment is also posted immediately so the operator isn't left with silence until the final escalation.
+**Degenerate output as a failure trigger:** A stage whose stripped output trips the degenerate-output guard (§2.6 — a bare `@file` reference or absolute path, e.g. `@/tmp/plan.md`) counts as a non-completion for retry purposes, identical to "no marker present." `escalateFailedStage()` takes an optional pre-formatted `causeNote` string, built by the caller; when the failure was caused by degenerate output, `causeNote` carries the offending reference and is appended to the pause comment as a `**Cause:**` paragraph naming it. On the first detection (before `MaxRetries` is reached), a one-time explanatory comment is also posted immediately so the operator isn't left with silence until the final escalation.
+
+**No-artifact completion as a failure trigger (#1782):** A stage whose invocation arrives with `completed=false` because `artifactMissingOnComplete()` fired upstream (§2.6) is a distinct cause from degenerate output — the CLI's terminal result field (and every assistant turn) carried nothing beyond `FABRIK_STAGE_COMPLETE` itself — and counts against `MaxRetries` the same way. `finalizeStageOutcome()` recomputes `artifactMissingOnComplete()` against the pre-strip output specifically to build a distinct `causeNote` for `escalateFailedStage()` (never reusing the degenerate-output guard's bare-file-reference wording, which would misdescribe this cause) and to post its own one-time first-detection comment ("no artifact harvested") on first occurrence, mirroring the degenerate-output guard's visibility. `escalateFailedStage()`'s `causeNote` parameter is exactly what makes both causes representable without either misdescribing the other — message construction lives at each call site, not inside `escalateFailedStage()` itself.
 
 **Recovery:** User investigates, makes fixes, then removes `fabrik:paused`. On next poll, `processItem()` detects the failed label (or `snap.PausedByEngine(stageName)` from the store) and calls `clearFailedStage()`, which:
 - Removes `stage:<X>:failed`
@@ -3244,8 +3251,10 @@ one entry per denial (`tool_name`, `tool_use_id`, `tool_input`), on an otherwise
 exit.
 
 **Detection:** `classifyToolsDenied(resp claudeResponse)` (`engine/claude.go`) returns the
-deduplicated, first-seen-order list of denied tool names whenever `len(resp.PermissionDenials) > 0`.
-`interpretClaudeResult` consults it only in the clean-exit path (`runErr == nil`), gated on
+deduplicated, first-seen-order list of denied tool names, alongside a per-denial (not deduplicated)
+`[]toolDenial` carrying each denial's tool name plus — for `Bash` only, best-effort decoded from the
+CLI's `tool_input` — the specific command that was denied (#1775; see §7.3d). `interpretClaudeResult`
+consults it only in the clean-exit path (`runErr == nil`), gated on
 `!completed` — a denial the model worked around and still completed the stage is ordinary success,
 with no exemption and no label, exactly matching every incident report and this section's own
 empirical reproduction. When the gate matches, `interpretClaudeResult` returns a
@@ -3270,11 +3279,12 @@ edits. In the final escalation block, `toolsDenied` is a fourth branch alongside
    deliberately **not** `StageRetryIncremented` (R2) — so a tool-permission denial never counts
    against `MaxRetries`.
 2. If `fabrik:tools-denied` is absent, posts an explanatory comment naming the denied tool(s)
-   (`toolsDeniedErr.ToolNames`, joined) and pointing at the permission configuration (e.g. a stray
-   `PreToolUse` hook, or an org/user-level `permissions` "ask" rule with no interactive prompt
-   available) as the thing to check, then applies the label — gated on the label's own absence, the
-   same once-per-episode idiom as `fabrik:claude-limit`/`fabrik:awaiting-ci`. A repeated detection
-   within the same episode posts neither a duplicate comment nor a duplicate label-add.
+   (`toolsDeniedErr.ToolNames`, joined) — plus the first denied command when the CLI's `tool_input`
+   made one decodable (`firstToolsDeniedCommand`/`sanitizeToolsDeniedCommand`, #1775) — stating that
+   the denial is scoped to that one command, not the tool for the rest of the session, then applies
+   the label — gated on the label's own absence, the same once-per-episode idiom as
+   `fabrik:claude-limit`/`fabrik:awaiting-ci`. A repeated detection within the same episode posts
+   neither a duplicate comment nor a duplicate label-add.
 3. Compares the running count against `MaxToolsDeniedRetries` (default **3** — see "The
    `MaxToolsDeniedRetries` bound" below); at the bound, `pauseForToolsDeniedLimit` applies
    `fabrik:paused` + `fabrik:awaiting-input` (via the shared `pauseIssue`/`EnginePaused` primitives,
@@ -3303,8 +3313,10 @@ cannot recur.
 
 **The `MaxToolsDeniedRetries` bound (R5, ADR-1523):** defaults to 3 (`--max-tools-denied-retries` /
 `FABRIK_MAX_TOOLS_DENIED_RETRIES`), lower than `MaxSliceRetries` (10 — a turn-cap preemption is
-routine and self-resolving by construction) since a permission misconfiguration does not resolve
-itself the way slicing does — no retry can fix a broken permission profile — but higher than
+routine and self-resolving by construction). A denial is command-scoped and often self-resolves once
+the worker reshapes the offending command (#1775, §7.3d) — unlike a genuine permission
+misconfiguration, which would recur identically — but a handful of cycles is still a reasonable place
+to draw the line before asking a human to look, higher than
 `MaxResumeFailures` (2) since the explanatory comment already reaches the operator on the very first
 detection (R4); the extra cycles before escalating guard only against a single spurious/flaky
 denial, never against expecting a retry to fix the underlying cause. An exempt condition that never
@@ -3357,15 +3369,69 @@ identical regardless of which invocation type detected it (R3). No change was ne
 itself — `dispatchReinvoke`'s error handling only logs whatever `processComments` returns; the
 classification, accounting, and escalation are already complete by the time control returns there.
 
-**Remedy naming (R4):** `pauseForToolsDeniedLimit`'s escalation comment additionally names
-`fabrik:unrestricted` as the actionable remedy, alongside the pre-existing "check the permission
-configuration" text — a headless worker has no interactive prompt to grant the denied tool, so
-"check the permission configuration" alone is not actionable in that context; the caveat (it removes
-all tool restrictions, not just the denied tool) is stated alongside it.
+**Remedy naming (R4, corrected by #1775 — see §7.3d):** `pauseForToolsDeniedLimit`'s escalation
+comment states the per-command scope, then offers remediation in order: try re-running the step as
+separate, simpler commands, or add a matching `allowed_tools` rule for the command that keeps getting
+denied, first; `fabrik:unrestricted` is named only as a last resort — a headless worker has no
+interactive prompt to grant a denied tool, so it is the fallback once the command-scoped fixes have
+been tried — with its trade-off (it removes all tool restrictions, not just the denied one) stated
+alongside it.
 
 See ADR-1704 and #1704, #1657, #1523.
 
-### 7.3d Toolchain Declaration Drift Detection
+### 7.3d Command-Scoped Messaging and Measured Progress Wording (#1775, #1743)
+
+Two corrections to the messaging §7.3b/§7.3c describe, both landing in #1775 since #1743 targets the
+same log line #1775 already touches:
+
+**Denials are command-scoped, not tool- or session-scoped.** ADR-1523's original reasoning — that a
+tool missing from `--allowedTools` "self-reports it unavailable, with no `permission_denials` entry,"
+so a real denial "most plausibly involved a hook" — was explicitly flagged in that ADR's own text as
+"by strong inference," never observed. A community report (#1741) directly contradicts it: within one
+session, an ordinary `git status && …` `Bash` call ran, and a later, differently-shaped
+`base_branch=$(gh pr view …)` `Bash` call was denied — impossible if a hook or mode had disabled `Bash`
+session-wide. The reporter's own 745-denial census attributes denials to command *shape* (`/tmp`
+redirects, unallowed binaries, env-prefix/variable-assignment forms, `cd`-chains, conditionals), not to
+session or tool. **ADR-1775 supersedes this specific piece of ADR-1523's reasoning** (and ADR-1704's
+repetition of the related `decision_reason_type: "mode"` framing) without rewriting either — both
+remain as accurate historical records of the decisions as made at the time.
+
+Consequently: `classifyToolsDenied` now also returns per-denial `[]toolDenial` (tool name plus, for
+`Bash` only, a best-effort `tool_input.command` decode — `decodeToolCommand`, silently degrading to
+`""` for absent/non-Bash/malformed input, never a panic). `sanitizeToolsDeniedCommand` renders a
+denied command safely for inline display: embedded newlines collapse to spaces, backticks become
+straight quotes, and the result is truncated via the existing `truncateMiddle` convention
+(`engine/merge_train.go`) with short constants sized for a single command line rather than
+`truncateMiddle`'s CI-log-sized defaults. Both `recordToolsDeniedDetection`'s initial comment and
+`pauseForToolsDeniedLimit`'s escalation comment name the first available command this way, state the
+per-command scope explicitly, and no longer contain "no retry can fix this on its own" — the phrase
+this section's earlier text described, now removed from both the comment templates and
+`claudeerr.ToolsDeniedError`'s doc comment. `ToolsDeniedError` gained an additive `Denials
+[]ToolDenial` field alongside the pre-existing `ToolNames`; every construction site that only ever set
+`ToolNames` keeps compiling and behaving unchanged.
+
+**The tools-denied log line no longer asserts unmeasured progress (#1743).** Independently of the
+command-scoping fix, `interpretClaudeResult`'s tools-denied branch previously logged "stage did not
+make progress" — a claim derived purely from `!completed` (the absence of `FABRIK_STAGE_COMPLETE`),
+never from checking the worktree. This directly contradicted this document's own §7.3b text ("real,
+committable work may have happened before the denial") and `plugin/fabrik-workflows/LABELS.md`'s
+shipped `fabrik:tools-denied` entry (which already correctly says commits and pushes still happen). A
+reported instance: an Implement comment-review invocation made three commits (the entire fix, pushed),
+spent 80 turns, and was logged as having made no progress — the next run then treated the review
+comment as already handled and did nothing. The fix: `runClaude` captures the worktree's `HEAD` before
+starting the Claude process and again immediately after `cmd.Wait()` returns (best-effort,
+`gitHeadSHA`, mirroring the existing `headBefore`/`headAfter` pattern `dispatchReviewReinvoke` uses for
+review-reinvoke, #1045), computes a commit count between them (`gitCommitCountBetween`, `git rev-list
+--count`) when both SHAs are non-empty and differ, and passes that count into
+`interpretClaudeResult` as a new parameter. The tools-denied branch reports "N commit(s) pushed, stage
+did not signal completion" when a positive count was measured, or "stage did not signal completion"
+— exactly what `!completed` actually establishes — when it wasn't; it never asserts an unmeasured
+claim, and never prints "0 commit(s)". The string "did not make progress" no longer appears anywhere in
+the engine.
+
+See adrs/1775-command-scoped-tools-denied-messaging.md, #1775, #1741, #1743.
+
+### 7.3e Toolchain Declaration Drift Detection
 
 A long-lived daemon inherits `PATH` once, from whatever shell hosted it at process start. A worktree
 can later declare a toolchain version (`.nvmrc`, `package.json` `engines.node`, `go.mod`'s
@@ -3661,8 +3727,9 @@ known-good set already computed elsewhere) are ever cleared. See ADR-1348.
 
 ### 7.12 Slice Budget / Turn-Cap Preemption Limit
 
-`max_retries` (§7.2) is the **failure** counter: genuine errors, degenerate output, PR-creation
-failures, and a clean run that never emits `FABRIK_STAGE_COMPLETE`. It was previously overloaded to
+`max_retries` (§7.2) is the **failure** counter: genuine errors, degenerate output, a completion
+marker with no harvestable artifact (#1782), PR-creation failures, and a clean run that never emits
+`FABRIK_STAGE_COMPLETE`. It was previously overloaded to
 also bound turn-cap preemptions — a large job resuming across several slices looked identical to a
 stage that kept genuinely failing, so a job needing more slices than `max_retries` was paused with
 `stage:<X>:failed` while progressing normally (#816, #1114, #1183; reported independently as the
@@ -3674,7 +3741,7 @@ section describes how the retry accounting *treats* it (#1199).
 
 | Counter | Field | Config | Default | Counts |
 |---------|-------|--------|---------|--------|
-| Failure counter | `StageState.Attempts` | `MaxRetries` / `--max-retries` / `FABRIK_MAX_RETRIES` | 3 (0 = unlimited) | Genuine errors, degenerate output, PR-creation failures, clean run with no completion marker |
+| Failure counter | `StageState.Attempts` | `MaxRetries` / `--max-retries` / `FABRIK_MAX_RETRIES` | 3 (0 = unlimited) | Genuine errors, degenerate output, no harvestable artifact (#1782), PR-creation failures, clean run with no completion marker |
 | Slice counter | `StageState.SliceRetries` | `MaxSliceRetries` / `--max-slice-retries` / `FABRIK_MAX_SLICE_RETRIES` | 10 | Turn-cap preemptions only (`turnLimited == true`, CLI `subtype: "error_max_turns"`) |
 
 The slice counter's default is intentionally higher than the failure counter's: a job legitimately
@@ -3962,9 +4029,24 @@ The "both conditions" requirement prevents spurious clearing of live workers who
 
 **`WorkerStaleTimeout`** (default **5 minutes**) is configurable via `--worker-stale-timeout <N>` (minutes) or `FABRIK_WORKER_STALE_TIMEOUT=N`. Must be longer than `heartbeatInterval × 2` (currently > 60 s).
 
-**PID=0 skip:** Workers with `PID == 0` (PID not yet set) are skipped regardless of heartbeat age — they are in the narrow window between `LocalLockAcquired` and `cmd.Start()`.
+**PID<=0 timeout-based clear (issue #1303):** Workers with `PID <= 0` (PID not yet set, or invalid) are in the narrow window between `LocalLockAcquired` and `cmd.Start()` — signal-0 has no PID to target, so the ordinary confirmed-dead check cannot run for them at all. An unconditional skip here would let a dispatch goroutine that hangs *before* `onPIDReady` fires (e.g. stuck in `ensureRepoReady`, before the child process is even started) outlive its own `WorkerEntered` marker indefinitely — and the `fabrik:locked:<user>` / `stage:<name>:in_progress` labels it gates — permanently suppressing dispatch for the item. Instead, the detector applies `WorkerStaleTimeout` against `Worker.StartedAt` (not `LastSignAt`, which may never have started ticking for a worker that hung before `acquireLockAndVerify` started the heartbeat goroutine): once a `PID<=0` worker has been running longer than `WorkerStaleTimeout`, it is a *candidate* for a timeout-based clear — not a confirmed-dead clear, since nothing here has verified the process is actually gone.
 
-**Signal-0 liveness check** (`syscall.Kill(pid, 0)`):
+**Sentinel-probe verification tier (issue #1779):** Before a `PID<=0` worker past the threshold is actually cleared, the detector probes for a live process carrying that worker's deterministic `sessionNameSentinel` (`fabrik:<owner>/<repo>#<issue>:<stage>` — see "Worker Session Naming" in `docs/USER_GUIDE.md`/`docs/stage-lifecycle.md`), already passed as `--name` on every worker invocation. This closes the gap #1303 left open: a real `claude` subprocess can be alive and progressing (the reported incident: cleared after 5 minutes, ran a further 1h36m, authored five files) even though the engine's own `Worker.PID` field was never updated — the two facts are unrelated once the subprocess has actually started. `handleUnverifiablePIDWorker` (`engine/worker_liveness.go`) implements this as a three-way branch, gated on `claudeNameFlagSupported` (a one-time, process-lifetime capability probe — if the installed `claude` binary predates `--name` support, no worker in this process could ever carry a sentinel, so the probe is skipped entirely and behavior falls straight through to the plain #1303 clear below):
+
+| Probe outcome | Action |
+|---|---|
+| Sentinel found live | Mirror the PID-recorded path's posture: log `[#N worker-liveness] sentinel "…" found live … — adopting PID, signal-0 liveness now governs` (or "waiting for natural exit" if no PID was recovered) and do **not** clear. When the probe also yields the OS PID, `WorkerPIDSet{PID}` adopts it into the handle and a fresh `WorkerHeartbeat{At: now}` is applied, so the item's `Worker.PID > 0` on the very next scan cycle and ordinary signal-0 liveness governs from then on. |
+| Sentinel affirmatively not found | Clear exactly as the plain #1303 timeout path: `store.Apply(WorkerExited{})` + label removal + log `[#N worker-liveness] worker never reached PID assignment (started T ago) — clearing, could not verify liveness (sentinel "…" not found)`. |
+| Probe itself failed (unsupported platform, `ps` error, non-zero exit, timeout) | Neither clear nor defer forever: a per-`(repo, issue)` consecutive-failure counter (`Engine.sentinelProbeFailures`, in-memory, scan-goroutine-local — not `itemstate.Store` state) is incremented and compared against `sentinelProbeUnverifiableCycleLimit` (currently 3, ~3 scan cycles ≈ 3 minutes on top of `WorkerStaleTimeout`). Below the bound: log `sentinel probe unverifiable (…) — deferring clear` and leave the worker alone. At the bound: clear, logged as `clearing UNVERIFIED after N consecutive sentinel-probe failures: <err>`. The counter is cleared whenever the worker leaves this state — sentinel found live, sentinel confirmed not found, cleared at the bound, or a real PID reaches the store via the ordinary `onPIDReady` callback. |
+| `claudeNameFlagSupported == false` | Probe skipped entirely (never invoked); clears exactly as the plain #1303 timeout path, logged without the "(sentinel … not found)" suffix. |
+
+The probe (`probeSentinelLive`, unix-only; a Windows build-tag stub always reports itself unsupported, routing Windows through the bounded-unverifiable row above — the same posture `isProcessAlive`'s Windows stub takes for signal-0) shells out to `ps -eo pid=,args= -w -w` (no shell, short timeout) and matches the sentinel as a whole argv token — never a substring — so a sentinel for issue `#2966` cannot match a decoy carrying `#29660`.
+
+**Dispatch-time backstop (R5, issue #1779):** R1/R2 above are meant to make "two workers on one worktree" unreachable, but `dispatchCandidates` (`engine/poll.go`) asserts it independently rather than relying on that alone: immediately after the existing `snap.Worker() != nil` in-flight guard (which only catches an item this process still *thinks* is in-flight), it re-checks the same sentinel for the item's resolved stage. A `Live` result refuses dispatch (logged `refusing dispatch: sentinel "…" still live for a cleared worker`) without ever applying `WorkerEntered`; "not found" or a probe error both fall through to ordinary dispatch — the guard fails *open* on a probe error, since treating an unverifiable probe as a hard block would let a broken `ps` wedge dispatch for every item on every poll, a strictly worse failure mode than the rare duplicate-writer it exists to prevent. Scoped to the main stage-dispatch path only; the structurally identical `snap.Worker() != nil` guards in the reinvoke dispatchers (`reinvoke.go`, `reviews.go`, `ci.go`, `merge_gate.go`) do not get this check.
+
+Unlike the scan's one-worker-at-a-time `probeSentinelLive` call, `dispatchCandidates` fetches the live process table at most **once per call** (`listProcessArgvFn`, lazily on first need) and matches every dispatch-eligible item's sentinel against that single snapshot in-process (`matchSentinelInArgvList`) — not once per item. A poll with many simultaneously dispatch-eligible items (a startup burst, or a wide cooldown-expiry window) would otherwise serialize one `ps` subprocess spawn per item ahead of the first dispatch in that pass.
+
+**Signal-0 liveness check** (`syscall.Kill(pid, 0)`, for workers with `PID > 0` — whether from the ordinary `onPIDReady` callback or adopted via the sentinel probe above):
 
 | Outcome | Action |
 |---------|--------|
@@ -3974,7 +4056,7 @@ The "both conditions" requirement prevents spurious clearing of live workers who
 
 `StageName` for label construction is taken from `Worker.StageName`, which was set at dispatch time.
 
-**Windows note:** `isProcessAlive` always returns `true` on Windows (signal-0 is unsupported). The detector never clears stale workers on Windows; the startup cleanup pass handles the restart case instead.
+**Windows note:** `isProcessAlive` always returns `true` on Windows (signal-0 is unsupported). The detector never clears stale workers on Windows via the signal-0 path; a `PID<=0` worker on Windows always falls through the sentinel probe's unsupported stub to the bounded-unverifiable row above. The startup cleanup pass handles the restart case on any platform.
 
 #### Janitor Integration (Stale-Worker Awareness)
 

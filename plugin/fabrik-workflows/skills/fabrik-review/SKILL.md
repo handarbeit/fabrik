@@ -335,6 +335,7 @@ So: prefer making steady, committed progress over racing to finish inside one sl
 - **`expected-reviewers:<mode>`** (`none`/`declared`) / the stage's `expected_reviewers` config — declares self-submitting bot reviewers (Copilot, Gemini, CodeRabbit-style) that never appear in GitHub's formal requested-reviewer list but are still expected to respond before the gate clears.
 - **`fabrik:bot-reprompted`** — applied by the engine's bot-reviewer re-prompt ladder if every outstanding reviewer is a bot and the wait timeout elapses once; you don't act on it directly, but its presence means a re-prompt already happened this gate cycle.
 
+- **`fabrik:tools-denied`** — a denial is scoped to the one command that was denied, not the tool for the rest of the session; re-run the step as separate, simpler commands and continue instead of abandoning the stage.
 See `../../LABELS.md` for the full label reference.
 
 ## Engine Context

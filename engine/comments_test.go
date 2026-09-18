@@ -63,6 +63,52 @@ func TestProcessComments_HonorsCompletionOnNonZeroExit(t *testing.T) {
 	}
 }
 
+// TestProcessComments_NoArtifactHarvested_NeverCompletes covers the
+// comment-review path's share of #1782/R3: FABRIK_STAGE_COMPLETE is present
+// but the invocation carries no harvestable artifact — mirroring what
+// interpretClaudeResult now forces (completed=false) for the stage-dispatch
+// path. processComments/publishCommentOutput have no dedicated R3 guard of
+// their own (Research confirmed none was needed, since both invocation
+// paths share interpretClaudeResult) — this test proves stage:<name>:complete
+// is never applied here either, driven purely by completed=false already
+// arriving from the shared harvest/guard layer.
+func TestProcessComments_NoArtifactHarvested_NeverCompletes(t *testing.T) {
+	skipIfNoGit(t)
+
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeForCommentsFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			// completed=false mirrors interpretClaudeResult's R3 forcing for a
+			// bare-marker-only artifact-missing invocation.
+			return "FABRIK_STAGE_COMPLETE", false, TokenUsage{}, nil
+		},
+	}
+
+	eng := testEngineWithRepo(t, client, claude)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	stage := &stages.Stage{Name: "Research", Order: 1, Completion: stages.CompletionCriteria{Type: "claude"}}
+	item := gh.ProjectItem{Number: 11, Body: "spec"}
+	userComments := []gh.Comment{
+		{ID: "C_1", DatabaseID: 101, Author: "testuser", Body: "finish it"},
+	}
+
+	if err := eng.processComments(context.Background(), board, item, stage, userComments); err != nil {
+		t.Fatalf("processComments: %v", err)
+	}
+
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "stage:Research:complete" {
+			t.Errorf("stage:Research:complete applied despite no harvestable artifact; addLabelCalls=%v", client.addLabelCalls)
+		}
+	}
+
+	for _, call := range client.addCommentCalls {
+		if strings.Contains(call.body, "FABRIK_STAGE_COMPLETE") {
+			t.Errorf("bare marker must not be posted verbatim as a comment: %s", call.body)
+		}
+	}
+}
+
 // testEngineWithRepo creates an engine using a real git repo for worktree operations.
 func testEngineWithRepo(t *testing.T, client *mockGitHubClient, claude *mockClaudeInvoker) *Engine {
 	t.Helper()
