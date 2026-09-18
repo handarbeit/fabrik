@@ -33,32 +33,28 @@ Start by reading these files to understand what was planned and implemented. Use
 Don't hardcode `main`. An issue carrying a `base:<branch>` label targets a different base branch — Fabrik already resolved it to fork this branch and open the PR, so read it back rather than assuming:
 
 ```bash
-base_branch=$(gh pr view --json baseRefName --jq .baseRefName 2>/dev/null)
-if [ -z "$base_branch" ]; then
-  base_branch=main
-  echo "no linked PR found (or the query failed); falling back to repository default branch 'main'"
-fi
+gh pr view --json baseRefName --jq .baseRefName
 ```
 
-By this stage a PR should already exist — Implement creates the draft PR before Review runs — so the fallback is a safety net, not the expected path. Fall back explicitly and say so; never assume `main` silently.
+If that prints a branch name, that is `<base-branch>` — substitute it literally into every rebase, diff, and comparison below and in "Merge conflict resolution" and "Push the rebase" immediately after it (it is not a shell variable: each command below is its own subprocess). If it prints nothing or fails (no linked PR, or the query errored), fall back explicitly: use `main` as `<base-branch>` and say so — `no linked PR found (or the query failed); falling back to repository default branch 'main'`.
 
-Use `$base_branch` — never a hardcoded `origin/main` — in every rebase, diff, and comparison below and in "Merge conflict resolution" and "Push the rebase" immediately after it.
+By this stage a PR should already exist — Implement creates the draft PR before Review runs — so the fallback is a safety net, not the expected path. Fall back explicitly and say so; never assume `main` silently.
 
 ### Rebase onto the base branch — only when behind
 
 Rebasing when the branch is already current with its base is pure churn: it replays every commit, produces new SHAs for identical content, and gives you nothing to push. Check first:
 
 ```bash
-git fetch origin "$base_branch"
-behind_count=$(git rev-list --count HEAD..origin/"$base_branch")
+git fetch origin <base-branch>
+git rev-list --count HEAD..origin/<base-branch>
 ```
 
-If `$behind_count` is `0`, **skip the rebase** — the branch is already up to date. Do not run `git rebase "origin/$base_branch"` in that case.
+If that count is `0`, **skip the rebase** — the branch is already up to date. Do not run `git rebase origin/<base-branch>` in that case.
 
 Otherwise, rebase:
 
 ```bash
-git rebase "origin/$base_branch"
+git rebase origin/<base-branch>
 ```
 
 If the rebase reports conflicts, resolve them first — see "Merge conflict resolution — CRITICAL" immediately below — before pushing anything. Only push once the rebase is clean (either it completed with no conflicts, or you resolved them and `git status` shows a clean, non-rebasing tree).
@@ -77,7 +73,7 @@ When resolving merge conflicts during rebase, you MUST be conservative:
 
 5. **After the full rebase, run `go test ./...`** before proceeding with review. If tests fail, the conflict resolution was wrong — investigate and fix before continuing.
 
-Common mistake: a feature branch that doesn't have a function added on the base will "resolve" the conflict by keeping its version (without the function). This silently deletes working code. Always check `git diff origin/"$base_branch"..HEAD` after rebase to verify you haven't lost anything from the base.
+Common mistake: a feature branch that doesn't have a function added on the base will "resolve" the conflict by keeping its version (without the function). This silently deletes working code. Always check `git diff origin/<base-branch>..HEAD` after rebase to verify you haven't lost anything from the base.
 
 ### Push the rebase — never reset
 
@@ -91,7 +87,7 @@ A rebase rewrites every replayed commit's SHA — the result will *never* match 
 
 **Never run `git reset --hard origin/fabrik/issue-<N>` — resetting this branch to its own previously-pushed remote tip (or any reset of this branch to the remote tip) — to resolve that mismatch.** Your local branch is ahead after a successful rebase — that's the correct state. Resetting it back to `origin` discards the rebase you just did and any commits on it, with no way to recover them. If you ever find yourself reaching for `git reset --hard` to make the worktree "match the remote," stop — that is data loss, not a fix.
 
-**If the push is rejected**, the remote moved since your fetch. Re-run `git fetch origin "$base_branch"`, repeat the behind-check, rebase again, and push again. If it's rejected a second time, stop and report it in your stage output rather than forcing — do not use `git push --force`, and do not reset.
+**If the push is rejected**, the remote moved since your fetch. Re-run `git fetch origin <base-branch>`, repeat the behind-check, rebase again, and push again. If it's rejected a second time, stop and report it in your stage output rather than forcing — do not use `git push --force`, and do not reset.
 
 If you narrate the rebase outcome anywhere in your output, describe only what you actually did (e.g. "rebased onto main and pushed 3 commits" or "skipped — already up to date with main") — never assert that the worktree was reverted or changed by something external unless you have concrete evidence of that; if you can't establish a cause, describe the observed state without attributing one.
 
@@ -118,7 +114,7 @@ Address valid feedback before doing your own review.
 
 Review what changed, not the entire codebase, against the base branch resolved above (not a hardcoded `main` — see "Resolve the base branch"):
 ```bash
-git diff "origin/$base_branch"..HEAD
+git diff origin/<base-branch>..HEAD
 ```
 
 ### Check for these categories

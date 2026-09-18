@@ -91,15 +91,17 @@ gh issue view <number> --json comments \
   --jq '.comments[] | select(.body | startswith("🏭 **Fabrik — stage: Plan**")) | .databaseId' \
   | tail -1
 ```
+That printed value is `<comment-id>` — substitute it literally into the two commands below (it is not a shell variable: each command is its own subprocess).
 
-Then update the comment body with the task checked off:
+Then read the current comment body:
 ```bash
-# Get current body and update the checkbox
-COMMENT_ID=<id from above>
-CURRENT_BODY=$(gh api /repos/{owner}/{repo}/issues/comments/$COMMENT_ID --jq '.body')
-# Edit CURRENT_BODY: change "- [ ] Task N" to "- [x] Task N"
-gh api -X PATCH /repos/{owner}/{repo}/issues/comments/$COMMENT_ID \
-  -f body="$UPDATED_BODY"
+gh api /repos/{owner}/{repo}/issues/comments/<comment-id> --jq '.body'
+```
+
+Edit the printed body yourself — change "- [ ] Task N" to "- [x] Task N" for the task you just completed — and write the full updated body back in one call:
+```bash
+gh api -X PATCH /repos/{owner}/{repo}/issues/comments/<comment-id> \
+  -f body="<updated body text>"
 ```
 
 If no Plan stage comment exists (Plan was never run or comment was deleted), skip task tracking gracefully — don't fail.
