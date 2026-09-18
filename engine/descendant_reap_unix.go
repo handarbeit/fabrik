@@ -275,13 +275,25 @@ func reapTrackedDescendants(workerPID, issueNumber int) (reaped, skipped int) {
 // recorded before this field existed (WorkerComm/WorkerLStart both empty)
 // falls back to liveness-only, matching this sweep's pre-existing behavior
 // rather than treating an old-format entry as a mismatch.
+//
+// A transient pidFingerprintFn error (e.g. the ps-subprocess timeout
+// expiring under host contention) returns true — "still matches" /
+// inconclusive — not false. This mirrors the fail-open handling every other
+// pidFingerprintFn call site in this file already applies: an inconclusive
+// probe must never be treated as a positive "identity mismatch" signal,
+// since sweepStaleDescendants's caller treats a false return here as
+// license to proceed toward killing the entry's descendant even though the
+// owning worker may be alive and genuinely still using it — exactly the
+// outcome R5's fail-closed requirement exists to prevent. Uses the
+// pidFingerprintFn seam (not pidFingerprint directly) so tests can inject
+// this failure the same way they do for every other fingerprint check here.
 func workerIdentityStillMatches(d trackedDescendant) bool {
 	if d.WorkerComm == "" && d.WorkerLStart == "" {
 		return true
 	}
-	comm, lstart, err := pidFingerprint(d.WorkerPID)
+	comm, lstart, err := pidFingerprintFn(d.WorkerPID)
 	if err != nil {
-		return false
+		return true
 	}
 	return comm == d.WorkerComm && lstart == d.WorkerLStart
 }

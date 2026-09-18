@@ -890,3 +890,90 @@ func TestSweepStaleDescendants_TransientProbeFailure_EntryRetained(t *testing.T)
 		t.Errorf("expected the entry to be RETAINED after a transient probe failure (for a later sweep retry), got %d remaining entries", len(remaining))
 	}
 }
+
+// TestSweepStaleDescendants_WorkerFingerprintTransientFailure_LeftAlone pins
+// a bot-review finding (Pruefer, PR #1806): workerIdentityStillMatches used
+// to call pidFingerprint directly (bypassing the pidFingerprintFn seam) and
+// treated ANY error — including a transient ps-subprocess timeout — as a
+// confirmed identity mismatch (return false). Since
+// isProcessAlive(d.WorkerPID) && workerIdentityStillMatches(d) is the guard
+// that leaves an entry alone for R2, a transient failure of the WORKER's own
+// fingerprint probe (not the descendant's) would fail closed toward the kill
+// path even though the worker is genuinely alive and unchanged — the
+// opposite of every other pidFingerprintFn call site in this file, and
+// exactly the R5 fail-closed violation sweepStaleDescendants's own doc
+// comment warns against ("sweeping it early risks killing a subprocess the
+// worker still genuinely needs").
+func TestSweepStaleDescendants_WorkerFingerprintTransientFailure_LeftAlone(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	worker := exec.Command("sleep", "30")
+	if err := worker.Start(); err != nil {
+		t.Fatalf("starting worker: %v", err)
+	}
+	defer func() {
+		_ = worker.Process.Kill()
+		_ = worker.Wait()
+	}()
+	workerPID := worker.Process.Pid
+	workerComm, workerLStart, err := pidFingerprint(workerPID)
+	if err != nil {
+		t.Fatalf("pidFingerprint(worker): %v", err)
+	}
+
+	descendant := exec.Command("sleep", "30")
+	if err := descendant.Start(); err != nil {
+		t.Fatalf("starting descendant: %v", err)
+	}
+	defer func() {
+		_ = descendant.Process.Kill()
+		_ = descendant.Wait()
+	}()
+	pid := descendant.Process.Pid
+	comm, lstart, err := pidFingerprint(pid)
+	if err != nil {
+		t.Fatalf("pidFingerprint(descendant): %v", err)
+	}
+
+	if err := upsertTrackedDescendant(trackedDescendant{
+		PID: pid, Comm: comm, LStart: lstart,
+		WorkerPID: workerPID, WorkerComm: workerComm, WorkerLStart: workerLStart,
+		IssueNumber: 1798,
+	}); err != nil {
+		t.Fatalf("upsertTrackedDescendant: %v", err)
+	}
+
+	origFn := pidFingerprintFn
+	pidFingerprintFn = func(p int) (string, string, error) {
+		if p == workerPID {
+			return "", "", context.DeadlineExceeded // simulated transient ps timeout on the WORKER's own fingerprint
+		}
+		return origFn(p)
+	}
+	defer func() { pidFingerprintFn = origFn }()
+
+	scanned, reaped, skipped := sweepStaleDescendants()
+	if scanned != 1 {
+		t.Errorf("expected scanned=1, got %d", scanned)
+	}
+	if reaped != 0 {
+		t.Errorf("expected 0 reaped (a transient failure of the worker's own fingerprint must never authorize a kill), got %d", reaped)
+	}
+	if skipped != 0 {
+		t.Errorf("expected 0 skipped (the entry should be left alone for R2, not even counted as processed), got %d", skipped)
+	}
+	if !pidAlive(pid) {
+		t.Fatal("descendant process was killed despite the owning worker being alive — only its fingerprint probe failed transiently")
+	}
+	if !pidAlive(workerPID) {
+		t.Fatal("test setup invariant violated: worker process should still be alive")
+	}
+
+	remaining, err := allTrackedDescendants()
+	if err != nil {
+		t.Fatalf("allTrackedDescendants: %v", err)
+	}
+	if len(remaining) != 1 {
+		t.Errorf("expected the entry to be RETAINED (owning worker still in flight), got %d remaining entries", len(remaining))
+	}
+}
