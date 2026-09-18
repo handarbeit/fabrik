@@ -153,16 +153,20 @@ func (e *Engine) addLabel(item gh.ProjectItem, label string) {
 	e.applyLabelAdd(item, label, true)
 }
 
-// addLabelChecked is addLabel's error-surfacing variant, for the rare caller
-// whose *next* action depends on whether the label actually landed on GitHub
-// rather than on the best-effort "log a warning and carry on" every other call
-// site wants. Same three-beat idiom as applyLabelAdd (always echoing, like
+// addLabelChecked is addLabel's error-surfacing variant, for a caller whose
+// *next* action depends on whether the label actually landed on GitHub rather
+// than on the best-effort "log a warning and carry on" every other call site
+// wants. Same three-beat idiom as applyLabelAdd (always echoing, like
 // addLabel), but AddLabelToIssue's error is returned instead of swallowed.
 //
 // Callers today: markCreditedLanding (landing_verification_settle.go), where a
 // silently-dropped fabrik:credited-pr:<N> write would let the settle scan
 // misread a merge-train member's own closed-not-merged PR as the credited one
-// — see that function's doc comment.
+// — see that function's doc comment; spawnChildren (spawn.go), for the same
+// reason applied to fabrik:spawned-child:<index>:<number>; and
+// beginStageRework/endStageRework (comments.go, #1802), where a silently-lost
+// fabrik:reworking/stage:<Stage>:complete mutation would break the
+// mark-first-then-clear crash-safety invariant those functions depend on.
 func (e *Engine) addLabelChecked(item gh.ProjectItem, label string) error {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	if err := e.client.AddLabelToIssue(owner, repo, item.Number, label); err != nil {
