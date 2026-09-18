@@ -1406,7 +1406,7 @@ allowed_tools:            # Optional. REPLACES the default tool set — not addi
                           #   Bash(yarn:*), Bash(pnpm:*), Bash(make:*), Bash(cargo:*),
                           #   Bash(python:*), Bash(pip:*), Bash(uv:*), Bash(pytest:*),
                           #   Bash(ls:*), Bash(cat:*), Bash(rm:*), Bash(cp:*), Bash(mv:*),
-                          #   Bash(mkdir:*), Bash(find:*).
+                          #   Bash(mkdir:*), Bash(find:*), Bash(date:*).
                           #   Use this to restrict read-only stages (Research, Plan, Specify)
                           #   or to limit Claude to project-specific tools.
 disable_adaptive_thinking: true  # Optional. Disables Claude Code's adaptive (auto-reduced)
@@ -3009,7 +3009,7 @@ Fabrik passes `--permission-mode dontAsk` to every Claude Code invocation. In th
 | Git & GitHub | `Bash(git:*)`, `Bash(gh:*)` |
 | Build systems | `Bash(go:*)`, `Bash(npm:*)`, `Bash(npx:*)`, `Bash(yarn:*)`, `Bash(pnpm:*)`, `Bash(make:*)`, `Bash(cargo:*)` |
 | Python | `Bash(python:*)`, `Bash(pip:*)`, `Bash(uv:*)`, `Bash(pytest:*)` |
-| Shell utilities | `Bash(ls:*)`, `Bash(cat:*)`, `Bash(rm:*)`, `Bash(cp:*)`, `Bash(mv:*)`, `Bash(mkdir:*)`, `Bash(find:*)` |
+| Shell utilities | `Bash(ls:*)`, `Bash(cat:*)`, `Bash(rm:*)`, `Bash(cp:*)`, `Bash(mv:*)`, `Bash(mkdir:*)`, `Bash(find:*)`, `Bash(date:*)` |
 
 **`allowed_tools` replaces the defaults — it is not additive.** When a stage sets `allowed_tools`, only those tools are permitted; the default list above is not merged in. This is intentional: Research, Plan, and Specify stages set `allowed_tools` to a read-only subset to prevent Claude from writing files during those stages.
 
