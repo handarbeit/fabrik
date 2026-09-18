@@ -312,6 +312,20 @@ and should recognize.
   automatically once the permission configuration is fixed and a later
   invocation isn't denied — no manual removal needed. The outcome is
   identical whether or not the worker also emits `FABRIK_BLOCKED_ON_INPUT`.
+- **`fabrik:toolchain-stale`** — Set when a worktree declares a toolchain
+  version (`.nvmrc`, `package.json` `engines.node`, `go.mod`
+  `toolchain`/`go` directive, or `.tool-versions`) that the resolved
+  binary on the daemon's own inherited `PATH` does not satisfy. Unlike
+  `fabrik:claude-limit`/`fabrik:api-key-helper-detected`, this never
+  skips the invocation — it's a warn-and-continue signal, checked at both
+  stage dispatch and comment review, with no effect on `max_retries` or
+  `stage:<name>:failed`. An explanatory comment names every mismatched
+  declaration (declared vs. resolved version); gated on the label's own
+  absence so it fires once per issue, not once per invocation. Clears
+  automatically once a later invocation observes no comparable mismatch
+  (e.g. the declaration file is fixed, or the daemon is restarted with a
+  corrected `PATH`) — no manual removal needed. Fabrik does not re-resolve
+  `PATH` or drive a version manager on your behalf; see ADR-1786.
 - **`fabrik:non-default-base-excluded`** (removed, #1648) — This label no
   longer exists. A Queued merge-train member whose `base:<branch>` label
   resolves to something other than the repository default used to be

@@ -1044,6 +1044,12 @@ func (e *Engine) runInvocationWithExtension(ctx context.Context, item gh.Project
 		}
 	}
 
+	// #1786: detect declared-vs-resolved toolchain drift (.nvmrc, package.json
+	// engines, go.mod toolchain/go directive, .tool-versions) before invoking
+	// Claude. Unlike the two checks above, this never skips the invocation —
+	// it's a warn-and-continue signal, not a gate. See checkToolchainDrift.
+	e.checkToolchainDrift(ctx, item, workDir)
+
 	modelOverride := e.extractModelOverride(item.Number, item.Labels)
 	if modelOverride != "" {
 		e.logf(item.Number, "model", "using model override %q\n", modelOverride)
