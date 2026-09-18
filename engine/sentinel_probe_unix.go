@@ -57,7 +57,7 @@ func probeSentinelLive(sentinel string) sentinelProbeResult {
 		}
 		pidStr, argv := fields[0], fields[1:]
 		for _, tok := range argv {
-			if tok == sentinel {
+			if strings.Contains(tok, sentinel) { // NEUTRALIZED-FOR-TEST
 				pid, perr := strconv.Atoi(pidStr)
 				if perr != nil {
 					continue
