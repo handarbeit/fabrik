@@ -1080,11 +1080,14 @@ func sanitizeSentinelComponent(s string) string {
 
 // sessionNameSentinel builds the --name value passed to every worker
 // invocation: fabrik:<owner>/<repo>#<issue>:<stage>. It is deterministic for a
-// given (repo, issueNumber, stageName) and purely observational — nothing in
-// the engine parses it back or branches on it. repo is expected to already be
-// "owner/repo" (as populated from the GitHub GraphQL response on real board
-// items); an empty repo falls back to the literal "unknown/repo" rather than
-// producing a malformed sentinel.
+// given (repo, issueNumber, stageName). Originally purely observational (a
+// human `ps | grep` aid), it is now also a liveness-verification signal
+// (#1779): runWorkerDetectorScan (worker_liveness.go) and dispatchCandidates
+// (poll.go) both probe the process table for this exact value and branch on
+// whether it's found — see sentinel_probe.go and docs/state-machine.md §9.7.
+// repo is expected to already be "owner/repo" (as populated from the GitHub
+// GraphQL response on real board items); an empty repo falls back to the
+// literal "unknown/repo" rather than producing a malformed sentinel.
 func sessionNameSentinel(repo string, issueNumber int, stageName string) string {
 	if repo == "" {
 		repo = "unknown/repo"
