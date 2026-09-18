@@ -1003,10 +1003,25 @@ func TestTrackWorkerDescendants_ConcurrentInvocationsShareProcessTableScan(t *te
 	defer func() { listProcessArgvFn = origFn }()
 
 	// Force the shared cache cold so an earlier test's fresh entry can't make
-	// this test spuriously pass with zero real calls.
+	// this test spuriously pass with zero real calls. Reset it again on
+	// return: this test's stubbed listProcessArgvFn leaves the cache holding
+	// a fake, always-empty result under a real, recent timestamp — without
+	// clearing it, any other test that calls trackWorkerDescendants /
+	// sharedProcessTableScan shortly afterward (while descendantScanInterval
+	// has already reverted to its real, longer default via the defer above)
+	// would silently reuse this stale entry instead of performing a genuine
+	// scan, for up to that default's duration. Mirrors descendantScanInterval's
+	// own save/defer-restore immediately above.
 	sharedProcessTableMu.Lock()
 	sharedProcessTableAt = time.Time{}
 	sharedProcessTableMu.Unlock()
+	defer func() {
+		sharedProcessTableMu.Lock()
+		sharedProcessTableAt = time.Time{}
+		sharedProcessTableProcs = nil
+		sharedProcessTableErr = nil
+		sharedProcessTableMu.Unlock()
+	}()
 
 	const numInvocations = 5
 	const runDuration = 220 * time.Millisecond // ~7 ticks at 30ms
