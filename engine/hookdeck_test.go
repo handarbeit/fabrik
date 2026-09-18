@@ -2,6 +2,7 @@ package engine
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	gh "github.com/handarbeit/fabrik/github"
@@ -200,6 +201,35 @@ func TestCheckHookdeckInstallationCoverage_SetsNoteOnGap(t *testing.T) {
 	}
 }
 
+func TestCheckHookdeckInstallationCoverage_TruncatedListingCaveatsTheNote(t *testing.T) {
+	orig := fetchInstallationRepositoriesFn
+	defer func() { fetchInstallationRepositoriesFn = orig }()
+	fetchInstallationRepositoriesFn = func(baseURL, token string) ([]string, bool, error) {
+		// b/two missing from the installation's grant, but the listing was
+		// truncated by the pagination ceiling — the "missing" verdict is a
+		// suspicion, not a fact, since b/two may exist beyond the ceiling
+		// (PR review finding: a discarded truncated return value could
+		// otherwise produce a false-positive coverage warning).
+		return []string{"a/one"}, true, nil
+	}
+
+	hm, _ := newTestHookdeckManager(t)
+	hm.UpdateRepos(map[string]bool{"a/one": true, "b/two": true})
+
+	e := &Engine{hostClient: gh.NewClient("fake-installation-token")}
+	e.checkHookdeckInstallationCoverage(hm)
+
+	hm.mu.Lock()
+	note := hm.installationNote
+	hm.mu.Unlock()
+	if !strings.Contains(note, "installation missing: 1 repo(s) (b/two)") {
+		t.Errorf("installationNote = %q, want it to still name the gap", note)
+	}
+	if !strings.Contains(note, "truncated") {
+		t.Errorf("installationNote = %q, want it to caveat that the listing was truncated", note)
+	}
+}
+
 func TestCheckHookdeckInstallationCoverage_NoManagedRepos(t *testing.T) {
 	var called bool
 	orig := fetchInstallationRepositoriesFn
@@ -224,7 +254,7 @@ func TestCheckHookdeckInstallationCoverage_FetchErrorLeavesNoteUnchanged(t *test
 
 	hm, _ := newTestHookdeckManager(t)
 	hm.UpdateRepos(map[string]bool{"a/one": true})
-	hm.setInstallationCoverageNote([]string{"a/one"}) // pre-existing note
+	hm.setInstallationCoverageNote([]string{"a/one"}, false) // pre-existing note
 
 	fetchInstallationRepositoriesFn = func(baseURL, token string) ([]string, bool, error) {
 		return nil, false, errors.New("boom")

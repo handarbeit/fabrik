@@ -56,11 +56,15 @@ func (c *Client) DeleteForwardingHooks(owner, repo string) error {
 // webhooks while the stream is otherwise reported healthy. A 404 listing
 // hooks (e.g. insufficient permission) is treated as "no hook found" rather
 // than an error, mirroring DeleteForwardingHooks's own 404-is-success
-// posture — this check is advisory, never fatal.
+// posture — this check is advisory, never fatal. Paginated via the same
+// paginateREST helper FetchComments/etc. use (PR review finding: an
+// unpaginated single-page listing could silently miss a forwarding hook
+// past the first 100 on a repo with unusually many hooks registered).
 func (c *Client) HasForwardingHook(owner, repo string) (bool, error) {
-	url := fmt.Sprintf("%s/repos/%s/%s/hooks?per_page=100", c.baseURL, owner, repo)
-	var hooks []repoHook
-	if err := c.restGetJSON(url, &hooks); err != nil {
+	hooks, err := paginateREST[repoHook](c, fmt.Sprintf("hooks for %s/%s", owner, repo), func(page int) string {
+		return fmt.Sprintf("%s/repos/%s/%s/hooks?per_page=%d&page=%d", c.baseURL, owner, repo, restPageSize, page)
+	})
+	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return false, nil
 		}

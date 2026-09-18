@@ -391,6 +391,23 @@ func New(cfg Config) (*Engine, error) {
 	worktreeRoot := filepath.Join(fabrikDir, ".fabrik", "worktrees")
 	sharedStore := itemstate.NewStore(nil)
 
+	// validateGitHubAppConfig runs first, ahead of the event_source:
+	// hookdeck checks below: it is the more specific diagnosis for a
+	// partially-configured GitHub App (e.g. github_app_id set with no
+	// private key), naming exactly which field is missing. Without this
+	// ordering, a partial App config combined with event_source: hookdeck
+	// would instead fail on RefuseHookdeckWithoutGitHubApp's coarser
+	// "requires GitHub App authentication" message — technically correct
+	// (gitHubAppAuthConfigured requires all three fields) but less
+	// actionable than naming the specific missing field (PR review
+	// finding). resolveGitHubAppAuth calls validateGitHubAppConfig again
+	// itself a few lines below; calling it here too is intentionally
+	// redundant — cheap, local, and returns the identical error, so the
+	// only user-visible effect is which of the two checks reports first.
+	if err := validateGitHubAppConfig(cfg); err != nil {
+		return nil, err
+	}
+
 	// event_source: hookdeck (#1142) validation runs here, alongside (not
 	// inside) resolveGitHubAppAuth's own App-auth-specific checks below —
 	// deliberately a separate call so RefuseWebhooksWithGitHubApp (#1752)

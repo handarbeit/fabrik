@@ -346,11 +346,18 @@ func (hm *hookdeckManager) DropCounts() map[events.DropReason]int {
 // setInstallationCoverageNote records the result of the R5
 // installation-repo-coverage assertion (#1142) and re-emits the current
 // state so the TUI/health surface picks up the change immediately —
-// mirrors webhookManager.setHookCoverageNote exactly.
-func (hm *hookdeckManager) setInstallationCoverageNote(missing []string) {
+// mirrors webhookManager.setHookCoverageNote exactly. truncated propagates
+// FetchInstallationRepositories's own pagination-ceiling signal: when the
+// granted-repo listing was cut off, a "missing" verdict is only a
+// suspicion, not a fact — the repo may genuinely be granted but beyond the
+// page the ceiling stopped at (PR review finding).
+func (hm *hookdeckManager) setInstallationCoverageNote(missing []string, truncated bool) {
 	var note string
 	if len(missing) > 0 {
 		note = fmt.Sprintf("installation missing: %d repo(s) (%s)", len(missing), strings.Join(missing, ", "))
+		if truncated {
+			note += " [unreliable: installation-repo listing was truncated by the pagination ceiling; some of these may actually be granted]"
+		}
 	}
 	hm.mu.Lock()
 	changed := hm.installationNote != note
@@ -405,13 +412,13 @@ var fetchInstallationRepositoriesFn = gh.FetchInstallationRepositories
 func (e *Engine) checkHookdeckInstallationCoverage(hm *hookdeckManager) {
 	repos := hm.ManagedRepos()
 	if len(repos) == 0 {
-		hm.setInstallationCoverageNote(nil)
+		hm.setInstallationCoverageNote(nil, false)
 		return
 	}
 	if e.hostClient == nil {
 		return
 	}
-	granted, _, err := fetchInstallationRepositoriesFn("", e.hostClient.Token())
+	granted, truncated, err := fetchInstallationRepositoriesFn("", e.hostClient.Token())
 	if err != nil {
 		e.logf(0, "hookdeck", "WARNING: installation-repo-coverage check failed: %v — leaving prior coverage note in place\n", err)
 		return
@@ -428,11 +435,20 @@ func (e *Engine) checkHookdeckInstallationCoverage(hm *hookdeckManager) {
 	}
 	sort.Strings(missing)
 	if len(missing) > 0 {
+		truncationNote := ""
+		if truncated {
+			// FetchInstallationRepositories already logged the pagination-
+			// ceiling detail; this ties that fact to the coverage warning
+			// it can invalidate, so an operator reading this line alone
+			// isn't misled into granting access the installation may
+			// already have (PR review finding).
+			truncationNote = " (installation-repo listing was truncated by the pagination ceiling — this may be a false positive; see the FetchInstallationRepositories warning above)"
+		}
 		e.logf(0, "hookdeck", "WARNING: GitHub App installation does not cover %d of %d managed repo(s): %s — "+
 			"these repos are receiving no webhooks (poll-only); grant the installation access to them (App settings "+
-			"→ Install App → Configure); see #1142\n", len(missing), len(repos), strings.Join(missing, ", "))
+			"→ Install App → Configure); see #1142%s\n", len(missing), len(repos), strings.Join(missing, ", "), truncationNote)
 	}
-	hm.setInstallationCoverageNote(missing)
+	hm.setInstallationCoverageNote(missing, truncated)
 }
 
 var _ eventIngestionManager = (*hookdeckManager)(nil)
