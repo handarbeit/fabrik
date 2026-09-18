@@ -640,7 +640,16 @@ func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem
 	if err != nil {
 		return output, completed, usage, err
 	}
-	return output, checkCompletion(stage, output), usage, nil
+	// AND, never overwrite: checkCompletion re-derives completion from the
+	// stage's configured Completion.Type (a no-op re-match of the same marker
+	// for the "claude"/"" type every real stage uses today, but `false` for
+	// any other type — a config-driven signal orthogonal to what runClaude
+	// just decided). completed already carries interpretClaudeResult's R3
+	// guard (artifactMissingOnComplete) — blindly replacing it with
+	// checkCompletion's marker-only regex would silently discard that guard
+	// for this exact call path, since the bare FABRIK_STAGE_COMPLETE line is
+	// never stripped from output before this point (#1782).
+	return output, completed && checkCompletion(stage, output), usage, nil
 }
 
 // InvokeClaudeForComments runs Claude Code with a comment-review prompt.
@@ -2027,6 +2036,12 @@ var fabrikControlMarkerLines = []string{
 	"FABRIK_NO_WORK_NEEDED",
 	"FABRIK_SUMMARY_BEGIN",
 	"FABRIK_SUMMARY_END",
+	// FABRIK_ISSUE_UPDATE_BEGIN/END are structural delimiters, not content —
+	// without stripping them too, an empty update block ("BEGIN\nEND" with no
+	// body between) would survive as two bare lines and make
+	// hasArtifactContent report content that isn't actually there.
+	"FABRIK_ISSUE_UPDATE_BEGIN",
+	"FABRIK_ISSUE_UPDATE_END",
 }
 
 // hasArtifactContent reports whether text carries anything beyond Fabrik's

@@ -291,6 +291,12 @@ func TestHasArtifactContent(t *testing.T) {
 		{"summary markers with real content between them", "FABRIK_SUMMARY_BEGIN\nNeed input on X.\nFABRIK_SUMMARY_END\nFABRIK_BLOCKED_ON_INPUT", true},
 		{"empty string", "", false},
 		{"whitespace only", "   \n\t", false},
+		// Pruefer review finding (#1782): an empty ISSUE_UPDATE_BEGIN/END pair
+		// is a structural delimiter with no body, not content — must not make
+		// hasArtifactContent report true, or R3's guard would miss an
+		// artifact-free Specify completion carrying only an empty update block.
+		{"empty issue-update block plus marker", "FABRIK_ISSUE_UPDATE_BEGIN\nFABRIK_ISSUE_UPDATE_END\nFABRIK_STAGE_COMPLETE", false},
+		{"issue-update block with real body content", "FABRIK_ISSUE_UPDATE_BEGIN\nUpdated spec body.\nFABRIK_ISSUE_UPDATE_END\nFABRIK_STAGE_COMPLETE", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
