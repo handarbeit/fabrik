@@ -931,18 +931,12 @@ func Execute() error {
 	var skillsStaleCount int
 	var customWorkflow bool
 	if _, statErr := os.Stat(".fabrik/plugin"); statErr == nil {
-		cw, upgradeNeeded, cwErr := fabrikplugin.CheckPluginState(".fabrik/plugin", strings.HasPrefix(Version, "dev"))
-		if cwErr != nil {
-			fmt.Fprintf(os.Stderr, "[upgrade] warning: plugin state check failed: %v\n", cwErr)
+		cw, _, staleCount, evalErr := evaluatePluginStartupState(".fabrik/plugin", strings.HasPrefix(Version, "dev"))
+		if evalErr != nil {
+			fmt.Fprintf(os.Stderr, "[upgrade] warning: plugin state check failed: %v\n", evalErr)
 		} else {
 			customWorkflow = cw
-			if upgradeNeeded {
-				if diffing, diffErr := diffingPluginFiles(".fabrik/plugin"); diffErr != nil {
-					fmt.Fprintf(os.Stderr, "[upgrade] warning: plugin skill check failed: %v\n", diffErr)
-				} else {
-					skillsStaleCount = len(diffing)
-				}
-			}
+			skillsStaleCount = staleCount
 		}
 	}
 
@@ -956,7 +950,7 @@ func Execute() error {
 		return runTUI(eng, cfg.PollSeconds, buildProjectInfo(cfg, pc), cfg.PluginDir, wakeCh, stopCh, skillsStaleCount, customWorkflow)
 	}
 	if customWorkflow {
-		fmt.Fprintf(os.Stderr, "%s", pluginCustomizationWarning(".fabrik/plugin"))
+		fmt.Fprintf(os.Stderr, "%s", pluginCustomizationWarning(".fabrik/plugin", skillsStaleCount))
 	} else if skillsStaleCount > 0 {
 		if refreshErr := checkPluginSkillsWithReader(".fabrik/plugin", false, nil); refreshErr != nil {
 			fmt.Fprintf(os.Stderr, "[upgrade] warning: plugin skill refresh failed: %v\n", refreshErr)
@@ -1085,11 +1079,11 @@ func handleReexecPluginRefresh(envVar, msgSuffix string) {
 		return
 	}
 	os.Unsetenv(envVar)
-	customWorkflow, upgradeNeeded, stateErr := fabrikplugin.CheckPluginState(".fabrik/plugin", strings.HasPrefix(Version, "dev"))
-	if stateErr != nil {
-		fmt.Fprintf(os.Stderr, "[upgrade] warning: plugin state check failed%s: %v\n", msgSuffix, stateErr)
+	customWorkflow, upgradeNeeded, skillsStaleCount, evalErr := evaluatePluginStartupState(".fabrik/plugin", strings.HasPrefix(Version, "dev"))
+	if evalErr != nil {
+		fmt.Fprintf(os.Stderr, "[upgrade] warning: plugin state check failed%s: %v\n", msgSuffix, evalErr)
 	} else if customWorkflow {
-		fmt.Fprintf(os.Stderr, "%s", pluginCustomizationWarning(".fabrik/plugin"))
+		fmt.Fprintf(os.Stderr, "%s", pluginCustomizationWarning(".fabrik/plugin", skillsStaleCount))
 	} else if upgradeNeeded {
 		if _, err := fabrikplugin.RefreshPlugin(); err != nil {
 			fmt.Fprintf(os.Stderr, "[upgrade] warning: RefreshPlugin failed%s: %v\n", msgSuffix, err)
@@ -1101,6 +1095,36 @@ func handleReexecPluginRefresh(envVar, msgSuffix string) {
 	}
 }
 
+// evaluatePluginStartupState is the single, shared computation of plugin
+// customization/staleness state, used both by daemon startup (Execute) and by
+// the auto-upgrade/SIGHUP re-exec path (handleReexecPluginRefresh). Prior to
+// #1787 these were two independent CheckPluginState call sites that could
+// silently drift on what they reported; consolidating them here means they
+// can't.
+//
+// skillsStaleCount is computed via diffingPluginFiles whenever the plugin is
+// stale (installedVer != embeddedVer) — independent of whether it is also
+// customized. This is what makes staleness visible even when customWorkflow
+// is true, which is the #1787 fix: before, skillsStaleCount was only ever
+// populated inside the upgradeNeeded branch, so it stayed silently 0 whenever
+// customWorkflow was true.
+func evaluatePluginStartupState(pluginDir string, isDevBuild bool) (customWorkflow, upgradeNeeded bool, skillsStaleCount int, err error) {
+	cw, up, stale, cwErr := fabrikplugin.CheckPluginState(pluginDir, isDevBuild)
+	if cwErr != nil {
+		return false, false, 0, cwErr
+	}
+	customWorkflow = cw
+	upgradeNeeded = up
+	if stale {
+		diffing, diffErr := diffingPluginFiles(pluginDir)
+		if diffErr != nil {
+			return customWorkflow, upgradeNeeded, 0, diffErr
+		}
+		skillsStaleCount = len(diffing)
+	}
+	return customWorkflow, upgradeNeeded, skillsStaleCount, nil
+}
+
 // pluginCustomizationWarning builds the "local customizations" startup warning,
 // naming the specific files that differ between pluginDir and the currently
 // embedded plugin (the same comparison basis diffingPluginFiles uses for stale-
@@ -1108,12 +1132,22 @@ func handleReexecPluginRefresh(envVar, msgSuffix string) {
 // rather than a bare assertion. Falls back to the assertion alone if the diff
 // itself fails or reports no differences (e.g. a race with a concurrent
 // refresh) rather than raising an error to the caller.
-func pluginCustomizationWarning(pluginDir string) string {
+//
+// staleCount is the number of plugin files differing from the currently
+// embedded plugin (#1787) — when > 0, the installed fingerprint (not just the
+// disk) is behind what's embedded in this binary, independent of whether the
+// disk is also customized. Reported additively alongside the customization
+// warning, never in place of it (R1) — see evaluatePluginStartupState.
+func pluginCustomizationWarning(pluginDir string, staleCount int) string {
 	msg := "[upgrade] warning: plugin skills have local customizations — skipping auto-refresh"
 	if diffing, diffErr := diffingPluginFiles(pluginDir); diffErr == nil && len(diffing) > 0 {
 		msg += fmt.Sprintf(" (differing: %s)", strings.Join(diffing, ", "))
 	}
-	msg += "; run 'fabrik upgrade --force' to overwrite\n"
+	msg += "; run 'fabrik upgrade --force' to overwrite, or 'fabrik upgrade --reconcile' for a reconciliation prompt"
+	if staleCount > 0 {
+		msg += stalenessNote(pluginDir, staleCount)
+	}
+	msg += "\n"
 	return msg
 }
 
