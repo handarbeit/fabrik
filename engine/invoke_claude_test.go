@@ -161,6 +161,55 @@ printf '%s\n' '{"result":"Claude output for test\nFABRIK_STAGE_COMPLETE\n","sess
 	}
 }
 
+// TestInvokeClaude_NoArtifactHarvested_NeverCompletes closes the gap
+// Pruefer's review of #1782 identified: interpretClaudeResult's R3 guard
+// (artifactMissingOnComplete) is applied correctly, but InvokeClaude's
+// clean-exit return path used to unconditionally overwrite that guarded
+// `completed` with checkCompletion(stage, output) — a bare re-match of the
+// same FABRIK_STAGE_COMPLETE regex with no knowledge of the guard. Since
+// every real stage config uses completion.type: claude, that overwrite
+// silently defeated R3 for the actual production stage-dispatch entry point
+// (InvokeClaude, called from Engine.Invoke/runInvocationWithExtension) —
+// exactly the path the issue names as its primary target. All of #1782's
+// other tests either call interpretClaudeResult directly (bypassing
+// InvokeClaude's override) or stub the invocation out entirely via
+// mockClaudeInvoker, so none of them caught this. This test drives the real
+// InvokeClaude implementation end-to-end with the #1632 transcript shape.
+func TestInvokeClaude_NoArtifactHarvested_NeverCompletes(t *testing.T) {
+	t.Chdir(t.TempDir())
+	binDir := t.TempDir()
+	fakeClaude := filepath.Join(binDir, "claude")
+	// Mirrors the reported #1632 shape: the real artifact + FABRIK_STAGE_COMPLETE
+	// land in an assistant turn, one more tool call follows, and the terminal
+	// "result" field carries nothing but the bare marker.
+	script := `#!/bin/sh
+cat >/dev/null
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"FABRIK_STAGE_COMPLETE"}]}}'
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","text":""}]}}'
+printf '%s\n' '{"type":"result","subtype":"success","result":"FABRIK_STAGE_COMPLETE","session_id":"sess_noartifact","num_turns":5,"total_cost_usd":0.01}'
+`
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	workDir := t.TempDir()
+	stage := &stages.Stage{
+		Name:       "Research",
+		Prompt:     "Do research",
+		Completion: stages.CompletionCriteria{Type: "claude"},
+	}
+	issue := gh.ProjectItem{Number: 1632, Title: "No artifact anywhere"}
+
+	_, completed, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, InvokeOptions{})
+	if err != nil {
+		t.Fatalf("InvokeClaude: %v", err)
+	}
+	if completed {
+		t.Error("expected completed=false through the real InvokeClaude entry point — no artifact was harvestable anywhere (R3), but checkCompletion's bare marker re-match must not overwrite the guard")
+	}
+}
+
 func TestInvokeClaude_WithResume(t *testing.T) {
 	t.Chdir(t.TempDir())
 	binDir := t.TempDir()

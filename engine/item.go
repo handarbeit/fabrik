@@ -1192,6 +1192,17 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 	err := p.invokeErr
 	releaseLock := p.release
 
+	// R3 detection (#1782): computed on the raw, pre-strip output — before the
+	// ISSUE_UPDATE/PR_CREATE/spawn-block stripping below removes structural
+	// content unrelated to this defect (e.g. Specify's updated-body block,
+	// which is deliberately moved to the issue body and stripped from the
+	// posted comment; that legitimate emptiness must not be misreported as a
+	// missing artifact). interpretClaudeResult already forced completed=false
+	// upstream when this is true; this recomputation exists only to drive the
+	// distinct first-detection comment and escalation cause below, using the
+	// exact same predicate so the two can never disagree.
+	artifactMissing := artifactMissingOnComplete(output)
+
 	if line := formatStatsLogLine(usage); line != "" {
 		e.logf(item.Number, "stats", "%s\n", line)
 	}
@@ -1720,6 +1731,15 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 						stage.Name, degenerateReason,
 					)
 					e.postItemComment(item, warnComment, true)
+				} else if artifactMissing && count == 1 && count < e.cfg.MaxRetries {
+					// R3 first-detection comment (#1782): mirrors the degenerate-output
+					// warning's visibility level and gating (fire once, on first
+					// detection, not on every retry up to escalation).
+					warnComment := fmt.Sprintf(
+						"🏭 **Fabrik — no artifact harvested**\n\nStage **%s** signaled `FABRIK_STAGE_COMPLETE`, but no content could be harvested from the terminal result or any assistant turn — likely because the model made a further tool call after emitting its real output, leaving only the wrap-up behind. The comment was not posted and the stage did not advance; it will be retried.",
+						stage.Name,
+					)
+					e.postItemComment(item, warnComment, true)
 				}
 				willEscalateFailure = count >= e.cfg.MaxRetries
 			}
@@ -1758,7 +1778,16 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 			e.detectAndArmStallHint(item, stage, repoStr, usage, err == nil || turnLimited)
 		}
 		if willEscalateFailure {
-			e.escalateFailedStage(item, stage, degenerateReason)
+			var causeNote string
+			if degenerateReason != "" {
+				causeNote = fmt.Sprintf(
+					"\n\n**Cause:** the stage's final output was a bare file reference (`%s`) instead of real content — the model likely wrote its output to a file and returned a dangling reference instead of emitting it inline.",
+					degenerateReason,
+				)
+			} else if artifactMissing {
+				causeNote = "\n\n**Cause:** the stage signaled `FABRIK_STAGE_COMPLETE`, but no harvestable artifact was found in the terminal result or any assistant turn — the model's last turn was likely a wrap-up following a trailing tool call, and the real content from an earlier turn could not be recovered either."
+			}
+			e.escalateFailedStage(item, stage, causeNote)
 			releaseLock() // permanently giving up — release the lock
 		} else if willEscalateSlice {
 			e.pauseForSliceLimit(item, stage, sliceCount, e.cfg.MaxSliceRetries)
@@ -1901,9 +1930,14 @@ func (e *Engine) escalatePRCreationFailure(item gh.ProjectItem, stage *stages.St
 // escalateFailedStage is called when a stage has failed MaxRetries times. It adds
 // fabrik:paused and stage:<name>:failed labels, posts an explanatory comment, and
 // records the escalation so clearFailedStage can detect when the user unpauses.
-// reason, when non-empty, names a specific cause (e.g. a degenerate bare file
-// reference) to append to the pause comment; pass "" for the generic message.
-func (e *Engine) escalateFailedStage(item gh.ProjectItem, stage *stages.Stage, reason string) {
+// causeNote, when non-empty, is a complete pre-formatted paragraph (typically
+// starting "\n\n**Cause:** ...") appended verbatim to the pause comment; pass
+// "" for the generic message. Message construction lives at each call site
+// rather than here, since different callers name unrelated causes (a
+// degenerate bare-file-reference output vs. a stage-complete marker with no
+// harvestable artifact, #1782) and a single hardcoded narrative here would
+// misdescribe whichever cause it wasn't written for.
+func (e *Engine) escalateFailedStage(item gh.ProjectItem, stage *stages.Stage, causeNote string) {
 	e.logf(item.Number, "escalate", "stage %q failed %d time(s) — pausing issue\n", stage.Name, e.cfg.MaxRetries)
 
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
@@ -1912,12 +1946,7 @@ func (e *Engine) escalateFailedStage(item gh.ProjectItem, stage *stages.Stage, r
 		"🏭 **Fabrik — stage failed**\n\nStage **%s** failed to complete after %d attempt(s). The issue has been paused (`fabrik:paused`).\n\nTo retry: investigate the failure, make any needed fixes, then remove the `fabrik:paused` label.",
 		stage.Name, e.cfg.MaxRetries,
 	)
-	if reason != "" {
-		comment += fmt.Sprintf(
-			"\n\n**Cause:** the stage's final output was a bare file reference (`%s`) instead of real content — the model likely wrote its output to a file and returned a dangling reference instead of emitting it inline.",
-			reason,
-		)
-	}
+	comment += causeNote
 	e.pauseIssue(item, comment, pauseOpts{
 		reactRocket: true,
 		labelEcho:   true,
