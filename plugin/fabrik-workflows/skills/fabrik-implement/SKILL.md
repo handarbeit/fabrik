@@ -98,10 +98,10 @@ Then read the current comment body:
 gh api /repos/{owner}/{repo}/issues/comments/<comment-id> --jq '.body'
 ```
 
-Edit the printed body yourself — change "- [ ] Task N" to "- [x] Task N" for the task you just completed — and write the full updated body back in one call:
+Edit the printed body yourself — change "- [ ] Task N" to "- [x] Task N" for the task you just completed. **Do not embed the edited body inline in the `gh api` command** — a Plan-stage checklist routinely contains backtick-wrapped file/code references, and backticks (and `$(...)`) inside a double-quoted shell argument are still expanded by the shell, corrupting or mis-executing the body. Instead, write the full updated body to a scratch file with the Write tool, then pass it by reference — `gh api` reads a field's value verbatim from a file when given `@<path>`, with no shell interpretation of its contents:
 ```bash
 gh api -X PATCH /repos/{owner}/{repo}/issues/comments/<comment-id> \
-  -f body="<updated body text>"
+  -f body=@/tmp/updated-plan-comment-body.md
 ```
 
 If no Plan stage comment exists (Plan was never run or comment was deleted), skip task tracking gracefully — don't fail.
