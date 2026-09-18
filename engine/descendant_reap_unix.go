@@ -18,6 +18,13 @@ import (
 // Test-overridable (mirrors claudeInactivityTimeout's pattern).
 var descendantScanInterval = 3 * time.Second
 
+// pidFingerprintFn is a package-level function-var seam (mirroring
+// listProcessArgvFn/sentinelProbeFn's existing convention in this package) so
+// tests can inject a transient failure for a specific PID without needing to
+// make the real `ps` binary fail on demand. Production code must never
+// reassign this outside tests.
+var pidFingerprintFn = pidFingerprint
+
 // sessionScopedDescendants returns the PID of every live process (other than
 // workerPID itself) whose session ID equals workerPID.
 //
@@ -114,7 +121,7 @@ func trackWorkerDescendants(ctx context.Context, workerPID, issueNumber int, rep
 	// alone cannot make that distinction, since it only checks liveness, not
 	// identity. Best-effort: if the worker has already exited by the first
 	// tick, these stay empty and the sweep falls back to liveness-only.
-	workerComm, workerLStart, _ := pidFingerprint(workerPID)
+	workerComm, workerLStart, _ := pidFingerprintFn(workerPID)
 	for {
 		select {
 		case <-ctx.Done():
@@ -128,11 +135,24 @@ func trackWorkerDescendants(ctx context.Context, workerPID, issueNumber int, rep
 				if seen[pid] {
 					continue
 				}
-				comm, lstart, ferr := pidFingerprint(pid)
+				comm, lstart, ferr := pidFingerprintFn(pid)
 				if ferr != nil {
-					// Already gone by the time we looked, or otherwise
-					// unreadable — nothing to record.
-					seen[pid] = true
+					// pidFingerprint's single-PID `ps` call cannot
+					// distinguish "the process exited between the Getsid
+					// check above and this call" from "the ps invocation
+					// itself failed transiently" (e.g. the 3s
+					// sentinelProbeTimeout expiring under exactly the host
+					// contention this issue describes) — both surface as a
+					// generic error. Deliberately do NOT mark seen[pid]
+					// here: a permanent "seen" mark would make a transient
+					// probe failure indistinguishable from "recorded," so a
+					// live descendant could be silently and permanently
+					// dropped from tracking under load — precisely the
+					// scenario this reaper exists to handle. Leaving it
+					// unmarked means the next tick retries; if the process
+					// really did exit, sessionScopedDescendants naturally
+					// stops returning its PID on its own, so no unbounded
+					// retry risk exists either way.
 					continue
 				}
 				seen[pid] = true

@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -536,5 +537,90 @@ func TestSweepStaleDescendants_AC3_OrphanFromPriorEngineRunReaped(t *testing.T) 
 	}
 	if len(remaining) != 0 {
 		t.Errorf("expected the reaped entry to be removed from the registry, got %+v", remaining)
+	}
+}
+
+// TestTrackWorkerDescendants_TransientFingerprintFailureRetried pins a review
+// finding: trackWorkerDescendants must not permanently give up on a PID after
+// a single fingerprint failure. pidFingerprint's single-PID `ps` call cannot
+// tell "the process already exited" apart from "the ps invocation itself
+// failed transiently" (e.g. sentinelProbeTimeout expiring under exactly the
+// host contention this issue is about) — both surface as a generic error. If
+// the discovery loop marked the PID permanently "seen" on any such failure,
+// a live descendant could be silently and permanently dropped from tracking
+// under load, defeating the reaper for the scenario it matters most in.
+//
+// Neutralization: before the fix (marking seen[pid]=true unconditionally on
+// a fingerprint error), this test fails — the injected failures land on the
+// PID's one and only discovery attempt, so it is never recorded and this
+// test's deadline loop times out with zero registry entries.
+func TestTrackWorkerDescendants_TransientFingerprintFailureRetried(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	origScan := descendantScanInterval
+	descendantScanInterval = 20 * time.Millisecond
+	defer func() { descendantScanInterval = origScan }()
+
+	// Session-leading "worker" shell with a real descendant in its session —
+	// mirrors TestSessionScopedDescendants_FindsRealChild's setup.
+	shell := exec.Command("/bin/sh", "-c", "sleep 5 & wait")
+	setCmdProcAttr(shell)
+	if err := shell.Start(); err != nil {
+		t.Fatalf("starting shell: %v", err)
+	}
+	defer func() {
+		_ = shell.Process.Kill()
+		_ = shell.Wait()
+	}()
+	workerPID := shell.Process.Pid
+
+	origFn := pidFingerprintFn
+	var mu sync.Mutex
+	failuresInjected := 0
+	pidFingerprintFn = func(pid int) (string, string, error) {
+		if pid == workerPID {
+			return origFn(pid) // don't interfere with the worker's own fingerprint
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if failuresInjected < 2 {
+			failuresInjected++
+			return "", "", context.DeadlineExceeded // simulated transient ps timeout
+		}
+		return origFn(pid)
+	}
+	defer func() { pidFingerprintFn = origFn }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		trackWorkerDescendants(ctx, workerPID, 1798, "", "Implement")
+		close(done)
+	}()
+
+	var got []trackedDescendant
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		entries, err := descendantsForWorker(workerPID)
+		if err != nil {
+			t.Fatalf("descendantsForWorker: %v", err)
+		}
+		if len(entries) > 0 {
+			got = entries
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	if len(got) == 0 {
+		t.Fatal("descendant was never recorded despite the injected transient failures eventually clearing — the retry-after-transient-failure behavior did not happen")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if failuresInjected < 2 {
+		t.Fatalf("expected at least 2 injected failures to have been consumed before the eventual success, got %d — test setup issue, not confirming the retry behavior", failuresInjected)
 	}
 }
