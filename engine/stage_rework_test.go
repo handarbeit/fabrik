@@ -176,6 +176,67 @@ func TestEndStageRework_NonCompletingExit_RestoresThenUnmarks(t *testing.T) {
 	}
 }
 
+// TestBeginStageRework_MarkerAddFails_DoesNotClearComplete guards the gap a
+// Pruefer review found in the original implementation (#1802): if the
+// fabrik:reworking add fails, stage:<Stage>:complete must NOT be removed —
+// doing so anyway would strand the completion claim with no durable marker
+// left for runStartupCleanup to recover it from. beginStageRework must report
+// false (no rework observably began) and leave the complete label untouched.
+func TestBeginStageRework_MarkerAddFails_DoesNotClearComplete(t *testing.T) {
+	client := &mockGitHubClient{
+		addLabelToIssueFn: func(owner, repo string, issueNumber int, labelName string) error {
+			if labelName == "fabrik:reworking" {
+				return errors.New("transient API error")
+			}
+			return nil
+		},
+	}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	item := gh.ProjectItem{
+		Number: 40,
+		Repo:   "owner/repo",
+		Labels: []string{"fabrik:editing", "stage:Research:complete"},
+	}
+	stage := &stages.Stage{Name: "Research"}
+
+	got := eng.beginStageRework(item, stage)
+	if got {
+		t.Error("beginStageRework returned true despite the marker add failing; want false")
+	}
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == "stage:Research:complete" {
+			t.Errorf("stage:Research:complete was removed even though fabrik:reworking never landed: %+v", client.removeLabelCalls)
+		}
+	}
+}
+
+// TestEndStageRework_RestoreAddFails_LeavesMarkerInPlace guards the reverse
+// gap: if restoring stage:<Stage>:complete fails, fabrik:reworking must NOT
+// be removed — removing it anyway would silently lose both the completion
+// state and the only remaining signal that a restore is still owed, with no
+// live retry path (runStartupCleanup only runs at startup).
+func TestEndStageRework_RestoreAddFails_LeavesMarkerInPlace(t *testing.T) {
+	client := &mockGitHubClient{
+		addLabelToIssueFn: func(owner, repo string, issueNumber int, labelName string) error {
+			if labelName == "stage:Research:complete" {
+				return errors.New("transient API error")
+			}
+			return nil
+		},
+	}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	item := gh.ProjectItem{Number: 41, Repo: "owner/repo"}
+	stage := &stages.Stage{Name: "Research"}
+
+	eng.endStageRework(item, stage, true, false)
+
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == "fabrik:reworking" {
+			t.Errorf("fabrik:reworking was removed even though the stage:Research:complete restore failed: %+v", client.removeLabelCalls)
+		}
+	}
+}
+
 // TestProcessComments_Rework_NonCompletingExit_RestoresCompleteLabel drives
 // beginStageRework/endStageRework through the real processComments flow: a
 // stage that already carries stage:<Stage>:complete is re-entered by a

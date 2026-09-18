@@ -514,12 +514,23 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 // dispatch-admission gate (itemNeedsWork) already refuses to act while
 // fabrik:editing is present, so clearing/restoring stage:<Stage>:complete
 // inside that window cannot change any gating decision.
+//
+// The fabrik:reworking add is error-checked (addLabelChecked), not
+// best-effort: if it doesn't actually land on GitHub, stage:<Stage>:complete
+// is deliberately left uncleared for this cycle (fail-open, logged) rather
+// than removed anyway — removing it here without a durably-landed marker
+// would strand the completion claim with no signal left for
+// runStartupCleanup to recover it from, exactly the failure this function's
+// whole ordering exists to prevent.
 func (e *Engine) beginStageRework(item gh.ProjectItem, stage *stages.Stage) bool {
 	completeLabel := "stage:" + stage.Name + ":complete"
 	if !hasLabel(item.Labels, completeLabel) {
 		return false
 	}
-	e.addLabel(item, "fabrik:reworking")
+	if err := e.addLabelChecked(item, "fabrik:reworking"); err != nil {
+		e.logf(item.Number, "warn", "could not add fabrik:reworking marker: %v — leaving %q in place for this cycle\n", err, completeLabel)
+		return false
+	}
 	e.removeLabel(item, completeLabel)
 	return true
 }
@@ -553,12 +564,25 @@ func (e *Engine) beginStageRework(item gh.ProjectItem, stage *stages.Stage) bool
 // is deliberately deferred to handleStageComplete) before the marker that
 // says "a restore is owed" is cleared, so a crash between the two still
 // leaves the correct, safe-to-retry signal for startup recovery.
+//
+// The restore add is error-checked (addLabelChecked), not best-effort: if
+// stage:<Stage>:complete doesn't actually land on GitHub, fabrik:reworking is
+// deliberately left in place (logged) rather than removed anyway — removing
+// the marker here without the restore having landed would silently lose both
+// the completion state and the only remaining signal that a restore is
+// still owed, with no runStartupCleanup path left to recover it (this
+// function only runs live, mid-session — the marker's continued presence is
+// what lets a later startup pass retry it).
 func (e *Engine) endStageRework(item gh.ProjectItem, stage *stages.Stage, wasReworking, completedThisCycle bool) {
 	if !wasReworking {
 		return
 	}
 	if !completedThisCycle {
-		e.addLabel(item, "stage:"+stage.Name+":complete")
+		completeLabel := "stage:" + stage.Name + ":complete"
+		if err := e.addLabelChecked(item, completeLabel); err != nil {
+			e.logf(item.Number, "warn", "could not restore %q: %v — leaving fabrik:reworking in place for recovery\n", completeLabel, err)
+			return
+		}
 	}
 	e.removeLabel(item, "fabrik:reworking")
 }
