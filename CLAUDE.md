@@ -158,7 +158,7 @@ allowed_tools:                  # Optional: REPLACES the default tool set (not a
                                 # Bash(git:*), Bash(gh:*), Bash(go:*), Bash(npm:*), Bash(npx:*), Bash(yarn:*),
                                 # Bash(pnpm:*), Bash(make:*), Bash(cargo:*), Bash(python:*), Bash(pip:*),
                                 # Bash(uv:*), Bash(pytest:*), Bash(ls:*), Bash(cat:*), Bash(rm:*), Bash(cp:*),
-                                # Bash(mv:*), Bash(mkdir:*), Bash(find:*).
+                                # Bash(mv:*), Bash(mkdir:*), Bash(find:*), Bash(date:*).
                                 # IMPORTANT: allowed_tools is a call-time PERMISSION filter, not an
                                 # AVAILABILITY filter — a tool absent from this list is still offered to
                                 # the model and, under --permission-mode dontAsk, may still be invoked
