@@ -2,6 +2,41 @@ package engine
 
 import "errors"
 
+// procArgvEntry is one process's PID and full argument list, as returned by
+// listProcessArgvFn. A single fetch is shared across every sentinel check in
+// one dispatchCandidates pass (see matchSentinelInArgvList below) rather than
+// invoking `ps` once per candidate — review finding on #1779: the R5 dispatch
+// guard was spawning one `ps` subprocess per dispatch-eligible item per poll,
+// serially, before any item in that poll could be dispatched.
+type procArgvEntry struct {
+	PID  int
+	Argv []string
+}
+
+// listProcessArgvFn is a package-level function-var seam (mirroring
+// sentinelProbeFn) so tests can substitute a canned process table without
+// spawning `ps`. Production code must never reassign this outside tests.
+var listProcessArgvFn = listProcessArgv
+
+// matchSentinelInArgvList searches a pre-fetched process table for an exact
+// argv-token match (R6/Acceptance 6: whole-token equality, never substring).
+// Pure and allocation-free of any subprocess — the expensive part
+// (listProcessArgvFn) is meant to be called once and its result matched
+// against many sentinels, not re-fetched per check.
+func matchSentinelInArgvList(sentinel string, procs []procArgvEntry) sentinelProbeResult {
+	if sentinel == "" {
+		return sentinelProbeResult{Err: errors.New("sentinel probe: empty sentinel")}
+	}
+	for _, p := range procs {
+		for _, tok := range p.Argv {
+			if tok == sentinel {
+				return sentinelProbeResult{Live: true, PID: p.PID}
+			}
+		}
+	}
+	return sentinelProbeResult{Live: false}
+}
+
 // errSentinelProbeUnsupported is returned by probeSentinelLive when the probe
 // itself cannot run on this platform (e.g. Windows, where there is no
 // portable argv-listing mechanism). It is one of the possible causes of

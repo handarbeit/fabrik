@@ -37,13 +37,28 @@ func probeSentinelLive(sentinel string) sentinelProbeResult {
 	if sentinel == "" {
 		return sentinelProbeResult{Err: fmt.Errorf("sentinel probe: empty sentinel")}
 	}
+	procs, err := listProcessArgv()
+	if err != nil {
+		return sentinelProbeResult{Err: err}
+	}
+	return matchSentinelInArgvList(sentinel, procs)
+}
+
+// listProcessArgv shells out to `ps` once and returns every process's PID and
+// full argument list. Split out from probeSentinelLive (#1779 review) so a
+// single fetch can be matched against many sentinels — dispatchCandidates
+// (poll.go) calls this once per poll pass via listProcessArgvFn and reuses
+// the result for every dispatch-eligible item, rather than invoking `ps`
+// once per item.
+func listProcessArgv() ([]procArgvEntry, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), sentinelProbeTimeout)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "ps", "-eo", "pid=,args=", "-w", "-w").Output()
 	if err != nil {
-		return sentinelProbeResult{Err: fmt.Errorf("sentinel probe: ps: %w", err)}
+		return nil, fmt.Errorf("sentinel probe: ps: %w", err)
 	}
 
+	var procs []procArgvEntry
 	scanner := bufio.NewScanner(strings.NewReader(string(out)))
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
@@ -56,18 +71,14 @@ func probeSentinelLive(sentinel string) sentinelProbeResult {
 			continue
 		}
 		pidStr, argv := fields[0], fields[1:]
-		for _, tok := range argv {
-			if tok == sentinel {
-				pid, perr := strconv.Atoi(pidStr)
-				if perr != nil {
-					continue
-				}
-				return sentinelProbeResult{Live: true, PID: pid}
-			}
+		pid, perr := strconv.Atoi(pidStr)
+		if perr != nil {
+			continue
 		}
+		procs = append(procs, procArgvEntry{PID: pid, Argv: argv})
 	}
 	if serr := scanner.Err(); serr != nil {
-		return sentinelProbeResult{Err: fmt.Errorf("sentinel probe: scanning ps output: %w", serr)}
+		return nil, fmt.Errorf("sentinel probe: scanning ps output: %w", serr)
 	}
-	return sentinelProbeResult{Live: false}
+	return procs, nil
 }

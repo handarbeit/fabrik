@@ -11,3 +11,12 @@ package engine
 func probeSentinelLive(sentinel string) sentinelProbeResult {
 	return sentinelProbeResult{Err: errSentinelProbeUnsupported}
 }
+
+// listProcessArgv mirrors probeSentinelLive's unsupported posture: there is
+// no portable, no-shell way to list every process's full argv on Windows, so
+// every call reports errSentinelProbeUnsupported, routing dispatchCandidates'
+// batched R5 check through the same bounded-unverifiable path as the scan
+// (#1779).
+func listProcessArgv() ([]procArgvEntry, error) {
+	return nil, errSentinelProbeUnsupported
+}

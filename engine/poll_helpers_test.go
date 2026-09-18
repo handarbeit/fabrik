@@ -178,21 +178,19 @@ func TestDispatchCandidates_RefusesLiveSentinelAfterClear(t *testing.T) {
 	// No Worker in the store — mirrors the state right after worker-liveness
 	// clears a worker (WorkerExited already applied).
 
-	var probedSentinel string
-	withSentinelProbe(t, true, func(sentinel string) sentinelProbeResult {
-		probedSentinel = sentinel
-		return sentinelProbeResult{Live: true, PID: 55555}
-	})
+	// The fake process table carries the item's own sentinel — proving both
+	// that dispatchCandidates constructs the expected sentinel value AND that
+	// the batched match finds it: if the wrong sentinel were computed, this
+	// fake process wouldn't match it and dispatch would proceed (dispatched
+	// would be 1, failing the assertion below).
+	wantSentinel := sessionNameSentinel(itemOwnerRepoString(item, eng.defaultRepo()), item.Number, "Research")
+	withProcessListProbe(t, true, []procArgvEntry{{PID: 55555, Argv: []string{"--name", wantSentinel}}}, nil)
 
 	dispatched := eng.dispatchCandidates(context.Background(), board, []gh.ProjectItem{item})
 	eng.wg.Wait()
 
 	if dispatched != 0 {
 		t.Errorf("dispatched = %d, want 0 (a live sentinel must refuse dispatch even with Worker() == nil)", dispatched)
-	}
-	wantSentinel := sessionNameSentinel(itemOwnerRepoString(item, eng.defaultRepo()), item.Number, "Research")
-	if probedSentinel != wantSentinel {
-		t.Errorf("probed sentinel = %q, want %q", probedSentinel, wantSentinel)
 	}
 	if snap, err := eng.store.Get(itemOwnerRepoString(item, eng.defaultRepo()), item.Number); err == nil && snap.Worker() != nil {
 		t.Error("expected no WorkerEntered mutation to have been applied for a refused dispatch")
@@ -211,9 +209,7 @@ func TestDispatchCandidates_DispatchesWhenSentinelNotFound(t *testing.T) {
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{Number: 13, Title: "Test", Status: "Research"}
 
-	withSentinelProbe(t, true, func(sentinel string) sentinelProbeResult {
-		return sentinelProbeResult{Live: false}
-	})
+	withProcessListProbe(t, true, nil, nil)
 
 	dispatched := eng.dispatchCandidates(context.Background(), board, []gh.ProjectItem{item})
 	eng.wg.Wait()
@@ -236,14 +232,100 @@ func TestDispatchCandidates_DispatchesOnProbeError(t *testing.T) {
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{Number: 14, Title: "Test", Status: "Research"}
 
-	withSentinelProbe(t, true, func(sentinel string) sentinelProbeResult {
-		return sentinelProbeResult{Err: errSentinelProbeUnsupported}
-	})
+	withProcessListProbe(t, true, nil, errSentinelProbeUnsupported)
 
 	dispatched := eng.dispatchCandidates(context.Background(), board, []gh.ProjectItem{item})
 	eng.wg.Wait()
 
 	if dispatched != 1 {
 		t.Errorf("dispatched = %d, want 1 (a probe error must fail open, not block dispatch)", dispatched)
+	}
+}
+
+// TestDispatchCandidates_BatchesProcessListFetchAcrossCandidates is the
+// review-finding regression for #1779: the R5 sentinel check must fetch the
+// live process table at most once per dispatchCandidates call, reusing it
+// for every dispatch-eligible item, not once per item — the original
+// implementation spawned one `ps` subprocess per candidate, serially, before
+// any of them could be dispatched. Neutralizing the batching (reverting to a
+// per-item fetch) makes fetchCount == 3 instead of 1, failing this test.
+func TestDispatchCandidates_BatchesProcessListFetchAcrossCandidates(t *testing.T) {
+	claude := &mockClaudeInvoker{}
+	eng := testEngine(t, &mockGitHubClient{}, claude)
+	eng.cfg.MaxConcurrent = 5
+	eng.sem = make(chan struct{}, 5)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	items := []gh.ProjectItem{
+		{Number: 20, Title: "A", Status: "Research"},
+		{Number: 21, Title: "B", Status: "Research"},
+		{Number: 22, Title: "C", Status: "Research"},
+	}
+
+	var fetchCount int
+	origSupported := claudeNameFlagSupported
+	origFn := listProcessArgvFn
+	claudeNameFlagSupported = true
+	listProcessArgvFn = func() ([]procArgvEntry, error) {
+		fetchCount++
+		return nil, nil
+	}
+	t.Cleanup(func() {
+		claudeNameFlagSupported = origSupported
+		listProcessArgvFn = origFn
+	})
+
+	dispatched := eng.dispatchCandidates(context.Background(), board, items)
+	eng.wg.Wait()
+
+	if dispatched != 3 {
+		t.Fatalf("dispatched = %d, want 3", dispatched)
+	}
+	if fetchCount != 1 {
+		t.Errorf("listProcessArgvFn called %d time(s) for 3 dispatch-eligible items, want 1 (process table must be fetched once per dispatchCandidates call, not once per item)", fetchCount)
+	}
+}
+
+// TestDispatchCandidates_SkipsProcessListFetchWhenNoCandidatesNeedIt verifies
+// the fetch stays lazy: when every candidate already has an in-flight worker
+// (never reaches the R5 check), listProcessArgvFn must not be invoked at all.
+func TestDispatchCandidates_SkipsProcessListFetchWhenNoCandidatesNeedIt(t *testing.T) {
+	claude := &mockClaudeInvoker{}
+	eng := testEngine(t, &mockGitHubClient{}, claude)
+	eng.cfg.MaxConcurrent = 5
+	eng.sem = make(chan struct{}, 5)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 23, Title: "Test", Status: "Research"}
+	itemRepo := itemOwnerRepoString(item, eng.defaultRepo())
+	eng.store.Apply(itemstate.LocalLockAcquired{
+		Repo:       itemRepo,
+		Number:     item.Number,
+		User:       eng.cfg.User,
+		AcquiredAt: time.Now(),
+		Worker:     &itemstate.WorkerHandle{StageName: "Research", StartedAt: time.Now(), LastSignAt: time.Now()},
+	})
+
+	var fetchCount int
+	origSupported := claudeNameFlagSupported
+	origFn := listProcessArgvFn
+	claudeNameFlagSupported = true
+	listProcessArgvFn = func() ([]procArgvEntry, error) {
+		fetchCount++
+		return nil, nil
+	}
+	t.Cleanup(func() {
+		claudeNameFlagSupported = origSupported
+		listProcessArgvFn = origFn
+	})
+
+	dispatched := eng.dispatchCandidates(context.Background(), board, []gh.ProjectItem{item})
+	eng.wg.Wait()
+
+	if dispatched != 0 {
+		t.Fatalf("dispatched = %d, want 0 (item already has an in-flight worker)", dispatched)
+	}
+	if fetchCount != 0 {
+		t.Errorf("listProcessArgvFn called %d time(s), want 0 (no candidate reached the R5 check)", fetchCount)
 	}
 }

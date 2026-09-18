@@ -868,6 +868,25 @@ func withSentinelProbe(t *testing.T, supported bool, fn func(sentinel string) se
 	})
 }
 
+// withProcessListProbe overrides claudeNameFlagSupported and listProcessArgvFn
+// for the duration of a test, restoring both on cleanup — the batched-fetch
+// analog of withSentinelProbe, for dispatchCandidates' R5 check (poll.go),
+// which fetches the process table once per call via listProcessArgvFn and
+// matches it against each candidate's sentinel in-process, rather than
+// probing per sentinel (#1779 review finding: avoids one `ps` subprocess
+// spawn per dispatch-eligible item per poll).
+func withProcessListProbe(t *testing.T, supported bool, procs []procArgvEntry, err error) {
+	t.Helper()
+	origSupported := claudeNameFlagSupported
+	origFn := listProcessArgvFn
+	claudeNameFlagSupported = supported
+	listProcessArgvFn = func() ([]procArgvEntry, error) { return procs, err }
+	t.Cleanup(func() {
+		claudeNameFlagSupported = origSupported
+		listProcessArgvFn = origFn
+	})
+}
+
 // TestDetectorSentinelLive_KeepsWorkerAndAdoptsPID is the R1/R2/Acceptance-1,3
 // case: a PID<=0 worker past workerStaleTimeout whose sentinel IS found live
 // must NOT be cleared, and the discovered PID must be adopted into the

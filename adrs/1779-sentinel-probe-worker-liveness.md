@@ -66,17 +66,29 @@ sentinel. This does not replace tier 2 — it gates entry into it:
   consecutive-failure counter allows a small number of scan cycles of grace before falling back to
   tier 2's plain clear, distinctly logged as unverified.
 
-### One probe implementation, two call sites
+### One shared implementation, two consumption patterns
 
-`probeSentinelLive` is called from both `runWorkerDetectorScan` (the tier above) and independently
-from `dispatchCandidates` (`engine/poll.go`), immediately after the existing `snap.Worker() != nil`
-in-flight guard. The dispatch-site check is a deliberate belt-and-suspenders addition, not a
-consequence of the scan-site fix being insufficient on its own: the scan-site fix is meant to make
-"dispatch a second worker while the first's sentinel is still live" unreachable, but the issue's own
-R5 requirement says to assert this independently rather than trust that inference. Sharing one
-implementation between both call sites (behind a package-level `sentinelProbeFn` function-var seam,
-mirroring `claudeNameFlagSupported`'s existing save/restore test convention) means a portability or
-correctness fix to the probe cannot silently apply to only one of the two guards.
+`runWorkerDetectorScan` (the tier above) and `dispatchCandidates` (`engine/poll.go`) both build on the
+same underlying pieces — `listProcessArgv` (one `ps` invocation, parsed into a process table) and
+`matchSentinelInArgvList` (pure exact-token matching against that table) — rather than two independent
+`ps`-shelling implementations, so a portability or correctness fix to either piece cannot silently
+apply to only one guard. They consume those pieces differently, for reasons specific to each call
+site's shape:
+
+- `runWorkerDetectorScan` checks one worker's sentinel at a time (`probeSentinelLive`, behind the
+  `sentinelProbeFn` function-var seam), composing a fresh fetch-then-match on each call — the scan
+  already processes stale workers one at a time across an entire store iteration, and workers rarely
+  go stale in large batches within a single 60s tick.
+- `dispatchCandidates` checks potentially many candidates in one call and reaches this guard
+  immediately after the existing `snap.Worker() != nil` in-flight guard, so it fetches the process
+  table once (`listProcessArgvFn`, lazily on first need) and matches every candidate's sentinel
+  against that one snapshot (`matchSentinelInArgvList` directly) — see the review-round fix under
+  Consequences below for why this shape replaced an earlier per-item `sentinelProbeFn` call.
+
+The dispatch-site check is a deliberate belt-and-suspenders addition regardless of which shape it
+uses, not a consequence of the scan-site fix being insufficient on its own: the scan-site fix is
+meant to make "dispatch a second worker while the first's sentinel is still live" unreachable, but the
+issue's own R5 requirement says to assert this independently rather than trust that inference.
 
 The dispatch-site check **fails open** on a probe error (allows dispatch), unlike the scan-site's
 tier-4 behavior (which eventually clears after a bound). This asymmetry is deliberate: by the time
@@ -169,10 +181,20 @@ is a follow-up issue grounded in evidence, not a speculative parameter added now
   itself is broken for the full duration — a strictly bounded, logged-as-unverified degradation, not
   an unbounded one.
 - Two new subprocess-spawn call sites are introduced (`ps`, once per stale `PID<=0` worker per scan
-  cycle, and once per dispatch-eligible item per poll pass with `Worker() == nil`) — both bounded by
-  a 3-second timeout and gated on `claudeNameFlagSupported`, so the additional cost is zero on a
-  fleet running an older `claude` CLI and small otherwise (proportional to items actually being
-  dispatched or actively timed-out, never full board size).
+  cycle, and — after a review-round fix, see below — once per `dispatchCandidates` call, not once
+  per dispatch-eligible item) — both bounded by a 3-second timeout and gated on
+  `claudeNameFlagSupported`, so the additional cost is zero on a fleet running an older `claude` CLI
+  and small otherwise.
+- **Review-round fix:** the first implementation called `sentinelProbeFn` (one `ps` spawn) per
+  dispatch-eligible item inside `dispatchCandidates`'s loop, before any item in that poll could be
+  dispatched — on a poll with many simultaneously dispatch-eligible items (a startup burst, or a wide
+  cooldown-expiry window), this serialized N subprocess spawns ahead of the first dispatch. Fixed by
+  splitting the probe into a fetch step (`listProcessArgvFn`, one `ps` invocation, one process-table
+  snapshot) and a pure in-memory match step (`matchSentinelInArgvList`); `dispatchCandidates` now
+  fetches the table at most once per call, lazily on first need, and matches every candidate's
+  sentinel against that single snapshot. `probeSentinelLive` (still used by the scan-loop's
+  one-worker-at-a-time check, and directly by the unix-only test suite) is unchanged in external
+  behavior — it composes the same two steps for a single sentinel.
 - `docs/USER_GUIDE.md`/`docs/stage-lifecycle.md`'s prior claim that the `--name` sentinel is
   "observability-only" and that "nothing in the engine reads, parses, or branches on it" is now
   false and has been corrected in the same change (see Scope in the issue).

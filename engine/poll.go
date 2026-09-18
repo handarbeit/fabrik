@@ -1810,6 +1810,19 @@ func (e *Engine) runCatchUpPhase2(ctx context.Context, board *gh.ProjectBoard, i
 func (e *Engine) dispatchCandidates(ctx context.Context, board *gh.ProjectBoard, deepFetchCandidates []gh.ProjectItem) int {
 	var dispatched int
 
+	// R5's sentinel check (below) fetches the live process table at most once
+	// per call to dispatchCandidates, lazily on first need, and reuses it for
+	// every dispatch-eligible item in this pass — not once per item. A poll
+	// with many simultaneously dispatch-eligible items (a startup burst, or a
+	// wide cooldown-expiry window) would otherwise serialize one `ps`
+	// subprocess spawn per item before any of them could be dispatched
+	// (review finding on #1779).
+	var (
+		procListFetched bool
+		procList        []procArgvEntry
+		procListErr     error
+	)
+
 	for _, item := range deepFetchCandidates {
 		item := item
 		iKey := issueKey(item, e.defaultRepo())
@@ -1850,8 +1863,18 @@ func (e *Engine) dispatchCandidates(ctx context.Context, board *gh.ProjectBoard,
 		// which would be a strictly worse failure mode than the rare
 		// duplicate-writer this check exists to prevent.
 		if claudeNameFlagSupported && stageName != "" {
+			if !procListFetched {
+				procList, procListErr = listProcessArgvFn()
+				procListFetched = true
+			}
 			sentinel := sessionNameSentinel(itemRepo, item.Number, stageName)
-			if result := sentinelProbeFn(sentinel); result.Err == nil && result.Live {
+			var result sentinelProbeResult
+			if procListErr != nil {
+				result = sentinelProbeResult{Err: procListErr}
+			} else {
+				result = matchSentinelInArgvList(sentinel, procList)
+			}
+			if result.Err == nil && result.Live {
 				e.logf(item.Number, "worker-liveness", "refusing dispatch: sentinel %q still live for a cleared worker\n", sentinel)
 				continue
 			}
