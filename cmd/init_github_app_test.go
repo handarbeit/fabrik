@@ -162,7 +162,7 @@ func TestRunGitHubAppSetup_AdoptPinnedInstallation_Success(t *testing.T) {
 	)
 
 	res, err := runGitHubAppSetup(context.Background(), githubAppSetupOptions{
-		Owner: "handarbeit", AppID: 42, PrivateKeyPath: keyPath, InstallationID: 555, BaseURL: srv.URL,
+		Owner: "handarbeit", AppID: 42, PrivateKeyPath: keyPath, InstallationID: 555, BaseURL: srv.URL, NoBrowser: true,
 	})
 	if err != nil {
 		t.Fatalf("runGitHubAppSetup: %v", err)
@@ -194,7 +194,7 @@ func TestRunGitHubAppSetup_Discovery_FindsInstallation(t *testing.T) {
 	)
 
 	res, err := runGitHubAppSetup(context.Background(), githubAppSetupOptions{
-		Owner: "handarbeit", AppID: 42, PrivateKeyPath: keyPath, BaseURL: srv.URL,
+		Owner: "handarbeit", AppID: 42, PrivateKeyPath: keyPath, BaseURL: srv.URL, NoBrowser: true,
 	})
 	if err != nil {
 		t.Fatalf("runGitHubAppSetup: %v", err)
@@ -214,7 +214,7 @@ func TestRunGitHubAppSetup_Discovery_NoInstallationFound(t *testing.T) {
 	)
 
 	_, err := runGitHubAppSetup(context.Background(), githubAppSetupOptions{
-		Owner: "handarbeit", AppID: 42, PrivateKeyPath: keyPath, BaseURL: srv.URL,
+		Owner: "handarbeit", AppID: 42, PrivateKeyPath: keyPath, BaseURL: srv.URL, NoBrowser: true,
 	})
 	if err == nil {
 		t.Fatal("expected an error when no installation matches --owner")
@@ -234,7 +234,7 @@ func TestRunGitHubAppSetup_UserOwnedBoard_Refused(t *testing.T) {
 	)
 
 	_, err := runGitHubAppSetup(context.Background(), githubAppSetupOptions{
-		Owner: "someuser", AppID: 42, PrivateKeyPath: keyPath, InstallationID: 555, BaseURL: srv.URL,
+		Owner: "someuser", AppID: 42, PrivateKeyPath: keyPath, InstallationID: 555, BaseURL: srv.URL, NoBrowser: true,
 	})
 	if err == nil {
 		t.Fatal("expected a refusal for a user-owned target")
@@ -257,7 +257,7 @@ func TestRunGitHubAppSetup_PermissionShortfall_ReportsApprovalURL(t *testing.T) 
 	)
 
 	_, err := runGitHubAppSetup(context.Background(), githubAppSetupOptions{
-		Owner: "handarbeit", AppID: 42, PrivateKeyPath: keyPath, InstallationID: 555, BaseURL: srv.URL,
+		Owner: "handarbeit", AppID: 42, PrivateKeyPath: keyPath, InstallationID: 555, BaseURL: srv.URL, NoBrowser: true,
 	})
 	if err == nil {
 		t.Fatal("expected a permission-shortfall error")
@@ -309,7 +309,7 @@ func TestRunGitHubAppSetup_SetsRequiredPermissionsOnReconcileOptions(t *testing.
 	os.Stdout = w
 
 	_, setupErr := runGitHubAppSetup(context.Background(), githubAppSetupOptions{
-		Owner: "handarbeit", AppID: 42, PrivateKeyPath: keyPath, InstallationID: 555, BaseURL: srv.URL,
+		Owner: "handarbeit", AppID: 42, PrivateKeyPath: keyPath, InstallationID: 555, BaseURL: srv.URL, NoBrowser: true,
 	})
 
 	w.Close()
@@ -341,7 +341,7 @@ func TestRunGitHubAppSetup_Webhooks_ExpandsRequiredPermissions(t *testing.T) {
 	)
 
 	_, err := runGitHubAppSetup(context.Background(), githubAppSetupOptions{
-		Owner: "handarbeit", AppID: 42, PrivateKeyPath: keyPath, InstallationID: 555, Webhooks: true, BaseURL: srv.URL,
+		Owner: "handarbeit", AppID: 42, PrivateKeyPath: keyPath, InstallationID: 555, Webhooks: true, BaseURL: srv.URL, NoBrowser: true,
 	})
 	if err == nil {
 		t.Fatal("expected a shortfall for the missing repository_hooks permission when --webhooks is set")
@@ -639,5 +639,46 @@ func TestRunInit_PlainInvocation_IgnoresMalformedGitHubAppEnvVar(t *testing.T) {
 
 	if err := runInit([]string{}); err != nil {
 		t.Fatalf("runInit with no GitHub-App flags should ignore a malformed FABRIK_GITHUB_APP_ID, got error: %v", err)
+	}
+}
+
+// TestRunGitHubAppSetup_Discovery_NoInstallationFound_NeverOpensBrowser is the
+// regression guard for #1781. The no-matching-installation path is the one
+// branch of runGitHubAppSetup that reaches guideMissingInstallations, and before
+// this fix it shelled out through exec.Command("open", …) to a real browser —
+// on every `go test ./cmd/...`, which every Fabrik stage worker runs. The
+// operator saw a Chrome window pointed at
+// https://github.com/apps/fabrik/installations/new (a 404, since "fabrik" is the
+// App's creation-time name rather than a registered slug).
+//
+// Asserting on NoBrowser's effect requires a positive signal, not the absence of
+// a window: a test that merely sets NoBrowser: true and passes tells you nothing
+// about whether suppression actually worked, because a test that forgot it
+// passes identically. So this stubs OpenBrowser and fails if it is ever reached.
+// The stub is what the assertion rests on — with NoBrowser: true the gate should
+// short-circuit before the opener is consulted at all.
+func TestRunGitHubAppSetup_Discovery_NoInstallationFound_NeverOpensBrowser(t *testing.T) {
+	dir := t.TempDir()
+	chdirTest(t, dir)
+	keyPath := writeCmdTestAppKey(t, dir)
+	srv := newFakeGitHubAppSetupServer(t,
+		[]gh.AppInstallation{{ID: 111, Account: "someone-else", Permissions: fullPermissions()}},
+		map[string]string{"handarbeit": "organization"},
+	)
+
+	var opened []string
+	_, err := runGitHubAppSetup(context.Background(), githubAppSetupOptions{
+		Owner: "handarbeit", AppID: 42, PrivateKeyPath: keyPath, BaseURL: srv.URL,
+		NoBrowser: true,
+		OpenBrowser: func(url string) error {
+			opened = append(opened, url)
+			return nil
+		},
+	})
+	if err == nil {
+		t.Fatal("expected an error when no installation matches --owner")
+	}
+	if len(opened) != 0 {
+		t.Errorf("browser opener called with %v, want no calls — NoBrowser: true must suppress the guided-install open", opened)
 	}
 }

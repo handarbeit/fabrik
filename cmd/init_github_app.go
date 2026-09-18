@@ -45,8 +45,22 @@ type githubAppSetupOptions struct {
 	// Webhooks mirrors the engine's own --webhooks flag: whether the
 	// manifest/verification should include webhook-management permission.
 	Webhooks bool
-	// NoBrowser is forwarded to the manifest flow (R7).
+	// NoBrowser is forwarded to the manifest flow (R7), and also gates
+	// guideMissingInstallations' guided-install browser-open inside
+	// Reconcile's non-pinned discovery branch. Its zero value (false) means
+	// "attempt to open a browser" — correct for a human running
+	// `fabrik init --github-app`, but an unsafe default for a test, which
+	// gets a real Chrome window on the developer's desktop simply by not
+	// mentioning browsers (#1781). Every test call site sets it true.
 	NoBrowser bool
+	// OpenBrowser, when non-nil, replaces the function
+	// guideMissingInstallations calls instead of the package-level opener
+	// in internal/githubauth (ADR-1763's seam). It does not bypass
+	// NoBrowser — that still decides whether an open is attempted at all.
+	// Exists so a test can exercise the no-matching-installation path and
+	// assert positively that nothing reached the desktop, rather than
+	// inferring it from the absence of a window.
+	OpenBrowser func(string) error
 	// BaseURL selects GitHub's API host. "" = production; tests point it at
 	// an httptest server.
 	BaseURL string
@@ -117,6 +131,7 @@ func runGitHubAppSetup(ctx context.Context, opts githubAppSetupOptions) (*github
 		AppStatePath:        engine.GitHubAppStatePath("."),
 		WatchedRepos:        []string{opts.Owner + "/*"},
 		NoBrowser:           opts.NoBrowser,
+		OpenBrowser:         opts.OpenBrowser,
 		BaseURL:             opts.BaseURL,
 		AppName:             engine.GitHubAppName,
 		AppHomepageURL:      engine.GitHubAppHomepageURL,
