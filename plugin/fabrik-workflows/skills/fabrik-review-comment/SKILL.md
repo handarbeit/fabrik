@@ -71,6 +71,21 @@ If, after evaluating a bot review's findings (marked or unmarked) or a user's co
 
 A confabulated commit on a PR that's about to merge is worse than doing nothing: it can draw a fresh bot review with a new `DatabaseID`, which bypasses dedup and consumes another review cycle on feedback that was never real in the first place. "I reviewed this and found nothing to change" is a complete, correct response — say so in your output and stop there.
 
+## Security-Tagged Findings
+
+When a finding — whether a `[Bot Review Finding]`-marked comment you're evaluating autonomously, or a human's decision on a prior finding — concerns security (credential/secret exposure, injection, authn/authz gaps, permission escalation, insecure defaults, or similar), treat it as security-relevant based on what it actually describes, not on whether it uses the literal word "security." This applies on top of, not instead of, the ordinary evaluation/decision handling above.
+
+Before any conformance argument ("the spec says X", "the reference implementation does it this way", "already decided") may be raised in response, you must first state:
+- what is reachable/exploitable,
+- under which trigger or condition, and
+- what mitigations (existing config, defaults, tooling behavior) already reduce the exposure.
+
+An answer that cites only a spec requirement, a reference implementation, or "already reviewed" provenance — without addressing the above — does not satisfy this bar, no matter how many times that spec point was previously discussed. Provenance (where a requirement came from) is a distinct claim from mitigation (whether the resulting state is safe) and must not substitute for it. **This is exactly the reasoning chain that failed in a real incident**: dismissing a missing `persist-credentials: false` finding because "it contradicts FR-020, which was already reviewed twice" cites provenance, not mitigation — the exposure was never actually assessed.
+
+If the exposure assessment genuinely conflicts with an explicit spec decision — the finding is real and the spec forbids the fix — that conflict is for a human to resolve, not for you to arbitrate by picking a side, whether you reached that conflict through your own evaluation or through a human's dismiss instruction. State the tension plainly in your stage output (both the spec requirement in conflict and the security exposure it creates), and do not treat stating the tension as equivalent to resolving it. This is deliberately non-blocking: the existing review-reinvoke loop stays engaged on unresolved feedback every poll, and `MaxReviewCycles`/the non-convergence pause fallback is the existing escalation path if the tension never converges — no new engine mechanism is needed.
+
+This bar applies only once a finding is judged security-relevant by its substance — it does not turn every superficially security-adjacent comment into a mandatory exposure-assessment ritual, and it does not change the No-Op Contract or the fix/dismiss/defer/clarify handling for findings that aren't security-relevant.
+
 ## What You Do
 
 ### Act on the user's decision
@@ -85,6 +100,7 @@ Read the user's comment carefully to understand their intent for each finding:
 **Dismiss**: The user has indicated the finding is a false positive or acceptable risk.
 - Do not change the code
 - Note the dismissal in your response so it can be tracked
+- **If the finding is security-relevant** (see "Security-Tagged Findings" below) and the user's dismiss instruction gives only conformance grounds ("contradicts FR-N," "already decided," or similar, without a reachability/trigger/mitigation rationale) — an instruction to dismiss is not itself a risk rationale. Ask the user for a one-line risk rationale before resolving the thread rather than acting on the instruction alone; do not resolve a security-tagged thread on a conformance-only dismiss.
 
 **Defer**: The user wants the finding addressed in a follow-up issue.
 - Do not change the code now
@@ -168,3 +184,5 @@ Prefer committing incremental progress over trying to finish everything in one s
   Write all stage output to stdout only. The Fabrik engine captures stdout and posts it as a properly formatted `🏭 **Fabrik — stage: <Name>**` comment.
 
   **Exception — review thread resolution**: Resolving a PR review thread via `gh api GraphQL` (e.g., the `resolveReviewThread` mutation) is permitted. Only *comment creation* is prohibited, not *thread resolution*.
+
+  **Security-tagged threads are conditioned further.** Resolving a thread for a finding you've judged security-relevant (see "Security-Tagged Findings" above) requires that, in this turn, either a code change addressing the finding was made, or you stated an explicit risk rationale covering reachability/exploitability, trigger/condition, and existing mitigations — including when the impetus is an explicit human dismiss decision. Citing only a spec requirement, a reference implementation, or "already reviewed" provenance — e.g. "it contradicts FR-020, which was already reviewed twice" — does not satisfy this bar and does not justify resolving the thread, regardless of how many times that spec point was previously discussed, and regardless of whether a human told you to dismiss it. If the tension is genuine, leave the thread unresolved and state it plainly instead.

@@ -112,6 +112,21 @@ gh pr view <number> --comments
 ```
 Address valid feedback before doing your own review.
 
+### Security-Tagged Findings
+
+When a review comment or bot finding concerns security — credential/secret exposure, injection, authn/authz gaps, permission escalation, insecure defaults, or similar — treat it as security-relevant based on what it actually describes, not on whether it uses the literal word "security."
+
+Before any conformance argument ("the spec says X", "the reference implementation does it this way", "already decided") may be raised in response, you must first state:
+- what is reachable/exploitable,
+- under which trigger or condition, and
+- what mitigations (existing config, defaults, tooling behavior) already reduce the exposure.
+
+An answer that cites only a spec requirement, a reference implementation, or "already reviewed" provenance — without addressing the above — does not satisfy this bar, no matter how many times that spec point was previously discussed. Provenance (where a requirement came from) is a distinct claim from mitigation (whether the resulting state is safe) and must not substitute for it. **This is exactly the reasoning chain that failed in a real incident**: dismissing a missing `persist-credentials: false` finding because "it contradicts FR-020, which was already reviewed twice" cites provenance, not mitigation — the exposure was never actually assessed.
+
+If the finding's exposure assessment genuinely conflicts with an explicit spec decision — the finding is real and the spec forbids the fix — that conflict is for a human to resolve, not for you to arbitrate by picking a side. State the tension plainly in your stage output (both the spec requirement in conflict and the security exposure it creates), and do not treat stating the tension as equivalent to resolving it. This is deliberately non-blocking at the stage level: the existing review-reinvoke loop stays engaged on unresolved feedback every poll, and `MaxReviewCycles`/the non-convergence pause fallback is the existing escalation path if the tension never converges — no new engine mechanism is needed or in scope.
+
+This bar applies only once a finding is judged security-relevant by its substance — it does not turn every superficially security-adjacent comment into a mandatory exposure-assessment ritual.
+
 ## How You Review
 
 ### Read the diff, not just the code
@@ -310,6 +325,8 @@ So: prefer making steady, committed progress over racing to finish inside one sl
   Write all stage output to stdout only. The Fabrik engine captures stdout and posts it as a properly formatted `🏭 **Fabrik — stage: <Name>**` comment.
 
   **Exception — review thread resolution**: Resolving a PR review thread via `gh api GraphQL` (e.g., the `resolveReviewThread` mutation) is permitted. Only *comment creation* is prohibited, not *thread resolution*.
+
+  **Security-tagged threads are conditioned further.** Resolving a thread for a finding you've judged security-relevant (see "Security-Tagged Findings" above) requires that, in this turn, either a code change addressing the finding was made, or you stated an explicit risk rationale covering reachability/exploitability, trigger/condition, and existing mitigations. Citing only a spec requirement, a reference implementation, or "already reviewed" provenance — e.g. "it contradicts FR-020, which was already reviewed twice" — does not satisfy this bar and does not justify resolving the thread, regardless of how many times that spec point was previously discussed. If the tension is genuine, leave the thread unresolved and state it plainly instead.
 
 ## Labels You Interact With
 

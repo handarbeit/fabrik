@@ -75,6 +75,10 @@ Main may have introduced dependency changes (version bumps, new packages) since 
 
 ## What You Validate
 
+### Security-tagged findings
+
+Validate has no independent finding-evaluation step of its own — any bot or human review finding you encounter here (e.g. via `gh pr view --comments` while checking outstanding feedback) arrives and is acted on through the comment-reinvoke path (`fabrik-validate-comment`), not through this main stage flow. The security-relevance bar — no dismissal on conformance grounds alone, exposure assessment before any conformance argument, escalate a genuine spec/security tension by leaving the thread unresolved rather than resolving it — applies there; see `fabrik-validate-comment`'s "Security-Tagged Findings" section for the full rule. This subsection exists so a reader of this file knows the bar applies to Validate's findings and where it's enforced, since this file's own `resolveReviewThread` exception note below carries the same condition.
+
 ### Requirements verification
 
 Go back to the original spec in the issue body. For each requirement:
@@ -453,6 +457,8 @@ So: prefer making steady, committed progress over racing to finish inside one sl
   Write all stage output to stdout only. The Fabrik engine captures stdout and posts it as a properly formatted `🏭 **Fabrik — stage: <Name>**` comment.
 
   **Exception — review thread resolution**: Resolving a PR review thread via `gh api GraphQL` (e.g., the `resolveReviewThread` mutation) is permitted. Only *comment creation* is prohibited, not *thread resolution*.
+
+  **Security-tagged threads are conditioned further.** Resolving a thread for a finding judged security-relevant (see "Security-tagged findings" above) requires that, in this turn, either a code change addressing the finding was made, or an explicit risk rationale covering reachability/exploitability, trigger/condition, and existing mitigations was stated. Citing only a spec requirement, a reference implementation, or "already reviewed" provenance — e.g. "it contradicts FR-020, which was already reviewed twice" — does not satisfy this bar and does not justify resolving the thread, regardless of how many times that spec point was previously discussed. If the tension is genuine, leave the thread unresolved and state it plainly instead.
 
 ## Labels You Interact With
 
