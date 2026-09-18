@@ -250,11 +250,22 @@ type updateStatusCall struct {
 	projectID, itemID, fieldID, optionID string
 }
 
+// errFetchLabelsNotConfigured is the mock's zero-value FetchLabels response.
+// refreshAutonomyLabels (#1769) now replaces item.Labels unconditionally on a
+// successful fetch (R3 — zero labels is real data, not "no change"), so a
+// test that hasn't configured fetchLabelsFn genuinely hasn't modeled what
+// GitHub would return here. Treating that as an error — which
+// refreshAutonomyLabels falls back on by leaving item.Labels untouched (R2)
+// — preserves every existing test's directly-constructed item.Labels, rather
+// than silently wiping them the way a bare (nil, nil) "confirmed zero
+// labels" default would.
+var errFetchLabelsNotConfigured = errors.New("mockGitHubClient: fetchLabelsFn not configured")
+
 func (m *mockGitHubClient) FetchLabels(owner, repo string, issueNumber int) ([]string, error) {
 	if m.fetchLabelsFn != nil {
 		return m.fetchLabelsFn(owner, repo, issueNumber)
 	}
-	return nil, nil
+	return nil, errFetchLabelsNotConfigured
 }
 
 func (m *mockGitHubClient) FetchProjectBoard(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
