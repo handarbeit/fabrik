@@ -306,6 +306,140 @@ func TestApplyItemDeepFetched(t *testing.T) {
 	}
 }
 
+// ---- BlockedByEdgeAdded ----
+
+func TestApplyBlockedByEdgeAdded(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	applyExpect(t, s, BlockedByEdgeAdded{
+		Repo:   testRepo,
+		Number: 1,
+		Dep:    gh.Dependency{Repo: "owner/child-repo", Number: 42, State: "OPEN"},
+	}, BlockedByChanged)
+	st := getItem(t, s, testRepo, 1)
+	if len(st.BlockedBy) != 1 {
+		t.Fatalf("BlockedBy = %v; want 1 entry", st.BlockedBy)
+	}
+	if got := st.BlockedBy[0]; got.Repo != "owner/child-repo" || got.Number != 42 || got.State != "OPEN" {
+		t.Errorf("BlockedBy[0] = %+v; want {Repo: owner/child-repo, Number: 42, State: OPEN}", got)
+	}
+}
+
+// TestApplyBlockedByEdgeAdded_AppendsToExisting verifies a second edge is
+// appended alongside an already-present one rather than replacing it — a
+// multi-child spawn calls this mutation once per child in sequence.
+func TestApplyBlockedByEdgeAdded_AppendsToExisting(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	applyExpect(t, s, BlockedByEdgeAdded{
+		Repo: testRepo, Number: 1,
+		Dep: gh.Dependency{Repo: "owner/child-repo", Number: 42, State: "OPEN"},
+	}, BlockedByChanged)
+	applyExpect(t, s, BlockedByEdgeAdded{
+		Repo: testRepo, Number: 1,
+		Dep: gh.Dependency{Repo: "owner/child-repo", Number: 43, State: "OPEN"},
+	}, BlockedByChanged)
+	st := getItem(t, s, testRepo, 1)
+	if len(st.BlockedBy) != 2 {
+		t.Fatalf("BlockedBy = %v; want 2 entries", st.BlockedBy)
+	}
+}
+
+// TestApplyBlockedByEdgeAdded_DedupsByRepoAndNumber verifies that re-applying
+// the same edge (e.g. spawnChildren resuming a partial spawn and re-linking an
+// already-linked child) is a no-op rather than a duplicate entry.
+func TestApplyBlockedByEdgeAdded_DedupsByRepoAndNumber(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	dep := gh.Dependency{Repo: "owner/child-repo", Number: 42, State: "OPEN"}
+	applyExpect(t, s, BlockedByEdgeAdded{Repo: testRepo, Number: 1, Dep: dep}, BlockedByChanged)
+
+	_, changes, err := s.Apply(BlockedByEdgeAdded{Repo: testRepo, Number: 1, Dep: dep})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(changes) != 0 {
+		t.Errorf("re-applying an existing edge produced Changes %v; want none (no-op)", changes)
+	}
+	st := getItem(t, s, testRepo, 1)
+	if len(st.BlockedBy) != 1 {
+		t.Fatalf("BlockedBy = %v; want still 1 entry after duplicate add", st.BlockedBy)
+	}
+}
+
+// TestApplyBlockedByEdgeAdded_LeavesOtherDeepFieldsUntouched contrasts with
+// ItemDeepFetched: this mutation must touch only BlockedBy, never resetting
+// Comments, Body, or Assignees the way a synthetic partial ItemDeepFetched
+// would.
+func TestApplyBlockedByEdgeAdded_LeavesOtherDeepFieldsUntouched(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	s.Apply(IssueCommentCreated{Repo: testRepo, Number: 1, Comment: gh.Comment{ID: "c1", DatabaseID: 1, Body: "hello"}})
+
+	before := getItem(t, s, testRepo, 1)
+
+	applyExpect(t, s, BlockedByEdgeAdded{
+		Repo: testRepo, Number: 1,
+		Dep: gh.Dependency{Repo: "owner/child-repo", Number: 42, State: "OPEN"},
+	}, BlockedByChanged)
+
+	after := getItem(t, s, testRepo, 1)
+	if !reflect.DeepEqual(before.Comments, after.Comments) {
+		t.Errorf("Comments changed: before %v, after %v", before.Comments, after.Comments)
+	}
+	if before.Body != after.Body {
+		t.Errorf("Body changed: before %q, after %q", before.Body, after.Body)
+	}
+	if !reflect.DeepEqual(before.Assignees, after.Assignees) {
+		t.Errorf("Assignees changed: before %v, after %v", before.Assignees, after.Assignees)
+	}
+}
+
+// ---- IssueOpened.PreserveBlockedBy ----
+
+// TestApplyIssueOpened_PreserveBlockedBy_KeepsPreSeededEdge is a bot-review
+// regression guard (#1783 follow-up): a dependency edge written synchronously
+// via BlockedByEdgeAdded (e.g. spawnChildren, for a child it just created)
+// must survive a subsequent IssueOpened apply whose Item carries no
+// BlockedBy data of its own — the shape of a genuine "issues.opened" webhook
+// payload, which never carries Issue Dependency data.
+func TestApplyIssueOpened_PreserveBlockedBy_KeepsPreSeededEdge(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	applyExpect(t, s, BlockedByEdgeAdded{
+		Repo: testRepo, Number: 1,
+		Dep: gh.Dependency{Repo: "owner/child-repo", Number: 42, State: "OPEN"},
+	}, BlockedByChanged)
+
+	pi := testProjectItem(testRepo, 1)
+	pi.BlockedBy = nil // webhook payloads never carry this
+	s.Apply(IssueOpened{Item: pi, PreserveBlockedBy: true})
+
+	st := getItem(t, s, testRepo, 1)
+	if len(st.BlockedBy) != 1 || st.BlockedBy[0].Repo != "owner/child-repo" || st.BlockedBy[0].Number != 42 {
+		t.Fatalf("BlockedBy = %+v; want the pre-seeded edge preserved", st.BlockedBy)
+	}
+}
+
+// TestApplyIssueOpened_WithoutPreserveBlockedBy_StillOverwrites pins the
+// default (PreserveBlockedBy: false) behavior unchanged: a genuine deep-fetch
+// caller (e.g. applyProjectsV2ItemDelta's "created" case, which resolves the
+// authoritative current BlockedBy via FetchItemDetails) must still be able to
+// clear a since-removed dependency — PreserveBlockedBy must not be applied
+// generically to every IssueOpened, only to the webhook-sourced caller that
+// opts in.
+func TestApplyIssueOpened_WithoutPreserveBlockedBy_StillOverwrites(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	applyExpect(t, s, BlockedByEdgeAdded{
+		Repo: testRepo, Number: 1,
+		Dep: gh.Dependency{Repo: "owner/child-repo", Number: 42, State: "OPEN"},
+	}, BlockedByChanged)
+
+	pi := testProjectItem(testRepo, 1)
+	pi.BlockedBy = nil // authoritative fetch found no open dependencies
+	s.Apply(IssueOpened{Item: pi})
+
+	st := getItem(t, s, testRepo, 1)
+	if len(st.BlockedBy) != 0 {
+		t.Errorf("BlockedBy = %+v; want cleared (default IssueOpened is still authoritative)", st.BlockedBy)
+	}
+}
+
 // ---- SelfWriteObserved ----
 
 func TestApplySelfWriteObserved(t *testing.T) {

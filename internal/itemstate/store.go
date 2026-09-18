@@ -279,6 +279,12 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		// (stale) creation-time label list from the webhook payload.
 		merged := v.Item
 		merged.Labels = unionStrings(item.Labels, v.Item.Labels)
+		if v.PreserveBlockedBy {
+			// v.Item.BlockedBy is always empty here (webhook payloads never
+			// carry dependency data) — keep whatever the Store already knows
+			// rather than letting applyProjectItem wipe it (#1783 follow-up).
+			merged.BlockedBy = item.BlockedBy
+		}
 		return applyProjectItem(item, merged)
 
 	case IssueLabeled:
@@ -393,6 +399,15 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		item.LastSeenSourceUpdatedAt = v.FreshState.UpdatedAt
 		item.LastDeepFetchFailureAt = time.Time{} // clear failure on success
 		return flags | DeepFetchChanged
+
+	case BlockedByEdgeAdded:
+		for _, d := range item.BlockedBy {
+			if d.Repo == v.Dep.Repo && d.Number == v.Dep.Number {
+				return 0
+			}
+		}
+		item.BlockedBy = append(item.BlockedBy, v.Dep)
+		return BlockedByChanged
 
 	case StageAttempted:
 		ensureStageStateMaps(item)

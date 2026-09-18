@@ -371,7 +371,12 @@ func (c *CacheImpl) applyIssuesDelta(payload []byte) {
 			Labels:    labels,
 			Assignees: assignees,
 		}
-		_, changes, _ := c.store.Apply(itemstate.IssueOpened{Item: pi})
+		// PreserveBlockedBy: this payload never carries Issue Dependency data,
+		// so an "opened" delivery arriving after a synchronous
+		// BlockedByEdgeAdded write (spawnChildren, #1783) — e.g. for a child
+		// issue this same engine just created — must not wipe it back to
+		// empty (#1783 follow-up).
+		_, changes, _ := c.store.Apply(itemstate.IssueOpened{Item: pi, PreserveBlockedBy: true})
 		if len(changes) == 0 {
 			return
 		}

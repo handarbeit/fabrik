@@ -26,6 +26,18 @@ type Mutation interface {
 // is the full per-item representation used throughout Fabrik.
 type IssueOpened struct {
 	Item gh.ProjectItem
+
+	// PreserveBlockedBy is set by callers whose Item.BlockedBy is known to be
+	// incomplete rather than genuinely empty — specifically, a GitHub
+	// "issues.opened" webhook payload, which structurally never carries Issue
+	// Dependency data. When true, applyToItem keeps the existing item's
+	// BlockedBy instead of overwriting it with Item's (always-empty) value —
+	// protecting a dependency edge written synchronously via
+	// BlockedByEdgeAdded (#1783) moments earlier for a newly-created item
+	// from being wiped by an out-of-order "opened" webhook delivery. Callers
+	// whose Item.BlockedBy comes from a genuine deep-fetch (authoritative)
+	// must leave this false so a since-removed dependency is still cleared.
+	PreserveBlockedBy bool
 }
 
 func (IssueOpened) isMutation() {}
@@ -290,6 +302,24 @@ type ItemDeepFetched struct {
 
 func (ItemDeepFetched) isMutation()       {}
 func (m ItemDeepFetched) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// BlockedByEdgeAdded appends a single dependency edge to an item's BlockedBy
+// list, deduplicated by (Repo, Number) — a no-op (returns ChangeFlags(0)) if an
+// edge to the same blocker is already present. Applied synchronously by
+// spawnChildren (engine/spawn.go) the instant each child is linked via
+// AddBlockedByIssue, so the Store's own copy of BlockedBy reflects the new
+// edge immediately, without waiting for a subsequent deep-fetch or depending
+// on cycleSet wake timing (#1783). Unlike ItemDeepFetched, this touches only
+// BlockedBy — no other deep field (Comments, Body, Assignees, etc.) is reset
+// or overwritten.
+type BlockedByEdgeAdded struct {
+	Repo   string // parent's "owner/repo"
+	Number int    // parent's issue number
+	Dep    gh.Dependency
+}
+
+func (BlockedByEdgeAdded) isMutation()       {}
+func (m BlockedByEdgeAdded) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // DeepFetchInvalidated clears LastDeepFetchAt so the next FetchItemDetails call
 // re-fetches deep fields from GitHub. Used by delta handlers that detect stale

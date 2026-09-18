@@ -32,7 +32,11 @@ Labels that suspend processing entirely.
   automatically on the next stage completion (removes any orphaned label
   left over from a manual `fabrik:paused` removal).
 - **`fabrik:blocked`** — Set when the issue has open `blockedBy`
-  dependencies (via GitHub's Issue Dependencies feature). Cleared as soon as
+  dependencies (via GitHub's Issue Dependencies feature). For a parent that
+  just spawned sub-issues (see `fabrik:children-spawned` below), the new
+  `blockedBy` edges are recorded deterministically at spawn time, not
+  discovered on some later poll — so the parent picks up this label on its
+  very next evaluation, not eventually. Cleared as soon as
   all blockers close — either immediately (a push-based observer) or within
   one dependency re-check cycle. Suspends all stage dispatch while present.
 
