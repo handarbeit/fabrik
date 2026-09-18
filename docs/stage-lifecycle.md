@@ -519,6 +519,24 @@ Empty result with valid session ID is accepted (max turns hit — Claude was mid
 
 If parsing fails: error message posted instead of raw output. Full output in log files.
 
+### Assistant-Turn Artifact Harvest (R1/R2)
+
+The CLI's terminal `result` field is whichever text the agent emitted in its *very last* turn — not necessarily the same turn that produced the stage's real artifact. If the agent makes one more tool call after emitting its output (a common shape: emit the Plan/Research/Review content, then run one more verification command before signaling done), `result` ends up carrying only the wrap-up, sometimes nothing but the bare `FABRIK_STAGE_COMPLETE` marker itself. Before this harvest existed, that wrap-up was trusted verbatim and the real artifact was silently discarded — the stage was still labelled `stage:<name>:complete`, with no comment and no `.fabrik-context/stage-<Name>.md` behind it, discovered only when a later stage found nothing to read (#1632, #1782).
+
+`interpretClaudeResult` (`engine/claude.go`) detects this via `artifactMissingOnComplete`: `FABRIK_STAGE_COMPLETE` is present, `FABRIK_NO_WORK_NEEDED` is not (see the exclusion below), and the text carries nothing beyond Fabrik's own bare control-marker lines (`hasArtifactContent` — the same five markers `FABRIK_STAGE_COMPLETE`/`FABRIK_BLOCKED_ON_INPUT`/`FABRIK_NO_WORK_NEEDED`/`FABRIK_SUMMARY_BEGIN`/`FABRIK_SUMMARY_END` that Marker Stripping below removes before posting). When that fires, `extractLastSubstantialAssistantTurn` re-scans the raw NDJSON output (the same `forEachAssistantText` line-scanner that already powers the narrower `FABRIK_ISSUE_UPDATE_BEGIN`-specific fallback immediately preceding it in the function) for the **last assistant turn whose text is non-empty after that same stripping** — not "the turn containing the marker," since the reported case's marker-bearing turn contains only the marker itself. The recovered turn is prepended to the CLI's own result text, so the marker itself is always preserved for the completion check that follows.
+
+This only ever *adds* content ahead of an already-thin result — an ordinary completion where the artifact is already present in `result` never triggers the scan (`hasArtifactContent(resp.Result)` is already true) and is byte-identical to before this existed.
+
+### No-Artifact Completion Guard (R3)
+
+`FABRIK_STAGE_COMPLETE` being present is not, by itself, sufficient evidence that the stage produced anything — the harvest above can come back empty too (no assistant turn had any content beyond control markers). `artifactMissingOnComplete` gates every place `interpretClaudeResult` would otherwise convert "marker present" into `completed = true` (the marker-found-despite-a-trailing-error path, and the ordinary clean-exit path); when it holds, `completed` is forced `false` and the invocation falls through to the stage's normal non-completion handling instead — for a stage dispatch, that is the existing retry/escalate machinery (`finalizeStageOutcome`, `engine/item.go`): the attempt counts against `MaxRetries` (mirroring the pre-existing degenerate-output guard, #1065 — the invocation did real work, so this is not exempted the way a usage-limit or tools-denied exit is), a one-time first-detection comment ("no artifact harvested") posts on the first occurrence, and the eventual escalation at `MaxRetries` names this cause distinctly from the unrelated bare-file-reference one. For the comment-review path (`processComments`/`publishCommentOutput`, `engine/comments.go`), `completed = false` flows through unchanged into the same no-progress/no-op-cycle handling comment processing already has — no separate guard was needed there, since both invocation paths bottom out in this same `interpretClaudeResult` call.
+
+**Exclusion:** a stage that legitimately produces no artifact — `FABRIK_STAGE_COMPLETE` co-occurring with `FABRIK_NO_WORK_NEEDED` — is never treated as this defect. Both the harvest scan and the completion guard check `!CheckNoWorkNeeded(text)` before doing anything, so a no-work-needed completion's established "nothing posted, stage skipped straight to Done" behavior is unaffected — including never risking a scan pulling unrelated earlier-turn reasoning into it.
+
+This does not change or duplicate `recoverMissingPlanComment` (#982): that recovery targets a stale-cache race (a fresh Plan comment existing on GitHub but not yet visible in `item.Comments`), a different root cause producing the same *symptom* (`stage:Plan:complete` present, no Plan comment). This guard targets the harvest defect directly, at the point the artifact is first assembled, so new occurrences of the #1632 shape should no longer reach that recovery path at all.
+
+See ADR-1782.
+
 ### Issue Body Update
 
 Before posting output, checks for `FABRIK_ISSUE_UPDATE_BEGIN`/`END` markers:
