@@ -9407,6 +9407,51 @@ self-resolve; no manual label removal is required. Unlike `fabrik:claude-limit`,
 account-wide settle sweep for this label — the condition is inherently per-worktree, not
 account-wide. See [ADR-1346](../adrs/1346-scrub-anthropic-auth-env-namespace.md).
 
+### Toolchain Declaration Drift Detection (Worktree)
+
+A sixth check, `checkToolchainDrift` (`engine/toolchain.go`), runs at both invocation entry points —
+`runInvocationWithExtension` (stage dispatch, immediately after the `apiKeyHelper` check above) and
+`processComments` (comment review, right after context files are written) — closing the gap the
+`apiKeyHelper` check leaves on the comment-review path (#1786 R5 explicitly names both cycles).
+
+**Unlike every check above, this one never skips the invocation.** A long-lived daemon inherits `PATH`
+once, from whatever shell hosted it at startup; a worktree can declare a toolchain version
+(`.nvmrc`, `package.json` `engines.node`, `go.mod`'s `toolchain`/`go` directive, or `.tool-versions`)
+newer than what that inherited `PATH` resolves, and nothing before this check ever notices — workers
+keep running the stale toolchain silently, indefinitely, restarting `fabrik` itself does not help
+(it re-inherits the same `PATH` from the same parent shell). Re-resolving `PATH` or driving a version
+manager (`nvm use`, `asdf install`, …) is explicitly out of scope; this is a warn-and-continue signal,
+not a gate, so it returns nothing — `finalizeStageOutcome` is never involved, `StageAttempted`/
+`StageRetryIncremented` bookkeeping is untouched, and the invocation proceeds exactly as it would have.
+
+1. `detectToolchainDrift` reads whichever declaration files exist in `workDir` and, for each
+   comparable declaration, resolves the corresponding binary (`node --version` / `go version`) via
+   `exec.LookPath` against the daemon's own inherited `PATH`. A binary entirely absent from `PATH` is
+   "cannot compare" (a distinct, pre-existing condition — not this check's concern), never a mismatch.
+   The resolved version is cached process-wide per tool for the daemon's lifetime (`resolveToolVersion`)
+   — since the entire premise of the bug is that this `PATH` is invariant until a restart, a second
+   check for the same tool is a cache hit, not a second shell-out.
+2. Comparison is deliberately narrow and fails closed: `.nvmrc`, `package.json` `engines.node`, and
+   `.tool-versions` are compared at **major-version granularity only** (an alias like `lts/*`, a
+   complex semver range using `||`/`x`/multiple clauses, or any other unparseable content is "not
+   comparable" — silence, never a false-positive warning); `go.mod`'s `toolchain`/`go` directive is
+   compared at **major.minor granularity**, using minimum-version (`>=`) semantics, since a `go.mod`
+   declares a floor, not a pin (and `GOTOOLCHAIN=auto`, the Go 1.21+ default, already self-corrects in
+   the common case — this only catches the `GOTOOLCHAIN=local` / auto-download-disabled edge case).
+3. On any comparable mismatch, if `fabrik:toolchain-stale` is absent: an explanatory comment naming
+   every mismatched declaration (source, declared version, resolved version) is posted and the label
+   is applied — gated on the label's own absence, so the warning fires once per episode (per issue),
+   not once per invocation (#1786 R5), matching `fabrik:claude-limit`/`fabrik:api-key-helper-detected`.
+4. If no comparable mismatch is found and `fabrik:toolchain-stale` is present, the label is cleared —
+   self-resolving once a worktree's declaration file is fixed (or, in practice, the daemon is restarted
+   with a corrected `PATH`), exactly like `fabrik:api-key-helper-detected`. No dedicated settle scan:
+   this is a fire-once informational label, added to `transientLifecycleLabels` for closed-issue sweep.
+
+A daemon/worktree whose resolved toolchain already satisfies every declaration sees no new behavior and
+no new output at all (#1786 R4) — no comment, no label, no added latency worth noticing beyond a few
+small file reads and, at most once per tool per daemon lifetime, a version-check subprocess. See
+[ADR-1786](../adrs/1786-toolchain-declaration-drift-detection.md).
+
 ### Branch Pushing
 
 Always pushed after Claude runs (success or failure): `git push --force-with-lease -u origin fabrik/issue-<N>`
