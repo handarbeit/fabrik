@@ -1395,6 +1395,11 @@ func TestUpdate_PluginUpgradeResultMsg_Error(t *testing.T) {
 
 // TestUpdate_CustomWorkflowEvent verifies that CustomWorkflowEvent sets the
 // customWorkflow badge and clears skillsStaleCount.
+// TestUpdate_CustomWorkflowEvent verifies #1787: CustomWorkflowEvent and
+// skillsStaleCount are independent facts. A pre-existing skillsStaleCount
+// must be preserved (not zeroed) when CustomWorkflowEvent arrives — before
+// #1787 this cleared skillsStaleCount, silently suppressing the staleness
+// signal the moment customization was also detected.
 func TestUpdate_CustomWorkflowEvent(t *testing.T) {
 	m := New(30, ProjectInfo{}, "", nil, nil, 4, false)
 
@@ -1407,8 +1412,8 @@ func TestUpdate_CustomWorkflowEvent(t *testing.T) {
 	if !nm.header.customWorkflow {
 		t.Error("expected customWorkflow=true after CustomWorkflowEvent")
 	}
-	if nm.header.skillsStaleCount != 0 {
-		t.Errorf("skillsStaleCount = %d, want 0 after CustomWorkflowEvent", nm.header.skillsStaleCount)
+	if nm.header.skillsStaleCount != 4 {
+		t.Errorf("skillsStaleCount = %d, want 4 (preserved) after CustomWorkflowEvent", nm.header.skillsStaleCount)
 	}
 }
 
@@ -1442,6 +1447,32 @@ func TestUKey_CustomWorkflow(t *testing.T) {
 	}
 	if !strings.Contains(nm.header.statusMsg, "[3]") {
 		t.Errorf("statusMsg should show cancel option, got %q", nm.header.statusMsg)
+	}
+}
+
+// TestUKey_CustomWorkflowAndStale verifies #1787 R1: pressing u when both
+// customWorkflow and skillsStaleCount are true shows a status message naming
+// both facts, not just the customization dialog alone.
+func TestUKey_CustomWorkflowAndStale(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", nil, nil, 3, true)
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("u")})
+	nm := next.(Model)
+
+	if cmd != nil {
+		t.Error("expected nil cmd from u key entering confirmReconcile")
+	}
+	if !nm.confirmReconcile {
+		t.Error("expected confirmReconcile=true after u key with customWorkflow")
+	}
+	if !strings.Contains(nm.header.statusMsg, "3") {
+		t.Errorf("statusMsg should name the stale count, got %q", nm.header.statusMsg)
+	}
+	if !strings.Contains(nm.header.statusMsg, "stale") {
+		t.Errorf("statusMsg should mention staleness, got %q", nm.header.statusMsg)
+	}
+	if !strings.Contains(nm.header.statusMsg, "[1]") || !strings.Contains(nm.header.statusMsg, "[2]") || !strings.Contains(nm.header.statusMsg, "[3]") {
+		t.Errorf("statusMsg should still show the reconcile/overwrite/cancel dialog, got %q", nm.header.statusMsg)
 	}
 }
 
@@ -1587,14 +1618,19 @@ func TestUKey_OverwriteConfirm_Esc(t *testing.T) {
 
 // TestUpdate_SkillsStaleEvent_Zero_ClearsCustomWorkflow verifies that
 // SkillsStaleEvent{Count:0} clears the customWorkflow badge.
-func TestUpdate_SkillsStaleEvent_Zero_ClearsCustomWorkflow(t *testing.T) {
+// TestUpdate_SkillsStaleEvent_Zero_PreservesCustomWorkflow verifies #1787:
+// SkillsStaleEvent{Count: 0} does not imply the plugin is no longer
+// customized — before #1787 this cleared customWorkflow, which is wrong: a
+// plugin can be customized (diskVer != installedVer) while having zero stale
+// files (installedVer == embeddedVer). The two facts are independent.
+func TestUpdate_SkillsStaleEvent_Zero_PreservesCustomWorkflow(t *testing.T) {
 	m := New(30, ProjectInfo{}, "", nil, nil, 0, true) // customWorkflow=true
 
 	next, _ := m.Update(SkillsStaleEvent{Count: 0})
 	nm := next.(Model)
 
-	if nm.header.customWorkflow {
-		t.Error("expected customWorkflow=false after SkillsStaleEvent{Count:0}")
+	if !nm.header.customWorkflow {
+		t.Error("expected customWorkflow=true to be preserved after SkillsStaleEvent{Count:0}")
 	}
 }
 
