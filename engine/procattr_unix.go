@@ -10,10 +10,27 @@ import (
 	"time"
 )
 
-// setCmdProcAttr starts cmd in its own process group so grandchild processes
-// (e.g. tail -f from the Monitor tool) can be cleaned up after cmd exits.
+// setCmdProcAttr starts cmd as a new session leader (setsid(2)) rather than
+// merely a new process group. This is #1798's load-bearing fix: setsid()
+// makes cmd's PID both its process group ID (PGID) and its session ID (SID),
+// and POSIX guarantees SID is assigned once at fork and never changes on
+// reparenting — only an explicit setsid() call in a descendant changes it.
+// So every process cmd transitively forks carries this same SID for its
+// entire life, however many shells deep, however it detaches (backgrounding,
+// nohup, disown) and however fast its immediate parent exits — even after
+// the kernel reparents it to init (PPID 1), which happens on a sub-second
+// timescale for nohup/disown and defeats any PPID-chain-walk-based reaper.
+// engine/descendant_reap_unix.go's trackWorkerDescendants exploits this by
+// matching live processes' SID against cmd's own PID.
+//
+// killProcGroup/killProcGroupGraceful's kill(-pid, sig) group-kill is
+// unaffected: setsid() also makes the caller its own process-group leader
+// (PGID == own PID), exactly as Setpgid: true already provided, so the
+// existing PGID-scoped kill needs no changes. The worker runs fully headless
+// (stdin is a string reader, not a tty), so losing a controlling terminal via
+// setsid() has no behavioral effect.
 func setCmdProcAttr(cmd *exec.Cmd) {
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 }
 
 // killProcGroup sends SIGKILL to cmd's entire process group, cleaning up any

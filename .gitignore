@@ -9,6 +9,7 @@
 .fabrik/plugin/
 .fabrik/sessions/
 .fabrik/logs/
+.fabrik/state/
 .fabrik/fabrik.lock
 .fabrik/fabrik.log
 .fabrik/debug/
