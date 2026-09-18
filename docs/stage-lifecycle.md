@@ -695,9 +695,12 @@ not a gate, so it returns nothing — `finalizeStageOutcome` is never involved, 
    comparable declaration, resolves the corresponding binary (`node --version` / `go version`) via
    `exec.LookPath` against the daemon's own inherited `PATH`. A binary entirely absent from `PATH` is
    "cannot compare" (a distinct, pre-existing condition — not this check's concern), never a mismatch.
-   The resolved version is cached process-wide per tool for the daemon's lifetime (`resolveToolVersion`)
-   — since the entire premise of the bug is that this `PATH` is invariant until a restart, a second
-   check for the same tool is a cache hit, not a second shell-out.
+   A successful resolution is cached process-wide per tool for the daemon's lifetime
+   (`resolveToolVersion`) — since the entire premise of the bug is that this `PATH` is invariant until
+   a restart, a second check for the same tool is a cache hit, not a second shell-out. A resolution
+   *failure* (subprocess timeout, transient exec error) is never cached, since unlike `PATH` itself a
+   failure carries no invariance guarantee — caching it would permanently and silently disable
+   detection for that tool after a single bad moment.
 2. Comparison is deliberately narrow and fails closed: `.nvmrc`, `package.json` `engines.node`, and
    `.tool-versions` are compared at **major-version granularity only** (an alias like `lts/*`, a
    complex semver range using `||`/`x`/multiple clauses, or any other unparseable content is "not

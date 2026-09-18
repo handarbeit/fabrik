@@ -314,9 +314,18 @@ var toolchainVersionCommand = map[string]struct {
 
 // resolveToolVersion resolves tool's version via the daemon's own inherited
 // PATH, memoized for the process's lifetime: the entire premise of #1786 is
-// that this PATH cannot change without a daemon restart, so the resolved
-// version is invariant for the process's life and a repeated per-invocation
-// shell-out would be pure waste (R4's "no added latency worth noticing").
+// that this PATH cannot change without a daemon restart, so a successful
+// resolution is invariant for the process's life and a repeated
+// per-invocation shell-out would be pure waste (R4's "no added latency
+// worth noticing"). Only successful resolutions are cached — a resolution
+// failure (subprocess timeout, transient exec error, or a momentarily
+// unavailable binary) is deliberately NOT cached, since unlike PATH itself,
+// nothing guarantees a failure is invariant; caching it would let a single
+// bad moment (e.g. a timeout under load) permanently and silently disable
+// drift detection for that tool for the rest of the daemon's life, with no
+// way to observe or recover from it (Pruefer, #1786 PR review). The retry
+// cost on a persistent failure is bounded the same way the happy path's
+// cost is: only paid when a worktree actually declares that tool.
 func resolveToolVersion(ctx context.Context, tool string) resolvedVersion {
 	toolchainVersionCacheMu.Lock()
 	if v, ok := toolchainVersionCache[tool]; ok {
@@ -327,9 +336,11 @@ func resolveToolVersion(ctx context.Context, tool string) resolvedVersion {
 
 	v := resolveToolVersionUncached(ctx, tool)
 
-	toolchainVersionCacheMu.Lock()
-	toolchainVersionCache[tool] = v
-	toolchainVersionCacheMu.Unlock()
+	if v.err == nil {
+		toolchainVersionCacheMu.Lock()
+		toolchainVersionCache[tool] = v
+		toolchainVersionCacheMu.Unlock()
+	}
 	return v
 }
 

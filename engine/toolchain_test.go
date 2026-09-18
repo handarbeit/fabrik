@@ -342,6 +342,67 @@ func TestResolveToolVersion_MissingFromPath(t *testing.T) {
 	}
 }
 
+// writeFlakyVersionShim writes an executable script named binName that fails
+// (nonzero exit, no parseable output) on its first invocation and succeeds
+// with output on every subsequent one — simulating a transient resolution
+// failure (e.g. a timeout or momentary exec hiccup) followed by recovery.
+// Uses only shell builtins (test, `:`, redirection) — no external commands
+// like `wc` — since the test deliberately restricts PATH to the shim's own
+// directory, exactly like writeVersionShim above.
+func writeFlakyVersionShim(t *testing.T, dir, binName, output, counterFile, markerFile string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell shim scripts are not supported on windows")
+	}
+	script := fmt.Sprintf(
+		"#!/bin/sh\necho x >> %q\nif [ -f %q ]; then\n  echo %q\nelse\n  : > %q\n  exit 1\nfi\n",
+		counterFile, markerFile, output, markerFile,
+	)
+	path := filepath.Join(dir, binName)
+	if err := os.WriteFile(path, []byte(script), 0755); err != nil {
+		t.Fatalf("write %s shim: %v", binName, err)
+	}
+}
+
+func TestResolveToolVersion_TransientFailureNotCached(t *testing.T) {
+	// Pruefer (#1786 PR review): a resolution failure must not be cached for
+	// the process lifetime the way a success is — a single transient hiccup
+	// (exec timeout under load, momentarily unavailable binary) would
+	// otherwise permanently and silently disable drift detection for that
+	// tool until the next daemon restart.
+	resetToolchainVersionCacheForTest()
+	t.Cleanup(resetToolchainVersionCacheForTest)
+
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	counter := filepath.Join(stateDir, "calls")
+	marker := filepath.Join(stateDir, "called-once")
+	writeFlakyVersionShim(t, binDir, "node", "v20.20.2", counter, marker)
+	t.Setenv("PATH", binDir)
+
+	v1 := resolveToolVersion(context.Background(), "node")
+	if v1.err == nil {
+		t.Fatalf("first resolveToolVersion() = %+v, want an error (simulated transient failure)", v1)
+	}
+
+	v2 := resolveToolVersion(context.Background(), "node")
+	if v2.err != nil {
+		t.Fatalf("second resolveToolVersion() error = %v, want a successful retry (failure must not be cached)", v2.err)
+	}
+	if v2.major != 20 || v2.minor != 20 {
+		t.Errorf("resolved = %+v, want major=20 minor=20", v2)
+	}
+
+	// A successful resolution IS cached: a third call must not re-invoke.
+	v3 := resolveToolVersion(context.Background(), "node")
+	if v3 != v2 {
+		t.Errorf("third resolveToolVersion() = %+v, want identical cached %+v", v3, v2)
+	}
+	if calls := countLines(t, counter); calls != 2 {
+		t.Errorf("shim invoked %d time(s), want 2 (fail once, succeed once, then served from cache)", calls)
+	}
+}
+
 // --- End-to-end detection ---
 
 func TestDetectToolchainDrift_ReportedShape(t *testing.T) {

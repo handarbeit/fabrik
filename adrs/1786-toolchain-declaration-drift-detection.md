@@ -64,15 +64,23 @@ repeated-subprocess-cost concern this could otherwise raise is solved independen
 (see below) — episode-scoping and cost-caching are orthogonal and do not need to be
 conflated into one mechanism.
 
-**Resolved-version caching is process-lifetime, independent of the per-issue label.**
-`resolveToolVersion` memoizes `node --version`/`go version` per tool for the daemon's
-own lifetime, in a package-level mutex-protected map. This is sound specifically
-*because* the bug this issue exists to catch is that the inherited `PATH` cannot change
-without a daemon restart — the resolved binary version is genuinely invariant for the
-process's life, so a second check for the same tool, on any issue, is a cache hit, not
-a second shell-out. This turns steady-state cost into "a few small file reads" after
-the first check per tool, satisfying R4's "no added latency worth noticing" without
-needing to cache or rate-limit the label/comment side of the check at all.
+**Resolved-version caching is process-lifetime, independent of the per-issue label —
+but only for a successful resolution.** `resolveToolVersion` memoizes `node
+--version`/`go version` per tool for the daemon's own lifetime, in a package-level
+mutex-protected map. This is sound specifically *because* the bug this issue exists to
+catch is that the inherited `PATH` cannot change without a daemon restart — a
+successful resolution is genuinely invariant for the process's life, so a second check
+for the same tool, on any issue, is a cache hit, not a second shell-out. This turns
+steady-state cost into "a few small file reads" after the first successful check per
+tool, satisfying R4's "no added latency worth noticing" without needing to cache or
+rate-limit the label/comment side of the check at all. A resolution *failure*
+(subprocess timeout, transient exec error, a momentarily unavailable binary) is
+deliberately **not** cached — nothing about `PATH` being invariant implies a failure is
+also invariant, and caching one would let a single bad moment permanently and silently
+disable detection for that tool until the next restart, with no way to observe or
+recover from it (Pruefer, PR #1794 review). Every invocation with a matching
+declaration retries an uncached failure, bounded the same way the happy path's cost is
+— only paid when a worktree actually declares that tool.
 
 **The comparator is deliberately narrow and fails closed on ambiguity, always.**
 `.nvmrc`, `package.json`'s `engines.node`, and `.tool-versions` are compared at
@@ -135,10 +143,14 @@ label sweep, not for any retry/escalation machinery of its own.
 - `.tool-versions` support is limited to the `nodejs`/`golang` tool names, mapped to
   the `node`/`go` binaries the codebase already knows how to invoke; every other asdf
   tool name is silently ignored — general asdf-tool-to-binary mapping is out of scope.
-- The resolved-version cache is genuinely process-lifetime: if an operator's inherited
-  `PATH` is corrected by some means other than restarting the daemon (unusual, but not
-  impossible — e.g. a symlink swap under an already-resolved binary path), the cache
-  would not observe it until the next daemon restart. This mirrors the same invariant
-  the bug report itself establishes ("only restarting the hosting shell" fixes the
-  underlying condition), so it is treated as consistent with the bug's own model, not
-  a new gap.
+- The resolved-version cache is genuinely process-lifetime **for a successful
+  resolution**: if an operator's inherited `PATH` is corrected by some means other than
+  restarting the daemon (unusual, but not impossible — e.g. a symlink swap under an
+  already-resolved binary path), the cache would not observe it until the next daemon
+  restart. This mirrors the same invariant the bug report itself establishes ("only
+  restarting the hosting shell" fixes the underlying condition), so it is treated as
+  consistent with the bug's own model, not a new gap. A resolution *failure* is the
+  opposite case and is handled oppositely: it is never cached, precisely because a
+  failure carries no such invariance guarantee (see the caching decision above) — a
+  persistently-failing tool retries on every invocation that declares it, rather than
+  going permanently dark after one bad attempt.
