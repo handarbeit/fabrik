@@ -94,6 +94,12 @@ func labelDefFor(name string) (description, color string) {
 		}
 	}
 
+	// fabrik:reworking:<Stage> (#1802)
+	if strings.HasPrefix(name, "fabrik:reworking:") {
+		stageName := strings.TrimPrefix(name, "fabrik:reworking:")
+		return fmt.Sprintf("%s stage's :complete is cleared for an active comment re-entry rework; restored on exit", stageName), "cfd3d7"
+	}
+
 	// fabrik:locked:<user>
 	if strings.HasPrefix(name, "fabrik:locked:") {
 		return "Another Fabrik instance is processing this issue", "cfd3d7"
@@ -229,14 +235,15 @@ func (c *Client) SeedLabels(owner, repo string, stageNames []string, lockedUser 
 	}
 
 	// Collect all labels to seed.
-	defs := make([]labelDef, 0, len(staticLabelDefs)+len(stageNames)*3+1)
+	defs := make([]labelDef, 0, len(staticLabelDefs)+len(stageNames)*4+1)
 	defs = append(defs, staticLabelDefs...)
 
 	// fabrik:locked:<user>
 	lockedName := fmt.Sprintf("fabrik:locked:%s", lockedUser)
 	defs = append(defs, labelDef{lockedName, "Another Fabrik instance is processing this issue", "cfd3d7"})
 
-	// stage:<name>:in_progress, stage:<name>:complete, stage:<name>:failed
+	// stage:<name>:in_progress, stage:<name>:complete, stage:<name>:failed,
+	// fabrik:reworking:<name> (#1802)
 	for _, s := range stageNames {
 		defs = append(defs,
 			labelDef{
@@ -253,6 +260,11 @@ func (c *Client) SeedLabels(owner, repo string, stageNames []string, lockedUser 
 				fmt.Sprintf("stage:%s:failed", s),
 				fmt.Sprintf("%s stage failed after max_retries attempts", s),
 				"d73a4a",
+			},
+			labelDef{
+				fmt.Sprintf("fabrik:reworking:%s", s),
+				fmt.Sprintf("%s stage's :complete is cleared for an active comment re-entry rework; restored on exit", s),
+				"cfd3d7",
 			},
 		)
 	}

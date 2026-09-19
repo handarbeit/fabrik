@@ -236,15 +236,33 @@ and should recognize.
   invocation ends, whatever the outcome.
 - **`fabrik:editing`** — Held for the duration of comment processing;
   prevents a fresh stage dispatch from racing an in-flight comment reply.
+- **`fabrik:reworking:<Stage>`** — Held for the duration of a comment
+  re-entry that found the re-entered stage's own `stage:<Stage>:complete`
+  already present: that label is cleared for the rework and this marker
+  brackets the window, so a crash mid-rework has a durable, unambiguous
+  signal that the completion label is owed a restore. The stage name is
+  encoded directly in the label — not inferred from the item's current
+  board Status — because Status can advance past the reworked stage
+  before the marker is cleared (a completing rework that also
+  auto-advances the board moves Status to the *next* stage before the
+  marker is removed); a Status-keyed restore would then risk stamping
+  `stage:<NextStage>:complete` onto a stage that never actually ran.
+  Nested strictly inside `fabrik:editing` — no dispatch decision can ever
+  observe the transient clear, so gating is unchanged. Restored (or
+  re-derived via the normal completion flow) and removed on every exit
+  path; an orphaned copy left by a crash is repaired at startup by
+  reading the stage name back out of the label itself. See ADR-1802.
 - **`stage:<name>:in_progress`** — Informational: shows which stage is
   currently running on the item. Mirrors `fabrik:locked:<user>`'s
   lifecycle.
 - **`stage:<name>:complete`** — Marks a stage as finished. Never removed
-  in the ordinary case (exception: `stage:Validate:complete` is stripped
-  if the linked PR's HEAD SHA changes after completion, since the
-  mergeability determination it certified no longer applies). Prevents
-  re-invocation of that stage and drives catch-up advancement to the next
-  one.
+  in the ordinary case, with two exceptions: `stage:Validate:complete` is
+  stripped if the linked PR's HEAD SHA changes after completion, since
+  the mergeability determination it certified no longer applies; and any
+  stage's `:complete` is cleared for the duration of a comment re-entry
+  that reworks it, restored (or re-derived) when the rework finishes —
+  see `fabrik:reworking` above and ADR-1802. Prevents re-invocation of
+  that stage and drives catch-up advancement to the next one.
 - **`stage:<name>:failed`** — Applied after a stage exhausts its
   *failure* budget (`max_retries`) — genuine errors, degenerate output,
   PR-creation failures; always paired with `fabrik:paused`. A turn-cap

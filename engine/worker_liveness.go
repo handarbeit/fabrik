@@ -2,11 +2,13 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/handarbeit/fabrik/boardcache"
+	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/itemstate"
 )
 
@@ -268,7 +270,7 @@ func (e *Engine) forEachStaleUnworkedItem(label string, fn func(snap itemstate.S
 
 // RunStartupCleanup runs the five one-shot startup recovery scans Run() has
 // always run, in order, immediately after the first successful poll cycle:
-// runStartupCleanup (stale fabrik:locked:<user>/fabrik:editing labels),
+// runStartupCleanup (stale fabrik:locked:<user>/fabrik:editing/fabrik:reworking labels),
 // runStartupOrphanedInProgressScan, runStartupBareInProgressScan (both
 // engine/worker_liveness.go), runStartupTransientLabelScan
 // (engine/startup.go), and runStartupTerminalScan (engine/terminal.go).
@@ -299,7 +301,9 @@ func (e *Engine) RunStartupCleanup() {
 
 // runStartupCleanup scans the store for items that have a fabrik:locked:<user>
 // label but no active Worker (Worker == nil). This catches the restart case where
-// a prior Fabrik instance crashed, leaving stale lock labels behind.
+// a prior Fabrik instance crashed, leaving stale lock labels behind. Two further
+// passes follow the same "stale label + no active Worker()" shape for
+// fabrik:editing and fabrik:reworking (#1802).
 //
 // Must be called after the store is populated by the first poll cycle.
 func (e *Engine) runStartupCleanup() {
@@ -342,6 +346,99 @@ func (e *Engine) runStartupCleanup() {
 	})
 	if cleanedEditing > 0 {
 		e.logf(0, "startup", "startup cleanup: attempted stale editing label removal on %d issue(s)\n", cleanedEditing)
+	}
+
+	// Third pass (#1802, R3): restore a stage's stale-cleared stage:<Stage>:complete
+	// label left behind by a crash mid-rework (beginStageRework landed, but the
+	// owning process died before endStageRework could restore it). Mirrors the
+	// fabrik:editing pass above structurally — same "stale label + no active
+	// Worker()" trigger, startup-only, no per-poll retry/escalation, since this
+	// condition can only arise from an in-process crash, not an async external
+	// condition. fabrik:reworking:<Stage>'s own mark-first-then-clear invariant
+	// (beginStageRework) guarantees the marker's mere presence is always a safe,
+	// idempotent restore trigger — regardless of whether the paired removal of
+	// stage:<Stage>:complete ever actually landed before the crash.
+	//
+	// The reworked stage name is read directly from the marker label
+	// (fabrik:reworking:<Stage>), NOT from the item's current board Status —
+	// a Pruefer review finding (#1802) caught that Status is not a reliable
+	// proxy for "which stage was being reworked": a completing rework that
+	// also auto-advances the board (yolo/cruise/auto_advance) moves Status to
+	// the *next* stage synchronously inside handleStageComplete, before
+	// finalizeComments' deferred call to endStageRework ever removes the
+	// marker. A crash in that window used to make this pass read the *next*
+	// stage's name from Status, find its :complete absent, and wrongly stamp
+	// stage:<NextStage>:complete onto an item that never actually ran that
+	// stage — which itemNeedsWork then reads as "already done," silently and
+	// permanently skipping real dispatch. Encoding the stage name in the
+	// label itself removes the ambiguity: the label always names the stage
+	// that was actually reworked, regardless of how far Status has since
+	// moved.
+	//
+	// fabrik:reworking:<Stage>'s removal is deferred (finalizeComments,
+	// engine/comments.go) until after handleStageComplete has made its
+	// durable completion decision on a completing exit, so a crash can also
+	// land AFTER that decision was written but BEFORE the marker was cleared.
+	// In that case stage:<Stage>:complete (or, for a wait_for_ci stage,
+	// fabrik:awaiting-ci) is already correctly present — blindly re-adding
+	// stage:<Stage>:complete here would either be harmless (already-present
+	// case) or, for the wait_for_ci case, actively wrong: it would bypass the
+	// CI gate that handleStageComplete deliberately deferred. Checking for
+	// either settled signal first and skipping the restore when one is found
+	// makes this pass correct for both crash points, not just the earlier
+	// (never-settled) one.
+	var cleanedReworking int
+	for _, snap := range e.store.All() {
+		if snap.Worker() != nil {
+			continue
+		}
+		labels := snap.Labels()
+		var reworkingLabel, reworkedStage string
+		for _, label := range labels {
+			if strings.HasPrefix(label, reworkingLabelPrefix) {
+				reworkingLabel = label
+				reworkedStage = strings.TrimPrefix(label, reworkingLabelPrefix)
+				break
+			}
+		}
+		if reworkingLabel == "" {
+			continue
+		}
+		owner, repoName := parseOwnerRepo(snap.Repo())
+		number := snap.Number()
+		if reworkedStage == "" {
+			// Malformed marker with no stage name encoded — leave it in place
+			// rather than silently dropping the only remaining signal that a
+			// restore is owed (mirrors ADR-1533's precedent for an
+			// unresolvable alert marker).
+			e.logf(number, "warn", "found stale reworking label %q from prior crash with no resolvable stage name — leaving it in place\n", reworkingLabel)
+			continue
+		}
+		completeLabel := "stage:" + reworkedStage + ":complete"
+		alreadySettled := hasLabel(labels, completeLabel) || hasLabel(labels, "fabrik:awaiting-ci")
+		if alreadySettled {
+			e.logf(number, "startup", "found stale reworking label from prior crash, but %q is already settled — removing marker only\n", reworkedStage)
+		} else {
+			e.logf(number, "startup", "found stale reworking label from prior crash — restoring %q\n", completeLabel)
+			if err := e.client.AddLabelToIssue(owner, repoName, number, completeLabel); err != nil {
+				e.logf(number, "warn", "could not restore label %q: %v\n", completeLabel, err)
+				continue
+			}
+			if c := e.cache(); c != nil {
+				c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repoName, number), completeLabel)
+			}
+		}
+		if err := e.client.RemoveLabelFromIssue(owner, repoName, number, reworkingLabel); err != nil && !errors.Is(err, gh.ErrNotFound) {
+			e.logf(number, "warn", "could not remove stale reworking label: %v\n", err)
+			continue
+		}
+		if c := e.cache(); c != nil {
+			c.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repoName, number), reworkingLabel)
+		}
+		cleanedReworking++
+	}
+	if cleanedReworking > 0 {
+		e.logf(0, "startup", "startup cleanup: restored stage completion labels on %d issue(s)\n", cleanedReworking)
 	}
 }
 
