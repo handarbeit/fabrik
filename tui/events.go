@@ -165,8 +165,9 @@ func (SkillsStaleEvent) tuiEvent() {}
 
 // CustomWorkflowEvent is emitted when the three-way plugin comparison determines
 // that the operator has local customizations in .fabrik/plugin/ that differ from
-// the last recorded installed-version. This state is mutually exclusive with
-// SkillsStaleEvent (customWorkflow takes priority over skillsStaleCount).
+// the last recorded installed-version. This is independent of SkillsStaleEvent
+// (#1787) — a customized plugin can also be stale relative to what's embedded
+// in this binary, and both facts are reported together when both are true.
 type CustomWorkflowEvent struct{}
 
 func (CustomWorkflowEvent) tuiEvent() {}

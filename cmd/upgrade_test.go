@@ -386,6 +386,104 @@ func TestCheckPluginSkillsWithReader_AutoRefresh_TTYNo(t *testing.T) {
 	}
 }
 
+// TestCheckPluginSkillsWithReader_CustomizedAndStale_NonTTY verifies #1787
+// AC1/AC2 for the non-TTY warning path: a plugin that is both customized
+// (diskVer != installedVer) and stale (installedVer != embeddedVer) reports
+// both facts, naming the drifted file count and 'fabrik upgrade --reconcile'
+// — not just the customization warning alone.
+func TestCheckPluginSkillsWithReader_CustomizedAndStale_NonTTY(t *testing.T) {
+	pluginDir := buildPluginDir(t)
+	entries, err := filepath.Glob(filepath.Join(pluginDir, "skills", "*", "SKILL.md"))
+	if err != nil || len(entries) < 2 {
+		t.Fatal("need at least 2 SKILL.md files for this test")
+	}
+	// Simulate an old installed version.
+	if err := os.WriteFile(entries[0], []byte("old embedded content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	writeInstalledForDir(t, pluginDir)
+	// Operator customizes a different file on top of the already-stale install.
+	if err := os.WriteFile(entries[1], []byte("operator customization"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	r, w, _ := os.Pipe()
+	origStderr := os.Stderr
+	os.Stderr = w
+
+	callErr := checkPluginSkillsWithReader(pluginDir, false, strings.NewReader(""))
+
+	w.Close()
+	os.Stderr = origStderr
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	if callErr != nil {
+		t.Fatalf("expected nil error, got %v", callErr)
+	}
+	if !strings.Contains(output, "local customizations") {
+		t.Fatalf("expected customization signal on stderr, got: %q", output)
+	}
+	if !strings.Contains(output, "stale") {
+		t.Fatalf("expected staleness signal on stderr, got: %q", output)
+	}
+	if !strings.Contains(output, "--reconcile") {
+		t.Fatalf("expected 'fabrik upgrade --reconcile' named on stderr, got: %q", output)
+	}
+	// Neither file must have been overwritten — customization still refuses auto-refresh.
+	data, _ := os.ReadFile(entries[1])
+	if string(data) != "operator customization" {
+		t.Fatal("custom-workflow non-TTY path should NOT overwrite operator customizations, even when also stale")
+	}
+}
+
+// TestCheckPluginSkillsWithReader_CustomizedAndStale_TTY is the TTY-path
+// equivalent of the above (#1787 AC1/AC2).
+func TestCheckPluginSkillsWithReader_CustomizedAndStale_TTY(t *testing.T) {
+	pluginDir := buildPluginDir(t)
+	entries, err := filepath.Glob(filepath.Join(pluginDir, "skills", "*", "SKILL.md"))
+	if err != nil || len(entries) < 2 {
+		t.Fatal("need at least 2 SKILL.md files for this test")
+	}
+	if err := os.WriteFile(entries[0], []byte("old embedded content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	writeInstalledForDir(t, pluginDir)
+	if err := os.WriteFile(entries[1], []byte("operator customization"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	r, w, _ := os.Pipe()
+	origStdout := os.Stdout
+	os.Stdout = w
+
+	callErr := checkPluginSkillsWithReader(pluginDir, true, strings.NewReader("y\n"))
+
+	w.Close()
+	os.Stdout = origStdout
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	if callErr != nil {
+		t.Fatalf("expected nil error, got %v", callErr)
+	}
+	if !strings.Contains(output, "Local customizations detected") {
+		t.Fatalf("expected customization signal in output, got: %q", output)
+	}
+	if !strings.Contains(output, "stale") {
+		t.Fatalf("expected staleness signal in output, got: %q", output)
+	}
+	if !strings.Contains(output, "--reconcile") {
+		t.Fatalf("expected 'fabrik upgrade --reconcile' named in output, got: %q", output)
+	}
+	data, _ := os.ReadFile(entries[1])
+	if string(data) != "operator customization" {
+		t.Fatal("TTY custom-workflow path should NOT overwrite operator customizations, even when also stale")
+	}
+}
+
 func TestRunUpgrade_HelpFlag(t *testing.T) {
 	dir := t.TempDir()
 	chdirTest(t, dir)
@@ -508,6 +606,47 @@ func TestRunUpgrade_CustomWorkflowError(t *testing.T) {
 	}
 	if !strings.Contains(callErr.Error(), "local customizations") {
 		t.Fatalf("expected 'local customizations' in error, got: %v", callErr)
+	}
+}
+
+// TestRunUpgrade_CustomWorkflowAndStaleError verifies #1787 AC1/AC2/R5 at the
+// `fabrik upgrade` refusal message: a customized-and-stale plugin still
+// refuses (R5 — never more permissive) but the refusal now names both facts
+// and points at --reconcile.
+func TestRunUpgrade_CustomWorkflowAndStaleError(t *testing.T) {
+	dir := t.TempDir()
+	chdirTest(t, dir)
+	pluginDir := buildFabrikPluginDir(t)
+
+	entries, err := filepath.Glob(filepath.Join(pluginDir, "skills", "*", "SKILL.md"))
+	if err != nil || len(entries) < 2 {
+		t.Fatal("need at least 2 SKILL.md files for this test")
+	}
+	if err := os.WriteFile(entries[0], []byte("old embedded content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	writeInstalledForDir(t, pluginDir)
+	if err := os.WriteFile(entries[1], []byte("operator customization"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	callErr := runUpgrade([]string{})
+	if callErr == nil {
+		t.Fatal("expected error for custom-workflow-and-stale state, got nil")
+	}
+	if !strings.Contains(callErr.Error(), "local customizations") {
+		t.Fatalf("expected 'local customizations' in error, got: %v", callErr)
+	}
+	if !strings.Contains(callErr.Error(), "stale") {
+		t.Fatalf("expected staleness signal in error, got: %v", callErr)
+	}
+	if !strings.Contains(callErr.Error(), "--reconcile") {
+		t.Fatalf("expected 'fabrik upgrade --reconcile' named in error, got: %v", callErr)
+	}
+	// Refusal must still mean refusal: neither file overwritten.
+	data, _ := os.ReadFile(entries[1])
+	if string(data) != "operator customization" {
+		t.Fatal("runUpgrade default path must NOT overwrite operator customizations, even when also stale (R5)")
 	}
 }
 

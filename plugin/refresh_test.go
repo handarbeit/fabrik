@@ -116,12 +116,12 @@ func TestCheckPluginState_Migration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cw, up, err := CheckPluginState(dir, false)
+	cw, up, stale, err := CheckPluginState(dir, false)
 	if err != nil {
 		t.Fatalf("CheckPluginState error: %v", err)
 	}
-	if cw || up {
-		t.Errorf("migration: want (false,false), got (%v,%v)", cw, up)
+	if cw || up || stale {
+		t.Errorf("migration: want (false,false,false), got (%v,%v,%v)", cw, up, stale)
 	}
 	// .installed-version must now exist and equal disk version.
 	installedVer, _ := ReadInstalledVersion(dir)
@@ -141,12 +141,12 @@ func TestCheckPluginState_NoOp(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cw, up, err := CheckPluginState(dir, false)
+	cw, up, stale, err := CheckPluginState(dir, false)
 	if err != nil {
 		t.Fatalf("CheckPluginState error: %v", err)
 	}
-	if cw || up {
-		t.Errorf("no-op: want (false,false), got (%v,%v)", cw, up)
+	if cw || up || stale {
+		t.Errorf("no-op: want (false,false,false), got (%v,%v,%v)", cw, up, stale)
 	}
 }
 
@@ -179,7 +179,7 @@ func TestCheckPluginState_AutoRefresh(t *testing.T) {
 	}
 
 	// Inject diskVer2 as a "known" version so the corrupted-state guard passes.
-	cw, up, err := checkPluginState(dir2, []string{diskVer2}, false)
+	cw, up, stale, err := checkPluginState(dir2, []string{diskVer2}, false)
 	if err != nil {
 		t.Fatalf("checkPluginState error: %v", err)
 	}
@@ -188,6 +188,9 @@ func TestCheckPluginState_AutoRefresh(t *testing.T) {
 	}
 	if !up {
 		t.Errorf("auto-refresh: upgradeNeeded should be true")
+	}
+	if !stale {
+		t.Errorf("auto-refresh: stale should be true (installedVer != embeddedVer)")
 	}
 }
 
@@ -210,7 +213,7 @@ func TestCheckPluginState_CustomWorkflow(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cw, up, err := CheckPluginState(dir, false)
+	cw, up, stale, err := CheckPluginState(dir, false)
 	if err != nil {
 		t.Fatalf("CheckPluginState error: %v", err)
 	}
@@ -219,6 +222,9 @@ func TestCheckPluginState_CustomWorkflow(t *testing.T) {
 	}
 	if up {
 		t.Errorf("custom-workflow: upgradeNeeded should be false")
+	}
+	if stale {
+		t.Errorf("custom-workflow: stale should be false (installedVer == embeddedVer, only disk was mutated after)")
 	}
 }
 
@@ -240,7 +246,7 @@ func TestCheckPluginState_MigrationCustomised(t *testing.T) {
 	}
 	// No .installed-version file present (simulating pre-v0.0.64).
 
-	cw, up, err := CheckPluginState(dir, false)
+	cw, up, stale, err := CheckPluginState(dir, false)
 	if err != nil {
 		t.Fatalf("CheckPluginState error: %v", err)
 	}
@@ -249,6 +255,9 @@ func TestCheckPluginState_MigrationCustomised(t *testing.T) {
 	}
 	if up {
 		t.Errorf("migration-customised: upgradeNeeded should be false")
+	}
+	if stale {
+		t.Errorf("migration-customised: stale should be false (no installedVer to compare)")
 	}
 	// .installed-version must NOT have been created.
 	installedPath := filepath.Join(dir, ".installed-version")
@@ -295,7 +304,7 @@ func TestCheckPluginState_CorruptedMigration(t *testing.T) {
 		t.Skip("embedded matches customized disk — cannot test corrupted-migration path")
 	}
 
-	cw, up, err := checkPluginState(dir, []string{}, false)
+	cw, up, stale, err := checkPluginState(dir, []string{}, false)
 	if err != nil {
 		t.Fatalf("checkPluginState error: %v", err)
 	}
@@ -304,6 +313,9 @@ func TestCheckPluginState_CorruptedMigration(t *testing.T) {
 	}
 	if up {
 		t.Errorf("corrupted-migration: upgradeNeeded should be false")
+	}
+	if !stale {
+		t.Errorf("corrupted-migration: stale should be true (installedVer != embeddedVer)")
 	}
 }
 
@@ -337,7 +349,7 @@ func TestCheckPluginState_KnownEmbeddedAutoRefresh(t *testing.T) {
 		t.Skip("embedded matches old hash — cannot test known-embedded auto-refresh")
 	}
 	// Inject oldHash into known list → should return upgradeNeeded=true.
-	cw, up, err := checkPluginState(dir, []string{oldHash}, false)
+	cw, up, stale, err := checkPluginState(dir, []string{oldHash}, false)
 	if err != nil {
 		t.Fatalf("checkPluginState error: %v", err)
 	}
@@ -346,6 +358,9 @@ func TestCheckPluginState_KnownEmbeddedAutoRefresh(t *testing.T) {
 	}
 	if !up {
 		t.Errorf("known-embedded-auto-refresh: upgradeNeeded should be true")
+	}
+	if !stale {
+		t.Errorf("known-embedded-auto-refresh: stale should be true (installedVer != embeddedVer)")
 	}
 }
 
@@ -389,7 +404,7 @@ func TestCheckPluginState_DevBuildUnlistedFingerprint(t *testing.T) {
 		t.Skip("embedded matches dev-build disk — cannot test dev-build path")
 	}
 
-	cw, up, err := checkPluginState(dir, []string{}, true)
+	cw, up, stale, err := checkPluginState(dir, []string{}, true)
 	if err != nil {
 		t.Fatalf("checkPluginState error: %v", err)
 	}
@@ -398,6 +413,110 @@ func TestCheckPluginState_DevBuildUnlistedFingerprint(t *testing.T) {
 	}
 	if !up {
 		t.Errorf("dev-build-unlisted-fingerprint: upgradeNeeded should be true, got false")
+	}
+	if !stale {
+		t.Errorf("dev-build-unlisted-fingerprint: stale should be true (installedVer != embeddedVer)")
+	}
+}
+
+// TestCheckPluginState_CustomizedAndStale verifies AC1: a plugin that is both
+// customized (diskVer != installedVer) AND stale (installedVer != embeddedVer)
+// reports both facts independently — the fix for #1787. Before this fix,
+// checkPluginState returned as soon as it detected diskVer != installedVer and
+// never computed the embeddedVer comparison in that branch, so stale was always
+// false whenever customWorkflow was true.
+func TestCheckPluginState_CustomizedAndStale(t *testing.T) {
+	dir := t.TempDir()
+	if err := populatePluginDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate an old installed version: mutate one file to get a hash distinct
+	// from current embedded, then seed installedVer to that old hash (mirrors
+	// TestCheckPluginState_AutoRefresh's setup).
+	entries, _ := filepath.Glob(filepath.Join(dir, "skills", "*", "SKILL.md"))
+	if len(entries) < 2 {
+		t.Fatal("need at least 2 SKILL.md files for this test")
+	}
+	if err := os.WriteFile(entries[0], []byte("old embedded content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	oldHash, err := ComputeDiskVersion(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteVersionHash(dir, oldHash); err != nil {
+		t.Fatal(err)
+	}
+	embeddedVer := ComputeEmbeddedVersion()
+	if embeddedVer == oldHash {
+		t.Skip("embedded matches old hash — cannot test customized-and-stale")
+	}
+
+	// Now mutate a *different* file on disk so diskVer != installedVer too —
+	// this is the operator customization on top of the already-stale install.
+	if err := os.WriteFile(entries[1], []byte("operator customization"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Register oldHash as known so the corrupted-migration guard doesn't
+	// misclassify this scenario — this test is specifically about the
+	// diskVer != installedVer branch, not the corrupted-state guard.
+	cw, up, stale, err := checkPluginState(dir, []string{oldHash}, false)
+	if err != nil {
+		t.Fatalf("checkPluginState error: %v", err)
+	}
+	if !cw {
+		t.Errorf("customized-and-stale: customWorkflow should be true, got false")
+	}
+	if up {
+		t.Errorf("customized-and-stale: upgradeNeeded should be false, got true")
+	}
+	if !stale {
+		t.Errorf("customized-and-stale: stale should be true, got false — this is the #1787 bug: staleness must be reported even when customized")
+	}
+}
+
+func TestVersionsBehind_Found(t *testing.T) {
+	known := []string{"v1", "v2", "v3", "v4"}
+	n, ok := versionsBehind("v2", "v4", known)
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	if n != 2 {
+		t.Errorf("versionsBehind(v2, v4) = %d, want 2", n)
+	}
+}
+
+func TestVersionsBehind_NotFound(t *testing.T) {
+	known := []string{"v1", "v2", "v3"}
+	n, ok := versionsBehind("unknown-dev-hash", "v3", known)
+	if ok {
+		t.Errorf("expected ok=false for unrecognized installedVer, got n=%d", n)
+	}
+}
+
+func TestVersionsBehind_EmbeddedNewerThanKnownList(t *testing.T) {
+	// embeddedVer itself is not in the known list (e.g. a dev build, or a
+	// release cut between cut-release.sh runs) — treat it as newer than every
+	// known entry.
+	known := []string{"v1", "v2", "v3"}
+	n, ok := versionsBehind("v1", "dev-build-hash-not-in-list", known)
+	if !ok {
+		t.Fatal("expected ok=true (installedVer v1 is known)")
+	}
+	if n != len(known) {
+		t.Errorf("versionsBehind(v1, unlisted) = %d, want %d (len(known))", n, len(known))
+	}
+}
+
+func TestVersionsBehind_SameVersion(t *testing.T) {
+	known := []string{"v1", "v2", "v3"}
+	n, ok := versionsBehind("v2", "v2", known)
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	if n != 0 {
+		t.Errorf("versionsBehind(v2, v2) = %d, want 0", n)
 	}
 }
 

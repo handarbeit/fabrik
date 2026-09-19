@@ -48,7 +48,6 @@ func (h HeaderComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
 		h.skillsStaleCount = ev.Count
 	case CustomWorkflowEvent:
 		h.customWorkflow = true
-		h.skillsStaleCount = 0
 	}
 	return h, nil
 }
@@ -79,13 +78,20 @@ func (h HeaderComponent) View(width int) string {
 	}
 
 	// Pre-compute badge so its width is factored into the truncation budget.
-	// customWorkflow takes priority over skillsStaleCount — they are mutually exclusive.
+	// customWorkflow and skillsStaleCount are independent facts (#1787) — both
+	// can be true at once (a customized plugin can also be stale relative to
+	// what's embedded in this binary), so both render in a single combined
+	// badge rather than one taking priority over the other.
 	badge := ""
 	badgeWidth := 0
-	if h.customWorkflow {
+	switch {
+	case h.customWorkflow && h.skillsStaleCount > 0:
+		badge = dimStyle.Render(fmt.Sprintf("  [u] custom workflow (%d stale)", h.skillsStaleCount))
+		badgeWidth = lipgloss.Width(badge)
+	case h.customWorkflow:
 		badge = dimStyle.Render("  [u] custom workflow")
 		badgeWidth = lipgloss.Width(badge)
-	} else if h.skillsStaleCount > 0 {
+	case h.skillsStaleCount > 0:
 		badge = dimStyle.Render("  [u] skills out of date")
 		badgeWidth = lipgloss.Width(badge)
 	}
@@ -112,6 +118,14 @@ func (h HeaderComponent) View(width int) string {
 		}
 		left = title + status
 		leftWidth = lipgloss.Width(left)
+	}
+	// Even with status cleared, a badge — especially the combined
+	// "custom workflow (N stale)" form (#1787), which is longer than either
+	// badge alone — may still not fit a narrow terminal. Drop it rather than
+	// let it overflow; the title and timer must always stay visible.
+	if badge != "" && leftWidth+timerWidth+badgeWidth > available {
+		badge = ""
+		badgeWidth = 0
 	}
 	if badge != "" {
 		left = left + badge
@@ -141,7 +155,8 @@ func (h *HeaderComponent) SetSkillsStaleCount(n int) {
 }
 
 // SetCustomWorkflow sets the custom workflow state. When true, a persistent
-// [u] custom workflow badge is shown (with priority over skillsStaleCount).
+// [u] custom workflow badge is shown — combined with the skillsStaleCount
+// badge, not in place of it, when both are set (#1787).
 func (h *HeaderComponent) SetCustomWorkflow(v bool) {
 	h.customWorkflow = v
 }

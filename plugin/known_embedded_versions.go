@@ -29,3 +29,46 @@ var KnownEmbeddedVersions = []string{
 	"6313e5e4ba8c390c1d80e660b8d9322877bc58c186452b38b920aa833369b547", // v0.0.81
 	"10050466de21c890995404641d82c86b4ae2a3027dd5fa76a1d30c2b1efc17aa", // v0.0.82
 }
+
+// VersionsBehind reports how many known-embedded releases separate installedVer
+// from embeddedVer, using KnownEmbeddedVersions' chronological-append order. It
+// delegates to versionsBehind for testability.
+//
+// ok is false when installedVer is not found in KnownEmbeddedVersions (a dev
+// build's fingerprint, or a baseline predating KnownEmbeddedVersions tracking)
+// — callers should omit the ordinal count entirely in that case rather than
+// fabricate one (see issue #1787, R2).
+func VersionsBehind(installedVer, embeddedVer string) (n int, ok bool) {
+	return versionsBehind(installedVer, embeddedVer, KnownEmbeddedVersions)
+}
+
+// versionsBehind is the testable core of VersionsBehind. installedVer's index
+// in knownVersions is the "installed" position; embeddedVer's index, if found,
+// is the "current" position — otherwise the running binary is newer than every
+// known entry (a dev build, or a release between cut-release.sh runs), so
+// len(knownVersions) is used as the current position instead.
+func versionsBehind(installedVer, embeddedVer string, knownVersions []string) (n int, ok bool) {
+	installedIdx := indexOf(installedVer, knownVersions)
+	if installedIdx < 0 {
+		return 0, false
+	}
+	currentIdx := indexOf(embeddedVer, knownVersions)
+	if currentIdx < 0 {
+		currentIdx = len(knownVersions)
+	}
+	behind := currentIdx - installedIdx
+	if behind < 0 {
+		behind = 0
+	}
+	return behind, true
+}
+
+// indexOf returns the index of hash in knownVersions, or -1 if not found.
+func indexOf(hash string, knownVersions []string) int {
+	for i, v := range knownVersions {
+		if v == hash {
+			return i
+		}
+	}
+	return -1
+}

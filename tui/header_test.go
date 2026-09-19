@@ -66,6 +66,61 @@ func TestViewHeader_WidthNeverExceedsTerminal(t *testing.T) {
 	}
 }
 
+// TestViewHeader_CombinedBadge_NamesBothFacts verifies #1787 R1: when both
+// customWorkflow and skillsStaleCount are true, the header renders a single
+// combined badge naming both — not just "custom workflow" alone.
+func TestViewHeader_CombinedBadge_NamesBothFacts(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", nil, nil, 5, true)
+	m.width = 80
+	m.header.nextPollAt = time.Now().Add(90 * time.Second)
+
+	header := m.header.View(m.width)
+	if !strings.Contains(header, "custom workflow") {
+		t.Errorf("expected 'custom workflow' in combined badge, got: %q", header)
+	}
+	if !strings.Contains(header, "5") {
+		t.Errorf("expected stale count '5' in combined badge, got: %q", header)
+	}
+	if !strings.Contains(header, "stale") {
+		t.Errorf("expected 'stale' in combined badge, got: %q", header)
+	}
+}
+
+// TestViewHeader_CombinedBadge_WidthNeverExceedsTerminal extends
+// TestViewHeader_WidthNeverExceedsTerminal's pattern to the combined badge
+// (customWorkflow=true, skillsStaleCount>0), whose lengthened badge text was
+// flagged as a truncation-budget risk during planning.
+func TestViewHeader_CombinedBadge_WidthNeverExceedsTerminal(t *testing.T) {
+	cases := []struct {
+		name       string
+		width      int
+		statusLine string
+	}{
+		{"empty status", 80, ""},
+		{"short status", 80, "syncing"},
+		{"boundary status", 80, strings.Repeat("x", 60)},
+		{"very long status", 80, strings.Repeat("x", 200)},
+		{"narrow terminal empty", 30, ""},
+		{"narrow terminal long", 30, strings.Repeat("x", 100)},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := New(30, ProjectInfo{}, "", nil, nil, 12, true)
+			m.width = tc.width
+			m.header.nextPollAt = time.Now().Add(90 * time.Second)
+			m.header.statusLine = tc.statusLine
+
+			header := m.header.View(m.width)
+			w := lipgloss.Width(header)
+			if w > tc.width {
+				t.Errorf("viewHeader() combined-badge width %d exceeds terminal width %d; status=%q",
+					w, tc.width, tc.statusLine)
+			}
+		})
+	}
+}
+
 // TestViewHeader_WithStatusLine verifies statusLine content appears in the header.
 func TestViewHeader_WithStatusLine(t *testing.T) {
 	m := New(30, ProjectInfo{}, "", nil, nil, 0, false)

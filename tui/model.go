@@ -149,6 +149,21 @@ const reconcilePromptText = "In .fabrik/plugin/, compare the on-disk plugin file
 // overwriteConfirmWord is the exact text the operator must type to confirm destructive overwrite.
 const overwriteConfirmWord = "OVERWRITE"
 
+// reconcileStatusMsg builds the status line shown when 'u' is pressed on a
+// customized plugin (the reconcile/overwrite/cancel dialog). staleCount is
+// the number of plugin skill files also differing from the embedded version
+// (#1787) — when > 0, the message additionally names the outstanding
+// staleness so the operator knows reconciling will also pick up upstream
+// changes, not just resolve their own customizations. The dialog's own
+// options are unchanged either way (still reconcile/overwrite/cancel only,
+// never a bare auto-refresh — R5).
+func reconcileStatusMsg(staleCount int) string {
+	if staleCount > 0 {
+		return fmt.Sprintf("%d skill file(s) also stale relative to embedded. [1] Reconcile via Claude Code  [2] Overwrite (destructive)  [3] Cancel", staleCount)
+	}
+	return "[1] Reconcile via Claude Code  [2] Overwrite (destructive)  [3] Cancel"
+}
+
 // New creates an initial TUI model.
 // pollSeconds is the configured polling interval.
 // info provides project metadata displayed in the footer.
@@ -497,7 +512,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "u":
 			if m.header.customWorkflow {
 				m.confirmReconcile = true
-				m.header.SetStatusMsg("[1] Reconcile via Claude Code  [2] Overwrite (destructive)  [3] Cancel")
+				m.header.SetStatusMsg(reconcileStatusMsg(m.header.skillsStaleCount))
 			} else if m.header.skillsStaleCount > 0 {
 				m.confirmUpgrade = true
 				m.header.SetStatusMsg(fmt.Sprintf(
@@ -635,7 +650,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// TickEvent clears statusMsg; re-show active confirmation prompts so
 		// they remain visible until the user responds.
 		if m.confirmReconcile {
-			m.header.SetStatusMsg("[1] Reconcile via Claude Code  [2] Overwrite (destructive)  [3] Cancel")
+			m.header.SetStatusMsg(reconcileStatusMsg(m.header.skillsStaleCount))
 		} else if m.confirmOverwrite {
 			m.header.SetStatusMsg("This will discard your customizations. Type 'OVERWRITE' to confirm.")
 		} else if m.confirmStop && m.pendingStopRequest != nil {
@@ -744,15 +759,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case SkillsStaleEvent:
+		// customWorkflow and skillsStaleCount are independent facts (#1787) —
+		// a SkillsStaleEvent{Count: 0} does not imply the plugin is no longer
+		// customized, so customWorkflow is left untouched here.
 		m.header.SetSkillsStaleCount(ev.Count)
-		if ev.Count == 0 {
-			m.header.SetCustomWorkflow(false)
-		}
 		return m, nil
 
 	case CustomWorkflowEvent:
+		// Independent of skillsStaleCount (#1787) — do not clear it here; a
+		// customized plugin can also be stale, and both facts are reported
+		// together when both are true.
 		m.header.SetCustomWorkflow(true)
-		m.header.SetSkillsStaleCount(0)
 		return m, nil
 
 	case pluginUpgradeResultMsg:
