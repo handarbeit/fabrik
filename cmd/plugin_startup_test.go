@@ -187,3 +187,62 @@ func TestPluginCustomizationWarning_CustomizedOnlyOmitsStaleness(t *testing.T) {
 		t.Errorf("did not expect a staleness clause when staleCount is 0, got: %q", msg)
 	}
 }
+
+// TestEvaluatePluginStartupState_DiffFailurePreservesState verifies that a
+// failure of the reporting-only file diff never discards the auto-refresh
+// decision (upgradeNeeded) or the customization fact — it only zeroes the
+// count. The failure is forced by replacing an embedded file's on-disk path
+// with a directory, which os.ReadFile rejects (not IsNotExist) while
+// ComputeDiskVersion's walk simply treats it as an empty directory.
+func TestEvaluatePluginStartupState_DiffFailurePreservesState(t *testing.T) {
+	setup := func(t *testing.T) (pluginDir string, other string) {
+		t.Helper()
+		pluginDir = buildPluginDir(t)
+		entries, err := filepath.Glob(filepath.Join(pluginDir, "skills", "*", "SKILL.md"))
+		if err != nil || len(entries) < 3 {
+			t.Fatal("need at least 3 SKILL.md files for this test")
+		}
+		if err := os.WriteFile(entries[0], []byte("old embedded content"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(entries[1]); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(entries[1], 0755); err != nil {
+			t.Fatal(err)
+		}
+		writeInstalledForDir(t, pluginDir)
+		return pluginDir, entries[2]
+	}
+
+	t.Run("pristine stale keeps upgradeNeeded", func(t *testing.T) {
+		pluginDir, _ := setup(t)
+		customWorkflow, upgradeNeeded, skillsStaleCount, err := evaluatePluginStartupState(pluginDir, false)
+		if err != nil {
+			t.Fatalf("diff failure must not surface as an error, got: %v", err)
+		}
+		if customWorkflow || !upgradeNeeded {
+			t.Errorf("want customWorkflow=false upgradeNeeded=true, got (%v,%v)", customWorkflow, upgradeNeeded)
+		}
+		if skillsStaleCount != 0 {
+			t.Errorf("want skillsStaleCount=0 on diff failure, got %d", skillsStaleCount)
+		}
+	})
+
+	t.Run("customized and stale keeps customWorkflow", func(t *testing.T) {
+		pluginDir, other := setup(t)
+		if err := os.WriteFile(other, []byte("operator customization"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		customWorkflow, upgradeNeeded, skillsStaleCount, err := evaluatePluginStartupState(pluginDir, false)
+		if err != nil {
+			t.Fatalf("diff failure must not surface as an error, got: %v", err)
+		}
+		if !customWorkflow || upgradeNeeded {
+			t.Errorf("want customWorkflow=true upgradeNeeded=false, got (%v,%v)", customWorkflow, upgradeNeeded)
+		}
+		if skillsStaleCount != 0 {
+			t.Errorf("want skillsStaleCount=0 on diff failure, got %d", skillsStaleCount)
+		}
+	})
+}

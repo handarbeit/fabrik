@@ -1116,11 +1116,15 @@ func evaluatePluginStartupState(pluginDir string, isDevBuild bool) (customWorkfl
 	customWorkflow = cw
 	upgradeNeeded = up
 	if stale {
+		// The file count is reporting-only: a failed diff must never discard
+		// customWorkflow/upgradeNeeded, which gate auto-refresh (R5). Warn and
+		// report a count of 0 instead of failing the whole evaluation.
 		diffing, diffErr := diffingPluginFiles(pluginDir)
 		if diffErr != nil {
-			return customWorkflow, upgradeNeeded, 0, diffErr
+			fmt.Fprintf(os.Stderr, "[upgrade] warning: plugin skill check failed: %v\n", diffErr)
+		} else {
+			skillsStaleCount = len(diffing)
 		}
-		skillsStaleCount = len(diffing)
 	}
 	return customWorkflow, upgradeNeeded, skillsStaleCount, nil
 }
