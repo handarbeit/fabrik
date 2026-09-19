@@ -67,7 +67,7 @@ func TestBeginStageRework_ClearsStaleComplete(t *testing.T) {
 		t.Fatal("beginStageRework returned false, want true (stage:Research:complete was present)")
 	}
 
-	addIdx := indexOf(*log, "add:fabrik:reworking")
+	addIdx := indexOf(*log, "add:fabrik:reworking:Research")
 	removeIdx := indexOf(*log, "remove:stage:Research:complete")
 	if addIdx == -1 {
 		t.Fatalf("fabrik:reworking was never added; log=%v", *log)
@@ -143,7 +143,7 @@ func TestEndStageRework_CompletingExit_DoesNotDirectlyRestoreComplete(t *testing
 	}
 	var sawRemove bool
 	for _, c := range client.removeLabelCalls {
-		if c.labelName == "fabrik:reworking" {
+		if c.labelName == "fabrik:reworking:Research" {
 			sawRemove = true
 		}
 	}
@@ -166,7 +166,7 @@ func TestEndStageRework_NonCompletingExit_RestoresThenUnmarks(t *testing.T) {
 	eng.endStageRework(item, stage, true, false)
 
 	addCompleteIdx := indexOf(*log, "add:stage:Research:complete")
-	removeMarkerIdx := indexOf(*log, "remove:fabrik:reworking")
+	removeMarkerIdx := indexOf(*log, "remove:fabrik:reworking:Research")
 	if addCompleteIdx == -1 {
 		t.Fatalf("stage:Research:complete was not restored; log=%v", *log)
 	}
@@ -187,7 +187,7 @@ func TestEndStageRework_NonCompletingExit_RestoresThenUnmarks(t *testing.T) {
 func TestBeginStageRework_MarkerAddFails_DoesNotClearComplete(t *testing.T) {
 	client := &mockGitHubClient{
 		addLabelToIssueFn: func(owner, repo string, issueNumber int, labelName string) error {
-			if labelName == "fabrik:reworking" {
+			if labelName == "fabrik:reworking:Research" {
 				return errors.New("transient API error")
 			}
 			return nil
@@ -233,7 +233,7 @@ func TestEndStageRework_RestoreAddFails_LeavesMarkerInPlace(t *testing.T) {
 	eng.endStageRework(item, stage, true, false)
 
 	for _, c := range client.removeLabelCalls {
-		if c.labelName == "fabrik:reworking" {
+		if c.labelName == "fabrik:reworking:Research" {
 			t.Errorf("fabrik:reworking was removed even though the stage:Research:complete restore failed: %+v", client.removeLabelCalls)
 		}
 	}
@@ -271,7 +271,7 @@ func TestProcessComments_Rework_NonCompletingExit_RestoresCompleteLabel(t *testi
 
 	var addedReworking, removedComplete, restoredComplete, removedReworking bool
 	for _, c := range client.addLabelCalls {
-		if c.labelName == "fabrik:reworking" {
+		if c.labelName == "fabrik:reworking:Research" {
 			addedReworking = true
 		}
 		if c.labelName == "stage:Research:complete" {
@@ -282,7 +282,7 @@ func TestProcessComments_Rework_NonCompletingExit_RestoresCompleteLabel(t *testi
 		if c.labelName == "stage:Research:complete" {
 			removedComplete = true
 		}
-		if c.labelName == "fabrik:reworking" {
+		if c.labelName == "fabrik:reworking:Research" {
 			removedReworking = true
 		}
 	}
@@ -339,7 +339,7 @@ func TestProcessComments_Rework_CompletingExit_DeferredToHandleStageComplete(t *
 		if c.labelName == "stage:Research:complete" {
 			// cleared at rework start — expected once
 		}
-		if c.labelName == "fabrik:reworking" {
+		if c.labelName == "fabrik:reworking:Research" {
 			removedReworking = true
 		}
 	}
@@ -388,7 +388,7 @@ func TestProcessComments_Rework_CompletingExit_MarkerRemovedAfterHandleStageComp
 	// beginStageRework's remove, never an add) — so the only "add" of this
 	// label in the log is handleStageComplete's own re-derivation.
 	restoreIdx := indexOf(*log, "add:stage:Research:complete")
-	removeMarkerIdx := indexOf(*log, "remove:fabrik:reworking")
+	removeMarkerIdx := indexOf(*log, "remove:fabrik:reworking:Research")
 	if restoreIdx == -1 {
 		t.Fatalf("stage:Research:complete was never (re-)added by handleStageComplete; log=%v", *log)
 	}
@@ -443,7 +443,7 @@ func TestProcessComments_Rework_WaitForCI_NoDirectComplete(t *testing.T) {
 		}
 	}
 	for _, c := range client.removeLabelCalls {
-		if c.labelName == "fabrik:reworking" {
+		if c.labelName == "fabrik:reworking:Implement" {
 			removedReworking = true
 		}
 	}
@@ -483,12 +483,12 @@ func TestProcessComments_Rework_MidFlightNoStaleComplete_NoOp(t *testing.T) {
 	}
 
 	for _, c := range client.addLabelCalls {
-		if c.labelName == "fabrik:reworking" {
+		if c.labelName == "fabrik:reworking:Research" {
 			t.Errorf("fabrik:reworking applied despite stage:Research:complete never having been present")
 		}
 	}
 	for _, c := range client.removeLabelCalls {
-		if c.labelName == "fabrik:reworking" {
+		if c.labelName == "fabrik:reworking:Research" {
 			t.Errorf("fabrik:reworking removed despite never having been applied")
 		}
 	}
@@ -538,7 +538,7 @@ func TestProcessComments_Rework_BaseBranchFailure_RestoresCompleteLabel(t *testi
 		}
 	}
 	for _, c := range client.removeLabelCalls {
-		if c.labelName == "fabrik:reworking" {
+		if c.labelName == "fabrik:reworking:Review" {
 			removedReworking = true
 		}
 	}
@@ -626,7 +626,7 @@ func TestProcessComments_Rework_EnsureWorktreeFailure_RestoresCompleteLabel(t *t
 		}
 	}
 	for _, c := range client.removeLabelCalls {
-		if c.labelName == "fabrik:reworking" {
+		if c.labelName == "fabrik:reworking:Review" {
 			removedReworking = true
 		}
 	}
@@ -653,7 +653,7 @@ func TestRemoveReworkingLabelRetrying_TransientRetrySucceeds(t *testing.T) {
 	var calls int
 	client := &mockGitHubClient{
 		removeLabelFromIssueFn: func(owner, repo string, issueNumber int, labelName string) error {
-			if labelName == "fabrik:reworking" {
+			if labelName == "fabrik:reworking:Research" {
 				calls++
 				if calls < 3 {
 					return fmt.Errorf("executing request: %w", &net.OpError{Op: "read", Net: "tcp"})
@@ -666,7 +666,7 @@ func TestRemoveReworkingLabelRetrying_TransientRetrySucceeds(t *testing.T) {
 	eng := testEngine(t, client, &mockClaudeInvoker{})
 	item := gh.ProjectItem{Number: 42, Repo: "owner/repo"}
 
-	eng.removeReworkingLabelRetrying(item)
+	eng.removeReworkingLabelRetrying(item, "fabrik:reworking:Research")
 
 	if calls != 3 {
 		t.Errorf("expected 3 calls (2 transient then success), got %d", calls)
@@ -684,7 +684,7 @@ func TestRemoveReworkingLabelRetrying_TransientExhausted(t *testing.T) {
 	var calls int
 	client := &mockGitHubClient{
 		removeLabelFromIssueFn: func(owner, repo string, issueNumber int, labelName string) error {
-			if labelName == "fabrik:reworking" {
+			if labelName == "fabrik:reworking:Research" {
 				calls++
 				return fmt.Errorf("executing request: %w", &net.OpError{Op: "read", Net: "tcp"})
 			}
@@ -694,7 +694,7 @@ func TestRemoveReworkingLabelRetrying_TransientExhausted(t *testing.T) {
 	eng := testEngine(t, client, &mockClaudeInvoker{})
 	item := gh.ProjectItem{Number: 43, Repo: "owner/repo"}
 
-	eng.removeReworkingLabelRetrying(item)
+	eng.removeReworkingLabelRetrying(item, "fabrik:reworking:Research")
 
 	if calls != 3 {
 		t.Errorf("expected 3 attempts, got %d", calls)

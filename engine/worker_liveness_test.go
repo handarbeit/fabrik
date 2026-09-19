@@ -606,7 +606,7 @@ func TestRunStartupCleanup_StaleReworkingLabel(t *testing.T) {
 	e := testEngine(t, client, &mockClaudeInvoker{})
 
 	// bootstrapItem seeds Status: "Implement" — a resolvable stage name.
-	bootstrapItem(t, e, 30, []string{"fabrik:reworking"})
+	bootstrapItem(t, e, 30, []string{"fabrik:reworking:Implement"})
 
 	if w := getWorker(t, e, 30); w != nil {
 		t.Fatalf("expected Worker == nil before cleanup, got %+v", w)
@@ -625,7 +625,7 @@ func TestRunStartupCleanup_StaleReworkingLabel(t *testing.T) {
 	}
 
 	removed := removeLabelsCalled(client, 30)
-	if !hasRemovedLabel(removed, "fabrik:reworking") {
+	if !hasRemovedLabel(removed, "fabrik:reworking:Implement") {
 		t.Errorf("expected fabrik:reworking to be removed; got: %v", removed)
 	}
 }
@@ -641,13 +641,13 @@ func TestRunStartupCleanup_ActiveWorkerSkipsReworking(t *testing.T) {
 	client := &mockGitHubClient{}
 	e := testEngine(t, client, &mockClaudeInvoker{})
 
-	bootstrapItem(t, e, 31, []string{"fabrik:reworking"})
+	bootstrapItem(t, e, 31, []string{"fabrik:reworking:Implement"})
 	setWorker(e, 31, os.Getpid(), "Implement", time.Now())
 
 	e.runStartupCleanup()
 
 	removed := removeLabelsCalled(client, 31)
-	if hasRemovedLabel(removed, "fabrik:reworking") {
+	if hasRemovedLabel(removed, "fabrik:reworking:Implement") {
 		t.Errorf("startup cleanup incorrectly removed fabrik:reworking for active worker")
 	}
 	for _, c := range client.addLabelCalls {
@@ -657,12 +657,16 @@ func TestRunStartupCleanup_ActiveWorkerSkipsReworking(t *testing.T) {
 	}
 }
 
-// TestRunStartupCleanup_ReworkingLabel_UnresolvableStatus verifies that when
-// an item's board Status cannot be resolved (empty), the third pass leaves
-// fabrik:reworking in place — logging loudly rather than silently dropping
+// TestRunStartupCleanup_ReworkingLabel_MalformedMarker verifies that a
+// malformed fabrik:reworking: marker with no stage name encoded (an empty
+// suffix) is left in place — logging loudly rather than silently dropping
 // the only remaining signal that a restore is owed — instead of guessing
-// which stage's :complete to restore.
-func TestRunStartupCleanup_ReworkingLabel_UnresolvableStatus(t *testing.T) {
+// which stage's :complete to restore. The stage name is now read directly
+// from the label itself, not from the item's board Status (#1802 — see
+// TestRunStartupCleanup_ReworkingLabel_StatusAlreadyAdvanced for why Status
+// is no longer used), so this replaces the old "unresolvable Status" case —
+// Status can be anything, even empty, without affecting this pass at all.
+func TestRunStartupCleanup_ReworkingLabel_MalformedMarker(t *testing.T) {
 	orig := editingLabelRetryDelay
 	editingLabelRetryDelay = 0
 	t.Cleanup(func() { editingLabelRetryDelay = orig })
@@ -678,21 +682,71 @@ func TestRunStartupCleanup_ReworkingLabel_UnresolvableStatus(t *testing.T) {
 			Number: 32,
 			Title:  "Test Issue",
 			Repo:   "owner/repo",
-			Status: "", // unresolvable
-			Labels: []string{"fabrik:reworking"},
+			Status: "",
+			Labels: []string{"fabrik:reworking:"}, // malformed: no stage name
 		},
 	})
 
 	e.runStartupCleanup()
 
 	removed := removeLabelsCalled(client, 32)
-	if hasRemovedLabel(removed, "fabrik:reworking") {
-		t.Errorf("expected fabrik:reworking to be left in place when Status is unresolvable; removed=%v", removed)
+	if hasRemovedLabel(removed, "fabrik:reworking:") {
+		t.Errorf("expected the malformed marker to be left in place; removed=%v", removed)
 	}
 	for _, c := range client.addLabelCalls {
 		if c.issueNumber == 32 {
-			t.Errorf("expected no label restore attempt when Status is unresolvable; addLabelCalls=%v", client.addLabelCalls)
+			t.Errorf("expected no label restore attempt for a malformed marker; addLabelCalls=%v", client.addLabelCalls)
 		}
+	}
+}
+
+// TestRunStartupCleanup_ReworkingLabel_StatusAlreadyAdvanced is the
+// regression guard for the Pruefer review finding (#1802): a completing
+// rework that also auto-advances the board moves Status to the *next* stage
+// (inside handleStageComplete) before finalizeComments' deferred call to
+// endStageRework removes the marker. A crash in that window must NOT cause
+// this pass to stamp stage:<NextStage>:complete onto an item that never
+// actually ran the next stage — which itemNeedsWork would then read as
+// "already done," silently and permanently skipping real dispatch. Reading
+// the reworked stage's name from the label itself (fabrik:reworking:Implement)
+// rather than from the item's current Status ("Review", already advanced)
+// is exactly what prevents this.
+func TestRunStartupCleanup_ReworkingLabel_StatusAlreadyAdvanced(t *testing.T) {
+	orig := editingLabelRetryDelay
+	editingLabelRetryDelay = 0
+	t.Cleanup(func() { editingLabelRetryDelay = orig })
+	client := &mockGitHubClient{}
+	e := testEngine(t, client, &mockClaudeInvoker{})
+
+	e.store.Apply(itemstate.ItemDeepFetched{
+		Repo:   "owner/repo",
+		Number: 35,
+		FreshState: gh.ProjectItem{
+			ID:     "I_003",
+			ItemID: "PVTI_003",
+			Number: 35,
+			Title:  "Test Issue",
+			Repo:   "owner/repo",
+			// Status has already advanced past the reworked stage
+			// (Implement) to the next one (Review) before the crash.
+			Status: "Review",
+			Labels: []string{"fabrik:reworking:Implement", "stage:Implement:complete"},
+		},
+	})
+
+	e.runStartupCleanup()
+
+	for _, c := range client.addLabelCalls {
+		if c.issueNumber == 35 && c.labelName == "stage:Review:complete" {
+			t.Errorf("stage:Review:complete was falsely stamped onto an item that never ran Review; addLabelCalls=%v", client.addLabelCalls)
+		}
+		if c.issueNumber == 35 && c.labelName == "stage:Implement:complete" {
+			t.Errorf("expected no restore attempt when stage:Implement:complete is already present; addLabelCalls=%v", client.addLabelCalls)
+		}
+	}
+	removed := removeLabelsCalled(client, 35)
+	if !hasRemovedLabel(removed, "fabrik:reworking:Implement") {
+		t.Errorf("expected fabrik:reworking:Implement to be removed; got: %v", removed)
 	}
 }
 
@@ -710,7 +764,7 @@ func TestRunStartupCleanup_ReworkingLabel_AlreadyComplete(t *testing.T) {
 	e := testEngine(t, client, &mockClaudeInvoker{})
 
 	// bootstrapItem seeds Status: "Implement".
-	bootstrapItem(t, e, 33, []string{"fabrik:reworking", "stage:Implement:complete"})
+	bootstrapItem(t, e, 33, []string{"fabrik:reworking:Implement", "stage:Implement:complete"})
 
 	e.runStartupCleanup()
 
@@ -720,7 +774,7 @@ func TestRunStartupCleanup_ReworkingLabel_AlreadyComplete(t *testing.T) {
 		}
 	}
 	removed := removeLabelsCalled(client, 33)
-	if !hasRemovedLabel(removed, "fabrik:reworking") {
+	if !hasRemovedLabel(removed, "fabrik:reworking:Implement") {
 		t.Errorf("expected fabrik:reworking to be removed even when already settled; got: %v", removed)
 	}
 }
@@ -739,7 +793,7 @@ func TestRunStartupCleanup_ReworkingLabel_AlreadyAwaitingCI(t *testing.T) {
 	e := testEngine(t, client, &mockClaudeInvoker{})
 
 	// bootstrapItem seeds Status: "Implement".
-	bootstrapItem(t, e, 34, []string{"fabrik:reworking", "fabrik:awaiting-ci"})
+	bootstrapItem(t, e, 34, []string{"fabrik:reworking:Implement", "fabrik:awaiting-ci"})
 
 	e.runStartupCleanup()
 
@@ -749,7 +803,7 @@ func TestRunStartupCleanup_ReworkingLabel_AlreadyAwaitingCI(t *testing.T) {
 		}
 	}
 	removed := removeLabelsCalled(client, 34)
-	if !hasRemovedLabel(removed, "fabrik:reworking") {
+	if !hasRemovedLabel(removed, "fabrik:reworking:Implement") {
 		t.Errorf("expected fabrik:reworking to be removed even when already settled; got: %v", removed)
 	}
 }

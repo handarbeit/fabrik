@@ -490,6 +490,22 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	return nil
 }
 
+// reworkingLabelPrefix is the prefix of every fabrik:reworking:<Stage> marker
+// label. The stage name is encoded directly in the label — not resolved from
+// the item's current board Status at recovery time — because Status can
+// advance past the reworked stage before the marker is cleared (a completing
+// rework that also auto-advances the board moves Status to the *next* stage
+// synchronously inside handleStageComplete, before finalizeComments gets a
+// chance to remove the marker). A Status-keyed recovery would then restore
+// the wrong stage's completion claim; see runStartupCleanup's third pass.
+const reworkingLabelPrefix = "fabrik:reworking:"
+
+// reworkingLabelName returns the fabrik:reworking:<Stage> marker label name
+// for stageName.
+func reworkingLabelName(stageName string) string {
+	return reworkingLabelPrefix + stageName
+}
+
 // beginStageRework clears stage's stale completion claim for the duration of a
 // comment re-entry (#1802, R1): a stage being reworked must not keep
 // advertising stage:<Stage>:complete for the whole rework window, since that
@@ -502,8 +518,8 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 // prior rework already cleared it) has nothing to lie about, so nothing is
 // marked or cleared.
 //
-// Mark-first-then-clear ordering is deliberate: fabrik:reworking is added
-// before stage:<Stage>:complete is removed, so "fabrik:reworking present" is
+// Mark-first-then-clear ordering is deliberate: fabrik:reworking:<Stage> is
+// added before stage:<Stage>:complete is removed, so the marker's presence is
 // always the correct, unambiguous trigger for crash recovery (R3) to restore
 // the completion label — regardless of which of the two mutations actually
 // landed before a crash. The reverse order would leave a crash window with no
@@ -515,7 +531,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 // fabrik:editing is present, so clearing/restoring stage:<Stage>:complete
 // inside that window cannot change any gating decision.
 //
-// The fabrik:reworking add is error-checked (addLabelChecked), not
+// The fabrik:reworking:<Stage> add is error-checked (addLabelChecked), not
 // best-effort: if it doesn't actually land on GitHub, stage:<Stage>:complete
 // is deliberately left uncleared for this cycle (fail-open, logged) rather
 // than removed anyway — removing it here without a durably-landed marker
@@ -527,8 +543,9 @@ func (e *Engine) beginStageRework(item gh.ProjectItem, stage *stages.Stage) bool
 	if !hasLabel(item.Labels, completeLabel) {
 		return false
 	}
-	if err := e.addLabelChecked(item, "fabrik:reworking"); err != nil {
-		e.logf(item.Number, "warn", "could not add fabrik:reworking marker: %v — leaving %q in place for this cycle\n", err, completeLabel)
+	reworkingLabel := reworkingLabelName(stage.Name)
+	if err := e.addLabelChecked(item, reworkingLabel); err != nil {
+		e.logf(item.Number, "warn", "could not add %s marker: %v — leaving %q in place for this cycle\n", reworkingLabel, err, completeLabel)
 		return false
 	}
 	e.removeLabel(item, completeLabel)
@@ -546,12 +563,13 @@ func (e *Engine) beginStageRework(item gh.ProjectItem, stage *stages.Stage) bool
 // correct label from scratch, including its wait_for_ci deferral. Restoring
 // it here too would just be redundant (AddLabelToIssue is idempotent) but
 // duplicates the single source of truth for "what does complete mean" in two
-// places, so it's deliberately left to that flow alone. Only fabrik:reworking
-// is removed on this path — and the caller (finalizeComments) MUST NOT call
-// this until after handleStageComplete has already run: removing the marker
-// any earlier would leave a crash window with no durable signal that a
-// restore is owed, between a rework's completion and the label write that
-// records it. See that call site and ADR-1802.
+// places, so it's deliberately left to that flow alone. Only
+// fabrik:reworking:<Stage> is removed on this path — and the caller
+// (finalizeComments) MUST NOT call this until after handleStageComplete has
+// already run: removing the marker any earlier would leave a crash window
+// with no durable signal that a restore is owed, between a rework's
+// completion and the label write that records it. See that call site and
+// ADR-1802.
 //
 // When completedThisCycle is false, stage:<Stage>:complete is restored
 // directly — the rework didn't re-signal completion this cycle (error,
@@ -559,20 +577,21 @@ func (e *Engine) beginStageRework(item gh.ProjectItem, stage *stages.Stage) bool
 // other flow will restore it, so a direct re-add is the only way the
 // stage's completion claim survives the cycle.
 //
-// fabrik:reworking is always removed last (mirroring beginStageRework's
-// mark-first-then-clear invariant in reverse): the completion label lands (or
-// is deliberately deferred to handleStageComplete) before the marker that
-// says "a restore is owed" is cleared, so a crash between the two still
-// leaves the correct, safe-to-retry signal for startup recovery.
+// fabrik:reworking:<Stage> is always removed last (mirroring
+// beginStageRework's mark-first-then-clear invariant in reverse): the
+// completion label lands (or is deliberately deferred to handleStageComplete)
+// before the marker that says "a restore is owed" is cleared, so a crash
+// between the two still leaves the correct, safe-to-retry signal for startup
+// recovery.
 //
 // The restore add is error-checked (addLabelChecked), not best-effort: if
-// stage:<Stage>:complete doesn't actually land on GitHub, fabrik:reworking is
-// deliberately left in place (logged) rather than removed anyway — removing
-// the marker here without the restore having landed would silently lose both
-// the completion state and the only remaining signal that a restore is
-// still owed, with no runStartupCleanup path left to recover it (this
-// function only runs live, mid-session — the marker's continued presence is
-// what lets a later startup pass retry it).
+// stage:<Stage>:complete doesn't actually land on GitHub,
+// fabrik:reworking:<Stage> is deliberately left in place (logged) rather than
+// removed anyway — removing the marker here without the restore having
+// landed would silently lose both the completion state and the only
+// remaining signal that a restore is still owed, with no runStartupCleanup
+// path left to recover it (this function only runs live, mid-session — the
+// marker's continued presence is what lets a later startup pass retry it).
 func (e *Engine) endStageRework(item gh.ProjectItem, stage *stages.Stage, wasReworking, completedThisCycle bool) {
 	if !wasReworking {
 		return
@@ -580,38 +599,39 @@ func (e *Engine) endStageRework(item gh.ProjectItem, stage *stages.Stage, wasRew
 	if !completedThisCycle {
 		completeLabel := "stage:" + stage.Name + ":complete"
 		if err := e.addLabelChecked(item, completeLabel); err != nil {
-			e.logf(item.Number, "warn", "could not restore %q: %v — leaving fabrik:reworking in place for recovery\n", completeLabel, err)
+			e.logf(item.Number, "warn", "could not restore %q: %v — leaving %s in place for recovery\n", completeLabel, err, reworkingLabelName(stage.Name))
 			return
 		}
 	}
-	e.removeReworkingLabelRetrying(item)
+	e.removeReworkingLabelRetrying(item, reworkingLabelName(stage.Name))
 }
 
-// removeReworkingLabelRetrying removes fabrik:reworking with the same bounded
-// retry-with-backoff as removeEditingLabel: a single best-effort attempt
-// would leave the marker dangling live (visible until the next
-// runStartupCleanup pass, i.e. the next process restart) whenever the final
-// RemoveLabelFromIssue call hits a transient error — reintroducing, for the
-// marker itself, exactly the class of stale/misleading label this whole
-// mechanism exists to eliminate. By the time this runs, stage:<Stage>:complete
-// (or fabrik:awaiting-ci) has already durably landed, so nothing is at risk
-// beyond the marker's own cosmetic staleness — but it's cheap to close.
-func (e *Engine) removeReworkingLabelRetrying(item gh.ProjectItem) {
+// removeReworkingLabelRetrying removes the fabrik:reworking:<Stage> marker
+// named by label with the same bounded retry-with-backoff as
+// removeEditingLabel: a single best-effort attempt would leave the marker
+// dangling live (visible until the next runStartupCleanup pass, i.e. the next
+// process restart) whenever the final RemoveLabelFromIssue call hits a
+// transient error — reintroducing, for the marker itself, exactly the class
+// of stale/misleading label this whole mechanism exists to eliminate. By the
+// time this runs, stage:<Stage>:complete (or fabrik:awaiting-ci) has already
+// durably landed, so nothing is at risk beyond the marker's own cosmetic
+// staleness — but it's cheap to close.
+func (e *Engine) removeReworkingLabelRetrying(item gh.ProjectItem, label string) {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	const maxAttempts = 3
 	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:reworking")
+		err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, label)
 		if err == nil {
-			e.syncLabelRemoval(item, "fabrik:reworking", true)
+			e.syncLabelRemoval(item, label, true)
 			return
 		}
 		if errors.Is(err, gh.ErrNotFound) {
-			e.syncLabelRemoval(item, "fabrik:reworking", false)
+			e.syncLabelRemoval(item, label, false)
 			return
 		}
 		if !isTransientError(err) {
-			e.logf(item.Number, "warn", "could not remove fabrik:reworking marker: %v\n", err)
+			e.logf(item.Number, "warn", "could not remove %s marker: %v\n", label, err)
 			return
 		}
 		lastErr = err
@@ -620,7 +640,7 @@ func (e *Engine) removeReworkingLabelRetrying(item gh.ProjectItem) {
 			time.Sleep(delay)
 		}
 	}
-	e.logf(item.Number, "warn", "could not remove fabrik:reworking marker after %d attempts: %v\n", maxAttempts, lastErr)
+	e.logf(item.Number, "warn", "could not remove %s marker after %d attempts: %v\n", label, maxAttempts, lastErr)
 }
 
 // lastCommentAuthor returns the author of the last comment in comments, or ""
