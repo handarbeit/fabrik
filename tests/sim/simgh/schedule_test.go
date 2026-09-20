@@ -594,6 +594,7 @@ func TestAnEmptyScheduledStepIsASeedingError(t *testing.T) {
 	}{
 		{"SeedCheckRunsAt", func(s *Sim) { s.SeedCheckRunsAt("acme/widgets", "sha", time.Now()) }},
 		{"SeedCommitStatusesAt", func(s *Sim) { s.SeedCommitStatusesAt("acme/widgets", "sha", time.Now()) }},
+		{"SeedCheckSuitesAt", func(s *Sim) { s.SeedCheckSuitesAt("acme/widgets", "sha", time.Now()) }},
 		{"SeedReviewsAt", func(s *Sim) { s.SeedReviewsAt("acme/widgets", 8, time.Now()) }},
 		{"SeedReviewRequestsAt", func(s *Sim) { s.SeedReviewRequestsAt("acme/widgets", 8, time.Now()) }},
 	}

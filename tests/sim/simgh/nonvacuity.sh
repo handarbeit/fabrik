@@ -602,6 +602,30 @@ mutate "an empty scheduled step is accepted" \
   'TestAnEmptyScheduledStepIsASeedingError' \
   'seed.go::s{\t\ts\.fail\("simgh: SeedCheckRunsAt\(%s, %s\): no check runs given; an empty step is unobservable", ownerRepo, sha\)\n\t\treturn s\n}{}'
 
+mutate "FetchCheckSuites does not drain the CI schedule" \
+  'TestFetchCheckSuitesDrainsTheSchedule' \
+  'ci.go::s{\ts\.drainCI\(r\)\n\tsuites := r\.checkSuites\[sha\]}{\tsuites := r.checkSuites[sha]}'
+
+mutate "a scheduled check suite appends instead of superseding by ID" \
+  'TestScheduledCheckSuiteTransitionIsClockDriven' \
+  'seed.go::s{\t\tif list\[i\]\.ID == cs\.ID \{}{\t\tif false \&\& list[i].ID == cs.ID \{}'
+
+mutate "a scheduled check suite is stamped with the seed instant, not the step's" \
+  'TestScheduledCheckSuiteDefaultsCreatedAtToTheStepInstant' \
+  'seed.go::s{reserveCheckSuite\(cs, at\)}{reserveCheckSuite(cs, s.now())}'
+
+mutate "an empty scheduled check suite step is accepted" \
+  'TestAnEmptyScheduledStepIsASeedingError' \
+  'seed.go::s{\t\ts\.fail\("simgh: SeedCheckSuitesAt\(%s, %s\): no check suites given; an empty step is unobservable", ownerRepo, sha\)\n\t\treturn s\n}{}'
+
+mutate "an auto-assigned check suite ID does not advance the counter" \
+  'TestCheckSuitesSurviveSnapshotRestore' \
+  'seed.go::s{\t\tcs\.ID = s\.nextCheckSuiteID\n\t\ts\.nextCheckSuiteID\+\+}{\t\tcs.ID = s.nextCheckSuiteID}'
+
+mutate "a snapshot drops the check suites" \
+  'TestCheckSuitesSurviveSnapshotRestore' \
+  'snapshot.go::s{\tfor k, v := range r\.checkSuites \{\n\t\tout\.checkSuites\[k\] = append\(\[\]gh\.CheckSuite\(nil\), v\.\.\.\)\n\t\}\n}{}'
+
 mutate "a scheduled review is not stamped with the step's instant" \
   'TestScheduledReviewArrivesOnTheClock' \
   'seed.go::s{\t\tif rev\.SubmittedAt\.IsZero\(\) \{\n\t\t\trev\.SubmittedAt = at\n\t\t\}\n}{}'

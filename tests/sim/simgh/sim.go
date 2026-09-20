@@ -175,6 +175,10 @@ type Sim struct {
 
 	nextCommentDatabaseID int
 	nextCheckRunID        int64
+	// nextCheckSuiteID auto-assigns check suite IDs. Suites carry no ordering
+	// semantics in production's classifier, so unlike check runs there is no
+	// duplicate-ID registry — only a counter kept ahead of explicit IDs.
+	nextCheckSuiteID int64
 
 	// seededCheckRunIDs is every check run ID handed out or explicitly seeded,
 	// so SeedCheckRun can refuse a duplicate. GitHub's check run IDs are unique
@@ -227,6 +231,7 @@ func New(baseDir string, opts ...Option) *Sim {
 		projects:              make(map[string]*projectState),
 		nextCommentDatabaseID: 1000,
 		nextCheckRunID:        5000,
+		nextCheckSuiteID:      9000,
 		seededCheckRunIDs:     make(map[int64]bool),
 		restRate:              rateBudget{limit: 5000, remaining: 5000, resetIn: time.Hour},
 		graphqlRate:           rateBudget{limit: 5000, remaining: 5000, resetIn: time.Hour},

@@ -143,6 +143,7 @@ func (s *Sim) SeedRepo(ownerRepo string, defaultBranch ...string) *Sim {
 		issues:            make(map[int]*issueRecord),
 		prs:               make(map[int]*prRecord),
 		checkRuns:         make(map[string][]gh.CheckRun),
+		checkSuites:       make(map[string][]gh.CheckSuite),
 		commitStatuses:    make(map[string][]gh.CommitStatus),
 		requiredContexts:  make(map[string][]string),
 		requireUpToDate:   make(map[string]bool),
@@ -1117,6 +1118,91 @@ func (s *Sim) SeedCheckRunsAt(ownerRepo, sha string, at time.Time, runs ...gh.Ch
 // reading.
 func (s *Sim) SeedCheckRunsAfter(ownerRepo, sha string, d time.Duration, runs ...gh.CheckRun) *Sim {
 	return s.SeedCheckRunsAt(ownerRepo, sha, s.now().Add(d), runs...)
+}
+
+// reserveCheckSuite assigns an ID when unset (keeping the counter ahead of any
+// explicit one), defaults Status the way SeedCheckRun does, and defaults
+// CreatedAt to defaultCreated. Caller must hold mu.
+func (s *Sim) reserveCheckSuite(cs gh.CheckSuite, defaultCreated time.Time) gh.CheckSuite {
+	if cs.ID == 0 {
+		cs.ID = s.nextCheckSuiteID
+		s.nextCheckSuiteID++
+	} else if cs.ID >= s.nextCheckSuiteID {
+		s.nextCheckSuiteID = cs.ID + 1
+	}
+	if cs.Status == "" {
+		if cs.Conclusion == "" {
+			cs.Status = "in_progress"
+		} else {
+			cs.Status = "completed"
+		}
+	}
+	if cs.CreatedAt.IsZero() {
+		cs.CreatedAt = defaultCreated
+	}
+	return cs
+}
+
+// upsertCheckSuite replaces the entry sharing cs's ID, or appends when there is
+// none — the same transition-in-place shape as upsertCheckRun.
+func upsertCheckSuite(list []gh.CheckSuite, cs gh.CheckSuite) []gh.CheckSuite {
+	for i := range list {
+		if list[i].ID == cs.ID {
+			list[i] = cs
+			return list
+		}
+	}
+	return append(list, cs)
+}
+
+// SeedCheckSuite attaches a check suite to a commit SHA now. An empty ID is
+// auto-assigned; an empty Status is "in_progress" (or "completed" when a
+// Conclusion is given); a zero CreatedAt is the clock's current reading. Give
+// an explicit old CreatedAt to model an inert App suite that has sat queued
+// with zero runs for hours.
+func (s *Sim) SeedCheckSuite(ownerRepo, sha string, cs gh.CheckSuite) *Sim {
+	r, ok := s.repoForSeed(ownerRepo)
+	if !ok {
+		return s
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r.checkSuites[sha] = upsertCheckSuite(r.checkSuites[sha], s.reserveCheckSuite(cs, s.now()))
+	return s
+}
+
+// SeedCheckSuitesAt schedules check suites to land on a SHA at instant at. A
+// suite whose ID matches one already recorded supersedes it in place, which is
+// how a scenario models a suite transitioning (in_progress → completed): pass
+// the same explicit ID each time. A zero CreatedAt defaults to the step's
+// instant.
+func (s *Sim) SeedCheckSuitesAt(ownerRepo, sha string, at time.Time, suites ...gh.CheckSuite) *Sim {
+	r, ok := s.repoForSeed(ownerRepo)
+	if !ok {
+		return s
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(suites) == 0 {
+		s.fail("simgh: SeedCheckSuitesAt(%s, %s): no check suites given; an empty step is unobservable", ownerRepo, sha)
+		return s
+	}
+	prepared := make([]gh.CheckSuite, 0, len(suites))
+	for _, cs := range suites {
+		prepared = append(prepared, s.reserveCheckSuite(cs, at))
+	}
+	r.ciSchedule.add(at, func(rs *repoState) {
+		for _, cs := range prepared {
+			rs.checkSuites[sha] = upsertCheckSuite(rs.checkSuites[sha], cs)
+		}
+	})
+	return s
+}
+
+// SeedCheckSuitesAfter is SeedCheckSuitesAt relative to the clock's current
+// reading.
+func (s *Sim) SeedCheckSuitesAfter(ownerRepo, sha string, d time.Duration, suites ...gh.CheckSuite) *Sim {
+	return s.SeedCheckSuitesAt(ownerRepo, sha, s.now().Add(d), suites...)
 }
 
 // SeedCommitStatusesAt schedules classic commit statuses to land on a SHA at

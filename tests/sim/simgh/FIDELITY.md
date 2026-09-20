@@ -345,6 +345,32 @@ required context can be posted through the classic Statuses API rather than as
 an Actions check run, and `FetchCombinedStatus` is Fabrik's only visibility into
 that case (ADR-933). Both feed the `mergeable_state` derivation.
 
+### Check suites — **Modelled, minimally** (#1822)
+
+`FetchCheckSuites` reads a third SHA-keyed collection, `repoState.checkSuites`,
+seeded with `SeedCheckSuite` and scheduled with `SeedCheckSuitesAt`/`After` on
+the same `ciSchedule` (so `drainCI` covers it and a scenario expresses "the
+suite is `in_progress` with a green prefix, then a failing run lands at T" on
+one clock). A suite carries only what the engine's gate reads: app slug,
+`status`, `conclusion`, `latest_check_runs_count` and `created_at`.
+
+- **Suites are independent of check runs on purpose.** Nothing derives one
+  from the other — the whole defect is that a suite can be `in_progress` while
+  every check run that exists is green, because a job queued for a runner has
+  no check run yet. Deriving the suite from the runs would make that state
+  unrepresentable.
+- **`deriveMergeableState` ignores suites.** GitHub reports `clean` for a green
+  prefix while a non-required job is unscheduled, and the engine's
+  suite-awareness is what closes that gap; the sim must not paper over it.
+- **No roll-up is computed.** GitHub rolls a suite's `status` up from its runs;
+  here the scenario states the suite's status directly. A scenario that seeds a
+  suite `completed` alongside a pending check run describes a state GitHub
+  would not produce, and nothing prevents it.
+- **Inert App suites** (`queued`, 0 runs, hours old) are modelled by seeding a
+  suite with an explicit old `CreatedAt`; the sim does not generate them.
+- **Multiple suites per SHA** are supported (GitHub Actions creates one per
+  workflow run).
+
 ### Required contexts — **Simplified**
 
 Branch protection's required-check configuration is modelled as a per-branch
