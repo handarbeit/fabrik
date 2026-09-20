@@ -669,13 +669,19 @@ func (e *Engine) pauseForCIFixCycleLimit(board *gh.ProjectBoard, item gh.Project
 	}
 	e.logf(item.Number, "ci-cycles", "CI-fix cycle limit %d reached — pausing for human intervention\n", maxCycles)
 
+	diagnosis := "CI checks are still failing after repeated fix attempts. "
+	if note, dominant := e.didNotRunPauseNote(repoStr, item.Number, stage.Name, cycleCount); dominant {
+		diagnosis = note + " "
+	} else if note != "" {
+		diagnosis = note + "\n\n" + diagnosis
+	}
 	msg := fmt.Sprintf(
 		"🏭 **Fabrik — CI fix cycle limit reached**\n\nThe stage **%s** has been re-invoked to fix CI failures %d time(s), "+
 			"which has reached the maximum configured limit (`FABRIK_MAX_CI_FIX_CYCLES=%d`).\n\n"+
-			"CI checks are still failing after repeated fix attempts. "+
+			"%s"+
 			"Fabrik has paused this issue for human review. Once the CI situation is resolved, "+
 			"remove the `fabrik:paused` label to resume.",
-		stage.Name, cycleCount, maxCycles,
+		stage.Name, cycleCount, maxCycles, diagnosis,
 	)
 	e.pauseIssue(item, msg, pauseOpts{
 		awaitingInput: true,

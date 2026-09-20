@@ -1942,13 +1942,20 @@ func (e *Engine) pauseForReviewCycleLimit(board *gh.ProjectBoard, item gh.Projec
 	}
 	e.logf(item.Number, "review-cycles", "review cycle limit %d reached — pausing for human intervention\n", maxCycles)
 
+	diagnosis := "This usually means a reviewer (bot or human) is repeatedly requesting changes after each fix. "
+	extra := ""
+	if note, dominant := e.didNotRunPauseNote(repoStr, item.Number, stage.Name, cycleCount); dominant {
+		diagnosis = note + " "
+	} else if note != "" {
+		extra = note + "\n\n"
+	}
 	msg := fmt.Sprintf(
 		"🏭 **Fabrik — review cycle limit reached**\n\n%s %d time(s), "+
 			"which has reached the maximum configured limit (`FABRIK_MAX_REVIEW_CYCLES=%d`).\n\n"+
-			"This usually means a reviewer (bot or human) is repeatedly requesting changes after each fix. "+
+			"%s%s"+
 			"Fabrik has paused this issue for human review. Once the review situation is resolved, "+
 			"remove the `fabrik:paused` label to resume.",
-		reviewCyclePauseFragment(stage), cycleCount, maxCycles,
+		reviewCyclePauseFragment(stage), cycleCount, maxCycles, extra, diagnosis,
 	)
 	e.pauseIssue(item, msg, pauseOpts{
 		awaitingInput: true,

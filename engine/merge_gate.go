@@ -646,15 +646,21 @@ func (e *Engine) pauseForRebaseCycleLimit(board *gh.ProjectBoard, item gh.Projec
 	}
 	e.logf(item.Number, "rebase-cycles", "rebase cycle limit %d reached — pausing for human intervention\n", maxCycles)
 
+	diagnosis := "GitHub still reports the PR as not mergeable. This usually means the conflict requires human judgment " +
+		"(for example: two PRs picked the same ADR number or migration slot, or a semantic overlap that cannot be " +
+		"resolved by automated rebase).\n\n"
+	if note, dominant := e.didNotRunPauseNote(repoStr, item.Number, stage.Name, cycleCount); dominant {
+		diagnosis = note + "\n\n"
+	} else if note != "" {
+		diagnosis = note + "\n\n" + diagnosis
+	}
 	msg := fmt.Sprintf(
 		"🏭 **Fabrik — rebase cycle limit reached**\n\n%s %d time(s), "+
 			"which has reached the configured limit of %d (override with `--max-rebase-cycles` or `FABRIK_MAX_REBASE_CYCLES`).\n\n"+
-			"GitHub still reports the PR as not mergeable. This usually means the conflict requires human judgment "+
-			"(for example: two PRs picked the same ADR number or migration slot, or a semantic overlap that cannot be "+
-			"resolved by automated rebase).\n\n"+
+			"%s"+
 			"Fabrik has paused this issue. Resolve the conflict manually, then remove the `fabrik:paused` and "+
 			"`fabrik:rebase-needed` labels to resume.",
-		rebaseCyclePauseFragment(stage), cycleCount, maxCycles,
+		rebaseCyclePauseFragment(stage), cycleCount, maxCycles, diagnosis,
 	)
 	e.pauseIssue(item, msg, pauseOpts{
 		awaitingInput: true,

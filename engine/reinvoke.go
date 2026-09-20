@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -199,9 +200,15 @@ func (e *Engine) dispatchReinvoke(ctx context.Context, board *gh.ProjectBoard, i
 		}
 
 		e.logf(item.Number, opts.tag, "re-invoking stage %q via comment processing (comments: %s)\n", stage.Name, commentIDsForLog(comments))
-		err := e.processComments(ctx, board, item, reinvokeStage, comments, onPIDReady)
+		kind, err := e.processCommentsClassified(ctx, board, item, reinvokeStage, comments, onPIDReady)
 
-		if opts.after != nil {
+		// An invocation that provably never ran was not an attempt to
+		// converge: refund the pre-dispatch cycle charge and skip opts.after,
+		// whose HEAD-based logic (CI no-op-SHA debounce, rebase auto-merge
+		// re-enable, #1045 no-op refund) is meaningless when nothing ran.
+		if kind != "" {
+			e.refundDidNotRunCycle(item, itemRepo, stage, opts.tag, kind, opts.cycle)
+		} else if opts.after != nil {
 			opts.after(workDir, err)
 		}
 
@@ -212,4 +219,34 @@ func (e *Engine) dispatchReinvoke(ctx context.Context, board *gh.ProjectBoard, i
 			e.logf(item.Number, "warn", "%s re-invocation failed: %v\n", opts.tag, err)
 		}
 	}()
+}
+
+// didNotRunPauseNote builds the cycle-limit pause message's did-not-run
+// evidence (#1812, R7). Refunded did-not-run cycles no longer show in the cycle
+// counters, so the never-refunded DidNotRunReinvokes tally is the only signal
+// that the outage — not a non-converging reviewer or CI — is what an operator
+// is looking at. Returns dominant when the tally is at least cycleCount (the
+// invocations that reached the limit were largely accompanied by ones that never
+// ran), in which case callers replace their "reviewer keeps requesting changes"
+// style diagnosis with note; a smaller nonzero tally yields an addendum only;
+// a zero tally yields "" so the message is byte-identical to before.
+func (e *Engine) didNotRunPauseNote(repoStr string, number int, stageName string, cycleCount int) (note string, dominant bool) {
+	snap, err := e.store.Get(repoStr, number)
+	if err != nil {
+		return "", false
+	}
+	n := snap.DidNotRunReinvokes(stageName)
+	switch {
+	case n <= 0:
+		return "", false
+	case n >= cycleCount:
+		return fmt.Sprintf("**%d re-invocation(s) never ran** — Claude exited before doing any work "+
+			"(an API error such as a 429 session limit, or a usage limit), so this is most likely a Claude "+
+			"availability problem rather than a reviewer or CI that keeps failing. Real cycles take minutes each; "+
+			"a burst of them within seconds means the invocations never ran. Check the `is_error`/`api_error` "+
+			"result lines in `.fabrik/logs/<repo>/issue-%d/`.", n, number), true
+	default:
+		return fmt.Sprintf("Note: %d re-invocation(s) for this stage never ran (Claude API error or usage limit) "+
+			"and were not counted toward this limit.", n), false
+	}
 }
