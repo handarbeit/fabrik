@@ -794,7 +794,12 @@ func (e *Engine) prepareTrainWorker(ctx context.Context, state *mergeTrainWorker
 
 	// Resolve each member's linked PR number + head SHA once, ejecting fetch failures.
 	current := e.fetchTrainMembers(ctx, owner, repo, batch)
-	e.logfRepo(repoKey, "merge-train", "assembled %d train member(s) for %s\n", len(current), repoKey)
+	// #1821: admission gate — keep members whose own PR CI is confirmed red out of the
+	// batch (fail-open on every other outcome). Fresh formation only: both restart
+	// routes returned from reconstructTrainState above.
+	fetched := len(current)
+	current = e.admitTrainMembers(ctx, state, owner, repo, current)
+	e.logfRepo(repoKey, "merge-train", "assembled %d train member(s) for %s (deferred %d for own-PR CI red)\n", len(current), repoKey, fetched-len(current))
 
 	return p, current, true
 }
