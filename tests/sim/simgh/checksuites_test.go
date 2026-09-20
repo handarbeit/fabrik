@@ -155,3 +155,19 @@ func TestFetchCheckSuitesDrainsTheSchedule(t *testing.T) {
 		t.Fatalf("FetchCheckSuites = %+v, %v; want the scheduled suite", got, err)
 	}
 }
+
+// TestAutoAssignedCheckSuiteIDsAreDistinct: two auto-assigned suites must not
+// share an ID, or a scheduled transition of one would supersede the other.
+func TestAutoAssignedCheckSuiteIDsAreDistinct(t *testing.T) {
+	s, _ := newSim(t)
+	s.SeedRepo("acme/widgets").
+		SeedCheckSuite("acme/widgets", "sha", gh.CheckSuite{AppSlug: "github-actions"}).
+		SeedCheckSuite("acme/widgets", "sha", gh.CheckSuite{AppSlug: "github-actions"})
+	got, err := s.FetchCheckSuites("acme", "widgets", "sha")
+	if err != nil || len(got) != 2 {
+		t.Fatalf("FetchCheckSuites = %+v, %v; want two suites", got, err)
+	}
+	if got[0].ID == got[1].ID {
+		t.Errorf("two auto-assigned suites share ID %d", got[0].ID)
+	}
+}

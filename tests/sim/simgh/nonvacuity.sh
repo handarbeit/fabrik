@@ -619,7 +619,7 @@ mutate "an empty scheduled check suite step is accepted" \
   'seed.go::s{\t\ts\.fail\("simgh: SeedCheckSuitesAt\(%s, %s\): no check suites given; an empty step is unobservable", ownerRepo, sha\)\n\t\treturn s\n}{}'
 
 mutate "an auto-assigned check suite ID does not advance the counter" \
-  'TestCheckSuitesSurviveSnapshotRestore' \
+  'TestAutoAssignedCheckSuiteIDsAreDistinct' \
   'seed.go::s{\t\tcs\.ID = s\.nextCheckSuiteID\n\t\ts\.nextCheckSuiteID\+\+}{\t\tcs.ID = s.nextCheckSuiteID}'
 
 mutate "a snapshot drops the check suites" \
