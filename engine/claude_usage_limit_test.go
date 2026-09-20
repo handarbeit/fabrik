@@ -94,8 +94,8 @@ func TestInterpretClaudeResult_UsageLimitExit_ReturnsSentinelError(t *testing.T)
 	if !errors.As(err, &limitErr) {
 		t.Fatalf("errors.As(err, *claudeUsageLimitError) = false; err = %v", err)
 	}
-	if limitErr.ResetTime != "" {
-		t.Errorf("ResetTime = %q, want empty — structural detection never populates a parsed reset time", limitErr.ResetTime)
+	if !limitErr.ResetAt.IsZero() {
+		t.Errorf("ResetAt = %v, want zero — this stream carries no rate_limit_event", limitErr.ResetAt)
 	}
 	if completed {
 		t.Errorf("expected completed=false for a usage-limit exit")
@@ -131,7 +131,7 @@ func TestInterpretClaudeResult_TurnCappedQuotingMessage_NotUsageLimit(t *testing
 
 	var limitErr *claudeUsageLimitError
 	if errors.As(err, &limitErr) {
-		t.Fatalf("turn-capped run quoting the usage-limit message was classified as a usage-limit exit (ResetTime=%q); #1183 regression", limitErr.ResetTime)
+		t.Fatalf("turn-capped run quoting the usage-limit message was classified as a usage-limit exit (ResetAt=%v); #1183 regression", limitErr.ResetAt)
 	}
 	var turnErr *claudeTurnLimitError
 	if !errors.As(err, &turnErr) {

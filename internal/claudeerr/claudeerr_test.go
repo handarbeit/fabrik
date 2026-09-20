@@ -3,6 +3,7 @@ package claudeerr
 import (
 	"errors"
 	"testing"
+	"time"
 )
 
 // TestUsageLimitError_ErrorFormat pins Error()'s exact string shape. engine's
@@ -11,7 +12,7 @@ import (
 // any consumer (log lines, comment text) that formats the error — see the
 // pure-move guard-rail in the issue's spec review comment.
 func TestUsageLimitError_ErrorFormat(t *testing.T) {
-	withReset := &UsageLimitError{Message: "terminal_reason=\"blocking_limit\"", ResetTime: "2026-01-01T00:00:00Z"}
+	withReset := &UsageLimitError{Message: "terminal_reason=\"blocking_limit\"", ResetAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
 	if got, want := withReset.Error(), `claude usage limit hit: terminal_reason="blocking_limit" (resets 2026-01-01T00:00:00Z)`; got != want {
 		t.Errorf("Error() = %q, want %q", got, want)
 	}

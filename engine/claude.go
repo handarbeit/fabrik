@@ -145,9 +145,10 @@ func classifyAPIErrorExit(resp claudeResponse, usage TokenUsage) (msg string, de
 // classification (#1183). An absent, zero, or unparseable status is not a 429
 // and falls through to classifyAPIErrorExit. The same exclusion gate applies
 // to both triggers, so a mid-session 429 after real work (turns and cost both
-// non-zero) is deliberately not detected. ResetTime is left empty for both
-// shapes: it drives activateClaudeSuspension's deadline, so populating it from
-// the result text would change the suspension duration and let prose reach a
+// non-zero) is deliberately not detected. This function decides only *whether*
+// the exit is a usage limit; the suspension's end instant is supplied separately
+// by extractUsageLimitReset from the CLI's structured rate_limit_event line
+// (ADR-1815) — never from the result text, which would let prose reach a
 // behavioural decision.
 func classifyUsageLimitExit(resp claudeResponse, usage TokenUsage) (msg string, detected bool) {
 	switch {
@@ -1796,7 +1797,11 @@ func interpretClaudeResult(ctx context.Context, issueNumber int, rawOutput []byt
 		if ok {
 			if msg, detected := classifyUsageLimitExit(resp, usage); detected {
 				claudeLog(issueNumber, "claude-limit", "usage-limit exit detected (turns=%d, cost=$%.4f): %s\n", usage.TurnsUsed, usage.CostUSD, msg)
-				return text, false, usage, &claudeUsageLimitError{Message: msg}
+				// The reset instant lives on a separate rate_limit_event stream line,
+				// not on the result object (ADR-1815); a best-effort raw-stream scan
+				// that can never affect the classification above.
+				resetAt, resetReason := extractUsageLimitReset(rawOutput)
+				return text, false, usage, &claudeUsageLimitError{Message: msg, ResetAt: resetAt, ResetFallbackReason: resetReason}
 			} else if _, detected := classifyAPIErrorExit(resp, usage); detected {
 				claudeLog(issueNumber, "claude", "api_error exit detected (turns=%d, cost=$%.4f) — stage did not run, not charged against max_retries\n", usage.TurnsUsed, usage.CostUSD)
 				return text, false, usage, &claudeAPIErrorExit{TerminalReason: resp.TerminalReason, NumTurns: resp.NumTurns, CostUSD: resp.CostUSD}

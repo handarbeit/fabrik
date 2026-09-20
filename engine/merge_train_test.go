@@ -2533,7 +2533,7 @@ func TestMergeTrainWorker_UsageLimitDuringConflictResolution(t *testing.T) {
 	// Claude conflict resolution hits the account usage limit instead of resolving.
 	claude := &mockClaudeInvoker{
 		invokeForCommentsFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
-			return "", false, TokenUsage{}, &claudeUsageLimitError{Message: "usage limit reached", ResetTime: "10:20pm (America/Edmonton)"}
+			return "", false, TokenUsage{}, &claudeUsageLimitError{Message: "usage limit reached", ResetAt: time.Now().Add(2 * time.Hour)}
 		},
 	}
 	eng := trainTestEngine(t, client, claude, wm)

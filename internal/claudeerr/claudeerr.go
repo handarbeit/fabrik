@@ -23,6 +23,7 @@ package claudeerr
 import (
 	"fmt"
 	"strings"
+	"time"
 )
 
 // UsageLimitError signals that a Claude invocation exited because the
@@ -36,17 +37,38 @@ type UsageLimitError struct {
 	// terminal_reason "blocking_limit", and terminal_reason "api_error" with
 	// api_error_status 429 (ADR-1811).
 	Message string
-	// ResetTime is always "" — the structural detector never parses a reset
-	// time from prose (including the "resets 3:30am (...)" text of a 429
-	// api_error result). Kept so computeUsageLimitResetDeadline's existing
-	// fallback-when-empty path (claudeUsageLimitFallbackBackoff) is exercised
-	// unconditionally; do not populate this from matched text (#1183).
-	ResetTime string
+	// ResetAt is the instant the exhausted usage window lifts, decoded from the
+	// CLI's structured rate_limit_event stream line (unifiedWindows.*.resetsAt,
+	// a Unix timestamp): the latest resetsAt among windows whose utilization is
+	// at or above 1 (ADR-1815). The zero time means no usable structured reset
+	// was found, in which case ResetFallbackReason says why. It is never derived
+	// from the result text ("You've hit your session limit · resets 3:30am
+	// (...)"): prose must not reach a behavioural decision (#1183, ADR-1183).
+	// ResetAt feeds engine's resolveUsageLimitDeadline, which still applies the
+	// past-instant and ceiling checks — it is the CLI's claim, not yet a deadline.
+	ResetAt time.Time
+	// ResetFallbackReason names why ResetAt is zero, for logging: one of the
+	// ResetReason* constants. Empty when ResetAt is set. A zero ResetAt with an
+	// empty reason is treated as ResetReasonAbsent.
+	ResetFallbackReason string
 }
 
+// Reasons a UsageLimitError carries no structured reset instant. The engine
+// logs the applicable one whenever it falls back to a fixed suspension.
+const (
+	// ResetReasonAbsent: no rate_limit_event, or none carried unifiedWindows.
+	ResetReasonAbsent = "absent"
+	// ResetReasonZero: an exhausted window reported a zero or missing resetsAt.
+	ResetReasonZero = "zero"
+	// ResetReasonMalformed: the event or its windows had an unexpected shape.
+	ResetReasonMalformed = "malformed"
+	// ResetReasonNoExhaustedWindow: windows decoded but none had utilization >= 1.
+	ResetReasonNoExhaustedWindow = "no_exhausted_window"
+)
+
 func (e *UsageLimitError) Error() string {
-	if e.ResetTime != "" {
-		return fmt.Sprintf("claude usage limit hit: %s (resets %s)", e.Message, e.ResetTime)
+	if !e.ResetAt.IsZero() {
+		return fmt.Sprintf("claude usage limit hit: %s (resets %s)", e.Message, e.ResetAt.UTC().Format(time.RFC3339))
 	}
 	return fmt.Sprintf("claude usage limit hit: %s", e.Message)
 }

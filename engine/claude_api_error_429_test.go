@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/handarbeit/fabrik/internal/claudeerr"
 )
 
 // TestClassifyUsageLimitExit_APIError429 covers the second structural shape of
@@ -69,8 +71,10 @@ func TestInterpretClaudeResult_APIError429_ReturnsUsageLimitError(t *testing.T) 
 	if !errors.As(err, &limitErr) {
 		t.Fatalf("errors.As(err, *claudeUsageLimitError) = false; err = %v", err)
 	}
-	if limitErr.ResetTime != "" {
-		t.Errorf("ResetTime = %q, want empty (never parsed from result text)", limitErr.ResetTime)
+	// No rate_limit_event line in this stream, so there is no structured reset.
+	// The result text's "resets 3:30am" must never be read (R2).
+	if !limitErr.ResetAt.IsZero() || limitErr.ResetFallbackReason != claudeerr.ResetReasonAbsent {
+		t.Errorf("ResetAt = %v, reason = %q; want zero/%q (never parsed from result text)", limitErr.ResetAt, limitErr.ResetFallbackReason, claudeerr.ResetReasonAbsent)
 	}
 	var apiErr *claudeAPIErrorExit
 	if errors.As(err, &apiErr) {

@@ -17,7 +17,7 @@ func TestSettleClaudeLimitClearRequests_TriggersClear(t *testing.T) {
 	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	now := time.Date(2026, 7, 27, 20, 0, 0, 0, time.UTC)
-	eng.activateClaudeSuspension(1, "", now)
+	eng.activateClaudeSuspension(1, nil, now)
 	if _, ok := eng.claudeSuspendedUntilTime(now); !ok {
 		t.Fatal("expected suspension to be active before the clear request")
 	}
@@ -55,7 +55,7 @@ func TestSettleClaudeLimitClearRequests_NoOpWithoutLabel(t *testing.T) {
 	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	now := time.Date(2026, 7, 27, 20, 0, 0, 0, time.UTC)
-	eng.activateClaudeSuspension(1, "", now)
+	eng.activateClaudeSuspension(1, nil, now)
 
 	board := &gh.ProjectBoard{
 		Items: []gh.ProjectItem{
@@ -82,7 +82,7 @@ func TestSettleClaudeLimitClearRequests_SkipsClosedItems(t *testing.T) {
 	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	now := time.Date(2026, 7, 27, 20, 0, 0, 0, time.UTC)
-	eng.activateClaudeSuspension(1, "", now)
+	eng.activateClaudeSuspension(1, nil, now)
 
 	board := &gh.ProjectBoard{
 		Items: []gh.ProjectItem{
@@ -134,7 +134,7 @@ func TestSettleClaudeLimitLabelSweep_RemovesWhenNotSuspended(t *testing.T) {
 func TestSettleClaudeLimitLabelSweep_LeavesLabelWhileSuspended(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng := testEngine(t, client, &mockClaudeInvoker{})
-	eng.activateClaudeSuspension(1, "", time.Now())
+	eng.activateClaudeSuspension(1, nil, time.Now())
 
 	board := &gh.ProjectBoard{
 		Items: []gh.ProjectItem{
@@ -216,7 +216,7 @@ func TestSettleClaudeLimitLabelSweep_ConcurrentWithActivate(t *testing.T) {
 	}()
 	go func() {
 		defer wg.Done()
-		eng.activateClaudeSuspension(55, "", time.Now())
+		eng.activateClaudeSuspension(55, nil, time.Now())
 	}()
 	wg.Wait()
 }

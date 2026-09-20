@@ -2145,7 +2145,7 @@ func (e *Engine) resolveConflictWithClaude(ctx context.Context, memberItem gh.Pr
 	_, _, _, err := e.claude.InvokeForComments(ctx, conflictResolutionStage(holdingStg), memberItem, []gh.Comment{comment}, trainWorkDir, opts)
 	var limitErr *claudeUsageLimitError
 	if errors.As(err, &limitErr) {
-		e.activateClaudeSuspension(memberItem.Number, limitErr.ResetTime, time.Now())
+		e.activateClaudeSuspension(memberItem.Number, limitErr, time.Now())
 		return false, err
 	}
 	if err != nil {
