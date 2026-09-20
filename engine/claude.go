@@ -1509,6 +1509,21 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 		trackWorkerDescendants(watchdogCtx, pid, issueNumber, repo, label)
 	}()
 
+	// Durable worker record (#1814): written synchronously now, when pid
+	// belongs to exactly one process, so the registry-independent session sweep
+	// below (and the periodic proc-janitor) can find a descendant that
+	// trackWorkerDescendants's tick never recorded. If the fingerprint capture
+	// failed, retry it in the background so the record's live-worker phase stays
+	// identifiable.
+	workerRec := beginWorkerRecord(pid, issueNumber, repo, label)
+	if workerRec.LStart == "" {
+		watchdogWG.Add(1)
+		go func() {
+			defer watchdogWG.Done()
+			backfillWorkerFingerprint(watchdogCtx, workerRec.ID, pid)
+		}()
+	}
+
 	// Inactivity watchdog: kills the process group if no stdout is received for
 	// claudeInactivityTimeout, indicating a stuck session regardless of wall time.
 	// Stopped via watchdogCtx after cmd.Wait returns.
@@ -1550,6 +1565,13 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 	// every invocation end, clean exit or not.
 	if reaped, _ := reapTrackedDescendants(pid, issueNumber); reaped > 0 {
 		claudeLog(issueNumber, "kill", "reaped %d session-scoped descendant(s) at invocation end\n", reaped)
+	}
+	// #1814 R5: registry-independent sweep by the worker's session ID. Catches
+	// a descendant spawned in the final seconds (never recorded by the tracker's
+	// tick, hence invisible to reapTrackedDescendants) using a fresh process
+	// scan, so correctness does not depend on how recently it was created.
+	if reaped := sweepWorkerSessionAtInvocationEnd(workerRec); reaped > 0 {
+		claudeLog(issueNumber, "kill", "reaped %d unrecorded session member(s) of worker PID %d at invocation end\n", reaped, pid)
 	}
 	rawOutput := stdout.Bytes()
 

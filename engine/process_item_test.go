@@ -75,6 +75,14 @@ func TestMain(m *testing.M) {
 		}
 	}
 	lockVerifyDelay = 0
+	// Keep spawn-time worker records (#1814) out of the package directory:
+	// most InvokeClaude tests run without t.Chdir.
+	if dir, err := os.MkdirTemp("", "fabrik-worker-records-*"); err == nil {
+		workerRecordsPathOverride = filepath.Join(dir, "workers.json")
+		code := m.Run()
+		os.RemoveAll(dir)
+		os.Exit(code)
+	}
 	os.Exit(m.Run())
 }
 
