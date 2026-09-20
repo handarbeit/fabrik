@@ -103,7 +103,7 @@ func TestItemNeedsWork_AwaitingInput_LockedByOther(t *testing.T) {
 		Comments: []gh.Comment{
 			// Author matches cfg.User ("testuser") — the operator replying under
 			// their own account, the realistic single-account deployment shape.
-			// humanNewComments does not exclude cfg.User, only bot logins.
+			// filterHuman does not exclude cfg.User, only bot logins.
 			{ID: "C1", Author: "testuser", Body: "Here is my answer"},
 		},
 	}
@@ -141,7 +141,7 @@ func TestItemNeedsWork_AwaitingInput_WithNewComments(t *testing.T) {
 		Labels: []string{"fabrik:paused", "fabrik:awaiting-input"},
 		Comments: []gh.Comment{
 			// Author matches cfg.User ("testuser") — the operator replying under
-			// their own account. humanNewComments does not exclude cfg.User.
+			// their own account. filterHuman does not exclude cfg.User.
 			{ID: "C1", Author: "testuser", Body: "Here is my answer"},
 		},
 	}
@@ -219,7 +219,7 @@ func TestProcessItem_AwaitingInput_UnblocksOnComment(t *testing.T) {
 		Labels: []string{"fabrik:paused", "fabrik:awaiting-input"},
 		Comments: []gh.Comment{
 			// Author matches cfg.User ("testuser") — the operator replying under
-			// their own account. humanNewComments does not exclude cfg.User.
+			// their own account. filterHuman does not exclude cfg.User.
 			{ID: "C1", Author: "testuser", Body: "Here is my answer"},
 		},
 	}
@@ -621,7 +621,7 @@ func TestProcessItem_BlockedOnInput_LastAttemptAtSet(t *testing.T) {
 
 // TestProcessItem_Paused_MixedBatch_ProcessesBothCommentsOnUnpause documents
 // the actual (and intentional) behavior when a paused item accumulates both
-// bot chatter and a human resume comment: humanNewComments only gates the
+// bot chatter and a human resume comment: resumeAuthorised only gates the
 // *decision* to unpause. Once unpaused, processItem falls through to the
 // same code path a non-paused item uses, which re-reads the raw
 // (unfiltered) new-comment set and hands the whole batch — bot comment
