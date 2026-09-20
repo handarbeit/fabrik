@@ -6605,6 +6605,8 @@ The resulting silent chain: `settlePRMergeState()`'s `CheckRunsPending` case ret
 
 **Code path:** `settleQueuedReviewFindings` (`engine/queued_review_settle.go`; called from `poll()` in `poll.go`, immediately after `handleMergeTrainBatch`, gated on `merge_train: on`).
 
+**Interaction with the own-PR CI admission gate (§6.25, #1821).** A pending eject signal for a member that the fresh-batch admission gate then defers for confirmed-red own-PR CI is consumed (`takePendingReviewEject`) and logged by the deferral, so the member is never double-routed or double-commented and the stale signal cannot later fire on a re-queued member. If the deferral's reroute fails, the signal is left intact.
+
 **Detection.** The scan groups the current Queued snapshot by `owner/repo` via `groupQueuedByRepoAndBase` — the identical holding-stage-column filter and closed/`fabrik:paused` exclusion `routeQueuedGroup` (§"Engine Selection" above) already applies, so a poisoner already excluded from batch formation is equally excluded here. For each remaining member it skips native-merge-queue items (`MergeQueue != "off" && LinkedPRIsMergeQueueEnabled`, or `fabrik:auto-merge-enabled` already present) — `ejectMember`/`MaxMergeTrainEjections` have no meaning for a member GitHub's own queue is landing, mirroring `routeQueuedGroup`'s FR-3 precedence exactly — then calls `FetchItemDetails` itself (the deep-fetch `deepFetchCandidates` never performs for a Queued item) and checks `currentHeadReviewThreadComments` — the ADR-1207-canonical, current-head-scoped primitive (not raw `buildReviewThreadComments`), so a thread anchored to a commit the PR has since moved past never triggers a spurious ejection.
 
 **Direct-eject vs. pending-signal split (the concurrency design).** The three pre-existing `ejectMember` call sites all run from inside the merge-train worker goroutine that owns the batch state, so there is no concurrent-mutation hazard: the same goroutine that decides to eject also owns the slice being mutated. This scan's trigger is different in kind — it fires from the poll loop, which can run concurrently with a worker blocked for up to `CIWaitTimeout` inside `pollTrainCI`. Reaching into that goroutine's own in-memory batch slice from outside it would race the worker's own assemble/validate/land sequence. The scan therefore branches on **batch membership, not repo-level activity**: `mergeTrainBatchMembers(repoKey)` returns the in-flight worker's `batchNumbers` — the issue-number set it was dispatched with, snapshotted once in `dispatchMergeTrainWorker` and immutable afterward (worker membership only ever shrinks via ejection/landing, never grows).
@@ -6824,6 +6826,8 @@ Unlike the other two paths, this one is **guarded**, rather than posted uncondit
 
 **No interaction with the runaway guard or trial counter.** `e.recordTrial` (the wrapper around `assembleAndValidate` that feeds `isRunawayTripped`) only fires for non-green results and is never invoked by the fast path, since the fast path never calls `assembleAndValidate` at all. A landed fast path is unambiguous progress, identical in kind to any other green land.
 
+**Contrast with batch admission (§6.25).** The fast path is fail-*closed*: it skips validation, so only positive evidence of green authorises it. §6.25's admission gate at fresh batch formation is the deliberate inverse, fail-*open*: it removes a member from a batch, so only positive evidence of red (`classifyLandingCI` → `TrainCIRed`, reused unmodified) acts, and every ambiguity admits.
+
 **Logging (R4).** Every disposition — eligible-and-landed, or the specific unmet condition that forced a trial — is logged from `trySingletonFastPath`/`singletonFastPathEligible`, so "why didn't it fast-path?" is answerable from logs without inference. On a completed landing `finishSingletonFastPathLanding` additionally emits the repo-scoped `landing complete for <trainKey> (singleton fast path, PR #<n>, 1 member)` line that `landMergeTrainBatch` emits for a batch — the train's terminal progress signal on its TUI job row, and the only log-visible statement that a train actually reached a landing. It is repo-scoped (`logfRepo`), not per-issue: a per-issue line would not reach the train's job row. Unlike the landed comment above it is emitted unconditionally rather than guarded, since a repeat on re-entry is accurate and is itself the signal that a re-entry happened.
 
 **Code path:** `trySingletonFastPath`, `singletonFastPathEligible`, `finishSingletonFastPathLanding` (`engine/merge_train.go`), called from `runMergeTrainWorker`'s re-form loop. See §6.19's table for how this path's credited PR is discovered post-Done.
@@ -7037,6 +7041,64 @@ refactor of the first.
 | `landMergeTrainBatch` found an existing integration PR that is already merged (FR-2 restart-safety state) | `integrationPR != nil && integrationPR.Merged` — the check is skipped entirely, regardless of member labels | FR-3 (advance to Done, close member PR/issue) proceeds normally; no `FetchLabels` calls made, no refusal possible | — | — |
 
 **References:** [ADR-1773: Merge-Train Base Sanity Check at Landing Time](../adrs/1773-merge-train-base-sanity-check.md), [ADR-1647: Merge-Train Non-Default-Base Exclusion](../adrs/1647-merge-train-non-default-base-exclusion.md), [ADR-1648: Merge-Train Batches Partitioned Per (Repo, Base)](../adrs/1648-merge-train-per-base-partitioning.md), §6.13 (`baseBranchForItem`'s remote-resolution semantics, deliberately not reused here), §6.20 (the singleton fast path, confirmed exempt), issue #1688 (the community report that motivated this issue), issue #1773 (this feature).
+
+---
+
+### 6.25 Merge-Train Own-PR CI Admission Gate (ADR-1821)
+
+**Trigger:** Issue #1821. `fetchTrainMembers` validated exactly two things per Queued member — a linked PR exists and has a head SHA — and never consulted the member's CI. A member whose **own** PR checks were already red was therefore admitted, merged into a trial, and only discovered by that trial's CI (or by bisection): on `verveguy/concept-maps` two such members cost roughly 2 hours each (an ~54-minute assembly, a 24-minute CI cycle, then re-bisection) to rediscover a fact that was readable off the members' own check-runs in one API call. `classifyLandingCI` already answers the question and is already trusted for a landing decision (§6.20 step 4), but was only applied on the singleton fast path, never at admission.
+
+**Mechanism: a fail-open admission gate at fresh batch formation.** `admitTrainMembers` (`engine/merge_train_admission.go`) is called from `prepareTrainWorker` immediately after `fetchTrainMembers`. For each member it reads `e.client.FetchCheckRuns(owner, repo, m.headSHA)` — the live REST client, at the head SHA `fetchTrainMembers` snapshotted, so the evidence corresponds to the exact commit that would enter the trial — and classifies it with `classifyLandingCI`, **unmodified**. The gate has no notion of red of its own: "confirmed red" is exactly `TrainCIRed`, which includes a required-context failure.
+
+**Polarity is fail-open — the inverse of §6.20.** The singleton fast path skips validation, so it authorises only on positive evidence and every ambiguity blocks it. The gate *removes* a member from a batch, so it acts only on positive evidence of failure and every ambiguity admits:
+
+| `classifyLandingCI` / read outcome | Gate action |
+|---|---|
+| `TrainCIRed` (failed check run, or required-context failure) | **Defer** (below) |
+| `TrainCIPending` (incl. a rerun in progress masking an older failure) | Admit |
+| `TrainCIGreen` | Admit |
+| Zero check runs, no required-context failure | Admit (the fast path's fail-closed zero-run rejection is deliberately *not* copied) |
+| `FetchCheckRuns` error | Admit, logged as `fetch-error` |
+| Context cancelled mid-gate | Admit the remainder unchecked |
+
+Admitting is byte-identical to pre-#1821 behavior. Deferring on ambiguity would silently drain the queue and strand members that have done nothing wrong; the cost of the fail-open choice is that a red member with a pending run, a zero-run head, or an unreadable read is discovered by the trial exactly as it always was.
+
+**Scope: fresh formation only (R7).** The gate lives in `prepareTrainWorker`, *after* `reconstructTrainState` has returned `true` for both restart routes (`completeDeferredLanding` of an already-merged marker PR, and `resumeTrain` of an existing in-flight trial), and it is not inside `fetchTrainMembers` itself. Those routes re-resolve an already-decided batch and must not re-litigate admission. Bisection sub-trials, `landOneAtATime`, and `landGreenBatch` never pass through it either. The gate needs `state.projectID` for the reroute, which `fetchTrainMembers` does not have.
+
+**Precondition: the reroute target must have `wait_for_ci` (R9).** A deferred member is rerouted to `stageBeforeHolding` (normally Validate) with its `stage:<X>:complete` label intact. What re-picks it up is Phase 1's `handleMergeAndCIGates`: `settlePRMergeState` classifies red checks as `PRMergeBlocked`, `checkCIGate` returns `ciFailure`, `fabrik:awaiting-ci` is applied and `dispatchCIFixReinvoke` runs (bounded by `MaxCiFixCycles`, with the no-op-SHA debounce). Phase 2 — the only place `attemptMergeOnValidate` → `advanceToQueued` runs — is never reached for a claimed item, so a red member is not advanced straight back to Queued, even under `fabrik:yolo`. But `checkCIGate` is a no-op unless the stage has `wait_for_ci: true`; without it nothing would claim the member (under yolo it would bounce back to Queued and be re-deferred every poll; under cruise it would strand). The gate therefore checks the target stage first and, if it lacks `wait_for_ci`, admits every member without reading anything, logging once per formation. The shipped and live `validate.yaml` both set `wait_for_ci: true`; a custom config that omits it simply gets no gate.
+
+**Deferral (`deferRedMember`).** Modelled on `ejectRedSingleton` (#1545) minus the pause:
+
+1. The member is dropped from the batch unconditionally — it is confirmed red.
+2. `rerouteQueuedMemberOffHolding` runs **first** (the ADR-1208 reroute-before-side-effects primitive). On failure nothing is posted, consumed, or recorded; the next poll's fresh formation retries the whole operation. The member stays out of the current batch regardless.
+3. On success, any pending review-finding eject signal for the member (`takePendingReviewEject`, §6.16) is consumed and logged, so a member flagged both ways is never double-routed or double-commented and a stale signal cannot later fire on a re-queued member that already addressed the finding.
+4. One comment is posted: header `🏭 **Fabrik merge-train — deferred (own CI failing)**`, the failing check(s) via `renderFailedChecks` (falling back to the classifier's `detail` for a required-context red, which has no failing runs to render), a statement that the failure is the PR's own and not a train interaction, and that the member has **not** been paused — the CI gate will dispatch a fix from the target stage and the issue re-queues once CI is green and that stage completes again. It is composed locally: `ejectMember(stayInQueue=false)` hard-codes review-finding wording, and `renderDiagnosticBlock` / `renderBatchContext` / `reentryInstruction` carry trial/integration-PR wording and a pause-assuming recovery instruction that are wrong for this cause.
+
+**Never paused, never counted (R5).** A deferral does not touch `mergeTrainEjectionCounts` and never calls `pauseMergeTrainMember`, so it cannot accumulate toward `MaxMergeTrainEjections`. This is the opposite of `ejectRedSingleton`'s reasoning: there the failure was only ever observed on a synthetic trial branch, so nothing external would re-detect it and a pause was the only human gate. Here the failure is observable on the member's own PR check-runs, so the ordinary CI gate has an external signal to act on.
+
+**Ping-pong backstop (R9).** `mergeTrainCIDeferred` (`owner/repo#N` → head SHA, in memory, `mergeTrainCIDeferredMu`) records the SHA each member was last deferred at. A repeat deferral of the *same* SHA — reachable only if the live read shows red while Phase 1's cache-backed read does not — still reroutes but posts no second comment. The entry is cleared when the member is next admitted non-red. It resets on restart, costing at most one duplicate comment.
+
+**Cost.** One `FetchCheckRuns` per member per fresh batch formation, sequentially, bounded by `MaxBatchSize`. A pending or timed-out trial re-forms the batch on the next poll, so the read repeats per member per poll until a landing or eject. `classifyLandingCI` additionally calls `FetchCombinedStatus` (cache-backed) only when `required_status_contexts` is configured and a required name is absent from the check runs. A one-member batch reads check runs again in `singletonFastPathEligible`. The small per-poll cost is set against ~2 hours avoided per red member. Every disposition — defer, or admit with its reason (`pending`, `green`, `fetch-error`, `no-wait-for-ci`) — is logged with the classifier's `detail`.
+
+**A new sustained label state.** A deferred member carries both `stage:<X>:complete` and `fabrik:awaiting-ci` for the whole CI-fix cycle (`classifyCIFromCheckRuns` adds the label but never removes the completion label). Both the main Phase 1 loop and `settleAwaitingCIScan` (ADR-1270) run the same handler chain on it; duplicate dispatch is prevented by the `snap.Worker() != nil` guard and duplicate pause comments by `hasCIGatePauseComment`. `MaxCiFixCycles` and the `CIBackstopTimeout` can still pause a slow fix — an ordinary Validate pause, not a deferral pause.
+
+**Crash window.** The reroute and the comment are two calls; a crash between them leaves a rerouted member with no comment, matching ADR-1208 and ADR-1545.
+
+**Code path:** `admitTrainMembers`, `deferRedMember`, `composeCIDeferralBody` (`engine/merge_train_admission.go`), called from `prepareTrainWorker` (`engine/merge_train.go`).
+
+**State transitions:**
+
+| Before | Trigger | After | Labels Added | Labels Removed |
+|---|---|---|---|---|
+| Queued member, fresh batch formation, reroute target has `wait_for_ci` | `classifyLandingCI` → `TrainCIRed` on the member's own head; reroute succeeds | Rerouted to the stage before Queued; excluded from the batch; one comment; ordinary CI gate takes over | — | — |
+| (as above) | `TrainCIRed`; reroute fails | Queued (unchanged), excluded from this batch; no comment, no dedupe record; whole operation retried next poll | — | — |
+| (as above) | `TrainCIRed` again at the same head SHA (e.g. stale-cache bounce) | Rerouted again; no repeat comment | — | — |
+| (as above) | Pending, green, zero check runs, or `FetchCheckRuns` error | Admitted to the batch, unchanged from pre-#1821 | — | — |
+| Queued member, reroute target lacks `wait_for_ci` | Gate skipped before any read | Admitted, unchanged | — | — |
+| Queued member, restart reconstruction (Route 1 / `resumeTrain`), bisection, `landOneAtATime`, `landGreenBatch` | Never reaches the gate | Unchanged | — | — |
+| Deferred member at the reroute target, red checks | Phase 1 `handleMergeAndCIGates` → `ciFailure` | CI-fix reinvoke dispatched; not advanced (Phase 2 unreached) | `fabrik:awaiting-ci` | — |
+
+**References:** [ADR-1821: Merge-Train Own-PR CI Admission Gate](../adrs/1821-merge-train-red-member-admission-gate.md), [ADR-1644: Merge-Train Singleton Fast Path](../adrs/1644-merge-train-singleton-fast-path.md) (the inverse fail-closed polarity), [ADR-1208: Queued Review-Finding Ejection](../adrs/1208-queued-review-finding-ejection.md) (reroute primitive), [ADR-1545: Red-Singleton Reroute Before Pause](../adrs/1545-red-singleton-reroute-before-pause.md), [ADR-1420: Merge-Train Ejection Diagnostics](../adrs/1420-merge-train-ejection-diagnostics.md), §6.16 (`applyPendingReviewEjects`), §6.20 (the singleton fast path), issue #1821
 
 ---
 
