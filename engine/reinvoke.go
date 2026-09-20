@@ -38,6 +38,75 @@ type reinvokeOpts struct {
 	// worktree dir and the processComments error. Used for CI's no-op-SHA
 	// recording and rebase's auto-merge re-enablement.
 	after func(workDir string, err error)
+	// cycle names the cycle counter(s) charged synchronously before this
+	// dispatch, so dispatchReinvoke can refund them when the invocation
+	// provably never ran (#1812). The zero value refunds nothing.
+	cycle cycleCharge
+}
+
+// didNotRunKind classifies why a processComments call provably never executed a
+// Claude invocation (#1812). "" means it ran, or that it is ambiguous — the
+// reinvoke cycle stays charged in that case (R3/R4): under-refunding costs an
+// unnecessary pause, over-refunding removes the only bound on a genuine
+// non-convergence loop.
+type didNotRunKind string
+
+const (
+	didNotRunSuspended    didNotRunKind = "account-suspended"
+	didNotRunUsageLimit   didNotRunKind = "usage-limit"
+	didNotRunAPIError     didNotRunKind = "api-error"
+	didNotRunAPIKeyHelper didNotRunKind = "api-key-helper"
+)
+
+// classifyDidNotRun maps a processComments error to the did-not-run set the
+// stage-dispatch path already exempts from max_retries: claudeUsageLimitError,
+// claudeAPIErrorExit (whose classifier already refuses a run that consumed
+// turns and incurred cost, R4) and apiKeyHelperDetectedError. Every other error
+// — turn limit, resume failure, tools denied, a mid-run crash, an output
+// publication failure — may have done real work and returns "" (R3).
+// apiKeyHelperDetectedError is produced only by the stage-dispatch path today,
+// so its arm here is forward-compatibility only.
+func classifyDidNotRun(err error) didNotRunKind {
+	if err == nil {
+		return ""
+	}
+	var limitErr *claudeUsageLimitError
+	if errors.As(err, &limitErr) {
+		return didNotRunUsageLimit
+	}
+	var apiErr *claudeAPIErrorExit
+	if errors.As(err, &apiErr) {
+		return didNotRunAPIError
+	}
+	var keyHelperErr *apiKeyHelperDetectedError
+	if errors.As(err, &keyHelperErr) {
+		return didNotRunAPIKeyHelper
+	}
+	return ""
+}
+
+// cycleCharge describes the cycle counter(s) a reinvoke dispatch charged before
+// starting, and the compensating mutations that undo the charge.
+type cycleCharge struct {
+	// label names the counter for the refund log line ("review", "rebase",
+	// "ci-fix").
+	label string
+	// refund builds the compensating mutations for this item and stage. Each
+	// is floored at zero by the store, so a double application is harmless.
+	refund func(repo string, number int, stageName string) []itemstate.Mutation
+}
+
+// refundDidNotRunCycle compensates the pre-dispatch cycle charge for an
+// invocation that never ran, records the never-refunded did-not-run tally the
+// cycle-limit pause messages draw on (R7), and logs the refund (R5).
+func (e *Engine) refundDidNotRunCycle(item gh.ProjectItem, itemRepo string, stage *stages.Stage, tag string, kind didNotRunKind, c cycleCharge) {
+	if c.refund != nil {
+		for _, m := range c.refund(itemRepo, item.Number, stage.Name) {
+			e.store.Apply(m)
+		}
+	}
+	e.store.Apply(itemstate.DidNotRunReinvokeRecorded{Repo: itemRepo, Number: item.Number, StageName: stage.Name})
+	e.logf(item.Number, tag, "invocation did not run (%s) — refunding %s cycle counter for stage %q (#1812)\n", kind, c.label, stage.Name)
 }
 
 // commentIDsForLog joins the IDs of a dispatched comment batch for inclusion
@@ -61,7 +130,7 @@ func commentIDsForLog(comments []gh.Comment) string {
 // dispatchRebaseReinvoke). It performs: optional precheck -> WorkerEntered ->
 // semaphore acquire -> ensureRepoReady (ErrSkipItem skips silently) ->
 // opts.build -> optional opts.stageVariant -> LocalLockAcquired + heartbeat +
-// onPIDReady -> processComments -> optional opts.after -> error logging
+// onPIDReady -> processCommentsClassified -> (did-not-run refund | optional opts.after) -> error logging
 // (ctx.Err() short-circuit) -> deferred WorkerExited.
 func (e *Engine) dispatchReinvoke(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, opts reinvokeOpts) {
 	if opts.precheck != nil && !opts.precheck() {

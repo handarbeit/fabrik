@@ -543,6 +543,14 @@ func (e *Engine) dispatchCIFixReinvoke(ctx context.Context, board *gh.ProjectBoa
 
 	e.dispatchReinvoke(ctx, board, item, stage, reinvokeOpts{
 		tag: "ci-fix-reinvoke",
+		// #1812: refunded by dispatchReinvoke when the invocation provably never
+		// ran; the after hook (and its no-op-SHA debounce) is skipped then.
+		cycle: cycleCharge{
+			label: "ci-fix",
+			refund: func(repo string, number int, stageName string) []itemstate.Mutation {
+				return []itemstate.Mutation{itemstate.CIFixCycleDecremented{Repo: repo, Number: number, StageName: stageName}}
+			},
+		},
 		build: func(workDir string) []gh.Comment {
 			// Snapshot HEAD before reinvoking so a no-op reinvoke (nothing to
 			// push because the fix is already in) can be recorded and debounced

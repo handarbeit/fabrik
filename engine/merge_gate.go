@@ -129,6 +129,14 @@ func (e *Engine) buildRebaseComment(item gh.ProjectItem, stage *stages.Stage, ba
 func (e *Engine) dispatchRebaseReinvoke(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) {
 	e.dispatchReinvoke(ctx, board, item, stage, reinvokeOpts{
 		tag: "rebase-reinvoke",
+		// #1812: refunded by dispatchReinvoke when the invocation provably never
+		// ran; the after hook (auto-merge re-enable) is skipped then.
+		cycle: cycleCharge{
+			label: "rebase",
+			refund: func(repo string, number int, stageName string) []itemstate.Mutation {
+				return []itemstate.Mutation{itemstate.RebaseCycleDecremented{Repo: repo, Number: number, StageName: stageName}}
+			},
+		},
 		build: func(workDir string) []gh.Comment {
 			// Resolve the base branch for the rebase instructions. Failure here is
 			// not fatal — the synthetic comment falls back to "main".

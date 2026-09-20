@@ -513,9 +513,11 @@ func (m ReviewCycleIncremented) itemKey() string { return itemKeyFor(m.Repo, m.N
 // dispatched while the gate is still blocked/timed-out — a reinvoke
 // dispatched with the gate already clear (the #1045 junk-overview shape)
 // never increments this counter. Unlike ReviewCycleIncremented, this counter
-// has no decrement counterpart by design: a reinvoke that turns out to be a
+// is not refunded for a no-op on HEAD: a reinvoke that turns out to be a
 // no-op on HEAD while the gate was blocking is still genuine evidence the
-// loop failed to converge, not an attempt that "didn't count."
+// loop failed to converge, not an attempt that "didn't count." The one
+// exception is a reinvoke that provably never ran at all (#1812, see
+// ReviewBlockedCycleDecremented).
 type ReviewBlockedCycleIncremented struct {
 	Repo      string
 	Number    int

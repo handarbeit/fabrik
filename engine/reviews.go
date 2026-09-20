@@ -1830,6 +1830,9 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 // for a base:<branch> item, would otherwise mean a second live FetchPRReviews
 // REST call for a value nothing async could have changed since the first.
 //
+// #1812: did-not-run exits are refunded by dispatchReinvoke (see cycle below),
+// not by this dispatcher's after hook.
+//
 // #1045: also snapshots HEAD before/after the reinvoke, mirroring
 // dispatchCIFixReinvoke's precedent (engine/ci.go), and applies
 // ReviewCycleDecremented in the after hook when no new commit landed. The
@@ -1852,12 +1855,28 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 // mechanism only compensates a cycle it can positively prove made no PR-visible
 // change, never one it simply couldn't measure. #1221 remains its own,
 // separately-tracked, unfixed-by-design trade-off (docs/state-machine.md §6.2).
-func (e *Engine) dispatchReviewReinvoke(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, precomputed []gh.Comment) {
+func (e *Engine) dispatchReviewReinvoke(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, precomputed []gh.Comment, blockedCharged bool) {
 	itemRepo := itemOwnerRepoString(item, e.defaultRepo())
 	var headBefore string
 
 	e.dispatchReinvoke(ctx, board, item, stage, reinvokeOpts{
 		tag: "review-reinvoke",
+		// #1812: an invocation that provably never ran (usage limit, api_error,
+		// apiKeyHelper) is refunded by dispatchReinvoke, which also skips the
+		// after hook below. blockedCharged mirrors handleReviewGate's
+		// `blocked || timedOut` — the ADR-1518 never-refunded
+		// ReviewBlockedCycles counter is compensated too, but ONLY on this
+		// did-not-run path; a genuinely no-op run keeps it.
+		cycle: cycleCharge{
+			label: "review",
+			refund: func(repo string, number int, stageName string) []itemstate.Mutation {
+				ms := []itemstate.Mutation{itemstate.ReviewCycleDecremented{Repo: repo, Number: number, StageName: stageName}}
+				if blockedCharged {
+					ms = append(ms, itemstate.ReviewBlockedCycleDecremented{Repo: repo, Number: number, StageName: stageName})
+				}
+				return ms
+			},
+		},
 		// precheck runs synchronously before WorkerEntered/goroutine dispatch,
 		// immediately after handleReviewGate computed precomputed — reusing it
 		// here avoids a redundant re-fetch for a same-poll no-op.
