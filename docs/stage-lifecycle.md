@@ -664,7 +664,9 @@ because the account's usage limit was hit, not because the stage genuinely faile
 `interpretClaudeResult` (`engine/claude.go`) detects this **structurally**, from the CLI's own parsed
 result object only — never from anything the assistant wrote: `classifyUsageLimitExit` checks
 `resp.TerminalReason == "blocking_limit"` (the same `terminal_reason` field the turn-cap check
-consults), and only when a result object actually parsed. When Claude exited non-zero without a
+consults) or `resp.TerminalReason == "api_error"` with `api_error_status == 429` (the CLI's other
+session-limit shape, #1811 / ADR-1811; other `api_error` statuses stay transient and never suspend),
+and only when a result object actually parsed. The `result` text is never matched. When Claude exited non-zero without a
 `FABRIK_STAGE_COMPLETE` marker, no turn cap, and `TerminalReason` matches, it returns a
 `*claudeUsageLimitError` sentinel in place of the generic error; an unparseable-JSON invocation is
 never classified as a usage-limit exit by any means. `finalizeStageOutcome` classifies it via

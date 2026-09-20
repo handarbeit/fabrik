@@ -1709,7 +1709,9 @@ When a stage doesn't complete (Claude doesn't output `FABRIK_STAGE_COMPLETE`):
 > the issue carries `fabrik:claude-limit`, the underlying Claude account has run out of
 > usage — this is not a stage failure, and it is not GitHub's own rate limiting (a
 > separate, unrelated mechanism; see *Rate Limit Monitoring* below). Fabrik detects this
-> **structurally**, from the CLI's own result object (`terminal_reason == "blocking_limit"`)
+> **structurally**, from the CLI's own result object (`terminal_reason == "blocking_limit"`,
+> or `terminal_reason == "api_error"` with `api_error_status == 429`, the other shape the CLI
+> uses to report a session limit; other `api_error` statuses stay transient and never suspend)
 > — never from anything a stage's output happened to say, so a stage whose output merely
 > discusses usage limits cannot trigger this. It does **not** count this attempt against
 > `--max-retries`: no `stage:<name>:failed`, no `fabrik:paused`, no escalation comment. As
@@ -3559,8 +3561,9 @@ polling, settle scans, and label reconciliation are unaffected; only the *start*
 Claude invocations is gated.
 
 When any worker's Claude invocation exits because the account's usage limit was hit —
-detected structurally from the CLI's own result object, never from output text a stage
-happened to write — Fabrik suspends the start of every new Claude invocation across all
+detected structurally from the CLI's own result object (`terminal_reason ==
+"blocking_limit"`, or `terminal_reason == "api_error"` with `api_error_status == 429`),
+never from output text a stage happened to write — Fabrik suspends the start of every new Claude invocation across all
 issues, not just the one that hit the limit, and displays a banner distinct from the
 GraphQL one:
 

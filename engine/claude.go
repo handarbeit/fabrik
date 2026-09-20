@@ -35,7 +35,38 @@ var noWorkNeededRE = regexp.MustCompile(`(?m)^FABRIK_NO_WORK_NEEDED\r?$`)
 // entry that #1178 already proved this installed CLI version emits). This is
 // the sole positive trigger for claudeUsageLimitError — see
 // classifyUsageLimitExit and #1183.
+//
+// A second structural shape carries the same condition: terminal_reason
+// "api_error" with api_error_status 429 (the HTTP status behind the failure).
+// See apiErrorRateLimitStatus and ADR-1811.
 const usageLimitTerminalReason = "blocking_limit"
+
+// apiErrorRateLimitStatus is the HTTP status the CLI reports in
+// api_error_status when an "api_error" exit is really a rate/usage-limit hit.
+// Unlike a 5xx, this is an account-wide condition, so it is routed to
+// claudeUsageLimitError rather than claudeAPIErrorExit. See ADR-1811.
+const apiErrorRateLimitStatus = 429
+
+// apiErrorStatus is the CLI's "api_error_status" result field (the HTTP status
+// behind an api_error exit). It decodes tolerantly: parseClaudeJSON and
+// tryParseResultMessage discard the entire result object on any unmarshal
+// error, so a strict int would let one wrongly-typed value (e.g. the string
+// "429") erase every classification, blocking_limit included. Only a JSON
+// integer is accepted; absent, null, string, float, or anything else reads as
+// 0, i.e. "not a 429" (fail-safe: under-detecting costs retries,
+// over-detecting suspends a healthy account).
+type apiErrorStatus int
+
+// UnmarshalJSON implements json.Unmarshaler. It never returns an error.
+func (s *apiErrorStatus) UnmarshalJSON(b []byte) error {
+	var n int
+	if err := json.Unmarshal(b, &n); err != nil {
+		*s = 0
+		return nil
+	}
+	*s = apiErrorStatus(n)
+	return nil
+}
 
 // claudeUsageLimitError, claudeTurnLimitError, claudeAPIErrorExit, and
 // claudeResumeFailureError are unexported aliases of the exported types in
@@ -51,12 +82,15 @@ type claudeAPIErrorExit = claudeerr.APIErrorExit
 type claudeResumeFailureError = claudeerr.ResumeFailureError
 type claudeToolsDeniedError = claudeerr.ToolsDeniedError
 
-// apiErrorTerminalReason is the CLI's structural terminal_reason value for a
-// transient Anthropic-side API error — observed live on 2026-08-08 (#1458) as
-// eight exits across two issues, each at 1 turn and $0.0000. Unlike
-// usageLimitTerminalReason, this is per-invocation and self-resolving: it
-// says nothing about the account as a whole, so it must never trigger
+// apiErrorTerminalReason is the CLI's structural terminal_reason value for an
+// Anthropic-side API error — observed live on 2026-08-08 (#1458) as eight
+// exits across two issues, each at 1 turn and $0.0000. For a non-429
+// api_error_status this is per-invocation and self-resolving: it says nothing
+// about the account as a whole, so it must never trigger
 // activateClaudeSuspension (see claudeAPIErrorExit's doc comment and #1458 R3).
+// An api_error carrying api_error_status 429 is a session/usage limit, not a
+// transient blip (ADR-1811): classifyUsageLimitExit claims it first, so only
+// the remaining statuses reach classifyAPIErrorExit.
 const apiErrorTerminalReason = "api_error"
 
 // classifyAPIErrorExit determines whether a Claude invocation exited on a
@@ -70,6 +104,10 @@ const apiErrorTerminalReason = "api_error"
 // classified as a did-not-run exit, regardless of what TerminalReason says
 // (#1458 R5 could not empirically verify CostUSD on a real api_error sample,
 // so this guard is reused unchanged rather than dropped — see ADR-1458).
+//
+// This function does not itself inspect api_error_status: the caller
+// (interpretClaudeResult) tries classifyUsageLimitExit first, which claims the
+// 429 subset (ADR-1811), leaving only non-429 api_errors for this path.
 func classifyAPIErrorExit(resp claudeResponse, usage TokenUsage) (msg string, detected bool) {
 	if resp.TerminalReason != apiErrorTerminalReason {
 		return "", false
@@ -99,14 +137,31 @@ func classifyAPIErrorExit(resp claudeResponse, usage TokenUsage) (msg string, de
 // exit terminates the invocation immediately (0 turns, $0.00), so an
 // invocation that consumed turns and incurred cost is never classified as
 // one, regardless of what TerminalReason says.
+//
+// A second structural trigger is terminal_reason "api_error" together with
+// api_error_status 429 (ADR-1811): the CLI reports a session limit that way
+// too. Only the structured fields are read — never resp.Result, whose text
+// ("You've hit your session limit · resets ...") must not participate in
+// classification (#1183). An absent, zero, or unparseable status is not a 429
+// and falls through to classifyAPIErrorExit. The same exclusion gate applies
+// to both triggers, so a mid-session 429 after real work (turns and cost both
+// non-zero) is deliberately not detected. ResetTime is left empty for both
+// shapes: it drives activateClaudeSuspension's deadline, so populating it from
+// the result text would change the suspension duration and let prose reach a
+// behavioural decision.
 func classifyUsageLimitExit(resp claudeResponse, usage TokenUsage) (msg string, detected bool) {
-	if resp.TerminalReason != usageLimitTerminalReason {
+	switch {
+	case resp.TerminalReason == usageLimitTerminalReason:
+		msg = fmt.Sprintf("terminal_reason=%q", resp.TerminalReason)
+	case resp.TerminalReason == apiErrorTerminalReason && resp.APIErrorStatus == apiErrorRateLimitStatus:
+		msg = fmt.Sprintf("terminal_reason=%q api_error_status=%d", resp.TerminalReason, int(resp.APIErrorStatus))
+	default:
 		return "", false
 	}
 	if usage.TurnsUsed > 0 && usage.CostUSD > 0 {
 		return "", false
 	}
-	return fmt.Sprintf("terminal_reason=%q", resp.TerminalReason), true
+	return msg, true
 }
 
 // permissionDenial is one entry of the CLI's "permission_denials" array on
@@ -1285,6 +1340,10 @@ type claudeResponse struct {
 	// (e.g. "max_turns"), captured for logging/future use alongside Subtype.
 	// Only Subtype is consulted for the error_max_turns branch condition below.
 	TerminalReason string `json:"terminal_reason"`
+	// APIErrorStatus is the HTTP status behind a terminal_reason "api_error"
+	// exit; 429 marks a session/usage limit (ADR-1811). Decodes tolerantly —
+	// see apiErrorStatus.
+	APIErrorStatus apiErrorStatus `json:"api_error_status"`
 	// PermissionDenials lists each tool call the CLI's permission layer
 	// denied during this invocation (e.g. a mutating tool blocked by a
 	// PreToolUse hook or an "ask" permission rule with no interactive prompt
