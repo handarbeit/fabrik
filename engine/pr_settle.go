@@ -137,14 +137,24 @@ func (e *Engine) settlePRMergeState(item gh.ProjectItem, _ *stages.Stage) PRSett
 	}
 
 	// ADR-033/ADR-1441: only mergeable_state == "clean" short-circuits straight
-	// to ready — GitHub has confirmed every check (required or not) passed.
+	// to ready — GitHub reports no check (required or not) failing or pending.
 	// "unstable" means a non-required check is failing or still pending; it
 	// must fall through to the existing per-check/required-context
 	// classification below instead of being treated as an unconditional green
 	// light, or a confirmed failure on a non-required check (e.g. the full
 	// test suite, when only a narrower context is marked required) silently
 	// clears the CI gate. See ADR-1441.
-	if mergeableState == "clean" {
+	//
+	// #1822: "clean" is NOT proof every check ran — a job still queued for a
+	// runner has no check run, and GitHub reports clean whenever no *required*
+	// check is outstanding. The shortcut never reads check runs, so it consults
+	// the suite roll-up itself before declaring ready. Without a head SHA no
+	// suite read is possible, so the shortcut is skipped and the "HeadSHA
+	// empty" Unsettled return below decides — ambiguity holds (fail-safe).
+	if mergeableState == "clean" && pr.HeadSHA != "" {
+		if r, held := e.suiteHoldResult(item.Number, owner, repo, pr, nil); held {
+			return r
+		}
 		e.logf(item.Number, "settle", "PR #%d mergeable_state=%q — ready\n", pr.Number, mergeableState)
 		return PRSettleResult{Status: PRMergeReady, Reason: fmt.Sprintf("mergeable_state=%q", mergeableState), MergeableState: mergeableState, PR: pr}
 	}
@@ -206,10 +216,7 @@ func (e *Engine) settlePRMergeState(item gh.ProjectItem, _ *stages.Stage) PRSett
 		}
 
 		if lpr != nil && !lpr.LastHeadSHAUpdate.IsZero() {
-			dwell := e.cfg.PostPushDwell
-			if dwell <= 0 {
-				dwell = 90 * time.Second
-			}
+			dwell := e.postPushDwell()
 			if elapsed := time.Since(lpr.LastHeadSHAUpdate); elapsed < dwell {
 				e.logf(item.Number, "settle", "no check runs for SHA %s — post-push dwell active (%.0fs remaining)\n",
 					pr.HeadSHA[:min(8, len(pr.HeadSHA))], (dwell - elapsed).Seconds())
@@ -233,6 +240,13 @@ func (e *Engine) settlePRMergeState(item gh.ProjectItem, _ *stages.Stage) PRSett
 			return e.requiredContextsSettleResult(item.Number, mergeableState, nil, pr, rcStatus, rcMissing, rcPending, rcFailed)
 		}
 
+		// #1822: "no CI configured" is only true when no suite says otherwise — a
+		// suite reporting runs (or a young run-less one) contradicts an empty run
+		// set. Repos with genuinely no CI have no outstanding suite and still clear.
+		if r, held := e.suiteHoldResult(item.Number, owner, repo, pr, nil); held {
+			return r
+		}
+
 		e.logf(item.Number, "settle", "no check runs for SHA %s — no CI configured\n",
 			pr.HeadSHA[:min(8, len(pr.HeadSHA))])
 		return PRSettleResult{Status: PRMergeReady, Reason: "no CI configured", MergeableState: mergeableState, PR: pr}
@@ -254,8 +268,31 @@ func (e *Engine) settlePRMergeState(item gh.ProjectItem, _ *stages.Stage) PRSett
 		if rcStatus, rcMissing, rcPending, rcFailed := e.classifyRequiredContexts(item.Number, owner, repo, pr.HeadSHA, checkRuns); rcStatus != gh.RequiredContextsSatisfied {
 			return e.requiredContextsSettleResult(item.Number, mergeableState, checkRuns, pr, rcStatus, rcMissing, rcPending, rcFailed)
 		}
+		// #1822: an all-green run set is only a complete pass if no suite still has
+		// work outstanding. Checked last so a confirmed failure, a pending run, or
+		// an unsatisfied required context (all returned above) is never masked.
+		if r, held := e.suiteHoldResult(item.Number, owner, repo, pr, checkRuns); held {
+			return r
+		}
 		return PRSettleResult{Status: PRMergeReady, Reason: "all CI checks passed", MergeableState: mergeableState, CheckRuns: checkRuns, PR: pr}
 	}
+}
+
+// suiteHoldResult consults ciSuiteHold for the PR's head SHA and, when a suite
+// is outstanding (or the read failed), returns the Unsettled result the caller
+// must return. MergeableState is intentionally omitted: this is a wait for
+// workflow work, not an R3 (BLOCKED+never-had-checks) case, so checkCIGate's
+// R3 pause must not misfire — the same invariant the hadChecks/dwell returns
+// keep. checkMergeabilityGate claims PRMergeUnsettled before checkCIGate, so the
+// hold is bounded by settleAwaitingCIScan's CIBackstopTimeout (ADR-1410).
+func (e *Engine) suiteHoldResult(itemNumber int, owner, repo string, pr *gh.PRDetails, checkRuns []gh.CheckRun) (PRSettleResult, bool) {
+	hold, detail := e.ciSuiteHold(e.readClient, owner, repo, pr.HeadSHA)
+	if !hold {
+		return PRSettleResult{}, false
+	}
+	e.logf(itemNumber, "settle", "PR #%d SHA %s: %s — holding the CI gate\n",
+		pr.Number, pr.HeadSHA[:min(8, len(pr.HeadSHA))], detail)
+	return PRSettleResult{Status: PRMergeUnsettled, Reason: detail, CheckRuns: checkRuns, PR: pr}, true
 }
 
 // requiredContextsSettleResult builds the PRSettleResult for a non-satisfied
