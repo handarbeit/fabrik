@@ -21,6 +21,7 @@ import (
 // condition and (when parseable) the reset time.
 func TestUsageLimitExit_ExemptFromRetryAndLabeledDistinctly(t *testing.T) {
 	skipIfNoGit(t)
+	resetAt := time.Now().Add(2 * time.Hour).Truncate(time.Second)
 	repoDir := initBareRepo(t)
 	wm := NewWorktreeManager(repoDir)
 
@@ -28,7 +29,7 @@ func TestUsageLimitExit_ExemptFromRetryAndLabeledDistinctly(t *testing.T) {
 	claude := &mockClaudeInvoker{
 		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
 			return "", false, TokenUsage{TurnsUsed: 1, CostUSD: 0},
-				&claudeUsageLimitError{Message: "hit your session limit", ResetTime: "10:20pm (America/Edmonton)"}
+				&claudeUsageLimitError{Message: "hit your session limit", ResetAt: resetAt}
 		},
 	}
 
@@ -87,8 +88,8 @@ func TestUsageLimitExit_ExemptFromRetryAndLabeledDistinctly(t *testing.T) {
 	if !strings.Contains(body, "usage limit") {
 		t.Errorf("comment does not name the condition: %s", body)
 	}
-	if !strings.Contains(body, "10:20pm (America/Edmonton)") {
-		t.Errorf("comment does not include the parsed reset time: %s", body)
+	if want := "(resets " + formatUsageLimitReset(resetAt) + ")"; !strings.Contains(body, want) {
+		t.Errorf("comment does not include the structured reset time %q: %s", want, body)
 	}
 	if !strings.Contains(body, "max_retries") {
 		t.Errorf("comment does not clarify retry-budget exemption: %s", body)
@@ -371,7 +372,7 @@ func TestUsageLimitSuspension_ConcurrentDispatchShortCircuitsAfterDetection(t *t
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{
 		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
-			return "", false, TokenUsage{}, &claudeUsageLimitError{Message: "hit your session limit", ResetTime: "10:20pm (America/Edmonton)"}
+			return "", false, TokenUsage{}, &claudeUsageLimitError{Message: "hit your session limit", ResetAt: time.Now().Add(2 * time.Hour)}
 		},
 	}
 
@@ -444,7 +445,7 @@ func TestUsageLimitSuspension_UnrelatedErrorDoesNotClearConcurrentlyActivatedSus
 		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
 			// Simulate a concurrent worker detecting the limit and activating the
 			// account-wide suspension while THIS invocation is still in flight.
-			eng.activateClaudeSuspension(999, "10:20pm (America/Edmonton)", time.Now())
+			eng.activateClaudeSuspension(999, nil, time.Now())
 			// This invocation's own outcome is unrelated to the usage limit.
 			return "partial output", false, TokenUsage{}, errors.New("some genuine transient failure")
 		},
@@ -480,7 +481,7 @@ func TestProcessComments_SuspendedGate_IsFullNoOp(t *testing.T) {
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{}
 	eng := testEngineWithRepo(t, client, claude)
-	eng.activateClaudeSuspension(0, "10:20pm (America/Edmonton)", time.Now())
+	eng.activateClaudeSuspension(0, nil, time.Now())
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	stage := &stages.Stage{Name: "Research", Order: 1, Completion: stages.CompletionCriteria{Type: "claude"}}

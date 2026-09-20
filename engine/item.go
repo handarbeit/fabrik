@@ -1130,7 +1130,7 @@ func (e *Engine) runInvocationWithExtension(ctx context.Context, item gh.Project
 
 		var limitErr *claudeUsageLimitError
 		if errors.As(err, &limitErr) {
-			e.activateClaudeSuspension(item.Number, limitErr.ResetTime, time.Now())
+			e.activateClaudeSuspension(item.Number, limitErr, time.Now())
 		} else if err == nil {
 			// Only a successful invocation is evidence the limit has cleared (ADR-1120's
 			// "early clear on success"). A generic, unrelated error proves nothing about
@@ -2878,10 +2878,7 @@ func (e *Engine) handleUsageLimitExit(p stageOutcomeParams, limitErr *claudeUsag
 	stage := p.stage
 	repoStr := p.repoStr
 
-	resetSuffix := ""
-	if limitErr.ResetTime != "" {
-		resetSuffix = fmt.Sprintf(" (resets %s)", limitErr.ResetTime)
-	}
+	resetSuffix := usageLimitResetSuffix(limitErr, time.Now())
 	e.logf(item.Number, "claude-limit", "stage %q did not run — Claude account usage limit hit%s\n", stage.Name, resetSuffix)
 
 	// Record StageAttempted so the normal dispatch cooldown applies — this is

@@ -266,8 +266,8 @@ func TestUsageLimitExit_MatchesProductionContract(t *testing.T) {
 	if !errors.As(err, &limitErr) {
 		t.Fatalf("err = %v, want *claudeerr.UsageLimitError", err)
 	}
-	if limitErr.ResetTime != "" {
-		t.Errorf("ResetTime = %q, want empty (the structural detector never parses a reset time — see claudeerr.UsageLimitError's doc comment)", limitErr.ResetTime)
+	if !limitErr.ResetAt.IsZero() {
+		t.Errorf("ResetAt = %v, want zero (the scripted exit carries no structured reset — see claudeerr.UsageLimitError's doc comment)", limitErr.ResetAt)
 	}
 }
 

@@ -155,7 +155,7 @@ func TestReviewReinvoke_UsageLimitNilReturn_Refunded(t *testing.T) {
 func TestReviewReinvoke_SuspensionGate_Refunded(t *testing.T) {
 	var calls int
 	eng, _, stgs := newDidNotRunReviewEngine(t, nil, &calls)
-	eng.activateClaudeSuspension(1, "", time.Now())
+	eng.activateClaudeSuspension(1, nil, time.Now())
 	dispatchReviewRound(t, eng, stgs[0], 3150)
 	if calls != 0 {
 		t.Fatalf("Claude invoked %d times under suspension, want 0", calls)

@@ -2090,7 +2090,7 @@ func TestProcessItem_StallDetection_HintSurvivesUsageLimitSuspension(t *testing.
 
 	// Activate the account-wide suspension before the 3rd dispatch — this dispatch
 	// must be gated before ever reaching Claude, and must NOT consume the hint.
-	eng.activateClaudeSuspension(0, "", time.Now())
+	eng.activateClaudeSuspension(0, nil, time.Now())
 	if err := eng.processItem(context.Background(), board, item); err != nil {
 		t.Fatalf("processItem (suspended call): %v", err)
 	}
