@@ -4660,6 +4660,41 @@ was recorded — means the entry is dropped from the registry and never signalle
 Each reaped PID is also logged individually, via the existing `[#N kill]` convention, at
 sweep time.
 
+**Registry-independent session sweep (#1814)**: `runProcessSweepJanitor` additionally calls
+`sweepOrphanedWorkerSessions`, because the registry sweep above can only act on a descendant that
+was recorded — one spawned in its worker's final seconds, or during a transient `ps` failure, has
+no entry and is invisible to it. The worker record is written at spawn to
+`.fabrik/state/workers.json` (a JSON array; one record per invocation, keyed by unique ID, never
+by PID). The sweep takes one process-table scan (the shared cached one) and one `Getsid` pass, and
+reaps every process whose SID equals the PID of a recorded worker classified as dead. The
+invocation-end variant runs the same logic with a fresh scan (stage-lifecycle.md § Session-Scoped
+Descendant Reaping).
+
+| Worker PID state | Result |
+|---|---|
+| not alive | dead — sweep members |
+| alive, fingerprint lookup errors | inconclusive — skip, keep record |
+| alive, record fingerprint empty | skip (never signalled on liveness alone) |
+| alive, `lstart` equal to record | live worker — skip |
+| alive, `lstart` differs | recycled PID — sweep only members that started at or after the recorded worker and strictly before the current holder; equal/unparseable timestamps skip |
+
+Ownership is by session lineage only (no `comm`/args allow-list), and only for a recorded worker:
+a dead session leader with no record is never touched. Before each `SIGKILL` the candidate's
+fingerprint is re-read and `Getsid` re-checked; a lookup failure skips it. A record is pruned only
+when the worker is dead, a successful scan found zero live members and nothing was skipped, on two
+consecutive scans (`EmptyScans >= 2`, persisted across janitor passes); a scan error or any skip
+resets the count and keeps the record. A scan error changes nothing.
+
+**Summary log** (a second line; the line above is unchanged):
+
+```
+[proc-janitor] session sweep complete: worker records N, session members reaped K, skipped M, records pruned P
+```
+
+Each reap is logged individually as `[#N kill] sending SIGKILL to PID <pid> (<comm>) — orphaned
+session member of dead worker PID <W> (reason=session_sweep_periodic)`. See
+[ADR 1814](../adrs/1814-registry-independent-worker-session-sweep.md).
+
 ---
 
 ## Appendix A: Two Paths to Stage Advancement
