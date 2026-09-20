@@ -126,20 +126,20 @@ func (e *Engine) deferRedMember(projectID, owner, repo string, m trainMember, ru
 		return
 	}
 
-	msg := composeCIDeferralComment(n, m.prNum, m.headSHA, targetName, runs, detail)
+	msg := fmt.Sprintf("🏭 **Fabrik merge-train — deferred (own CI failing)**\n\n%s", composeCIDeferralBody(n, m.prNum, m.headSHA, targetName, runs, detail))
 	if _, err := e.client.AddComment(owner, repo, n, msg); err != nil {
 		e.logf(n, "merge-train", "warn: could not post CI deferral comment: %v\n", err)
 	}
 	e.logf(n, "merge-train", "#%d deferred: rerouted to %s (not paused, no ejection counted)\n", n, targetName)
 }
 
-// composeCIDeferralComment renders the R6 comment. It is composed locally rather than via
-// renderDiagnosticBlock/renderBatchContext/reentryInstruction: those carry wording that is
-// wrong for this cause ("trial ..., integration PR #N" header, "moved base branch alone",
-// and a recovery instruction that assumes a pause). Only renderFailedChecks/
-// renderFailedContexts are shared, so failing checks are named identically to every other
-// merge-train diagnostic (ADR-1420).
-func composeCIDeferralComment(issueNum, prNum int, headSHA, targetName string, runs []gh.CheckRun, detail string) string {
+// composeCIDeferralBody renders the body of the R6 comment (the caller adds the header).
+// It is composed locally rather than via renderDiagnosticBlock/renderBatchContext/
+// reentryInstruction: those carry wording that is wrong for this cause ("trial ...,
+// integration PR #N" header, "moved base branch alone", and a recovery instruction that
+// assumes a pause). Only renderFailedChecks is shared, so failing checks are rendered
+// identically to every other merge-train diagnostic (ADR-1420).
+func composeCIDeferralBody(issueNum, prNum int, headSHA, targetName string, runs []gh.CheckRun, detail string) string {
 	// Diagnostic only: the classifier has already said red, so this introduces no
 	// independent notion of red. A required-context red has no failing runs to render,
 	// so it falls back to the classifier's own detail string.
@@ -155,7 +155,7 @@ func composeCIDeferralComment(issueNum, prNum int, headSHA, targetName string, r
 		fmt.Sprintf("**Diagnostic** (PR #%d, head %s)\n\n%s", prNum, headSHA, diag),
 		fmt.Sprintf("This issue has left the Queued column for %s and has **not** been paused. The ordinary CI gate will pick up the failing check(s) from %s and dispatch a fix automatically. Once CI is green and %s completes again, this issue will re-queue and rejoin a later batch.", targetName, targetName, targetName),
 	}
-	return "🏭 **Fabrik merge-train — deferred (own CI failing)**\n\n" + strings.Join(sections, "\n\n")
+	return strings.Join(sections, "\n\n")
 }
 
 func ciDeferredKey(owner, repo string, n int) string {
