@@ -88,6 +88,12 @@ type mergeTrainEnvOptions struct {
 	// Mode sets cfg.MergeTrain — "on" (default) or "off" (R8/AC8).
 	Mode string
 
+	// ValidateWaitForCI enables wait_for_ci on the Validate stage (the stage
+	// before Queued) — the #1821 admission gate's precondition, since only then
+	// does the ordinary CI gate re-detect a deferred red member. Off by default so
+	// every pre-existing scenario keeps its exact behavior.
+	ValidateWaitForCI bool
+
 	// ConfigureCfg, when non-nil, runs after this file's own merge-train
 	// defaults are applied (short CIBackstopTimeout, small MaxBatchSize) —
 	// an escape hatch for a scenario needing e.g. a smaller
@@ -151,8 +157,17 @@ func mergeTrainEnv(t *testing.T, opts mergeTrainEnvOptions) *Env {
 	if mode == "" {
 		mode = "on"
 	}
+	stgs := mergeTrainStages()
+	if opts.ValidateWaitForCI {
+		waitForCI := true
+		for _, s := range stgs {
+			if s.Name == "Validate" {
+				s.WaitForCI = &waitForCI
+			}
+		}
+	}
 	env := NewEnv(t, EnvOptions{
-		Stages: mergeTrainStages(),
+		Stages: stgs,
 		ConfigureCfg: func(cfg *engine.Config) {
 			cfg.MergeTrain = mode
 			cfg.CIBackstopTimeout = 10 * time.Second
