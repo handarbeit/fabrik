@@ -77,9 +77,10 @@ func (e *TurnLimitError) Error() string {
 // transient Anthropic-side API error, not because the stage genuinely
 // failed. An api_error carrying api_error_status 429 is not this type: it is a
 // session/usage limit and is classified as UsageLimitError instead (ADR-1811),
-// so only non-429 statuses (5xx, absent, ...) reach APIErrorExit. The stage never ran, so this condition must be excluded from
-// max_retries — see handleAPIErrorExit in engine/item.go, which is the sole
-// consumer (via errors.As).
+// so only non-429 statuses (5xx, absent, ...) reach APIErrorExit. The stage
+// never ran, so this condition must be excluded from max_retries — see
+// handleAPIErrorExit in engine/item.go, which is the sole consumer (via
+// errors.As).
 //
 // Deliberately a distinct type from UsageLimitError, not a second value
 // recognized by classifyUsageLimitExit itself: UsageLimitError is also the
