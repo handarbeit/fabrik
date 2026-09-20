@@ -379,6 +379,11 @@ func (e *Engine) runProcessSweepJanitor(ctx context.Context) {
 	_ = ctx // reserved for future use; sweepStaleDescendants performs no cancellable I/O
 	scanned, reaped, skipped := sweepStaleDescendants()
 	e.logf(0, "proc-janitor", "cycle complete: scanned %d registry entries, reaped %d, skipped %d\n", scanned, reaped, skipped)
+	// #1814: registry-independent sweep by worker session ID — finds orphans
+	// that never got a descendant registry entry. Additive; the line above and
+	// its format are unchanged.
+	records, sessReaped, sessSkipped, pruned := sweepOrphanedWorkerSessions()
+	e.logf(0, "proc-janitor", "session sweep complete: worker records %d, session members reaped %d, skipped %d, records pruned %d\n", records, sessReaped, sessSkipped, pruned)
 }
 
 // pruneSessions walks root (.fabrik/sessions/) and removes ".session" files

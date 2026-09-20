@@ -8758,6 +8758,42 @@ was recorded — means the entry is dropped from the registry and never signalle
 Each reaped PID is also logged individually, via the existing `[#N kill]` convention, at
 sweep time.
 
+**Registry-independent session sweep (#1814)**: `runProcessSweepJanitor` additionally calls
+`sweepOrphanedWorkerSessions`, because the registry sweep above can only act on a descendant that
+was recorded — one spawned in its worker's final seconds, or during a transient `ps` failure, has
+no entry and is invisible to it. The worker record is written at spawn to
+`.fabrik/state/workers.json` (a JSON array; one record per invocation, keyed by unique ID, never
+by PID; an unparseable file is quarantined to `workers.json.corrupt` with a logged warning and
+treated as empty, so a corrupt file cannot disable recording). The sweep takes one process-table scan (the shared cached one) and one `Getsid` pass, and
+reaps every process whose SID equals the PID of a recorded worker classified as dead. The
+invocation-end variant runs the same logic with a fresh scan (stage-lifecycle.md § Session-Scoped
+Descendant Reaping).
+
+| Worker PID state | Result |
+|---|---|
+| not alive | dead — sweep members |
+| alive, fingerprint lookup errors | inconclusive — skip, keep record |
+| alive, record fingerprint empty | skip (never signalled on liveness alone) |
+| alive, `lstart` equal to record | live worker — skip |
+| alive, `lstart` differs | recycled PID — sweep only members that started at or after the recorded worker and strictly before the current holder; equal/unparseable timestamps skip |
+
+Ownership is by session lineage only (no `comm`/args allow-list), and only for a recorded worker:
+a dead session leader with no record is never touched. Before each `SIGKILL` the candidate's
+fingerprint is re-read and `Getsid` re-checked; a lookup failure skips it. A record is pruned only
+when the worker is dead, a successful scan found zero live members and nothing was skipped, on two
+consecutive scans (`EmptyScans >= 2`, persisted across janitor passes); a scan error or any skip
+resets the count and keeps the record. A scan error changes nothing.
+
+**Summary log** (a second line; the line above is unchanged):
+
+```
+[proc-janitor] session sweep complete: worker records N, session members reaped K, skipped M, records pruned P
+```
+
+Each reap is logged individually as `[#N kill] sending SIGKILL to PID <pid> (<comm>) — orphaned
+session member of dead worker PID <W> (reason=session_sweep_periodic)`. See
+[ADR 1814](../adrs/1814-registry-independent-worker-session-sweep.md).
+
 ---
 
 ## Appendix A: Two Paths to Stage Advancement
@@ -9623,9 +9659,13 @@ The PGID-scoped grandchild cleanup above (item 1) and the cwd-rooted worktree-te
 
 - **Backstop sweep (R3)**: `runProcessSweepJanitor` (`engine/janitor.go`) is a fourth periodic janitor, wired into the same `JanitorIntervalHours`-gated call sites (startup, and the hourly ticker) as the worktree/log/session janitors — no new config knob. It calls `sweepStaleDescendants`, which loads the *entire* durable registry (every worker, including ones from a previous engine run — the registry lives at `.fabrik/state/descendants.json` and survives a restart) and, for each entry whose recorded worker PID is confirmed dead, re-verifies its fingerprint and kills it exactly as the invocation-end reap does. "Confirmed dead" is a live signal-0 probe *plus* an identity re-check: `trackWorkerDescendants` also stamps each entry with the worker's own `comm`/`lstart` fingerprint at discovery time, and a live PID whose fingerprint no longer matches (the worker exited and the OS reused its PID) is treated as dead too — otherwise such an entry would pass the signal-0 probe forever and never be swept. An entry whose worker is still alive and still the same worker is left alone — that invocation is still in flight and R2 will reap it — so the sweep only ever acts on orphans that genuinely escaped R1/R2, including ones left behind by a prior engine run or orphaned by worker-PID reuse.
 
+- **Registry-independent worker-session sweep (#1814)**: every path above starts from a registry entry, so a descendant that was *never recorded* — spawned within the last `descendantScanInterval` before its worker exited, or during a transient `ps` failure — is invisible to all of them, and nothing would ever reap it. `runClaude` therefore also writes a durable **worker record** (`.fabrik/state/workers.json`, `engine/worker_registry.go`) synchronously right after `cmd.Start()`, when the worker's PID belongs to exactly one process, capturing its `comm`/`lstart` fingerprint (retried in the background if that first lookup fails). `engine/worker_sweep_unix.go` then finds orphans by enumerating live processes and calling `unix.Getsid` on each: any process whose SID equals the PID of a recorded, confirmed-dead worker is reaped. Ownership is by session lineage alone — no `comm`/args allow-list — so an orphaned Bash-tool shell with zero children is reaped like any test binary. It runs (a) at invocation end, immediately after `reapTrackedDescendants`, using a **fresh, uncached** process scan (a cached snapshot could predate the racing descendant), rescanning briefly (≤2s) to catch members still visible after `SIGKILL`; and (b) from the proc-janitor (see state-machine.md §11.7), reading every record from disk so an orphan from a previous engine run is still reapable. The per-descendant registry stays as the fast path; this is additive.
+
+  A process is signalled only when it is provably a descendant of a dead recorded worker — a dead session leader alone is never enough, and no record means no kill. A worker is "dead" when its PID is not alive, or when the live process at that PID has a different `lstart` than recorded (a recycled PID). In the recycled case SID equality alone would also match the *new* holder's descendants, so a member is reaped only if it started at or after the dead worker and strictly before the current holder; equal or unparseable timestamps skip. Every ambiguity fails open: a fingerprint lookup error, an empty recorded fingerprint while the PID is alive, or a scan error signals nothing and keeps the record. Each candidate is re-verified (fresh fingerprint, `Getsid` still equal) immediately before a single-PID `SIGKILL`, logged as `[#N kill] sending SIGKILL to PID <pid> (<comm>) — orphaned session member of dead worker PID <W> (reason=session_sweep_invocation_end|session_sweep_periodic)`. A record is pruned only once the worker is confirmed dead and two consecutive successful scans find no live member and nothing was skipped. See ADR 1814.
+
 **Kill scope**: both reap paths signal the descendant's own PID directly (`syscall.Kill(pid, SIGKILL)`), not a process group — matching the worktree-teardown reaper's own `killWorktreeProcess` precedent.
 
-**Known gaps** (see ADR 1798 Consequences): a descendant that calls its own `setsid()` is not caught (its SID permanently diverges from the worker's — this is the cwd-rooted reaper's domain instead); a detached descendant that itself forks further descendants is reaped only at the recorded leaf, not recursively.
+**Known gaps** (see ADR 1798 Consequences): a descendant that calls its own `setsid()` is not caught (its SID permanently diverges from the worker's — this is the cwd-rooted reaper's domain instead); a detached descendant that itself forks further descendants is reaped only at the recorded leaf, not recursively; a descendant that was never recorded is invisible to the registry paths above (closed by the worker-session sweep, #1814, for any worker that has a record). Still not covered by the worker-session sweep (ADR 1814 Consequences): orphans that predate worker records, other Fabrik instances' orphans, and — by design, failing open — a member whose lookups are inconclusive or whose recorded worker fingerprint could not be captured while its PID is alive.
 
 ### Worktree Teardown Process Reaping
 
