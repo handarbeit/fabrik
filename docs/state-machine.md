@@ -3021,10 +3021,10 @@ absent, `null`, zero, or wrong-typed values read as "not 429" and never drop the
 object. The `result` text is never consulted. Both shapes sit behind the same turns/cost exclusion
 gate, and detection only runs when a result object actually parsed (`ok == true`). When Claude exits non-zero
 without a `FABRIK_STAGE_COMPLETE` marker, no turn cap, and `TerminalReason` matches,
-`interpretClaudeResult` returns a `*claudeUsageLimitError{Message}` sentinel instead of the generic
-error wrapper; `ResetTime` is always `""` for both shapes (see "Parsing the reset time" below) —
-including for a 429 `api_error`, whose result text names a reset time: populating `ResetTime` would
-change the suspension deadline from the fixed one-hour fallback, so it is deliberately not parsed. An unparseable-JSON
+`interpretClaudeResult` returns a `*claudeUsageLimitError{Message, ResetAt, ResetFallbackReason}` sentinel
+instead of the generic error wrapper; `ResetAt`/`ResetFallbackReason` come from the separate
+structured `rate_limit_event` scan (see "Structured reset instant" below, ADR-1815) — never from the
+`result` text, which for a 429 `api_error` names a reset time that is deliberately not parsed. An unparseable-JSON
 invocation (`ok == false` — process killed mid-stream, truncated output) has no structured payload to
 trust and is never classified as a usage-limit exit by any means; it falls through to ordinary
 failure/timeout handling.
@@ -3056,8 +3056,9 @@ immediately after the existing engine-shutdown guard, and routes to `handleUsage
 2. If `fabrik:claude-limit` is absent, posts an explanatory comment naming the condition and applies
    the label — gated on the label's own absence, the same once-per-episode idiom as
    `fabrik:awaiting-ci`/`fabrik:bot-reprompted`. If already present (a repeated hit within the same
-   episode), neither the comment nor a duplicate label-add fires. The comment no longer names a parsed
-   reset time — structural detection never populates one (see "Parsing the reset time" below).
+   episode), neither the comment nor a duplicate label-add fires. The comment names the reset
+   time only when it was sourced from the structured `resetsAt` (see "Structured reset instant" below); it is
+   omitted on the fixed fallback.
 3. Skips `commitWIP`, push, and `markCommentsSeenByStage` — nothing was produced.
 4. Releases the lock and returns — no `stage:<name>:failed`, no `fabrik:paused`.
 
@@ -3087,24 +3088,27 @@ the stage-invocation loop (`runInvocationWithExtension`, `engine/item.go`), the 
 (`processComments`/`runCommentExtensionLoop`, `engine/comments.go`), and merge-train inline conflict
 resolution (`resolveConflictWithClaude`, `engine/merge_train.go`).
 
-- **Parsing the reset time (always the fallback):** `claudeUsageLimitError.ResetTime` is always `""` —
-  structural detection (`classifyUsageLimitExit`) never parses a reset time from prose, deliberately:
-  the original mechanism (`usageLimitResetRE`, a regex over raw invocation output) is exactly what
-  mis-parsed #1084's example fixture text as a real reset time in the #1183 incident. `parseUsageLimitResetTime`/
-  `computeUsageLimitResetDeadline` (`engine/usage_limit_backoff.go`) still exist — they still correctly
-  parse a `"3:04pm (Zone/City)"`-shaped fragment when given one — but with `ResetTime` always empty,
-  `computeUsageLimitResetDeadline` unconditionally takes its fallback path: a fixed
-  `claudeUsageLimitFallbackBackoff` (1 hour), a full order of magnitude longer than the ordinary
-  5-minute dispatch cooldown. Trusting a higher-fidelity structural reset time (the CLI's separate
-  `rate_limit_event`/`resetsAt` NDJSON message, a numeric epoch) is deferred future work — see
-  ADR-1183.
-- **Activating and extending:** `activateClaudeSuspension(issueNumber, resetTimeRaw, now)` computes the
-  deadline and, under `claudeSuspendMu`, only updates `claudeSuspendedUntil` if no suspension is
-  currently active or the newly computed deadline is later than the one already recorded — so
-  concurrent workers racing to report the same or different reset times converge on the latest deadline
-  seen, never shortening an active window. It logs (tag `"claude-limit"`, naming the reset time and
-  whether it was parsed or a fallback) and emits `tui.ClaudeUsageLimitAlertEvent{Suspended: true, Reset:
-  deadline}` only on an actual change — the same non-spamming idiom as the per-issue label.
+- **Structured reset instant (ADR-1815):** `unifiedWindows` is not on the terminal `result` line — it sits
+  on a separate `{"type":"rate_limit_event"}` NDJSON line that arrives before it. Once
+  `classifyUsageLimitExit` has fired, `extractUsageLimitReset` (`engine/usage_limit_reset.go`) makes a
+  tolerant best-effort scan of the raw stream (independent of `parseClaudeJSON`, so a malformed event can
+  never break classification) and attaches the result to the error as `ResetAt`, or a
+  `ResetFallbackReason` (`absent` / `zero` / `malformed` / `no_exhausted_window`) when none is usable.
+  The **last** `rate_limit_event` carrying `unifiedWindows` wins, and within it the reset is the **latest
+  `resetsAt` among windows whose `utilization` is ≥ 1** — windows below 1 never contribute (a
+  non-exhausted `seven_day` resets days after the blocking `five_hour` and would over-suspend the
+  account). Window keys are read generically, so a future exhausted window is honoured. `result` prose,
+  assistant text and `overageStatus`/`overageResetsAt` are never read (ADR-1183 applies to the deadline as
+  it does to the trigger). The prose parser (`parseUsageLimitResetTime`) is deleted. This reverses
+  ADR-1811's dropped R6 and fulfils ADR-1183 §3's deferred follow-up.
+- **Deadline resolution:** `resolveUsageLimitDeadline(limitErr, now)` is the single place the R3 and R4
+  rules apply: a zero `ResetAt` falls back to `claudeUsageLimitFallbackBackoff` (1 hour, ADR-1120) with the
+  decode-time reason; `ResetAt <= now` falls back with reason `past`; `ResetAt` more than
+  `usageLimitMaxResetHorizon` (8 days — the 7-day window plus a day's margin) ahead is clamped to `now + 8d`;
+  anything else is used as-is. Every fallback and clamp is logged with its named reason. Accepted edge: a
+  fallback-derived deadline from one worker can extend an exact one that ends sooner than an hour away
+  (extend-never-shorten is preserved unchanged); unreachable in practice, since every captured 429 exit
+  carries the event.
 - **Gating:** each of the three call sites checks `claudeSuspendedUntilTime(time.Now())` before
   attempting an invocation. If suspended, the stage-invocation and merge-train paths short-circuit by
   returning/propagating a `*claudeUsageLimitError` without calling Claude at all (routed through the
@@ -3178,7 +3182,7 @@ resolution (`resolveConflictWithClaude`, `engine/merge_train.go`).
 - **Updated comment copy:** the per-issue explanatory comment posted by `handleUsageLimitExit` no
   longer says "Fabrik will keep retrying on the normal poll cooldown" — it now describes the
   account-wide suspension and automatic resume at the reset time (or as soon as any invocation
-  succeeds).
+  succeeds), and carries the structured reset instant when one was sourced.
 
 **Out of scope (still deferred):** a dedicated escalation/safety-net path for persistent or repeated
 misdetection. Without `MaxRetries` counting against a usage-limit exit, a misdetected or unusually

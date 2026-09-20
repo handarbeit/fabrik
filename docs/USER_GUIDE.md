@@ -1716,13 +1716,14 @@ When a stage doesn't complete (Claude doesn't output `FABRIK_STAGE_COMPLETE`):
 > discusses usage limits cannot trigger this. It does **not** count this attempt against
 > `--max-retries`: no `stage:<name>:failed`, no `fabrik:paused`, no escalation comment. As
 > soon as one worker observes the limit, Fabrik suspends *all* new Claude dispatch
-> account-wide — not just for this issue — for a fixed one-hour backoff (structural
-> detection carries no reset time to parse, so this fallback backoff is always used), so a
-> usage-limit window costs one detection and one automatic resume rather than every
+> account-wide — not just for this issue — until the reset instant the CLI itself reports
+> (the latest `resetsAt` among the exhausted usage windows, read from a structured field,
+> never from the message text; a fixed one-hour backoff applies only when none is usable),
+> so a usage-limit window costs one detection and one automatic resume rather than every
 > concurrent item independently rediscovering and waiting out the same limit. The
 > suspension and its expected end are visible in the log (tag `claude-limit`) and, in the
 > TUI, as a dedicated banner distinct from the GitHub rate-limit banner (see *Claude
-> Usage-Limit Suspension* below). It clears automatically — either at the one-hour
+> Usage-Limit Suspension* below). It clears automatically — either at the reset
 > deadline or as soon as any invocation succeeds, whichever comes first — or you can clear
 > it immediately without restarting the engine by applying `fabrik:clear-claude-limit` to
 > any open board item (see *Claude Usage-Limit Suspension* below). Once the account-wide
@@ -3571,11 +3572,20 @@ GraphQL one:
 ⚠ Claude usage limit hit — dispatch suspended. Resumes in 1h (22:20 local time).
 ```
 
-Structural detection carries no reset time to parse, so this is always a fixed one-hour
-suspension — a full order of magnitude longer than the normal 5-minute dispatch cooldown
-— rather than retrying on the normal cooldown. The suspension clears in any of three ways:
+The suspension runs until the reset instant the CLI reports in its structured
+`rate_limit_event` stream line (`unifiedWindows.<window>.resetsAt`, a Unix timestamp): the
+latest reset among the windows that are actually exhausted (`utilization` of 1 or more).
+Windows below 1 are ignored, since a weekly window that is only 65% used resets days after
+the five-hour one that is blocking you. The message text ("resets 3:30am …") is never
+read. Any value that is not a sane future instant — absent, zero, malformed, already
+past, or no exhausted window — falls back to a fixed one-hour suspension (a full order of
+magnitude longer than the normal 5-minute dispatch cooldown) and the log line names which
+condition applied, e.g. `no usable structured reset (reason=absent)`. A reset more than 8
+days away is clamped to 8 days and logged. The comment and log show the real time —
+`(resets 2026-09-18 03:30 EDT)`, in the engine's local zone — only when it came from the
+structured field. The suspension clears in any of three ways:
 
-1. **Automatically**, once the one-hour deadline passes or as soon as any invocation
+1. **Automatically**, once the reset deadline passes or as soon as any invocation
    succeeds, whichever comes first — no operator action required.
 2. **On operator request**, by applying `fabrik:clear-claude-limit` to *any* open board
    item (it does not need to be one already carrying `fabrik:claude-limit` — the

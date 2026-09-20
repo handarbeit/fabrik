@@ -679,8 +679,10 @@ engine-shutdown guard — before the normal `claudeRan`/retry classification log
 2. Retry count is **not** incremented — the stage never ran, so this does not consume `max_retries`.
 3. If `fabrik:claude-limit` is absent, an explanatory comment naming the condition is posted and the
    label is added — gated on the label's own absence so a repeated hit within the same episode does not
-   repost the comment. Neither `fabrik:paused` nor `stage:<name>:failed` is applied. The comment no
-   longer names a reset time — structural detection never parses one from prose.
+   repost the comment. Neither `fabrik:paused` nor `stage:<name>:failed` is applied. The comment
+   names the reset time (`(resets <local time>)`) only when it was sourced from the CLI's structured
+   `unifiedWindows.*.resetsAt` (ADR-1815); it is never parsed from prose, and is omitted on the
+   one-hour fallback.
 4. No partial-progress commit, no branch push, no `markCommentsSeenByStage` — nothing was produced.
 5. Lock released.
 
