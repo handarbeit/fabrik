@@ -617,14 +617,14 @@ func TestFindNewCommentsFiltering(t *testing.T) {
 	}
 }
 
-// TestHumanNewComments verifies humanNewComments filters findNewComments'
+// TestFilterHumanNewComments verifies filterHuman(findNewComments) filters findNewComments'
 // output to exclude bot logins, leaving only human-authored comments (#1083).
 // It deliberately does NOT exclude e.cfg.User: that is the operator's own
 // GitHub login (in the common single-account deployment, the same account
 // Fabrik posts as), so excluding it would filter out the operator's own
 // resume reply. Fabrik's own output is already excluded upstream by
 // findNewComments' body-prefix check, independent of author.
-func TestHumanNewComments(t *testing.T) {
+func TestFilterHumanNewComments(t *testing.T) {
 	e := &Engine{
 		cfg:   Config{User: "fabrikbot"},
 		store: itemstate.NewStore(nil),
@@ -642,7 +642,7 @@ func TestHumanNewComments(t *testing.T) {
 		},
 	}
 
-	result := e.humanNewComments(item)
+	result := filterHuman(e.findNewComments(item))
 	if len(result) != 3 {
 		t.Fatalf("expected 3 human comments, got %d: %v", len(result), result)
 	}
@@ -651,13 +651,13 @@ func TestHumanNewComments(t *testing.T) {
 	}
 }
 
-// TestHumanNewComments_EmptyAuthor_FailsClosed verifies that a comment with no
+// TestFilterHumanNewComments_EmptyAuthor_FailsClosed verifies that a comment with no
 // resolvable author (e.g. a deleted GitHub account, which the deep fetch
 // leaves as an empty Author string) is treated as non-human rather than as an
 // implicit resume trigger. IsBotLogin("") is false, so without this guard an
 // unattributed comment would silently defeat a pause exactly like the bot
 // chatter this fix targets (#1083) — fail closed instead.
-func TestHumanNewComments_EmptyAuthor_FailsClosed(t *testing.T) {
+func TestFilterHumanNewComments_EmptyAuthor_FailsClosed(t *testing.T) {
 	e := &Engine{
 		cfg:   Config{User: "operator"},
 		store: itemstate.NewStore(nil),
@@ -672,20 +672,20 @@ func TestHumanNewComments_EmptyAuthor_FailsClosed(t *testing.T) {
 		},
 	}
 
-	result := e.humanNewComments(item)
+	result := filterHuman(e.findNewComments(item))
 	if len(result) != 1 || result[0].ID != "h1" {
 		t.Fatalf("expected only the human comment h1, got %v", result)
 	}
 }
 
-// TestHumanNewComments_MixedBatch_KeepsOnlyHuman verifies that humanNewComments
+// TestFilterHumanNewComments_MixedBatch_KeepsOnlyHuman verifies that filterHuman(findNewComments)
 // isolates the human-authored comment out of a mixed human+bot batch. This
 // filtered result is used only to decide *whether* to resume a paused /
 // awaiting-input item — it is not what gets handed to processComments once
 // resumed (processItem passes the full raw findNewComments batch at that
 // point; see TestProcessItem_Paused_MixedBatch_ProcessesBothCommentsOnUnpause
 // and its awaiting-input counterpart).
-func TestHumanNewComments_MixedBatch_KeepsOnlyHuman(t *testing.T) {
+func TestFilterHumanNewComments_MixedBatch_KeepsOnlyHuman(t *testing.T) {
 	e := &Engine{
 		cfg:   Config{User: "operator"},
 		store: itemstate.NewStore(nil),
@@ -701,7 +701,7 @@ func TestHumanNewComments_MixedBatch_KeepsOnlyHuman(t *testing.T) {
 		},
 	}
 
-	result := e.humanNewComments(item)
+	result := filterHuman(e.findNewComments(item))
 	if len(result) != 1 || result[0].ID != "h1" {
 		t.Fatalf("expected only the human comment h1, got %v", result)
 	}

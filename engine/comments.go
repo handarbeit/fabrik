@@ -150,14 +150,63 @@ func filterHuman(comments []gh.Comment) []gh.Comment {
 	return human
 }
 
-// humanNewComments filters findNewComments to comments authored by a human.
-// Used at the paused / awaiting-input resume-decision sites so bot chatter
-// cannot silently defeat an operator-applied pause (#1083). Callers that also
-// need the unfiltered set (to hand the full backlog to processComments once
-// a resume is authorized) should call findNewComments once and pass it
-// through filterHuman directly instead of calling this a second time.
-func (e *Engine) humanNewComments(item gh.ProjectItem) []gh.Comment {
-	return filterHuman(e.findNewComments(item))
+// pauseLabel is the label whose latest `labeled` event anchors "the moment the
+// current pause began" for resumeAuthorised. isAwaitingInput implies paused, so
+// this one label covers both resume gates.
+const pauseLabel = "fabrik:paused"
+
+// commentsPredatePause reports whether every comment in human strictly predates
+// pausedAt — the only positive finding that may refuse a resume (ADR-1813, R6).
+// Every indeterminate input resumes: a zero anchor, or any comment with a zero
+// CreatedAt or one equal to the anchor (GitHub timestamps have one-second
+// resolution, so equality cannot prove the comment came first).
+func commentsPredatePause(human []gh.Comment, pausedAt time.Time) bool {
+	if pausedAt.IsZero() || len(human) == 0 {
+		return false
+	}
+	for _, c := range human {
+		if c.CreatedAt.IsZero() || !c.CreatedAt.Before(pausedAt) {
+			return false
+		}
+	}
+	return true
+}
+
+// resumeAuthorised is the single predicate deciding whether a paused or
+// awaiting-input item may be resumed by a human comment (ADR-069, ADR-1813).
+// It is shared by itemNeedsWork (admission) and processItem (both resume
+// gates), so the two can never disagree.
+//
+// A resume is authorised only by an *event* — a human comment created at or
+// after the latest `fabrik:paused` labeled event — not by the *state* "an
+// unprocessed human comment exists", which stays true forever when processing
+// can never succeed and would let one comment lift the pause every poll.
+//
+// raw is always the full findNewComments set (including bot chatter), so an
+// authorised resume hands the whole backlog to processComments (R5). refused
+// is the number of human comments that predate the pause (0 when authorised or
+// when there were no human comments), for distinct logging.
+//
+// The anchor is read directly from GitHub (client.FetchLabelAppliedAt), never
+// through the record-on-write cache: a human removing the label in the UI
+// leaves a stale early cache entry that a later pause would inherit, silently
+// re-arming the loop. Any fetch error or missing event resumes (R6).
+func (e *Engine) resumeAuthorised(item gh.ProjectItem) (authorised bool, raw []gh.Comment, refused int) {
+	raw = e.findNewComments(item)
+	human := filterHuman(raw)
+	if len(human) == 0 {
+		return false, raw, 0
+	}
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	pausedAt, err := e.client.FetchLabelAppliedAt(owner, repo, item.Number, pauseLabel)
+	if err != nil {
+		e.logf(item.Number, "resume", "pause anchor unavailable (%v) — resuming\n", err)
+		return true, raw, 0
+	}
+	if commentsPredatePause(human, pausedAt) {
+		return false, raw, len(human)
+	}
+	return true, raw, 0
 }
 
 // processComments handles new user comments on an issue.

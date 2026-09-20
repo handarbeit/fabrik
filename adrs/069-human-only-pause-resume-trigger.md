@@ -67,3 +67,7 @@ This ADR intentionally addresses only the resume-trigger authorship gap. Sibling
 - #1088, #1089, #1090 — fixes 2–4 of the same runaway-loop remediation series.
 
 **References:** [docs/state-machine.md §1.1, §1.3, §2.2, §4.4, §8.1, Appendix C](../docs/state-machine.md)
+
+## Superseded in part
+
+`humanNewComments` was removed by [ADR 1813](1813-pause-resume-requires-post-pause-comment.md), which replaced it with `resumeAuthorised` (`engine/comments.go`) — the same four call sites, but additionally requiring the human comment to postdate the pause. The human-only rule above is unchanged.

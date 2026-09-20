@@ -349,24 +349,26 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 	// Awaiting-input items: new human comment = resume trigger; no human
 	// comment (or bot-only chatter) = skip.
 	if awaitingInput {
-		raw := e.findNewComments(item)
-		human := filterHuman(raw)
-		if len(raw) > 0 && len(human) == 0 {
+		ok, raw, refused := e.resumeAuthorised(item)
+		if refused > 0 {
+			e.logf(item.Number, "skip", "awaiting-input: %d human comment(s) predate the pause — still waiting\n", refused)
+		} else if !ok && len(raw) > 0 {
 			e.logf(item.Number, "skip", "awaiting-input: %d new comment(s), none human-authored — still waiting\n", len(raw))
 		}
-		return len(human) > 0
+		return ok
 	}
 
 	// Paused items: a new human comment is an implicit "resume and handle
 	// this." Without one — including bot-only chatter — respect the pause.
 	isPaused := hasLabel(item.Labels, "fabrik:paused")
 	if isPaused {
-		raw := e.findNewComments(item)
-		human := filterHuman(raw)
-		if len(human) > 0 {
+		ok, raw, refused := e.resumeAuthorised(item)
+		if ok {
 			return true // comment triggers unpause — processItem handles label removal
 		}
-		if len(raw) > 0 {
+		if refused > 0 {
+			e.logf(item.Number, "skip", "paused: %d human comment(s) predate the pause — pause retained\n", refused)
+		} else if len(raw) > 0 {
 			e.logf(item.Number, "skip", "paused: %d new comment(s), none human-authored — pause retained\n", len(raw))
 		}
 		return false
@@ -502,16 +504,19 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 
 	// Awaiting-input: paused because Claude needs user input. If the user has
 	// responded with a new comment, unblock and route to comment processing.
-	// humanNewComments only gates the resume decision; once authorized, the
+	// resumeAuthorised only gates the resume decision (a human comment created
+	// at or after the pause, ADR-1813); once authorized, the
 	// full raw comment set (including any bot chatter that accumulated while
 	// awaiting input) is handed to processComments in this same pass —
 	// mirroring the paused-unpause branch below, so a resume never leaves a
 	// bot-comment backlog to be picked up as a separate invocation next poll.
 	if isAwaitingInput(item) {
-		raw := e.findNewComments(item)
-		if len(filterHuman(raw)) > 0 {
+		if ok, raw, refused := e.resumeAuthorised(item); ok {
 			e.unblockAwaitingInput(item, stage)
 			return e.processComments(ctx, board, item, stage, raw)
+		} else if refused > 0 {
+			e.logf(item.Number, "skip", "awaiting user input: %d human comment(s) predate the pause — resume refused (ADR-1813)\n", refused)
+			return nil
 		}
 		e.logf(item.Number, "skip", "awaiting user input\n")
 		return nil
@@ -523,14 +528,19 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// unpause (#1083 — pause must remain an effective operator kill-switch).
 	for _, label := range item.Labels {
 		if label == "fabrik:paused" {
-			if len(filterHuman(e.findNewComments(item))) > 0 {
+			ok, _, refused := e.resumeAuthorised(item)
+			if ok {
 				e.logf(item.Number, "unpause", "user commented on paused issue — unpausing\n")
 				e.removeLabel(item, "fabrik:paused")
 				// Also clear any failed label so the stage retries cleanly
 				e.clearFailedStage(item, stage)
 				break // fall through to comment processing below
 			}
-			e.logf(item.Number, "skip", "is paused\n")
+			if refused > 0 {
+				e.logf(item.Number, "skip", "is paused: %d human comment(s) predate the pause — resume refused (ADR-1813)\n", refused)
+			} else {
+				e.logf(item.Number, "skip", "is paused\n")
+			}
 			return nil
 		}
 	}
