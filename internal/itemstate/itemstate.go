@@ -328,6 +328,13 @@ type StageState struct {
 	// trips it. Reset to zero on genuine progress (see NoOpCommentCycleReset)
 	// or by EngineCyclesCleared on a manual unpause.
 	NoOpCommentCycles map[string]int
+	// DidNotRunReinvokes counts reinvokes (review, CI-fix, rebase) for a stage
+	// whose Claude invocation provably never ran — a usage-limit, api_error or
+	// apiKeyHelper exit (#1812). The cycle counters are refunded for these, so
+	// this never-refunded tally is the only remaining evidence for the
+	// cycle-limit pause messages to say "these invocations never ran". Cleared
+	// by EngineCyclesCleared.
+	DidNotRunReinvokes map[string]int
 	// ProcessedComments maps comment ID to the time Fabrik finished processing it.
 	ProcessedComments map[string]time.Time
 	// LinkageHealAttempted maps stage name to the PR head SHA for which a linkage

@@ -223,6 +223,13 @@ func (s Snapshot) NoOpCommentCycles(stageName string) int {
 	return s.state.StageState.NoOpCommentCycles[stageName]
 }
 
+// DidNotRunReinvokes returns the never-refunded tally of reinvokes whose Claude
+// invocation never ran for a given stage (#1812) — see
+// StageState.DidNotRunReinvokes.
+func (s Snapshot) DidNotRunReinvokes(stageName string) int {
+	return s.state.StageState.DidNotRunReinvokes[stageName]
+}
+
 // CIFixCycles returns the CI-fix re-invocation cycle count for a given stage.
 func (s Snapshot) CIFixCycles(stageName string) int {
 	return s.state.StageState.CIFixCycles[stageName]
@@ -428,6 +435,7 @@ func copyStageState(s StageState) StageState {
 		SliceRetries:         copyMap(s.SliceRetries),
 		ToolsDeniedRetries:   copyMap(s.ToolsDeniedRetries),
 		NoOpCommentCycles:    copyMap(s.NoOpCommentCycles),
+		DidNotRunReinvokes:   copyMap(s.DidNotRunReinvokes),
 		ProcessedComments:    copyMap(s.ProcessedComments),
 		LinkageHealAttempted: copyMap(s.LinkageHealAttempted),
 		LastTurnsUsed:        copyMap(s.LastTurnsUsed),
