@@ -164,6 +164,8 @@ gh_ api "repos/$LIVE_REPO/pulls/$REC_PR/reviews?per_page=100" > /tmp/wc-reviews.
 write_recording fetch_pr_reviews "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews" "$LIVE_REPO#$REC_PR (read-only)" /tmp/wc-reviews.json
 gh_ api "repos/$LIVE_REPO/commits/$REC_SHA/check-runs?per_page=100" > /tmp/wc-checkruns.json
 write_recording fetch_check_runs "GET /repos/{owner}/{repo}/commits/{sha}/check-runs" "$LIVE_REPO#$REC_PR (read-only)" /tmp/wc-checkruns.json
+gh_ api "repos/$LIVE_REPO/commits/$REC_SHA/check-suites?per_page=100" > /tmp/wc-checksuites.json
+write_recording fetch_check_suites "GET /repos/{owner}/{repo}/commits/{sha}/check-suites" "$LIVE_REPO#$REC_PR (read-only)" /tmp/wc-checksuites.json
 
 if [ "$MODE" = "reads-only" ]; then
   echo "reads-only mode: skipping mutation recordings."
