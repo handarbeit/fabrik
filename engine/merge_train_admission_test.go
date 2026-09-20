@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/stages"
 )
 
 // admissionEngine is trainTestEngine with wait_for_ci enabled on the reroute target
@@ -320,5 +321,51 @@ func TestAdmitTrainMembers_RequiredContextRedDeferred(t *testing.T) {
 	defer client.mu.Unlock()
 	if len(client.addCommentCalls) != 1 || !strings.Contains(client.addCommentCalls[0].body, "required status context") {
 		t.Errorf("expected comment to fall back to the classifier detail, got %+v", client.addCommentCalls)
+	}
+}
+
+// TestDeferredRedMember_ReclaimedByCIGate_NotReadvanced is the #1821 re-pickup
+// precondition (R9): a member rerouted off Queued to a wait_for_ci stage keeps its
+// stage:<X>:complete label (the reroute never removes it) and has red own-PR checks. Phase 1
+// (handleMergeAndCIGates) must claim it and dispatch a CI-fix, so Phase 2 never runs and
+// the member — even under fabrik:yolo — is never advanced straight back to Queued.
+func TestDeferredRedMember_ReclaimedByCIGate_NotReadvanced(t *testing.T) {
+	client := ciFailureSettleClient()
+	waitTrue := true
+	stgs := []*stages.Stage{
+		{Name: "Implement", Order: 1, Prompt: "implement", WaitForCI: &waitTrue},
+		{Name: "Queued", Order: 2, HoldingStage: true},
+	}
+	eng := testEngineWithStages(t, client, stgs)
+	eng.cfg.MaxCiFixCycles = 5
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	advancedItems := make(map[string]bool)
+	pctx := makeMergeGatePctx(board, advancedItems)
+	// The rerouted state: complete label present, awaiting-ci not yet applied.
+	pctx.item.Labels = []string{"stage:Implement:complete", "fabrik:yolo"}
+	pctx.hasComplete = true
+
+	if !eng.handleMergeAndCIGates(pctx) {
+		t.Fatal("expected Phase 1 to claim a rerouted member whose own CI is red")
+	}
+	eng.wg.Wait()
+	snap, _ := eng.store.Get("owner/repo", 20)
+	if snap.CIFixCycles("Implement") != 1 {
+		t.Errorf("CIFixCycles(Implement) = %d; want 1 (CI-fix dispatched)", snap.CIFixCycles("Implement"))
+	}
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.updateStatusCalls) != 0 {
+		t.Errorf("a red member must not be advanced back to Queued, got status updates %+v", client.updateStatusCalls)
+	}
+	sawAwaitingCI := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:awaiting-ci" {
+			sawAwaitingCI = true
+		}
+	}
+	if !sawAwaitingCI {
+		t.Errorf("expected fabrik:awaiting-ci applied on confirmed CI failure, got %+v", client.addLabelCalls)
 	}
 }
