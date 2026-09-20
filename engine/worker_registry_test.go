@@ -106,3 +106,27 @@ func TestWorkerRecords_ConcurrentAppends(t *testing.T) {
 		t.Fatalf("expected %d records, got %d (%v)", n, len(recs), err)
 	}
 }
+
+// A corrupt workers.json must be quarantined, not left to fail every append and
+// every janitor pass forever.
+func TestWorkerRecords_CorruptFileIsQuarantined(t *testing.T) {
+	path := useWorkerRecordsDir(t)
+	if err := os.WriteFile(path, []byte(`[{"id": "1-1", "pid"`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	recs, err := allWorkerRecords()
+	if err != nil || len(recs) != 0 {
+		t.Fatalf("expected empty set after quarantine, got %v, %v", recs, err)
+	}
+	if _, err := os.Stat(path + ".corrupt"); err != nil {
+		t.Fatalf("corrupt file was not preserved for inspection: %v", err)
+	}
+	in := workerRecord{ID: "7-1", PID: 7, Stage: "Implement"}
+	if err := appendWorkerRecord(in); err != nil {
+		t.Fatalf("append after quarantine: %v", err)
+	}
+	recs, err = allWorkerRecords()
+	if err != nil || len(recs) != 1 || recs[0].ID != in.ID {
+		t.Fatalf("expected the new record to persist, got %v, %v", recs, err)
+	}
+}

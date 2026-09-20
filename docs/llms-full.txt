@@ -8763,7 +8763,8 @@ sweep time.
 was recorded — one spawned in its worker's final seconds, or during a transient `ps` failure, has
 no entry and is invisible to it. The worker record is written at spawn to
 `.fabrik/state/workers.json` (a JSON array; one record per invocation, keyed by unique ID, never
-by PID). The sweep takes one process-table scan (the shared cached one) and one `Getsid` pass, and
+by PID; an unparseable file is quarantined to `workers.json.corrupt` with a logged warning and
+treated as empty, so a corrupt file cannot disable recording). The sweep takes one process-table scan (the shared cached one) and one `Getsid` pass, and
 reaps every process whose SID equals the PID of a recorded worker classified as dead. The
 invocation-end variant runs the same logic with a fresh scan (stage-lifecycle.md § Session-Scoped
 Descendant Reaping).

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -76,7 +77,18 @@ func loadWorkerRecords() ([]workerRecord, error) {
 	}
 	var recs []workerRecord
 	if err := json.Unmarshal(data, &recs); err != nil {
-		return nil, err
+		// A corrupt file would otherwise fail every append and every janitor
+		// pass, silently disabling the registry-independent sweep until someone
+		// deletes it by hand. Quarantine it and continue with an empty set: the
+		// records it held are lost (fail open — a leak, never a false kill), but
+		// new workers are recorded again.
+		path := workerRecordsPath()
+		quarantine := path + ".corrupt"
+		if rerr := os.Rename(path, quarantine); rerr != nil {
+			return nil, fmt.Errorf("worker records unparseable (%v) and could not be quarantined: %w", err, rerr)
+		}
+		claudeLog(0, "warn", "worker records file %s was unparseable (%v); moved to %s and continuing with an empty set\n", path, err, quarantine)
+		return nil, nil
 	}
 	return recs, nil
 }

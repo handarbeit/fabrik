@@ -126,6 +126,9 @@ started at or after `SpawnedAt - 1s`.
   later recycled by a *non-Fabrik* session leader that then exits, its members that started after
   `SpawnedAt - 1s` would match. The synchronous capture, the background backfill and the `SpawnedAt`
   bound keep the window small but do not eliminate it.
+- **Corrupt `workers.json`.** An unparseable file is renamed to `workers.json.corrupt` (logged) and
+  the sweep continues with an empty set, so new workers are recorded again instead of every append
+  and janitor pass failing forever. The records it held are lost, so their orphans are not reaped.
 - **Live record whose PID is held by an unrelated process with no fingerprint** is never pruned
   while that process lives.
 - **Fork during sweep.** Narrowed by the bounded rescan, not eliminated at invocation end; the
