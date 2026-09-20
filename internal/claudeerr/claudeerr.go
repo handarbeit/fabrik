@@ -31,11 +31,14 @@ import (
 // condition must be excluded from max_retries — see handleUsageLimitExit in
 // engine/item.go, which is the sole consumer (via errors.As).
 type UsageLimitError struct {
-	// Message describes the structural field that triggered detection (see
-	// engine's classifyUsageLimitExit), for logging.
+	// Message describes the structural field(s) that triggered detection (see
+	// engine's classifyUsageLimitExit), for logging. Two shapes are detected:
+	// terminal_reason "blocking_limit", and terminal_reason "api_error" with
+	// api_error_status 429 (ADR-1811).
 	Message string
 	// ResetTime is always "" — the structural detector never parses a reset
-	// time from prose. Kept so computeUsageLimitResetDeadline's existing
+	// time from prose (including the "resets 3:30am (...)" text of a 429
+	// api_error result). Kept so computeUsageLimitResetDeadline's existing
 	// fallback-when-empty path (claudeUsageLimitFallbackBackoff) is exercised
 	// unconditionally; do not populate this from matched text (#1183).
 	ResetTime string
@@ -72,9 +75,12 @@ func (e *TurnLimitError) Error() string {
 
 // APIErrorExit signals that a Claude invocation exited because of a
 // transient Anthropic-side API error, not because the stage genuinely
-// failed. The stage never ran, so this condition must be excluded from
-// max_retries — see handleAPIErrorExit in engine/item.go, which is the sole
-// consumer (via errors.As).
+// failed. An api_error carrying api_error_status 429 is not this type: it is a
+// session/usage limit and is classified as UsageLimitError instead (ADR-1811),
+// so only non-429 statuses (5xx, absent, ...) reach APIErrorExit. The stage
+// never ran, so this condition must be excluded from max_retries — see
+// handleAPIErrorExit in engine/item.go, which is the sole consumer (via
+// errors.As).
 //
 // Deliberately a distinct type from UsageLimitError, not a second value
 // recognized by classifyUsageLimitExit itself: UsageLimitError is also the
