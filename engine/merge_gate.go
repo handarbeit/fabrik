@@ -129,6 +129,14 @@ func (e *Engine) buildRebaseComment(item gh.ProjectItem, stage *stages.Stage, ba
 func (e *Engine) dispatchRebaseReinvoke(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) {
 	e.dispatchReinvoke(ctx, board, item, stage, reinvokeOpts{
 		tag: "rebase-reinvoke",
+		// #1812: refunded by dispatchReinvoke when the invocation provably never
+		// ran; the after hook (auto-merge re-enable) is skipped then.
+		cycle: cycleCharge{
+			label: "rebase",
+			refund: func(repo string, number int, stageName string) []itemstate.Mutation {
+				return []itemstate.Mutation{itemstate.RebaseCycleDecremented{Repo: repo, Number: number, StageName: stageName}}
+			},
+		},
 		build: func(workDir string) []gh.Comment {
 			// Resolve the base branch for the rebase instructions. Failure here is
 			// not fatal — the synthetic comment falls back to "main".
@@ -638,15 +646,21 @@ func (e *Engine) pauseForRebaseCycleLimit(board *gh.ProjectBoard, item gh.Projec
 	}
 	e.logf(item.Number, "rebase-cycles", "rebase cycle limit %d reached — pausing for human intervention\n", maxCycles)
 
+	diagnosis := "GitHub still reports the PR as not mergeable. This usually means the conflict requires human judgment " +
+		"(for example: two PRs picked the same ADR number or migration slot, or a semantic overlap that cannot be " +
+		"resolved by automated rebase).\n\n"
+	if note, dominant := e.didNotRunPauseNote(repoStr, item.Number, stage.Name, cycleCount); dominant {
+		diagnosis = note + "\n\n"
+	} else if note != "" {
+		diagnosis = note + "\n\n" + diagnosis
+	}
 	msg := fmt.Sprintf(
 		"🏭 **Fabrik — rebase cycle limit reached**\n\n%s %d time(s), "+
 			"which has reached the configured limit of %d (override with `--max-rebase-cycles` or `FABRIK_MAX_REBASE_CYCLES`).\n\n"+
-			"GitHub still reports the PR as not mergeable. This usually means the conflict requires human judgment "+
-			"(for example: two PRs picked the same ADR number or migration slot, or a semantic overlap that cannot be "+
-			"resolved by automated rebase).\n\n"+
+			"%s"+
 			"Fabrik has paused this issue. Resolve the conflict manually, then remove the `fabrik:paused` and "+
 			"`fabrik:rebase-needed` labels to resume.",
-		rebaseCyclePauseFragment(stage), cycleCount, maxCycles,
+		rebaseCyclePauseFragment(stage), cycleCount, maxCycles, diagnosis,
 	)
 	e.pauseIssue(item, msg, pauseOpts{
 		awaitingInput: true,

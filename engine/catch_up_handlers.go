@@ -272,15 +272,18 @@ func (e *Engine) handleReviewGate(pctx *phase1Ctx) bool {
 				if blocked || timedOut {
 					// Genuine non-convergence evidence (ADR-1518): this reinvoke is
 					// being dispatched while the gate itself is still failing to
-					// clear, so unlike ReviewCycles this counter is never refunded,
-					// even if the reinvoke turns out to be a no-op on HEAD. A
+					// clear, so unlike ReviewCycles this counter is never refunded
+					// for a no-op on HEAD (only for a reinvoke that provably never
+					// ran, #1812 — dispatchReinvoke compensates that). A
 					// reinvoke dispatched with the gate already clear (the #1045
 					// junk-overview shape, blocked == timedOut == false) never
 					// reaches this branch, so it stays forgivable.
 					e.store.Apply(itemstate.ReviewBlockedCycleIncremented{Repo: repoStr, Number: pctx.item.Number, StageName: pctx.stage.Name})
 				}
 			},
-			func() { e.dispatchReviewReinvoke(pctx.ctx, pctx.board, pctx.item, pctx.stage, syntheticComments) },
+			func() {
+				e.dispatchReviewReinvoke(pctx.ctx, pctx.board, pctx.item, pctx.stage, syntheticComments, blocked || timedOut)
+			},
 			func(cycleCount int) {
 				// escalated return value intentionally discarded — this claim
 				// (dispatchWithCycleLimit always returns true) is correct whether the

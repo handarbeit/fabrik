@@ -214,6 +214,22 @@ func (e *Engine) resumeAuthorised(item gh.ProjectItem) (authorised bool, raw []g
 // invoke Claude → perform actions / update issue body → restore/re-derive
 // stage:<Stage>:complete → remove editing label → 🚀 reactions
 func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, comments []gh.Comment, onPIDReady ...func(int)) error {
+	_, err := e.processCommentsClassified(ctx, board, item, stage, comments, onPIDReady...)
+	return err
+}
+
+// processCommentsClassified is processComments plus a side-channel result: the
+// didNotRunKind (#1812) reporting whether this call provably never executed a
+// Claude invocation. The user-comment callers keep using processComments (whose
+// error contract is unchanged); dispatchReinvoke uses this variant to refund
+// the reinvoke cycle counter charged before dispatch. The kind is deliberately
+// NOT folded into the returned error: a usage-limit or suspension skip returns
+// a nil error today (excluded from the comment circuit breakers), and changing
+// that would alter what every caller and breaker sees.
+//
+// The kind is "" (ran, or ambiguous) at every exit other than the three that
+// positively establish the invocation never ran; ambiguity is charged (R4).
+func (e *Engine) processCommentsClassified(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, comments []gh.Comment, onPIDReady ...func(int)) (didNotRunKind, error) {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 
 	// Account-wide Claude usage-limit suspension gate (ADR-1120): checked before
@@ -222,7 +238,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	// once dispatch resumes, rather than being consumed by a doomed invocation.
 	if _, suspended := e.claudeSuspendedUntilTime(time.Now()); suspended {
 		e.logf(item.Number, "claude-limit", "Claude dispatch suspended account-wide; skipping comment review\n")
-		return nil
+		return didNotRunSuspended, nil
 	}
 
 	// Merge any unresolved PR review thread comments into the working slice.
@@ -267,7 +283,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	comments = filterBotServiceNotices(comments)
 	if len(comments) == 0 {
 		e.logf(item.Number, "comments", "all candidate comments were bot service notices; skipping\n")
-		return nil
+		return "", nil
 	}
 
 	e.logf(item.Number, "comments", "processing %d new comment(s) — stage: %s\n",
@@ -313,7 +329,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		if !e.checkNoOpCommentCycle(item, stage, false, lastCommentAuthor(comments)) {
 			e.checkCommentBreaker(item, fmt.Sprintf("the fabrik:editing label add failed: %v", err))
 		}
-		return fmt.Errorf("adding editing label: %w", err)
+		return "", fmt.Errorf("adding editing label: %w", err)
 	} else {
 		e.syncLabelAdd(item, "fabrik:editing", true)
 	}
@@ -333,7 +349,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		if !e.checkNoOpCommentCycle(item, stage, false, lastCommentAuthor(comments)) {
 			e.checkCommentBreaker(item, fmt.Sprintf("resolving the base branch failed: %v", err))
 		}
-		return fmt.Errorf("setting up worktree for %s/%s: %w", owner, repo, err)
+		return "", fmt.Errorf("setting up worktree for %s/%s: %w", owner, repo, err)
 	}
 	// Merge-queue awareness (ADR-058 D3): skip the preemptive rebase when the PR is
 	// in the queue (FR-1) or the repo is queue-enabled (FR-2). Both ProjectItem-sourced
@@ -346,7 +362,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		if !e.checkNoOpCommentCycle(item, stage, false, lastCommentAuthor(comments)) {
 			e.checkCommentBreaker(item, fmt.Sprintf("setting up the worktree failed: %v", err))
 		}
-		return fmt.Errorf("setting up worktree for %s/%s: %w", owner, repo, err)
+		return "", fmt.Errorf("setting up worktree for %s/%s: %w", owner, repo, err)
 	}
 
 	// If a PR exists and its base branch doesn't match the resolved base, update it.
@@ -452,7 +468,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		e.removeEditingLabel(owner, repo, item.Number)
 		if ctx.Err() != nil {
 			e.logf(item.Number, "skip", "cancelled during claude comment review\n")
-			return nil
+			return "", nil
 		}
 		// A Claude usage-limit hit is not "no forward progress" — it's an
 		// account-wide condition unrelated to this issue's comment thread, already
@@ -462,7 +478,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		var limitErr *claudeUsageLimitError
 		if errors.As(err, &limitErr) {
 			e.logf(item.Number, "claude-limit", "claude comment review hit the account usage limit; not counted toward the comment circuit breaker\n")
-			return nil
+			return didNotRunUsageLimit, nil
 		}
 		// A tool-permission-denial exit (#1523/#1704) is deterministic — a
 		// "don't ask mode" denial short-circuits allowlist evaluation, so no
@@ -483,7 +499,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 			if willEscalate {
 				e.pauseForToolsDeniedLimit(item, stage, toolsDeniedCount, e.cfg.MaxToolsDeniedRetries, toolsDeniedErr.ToolNames, toolsDeniedErr.Denials)
 			}
-			return err
+			return "", err
 		}
 		// Deliberately NO exclusion for *claudeResumeFailureError here (#1414),
 		// unlike the usage-limit exclusion immediately above: a resume failure
@@ -504,7 +520,9 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		if !e.checkNoOpCommentCycle(item, stage, headChanged, lastCommentAuthor(comments)) {
 			e.checkCommentBreaker(item, "")
 		}
-		return err
+		// Breaker checks above are unchanged and still count did-not-run
+		// exits; only the reinvoke cycle counters are refunded (#1812).
+		return classifyDidNotRun(err), err
 	}
 	if err != nil {
 		e.logf(item.Number, "warn", "claude comment review exited with error but stage completed (marker found) — proceeding: %v\n", err)
@@ -536,7 +554,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		e.checkCommentBreaker(item, "")
 	}
 
-	return nil
+	return "", nil
 }
 
 // reworkingLabelPrefix is the prefix of every fabrik:reworking:<Stage> marker

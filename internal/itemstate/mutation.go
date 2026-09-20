@@ -513,9 +513,11 @@ func (m ReviewCycleIncremented) itemKey() string { return itemKeyFor(m.Repo, m.N
 // dispatched while the gate is still blocked/timed-out — a reinvoke
 // dispatched with the gate already clear (the #1045 junk-overview shape)
 // never increments this counter. Unlike ReviewCycleIncremented, this counter
-// has no decrement counterpart by design: a reinvoke that turns out to be a
+// is not refunded for a no-op on HEAD: a reinvoke that turns out to be a
 // no-op on HEAD while the gate was blocking is still genuine evidence the
-// loop failed to converge, not an attempt that "didn't count."
+// loop failed to converge, not an attempt that "didn't count." The one
+// exception is a reinvoke that provably never ran at all (#1812, see
+// ReviewBlockedCycleDecremented).
 type ReviewBlockedCycleIncremented struct {
 	Repo      string
 	Number    int
@@ -543,6 +545,51 @@ type ReviewCycleDecremented struct {
 func (ReviewCycleDecremented) isMutation()       {}
 func (m ReviewCycleDecremented) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
+// ReviewBlockedCycleDecremented compensates a prior ReviewBlockedCycleIncremented
+// when the reinvoke it accompanied provably never ran (#1812) — a usage-limit,
+// api_error or apiKeyHelper exit. Unlike ReviewCycleDecremented's #1045
+// no-op-on-HEAD refund, this is applied ONLY for did-not-run exits, so
+// ADR-1518's guarantee that a genuinely no-op blocked cycle is never refunded
+// is preserved. Floored at 0 by the store.
+type ReviewBlockedCycleDecremented struct {
+	Repo      string
+	Number    int
+	StageName string
+}
+
+func (ReviewBlockedCycleDecremented) isMutation()       {}
+func (m ReviewBlockedCycleDecremented) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// DidNotRunReinvokeRecorded increments the never-refunded tally of reinvokes
+// (review, CI-fix, rebase) whose Claude invocation provably never ran (#1812).
+// It exists purely as evidence for the cycle-limit pause messages: once a
+// did-not-run cycle has been refunded, the counters no longer show it, so this
+// tally is the only way to tell an operator that a burst of cycles was an
+// outage rather than a reviewer that never converged. Cleared by
+// EngineCyclesCleared.
+type DidNotRunReinvokeRecorded struct {
+	Repo      string
+	Number    int
+	StageName string
+}
+
+func (DidNotRunReinvokeRecorded) isMutation()       {}
+func (m DidNotRunReinvokeRecorded) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// DidNotRunReinvokesReset zeroes the DidNotRunReinvokes tally for a stage (#1812).
+// Applied whenever a reinvoke stays charged (it ran, or is ambiguous), so the
+// tally only ever describes the streak of never-ran reinvokes since the last
+// genuine cycle — never an outage from days earlier. A no-op (no Change) when
+// the tally is already zero.
+type DidNotRunReinvokesReset struct {
+	Repo      string
+	Number    int
+	StageName string
+}
+
+func (DidNotRunReinvokesReset) isMutation()       {}
+func (m DidNotRunReinvokesReset) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
 // CIFixCycleIncremented increments the CI-fix cycle counter for a stage.
 type CIFixCycleIncremented struct {
 	Repo      string
@@ -553,6 +600,17 @@ type CIFixCycleIncremented struct {
 func (CIFixCycleIncremented) isMutation()       {}
 func (m CIFixCycleIncremented) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
+// CIFixCycleDecremented compensates a prior CIFixCycleIncremented when the
+// CI-fix reinvoke provably never ran (#1812). Floored at 0 by the store.
+type CIFixCycleDecremented struct {
+	Repo      string
+	Number    int
+	StageName string
+}
+
+func (CIFixCycleDecremented) isMutation()       {}
+func (m CIFixCycleDecremented) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
 // RebaseCycleIncremented increments the rebase cycle counter for a stage.
 type RebaseCycleIncremented struct {
 	Repo      string
@@ -562,6 +620,17 @@ type RebaseCycleIncremented struct {
 
 func (RebaseCycleIncremented) isMutation()       {}
 func (m RebaseCycleIncremented) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// RebaseCycleDecremented compensates a prior RebaseCycleIncremented when the
+// rebase reinvoke provably never ran (#1812). Floored at 0 by the store.
+type RebaseCycleDecremented struct {
+	Repo      string
+	Number    int
+	StageName string
+}
+
+func (RebaseCycleDecremented) isMutation()       {}
+func (m RebaseCycleDecremented) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // EnqueueCycleIncremented increments the merge-queue re-enqueue cycle counter for a
 // stage (ADR-058 D4 FR-3). Applied on each fresh enqueue trip in the convergence
@@ -857,7 +926,7 @@ func (EngineUnpaused) isMutation()       {}
 func (m EngineUnpaused) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // EngineCyclesCleared zeroes ReviewCycles, ReviewBlockedCycles, CIFixCycles,
-// RebaseCycles, EnqueueCycles, and NoOpCommentCycles for a stage. Called by
+// RebaseCycles, EnqueueCycles, NoOpCommentCycles, and DidNotRunReinvokes for a stage. Called by
 // clearFailedStage on unpause/success to prevent stale counters from
 // triggering premature max-cycle pauses on the next run.
 type EngineCyclesCleared struct {

@@ -483,14 +483,53 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		item.StageState.ReviewCycles[v.StageName]--
 		return StageStateChanged
 
+	case ReviewBlockedCycleDecremented:
+		// Zero check before ensureStageStateMaps — see ReviewCycleDecremented.
+		if item.StageState.ReviewBlockedCycles[v.StageName] == 0 {
+			return 0 // no-op: already floored at zero
+		}
+		ensureStageStateMaps(item)
+		item.StageState.ReviewBlockedCycles[v.StageName]--
+		return StageStateChanged
+
+	case DidNotRunReinvokeRecorded:
+		ensureStageStateMaps(item)
+		item.StageState.DidNotRunReinvokes[v.StageName]++
+		return StageStateChanged
+
+	case DidNotRunReinvokesReset:
+		if item.StageState.DidNotRunReinvokes[v.StageName] == 0 {
+			return 0 // no-op: nothing to reset
+		}
+		delete(item.StageState.DidNotRunReinvokes, v.StageName)
+		return StageStateChanged
+
 	case CIFixCycleIncremented:
 		ensureStageStateMaps(item)
 		item.StageState.CIFixCycles[v.StageName]++
 		return StageStateChanged
 
+	case CIFixCycleDecremented:
+		// Zero check before ensureStageStateMaps — see ReviewCycleDecremented.
+		if item.StageState.CIFixCycles[v.StageName] == 0 {
+			return 0 // no-op: already floored at zero
+		}
+		ensureStageStateMaps(item)
+		item.StageState.CIFixCycles[v.StageName]--
+		return StageStateChanged
+
 	case RebaseCycleIncremented:
 		ensureStageStateMaps(item)
 		item.StageState.RebaseCycles[v.StageName]++
+		return StageStateChanged
+
+	case RebaseCycleDecremented:
+		// Zero check before ensureStageStateMaps — see ReviewCycleDecremented.
+		if item.StageState.RebaseCycles[v.StageName] == 0 {
+			return 0 // no-op: already floored at zero
+		}
+		ensureStageStateMaps(item)
+		item.StageState.RebaseCycles[v.StageName]--
 		return StageStateChanged
 
 	case EnqueueCycleIncremented:
@@ -521,6 +560,7 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		delete(item.StageState.RebaseCycles, v.StageName)
 		delete(item.StageState.EnqueueCycles, v.StageName)
 		delete(item.StageState.NoOpCommentCycles, v.StageName)
+		delete(item.StageState.DidNotRunReinvokes, v.StageName)
 		return StageStateChanged
 
 	case LinkageHealAttempted:
@@ -1280,6 +1320,9 @@ func ensureStageStateMaps(item *ItemState) {
 	}
 	if ss.NoOpCommentCycles == nil {
 		ss.NoOpCommentCycles = make(map[string]int)
+	}
+	if ss.DidNotRunReinvokes == nil {
+		ss.DidNotRunReinvokes = make(map[string]int)
 	}
 	if ss.ProcessedComments == nil {
 		ss.ProcessedComments = make(map[string]time.Time)

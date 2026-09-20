@@ -543,6 +543,14 @@ func (e *Engine) dispatchCIFixReinvoke(ctx context.Context, board *gh.ProjectBoa
 
 	e.dispatchReinvoke(ctx, board, item, stage, reinvokeOpts{
 		tag: "ci-fix-reinvoke",
+		// #1812: refunded by dispatchReinvoke when the invocation provably never
+		// ran; the after hook (and its no-op-SHA debounce) is skipped then.
+		cycle: cycleCharge{
+			label: "ci-fix",
+			refund: func(repo string, number int, stageName string) []itemstate.Mutation {
+				return []itemstate.Mutation{itemstate.CIFixCycleDecremented{Repo: repo, Number: number, StageName: stageName}}
+			},
+		},
 		build: func(workDir string) []gh.Comment {
 			// Snapshot HEAD before reinvoking so a no-op reinvoke (nothing to
 			// push because the fix is already in) can be recorded and debounced
@@ -661,13 +669,19 @@ func (e *Engine) pauseForCIFixCycleLimit(board *gh.ProjectBoard, item gh.Project
 	}
 	e.logf(item.Number, "ci-cycles", "CI-fix cycle limit %d reached — pausing for human intervention\n", maxCycles)
 
+	diagnosis := "CI checks are still failing after repeated fix attempts. "
+	if note, dominant := e.didNotRunPauseNote(repoStr, item.Number, stage.Name, cycleCount); dominant {
+		diagnosis = note + " "
+	} else if note != "" {
+		diagnosis = note + "\n\n" + diagnosis
+	}
 	msg := fmt.Sprintf(
 		"🏭 **Fabrik — CI fix cycle limit reached**\n\nThe stage **%s** has been re-invoked to fix CI failures %d time(s), "+
 			"which has reached the maximum configured limit (`FABRIK_MAX_CI_FIX_CYCLES=%d`).\n\n"+
-			"CI checks are still failing after repeated fix attempts. "+
+			"%s"+
 			"Fabrik has paused this issue for human review. Once the CI situation is resolved, "+
 			"remove the `fabrik:paused` label to resume.",
-		stage.Name, cycleCount, maxCycles,
+		stage.Name, cycleCount, maxCycles, diagnosis,
 	)
 	e.pauseIssue(item, msg, pauseOpts{
 		awaitingInput: true,
