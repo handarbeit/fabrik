@@ -70,13 +70,20 @@ reinvoke path was the outlier.
    disjoint, so they cannot double-refund; store flooring is a second line of
    defence.
 
-6. **The pause message uses a never-refunded tally, not timestamps.**
-   Refunded cycles vanish from the counters, so `DidNotRunReinvokes` (cleared
-   by `EngineCyclesCleared`) is the only remaining evidence. The store keeps no
-   per-cycle timestamps; elapsed time appears only as guidance text. The
+6. **The pause message uses a streak tally, not timestamps.**
+   Refunded cycles vanish from the counters, so `DidNotRunReinvokes` is the only
+   remaining evidence. It is cleared by `EngineCyclesCleared` and **reset by
+   `DidNotRunReinvokesReset` whenever a reinvoke stays charged** (ran, or
+   ambiguous), so it is the streak of never-ran reinvokes since the last genuine
+   cycle. Without the reset (review finding on this PR), five 429s spread over
+   days plus five real non-converging cycles would satisfy `tally >= cycleCount`
+   and blame Claude availability for a reviewer that never converges. The store
+   keeps no per-cycle timestamps; elapsed time appears only as guidance text. The
    dedup fragments (`reviewCyclePauseFragment` etc.) are unchanged so #1460's
    `hasPauseComment` still matches, and a zero tally leaves the message
-   byte-identical.
+   byte-identical. Because the tally is per stage, not per counter, a real
+   reinvoke of any of the three kinds ends the streak — deliberately the
+   conservative direction (reverts to the original wording).
 
 ## Consequences
 
@@ -88,7 +95,7 @@ reinvoke path was the outlier.
   out of scope; detecting the 429 upstream (sibling issue) is what prevents
   the storm. Both are wanted.
 - The tally is stage-scoped, not per-counter, so the review pause message may
-  cite did-not-run reinvokes that were rebase or CI-fix ones. The wording says
+  cite a streak that included rebase or CI-fix reinvokes. The wording says
   "re-invocations for this stage" and is guidance, not a claim about the exact
   counter.
 - Each refund is logged (`invocation did not run (<kind>) — refunding <counter>

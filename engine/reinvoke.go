@@ -208,8 +208,15 @@ func (e *Engine) dispatchReinvoke(ctx context.Context, board *gh.ProjectBoard, i
 		// re-enable, #1045 no-op refund) is meaningless when nothing ran.
 		if kind != "" {
 			e.refundDidNotRunCycle(item, itemRepo, stage, opts.tag, kind, opts.cycle)
-		} else if opts.after != nil {
-			opts.after(workDir, err)
+		} else {
+			// The reinvoke stays charged (it ran, or is ambiguous): a genuine
+			// cycle ends any streak of never-ran reinvokes, so the tally the
+			// pause messages read never blames an old outage for a loop
+			// that is really failing to converge.
+			e.store.Apply(itemstate.DidNotRunReinvokesReset{Repo: itemRepo, Number: item.Number, StageName: stage.Name})
+			if opts.after != nil {
+				opts.after(workDir, err)
+			}
 		}
 
 		if err != nil {
@@ -225,11 +232,13 @@ func (e *Engine) dispatchReinvoke(ctx context.Context, board *gh.ProjectBoard, i
 // evidence (#1812, R7). Refunded did-not-run cycles no longer show in the cycle
 // counters, so the never-refunded DidNotRunReinvokes tally is the only signal
 // that the outage — not a non-converging reviewer or CI — is what an operator
-// is looking at. Returns dominant when the tally is at least cycleCount (the
-// invocations that reached the limit were largely accompanied by ones that never
-// ran), in which case callers replace their "reviewer keeps requesting changes"
-// style diagnosis with note; a smaller nonzero tally yields an addendum only;
-// a zero tally yields "" so the message is byte-identical to before.
+// is looking at. The tally is reset by every reinvoke that stays charged, so it
+// is the streak of never-ran reinvokes since the last genuine cycle — an old
+// outage cannot be blamed for a loop that is really failing to converge.
+// Returns dominant when that streak is at least cycleCount, in which case
+// callers replace their "reviewer keeps requesting changes" style diagnosis
+// with note; a smaller nonzero streak yields an addendum only; a zero tally
+// yields "" so the message is byte-identical to before.
 func (e *Engine) didNotRunPauseNote(repoStr string, number int, stageName string, cycleCount int) (note string, dominant bool) {
 	snap, err := e.store.Get(repoStr, number)
 	if err != nil {

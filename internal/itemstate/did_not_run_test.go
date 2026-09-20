@@ -96,3 +96,26 @@ func TestApplyDidNotRunReinvokeRecordedAndCleared(t *testing.T) {
 		t.Errorf("DidNotRunReinvokes(Validate) = %d, want 1 (untouched)", got)
 	}
 }
+
+func TestApplyDidNotRunReinvokesReset(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	// Zero tally: no-op, no Change (I6).
+	applyExpect(t, s, DidNotRunReinvokesReset{Repo: testRepo, Number: 1, StageName: "Review"}, 0)
+
+	applyExpect(t, s, DidNotRunReinvokeRecorded{Repo: testRepo, Number: 1, StageName: "Review"}, StageStateChanged)
+	applyExpect(t, s, DidNotRunReinvokeRecorded{Repo: testRepo, Number: 1, StageName: "Validate"}, StageStateChanged)
+	applyExpect(t, s, DidNotRunReinvokesReset{Repo: testRepo, Number: 1, StageName: "Review"}, StageStateChanged)
+	// Idempotent.
+	applyExpect(t, s, DidNotRunReinvokesReset{Repo: testRepo, Number: 1, StageName: "Review"}, 0)
+
+	snap, err := s.Get(testRepo, 1)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got := snap.DidNotRunReinvokes("Review"); got != 0 {
+		t.Errorf("DidNotRunReinvokes(Review) = %d, want 0", got)
+	}
+	if got := snap.DidNotRunReinvokes("Validate"); got != 1 {
+		t.Errorf("DidNotRunReinvokes(Validate) = %d, want 1 (untouched)", got)
+	}
+}

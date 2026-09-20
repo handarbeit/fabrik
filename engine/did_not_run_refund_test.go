@@ -193,6 +193,50 @@ func TestReviewReinvoke_OtherErrors_StayCharged(t *testing.T) {
 	}
 }
 
+// A genuine (charged) reinvoke ends any streak of never-ran reinvokes: an old
+// outage's tally must not survive into a later real non-converging loop and
+// flip the cycle-limit pause message to blame Claude availability.
+func TestReviewReinvoke_ChargedCycleResetsDidNotRunTally(t *testing.T) {
+	for name, cerr := range map[string]error{
+		"ran, errored": errors.New("crashed mid-run"),
+		"ran, clean":   nil,
+		"turn limit":   &claudeTurnLimitError{TerminalReason: "max_turns", NumTurns: 50},
+		"tools denied": &claudeToolsDeniedError{ToolNames: []string{"Bash"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var calls int
+			eng, _, stgs := newDidNotRunReviewEngine(t, cerr, &calls)
+			for i := 0; i < 5; i++ { // five 429s from an earlier outage
+				eng.store.Apply(itemstate.DidNotRunReinvokeRecorded{Repo: "owner/repo", Number: 31, StageName: "Implement"})
+			}
+			dispatchReviewRound(t, eng, stgs[0], 3250)
+			snap, _ := eng.store.Get("owner/repo", 31)
+			if got := snap.DidNotRunReinvokes("Implement"); got != 0 {
+				t.Errorf("DidNotRunReinvokes = %d, want 0 (a charged reinvoke ends the streak)", got)
+			}
+			if note, dom := eng.didNotRunPauseNote("owner/repo", 31, "Implement", 5); note != "" || dom {
+				t.Errorf("pause note after a genuine cycle = (%q, %v), want empty", note, dom)
+			}
+		})
+	}
+}
+
+// A did-not-run exit must not reset the streak it extends.
+func TestReviewReinvoke_DidNotRunKeepsTally(t *testing.T) {
+	var calls int
+	eng, _, stgs := newDidNotRunReviewEngine(t, &claudeAPIErrorExit{TerminalReason: "api_error", NumTurns: 1}, &calls)
+	eng.cfg.MaxNoOpCommentCycles = 100
+	eng.cfg.MaxCommentCyclesPerWindow = 100
+	for i := 0; i < 2; i++ {
+		eng.store.Apply(itemstate.DidNotRunReinvokeRecorded{Repo: "owner/repo", Number: 31, StageName: "Implement"})
+	}
+	dispatchReviewRound(t, eng, stgs[0], 3260)
+	snap, _ := eng.store.Get("owner/repo", 31)
+	if got := snap.DidNotRunReinvokes("Implement"); got != 3 {
+		t.Errorf("DidNotRunReinvokes = %d, want 3", got)
+	}
+}
+
 // A did-not-run refund and the #1045 HEAD-unchanged refund are disjoint: a clean
 // no-op run nets to zero exactly once, and records no did-not-run tally.
 func TestReviewReinvoke_CleanNoOp_NoDidNotRunTally(t *testing.T) {

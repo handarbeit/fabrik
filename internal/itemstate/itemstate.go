@@ -333,7 +333,9 @@ type StageState struct {
 	// apiKeyHelper exit (#1812). The cycle counters are refunded for these, so
 	// this never-refunded tally is the only remaining evidence for the
 	// cycle-limit pause messages to say "these invocations never ran". Cleared
-	// by EngineCyclesCleared.
+	// by EngineCyclesCleared, and reset by DidNotRunReinvokesReset whenever a
+	// reinvoke stays charged, so it only describes the streak since the last
+	// genuine cycle.
 	DidNotRunReinvokes map[string]int
 	// ProcessedComments maps comment ID to the time Fabrik finished processing it.
 	ProcessedComments map[string]time.Time

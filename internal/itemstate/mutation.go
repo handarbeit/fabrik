@@ -576,6 +576,20 @@ type DidNotRunReinvokeRecorded struct {
 func (DidNotRunReinvokeRecorded) isMutation()       {}
 func (m DidNotRunReinvokeRecorded) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
+// DidNotRunReinvokesReset zeroes the DidNotRunReinvokes tally for a stage (#1812).
+// Applied whenever a reinvoke stays charged (it ran, or is ambiguous), so the
+// tally only ever describes the streak of never-ran reinvokes since the last
+// genuine cycle — never an outage from days earlier. A no-op (no Change) when
+// the tally is already zero.
+type DidNotRunReinvokesReset struct {
+	Repo      string
+	Number    int
+	StageName string
+}
+
+func (DidNotRunReinvokesReset) isMutation()       {}
+func (m DidNotRunReinvokesReset) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
 // CIFixCycleIncremented increments the CI-fix cycle counter for a stage.
 type CIFixCycleIncremented struct {
 	Repo      string

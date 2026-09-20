@@ -497,6 +497,13 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		item.StageState.DidNotRunReinvokes[v.StageName]++
 		return StageStateChanged
 
+	case DidNotRunReinvokesReset:
+		if item.StageState.DidNotRunReinvokes[v.StageName] == 0 {
+			return 0 // no-op: nothing to reset
+		}
+		delete(item.StageState.DidNotRunReinvokes, v.StageName)
+		return StageStateChanged
+
 	case CIFixCycleIncremented:
 		ensureStageStateMaps(item)
 		item.StageState.CIFixCycles[v.StageName]++
