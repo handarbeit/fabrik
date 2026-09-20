@@ -113,11 +113,12 @@ func ReadInstalledVersion(pluginDir string) (string, error) {
 }
 
 // CheckPluginState performs a three-way comparison (embedded vs installedVer vs
-// disk) and determines whether the operator has local customizations or whether
-// an auto-refresh is needed. It delegates to checkPluginState with the global
+// disk) and determines whether the operator has local customizations, whether
+// an auto-refresh is needed, and whether the installed plugin is stale relative
+// to the embedded one. It delegates to checkPluginState with the global
 // KnownEmbeddedVersions list. isDevBuild identifies whether the calling binary
 // is a dev build (see checkPluginState for why this matters).
-func CheckPluginState(pluginDir string, isDevBuild bool) (customWorkflow, upgradeNeeded bool, err error) {
+func CheckPluginState(pluginDir string, isDevBuild bool) (customWorkflow, upgradeNeeded, stale bool, err error) {
 	return checkPluginState(pluginDir, KnownEmbeddedVersions, isDevBuild)
 }
 
@@ -152,45 +153,66 @@ func CheckPluginState(pluginDir string, isDevBuild bool) (customWorkflow, upgrad
 //     return (true,false) — unchanged from pre-#1297 behavior, preserving the
 //     protection that motivated KnownEmbeddedVersions in the first place (#820)
 //
+// customWorkflow and upgradeNeeded together govern whether an auto-refresh is
+// safe to perform — that decision tree is unchanged by stale's addition below.
+//
+// stale is a third, independent fact — computed once as
+// installedVer != "" && installedVer != embeddedVer — and returned unchanged
+// from every branch above, including the customWorkflow branches. It answers a
+// different question than customWorkflow/upgradeNeeded ("is auto-refresh
+// safe?"): "is the installed content behind what's embedded in this binary?",
+// regardless of whether the disk has also been customized since. A customised
+// plugin can be stale, up to date, or (if installedVer=="") indeterminate — in
+// the migration path stale is always false, since there is no installedVer to
+// compare against embeddedVer. stale must never influence customWorkflow or
+// upgradeNeeded — it is purely an additional reporting signal for callers.
+//
 // Return values:
 //
 //	customWorkflow=true  — disk differs from installedVer; skip auto-refresh.
 //	upgradeNeeded=true   — disk matches installedVer but embedded differs; auto-refresh safe.
-//	both false           — no action needed.
-func checkPluginState(pluginDir string, knownVersions []string, isDevBuild bool) (customWorkflow, upgradeNeeded bool, err error) {
+//	stale=true           — installedVer differs from embeddedVer (independent of customWorkflow).
+//	all false            — no action needed.
+func checkPluginState(pluginDir string, knownVersions []string, isDevBuild bool) (customWorkflow, upgradeNeeded, stale bool, err error) {
 	installedVer, err := ReadInstalledVersion(pluginDir)
 	if err != nil {
-		return false, false, err
+		return false, false, false, err
 	}
 
 	diskVer, err := ComputeDiskVersion(pluginDir)
 	if err != nil {
-		return false, false, err
+		return false, false, false, err
 	}
 
 	embeddedVer := ComputeEmbeddedVersion()
+	stale = installedVer != "" && installedVer != embeddedVer
 
 	if installedVer == "" {
 		// Migration path: .installed-version absent (pre-v0.0.64 or first run).
+		// stale is always false here — there is no installedVer to compare.
 		if diskVer == "" {
 			// Empty plugin dir — not a customization, nothing to seed.
-			return false, false, nil
+			return false, false, false, nil
 		}
 		if diskVer == embeddedVer {
 			// Pristine install: disk matches embedded. Seed normally.
 			if wErr := WriteVersionHash(pluginDir, diskVer); wErr != nil {
-				return false, false, fmt.Errorf("writing installed version (migration): %w", wErr)
+				return false, false, false, fmt.Errorf("writing installed version (migration): %w", wErr)
 			}
-			return false, false, nil
+			return false, false, false, nil
 		}
 		// Disk differs from embedded: operator has pre-existing customizations.
 		// Do NOT seed installedVer — doing so would corrupt it with a custom hash.
-		return true, false, nil
+		return true, false, false, nil
 	}
 
 	if diskVer != installedVer {
 		// Operator has customized the plugin directory since last install.
-		return true, false, nil
+		// stale (installedVer vs embeddedVer) was already computed above and is
+		// reported here independently of the customization — this is the fix for
+		// #1787: staleness is no longer silently skipped once customization is
+		// detected.
+		return true, false, stale, nil
 	}
 
 	if embeddedVer != installedVer {
@@ -209,14 +231,17 @@ func checkPluginState(pluginDir string, knownVersions []string, isDevBuild bool)
 		// would also be trusted if first checked by a dev build. Closing that gap
 		// needs persisted provenance, rejected elsewhere for self-heal reasons —
 		// see ADR 1297's "Acknowledged trade-off".
+		//
+		// stale is true in every sub-branch here by construction (we're inside
+		// embeddedVer != installedVer).
 		if isKnownEmbedded(installedVer, knownVersions) || isDevBuild {
-			return false, true, nil
+			return false, true, stale, nil
 		}
-		return true, false, nil
+		return true, false, stale, nil
 	}
 
-	// No-op: everything matches.
-	return false, false, nil
+	// No-op: everything matches (stale is false here since installedVer == embeddedVer).
+	return false, false, stale, nil
 }
 
 // isKnownEmbedded reports whether hash appears in the known embedded versions list.

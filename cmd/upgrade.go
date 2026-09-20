@@ -3,6 +3,7 @@ package cmd
 import (
 	"bufio"
 	"crypto/sha256"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -99,17 +100,26 @@ func runUpgrade(args []string) error {
 		return nil
 	}
 
-	// Default path: check three-way state before refreshing.
-	customWorkflow, _, stateErr := fabrikplugin.CheckPluginState(".fabrik/plugin", strings.HasPrefix(Version, "dev"))
+	// Default path: check three-way state before refreshing. Per #1787 R5, the
+	// refusal below must not become more permissive because of stale — it
+	// still refuses unconditionally whenever customWorkflow is true, exactly
+	// as before this issue. stale is purely additive to the message.
+	customWorkflow, _, stale, stateErr := fabrikplugin.CheckPluginState(".fabrik/plugin", strings.HasPrefix(Version, "dev"))
 	if stateErr != nil {
 		return fmt.Errorf("checking plugin state: %w", stateErr)
 	}
 	if customWorkflow {
-		return fmt.Errorf("fabrik: local customizations detected in .fabrik/plugin/ — refusing to overwrite.\n" +
+		msg := "fabrik: local customizations detected in .fabrik/plugin/ — refusing to overwrite.\n" +
 			"  Options:\n" +
 			"    fabrik upgrade --force       Overwrite customizations (destructive)\n" +
 			"    fabrik upgrade --reconcile   Print a Claude Code reconciliation prompt\n" +
-			"    (or use the TUI 'u' key for an interactive dialog)")
+			"    (or use the TUI 'u' key for an interactive dialog)"
+		if stale {
+			if diffing, diffErr := diffingPluginFiles(".fabrik/plugin"); diffErr == nil {
+				msg += "\n" + strings.TrimSpace(stalenessNote(".fabrik/plugin", len(diffing)))
+			}
+		}
+		return errors.New(msg)
 	}
 
 	wrote, err := fabrikplugin.RefreshPlugin()
@@ -144,15 +154,21 @@ func checkPluginSkillsWithReader(pluginDir string, isTTY bool, r io.Reader) erro
 
 	// Three-way check: detect operator customizations before refreshing.
 	// upgradeNeeded=true only when disk==installed and embedded differs (safe to refresh).
-	// Migration path (installedVer absent) returns (false,false): do nothing until next cycle.
-	customWorkflow, upgradeNeeded, stateErr := fabrikplugin.CheckPluginState(pluginDir, strings.HasPrefix(Version, "dev"))
+	// Migration path (installedVer absent) returns (false,false,false): do nothing until next cycle.
+	// stale (#1787) is independent of customWorkflow/upgradeNeeded — it is purely
+	// additive reporting and never changes which branch below is taken (R5).
+	customWorkflow, upgradeNeeded, stale, stateErr := fabrikplugin.CheckPluginState(pluginDir, strings.HasPrefix(Version, "dev"))
 	if stateErr != nil {
 		return fmt.Errorf("checking plugin state: %w", stateErr)
 	}
 
 	if !isTTY {
 		if customWorkflow {
-			fmt.Fprintf(os.Stderr, "[upgrade] warning: plugin skills have local customizations — skipping auto-refresh; run 'fabrik upgrade --force' to overwrite\n")
+			msg := "[upgrade] warning: plugin skills have local customizations — skipping auto-refresh; run 'fabrik upgrade --force' to overwrite, or 'fabrik upgrade --reconcile' for a reconciliation prompt"
+			if stale {
+				msg += stalenessNote(pluginDir, len(diffing))
+			}
+			fmt.Fprintf(os.Stderr, "%s\n", msg)
 			return nil
 		}
 		if !upgradeNeeded {
@@ -186,6 +202,9 @@ func checkPluginSkillsWithReader(pluginDir string, isTTY bool, r io.Reader) erro
 	if customWorkflow {
 		fmt.Printf("Local customizations detected in %s.\n", pluginDir)
 		fmt.Printf("Use 'fabrik upgrade --force' to overwrite, or 'fabrik upgrade --reconcile' for a reconciliation prompt.\n")
+		if stale {
+			fmt.Printf("%s\n", strings.TrimSpace(stalenessNote(pluginDir, len(diffing))))
+		}
 		return nil
 	}
 	if !upgradeNeeded {
@@ -220,6 +239,41 @@ func checkPluginSkillsWithReader(pluginDir string, isTTY bool, r io.Reader) erro
 	}
 	fmt.Printf("fabrik: upgraded %d plugin file(s)\n", len(diffing))
 	return nil
+}
+
+// stalenessOrdinalSuffix returns a parenthetical "(N known release(s) behind)"
+// suffix when pluginDir's installed fingerprint is found in
+// plugin.KnownEmbeddedVersions, or "" when it isn't recognized — a dev build's
+// own fingerprint, a baseline predating KnownEmbeddedVersions tracking, or the
+// installed and embedded fingerprints being equal. Per #1787 R2, the ordinal
+// is a bonus signal: omit it rather than fabricate one when it can't be
+// computed.
+func stalenessOrdinalSuffix(pluginDir string) string {
+	installedVer, err := fabrikplugin.ReadInstalledVersion(pluginDir)
+	if err != nil || installedVer == "" {
+		return ""
+	}
+	n, ok := fabrikplugin.VersionsBehind(installedVer, fabrikplugin.ComputeEmbeddedVersion())
+	if !ok || n == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" (%d known release(s) behind)", n)
+}
+
+// stalenessNote builds the additive "also stale" clause appended to a
+// customization warning/refusal message when both facts are true (#1787 R1).
+// staleCount is the number of plugin files differing from the currently
+// embedded plugin — the same disk-vs-embedded comparison basis already used
+// for the customization warning's own file list (R2's comparison-basis note:
+// the two signals' file lists legitimately overlap when both fire, since
+// .installed-version stores only a single aggregate fingerprint, not a
+// per-file baseline). Returns "" when staleCount is 0.
+func stalenessNote(pluginDir string, staleCount int) string {
+	if staleCount == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" Also stale relative to the embedded plugin: %d file(s) differ%s. Run 'fabrik upgrade --reconcile' to address both.",
+		staleCount, stalenessOrdinalSuffix(pluginDir))
 }
 
 // diffingPluginFiles walks the embedded FabrikPlugin FS and returns the relative
