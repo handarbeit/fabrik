@@ -115,7 +115,7 @@ func TestInterpretClaudeResult_APIErrorNon429_StaysAPIErrorExit(t *testing.T) {
 // guards the parse-drop failure mode: a wrong-typed api_error_status must not
 // erase the rest of the result object.
 func TestInterpretClaudeResult_WrongTypedStatus_BlockingLimitStillClassifies(t *testing.T) {
-	raw := `{"result":"","terminal_reason":"blocking_limit","is_error":true,"num_turns":0,"total_cost_usd":0,"api_error_status":"429"}`
+	raw := `{"result":"","session_id":"sid-1","terminal_reason":"blocking_limit","is_error":true,"num_turns":0,"total_cost_usd":0,"api_error_status":"429"}`
 	_, err := interpretRaw(t, raw)
 	var limitErr *claudeUsageLimitError
 	if !errors.As(err, &limitErr) {
