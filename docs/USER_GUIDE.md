@@ -1843,6 +1843,9 @@ When the configured user posts a new comment:
 3. The comment processing run can output `FABRIK_STAGE_COMPLETE` to finish the stage
    directly, without needing an additional stage invocation
 
+Only a comment posted **after** the pause resumes it: a comment that was already on the issue when Fabrik paused it does not (otherwise one
+unprocessable comment would lift the pause on every poll). If Fabrik cannot determine when the pause began, it resumes rather than leave the issue stuck.
+
 This is the intended mechanism for Q&A in stages like Specify — Claude asks a question,
 the configured user answers it in a comment, and the stage resumes automatically.
 
