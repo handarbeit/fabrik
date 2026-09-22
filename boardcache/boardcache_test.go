@@ -96,6 +96,10 @@ func (m *mockClient) FetchCombinedStatus(owner, repo, ref string) ([]gh.CommitSt
 	return nil, nil
 }
 
+func (m *mockClient) FetchCheckSuites(owner, repo, sha string) ([]gh.CheckSuite, error) {
+	return nil, nil
+}
+
 func (m *mockClient) FetchLinkedPR(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
 	m.fetchLinkedPRCount++
 	return m.linkedPRResult, nil

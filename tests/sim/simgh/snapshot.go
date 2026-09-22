@@ -70,6 +70,7 @@ type Snapshot struct {
 
 	nextCommentDatabaseID int
 	nextCheckRunID        int64
+	nextCheckSuiteID      int64
 	seededCheckRunIDs     map[int64]bool
 
 	restRate    rateBudget
@@ -129,6 +130,7 @@ func (s *Sim) Snapshot(stagingDir string) (*Snapshot, error) {
 		projects:              make(map[string]*projectState, len(s.projects)),
 		nextCommentDatabaseID: s.nextCommentDatabaseID,
 		nextCheckRunID:        s.nextCheckRunID,
+		nextCheckSuiteID:      s.nextCheckSuiteID,
 		seededCheckRunIDs:     make(map[int64]bool, len(s.seededCheckRunIDs)),
 		restRate:              s.restRate,
 		graphqlRate:           s.graphqlRate,
@@ -191,6 +193,7 @@ func Restore(snap *Snapshot, baseDir string, opts ...Option) (*Sim, error) {
 
 	s.nextCommentDatabaseID = snap.nextCommentDatabaseID
 	s.nextCheckRunID = snap.nextCheckRunID
+	s.nextCheckSuiteID = snap.nextCheckSuiteID
 	s.restRate = snap.restRate
 	s.graphqlRate = snap.graphqlRate
 	s.seedErr = snap.seedErr
@@ -270,6 +273,7 @@ func cloneRepoState(r *repoState) *repoState {
 		issues:            make(map[int]*issueRecord, len(r.issues)),
 		prs:               make(map[int]*prRecord, len(r.prs)),
 		checkRuns:         make(map[string][]gh.CheckRun, len(r.checkRuns)),
+		checkSuites:       make(map[string][]gh.CheckSuite, len(r.checkSuites)),
 		commitStatuses:    make(map[string][]gh.CommitStatus, len(r.commitStatuses)),
 		ciSchedule:        r.ciSchedule.clone(),
 		requiredContexts:  make(map[string][]string, len(r.requiredContexts)),
@@ -288,6 +292,9 @@ func cloneRepoState(r *repoState) *repoState {
 	}
 	for k, v := range r.checkRuns {
 		out.checkRuns[k] = append([]gh.CheckRun(nil), v...)
+	}
+	for k, v := range r.checkSuites {
+		out.checkSuites[k] = append([]gh.CheckSuite(nil), v...)
 	}
 	for k, v := range r.commitStatuses {
 		out.commitStatuses[k] = append([]gh.CommitStatus(nil), v...)
@@ -522,6 +529,7 @@ var snapshotFieldRegistry = map[string]map[string]fieldDisposition{
 		"defaultProject":        fieldCopied,
 		"nextCommentDatabaseID": fieldCopied,
 		"nextCheckRunID":        fieldCopied,
+		"nextCheckSuiteID":      fieldCopied,
 		"seededCheckRunIDs":     fieldCopied,
 		"restRate":              fieldCopied,
 		"graphqlRate":           fieldCopied,
@@ -538,6 +546,7 @@ var snapshotFieldRegistry = map[string]map[string]fieldDisposition{
 		"issues":            fieldCopied,
 		"prs":               fieldCopied,
 		"checkRuns":         fieldCopied,
+		"checkSuites":       fieldCopied,
 		"commitStatuses":    fieldCopied,
 		"ciSchedule":        fieldCopied,
 		"requiredContexts":  fieldCopied,

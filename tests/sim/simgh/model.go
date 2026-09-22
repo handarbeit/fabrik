@@ -85,6 +85,15 @@ type repoState struct {
 	checkRuns      map[string][]gh.CheckRun
 	commitStatuses map[string][]gh.CommitStatus
 
+	// checkSuites is the per-SHA check-suite roll-up (#1822), a third
+	// collection kept separate from checkRuns because the whole point of the
+	// signal is that it can disagree with them: a suite can be in_progress while
+	// every check run that exists is green, because a job still queued for a
+	// runner has no check run yet. Nothing here feeds deriveMergeableState, which
+	// stays check-run-derived so a green prefix still reads "clean" exactly as
+	// GitHub reports it while a job is unscheduled.
+	checkSuites map[string][]gh.CheckSuite
+
 	// ciSchedule holds pending clock-driven mutations to checkRuns and
 	// commitStatuses: "this SHA goes red at T". Applied lazily by drainCI on
 	// every read of either collection, so a scenario expresses a CI transition

@@ -3340,6 +3340,14 @@ func (e *Engine) classifyLandingCI(owner, repo, mergeableState, headSHA string, 
 			rcStatus, _, _, rcFailed := e.classifyRequiredContexts(0, owner, repo, headSHA, checkRuns)
 			switch rcStatus {
 			case gh.RequiredContextsSatisfied:
+				// #1822: an all-green run set is a complete pass only if no check
+				// suite still has work outstanding (a job queued for a runner has no
+				// check run yet). Consulted last so a red/pending verdict above is
+				// never masked, and shared with settlePRMergeState via ciSuiteHold so
+				// the advance and landing gates cannot disagree on one SHA.
+				if hold, why := e.ciSuiteHold(e.client, owner, repo, headSHA); hold {
+					return TrainCIPending, fmt.Sprintf("checks: %s; %s", describeCheckRuns(checkRuns), why)
+				}
 				return TrainCIGreen, fmt.Sprintf("checks: %s", describeCheckRuns(checkRuns))
 			case gh.RequiredContextsFailed:
 				return TrainCIRed, fmt.Sprintf("required status context(s) failed: %v", rcFailed)
@@ -3360,11 +3368,23 @@ func (e *Engine) classifyLandingCI(owner, repo, mergeableState, headSHA string, 
 		return TrainCIRed, fmt.Sprintf("required status context(s) failed: %v", rcFailed)
 	}
 	if gh.MergeableStateAccepted(mergeableState) && rcStatus == gh.RequiredContextsSatisfied {
+		// #1822: zero check runs is contradicted by a suite reporting runs (or a
+		// young run-less one) — "nothing has run yet", not "no CI".
+		if hold, why := e.ciSuiteHold(e.client, owner, repo, headSHA); hold {
+			return TrainCIPending, fmt.Sprintf("mergeable_state=%q, zero check runs; %s", mergeableState, why)
+		}
 		return TrainCIGreen, fmt.Sprintf("mergeable_state %q accepted, zero check runs, required contexts satisfied", mergeableState)
 	}
 	return TrainCIPending, fmt.Sprintf("mergeable_state=%q, zero check runs", mergeableState)
 }
 
+// Since #1822 both green returns are additionally gated on ciSuiteHold: an
+// all-green (or zero-run) check-run set is a complete pass only when no check
+// suite still has outstanding work, since a job queued for a runner has no
+// check run yet. A hold or a suite-read error is TrainCIPending — never green.
+// singletonFastPathEligible inherits this through its own call here, so the
+// fast path, the landing poll and the advance gate agree on one SHA.
+//
 // pollForMergeable polls the integration PR until CI is confirmed green —
 // per classifyLandingCI (R6, ADR-1441) — blocking up to CIBackstopTimeout.
 // Returns true when the PR is ready to merge.
@@ -4256,6 +4276,14 @@ func (e *Engine) pollTrainCI(ctx context.Context, owner, repo string, prNum int,
 				rcStatus, _, _, rcFailed := e.classifyRequiredContexts(0, owner, repo, trialSHA, checkRuns)
 				switch rcStatus {
 				case gh.RequiredContextsSatisfied:
+					// #1822: same suite-aware completeness rule as
+					// classifyLandingCI — an all-green run set on a trial SHA can
+					// still be a prefix while a needs:-dependent job is queued for a
+					// runner. Hold and keep polling; CIBackstopTimeout bounds it.
+					if hold, why := e.ciSuiteHold(e.client, owner, repo, trialSHA); hold {
+						e.logfRepo(owner+"/"+repo, "merge-train", "trial %s checks green but %s — still waiting\n", trialSHA, why)
+						break
+					}
 					e.logfRepo(owner+"/"+repo, "merge-train", "trial %s green — checks: %s\n", trialSHA, describeCheckRuns(checkRuns))
 					return TrainCIGreen, nil
 				case gh.RequiredContextsFailed:
@@ -4290,8 +4318,13 @@ func (e *Engine) pollTrainCI(ctx context.Context, owner, repo string, prNum int,
 			// the one place mergeable_state is genuinely load-bearing for
 			// green.
 			if mergeableAccepted && rcStatus == gh.RequiredContextsSatisfied {
-				e.logfRepo(owner+"/"+repo, "merge-train", "trial %s green — mergeable_state %q accepted, zero check runs, required contexts satisfied\n", trialSHA, mergeableState)
-				return TrainCIGreen, nil
+				// #1822: see the all-green branch above.
+				if hold, why := e.ciSuiteHold(e.client, owner, repo, trialSHA); hold {
+					e.logfRepo(owner+"/"+repo, "merge-train", "trial %s has zero check runs but %s — still waiting\n", trialSHA, why)
+				} else {
+					e.logfRepo(owner+"/"+repo, "merge-train", "trial %s green — mergeable_state %q accepted, zero check runs, required contexts satisfied\n", trialSHA, mergeableState)
+					return TrainCIGreen, nil
+				}
 			}
 		}
 

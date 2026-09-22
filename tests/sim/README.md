@@ -62,6 +62,14 @@ the live bed cannot be made to produce on demand:
   reads a SHA's check runs twice in a single poll, and whether it does depends
   on harness configuration. A read-count sequence would not correspond to poll
   boundaries at all.
+- **Check suites** (#1822, `simgh/ci.go`, `SeedCheckSuite`/`SeedCheckSuitesAt`/
+  `SeedCheckSuitesAfter`). A third SHA-keyed collection alongside check runs and
+  commit statuses, on the same clock-driven `ciSchedule`. It is independent of
+  check runs by design — the defect it models is a suite `in_progress` while
+  every check run that exists is green (a job queued for a runner has no check
+  run yet) — and `deriveMergeableState` deliberately ignores it, so a green
+  prefix still reads `clean` exactly as GitHub reports. `ci_suite_gate_test.go`
+  holds the incident reproduction and its companions.
 - **Fault injection** (`simgh/fault.go`). Any `engine.GitHubClient` method can
   be made to fail once, N times then succeed, always, on the Kth call, or only
   for calls matching a predicate. The five settle scans' retry loops and

@@ -631,14 +631,40 @@ func (e *Engine) pauseForCITimeout(board *gh.ProjectBoard, item gh.ProjectItem, 
 
 	msg := fmt.Sprintf(
 		"🏭 **Fabrik — CI wait timeout**\n\nThe CI gate for stage **%s** timed out waiting for checks to pass.\n\n"+
+			"%s"+
 			"Fabrik has paused this issue. Please check the PR's CI status, address any failures, and then remove the `fabrik:paused` label to resume.",
-		stage.Name,
+		stage.Name, e.suiteTimeoutNote(item),
 	)
 	e.pauseIssue(item, msg, pauseOpts{
 		awaitingInput: true,
 		reactRocket:   true,
 	})
 	return true
+}
+
+// suiteTimeoutNote returns a paragraph naming any check suite still holding the
+// gate at timeout (#1822), or "" when none is or the read fails. Without it a
+// timeout caused by a suite stuck in_progress while every check run is green
+// would read as "waiting for checks" with no indication of which workflow is
+// stuck. Best-effort by design: it runs once, on escalation, and must never
+// block or change the pause itself — so an error yields no note rather than a
+// hold.
+func (e *Engine) suiteTimeoutNote(item gh.ProjectItem) string {
+	if item.LinkedPRHeadSHA == "" {
+		return ""
+	}
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	suites, err := e.readClient.FetchCheckSuites(owner, repo, item.LinkedPRHeadSHA)
+	if err != nil {
+		e.logf(item.Number, "ci-timeout", "could not read check suites for the timeout note: %v\n", err)
+		return ""
+	}
+	out := gh.OutstandingCheckSuites(suites, e.now(), e.postPushDwell())
+	if len(out) == 0 {
+		return ""
+	}
+	return "The head commit's " + describeOutstandingSuites(out) + " — all check runs that exist may be green, " +
+		"but a workflow that never finished (or a job that never got a runner) keeps the suite open.\n\n"
 }
 
 // pauseForCIFixCycleLimit pauses the issue when the maximum CI-fix
