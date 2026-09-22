@@ -240,8 +240,12 @@ func TestSettle_NoRuns_SuiteReportsRuns_Holds(t *testing.T) {
 
 // TestSettle_NoRuns_YoungSuiteHoldsThenClearsAfterDwell covers the post-push
 // window, anchored on the suite's own created_at (so it survives a restart).
+//
+// The suite's App is deliberately not github-actions (#1829): a github-actions
+// suite is never inert regardless of age — see
+// TestSettle_NoRuns_GithubActionsSuiteNeverClearsByAgeAlone below.
 func TestSettle_NoRuns_YoungSuiteHoldsThenClearsAfterDwell(t *testing.T) {
-	young := gh.CheckSuite{AppSlug: "github-actions", Status: "queued", CreatedAt: suiteNow.Add(-10 * time.Second)}
+	young := gh.CheckSuite{AppSlug: "some-other-ci-app", Status: "queued", CreatedAt: suiteNow.Add(-10 * time.Second)}
 	eng := suiteEngine(t, settleSuiteClient("", nil, []gh.CheckSuite{young}, nil))
 	if r := eng.settlePRMergeState(settleItem(1), &stages.Stage{Name: "Validate"}); r.Status != PRMergeUnsettled {
 		t.Fatalf("young suite: status = %v (%s), want Unsettled", r.Status, r.Reason)
@@ -249,6 +253,27 @@ func TestSettle_NoRuns_YoungSuiteHoldsThenClearsAfterDwell(t *testing.T) {
 	eng.SetClock(stubClock{t: suiteNow.Add(2 * time.Minute)})
 	if r := eng.settlePRMergeState(settleItem(1), &stages.Stage{Name: "Validate"}); r.Status != PRMergeReady {
 		t.Errorf("after dwell: status = %v (%s), want Ready (a run-less suite that never registers is inert)", r.Status, r.Reason)
+	}
+}
+
+// TestSettle_NoRuns_GithubActionsSuiteNeverClearsByAgeAlone is #1829's own
+// regression guard at the settlePRMergeState layer: a zero-run github-actions
+// suite must still hold well past the post-push dwell, and only clear once
+// GitHub actually reports it completed.
+func TestSettle_NoRuns_GithubActionsSuiteNeverClearsByAgeAlone(t *testing.T) {
+	young := gh.CheckSuite{ID: 9100, AppSlug: "github-actions", Status: "queued", CreatedAt: suiteNow.Add(-10 * time.Second)}
+	eng := suiteEngine(t, settleSuiteClient("", nil, []gh.CheckSuite{young}, nil))
+	if r := eng.settlePRMergeState(settleItem(1), &stages.Stage{Name: "Validate"}); r.Status != PRMergeUnsettled {
+		t.Fatalf("young suite: status = %v (%s), want Unsettled", r.Status, r.Reason)
+	}
+	eng.SetClock(stubClock{t: suiteNow.Add(20 * time.Minute)})
+	if r := eng.settlePRMergeState(settleItem(1), &stages.Stage{Name: "Validate"}); r.Status != PRMergeUnsettled {
+		t.Errorf("well past dwell, still zero runs: status = %v (%s), want Unsettled — a github-actions suite must never clear by age alone", r.Status, r.Reason)
+	}
+	settled := gh.CheckSuite{ID: 9100, AppSlug: "github-actions", Status: "completed", Conclusion: "success", LatestCheckRunsCount: 3, CreatedAt: suiteNow.Add(-10 * time.Second)}
+	eng2 := suiteEngine(t, settleSuiteClient("", nil, []gh.CheckSuite{settled}, nil))
+	if r := eng2.settlePRMergeState(settleItem(1), &stages.Stage{Name: "Validate"}); r.Status != PRMergeReady {
+		t.Errorf("after real completion: status = %v (%s), want Ready", r.Status, r.Reason)
 	}
 }
 
