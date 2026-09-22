@@ -148,6 +148,8 @@ func TestOutstandingCheckSuites(t *testing.T) {
 		{"real suite queued with runs", []CheckSuite{{Status: "queued", LatestCheckRunsCount: 1, CreatedAt: old}}, 1},
 		{"young zero-run suite (post-push window)", []CheckSuite{{Status: "queued", CreatedAt: young}}, 1},
 		{"old inert zero-run suite", []CheckSuite{{AppSlug: "cursor", Status: "queued", CreatedAt: old}}, 0},
+		{"old zero-run github-actions suite is never inert (#1829)", []CheckSuite{{AppSlug: "github-actions", Status: "queued", CreatedAt: old}}, 1},
+		{"old zero-run github-actions suite that has settled clears", []CheckSuite{{AppSlug: "github-actions", Status: "completed", Conclusion: "failure", CreatedAt: old}}, 0},
 		{"zero CreatedAt on zero-run suite holds", []CheckSuite{{Status: "queued"}}, 1},
 		{"exactly at dwell boundary is settled", []CheckSuite{{Status: "queued", CreatedAt: now.Add(-dwell)}}, 0},
 		{"mixed: inert + completed + real", []CheckSuite{
