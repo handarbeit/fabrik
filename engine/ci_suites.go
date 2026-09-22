@@ -43,8 +43,12 @@ func (e *Engine) postPushDwell() time.Duration {
 // suite is created at queue time and stays non-completed until every job has
 // run, which is exactly the signal missing from the run set. The discriminator
 // (gh.OutstandingCheckSuites) counts a non-completed suite that has produced
-// runs, or a run-less one still younger than the post-push dwell, and ignores
-// an old run-less suite — an inert installed App must never deadlock the gate.
+// runs, a run-less one still younger than the post-push dwell, or any
+// non-completed github-actions suite regardless of age or run count (#1829 —
+// GitHub creates one suite per workflow run, so a run-less github-actions
+// suite always means a job hasn't been scheduled yet, never an idle install);
+// it ignores only an old run-less suite from another App — an inert installed
+// App must never deadlock the gate.
 //
 // Fail-safe: a read error holds (hold=true) with the error in detail, matching
 // the review gate's "blocks conservatively when a fetch errors" idiom. The
