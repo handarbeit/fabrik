@@ -241,6 +241,8 @@ type Engine struct {
 	mergeTrainInFlight          sync.Map                      // key: trainKey ("owner/repo:baseBranch", mergeTrainKey — since #1648, was bare "owner/repo"), value: *mergeTrainWorkerState; per-(repo,base) train dispatch guard, so one base's train cannot block or be mistaken for another base's train in the same repo
 	mergeTrainEjectionsMu       sync.Mutex                    // guards mergeTrainEjectionCounts
 	mergeTrainEjectionCounts    map[string]int                // key: "owner/repo#N", ejection count per member — deliberately stays issue-scoped, not re-keyed by base (#1648): an issue belongs to exactly one partition at a time
+	mergeTrainCIDeferredMu      sync.Mutex                    // guards mergeTrainCIDeferred
+	mergeTrainCIDeferred        map[string]string             // key: "owner/repo#N", value: head SHA last deferred at by the #1821 admission gate — suppresses a repeat comment when the same SHA is re-deferred (R9 ping-pong backstop); in-memory only, cleared when the member is next admitted non-red
 	mergeTrainCloneSkipMu       sync.Mutex                    // guards mergeTrainCloneSkipCounts
 	mergeTrainCloneSkipCounts   map[string]int                // key: "owner/repo"; consecutive ensureRepoReady ErrSkipItem streak for prepareTrainWorker's batch[0] anchor call — batch[0] can differ across polls, so this is repo-keyed rather than item-keyed like mergeTrainEjectionCounts (#1543 follow-up: identity-gated retry boundary can wedge behind a since-rotated anchor). Deliberately NOT re-keyed by base (#1648): a bare-clone failure is a property of the repo's git remote, shared by every base partition — re-keying would fragment one genuine repo-level failure signal into N spurious per-base ones.
 	mergeTrainTrialsMu          sync.Mutex                    // guards mergeTrainTrials
@@ -485,6 +487,7 @@ func New(cfg Config) (*Engine, error) {
 		repoAccess:                make(map[string]gh.RepoAccess),
 		sem:                       make(chan struct{}, cfg.MaxConcurrent),
 		mergeTrainEjectionCounts:  make(map[string]int),
+		mergeTrainCIDeferred:      make(map[string]string),
 		mergeTrainCloneSkipCounts: make(map[string]int),
 		mergeTrainTrials:          make(map[string][]time.Time),
 		mergeTrainRunawayAlerted:  make(map[string]int),
@@ -587,6 +590,7 @@ func NewWithDeps(cfg Config, client GitHubClient, claude ClaudeInvoker, worktree
 		repoAccess:                make(map[string]gh.RepoAccess),
 		sem:                       make(chan struct{}, maxConcurrent),
 		mergeTrainEjectionCounts:  make(map[string]int),
+		mergeTrainCIDeferred:      make(map[string]string),
 		mergeTrainCloneSkipCounts: make(map[string]int),
 		mergeTrainTrials:          make(map[string][]time.Time),
 		mergeTrainRunawayAlerted:  make(map[string]int),
