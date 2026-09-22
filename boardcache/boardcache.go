@@ -18,6 +18,7 @@ type ReadClient interface {
 	FetchItemDetails(item *gh.ProjectItem) error
 	FetchCheckRuns(owner, repo, sha string) ([]gh.CheckRun, error)
 	FetchCombinedStatus(owner, repo, ref string) ([]gh.CommitStatus, error)
+	FetchCheckSuites(owner, repo, sha string) ([]gh.CheckSuite, error)
 	FetchLinkedPR(owner, repo string, issueNumber int) (*gh.PRDetails, error)
 	FetchPRMergeableFields(owner, repo string, prNumber int) (mergeable *bool, mergeableState string, err error)
 	FetchPRMergeable(owner, repo string, prNumber int) (*bool, error)
@@ -60,6 +61,10 @@ func (a *GitHubAdapter) FetchCheckRuns(owner, repo, sha string) ([]gh.CheckRun, 
 
 func (a *GitHubAdapter) FetchCombinedStatus(owner, repo, ref string) ([]gh.CommitStatus, error) {
 	return a.client.FetchCombinedStatus(owner, repo, ref)
+}
+
+func (a *GitHubAdapter) FetchCheckSuites(owner, repo, sha string) ([]gh.CheckSuite, error) {
+	return a.client.FetchCheckSuites(owner, repo, sha)
 }
 
 func (a *GitHubAdapter) FetchLinkedPR(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
@@ -955,6 +960,16 @@ func (c *CacheImpl) FetchPRMergeableFields(owner, repo string, prNumber int) (*b
 // without webhooks, same reasoning as FetchPRMergeableFields above.
 func (c *CacheImpl) FetchCombinedStatus(owner, repo, ref string) ([]gh.CommitStatus, error) {
 	return c.fallback.FetchCombinedStatus(owner, repo, ref)
+}
+
+// FetchCheckSuites always delegates to GitHub and is never cached (#1822): the
+// check_suite webhook is a deliberate no-op (see applyCheckSuite in delta.go —
+// coarse aggregates), so the store holds no suite state to serve. A suite read
+// is the only signal that a job still queued for a runner — which has no check
+// run yet — is outstanding, so a stale answer would reopen the very race it
+// exists to close.
+func (c *CacheImpl) FetchCheckSuites(owner, repo, sha string) ([]gh.CheckSuite, error) {
+	return c.fallback.FetchCheckSuites(owner, repo, sha)
 }
 
 // FetchPRMergeable always delegates to GitHub — mergeability changes without webhooks.

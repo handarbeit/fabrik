@@ -2319,11 +2319,8 @@ The agent should fix NEW REGRESSION failures, commit, push, and **not** emit `FA
 The CI gate operates on two different paths depending on whether the item is being auto-merged or just being polled:
 
 **Merge guard (Validate+yolo auto-merge path):**
-- Checks CI before attempting the merge in `attemptMergeOnValidate()`
-- **`mergeable_state` shortcut (v0.0.52):** `attemptMergeOnValidate` queries GitHub's `mergeable_state` first; if `clean` or `unstable`, the gate clears immediately and proceeds to merge — per-check classification is skipped entirely
-- While CI is pending: returns an error (no label applied — avoids churn)
-- On CI failure: adds `fabrik:awaiting-ci`, returns error (skips merge)
-- On timeout (pending too long): pauses with `fabrik:paused` + `fabrik:awaiting-input`
+- `attemptMergeOnValidate()` runs no CI classification of its own: it enables GitHub auto-merge (GitHub enforces *required* checks natively), falling back to a direct merge whose only CI protection is `mergeable_state`
+- CI protection is therefore transitive — landing follows `stage:<X>:complete`, which for a `wait_for_ci: true` stage is granted only by the catch-up loop's CI gate below
 
 **Catch-up loop (all other paths):**
 - Evaluates CI on every poll for items with `fabrik:awaiting-ci` on stages with `wait_for_ci: true`
@@ -2335,6 +2332,8 @@ The CI gate operates on two different paths depending on whether the item is bei
 
 > **Rationale for the `mergeable_state` shortcut:** GitHub's `mergeable_state` reflects branch protection rules — it already aggregates required check status, reviewer approvals, and protection constraints. Non-required check_run failures (e.g., cleanup workflow jobs, notification steps) do not block merges per branch protection, so Fabrik's gate must not block on them either. Consulting `mergeable_state` first avoids over-aggressive blocking caused by raw per-check classification that cannot distinguish required from non-required checks.
 
+
+**A green prefix is not a complete pass (#1822).** A CI job that is still queued for a runner (for example a `needs:`-dependent end-to-end job) has not created a check run yet, so every check run that exists can be green — and GitHub can report `mergeable_state: clean` — while a workflow is still running. Before the gate clears, Fabrik also reads the head commit's **check suites**: a suite that is not `completed` and has produced check runs holds the gate (`fabrik:awaiting-ci` stays), and so does a brand-new suite with no runs yet for the post-push dwell (`FABRIK_POST_PUSH_DWELL`, default 90s). An old suite that never produced a run — an installed-but-inert GitHub App — is ignored, so it can never deadlock the gate. A confirmed check-run failure still dispatches the CI-fix re-invocation immediately, even while a suite is open. If the suite read fails, the gate holds rather than clears. A suite that never finishes is bounded by the same absolute backstop as any other stuck CI, and the timeout comment names the suite. This applies identically to the merge-train landing and trial CI polls and the singleton fast path. No new setting is needed, and under GitHub App auth the `checks: read` permission already granted is sufficient. Limitation: a workflow that has not been triggered yet (for example a `workflow_run` chain) is invisible to any suite read.
 #### CI Gate Recovery
 
 Beyond the normal pending→failure→fix→pass loop, the CI gate handles four additional edge cases:

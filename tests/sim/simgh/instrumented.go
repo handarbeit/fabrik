@@ -452,6 +452,11 @@ func (in *Instrumented) FetchCheckRuns(owner, repo, sha string) ([]gh.CheckRun, 
 		func() ([]gh.CheckRun, error) { return in.sim.FetchCheckRuns(owner, repo, sha) })
 }
 
+func (in *Instrumented) FetchCheckSuites(owner, repo, sha string) ([]gh.CheckSuite, error) {
+	return do1(in, "FetchCheckSuites", false, Args{Owner: owner, Repo: repo, SHA: sha},
+		func() ([]gh.CheckSuite, error) { return in.sim.FetchCheckSuites(owner, repo, sha) })
+}
+
 func (in *Instrumented) FetchCombinedStatus(owner, repo, ref string) ([]gh.CommitStatus, error) {
 	return do1(in, "FetchCombinedStatus", false, Args{Owner: owner, Repo: repo, SHA: ref},
 		func() ([]gh.CommitStatus, error) { return in.sim.FetchCombinedStatus(owner, repo, ref) })

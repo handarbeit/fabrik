@@ -26,6 +26,26 @@ func (s *Sim) FetchCheckRuns(owner, repo, sha string) ([]gh.CheckRun, error) {
 	return out, nil
 }
 
+// FetchCheckSuites returns the check suites recorded against a commit SHA. An
+// unknown SHA yields an empty slice, not an error.
+//
+// Suites are drained on the same schedule as check runs (drainCI), so a
+// scenario can express "the suite is in_progress with a green prefix, and the
+// failing run lands at T" as instants on one clock.
+func (s *Sim) FetchCheckSuites(owner, repo, sha string) ([]gh.CheckSuite, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, err := s.lookupRepo(owner, repo)
+	if err != nil {
+		return nil, err
+	}
+	s.drainCI(r)
+	suites := r.checkSuites[sha]
+	out := make([]gh.CheckSuite, len(suites))
+	copy(out, suites)
+	return out, nil
+}
+
 // FetchCombinedStatus returns the classic commit statuses for a ref.
 //
 // The drain below covers *both* of this function's read sections. Draining is
