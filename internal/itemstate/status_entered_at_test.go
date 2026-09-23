@@ -214,6 +214,46 @@ func TestStatusEnteredAtUnchangedByNoOpProjectV2ItemEdited(t *testing.T) {
 	}
 }
 
+// TestStatusEnteredAtOnResetFollowsInputSliceOrder pins the exact behavior at
+// engine restart / bootstrap (Pruefer review finding on #1833's PR): Store.Reset
+// gives every already-Queued item a fresh "now" StatusEnteredAt, since each is a
+// brand-new zero-value ItemState transitioning from "" — there is no durable
+// cross-restart record of true entry time (see ADR-1833's "Restart resets the
+// clock"). What this test establishes is that the resulting order is NOT the
+// Store.All()-style Go map randomization the merge train's sort exists to defeat:
+// Reset (store.go) iterates `for i := range items` over the caller-supplied
+// slice — deterministic, sequential, monotonically increasing time.Now() calls —
+// so the post-restart ordering reflects the board-fetch slice order (e.g. GraphQL
+// board position), not an arbitrary map shuffle. It is still not true historical
+// entry order, and a restart can still cause a one-time batch reshuffle (bounded
+// to once per restart, unlike the pre-#1833 defect's per-poll churn), but it is
+// not random.
+func TestStatusEnteredAtOnResetFollowsInputSliceOrder(t *testing.T) {
+	s := NewStore(nil)
+	items := []gh.ProjectItem{
+		testProjectItem(testRepo, 3),
+		testProjectItem(testRepo, 1),
+		testProjectItem(testRepo, 2),
+	}
+	for i := range items {
+		items[i].Status = "Queued"
+	}
+	s.Reset(items)
+
+	t3 := getItem(t, s, testRepo, 3).StatusEnteredAt
+	t1 := getItem(t, s, testRepo, 1).StatusEnteredAt
+	t2 := getItem(t, s, testRepo, 2).StatusEnteredAt
+
+	for name, got := range map[string]time.Time{"3": t3, "1": t1, "2": t2} {
+		if got.IsZero() {
+			t.Fatalf("item %s: StatusEnteredAt is zero after Reset; expected a fresh stamp", name)
+		}
+	}
+	if !(t3.Before(t1) || t3.Equal(t1)) || !(t1.Before(t2) || t1.Equal(t2)) {
+		t.Errorf("expected StatusEnteredAt to follow Reset's input slice order (3, 1, 2), got 3=%v 1=%v 2=%v", t3, t1, t2)
+	}
+}
+
 // TestStatusEnteredAtSurvivesSnapshotTranslation confirms the field is a plain
 // scalar copy through Snapshot/State() — no deep-copy machinery is needed for
 // it (unlike the slice/map fields newSnapshot explicitly re-copies).
