@@ -48,6 +48,7 @@ const configYAMLTemplate = `# .fabrik/config.yaml — project-level configuratio
 #                               # Absent means github.com. Also: --ghes-host flag or FABRIK_GHES_HOST env var.
 # stages: ./.fabrik/stages      # Path to stage YAML configs directory.
 # poll: 30                      # Polling interval in seconds. Lower = more responsive, higher = fewer API calls.
+# retry_backoff: 60             # Seconds before retrying a stage that did not complete. Independent of poll (#1831).
 # max_concurrent: 5             # Max parallel Claude sessions. Tune based on your API tier capacity.
 # max_retries: 3                # Max stage failures before pausing an issue (0 = unlimited retries).
 # yolo: false                   # Auto-advance issues through stages without human card moves.

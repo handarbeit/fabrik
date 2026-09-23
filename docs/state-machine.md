@@ -3017,8 +3017,8 @@ Admitting is byte-identical to pre-#1821 behavior. Deferring on ambiguity would 
 
 When Claude runs but does not output any completion marker, the engine enters a cooldown retry loop. This applies both when Claude exits cleanly without a marker and when it exits with an error (e.g., timeout, crash). Only start failures (binary not found, `exec.Error`, `os.PathError`) skip the cooldown — the item is retried on the next poll instead.
 
-- **Cooldown duration:** `PollSeconds * 10` (e.g., 30s poll → 300s cooldown)
-- **State:** In-memory only (`CooldownAt("periodic-re-eval")` written to `itemstate.Store` via `CooldownRecorded` mutation). No label is added for cooldown.
+- **Cooldown duration:** `retry_backoff` (`--retry-backoff` / `FABRIK_RETRY_BACKOFF`, default 60s, minimum 1s), **independent of `poll`** (#1831). Its only job is to stop a stage that exits incomplete from hot-looping; runaway and slot-fairness control belong to `max_turns` (per attempt — the worker slot is released when the invocation ends) and `max_retries` (across attempts). Before #1831 this was `PollSeconds * 10`, so raising `poll` to protect a shared GitHub rate limit silently multiplied retry latency (180s poll → 30 min). A `Config` built without the CLI (tests, embedders) leaves `RetryBackoff` zero and falls back to `PollSeconds * 10`.
+- **State:** In-memory only — `LastAttemptAt(stage)` in `itemstate.Store`, written by `StageAttempted` only when Claude actually runs, and read through the one shared helper `stageRetryBackoff()` by the dispatch gate (`itemNeedsWork`), `processItem`'s gate, and the "will retry after" message, so all three always agree. No label is added for cooldown. This is distinct from `CooldownAt("periodic-re-eval")`, which suppresses *deep-fetches* on the GitHub re-check cadence (`githubRecheckInterval()`, still `PollSeconds * 10` because it is about API cost) — see ADR-1831.
 - **Lock behavior:** The lock (`fabrik:locked:<user>` and `stage:<X>:in_progress`) is NOT released during cooldown. This prevents other instances from picking up the item.
 - **Resume behavior:** On retry, `resume=true` is passed to Claude (resumes the session rather than starting fresh)
 - **On restart:** Cooldown state is lost. On clean shutdown, `fabrik:locked:<user>` is removed by the deferred `cleanupLockedIssues()` path and is NOT present on restart; a daemon-wide clean stop (SIGINT/SIGTERM) additionally clears `stage:<X>:in_progress` directly for every issue with a live worker, before the process exits (ADR-1393 R1/R2), rather than leaving that to chance. After a crash, a force-quit, or a shutdown-pause write that itself failed, a stale `fabrik:locked:<user>` label remains on GitHub and is detected by `runStartupCleanup()` on next startup, which removes it (logging `[#N startup] found stale lock label from prior crash — removing`); `stage:*:in_progress` labels are also removed by that same pass. A `stage:<X>:in_progress` label that survives with neither a lock label nor a `complete`/`failed` sibling — the residual gap even the direct clear above cannot fully close — is healed independently by `runStartupBareInProgressScan()` (§9.7, ADR-1393 R7).
@@ -3118,7 +3118,7 @@ usage limit) so a real-world sighting is auditable without affecting classificat
 **Handling:** `finalizeStageOutcome()` (`engine/item.go`) detects the sentinel via `errors.As`,
 immediately after the existing engine-shutdown guard, and routes to `handleUsageLimitExit()`, which:
 
-1. Applies `itemstate.StageAttempted` — the normal dispatch cooldown (`PollSeconds * 10`) applies, so
+1. Applies `itemstate.StageAttempted` — the normal dispatch cooldown (`retry_backoff`, §7.1) applies, so
    the item does not retry on the very next poll and hammer the limit in a tight loop. Deliberately
    does **not** call `StageRetryIncremented` — the stage never ran, so this does not count against
    `MaxRetries`.
@@ -3296,7 +3296,7 @@ as a whole, so `claudeAPIErrorExit` is a separate sentinel type that simply neve
 added conditional. `finalizeStageOutcome()` detects it via its own `errors.As` branch (alongside the
 usage-limit and apiKeyHelper branches) and routes to `handleAPIErrorExit()`, which:
 
-1. Applies `itemstate.StageAttempted` — the normal dispatch cooldown (`PollSeconds * 10`) applies on the
+1. Applies `itemstate.StageAttempted` — the normal dispatch cooldown (`retry_backoff`, §7.1) applies on the
    stage-dispatch path, exactly as for a usage-limit exit. Deliberately does **not** call
    `StageRetryIncremented` — the stage never ran, so this does not count against `MaxRetries`.
 2. Logs only. Unlike `handleUsageLimitExit`/`handleAPIKeyHelperDetected`, posts **no comment** and

@@ -41,6 +41,7 @@ type Config struct {
 	GitSSH                    bool
 	TUI                       bool
 	PollSeconds               int
+	RetryBackoffSeconds       int // seconds before re-dispatching an incomplete stage; independent of PollSeconds (#1831)
 	MaxConcurrent             int
 	MaxRetries                int
 	MaxSliceRetries           int    // Max turn-cap preemption cycles per stage; 0 means use default (10; #1199)
@@ -178,6 +179,7 @@ func Execute() error {
 	var noTUI bool
 	flag.BoolVar(&noTUI, "notui", false, "Disable the interactive TUI dashboard (default: enabled when a real terminal is detected)")
 	flag.IntVar(&cfg.PollSeconds, "poll", 30, "Polling interval in seconds")
+	flag.IntVar(&cfg.RetryBackoffSeconds, "retry-backoff", defaultRetryBackoffSeconds, "Seconds to wait before re-dispatching a stage after an incomplete attempt. Independent of --poll, which governs GitHub API cadence (#1831). Minimum 1. Also FABRIK_RETRY_BACKOFF / retry_backoff.")
 	flag.IntVar(&cfg.MaxConcurrent, "max-concurrent", 5, "Maximum number of concurrent issue workers")
 	flag.IntVar(&cfg.MaxRetries, "max-retries", 3, "Max failed stage attempts before pausing the issue (0 = unlimited)")
 	flag.IntVar(&cfg.MaxSliceRetries, "max-slice-retries", 0, "Maximum number of turn-cap preemption cycles per stage before pausing — a large job resuming across multiple slices is not a failure and is bounded separately from max-retries (0 = use default of 10; also FABRIK_MAX_SLICE_RETRIES; #1199)")
@@ -355,6 +357,16 @@ func Execute() error {
 				cfg.PollSeconds = *pc.Poll
 			}
 		}
+	}
+	if !explicitFlags["retry-backoff"] {
+		cfg.RetryBackoffSeconds = resolveRetryBackoff(os.Getenv("FABRIK_RETRY_BACKOFF"), pc.RetryBackoff, cfg.RetryBackoffSeconds)
+	}
+	if cfg.RetryBackoffSeconds < 1 {
+		// An explicit --retry-backoff below 1 skips the resolution above. Zero would
+		// reach the engine as "unset" and silently fall back to 10 × poll — the
+		// exact coupling #1831 removes — so reject it here.
+		fmt.Fprintf(os.Stderr, "[warn] --retry-backoff=%d is invalid (must be >= 1 second); using default %d\n", cfg.RetryBackoffSeconds, defaultRetryBackoffSeconds)
+		cfg.RetryBackoffSeconds = defaultRetryBackoffSeconds
 	}
 	if cfg.MaxConcurrent == 5 {
 		if v := os.Getenv("FABRIK_MAX_CONCURRENT"); v != "" {
@@ -862,6 +874,7 @@ func Execute() error {
 		AutoUpgrade:               cfg.AutoUpgrade,
 		GitSSH:                    cfg.GitSSH,
 		PollSeconds:               cfg.PollSeconds,
+		RetryBackoff:              time.Duration(cfg.RetryBackoffSeconds) * time.Second,
 		MaxConcurrent:             cfg.MaxConcurrent,
 		MaxRetries:                cfg.MaxRetries,
 		MaxSliceRetries:           maxSliceRetries(cfg.MaxSliceRetries),
@@ -1602,4 +1615,31 @@ func runTUI(eng *engine.Engine, pollSeconds int, info tui.ProjectInfo, pluginDir
 		_ = syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
 		return <-errCh
 	}
+}
+
+// defaultRetryBackoffSeconds is the delay before re-dispatching a stage after
+// an incomplete attempt when nothing overrides it (#1831). Deliberately small
+// and independent of poll: its only job is to prevent a hot loop, and at
+// typical poll intervals it amounts to "retry at the next poll".
+const defaultRetryBackoffSeconds = 60
+
+// resolveRetryBackoff applies FABRIK_RETRY_BACKOFF, then config.yaml's
+// retry_backoff, over current (the flag default when the flag was not set
+// explicitly). Values below 1 are rejected with a warning: a zero floor would
+// let a webhook-triggered wake re-dispatch an incomplete stage in a hot loop.
+func resolveRetryBackoff(envVal string, yamlVal *int, current int) int {
+	if envVal != "" {
+		if n, err := strconv.Atoi(envVal); err == nil && n >= 1 {
+			return n
+		}
+		fmt.Fprintf(os.Stderr, "[warn] FABRIK_RETRY_BACKOFF=%q is invalid (must be an integer >= 1 second); using %d\n", envVal, current)
+		return current
+	}
+	if yamlVal != nil {
+		if *yamlVal >= 1 {
+			return *yamlVal
+		}
+		fmt.Fprintf(os.Stderr, "[warn] config.yaml retry_backoff=%d is invalid (must be an integer >= 1 second); using %d\n", *yamlVal, current)
+	}
+	return current
 }

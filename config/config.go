@@ -20,6 +20,7 @@ type ProjectConfig struct {
 	User                  string   `yaml:"user"`
 	StagesDir             string   `yaml:"stages"`
 	Poll                  *int     `yaml:"poll"`
+	RetryBackoff          *int     `yaml:"retry_backoff"` // seconds before re-dispatching an incomplete stage; independent of poll (#1831)
 	MaxConcurrent         *int     `yaml:"max_concurrent"`
 	MaxRetries            *int     `yaml:"max_retries"`
 	Yolo                  bool     `yaml:"yolo"`

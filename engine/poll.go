@@ -1417,7 +1417,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		// terminal-only guard is removed here: LastAttemptAt (not CooldownAt) now carries
 		// dispatch suppression, so refreshing CooldownAt for ALL non-advanced
 		// deepFetchCandidates is safe regardless of completion state (#504 structural fix).
-		cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
+		cooldown := e.githubRecheckInterval()
 		for _, item := range deepFetchCandidates {
 			iKey := issueKey(item, e.defaultRepo())
 			if advancedItems[iKey] {

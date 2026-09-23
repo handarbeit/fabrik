@@ -7,7 +7,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/itemstate"
@@ -423,7 +422,7 @@ func (e *Engine) refreshForSpawnResume(item *gh.ProjectItem) error {
 			Repo:   item.Repo,
 			Number: item.Number,
 			Reason: cooldownReason,
-			Until:  e.now().Add(time.Duration(e.cfg.PollSeconds*10) * time.Second),
+			Until:  e.now().Add(e.githubRecheckInterval()),
 		})
 		return errPreImplementDeferred
 	}
@@ -553,7 +552,7 @@ func (e *Engine) recoverMissingPlanComment(ctx context.Context, board *gh.Projec
 			Repo:   item.Repo,
 			Number: item.Number,
 			Reason: cooldownReason,
-			Until:  e.now().Add(time.Duration(e.cfg.PollSeconds*10) * time.Second),
+			Until:  e.now().Add(e.githubRecheckInterval()),
 		})
 		return false, errPreImplementDeferred
 	}
