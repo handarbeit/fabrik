@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -3415,6 +3417,142 @@ func TestGroupQueuedByRepo_ExcludesPausedAndClosed(t *testing.T) {
 	}
 	if len(groups[0].items) != 2 || groups[0].items[0].Number != 1 || groups[0].items[1].Number != 4 {
 		t.Errorf("expected only clean members #1 and #4, got %+v", groups[0].items)
+	}
+}
+
+// ── #1833: deterministic Queued ordering ─────────────────────────────────────
+
+// TestGroupQueuedByRepo_DeterministicUnderShuffledInput is the AC1 acceptance test:
+// given the same Queued set presented in several different (actually shuffled —
+// a fixed-order fixture proves nothing) input orders, batch formation must select
+// the identical member list every time, ordered ascending by (StatusEnteredAt,
+// Number).
+func TestGroupQueuedByRepo_DeterministicUnderShuffledInput(t *testing.T) {
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	makeItems := func() []gh.ProjectItem {
+		return []gh.ProjectItem{
+			{Number: 5, Status: "BatchHold", Repo: "owner/repo", StatusEnteredAt: base.Add(4 * time.Hour)},
+			{Number: 1, Status: "BatchHold", Repo: "owner/repo", StatusEnteredAt: base.Add(1 * time.Hour)},
+			{Number: 9, Status: "BatchHold", Repo: "owner/repo", StatusEnteredAt: base.Add(3 * time.Hour)},
+			{Number: 2, Status: "BatchHold", Repo: "owner/repo", StatusEnteredAt: base.Add(2 * time.Hour)},
+			{Number: 7, Status: "BatchHold", Repo: "owner/repo", StatusEnteredAt: base.Add(5 * time.Hour)},
+			{Number: 3, Status: "BatchHold", Repo: "owner/repo", StatusEnteredAt: base.Add(6 * time.Hour)},
+		}
+	}
+	wantOrder := []int{1, 2, 9, 5, 7, 3} // ascending by StatusEnteredAt
+
+	rng := rand.New(rand.NewSource(1833))
+	for trial := 0; trial < 20; trial++ {
+		items := makeItems()
+		rng.Shuffle(len(items), func(i, j int) { items[i], items[j] = items[j], items[i] })
+
+		groups := groupQueuedByRepo(items, "BatchHold", "owner/repo")
+		if len(groups) != 1 {
+			t.Fatalf("trial %d: expected 1 group, got %d", trial, len(groups))
+		}
+		got := make([]int, len(groups[0].items))
+		for i, it := range groups[0].items {
+			got[i] = it.Number
+		}
+		if !reflect.DeepEqual(got, wantOrder) {
+			t.Fatalf("trial %d: order = %v; want %v (input shuffle: %v)", trial, got, wantOrder, items)
+		}
+	}
+}
+
+// TestGroupQueuedByRepo_TiesBrokenByNumber verifies that items sharing an equal
+// StatusEnteredAt — including the zero value, the direct-GraphQL degeneration
+// case where no board-cache source ever populates the field — sort purely by
+// ascending Number, regardless of input order.
+func TestGroupQueuedByRepo_TiesBrokenByNumber(t *testing.T) {
+	items := []gh.ProjectItem{
+		{Number: 9, Status: "BatchHold", Repo: "owner/repo"},
+		{Number: 2, Status: "BatchHold", Repo: "owner/repo"},
+		{Number: 5, Status: "BatchHold", Repo: "owner/repo"},
+	}
+	groups := groupQueuedByRepo(items, "BatchHold", "owner/repo")
+	if len(groups) != 1 || len(groups[0].items) != 3 {
+		t.Fatalf("unexpected grouping: %+v", groups)
+	}
+	got := []int{groups[0].items[0].Number, groups[0].items[1].Number, groups[0].items[2].Number}
+	want := []int{2, 5, 9}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("zero-StatusEnteredAt tie-break order = %v; want %v", got, want)
+	}
+}
+
+// TestGroupQueuedByRepoAndBase_SortAppliesWithinEachPartition is the R4 guard:
+// partitioning by (repo, base) (ADR-1648) must be unchanged, and the new
+// (StatusEnteredAt, Number) ordering must apply independently within each
+// resulting partition — never across a partition boundary. Constructs one repo
+// with a default-base partition and a base:-labeled partition, items interleaved
+// out of order across both.
+func TestGroupQueuedByRepoAndBase_SortAppliesWithinEachPartition(t *testing.T) {
+	_, _, worktreeRoot, wm := setupTrainRepo(t)
+	sha := strings.TrimSpace(gitOutputDir(t, wm.baseDir, "rev-parse", "HEAD"))
+	mustGitDir(t, wm.baseDir, "update-ref", "refs/remotes/origin/maint/1.x", sha)
+
+	eng := NewWithDeps(Config{Owner: "owner", Repo: "repo", MaxConcurrent: 1, Stages: testStages()}, &mockGitHubClient{}, &mockClaudeInvoker{}, nil)
+	eng.registerWorktrees("owner/repo", wm.baseDir, worktreeRoot)
+
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	items := []gh.ProjectItem{
+		{Number: 10, Status: "BatchHold", Repo: "owner/repo", StatusEnteredAt: base.Add(3 * time.Hour)},
+		{Number: 20, Status: "BatchHold", Repo: "owner/repo", Labels: []string{"base:maint/1.x"}, StatusEnteredAt: base.Add(9 * time.Hour)},
+		{Number: 11, Status: "BatchHold", Repo: "owner/repo", StatusEnteredAt: base.Add(1 * time.Hour)},
+		{Number: 21, Status: "BatchHold", Repo: "owner/repo", Labels: []string{"base:maint/1.x"}, StatusEnteredAt: base.Add(2 * time.Hour)},
+		{Number: 12, Status: "BatchHold", Repo: "owner/repo", StatusEnteredAt: base.Add(2 * time.Hour)},
+	}
+
+	groups := eng.groupQueuedByRepoAndBase(items, "BatchHold", "owner/repo")
+	if len(groups) != 2 {
+		t.Fatalf("expected 2 partitions, got %d: %+v", len(groups), groups)
+	}
+	var defaultGroup, maintGroup queuedRepoGroup
+	for _, g := range groups {
+		if g.base == defaultPartitionBase {
+			defaultGroup = g
+		} else {
+			maintGroup = g
+		}
+	}
+	gotDefault := []int{defaultGroup.items[0].Number, defaultGroup.items[1].Number, defaultGroup.items[2].Number}
+	if want := []int{11, 12, 10}; !reflect.DeepEqual(gotDefault, want) {
+		t.Errorf("default partition order = %v; want %v", gotDefault, want)
+	}
+	gotMaint := []int{maintGroup.items[0].Number, maintGroup.items[1].Number}
+	if want := []int{21, 20}; !reflect.DeepEqual(gotMaint, want) {
+		t.Errorf("maint partition order = %v; want %v", gotMaint, want)
+	}
+}
+
+// TestSetMergeTrainQueueSortDisabledForTest_DisablesSort is the direct-proof
+// counterpart to the sim scenario built on this toggle: it demonstrates the
+// toggle actually disables the (StatusEnteredAt, Number) sort, returning raw
+// input order instead — so the sim test relying on it to reproduce pre-#1833
+// churn is trustworthy.
+func TestSetMergeTrainQueueSortDisabledForTest_DisablesSort(t *testing.T) {
+	eng := NewWithDeps(Config{Owner: "owner", Repo: "repo", MaxConcurrent: 1, Stages: testStages()}, &mockGitHubClient{}, &mockClaudeInvoker{}, nil)
+
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	items := []gh.ProjectItem{
+		{Number: 9, Status: "BatchHold", Repo: "owner/repo", StatusEnteredAt: base.Add(9 * time.Hour)},
+		{Number: 1, Status: "BatchHold", Repo: "owner/repo", StatusEnteredAt: base.Add(1 * time.Hour)},
+		{Number: 5, Status: "BatchHold", Repo: "owner/repo", StatusEnteredAt: base.Add(5 * time.Hour)},
+	}
+
+	// Default (sort enabled): ascending by StatusEnteredAt.
+	sorted := eng.groupQueuedByRepoAndBase(items, "BatchHold", "owner/repo")
+	gotSorted := []int{sorted[0].items[0].Number, sorted[0].items[1].Number, sorted[0].items[2].Number}
+	if want := []int{1, 5, 9}; !reflect.DeepEqual(gotSorted, want) {
+		t.Fatalf("expected sorted order %v with sort enabled, got %v", want, gotSorted)
+	}
+
+	eng.SetMergeTrainQueueSortDisabledForTest(true)
+	unsorted := eng.groupQueuedByRepoAndBase(items, "BatchHold", "owner/repo")
+	gotUnsorted := []int{unsorted[0].items[0].Number, unsorted[0].items[1].Number, unsorted[0].items[2].Number}
+	if want := []int{9, 1, 5}; !reflect.DeepEqual(gotUnsorted, want) {
+		t.Fatalf("expected raw input order %v with sort disabled, got %v", want, gotUnsorted)
 	}
 }
 

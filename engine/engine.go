@@ -331,6 +331,15 @@ type Engine struct {
 	// literal. See SetTrainCIPollIntervalForTest and adrs/1452-mergetrain-sim-
 	// harness-seams.md.
 	trainCIPollInterval time.Duration
+	// mergeTrainQueueSortDisabledForTest disables groupQueuedByRepoAndBase's
+	// deterministic (StatusEnteredAt, Number) ordering (#1833) when true, falling
+	// back to whatever order the board-state source produced — i.e. exactly the
+	// pre-#1833 behavior. Exists solely so a sim scenario can reproduce the
+	// historical churn (a different arbitrary Queued subset selected every poll
+	// once membership exceeds max_batch_size) and then demonstrate it gone with
+	// the sort left enabled (the production default; New never sets this). See
+	// SetMergeTrainQueueSortDisabledForTest and ADR-1833.
+	mergeTrainQueueSortDisabledForTest bool
 }
 
 func New(cfg Config) (*Engine, error) {
@@ -649,6 +658,14 @@ func (e *Engine) RegisterWorktreeManagerForTest(nameWithOwner string, wm *Worktr
 // original 30s literal outside a test.
 func (e *Engine) SetTrainCIPollIntervalForTest(d time.Duration) {
 	e.trainCIPollInterval = d
+}
+
+// SetMergeTrainQueueSortDisabledForTest disables groupQueuedByRepoAndBase's
+// deterministic Queued-ordering sort (#1833) — see the
+// mergeTrainQueueSortDisabledForTest field's doc comment. Test seam only
+// (ADR-1833, tests/sim); production never calls this.
+func (e *Engine) SetMergeTrainQueueSortDisabledForTest(disabled bool) {
+	e.mergeTrainQueueSortDisabledForTest = disabled
 }
 
 // SetGitHubAppModeForTest puts e into App-auth mode for the App-auth
