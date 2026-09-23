@@ -340,6 +340,7 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		if item.Status != v.NewStatus {
 			item.Status = v.NewStatus
 			item.Terminal = false
+			item.StatusEnteredAt = time.Now()
 		}
 		return StatusChanged
 
@@ -870,6 +871,7 @@ func (s *Store) applyProjectV2ItemEdited(v ProjectV2ItemEdited) (Snapshot, []Cha
 	if item.Status != v.NewStatus {
 		item.Status = v.NewStatus
 		item.Terminal = false
+		item.StatusEnteredAt = time.Now()
 	}
 	if reflect.DeepEqual(before, *item) {
 		snap := newSnapshot(*item)

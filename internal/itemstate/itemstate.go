@@ -41,6 +41,18 @@ type ItemState struct {
 	Labels   []string
 	// Status is the project board column ("Specify", "Implement", etc.).
 	Status string
+	// StatusEnteredAt is the time this item's Status was last observed to change
+	// (record-on-write, sibling of LabelAppliedAt/#1314, applied to Status rather
+	// than to a label). Set to time.Now() at the moment a Status mutation is
+	// applied, inside the same "if item.Status != new" guard every Status writer
+	// already uses for no-op detection — so a no-op reconcile of an unchanged
+	// Status never touches this field. Generic and Queued-agnostic by design:
+	// this package has no notion of which Status name is a merge-train holding
+	// stage; consumers (e.g. engine's Queued-batch ordering, #1833) attach that
+	// meaning themselves. Reset to "now" on every fresh Store.Reset (bootstrap/
+	// restart) for every item, since there is no durable cross-restart source
+	// for "when did this item truly enter its current Status" — see ADR-1833.
+	StatusEnteredAt time.Time
 	// UpdatedAt is max(issue.updatedAt, projectItem.updatedAt, linkedPR.updatedAt).
 	UpdatedAt time.Time
 

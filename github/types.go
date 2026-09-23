@@ -110,23 +110,30 @@ type MergeQueueEntry struct {
 
 // ProjectItem represents an issue or pull request card on the project board.
 type ProjectItem struct {
-	ID             string
-	ItemID         string // The project item ID (needed for mutations)
-	Number         int
-	Title          string
-	Body           string
-	Status         string // The column/status on the board
-	URL            string
-	Repo           string // "owner/repo" (e.g., "acme/widgets")
-	IsPR           bool   // True if this item is a Pull Request (vs an Issue)
-	IsClosed       bool   // True if the underlying GitHub Issue is closed (always false for PRs)
-	UpdatedAt      time.Time
-	Labels         []string
-	Assignees      []string
-	Comments       []Comment
-	Author         string
-	BlockedBy      []Dependency // Issues that must be closed before this one can advance
-	LinkedPRNumber int          // PR number of the first linked PR (0 if none); for REST re-request calls
+	ID     string
+	ItemID string // The project item ID (needed for mutations)
+	Number int
+	Title  string
+	Body   string
+	Status string // The column/status on the board
+	// StatusEnteredAt is the time Status was last observed to change, per the
+	// record-on-write itemstate.ItemState.StatusEnteredAt field (#1833). Populated
+	// only by the in-memory-cache path (boardcache's snapshotToProjectItem); the
+	// direct-GraphQL GitHubAdapter path leaves this at the zero value, since no
+	// cheap durable "entered this Status" signal exists via REST/GraphQL for
+	// Project v2 items. See ADR-1833.
+	StatusEnteredAt time.Time
+	URL             string
+	Repo            string // "owner/repo" (e.g., "acme/widgets")
+	IsPR            bool   // True if this item is a Pull Request (vs an Issue)
+	IsClosed        bool   // True if the underlying GitHub Issue is closed (always false for PRs)
+	UpdatedAt       time.Time
+	Labels          []string
+	Assignees       []string
+	Comments        []Comment
+	Author          string
+	BlockedBy       []Dependency // Issues that must be closed before this one can advance
+	LinkedPRNumber  int          // PR number of the first linked PR (0 if none); for REST re-request calls
 	// LinkedPRNumberShallow is the PR number of the first linked PR from the shallow board query (0 if none).
 	// Populated only during shallow board parse. Linkage drift detection was previously performed
 	// by Reconcile using this field; that responsibility has moved to the probe loop
