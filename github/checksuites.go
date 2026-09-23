@@ -104,7 +104,7 @@ func (c *Client) FetchCheckSuites(owner, repo, sha string) ([]CheckSuite, error)
 // not yet reflected in the check-run set: the reason a set of all-green check
 // runs must not yet be read as a complete pass (#1822).
 //
-// A suite is outstanding when it is not `completed` AND either:
+// A suite is outstanding when it is not `completed` AND any of:
 //
 //   - it has produced at least one check run (LatestCheckRunsCount > 0). This
 //     is the incident case: a needs:-dependent job sat in the Actions queue for
@@ -113,20 +113,32 @@ func (c *Client) FetchCheckSuites(owner, repo, sha string) ([]CheckSuite, error)
 //   - it has no check runs yet but is younger than dwell (measured from the
 //     suite's own CreatedAt, so it survives an engine restart). This is the
 //     post-push window in which a real suite exists before its first job
-//     registers.
+//     registers. Or
 //
-// An old, non-completed suite with zero runs is inert — an installed App
-// (cursor, claude, coderabbitai, github-pages …) whose suite sits `queued`
-// forever — and is ignored. The naive rule "every suite must be completed"
-// would deadlock on those permanently and is explicitly rejected.
+//   - it belongs to the github-actions App (#1829). GitHub creates exactly one
+//     check suite per workflow run, so a non-completed github-actions suite
+//     with zero runs always means a job has not yet been scheduled onto a
+//     runner — never an idle installation — no matter how long that takes
+//     (the incident this closes saw a 17-minute wait for the first runner,
+//     well past any plausible fixed dwell). Age and run count are irrelevant
+//     for this App slug: only Status == "completed" clears it.
+//
+// An old, non-completed suite with zero runs from any other App is inert — an
+// installed App (cursor, claude, coderabbitai, github-pages …) whose suite
+// sits `queued` forever — and is ignored. The naive rule "every suite must be
+// completed" would deadlock on those permanently and is explicitly rejected.
 //
 // A zero CreatedAt on a zero-run suite counts as young (hold): an unreadable
 // age is ambiguous, and ambiguity must hold. The caller's CI backstop bounds
-// the wait.
+// the wait in both cases.
 func OutstandingCheckSuites(suites []CheckSuite, now time.Time, dwell time.Duration) []CheckSuite {
 	var out []CheckSuite
 	for _, s := range suites {
 		if s.Status == "completed" {
+			continue
+		}
+		if s.AppSlug == "github-actions" {
+			out = append(out, s)
 			continue
 		}
 		if s.LatestCheckRunsCount > 0 || s.CreatedAt.IsZero() || now.Sub(s.CreatedAt) < dwell {

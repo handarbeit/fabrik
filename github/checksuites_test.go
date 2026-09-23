@@ -132,6 +132,46 @@ func TestFetchCheckSuites_RecordedResponse(t *testing.T) {
 	}
 }
 
+// TestOutstandingCheckSuites_GithubActionsZeroRunSettledIsNotOutstanding covers
+// #1829 Requirement 3: a github-actions suite that GitHub has actually settled
+// to `completed` with zero check runs must clear the gate — otherwise treating
+// every non-completed zero-run github-actions suite as outstanding (this
+// file's own fix, see the "never inert" case in TestOutstandingCheckSuites)
+// would itself deadlock on a workflow whose jobs never produced a check run at
+// all (e.g. all jobs skipped by a job-level `if:`, or a matrix that evaluates
+// to zero elements).
+//
+// A live-captured recording of this exact scenario (the precedent
+// `fetch_check_suites.json` set for #1822) was attempted for this issue but
+// is not obtainable from a headless Implement stage: GitHub only triggers
+// `pull_request`-scoped Actions runs (this repo's ci.yml) once a PR is open
+// against the SHA, and no PR exists yet at Implement time — it's created only
+// after this stage signals completion — so there is no live CI run to capture
+// a response from without ending the turn to wait on one, which this project's
+// Implement conventions explicitly forbid.
+//
+// This case is therefore the pre-approved fallback (per the Plan stage): a
+// synthetic suite documented against the closest verified analog Research
+// found — GitHub's well-documented behavior for a workflow that fails at
+// parse/startup time (invalid YAML, before any job is ever created): the
+// check suite settles to `completed`/`failure` with zero check runs, it does
+// not hang non-completed. This is the same "zero jobs ever ran" shape as an
+// all-skipped-jobs or empty-matrix workflow, so it is a reasonable stand-in
+// for that scenario even though it isn't a byte-for-byte capture of it.
+func TestOutstandingCheckSuites_GithubActionsZeroRunSettledIsNotOutstanding(t *testing.T) {
+	settled := []CheckSuite{{
+		AppSlug:              "github-actions",
+		Status:               "completed",
+		Conclusion:           "failure", // startup_failure-shaped: zero jobs ever ran
+		LatestCheckRunsCount: 0,
+		CreatedAt:            time.Date(2026, 9, 20, 17, 9, 4, 0, time.UTC),
+	}}
+	after := settled[0].CreatedAt.Add(time.Hour)
+	if out := OutstandingCheckSuites(settled, after, 90*time.Second); len(out) != 0 {
+		t.Errorf("settled zero-run github-actions suite reports %d outstanding, want 0 (no-deadlock property): %+v", len(out), out)
+	}
+}
+
 func TestOutstandingCheckSuites(t *testing.T) {
 	now := time.Date(2026, 9, 20, 18, 0, 0, 0, time.UTC)
 	dwell := 90 * time.Second
@@ -148,6 +188,7 @@ func TestOutstandingCheckSuites(t *testing.T) {
 		{"real suite queued with runs", []CheckSuite{{Status: "queued", LatestCheckRunsCount: 1, CreatedAt: old}}, 1},
 		{"young zero-run suite (post-push window)", []CheckSuite{{Status: "queued", CreatedAt: young}}, 1},
 		{"old inert zero-run suite", []CheckSuite{{AppSlug: "cursor", Status: "queued", CreatedAt: old}}, 0},
+		{"old zero-run github-actions suite is never inert (#1829)", []CheckSuite{{AppSlug: "github-actions", Status: "queued", CreatedAt: old}}, 1},
 		{"zero CreatedAt on zero-run suite holds", []CheckSuite{{Status: "queued"}}, 1},
 		{"exactly at dwell boundary is settled", []CheckSuite{{Status: "queued", CreatedAt: now.Add(-dwell)}}, 0},
 		{"mixed: inert + completed + real", []CheckSuite{

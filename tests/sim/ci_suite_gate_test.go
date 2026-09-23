@@ -203,6 +203,11 @@ func TestCISuiteGate_InertSuiteDoesNotDeadlock(t *testing.T) {
 // exists with zero runs right after a push (its first job has not registered)
 // holds the gate for the post-push dwell, measured from the suite's own
 // created_at, and only then reads as inert.
+//
+// The seeded App is deliberately *not* github-actions (#1829): a github-actions
+// suite is never inert regardless of age (see
+// TestCISuiteGate_ActionsSuiteNeverInertOnAge below) — the dwell-then-inert
+// mechanism this test pins now applies only to every other App.
 func TestCISuiteGate_PostPushWindowHoldsThenClears(t *testing.T) {
 	t.Parallel()
 	env := newSuiteGateEnv(t, time.Now(), 30, func(cfg *engine.Config) { cfg.PostPushDwell = 90 * time.Second })
@@ -211,7 +216,7 @@ func TestCISuiteGate_PostPushWindowHoldsThenClears(t *testing.T) {
 	seedGreenPrefix(t, env, sha)
 	// Created "now", no runs yet: the window in which a real suite is
 	// indistinguishable from an inert one except by age.
-	env.Sim.Sim().SeedCheckSuite(env.OwnerRepo, sha, gh.CheckSuite{AppSlug: "github-actions", Status: "queued"})
+	env.Sim.Sim().SeedCheckSuite(env.OwnerRepo, sha, gh.CheckSuite{AppSlug: "some-other-ci-app", Status: "queued"})
 	if err := env.Sim.Sim().Err(); err != nil {
 		t.Fatalf("seeding: %v", err)
 	}
@@ -222,6 +227,45 @@ func TestCISuiteGate_PostPushWindowHoldsThenClears(t *testing.T) {
 		assertGateHolding(t, env, num, "inside the post-push dwell")
 	}
 	// Past the dwell a suite that never registered a run is inert: no deadlock.
+	WaitForIssueLabel(t, env, num, "stage:Validate:complete", 20)
+	WaitForIssueClosed(t, env, num, 40)
+}
+
+// TestCISuiteGate_ActionsSuiteNeverInertOnAge is #1829's own regression guard:
+// a github-actions suite with zero check runs must hold the gate no matter how
+// far past the post-push dwell it ages — the incident's 17-minute wait for a
+// runner is the shape this proves, at simulated-clock speed — and must only
+// clear once GitHub actually settles the suite to completed. Together with
+// TestCISuiteGate_PostPushWindowHoldsThenClears (still-inert-eventually for
+// every other App) this pins both halves of the #1829 fix: never clears by age
+// alone, but does clear once really done (no deadlock regression against
+// #1822's own acceptance criteria).
+func TestCISuiteGate_ActionsSuiteNeverInertOnAge(t *testing.T) {
+	t.Parallel()
+	env := newSuiteGateEnv(t, time.Now(), 30, func(cfg *engine.Config) { cfg.PostPushDwell = 90 * time.Second })
+	num, sha := reachAwaitingCI(t, env, "sim ci suite gate: actions never inert on age")
+
+	seedGreenPrefix(t, env, sha)
+	const actionsSuiteID = 8300
+	env.Sim.Sim().SeedCheckSuite(env.OwnerRepo, sha,
+		gh.CheckSuite{ID: actionsSuiteID, AppSlug: "github-actions", Status: "queued"})
+	if err := env.Sim.Sim().Err(); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	// Several simulated minutes — well past the 90s dwell that would have made
+	// this suite read as inert before #1829. The gate must hold throughout.
+	for i := 0; i < 10; i++ {
+		RunPoll(t, env)
+		assertGateHolding(t, env, num, "well past the post-push dwell, still zero runs")
+	}
+
+	// The runner finally picks up the job and the workflow completes green.
+	env.Sim.Sim().SeedCheckSuitesAfter(env.OwnerRepo, sha, 30*time.Second,
+		gh.CheckSuite{ID: actionsSuiteID, AppSlug: "github-actions", Status: "completed", Conclusion: "success", LatestCheckRunsCount: 3})
+	if err := env.Sim.Sim().Err(); err != nil {
+		t.Fatalf("seeding completion: %v", err)
+	}
 	WaitForIssueLabel(t, env, num, "stage:Validate:complete", 20)
 	WaitForIssueClosed(t, env, num, 40)
 }
