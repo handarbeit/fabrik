@@ -413,9 +413,16 @@ func (e *Engine) effectiveMaxTrainRebaseCycles() int {
 	return e.cfg.MaxTrainRebaseCycles
 }
 
-// capBatch returns the first max items of the batch, preserving entry order
-// (ADR-059 D2 / FR-4). max ≤ 0 means no cap. Capping to the first N bounds the
-// worst-case bisection cost if the batch turns out red.
+// capBatch returns the first max items of the batch. Its caller
+// (groupQueuedByRepoAndBase, engine/poll.go) sorts items ascending by
+// (StatusEnteredAt, Number) before this ever runs, so "first max" means the max
+// members that have waited longest to enter Queued — the ADR-059 D2 / FR-4
+// "ordered by entry" intent, now actually enforced (#1833, ADR-1833) rather than
+// merely asserted: before that fix, this comment claimed an ordering the caller
+// never established, and the items it received were whatever order the
+// board-state source (commonly a randomized in-memory map iteration) happened to
+// produce. max ≤ 0 means no cap. Capping to the first N bounds the worst-case
+// bisection cost if the batch turns out red.
 func capBatch(items []gh.ProjectItem, max int) []gh.ProjectItem {
 	if max <= 0 || len(items) <= max {
 		return items
