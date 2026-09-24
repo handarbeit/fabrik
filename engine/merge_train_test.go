@@ -2725,6 +2725,117 @@ func TestMergeTrainWorker_ConflictResolvedByClaude_RecordsRerereResolution(t *te
 	}
 }
 
+// TestRunMergeTrainWorker_InvokesRerereGC is ADR-1834's Requirement 5 pruning half:
+// runMergeTrainWorker actually invokes `git rerere gc` (previously nothing in the
+// codebase did, making gc.rerereResolved/gc.rerereUnresolved's default expiries
+// moot). Rather than merely asserting the call doesn't error (which a stray
+// unconditional no-op could also satisfy), this seeds a completed resolution,
+// backdates its rr-cache entry past gc.rerereResolved's default 60-day expiry, and
+// asserts a real worker run (landing an entirely unrelated clean batch) prunes it —
+// the only externally observable proof `git rerere gc` genuinely ran against the
+// worker's own bare clone.
+func TestRunMergeTrainWorker_InvokesRerereGC(t *testing.T) {
+	skipIfNoGit(t)
+	bareDir, srcDir, _, wm := setupTrainRepo(t)
+
+	// Seed a resolved conflict on an unrelated pair of throwaway branches — not part
+	// of the batch the worker will actually process below.
+	seedSHA1 := pushBranchToBare(t, srcDir, bareDir, "fabrik/issue-501", "counter.txt", "from-501\n")
+	seedSHA2 := pushBranchToBare(t, srcDir, bareDir, "fabrik/issue-502", "counter.txt", "from-502\n")
+	baseSHA := strings.TrimSpace(gitOutputDir(t, bareDir, "rev-parse", "refs/remotes/origin/main"))
+
+	seedName := "gc-seed"
+	seedDir, err := wm.EnsureTrainWorktreeAt(seedName, baseSHA)
+	if err != nil {
+		t.Fatalf("EnsureTrainWorktreeAt(seed): %v", err)
+	}
+	mustGit(t, seedDir, "merge", "--no-ff", "--no-edit", seedSHA1)
+	mergeCmd := exec.Command("git", "merge", "--no-ff", "--no-edit", seedSHA2)
+	mergeCmd.Dir = seedDir
+	if out, mergeErr := mergeCmd.CombinedOutput(); mergeErr == nil {
+		t.Fatalf("expected the seed merge to conflict, it succeeded: %s", out)
+	}
+	writeFile(t, filepath.Join(seedDir, "counter.txt"), "resolved\n")
+	mustGit(t, seedDir, "add", "-A")
+	mustGit(t, seedDir, "commit", "--no-edit", "-m", "resolve")
+	if err := wm.CleanupTrainWorktree(seedName, true); err != nil {
+		t.Fatalf("cleaning up seed worktree: %v", err)
+	}
+
+	rrCacheDir := filepath.Join(bareDir, "rr-cache")
+	entries, err := os.ReadDir(rrCacheDir)
+	if err != nil {
+		t.Fatalf("reading rr-cache dir: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("expected the seed resolution to record an rr-cache entry, found none")
+	}
+
+	// Backdate every file under the recorded entry past gc.rerereResolved's default
+	// 60-day expiry, so a real `git rerere gc` has something to prune.
+	backdated := time.Now().Add(-61 * 24 * time.Hour)
+	for _, entry := range entries {
+		entryDir := filepath.Join(rrCacheDir, entry.Name())
+		files, err := os.ReadDir(entryDir)
+		if err != nil {
+			t.Fatalf("reading rr-cache entry dir %s: %v", entryDir, err)
+		}
+		for _, f := range files {
+			p := filepath.Join(entryDir, f.Name())
+			if err := os.Chtimes(p, backdated, backdated); err != nil {
+				t.Fatalf("backdating %s: %v", p, err)
+			}
+		}
+	}
+
+	// An entirely separate, non-conflicting clean batch — the worker landing this has
+	// nothing to do with the seeded (and now stale) resolution above.
+	memberSHA1 := pushBranchToBare(t, srcDir, bareDir, "fabrik/issue-1", "file1.txt", "content1\n")
+	memberSHA2 := pushBranchToBare(t, srcDir, bareDir, "fabrik/issue-2", "file2.txt", "content2\n")
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			switch issueNumber {
+			case 1:
+				return &gh.PRDetails{Number: 10, HeadSHA: memberSHA1, State: "open"}, nil
+			case 2:
+				return &gh.PRDetails{Number: 11, HeadSHA: memberSHA2, State: "open"}, nil
+			}
+			return nil, fmt.Errorf("not found")
+		},
+		createDraftPRFn: func(owner, repo, title, head, base, body string, issueNumber int) (int, error) {
+			return 99, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			tr := true
+			return &tr, "clean", nil
+		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
+		},
+	}
+	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, wm)
+	eng.mu.Lock()
+	eng.worktreeManagers["owner/repo"] = wm
+	eng.mu.Unlock()
+
+	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1"), makeTrainItem(2, "Issue 2")}
+	state := &mergeTrainWorkerState{assembling: true, trialName: fmt.Sprintf("merge-train-repo-%d", time.Now().Unix())}
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
+	eng.store.EnterRepoWorker(mergeTrainKey("owner/repo", "main"))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
+
+	entriesAfter, err := os.ReadDir(rrCacheDir)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("reading rr-cache dir after worker run: %v", err)
+	}
+	if len(entriesAfter) != 0 {
+		t.Errorf("expected the backdated rr-cache entry to be pruned by a real `git rerere gc` run, but %d entr(ies) remain", len(entriesAfter))
+	}
+}
+
 func TestMergeTrainWorker_ConflictResolvedByClaude(t *testing.T) {
 	skipIfNoGit(t)
 	_, srcDir, _, wm := setupTrainRepo(t)

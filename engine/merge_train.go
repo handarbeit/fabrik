@@ -998,6 +998,22 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 	defer func() { <-e.sem }()
 	defer e.finishTrain(trainKey)
 
+	// ADR-1834 Requirement 5: best-effort periodic pruning of the shared rr-cache.
+	// Nothing in the codebase invoked `git rerere gc` before this, so
+	// gc.rerereResolved/gc.rerereUnresolved's default expiries (60d/15d) were moot —
+	// rr-cache would grow unbounded. Once per worker invocation is a low-cost,
+	// sufficient cadence given rr-cache entries are small text blobs and the
+	// merge-train's own observed reuse window is minutes to weeks. Skipped under the
+	// trainValidateFn test seam, mirroring prepareTrainWorker's own base-SHA-pinning
+	// gate immediately above (no real git involved under that seam).
+	if e.trainValidateFn == nil {
+		gcCmd := exec.CommandContext(ctx, "git", "rerere", "gc")
+		gcCmd.Dir = p.wm.BaseDir()
+		if out, gcErr := gcCmd.CombinedOutput(); gcErr != nil {
+			e.logfRepo(repoKey, "merge-train", "warn: git rerere gc failed: %s: %v\n", strings.TrimSpace(string(out)), gcErr)
+		}
+	}
+
 	// Re-form loop: validate, land-on-green, or bisect-eject-reform on red.
 	for {
 		if len(current) == 0 {
