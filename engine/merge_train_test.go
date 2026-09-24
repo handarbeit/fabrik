@@ -7850,6 +7850,111 @@ func TestMergeTrainWorker_GeneratedConflictRegeneratedWithoutClaude(t *testing.T
 	}
 }
 
+// TestMergeTrainWorker_GeneratedConflictRerereReplayForcesFreshRegeneration is
+// ADR-1834's regression test for the interaction it identifies as the single
+// highest-value risk with ADR-1235 (generated-file regeneration): git rerere
+// operates on git merge's conflict machinery with no awareness that a path is
+// a declared generated file, so if a conflict confined to that path was
+// already resolved-and-committed by regenerateAndCommit once, an identical
+// conflict recurring in a later, independent trial must NOT let rerere's
+// silent replay-and-autostage substitute for a fresh regeneration — the
+// replayed content can be stale relative to whatever the trial's current
+// (possibly-different) merged sources now say.
+//
+// Both members' branches fork from the fixture's original main commit — long
+// before source.txt exists at all — so merging either one into a trial forked
+// from ANY later commit on main introduces only "add generated.txt", with no
+// interference from main's own subsequent history. This lets the same two
+// member commits be reused, unmodified, across two trials whose base SHAs
+// pin two different source.txt contents: trial 1 sees "v1\n", trial 2 sees
+// "v2\n". The add/add conflict on generated.txt itself is byte-identical
+// across both trials (same two contributed contents), so git rerere matches
+// and replays trial 1's resolution in trial 2 — the exact condition under
+// test. If resolveTrainConflict trusted that replay instead of forcing a
+// fresh regeneration, trial 2's generated.txt would incorrectly read "v1\n"
+// (trial 1's postimage) instead of "v2\n" (a fresh `cat source.txt` in trial
+// 2's own worktree).
+func TestMergeTrainWorker_GeneratedConflictRerereReplayForcesFreshRegeneration(t *testing.T) {
+	skipIfNoGit(t)
+	bareDir, srcDir, _, wm := setupTrainRepo(t)
+
+	sha1 := pushBranchToBare(t, srcDir, bareDir, "fabrik/issue-1", "generated.txt", "stale-content-from-1\n")
+	sha2 := pushBranchToBare(t, srcDir, bareDir, "fabrik/issue-2", "generated.txt", "stale-content-from-2\n")
+
+	// Two commits on main advance source.txt's content between the two trials —
+	// exactly what the declared regeneration command reads, so a stale
+	// rerere-replayed postimage from trial 1 is observably wrong in trial 2.
+	mustGit(t, srcDir, "checkout", "main")
+	writeFile(t, filepath.Join(srcDir, "source.txt"), "v1\n")
+	mustGit(t, srcDir, "add", "-A")
+	mustGit(t, srcDir, "commit", "-m", "source v1")
+	mustGit(t, srcDir, "push", bareDir, "main:main")
+	baseSHA1 := strings.TrimSpace(gitOutputDir(t, srcDir, "rev-parse", "HEAD"))
+
+	writeFile(t, filepath.Join(srcDir, "source.txt"), "v2\n")
+	mustGit(t, srcDir, "add", "-A")
+	mustGit(t, srcDir, "commit", "-m", "source v2")
+	mustGit(t, srcDir, "push", bareDir, "main:main")
+	baseSHA2 := strings.TrimSpace(gitOutputDir(t, srcDir, "rev-parse", "HEAD"))
+
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, &mockGitHubClient{}, claude, wm)
+	eng.generatedFilesOverride = []generatedFileSpec{
+		{Path: "generated.txt", Command: []string{"sh", "-c", "cat source.txt > generated.txt"}},
+	}
+
+	members := []trainMember{
+		{item: makeTrainItem(1, "Issue 1"), prNum: 10, headSHA: sha1},
+		{item: makeTrainItem(2, "Issue 2"), prNum: 11, headSHA: sha2},
+	}
+
+	p1 := trialParams{owner: "owner", repo: "repo", baseBranch: "main", baseSHA: baseSHA1, wm: wm, holdingStg: holdingStage(eng.cfg)}
+	const trial1Name = "generated-rerere-trial-1"
+	survivors1, _, err := eng.assembleTrialBranch(context.Background(), p1, members, trial1Name)
+	if err != nil {
+		t.Fatalf("assembleTrialBranch (trial 1): %v", err)
+	}
+	if len(survivors1) != 2 {
+		t.Fatalf("expected both members to survive trial 1, got %d", len(survivors1))
+	}
+
+	wtDir1 := wm.trainWorktreeDir(trial1Name)
+	got1, err := os.ReadFile(filepath.Join(wtDir1, "generated.txt"))
+	if err != nil {
+		t.Fatalf("reading trial 1 generated.txt: %v", err)
+	}
+	if string(got1) != "v1\n" {
+		t.Fatalf("trial 1 generated.txt = %q, want %q (fresh regeneration from source.txt=v1)", got1, "v1\n")
+	}
+	if err := wm.CleanupTrainWorktree(trial1Name, true); err != nil {
+		t.Fatalf("cleaning up trial 1: %v", err)
+	}
+
+	p2 := p1
+	p2.baseSHA = baseSHA2
+	const trial2Name = "generated-rerere-trial-2"
+	survivors2, _, err := eng.assembleTrialBranch(context.Background(), p2, members, trial2Name)
+	if err != nil {
+		t.Fatalf("assembleTrialBranch (trial 2): %v", err)
+	}
+	if len(survivors2) != 2 {
+		t.Fatalf("expected both members to survive trial 2, got %d", len(survivors2))
+	}
+	if len(claude.forCommentsCalls) != 0 {
+		t.Errorf("expected Claude never invoked for a generated-only conflict in either trial, got %d call(s)", len(claude.forCommentsCalls))
+	}
+
+	wtDir2 := wm.trainWorktreeDir(trial2Name)
+	got2, err := os.ReadFile(filepath.Join(wtDir2, "generated.txt"))
+	if err != nil {
+		t.Fatalf("reading trial 2 generated.txt: %v", err)
+	}
+	if string(got2) != "v2\n" {
+		t.Errorf("trial 2 generated.txt = %q, want %q — a stale rerere-replayed postimage from trial 1 would incorrectly read %q", got2, "v2\n", "v1\n")
+	}
+	wm.CleanupTrainWorktree(trial2Name, true)
+}
+
 // TestMergeTrainWorker_MixedGeneratedAndNormalConflict verifies FR-5: a conflict whose
 // paths span both a declared generated file and a normal file still dispatches the
 // non-generated portion to Claude, while the generated portion is regenerated instead
