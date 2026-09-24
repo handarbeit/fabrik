@@ -163,6 +163,23 @@ file itself rather than a git diff. A regression test
 non-vacuous the same way as the rest of this issue's tests: disabling the new check
 makes it fail.
 
+**Follow-up hardening found in a second review pass: the marker regex was too broad.**
+`conflictMarkerLineRegex` initially matched any line starting with 7+ of `<`, `=`, `>`,
+or `|` — git's own conflict-marker set. But a bare `=======` (or `|||||||`) line at the
+start of a line is common *legitimate* content: a Markdown setext heading underline, an
+RST section underline, an ASCII-art banner. `pathsStillContainConflictMarkers` scans
+the whole resolved file, so a correctly resolved file that happens to contain such a
+line — unrelated to the original conflict — would be misread as still conflicted and
+the member wrongly ejected. The two boundary markers, `<<<<<<<` and `>>>>>>>`, don't
+have this problem: real prose or code essentially never opens a line with 7+ of either
+character, so their presence alone is reliable evidence of surviving conflict-marker
+text, and a genuine unresolved conflict always includes at least one of them. The fix
+narrows the regex to just those two forms. A regression test
+(`TestMergeTrainWorker_ResolvedFileWithBareEqualsLineNotFlagged`) reproduces the
+false-positive case — a resolved file containing a bare `=======` line and no boundary
+markers — and was confirmed non-vacuous the same way: reverting the regex to its
+original four-pattern form makes it fail.
+
 ## 4. Decision: thread a conflict-specific diagnostic, don't reuse `trainCIDiagnostic`
 
 When a conflict genuinely remains unresolved — whether from a clean-but-incomplete
