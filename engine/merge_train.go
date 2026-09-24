@@ -1262,6 +1262,20 @@ func (e *Engine) assembleTrialBranch(ctx context.Context, p trialParams, members
 			survivors = append(survivors, member)
 			if sha, shaErr := gitRevParse(wtDir, "HEAD"); shaErr == nil {
 				chainHash = p.prefixCache.record(chainHash, member, sha)
+			} else {
+				// Merged, but we couldn't learn the resulting commit SHA to record it.
+				// chainHash must not simply stay put: a later record() call for the next
+				// member would then chain off this member's pre-merge position while the
+				// worktree HEAD actually already contains this member's changes, producing
+				// an entry a future lookup could match without this member actually being
+				// in its member list — a false hit, not just a missed one. Poisoning to ""
+				// (chainHashStep never produces an empty string, and lookup always starts
+				// from c.seed, never "") makes every subsequent record() in this assembly
+				// write an entry no real lookup can ever reach, so nothing past this point
+				// is falsely reusable — only the already-recorded prefix before this member
+				// remains valid.
+				chainHash = ""
+				e.logf(member.item.Number, "merge-train", "warn: could not read merge commit SHA for #%d (%v) — trial-prefix recording disabled for the rest of this assembly\n", member.item.Number, shaErr)
 			}
 			e.logf(member.item.Number, "merge-train", "merged #%d cleanly into trial branch\n", member.item.Number)
 			continue
@@ -1285,6 +1299,11 @@ func (e *Engine) assembleTrialBranch(ctx context.Context, p trialParams, members
 			survivors = append(survivors, member)
 			if sha, shaErr := gitRevParse(wtDir, "HEAD"); shaErr == nil {
 				chainHash = p.prefixCache.record(chainHash, member, sha)
+			} else {
+				// See the identical clean-merge branch above for why chainHash is
+				// poisoned to "" rather than left unadvanced on a rev-parse failure.
+				chainHash = ""
+				e.logf(member.item.Number, "merge-train", "warn: could not read merge commit SHA for #%d (%v) — trial-prefix recording disabled for the rest of this assembly\n", member.item.Number, shaErr)
 			}
 			e.logf(member.item.Number, "merge-train", "conflict for #%d resolved\n", member.item.Number)
 			continue
