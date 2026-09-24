@@ -2643,6 +2643,87 @@ func TestMergeTrainWorker_ZeroSurvivors(t *testing.T) {
 
 // TestMergeTrainWorker_ConflictResolvedByClaude verifies Task 11b: Claude resolves
 // a textual conflict and the resolved member appears in survivors (Task 12).
+// TestMergeTrainWorker_ConflictResolvedByClaude_RecordsRerereResolution locks in
+// ADR-1834's Requirement 2: the code path that commits a Claude-resolved merge
+// conflict goes through a real `git commit` (not a plumbing bypass that would skip
+// rerere's postimage recording), demonstrated — not merely assumed — by asserting an
+// actual rr-cache entry exists in the shared bare clone's git dir afterward. For a
+// bare repo, bareDir IS $GIT_DIR, so <bareDir>/rr-cache is exactly where git records
+// it, and it is that same directory every subsequent trial's worktree shares.
+func TestMergeTrainWorker_ConflictResolvedByClaude_RecordsRerereResolution(t *testing.T) {
+	skipIfNoGit(t)
+	bareDir, srcDir, _, wm := setupTrainRepo(t)
+
+	sha1 := pushBranchToBare(t, srcDir, wm.baseDir, "fabrik/issue-1", "counter.txt", "from-branch-1\n")
+	sha2 := pushBranchToBare(t, srcDir, wm.baseDir, "fabrik/issue-2", "counter.txt", "from-branch-2\n")
+
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			switch issueNumber {
+			case 1:
+				return &gh.PRDetails{Number: 10, HeadSHA: sha1, State: "open"}, nil
+			case 2:
+				return &gh.PRDetails{Number: 11, HeadSHA: sha2, State: "open"}, nil
+			}
+			return nil, fmt.Errorf("not found")
+		},
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) { return 1, nil },
+		createDraftPRFn: func(owner, repo, title, head, base, body string, issueNumber int) (int, error) {
+			return 99, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			tr := true
+			return &tr, "clean", nil
+		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
+		},
+	}
+
+	claude := &mockClaudeInvoker{
+		invokeForCommentsFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			resolvedContent := "from-branch-1\nfrom-branch-2\n"
+			if err := os.WriteFile(filepath.Join(workDir, "counter.txt"), []byte(resolvedContent), 0644); err != nil {
+				return "", false, TokenUsage{}, fmt.Errorf("write resolved file: %w", err)
+			}
+			addCmd := exec.Command("git", "add", "-A")
+			addCmd.Dir = workDir
+			if out, err := addCmd.CombinedOutput(); err != nil {
+				return fmt.Sprintf("git add failed: %s", out), false, TokenUsage{}, nil
+			}
+			commitCmd := exec.Command("git", "commit", "--no-edit", "-m",
+				fmt.Sprintf("chore(merge-train): resolve conflict for #%d", issue.Number))
+			commitCmd.Dir = workDir
+			if out, err := commitCmd.CombinedOutput(); err != nil {
+				return fmt.Sprintf("git commit failed: %s", out), false, TokenUsage{}, nil
+			}
+			return "resolved successfully", true, TokenUsage{}, nil
+		},
+	}
+
+	eng := trainTestEngine(t, client, claude, wm)
+	eng.mu.Lock()
+	eng.worktreeManagers["owner/repo"] = wm
+	eng.mu.Unlock()
+
+	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1"), makeTrainItem(2, "Issue 2")}
+	state := &mergeTrainWorkerState{assembling: true, trialName: fmt.Sprintf("merge-train-repo-%d", time.Now().Unix())}
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
+
+	rrCacheDir := filepath.Join(bareDir, "rr-cache")
+	entries, err := os.ReadDir(rrCacheDir)
+	if err != nil {
+		t.Fatalf("reading rr-cache dir %s: %v", rrCacheDir, err)
+	}
+	if len(entries) == 0 {
+		t.Error("expected a recorded rr-cache entry after Claude's resolution went through a real git commit, found none")
+	}
+}
+
 func TestMergeTrainWorker_ConflictResolvedByClaude(t *testing.T) {
 	skipIfNoGit(t)
 	_, srcDir, _, wm := setupTrainRepo(t)
