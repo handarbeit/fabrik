@@ -2200,11 +2200,28 @@ type queuedRepoGroup struct {
 }
 
 // groupQueuedByRepo collects board items in the holding (Queued) column and groups
-// them by owner/repo, preserving first-seen repo order and per-repo entry order. This
-// replaces the former flat cross-repo batch (which anchored the whole set on batch[0]'s
-// repo and would shove repo B's items into repo A's trial branch — a latent multi-repo
-// bug that per-repo grouping also hardens; ADR-059 D-3).
+// them by owner/repo. Within each repo group, members are ordered deterministically —
+// ascending by (StatusEnteredAt, Number), so a member that has waited longest to enter
+// Queued goes first, with issue number as the tie-break (#1833, ADR-1833) — regardless
+// of what order the underlying board-state source (in-memory cache map iteration, or
+// direct GraphQL) hands items back in. This replaces the former flat cross-repo batch
+// (which anchored the whole set on batch[0]'s repo and would shove repo B's items into
+// repo A's trial branch — a latent multi-repo bug that per-repo grouping also hardens;
+// ADR-059 D-3).
 func groupQueuedByRepo(items []gh.ProjectItem, holdingStatus, defaultRepo string) []queuedRepoGroup {
+	groups := groupQueuedItemsByRepoUnordered(items, holdingStatus, defaultRepo)
+	sortQueuedGroupsByEntry(groups)
+	return groups
+}
+
+// groupQueuedItemsByRepoUnordered is groupQueuedByRepo's filtering/grouping core,
+// factored out so groupQueuedByRepoAndBase can partition by base branch before the
+// deterministic sort is applied (sorting after partitioning is what keeps the
+// ordering scoped within each (repo, base) partition — R4). Preserves first-seen
+// repo order and whatever per-repo item order the input arrived in; callers that
+// need a stable member order MUST sort afterward via sortQueuedGroupsByEntry —
+// this function alone does not satisfy Requirement 1.
+func groupQueuedItemsByRepoUnordered(items []gh.ProjectItem, holdingStatus, defaultRepo string) []queuedRepoGroup {
 	var order []string
 	byRepo := make(map[string][]gh.ProjectItem)
 	for _, item := range items {
@@ -2232,6 +2249,26 @@ func groupQueuedByRepo(items []gh.ProjectItem, holdingStatus, defaultRepo string
 		groups = append(groups, queuedRepoGroup{repoKey: key, items: byRepo[key]})
 	}
 	return groups
+}
+
+// sortQueuedGroupsByEntry sorts each group's items in place, ascending by
+// (StatusEnteredAt, Number). Number is unique within a repo, so the comparator is
+// total — the same input permutation always produces the same output order
+// (#1833 AC1). A zero-value StatusEnteredAt (the direct-GraphQL GitHubAdapter path,
+// which has no cheap durable "entered Queued" signal to populate it with — see
+// ADR-1833) sorts before any non-zero time, so items sharing the zero value fall
+// through entirely to Number ordering: deterministic, just not wait-time-ordered.
+func sortQueuedGroupsByEntry(groups []queuedRepoGroup) {
+	for i := range groups {
+		items := groups[i].items
+		sort.Slice(items, func(a, b int) bool {
+			ta, tb := items[a].StatusEnteredAt, items[b].StatusEnteredAt
+			if !ta.Equal(tb) {
+				return ta.Before(tb)
+			}
+			return items[a].Number < items[b].Number
+		})
+	}
 }
 
 // groupQueuedByRepoAndBase further partitions each of groupQueuedByRepo's
@@ -2286,7 +2323,7 @@ func groupQueuedByRepo(items []gh.ProjectItem, holdingStatus, defaultRepo string
 // hydrated — no operator action required. See ADR-1772.
 func (e *Engine) groupQueuedByRepoAndBase(items []gh.ProjectItem, holdingStatus, defaultRepo string) []queuedRepoGroup {
 	var out []queuedRepoGroup
-	for _, rg := range groupQueuedByRepo(items, holdingStatus, defaultRepo) {
+	for _, rg := range groupQueuedItemsByRepoUnordered(items, holdingStatus, defaultRepo) {
 		var baseOrder []string
 		byBase := make(map[string][]gh.ProjectItem)
 		for _, item := range rg.items {
@@ -2328,6 +2365,15 @@ func (e *Engine) groupQueuedByRepoAndBase(items []gh.ProjectItem, holdingStatus,
 				items:    byBase[base],
 			})
 		}
+	}
+	// Sort within each (repo, base) partition, ascending by (StatusEnteredAt, Number) —
+	// #1833. Applied after partitioning so ordering never crosses a partition boundary
+	// (ADR-1648 R4). Skippable only via mergeTrainQueueSortDisabledForTest, a narrow
+	// production-code seam that lets a sim scenario reproduce the pre-#1833 churn (an
+	// unsorted batch selection differing across polls) and then demonstrate it gone —
+	// AC3's "shown non-vacuous by neutralising the sort". Never disabled outside tests.
+	if !e.mergeTrainQueueSortDisabledForTest {
+		sortQueuedGroupsByEntry(out)
 	}
 	return out
 }

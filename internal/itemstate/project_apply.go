@@ -2,6 +2,7 @@ package itemstate
 
 import (
 	"reflect"
+	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
 )
@@ -44,6 +45,7 @@ func applyProjectItem(item *ItemState, pi gh.ProjectItem) ChangeFlags {
 
 	if item.Status != pi.Status {
 		item.Status = pi.Status
+		item.StatusEnteredAt = time.Now()
 		flags |= StatusChanged
 	}
 
@@ -167,6 +169,7 @@ func applyShallowItem(item *ItemState, pi gh.ProjectItem) ChangeFlags {
 	if item.Status != pi.Status {
 		item.Status = pi.Status
 		item.Terminal = false
+		item.StatusEnteredAt = time.Now()
 		flags |= StatusChanged
 	}
 
@@ -204,6 +207,7 @@ func applyProbeItem(item *ItemState, pi gh.BoardProbeItem) ChangeFlags {
 	if item.Status != pi.Status {
 		item.Status = pi.Status
 		item.Terminal = false
+		item.StatusEnteredAt = time.Now()
 		flags |= StatusChanged
 	}
 
