@@ -140,6 +140,29 @@ ever called for the plain and mixed cases — this issue's changes are inside th
 branch only, and never change the dispatch decision itself. A conflict rerere fully
 replays still short-circuits with no Claude invocation at all, exactly as before.
 
+**Hardening found in review: a "resolved" index doesn't prove marker-free content.**
+`unmergedPaths` (`git status --porcelain`) clears a path's `UU` status as soon as it is
+`git add`ed — regardless of whether the staged content still contains literal
+conflict-marker text. By the point `finalizeConflictResolution` runs its plain-case
+`git diff --check` (no `--cached`), every originally conflicted path has therefore
+already been staged (that's what cleared its `UU` status), so the working tree and the
+index are already identical and the check compares two copies that can never differ —
+it is a structural no-op precisely when it matters most, and more likely to matter now
+that a turn-limited exit (Claude cut off mid-resolution) also reaches this code path.
+`regenerateAndCommit` already worked around the staged half of this with `git diff
+--cached --check` (see its own doc comment); this issue's plain case additionally needed
+to cover the *already-committed* case, since the plain-case prompt's own step 4
+instructs Claude to commit itself, which is the most common path here. The fix is a
+direct on-disk content scan, `pathsStillContainConflictMarkers`, checked against
+`originalNonGeneratedPaths` right after the abort-disambiguation block (so it covers
+both the plain and mixed cases with one check, ahead of the mixed case's early return) —
+immune to whether the content has since been staged or committed, since it reads the
+file itself rather than a git diff. A regression test
+(`TestMergeTrainWorker_ConflictStagedMarkersNotCommitted`) reproduces the exact gap
+(Claude stages and commits a file that still contains marker text) and was confirmed
+non-vacuous the same way as the rest of this issue's tests: disabling the new check
+makes it fail.
+
 ## 4. Decision: thread a conflict-specific diagnostic, don't reuse `trainCIDiagnostic`
 
 When a conflict genuinely remains unresolved — whether from a clean-but-incomplete
