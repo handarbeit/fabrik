@@ -2634,7 +2634,18 @@ func (e *Engine) finalizeConflictResolution(memberItem gh.ProjectItem, trainWork
 // "=======" separator on its own (already excluded before this change; see the
 // now-superseded single-line matcher this replaces) — without requiring a base-branch
 // diff to determine which marker lines are new.
-var conflictMarkerBlockRegex = regexp.MustCompile(`(?m)^<{7}[^\n]*\n(?:.*\n)*?^={7}\n(?:.*\n)*?^>{7}`)
+//
+// The separator line is matched as "^={7}\r?\n" rather than "^={7}\n": a target repo
+// with CRLF line endings (common in Windows-origin repos, or any repo whose
+// .gitattributes declares eol=crlf) has "=======\r\n" for this line, and the literal
+// "\n" anchor immediately after the seven "=" characters would never match the "\r"
+// that sits between them — silently failing to detect a genuine unresolved conflict
+// block in exactly the case a turn-limited exit makes more likely to matter. Flagged in
+// review of #1841. The "<{7}[^\n]*\n" and "(?:.*\n)*?" spans don't need the same
+// treatment: "[^\n]*" and "." already absorb a "\r" that precedes "\n" as ordinary line
+// content, since neither excludes it — only the anchors that require an exact,
+// zero-width transition from the marker text straight to "\n" are affected.
+var conflictMarkerBlockRegex = regexp.MustCompile(`(?m)^<{7}[^\n]*\n(?:.*\n)*?^={7}\r?\n(?:.*\n)*?^>{7}`)
 
 // pathsStillContainConflictMarkers scans each of paths' current on-disk content in dir
 // for a complete conflict-marker block (see conflictMarkerBlockRegex) and returns the

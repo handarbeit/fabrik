@@ -202,6 +202,27 @@ resolved file containing a lone quoted `<<<<<<<` line with no accompanying separ
 opposing boundary, and was confirmed non-vacuous the same way: reverting to the
 boundary-line-only regex makes it fail.
 
+**Fourth hardening pass: the block regex silently missed CRLF line endings.**
+`conflictMarkerBlockRegex`'s separator span was anchored as `^={7}\n` — an exact,
+zero-width transition from the seventh `=` straight to a line feed. A target repo with
+CRLF line endings (common in Windows-origin repos, or any repo whose `.gitattributes`
+declares `eol=crlf`) has `=======\r\n` for that line: the `\r` sits between the `=`
+characters and the `\n` the anchor requires, so the anchor never matches and a
+genuinely unresolved, CRLF-terminated conflict block goes undetected — the resolution
+is committed and reaches the trial's own CI instead of being caught here, exactly the
+outcome this whole check exists to prevent, and more likely to matter now that a
+turn-limited exit reaches this code path too. The boundary spans (`<{7}[^\n]*\n` and
+the two `(?:.*\n)*?` spans) don't share this problem, since `[^\n]*` and `.` already
+absorb a `\r` that precedes `\n` as ordinary line content — only the anchor requiring an
+*exact* marker-to-newline transition is affected. The fix changes that one anchor to
+`^={7}\r?\n`. A direct unit test (`TestPathsStillContainConflictMarkers_CRLF`, testing
+`pathsStillContainConflictMarkers` directly rather than through the full merge-train
+worker, since the CRLF distinction is a property of the on-disk bytes and needs no
+worker-level scaffolding to exercise) covers both a CRLF-terminated file with a complete
+conflict-marker block (must be flagged) and a CRLF-terminated file with no markers at
+all (must not be), and was confirmed non-vacuous the same way as the rest of this
+issue's tests: reverting the anchor to `^={7}\n` makes the conflicted case fail.
+
 ## 4. Decision: thread a conflict-specific diagnostic, don't reuse `trainCIDiagnostic`
 
 When a conflict genuinely remains unresolved — whether from a clean-but-incomplete

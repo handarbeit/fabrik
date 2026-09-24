@@ -3028,6 +3028,42 @@ func TestMergeTrainWorker_ResolvedFileWithLoneBoundaryMarkerNotFlagged(t *testin
 	}
 }
 
+// TestPathsStillContainConflictMarkers_CRLF guards against a gap flagged in review of
+// PR #1843: conflictMarkerBlockRegex's separator span was anchored as "^={7}\n", which
+// never matches a CRLF-terminated "=======\r\n" line — common in Windows-origin repos
+// or any repo whose .gitattributes declares eol=crlf. A file that still holds a
+// complete, CRLF-terminated conflict-marker block must be detected exactly as a
+// LF-terminated one would be; a CRLF-terminated file with no conflict markers at all
+// must not be flagged either.
+func TestPathsStillContainConflictMarkers_CRLF(t *testing.T) {
+	dir := t.TempDir()
+
+	stillConflicted := "<<<<<<< HEAD\r\nbranch1-value\r\n=======\r\nbranch2-value\r\n>>>>>>> incoming\r\n"
+	if err := os.WriteFile(filepath.Join(dir, "conflicted.txt"), []byte(stillConflicted), 0644); err != nil {
+		t.Fatalf("write conflicted.txt: %v", err)
+	}
+
+	resolved := "Counter\r\nfrom-branch-1\r\nfrom-branch-2\r\n"
+	if err := os.WriteFile(filepath.Join(dir, "resolved.txt"), []byte(resolved), 0644); err != nil {
+		t.Fatalf("write resolved.txt: %v", err)
+	}
+
+	found := pathsStillContainConflictMarkers(dir, []string{"conflicted.txt", "resolved.txt"})
+
+	foundConflicted := false
+	for _, p := range found {
+		if p == "conflicted.txt" {
+			foundConflicted = true
+		}
+		if p == "resolved.txt" {
+			t.Errorf("resolved.txt (CRLF, no conflict markers) must not be flagged, found=%v", found)
+		}
+	}
+	if !foundConflicted {
+		t.Errorf("conflicted.txt (CRLF conflict-marker block) must be flagged as still conflicted, found=%v", found)
+	}
+}
+
 // TestMergeTrainWorker_ConflictResolutionNoResume verifies #1841 Requirement 5: every
 // merge-train conflict-resolution invocation sets InvokeOptions.NoResume, since each
 // attempt runs in a fresh, ephemeral trial worktree that has no meaningful prior
