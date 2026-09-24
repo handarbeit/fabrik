@@ -411,7 +411,35 @@ func (wm *WorktreeManager) ensureTrainWorktreeFromRef(name, baseRef string) (str
 		return "", fmt.Errorf("creating train worktree: %s: %w", string(out), err)
 	}
 
+	enableTrainWorktreeRerere(wm.baseDir, wtDir, wm.logf)
+
 	return wtDir, nil
+}
+
+// enableTrainWorktreeRerere scopes git rerere ("reuse recorded resolution") to this
+// merge-train trial worktree only, via git's per-worktree config extension
+// (extensions.worktreeConfig, Git 2.20+) — a regular per-issue worktree off the same
+// bare clone (EnsureWorktree) never gets rerere.enabled set, so a Validate-stage
+// rebase conflict is unaffected (ADR-1834, Requirement 1). The rr-cache itself needs
+// no separate scoping to be shared/durable: for a bare repo, bareDir IS $GIT_DIR, so
+// <bareDir>/rr-cache is already common to every trial worktree and untouched by
+// CleanupTrainWorktree, which never removes bareDir itself. Best-effort throughout —
+// a failure here never fails worktree creation, since a trial can always fall back to
+// full Claude-driven conflict resolution with no recorded history to replay from.
+func enableTrainWorktreeRerere(bareDir, wtDir string, logf func(int, string, string, ...any)) {
+	extCmd := exec.Command("git", "config", "extensions.worktreeConfig", "true")
+	extCmd.Dir = bareDir
+	if out, err := extCmd.CombinedOutput(); err != nil {
+		logf(0, "merge-train", "warn: could not enable extensions.worktreeConfig for rerere: %s\n", strings.TrimSpace(string(out)))
+		return
+	}
+	for _, kv := range [][2]string{{"rerere.enabled", "true"}, {"rerere.autoupdate", "true"}} {
+		cmd := exec.Command("git", "config", "--worktree", kv[0], kv[1])
+		cmd.Dir = wtDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			logf(0, "merge-train", "warn: could not set %s for trial worktree %s: %s\n", kv[0], wtDir, strings.TrimSpace(string(out)))
+		}
+	}
 }
 
 // PushTrainBranch pushes the trial branch to origin.

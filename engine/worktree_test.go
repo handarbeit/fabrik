@@ -653,3 +653,50 @@ func TestEnsureWorktree_ExistingBranch(t *testing.T) {
 		t.Fatal("worktree dir not created")
 	}
 }
+
+// worktreeConfigValue reads a config key via `git config --worktree --get <key>` inside
+// wtDir, returning ("", false) when the key is unset in that worktree's own config
+// (a non-zero exit, distinguishing "unset" from a genuine error is not needed here —
+// callers only care about presence/value).
+func worktreeConfigValue(t *testing.T, wtDir, key string) (string, bool) {
+	t.Helper()
+	cmd := exec.Command("git", "config", "--worktree", "--get", key)
+	cmd.Dir = wtDir
+	out, err := cmd.Output()
+	if err != nil {
+		return "", false
+	}
+	return strings.TrimSpace(string(out)), true
+}
+
+// TestEnableTrainWorktreeRerere_ScopedToTrialWorktrees locks in Requirement 1's
+// scoping decision (ADR-1834): rerere is enabled via git's per-worktree config
+// extension for merge-train trial worktrees only — a regular per-issue worktree off
+// the same bare clone must never see rerere.enabled set, so a Validate-stage rebase
+// conflict is unaffected. ensureTrainWorktreeFromRef is the single production+test
+// call site behind both EnsureTrainWorktree and EnsureTrainWorktreeAt, so this test
+// also confirms setupTrainRepo's hand-rolled bare-clone fixture (which never calls
+// ensureBareClone) exercises the same enablement path as production.
+func TestEnableTrainWorktreeRerere_ScopedToTrialWorktrees(t *testing.T) {
+	_, _, _, wm := setupTrainRepo(t)
+
+	const trialName = "rerere-scope-trial"
+	trialDir, err := wm.EnsureTrainWorktree(trialName, "main")
+	if err != nil {
+		t.Fatalf("EnsureTrainWorktree: %v", err)
+	}
+	if v, ok := worktreeConfigValue(t, trialDir, "rerere.enabled"); !ok || v != "true" {
+		t.Errorf("trial worktree rerere.enabled = %q, ok=%v; want true, true", v, ok)
+	}
+	if v, ok := worktreeConfigValue(t, trialDir, "rerere.autoupdate"); !ok || v != "true" {
+		t.Errorf("trial worktree rerere.autoupdate = %q, ok=%v; want true, true", v, ok)
+	}
+
+	issueDir, err := wm.EnsureWorktree(1834, "main", false)
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+	if v, ok := worktreeConfigValue(t, issueDir, "rerere.enabled"); ok {
+		t.Errorf("regular per-issue worktree unexpectedly has rerere.enabled = %q; want unset", v)
+	}
+}
