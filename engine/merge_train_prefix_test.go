@@ -210,6 +210,55 @@ func TestTrainPrefixCache_RecordThenLookup_RealGit(t *testing.T) {
 	c.cleanup()
 }
 
+// TestTrainPrefixCache_DifferentPinnedBase_ProducesIndependentNonInterferingChains is
+// Acceptance 3's real-git half: two caches for the same trainKey (as a base-moved
+// restart would produce — same partition, a later invocation pinned to a different
+// base SHA) never share a chain — a member recorded under one base is never found
+// under the other, and their protective refs coexist under the same trainKey ref
+// directory without colliding (different chain hashes from different seeds).
+func TestTrainPrefixCache_DifferentPinnedBase_ProducesIndependentNonInterferingChains(t *testing.T) {
+	_, srcDir, _, wm := setupTrainRepo(t)
+	baseSHA1 := strings.TrimSpace(gitOutputDir(t, srcDir, "rev-parse", "HEAD"))
+
+	// Advance main so a later invocation for the same trainKey pins a different base
+	// SHA — the "main moved between polls" case (ADR-059 D5).
+	writeFile(t, srcDir+"/advance.txt", "main moved\n")
+	mustGit(t, srcDir, "add", "-A")
+	mustGit(t, srcDir, "commit", "-m", "advance main")
+	mustGit(t, srcDir, "push", wm.baseDir, "main:main")
+	baseSHA2 := strings.TrimSpace(gitOutputDir(t, srcDir, "rev-parse", "HEAD"))
+	if baseSHA1 == baseSHA2 {
+		t.Fatal("setup failed: expected the second base SHA to differ from the first")
+	}
+
+	trainKey := "owner/repo:main"
+	m1 := trainMember{item: makeTrainItem(1, "one"), headSHA: "h1"}
+
+	c1 := newTrainPrefixCache(trainKey, baseSHA1, wm.baseDir, false)
+	_, _, h0c1 := c1.lookup(nil)
+	c1.record(h0c1, m1, baseSHA1)
+
+	c2 := newTrainPrefixCache(trainKey, baseSHA2, wm.baseDir, false)
+	// A fresh invocation always sweeps stale refs for its own trainKey before use —
+	// this must NOT remove c1's still-live ref, since c1 hasn't called cleanup() yet
+	// (modeling two invocations whose lifetimes momentarily overlap in this test,
+	// even though in production the in-flight guard serializes them).
+	matchedLen, _, _ := c2.lookup([]trainMember{m1})
+	if matchedLen != 0 {
+		t.Errorf("expected a cache pinned to a different base SHA to find zero reusable prefix for a member recorded under the other base, got matchedLen=%d", matchedLen)
+	}
+
+	// c1's own chain is unaffected by c2 having been constructed (no shared mutable
+	// state beyond the git refs, which live at different paths since h0 differs).
+	matchedLen, commitSHA, _ := c1.lookup([]trainMember{m1})
+	if matchedLen != 1 || commitSHA != baseSHA1 {
+		t.Errorf("expected c1's own chain to still resolve after c2 was constructed, got matchedLen=%d commitSHA=%q", matchedLen, commitSHA)
+	}
+
+	c1.cleanup()
+	c2.cleanup()
+}
+
 // TestTrainPrefixCache_GCSurvival is Acceptance 4: a reused commit survives
 // `git gc --prune=now` in the bare clone for as long as it is still protected by a
 // ref, and the ref is removed once cleanup() runs.
