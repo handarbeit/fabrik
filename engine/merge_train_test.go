@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1980,6 +1981,11 @@ func setupTrainRepo(t *testing.T) (bareDir, srcDir, worktreeRoot string, wm *Wor
 	mustGitDir(t, bareDir, "remote", "set-head", "origin", "--auto")
 	mustGitDir(t, bareDir, "config", "user.email", "test@test.com")
 	mustGitDir(t, bareDir, "config", "user.name", "Test")
+	// Repo-wide rerere enablement — mirrors ensureBareClone's own enableRerere step
+	// (ADR-1834), so merge-train conflict-replay tests exercise the same git
+	// behavior here as in production.
+	mustGitDir(t, bareDir, "config", "rerere.enabled", "true")
+	mustGitDir(t, bareDir, "config", "rerere.autoupdate", "true")
 
 	wm = NewWorktreeManagerForRepo(bareDir, worktreeRoot, "test-repo")
 	wm.logfFn = func(n int, tag, format string, args ...any) {
@@ -2638,6 +2644,198 @@ func TestMergeTrainWorker_ZeroSurvivors(t *testing.T) {
 
 // TestMergeTrainWorker_ConflictResolvedByClaude verifies Task 11b: Claude resolves
 // a textual conflict and the resolved member appears in survivors (Task 12).
+// TestMergeTrainWorker_ConflictResolvedByClaude_RecordsRerereResolution locks in
+// ADR-1834's Requirement 2: the code path that commits a Claude-resolved merge
+// conflict goes through a real `git commit` (not a plumbing bypass that would skip
+// rerere's postimage recording), demonstrated — not merely assumed — by asserting an
+// actual rr-cache entry exists in the shared bare clone's git dir afterward. For a
+// bare repo, bareDir IS $GIT_DIR, so <bareDir>/rr-cache is exactly where git records
+// it, and it is that same directory every subsequent trial's worktree shares.
+func TestMergeTrainWorker_ConflictResolvedByClaude_RecordsRerereResolution(t *testing.T) {
+	skipIfNoGit(t)
+	bareDir, srcDir, _, wm := setupTrainRepo(t)
+
+	sha1 := pushBranchToBare(t, srcDir, wm.baseDir, "fabrik/issue-1", "counter.txt", "from-branch-1\n")
+	sha2 := pushBranchToBare(t, srcDir, wm.baseDir, "fabrik/issue-2", "counter.txt", "from-branch-2\n")
+
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			switch issueNumber {
+			case 1:
+				return &gh.PRDetails{Number: 10, HeadSHA: sha1, State: "open"}, nil
+			case 2:
+				return &gh.PRDetails{Number: 11, HeadSHA: sha2, State: "open"}, nil
+			}
+			return nil, fmt.Errorf("not found")
+		},
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) { return 1, nil },
+		createDraftPRFn: func(owner, repo, title, head, base, body string, issueNumber int) (int, error) {
+			return 99, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			tr := true
+			return &tr, "clean", nil
+		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
+		},
+	}
+
+	claude := &mockClaudeInvoker{
+		invokeForCommentsFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			resolvedContent := "from-branch-1\nfrom-branch-2\n"
+			if err := os.WriteFile(filepath.Join(workDir, "counter.txt"), []byte(resolvedContent), 0644); err != nil {
+				return "", false, TokenUsage{}, fmt.Errorf("write resolved file: %w", err)
+			}
+			addCmd := exec.Command("git", "add", "-A")
+			addCmd.Dir = workDir
+			if out, err := addCmd.CombinedOutput(); err != nil {
+				return fmt.Sprintf("git add failed: %s", out), false, TokenUsage{}, nil
+			}
+			commitCmd := exec.Command("git", "commit", "--no-edit", "-m",
+				fmt.Sprintf("chore(merge-train): resolve conflict for #%d", issue.Number))
+			commitCmd.Dir = workDir
+			if out, err := commitCmd.CombinedOutput(); err != nil {
+				return fmt.Sprintf("git commit failed: %s", out), false, TokenUsage{}, nil
+			}
+			return "resolved successfully", true, TokenUsage{}, nil
+		},
+	}
+
+	eng := trainTestEngine(t, client, claude, wm)
+	eng.mu.Lock()
+	eng.worktreeManagers["owner/repo"] = wm
+	eng.mu.Unlock()
+
+	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1"), makeTrainItem(2, "Issue 2")}
+	state := &mergeTrainWorkerState{assembling: true, trialName: fmt.Sprintf("merge-train-repo-%d", time.Now().Unix())}
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
+
+	rrCacheDir := filepath.Join(bareDir, "rr-cache")
+	entries, err := os.ReadDir(rrCacheDir)
+	if err != nil {
+		t.Fatalf("reading rr-cache dir %s: %v", rrCacheDir, err)
+	}
+	if len(entries) == 0 {
+		t.Error("expected a recorded rr-cache entry after Claude's resolution went through a real git commit, found none")
+	}
+}
+
+// TestRunMergeTrainWorker_InvokesRerereGC is ADR-1834's Requirement 5 pruning half:
+// runMergeTrainWorker actually invokes `git rerere gc` (previously nothing in the
+// codebase did, making gc.rerereResolved/gc.rerereUnresolved's default expiries
+// moot). Rather than merely asserting the call doesn't error (which a stray
+// unconditional no-op could also satisfy), this seeds a completed resolution,
+// backdates its rr-cache entry past gc.rerereResolved's default 60-day expiry, and
+// asserts a real worker run (landing an entirely unrelated clean batch) prunes it —
+// the only externally observable proof `git rerere gc` genuinely ran against the
+// worker's own bare clone.
+func TestRunMergeTrainWorker_InvokesRerereGC(t *testing.T) {
+	skipIfNoGit(t)
+	bareDir, srcDir, _, wm := setupTrainRepo(t)
+
+	// Seed a resolved conflict on an unrelated pair of throwaway branches — not part
+	// of the batch the worker will actually process below.
+	seedSHA1 := pushBranchToBare(t, srcDir, bareDir, "fabrik/issue-501", "counter.txt", "from-501\n")
+	seedSHA2 := pushBranchToBare(t, srcDir, bareDir, "fabrik/issue-502", "counter.txt", "from-502\n")
+	baseSHA := strings.TrimSpace(gitOutputDir(t, bareDir, "rev-parse", "refs/remotes/origin/main"))
+
+	seedName := "gc-seed"
+	seedDir, err := wm.EnsureTrainWorktreeAt(seedName, baseSHA)
+	if err != nil {
+		t.Fatalf("EnsureTrainWorktreeAt(seed): %v", err)
+	}
+	mustGit(t, seedDir, "merge", "--no-ff", "--no-edit", seedSHA1)
+	mergeCmd := exec.Command("git", "merge", "--no-ff", "--no-edit", seedSHA2)
+	mergeCmd.Dir = seedDir
+	if out, mergeErr := mergeCmd.CombinedOutput(); mergeErr == nil {
+		t.Fatalf("expected the seed merge to conflict, it succeeded: %s", out)
+	}
+	writeFile(t, filepath.Join(seedDir, "counter.txt"), "resolved\n")
+	mustGit(t, seedDir, "add", "-A")
+	mustGit(t, seedDir, "commit", "--no-edit", "-m", "resolve")
+	if err := wm.CleanupTrainWorktree(seedName, true); err != nil {
+		t.Fatalf("cleaning up seed worktree: %v", err)
+	}
+
+	rrCacheDir := filepath.Join(bareDir, "rr-cache")
+	entries, err := os.ReadDir(rrCacheDir)
+	if err != nil {
+		t.Fatalf("reading rr-cache dir: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("expected the seed resolution to record an rr-cache entry, found none")
+	}
+
+	// Backdate every file under the recorded entry past gc.rerereResolved's default
+	// 60-day expiry, so a real `git rerere gc` has something to prune.
+	backdated := time.Now().Add(-61 * 24 * time.Hour)
+	for _, entry := range entries {
+		entryDir := filepath.Join(rrCacheDir, entry.Name())
+		files, err := os.ReadDir(entryDir)
+		if err != nil {
+			t.Fatalf("reading rr-cache entry dir %s: %v", entryDir, err)
+		}
+		for _, f := range files {
+			p := filepath.Join(entryDir, f.Name())
+			if err := os.Chtimes(p, backdated, backdated); err != nil {
+				t.Fatalf("backdating %s: %v", p, err)
+			}
+		}
+	}
+
+	// An entirely separate, non-conflicting clean batch — the worker landing this has
+	// nothing to do with the seeded (and now stale) resolution above.
+	memberSHA1 := pushBranchToBare(t, srcDir, bareDir, "fabrik/issue-1", "file1.txt", "content1\n")
+	memberSHA2 := pushBranchToBare(t, srcDir, bareDir, "fabrik/issue-2", "file2.txt", "content2\n")
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			switch issueNumber {
+			case 1:
+				return &gh.PRDetails{Number: 10, HeadSHA: memberSHA1, State: "open"}, nil
+			case 2:
+				return &gh.PRDetails{Number: 11, HeadSHA: memberSHA2, State: "open"}, nil
+			}
+			return nil, fmt.Errorf("not found")
+		},
+		createDraftPRFn: func(owner, repo, title, head, base, body string, issueNumber int) (int, error) {
+			return 99, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			tr := true
+			return &tr, "clean", nil
+		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
+		},
+	}
+	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, wm)
+	eng.mu.Lock()
+	eng.worktreeManagers["owner/repo"] = wm
+	eng.mu.Unlock()
+
+	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1"), makeTrainItem(2, "Issue 2")}
+	state := &mergeTrainWorkerState{assembling: true, trialName: fmt.Sprintf("merge-train-repo-%d", time.Now().Unix())}
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
+	eng.store.EnterRepoWorker(mergeTrainKey("owner/repo", "main"))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
+
+	entriesAfter, err := os.ReadDir(rrCacheDir)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("reading rr-cache dir after worker run: %v", err)
+	}
+	if len(entriesAfter) != 0 {
+		t.Errorf("expected the backdated rr-cache entry to be pruned by a real `git rerere gc` run, but %d entr(ies) remain", len(entriesAfter))
+	}
+}
+
 func TestMergeTrainWorker_ConflictResolvedByClaude(t *testing.T) {
 	skipIfNoGit(t)
 	_, srcDir, _, wm := setupTrainRepo(t)
@@ -7764,6 +7962,383 @@ func TestMergeTrainWorker_GeneratedConflictRegeneratedWithoutClaude(t *testing.T
 	}
 }
 
+// TestMergeTrainWorker_GeneratedConflictRerereReplayForcesFreshRegeneration is
+// ADR-1834's regression test for the interaction it identifies as the single
+// highest-value risk with ADR-1235 (generated-file regeneration): git rerere
+// operates on git merge's conflict machinery with no awareness that a path is
+// a declared generated file, so if a conflict confined to that path was
+// already resolved-and-committed by regenerateAndCommit once, an identical
+// conflict recurring in a later, independent trial must NOT let rerere's
+// silent replay-and-autostage substitute for a fresh regeneration — the
+// replayed content can be stale relative to whatever the trial's current
+// (possibly-different) merged sources now say.
+//
+// Both members' branches fork from the fixture's original main commit — long
+// before source.txt exists at all — so merging either one into a trial forked
+// from ANY later commit on main introduces only "add generated.txt", with no
+// interference from main's own subsequent history. This lets the same two
+// member commits be reused, unmodified, across two trials whose base SHAs
+// pin two different source.txt contents: trial 1 sees "v1\n", trial 2 sees
+// "v2\n". The add/add conflict on generated.txt itself is byte-identical
+// across both trials (same two contributed contents), so git rerere matches
+// and replays trial 1's resolution in trial 2 — the exact condition under
+// test. If resolveTrainConflict trusted that replay instead of forcing a
+// fresh regeneration, trial 2's generated.txt would incorrectly read "v1\n"
+// (trial 1's postimage) instead of "v2\n" (a fresh `cat source.txt` in trial
+// 2's own worktree).
+func TestMergeTrainWorker_GeneratedConflictRerereReplayForcesFreshRegeneration(t *testing.T) {
+	skipIfNoGit(t)
+	bareDir, srcDir, _, wm := setupTrainRepo(t)
+
+	sha1 := pushBranchToBare(t, srcDir, bareDir, "fabrik/issue-1", "generated.txt", "stale-content-from-1\n")
+	sha2 := pushBranchToBare(t, srcDir, bareDir, "fabrik/issue-2", "generated.txt", "stale-content-from-2\n")
+
+	// Two commits on main advance source.txt's content between the two trials —
+	// exactly what the declared regeneration command reads, so a stale
+	// rerere-replayed postimage from trial 1 is observably wrong in trial 2.
+	mustGit(t, srcDir, "checkout", "main")
+	writeFile(t, filepath.Join(srcDir, "source.txt"), "v1\n")
+	mustGit(t, srcDir, "add", "-A")
+	mustGit(t, srcDir, "commit", "-m", "source v1")
+	mustGit(t, srcDir, "push", bareDir, "main:main")
+	baseSHA1 := strings.TrimSpace(gitOutputDir(t, srcDir, "rev-parse", "HEAD"))
+
+	writeFile(t, filepath.Join(srcDir, "source.txt"), "v2\n")
+	mustGit(t, srcDir, "add", "-A")
+	mustGit(t, srcDir, "commit", "-m", "source v2")
+	mustGit(t, srcDir, "push", bareDir, "main:main")
+	baseSHA2 := strings.TrimSpace(gitOutputDir(t, srcDir, "rev-parse", "HEAD"))
+
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, &mockGitHubClient{}, claude, wm)
+	eng.generatedFilesOverride = []generatedFileSpec{
+		{Path: "generated.txt", Command: []string{"sh", "-c", "cat source.txt > generated.txt"}},
+	}
+
+	members := []trainMember{
+		{item: makeTrainItem(1, "Issue 1"), prNum: 10, headSHA: sha1},
+		{item: makeTrainItem(2, "Issue 2"), prNum: 11, headSHA: sha2},
+	}
+
+	p1 := trialParams{owner: "owner", repo: "repo", baseBranch: "main", baseSHA: baseSHA1, wm: wm, holdingStg: holdingStage(eng.cfg)}
+	const trial1Name = "generated-rerere-trial-1"
+	survivors1, _, err := eng.assembleTrialBranch(context.Background(), p1, members, trial1Name)
+	if err != nil {
+		t.Fatalf("assembleTrialBranch (trial 1): %v", err)
+	}
+	if len(survivors1) != 2 {
+		t.Fatalf("expected both members to survive trial 1, got %d", len(survivors1))
+	}
+
+	wtDir1 := wm.trainWorktreeDir(trial1Name)
+	got1, err := os.ReadFile(filepath.Join(wtDir1, "generated.txt"))
+	if err != nil {
+		t.Fatalf("reading trial 1 generated.txt: %v", err)
+	}
+	if string(got1) != "v1\n" {
+		t.Fatalf("trial 1 generated.txt = %q, want %q (fresh regeneration from source.txt=v1)", got1, "v1\n")
+	}
+	if err := wm.CleanupTrainWorktree(trial1Name, true); err != nil {
+		t.Fatalf("cleaning up trial 1: %v", err)
+	}
+
+	p2 := p1
+	p2.baseSHA = baseSHA2
+	const trial2Name = "generated-rerere-trial-2"
+	survivors2, _, err := eng.assembleTrialBranch(context.Background(), p2, members, trial2Name)
+	if err != nil {
+		t.Fatalf("assembleTrialBranch (trial 2): %v", err)
+	}
+	if len(survivors2) != 2 {
+		t.Fatalf("expected both members to survive trial 2, got %d", len(survivors2))
+	}
+	if len(claude.forCommentsCalls) != 0 {
+		t.Errorf("expected Claude never invoked for a generated-only conflict in either trial, got %d call(s)", len(claude.forCommentsCalls))
+	}
+
+	wtDir2 := wm.trainWorktreeDir(trial2Name)
+	got2, err := os.ReadFile(filepath.Join(wtDir2, "generated.txt"))
+	if err != nil {
+		t.Fatalf("reading trial 2 generated.txt: %v", err)
+	}
+	if string(got2) != "v2\n" {
+		t.Errorf("trial 2 generated.txt = %q, want %q — a stale rerere-replayed postimage from trial 1 would incorrectly read %q", got2, "v2\n", "v1\n")
+	}
+	wm.CleanupTrainWorktree(trial2Name, true)
+}
+
+// rrCacheEntryCount returns how many entries exist under bareDir's rr-cache
+// directory — 0 (not an error) when the directory doesn't exist at all, i.e. no
+// resolution has ever been recorded.
+func rrCacheEntryCount(t *testing.T, bareDir string) int {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(bareDir, "rr-cache"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0
+		}
+		t.Fatalf("reading rr-cache dir: %v", err)
+	}
+	return len(entries)
+}
+
+// TestConflictedPathsFromMergeOutput covers conflictedPathsFromMergeOutput, the
+// mergeOut-derived path-extraction helper forgetPoisonerResolutions relies on
+// (see that function's doc comment for why unmergedPaths/git status can't be used
+// instead once rerere's autoupdate has already replayed and staged a path).
+func TestConflictedPathsFromMergeOutput(t *testing.T) {
+	tests := []struct {
+		name     string
+		mergeOut string
+		want     []string
+	}{
+		{
+			name:     "content conflict",
+			mergeOut: "Auto-merging file1.txt\nCONFLICT (content): Merge conflict in file1.txt\nAutomatic merge failed; fix conflicts and then commit the result.\n",
+			want:     []string{"file1.txt"},
+		},
+		{
+			name:     "add/add conflict",
+			mergeOut: "CONFLICT (add/add): Merge conflict in shared.txt\n",
+			want:     []string{"shared.txt"},
+		},
+		{
+			name:     "modify/delete conflict",
+			mergeOut: "CONFLICT (modify/delete): gen.txt deleted in HEAD and modified in abc123. Version abc123 of gen.txt left in tree.\n",
+			want:     []string{"gen.txt"},
+		},
+		{
+			name:     "multiple distinct paths, order preserved",
+			mergeOut: "CONFLICT (content): Merge conflict in b.txt\nCONFLICT (content): Merge conflict in a.txt\n",
+			want:     []string{"b.txt", "a.txt"},
+		},
+		{
+			name:     "duplicate mentions dedupe",
+			mergeOut: "CONFLICT (content): Merge conflict in a.txt\nStaged 'a.txt' using previous resolution.\nCONFLICT (content): Merge conflict in a.txt\n",
+			want:     []string{"a.txt"},
+		},
+		{
+			name:     "no conflict lines",
+			mergeOut: "Merge made by the 'ort' strategy.\n",
+			want:     nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := conflictedPathsFromMergeOutput(tt.mergeOut)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("conflictedPathsFromMergeOutput() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestForgetPoisonerResolutions_RemovesRecordedResolution is ADR-1834's Requirement
+// 5 (red-trial resolution hygiene): once a member is isolated as a batch's poisoner,
+// any rerere resolution recorded against a conflict it was party to must be forgotten
+// so it is never silently replayed against a future trial. The seed resolution is
+// recorded independently of forgetPoisonerResolutions itself (a manual merge +
+// resolve + commit in this test's own throwaway worktree), so this test doesn't
+// assume the function under test also correctly produced its own fixture.
+func TestForgetPoisonerResolutions_RemovesRecordedResolution(t *testing.T) {
+	skipIfNoGit(t)
+	bareDir, srcDir, _, wm := setupTrainRepo(t)
+
+	// The poisoner's branch modifies counter.txt from the ORIGINAL main; main is then
+	// separately advanced to a different counter.txt value — merging the poisoner's
+	// branch against that later base produces a genuine modify/modify conflict.
+	poisonerSHA := pushBranchToBare(t, srcDir, bareDir, "fabrik/issue-99", "counter.txt", "poison\n")
+
+	mustGit(t, srcDir, "checkout", "main")
+	writeFile(t, filepath.Join(srcDir, "counter.txt"), "changed-on-main\n")
+	mustGit(t, srcDir, "add", "-A")
+	mustGit(t, srcDir, "commit", "-m", "advance main")
+	mustGit(t, srcDir, "push", bareDir, "main:main")
+	baseSHA := strings.TrimSpace(gitOutputDir(t, srcDir, "rev-parse", "HEAD"))
+
+	seedName := "forget-seed"
+	seedDir, err := wm.EnsureTrainWorktreeAt(seedName, baseSHA)
+	if err != nil {
+		t.Fatalf("EnsureTrainWorktreeAt(seed): %v", err)
+	}
+	mergeCmd := exec.Command("git", "merge", "--no-ff", "--no-edit", poisonerSHA)
+	mergeCmd.Dir = seedDir
+	if out, mergeErr := mergeCmd.CombinedOutput(); mergeErr == nil {
+		t.Fatalf("expected the seed merge to conflict, it succeeded: %s", out)
+	}
+	writeFile(t, filepath.Join(seedDir, "counter.txt"), "resolved\n")
+	mustGit(t, seedDir, "add", "-A")
+	mustGit(t, seedDir, "commit", "--no-edit", "-m", "resolve")
+	if err := wm.CleanupTrainWorktree(seedName, true); err != nil {
+		t.Fatalf("cleaning up seed worktree: %v", err)
+	}
+	if got := rrCacheEntryCount(t, bareDir); got == 0 {
+		t.Fatal("expected the seed resolution to record an rr-cache entry, found none")
+	}
+
+	eng := trainTestEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{}, wm)
+	p := trialParams{owner: "owner", repo: "repo", baseBranch: "main", baseSHA: baseSHA, wm: wm, nextTrialName: trialNameGen("forget-test")}
+	poisoner := trainMember{item: makeTrainItem(99, "Issue 99"), prNum: 199, headSHA: poisonerSHA}
+
+	// poisoner is the only (and therefore first) member in its own red batch here, so
+	// there is nothing to replay ahead of it — this exercises the idx==0 path.
+	eng.forgetPoisonerResolutions(context.Background(), p, []trainMember{poisoner}, poisoner)
+
+	if _, err := os.Stat(wm.trainWorktreeDir("forget-test")); !os.IsNotExist(err) {
+		t.Error("expected the disposable forget worktree to be cleaned up")
+	}
+
+	// Re-merge to confirm the resolution is genuinely gone: a live re-merge must show
+	// live conflict markers rather than a rerere replay.
+	verifyName := "forget-verify"
+	verifyDir, err := wm.EnsureTrainWorktreeAt(verifyName, baseSHA)
+	if err != nil {
+		t.Fatalf("EnsureTrainWorktreeAt(verify): %v", err)
+	}
+	defer wm.CleanupTrainWorktree(verifyName, true)
+	verifyMergeCmd := exec.Command("git", "merge", "--no-ff", "--no-edit", poisonerSHA)
+	verifyMergeCmd.Dir = verifyDir
+	out, verifyErr := verifyMergeCmd.CombinedOutput()
+	if verifyErr == nil {
+		t.Fatalf("expected the re-merge to conflict again, it succeeded: %s", out)
+	}
+	if strings.Contains(string(out), "using previous resolution") {
+		t.Errorf("expected the resolution to have been forgotten, but rerere still replayed it: %s", out)
+	}
+	remaining, err := os.ReadFile(filepath.Join(verifyDir, "counter.txt"))
+	if err != nil {
+		t.Fatalf("reading counter.txt after re-merge: %v", err)
+	}
+	if !strings.Contains(string(remaining), "<<<<<<<") {
+		t.Error("expected counter.txt to carry live conflict markers after forgetting the resolution")
+	}
+	abortCmd := exec.Command("git", "merge", "--abort")
+	abortCmd.Dir = verifyDir
+	abortCmd.CombinedOutput() // best-effort cleanup of the verification merge
+}
+
+// TestForgetPoisonerResolutions_CleanSoloMergeNoOp verifies the negative case: a
+// poisoner whose solo merge against the pinned base is clean (the batch's redness
+// was a non-isolable interaction, ADR-059 D-e, not this member's own conflict
+// resolution) leaves the rr-cache untouched and produces no error.
+func TestForgetPoisonerResolutions_CleanSoloMergeNoOp(t *testing.T) {
+	skipIfNoGit(t)
+	bareDir, srcDir, _, wm := setupTrainRepo(t)
+
+	poisonerSHA := pushBranchToBare(t, srcDir, bareDir, "fabrik/issue-77", "unrelated.txt", "clean-add\n")
+	baseSHA := strings.TrimSpace(gitOutputDir(t, bareDir, "rev-parse", "refs/remotes/origin/main"))
+	beforeCount := rrCacheEntryCount(t, bareDir)
+
+	eng := trainTestEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{}, wm)
+	p := trialParams{owner: "owner", repo: "repo", baseBranch: "main", baseSHA: baseSHA, wm: wm, nextTrialName: trialNameGen("forget-clean-test")}
+	poisoner := trainMember{item: makeTrainItem(77, "Issue 77"), prNum: 177, headSHA: poisonerSHA}
+
+	eng.forgetPoisonerResolutions(context.Background(), p, []trainMember{poisoner}, poisoner)
+
+	if got := rrCacheEntryCount(t, bareDir); got != beforeCount {
+		t.Errorf("expected rr-cache entry count unchanged after a clean solo merge, got %d, want %d", got, beforeCount)
+	}
+	if _, err := os.Stat(wm.trainWorktreeDir("forget-clean-test")); !os.IsNotExist(err) {
+		t.Error("expected the disposable forget worktree to be cleaned up even on the clean-merge path")
+	}
+}
+
+// TestForgetPoisonerResolutions_ReconstructsConflictAgainstEarlierMember covers the
+// gap a review caught in this function's initial version: a poisoner's recorded
+// resolution is very often not against base at all, but against the trial-so-far
+// state after an earlier-in-order red member has already been merged in. earlier and
+// poisoner both add the SAME new file (an add/add conflict relative to base, the same
+// pattern TestMergeTrainWorker_ConflictResolvedByClaude_RecordsRerereResolution uses)
+// — so poisoner's own solo merge against base alone is clean (proven below), and only
+// merging it after earlier produces the conflict whose resolution is seeded here.
+// This is exactly the scenario a poisoner-vs-base-only reconstruction would silently
+// miss.
+func TestForgetPoisonerResolutions_ReconstructsConflictAgainstEarlierMember(t *testing.T) {
+	skipIfNoGit(t)
+	bareDir, srcDir, _, wm := setupTrainRepo(t)
+
+	earlierSHA := pushBranchToBare(t, srcDir, bareDir, "fabrik/issue-50", "shared.txt", "from-earlier\n")
+	poisonerSHA := pushBranchToBare(t, srcDir, bareDir, "fabrik/issue-99", "shared.txt", "from-poisoner\n")
+	baseSHA := strings.TrimSpace(gitOutputDir(t, bareDir, "rev-parse", "refs/remotes/origin/main"))
+
+	// Non-vacuity: poisoner's own change does not conflict with base directly — only
+	// with earlier's change, once earlier is already merged in. A solo poisoner-vs-base
+	// merge here would be clean, exactly the case that silently missed the resolution
+	// before this reconstruction fix.
+	soloDir, err := wm.EnsureTrainWorktreeAt("forget-solo-control", baseSHA)
+	if err != nil {
+		t.Fatalf("EnsureTrainWorktreeAt(solo control): %v", err)
+	}
+	soloMergeCmd := exec.Command("git", "merge", "--no-ff", "--no-edit", poisonerSHA)
+	soloMergeCmd.Dir = soloDir
+	if out, soloErr := soloMergeCmd.CombinedOutput(); soloErr != nil {
+		t.Fatalf("expected poisoner's solo merge against base alone to be clean (the scenario this test exists to cover), got a conflict: %s", out)
+	}
+	if err := wm.CleanupTrainWorktree("forget-solo-control", true); err != nil {
+		t.Fatalf("cleaning up solo control worktree: %v", err)
+	}
+
+	// Seed the resolution exactly as the original trial would have recorded it:
+	// earlier merged first (clean add), then poisoner (conflicts against the
+	// trial-so-far state, not against base).
+	seedName := "forget-order-seed"
+	seedDir, err := wm.EnsureTrainWorktreeAt(seedName, baseSHA)
+	if err != nil {
+		t.Fatalf("EnsureTrainWorktreeAt(seed): %v", err)
+	}
+	mustGit(t, seedDir, "merge", "--no-ff", "--no-edit", earlierSHA)
+	seedMergeCmd := exec.Command("git", "merge", "--no-ff", "--no-edit", poisonerSHA)
+	seedMergeCmd.Dir = seedDir
+	if out, mergeErr := seedMergeCmd.CombinedOutput(); mergeErr == nil {
+		t.Fatalf("expected merging poisoner after earlier to conflict, it succeeded: %s", out)
+	}
+	writeFile(t, filepath.Join(seedDir, "shared.txt"), "resolved-order-sensitive\n")
+	mustGit(t, seedDir, "add", "-A")
+	mustGit(t, seedDir, "commit", "--no-edit", "-m", "resolve")
+	if err := wm.CleanupTrainWorktree(seedName, true); err != nil {
+		t.Fatalf("cleaning up seed worktree: %v", err)
+	}
+	if got := rrCacheEntryCount(t, bareDir); got == 0 {
+		t.Fatal("expected the seed resolution to record an rr-cache entry, found none")
+	}
+
+	eng := trainTestEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{}, wm)
+	p := trialParams{owner: "owner", repo: "repo", baseBranch: "main", baseSHA: baseSHA, wm: wm, nextTrialName: trialNameGen("forget-order-test")}
+	earlier := trainMember{item: makeTrainItem(50, "Issue 50"), prNum: 150, headSHA: earlierSHA}
+	poisoner := trainMember{item: makeTrainItem(99, "Issue 99"), prNum: 199, headSHA: poisonerSHA}
+	red := []trainMember{earlier, poisoner}
+
+	eng.forgetPoisonerResolutions(context.Background(), p, red, poisoner)
+
+	// Re-merge in the same order to confirm the resolution is genuinely gone.
+	verifyName := "forget-order-verify"
+	verifyDir, err := wm.EnsureTrainWorktreeAt(verifyName, baseSHA)
+	if err != nil {
+		t.Fatalf("EnsureTrainWorktreeAt(verify): %v", err)
+	}
+	defer wm.CleanupTrainWorktree(verifyName, true)
+	mustGit(t, verifyDir, "merge", "--no-ff", "--no-edit", earlierSHA)
+	verifyMergeCmd := exec.Command("git", "merge", "--no-ff", "--no-edit", poisonerSHA)
+	verifyMergeCmd.Dir = verifyDir
+	out, verifyErr := verifyMergeCmd.CombinedOutput()
+	if verifyErr == nil {
+		t.Fatalf("expected the re-merge to conflict again, it succeeded: %s", out)
+	}
+	if strings.Contains(string(out), "using previous resolution") {
+		t.Errorf("expected the order-sensitive resolution to have been forgotten, but rerere still replayed it: %s", out)
+	}
+	remaining, err := os.ReadFile(filepath.Join(verifyDir, "shared.txt"))
+	if err != nil {
+		t.Fatalf("reading shared.txt after re-merge: %v", err)
+	}
+	if !strings.Contains(string(remaining), "<<<<<<<") {
+		t.Error("expected shared.txt to carry live conflict markers after forgetting the resolution")
+	}
+	abortCmd := exec.Command("git", "merge", "--abort")
+	abortCmd.Dir = verifyDir
+	abortCmd.CombinedOutput() // best-effort cleanup of the verification merge
+}
+
 // TestMergeTrainWorker_MixedGeneratedAndNormalConflict verifies FR-5: a conflict whose
 // paths span both a declared generated file and a normal file still dispatches the
 // non-generated portion to Claude, while the generated portion is regenerated instead
@@ -8005,7 +8580,7 @@ func TestResolveTrainConflict_UnmergedPathsErrorFallsBackToPlainClaude(t *testin
 	// attempting to classify conflicted paths against the generated set.
 	wtDir := t.TempDir()
 
-	_, reason, err := eng.resolveTrainConflict(context.Background(), makeTrainItem(1, "Issue 1"), wtDir, holdingStage(eng.cfg), "deadbeef", "deadbeef", InvokeOptions{})
+	_, reason, err := eng.resolveTrainConflict(context.Background(), makeTrainItem(1, "Issue 1"), wtDir, holdingStage(eng.cfg), "deadbeef", "deadbeef", "", InvokeOptions{})
 	if err != nil {
 		t.Fatalf("resolveTrainConflict: %v", err)
 	}

@@ -383,6 +383,12 @@ func buildWorktreeManager(t *testing.T, simModel *simgh.Sim, ownerRepo string) *
 	runGit(t, localBareDir, "config", "user.name", "fabrik-sim")
 	runGit(t, localBareDir, "config", "user.email", "fabrik-sim@example.invalid")
 
+	// Repo-wide rerere enablement — mirrors ensureBareClone's own enableRerere step
+	// (ADR-1834), so merge-train conflict-replay scenarios exercise the same git
+	// behavior here as in production.
+	runGit(t, localBareDir, "config", "rerere.enabled", "true")
+	runGit(t, localBareDir, "config", "rerere.autoupdate", "true")
+
 	worktreeRoot := filepath.Join(t.TempDir(), "worktrees")
 	owner, repo, _ := strings.Cut(ownerRepo, "/")
 	return engine.NewWorktreeManagerForRepo(localBareDir, worktreeRoot, owner+"-"+repo)

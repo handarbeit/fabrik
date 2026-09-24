@@ -119,6 +119,7 @@ func ensureBareClone(baseDir, owner, repo, user string, useSSH bool, host string
 		refreshCmd.CombinedOutput() // best-effort
 
 		setCommitterIdentity(bareDir, user, env, host)
+		enableRerere(bareDir, env)
 		return bareDir, nil
 	}
 
@@ -158,7 +159,46 @@ func ensureBareClone(baseDir, owner, repo, user string, useSSH bool, host string
 	refreshCmd.CombinedOutput() // best-effort
 
 	setCommitterIdentity(bareDir, user, env, host)
+	enableRerere(bareDir, env)
 	return bareDir, nil
+}
+
+// enableRerere sets local rerere.enabled and rerere.autoupdate on the given bare
+// clone so that git's "reuse recorded resolution" mechanism is active for every
+// worktree derived from it — regular per-issue worktrees and merge-train trial
+// worktrees alike (ADR-1834). Existing values are preserved (mirrors
+// setCommitterIdentity) so an operator who set these explicitly keeps their choice.
+//
+// This is deliberately repo-wide rather than scoped to merge-train trial worktrees
+// alone. Git's per-worktree config extension (extensions.worktreeConfig) was
+// evaluated and rejected: enabling it on a bare clone makes core.bare (true, shared
+// repo-wide for a bare clone) apply to every linked worktree that doesn't
+// explicitly override it in its own config.worktree — breaking ordinary git
+// operations ("fatal: this operation must be run in a work tree") in EVERY
+// worktree off that bare clone, existing or future, the instant the extension is
+// turned on, not just the newly-created trial worktree (confirmed by direct
+// reproduction). Since every worktree for a given repo — every open issue's
+// worktree, not just merge-train trials — shares one bare clone
+// (NewWorktreeManagerForRepo), that blast radius is unacceptable. A rerere lookup
+// with no recorded resolution is a pure no-op, so extending rerere to regular
+// per-issue worktrees carries no behavioral risk: at most, a Validate-stage rebase
+// conflict that happens to exactly match a merge-train-recorded resolution is
+// itself replayed for free, which is a strict improvement, not a regression.
+func enableRerere(repoDir string, env []string) {
+	setIfUnset := func(key, value string) {
+		check := exec.Command("git", "config", "--local", "--get", key)
+		check.Dir = repoDir
+		check.Env = env
+		if err := check.Run(); err == nil {
+			return // already set locally; preserve operator's choice
+		}
+		set := exec.Command("git", "config", key, value)
+		set.Dir = repoDir
+		set.Env = env
+		set.CombinedOutput() // best-effort
+	}
+	setIfUnset("rerere.enabled", "true")
+	setIfUnset("rerere.autoupdate", "true")
 }
 
 // setCommitterIdentity sets local user.name and user.email on the given

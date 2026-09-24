@@ -998,6 +998,22 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 	defer func() { <-e.sem }()
 	defer e.finishTrain(trainKey)
 
+	// ADR-1834 Requirement 5: best-effort periodic pruning of the shared rr-cache.
+	// Nothing in the codebase invoked `git rerere gc` before this, so
+	// gc.rerereResolved/gc.rerereUnresolved's default expiries (60d/15d) were moot —
+	// rr-cache would grow unbounded. Once per worker invocation is a low-cost,
+	// sufficient cadence given rr-cache entries are small text blobs and the
+	// merge-train's own observed reuse window is minutes to weeks. Skipped under the
+	// trainValidateFn test seam, mirroring prepareTrainWorker's own base-SHA-pinning
+	// gate immediately above (no real git involved under that seam).
+	if e.trainValidateFn == nil {
+		gcCmd := exec.CommandContext(ctx, "git", "rerere", "gc")
+		gcCmd.Dir = p.wm.BaseDir()
+		if out, gcErr := gcCmd.CombinedOutput(); gcErr != nil {
+			e.logfRepo(repoKey, "merge-train", "warn: git rerere gc failed: %s: %v\n", strings.TrimSpace(string(out)), gcErr)
+		}
+	}
+
 	// Re-form loop: validate, land-on-green, or bisect-eject-reform on red.
 	for {
 		if len(current) == 0 {
@@ -1202,7 +1218,7 @@ func (e *Engine) assembleTrialBranch(ctx context.Context, p trialParams, members
 		// single "the PR" for FABRIK_PR to name. FabrikRoot is still cheap and correct
 		// to set for consistency with the other two InvokeOptions call sites.
 		opts := InvokeOptions{BaseBranch: p.baseBranch, MaxTurnsOverride: p.maxTurnsOverride, FabrikRoot: e.fabrikDir, FabrikRepo: e.defaultRepo(), MaxResumeFailures: e.cfg.MaxResumeFailures}
-		resolved, reason, resolveErr := e.resolveTrainConflict(ctx, member.item, wtDir, p.holdingStg, member.headSHA, preMergeHEAD, opts)
+		resolved, reason, resolveErr := e.resolveTrainConflict(ctx, member.item, wtDir, p.holdingStg, member.headSHA, preMergeHEAD, string(mergeOut), opts)
 		if resolved {
 			survivors = append(survivors, member)
 			e.logf(member.item.Number, "merge-train", "conflict for #%d resolved\n", member.item.Number)
@@ -1441,6 +1457,7 @@ func (e *Engine) handleRedBatch(ctx context.Context, state *mergeTrainWorkerStat
 	e.ejectMember(p.owner, p.repo, poisoner.item,
 		fmt.Sprintf("ejected from merge-train — the combined Validate fails whenever #%d is in the batch (isolated by halving bisection). It will be retried in a future train with a different composition.", poisoner.item.Number),
 		isolationDiag, red, true)
+	e.forgetPoisonerResolutions(ctx, p, red, *poisoner)
 
 	var survivors []trainMember
 	for i := range red {
@@ -1449,6 +1466,194 @@ func (e *Engine) handleRedBatch(ctx context.Context, state *mergeTrainWorkerStat
 		}
 	}
 	return survivors, false, false
+}
+
+// conflictInLineRE matches a git merge conflict line whose path follows "Merge
+// conflict in " — the shape git uses for content and add/add conflicts, e.g.
+// "CONFLICT (content): Merge conflict in path/to/file".
+var conflictInLineRE = regexp.MustCompile(`^CONFLICT \([^)]+\): Merge conflict in (.+)$`)
+
+// conflictModifyDeleteRE matches a git merge modify/delete conflict line, whose path
+// precedes " deleted in", e.g. "CONFLICT (modify/delete): path/to/file deleted in
+// HEAD and modified in <sha>. Version <sha> of path/to/file left in tree."
+var conflictModifyDeleteRE = regexp.MustCompile(`^CONFLICT \(modify/delete\): (.+?) deleted in`)
+
+// conflictedPathsFromMergeOutput extracts every conflicted path named in a `git
+// merge` command's combined output, order-stable and deduplicated. Unlike
+// unmergedPaths (which reads live `git status --porcelain`), this recovers a
+// conflict's original path membership independent of whether git rerere's
+// autoupdate has since replayed and staged a path — autostaging removes a path
+// from git status's unmerged view entirely (MERGE_HEAD remains, but the path is no
+// longer reported as UU/AA/etc.), while the merge's own "CONFLICT (...)" line for
+// that path is printed unconditionally, before rerere ever runs. This is the same
+// fact conflictedGeneratedSpecsFromMergeOutput relies on for the ADR-1235
+// interaction guard, generalized here to extract arbitrary paths rather than
+// checking membership in a declared set.
+//
+// Only the two most common conflict-line shapes (content/add-add's "Merge conflict
+// in <path>", and modify/delete's "<path> deleted in ...") are recognized; an
+// unrecognized shape (e.g. a rename conflict) is silently skipped rather than
+// guessed at — this is a best-effort hygiene helper (forgetPoisonerResolutions),
+// not a correctness-critical path, so missing an exotic conflict kind here means
+// one fewer resolution proactively forgotten, not a wrong outcome.
+func conflictedPathsFromMergeOutput(mergeOut string) []string {
+	seen := make(map[string]bool)
+	var paths []string
+	add := func(path string) {
+		if path != "" && !seen[path] {
+			seen[path] = true
+			paths = append(paths, path)
+		}
+	}
+	for _, line := range strings.Split(mergeOut, "\n") {
+		line = strings.TrimSpace(line)
+		if m := conflictInLineRE.FindStringSubmatch(line); m != nil {
+			add(m[1])
+			continue
+		}
+		if m := conflictModifyDeleteRE.FindStringSubmatch(line); m != nil {
+			add(m[1])
+		}
+	}
+	return paths
+}
+
+// forgetPoisonerResolutions is ADR-1834's red-trial resolution hygiene (Requirement
+// 5): once handleRedBatch has isolated poisoner as the batch's culprit, any git
+// rerere resolution recorded while resolving a conflict poisoner was party to during
+// this episode should not go on being replayed indefinitely against future trials —
+// a bad resolution stays bad regardless of which member's PR happened to introduce it.
+//
+// The mechanism reconstructs the ORIGINAL merge order, not a poisoner-vs-base solo
+// merge: red is the full episode's red batch in its original, order-preserving
+// sequence (bisect only ever slices red, never reorders it), and poisoner occupies
+// some position in it. assembleTrialBranch merges members strictly in that order into
+// one accumulating branch, so the conflict that produced poisoner's recorded
+// resolution — if any — was almost always poisoner vs. the trial-so-far (base plus
+// every earlier-in-order red member already merged in), not poisoner vs. base alone.
+// A solo poisoner-vs-base merge reproduces a materially different three-way diff
+// whenever any earlier member touches the same region, so it can silently miss the
+// very resolution this hygiene step exists to forget — exactly the gap a review
+// caught in the initial version of this function (see the ADR's Decision 4 for the
+// full writeup). This rebuilds red[:idx] (idx = poisoner's position) ahead of
+// poisoner in a disposable worktree before checking poisoner's own merge, so the
+// "ours" state poisoner merges against here matches what it actually merged against
+// during the episode's original trial.
+//
+// Replaying red[:idx] never invokes Claude and never risks committing anything new:
+// each earlier member is merged with `--no-ff --no-edit`, and rerere.autoupdate
+// (enabled repo-wide) auto-replays whatever resolution that member's own commit
+// already recorded during this same episode. If any earlier member's merge leaves a
+// live unresolved hunk — no matching rerere history, an unexpected state — the
+// reconstruction can no longer be trusted to represent the original trial faithfully,
+// so it aborts and returns without forgetting anything (fail-safe: a resolution left
+// un-forgotten is a coverage gap, not a wrong outcome). Once red[:idx] is replayed,
+// poisoner.headSHA is merged last; if that conflicts, `git rerere forget` is run once
+// per path named in the merge's own output (conflictedPathsFromMergeOutput, not
+// unmergedPaths — see that helper's doc comment for why) — the porcelain command's
+// documented mechanism for resetting an already-replayed resolution and invalidating
+// its rr-cache entry, which requires a live conflicted working tree to re-derive the
+// conflict's hash from (it cannot be pointed at an arbitrary historical hash from
+// outside a live conflict — see handleRedBatch's own doc comment on why the poisoner
+// is only known after every bisection sub-trial's worktree is already gone, which is
+// exactly why this reconstructs a fresh live conflict rather than trying to reach
+// into a deleted one).
+//
+// If poisoner's merge doesn't conflict at all against the reconstructed trial-so-far
+// state, there is nothing to forget for this episode's primary (pre-bisection) trial
+// order — this returns silently, without a warning log. This does not, by itself,
+// prove poisoner never recorded any resolution worth forgetting: a bisection
+// sub-trial can combine poisoner with a different partial subset of red and record a
+// distinct resolution against that different "ours" state, which this reconstruction
+// (anchored on the episode's original full order) does not replay. That residual gap
+// is accepted, not solved, here — see the ADR. Entirely best-effort throughout: every
+// git failure is logged and none of them affect the eject that already happened.
+// Skipped entirely under the trainValidateFn test seam, which never runs
+// assembleTrialBranch's real git assembly in the first place (see
+// assembleAndValidateInner's own doc comment) — there is no real rr-cache entry from
+// this episode to forget under that seam, only whatever unrelated content e.wm happens
+// to point at, and creating a real worktree there would be pure git-call overhead
+// masquerading as a hygiene action.
+func (e *Engine) forgetPoisonerResolutions(ctx context.Context, p trialParams, red []trainMember, poisoner trainMember) {
+	if e.trainValidateFn != nil {
+		return
+	}
+
+	idx := -1
+	for i := range red {
+		if red[i].item.Number == poisoner.item.Number {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		// Structurally shouldn't happen — poisoner was isolated from red itself — but
+		// fail safe rather than reconstruct against an unknown position.
+		e.logf(poisoner.item.Number, "merge-train", "warn: poisoner #%d not found in its own red batch — skipping rerere forget reconstruction\n", poisoner.item.Number)
+		return
+	}
+
+	trialName := p.nextTrialName()
+	wtDir, err := p.wm.EnsureTrainWorktreeAt(trialName, p.baseSHA)
+	if err != nil {
+		e.logf(poisoner.item.Number, "merge-train", "warn: could not create disposable worktree to forget #%d's rerere resolution(s): %v\n", poisoner.item.Number, err)
+		return
+	}
+	defer func() {
+		if cleanupErr := p.wm.CleanupTrainWorktree(trialName, true); cleanupErr != nil {
+			e.logf(poisoner.item.Number, "merge-train", "warn: could not clean up disposable forget-resolution worktree: %v\n", cleanupErr)
+		}
+	}()
+
+	for _, earlier := range red[:idx] {
+		mergeCmd := exec.CommandContext(ctx, "git", "merge", "--no-ff", "--no-edit", earlier.headSHA)
+		mergeCmd.Dir = wtDir
+		out, mergeErr := mergeCmd.CombinedOutput()
+		if mergeErr == nil {
+			continue
+		}
+		remaining, upErr := unmergedPaths(wtDir)
+		if upErr != nil || len(remaining) > 0 {
+			e.logf(poisoner.item.Number, "merge-train", "warn: could not faithfully reconstruct the trial-so-far state ahead of poisoner #%d (earlier member #%d did not fully replay via rerere) — skipping forget: %s\n", poisoner.item.Number, earlier.item.Number, strings.TrimSpace(string(out)))
+			earlierAbortCmd := exec.Command("git", "merge", "--abort")
+			earlierAbortCmd.Dir = wtDir
+			earlierAbortCmd.Run() // best-effort; wtDir is discarded regardless
+			return
+		}
+		if commitErr := e.commitRerereReplayedMerge(wtDir, earlier.item.Number); commitErr != nil {
+			e.logf(poisoner.item.Number, "merge-train", "warn: could not finalize reconstructed merge for earlier member #%d ahead of poisoner #%d — skipping forget: %v\n", earlier.item.Number, poisoner.item.Number, commitErr)
+			return
+		}
+	}
+
+	mergeCmd := exec.CommandContext(ctx, "git", "merge", "--no-ff", "--no-edit", poisoner.headSHA)
+	mergeCmd.Dir = wtDir
+	out, mergeErr := mergeCmd.CombinedOutput()
+	if mergeErr == nil {
+		// Clean merge against the reconstructed trial-so-far state — poisoner's own
+		// conflict resolution (if any, from a different bisection sub-trial) is not
+		// implicated in this episode's primary trial order; nothing to forget here.
+		return
+	}
+	e.logf(poisoner.item.Number, "merge-train", "reconstructed re-merge of poisoner #%d conflicts — forgetting its recorded rerere resolution(s): %s\n", poisoner.item.Number, strings.TrimSpace(string(out)))
+
+	// Paths are recovered from the merge's own output, not from unmergedPaths/`git
+	// status`: when rerere's autoupdate fully replays and stages a path, git no longer
+	// reports it as unmerged even though MERGE_HEAD is still present — exactly the
+	// case this function exists to reach. git's own "CONFLICT (...)" lines always name
+	// every originally-conflicted path regardless of whether rerere then resolved it
+	// (the same fact resolveTrainConflict's ADR-1235 guard relies on).
+	for _, path := range conflictedPathsFromMergeOutput(string(out)) {
+		forgetCmd := exec.Command("git", "rerere", "forget", path)
+		forgetCmd.Dir = wtDir
+		if forgetOut, forgetErr := forgetCmd.CombinedOutput(); forgetErr != nil {
+			e.logf(poisoner.item.Number, "merge-train", "warn: could not forget rerere resolution for %s: %s\n", path, strings.TrimSpace(string(forgetOut)))
+		}
+	}
+
+	abortCmd := exec.Command("git", "merge", "--abort")
+	abortCmd.Dir = wtDir
+	abortCmd.CombinedOutput() // best-effort; the disposable worktree is destroyed regardless
 }
 
 // landOneAtATime is the FR-5 fallback: it validates and lands each member as its own
@@ -2435,23 +2640,57 @@ func (e *Engine) regenerateAndCommit(ctx context.Context, memberItem gh.ProjectI
 	return true, ""
 }
 
+// commitRerereReplayedMerge finalizes a merge whose conflict was resolved entirely by
+// git rerere's automatic replay (Requirement 3's first case: rerere resolved every
+// hunk and no declared generated path was part of the original conflict) — a plain
+// `git add -A` (a no-op when rerere.autoupdate already staged everything) followed by
+// a real `git commit`, mirroring resolveConflictWithClaude's own finalization commit
+// so a subsequent identical conflict remains recordable by rerere in turn (ADR-1834
+// Requirement 2 — recording only happens through a real commit).
+func (e *Engine) commitRerereReplayedMerge(wtDir string, memberNumber int) error {
+	addCmd := exec.Command("git", "add", "-A")
+	addCmd.Dir = wtDir
+	if out, err := addCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("staging rerere-replayed merge for #%d: %s: %w", memberNumber, strings.TrimSpace(string(out)), err)
+	}
+	commitCmd := exec.Command("git", "commit", "--no-edit", "-m",
+		fmt.Sprintf("chore(merge-train): resolve conflict for #%d (rerere replay)", memberNumber))
+	commitCmd.Dir = wtDir
+	if out, err := commitCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("committing rerere-replayed merge for #%d: %s: %w", memberNumber, strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
 // resolveTrainConflict classifies a merge conflict's paths against the declared
 // generated-file set and dispatches accordingly:
-//   - A conflict confined entirely to generated paths is regenerated without invoking
-//     Claude (FR-1/FR-2).
-//   - A conflict with no generated paths dispatches Claude exactly as before FR-1..5.
+//   - A conflict git rerere already resolved in full — no declared generated path
+//     involved — is finalized with a direct commit, no Claude invocation (ADR-1834
+//     Requirement 3, first case).
+//   - A conflict confined entirely to generated paths (whether still unmerged now, or
+//     already replayed-and-staged by rerere) is regenerated without invoking Claude
+//     (FR-1/FR-2, extended by ADR-1834 to force a fresh regeneration over a rerere
+//     replay so a stale replayed generated artefact never lands — ADR-1235).
+//   - A conflict with no generated paths dispatches Claude exactly as before FR-1..5;
+//     if rerere already replayed some of the non-generated hunks, Claude's own `git
+//     status` naturally shows only what's left (ADR-1834 Requirement 3, second case).
 //   - A mixed conflict (FR-5) dispatches Claude for the non-generated part first, then
 //     regenerates. Regeneration must always run last: if a co-conflicted non-generated
 //     path is itself one of the generator's own inputs (e.g. one of the four docs/*.md
 //     files generate-llms-full.sh reads), regenerating before Claude resolves it would
 //     read stale/conflicted source content.
 //
+// mergeOut is the failed `git merge` command's own combined output, needed only to
+// recover which declared generated path(s) — if any — were part of the *original*
+// conflict when rerere has already replayed one out of unmergedPaths' current view
+// (see conflictedGeneratedSpecsFromMergeOutput).
+//
 // Returns (resolved, reason, err). err carries only the ADR-1120 usage-limit sentinel
 // and is otherwise nil — the caller must not eject on a non-nil err (see
 // resolveConflictWithClaude's own doc comment). When resolved is false and err is nil,
 // reason is a diagnosable message for ejectMember; an empty reason tells the caller to
 // fall back to its own generic "unresolvable conflict" message.
-func (e *Engine) resolveTrainConflict(ctx context.Context, memberItem gh.ProjectItem, wtDir string, holdingStg *stages.Stage, prSHA string, preMergeHEAD string, opts InvokeOptions) (bool, string, error) {
+func (e *Engine) resolveTrainConflict(ctx context.Context, memberItem gh.ProjectItem, wtDir string, holdingStg *stages.Stage, prSHA string, preMergeHEAD string, mergeOut string, opts InvokeOptions) (bool, string, error) {
 	paths, err := unmergedPaths(wtDir)
 	if err != nil {
 		// Can't classify conflicted paths — fall back to the plain Claude path exactly
@@ -2461,7 +2700,42 @@ func (e *Engine) resolveTrainConflict(ctx context.Context, memberItem gh.Project
 		return resolved, "", resolveErr
 	}
 
+	// currentSet is what unmergedPaths reports *now*. A declared generated path named
+	// in mergeOut's original CONFLICT line(s) but absent from currentSet was fully
+	// replayed by rerere and must still be force-regenerated (ADR-1235) rather than
+	// trusted as-is — a path still present in currentSet is already correctly
+	// classified below by classifyConflictedPaths (including any deletion-involving
+	// routing to Claude), so it is deliberately excluded from forcedRegen here.
+	currentSet := make(map[string]bool, len(paths))
+	for _, p := range paths {
+		currentSet[p.Path] = true
+	}
+	var forcedRegen []generatedFileSpec
+	for _, spec := range conflictedGeneratedSpecsFromMergeOutput(mergeOut, e.generatedFileSet()) {
+		if !currentSet[spec.Path] {
+			forcedRegen = append(forcedRegen, spec)
+		}
+	}
+
+	if len(paths) == 0 {
+		// rerere replayed every hunk: nothing left for Claude. Force a fresh
+		// regeneration if a declared generated path was part of the original
+		// conflict; otherwise finalize directly with no Claude invocation.
+		if len(forcedRegen) == 0 {
+			if err := e.commitRerereReplayedMerge(wtDir, memberItem.Number); err != nil {
+				e.logf(memberItem.Number, "merge-train", "could not finalize rerere-replayed merge for #%d: %v\n", memberItem.Number, err)
+				return false, "", nil
+			}
+			e.logf(memberItem.Number, "merge-train", "conflict for #%d fully resolved by git rerere replay — no Claude invocation\n", memberItem.Number)
+			return true, "", nil
+		}
+		e.logf(memberItem.Number, "merge-train", "conflict for #%d replayed by rerere but touches declared generated path(s) — forcing fresh regeneration\n", memberItem.Number)
+		resolved, reason := e.regenerateAndCommit(ctx, memberItem, wtDir, forcedRegen, nil)
+		return resolved, reason, nil
+	}
+
 	matched, nonGenerated, deletionExcluded := classifyConflictedPaths(e.generatedFileSet(), paths)
+	matched = unionGeneratedSpecsByPath(matched, forcedRegen)
 
 	if len(matched) == 0 {
 		// Nothing left for regeneration to do: either no declared generated path is
