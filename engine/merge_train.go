@@ -1615,7 +1615,9 @@ func (e *Engine) forgetPoisonerResolutions(ctx context.Context, p trialParams, r
 		remaining, upErr := unmergedPaths(wtDir)
 		if upErr != nil || len(remaining) > 0 {
 			e.logf(poisoner.item.Number, "merge-train", "warn: could not faithfully reconstruct the trial-so-far state ahead of poisoner #%d (earlier member #%d did not fully replay via rerere) — skipping forget: %s\n", poisoner.item.Number, earlier.item.Number, strings.TrimSpace(string(out)))
-			exec.Command("git", "merge", "--abort").Run() // best-effort; wtDir is discarded regardless
+			earlierAbortCmd := exec.Command("git", "merge", "--abort")
+			earlierAbortCmd.Dir = wtDir
+			earlierAbortCmd.Run() // best-effort; wtDir is discarded regardless
 			return
 		}
 		if commitErr := e.commitRerereReplayedMerge(wtDir, earlier.item.Number); commitErr != nil {
