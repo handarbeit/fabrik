@@ -8082,13 +8082,10 @@ func rrCacheEntryCount(t *testing.T, bareDir string) int {
 	return len(entries)
 }
 
-// TestForgetPoisonerResolutions_RemovesRecordedResolution is ADR-1834's Requirement
-// 5 (red-trial resolution hygiene): once a member is isolated as a batch's poisoner,
-// any rerere resolution recorded against a conflict it was party to must be forgotten
-// so it is never silently replayed against a future trial. The seed resolution is
-// recorded independently of forgetPoisonerResolutions itself (a manual merge +
-// resolve + commit in this test's own throwaway worktree), so this test doesn't
-// assume the function under test also correctly produced its own fixture.
+// TestConflictedPathsFromMergeOutput covers conflictedPathsFromMergeOutput, the
+// mergeOut-derived path-extraction helper forgetPoisonerResolutions relies on
+// (see that function's doc comment for why unmergedPaths/git status can't be used
+// instead once rerere's autoupdate has already replayed and staged a path).
 func TestConflictedPathsFromMergeOutput(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -8136,6 +8133,13 @@ func TestConflictedPathsFromMergeOutput(t *testing.T) {
 	}
 }
 
+// TestForgetPoisonerResolutions_RemovesRecordedResolution is ADR-1834's Requirement
+// 5 (red-trial resolution hygiene): once a member is isolated as a batch's poisoner,
+// any rerere resolution recorded against a conflict it was party to must be forgotten
+// so it is never silently replayed against a future trial. The seed resolution is
+// recorded independently of forgetPoisonerResolutions itself (a manual merge +
+// resolve + commit in this test's own throwaway worktree), so this test doesn't
+// assume the function under test also correctly produced its own fixture.
 func TestForgetPoisonerResolutions_RemovesRecordedResolution(t *testing.T) {
 	skipIfNoGit(t)
 	bareDir, srcDir, _, wm := setupTrainRepo(t)
