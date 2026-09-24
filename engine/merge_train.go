@@ -2552,6 +2552,27 @@ func (e *Engine) finalizeConflictResolution(memberItem gh.ProjectItem, trainWork
 		}
 	}
 
+	// git's own unmerged-path tracking (unmergedPaths, used for remainingNonGenerated
+	// above) reflects index stage entries only — `git add` clears those regardless of
+	// whether the staged content still contains literal conflict-marker text. By this
+	// point remainingNonGenerated is already empty, which means every originally
+	// conflicted path has necessarily already been staged (that's what cleared its "UU"
+	// status) — so a plain `git diff --check` below (working tree vs index) compares
+	// two copies that are already identical and can never see the staged content at
+	// all, whether or not it still contains marker text. Reading each originally
+	// conflicted path's on-disk content directly sidesteps that gap entirely: it is
+	// immune to whether the content has since been staged or even committed already
+	// (regenerateAndCommit's own `git diff --cached --check` documents the staged half
+	// of this same gap; this direct scan additionally covers the already-committed
+	// case, which the plain-case prompt's own step 4 instructs Claude to reach).
+	if markerPaths := pathsStillContainConflictMarkers(trainWorkDir, originalNonGeneratedPaths); len(markerPaths) > 0 {
+		e.logf(memberItem.Number, "merge-train", "conflict marker text remains in supposedly-resolved file(s): %s\n", strings.Join(markerPaths, ", "))
+		return false, &conflictEjectionDiagnostic{
+			RemainingPaths: markerPaths,
+			Reason:         "conflict marker text remains in the resolution despite git no longer considering the path(s) unmerged",
+		}
+	}
+
 	if len(generatedPaths) > 0 {
 		// Mixed case: the generated path(s) are still unmerged by design. The unscoped
 		// `git diff --check` and the commit are deferred to regenerateAndCommit, which
@@ -2592,6 +2613,31 @@ func (e *Engine) finalizeConflictResolution(memberItem gh.ProjectItem, trainWork
 	}
 
 	return true, nil
+}
+
+// conflictMarkerLineRegex matches a literal git conflict-marker line — <<<<<<<,
+// =======, >>>>>>>, or ||||||| at the start of a line — git's own default
+// conflictMarkerSize (7 repeated characters), each optionally followed by more
+// content (e.g. a ref name after <<<<<<< or >>>>>>>).
+var conflictMarkerLineRegex = regexp.MustCompile(`(?m)^(<{7}|={7}|>{7}|\|{7})`)
+
+// pathsStillContainConflictMarkers scans each of paths' current on-disk content in dir
+// for a literal conflict-marker line and returns the subset where one is found. An
+// unreadable or absent path is skipped, not reported — this function only flags marker
+// text it actually observed, never a read failure (finalizeConflictResolution's other
+// checks are responsible for verifying a path's existence/readability).
+func pathsStillContainConflictMarkers(dir string, paths []string) []string {
+	var found []string
+	for _, p := range paths {
+		content, err := os.ReadFile(filepath.Join(dir, p))
+		if err != nil {
+			continue
+		}
+		if conflictMarkerLineRegex.Match(content) {
+			found = append(found, p)
+		}
+	}
+	return found
 }
 
 // regenerationCommandTimeout bounds each declared regeneration command: a hung

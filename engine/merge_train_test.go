@@ -2717,6 +2717,112 @@ func TestMergeTrainWorker_ConflictTurnLimitedWithRemainingConflictsEjects(t *tes
 	}
 }
 
+// TestMergeTrainWorker_ConflictStagedMarkersNotCommitted guards against a gap flagged
+// in PR #1843 review: `git status --porcelain` (unmergedPaths) clears a path's "UU"
+// status as soon as it is `git add`ed, regardless of whether the staged content still
+// contains literal conflict-marker text — so a plain `git diff --check` (working tree
+// vs. index) run after staging compares two already-identical copies and can never see
+// what was actually staged. This reproduces exactly that: the mock invocation edits the
+// file to *leave* marker text in place, then runs `git add -A` and commits anyway (as a
+// buggy or truncated Claude invocation might), returning success. The member must still
+// be ejected — the resolution must not be accepted purely because git's own index
+// bookkeeping no longer calls the path unmerged.
+func TestMergeTrainWorker_ConflictStagedMarkersNotCommitted(t *testing.T) {
+	skipIfNoGit(t)
+	_, srcDir, _, wm := setupTrainRepo(t)
+
+	sha1 := pushBranchToBare(t, srcDir, wm.baseDir, "fabrik/issue-1", "counter.txt", "branch1-value\n")
+	sha2 := pushBranchToBare(t, srcDir, wm.baseDir, "fabrik/issue-2", "counter.txt", "branch2-value\n")
+
+	var addCommentIssues []int
+	var ejectionBody string
+	var createdPRs int
+	var mu sync.Mutex
+
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			switch issueNumber {
+			case 1:
+				return &gh.PRDetails{Number: 10, HeadSHA: sha1, State: "open"}, nil
+			case 2:
+				return &gh.PRDetails{Number: 11, HeadSHA: sha2, State: "open"}, nil
+			}
+			return nil, fmt.Errorf("not found")
+		},
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
+			mu.Lock()
+			addCommentIssues = append(addCommentIssues, issueNumber)
+			if issueNumber == 2 {
+				ejectionBody = body
+			}
+			mu.Unlock()
+			return 1, nil
+		},
+		createDraftPRFn: func(owner, repo, title, head, base, body string, issueNumber int) (int, error) {
+			mu.Lock()
+			createdPRs++
+			mu.Unlock()
+			return 99, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			tr := true
+			return &tr, "clean", nil
+		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
+		},
+	}
+
+	// Claude stages and commits the file, but leaves conflict-marker text inside it —
+	// unmergedPaths (git status) sees a resolved index and would say nothing is wrong.
+	claude := &mockClaudeInvoker{
+		invokeForCommentsFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			stillConflicted := "<<<<<<< HEAD\nbranch1-value\n=======\nbranch2-value\n>>>>>>> incoming\n"
+			if err := os.WriteFile(filepath.Join(workDir, "counter.txt"), []byte(stillConflicted), 0644); err != nil {
+				return "", false, TokenUsage{}, fmt.Errorf("write file: %w", err)
+			}
+			mustGit(t, workDir, "add", "-A")
+			mustGit(t, workDir, "commit", "--no-edit", "-m", fmt.Sprintf("chore(merge-train): resolve conflict for #%d", issue.Number))
+			return "resolved", false, TokenUsage{}, nil
+		},
+	}
+
+	eng := trainTestEngine(t, client, claude, wm)
+	eng.mu.Lock()
+	eng.worktreeManagers["owner/repo"] = wm
+	eng.mu.Unlock()
+
+	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1"), makeTrainItem(2, "Issue 2")}
+	state := &mergeTrainWorkerState{assembling: true, trialName: fmt.Sprintf("merge-train-repo-%d", time.Now().Unix())}
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
+
+	mu.Lock()
+	prs := createdPRs
+	comments := append([]int(nil), addCommentIssues...)
+	body := ejectionBody
+	mu.Unlock()
+
+	if prs != 1 {
+		t.Errorf("expected 1 draft PR (for survivor #1 only — #2's marker-laden commit must not land), got %d", prs)
+	}
+	ejectedIssue2 := false
+	for _, n := range comments {
+		if n == 2 {
+			ejectedIssue2 = true
+		}
+	}
+	if !ejectedIssue2 {
+		t.Fatal("expected #2 to be ejected — marker text survived into the staged/committed resolution despite git no longer reporting it as unmerged")
+	}
+	if !strings.Contains(body, "counter.txt") {
+		t.Errorf("expected ejection comment to name counter.txt, got: %s", body)
+	}
+}
+
 // TestMergeTrainWorker_ConflictResolutionNoResume verifies #1841 Requirement 5: every
 // merge-train conflict-resolution invocation sets InvokeOptions.NoResume, since each
 // attempt runs in a fresh, ephemeral trial worktree that has no meaningful prior
