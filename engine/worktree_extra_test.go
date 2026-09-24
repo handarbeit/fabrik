@@ -256,6 +256,73 @@ func TestSetCommitterIdentity_EmptyUserIsNoOp(t *testing.T) {
 	}
 }
 
+// TestEnableRerere_SetsWhenUnset locks in ADR-1834's Requirement 1: enableRerere sets
+// rerere.enabled/rerere.autoupdate on the bare clone, repo-wide.
+func TestEnableRerere_SetsWhenUnset(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	env := nonInteractiveGitEnv()
+
+	enableRerere(repoDir, env)
+
+	if got := readGitConfig(t, repoDir, "rerere.enabled"); got != "true" {
+		t.Errorf("rerere.enabled = %q, want true", got)
+	}
+	if got := readGitConfig(t, repoDir, "rerere.autoupdate"); got != "true" {
+		t.Errorf("rerere.autoupdate = %q, want true", got)
+	}
+}
+
+// TestEnableRerere_PreservesExisting mirrors TestSetCommitterIdentity_PreservesExisting:
+// an operator who explicitly disabled rerere keeps that choice.
+func TestEnableRerere_PreservesExisting(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	env := nonInteractiveGitEnv()
+
+	cmd := exec.Command("git", "config", "rerere.enabled", "false")
+	cmd.Dir = repoDir
+	cmd.Env = env
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("setup: %s: %v", out, err)
+	}
+
+	enableRerere(repoDir, env)
+
+	if got := readGitConfig(t, repoDir, "rerere.enabled"); got != "false" {
+		t.Errorf("rerere.enabled = %q, want preserved false", got)
+	}
+}
+
+// TestEnableRerere_CoversEveryWorktree proves the repo-wide scoping decision (ADR-1834):
+// once ensureBareClone-style enablement has run on a bare clone, every worktree derived
+// from it — merge-train trial worktrees and regular per-issue worktrees alike — reads
+// rerere.enabled/rerere.autoupdate as true, since they share the bare clone's git config.
+// This is the corrected replacement for an earlier worktree-scoped design
+// (extensions.worktreeConfig) that was found, by direct reproduction, to break every
+// worktree off a bare clone — not just the newly-created one — because a bare repo's
+// core.bare=true becomes the extension's shared/common value with no per-worktree
+// override, producing "fatal: this operation must be run in a work tree" everywhere.
+func TestEnableRerere_CoversEveryWorktree(t *testing.T) {
+	_, _, _, wm := setupTrainRepo(t)
+
+	trialDir, err := wm.EnsureTrainWorktree("rerere-coverage-trial", "main")
+	if err != nil {
+		t.Fatalf("EnsureTrainWorktree: %v", err)
+	}
+	if got := readGitConfig(t, trialDir, "rerere.enabled"); got != "true" {
+		t.Errorf("trial worktree rerere.enabled = %q, want true", got)
+	}
+
+	issueDir, err := wm.EnsureWorktree(1834, "main", false)
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+	if got := readGitConfig(t, issueDir, "rerere.enabled"); got != "true" {
+		t.Errorf("regular per-issue worktree rerere.enabled = %q, want true (repo-wide)", got)
+	}
+}
+
 func readGitConfig(t *testing.T, repoDir, key string) string {
 	t.Helper()
 	cmd := exec.Command("git", "config", "--local", "--get", key)

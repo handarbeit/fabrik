@@ -1980,6 +1980,11 @@ func setupTrainRepo(t *testing.T) (bareDir, srcDir, worktreeRoot string, wm *Wor
 	mustGitDir(t, bareDir, "remote", "set-head", "origin", "--auto")
 	mustGitDir(t, bareDir, "config", "user.email", "test@test.com")
 	mustGitDir(t, bareDir, "config", "user.name", "Test")
+	// Repo-wide rerere enablement — mirrors ensureBareClone's own enableRerere step
+	// (ADR-1834), so merge-train conflict-replay tests exercise the same git
+	// behavior here as in production.
+	mustGitDir(t, bareDir, "config", "rerere.enabled", "true")
+	mustGitDir(t, bareDir, "config", "rerere.autoupdate", "true")
 
 	wm = NewWorktreeManagerForRepo(bareDir, worktreeRoot, "test-repo")
 	wm.logfFn = func(n int, tag, format string, args ...any) {
