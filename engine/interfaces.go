@@ -136,6 +136,22 @@ type InvokeOptions struct {
 	// convention); resolveInt always resolves a positive default in
 	// production.
 	MaxResumeFailures int
+	// NoResume, when true, forces InvokeClaudeForComments to treat this
+	// invocation as a fresh session regardless of any session file recorded
+	// for the (issue, stage) pair — resolveResumeSessionID returns "" without
+	// logging, exactly as it already does for resume=false. Set only by
+	// merge-train's conflict-resolution call site (#1841): each attempt runs
+	// in a fresh, ephemeral trial worktree against whatever the *current*
+	// accumulated conflict happens to be, so a prior session recorded under
+	// the shared "Queued" holding-stage name — from an earlier trial cycle or
+	// bisection sub-trial, quite possibly about an entirely different
+	// conflict — has no meaningful continuity to resume. Resuming it anyway
+	// was also the source of a spurious "resume requested but none exists"
+	// warning on every member's first encounter (the session file can't exist
+	// yet), and a plausible contributor to wasted turns on irrelevant prior
+	// context. Every other InvokeForComments call site (real PR/issue comment
+	// review) leaves this false, preserving today's unconditional resume.
+	NoResume bool
 }
 
 // ClaudeInvoker defines the interface for invoking Claude Code.
