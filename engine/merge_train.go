@@ -1457,7 +1457,7 @@ func (e *Engine) handleRedBatch(ctx context.Context, state *mergeTrainWorkerStat
 	e.ejectMember(p.owner, p.repo, poisoner.item,
 		fmt.Sprintf("ejected from merge-train — the combined Validate fails whenever #%d is in the batch (isolated by halving bisection). It will be retried in a future train with a different composition.", poisoner.item.Number),
 		isolationDiag, red, true)
-	e.forgetPoisonerResolutions(ctx, p, *poisoner)
+	e.forgetPoisonerResolutions(ctx, p, red, *poisoner)
 
 	var survivors []trainMember
 	for i := range red {
@@ -1524,31 +1524,72 @@ func conflictedPathsFromMergeOutput(mergeOut string) []string {
 // this episode should not go on being replayed indefinitely against future trials —
 // a bad resolution stays bad regardless of which member's PR happened to introduce it.
 //
-// The mechanism is a throwaway solo re-merge: poisoner.headSHA is merged alone
-// against the same pinned p.baseSHA every trial in this episode forked from, in a
-// disposable trial worktree. If that solo merge conflicts, `git rerere forget` is run
-// once per path named in the merge's own output (conflictedPathsFromMergeOutput,
-// not unmergedPaths — see that helper's doc comment for why) — the porcelain
-// command's documented mechanism for resetting an already-replayed resolution and
-// invalidating its rr-cache entry, which requires a live conflicted working tree to
-// re-derive the conflict's hash from (it cannot be pointed at an arbitrary
-// historical hash from outside a live conflict — see handleRedBatch's own doc
-// comment on why the poisoner is only known after every bisection sub-trial's
-// worktree is already gone, which is exactly why this reconstructs a fresh live
-// conflict rather than trying to reach into a deleted one).
+// The mechanism reconstructs the ORIGINAL merge order, not a poisoner-vs-base solo
+// merge: red is the full episode's red batch in its original, order-preserving
+// sequence (bisect only ever slices red, never reorders it), and poisoner occupies
+// some position in it. assembleTrialBranch merges members strictly in that order into
+// one accumulating branch, so the conflict that produced poisoner's recorded
+// resolution — if any — was almost always poisoner vs. the trial-so-far (base plus
+// every earlier-in-order red member already merged in), not poisoner vs. base alone.
+// A solo poisoner-vs-base merge reproduces a materially different three-way diff
+// whenever any earlier member touches the same region, so it can silently miss the
+// very resolution this hygiene step exists to forget — exactly the gap a review
+// caught in the initial version of this function (see the ADR's Decision 4 for the
+// full writeup). This rebuilds red[:idx] (idx = poisoner's position) ahead of
+// poisoner in a disposable worktree before checking poisoner's own merge, so the
+// "ours" state poisoner merges against here matches what it actually merged against
+// during the episode's original trial.
 //
-// If poisoner's solo merge doesn't conflict at all, there is nothing to forget — the
-// batch's redness was a non-isolable interaction (ADR-059 D-e) unrelated to any
-// conflict resolution — and this returns silently, without a warning log. Entirely
-// best-effort throughout: every git failure is logged and none of them affect the
-// eject that already happened. Skipped entirely under the trainValidateFn test seam,
-// which never runs assembleTrialBranch's real git assembly in the first place (see
+// Replaying red[:idx] never invokes Claude and never risks committing anything new:
+// each earlier member is merged with `--no-ff --no-edit`, and rerere.autoupdate
+// (enabled repo-wide) auto-replays whatever resolution that member's own commit
+// already recorded during this same episode. If any earlier member's merge leaves a
+// live unresolved hunk — no matching rerere history, an unexpected state — the
+// reconstruction can no longer be trusted to represent the original trial faithfully,
+// so it aborts and returns without forgetting anything (fail-safe: a resolution left
+// un-forgotten is a coverage gap, not a wrong outcome). Once red[:idx] is replayed,
+// poisoner.headSHA is merged last; if that conflicts, `git rerere forget` is run once
+// per path named in the merge's own output (conflictedPathsFromMergeOutput, not
+// unmergedPaths — see that helper's doc comment for why) — the porcelain command's
+// documented mechanism for resetting an already-replayed resolution and invalidating
+// its rr-cache entry, which requires a live conflicted working tree to re-derive the
+// conflict's hash from (it cannot be pointed at an arbitrary historical hash from
+// outside a live conflict — see handleRedBatch's own doc comment on why the poisoner
+// is only known after every bisection sub-trial's worktree is already gone, which is
+// exactly why this reconstructs a fresh live conflict rather than trying to reach
+// into a deleted one).
+//
+// If poisoner's merge doesn't conflict at all against the reconstructed trial-so-far
+// state, there is nothing to forget for this episode's primary (pre-bisection) trial
+// order — this returns silently, without a warning log. This does not, by itself,
+// prove poisoner never recorded any resolution worth forgetting: a bisection
+// sub-trial can combine poisoner with a different partial subset of red and record a
+// distinct resolution against that different "ours" state, which this reconstruction
+// (anchored on the episode's original full order) does not replay. That residual gap
+// is accepted, not solved, here — see the ADR. Entirely best-effort throughout: every
+// git failure is logged and none of them affect the eject that already happened.
+// Skipped entirely under the trainValidateFn test seam, which never runs
+// assembleTrialBranch's real git assembly in the first place (see
 // assembleAndValidateInner's own doc comment) — there is no real rr-cache entry from
 // this episode to forget under that seam, only whatever unrelated content e.wm happens
 // to point at, and creating a real worktree there would be pure git-call overhead
 // masquerading as a hygiene action.
-func (e *Engine) forgetPoisonerResolutions(ctx context.Context, p trialParams, poisoner trainMember) {
+func (e *Engine) forgetPoisonerResolutions(ctx context.Context, p trialParams, red []trainMember, poisoner trainMember) {
 	if e.trainValidateFn != nil {
+		return
+	}
+
+	idx := -1
+	for i := range red {
+		if red[i].item.Number == poisoner.item.Number {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		// Structurally shouldn't happen — poisoner was isolated from red itself — but
+		// fail safe rather than reconstruct against an unknown position.
+		e.logf(poisoner.item.Number, "merge-train", "warn: poisoner #%d not found in its own red batch — skipping rerere forget reconstruction\n", poisoner.item.Number)
 		return
 	}
 
@@ -1564,15 +1605,35 @@ func (e *Engine) forgetPoisonerResolutions(ctx context.Context, p trialParams, p
 		}
 	}()
 
+	for _, earlier := range red[:idx] {
+		mergeCmd := exec.CommandContext(ctx, "git", "merge", "--no-ff", "--no-edit", earlier.headSHA)
+		mergeCmd.Dir = wtDir
+		out, mergeErr := mergeCmd.CombinedOutput()
+		if mergeErr == nil {
+			continue
+		}
+		remaining, upErr := unmergedPaths(wtDir)
+		if upErr != nil || len(remaining) > 0 {
+			e.logf(poisoner.item.Number, "merge-train", "warn: could not faithfully reconstruct the trial-so-far state ahead of poisoner #%d (earlier member #%d did not fully replay via rerere) — skipping forget: %s\n", poisoner.item.Number, earlier.item.Number, strings.TrimSpace(string(out)))
+			exec.Command("git", "merge", "--abort").Run() // best-effort; wtDir is discarded regardless
+			return
+		}
+		if commitErr := e.commitRerereReplayedMerge(wtDir, earlier.item.Number); commitErr != nil {
+			e.logf(poisoner.item.Number, "merge-train", "warn: could not finalize reconstructed merge for earlier member #%d ahead of poisoner #%d — skipping forget: %v\n", earlier.item.Number, poisoner.item.Number, commitErr)
+			return
+		}
+	}
+
 	mergeCmd := exec.CommandContext(ctx, "git", "merge", "--no-ff", "--no-edit", poisoner.headSHA)
 	mergeCmd.Dir = wtDir
 	out, mergeErr := mergeCmd.CombinedOutput()
 	if mergeErr == nil {
-		// Clean solo merge — poisoner's own conflict resolution (if any) is not
-		// implicated in this trial's redness; nothing to forget.
+		// Clean merge against the reconstructed trial-so-far state — poisoner's own
+		// conflict resolution (if any, from a different bisection sub-trial) is not
+		// implicated in this episode's primary trial order; nothing to forget here.
 		return
 	}
-	e.logf(poisoner.item.Number, "merge-train", "solo re-merge of poisoner #%d conflicts — forgetting its recorded rerere resolution(s): %s\n", poisoner.item.Number, strings.TrimSpace(string(out)))
+	e.logf(poisoner.item.Number, "merge-train", "reconstructed re-merge of poisoner #%d conflicts — forgetting its recorded rerere resolution(s): %s\n", poisoner.item.Number, strings.TrimSpace(string(out)))
 
 	// Paths are recovered from the merge's own output, not from unmergedPaths/`git
 	// status`: when rerere's autoupdate fully replays and stages a path, git no longer

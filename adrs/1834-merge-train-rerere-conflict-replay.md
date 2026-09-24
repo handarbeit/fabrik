@@ -95,7 +95,7 @@ whatever `classifyConflictedPaths` finds in the current (post-rerere) unmerged s
 `unionGeneratedSpecsByPath`, before any dispatch decision, so a declared generated path is always
 force-regenerated whether or not it is still genuinely unmerged by the time the check runs.
 
-### 4. Red-trial hygiene: a throwaway solo re-merge plus `git rerere forget`, not `rr-cache` directory bookkeeping
+### 4. Red-trial hygiene: reconstruct the original merge order, then `git rerere forget` — not `rr-cache` directory bookkeeping
 
 Bisection sub-trial worktrees are destroyed (`cleanupTrialArtifacts`) immediately after each
 sub-trial's own CI result is known — before the poisoner is identified, since bisection only learns
@@ -110,25 +110,54 @@ touched hash directories) through the fully recursive `bisect` call tree, and re
 lifetime of a red-batch episode — was considered and rejected as substantially more code and much
 harder to test reliably for a hygiene feature that only needs to fire once per ejected poisoner.
 
-Instead, `forgetPoisonerResolutions` (`engine/merge_train.go`, called from `handleRedBatch`
-immediately after the poisoner is ejected) reconstructs a fresh live conflict cheaply: a disposable
-trial worktree forked off the same pinned `p.baseSHA` every trial in the episode used, a solo
-`git merge --no-ff --no-edit <poisoner.headSHA>`, and — if that conflicts — `git rerere forget` for
-every path named in *that* merge's own output. Paths are recovered via
+`forgetPoisonerResolutions` (`engine/merge_train.go`, called from `handleRedBatch` immediately
+after the poisoner is ejected) reconstructs a fresh live conflict instead of consulting `rr-cache`
+directly. **Its first implementation reconstructed only a solo `poisoner.headSHA` vs. `p.baseSHA`
+merge** — a review caught that this misses the common case: `assembleTrialBranch` merges members
+strictly in order into one accumulating branch, so the conflict that actually produced a poisoner's
+recorded resolution is usually poisoner vs. the *trial-so-far* (base plus every earlier-in-order red
+member already merged in), not poisoner vs. base alone. Whenever an earlier member touches the same
+region, a solo poisoner-vs-base merge reproduces a materially different three-way diff — either a
+clean merge (the false-negative case: nothing gets forgotten because the reconstruction never even
+conflicts) or a conflict on different hunks — so the actual poisoning resolution survives untouched
+in `rr-cache` and keeps being eligible for replay. The corrected version takes `red`, the full
+episode's red batch in its original, order-preserving sequence (`bisect` only ever slices `red`,
+never reorders it), locates poisoner's position `idx` in it, and replays `red[:idx]` — each earlier
+member merged with `--no-ff --no-edit` into the same disposable worktree, relying on
+`rerere.autoupdate` (enabled repo-wide) to silently replay each earlier member's own already-
+recorded resolution — before merging poisoner last. This makes the "ours" state poisoner merges
+against here match what it actually merged against in the episode's original trial.
+
+Replaying `red[:idx]` never invokes Claude and never risks committing anything new: if any earlier
+member's merge leaves a live unresolved hunk (no matching rerere history — an unexpected state), the
+reconstruction can no longer be trusted, so it aborts and skips forgetting entirely (fail-safe: a
+resolution left un-forgotten is a coverage gap, not a wrong outcome; the alternative — invoking
+Claude mid-hygiene-step to push through — was rejected as scope creep for a background cleanup
+step). Once `red[:idx]` is replayed, `poisoner.headSHA` is merged last; if that conflicts,
+`git rerere forget` runs once per path named in *that* merge's own output. Paths are recovered via
 `conflictedPathsFromMergeOutput`, the same `mergeOut`-derived technique as the ADR-1235 guard above,
 deliberately **not** `unmergedPaths`: direct testing confirmed that once rerere's `autoupdate` has
 replayed and staged a path, `git status` no longer reports it as unmerged even though `git rerere
 forget` still has a genuine, live resolution to forget there — the identical structural gap
 Decision 2 closes for the ordinary assembly path.
 
-If the solo merge doesn't conflict at all, the batch's redness was a non-isolable interaction
-(ADR-059 D-e) unrelated to any conflict resolution, and nothing is forgotten — silently, with no
-warning logged, since this is the expected, non-exceptional case for that kind of redness. Entirely
-best-effort throughout: every git failure here is logged and none of them affect the eject that
-already happened. Forgetting is unconditional for every path in the poisoner's own solo conflict —
-not narrowed to "only resolutions that involved a specific cross-PR interaction" — since a bad
-resolution recorded anywhere in the poisoner's own conflict history is exactly the class of thing
-this hygiene step exists to stop replaying.
+If poisoner's merge against the reconstructed trial-so-far state doesn't conflict at all, there is
+nothing to forget for this episode's primary (pre-bisection) trial order — silently, with no warning
+logged. **This is a narrower guarantee than "every resolution poisoner was ever party to is
+forgotten,"** and the gap is accepted, not solved: a bisection sub-trial can combine poisoner with a
+different partial subset of `red` and record a distinct resolution against that different "ours"
+state (a different three-way diff, hence a different `rr-cache` hash) that this reconstruction —
+anchored on the episode's original full order — does not replay and so cannot forget. Fully closing
+that residual gap would require the same `rr-cache`-bookkeeping approach rejected above (or
+replaying every bisection sub-trial's own member ordering, not just the primary one), which was
+judged not worth the added complexity for a best-effort hygiene step whose failure mode is "a stale
+resolution might get replayed once more, then re-fail CI and re-triger bisection/ejection again" —
+not silent corruption; the CI trust boundary (Decision/Consequence below) still catches a bad replay
+before it lands. Entirely best-effort throughout: every git failure here is logged and none of them
+affect the eject that already happened. Forgetting is unconditional for every path in poisoner's own
+reconstructed conflict — not narrowed to "only resolutions that involved a specific cross-PR
+interaction" — since a bad resolution recorded there is exactly the class of thing this hygiene step
+exists to stop replaying.
 
 ### 5. `gc.rerereResolved`/`gc.rerereUnresolved` defaults accepted as-is; `git rerere gc` is now actually invoked
 
@@ -169,6 +198,13 @@ clone is created or repaired — there is no `merge_train_rerere`-style opt-out,
 - The trust boundary for a conflict resolution is unchanged (Requirement 4): a replayed rerere
   resolution is committed and pushed exactly like a fresh Claude resolution, then validated by the
   trial's own combined CI. No code path treats a replay as more trusted than a fresh resolution.
+- **Red-trial hygiene (Decision 4) only forgets resolutions recorded against the episode's original,
+  pre-bisection trial order — not every resolution poisoner was ever party to.** A resolution
+  recorded during a bisection sub-trial that combined poisoner with a different partial subset of
+  `red` is not replayed by the reconstruction and so cannot be forgotten by it. Accepted, not
+  solved: the failure mode is a stale resolution getting replayed once more and (if genuinely bad)
+  re-failing CI, re-triggering ejection again — not silent corruption, since the unchanged CI trust
+  boundary above still gates every replay regardless of whether it should have been forgotten.
 - `docs/state-machine.md` §6.26 and `docs/USER_GUIDE.md`'s "Merge Train / Queued" section are
   updated to describe the mechanism and the user-visible cost change.
 
@@ -185,8 +221,14 @@ clone is created or repaired — there is no `merge_train_rerere`-style opt-out,
   documented conflict-line output.
 - **`rr-cache` directory diffing plus a member→hash-directory map threaded through `bisect`** for
   red-trial hygiene — see Decision 4. Rejected as substantially more code and much harder to test
-  reliably than a throwaway solo re-merge, for a hygiene feature that only needs to trigger once
+  reliably than a throwaway re-merge, for a hygiene feature that only needs to trigger once
   per ejected poisoner.
+- **A solo `poisoner.headSHA` vs. `p.baseSHA` re-merge, with no earlier-member replay**, for
+  red-trial hygiene. This was the mechanism's initial implementation; a review caught that it
+  silently misses the common case where poisoner's recorded resolution was against the
+  trial-so-far state (base plus earlier-in-order red members already merged in), not against base
+  alone — see Decision 4's full writeup. Replaced with reconstructing `red[:idx]` ahead of poisoner
+  before checking poisoner's own merge.
 - **A `merge_train_rerere` configuration toggle.** Rejected: the issue's requirements never mention
   one, and rerere's downside when it has nothing recorded is zero — there is no scenario where an
   operator would want it off.
