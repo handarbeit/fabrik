@@ -2263,7 +2263,9 @@ func buildTrainConflictComment(memberItem gh.ProjectItem, prSHA string, generate
 				"ID, or ADR number): keep both contributions with the correct identifiers.\n"+
 				"3. `git add -A` to stage all resolved files.\n"+
 				"4. `git commit -m \"chore(merge-train): resolve conflict for #%d\"` to finalize.\n"+
-				"5. Run the project's build + test commands (`go build ./...` and `go vet ./...` at minimum).\n"+
+				"5. Do not run the project's build, test, lint, or install commands, and do not explore "+
+				"files outside the conflicted path(s) — the trial's own CI validates the result after this "+
+				"step completes. Resolve only the conflict markers in the listed file(s) and stop.\n"+
 				"6. **Do NOT emit `FABRIK_STAGE_COMPLETE`.** The merge-train engine takes over after resolution.\n\n"+
 				"If the conflict cannot be resolved safely (ambiguous intent, requires human judgment), "+
 				"abort with `git merge --abort` and explain in your response why resolution is not possible.\n",
@@ -2296,8 +2298,9 @@ func buildTrainConflictComment(memberItem gh.ProjectItem, prSHA string, generate
 			"`git add -A` and do **NOT** touch the generated path(s) above.\n"+
 			"4. **Do NOT commit.** Leave the merge in progress — the engine finalizes the commit after "+
 			"regenerating the generated path(s).\n"+
-			"5. Run the project's build + test commands (`go build ./...` and `go vet ./...` at minimum) "+
-			"if they don't depend on the generated path(s) above.\n"+
+			"5. Do not run the project's build, test, lint, or install commands, and do not explore "+
+			"files outside the conflicted path(s) — the trial's own CI validates the result after this "+
+			"step completes. Resolve only the conflict markers in the listed file(s) and stop.\n"+
 			"6. **Do NOT emit `FABRIK_STAGE_COMPLETE`.** The merge-train engine takes over after resolution.\n\n"+
 			"If the non-generated conflict cannot be resolved safely (ambiguous intent, requires human "+
 			"judgment), abort with `git merge --abort` and explain in your response why resolution is not "+
