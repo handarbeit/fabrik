@@ -180,6 +180,28 @@ false-positive case — a resolved file containing a bare `=======` line and no 
 markers — and was confirmed non-vacuous the same way: reverting the regex to its
 original four-pattern form makes it fail.
 
+**Third hardening pass: even a lone boundary marker isn't unambiguous enough.** The
+claim that real content "essentially never" opens a line with 7+ `<` or `>` characters
+was itself too strong — reviewed again and found overclaimed, especially for this
+specific tool: it scans arbitrary target repos, including ones whose purpose involves
+documenting or testing conflict-marker syntax, where a single quoted `<<<<<<<` or
+`>>>>>>>` line at column 0 (a doc example, a test fixture, quoted diff/patch text) is
+plausible legitimate content, distinct from a genuine surviving conflict. `git`'s own
+conflict markers are never a lone boundary line — they always appear as the full
+three-part structure, `<<<<<<<` then (later) a bare `=======` then (later still)
+`>>>>>>>`. `conflictMarkerBlockRegex` now requires that full ordered structure instead
+of either boundary line alone, which is far more specific: real content essentially
+never happens to contain all three markers in the correct order, whereas an actual
+unresolved conflict always does. This doesn't claim to eliminate every false positive
+(a file that documents a *complete* worked conflict example would still match — an
+acknowledged, accepted residual case, not pursued further since diffing against the
+base branch's own marker lines to solve it exactly would add real complexity for a
+vanishingly rare case), but it closes the concrete gap raised in review. A regression
+test (`TestMergeTrainWorker_ResolvedFileWithLoneBoundaryMarkerNotFlagged`) reproduces a
+resolved file containing a lone quoted `<<<<<<<` line with no accompanying separator or
+opposing boundary, and was confirmed non-vacuous the same way: reverting to the
+boundary-line-only regex makes it fail.
+
 ## 4. Decision: thread a conflict-specific diagnostic, don't reuse `trainCIDiagnostic`
 
 When a conflict genuinely remains unresolved — whether from a clean-but-incomplete

@@ -2615,25 +2615,33 @@ func (e *Engine) finalizeConflictResolution(memberItem gh.ProjectItem, trainWork
 	return true, nil
 }
 
-// conflictMarkerLineRegex matches a literal git conflict-marker boundary line —
-// <<<<<<< or >>>>>>> at the start of a line — git's own default conflictMarkerSize (7
-// repeated characters), optionally followed by more content (e.g. a ref name).
-// Deliberately excludes the bare "=======" and "|||||||" separator forms: unlike the
-// two boundary markers, a run of 7+ "=" (or "|") characters at the start of a line is
-// common legitimate content — Markdown setext heading underlines, RST section
-// underlines, ASCII-art banners — so matching on it alone would eject a file that was
-// actually resolved correctly (flagged in review of #1841). The two boundary markers
-// below are effectively unambiguous: real prose or code essentially never opens a line
-// with 7+ "<" or 7+ ">" characters, so their presence alone is reliable evidence that
-// conflict-marker text survived. A genuine unresolved conflict always includes at
-// least one of these two boundaries, so detection coverage is unaffected.
-var conflictMarkerLineRegex = regexp.MustCompile(`(?m)^(<{7}|>{7})`)
+// conflictMarkerBlockRegex matches a complete git conflict-marker block: a "<<<<<<<"
+// boundary line, then (anywhere after it) a bare "=======" separator line, then
+// (anywhere after that) a ">>>>>>>" boundary line — git's own default
+// conflictMarkerSize (7 repeated characters) for all three. Matching the boundary
+// lines alone (an earlier version of this check) was flagged in review of #1841 as too
+// permissive for the general case: this scan runs against arbitrary target repos, and
+// a single "<<<<<<<"/">>>>>>>" line at column 0 can occur in legitimate content — docs
+// or test fixtures that document conflict-marker syntax, diff/patch text embedded in a
+// file, quoted email-style content, and the like — especially in a repo whose purpose
+// is handling merge conflicts. Requiring the full three-part structure in the correct
+// order is far more specific: real content essentially never happens to contain a
+// "<<<<<<<" line, then later a bare "=======" line, then later still a ">>>>>>>" line,
+// whereas a genuine unresolved conflict always contains exactly that structure. This
+// does not fully eliminate every false positive (a file that documents a complete
+// worked conflict example would still match), but it closes the concrete gap raised in
+// review — a resolved file containing an unrelated single boundary line, or a bare
+// "=======" separator on its own (already excluded before this change; see the
+// now-superseded single-line matcher this replaces) — without requiring a base-branch
+// diff to determine which marker lines are new.
+var conflictMarkerBlockRegex = regexp.MustCompile(`(?m)^<{7}[^\n]*\n(?:.*\n)*?^={7}\n(?:.*\n)*?^>{7}`)
 
 // pathsStillContainConflictMarkers scans each of paths' current on-disk content in dir
-// for a literal conflict-marker line and returns the subset where one is found. An
-// unreadable or absent path is skipped, not reported — this function only flags marker
-// text it actually observed, never a read failure (finalizeConflictResolution's other
-// checks are responsible for verifying a path's existence/readability).
+// for a complete conflict-marker block (see conflictMarkerBlockRegex) and returns the
+// subset where one is found. An unreadable or absent path is skipped, not reported —
+// this function only flags marker text it actually observed, never a read failure
+// (finalizeConflictResolution's other checks are responsible for verifying a path's
+// existence/readability).
 func pathsStillContainConflictMarkers(dir string, paths []string) []string {
 	var found []string
 	for _, p := range paths {
@@ -2641,7 +2649,7 @@ func pathsStillContainConflictMarkers(dir string, paths []string) []string {
 		if err != nil {
 			continue
 		}
-		if conflictMarkerLineRegex.Match(content) {
+		if conflictMarkerBlockRegex.Match(content) {
 			found = append(found, p)
 		}
 	}
