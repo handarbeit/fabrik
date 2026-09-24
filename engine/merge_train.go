@@ -1202,7 +1202,7 @@ func (e *Engine) assembleTrialBranch(ctx context.Context, p trialParams, members
 		// single "the PR" for FABRIK_PR to name. FabrikRoot is still cheap and correct
 		// to set for consistency with the other two InvokeOptions call sites.
 		opts := InvokeOptions{BaseBranch: p.baseBranch, MaxTurnsOverride: p.maxTurnsOverride, FabrikRoot: e.fabrikDir, FabrikRepo: e.defaultRepo(), MaxResumeFailures: e.cfg.MaxResumeFailures}
-		resolved, reason, resolveErr := e.resolveTrainConflict(ctx, member.item, wtDir, p.holdingStg, member.headSHA, preMergeHEAD, opts)
+		resolved, reason, resolveErr := e.resolveTrainConflict(ctx, member.item, wtDir, p.holdingStg, member.headSHA, preMergeHEAD, string(mergeOut), opts)
 		if resolved {
 			survivors = append(survivors, member)
 			e.logf(member.item.Number, "merge-train", "conflict for #%d resolved\n", member.item.Number)
@@ -2435,23 +2435,57 @@ func (e *Engine) regenerateAndCommit(ctx context.Context, memberItem gh.ProjectI
 	return true, ""
 }
 
+// commitRerereReplayedMerge finalizes a merge whose conflict was resolved entirely by
+// git rerere's automatic replay (Requirement 3's first case: rerere resolved every
+// hunk and no declared generated path was part of the original conflict) — a plain
+// `git add -A` (a no-op when rerere.autoupdate already staged everything) followed by
+// a real `git commit`, mirroring resolveConflictWithClaude's own finalization commit
+// so a subsequent identical conflict remains recordable by rerere in turn (ADR-1834
+// Requirement 2 — recording only happens through a real commit).
+func (e *Engine) commitRerereReplayedMerge(wtDir string, memberNumber int) error {
+	addCmd := exec.Command("git", "add", "-A")
+	addCmd.Dir = wtDir
+	if out, err := addCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("staging rerere-replayed merge for #%d: %s: %w", memberNumber, strings.TrimSpace(string(out)), err)
+	}
+	commitCmd := exec.Command("git", "commit", "--no-edit", "-m",
+		fmt.Sprintf("chore(merge-train): resolve conflict for #%d (rerere replay)", memberNumber))
+	commitCmd.Dir = wtDir
+	if out, err := commitCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("committing rerere-replayed merge for #%d: %s: %w", memberNumber, strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
 // resolveTrainConflict classifies a merge conflict's paths against the declared
 // generated-file set and dispatches accordingly:
-//   - A conflict confined entirely to generated paths is regenerated without invoking
-//     Claude (FR-1/FR-2).
-//   - A conflict with no generated paths dispatches Claude exactly as before FR-1..5.
+//   - A conflict git rerere already resolved in full — no declared generated path
+//     involved — is finalized with a direct commit, no Claude invocation (ADR-1834
+//     Requirement 3, first case).
+//   - A conflict confined entirely to generated paths (whether still unmerged now, or
+//     already replayed-and-staged by rerere) is regenerated without invoking Claude
+//     (FR-1/FR-2, extended by ADR-1834 to force a fresh regeneration over a rerere
+//     replay so a stale replayed generated artefact never lands — ADR-1235).
+//   - A conflict with no generated paths dispatches Claude exactly as before FR-1..5;
+//     if rerere already replayed some of the non-generated hunks, Claude's own `git
+//     status` naturally shows only what's left (ADR-1834 Requirement 3, second case).
 //   - A mixed conflict (FR-5) dispatches Claude for the non-generated part first, then
 //     regenerates. Regeneration must always run last: if a co-conflicted non-generated
 //     path is itself one of the generator's own inputs (e.g. one of the four docs/*.md
 //     files generate-llms-full.sh reads), regenerating before Claude resolves it would
 //     read stale/conflicted source content.
 //
+// mergeOut is the failed `git merge` command's own combined output, needed only to
+// recover which declared generated path(s) — if any — were part of the *original*
+// conflict when rerere has already replayed one out of unmergedPaths' current view
+// (see conflictedGeneratedSpecsFromMergeOutput).
+//
 // Returns (resolved, reason, err). err carries only the ADR-1120 usage-limit sentinel
 // and is otherwise nil — the caller must not eject on a non-nil err (see
 // resolveConflictWithClaude's own doc comment). When resolved is false and err is nil,
 // reason is a diagnosable message for ejectMember; an empty reason tells the caller to
 // fall back to its own generic "unresolvable conflict" message.
-func (e *Engine) resolveTrainConflict(ctx context.Context, memberItem gh.ProjectItem, wtDir string, holdingStg *stages.Stage, prSHA string, preMergeHEAD string, opts InvokeOptions) (bool, string, error) {
+func (e *Engine) resolveTrainConflict(ctx context.Context, memberItem gh.ProjectItem, wtDir string, holdingStg *stages.Stage, prSHA string, preMergeHEAD string, mergeOut string, opts InvokeOptions) (bool, string, error) {
 	paths, err := unmergedPaths(wtDir)
 	if err != nil {
 		// Can't classify conflicted paths — fall back to the plain Claude path exactly
@@ -2461,7 +2495,42 @@ func (e *Engine) resolveTrainConflict(ctx context.Context, memberItem gh.Project
 		return resolved, "", resolveErr
 	}
 
+	// currentSet is what unmergedPaths reports *now*. A declared generated path named
+	// in mergeOut's original CONFLICT line(s) but absent from currentSet was fully
+	// replayed by rerere and must still be force-regenerated (ADR-1235) rather than
+	// trusted as-is — a path still present in currentSet is already correctly
+	// classified below by classifyConflictedPaths (including any deletion-involving
+	// routing to Claude), so it is deliberately excluded from forcedRegen here.
+	currentSet := make(map[string]bool, len(paths))
+	for _, p := range paths {
+		currentSet[p.Path] = true
+	}
+	var forcedRegen []generatedFileSpec
+	for _, spec := range conflictedGeneratedSpecsFromMergeOutput(mergeOut, e.generatedFileSet()) {
+		if !currentSet[spec.Path] {
+			forcedRegen = append(forcedRegen, spec)
+		}
+	}
+
+	if len(paths) == 0 {
+		// rerere replayed every hunk: nothing left for Claude. Force a fresh
+		// regeneration if a declared generated path was part of the original
+		// conflict; otherwise finalize directly with no Claude invocation.
+		if len(forcedRegen) == 0 {
+			if err := e.commitRerereReplayedMerge(wtDir, memberItem.Number); err != nil {
+				e.logf(memberItem.Number, "merge-train", "could not finalize rerere-replayed merge for #%d: %v\n", memberItem.Number, err)
+				return false, "", nil
+			}
+			e.logf(memberItem.Number, "merge-train", "conflict for #%d fully resolved by git rerere replay — no Claude invocation\n", memberItem.Number)
+			return true, "", nil
+		}
+		e.logf(memberItem.Number, "merge-train", "conflict for #%d replayed by rerere but touches declared generated path(s) — forcing fresh regeneration\n", memberItem.Number)
+		resolved, reason := e.regenerateAndCommit(ctx, memberItem, wtDir, forcedRegen, nil)
+		return resolved, reason, nil
+	}
+
 	matched, nonGenerated, deletionExcluded := classifyConflictedPaths(e.generatedFileSet(), paths)
+	matched = unionGeneratedSpecsByPath(matched, forcedRegen)
 
 	if len(matched) == 0 {
 		// Nothing left for regeneration to do: either no declared generated path is

@@ -8010,7 +8010,7 @@ func TestResolveTrainConflict_UnmergedPathsErrorFallsBackToPlainClaude(t *testin
 	// attempting to classify conflicted paths against the generated set.
 	wtDir := t.TempDir()
 
-	_, reason, err := eng.resolveTrainConflict(context.Background(), makeTrainItem(1, "Issue 1"), wtDir, holdingStage(eng.cfg), "deadbeef", "deadbeef", InvokeOptions{})
+	_, reason, err := eng.resolveTrainConflict(context.Background(), makeTrainItem(1, "Issue 1"), wtDir, holdingStage(eng.cfg), "deadbeef", "deadbeef", "", InvokeOptions{})
 	if err != nil {
 		t.Fatalf("resolveTrainConflict: %v", err)
 	}
