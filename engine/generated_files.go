@@ -1,5 +1,7 @@
 package engine
 
+import "strings"
+
 // generatedFileSpec declares a single generated artefact: a path that must never be
 // textually merged, and the command that regenerates it from its (already-merged)
 // sources. The Command slice is passed directly to exec.Command(Command[0], Command[1:]...).
@@ -103,4 +105,71 @@ func classifyConflictedPaths(specs []generatedFileSpec, paths []conflictedPath) 
 	}
 
 	return matched, nonGenerated, deletionExcluded
+}
+
+// conflictedGeneratedSpecsFromMergeOutput scans a `git merge` invocation's combined
+// output (mergeOut) for "CONFLICT" lines naming any of the declared generated-file
+// paths in specs, returning the subset of specs whose Path was named — regardless of
+// whether that path is still unmerged by the time the caller checks (ADR-1834).
+//
+// git rerere's autoupdate can silently replay and re-stage a previously recorded
+// resolution for a declared generated path before resolveTrainConflict's
+// unmergedPaths-based classification ever runs, which would otherwise make the
+// replayed path invisible to classifyConflictedPaths and skip ADR-1235's "always
+// regenerate, never trust textual merge content" guarantee. git always prints a
+// "CONFLICT (...)" line naming every originally-conflicted path regardless of
+// whether rerere then resolved it, so this recovers the conflict's true original
+// membership independent of current unmerged state.
+//
+// Matching is a plain substring check of each declared path against every
+// "CONFLICT"-prefixed line — content, add/add, and modify/delete conflicts (git's
+// three conflict-line shapes) all name the path directly in that line's text, so this
+// needs no structured parsing of git's conflict-kind variants. Order-stable per
+// specs; a spec named on more than one CONFLICT line is included only once.
+func conflictedGeneratedSpecsFromMergeOutput(mergeOut string, specs []generatedFileSpec) []generatedFileSpec {
+	var conflictLines []string
+	for _, line := range strings.Split(mergeOut, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "CONFLICT") {
+			conflictLines = append(conflictLines, line)
+		}
+	}
+	if len(conflictLines) == 0 {
+		return nil
+	}
+
+	var out []generatedFileSpec
+	for _, spec := range specs {
+		for _, line := range conflictLines {
+			if strings.Contains(line, spec.Path) {
+				out = append(out, spec)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// unionGeneratedSpecsByPath returns the union of a and b, deduplicated by Path (a's
+// entry wins on a duplicate Path — the two are expected to be identical declarations
+// of the same static generatedFiles table in practice), preserving a's order followed
+// by b's remaining order-stable entries.
+func unionGeneratedSpecsByPath(a, b []generatedFileSpec) []generatedFileSpec {
+	if len(a) == 0 && len(b) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(a)+len(b))
+	out := make([]generatedFileSpec, 0, len(a)+len(b))
+	for _, spec := range a {
+		if !seen[spec.Path] {
+			seen[spec.Path] = true
+			out = append(out, spec)
+		}
+	}
+	for _, spec := range b {
+		if !seen[spec.Path] {
+			seen[spec.Path] = true
+			out = append(out, spec)
+		}
+	}
+	return out
 }

@@ -160,3 +160,86 @@ func TestDeclaredGeneratedFiles(t *testing.T) {
 		t.Errorf("Command = %v, want %v", spec.Command, wantCmd)
 	}
 }
+
+func TestConflictedGeneratedSpecsFromMergeOutput(t *testing.T) {
+	docsSpec := generatedFileSpec{Path: "docs/llms-full.txt", Command: []string{"bash", "scripts/generate-llms-full.sh"}}
+	otherSpec := generatedFileSpec{Path: "docs/other-generated.txt", Command: []string{"bash", "scripts/generate-other.sh"}}
+	specs := []generatedFileSpec{docsSpec, otherSpec}
+
+	tests := []struct {
+		name     string
+		mergeOut string
+		want     []generatedFileSpec
+	}{
+		{
+			name:     "content conflict names declared path",
+			mergeOut: "Auto-merging docs/llms-full.txt\nCONFLICT (content): Merge conflict in docs/llms-full.txt\n",
+			want:     []generatedFileSpec{docsSpec},
+		},
+		{
+			name:     "unrelated conflict on a non-declared path is not matched",
+			mergeOut: "CONFLICT (content): Merge conflict in main.go\n",
+			want:     nil,
+		},
+		{
+			name:     "declared path mentioned without a CONFLICT prefix is not matched",
+			mergeOut: "Auto-merging docs/llms-full.txt\n",
+			want:     nil,
+		},
+		{
+			name:     "duplicate mentions across lines dedupe",
+			mergeOut: "CONFLICT (content): Merge conflict in docs/llms-full.txt\nCONFLICT (add/add): Merge conflict in docs/llms-full.txt\n",
+			want:     []generatedFileSpec{docsSpec},
+		},
+		{
+			name:     "modify/delete conflict line shape is still matched",
+			mergeOut: "CONFLICT (modify/delete): docs/llms-full.txt deleted in HEAD and modified in abc123. Version abc123 of docs/llms-full.txt left in tree.\n",
+			want:     []generatedFileSpec{docsSpec},
+		},
+		{
+			name:     "two declared paths both conflicted are both returned in spec order",
+			mergeOut: "CONFLICT (content): Merge conflict in docs/other-generated.txt\nCONFLICT (content): Merge conflict in docs/llms-full.txt\n",
+			want:     []generatedFileSpec{docsSpec, otherSpec},
+		},
+		{
+			name:     "no conflict lines at all",
+			mergeOut: "Auto-merging docs/llms-full.txt\nMerge made by the 'ort' strategy.\n",
+			want:     nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := conflictedGeneratedSpecsFromMergeOutput(tt.mergeOut, specs)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("conflictedGeneratedSpecsFromMergeOutput() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestUnionGeneratedSpecsByPath(t *testing.T) {
+	specA := generatedFileSpec{Path: "docs/a.txt", Command: []string{"cmd-a"}}
+	specB := generatedFileSpec{Path: "docs/b.txt", Command: []string{"cmd-b"}}
+	specADup := generatedFileSpec{Path: "docs/a.txt", Command: []string{"cmd-a-dup"}}
+
+	tests := []struct {
+		name string
+		a, b []generatedFileSpec
+		want []generatedFileSpec
+	}{
+		{"both empty", nil, nil, nil},
+		{"a only", []generatedFileSpec{specA}, nil, []generatedFileSpec{specA}},
+		{"b only", nil, []generatedFileSpec{specB}, []generatedFileSpec{specB}},
+		{"disjoint union preserves a-then-b order", []generatedFileSpec{specA}, []generatedFileSpec{specB}, []generatedFileSpec{specA, specB}},
+		{"duplicate path: a's entry wins", []generatedFileSpec{specA}, []generatedFileSpec{specADup}, []generatedFileSpec{specA}},
+		{"duplicate path amid other entries stays deduped and ordered", []generatedFileSpec{specA, specB}, []generatedFileSpec{specB, specADup}, []generatedFileSpec{specA, specB}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := unionGeneratedSpecsByPath(tt.a, tt.b)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("unionGeneratedSpecsByPath() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
