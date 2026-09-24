@@ -1243,6 +1243,9 @@ func (e *Engine) assembleTrialBranch(ctx context.Context, p trialParams, members
 
 	survivors := append([]trainMember(nil), members[:matchedLen]...)
 	for _, member := range members[matchedLen:] {
+		if e.trainMergeAttemptHookFn != nil {
+			e.trainMergeAttemptHookFn(member.item.Number)
+		}
 		preMergeHeadCmd := exec.Command("git", "rev-parse", "HEAD")
 		preMergeHeadCmd.Dir = wtDir
 		preMergeHeadOut, preMergeHeadErr := preMergeHeadCmd.Output()

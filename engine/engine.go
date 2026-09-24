@@ -356,6 +356,18 @@ type Engine struct {
 	// exactly how much of a given trial's chain was reused, not just the end-to-end
 	// outcome. Nil in production (zero cost). See ADR-1835.
 	trainPrefixLookupHookFn func(matchedLen, totalLen int, memberNumbers []int)
+	// trainMergeAttemptHookFn, when non-nil, is called immediately before
+	// assembleTrialBranch actually runs `git merge` for a member — i.e. once per member
+	// NOT covered by a reused prefix. This is a merge-count observation independent of
+	// resolveConflictWithClaude's own invocation count, which git rerere's autoupdate
+	// replay (ADR-1834) can satisfy without ever calling Claude — so "zero Claude
+	// invocations" alone cannot distinguish "the merge was skipped entirely" (#1835's
+	// prefix reuse) from "the merge ran but its conflict was resolved for free by
+	// rerere" (already-existing, unrelated behavior). This hook fires for every member
+	// actually merged regardless of outcome (clean or conflicted), letting a test assert
+	// the literal "zero merges" half of Acceptance 1 directly. Nil in production (zero
+	// cost). See ADR-1835.
+	trainMergeAttemptHookFn func(memberNumber int)
 }
 
 func New(cfg Config) (*Engine, error) {
