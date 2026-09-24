@@ -2,7 +2,6 @@ package engine
 
 import (
 	"context"
-	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/itemstate"
@@ -322,7 +321,7 @@ func (e *Engine) handleReviewGate(pctx *phase1Ctx) bool {
 		// re-evaluates this item every 10 × PollSeconds even when nothing bumps
 		// updatedAt. This lets Phase 1/Phase 2 review-reprompt timers fire on a
 		// non-responsive bot reviewer (issue #495).
-		cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
+		cooldown := e.githubRecheckInterval()
 		e.store.Apply(itemstate.CooldownRecorded{
 			Repo:   itemOwnerRepoString(pctx.item, e.defaultRepo()),
 			Number: pctx.item.Number,

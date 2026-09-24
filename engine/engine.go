@@ -31,6 +31,7 @@ type Config struct {
 	AutoUpgrade               bool
 	GitSSH                    bool
 	PollSeconds               int
+	RetryBackoff              time.Duration // Delay before re-dispatching a stage after an incomplete attempt; independent of PollSeconds (#1831). Zero = unset → falls back to githubRecheckInterval (see retry_backoff.go). The CLI always sets it.
 	MaxConcurrent             int
 	MaxRetries                int
 	MaxSliceRetries           int                 // Max turn-cap preemption ("slice") cycles per stage before pausing (default 10; #1199) — bounds a non-converging job independently of MaxRetries, which counts only genuine failures

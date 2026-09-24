@@ -1139,7 +1139,8 @@ FABRIK_USER=my-personal-username
 | `--auto-upgrade` | At startup and when idle (after 2 idle polls), check GitHub Releases for a newer version and self-upgrade; dev builds (built from source) rebuild from `origin/main` instead | `false` |
 | `--notui` | Disable the interactive TUI dashboard | TUI on by default |
 | `--plugin-dir` | Path to Fabrik plugin directory (overrides `.fabrik/plugin/`) | auto-detected |
-| `--poll` | Poll interval in seconds | `30` |
+| `--poll` | Poll interval in seconds. Governs GitHub API cadence; does not affect stage retry latency (see `--retry-backoff`) | `30` |
+| `--retry-backoff` | Seconds before re-dispatching a stage that did not complete. Independent of `--poll` (#1831). Minimum 1 | `60` |
 | `--max-concurrent` | Maximum number of concurrent issue workers | `5` |
 | `--max-retries` | Max failed stage attempts before pausing the issue (0 = unlimited). Counts genuine failures only — a turn-cap preemption never counts here; see `--max-slice-retries` | `3` |
 | `--max-slice-retries` | Maximum number of turn-cap preemption cycles per stage before pausing (0 = use default of 10; also `FABRIK_MAX_SLICE_RETRIES`). A large job that resumes across several slices is not a failure and is bounded separately from `--max-retries` — see the "Max retries" troubleshooting note below | `0` (10 slices) |
@@ -1209,7 +1210,8 @@ The flag/env suggestion is derived mechanically from Fabrik's snake_case (`confi
 | `FABRIK_USER` | `user` | Your GitHub username — operator identity for lock labels, tie-breaking, and @mention notifications | -- |
 | `FABRIK_STAGES` | `stages` | Stage configs directory | `./.fabrik/stages` |
 | `FABRIK_YOLO` | `yolo` | Auto-advance (`true`/`1`/`yes`) | `false` |
-| `FABRIK_POLL` | `poll` | Poll interval in seconds | `30` |
+| `FABRIK_POLL` | `poll` | Poll interval in seconds. Governs GitHub API cadence; does not affect stage retry latency | `30` |
+| `FABRIK_RETRY_BACKOFF` | `retry_backoff` | Seconds before re-dispatching a stage that did not complete. Independent of `poll` — raise `poll` to protect a shared rate limit without slowing retries (#1831). Minimum 1 | `60` |
 | `FABRIK_MAX_CONCURRENT` | `max_concurrent` | Max parallel Claude sessions | `5` |
 | `FABRIK_MAX_RETRIES` | `max_retries` | Max retries before pausing (0 = unlimited). Genuine failures only — see `FABRIK_MAX_SLICE_RETRIES` for turn-cap preemptions | `3` |
 | `FABRIK_MAX_SLICE_RETRIES` | *(no config.yaml key)* | Maximum number of turn-cap preemption cycles per stage before pausing with `fabrik:paused` + `fabrik:awaiting-input` (positive integer; invalid or unset values default to 10). A large job resuming across several slices is not a failure and is bounded separately from `max_retries`. See `--max-slice-retries`. | `10` |

@@ -224,7 +224,7 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 	// the retry window used by LastAttemptAt and CooldownAt.
 	if snap, snapErr := e.store.Get(itemOwnerRepoString(item, e.defaultRepo()), item.Number); snapErr == nil {
 		if lastFailure := snap.State().LastDeepFetchFailureAt; !lastFailure.IsZero() {
-			cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
+			cooldown := e.githubRecheckInterval()
 			if time.Since(lastFailure) < cooldown {
 				return false
 			}
@@ -421,7 +421,7 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 	if snap, snapErr := e.store.Get(repo, item.Number); snapErr == nil {
 		lastAttempt := snap.LastAttemptAt(stage.Name)
 		if !lastAttempt.IsZero() {
-			cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
+			cooldown := e.stageRetryBackoff()
 			if time.Since(lastAttempt) < cooldown {
 				return false
 			}
@@ -555,7 +555,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		// path triggers periodic re-evaluation. Without this, a blocked item whose
 		// updatedAt never changes (GitHub may not propagate a dependency's closure
 		// to the blocked item) would be permanently filtered and never unblocked.
-		cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
+		cooldown := e.githubRecheckInterval()
 		e.store.Apply(itemstate.CooldownRecorded{
 			Repo:   repoStr,
 			Number: item.Number,
@@ -629,7 +629,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		// If stage completed, the completion label above would have caught it.
 		// If we're here, the stage was attempted but didn't complete.
 		// Apply a cooldown to avoid hot-looping.
-		cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
+		cooldown := e.stageRetryBackoff()
 		if time.Since(lastAttempt) < cooldown {
 			return nil
 		}
@@ -909,7 +909,7 @@ func (e *Engine) handleCleanupStage(item gh.ProjectItem, stage *stages.Stage, re
 
 	// Record CooldownAt["periodic-re-eval"] so itemMayNeedWork suppresses
 	// deep-fetches for this terminal item during the cooldown window.
-	cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
+	cooldown := e.githubRecheckInterval()
 	e.store.Apply(itemstate.CooldownRecorded{
 		Repo:   repoStr,
 		Number: item.Number,
@@ -1675,7 +1675,7 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 		releaseLock()
 		e.blockOnInput(item, stage, output)
 	} else {
-		cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
+		cooldown := e.stageRetryBackoff()
 		e.logf(item.Number, "wait", "stage %q did not complete — will retry after %v\n", stage.Name, cooldown)
 		// Escalation is decided before stall-hint arming (see below) so arming can be
 		// skipped on the attempt that triggers it.
