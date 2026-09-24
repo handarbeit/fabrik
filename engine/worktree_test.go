@@ -653,4 +653,3 @@ func TestEnsureWorktree_ExistingBranch(t *testing.T) {
 		t.Fatal("worktree dir not created")
 	}
 }
-
