@@ -132,7 +132,7 @@ type ReviewOutcome struct {
 func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, clone CloneFunc, cfg Config, botLogin, owner, repo string, pr gh.PRDetails, tracker *ReviewTracker) ReviewOutcome {
 	// R1/R2 (#1642): resolve owner/repo's repo-resident .pruefer/config.yaml
 	// at the PR's base ref — never the head, so a PR can never change how it
-	// is itself reviewed (mirrors --setting-sources user's "the PR head is
+	// is itself reviewed (mirrors --setting-sources' "the PR head is
 	// untrusted" doctrine, adrs/1113-pruefer-v1-architecture.md). This is
 	// deliberately the very first network call in ReviewPR, ahead of even
 	// PendingForceReview/FetchPRReviews below: EligibilityInput (built just

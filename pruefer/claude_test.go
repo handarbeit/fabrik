@@ -46,18 +46,47 @@ func TestBuildReviewArgs_ReadOnlyAllowlist(t *testing.T) {
 	}
 }
 
-func TestBuildReviewArgs_UserSettingsOnly(t *testing.T) {
+// TestBuildReviewArgs_NoSettingSourcesLoaded pins that a review loads NO
+// settings layer. This replaces TestBuildReviewArgs_UserSettingsOnly, which
+// asserted "--setting-sources user" — the behavior deliberately changed, not
+// a regression.
+//
+// Loading the operator's profile made every review depend on whichever
+// CLAUDE_CONFIG_DIR the daemon inherited. Switching accounts silently rewired
+// the reviewer: one profile carried a PreToolUse hook that proxied the
+// reviewer's own git and file reads, plus "defaultMode": "auto" and an
+// "effortLevel". Reviews degraded fleet-wide with nothing logged anywhere.
+func TestBuildReviewArgs_NoSettingSourcesLoaded(t *testing.T) {
 	args := buildReviewArgs(ReviewRequest{})
 
-	found := false
+	idx := -1
 	for i, a := range args {
-		if a == "--setting-sources" && i+1 < len(args) && args[i+1] == "user" {
-			found = true
+		if a == "--setting-sources" {
+			idx = i
 			break
 		}
 	}
-	if !found {
-		t.Errorf("expected --setting-sources user, args = %v", args)
+	if idx < 0 {
+		t.Fatalf("--setting-sources absent; the PR's own settings files would be loaded: %v", args)
+	}
+	if idx+1 >= len(args) {
+		t.Fatalf("--setting-sources has no value: %v", args)
+	}
+	if got := args[idx+1]; got != "" {
+		t.Errorf("--setting-sources = %q, want \"\" (load no settings layer)", got)
+	}
+}
+
+// TestBuildReviewArgs_ExplicitControlsStillPassed: with no settings layer,
+// everything governing the review must be passed on the command line, or
+// removing the layer would silently drop it.
+func TestBuildReviewArgs_ExplicitControlsStillPassed(t *testing.T) {
+	args := buildReviewArgs(ReviewRequest{Model: "sonnet"})
+	joined := strings.Join(args, " ")
+	for _, want := range []string{"--permission-mode dontAsk", "--model sonnet", "--allowedTools Read"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("args missing %q: %v", want, args)
+		}
 	}
 }
 

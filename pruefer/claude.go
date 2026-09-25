@@ -454,23 +454,40 @@ func buildReviewPrompt(req ReviewRequest) string {
 // escape hatch, unlike Fabrik stages.
 //
 // Together with reviewAllowedTools above and --permission-mode dontAsk
-// below, --setting-sources user is the third piece of Pruefer's security
-// posture: it requests only the operator's own ~/.claude/settings.json,
-// never the reviewed PR's .claude/settings.json or .claude/settings.local.json.
-// Those files come from code that has not been reviewed yet, so a
-// malicious or careless PR could otherwise widen the reviewer's own tool
-// grants via permissions.allow entries. This is additive, not a substitute
-// for the untrusted-workspace default that already blocks loading them —
-// the clone is never marked trusted (no hasTrustDialogAccepted) — it just
-// makes the restriction explicit instead of incidental, and stops Claude
-// Code from emitting an "Ignoring N permissions.allow entries" warning for
-// settings files it was never asked to load in the first place.
+// below, an empty --setting-sources is the third piece of Pruefer's
+// security posture: it loads NO settings layer at all — not the reviewed
+// PR's .claude/settings.json or settings.local.json, and not the
+// operator's own ~/.claude/settings.json either.
+//
+// Excluding the PR's own files is the original reason (they come from code
+// that has not been reviewed yet, so a malicious or careless PR could
+// otherwise widen the reviewer's tool grants via permissions.allow). That
+// remains additive to the untrusted-workspace default which already blocks
+// them — the clone is never marked trusted — and it still suppresses the
+// "Ignoring N permissions.allow entries" warning.
+//
+// Excluding the *operator's* settings is newer, and is about
+// reproducibility rather than trust. This previously passed
+// "--setting-sources user", which made every review depend on whichever
+// profile the daemon happened to inherit via CLAUDE_CONFIG_DIR. Switching
+// accounts silently rewired the reviewer: one profile carried a PreToolUse
+// hook (an output-compressing proxy applied to the reviewer's own git and
+// file reads), "permissions.defaultMode": "auto", and an "effortLevel" —
+// none of which Pruefer chose, none of which appear in its log, and all of
+// which change how thoroughly a PR is read. Reviews degraded fleet-wide to
+// ~20s with no error anywhere.
+//
+// Everything Pruefer actually needs from settings it already passes
+// explicitly (--model, CLAUDE_CODE_EFFORT_LEVEL, --allowedTools,
+// --permission-mode), so loading none makes a review a function of the PR
+// and Pruefer's own config alone. Authentication is unaffected: it comes
+// from the config directory, not from any settings layer.
 func buildReviewArgs(req ReviewRequest) []string {
 	args := []string{
 		"--output-format", "stream-json",
 		"--verbose",
 		"--permission-mode", "dontAsk",
-		"--setting-sources", "user",
+		"--setting-sources", "",
 	}
 	if req.Model != "" {
 		args = append(args, "--model", req.Model)
