@@ -516,8 +516,9 @@ or as a follow-up comment on handarbeit/fabrik#1355 once run.
 ### Additional prerequisites for the merge-train scenarios (ADR-059)
 
 `TestMergeTrainHappyPathLanding`, `TestMergeTrainBisectionEjectsPoisoner`,
-`TestMergeTrainRestartSafety`, `TestMergeTrainRunawayGuardPausesBatch`, and
-`TestMergeTrainRedSingletonReroutesOffQueued` need one-time bed setup. They
+`TestMergeTrainRestartSafety`, `TestMergeTrainRunawayGuardPausesBatch`,
+`TestMergeTrainRedSingletonReroutesOffQueued`, and
+`TestMergeTrainConflictBisectPrefixRerere` need one-time bed setup. They
 **skip cleanly** (`requireTrainBed`) if the `Queued` column is absent, so they
 are safe to merge before the bed is set up. They
 also skip cleanly under train mode `"off"` — these scenarios place issues
@@ -593,7 +594,6 @@ timeout instead of skipping. Only run in the `on` leg of the two-mode gate.
     `t.Parallel()` here guarantees the runaway scenario completes before
     `TestCrossRepoSpawn` starts real work, mirroring the same idiom
     `TestMergeTrainRestartSafety` already uses below.
-
 21. **`TestMergeTrainQueuedDeeperThanBatchCap`** (#1850, ADR-1833) — queues
     **seven** clean members against the bed's `max_batch_size` and asserts
     (A1) the first trial holds exactly the first five, (A2) batch membership
@@ -647,6 +647,68 @@ timeout instead of skipping. Only run in the `on` leg of the two-mode gate.
       2-member trial) and **no** Claude conflict invocations (every member writes
       a distinct path) — low cost, ~30–60 min. Covered by the default
       `E2E_TIMEOUT=4h`.
+
+22. **`TestMergeTrainConflictBisectPrefixRerere`** (#1848) — the live counterpart of
+    the sim bed's scripted-Claude conflict/bisect/prefix/rerere coverage, and the
+    only release-gate scenario that creates a textual conflict, so the only one that
+    runs **real Claude** conflict resolution under the real merge-train prompt
+    (#1841) alongside trial-prefix reuse (#1835) and rerere replay (#1834). It needs
+    no bed setup beyond #15–#18 (Queued column, `queued.yaml`, train-capable binary,
+    `train-poison-guard` required on Alpha) plus:
+    - **Real Claude usable from the `Queued` holding stage.** The default tool set
+      (`Bash(git:*)`, Edit, Write) is enough; nothing else is configured.
+    - **Non-parallel** (no `t.Parallel()`), for the same reason as the red-singleton
+      scenario: the train batches every item in `Queued` on a repo, so a concurrent
+      sibling would join and break the batch shape. It runs to completion before any
+      parallel Alpha train scenario resumes.
+    - **Shape.** Four members queued A, B, C, P: A and B write the same path
+      (`e2e/train/conflict/shared-<stamp>.txt`, outside `e2e/train/entries/`, so
+      `train-poison-guard` cannot trip on it) with divergent content; C is clean; P
+      is the poisoner. The trial `[A,B,C,P]` has Claude resolve B onto A, goes red,
+      and bisects: `[A,B]` reuses the recorded prefix (2/2, no Claude), `[C,P]`
+      red, `[C]` green, `[P]` red → P ejected; `[A,B,C]` re-forms on the prefix
+      (3/3) and lands. P ends off `Queued` (re-batched as a singleton, then
+      rerouted). All four members are prepared first and moved to `Queued` back to
+      back; the scenario then fails fast unless the first `batch snapshot` line
+      lists exactly A, B, C, P in that order.
+    - **What it asserts** (each from GitHub state or a log line copied from `main`;
+      the analysis is pure and unit-tested in `mergetrain_conflict_log_test.go`,
+      run with `go test -tags e2e ./tests/e2e/ -run 'ConflictTrain|BatchSnapshot|SnapshotForRepo'`):
+      (A1) `conflict for #B resolved`, no `cannot resolve conflict for #B`, no
+      ejection comment on B, no conflict markers on `main`; (A2) B's single Claude
+      invocation uses at most `maxConflictResolutionTurns` (20) turns — parsed from
+      either `used N turns` (error/turn-limit exit) or `completed in N turns`
+      (clean exit); (A3) `bisection isolated #P as the batch poisoner` and an ejection
+      comment on P; (A4) after `bisecting to isolate the poisoner`, `reusing a
+      recorded prefix (2/2 member(s) already merged)` appears and no Claude is
+      invoked for any member before the `(3/3 …)` re-form; (A5) B has exactly one
+      Claude invocation for the whole run and no `did not fully replay via rerere`
+      warning; (A6) A, B, C land and P ends off `Queued`, not `Done`.
+    - **The rerere replay line is asserted only conditionally.** A logged
+      B-onto-A re-merge (`conflict for #B fully resolved by git rerere replay — no
+      Claude invocation`) is *not* guaranteed by this shape: prefix reuse covers
+      every re-form, and the one unconditional re-merge (inside
+      `forgetPoisonerResolutions`) logs nothing on success. The line is required
+      only if main moved mid-run and the train rebuilt on the new base
+      (`(main moved) — rebasing off the new base`), which changes the base SHA and
+      misses the prefix cache.
+    - **Admission-gate caveat (shared with the bisect scenario).** If P's own PR CI
+      finishes red before the batch forms, the admission gate (#1821, active when
+      the stage before `Queued` has `wait_for_ci: true`) defers P and no bisection
+      happens. The scenario fails fast naming `deferring #<P> (own PR CI confirmed
+      red` as the cause; the gate must be pending or skipped, so re-run.
+    - **Turn bound is unmeasured.** 20 is under half the holding stage's 50-turn
+      comment cap (the cap the pre-#1841 prompt burned through) but has no live
+      baseline; the failure message prints the actual N. Tune
+      `maxConflictResolutionTurns` after the first release-gate run.
+    - **Cost (unmeasured estimates).** Claude: **one** conflict-resolution invocation
+      (roughly $0.05–0.30) plus the bed reviewer's reviews of four member PRs. CI: 4
+      member-PR runs, ~6 trial cycles (initial, `[A,B]`, `[C,P]`, `[C]`, `[P]`,
+      `[A,B,C]`), and ~1 follow-up cycle for P's singleton disposition. Wall-clock
+      ~45–80 min, inside the default `E2E_TIMEOUT=4h`. The batch adds 3 non-green
+      trials (initial, `[C,P]`, `[P]`) to the runaway guard's counter, well under
+      the default cap of 20.
+
 
 ### Additional prerequisites for `TestReviewAuthority*` scenarios
 
@@ -1376,6 +1438,7 @@ the `Queued` column is absent, so it only runs in the gate's `on` leg.
 | `TestLateCheckRunSuiteGate` | ADR-1822/#1829 suite-aware CI gate (yolo item taken to Validate, `wait_for_ci`): the gate must not clear while a `needs:`-gated late check run is outstanding. Asserts on GitHub timestamps — late run starts after the fast run completes (A1), `stage:Validate:complete` is applied only after the late run completes (A2), and the fast run finished after `fabrik:awaiting-ci` (A3, vacuity guard). Needs `late-check-suite-gate.yml` installed on Alpha (not required); skips if absent. Mode-invariant | Both | 20–35 min (incl. ~4 min sleep) | ~$0.10–0.50 (one Validate Claude invocation) + one CI cycle |
 | `TestMergeTrainHappyPathLanding` | ADR-059 internal train: 3 clean Queued members → one integration PR → all advance Queued→Done, PRs closed, no O(N²) per-member retests | Train-only (on) | 10–25 min | low (no Claude) |
 | `TestMergeTrainBisectionEjectsPoisoner` | ADR-059 D4: red combined batch → halving bisection isolates the poison member → ejected → survivors land. Needs the `train-poison-guard` required check | Train-only (on) | 20–40 min | low–moderate |
+| `TestMergeTrainConflictBisectPrefixRerere` | #1848: 4-member batch (A/B same-path conflict, clean C, poison P) → **real Claude** resolves B onto A (small turn count) → red trial → bisect ejects P → first half reuses the recorded prefix with no Claude → A, B, C land, P off Queued; rerere replay asserted only if main moves. Needs the `train-poison-guard` required check. **Not parallel** — the train batches every Queued item (prerequisite #22) | Train-only (on) | 45–80 min (est.) | 1 Claude invocation (~$0.05–0.30) + ~11 CI cycles |
 | `TestMergeTrainRestartSafety` | ADR-059 D5 / #960: after a landing, a restart with the historical merged integration PR present does NOT stall the next batch (reconstruct proceeds fresh). **Not parallel** — restarts the bed | Train-only (on) | 25–50 min | low |
 | `TestMergeTrainRunawayGuardPausesBatch` | ADR-059 D8 (#964/#965): persistently-red 4-member batch trips the runaway guard at cap=6, pauses all Queued members, no member reaches Done. Runs on RepoBeta for counter isolation. **Not parallel** — induces a repo-wide fault on RepoBeta that would collide with `TestCrossRepoSpawn`'s use of the same repo (#1395) | Train-only (on) | 10–20 min | low (no Claude) |
 | `TestMergeTrainQueuedDeeperThanBatchCap` | ADR-1833 / #1850: 7 clean members Queued against `max_batch_size` 5 → first trial holds exactly the first five, membership stays stable (one snapshot line, no unmerged-closed trial PR), all seven land as 5 then 2. Members are queued paused then released together. **Not parallel** — shares the (RepoAlpha, main) partition | Train-only (on) | 30–60 min | low (no Claude) |
@@ -1417,6 +1480,7 @@ shape, not just the single-mode total.
 | `TestLateCheckRunSuiteGate` | ADR-1822 / #1822 (suite-aware CI gate: `ciSuiteHold`, `settlePRMergeState`), #1829 (`github-actions` suites never inert), #1849 (this scenario) |
 | `TestMergeTrainHappyPathLanding` | ADR-059 D1/D3 (#946, #947, #948) — Queued column, trial-branch build, integration-PR landing + member lifecycle |
 | `TestMergeTrainBisectionEjectsPoisoner` | ADR-059 D4 (#949) — halving bisection, ejection, one-at-a-time fallback |
+| `TestMergeTrainConflictBisectPrefixRerere` | #1841 (conflict prompt without build/test commands; turn-limited-but-resolved exit kept), #1835 (trial-prefix reuse), #1834 (rerere replay, `forgetPoisonerResolutions`), #1833 (deterministic Queued order), #1848 (this scenario) |
 | `TestMergeTrainRestartSafety` | ADR-059 D5 (#950) + PR #960 (reconstruct must not stall on a historical merged PR) |
 | `TestMergeTrainRunawayGuardPausesBatch` | ADR-059 D8 (#964) — runaway guard trial cap, per-repo counter isolation |
 | `TestMergeTrainQueuedDeeperThanBatchCap` | ADR-1833 / #1833 (deterministic Queued ordering — pre-fix the capped batch was an arbitrary map-order subset that churned poll to poll), #1850 (this scenario); the sim bed cannot cover it (ADR-1833 non-vacuity proof) |

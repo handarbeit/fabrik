@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"bufio"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -185,6 +186,87 @@ func QueueMember(t *testing.T, env *Env, repo, baseBranch, marker, path, content
 	SetIssueStatus(t, env, itemID, "Queued")
 	t.Logf("queued member: issue #%d, PR #%d, at Status=Queued", num, prNum)
 	return num, prNum
+}
+
+// PrepareMemberExactPath is QueueMember minus two things: it does NOT uniquify the
+// path (uniqueMemberPath) and it does NOT place the issue in Queued. It files the
+// issue, adds it to the project, creates the member PR on fabrik/issue-<N> at
+// exactly path, and confirms the PR is resolvable — leaving the caller to move
+// itemID to Queued via SetIssueStatus.
+//
+// Both differences exist for the conflict scenario: two members must write the SAME
+// path with divergent content to conflict textually (QueueMember's per-issue
+// suffix would make every member's path distinct), and all members must enter Queued
+// back to back so a train worker cannot form a partial batch while slow gh calls
+// for a later member are still in flight. The caller owns path uniqueness across
+// runs (a landed batch merges its files into main).
+func PrepareMemberExactPath(t *testing.T, env *Env, repo, baseBranch, marker, path, content string) (issueNum, prNum int, itemID string) {
+	t.Helper()
+	stamp := time.Now().UTC().Format("150405.000")
+	title := fmt.Sprintf("e2e merge-train member %s (%s)", marker, stamp)
+	issueNum = FileIssue(t, env, repo, title,
+		fmt.Sprintf("e2e merge-train member. marker=%s", marker))
+	itemID = AddIssueToProject(t, env, repo, issueNum)
+	branch := fmt.Sprintf("fabrik/issue-%d", issueNum)
+	prNum = CreateMemberPR(t, env, repo, baseBranch, branch, path, content, title, issueNum)
+	LinkedPRNumber(t, env, repo, issueNum)
+	t.Logf("prepared member %s: issue #%d, PR #%d, path %s (not yet Queued)", marker, issueNum, prNum, path)
+	return issueNum, prNum, itemID
+}
+
+// readLogLinesFrom returns every line of the test bed's fabrik.log from offset to
+// EOF, for callers that must reason about line ORDER within a window (which
+// CountLogLines/WaitForLogLine cannot express). Call it only once the terminal
+// state being analysed has already been observed through GitHub state, so the
+// window is known to be complete.
+func readLogLinesFrom(t *testing.T, env *Env, offset int64) []string {
+	t.Helper()
+	f, err := os.Open(env.LogPath)
+	if err != nil {
+		t.Fatalf("open %s: %v", env.LogPath, err)
+	}
+	defer f.Close()
+	if _, err := f.Seek(offset, 0); err != nil {
+		t.Fatalf("seek %s to %d: %v", env.LogPath, offset, err)
+	}
+	var lines []string
+	scanner := bufio.NewScanner(f)
+	// Same buffer sizing as CountLogLines: engine lines can exceed the 64KB default.
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		lines = append(lines, scanner.Text())
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("scanning %s from offset %d: %v", env.LogPath, offset, err)
+	}
+	return lines
+}
+
+// waitForLogLineOrFail polls the bed log from offset until a line containing want
+// appears (returned), or fails the test if a line containing any failOn substring
+// appears first (each failOn entry maps a substring to the diagnostic to print),
+// or timeout expires. Unlike WaitForLogLine it lets a scenario turn a known
+// early-exit cause (e.g. the admission gate deferring a member) into a named
+// failure instead of a bare timeout. want is checked before failOn within a line.
+func waitForLogLineOrFail(t *testing.T, env *Env, want string, failOn map[string]string, offset int64, timeout time.Duration) string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if line, err := tryLogLineContaining(env, want, offset); err == nil && line != "" {
+			return line
+		} else if err != nil {
+			t.Logf("waitForLogLineOrFail: transient log read error: %v (will retry)", err)
+		}
+		for sub, why := range failOn {
+			if line, err := tryLogLineContaining(env, sub, offset); err == nil && line != "" {
+				t.Fatalf("saw %q while waiting for %q: %s\nlog line: %s", sub, want, why, strings.TrimSpace(line))
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out after %s waiting for log line containing %q (scanned from offset %d)", timeout, want, offset)
+		}
+		time.Sleep(5 * time.Second)
+	}
 }
 
 // QueueMemberOnBase is QueueMember for a non-default baseBranch (#1648): it additionally
