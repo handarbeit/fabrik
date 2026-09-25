@@ -336,6 +336,20 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 	}
 	defer cleanup()
 
+	// Hand the model the diff we already have. The clone is a depth-1 fetch
+	// of refs/pull/<N>/head alone, so the base branch is not a ref in it and
+	// the model cannot derive the change from git — see ReviewRequest.DiffPath.
+	// Written outside the clone so it never appears in the reviewed tree,
+	// git status, or a Grep/Glob sweep of the repo.
+	diffPath, cleanupDiff, err := writeDiffFile(diff, pr.Number)
+	if err != nil {
+		// Non-fatal: the prompt degrades to its older base-branch wording
+		// rather than failing the review outright.
+		logf(pr.Number, "warn", "writing diff file for %s/%s#%d: %v — review will proceed without it\n", owner, repo, pr.Number, err)
+	} else {
+		defer cleanupDiff()
+	}
+
 	result, err := claude.Review(ctx, ReviewRequest{
 		Owner: owner, Repo: repo, PRNumber: pr.Number, Title: pr.Title, Body: pr.Body,
 		HeadSHA: pr.HeadSHA, BaseBranch: pr.BaseRef, Model: cfg.Model, Effort: cfg.Effort,
@@ -343,6 +357,7 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 		OmittedExcludedPaths: omittedExcludedPaths, OmittedTrimmedPaths: omittedTrimmedPaths,
 		OperatorGuidance: cfg.ReviewGuidance, OperatorGuidanceMode: cfg.ReviewGuidanceMode,
 		RepoGuidance: repoGuidance, RepoGuidanceMode: repoGuidanceMode,
+		DiffPath: diffPath,
 	})
 	if err != nil {
 		logf(pr.Number, "claude", "review invocation failed for %s/%s#%d: %v — posting nothing\n", owner, repo, pr.Number, err)
