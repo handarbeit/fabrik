@@ -63,7 +63,9 @@ jobs:
           esac
           # 140 x 15s = 35 min. Fail open (exit 0) so this job can never deadlock a PR.
           for _ in $(seq 1 140); do
-            if gh api "repos/$REPO/issues/$issue" --jq '.labels[].name' 2>/dev/null | grep -qx 'fabrik:awaiting-ci'; then
+            # No `grep -q`: under the runner's default `bash -e -o pipefail`, an early-exiting
+            # grep can SIGPIPE gh and turn a match into a pipeline failure.
+            if gh api "repos/$REPO/issues/$issue" --jq '.labels[].name' 2>/dev/null | grep -x 'fabrik:awaiting-ci' >/dev/null; then
               echo "fabrik:awaiting-ci present on #$issue — CI gate is active; fast job done"
               exit 0
             fi
