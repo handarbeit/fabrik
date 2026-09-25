@@ -4,10 +4,15 @@ package e2e
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -498,4 +503,370 @@ func WaitForNoStaleTrainArtifacts(t *testing.T, env *Env, repo string, timeout t
 		}
 		time.Sleep(10 * time.Second)
 	}
+}
+
+// ── Batch-cap scenario helpers (#1850, ADR-1833) ───────────────────────────
+//
+// TestMergeTrainQueuedDeeperThanBatchCap needs a batch to form ONLY once all of
+// its members are Queued: the engine has no batching dwell, so a poll that lands
+// while members are still being queued would dispatch a worker on a partial
+// batch. fabrik:paused is the one exclusion a test controls
+// (groupQueuedItemsByRepoUnordered drops paused items), so members are queued
+// paused and then unpaused together.
+
+// pausedLabel is the engine's pause label. It is created by the engine in normal
+// operation; ensurePausedLabelExists only guards a bed where it does not yet exist.
+const pausedLabel = "fabrik:paused"
+
+// ensurePausedLabelExists creates fabrik:paused on repo if it is missing, so that
+// gh issue create --label does not fail. Unlike ensureLabelExists it registers NO
+// delete cleanup: the label is engine-owned and shared by every scenario, and
+// deleting it repo-wide would strip it from unrelated issues. Never swap this
+// for ensureLabelExists.
+func ensurePausedLabelExists(t *testing.T, env *Env, repo string) {
+	t.Helper()
+	exists := func() bool {
+		_, err := ghOutput(env, "api", fmt.Sprintf("repos/%s/labels/%s", repo, "fabrik%3Apaused"))
+		return err == nil
+	}
+	if exists() {
+		return
+	}
+	out, err := ghOutput(env, "label", "create", pausedLabel, "-R", repo, "--color", "e99695")
+	if err != nil && !exists() {
+		t.Fatalf("ensure label %q exists on %s: %v\n%s", pausedLabel, repo, err, out)
+	}
+}
+
+// QueueMemberPaused is QueueMember for the default base, except the issue is
+// created already carrying fabrik:paused — so it is never visible to the engine
+// without the label — and stays paused after being placed in Queued. The caller
+// releases the whole batch with removePausedConcurrently. QueueMember itself is
+// untouched for its existing callers.
+func QueueMemberPaused(t *testing.T, env *Env, repo, baseBranch, marker, path, content string) (int, int) {
+	t.Helper()
+	stamp := time.Now().UTC().Format("150405.000")
+	title := fmt.Sprintf("e2e merge-train member %s (%s)", marker, stamp)
+	num := FileIssue(t, env, repo, title,
+		fmt.Sprintf("e2e merge-train member. marker=%s", marker), pausedLabel)
+	itemID := AddIssueToProject(t, env, repo, num)
+	uPath := uniqueMemberPath(path, num)
+	branch := fmt.Sprintf("fabrik/issue-%d", num)
+	prNum := CreateMemberPR(t, env, repo, baseBranch, branch, uPath, content, title, num)
+	LinkedPRNumber(t, env, repo, num)
+	SetIssueStatus(t, env, itemID, "Queued")
+	t.Logf("queued PAUSED member: issue #%d, PR #%d, at Status=Queued", num, prNum)
+	return num, prNum
+}
+
+// removePausedConcurrently removes fabrik:paused from every issue at once (REST,
+// one goroutine per issue) so the engine's view of the batch flips from "none
+// visible" to "all visible" inside roughly one API round-trip, rather than
+// across the seconds a sequential loop would take. Goroutines never call
+// t.Fatal; every failure is returned.
+func removePausedConcurrently(env *Env, repo string, nums []int) []error {
+	errs := make([]error, len(nums))
+	var wg sync.WaitGroup
+	for i, n := range nums {
+		wg.Add(1)
+		go func(i, n int) {
+			defer wg.Done()
+			out, err := ghOutput(env, "api", "-X", "DELETE",
+				fmt.Sprintf("repos/%s/issues/%d/labels/%s", repo, n, "fabrik%3Apaused"))
+			if err != nil {
+				errs[i] = fmt.Errorf("remove %s from %s#%d: %v: %s", pausedLabel, repo, n, err, strings.TrimSpace(out))
+			}
+		}(i, n)
+	}
+	wg.Wait()
+	var failed []error
+	for _, e := range errs {
+		if e != nil {
+			failed = append(failed, e)
+		}
+	}
+	return failed
+}
+
+// repauseOnFailure registers a cleanup that, only when the test failed, re-applies
+// fabrik:paused to the issue if it is still open — so a failed run cannot leave
+// un-paused Queued members to join a later scenario's batch. Call it right after
+// the member is queued: cleanups run LIFO, so it runs before FileIssue's own
+// close-the-issue cleanup for the same member. Best-effort by design.
+func repauseOnFailure(t *testing.T, env *Env, repo string, num int) {
+	t.Helper()
+	t.Cleanup(func() {
+		if !t.Failed() {
+			return
+		}
+		if state, err := tryIssueState(env, repo, num); err == nil && state != "OPEN" {
+			return
+		}
+		_, _ = ghOutput(env, "issue", "edit", fmt.Sprint(num), "-R", repo, "--add-label", pausedLabel)
+	})
+}
+
+// staleQueuedMembers returns open, non-paused issues on repo that already sit in
+// Queued. Any such item would join this scenario's (repo, base) partition and
+// change the batch composition, so the caller fails loudly rather than run.
+func staleQueuedMembers(env *Env, repo string) ([]int, error) {
+	items, err := fetchBoardItems(env)
+	if err != nil {
+		return nil, err
+	}
+	var stale []int
+	for _, it := range items {
+		if !strings.EqualFold(it.Repo, repo) || strings.TrimSpace(it.Status) != "Queued" {
+			continue
+		}
+		state, err := tryIssueState(env, repo, it.Number)
+		if err != nil {
+			return nil, fmt.Errorf("read state of %s#%d: %w", repo, it.Number, err)
+		}
+		if state != "OPEN" {
+			continue
+		}
+		labels, err := tryIssueLabels(env, repo, it.Number)
+		if err != nil {
+			return nil, fmt.Errorf("read labels of %s#%d: %w", repo, it.Number, err)
+		}
+		paused := false
+		for _, l := range labels {
+			if l == pausedLabel {
+				paused = true
+			}
+		}
+		if !paused {
+			stale = append(stale, it.Number)
+		}
+	}
+	sort.Ints(stale)
+	return stale, nil
+}
+
+// configuredMaxBatchSize best-effort reads the bed's configured max_batch_size:
+// FABRIK_MAX_BATCH_SIZE from the bed .env wins (it takes precedence over the
+// config file, cmd/root.go), else a top-level max_batch_size line in
+// .fabrik/config.yaml. Returns 0 when neither is set (engine default applies).
+// This is only a pre-flight; the authoritative check is the engine's own
+// "batch capped … max_batch_size=N" log line.
+func configuredMaxBatchSize(env *Env) int {
+	if v, err := readEnvFileValue(filepath.Join(env.FabrikTestDir, ".env"), "FABRIK_MAX_BATCH_SIZE"); err == nil && strings.TrimSpace(v) != "" {
+		if n, aerr := strconv.Atoi(strings.TrimSpace(v)); aerr == nil {
+			return n
+		}
+		return -1 // set but unparseable: not the default of 5
+	}
+	data, err := os.ReadFile(filepath.Join(env.FabrikTestDir, ".fabrik", "config.yaml"))
+	if err != nil {
+		return 0
+	}
+	if m := regexp.MustCompile(`(?m)^max_batch_size:\s*(\d+)\s*(?:#.*)?$`).FindSubmatch(data); m != nil {
+		n, _ := strconv.Atoi(string(m[1]))
+		return n
+	}
+	return 0
+}
+
+// logLinesSince returns every line of the bed log from offset to EOF.
+func logLinesSince(t *testing.T, env *Env, offset int64) []string {
+	t.Helper()
+	lines, err := allLogLinesContaining(env, "", offset)
+	if err != nil {
+		t.Fatalf("read %s from offset %d: %v", env.LogPath, offset, err)
+	}
+	for i := range lines {
+		lines[i] = strings.TrimRight(lines[i], "\r\n")
+	}
+	return lines
+}
+
+// waitForLogMatch polls the log from offset until some line satisfies match, and
+// returns that line. WaitForLogLine can only substring-match; the scenario needs
+// to match on a parsed field (the repo and trainKey a line names).
+func waitForLogMatch(t *testing.T, env *Env, offset int64, timeout time.Duration, what string, match func(line string) bool) string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		for _, l := range logLinesSince(t, env, offset) {
+			if match(l) {
+				return l
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out after %s waiting for log line: %s (scanned from offset %d)", timeout, what, offset)
+		}
+		time.Sleep(10 * time.Second)
+	}
+}
+
+// The parsers below match the engine's own format strings, copied verbatim:
+//
+//	engine/poll.go        "batch capped for %s: %d Queued item(s) exceed max_batch_size=%d — landing first %d by entry order"
+//	engine/poll.go        "batch snapshot for %s: %d item(s) — #A \"title\", …"
+//	engine/merge_train.go "opened draft CI PR #%d for %s/%s (%d survivor(s))"
+//	engine/merge_train.go "merged integration PR #%d for %s"          (%s = owner/repo)
+//	engine/merge_train.go "landing complete for %s (integration PR #%d, %d members)"   (%s = trainKey)
+//
+// The strings have no compile-time link to the engine, so a wording change there
+// makes these return ok=false and the scenario fails loudly on "line not found"
+// rather than passing vacuously. mergetrain_batchcap_parse_test.go pins them.
+// trainKey is the bare owner/repo for the default-base partition; a non-default
+// base is owner/repo:branch — the trailing ": " / " (" in each pattern keeps a
+// key from matching a longer one.
+
+var snapshotMemberRE = regexp.MustCompile(`(?:^|, )#(\d+) "`)
+
+// parseBatchSnapshot parses a "batch snapshot for <trainKey>: N item(s) — …"
+// line, returning the member issue numbers in listed order.
+func parseBatchSnapshot(line, trainKey string) ([]int, bool) {
+	head := "batch snapshot for " + trainKey + ": "
+	i := strings.Index(line, head)
+	if i < 0 {
+		return nil, false
+	}
+	rest := line[i+len(head):]
+	j := strings.Index(rest, " item(s) — ")
+	if j < 0 {
+		return nil, false
+	}
+	want, err := strconv.Atoi(rest[:j])
+	if err != nil {
+		return nil, false
+	}
+	var members []int
+	for _, m := range snapshotMemberRE.FindAllStringSubmatch(rest[j+len(" item(s) — "):], -1) {
+		n, _ := strconv.Atoi(m[1])
+		members = append(members, n)
+	}
+	if len(members) != want {
+		return nil, false
+	}
+	return members, true
+}
+
+// parseBatchCapped parses a "batch capped for <trainKey>: Q Queued item(s) exceed
+// max_batch_size=M — landing first M by entry order" line.
+func parseBatchCapped(line, trainKey string) (queued, maxBatch int, ok bool) {
+	re := regexp.MustCompile(`batch capped for ` + regexp.QuoteMeta(trainKey) +
+		`: (\d+) Queued item\(s\) exceed max_batch_size=(\d+) — landing first (\d+) by entry order`)
+	m := re.FindStringSubmatch(line)
+	if m == nil || m[2] != m[3] {
+		return 0, 0, false
+	}
+	queued, _ = strconv.Atoi(m[1])
+	maxBatch, _ = strconv.Atoi(m[2])
+	return queued, maxBatch, true
+}
+
+// parseOpenedDraftCI parses "opened draft CI PR #N for <owner/repo> (K survivor(s))".
+func parseOpenedDraftCI(line, repo string) (pr, survivors int, ok bool) {
+	re := regexp.MustCompile(`opened draft CI PR #(\d+) for ` + regexp.QuoteMeta(repo) + ` \((\d+) survivor\(s\)\)`)
+	m := re.FindStringSubmatch(line)
+	if m == nil {
+		return 0, 0, false
+	}
+	pr, _ = strconv.Atoi(m[1])
+	survivors, _ = strconv.Atoi(m[2])
+	return pr, survivors, true
+}
+
+// parseMergedIntegration parses "merged integration PR #N for <owner/repo>".
+func parseMergedIntegration(line, repo string) (pr int, ok bool) {
+	re := regexp.MustCompile(`merged integration PR #(\d+) for ` + regexp.QuoteMeta(repo) + `\s*$`)
+	m := re.FindStringSubmatch(line)
+	if m == nil {
+		return 0, false
+	}
+	pr, _ = strconv.Atoi(m[1])
+	return pr, true
+}
+
+// parseLandingComplete parses "landing complete for <trainKey> (integration PR #N, K members)".
+func parseLandingComplete(line, trainKey string) (pr, members int, ok bool) {
+	re := regexp.MustCompile(`landing complete for ` + regexp.QuoteMeta(trainKey) + ` \(integration PR #(\d+), (\d+) members\)`)
+	m := re.FindStringSubmatch(line)
+	if m == nil {
+		return 0, 0, false
+	}
+	pr, _ = strconv.Atoi(m[1])
+	members, _ = strconv.Atoi(m[2])
+	return pr, members, true
+}
+
+// sameMemberSet reports whether a and b hold the same numbers, ignoring order.
+func sameMemberSet(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	x := append([]int(nil), a...)
+	y := append([]int(nil), b...)
+	sort.Ints(x)
+	sort.Ints(y)
+	for i := range x {
+		if x[i] != y[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// trainPR is one merge-train trial/integration PR, reduced to what the
+// batch-cap scenario asserts on.
+type trainPR struct {
+	Number  int
+	Merged  bool
+	State   string // REST state: "open" or "closed"
+	Members []int  // issue numbers from the body's "Closes #N" lines, ascending
+}
+
+var closesLineRE = regexp.MustCompile(`(?m)^Closes #(\d+)\s*$`)
+
+// listTrainPRsSince lists PRs on repo whose head is under fabrik/merge-train/,
+// created at or after since, and whose body's "Closes #N" lines include at
+// least one of members — so PRs from any other scenario are excluded by
+// membership, not by timing luck. Ascending by PR number. REST, not GraphQL.
+func listTrainPRsSince(env *Env, repo string, since time.Time, members []int) ([]trainPR, error) {
+	out, err := ghOutput(env, "api", fmt.Sprintf("repos/%s/pulls?state=all&per_page=100", repo),
+		"--jq", `[.[] | select(.head.ref | startswith("fabrik/merge-train/")) | {number, state, merged: (.merged_at != null), created_at, body: (.body // "")}]`)
+	if err != nil {
+		return nil, fmt.Errorf("list train PRs on %s: %v: %s", repo, err, strings.TrimSpace(out))
+	}
+	var raw []struct {
+		Number    int    `json:"number"`
+		State     string `json:"state"`
+		Merged    bool   `json:"merged"`
+		CreatedAt string `json:"created_at"`
+		Body      string `json:"body"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &raw); err != nil {
+		return nil, fmt.Errorf("parse train PR list: %w", err)
+	}
+	ours := map[int]bool{}
+	for _, m := range members {
+		ours[m] = true
+	}
+	var prs []trainPR
+	for _, r := range raw {
+		created, perr := time.Parse(time.RFC3339, r.CreatedAt)
+		if perr != nil || created.Before(since) {
+			continue
+		}
+		var closes []int
+		mine := false
+		for _, m := range closesLineRE.FindAllStringSubmatch(r.Body, -1) {
+			n, _ := strconv.Atoi(m[1])
+			closes = append(closes, n)
+			if ours[n] {
+				mine = true
+			}
+		}
+		if !mine {
+			continue
+		}
+		sort.Ints(closes)
+		prs = append(prs, trainPR{Number: r.Number, Merged: r.Merged, State: r.State, Members: closes})
+	}
+	sort.Slice(prs, func(i, j int) bool { return prs[i].Number < prs[j].Number })
+	return prs, nil
 }
