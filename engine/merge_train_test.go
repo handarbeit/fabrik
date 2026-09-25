@@ -2419,6 +2419,7 @@ func TestMergeTrainWorker_UnresolvableConflict(t *testing.T) {
 	sha2 := pushBranchToBare(t, srcDir, wm.baseDir, "fabrik/issue-2", "counter.txt", "branch2-value\n")
 
 	var addCommentIssues []int
+	var ejectionBody string
 	var createdPRs int
 	var mu sync.Mutex
 
@@ -2435,6 +2436,9 @@ func TestMergeTrainWorker_UnresolvableConflict(t *testing.T) {
 		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
 			mu.Lock()
 			addCommentIssues = append(addCommentIssues, issueNumber)
+			if issueNumber == 2 {
+				ejectionBody = body
+			}
 			mu.Unlock()
 			return 1, nil
 		},
@@ -2477,6 +2481,7 @@ func TestMergeTrainWorker_UnresolvableConflict(t *testing.T) {
 	mu.Lock()
 	prs := createdPRs
 	comments := append([]int(nil), addCommentIssues...)
+	body := ejectionBody
 	mu.Unlock()
 
 	// One draft PR should be created (for the survivor — issue #1).
@@ -2492,6 +2497,636 @@ func TestMergeTrainWorker_UnresolvableConflict(t *testing.T) {
 	}
 	if !ejectedIssue2 {
 		t.Error("expected ejection comment on issue #2")
+	}
+	// A genuine (non-turn-limited) unresolvable conflict must read as a judgment,
+	// never as a turn-budget exhaustion — the two must produce distinct wording
+	// (see TestMergeTrainWorker_ConflictTurnLimitedWithRemainingConflictsEjects for
+	// the turn-limited counterpart).
+	if !strings.Contains(body, "conflict judged unresolvable") {
+		t.Errorf("expected ejection comment to read as a genuine judgment, got: %s", body)
+	}
+	if strings.Contains(body, "ran out of turns") {
+		t.Errorf("expected ejection comment NOT to claim a turn-budget exhaustion, got: %s", body)
+	}
+	if !strings.Contains(body, "counter.txt") {
+		t.Errorf("expected ejection comment to name the conflicted file counter.txt, got: %s", body)
+	}
+}
+
+// TestMergeTrainWorker_ConflictTurnLimitedButResolvedStaysInBatch verifies #1841
+// Requirement 2/Acceptance 2: a conflict-resolution invocation that exhausts its turn
+// budget (claudeTurnLimitError, CLI subtype error_max_turns) must NOT be automatically
+// treated as unresolvable. When the worktree shows no remaining conflict markers (the
+// resolution actually finished, it just ran out of turns on unrelated work per
+// adrs/1841-*.md's turn-sink diagnosis), the member must stay in the batch — no
+// ejection comment, and its resolved content lands in the draft PR.
+func TestMergeTrainWorker_ConflictTurnLimitedButResolvedStaysInBatch(t *testing.T) {
+	skipIfNoGit(t)
+	_, srcDir, _, wm := setupTrainRepo(t)
+
+	sha1 := pushBranchToBare(t, srcDir, wm.baseDir, "fabrik/issue-1", "counter.txt", "from-branch-1\n")
+	sha2 := pushBranchToBare(t, srcDir, wm.baseDir, "fabrik/issue-2", "counter.txt", "from-branch-2\n")
+
+	var createdPRs []createDraftPRCall
+	var addCommentIssues []int
+	var mu sync.Mutex
+
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			switch issueNumber {
+			case 1:
+				return &gh.PRDetails{Number: 10, HeadSHA: sha1, State: "open"}, nil
+			case 2:
+				return &gh.PRDetails{Number: 11, HeadSHA: sha2, State: "open"}, nil
+			}
+			return nil, fmt.Errorf("not found")
+		},
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
+			mu.Lock()
+			addCommentIssues = append(addCommentIssues, issueNumber)
+			mu.Unlock()
+			return 1, nil
+		},
+		createDraftPRFn: func(owner, repo, title, head, base, body string, issueNumber int) (int, error) {
+			mu.Lock()
+			createdPRs = append(createdPRs, createDraftPRCall{owner, repo, title, head, base, body, issueNumber})
+			mu.Unlock()
+			return 99, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			tr := true
+			return &tr, "clean", nil
+		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
+		},
+	}
+
+	// Claude actually resolves and commits the conflict, but the invocation itself
+	// reports a turn-limit exit — mirroring the #516 production episode, where the
+	// worktree's own state is not what the error return implies.
+	claude := &mockClaudeInvoker{
+		invokeForCommentsFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			resolvedContent := "from-branch-1\nfrom-branch-2\n"
+			if err := os.WriteFile(filepath.Join(workDir, "counter.txt"), []byte(resolvedContent), 0644); err != nil {
+				return "", false, TokenUsage{}, fmt.Errorf("write resolved file: %w", err)
+			}
+			mustGit(t, workDir, "add", "-A")
+			mustGit(t, workDir, "commit", "--no-edit", "-m", fmt.Sprintf("chore(merge-train): resolve conflict for #%d", issue.Number))
+			return "ran out of turns mid-verification", false, TokenUsage{}, &claudeTurnLimitError{TerminalReason: "error_max_turns", NumTurns: 51}
+		},
+	}
+
+	eng := trainTestEngine(t, client, claude, wm)
+	eng.mu.Lock()
+	eng.worktreeManagers["owner/repo"] = wm
+	eng.mu.Unlock()
+
+	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1"), makeTrainItem(2, "Issue 2")}
+	state := &mergeTrainWorkerState{assembling: true, trialName: fmt.Sprintf("merge-train-repo-%d", time.Now().Unix())}
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
+
+	mu.Lock()
+	n := len(createdPRs)
+	comments := append([]int(nil), addCommentIssues...)
+	mu.Unlock()
+
+	// Both members survive — no ejection for #2 despite the turn-limit exit.
+	if n != 1 {
+		t.Fatalf("expected 1 draft PR after turn-limited-but-resolved conflict, got %d", n)
+	}
+	body := createdPRs[0].body
+	if !strings.Contains(body, "#1") || !strings.Contains(body, "#2") {
+		t.Errorf("PR body should reference both members (neither ejected), got: %s", body)
+	}
+	for _, n := range comments {
+		if n == 2 {
+			t.Error("issue #2 must not receive an ejection comment — the worktree shows the conflict was actually resolved")
+		}
+	}
+	// The account-wide suspension-clearing signal must still fire on a turn-limited
+	// exit exactly as it does on a clean success (ADR-1120's principle applied here).
+	if _, suspended := eng.claudeSuspendedUntilTime(time.Now()); suspended {
+		t.Error("expected no account-wide Claude suspension after a turn-limited (not usage-limited) exit")
+	}
+}
+
+// TestMergeTrainWorker_ConflictTurnLimitedWithRemainingConflictsEjects verifies #1841
+// Requirements 3/4 and Acceptance 3: when a turn-limited conflict-resolution invocation
+// leaves genuine conflict markers behind, the member is still ejected — but the
+// ejection comment must name the still-conflicted file(s) and say plainly that the
+// invocation ran out of budget, never that the conflict was judged unresolvable.
+func TestMergeTrainWorker_ConflictTurnLimitedWithRemainingConflictsEjects(t *testing.T) {
+	skipIfNoGit(t)
+	_, srcDir, _, wm := setupTrainRepo(t)
+
+	sha1 := pushBranchToBare(t, srcDir, wm.baseDir, "fabrik/issue-1", "counter.txt", "branch1-value\n")
+	sha2 := pushBranchToBare(t, srcDir, wm.baseDir, "fabrik/issue-2", "counter.txt", "branch2-value\n")
+
+	var addCommentIssues []int
+	var ejectionBody string
+	var createdPRs int
+	var mu sync.Mutex
+
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			switch issueNumber {
+			case 1:
+				return &gh.PRDetails{Number: 10, HeadSHA: sha1, State: "open"}, nil
+			case 2:
+				return &gh.PRDetails{Number: 11, HeadSHA: sha2, State: "open"}, nil
+			}
+			return nil, fmt.Errorf("not found")
+		},
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
+			mu.Lock()
+			addCommentIssues = append(addCommentIssues, issueNumber)
+			if issueNumber == 2 {
+				ejectionBody = body
+			}
+			mu.Unlock()
+			return 1, nil
+		},
+		createDraftPRFn: func(owner, repo, title, head, base, body string, issueNumber int) (int, error) {
+			mu.Lock()
+			createdPRs++
+			mu.Unlock()
+			return 99, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			tr := true
+			return &tr, "clean", nil
+		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
+		},
+	}
+
+	// Claude leaves conflict markers in place and reports a turn-limit exit.
+	claude := &mockClaudeInvoker{
+		invokeForCommentsFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			return "ran out of turns before finishing", false, TokenUsage{}, &claudeTurnLimitError{TerminalReason: "error_max_turns", NumTurns: 51}
+		},
+	}
+	eng := trainTestEngine(t, client, claude, wm)
+	eng.mu.Lock()
+	eng.worktreeManagers["owner/repo"] = wm
+	eng.mu.Unlock()
+
+	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1"), makeTrainItem(2, "Issue 2")}
+	state := &mergeTrainWorkerState{assembling: true, trialName: fmt.Sprintf("merge-train-repo-%d", time.Now().Unix())}
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
+
+	mu.Lock()
+	prs := createdPRs
+	comments := append([]int(nil), addCommentIssues...)
+	body := ejectionBody
+	mu.Unlock()
+
+	if prs != 1 {
+		t.Errorf("expected 1 draft PR (for survivor #1), got %d", prs)
+	}
+	ejectedIssue2 := false
+	for _, n := range comments {
+		if n == 2 {
+			ejectedIssue2 = true
+		}
+	}
+	if !ejectedIssue2 {
+		t.Fatal("expected ejection comment on issue #2")
+	}
+	if !strings.Contains(body, "ran out of turns") {
+		t.Errorf("expected ejection comment to say the invocation ran out of turns, got: %s", body)
+	}
+	if strings.Contains(body, "conflict judged unresolvable") {
+		t.Errorf("expected ejection comment NOT to claim the conflict was judged unresolvable, got: %s", body)
+	}
+	if !strings.Contains(body, "counter.txt") {
+		t.Errorf("expected ejection comment to name the still-conflicted file counter.txt, got: %s", body)
+	}
+	if !strings.Contains(body, "51") {
+		t.Errorf("expected ejection comment to report the turn count (51), got: %s", body)
+	}
+}
+
+// TestMergeTrainWorker_ConflictStagedMarkersNotCommitted guards against a gap flagged
+// in PR #1843 review: `git status --porcelain` (unmergedPaths) clears a path's "UU"
+// status as soon as it is `git add`ed, regardless of whether the staged content still
+// contains literal conflict-marker text — so a plain `git diff --check` (working tree
+// vs. index) run after staging compares two already-identical copies and can never see
+// what was actually staged. This reproduces exactly that: the mock invocation edits the
+// file to *leave* marker text in place, then runs `git add -A` and commits anyway (as a
+// buggy or truncated Claude invocation might), returning success. The member must still
+// be ejected — the resolution must not be accepted purely because git's own index
+// bookkeeping no longer calls the path unmerged.
+func TestMergeTrainWorker_ConflictStagedMarkersNotCommitted(t *testing.T) {
+	skipIfNoGit(t)
+	_, srcDir, _, wm := setupTrainRepo(t)
+
+	sha1 := pushBranchToBare(t, srcDir, wm.baseDir, "fabrik/issue-1", "counter.txt", "branch1-value\n")
+	sha2 := pushBranchToBare(t, srcDir, wm.baseDir, "fabrik/issue-2", "counter.txt", "branch2-value\n")
+
+	var addCommentIssues []int
+	var ejectionBody string
+	var createdPRs int
+	var mu sync.Mutex
+
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			switch issueNumber {
+			case 1:
+				return &gh.PRDetails{Number: 10, HeadSHA: sha1, State: "open"}, nil
+			case 2:
+				return &gh.PRDetails{Number: 11, HeadSHA: sha2, State: "open"}, nil
+			}
+			return nil, fmt.Errorf("not found")
+		},
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
+			mu.Lock()
+			addCommentIssues = append(addCommentIssues, issueNumber)
+			if issueNumber == 2 {
+				ejectionBody = body
+			}
+			mu.Unlock()
+			return 1, nil
+		},
+		createDraftPRFn: func(owner, repo, title, head, base, body string, issueNumber int) (int, error) {
+			mu.Lock()
+			createdPRs++
+			mu.Unlock()
+			return 99, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			tr := true
+			return &tr, "clean", nil
+		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
+		},
+	}
+
+	// Claude stages and commits the file, but leaves conflict-marker text inside it —
+	// unmergedPaths (git status) sees a resolved index and would say nothing is wrong.
+	claude := &mockClaudeInvoker{
+		invokeForCommentsFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			stillConflicted := "<<<<<<< HEAD\nbranch1-value\n=======\nbranch2-value\n>>>>>>> incoming\n"
+			if err := os.WriteFile(filepath.Join(workDir, "counter.txt"), []byte(stillConflicted), 0644); err != nil {
+				return "", false, TokenUsage{}, fmt.Errorf("write file: %w", err)
+			}
+			mustGit(t, workDir, "add", "-A")
+			mustGit(t, workDir, "commit", "--no-edit", "-m", fmt.Sprintf("chore(merge-train): resolve conflict for #%d", issue.Number))
+			return "resolved", false, TokenUsage{}, nil
+		},
+	}
+
+	eng := trainTestEngine(t, client, claude, wm)
+	eng.mu.Lock()
+	eng.worktreeManagers["owner/repo"] = wm
+	eng.mu.Unlock()
+
+	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1"), makeTrainItem(2, "Issue 2")}
+	state := &mergeTrainWorkerState{assembling: true, trialName: fmt.Sprintf("merge-train-repo-%d", time.Now().Unix())}
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
+
+	mu.Lock()
+	prs := createdPRs
+	comments := append([]int(nil), addCommentIssues...)
+	body := ejectionBody
+	mu.Unlock()
+
+	if prs != 1 {
+		t.Errorf("expected 1 draft PR (for survivor #1 only — #2's marker-laden commit must not land), got %d", prs)
+	}
+	ejectedIssue2 := false
+	for _, n := range comments {
+		if n == 2 {
+			ejectedIssue2 = true
+		}
+	}
+	if !ejectedIssue2 {
+		t.Fatal("expected #2 to be ejected — marker text survived into the staged/committed resolution despite git no longer reporting it as unmerged")
+	}
+	if !strings.Contains(body, "counter.txt") {
+		t.Errorf("expected ejection comment to name counter.txt, got: %s", body)
+	}
+}
+
+// TestMergeTrainWorker_ResolvedFileWithBareEqualsLineNotFlagged guards against a
+// false-positive flagged in review of PR #1843: pathsStillContainConflictMarkers
+// previously matched any line starting with 7+ "=" characters, which also matches
+// ordinary content such as a Markdown setext heading underline. A correctly resolved
+// file that happens to contain such a line must not be misread as still conflicted and
+// ejected. The resolved content here has no "<<<<<<<"/">>>>>>>" boundary markers at
+// all — only a bare "=======" line, indistinguishable from legitimate content — so the
+// member must stay in the batch.
+func TestMergeTrainWorker_ResolvedFileWithBareEqualsLineNotFlagged(t *testing.T) {
+	skipIfNoGit(t)
+	_, srcDir, _, wm := setupTrainRepo(t)
+
+	sha1 := pushBranchToBare(t, srcDir, wm.baseDir, "fabrik/issue-1", "counter.txt", "from-branch-1\n")
+	sha2 := pushBranchToBare(t, srcDir, wm.baseDir, "fabrik/issue-2", "counter.txt", "from-branch-2\n")
+
+	var createdPRs []createDraftPRCall
+	var addCommentIssues []int
+	var mu sync.Mutex
+
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			switch issueNumber {
+			case 1:
+				return &gh.PRDetails{Number: 10, HeadSHA: sha1, State: "open"}, nil
+			case 2:
+				return &gh.PRDetails{Number: 11, HeadSHA: sha2, State: "open"}, nil
+			}
+			return nil, fmt.Errorf("not found")
+		},
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
+			mu.Lock()
+			addCommentIssues = append(addCommentIssues, issueNumber)
+			mu.Unlock()
+			return 1, nil
+		},
+		createDraftPRFn: func(owner, repo, title, head, base, body string, issueNumber int) (int, error) {
+			mu.Lock()
+			createdPRs = append(createdPRs, createDraftPRCall{owner, repo, title, head, base, body, issueNumber})
+			mu.Unlock()
+			return 99, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			tr := true
+			return &tr, "clean", nil
+		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
+		},
+	}
+
+	// Claude resolves the conflict cleanly, but the resolved content legitimately
+	// contains a bare "=======" line (e.g. a Markdown setext heading underline) —
+	// content that must not be mistaken for a surviving conflict marker.
+	claude := &mockClaudeInvoker{
+		invokeForCommentsFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			resolvedContent := "Counter\n=======\nfrom-branch-1\nfrom-branch-2\n"
+			if err := os.WriteFile(filepath.Join(workDir, "counter.txt"), []byte(resolvedContent), 0644); err != nil {
+				return "", false, TokenUsage{}, fmt.Errorf("write resolved file: %w", err)
+			}
+			addCmd := exec.Command("git", "add", "-A")
+			addCmd.Dir = workDir
+			if out, err := addCmd.CombinedOutput(); err != nil {
+				return fmt.Sprintf("git add failed: %s", out), false, TokenUsage{}, nil
+			}
+			commitCmd := exec.Command("git", "commit", "--no-edit", "-m",
+				fmt.Sprintf("chore(merge-train): resolve conflict for #%d", issue.Number))
+			commitCmd.Dir = workDir
+			if out, err := commitCmd.CombinedOutput(); err != nil {
+				return fmt.Sprintf("git commit failed: %s", out), false, TokenUsage{}, nil
+			}
+			return "resolved successfully", true, TokenUsage{}, nil
+		},
+	}
+
+	eng := trainTestEngine(t, client, claude, wm)
+	eng.mu.Lock()
+	eng.worktreeManagers["owner/repo"] = wm
+	eng.mu.Unlock()
+
+	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1"), makeTrainItem(2, "Issue 2")}
+	state := &mergeTrainWorkerState{assembling: true, trialName: fmt.Sprintf("merge-train-repo-%d", time.Now().Unix())}
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
+
+	mu.Lock()
+	n := len(createdPRs)
+	comments := append([]int(nil), addCommentIssues...)
+	mu.Unlock()
+
+	if n != 1 {
+		t.Fatalf("expected 1 draft PR (both members survive — bare '=======' line is not a conflict marker), got %d", n)
+	}
+	for _, issueNum := range comments {
+		if issueNum == 2 {
+			t.Errorf("member #2 must not be ejected — its resolved content's bare '=======' line is legitimate, not a conflict marker")
+		}
+	}
+}
+
+// TestMergeTrainWorker_ResolvedFileWithLoneBoundaryMarkerNotFlagged guards against a
+// false positive flagged in follow-up review of PR #1843: pathsStillContainConflictMarkers
+// previously matched any single "<<<<<<<"/">>>>>>>" boundary line on its own, which is
+// common legitimate content in a repo whose purpose involves merge conflicts — e.g. a
+// doc or test fixture that quotes an example conflict-marker line without the
+// surrounding block. A correctly resolved file that legitimately contains a single such
+// line (with no matching "=======" separator or opposing boundary anywhere after it)
+// must not be misread as still conflicted and ejected.
+func TestMergeTrainWorker_ResolvedFileWithLoneBoundaryMarkerNotFlagged(t *testing.T) {
+	skipIfNoGit(t)
+	_, srcDir, _, wm := setupTrainRepo(t)
+
+	sha1 := pushBranchToBare(t, srcDir, wm.baseDir, "fabrik/issue-1", "counter.txt", "from-branch-1\n")
+	sha2 := pushBranchToBare(t, srcDir, wm.baseDir, "fabrik/issue-2", "counter.txt", "from-branch-2\n")
+
+	var createdPRs []createDraftPRCall
+	var addCommentIssues []int
+	var mu sync.Mutex
+
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			switch issueNumber {
+			case 1:
+				return &gh.PRDetails{Number: 10, HeadSHA: sha1, State: "open"}, nil
+			case 2:
+				return &gh.PRDetails{Number: 11, HeadSHA: sha2, State: "open"}, nil
+			}
+			return nil, fmt.Errorf("not found")
+		},
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
+			mu.Lock()
+			addCommentIssues = append(addCommentIssues, issueNumber)
+			mu.Unlock()
+			return 1, nil
+		},
+		createDraftPRFn: func(owner, repo, title, head, base, body string, issueNumber int) (int, error) {
+			mu.Lock()
+			createdPRs = append(createdPRs, createDraftPRCall{owner, repo, title, head, base, body, issueNumber})
+			mu.Unlock()
+			return 99, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			tr := true
+			return &tr, "clean", nil
+		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
+		},
+	}
+
+	// Claude resolves the conflict cleanly, but the resolved content legitimately
+	// quotes a single conflict-marker boundary line (e.g. documentation describing git
+	// conflict syntax) with no accompanying "=======" separator or opposing boundary —
+	// not a surviving conflict, and must not be mistaken for one.
+	claude := &mockClaudeInvoker{
+		invokeForCommentsFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			resolvedContent := "Conflict markers start with a line like:\n<<<<<<< HEAD\nfrom-branch-1\nfrom-branch-2\n"
+			if err := os.WriteFile(filepath.Join(workDir, "counter.txt"), []byte(resolvedContent), 0644); err != nil {
+				return "", false, TokenUsage{}, fmt.Errorf("write resolved file: %w", err)
+			}
+			addCmd := exec.Command("git", "add", "-A")
+			addCmd.Dir = workDir
+			if out, err := addCmd.CombinedOutput(); err != nil {
+				return fmt.Sprintf("git add failed: %s", out), false, TokenUsage{}, nil
+			}
+			commitCmd := exec.Command("git", "commit", "--no-edit", "-m",
+				fmt.Sprintf("chore(merge-train): resolve conflict for #%d", issue.Number))
+			commitCmd.Dir = workDir
+			if out, err := commitCmd.CombinedOutput(); err != nil {
+				return fmt.Sprintf("git commit failed: %s", out), false, TokenUsage{}, nil
+			}
+			return "resolved successfully", true, TokenUsage{}, nil
+		},
+	}
+
+	eng := trainTestEngine(t, client, claude, wm)
+	eng.mu.Lock()
+	eng.worktreeManagers["owner/repo"] = wm
+	eng.mu.Unlock()
+
+	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1"), makeTrainItem(2, "Issue 2")}
+	state := &mergeTrainWorkerState{assembling: true, trialName: fmt.Sprintf("merge-train-repo-%d", time.Now().Unix())}
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
+
+	mu.Lock()
+	n := len(createdPRs)
+	comments := append([]int(nil), addCommentIssues...)
+	mu.Unlock()
+
+	if n != 1 {
+		t.Fatalf("expected 1 draft PR (both members survive — a lone boundary marker line is not a conflict marker), got %d", n)
+	}
+	for _, issueNum := range comments {
+		if issueNum == 2 {
+			t.Errorf("member #2 must not be ejected — its resolved content's lone '<<<<<<<' line is legitimate quoted documentation, not a conflict marker")
+		}
+	}
+}
+
+// TestPathsStillContainConflictMarkers_CRLF guards against a gap flagged in review of
+// PR #1843: conflictMarkerBlockRegex's separator span was anchored as "^={7}\n", which
+// never matches a CRLF-terminated "=======\r\n" line — common in Windows-origin repos
+// or any repo whose .gitattributes declares eol=crlf. A file that still holds a
+// complete, CRLF-terminated conflict-marker block must be detected exactly as a
+// LF-terminated one would be; a CRLF-terminated file with no conflict markers at all
+// must not be flagged either.
+func TestPathsStillContainConflictMarkers_CRLF(t *testing.T) {
+	dir := t.TempDir()
+
+	stillConflicted := "<<<<<<< HEAD\r\nbranch1-value\r\n=======\r\nbranch2-value\r\n>>>>>>> incoming\r\n"
+	if err := os.WriteFile(filepath.Join(dir, "conflicted.txt"), []byte(stillConflicted), 0644); err != nil {
+		t.Fatalf("write conflicted.txt: %v", err)
+	}
+
+	resolved := "Counter\r\nfrom-branch-1\r\nfrom-branch-2\r\n"
+	if err := os.WriteFile(filepath.Join(dir, "resolved.txt"), []byte(resolved), 0644); err != nil {
+		t.Fatalf("write resolved.txt: %v", err)
+	}
+
+	found := pathsStillContainConflictMarkers(dir, []string{"conflicted.txt", "resolved.txt"})
+
+	foundConflicted := false
+	for _, p := range found {
+		if p == "conflicted.txt" {
+			foundConflicted = true
+		}
+		if p == "resolved.txt" {
+			t.Errorf("resolved.txt (CRLF, no conflict markers) must not be flagged, found=%v", found)
+		}
+	}
+	if !foundConflicted {
+		t.Errorf("conflicted.txt (CRLF conflict-marker block) must be flagged as still conflicted, found=%v", found)
+	}
+}
+
+// TestMergeTrainWorker_ConflictResolutionNoResume verifies #1841 Requirement 5: every
+// merge-train conflict-resolution invocation sets InvokeOptions.NoResume, since each
+// attempt runs in a fresh, ephemeral trial worktree that has no meaningful prior
+// session to resume — resuming one anyway was the source of a spurious "resume
+// requested but none exists" warning on every member's first encounter.
+func TestMergeTrainWorker_ConflictResolutionNoResume(t *testing.T) {
+	skipIfNoGit(t)
+	_, srcDir, _, wm := setupTrainRepo(t)
+
+	sha1 := pushBranchToBare(t, srcDir, wm.baseDir, "fabrik/issue-1", "counter.txt", "branch1-value\n")
+	sha2 := pushBranchToBare(t, srcDir, wm.baseDir, "fabrik/issue-2", "counter.txt", "branch2-value\n")
+
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			switch issueNumber {
+			case 1:
+				return &gh.PRDetails{Number: 10, HeadSHA: sha1, State: "open"}, nil
+			case 2:
+				return &gh.PRDetails{Number: 11, HeadSHA: sha2, State: "open"}, nil
+			}
+			return nil, fmt.Errorf("not found")
+		},
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
+			return 1, nil
+		},
+		createDraftPRFn: func(owner, repo, title, head, base, body string, issueNumber int) (int, error) {
+			return 99, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			tr := true
+			return &tr, "clean", nil
+		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
+		},
+	}
+	claude := &mockClaudeInvoker{
+		invokeForCommentsFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			return "unable to resolve", false, TokenUsage{}, nil
+		},
+	}
+	eng := trainTestEngine(t, client, claude, wm)
+	eng.mu.Lock()
+	eng.worktreeManagers["owner/repo"] = wm
+	eng.mu.Unlock()
+
+	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1"), makeTrainItem(2, "Issue 2")}
+	state := &mergeTrainWorkerState{assembling: true, trialName: fmt.Sprintf("merge-train-repo-%d", time.Now().Unix())}
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", "main", batch)
+
+	claude.mu.Lock()
+	calls := append([]commentInvokeCall(nil), claude.forCommentsCalls...)
+	claude.mu.Unlock()
+
+	if len(calls) != 1 {
+		t.Fatalf("expected exactly 1 conflict-resolution invocation, got %d", len(calls))
+	}
+	if !calls[0].opts.NoResume {
+		t.Error("expected merge-train conflict resolution to always set InvokeOptions.NoResume")
 	}
 }
 
@@ -8580,12 +9215,16 @@ func TestResolveTrainConflict_UnmergedPathsErrorFallsBackToPlainClaude(t *testin
 	// attempting to classify conflicted paths against the generated set.
 	wtDir := t.TempDir()
 
-	_, reason, err := eng.resolveTrainConflict(context.Background(), makeTrainItem(1, "Issue 1"), wtDir, holdingStage(eng.cfg), "deadbeef", "deadbeef", "", InvokeOptions{})
+	_, diag, err := eng.resolveTrainConflict(context.Background(), makeTrainItem(1, "Issue 1"), wtDir, holdingStage(eng.cfg), "deadbeef", "deadbeef", "", InvokeOptions{})
 	if err != nil {
 		t.Fatalf("resolveTrainConflict: %v", err)
 	}
-	if reason != "" {
-		t.Errorf("reason = %q, want empty (caller falls back to its own generic ejection message)", reason)
+	// wtDir is a plain (non-git) directory, so finalizeConflictResolution's own
+	// post-invocation unmergedPaths check fails too (the same git-level condition
+	// that triggered the fallback in the first place) — the returned diagnostic
+	// carries that failure as its Reason rather than being nil.
+	if diag == nil || diag.Reason == "" {
+		t.Errorf("diag = %+v, want a non-nil diagnostic with a Reason describing the verification failure", diag)
 	}
 	if len(claude.forCommentsCalls) != 1 {
 		t.Fatalf("expected Claude invoked once via the unmergedPaths-error fallback path, got %d", len(claude.forCommentsCalls))
@@ -9479,7 +10118,7 @@ func TestResolveConflictWithClaude_FallbackKillsUnboundedInvocation(t *testing.T
 	ch := make(chan result, 1)
 	start := time.Now()
 	go func() {
-		resolved, err := eng.resolveConflictWithClaude(context.Background(), memberItem, trainWorkDir, holdingStg, "deadbeef", nil, "deadbeef", InvokeOptions{})
+		resolved, _, err := eng.resolveConflictWithClaude(context.Background(), memberItem, trainWorkDir, holdingStg, "deadbeef", nil, "deadbeef", nil, InvokeOptions{})
 		ch <- result{resolved, err}
 	}()
 

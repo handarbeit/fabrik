@@ -842,7 +842,7 @@ func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.
 	if opts.MaxTurnsOverride > 0 {
 		limit = opts.MaxTurnsOverride
 	}
-	resumeSessionID := resolveResumeSessionID(issue.Number, stage.Name, sessFilePath, true) // resume existing session
+	resumeSessionID := resolveResumeSessionID(issue.Number, stage.Name, sessFilePath, !opts.NoResume) // resume existing session unless the caller opts out (#1841)
 	sessionName := sessionNameSentinel(issue.Repo, issue.Number, stage.Name)
 	args := buildClaudeArgs(stage, resumeSessionID, opts.ModelOverride, limit, hasUnrestrictedLabel(issue), workDir, sessionName)
 

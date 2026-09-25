@@ -43,8 +43,14 @@ func TestMergeTrainConflict_UnresolvableEjectsMember(t *testing.T) {
 	if projectItem(t, env, numB).IsClosed {
 		t.Fatalf("unresolvable-conflict member #%d must not land", numB)
 	}
-	if !hasCommentContaining(t, env, numB, "unresolvable conflict") {
-		t.Errorf("expected #%d's ejection comment to name the cause as an unresolvable conflict, got comments: %v", numB, commentsOn(t, env, numB))
+	// #1841: a genuine (non-turn-limited) unresolvable conflict now reads as a
+	// judgment and names the still-conflicted file, rather than the old generic
+	// "unresolvable conflict" wording with no file detail.
+	if !hasCommentContaining(t, env, numB, "conflict judged unresolvable") {
+		t.Errorf("expected #%d's ejection comment to name the cause as a judged-unresolvable conflict, got comments: %v", numB, commentsOn(t, env, numB))
+	}
+	if !hasCommentContaining(t, env, numB, "shared.txt") {
+		t.Errorf("expected #%d's ejection comment to name the conflicted file shared.txt, got comments: %v", numB, commentsOn(t, env, numB))
 	}
 	if !hasCommentContaining(t, env, numB, "will be retried in a future train with a different composition") {
 		t.Errorf("expected #%d to remain eligible for a future train (stayInQueue=true for this cause)", numB)
