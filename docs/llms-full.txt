@@ -461,6 +461,17 @@ https://github.com/settings/installations/789012 (an org admin may be required),
 then re-run `fabrik init --github-app`
 ```
 
+**Contents permission.** A newly created App always requests `contents: write`, because by default git runs over HTTPS as the installation (see [Git under App auth](#git-under-app-auth)). Verification follows the engine's own rule: `contents: write` is required unless git runs over SSH — `git_ssh: true` in an existing `.fabrik/config.yaml`, `FABRIK_GIT_SSH`, or a global `url.git@github.com:.insteadOf` rewrite. An App created before this change requested only `contents: read`; there is nothing for the installation to approve until the App itself asks for more, so the error names the App's permissions page as the first step:
+
+```
+GitHub App installation 789012 is missing required permissions: contents (required "write",
+granted "read") (contents:write is needed because git runs over HTTPS as the installation — if
+the App does not request it yet, set Contents to "Read and write" at
+https://github.com/organizations/myorg/settings/apps/my-app/permissions first; or set
+git_ssh: true in .fabrik/config.yaml to keep using your SSH key) — approve the permission
+change at https://github.com/settings/installations/789012 ...
+```
+
 **`--webhooks`.** GitHub App auth and `--webhooks` cannot currently be combined — see "Not combinable with `--webhooks`" under Known limitations below. `fabrik init --github-app --webhooks` is refused outright at setup time, before any network call, with the same explanation the engine's own startup gives; there's no need to discover the incompatibility later by watching the engine refuse to start. Run the engine with polling (`--reconcile-interval`) instead.
 
 **Key storage.** A freshly created App's private key is written to `.fabrik/github-app-key.pem` (0600, parent directory 0700, written atomically) unless `--github-app-private-key-path` names a different location (adopt path only — see above). Non-key App metadata (App ID, slug, webhook secret, client ID/secret) is written to the fixed, non-configurable `.fabrik/github-app-state.json` — the same file the engine's own compat-mode client construction reads diagnostics-only state from. **Re-keying:** rotate the key on the App's GitHub settings page, then replace the file at your configured `github_app_private_key_path`; the engine's own startup detects a key that doesn't match its recorded fingerprint and fails loudly with a repair-needed error rather than silently misauthenticating. Both default paths are added to `.git/info/exclude` by `fabrik init` (alongside the other Fabrik working directories it already excludes) so a routine `git add .` in your project can't accidentally commit the private key — unlike `.fabrik/config.yaml`, which is meant to be committed, these are per-operator secrets. A custom `--github-app-private-key-path` outside `.fabrik/` is not auto-excluded; add it to your own `.gitignore` if needed.

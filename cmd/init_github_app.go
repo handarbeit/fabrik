@@ -45,6 +45,11 @@ type githubAppSetupOptions struct {
 	// Webhooks mirrors the engine's own --webhooks flag: whether the
 	// manifest/verification should include webhook-management permission.
 	Webhooks bool
+	// GitSSH mirrors the engine's resolved git_ssh (FABRIK_GIT_SSH, then
+	// .fabrik/config.yaml). Verification applies the engine's own rule —
+	// contents:write unless git runs over SSH (engine.AppGitUsesHTTPS) — so
+	// an installation init accepts is one the engine will start with.
+	GitSSH bool
 	// NoBrowser is forwarded to the manifest flow (R7), and also gates
 	// guideMissingInstallations' guided-install browser-open inside
 	// Reconcile's non-pinned discovery branch. Its zero value (false) means
@@ -78,6 +83,22 @@ type githubAppSetupResult struct {
 	// separate --token.
 	Client     *gh.Client
 	Reconciler *githubauth.Reconciler
+}
+
+// githubAppSetupPermissions returns the permission set runGitHubAppSetup
+// verifies (the engine's own startup rule, so init never accepts an
+// installation the engine would then refuse) and the set it puts in a new
+// App's manifest — always including contents:write, since the App outlives
+// this machine's git transport and HTTPS is the default (#1846). On the
+// adopt path the manifest set is never sent anywhere, so it equals verify.
+func githubAppSetupPermissions(opts githubAppSetupOptions) (verify, manifest map[string]string, httpsGit bool) {
+	httpsGit = engine.AppGitUsesHTTPS(opts.GitSSH)
+	verify = engine.RequiredGitHubAppPermissionsForGit(opts.Webhooks, httpsGit)
+	manifest = verify
+	if opts.AppID == 0 {
+		manifest = engine.RequiredGitHubAppPermissionsForGit(opts.Webhooks, true)
+	}
+	return verify, manifest, httpsGit
 }
 
 // runGitHubAppSetup drives R1/R2/R3/R4 end to end. It composes exactly two
@@ -122,7 +143,15 @@ func runGitHubAppSetup(ctx context.Context, opts githubAppSetupOptions) (*github
 	// up pinned (explicit --github-app-installation-id, or Call 2 below after
 	// discovery) — is a one-time cost for a one-shot setup command, not a
 	// per-poll cost like the engine's case, so correctness wins here.
-	required := engine.RequiredGitHubAppPermissions(opts.Webhooks)
+	//
+	// #1846: verification uses the engine's own rule (contents:write when
+	// git runs over HTTPS as the installation — the default). A freshly
+	// created App always requests contents:write regardless: its permission
+	// set outlives this machine's git transport, and the default config is
+	// HTTPS. The adopt path (opts.AppID set) requests nothing new — its
+	// manifest was fixed when it was created — so there RequiredPermissions
+	// only feeds Reconcile's soft log, which should match what is verified.
+	required, manifestRequired, httpsGit := githubAppSetupPermissions(opts)
 
 	baseOpts := githubauth.Options{
 		AppID:               opts.AppID,
@@ -135,7 +164,7 @@ func runGitHubAppSetup(ctx context.Context, opts githubAppSetupOptions) (*github
 		BaseURL:             opts.BaseURL,
 		AppName:             engine.GitHubAppName,
 		AppHomepageURL:      engine.GitHubAppHomepageURL,
-		RequiredPermissions: required,
+		RequiredPermissions: manifestRequired,
 		Logf:                logf,
 	}
 
@@ -197,9 +226,21 @@ func runGitHubAppSetup(ctx context.Context, opts githubAppSetupOptions) (*github
 		// installation automatically — name the per-installation approval
 		// page rather than appearing to succeed.
 		approvalURL := fmt.Sprintf("https://github.com/settings/installations/%d", installationID)
-		return nil, fmt.Errorf("GitHub App installation %d is missing required permissions: %s — approve the "+
+		hint := ""
+		for _, sf := range shortfalls {
+			if sf.Permission == "contents" && httpsGit {
+				// An App created before #1846 never requested contents:write,
+				// so there is nothing to approve until the App itself asks.
+				slug := strings.TrimSuffix(reconciler.BotLogin(), "[bot]")
+				hint = fmt.Sprintf(" (contents:write is needed because git runs over HTTPS as the installation — "+
+					"if the App does not request it yet, set Contents to \"Read and write\" at "+
+					"https://github.com/organizations/%s/settings/apps/%s/permissions first; or set git_ssh: true "+
+					"in .fabrik/config.yaml to keep using your SSH key)", opts.Owner, slug)
+			}
+		}
+		return nil, fmt.Errorf("GitHub App installation %d is missing required permissions: %s%s — approve the "+
 			"permission change at %s (an org admin may be required), then re-run `fabrik init --github-app`",
-			installationID, engine.FormatPermissionShortfalls(shortfalls), approvalURL)
+			installationID, engine.FormatPermissionShortfalls(shortfalls), hint, approvalURL)
 	}
 
 	fmt.Printf("  github-app: authenticated as %s (installation %d, organization %q)\n", reconciler.BotLogin(), installationID, opts.Owner)

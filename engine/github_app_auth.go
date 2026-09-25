@@ -115,6 +115,28 @@ func RequiredGitHubAppPermissions(webhooksEnabled bool) map[string]string {
 	return perms
 }
 
+// RequiredGitHubAppPermissionsForGit is RequiredGitHubAppPermissions with
+// contents raised to write when git runs over HTTPS as the installation
+// (httpsGit — see AppGitUsesHTTPS): engine and worker git then push with the
+// installation token (setUpAppGitCredential, #1846). Shared by the engine's
+// startup grant check and `fabrik init --github-app`, so the two can never
+// disagree about what an installation needs.
+func RequiredGitHubAppPermissionsForGit(webhooksEnabled, httpsGit bool) map[string]string {
+	perms := RequiredGitHubAppPermissions(webhooksEnabled)
+	if httpsGit {
+		perms["contents"] = "write"
+	}
+	return perms
+}
+
+// AppGitUsesHTTPS reports whether git runs over HTTPS (and so as the App
+// installation, #1846): neither git_ssh nor a global
+// url.git@github.com:.insteadOf = https://github.com/ rewrite, either of
+// which sends git over the operator's SSH key instead.
+func AppGitUsesHTTPS(gitSSH bool) bool {
+	return !gitSSH && !gitHTTPSRewrittenToSSH()
+}
+
 // gitHubAppFieldsSet reports which of the three GitHub App compat-mode
 // config fields are non-empty, for the all-or-nothing check below (R5).
 func gitHubAppFieldsSet(cfg Config) (id, key, inst bool) {
@@ -332,16 +354,13 @@ func RefuseUserOwnedBoardForAppAuth(client *gh.Client, owner string) error {
 // owns the project board — including in multi-repo mode, where cfg.Repo may
 // be empty but cfg.Owner names the board's own organization.
 func setUpGitHubAppAuth(ctx context.Context, cfg Config, fabrikDir, baseURL string) (*gh.Client, *githubauth.Reconciler, error) {
-	required := RequiredGitHubAppPermissions(cfg.Webhooks)
 	// HTTPS git (#1846): engine and workers push over HTTPS with the
 	// installation token (setUpAppGitCredential), so the installation must
 	// grant contents:write. Not needed when git goes over SSH — git_ssh, or
 	// a global HTTPS→SSH insteadOf rewrite — where the token never reaches
 	// git at all.
-	httpsGit := !cfg.GitSSH && !gitHTTPSRewrittenToSSH()
-	if httpsGit {
-		required["contents"] = "write"
-	}
+	httpsGit := AppGitUsesHTTPS(cfg.GitSSH)
+	required := RequiredGitHubAppPermissionsForGit(cfg.Webhooks, httpsGit)
 
 	// Options.RequiredPermissions is deliberately left unset here (rather
 	// than passed required): Reconcile's own verifyPinnedGrants would only
