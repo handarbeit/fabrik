@@ -32,7 +32,9 @@ itself*, including clean merges that never needed a resolution at all.
 ### 1. A content-addressed hash chain, not a structural (member-list) index
 
 The cache (`trainPrefixCache`, `engine/merge_train_prefix.go`) records a chain of SHA-256
-hashes: `h0 = chainHashSeed(trainKey, baseSHA)`, and `h_i =
+hashes: `h0 = chainHashSeed(trainKey, baseSHA)` — computed **per lookup** from the
+`baseSHA` the caller passes (`lookup(p.baseSHA, members)`), never fixed at construction —
+and `h_i =
 chainHashStep(h_{i-1}, member[i].Number, member[i].headSHA)` for each member that merged
 successfully. Each `h_i` maps to the resulting merge commit's SHA. A lookup for a new
 member list walks the identical recurrence forward from `h0`; the last hit before the first
@@ -76,12 +78,21 @@ succeeds (alongside the existing `git rerere gc` call, and skipped identically u
 swept away — regardless of how the invocation ends — before the goroutine returns.
 
 The evidence log's entire savings (bisect first-half, eject-reform) happen *within* one
-worker invocation: `p.baseSHA` and every member's `headSHA` are pinned/fetched exactly once
-per dispatch and held constant for its whole lifetime (`prepareTrainWorker`,
-`fetchTrainMembers`). A cache that only lives as long as those values are guaranteed stable
-needs no cross-invocation staleness bookkeeping at all — "has a member landed or left
-Queued since this was recorded?", "did the base move?" are all questions a fresh empty
-cache trivially answers correctly by finding nothing to reuse. Requirement 6 explicitly
+worker invocation, where every member's `headSHA` is fetched exactly once per dispatch
+(`fetchTrainMembers`) and held constant. `p.baseSHA` is pinned once in `prepareTrainWorker`
+but is **not** constant for the invocation: `landOneAtATime` re-pins its local copy of
+`trialParams` to the current `origin/<base>` before each singleton, and the main-moved
+rebuild loop (ADR-059 D5) re-pins before re-assembling — both share the worker's one
+`*trainPrefixCache`. This is why the seed is derived from the base passed at lookup time
+rather than captured at construction (found in review): a construction-time seed would let
+a member that was chain position 1 on the *old* base hit a stale chain and fork a singleton
+(or a rebuilt trial) from a commit lacking the newly landed / newly advanced base — a
+combination validated on a base it was never tested on. With the per-lookup seed, entries
+recorded under different bases partition naturally and a re-pin is simply a miss. A cache
+that only lives as long as the head SHAs are guaranteed stable needs no cross-invocation
+staleness bookkeeping at all — "has a member landed or left Queued since this was
+recorded?" is a question a fresh empty cache trivially answers correctly by finding
+nothing to reuse. Requirement 6 explicitly
 permits this as the default degradation, not merely as a fallback: a restart, or even the
 very next poll's fresh worker dispatch, starts from a nil-equivalent cache, which by
 construction can only ever reproduce today's full-reassembly behavior (Acceptance 5) —

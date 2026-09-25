@@ -8,20 +8,20 @@ import (
 
 // ── pure lookup semantics (no git — entries populated directly) ────────────────
 
-func newTestPrefixCacheNoGit(trainKey, baseSHA string) *trainPrefixCache {
+func newTestPrefixCacheNoGit(trainKey string) *trainPrefixCache {
 	return &trainPrefixCache{
-		baseDir: "", // never touched — these tests bypass record()/git entirely
-		refDir:  "refs/fabrik/merge-train-prefix/test",
-		seed:    chainHashSeed(trainKey, baseSHA),
-		entries: make(map[string]trainPrefixCacheEntry),
+		baseDir:  "", // never touched — these tests bypass record()/git entirely
+		refDir:   "refs/fabrik/merge-train-prefix/test",
+		trainKey: trainKey,
+		entries:  make(map[string]trainPrefixCacheEntry),
 	}
 }
 
 // seedChain populates c.entries as if members[0:n] had all merged successfully in
 // order, without touching git — chainHashStep is a pure function, so the resulting
 // entries are indistinguishable from ones record() would have produced.
-func seedChain(c *trainPrefixCache, members []trainMember, commitSHAs []string) {
-	current := c.seed
+func seedChain(c *trainPrefixCache, baseSHA string, members []trainMember, commitSHAs []string) {
+	current := chainHashSeed(c.trainKey, baseSHA)
 	for i, m := range members {
 		current = chainHashStep(current, m.item.Number, m.headSHA)
 		c.entries[current] = trainPrefixCacheEntry{commitSHA: commitSHAs[i]}
@@ -29,15 +29,15 @@ func seedChain(c *trainPrefixCache, members []trainMember, commitSHAs []string) 
 }
 
 func TestTrainPrefixCache_Lookup_FullMatch(t *testing.T) {
-	c := newTestPrefixCacheNoGit("owner/repo:main", "base-sha")
+	c := newTestPrefixCacheNoGit("owner/repo:main")
 	members := []trainMember{
 		{item: makeTrainItem(1, "one"), headSHA: "h1"},
 		{item: makeTrainItem(2, "two"), headSHA: "h2"},
 		{item: makeTrainItem(3, "three"), headSHA: "h3"},
 	}
-	seedChain(c, members, []string{"c1", "c2", "c3"})
+	seedChain(c, "base-sha", members, []string{"c1", "c2", "c3"})
 
-	matchedLen, commitSHA, _ := c.lookup(members)
+	matchedLen, commitSHA, _ := c.lookup("base-sha", members)
 	if matchedLen != 3 {
 		t.Errorf("expected matchedLen 3 (full match), got %d", matchedLen)
 	}
@@ -47,12 +47,12 @@ func TestTrainPrefixCache_Lookup_FullMatch(t *testing.T) {
 }
 
 func TestTrainPrefixCache_Lookup_PartialMatch_DifferingHeadSHA(t *testing.T) {
-	c := newTestPrefixCacheNoGit("owner/repo:main", "base-sha")
+	c := newTestPrefixCacheNoGit("owner/repo:main")
 	recorded := []trainMember{
 		{item: makeTrainItem(1, "one"), headSHA: "h1"},
 		{item: makeTrainItem(2, "two"), headSHA: "h2"},
 	}
-	seedChain(c, recorded, []string{"c1", "c2"})
+	seedChain(c, "base-sha", recorded, []string{"c1", "c2"})
 
 	// Member #2 was re-pushed: its head SHA now differs from what was recorded.
 	query := []trainMember{
@@ -60,7 +60,7 @@ func TestTrainPrefixCache_Lookup_PartialMatch_DifferingHeadSHA(t *testing.T) {
 		{item: makeTrainItem(2, "two"), headSHA: "h2-repushed"},
 		{item: makeTrainItem(3, "three"), headSHA: "h3"},
 	}
-	matchedLen, commitSHA, _ := c.lookup(query)
+	matchedLen, commitSHA, _ := c.lookup("base-sha", query)
 	if matchedLen != 1 {
 		t.Errorf("expected matchedLen 1 (stops at the re-pushed member), got %d", matchedLen)
 	}
@@ -69,36 +69,43 @@ func TestTrainPrefixCache_Lookup_PartialMatch_DifferingHeadSHA(t *testing.T) {
 	}
 }
 
+// TestTrainPrefixCache_Lookup_NoMatch_DifferentBaseSHA is Requirement 4 on ONE live
+// cache: a worker re-pins p.baseSHA mid-invocation (landOneAtATime's per-singleton
+// re-pin, the main-moved rebuild loop) while sharing the same *trainPrefixCache, so a
+// chain recorded on base A must never be matched by a lookup on base B — the seed
+// follows the base passed to lookup, not the base at construction.
 func TestTrainPrefixCache_Lookup_NoMatch_DifferentBaseSHA(t *testing.T) {
-	c := newTestPrefixCacheNoGit("owner/repo:main", "base-sha-old")
+	c := newTestPrefixCacheNoGit("owner/repo:main")
 	recorded := []trainMember{
 		{item: makeTrainItem(1, "one"), headSHA: "h1"},
 	}
-	seedChain(c, recorded, []string{"c1"})
+	seedChain(c, "base-sha-old", recorded, []string{"c1"})
 
-	// A cache pinned at a different base SHA (main moved) never matches, even
-	// though the member composition is identical.
-	other := newTestPrefixCacheNoGit("owner/repo:main", "base-sha-new")
-	matchedLen, commitSHA, chainHash := other.lookup(recorded)
+	// Sanity: the same live cache does match on the base the chain was recorded under.
+	if matchedLen, _, _ := c.lookup("base-sha-old", recorded); matchedLen != 1 {
+		t.Fatalf("setup failed: expected matchedLen 1 on the recording base, got %d", matchedLen)
+	}
+
+	matchedLen, commitSHA, chainHash := c.lookup("base-sha-new", recorded)
 	if matchedLen != 0 {
-		t.Errorf("expected matchedLen 0 for a different pinned base SHA, got %d", matchedLen)
+		t.Errorf("expected matchedLen 0 for a different pinned base SHA on the same live cache, got %d", matchedLen)
 	}
 	if commitSHA != "" {
 		t.Errorf("expected empty commitSHA, got %q", commitSHA)
 	}
-	if chainHash != other.seed {
-		t.Errorf("expected chainHash to be the fresh cache's own seed, got %q", chainHash)
+	if want := chainHashSeed("owner/repo:main", "base-sha-new"); chainHash != want {
+		t.Errorf("expected chainHash to be the seed for the looked-up base, got %q want %q", chainHash, want)
 	}
 }
 
 func TestTrainPrefixCache_Lookup_EmptyMembers(t *testing.T) {
-	c := newTestPrefixCacheNoGit("owner/repo:main", "base-sha")
-	matchedLen, commitSHA, chainHash := c.lookup(nil)
+	c := newTestPrefixCacheNoGit("owner/repo:main")
+	matchedLen, commitSHA, chainHash := c.lookup("base-sha", nil)
 	if matchedLen != 0 || commitSHA != "" {
 		t.Errorf("expected (0, \"\") for empty members, got (%d, %q)", matchedLen, commitSHA)
 	}
-	if chainHash != c.seed {
-		t.Errorf("expected chainHash == seed for empty members, got %q vs seed %q", chainHash, c.seed)
+	if chainHash != chainHashSeed(c.trainKey, "base-sha") {
+		t.Errorf("expected chainHash == seed for empty members, got %q vs seed %q", chainHash, chainHashSeed(c.trainKey, "base-sha"))
 	}
 }
 
@@ -107,7 +114,7 @@ func TestTrainPrefixCache_Lookup_EmptyMembers(t *testing.T) {
 // recorded against — and later matched against — whatever chain hash preceded the
 // ejected one, not a hash derived from it.
 func TestTrainPrefixCache_Lookup_EjectedMemberDoesNotBreakChain(t *testing.T) {
-	c := newTestPrefixCacheNoGit("owner/repo:main", "base-sha")
+	c := newTestPrefixCacheNoGit("owner/repo:main")
 	m1 := trainMember{item: makeTrainItem(1, "one"), headSHA: "h1"}
 	m2 := trainMember{item: makeTrainItem(2, "two"), headSHA: "h2"}
 	m4 := trainMember{item: makeTrainItem(4, "four"), headSHA: "h4"}
@@ -115,7 +122,7 @@ func TestTrainPrefixCache_Lookup_EjectedMemberDoesNotBreakChain(t *testing.T) {
 	// Simulate the original assembly: 1 and 2 merged; member 3 (not modeled here) was
 	// ejected mid-assembly, contributing no step; then 4 merged, chained directly off
 	// member 2's hash.
-	afterM1 := chainHashStep(c.seed, m1.item.Number, m1.headSHA)
+	afterM1 := chainHashStep(chainHashSeed(c.trainKey, "base-sha"), m1.item.Number, m1.headSHA)
 	c.entries[afterM1] = trainPrefixCacheEntry{commitSHA: "c1"}
 	afterM2 := chainHashStep(afterM1, m2.item.Number, m2.headSHA)
 	c.entries[afterM2] = trainPrefixCacheEntry{commitSHA: "c2"}
@@ -124,7 +131,7 @@ func TestTrainPrefixCache_Lookup_EjectedMemberDoesNotBreakChain(t *testing.T) {
 
 	// A later re-form's survivor list (3 already ejected) should match all three
 	// recorded steps.
-	matchedLen, commitSHA, _ := c.lookup([]trainMember{m1, m2, m4})
+	matchedLen, commitSHA, _ := c.lookup("base-sha", []trainMember{m1, m2, m4})
 	if matchedLen != 3 {
 		t.Errorf("expected matchedLen 3 (survivors list matches despite the gap left by the ejected member), got %d", matchedLen)
 	}
@@ -136,7 +143,7 @@ func TestTrainPrefixCache_Lookup_EjectedMemberDoesNotBreakChain(t *testing.T) {
 // ── nil-receiver safety ─────────────────────────────────────────────────────────
 
 func TestTrainPrefixCache_Disabled_NewReturnsNil(t *testing.T) {
-	c := newTrainPrefixCache("owner/repo:main", "base-sha", "/does/not/matter", true)
+	c := newTrainPrefixCache("owner/repo:main", "/does/not/matter", true)
 	if c != nil {
 		t.Fatalf("expected newTrainPrefixCache(disabled=true) to return nil, got %#v", c)
 	}
@@ -145,7 +152,7 @@ func TestTrainPrefixCache_Disabled_NewReturnsNil(t *testing.T) {
 func TestTrainPrefixCache_NilReceiver_IsNoOp(t *testing.T) {
 	var c *trainPrefixCache // nil
 
-	matchedLen, commitSHA, chainHash := c.lookup([]trainMember{{item: makeTrainItem(1, "one"), headSHA: "h1"}})
+	matchedLen, commitSHA, chainHash := c.lookup("base-sha", []trainMember{{item: makeTrainItem(1, "one"), headSHA: "h1"}})
 	if matchedLen != 0 || commitSHA != "" || chainHash != "" {
 		t.Errorf("expected nil-receiver lookup to return (0, \"\", \"\"), got (%d, %q, %q)", matchedLen, commitSHA, chainHash)
 	}
@@ -190,13 +197,13 @@ func TestTrainPrefixCache_RecordThenLookup_RealGit(t *testing.T) {
 	bareDir, _ := setupBareRepoForTrain(t)
 	baseSHA := strings.TrimSpace(gitOutputDir(t, bareDir, "rev-parse", "refs/remotes/origin/main"))
 
-	c := newTrainPrefixCache("owner/repo:main", baseSHA, bareDir, false)
+	c := newTrainPrefixCache("owner/repo:main", bareDir, false)
 	m1 := trainMember{item: makeTrainItem(1, "one"), headSHA: "h1"}
 
-	_, _, h0 := c.lookup(nil)
+	_, _, h0 := c.lookup(baseSHA, nil)
 	next := c.record(h0, m1, baseSHA) // any resolvable commit SHA works for this test
 
-	matchedLen, commitSHA, gotHash := c.lookup([]trainMember{m1})
+	matchedLen, commitSHA, gotHash := c.lookup(baseSHA, []trainMember{m1})
 	if matchedLen != 1 {
 		t.Fatalf("expected matchedLen 1 after recording one step, got %d", matchedLen)
 	}
@@ -234,29 +241,29 @@ func TestTrainPrefixCache_DifferentPinnedBase_ProducesIndependentNonInterferingC
 	trainKey := "owner/repo:main"
 	m1 := trainMember{item: makeTrainItem(1, "one"), headSHA: "h1"}
 
-	c1 := newTrainPrefixCache(trainKey, baseSHA1, wm.baseDir, false)
-	_, _, h0c1 := c1.lookup(nil)
-	c1.record(h0c1, m1, baseSHA1)
+	// ONE live cache whose worker re-pins its base mid-invocation — the shape
+	// landOneAtATime and the main-moved rebuild loop produce (they share the cache).
+	c := newTrainPrefixCache(trainKey, wm.baseDir, false)
+	_, _, h0A := c.lookup(baseSHA1, nil)
+	c.record(h0A, m1, baseSHA1)
 
-	c2 := newTrainPrefixCache(trainKey, baseSHA2, wm.baseDir, false)
-	// A fresh invocation always sweeps stale refs for its own trainKey before use —
-	// this must NOT remove c1's still-live ref, since c1 hasn't called cleanup() yet
-	// (modeling two invocations whose lifetimes momentarily overlap in this test,
-	// even though in production the in-flight guard serializes them).
-	matchedLen, _, _ := c2.lookup([]trainMember{m1})
+	matchedLen, _, hB := c.lookup(baseSHA2, []trainMember{m1})
 	if matchedLen != 0 {
-		t.Errorf("expected a cache pinned to a different base SHA to find zero reusable prefix for a member recorded under the other base, got matchedLen=%d", matchedLen)
+		t.Errorf("expected a re-pinned base to find zero reusable prefix for a member recorded under the other base, got matchedLen=%d", matchedLen)
 	}
 
-	// c1's own chain is unaffected by c2 having been constructed (no shared mutable
-	// state beyond the git refs, which live at different paths since h0 differs).
-	matchedLen, commitSHA, _ := c1.lookup([]trainMember{m1})
+	// Recording under the new base does not disturb the old base's chain.
+	c.record(hB, m1, baseSHA2)
+	matchedLen, commitSHA, _ := c.lookup(baseSHA1, []trainMember{m1})
 	if matchedLen != 1 || commitSHA != baseSHA1 {
-		t.Errorf("expected c1's own chain to still resolve after c2 was constructed, got matchedLen=%d commitSHA=%q", matchedLen, commitSHA)
+		t.Errorf("expected the original base's chain to still resolve, got matchedLen=%d commitSHA=%q", matchedLen, commitSHA)
+	}
+	matchedLen, commitSHA, _ = c.lookup(baseSHA2, []trainMember{m1})
+	if matchedLen != 1 || commitSHA != baseSHA2 {
+		t.Errorf("expected the re-pinned base's own chain to resolve to its own commit, got matchedLen=%d commitSHA=%q", matchedLen, commitSHA)
 	}
 
-	c1.cleanup()
-	c2.cleanup()
+	c.cleanup()
 }
 
 // TestTrainPrefixCache_GCSurvival is Acceptance 4: a reused commit survives
@@ -283,8 +290,8 @@ func TestTrainPrefixCache_GCSurvival(t *testing.T) {
 	// the state a trial's merge commits are left in today without #1835's ref
 	// protection.
 
-	c := newTrainPrefixCache("owner/repo:main", baseSHA, bareDir, false)
-	_, _, h0 := c.lookup(nil)
+	c := newTrainPrefixCache("owner/repo:main", bareDir, false)
+	_, _, h0 := c.lookup(baseSHA, nil)
 	m1 := trainMember{item: makeTrainItem(1, "one"), headSHA: "h1"}
 	c.record(h0, m1, orphanSHA)
 
@@ -321,8 +328,8 @@ func TestTrainPrefixCache_SweepStaleRefs_RemovesLeftoverFromCrashedInvocation(t 
 
 	// Simulate a crashed prior invocation: write a ref directly, bypassing a live
 	// cache's cleanup().
-	leaked := newTrainPrefixCache(trainKey, baseSHA, bareDir, false)
-	_, _, h0 := leaked.lookup(nil)
+	leaked := newTrainPrefixCache(trainKey, bareDir, false)
+	_, _, h0 := leaked.lookup(baseSHA, nil)
 	m1 := trainMember{item: makeTrainItem(1, "one"), headSHA: "h1"}
 	leaked.record(h0, m1, baseSHA)
 	if refs := leaked.listOwnRefs(); len(refs) == 0 {
@@ -332,7 +339,7 @@ func TestTrainPrefixCache_SweepStaleRefs_RemovesLeftoverFromCrashedInvocation(t 
 
 	// A fresh invocation for the same trainKey starts with its own empty in-memory
 	// cache and sweeps stale refs before doing anything else.
-	fresh := newTrainPrefixCache(trainKey, baseSHA, bareDir, false)
+	fresh := newTrainPrefixCache(trainKey, bareDir, false)
 	fresh.sweepStaleRefs()
 
 	if refs := fresh.listOwnRefs(); len(refs) != 0 {
@@ -342,7 +349,7 @@ func TestTrainPrefixCache_SweepStaleRefs_RemovesLeftoverFromCrashedInvocation(t 
 	// even if sweepStaleRefs somehow missed something, a lookup could never
 	// incorrectly hit, since correctness is decided by entries, never by ref
 	// presence (Decision 3).
-	matchedLen, _, _ := fresh.lookup([]trainMember{m1})
+	matchedLen, _, _ := fresh.lookup(baseSHA, []trainMember{m1})
 	if matchedLen != 0 {
 		t.Errorf("expected a fresh invocation to start with zero reusable prefix regardless of leftover refs, got matchedLen %d", matchedLen)
 	}

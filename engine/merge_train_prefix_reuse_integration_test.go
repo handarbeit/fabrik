@@ -299,3 +299,130 @@ func TestMergeTrainWorker_PrefixReuse_DisabledForTest_IsNonVacuous(t *testing.T)
 		t.Errorf("expected the re-formed trial {1,2,4} to re-pay `git merge` attempts for all 3 survivors with reuse disabled, got %d — this would make TestMergeTrainWorker_PrefixReuse_EjectReformReusesPrefix's assertion vacuous", delta)
 	}
 }
+
+// TestMergeTrainWorker_PrefixReuse_LandOneAtATimeRepinnedBase_ForksFromRepinnedBase is
+// Requirement 4 through a real worker path (the #1835 review finding): landOneAtATime
+// re-pins its local copy of trialParams.baseSHA to the current origin/<base> before each
+// singleton, while sharing the worker's one *trainPrefixCache. A member that was chain
+// position 1 on the ORIGINAL base must not hit that stale chain — each singleton trial
+// must fork from the re-pinned base (so a prior singleton's land is visible to its
+// validation), not from a commit built on the old one.
+func TestMergeTrainWorker_PrefixReuse_LandOneAtATimeRepinnedBase_ForksFromRepinnedBase(t *testing.T) {
+	skipIfNoGit(t)
+	_, srcDir, _, wm := setupTrainRepo(t)
+
+	sha1 := pushBranchToBare(t, srcDir, wm.baseDir, "fabrik/issue-1", "file1.txt", "content1\n")
+	sha2 := pushBranchToBare(t, srcDir, wm.baseDir, "fabrik/issue-2", "file2.txt", "content2\n")
+	memberSHA := map[int]string{1: sha1, 2: sha2}
+	m1 := trainMember{item: makeTrainItem(1, "1"), prNum: 11, headSHA: sha1}
+	m2 := trainMember{item: makeTrainItem(2, "2"), prNum: 12, headSHA: sha2}
+
+	baseA := strings.TrimSpace(gitOutputDir(t, srcDir, "rev-parse", "main"))
+	mustGitDir(t, wm.baseDir, "fetch", "origin", "+refs/heads/*:refs/remotes/origin/*")
+
+	// The trial branch is deleted as soon as its (red) trial is disposed, so the
+	// fork-point check runs inside createDraftPRFn, while the branch still exists.
+	var mu sync.Mutex
+	var repinnedBase string // set once main advances
+	var trialHeads []string
+	var forkErrs []string
+	nextPR := int32(100)
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: issueNumber + 10, HeadSHA: memberSHA[issueNumber], State: "open"}, nil
+		},
+		createDraftPRFn: func(owner, repo, title, head, base, body string, issueNumber int) (int, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			trialHeads = append(trialHeads, head)
+			if repinnedBase != "" {
+				cmd := exec.Command("git", "merge-base", "--is-ancestor", repinnedBase, "refs/heads/"+head)
+				cmd.Dir = wm.baseDir
+				if out, err := cmd.CombinedOutput(); err != nil {
+					forkErrs = append(forkErrs, fmt.Sprintf("%s does not contain re-pinned base %s: %s: %v", head, repinnedBase, out, err))
+				}
+			}
+			nextPR++
+			return int(nextPR), nil
+		},
+		// Red keeps each singleton on the cheap dispose path — this test is about where
+		// the trial forked from, not about landing.
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			f := false
+			return &f, "dirty", nil
+		},
+		fetchPRDetailsFn: func(owner, repo string, prNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNumber, MergeableState: "clean"}, nil
+		},
+	}
+	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, wm)
+	eng.mu.Lock()
+	eng.worktreeManagers["owner/repo"] = wm
+	eng.mu.Unlock()
+
+	var lookups []prefixLookupCall
+	eng.trainPrefixLookupHookFn = func(matchedLen, totalLen int, numbers []int) {
+		lookups = append(lookups, prefixLookupCall{numbers: append([]int(nil), numbers...), matchedLen: matchedLen, totalLen: totalLen})
+	}
+
+	trainKey := mergeTrainKey("owner/repo", "main")
+	p := trialParams{
+		owner: "owner", repo: "repo", baseBranch: "main", trainKey: trainKey, baseSHA: baseA, wm: wm,
+		nextTrialName: trialNameGen("repin-test"),
+		prefixCache:   newTrainPrefixCache(trainKey, wm.baseDir, false),
+	}
+	defer p.prefixCache.cleanup()
+
+	// A prior trial on the original base records a chain whose position 1 is m1 —
+	// exactly the shape an original red trial (or bisect's second half) leaves behind.
+	if _, _, err := e2eAssemble(eng, p, []trainMember{m1, m2}, "repin-seed"); err != nil {
+		t.Fatalf("seed assembly on the original base: %v", err)
+	}
+	eng.cleanupTrialArtifacts(p.repoKey(), wm, "repin-seed")
+
+	// main advances: this is the "prior singleton just landed" / "main moved" state.
+	writeFile(t, srcDir+"/advance.txt", "main moved\n")
+	mustGit(t, srcDir, "add", "-A")
+	mustGit(t, srcDir, "commit", "-m", "advance main")
+	mustGit(t, srcDir, "push", wm.baseDir, "main:main")
+	baseB := strings.TrimSpace(gitOutputDir(t, srcDir, "rev-parse", "main"))
+	if baseA == baseB {
+		t.Fatal("setup failed: main did not advance")
+	}
+	lookups = nil
+	mu.Lock()
+	repinnedBase = baseB
+	trialHeads = nil
+	mu.Unlock()
+
+	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store(trainKey, state)
+	eng.store.EnterRepoWorker(trainKey)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	eng.landOneAtATime(ctx, state, p, []trainMember{m1, m2})
+
+	mu.Lock()
+	heads := append([]string(nil), trialHeads...)
+	mu.Unlock()
+	if len(heads) != 2 {
+		t.Fatalf("expected 2 singleton trials (one per member), got %d: %v", len(heads), heads)
+	}
+	mu.Lock()
+	errs := append([]string(nil), forkErrs...)
+	mu.Unlock()
+	for _, msg := range errs {
+		t.Errorf("singleton trial forked from a stale prefix: %s", msg)
+	}
+	for _, c := range lookups {
+		if c.matchedLen != 0 {
+			t.Errorf("expected zero prefix reuse after the base was re-pinned, got matchedLen=%d for members %v", c.matchedLen, c.numbers)
+		}
+	}
+}
+
+// e2eAssemble runs assembleTrialBranch for a test that needs a recorded chain without a
+// full worker.
+func e2eAssemble(eng *Engine, p trialParams, members []trainMember, trialName string) ([]trainMember, string, error) {
+	return eng.assembleTrialBranch(context.Background(), p, members, trialName)
+}

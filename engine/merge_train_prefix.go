@@ -19,8 +19,10 @@ type trainPrefixCacheEntry struct {
 // trainPrefixCache lets assembleTrialBranch resume a trial assembly from an
 // already-built merge commit instead of always forking fresh off the pinned base SHA
 // (#1835). It is a content-addressed cache of the ordered chain of merges a single
-// runMergeTrainWorker invocation has produced: h0 = chainHashSeed(trainKey, baseSHA),
-// and h_i = chainHashStep(h_{i-1}, member[i].Number, member[i].headSHA) for each
+// runMergeTrainWorker invocation has produced: h0 = chainHashSeed(trainKey, baseSHA) —
+// derived per lookup from the base passed in, never fixed at construction, because a
+// worker re-pins its base mid-invocation (landOneAtATime's per-singleton re-pin, the
+// main-moved rebuild loop) — and h_i = chainHashStep(h_{i-1}, member[i].Number, member[i].headSHA) for each
 // member that merged successfully — an ejected member contributes no step, so the
 // next successful member's hash is computed against whatever hash preceded it. A new
 // assembly's member list is matched by walking the same recurrence forward from h0;
@@ -47,9 +49,9 @@ type trainPrefixCacheEntry struct {
 // before use, so "no cache" degrades to exactly today's behavior with no special
 // casing at call sites.
 type trainPrefixCache struct {
-	baseDir string // the bare clone's directory; every git command here runs with Dir=baseDir
-	refDir  string // refs/fabrik/merge-train-prefix/<sha256(trainKey)> — this trainKey's own ref namespace
-	seed    string // h0 = chainHashSeed(trainKey, baseSHA)
+	baseDir  string // the bare clone's directory; every git command here runs with Dir=baseDir
+	refDir   string // refs/fabrik/merge-train-prefix/<sha256(trainKey)> — this trainKey's own ref namespace
+	trainKey string // hashed with the base SHA passed to lookup to form that lookup's h0
 
 	entries map[string]trainPrefixCacheEntry // key: chain hash h_i -> the entry it produced
 }
@@ -80,7 +82,7 @@ func chainHashStep(prev string, memberNumber int, headSHA string) string {
 }
 
 // newTrainPrefixCache constructs a trainPrefixCache scoped to one worker invocation
-// pinned at (trainKey, baseSHA), or returns nil when disabled (the
+// for trainKey, or returns nil when disabled (the
 // mergeTrainPrefixReuseDisabledForTest test seam) — a nil cache is a pure no-op
 // everywhere it's used, reproducing pre-#1835 behavior exactly (Acceptance 6).
 //
@@ -89,27 +91,30 @@ func chainHashStep(prev string, memberNumber int, headSHA string) string {
 // concurrently-running sibling (repo, base) partition sharing the same bare clone
 // (ADR-1648): the in-flight guard already guarantees no other goroutine is using this
 // exact trainKey right now, and a different trainKey hashes to a different directory.
-func newTrainPrefixCache(trainKey, baseSHA, baseDir string, disabled bool) *trainPrefixCache {
+func newTrainPrefixCache(trainKey, baseDir string, disabled bool) *trainPrefixCache {
 	if disabled {
 		return nil
 	}
 	return &trainPrefixCache{
-		baseDir: baseDir,
-		refDir:  "refs/fabrik/merge-train-prefix/" + chainHash("refdir", trainKey),
-		seed:    chainHashSeed(trainKey, baseSHA),
-		entries: make(map[string]trainPrefixCacheEntry),
+		baseDir:  baseDir,
+		refDir:   "refs/fabrik/merge-train-prefix/" + chainHash("refdir", trainKey),
+		trainKey: trainKey,
+		entries:  make(map[string]trainPrefixCacheEntry),
 	}
 }
 
-// lookup walks members forward from the cache's seed hash, returning the length of
+// lookup walks members forward from the seed hash for baseSHA (the base the caller is
+// about to fork the trial from — p.baseSHA at call time, which a worker may have
+// re-pinned since the cache was constructed), returning the length of
 // the longest matching prefix, the commit SHA the prefix ends at (empty when
-// matchedLen is 0), and the chain hash to resume recording from (the seed itself when
-// nothing matched). A nil receiver always returns (0, "", "").
-func (c *trainPrefixCache) lookup(members []trainMember) (matchedLen int, commitSHA, chainHash string) {
+// matchedLen is 0), and the chain hash to resume recording from (the seed for baseSHA
+// when nothing matched). Entries recorded under a different base can never match, so a
+// re-pin ends the reusable prefix by construction (Requirement 4). A nil receiver always returns (0, "", "").
+func (c *trainPrefixCache) lookup(baseSHA string, members []trainMember) (matchedLen int, commitSHA, chainHash string) {
 	if c == nil {
 		return 0, "", ""
 	}
-	current := c.seed
+	current := chainHashSeed(c.trainKey, baseSHA)
 	for _, m := range members {
 		next := chainHashStep(current, m.item.Number, m.headSHA)
 		entry, ok := c.entries[next]

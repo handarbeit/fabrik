@@ -1029,7 +1029,7 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 		// and unconditionally remove everything this invocation's own cache creates when
 		// the worker exits, by any path — nothing will ever look up this invocation's
 		// chain again once it's gone (Decision 1, ADR-1835).
-		p.prefixCache = newTrainPrefixCache(trainKey, p.baseSHA, p.wm.BaseDir(), e.mergeTrainPrefixReuseDisabledForTest)
+		p.prefixCache = newTrainPrefixCache(trainKey, p.wm.BaseDir(), e.mergeTrainPrefixReuseDisabledForTest)
 		p.prefixCache.sweepStaleRefs()
 	}
 	defer p.prefixCache.cleanup()
@@ -1213,7 +1213,7 @@ func (e *Engine) fetchTrainMembers(ctx context.Context, owner, repo string, batc
 // disabled or unavailable (the trainValidateFn test seam never reaches this function at
 // all). See ADR-1835.
 func (e *Engine) assembleTrialBranch(ctx context.Context, p trialParams, members []trainMember, trialName string) ([]trainMember, string, error) {
-	matchedLen, prefixCommitSHA, chainHash := p.prefixCache.lookup(members)
+	matchedLen, prefixCommitSHA, chainHash := p.prefixCache.lookup(p.baseSHA, members)
 	if e.trainPrefixLookupHookFn != nil {
 		numbers := make([]int, len(members))
 		for i, m := range members {
@@ -1270,7 +1270,7 @@ func (e *Engine) assembleTrialBranch(ctx context.Context, p trialParams, members
 				// an entry a future lookup could match without this member actually being
 				// in its member list — a false hit, not just a missed one. Poisoning to ""
 				// (chainHashStep never produces an empty string, and lookup always starts
-				// from c.seed, never "") makes every subsequent record() in this assembly
+				// from the seed for the current base, never "") makes every subsequent record() in this assembly
 				// write an entry no real lookup can ever reach, so nothing past this point
 				// is falsely reusable — only the already-recorded prefix before this member
 				// remains valid.
