@@ -179,18 +179,25 @@ func writeAppGitToken(path, token string) error {
 	return nil
 }
 
-// runAppGitTokenWriter keeps path in step with tokenFn until ctx is done,
-// then removes the file. The caller has already written the initial token.
-// A failed rewrite is logged and retried on the next tick: the previous
-// token stays valid until its own expiry, well past one interval.
+// runAppGitTokenWriter keeps path in step with tokenFn until ctx is done.
+// The caller has already written the initial token. A failed rewrite is
+// logged and retried on the next tick: the previous token stays valid until
+// its own expiry, well past one interval.
+//
+// It deliberately does NOT remove the file when ctx is done. ctx is cancelled
+// at the START of the SIGHUP/shutdown drain, not the end, and in-flight
+// workers (and engine git such as cleanup or push) keep calling the helper
+// throughout that drain. The helper serves nothing for a missing file, and the
+// injected reset entry suppresses any ambient helper, so removing the file
+// here would fail their pushes with a still-valid token (#1847 review). The
+// file is 0600 in gitignored .fabrik/state, every start overwrites it before
+// git runs, and the token expires within an hour; the App private key that
+// mints it is already on disk under the same user. A stale file left by a
+// previous App-HTTPS run is removed at the next startup instead (see
+// setUpAppGitCredential), when no worker can be using it.
 func (e *Engine) runAppGitTokenWriter(ctx context.Context, tokenFn func() string, path, written string) {
 	ticker := time.NewTicker(appGitTokenRewriteInterval)
 	defer ticker.Stop()
-	defer func() {
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			e.logf(0, "github-app", "warning: removing git token file %s: %v", path, err)
-		}
-	}()
 	for {
 		select {
 		case <-ctx.Done():
@@ -218,6 +225,14 @@ func (e *Engine) runAppGitTokenWriter(ctx context.Context, tokenFn func() string
 func (e *Engine) setUpAppGitCredential(ctx context.Context, httpsGit bool) error {
 	if e.ghAppAuth == nil || !httpsGit || e.hostClient == nil {
 		// hostClient is nil only for NewWithDeps-built test engines.
+		// No helper is injected this run, so a token file a previous App-HTTPS
+		// run left behind (see runAppGitTokenWriter) is removed now, at startup,
+		// before any worker exists.
+		if e.fabrikDir != "" {
+			if err := os.Remove(AppGitTokenPath(e.fabrikDir)); err != nil && !os.IsNotExist(err) {
+				e.logf(0, "github-app", "warning: removing stale git token file: %v", err)
+			}
+		}
 		return applyGitConfigEnv("")
 	}
 	tokenFn := e.hostClient.Token

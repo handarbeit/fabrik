@@ -231,6 +231,11 @@ func TestRun_GitHubAppAuth_GitSSH_StripsStaleHelper(t *testing.T) {
 	eng := newAppAuthTestEngine(t)
 	eng.hostClient = gh.NewClient("ghs_installation_token")
 	eng.cfg.GitSSH = true
+	// A previous App-HTTPS run no longer removes its token file at shutdown
+	// (#1847 review), so this start must remove the leftover itself.
+	if err := writeAppGitToken(AppGitTokenPath(eng.fabrikDir), "ghs_stale"); err != nil {
+		t.Fatal(err)
+	}
 
 	runEngineUntilShutdownWith(t, eng, func() {
 		// ReadyCh closes before Run()'s git preflight; wait for it.
@@ -239,9 +244,41 @@ func TestRun_GitHubAppAuth_GitSSH_StripsStaleHelper(t *testing.T) {
 			t.Errorf("GIT_CONFIG_COUNT still set (%q); stale helper not stripped", os.Getenv("GIT_CONFIG_COUNT"))
 		}
 		if _, err := os.Stat(AppGitTokenPath(eng.fabrikDir)); !os.IsNotExist(err) {
-			t.Errorf("token file written under git_ssh (stat err %v)", err)
+			t.Errorf("token file present under git_ssh: a previous run's leftover was not removed at startup (stat err %v)", err)
 		}
 	})
+}
+
+// TestRunAppGitTokenWriter_FileSurvivesCancellation: ctx is cancelled at the
+// START of the SIGHUP/shutdown drain, while in-flight workers still call the
+// credential helper. The writer must leave the token file in place on
+// cancellation, or those workers' pushes fail with a still-valid token (#1847
+// review).
+func TestRunAppGitTokenWriter_FileSurvivesCancellation(t *testing.T) {
+	eng := newAppAuthTestEngine(t)
+	path := AppGitTokenPath(eng.fabrikDir)
+	if err := writeAppGitToken(path, "ghs_live"); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		eng.runAppGitTokenWriter(ctx, func() string { return "ghs_live" }, path, "ghs_live")
+		close(done)
+	}()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runAppGitTokenWriter did not return after ctx cancellation")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("token file gone after cancellation (in-flight workers would lose git auth): %v", err)
+	}
+	if string(data) != "ghs_live" {
+		t.Errorf("token file = %q after cancellation, want the live token", data)
+	}
 }
 
 // waitFor polls cond for up to 5s.
