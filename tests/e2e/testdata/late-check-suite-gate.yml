@@ -1,0 +1,87 @@
+# Late check-run e2e fixture (#1849) — commit this to fabrik-test-alpha as
+# .github/workflows/late-check-suite-gate.yml. Do NOT mark either check required
+# on branch protection.
+#
+# Why it exists: #1822 made the engine's CI gate wait on GitHub check SUITES, not
+# just existing check runs. A job still queued behind a `needs:` dependency has no
+# check run yet, so an all-green prefix used to read as a complete pass. The sim
+# bed cannot see that wire behaviour; TestLateCheckRunSuiteGate (live e2e) can.
+#
+# Shape:
+#   late-check-fast  succeeds as soon as the engine has applied fabrik:awaiting-ci
+#                    to the PR's issue (i.e. the CI gate is active). Fails OPEN
+#                    after ~35 min so it can never deadlock; the scenario's
+#                    vacuity guard then reports the run as inconclusive.
+#   late-check-slow  needs: late-check-fast, so its check run does not exist until
+#                    fast has finished — exactly the "fast job green, late job not
+#                    yet visible" window the suite-aware gate exists to hold
+#                    through. It then sleeps ~4 min (at least four 60s engine
+#                    polls) and succeeds. `environment: late-check-gate` is
+#                    auto-created by GitHub on first use; an operator MAY add a
+#                    wait timer to it to widen the window from seconds to minutes
+#                    (see tests/e2e/README.md, "Additional prerequisites for TestLateCheckRunSuiteGate").
+#
+# Scoping (so no other scenario pays this delay):
+#   - `paths:` restricts the trigger to PRs touching e2e/late-check/**, the
+#     directory only TestLateCheckRunSuiteGate writes to.
+#   - The job-level `if:` restricts it to PR head branches named
+#     fabrik/issue-N. Merge-train trial/integration PRs (head fabrik/merge-train/…)
+#     can match the path filter when a member is batched; they get skipped check
+#     runs, which the engine's classifier treats as neither pending nor failed.
+#     (`on.pull_request.branches` filters the BASE ref, so it cannot do this.)
+#
+# NOT required on purpose: a path-filtered required check never reports on PRs
+# that do not match the filter, so it would sit at "Expected" forever and block
+# every other PR on the repo. The engine's gate reads every check run and suite
+# on the SHA regardless of required status, so nothing is lost.
+name: late-check-suite-gate
+
+on:
+  pull_request:
+    paths:
+      - "e2e/late-check/**"
+
+permissions:
+  contents: read
+  issues: read
+
+jobs:
+  late-check-fast:
+    if: startsWith(github.head_ref, 'fabrik/issue-')
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Wait for the engine's CI gate (fabrik:awaiting-ci) on the PR's issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_REF: ${{ github.head_ref }}
+          REPO: ${{ github.repository }}
+        run: |
+          issue="${HEAD_REF#fabrik/issue-}"
+          case "$issue" in
+            ''|*[!0-9]*) echo "cannot derive issue number from '$HEAD_REF' — failing open"; exit 0 ;;
+          esac
+          # 140 x 15s = 35 min. Fail open (exit 0) so this job can never deadlock a PR.
+          for _ in $(seq 1 140); do
+            # No `grep -q`: under the runner's default `bash -e -o pipefail`, an early-exiting
+            # grep can SIGPIPE gh and turn a match into a pipeline failure.
+            if gh api "repos/$REPO/issues/$issue" --jq '.labels[].name' 2>/dev/null | grep -x 'fabrik:awaiting-ci' >/dev/null; then
+              echo "fabrik:awaiting-ci present on #$issue — CI gate is active; fast job done"
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "::warning::fabrik:awaiting-ci never appeared on #$issue within 35 min — failing open (scenario will report inconclusive)"
+
+  late-check-slow:
+    if: startsWith(github.head_ref, 'fabrik/issue-')
+    needs: late-check-fast
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: late-check-gate
+    steps:
+      - name: Sleep long enough to span several engine polls
+        run: |
+          echo "late check running — holding the window open for 240s"
+          sleep 240
+          echo "late check done"
