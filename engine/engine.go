@@ -341,6 +341,33 @@ type Engine struct {
 	// the sort left enabled (the production default; New never sets this). See
 	// SetMergeTrainQueueSortDisabledForTest and ADR-1833.
 	mergeTrainQueueSortDisabledForTest bool
+	// mergeTrainPrefixReuseDisabledForTest disables assembleTrialBranch's trial-prefix
+	// reuse (#1835) when true, falling back to always forking fresh off the pinned base
+	// SHA and re-merging every member — i.e. exactly the pre-#1835 behavior. Exists
+	// solely so a test can demonstrate the reuse is non-vacuous (Acceptance 6): re-run
+	// an AC1/AC2-style scenario with this set and observe the previously-suppressed
+	// merges and resolveConflictWithClaude invocations return. Production leaves this
+	// false (New never sets it); see newTrainPrefixCache and ADR-1835.
+	mergeTrainPrefixReuseDisabledForTest bool
+	// trainPrefixLookupHookFn, when non-nil, is called at the end of every
+	// assembleTrialBranch prefix lookup with the matched prefix length, the total
+	// member count, and the member numbers being assembled — a test-only
+	// call-observation seam (mirrors trainRedBatchHook's pattern) letting a test assert
+	// exactly how much of a given trial's chain was reused, not just the end-to-end
+	// outcome. Nil in production (zero cost). See ADR-1835.
+	trainPrefixLookupHookFn func(matchedLen, totalLen int, memberNumbers []int)
+	// trainMergeAttemptHookFn, when non-nil, is called immediately before
+	// assembleTrialBranch actually runs `git merge` for a member — i.e. once per member
+	// NOT covered by a reused prefix. This is a merge-count observation independent of
+	// resolveConflictWithClaude's own invocation count, which git rerere's autoupdate
+	// replay (ADR-1834) can satisfy without ever calling Claude — so "zero Claude
+	// invocations" alone cannot distinguish "the merge was skipped entirely" (#1835's
+	// prefix reuse) from "the merge ran but its conflict was resolved for free by
+	// rerere" (already-existing, unrelated behavior). This hook fires for every member
+	// actually merged regardless of outcome (clean or conflicted), letting a test assert
+	// the literal "zero merges" half of Acceptance 1 directly. Nil in production (zero
+	// cost). See ADR-1835.
+	trainMergeAttemptHookFn func(memberNumber int)
 }
 
 func New(cfg Config) (*Engine, error) {

@@ -533,6 +533,15 @@ type trialParams struct {
 	holdingStg       *stages.Stage
 	maxTurnsOverride int
 	nextTrialName    func() string // returns a unique trial name per call (first == base)
+	// prefixCache is this worker invocation's trial-assembly prefix cache (#1835), set
+	// once in runMergeTrainWorker right after prepareTrainWorker succeeds and shared by
+	// every trial the invocation assembles (the main-loop re-form loop and every
+	// bisection sub-trial) via trialParams' pass-by-value copies, which all still carry
+	// the same pointer. nil under the trainValidateFn test seam (no real git) and when
+	// e.mergeTrainPrefixReuseDisabledForTest is set — assembleTrialBranch's use of it is
+	// nil-receiver-safe throughout, so both cases degrade to pre-#1835 behavior with no
+	// special-casing. See ADR-1835.
+	prefixCache *trainPrefixCache
 }
 
 // repoKey returns the "owner/repo" identity for this trial, used to route
@@ -1012,7 +1021,18 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 		if out, gcErr := gcCmd.CombinedOutput(); gcErr != nil {
 			e.logfRepo(repoKey, "merge-train", "warn: git rerere gc failed: %s: %v\n", strings.TrimSpace(string(out)), gcErr)
 		}
+
+		// #1835: construct this invocation's trial-assembly prefix cache, pinned to
+		// (trainKey, p.baseSHA) — nil (a pure no-op everywhere it's used) when the test
+		// seam disables reuse. Sweep any refs a crashed prior invocation for this exact
+		// trainKey left behind before anything is looked up or recorded (Requirement 5),
+		// and unconditionally remove everything this invocation's own cache creates when
+		// the worker exits, by any path — nothing will ever look up this invocation's
+		// chain again once it's gone (Decision 1, ADR-1835).
+		p.prefixCache = newTrainPrefixCache(trainKey, p.wm.BaseDir(), e.mergeTrainPrefixReuseDisabledForTest)
+		p.prefixCache.sweepStaleRefs()
 	}
+	defer p.prefixCache.cleanup()
 
 	// Re-form loop: validate, land-on-green, or bisect-eject-reform on red.
 	for {
@@ -1172,13 +1192,43 @@ func (e *Engine) fetchTrainMembers(ctx context.Context, owner, repo string, batc
 	return members
 }
 
-// assembleTrialBranch creates a fresh trial worktree forked off the pinned base SHA (D-b)
-// and sequentially merges each member's head SHA into it, resolving conflicts via Claude and
-// ejecting members whose conflicts are unresolvable. It returns the survivors (members that
-// merged or were resolved), the pushed trial branch HEAD SHA, and any fatal error. A zero-
-// survivor result returns (nil, "", nil) — the caller handles the terminal.
+// assembleTrialBranch creates a trial worktree and sequentially merges each member's
+// head SHA into it, resolving conflicts via Claude and ejecting members whose conflicts
+// are unresolvable. It returns the survivors (members that merged or were resolved), the
+// pushed trial branch HEAD SHA, and any fatal error. A zero-survivor result returns
+// (nil, "", nil) — the caller handles the terminal.
+//
+// #1835: before forking, it consults p.prefixCache for the longest recorded chain that is
+// a matching prefix of members (same pinned base SHA, same members in the same order,
+// each at the same head SHA) and, on a match, forks the worktree from that prefix's
+// already-built merge commit instead of the pinned base SHA (D-b) — skipping merge work
+// (and any Claude conflict resolution) for the matched members entirely. Every successful
+// merge for a member past the matched prefix is recorded back into the cache as it
+// happens, extending the chain for a later re-form or bisection sub-trial within the same
+// worker invocation to reuse in turn. An ejected member (mid-assembly conflict, below)
+// contributes no chain step, so the next successful member's step is recorded against
+// whatever chain preceded the ejected one — this is what lets a re-form after ejecting mk
+// correctly reuse base..m(k-1) with no special-casing. p.prefixCache is nil-receiver-safe,
+// so this degrades to always forking off p.baseSHA and merging every member when reuse is
+// disabled or unavailable (the trainValidateFn test seam never reaches this function at
+// all). See ADR-1835.
 func (e *Engine) assembleTrialBranch(ctx context.Context, p trialParams, members []trainMember, trialName string) ([]trainMember, string, error) {
-	wtDir, err := p.wm.EnsureTrainWorktreeAt(trialName, p.baseSHA)
+	matchedLen, prefixCommitSHA, chainHash := p.prefixCache.lookup(p.baseSHA, members)
+	if e.trainPrefixLookupHookFn != nil {
+		numbers := make([]int, len(members))
+		for i, m := range members {
+			numbers[i] = m.item.Number
+		}
+		e.trainPrefixLookupHookFn(matchedLen, len(members), numbers)
+	}
+
+	startRef := p.baseSHA
+	if matchedLen > 0 {
+		startRef = prefixCommitSHA
+		e.logfRepo(p.repoKey(), "merge-train", "reusing a recorded prefix (%d/%d member(s) already merged) for trial %s\n", matchedLen, len(members), trialName)
+	}
+
+	wtDir, err := p.wm.EnsureTrainWorktreeAt(trialName, startRef)
 	if err != nil {
 		return nil, "", fmt.Errorf("creating trial worktree: %w", err)
 	}
@@ -1191,8 +1241,11 @@ func (e *Engine) assembleTrialBranch(ctx context.Context, p trialParams, members
 	// object resolvable by `git merge <sha>`. Re-fetching per trial would be a wasted network
 	// round-trip on every bisection sub-trial. Keep this invariant if the fetch is refactored.
 
-	var survivors []trainMember
-	for _, member := range members {
+	survivors := append([]trainMember(nil), members[:matchedLen]...)
+	for _, member := range members[matchedLen:] {
+		if e.trainMergeAttemptHookFn != nil {
+			e.trainMergeAttemptHookFn(member.item.Number)
+		}
 		preMergeHeadCmd := exec.Command("git", "rev-parse", "HEAD")
 		preMergeHeadCmd.Dir = wtDir
 		preMergeHeadOut, preMergeHeadErr := preMergeHeadCmd.Output()
@@ -1207,6 +1260,23 @@ func (e *Engine) assembleTrialBranch(ctx context.Context, p trialParams, members
 
 		if mergeErr == nil {
 			survivors = append(survivors, member)
+			if sha, shaErr := gitRevParse(wtDir, "HEAD"); shaErr == nil {
+				chainHash = p.prefixCache.record(chainHash, member, sha)
+			} else {
+				// Merged, but we couldn't learn the resulting commit SHA to record it.
+				// chainHash must not simply stay put: a later record() call for the next
+				// member would then chain off this member's pre-merge position while the
+				// worktree HEAD actually already contains this member's changes, producing
+				// an entry a future lookup could match without this member actually being
+				// in its member list — a false hit, not just a missed one. Poisoning to ""
+				// (chainHashStep never produces an empty string, and lookup always starts
+				// from the seed for the current base, never "") makes every subsequent record() in this assembly
+				// write an entry no real lookup can ever reach, so nothing past this point
+				// is falsely reusable — only the already-recorded prefix before this member
+				// remains valid.
+				chainHash = ""
+				e.logf(member.item.Number, "merge-train", "warn: could not read merge commit SHA for #%d (%v) — trial-prefix recording disabled for the rest of this assembly\n", member.item.Number, shaErr)
+			}
 			e.logf(member.item.Number, "merge-train", "merged #%d cleanly into trial branch\n", member.item.Number)
 			continue
 		}
@@ -1227,6 +1297,14 @@ func (e *Engine) assembleTrialBranch(ctx context.Context, p trialParams, members
 		resolved, diag, resolveErr := e.resolveTrainConflict(ctx, member.item, wtDir, p.holdingStg, member.headSHA, preMergeHEAD, string(mergeOut), opts)
 		if resolved {
 			survivors = append(survivors, member)
+			if sha, shaErr := gitRevParse(wtDir, "HEAD"); shaErr == nil {
+				chainHash = p.prefixCache.record(chainHash, member, sha)
+			} else {
+				// See the identical clean-merge branch above for why chainHash is
+				// poisoned to "" rather than left unadvanced on a rev-parse failure.
+				chainHash = ""
+				e.logf(member.item.Number, "merge-train", "warn: could not read merge commit SHA for #%d (%v) — trial-prefix recording disabled for the rest of this assembly\n", member.item.Number, shaErr)
+			}
 			e.logf(member.item.Number, "merge-train", "conflict for #%d resolved\n", member.item.Number)
 			continue
 		}
