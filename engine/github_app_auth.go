@@ -193,51 +193,6 @@ func RefuseGHESWithGitHubApp(ghesHost string) error {
 		"config to use a personal access token against this GHES instance instead", ghesHost)
 }
 
-// RefuseHTTPSWorkerGitUnderAppAuth refuses App auth + default HTTPS worker
-// git loudly at startup, mirroring RefuseGHESWithGitHubApp's shape (#1756,
-// R2). Under App auth, buildClaudeEnv (engine/claude.go) injects the
-// installation token as GH_TOKEN/GITHUB_TOKEN into every stage worker's
-// environment. RequiredGitHubAppPermissions grants `contents:read` (added by
-// #1755, for the engine's own compare/merge calls) but not `contents:write`
-// — so a worker `git fetch` over the bare clone's default HTTPS remote
-// (buildCloneURL, engine/worktree.go) would likely succeed, but
-// `git push`/`git push --force-with-lease` would still resolve credentials
-// through a `gh auth setup-git`-style helper straight to that
-// write-ungranted token and 403. Two configurations mask this entirely:
-// gitSSH (the clone/push protocol is SSH, so no HTTPS credential helper is
-// ever consulted) and hasSSHRewrite (a global
-// url.git@github.com:.insteadOf = https://github.com/ rewrite transparently
-// redirects the HTTPS remote to SSH before git ever asks a credential
-// helper for anything). Outside those two cases, silently depending on host
-// git config is exactly the failure mode this function exists to eliminate
-// — see ADR-1756.
-//
-// Deliberately does not attempt to distinguish "no credential helper
-// configured" (already covered, advisory-only, by checkHTTPSCredentials)
-// from "a credential helper is configured and will hand the worker's git a
-// bad token": under App auth, the latter is the default outcome on any
-// machine where `gh auth setup-git` (or an equivalent helper) has ever been
-// run, which is common enough that a hard refusal is the safer default
-// rather than a best-effort probe. It also does not attempt to distinguish
-// "worker only ever fetches" from "worker also needs to push" — every
-// managed stage commits and pushes its own work (see CLAUDE.md's "Commit
-// frequently" convention), so the push failure is reachable from every
-// stage, not a corner case worth probing around.
-func RefuseHTTPSWorkerGitUnderAppAuth(gitSSH, hasSSHRewrite bool) error {
-	if gitSSH || hasSSHRewrite {
-		return nil
-	}
-	return fmt.Errorf("GitHub App authentication is configured with default HTTPS git cloning — under App auth, " +
-		"stage workers authenticate gh/git via the installation token (see RequiredGitHubAppPermissions), which " +
-		"is granted `contents:read` but not `contents:write`, so a worker's `git push` over the default HTTPS " +
-		"remote would 403 as soon as any git credential helper (e.g. one registered by `gh auth setup-git`) " +
-		"resolves credentials from the GH_TOKEN/GITHUB_TOKEN environment (fetch alone would likely succeed, but " +
-		"every managed stage also commits and pushes). Fix by either setting git_ssh: true (or --ssh) in " +
-		".fabrik/config.yaml so worktrees clone over SSH instead, or configuring a global " +
-		"url.git@github.com:.insteadOf = https://github.com/ rewrite so HTTPS remotes are transparently sent " +
-		"over SSH. See ADR-1756 and docs/USER_GUIDE.md")
-}
-
 // RefuseWebhooksWithGitHubApp refuses the --webhooks + GitHub-App-auth
 // combination outright rather than letting it silently degrade to polling
 // (#1752): `gh webhook forward` (engine/webhook.go's webhookManager) is
@@ -378,6 +333,15 @@ func RefuseUserOwnedBoardForAppAuth(client *gh.Client, owner string) error {
 // be empty but cfg.Owner names the board's own organization.
 func setUpGitHubAppAuth(ctx context.Context, cfg Config, fabrikDir, baseURL string) (*gh.Client, *githubauth.Reconciler, error) {
 	required := RequiredGitHubAppPermissions(cfg.Webhooks)
+	// HTTPS git (#1846): engine and workers push over HTTPS with the
+	// installation token (setUpAppGitCredential), so the installation must
+	// grant contents:write. Not needed when git goes over SSH — git_ssh, or
+	// a global HTTPS→SSH insteadOf rewrite — where the token never reaches
+	// git at all.
+	httpsGit := !cfg.GitSSH && !gitHTTPSRewrittenToSSH()
+	if httpsGit {
+		required["contents"] = "write"
+	}
 
 	// Options.RequiredPermissions is deliberately left unset here (rather
 	// than passed required): Reconcile's own verifyPinnedGrants would only
@@ -424,9 +388,18 @@ func setUpGitHubAppAuth(ctx context.Context, cfg Config, fabrikDir, baseURL stri
 		return nil, nil, fmt.Errorf("verifying GitHub App installation's granted permissions: %w", err)
 	}
 	if len(shortfalls) > 0 {
-		return nil, nil, fmt.Errorf("GitHub App installation %d is missing required permissions: %s — "+
+		hint := ""
+		if httpsGit {
+			for _, sf := range shortfalls {
+				if sf.Permission == "contents" {
+					hint = " (contents:write is required because git runs over HTTPS as the installation; " +
+						"alternatively set git_ssh: true so git uses your SSH key instead)"
+				}
+			}
+		}
+		return nil, nil, fmt.Errorf("GitHub App installation %d is missing required permissions: %s%s — "+
 			"grant these permissions to the installation (App settings → Install App → Configure) and "+
-			"restart Fabrik", cfg.GitHubAppInstallationID, FormatPermissionShortfalls(shortfalls))
+			"restart Fabrik", cfg.GitHubAppInstallationID, FormatPermissionShortfalls(shortfalls), hint)
 	}
 
 	fmt.Printf("[startup] authenticated as %s (GitHub App installation, organization %q)\n", reconciler.BotLogin(), cfg.Owner)
@@ -551,10 +524,9 @@ func resolveGitHubAppAuth(ctx context.Context, cfg Config, fabrikDir, baseURL st
 	// logged, not silent.
 	if cfg.Token != "" {
 		fmt.Printf("[startup] github-app: GitHub App authentication is configured and takes precedence over the " +
-			"configured personal access token (FABRIK_TOKEN) for GitHub API calls and worker gh CLI auth — but " +
-			"git clone/fetch/push (engine's own and, unless git_ssh/an SSH rewrite is configured, workers' too) " +
-			"may still depend on the PAT via ambient credentials; do not revoke it until git_ssh or an SSH " +
-			"rewrite is confirmed in place (see ADR-1756)\n")
+			"configured personal access token (FABRIK_TOKEN) for GitHub API calls, worker gh CLI auth, and " +
+			"HTTPS git (engine and workers — see ADR-1846); with git_ssh or an SSH rewrite, git uses your SSH " +
+			"key instead. The PAT is not used\n")
 	}
 	return setUpGitHubAppAuth(ctx, cfg, fabrikDir, baseURL)
 }
