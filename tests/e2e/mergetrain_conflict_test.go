@@ -84,7 +84,7 @@ import (
 // stage before Queued has wait_for_ci: true) defers P before bisection. The scenario
 // fails fast with that named cause rather than timing out; a re-run resolves it.
 //
-// Prerequisites: see tests/e2e/README.md prerequisite #21 (Queued column, merge_train
+// Prerequisites: see tests/e2e/README.md prerequisite #22 (Queued column, merge_train
 // on, train-poison-guard required on fabrik-test-alpha, real Claude usable from the
 // Queued holding stage). Skips cleanly if the bed is not train-capable.
 //
