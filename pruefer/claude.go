@@ -105,6 +105,20 @@ type ReviewRequest struct {
 	// most repos have no skill file at all.
 	RepoGuidance     string
 	RepoGuidanceMode string
+	// DiffPath is the absolute path to a file holding the PR's unified diff
+	// — the same bytes review.go already fetched for the size guard, after
+	// exclusion and trimming, so it is exactly the change the model is
+	// being asked to review and nothing more.
+	//
+	// It exists because the review clone structurally cannot produce that
+	// diff itself: CloneForReview does a depth-1 fetch of
+	// refs/pull/<N>/head and nothing else, so the base branch is not a ref
+	// in that repository and `git diff <base>...HEAD` cannot resolve. The
+	// prompt used to instruct exactly that command; it failed on every
+	// review, and the model was left to infer the change by reading whole
+	// files. Empty (the degraded case) falls back to that older wording so
+	// a review still runs.
+	DiffPath string
 }
 
 // ClaudeInvoker defines the interface for invoking Claude Code to produce
@@ -357,7 +371,17 @@ func composeGuidanceLayer(base, overlay, mode string) string {
 func renderDynamicContext(b *strings.Builder, req ReviewRequest) {
 	fmt.Fprintf(b, "You are Pruefer, an automated code reviewer for pull request %s/%s#%d: %q.\n\n", req.Owner, req.Repo, req.PRNumber, req.Title)
 	b.WriteString("The PR's head commit is already checked out in your working directory. Use git (diff, log, show, blame, grep, status), Read, Grep, and Glob to inspect the change and any surrounding code you need for context — you have no write access and no other tools.\n\n")
-	if req.BaseBranch != "" {
+	switch {
+	case req.DiffPath != "":
+		// The clone has no base ref (depth-1 head-only fetch), so a
+		// three-dot diff against the base cannot resolve here. Hand over
+		// the diff Pruefer already has instead of naming a command that
+		// will fail.
+		fmt.Fprintf(b, "This PR's complete unified diff — exactly the change under review, already filtered to what you should review — is written to %s. Read that file first: it is the authoritative statement of what changed. The working directory holds the PR's head commit, so use git/Grep/Glob/Read on it for surrounding context the diff alone doesn't give you.\n\n", req.DiffPath)
+		if req.BaseBranch != "" {
+			fmt.Fprintf(b, "The PR targets %q. Note the checkout is a shallow, single-commit fetch of the PR head: %q is not a ref here, so `git diff %s...HEAD` and `git log` against the base will not resolve. Use the diff file above rather than trying to reconstruct the change from git history.\n\n", req.BaseBranch, req.BaseBranch, req.BaseBranch)
+		}
+	case req.BaseBranch != "":
 		fmt.Fprintf(b, "The PR's base branch is %q; compare against it (e.g. `git diff %s...HEAD`) to see only this PR's changes.\n\n", req.BaseBranch, req.BaseBranch)
 	}
 	renderOmittedPaths(b, req.BaseBranch, req.OmittedExcludedPaths, req.OmittedTrimmedPaths)
