@@ -100,6 +100,23 @@ func parseBatchSnapshotNumbers(line string) []int {
 	return nums
 }
 
+// firstSnapshotForRepo returns the issue numbers of the first batch snapshot line for
+// trainKey (the bare "owner/repo" for a default-base partition) in lines, and whether
+// one was found. Scoping by trainKey keeps a sibling repo's snapshot from being
+// mistaken for this scenario's batch.
+func firstSnapshotForRepo(lines []string, trainKey string) ([]int, bool) {
+	prefix := logBatchSnapshot + trainKey + ": "
+	for _, l := range lines {
+		if !strings.Contains(l, prefix) {
+			continue
+		}
+		if nums := parseBatchSnapshotNumbers(l); nums != nil {
+			return nums, true
+		}
+	}
+	return nil, false
+}
+
 // firstBatchSnapshotNumbers returns the issue numbers of the first batch snapshot line
 // in lines, and whether one was found.
 func firstBatchSnapshotNumbers(lines []string) ([]int, bool) {

@@ -223,3 +223,17 @@ func TestAnalyzeConflictTrainLog_MainMoved(t *testing.T) {
 		}
 	})
 }
+
+func TestFirstSnapshotForRepo(t *testing.T) {
+	lines := tsLines(
+		`[merge-train] batch snapshot for o/other: 1 item(s) — #9 "x"`,
+		`[merge-train] batch snapshot for o/r: 2 item(s) — #1 "a", #2 "b"`,
+		`[merge-train] batch snapshot for o/r: 4 item(s) — #1 "a", #2 "b", #3 "c", #4 "d"`,
+	)
+	if got, ok := firstSnapshotForRepo(lines, "o/r"); !ok || !intsEqual(got, []int{1, 2}) {
+		t.Fatalf("got %v ok=%v, want the FIRST o/r snapshot [1 2]", got, ok)
+	}
+	if _, ok := firstSnapshotForRepo(lines, "o/missing"); ok {
+		t.Fatal("found a snapshot for a repo with none")
+	}
+}
