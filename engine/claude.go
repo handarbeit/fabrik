@@ -995,14 +995,25 @@ func buildClaudeEnv(stage *stages.Stage, issue gh.ProjectItem, workDir string, o
 		fabrikRepo = opts.FabrikRepo
 	}
 	env = append(env, "FABRIK_REPO="+fabrikRepo)
+	// The three optional worker vars below must never inherit an ambient value
+	// either (same reasoning as FABRIK_REPO above): when there is nothing to
+	// inject, emit mergeEnv's bare-key removal sentinel so a copy already in
+	// the engine process's own environment — e.g. an engine or test suite run
+	// from inside a Fabrik worker — is stripped rather than passed through.
 	if workDir != "" {
 		env = append(env, "FABRIK_WORKTREE="+workDir)
+	} else {
+		env = append(env, "FABRIK_WORKTREE")
 	}
 	if opts.FabrikRoot != "" {
 		env = append(env, "FABRIK_ROOT="+opts.FabrikRoot)
+	} else {
+		env = append(env, "FABRIK_ROOT")
 	}
 	if opts.PRNumber != 0 {
 		env = append(env, "FABRIK_PR="+strconv.Itoa(opts.PRNumber))
+	} else {
+		env = append(env, "FABRIK_PR")
 	}
 
 	passthrough := passthroughSet(claudeAnthropicEnvPassthrough)

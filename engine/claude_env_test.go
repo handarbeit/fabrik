@@ -522,3 +522,58 @@ func TestParseAnthropicEnvPassthrough(t *testing.T) {
 		})
 	}
 }
+
+// TestBuildClaudeEnv_OptionalWorkerVarsNeverInherited covers #1844: FABRIK_PR,
+// FABRIK_WORKTREE and FABRIK_ROOT are injected only when the engine has a value
+// for them, and must never inherit an ambient copy from the engine process's own
+// environment otherwise — the case when an engine or the test suite itself runs
+// inside a Fabrik worker, whose own environment carries all three.
+func TestBuildClaudeEnv_OptionalWorkerVarsNeverInherited(t *testing.T) {
+	resetAnthropicEnvVars(t)
+	baseEnv := []string{
+		"PATH=/usr/bin",
+		"FABRIK_PR=999",
+		"FABRIK_WORKTREE=/ambient/worktree",
+		"FABRIK_ROOT=/ambient/root",
+	}
+	count := func(env []string, key string) int {
+		n := 0
+		for _, kv := range env {
+			if strings.HasPrefix(kv, key+"=") || kv == key {
+				n++
+			}
+		}
+		return n
+	}
+
+	t.Run("nothing to inject: ambient values are stripped", func(t *testing.T) {
+		overrides := buildClaudeEnv(envTestStage(), envTestIssue(), "", InvokeOptions{}, baseEnv)
+		env := mergeEnv(baseEnv, overrides)
+		for _, key := range []string{"FABRIK_PR", "FABRIK_WORKTREE", "FABRIK_ROOT"} {
+			if n := count(env, key); n != 0 {
+				t.Errorf("%s: expected absent from worker env, found %d occurrence(s) in %v", key, n, env)
+			}
+		}
+		if v, ok := envLookup(env, "PATH"); !ok || v != "/usr/bin" {
+			t.Errorf("unrelated ambient PATH must survive, got %q (present=%v)", v, ok)
+		}
+	})
+
+	t.Run("values to inject: engine values win, exactly once", func(t *testing.T) {
+		opts := InvokeOptions{FabrikRoot: "/engine/root", PRNumber: 42}
+		overrides := buildClaudeEnv(envTestStage(), envTestIssue(), "/engine/worktree", opts, baseEnv)
+		env := mergeEnv(baseEnv, overrides)
+		for key, want := range map[string]string{
+			"FABRIK_PR":       "42",
+			"FABRIK_WORKTREE": "/engine/worktree",
+			"FABRIK_ROOT":     "/engine/root",
+		} {
+			if n := count(env, key); n != 1 {
+				t.Errorf("%s: expected exactly one occurrence, found %d in %v", key, n, env)
+			}
+			if got, _ := envLookup(env, key); got != want {
+				t.Errorf("%s = %q, want %q", key, got, want)
+			}
+		}
+	})
+}

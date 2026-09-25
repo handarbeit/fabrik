@@ -14,6 +14,12 @@ import (
 	"github.com/handarbeit/fabrik/config"
 )
 
+// executeSIGINTDeadline bounds how long a test waits for Execute() to return
+// after SIGINT. These tests assert that configuration is applied, not how fast
+// shutdown is, so the bound is deliberately generous: 5s flaked on a heavily
+// loaded host (#1844).
+const executeSIGINTDeadline = 30 * time.Second
+
 // chdirTest changes to dir for the duration of the test, restoring original on cleanup.
 func chdirTest(t *testing.T, dir string) {
 	t.Helper()
@@ -327,7 +333,7 @@ func TestExecute_ConfigYAMLApplied(t *testing.T) {
 	var err error
 	select {
 	case err = <-done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(executeSIGINTDeadline):
 		t.Fatal("Execute did not return after SIGINT")
 	}
 
@@ -406,7 +412,7 @@ prompt: "Do research"
 	select {
 	case <-done:
 		// Success — Execute returned
-	case <-time.After(5 * time.Second):
+	case <-time.After(executeSIGINTDeadline):
 		t.Fatal("Execute did not return after SIGINT")
 	}
 }
