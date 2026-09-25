@@ -341,12 +341,22 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 	// the model cannot derive the change from git — see ReviewRequest.DiffPath.
 	// Written outside the clone so it never appears in the reviewed tree,
 	// git status, or a Grep/Glob sweep of the repo.
-	diffPath, cleanupDiff, err := writeDiffFile(diff, pr.Number)
-	if err != nil {
+	// Guard the empty case explicitly. When FetchPRDiff returns 406
+	// too_large the files-API fallback above leaves diff == "", and writing
+	// that would hand the reviewer an empty file the prompt then calls the
+	// authoritative statement of the change while telling it not to fall
+	// back to git — strictly worse than no file, and it would hit exactly
+	// the largest PRs.
+	var diffPath string
+	var cleanupDiff func()
+	if diff == "" {
+		logf(pr.Number, "warn", "no diff text available for %s/%s#%d (size-guard fallback) — review proceeds without a diff file\n", owner, repo, pr.Number)
+	} else if diffPath, cleanupDiff, err = writeDiffFile(diff, pr.Number); err != nil {
 		// Non-fatal: the prompt degrades to its older base-branch wording
 		// rather than failing the review outright.
 		logf(pr.Number, "warn", "writing diff file for %s/%s#%d: %v — review will proceed without it\n", owner, repo, pr.Number, err)
-	} else {
+		diffPath = ""
+	} else if cleanupDiff != nil {
 		defer cleanupDiff()
 	}
 

@@ -2,6 +2,7 @@ package pruefer
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -16,12 +17,13 @@ import (
 // because `main` doesn't resolve in this checkout, so I did not read the
 // rest of the diff."
 func TestBuildReviewPrompt_DiffPathReplacesImpossibleGitDiff(t *testing.T) {
+	diffPath := filepath.Join(t.TempDir(), "pruefer-pr-958.diff")
 	got := buildReviewPrompt(ReviewRequest{
 		Owner: "verveguy", Repo: "concept-maps", PRNumber: 958,
-		BaseBranch: "main", DiffPath: "/tmp/pruefer-pr-958-x.diff",
+		BaseBranch: "main", DiffPath: diffPath,
 	})
 
-	if !strings.Contains(got, "/tmp/pruefer-pr-958-x.diff") {
+	if !strings.Contains(got, diffPath) {
 		t.Errorf("prompt does not name the diff file:\n%s", got)
 	}
 	// The impossible command must not be presented as something to run.
@@ -73,4 +75,43 @@ func TestWriteDiffFile_OutsideCloneAndCleanedUp(t *testing.T) {
 		t.Errorf("diff file still present after cleanup: %v", err)
 	}
 	cleanup() // must be safe to call twice
+}
+
+// TestReviewPR_EmptyDiffWritesNoFile is the regression test for the defect
+// Pruefer found reviewing this change: when FetchPRDiff returns 406
+// too_large, review.go's files-API fallback leaves diff == "". Writing that
+// would create an empty file the prompt then calls "the authoritative
+// statement of what changed" while telling the reviewer not to fall back to
+// git — strictly worse than no file, and it hits exactly the largest PRs.
+func TestReviewPR_EmptyDiffWritesNoFile(t *testing.T) {
+	// The prompt must never name a diff file when there is no diff to put
+	// in one.
+	got := buildReviewPrompt(ReviewRequest{
+		Owner: "o", Repo: "r", PRNumber: 1, BaseBranch: "main", DiffPath: "",
+	})
+	if strings.Contains(got, "authoritative statement of what changed") {
+		t.Errorf("prompt claims an authoritative diff file with no DiffPath set:\n%s", got)
+	}
+	if !strings.Contains(got, "compare against it") {
+		t.Errorf("prompt did not degrade to the base-branch wording:\n%s", got)
+	}
+}
+
+// TestWriteDiffFile_EmptyContentStillGuardedByCaller documents the division
+// of responsibility: writeDiffFile itself is content-agnostic (it would
+// happily write zero bytes), so the empty check belongs at the call site in
+// ReviewPR, which is where the 406 fallback's empty diff originates.
+func TestWriteDiffFile_EmptyContentStillGuardedByCaller(t *testing.T) {
+	path, cleanup, err := writeDiffFile("", 1)
+	if err != nil {
+		t.Fatalf("writeDiffFile: %v", err)
+	}
+	defer cleanup()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading back: %v", err)
+	}
+	if len(b) != 0 {
+		t.Errorf("expected an empty file, got %d bytes", len(b))
+	}
 }
