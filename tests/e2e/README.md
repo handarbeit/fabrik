@@ -793,6 +793,46 @@ is a documented, accepted e2e gap.
     bounded-window assertions. This requires no additional bed setup; it is
     purely a change in how the harness constructs the member PR.
 
+### Additional prerequisites for `TestLateCheckRunSuiteGate` (#1849)
+
+`TestLateCheckRunSuiteGate` is the live proof of the suite-aware CI gate (#1822,
+#1829): with `wait_for_ci` on, the gate must not clear while a check run that does
+not exist yet — a job queued behind a `needs:` dependency — is still to come.
+The sim bed cannot see this GitHub wire timing (ADR-1454), so it lives here.
+
+- **Install the workflow on `fabrik-test-alpha`.** Commit
+  `tests/e2e/testdata/late-check-suite-gate.yml` to
+  `handarbeit/fabrik-test-alpha` as `.github/workflows/late-check-suite-gate.yml`
+  (a manual commit, exactly as for `train-poison-guard.yml` in the merge-train
+  prerequisites). It defines two jobs: `late-check-fast` (succeeds once the
+  engine has applied `fabrik:awaiting-ci`, so the CI gate is active; fails open
+  after ~35 min) and `late-check-slow` (`needs: late-check-fast`, sleeps ~4 min,
+  succeeds). The scenario skips cleanly if the workflow is absent or not
+  `active`.
+- **Do NOT mark either check required on branch protection.** The workflow is
+  path-scoped (`e2e/late-check/**`), so on any other PR it never reports; a
+  required check that never reports sits at "Expected" forever and would block
+  every unrelated PR on the repo. The engine's gate reads every check run and
+  suite on the SHA regardless of required status, so nothing is lost — and the
+  scenario needs no branch-protection API access.
+- **Scoping.** Only PRs that touch `e2e/late-check/**` *and* whose head branch is
+  `fabrik/issue-N` run the jobs (a job-level `if:` guard; merge-train
+  trial/integration PRs that happen to match the path filter get skipped check
+  runs, which the engine treats as neither pending nor failed). No other scenario
+  pays the ~4 min sleep or is otherwise affected.
+- **Optional: widen the window.** The gap between the fast job finishing and the
+  late job's check run existing is normally only seconds. `late-check-slow`
+  declares `environment: late-check-gate`, which GitHub auto-creates on first
+  use; adding a **wait timer** (e.g. 3 min) to that environment in the repo's
+  Settings → Environments holds the job before it is scheduled, widening the
+  "fast green, late run absent" window from seconds to minutes and making the
+  scenario a much stronger detector of a #1822 regression. Without it the
+  scenario still proves the deterministic property (gate holds until the late job
+  completes) but a regressed engine polling every 60s would only sometimes clear
+  inside the gap.
+- **Cost / wall-clock.** One real Validate Claude invocation and one CI cycle
+  (~5 runner-minutes) per mode; ~20–35 min, of which ~4 min is the sleep.
+
 ### Reviewer topology (#1396)
 
 Every scenario that drives a PR through the organic Review gate depends on
@@ -1279,6 +1319,7 @@ the `Queued` column is absent, so it only runs in the gate's `on` leg.
 | `TestExpectedReviewersUndeclaredRegressionGuard` | Regression guard: undeclared (`nil`) `expected_reviewers` still never fast-advances — pins the `expected != nil` check and proves the shipped default (FR-5) is unchanged | Both | 2–5 min | ~$0.02 (no Claude) |
 | `TestExpectedReviewersFastAdvanceComposesWithAuthoritative` | ADR-1283 composition guard (via `expected-reviewers:none` + `review-authority:authoritative` labels, requires follow-up engine issue + #1261): fast-advance still fires ahead of the authority-verdict branch, since it only activates once hasReviews is true | Both | 2–5 min | ~$0.02 (no Claude) |
 | `TestReviewAuthorityDeclaredBotDoesNotDeferHumanEscalation` | ADR-1375 Finding 2/AC2 (via `expected-reviewers:declared` + `review-authority:authoritative` labels, human requested via `RequestPRReviewer`): a declared bot's re-prompt ladder must never defer an outstanding human's authoritative CHANGES_REQUESTED escalation — the reinvoke fires and `fabrik:bot-reprompted` never applies | Both | ~`FABRIK_REVIEW_WAIT_TIMEOUT` + ~15 min | $0.10–0.50 (one Claude invocation) |
+| `TestLateCheckRunSuiteGate` | ADR-1822/#1829 suite-aware CI gate (yolo item taken to Validate, `wait_for_ci`): the gate must not clear while a `needs:`-gated late check run is outstanding. Asserts on GitHub timestamps — late run starts after the fast run completes (A1), `stage:Validate:complete` is applied only after the late run completes (A2), and the fast run finished after `fabrik:awaiting-ci` (A3, vacuity guard). Needs `late-check-suite-gate.yml` installed on Alpha (not required); skips if absent. Mode-invariant | Both | 20–35 min (incl. ~4 min sleep) | ~$0.10–0.50 (one Validate Claude invocation) + one CI cycle |
 | `TestMergeTrainHappyPathLanding` | ADR-059 internal train: 3 clean Queued members → one integration PR → all advance Queued→Done, PRs closed, no O(N²) per-member retests | Train-only (on) | 10–25 min | low (no Claude) |
 | `TestMergeTrainBisectionEjectsPoisoner` | ADR-059 D4: red combined batch → halving bisection isolates the poison member → ejected → survivors land. Needs the `train-poison-guard` required check | Train-only (on) | 20–40 min | low–moderate |
 | `TestMergeTrainRestartSafety` | ADR-059 D5 / #960: after a landing, a restart with the historical merged integration PR present does NOT stall the next batch (reconstruct proceeds fresh). **Not parallel** — restarts the bed | Train-only (on) | 25–50 min | low |
@@ -1318,6 +1359,7 @@ shape, not just the single-mode total.
 | `TestExpectedReviewersUndeclaredRegressionGuard` | ADR-1283 FR-5 regression guard, #1298 — pins `reviewGateFastAdvance`'s `expected != nil` check |
 | `TestExpectedReviewersFastAdvanceComposesWithAuthoritative` | ADR-1283, #1298 — fast-advance independence from `review_authority` (ADR-1250) |
 | `TestReviewAuthorityDeclaredBotDoesNotDeferHumanEscalation` | ADR-1375 Finding 2 (`reviewGateAllBots` gated on `authorityReason == ""`), AC2, #1375 |
+| `TestLateCheckRunSuiteGate` | ADR-1822 / #1822 (suite-aware CI gate: `ciSuiteHold`, `settlePRMergeState`), #1829 (`github-actions` suites never inert), #1849 (this scenario) |
 | `TestMergeTrainHappyPathLanding` | ADR-059 D1/D3 (#946, #947, #948) — Queued column, trial-branch build, integration-PR landing + member lifecycle |
 | `TestMergeTrainBisectionEjectsPoisoner` | ADR-059 D4 (#949) — halving bisection, ejection, one-at-a-time fallback |
 | `TestMergeTrainRestartSafety` | ADR-059 D5 (#950) + PR #960 (reconstruct must not stall on a historical merged PR) |

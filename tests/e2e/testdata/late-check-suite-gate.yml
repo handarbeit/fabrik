@@ -19,7 +19,7 @@
 #                    polls) and succeeds. `environment: late-check-gate` is
 #                    auto-created by GitHub on first use; an operator MAY add a
 #                    wait timer to it to widen the window from seconds to minutes
-#                    (see tests/e2e/README.md prerequisite #21).
+#                    (see tests/e2e/README.md, "Additional prerequisites for TestLateCheckRunSuiteGate").
 #
 # Scoping (so no other scenario pays this delay):
 #   - `paths:` restricts the trigger to PRs touching e2e/late-check/**, the
