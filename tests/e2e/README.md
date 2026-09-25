@@ -594,6 +594,60 @@ timeout instead of skipping. Only run in the `on` leg of the two-mode gate.
     `TestCrossRepoSpawn` starts real work, mirroring the same idiom
     `TestMergeTrainRestartSafety` already uses below.
 
+21. **`TestMergeTrainQueuedDeeperThanBatchCap`** (#1850, ADR-1833) — queues
+    **seven** clean members against the bed's `max_batch_size` and asserts
+    (A1) the first trial holds exactly the first five, (A2) batch membership
+    stays stable from the first `batch snapshot` line to the batch-1 landing
+    (exactly one snapshot line, no trial PR closed unmerged), and (A3) all seven
+    land in two batches (5, then 2). It is the only scenario that queues more
+    members than the cap, so it is the only release-gate coverage of ADR-1833's
+    deterministic Queued ordering (the sim bed cannot host that defect — it uses
+    the pass-through adapter, never the map-backed `itemstate.Store`).
+    - **Bed prerequisites:** the default `max_batch_size` of **5** (no
+      `FABRIK_MAX_BATCH_SIZE` in the bed `.env`, no `max_batch_size` in
+      `.fabrik/config.yaml`), and **no other open, non-paused item in `Queued`**
+      on Alpha. A pre-flight skips on a configured non-5 value and fails loudly
+      on stale Queued items; the engine's own `batch capped … max_batch_size=N`
+      line is the authoritative check and fails the scenario if `N != 5`.
+    - **No cache-mode prerequisite.** `board_cache_mode` was never a real config
+      key (#1544) and a live bed always runs the in-memory `CacheImpl`, which is
+      the mode the defect needs. ADR-1833's wording is historical.
+    - **Not parallel**, on `RepoAlpha`/`main` (the default partition production
+      uses). Any other Queued member on the same (repo, base) would join the
+      partition and change the batch composition; Go runs non-parallel tests to
+      completion before resuming parallel ones, so no `run.sh` change is needed.
+    - **Batch gating.** The engine has no batching dwell, so members are filed
+      carrying `fabrik:paused`, all seven are placed in `Queued`, then the label
+      is removed from all seven concurrently (REST). Paused Queued members are
+      excluded from the partition and cause no engine side effect. The unpause
+      window is about one API round-trip, not zero: if a poll lands inside it the
+      scenario fails with a **"poll boundary straddled the unpause … re-run"**
+      message (first cap line not `7 Queued`, or first snapshot under five
+      members). That is a harness race, not an engine regression — re-run. A
+      failed run re-pauses any still-open member so it cannot leak into a later
+      scenario's batch. The `fabrik:paused` label itself is never deleted.
+    - **Placement order.** Members are filed and placed sequentially, so
+      placement order equals issue-number order under either observation timing
+      of the engine's `StatusEnteredAt`. "First five by entry order" therefore
+      means the five lowest issue numbers; the scenario cannot distinguish
+      `(StatusEnteredAt, Number)` from `Number` alone (that would need permuted
+      placement with a poll between each, 5+ min extra), but it does catch the
+      pre-#1833 map-order selection.
+    - **Log anchors** (copied from the engine; pinned by
+      `mergetrain_batchcap_parse_test.go`): `batch capped for <key>: 7 Queued
+      item(s) exceed max_batch_size=5 — landing first 5 by entry order`,
+      `batch snapshot for <key>: N item(s) — …`, `opened draft CI PR #N for
+      owner/repo (K survivor(s))`, `merged integration PR #N for owner/repo`,
+      `landing complete for <key> (integration PR #N, K members)`. The A2 window
+      ends at `merged integration PR`, not `landing complete`: once members
+      advance to Done the Queued set legitimately shrinks and a new snapshot is
+      correct. Log reads are scoped by a `LogOffset` taken just before the
+      unpause, the repo's trainKey, and this scenario's own members.
+    - **Cost / wall-clock:** two green trial CI cycles (a 5-member trial, then a
+      2-member trial) and **no** Claude conflict invocations (every member writes
+      a distinct path) — low cost, ~30–60 min. Covered by the default
+      `E2E_TIMEOUT=4h`.
+
 ### Additional prerequisites for `TestReviewAuthority*` scenarios
 
 `TestReviewAuthorityReinvokesOnChangesRequested`, `TestReviewAuthorityCycleLimitPauses`,
@@ -1283,6 +1337,7 @@ the `Queued` column is absent, so it only runs in the gate's `on` leg.
 | `TestMergeTrainBisectionEjectsPoisoner` | ADR-059 D4: red combined batch → halving bisection isolates the poison member → ejected → survivors land. Needs the `train-poison-guard` required check | Train-only (on) | 20–40 min | low–moderate |
 | `TestMergeTrainRestartSafety` | ADR-059 D5 / #960: after a landing, a restart with the historical merged integration PR present does NOT stall the next batch (reconstruct proceeds fresh). **Not parallel** — restarts the bed | Train-only (on) | 25–50 min | low |
 | `TestMergeTrainRunawayGuardPausesBatch` | ADR-059 D8 (#964/#965): persistently-red 4-member batch trips the runaway guard at cap=6, pauses all Queued members, no member reaches Done. Runs on RepoBeta for counter isolation. **Not parallel** — induces a repo-wide fault on RepoBeta that would collide with `TestCrossRepoSpawn`'s use of the same repo (#1395) | Train-only (on) | 10–20 min | low (no Claude) |
+| `TestMergeTrainQueuedDeeperThanBatchCap` | ADR-1833 / #1850: 7 clean members Queued against `max_batch_size` 5 → first trial holds exactly the first five, membership stays stable (one snapshot line, no unmerged-closed trial PR), all seven land as 5 then 2. Members are queued paused then released together. **Not parallel** — shares the (RepoAlpha, main) partition | Train-only (on) | 30–60 min | low (no Claude) |
 
 Approximate single-mode suite total: ~685 min wall-clock, $10.30–30 in Claude
 tokens. A full two-mode gate run is roughly double this, minus the
@@ -1322,6 +1377,7 @@ shape, not just the single-mode total.
 | `TestMergeTrainBisectionEjectsPoisoner` | ADR-059 D4 (#949) — halving bisection, ejection, one-at-a-time fallback |
 | `TestMergeTrainRestartSafety` | ADR-059 D5 (#950) + PR #960 (reconstruct must not stall on a historical merged PR) |
 | `TestMergeTrainRunawayGuardPausesBatch` | ADR-059 D8 (#964) — runaway guard trial cap, per-repo counter isolation |
+| `TestMergeTrainQueuedDeeperThanBatchCap` | ADR-1833 / #1833 (deterministic Queued ordering — pre-fix the capped batch was an arbitrary map-order subset that churned poll to poll), #1850 (this scenario); the sim bed cannot cover it (ADR-1833 non-vacuity proof) |
 
 Every escape-from-release regression earns a new scenario in this table.
 
