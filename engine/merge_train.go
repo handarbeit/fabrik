@@ -1783,7 +1783,7 @@ func (e *Engine) landOneAtATime(ctx context.Context, state *mergeTrainWorkerStat
 		// discarded regardless of its own CI result — there is nothing left to land or
 		// eject via the normal green/red path this iteration, so move on to the next member.
 		if _, ejectedCount := e.applyPendingReviewEjects(state.projectID, repoKey, survivors); ejectedCount > 0 {
-			e.logf(m.item.Number, "merge-train", "pending review-finding eject flagged for singleton #%d — discarding trial\n", m.item.Number)
+			e.logf(m.item.Number, "merge-train", "pending review-finding or unprocessed-comment eject flagged for singleton #%d — discarding trial\n", m.item.Number)
 			e.cleanupTrialArtifacts(p.repoKey(), p.wm, trialName)
 			continue
 		}
