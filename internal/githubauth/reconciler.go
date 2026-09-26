@@ -170,6 +170,10 @@ type Options struct {
 	// construction sites: the product the manifest flow's browser pages
 	// name. Empty yields "Pruefer" (#1881).
 	ProductName string
+	// AppOrganization is forwarded to ManifestFlowOptions.Organization at
+	// both construction sites: the organization that should own a newly
+	// created App. Empty creates it under the signed-in user.
+	AppOrganization string
 	// RequiredPermissions is the permission set (#1709, R2) every
 	// installation Reconcile discovers or pins is checked against —
 	// compared to that installation's actually-granted permissions
@@ -825,7 +829,7 @@ func Reconcile(ctx context.Context, opts Options) (*Reconciler, error) {
 			creds, bootErr := runManifestFlow(ctx, ManifestFlowOptions{
 				BaseURL: opts.BaseURL, NoBrowser: opts.NoBrowser,
 				PrivateKeyPath: opts.AppPrivateKeyPath, AppStatePath: opts.AppStatePath, Logf: logf,
-				AppName: opts.AppName, AppHomepageURL: opts.AppHomepageURL, ProductName: opts.ProductName, RequiredPermissions: opts.RequiredPermissions,
+				AppName: opts.AppName, AppHomepageURL: opts.AppHomepageURL, ProductName: opts.ProductName, Organization: opts.AppOrganization, RequiredPermissions: opts.RequiredPermissions,
 			})
 			if bootErr != nil {
 				return nil, fmt.Errorf("app identity validation failed (%w) and re-creating the App also failed: %v", err, bootErr)
@@ -1148,7 +1152,7 @@ func loadOrBootstrapCredentials(ctx context.Context, opts Options, logf func(str
 		creds, err := runManifestFlow(ctx, ManifestFlowOptions{
 			BaseURL: opts.BaseURL, NoBrowser: opts.NoBrowser,
 			PrivateKeyPath: opts.AppPrivateKeyPath, AppStatePath: opts.AppStatePath, Logf: logf,
-			AppName: opts.AppName, AppHomepageURL: opts.AppHomepageURL, ProductName: opts.ProductName, RequiredPermissions: opts.RequiredPermissions,
+			AppName: opts.AppName, AppHomepageURL: opts.AppHomepageURL, ProductName: opts.ProductName, Organization: opts.AppOrganization, RequiredPermissions: opts.RequiredPermissions,
 		})
 		if err != nil {
 			return 0, nil, false, fmt.Errorf("first-run GitHub App setup: %w", err)

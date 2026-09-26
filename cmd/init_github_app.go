@@ -154,17 +154,21 @@ func runGitHubAppSetup(ctx context.Context, opts githubAppSetupOptions) (*github
 	required, manifestRequired, httpsGit := githubAppSetupPermissions(opts)
 
 	baseOpts := githubauth.Options{
-		AppID:               opts.AppID,
-		AppInstallationID:   opts.InstallationID,
-		AppPrivateKeyPath:   privateKeyPath,
-		AppStatePath:        engine.GitHubAppStatePath("."),
-		WatchedRepos:        []string{opts.Owner + "/*"},
-		NoBrowser:           opts.NoBrowser,
-		OpenBrowser:         opts.OpenBrowser,
-		BaseURL:             opts.BaseURL,
-		AppName:             engine.GitHubAppName,
-		AppHomepageURL:      engine.GitHubAppHomepageURL,
-		ProductName:         engine.GitHubAppProductName,
+		AppID:             opts.AppID,
+		AppInstallationID: opts.InstallationID,
+		AppPrivateKeyPath: privateKeyPath,
+		AppStatePath:      engine.GitHubAppStatePath("."),
+		WatchedRepos:      []string{opts.Owner + "/*"},
+		NoBrowser:         opts.NoBrowser,
+		OpenBrowser:       opts.OpenBrowser,
+		BaseURL:           opts.BaseURL,
+		AppName:           engine.GitHubAppName,
+		AppHomepageURL:    engine.GitHubAppHomepageURL,
+		ProductName:       engine.GitHubAppProductName,
+		// The board owner must be an organization (R4), and the App is
+		// created private, which can only be installed on its owner — so a
+		// newly created App must be owned by the org, not the signed-in user.
+		AppOrganization:     opts.Owner,
 		RequiredPermissions: manifestRequired,
 		Logf:                logf,
 	}

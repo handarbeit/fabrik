@@ -11,6 +11,7 @@ import (
 	"html/template"
 	"net"
 	"net/http"
+	"net/url"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -36,10 +37,35 @@ type callbackResult struct {
 	err  error
 }
 
-// githubManifestCreateURL is GitHub's App-creation-from-manifest endpoint —
-// the form served at "/start" auto-submits the manifest here. See
+// githubManifestCreateURL is GitHub's App-creation-from-manifest endpoint for
+// an App owned by the signed-in user — the form served at "/start"
+// auto-submits the manifest here. See
 // https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest.
 const githubManifestCreateURL = "https://github.com/settings/apps/new"
+
+// manifestPageConfig is the caller-supplied identity the manifest flow's
+// browser side needs: which product to name on its pages (#1881), and which
+// organization should own a newly created App.
+type manifestPageConfig struct {
+	// Product is named on every page ("Fabrik setup received — …"); empty
+	// falls back to defaultProductName.
+	Product string
+	// Organization, when set, makes GitHub create the App under that
+	// organization (/organizations/<org>/settings/apps/new) instead of the
+	// signed-in user. Needed because the App is created private
+	// (buildManifest's "public": false), and a private App can only be
+	// installed on the account that owns it: a user-owned App offers only
+	// that user's repositories. Empty keeps the user-owned endpoint.
+	Organization string
+}
+
+// manifestCreateURL is where the manifest form posts for cfg.
+func (cfg manifestPageConfig) manifestCreateURL() string {
+	if cfg.Organization == "" {
+		return githubManifestCreateURL
+	}
+	return "https://github.com/organizations/" + url.PathEscape(cfg.Organization) + "/settings/apps/new"
+}
 
 var manifestFormTemplate = template.Must(template.New("manifest-form").Parse(`<!DOCTYPE html>
 <html><body onload="document.forms[0].submit()">
@@ -56,7 +82,7 @@ var manifestFormTemplate = template.Must(template.New("manifest-form").Parse(`<!
 // parameter GitHub echoes back unchanged on its redirect — this is how the
 // loopback callback later confirms the redirect really answers this flow
 // and not some other request hitting the same port.
-func renderManifestForm(manifest map[string]interface{}, state, product string) (string, error) {
+func renderManifestForm(manifest map[string]interface{}, state string, cfg manifestPageConfig) (string, error) {
 	manifestJSON, err := json.Marshal(manifest)
 	if err != nil {
 		return "", fmt.Errorf("marshaling manifest: %w", err)
@@ -67,9 +93,9 @@ func renderManifestForm(manifest map[string]interface{}, state, product string) 
 		Manifest string
 		Product  string
 	}{
-		Action:   githubManifestCreateURL + "?state=" + state,
+		Action:   cfg.manifestCreateURL() + "?state=" + url.QueryEscape(state),
 		Manifest: string(manifestJSON),
-		Product:  productNameOrDefault(product),
+		Product:  productNameOrDefault(cfg.Product),
 	})
 	if err != nil {
 		return "", fmt.Errorf("rendering manifest form: %w", err)
@@ -95,10 +121,10 @@ func randomState() (string, error) {
 // called (even after a successful result) to stop the listener. logf may be
 // nil (tests that don't care about the rare unexpected-Serve-error log
 // line); RunManifestFlow always passes its own logf through.
-// product names the program running the flow ("Fabrik", "Pruefer") on the
-// pages the browser sees; empty falls back to defaultProductName.
-func runManifestCallbackServer(product string, buildManifestFn func(redirectURL string) map[string]interface{}, logf func(string, ...any)) (startURL string, results <-chan callbackResult, shutdown func(), err error) {
-	product = productNameOrDefault(product)
+// cfg names the product on the pages the browser sees and, optionally, the
+// organization that should own the created App (see manifestPageConfig).
+func runManifestCallbackServer(cfg manifestPageConfig, buildManifestFn func(redirectURL string) map[string]interface{}, logf func(string, ...any)) (startURL string, results <-chan callbackResult, shutdown func(), err error) {
+	product := productNameOrDefault(cfg.Product)
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
@@ -116,7 +142,7 @@ func runManifestCallbackServer(product string, buildManifestFn func(redirectURL 
 	}
 
 	manifest := buildManifestFn(redirectURL)
-	formHTML, err := renderManifestForm(manifest, state, product)
+	formHTML, err := renderManifestForm(manifest, state, cfg)
 	if err != nil {
 		ln.Close()
 		return "", nil, nil, err
