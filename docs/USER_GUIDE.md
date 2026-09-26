@@ -155,17 +155,22 @@ onboarding failure has always been a hand-built board whose column names don't e
 match the stage names in `.fabrik/stages/*.yaml` — a human retyping nine names into
 GitHub's UI. `fabrik init --create-board` removes that step entirely: it creates a fully
 configured Project (v2) board directly from the stage configs it just extracted, in
-stage order, linked to your repository, so the board and your stage configs can never
-disagree.
+stage order, so the board and your stage configs can never disagree.
 
 ```bash
-./fabrik init --create-board --owner your-org --repo your-repo
+./fabrik init --create-board --owner your-org
 ```
+
+`--repo` is optional. Fabrik discovers repositories from the items on the board, so a
+board needs no repository link to work. Pass `--repo your-repo` only if you want the
+board linked to that repository (it then shows on the repo's Projects tab) and
+`.fabrik/config.yaml` scoped to it (`repo:`, single-repo mode). Without it, the board is
+created unlinked and the config is multi-repo.
 
 This requires a GitHub token (`--token`, `FABRIK_TOKEN`, or `GITHUB_TOKEN`) with `repo`
 and `project` scopes, same as the daemon itself. On success it writes the new project's
 number, owner, and owner type into `.fabrik/config.yaml` for you. `--title` sets the
-board's title (default: `"<repo> Fabrik Pipeline"`).
+board's title (default: `"<repo> Fabrik Pipeline"`, or `"<owner> Fabrik Pipeline"` without `--repo`).
 
 If `.fabrik/config.yaml` already has an `owner`/`project` configured — this repo has
 already been onboarded — `--create-board` refuses rather than creating a second board
@@ -432,7 +437,9 @@ App auth gives the engine its own rate-limit bucket (separate from any human's P
 fabrik init --github-app --owner myorg
 ```
 
-This opens (or, headless, prints) GitHub's App-creation page pre-filled with the exact permission set the engine requires. Confirm creation on GitHub, and the flow resumes automatically: it exchanges the resulting code for the App's credentials, writes the private key to `.fabrik/github-app-key.pem` (see "Key storage" below), discovers the installation on `myorg` (installing the App there first if it isn't installed yet — the flow prints the guided-install URL and exits non-zero, safely re-runnable once you've installed it), verifies granted permissions, and writes `github_app_id`/`github_app_private_key_path`/`github_app_installation_id` into `.fabrik/config.yaml`.
+This opens (or, headless, prints) GitHub's App-creation page pre-filled with the exact permission set the engine requires. Confirm creation on GitHub, and the flow resumes automatically: it exchanges the resulting code for the App's credentials, writes the private key to `.fabrik/github-app-key.pem` (see "Key storage" below), discovers the installation on `myorg`, verifies granted permissions, and writes `github_app_id`/`github_app_private_key_path`/`github_app_installation_id` into `.fabrik/config.yaml`.
+
+The App is created under `myorg` itself, not your personal account. It is private, and a private App can only be installed on the account that owns it. On a first run it isn't installed yet, so the flow opens its install page. In an interactive terminal it then waits (up to 10 minutes) and carries on by itself as soon as you've installed the App on `myorg`; Ctrl-C stops it. Run non-interactively, it prints the install URL and exits non-zero instead, and is safe to re-run once the App is installed: it reuses the App it created.
 
 **Adopting an existing App** — one you already created by hand or via another tool — using the same `--github-app-id`/`--github-app-private-key-path` flag names the engine's own runtime config uses:
 
@@ -449,8 +456,10 @@ Both flags must be given together, or neither — giving only one is refused, si
 **Creating the board in the same run:** combine with `--create-board` (see [Create a Project Board](#create-a-project-board)) to also create a fully-configured project board, using the App's own freshly-minted client — no separate `--token` needed, since App auth already carries `organization_projects:write`:
 
 ```bash
-fabrik init --github-app --create-board --owner myorg --repo myrepo
+fabrik init --github-app --create-board --owner myorg
 ```
+
+If you pass `--repo`, it must be one of the repositories the App's installation can access. With "Only select repositories", init checks this before creating anything and names the repositories the installation does cover, and where to add more.
 
 **Organization-only, at setup time too.** The same restriction [Organization boards only](#organization-boards-only) describes for the running engine applies during setup: `fabrik init --github-app` refuses a user-owned `--owner` outright, before attempting anything else, with the identical wording.
 

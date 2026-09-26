@@ -336,7 +336,7 @@ func runInit(args []string) error {
 	ghesHostFlag := fset.String("ghes-host", "", "GitHub Enterprise Server hostname, e.g. github.example.com (also FABRIK_GHES_HOST)")
 	createBoard := fset.Bool("create-board", false, "Create a new GitHub Project (v2) board from the just-extracted stage configs, linked to --owner/--repo. Organization-owned repos only (see #770). Mutually exclusive with the positional <project-url> argument.")
 	ownerFlag := fset.String("owner", "", "GitHub org (owner) to create the board under; required with --create-board and --github-app")
-	repoFlag := fset.String("repo", "", "GitHub repository to link the new board to; required with --create-board")
+	repoFlag := fset.String("repo", "", "Optional with --create-board: link the new board to this repository and scope .fabrik/config.yaml to it (repo:). Omit for an unlinked org board; Fabrik discovers repos from the board's items")
 	titleFlag := fset.String("title", "", "Project board title for --create-board (default: \"<repo> Fabrik Pipeline\")")
 	tokenFlag := fset.String("token", "", "GitHub token for --create-board (or FABRIK_TOKEN / GITHUB_TOKEN)")
 	githubApp := fset.Bool("github-app", false, "Guided GitHub App auth setup: register a new App via the manifest flow (or adopt an existing one with --github-app-id/--github-app-private-key-path), verify its granted permissions, and populate github_app_* in .fabrik/config.yaml. Requires --owner. Organization-owned targets only (see #770).")
@@ -414,9 +414,6 @@ func runInit(args []string) error {
 	}
 	if *createBoard && *ownerFlag == "" {
 		return fmt.Errorf("init: --create-board requires --owner")
-	}
-	if *createBoard && *repoFlag == "" {
-		return fmt.Errorf("init: --create-board requires --repo")
 	}
 	if *createBoard && !*force {
 		// R1 review finding (PR #1718): without this guard, a repo that's
@@ -634,6 +631,11 @@ func runInit(args []string) error {
 			Webhooks:       *webhooksFlag,
 			GitSSH:         resolveBool("FABRIK_GIT_SSH", pc.GitSSH),
 			NoBrowser:      noBrowser,
+			// A first run creates the App and opens its install page; on an
+			// interactive terminal, wait for the install rather than exiting
+			// with "install it, then re-run". Non-interactive runs keep failing
+			// fast, since nobody is there to install it.
+			InstallWait: interactiveInstallWait(isatty.IsTerminal(os.Stdin.Fd()) || isatty.IsCygwinTerminal(os.Stdin.Fd())),
 		})
 		if err != nil {
 			return fmt.Errorf("--github-app: %w", err)
@@ -650,6 +652,18 @@ func runInit(args []string) error {
 		var number, resolvedOwnerType string
 		var err error
 		if appSetup != nil {
+			// A repo outside the installation's grant is invisible to the
+			// App and would surface only as GitHub's bare "Could not resolve
+			// to a Repository" — say which repos it can see and where to add
+			// more, before anything is created.
+			if *repoFlag != "" {
+				repos, truncated, accErr := appSetup.Reconciler.AccessibleRepos()
+				if accErr != nil {
+					fmt.Fprintf(os.Stderr, "  warning: could not list the App installation's repositories (%v) — skipping the --repo access check\n", accErr)
+				} else if err := appRepoAccessError(*ownerFlag, *repoFlag, repos, truncated, appSetup.InstallationID); err != nil {
+					return fmt.Errorf("--create-board: %w", err)
+				}
+			}
 			number, resolvedOwnerType, err = createBoardCore(appSetup.Client, *ownerFlag, *repoFlag, *titleFlag, stagesDir)
 		} else {
 			number, resolvedOwnerType, err = runCreateBoard(*ownerFlag, *repoFlag, *titleFlag, ghesHost, *tokenFlag, stagesDir)
@@ -728,9 +742,14 @@ func createBoardCore(client *gh.Client, owner, repo, title, stagesDir string) (p
 		return "", "", err
 	}
 
-	repoID, err := client.FetchRepositoryID(owner, repo)
-	if err != nil {
-		return "", "", fmt.Errorf("resolving repository %s/%s: %w", owner, repo, err)
+	// --repo is optional (the engine discovers repos from the board's items):
+	// without it the board is created unlinked.
+	var repoID string
+	if repo != "" {
+		repoID, err = client.FetchRepositoryID(owner, repo)
+		if err != nil {
+			return "", "", fmt.Errorf("resolving repository %s/%s: %w", owner, repo, err)
+		}
 	}
 
 	// Load stage configs and compute the required column set BEFORE creating
@@ -751,7 +770,11 @@ func createBoardCore(client *gh.Client, owner, repo, title, stagesDir string) (p
 	}
 
 	if title == "" {
-		title = repo + " Fabrik Pipeline"
+		name := repo
+		if name == "" {
+			name = owner
+		}
+		title = name + " Fabrik Pipeline"
 	}
 
 	projectID, number, err := client.CreateProjectV2(ownerID, title, repoID)
@@ -776,7 +799,10 @@ func createBoardCore(client *gh.Client, owner, repo, title, stagesDir string) (p
 			step, causeErr, title, number, boardURL, boardURL)
 	}
 
-	desc := fmt.Sprintf("Managed by Fabrik — https://github.com/%s/%s (see .fabrik/stages/)", owner, repo)
+	desc := "Managed by Fabrik (see .fabrik/stages/)"
+	if repo != "" {
+		desc = fmt.Sprintf("Managed by Fabrik — https://github.com/%s/%s (see .fabrik/stages/)", owner, repo)
+	}
 	if err := client.SetProjectDescription(projectID, desc); err != nil {
 		// Non-fatal: the board is usable without a description. Fail loud
 		// but continue — R1 does not require a description to succeed.

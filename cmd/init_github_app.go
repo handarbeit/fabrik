@@ -3,7 +3,9 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
+	"time"
 
 	"github.com/handarbeit/fabrik/engine"
 	gh "github.com/handarbeit/fabrik/github"
@@ -69,6 +71,14 @@ type githubAppSetupOptions struct {
 	// BaseURL selects GitHub's API host. "" = production; tests point it at
 	// an httptest server.
 	BaseURL string
+	// InstallWait, when > 0, makes setup wait up to this long for the App
+	// to be installed on Owner instead of failing straight away when no
+	// installation exists yet (the normal first run: the App was just
+	// created and the install page has just been opened). cmd/init.go sets
+	// it only for an interactive terminal; 0 keeps the fail-fast behaviour.
+	InstallWait time.Duration
+	// InstallPollInterval is how often the wait re-checks. 0 = 5s.
+	InstallPollInterval time.Duration
 }
 
 // githubAppSetupResult is runGitHubAppSetup's success return: everything
@@ -188,6 +198,16 @@ func runGitHubAppSetup(ctx context.Context, opts githubAppSetupOptions) (*github
 				break
 			}
 		}
+		if found == nil && opts.InstallWait > 0 {
+			slug := strings.TrimSuffix(reconciler.BotLogin(), "[bot]")
+			waitedID, err := waitForOwnerInstallation(ctx, opts, reconciler.AppID(), privateKeyPath, slug, logf)
+			if err != nil {
+				return nil, err
+			}
+			if waitedID != 0 {
+				found = &githubauth.DerivedInstallation{InstallationID: waitedID, Account: opts.Owner}
+			}
+		}
 		if found == nil {
 			slug := strings.TrimSuffix(reconciler.BotLogin(), "[bot]")
 			installURL := fmt.Sprintf("https://github.com/apps/%s/installations/new", slug)
@@ -257,4 +277,90 @@ func runGitHubAppSetup(ctx context.Context, opts githubAppSetupOptions) (*github
 		Client:         client,
 		Reconciler:     reconciler,
 	}, nil
+}
+
+// appRepoAccessError explains a --repo the App installation cannot access:
+// GitHub answers "Could not resolve to a Repository" for a repo outside a
+// "selected repositories" grant, which reads like a typo. Returns nil when
+// the repo is covered, or when a truncated list can't prove it isn't.
+func appRepoAccessError(owner, repo string, accessible []string, truncated bool, installationID int64) error {
+	want := strings.ToLower(owner + "/" + repo)
+	for _, r := range accessible {
+		if strings.ToLower(r) == want {
+			return nil
+		}
+	}
+	if truncated {
+		return nil
+	}
+	covers := "no repositories"
+	if len(accessible) > 0 {
+		covers = strings.Join(accessible, ", ")
+	}
+	return fmt.Errorf("the GitHub App installation on %s cannot access %s/%s (it covers: %s) — add the repository at "+
+		"https://github.com/organizations/%s/settings/installations/%d, check the name, or omit --repo to create "+
+		"an unlinked board (Fabrik discovers repositories from the board's items)",
+		owner, owner, repo, covers, owner, installationID)
+}
+
+// waitForOwnerInstallation polls the App's installations (JWT-authenticated,
+// so it needs no installation yet) until one exists for opts.Owner, and
+// returns its ID. It returns 0 with no error when opts.InstallWait elapses,
+// so the caller falls back to its "install, then re-run" error. A failed
+// poll is logged and retried: the wait is for a human, and a transient API
+// error shouldn't end it.
+func waitForOwnerInstallation(ctx context.Context, opts githubAppSetupOptions, appID int64, privateKeyPath, slug string, logf func(string, ...any)) (int64, error) {
+	pemBytes, err := os.ReadFile(privateKeyPath)
+	if err != nil {
+		return 0, fmt.Errorf("reading the App's private key to wait for its installation: %w", err)
+	}
+	key, err := gh.ParseAppPrivateKey(pemBytes)
+	if err != nil {
+		return 0, fmt.Errorf("parsing the App's private key to wait for its installation: %w", err)
+	}
+	interval := opts.InstallPollInterval
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+	logf("waiting for the App to be installed on %s — install it at https://github.com/apps/%s/installations/new "+
+		"(setup continues on its own once it's installed; Ctrl-C to stop, gives up after %s)", opts.Owner, slug, opts.InstallWait)
+	deadline := time.Now().Add(opts.InstallWait)
+	for {
+		jwt, err := gh.BuildAppJWT(appID, key)
+		if err != nil {
+			return 0, fmt.Errorf("building App JWT to wait for its installation: %w", err)
+		}
+		insts, _, err := gh.FetchAppInstallations(opts.BaseURL, jwt)
+		if err != nil {
+			logf("! checking for the installation failed (%v) — retrying", err)
+		}
+		for _, inst := range insts {
+			if strings.EqualFold(inst.Account, opts.Owner) {
+				logf("✓ installed on %s (installation %d) — continuing", opts.Owner, inst.ID)
+				return inst.ID, nil
+			}
+		}
+		if !time.Now().Add(interval).Before(deadline) {
+			logf("! no installation on %s after %s — giving up", opts.Owner, opts.InstallWait)
+			return 0, nil
+		}
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-time.After(interval):
+		}
+	}
+}
+
+// defaultInstallWait bounds how long an interactive `fabrik init
+// --github-app` waits for the operator to install a just-created App.
+const defaultInstallWait = 10 * time.Minute
+
+// interactiveInstallWait is defaultInstallWait on an interactive terminal,
+// 0 (fail fast) otherwise.
+func interactiveInstallWait(interactive bool) time.Duration {
+	if interactive {
+		return defaultInstallWait
+	}
+	return 0
 }
