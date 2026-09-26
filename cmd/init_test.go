@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -368,8 +369,7 @@ func TestRunInit_CreateBoardFlagValidation(t *testing.T) {
 		desc string
 	}{
 		{[]string{"--create-board", "https://github.com/orgs/foo/projects/1"}, "create-board combined with project URL"},
-		{[]string{"--create-board"}, "create-board missing --owner and --repo"},
-		{[]string{"--create-board", "--owner", "acme"}, "create-board missing --repo"},
+		{[]string{"--create-board"}, "create-board missing --owner"},
 		{[]string{"--create-board", "--repo", "widgets"}, "create-board missing --owner"},
 	}
 	for _, tc := range cases {
@@ -1013,6 +1013,61 @@ func TestCreateBoardCore_Success(t *testing.T) {
 	}
 	if ownerType != "organization" {
 		t.Errorf("ownerType = %q, want organization", ownerType)
+	}
+}
+
+// TestCreateBoardCore_NoRepoCreatesUnlinkedBoard: --repo is optional. The
+// engine discovers repos from the board's items, so without it the board is
+// created unlinked: no repository lookup, no repositoryId, and a title named
+// after the owner.
+func TestCreateBoardCore_NoRepoCreatesUnlinkedBoard(t *testing.T) {
+	inner := createBoardTestServer(t, "Organization", []map[string]interface{}{
+		{"id": "OPT_1", "name": "Todo", "color": "GRAY", "description": ""},
+	}, nil)
+	defer inner.Close()
+	var queries []string
+	var createVars map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, _ := io.ReadAll(r.Body)
+		var body struct {
+			Query     string                 `json:"query"`
+			Variables map[string]interface{} `json:"variables"`
+		}
+		_ = json.Unmarshal(data, &body)
+		queries = append(queries, body.Query)
+		if strings.Contains(body.Query, "createProjectV2(input:") {
+			createVars = body.Variables
+		}
+		r.Body = io.NopCloser(bytes.NewReader(data))
+		inner.Config.Handler.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+
+	stagesDir := t.TempDir()
+	writeMinimalStage(t, stagesDir, "Specify", 0)
+	writeMinimalStage(t, stagesDir, "Implement", 1)
+
+	client := gh.NewClientWithBaseURL("token", srv.URL)
+	project, _, err := createBoardCore(client, "acme", "", "", stagesDir)
+	if err != nil {
+		t.Fatalf("createBoardCore without a repo: %v", err)
+	}
+	if project != "42" {
+		t.Errorf("project = %q, want 42", project)
+	}
+	for _, q := range queries {
+		if strings.Contains(q, "repository(owner: $owner, name: $name)") {
+			t.Error("looked up a repository although --repo was omitted")
+		}
+	}
+	if createVars == nil {
+		t.Fatal("board was never created")
+	}
+	if _, ok := createVars["repositoryId"]; ok {
+		t.Errorf("unlinked board creation sent repositoryId: %+v", createVars)
+	}
+	if createVars["title"] != "acme Fabrik Pipeline" {
+		t.Errorf("title = %v, want %q", createVars["title"], "acme Fabrik Pipeline")
 	}
 }
 

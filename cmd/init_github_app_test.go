@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -768,5 +770,136 @@ func TestRunGitHubAppSetup_Discovery_NoInstallationFound_NeverOpensBrowser(t *te
 	}
 	if len(opened) != 0 {
 		t.Errorf("browser opener called with %v, want no calls — NoBrowser: true must suppress the guided-install open", opened)
+	}
+}
+
+func TestAppRepoAccessError(t *testing.T) {
+	covered := []string{"shadoworg/fantasy"}
+	if err := appRepoAccessError("shadoworg", "fantasy", covered, false, 165275277); err != nil {
+		t.Errorf("covered repo: %v", err)
+	}
+	if err := appRepoAccessError("ShadowOrg", "Fantasy", covered, false, 165275277); err != nil {
+		t.Errorf("case differs only: %v", err)
+	}
+	if err := appRepoAccessError("shadoworg", "dummy-repo", covered, true, 165275277); err != nil {
+		t.Errorf("truncated list cannot prove absence, want nil: %v", err)
+	}
+	err := appRepoAccessError("shadoworg", "dummy-repo", covered, false, 165275277)
+	if err == nil {
+		t.Fatal("repo outside the grant: want an error")
+	}
+	for _, want := range []string{"cannot access shadoworg/dummy-repo", "covers: shadoworg/fantasy",
+		"https://github.com/organizations/shadoworg/settings/installations/165275277", "omit --repo"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q missing %q", err.Error(), want)
+		}
+	}
+	if err := appRepoAccessError("shadoworg", "x", nil, false, 1); err == nil || !strings.Contains(err.Error(), "covers: no repositories") {
+		t.Errorf("empty grant: got %v", err)
+	}
+}
+
+// installationsAfterServer serves /app/installations empty for the first
+// hidden calls, then lists installs; calls counts every list request.
+func installationsAfterServer(t *testing.T, hidden int32, installs []gh.AppInstallation) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/app/installations" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		raw := []map[string]interface{}{}
+		if calls.Add(1) > hidden {
+			for _, inst := range installs {
+				raw = append(raw, map[string]interface{}{"id": inst.ID, "account": map[string]string{"login": inst.Account}})
+			}
+		}
+		json.NewEncoder(w).Encode(raw)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &calls
+}
+
+func TestWaitForOwnerInstallation(t *testing.T) {
+	keyPath := writeCmdTestAppKey(t, t.TempDir())
+	quiet := func(string, ...any) {}
+	opts := func(url string, wait time.Duration) githubAppSetupOptions {
+		return githubAppSetupOptions{Owner: "shadoworg", BaseURL: url, InstallWait: wait, InstallPollInterval: 5 * time.Millisecond}
+	}
+
+	t.Run("returns the installation once it appears", func(t *testing.T) {
+		srv, calls := installationsAfterServer(t, 3, []gh.AppInstallation{{ID: 11, Account: "someone-else"}, {ID: 42, Account: "ShadowOrg"}})
+		id, err := waitForOwnerInstallation(context.Background(), opts(srv.URL, 5*time.Second), 1, keyPath, "shadoworg-fabrik", quiet)
+		if err != nil || id != 42 {
+			t.Fatalf("got (%d, %v), want (42, nil)", id, err)
+		}
+		if calls.Load() < 4 {
+			t.Errorf("returned after %d polls, before the installation appeared", calls.Load())
+		}
+	})
+
+	t.Run("gives up at the deadline with no error", func(t *testing.T) {
+		srv, _ := installationsAfterServer(t, 1<<30, nil)
+		start := time.Now()
+		id, err := waitForOwnerInstallation(context.Background(), opts(srv.URL, 60*time.Millisecond), 1, keyPath, "s", quiet)
+		if err != nil || id != 0 {
+			t.Fatalf("got (%d, %v), want (0, nil)", id, err)
+		}
+		if time.Since(start) > 2*time.Second {
+			t.Errorf("wait overran its deadline: %s", time.Since(start))
+		}
+	})
+
+	t.Run("an installation on another account never counts", func(t *testing.T) {
+		srv, _ := installationsAfterServer(t, 0, []gh.AppInstallation{{ID: 11, Account: "verveguy"}})
+		id, err := waitForOwnerInstallation(context.Background(), opts(srv.URL, 40*time.Millisecond), 1, keyPath, "s", quiet)
+		if err != nil || id != 0 {
+			t.Fatalf("got (%d, %v), want (0, nil)", id, err)
+		}
+	})
+
+	t.Run("stops on cancellation", func(t *testing.T) {
+		srv, _ := installationsAfterServer(t, 1<<30, nil)
+		ctx, cancel := context.WithCancel(context.Background())
+		time.AfterFunc(30*time.Millisecond, cancel)
+		_, err := waitForOwnerInstallation(ctx, opts(srv.URL, 5*time.Second), 1, keyPath, "s", quiet)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v, want context.Canceled", err)
+		}
+	})
+}
+
+// TestRunGitHubAppSetup_WaitsForInstallBeforeFailing: with InstallWait set,
+// a run that finds no installation for --owner waits before giving up
+// (with the same install-then-re-run error) rather than failing at once.
+func TestRunGitHubAppSetup_WaitsForInstallBeforeFailing(t *testing.T) {
+	dir := t.TempDir()
+	chdirTest(t, dir)
+	keyPath := writeCmdTestAppKey(t, dir)
+	srv := newFakeGitHubAppSetupServer(t,
+		[]gh.AppInstallation{{ID: 111, Account: "someone-else", Permissions: fullPermissions()}},
+		map[string]string{"handarbeit": "organization"},
+	)
+	const wait = 300 * time.Millisecond
+	start := time.Now()
+	_, err := runGitHubAppSetup(context.Background(), githubAppSetupOptions{
+		Owner: "handarbeit", AppID: 42, PrivateKeyPath: keyPath, BaseURL: srv.URL, NoBrowser: true,
+		InstallWait: wait, InstallPollInterval: 20 * time.Millisecond,
+	})
+	if err == nil || !strings.Contains(err.Error(), "installations/new") {
+		t.Fatalf("err = %v, want the install-then-re-run error", err)
+	}
+	if elapsed := time.Since(start); elapsed < wait {
+		t.Errorf("failed after %s, before the %s install wait", elapsed, wait)
+	}
+}
+
+func TestInteractiveInstallWait(t *testing.T) {
+	if got := interactiveInstallWait(true); got != defaultInstallWait {
+		t.Errorf("interactive: %s, want %s", got, defaultInstallWait)
+	}
+	if got := interactiveInstallWait(false); got != 0 {
+		t.Errorf("non-interactive: %s, want 0 (fail fast)", got)
 	}
 }

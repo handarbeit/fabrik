@@ -171,6 +171,41 @@ func TestCreateProjectV2_Success(t *testing.T) {
 	}
 }
 
+// TestCreateProjectV2_Unlinked: with no repository, the board is created
+// with a mutation that has no repositoryId at all — sending "" would be a
+// GraphQL error, and a linked mutation would need a real repository.
+func TestCreateProjectV2_Unlinked(t *testing.T) {
+	var gotQuery string
+	var gotVars map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Query     string                 `json:"query"`
+			Variables map[string]interface{} `json:"variables"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		gotQuery, gotVars = body.Query, body.Variables
+		json.NewEncoder(w).Encode(map[string]interface{}{"data": map[string]interface{}{
+			"createProjectV2": map[string]interface{}{"projectV2": map[string]interface{}{"id": "PVT_NEW2", "number": 8}},
+		}})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	projectID, number, err := c.CreateProjectV2("O_ORG1", "acme Fabrik Pipeline", "")
+	if err != nil {
+		t.Fatalf("CreateProjectV2: %v", err)
+	}
+	if projectID != "PVT_NEW2" || number != 8 {
+		t.Errorf("got (%q, %d), want (PVT_NEW2, 8)", projectID, number)
+	}
+	if strings.Contains(gotQuery, "repositoryId") {
+		t.Errorf("unlinked create sent a repositoryId in its query:\n%s", gotQuery)
+	}
+	if _, ok := gotVars["repositoryId"]; ok {
+		t.Errorf("unlinked create sent a repositoryId variable: %+v", gotVars)
+	}
+}
+
 func TestCreateProjectV2_NoProjectReturned(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := map[string]interface{}{

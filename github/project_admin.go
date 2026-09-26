@@ -90,13 +90,26 @@ func (c *Client) FetchRepositoryID(owner, name string) (string, error) {
 	return result.Data.Repository.ID, nil
 }
 
-// createProjectV2Mutation is the GraphQL mutation used by CreateProjectV2.
-// repositoryId is supplied inline (rather than via a separate
-// linkProjectV2ToRepository call) so the project is never created unlinked,
-// even transiently.
+// createProjectV2Mutation is the GraphQL mutation used by CreateProjectV2
+// when a repository is given. repositoryId is supplied inline (rather than
+// via a separate linkProjectV2ToRepository call) so a board meant to be
+// linked is never created unlinked, even transiently.
 const createProjectV2Mutation = `
 mutation($ownerId: ID!, $title: String!, $repositoryId: ID!) {
   createProjectV2(input: {ownerId: $ownerId, title: $title, repositoryId: $repositoryId}) {
+    projectV2 {
+      id
+      number
+    }
+  }
+}`
+
+// createProjectV2UnlinkedMutation creates an org board linked to no
+// repository. The engine discovers repos from the board's items, so a link
+// is only a convenience (the board shows on that repo's Projects tab).
+const createProjectV2UnlinkedMutation = `
+mutation($ownerId: ID!, $title: String!) {
+  createProjectV2(input: {ownerId: $ownerId, title: $title}) {
     projectV2 {
       id
       number
@@ -109,10 +122,15 @@ mutation($ownerId: ID!, $title: String!, $repositoryId: ID!) {
 // to repositoryID (from FetchRepositoryID) at creation time. Returns the new
 // project's node ID and its number (as shown in its URL).
 func (c *Client) CreateProjectV2(ownerID, title, repositoryID string) (projectID string, number int, err error) {
+	mutation := createProjectV2Mutation
 	vars := map[string]interface{}{
 		"ownerId":      ownerID,
 		"title":        title,
 		"repositoryId": repositoryID,
+	}
+	if repositoryID == "" {
+		mutation = createProjectV2UnlinkedMutation
+		delete(vars, "repositoryId")
 	}
 
 	var result struct {
@@ -126,7 +144,7 @@ func (c *Client) CreateProjectV2(ownerID, title, repositoryID string) (projectID
 		} `json:"data"`
 	}
 
-	if err := c.graphqlRequest(createProjectV2Mutation, vars, &result); err != nil {
+	if err := c.graphqlRequest(mutation, vars, &result); err != nil {
 		return "", 0, fmt.Errorf("creating project %q for owner %s: %w", title, ownerID, err)
 	}
 	if result.Data.CreateProjectV2.ProjectV2 == nil {
