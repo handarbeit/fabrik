@@ -813,7 +813,11 @@ func (e *Engine) prepareTrainWorker(ctx context.Context, state *mergeTrainWorker
 	// #1871: the batch is a board snapshot that may predate a landing that already
 	// completed; drop live-moved and live-unreadable members before they are
 	// admitted, assembled into a trial and re-landed.
+	beforeLive := len(current)
 	current = e.dropLiveLandedMembers(state, p, current)
+	if dropped := beforeLive - len(current); dropped > 0 {
+		e.logfRepo(repoKey, "merge-train", "live-status guard excluded %d of %d fetched member(s) for %s from this batch (already landed, or live status read failed — see per-member lines above)\n", dropped, beforeLive, repoKey)
+	}
 	// #1821: admission gate — keep members whose own PR CI is confirmed red out of the
 	// batch (fail-open on every other outcome). Fresh formation only: both restart
 	// routes returned from reconstructTrainState above.
