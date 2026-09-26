@@ -80,10 +80,16 @@ func TestAppSelfRecognitionBotCommentNeverResumes(t *testing.T) {
 	logCommentAuthorShapes(t, env, repo, num, bot.ID)
 
 	// Positive first: the engine must have evaluated the comment and kept the pause.
-	skipLine := waitForLogLineWhere(t, env, fmt.Sprintf("[#%d skip]", num),
-		func(l string) bool { return noHumanSkipLine(l, num) }, off, 15*time.Minute,
+	// A resume line is watched in the same loop: if the bot comment is read as
+	// human the engine unpauses and never logs the skip line, and waiting only
+	// for the skip line would sit out the whole budget hiding that regression.
+	evalLine := waitForLogLineWhere(t, env, fmt.Sprintf("[#%d ", num),
+		func(l string) bool { return noHumanSkipLine(l, num) || resumeLine(l, num) }, off, 15*time.Minute,
 		fmt.Sprintf("the engine to evaluate the bot comment on #%d and report it non-human", num))
-	t.Logf("engine evaluated the bot comment and kept the pause: %s", skipLine)
+	if resumeLine(evalLine, num) {
+		t.Fatalf("engine resumed #%d on a bot-authored comment: %s — the bot comment was treated as human input; see the logged author shapes", num, evalLine)
+	}
+	t.Logf("engine evaluated the bot comment and kept the pause: %s", evalLine)
 
 	// Then hold: at least three poll intervals in which nothing may change.
 	hold := 3*bedPollInterval() + 30*time.Second

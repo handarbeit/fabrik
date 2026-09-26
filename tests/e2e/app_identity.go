@@ -3,7 +3,6 @@
 package e2e
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -223,7 +222,7 @@ func postCommentAs(token, repo string, number int, body string) (postedComment, 
 			Type  string `json:"type"`
 		} `json:"user"`
 	}
-	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &resp); err != nil {
+	if err := decodeJSONObject(out, &resp); err != nil {
 		return postedComment{}, fmt.Errorf("parsing created-comment response for %s#%d: %v", repo, number, err)
 	}
 	if resp.ID == 0 {
