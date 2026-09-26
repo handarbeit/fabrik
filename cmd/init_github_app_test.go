@@ -881,17 +881,20 @@ func TestRunGitHubAppSetup_WaitsForInstallBeforeFailing(t *testing.T) {
 		[]gh.AppInstallation{{ID: 111, Account: "someone-else", Permissions: fullPermissions()}},
 		map[string]string{"handarbeit": "organization"},
 	)
-	const wait = 300 * time.Millisecond
+	const wait, interval = 300 * time.Millisecond, 20 * time.Millisecond
 	start := time.Now()
 	_, err := runGitHubAppSetup(context.Background(), githubAppSetupOptions{
 		Owner: "handarbeit", AppID: 42, PrivateKeyPath: keyPath, BaseURL: srv.URL, NoBrowser: true,
-		InstallWait: wait, InstallPollInterval: 20 * time.Millisecond,
+		InstallWait: wait, InstallPollInterval: interval,
 	})
 	if err == nil || !strings.Contains(err.Error(), "installations/new") {
 		t.Fatalf("err = %v, want the install-then-re-run error", err)
 	}
-	if elapsed := time.Since(start); elapsed < wait {
-		t.Errorf("failed after %s, before the %s install wait", elapsed, wait)
+	// The loop stops polling once the next poll would land past the
+	// deadline, so it may return up to one interval early. Without the
+	// wait wired in, it returns in well under a millisecond.
+	if elapsed := time.Since(start); elapsed < wait-interval {
+		t.Errorf("failed after %s, before the %s install wait (less one %s poll interval)", elapsed, wait, interval)
 	}
 }
 

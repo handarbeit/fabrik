@@ -658,10 +658,10 @@ func runInit(args []string) error {
 			// more, before anything is created.
 			if *repoFlag != "" {
 				repos, truncated, accErr := appSetup.Reconciler.AccessibleRepos()
-				if accErr == nil {
-					if err := appRepoAccessError(*ownerFlag, *repoFlag, repos, truncated, appSetup.InstallationID); err != nil {
-						return fmt.Errorf("--create-board: %w", err)
-					}
+				if accErr != nil {
+					fmt.Fprintf(os.Stderr, "  warning: could not list the App installation's repositories (%v) — skipping the --repo access check\n", accErr)
+				} else if err := appRepoAccessError(*ownerFlag, *repoFlag, repos, truncated, appSetup.InstallationID); err != nil {
+					return fmt.Errorf("--create-board: %w", err)
 				}
 			}
 			number, resolvedOwnerType, err = createBoardCore(appSetup.Client, *ownerFlag, *repoFlag, *titleFlag, stagesDir)
