@@ -38,8 +38,9 @@ sim, fixed there as well as in the engine.
 
 CI's layer-1 `go test` step runs the **whole module on every PR** — no `paths:` filter
 and no dependency-graph test selection, by decision (`adrs/1857-no-per-pr-test-selection.md`,
-which also records why `tests/sim/simgh` is not sharded). The release gate is always the
-full suite.
+which also records why `tests/sim/simgh` is not sharded). The release gate runs the full
+suite by default; `scripts/cut-release.sh`'s `--skip-tests` is a last-resort escape hatch
+that skips the `go test -race ./...` step (with a warning), never a narrowed run.
 
 ## Documentation bundle (docs/llms-full.txt)
 
