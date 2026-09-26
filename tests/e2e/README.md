@@ -526,7 +526,8 @@ or as a follow-up comment on handarbeit/fabrik#1355 once run.
 
 `TestMergeTrainHappyPathLanding`, `TestMergeTrainBisectionEjectsPoisoner`,
 `TestMergeTrainRestartSafety`, `TestMergeTrainRunawayGuardPausesBatch`,
-`TestMergeTrainRedSingletonReroutesOffQueued`, and
+`TestMergeTrainRedSingletonReroutesOffQueued`,
+`TestMergeTrainSingletonFastPathLandsExactlyOnce`, and
 `TestMergeTrainConflictBisectPrefixRerere` need one-time bed setup. They
 **skip cleanly** (`requireTrainBed`) if the `Queued` column is absent, so they
 are safe to merge before the bed is set up. They
@@ -717,6 +718,21 @@ timeout instead of skipping. Only run in the `on` leg of the two-mode gate.
       ~45–80 min, inside the default `E2E_TIMEOUT=4h`. The batch adds 3 non-green
       trials (initial, `[C,P]`, `[P]`) to the runaway guard's counter, well under
       the default cap of 20.
+22a. **`TestMergeTrainSingletonFastPathLandsExactlyOnce`** (#1874, ADR-1871) — the
+    only scenario that lands one member alone through the **singleton fast path**
+    (#1644) deterministically, and the fast-path half of the exactly-once landing
+    check (see "Exactly-once landing assertion" below). It needs no bed setup beyond
+    #15–#18 (Queued column, `queued.yaml`, train-capable binary, `train-poison-guard`
+    required on Alpha, which supplies the member's own check run — the scenario skips
+    cleanly where it is not enrolled).
+    - **Non-parallel** (no `t.Parallel()`): `main` must not move (the fast path needs
+      the pinned base to be an ancestor of the member head) and no sibling may join the
+      batch. It runs to completion before any parallel Alpha train scenario resumes.
+    - The member is *prepared*, not queued, until its own CI is complete and green and
+      its `mergeable_state` is `clean`/`unstable`; it then fails loudly (never skips)
+      if the log shows `singleton fast path not taken for #N`, so a bed that cannot
+      support the fast path (e.g. branch protection needing an approval) is a visible
+      bed problem, not silently dropped coverage.
 
 
 ### Additional prerequisites for `TestReviewAuthority*` scenarios
@@ -1178,7 +1194,7 @@ records which scenarios assert a mode-specific contract.
 
 #### Parallelism cap — the shared bed oversubscribes easily
 
-16 of the 17 scenarios are `t.Parallel()`, but they **all drive one shared
+16 of the 18 scenarios are `t.Parallel()`, but they **all drive one shared
 Fabrik bed** (5 workers by default) against **one shared board and one shared
 GitHub API budget**. Go's default `-parallel` is `GOMAXPROCS` (~8–12 cores), so
 an unbounded full run fires ~16 scenarios at once, floods the 5-worker bed, and
@@ -1477,12 +1493,42 @@ the `Queued` column is absent, so it only runs in the gate's `on` leg.
 | `TestExpectedReviewersFastAdvanceComposesWithAuthoritative` | ADR-1283 composition guard (via `expected-reviewers:none` + `review-authority:authoritative` labels, requires follow-up engine issue + #1261): fast-advance still fires ahead of the authority-verdict branch, since it only activates once hasReviews is true | Both | 2–5 min | ~$0.02 (no Claude) |
 | `TestReviewAuthorityDeclaredBotDoesNotDeferHumanEscalation` | ADR-1375 Finding 2/AC2 (via `expected-reviewers:declared` + `review-authority:authoritative` labels, human requested via `RequestPRReviewer`): a declared bot's re-prompt ladder must never defer an outstanding human's authoritative CHANGES_REQUESTED escalation — the reinvoke fires and `fabrik:bot-reprompted` never applies | Both | ~`FABRIK_REVIEW_WAIT_TIMEOUT` + ~15 min | $0.10–0.50 (one Claude invocation) |
 | `TestLateCheckRunSuiteGate` | ADR-1822/#1829 suite-aware CI gate (yolo item taken to Validate, `wait_for_ci`): the gate must not clear while a `needs:`-gated late check run is outstanding. Asserts on GitHub timestamps — late run starts after the fast run completes (A1), `stage:Validate:complete` is applied only after the late run completes (A2), and the fast run finished after `fabrik:awaiting-ci` (A3, vacuity guard). Needs `late-check-suite-gate.yml` installed on Alpha (not required); skips if absent. Mode-invariant | Both | 20–35 min (incl. ~4 min sleep) | ~$0.10–0.50 (one Validate Claude invocation) + one CI cycle |
-| `TestMergeTrainHappyPathLanding` | ADR-059 internal train: 3 clean Queued members → one integration PR → all advance Queued→Done, PRs closed, no O(N²) per-member retests | Train-only (on) | 10–25 min | low (no Claude) |
+| `TestMergeTrainHappyPathLanding` | ADR-059 internal train: 3 clean Queued members → one integration PR → all advance Queued→Done, PRs closed, no O(N²) per-member retests | Train-only (on) | 13–28 min (incl. exactly-once settle wait, #1874) | low (no Claude) |
+| `TestMergeTrainSingletonFastPathLandsExactlyOnce` | #1874 / ADR-1871: one clean member with green own CI, queued alone → landed by the **singleton fast path** (log `singleton fast path taken`, comment `Landed via singleton fast path PR #N.` citing its own PR) → exactly one landing comment and one issue close after a 3-poll settle wait. **Not parallel** (prerequisite #22a). Needs the `train-poison-guard` required check | Train-only (on) | 10–15 min (est.) | low (no Claude) |
 | `TestMergeTrainBisectionEjectsPoisoner` | ADR-059 D4: red combined batch → halving bisection isolates the poison member → ejected → survivors land. Needs the `train-poison-guard` required check | Train-only (on) | 20–40 min | low–moderate |
 | `TestMergeTrainConflictBisectPrefixRerere` | #1848: 4-member batch (A/B same-path conflict, clean C, poison P) → **real Claude** resolves B onto A (small turn count) → red trial → bisect ejects P → first half reuses the recorded prefix with no Claude → A, B, C land, P off Queued; rerere replay asserted only if main moves. Needs the `train-poison-guard` required check. **Not parallel** — the train batches every Queued item (prerequisite #22) | Train-only (on) | 45–80 min (est.) | 1 Claude invocation (~$0.05–0.30) + ~11 CI cycles |
-| `TestMergeTrainRestartSafety` | ADR-059 D5 / #960: after a landing, a restart with the historical merged integration PR present does NOT stall the next batch (reconstruct proceeds fresh). **Not parallel** — restarts the bed | Train-only (on) | 25–50 min | low |
+| `TestMergeTrainRestartSafety` | ADR-059 D5 / #960: after a landing, a restart with the historical merged integration PR present does NOT stall the next batch (reconstruct proceeds fresh). **Not parallel** — restarts the bed | Train-only (on) | 28–53 min (incl. exactly-once settle wait, #1874) | low |
 | `TestMergeTrainRunawayGuardPausesBatch` | ADR-059 D8 (#964/#965): persistently-red 4-member batch trips the runaway guard at cap=6, pauses all Queued members, no member reaches Done. Runs on RepoBeta for counter isolation. **Not parallel** — induces a repo-wide fault on RepoBeta that would collide with `TestCrossRepoSpawn`'s use of the same repo (#1395) | Train-only (on) | 10–20 min | low (no Claude) |
-| `TestMergeTrainQueuedDeeperThanBatchCap` | ADR-1833 / #1850: 7 clean members Queued against `max_batch_size` 5 → first trial holds exactly the first five, membership stays stable (one snapshot line, no unmerged-closed trial PR), all seven land as 5 then 2. Members are queued paused then released together. **Not parallel** — shares the (RepoAlpha, main) partition | Train-only (on) | 30–60 min | low (no Claude) |
+| `TestMergeTrainQueuedDeeperThanBatchCap` | ADR-1833 / #1850: 7 clean members Queued against `max_batch_size` 5 → first trial holds exactly the first five, membership stays stable (one snapshot line, no unmerged-closed trial PR), all seven land as 5 then 2. Members are queued paused then released together. **Not parallel** — shares the (RepoAlpha, main) partition | Train-only (on) | 33–63 min (incl. exactly-once settle wait, #1874) | low (no Claude) |
+
+**Exactly-once landing assertion (#1874, regression coverage for #1871 / ADR-1871).**
+`AssertMembersLandedExactlyOnce` (`landed_once.go`) asserts each member the scenario
+landed has **exactly one** landing comment on its own PR (all three engine forms are
+counted: `Landed via batch PR #N.`, `Landed via singleton fast path PR #N.` and
+`Landed one-at-a-time via singleton PR #N.`) and **exactly one `closed` and no
+`reopened`** timeline event on its issue. It is called from
+`TestMergeTrainHappyPathLanding`, `TestMergeTrainQueuedDeeperThanBatchCap`,
+`TestMergeTrainRestartSafety`, the `train-mode=on` subtest of `TestYoloAutoMergeLabel`
+and `TestMergeTrainSingletonFastPathLandsExactlyOnce`; later train scenarios can reuse
+it. The comment count is the load-bearing check (closing an already-closed issue creates
+no timeline event, so the close count mainly catches a reopen-and-re-close).
+- **Settle wait:** it sleeps **3 × the bed poll interval** once per scenario before
+  counting (180 s at the default `bedPollSeconds()` of 60; follows
+  `E2E_BED_POLL_SECONDS`). The defect re-lands a member in the poll *after* the landing,
+  so counting at landing time would pass vacuously; two polls is the minimum and the third
+  absorbs jitter/backoff (the bed log has no per-poll line to count instead). That is
+  **~3 min added to each wired scenario**, reflected in the wall-clock column above.
+- **Retry duplicates:** `addLandedCommentWithRetry` can legitimately post an identical
+  comment within ~1 s when a post succeeded but its response failed; matching comments
+  within 10 s of each other count as one landing (logged, not failed).
+- **Zero comments fails** too (the engine's landed comment is best-effort, #1275); the
+  message points at the bed log's `could not post landed comment` warning when present.
+- Counting is scoped to each scenario's own member PR/issue numbers (safe under
+  `t.Parallel()`), by body never by author, and posts no comments — so it holds
+  identically under PAT and GitHub App auth. Under `merge_train: off` the ordinary
+  auto-merge path posts no landing comment, so there is no off-mode counterpart.
+- The pure parsing/verdict half has bed-free unit tests:
+  `go test -tags e2e -run 'LandedExactlyOnce|LandingComment|ParseIssueComments|CountLifecycle|CollapseRetry|LandingSettle' ./tests/e2e/`.
 
 Approximate single-mode suite total: ~685 min wall-clock, $10.30–30 in Claude
 tokens. A full two-mode gate run is roughly double this, minus the
@@ -1524,6 +1570,7 @@ shape, not just the single-mode total.
 | `TestMergeTrainConflictBisectPrefixRerere` | #1841 (conflict prompt without build/test commands; turn-limited-but-resolved exit kept), #1835 (trial-prefix reuse), #1834 (rerere replay, `forgetPoisonerResolutions`), #1833 (deterministic Queued order), #1848 (this scenario) |
 | `TestMergeTrainRestartSafety` | ADR-059 D5 (#950) + PR #960 (reconstruct must not stall on a historical merged PR) |
 | `TestMergeTrainRunawayGuardPausesBatch` | ADR-059 D8 (#964) — runaway guard trial cap, per-repo counter isolation |
+| `TestMergeTrainSingletonFastPathLandsExactlyOnce` | ADR-1871 / #1871 (a stale Queued snapshot re-landing a just-landed member: second `Landed via singleton fast path` comment), ADR-1644 (singleton fast path), #1874 (this scenario). The exactly-once assertion also runs in the happy-path, batch-cap, restart-safety and yolo (train-on) scenarios for the integration-PR path |
 | `TestMergeTrainQueuedDeeperThanBatchCap` | ADR-1833 / #1833 (deterministic Queued ordering — pre-fix the capped batch was an arbitrary map-order subset that churned poll to poll), #1850 (this scenario); the sim bed cannot cover it (ADR-1833 non-vacuity proof) |
 
 Every escape-from-release regression earns a new scenario in this table.
