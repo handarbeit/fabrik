@@ -250,12 +250,28 @@ func StartFabrikTestBed(t *testing.T, env *Env) {
 	// Strip GITHUB_TOKEN so Fabrik uses FABRIK_TOKEN (@arbeithand) from the bed's
 	// .env — an ambient token must not hijack the bed's identity.
 	cmd.Env = stripEnv(os.Environ(), "GITHUB_TOKEN")
+	// Auth mode comes from the bed's own .env only (#1861, applied by
+	// TestSwitchTrainMode) — an ambient FABRIK_GITHUB_APP_* would win over
+	// it, since .env loading never overrides an already-set variable.
+	for _, k := range bedAppAuthEnvKeys {
+		cmd.Env = stripEnv(cmd.Env, k)
+	}
 	cmd.Env = append(cmd.Env, bedGitConfigIsolationEnv(t, env)...)
 	// Detach: new process group + /dev/null stdio so the child outlives the test.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if devnull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0); err == nil {
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = devnull, devnull, devnull
 		defer devnull.Close()
+	}
+	// Stdout/stderr go to bed-run.log, like run.sh's own launch
+	// (preflight_bed_start), so the startup banner — including the identity
+	// line verifyBedAuthIdentity checks (#1861) — is readable after a
+	// harness restart too. Falls back to /dev/null if the file can't open.
+	if out, err := os.OpenFile(bedRunLogPath(env), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644); err == nil {
+		cmd.Stdout, cmd.Stderr = out, out
+		defer out.Close()
+	} else {
+		t.Logf("StartFabrikTestBed: cannot open %s (%v) — bed stdout discarded", bedRunLogPath(env), err)
 	}
 	// Setting stdio to /dev/null covers fds 0-2 only. Every OTHER descriptor
 	// this test process inherited is still passed to the child: os/exec sets
