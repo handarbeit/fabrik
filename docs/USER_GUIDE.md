@@ -1522,6 +1522,8 @@ issue to Queued) until that comment has been processed. Fabrik processes the com
 any change it makes is re-verified by CI before the PR lands. Comments from Fabrik itself and
 known bot service notices never hold a merge.
 
+A comment you post on an issue that is already sitting in `Queued` waiting for a merge-train batch is not ignored either: Fabrik moves the issue back to the stage before `Queued` (normally Validate), processes the comment, and the issue re-queues once Validate completes again. This is not a train failure — the issue is not paused and the move does not count toward the merge train's three-strikes ejection limit. Only human comments do this; bot and Fabrik comments never take an issue out of `Queued`.
+
 **Comments after the work has merged.** Fabrik never pushes to a branch whose PR has already
 merged. If a comment reaches an issue whose work already landed, Fabrik does not run a worker:
 it replies on the issue and the PR that the change was **not** applied and that you should open

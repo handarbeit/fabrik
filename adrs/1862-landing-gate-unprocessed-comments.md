@@ -154,7 +154,7 @@ a transient wait or the existing pause — never a silent, indefinite block.
   `attemptMergeOnValidate` returns at that label and Phase 2 returns before the
   guard. Only the post-merge guard protects that convergence window (ADR-1216's
   guard 2 is the precedent if it needs closing).
-- Comments on a member already in `Queued` are out of scope (separate issue).
+- Comments on a member already in `Queued` are out of scope here; they are handled by the Queued settle scan's comment cause (ADR-1863).
 
 ## Consequences
 
