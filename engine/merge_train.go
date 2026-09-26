@@ -2260,7 +2260,7 @@ func (e *Engine) liveLandingState(state *mergeTrainWorkerState, p trialParams, i
 	case err != nil:
 		e.logf(item.Number, "merge-train", "deferring resume of #%d: live status read failed: %v — will retry next poll\n", item.Number, err)
 		return liveReadFailed
-	case status == "":
+	case status == "" || p.holdingStg == nil:
 		e.logf(item.Number, "merge-train", "live status of #%d is empty — cannot confirm the landing completed, resuming\n", item.Number)
 		return liveUnknown
 	case status != p.holdingStg.Name:
