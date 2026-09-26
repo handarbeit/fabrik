@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"testing"
 	"time"
 )
 
@@ -195,4 +196,156 @@ func humanCommentBodyOK(body string) error {
 		return fmt.Errorf("comment body lacks %q — the comment worker might push and re-run Validate", noCodeChangePhrase)
 	}
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Harness-touching helpers (GitHub REST via gh; no engine knowledge).
+// ---------------------------------------------------------------------------
+
+// postHumanIssueComment posts body on the issue (or PR) thread as FABRIK_TOKEN's
+// account and returns the new comment's database ID, which CommentOnIssue does
+// not surface. arbeithand classifies as human to Fabrik in BOTH auth legs:
+// IsBotLogin("arbeithand") is false, and findNewComments excludes only
+// "🏭 **Fabrik"-prefixed bodies — which humanCommentBodyOK refuses to post.
+// (PAT leg: Fabrik posts as the same account, so that prefix is the only thing
+// distinguishing its comments. App leg: Fabrik posts as <slug>[bot].)
+func postHumanIssueComment(t *testing.T, env *Env, repo string, number int, body string) int64 {
+	t.Helper()
+	if err := humanCommentBodyOK(body); err != nil {
+		t.Fatalf("refusing to post harness comment on %s#%d: %v", repo, number, err)
+	}
+	owner, name, ok := splitRepo(repo)
+	if !ok {
+		t.Fatalf("bad repo: %q", repo)
+	}
+	out, err := ghOutput(env, "api", "--method", "POST",
+		fmt.Sprintf("repos/%s/%s/issues/%d/comments", owner, name, number),
+		"-f", "body="+body, "--jq", ".id")
+	if err != nil {
+		t.Fatalf("post comment on %s#%d: %v\n%s", repo, number, err, out)
+	}
+	id, perr := strconv.ParseInt(lastNonEmpty(out), 10, 64)
+	if perr != nil || id == 0 {
+		t.Fatalf("could not parse comment id from %q: %v", out, perr)
+	}
+	return id
+}
+
+// commentExistsViaREST reports whether the comment is readable through the REST
+// API. Verifying this before the item is exposed to the engine closes the
+// read-after-write gap: the engine's first evaluation must see the comment.
+func commentExistsViaREST(env *Env, repo string, commentID int64) bool {
+	owner, name, ok := splitRepo(repo)
+	if !ok {
+		return false
+	}
+	out, err := ghOutput(env, "api",
+		fmt.Sprintf("repos/%s/%s/issues/comments/%d", owner, name, commentID), "--jq", ".id")
+	return err == nil && strings.TrimSpace(out) == strconv.FormatInt(commentID, 10)
+}
+
+// commentReactionTimes returns the earliest 👀 and 🚀 created_at on the comment
+// (zero time when absent). Existence and timestamps only: the reacting login
+// differs by auth leg (arbeithand under PAT, <slug>[bot] under App), so no
+// assertion may key on it.
+func commentReactionTimes(env *Env, repo string, commentID int64) (eyes, rocket time.Time, err error) {
+	owner, name, ok := splitRepo(repo)
+	if !ok {
+		return eyes, rocket, fmt.Errorf("bad repo: %q", repo)
+	}
+	out, err := ghOutput(env, "api", "--paginate",
+		fmt.Sprintf("repos/%s/%s/issues/comments/%d/reactions", owner, name, commentID),
+		"--jq", `.[] | "\(.content) \(.created_at)"`)
+	if err != nil {
+		return eyes, rocket, fmt.Errorf("read reactions: %w\n%s", err, out)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		f := strings.Fields(line)
+		if len(f) != 2 {
+			continue
+		}
+		ts, perr := time.Parse(time.RFC3339, f[1])
+		if perr != nil {
+			return eyes, rocket, fmt.Errorf("parse reaction time %q: %w", f[1], perr)
+		}
+		switch f[0] {
+		case "eyes":
+			if eyes.IsZero() || ts.Before(eyes) {
+				eyes = ts
+			}
+		case "rocket":
+			if rocket.IsZero() || ts.Before(rocket) {
+				rocket = ts
+			}
+		}
+	}
+	return eyes, rocket, nil
+}
+
+// restTime reads a jq-selected RFC3339 field from a REST path; zero when null/empty.
+func restTime(env *Env, path, jq string) (time.Time, error) {
+	out, err := ghOutput(env, "api", path, "--jq", jq)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("%s: %w\n%s", path, err, out)
+	}
+	s := strings.TrimSpace(out)
+	if s == "" || s == "null" {
+		return time.Time{}, nil
+	}
+	return time.Parse(time.RFC3339, s)
+}
+
+// issueClosedAt returns the issue's closed_at (zero while open).
+func issueClosedAt(env *Env, repo string, number int) (time.Time, error) {
+	return restTime(env, fmt.Sprintf("repos/%s/issues/%d", repo, number), ".closed_at")
+}
+
+// prMergedAt returns the PR's merged_at (zero while unmerged).
+func prMergedAt(env *Env, repo string, prNumber int) (time.Time, error) {
+	return restTime(env, fmt.Sprintf("repos/%s/pulls/%d", repo, prNumber), ".merged_at")
+}
+
+// seedLandingCandidate files an issue carrying extraLabels, adds it to the
+// project WITHOUT a Status, opens a non-draft member PR on fabrik/issue-<N>,
+// confirms the engine can resolve it, and applies stage:Validate:complete. The
+// caller decides when to expose the item to the engine (SetIssueStatus): with no
+// Status the engine cannot act on it, so a comment posted first is deterministically
+// present at the engine's first landing evaluation — no timing luck.
+func seedLandingCandidate(t *testing.T, env *Env, repo, baseBranch, marker, path string, extraLabels ...string) (issueNum, prNum int, itemID string) {
+	t.Helper()
+	stamp := time.Now().UTC().Format("150405.000")
+	title := fmt.Sprintf("e2e comment-landing %s (%s)", marker, stamp)
+	issueNum = FileIssue(t, env, repo, title,
+		fmt.Sprintf("e2e unprocessed-comment landing scenario. marker=%s", marker), extraLabels...)
+	itemID = AddIssueToProject(t, env, repo, issueNum)
+	branch := fmt.Sprintf("fabrik/issue-%d", issueNum)
+	uPath := uniqueMemberPath(path, issueNum)
+	prNum = CreateMemberPR(t, env, repo, baseBranch, branch, uPath,
+		fmt.Sprintf("# e2e comment-landing marker\n\nmarker=%s\n", marker), title, issueNum)
+	LinkedPRNumber(t, env, repo, issueNum)
+	AddLabel(t, env, repo, issueNum, "stage:Validate:complete")
+	t.Logf("seeded landing candidate %s: issue #%d, PR #%d, path %s, stage:Validate:complete, no Status yet", marker, issueNum, prNum, uPath)
+	return issueNum, prNum, itemID
+}
+
+// waitForCommentRocket polls until the comment carries a 🚀, returning both
+// reaction times. held is called once per poll while the rocket is still absent
+// (its argument is the eyes time, zero if none yet) so a scenario can assert the
+// item is still held the whole time the comment is unprocessed.
+func waitForCommentRocket(t *testing.T, env *Env, repo string, commentID int64, timeout time.Duration, held func()) (eyes, rocket time.Time) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		e, r, err := commentReactionTimes(env, repo, commentID)
+		if err != nil {
+			t.Logf("waitForCommentRocket: transient error (will retry): %v", err)
+		} else if !r.IsZero() {
+			return e, r
+		} else if held != nil {
+			held()
+		}
+		time.Sleep(20 * time.Second)
+	}
+	t.Fatalf("timed out after %s waiting for a 🚀 on comment %d (%s)", timeout, commentID, repo)
+	return
 }
