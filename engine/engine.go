@@ -691,6 +691,18 @@ func (e *Engine) SetTrainCIPollIntervalForTest(d time.Duration) {
 	e.trainCIPollInterval = d
 }
 
+// SimulateCacheStatusWriteThroughForTest applies the store mutation production's
+// boardcache.CacheImpl.UpdateItemStatus performs after an engine-initiated board
+// status move (rerouteQueuedMemberOffHolding, advanceToQueued, ...): a
+// LocalStatusUpdated, whose StatusChanged flag admits the item to the next poll's
+// cycleSet. tests/sim deliberately never wires CacheImpl in (see NewWithDeps), so a
+// scenario that depends on the moved item being picked up by the very next poll —
+// #1863's comment eject — calls this right after the ejecting poll. Test seam only;
+// production never calls this.
+func (e *Engine) SimulateCacheStatusWriteThroughForTest(repo string, number int, status string) {
+	e.store.Apply(itemstate.LocalStatusUpdated{Repo: repo, Number: number, NewStatus: status})
+}
+
 // SetMergeTrainQueueSortDisabledForTest disables groupQueuedByRepoAndBase's
 // deterministic Queued-ordering sort (#1833) — see the
 // mergeTrainQueueSortDisabledForTest field's doc comment. Test seam only

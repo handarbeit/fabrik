@@ -1059,7 +1059,7 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 			// `current` empty, so `continue` re-enters the loop and the
 			// top-of-loop zero-survivors check returns.
 			if remaining, ejectedCount := e.applyPendingReviewEjects(state.projectID, repoKey, current); ejectedCount > 0 {
-				e.logfRepo(repoKey, "merge-train", "%d member(s) ejected for unresolved review findings before the singleton fast path — re-forming for %s\n", ejectedCount, trainKey)
+				e.logfRepo(repoKey, "merge-train", "%d member(s) ejected for unresolved review findings or unprocessed comments before the singleton fast path — re-forming for %s\n", ejectedCount, trainKey)
 				current = remaining
 				continue
 			}
@@ -1106,7 +1106,7 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 		// `remaining` falls through to continue and is caught by the top-of-loop
 		// zero-survivors return, so no special-casing is needed here.
 		if remaining, ejectedCount := e.applyPendingReviewEjects(state.projectID, repoKey, survivors); ejectedCount > 0 {
-			e.logfRepo(repoKey, "merge-train", "%d member(s) ejected for unresolved review findings mid-trial — discarding trial and re-forming for %s\n", ejectedCount, trainKey)
+			e.logfRepo(repoKey, "merge-train", "%d member(s) ejected for unresolved review findings or unprocessed comments mid-trial — discarding trial and re-forming for %s\n", ejectedCount, trainKey)
 			e.cleanupTrialArtifacts(p.repoKey(), p.wm, trialName)
 			current = remaining
 			continue
@@ -4588,7 +4588,7 @@ func (e *Engine) landGreenBatch(ctx context.Context, state *mergeTrainWorkerStat
 		// have, rather than threading a resume-with-reduced-membership path back
 		// into this loop.
 		if _, ejectedCount := e.applyPendingReviewEjects(state.projectID, p.owner+"/"+p.repo, newSurvivors); ejectedCount > 0 {
-			e.logfRepo(p.repoKey(), "merge-train", "%d member(s) ejected for unresolved review findings during main-moved rebase for %s/%s — discarding trial; remaining survivors will re-form on a future poll\n", ejectedCount, p.owner, p.repo)
+			e.logfRepo(p.repoKey(), "merge-train", "%d member(s) ejected for unresolved review findings or unprocessed comments during main-moved rebase for %s/%s — discarding trial; remaining survivors will re-form on a future poll\n", ejectedCount, p.owner, p.repo)
 			e.cleanupTrialArtifacts(p.repoKey(), p.wm, newTrialName)
 			return
 		}
