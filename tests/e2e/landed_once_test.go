@@ -18,11 +18,11 @@ import (
 // drifts these fixtures must be re-copied — that is the point: the counting
 // pattern is pinned to real engine text, not to a paraphrase.
 const (
-	landedBatchBody     = "🏭 **Fabrik merge-train** — Landed via batch PR #77."
-	landedFastPathBody  = "🏭 **Fabrik merge-train** — Landed via singleton fast path PR #42. That is this PR: the pinned base was already an ancestor of this head, this PR was mergeable, and its own CI was green and complete, so it was landed directly — no trial branch was assembled and no separate integration PR exists. See ADR-1644."
-	landedOneByOneBody  = "🏭 **Fabrik merge-train** — Landed one-at-a-time via singleton PR #55."
-	postMergeReplyBody  = "🏭 comment not applied: this item's work has already landed."
-	ejectionNoticeBody  = "🏭 **Fabrik merge-train** — ejected from the batch."
+	landedBatchBody    = "🏭 **Fabrik merge-train** — Landed via batch PR #77."
+	landedFastPathBody = "🏭 **Fabrik merge-train** — Landed via singleton fast path PR #42. That is this PR: the pinned base was already an ancestor of this head, this PR was mergeable, and its own CI was green and complete, so it was landed directly — no trial branch was assembled and no separate integration PR exists. See ADR-1644."
+	landedOneByOneBody = "🏭 **Fabrik merge-train** — Landed one-at-a-time via singleton PR #55."
+	postMergeReplyBody = "🏭 comment not applied: this item's work has already landed."
+	ejectionNoticeBody = "🏭 **Fabrik merge-train** — ejected from the batch."
 )
 
 var landedT0 = time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
