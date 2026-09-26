@@ -36,6 +36,11 @@ and `tests/e2e/README.md` for the full detail, including each layer's blind spot
 fidelity-drift policy: any live-e2e failure the sim passed is a fidelity bug in the
 sim, fixed there as well as in the engine.
 
+CI's layer-1 `go test` step runs the **whole module on every PR** — no `paths:` filter
+and no dependency-graph test selection, by decision (`adrs/1857-no-per-pr-test-selection.md`,
+which also records why `tests/sim/simgh` is not sharded). The release gate is always the
+full suite; `scripts/release_gate_full_suite_test.sh` pins that.
+
 ## Documentation bundle (docs/llms-full.txt)
 
 When you modify any of the canonical doc pages — `docs/USER_GUIDE.md`, `docs/state-machine.md`, `docs/stage-lifecycle.md`, or `docs/positioning.md` — you MUST regenerate `docs/llms-full.txt` in the same commit:
