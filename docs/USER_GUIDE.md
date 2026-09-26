@@ -1515,6 +1515,19 @@ When you post a comment:
 
 The rocket reaction is durable -- on restart, Fabrik skips comments that already have it.
 
+**A comment holds the merge until it is processed.** If you comment on an issue that has
+already completed Validate -- for example a last request just before swapping `fabrik:cruise`
+for `fabrik:yolo` -- Fabrik will not merge the PR (or, with the merge train on, advance the
+issue to Queued) until that comment has been processed. Fabrik processes the comment first;
+any change it makes is re-verified by CI before the PR lands. Comments from Fabrik itself and
+known bot service notices never hold a merge.
+
+**Comments after the work has merged.** Fabrik never pushes to a branch whose PR has already
+merged. If a comment reaches an issue whose work already landed, Fabrik does not run a worker:
+it replies on the issue and the PR that the change was **not** applied and that you should open
+a new issue, and it leaves the comment without the rocket reaction so it does not look
+processed.
+
 Engine-posted comments are identified by **two dedup signals**: the `🏭 **Fabrik` header (primary) and the 🚀 rocket reaction (secondary). Both categories are skipped when scanning for new user comments to process.
 
 ### Reaction Flow
@@ -1545,6 +1558,8 @@ Pass `--yolo` to enable global auto-advance: Fabrik moves issues through every s
 > Without this setting, Fabrik will reach Validate complete and attempt auto-merge, but GitHub will reject it. The Fabrik engine emits a `[startup] WARNING` at startup if this setting is disabled on any managed repo.
 
 When Validate completes on a yolo issue, Fabrik calls GitHub's `enablePullRequestAutoMerge` API (the same merge-when-ready mechanism available in the GitHub UI) rather than attempting to merge immediately. GitHub holds the merge until all branch-protection requirements are satisfied — required CI checks, required reviews, up-to-date branch — then merges atomically. Fabrik monitors convergence in the background and pauses the issue if the PR does not reach a terminal state within the convergence budget (default 30 min; see `FABRIK_CONVERGENCE_BUDGET`). See [Post-Validate Convergence Monitor (yolo)](#post-validate-convergence-monitor-yolo) for full details.
+
+Commenting and then applying `fabrik:yolo` is safe: an unprocessed comment holds the merge until Fabrik has processed it (see [Steering with Comments](#steering-with-comments)), so the last-minute request is part of what lands.
 
 For lighter automation without auto-merge, use `fabrik:cruise`: it auto-advances through all stages but stops at Validate, leaving the merge decision to you. If both `fabrik:cruise` and `fabrik:yolo` are present, cruise takes precedence for both decisions — the PR is not auto-merged and the issue does not advance to Done. It stops at Validate exactly as cruise alone would.
 

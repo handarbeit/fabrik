@@ -286,6 +286,13 @@ func (e *Engine) processCommentsClassified(ctx context.Context, board *gh.Projec
 		return "", nil
 	}
 
+	// Post-merge guard (#1862): never invoke a worker, commit or push for an item
+	// whose PR already merged. Placed before the breaker record and every setup
+	// side effect below, so a guarded cycle is a no-op that feeds no breaker.
+	if e.postMergeCommentGuard(item, comments) {
+		return didNotRunPostMerge, nil
+	}
+
 	e.logf(item.Number, "comments", "processing %d new comment(s) — stage: %s\n",
 		len(comments), stage.Name)
 
