@@ -173,6 +173,10 @@ type Sim struct {
 	// single-project scenario does not have to name it repeatedly.
 	defaultProject *projectState
 
+	// boardLag holds, per project item ID, the Status (and open-issue state) the
+	// board-scoped bulk reads report instead of the truth. See LagBoardStatus.
+	boardLag map[string]boardLagEntry
+
 	nextCommentDatabaseID int
 	nextCheckRunID        int64
 	// nextCheckSuiteID auto-assigns check suite IDs. Suites carry no ordering

@@ -927,6 +927,24 @@ Only ADR-1750's second escalation tier (one excluded repo → `warnings.Record`)
 is reachable this way — see "What this layer is permanently blind to" above
 for the tier and the other App-auth behavior this does not cover.
 
+## Stale board snapshot: `LagBoardStatus` (#1871)
+
+`poll()` reads the board once and can reach merge-train batch formation seconds later,
+after the previous worker already moved a member to Done. `simgh.Sim.LagBoardStatus(itemID,
+status, labels)` reproduces that lagging read model: `FetchProjectBoard` and
+`FetchProjectItemStatusBatch` keep reporting the held Status/labels (and the issue as
+open) until `ClearBoardLag`, while the single-node reads (`FetchProjectItemStatus`,
+`LookupIssueProjectItem`, `FetchProjectItem`) keep telling the truth — exactly the split
+the engine's live-read guard relies on. `RunPoll` waits for worker quiescence, so without
+this seam no scenario could dispatch from a pre-landing snapshot.
+
+`mergetrain_stale_snapshot_test.go` lands a member (fast path, then integration PR),
+lags the board back to Queued, polls again, and asserts exactly one `Landed via …`
+comment. Each duplicate scenario also runs with `Engine.SetMergeTrainLandingGuardDisabledForTest(true)`
+and must observe the duplicate (non-vacuity). A third scenario merges a member's PR
+without the Done move and restarts, asserting the interrupted landing still completes once.
+See ADR-1871 and `docs/state-machine.md` §6.28.
+
 ## Guard-testing convention (R1–R4, #1687)
 
 Three times in one working session, a guard (a check that rejects, refuses, or falls
