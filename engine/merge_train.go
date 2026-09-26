@@ -810,6 +810,14 @@ func (e *Engine) prepareTrainWorker(ctx context.Context, state *mergeTrainWorker
 
 	// Resolve each member's linked PR number + head SHA once, ejecting fetch failures.
 	current := e.fetchTrainMembers(ctx, owner, repo, batch)
+	// #1871: the batch is a board snapshot that may predate a landing that already
+	// completed; drop live-moved and live-unreadable members before they are
+	// admitted, assembled into a trial and re-landed.
+	beforeLive := len(current)
+	current = e.dropLiveLandedMembers(state, p, current)
+	if dropped := beforeLive - len(current); dropped > 0 {
+		e.logfRepo(repoKey, "merge-train", "live-status guard excluded %d of %d fetched member(s) for %s from this batch (already landed, or live status read failed — see per-member lines above)\n", dropped, beforeLive, repoKey)
+	}
 	// #1821: admission gate — keep members whose own PR CI is confirmed red out of the
 	// batch (fail-open on every other outcome). Fresh formation only: both restart
 	// routes returned from reconstructTrainState above.
@@ -2215,6 +2223,81 @@ func (e *Engine) finishSingletonFastPathLanding(state *mergeTrainWorkerState, p 
 	e.logfRepo(p.repoKey(), "merge-train", "landing complete for %s (singleton fast path, PR #%d, 1 member)\n", p.trainKey, m.prNum)
 }
 
+// landingLiveState is the outcome of liveLandingState (#1871): whether a member the
+// batch snapshot shows as Queued is still actually holding, so a "resume an
+// interrupted landing" branch can tell a genuine interruption from a landing that
+// already completed after the snapshot was read.
+type landingLiveState int
+
+const (
+	// liveHolding: live Status equals the holding stage — resume (crash between merge
+	// and Done, or the awaitingAdvanceLabel retry, where the member stays Queued).
+	liveHolding landingLiveState = iota
+	// liveMoved: live Status is non-empty and not the holding stage — the landing
+	// already completed (or a human moved the item). Skip; write nothing.
+	liveMoved
+	// liveUnknown: the read succeeded but returned an empty Status — no positive
+	// evidence of completion, so resume (fail-open on ambiguity).
+	liveUnknown
+	// liveReadFailed: the read errored — defer to the next poll (fail-closed).
+	liveReadFailed
+)
+
+// liveLandingState reads a batch member's Status live (#1871) via e.client — the
+// uncached FetchProjectItemStatus, falling back to LookupIssueProjectItem when the
+// snapshot carries no ItemID — never e.readClient (boardcache-backed) nor
+// item.Status/item.Labels, which is the stale source of the duplicate landing this
+// guards against. Same live-read discipline as refuseIfBaseContradictsMembers
+// (#1773). A skip requires positive evidence (a non-empty, non-holding Status); an
+// empty Status resumes; a read error defers, which cannot strand the member because
+// both resume branches re-run every poll. See ADR-1871.
+func (e *Engine) liveLandingState(state *mergeTrainWorkerState, p trialParams, item gh.ProjectItem) landingLiveState {
+	if e.mergeTrainLandingGuardDisabledForTest {
+		return liveHolding
+	}
+	var (
+		status string
+		err    error
+	)
+	if item.ItemID != "" {
+		status, err = e.client.FetchProjectItemStatus(item.ItemID)
+	} else {
+		_, status, err = e.client.LookupIssueProjectItem(state.projectID, itemOwnerRepoString(item, p.owner+"/"+p.repo), item.Number)
+	}
+	switch {
+	case err != nil:
+		e.logf(item.Number, "merge-train", "deferring resume of #%d: live status read failed: %v — will retry next poll\n", item.Number, err)
+		return liveReadFailed
+	case status == "" || p.holdingStg == nil:
+		e.logf(item.Number, "merge-train", "live status of #%d is empty — cannot confirm the landing completed, resuming\n", item.Number)
+		return liveUnknown
+	case status != p.holdingStg.Name:
+		e.logf(item.Number, "merge-train", "not resuming landing of #%d: live status is %q, not %q — the landing already completed after this batch's board snapshot was read\n", item.Number, status, p.holdingStg.Name)
+		return liveMoved
+	}
+	return liveHolding
+}
+
+// dropLiveLandedMembers is the fresh-formation counterpart of the two resume-branch
+// guards (#1871): it removes from a freshly fetched batch every member whose live
+// Status shows the landing already completed (liveMoved) and every member whose live
+// read failed (liveReadFailed — excluded from this batch only, the next poll retries).
+// liveHolding and liveUnknown members are kept, so a genuinely Queued member is never
+// dropped. A stale snapshot can otherwise put several just-landed members into a fresh
+// batch, whose trial (their heads are already in base) would pass CI and re-land each
+// one. Costs one live read per member per fresh formation. See ADR-1871.
+func (e *Engine) dropLiveLandedMembers(state *mergeTrainWorkerState, p trialParams, members []trainMember) []trainMember {
+	kept := make([]trainMember, 0, len(members))
+	for _, m := range members {
+		switch e.liveLandingState(state, p, m.item) {
+		case liveMoved, liveReadFailed:
+			continue
+		}
+		kept = append(kept, m)
+	}
+	return kept
+}
+
 // trySingletonFastPath is runMergeTrainWorker's re-form-loop guard (#1644),
 // checked on every iteration for a length-1 current batch, immediately before a
 // trial would otherwise be built. It is deliberately NOT inside
@@ -2234,6 +2317,13 @@ func (e *Engine) trySingletonFastPath(ctx context.Context, state *mergeTrainWork
 	}
 
 	if pr.Merged {
+		// #1871: the batch's Queued snapshot may predate a landing that already
+		// completed. Only a member that is live-still-holding is a genuine
+		// interrupted landing; otherwise the disposition is decided (no trial, no
+		// re-landing) — the next poll re-evaluates a deferred read.
+		if s := e.liveLandingState(state, p, m.item); s == liveMoved || s == liveReadFailed {
+			return true
+		}
 		e.logf(m.item.Number, "merge-train", "singleton fast path: PR #%d already merged (resuming a prior partial run) — completing Done transition\n", m.prNum)
 		e.finishSingletonFastPathLanding(state, p, m)
 		return true
@@ -4754,14 +4844,36 @@ func (e *Engine) reconstructTrainState(ctx context.Context, state *mergeTrainWor
 
 // completeDeferredLanding finishes a landing that merged before a crash but whose
 // members are still in Queued (ADR-059 D5, FR-4). It parses the merged PR's member
-// list, intersects it with the still-Queued snapshot, and runs the idempotent
+// list, intersects it with the Queued snapshot, drops members whose live Status
+// shows the landing already completed (#1871), and runs the idempotent
 // landMergeTrainBatch advancement (which finds the already-merged PR, skips the
 // merge, and advances each still-Queued member to Done).
 func (e *Engine) completeDeferredLanding(ctx context.Context, state *mergeTrainWorkerState, p trialParams, pr gh.PRDetails, batch []gh.ProjectItem) {
 	repoKey := p.owner + "/" + p.repo
-	items := filterBatchByNumbers(batch, parseTrainMembers(pr.Body))
+	// #1871: the batch is a board snapshot that may predate a landing that already
+	// completed, so each member is re-checked live; only still-holding (or
+	// indeterminate-empty) members are genuine interrupted landings. Moved and
+	// read-failed members drop out of this poll's landing.
+	var items []gh.ProjectItem
+	deferred := 0
+	for _, it := range filterBatchByNumbers(batch, parseTrainMembers(pr.Body)) {
+		switch e.liveLandingState(state, p, it) {
+		case liveMoved:
+			continue
+		case liveReadFailed:
+			deferred++
+			continue
+		}
+		items = append(items, it)
+	}
 	if len(items) == 0 {
-		e.logfRepo(repoKey, "merge-train", "reconstruct: merged integration PR #%d for %s has no still-Queued members — nothing to complete\n", pr.Number, repoKey)
+		if deferred > 0 {
+			// Distinct from the already-landed case: these members may still be
+			// unlanded, so name the read failures for whoever is investigating.
+			e.logfRepo(repoKey, "merge-train", "reconstruct: merged integration PR #%d for %s — deferred %d member(s) because their live status read failed; will retry next poll\n", pr.Number, repoKey, deferred)
+		} else {
+			e.logfRepo(repoKey, "merge-train", "reconstruct: merged integration PR #%d for %s has no still-Queued members — nothing to complete\n", pr.Number, repoKey)
+		}
 		// The in-flight marker is cleared by prepareTrainWorker's own-failure defer
 		// (this function is only reached via reconstructTrainState returning true,
 		// which prepareTrainWorker treats as ok=false) — see ADR-067.

@@ -534,6 +534,9 @@ var snapshotFieldRegistry = map[string]map[string]fieldDisposition{
 		"restRate":              fieldCopied,
 		"graphqlRate":           fieldCopied,
 		"seedErr":               fieldCopied,
+		// boardLag is a transient read-model perturbation installed by a scenario
+		// (LagBoardStatus, #1871), not model state — a restart reads the truth.
+		"boardLag": fieldSkipped,
 	},
 	"repoState": {
 		"owner":             fieldCopied,

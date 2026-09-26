@@ -42,9 +42,47 @@ func (s *Sim) FetchProjectBoard(owner, repo string, projectNum int, ownerType st
 		if item == nil {
 			continue
 		}
+		s.mu.Lock()
+		if lag, lagged := s.boardLag[ref.itemID]; lagged {
+			item.Status = lag.status
+			item.Labels = cloneStrings(lag.labels)
+			item.IsClosed = false
+		}
+		s.mu.Unlock()
 		board.Items = append(board.Items, *item)
 	}
 	return board, nil
+}
+
+// boardLagEntry is the stale view LagBoardStatus installs for one item.
+type boardLagEntry struct {
+	status string
+	labels []string
+}
+
+// LagBoardStatus makes the board-scoped bulk reads (FetchProjectBoard and
+// FetchProjectItemStatusBatch) keep reporting held as the item's Status, heldLabels
+// as its labels, and the issue as open, regardless of later moves, until
+// ClearBoardLag. heldLabels is what the pre-landing snapshot carried — a
+// snapshot that predates the Done move also predates the landing's label writes. It models
+// the read-model lag production exhibits (a poll that read its board before a
+// worker's Done move landed, #1871): the single-node reads
+// (FetchProjectItemStatus, LookupIssueProjectItem, FetchProjectItem) keep
+// reporting the truth, exactly as the uncached live reads do in production.
+func (s *Sim) LagBoardStatus(itemID, held string, heldLabels []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.boardLag == nil {
+		s.boardLag = map[string]boardLagEntry{}
+	}
+	s.boardLag[itemID] = boardLagEntry{status: held, labels: cloneStrings(heldLabels)}
+}
+
+// ClearBoardLag removes the lag LagBoardStatus installed for itemID.
+func (s *Sim) ClearBoardLag(itemID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.boardLag, itemID)
 }
 
 // itemRef identifies a card without holding a pointer into model state.
@@ -583,6 +621,9 @@ func (s *Sim) FetchProjectItemStatusBatch(projectID string) (map[string]string, 
 			continue
 		}
 		out[id] = it.status
+		if lag, lagged := s.boardLag[id]; lagged {
+			out[id] = lag.status
+		}
 	}
 	return out, nil
 }

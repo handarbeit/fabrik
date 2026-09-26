@@ -342,6 +342,13 @@ type Engine struct {
 	// the sort left enabled (the production default; New never sets this). See
 	// SetMergeTrainQueueSortDisabledForTest and ADR-1833.
 	mergeTrainQueueSortDisabledForTest bool
+	// mergeTrainLandingGuardDisabledForTest makes liveLandingState (#1871) always
+	// report liveHolding, i.e. exactly the pre-#1871 behavior where the two "resume
+	// an interrupted landing" branches trust the batch's board snapshot. Exists
+	// solely so a test can demonstrate the duplicate landing with the guard off and
+	// gone with it on (the production default; New never sets this). See
+	// SetMergeTrainLandingGuardDisabledForTest and ADR-1871.
+	mergeTrainLandingGuardDisabledForTest bool
 	// mergeTrainPrefixReuseDisabledForTest disables assembleTrialBranch's trial-prefix
 	// reuse (#1835) when true, falling back to always forking fresh off the pinned base
 	// SHA and re-merging every member — i.e. exactly the pre-#1835 behavior. Exists
@@ -709,6 +716,13 @@ func (e *Engine) SimulateCacheStatusWriteThroughForTest(repo string, number int,
 // (ADR-1833, tests/sim); production never calls this.
 func (e *Engine) SetMergeTrainQueueSortDisabledForTest(disabled bool) {
 	e.mergeTrainQueueSortDisabledForTest = disabled
+}
+
+// SetMergeTrainLandingGuardDisabledForTest disables the live-status resume guard
+// (#1871) — see the mergeTrainLandingGuardDisabledForTest field's doc comment.
+// Test seam only (ADR-1871); production never calls this.
+func (e *Engine) SetMergeTrainLandingGuardDisabledForTest(disabled bool) {
+	e.mergeTrainLandingGuardDisabledForTest = disabled
 }
 
 // SetGitHubAppModeForTest puts e into App-auth mode for the App-auth
