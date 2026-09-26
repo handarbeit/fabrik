@@ -246,6 +246,9 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 	// attemptMergeOnValidate — do not advance. poll.go's Phase 2 Validate
 	// branch retries attemptMergeOnValidate on every subsequent poll, so this
 	// resolves itself once the review-reinvoke loop (§2.9) clears the thread.
+	// The same "landing deferred" return carries the #1862 comment gate: an
+	// unmerged item with a pending comment must never fall through to
+	// advanceToNextStage (Done) here.
 	if reviewThreadDeferred {
 		shouldAdvance = false
 	}
@@ -295,9 +298,11 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 // of a yolo issue at Validate completion. Returns (true, false, nil) when
 // auto-merge was enabled (or is already enabled as an idempotency guard),
 // (false, false, nil) when no action is needed (cruise label, review gate
-// blocking, no linked PR), (false, true, nil) when deferred because an
-// unresolved review thread exists on the current head (#1207 guard 1), and
-// (false, false, err) on failure. The fabrik:auto-merge-enabled label serves
+// blocking, no linked PR), (false, true, nil) when landing is deferred — an
+// unresolved review thread exists on the current head (#1207 guard 1) or an
+// unprocessed comment is pending (#1862, commentGateBlocksLanding) — and
+// (false, false, err) on failure. A deferred return tells handleStageComplete
+// to stop rather than fall through to advanceToNextStage. The fabrik:auto-merge-enabled label serves
 // as both the idempotency guard and the budget-start anchor read by
 // checkAutoMergeConvergence.
 //
@@ -357,8 +362,10 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 	// live fetch is bounded to the same narrow per-Validate-completion
 	// window guard 1 below already re-fetches live data in.
 	fresh := item
+	liveRead := true
 	if ferr := e.client.FetchItemDetails(&fresh); ferr != nil {
 		e.logf(item.Number, "warn", "attemptMergeOnValidate: live re-read of dependencies failed (%v) — using possibly-stale snapshot\n", ferr)
+		liveRead = false
 	} else {
 		item = fresh
 	}
@@ -396,6 +403,18 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 	if blocking := e.currentHeadReviewThreadComments(item); len(blocking) > 0 {
 		e.logf(item.Number, "yolo-merge-guard", "not advancing: %d unresolved review thread(s) on %s\n",
 			len(blocking), item.LinkedPRHeadSHA)
+		return false, true, nil
+	}
+
+	// Comment gate (#1862): an unprocessed comment must not be merged past or
+	// advanced to Queued — dispatch processes it after this poll's catch-up
+	// loop, by which point the merge would already have happened and the
+	// rework would be committed to a dead branch. Reads the live item.Comments
+	// the re-read above just refreshed (a failed re-read holds), and sits ahead
+	// of the merge_train fork so all three landing paths are gated identically.
+	// Returns deferred=true so handleStageComplete never falls through to
+	// advanceToNextStage on an unmerged item.
+	if e.commentGateBlocksLanding(item, liveRead) {
 		return false, true, nil
 	}
 
@@ -473,6 +492,11 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 		if blocking := e.currentHeadReviewThreadComments(fresh); len(blocking) > 0 {
 			e.logf(item.Number, "yolo-merge-guard", "not advancing: %d unresolved review thread(s) on %s (direct-merge fallback)\n",
 				len(blocking), fresh.LinkedPRHeadSHA)
+			return false, true, nil
+		}
+		// #1862: same reason — narrow the check-then-merge window for a comment
+		// that arrived after the comment gate's read above.
+		if e.commentGateBlocksLanding(fresh, true) {
 			return false, true, nil
 		}
 		if mergeErr := e.client.MergePR(owner, repo, pr.Number); mergeErr != nil {

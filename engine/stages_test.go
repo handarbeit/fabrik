@@ -530,6 +530,7 @@ func TestAttemptMergeOnValidate_DirectMergeFallback_LiveCheckStaleSHAProceeds(t 
 // existing retry-next-poll path handles it) rather than proceeding to merge
 // on the stale pre-invocation snapshot.
 func TestAttemptMergeOnValidate_DirectMergeFallback_LiveCheckFetchFails(t *testing.T) {
+	reads := 0
 	client := &mockGitHubClient{
 		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
 			return &gh.PRDetails{Number: 42, HeadSHA: "sha42"}, nil
@@ -537,7 +538,14 @@ func TestAttemptMergeOnValidate_DirectMergeFallback_LiveCheckFetchFails(t *testi
 		enablePullRequestAutoMergeFn: func(owner, repo string, prNumber int, strategy string) error {
 			return fmt.Errorf("%w: GraphQL error: Pull request is in clean status", gh.ErrAutoMergeAlreadyClean)
 		},
+		// The first read (dependency guard, which also feeds the #1862 comment
+		// gate) succeeds; only the fallback's own re-read fails, so this
+		// exercises the fallback's error path specifically.
 		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			reads++
+			if reads == 1 {
+				return nil
+			}
 			return errors.New("GraphQL error: rate limited")
 		},
 	}
