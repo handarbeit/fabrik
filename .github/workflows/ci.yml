@@ -162,6 +162,16 @@ jobs:
       - name: cut-release flag/gate regression test (#1454)
         run: bash scripts/cut_release_gate_test.sh
 
+      # R3/AC5 (#1857): the release gate always runs the full suite. #1857
+      # decided against per-PR test selection (adrs/1857-no-per-pr-test-
+      # selection.md), so nothing is narrowed today; this static check keeps
+      # a future selector from leaking into scripts/cut-release.sh or
+      # scripts/e2e/run.sh's run_pregate unnoticed (same reasoning as ADR
+      # 1454: a cheap layer never replaces the full one at the release gate).
+      # Greps the two scripts' text only — never executes them.
+      - name: release-gate full-suite regression test (#1857)
+        run: bash scripts/release_gate_full_suite_test.sh
+
       # ADR citation integrity. ADRs are numbered after their originating
       # issue (CLAUDE.md's "ADR numbering"), so issue and ADR numbers share
       # one namespace and "ADR-1303" vs "#1303" is a one-token, invisible
