@@ -2,11 +2,13 @@ package sim
 
 import (
 	"context"
+	"fmt"
 	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/handarbeit/fabrik/engine"
 	gh "github.com/handarbeit/fabrik/github"
@@ -33,7 +35,7 @@ const gateHumanComment = "please also handle the edge case in the README"
 type gateWorkerProbe struct {
 	mu        sync.Mutex
 	merges    int
-	status    string
+	queued    int
 	reworkSHA string
 	workDir   string
 	calls     int
@@ -45,11 +47,14 @@ func (p *gateWorkerProbe) script(env *Env, num int) simclaude.CommentScript {
 		defer p.mu.Unlock()
 		p.calls++
 		p.merges = len(env.Sim.Log().ByMethod("MergePR"))
-		if it, err := env.Sim.FetchProjectItem(env.Owner, env.Repo, num); err == nil && it != nil {
-			p.status = it.Status
-		}
+		p.queued = queuedMoves(env)
 		out, completed, usage, err := simclaude.DefaultCommentScript(ctx, stage, issue, comments, workDir, opts)
 		if err == nil {
+			// A real comment worker commits AND pushes (the engine's comment path
+			// pushes nothing itself), so the rework only reaches the PR if it does.
+			if pushOut, perr := exec.Command("git", "-C", workDir, "push", "origin", "HEAD").CombinedOutput(); perr != nil {
+				return "", false, engine.TokenUsage{}, fmt.Errorf("push rework: %v\n%s", perr, pushOut)
+			}
 			if sha, gerr := exec.Command("git", "-C", workDir, "rev-parse", "HEAD").Output(); gerr == nil {
 				p.reworkSHA = strings.TrimSpace(string(sha))
 				p.workDir = workDir
@@ -83,6 +88,31 @@ func swapCruiseForYolo(t *testing.T, env *Env, num int) {
 	if err := env.Sim.AddLabelToIssue(env.Owner, env.Repo, num, "fabrik:yolo"); err != nil {
 		t.Fatalf("add yolo: %v", err)
 	}
+}
+
+// queuedMoves counts board-status moves into the holding stage ("Queued") in the
+// mutation log. Asserted on the log rather than the item's final column: with
+// wait_for_ci off (this scenario's Validate) a successful advanceToQueued
+// returns into handleStageComplete's ordinary advance, which is pre-existing
+// behavior this scenario does not cover.
+func queuedMoves(env *Env) int {
+	n := 0
+	for _, e := range env.Sim.Log().ByMethod("UpdateProjectItemStatus") {
+		if e.Failed() {
+			continue
+		}
+		if strings.HasSuffix(e.Args.ID, ":Queued") {
+			n++
+			continue
+		}
+		for _, v := range e.Args.Values {
+			if strings.HasSuffix(v, ":Queued") {
+				n++
+				break
+			}
+		}
+	}
+	return n
 }
 
 func linkedPRMerged(env *Env, num int) bool {
@@ -123,7 +153,6 @@ func TestCommentLandingGate_HoldsMergeUntilProcessed(t *testing.T) {
 	swapCruiseForYolo(t, env, realNum)
 
 	AdvanceUntil(t, env, func(env *Env) bool { return linkedPRMerged(env, realNum) }, 60)
-	defer dumpMutations(t, env)
 
 	probe.mu.Lock()
 	defer probe.mu.Unlock()
@@ -134,14 +163,42 @@ func TestCommentLandingGate_HoldsMergeUntilProcessed(t *testing.T) {
 		t.Errorf("the PR was merged %d time(s) BEFORE the comment worker ran — the landing gate did not hold (#1862 AC1)", probe.merges)
 	}
 	merged, _ := env.Sim.FetchLinkedPR(env.Owner, env.Repo, realNum)
-	t.Logf("DBG pre=%s rework=%s merged=%s", preHead, probe.reworkSHA, merged.HeadSHA)
 	if merged.HeadSHA == preHead {
-		t.Error("merged head equals the pre-comment head — the rework never reached the merged PR")
+		t.Errorf("merged head %s equals the pre-comment head %s — the rework (%s) never reached the merged PR", merged.HeadSHA, preHead, probe.reworkSHA)
 	}
 	if out, err := exec.Command("git", "-C", probe.workDir, "merge-base", "--is-ancestor", probe.reworkSHA, merged.HeadSHA).CombinedOutput(); err != nil {
 		t.Errorf("rework commit %s is not an ancestor of the merged head %s: %v\n%s", probe.reworkSHA, merged.HeadSHA, err, out)
 	}
 	assertProcessedNotBounced(t, env, realNum)
+}
+
+// commentRocketed reports whether the engine added a 🚀 to the comment with the
+// given body. Read from the mutation log rather than the comment's reaction
+// groups: simgh stores the reaction content exactly as the REST call passed it
+// ("rocket"), while the engine reads GraphQL's "ROCKET", so a reaction-group
+// check would silently never match.
+func commentRocketed(t *testing.T, env *Env, num int, body string) bool {
+	t.Helper()
+	comments, err := env.Sim.FetchIssueComments(env.Owner, env.Repo, num)
+	if err != nil {
+		t.Fatalf("FetchIssueComments: %v", err)
+	}
+	for _, c := range comments {
+		if c.Body != body {
+			continue
+		}
+		for _, e := range env.Sim.Log().ByMethod("AddCommentReaction") {
+			if e.Args.Number != c.DatabaseID || e.Failed() {
+				continue
+			}
+			for _, v := range e.Args.Values {
+				if strings.EqualFold(v, "rocket") {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // assertProcessedNotBounced: the comment was answered by the worker (🚀) and the
@@ -152,16 +209,12 @@ func assertProcessedNotBounced(t *testing.T, env *Env, num int) {
 	if err != nil {
 		t.Fatalf("FetchIssueComments: %v", err)
 	}
-	rocketed := false
 	for _, c := range comments {
-		if c.Body == gateHumanComment && c.HasReaction("ROCKET") {
-			rocketed = true
-		}
 		if strings.Contains(c.Body, "comment not applied") {
 			t.Errorf("post-merge 'not applied' reply posted although the comment was processed before the merge: %q", c.Body)
 		}
 	}
-	if !rocketed {
+	if !commentRocketed(t, env, num, gateHumanComment) {
 		t.Error("the comment was never 🚀'd — it was not processed")
 	}
 }
@@ -201,15 +254,15 @@ func TestCommentLandingGate_HoldsAdvanceToQueued(t *testing.T) {
 	}
 	swapCruiseForYolo(t, env, num)
 
-	WaitForProjectStatus(t, env, num, "Queued", 60)
+	AdvanceUntil(t, env, func(env *Env) bool { return queuedMoves(env) > 0 }, 60)
 
 	probe.mu.Lock()
 	defer probe.mu.Unlock()
 	if probe.calls != 1 {
 		t.Fatalf("Validate comment worker ran %d time(s), want exactly 1", probe.calls)
 	}
-	if probe.status != "Validate" {
-		t.Errorf("item was already %q when the comment worker ran — it advanced to Queued with the comment unprocessed (#1862 AC2)", probe.status)
+	if probe.queued != 0 {
+		t.Errorf("the item had already been moved to Queued %d time(s) when the comment worker ran — it advanced with the comment unprocessed (#1862 AC2)", probe.queued)
 	}
 }
 
@@ -220,7 +273,7 @@ func TestCommentLandingGate_HoldsAdvanceToQueued_NonVacuous(t *testing.T) {
 	env := mergeTrainEnv(t, mergeTrainEnvOptions{ConfigureCfg: func(cfg *engine.Config) { cfg.Yolo = false }})
 	num := reachValidateCompleteUnderCruise(t, env, "comment gate train control")
 	swapCruiseForYolo(t, env, num)
-	WaitForProjectStatus(t, env, num, "Queued", 10)
+	AdvanceUntil(t, env, func(env *Env) bool { return queuedMoves(env) > 0 }, 10)
 	if got := env.Claude.CommentCallCount("Validate"); got != 0 {
 		t.Errorf("control ran the comment worker %d time(s); there was no comment", got)
 	}
@@ -257,6 +310,11 @@ func TestPostMergeGuard_LateCommentIsNotApplied(t *testing.T) {
 	pr, _ := env.Sim.FetchLinkedPR(env.Owner, env.Repo, num)
 	prNum := pr.Number
 
+	// Move the sim clock so the merge/reopen/comment below carry a fresh
+	// updatedAt: stamped at the same instant as the last poll's own writes they
+	// would look unchanged and the item would never be re-admitted.
+	env.Clock.Advance(time.Second)
+
 	// The PR merges out from under the item (a human merge / a race) with the
 	// issue still open at Validate, then a comment arrives.
 	if err := env.Sim.MergePR(env.Owner, env.Repo, prNum); err != nil {
@@ -271,7 +329,11 @@ func TestPostMergeGuard_LateCommentIsNotApplied(t *testing.T) {
 	}
 	headBefore, _ := env.Sim.Sim().HeadSHA(env.OwnerRepo, "fabrik/issue-"+strconv.Itoa(num))
 
-	RunPolls(t, env, 6)
+	// The comment is picked up once the item is re-admitted (a sim artifact of
+	// updatedAt granularity, not engine behavior); then keep polling to prove the
+	// un-🚀'd comment is answered exactly once, not on every poll.
+	AdvanceUntil(t, env, func(env *Env) bool { return hasCommentContaining(t, env, num, "comment not applied") }, 60)
+	RunPolls(t, env, 4)
 
 	if got := env.Claude.CommentCallCount("Validate"); got != 0 {
 		t.Errorf("comment worker ran %d time(s) after the merge — must never invoke a worker (AC4)", got)
@@ -280,11 +342,11 @@ func TestPostMergeGuard_LateCommentIsNotApplied(t *testing.T) {
 		t.Errorf("branch tip moved %s -> %s after the merge — nothing may be pushed (AC4)", headBefore, headAfter)
 	}
 	comments, _ := env.Sim.FetchIssueComments(env.Owner, env.Repo, num)
+	if commentRocketed(t, env, num, gateHumanComment) {
+		t.Error("the un-applied comment got a 🚀 — it must not look processed (AC4)")
+	}
 	replies := 0
 	for _, c := range comments {
-		if c.Body == gateHumanComment && c.HasReaction("ROCKET") {
-			t.Error("the un-applied comment got a 🚀 — it must not look processed (AC4)")
-		}
 		if strings.Contains(c.Body, "comment not applied") {
 			replies++
 		}
@@ -295,4 +357,49 @@ func TestPostMergeGuard_LateCommentIsNotApplied(t *testing.T) {
 	if entries := env.Sim.Log().Find(simgh.And(simgh.MethodIs("AddComment"), simgh.OnIssue(prNum))); len(entries) == 0 {
 		t.Error("no reply was posted on the PR")
 	}
+}
+
+// TestPostMergeGuard_MergeTrainMemberIsNotApplied is AC4 for a merge-train
+// member: its own PR stays closed-not-merged after the train lands it via an
+// integration PR, so the durable "already landed" signal is the credited-PR
+// label (ADR-1616), not the member PR's merge state. The member's own PR is
+// deliberately still open here, so the label is the only evidence.
+func TestPostMergeGuard_MergeTrainMemberIsNotApplied(t *testing.T) {
+	t.Parallel()
+	env := gateEnv(t)
+	num := reachValidateCompleteUnderCruise(t, env, "post-merge guard (train member)")
+	pr, _ := env.Sim.FetchLinkedPR(env.Owner, env.Repo, num)
+
+	env.Clock.Advance(time.Second)
+	if err := env.Sim.AddLabelToIssue(env.Owner, env.Repo, num, "fabrik:credited-pr:"+strconv.Itoa(pr.Number+1000)); err != nil {
+		t.Fatalf("add credited label: %v", err)
+	}
+	env.Sim.Sim().SeedComment(env.OwnerRepo, num, "maintainer", gateHumanComment)
+	if err := env.Sim.Sim().Err(); err != nil {
+		t.Fatalf("SeedComment: %v", err)
+	}
+
+	AdvanceUntil(t, env, func(env *Env) bool { return hasCommentContaining(t, env, num, "comment not applied") }, 60)
+	RunPolls(t, env, 3)
+
+	if got := env.Claude.CommentCallCount("Validate"); got != 0 {
+		t.Errorf("comment worker ran %d time(s) for a landed merge-train member (AC4)", got)
+	}
+	if commentRocketed(t, env, num, gateHumanComment) {
+		t.Error("the un-applied comment got a 🚀 (AC4)")
+	}
+	if n := countCommentsContaining(t, env, num, "comment not applied"); n != 1 {
+		t.Errorf("%d 'not applied' reply(ies), want exactly 1", n)
+	}
+}
+
+func countCommentsContaining(t *testing.T, env *Env, num int, substr string) int {
+	t.Helper()
+	n := 0
+	for _, c := range commentsOn(t, env, num) {
+		if strings.Contains(c.Body, substr) {
+			n++
+		}
+	}
+	return n
 }
