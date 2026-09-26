@@ -94,6 +94,12 @@ type mergeTrainEnvOptions struct {
 	// every pre-existing scenario keeps its exact behavior.
 	ValidateWaitForCI bool
 
+	// StartTime, when non-zero, seeds the shared sim Clock (EnvOptions.StartTime). A
+	// scenario that reaches fabrik:awaiting-ci needs it near real time: the awaiting-ci
+	// backstop compares real time.Since against the clock-stamped label time, so the
+	// default 2026-01-01 start makes it fire on the first settle pass.
+	StartTime time.Time
+
 	// ConfigureCfg, when non-nil, runs after this file's own merge-train
 	// defaults are applied (short CIBackstopTimeout, small MaxBatchSize) —
 	// an escape hatch for a scenario needing e.g. a smaller
@@ -167,7 +173,8 @@ func mergeTrainEnv(t *testing.T, opts mergeTrainEnvOptions) *Env {
 		}
 	}
 	env := NewEnv(t, EnvOptions{
-		Stages: stgs,
+		Stages:    stgs,
+		StartTime: opts.StartTime,
 		ConfigureCfg: func(cfg *engine.Config) {
 			cfg.MergeTrain = mode
 			cfg.CIBackstopTimeout = 10 * time.Second

@@ -45,6 +45,9 @@ import (
 //     since a worker never looks at, fetches, or mutates an item outside the batch
 //     it was dispatched with (worker membership only ever shrinks, never grows).
 //
+// The same scan also ejects a member with an unprocessed human comment (#1863) — see
+// settleQueuedCommentCause — through the same direct/pending routing.
+//
 // Native-merge-queue members (GitHub's own merge queue, not the internal train) are
 // skipped: ejectMember/MaxMergeTrainEjections have no meaning for them, mirroring
 // routeQueuedGroup's own FR-3 precedence rule.
@@ -92,6 +95,7 @@ func (e *Engine) settleQueuedReviewFindings(board *gh.ProjectBoard) {
 
 			findings := e.currentHeadReviewThreadComments(item)
 			if len(findings) == 0 {
+				e.settleQueuedCommentCause(board.ProjectID, g.repoKey, g.trainKey, item, batchNumbers[item.Number])
 				continue
 			}
 
@@ -104,4 +108,38 @@ func (e *Engine) settleQueuedReviewFindings(board *gh.ProjectBoard) {
 			e.ejectQueuedMemberForReviewFindings(board.ProjectID, item, len(findings))
 		}
 	}
+}
+
+// settleQueuedCommentCause is the comment-cause branch of the Queued settle scan (#1863),
+// reached only for a member with no review-thread findings (review findings take
+// precedence: the ordinary comment path handles both in one invocation, and the
+// review-finding eject stays byte-identical).
+//
+// Detection is filterHuman(findNewComments(item)) on the item the scan already
+// deep-fetched — findNewComments is the same "unprocessed" predicate as the Validate
+// landing gate (commentGateBlocksLanding) and the non-Validate advance guard, and the
+// human restriction is layered over it rather than forking it. findNewComments does not
+// exclude every bot-authored comment, so filterHuman is what guarantees that a bot comment
+// never ejects a member.
+//
+// Routing mirrors the review-finding cause: an in-batch member gets a pending signal for
+// the worker to apply at its checkpoints; any other member is ejected directly. An
+// in-batch member that is no longer flagged has any stale signal cleared, so it cannot
+// fire later on a re-queued member. The eject is not train churn — see
+// ejectQueuedMemberForComments.
+func (e *Engine) settleQueuedCommentCause(projectID, repoKey, trainKey string, item gh.ProjectItem, inLiveBatch bool) {
+	comments := filterHuman(e.findNewComments(item))
+	if len(comments) == 0 {
+		if inLiveBatch {
+			e.clearPendingCommentEject(repoKey, item.Number)
+		}
+		return
+	}
+	if inLiveBatch {
+		e.logf(item.Number, "queued-review-settle", "%d unprocessed human comment(s) on Queued member #%d — owned by the live batch for %s, flagging pending eject\n", len(comments), item.Number, trainKey)
+		e.markPendingCommentEject(repoKey, item.Number)
+		return
+	}
+	e.logf(item.Number, "queued-review-settle", "%d unprocessed human comment(s) on Queued member #%d — not owned by any live batch for %s, ejecting directly\n", len(comments), item.Number, trainKey)
+	e.ejectQueuedMemberForComments(projectID, item)
 }
