@@ -57,6 +57,7 @@ const (
 	didNotRunUsageLimit   didNotRunKind = "usage-limit"
 	didNotRunAPIError     didNotRunKind = "api-error"
 	didNotRunAPIKeyHelper didNotRunKind = "api-key-helper"
+	didNotRunPostMerge    didNotRunKind = "post-merge"
 )
 
 // classifyDidNotRun maps a processComments error to the did-not-run set the
