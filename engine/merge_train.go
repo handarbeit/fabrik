@@ -4816,7 +4816,8 @@ func (e *Engine) reconstructTrainState(ctx context.Context, state *mergeTrainWor
 
 // completeDeferredLanding finishes a landing that merged before a crash but whose
 // members are still in Queued (ADR-059 D5, FR-4). It parses the merged PR's member
-// list, intersects it with the still-Queued snapshot, and runs the idempotent
+// list, intersects it with the Queued snapshot, drops members whose live Status
+// shows the landing already completed (#1871), and runs the idempotent
 // landMergeTrainBatch advancement (which finds the already-merged PR, skips the
 // merge, and advances each still-Queued member to Done).
 func (e *Engine) completeDeferredLanding(ctx context.Context, state *mergeTrainWorkerState, p trialParams, pr gh.PRDetails, batch []gh.ProjectItem) {
