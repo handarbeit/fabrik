@@ -28,7 +28,11 @@ type ManifestFlowOptions struct {
 	AppName             string
 	AppHomepageURL      string
 	RequiredPermissions map[string]string
-	Logf                func(format string, args ...any)
+	// ProductName names the program running the flow on the browser pages
+	// the loopback callback serves ("Fabrik setup received — …"). Empty
+	// yields "Pruefer", Pruefer's own default (#1881).
+	ProductName string
+	Logf        func(format string, args ...any)
 }
 
 // RunManifestFlow drives GitHub's App Manifest flow end to end: starts a
@@ -56,7 +60,7 @@ func RunManifestFlow(ctx context.Context, opts ManifestFlowOptions) (Credentials
 	buildManifestFn := func(redirectURL string) map[string]interface{} {
 		return buildManifest(redirectURL, opts.AppName, opts.AppHomepageURL, opts.RequiredPermissions)
 	}
-	startURL, results, shutdown, err := runManifestCallbackServer(buildManifestFn, logf)
+	startURL, results, shutdown, err := runManifestCallbackServer(opts.ProductName, buildManifestFn, logf)
 	if err != nil {
 		return Credentials{}, fmt.Errorf("starting manifest callback listener: %w", err)
 	}

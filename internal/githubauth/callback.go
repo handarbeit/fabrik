@@ -46,7 +46,7 @@ var manifestFormTemplate = template.Must(template.New("manifest-form").Parse(`<!
 <form action="{{.Action}}" method="post">
 <input type="hidden" name="manifest" value="{{.Manifest}}">
 </form>
-<p>Redirecting to GitHub to create your Pruefer GitHub App&hellip;</p>
+<p>Redirecting to GitHub to create your {{.Product}} GitHub App&hellip;</p>
 </body></html>
 `))
 
@@ -56,7 +56,7 @@ var manifestFormTemplate = template.Must(template.New("manifest-form").Parse(`<!
 // parameter GitHub echoes back unchanged on its redirect — this is how the
 // loopback callback later confirms the redirect really answers this flow
 // and not some other request hitting the same port.
-func renderManifestForm(manifest map[string]interface{}, state string) (string, error) {
+func renderManifestForm(manifest map[string]interface{}, state, product string) (string, error) {
 	manifestJSON, err := json.Marshal(manifest)
 	if err != nil {
 		return "", fmt.Errorf("marshaling manifest: %w", err)
@@ -65,9 +65,11 @@ func renderManifestForm(manifest map[string]interface{}, state string) (string, 
 	err = manifestFormTemplate.Execute(&buf, struct {
 		Action   string
 		Manifest string
+		Product  string
 	}{
 		Action:   githubManifestCreateURL + "?state=" + state,
 		Manifest: string(manifestJSON),
+		Product:  productNameOrDefault(product),
 	})
 	if err != nil {
 		return "", fmt.Errorf("rendering manifest form: %w", err)
@@ -93,7 +95,10 @@ func randomState() (string, error) {
 // called (even after a successful result) to stop the listener. logf may be
 // nil (tests that don't care about the rare unexpected-Serve-error log
 // line); RunManifestFlow always passes its own logf through.
-func runManifestCallbackServer(buildManifestFn func(redirectURL string) map[string]interface{}, logf func(string, ...any)) (startURL string, results <-chan callbackResult, shutdown func(), err error) {
+// product names the program running the flow ("Fabrik", "Pruefer") on the
+// pages the browser sees; empty falls back to defaultProductName.
+func runManifestCallbackServer(product string, buildManifestFn func(redirectURL string) map[string]interface{}, logf func(string, ...any)) (startURL string, results <-chan callbackResult, shutdown func(), err error) {
+	product = productNameOrDefault(product)
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
@@ -111,7 +116,7 @@ func runManifestCallbackServer(buildManifestFn func(redirectURL string) map[stri
 	}
 
 	manifest := buildManifestFn(redirectURL)
-	formHTML, err := renderManifestForm(manifest, state)
+	formHTML, err := renderManifestForm(manifest, state, product)
 	if err != nil {
 		ln.Close()
 		return "", nil, nil, err
@@ -175,7 +180,7 @@ func runManifestCallbackServer(buildManifestFn func(redirectURL string) map[stri
 			// waiting on. Mirrors /callback's own "already completed"
 			// messaging below.
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-			fmt.Fprintln(w, "Pruefer setup already concluded for this run — you can close this tab.")
+			fmt.Fprintln(w, product+" setup already concluded for this run — you can close this tab.")
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -224,11 +229,11 @@ func runManifestCallbackServer(buildManifestFn func(redirectURL string) map[stri
 			if cbErr != nil {
 				firstDeliveryErr = cbErr
 				w.WriteHeader(http.StatusBadRequest)
-				fmt.Fprintln(w, "Pruefer setup failed: "+cbErr.Error())
+				fmt.Fprintln(w, product+" setup failed: "+cbErr.Error())
 				resultCh <- callbackResult{err: cbErr}
 				return
 			}
-			fmt.Fprintln(w, "Pruefer setup received — you can close this tab.")
+			fmt.Fprintln(w, product+" setup received — you can close this tab.")
 			resultCh <- callbackResult{code: q.Get("code")}
 		})
 		if !delivered {
@@ -243,9 +248,9 @@ func runManifestCallbackServer(buildManifestFn func(redirectURL string) map[stri
 			// contradict that outcome for the same user.
 			if firstDeliveryErr != nil {
 				w.WriteHeader(http.StatusBadRequest)
-				fmt.Fprintln(w, "Pruefer setup already failed: "+firstDeliveryErr.Error())
+				fmt.Fprintln(w, product+" setup already failed: "+firstDeliveryErr.Error())
 			} else {
-				fmt.Fprintln(w, "Pruefer setup already completed — you can close this tab.")
+				fmt.Fprintln(w, product+" setup already completed — you can close this tab.")
 			}
 		}
 	})

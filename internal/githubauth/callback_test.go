@@ -50,7 +50,7 @@ func testManifestBuilder(redirectURL string) map[string]interface{} {
 }
 
 func TestRunManifestCallbackServer_HappyPath(t *testing.T) {
-	startURL, results, shutdown, err := runManifestCallbackServer(testManifestBuilder, nil)
+	startURL, results, shutdown, err := runManifestCallbackServer("", testManifestBuilder, nil)
 	if err != nil {
 		t.Fatalf("runManifestCallbackServer: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestRunManifestCallbackServer_HappyPath(t *testing.T) {
 // concluded" message — with no auto-submitting <form> in the body — once
 // the single result has been delivered.
 func TestRunManifestCallbackServer_StartNotReservedAfterCallbackDelivered(t *testing.T) {
-	startURL, results, shutdown, err := runManifestCallbackServer(testManifestBuilder, nil)
+	startURL, results, shutdown, err := runManifestCallbackServer("", testManifestBuilder, nil)
 	if err != nil {
 		t.Fatalf("runManifestCallbackServer: %v", err)
 	}
@@ -147,7 +147,7 @@ func TestRunManifestCallbackServer_StartNotReservedAfterCallbackDelivered(t *tes
 // afterward, hanging the flow until manifestCallbackTimeout with no
 // indication of the real cause.
 func TestRunManifestCallbackServer_StateMismatchDoesNotConsumeResult(t *testing.T) {
-	startURL, results, shutdown, err := runManifestCallbackServer(testManifestBuilder, nil)
+	startURL, results, shutdown, err := runManifestCallbackServer("", testManifestBuilder, nil)
 	if err != nil {
 		t.Fatalf("runManifestCallbackServer: %v", err)
 	}
@@ -192,7 +192,7 @@ func TestRunManifestCallbackServer_StateMismatchDoesNotConsumeResult(t *testing.
 }
 
 func TestRunManifestCallbackServer_MissingCodeRejected(t *testing.T) {
-	startURL, results, shutdown, err := runManifestCallbackServer(testManifestBuilder, nil)
+	startURL, results, shutdown, err := runManifestCallbackServer("", testManifestBuilder, nil)
 	if err != nil {
 		t.Fatalf("runManifestCallbackServer: %v", err)
 	}
@@ -225,7 +225,7 @@ func TestRunManifestCallbackServer_MissingCodeRejected(t *testing.T) {
 // drop the genuine GitHub redirect if it arrives afterward, hanging the
 // flow until manifestCallbackTimeout with no indication of the real cause.
 func TestRunManifestCallbackServer_SpuriousBareHitDoesNotConsumeResult(t *testing.T) {
-	startURL, results, shutdown, err := runManifestCallbackServer(testManifestBuilder, nil)
+	startURL, results, shutdown, err := runManifestCallbackServer("", testManifestBuilder, nil)
 	if err != nil {
 		t.Fatalf("runManifestCallbackServer: %v", err)
 	}
@@ -274,7 +274,7 @@ func TestRunManifestCallbackServer_SpuriousBareHitDoesNotConsumeResult(t *testin
 // not a plausible completion attempt (GitHub always echoes state back) and
 // must be ignored, not treated as terminal.
 func TestRunManifestCallbackServer_CodeOnlyHitDoesNotConsumeResult(t *testing.T) {
-	startURL, results, shutdown, err := runManifestCallbackServer(testManifestBuilder, nil)
+	startURL, results, shutdown, err := runManifestCallbackServer("", testManifestBuilder, nil)
 	if err != nil {
 		t.Fatalf("runManifestCallbackServer: %v", err)
 	}
@@ -339,7 +339,7 @@ func TestWaitForCallback_ContextCancellation(t *testing.T) {
 }
 
 func TestRenderManifestForm_EscapesManifestContent(t *testing.T) {
-	html, err := renderManifestForm(map[string]interface{}{"name": `"><script>alert(1)</script>`}, "somestate")
+	html, err := renderManifestForm(map[string]interface{}{"name": `"><script>alert(1)</script>`}, "somestate", "")
 	if err != nil {
 		t.Fatalf("renderManifestForm: %v", err)
 	}
@@ -349,7 +349,7 @@ func TestRenderManifestForm_EscapesManifestContent(t *testing.T) {
 }
 
 func TestRunManifestCallbackServer_PortAssignedDynamically(t *testing.T) {
-	startURL, _, shutdown, err := runManifestCallbackServer(testManifestBuilder, nil)
+	startURL, _, shutdown, err := runManifestCallbackServer("", testManifestBuilder, nil)
 	if err != nil {
 		t.Fatalf("runManifestCallbackServer: %v", err)
 	}
@@ -364,7 +364,7 @@ func TestRunManifestCallbackServer_PortAssignedDynamically(t *testing.T) {
 
 func TestRunManifestCallbackServer_ManifestReceivesAssignedRedirectURL(t *testing.T) {
 	var gotRedirectURL string
-	startURL, _, shutdown, err := runManifestCallbackServer(func(redirectURL string) map[string]interface{} {
+	startURL, _, shutdown, err := runManifestCallbackServer("", func(redirectURL string) map[string]interface{} {
 		gotRedirectURL = redirectURL
 		return map[string]interface{}{"redirect_url": redirectURL}
 	}, nil)
@@ -394,7 +394,7 @@ func TestRunManifestCallbackServer_ManifestReceivesAssignedRedirectURL(t *testin
 // through to an unadorned empty 200 rather than an explicit response,
 // which could look like a hang to whoever's driving the browser.
 func TestRunManifestCallbackServer_DuplicateStateMatchingHitRespondsExplicitly(t *testing.T) {
-	startURL, results, shutdown, err := runManifestCallbackServer(testManifestBuilder, nil)
+	startURL, results, shutdown, err := runManifestCallbackServer("", testManifestBuilder, nil)
 	if err != nil {
 		t.Fatalf("runManifestCallbackServer: %v", err)
 	}
@@ -445,7 +445,7 @@ func TestRunManifestCallbackServer_DuplicateStateMatchingHitRespondsExplicitly(t
 // the same user their setup succeeded when the log/CLI was reporting it
 // failed.
 func TestRunManifestCallbackServer_DuplicateHitAfterFailureReflectsFailure(t *testing.T) {
-	startURL, results, shutdown, err := runManifestCallbackServer(testManifestBuilder, nil)
+	startURL, results, shutdown, err := runManifestCallbackServer("", testManifestBuilder, nil)
 	if err != nil {
 		t.Fatalf("runManifestCallbackServer: %v", err)
 	}
@@ -507,7 +507,7 @@ func TestRunManifestCallbackServer_ShutdownForceClosesAfterGraceTimeout(t *testi
 	manifestShutdownGraceTimeout = 50 * time.Millisecond
 	defer func() { manifestShutdownGraceTimeout = oldGrace }()
 
-	startURL, _, shutdown, err := runManifestCallbackServer(testManifestBuilder, nil)
+	startURL, _, shutdown, err := runManifestCallbackServer("", testManifestBuilder, nil)
 	if err != nil {
 		t.Fatalf("runManifestCallbackServer: %v", err)
 	}
@@ -545,5 +545,77 @@ func TestRunManifestCallbackServer_ShutdownForceClosesAfterGraceTimeout(t *testi
 	if c2, err := net.DialTimeout("tcp", addr, 500*time.Millisecond); err == nil {
 		c2.Close()
 		t.Error("expected the listener to be closed after shutdown(), but a new connection succeeded")
+	}
+}
+
+// getBody GETs url and returns its body as a string.
+func getBody(t *testing.T, url string) string {
+	t.Helper()
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading %s: %v", url, err)
+	}
+	return string(b)
+}
+
+// TestRunManifestCallbackServer_PagesNameTheCallingProduct is the #1881
+// regression test: `fabrik init --github-app` showed "Pruefer setup received"
+// because the shared flow hard-coded Pruefer's name. Every page the browser
+// sees must name the caller's product, and an empty product keeps Pruefer's
+// default for its existing call sites.
+func TestRunManifestCallbackServer_PagesNameTheCallingProduct(t *testing.T) {
+	for _, tc := range []struct{ product, want, forbidden string }{
+		{product: "Fabrik", want: "Fabrik", forbidden: "Pruefer"},
+		{product: "", want: "Pruefer", forbidden: "Fabrik"},
+	} {
+		t.Run("product="+tc.want, func(t *testing.T) {
+			startURL, results, shutdown, err := runManifestCallbackServer(tc.product, testManifestBuilder, nil)
+			if err != nil {
+				t.Fatalf("runManifestCallbackServer: %v", err)
+			}
+			defer shutdown()
+			base := strings.TrimSuffix(startURL, "/start")
+
+			start := getBody(t, startURL)
+			state := fetchStartAndExtractState(t, startURL)
+			good := getBody(t, base+"/callback?state="+state+"&code=testcode123")
+			<-results
+			again := getBody(t, base+"/callback?state="+state+"&code=testcode123")
+			restart := getBody(t, startURL)
+
+			// A second flow that fails: matching state, no code (a wrong
+			// state is deliberately a silent 404, so it can't be used here).
+			failURL, failResults, failShutdown, err := runManifestCallbackServer(tc.product, testManifestBuilder, nil)
+			if err != nil {
+				t.Fatalf("runManifestCallbackServer (failure flow): %v", err)
+			}
+			defer failShutdown()
+			failBase := strings.TrimSuffix(failURL, "/start")
+			failState := fetchStartAndExtractState(t, failURL)
+			failed := getBody(t, failBase+"/callback?state="+failState)
+			<-failResults
+			failedAgain := getBody(t, failBase+"/callback?state="+failState)
+
+			for name, tt := range map[string]struct{ body, want string }{
+				"redirect page":      {start, "create your " + tc.want + " GitHub App"},
+				"received":           {good, tc.want + " setup received"},
+				"repeat callback":    {again, tc.want + " setup already completed"},
+				"start after result": {restart, tc.want + " setup already concluded"},
+				"failed":             {failed, tc.want + " setup failed"},
+				"repeat after fail":  {failedAgain, tc.want + " setup already failed"},
+			} {
+				if !strings.Contains(tt.body, tt.want) {
+					t.Errorf("%s: body %q does not contain %q", name, tt.body, tt.want)
+				}
+				if strings.Contains(tt.body, tc.forbidden) {
+					t.Errorf("%s: body %q names %q", name, tt.body, tc.forbidden)
+				}
+			}
+		})
 	}
 }

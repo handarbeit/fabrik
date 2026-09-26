@@ -30,6 +30,19 @@ const maxManifestExchangeResponseBytes = 1 << 20 // 1 MiB
 // Pruefer's own default is just a sensible starting point, not enforced.
 const defaultAppName = "pruefer"
 
+// defaultProductName is the product the manifest flow's browser pages name
+// when the caller supplies none (#1881) — Pruefer, whose call sites predate
+// the field, exactly as defaultAppName is.
+const defaultProductName = "Pruefer"
+
+// productNameOrDefault returns product, or defaultProductName when empty.
+func productNameOrDefault(product string) string {
+	if product == "" {
+		return defaultProductName
+	}
+	return product
+}
+
 // defaultAppHomepageURL is the manifest's "url" field — the App's public
 // homepage link, shown on its GitHub App settings page — for Pruefer's own
 // default; a second caller overrides it via

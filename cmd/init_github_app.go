@@ -164,6 +164,7 @@ func runGitHubAppSetup(ctx context.Context, opts githubAppSetupOptions) (*github
 		BaseURL:             opts.BaseURL,
 		AppName:             engine.GitHubAppName,
 		AppHomepageURL:      engine.GitHubAppHomepageURL,
+		ProductName:         engine.GitHubAppProductName,
 		RequiredPermissions: manifestRequired,
 		Logf:                logf,
 	}
