@@ -958,6 +958,54 @@ The sim bed cannot see this GitHub wire timing (ADR-1454), so it lives here.
 - **Cost / wall-clock.** One real Validate Claude invocation and one CI cycle
   (~5 runner-minutes) per mode; ~20–35 min, of which ~4 min is the sleep.
 
+### Notes on `TestPauseLiftedOnlyByPostPauseHumanComment` (#1876)
+
+The live proof of ADR-1813 / #1813 (the #1752 incident class): a pause is lifted only
+by a **human** comment created **at or after** the latest `fabrik:paused` `labeled`
+event. The rule depends on real GitHub event timestamps, which the sim bed cannot
+see (ADR-1454; `tests/sim/pause_resume_anchor_test.go` covers the logic against
+simulated timestamps only). No bed setup beyond the standard one.
+
+- **How the comment predates the pause without being consumed.** The issue is filed
+  in Alpha but **not added to the project board**. The engine discovers work only
+  through `FetchProjectBoard`, so an off-board issue can be neither deep-fetched nor
+  dispatched; the comment cannot be processed before the pause anchor exists. The
+  scenario then posts the old comment, waits 6s, applies `fabrik:paused` +
+  `fabrik:awaiting-input`, waits 6s, and only then adds the issue to the board and
+  moves it to Specify. (Parking in a Backlog column is untested on the bed — no
+  `backlog.yaml` is installed there — and is a weaker guarantee than off-board.)
+  The 6s gaps exceed GitHub's one-second timestamp resolution; equality resolves
+  toward resuming, so they must not be shrunk.
+- **Assertions.** A1: the engine's own refusal line for this issue
+  (`[#N skip] awaiting-input: 1 human comment(s) predate the pause — still waiting`,
+  `engine/item.go`'s `itemNeedsWork`; *not* the unreachable `resume refused
+  (ADR-1813)` lines in `processItem`), both pause labels still present after a
+  ≥4 min window (≥3 polls at the 60s bed cadence), and no 👀/🚀 on the old
+  comment. A quiescent paused item is **not** re-evaluated every poll, so the line
+  is not counted per poll: two `🏭 **Fabrik — e2e nudge**` comments are posted to
+  re-evaluate it (they are skipped by `findNewComments`, so never resume-eligible).
+  A2: the `issues/N/events` log shows exactly one `labeled` and zero `unlabeled`
+  `fabrik:paused` events (no lift/re-add cycles, no re-stamp on the board move). A3:
+  a new human comment posted after the pause gets 👀 then 🚀 and the events log gains
+  an `unlabeled` `fabrik:paused` event (the events log, not current labels, because
+  the resumed worker may block again). Nothing is asserted about the *old* comment
+  after the resume: an authorised resume hands the full raw `findNewComments` set to
+  `processComments` (ADR-1813 R5), so it is legitimately processed with the new one.
+- **Both auth legs.** Only the harness account (arbeithand, `FABRIK_TOKEN`) posts. It
+  matches none of `gh.IsBotLogin`'s patterns, so `filterHuman` reads it as human in
+  both legs; in the PAT leg it is also Fabrik's own identity, but every engine
+  comment carries the `🏭 **Fabrik` prefix and is skipped by `findNewComments`. In
+  the App leg the engine posts as `<slug>[bot]`. No reviewer-token fallback is
+  needed and there is no per-leg skip. A4 (the item's own bot comments never
+  resume) is observed only for the `🏭`-prefix path through the nudges; a genuine
+  `[bot]`-login classification is left to the App-auth self-recognition scenario.
+- **Cost / wall-clock.** One Specify comment-review invocation after the resume;
+  ~10–15 min, ~$0.15–0.40 per leg. Parallel-safe: it touches only its own issue and
+  reads the shared bed log scoped by issue number and `LogOffset`. The pure helpers
+  (`pauseRefusalLogNeedle`, `parseLabelEvents`, `countLabelEvents`,
+  `parseCommentReactions`) are unit-tested by
+  `go test -tags e2e -run 'PauseRefusal|LabelEvent|CommentReactions' ./tests/e2e/`.
+
 ### Reviewer topology (#1396)
 
 Every scenario that drives a PR through the organic Review gate depends on
@@ -1483,6 +1531,7 @@ the `Queued` column is absent, so it only runs in the gate's `on` leg.
 | `TestMergeTrainRestartSafety` | ADR-059 D5 / #960: after a landing, a restart with the historical merged integration PR present does NOT stall the next batch (reconstruct proceeds fresh). **Not parallel** — restarts the bed | Train-only (on) | 25–50 min | low |
 | `TestMergeTrainRunawayGuardPausesBatch` | ADR-059 D8 (#964/#965): persistently-red 4-member batch trips the runaway guard at cap=6, pauses all Queued members, no member reaches Done. Runs on RepoBeta for counter isolation. **Not parallel** — induces a repo-wide fault on RepoBeta that would collide with `TestCrossRepoSpawn`'s use of the same repo (#1395) | Train-only (on) | 10–20 min | low (no Claude) |
 | `TestMergeTrainQueuedDeeperThanBatchCap` | ADR-1833 / #1850: 7 clean members Queued against `max_batch_size` 5 → first trial holds exactly the first five, membership stays stable (one snapshot line, no unmerged-closed trial PR), all seven land as 5 then 2. Members are queued paused then released together. **Not parallel** — shares the (RepoAlpha, main) partition | Train-only (on) | 30–60 min | low (no Claude) |
+| `TestPauseLiftedOnlyByPostPauseHumanComment` | ADR-1813 / #1876: a human comment that predates a pause does not lift it (item parked off-board, commented, paused, then moved to Specify: refusal log line, labels hold ≥4 min, no 👀/🚀 on the old comment, exactly one `labeled` and no `unlabeled` `fabrik:paused` event); a post-pause human comment resumes it (👀→🚀 + `unlabeled` event) | Both | 10–15 min | $0.15–0.40 |
 
 Approximate single-mode suite total: ~685 min wall-clock, $10.30–30 in Claude
 tokens. A full two-mode gate run is roughly double this, minus the
@@ -1525,6 +1574,7 @@ shape, not just the single-mode total.
 | `TestMergeTrainRestartSafety` | ADR-059 D5 (#950) + PR #960 (reconstruct must not stall on a historical merged PR) |
 | `TestMergeTrainRunawayGuardPausesBatch` | ADR-059 D8 (#964) — runaway guard trial cap, per-repo counter isolation |
 | `TestMergeTrainQueuedDeeperThanBatchCap` | ADR-1833 / #1833 (deterministic Queued ordering — pre-fix the capped batch was an arbitrary map-order subset that churned poll to poll), #1850 (this scenario); the sim bed cannot cover it (ADR-1833 non-vacuity proof) |
+| `TestPauseLiftedOnlyByPostPauseHumanComment` | ADR-1813 / #1813 (pre-fix, any human comment lifted a pause — including one older than it, re-lifting every poll), #1752 (the incident: comment circuit breakers zeroed ten times), #1861 (both auth legs), #1876 (this scenario); the sim bed sees only simulated timestamps |
 
 Every escape-from-release regression earns a new scenario in this table.
 
