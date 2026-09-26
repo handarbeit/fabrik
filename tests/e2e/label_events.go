@@ -138,10 +138,10 @@ func checkYoloRemovedMidValidate(events []issueEvent) error {
 // the genuine earlier `labeled stage:<stage>:complete` is ignored), the events
 // occur in this order:
 //
-//	1. labeled   fabrik:reworking:<stage>   marker added first (ADR-1802)
-//	2. unlabeled stage:<stage>:complete     completion cleared while the marker is on
-//	3. labeled   stage:<stage>:complete     completion restored
-//	4. unlabeled fabrik:reworking:<stage>   marker removed last
+//  1. labeled   fabrik:reworking:<stage>   marker added first (ADR-1802)
+//  2. unlabeled stage:<stage>:complete     completion cleared while the marker is on
+//  3. labeled   stage:<stage>:complete     completion restored
+//  4. unlabeled fabrik:reworking:<stage>   marker removed last
 //
 // Steps 2..3 bracket the window in which the board would have shown the item as
 // not-complete; step 1 before 2 and 3 before 4 mean that window is always covered
