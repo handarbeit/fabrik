@@ -34,6 +34,9 @@ import (
 const (
 	GitHubAppName        = "fabrik"
 	GitHubAppHomepageURL = "https://github.com/handarbeit/fabrik"
+	// GitHubAppProductName is what the manifest flow's browser pages call the
+	// program running setup (#1881) — without it they default to "Pruefer".
+	GitHubAppProductName = "Fabrik"
 )
 
 // GitHubAppStatePath is the fixed, non-configurable path Reconcile uses
@@ -380,6 +383,7 @@ func setUpGitHubAppAuth(ctx context.Context, cfg Config, fabrikDir, baseURL stri
 		BaseURL:           baseURL, // "" in production (github.com); tests point this at an httptest server
 		AppName:           GitHubAppName,
 		AppHomepageURL:    GitHubAppHomepageURL,
+		ProductName:       GitHubAppProductName,
 		NoBrowser:         cfg.NoBrowser, // #1763, R1/R2: cmd/root.go resolves this to true by default for the engine
 		Logf:              func(format string, args ...any) { fmt.Printf("[startup] github-app: "+format+"\n", args...) },
 	})
