@@ -252,6 +252,19 @@ func holdFor(d, interval time.Duration, check func()) {
 	check()
 }
 
+// decodeJSONObject decodes the first JSON object in out into v. ghOutputWithToken
+// merges stderr into out (CombinedOutput), so a successful call can still carry
+// gh noise (an upgrade notice, a deprecation warning) before or after the JSON;
+// decoding from the first '{' and ignoring what follows keeps that environmental
+// noise from failing a scenario as an unparseable response.
+func decodeJSONObject(out string, v any) error {
+	i := strings.Index(out, "{")
+	if i < 0 {
+		return fmt.Errorf("no JSON object in output")
+	}
+	return json.NewDecoder(strings.NewReader(out[i:])).Decode(v)
+}
+
 // createPendingReview opens a PENDING (unsubmitted) review with token and
 // returns its id. A pending review is invisible to everyone else, and keeps its
 // id when later submitted, so a scenario can act on the review's id before the
@@ -272,7 +285,7 @@ func createPendingReview(t *testing.T, token, repo string, prNumber int, body st
 		ID    int    `json:"id"`
 		State string `json:"state"`
 	}
-	if uerr := json.Unmarshal([]byte(strings.TrimSpace(out)), &resp); uerr != nil || resp.ID == 0 {
+	if uerr := decodeJSONObject(out, &resp); uerr != nil || resp.ID == 0 {
 		t.Fatalf("creating pending review on %s PR #%d: unparseable response (%v): %q", repo, prNumber, uerr, redactSecret(out, token))
 	}
 	if resp.State != "PENDING" {

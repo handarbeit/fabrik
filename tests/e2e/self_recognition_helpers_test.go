@@ -170,3 +170,31 @@ func TestParseComments(t *testing.T) {
 		t.Error("garbage should fail to parse")
 	}
 }
+
+func TestDecodeJSONObjectToleratesSurroundingNoise(t *testing.T) {
+	type resp struct {
+		ID int `json:"id"`
+	}
+	cases := map[string]struct {
+		in      string
+		want    int
+		wantErr bool
+	}{
+		"clean":          {in: `{"id": 7}` + "\n", want: 7},
+		"leading noise":  {in: "A new release of gh is available\n{\"id\": 8}", want: 8},
+		"trailing noise": {in: "{\"id\": 9}\nwarning: deprecated\n", want: 9},
+		"no object":      {in: "boom", wantErr: true},
+		"empty":          {in: "", wantErr: true},
+	}
+	for name, c := range cases {
+		var r resp
+		err := decodeJSONObject(c.in, &r)
+		if (err != nil) != c.wantErr {
+			t.Errorf("%s: err = %v, wantErr %v", name, err, c.wantErr)
+			continue
+		}
+		if !c.wantErr && r.ID != c.want {
+			t.Errorf("%s: id = %d, want %d", name, r.ID, c.want)
+		}
+	}
+}
