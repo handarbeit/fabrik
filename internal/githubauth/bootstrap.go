@@ -32,7 +32,12 @@ type ManifestFlowOptions struct {
 	// the loopback callback serves ("Fabrik setup received — …"). Empty
 	// yields "Pruefer", Pruefer's own default (#1881).
 	ProductName string
-	Logf        func(format string, args ...any)
+	// Organization, when set, creates the App under that organization
+	// rather than the signed-in user. A private App can only be installed
+	// on its owner, so an App meant for an org must be owned by it.
+	// Empty keeps the user-owned endpoint (Pruefer's existing behaviour).
+	Organization string
+	Logf         func(format string, args ...any)
 }
 
 // RunManifestFlow drives GitHub's App Manifest flow end to end: starts a
@@ -60,7 +65,7 @@ func RunManifestFlow(ctx context.Context, opts ManifestFlowOptions) (Credentials
 	buildManifestFn := func(redirectURL string) map[string]interface{} {
 		return buildManifest(redirectURL, opts.AppName, opts.AppHomepageURL, opts.RequiredPermissions)
 	}
-	startURL, results, shutdown, err := runManifestCallbackServer(opts.ProductName, buildManifestFn, logf)
+	startURL, results, shutdown, err := runManifestCallbackServer(manifestPageConfig{Product: opts.ProductName, Organization: opts.Organization}, buildManifestFn, logf)
 	if err != nil {
 		return Credentials{}, fmt.Errorf("starting manifest callback listener: %w", err)
 	}
