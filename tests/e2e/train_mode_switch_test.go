@@ -9,7 +9,9 @@ import (
 )
 
 // TestSwitchTrainMode restarts the shared test bed with FABRIK_MERGE_TRAIN
-// set to the mode named by E2E_TRAIN_MODE, satisfying FR-5: mode is read at
+// set to the mode named by E2E_TRAIN_MODE — and, when E2E_AUTH_MODE is set
+// (pat/app, #1861), with the engine's auth mode applied and verified in the
+// same restart — satisfying FR-5: mode is read at
 // Fabrik startup, so switching it requires a restart — never an in-run flip
 // while other scenarios' t.Parallel() invocations might be in flight.
 //
@@ -38,6 +40,11 @@ func TestSwitchTrainMode(t *testing.T) {
 		t.Fatalf("E2E_TRAIN_MODE=%q is invalid (must be on or off)", rawMode)
 	}
 
+	authMode, err := normalizeAuthMode(os.Getenv("E2E_AUTH_MODE"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	env := LoadEnv(t)
 
 	// Mirrors RestartFabrikTestBed (lifecycle.go): register the bring-back-up
@@ -55,7 +62,21 @@ func TestSwitchTrainMode(t *testing.T) {
 		t.Fatalf("write FABRIK_MERGE_TRAIN=%s to %s: %v", mode, envFile, err)
 	}
 
+	// Auth mode (#1861): applied in the same stopped window, so one restart
+	// covers both. Empty E2E_AUTH_MODE (a switch outside run.sh's auth legs)
+	// leaves the bed's auth untouched.
+	if authMode != "" {
+		t.Logf("switching test bed to auth mode %s", authMode)
+		if err := applyBedAuthMode(env.FabrikTestDir, authMode); err != nil {
+			t.Fatalf("applying auth mode %s: %v", authMode, err)
+		}
+	}
+
 	StartFabrikTestBed(t, env)
+
+	if authMode != "" {
+		verifyBedAuthIdentity(t, env, authMode)
+	}
 
 	// Postcondition: assert the bed's .env still holds the requested mode
 	// after the restart, per this issue's explicit acceptance criteria.

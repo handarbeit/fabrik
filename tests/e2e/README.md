@@ -96,6 +96,15 @@ These tests assume:
    up/down contract" below for the full mechanism and escape hatch
    (`E2E_SKIP_TOKEN_CHECK=1`).
 
+5. **For the App-mode legs (#1861):** the bed's `.env` also carries the
+   GitHub App identity as `E2E_APP_ID`, `E2E_APP_PRIVATE_KEY_PATH` (relative
+   to the bed dir, e.g. `.fabrik/github-app-key.pem`) and
+   `E2E_APP_INSTALLATION_ID`, for an org-owned App installed on both test repos
+   with `contents: write` (git runs over HTTPS as the installation — ADR-1846).
+   `.fabrik/config.yaml` must **not** set `github_app_*`: auth mode is applied
+   per leg through `.env`, and a config key would silently turn every PAT leg
+   into App auth. `run.sh` refuses up front if either is wrong.
+
 See `~/fabrik-oss-launch-notes.md` (under "Files and where they live") for
 the canonical setup.
 
@@ -1128,6 +1137,38 @@ none of that actually happened — see #1327. `TestSwitchTrainMode` also
 asserts its own postcondition (bed running, `.env` mode matches) after
 `StartFabrikTestBed` returns, so a cached or partially-failed switch fails
 loudly instead of reporting success.
+
+#### Auth-mode legs — PAT and GitHub App (#1861)
+
+The train-mode legs above run once per auth mode: first with the bed engine on
+its PAT (`FABRIK_TOKEN`), then as the GitHub App installation. Auth mode changes
+Fabrik's own identity: every "is this mine or a human's?" decision, every push
+and merge, and repo-access resolution. So the App legs rerun the full suite.
+
+The same `TestSwitchTrainMode` restart applies it. When `E2E_AUTH_MODE` is set,
+it writes `FABRIK_GITHUB_APP_*` into the bed's `.env` from the bed's own
+`E2E_APP_*` values (or blanks them for `pat`), restarts the bed, and reads the
+bed's stdout (`bed-run.log`) to verify the identity it started as. A bed that
+comes up as the wrong identity fails the switch step before any scenario runs.
+
+```bash
+scripts/e2e/run.sh                          # pat/off, pat/on, then app/off, app/on
+E2E_AUTH_MODE=app scripts/e2e/run.sh        # App legs only
+E2E_AUTH_MODE=pat E2E_TRAIN_MODE=off scripts/e2e/run.sh -run TestSmokeSingleRepoDispatch
+```
+
+Leg labels in the reports carry both modes (e.g. `app/on`). The full default
+gate is therefore four suite runs (six `go test` legs, counting the isolated
+runaway-guard leg under each auth mode), roughly double the Claude quota of the
+PAT-only gate. When only App legs are planned, the competing-token check warns
+instead of refusing: the bed engine spends the installation's own GraphQL
+budget, and only the harness's own calls share `FABRIK_TOKEN`'s. For the same
+reason, an App leg's "GraphQL budget" report line measures only the harness.
+
+The harness still files issues and posts its scripted replies as
+`FABRIK_TOKEN`'s account. In PAT mode that is Fabrik's own identity; in App
+mode it is a human to Fabrik. Triage an App-only failure with that in mind:
+it may be a scenario that leaned on the harness sharing Fabrik's identity.
 
 Scenarios resolve mode via `resolveTrainMode` (`harness.go`): `E2E_TRAIN_MODE`
 takes precedence when set (an invalid value is a hard test failure), falling
