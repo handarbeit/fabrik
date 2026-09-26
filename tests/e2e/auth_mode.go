@@ -68,25 +68,39 @@ func applyBedAuthMode(bedDir, mode string) error {
 			cfgPath, strings.Join(bedAppIdentityEnvKeys, "/"), bedDir)
 	}
 	envFile := filepath.Join(bedDir, ".env")
-	for i, key := range bedAppAuthEnvKeys {
-		value := ""
-		if mode == "app" {
-			v, err := readEnvFileValue(envFile, bedAppIdentityEnvKeys[i])
+	// Resolve every value before writing any, so a missing E2E_APP_* can
+	// never leave .env with a partial FABRIK_GITHUB_APP_* set (the engine
+	// refuses a partial App config at startup, but the bed would be left
+	// inconsistent for whoever uses it next).
+	values := make([]string, len(bedAppAuthEnvKeys))
+	if mode == "app" {
+		for i, src := range bedAppIdentityEnvKeys {
+			v, err := readEnvFileValue(envFile, src)
 			if err != nil || v == "" {
-				return fmt.Errorf("app auth leg needs %s in %s (err: %v)", bedAppIdentityEnvKeys[i], envFile, err)
+				return fmt.Errorf("app auth leg needs %s in %s (err: %v)", src, envFile, err)
 			}
-			value = v
+			values[i] = v
 		}
-		if err := writeEnvFileValue(envFile, key, value); err != nil {
+	}
+	for i, key := range bedAppAuthEnvKeys {
+		if err := writeEnvFileValue(envFile, key, values[i]); err != nil {
 			return fmt.Errorf("writing %s to %s: %w", key, envFile, err)
 		}
 	}
 	return nil
 }
 
-// bedAuthIdentity reports the App login from a bed stdout log's startup
-// banner, or "" when the bed started without App auth.
+// bedStartMarker is the first line every Fabrik startup prints (cmd/root.go).
+const bedStartMarker = "Fabrik starting "
+
+// bedAuthIdentity reports the App login from the most recent startup's
+// banner in a bed stdout log, or "" when that startup ran without App auth.
+// bed-run.log accumulates across harness restarts (StartFabrikTestBed
+// appends), so only the lines after the last start marker count.
 func bedAuthIdentity(stdout string) string {
+	if i := strings.LastIndex(stdout, bedStartMarker); i >= 0 {
+		stdout = stdout[i:]
+	}
 	for _, line := range strings.Split(stdout, "\n") {
 		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), appAuthBannerPrefix); ok && strings.Contains(rest, appAuthBannerSuffix) {
 			login, _, _ := strings.Cut(rest, " ")

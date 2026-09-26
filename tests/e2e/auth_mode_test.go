@@ -87,11 +87,15 @@ func TestApplyBedAuthMode(t *testing.T) {
 		}
 	})
 
-	t.Run("app without the bed identity refused", func(t *testing.T) {
+	t.Run("app without the bed identity refused, .env untouched", func(t *testing.T) {
 		dir := writeBed(t, "FABRIK_TOKEN=tok\nE2E_APP_ID=4960842\n", "owner: handarbeit\n")
 		err := applyBedAuthMode(dir, "app")
 		if err == nil || !strings.Contains(err.Error(), "E2E_APP_PRIVATE_KEY_PATH") {
 			t.Errorf("err = %v, want it to name the missing E2E_APP_PRIVATE_KEY_PATH", err)
+		}
+		// E2E_APP_ID resolved before the failure, but nothing may be written.
+		if got, _ := readEnvFileValue(filepath.Join(dir, ".env"), "FABRIK_GITHUB_APP_ID"); got != "" {
+			t.Errorf("FABRIK_GITHUB_APP_ID = %q after a refused app switch, want .env left untouched", got)
 		}
 	})
 }
@@ -109,5 +113,13 @@ func TestBedAuthIdentity(t *testing.T) {
 	}
 	if got := bedAuthIdentity("Fabrik starting dev(abc)\n[startup] warn: something\n"); got != "" {
 		t.Errorf("pat stdout: got %q, want none", got)
+	}
+	// Accumulated log: an earlier App startup followed by a PAT one reads as
+	// PAT, and the reverse reads as App — only the latest startup counts.
+	if got := bedAuthIdentity(app + "\n=== StartFabrikTestBed x ===\nFabrik starting dev(abc)\n"); got != "" {
+		t.Errorf("app then pat: got %q, want none (latest startup is PAT)", got)
+	}
+	if got := bedAuthIdentity("Fabrik starting dev(abc)\n\n=== StartFabrikTestBed x ===\n" + app); got != "fabrik-bed[bot]" {
+		t.Errorf("pat then app: got %q, want fabrik-bed[bot]", got)
 	}
 }

@@ -266,8 +266,13 @@ func StartFabrikTestBed(t *testing.T, env *Env) {
 	// Stdout/stderr go to bed-run.log, like run.sh's own launch
 	// (preflight_bed_start), so the startup banner — including the identity
 	// line verifyBedAuthIdentity checks (#1861) — is readable after a
-	// harness restart too. Falls back to /dev/null if the file can't open.
-	if out, err := os.OpenFile(bedRunLogPath(env), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644); err == nil {
+	// harness restart too. Appended, not truncated: run.sh truncates once at
+	// the start of a run, and every restart after that (mode switches,
+	// TestMergeTrainRestartSafety) keeps its predecessors' output for
+	// post-mortems. verifyBedAuthIdentity reads only the latest startup.
+	// Falls back to /dev/null if the file can't open.
+	if out, err := os.OpenFile(bedRunLogPath(env), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err == nil {
+		fmt.Fprintf(out, "\n=== StartFabrikTestBed %s ===\n", time.Now().UTC().Format(time.RFC3339))
 		cmd.Stdout, cmd.Stderr = out, out
 		defer out.Close()
 	} else {
