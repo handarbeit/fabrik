@@ -3515,17 +3515,102 @@ func (e *Engine) takePendingReviewEject(repoKey string, issueNumber int) (int, b
 // main-moved rebase loop — so a flagged member can never ride a trial (green or
 // otherwise), or the fast path, to landing: the caller must discard the current trial
 // whenever ejectedCount > 0, regardless of that trial's own CI result.
+//
+// The unprocessed-comment signal (#1863, markPendingCommentEject) is consumed in the
+// same per-member pass, so a member is taken once and can never be double-ejected. A
+// review-finding signal takes precedence — the ordinary comment path handles both
+// causes in one invocation, and the review-finding path stays byte-identical — and
+// drops any comment signal for the same member.
 func (e *Engine) applyPendingReviewEjects(projectID, repoKey string, members []trainMember) (remaining []trainMember, ejectedCount int) {
 	for _, m := range members {
-		if count, ok := e.takePendingReviewEject(repoKey, m.item.Number); ok {
+		count, reviewOK := e.takePendingReviewEject(repoKey, m.item.Number)
+		commentOK := e.takePendingCommentEject(repoKey, m.item.Number)
+		if reviewOK {
 			e.logf(m.item.Number, "merge-train", "applying pending review-finding eject flagged mid-trial (%d finding(s))\n", count)
 			e.ejectQueuedMemberForReviewFindings(projectID, m.item, count)
+			ejectedCount++
+			continue
+		}
+		if commentOK {
+			e.logf(m.item.Number, "merge-train", "applying pending unprocessed-comment eject flagged mid-trial\n")
+			e.ejectQueuedMemberForComments(projectID, m.item)
 			ejectedCount++
 			continue
 		}
 		remaining = append(remaining, m)
 	}
 	return remaining, ejectedCount
+}
+
+// ejectQueuedMemberForComments ejects a Queued merge-train member that has an
+// unprocessed human comment (#1863) so the ordinary comment path can act on it; the
+// member re-queues once Validate completes again.
+//
+// Unlike ejectQueuedMemberForReviewFindings it deliberately does NOT go through
+// ejectMember: a comment eject is not train churn. It never increments
+// mergeTrainEjectionCounts, never pauses, and never touches labels or ReviewCycles
+// (ADR-1208 §5 — a plain status move). It follows deferRedMember's shape: reroute first,
+// and only on success post one locally composed comment, so a failed reroute leaves
+// nothing posted and the settle scan re-detects the still-unprocessed comment on the
+// next poll. The comment carries the 🏭 **Fabrik prefix so findNewComments never treats
+// it as a human comment (PAT mode posts as the operator's own login).
+func (e *Engine) ejectQueuedMemberForComments(projectID string, item gh.ProjectItem) {
+	if !e.rerouteQueuedMemberOffHolding(projectID, item) {
+		return
+	}
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	targetName := "the preceding stage"
+	if target := stageBeforeHolding(e.cfg, holdingStage(e.cfg)); target != nil {
+		targetName = target.Name
+	}
+	msg := fmt.Sprintf("🏭 **Fabrik merge-train — ejected (unprocessed comment)**\n\n"+
+		"#%d left the merge-train queue because an unprocessed comment arrived while it was Queued. "+
+		"It has been moved back to **%s** so the comment can be processed, and it will re-queue once Validate completes again. "+
+		"This is not a train failure: the member is not paused and no ejection was counted.",
+		item.Number, targetName)
+	if _, err := e.client.AddComment(owner, repo, item.Number, msg); err != nil {
+		e.logf(item.Number, "merge-train", "warn: could not post comment-eject comment: %v\n", err)
+	}
+	e.logf(item.Number, "merge-train", "#%d ejected for an unprocessed comment: rerouted to %s (not paused, no ejection counted)\n", item.Number, targetName)
+}
+
+// markPendingCommentEject records that issueNumber (in repoKey) has an unprocessed human
+// comment and should be ejected at the worker's next checkpoint (#1863) — the
+// comment-cause sibling of markPendingReviewEject, kept as a parallel map so the
+// review-finding signal's shape is untouched.
+func (e *Engine) markPendingCommentEject(repoKey string, issueNumber int) {
+	e.queuedReviewEjectsMu.Lock()
+	defer e.queuedReviewEjectsMu.Unlock()
+	if e.queuedCommentEjects == nil {
+		e.queuedCommentEjects = make(map[string]map[int]struct{})
+	}
+	if e.queuedCommentEjects[repoKey] == nil {
+		e.queuedCommentEjects[repoKey] = make(map[int]struct{})
+	}
+	e.queuedCommentEjects[repoKey][issueNumber] = struct{}{}
+}
+
+// takePendingCommentEject reports whether a comment-eject signal was pending for
+// issueNumber in repoKey, clearing it on read (one-shot, like takePendingReviewEject).
+func (e *Engine) takePendingCommentEject(repoKey string, issueNumber int) bool {
+	e.queuedReviewEjectsMu.Lock()
+	defer e.queuedReviewEjectsMu.Unlock()
+	byIssue := e.queuedCommentEjects[repoKey]
+	if _, ok := byIssue[issueNumber]; !ok {
+		return false
+	}
+	delete(byIssue, issueNumber)
+	if len(byIssue) == 0 {
+		delete(e.queuedCommentEjects, repoKey)
+	}
+	return true
+}
+
+// clearPendingCommentEject drops a pending comment-eject signal without acting on it —
+// used by the settle scan when an in-batch member is no longer flagged (the comment was
+// processed, reacted to, or deleted), so a stale signal cannot fire on a later batch.
+func (e *Engine) clearPendingCommentEject(repoKey string, issueNumber int) {
+	e.takePendingCommentEject(repoKey, issueNumber)
 }
 
 // effectiveTrialWindow returns the runaway-guard threshold (N) and rolling window (M),

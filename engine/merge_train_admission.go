@@ -116,6 +116,10 @@ func (e *Engine) deferRedMember(projectID, owner, repo string, m trainMember, ru
 		e.logf(n, "merge-train", "dropping pending review-finding eject signal (%d finding(s)) for #%d — superseded by the CI deferral\n", count, n)
 	}
 
+	if e.takePendingCommentEject(repoKey, n) {
+		e.logf(n, "merge-train", "dropping pending unprocessed-comment eject signal for #%d — superseded by the CI deferral\n", n)
+	}
+
 	targetName := "the preceding stage"
 	if target := stageBeforeHolding(e.cfg, holdingStage(e.cfg)); target != nil {
 		targetName = target.Name
