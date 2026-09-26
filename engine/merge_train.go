@@ -4827,14 +4827,25 @@ func (e *Engine) completeDeferredLanding(ctx context.Context, state *mergeTrainW
 	// indeterminate-empty) members are genuine interrupted landings. Moved and
 	// read-failed members drop out of this poll's landing.
 	var items []gh.ProjectItem
+	deferred := 0
 	for _, it := range filterBatchByNumbers(batch, parseTrainMembers(pr.Body)) {
-		if s := e.liveLandingState(state, p, it); s == liveMoved || s == liveReadFailed {
+		switch e.liveLandingState(state, p, it) {
+		case liveMoved:
+			continue
+		case liveReadFailed:
+			deferred++
 			continue
 		}
 		items = append(items, it)
 	}
 	if len(items) == 0 {
-		e.logfRepo(repoKey, "merge-train", "reconstruct: merged integration PR #%d for %s has no still-Queued members — nothing to complete\n", pr.Number, repoKey)
+		if deferred > 0 {
+			// Distinct from the already-landed case: these members may still be
+			// unlanded, so name the read failures for whoever is investigating.
+			e.logfRepo(repoKey, "merge-train", "reconstruct: merged integration PR #%d for %s — deferred %d member(s) because their live status read failed; will retry next poll\n", pr.Number, repoKey, deferred)
+		} else {
+			e.logfRepo(repoKey, "merge-train", "reconstruct: merged integration PR #%d for %s has no still-Queued members — nothing to complete\n", pr.Number, repoKey)
+		}
 		// The in-flight marker is cleared by prepareTrainWorker's own-failure defer
 		// (this function is only reached via reconstructTrainState returning true,
 		// which prepareTrainWorker treats as ok=false) — see ADR-067.
