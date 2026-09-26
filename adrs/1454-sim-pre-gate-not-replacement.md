@@ -164,7 +164,10 @@ in production use that the pre-gate should have caught first.
 
 ### R7 — CI placement: confirmed, not built
 
-Per the issue's own framing, this was mostly already true:
+Per the issue's own framing, this was mostly already true. (Later, #1857 evaluated
+narrowing this per-PR `go test` step by dependency-graph test selection and declined; CI
+still runs the whole module on every PR, and the release gate stays full — see
+`adrs/1857-no-per-pr-test-selection.md`.)
 
 - **`go test ./...`** — every PR, unconditionally. Unchanged by this issue.
 - **sim e2e (`tests/sim`)** — carries no `sim` build tag (confirmed:

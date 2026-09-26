@@ -21,7 +21,9 @@ go vet ./...
 gofmt -s -d .         # fix with: gofmt -s -w .
 ```
 
-CI runs `go test -race`, `go vet`, `gofmt -s -l`, and the docs-drift check on every PR.
+CI runs `go test -race` over the whole module (no per-PR test selection — see
+`adrs/1857-no-per-pr-test-selection.md`), `go vet`, `gofmt -s -l`, and the docs-drift
+check on every PR.
 
 ## Documentation bundle
 

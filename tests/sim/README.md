@@ -456,7 +456,9 @@ number in a document cannot track a suite that grows scenarios underneath it.
 
 `tests/sim` carries **no `sim` build tag**: it is part of the default
 `go test ./...` (and CI's `go test -race -timeout 5m ./...`), guarded only by
-the existing `skipIfNoGit` idiom, exactly like `tests/sim/simgh`.
+the existing `skipIfNoGit` idiom, exactly like `tests/sim/simgh`. CI runs it as
+part of the whole module on every PR — per-PR test selection and `simgh` sharding
+were evaluated and declined; see `adrs/1857-no-per-pr-test-selection.md`.
 
 That decision no longer rests on a runtime threshold, and deliberately so.
 R8 originally framed it as "under ~90s, no tag; slower, tag it" — a rule
