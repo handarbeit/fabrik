@@ -55,7 +55,7 @@ CI's `docs-drift` workflow (`.github/workflows/docs-drift.yml`) runs the regen a
 - `engine/poll.go` — Main poll loop, idle-upgrade, concurrent worker dispatch. `Run()` also starts and joins the GitHub App auth refresh loop (`e.ghAppAuth.RunRefreshLoops`, #1713) when App auth is configured — its `defer wait()` is registered before `defer cancel()` so that on shutdown, context cancellation always precedes (and unblocks) the wait, itself ordered ahead of the log-file-close defer.
 - `engine/item.go` — Per-issue processing: stage runs, comment processing, blocking/pausing
 - `engine/pr.go` — Output posting: issue comments, PR comments, summary extraction
-- `engine/comments.go` — Comment detection and filtering logic
+- `engine/comments.go` — Comment detection and filtering logic. `processCommentsClassified` also hosts the post-merge guard (`engine/post_merge_comments.go`, #1862): once an item's work has landed (merged linked PR, or a merge-train member's `fabrik:credited-pr:<N>`/`fabrik:awaiting-landing-verification`) it runs no worker, pushes nothing and adds no 🚀, and answers each human comment once with a marker-deduped "not applied" reply. `engine/comment_landing_gate.go`'s `commentGateBlocksLanding` is the matching landing-decision gate inside `attemptMergeOnValidate`, using `findNewComments` and returning `deferred=true` — see ADR-1862 and `docs/state-machine.md` §2.2/§6.6.6
 - `engine/context.go` — Context files (.fabrik-context/) and stage comment lookup
 - `engine/repo.go` — Per-repo identity helpers (parseOwnerRepo, repoName, issueKey)
 - `engine/claude.go` — Claude Code invocation, prompt building, marker extraction
