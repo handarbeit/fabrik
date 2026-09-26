@@ -111,6 +111,16 @@ func CreateMemberPRDraft(t *testing.T, env *Env, repo, baseBranch, branch, path,
 
 func createMemberPR(t *testing.T, env *Env, repo, baseBranch, branch, path, content, issueTitle string, issueNum int, draft bool) int {
 	t.Helper()
+	// Open the PR with the Closes #N linkage.
+	body := fmt.Sprintf("e2e merge-train member.\n\nCloses #%d\n", issueNum)
+	return createMemberPRBody(t, env, repo, baseBranch, branch, path, content, issueTitle, body, issueNum, draft)
+}
+
+// createMemberPRBody is createMemberPR with a caller-supplied PR body. Callers
+// that pass a body without a closing keyword get a PR that GitHub will not
+// auto-close the issue for on merge (the engine links by branch name, not body).
+func createMemberPRBody(t *testing.T, env *Env, repo, baseBranch, branch, path, content, issueTitle, body string, issueNum int, draft bool) int {
+	t.Helper()
 	baseSHA := defaultBranchSHA(t, env, repo, baseBranch)
 
 	// Create the branch ref off the base head.
@@ -135,8 +145,6 @@ func createMemberPR(t *testing.T, env *Env, repo, baseBranch, branch, path, cont
 		t.Fatalf("write %s on %s@%s: %v\n%s", path, repo, branch, err, out)
 	}
 
-	// Open the PR with the Closes #N linkage.
-	body := fmt.Sprintf("e2e merge-train member.\n\nCloses #%d\n", issueNum)
 	args := []string{"pr", "create", "-R", repo,
 		"--base", baseBranch, "--head", branch,
 		"--title", issueTitle, "--body", body}
