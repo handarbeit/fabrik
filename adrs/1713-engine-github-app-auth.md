@@ -190,7 +190,9 @@ genuinely new gap goes undetected until that feature's first use.
   granted `contents:read` but not `contents:write` — and would 403 (fetch alone would
   likely succeed). This was corrected, and the gap closed with a startup-time refusal
   rather than a silent dependency on host git config, by #1756 — see ADR-1756 for the
-  git-under-App-auth decision.
+  git-under-App-auth decision. #1846 (ADR-1846) later replaced that refusal with an
+  engine-injected credential helper serving the installation token (requiring
+  `contents:write`), which also closes this ADR's ~1h token-lifetime gap for git.
 - A future `fabrik init --github-app` bootstrap issue would need to parameterize
   `internal/githubauth`'s manifest-bootstrap path (`defaultAppName`,
   `defaultAppHomepageURL`) for the engine's own identity, mirroring what ADR-1712 already

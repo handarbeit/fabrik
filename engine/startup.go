@@ -372,7 +372,8 @@ func captureGitMeta(workDir, baseBranch string) (branch, commit, mainSHA, timest
 // effect for github.com — no credential helper is needed in either case.
 // This check is non-interactive and never prompts; it only reads git config.
 func (e *Engine) checkHTTPSCredentials(hasSSHRewrite bool) {
-	if e.cfg.GitSSH || hasSSHRewrite {
+	// Under App auth, setUpAppGitCredential injects the helper itself (#1846).
+	if e.cfg.GitSSH || hasSSHRewrite || e.ghAppAuth != nil {
 		return
 	}
 	cmd := exec.Command("git", "config", "credential.helper")
@@ -589,6 +590,12 @@ func (e *Engine) checkAllowAutoMerge(owner, repo string) {
 // is needed when HTTPS is rewritten to SSH); this is a normal, expected config
 // state, so detecting it is silent — nothing is printed.
 func (e *Engine) checkURLRewrite() bool {
+	return gitHTTPSRewrittenToSSH()
+}
+
+// gitHTTPSRewrittenToSSH is checkURLRewrite's body, callable without an
+// Engine — setUpGitHubAppAuth runs from New(), before the Engine exists.
+func gitHTTPSRewrittenToSSH() bool {
 	cmd := exec.Command("git", "config", "--get-regexp", `url\..*\.insteadOf`)
 	out, _ := cmd.Output() // exit code 1 = no matches, not an error
 	// Parse each line: "url.<base>.insteadof <value>"

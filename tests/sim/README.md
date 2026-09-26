@@ -439,7 +439,7 @@ below). Everything else App-auth touches remains an honest blind spot here:
   design (no real JWT, no network). Structurally unreachable from this
   package, not merely untested.
 - **Everything `Run()`-only**: the webhooks-refused-under-App-auth check
-  (#1752), the GHES-floor and HTTPS-worker-git refusals (#1756), the App-auth
+  (#1752), the GHES-floor refusal (#1756), the HTTPS git credential helper (#1846), the App-auth
   token refresh loop (`Reconciler.RunRefreshLoops`, #1713), and
   `selfLogin`/`BotLogin` comment-authorship identity — none of these are
   reachable from `Engine.PollOnce`, which is the only entry point

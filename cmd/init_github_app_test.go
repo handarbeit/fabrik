@@ -138,8 +138,9 @@ func newFakeGitHubAppSetupServer(t *testing.T, installations []gh.AppInstallatio
 }
 
 // fullPermissions returns a granted-permissions map satisfying
-// engine.RequiredGitHubAppPermissions(false) in full — the "everything
-// granted" baseline the shortfall test then narrows.
+// engine.RequiredGitHubAppPermissionsForGit(false, true) in full — the
+// default HTTPS-git requirement (#1846) — the "everything granted" baseline
+// the shortfall tests then narrow.
 func fullPermissions() map[string]string {
 	return map[string]string{
 		"metadata":              "read",
@@ -148,7 +149,94 @@ func fullPermissions() map[string]string {
 		"pull_requests":         "write",
 		"checks":                "read",
 		"statuses":              "read",
-		"contents":              "read",
+		"contents":              "write",
+	}
+}
+
+// isolateCmdGitConfig points git's global config at a test-local file
+// (content verbatim) and skips the system config, so engine.AppGitUsesHTTPS
+// never sees the host's own url.*.insteadOf rewrite.
+func isolateCmdGitConfig(t *testing.T, content string) {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "gitconfig")
+	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", p)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+}
+
+const cmdSSHRewriteGitConfig = "[url \"git@github.com:\"]\n\tinsteadOf = https://github.com/\n"
+
+func TestGitHubAppSetupPermissions(t *testing.T) {
+	tests := []struct {
+		name         string
+		opts         githubAppSetupOptions
+		rewrite      string
+		wantVerify   string // contents level verified
+		wantManifest string // contents level a new App requests
+	}{
+		{name: "create, https", opts: githubAppSetupOptions{}, wantVerify: "write", wantManifest: "write"},
+		{name: "create, git_ssh still requests write", opts: githubAppSetupOptions{GitSSH: true}, wantVerify: "read", wantManifest: "write"},
+		{name: "create, ssh rewrite still requests write", opts: githubAppSetupOptions{}, rewrite: cmdSSHRewriteGitConfig, wantVerify: "read", wantManifest: "write"},
+		{name: "adopt, https", opts: githubAppSetupOptions{AppID: 42}, wantVerify: "write", wantManifest: "write"},
+		{name: "adopt, git_ssh", opts: githubAppSetupOptions{AppID: 42, GitSSH: true}, wantVerify: "read", wantManifest: "read"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			isolateCmdGitConfig(t, tt.rewrite)
+			verify, manifest, _ := githubAppSetupPermissions(tt.opts)
+			if got := verify["contents"]; got != tt.wantVerify {
+				t.Errorf("verify contents = %q, want %q", got, tt.wantVerify)
+			}
+			if got := manifest["contents"]; got != tt.wantManifest {
+				t.Errorf("manifest contents = %q, want %q", got, tt.wantManifest)
+			}
+			// Everything else matches the engine's base set in both.
+			for k, v := range engine.RequiredGitHubAppPermissions(false) {
+				if k == "contents" {
+					continue
+				}
+				if verify[k] != v || manifest[k] != v {
+					t.Errorf("%s: verify=%q manifest=%q, want %q", k, verify[k], manifest[k], v)
+				}
+			}
+		})
+	}
+}
+
+// TestRunGitHubAppSetup_HTTPSGit_ContentsReadRefusedWithFixHint: adopting an
+// installation that grants only contents:read under the default HTTPS git
+// fails init (the engine would refuse it at startup) and names both fixes.
+func TestRunGitHubAppSetup_HTTPSGit_ContentsReadRefusedWithFixHint(t *testing.T) {
+	isolateCmdGitConfig(t, "")
+	dir := t.TempDir()
+	chdirTest(t, dir)
+	keyPath := writeCmdTestAppKey(t, dir)
+	readOnly := fullPermissions()
+	readOnly["contents"] = "read"
+	srv := newFakeGitHubAppSetupServer(t,
+		[]gh.AppInstallation{{ID: 555, Account: "handarbeit", Permissions: readOnly}},
+		map[string]string{"handarbeit": "organization"},
+	)
+
+	_, err := runGitHubAppSetup(context.Background(), githubAppSetupOptions{
+		Owner: "handarbeit", AppID: 42, PrivateKeyPath: keyPath, InstallationID: 555, BaseURL: srv.URL, NoBrowser: true,
+	})
+	if err == nil {
+		t.Fatal("expected a contents shortfall under HTTPS git")
+	}
+	for _, want := range []string{"contents", "settings/apps/", "/permissions", "git_ssh"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q missing %q", err.Error(), want)
+		}
+	}
+
+	// The same installation is fine once git runs over SSH.
+	if _, err := runGitHubAppSetup(context.Background(), githubAppSetupOptions{
+		Owner: "handarbeit", AppID: 42, PrivateKeyPath: keyPath, InstallationID: 555, GitSSH: true, BaseURL: srv.URL, NoBrowser: true,
+	}); err != nil {
+		t.Fatalf("git_ssh with contents:read: %v", err)
 	}
 }
 

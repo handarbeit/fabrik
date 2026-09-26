@@ -620,12 +620,19 @@ func runInit(args []string) error {
 	var appSetup *githubAppSetupResult
 	if *githubApp {
 		noBrowser := *noBrowserFlag || !(isatty.IsTerminal(os.Stdin.Fd()) || isatty.IsCygwinTerminal(os.Stdin.Fd()))
+		// Same git_ssh resolution as the daemon (minus its --ssh flag): an
+		// existing .fabrik/config.yaml, overridden by FABRIK_GIT_SSH (#1846).
+		pc, err := config.LoadProjectConfig()
+		if err != nil {
+			return fmt.Errorf("--github-app: %w", err)
+		}
 		res, err := runGitHubAppSetup(context.Background(), githubAppSetupOptions{
 			Owner:          *ownerFlag,
 			AppID:          *githubAppIDFlag,
 			PrivateKeyPath: *githubAppKeyPathFlag,
 			InstallationID: *githubAppInstallationIDFlag,
 			Webhooks:       *webhooksFlag,
+			GitSSH:         resolveBool("FABRIK_GIT_SSH", pc.GitSSH),
 			NoBrowser:      noBrowser,
 		})
 		if err != nil {

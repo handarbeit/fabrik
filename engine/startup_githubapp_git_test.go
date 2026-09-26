@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -14,7 +13,7 @@ import (
 )
 
 // isolateGitConfig points the git-config lookups checkURLRewrite (and hence
-// RefuseHTTPSWorkerGitUnderAppAuth's hasSSHRewrite input) makes at a
+// the HTTPS-git decision in setUpGitHubAppAuth/setUpAppGitCredential) makes at a
 // test-local global config file, so these tests are deterministic regardless
 // of the host's own ~/.gitconfig — mirroring tests/sim/simgh/git.go's
 // GIT_CONFIG_GLOBAL/GIT_CONFIG_NOSYSTEM precedent (#1756, same class of
@@ -35,11 +34,18 @@ func isolateGitConfig(t *testing.T, rewrite string) {
 const sshRewriteGitConfig = "[url \"git@github.com:\"]\n\tinsteadOf = https://github.com/\n"
 
 // runEngineUntilShutdown starts eng.Run() in the background, waits for
-// ReadyCh (proving Run() got past every preflight, including the #1756
-// refusal under test), sends SIGINT, and asserts a clean, prompt shutdown.
+// ReadyCh (proving Run() got past every preflight, including the App-auth
+// git setup under test), sends SIGINT, and asserts a clean, prompt shutdown.
 // Mirrors TestRun_ShutdownOnSignal_WithGitHubAppAuth_WaitsForRefreshLoop's
 // shape.
 func runEngineUntilShutdown(t *testing.T, eng *Engine) {
+	t.Helper()
+	runEngineUntilShutdownWith(t, eng, nil)
+}
+
+// runEngineUntilShutdownWith is runEngineUntilShutdown with a hook that runs
+// once Run() is ready, before the shutdown signal.
+func runEngineUntilShutdownWith(t *testing.T, eng *Engine, onReady func()) {
 	t.Helper()
 	readyCh := make(chan struct{})
 	eng.cfg.ReadyCh = readyCh
@@ -53,6 +59,9 @@ func runEngineUntilShutdown(t *testing.T, eng *Engine) {
 		t.Fatalf("Run() exited before signaling ready (preflight refused startup unexpectedly): %v", err)
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run() did not become ready in time")
+	}
+	if onReady != nil {
+		onReady()
 	}
 
 	p, _ := os.FindProcess(os.Getpid())
@@ -71,7 +80,7 @@ func runEngineUntilShutdown(t *testing.T, eng *Engine) {
 // newAppAuthTestEngine builds an Engine wired with a real, working
 // githubauth.Reconciler (against a fake GitHub App server) as e.ghAppAuth,
 // exactly as App-auth mode leaves it after New() — so Run()'s
-// e.ghAppAuth != nil gate for the #1756 refusal is exercised the same way
+// e.ghAppAuth != nil gate for the App-auth git setup is exercised the same way
 // production code sets it, not via a bare struct-literal assignment.
 func newAppAuthTestEngine(t *testing.T) *Engine {
 	t.Helper()
@@ -104,28 +113,8 @@ func newAppAuthTestEngine(t *testing.T) *Engine {
 	return eng
 }
 
-// TestRun_GitHubAppAuth_HTTPSNoRewrite_RefusedAtStartup covers #1756's AC2:
-// App auth + default HTTPS git config, with no SSH rewrite masking it, must
-// be refused at startup with a clear message — never left to fail later as a
-// confusing mid-stage 403.
-func TestRun_GitHubAppAuth_HTTPSNoRewrite_RefusedAtStartup(t *testing.T) {
-	isolateGitConfig(t, "")
-	eng := newAppAuthTestEngine(t)
-	// eng.cfg.GitSSH is false by default (testEngine's Config zero value).
-
-	err := eng.Run()
-	if err == nil {
-		t.Fatal("expected Run() to refuse App auth + default HTTPS worker git, got nil error")
-	}
-	for _, want := range []string{"HTTPS", "git_ssh", "insteadOf"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("refusal error %q missing expected substring %q", err.Error(), want)
-		}
-	}
-}
-
 // TestRun_GitHubAppAuth_GitSSH_StartsCleanly confirms setting git_ssh: true
-// avoids the #1756 refusal and Run() proceeds to a normal, signal-driven
+// starts without injecting a helper and Run() proceeds to a normal, signal-driven
 // shutdown.
 func TestRun_GitHubAppAuth_GitSSH_StartsCleanly(t *testing.T) {
 	isolateGitConfig(t, "")
@@ -135,9 +124,8 @@ func TestRun_GitHubAppAuth_GitSSH_StartsCleanly(t *testing.T) {
 }
 
 // TestRun_GitHubAppAuth_SSHRewrite_StartsCleanly confirms an active
-// url.git@github.com:.insteadOf rewrite also avoids the #1756 refusal, since
-// it transparently redirects worker HTTPS git to SSH before any credential
-// helper is ever consulted.
+// url.git@github.com:.insteadOf rewrite is treated like git_ssh, since it
+// redirects HTTPS git to SSH before any credential helper is consulted.
 func TestRun_GitHubAppAuth_SSHRewrite_StartsCleanly(t *testing.T) {
 	isolateGitConfig(t, sshRewriteGitConfig)
 	eng := newAppAuthTestEngine(t)
@@ -146,9 +134,8 @@ func TestRun_GitHubAppAuth_SSHRewrite_StartsCleanly(t *testing.T) {
 }
 
 // TestRun_PATMode_HTTPSNoRewrite_Unaffected pins AC5: PAT mode (no App auth
-// configured, e.ghAppAuth == nil) must never see the #1756 refusal, even
-// under the exact HTTPS+no-rewrite configuration that triggers it under App
-// auth.
+// configured, e.ghAppAuth == nil) starts normally under HTTPS with no
+// rewrite, and gets no injected helper.
 func TestRun_PATMode_HTTPSNoRewrite_Unaffected(t *testing.T) {
 	isolateGitConfig(t, "")
 	client := &mockGitHubClient{

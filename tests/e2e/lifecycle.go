@@ -212,6 +212,26 @@ func markInheritedFDsCloseOnExec() {
 	}
 }
 
+// bedGitConfigIsolationEnv returns the git-config isolation env for a bed
+// launch, matching scripts/e2e/run.sh's preflight_bed_start (#1756/R5): its
+// GIT_CONFIG_GLOBAL points at the credential-only config run.sh writes to
+// .fabrik/git-config-isolated, so the operator's url.*.insteadOf rewrite
+// cannot silently move the bed's HTTPS git onto SSH. run.sh sets these only
+// in its own launch subshell, so a bed restarted here (every train-mode
+// switch) would otherwise run on the operator's real ~/.gitconfig — which
+// is how an App-mode leg could pass over SSH while HTTPS (#1846) was never
+// exercised. Missing file (a go test run outside run.sh) → no isolation,
+// logged.
+func bedGitConfigIsolationEnv(t *testing.T, env *Env) []string {
+	t.Helper()
+	path := filepath.Join(env.FabrikTestDir, ".fabrik", "git-config-isolated")
+	if _, err := os.Stat(path); err != nil {
+		t.Logf("StartFabrikTestBed: no isolated git config at %s (%v) — bed inherits the operator's git config", path, err)
+		return nil
+	}
+	return []string{"GIT_CONFIG_GLOBAL=" + path, "GIT_CONFIG_NOSYSTEM=1"}
+}
+
 // StartFabrikTestBed launches a fresh detached bed from the bed's own binary and
 // waits for it to acquire the lock. No-op if already running.
 func StartFabrikTestBed(t *testing.T, env *Env) {
@@ -230,6 +250,7 @@ func StartFabrikTestBed(t *testing.T, env *Env) {
 	// Strip GITHUB_TOKEN so Fabrik uses FABRIK_TOKEN (@arbeithand) from the bed's
 	// .env — an ambient token must not hijack the bed's identity.
 	cmd.Env = stripEnv(os.Environ(), "GITHUB_TOKEN")
+	cmd.Env = append(cmd.Env, bedGitConfigIsolationEnv(t, env)...)
 	// Detach: new process group + /dev/null stdio so the child outlives the test.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if devnull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0); err == nil {

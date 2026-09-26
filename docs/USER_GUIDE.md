@@ -463,6 +463,17 @@ https://github.com/settings/installations/789012 (an org admin may be required),
 then re-run `fabrik init --github-app`
 ```
 
+**Contents permission.** A newly created App always requests `contents: write`, because by default git runs over HTTPS as the installation (see [Git under App auth](#git-under-app-auth)). Verification follows the engine's own rule: `contents: write` is required unless git runs over SSH — `git_ssh: true` in an existing `.fabrik/config.yaml`, `FABRIK_GIT_SSH`, or a global `url.git@github.com:.insteadOf` rewrite. An App created before this change requested only `contents: read`; there is nothing for the installation to approve until the App itself asks for more, so the error names the App's permissions page as the first step:
+
+```
+GitHub App installation 789012 is missing required permissions: contents (required "write",
+granted "read") (contents:write is needed because git runs over HTTPS as the installation — if
+the App does not request it yet, set Contents to "Read and write" at
+https://github.com/organizations/myorg/settings/apps/my-app/permissions first; or set
+git_ssh: true in .fabrik/config.yaml to keep using your SSH key) — approve the permission
+change at https://github.com/settings/installations/789012 ...
+```
+
 **`--webhooks`.** GitHub App auth and `--webhooks` cannot currently be combined — see "Not combinable with `--webhooks`" under Known limitations below. `fabrik init --github-app --webhooks` is refused outright at setup time, before any network call, with the same explanation the engine's own startup gives; there's no need to discover the incompatibility later by watching the engine refuse to start. Run the engine with polling (`--reconcile-interval`) instead.
 
 **Key storage.** A freshly created App's private key is written to `.fabrik/github-app-key.pem` (0600, parent directory 0700, written atomically) unless `--github-app-private-key-path` names a different location (adopt path only — see above). Non-key App metadata (App ID, slug, webhook secret, client ID/secret) is written to the fixed, non-configurable `.fabrik/github-app-state.json` — the same file the engine's own compat-mode client construction reads diagnostics-only state from. **Re-keying:** rotate the key on the App's GitHub settings page, then replace the file at your configured `github_app_private_key_path`; the engine's own startup detects a key that doesn't match its recorded fingerprint and fails loudly with a repair-needed error rather than silently misauthenticating. Both default paths are added to `.git/info/exclude` by `fabrik init` (alongside the other Fabrik working directories it already excludes) so a routine `git add .` in your project can't accidentally commit the private key — unlike `.fabrik/config.yaml`, which is meant to be committed, these are per-operator secrets. A custom `--github-app-private-key-path` outside `.fabrik/` is not auto-excluded; add it to your own `.gitignore` if needed.
@@ -542,7 +553,7 @@ GitHub App installation 789012 is missing required permissions: organization_pro
 (App settings → Install App → Configure) and restart Fabrik
 ```
 
-The engine currently requires: `metadata:read`, `organization_projects:write`, `issues:write`, `pull_requests:write`, `checks:read`, `statuses:read`, `contents:read`. (`--webhooks` cannot be combined with App auth at all — see Known limitations below — so no webhook-management permission is ever required here.) Notably absent: `actions` and `contents:write` — see "Worker git under App auth" below for what that means for worker `git`/`gh run` usage.
+The engine currently requires: `metadata:read`, `organization_projects:write`, `issues:write`, `pull_requests:write`, `checks:read`, `statuses:read`, `contents:read` — `contents:write` instead when git runs over HTTPS (the default; see "Git under App auth" below). (`--webhooks` cannot be combined with App auth at all — see Known limitations below — so no webhook-management permission is ever required here.) Notably absent: `actions` — see "Worker `gh` CLI authentication" below for what that means for `gh run` usage.
 
 #### Per-repo access coverage
 
@@ -578,21 +589,19 @@ Built-in stage skills (e.g. `fabrik-validate`'s Pre-Completion Gate) shell out t
 
 The installation token is not granted `actions:read`, so `gh run list`/`gh run view --log-failed` 403 under App auth. The built-in CI-fix instructions (`fabrik-review`/`fabrik-validate`) use the Checks API (`gh api repos/{owner}/{repo}/commits/<sha>/check-runs` + `.../check-runs/<id>/annotations`) instead, which runs on the already-granted `checks:read` scope — see [ADR-1756](../adrs/1756-worker-git-gh-surface-under-github-app-auth.md).
 
-#### Worker git under App auth
+#### Git under App auth
 
-Worktrees clone over HTTPS by default (`git_ssh: false`). On a machine where a git credential helper is registered to prefer `GH_TOKEN`/`GITHUB_TOKEN` from the environment (e.g. one installed by `gh auth setup-git`), a worker's `git fetch`/`git push` would resolve credentials to the installation token above — which is granted `contents:read` but not `contents:write`, so fetch would likely succeed but `git push` (which every managed stage does — see CLAUDE.md's "commit frequently" convention) would 403. Fabrik refuses this combination explicitly at startup rather than letting it fail mid-stage:
+Worktrees clone over HTTPS by default (`git_ssh: false`). Under App auth, Fabrik makes HTTPS git — the engine's own clone/fetch/push and every stage worker's — authenticate to `https://github.com` as the App installation, whatever credential helpers the host has configured (GCM, osxkeychain, `gh auth git-credential`). It does this by injecting a credential helper through git's `GIT_CONFIG_COUNT` environment mechanism at startup; the helper reads the installation token from `.fabrik/state/github-app-git-token`, which Fabrik rewrites whenever the token rotates, so a worker running longer than the token's ~1-hour lifetime still pushes. Pushes therefore appear as `<app-slug>[bot]`.
+
+This requires the installation to grant **`contents: write`**, checked at startup along with the other permissions. Without it, startup fails:
 
 ```
-GitHub App authentication is configured with default HTTPS git cloning — under App auth,
-stage workers authenticate gh/git via the installation token (see RequiredGitHubAppPermissions),
-which is granted contents:read but not contents:write, so a worker's git push over the
-default HTTPS remote would 403 as soon as any git credential helper ... resolves credentials
-from the GH_TOKEN/GITHUB_TOKEN environment. Fix by either setting git_ssh: true (or --ssh) in
-.fabrik/config.yaml so worktrees clone over SSH instead, or configuring a global
-url.git@github.com:.insteadOf = https://github.com/ rewrite ...
+GitHub App installation 162085522 is missing required permissions: contents (required write,
+granted read) (contents:write is required because git runs over HTTPS as the installation;
+alternatively set git_ssh: true so git uses your SSH key instead) — grant these permissions ...
 ```
 
-Fix by doing one of the two things it names: set `git_ssh: true` (or pass `--ssh`) so worktrees clone over SSH instead, or configure a global `url.git@github.com:.insteadOf = https://github.com/` rewrite so HTTPS remotes are transparently redirected to SSH before any credential helper is consulted. Either is sufficient; this check never fires in PAT mode. See [ADR-1756](../adrs/1756-worker-git-gh-surface-under-github-app-auth.md).
+Fix by granting `Contents: Read and write` on the App (App settings → Permissions & events), then accepting the updated permissions on the installation — or set `git_ssh: true` (or `--ssh`), or configure a global `url.git@github.com:.insteadOf = https://github.com/` rewrite. With either SSH route, git uses your SSH key, no helper is injected, and `contents: read` suffices. PAT mode is unaffected. See [ADR-1846](../adrs/1846-app-auth-https-git-credential-helper.md).
 
 #### Event-Driven Ingestion via Hookdeck (App Auth)
 
@@ -651,7 +660,7 @@ The same gap is surfaced as a coverage note next to the webhook health indicator
 - **`event_source: hookdeck` requires App auth, and cannot be combined with `--webhooks` either.** Both combinations are refused explicitly at startup, naming both settings: `event_source: hookdeck` with no GitHub App configured (Hookdeck has no PAT-mode equivalent — it consumes the App's own webhook), and `event_source: hookdeck` together with `--webhooks` (the two are mutually exclusive ingestion transports). See [Event-Driven Ingestion via Hookdeck](#event-driven-ingestion-via-hookdeck-app-auth) above.
 - **An unrecognized `event_source` value is refused at startup, not silently downgraded.** Only `poll` (the default), `hookdeck`, or omitting the field entirely are accepted — a typo (`Hookdeck`, `hook-deck`, etc.) fails loud with an error naming the offending value, rather than comparing unequal to every known constant and quietly falling back to plain polling with no error or log line.
 - **One installation, one account.** The engine holds a single GitHub client scoped to one App installation (one organization). A cross-organization spawn target (a Plan/Review/Validate stage spawning a child issue in a different GitHub account or organization) is unreachable under App auth — this mirrors a GitHub App installation's own strict account-scoping, not a Fabrik design choice.
-- **Git operations depend on `git_ssh`/an SSH rewrite.** The engine's own git clone/push machinery always uses ambient SSH or a credential helper, regardless of authentication mode — but worker git (the worktree a stage operates in) is only safe under App auth's default-HTTPS mode if `git_ssh: true` or an `insteadOf` rewrite is configured; see "Worker git under App auth" above. Fabrik refuses to start otherwise rather than leaving this to silent host-config dependence.
+- **HTTPS git needs `contents: write`.** Under App auth, HTTPS git (engine and workers) authenticates as the installation, which requires `contents: write`; with `git_ssh: true` or an `insteadOf` rewrite, git uses your SSH key instead. See "Git under App auth" above.
 - **No secret material is ever logged**, at any verbosity — neither the private key nor any minted installation token.
 
 ### Auto-upgrade
