@@ -111,16 +111,17 @@ meant to avoid.
    `t.Setenv`/timing constraints and the requirement to preserve coverage exactly.
 3. **Keep `ci.yml`'s job structure and `go test` step unchanged**, so the `Test and vet`
    check reports on every PR exactly as before (R7/AC8).
-4. **Pin R3 with a test.** `scripts/release_gate_full_suite_test.sh` (wired into `ci.yml`)
-   asserts that `scripts/cut-release.sh` and `scripts/e2e/run.sh` still run their full
-   suites and reference no selection mechanism. Nothing is narrowed today, but the guard
-   means a future selector cannot leak into the release gate unnoticed (AC5). This follows
-   the reasoning of ADR 1454: a cheap layer never replaces the full one at the release
-   gate.
+4. **Ship no guard test.** The release gate (`scripts/cut-release.sh`, `scripts/e2e/run.sh`'s
+   `run_pregate`) is untouched and nothing narrows it, so R3/AC5 holds by construction. A
+   static check that greps the gate scripts' `go test` command text would guard a selector
+   nobody is building, and any harmless refactor of those scripts would fail CI. If a
+   selector is ever built, the PR that introduces it is the natural place to add its own
+   guard. This follows the reasoning of ADR 1454: a cheap layer never replaces the full one
+   at the release gate.
 
 Under AC7, this ADR satisfies AC1–4 and AC6 (no selector ships, so there is nothing to
-exercise them against); AC5 is covered by the guard test; AC8 and AC9 hold because the
-workflow's job and test step are untouched.
+exercise them against); AC5 is satisfied because the release gate is untouched and nothing
+narrows it; AC8 and AC9 hold because the workflow's job and test step are untouched.
 
 ## Why not selection — the case in full
 
@@ -174,6 +175,6 @@ of cross-package `_test.go` readers, backed by a guard test that fails when a te
 - CI stays whole-module; every PR pays the ~145–200s `go test` step (a cold run can be
   slower than cached reruns).
 - ADR 1454's R7 ("CI placement") stays accurate: layers 1–3 share one `go test -race ./...`
-  on every PR. It carries a pointer to this ADR.
+  on every PR.
 - The release gate (`scripts/cut-release.sh`, `scripts/e2e/run.sh`'s `run_pregate`) is
-  unchanged and guarded against future narrowing.
+  unchanged. No guard test ships; a future selector's PR should add its own.

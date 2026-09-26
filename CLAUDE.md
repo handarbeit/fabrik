@@ -39,7 +39,7 @@ sim, fixed there as well as in the engine.
 CI's layer-1 `go test` step runs the **whole module on every PR** — no `paths:` filter
 and no dependency-graph test selection, by decision (`adrs/1857-no-per-pr-test-selection.md`,
 which also records why `tests/sim/simgh` is not sharded). The release gate is always the
-full suite; `scripts/release_gate_full_suite_test.sh` pins that.
+full suite.
 
 ## Documentation bundle (docs/llms-full.txt)
 
