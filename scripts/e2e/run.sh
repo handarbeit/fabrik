@@ -2,13 +2,14 @@
 # scripts/e2e/run.sh — runner for the Fabrik end-to-end integration suite.
 #
 # Usage:
-#   scripts/e2e/run.sh                       # full two-mode validation gate (off, then on)
+#   scripts/e2e/run.sh                       # full gate: off then on, under pat then app auth
 #   scripts/e2e/run.sh --clean               # reset boards/PRs/branches first, then the gate
 #   scripts/e2e/run.sh -run TestSmokeSingleRepoDispatch    # one test, both modes
 #   scripts/e2e/run.sh -run 'Smoke|NoWork'                 # subset, both modes
 #   E2E_TRAIN_MODE=off scripts/e2e/run.sh -run TestSmokeSingleRepoDispatch  # single mode only
 #   E2E_PARALLEL=2 scripts/e2e/run.sh        # tighten the parallelism cap for a heavy run
 #   E2E_PARALLEL_ON=1 scripts/e2e/run.sh     # tighten just the "on" leg's cap further
+#   E2E_AUTH_MODE=app scripts/e2e/run.sh     # App-auth legs only (default: pat, then app — #1861)
 #
 # --clean (if given, must be the first argument) runs scripts/e2e/reset.sh for a
 # clean-slate bed before the run. Anything else is passed to `go test`.
@@ -421,6 +422,93 @@ readonly POST_SUITE_WATCHDOG_EXIT=6
 readonly PRECONDITION_FAILED_EXIT=7
 
 # ---------------------------------------------------------------------------
+# Auth-mode legs (#1861). The gate runs its train-mode legs once per auth
+# mode: "pat" (the bed engine authenticates with FABRIK_TOKEN) and then "app"
+# (it authenticates as the GitHub App installation — see ADR-1713/ADR-1846).
+# Auth mode changes Fabrik's own identity: every "is this comment/review
+# mine or a human's?" decision, every push and merge, repo-access
+# resolution. So the App legs are a full rerun of the suite, not a smoke
+# check.
+#
+# The mode is applied by the same dedicated restart step that applies the
+# train mode (TestSwitchTrainMode): it writes FABRIK_GITHUB_APP_* into the
+# bed's .env from the bed-local E2E_APP_ID / E2E_APP_PRIVATE_KEY_PATH /
+# E2E_APP_INSTALLATION_ID for "app", blanks them for "pat", restarts the bed,
+# and verifies the identity it came up as from its startup banner.
+# config.yaml must therefore be auth-neutral (no github_app_* keys) — a key
+# there would silently turn every "pat" leg into App auth.
+#
+#   E2E_AUTH_MODE   unset (default) = both, "pat" then "app"; or "pat" / "app"
+#                   for a single auth mode.
+# ---------------------------------------------------------------------------
+
+# resolve_auth_modes echoes the space-separated auth legs to run for
+# E2E_AUTH_MODE=$1, or fails (exit 1, message on stderr) on an unknown value.
+resolve_auth_modes() {
+  case "${1:-}" in
+    "") echo "pat app" ;;
+    pat | app) echo "$1" ;;
+    *)
+      echo "E2E_AUTH_MODE=\"$1\" is invalid (must be pat, app, or unset for both)" >&2
+      return 1
+      ;;
+  esac
+}
+
+# auth_modes_include <modes> <mode>: 0 when <mode> is one of <modes>.
+auth_modes_include() {
+  case " $1 " in *" $2 "*) return 0 ;; *) return 1 ;; esac
+}
+
+# env_file_value <file> <key>: the value of the last KEY= line, or empty.
+env_file_value() {
+  { grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- | sed -e "s/^[\"']//" -e "s/[\"']\$//"; } || true
+}
+
+# auth_mode_problems <bed_dir> <modes> prints one line per unmet auth-mode
+# precondition (nothing when all are met). Pure over the bed's files, so
+# auth_mode_check_test.sh covers it against fixture directories.
+auth_mode_problems() {
+  local bed="$1" modes="$2"
+  if grep -Eq '^[[:space:]]*github_app_(id|private_key_path|installation_id)[[:space:]]*:' "$bed/.fabrik/config.yaml" 2>/dev/null; then
+    echo "$bed/.fabrik/config.yaml sets github_app_* keys — auth mode is applied per leg through .env, so these would turn every pat leg into App auth; move the values to E2E_APP_ID / E2E_APP_PRIVATE_KEY_PATH / E2E_APP_INSTALLATION_ID in $bed/.env"
+  fi
+  if auth_modes_include "$modes" app; then
+    local k v key_path
+    for k in E2E_APP_ID E2E_APP_PRIVATE_KEY_PATH E2E_APP_INSTALLATION_ID; do
+      v="$(env_file_value "$bed/.env" "$k")"
+      [ -n "$v" ] || echo "$k is not set in $bed/.env (needed for the app auth leg)"
+    done
+    key_path="$(env_file_value "$bed/.env" E2E_APP_PRIVATE_KEY_PATH)"
+    if [ -n "$key_path" ]; then
+      case "$key_path" in /*) ;; *) key_path="$bed/$key_path" ;; esac
+      [ -r "$key_path" ] || echo "E2E_APP_PRIVATE_KEY_PATH points at $key_path, which is not a readable file"
+    fi
+  fi
+}
+
+# check_auth_mode_preconditions refuses (PRECONDITION_FAILED_EXIT) before any
+# live spend when a planned auth leg cannot run.
+check_auth_mode_preconditions() {
+  local problems
+  problems="$(auth_mode_problems "$TEST_BED" "$AUTH_MODES")"
+  if [ -n "$problems" ]; then
+    {
+      echo ""
+      echo "############################################################"
+      echo "## PRECONDITION FAILED: auth-mode legs (${AUTH_MODES}) cannot run (#1861)"
+      echo "##"
+      printf '%s\n' "$problems" | while IFS= read -r line; do echo "##   $line"; done
+      echo "##"
+      echo "## Or set E2E_AUTH_MODE=pat to run only the PAT legs."
+      echo "############################################################"
+    } >&2
+    exit "$PRECONDITION_FAILED_EXIT"
+  fi
+  echo "== auth-mode legs: ${AUTH_MODES} =="
+}
+
+# ---------------------------------------------------------------------------
 # run_reaped (R3, #1624): run "$@" as a backgrounded job in its own process
 # group and reap that whole group if this script is killed while it's in
 # flight, instead of leaving its children (most concretely, a compiled
@@ -740,6 +828,14 @@ check_competing_token_consumers() {
   local candidates matches
   candidates="$(discover_fabrik_process_dirs)"
   matches="$(find_competing_token_consumers "$TEST_BED" "$BED_TOKEN" "$candidates" || true)"
+  if [ -n "$matches" ] && ! auth_modes_include "${AUTH_MODES:-pat app}" pat; then
+    # App-only run (#1861): the bed engine spends the App installation's own
+    # GraphQL budget, not this token's; only the harness's own gh calls share
+    # it. Worth knowing, not worth refusing.
+    echo "warning: other local Fabrik process(es) share the bed's FABRIK_TOKEN, but no pat leg is planned (auth legs: ${AUTH_MODES}) — the bed engine uses the App installation's budget, so only the harness's own calls compete:" >&2
+    printf '%s\n' "$matches" | while IFS=$'\t' read -r pid dir; do echo "   pid $pid   dir $dir" >&2; done
+    return 0
+  fi
   if [ -n "$matches" ]; then
     {
       echo ""
@@ -1138,7 +1234,8 @@ preflight_bed_start() {
 
   echo "== preflight: starting bed instance (-notui -poll ${BED_POLL_SECONDS}s, no --auto-upgrade) =="
   ( cd "$TEST_BED" && GIT_CONFIG_GLOBAL="$isolated_gitconfig" GIT_CONFIG_NOSYSTEM=1 \
-      nohup ./fabrik -notui -poll "$BED_POLL_SECONDS" > "$TEST_BED/bed-run.log" 2>&1 & )
+      nohup env -u FABRIK_GITHUB_APP_ID -u FABRIK_GITHUB_APP_PRIVATE_KEY_PATH -u FABRIK_GITHUB_APP_INSTALLATION_ID \
+      ./fabrik -notui -poll "$BED_POLL_SECONDS" > "$TEST_BED/bed-run.log" 2>&1 & )
 
   # The startup banner goes to the engine's STDOUT (captured in bed-run.log),
   # while ENGINE_LOG holds the structured per-item log — which never contains
@@ -1246,7 +1343,7 @@ drain_output_consumer() {
   if ! kill -0 "$pid" 2>/dev/null; then
     return 0
   fi
-  echo "warning: output consumer did not drain within ${timeout_secs}s after go test exited (leg: ${mode})." >&2
+  echo "warning: output consumer did not drain within ${timeout_secs}s after go test exited (leg: ${leg:-$mode})." >&2
   echo "         Something that outlived go test is holding the output pipe open — find it with" >&2
   echo "         'lsof -p <pid> | grep FIFO'. go test has already exited, so its JSON log is" >&2
   echo "         complete and this leg's results are unaffected; continuing to the next leg." >&2
@@ -1364,7 +1461,7 @@ report_test_outcomes() {
 report_test_timings() {
   local jsonlog="$1"
   local mode="$2"
-  echo "== per-test wall-clock (leg: ${mode}), slowest first =="
+  echo "== per-test wall-clock (leg: ${leg:-$mode}), slowest first =="
   jq -R 'fromjson? // empty' "$jsonlog" \
     | jq -s -r '
         [ .[] | select(.Test != null and (.Test | contains("/") | not)
@@ -1587,7 +1684,7 @@ _post_suite_watchdog_signal() {
     {
       echo ""
       echo "############################################################"
-      echo "## POST-SUITE WATCHDOG (leg: ${mode}): go test exited $(( $(date +%s) - suite_exit_epoch ))s ago,"
+      echo "## POST-SUITE WATCHDOG (leg: ${leg:-$mode}): go test exited $(( $(date +%s) - suite_exit_epoch ))s ago,"
       echo "## but the script has not progressed past its post-suite steps"
       echo "## within ${POST_SUITE_WATCHDOG}s (E2E_POST_SUITE_WATCHDOG)."
       echo "## Stuck in: $(cat "$watchdog_dir/checkpoint" 2>/dev/null || echo "(unknown step)")"
@@ -1612,8 +1709,10 @@ switch_and_run() {
   local mode="$1"
   local parallel="$2"
   shift 2
+  # Report label: auth mode / train mode (#1861), e.g. "app/on".
+  local leg="${E2E_AUTH_MODE:-pat}/${mode}"
 
-  echo "== switching test bed to FABRIK_MERGE_TRAIN=${mode} =="
+  echo "== switching test bed to FABRIK_MERGE_TRAIN=${mode}, auth=${E2E_AUTH_MODE:-pat} (leg ${leg}) =="
   # KNOWN GAP: this restart step has none of the classification/auto-teardown
   # machinery below — it's a plain `-v` (non-`-json`) run with its own fixed
   # 3m timeout and no exit-code capture. If the bed fails to come back up
@@ -1628,10 +1727,10 @@ switch_and_run() {
   # rather than actually stuck. It is, however, still run via run_reaped
   # (R3, #1624) so a kill of this script during the restart doesn't leave its
   # own test binary running behind it.
-  E2E_TRAIN_SWITCH=1 E2E_TRAIN_MODE="$mode" run_reaped go test -tags=e2e -v -count=1 -timeout 3m \
+  E2E_TRAIN_SWITCH=1 E2E_TRAIN_MODE="$mode" E2E_AUTH_MODE="${E2E_AUTH_MODE:-pat}" run_reaped go test -tags=e2e -v -count=1 -timeout 3m \
     -run '^TestSwitchTrainMode$' ./tests/e2e/...
-  echo "== running suite with E2E_TRAIN_MODE=${mode}, -parallel=${parallel} =="
-  local jsonlog="${TMPDIR:-/tmp}/fabrik-e2e-${mode}-$$.json"
+  echo "== running suite with E2E_TRAIN_MODE=${mode}, E2E_AUTH_MODE=${E2E_AUTH_MODE:-pat}, -parallel=${parallel} (leg ${leg}) =="
+  local jsonlog="${TMPDIR:-/tmp}/fabrik-e2e-${E2E_AUTH_MODE:-pat}-${mode}-$$.json"
   local rc=0
 
   # Snapshot the bed's GraphQL budget right before the suite runs — this is
@@ -1660,7 +1759,7 @@ switch_and_run() {
         > "$budget_before_tmp" 2>"$budget_before_err"; then
       budget_before="$(cat "$budget_before_tmp" 2>/dev/null || echo "")"
     else
-      _report_gh_probe_failure "$budget_before_err" "budget_before (leg: ${mode})"
+      _report_gh_probe_failure "$budget_before_err" "budget_before (leg: ${leg:-$mode})"
     fi
     rm -f "$budget_before_tmp" "$budget_before_err"
   fi
@@ -1751,7 +1850,7 @@ switch_and_run() {
       fi
       prev_mtime="$cur_mtime"
       if [ "$stall_secs" -ge "$STALL_WARN_SECS" ]; then
-        echo "== STALL WARNING (leg: ${mode}): no new suite output for ${stall_secs}s (E2E_STALL_WARN_MINUTES=$((STALL_WARN_SECS / 60))) — go test is still running. Last completed scenario: $(last_completed_test_name "$jsonlog") ==" >&2
+        echo "== STALL WARNING (leg: ${leg:-$mode}): no new suite output for ${stall_secs}s (E2E_STALL_WARN_MINUTES=$((STALL_WARN_SECS / 60))) — go test is still running. Last completed scenario: $(last_completed_test_name "$jsonlog") ==" >&2
         stall_secs=0
       fi
     done
@@ -1880,18 +1979,21 @@ switch_and_run() {
         > "$budget_after_tmp" 2>"$budget_after_err"; then
       budget_after="$(cat "$budget_after_tmp" 2>/dev/null || echo "")"
     else
-      _report_gh_probe_failure "$budget_after_err" "budget_after (leg: ${mode})"
+      _report_gh_probe_failure "$budget_after_err" "budget_after (leg: ${leg:-$mode})"
     fi
     rm -f "$budget_after_tmp" "$budget_after_err"
   fi
   if [ -n "$budget_before" ] && [ -n "$budget_after" ]; then
     if [ "$budget_after" -le "$budget_before" ]; then
-      echo "== GraphQL budget (leg: ${mode}): ${budget_before} -> ${budget_after} remaining (consumed $((budget_before - budget_after)) pts) =="
+      echo "== GraphQL budget (leg: ${leg:-$mode}): ${budget_before} -> ${budget_after} remaining (consumed $((budget_before - budget_after)) pts) =="
+      if [ "${E2E_AUTH_MODE:-pat}" = "app" ]; then
+        echo "   (app leg: this is the harness's FABRIK_TOKEN budget only — the bed engine spends the App installation's own budget)"
+      fi
     else
-      echo "== GraphQL budget (leg: ${mode}): ${budget_before} -> ${budget_after} remaining (budget reset mid-leg; consumption not computable) =="
+      echo "== GraphQL budget (leg: ${leg:-$mode}): ${budget_before} -> ${budget_after} remaining (budget reset mid-leg; consumption not computable) =="
     fi
   else
-    echo "warning: could not read GraphQL rate_limit before/after leg ${mode} (gh api call failed) — skipping budget report" >&2
+    echo "warning: could not read GraphQL rate_limit before/after leg ${leg:-$mode} (gh api call failed) — skipping budget report" >&2
   fi
 
   echo "report_test_timings" > "$watchdog_dir/checkpoint"
@@ -1899,8 +2001,8 @@ switch_and_run() {
     || echo "warning: failed to compute test timings (jq error) — inspect the raw JSON log directly: $jsonlog" >&2
 
   if [ "$rc" -ne 0 ]; then
-    echo "failure classification / teardown (leg ${mode} failed, rc=${rc})" > "$watchdog_dir/checkpoint"
-    echo "== suite FAILED (leg: ${mode}, exit ${rc}) — classifying test outcomes ==" >&2
+    echo "failure classification / teardown (leg ${leg:-$mode} failed, rc=${rc})" > "$watchdog_dir/checkpoint"
+    echo "== suite FAILED (leg: ${leg:-$mode}, exit ${rc}) — classifying test outcomes ==" >&2
     echo "JSON log: $jsonlog" >&2
     report_test_outcomes "$jsonlog" >&2 \
       || echo "warning: failed to classify test outcomes (jq error) — inspect the raw JSON log directly: $jsonlog" >&2
@@ -1917,7 +2019,7 @@ switch_and_run() {
     # panic line has no attributed Test, or checking the outer process's
     # own exit code pattern) if that ever becomes true.
     if grep -q 'panic: test timed out after' "$jsonlog"; then
-      echo "== E2E_TIMEOUT kill detected (leg: ${mode}) — running best-effort teardown ==" >&2
+      echo "== E2E_TIMEOUT kill detected (leg: ${leg:-$mode}) — running best-effort teardown ==" >&2
       "$REPO_ROOT/scripts/e2e/reset.sh" \
         || echo "warning: automatic teardown failed; run scripts/e2e/reset.sh manually" >&2
       echo "NOTE: worktrees were NOT cleaned automatically (that requires stopping the bed first)." >&2
@@ -1941,7 +2043,7 @@ switch_and_run() {
     {
       echo ""
       echo "############################################################"
-      echo "## RUN INVALID (leg: ${mode}): GraphQL rate-limit backoff engaged mid-run."
+      echo "## RUN INVALID (leg: ${leg:-$mode}): GraphQL rate-limit backoff engaged mid-run."
       echo "## Any test failures/timeouts above may be throttling artifacts, not real"
       echo "## regressions — this run's verdict cannot be trusted."
       echo "##"
@@ -1977,6 +2079,8 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
   # below, let alone any bed preflight, build, restart, or live GitHub/Claude
   # call. See the header comment's "Preconditions" section and each
   # function's own comment for the full rationale.
+  AUTH_MODES="$(resolve_auth_modes "${E2E_AUTH_MODE:-}")" || exit "$PRECONDITION_FAILED_EXIT"
+  check_auth_mode_preconditions
   check_competing_token_consumers
   check_reviewer_reachable "$@"
 
@@ -2031,28 +2135,37 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
     case "$a" in -run | -run=* | --run | --run=*) caller_has_run=1 ;; esac
   done
 
-  if [ -n "${E2E_TRAIN_MODE:-}" ]; then
-    # Single mode forced by the caller — one switch + one suite invocation.
-    # Always uses E2E_PARALLEL (not E2E_PARALLEL_ON), unchanged from before
-    # E2E_PARALLEL_ON existed — see the header comment.
-    if [ "$E2E_TRAIN_MODE" = "on" ] && [ "$caller_has_run" -eq 0 ]; then
-      switch_and_run on "$PARALLEL" -skip "$TRAIN_ISOLATED_RE" "$@"
-      switch_and_run on "$PARALLEL" -run "^(${TRAIN_ISOLATED_RE})\$"
+  # Auth legs (#1861): the train-mode legs below run once per auth mode, pat
+  # first — the long-proven path, so a regression there surfaces before the
+  # App legs spend anything. TestSwitchTrainMode applies E2E_AUTH_MODE on
+  # every leg's restart. Under set -e a failing leg ends the run, exactly as
+  # a failing train leg always has.
+  for auth_mode in $AUTH_MODES; do
+    export E2E_AUTH_MODE="$auth_mode"
+    echo "== auth leg: ${auth_mode} =="
+    if [ -n "${E2E_TRAIN_MODE:-}" ]; then
+      # Single mode forced by the caller — one switch + one suite invocation.
+      # Always uses E2E_PARALLEL (not E2E_PARALLEL_ON), unchanged from before
+      # E2E_PARALLEL_ON existed — see the header comment.
+      if [ "$E2E_TRAIN_MODE" = "on" ] && [ "$caller_has_run" -eq 0 ]; then
+        switch_and_run on "$PARALLEL" -skip "$TRAIN_ISOLATED_RE" "$@"
+        switch_and_run on "$PARALLEL" -run "^(${TRAIN_ISOLATED_RE})\$"
+      else
+        switch_and_run "$E2E_TRAIN_MODE" "$PARALLEL" "$@"
+      fi
     else
-      switch_and_run "$E2E_TRAIN_MODE" "$PARALLEL" "$@"
+      # Default: the full validation gate. "off" first — see header comment for
+      # why. "on" gets the tighter E2E_PARALLEL_ON cap, and is split into a main
+      # leg plus an isolated leg for the scenarios above. switch_and_run
+      # restarts the bed each time, which also clears the in-memory guard state
+      # — so the isolation is explicit, not merely dependent on ordering.
+      switch_and_run off "$PARALLEL" "$@"
+      if [ "$caller_has_run" -eq 0 ]; then
+        switch_and_run on "$PARALLEL_ON" -skip "$TRAIN_ISOLATED_RE" "$@"
+        switch_and_run on "$PARALLEL_ON" -run "^(${TRAIN_ISOLATED_RE})\$"
+      else
+        switch_and_run on "$PARALLEL_ON" "$@"
+      fi
     fi
-  else
-    # Default: the full validation gate. "off" first — see header comment for
-    # why. "on" gets the tighter E2E_PARALLEL_ON cap, and is split into a main
-    # leg plus an isolated leg for the scenarios above. switch_and_run
-    # restarts the bed each time, which also clears the in-memory guard state
-    # — so the isolation is explicit, not merely dependent on ordering.
-    switch_and_run off "$PARALLEL" "$@"
-    if [ "$caller_has_run" -eq 0 ]; then
-      switch_and_run on "$PARALLEL_ON" -skip "$TRAIN_ISOLATED_RE" "$@"
-      switch_and_run on "$PARALLEL_ON" -run "^(${TRAIN_ISOLATED_RE})\$"
-    else
-      switch_and_run on "$PARALLEL_ON" "$@"
-    fi
-  fi
+  done
 fi

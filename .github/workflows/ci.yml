@@ -119,6 +119,12 @@ jobs:
       - name: competing-token-consumer regression test (#1684)
         run: bash scripts/e2e/token_consumer_check_test.sh
 
+      # Auth-mode legs (#1861): E2E_AUTH_MODE resolution, the auth-mode
+      # preconditions against fixture beds, and the token check's downgrade to
+      # a warning when no pat leg is planned. Same sourced-fixture pattern.
+      - name: auth-mode legs regression test (#1861)
+        run: bash scripts/e2e/auth_mode_check_test.sh
+
       # R2's review-bot-reachable preflight (scripts/e2e/run.sh's
       # check_reviewer_reachable, #1684) exists so a gate run fails fast when
       # Pruefer is confidently down, instead of every review-gated scenario
