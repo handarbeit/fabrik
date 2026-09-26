@@ -3114,7 +3114,7 @@ The empty-`unmergedPaths` cases above are the ones this issue adds: previously, 
 
 **Trigger:** Issue #1871. Right after the train lands a member, the next batch formation could still see it in `Queued` and run its landing a second time — a second Done move, close, `Landed via …` comment and landing-verification write (3 of 25 landings on `verveguy/concept-maps`, on both landing paths, 5–6 s apart). Cause: `poll()` reads the board once (`engine/poll.go`) and reaches `handleMergeTrainBatch` seconds later with that same object; meanwhile the previous worker moved the member to Done and `finishTrain` released the in-flight marker, so `LoadOrStore` succeeds and a fresh worker starts from the pre-landing snapshot. Both "resume an interrupted landing" branches then read `Queued` off that snapshot as "interrupted". Their own `Status == "Done"` / `fabrik:awaiting-landing-verification` checks read snapshot fields too, so could not catch it.
 
-**Mechanism: a live Status read at the two resume decision points.** `liveLandingState` (`engine/merge_train.go`) reads each member's Status via `e.client.FetchProjectItemStatus(item.ItemID)` (falling back to `LookupIssueProjectItem` when the snapshot has no `ItemID`) — never `e.readClient` (boardcache-backed), `item.Status` or `item.Labels`; the same live-read discipline as §6.24. It is called from `completeDeferredLanding` (Route 1 of restart reconstruction, a per-member filter applied before `fetchTrainMembers`) and from the `pr.Merged` branch of `trySingletonFastPath` (§6.20).
+**Mechanism: a live Status read at the two resume decision points.** `liveLandingState` (`engine/merge_train.go`) reads each member's Status via `e.client.FetchProjectItemStatus(item.ItemID)` (falling back to `LookupIssueProjectItem` when the snapshot has no `ItemID`) — never `e.readClient` (boardcache-backed), `item.Status` or `item.Labels`; the same live-read discipline as §6.24. It is called from `completeDeferredLanding` (Route 1 of restart reconstruction, a per-member filter applied before `fetchTrainMembers`), from the `pr.Merged` branch of `trySingletonFastPath` (§6.20), and — via `dropLiveLandedMembers` — at **fresh batch formation** in `prepareTrainWorker`, right after `fetchTrainMembers` and before `admitTrainMembers` (§6.25).
 
 | Live read | Outcome | Action |
 |---|---|---|
@@ -3127,13 +3127,15 @@ The empty-`unmergedPaths` cases above are the ones this issue adds: previously, 
 
 **Integration-PR path.** Members that are moved or read-failed drop out of this poll's landing; the rest still land (a merged batch PR can have some members Done live and others still Queued). When none remain the existing "no still-Queued members" early return applies and `reconstructTrainState` still reports handled, so no fresh batch forms that poll. **Singleton fast path.** `liveMoved`/`liveReadFailed` return `true` ("disposition decided") — no trial is built and no landing is re-run.
 
+**Fresh batch formation.** A stale snapshot can also put just-landed members into a *fresh* batch: when no merged marker PR matches (any landing that carries no batch marker, e.g. a series of singleton fast-path landings), `reconstructTrainState` returns false and `prepareTrainWorker` falls through to formation. `fetchTrainMembers` only checks that a linked PR exists with a head SHA (a merged PR passes) and `admitTrainMembers` only classifies the member's own CI (green), so the trial — whose landed members' heads are already in base, making the merges no-ops — would pass and `landMergeTrainBatch` would re-land each one. `dropLiveLandedMembers` therefore drops `liveMoved` members and excludes `liveReadFailed` members from *this* batch only (the next poll retries them); `liveHolding`/`liveUnknown` members are kept, so a genuinely Queued member is never dropped. If nothing remains the worker logs "no survivors" and returns. The resume-branch guards stay: they cover the restart case formation never reaches. Cost: one live read per member per fresh formation (including polls where the batch is merely pending).
+
 **Consequence for the landing functions' own Done branches.** `landMergeTrainBatch`'s `Status == "Done"` branch and `finishSingletonFastPathLanding`'s Done-status branch (both commented as restart safety) are now reachable only if the Status changes between the guard's read and their own snapshot check.
 
 **Known gap (out of scope, ADR-1871).** `landSingleton`'s dedicated landing PR carries no batch marker, so Route 1 never matches it; a stale-Queued member from that path goes to fresh formation and was not traced. Bisection, `landOneAtATime` and `landGreenBatch` share the snapshot source but are not entered from either resume branch. Follow-up to be filed separately.
 
 **Test seams.** `Engine.SetMergeTrainLandingGuardDisabledForTest` makes the guard report `liveHolding` (pre-#1871 behaviour) so the sim scenarios can show the duplicate with the guard off. `simgh.Sim.LagBoardStatus` makes the bulk board reads keep reporting a held Status/labels while the single-node reads stay truthful.
 
-**Code path:** `landingLiveState`, `liveLandingState`, `completeDeferredLanding`, `trySingletonFastPath` (`engine/merge_train.go`).
+**Code path:** `landingLiveState`, `liveLandingState`, `dropLiveLandedMembers`, `prepareTrainWorker`, `completeDeferredLanding`, `trySingletonFastPath` (`engine/merge_train.go`).
 
 **State transitions:**
 
@@ -3142,6 +3144,8 @@ The empty-`unmergedPaths` cases above are the ones this issue adds: previously, 
 | Snapshot Queued, live Done (or any other non-holding column), merged PR found | Resume branch runs `liveLandingState` → `liveMoved` | Unchanged; nothing written | — | — |
 | Snapshot Queued, live Queued, merged PR found | `liveHolding` | Landing completed once (as §6.20 / Route 1) | (as the landing path) | — |
 | Snapshot Queued, live read errors | `liveReadFailed` | Unchanged; retried next poll | — | — |
+| Fresh batch lists a member that is live Done (or any non-holding column) | `dropLiveLandedMembers` → `liveMoved` | Member dropped from the batch; nothing written | — | — |
+| Fresh batch lists a member whose live read errors | `dropLiveLandedMembers` → `liveReadFailed` | Member excluded from this batch; retried next poll | — | — |
 
 **References:** [ADR-1871: Merge-Train Live-Status Resume Guard](../adrs/1871-merge-train-live-status-resume-guard.md), [ADR-059: Internal Merge Train](../adrs/059-internal-merge-train.md) (FR-2 restart safety, unchanged), [ADR-1644: Merge-Train Singleton Fast Path](../adrs/1644-merge-train-singleton-fast-path.md), [ADR-1773: Merge-Train Base Sanity Check](../adrs/1773-merge-train-base-sanity-check.md) (live-read discipline), §6.20, §6.24, issue #1871
 

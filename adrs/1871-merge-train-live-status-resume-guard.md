@@ -18,17 +18,18 @@ A live Status read at the two resume decision points, via `liveLandingState`:
 - **Skip only on positive evidence:** a non-empty Status that is not the holding stage. A holding Status resumes (crash between merge and Done; the `fabrik:awaiting-advance` retry). An empty Status resumes (no positive evidence).
 - **Fail closed on a read error:** defer this poll. Both resume branches re-run every poll, so this delays but never strands a member; failing open would keep the duplicate exactly when reads are flaky.
 - Per-member on the integration path (a merged batch PR can have members in mixed states); `return true` ("disposition decided", no trial) on the fast path.
+- **Also at fresh batch formation** (added in Validate review): `dropLiveLandedMembers` in `prepareTrainWorker`, after `fetchTrainMembers` and before `admitTrainMembers`, drops `liveMoved` members and excludes `liveReadFailed` members from that batch (retried next poll). Without it, a stale snapshot listing several just-landed members reaches a fresh batch whenever no merged marker PR matches (e.g. consecutive singleton fast-path landings): `fetchTrainMembers` accepts a merged PR and `admitTrainMembers` sees green CI, the trial passes because the members' heads are already in base, and `landMergeTrainBatch` re-lands each one. The #882 duplicate only surfaced on the fast path's resume branch because that batch happened to be a singleton.
 
 `Engine.SetMergeTrainLandingGuardDisabledForTest` restores the pre-#1871 behaviour so tests can show the duplicate with the guard off. `simgh.Sim.LagBoardStatus` reproduces the lagging read model in the sim.
 
 ## Alternatives considered
 
 1. **In-memory "landed this process" record per train key.** Zero API cost and clears on restart, but every landing path must remember to write it (`finishSingletonFastPathLanding` does not call `markCreditedLanding`), so a missed write silently reintroduces the bug, and it cannot cover another instance sharing the board.
-2. **Exclude just-landed members at batch formation** (a live read per member in `prepareTrainWorker`). Broadest, but adds N reads to every worker start — which happens every poll while a batch is Queued — and widens the change into batch formation, which the issue puts out of scope.
+2. **Exclude just-landed members at batch formation *instead of* guarding the resume branches.** A live read per member in `prepareTrainWorker` does not cover restart recovery paths that never reach formation (Route 1, the fast path's `pr.Merged` branch), so it cannot replace them. It is adopted only *in addition* to the resume-branch guards (see Decision).
 
 ## Consequences
 
-- A few extra live reads, only when a merged PR has already been found.
+- Extra live reads: a few at the resume branches (only when a merged PR has already been found), plus one per member at every fresh batch formation — including polls where the batch is merely pending — since formation cannot know in advance whether the snapshot is stale.
 - The restart-recovery contract (ADR-059 D5 / FR-2) is unchanged.
 - The Done branches inside `landMergeTrainBatch` and `finishSingletonFastPathLanding` are reachable only if Status changes after the guard's read.
 - A member a human moved to another column while its PR is merged is treated as landed and skipped.

@@ -940,7 +940,9 @@ this seam no scenario could dispatch from a pre-landing snapshot.
 
 `mergetrain_stale_snapshot_test.go` lands a member (fast path, then integration PR),
 lags the board back to Queued, polls again, and asserts exactly one `Landed via …`
-comment. Each duplicate scenario also runs with `Engine.SetMergeTrainLandingGuardDisabledForTest(true)`
+comment. A fresh-formation scenario lands two singletons, queues a third member and lags
+both landed members back to Queued, asserting only the genuinely Queued member lands.
+Each duplicate scenario also runs with `Engine.SetMergeTrainLandingGuardDisabledForTest(true)`
 and must observe the duplicate (non-vacuity). A third scenario merges a member's PR
 without the Done move and restarts, asserting the interrupted landing still completes once.
 See ADR-1871 and `docs/state-machine.md` §6.28.

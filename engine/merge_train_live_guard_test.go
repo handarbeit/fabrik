@@ -226,3 +226,45 @@ func TestReconstructTrainState_CompleteDeferredLanding_GuardDisabled_Relands(t *
 		t.Errorf("with the guard disabled the stale snapshot re-lands (non-vacuity), got %d status updates", len(client.updateStatusCalls))
 	}
 }
+
+// dropLiveLandedMembers is the fresh-formation guard (#1871): a stale snapshot that
+// lists just-landed members must not carry them into a fresh batch.
+func TestDropLiveLandedMembers_KeepsOnlyStillHolding(t *testing.T) {
+	statuses := map[string]string{"item-1": "Done", "item-2": "Queued", "item-3": "", "item-4": "Done"}
+	errFor := map[string]error{"item-5": errors.New("boom")}
+	client := &mockGitHubClient{
+		fetchProjectItemStatusFn: func(id string) (string, error) { return statuses[id], errFor[id] },
+	}
+	wm := NewWorktreeManager(t.TempDir())
+	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, wm)
+	state := &mergeTrainWorkerState{projectID: "PVT_test"}
+	p := trialParams{owner: "owner", repo: "repo", baseBranch: "main", wm: wm, holdingStg: holdingStage(eng.cfg)}
+	mk := func(n int, id string) trainMember {
+		return trainMember{item: gh.ProjectItem{Number: n, ItemID: id, Repo: "owner/repo", Status: "Queued"}, prNum: n * 10, headSHA: "sha"}
+	}
+	in := []trainMember{mk(1, "item-1"), mk(2, "item-2"), mk(3, "item-3"), mk(4, "item-4"), mk(5, "item-5")}
+
+	got := eng.dropLiveLandedMembers(state, p, in)
+	var nums []int
+	for _, m := range got {
+		nums = append(nums, m.item.Number)
+	}
+	// #1 and #4 are live-Done (dropped), #5 read failed (excluded this batch); the
+	// live-Queued #2 and the empty-status #3 (no positive evidence) are kept.
+	if len(nums) != 2 || nums[0] != 2 || nums[1] != 3 {
+		t.Fatalf("kept members = %v, want [2 3]", nums)
+	}
+}
+
+func TestDropLiveLandedMembers_GuardDisabledKeepsAll(t *testing.T) {
+	client := &mockGitHubClient{fetchProjectItemStatusFn: func(string) (string, error) { return "Done", nil }}
+	wm := NewWorktreeManager(t.TempDir())
+	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, wm)
+	eng.SetMergeTrainLandingGuardDisabledForTest(true)
+	state := &mergeTrainWorkerState{projectID: "PVT_test"}
+	p := trialParams{owner: "owner", repo: "repo", baseBranch: "main", wm: wm, holdingStg: holdingStage(eng.cfg)}
+	in := []trainMember{{item: gh.ProjectItem{Number: 1, ItemID: "item-1", Repo: "owner/repo"}, prNum: 10, headSHA: "sha"}}
+	if got := eng.dropLiveLandedMembers(state, p, in); len(got) != 1 {
+		t.Fatalf("with the guard disabled every member must be kept (non-vacuity), got %d", len(got))
+	}
+}

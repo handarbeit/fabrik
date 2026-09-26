@@ -810,6 +810,10 @@ func (e *Engine) prepareTrainWorker(ctx context.Context, state *mergeTrainWorker
 
 	// Resolve each member's linked PR number + head SHA once, ejecting fetch failures.
 	current := e.fetchTrainMembers(ctx, owner, repo, batch)
+	// #1871: the batch is a board snapshot that may predate a landing that already
+	// completed; drop live-moved and live-unreadable members before they are
+	// admitted, assembled into a trial and re-landed.
+	current = e.dropLiveLandedMembers(state, p, current)
 	// #1821: admission gate — keep members whose own PR CI is confirmed red out of the
 	// batch (fail-open on every other outcome). Fresh formation only: both restart
 	// routes returned from reconstructTrainState above.
@@ -2268,6 +2272,26 @@ func (e *Engine) liveLandingState(state *mergeTrainWorkerState, p trialParams, i
 		return liveMoved
 	}
 	return liveHolding
+}
+
+// dropLiveLandedMembers is the fresh-formation counterpart of the two resume-branch
+// guards (#1871): it removes from a freshly fetched batch every member whose live
+// Status shows the landing already completed (liveMoved) and every member whose live
+// read failed (liveReadFailed — excluded from this batch only, the next poll retries).
+// liveHolding and liveUnknown members are kept, so a genuinely Queued member is never
+// dropped. A stale snapshot can otherwise put several just-landed members into a fresh
+// batch, whose trial (their heads are already in base) would pass CI and re-land each
+// one. Costs one live read per member per fresh formation. See ADR-1871.
+func (e *Engine) dropLiveLandedMembers(state *mergeTrainWorkerState, p trialParams, members []trainMember) []trainMember {
+	kept := make([]trainMember, 0, len(members))
+	for _, m := range members {
+		switch e.liveLandingState(state, p, m.item) {
+		case liveMoved, liveReadFailed:
+			continue
+		}
+		kept = append(kept, m)
+	}
+	return kept
 }
 
 // trySingletonFastPath is runMergeTrainWorker's re-form-loop guard (#1644),

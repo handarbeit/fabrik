@@ -168,3 +168,71 @@ func TestMergeTrainStaleSnapshot_FastPathRestartBetweenMergeAndDone(t *testing.T
 		t.Errorf("an already-merged PR must never be re-merged, got %d merge call(s)", got)
 	}
 }
+
+// runFreshBatchDuplicate lands two singleton members (A, B) through the fast path,
+// then queues a genuinely Queued member C and lags the board so A and B still show
+// as open/Queued. The stale snapshot puts all three into a FRESH batch — there is no
+// merged integration PR carrying a batch marker, so reconstructTrainState does not
+// match and neither resume-branch guard is on this path. It returns the "Landed via"
+// comment counts for A, B and C and whether C ended in Done.
+func runFreshBatchDuplicate(t *testing.T, guardDisabled bool) (landedA, landedB, landedC int, cDone bool) {
+	t.Helper()
+	env := mergeTrainEnv(t, mergeTrainEnvOptions{})
+	env.Engine.SetMergeTrainLandingGuardDisabledForTest(guardDisabled)
+	stop := startTrialVerdictSeeder(t, env, allGreenVerdict)
+	defer stop()
+
+	landSingleton := func(name, file string) (num, prNum int, itemID string, preLabels []string) {
+		num, prNum = QueueMember(t, env, name, map[string]string{file: "x\n"})
+		pr, err := env.Sim.Sim().FetchLinkedPR(env.Owner, env.Repo, num)
+		if err != nil || pr == nil {
+			t.Fatalf("could not resolve #%d's linked PR: %v", num, err)
+		}
+		env.Sim.Sim().SeedCheckRun(env.OwnerRepo, pr.HeadSHA, greenCheckRun(""))
+		itemID = memberItemID(t, env, num)
+		preLabels = projectItem(t, env, num).Labels
+		RunPoll(t, env)
+		WaitForProjectStatus(t, env, num, "Done", 20)
+		WaitForIssueClosed(t, env, num, 5)
+		return num, prNum, itemID, preLabels
+	}
+	aNum, aPR, aID, aLabels := landSingleton("stale-fresh-a", "stale-fresh-a.txt")
+	bNum, bPR, bID, bLabels := landSingleton("stale-fresh-b", "stale-fresh-b.txt")
+
+	cNum, cPR := QueueMember(t, env, "stale-fresh-c", map[string]string{"stale-fresh-c.txt": "x\n"})
+	cLinked, err := env.Sim.Sim().FetchLinkedPR(env.Owner, env.Repo, cNum)
+	if err != nil || cLinked == nil {
+		t.Fatalf("could not resolve #%d's linked PR: %v", cNum, err)
+	}
+	env.Sim.Sim().SeedCheckRun(env.OwnerRepo, cLinked.HeadSHA, greenCheckRun(""))
+
+	env.Sim.Sim().LagBoardStatus(aID, "Queued", aLabels)
+	env.Sim.Sim().LagBoardStatus(bID, "Queued", bLabels)
+	RunPoll(t, env)
+	RunPoll(t, env)
+
+	return landedCommentCount(t, env, aNum, aPR), landedCommentCount(t, env, bNum, bPR),
+		landedCommentCount(t, env, cNum, cPR), projectItem(t, env, cNum).Status == "Done"
+}
+
+// TestMergeTrainStaleSnapshot_FreshBatch_LandedMembersDropped: the stale snapshot
+// lists two just-landed members alongside a genuinely Queued one. Only the Queued
+// member is landed; neither landed member gets a second "Landed via…" comment.
+func TestMergeTrainStaleSnapshot_FreshBatch_LandedMembersDropped(t *testing.T) {
+	t.Parallel()
+	a, b, c, cDone := runFreshBatchDuplicate(t, false)
+	if a != 1 || b != 1 {
+		t.Errorf("already-landed members must not be re-landed: \"Landed via\" comments A=%d B=%d, want 1 each", a, b)
+	}
+	if c != 1 || !cDone {
+		t.Errorf("the genuinely Queued member must land exactly once: comments=%d done=%v", c, cDone)
+	}
+}
+
+func TestMergeTrainStaleSnapshot_FreshBatch_NonVacuity_GuardDisabledDuplicates(t *testing.T) {
+	t.Parallel()
+	a, b, _, _ := runFreshBatchDuplicate(t, true)
+	if a < 2 && b < 2 {
+		t.Errorf("with the guard disabled the stale fresh batch must re-land a landed member (A=%d B=%d, want >=2 for at least one) — the scenario proves nothing", a, b)
+	}
+}
