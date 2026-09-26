@@ -2215,6 +2215,61 @@ func (e *Engine) finishSingletonFastPathLanding(state *mergeTrainWorkerState, p 
 	e.logfRepo(p.repoKey(), "merge-train", "landing complete for %s (singleton fast path, PR #%d, 1 member)\n", p.trainKey, m.prNum)
 }
 
+// landingLiveState is the outcome of liveLandingState (#1871): whether a member the
+// batch snapshot shows as Queued is still actually holding, so a "resume an
+// interrupted landing" branch can tell a genuine interruption from a landing that
+// already completed after the snapshot was read.
+type landingLiveState int
+
+const (
+	// liveHolding: live Status equals the holding stage — resume (crash between merge
+	// and Done, or the awaitingAdvanceLabel retry, where the member stays Queued).
+	liveHolding landingLiveState = iota
+	// liveMoved: live Status is non-empty and not the holding stage — the landing
+	// already completed (or a human moved the item). Skip; write nothing.
+	liveMoved
+	// liveUnknown: the read succeeded but returned an empty Status — no positive
+	// evidence of completion, so resume (fail-open on ambiguity).
+	liveUnknown
+	// liveReadFailed: the read errored — defer to the next poll (fail-closed).
+	liveReadFailed
+)
+
+// liveLandingState reads a batch member's Status live (#1871) via e.client — the
+// uncached FetchProjectItemStatus, falling back to LookupIssueProjectItem when the
+// snapshot carries no ItemID — never e.readClient (boardcache-backed) nor
+// item.Status/item.Labels, which is the stale source of the duplicate landing this
+// guards against. Same live-read discipline as refuseIfBaseContradictsMembers
+// (#1773). A skip requires positive evidence (a non-empty, non-holding Status); an
+// empty Status resumes; a read error defers, which cannot strand the member because
+// both resume branches re-run every poll. See ADR-1871.
+func (e *Engine) liveLandingState(state *mergeTrainWorkerState, p trialParams, item gh.ProjectItem) landingLiveState {
+	if e.mergeTrainLandingGuardDisabledForTest {
+		return liveHolding
+	}
+	var (
+		status string
+		err    error
+	)
+	if item.ItemID != "" {
+		status, err = e.client.FetchProjectItemStatus(item.ItemID)
+	} else {
+		_, status, err = e.client.LookupIssueProjectItem(state.projectID, itemOwnerRepoString(item, p.owner+"/"+p.repo), item.Number)
+	}
+	switch {
+	case err != nil:
+		e.logf(item.Number, "merge-train", "deferring resume of #%d: live status read failed: %v — will retry next poll\n", item.Number, err)
+		return liveReadFailed
+	case status == "":
+		e.logf(item.Number, "merge-train", "live status of #%d is empty — cannot confirm the landing completed, resuming\n", item.Number)
+		return liveUnknown
+	case status != p.holdingStg.Name:
+		e.logf(item.Number, "merge-train", "not resuming landing of #%d: live status is %q, not %q — the landing already completed after this batch's board snapshot was read\n", item.Number, status, p.holdingStg.Name)
+		return liveMoved
+	}
+	return liveHolding
+}
+
 // trySingletonFastPath is runMergeTrainWorker's re-form-loop guard (#1644),
 // checked on every iteration for a length-1 current batch, immediately before a
 // trial would otherwise be built. It is deliberately NOT inside
@@ -2234,6 +2289,13 @@ func (e *Engine) trySingletonFastPath(ctx context.Context, state *mergeTrainWork
 	}
 
 	if pr.Merged {
+		// #1871: the batch's Queued snapshot may predate a landing that already
+		// completed. Only a member that is live-still-holding is a genuine
+		// interrupted landing; otherwise the disposition is decided (no trial, no
+		// re-landing) — the next poll re-evaluates a deferred read.
+		if s := e.liveLandingState(state, p, m.item); s == liveMoved || s == liveReadFailed {
+			return true
+		}
 		e.logf(m.item.Number, "merge-train", "singleton fast path: PR #%d already merged (resuming a prior partial run) — completing Done transition\n", m.prNum)
 		e.finishSingletonFastPathLanding(state, p, m)
 		return true
@@ -4759,7 +4821,17 @@ func (e *Engine) reconstructTrainState(ctx context.Context, state *mergeTrainWor
 // merge, and advances each still-Queued member to Done).
 func (e *Engine) completeDeferredLanding(ctx context.Context, state *mergeTrainWorkerState, p trialParams, pr gh.PRDetails, batch []gh.ProjectItem) {
 	repoKey := p.owner + "/" + p.repo
-	items := filterBatchByNumbers(batch, parseTrainMembers(pr.Body))
+	// #1871: the batch is a board snapshot that may predate a landing that already
+	// completed, so each member is re-checked live; only still-holding (or
+	// indeterminate-empty) members are genuine interrupted landings. Moved and
+	// read-failed members drop out of this poll's landing.
+	var items []gh.ProjectItem
+	for _, it := range filterBatchByNumbers(batch, parseTrainMembers(pr.Body)) {
+		if s := e.liveLandingState(state, p, it); s == liveMoved || s == liveReadFailed {
+			continue
+		}
+		items = append(items, it)
+	}
 	if len(items) == 0 {
 		e.logfRepo(repoKey, "merge-train", "reconstruct: merged integration PR #%d for %s has no still-Queued members — nothing to complete\n", pr.Number, repoKey)
 		// The in-flight marker is cleared by prepareTrainWorker's own-failure defer
