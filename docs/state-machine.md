@@ -3741,6 +3741,8 @@ Per [ADR-007](../adrs/007-label-based-locking.md):
 
 **Legacy lock sweep.** A deployment that switches from PAT to App mode may have crashed holding `fabrik:locked:<user>`; under the new identity that label reads as "locked by another instance" and would strand the item. `runStartupCleanup` therefore additionally removes exactly `fabrik:locked:<cfg.User>` (only when App auth is active and `user:` is still set) from items with no live local `Worker()`. It does not sweep other `fabrik:locked:*` labels, which may belong to a live instance. Because nothing ties the `<cfg.User>` label to *this* instance (a PAT-mode instance still running as that user legitimately holds it), the sweep also skips a label applied less than `legacyLockMinAge` (2h) ago, or whose age cannot be read (`FetchLabelAppliedAt`, live), logging that the label was left for a human to remove.
 
+**Age-window limitation.** The 2h window is a heuristic, not a liveness proof: no process can see whether *another* process is alive. It only matters when a PAT-mode instance and an App-mode instance share a username and a board. In that case a PAT-mode stage that runs longer than 2h (possible with no `max_wall_time`) could have its live `fabrik:locked:<user>` lock swept when the App-mode instance starts. Deployments without that mix are unaffected.
+
 ### 7.5 Closed-Issue Catch-Up
 
 Closed issues are normally skipped by `itemMayNeedWork()` and `itemNeedsWork()`. Exceptions:
