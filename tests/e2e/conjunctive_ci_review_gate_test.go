@@ -396,14 +396,22 @@ func slowGateOnPRHead(env *Env, repo string, prNumber int) (run CheckRunTiming, 
 	if err != nil {
 		return CheckRunTiming{}, false, err
 	}
-	// An in-flight run (a re-run on the same SHA, possibly still queued with a
-	// zero StartedAt) is the one the engine's gate waits on — prefer it over
-	// latestRunNamed's latest-started pick, which would favour a stale
-	// completed run.
+	// The engine's gate waits on every in-flight run, so the window ends when
+	// the last one finishes: prefer a still-queued run (zero StartedAt — its
+	// whole window is ahead), else the latest-started in-flight run. Either
+	// beats latestRunNamed's pick, which could favour a stale completed run.
+	var inFlight CheckRunTiming
+	found := false
 	for _, r := range runs {
-		if r.Name == "slow-gate" && r.Status != "completed" {
-			return r, true, nil
+		if r.Name != "slow-gate" || r.Status == "completed" {
+			continue
 		}
+		if !found || r.StartedAt.IsZero() || (!inFlight.StartedAt.IsZero() && r.StartedAt.After(inFlight.StartedAt)) {
+			inFlight, found = r, true
+		}
+	}
+	if found {
+		return inFlight, true, nil
 	}
 	run, ok = latestRunNamed(runs, "slow-gate")
 	return run, ok, nil
