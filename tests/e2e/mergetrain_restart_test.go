@@ -29,7 +29,8 @@ import (
 // with the other train scenarios. Go runs non-parallel tests to completion before
 // resuming parallel ones, so this runs in isolation and leaves the bed up.
 //
-// Wall-clock: ~25–50 min (two full batch landings + a restart). Cost: low.
+// Wall-clock: ~28–53 min (two full batch landings + a restart, plus the 3-poll
+// exactly-once settle wait, #1874). Cost: low.
 func TestMergeTrainRestartSafety(t *testing.T) {
 	env := LoadEnv(t)
 	AssertFabrikRunning(t, env)
@@ -47,6 +48,7 @@ func TestMergeTrainRestartSafety(t *testing.T) {
 		waitForPRClosed(t, env, env.RepoAlpha, m[1], 10*time.Minute)
 	}
 	t.Logf("batch 1 landed — a merged integration PR is now history on the repo")
+	batch1 := []landedMember{{"r1a", b1a, b1aPR}, {"r1b", b1b, b1bPR}}
 
 	// --- Restart: clears the in-memory in-flight map; historical merged PR remains. ---
 	RestartFabrikTestBed(t, env)
@@ -64,6 +66,14 @@ func TestMergeTrainRestartSafety(t *testing.T) {
 		WaitForMemberLanded(t, env, env.RepoAlpha, m[0], 10*time.Minute)
 		waitForPRClosed(t, env, env.RepoAlpha, m[1], 10*time.Minute)
 	}
+
+	// #1874 / ADR-1871: the restart adds a fresh-worker window (empty in-flight map)
+	// in which a stale Queued snapshot could re-land a member. Assert BOTH batches'
+	// members landed exactly once — batch 1 across the restart, batch 2 after it — in
+	// one call, so the 3-poll settle wait is paid once (batch 1 has long since settled).
+	batch2 := []landedMember{{"r2a", b2a, b2aPR}, {"r2b", b2b, b2bPR}}
+	AssertMembersLandedExactlyOnce(t, env, env.RepoAlpha, append(batch1, batch2...), logStart1)
+
 	WaitForNoStaleTrainArtifacts(t, env, env.RepoAlpha, 2*time.Minute)
 	t.Logf("restart-safety verified: batch 2 landed after restart — no stall from the historical merged PR")
 }

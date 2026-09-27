@@ -75,8 +75,8 @@ import (
 // strings are copied from the engine and pinned by
 // mergetrain_batchcap_parse_test.go.
 //
-// Wall-clock: ~30–60 min (two green trial CI cycles: a 5-member trial then a
-// 2-member trial). Cost: low — no Claude conflict invocations (every member
+// Wall-clock: ~33–63 min (two green trial CI cycles: a 5-member trial then a
+// 2-member trial, plus the 3-poll exactly-once settle wait, #1874). Cost: low — no Claude conflict invocations (every member
 // writes a distinct path).
 func TestMergeTrainQueuedDeeperThanBatchCap(t *testing.T) {
 	env := LoadEnv(t)
@@ -300,6 +300,15 @@ func TestMergeTrainQueuedDeeperThanBatchCap(t *testing.T) {
 	if trainPRs[0].Number != landings[0].pr || trainPRs[1].Number != landings[1].pr {
 		t.Fatalf("A3: GitHub train PRs %s do not match the logged landing PRs %+v", strings.Join(desc, " "), landings)
 	}
+
+	// #1874 / ADR-1871: batch 1 → batch 2 is the natural window for a stale Queued
+	// snapshot to re-land a just-landed member, so assert every member landed once.
+	var landed []landedMember
+	for i, n := range nums {
+		landed = append(landed, landedMember{Name: fmt.Sprintf("bc%d", i+1), Issue: n, PR: prs[i]})
+	}
+	AssertMembersLandedExactlyOnce(t, env, repo, landed, offset)
+
 	WaitForNoStaleTrainArtifacts(t, env, repo, 2*time.Minute)
 	t.Logf("batch-cap verified: %d members landed as %v (PR #%d) then %v (PR #%d); one stable snapshot, no abandoned trial",
 		memberCount, firstFive, trainPRs[0].Number, lastTwo, trainPRs[1].Number)
