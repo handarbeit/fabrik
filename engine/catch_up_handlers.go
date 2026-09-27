@@ -348,6 +348,19 @@ func (e *Engine) handleReviewGate(pctx *phase1Ctx) bool {
 // snapshot state can never fire without a snapshot). Always returns true —
 // callers only reach this after already deciding a reinvoke condition holds
 // (blocked review, merge conflict, CI failure).
+//
+// Landed work is never re-invoked or cycle-limit-paused (#1934): once the
+// item's PR has landed (itemPRAlreadyLanded), a reinvoke can only hit the
+// post-merge guard (#1862), which runs nothing and leaves the triggering
+// feedback unprocessed — so it would be re-dispatched every poll. Worse, each
+// dispatch marks the item in advancedItems, which advanceValidateTerminalItem
+// treats as "already advanced this poll", so the merged-PR advance to Done
+// never runs for an item whose issue stays open (a base:<branch> PR, where
+// GitHub never auto-closes it). The item is claimed without dispatching and
+// without marking it advanced, leaving the terminal advance free to run later
+// in the same poll. The landed check sits after the in-flight bail and
+// costs one live PR read, only when a reinvoke is about to be dispatched or
+// a cycle-limit pause applied.
 func (e *Engine) dispatchWithCycleLimit(
 	pctx *phase1Ctx,
 	tag string,
@@ -371,6 +384,11 @@ func (e *Engine) dispatchWithCycleLimit(
 		if shortCircuit != nil && shortCircuit(snap) {
 			return true
 		}
+	}
+
+	if landed, prNumber := e.itemPRAlreadyLanded(pctx.item); landed {
+		e.logf(pctx.item.Number, tag, "PR #%d already landed — not re-invoking; leaving the item to the terminal advance\n", prNumber)
+		return true
 	}
 
 	if cycleCount >= maxCycles {

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
 )
 
@@ -179,5 +180,67 @@ func TestPostMergeGuard_OpenPRProcessesNormally(t *testing.T) {
 		if strings.Contains(c.body, "comment not applied") {
 			t.Error("'not applied' reply posted for an open PR")
 		}
+	}
+}
+
+// dispatchWithCycleLimitProbe drives dispatchWithCycleLimit with recording
+// callbacks and reports which of them fired.
+type dispatchWithCycleLimitProbe struct {
+	dispatched, paused, incremented bool
+}
+
+func (p *dispatchWithCycleLimitProbe) run(eng *Engine, pctx *phase1Ctx, cycleCount, maxCycles int) bool {
+	return eng.dispatchWithCycleLimit(pctx, "review-reinvoke",
+		func(itemstate.Snapshot) int { return cycleCount },
+		maxCycles,
+		nil,
+		func(string) { p.incremented = true },
+		func() { p.dispatched = true },
+		func(int) { p.paused = true },
+	)
+}
+
+// TestDispatchWithCycleLimit_LandedPRNeverReinvokes (#1934): once the PR has
+// landed, a reinvoke can only hit the post-merge guard, so the handler must
+// claim the item without dispatching, pausing, charging a cycle, or marking it
+// advanced — advancedItems is what advanceValidateTerminalItem reads as "already
+// advanced this poll", so marking it starved the merged-PR advance to Done
+// forever for an open (base:<branch>) item.
+func TestDispatchWithCycleLimit_LandedPRNeverReinvokes(t *testing.T) {
+	eng := testEngineForMerge(t, mergedPRClient())
+	item := postMergeItem()
+	pctx := &phase1Ctx{ctx: context.Background(), board: &gh.ProjectBoard{}, item: item,
+		stage: &stages.Stage{Name: "Validate"}, advancedItems: map[string]bool{}}
+	var p dispatchWithCycleLimitProbe
+	if !p.run(eng, pctx, 0, 3) {
+		t.Fatal("handler must still claim the item")
+	}
+	if p.dispatched || p.paused || p.incremented {
+		t.Errorf("landed PR: dispatched=%v paused=%v incremented=%v, want all false", p.dispatched, p.paused, p.incremented)
+	}
+	if pctx.advancedItems[issueKey(item, eng.defaultRepo())] {
+		t.Error("landed PR: item marked in advancedItems — the terminal advance would skip it this poll")
+	}
+}
+
+// TestDispatchWithCycleLimit_OpenPRStillDispatches: the landed check must not
+// change the ordinary path — an open PR is dispatched and marked advanced.
+func TestDispatchWithCycleLimit_OpenPRStillDispatches(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, n int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 77, State: "open"}, nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	item := postMergeItem()
+	pctx := &phase1Ctx{ctx: context.Background(), board: &gh.ProjectBoard{}, item: item,
+		stage: &stages.Stage{Name: "Validate"}, advancedItems: map[string]bool{}}
+	var p dispatchWithCycleLimitProbe
+	p.run(eng, pctx, 0, 3)
+	if !p.dispatched || !p.incremented || p.paused {
+		t.Errorf("open PR: dispatched=%v incremented=%v paused=%v, want dispatch+increment", p.dispatched, p.incremented, p.paused)
+	}
+	if !pctx.advancedItems[issueKey(item, eng.defaultRepo())] {
+		t.Error("open PR: dispatched item must be marked in advancedItems (unchanged behavior)")
 	}
 }
