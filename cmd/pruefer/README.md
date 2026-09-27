@@ -11,6 +11,7 @@ It exists to satisfy Fabrik's `wait_for_reviews: true` gate (and any repo that w
 Every `poll_interval_seconds`, Pruefer lists open, non-draft PRs on each watched repo and, for each one, checks:
 
 - Is the PR authored by Pruefer's own bot identity? Skip (GitHub rejects self-review anyway).
+- Is the PR labelled **`pruefer:ignore`**? Skip. This built-in opt-out works on every watched repo with no configuration, and a `/pruefer review` command does not override it. Use it when whoever creates a PR wants no automated review of it (e2e fixtures that control their own reviews, generated or vendored changes, experiments). `excluded_labels` adds deployment-specific labels on top.
 - Does an excluded author or label match? Skip.
 - Has Pruefer already reviewed this exact head SHA? Skip — **unless** an unprocessed `/pruefer review` comment is on the PR, which forces a fresh review of the current head. This is checked two ways, independently: GitHub's own review history for the PR, and (#1631) a local, in-memory record of Pruefer's own past submissions for this process — see below.
 - Is *every* touched path excluded by `excluded_paths`? Skip — this is the only whole-PR path exclusion; see below for the per-file case.
