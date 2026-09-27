@@ -24,7 +24,8 @@ import (
 // must run a train-capable binary with the Queued holding stage configured (see
 // tests/e2e/README.md → "Merge-train scenarios"). Skips cleanly otherwise.
 //
-// Wall-clock: ~10–25 min (one combined validation + integration-PR CI). Cost: low
+// Wall-clock: ~13–28 min (one combined validation + integration-PR CI, plus the
+// 3-poll exactly-once settle wait, #1874). Cost: low
 // (no Claude invocations on the happy path — no conflicts to resolve).
 func TestMergeTrainHappyPathLanding(t *testing.T) {
 	t.Parallel()
@@ -68,6 +69,15 @@ func TestMergeTrainHappyPathLanding(t *testing.T) {
 		WaitForIssueClosed(t, env, env.RepoAlpha, m.issue, 10*time.Minute)
 		t.Logf("member #%d landed: Done + issue closed + member PR #%d closed", m.issue, m.pr)
 	}
+
+	// #1874 / ADR-1871: every member landed exactly ONCE — one landing comment on its
+	// PR and one close on its issue — after a settle wait long enough for the poll(s)
+	// that follow the landing, where a stale Queued snapshot used to re-land it.
+	var landed []landedMember
+	for i, m := range members {
+		landed = append(landed, landedMember{Name: []string{"alpha", "bravo", "charlie"}[i], Issue: m.issue, PR: m.pr})
+	}
+	AssertMembersLandedExactlyOnce(t, env, env.RepoAlpha, landed, logStart)
 
 	// No stale train branches/PRs should remain after the landing.
 	WaitForNoStaleTrainArtifacts(t, env, env.RepoAlpha, 2*time.Minute)

@@ -57,7 +57,8 @@ import (
 //   - cruise preservation (Story 4 / SC-004 — covered by unit tests of the
 //     yolo/cruise gating logic)
 //
-// Wall-clock: ~20-40 min. Cost: ~$0.50-1.50.
+// Wall-clock: ~20-40 min (+~3 min under train mode "on" for the #1874 exactly-once
+// settle wait). Cost: ~$0.50-1.50.
 func TestYoloAutoMergeLabel(t *testing.T) {
 	t.Parallel()
 	env := LoadEnv(t)
@@ -135,6 +136,13 @@ func TestYoloAutoMergeLabel(t *testing.T) {
 
 			AssertLabelWasNeverApplied(t, env, env.RepoAlpha, num, "fabrik:auto-merge-enabled")
 			t.Logf("fabrik:auto-merge-enabled was never applied — train-on contract verified")
+
+			// #1874 / ADR-1871: whichever landing path took it (fast path or trial),
+			// the member landed exactly once. Wired ONLY into this subtest: under
+			// merge_train: off the ordinary auto-merge path posts no landing comment,
+			// so the comment count has no off-mode counterpart.
+			AssertMembersLandedExactlyOnce(t, env, env.RepoAlpha,
+				[]landedMember{{Name: "yolo-auto-merge", Issue: num, PR: prNum}}, logStart)
 		})
 		return
 	}

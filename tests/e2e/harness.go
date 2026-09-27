@@ -1616,6 +1616,23 @@ func tryPRCheckRunConclusions(env *Env, repo string, prNumber int) ([]string, er
 	return conclusions, nil
 }
 
+// tryPRMergeableState returns the PR's mergeable_state ("clean", "unstable",
+// "blocked", "behind", "dirty", "draft", or "unknown" while GitHub is still
+// computing it). REST, so it costs no GraphQL budget. Errors are transient.
+func tryPRMergeableState(env *Env, repo string, prNumber int) (string, error) {
+	owner, name, ok := splitRepo(repo)
+	if !ok {
+		return "", fmt.Errorf("bad repo: %q", repo)
+	}
+	out, err := ghOutput(env, "api",
+		fmt.Sprintf("repos/%s/%s/pulls/%d", owner, name, prNumber),
+		"--jq", ".mergeable_state")
+	if err != nil {
+		return "", fmt.Errorf("read mergeable_state of %s#%d: %w\n%s", repo, prNumber, err, out)
+	}
+	return strings.TrimSpace(out), nil
+}
+
 // PRCheckRunConclusions returns the check-run conclusions for the PR's head SHA
 // (in-progress runs appear as "pending"). Fails the test on error.
 func PRCheckRunConclusions(t *testing.T, env *Env, repo string, prNumber int) []string {
