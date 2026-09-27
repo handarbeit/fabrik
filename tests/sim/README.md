@@ -923,6 +923,37 @@ returns, before filing the issue under test.
   starting the paused parallel batch, so omitting `t.Parallel()` here is
   sufficient on its own.
 
+### App mode without an operator identity (#1893)
+
+The zero-value `Reconciler` `SetGitHubAppModeForTest` installs carries no bot
+login, so on its own the App-mode lock identity would be keyed on an empty
+slug (the engine substitutes a fallback so it never yields `fabrik:locked:`,
+but that is not the identity a real App has). `Engine.SetGitHubAppIdentityForTest(slug,
+botUserID, instanceKey)` supplies one; `instanceKey` stands in for the
+hostname+directory the lock ID is normally hashed from, so a scenario can model
+two local instances of one App. Like `SetGitHubAppModeForTest` it is a seam
+only, and `RestartEnv` does not re-apply it.
+
+`NewEnv` still hardcodes `cfg.User = "fabrik-sim-bot"`; under App mode that
+value must be *ignored*, so a leak shows up as `fabrik-sim-bot` in a label,
+mention or assignee. Three scenarios in `github_app_auth_test.go` cover it:
+
+- **`TestGitHubAppAuth_NoOperator_LockLabelAndMention`** — the lock label seen
+  while Specify runs is `fabrik:locked:<slug>-<hash>` (≤ 50 chars, no `[bot]`,
+  not the configured user), and the awaiting-input comment mentions the human
+  assignee only — not `cfg.User`, not a bot assignee.
+- **`TestGitHubAppAuth_NoOperator_MentionsNobodyWhenOnlyBotsAreOnTheIssue`** —
+  an issue authored by the App (GraphQL-shaped login, no `[bot]`) with no
+  assignees resolves nobody, so the comment carries no `@mention`.
+- **`TestGitHubAppAuth_NoOperator_SpawnedChildInheritsParentAssignees`** — a
+  spawned child gets the parent's human assignees.
+
+Not covered here (needs real GitHub, see #1861): commit-avatar linking of the
+`<id>+<slug>[bot]` email, label creation with the hashed suffix, and GitHub's
+422 on an unassignable assignee. Commit identity is unit-tested against real
+git in `engine/worktree_extra_test.go` because the sim's `NewEnv` sets the
+bare clone's identity itself and never reaches `ensureBareClone`.
+
 Only ADR-1750's second escalation tier (one excluded repo → `warnings.Record`)
 is reachable this way — see "What this layer is permanently blind to" above
 for the tier and the other App-auth behavior this does not cover.
