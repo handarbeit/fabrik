@@ -1206,3 +1206,57 @@ func TestBuildConfigWithValues_AppFlowLeavesUserCommented(t *testing.T) {
 		t.Error("template must document user as PAT-mode only")
 	}
 }
+
+// TestCreateBoardCore_CreatesDoneColumnButNotBacklog pins the create path
+// itself (Pruefer on PR #1892): with a cleanup stage (Done) and an unmanaged
+// parking stage (Backlog) configured, the Status options sent to GitHub must
+// be the prompt stages plus Done, in stage order, with no Backlog. A board
+// created without Done can never complete an item.
+func TestCreateBoardCore_CreatesDoneColumnButNotBacklog(t *testing.T) {
+	inner := createBoardTestServer(t, "Organization", []map[string]interface{}{
+		{"id": "OPT_1", "name": "Todo", "color": "GRAY", "description": ""},
+	}, nil)
+	defer inner.Close()
+	var sent []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, _ := io.ReadAll(r.Body)
+		var body struct {
+			Query     string `json:"query"`
+			Variables struct {
+				Options []struct {
+					Name string `json:"name"`
+				} `json:"options"`
+			} `json:"variables"`
+		}
+		_ = json.Unmarshal(data, &body)
+		if strings.Contains(body.Query, "updateProjectV2Field(input:") {
+			for _, o := range body.Variables.Options {
+				sent = append(sent, o.Name)
+			}
+		}
+		r.Body = io.NopCloser(bytes.NewReader(data))
+		inner.Config.Handler.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+
+	stagesDir := t.TempDir()
+	writeMinimalStage(t, stagesDir, "Specify", 0)
+	writeMinimalStage(t, stagesDir, "Implement", 1)
+	for name, content := range map[string]string{
+		"done.yaml":    "name: Done\norder: 99\ncleanup_worktree: true\n",
+		"backlog.yaml": "name: Backlog\norder: -1\nunmanaged: true\n",
+	} {
+		if err := os.WriteFile(filepath.Join(stagesDir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	client := gh.NewClientWithBaseURL("token", srv.URL)
+	if _, _, err := createBoardCore(client, "acme", "", "", stagesDir); err != nil {
+		t.Fatalf("createBoardCore: %v", err)
+	}
+	want := []string{"Specify", "Implement", "Done"}
+	if strings.Join(sent, ",") != strings.Join(want, ",") {
+		t.Fatalf("Status options sent = %v, want %v (Done included, Backlog excluded, stage order)", sent, want)
+	}
+}

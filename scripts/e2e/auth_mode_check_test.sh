@@ -49,6 +49,8 @@ mkdir -p "$BED/.fabrik"
 assert_eq "unset E2E_AUTH_MODE runs both, pat first" "pat app" "$(resolve_auth_modes "")"
 assert_eq "E2E_AUTH_MODE=pat" "pat" "$(resolve_auth_modes pat)"
 assert_eq "E2E_AUTH_MODE=app" "app" "$(resolve_auth_modes app)"
+assert_eq "E2E_AUTH_MODE=APP (case-insensitive)" "app" "$(resolve_auth_modes APP)"
+assert_eq "E2E_AUTH_MODE=' pat ' (trimmed)" "pat" "$(resolve_auth_modes " pat ")"
 resolve_auth_modes both >/dev/null 2>&1
 assert_eq "invalid E2E_AUTH_MODE fails" "1" "$?"
 

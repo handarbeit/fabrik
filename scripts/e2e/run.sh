@@ -445,9 +445,12 @@ readonly PRECONDITION_FAILED_EXIT=7
 # resolve_auth_modes echoes the space-separated auth legs to run for
 # E2E_AUTH_MODE=$1, or fails (exit 1, message on stderr) on an unknown value.
 resolve_auth_modes() {
-  case "${1:-}" in
+  # Case- and whitespace-insensitive, like the Go side's normalizeAuthMode.
+  local mode
+  mode="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+  case "$mode" in
     "") echo "pat app" ;;
-    pat | app) echo "$1" ;;
+    pat | app) echo "$mode" ;;
     *)
       echo "E2E_AUTH_MODE=\"$1\" is invalid (must be pat, app, or unset for both)" >&2
       return 1
