@@ -233,7 +233,7 @@ func TestBlockOnInput_Success(t *testing.T) {
 // with-summary and without-summary cases.
 func TestBuildAwaitingInputComment(t *testing.T) {
 	t.Run("with summary", func(t *testing.T) {
-		got := buildAwaitingInputComment("alice", "Plan", "What should the timeout be?")
+		got := buildAwaitingInputComment([]string{"alice"}, "Plan", "What should the timeout be?")
 		if !strings.HasPrefix(got, "🏭 **Fabrik") {
 			t.Errorf("expected Fabrik header prefix, got: %q", got)
 		}
@@ -252,7 +252,7 @@ func TestBuildAwaitingInputComment(t *testing.T) {
 	})
 
 	t.Run("without summary", func(t *testing.T) {
-		got := buildAwaitingInputComment("alice", "Research", "")
+		got := buildAwaitingInputComment([]string{"alice"}, "Research", "")
 		if !strings.HasPrefix(got, "🏭 **Fabrik") {
 			t.Errorf("expected Fabrik header prefix, got: %q", got)
 		}
@@ -268,7 +268,7 @@ func TestBuildAwaitingInputComment(t *testing.T) {
 	})
 
 	t.Run("empty user", func(t *testing.T) {
-		got := buildAwaitingInputComment("", "Implement", "")
+		got := buildAwaitingInputComment(nil, "Implement", "")
 		if !strings.HasPrefix(got, "🏭 **Fabrik") {
 			t.Errorf("expected Fabrik header prefix, got: %q", got)
 		}
@@ -285,7 +285,7 @@ func TestBuildAwaitingInputComment(t *testing.T) {
 // the blockquoted summary is Claude-derived freeform text and must not carry
 // a live bot mention through to the posted comment.
 func TestBuildAwaitingInputComment_NeutralizesBotMention(t *testing.T) {
-	got := buildAwaitingInputComment("alice", "Validate", "**@coderabbitai**: No action taken.")
+	got := buildAwaitingInputComment([]string{"alice"}, "Validate", "**@coderabbitai**: No action taken.")
 	assertNoLiveBotMention(t, got)
 }
 

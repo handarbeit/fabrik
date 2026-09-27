@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"reflect"
 	"strings"
@@ -310,3 +311,116 @@ func TestResolveAppIdentity_LookupSuccessAndSoftFailure(t *testing.T) {
 }
 
 var errFakeLookup = errors.New("boom")
+
+func TestBuildAwaitingInputComment_MultipleMentions(t *testing.T) {
+	got := buildAwaitingInputComment([]string{"alice", "bob"}, "Plan", "")
+	if !strings.Contains(got, "@alice @bob: awaiting your input on **Plan**") {
+		t.Errorf("comment = %q", got)
+	}
+}
+
+func TestBlockOnInput_AppMode_MentionsAssigneesNotOperator(t *testing.T) {
+	eng := appModeEngine(t, "my-app", 1, "k")
+	client := &mockGitHubClient{}
+	eng.client = client
+	eng.cfg.User = "operator"
+	stage := &stages.Stage{Name: "Research", Order: 1}
+
+	eng.blockOnInput(gh.ProjectItem{Number: 5, Assignees: []string{"alice"}, Author: "carol"}, stage, "")
+	if len(client.addCommentCalls) != 1 {
+		t.Fatalf("expected 1 comment, got %d", len(client.addCommentCalls))
+	}
+	body := client.addCommentCalls[0].body
+	if !strings.Contains(body, "@alice") || strings.Contains(body, "@operator") || strings.Contains(body, "@carol") {
+		t.Errorf("comment = %q", body)
+	}
+
+	// Bot-authored, unassigned (e.g. a spawned child created by the App): nobody is pinged.
+	client.addCommentCalls = nil
+	eng.blockOnInput(gh.ProjectItem{Number: 6, Author: "my-app"}, stage, "")
+	body = client.addCommentCalls[0].body
+	if strings.Contains(body, "@") {
+		t.Errorf("no human resolvable — comment must mention nobody, got %q", body)
+	}
+	if !strings.HasPrefix(body, "🏭 **Fabrik**") {
+		t.Errorf("comment = %q", body)
+	}
+}
+
+func spawnParentAndBoard() (gh.ProjectItem, *gh.ProjectBoard) {
+	return gh.ProjectItem{ID: "I_parent", ItemID: "PVTI_parent", Number: 42, Repo: "owner/repo", Assignees: []string{"alice", "x[bot]"}, Author: "bob"},
+		&gh.ProjectBoard{ProjectID: "PVT_1"}
+}
+
+func TestSpawnChildren_AssigneesByMode(t *testing.T) {
+	blocks := []SpawnBlock{{Repo: "owner/repo", Title: "Child", Body: "b"}}
+	for _, app := range []bool{false, true} {
+		var got [][]string
+		client := &mockGitHubClient{
+			createIssueFn: func(owner, repo, title, body string, assignees []string) (int, string, error) {
+				got = append(got, assignees)
+				return 300, "I_child", nil
+			},
+			addProjectV2ItemByIdFn: func(projectID, contentNodeID string) (string, error) { return "PVTI_c", nil },
+		}
+		eng := spawnTestEngine(t, client)
+		if app {
+			eng.SetGitHubAppModeForTest(nil, false)
+			eng.SetGitHubAppIdentityForTest("my-app", 1, "k")
+		}
+		item, board := spawnParentAndBoard()
+		if _, _, err := eng.spawnChildren(context.Background(), board, item, "owner", "repo", blocks, false); err != nil {
+			t.Fatalf("app=%v: %v", app, err)
+		}
+		want := []string{"testuser"}
+		if app {
+			want = []string{"alice"}
+		}
+		if len(got) != 1 || !reflect.DeepEqual(got[0], want) {
+			t.Errorf("app=%v: CreateIssue assignees = %v, want %v", app, got, want)
+		}
+	}
+}
+
+func TestSpawnChildren_AppMode_RetriesUnassignedOn422(t *testing.T) {
+	var got [][]string
+	client := &mockGitHubClient{
+		createIssueFn: func(owner, repo, title, body string, assignees []string) (int, string, error) {
+			got = append(got, assignees)
+			if len(assignees) > 0 {
+				return 0, "", fmt.Errorf("creating issue: %w", gh.ErrUnprocessableEntity)
+			}
+			return 300, "I_child", nil
+		},
+		addProjectV2ItemByIdFn: func(projectID, contentNodeID string) (string, error) { return "PVTI_c", nil },
+	}
+	eng := spawnTestEngine(t, client)
+	eng.SetGitHubAppModeForTest(nil, false)
+	eng.SetGitHubAppIdentityForTest("my-app", 1, "k")
+	item, board := spawnParentAndBoard()
+	spawned, _, err := eng.spawnChildren(context.Background(), board, item, "owner", "repo",
+		[]SpawnBlock{{Repo: "owner/repo", Title: "Child", Body: "b"}}, false)
+	if err != nil || len(spawned) != 1 {
+		t.Fatalf("spawned=%v err=%v", spawned, err)
+	}
+	if len(got) != 2 || len(got[0]) != 1 || len(got[1]) != 0 {
+		t.Errorf("CreateIssue attempts = %v, want [[alice] []]", got)
+	}
+}
+
+func TestSpawnChildren_PATMode_422StillFailsLoud(t *testing.T) {
+	calls := 0
+	client := &mockGitHubClient{
+		createIssueFn: func(owner, repo, title, body string, assignees []string) (int, string, error) {
+			calls++
+			return 0, "", fmt.Errorf("creating issue: %w", gh.ErrUnprocessableEntity)
+		},
+	}
+	eng := spawnTestEngine(t, client)
+	item, board := spawnParentAndBoard()
+	_, _, err := eng.spawnChildren(context.Background(), board, item, "owner", "repo",
+		[]SpawnBlock{{Repo: "owner/repo", Title: "Child", Body: "b"}}, false)
+	if err == nil || calls != 1 {
+		t.Errorf("PAT mode must fail loud on a bad assignee without retrying: err=%v calls=%d", err, calls)
+	}
+}

@@ -2229,14 +2229,18 @@ func (e *Engine) handleValidateSHAInvalidation(item gh.ProjectItem, owner, repo 
 // buildAwaitingInputComment builds the notification comment body for a
 // blocked-on-input event. The body starts with the canonical "🏭 **Fabrik"
 // prefix so findNewComments skips it and Fabrik does not treat it as user input.
-// If user is non-empty the comment includes an @mention so GitHub delivers a
-// mobile push notification. If summary is non-empty it is embedded as a
-// blockquote (the specific question Claude needs answered); otherwise a generic
-// message is used.
-func buildAwaitingInputComment(user, stageName, summary string) string {
+// If users is non-empty the comment @mentions each of them so GitHub delivers a
+// mobile push notification; an empty list omits the mention. If summary is
+// non-empty it is embedded as a blockquote (the specific question Claude needs
+// answered); otherwise a generic message is used.
+func buildAwaitingInputComment(users []string, stageName, summary string) string {
 	var b strings.Builder
-	if user != "" {
-		fmt.Fprintf(&b, "🏭 **Fabrik** — @%s: awaiting your input on **%s**.\n\n", user, stageName)
+	if len(users) > 0 {
+		mentions := make([]string, len(users))
+		for i, u := range users {
+			mentions[i] = "@" + u
+		}
+		fmt.Fprintf(&b, "🏭 **Fabrik** — %s: awaiting your input on **%s**.\n\n", strings.Join(mentions, " "), stageName)
 	} else {
 		fmt.Fprintf(&b, "🏭 **Fabrik** — awaiting your input on **%s**.\n\n", stageName)
 	}
@@ -2262,10 +2266,11 @@ func (e *Engine) blockOnInput(item gh.ProjectItem, stage *stages.Stage, output s
 	e.addLabel(item, "fabrik:awaiting-input")
 
 	// Post a dedicated @mention notification comment so GitHub delivers a mobile
-	// push to the operator. No rocket reaction — this is engine-generated, not
+	// push to the operator (PAT mode) or to the issue's assignees/author under
+	// App auth (#1893, R4 — see mentionTargets). No rocket reaction — this is engine-generated, not
 	// Claude output, so the reaction-based reprocessing guard should not apply.
 	summary := extractSummary(output)
-	comment := buildAwaitingInputComment(e.cfg.User, stage.Name, summary)
+	comment := buildAwaitingInputComment(e.mentionTargets(item), stage.Name, summary)
 	e.postItemComment(item, comment, false)
 }
 
@@ -3018,9 +3023,13 @@ func (e *Engine) handleStopRequest(ctx context.Context, req tui.StopRequest) {
 	// being precomputed here — see pauseInterruptedIssue's doc comment
 	// (review finding: a concurrent daemon shutdown pause for the same issue
 	// could otherwise race this same "not yet paused" check and double-post).
+	stoppedBy := "stopped from TUI"
+	if who := e.operatorNote(); who != "" {
+		stoppedBy += " by " + who
+	}
 	comment := fmt.Sprintf(
-		"🏭 **Fabrik — stopped from TUI by %s**\n\nStage **%s** was stopped manually from the TUI. Remove `fabrik:paused` to resume.",
-		e.cfg.User, req.StageName,
+		"🏭 **Fabrik — %s**\n\nStage **%s** was stopped manually from the TUI. Remove `fabrik:paused` to resume.",
+		stoppedBy, req.StageName,
 	)
 	e.pauseInterruptedIssue(item, comment)
 }
