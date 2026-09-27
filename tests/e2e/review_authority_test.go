@@ -281,7 +281,7 @@ func TestReviewAuthorityCycleLimitPauses(t *testing.T) {
 	maxCycles := readEnvFileMaxReviewCycles(t, env)
 	if maxCycles > 5 {
 		t.Skipf("FABRIK_MAX_REVIEW_CYCLES=%d is too large for a bounded e2e run (the engine dispatches one reinvoke per poll while the gate blocks) — "+
-			"set a small bed value (e.g. 2) for this test, see README", maxCycles)
+			"set FABRIK_MAX_REVIEW_CYCLES=3 in the bed .env for this test (README prerequisite 24a)", maxCycles)
 	}
 
 	num, prNum, _ := seedReviewGateItem(t, env, env.RepoAlpha, "main", "Review", "cycle-limit", "review-authority:authoritative")
