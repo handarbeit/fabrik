@@ -103,6 +103,15 @@ unconditionally — matching `fabrik init`'s own unconditional extraction of
 `queued.yaml` regardless of `merge_train`, so a fresh board and a fresh stage set can
 never start out of sync (the exact gap ADR-1421 had to patch around after the fact).
 
+> **Amended by #1891 (2026-09-26):** that function mirrored the startup check's
+> "required" set and so skipped the cleanup stage, leaving created boards with no
+> **Done** column: no item could ever complete. It is now `boardColumnNames`, which
+> includes the cleanup stage (Done) in stage order and still excludes optional
+> unmanaged parking stages (Backlog). `repair-board` uses the same set. The startup
+> check is unchanged. Separately, #1889 made `--repo` optional for `--create-board`
+> (without it the board is created unlinked; the engine discovers repos from board
+> items).
+
 `--create-board` requires `--owner` and `--repo` and is mutually exclusive with the
 existing positional `<project-url>` argument (one links to a board that already exists;
 this creates one). `fabrik init` had no GitHub client/token dependency before this issue;

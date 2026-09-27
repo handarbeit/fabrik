@@ -53,24 +53,27 @@ func refuseIfUserOwnedBoard(ownerType string) error {
 		"or move it to an organization")
 }
 
-// requiredStageColumnNames returns the ordered list of stage names that must
-// have a matching board Status column, per the same rule
-// engine/startup.go's checkStageColumnAlignment uses for its "required" set:
-// every non-cleanup, non-unmanaged stage. Holding stages (e.g. Queued) are
-// included unconditionally here — unlike checkStageColumnAlignment's
-// merge_train-gated startup deferral (ADR-1421), both create and repair are
-// explicit operator actions with no reason to withhold a column the operator
-// is about to create/repair anyway, and `fabrik init` extracts every
-// embedded default stage (including queued.yaml) unconditionally regardless
-// of merge_train. Returned in stage Order.
-func requiredStageColumnNames(allStages []*stages.Stage) []string {
+// boardColumnNames returns the ordered list of Status columns a Fabrik board
+// needs: one per configured stage, in stage Order — including the cleanup
+// stage (Done), excluding unmanaged parking stages (Backlog), which are
+// optional. Board creation and repair build the board itself, so the
+// terminal column must exist: without Done, no item can ever complete
+// (every terminal advance fails and the item escalates via
+// fabrik:awaiting-advance). This is deliberately wider than the "required" set
+// engine/startup.go's checkStageColumnAlignment enforces at startup, which
+// only has to refuse a board missing a column a managed stage dispatches
+// into. Holding stages (e.g. Queued) are included unconditionally: create
+// and repair are explicit operator actions, and `fabrik init` extracts
+// every embedded default stage (including queued.yaml) regardless of
+// merge_train. Returned in stage Order (ties keep source order).
+func boardColumnNames(allStages []*stages.Stage) []string {
 	type nameOrder struct {
 		name  string
 		order int
 	}
 	var filtered []nameOrder
 	for _, s := range allStages {
-		if s.CleanupWorktree || s.Unmanaged {
+		if s.Unmanaged {
 			continue
 		}
 		filtered = append(filtered, nameOrder{name: s.Name, order: s.Order})

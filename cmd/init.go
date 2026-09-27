@@ -764,7 +764,7 @@ func createBoardCore(client *gh.Client, owner, repo, title, stagesDir string) (p
 	if err != nil {
 		return "", "", fmt.Errorf("loading stage configs from %s: %w", stagesDir, err)
 	}
-	names := requiredStageColumnNames(allStages)
+	names := boardColumnNames(allStages)
 	if len(names) == 0 {
 		return "", "", fmt.Errorf("no stage configs with board columns found in %s — nothing to create Status columns for", stagesDir)
 	}
