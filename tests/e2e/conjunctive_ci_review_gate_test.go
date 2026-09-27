@@ -109,7 +109,8 @@ import (
 //     the sequencing this redesign depends on. Use FABRIK_REVIEW_WAIT_TIMEOUT=2
 //     only for the timeout-fallback path.
 //
-// Wall-clock: ~65–100 min (approval path); ~35–60 min (timeout path). Use E2E_TIMEOUT=2h.
+// Wall-clock: ~80–115 min (approval path); ~50–75 min (timeout path) — the 25-min
+// slow-gate window is most of it. Use E2E_TIMEOUT=2h or more.
 // Cost: ~$1.00–2.50.
 func TestConjunctiveCIReviewGate(t *testing.T) {
 	t.Parallel()
@@ -176,6 +177,9 @@ func TestConjunctiveCIReviewGate(t *testing.T) {
 	} else if run.Status == "completed" {
 		t.Fatalf("fixture: slow-gate on PR #%d already completed (%s) before fabrik:awaiting-ci was observed — Review latency consumed "+
 			"the CI-await window, so R1 cannot be tested; this is not an engine regression", prNumber, run.CompletedAt.Format(time.RFC3339))
+	} else if run.StartedAt.IsZero() {
+		// Still queued (GitHub reports started_at: null): none of the window is used yet.
+		t.Logf("slow-gate on PR #%d still queued — its full ~%s window is ahead", prNumber, slowGateLongDuration)
 	} else if left := time.Until(run.StartedAt.Add(slowGateLongDuration)); left < 4*time.Minute {
 		t.Fatalf("fixture: only ~%s of slow-gate's window left on PR #%d when fabrik:awaiting-ci was observed — too little for the "+
 			"2-minute R1 window; this is not an engine regression", left.Round(time.Second), prNumber)
