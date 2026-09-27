@@ -335,10 +335,21 @@ func (e *Engine) pauseIssue(item gh.ProjectItem, comment string, opts pauseOpts)
 // hasSkippedComment's precedent (no_work_needed_settle.go): match on a stable
 // prose fragment rather than the full message, since counters/values embedded
 // in the message can differ between posts of the "same" episode.
+//
+// The fragment is anchored to the engine's own pause-comment shape (#1937):
+// a "🏭 **Fabrik — …**" header line, a blank line, then the fragment at the
+// start of the body text. Every pause message is built that way. An unanchored
+// substring match also hit a fragment merely quoted elsewhere — a stage output
+// recounting an earlier run's pause, or a human quoting one — and the caller
+// then paused silently, reapplying labels with no explanatory comment.
 func hasPauseComment(item gh.ProjectItem, fragments ...string) bool {
 	for _, c := range item.Comments {
+		header, text, ok := strings.Cut(c.Body, "\n\n")
+		if !ok || strings.Contains(header, "\n") || !strings.HasPrefix(header, "🏭 **Fabrik — ") {
+			continue
+		}
 		for _, frag := range fragments {
-			if strings.Contains(c.Body, frag) {
+			if strings.HasPrefix(text, frag) {
 				return true
 			}
 		}
