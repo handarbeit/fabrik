@@ -47,8 +47,9 @@ import (
 // for a trial the fast path had skipped. Once the log shows
 // `opened draft CI PR … (1 survivor(s))`, M2 is queued and commented on. M2 is never
 // in the fixed batch, dispatch skips, and the settle scan ejects it directly. The
-// scenario fails loudly ("occupant window closed") if M2 ever appears in a batch
-// snapshot, rather than reporting an engine regression.
+// scenario asserts the settle scan's direct-route line for M2 ("not owned by any
+// live batch … ejecting directly") and fails loudly ("occupant window closed") if it
+// took the pending-signal route instead, rather than reporting an engine regression.
 //
 // M2 is prepared first (issue, PR, fabrik:yolo, stage:Validate:complete, reviewer
 // APPROVE) so that after the eject it returns to Validate, clears the comment gate
@@ -140,19 +141,30 @@ func TestQueuedMemberCommentEjection(t *testing.T) {
 	_, target, _ := parseCommentEjectLine(ejectLine)
 	t.Logf("A3: ejected — rerouted to %q: %s", target, strings.TrimSpace(ejectLine))
 
-	// Determinism check: M2 must never have been in a formed batch, or the eject may
-	// have taken the racy pending-signal route. Report that as a harness problem.
+	// Determinism check: the eject must have taken the DIRECT route (M2 not owned by
+	// any live batch), not the pending-signal route. Assert it from the settle scan's
+	// own route line (engine/queued_review_settle.go). A "batch snapshot" line listing
+	// M2 is NOT evidence of the pending route: that line reports what is in Queued
+	// whenever it changes, even while the worker holds a fixed batch and logs
+	// "train worker already assembling … — skipping" (the first live run of this
+	// scenario tripped over exactly that).
+	directLine := fmt.Sprintf("unprocessed human comment(s) on Queued member #%d — not owned by any live batch for %s, ejecting directly", m2, trainKey)
+	pendingLine := fmt.Sprintf("unprocessed human comment(s) on Queued member #%d — owned by the live batch for %s, flagging pending eject", m2, trainKey)
+	sawDirect := false
 	for _, l := range logLinesSince(t, env, offset) {
-		if members, ok := parseBatchSnapshot(l, trainKey); ok {
-			for _, n := range members {
-				if n == m2 {
-					t.Fatalf("occupant window closed: M2 #%d appears in a batch snapshot (%s) — the occupant's trial finished before "+
-						"M2 was queued (or the slow-gate is not holding it). This is a harness/bed problem, not an engine regression — re-run.",
-						m2, strings.TrimSpace(l))
-				}
-			}
+		if strings.Contains(l, pendingLine) {
+			t.Fatalf("occupant window closed: M2 #%d was owned by the live batch and took the pending-signal eject route (%s) — "+
+				"the occupant's trial finished before M2 was queued (or the slow-gate is not holding it). This is a harness/bed "+
+				"problem, not an engine regression — re-run.", m2, strings.TrimSpace(l))
+		}
+		if strings.Contains(l, directLine) {
+			sawDirect = true
 		}
 	}
+	if !sawDirect {
+		t.Fatalf("A3: M2 #%d was ejected, but the settle scan never logged the direct route (%q)", m2, directLine)
+	}
+	t.Logf("A3: direct eject route confirmed (M2 not owned by any live batch)")
 
 	// --- A5: processed (👀 then 🚀), then re-queued and landed. ---
 	eyes, rocket := waitForCommentRocket(t, env, repo, commentID, 40*time.Minute, nil)
