@@ -194,3 +194,41 @@ func TestCheckLateCheckOrdering(t *testing.T) {
 		}
 	})
 }
+
+func TestPickSlowGateRun(t *testing.T) {
+	t0 := time.Date(2026, 9, 27, 18, 0, 0, 0, time.UTC)
+	done := func(start time.Time) CheckRunTiming {
+		return CheckRunTiming{Name: "slow-gate", Status: "completed", Conclusion: "success", StartedAt: start, CompletedAt: start.Add(10 * time.Minute)}
+	}
+	running := func(start time.Time) CheckRunTiming {
+		return CheckRunTiming{Name: "slow-gate", Status: "in_progress", StartedAt: start}
+	}
+	queued := CheckRunTiming{Name: "slow-gate", Status: "queued"}
+	other := CheckRunTiming{Name: "test", Status: "in_progress", StartedAt: t0.Add(time.Hour)}
+
+	cases := []struct {
+		name   string
+		runs   []CheckRunTiming
+		want   CheckRunTiming
+		wantOK bool
+	}{
+		{name: "none", runs: []CheckRunTiming{other}},
+		{name: "single completed", runs: []CheckRunTiming{done(t0)}, want: done(t0), wantOK: true},
+		{name: "queued beats stale completed", runs: []CheckRunTiming{done(t0), queued}, want: queued, wantOK: true},
+		{name: "queued beats stale completed, reversed", runs: []CheckRunTiming{queued, done(t0)}, want: queued, wantOK: true},
+		{name: "in-flight beats later-started completed", runs: []CheckRunTiming{running(t0), done(t0.Add(time.Minute))}, want: running(t0), wantOK: true},
+		{name: "latest-started in-flight", runs: []CheckRunTiming{running(t0), running(t0.Add(time.Minute))}, want: running(t0.Add(time.Minute)), wantOK: true},
+		{name: "latest-started in-flight, reversed", runs: []CheckRunTiming{running(t0.Add(time.Minute)), running(t0)}, want: running(t0.Add(time.Minute)), wantOK: true},
+		{name: "queued beats in-flight", runs: []CheckRunTiming{running(t0), queued}, want: queued, wantOK: true},
+		{name: "queued beats in-flight, reversed", runs: []CheckRunTiming{queued, running(t0)}, want: queued, wantOK: true},
+		{name: "all completed falls back to latest-started", runs: []CheckRunTiming{done(t0), done(t0.Add(time.Minute))}, want: done(t0.Add(time.Minute)), wantOK: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := pickSlowGateRun(append(tc.runs, other))
+			if ok != tc.wantOK || got != tc.want {
+				t.Errorf("pickSlowGateRun = %+v, %v; want %+v, %v", got, ok, tc.want, tc.wantOK)
+			}
+		})
+	}
+}
