@@ -564,6 +564,13 @@ timeout instead of skipping. Only run in the `on` leg of the two-mode gate.
     The bisection test skips this check indirectly — if the guard is absent the
     combined batch is green and no bisection occurs, failing the `bisecting`
     log-line wait; run it only after the guard is enrolled.
+    **Keep the bed's copy in sync with `tests/e2e/testdata/`.** The guard fails a
+    merge-train trial/integration branch immediately, but a poison member's own PR
+    only after `POISON_MEMBER_DELAY` (600s). That delay lets #1821's admission gate
+    admit the member, which it would defer if its own CI were already red, while
+    making sure its own CI is never green, so the singleton fast path can never land
+    POISON on `main`. An older copy that fails member PRs immediately breaks every
+    poison scenario (bisection, conflict, red-singleton, runaway) at admission.
     `TestMergeTrainRedSingletonReroutesOffQueued` queues exactly one poison
     member, so its own combined Validate goes red with nobody to bisect against —
     the top-level `len(survivors) == 1` arity guard short-circuits straight to

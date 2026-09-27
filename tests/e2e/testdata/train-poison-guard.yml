@@ -12,6 +12,21 @@
 #
 # Scoped so it never disrupts other e2e scenarios: it is a fast grep, and green
 # whenever no poison entry is present (the common case).
+#
+# Timing matters since #1821's admission gate defers any member whose own PR CI is
+# confirmed red. A poison member's OWN PR therefore fails only after a delay
+# (POISON_MEMBER_DELAY), while a merge-train trial/integration PR (head branch
+# fabrik/merge-train/...) fails immediately:
+#   - at admission the member's own CI is still pending, so it is admitted (only a
+#     confirmed-red result is deferred) and the combined trial goes red at once,
+#     so bisection / the red-singleton disposition / the runaway guard are reached;
+#   - on any later retry the member's own CI is pending or red — never green — so
+#     the singleton fast path (which requires green) can never land POISON on main.
+# Before this, the member PR failed immediately: #1821 deferred every poison member
+# before its batch formed, and bisection was never reached (0.0.83 gate,
+# 2026-09-27). Failing only on merge-train branches (green on the member) would fix
+# admission but let an ejected poison member land via the fast path.
+# The job runs on every PR, so the required check always reports.
 name: train-poison-guard
 
 on:
@@ -23,9 +38,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Reject POISON entries in the combined tree
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          POISON_MEMBER_DELAY: "600"
         run: |
           dir="e2e/train/entries"
           if [ -d "$dir" ] && grep -rlq "POISON" "$dir"; then
+            case "$HEAD_REF" in
+              fabrik/merge-train/*) ;;
+              *)
+                echo "POISON on member branch $HEAD_REF — failing after ${POISON_MEMBER_DELAY}s so the admission gate sees it pending"
+                sleep "$POISON_MEMBER_DELAY"
+                ;;
+            esac
             echo "::error::found POISON sentinel in $dir — combined batch is red (bisection fixture)"
             grep -rl "POISON" "$dir" || true
             exit 1

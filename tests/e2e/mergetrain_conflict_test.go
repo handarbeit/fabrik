@@ -79,10 +79,12 @@ import (
 // checked to list exactly A, B, C, P in order — proving the merge order at runtime and
 // failing loudly on a premature partial batch or on stale Queued leftovers.
 //
-// Known race (shared with TestMergeTrainBisectionEjectsPoisoner): if P's own PR CI
-// completes red before the batch forms, the admission gate (#1821, active when the
-// stage before Queued has wait_for_ci: true) defers P before bisection. The scenario
-// fails fast with that named cause rather than timing out; a re-run resolves it.
+// P's own PR CI is still pending when its batch forms: train-poison-guard fails a
+// member branch only after a delay (and a merge-train trial branch immediately), so
+// the admission gate (#1821) admits P and the combined trial goes red. (When the
+// guard failed member branches immediately, #1821 deferred P off Queued before the
+// batch formed and bisection never ran.) If P is ever deferred anyway, the scenario
+// fails fast with that named cause rather than timing out.
 //
 // Prerequisites: see tests/e2e/README.md prerequisite #22 (Queued column, merge_train
 // on, train-poison-guard required on fabrik-test-alpha, real Claude usable from the
@@ -136,7 +138,7 @@ func TestMergeTrainConflictBisectPrefixRerere(t *testing.T) {
 	// Bisection must engage. Fail fast, naming the cause, on the known early exits.
 	waitForLogLineOrFail(t, env, logBisecting, map[string]string{
 		fmt.Sprintf(logDeferringFmt, pIssue): "the admission gate (#1821) deferred P because its own PR CI went red before the batch formed, " +
-			"so no bisection will happen (known race — see this test's doc comment); re-run",
+			"so no bisection will happen — check the bed's train-poison-guard.yml matches tests/e2e/testdata (member-branch failure must be delayed)",
 		fmt.Sprintf(logCannotResolveFmt, bIssue): "the engine could not resolve B's conflict and ejected it (the #1841 failure mode)",
 	}, logStart, 30*time.Minute)
 	t.Logf("bisection engaged on the red batch")
