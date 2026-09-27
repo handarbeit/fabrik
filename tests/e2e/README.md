@@ -993,6 +993,79 @@ boundary (see `adrs/1873-e2e-comment-landing-coverage.md`).
   2×(2×25 + 45 + 5) ≈ 200 min of scenario time (much of it overlapping the parallel
   pool) and ~$1–3 to a full gate run.
 
+### Additional prerequisites for `TestAppSelfRecognition*` (#1877)
+
+Three App-leg-only scenarios (files `self_recognition_test.go`, `app_identity.go`,
+`self_recognition_helpers.go`; decision record `adrs/1877-e2e-app-self-recognition.md`).
+
+1. **Bed-local `E2E_APP_ID` / `E2E_APP_PRIVATE_KEY_PATH` / `E2E_APP_INSTALLATION_ID`**
+   in the bed's `.env` (already required by the App auth leg). The harness mints
+   an installation token from them with the `github` package's own
+   `ParseAppPrivateKey`/`BuildAppJWT`/`MintInstallationToken` (no second JWT
+   implementation) so it can post as `<slug>[bot]`. A relative key path resolves
+   against the bed directory. The token is passed to `gh` via the environment only,
+   never in argv, and never logged; every `gh` output that reaches a failure
+   message is redacted. With none of the keys set the scenarios skip; a partial set
+   fails.
+2. **`fabrik:paused`, `fabrik:awaiting-input`** labels exist on Alpha (created
+   on demand, never deleted), and **`review-authority:authoritative`** (as for
+   `TestReviewAuthority*`).
+3. **`FABRIK_REVIEWER_TOKEN`** set (distinct from the PR-author account) for the
+   review-suppression scenario only; it skips without it.
+4. The harness account (`FABRIK_TOKEN`) must not classify as a bot
+   (`github.IsBotLogin`); in the App legs it is the "human" of every positive control.
+
+| Scenario | Asserts | Claude cost | Wall-clock |
+|---|---|---|---|
+| `TestAppSelfRecognitionBotCommentNeverResumes` (A1) | A plain, marker-free bot comment on a paused item never resumes it: after the engine's `none human-authored` evaluation line, 3+ polls with the pause labels intact, no `unpause`/`unblock` line, no 👀/🚀 on the comment; then a human comment resumes it (control) | 1 comment-processing invocation | ~6–10 min |
+| `TestAppSelfRecognitionBlockedCommentUpdatedInPlace` (A2) | After the dependency set changes ({B1} → {B1,B2}) the one blocked comment (same id, bot-authored) is edited in place: its parsed dependency set equals the new set | none | ~12–25 min (waits out the `dep-blocked` cooldown, `PollSeconds*10`) |
+| `TestAppSelfRecognitionDurableReviewSuppression` (A3) | A `review-ids-addressed` marker comment authored by the bot suppresses redelivery of that review (`durablyAddressedReviewIDs`); the same marker authored by the harness account does not (control) | 1 review-reinvoke (control arm) | ~8–15 min |
+
+Run in parallel, ~15–25 min per App leg, ≈ $0.10–0.60; the cost is paid in both the
+`app/off` and `app/on` legs. There is no PAT counterpart: the other scenarios
+already exercise the PAT identity.
+
+**Non-vacuity, stated honestly.**
+
+- **A3 discriminates #1754.** Pre-fix `durablyAddressedReviewIDs` compared
+  `c.Author != e.cfg.User` to the REST author `fabrik-bed[bot]`, so the bot's
+  marker was ignored and `review-body:R` was dispatched. The control arm proves the
+  author scoping still rejects a non-self marker.
+- **A2's dependency-set assertion is the one that catches the #1754 regression.**
+  Pre-fix `findBlockedComment(…, e.cfg.User)` matched nothing and skipped the
+  update, leaving a *stale* body, not a duplicate; a count check alone would not
+  notice.
+- **A1 does not discriminate the #1754 delta.** Pre-fix `filterHuman` had no
+  `cfg.User` comparison; the defect was the cache write-through stamping
+  `Author: cfg.User` on Fabrik's own posts, a transient human classification that is
+  not live-observable. A1 guards `filterHuman`/`gh.IsBotLogin` on the real wire
+  shape and the ADR-1813 resume path. Its negative arm is positive-first: it waits
+  for the engine's own evaluation line before starting the hold, since only the
+  first evaluation of a paused item is guaranteed to log.
+
+**Known expected-red: A1 and A2 on the App leg until the engine normalises
+comment authors at ingestion.** Research found (from the code, not confirmed live)
+that REST reports a bot comment's author as `fabrik-bed[bot]` but the GraphQL
+comment fragment (`author { login }`, no `__typename`) yields the bare
+`fabrik-bed`, and under App auth (webhooks are refused, ADR-1752) the engine reads
+issue comments through GraphQL. If so, `IsBotLogin("fabrik-bed")` is false and
+`findBlockedComment` never matches, so A1 and A2 fail on a live App leg for a reason
+outside this change (mirror `applyLinkedPRs`'s review-author normalisation
+for comments). The scenarios assert the correct behaviour and are not weakened; each
+logs both wire shapes (`REST=… GraphQL=…`) so a failure is attributable. A3 reads
+REST and is unaffected. A release gate that goes red on A1/A2 for this reason can be
+released with `cut-release.sh --skip-integration=<reason>` until the engine work
+lands. A name ending in `-bot` would make A1 pass through `IsBotLogin`'s suffix rule
+regardless; the bed's `fabrik-bed` does not.
+
+**A3 topology.** GraphQL `latestReviews` keeps one review per reviewer, so two
+reviews cannot share a PR: each arm has its own item/PR and one review from the
+reviewer token. Each review is created PENDING (invisible to the engine), the marker
+comment is posted against its id, and only then is the review submitted, so there is
+no race with the poll. The suppressed arm logs nothing of its own; the control arm's
+dispatch is the positive proof that the engine evaluated review feedback after both
+reviews existed, before the 3-poll negative hold.
+
 ### Reviewer topology (#1396)
 
 Every scenario that drives a PR through the organic Review gate depends on
@@ -1204,6 +1277,15 @@ The harness still files issues and posts its scripted replies as
 `FABRIK_TOKEN`'s account. In PAT mode that is Fabrik's own identity; in App
 mode it is a human to Fabrik. Triage an App-only failure with that in mind:
 it may be a scenario that leaned on the harness sharing Fabrik's identity.
+
+**App-only scenarios (#1877).** `TestAppSelfRecognition*` assert that Fabrik
+recognises its own `<slug>[bot]` comments as its own (guarding #1754's
+`selfLogin()` routing). They run only in the App legs and **skip in the PAT legs**
+with a stated reason: `requireAppLeg` decides from `E2E_AUTH_MODE`
+(`normalizeAuthMode`) or, when unset, from the bed's startup identity
+(`bedAuthIdentity`) via the pure `decideAppLegRun`. An `app` leg whose bed shows no
+App identity fails loudly rather than skipping. See "Additional prerequisites for
+`TestAppSelfRecognition*`" below.
 
 Scenarios resolve mode via `resolveTrainMode` (`harness.go`): `E2E_TRAIN_MODE`
 takes precedence when set (an invalid value is a hard test failure), falling
@@ -1514,6 +1596,9 @@ the `Queued` column is absent, so it only runs in the gate's `on` leg.
 | `TestLateCheckRunSuiteGate` | ADR-1822/#1829 suite-aware CI gate (yolo item taken to Validate, `wait_for_ci`): the gate must not clear while a `needs:`-gated late check run is outstanding. Asserts on GitHub timestamps — late run starts after the fast run completes (A1), `stage:Validate:complete` is applied only after the late run completes (A2), and the fast run finished after `fabrik:awaiting-ci` (A3, vacuity guard). Needs `late-check-suite-gate.yml` installed on Alpha (not required); skips if absent. Mode-invariant | Both | 20–35 min (incl. ~4 min sleep) | ~$0.10–0.50 (one Validate Claude invocation) + one CI cycle |
 | `TestYoloRemovedMidValidateBlocksMerge` | ADR-1769/#1769 live re-read of autonomy labels (yolo item taken to Validate): `fabrik:yolo` is removed over REST the moment `stage:Validate:in_progress` appears; the PR must not merge — no `fabrik:auto-merge-enabled`, PR and issue stay OPEN, board Status stays `Validate` with `stage:Validate:complete` present. The mid-stage window is proven from the events log by event id (`in_progress` < yolo removal < `awaiting-ci`); a missed window fails as INCONCLUSIVE, never skips. On the bed's `wait_for_ci` Validate a pre-fix engine can also pass when the board cache had already caught up — the scenario guards the operator-trust property and the cache-lag window. Mode-invariant | Both | 15–30 min | ~$0.10–0.50 (one Validate Claude invocation) + one CI cycle |
 | `TestCommentReentryShowsReworking` | ADR-1802/#1802 comment re-entry rework marker: after a real Research run parks the item, a human comment triggers re-entry; the events log (after the pre-comment event id) must show `fabrik:reworking:Research` labeled, `stage:Research:complete` unlabeled, `stage:Research:complete` re-labeled, then the marker unlabeled — in that order — and the item ends with `:complete` restored, marker gone, still at Research. Events-log ordering is the proof (the window is sub-second); a live poll is informational only. Mode-invariant | Both | 10–20 min | ~$0.20–0.60 (two Claude invocations) |
+| `TestAppSelfRecognitionBotCommentNeverResumes` | #1877 A1 (guards #1754): a plain bot-authored comment never resumes a paused item; a human comment does (control). See "Additional prerequisites for `TestAppSelfRecognition*`" | App legs only (skips in `pat`) | ~6–10 min | ~$0.10–0.30 (one comment-processing invocation) |
+| `TestAppSelfRecognitionBlockedCommentUpdatedInPlace` | #1877 A2 (guards #1754): a changed `blockedBy` set edits Fabrik's single blocked comment in place; body reflects the new set | App legs only (skips in `pat`) | ~12–25 min (dep-blocked cooldown) | none |
+| `TestAppSelfRecognitionDurableReviewSuppression` | #1877 A3 (guards #1754): a bot-authored `review-ids-addressed` marker suppresses that review's redelivery; a non-self marker does not | App legs only (skips in `pat`) | ~8–15 min | ~$0.10–0.30 (one review-reinvoke) |
 | `TestMergeTrainHappyPathLanding` | ADR-059 internal train: 3 clean Queued members → one integration PR → all advance Queued→Done, PRs closed, no O(N²) per-member retests | Train-only (on) | 10–25 min | low (no Claude) |
 | `TestMergeTrainBisectionEjectsPoisoner` | ADR-059 D4: red combined batch → halving bisection isolates the poison member → ejected → survivors land. Needs the `train-poison-guard` required check | Train-only (on) | 20–40 min | low–moderate |
 | `TestMergeTrainConflictBisectPrefixRerere` | #1848: 4-member batch (A/B same-path conflict, clean C, poison P) → **real Claude** resolves B onto A (small turn count) → red trial → bisect ejects P → first half reuses the recorded prefix with no Claude → A, B, C land, P off Queued; rerere replay asserted only if main moves. Needs the `train-poison-guard` required check. **Not parallel** — the train batches every Queued item (prerequisite #22) | Train-only (on) | 45–80 min (est.) | 1 Claude invocation (~$0.05–0.30) + ~11 CI cycles |
@@ -1565,6 +1650,9 @@ scenarios" for their per-scenario cost and wall-clock.
 | `TestLateCheckRunSuiteGate` | ADR-1822 / #1822 (suite-aware CI gate: `ciSuiteHold`, `settlePRMergeState`), #1829 (`github-actions` suites never inert), #1849 (this scenario) |
 | `TestYoloRemovedMidValidateBlocksMerge` | ADR-1769 / #1769 (`refreshAutonomyLabels`, `engine/stages.go`, called from `handleStageComplete` and `runCatchUpPhase2` ahead of `attemptMergeOnValidate`), #1878 (this scenario) |
 | `TestCommentReentryShowsReworking` | ADR-1802 / #1802 (`beginStageRework`/`endStageRework`, `engine/comments.go`; `reworkingLabelPrefix`), #1878 (this scenario) |
+| `TestAppSelfRecognitionBotCommentNeverResumes` | #1754 (`selfLogin()`), #1877; guards `filterHuman`/`gh.IsBotLogin` on the real wire shape and ADR-1813's resume rule (does not discriminate #1754's cache write-through delta) |
+| `TestAppSelfRecognitionBlockedCommentUpdatedInPlace` | #1754 (`findBlockedComment` under App auth), #1877; expected red on the App leg until comment authors are normalised at ingestion |
+| `TestAppSelfRecognitionDurableReviewSuppression` | #1754 (`durablyAddressedReviewIDs`), #1555, #1877 |
 | `TestMergeTrainHappyPathLanding` | ADR-059 D1/D3 (#946, #947, #948) — Queued column, trial-branch build, integration-PR landing + member lifecycle |
 | `TestMergeTrainBisectionEjectsPoisoner` | ADR-059 D4 (#949) — halving bisection, ejection, one-at-a-time fallback |
 | `TestMergeTrainConflictBisectPrefixRerere` | #1841 (conflict prompt without build/test commands; turn-limited-but-resolved exit kept), #1835 (trial-prefix reuse), #1834 (rerere replay, `forgetPoisonerResolutions`), #1833 (deterministic Queued order), #1848 (this scenario) |
