@@ -653,3 +653,83 @@ func TestEnsureWorktree_ExistingBranch(t *testing.T) {
 		t.Fatal("worktree dir not created")
 	}
 }
+
+// cloneBareWithRefspec makes a Fabrik-shaped bare clone of origin: branches
+// under refs/remotes/origin/*, as ensureBareClone configures.
+func cloneBareWithRefspec(t *testing.T, origin string) string {
+	t.Helper()
+	bare := filepath.Join(t.TempDir(), "clone.git")
+	for _, args := range [][]string{
+		{"git", "clone", "--bare", origin, bare},
+		{"git", "-C", bare, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"},
+		{"git", "-C", bare, "fetch", "origin", "+refs/heads/*:refs/remotes/origin/*"},
+	} {
+		if out, err := exec.Command(args[0], args[1:]...).CombinedOutput(); err != nil {
+			t.Fatalf("%v: %s: %v", args, out, err)
+		}
+	}
+	return bare
+}
+
+func gitOut(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v in %s: %s: %v", args, dir, out, err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// TestEnsureWorktree_AdoptsIssueBranchCreatedOnOriginAfterClone: the issue
+// branch appears on origin after the bare clone last fetched (a PR opened by a
+// person or the e2e harness, or a branch pushed by a since-removed worktree).
+// The worktree must start from that branch, not fork from base — forking left
+// it without the branch's commits and every push was rejected as stale (0.0.83
+// gate, TestLateCheckRunSuiteGate).
+func TestEnsureWorktree_AdoptsIssueBranchCreatedOnOriginAfterClone(t *testing.T) {
+	skipIfNoGit(t)
+	origin := initBareRepo(t)
+	bare := cloneBareWithRefspec(t, origin)
+
+	// After the clone: the issue branch appears on origin with its own commit.
+	gitOut(t, origin, "checkout", "-q", "-b", "fabrik/issue-7")
+	if err := os.WriteFile(filepath.Join(origin, "fixture.txt"), []byte("from origin\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitOut(t, origin, "add", "fixture.txt")
+	gitOut(t, origin, "commit", "-q", "-m", "fixture on the issue branch")
+	want := gitOut(t, origin, "rev-parse", "HEAD")
+	gitOut(t, origin, "checkout", "-q", "main")
+
+	wm := NewWorktreeManager(bare)
+	wtDir, err := wm.EnsureWorktree(7, "main", true)
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+	if got := gitOut(t, wtDir, "rev-parse", "HEAD"); got != want {
+		t.Errorf("worktree HEAD = %s, want origin's fabrik/issue-7 %s", got, want)
+	}
+	if _, err := os.Stat(filepath.Join(wtDir, "fixture.txt")); err != nil {
+		t.Errorf("fixture from origin's branch missing in worktree: %v", err)
+	}
+}
+
+// TestEnsureWorktree_NoOriginBranchForksFromBase: with no issue branch on
+// origin, the worktree still forks from origin/<base>.
+func TestEnsureWorktree_NoOriginBranchForksFromBase(t *testing.T) {
+	skipIfNoGit(t)
+	origin := initBareRepo(t)
+	bare := cloneBareWithRefspec(t, origin)
+	want := gitOut(t, origin, "rev-parse", "main")
+
+	wm := NewWorktreeManager(bare)
+	wtDir, err := wm.EnsureWorktree(8, "main", true)
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+	if got := gitOut(t, wtDir, "rev-parse", "HEAD"); got != want {
+		t.Errorf("worktree HEAD = %s, want main %s", got, want)
+	}
+}
