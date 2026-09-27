@@ -469,7 +469,14 @@ or as a follow-up comment on handarbeit/fabrik#1355 once run.
 
 11. **`slow-gate` enrolled as a required status check** on
     `handarbeit/fabrik-test-alpha/main`. The test skips gracefully (via
-    `t.Skip`) if not enrolled — safe to merge before enrollment.
+    `t.Skip`) if not enrolled — safe to merge before enrollment. Its
+    `ci.yml` must also honour the `slow-ci-required-long` PR-body marker
+    (`SLOW_CI_LONG_SECONDS: "1500"`, checked before the plain
+    `slow-ci-required` one, which is a prefix of it). The window runs from
+    the PR push, and Review's latency eats into it before `fabrik:awaiting-ci`
+    appears, so the plain 10-minute marker is too short for this test. The
+    test reads `slow-gate`'s real state and fails as a fixture problem, not an
+    engine regression, when too little window is left.
 12. **The engine process must actually authenticate as `FABRIK_TOKEN`'s
     identity** — no shell export shadowing it. `config.Token()`'s precedence
     is `FABRIK_TOKEN > GITHUB_TOKEN`, and `godotenv.Load(".env")` does not
