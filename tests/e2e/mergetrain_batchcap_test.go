@@ -115,11 +115,18 @@ func TestMergeTrainQueuedDeeperThanBatchCap(t *testing.T) {
 	scenarioStart := time.Now().Add(-time.Minute)
 
 	// --- Queue seven clean members, all paused, in a known order. ---
+	// Each run's fixtures live in their own directory with run-stamped content.
+	// Landed fixtures persist on main, so a flat e2e/train/batchcap/ with a
+	// recurring "batch-cap member N" made every new member look like a duplicate
+	// of an earlier run's: the bed's reviewer (Pruefer) flagged it, the #1208
+	// settle scan correctly ejected the flagged members, and batch 1's
+	// membership changed mid-trial (0.0.83 gate run 3).
+	runStamp := time.Now().UTC().Format("20060102-150405")
 	var nums, prs []int
 	for i := 1; i <= memberCount; i++ {
 		marker := fmt.Sprintf("bc%d", i)
 		n, pr := QueueMemberPaused(t, env, repo, base, marker,
-			fmt.Sprintf("e2e/train/batchcap/m%d.txt", i), fmt.Sprintf("batch-cap member %d\n", i))
+			fmt.Sprintf("e2e/train/batchcap/%s/m%d.txt", runStamp, i), fmt.Sprintf("batch-cap member %d of run %s\n", i, runStamp))
 		repauseOnFailure(t, env, repo, n)
 		nums = append(nums, n)
 		prs = append(prs, pr)
@@ -186,6 +193,20 @@ func TestMergeTrainQueuedDeeperThanBatchCap(t *testing.T) {
 	for _, l := range lines[:mergeIdx] {
 		if isSnapshot(l) {
 			window = append(window, l)
+		}
+	}
+	// A member ejected for reviewer feedback (#1208 review findings, or an
+	// unprocessed comment, #1863) changes the Queued set legitimately. That is
+	// not #1833 selection churn, and this scenario can no longer assert
+	// stability, so name the environmental cause rather than blaming selection.
+	for _, l := range lines[:mergeIdx] {
+		for _, n := range nums {
+			if strings.Contains(l, fmt.Sprintf("review-thread finding(s) on Queued member #%d ", n)) ||
+				strings.Contains(l, fmt.Sprintf("unprocessed human comment(s) on Queued member #%d ", n)) {
+				t.Fatalf("A2 inconclusive: member #%d was ejected for reviewer feedback while batch 1 was in flight, so Queued "+
+					"membership changed for a legitimate reason (not #1833 selection churn) — check the member PR's review "+
+					"threads; this is environmental, re-run: %s", n, strings.TrimSpace(l))
+			}
 		}
 	}
 	if len(window) != 1 {
