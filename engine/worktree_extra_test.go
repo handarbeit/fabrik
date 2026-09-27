@@ -363,3 +363,149 @@ func TestBuildCloneURL(t *testing.T) {
 		})
 	}
 }
+
+// --- App commit identity (#1893, R2) ---
+
+func writeGitConfig(t *testing.T, repoDir, key, value string) {
+	t.Helper()
+	cmd := exec.Command("git", "config", "--local", key, value)
+	cmd.Dir = repoDir
+	cmd.Env = nonInteractiveGitEnv()
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git config %s: %s: %v", key, out, err)
+	}
+}
+
+func unsetGitConfig(t *testing.T, repoDir string, keys ...string) {
+	t.Helper()
+	for _, key := range keys {
+		cmd := exec.Command("git", "config", "--local", "--unset", key)
+		cmd.Dir = repoDir
+		cmd.Env = nonInteractiveGitEnv()
+		cmd.CombinedOutput() // absent key is fine
+	}
+}
+
+var testAppIdent = &commitIdentity{Name: "my-app[bot]", Email: "42+my-app[bot]@users.noreply.github.com"}
+
+func TestSetAppCommitterIdentity_FreshCloneWritesIdentityAndMarkers(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	unsetGitConfig(t, repoDir, "user.name", "user.email")
+
+	setAppCommitterIdentity(repoDir, testAppIdent, "", nonInteractiveGitEnv(), "")
+
+	for key, want := range map[string]string{
+		"user.name": testAppIdent.Name, "user.email": testAppIdent.Email,
+		managedNameKey: testAppIdent.Name, managedEmailKey: testAppIdent.Email,
+	} {
+		if got := readGitConfig(t, repoDir, key); got != want {
+			t.Errorf("%s = %q, want %q", key, got, want)
+		}
+	}
+}
+
+func TestSetAppCommitterIdentity_ReplacesLegacyOperatorIdentity(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	// What PAT mode wrote before the deployment switched to App auth.
+	writeGitConfig(t, repoDir, "user.name", "operator")
+	writeGitConfig(t, repoDir, "user.email", "operator@users.noreply.github.com")
+
+	setAppCommitterIdentity(repoDir, testAppIdent, "operator", nonInteractiveGitEnv(), "")
+
+	if got := readGitConfig(t, repoDir, "user.name"); got != testAppIdent.Name {
+		t.Errorf("user.name = %q, want the App's", got)
+	}
+	if got := readGitConfig(t, repoDir, "user.email"); got != testAppIdent.Email {
+		t.Errorf("user.email = %q, want the App's", got)
+	}
+}
+
+func TestSetAppCommitterIdentity_PreservesOperatorChosenIdentity(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	writeGitConfig(t, repoDir, "user.name", "Jane Doe")
+	writeGitConfig(t, repoDir, "user.email", "jane@example.com")
+
+	setAppCommitterIdentity(repoDir, testAppIdent, "operator", nonInteractiveGitEnv(), "")
+
+	if got := readGitConfig(t, repoDir, "user.name"); got != "Jane Doe" {
+		t.Errorf("user.name = %q, want preserved", got)
+	}
+	if got := readGitConfig(t, repoDir, "user.email"); got != "jane@example.com" {
+		t.Errorf("user.email = %q, want preserved", got)
+	}
+}
+
+func TestSetAppCommitterIdentity_UpgradesFallbackEmailAndPreservesLaterEdit(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	unsetGitConfig(t, repoDir, "user.name", "user.email")
+	env := nonInteractiveGitEnv()
+
+	// First start: bot-ID lookup failed, so the ID-less email is written.
+	fallback := &commitIdentity{Name: "my-app[bot]", Email: "my-app[bot]@users.noreply.github.com"}
+	setAppCommitterIdentity(repoDir, fallback, "", env, "")
+	if got := readGitConfig(t, repoDir, "user.email"); got != fallback.Email {
+		t.Fatalf("fallback email = %q", got)
+	}
+
+	// Later start: lookup succeeded — Fabrik wrote the old value, so it upgrades.
+	setAppCommitterIdentity(repoDir, testAppIdent, "", env, "")
+	if got := readGitConfig(t, repoDir, "user.email"); got != testAppIdent.Email {
+		t.Errorf("email not upgraded: %q", got)
+	}
+
+	// An operator edit after Fabrik's write is theirs and is never overwritten.
+	writeGitConfig(t, repoDir, "user.email", "ops@example.com")
+	setAppCommitterIdentity(repoDir, testAppIdent, "", env, "")
+	if got := readGitConfig(t, repoDir, "user.email"); got != "ops@example.com" {
+		t.Errorf("operator edit overwritten: %q", got)
+	}
+}
+
+func TestSetAppCommitterIdentity_LegacyGHESHostForm(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	writeGitConfig(t, repoDir, "user.name", "operator")
+	writeGitConfig(t, repoDir, "user.email", "operator@users.noreply.ghe.example.com")
+
+	setAppCommitterIdentity(repoDir, testAppIdent, "operator", nonInteractiveGitEnv(), "ghe.example.com")
+
+	if got := readGitConfig(t, repoDir, "user.email"); got != testAppIdent.Email {
+		t.Errorf("user.email = %q", got)
+	}
+}
+
+func TestEnsureBareCloneAs_ExistingCloneGetsAppIdentity_PATWritesNoMarkers(t *testing.T) {
+	skipIfNoGit(t)
+	base := t.TempDir()
+	bareDir := filepath.Join(base, ".fabrik", "repos", "o-r.git")
+	if out, err := exec.Command("git", "init", "--bare", bareDir).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %s: %v", out, err)
+	}
+	unsetGitConfig(t, bareDir, "user.name", "user.email")
+
+	// PAT mode (nil identity): the legacy path, no marker keys.
+	if _, err := ensureBareCloneAs(base, "o", "r", "operator", nil, false, ""); err != nil {
+		t.Fatalf("ensureBareCloneAs: %v", err)
+	}
+	if got := readGitConfig(t, bareDir, "user.name"); got != "operator" {
+		t.Errorf("PAT user.name = %q", got)
+	}
+	if got := readGitConfig(t, bareDir, managedNameKey); got != "" {
+		t.Errorf("PAT mode must write no marker keys, got %q", got)
+	}
+
+	// Switch to App mode over the same, now-existing clone.
+	if _, err := ensureBareCloneAs(base, "o", "r", "operator", testAppIdent, false, ""); err != nil {
+		t.Fatalf("ensureBareCloneAs: %v", err)
+	}
+	if got := readGitConfig(t, bareDir, "user.name"); got != testAppIdent.Name {
+		t.Errorf("App user.name = %q", got)
+	}
+	if got := readGitConfig(t, bareDir, "user.email"); got != testAppIdent.Email {
+		t.Errorf("App user.email = %q", got)
+	}
+}

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"os"
 	"reflect"
 	"strings"
@@ -280,3 +281,32 @@ func TestLegacyLockLabel(t *testing.T) {
 		t.Errorf("App mode without user: %q", got)
 	}
 }
+
+type fakeUserIDFetcher struct {
+	id  int64
+	err error
+	got string
+}
+
+func (f *fakeUserIDFetcher) FetchUserID(login string) (int64, error) {
+	f.got = login
+	return f.id, f.err
+}
+
+func TestResolveAppIdentity_LookupSuccessAndSoftFailure(t *testing.T) {
+	ok := &fakeUserIDFetcher{id: 99}
+	id := resolveAppIdentity(ok, "my-app[bot]", t.TempDir())
+	if ok.got != "my-app[bot]" || id.botUserID != 99 || id.slug != "my-app" || id.botLogin != "my-app[bot]" {
+		t.Errorf("identity = %+v (lookup of %q)", id, ok.got)
+	}
+
+	// A failed lookup must not fail startup: the identity still names the bot,
+	// with no ID (ID-less noreply email).
+	bad := &fakeUserIDFetcher{err: errFakeLookup}
+	id = resolveAppIdentity(bad, "my-app[bot]", t.TempDir())
+	if id == nil || id.botUserID != 0 || id.botLogin != "my-app[bot]" || id.lockID == "" {
+		t.Errorf("soft-failure identity = %+v", id)
+	}
+}
+
+var errFakeLookup = errors.New("boom")

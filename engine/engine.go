@@ -1048,7 +1048,7 @@ func (e *Engine) ensureRepoReady(ctx context.Context, item gh.ProjectItem) error
 		if e.cloneAttemptHook != nil {
 			e.cloneAttemptHook(nameWithOwner)
 		}
-		bareDir, err := ensureBareClone(e.fabrikDir, owner, repo, e.cfg.User, e.cfg.GitSSH, e.cfg.GHESHost)
+		bareDir, err := ensureBareCloneAs(e.fabrikDir, owner, repo, e.cfg.User, e.commitIdentity(), e.cfg.GitSSH, e.cfg.GHESHost)
 		call.dir = bareDir
 		call.err = err
 
@@ -1166,7 +1166,7 @@ func (e *Engine) ensureSpawnTargetReady(ctx context.Context, targetOwner, target
 		if e.cloneAttemptHook != nil {
 			e.cloneAttemptHook(nameWithOwner)
 		}
-		bareDir, err := ensureBareClone(e.fabrikDir, targetOwner, targetRepo, e.cfg.User, e.cfg.GitSSH, e.cfg.GHESHost)
+		bareDir, err := ensureBareCloneAs(e.fabrikDir, targetOwner, targetRepo, e.cfg.User, e.commitIdentity(), e.cfg.GitSSH, e.cfg.GHESHost)
 		call.dir = bareDir
 		call.err = err
 
