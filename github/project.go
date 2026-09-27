@@ -14,14 +14,15 @@ import (
 // It intentionally does not include the extra location fields (diffHunk,
 // path, line, originalLine) that PR review-thread comments carry — that
 // selection is a strict superset and stays hand-written where it's used.
-const commentSelectionFragment = `id databaseId author { login } body createdAt reactionGroups { content reactors { totalCount } }`
+const commentSelectionFragment = `id databaseId author { __typename login } body createdAt reactionGroups { content reactors { totalCount } }`
 
 // commentNodeData holds the raw data for a comment returned from the API.
 type commentNodeData struct {
 	ID         string `json:"id"`
 	DatabaseID int    `json:"databaseId"`
 	Author     *struct {
-		Login string `json:"login"`
+		Typename string `json:"__typename"`
+		Login    string `json:"login"`
 	} `json:"author"`
 	Body           string `json:"body"`
 	CreatedAt      string `json:"createdAt"`
@@ -658,7 +659,7 @@ query($id: ID!) {
       url
       closed
       repository { nameWithOwner }
-      author { login }
+      author { __typename login }
       labels(first: 20) {
         nodes { name }
         pageInfo { hasNextPage endCursor }
@@ -725,7 +726,7 @@ query($id: ID!) {
                 nodes {
                   id
                   databaseId
-                  author { login }
+                  author { __typename login }
                   body
                   createdAt
                   diffHunk
@@ -747,7 +748,7 @@ query($id: ID!) {
       title
       body
       url
-      author { login }
+      author { __typename login }
       labels(first: 20) {
         nodes { name }
         pageInfo { hasNextPage endCursor }
@@ -781,7 +782,8 @@ type fetchItemDetailsNode struct {
 		NameWithOwner string `json:"nameWithOwner"`
 	} `json:"repository"`
 	Author *struct {
-		Login string `json:"login"`
+		Typename string `json:"__typename"`
+		Login    string `json:"login"`
 	} `json:"author"`
 	Labels struct {
 		Nodes []struct {
@@ -911,7 +913,7 @@ func (c *Client) FetchItemDetails(item *ProjectItem) error {
 		item.IsClosed = node.Closed
 	}
 	if node.Author != nil {
-		item.Author = node.Author.Login
+		item.Author = restShapedLogin(node.Author.Login, node.Author.Typename)
 	}
 
 	// Populate assignees
@@ -1064,9 +1066,7 @@ func (c *Client) applyLinkedPRs(item *ProjectItem, node *fetchItemDetailsNode) e
 				// that has no other recognizable login pattern (e.g.
 				// handarbeit-pruefer, #1045) would never be recognized as
 				// a bot in a rendered comment prompt.
-				if rev.Author.Typename == "Bot" && !strings.HasSuffix(strings.ToLower(author), "[bot]") {
-					author += "[bot]"
-				}
+				author = restShapedLogin(author, rev.Author.Typename)
 				review := PRReview{
 					Author:     author,
 					State:      rev.State,
@@ -1115,7 +1115,7 @@ func toComment(cm commentNodeData, fromPR int) Comment {
 		DiffHunk:     cm.DiffHunk,
 	}
 	if cm.Author != nil {
-		c.Author = cm.Author.Login
+		c.Author = restShapedLogin(cm.Author.Login, cm.Author.Typename)
 	}
 	if t, err := parseTime(cm.CreatedAt); err == nil {
 		c.CreatedAt = t

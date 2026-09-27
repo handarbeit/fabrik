@@ -283,3 +283,19 @@ func (c Comment) HasReaction(content string) bool {
 	}
 	return false
 }
+
+// restShapedLogin returns login in the form REST's user.login uses. GraphQL's
+// Bot.login omits the "[bot]" suffix REST includes for the same account
+// (GraphQL "handarbeit-pruefer" vs REST "handarbeit-pruefer[bot]"), so any
+// login read through GraphQL with typename "Bot" gets the suffix appended.
+// Without it IsBotLogin misses every GitHub App's comments, and under App
+// auth Fabrik's own comments no longer match its selfLogin() "<slug>[bot]".
+// Every GraphQL author selection must request __typename and route through
+// here. A non-Bot typename, an empty one (an older response without the
+// field), or a login already suffixed is returned unchanged.
+func restShapedLogin(login, typename string) string {
+	if typename == "Bot" && login != "" && !strings.HasSuffix(strings.ToLower(login), "[bot]") {
+		return login + "[bot]"
+	}
+	return login
+}
