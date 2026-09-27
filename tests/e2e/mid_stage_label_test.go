@@ -242,16 +242,25 @@ func TestCommentReentryShowsReworking(t *testing.T) {
 	stamp := time.Now().UTC().Format("150405.000")
 	num := FileIssue(t, env, env.RepoAlpha,
 		fmt.Sprintf("e2e comment re-entry shows reworking (%s)", stamp),
-		"e2e scenario for the comment re-entry rework marker. Goal: confirm that "+
-			"the repository's README.md and the Go module file go.mod exist and briefly "+
-			"describe what each is for. There is nothing to implement; Research should "+
-			"summarise those two files and complete.")
+		"e2e scenario for the comment re-entry rework marker. Goal: add a short "+
+			"\"Files\" section to README.md that names README.md and go.mod and states in "+
+			"one sentence each what they are for. Research should read both files and "+
+			"record what the new section needs to say; later stages would make the edit.")
 	itemID := AddIssueToProject(t, env, env.RepoAlpha, num)
 	AddLabel(t, env, env.RepoAlpha, num, "stage:Specify:complete")
 	SetIssueStatus(t, env, itemID, stage)
 	t.Logf("filed %s#%d at Status=%s (no autonomy label — the item parks after Research)", env.RepoAlpha, num, stage)
 
 	waitForLabelFirstApplied(t, env, env.RepoAlpha, num, completeLabel, 30*time.Minute)
+	// Research may still judge the issue to need no work (FABRIK_NO_WORK_NEEDED),
+	// which sends it to Done and closes it — there is then no parked stage for the
+	// comment to re-enter. That is a fixture outcome, not an engine regression, so
+	// report it as such instead of timing out 20 minutes later on a missing marker.
+	if _, found, err := tryLabelFirstAppliedAt(env, env.RepoAlpha, num, "fabrik:awaiting-done"); err == nil && found {
+		t.Fatalf("fixture: Research judged %s#%d to need no work (fabrik:awaiting-done applied), so the item went to Done "+
+			"instead of parking after Research — the re-entry scenario cannot run; re-run, and if it recurs make the issue body "+
+			"describe more concrete work", env.RepoAlpha, num)
+	}
 	t.Logf("%s applied — Research complete, item parked", completeLabel)
 
 	sinceID := maxEventID(mustFetchIssueEvents(t, env, env.RepoAlpha, num))
