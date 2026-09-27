@@ -2450,6 +2450,10 @@ The resulting silent chain: `settlePRMergeState()`'s `CheckRunsPending` case ret
 
 **R7 — no behavior change for an item that has never posted a CI-gate pause comment.** `hasCIGatePauseComment` returns `false` for such an item exactly as before; the backstop's fresh-timeout branch (pause and `continue`) and both pause functions' fresh-post branch (post via `pauseIssue`, return `true`) are byte-identical to pre-#1408 behavior.
 
+**Correction (issue #1937): the match is anchored to the pause-comment shape.** The shared primitive behind `hasCIGatePauseComment` and the review/rebase/enqueue wrappers is `hasPauseComment` (`engine/mutate.go`). It still scans the whole comment history, so it still identifies an episode. But a comment now counts only if it has the engine's own pause shape: a `🏭 **Fabrik — …**` header line, a blank line, then the fragment at the start of the body text. Every pause message is built that way.
+
+The previous unanchored substring match also hit a fragment merely quoted elsewhere. In the live case (release gate, `TestCIFixReinvokeCycleLimit`), a Research output recounted an earlier run's *"The stage **Validate** has been re-invoked to fix CI failures 2 time(s)…"*. When the real limit was hit, `pauseForCIFixCycleLimit` took the reapply branch and paused with labels only: no explanatory comment was ever posted. A human quoting a pause message had the same effect.
+
 **State transitions (new rows; existing §6.14 rows unaffected):**
 
 | Before | Trigger | After | Labels Added | Labels Removed |
