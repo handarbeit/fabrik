@@ -832,6 +832,37 @@ query {
 	t.Fatalf("%s#%d not blocked by %s#%d (blockedBy was: %+v)", issueRepo, issueNumber, blockerRepo, blockerNumber, nodes)
 }
 
+// AddBlockedBy records `issueRepo#issueNumber` as blocked-by
+// `blockerRepo#blockerNumber` via the GraphQL addBlockedBy mutation — the same
+// mutation the engine uses (github.Client.AddBlockedByIssue). It is the write
+// counterpart to AssertBlockedBy. Node IDs are resolved over REST
+// (repos/{o}/{r}/issues/{n} → .node_id).
+func AddBlockedBy(t *testing.T, env *Env, issueRepo string, issueNumber int, blockerRepo string, blockerNumber int) {
+	t.Helper()
+	nodeID := func(repo string, n int) string {
+		out, err := ghOutput(env, "api", fmt.Sprintf("repos/%s/issues/%d", repo, n), "--jq", ".node_id")
+		if err != nil {
+			t.Fatalf("resolve node id of %s#%d: %v\n%s", repo, n, err, out)
+		}
+		id := lastNonEmpty(out)
+		if id == "" {
+			t.Fatalf("empty node id for %s#%d", repo, n)
+		}
+		return id
+	}
+	issueID := nodeID(issueRepo, issueNumber)
+	blockerID := nodeID(blockerRepo, blockerNumber)
+	const mutation = `mutation($issueId: ID!, $blockingIssueId: ID!) {
+  addBlockedBy(input: {issueId: $issueId, blockingIssueId: $blockingIssueId}) { issue { id } }
+}`
+	if out, err := ghOutput(env, "api", "graphql",
+		"-f", "query="+mutation,
+		"-f", "issueId="+issueID,
+		"-f", "blockingIssueId="+blockerID); err != nil {
+		t.Fatalf("addBlockedBy %s#%d -> %s#%d: %v\n%s", issueRepo, issueNumber, blockerRepo, blockerNumber, err, out)
+	}
+}
+
 // FetchRepoFileContent reads a file's content from repo's default branch via
 // the GitHub Contents API and returns it decoded. Mirrors CreateMemberPR's
 // write shape (mergetrain_helpers.go) but as a read. Fails the test
