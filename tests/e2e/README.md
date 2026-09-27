@@ -828,13 +828,16 @@ scenarios below therefore assert the gate *clears* (`fabrik:awaiting-review` dis
     `FABRIK_REVIEWER_TOKEN` is set, so a value like 5 silently drops that scenario
     from the gate.
 24a. **`TestReviewAuthorityCycleLimitPauses` needs a small `FABRIK_MAX_REVIEW_CYCLES`**
-    (set `FABRIK_MAX_REVIEW_CYCLES=2` in the bed `.env`) for a bounded wall-clock — each
+    (set `FABRIK_MAX_REVIEW_CYCLES=3` in the bed `.env`) for a bounded wall-clock — each
     cycle requires a full reinvoke (a real Claude invocation) before the next distinct
     `REQUEST_CHANGES` review can be submitted. It also has to reach the cycle-limit pause
     before the review-wait timeout (15 minutes, above) pauses the item first. With the
     engine default of 5 and dispatches several minutes apart under load, the timeout
     won that race in the 0.0.83 gate and the scenario failed on the wrong terminal
-    comment. The test skips itself with an instructional message if the bed's
+    comment. Not 2: the bed's own reviewer (Pruefer) reviews test PRs, and each of its
+    reviews spends a cycle. At 2, that paused `TestReviewAuthorityYoloDoesNotBypassBlock`
+    (a harness `REQUEST_CHANGES` plus Pruefer's review) before its `APPROVE` could clear
+    the gate. 3 is the smallest value that serves both scenarios. The test skips itself with an instructional message if the bed's
     configured value is above 5 (too large for a reasonable e2e run). Defaults to the
     engine's own default (5) if `FABRIK_MAX_REVIEW_CYCLES` is unset in the bed `.env`,
     which will cause the skip.
