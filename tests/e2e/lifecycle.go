@@ -323,8 +323,16 @@ func StartFabrikTestBed(t *testing.T, env *Env) {
 		t.Fatalf("start bed Fabrik (%s): %v", bin, err)
 	}
 	launchedPID := cmd.Process.Pid
-	// Release so the test never becomes its reaper; the OS reparents it on exit.
-	_ = cmd.Process.Release()
+	// Reap the bed when it exits. The OS reparents a child only when its PARENT
+	// exits, so a bed started from inside the suite binary (a mid-suite restart,
+	// e.g. TestMergeTrainColdCacheBaseMember) that later exits stays a zombie
+	// until the whole suite ends — and a zombie answers kill -0, so lockedPID
+	// reported it alive: a later stop "timed out", the next start found the bed
+	// "already running", and every remaining scenario ran with no working bed
+	// (0.0.83 gate run 3). Waiting in a goroutine reaps it the moment it exits
+	// without blocking the test; the bed still outlives the test if the suite
+	// ends first (it is then reparented to init).
+	go func() { _ = cmd.Wait() }()
 
 	start := time.Now()
 	deadline := start.Add(bedLifecycleTimeout)

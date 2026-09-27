@@ -147,7 +147,27 @@ func syscallSignalZero(pid int) error {
 	if err != nil {
 		return err
 	}
-	return p.Signal(syscall.Signal(0))
+	if err := p.Signal(syscall.Signal(0)); err != nil {
+		return err
+	}
+	// A zombie (exited but not yet reaped by its parent) still answers signal 0
+	// but is not running. Treat it as dead, or a stopped bed looks alive for as
+	// long as its parent lives (see StartFabrikTestBed).
+	if processIsZombie(pid) {
+		return fmt.Errorf("pid %d is a zombie (exited, not yet reaped)", pid)
+	}
+	return nil
+}
+
+// processIsZombie reports whether pid is in the zombie state, via ps. Any ps
+// error (including the process vanishing between checks) reports false, so
+// the caller's signal-0 result stands.
+func processIsZombie(pid int) bool {
+	out, err := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return false
+	}
+	return strings.HasPrefix(strings.TrimSpace(string(out)), "Z")
 }
 
 // FileIssue creates an issue in the named repo with the given title, body, and
