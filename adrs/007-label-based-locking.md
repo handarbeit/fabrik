@@ -51,3 +51,7 @@ Use GitHub issue labels as lightweight locks:
 - **Same-username tie-breaking degrades to "both win"**: If two instances share
   the same `--user`, tie-breaking is a no-op and both proceed. This is an
   unsupported configuration.
+
+## Update (ADR 1893)
+
+Under GitHub App auth there is no operator `--user`; the lock identity is instead `<app-slug>-<6 hex of hostname+directory>`, so two local instances sharing one installation still hold distinct labels and the protocol above works unchanged. See [ADR 1893](1893-app-mode-no-operator-identity.md).
