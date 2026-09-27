@@ -465,6 +465,41 @@ func TestSetAppCommitterIdentity_UpgradesFallbackEmailAndPreservesLaterEdit(t *t
 	}
 }
 
+func TestSetAppCommitterIdentity_TransientLookupFailureDoesNotDowngradeEmail(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	unsetGitConfig(t, repoDir, "user.name", "user.email")
+	env := nonInteractiveGitEnv()
+
+	// Start N: lookup succeeded, the ID-bearing email is written and tracked.
+	setAppCommitterIdentity(repoDir, testAppIdent, "", env, "")
+
+	// Start N+1: lookup failed transiently, so the ID-less fallback is offered.
+	fallback := &commitIdentity{Name: "my-app[bot]", Email: "my-app[bot]@users.noreply.github.com"}
+	setAppCommitterIdentity(repoDir, fallback, "", env, "")
+
+	for _, key := range []string{"user.email", managedEmailKey} {
+		if got := readGitConfig(t, repoDir, key); got != testAppIdent.Email {
+			t.Errorf("%s = %q, want the ID-bearing email kept", key, got)
+		}
+	}
+}
+
+func TestIsIDBearingForm(t *testing.T) {
+	idless := "my-app[bot]@users.noreply.github.com"
+	for cur, want := range map[string]bool{
+		"42+" + idless:      true,
+		idless:              false,
+		"+" + idless:        false,
+		"abc+" + idless:     false,
+		"42+other[bot]@x.y": false,
+	} {
+		if got := isIDBearingForm(cur, idless); got != want {
+			t.Errorf("isIDBearingForm(%q) = %v, want %v", cur, got, want)
+		}
+	}
+}
+
 func TestSetAppCommitterIdentity_LegacyGHESHostForm(t *testing.T) {
 	skipIfNoGit(t)
 	repoDir := initBareRepo(t)

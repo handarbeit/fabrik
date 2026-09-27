@@ -281,6 +281,10 @@ func applyCommitterIdentity(repoDir, user string, ident *commitIdentity, env []s
 //     Fabrik wrote in PAT mode → replace it and start tracking it;
 //   - anything else           → the operator's own value: preserved.
 //
+// The upgrade is one-way: when a Fabrik-owned email is already the ID-bearing
+// form of the ID-less fallback now offered (the lookup failed transiently this
+// start), it is kept rather than downgraded.
+//
 // A marker that differs from the current value means someone edited the value
 // after Fabrik wrote it, which is also treated as the operator's choice.
 func setAppCommitterIdentity(repoDir string, ident *commitIdentity, legacyUser string, env []string, host string) {
@@ -317,6 +321,12 @@ func setAppCommitterIdentity(repoDir string, ident *commitIdentity, legacyUser s
 			if !owned {
 				return // the operator's own value; preserve it
 			}
+			// Never downgrade: want is the ID-less fallback form of the
+			// ID-bearing email already written (a later lookup failed
+			// transiently). Keep the avatar-linked value and its marker.
+			if cur != want && isIDBearingForm(cur, want) {
+				return
+			}
 		}
 		if !hasCur || cur != want {
 			set(key, want)
@@ -332,6 +342,21 @@ func setAppCommitterIdentity(repoDir string, ident *commitIdentity, legacyUser s
 	}
 	apply("user.name", managedNameKey, ident.Name, legacyName)
 	apply("user.email", managedEmailKey, ident.Email, legacyEmail)
+}
+
+// isIDBearingForm reports whether cur is the "<numeric-id>+<idless>" form of
+// the ID-less noreply address idless.
+func isIDBearingForm(cur, idless string) bool {
+	id, ok := strings.CutSuffix(cur, "+"+idless)
+	if !ok || id == "" {
+		return false
+	}
+	for _, r := range id {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // BaseDir returns the main repository directory.
