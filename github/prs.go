@@ -237,7 +237,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
           comments(first: 20) {
             totalCount
             nodes {
-              author { login }
+              author { __typename login }
               body
               createdAt
             }
@@ -308,7 +308,8 @@ func (c *Client) FetchPRReviewThreads(owner, repo string, prNumber int) ([]PRRev
 								TotalCount int `json:"totalCount"`
 								Nodes      []struct {
 									Author *struct {
-										Login string `json:"login"`
+										Typename string `json:"__typename"`
+										Login    string `json:"login"`
 									} `json:"author"`
 									Body      string `json:"body"`
 									CreatedAt string `json:"createdAt"`
@@ -346,7 +347,7 @@ func (c *Client) FetchPRReviewThreads(owner, repo string, prNumber int) ([]PRRev
 		for _, cm := range n.Comments.Nodes {
 			tc := PRReviewThreadComment{Body: cm.Body}
 			if cm.Author != nil {
-				tc.Author = cm.Author.Login
+				tc.Author = restShapedLogin(cm.Author.Login, cm.Author.Typename)
 			}
 			if ts, err := parseTime(cm.CreatedAt); err == nil {
 				tc.CreatedAt = ts
