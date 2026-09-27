@@ -109,8 +109,14 @@ func TestMergeTrainConflictBisectPrefixRerere(t *testing.T) {
 	cleanPath := fmt.Sprintf("e2e/train/conflict/clean-%s.txt", stamp)
 	poisonPath := fmt.Sprintf("e2e/train/entries/conflict-poison-%s.txt", stamp)
 
-	aIssue, aPR, aItem := PrepareMemberExactPath(t, env, repo, base, "conflictA", sharedPath, "alpha line\n")
-	bIssue, bPR, bItem := PrepareMemberExactPath(t, env, repo, base, "conflictB", sharedPath, "bravo line\n")
+	// The conflict hunk itself must be unique per run too. git rerere keys a
+	// recorded resolution on the hunk's content, not its path, and the bed's
+	// rr-cache persists in the bare clone across runs. With a fixed
+	// "alpha line"/"bravo line" hunk, a later run's conflict was "Staged …
+	// using previous resolution" and never reached Claude, failing A2/A5
+	// (0.0.83 gate run 3). The engine was right to replay it (#1834).
+	aIssue, aPR, aItem := PrepareMemberExactPath(t, env, repo, base, "conflictA", sharedPath, fmt.Sprintf("alpha line %s\n", stamp))
+	bIssue, bPR, bItem := PrepareMemberExactPath(t, env, repo, base, "conflictB", sharedPath, fmt.Sprintf("bravo line %s\n", stamp))
 	cIssue, cPR, cItem := PrepareMemberExactPath(t, env, repo, base, "conflictC", cleanPath, "clean entry\n")
 	pIssue, _, pItem := PrepareMemberExactPath(t, env, repo, base, "conflictP", poisonPath, "POISON — this member fails the combined check\n")
 
