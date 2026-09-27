@@ -65,6 +65,20 @@ func requireTrainBed(t *testing.T, env *Env) {
 	t.Fatalf("could not read board columns after 6 attempts (last: %v) — GraphQL rate limit or API issue, not a skip condition", err)
 }
 
+// ensureLabelExists creates label on repo if it doesn't already exist
+// (idempotent via --force). Needed because base:<branch> labels are minted
+// fresh per run and gh issue create --label fails if the label is missing.
+func ensureLabelExists(t *testing.T, env *Env, repo, label string) {
+	t.Helper()
+	if out, err := ghOutput(env, "label", "create", label, "-R", repo,
+		"--color", "5319e7", "--force"); err != nil {
+		t.Fatalf("ensure label %q exists on %s: %v\n%s", label, repo, err, out)
+	}
+	t.Cleanup(func() {
+		_, _ = ghOutput(env, "label", "delete", label, "-R", repo, "--yes")
+	})
+}
+
 // defaultBranchSHA returns the head commit SHA of the repo's default branch.
 func defaultBranchSHA(t *testing.T, env *Env, repo, baseBranch string) string {
 	t.Helper()
@@ -111,6 +125,16 @@ func CreateMemberPRDraft(t *testing.T, env *Env, repo, baseBranch, branch, path,
 
 func createMemberPR(t *testing.T, env *Env, repo, baseBranch, branch, path, content, issueTitle string, issueNum int, draft bool) int {
 	t.Helper()
+	// Open the PR with the Closes #N linkage.
+	body := fmt.Sprintf("e2e merge-train member.\n\nCloses #%d\n", issueNum)
+	return createMemberPRBody(t, env, repo, baseBranch, branch, path, content, issueTitle, body, issueNum, draft)
+}
+
+// createMemberPRBody is createMemberPR with a caller-supplied PR body. Callers
+// that pass a body without a closing keyword get a PR that GitHub will not
+// auto-close the issue for on merge (the engine links by branch name, not body).
+func createMemberPRBody(t *testing.T, env *Env, repo, baseBranch, branch, path, content, issueTitle, body string, issueNum int, draft bool) int {
+	t.Helper()
 	baseSHA := defaultBranchSHA(t, env, repo, baseBranch)
 
 	// Create the branch ref off the base head.
@@ -135,8 +159,6 @@ func createMemberPR(t *testing.T, env *Env, repo, baseBranch, branch, path, cont
 		t.Fatalf("write %s on %s@%s: %v\n%s", path, repo, branch, err, out)
 	}
 
-	// Open the PR with the Closes #N linkage.
-	body := fmt.Sprintf("e2e merge-train member.\n\nCloses #%d\n", issueNum)
 	args := []string{"pr", "create", "-R", repo,
 		"--base", baseBranch, "--head", branch,
 		"--title", issueTitle, "--body", body}
