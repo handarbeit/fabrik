@@ -289,8 +289,8 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 
 	// Items locked by another user are not our work — checked before the
 	// awaiting-input early return so locks are always respected.
-	lockLabel := fmt.Sprintf("fabrik:locked:%s", e.cfg.User)
-	otherLockPrefix := "fabrik:locked:"
+	lockLabel := e.lockLabel()
+	otherLockPrefix := lockLabelPrefix
 	for _, label := range item.Labels {
 		if strings.HasPrefix(label, otherLockPrefix) && label != lockLabel {
 			return false
@@ -469,8 +469,8 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
 
 	// Check if this issue is locked by another driver instance
-	lockLabel := fmt.Sprintf("fabrik:locked:%s", e.cfg.User)
-	otherLockPrefix := "fabrik:locked:"
+	lockLabel := e.lockLabel()
+	otherLockPrefix := lockLabelPrefix
 	for _, label := range item.Labels {
 		if strings.HasPrefix(label, otherLockPrefix) && label != lockLabel {
 			e.logf(item.Number, "skip", "locked by another user\n")
@@ -944,7 +944,7 @@ func (e *Engine) acquireLockAndVerify(ctx context.Context, item gh.ProjectItem, 
 		e.store.Apply(itemstate.LocalLockAcquired{
 			Repo:       repoStr,
 			Number:     item.Number,
-			User:       e.cfg.User,
+			User:       e.lockIdentity(),
 			AcquiredAt: workerStartedAt,
 			Worker:     &itemstate.WorkerHandle{StageName: stage.Name, StartedAt: workerStartedAt, LastSignAt: workerStartedAt},
 		})
@@ -991,7 +991,7 @@ func (e *Engine) acquireLockAndVerify(ctx context.Context, item gh.ProjectItem, 
 			for _, label := range labels {
 				if strings.HasPrefix(label, "fabrik:locked:") && label != lockLabel {
 					competing := strings.TrimPrefix(label, "fabrik:locked:")
-					if e.cfg.User > competing {
+					if e.lockIdentity() > competing {
 						e.logf(item.Number, "skip", "lock conflict with %q — yielding (lexicographic tie-break)\n", competing)
 						release()
 						return release, workerStartedAt, workerDone, false

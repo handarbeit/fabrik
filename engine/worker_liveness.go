@@ -94,7 +94,7 @@ func (e *Engine) startWorkerDetector(ctx context.Context) {
 }
 
 func (e *Engine) runWorkerDetectorScan() {
-	lockLabel := fmt.Sprintf("fabrik:locked:%s", e.cfg.User)
+	lockLabel := e.lockLabel()
 	threshold := e.workerStaleTimeout()
 	for _, snap := range e.store.All() {
 		w := snap.Worker()
@@ -307,7 +307,7 @@ func (e *Engine) RunStartupCleanup() {
 //
 // Must be called after the store is populated by the first poll cycle.
 func (e *Engine) runStartupCleanup() {
-	lockLabel := fmt.Sprintf("fabrik:locked:%s", e.cfg.User)
+	lockLabel := e.lockLabel()
 	var cleaned int
 	e.forEachStaleUnworkedItem(lockLabel, func(snap itemstate.Snapshot, owner, repoName string, number int) {
 		repo := snap.Repo()
@@ -335,6 +335,27 @@ func (e *Engine) runStartupCleanup() {
 	})
 	if cleaned > 0 {
 		e.logf(0, "startup", "startup cleanup: removed stale locks from %d issue(s)\n", cleaned)
+	}
+
+	// Legacy-lock migration (#1893, R8): a deployment that switched from PAT/
+	// user mode to App auth may have crashed holding fabrik:locked:<user>. The
+	// lock identity is now App-derived, so that label reads as "locked by
+	// another instance" and would strand the item forever — nothing above
+	// removes a label other than our own. Sweep exactly the label the still-
+	// configured user: would have produced (this instance's own former lock),
+	// on items with no live local Worker. Sweeping every foreign
+	// fabrik:locked:* label instead would strip another live instance's lock.
+	// The value is read only to name that label; it is never used as an identity.
+	if legacy := e.legacyLockLabel(); legacy != "" {
+		var swept int
+		e.forEachStaleUnworkedItem(legacy, func(snap itemstate.Snapshot, owner, repoName string, number int) {
+			e.logf(number, "startup", "found legacy operator lock label %q (pre-App-auth) — removing\n", legacy)
+			e.removeLockLabel(owner, repoName, number, legacy)
+			swept++
+		})
+		if swept > 0 {
+			e.logf(0, "startup", "startup cleanup: removed legacy operator lock from %d issue(s)\n", swept)
+		}
 	}
 
 	// Second pass: remove stale fabrik:editing labels left by prior crashes.
@@ -525,7 +546,7 @@ func (e *Engine) runStartupOrphanedInProgressScan() {
 // silently absorbs another's responsibility.
 //
 // hasLock checks any fabrik:locked:<user> label, not just the current
-// process's own e.cfg.User — a bare in_progress with someone else's lock
+// process's own (e.lockLabel()) — a bare in_progress with someone else's lock
 // label present is a different, already-handled shape (that lock label
 // itself is what runStartupCleanup's scan is keyed on, for whichever user it
 // names); this pass only owns the case where no lock label survives at all.
