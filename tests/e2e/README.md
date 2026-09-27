@@ -822,12 +822,19 @@ scenarios below therefore assert the gate *clears* (`fabrik:awaiting-review` dis
     persists under yolo" window starts shortly after `fabrik:awaiting-review` first
     appears — a too-short timeout risks a legitimate review-wait-timeout pause landing
     inside that window, which the test detects and fails on explicitly (distinct message,
-    not misreported as a yolo bypass) rather than passing. A moderate value (e.g.
-    `FABRIK_REVIEW_WAIT_TIMEOUT=5`) balances both tests' needs.
+    not misreported as a yolo bypass) rather than passing. **Leave
+    `FABRIK_REVIEW_WAIT_TIMEOUT` at its 15-minute default**: it satisfies this, and
+    `TestConjunctiveCIReviewGate` (prerequisite 13) *skips* below 10 when
+    `FABRIK_REVIEWER_TOKEN` is set, so a value like 5 silently drops that scenario
+    from the gate.
 24a. **`TestReviewAuthorityCycleLimitPauses` needs a small `FABRIK_MAX_REVIEW_CYCLES`**
-    (e.g. `2`) for a bounded wall-clock — each cycle requires a full reinvoke (a real
-    Claude invocation) before the next distinct `REQUEST_CHANGES` review can be
-    submitted. The test skips itself with an instructional message if the bed's
+    (set `FABRIK_MAX_REVIEW_CYCLES=2` in the bed `.env`) for a bounded wall-clock — each
+    cycle requires a full reinvoke (a real Claude invocation) before the next distinct
+    `REQUEST_CHANGES` review can be submitted. It also has to reach the cycle-limit pause
+    before the review-wait timeout (15 minutes, above) pauses the item first. With the
+    engine default of 5 and dispatches several minutes apart under load, the timeout
+    won that race in the 0.0.83 gate and the scenario failed on the wrong terminal
+    comment. The test skips itself with an instructional message if the bed's
     configured value is above 5 (too large for a reasonable e2e run). Defaults to the
     engine's own default (5) if `FABRIK_MAX_REVIEW_CYCLES` is unset in the bed `.env`,
     which will cause the skip.
