@@ -256,7 +256,9 @@ func TestCommentReentryShowsReworking(t *testing.T) {
 	// which sends it to Done and closes it — there is then no parked stage for the
 	// comment to re-enter. That is a fixture outcome, not an engine regression, so
 	// report it as such instead of timing out 20 minutes later on a missing marker.
-	if _, found, err := tryLabelFirstAppliedAt(env, env.RepoAlpha, num, "fabrik:awaiting-done"); err == nil && found {
+	if _, found, err := tryLabelFirstAppliedAt(env, env.RepoAlpha, num, "fabrik:awaiting-done"); err != nil {
+		t.Logf("could not check %s#%d for fabrik:awaiting-done (%v) — skipping the no-work-needed fast-fail", env.RepoAlpha, num, err)
+	} else if found {
 		t.Fatalf("fixture: Research judged %s#%d to need no work (fabrik:awaiting-done applied), so the item went to Done "+
 			"instead of parking after Research — the re-entry scenario cannot run; re-run, and if it recurs make the issue body "+
 			"describe more concrete work", env.RepoAlpha, num)
