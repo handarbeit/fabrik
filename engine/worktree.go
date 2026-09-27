@@ -400,13 +400,17 @@ func (wm *WorktreeManager) EnsureWorktree(issueNumber int, baseBranch string, sk
 		return "", fmt.Errorf("creating worktree root: %w", err)
 	}
 
-	// Create the branch if it doesn't exist, forking from origin/<base>
+	// Create the branch if it doesn't exist: from the issue branch already on
+	// origin when there is one, otherwise forking from origin/<base>.
 	if !wm.branchExists(branch) {
 		// Use the fully-qualified ref to avoid ambiguity when a local branch
 		// or tag happens to share the "origin/<base>" name.
 		baseRef := "refs/remotes/origin/" + baseBranch
 		if !wm.branchExists("origin/" + baseBranch) {
 			baseRef = baseBranch
+		}
+		if remoteRef, ok := wm.adoptRemoteIssueBranch(branch, issueNumber); ok {
+			baseRef = remoteRef
 		}
 		cmd := exec.Command("git", "branch", branch, baseRef)
 		cmd.Dir = wm.baseDir
@@ -425,6 +429,40 @@ func (wm *WorktreeManager) EnsureWorktree(issueNumber int, baseBranch string, sk
 	wm.logf(issueNumber, "worktree", "created %s\n", wtDir)
 	wm.writeGitExclude(wtDir, issueNumber)
 	return wtDir, nil
+}
+
+// adoptRemoteIssueBranch reports whether the issue branch already exists on
+// origin and, if so, makes sure the bare clone has it and returns the
+// remote-tracking ref to start the local branch from. Called with wm.mu held,
+// only when the local branch is missing.
+//
+// The branch can exist on origin without a local branch in several ways: a
+// worktree that pushed work and was later cleaned up, a branch pushed by a
+// person or another Fabrik instance, or a PR opened before this clone last
+// fetched. Forking from base in those cases (the pre-fix behaviour) left the
+// worktree without the branch's commits, and every later
+// `push --force-with-lease` was rejected as stale, so the stage looped (0.0.83
+// gate, TestLateCheckRunSuiteGate). The remote is always probed
+// (remoteBranchExists) rather than trusting a possibly stale remote-tracking
+// ref, and only that branch is fetched. Fails safe: any probe or fetch error
+// returns false and the caller forks from base as before.
+func (wm *WorktreeManager) adoptRemoteIssueBranch(branch string, issueNumber int) (string, bool) {
+	remoteRef := "refs/remotes/origin/" + branch
+	if !wm.remoteBranchExists(branch) {
+		return "", false
+	}
+	cmd := exec.Command("git", "fetch", "origin", "--", "+refs/heads/"+branch+":"+remoteRef)
+	cmd.Dir = wm.baseDir
+	cmd.Env = nonInteractiveGitEnv()
+	if out, err := cmd.CombinedOutput(); err != nil {
+		wm.logf(issueNumber, "worktree", "warn: %s exists on origin but could not be fetched (%s) — forking from base\n", branch, strings.TrimSpace(string(out)))
+		return "", false
+	}
+	if !wm.branchExists(remoteRef) {
+		return "", false
+	}
+	wm.logf(issueNumber, "worktree", "%s already exists on origin — starting the local branch from it\n", branch)
+	return remoteRef, true
 }
 
 // PushBranch pushes the issue's worktree branch to origin.
