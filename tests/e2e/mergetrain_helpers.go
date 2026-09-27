@@ -629,17 +629,7 @@ const pausedLabel = "fabrik:paused"
 // for ensureLabelExists.
 func ensurePausedLabelExists(t *testing.T, env *Env, repo string) {
 	t.Helper()
-	exists := func() bool {
-		_, err := ghOutput(env, "api", fmt.Sprintf("repos/%s/labels/%s", repo, "fabrik%3Apaused"))
-		return err == nil
-	}
-	if exists() {
-		return
-	}
-	out, err := ghOutput(env, "label", "create", pausedLabel, "-R", repo, "--color", "e99695")
-	if err != nil && !exists() {
-		t.Fatalf("ensure label %q exists on %s: %v\n%s", pausedLabel, repo, err, out)
-	}
+	ensureEngineLabelExists(t, env, repo, pausedLabel)
 }
 
 // QueueMemberPaused is QueueMember for the default base, except the issue is
