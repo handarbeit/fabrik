@@ -930,6 +930,7 @@ type trainPR struct {
 	Merged  bool
 	State   string // REST state: "open" or "closed"
 	Members []int  // issue numbers from the body's "Closes #N" lines, ascending
+	Base    string // base ref the PR targets (.base.ref)
 }
 
 var closesLineRE = regexp.MustCompile(`(?m)^Closes #(\d+)\s*$`)
@@ -940,15 +941,23 @@ var closesLineRE = regexp.MustCompile(`(?m)^Closes #(\d+)\s*$`)
 // membership, not by timing luck. Ascending by PR number. REST, not GraphQL.
 func listTrainPRsSince(env *Env, repo string, since time.Time, members []int) ([]trainPR, error) {
 	out, err := ghOutput(env, "api", fmt.Sprintf("repos/%s/pulls?state=all&per_page=100", repo),
-		"--jq", `[.[] | select(.head.ref | startswith("fabrik/merge-train/")) | {number, state, merged: (.merged_at != null), created_at, body: (.body // "")}]`)
+		"--jq", `[.[] | select(.head.ref | startswith("fabrik/merge-train/")) | {number, state, merged: (.merged_at != null), created_at, base: .base.ref, body: (.body // "")}]`)
 	if err != nil {
 		return nil, fmt.Errorf("list train PRs on %s: %v: %s", repo, err, strings.TrimSpace(out))
 	}
+	return parseTrainPRs(out, since, members)
+}
+
+// parseTrainPRs is listTrainPRsSince's pure core: it decodes the jq-shaped JSON
+// array (number, state, merged, created_at, base, body) and applies the since /
+// membership filters.
+func parseTrainPRs(out string, since time.Time, members []int) ([]trainPR, error) {
 	var raw []struct {
 		Number    int    `json:"number"`
 		State     string `json:"state"`
 		Merged    bool   `json:"merged"`
 		CreatedAt string `json:"created_at"`
+		Base      string `json:"base"`
 		Body      string `json:"body"`
 	}
 	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &raw); err != nil {
@@ -977,7 +986,7 @@ func listTrainPRsSince(env *Env, repo string, since time.Time, members []int) ([
 			continue
 		}
 		sort.Ints(closes)
-		prs = append(prs, trainPR{Number: r.Number, Merged: r.Merged, State: r.State, Members: closes})
+		prs = append(prs, trainPR{Number: r.Number, Merged: r.Merged, State: r.State, Members: closes, Base: r.Base})
 	}
 	sort.Slice(prs, func(i, j int) bool { return prs[i].Number < prs[j].Number })
 	return prs, nil

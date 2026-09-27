@@ -1668,6 +1668,7 @@ the `Queued` column is absent, so it only runs in the gate's `on` leg.
 | `TestMergeTrainBisectionEjectsPoisoner` | ADR-059 D4: red combined batch → halving bisection isolates the poison member → ejected → survivors land. Needs the `train-poison-guard` required check | Train-only (on) | 20–40 min | low–moderate |
 | `TestMergeTrainConflictBisectPrefixRerere` | #1848: 4-member batch (A/B same-path conflict, clean C, poison P) → **real Claude** resolves B onto A (small turn count) → red trial → bisect ejects P → first half reuses the recorded prefix with no Claude → A, B, C land, P off Queued; rerere replay asserted only if main moves. Needs the `train-poison-guard` required check. **Not parallel** — the train batches every Queued item (prerequisite #22) | Train-only (on) | 45–80 min (est.) | 1 Claude invocation (~$0.05–0.30) + ~11 CI cycles |
 | `TestMergeTrainRestartSafety` | ADR-059 D5 / #960: after a landing, a restart with the historical merged integration PR present does NOT stall the next batch (reconstruct proceeds fresh). **Not parallel** — restarts the bed | Train-only (on) | 28–53 min (incl. exactly-once settle wait, #1874) | low |
+| `TestMergeTrainColdCacheBaseMember` | ADR-1772 / ADR-1773: two `base:<branch>` members are queued **while the bed is stopped**, then the bed is started, so the first poll of the fresh process sees them with a cold cache. Asserts they are excluded as "not yet hydrated" (fail-as-vacuous if not), then land on the declared base: every `fabrik/merge-train/*` PR carrying a member targets that branch (state=all, whole window), no batch forms under the bare default key, member files are absent from `main`, and #1773's `REFUSING to open/reuse` line never fires. Files a blocked Specify "primer" issue to register the repo's `WorktreeManager` after the restart. Skips on a webhook-enabled bed. Posts no comments. **Not parallel** — stops the bed | Train-only (on) | 15–30 min | low (no Claude) |
 | `TestMergeTrainRunawayGuardPausesBatch` | ADR-059 D8 (#964/#965): persistently-red 4-member batch trips the runaway guard at cap=6, pauses all Queued members, no member reaches Done. Runs on RepoBeta for counter isolation. **Not parallel** — induces a repo-wide fault on RepoBeta that would collide with `TestCrossRepoSpawn`'s use of the same repo (#1395) | Train-only (on) | 10–20 min | low (no Claude) |
 | `TestMergeTrainQueuedDeeperThanBatchCap` | ADR-1833 / #1850: 7 clean members Queued against `max_batch_size` 5 → first trial holds exactly the first five, membership stays stable (one snapshot line, no unmerged-closed trial PR), all seven land as 5 then 2. Members are queued paused then released together. **Not parallel** — shares the (RepoAlpha, main) partition | Train-only (on) | 33–63 min (incl. exactly-once settle wait, #1874) | low (no Claude) |
 | `TestPauseLiftedOnlyByPostPauseHumanComment` | ADR-1813 / #1876: a human comment that predates a pause does not lift it (item parked off-board, commented, paused, then moved to Specify: refusal log line, labels hold ≥4 min, no 👀/🚀 on the old comment, exactly one `labeled` and no `unlabeled` `fabrik:paused` event); a post-pause human comment resumes it (👀→🚀 + `unlabeled` event) | Both | 10–15 min | $0.15–0.40 |
@@ -1752,6 +1753,7 @@ scenarios" for their per-scenario cost and wall-clock.
 | `TestMergeTrainBisectionEjectsPoisoner` | ADR-059 D4 (#949) — halving bisection, ejection, one-at-a-time fallback |
 | `TestMergeTrainConflictBisectPrefixRerere` | #1841 (conflict prompt without build/test commands; turn-limited-but-resolved exit kept), #1835 (trial-prefix reuse), #1834 (rerere replay, `forgetPoisonerResolutions`), #1833 (deterministic Queued order), #1848 (this scenario) |
 | `TestMergeTrainRestartSafety` | ADR-059 D5 (#950) + PR #960 (reconstruct must not stall on a historical merged PR) |
+| `TestMergeTrainColdCacheBaseMember` | #1688 (report: default branch pinned for a `base:<branch>` member whose cache was cold after a restart), #1772 / ADR-1772 (per-item `IsItemDeepFetched` guard — fail closed on an unhydrated member), #1773 / ADR-1773 (`refuseIfBaseContradictsMembers`, the independent second line), ADR-1648 (per-(repo, base) partitions; unique per-run branch); the warm-cache two-base scenario and the default-base restart scenario cannot cover it |
 | `TestMergeTrainRunawayGuardPausesBatch` | ADR-059 D8 (#964) — runaway guard trial cap, per-repo counter isolation |
 | `TestMergeTrainSingletonFastPathLandsExactlyOnce` | ADR-1871 / #1871 (a stale Queued snapshot re-landing a just-landed member: second `Landed via singleton fast path` comment), ADR-1644 (singleton fast path), #1874 (this scenario). The exactly-once assertion also runs in the happy-path, batch-cap, restart-safety and yolo (train-on) scenarios for the integration-PR path |
 | `TestMergeTrainQueuedDeeperThanBatchCap` | ADR-1833 / #1833 (deterministic Queued ordering — pre-fix the capped batch was an arbitrary map-order subset that churned poll to poll), #1850 (this scenario); the sim bed cannot cover it (ADR-1833 non-vacuity proof) |
@@ -1827,13 +1829,41 @@ Every escape-from-release regression earns a new scenario in this table.
 ## Design notes
 
 - Scenarios do **not** start or stop the Fabrik instance — the instance is
-  expected to be already running. Two exceptions, both using the
+  expected to be already running. Three exceptions, all using the
   `StopFabrikTestBed`/`StartFabrikTestBed` helpers in `lifecycle.go`:
   `TestMergeTrainRestartSafety` (restarts mid-scenario to exercise
-  restart-safety) and `TestSwitchTrainMode` (restarts to flip
-  `FABRIK_MERGE_TRAIN` for the two-mode gate — not itself a scenario, run
-  only via `run.sh`'s mode-switch step). Both are deliberately **not**
-  `t.Parallel()`.
+  restart-safety), `TestMergeTrainColdCacheBaseMember` (stops the bed,
+  queues its members while it is down, then starts it — see below) and
+  `TestSwitchTrainMode` (restarts to flip `FABRIK_MERGE_TRAIN` for the
+  two-mode gate — not itself a scenario, run only via `run.sh`'s mode-switch
+  step). All three are deliberately **not** `t.Parallel()`.
+- `TestMergeTrainColdCacheBaseMember` is ordered **stop → queue → start**, not
+  "queue, then restart". The bed polls every 60s, so a batch can form between
+  queueing and a literal restart and the scenario would prove nothing. With the
+  engine down nothing can batch, and the fresh process's first poll is the first
+  formation opportunity with a provably virgin cache (`BootstrapFromProbe` seeds
+  members with no labels and no deep-fetch; nothing deep-fetches a Queued item
+  before `handleMergeTrainBatch`). Its non-obvious assumptions:
+  - It uses **two** members: a one-member batch takes the singleton fast path,
+    which lands the member's own PR and cannot reproduce the contradiction.
+  - After a restart the engine's `WorktreeManager` map is empty, and a
+    `base:`-labelled Queued member is excluded until something calls
+    `ensureRepoReady` for its repo. The scenario therefore files a **primer**: an
+    issue at Specify with an open `blockedBy` edge, which `processItem` registers
+    (before `checkDependencies` labels it `fabrik:blocked`) with no Claude spend.
+    A default-base Queued primer would land on `main` and break the
+    "nothing reaches `main`" assertion. The underlying engine gap (Queued
+    `base:` members can wait indefinitely after a restart until another item in
+    the repo is processed) is not fixed by this test-only scenario.
+  - `fabrik.log` is truncated on every engine start, so it reads from offset 0
+    and scopes every matcher to its own issue numbers and train key.
+  - It fails (never passes) if a member has no "not yet hydrated" line, and skips
+    on a webhook-enabled bed, where poll 1 hydrates members before batching.
+  - The healthy run is **not** expected to log #1773's `REFUSING to open/reuse
+    integration PR` line, since #1772 prevents the contradiction; the scenario
+    asserts its absence.
+  - It posts no comments, so PAT and GitHub App legs behave identically (a
+    harness comment would read as human in both modes and eject the member).
 - Assertions are on **observable outcomes**, not internal state. We check
   GitHub for label changes, comments, PR creation, etc. — not the engine's
   internal `worktreeManagers` map.
