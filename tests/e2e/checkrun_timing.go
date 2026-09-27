@@ -253,3 +253,26 @@ func waitForLabelFirstApplied(t *testing.T, env *Env, repo string, issueNumber i
 	t.Fatalf("timed out after %s waiting for label %q to be applied on %s#%d", timeout, label, repo, issueNumber)
 	return time.Time{}
 }
+
+// pickSlowGateRun selects the "slow-gate" check run a CI gate is waiting on.
+// The gate waits on every in-flight run, so the window ends when the last one
+// finishes: a still-queued run (zero StartedAt — its whole window is ahead)
+// wins, else the latest-started in-flight run, regardless of list order. With
+// nothing in flight it falls back to latestRunNamed. ok is false when there is
+// no slow-gate run at all.
+func pickSlowGateRun(runs []CheckRunTiming) (CheckRunTiming, bool) {
+	var inFlight CheckRunTiming
+	found := false
+	for _, r := range runs {
+		if r.Name != "slow-gate" || r.Status == "completed" {
+			continue
+		}
+		if !found || r.StartedAt.IsZero() || (!inFlight.StartedAt.IsZero() && r.StartedAt.After(inFlight.StartedAt)) {
+			inFlight, found = r, true
+		}
+	}
+	if found {
+		return inFlight, true
+	}
+	return latestRunNamed(runs, "slow-gate")
+}

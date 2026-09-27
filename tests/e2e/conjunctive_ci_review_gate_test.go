@@ -14,10 +14,21 @@ import (
 // Review stage also carries wait_for_reviews: true (the production default —
 // see docs/state-machine.md).
 //
-// The slow-gate CI check (~10 minutes, enrolled as required on
-// handarbeit/fabrik-test-alpha/main) is triggered by placing "slow-ci-required"
-// in the PR body. This creates a wide CI-await window without triggering the
-// CI-fix reinvoke machinery.
+// The slow-gate CI check (~25 minutes, enrolled as required on
+// handarbeit/fabrik-test-alpha/main) is triggered by placing
+// "slow-ci-required-long" in the PR body. This creates a wide CI-await window
+// without triggering the CI-fix reinvoke machinery.
+//
+// The window is measured from the PR push, not from fabrik:awaiting-ci:
+// slow-gate starts when Implement pushes, and Review (waiting on its own
+// declared reviewer) plus the Validate run consume part of it before
+// fabrik:awaiting-ci ever appears. The plain 10-minute marker was not enough
+// — on a loaded bed awaiting-ci landed 27s before slow-gate finished, so the
+// engine correctly cleared the gate inside the R1 window. The test now also
+// reads slow-gate's real state before blaming the engine (see
+// slowGateOnPRHead): too little window left is a fixture failure, and
+// stage:Validate:complete is an engine failure only while slow-gate is still
+// running.
 //
 // History: this test originally requested the held-out reviewer immediately
 // after PR creation and assumed reviews gate only at Validate. That plan
@@ -98,7 +109,8 @@ import (
 //     the sequencing this redesign depends on. Use FABRIK_REVIEW_WAIT_TIMEOUT=2
 //     only for the timeout-fallback path.
 //
-// Wall-clock: ~65–100 min (approval path); ~35–60 min (timeout path). Use E2E_TIMEOUT=2h.
+// Wall-clock: ~80–115 min (approval path); ~50–75 min (timeout path) — the 25-min
+// slow-gate window is most of it. Use E2E_TIMEOUT=2h or more.
 // Cost: ~$1.00–2.50.
 func TestConjunctiveCIReviewGate(t *testing.T) {
 	t.Parallel()
@@ -155,17 +167,37 @@ func TestConjunctiveCIReviewGate(t *testing.T) {
 	AssertLabelWasApplied(t, env, env.RepoAlpha, num, "fabrik:awaiting-ci")
 	t.Logf("fabrik:awaiting-ci confirmed on %s#%d (CI gate is holding; Review's own review gate has cleared)", env.RepoAlpha, num)
 
+	// The R1 withheld window below is only meaningful while slow-gate is still
+	// running with room to spare. Fail as a fixture problem — not an engine
+	// one — when upstream latency has already consumed the window.
+	if run, ok, err := slowGateOnPRHead(env, env.RepoAlpha, prNumber); err != nil {
+		t.Logf("could not read slow-gate on PR #%d (%v) — continuing without the window check", prNumber, err)
+	} else if !ok {
+		t.Fatalf("fixture: no slow-gate check run on PR #%d's head — is the PR body missing slow-ci-required-long?", prNumber)
+	} else if run.Status == "completed" {
+		t.Fatalf("fixture: slow-gate on PR #%d already completed (%s) before fabrik:awaiting-ci was observed — Review latency consumed "+
+			"the CI-await window, so R1 cannot be tested; this is not an engine regression", prNumber, run.CompletedAt.Format(time.RFC3339))
+	} else if run.StartedAt.IsZero() {
+		// Still queued (GitHub reports started_at: null): none of the window is used yet.
+		t.Logf("slow-gate on PR #%d still queued — its full ~%s window is ahead", prNumber, slowGateLongDuration)
+	} else if left := time.Until(run.StartedAt.Add(slowGateLongDuration)); left < 4*time.Minute {
+		t.Fatalf("fixture: only ~%s of slow-gate's window left on PR #%d when fabrik:awaiting-ci was observed — too little for the "+
+			"2-minute R1 window; this is not an engine regression", left.Round(time.Second), prNumber)
+	} else {
+		t.Logf("slow-gate on PR #%d still running, ~%s of its window left", prNumber, left.Round(time.Minute))
+	}
+
 	// Now establish a genuinely outstanding reviewer request so Validate's
 	// gate has something real to hold on. Review's own gate has already
 	// cleared (the item has advanced to Validate, above), so this request
 	// only engages once Validate's own checkReviewGate call evaluates it
-	// (after CI clears, ~10 min away) — well ahead of that window.
+	// (after CI clears, several minutes away) — well ahead of that window.
 	if reviewerToken != "" {
 		reviewerLogin := TokenLogin(t, reviewerToken)
 		// Fail fast if FABRIK_REVIEWER_TOKEN resolves to the same identity as
 		// the engine/PR author: GitHub forbids self-review, so RequestPRReviewer
 		// would silently no-op and this misconfiguration would only surface
-		// after the full CI wait (~10 min) when R2/R5 fail downstream.
+		// after the full CI wait (~25 min) when R2/R5 fail downstream.
 		if engineLogin := TokenLogin(t, env.GHToken); reviewerLogin == engineLogin {
 			t.Fatalf("FABRIK_REVIEWER_TOKEN resolves to %q, the same identity as the engine/PR author — "+
 				"set FABRIK_REVIEWER_TOKEN to a distinct GitHub account's PAT", reviewerLogin)
@@ -175,7 +207,8 @@ func TestConjunctiveCIReviewGate(t *testing.T) {
 	}
 
 	// R1 withheld window (2 min): stage:Validate:complete must NOT appear while
-	// fabrik:awaiting-ci is present — CI has not yet passed (~10 min).
+	// fabrik:awaiting-ci is present — CI has not yet passed (slow-gate is still
+	// running, checked above).
 	withheldDeadline := time.Now().Add(2 * time.Minute)
 	r1Checked := false
 	for time.Now().Before(withheldDeadline) {
@@ -188,7 +221,13 @@ func TestConjunctiveCIReviewGate(t *testing.T) {
 		r1Checked = true
 		for _, l := range labels {
 			if l == "stage:Validate:complete" {
-				t.Fatalf("stage:Validate:complete appeared during CI-await window — CI gate did not hold on %s#%d",
+				// An engine failure only if slow-gate is genuinely still running.
+				if run, ok, err := slowGateOnPRHead(env, env.RepoAlpha, prNumber); err == nil && ok && run.Status == "completed" {
+					t.Fatalf("fixture: stage:Validate:complete appeared on %s#%d inside the R1 window, but slow-gate had already "+
+						"completed (%s) — the gate cleared correctly; the window was too short. Not an engine regression",
+						env.RepoAlpha, num, run.CompletedAt.Format(time.RFC3339))
+				}
+				t.Fatalf("stage:Validate:complete appeared during CI-await window while slow-gate was still running — CI gate did not hold on %s#%d",
 					env.RepoAlpha, num)
 			}
 		}
@@ -206,9 +245,9 @@ func TestConjunctiveCIReviewGate(t *testing.T) {
 	CommentOnPR(t, env, env.RepoAlpha, prNumber, commentBody)
 	t.Logf("posted PR comment %q on #%d during CI-await (R3)", commentBody, prNumber)
 
-	// Wait for CI (~10 min) to pass — fabrik:awaiting-ci clears when
+	// Wait for CI (up to ~25 min) to pass — fabrik:awaiting-ci clears when
 	// addCompleteLabelAndRemoveCI runs after checkCIGate returns cleared.
-	WaitForLabelAbsent(t, env, env.RepoAlpha, num, "fabrik:awaiting-ci", 20*time.Minute)
+	WaitForLabelAbsent(t, env, env.RepoAlpha, num, "fabrik:awaiting-ci", 35*time.Minute)
 	t.Logf("fabrik:awaiting-ci cleared on %s#%d (CI gate passed)", env.RepoAlpha, num)
 
 	// R3 verify: the PR comment must have received 👀 (eyes) reaction.
@@ -300,8 +339,8 @@ func TestConjunctiveCIReviewGate(t *testing.T) {
 // conjunctiveCIReviewGateBody is the issue body template for
 // TestConjunctiveCIReviewGate. Both %s placeholders are the scenario's unique
 // marker file path (see markerPath in harness.go, #1394), repeated verbatim.
-// Claude makes a minimal change to that file and includes "slow-ci-required"
-// in the PR body to trigger the ~10-minute slow-gate required CI check, creating
+// Claude makes a minimal change to that file and includes "slow-ci-required-long"
+// in the PR body to trigger the ~25-minute slow-gate required CI check, creating
 // a wide CI-await window for the conjunctive gate test.
 const conjunctiveCIReviewGateBody = `## Goal
 
@@ -324,9 +363,9 @@ to this test.
 ## CI behaviour required
 
 The PR body MUST carry the literal marker below so the test repo's CI
-slow-gate check fires (~10 minutes, enrolled as a required check):
+slow-gate check fires (~25 minutes, enrolled as a required check):
 
-slow-ci-required
+slow-ci-required-long
 
 This creates the CI-await window the test needs to verify the conjunctive gate
 behaviour. Do NOT include ci-fix-sentinel-required in the PR body.
@@ -336,3 +375,27 @@ behaviour. Do NOT include ci-fix-sentinel-required in the PR body.
 Single file (` + "`%s`" + `). Minimal one-line change. No decomposition.
 Plan and Implement should be a one-commit change.
 `
+
+// slowGateLongDuration is slow-gate's sleep under the slow-ci-required-long
+// marker (SLOW_CI_LONG_SECONDS in fabrik-test-alpha's ci.yml).
+const slowGateLongDuration = 25 * time.Minute
+
+// slowGateOnPRHead returns the "slow-gate" check run on the PR's current head
+// commit that the CI gate is waiting on: an in-flight one if any, else the most
+// recently started. ok is false when there is none.
+func slowGateOnPRHead(env *Env, repo string, prNumber int) (run CheckRunTiming, ok bool, err error) {
+	sha, err := prHeadSHA(env, repo, prNumber)
+	if err != nil {
+		return CheckRunTiming{}, false, err
+	}
+	out, err := ghOutput(env, "api", fmt.Sprintf("repos/%s/commits/%s/check-runs?per_page=100", repo, sha))
+	if err != nil {
+		return CheckRunTiming{}, false, fmt.Errorf("read check runs for %s@%s: %w", repo, sha, err)
+	}
+	runs, err := parseCheckRunTimings([]byte(out))
+	if err != nil {
+		return CheckRunTiming{}, false, err
+	}
+	run, ok = pickSlowGateRun(runs)
+	return run, ok, nil
+}

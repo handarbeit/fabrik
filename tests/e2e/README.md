@@ -469,7 +469,14 @@ or as a follow-up comment on handarbeit/fabrik#1355 once run.
 
 11. **`slow-gate` enrolled as a required status check** on
     `handarbeit/fabrik-test-alpha/main`. The test skips gracefully (via
-    `t.Skip`) if not enrolled — safe to merge before enrollment.
+    `t.Skip`) if not enrolled — safe to merge before enrollment. Its
+    `ci.yml` must also honour the `slow-ci-required-long` PR-body marker
+    (`SLOW_CI_LONG_SECONDS: "1500"`, checked before the plain
+    `slow-ci-required` one, which is a prefix of it). The window runs from
+    the PR push, and Review's latency eats into it before `fabrik:awaiting-ci`
+    appears, so the plain 10-minute marker is too short for this test. The
+    test reads `slow-gate`'s real state and fails as a fixture problem, not an
+    engine regression, when too little window is left.
 12. **The engine process must actually authenticate as `FABRIK_TOKEN`'s
     identity** — no shell export shadowing it. `config.Token()`'s precedence
     is `FABRIK_TOKEN > GITHUB_TOKEN`, and `godotenv.Load(".env")` does not
@@ -1673,7 +1680,7 @@ the `Queued` column is absent, so it only runs in the gate's `on` leg.
 | `TestCIFixReinvoke` | CI-fix reinvoke positive path: sentinel fails on first push, Claude fixes, CI passes, issue closes | Both | 75–90 min | $1.00–3.00 |
 | `TestCIFixReinvokeCycleLimit` | CI-fix reinvoke negative path: unfixable sentinel exhausts MaxCiFixCycles, issue pauses | Both | 30–60 min | $0.50–1.50 |
 | `TestPausedMergedPRRecovery` | paused + gate-label at Validate with merged PR heals to CLOSED (3 sequential sub-tests: awaiting-ci, awaiting-review, no-gate-label); regression guard for #874 class | Both | 60–90 min (3 sequential sub-tests, ~20–30 min each); covered by the default `E2E_TIMEOUT=4h` | $1.50–4.50 |
-| `TestConjunctiveCIReviewGate` | Conjunctive CI∧review gate: fabrik:awaiting-ci holds before CI, PR comment during CI-await not dropped, fabrik:awaiting-review holds before approval, advance suppressed until both gates clear | Both | 60–90 min (approval path) / 30–50 min (timeout path) | $1.00–2.50 |
+| `TestConjunctiveCIReviewGate` | Conjunctive CI∧review gate: fabrik:awaiting-ci holds before CI, PR comment during CI-await not dropped, fabrik:awaiting-review holds before approval, advance suppressed until both gates clear | Both | 80–115 min (approval path) / 50–75 min (timeout path) | $1.00–2.50 |
 | `TestReviewAuthorityReinvokesOnChangesRequested` | ADR-1250/ADR-1375 authoritative mode (via `review-authority:authoritative` label): CHANGES_REQUESTED verdict blocks checkReviewGate, but a bounded reinvoke fires immediately (AC1/AC6, engine log assertion, not a label transition) — the body-only review shape SubmitPRReview produces is enough with zero inline comments; the same review is not re-dispatched on a later poll (AC7) | Both | several min (one real Claude invocation) + 90s settle window | $0.10–0.50 (one Claude invocation) |
 | `TestReviewAuthorityCycleLimitPauses` | ADR-1375 R5 terminal fallback (via `review-authority:authoritative` label): repeated distinct CHANGES_REQUESTED reviews up to `FABRIK_MAX_REVIEW_CYCLES` (bed-configured small) terminate in `pauseForReviewCycleLimit`, not an unbounded reinvoke loop (AC4) | Both | ~`FABRIK_MAX_REVIEW_CYCLES` × several min (one Claude invocation per cycle) | $0.20–1.00 (`FABRIK_MAX_REVIEW_CYCLES` Claude invocations) |
 | `TestReviewAuthorityClearsOnApproval` | ADR-1250 authoritative mode (via `review-authority:authoritative` label, requires #1261): APPROVED verdict clears the gate; fabrik:paused never applied | Both | 2–5 min | ~$0.02 (no Claude) |
