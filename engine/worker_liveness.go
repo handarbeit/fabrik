@@ -15,6 +15,12 @@ import (
 const (
 	heartbeatInterval       = 30 * time.Second
 	staleWorkerScanInterval = 60 * time.Second
+
+	// legacyLockMinAge is how old a legacy fabrik:locked:<user> label must be
+	// before the App-mode startup sweep removes it (#1893) — comfortably longer
+	// than a stage's wall time, so a lock a live PAT-mode instance is holding
+	// under that user is never stripped.
+	legacyLockMinAge = 2 * time.Hour
 )
 
 // workerStaleTimeout returns the configured WorkerStaleTimeout, defaulting to
@@ -346,9 +352,24 @@ func (e *Engine) runStartupCleanup() {
 	// on items with no live local Worker. Sweeping every foreign
 	// fabrik:locked:* label instead would strip another live instance's lock.
 	// The value is read only to name that label; it is never used as an identity.
+	// Nothing ties that label to *this* instance, though: a PAT-mode instance
+	// still running as the same user legitimately holds it. So only a label
+	// older than legacyLockMinAge is swept (a live stage's lock is bounded by
+	// its wall time; a crash leftover is older), and one whose age cannot be
+	// read is left alone with a log line — stranding an item until a human
+	// removes the label is recoverable, stripping a live lock is not.
 	if legacy := e.legacyLockLabel(); legacy != "" {
 		var swept int
 		e.forEachStaleUnworkedItem(legacy, func(snap itemstate.Snapshot, owner, repoName string, number int) {
+			applied, err := e.client.FetchLabelAppliedAt(owner, repoName, number, legacy)
+			if err != nil {
+				e.logf(number, "startup", "legacy operator lock label %q: could not read its age (%v) — leaving it; remove it by hand if no other instance holds it\n", legacy, err)
+				return
+			}
+			if !applied.IsZero() && e.now().Sub(applied) < legacyLockMinAge {
+				e.logf(number, "startup", "legacy operator lock label %q applied %s ago — may belong to a live instance running as that user; leaving it (remove it by hand if that instance is gone)\n", legacy, e.now().Sub(applied).Round(time.Second))
+				return
+			}
 			e.logf(number, "startup", "found legacy operator lock label %q (pre-App-auth) — removing\n", legacy)
 			e.removeLockLabel(owner, repoName, number, legacy)
 			swept++

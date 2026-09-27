@@ -505,6 +505,9 @@ func New(cfg Config) (*Engine, error) {
 		// is structural rather than a convention every reader must remember.
 		cfg.Token = ""
 		appIdent = resolveAppIdentity(ghAppClient, ghAppReconciler.BotLogin(), fabrikDir)
+		fmt.Printf("[startup] github-app: lock label is %s%s — derived from the App slug, this host's name (or %s) and the Fabrik "+
+			"directory; if it changes between runs (e.g. a container hostname), a crashed run's lock label is stranded until removed "+
+			"by hand, so pin it with %s\n", lockLabelPrefix, appIdent.lockID, instanceIDEnv, instanceIDEnv)
 		if cfg.User != "" {
 			fmt.Printf("[startup] github-app: user %q is configured but ignored under GitHub App auth — commit identity, "+
 				"lock label, @mentions and spawned-child assignees are derived from the App (%s)\n", cfg.User, appIdent.botLogin)

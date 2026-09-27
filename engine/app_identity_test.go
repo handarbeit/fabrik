@@ -35,6 +35,25 @@ func TestDeriveLockID(t *testing.T) {
 	}
 }
 
+func TestLockInstanceKey_EnvOverridesHostname(t *testing.T) {
+	t.Setenv(instanceIDEnv, "")
+	host, _ := os.Hostname()
+	if got := lockInstanceKey(); got != host {
+		t.Errorf("unset override: key = %q, want hostname %q", got, host)
+	}
+	t.Setenv(instanceIDEnv, "  pod-a  ")
+	if got := lockInstanceKey(); got != "pod-a" {
+		t.Errorf("override: key = %q, want %q", got, "pod-a")
+	}
+	// With the override pinned, the derived label no longer depends on the
+	// hostname, so a container restart (new hostname) keeps the same label.
+	a := resolveAppIdentity(&fakeUserIDFetcher{id: 1}, "my-app[bot]", "/work/a")
+	b := resolveAppIdentity(&fakeUserIDFetcher{id: 1}, "my-app[bot]", "/work/a")
+	if a.lockID != b.lockID || a.lockID != deriveLockID("my-app", "pod-a", "/work/a") {
+		t.Errorf("lock IDs %q / %q not pinned to the override", a.lockID, b.lockID)
+	}
+}
+
 func TestDeriveLockID_TruncatesToLabelLimit(t *testing.T) {
 	long := strings.Repeat("a", 34)
 	id := deriveLockID(long, "h", "/d")
@@ -240,6 +259,9 @@ func TestStartupCleanup_LegacyOperatorLockSweep(t *testing.T) {
 	e := appModeEngine(t, "my-app", 1, "instance-a")
 	e.client = client
 	e.cfg.User = "operator"
+	client.fetchLabelAppliedAtFn = func(_, _ string, _ int, _ string) (time.Time, error) {
+		return time.Now().Add(-legacyLockMinAge - time.Hour), nil
+	}
 	bootstrapItem(t, e, 21, []string{"fabrik:locked:operator"})
 	bootstrapItem(t, e, 22, []string{"fabrik:locked:my-app-abcdef"})
 
@@ -250,6 +272,32 @@ func TestStartupCleanup_LegacyOperatorLockSweep(t *testing.T) {
 	}
 	if removed := removeLabelsCalled(client, 22); len(removed) != 0 {
 		t.Errorf("another instance's lock must not be swept: %v", removed)
+	}
+}
+
+func TestStartupCleanup_LegacySweepLeavesRecentOrUnreadableLock(t *testing.T) {
+	// A label applied recently may belong to a live PAT-mode instance running
+	// as the same user, and one whose age cannot be read cannot be shown safe:
+	// neither is swept.
+	client := &mockGitHubClient{}
+	e := appModeEngine(t, "my-app", 1, "instance-a")
+	e.client = client
+	e.cfg.User = "operator"
+	client.fetchLabelAppliedAtFn = func(_, _ string, n int, _ string) (time.Time, error) {
+		if n == 25 {
+			return time.Time{}, errors.New("events unavailable")
+		}
+		return time.Now().Add(-10 * time.Minute), nil
+	}
+	bootstrapItem(t, e, 24, []string{"fabrik:locked:operator"})
+	bootstrapItem(t, e, 25, []string{"fabrik:locked:operator"})
+
+	e.runStartupCleanup()
+
+	for _, n := range []int{24, 25} {
+		if removed := removeLabelsCalled(client, n); len(removed) != 0 {
+			t.Errorf("#%d: legacy lock swept despite recent/unreadable age: %v", n, removed)
+		}
 	}
 }
 

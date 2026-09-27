@@ -76,6 +76,24 @@ func deriveLockID(slug, hostname, fabrikDir string) string {
 	return slug + "-" + hex.EncodeToString(sum[:])[:lockIdentitySuffixLn]
 }
 
+// instanceIDEnv overrides the hostname component of the lock ID hash. The
+// hostname is not stable everywhere — in a container or pod it is the
+// container/pod ID and changes on every restart or reschedule, on a laptop it
+// can follow the network — and a changed hash strands a crashed instance's lock
+// label (nothing removes a foreign fabrik:locked:* label). Setting this to any
+// stable per-instance string pins the lock label across such changes.
+const instanceIDEnv = "FABRIK_INSTANCE_ID"
+
+// lockInstanceKey is the per-host component of the lock ID hash: the
+// FABRIK_INSTANCE_ID override when set, else the hostname.
+func lockInstanceKey() string {
+	if v := strings.TrimSpace(os.Getenv(instanceIDEnv)); v != "" {
+		return v
+	}
+	host, _ := os.Hostname()
+	return host
+}
+
 // userIDFetcher is the slice of *gh.Client resolveAppIdentity needs.
 type userIDFetcher interface {
 	FetchUserID(login string) (int64, error)
@@ -88,7 +106,7 @@ type userIDFetcher interface {
 // clone-marker protocol (setAppCommitterIdentity) upgrades the email on a
 // later start where the lookup succeeds.
 func resolveAppIdentity(client userIDFetcher, botLogin, fabrikDir string) *appIdentity {
-	host, _ := os.Hostname()
+	host := lockInstanceKey()
 	var botUserID int64
 	if botLogin != "" {
 		id, err := client.FetchUserID(botLogin)
@@ -114,7 +132,7 @@ func (e *Engine) appID() *appIdentity {
 	if e.appIdent != nil {
 		return e.appIdent
 	}
-	host, _ := os.Hostname()
+	host := lockInstanceKey()
 	return newAppIdentity(e.ghAppAuth.BotLogin(), 0, host, e.fabrikDir)
 }
 
