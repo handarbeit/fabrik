@@ -1022,6 +1022,41 @@ simulated timestamps only). No bed setup beyond the standard one.
   `parseCommentReactions`) are unit-tested by
   `go test -tags e2e -run 'PauseRefusal|LabelEvent|CommentReactions' ./tests/e2e/`.
 
+### Additional prerequisites for the unprocessed-comment landing scenarios (#1873)
+
+`TestCommentLandingGateHolds`, `TestQueuedMemberCommentEjection` and
+`TestPostMergeCommentNotApplied` cover the #1862/#1863 behaviour at the landing
+boundary (see `adrs/1873-e2e-comment-landing-coverage.md`).
+
+- **`FABRIK_REVIEWER_TOKEN`** in the bed's `.env` (a non-author PAT — see
+  "Reviewer topology"). `TestCommentLandingGateHolds` and
+  `TestQueuedMemberCommentEjection` skip cleanly without it: they need a
+  deterministic `APPROVE` so the review gate never decides when the item lands, and
+  a review-wait timeout would apply `fabrik:paused` and corrupt their assertions.
+  `TestPostMergeCommentNotApplied` does not need it.
+- **`slow-gate` required on `fabrik-test-alpha/main`** for the first two
+  (`assertSlowGateRequired` skips otherwise). The gate scenario waits for it to go
+  green so no Phase 1 gate claims the item; the eject scenario relies on it to hold
+  the occupant member's trial open.
+- **Queued column + `merge_train: on`** for `TestQueuedMemberCommentEjection` only
+  (`requireTrainBed`). `TestCommentLandingGateHolds` runs in both legs;
+  `TestPostMergeCommentNotApplied` is mode-invariant.
+- **Labels** `fabrik:yolo`, `stage:Validate:complete` and `stage:Implement:complete`
+  must exist in the repo (they are seeded with `gh issue create --label` /
+  `AddLabel`); they already do on a bed that runs the other scenarios.
+- **`TestQueuedMemberCommentEjection` is not parallel** and pre-flights for stale
+  Queued items on RepoAlpha, like the batch-cap scenario (prerequisite #22).
+- **Auth legs.** The harness posts every "human" comment as `FABRIK_TOKEN`'s
+  account (arbeithand). That reads as human to Fabrik in both the PAT leg (Fabrik
+  posts as the same account, distinguished only by the `🏭 **Fabrik` body prefix,
+  which the helper refuses to post) and the App leg (Fabrik posts as `<slug>[bot]`).
+  Reaction assertions check existence and timestamps only, never the reacting login.
+- **Cost / wall-clock** (per run): gate ~20–35 min and ~$0.10–0.50 per train mode
+  and auth leg; eject ~35–60 min and ~$0.10–0.50, on-leg only; post-merge ~3–8 min
+  and no Claude. Across both auth legs and both train modes that adds roughly
+  2×(2×25 + 45 + 5) ≈ 200 min of scenario time (much of it overlapping the parallel
+  pool) and ~$1–3 to a full gate run.
+
 ### Reviewer topology (#1396)
 
 Every scenario that drives a PR through the organic Review gate depends on
@@ -1551,6 +1586,9 @@ the `Queued` column is absent, so it only runs in the gate's `on` leg.
 | `TestMergeTrainRunawayGuardPausesBatch` | ADR-059 D8 (#964/#965): persistently-red 4-member batch trips the runaway guard at cap=6, pauses all Queued members, no member reaches Done. Runs on RepoBeta for counter isolation. **Not parallel** — induces a repo-wide fault on RepoBeta that would collide with `TestCrossRepoSpawn`'s use of the same repo (#1395) | Train-only (on) | 10–20 min | low (no Claude) |
 | `TestMergeTrainQueuedDeeperThanBatchCap` | ADR-1833 / #1850: 7 clean members Queued against `max_batch_size` 5 → first trial holds exactly the first five, membership stays stable (one snapshot line, no unmerged-closed trial PR), all seven land as 5 then 2. Members are queued paused then released together. **Not parallel** — shares the (RepoAlpha, main) partition | Train-only (on) | 33–63 min (incl. exactly-once settle wait, #1874) | low (no Claude) |
 | `TestPauseLiftedOnlyByPostPauseHumanComment` | ADR-1813 / #1876: a human comment that predates a pause does not lift it (item parked off-board, commented, paused, then moved to Specify: refusal log line, labels hold ≥4 min, no 👀/🚀 on the old comment, exactly one `labeled` and no `unlabeled` `fabrik:paused` event); a post-pause human comment resumes it (👀→🚀 + `unlabeled` event) | Both | 10–15 min | $0.15–0.40 |
+| `TestCommentLandingGateHolds` | #1862 landing gate (ADR-1862): a human comment posted while the item has no Status, then the item moved into Validate (yolo, green CI, reviewer APPROVE) — the `comment-gate` hold line appears, the item is not merged/Queued/`fabrik:auto-merge-enabled` while the comment has no 🚀, the comment gets 👀 then 🚀, and only then does the item land (`closed_at` >= 🚀). Holds under both train modes; the `advance` "skipping stage" line the issue text names fires only for non-Validate stages, so `comment-gate` is asserted in both. Needs `FABRIK_REVIEWER_TOKEN` and `slow-gate`; skips otherwise | Both | 20–35 min per mode and auth leg | ~$0.10–0.50 (one comment-review Claude invocation) + one CI wait |
+| `TestQueuedMemberCommentEjection` | #1863 (ADR-1863): a Queued member receiving an unprocessed human comment is ejected — `🏭 **Fabrik merge-train — ejected (unprocessed comment)**` comment + `ejected for an unprocessed comment … (not paused, no ejection counted)` log line; never `fabrik:paused`, and no counted-ejection artifact (comment, `pausing after N ejections`, `ejected N time(s) — pausing`); the comment is then processed (👀 then 🚀) and the member re-queues and lands. An occupant member M1 holds a slow-gate trial so M2 is deterministically outside the batch. "Not counted" is asserted indirectly (the counter is in memory). **Not parallel** — shares the (RepoAlpha, main) partition. Needs `FABRIK_REVIEWER_TOKEN` and `slow-gate` | Train-only (on) | 35–60 min | ~$0.10–0.50 (one comment-review Claude invocation) + two trial CI cycles |
+| `TestPostMergeCommentNotApplied` | #1862 post-merge guard: a human comment on an OPEN item whose PR already merged (member PR without a closing keyword, item parked at Implement, admin merge) gets `🏭 **Fabrik — comment not applied**` exactly once on the issue and on the PR, no 👀/🚀 on the comment, no `comments … processing` line, no `stage:Implement:in_progress`, branch tip unchanged. Fails loudly (never passes vacuously) if the item was already closed/moved before the comment | Both | 3–8 min | none (no Claude) |
 
 **Exactly-once landing assertion (#1874, regression coverage for #1871 / ADR-1871).**
 `AssertMembersLandedExactlyOnce` (`landed_once.go`) asserts each member the scenario
@@ -1587,6 +1625,10 @@ near-instant skip of the four Train-only scenarios in the `off` leg — the
 default `E2E_TIMEOUT=4h` and the contention data behind it (see "How the
 timeout/parallelism defaults are derived" above) assume this full two-mode
 shape, not just the single-mode total.
+
+The three unprocessed-comment landing scenarios (#1873) are not yet included in the
+totals above; see "Additional prerequisites for the unprocessed-comment landing
+scenarios" for their per-scenario cost and wall-clock.
 
 ### Regression coverage map
 
@@ -1626,6 +1668,9 @@ shape, not just the single-mode total.
 | `TestMergeTrainSingletonFastPathLandsExactlyOnce` | ADR-1871 / #1871 (a stale Queued snapshot re-landing a just-landed member: second `Landed via singleton fast path` comment), ADR-1644 (singleton fast path), #1874 (this scenario). The exactly-once assertion also runs in the happy-path, batch-cap, restart-safety and yolo (train-on) scenarios for the integration-PR path |
 | `TestMergeTrainQueuedDeeperThanBatchCap` | ADR-1833 / #1833 (deterministic Queued ordering — pre-fix the capped batch was an arbitrary map-order subset that churned poll to poll), #1850 (this scenario); the sim bed cannot cover it (ADR-1833 non-vacuity proof) |
 | `TestPauseLiftedOnlyByPostPauseHumanComment` | ADR-1813 / #1813 (pre-fix, any human comment lifted a pause — including one older than it, re-lifting every poll), #1752 (the incident: comment circuit breakers zeroed ten times), #1861 (both auth legs), #1876 (this scenario); the sim bed sees only simulated timestamps |
+| `TestCommentLandingGateHolds` | #1862 / ADR-1862 (`commentGateBlocksLanding` — an unprocessed comment holds the landing decision in both train modes), #1873 (this scenario) |
+| `TestQueuedMemberCommentEjection` | #1863 / ADR-1863 (`settleQueuedCommentCause`, `ejectQueuedMemberForComments` — eject, no pause, no counted ejection), #1873 (this scenario) |
+| `TestPostMergeCommentNotApplied` | #1862 / ADR-1862 (`postMergeCommentGuard` — "comment not applied" reply, no worker, no 🚀), #1873 (this scenario) |
 
 Every escape-from-release regression earns a new scenario in this table.
 

@@ -126,20 +126,6 @@ func TestBaseBranchPipeline(t *testing.T) {
 	t.Logf("%s#%d closed after human merge — full base:<branch> pipeline verified", env.RepoAlpha, num)
 }
 
-// ensureLabelExists creates label on repo if it doesn't already exist
-// (idempotent via --force). Needed because base:<branch> labels are minted
-// fresh per run and gh issue create --label fails if the label is missing.
-func ensureLabelExists(t *testing.T, env *Env, repo, label string) {
-	t.Helper()
-	if out, err := ghOutput(env, "label", "create", label, "-R", repo,
-		"--color", "5319e7", "--force"); err != nil {
-		t.Fatalf("ensure label %q exists on %s: %v\n%s", label, repo, err, out)
-	}
-	t.Cleanup(func() {
-		_, _ = ghOutput(env, "label", "delete", label, "-R", repo, "--yes")
-	})
-}
-
 // baseBranchPipelineBodyTemplate is the issue body for TestBaseBranchPipeline.
 // The seven %s placeholders are: backtick, marker path, backtick, codefence,
 // marker, codefence, branch name (Go raw strings can't contain backticks).
