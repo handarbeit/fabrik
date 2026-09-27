@@ -65,6 +65,10 @@ func lockedPID(env *Env) int {
 // real diagnostics (bedDiagnostics below) doesn't need.
 const bedLifecycleTimeout = 90 * time.Second
 
+// bedForceQuitTimeout bounds how long StopFabrikTestBed waits after the
+// second (force-quit) SIGTERM.
+const bedForceQuitTimeout = 30 * time.Second
+
 // bedLifecyclePollInterval is how often StopFabrikTestBed/StartFabrikTestBed
 // re-check the lock and log progress while waiting.
 const bedLifecyclePollInterval = 500 * time.Millisecond
@@ -134,6 +138,7 @@ func StopFabrikTestBed(t *testing.T, env *Env) {
 	}
 	start := time.Now()
 	deadline := start.Add(bedLifecycleTimeout)
+	forced := false
 	lastLog := start
 	for {
 		if lockedPID(env) == 0 {
@@ -141,9 +146,23 @@ func StopFabrikTestBed(t *testing.T, env *Env) {
 			return
 		}
 		now := time.Now()
-		if now.After(deadline) {
-			t.Fatalf("bed pid %d did not release lock within %s — bed diagnostics:\n%s",
-				pid, bedLifecycleTimeout, bedDiagnostics(env, pid))
+		if now.After(deadline) && !forced {
+			// The first SIGTERM starts a graceful drain, which waits for every
+			// in-flight worker — a Claude stage can run for many minutes (a
+			// leftover item from an earlier scenario was enough to overrun 90s
+			// in the 0.0.83 gate). Do what an operator does and send the second
+			// signal, which the engine treats as force-quit (engine/poll.go's
+			// second-signal listener); restart recovery then cleans up the
+			// interrupted worker's state.
+			forced = true
+			t.Logf("StopFabrikTestBed: pid %d still draining after %s — sending a second SIGTERM (force-quit)", pid, bedLifecycleTimeout)
+			if p, err := os.FindProcess(pid); err == nil {
+				_ = p.Signal(syscall.SIGTERM)
+			}
+			deadline = now.Add(bedForceQuitTimeout)
+		} else if now.After(deadline) {
+			t.Fatalf("bed pid %d did not release lock within %s plus %s after force-quit — bed diagnostics:\n%s",
+				pid, bedLifecycleTimeout, bedForceQuitTimeout, bedDiagnostics(env, pid))
 		}
 		if now.Sub(lastLog) >= bedLifecycleLogEvery {
 			t.Logf("StopFabrikTestBed: still waiting for pid %d to release lock (%s elapsed)", pid, now.Sub(start).Round(time.Second))
