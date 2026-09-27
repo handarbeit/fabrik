@@ -1100,7 +1100,7 @@ func TestCreateBoardCore_NoStageConfigs(t *testing.T) {
 	defer srv.Close()
 
 	stagesDir := t.TempDir()
-	// No stage YAML files written — requiredStageColumnNames returns empty.
+	// No stage YAML files written — boardColumnNames returns empty.
 
 	client := gh.NewClientWithBaseURL("token", srv.URL)
 	if _, _, err := createBoardCore(client, "acme", "widgets", "", stagesDir); err == nil {

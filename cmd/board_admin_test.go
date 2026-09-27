@@ -51,7 +51,10 @@ func TestRefuseIfUserOwnedBoard(t *testing.T) {
 	}
 }
 
-func TestRequiredStageColumnNames(t *testing.T) {
+// TestBoardColumnNames: create and repair must produce the Done (cleanup)
+// column — a board created without it can never complete an item — while an
+// unmanaged parking stage (Backlog) stays optional.
+func TestBoardColumnNames(t *testing.T) {
 	allStages := []*stages.Stage{
 		{Name: "Implement", Order: 3},
 		{Name: "Specify", Order: 0},
@@ -60,8 +63,8 @@ func TestRequiredStageColumnNames(t *testing.T) {
 		{Name: "Research", Order: 1},
 		{Name: "Queued", Order: 4, HoldingStage: true},
 	}
-	got := requiredStageColumnNames(allStages)
-	want := []string{"Specify", "Research", "Implement", "Queued"}
+	got := boardColumnNames(allStages)
+	want := []string{"Specify", "Research", "Implement", "Queued", "Done"}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}

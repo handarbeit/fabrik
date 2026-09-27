@@ -142,6 +142,7 @@ func TestRepairBoardCore_NoMissingColumnsIsNoOpEvenWithApply(t *testing.T) {
 		{"id": "OPT_2", "name": "Research", "color": "GRAY", "description": ""},
 		{"id": "OPT_3", "name": "Implement", "color": "GRAY", "description": ""},
 		{"id": "OPT_4", "name": "Queued", "color": "GRAY", "description": ""},
+		{"id": "OPT_5", "name": "Done", "color": "GRAY", "description": ""},
 	}, &mutated)
 	defer srv.Close()
 
@@ -250,8 +251,13 @@ func TestRepairBoardCore_ApplyPreservesExistingIDsAndEchoesFields(t *testing.T) 
 	}
 
 	rawOptions, ok := gotVars["options"].([]interface{})
-	if !ok || len(rawOptions) != 4 {
+	// Specify and Research echoed; Implement, Queued and Done appended — Done
+	// is the cleanup stage's column, which a repaired board must have.
+	if !ok || len(rawOptions) != 5 {
 		t.Fatalf("options sent = %+v", gotVars["options"])
+	}
+	if last := rawOptions[4].(map[string]interface{}); last["name"] != "Done" {
+		t.Errorf("last appended option = %+v, want Done", last)
 	}
 
 	opt0 := rawOptions[0].(map[string]interface{})

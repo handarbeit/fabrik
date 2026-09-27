@@ -97,7 +97,7 @@ func repairBoardCore(client *gh.Client, owner, repo string, projectNum int, owne
 		return fmt.Errorf("fetching Status field: %w", err)
 	}
 
-	required := requiredStageColumnNames(allStages)
+	required := boardColumnNames(allStages)
 	missing := missingStageColumns(required, sf)
 
 	if len(missing) == 0 {
