@@ -66,10 +66,20 @@ func TestMergeTrainRedSingletonReroutesOffQueued(t *testing.T) {
 	const base = "main"
 	logStart := LogOffset(t, env)
 
-	issue, _ := QueueMember(t, env, env.RepoAlpha, base, "redsingleton",
-		"e2e/train/entries/redsingleton.txt",
+	// The member's own PR CI is pending at queue time (train-poison-guard delays its
+	// member-branch failure so #1821's admission gate admits it), which already makes
+	// the singleton fast path ineligible. Advancing main past the member's head
+	// before queuing makes that structural rather than timing-dependent: the fast
+	// path is refused ("pinned base is N commit(s) ahead of the member's head"), so
+	// the train must build the single-member trial whose red result this tests.
+	stamp := time.Now().UTC().Format("20060102-150405.000")
+	issue, _, itemID := PrepareMemberExactPath(t, env, env.RepoAlpha, base, "redsingleton",
+		fmt.Sprintf("e2e/train/entries/redsingleton-%s.txt", stamp),
 		"POISON — #1545 red-singleton e2e member\n",
 	)
+	AdvanceBaseBranch(t, env, env.RepoAlpha, base,
+		fmt.Sprintf("e2e/train/entries/redsingleton-basebump-%s.txt", stamp), "base bump for the red-singleton member\n")
+	SetIssueStatus(t, env, itemID, "Queued")
 	t.Logf("queued single poison member (issue #%d); awaiting red-singleton disposition", issue)
 
 	// The top-level arity guard's own log line — proves bisection was never reached.
