@@ -842,3 +842,36 @@ func TestFetchItemDetails_TitlePopulatedForPRItem(t *testing.T) {
 		t.Errorf("Body = %q, want %q", item.Body, "PR body text")
 	}
 }
+
+func TestFetchItemDetails_NormalizesBotAuthor(t *testing.T) {
+	cases := []struct {
+		name, typename, login, want string
+	}{
+		{"bot without suffix", "Bot", "my-app", "my-app[bot]"},
+		{"bot already suffixed", "Bot", "my-app[bot]", "my-app[bot]"},
+		{"user untouched", "User", "alice", "alice"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"data": map[string]interface{}{
+						"node": map[string]interface{}{
+							"author": map[string]interface{}{"__typename": tc.typename, "login": tc.login},
+						},
+					},
+				})
+			}))
+			defer srv.Close()
+
+			c := NewClientWithBaseURL("token", srv.URL)
+			item := &ProjectItem{ID: "I_1", Number: 1}
+			if err := c.FetchItemDetails(item); err != nil {
+				t.Fatalf("FetchItemDetails: %v", err)
+			}
+			if item.Author != tc.want {
+				t.Errorf("Author = %q, want %q", item.Author, tc.want)
+			}
+		})
+	}
+}

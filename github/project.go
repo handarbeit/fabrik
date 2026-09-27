@@ -1535,6 +1535,9 @@ func (c *Client) FetchProjectItem(owner, repo string, issueNumber int) (*Project
 		Assignees []struct {
 			Login string `json:"login"`
 		} `json:"assignees"`
+		User *struct {
+			Login string `json:"login"`
+		} `json:"user"`
 	}
 
 	if err := c.restGetJSON(url, &raw); err != nil {
@@ -1555,6 +1558,10 @@ func (c *Client) FetchProjectItem(owner, repo string, issueNumber int) (*Project
 	}
 	for _, a := range raw.Assignees {
 		pi.Assignees = append(pi.Assignees, a.Login)
+	}
+	if raw.User != nil {
+		// REST logins already carry the "[bot]" suffix (#1893).
+		pi.Author = raw.User.Login
 	}
 	return pi, nil
 }
