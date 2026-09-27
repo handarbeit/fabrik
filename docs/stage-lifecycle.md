@@ -47,7 +47,7 @@ Shallow query: ~16 points/poll. Deep fetch: ~2 points per active item. Typical p
 
 ### Lock & Label Acquisition
 
-- `fabrik:locked:<user>` — prevents other instances from picking up the issue
+- `fabrik:locked:<user>` — prevents other instances from picking up the issue (`<user>` is the configured user in PAT mode and an App-derived `<slug>-<hash>` identity under GitHub App auth — see `docs/state-machine.md` §7.4)
 - `stage:<name>:in_progress` — signals active work on the board
 - Both held through cooldown retries (not released until completion or permanent failure)
 
