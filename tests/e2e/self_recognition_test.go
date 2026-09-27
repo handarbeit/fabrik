@@ -335,15 +335,6 @@ func TestAppSelfRecognitionDurableReviewSuppression(t *testing.T) {
 // awaitingInputLabel is the engine's awaiting-input half of the pause pair.
 const awaitingInputLabel = "fabrik:awaiting-input"
 
-func containsString(list []string, s string) bool {
-	for _, v := range list {
-		if v == s {
-			return true
-		}
-	}
-	return false
-}
-
 // mustDeps parses a blocked comment body's dependency list or fails.
 func mustDeps(t *testing.T, body string) []string {
 	t.Helper()

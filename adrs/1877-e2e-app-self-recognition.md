@@ -63,9 +63,9 @@ through GraphQL. If confirmed, `gh.IsBotLogin("<slug>")` is false and `findBlock
 never matches, so A1 and A2 fail on a live App leg because of an engine defect outside this
 change (reviews are normalised at `project.go`; comments are not; ADR-1045 documents the
 asymmetry). The scenarios assert the correct behaviour and are not weakened. Each logs both
-wire shapes so a failure is attributable. The suggested follow-up is a separate engine work
-issue normalising `Bot`-typed comment authors at ingestion. Until it ships, the release gate
-may be red for that reason; `cut-release.sh --skip-integration=<reason>` remains the
+wire shapes so a failure is attributable. The engine-side fix, normalising `Bot`-typed
+comment authors at ingestion, is tracked in #1898 (PR #1899). Until it ships, the release
+gate may be red for that reason; `cut-release.sh --skip-integration=<reason>` remains the
 escape hatch.
 
 ## Consequences

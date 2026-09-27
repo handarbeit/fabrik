@@ -632,24 +632,6 @@ func ensurePausedLabelExists(t *testing.T, env *Env, repo string) {
 	ensureEngineLabelExists(t, env, repo, pausedLabel)
 }
 
-// ensureEngineLabelExists is ensurePausedLabelExists for any engine-owned
-// fabrik:* label (e.g. fabrik:awaiting-input, #1877). Same rule: create if
-// missing, register NO delete cleanup — the label is shared repo-wide.
-func ensureEngineLabelExists(t *testing.T, env *Env, repo, label string) {
-	t.Helper()
-	exists := func() bool {
-		_, err := ghOutput(env, "api", fmt.Sprintf("repos/%s/labels/%s", repo, strings.ReplaceAll(label, ":", "%3A")))
-		return err == nil
-	}
-	if exists() {
-		return
-	}
-	out, err := ghOutput(env, "label", "create", label, "-R", repo, "--color", "e99695")
-	if err != nil && !exists() {
-		t.Fatalf("ensure label %q exists on %s: %v\n%s", label, repo, err, out)
-	}
-}
-
 // QueueMemberPaused is QueueMember for the default base, except the issue is
 // created already carrying fabrik:paused — so it is never visible to the engine
 // without the label — and stays paused after being placed in Queued. The caller

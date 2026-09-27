@@ -1108,7 +1108,7 @@ already exercise the PAT identity.
   first evaluation of a paused item is guaranteed to log.
 
 **Known expected-red: A1 and A2 on the App leg until the engine normalises
-comment authors at ingestion.** Research found (from the code, not confirmed live)
+comment authors at ingestion (tracked in #1898).** Research found (from the code, not confirmed live)
 that REST reports a bot comment's author as `fabrik-bed[bot]` but the GraphQL
 comment fragment (`author { login }`, no `__typename`) yields the bare
 `fabrik-bed`, and under App auth (webhooks are refused, ADR-1752) the engine reads
@@ -1118,8 +1118,7 @@ outside this change (mirror `applyLinkedPRs`'s review-author normalisation
 for comments). The scenarios assert the correct behaviour and are not weakened; each
 logs both wire shapes (`REST=… GraphQL=…`) so a failure is attributable. A3 reads
 REST and is unaffected. A release gate that goes red on A1/A2 for this reason can be
-released with `cut-release.sh --skip-integration=<reason>` until the engine work
-lands. A name ending in `-bot` would make A1 pass through `IsBotLogin`'s suffix rule
+released with `cut-release.sh --skip-integration=<reason>` until #1898 lands. A name ending in `-bot` would make A1 pass through `IsBotLogin`'s suffix rule
 regardless; the bed's `fabrik-bed` does not.
 
 **A3 topology.** GraphQL `latestReviews` keeps one review per reviewer, so two
