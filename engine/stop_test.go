@@ -268,3 +268,35 @@ func TestHandleStopRequest_Idempotent_NoDuplicateComment(t *testing.T) {
 		t.Fatal("precondition failed: fabrik:paused was not recorded in the store after the first call — idempotency check is vacuous")
 	}
 }
+
+// TestHandleStopRequest_StopComment_ByMode: PAT mode names the operator (unchanged);
+// App mode names nobody (#1893 — there is no operator identity).
+func TestHandleStopRequest_StopComment_ByMode(t *testing.T) {
+	for _, app := range []bool{false, true} {
+		client := &mockGitHubClient{}
+		client.addLabelToIssueFn = func(owner, repo string, issueNumber int, label string) error { return nil }
+		client.addCommentFn = func(owner, repo string, issueNumber int, body string) (int, error) { return 1, nil }
+		eng := testEngine(t, client, &mockClaudeInvoker{})
+		if app {
+			eng.SetGitHubAppModeForTest(nil, false)
+			eng.SetGitHubAppIdentityForTest("my-app", 1, "k")
+		}
+		eng.handleStopRequest(context.Background(), tui.StopRequest{IssueNumber: 7, Repo: "owner/repo", StageName: "Plan"})
+
+		client.mu.Lock()
+		var body string
+		for _, c := range client.addCommentCalls {
+			if c.issueNumber == 7 {
+				body = c.body
+			}
+		}
+		client.mu.Unlock()
+		wantBy := strings.Contains(body, "stopped from TUI by testuser")
+		if app && (strings.Contains(body, " by ") || !strings.Contains(body, "stopped from TUI**")) {
+			t.Errorf("App mode comment must not name a person: %q", body)
+		}
+		if !app && !wantBy {
+			t.Errorf("PAT mode comment must keep naming the operator: %q", body)
+		}
+	}
+}

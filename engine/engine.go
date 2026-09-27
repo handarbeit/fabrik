@@ -170,6 +170,7 @@ type Engine struct {
 	client                GitHubClient
 	releaseClient         GitHubClient           // always github.com, regardless of cfg.GHESHost — Fabrik's own self-upgrade release lives on github.com/handarbeit/fabrik, never on a customer's GHES instance (see checkReleaseUpgrade). Equal to client whenever no GHES host is configured (including all NewWithDeps-constructed test engines), so this is a no-op on the default path.
 	hostClient            *gh.Client             // same host as client, concretely typed; used by the GHES-only startup version-floor preflight (checkGHESVersionFloor), which needs FetchInstalledVersion and isn't worth adding to the GitHubClient interface for one startup-only call, and by checkHookdeckInstallationCoverage (#1142), which needs a live installation token via Token() for the R5 App-mode coverage check. nil outside New() (e.g. NewWithDeps-constructed test engines); checkGHESVersionFloor is a standalone function tested directly against a *gh.Client, not through the Engine.
+	appIdent              *appIdentity           // App-mode identity (bot login, bot user ID, lock ID) resolved once in New() (#1893); nil in PAT mode. Read via appID() — never assign after Run() starts.
 	ghAppAuth             *githubauth.Reconciler // non-nil only when Config.GitHubApp* fields configure App-auth (#1713); nil in PAT mode (the default). Run() starts and, on shutdown, joins its refresh-loop goroutines when non-nil — see poll.go's Run().
 	readClient            boardcache.ReadClient  // read-only GitHub calls; may be CacheImpl or GitHubAdapter
 	claude                ClaudeInvoker
@@ -417,7 +418,13 @@ func New(cfg Config) (*Engine, error) {
 	} else {
 		claudeKillGraceSigTerm = 10 * time.Second
 	}
-	claudeGHToken = cfg.Token
+	// Under App auth there is no static token to inject: claudeGHTokenOverrideFn
+	// (set below) always wins, and the PAT is never used (#1893, R5).
+	if gitHubAppAuthConfigured(cfg) {
+		claudeGHToken = ""
+	} else {
+		claudeGHToken = cfg.Token
+	}
 	claudeGHHost = cfg.GHESHost
 	claudeAnthropicAPIKey = os.Getenv("FABRIK_ANTHROPIC_API_KEY")
 	claudeAnthropicEnvPassthrough = parseAnthropicEnvPassthrough(os.Getenv("FABRIK_ANTHROPIC_ENV_PASSTHROUGH"))
@@ -489,8 +496,22 @@ func New(cfg Config) (*Engine, error) {
 	}
 
 	var ghClient *gh.Client
+	var appIdent *appIdentity
 	if ghAppClient != nil {
 		ghClient = ghAppClient
+		// App auth wins over a coexisting PAT (resolveGitHubAppAuth logged
+		// it) and, since #1893, over a configured user: for identity, locks,
+		// mentions and spawn assignees. Drop both so "no PAT / no operator"
+		// is structural rather than a convention every reader must remember.
+		cfg.Token = ""
+		appIdent = resolveAppIdentity(ghAppClient, ghAppReconciler.BotLogin(), fabrikDir)
+		fmt.Printf("[startup] github-app: lock label is %s%s — derived from the App slug, this host's name (or %s) and the Fabrik "+
+			"directory; if it changes between runs (e.g. a container hostname), a crashed run's lock label is stranded until removed "+
+			"by hand, so pin it with %s\n", lockLabelPrefix, appIdent.lockID, instanceIDEnv, instanceIDEnv)
+		if cfg.User != "" {
+			fmt.Printf("[startup] github-app: user %q is configured but ignored under GitHub App auth — commit identity, "+
+				"lock label, @mentions and spawned-child assignees are derived from the App (%s)\n", cfg.User, appIdent.botLogin)
+		}
 	} else if cfg.GHESHost != "" {
 		ghClient = gh.NewClientForHost(cfg.Token, cfg.GHESHost)
 	} else {
@@ -522,6 +543,7 @@ func New(cfg Config) (*Engine, error) {
 		releaseClient:             releaseClient,
 		hostClient:                ghClient,
 		ghAppAuth:                 ghAppReconciler,
+		appIdent:                  appIdent,
 		claude:                    &RealClaudeInvoker{DebugOutput: cfg.DebugOutput},
 		worktreeManagers:          make(map[string]*WorktreeManager),
 		fabrikDir:                 fabrikDir,
@@ -745,9 +767,24 @@ func (e *Engine) SetMergeTrainLandingGuardDisabledForTest(disabled bool) {
 // new instance.
 func (e *Engine) SetGitHubAppModeForTest(accessibleRepos map[string]bool, truncated bool) {
 	e.ghAppAuth = &githubauth.Reconciler{}
+	e.appIdent = nil
 	e.appAccessibleRepos = accessibleRepos
 	e.appAccessibleReposTrunc = truncated
 	e.appAccessibleReposReady = true
+}
+
+// SetGitHubAppIdentityForTest gives an Engine already in App mode (see
+// SetGitHubAppModeForTest) a bot identity: slug is the App slug without
+// "[bot]", botUserID the ID GET /users/<slug>[bot] would return. The
+// zero-value Reconciler SetGitHubAppModeForTest installs carries no bot
+// login, which would leave the lock identity and every mention filter
+// keyed on an empty string; this seam supplies one so sim scenarios exercise
+// the real App-mode identity paths (#1893). instanceKey stands in for the
+// hostname+directory the lock ID is normally derived from, letting a
+// scenario model two local instances of one App. Test seam only; like
+// SetGitHubAppModeForTest it is not re-applied by RestartEnv.
+func (e *Engine) SetGitHubAppIdentityForTest(slug string, botUserID int64, instanceKey string) {
+	e.appIdent = newAppIdentity(slug+"[bot]", botUserID, instanceKey, e.fabrikDir)
 }
 
 // trainCIPollIntervalOrDefault returns the test-overridden CI poll interval
@@ -1014,7 +1051,7 @@ func (e *Engine) ensureRepoReady(ctx context.Context, item gh.ProjectItem) error
 		if e.cloneAttemptHook != nil {
 			e.cloneAttemptHook(nameWithOwner)
 		}
-		bareDir, err := ensureBareClone(e.fabrikDir, owner, repo, e.cfg.User, e.cfg.GitSSH, e.cfg.GHESHost)
+		bareDir, err := ensureBareCloneAs(e.fabrikDir, owner, repo, e.cfg.User, e.commitIdentity(), e.cfg.GitSSH, e.cfg.GHESHost)
 		call.dir = bareDir
 		call.err = err
 
@@ -1132,7 +1169,7 @@ func (e *Engine) ensureSpawnTargetReady(ctx context.Context, targetOwner, target
 		if e.cloneAttemptHook != nil {
 			e.cloneAttemptHook(nameWithOwner)
 		}
-		bareDir, err := ensureBareClone(e.fabrikDir, targetOwner, targetRepo, e.cfg.User, e.cfg.GitSSH, e.cfg.GHESHost)
+		bareDir, err := ensureBareCloneAs(e.fabrikDir, targetOwner, targetRepo, e.cfg.User, e.commitIdentity(), e.cfg.GitSSH, e.cfg.GHESHost)
 		call.dir = bareDir
 		call.err = err
 

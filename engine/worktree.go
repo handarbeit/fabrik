@@ -91,6 +91,15 @@ func nonInteractiveGitEnv() []string {
 // host is the configured GHES hostname (see buildCloneURL); an empty host
 // defaults to "github.com".
 func ensureBareClone(baseDir, owner, repo, user string, useSSH bool, host string) (string, error) {
+	return ensureBareCloneAs(baseDir, owner, repo, user, nil, useSSH, host)
+}
+
+// ensureBareCloneAs is ensureBareClone with an optional App commit identity
+// (#1893). A nil ident is exactly ensureBareClone: the cfg.User path, byte for
+// byte. A non-nil ident (GitHub App auth) writes the App's bot identity
+// instead, via setAppCommitterIdentity's marker protocol, with user consulted
+// only to recognize a previously Fabrik-written operator identity to replace.
+func ensureBareCloneAs(baseDir, owner, repo, user string, ident *commitIdentity, useSSH bool, host string) (string, error) {
 	bareDir := filepath.Join(baseDir, ".fabrik", "repos", owner+"-"+repo+".git")
 	env := nonInteractiveGitEnv()
 
@@ -118,7 +127,7 @@ func ensureBareClone(baseDir, owner, repo, user string, useSSH bool, host string
 		refreshCmd.Env = env
 		refreshCmd.CombinedOutput() // best-effort
 
-		setCommitterIdentity(bareDir, user, env, host)
+		applyCommitterIdentity(bareDir, user, ident, env, host)
 		enableRerere(bareDir, env)
 		return bareDir, nil
 	}
@@ -158,7 +167,7 @@ func ensureBareClone(baseDir, owner, repo, user string, useSSH bool, host string
 	refreshCmd.Env = env
 	refreshCmd.CombinedOutput() // best-effort
 
-	setCommitterIdentity(bareDir, user, env, host)
+	applyCommitterIdentity(bareDir, user, ident, env, host)
 	enableRerere(bareDir, env)
 	return bareDir, nil
 }
@@ -238,6 +247,116 @@ func setCommitterIdentity(repoDir, user string, env []string, host string) {
 	}
 	setIfUnset("user.name", user)
 	setIfUnset("user.email", user+"@users.noreply."+host)
+}
+
+// Git config keys recording what Fabrik itself last wrote as the App commit
+// identity. They let setAppCommitterIdentity tell "Fabrik wrote this" (safe to
+// update) from "the operator set this" (never overridden) on an existing clone.
+const (
+	managedNameKey  = "fabrik.managed-name"
+	managedEmailKey = "fabrik.managed-email"
+)
+
+// applyCommitterIdentity dispatches on whether an App identity is in force.
+func applyCommitterIdentity(repoDir, user string, ident *commitIdentity, env []string, host string) {
+	if ident == nil {
+		setCommitterIdentity(repoDir, user, env, host)
+		return
+	}
+	setAppCommitterIdentity(repoDir, ident, user, env, host)
+}
+
+// setAppCommitterIdentity sets local user.name/user.email on repoDir to the
+// GitHub App's bot identity (#1893, R2), without ever overriding an identity
+// the operator chose. setCommitterIdentity's "only fill in what is unset" is
+// not enough here: a deployment migrating from PAT/user mode already has bare
+// clones carrying the operator identity Fabrik itself wrote, and leaving it
+// would keep authoring commits as a person while the push comes from the App.
+//
+// Each of name and email is handled independently:
+//   - unset locally           → write it, and record it in the marker key;
+//   - equals its marker       → Fabrik wrote it: rewrite when it changed (this
+//     is how an ID-less fallback email is upgraded once the lookup succeeds);
+//   - no marker, equals the legacy <user> / <user>@users.noreply.<host> form
+//     Fabrik wrote in PAT mode → replace it and start tracking it;
+//   - anything else           → the operator's own value: preserved.
+//
+// The upgrade is one-way: when a Fabrik-owned email is already the ID-bearing
+// form of the ID-less fallback now offered (the lookup failed transiently this
+// start), it is kept rather than downgraded.
+//
+// A marker that differs from the current value means someone edited the value
+// after Fabrik wrote it, which is also treated as the operator's choice.
+func setAppCommitterIdentity(repoDir string, ident *commitIdentity, legacyUser string, env []string, host string) {
+	if host == "" {
+		host = "github.com"
+	}
+	get := func(key string) (string, bool) {
+		cmd := exec.Command("git", "config", "--local", "--get", key)
+		cmd.Dir = repoDir
+		cmd.Env = env
+		out, err := cmd.Output()
+		if err != nil {
+			return "", false
+		}
+		return strings.TrimSuffix(string(out), "\n"), true
+	}
+	set := func(key, value string) {
+		cmd := exec.Command("git", "config", "--local", key, value)
+		cmd.Dir = repoDir
+		cmd.Env = env
+		cmd.CombinedOutput() // best-effort
+	}
+	apply := func(key, markerKey, want, legacy string) {
+		cur, hasCur := get(key)
+		if hasCur {
+			marker, hasMarker := get(markerKey)
+			owned := false
+			switch {
+			case hasMarker:
+				owned = cur == marker
+			case legacy != "":
+				owned = cur == legacy
+			}
+			if !owned {
+				return // the operator's own value; preserve it
+			}
+			// Never downgrade: want is the ID-less fallback form of the
+			// ID-bearing email already written (a later lookup failed
+			// transiently). Keep the avatar-linked value and its marker.
+			if cur != want && isIDBearingForm(cur, want) {
+				return
+			}
+		}
+		if !hasCur || cur != want {
+			set(key, want)
+		}
+		if marker, ok := get(markerKey); !ok || marker != want {
+			set(markerKey, want)
+		}
+	}
+	legacyName, legacyEmail := "", ""
+	if legacyUser != "" {
+		legacyName = legacyUser
+		legacyEmail = legacyUser + "@users.noreply." + host
+	}
+	apply("user.name", managedNameKey, ident.Name, legacyName)
+	apply("user.email", managedEmailKey, ident.Email, legacyEmail)
+}
+
+// isIDBearingForm reports whether cur is the "<numeric-id>+<idless>" form of
+// the ID-less noreply address idless.
+func isIDBearingForm(cur, idless string) bool {
+	id, ok := strings.CutSuffix(cur, "+"+idless)
+	if !ok || id == "" {
+		return false
+	}
+	for _, r := range id {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // BaseDir returns the main repository directory.

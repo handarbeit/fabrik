@@ -1,6 +1,7 @@
 package sim
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"github.com/handarbeit/fabrik/engine"
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/stages"
+	"github.com/handarbeit/fabrik/tests/sim/simgh"
 	"github.com/handarbeit/fabrik/warnings"
 )
 
@@ -127,5 +129,160 @@ func TestGitHubAppAuth_DispatchAdmission_ExcludedRepoBlocksAndWarns(t *testing.T
 	}
 	if !strings.Contains(found.Detail, fmt.Sprintf("%d", installationID)) {
 		t.Errorf("warnings entry Detail = %q, want it to name installation %d", found.Detail, installationID)
+	}
+}
+
+// --- App mode without an operator identity (#1893) ---
+//
+// Under App auth the engine has no operator: the lock label, the "awaiting
+// input" @mention and spawned-child assignees are derived from the App and
+// from the issue itself, never from cfg.User. NewEnv still hardcodes
+// cfg.User = "fabrik-sim-bot"; these scenarios pass because it is IGNORED in
+// App mode — a leak would surface as "fabrik-sim-bot" in a label, mention or
+// assignee. The zero-value Reconciler SetGitHubAppModeForTest installs has no
+// bot login, so each scenario also calls SetGitHubAppIdentityForTest —
+// otherwise the lock identity would be keyed on an empty slug.
+
+const (
+	appModeSlug     = "sim-app"
+	appModeBotLogin = appModeSlug + "[bot]"
+)
+
+func enterAppMode(env *Env) {
+	env.Engine.SetGitHubAppModeForTest(map[string]bool{env.OwnerRepo: true}, false)
+	env.Engine.SetGitHubAppIdentityForTest(appModeSlug, 4242, "sim-instance")
+}
+
+// TestGitHubAppAuth_NoOperator_LockLabelAndMention: while Specify runs the
+// issue carries an App-derived lock label (never the configured user's, never
+// "[bot]"-suffixed, never empty), and when Specify blocks on input the
+// notification mentions the issue's human assignee — not cfg.User.
+func TestGitHubAppAuth_NoOperator_LockLabelAndMention(t *testing.T) {
+	t.Parallel()
+	env := NewEnv(t, EnvOptions{Stages: githubAppAuthStages()})
+	enterAppMode(env)
+
+	var lockLabelsSeen []string
+	env.Claude.ForStage("Specify", func(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts engine.InvokeOptions) (string, bool, engine.TokenUsage, error) {
+		for _, l := range IssueLabels(t, env, issue.Number) {
+			if strings.HasPrefix(l, "fabrik:locked:") {
+				lockLabelsSeen = append(lockLabelsSeen, l)
+			}
+		}
+		return "FABRIK_BLOCKED_ON_INPUT\n", false, engine.TokenUsage{}, nil
+	})
+
+	env.issueSeqMu.Lock()
+	env.issueSeqNext++
+	num := env.issueSeqNext
+	env.issueSeqMu.Unlock()
+	env.Sim.Sim().SeedIssue(env.OwnerRepo, simgh.IssueSeed{
+		Number: num, Title: "App no-operator", Body: "body", Status: "Specify",
+		Author: appModeBotLogin, Assignees: []string{"alice", "dependabot[bot]"},
+	})
+	if err := env.Sim.Sim().Err(); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	WaitForIssueLabel(t, env, num, "fabrik:awaiting-input", 80)
+
+	if len(lockLabelsSeen) == 0 {
+		t.Fatal("no fabrik:locked:* label was present while Specify ran")
+	}
+	for _, l := range lockLabelsSeen {
+		if !strings.HasPrefix(l, "fabrik:locked:"+appModeSlug+"-") || strings.Contains(l, "[bot]") || strings.Contains(l, "fabrik-sim-bot") {
+			t.Errorf("lock label %q is not the App-derived identity", l)
+		}
+		if len(l) > 50 {
+			t.Errorf("lock label %q exceeds GitHub's 50-char limit", l)
+		}
+	}
+
+	comments, err := env.Sim.FetchIssueComments(env.Owner, env.Repo, num)
+	if err != nil {
+		t.Fatalf("FetchIssueComments: %v", err)
+	}
+	var notice string
+	for _, c := range comments {
+		if strings.Contains(c.Body, "awaiting your input") {
+			notice = c.Body
+		}
+	}
+	if notice == "" {
+		t.Fatal("no awaiting-input notification comment was posted")
+	}
+	if !strings.Contains(notice, "@alice") {
+		t.Errorf("notification must mention the issue's human assignee: %q", notice)
+	}
+	for _, bad := range []string{"@fabrik-sim-bot", "dependabot", appModeSlug} {
+		if strings.Contains(notice, bad) {
+			t.Errorf("notification must not mention %q: %q", bad, notice)
+		}
+	}
+}
+
+// TestGitHubAppAuth_NoOperator_MentionsNobodyWhenOnlyBotsAreOnTheIssue: an
+// issue authored by the App itself (e.g. a spawned child) with no assignees
+// resolves no human, so the notification carries no @mention at all.
+func TestGitHubAppAuth_NoOperator_MentionsNobodyWhenOnlyBotsAreOnTheIssue(t *testing.T) {
+	t.Parallel()
+	env := NewEnv(t, EnvOptions{Stages: githubAppAuthStages()})
+	enterAppMode(env)
+	env.Claude.ForStage("Specify", func(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts engine.InvokeOptions) (string, bool, engine.TokenUsage, error) {
+		return "FABRIK_BLOCKED_ON_INPUT\n", false, engine.TokenUsage{}, nil
+	})
+	env.issueSeqMu.Lock()
+	env.issueSeqNext++
+	num := env.issueSeqNext
+	env.issueSeqMu.Unlock()
+	env.Sim.Sim().SeedIssue(env.OwnerRepo, simgh.IssueSeed{
+		Number: num, Title: "App-authored", Body: "body", Status: "Specify",
+		Author: appModeSlug, // GraphQL-shaped bot login: no "[bot]" suffix
+	})
+	if err := env.Sim.Sim().Err(); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	WaitForIssueLabel(t, env, num, "fabrik:awaiting-input", 80)
+	comments, err := env.Sim.FetchIssueComments(env.Owner, env.Repo, num)
+	if err != nil {
+		t.Fatalf("FetchIssueComments: %v", err)
+	}
+	for _, c := range comments {
+		if strings.Contains(c.Body, "awaiting your input") && strings.Contains(c.Body, "@") {
+			t.Errorf("no human resolvable — notification must not mention anyone: %q", c.Body)
+		}
+	}
+}
+
+// TestGitHubAppAuth_NoOperator_SpawnedChildInheritsParentAssignees: under App
+// auth a spawned child is assigned the parent's human assignees, not cfg.User.
+func TestGitHubAppAuth_NoOperator_SpawnedChildInheritsParentAssignees(t *testing.T) {
+	t.Parallel()
+	env := NewEnv(t, EnvOptions{Stages: crossRepoSpawnStages()})
+	enterAppMode(env)
+
+	env.issueSeqMu.Lock()
+	env.issueSeqNext++
+	num := env.issueSeqNext
+	env.issueSeqMu.Unlock()
+	env.Sim.Sim().SeedIssue(env.OwnerRepo, simgh.IssueSeed{
+		Number: num, Title: "App spawn parent", Body: "body", Status: "Implement",
+		Labels: []string{"stage:Plan:complete"}, Assignees: []string{"alice", "dependabot[bot]"},
+	})
+	env.Sim.Sim().SeedComment(env.OwnerRepo, num, appModeBotLogin,
+		spawnPlanCommentBody(env.OwnerRepo, "App spawn child", "child body"))
+	if err := env.Sim.Sim().Err(); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	WaitForIssueLabel(t, env, num, "fabrik:children-spawned", 40)
+	item := projectItem(t, env, num)
+	if len(item.BlockedBy) != 1 {
+		t.Fatalf("expected 1 spawned child, got %+v", item.BlockedBy)
+	}
+	child := projectItem(t, env, item.BlockedBy[0].Number)
+	if len(child.Assignees) != 1 || child.Assignees[0] != "alice" {
+		t.Errorf("child assignees = %v, want [alice] (parent's human assignees; not cfg.User, not the bot)", child.Assignees)
 	}
 }

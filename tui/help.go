@@ -59,7 +59,7 @@ KEYBOARD SHORTCUTS
 LABELS REFERENCE
 
   Engine-managed state
-    fabrik:locked:<user>   Issue being processed by this user's instance
+    fabrik:locked:<id>     Issue being processed by an instance (id: its user; App auth: <slug>-<hash>)
     fabrik:editing         Issue body being updated (comment processing)
     fabrik:paused          Processing paused (max retries exceeded or manual)
     fabrik:awaiting-input  Stage paused waiting for user input

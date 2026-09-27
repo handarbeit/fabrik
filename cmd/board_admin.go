@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/handarbeit/fabrik/config"
@@ -106,4 +107,46 @@ func missingStageColumns(required []string, sf *gh.StatusField) []string {
 		}
 	}
 	return missing
+}
+
+// appBoardClient builds an installation-token client for the board-admin
+// entry points that have no daemon Config to draw from, when the resolved
+// config (FABRIK_GITHUB_APP_* env over .fabrik/config.yaml) fully configures
+// GitHub App auth. It returns (nil, nil) when App auth is not configured, so
+// callers fall back to loadGitHubToken; a partial configuration is an error,
+// as it is for the daemon (R5). It reuses the `init --github-app` adopt path,
+// which verifies the installation's grants with the engine's own rule, so an
+// App-only deployment (no user, no PAT — #1893) can still run repair-board.
+func appBoardClient(ctx context.Context, owner string, pc config.ProjectConfig, ghesHost string) (*gh.Client, error) {
+	var app Config
+	if err := resolveGitHubAppConfig(&app, pc); err != nil {
+		return nil, err
+	}
+	set := 0
+	for _, ok := range []bool{app.GitHubAppID != 0, app.GitHubAppPrivateKeyPath != "", app.GitHubAppInstallationID != 0} {
+		if ok {
+			set++
+		}
+	}
+	switch set {
+	case 0:
+		return nil, nil
+	case 3:
+	default:
+		return nil, fmt.Errorf("GitHub App authentication is partially configured: github_app_id, github_app_private_key_path and github_app_installation_id must all be set, or none")
+	}
+	if ghesHost != "" {
+		return nil, fmt.Errorf("GitHub App authentication is not supported with a GitHub Enterprise Server host; use --token")
+	}
+	res, err := runGitHubAppSetup(ctx, githubAppSetupOptions{
+		Owner:          owner,
+		AppID:          app.GitHubAppID,
+		PrivateKeyPath: app.GitHubAppPrivateKeyPath,
+		InstallationID: app.GitHubAppInstallationID,
+		NoBrowser:      true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("GitHub App authentication: %w", err)
+	}
+	return res.Client, nil
 }

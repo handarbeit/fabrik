@@ -344,7 +344,7 @@ GITHUB_TOKEN=ghp_...    # Fallback
 | `--owner` | GitHub repo owner | required |
 | `--repo` | GitHub repo name; omit for multi-repo mode | optional |
 | `--project` | GitHub project number | required |
-| `--user` | Your GitHub username | required |
+| `--user` | Your GitHub username | required in PAT mode; not needed under GitHub App auth |
 | `--token` | GitHub token | `$GITHUB_TOKEN` |
 | `--stages` | Stage configs directory | `./.fabrik/stages` |
 | `--yolo` | Auto-advance issues through stages without human approval; also auto-merges the linked PR when Validate completes | `false` |

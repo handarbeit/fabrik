@@ -68,8 +68,13 @@ func (e *Engine) checkAndUpgrade() {
 // self-upgrade works fine unauthenticated (just more tightly rate-limited);
 // dropping the token entirely when a GHES host is configured is safer than
 // sending one guaranteed to be rejected.
+//
+// Under GitHub App auth (#1893, R5) it is also "": an App-mode deployment
+// uses no personal access token, and the installation token is the wrong
+// credential here — it is scoped to the customer's organization, not to the
+// public github.com/handarbeit/fabrik release repo.
 func releaseUpgradeToken(cfg Config) string {
-	if cfg.GHESHost != "" {
+	if cfg.GHESHost != "" || gitHubAppAuthConfigured(cfg) {
 		return ""
 	}
 	return cfg.Token

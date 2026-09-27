@@ -445,13 +445,15 @@ func setUpGitHubAppAuth(ctx context.Context, cfg Config, fabrikDir, baseURL stri
 // dependencies comment was never updated, and cached comments read as
 // "human" pre-refetch but "bot" post-refetch).
 //
-// Exception: fabrik:locked:<user> and itemstate.LocalLockAcquired are
-// deliberately about which *operator* holds a local advisory lock, not
-// about Fabrik's own posting identity — they must keep using e.cfg.User
-// directly and must never be routed through this accessor.
+// fabrik:locked:<name> and itemstate.LocalLockAcquired are a separate
+// concern with their own accessor, lockIdentity (engine/app_identity.go):
+// cfg.User in PAT mode, an instance-distinct App-derived ID under App auth
+// (#1893, ADR-1893 — this reverses the exception #1754 originally carved out).
+// Never route a lock label through selfLogin: the bot login carries "[bot]"
+// and is shared by every instance of the App.
 func (e *Engine) selfLogin() string {
 	if e.ghAppAuth != nil {
-		return e.ghAppAuth.BotLogin()
+		return e.appBotLogin()
 	}
 	return e.cfg.User
 }

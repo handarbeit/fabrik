@@ -170,7 +170,7 @@ func Execute() error {
 	flag.StringVar(&cfg.Owner, "owner", "", "GitHub repository owner")
 	flag.StringVar(&cfg.Repo, "repo", "", "GitHub repository name")
 	flag.IntVar(&cfg.ProjectNum, "project", 0, "GitHub project number")
-	flag.StringVar(&cfg.User, "user", "", "GitHub username (only process changes by this user)")
+	flag.StringVar(&cfg.User, "user", "", "Your GitHub login; required in PAT mode, ignored under GitHub App authentication")
 	flag.StringVar(&cfg.Token, "token", "", "GitHub token (or set GITHUB_TOKEN env var)")
 	flag.StringVar(&cfg.StagesDir, "stages", "./.fabrik/stages", "Directory containing stage YAML configs")
 	flag.BoolVar(&cfg.Yolo, "yolo", false, "Auto-advance issues through stages without waiting for human input; also auto-merges the linked PR when Validate completes")
@@ -793,7 +793,11 @@ func Execute() error {
 		fmt.Fprintf(os.Stderr, "[warn] Fine-grained personal access tokens (github_pat_...) do not support GitHub Projects v2 GraphQL. Switch to a classic personal access token with 'repo', 'project', and 'workflow' scopes. See: https://github.com/settings/tokens\n")
 	}
 
-	if cfg.User == "" {
+	// user is the operator's identity and only PAT mode has one: under GitHub
+	// App auth the App installation is the identity (commit author, lock label,
+	// @mentions, spawn assignees are all derived from it — #1893), so a missing
+	// user is fine and a present one is tolerated but ignored (R8).
+	if cfg.User == "" && !githubAppAuthIntended {
 		return fmt.Errorf("user is required: use --user flag or FABRIK_USER in .env")
 	}
 
@@ -821,7 +825,11 @@ func Execute() error {
 		fmt.Printf("Fabrik starting %s\n", Version)
 		fmt.Printf("  repo:    %s/%s\n", cfg.Owner, cfg.Repo)
 		fmt.Printf("  project: #%d\n", cfg.ProjectNum)
-		fmt.Printf("  user:    %s\n", cfg.User)
+		if githubAppAuthIntended {
+			fmt.Printf("  identity: GitHub App installation %d\n", cfg.GitHubAppInstallationID)
+		} else {
+			fmt.Printf("  user:    %s\n", cfg.User)
+		}
 		fmt.Printf("  stages:  %d loaded\n", len(stageCfgs))
 		fmt.Printf("  yolo:    %v\n", cfg.Yolo)
 		fmt.Printf("  auto-upgrade: %v\n", cfg.AutoUpgrade)

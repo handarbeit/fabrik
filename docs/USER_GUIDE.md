@@ -427,6 +427,25 @@ App auth gives the engine its own rate-limit bucket (separate from any human's P
 
 **The engine itself is compat mode only.** It consumes an App ID, private key, and installation ID for a GitHub App you have already created and installed — manually via GitHub's own App-creation UI, or via `fabrik init --github-app` below. The engine never runs the manifest/browser bootstrap flow itself; that's `fabrik init --github-app`'s job.
 
+#### No user, no PAT — the App is the identity
+
+An App-authenticated deployment is self-contained: it needs **no `user:`** and **no `FABRIK_TOKEN`/`GITHUB_TOKEN`**. `fabrik init --github-app` does not ask for a GitHub username, and startup accepts an App config with `user` unset (PAT mode still requires `user`). Everything that a PAT-mode deployment attributes to a person is derived from the App instead:
+
+| Where | PAT mode | App mode |
+|---|---|---|
+| Commit author/committer | `<user>` / `<user>@users.noreply.github.com` | `<slug>[bot]` / `<bot-user-id>+<slug>[bot]@users.noreply.github.com` — GitHub's documented form, so commits link to the App's avatar. The bot user ID is looked up once at startup (`GET /users/<slug>[bot]`); if that lookup fails, startup logs a warning and uses the ID-less `<slug>[bot]@users.noreply.github.com` (still authored by the App, but not avatar-linked), upgrading it on a later start once the lookup succeeds |
+| Lock label | `fabrik:locked:<user>` | `fabrik:locked:<slug>-<hash>` — see "Lock identity" below |
+| "Awaiting input" `@mention` | the configured `user` | the issue's assignees, or its author when unassigned; nobody when neither resolves. A bot login (including this App itself) is never mentioned |
+| Spawned-child assignees | the configured `user` | the parent's human assignees, or none. If GitHub rejects an inherited assignee (HTTP 422 — e.g. not assignable in the child's repo) the child is created unassigned and a warning is logged |
+| TUI stop comment | "stopped from TUI by `<user>`" | "stopped from TUI" |
+| Release-upgrade check | authenticates with the PAT | unauthenticated — Fabrik's release repo is public on github.com, and an installation token is scoped to your organization, not to it |
+
+**A leftover `user:` is tolerated and ignored.** An existing App deployment that still has `user:` configured keeps starting; the value is not used for the commit identity, lock label, mentions, or spawn assignees (App auth wins over it just as it wins over a coexisting PAT), and startup logs one line saying so. Likewise a leftover `FABRIK_TOKEN` is never used under App auth. The one thing the leftover `user:` is still read for is a **one-time cleanup**: at startup, Fabrik removes a `fabrik:locked:<user>` label left on an item by a pre-App run of this instance (a crash while locked) when no worker in this process holds it, so a switch from PAT to App mode does not strand items. Only a label applied more than two hours ago is removed (a PAT-mode instance still running as that user may legitimately hold a younger one), and one whose age cannot be read is left; either case is logged, and you remove the label by hand once you are sure no other instance holds it.
+
+**Lock identity.** The `<hash>` in `fabrik:locked:<slug>-<hash>` is six hex characters of a hash of this machine's hostname and Fabrik's working directory, so two local instances that share one App installation hold *different* lock labels and the usual lock-then-verify tie-break between instances keeps working (a single shared label would make each instance read the other's lock as its own). The label never contains `[bot]` and is kept within GitHub's 50-character label limit — an App slug longer than 29 characters is truncated deterministically. Two consequences: the label is stable across restarts on the same host and directory, but **changing the hostname or moving the Fabrik directory changes it**, so a lock left by a crashed instance under the old name has to be removed by hand (`fabrik:locked:<slug>-<old-hash>`). Where the hostname is not stable — a container or Kubernetes pod (the hostname is the container/pod ID and changes on every restart or reschedule) or a laptop whose hostname follows the network — set `FABRIK_INSTANCE_ID` to a stable per-instance string (for example the StatefulSet pod name); it replaces the hostname in the hash, so the label survives restarts. Give each concurrent instance of one App a *different* value (or a different Fabrik directory). Startup logs the derived lock label so you can see what to look for.
+
+**Operator-side CLIs.** `fabrik repair-board` builds an installation client from the `github_app_*` config when no `--token` is given, so it works on an App-only deployment (`fabrik init --github-app --create-board` already did). `fabrik upgrade` and `fabrik watch` are run by an operator at a terminal, not by the daemon: they need no token (`watch` just omits PR/CI status without one), and non-App `fabrik init --create-board` still needs a PAT. Git over SSH (`git_ssh: true`) is an explicit operator choice and out of scope here.
+
 #### Setting up App auth
 
 `fabrik init --github-app` drives setup end to end: register a new App via GitHub's manifest flow (or adopt an existing one), resolve its installation on your organization, verify the installation's granted permissions, and populate `.fabrik/config.yaml` — no manual credential copying or board editing required.
@@ -498,7 +517,7 @@ Set all three of the following together via any of the usual precedence layers (
 fabrik --github-app-id 123456 \
   --github-app-private-key-path /path/to/private-key.pem \
   --github-app-installation-id 789012 \
-  --owner myorg --project 5 --user me
+  --owner myorg --project 5
 
 # Environment variables
 export FABRIK_GITHUB_APP_ID=123456
@@ -668,7 +687,7 @@ The same gap is surfaced as a coverage note next to the webhook health indicator
 - **Not combinable with `--webhooks`.** `--webhooks`/`FABRIK_WEBHOOKS` and GitHub App auth cannot be configured together — refused explicitly at startup, naming both settings. `gh webhook forward` (the mechanism `--webhooks` uses to deliver events) is feature-gated to user tokens by GitHub CLI itself and refuses an installation token outright ("you do not have access to this feature") — no App permission grant fixes this. Drop `--webhooks` to use App auth with `--reconcile-interval` polling instead, or use `event_source: hookdeck` (see [Event-Driven Ingestion via Hookdeck](#event-driven-ingestion-via-hookdeck-app-auth) above) for real-time delivery under App auth, or drop the GitHub App config to use `--webhooks` with a personal access token.
 - **`event_source: hookdeck` requires App auth, and cannot be combined with `--webhooks` either.** Both combinations are refused explicitly at startup, naming both settings: `event_source: hookdeck` with no GitHub App configured (Hookdeck has no PAT-mode equivalent — it consumes the App's own webhook), and `event_source: hookdeck` together with `--webhooks` (the two are mutually exclusive ingestion transports). See [Event-Driven Ingestion via Hookdeck](#event-driven-ingestion-via-hookdeck-app-auth) above.
 - **An unrecognized `event_source` value is refused at startup, not silently downgraded.** Only `poll` (the default), `hookdeck`, or omitting the field entirely are accepted — a typo (`Hookdeck`, `hook-deck`, etc.) fails loud with an error naming the offending value, rather than comparing unequal to every known constant and quietly falling back to plain polling with no error or log line.
-- **One installation, one account.** The engine holds a single GitHub client scoped to one App installation (one organization). A cross-organization spawn target (a Plan/Review/Validate stage spawning a child issue in a different GitHub account or organization) is unreachable under App auth — this mirrors a GitHub App installation's own strict account-scoping, not a Fabrik design choice.
+- **One installation, one account** (per instance). The engine holds a single GitHub client scoped to one App installation (one organization); two local instances may share it, each holding its own lock label (see "No user, no PAT" above). A cross-organization spawn target (a Plan/Review/Validate stage spawning a child issue in a different GitHub account or organization) is unreachable under App auth — this mirrors a GitHub App installation's own strict account-scoping, not a Fabrik design choice.
 - **HTTPS git needs `contents: write`.** Under App auth, HTTPS git (engine and workers) authenticates as the installation, which requires `contents: write`; with `git_ssh: true` or an `insteadOf` rewrite, git uses your SSH key instead. See "Git under App auth" above.
 - **No secret material is ever logged**, at any verbosity — neither the private key nor any minted installation token.
 
@@ -963,6 +982,9 @@ Generated by `fabrik init`. Commit this file — it carries project settings wit
 owner: your-org
 # repo: your-repo  # omit for multi-repo mode (processes all repos on the board)
 project: 1
+# Your GitHub username — required in PAT mode. Not needed under GitHub App
+# authentication (github_app_*), where the App installation is the identity;
+# if set there it is ignored. See "GitHub App Authentication" above.
 user: your-github-username
 
 # Optional settings (defaults shown):
@@ -1150,7 +1172,7 @@ FABRIK_USER=my-personal-username
 | `--owner` | GitHub repo owner (org or user) | required |
 | `--repo` | GitHub repo name; omit to enable multi-repo mode (processes all repos on the board) | optional |
 | `--project` | GitHub Project (v2) number | required |
-| `--user` | Your GitHub username — used as the operator identity for lock labels (`fabrik:locked:<user>`), multi-instance tie-breaking, and engine-generated comment authorship; also @mentioned in awaiting-input notification comments to trigger a GitHub Mobile push when an issue blocks on your input | required |
+| `--user` | Your GitHub username — used as the operator identity for lock labels (`fabrik:locked:<user>`), multi-instance tie-breaking, and git commit authorship; also @mentioned in awaiting-input notification comments to trigger a GitHub Mobile push when an issue blocks on your input. **Required in PAT mode; not needed — and ignored if set — under [GitHub App Authentication](#github-app-authentication)**, where the App is the identity | required in PAT mode |
 | `--token` | GitHub API token | `$GITHUB_TOKEN` |
 | `--stages` | Directory containing stage YAML configs | `./.fabrik/stages` |
 | `--yolo` | Auto-advance issues through stages without human approval; also auto-merges the linked PR when Validate completes | `false` |
@@ -1225,7 +1247,7 @@ The flag/env suggestion is derived mechanically from Fabrik's snake_case (`confi
 | `FABRIK_OWNER` | `owner` | GitHub repo owner | -- |
 | `FABRIK_REPO` | `repo` | GitHub repo name; optional — omitting enables multi-repo mode (all repos on the board) | -- |
 | `FABRIK_PROJECT_NUMBER` | `project` | GitHub Project (v2) number | -- |
-| `FABRIK_USER` | `user` | Your GitHub username — operator identity for lock labels, tie-breaking, and @mention notifications | -- |
+| `FABRIK_USER` | `user` | Your GitHub username — operator identity for lock labels, tie-breaking, commit authorship, and @mention notifications. Required in PAT mode; ignored under GitHub App auth | -- |
 | `FABRIK_STAGES` | `stages` | Stage configs directory | `./.fabrik/stages` |
 | `FABRIK_YOLO` | `yolo` | Auto-advance (`true`/`1`/`yes`) | `false` |
 | `FABRIK_POLL` | `poll` | Poll interval in seconds. Governs GitHub API cadence; does not affect stage retry latency | `30` |
@@ -1273,6 +1295,7 @@ The flag/env suggestion is derived mechanically from Fabrik's snake_case (`confi
 | `FABRIK_ARCHIVE_DONE` | *(no config.yaml key)* | Auto-archive Done items after `FABRIK_ARCHIVE_AFTER` elapses: `"on"` or `"off"` (case-insensitive; unrecognized values fall back to `"on"`) | `""` (on) |
 | `FABRIK_ANTHROPIC_API_KEY` | *(no config.yaml key)* | Explicit opt-in for API billing: when set and non-empty, translated into `ANTHROPIC_API_KEY` on every Claude worker invocation. The only supported way to obtain API billing through this variable — an ambient `ANTHROPIC_API_KEY` in the engine's own environment is scrubbed and never reaches the worker on its own. Never forwarded to the worker itself; a one-time `[startup]` notice fires when active. See "Anthropic Auth Namespace Scrub & `apiKeyHelper` Refusal" below. | -- |
 | `FABRIK_ANTHROPIC_ENV_PASSTHROUGH` | *(no config.yaml key)* | Comma-separated exact variable names to re-inherit unchanged from the engine's ambient environment into the worker, overriding the Anthropic auth namespace scrub for only those names (e.g. Bedrock/Vertex selectors). Never forwarded to the worker itself; a one-time `[startup]` notice names which variables were passed through when non-empty. See "Anthropic Auth Namespace Scrub & `apiKeyHelper` Refusal" below. | -- |
+| `FABRIK_INSTANCE_ID` | *(no config.yaml key)* | GitHub App auth only. Stable per-instance string that replaces the hostname in the hash behind the `fabrik:locked:<slug>-<hash>` lock label, so it survives hostname changes (container/pod restarts). Ignored in PAT mode. Absent (default) means the hostname is used. See [GitHub App Authentication](#github-app-authentication). | `""` (hostname) |
 | `FABRIK_GHES_HOST` | `ghes_host` | GitHub Enterprise Server hostname (no scheme, no trailing slash). Absent means github.com, byte-identical to today's behavior. See [GitHub Enterprise Server Support](#github-enterprise-server-support). | `""` (github.com) |
 | `FABRIK_GITHUB_APP_ID` | `github_app_id` | GitHub App ID for App-installation auth — co-equal with `FABRIK_TOKEN`/`GITHUB_TOKEN`, not a replacement. Must be set together with `FABRIK_GITHUB_APP_PRIVATE_KEY_PATH` and `FABRIK_GITHUB_APP_INSTALLATION_ID`, or not at all. See [GitHub App Authentication](#github-app-authentication). | `0` (PAT mode) |
 | `FABRIK_GITHUB_APP_PRIVATE_KEY_PATH` | `github_app_private_key_path` | Path to the GitHub App's private key PEM file. | `""` |
@@ -1896,7 +1919,9 @@ the configured user answers it in a comment, and the stage resumes automatically
 When Fabrik adds `fabrik:awaiting-input`, it also posts a notification comment beginning
 with `🏭 **Fabrik** — @<user>:` so GitHub delivers a mobile push notification to the
 configured operator (set via `--user` / `FABRIK_USER`). This ensures you're alerted even
-if you're not actively watching the issue.
+if you're not actively watching the issue. Under [GitHub App authentication](#github-app-authentication)
+there is no configured operator: the comment mentions the issue's assignees instead (or its
+author when unassigned, or nobody when neither is a human), and never a bot login.
 
 > **Note:** GitHub does not deliver push notifications for activity an account performs on
 > itself. If Fabrik runs as the same GitHub account as the user being @mentioned, no push
@@ -2015,7 +2040,7 @@ When the parent advances to Implement, the engine's `preImplement` step fires **
 
 1. Validates any `DEPENDS_ON:` headers declared in the blocks (see below); an invalid one pauses the parent before any child is created
 2. Confirms this Fabrik instance is actually configured to serve each target repo (see [Same-Repo and Cross-Repo](#same-repo-and-cross-repo) below) — if not, the spawn fails loudly rather than silently registering the child on the wrong board
-3. Creates each child issue in its target repo (same repo or cross-repo) and **assigns it to the `user:` configured on this instance** — every spawned child gets an assignee, unconditionally
+3. Creates each child issue in its target repo (same repo or cross-repo) and **assigns it to the `user:` configured on this instance** — in PAT mode every spawned child gets an assignee, unconditionally. Under [GitHub App authentication](#github-app-authentication) there is no configured user: the child inherits the parent's human assignees (none if it has none)
 4. Adds each child to the same project board
 5. Links each child as a `blockedBy` dependency of the parent
 6. Applies `fabrik:sub-issue` label to each child (informational)
@@ -4022,6 +4047,8 @@ the same project, it exits with a clear error. The lock is automatically
 released if the process crashes.
 
 To check for stale instances: `pgrep -la fabrik`
+
+Instances in *different* directories (or on different hosts) against the same board are a separate case the file lock cannot see. In PAT mode they must run as different GitHub users, since the `fabrik:locked:<user>` label is what tells them apart; under [GitHub App authentication](#github-app-authentication) each derives its own lock label from the App slug plus a hash of hostname and directory, so they stay distinguishable without separate users.
 
 ### `unknown command "webhook" for "gh"` in Webhook Mode
 

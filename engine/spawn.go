@@ -597,7 +597,7 @@ func (e *Engine) spawnTargetServedByThisInstance(childOwner, childRepo string) b
 }
 
 // spawnChildren creates the child issues described by blocks, adds them to the
-// project board, assigns them to cfg.User, links them as blockedBy
+// project board, assigns them (cfg.User in PAT mode, the parent's human assignees under App auth), links them as blockedBy
 // dependencies of the parent, and marks the parent with fabrik:children-spawned.
 // Shared by all spawn origins — preImplement's direct path, recoverMissingPlanComment's
 // recovery path, and finalizeStageOutcome's Review/Validate mid-flight hook —
@@ -762,12 +762,24 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 			childNodeID = pi.ID
 			e.logf(item.Number, "spawn", "resuming block %d: child %s/%s#%d already created\n", blockIndex, childOwner, childRepo, childNumber)
 		} else {
-			// Every spawned child is assigned to cfg.User — the user of the
-			// instance meant to process it (requirement 4). Folded into the same
-			// CreateIssue POST rather than a separate call, so a bad/misconfigured
-			// user still fails loud through this single, already-fail-loud path.
+			// PAT mode: every spawned child is assigned to cfg.User — the user
+			// of the instance meant to process it (requirement 4). Folded into
+			// the same CreateIssue POST rather than a separate call, so a
+			// bad/misconfigured user still fails loud through this single,
+			// already-fail-loud path. App mode (#1893, R4): there is no
+			// operator, so the child inherits the parent's human assignees.
 			fullBody := block.Body + childFooter(owner, repo, item.Number)
-			n, nodeID, err := e.client.CreateIssue(childOwner, childRepo, block.Title, fullBody, []string{e.cfg.User})
+			assignees := e.spawnAssignees(item)
+			n, nodeID, err := e.client.CreateIssue(childOwner, childRepo, block.Title, fullBody, assignees)
+			if err != nil && e.ghAppAuth != nil && len(assignees) > 0 && errors.Is(err, gh.ErrUnprocessableEntity) {
+				// An inherited assignee is not guaranteed assignable in the
+				// child's repo (a non-collaborator, or a repo the person cannot
+				// be assigned in) and GitHub answers 422. An unassigned child
+				// is better than aborting the whole batch; unlike the PAT-mode
+				// operator, nothing here was misconfigured by the operator.
+				e.logf(item.Number, "warn", "spawn: creating child in %s/%s with assignees %v was rejected (%v) — retrying unassigned\n", childOwner, childRepo, assignees, err)
+				n, nodeID, err = e.client.CreateIssue(childOwner, childRepo, block.Title, fullBody, nil)
+			}
 			if err != nil {
 				msg := fmt.Sprintf("🏭 **Fabrik — spawn failed**\n\nFailed to create child issue %d/%d in `%s`: `%v`\n\nCreated so far: %s\n\n%s",
 					blockIndex, len(blocks), block.Repo, err, formatSpawnedList(spawned), spawnRetryInstruction)

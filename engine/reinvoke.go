@@ -189,7 +189,7 @@ func (e *Engine) dispatchReinvoke(ctx context.Context, board *gh.ProjectBoard, i
 		e.store.Apply(itemstate.LocalLockAcquired{
 			Repo:       itemRepo,
 			Number:     item.Number,
-			User:       e.cfg.User,
+			User:       e.lockIdentity(),
 			AcquiredAt: now,
 			Worker:     &itemstate.WorkerHandle{StageName: stage.Name, StartedAt: now, LastSignAt: now},
 		})

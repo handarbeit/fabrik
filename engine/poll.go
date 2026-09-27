@@ -427,7 +427,7 @@ func (e *Engine) Run() error {
 	}
 	if e.cfg.Repo != "" {
 		if e.resolveRepoAccess(e.cfg.Owner, e.cfg.Repo).CanPush {
-			if err := e.client.SeedLabels(e.cfg.Owner, e.cfg.Repo, stageNames, e.cfg.User); err != nil {
+			if err := e.client.SeedLabels(e.cfg.Owner, e.cfg.Repo, stageNames, e.lockIdentity()); err != nil {
 				e.logf(0, "warn", "label seeding failed (non-fatal): %v\n", err)
 			}
 		}
@@ -756,7 +756,7 @@ func (e *Engine) Run() error {
 // at shutdown time but never released (e.g., because the worker was killed mid-run).
 func (e *Engine) cleanupLockedIssues() {
 	snaps := e.store.All()
-	lockLabel := fmt.Sprintf("fabrik:locked:%s", e.cfg.User)
+	lockLabel := e.lockLabel()
 
 	var locked []itemstate.Snapshot
 	for _, snap := range snaps {
@@ -789,7 +789,7 @@ func (e *Engine) cleanupLockedIssues() {
 // an issue was closed while a stage was in-flight. It runs every poll cycle so
 // the board stays clean without requiring a manual intervention or restart.
 func (e *Engine) cleanupClosedIssueLocks(board *gh.ProjectBoard) {
-	lockLabel := fmt.Sprintf("fabrik:locked:%s", e.cfg.User)
+	lockLabel := e.lockLabel()
 	for _, item := range board.Items {
 		if !item.IsClosed {
 			continue
@@ -1494,7 +1494,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			}
 			e.checkAllowAutoMerge(owner, repo)
 			if e.resolveRepoAccess(owner, repo).CanPush {
-				if err := e.client.SeedLabels(owner, repo, sn, e.cfg.User); err != nil {
+				if err := e.client.SeedLabels(owner, repo, sn, e.lockIdentity()); err != nil {
 					e.logf(0, "warn", "label seeding for %s failed (non-fatal): %v\n", ownerRepo, err)
 				}
 			}

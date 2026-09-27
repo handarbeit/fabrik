@@ -290,7 +290,7 @@ func (e *Engine) runStartupTransientLabelScan() {
 	for _, l := range transientLifecycleLabels {
 		transientSet[l] = true
 	}
-	lockLabel := fmt.Sprintf("fabrik:locked:%s", e.cfg.User)
+	lockLabel := e.lockLabel()
 
 	var items []gh.ProjectItem
 	for _, snap := range snaps {

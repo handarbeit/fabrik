@@ -3,6 +3,7 @@ package cmd
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -885,5 +886,51 @@ func TestExecute_MaxNoOpCommentCyclesEnvInvalidValue(t *testing.T) {
 	cfg := executeWithConfigHook(t)
 	if cfg.MaxNoOpCommentCycles != 0 {
 		t.Errorf("cfg.MaxNoOpCommentCycles = %d, want 0 (invalid env value falls back to default)", cfg.MaxNoOpCommentCycles)
+	}
+}
+
+// #1893 R1/R8: GitHub App auth needs no user and no token; PAT mode still
+// requires user.
+func TestExecute_AppAuth_NoUserNoTokenStarts(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	resetFlags()
+	t.Setenv("FABRIK_USER", "")
+	t.Setenv("FABRIK_TOKEN", "")
+	t.Setenv("GITHUB_TOKEN", "")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--stages", stagesDir,
+		"--github-app-id", "1", "--github-app-private-key-path", "/k.pem", "--github-app-installation-id", "2"}
+
+	cfg := executeWithConfigHook(t)
+	if cfg.User != "" || cfg.Token != "" {
+		t.Errorf("user=%q token=%q, want both empty", cfg.User, cfg.Token)
+	}
+}
+
+func TestExecute_AppAuth_ConfiguredUserIsTolerated(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir,
+		"--github-app-id", "1", "--github-app-private-key-path", "/k.pem", "--github-app-installation-id", "2"}
+
+	cfg := executeWithConfigHook(t)
+	if cfg.User != "u" {
+		t.Errorf("cfg.User = %q, want u to pass through (engine.New ignores it)", cfg.User)
+	}
+}
+
+func TestExecute_PATMode_StillRequiresUser(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	resetFlags()
+	t.Setenv("FABRIK_USER", "")
+	t.Setenv("GITHUB_TOKEN", "tok")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--stages", stagesDir}
+
+	err := Execute()
+	if err == nil || !strings.Contains(err.Error(), "user is required") {
+		t.Fatalf("err = %v, want 'user is required'", err)
 	}
 }
