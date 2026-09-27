@@ -380,8 +380,9 @@ Plan and Implement should be a one-commit change.
 // marker (SLOW_CI_LONG_SECONDS in fabrik-test-alpha's ci.yml).
 const slowGateLongDuration = 25 * time.Minute
 
-// slowGateOnPRHead returns the most recent "slow-gate" check run on the PR's
-// current head commit. ok is false when there is none.
+// slowGateOnPRHead returns the "slow-gate" check run on the PR's current head
+// commit that the CI gate is waiting on: an in-flight one if any, else the most
+// recently started. ok is false when there is none.
 func slowGateOnPRHead(env *Env, repo string, prNumber int) (run CheckRunTiming, ok bool, err error) {
 	sha, err := prHeadSHA(env, repo, prNumber)
 	if err != nil {
@@ -394,6 +395,15 @@ func slowGateOnPRHead(env *Env, repo string, prNumber int) (run CheckRunTiming, 
 	runs, err := parseCheckRunTimings([]byte(out))
 	if err != nil {
 		return CheckRunTiming{}, false, err
+	}
+	// An in-flight run (a re-run on the same SHA, possibly still queued with a
+	// zero StartedAt) is the one the engine's gate waits on — prefer it over
+	// latestRunNamed's latest-started pick, which would favour a stale
+	// completed run.
+	for _, r := range runs {
+		if r.Name == "slow-gate" && r.Status != "completed" {
+			return r, true, nil
+		}
 	}
 	run, ok = latestRunNamed(runs, "slow-gate")
 	return run, ok, nil
