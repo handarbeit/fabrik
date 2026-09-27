@@ -236,6 +236,26 @@ func PrepareMemberExactPath(t *testing.T, env *Env, repo, baseBranch, marker, pa
 	return issueNum, prNum, itemID
 }
 
+// AdvanceBaseBranch commits one new file (path, content) directly onto
+// baseBranch via the Contents API, moving the base past every member PR created
+// before the call. A member queued afterwards is therefore never eligible for
+// the singleton fast path — the engine refuses it when "pinned base is N
+// commit(s) ahead of the member's head" (engine/merge_train.go) — so the train
+// must build a trial. The caller owns path uniqueness across runs (the file
+// persists on the base branch).
+func AdvanceBaseBranch(t *testing.T, env *Env, repo, baseBranch, path, content string) {
+	t.Helper()
+	enc := base64.StdEncoding.EncodeToString([]byte(content))
+	if out, err := ghOutput(env, "api", "--method", "PUT",
+		fmt.Sprintf("repos/%s/contents/%s", repo, path),
+		"-f", "message=e2e: advance "+baseBranch+" so a queued member cannot take the singleton fast path",
+		"-f", "content="+enc,
+		"-f", "branch="+baseBranch); err != nil {
+		t.Fatalf("advance %s on %s with %s: %v\n%s", baseBranch, repo, path, err, out)
+	}
+	t.Logf("advanced %s@%s with %s", repo, baseBranch, path)
+}
+
 // readLogLinesFrom returns every line of the test bed's fabrik.log from offset to
 // EOF, for callers that must reason about line ORDER within a window (which
 // CountLogLines/WaitForLogLine cannot express). Call it only once the terminal

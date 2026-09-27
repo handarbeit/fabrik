@@ -35,9 +35,16 @@ import (
 // Queuing a member and commenting cannot deterministically produce a DIRECT eject:
 // the batch worker dispatches before the settle scan in the same poll, so a member
 // in the just-formed batch is ejected via the pending-signal route, which a worker on
-// the singleton fast path can miss. So an occupant M1 is queued first; its own PR CI
-// is still pending, so the train builds a trial and holds a worker in flight for the
-// (repo, base) partition for the bed's ~10 min slow-gate. Once the log shows
+// the singleton fast path can miss. So an occupant M1 is queued first and made to
+// build a trial, holding a worker in flight for the (repo, base) partition for the
+// bed's ~10 min slow-gate. A lone, green, up-to-date member takes the singleton fast
+// path and never opens a trial (member-PR CI on the bed is green within about a
+// minute; only trial branches are slow), so M1's PR is prepared first, main is then
+// advanced by one unrelated commit (AdvanceBaseBranch), and only then is M1 queued:
+// its head is no longer a fast-forward of the pinned base, so the engine must build
+// a trial (engine/merge_train.go: "pinned base is N commit(s) ahead of the member's
+// head"). The first live run of this scenario failed exactly here, waiting 25 min
+// for a trial the fast path had skipped. Once the log shows
 // `opened draft CI PR … (1 survivor(s))`, M2 is queued and commented on. M2 is never
 // in the fixed batch, dispatch skips, and the settle scan ejects it directly. The
 // scenario fails loudly ("occupant window closed") if M2 ever appears in a batch
@@ -95,11 +102,20 @@ func TestQueuedMemberCommentEjection(t *testing.T) {
 	SubmitPRReview(t, env, reviewerToken, repo, m2PR, "APPROVE")
 
 	// --- Queue the occupant M1 and wait for its trial to be in flight. ---
+	m1, m1PR, m1Item := PrepareMemberExactPath(t, env, repo, base, "ce-m1",
+		fmt.Sprintf("e2e/train/entries/comment-eject-m1-%s.txt", stamp), "comment-eject occupant M1\n")
+	// Move main past M1's head so M1 cannot take the singleton fast path.
+	AdvanceBaseBranch(t, env, repo, base,
+		fmt.Sprintf("e2e/train/entries/comment-eject-basebump-%s.txt", stamp), "base bump for the comment-eject occupant\n")
 	offset := LogOffset(t, env)
-	m1, m1PR := QueueMember(t, env, repo, base, "ce-m1", "e2e/train/entries/comment-eject-m1.txt", "comment-eject occupant M1\n")
+	SetIssueStatus(t, env, m1Item, "Queued")
 	t.Logf("occupant M1 = #%d (PR #%d), member under test M2 = #%d (PR #%d)", m1, m1PR, m2, m2PR)
 
+	fastPathTaken := fmt.Sprintf("singleton fast path taken for #%d:", m1)
 	isM1Trial := func(l string) bool {
+		if strings.Contains(l, fastPathTaken) {
+			t.Fatalf("occupant M1 #%d took the singleton fast path despite the base bump, so no trial will open: %s", m1, strings.TrimSpace(l))
+		}
 		_, survivors, ok := parseOpenedDraftCI(l, repo)
 		return ok && survivors == 1
 	}
