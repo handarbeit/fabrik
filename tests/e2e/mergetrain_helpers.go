@@ -159,9 +159,17 @@ func createMemberPRBody(t *testing.T, env *Env, repo, baseBranch, branch, path, 
 		t.Fatalf("write %s on %s@%s: %v\n%s", path, repo, branch, err, out)
 	}
 
+	// Every harness-made fixture PR opts out of the bed's real reviewer:
+	// these scenarios drive all review activity themselves (FABRIK_REVIEWER_TOKEN)
+	// and assert on exact review counts, cycles or batch membership, which an
+	// incidental Pruefer review perturbed in the 0.0.83 gate. Scenarios that
+	// need a real review use engine-created pipeline PRs, which stay unlabelled.
+	// ensureEngineLabelExists never deletes the label, since parallel scenarios
+	// share it and deleting a label strips it from every PR.
+	ensureEngineLabelExists(t, env, repo, prueferIgnoreLabel)
 	args := []string{"pr", "create", "-R", repo,
 		"--base", baseBranch, "--head", branch,
-		"--title", issueTitle, "--body", body}
+		"--title", issueTitle, "--body", body, "--label", prueferIgnoreLabel}
 	if draft {
 		args = append(args, "--draft")
 	}
@@ -235,6 +243,10 @@ func PrepareMemberExactPath(t *testing.T, env *Env, repo, baseBranch, marker, pa
 	t.Logf("prepared member %s: issue #%d, PR #%d, path %s (not yet Queued)", marker, issueNum, prNum, path)
 	return issueNum, prNum, itemID
 }
+
+// prueferIgnoreLabel is Pruefer's built-in opt-out (pruefer.IgnoreLabel), put
+// on every harness-made fixture PR by createMemberPRBody.
+const prueferIgnoreLabel = "pruefer:ignore"
 
 // AdvanceBaseBranch commits one new file (path, content) directly onto
 // baseBranch via the Contents API, moving the base past every member PR created

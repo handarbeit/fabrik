@@ -1145,6 +1145,17 @@ reviews existed, before the 3-poll negative hold.
 
 ### Reviewer topology (#1396)
 
+**Fixture PRs opt out of Pruefer.** Every PR the harness creates itself
+(`createMemberPRBody`: merge-train members, review-authority and expected-reviewers
+seeds, and the other fixture scenarios) carries the `pruefer:ignore` label, Pruefer's
+built-in opt-out. Those scenarios drive every review themselves through
+`FABRIK_REVIEWER_TOKEN` and assert on exact review counts, cycles or batch membership.
+In the 0.0.83 gate an incidental Pruefer review perturbed two of them: a reasonable
+duplicate-fixture finding ejected batch-cap members, and a `COMMENTED` review spent a
+review cycle. Scenarios that need a real review use engine-created pipeline PRs, which
+stay unlabelled. The label only takes effect once the bed's Pruefer runs a build that
+honours it, or has `excluded_labels: [pruefer:ignore]` in its config.
+
 Every scenario that drives a PR through the organic Review gate depends on
 some external actor actually submitting a review. As of #1396, the bed's
 reviewer topology is:

@@ -45,6 +45,17 @@ const (
 	SkipCadenceOnRequest SkipReason = "cadence=on-request: no /pruefer review command pending"
 )
 
+// IgnoreLabel is the built-in opt-out: a PR carrying it is never reviewed, on
+// any watched repo, with no configuration. It lets whoever creates a PR say
+// "no automated review here" (e2e fixtures whose scenarios control every
+// review themselves, generated or vendored changes, experiments) without
+// editing Pruefer's config. excluded_labels remains for deployment-specific
+// additions.
+const IgnoreLabel = "pruefer:ignore"
+
+// SkipIgnoreLabel is reported for a PR labelled IgnoreLabel.
+const SkipIgnoreLabel SkipReason = "labelled " + IgnoreLabel
+
 // EligibilityInput bundles everything Eligible needs to decide whether a PR
 // should be reviewed.
 type EligibilityInput struct {
@@ -87,6 +98,11 @@ func Eligible(in EligibilityInput) (bool, SkipReason) {
 	for _, a := range in.ExcludedAuthors {
 		if strings.EqualFold(a, in.PR.Author) {
 			return false, SkipExcludedAuthor
+		}
+	}
+	for _, prLabel := range in.PR.Labels {
+		if strings.EqualFold(prLabel, IgnoreLabel) {
+			return false, SkipIgnoreLabel
 		}
 	}
 	for _, l := range in.ExcludedLabels {

@@ -87,6 +87,31 @@ func TestEligible(t *testing.T) {
 			wantOK: true,
 		},
 		{
+			name: "built-in pruefer:ignore is skipped with no excluded_labels configured",
+			in: EligibilityInput{
+				PR: gh.PRDetails{Author: "alice", HeadSHA: "sha1", Labels: []string{"docs", "pruefer:ignore"}},
+			},
+			wantOK:     false,
+			wantReason: SkipIgnoreLabel,
+		},
+		{
+			name: "pruefer:ignore matches case-insensitively",
+			in: EligibilityInput{
+				PR: gh.PRDetails{Author: "alice", HeadSHA: "sha1", Labels: []string{"Pruefer:Ignore"}},
+			},
+			wantOK:     false,
+			wantReason: SkipIgnoreLabel,
+		},
+		{
+			name: "pruefer:ignore is not bypassed by a forced review",
+			in: EligibilityInput{
+				PR:          gh.PRDetails{Author: "alice", HeadSHA: "sha1", Labels: []string{"pruefer:ignore"}},
+				ForceReview: true,
+			},
+			wantOK:     false,
+			wantReason: SkipIgnoreLabel,
+		},
+		{
 			name: "excluded path: all touched paths match is skipped",
 			in: EligibilityInput{
 				PR:            gh.PRDetails{Author: "alice", HeadSHA: "sha1"},
