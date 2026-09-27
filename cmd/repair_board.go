@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -63,12 +64,24 @@ func runRepairBoard(args []string) error {
 		return fmt.Errorf("repair-board: loading stage configs from %s: %w", stagesDir, err)
 	}
 
-	token, err := loadGitHubToken(*tokenFlag)
-	if err != nil {
-		return err
-	}
 	ghesHost := resolveGHESHost(*ghesHostFlag, pc)
-	client := newBoardGHClient(token, ghesHost)
+	// An explicit --token wins; otherwise a fully-configured GitHub App
+	// authenticates (an App-only deployment has no PAT — #1893, R5), and only
+	// then does the PAT lookup run.
+	var client *gh.Client
+	if *tokenFlag == "" {
+		client, err = appBoardClient(context.Background(), pc.Owner, pc, ghesHost)
+		if err != nil {
+			return fmt.Errorf("repair-board: %w", err)
+		}
+	}
+	if client == nil {
+		token, err := loadGitHubToken(*tokenFlag)
+		if err != nil {
+			return err
+		}
+		client = newBoardGHClient(token, ghesHost)
+	}
 
 	return repairBoardCore(client, pc.Owner, pc.Repo, *pc.ProjectNum, pc.OwnerType, allStages, *apply, os.Stdout)
 }

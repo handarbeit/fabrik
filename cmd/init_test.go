@@ -1177,3 +1177,32 @@ func TestCreateBoardCore_PostCreateFailureNamesTheOrphanedBoard(t *testing.T) {
 		}
 	}
 }
+
+func TestShouldPromptForUser(t *testing.T) {
+	pat := configValues{Owner: "o", Project: "1"}
+	app := configValues{Owner: "o", Project: "1", GitHubAppID: 1, GitHubAppInstallationID: 2, GitHubAppPrivateKeyPath: "/k.pem"}
+	if !shouldPromptForUser(pat, true) {
+		t.Error("PAT flow on a TTY must prompt for a user")
+	}
+	if shouldPromptForUser(pat, false) {
+		t.Error("no TTY: never prompt")
+	}
+	if shouldPromptForUser(configValues{Owner: "o", User: "u"}, true) {
+		t.Error("user already given: never prompt")
+	}
+	if shouldPromptForUser(app, true) {
+		t.Error("GitHub App flow must not prompt for a user (#1893)")
+	}
+}
+
+func TestBuildConfigWithValues_AppFlowLeavesUserCommented(t *testing.T) {
+	out := buildConfigWithValues(configValues{Owner: "o", Project: "1", GitHubAppID: 1, GitHubAppPrivateKeyPath: "/k.pem", GitHubAppInstallationID: 2})
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "user:") {
+			t.Errorf("App-mode config must not write a user: line, got %q", line)
+		}
+	}
+	if !strings.Contains(out, "# user: your-github-username") || !strings.Contains(out, "Required in PAT mode") {
+		t.Error("template must document user as PAT-mode only")
+	}
+}

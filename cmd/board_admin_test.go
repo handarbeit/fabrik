@@ -1,9 +1,11 @@
 package cmd
 
 import (
+	"context"
 	"strings"
 	"testing"
 
+	"github.com/handarbeit/fabrik/config"
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/stages"
 )
@@ -99,5 +101,31 @@ func TestMissingStageColumns_NilStatusField(t *testing.T) {
 	got := missingStageColumns([]string{"Specify", "Research"}, nil)
 	if len(got) != 2 {
 		t.Fatalf("got %v, want everything missing when sf is nil", got)
+	}
+}
+
+// #1893 R5: an App-only deployment (no PAT) can run repair-board; a missing,
+// partial or GHES-incompatible App configuration is decided before any network call.
+func TestAppBoardClient_ConfigResolution(t *testing.T) {
+	t.Setenv("FABRIK_GITHUB_APP_ID", "")
+	t.Setenv("FABRIK_GITHUB_APP_PRIVATE_KEY_PATH", "")
+	t.Setenv("FABRIK_GITHUB_APP_INSTALLATION_ID", "")
+
+	c, err := appBoardClient(context.Background(), "org", config.ProjectConfig{}, "")
+	if c != nil || err != nil {
+		t.Errorf("no App config: got (%v, %v), want (nil, nil) so the caller falls back to the PAT path", c, err)
+	}
+
+	id := int64(1)
+	_, err = appBoardClient(context.Background(), "org", config.ProjectConfig{GitHubAppID: &id}, "")
+	if err == nil || !strings.Contains(err.Error(), "partially configured") {
+		t.Errorf("partial config: err = %v", err)
+	}
+
+	inst := int64(2)
+	full := config.ProjectConfig{GitHubAppID: &id, GitHubAppPrivateKeyPath: "/k.pem", GitHubAppInstallationID: &inst}
+	_, err = appBoardClient(context.Background(), "org", full, "ghe.example.com")
+	if err == nil || !strings.Contains(err.Error(), "Enterprise Server") {
+		t.Errorf("GHES + App: err = %v", err)
 	}
 }

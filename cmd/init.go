@@ -39,7 +39,9 @@ const configYAMLTemplate = `# .fabrik/config.yaml — project-level configuratio
 # Required: GitHub project number (the number in the project URL)
 # project: 1
 
-# Required: Your GitHub username (Fabrik only processes issues assigned to you)
+# Required in PAT mode: Your GitHub username. Not needed under GitHub App
+# authentication (github_app_*), where the App installation is the identity;
+# if set there it is ignored.
 # user: your-github-username
 
 # Optional settings (defaults shown):
@@ -189,8 +191,9 @@ func writeConfigTemplate(v configValues, force bool) error {
 	switch {
 	case v.Owner != "":
 		// URL-provided (or --create-board/--github-app) flow: owner/project/
-		// ownerType are known; only prompt for user.
-		if v.User == "" && isTTY {
+		// ownerType are known; only prompt for user — and not at all under
+		// GitHub App auth, where the App is the identity (#1893, R1).
+		if shouldPromptForUser(v, isTTY) {
 			v.User = promptForUser()
 		}
 		content = buildConfigWithValues(v)
@@ -213,6 +216,15 @@ func writeConfigTemplate(v configValues, force bool) error {
 	}
 	fmt.Printf("  config: %s\n", configPath)
 	return nil
+}
+
+// shouldPromptForUser reports whether the URL-provided init flow asks for a
+// GitHub username: only on a terminal, only when none was given, and never when
+// the flow resolved GitHub App auth (#1893, R1) — the App installation is the
+// identity there, so there is no operator username to collect.
+func shouldPromptForUser(v configValues, isTTY bool) bool {
+	appAuth := v.GitHubAppID != 0 || v.GitHubAppPrivateKeyPath != "" || v.GitHubAppInstallationID != 0
+	return v.User == "" && isTTY && !appAuth
 }
 
 // promptForUser prompts for a single GitHub username interactively.
@@ -332,7 +344,7 @@ func resolveGitHubAppInitFlagsFromEnv(idFlag *int64, keyPathFlag *string, instal
 func runInit(args []string) error {
 	fset := flag.NewFlagSet("init", flag.ContinueOnError)
 	force := fset.Bool("force", false, "Overwrite existing files")
-	userFlag := fset.String("user", "", "Your GitHub username")
+	userFlag := fset.String("user", "", "Your GitHub username (PAT mode; not needed with --github-app)")
 	ghesHostFlag := fset.String("ghes-host", "", "GitHub Enterprise Server hostname, e.g. github.example.com (also FABRIK_GHES_HOST)")
 	createBoard := fset.Bool("create-board", false, "Create a new GitHub Project (v2) board from the just-extracted stage configs, linked to --owner/--repo. Organization-owned repos only (see #770). Mutually exclusive with the positional <project-url> argument.")
 	ownerFlag := fset.String("owner", "", "GitHub org (owner) to create the board under; required with --create-board and --github-app")
