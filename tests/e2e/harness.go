@@ -2042,8 +2042,11 @@ func ghOutputWithToken(token string, args ...string) (string, error) {
 // SubmitPRReview submits a review on the PR using reviewerToken (a PAT for a
 // non-author identity — GitHub forbids the PR author from approving their own
 // PR). action must be "APPROVE" or "REQUEST_CHANGES" (GitHub API event values).
-// GitHub's API requires a non-empty body for REQUEST_CHANGES/COMMENT (only
-// APPROVE may omit it), so a fixed body is always sent — harmless for APPROVE.
+// GitHub's API requires a non-empty body for REQUEST_CHANGES/COMMENT, so those
+// get a fixed body. APPROVE is sent WITHOUT one: the engine treats any non-empty
+// review body as actionable feedback (#1045) and would re-invoke the stage on it
+// (see the comment in the body below). A test that needs to trace a specific
+// review body through a reinvoke uses SubmitPRReviewID, which always sends one.
 // Fails the test on API error (e.g. 422 if reviewerToken == env.GHToken).
 // Deliberately does NOT go through SubmitPRReviewID: that variant must parse
 // the response to return the review ID, and a response it cannot parse is
@@ -2062,9 +2065,18 @@ func SubmitPRReview(t *testing.T, env *Env, reviewerToken string, repo string, p
 		t.Fatalf("bad repo: %q", repo)
 	}
 	path := fmt.Sprintf("repos/%s/%s/pulls/%d/reviews", owner, name, prNumber)
-	out, err := ghOutputWithToken(reviewerToken, "api", "-X", "POST", path,
-		"-f", "event="+action,
-		"-f", "body=e2e harness review ("+action+")")
+	args := []string{"api", "-X", "POST", path, "-f", "event=" + action}
+	// An APPROVE carries no body. Since #1045 the engine treats any non-empty
+	// review body — APPROVED included — as potentially actionable feedback and
+	// re-invokes the stage on it (engine/reviews.go skips only an empty body).
+	// A harness approval exists to clear the review gate, not to be addressed, and
+	// the reinvoke it caused could claim the item ahead of the scenario under test
+	// (0.0.83 gate run 10, TestCommentLandingGateHolds). GitHub requires a body
+	// for REQUEST_CHANGES and COMMENT, so those keep one.
+	if action != "APPROVE" {
+		args = append(args, "-f", "body=e2e harness review ("+action+")")
+	}
+	out, err := ghOutputWithToken(reviewerToken, args...)
 	if err != nil {
 		t.Fatalf("SubmitPRReview %s on %s PR #%d: %v\n%s", action, repo, prNumber, err, out)
 	}
