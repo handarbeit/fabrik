@@ -2150,21 +2150,22 @@ func (e *Engine) selectDeepFetchCandidates(board *gh.ProjectBoard, repoFilter st
 		// intent: a long-parked item (old baseline) is still never fetched, and a
 		// fresh pause costs at most one or two extra fetches — the fetch itself
 		// re-anchors the baseline to GitHub's own updatedAt.
-		if hasLabel(item.Labels, "fabrik:paused") && !cycleSet[iKey] && !(periodicReeval && recentBaseline) {
-			if admitErr == nil {
+		if hasLabel(item.Labels, "fabrik:paused") && !cycleSet[iKey] {
+			switch {
+			case admitErr != nil:
+				// Not yet in the store (first sighting): fall through and fetch once to
+				// establish a baseline, mirroring the notInStore bypass in the pre-filter above.
+			case periodicReeval && recentBaseline:
+				// Backstop fetch. It must reach GitHub: the board cache judges freshness
+				// by the same masked baseline, so it would otherwise hand back the cached
+				// comments without the reply this fetch exists to find.
+				e.logf(0, "poll", "re-fetching paused item #%d at periodic re-evaluation (recent self-write may have masked a reply)\n", board.Items[i].Number)
+				e.store.Apply(itemstate.DeepFetchInvalidated{Repo: repo, Number: item.Number})
+			default:
 				e.logf(0, "poll", "skipping deep-fetch for paused item #%d (no new activity)\n", board.Items[i].Number)
 				deepFetchCandidates = append(deepFetchCandidates, board.Items[i])
 				continue
 			}
-			// Not yet in the store (first sighting): fall through and fetch once to
-			// establish a baseline, mirroring the notInStore bypass in the pre-filter above.
-		}
-		if hasLabel(item.Labels, "fabrik:paused") && !cycleSet[iKey] && periodicReeval && recentBaseline && admitErr == nil {
-			// The backstop fetch must reach GitHub: the board cache judges freshness
-			// by the same masked baseline, so it would otherwise hand back the cached
-			// comments without the reply this fetch exists to find.
-			e.logf(0, "poll", "re-fetching paused item #%d at periodic re-evaluation (recent self-write may have masked a reply)\n", board.Items[i].Number)
-			e.store.Apply(itemstate.DeepFetchInvalidated{Repo: repo, Number: item.Number})
 		}
 		if c := e.cache(); c != nil && !c.IsPaused() && c.IsItemCacheFresh(board.Items[i].Repo, board.Items[i].Number, board.Items[i].UpdatedAt) {
 			e.logf(0, "poll", "reading details for #%d from cache\n", board.Items[i].Number)
