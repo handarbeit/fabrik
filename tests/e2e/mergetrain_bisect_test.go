@@ -3,6 +3,8 @@
 package e2e
 
 import (
+	"fmt"
+	"slices"
 	"testing"
 	"time"
 )
@@ -38,10 +40,40 @@ func TestMergeTrainBisectionEjectsPoisoner(t *testing.T) {
 	const base = "main"
 	logStart := LogOffset(t, env)
 
-	clean1Issue, clean1PR := QueueMember(t, env, env.RepoAlpha, base, "clean1", "e2e/train/entries/clean1.txt", "clean entry 1\n")
-	clean2Issue, clean2PR := QueueMember(t, env, env.RepoAlpha, base, "clean2", "e2e/train/entries/clean2.txt", "clean entry 2\n")
-	poisonIssue, _ := QueueMember(t, env, env.RepoAlpha, base, "poison", "e2e/train/entries/poison.txt", "POISON — this member fails the combined check\n")
-	t.Logf("queued 2 clean (#%d,#%d) + 1 poison (#%d); awaiting bisection", clean1Issue, clean2Issue, poisonIssue)
+	// Prepare all three, then queue them back to back: queuing each as it is
+	// created (QueueMember) let the train form a batch from the two clean members
+	// before the poisoner was Queued. That batch was green and landed, the
+	// poisoner went through alone, and nothing was ever bisected (0.0.83 gate run
+	// 9). Paths are unique per run (a landed batch merges its files into main) and
+	// stay under e2e/train/entries/, which the poison guard scans.
+	stamp := time.Now().UTC().Format("20060102-150405")
+	clean1Issue, clean1PR, clean1Item := PrepareMemberExactPath(t, env, env.RepoAlpha, base, "clean1",
+		fmt.Sprintf("e2e/train/entries/clean1-%s.txt", stamp), "clean entry 1\n")
+	clean2Issue, clean2PR, clean2Item := PrepareMemberExactPath(t, env, env.RepoAlpha, base, "clean2",
+		fmt.Sprintf("e2e/train/entries/clean2-%s.txt", stamp), "clean entry 2\n")
+	poisonIssue, _, poisonItem := PrepareMemberExactPath(t, env, env.RepoAlpha, base, "poison",
+		fmt.Sprintf("e2e/train/entries/poison-%s.txt", stamp), "POISON — this member fails the combined check\n")
+
+	placeOffset := LogOffset(t, env)
+	for _, item := range []string{clean1Item, clean2Item, poisonItem} {
+		SetIssueStatus(t, env, item, "Queued")
+	}
+	t.Logf("queued 2 clean (#%d,#%d) + 1 poison (#%d) together; verifying batch composition", clean1Issue, clean2Issue, poisonIssue)
+
+	// The first batch must contain all three. Other parallel RepoAlpha scenarios may
+	// add members of their own, so this is a containment check, not an exact one.
+	waitForLogLineOrFail(t, env, logBatchSnapshot+env.RepoAlpha+": ", nil, placeOffset, 10*time.Minute)
+	snapshot, ok := firstSnapshotForRepo(readLogLinesFrom(t, env, placeOffset), env.RepoAlpha)
+	if !ok {
+		t.Fatalf("batch snapshot line for %s vanished after being observed", env.RepoAlpha)
+	}
+	for _, n := range []int{clean1Issue, clean2Issue, poisonIssue} {
+		if !slices.Contains(snapshot, n) {
+			t.Fatalf("fixture: first batch snapshot for %s listed %v, missing #%d — a partial batch formed before all three "+
+				"members were Queued, so there may be nothing to bisect. Not an engine regression; re-run", env.RepoAlpha, snapshot, n)
+		}
+	}
+	t.Logf("first batch %v contains all three members; awaiting bisection", snapshot)
 
 	// Bisection must run (combined batch is red) — the strongest internal signal.
 	WaitForLogLine(t, env, "bisecting to isolate the poisoner", logStart, 25*time.Minute)
