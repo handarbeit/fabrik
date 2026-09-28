@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	ghapi "github.com/handarbeit/fabrik/github"
 )
 
 // TestMergeTrainSingletonFastPathLandsExactlyOnce is the live regression check for
@@ -73,12 +75,25 @@ func TestMergeTrainSingletonFastPathLandsExactlyOnce(t *testing.T) {
 			conclusions, mergeState = cs, ms
 		}
 		if cerr == nil && merr == nil && len(cs) > 0 && allSuccess(cs) && (ms == "clean" || ms == "unstable") {
-			break
+			// The engine also holds the fast path while any check suite on the head is
+			// outstanding (#1822, ciSuiteHold) — including a run-less suite younger
+			// than the post-push dwell, such as the bed's inert "claude" App suite.
+			// Queuing before that clears sends the member down the trial path.
+			out, serr := outstandingSuitesOnPRHead(env, env.RepoAlpha, pr)
+			if serr != nil {
+				t.Logf("transient error reading check suites of PR #%d: %v (will retry)", pr, serr)
+			} else if len(out) == 0 {
+				break
+			} else {
+				t.Logf("PR #%d check runs green but %d check suite(s) still outstanding (e.g. %s %s, %d run(s)) — waiting",
+					pr, len(out), out[0].AppSlug, out[0].Status, out[0].LatestCheckRunsCount)
+			}
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("member PR #%d never became fast-path eligible within 10m (check runs %v, mergeable_state %q) — "+
-				"the fast path needs at least one completed green check run and a clean/unstable PR; "+
-				"check the bed's branch protection and the train-poison-guard workflow", pr, conclusions, mergeState)
+				"the fast path needs at least one completed green check run, a clean/unstable PR and no outstanding "+
+				"check suite (a run-less suite counts until it is older than the post-push dwell); check the bed's "+
+				"branch protection, the train-poison-guard workflow and any App that leaves a suite in progress", pr, conclusions, mergeState)
 		}
 		time.Sleep(10 * time.Second)
 	}
@@ -119,4 +134,27 @@ func allSuccess(conclusions []string) bool {
 		}
 	}
 	return true
+}
+
+// fastPathSuiteDwell is the engine's default post-push dwell (defaultPostPushDwell,
+// engine/ci_suites.go) plus a margin for the engine's own poll timing. The bed
+// does not override the dwell.
+const fastPathSuiteDwell = 90*time.Second + 30*time.Second
+
+// outstandingSuitesOnPRHead applies the engine's own suite rule
+// (ghapi.OutstandingCheckSuites) to the PR's current head.
+func outstandingSuitesOnPRHead(env *Env, repo string, prNumber int) ([]ghapi.CheckSuite, error) {
+	sha, err := prHeadSHA(env, repo, prNumber)
+	if err != nil {
+		return nil, err
+	}
+	owner, name, ok := strings.Cut(repo, "/")
+	if !ok {
+		return nil, fmt.Errorf("repo %q is not owner/name", repo)
+	}
+	suites, err := ghapi.NewClient(env.GHToken).FetchCheckSuites(owner, name, sha)
+	if err != nil {
+		return nil, err
+	}
+	return ghapi.OutstandingCheckSuites(suites, time.Now(), fastPathSuiteDwell), nil
 }
