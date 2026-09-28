@@ -233,6 +233,40 @@ func TestNew(t *testing.T) {
 	}
 }
 
+// TestNew_RoutesClaudeLogToLogFile (#1939): claudeLog lines must reach the
+// persistent log file in plain-text (-notui) mode too, where SetEvents is never
+// called. Before the fix claudeLogf stayed nil there and "[#N claude] invoking"
+// went only to stderr, invisible to anything reading .fabrik/fabrik.log.
+func TestNew_RoutesClaudeLogToLogFile(t *testing.T) {
+	skipIfNoGit(t)
+	origSupported := claudeNameFlagSupported
+	origLogf := claudeLogf
+	defer func() { claudeNameFlagSupported = origSupported; claudeLogf = origLogf }()
+	t.Setenv("PATH", t.TempDir())
+	claudeLogf = nil
+
+	eng, err := New(Config{Owner: "o", Repo: "r", Token: "tok"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	f, err := os.CreateTemp(t.TempDir(), "fabrik.log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	eng.logFile = f
+
+	claudeLog(7, "claude", "invoking (%s) in %s\n", "Validate", "/tmp/wt")
+
+	got, err := os.ReadFile(f.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "[#7 claude] invoking (Validate) in /tmp/wt") {
+		t.Errorf("claudeLog line missing from the engine log file; got %q", got)
+	}
+}
+
 // TestNew_PartialGitHubAppConfigWithHookdeckReportsSpecificError verifies
 // the ordering PR review flagged on #1142: validateGitHubAppConfig must run
 // before RefuseHookdeckWithoutGitHubApp, so a partially-configured GitHub

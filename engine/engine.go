@@ -633,6 +633,15 @@ func New(cfg Config) (*Engine, error) {
 	cacheLogFn := func(format string, args ...any) { eng.logf(0, "cache", format, args...) }
 	eng.readClient = boardcache.NewCacheImpl(adapter, sharedStore, cacheLogFn)
 
+	// Route claudeLog through the engine's logger in every mode, not only once
+	// SetEvents wires the TUI (#1939). In plain-text (-notui) mode claudeLogf
+	// used to stay nil, so every claudeLog line — "invoking", the kill/reap
+	// notices, max_wall_time/idle kills, session expiry — went to raw stderr and
+	// never reached .fabrik/fabrik.log. Set here in New() only: NewWithDeps
+	// builds many engines concurrently in tests, where writing this package
+	// global would race.
+	claudeLogf = eng.logf
+
 	return eng, nil
 }
 
