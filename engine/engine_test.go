@@ -198,7 +198,17 @@ func TestNewWithDeps(t *testing.T) {
 	}
 }
 
+// preserveClaudeLogf restores the package-global claudeLogf when the test ends.
+// New() points it at the engine it builds (#1939), so every test that calls
+// New() must use this or leave later tests logging through a dead engine.
+func preserveClaudeLogf(t *testing.T) {
+	t.Helper()
+	orig := claudeLogf
+	t.Cleanup(func() { claudeLogf = orig })
+}
+
 func TestNew(t *testing.T) {
+	preserveClaudeLogf(t)
 	skipIfNoGit(t)
 	// New() runs the real claudeNameFlagSupported probe. Save/restore so the
 	// result doesn't leak into later tests in this package's test binary, and
@@ -240,8 +250,8 @@ func TestNew(t *testing.T) {
 func TestNew_RoutesClaudeLogToLogFile(t *testing.T) {
 	skipIfNoGit(t)
 	origSupported := claudeNameFlagSupported
-	origLogf := claudeLogf
-	defer func() { claudeNameFlagSupported = origSupported; claudeLogf = origLogf }()
+	defer func() { claudeNameFlagSupported = origSupported }()
+	preserveClaudeLogf(t)
 	t.Setenv("PATH", t.TempDir())
 	claudeLogf = nil
 
@@ -256,13 +266,13 @@ func TestNew_RoutesClaudeLogToLogFile(t *testing.T) {
 	defer f.Close()
 	eng.logFile = f
 
-	claudeLog(7, "claude", "invoking (%s) in %s\n", "Validate", "/tmp/wt")
+	claudeLog(7, "claude", "invoking (%s) in %s\n", "Validate", "worktree-dir")
 
 	got, err := os.ReadFile(f.Name())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(got), "[#7 claude] invoking (Validate) in /tmp/wt") {
+	if !strings.Contains(string(got), "[#7 claude] invoking (Validate) in worktree-dir") {
 		t.Errorf("claudeLog line missing from the engine log file; got %q", got)
 	}
 }
@@ -277,6 +287,7 @@ func TestNew_RoutesClaudeLogToLogFile(t *testing.T) {
 // (gitHubAppAuthConfigured requires all three fields), but only one names
 // the actual fix.
 func TestNew_PartialGitHubAppConfigWithHookdeckReportsSpecificError(t *testing.T) {
+	preserveClaudeLogf(t)
 	skipIfNoGit(t)
 	origSupported := claudeNameFlagSupported
 	defer func() { claudeNameFlagSupported = origSupported }()
@@ -299,6 +310,7 @@ func TestNew_PartialGitHubAppConfigWithHookdeckReportsSpecificError(t *testing.T
 }
 
 func TestNew_WiresMergeStrategy(t *testing.T) {
+	preserveClaudeLogf(t)
 	skipIfNoGit(t)
 	// See TestNew: save/restore claudeNameFlagSupported and isolate PATH so
 	// the real probe New() runs is deterministic and fast rather than
@@ -334,6 +346,7 @@ func TestNew_WiresMergeStrategy(t *testing.T) {
 // A shared/aliased client here would silently misdirect fabrik upgrade's
 // release lookup at the customer's GHES instance instead of github.com.
 func TestNew_GHESHost_ReleaseClientStaysOnGithubCom(t *testing.T) {
+	preserveClaudeLogf(t)
 	skipIfNoGit(t)
 	origSupported := claudeNameFlagSupported
 	defer func() { claudeNameFlagSupported = origSupported }()
