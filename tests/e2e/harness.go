@@ -2062,9 +2062,18 @@ func SubmitPRReview(t *testing.T, env *Env, reviewerToken string, repo string, p
 		t.Fatalf("bad repo: %q", repo)
 	}
 	path := fmt.Sprintf("repos/%s/%s/pulls/%d/reviews", owner, name, prNumber)
-	out, err := ghOutputWithToken(reviewerToken, "api", "-X", "POST", path,
-		"-f", "event="+action,
-		"-f", "body=e2e harness review ("+action+")")
+	args := []string{"api", "-X", "POST", path, "-f", "event=" + action}
+	// An APPROVE carries no body. Since #1045 the engine treats any non-empty
+	// review body — APPROVED included — as potentially actionable feedback and
+	// re-invokes the stage on it (engine/reviews.go skips only an empty body).
+	// A harness approval exists to clear the review gate, not to be addressed, and
+	// the reinvoke it caused could claim the item ahead of the scenario under test
+	// (0.0.83 gate run 10, TestCommentLandingGateHolds). GitHub requires a body
+	// for REQUEST_CHANGES and COMMENT, so those keep one.
+	if action != "APPROVE" {
+		args = append(args, "-f", "body=e2e harness review ("+action+")")
+	}
+	out, err := ghOutputWithToken(reviewerToken, args...)
 	if err != nil {
 		t.Fatalf("SubmitPRReview %s on %s PR #%d: %v\n%s", action, repo, prNumber, err, out)
 	}
