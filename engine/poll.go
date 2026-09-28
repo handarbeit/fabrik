@@ -2083,6 +2083,10 @@ func (e *Engine) selectDeepFetchCandidates(board *gh.ProjectBoard, repoFilter st
 				e.logf(item.Number, "poll", "terminal flag cleared (status drifted to %q)\n", item.Status)
 			}
 		}
+		// periodicReeval is true when this poll admits the item only because its
+		// periodic-re-eval cooldown expired. The paused deep-fetch skip below honours
+		// it (#1944): see the comment there.
+		var periodicReeval bool
 		if !cycleSet[iKey] {
 			stage := stages.FindStage(e.cfg.Stages, item.Status)
 			isCleanup := stage != nil && stage.CleanupWorktree
@@ -2104,7 +2108,13 @@ func (e *Engine) selectDeepFetchCandidates(board *gh.ProjectBoard, repoFilter st
 			if !isCleanup && !hasAwaitingLabel && !hasExpiredCooldown && !notInStore {
 				continue // no state change, no bypass — skip this cycle
 			}
+			periodicReeval = hasExpiredCooldown
 		}
+		// recentBaseline: the item's staleness baseline moved within the last two
+		// recheck intervals — the only window in which a self-write (#1090) can have
+		// masked a concurrent human comment. See the paused skip below (#1944).
+		recentBaseline := admitErr == nil &&
+			e.now().Sub(admitSnap.State().LastSeenSourceUpdatedAt) < 2*e.githubRecheckInterval()
 		if !e.itemMayNeedWork(board.Items[i]) {
 			continue
 		}
@@ -2129,14 +2139,33 @@ func (e *Engine) selectDeepFetchCandidates(board *gh.ProjectBoard, repoFilter st
 		// consumers that only need list membership — runValidatePRTerminalAdvance's
 		// merged-while-paused self-heal (ADR-056 D2) and settleRevalidateScan's FR-5
 		// guarantee — are unaffected; only the FetchItemDetails call itself is skipped.
+		//
+		// Backstop (#1944): a paused item admitted by the periodic re-evaluation IS
+		// fetched while its staleness baseline is recent. cycleSet can miss a genuine
+		// change — the self-write baseline (SelfWriteObserved, #1090) is the local
+		// clock at the engine's own write, so a human comment landing within about a
+		// second of it (typically a reply to the pause comment itself) reads as
+		// already seen. Without this nothing ever refreshed item.Comments and the
+		// resume comment (ADR-1813) was lost for good. Cost stays within #1379's
+		// intent: a long-parked item (old baseline) is still never fetched, and a
+		// fresh pause costs at most one or two extra fetches — the fetch itself
+		// re-anchors the baseline to GitHub's own updatedAt.
 		if hasLabel(item.Labels, "fabrik:paused") && !cycleSet[iKey] {
-			if admitErr == nil {
+			switch {
+			case admitErr != nil:
+				// Not yet in the store (first sighting): fall through and fetch once to
+				// establish a baseline, mirroring the notInStore bypass in the pre-filter above.
+			case periodicReeval && recentBaseline:
+				// Backstop fetch. It must reach GitHub: the board cache judges freshness
+				// by the same masked baseline, so it would otherwise hand back the cached
+				// comments without the reply this fetch exists to find.
+				e.logf(0, "poll", "re-fetching paused item #%d at periodic re-evaluation (recent self-write may have masked a reply)\n", board.Items[i].Number)
+				e.store.Apply(itemstate.DeepFetchInvalidated{Repo: repo, Number: item.Number})
+			default:
 				e.logf(0, "poll", "skipping deep-fetch for paused item #%d (no new activity)\n", board.Items[i].Number)
 				deepFetchCandidates = append(deepFetchCandidates, board.Items[i])
 				continue
 			}
-			// Not yet in the store (first sighting): fall through and fetch once to
-			// establish a baseline, mirroring the notInStore bypass in the pre-filter above.
 		}
 		if c := e.cache(); c != nil && !c.IsPaused() && c.IsItemCacheFresh(board.Items[i].Repo, board.Items[i].Number, board.Items[i].UpdatedAt) {
 			e.logf(0, "poll", "reading details for #%d from cache\n", board.Items[i].Number)
