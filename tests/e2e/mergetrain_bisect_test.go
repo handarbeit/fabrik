@@ -5,6 +5,7 @@ package e2e
 import (
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -40,25 +41,36 @@ func TestMergeTrainBisectionEjectsPoisoner(t *testing.T) {
 	const base = "main"
 	logStart := LogOffset(t, env)
 
-	// Prepare all three, then queue them back to back: queuing each as it is
-	// created (QueueMember) let the train form a batch from the two clean members
-	// before the poisoner was Queued. That batch was green and landed, the
-	// poisoner went through alone, and nothing was ever bisected (0.0.83 gate run
-	// 9). Paths are unique per run (a landed batch merges its files into main) and
-	// stay under e2e/train/entries/, which the poison guard scans.
-	stamp := time.Now().UTC().Format("20060102-150405")
-	clean1Issue, clean1PR, clean1Item := PrepareMemberExactPath(t, env, env.RepoAlpha, base, "clean1",
-		fmt.Sprintf("e2e/train/entries/clean1-%s.txt", stamp), "clean entry 1\n")
-	clean2Issue, clean2PR, clean2Item := PrepareMemberExactPath(t, env, env.RepoAlpha, base, "clean2",
-		fmt.Sprintf("e2e/train/entries/clean2-%s.txt", stamp), "clean entry 2\n")
-	poisonIssue, _, poisonItem := PrepareMemberExactPath(t, env, env.RepoAlpha, base, "poison",
-		fmt.Sprintf("e2e/train/entries/poison-%s.txt", stamp), "POISON — this member fails the combined check\n")
+	// Queue all three PAUSED, wait until the engine has seen every one, then
+	// release them together (removePausedConcurrently). Neither "queue each as it
+	// is created" (0.0.83 gate run 9: the two clean members batched and landed
+	// before the poisoner was Queued) nor "queue back to back" (run 11: the board
+	// probe surfaced the poisoner a full poll before the clean members, so it
+	// batched alone as a red singleton) guarantees one batch. A paused Queued
+	// member is excluded from batching, so the engine can discover all three
+	// without forming anything; once all three are in its cache, the release is
+	// seen in one poll. QueueMemberPaused keeps paths unique per run under
+	// e2e/train/entries/, which the poison guard scans.
+	discoverOffset := LogOffset(t, env)
+	clean1Issue, clean1PR := QueueMemberPaused(t, env, env.RepoAlpha, base, "clean1", "e2e/train/entries/clean1.txt", "clean entry 1\n")
+	repauseOnFailure(t, env, env.RepoAlpha, clean1Issue)
+	clean2Issue, clean2PR := QueueMemberPaused(t, env, env.RepoAlpha, base, "clean2", "e2e/train/entries/clean2.txt", "clean entry 2\n")
+	repauseOnFailure(t, env, env.RepoAlpha, clean2Issue)
+	poisonIssue, _ := QueueMemberPaused(t, env, env.RepoAlpha, base, "poison", "e2e/train/entries/poison.txt", "POISON — this member fails the combined check\n")
+	repauseOnFailure(t, env, env.RepoAlpha, poisonIssue)
+	members := []int{clean1Issue, clean2Issue, poisonIssue}
+
+	for _, n := range members {
+		seen := fmt.Sprintf("[#%d cache] probe: new item discovered", n)
+		waitForLogMatch(t, env, discoverOffset, 10*time.Minute, fmt.Sprintf("the engine discovering paused member #%d", n),
+			func(l string) bool { return strings.Contains(l, seen) })
+	}
+	t.Logf("engine has discovered all three paused members %v; releasing them together", members)
 
 	placeOffset := LogOffset(t, env)
-	for _, item := range []string{clean1Item, clean2Item, poisonItem} {
-		SetIssueStatus(t, env, item, "Queued")
+	if errs := removePausedConcurrently(env, env.RepoAlpha, members); len(errs) > 0 {
+		t.Fatalf("could not release the members (they stay paused; nothing has formed): %v", errs)
 	}
-	t.Logf("queued 2 clean (#%d,#%d) + 1 poison (#%d) together; verifying batch composition", clean1Issue, clean2Issue, poisonIssue)
 
 	// The first batch must contain all three. Other parallel RepoAlpha scenarios may
 	// add members of their own, so this is a containment check, not an exact one.
@@ -67,10 +79,10 @@ func TestMergeTrainBisectionEjectsPoisoner(t *testing.T) {
 	if !ok {
 		t.Fatalf("batch snapshot line for %s vanished after being observed", env.RepoAlpha)
 	}
-	for _, n := range []int{clean1Issue, clean2Issue, poisonIssue} {
+	for _, n := range members {
 		if !slices.Contains(snapshot, n) {
-			t.Fatalf("fixture: first batch snapshot for %s listed %v, missing #%d — a partial batch formed before all three "+
-				"members were Queued, so there may be nothing to bisect. Not an engine regression; re-run", env.RepoAlpha, snapshot, n)
+			t.Fatalf("fixture: first batch snapshot for %s listed %v, missing #%d — the release straddled a poll boundary, "+
+				"so there may be nothing to bisect. Not an engine regression; re-run", env.RepoAlpha, snapshot, n)
 		}
 	}
 	t.Logf("first batch %v contains all three members; awaiting bisection", snapshot)
