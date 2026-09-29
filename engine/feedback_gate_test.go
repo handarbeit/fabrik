@@ -9,6 +9,7 @@ import (
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/itemstate"
+	"github.com/handarbeit/fabrik/stages"
 )
 
 var (
@@ -35,11 +36,13 @@ func TestFeedbackGate_EachSourceHolds(t *testing.T) {
 		mod  func(*gh.ProjectItem)
 		want bool
 	}{
-		"clean item":       {func(*gh.ProjectItem) {}, false},
-		"issue comment":    {func(i *gh.ProjectItem) { i.Comments = []gh.Comment{humanComment} }, true},
-		"review thread":    {func(i *gh.ProjectItem) { i.LinkedPRReviewThreadComments = []gh.Comment{openThread} }, true},
-		"review body":      {func(i *gh.ProjectItem) { i.LinkedPRReviews = []gh.PRReview{bodyOnlyReview} }, true},
-		"approved no body": {func(i *gh.ProjectItem) { i.LinkedPRReviews = []gh.PRReview{{Author: "a", State: "APPROVED", DatabaseID: 9}} }, false},
+		"clean item":    {func(*gh.ProjectItem) {}, false},
+		"issue comment": {func(i *gh.ProjectItem) { i.Comments = []gh.Comment{humanComment} }, true},
+		"review thread": {func(i *gh.ProjectItem) { i.LinkedPRReviewThreadComments = []gh.Comment{openThread} }, true},
+		"review body":   {func(i *gh.ProjectItem) { i.LinkedPRReviews = []gh.PRReview{bodyOnlyReview} }, true},
+		"approved no body": {func(i *gh.ProjectItem) {
+			i.LinkedPRReviews = []gh.PRReview{{Author: "a", State: "APPROVED", DatabaseID: 9}}
+		}, false},
 		"dismissed body": {func(i *gh.ProjectItem) {
 			r := bodyOnlyReview
 			r.State = "DISMISSED"
