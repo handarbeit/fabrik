@@ -163,10 +163,21 @@ func (e *Engine) handleDependencies(pctx *phase1Ctx) bool {
 	return e.checkDependencies(pctx.board, pctx.item, pctx.stage)
 }
 
-// handleReviewGate runs the review gate and review reinvoke dispatch. Only
-// active when the stage has genuinely completed (hasComplete == true); during
-// the CI-await window (fabrik:awaiting-ci && !hasComplete) the gate is skipped
-// to prevent spurious fabrik:awaiting-review re-application (#617).
+// handleReviewGate runs the review gate and review reinvoke dispatch.
+//
+// Feedback detection and the gate are separate jobs (#1953 R1). The gate half —
+// checkReviewGate, whose job includes writing fabrik:awaiting-review and running
+// the reviewer timeout — is only run when the stage has genuinely completed
+// (hasComplete == true). During the CI-await window (fabrik:awaiting-ci &&
+// !hasComplete) it stays skipped, which is what #617 actually needed: a stale
+// LinkedPRReviewRequests snapshot must never re-apply fabrik:awaiting-review.
+// The detection-and-dispatch half, however, runs in every state: skipping it
+// too (the original #617 fix) blinded the engine to review feedback from stage
+// start through CI wait, so a body-only COMMENTED review that landed there was
+// never processed and the item then advanced or landed past it (#616). With
+// !hasComplete this handler therefore resolves reviews itself, passes
+// blocked=timedOut=false, writes no label, and returns false when nothing was
+// dispatched so the rest of the chain (the CI gate) still runs.
 //
 // Reinvoke-governs-working, authoritative-governs-merging (R1, #1375,
 // amending ADR-1250): actionable review feedback (buildReviewFeedbackComments —
@@ -186,17 +197,29 @@ func (e *Engine) handleDependencies(pctx *phase1Ctx) bool {
 // returns unprocessed feedback) is what stops this from firing every poll for
 // the same review.
 func (e *Engine) handleReviewGate(pctx *phase1Ctx) bool {
-	if !pctx.hasComplete {
-		return false
-	}
-	blocked, timedOut, terminated, resolvedReviews := e.checkReviewGate(pctx.board, pctx.item, pctx.stage)
-	if terminated {
-		// checkReviewGate already paused the item directly via
-		// handleBrokenReviewLinkage — claim it so Phase 2 does not advance an
-		// item that was just paused in this same pass. Checked ahead of the
-		// other branches for the same reason as handleMergeAndCIGates's
-		// ciTerminated check. See ADR-1223.
-		return true
+	var (
+		blocked, timedOut bool
+		resolvedReviews   []gh.PRReview
+	)
+	if pctx.hasComplete {
+		var terminated bool
+		blocked, timedOut, terminated, resolvedReviews = e.checkReviewGate(pctx.board, pctx.item, pctx.stage)
+		if terminated {
+			// checkReviewGate already paused the item directly via
+			// handleBrokenReviewLinkage — claim it so Phase 2 does not advance an
+			// item that was just paused in this same pass. Checked ahead of the
+			// other branches for the same reason as handleMergeAndCIGates's
+			// ciTerminated check. See ADR-1223.
+			return true
+		}
+		// A stage without wait_for_reviews never runs the gate, so
+		// checkReviewGate returns no reviews — but review bodies are still
+		// actionable feedback (#1953 R1). Resolve them here.
+		if pctx.stage.WaitForReviews == nil || !*pctx.stage.WaitForReviews {
+			resolvedReviews = e.resolveReviewsForFeedback(pctx.item)
+		}
+	} else {
+		resolvedReviews = e.resolveReviewsForFeedback(pctx.item)
 	}
 	// Actionable review feedback (thread comments and/or review bodies) is
 	// dispatched regardless of blocked/timedOut — see the doc comment above.
@@ -290,6 +313,11 @@ func (e *Engine) handleReviewGate(pctx *phase1Ctx) bool {
 				e.pauseForReviewCycleLimit(pctx.board, pctx.item, pctx.stage, cycleCount, e.cfg.MaxReviewCycles)
 			},
 		)
+	}
+	// Nothing was dispatched and the stage has not completed: there is no gate
+	// state to act on (#1953 R1) — leave the item to the CI gate.
+	if !pctx.hasComplete {
+		return false
 	}
 	// Nothing actionable to reinvoke on this poll — fall back to the
 	// pre-existing blocked/timedOut handling (the plain "waiting for a
