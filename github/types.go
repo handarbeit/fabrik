@@ -88,6 +88,11 @@ type PRReview struct {
 	State      string // "APPROVED", "CHANGES_REQUESTED", or "COMMENTED"
 	Body       string // Review summary body (may be empty for comment-only reviews)
 	DatabaseID int    // Numeric PR review ID (0 if not fetched or unavailable)
+	// NodeID is the review's GraphQL node ID (GraphQL "id" / REST "node_id").
+	// A PullRequestReview is Reactable in GraphQL but has no REST reactions
+	// endpoint, so this is the subject ID for addReaction (#1953 R8). Empty
+	// when not fetched.
+	NodeID string
 	// CommitID is the SHA the review was submitted against (GitHub's REST
 	// "commit_id" field). Needed to determine whether a review targets the
 	// PR's current head SHA or a stale one (Pruefer's GitHub-derived
@@ -170,6 +175,12 @@ type Comment struct {
 	CreatedAt  time.Time
 	Reactions  []ReactionGroup
 	FromPR     int // Non-zero if this comment is from a linked PR
+	// ReactionNodeID is the GraphQL node ID to react to when the comment has no
+	// REST DatabaseID. Set only on the synthetic review-body comment (its
+	// subject is a PullRequestReview, which REST cannot react to); reactions
+	// then go through GraphQL addReaction (#1953 R8). Empty for every other
+	// comment.
+	ReactionNodeID string
 	// ReviewThreadID is the GraphQL node ID of the PR review thread this
 	// comment belongs to. Empty for non-review-thread comments. Needed to
 	// call resolveReviewThread after the feedback is addressed.

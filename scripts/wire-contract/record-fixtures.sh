@@ -245,6 +245,20 @@ mutation($prId: ID!) {
 }' -f prId="$PR_NODE_ID" > /tmp/wc-markready.json
 write_recording mark_pr_ready "https://api.github.com/graphql" "$ALPHA#$PR_NUM (disposable sandbox PR)" /tmp/wc-markready.json
 
+# add_review_reaction (#1953 R8): GraphQL addReaction against a
+# PullRequestReview subject. REST has no reactions endpoint for a review, so
+# the node_id of a COMMENT review on the disposable PR is the subjectId.
+# (A PR author may leave a COMMENT review on their own PR; APPROVE would be refused.)
+gh_ api -X POST "repos/$ALPHA/pulls/$PR_NUM/reviews" -f event=COMMENT -f body="wire-contract fixture review (disposable)" > /tmp/wc-review.json
+REVIEW_NODE_ID=$(python3 -c 'import json; print(json.load(open("/tmp/wc-review.json"))["node_id"])')
+gh_ api graphql -f query='
+mutation($subjectId: ID!, $content: ReactionContent!) {
+  addReaction(input: { subjectId: $subjectId, content: $content }) {
+    reaction { content }
+  }
+}' -f subjectId="$REVIEW_NODE_ID" -f content=EYES > /tmp/wc-addreaction.json
+write_recording add_review_reaction "https://api.github.com/graphql" "$ALPHA#$PR_NUM (disposable sandbox PR review)" /tmp/wc-addreaction.json
+
 # fabrik-test-alpha's branch protection requires status checks that never
 # run for a throwaway branch; the merge only succeeds because the recording
 # account has admin rights on the sandbox repo and branch protection there

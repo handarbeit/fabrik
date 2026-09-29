@@ -83,6 +83,59 @@ func (c *Client) ResolveReviewThread(threadID string) error {
 	return nil
 }
 
+// addReactionMutation is the GraphQL mutation used by AddReviewReaction.
+const addReactionMutation = `
+mutation($subjectId: ID!, $content: ReactionContent!) {
+  addReaction(input: { subjectId: $subjectId, content: $content }) {
+    reaction { content }
+  }
+}`
+
+// reviewReactionContent maps the lowercase REST reaction names the engine uses
+// everywhere else ("eyes", "rocket") to GraphQL's ReactionContent enum, which
+// is uppercase and spells some values differently from REST ("+1" is
+// THUMBS_UP, "hooray" is HOORAY).
+var reviewReactionContent = map[string]string{
+	"+1":       "THUMBS_UP",
+	"-1":       "THUMBS_DOWN",
+	"laugh":    "LAUGH",
+	"confused": "CONFUSED",
+	"heart":    "HEART",
+	"hooray":   "HOORAY",
+	"rocket":   "ROCKET",
+	"eyes":     "EYES",
+}
+
+// AddReviewReaction adds a reaction to a pull-request review through GraphQL
+// addReaction (#1953 R8). A PullRequestReview is Reactable in GraphQL, but REST
+// has no reactions endpoint for one, so AddCommentReaction cannot reach it.
+// subjectNodeID is the review's GraphQL node ID (PRReview.NodeID); content uses
+// the same lowercase REST names as AddCommentReaction and is mapped to the
+// GraphQL enum. An unknown content is an error, not a silent no-op.
+func (c *Client) AddReviewReaction(subjectNodeID, content string) error {
+	gqlContent, ok := reviewReactionContent[content]
+	if !ok {
+		return fmt.Errorf("adding %q reaction to review %s: unsupported reaction content", content, subjectNodeID)
+	}
+	if subjectNodeID == "" {
+		return fmt.Errorf("adding %q reaction to review: empty subject node ID", content)
+	}
+	vars := map[string]interface{}{"subjectId": subjectNodeID, "content": gqlContent}
+	var result struct {
+		Data struct {
+			AddReaction struct {
+				Reaction struct {
+					Content string `json:"content"`
+				} `json:"reaction"`
+			} `json:"addReaction"`
+		} `json:"data"`
+	}
+	if err := c.graphqlRequest(addReactionMutation, vars, &result); err != nil {
+		return fmt.Errorf("adding %q reaction to review %s: %w", content, subjectNodeID, err)
+	}
+	return nil
+}
+
 // UpdateComment replaces the body of an existing issue comment.
 func (c *Client) UpdateComment(owner, repo string, commentDatabaseID int, body string) error {
 	apiURL := fmt.Sprintf("%s/repos/%s/%s/issues/comments/%d", c.baseURL, owner, repo, commentDatabaseID)

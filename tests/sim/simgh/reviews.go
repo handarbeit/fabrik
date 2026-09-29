@@ -33,11 +33,13 @@ func (s *Sim) FetchPRReviews(owner, repo string, prNumber int) ([]gh.PRReview, e
 //
 //   - the most recent submission wins, and authors keep first-submission order;
 //   - except that a COMMENTED follow-up never supersedes an author's existing
-//     formal verdict (APPROVED, CHANGES_REQUESTED, DISMISSED). GitHub treats
+//     *formal verdict* (APPROVED, CHANGES_REQUESTED, DISMISSED). GitHub treats
 //     COMMENTED as informational, not a state transition, so a reviewer who
 //     requests changes and later comments still has an active
-//     CHANGES_REQUESTED. Only when an author's *first* submission is COMMENTED
-//     does it become their entry.
+//     CHANGES_REQUESTED. A stored COMMENTED entry, by contrast, IS superseded
+//     by a newer COMMENTED — the newer body is the author's current review.
+//     (Before #1953 the sim skipped any later COMMENTED, which hid a bot's
+//     second body-only review — the #616 shape — from every read.)
 func latestReviewsByAuthor(reviews []gh.PRReview) []gh.PRReview {
 	latest := make(map[string]gh.PRReview, len(reviews))
 	order := make([]string, 0, len(reviews))
@@ -45,9 +47,10 @@ func latestReviewsByAuthor(reviews []gh.PRReview) []gh.PRReview {
 		if rev.Author == "" {
 			continue
 		}
-		if _, seen := latest[rev.Author]; !seen {
+		stored, seen := latest[rev.Author]
+		if !seen {
 			order = append(order, rev.Author)
-		} else if rev.State == "COMMENTED" {
+		} else if rev.State == "COMMENTED" && isFormalVerdict(stored.State) {
 			continue
 		}
 		latest[rev.Author] = rev
@@ -193,4 +196,13 @@ func (s *Sim) FetchPRReviewDecision(owner, repo string, prNumber int) (string, e
 		return "APPROVED", nil
 	}
 	return "REVIEW_REQUIRED", nil
+}
+
+// isFormalVerdict mirrors github.isFormalReviewVerdict (unexported there).
+func isFormalVerdict(state string) bool {
+	switch state {
+	case "APPROVED", "CHANGES_REQUESTED", "DISMISSED":
+		return true
+	}
+	return false
 }
