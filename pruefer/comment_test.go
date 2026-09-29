@@ -17,11 +17,15 @@ type fakeCommenter struct {
 	addErr      error
 	addedBodies []string
 	nextAddID   int
+	// commentFetches counts FetchIssueComments calls (#1952: the per-PR
+	// comment read the memo exists to avoid).
+	commentFetches int
 }
 
 func (f *fakeCommenter) FetchIssueComments(owner, repo string, issueNumber int) ([]gh.Comment, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.commentFetches++
 	if f.fetchErr != nil {
 		return nil, f.fetchErr
 	}

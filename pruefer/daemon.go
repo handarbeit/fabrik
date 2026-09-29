@@ -2,6 +2,9 @@ package pruefer
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -37,6 +40,15 @@ type GitHubLister interface {
 // show).
 type RateLimitReporter interface {
 	RateLimitStats() (rest, graphql gh.RateLimitStats)
+}
+
+// RequestCounter is an optional interface implemented by *github.Client
+// (#1952), type-asserted per owner per poll cycle — like RateLimitReporter,
+// deliberately not part of GitHubLister so test fakes needn't implement it.
+// poll() differences two reads to log how many HTTP requests (and how many
+// 304s, which GitHub does not count against the rate limit) a cycle cost.
+type RequestCounter interface {
+	RequestStats() gh.RequestStats
 }
 
 // Daemon polls Pruefer's configured repos and dispatches eligible PRs to
@@ -82,6 +94,17 @@ type Daemon struct {
 	// tracker check a no-op, preserving pre-#1631 behavior exactly.
 	// NewDaemon always constructs one.
 	Tracker *ReviewTracker
+
+	// memo (#1952) is the per-PR "conclusively evaluated" record poll()
+	// consults before dispatching a PR: an unchanged, already-decided PR
+	// costs no per-PR API calls. Process-lifetime and in-memory, like
+	// Tracker; nil-safe (a hand-built Daemon{} literal never skips).
+	// NewDaemon always constructs one. opGen is the operator-config
+	// generation folded into every memo stamp — bumped by ApplyReload so a
+	// reload (which can change excluded_*/cadence/max_diff_bytes without
+	// touching any PR) invalidates every entry.
+	memo  *prMemo
+	opGen atomic.Uint64
 
 	// Reconciler is the installation-derived discovery engine (#1641):
 	// rederiveRepos calls its Derive method to re-fetch the App's current
@@ -278,6 +301,11 @@ func (d *Daemon) ApplyReload(merged Config, addedClients map[string]GitHubLister
 	d.cfgMu.Lock()
 	defer d.cfgMu.Unlock()
 	d.Config = merged
+	// #1952: every skip decision the memo holds may have read a field this
+	// reload just changed. A generation bump (rather than diffing the
+	// skip-relevant fields) is conservative — one re-evaluation sweep per
+	// reload — and cannot go stale when a new skip input is added.
+	d.opGen.Add(1)
 	for _, owner := range removedOwners {
 		delete(d.Clients, owner)
 	}
@@ -483,6 +511,7 @@ func NewDaemon(cfg Config, clients map[string]GitHubLister, claude ClaudeInvoker
 		Config:   cfg,
 		BotLogin: botLogin,
 		Tracker:  NewReviewTracker(),
+		memo:     newPRMemo(),
 	}
 
 	return d, wireLogf(cfg, useTUI(cfg))
@@ -1158,6 +1187,27 @@ func (d *Daemon) poll(ctx context.Context) {
 	// (ADR-1640's R3, unchanged by #1641's derivation source swap).
 	derived := d.derivedSet()
 
+	// #1952: the operator-config generation is read once, before any
+	// dispatch snapshots d.config(). A reload landing in between leaves
+	// this stamp older than the config a review actually used, so the next
+	// poll mismatches and re-evaluates — the safe direction.
+	opGen := d.opGen.Load()
+	cfgFP := make(map[string]string) // "owner/repo\x00baseRef" → fingerprint, this cycle only
+	counts := make(map[string]*pollCounts)
+	baseline := make(map[string]gh.RequestStats)
+	for _, dr := range derived.Repos {
+		key := strings.ToLower(dr.Owner)
+		if _, seen := counts[key]; seen {
+			continue
+		}
+		counts[key] = &pollCounts{}
+		if client, ok := d.client(key); ok {
+			if rc, ok := client.(RequestCounter); ok {
+				baseline[key] = rc.RequestStats()
+			}
+		}
+	}
+
 	for _, dr := range derived.Repos {
 		client, ok := d.client(strings.ToLower(dr.Owner))
 		if !ok {
@@ -1171,16 +1221,51 @@ func (d *Daemon) poll(ctx context.Context) {
 		pollAt := time.Now()
 		prs, err := client.ListOpenPRs(dr.Owner, dr.RepoName)
 		if err != nil {
+			// A failed listing never records and never evicts: absence from
+			// a failed read is not absence from GitHub (#1952 R3).
 			logf(0, "warn", "listing open PRs for %s: %v — skipping this repo this cycle\n", dr.Repo, err)
 			d.emit(ptui.RepoPollEvent{Repo: dr.Repo, At: pollAt, Err: err.Error()})
 			continue
 		}
-		d.emit(ptui.RepoPollEvent{Repo: dr.Repo, At: pollAt, PRCount: len(prs)})
+
+		live := make(map[int]bool, len(prs))
 		for _, pr := range prs {
-			d.reviewOne(ctx, &wg, client, dr.Owner, dr.RepoName, pr)
+			live[pr.Number] = true
+		}
+		d.memo.Prune(dr.Owner, dr.RepoName, live)
+
+		type dispatch struct {
+			pr    gh.PRDetails
+			stamp prStamp
+		}
+		var todo []dispatch
+		memoSkipped := 0
+		for _, pr := range prs {
+			stamp := d.stampFor(client, dr.Owner, dr.RepoName, pr, opGen, cfgFP)
+			if d.memo.Skip(dr.Owner, dr.RepoName, pr.Number, pr.HeadSHA, stamp) {
+				memoSkipped++
+				continue
+			}
+			todo = append(todo, dispatch{pr, stamp})
+		}
+		c := counts[strings.ToLower(dr.Owner)]
+		c.prs += len(prs)
+		c.memoSkipped += memoSkipped
+		c.evaluated += len(todo)
+
+		d.emit(ptui.RepoPollEvent{Repo: dr.Repo, At: pollAt, PRCount: len(prs), MemoSkipped: memoSkipped})
+		for _, w := range todo {
+			d.reviewOne(ctx, &wg, client, dr.Owner, dr.RepoName, w.pr, w.stamp)
 		}
 	}
 	wg.Wait()
+
+	// Repos that left the derived set take their memo entries with them.
+	keep := make(map[string]bool, len(derived.Repos))
+	for _, dr := range derived.Repos {
+		keep[strings.ToLower(dr.Owner+"/"+dr.RepoName)] = true
+	}
+	d.memo.RetainRepos(keep)
 
 	seenOwner := make(map[string]bool, len(derived.Repos))
 	for _, dr := range derived.Repos {
@@ -1197,7 +1282,57 @@ func (d *Daemon) poll(ctx context.Context) {
 			rest, _ := reporter.RateLimitStats()
 			d.emit(ptui.RateLimitSnapshotEvent{Owner: dr.Owner, Stats: rest})
 		}
+		c := counts[key]
+		if rc, ok := client.(RequestCounter); ok {
+			now, before := rc.RequestStats(), baseline[key]
+			logf(0, "poll", "owner=%s requests=%d not_modified=%d prs=%d memo_skipped=%d evaluated=%d\n",
+				dr.Owner, now.Total-before.Total, now.NotModified-before.NotModified, c.prs, c.memoSkipped, c.evaluated)
+		} else {
+			logf(0, "poll", "owner=%s prs=%d memo_skipped=%d evaluated=%d\n", dr.Owner, c.prs, c.memoSkipped, c.evaluated)
+		}
 	}
+}
+
+// pollCounts is one owner's per-cycle tally, for the poll summary log line
+// (#1952 R4). Only the poll goroutine touches it.
+type pollCounts struct {
+	prs, memoSkipped, evaluated int
+}
+
+// stampFor builds the memo stamp for pr. The repo-config fingerprint is
+// resolved at most once per (repo, base ref) per cycle — N per-PR config reads
+// become one, and a conditional-request 304 makes even that one free — and is
+// left "" (unknown, never memoised or matched) on a fetch error. With no memo
+// configured it does no work at all, so a Daemon without one issues exactly
+// the calls it did before #1952.
+func (d *Daemon) stampFor(client GitHubLister, owner, repo string, pr gh.PRDetails, opGen uint64, cache map[string]string) prStamp {
+	if d.memo == nil || pr.UpdatedAt == "" {
+		return prStamp{}
+	}
+	key := strings.ToLower(owner+"/"+repo) + "\x00" + pr.BaseRef
+	fp, ok := cache[key]
+	if !ok {
+		fp = repoConfigFingerprint(client, owner, repo, pr.BaseRef)
+		cache[key] = fp
+	}
+	return prStamp{UpdatedAt: pr.UpdatedAt, OpGen: opGen, RepoCfg: fp}
+}
+
+// repoConfigFingerprint identifies the repo-resident .pruefer/config.yaml at
+// ref for memo-staleness purposes: a content hash, "absent" when the file does
+// not exist, and "" (unknown) on any other error. The file changes when the
+// base branch does, not when a PR does, so nothing on the PR would otherwise
+// reveal that a memoised skip's inputs moved.
+func repoConfigFingerprint(client GitHubReviewer, owner, repo, ref string) string {
+	data, err := client.FetchFileAtRef(owner, repo, DefaultConfigPath, ref)
+	if err != nil {
+		if errors.Is(err, gh.ErrNotFound) {
+			return "absent"
+		}
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 // reviewOne dispatches a single PR to ReviewPR through the daemon's shared
@@ -1208,7 +1343,7 @@ func (d *Daemon) poll(ctx context.Context) {
 // see eventsink.go) so both draw from one concurrency budget, satisfying
 // the issue's "hand off to the existing concurrency-capped review dispatch"
 // requirement for real rather than just in shape.
-func (d *Daemon) reviewOne(ctx context.Context, wg *sync.WaitGroup, client GitHubLister, owner, repo string, pr gh.PRDetails) {
+func (d *Daemon) reviewOne(ctx context.Context, wg *sync.WaitGroup, client GitHubLister, owner, repo string, pr gh.PRDetails, stamp prStamp) {
 	sem := d.semaphore()
 	wg.Add(1)
 	select {
@@ -1220,7 +1355,7 @@ func (d *Daemon) reviewOne(ctx context.Context, wg *sync.WaitGroup, client GitHu
 	go func() {
 		defer wg.Done()
 		defer func() { <-sem }()
-		d.runReview(ctx, client, owner, repo, pr)
+		d.runReview(ctx, client, owner, repo, pr, stamp)
 	}()
 }
 
@@ -1245,12 +1380,12 @@ func (d *Daemon) reviewOne(ctx context.Context, wg *sync.WaitGroup, client GitHu
 // caller's ReviewPR call observe the first caller's just-submitted review
 // and skip, restoring the single-flight-per-PR property the SHA-idempotency
 // guarantee assumes.
-func (d *Daemon) runReview(ctx context.Context, client GitHubLister, owner, repo string, pr gh.PRDetails) {
+func (d *Daemon) runReview(ctx context.Context, client GitHubLister, owner, repo string, pr gh.PRDetails, stamp prStamp) {
 	g, release := d.acquirePRGate(owner, repo, pr.Number)
 	defer release()
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	d.executeReview(ctx, client, owner, repo, pr)
+	d.executeReview(ctx, client, owner, repo, pr, stamp)
 }
 
 // executeReview runs ReviewPR and emits the same TUI events poll()'s former
@@ -1259,7 +1394,13 @@ func (d *Daemon) runReview(ctx context.Context, client GitHubLister, owner, repo
 // neither itself; see runReview (blocking claim, used by poll()) and
 // ReviewFromEvent (non-blocking claim, used by event-triggered dispatch)
 // for the two ways callers establish that precondition.
-func (d *Daemon) executeReview(ctx context.Context, client GitHubLister, owner, repo string, pr gh.PRDetails) {
+//
+// stamp (#1952) is the memo stamp poll() computed for this PR from the listing
+// that dispatched it; the zero stamp (the event path, which has no listing)
+// records nothing. A conclusive outcome is memoised under it; anything else
+// forgets any older entry, so an errored or degraded evaluation retries next
+// poll exactly as it did before the memo existed.
+func (d *Daemon) executeReview(ctx context.Context, client GitHubLister, owner, repo string, pr gh.PRDetails, stamp prStamp) {
 	repoName := owner + "/" + repo
 	startedAt := time.Now()
 	d.emit(ptui.ReviewStartedEvent{Repo: repoName, PRNumber: pr.Number, Title: pr.Title, StartedAt: startedAt})
@@ -1270,6 +1411,11 @@ func (d *Daemon) executeReview(ctx context.Context, client GitHubLister, owner, 
 	// protecting is this read itself, against a concurrent ApplyReload
 	// write.
 	outcome := ReviewPR(ctx, client, d.Claude, d.Clone, d.config(), d.BotLogin, owner, repo, pr, d.Tracker)
+	if outcome.Conclusive && stamp.usable() {
+		d.memo.Record(owner, repo, pr.Number, pr.HeadSHA, stamp)
+	} else {
+		d.memo.Forget(owner, repo, pr.Number)
+	}
 	if outcome.Err != nil {
 		logf(pr.Number, "warn", "reviewing %s/%s#%d: %v\n", owner, repo, pr.Number, outcome.Err)
 	}

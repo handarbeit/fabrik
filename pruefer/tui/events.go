@@ -24,6 +24,10 @@ type RepoPollEvent struct {
 	At      time.Time
 	PRCount int
 	Err     string // empty means no error
+	// MemoSkipped is how many of PRCount were skipped without any per-PR API
+	// call because they were unchanged since a conclusive evaluation (#1952).
+	// Zero when the memo is off.
+	MemoSkipped int
 }
 
 func (RepoPollEvent) tuiEvent() {}
