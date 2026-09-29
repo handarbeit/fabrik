@@ -425,8 +425,8 @@ func buildThreadEntries(comments []gh.Comment) []reviewThreadEntry {
 //   - when addressedReviewIDs is non-empty, a trailing machine-readable
 //     <!-- fabrik:review-ids-addressed: N,N --> marker (R3, #1555) — a
 //     durable, GitHub-sourced idempotency signal for the review-body
-//     synthetic-comment path, which has no reaction-endpoint backstop and
-//     otherwise depends entirely on itemstate.Store's in-memory
+//     synthetic-comment path, whose reaction (#1953 R8) is only a human-visible
+//     signal and so otherwise depends entirely on itemstate.Store's in-memory
 //     ProcessedComments (wiped by every self-upgrade restart). See
 //     durablyAddressedReviewIDs/parseReviewIDsAddressedMarker.
 func formatReviewFeedbackComment(stageName, output, branch, commit, mainSHA, timestamp string, threads []reviewThreadEntry, totalComments int, addressedReviewIDs []int) string {

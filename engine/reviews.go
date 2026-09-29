@@ -23,10 +23,14 @@ const botRepromptedLabel = "fabrik:bot-reprompted"
 // reviewBodyIDPrefix marks a synthetic gh.Comment derived from a PR review's
 // top-level body (Finding 4, #1375) rather than a real inline thread comment.
 // GitHub's REST reactions API has no endpoint for a pulls/.../reviews/{id}
-// object itself, so a review body has no ROCKET-reaction dedup backstop the
-// way a real thread comment does (acknowledgeComments/finalizeComments skip
-// reaction calls for DatabaseID==0 synthetics) — snap.CommentProcessed keyed
-// on this ID is the *only* idempotency guard (R7). The prefix is structurally
+// object itself, so a review body has no REST ROCKET-reaction backstop the way
+// a real thread comment does. Since #1953 R8 it is reacted to through GraphQL
+// addReaction instead (the synthetic comment carries ReactionNodeID and no
+// DatabaseID — acknowledgeComments/finalizeComments branch on that), but that
+// reaction is purely the human-visible signal: reactions can be added or
+// removed by anyone, so dedup never depends on it. snap.CommentProcessed keyed
+// on this ID (plus the durable review-ids-addressed marker) remains the
+// idempotency guard (R7). The prefix is structurally
 // distinct from GraphQL node IDs (thread comments use those verbatim as ID),
 // so a synthetic body ID can never collide with a real comment ID. Also
 // doubles as the isReviewReinvoke/buildThreadEntries discriminator for a
@@ -1223,9 +1227,9 @@ func (e *Engine) currentHeadReviewThreadComments(item gh.ProjectItem) []gh.Comme
 //     reviewGateOutstanding's hasReviews computation) or State == "PENDING"
 //     (not yet submitted)
 //   - Body == "" (nothing to act on)
-//   - already recorded via snap.CommentProcessed(reviewBodyCommentID(r)) — the
-//     only dedup mechanism available, since no GitHub reaction endpoint exists
-//     for a top-level review body (see reviewBodyIDPrefix's doc comment, R7)
+//   - already recorded via snap.CommentProcessed(reviewBodyCommentID(r)) — dedup
+//     never rests on a reaction, since reactions can be added or removed by
+//     anyone (see reviewBodyIDPrefix's doc comment, R7, and #1953 R8)
 //
 // #1375 originally excluded COMMENTED and APPROVED bodies here: automated
 // reviewers (Copilot, Gemini) routinely submit a COMMENTED review whose body
@@ -1320,7 +1324,8 @@ func (e *Engine) resolveReviewsForFeedback(item gh.ProjectItem) []gh.PRReview {
 // synthetic gh.Comments — the skip conditions and dedup logic are documented
 // on buildReviewBodyComments above.
 //
-// R3 (#1555): a review body has no GitHub reaction endpoint (reviewBodyIDPrefix's
+// R3 (#1555): a review body has no REST reaction endpoint and its GraphQL
+// reaction (#1953 R8) is only a human-visible signal (reviewBodyIDPrefix's
 // doc comment, R7), so the in-memory snap.CommentProcessed record — wiped by
 // every self-upgrade restart — was previously the *only* idempotency guard,
 // letting an already-addressed review body be redelivered after every
@@ -1401,6 +1406,10 @@ func (e *Engine) buildReviewBodyCommentsFromReviews(item gh.ProjectItem, reviews
 			Author:    c.review.Author,
 			Body:      c.review.Body,
 			CreatedAt: createdAt,
+			// GraphQL node ID for the 👀/🚀 reactions (#1953 R8); empty when the
+			// review was fetched without one, in which case the reaction sites
+			// skip exactly as they do for any other DatabaseID-less synthetic.
+			ReactionNodeID: c.review.NodeID,
 		})
 	}
 	return out

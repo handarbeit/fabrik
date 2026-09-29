@@ -727,10 +727,31 @@ func lastCommentAuthor(comments []gh.Comment) string {
 	return comments[len(comments)-1].Author
 }
 
+// reactToReviewBody reacts to a synthetic review-body comment through GraphQL
+// addReaction (#1953 R8). It reports whether c is such a comment — DatabaseID 0
+// with a ReactionNodeID — so the caller can skip its REST path. A failed
+// reaction is a logged warning, never an error: the reaction is the
+// human-visible signal, and dedup rests on the review-ids-addressed marker and
+// the store, not on it.
+func (e *Engine) reactToReviewBody(itemNumber int, c gh.Comment, content, glyph string) bool {
+	if c.DatabaseID != 0 || c.ReactionNodeID == "" {
+		return false
+	}
+	// no write-through: excluded — AddReviewReaction does not affect dispatch-relevant cache state
+	if err := e.client.AddReviewReaction(c.ReactionNodeID, content); err != nil {
+		e.logf(itemNumber, "warn", "could not add %s to review body %s: %v\n", glyph, c.ID, err)
+	}
+	return true
+}
+
 // acknowledgeComments reacts with 👀 to all new comments. PR review thread
-// (inline) comments use a different REST endpoint than issue comments.
+// (inline) comments use a different REST endpoint than issue comments, and a
+// review body is reacted to through GraphQL (#1953 R8).
 func (e *Engine) acknowledgeComments(owner, repo string, itemNumber int, comments []gh.Comment) {
 	for _, c := range comments {
+		if e.reactToReviewBody(itemNumber, c, "eyes", "👀") {
+			continue
+		}
 		if c.DatabaseID == 0 {
 			e.logf(itemNumber, "debug", "skipping 👀 reaction for synthetic comment %s (no DatabaseID)\n", c.ID)
 			continue
@@ -938,6 +959,9 @@ func (e *Engine) finalizeComments(ctx context.Context, board *gh.ProjectBoard, i
 
 	resolvedThreads := make(map[string]bool)
 	for _, c := range comments {
+		if e.reactToReviewBody(item.Number, c, "rocket", "🚀") {
+			continue
+		}
 		if c.DatabaseID == 0 {
 			e.logf(item.Number, "debug", "skipping 🚀 reaction for synthetic comment %s (no DatabaseID)\n", c.ID)
 			continue
