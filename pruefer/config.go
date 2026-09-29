@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -289,6 +290,23 @@ type Config struct {
 	// Options.AppHomepageURL. Restart-only, for the same reason as AppName
 	// above.
 	AppHomepageURL string `reload:"restart"`
+	// AppOrganization, when set, makes first-run setup create the App under
+	// that GitHub organization (/organizations/<org>/settings/apps/new)
+	// instead of under the signed-in user. Forwarded to
+	// githubauth.Options.AppOrganization, which already passes it to both
+	// manifest-flow construction sites (first-run bootstrap and the
+	// self-heal re-manifest path).
+	//
+	// Needed because the manifest creates a PRIVATE App ("public": false),
+	// and a private App can only be installed on the account that owns it.
+	// Serving an organization's repos from a private App therefore requires
+	// that organization to own the App — a user-owned App cannot be
+	// installed there at all. Empty (the default) keeps today's behavior:
+	// the App is owned by whoever completes the manifest flow.
+	//
+	// Restart-only, for the same reason as AppName: it only matters to the
+	// first-run manifest flow, which runs once at startup.
+	AppOrganization string `reload:"restart"`
 	// NoBrowser skips attempting to open a local browser during first-run
 	// GitHub App manifest setup — the setup URL is always printed
 	// regardless. Set this in headless/SSH/CI environments where no local
@@ -384,6 +402,7 @@ type yamlConfig struct {
 	AppStatePath      string            `yaml:"github_app_state_path"`
 	AppName           string            `yaml:"github_app_name"`
 	AppHomepageURL    string            `yaml:"github_app_homepage_url"`
+	AppOrganization   string            `yaml:"github_app_organization"`
 	NoBrowser         *bool             `yaml:"no_browser"`
 	TUI               *bool             `yaml:"tui"`
 	LogFile           *string           `yaml:"log_file"`
@@ -625,6 +644,13 @@ func LoadConfig(args []string) (Config, error) {
 	}
 	if yc.AppHomepageURL != "" {
 		cfg.AppHomepageURL = yc.AppHomepageURL
+	}
+	if yc.AppOrganization != "" {
+		org, err := validateAppOrganization(yc.AppOrganization)
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.AppOrganization = org
 	}
 	if yc.NoBrowser != nil {
 		cfg.NoBrowser = *yc.NoBrowser
@@ -1117,4 +1143,23 @@ func logReloadSummary(diff ReloadDiff) {
 	for _, c := range diff.RestartOnlyChanged {
 		logf(0, "reload", "%s changed (%s -> %s) but requires a restart to take effect — not applied\n", c.Field, c.Old, c.New)
 	}
+}
+
+// githubLoginRE matches a GitHub account login: alphanumerics and single
+// hyphens, not starting or ending with a hyphen, at most 39 characters.
+var githubLoginRE = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9]|-(?:[A-Za-z0-9])){0,38}$`)
+
+// validateAppOrganization trims and checks github_app_organization at config
+// load. The value becomes a URL path segment in the manifest flow; a malformed
+// one would not fail until the operator was already in a browser looking at a
+// GitHub 404, mid-setup. Failing here names the key and the problem instead.
+func validateAppOrganization(raw string) (string, error) {
+	org := strings.TrimSpace(raw)
+	if org == "" {
+		return "", fmt.Errorf("github_app_organization: must not be empty or whitespace-only")
+	}
+	if !githubLoginRE.MatchString(org) {
+		return "", fmt.Errorf("github_app_organization: %q is not a valid GitHub organization name (letters, digits and single hyphens; must not start or end with a hyphen; at most 39 characters)", org)
+	}
+	return org, nil
 }

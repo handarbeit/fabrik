@@ -109,20 +109,7 @@ func Execute() error {
 		}
 	}()
 
-	auth, err := githubauth.Reconcile(ctx, githubauth.Options{
-		AppID:               cfg.AppID,
-		AppInstallationID:   cfg.AppInstallationID,
-		AppPrivateKeyPath:   cfg.AppPrivateKeyPath,
-		AppStatePath:        cfg.AppStatePath,
-		AppName:             cfg.AppName,
-		AppHomepageURL:      cfg.AppHomepageURL,
-		WatchedRepos:        cfg.WatchedRepos,
-		ServedAccounts:      cfg.ServedAccounts,
-		MaxDerivedRepos:     cfg.MaxDerivedRepos,
-		NoBrowser:           cfg.NoBrowser,
-		RequiredPermissions: githubauth.PrueferRequiredPermissions(),
-		Logf:                func(format string, args ...any) { logf(0, "auth", format+"\n", args...) },
-	})
+	auth, err := githubauth.Reconcile(ctx, reconcileOptions(cfg))
 	if err != nil {
 		return fmt.Errorf("reconciling GitHub App auth: %w", err)
 	}
@@ -292,4 +279,27 @@ func fieldChanged(changes []FieldChange, name string) bool {
 		}
 	}
 	return false
+}
+
+// reconcileOptions maps Pruefer's Config onto githubauth.Options. Extracted so
+// the mapping itself is testable: a Config field that is parsed but never
+// forwarded here is silently ignored at runtime — which is exactly how
+// github_app_organization could not be set this change, despite
+// githubauth.Options.AppOrganization already existing.
+func reconcileOptions(cfg Config) githubauth.Options {
+	return githubauth.Options{
+		AppID:               cfg.AppID,
+		AppInstallationID:   cfg.AppInstallationID,
+		AppPrivateKeyPath:   cfg.AppPrivateKeyPath,
+		AppStatePath:        cfg.AppStatePath,
+		AppName:             cfg.AppName,
+		AppHomepageURL:      cfg.AppHomepageURL,
+		AppOrganization:     cfg.AppOrganization,
+		WatchedRepos:        cfg.WatchedRepos,
+		ServedAccounts:      cfg.ServedAccounts,
+		MaxDerivedRepos:     cfg.MaxDerivedRepos,
+		NoBrowser:           cfg.NoBrowser,
+		RequiredPermissions: githubauth.PrueferRequiredPermissions(),
+		Logf:                func(format string, args ...any) { logf(0, "auth", format+"\n", args...) },
+	}
 }
