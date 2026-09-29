@@ -1861,3 +1861,34 @@ func TestHandleReviewGate_NoWaitForReviews_StillDispatchesReviewBody(t *testing.
 		t.Errorf("ReviewCycles = %d, want 1", snap.ReviewCycles("Review"))
 	}
 }
+
+// #1953 R4: a review reinvoke dispatched while feedback stands between the item
+// and its advance/landing is charged to the never-refunded ReviewBlockedCycles
+// counter; one with nothing pending behind it stays forgivable (#1045).
+func TestFeedbackHoldsProgress(t *testing.T) {
+	yoloItem := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:yolo"}}
+	cases := map[string]struct {
+		ctx  phase1Ctx
+		yolo bool
+		want bool
+	}{
+		"incomplete stage (CI wait)":           {phase1Ctx{item: gh.ProjectItem{Number: 1}, stage: &stages.Stage{Name: "Validate"}}, false, true},
+		"complete, no automation":              {phase1Ctx{hasComplete: true, item: gh.ProjectItem{Number: 1}, stage: &stages.Stage{Name: "Review"}}, false, false},
+		"complete, yolo label, non-Validate":   {phase1Ctx{hasComplete: true, item: yoloItem, stage: &stages.Stage{Name: "Review"}}, false, true},
+		"complete, yolo label, Validate":       {phase1Ctx{hasComplete: true, item: yoloItem, stage: &stages.Stage{Name: "Validate"}}, false, true},
+		"complete, cruise label, Validate":     {phase1Ctx{hasComplete: true, item: gh.ProjectItem{Number: 1, Labels: []string{"fabrik:cruise"}}, stage: &stages.Stage{Name: "Validate"}}, false, false},
+		"complete, cfg yolo, auto_advance off": {phase1Ctx{hasComplete: true, item: gh.ProjectItem{Number: 1}, stage: &stages.Stage{Name: "Review", AutoAdvance: boolPtrForGate(false)}}, true, false},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			eng := testEngineWithStages(t, &mockGitHubClient{}, []*stages.Stage{{Name: "Review", Order: 1}})
+			eng.cfg.Yolo = tc.yolo
+			pctx := tc.ctx
+			if got := eng.feedbackHoldsProgress(&pctx); got != tc.want {
+				t.Errorf("feedbackHoldsProgress = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func boolPtrForGate(b bool) *bool { return &b }

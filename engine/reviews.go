@@ -728,8 +728,9 @@ func reviewGateAuthorityVerdict(reviewDecision string, reviews []gh.PRReview) (s
 // itself satisfied, never the gate's clearing condition.
 //
 // Why this exists separately from checkReviewGate: the catch-up loop's
-// handleReviewGate deliberately no-ops while !pctx.hasComplete (#617), and
-// pctx.hasComplete is frozen before the Phase 1 handler chain runs. Because
+// handleReviewGate deliberately skips its gate half (checkReviewGate) while
+// !pctx.hasComplete (#617 — since #1953 its feedback-detection half still runs
+// in every state, see the doc comment there), and pctx.hasComplete is frozen before the Phase 1 handler chain runs. Because
 // reviewGate is ordered ahead of mergeAndCIGates, there is no poll pass in which
 // the gate can arm after CI clears and before Phase 2 calls attemptMergeOnValidate
 // in that same iteration. Enforcing here — at the single landing-decision choke

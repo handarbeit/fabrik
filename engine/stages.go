@@ -194,7 +194,10 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 		}
 		// fabrik:awaiting-review is NOT seeded here when wait_for_ci: true.
 		// Path 2 (checkReviewGate in the catch-up loop) handles the review gate
-		// after the CI gate clears and stage:X:complete is added (#617).
+		// after the CI gate clears and stage:X:complete is added (#617). Review
+		// *feedback* is a separate matter: settleAwaitingCIScan's handler chain
+		// detects and dispatches it during the CI wait (#1953 R1), without
+		// writing that label.
 		e.logf(item.Number, "awaiting-ci", "deferring stage:%s:complete until CI gate clears\n", stage.Name)
 		return // catch-up loop adds stage:X:complete when checkCIGate clears
 	}

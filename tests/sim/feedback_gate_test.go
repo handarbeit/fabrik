@@ -69,6 +69,10 @@ type feedbackProbe struct {
 	merges   []int
 	bodyIDs  [][]string
 	noCommit bool
+	// signalComplete makes a no-commit invocation still report
+	// FABRIK_STAGE_COMPLETE — the shape that runs handleStageComplete (and its
+	// resetCommentBreaker) after every reinvoke.
+	signalComplete bool
 	// afterCall, when non-nil, runs after each invocation (used by the R4 test
 	// to make the reviewer produce a fresh body every cycle).
 	afterCall func(n int)
@@ -90,6 +94,9 @@ func (p *feedbackProbe) script(env *Env) simclaude.CommentScript {
 		if p.noCommit {
 			if p.afterCall != nil {
 				p.afterCall(n)
+			}
+			if p.signalComplete {
+				return "nothing actionable\nFABRIK_STAGE_COMPLETE\n", true, engine.TokenUsage{InputTokens: 100, OutputTokens: 20, TurnsUsed: 1, MaxTurns: 15}, nil
 			}
 			return "nothing actionable\n", false, engine.TokenUsage{InputTokens: 100, OutputTokens: 20, TurnsUsed: 1, MaxTurns: 15}, nil
 		}
@@ -183,10 +190,23 @@ func TestFeedbackGate_MidRunReviewBodyIsReinvokedBeforeLanding(t *testing.T) {
 // commit (ReviewCycles is refunded).
 func TestFeedbackGate_ChatterConvergesToPause(t *testing.T) {
 	t.Parallel()
+	chatterConvergesToPause(t, false)
+}
+
+// The same bound must hold when every no-commit reinvoke still reports
+// FABRIK_STAGE_COMPLETE, which runs handleStageComplete and its
+// resetCommentBreaker each cycle — a reset there must not defeat R4.
+func TestFeedbackGate_ChatterWithCompletionSignalConvergesToPause(t *testing.T) {
+	t.Parallel()
+	chatterConvergesToPause(t, true)
+}
+
+func chatterConvergesToPause(t *testing.T, signalComplete bool) {
+	t.Helper()
 	env := newFeedbackGateEnv(t, func(cfg *engine.Config) {
 		cfg.MaxNoOpCommentCycles = 3
 	})
-	probe := &feedbackProbe{noCommit: true}
+	probe := &feedbackProbe{noCommit: true, signalComplete: signalComplete}
 	var reviewIDs = feedbackReviewID
 	var num int
 	seed := func() {

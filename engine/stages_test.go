@@ -1229,7 +1229,8 @@ func TestAttemptMergeOnValidate_MergeTrainOn_CruiseBypasses(t *testing.T) {
 // ── #1216: wait_for_reviews enforced at the landing decision ─────────────────
 //
 // The review gate used to be armed only by the catch-up loop's handleReviewGate,
-// which no-ops while !hasComplete (#617) and is ordered ahead of the handler that
+// whose gate half (checkReviewGate) is skipped while !hasComplete (#617; its
+// feedback detection has run in every state since #1953) and is ordered ahead of the handler that
 // clears CI — so it could never arm before attemptMergeOnValidate ran. These tests
 // pin the gate at the landing decision itself, for both merge_train modes.
 
