@@ -163,6 +163,10 @@ func (a *Auth) RunRefreshLoop(ctx context.Context, logf func(format string, args
 // mints its first token.
 func mintAuth(appID, installationID int64, botLogin string, privateKey *rsa.PrivateKey, baseURL string) (*Auth, error) {
 	client := gh.NewClientWithBaseURL("", baseURL)
+	// Pruefer's per-installation clients opt in to ETag conditional requests
+	// (#1952): a 304 is free against the installation's primary rate limit.
+	// The cache is dropped on every token rotation (Client.SetToken).
+	client.EnableConditionalRequests()
 	a := &Auth{
 		AppID:          appID,
 		InstallationID: installationID,

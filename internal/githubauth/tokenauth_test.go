@@ -418,3 +418,63 @@ func TestReconciler_RunRefreshLoops_WaitBlocksUntilGoroutinesExit(t *testing.T) 
 		t.Fatal("wait() did not return within 2s of ctx cancellation")
 	}
 }
+
+// TestMintAuth_EnablesConditionalRequests pins #1952: a minted per-installation
+// client sends If-None-Match on a repeat read and serves the 304 from cache,
+// while a plain client (the Fabrik engine's shape) never sends one.
+func TestMintAuth_EnablesConditionalRequests(t *testing.T) {
+	dir := t.TempDir()
+	privateKey, err := loadPrivateKey(writeTestPrivateKey(t, dir))
+	if err != nil {
+		t.Fatalf("loadPrivateKey: %v", err)
+	}
+	app, _ := newFakeAppServer("pruefer-bot", []gh.AppInstallation{{ID: 111, Account: "handarbeit"}}, func() time.Time {
+		return time.Now().Add(time.Hour)
+	})
+	defer app.Close()
+
+	var mu sync.Mutex
+	var inms []string
+	outer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/repos/") {
+			app.Config.Handler.ServeHTTP(w, r)
+			return
+		}
+		mu.Lock()
+		inms = append(inms, r.Header.Get("If-None-Match"))
+		mu.Unlock()
+		w.Header().Set("ETag", `"v1"`)
+		if r.Header.Get("If-None-Match") == `"v1"` {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"type": "file", "encoding": "base64", "content": "aGk="})
+	}))
+	defer outer.Close()
+
+	a, err := mintAuth(42, 111, "pruefer-bot[bot]", privateKey, outer.URL)
+	if err != nil {
+		t.Fatalf("mintAuth: %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		if got, err := a.client.FetchFileAtRef("o", "r", "f", "main"); err != nil || string(got) != "hi" {
+			t.Fatalf("call %d: %q %v", i, got, err)
+		}
+	}
+	if len(inms) != 2 || inms[0] != "" || inms[1] != `"v1"` {
+		t.Errorf("If-None-Match sequence = %q, want [\"\" \"\\\"v1\\\"\"]", inms)
+	}
+
+	inms = nil
+	plain := gh.NewClientWithBaseURL("tok", outer.URL)
+	for i := 0; i < 2; i++ {
+		if _, err := plain.FetchFileAtRef("o", "r", "f", "main"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, v := range inms {
+		if v != "" {
+			t.Errorf("plain client sent If-None-Match %q", v)
+		}
+	}
+}
