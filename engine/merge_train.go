@@ -3546,7 +3546,7 @@ func (e *Engine) ejectQueuedMemberForReviewFindings(projectID string, item gh.Pr
 	}
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	reason := fmt.Sprintf(
-		"ejected from merge-train — %d unresolved review-thread finding(s) arrived on the linked PR while this issue was Queued.",
+		"ejected from merge-train — %d unprocessed review finding(s) (review threads or review bodies) arrived on the linked PR while this issue was Queued.",
 		findingCount,
 	)
 	// diag/otherMembers are nil (no combined-Validate diagnostic exists for this

@@ -5,8 +5,10 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
 )
 
 // queuedCommentItem returns a Queued item carrying the given comments.
@@ -398,5 +400,71 @@ func TestSettleQueuedComment_FailedReroute_RetriesNextPoll(t *testing.T) {
 	client.mu.Unlock()
 	if n != 1 {
 		t.Errorf("expected the retry to post exactly one comment, got %d", n)
+	}
+}
+
+// ── settle-scan review-body cause (#1953 R2) ──────────────────────────────────
+
+func settleBodyEngine(t *testing.T, client *mockGitHubClient, reviews map[int][]gh.PRReview) *Engine {
+	t.Helper()
+	client.fetchItemDetailsFn = func(item *gh.ProjectItem) error {
+		item.LinkedPRReviews = reviews[item.Number]
+		return nil
+	}
+	return trainTestEngine(t, client, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
+}
+
+var queuedBodyReview = gh.PRReview{
+	Author: "handarbeit-pruefer", State: "COMMENTED", Body: "a real defect", DatabaseID: 5356334497, NodeID: "PRR_x",
+}
+
+// A body-only COMMENTED review arriving on a Queued member ejects it, like an
+// unresolved thread does — before #1953 the scan ignored review bodies.
+func TestSettleQueuedReviewBody_DirectEject_NoWorker(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := settleBodyEngine(t, client, map[int][]gh.PRReview{1: {queuedBodyReview}})
+
+	eng.settleQueuedReviewFindings(settleCommentBoard(queuedCommentItem(1)))
+
+	if len(client.updateStatusCalls) != 1 {
+		t.Fatalf("expected 1 reroute off Queued, got %d", len(client.updateStatusCalls))
+	}
+	client.mu.Lock()
+	calls := client.addCommentCalls
+	client.mu.Unlock()
+	if len(calls) != 1 || !strings.Contains(calls[0].body, "review finding") {
+		t.Fatalf("expected the review-finding eject comment, got %+v", calls)
+	}
+}
+
+func TestSettleQueuedReviewBody_PendingFlag_InLiveBatch(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := settleBodyEngine(t, client, map[int][]gh.PRReview{1: {queuedBodyReview}})
+	eng.store.EnterRepoWorker(mergeTrainKey("owner/repo", defaultPartitionBase))
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", defaultPartitionBase), &mergeTrainWorkerState{
+		projectID:    "PVT_1",
+		batchNumbers: map[int]bool{1: true},
+	})
+
+	eng.settleQueuedReviewFindings(settleCommentBoard(queuedCommentItem(1)))
+
+	if len(client.updateStatusCalls) != 0 {
+		t.Errorf("in-batch member must not be rerouted by the scan, got %d", len(client.updateStatusCalls))
+	}
+	if n, ok := eng.takePendingReviewEject("owner/repo", 1); !ok || n != 1 {
+		t.Errorf("expected a pending review eject of 1 finding, got %d/%v", n, ok)
+	}
+}
+
+// An addressed (or empty / dismissed) body never ejects.
+func TestSettleQueuedReviewBody_AddressedBodyDoesNotEject(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := settleBodyEngine(t, client, map[int][]gh.PRReview{1: {queuedBodyReview}})
+	eng.store.Apply(itemstate.CommentProcessed{Repo: "owner/repo", Number: 1, CommentID: "review-body:5356334497", At: time.Now()})
+
+	eng.settleQueuedReviewFindings(settleCommentBoard(queuedCommentItem(1)))
+
+	if len(client.updateStatusCalls) != 0 {
+		t.Errorf("an addressed review body must not eject, got %d reroute(s)", len(client.updateStatusCalls))
 	}
 }
