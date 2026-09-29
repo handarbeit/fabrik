@@ -221,6 +221,10 @@ type prRecord struct {
 
 	reviews        []gh.PRReview
 	reviewRequests []gh.ReviewRequest
+	// reviewReactions holds reactions on reviews (PullRequestReview is Reactable
+	// in GraphQL but not in REST), keyed by the review's node ID and then by
+	// content. Lazily allocated.
+	reviewReactions map[string]map[string]int
 
 	// reviewSchedule holds pending clock-driven mutations to reviews and
 	// reviewRequests: "the reviewer responds at T". Applied lazily by

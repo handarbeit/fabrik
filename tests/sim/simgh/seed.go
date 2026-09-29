@@ -759,6 +759,7 @@ func (s *Sim) SeedReview(ownerRepo string, prNumber int, review gh.PRReview) *Si
 	if review.SubmittedAt.IsZero() {
 		review.SubmittedAt = s.now()
 	}
+	ensureReviewNodeID(pr, &review)
 	pr.reviews = append(pr.reviews, review)
 	removeReviewRequestFor(pr, review.Author)
 	return s
@@ -1264,6 +1265,9 @@ func (s *Sim) SeedReviewsAt(ownerRepo string, prNumber int, at time.Time, review
 		pending = append(pending, rev)
 	}
 	pr.reviewSchedule.add(at, func(p *prRecord) {
+		for i := range pending {
+			ensureReviewNodeID(p, &pending[i])
+		}
 		p.reviews = append(p.reviews, pending...)
 		for _, rev := range pending {
 			removeReviewRequestFor(p, rev.Author)

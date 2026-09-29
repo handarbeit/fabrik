@@ -1,6 +1,8 @@
 package simgh
 
 import (
+	"fmt"
+
 	gh "github.com/handarbeit/fabrik/github"
 )
 
@@ -205,4 +207,84 @@ func isFormalVerdict(state string) bool {
 		return true
 	}
 	return false
+}
+
+// ensureReviewNodeID gives a review a GraphQL node ID when the scenario did not
+// set one, mirroring production where every review carries one. Derived from
+// the PR and the review's position so it is stable and unique per PR. Caller
+// must hold s.mu.
+func ensureReviewNodeID(pr *prRecord, rev *gh.PRReview) {
+	if rev.NodeID != "" {
+		return
+	}
+	rev.NodeID = fmt.Sprintf("PRR_sim_%d_%d", pr.number, len(pr.reviews)+1)
+}
+
+func cloneReviewReactions(in map[string]map[string]int) map[string]map[string]int {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]map[string]int, len(in))
+	for id, m := range in {
+		dup := make(map[string]int, len(m))
+		for k, v := range m {
+			dup[k] = v
+		}
+		out[id] = dup
+	}
+	return out
+}
+
+// AddReviewReaction reacts to a review by its GraphQL node ID (#1953 R8).
+// Reactions are stored per review and are idempotent per content, like comment
+// reactions. An unknown node ID is an error, as GraphQL would report NOT_FOUND.
+func (s *Sim) AddReviewReaction(subjectNodeID, content string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, r := range s.repos {
+		for _, pr := range r.prs {
+			s.drainReviews(pr)
+			for _, rev := range pr.reviews {
+				if rev.NodeID != subjectNodeID {
+					continue
+				}
+				if pr.reviewReactions == nil {
+					pr.reviewReactions = make(map[string]map[string]int)
+				}
+				if pr.reviewReactions[subjectNodeID] == nil {
+					pr.reviewReactions[subjectNodeID] = make(map[string]int)
+				}
+				pr.reviewReactions[subjectNodeID][content] = 1
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("simgh: review node %q not found", subjectNodeID)
+}
+
+// ReviewReactions returns the reactions recorded on the review with the given
+// database ID on ownerRepo#prNumber, keyed by content. It is the assertion
+// accessor for R8 scenarios; nil when the review has none or does not exist.
+func (s *Sim) ReviewReactions(ownerRepo string, prNumber, reviewDatabaseID int) map[string]int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.repos[ownerRepo]
+	if !ok {
+		return nil
+	}
+	pr, ok := r.prs[prNumber]
+	if !ok {
+		return nil
+	}
+	s.drainReviews(pr)
+	for _, rev := range pr.reviews {
+		if rev.DatabaseID == reviewDatabaseID {
+			out := make(map[string]int)
+			for k, v := range pr.reviewReactions[rev.NodeID] {
+				out[k] = v
+			}
+			return out
+		}
+	}
+	return nil
 }
