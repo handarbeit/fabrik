@@ -51,6 +51,7 @@ func TestMergeTrainBisectionEjectsPoisoner(t *testing.T) {
 	// without forming anything; once all three are in its cache, the release is
 	// seen in one poll. QueueMemberPaused keeps paths unique per run under
 	// e2e/train/entries/, which the poison guard scans.
+	ensurePausedLabelExists(t, env, env.RepoAlpha)
 	discoverOffset := LogOffset(t, env)
 	clean1Issue, clean1PR := QueueMemberPaused(t, env, env.RepoAlpha, base, "clean1", "e2e/train/entries/clean1.txt", "clean entry 1\n")
 	repauseOnFailure(t, env, env.RepoAlpha, clean1Issue)
