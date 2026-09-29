@@ -152,3 +152,27 @@ func TestRepoPane_DerivedRepoSetEvent_SurfacesProvenanceWarnings(t *testing.T) {
 		t.Errorf("View() does not surface the filtered-out watched_repos entry:\n%s", view)
 	}
 }
+
+// #1951: an operator watching the TUI must be able to tell a stale listing (or
+// an unknown cold-start one) from a fresh one.
+func TestRepoPane_DerivedRepoSetEvent_MarksStaleAndFailedListings(t *testing.T) {
+	var r RepoPaneComponent
+	reset := time.Date(2026, 9, 29, 18, 0, 0, 0, time.UTC)
+	comp, _ := r.Update(DerivedRepoSetEvent{
+		Repos: []DerivedRepoEntry{{Repo: "verveguy/a", InstallationID: 1}},
+		Installations: []DerivedInstallationSummary{
+			{Account: "verveguy", InstallationID: 1, RepoCount: 61, ListingFailed: true, Stale: true, RetryNotBefore: reset},
+			{Account: "coldorg", InstallationID: 2, ListingFailed: true},
+			{Account: "healthy", InstallationID: 3, RepoCount: 4},
+		},
+	})
+	view := comp.(RepoPaneComponent).View(200)
+	for _, want := range []string{"STALE: installation 1", "61 repo(s)", "2026-09-29T18:00:00Z", "installation 2 (coldorg) repo listing failed with no earlier listing"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("View() missing %q:\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, "installation 3") && strings.Contains(view, "installation 3 (healthy) repo listing") {
+		t.Errorf("a healthy installation must not be flagged:\n%s", view)
+	}
+}

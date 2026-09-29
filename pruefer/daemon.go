@@ -1053,6 +1053,13 @@ func logRederivedRepos(set githubauth.DerivedRepoSet) {
 			logf(0, "derive", "installation %d (%s, repository_selection=%s): not named in watched_repos — no token minted for it (R3)\n", inst.InstallationID, inst.Account, inst.RepositorySelection)
 		case inst.MintError != "":
 			logf(0, "derive", "installation %d (%s, repository_selection=%s): minting a token failed this round (%s) — the installation exists but is not yet usable; retry reconciliation\n", inst.InstallationID, inst.Account, inst.RepositorySelection, inst.MintError)
+		case inst.RepoListError != "" && inst.Stale:
+			// #1951: a failed listing keeps the last successful one; say so.
+			logf(0, "warn", "STALE: installation %d (%s, repository_selection=%s): repo listing failed this round (%s) — still reviewing its last successful listing of %d repo(s)%s\n", inst.InstallationID, inst.Account, inst.RepositorySelection, inst.RepoListError, inst.RepoCount, retryNotBeforeClause(inst.RetryNotBefore))
+		case inst.RepoListError != "":
+			// Cold start: nothing to fall back on. Never "0 repo(s) accessible" —
+			// that would claim a confirmed empty grant.
+			logf(0, "error", "installation %d (%s, repository_selection=%s): repo listing failed and there is no earlier listing to fall back on (%s) — no repos derived for it; its grant is unknown, not confirmed empty%s\n", inst.InstallationID, inst.Account, inst.RepositorySelection, inst.RepoListError, retryNotBeforeClause(inst.RetryNotBefore))
 		default:
 			logf(0, "derive", "installation %d (%s, repository_selection=%s): %d repo(s) accessible\n", inst.InstallationID, inst.Account, inst.RepositorySelection, inst.RepoCount)
 		}
@@ -1068,6 +1075,14 @@ func logRederivedRepos(set githubauth.DerivedRepoSet) {
 	for _, f := range set.FilteredOut {
 		logf(0, "derive", "watched_repos entry %q is not covered by any installation's grant — excluded\n", f)
 	}
+}
+
+// retryNotBeforeClause renders a rate-limit hold (#1951, R3) for a log line.
+func retryNotBeforeClause(t time.Time) string {
+	if t.IsZero() {
+		return "; will retry on the next re-derivation"
+	}
+	return "; will not retry before " + t.UTC().Format(time.RFC3339)
 }
 
 // unrecognizedInstallationAccounts extracts every currently-unrecognized
@@ -1124,6 +1139,9 @@ func derivedInstallationSummaries(set githubauth.DerivedRepoSet) []ptui.DerivedI
 		out[i] = ptui.DerivedInstallationSummary{
 			Account: inst.Account, InstallationID: inst.InstallationID,
 			RepositorySelection: inst.RepositorySelection, RepoCount: inst.RepoCount,
+			Stale:          inst.Stale,
+			ListingFailed:  inst.RepoListError != "",
+			RetryNotBefore: inst.RetryNotBefore,
 		}
 	}
 	return out

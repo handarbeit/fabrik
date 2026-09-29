@@ -732,13 +732,15 @@ func TestReconcile_SelectedModeExclusion_SoftStatusNotHardError(t *testing.T) {
 	}
 }
 
-// TestReconcile_RepoVerifyFailure_LogsSkippedNotAuthorized is the regression
-// test for a review finding: when verifyRepoAccess errors (e.g. a transient
-// failure listing /installation/repositories), the minted client is still
-// usable, but the final "✓ owner authorized" log line previously implied
-// repo access had actually been confirmed even though verification was
-// skipped. The log line must say so.
-func TestReconcile_RepoVerifyFailure_LogsSkippedNotAuthorized(t *testing.T) {
+// TestReconcile_RepoVerifyFailure_LogsListingErrorNotAuthorized: when an
+// installation's repo listing fails (e.g. a transient error) the minted client
+// is still usable, but the failure must be reported as a failed listing — an
+// error for that installation, not a success-marked "authorized" line (#1951;
+// the old "✓ ... authorized" wording implied a confirmation that never
+// happened) — and the watched repo it should have covered must not be
+// reported as "not covered by any installation's grant", since the grant is
+// unknown, not confirmed empty.
+func TestReconcile_RepoVerifyFailure_LogsListingErrorNotAuthorized(t *testing.T) {
 	oldFlow := runManifestFlow
 	runManifestFlow = failingRunManifestFlow(t)
 	defer func() { runManifestFlow = oldFlow }()
@@ -762,17 +764,17 @@ func TestReconcile_RepoVerifyFailure_LogsSkippedNotAuthorized(t *testing.T) {
 	if _, err := r.ClientForRepo(context.Background(), "someorg", "repo-one"); err != nil {
 		t.Errorf("expected the minted client to still be usable despite the verify failure: %v", err)
 	}
-	found := false
-	for _, l := range lines() {
-		if strings.Contains(l, "someorg") && strings.Contains(l, "authorized") {
-			if !strings.Contains(l, "skipped") {
-				t.Errorf("expected the authorized log line to note verification was skipped, got: %q", l)
-			}
-			found = true
-		}
+	logDerivedSet(r.LastDerived(), logf)
+	if !containsSubstring(lines(), "ERROR: installation 111 (someorg") {
+		t.Errorf("expected an error-marked line for the failed listing, got: %v", lines())
 	}
-	if !found {
-		t.Errorf("expected an authorized log line for someorg, got: %v", lines())
+	for _, l := range lines() {
+		if strings.Contains(l, "authorized") && strings.Contains(l, "someorg") {
+			t.Errorf("a failed listing must not read as an authorization success: %q", l)
+		}
+		if strings.Contains(l, "not covered by any installation's grant") {
+			t.Errorf("a repo under a failed-listing owner is unknown, not uncovered: %q", l)
+		}
 	}
 }
 
