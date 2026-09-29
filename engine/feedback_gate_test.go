@@ -164,3 +164,75 @@ func TestAttemptMergeOnValidate_HeldByUnprocessedReviewBody(t *testing.T) {
 	}
 	assertNoLanding(t, client)
 }
+
+// R2/R3: a review body that landed while the stage was running is invisible to
+// handleStageComplete's pre-run snapshot but visible to the live read — the
+// advance is held, and the stage keeps its completion label.
+func TestHandleStageComplete_HoldsAdvanceForMidRunReviewBody(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			item.LinkedPRReviews = []gh.PRReview{bodyOnlyReview}
+			return nil
+		},
+	}
+	eng := testEngineWithStages(t, client, testStagesWithValidate())
+	eng.cfg.Yolo = true
+	eng.handleStageComplete(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"},
+		gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Repo: "owner/repo"}, &stages.Stage{Name: "Research"})
+
+	if len(client.updateStatusCalls) != 0 {
+		t.Errorf("advanced with an unprocessed review body pending: %+v", client.updateStatusCalls)
+	}
+	if !hasAddLabelCall(client, "stage:Research:complete") {
+		t.Error("the completion label must still be recorded — a hold defers the advance, not the completion")
+	}
+	snap, _ := eng.store.Get("owner/repo", 1)
+	if snap.CooldownAt("feedback-pending").IsZero() {
+		t.Error("expected a feedback-pending cooldown so the item is re-evaluated")
+	}
+}
+
+// The gate is inert on a clean item: yolo still advances.
+func TestHandleStageComplete_CleanItemStillAdvances(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineWithStages(t, client, testStagesWithValidate())
+	eng.cfg.Yolo = true
+	eng.handleStageComplete(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"},
+		gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}, &stages.Stage{Name: "Research"})
+	if len(client.updateStatusCalls) != 1 {
+		t.Errorf("expected one advance, got %d", len(client.updateStatusCalls))
+	}
+}
+
+// Fail closed on the advance too: a failed live read holds.
+func TestHandleStageComplete_LiveReadFailureHoldsAdvance(t *testing.T) {
+	client := &mockGitHubClient{fetchItemDetailsFn: func(*gh.ProjectItem) error { return errors.New("boom") }}
+	eng := testEngineWithStages(t, client, testStagesWithValidate())
+	eng.cfg.Yolo = true
+	eng.handleStageComplete(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"},
+		gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}, &stages.Stage{Name: "Research"})
+	if len(client.updateStatusCalls) != 0 {
+		t.Errorf("advanced despite an unreadable feedback state: %+v", client.updateStatusCalls)
+	}
+}
+
+// The catch-up loop's non-Validate advance consults the same predicate.
+func TestRunCatchUpPhase2_HoldsAdvanceForUnprocessedReviewBody(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			item.LinkedPRReviews = []gh.PRReview{bodyOnlyReview}
+			return nil
+		},
+	}
+	eng := testEngineWithStages(t, client, testStagesWithValidate())
+	eng.cfg.Yolo = true
+	advanced := map[string]bool{}
+	eng.runCatchUpPhase2(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"},
+		gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Repo: "owner/repo", Status: "Research"}, &stages.Stage{Name: "Research"}, advanced)
+	if len(client.updateStatusCalls) != 0 {
+		t.Errorf("Phase 2 advanced with an unprocessed review body pending: %+v", client.updateStatusCalls)
+	}
+	if advanced["owner/repo#1"] {
+		t.Error("a held item must not be marked advanced")
+	}
+}

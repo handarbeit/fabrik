@@ -257,6 +257,18 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 		if e.checkDependencies(board, item, stage) {
 			return // blocked; checkDependencies handled label + comment
 		}
+		// Feedback gate (#1953 R2/R3): `item` is the pre-run snapshot, so feedback
+		// that landed while this invocation ran is invisible to it. The run is
+		// allowed to finish (nothing is injected mid-run); before the completion
+		// is treated as final and the item advances, consult the live predicate.
+		// On a hold the stage keeps stage:<X>:complete and does not advance —
+		// "final" means advance or landing, not the label — and Phase 1's
+		// handleReviewGate / the comment path dispatches the feedback on the next
+		// poll, under the ordinary reinvoke bounds, before the catch-up loop
+		// advances the item again.
+		if e.feedbackGateBlocks(item, false, "advance") {
+			return
+		}
 		// Path 1: handleStageComplete always has stale review data because
 		// reviewers are added only after MarkPRReady (which runs inside the
 		// stage). Rather than re-fetching, we optimistically apply

@@ -1873,8 +1873,10 @@ func (e *Engine) runCatchUpPhase2(ctx context.Context, board *gh.ProjectBoard, i
 		// runValidatePRTerminalAdvance (ADR-056 D2) — do not advance here.
 		return
 	}
-	if newComments := e.findNewComments(item); len(newComments) > 0 {
-		e.logf(item.Number, "advance", "skipping stage %q — %d unprocessed comment(s) pending\n", stage.Name, len(newComments))
+	// Feedback gate (#1953 R2, superseding the comments-only #1862 guard here):
+	// unprocessed comments, review threads and review bodies all hold the
+	// advance, read live rather than from this poll's deep-fetched snapshot.
+	if e.feedbackGateBlocks(item, false, "advance") {
 		return
 	}
 	if err := e.advanceToNextStage(board, item, stage); err != nil {
