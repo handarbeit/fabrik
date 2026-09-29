@@ -3,6 +3,7 @@
 **Date**: 2026-08-27
 **Status**: Accepted
 **Issue**: #1641 — derive the watched repo set from App installations instead of a hand-maintained list
+**See also**: ADR 1951 — adds a failure-only last-known-good fallback, qualifying the "never cached" premise
 
 ## Context
 
