@@ -56,6 +56,19 @@ type ReviewOutcome struct {
 	Err      error      // non-nil on a genuine failure (clone, claude invocation, API call)
 	NumTurns int        // set iff Reviewed; turns used by the claude invocation
 	CostUSD  float64    // set iff Reviewed; cost of the claude invocation
+
+	// Conclusive is true iff this outcome is a settled verdict about the PR at
+	// its current head and inputs: it was reviewed, or skipped for a reason,
+	// with no error and without any degraded read having shaped the decision
+	// (#1952 R3). Only a conclusive outcome may be memoised by the daemon. It
+	// is opt-out by construction — the zero value is "not conclusive", and
+	// ReviewPR computes it in one deferred place — because the failure modes
+	// that must not be memoised include ones ReviewPR deliberately swallows
+	// (a failed comment read treated as "no /pruefer review", a failed repo
+	// config fetch degraded to operator config, a failed files-API fallback,
+	// a failed notice post or force-review acknowledgement): none of them
+	// surface in Err, yet every one of them can make an outcome wrong.
+	Conclusive bool
 }
 
 // ReviewPR runs the full per-PR pipeline: repo-resident config resolution
@@ -129,7 +142,17 @@ type ReviewOutcome struct {
 // R5). diff is rebound to the filtered/trimmed text before validRightAnchors
 // is called below, so R6 (a finding can never anchor to an omitted file)
 // holds with no separate anchor-scrubbing logic.
-func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, clone CloneFunc, cfg Config, botLogin, owner, repo string, pr gh.PRDetails, tracker *ReviewTracker) ReviewOutcome {
+func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, clone CloneFunc, cfg Config, botLogin, owner, repo string, pr gh.PRDetails, tracker *ReviewTracker) (outcome ReviewOutcome) {
+	// degraded is set wherever a read or write whose failure ReviewPR
+	// deliberately tolerates could have shaped the outcome. See
+	// ReviewOutcome.Conclusive. Every return path passes through this defer,
+	// so a new return site that forgets to think about it is safe by
+	// construction: it can only be conclusive if it is a clean review/skip.
+	degraded := false
+	defer func() {
+		outcome.Conclusive = !degraded && outcome.Err == nil && (outcome.Reviewed || outcome.Skipped)
+	}()
+
 	// R1/R2 (#1642): resolve owner/repo's repo-resident .pruefer/config.yaml
 	// at the PR's base ref — never the head, so a PR can never change how it
 	// is itself reviewed (mirrors --setting-sources' "the PR head is
@@ -148,11 +171,15 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 	repoYAML, prov := fetchRepoConfig(client, owner, repo, pr.BaseRef)
 	cfg, warnings := applyRepoNarrowing(cfg, repoYAML)
 	logRepoConfigResolution(pr.Number, owner, repo, prov, warnings)
+	if prov.FetchFailed {
+		degraded = true // the repo's real config is unknown, not "invalid"
+	}
 
 	forceReview, err := PendingForceReview(client, owner, repo, pr.Number)
 	if err != nil {
 		logf(pr.Number, "warn", "checking for /pruefer review command on %s/%s#%d: %v\n", owner, repo, pr.Number, err)
 		forceReview = false // not fatal to the poll cycle — treat as no forced review this round
+		degraded = true     // ...but a decision made on that basis is not conclusive (#1952)
 	}
 
 	// #1610 R1/R4: cadence == on-request means no automatic review is ever
@@ -210,8 +237,10 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 		files, filesErr := client.FetchPRFiles(owner, repo, pr.Number)
 		if filesErr != nil {
 			logf(pr.Number, "select", "skipping %s/%s#%d: %s (files-API fallback also failed: %v)\n", owner, repo, pr.Number, SkipDiffTooLarge, filesErr)
+			degraded = true // the 406 is deterministic; the fallback failure is not
 			if noticeErr := postDiffUnavailableNoticeOnce(client, owner, repo, pr.Number, pr.HeadSHA); noticeErr != nil {
 				logf(pr.Number, "warn", "posting diff-unavailable notice on %s/%s#%d: %v\n", owner, repo, pr.Number, noticeErr)
+				degraded = true
 			}
 			return ReviewOutcome{Skipped: true, Reason: SkipDiffTooLarge}
 		}
@@ -281,6 +310,7 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 					owner, repo, pr.Number, preTrimBytes, len(excludedBlocks), len(blocks), excludedPathsNote(cfg.ExcludedPaths), cfg.MaxDiffBytes)
 				if noticeErr := postDiffTooLargeAfterFetchNoticeOnce(client, owner, repo, pr.Number, pr.HeadSHA, rawBytes, cfg.MaxDiffBytes, pathsOf(excludedBlocks), pathsOf(trimmedBlocks), false); noticeErr != nil {
 					logf(pr.Number, "warn", "posting diff-too-large notice on %s/%s#%d: %v\n", owner, repo, pr.Number, noticeErr)
+					degraded = true
 				}
 				return ReviewOutcome{Skipped: true, Reason: SkipDiffTooLarge}
 			}
@@ -301,6 +331,7 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 		if rawOversized && (len(omittedExcludedPaths) > 0 || len(omittedTrimmedPaths) > 0) {
 			if noticeErr := postDiffTooLargeAfterFetchNoticeOnce(client, owner, repo, pr.Number, pr.HeadSHA, rawBytes, cfg.MaxDiffBytes, omittedExcludedPaths, omittedTrimmedPaths, true); noticeErr != nil {
 				logf(pr.Number, "warn", "posting diff-too-large notice on %s/%s#%d: %v\n", owner, repo, pr.Number, noticeErr)
+				degraded = true
 			}
 		}
 	}
@@ -308,6 +339,7 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 	if forceReview {
 		if err := AcknowledgeForceReview(client, owner, repo, pr.Number); err != nil {
 			logf(pr.Number, "warn", "acknowledging /pruefer review comment on %s/%s#%d: %v\n", owner, repo, pr.Number, err)
+			degraded = true
 		}
 	}
 
@@ -389,6 +421,7 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 	if forceReview {
 		if err := MarkForceReviewsProcessed(client, owner, repo, pr.Number); err != nil {
 			logf(pr.Number, "warn", "marking /pruefer review comment processed on %s/%s#%d: %v\n", owner, repo, pr.Number, err)
+			degraded = true
 		}
 	}
 

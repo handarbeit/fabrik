@@ -76,6 +76,14 @@ type RepoConfigProvenance struct {
 	Invalid bool
 	Reason  string
 
+	// FetchFailed is true iff the file could not be read at all (a transport
+	// or API error other than "not found") — distinct from Invalid content,
+	// which is a deterministic verdict about the file. A failed fetch says
+	// nothing about what the repo's config actually is, so ReviewPR treats
+	// any outcome reached through one as non-conclusive (#1952 R3): it must
+	// never be memoised. Implies Invalid.
+	FetchFailed bool
+
 	// UnknownKeys lists any top-level YAML key present in the file that
 	// recognizedRepoConfigKeys does not recognize — whether a real
 	// operator-scoped Config field (e.g. "model", "watched_repos") or simply
@@ -104,6 +112,7 @@ func fetchRepoConfig(client GitHubReviewer, owner, repo, ref string) (yamlRepoCo
 			return yamlRepoConfig{}, prov // R3: absent file, not an error, no warning.
 		}
 		prov.Invalid = true
+		prov.FetchFailed = true
 		prov.Reason = fmt.Sprintf("fetching %s: %v", DefaultConfigPath, err)
 		return yamlRepoConfig{}, prov
 	}
