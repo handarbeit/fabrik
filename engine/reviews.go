@@ -1299,25 +1299,44 @@ func (e *Engine) buildReviewBodyComments(item gh.ProjectItem) []gh.Comment {
 // real time may have passed and review state may have changed since the
 // synchronous chain resolved it.
 func (e *Engine) resolveReviewsForFeedback(item gh.ProjectItem) []gh.PRReview {
+	reviews, err := e.resolveReviewsForFeedbackChecked(item)
+	if err != nil {
+		e.logf(item.Number, "warn", "resolveReviewsForFeedback: %v\n", err)
+		return nil
+	}
+	return reviews
+}
+
+// resolveReviewsForFeedbackChecked is resolveReviewsForFeedback with the read
+// error surfaced instead of swallowed, for the callers that must fail closed on
+// it (the feedback gate, #1953 R5). A base:<branch> item whose linked PR does not
+// exist resolves to (nil, nil) — nothing to review — exactly as before.
+func (e *Engine) resolveReviewsForFeedbackChecked(item gh.ProjectItem) ([]gh.PRReview, error) {
 	reviews := item.LinkedPRReviews
 	if itemHasBaseLabel(item) {
 		owner, repo := itemOwnerRepo(item, e.defaultRepo())
 		prNumber := item.LinkedPRNumber
 		if prNumber == 0 {
 			pr, err := e.readClient.FetchLinkedPR(owner, repo, item.Number)
-			if err != nil || pr == nil || pr.Number == 0 {
-				return nil
+			if err != nil {
+				return nil, fmt.Errorf("FetchLinkedPR failed: %w", err)
+			}
+			// FetchLinkedPR queries state=all, so a stale closed or merged PR
+			// left on the reused fabrik/issue-N branch can come back — its
+			// reviews are not this item's feedback (same filter as
+			// handleBrokenReviewLinkage and reviewGateBlocksLanding).
+			if pr == nil || pr.Number == 0 || pr.State != "open" || pr.Merged {
+				return nil, nil
 			}
 			prNumber = pr.Number
 		}
 		restReviews, err := e.readClient.FetchPRReviews(owner, repo, prNumber)
 		if err != nil {
-			e.logf(item.Number, "warn", "resolveReviewsForFeedback: FetchPRReviews failed: %v\n", err)
-			return nil
+			return nil, fmt.Errorf("FetchPRReviews failed: %w", err)
 		}
 		reviews = restReviews
 	}
-	return reviews
+	return reviews, nil
 }
 
 // buildReviewBodyCommentsFromReviews turns already-resolved reviews into

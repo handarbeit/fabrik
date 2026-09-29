@@ -203,8 +203,8 @@ func TestCommentGate_RecordsReevalCooldown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store.Get: %v", err)
 	}
-	if snap.CooldownAt("comment-pending").IsZero() {
-		t.Error("expected a comment-pending cooldown to be recorded on hold")
+	if snap.CooldownAt("feedback-pending").IsZero() {
+		t.Error("expected a feedback-pending cooldown to be recorded on hold")
 	}
 }
 

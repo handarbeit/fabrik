@@ -117,7 +117,7 @@ func (e *Engine) settleQueuedReviewFindings(board *gh.ProjectBoard) {
 //
 // Detection is filterHuman(findNewComments(item)) on the item the scan already
 // deep-fetched — findNewComments is the same "unprocessed" predicate as the Validate
-// landing gate (commentGateBlocksLanding) and the non-Validate advance guard, and the
+// landing gate (feedbackGateBlocks) and the non-Validate advance guard, and the
 // human restriction is layered over it rather than forking it. findNewComments does not
 // exclude every bot-authored comment, so filterHuman is what guarantees that a bot comment
 // never ejects a member.
