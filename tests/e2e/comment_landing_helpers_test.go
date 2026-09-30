@@ -20,12 +20,17 @@ func TestCommentLandingGateHoldCount(t *testing.T) {
 		`2026-09-26T21:51:00Z [#43 comment-gate] holding landing decision: 2 unprocessed comment(s) pending — will re-evaluate once processed`,
 		`2026-09-26T21:51:00Z [#42 advance] skipping stage "Review" — 1 unprocessed comment(s) pending`,
 		`2026-09-26T21:51:00Z [#142 comment-gate] holding landing decision: 1 unprocessed comment(s) pending — will re-evaluate once processed`,
+		`2026-09-30T04:07:10Z [#43 feedback-gate] holding landing decision — 1 unprocessed comment(s) (5903836576)`,
+		`2026-09-30T04:07:11Z [#43 feedback-gate] holding advance — 1 unprocessed review body (5356334497)`,
 	}
 	if got := countCommentGateHolds(lines, 42); got != 2 {
 		t.Errorf("issue 42: got %d holds, want 2", got)
 	}
-	if got := countCommentGateHolds(lines, 43); got != 1 {
-		t.Errorf("issue 43: got %d holds, want 1", got)
+	// #43: the legacy comment-gate hold plus the #1953 feedback-gate landing
+	// hold; the feedback-gate "holding advance … review body" line is neither a
+	// landing decision nor a comment and must not count.
+	if got := countCommentGateHolds(lines, 43); got != 2 {
+		t.Errorf("issue 43: got %d holds, want 2", got)
 	}
 	if got := countCommentGateHolds(lines, 4); got != 0 {
 		t.Errorf("issue 4 must not match #42/#142: got %d", got)
