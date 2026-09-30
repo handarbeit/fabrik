@@ -145,9 +145,19 @@ func (e *Engine) escalateNonDefaultBaseCloseFailure(item gh.ProjectItem) {
 		if itemOnDefaultBase(item) {
 			baseKind, baseWhere = "post-merge", "into the default branch and GitHub's auto-close did not fire"
 		}
+		// Name the merged PR. item.LinkedPRNumber comes from GitHub's closing-keyword
+		// link, which is empty in exactly the outage the default-base backstop
+		// exists for (#1962) — fall back to resolving it by branch, as the success
+		// path does.
+		prNum := item.LinkedPRNumber
+		if prNum == 0 {
+			if pr, err := e.client.FetchLinkedPR(owner, repo, item.Number); err == nil && pr != nil {
+				prNum = pr.Number
+			}
+		}
 		prClause := ""
-		if item.LinkedPRNumber != 0 {
-			prClause = fmt.Sprintf(" (merged via PR #%d)", item.LinkedPRNumber)
+		if prNum != 0 {
+			prClause = fmt.Sprintf(" (merged via PR #%d)", prNum)
 		}
 		comment := fmt.Sprintf(
 			"🏭 **Fabrik — %s explicit close failed**\n\nThis issue's linked PR merged%s %s, but closing the issue explicitly could not be completed after %d attempt(s). The issue has been paused.\n\nManual fix:\n```\ngh issue close %d --repo %s/%s\n```\nThen remove the `fabrik:paused` label.",
