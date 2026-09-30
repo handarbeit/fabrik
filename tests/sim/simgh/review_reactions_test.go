@@ -2,6 +2,7 @@ package simgh
 
 import (
 	"testing"
+	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
 )
@@ -60,5 +61,40 @@ func TestAddReviewReactionRecordsOnReview(t *testing.T) {
 	}
 	if err := s.AddReviewReaction("PRR_missing", "eyes"); err == nil {
 		t.Error("unknown node ID: expected error")
+	}
+}
+
+// Reviews seeded in one SeedReviewsAt batch must each get a distinct node ID:
+// the IDs are assigned before any of them is appended to the PR, so deriving
+// them from len(pr.reviews) alone gave the whole batch the same ID and made a
+// reaction land on (and be reported for) the wrong review.
+func TestSeedReviewsAtBatchGetsDistinctNodeIDs(t *testing.T) {
+	s, _ := seedBasicBoard(t)
+	seedCleanDivergence(t, s)
+	s.SeedPR(repoName, PRSeed{Number: 42, Head: headBranch, Base: "main"}).
+		SeedReviewsAt(repoName, 42, s.now().Add(-time.Minute),
+			gh.PRReview{Author: "pruefer", State: "COMMENTED", Body: "a", DatabaseID: 1},
+			gh.PRReview{Author: "gemini", State: "COMMENTED", Body: "b", DatabaseID: 2})
+	if err := s.Err(); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+	reviews, err := s.FetchPRReviews("acme", "widgets", 42)
+	if err != nil {
+		t.Fatalf("FetchPRReviews: %v", err)
+	}
+	if len(reviews) != 2 {
+		t.Fatalf("got %d reviews, want 2: %+v", len(reviews), reviews)
+	}
+	if reviews[0].NodeID == "" || reviews[0].NodeID == reviews[1].NodeID {
+		t.Fatalf("batch node IDs not distinct: %q vs %q", reviews[0].NodeID, reviews[1].NodeID)
+	}
+	if err := s.AddReviewReaction(reviews[1].NodeID, "eyes"); err != nil {
+		t.Fatalf("AddReviewReaction: %v", err)
+	}
+	if got := s.ReviewReactions(repoName, 42, 2); got["eyes"] != 1 {
+		t.Errorf("reaction not recorded on the targeted review: %v", got)
+	}
+	if got := s.ReviewReactions(repoName, 42, 1); len(got) != 0 {
+		t.Errorf("reaction leaked onto the other review in the batch: %v", got)
 	}
 }

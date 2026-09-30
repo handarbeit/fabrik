@@ -211,13 +211,15 @@ func isFormalVerdict(state string) bool {
 
 // ensureReviewNodeID gives a review a GraphQL node ID when the scenario did not
 // set one, mirroring production where every review carries one. Derived from
-// the PR and the review's position so it is stable and unique per PR. Caller
-// must hold s.mu.
-func ensureReviewNodeID(pr *prRecord, rev *gh.PRReview) {
+// the PR and the review's position so it is stable and unique per PR. offset is the
+// number of reviews about to be appended ahead of this one (0 for a single
+// review; the batch index for SeedReviewsAt, whose reviews are all appended
+// only after every ID is assigned). Caller must hold s.mu.
+func ensureReviewNodeID(pr *prRecord, rev *gh.PRReview, offset int) {
 	if rev.NodeID != "" {
 		return
 	}
-	rev.NodeID = fmt.Sprintf("PRR_sim_%d_%d", pr.number, len(pr.reviews)+1)
+	rev.NodeID = fmt.Sprintf("PRR_sim_%d_%d", pr.number, len(pr.reviews)+offset+1)
 }
 
 func cloneReviewReactions(in map[string]map[string]int) map[string]map[string]int {
