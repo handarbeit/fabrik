@@ -97,7 +97,10 @@ func (d *Daemon) ReviewFromEvent(ctx context.Context, owner, repo string, prNumb
 		return
 	}
 
-	d.executeReview(ctx, client, owner, repo, *pr)
+	// Zero stamp: the event path has no listing to stamp from, so it neither
+	// consults nor records the PR memo (#1952) — the next fallback poll
+	// re-evaluates a PR an event touched, once.
+	d.executeReview(ctx, client, owner, repo, *pr, prStamp{})
 }
 
 // reviewTriggerActions are the pull_request webhook actions that should

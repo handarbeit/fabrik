@@ -38,7 +38,7 @@ func (c *Client) FetchFileAtRef(owner, repo, path, ref string) ([]byte, error) {
 	apiURL := fmt.Sprintf("%s/repos/%s/%s/contents/%s?ref=%s",
 		c.baseURL, url.PathEscape(owner), url.PathEscape(repo), escapeRepoPath(path), url.QueryEscape(ref))
 	var resp contentsResponse
-	if err := c.restGetJSON(apiURL, &resp); err != nil {
+	if err := condGetJSON(c, apiURL, &resp); err != nil {
 		return nil, fmt.Errorf("fetching %s at %s in %s/%s: %w", path, ref, owner, repo, err)
 	}
 	if resp.Type != "file" {

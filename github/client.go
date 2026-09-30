@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -40,6 +41,30 @@ type Client struct {
 	graphqlStats RateLimitStats
 
 	mergeStrategy string
+
+	// reqTotal / reqNotModified count every HTTP request this client issued
+	// and how many of them came back 304 (#1952). Read via RequestStats.
+	reqTotal       atomic.Int64
+	reqNotModified atomic.Int64
+
+	// cond is the opt-in conditional-request cache (#1952); nil (the default)
+	// means no If-None-Match is ever sent. See EnableConditionalRequests.
+	cond *condCache
+}
+
+// RequestStats is a cumulative count of the HTTP requests a Client has issued.
+type RequestStats struct {
+	// Total is every request sent (REST and GraphQL), whatever the outcome.
+	Total int64
+	// NotModified is the subset answered 304 Not Modified — GitHub does not
+	// count these against the primary rate limit.
+	NotModified int64
+}
+
+// RequestStats returns the client's cumulative request counters. Safe for
+// concurrent use; callers compute per-interval cost by differencing two reads.
+func (c *Client) RequestStats() RequestStats {
+	return RequestStats{Total: c.reqTotal.Load(), NotModified: c.reqNotModified.Load()}
 }
 
 // SetMergeStrategy configures the merge method MergePR attempts first
@@ -65,8 +90,16 @@ func (c *Client) MergeStrategy() string {
 // in place without reconstructing the client (see ADR-1113).
 func (c *Client) SetToken(token string) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	changed := c.token != token
 	c.token = token
+	cond := c.cond
+	c.mu.Unlock()
+	// A cached ETag/body belongs to the identity that fetched it. Drop the
+	// cache on a real credential change rather than rely on GitHub's
+	// Vary: Authorization (#1952).
+	if changed && cond != nil {
+		cond.clear()
+	}
 }
 
 // Token returns the client's current bearer token, safe for concurrent use
@@ -185,6 +218,7 @@ func (c *Client) graphqlRequest(query string, variables map[string]interface{}, 
 	}
 	req.Header.Set("Content-Type", "application/json")
 
+	c.reqTotal.Add(1)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("executing request: %w", err)

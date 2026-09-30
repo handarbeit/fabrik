@@ -488,7 +488,7 @@ func TestDaemonEventSink_ReviewFromEvent_AcquiresSemaphoreBeforePRLock(t *testin
 	// Saturate the daemon's single concurrency slot with a bystander review
 	// of an unrelated PR (#99), the same dispatch path poll() itself uses.
 	var wg sync.WaitGroup
-	d.reviewOne(context.Background(), &wg, client, "owner", "repo", bystanderPR)
+	d.reviewOne(context.Background(), &wg, client, "owner", "repo", bystanderPR, prStamp{})
 	select {
 	case <-started:
 	case <-time.After(2 * time.Second):

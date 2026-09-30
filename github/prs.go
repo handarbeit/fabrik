@@ -424,6 +424,11 @@ type PRDetails struct {
 	Merged  bool
 	Draft   bool
 	HeadSHA string
+	// UpdatedAt is the PR's updated_at timestamp exactly as GitHub returned it
+	// (RFC 3339, opaque to callers — compare for equality only). Populated by
+	// ListOpenPRs (#1952); other constructors leave it empty, which callers
+	// must treat as "unknown", never as "unchanged".
+	UpdatedAt string
 	// HeadRefName is the PR's head branch name (e.g. "fabrik/merge-train/…").
 	// Populated by ListPRs (from head.ref); other constructors may leave it empty.
 	HeadRefName string
@@ -875,7 +880,9 @@ func (c *Client) ListOpenPRs(owner, repo string) ([]PRDetails, error) {
 		State  string `json:"state"`
 		Draft  bool   `json:"draft"`
 		Body   string `json:"body"`
-		User   struct {
+		// UpdatedAt is GitHub's updated_at, kept verbatim (#1952).
+		UpdatedAt string `json:"updated_at"`
+		User      struct {
 			Login string `json:"login"`
 		} `json:"user"`
 		Labels []rawLabel `json:"labels"`
@@ -903,6 +910,7 @@ func (c *Client) ListOpenPRs(owner, repo string) ([]PRDetails, error) {
 			Draft:       pr.Draft,
 			Body:        pr.Body,
 			HeadSHA:     pr.Head.SHA,
+			UpdatedAt:   pr.UpdatedAt,
 			HeadRefName: pr.Head.Ref,
 			Author:      pr.User.Login,
 			Labels:      labelNames(pr.Labels),

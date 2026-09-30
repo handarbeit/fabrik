@@ -106,6 +106,16 @@ func (c *Client) do(method, url string, body interface{}) (*http.Response, []byt
 // GitHub's diff format) while sharing the rest of the request/error-handling
 // pipeline.
 func (c *Client) doWithAccept(method, url, accept string, body interface{}) (*http.Response, []byte, error) {
+	return c.doWithHeaders(method, url, accept, nil, body)
+}
+
+// doWithHeaders is doWithAccept plus caller-supplied extra request headers
+// (e.g. If-None-Match, #1952). Every request it executes is counted in the
+// client's RequestStats, and a 304 is additionally counted as NotModified. A
+// 304 is not an error here (status < 400) and carries an empty body — callers
+// that send a conditional header own its handling; doWithAccept never sends
+// one, so existing callers never see a 304.
+func (c *Client) doWithHeaders(method, url, accept string, extra http.Header, body interface{}) (*http.Response, []byte, error) {
 	var reader io.Reader
 	if body != nil {
 		jsonBody, err := json.Marshal(body)
@@ -133,13 +143,22 @@ func (c *Client) doWithAccept(method, url, accept string, body interface{}) (*ht
 		req.Header.Set("Content-Type", "application/json")
 	}
 	req.Header.Set("Accept", accept)
+	for k, vs := range extra {
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
+	}
 
+	c.reqTotal.Add(1)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, nil, fmt.Errorf("executing request: %w", err)
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusNotModified {
+		c.reqNotModified.Add(1)
+	}
 	c.updateRestStats(resp.Header)
 
 	respBody, err := io.ReadAll(resp.Body)
@@ -273,11 +292,16 @@ const restMaxPages = 100
 // never returns a short page, and is reported as the latter. At 10,000 records
 // that is far outside any real review list, comment thread, or open-PR set, and
 // erring toward "refuse" beats erring toward a silent truncation.
+//
+// Each page is fetched through condGetJSON (#1952): every page is still
+// requested on every call, each with its own URL-keyed ETag, so a 304 on page 1
+// cannot hide a change on page 2. Cached chunks are copied into the fresh
+// accumulator, never mutated or returned directly.
 func paginateREST[T any](c *Client, what string, urlFor func(page int) string) ([]T, error) {
 	var all []T
 	for page := 1; page <= restMaxPages; page++ {
 		var chunk []T
-		if err := c.restGetJSON(urlFor(page), &chunk); err != nil {
+		if err := condGetJSON(c, urlFor(page), &chunk); err != nil {
 			return nil, err
 		}
 		all = append(all, chunk...)

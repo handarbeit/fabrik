@@ -70,6 +70,7 @@ type fakeReviewer struct {
 	diffCalls      int
 	filesCalls     int
 	fileAtRefCalls []fileAtRefCall
+	reviewsFetches int // FetchPRReviews calls (#1952)
 }
 
 type fileAtRefCall struct {
@@ -154,6 +155,7 @@ func (f *fakeReviewer) filesCallCount() int {
 func (f *fakeReviewer) FetchPRReviews(owner, repo string, prNumber int) ([]gh.PRReview, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.reviewsFetches++
 	if f.reviewsErr != nil {
 		return nil, f.reviewsErr
 	}
