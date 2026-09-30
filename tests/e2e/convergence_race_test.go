@@ -103,6 +103,15 @@ func TestConvergenceRace(t *testing.T) {
 		}(i)
 	}
 	fileWg.Wait()
+	// A t.Fatalf inside the setup goroutines above ends only that goroutine,
+	// not the test: before this check a GitHub blip during setup left a zero
+	// issue number and the test then waited 90 minutes for "#0" to close
+	// (0.0.83 gate run 13). Fail fast instead.
+	for i, n := range nums {
+		if n == 0 {
+			t.Fatalf("setup failed for contention issue %d (%q) — see the setup error above; not an engine regression, re-run", i, pairs[i].title)
+		}
+	}
 	t.Logf("filed contention pair: %s#%d and %s#%d", env.RepoAlpha, nums[0], env.RepoAlpha, nums[1])
 
 	// Both must reach closed (merged). Wait in parallel — one will close
