@@ -232,6 +232,22 @@ func TestSettleScan_AwaitingClose(t *testing.T) {
 		assertNotPausedYet(t, env, num, 1)
 
 		RunPoll(t, env)
+		// No base: label → a default-base item: since #1962 the marker also backstops
+		// GitHub's Closes #N auto-close there, and the escalation says so.
+		assertEscalatedExactlyOnce(t, env, num, "fabrik:awaiting-close", "🏭 **Fabrik — post-merge explicit close failed**", 3)
+	})
+
+	t.Run("escalates after MaxRetries (base:<branch>)", func(t *testing.T) {
+		t.Parallel()
+		env := settleScanEnv(t)
+		num := FileIssue(t, env, "awaiting-close escalation base", "body", "Validate",
+			"stage:Validate:complete", "fabrik:awaiting-close", "base:release")
+		env.Sim.Faults().FailAlways("CloseIssue", errInjectedSettleFault)
+
+		RunPoll(t, env)
+		assertNotPausedYet(t, env, num, 1)
+
+		RunPoll(t, env)
 		assertEscalatedExactlyOnce(t, env, num, "fabrik:awaiting-close", "🏭 **Fabrik — non-default-base explicit close failed**", 3)
 	})
 }

@@ -13,12 +13,12 @@ import (
 // auto-close finally landed, or a human closed it manually), the settle pass must skip the
 // redundant CloseIssue call and just clear the marker.
 func TestSettleNonDefaultBaseClose_AlreadyClosed_SkipsCloseAndClearsMarker(t *testing.T) {
-	client := &mockGitHubClient{}
+	client := &mockGitHubClient{fetchIssueFn: func(_, _ string, n int) (*gh.IssueData, error) { return &gh.IssueData{Number: n, State: "open"}, nil }}
 	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	item := gh.ProjectItem{
 		Number: 9, Repo: "owner/repo", IsClosed: true,
-		Labels: []string{nonDefaultBaseAwaitingCloseLabel},
+		Labels: []string{nonDefaultBaseAwaitingCloseLabel, "base:release"}, // non-default base (#1962: unlabelled = default base)
 	}
 
 	eng.settleNonDefaultBaseClose(item)
@@ -43,13 +43,14 @@ func TestSettleNonDefaultBaseClose_AlreadyClosed_SkipsCloseAndClearsMarker(t *te
 // on this pass, the marker is cleared, and the retry counter resets.
 func TestSettleNonDefaultBaseClose_RetrySucceeds(t *testing.T) {
 	client := &mockGitHubClient{
+		fetchIssueFn: func(_, _ string, n int) (*gh.IssueData, error) { return &gh.IssueData{Number: n, State: "open"}, nil }, // live read (#1962)
 		closeIssueFn: func(owner, repo string, n int) error { return nil },
 	}
 	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	item := gh.ProjectItem{
 		Number: 10, Repo: "owner/repo", IsClosed: false,
-		Labels: []string{nonDefaultBaseAwaitingCloseLabel},
+		Labels: []string{nonDefaultBaseAwaitingCloseLabel, "base:release"}, // non-default base (#1962: unlabelled = default base)
 	}
 
 	eng.settleNonDefaultBaseClose(item)
@@ -74,6 +75,7 @@ func TestSettleNonDefaultBaseClose_RetrySucceeds(t *testing.T) {
 // retry counter — verified indirectly via TestRecordNonDefaultBaseCloseRetry_EscalatesAtMaxRetries.
 func TestSettleNonDefaultBaseClose_RetryFails_MarkerStays(t *testing.T) {
 	client := &mockGitHubClient{
+		fetchIssueFn: func(_, _ string, n int) (*gh.IssueData, error) { return &gh.IssueData{Number: n, State: "open"}, nil }, // live read (#1962)
 		closeIssueFn: func(owner, repo string, n int) error { return fmt.Errorf("rate limited") },
 	}
 	eng := testEngine(t, client, &mockClaudeInvoker{})
@@ -81,7 +83,7 @@ func TestSettleNonDefaultBaseClose_RetryFails_MarkerStays(t *testing.T) {
 
 	item := gh.ProjectItem{
 		Number: 11, Repo: "owner/repo", IsClosed: false,
-		Labels: []string{nonDefaultBaseAwaitingCloseLabel},
+		Labels: []string{nonDefaultBaseAwaitingCloseLabel, "base:release"}, // non-default base (#1962: unlabelled = default base)
 	}
 
 	eng.settleNonDefaultBaseClose(item)
@@ -103,6 +105,7 @@ func TestSettleNonDefaultBaseClose_RetryFails_MarkerStays(t *testing.T) {
 // fought by this scan.
 func TestSettleNonDefaultBaseCloses_SkipsPausedItems(t *testing.T) {
 	client := &mockGitHubClient{
+		fetchIssueFn: func(_, _ string, n int) (*gh.IssueData, error) { return &gh.IssueData{Number: n, State: "open"}, nil }, // live read (#1962)
 		closeIssueFn: func(owner, repo string, n int) error { return nil },
 	}
 	eng := testEngine(t, client, &mockClaudeInvoker{})
@@ -129,6 +132,7 @@ func TestSettleNonDefaultBaseCloses_SkipsPausedItems(t *testing.T) {
 // items carrying the durable marker.
 func TestSettleNonDefaultBaseCloses_SkipsItemsWithoutMarker(t *testing.T) {
 	client := &mockGitHubClient{
+		fetchIssueFn: func(_, _ string, n int) (*gh.IssueData, error) { return &gh.IssueData{Number: n, State: "open"}, nil }, // live read (#1962)
 		closeIssueFn: func(owner, repo string, n int) error { return nil },
 	}
 	eng := testEngine(t, client, &mockClaudeInvoker{})
@@ -154,6 +158,7 @@ func TestSettleNonDefaultBaseCloses_SkipsItemsWithoutMarker(t *testing.T) {
 // merged PR.
 func TestRecordNonDefaultBaseCloseRetry_EscalatesAtMaxRetries(t *testing.T) {
 	client := &mockGitHubClient{
+		fetchIssueFn: func(_, _ string, n int) (*gh.IssueData, error) { return &gh.IssueData{Number: n, State: "open"}, nil }, // live read (#1962)
 		closeIssueFn: func(owner, repo string, n int) error { return fmt.Errorf("rate limited") },
 	}
 	eng := testEngine(t, client, &mockClaudeInvoker{})
@@ -161,7 +166,7 @@ func TestRecordNonDefaultBaseCloseRetry_EscalatesAtMaxRetries(t *testing.T) {
 
 	item := gh.ProjectItem{
 		Number: 12, Repo: "owner/repo", IsClosed: false, LinkedPRNumber: 55,
-		Labels: []string{nonDefaultBaseAwaitingCloseLabel},
+		Labels: []string{nonDefaultBaseAwaitingCloseLabel, "base:release"}, // non-default base (#1962: unlabelled = default base)
 	}
 
 	for i := 0; i < eng.cfg.MaxRetries; i++ {
@@ -207,6 +212,7 @@ func TestRecordNonDefaultBaseCloseRetry_EscalatesAtMaxRetries(t *testing.T) {
 // never escalate.
 func TestRecordNonDefaultBaseCloseRetry_UnlimitedWhenMaxRetriesZero(t *testing.T) {
 	client := &mockGitHubClient{
+		fetchIssueFn: func(_, _ string, n int) (*gh.IssueData, error) { return &gh.IssueData{Number: n, State: "open"}, nil }, // live read (#1962)
 		closeIssueFn: func(owner, repo string, n int) error { return fmt.Errorf("rate limited") },
 	}
 	eng := testEngine(t, client, &mockClaudeInvoker{})
@@ -214,7 +220,7 @@ func TestRecordNonDefaultBaseCloseRetry_UnlimitedWhenMaxRetriesZero(t *testing.T
 
 	item := gh.ProjectItem{
 		Number: 13, Repo: "owner/repo", IsClosed: false,
-		Labels: []string{nonDefaultBaseAwaitingCloseLabel},
+		Labels: []string{nonDefaultBaseAwaitingCloseLabel, "base:release"}, // non-default base (#1962: unlabelled = default base)
 	}
 
 	for i := 0; i < 10; i++ {

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
@@ -64,6 +65,25 @@ func (e *Engine) settleNonDefaultBaseClose(item gh.ProjectItem) {
 		e.clearNonDefaultBaseCloseMarker(item, owner, repo)
 		return
 	}
+	// Decide on the live state, on every base. The board snapshot can lag a close
+	// (a late GitHub auto-close, or any other actor) by a poll, and CloseIssue is a
+	// bare PATCH that succeeds on an already-closed issue — so without a live read
+	// this path could re-close it (overwriting its state_reason) and, on the
+	// default base, post a false "auto-close did not fire" comment. An unreadable
+	// state waits for the next poll rather than risk either, but counts toward the
+	// same retry budget as a failed close, so a persistently unreadable issue still
+	// escalates (ADR-1097) instead of stalling silently.
+	iss, err := e.client.FetchIssue(owner, repo, item.Number)
+	if err != nil || iss == nil {
+		e.logf(item.Number, "pr-terminal", "retry: could not read #%d's state (%v) — deferring the close check to the next poll\n", item.Number, err)
+		e.recordNonDefaultBaseCloseRetry(item)
+		return
+	}
+	if iss.State == "closed" {
+		e.logf(item.Number, "pr-terminal", "issue #%d already closed — clearing awaiting-close marker\n", item.Number)
+		e.clearNonDefaultBaseCloseMarker(item, owner, repo)
+		return
+	}
 
 	if err := e.client.CloseIssue(owner, repo, item.Number); err != nil {
 		e.logf(item.Number, "pr-terminal", "retry: could not close #%d: %v\n", item.Number, err)
@@ -74,8 +94,33 @@ func (e *Engine) settleNonDefaultBaseClose(item gh.ProjectItem) {
 	if c := e.cache(); c != nil {
 		c.ApplyIssueClosed(boardcache.ItemKey(owner+"/"+repo, item.Number))
 	}
-	e.logf(item.Number, "pr-terminal", "closed #%d (retry)\n", item.Number)
+	if itemOnDefaultBase(item) {
+		// The default-base backstop (#1962, guardDefaultBaseAutoClose): GitHub's
+		// Closes #N auto-close should have closed this issue and did not. Say so
+		// on the issue, naming the merged PR — resolved by branch, since GitHub's
+		// closing-keyword link is exactly what may be missing.
+		prClause := "its merged PR"
+		if pr, perr := e.client.FetchLinkedPR(owner, repo, item.Number); perr == nil && pr != nil && pr.Number != 0 {
+			prClause = fmt.Sprintf("PR #%d", pr.Number)
+		}
+		e.logf(item.Number, "pr-terminal", "GitHub auto-close did not fire for #%d — closed explicitly (default base, %s)\n", item.Number, prClause)
+		e.postItemComment(item, fmt.Sprintf(
+			"🏭 **Fabrik — closed after merge**\n\n%s merged into the default branch, but GitHub's `Closes #%d` auto-close did not fire. Fabrik closed this issue explicitly.",
+			strings.ToUpper(prClause[:1])+prClause[1:], item.Number), false)
+	} else {
+		e.logf(item.Number, "pr-terminal", "closed #%d (retry)\n", item.Number)
+	}
 	e.clearNonDefaultBaseCloseMarker(item, owner, repo)
+}
+
+// itemOnDefaultBase reports whether the item targets the repository default
+// branch as far as the settle scan can tell without a worktree: no base:
+// label. It decides only wording — the "closed after merge" comment and the
+// escalation text — never whether or how the issue is closed (the live read
+// above runs on every base). A base: label that names the default branch is
+// therefore worded as non-default: rare, and cosmetic.
+func itemOnDefaultBase(item gh.ProjectItem) bool {
+	return !itemHasBaseLabel(item)
 }
 
 // recordNonDefaultBaseCloseRetry increments the in-memory retry counter for a stalled
@@ -99,13 +144,27 @@ func (e *Engine) escalateNonDefaultBaseCloseFailure(item gh.ProjectItem) {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 
 	e.escalateSettle(item, nonDefaultBaseAwaitingCloseLabel, nonDefaultBaseCloseRetryStage, func(item gh.ProjectItem) {
+		baseKind, baseWhere := "non-default-base", "onto a non-default base branch"
+		if itemOnDefaultBase(item) {
+			baseKind, baseWhere = "post-merge", "into the default branch and GitHub's auto-close did not fire"
+		}
+		// Name the merged PR. item.LinkedPRNumber comes from GitHub's closing-keyword
+		// link, which is empty in exactly the outage the default-base backstop
+		// exists for (#1962) — fall back to resolving it by branch, as the success
+		// path does.
+		prNum := item.LinkedPRNumber
+		if prNum == 0 {
+			if pr, err := e.client.FetchLinkedPR(owner, repo, item.Number); err == nil && pr != nil {
+				prNum = pr.Number
+			}
+		}
 		prClause := ""
-		if item.LinkedPRNumber != 0 {
-			prClause = fmt.Sprintf(" (merged via PR #%d)", item.LinkedPRNumber)
+		if prNum != 0 {
+			prClause = fmt.Sprintf(" (merged via PR #%d)", prNum)
 		}
 		comment := fmt.Sprintf(
-			"🏭 **Fabrik — non-default-base explicit close failed**\n\nThis issue's linked PR merged%s onto a non-default base branch, but closing the issue explicitly could not be completed after %d attempt(s). The issue has been paused.\n\nManual fix:\n```\ngh issue close %d --repo %s/%s\n```\nThen remove the `fabrik:paused` label.",
-			prClause, e.cfg.MaxRetries, item.Number, owner, repo,
+			"🏭 **Fabrik — %s explicit close failed**\n\nThis issue's linked PR merged%s %s, but closing the issue explicitly could not be completed after %d attempt(s). The issue has been paused.\n\nManual fix:\n```\ngh issue close %d --repo %s/%s\n```\nThen remove the `fabrik:paused` label.",
+			baseKind, prClause, baseWhere, e.cfg.MaxRetries, item.Number, owner, repo,
 		)
 		e.postItemComment(item, comment, true)
 	})
