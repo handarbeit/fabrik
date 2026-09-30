@@ -204,8 +204,23 @@ func FileIssue(t *testing.T, env *Env, repo, title, body string, labels ...strin
 func AddIssueToProject(t *testing.T, env *Env, repo string, issueNumber int) string {
 	t.Helper()
 	url := fmt.Sprintf("https://github.com/%s/issues/%d", repo, issueNumber)
-	out, err := ghOutput(env, "project", "item-add", fmt.Sprint(env.ProjectNumber),
-		"--owner", env.ProjectOwner, "--url", url, "--format", "json")
+	// item-add is idempotent (re-adding an issue returns its existing item), so
+	// a failed call is retried unconditionally: a GitHub blip here failed a
+	// scenario's setup with a bare "exit status 1" (0.0.83 gate run 13,
+	// TestConvergenceRace).
+	var out string
+	var err error
+	for attempt := 1; attempt <= 4; attempt++ {
+		out, err = ghOutput(env, "project", "item-add", fmt.Sprint(env.ProjectNumber),
+			"--owner", env.ProjectOwner, "--url", url, "--format", "json")
+		if err == nil {
+			break
+		}
+		if attempt < 4 {
+			t.Logf("add #%d to project failed (attempt %d/4), retrying: %v %s", issueNumber, attempt, err, strings.TrimSpace(out))
+			time.Sleep(time.Duration(attempt*5) * time.Second)
+		}
+	}
 	if err != nil {
 		t.Fatalf("add #%d to project: %v\n%s", issueNumber, err, out)
 	}
