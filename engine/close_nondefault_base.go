@@ -41,6 +41,7 @@ func (e *Engine) closeIssueIfNonDefaultBase(item gh.ProjectItem, prNumber int) {
 	// e.worktreesFor pattern other callers use, since runValidatePRTerminalAdvance
 	// has no guarantee a WorktreeManager is registered for item.Repo yet.
 	if !itemHasBaseLabel(item) {
+		e.guardDefaultBaseAutoClose(item, prNumber)
 		return
 	}
 
@@ -67,7 +68,9 @@ func (e *Engine) closeIssueIfNonDefaultBase(item gh.ProjectItem, prNumber int) {
 		return
 	}
 	if base == def {
-		// The common case: GitHub's own Closes #N auto-close already handles this.
+		// A base: label naming the default branch: GitHub's own Closes #N
+		// auto-close is supposed to handle it — guarded like the unlabelled case.
+		e.guardDefaultBaseAutoClose(item, prNumber)
 		return
 	}
 
@@ -90,4 +93,38 @@ func (e *Engine) closeIssueIfNonDefaultBase(item gh.ProjectItem, prNumber int) {
 	if c := e.cache(); c != nil {
 		c.ApplyIssueClosed(boardcache.ItemKey(owner+"/"+repo, item.Number))
 	}
+}
+
+// guardDefaultBaseAutoClose backstops GitHub's Closes #N auto-close for a PR
+// merged into the repository's default branch (#1962). GitHub is supposed to
+// close the issue 1–2 s after the merge, but can silently fail to: on
+// 2026-09-30 it stopped creating closing-keyword links for new PRs and dropped
+// the auto-close even for already-linked ones, with no declared incident
+// (liminis-context-graph#629, fabrik-test-alpha#7203). A Done item whose issue
+// stays open then never closes.
+//
+// It does not close immediately: a landing path such as the singleton fast
+// path reaches here within the auto-close's own latency, and closing then
+// would race GitHub and misreport a miss. Instead a live read — never the board
+// snapshot, which predates the merge — decides: already closed means GitHub did
+// its job and nothing happens; still open (or unreadable) records the
+// fabrik:awaiting-close marker, and settleNonDefaultBaseCloses closes it on a
+// later poll — by which point any genuine auto-close has long landed and simply
+// clears the marker — through the same retry/escalation path the non-default
+// base close uses (ADR-1097).
+func (e *Engine) guardDefaultBaseAutoClose(item gh.ProjectItem, prNumber int) {
+	if item.IsClosed {
+		return
+	}
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	iss, err := e.client.FetchIssue(owner, repo, item.Number)
+	switch {
+	case err == nil && iss != nil && iss.State == "closed":
+		return
+	case err != nil || iss == nil:
+		e.logf(item.Number, "pr-terminal", "could not read #%d's state after merge of PR #%d: %v — scheduling an explicit close check\n", item.Number, prNumber, err)
+	default:
+		e.logf(item.Number, "pr-terminal", "issue #%d still open after PR #%d merged into the default branch — scheduling an explicit close in case GitHub's auto-close does not fire\n", item.Number, prNumber)
+	}
+	e.markNonDefaultBaseCloseOutstanding(item, owner, repo)
 }

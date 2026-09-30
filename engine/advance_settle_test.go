@@ -489,6 +489,11 @@ func TestRunValidatePRTerminalAdvance_SettlesIntoStablePause(t *testing.T) {
 		updateProjectItemStatusFn: func(projectID, itemID, statusFieldID, statusOptionID string) error {
 			return missingDoneOptionErr()
 		},
+		// GitHub's auto-close did fire, so the #1962 default-base close guard is a
+		// no-op and this test stays about the advance-failure escalation alone.
+		fetchIssueFn: func(owner, repo string, n int) (*gh.IssueData, error) {
+			return &gh.IssueData{Number: n, State: "closed"}, nil
+		},
 	}
 	stgs := terminalAdvanceStages()
 	eng := testEngineWithStages(t, client, stgs)

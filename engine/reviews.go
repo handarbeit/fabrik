@@ -379,17 +379,25 @@ func (e *Engine) handleBrokenReviewLinkage(owner, repo string, item gh.ProjectIt
 		return false, 0
 	}
 
+	// Confirm against the PR body on every path before concluding the linkage
+	// is broken (#1962). LinkedPRNumber comes from GitHub's
+	// closedByPullRequestsReferences, which is structurally empty on a
+	// base:<branch> repo, can lag a freshly opened PR, can be a stale cached
+	// snapshot taken before the PR existed, and on 2026-09-30 stopped being
+	// populated at all for new PRs. The body's closing keyword is the ground
+	// truth; a PR whose body references the issue is not broken.
+	closingIssues, err := e.readClient.FetchPRClosingIssues(owner, repo, pr.Number)
+	if err != nil {
+		// Transient fetch error: skip verification rather than false-positive pausing.
+		e.logf(item.Number, "warn", "handleBrokenReviewLinkage: FetchPRClosingIssues failed: %v\n", err)
+		return false, pr.Number
+	}
+	if slices.Contains(closingIssues, item.Number) {
+		// Linkage confirmed via PR body — not broken; let the gate proceed normally.
+		return false, pr.Number
+	}
+
 	if itemHasBaseLabel(item) {
-		closingIssues, err := e.readClient.FetchPRClosingIssues(owner, repo, pr.Number)
-		if err != nil {
-			// Transient fetch error: skip verification rather than false-positive pausing.
-			e.logf(item.Number, "warn", "handleBrokenReviewLinkage: FetchPRClosingIssues failed: %v\n", err)
-			return false, pr.Number
-		}
-		if slices.Contains(closingIssues, item.Number) {
-			// Linkage confirmed via PR body — not broken; let the gate proceed normally.
-			return false, pr.Number
-		}
 		e.logf(item.Number, "review-gate", "broken linkage: PR #%d (base:<branch> repo) exists on branch fabrik/issue-%d but its body lacks a closing keyword\n", pr.Number, item.Number)
 		msg := fmt.Sprintf(
 			"🏭 **Fabrik — broken PR↔issue linkage**\n\n"+
