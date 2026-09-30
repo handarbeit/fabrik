@@ -2232,19 +2232,25 @@ func AssertPRAuthorIsExpectedIdentity(t *testing.T, env *Env, repo string, prNum
 	}
 	actual := strings.TrimSpace(out)
 	expected := TokenLogin(t, env.GHToken)
+	source := "the test bed's token resolves to"
 	// On an App-auth bed the engine authors as the App installation
 	// (<slug>[bot]), not as the token's user: expect the login its startup
 	// banner reports.
 	if data, rerr := os.ReadFile(bedRunLogPath(env)); rerr == nil {
 		if login := bedAuthIdentity(string(data)); login != "" {
 			expected = login
+			source = "the bed's startup banner reports the GitHub App identity"
 		}
 	}
 	if actual != expected {
-		t.Fatalf("engine identity mismatch: PR #%d on %s was authored by %q but the test bed's token resolves to %q — "+
-			"the engine process is very likely authenticating as a different identity than FABRIK_TOKEN "+
-			"(e.g. FABRIK_TOKEN itself shadowed by an export in the launching shell; see handarbeit/fabrik#925 Confound 1)",
-			prNumber, repo, actual, expected)
+		cause := "the engine process is very likely authenticating as a different identity than FABRIK_TOKEN " +
+			"(e.g. FABRIK_TOKEN itself shadowed by an export in the launching shell; see handarbeit/fabrik#925 Confound 1)"
+		if expected != TokenLogin(t, env.GHToken) {
+			cause = "the engine authored the PR as someone other than its own GitHub App installation " +
+				"(check the bed's App config and whether a PAT path was taken)"
+		}
+		t.Fatalf("engine identity mismatch: PR #%d on %s was authored by %q but %s %q — %s",
+			prNumber, repo, actual, source, expected, cause)
 	}
 }
 
