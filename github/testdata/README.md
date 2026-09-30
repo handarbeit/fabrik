@@ -171,6 +171,12 @@ set was migrated):
 - `enqueuePullRequestMutation`, `dequeuePullRequestMutation`
 - `archiveProjectItemMutation`, `fetchStatusFieldQuery`
 - `resolveReviewThreadMutation`
+- `addReactionMutation` (#1953 R8 — the first reaction mutation, and the first
+  with a `PullRequestReview` subject; REST cannot react to a review). Its
+  request shape (`subjectId` = review node ID, uppercase `content`) is pinned
+  by `review_reaction_test.go`, which serves the real recorded response
+  (`recordings/add_review_reaction.json`, captured by `record-fixtures.sh`'s
+  `add_review_reaction` step against a disposable sandbox PR review).
 
 **REST surface not in R5's named list**: `FetchLatestRelease`,
 `FetchRepoAccess`, `FetchInstalledVersion` (`github/client.go`),

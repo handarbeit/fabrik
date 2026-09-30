@@ -93,21 +93,45 @@ func (e *Engine) settleQueuedReviewFindings(board *gh.ProjectBoard) {
 				continue
 			}
 
-			findings := e.currentHeadReviewThreadComments(item)
+			findings := e.queuedReviewFindings(item)
 			if len(findings) == 0 {
 				e.settleQueuedCommentCause(board.ProjectID, g.repoKey, g.trainKey, item, batchNumbers[item.Number])
 				continue
 			}
 
 			if batchNumbers[item.Number] {
-				e.logf(item.Number, "queued-review-settle", "%d unresolved review-thread finding(s) on Queued member #%d — owned by the live batch for %s, flagging pending eject\n", len(findings), item.Number, g.trainKey)
+				e.logf(item.Number, "queued-review-settle", "%d unprocessed review finding(s) (threads or review bodies) on Queued member #%d — owned by the live batch for %s, flagging pending eject\n", len(findings), item.Number, g.trainKey)
 				e.markPendingReviewEject(g.repoKey, item.Number, len(findings))
 				continue
 			}
-			e.logf(item.Number, "queued-review-settle", "%d unresolved review-thread finding(s) on Queued member #%d — not owned by any live batch for %s, ejecting directly\n", len(findings), item.Number, g.trainKey)
+			e.logf(item.Number, "queued-review-settle", "%d unprocessed review finding(s) (threads or review bodies) on Queued member #%d — not owned by any live batch for %s, ejecting directly\n", len(findings), item.Number, g.trainKey)
 			e.ejectQueuedMemberForReviewFindings(board.ProjectID, item, len(findings))
 		}
 	}
+}
+
+// queuedReviewFindings is the review-feedback detection of the Queued settle scan:
+// current-head unresolved thread comments (#1208) plus unaddressed review bodies
+// (#1953 R2) — the same two review sources feedbackGateBlocks consults, so a
+// body-only COMMENTED review (the #616 shape) arriving on a Queued member ejects it
+// like a thread does. Bodies are resolved through resolveReviewsForFeedbackChecked
+// (a live REST read on a base:<branch> item); a read error skips the bodies for this
+// poll only — the scan re-runs every poll, and the landing-side gates fail closed
+// independently — so an outage never ejects a member spuriously.
+//
+// Arrival *before* admission is covered without an admission-time gate: the batch is
+// formed in handleMergeTrainBatch just before this scan runs, and a member flagged
+// here that a fresh worker already holds is consumed by that worker at its first
+// applyPendingReviewEjects checkpoint, ahead of any trial or landing; a member not
+// yet in a batch is ejected directly. admitTrainMembers deliberately stays fail-open.
+func (e *Engine) queuedReviewFindings(item gh.ProjectItem) []gh.Comment {
+	findings := e.currentHeadReviewThreadComments(item)
+	reviews, err := e.resolveReviewsForFeedbackChecked(item)
+	if err != nil {
+		e.logf(item.Number, "queued-review-settle", "could not resolve reviews for body detection: %v — bodies skipped this poll\n", err)
+		return findings
+	}
+	return append(findings, e.buildReviewBodyCommentsFromReviews(item, reviews)...)
 }
 
 // settleQueuedCommentCause is the comment-cause branch of the Queued settle scan (#1863),
@@ -117,7 +141,7 @@ func (e *Engine) settleQueuedReviewFindings(board *gh.ProjectBoard) {
 //
 // Detection is filterHuman(findNewComments(item)) on the item the scan already
 // deep-fetched — findNewComments is the same "unprocessed" predicate as the Validate
-// landing gate (commentGateBlocksLanding) and the non-Validate advance guard, and the
+// landing gate (feedbackGateBlocks) and the non-Validate advance guard, and the
 // human restriction is layered over it rather than forking it. findNewComments does not
 // exclude every bot-authored comment, so filterHuman is what guarantees that a bot comment
 // never ejects a member.

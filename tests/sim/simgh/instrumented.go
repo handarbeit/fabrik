@@ -264,6 +264,11 @@ func (in *Instrumented) AddPRReviewCommentReaction(owner, repo string, commentDa
 		func() error { return in.sim.AddPRReviewCommentReaction(owner, repo, commentDatabaseID, content) })
 }
 
+func (in *Instrumented) AddReviewReaction(subjectNodeID, content string) error {
+	return do0(in, "AddReviewReaction", true, Args{ID: subjectNodeID, Values: []string{content}},
+		func() error { return in.sim.AddReviewReaction(subjectNodeID, content) })
+}
+
 func (in *Instrumented) UpdateComment(owner, repo string, commentDatabaseID int, body string) error {
 	return do0(in, "UpdateComment", true, Args{Owner: owner, Repo: repo, Number: commentDatabaseID, Body: body},
 		func() error { return in.sim.UpdateComment(owner, repo, commentDatabaseID, body) })

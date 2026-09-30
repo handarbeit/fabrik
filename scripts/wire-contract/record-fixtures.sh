@@ -223,7 +223,10 @@ GIT_TOKEN="${TOKEN:-$(gh_ auth token)}"
 git -C "$WORKDIR" clone -q "https://x-access-token:${GIT_TOKEN}@github.com/$ALPHA.git" repo
 BRANCH="wire-contract-fixture-pr-$$"
 git -C "$WORKDIR/repo" checkout -q -b "$BRANCH"
-echo "wire-contract fixture PR — disposable, safe to delete" > "$WORKDIR/repo/WIRE_CONTRACT_FIXTURE.md"
+# Unique content per run: a fixed body is a no-op commit once an earlier run
+# has merged the same file into the sandbox's main, and the empty commit then
+# aborts the script (set -e) before the PR is created.
+echo "wire-contract fixture PR — disposable, safe to delete ($(date -u +%FT%TZ), pid $$)" > "$WORKDIR/repo/WIRE_CONTRACT_FIXTURE.md"
 git -C "$WORKDIR/repo" add WIRE_CONTRACT_FIXTURE.md
 git -C "$WORKDIR/repo" -c user.email="wire-contract-fixture@handarbeit.io" -c user.name="wire-contract-fixture" commit -q -m "chore: wire-contract fixture PR (disposable)"
 git -C "$WORKDIR/repo" push -q -u origin "$BRANCH"
@@ -244,6 +247,20 @@ mutation($prId: ID!) {
   }
 }' -f prId="$PR_NODE_ID" > /tmp/wc-markready.json
 write_recording mark_pr_ready "https://api.github.com/graphql" "$ALPHA#$PR_NUM (disposable sandbox PR)" /tmp/wc-markready.json
+
+# add_review_reaction (#1953 R8): GraphQL addReaction against a
+# PullRequestReview subject. REST has no reactions endpoint for a review, so
+# the node_id of a COMMENT review on the disposable PR is the subjectId.
+# (A PR author may leave a COMMENT review on their own PR; APPROVE would be refused.)
+gh_ api -X POST "repos/$ALPHA/pulls/$PR_NUM/reviews" -f event=COMMENT -f body="wire-contract fixture review (disposable)" > /tmp/wc-review.json
+REVIEW_NODE_ID=$(python3 -c 'import json; print(json.load(open("/tmp/wc-review.json"))["node_id"])')
+gh_ api graphql -f query='
+mutation($subjectId: ID!, $content: ReactionContent!) {
+  addReaction(input: { subjectId: $subjectId, content: $content }) {
+    reaction { content }
+  }
+}' -f subjectId="$REVIEW_NODE_ID" -f content=EYES > /tmp/wc-addreaction.json
+write_recording add_review_reaction "https://api.github.com/graphql" "$ALPHA#$PR_NUM (disposable sandbox PR review)" /tmp/wc-addreaction.json
 
 # fabrik-test-alpha's branch protection requires status checks that never
 # run for a throwaway branch; the merge only succeeds because the recording

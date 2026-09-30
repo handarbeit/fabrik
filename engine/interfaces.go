@@ -30,6 +30,11 @@ type GitHubClient interface {
 	FetchIssueComments(owner, repo string, issueNumber int) ([]gh.Comment, error)
 	AddCommentReaction(owner, repo string, commentDatabaseID int, content string) error
 	AddPRReviewCommentReaction(owner, repo string, commentDatabaseID int, content string) error
+	// AddReviewReaction reacts to a pull-request review (not a review-thread
+	// comment) through GraphQL addReaction — REST has no reactions endpoint for
+	// a review. subjectNodeID is PRReview.NodeID; content uses the same
+	// lowercase names as AddCommentReaction ("eyes", "rocket") (#1953 R8).
+	AddReviewReaction(subjectNodeID, content string) error
 	ResolveReviewThread(threadID string) error
 	UpdateComment(owner, repo string, commentDatabaseID int, body string) error
 	UpdateIssueBody(owner, repo string, issueNumber int, body string) error

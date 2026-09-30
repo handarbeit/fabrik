@@ -706,6 +706,7 @@ query($id: ID!) {
           }
           latestReviews(first: 10) {
             nodes {
+              id
               databaseId
               author { __typename login }
               state
@@ -838,7 +839,8 @@ type fetchItemDetailsNode struct {
 			} `json:"reviewRequests"`
 			LatestReviews struct {
 				Nodes []struct {
-					DatabaseID int `json:"databaseId"`
+					ID         string `json:"id"`
+					DatabaseID int    `json:"databaseId"`
 					Author     *struct {
 						Typename string `json:"__typename"`
 						Login    string `json:"login"`
@@ -1072,6 +1074,7 @@ func (c *Client) applyLinkedPRs(item *ProjectItem, node *fetchItemDetailsNode) e
 					State:      rev.State,
 					Body:       rev.Body,
 					DatabaseID: rev.DatabaseID,
+					NodeID:     rev.ID,
 				}
 				if t, err := parseTime(rev.SubmittedAt); err == nil {
 					review.SubmittedAt = t

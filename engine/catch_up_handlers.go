@@ -163,10 +163,21 @@ func (e *Engine) handleDependencies(pctx *phase1Ctx) bool {
 	return e.checkDependencies(pctx.board, pctx.item, pctx.stage)
 }
 
-// handleReviewGate runs the review gate and review reinvoke dispatch. Only
-// active when the stage has genuinely completed (hasComplete == true); during
-// the CI-await window (fabrik:awaiting-ci && !hasComplete) the gate is skipped
-// to prevent spurious fabrik:awaiting-review re-application (#617).
+// handleReviewGate runs the review gate and review reinvoke dispatch.
+//
+// Feedback detection and the gate are separate jobs (#1953 R1). The gate half —
+// checkReviewGate, whose job includes writing fabrik:awaiting-review and running
+// the reviewer timeout — is only run when the stage has genuinely completed
+// (hasComplete == true). During the CI-await window (fabrik:awaiting-ci &&
+// !hasComplete) it stays skipped, which is what #617 actually needed: a stale
+// LinkedPRReviewRequests snapshot must never re-apply fabrik:awaiting-review.
+// The detection-and-dispatch half, however, runs in every state: skipping it
+// too (the original #617 fix) blinded the engine to review feedback from stage
+// start through CI wait, so a body-only COMMENTED review that landed there was
+// never processed and the item then advanced or landed past it (#616). With
+// !hasComplete this handler therefore resolves reviews itself, passes
+// blocked=timedOut=false, writes no label, and returns false when nothing was
+// dispatched so the rest of the chain (the CI gate) still runs.
 //
 // Reinvoke-governs-working, authoritative-governs-merging (R1, #1375,
 // amending ADR-1250): actionable review feedback (buildReviewFeedbackComments —
@@ -186,17 +197,29 @@ func (e *Engine) handleDependencies(pctx *phase1Ctx) bool {
 // returns unprocessed feedback) is what stops this from firing every poll for
 // the same review.
 func (e *Engine) handleReviewGate(pctx *phase1Ctx) bool {
-	if !pctx.hasComplete {
-		return false
-	}
-	blocked, timedOut, terminated, resolvedReviews := e.checkReviewGate(pctx.board, pctx.item, pctx.stage)
-	if terminated {
-		// checkReviewGate already paused the item directly via
-		// handleBrokenReviewLinkage — claim it so Phase 2 does not advance an
-		// item that was just paused in this same pass. Checked ahead of the
-		// other branches for the same reason as handleMergeAndCIGates's
-		// ciTerminated check. See ADR-1223.
-		return true
+	var (
+		blocked, timedOut bool
+		resolvedReviews   []gh.PRReview
+	)
+	if pctx.hasComplete {
+		var terminated bool
+		blocked, timedOut, terminated, resolvedReviews = e.checkReviewGate(pctx.board, pctx.item, pctx.stage)
+		if terminated {
+			// checkReviewGate already paused the item directly via
+			// handleBrokenReviewLinkage — claim it so Phase 2 does not advance an
+			// item that was just paused in this same pass. Checked ahead of the
+			// other branches for the same reason as handleMergeAndCIGates's
+			// ciTerminated check. See ADR-1223.
+			return true
+		}
+		// A stage without wait_for_reviews never runs the gate, so
+		// checkReviewGate returns no reviews — but review bodies are still
+		// actionable feedback (#1953 R1). Resolve them here.
+		if pctx.stage.WaitForReviews == nil || !*pctx.stage.WaitForReviews {
+			resolvedReviews = e.resolveReviewsForFeedback(pctx.item)
+		}
+	} else {
+		resolvedReviews = e.resolveReviewsForFeedback(pctx.item)
 	}
 	// Actionable review feedback (thread comments and/or review bodies) is
 	// dispatched regardless of blocked/timedOut — see the doc comment above.
@@ -252,6 +275,7 @@ func (e *Engine) handleReviewGate(pctx *phase1Ctx) bool {
 		// work is still in progress. The store Worker field is the semantic
 		// source of truth for in-flight state. (Enforced by
 		// dispatchWithCycleLimit's in-flight bail.)
+		chargeBlocked := blocked || timedOut || e.feedbackHoldsProgress(pctx)
 		return e.dispatchWithCycleLimit(
 			pctx,
 			"review-reinvoke",
@@ -268,20 +292,23 @@ func (e *Engine) handleReviewGate(pctx *phase1Ctx) bool {
 			nil,
 			func(repoStr string) {
 				e.store.Apply(itemstate.ReviewCycleIncremented{Repo: repoStr, Number: pctx.item.Number, StageName: pctx.stage.Name})
-				if blocked || timedOut {
+				if chargeBlocked {
 					// Genuine non-convergence evidence (ADR-1518): this reinvoke is
 					// being dispatched while the gate itself is still failing to
 					// clear, so unlike ReviewCycles this counter is never refunded
 					// for a no-op on HEAD (only for a reinvoke that provably never
 					// ran, #1812 — dispatchReinvoke compensates that). A
-					// reinvoke dispatched with the gate already clear (the #1045
-					// junk-overview shape, blocked == timedOut == false) never
-					// reaches this branch, so it stays forgivable.
+					// reinvoke dispatched with the gate already clear and nothing
+					// pending behind it (the #1045 junk-overview shape) never
+					// reaches this branch, so it stays forgivable. #1953: the
+					// same holds for a reinvoke dispatched while feedback is
+					// what stands between the item and its advance or landing —
+					// see feedbackHoldsProgress.
 					e.store.Apply(itemstate.ReviewBlockedCycleIncremented{Repo: repoStr, Number: pctx.item.Number, StageName: pctx.stage.Name})
 				}
 			},
 			func() {
-				e.dispatchReviewReinvoke(pctx.ctx, pctx.board, pctx.item, pctx.stage, syntheticComments, blocked || timedOut)
+				e.dispatchReviewReinvoke(pctx.ctx, pctx.board, pctx.item, pctx.stage, syntheticComments, chargeBlocked)
 			},
 			func(cycleCount int) {
 				// escalated return value intentionally discarded — this claim
@@ -290,6 +317,11 @@ func (e *Engine) handleReviewGate(pctx *phase1Ctx) bool {
 				e.pauseForReviewCycleLimit(pctx.board, pctx.item, pctx.stage, cycleCount, e.cfg.MaxReviewCycles)
 			},
 		)
+	}
+	// Nothing was dispatched and the stage has not completed: there is no gate
+	// state to act on (#1953 R1) — leave the item to the CI gate.
+	if !pctx.hasComplete {
+		return false
 	}
 	// Nothing actionable to reinvoke on this poll — fall back to the
 	// pre-existing blocked/timedOut handling (the plain "waiting for a
@@ -335,6 +367,40 @@ func (e *Engine) handleReviewGate(pctx *phase1Ctx) bool {
 		return true
 	}
 	return false
+}
+
+// feedbackHoldsProgress reports whether the review feedback being dispatched is
+// what currently stands between the item and an advance or landing (#1953 R4):
+// either the stage has not completed (a CI wait ends in completion and then an
+// advance/landing, both feedback-gated), or it has and the engine would advance
+// or land it automatically (yolo, cruise or auto_advance, mirroring
+// runCatchUpPhase2's own gate; Validate lands only under yolo).
+//
+// Such a reinvoke must be charged to the never-refunded ReviewBlockedCycles
+// counter. Feedback now holds progress, so a reviewer that keeps producing
+// fresh non-actionable bodies would otherwise loop forever: each no-op
+// reinvoke refunds ReviewCycles (#1045), and one that signals
+// FABRIK_STAGE_COMPLETE counts as progress for the no-op and frequency comment
+// breakers and resets them. Charging it makes MaxReviewCycles a hard cap on
+// feedback reinvokes exactly where they can stall an advance. Where nothing is
+// pending behind the feedback (a stage that stops for a human), the #1045
+// forgiveness is unchanged.
+func (e *Engine) feedbackHoldsProgress(pctx *phase1Ctx) bool {
+	if !pctx.hasComplete {
+		return true
+	}
+	item, stage := pctx.item, pctx.stage
+	isAuto := hasYoloLabel(item) || hasCruiseLabel(item)
+	if !e.cfg.Yolo && !isAuto && !(stage.AutoAdvance != nil && *stage.AutoAdvance) {
+		return false
+	}
+	if !isAuto && stage.AutoAdvance != nil && !*stage.AutoAdvance {
+		return false
+	}
+	if stage.Name == "Validate" {
+		return e.cfg.Yolo || hasYoloLabel(item)
+	}
+	return true
 }
 
 // dispatchWithCycleLimit implements the cycle-limit dispatch pattern shared

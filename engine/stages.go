@@ -194,7 +194,10 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 		}
 		// fabrik:awaiting-review is NOT seeded here when wait_for_ci: true.
 		// Path 2 (checkReviewGate in the catch-up loop) handles the review gate
-		// after the CI gate clears and stage:X:complete is added (#617).
+		// after the CI gate clears and stage:X:complete is added (#617). Review
+		// *feedback* is a separate matter: settleAwaitingCIScan's handler chain
+		// detects and dispatches it during the CI wait (#1953 R1), without
+		// writing that label.
 		e.logf(item.Number, "awaiting-ci", "deferring stage:%s:complete until CI gate clears\n", stage.Name)
 		return // catch-up loop adds stage:X:complete when checkCIGate clears
 	}
@@ -257,6 +260,18 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 		if e.checkDependencies(board, item, stage) {
 			return // blocked; checkDependencies handled label + comment
 		}
+		// Feedback gate (#1953 R2/R3): `item` is the pre-run snapshot, so feedback
+		// that landed while this invocation ran is invisible to it. The run is
+		// allowed to finish (nothing is injected mid-run); before the completion
+		// is treated as final and the item advances, consult the live predicate.
+		// On a hold the stage keeps stage:<X>:complete and does not advance —
+		// "final" means advance or landing, not the label — and Phase 1's
+		// handleReviewGate / the comment path dispatches the feedback on the next
+		// poll, under the ordinary reinvoke bounds, before the catch-up loop
+		// advances the item again.
+		if e.feedbackGateBlocks(item, false, "advance") {
+			return
+		}
 		// Path 1: handleStageComplete always has stale review data because
 		// reviewers are added only after MarkPRReady (which runs inside the
 		// stage). Rather than re-fetching, we optimistically apply
@@ -300,7 +315,7 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 // (false, false, nil) when no action is needed (cruise label, review gate
 // blocking, no linked PR), (false, true, nil) when landing is deferred — an
 // unresolved review thread exists on the current head (#1207 guard 1) or an
-// unprocessed comment is pending (#1862, commentGateBlocksLanding) — and
+// unprocessed feedback is pending (#1862/#1953, feedbackGateBlocks) — and
 // (false, false, err) on failure. A deferred return tells handleStageComplete
 // to stop rather than fall through to advanceToNextStage. The fabrik:auto-merge-enabled label serves
 // as both the idempotency guard and the budget-start anchor read by
@@ -406,18 +421,6 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 		return false, true, nil
 	}
 
-	// Comment gate (#1862): an unprocessed comment must not be merged past or
-	// advanced to Queued — dispatch processes it after this poll's catch-up
-	// loop, by which point the merge would already have happened and the
-	// rework would be committed to a dead branch. Reads the live item.Comments
-	// the re-read above just refreshed (a failed re-read holds), and sits ahead
-	// of the merge_train fork so all three landing paths are gated identically.
-	// Returns deferred=true so handleStageComplete never falls through to
-	// advanceToNextStage on an unmerged item.
-	if e.commentGateBlocksLanding(item, liveRead) {
-		return false, true, nil
-	}
-
 	// Review gate (#1216): a wait_for_reviews stage must not reach any landing
 	// action while reviewer requests are outstanding. Sits ahead of the
 	// merge_train fork so both modes are gated identically (FR-3), and re-reads
@@ -425,6 +428,18 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 	// blocks (FR-2).
 	if e.reviewGateBlocksLanding(item, stage, owner, repo) {
 		return false, false, nil
+	}
+
+	// Feedback gate (#1862 comments, #1953 review threads and bodies): unprocessed
+	// feedback must not be merged past or advanced to Queued — dispatch processes
+	// it after this poll's catch-up loop, by which point the merge would already
+	// have happened and the rework would be committed to a dead branch. Reads the
+	// live item the re-read above just refreshed (a failed re-read holds), and
+	// sits ahead of the merge_train fork so all three landing paths are gated
+	// identically. Returns deferred=true so handleStageComplete never falls
+	// through to advanceToNextStage on an unmerged item.
+	if e.feedbackGateBlocks(item, liveRead, "landing decision") {
+		return false, true, nil
 	}
 
 	// Merge-train gate: when merge_train: on, advance to Queued instead of enabling auto-merge.
@@ -494,9 +509,9 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 				len(blocking), fresh.LinkedPRHeadSHA)
 			return false, true, nil
 		}
-		// #1862: same reason — narrow the check-then-merge window for a comment
-		// that arrived after the comment gate's read above.
-		if e.commentGateBlocksLanding(fresh, true) {
+		// #1862/#1953: same reason — narrow the check-then-merge window for
+		// feedback that arrived after the feedback gate's read above.
+		if e.feedbackGateBlocks(fresh, true, "direct merge") {
 			return false, true, nil
 		}
 		if mergeErr := e.client.MergePR(owner, repo, pr.Number); mergeErr != nil {

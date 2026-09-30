@@ -840,10 +840,11 @@ only once the scenario was actually driven for more than one round: see
 
 Two fidelity notes surfaced while building gap 4, recorded in
 `reinvoke_cycle_counters_test.go`'s own doc comments: `simgh`'s
-`FetchPRReviews` collapses same-author `COMMENTED` follow-ups
-(`latestReviewsByAuthor`, modelling GitHub's own per-author reduction), so
-each round's seeded review needs a distinct author, not merely a distinct
-`DatabaseID`, or every round after the first is invisible to the engine;
+`FetchPRReviews` collapsed same-author `COMMENTED` follow-ups (a fidelity
+bug, fixed by #1953: production supersedes a stored `COMMENTED` with a newer
+one and only a stored *formal verdict* resists it — `latestReviewsByAuthor` now
+does the same). A distinct author per round is still harmless but no longer
+required; the historical note in `reinvoke_cycle_counters_test.go` predates the fix;
 and `dispatchReviewReinvoke`'s `build()` hook captures `headBefore` via
 `gitHeadSHA` *before* `processComments` itself calls `EnsureWorktree` (see
 `dispatchReinvoke`, `engine/reinvoke.go`), so a zero-Claude-cost

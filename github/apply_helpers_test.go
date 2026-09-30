@@ -148,7 +148,8 @@ func TestApplyLinkedPRs_MapsFirstPRAndReviews(t *testing.T) {
 			} `json:"reviewRequests"`
 			LatestReviews struct {
 				Nodes []struct {
-					DatabaseID int `json:"databaseId"`
+					ID         string `json:"id"`
+					DatabaseID int    `json:"databaseId"`
 					Author     *struct {
 						Typename string `json:"__typename"`
 						Login    string `json:"login"`
@@ -198,7 +199,8 @@ func TestApplyLinkedPRs_MapsFirstPRAndReviews(t *testing.T) {
 		} `json:"reviewRequests"`
 		LatestReviews struct {
 			Nodes []struct {
-				DatabaseID int `json:"databaseId"`
+				ID         string `json:"id"`
+				DatabaseID int    `json:"databaseId"`
 				Author     *struct {
 					Typename string `json:"__typename"`
 					Login    string `json:"login"`
@@ -239,7 +241,8 @@ func TestApplyLinkedPRs_MapsFirstPRAndReviews(t *testing.T) {
 		}{Typename: "User", Login: "carol"}},
 	}
 	pr.LatestReviews.Nodes = []struct {
-		DatabaseID int `json:"databaseId"`
+		ID         string `json:"id"`
+		DatabaseID int    `json:"databaseId"`
 		Author     *struct {
 			Typename string `json:"__typename"`
 			Login    string `json:"login"`
@@ -277,7 +280,8 @@ func TestApplyLinkedPRs_MapsFirstPRAndReviews(t *testing.T) {
 		} `json:"reviewRequests"`
 		LatestReviews struct {
 			Nodes []struct {
-				DatabaseID int `json:"databaseId"`
+				ID         string `json:"id"`
+				DatabaseID int    `json:"databaseId"`
 				Author     *struct {
 					Typename string `json:"__typename"`
 					Login    string `json:"login"`
@@ -365,7 +369,8 @@ func TestApplyLinkedPRs_BotReviewAuthorGetsBotSuffix(t *testing.T) {
 			} `json:"reviewRequests"`
 			LatestReviews struct {
 				Nodes []struct {
-					DatabaseID int `json:"databaseId"`
+					ID         string `json:"id"`
+					DatabaseID int    `json:"databaseId"`
 					Author     *struct {
 						Typename string `json:"__typename"`
 						Login    string `json:"login"`
@@ -415,7 +420,8 @@ func TestApplyLinkedPRs_BotReviewAuthorGetsBotSuffix(t *testing.T) {
 		} `json:"reviewRequests"`
 		LatestReviews struct {
 			Nodes []struct {
-				DatabaseID int `json:"databaseId"`
+				ID         string `json:"id"`
+				DatabaseID int    `json:"databaseId"`
 				Author     *struct {
 					Typename string `json:"__typename"`
 					Login    string `json:"login"`
@@ -444,7 +450,8 @@ func TestApplyLinkedPRs_BotReviewAuthorGetsBotSuffix(t *testing.T) {
 		Number: 55,
 	}
 	pr.LatestReviews.Nodes = []struct {
-		DatabaseID int `json:"databaseId"`
+		ID         string `json:"id"`
+		DatabaseID int    `json:"databaseId"`
 		Author     *struct {
 			Typename string `json:"__typename"`
 			Login    string `json:"login"`
@@ -494,7 +501,8 @@ func TestApplyLinkedPRs_BotReviewAuthorGetsBotSuffix(t *testing.T) {
 		} `json:"reviewRequests"`
 		LatestReviews struct {
 			Nodes []struct {
-				DatabaseID int `json:"databaseId"`
+				ID         string `json:"id"`
+				DatabaseID int    `json:"databaseId"`
 				Author     *struct {
 					Typename string `json:"__typename"`
 					Login    string `json:"login"`

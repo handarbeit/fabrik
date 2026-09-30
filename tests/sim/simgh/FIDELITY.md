@@ -475,6 +475,17 @@ reviews do not participate.
 **Simplified:** code-owner requirements, review dismissal on push, and stale-review
 invalidation are **absent**. `DISMISSED` is not a state the model produces.
 
+**Same-author `COMMENTED` supersession (#1953).** `latestReviewsByAuthor` used
+to skip *every* later `COMMENTED` for an author already seen. Production
+(`github.Client.FetchPRReviews`) skips a later `COMMENTED` only when the stored
+entry is a **formal verdict** (`APPROVED`/`CHANGES_REQUESTED`/`DISMISSED`); a
+stored `COMMENTED` is superseded by a newer one. The old sim therefore hid a
+bot's second body-only review (the #616 shape) from every read — a fidelity bug
+found while porting the scenario, fixed here and in the board projection
+(`buildProjectItem` shares the reduction). Reviews also now carry a GraphQL node
+ID (`PRR_sim_<pr>_<n>` unless seeded) and `AddReviewReaction` stores reactions
+per review node ID, read back by `Sim.ReviewReactions` (#1953 R8).
+
 **The decision shares one reduction with `FetchPRReviews`.** Both roll up
 through `latestReviewsByAuthor`, so a `DISMISSED` submission supersedes that
 author's earlier verdict in the decision exactly as it does in the review list.

@@ -85,8 +85,9 @@ func ParseClosingIssues(body string) []int {
 // Returns nil, nil on 404.
 func (c *Client) FetchPRReviews(owner, repo string, prNumber int) ([]PRReview, error) {
 	type rawReview struct {
-		ID   int `json:"id"`
-		User *struct {
+		ID     int    `json:"id"`
+		NodeID string `json:"node_id"`
+		User   *struct {
 			Login string `json:"login"`
 		} `json:"user"`
 		State       string `json:"state"`
@@ -135,6 +136,7 @@ func (c *Client) FetchPRReviews(owner, repo string, prNumber int) ([]PRReview, e
 			State:      r.State,
 			Body:       r.Body,
 			DatabaseID: r.ID,
+			NodeID:     r.NodeID,
 			CommitID:   r.CommitID,
 		}
 		if t, err := parseTime(r.SubmittedAt); err == nil {

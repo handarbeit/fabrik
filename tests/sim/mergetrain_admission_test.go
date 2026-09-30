@@ -82,7 +82,7 @@ func assertDeferredNotPaused(t *testing.T, env *Env, num int) {
 	if !hasCommentContaining(t, env, num, "not a merge-train interaction") {
 		t.Errorf("expected the comment on #%d to attribute the failure to the PR itself", num)
 	}
-	if hasCommentContaining(t, env, num, "unresolved review-thread finding") || hasCommentContaining(t, env, num, "merge-train — ejected") {
+	if hasCommentContaining(t, env, num, "unprocessed review finding") || hasCommentContaining(t, env, num, "merge-train — ejected") {
 		t.Errorf("deferral on #%d must not reuse ejection/review wording", num)
 	}
 }

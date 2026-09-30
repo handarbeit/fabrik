@@ -96,6 +96,7 @@ var wireContractRegistry = []wireOperation{
 
 	// comments.go
 	{"resolveReviewThreadMutation", []string{resolveReviewThreadMutation}},
+	{"addReactionMutation", []string{addReactionMutation}},
 }
 
 // loadWireSchema loads the vendored GitHub GraphQL SDL schema. It is a

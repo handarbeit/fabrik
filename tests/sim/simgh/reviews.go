@@ -1,6 +1,8 @@
 package simgh
 
 import (
+	"fmt"
+
 	gh "github.com/handarbeit/fabrik/github"
 )
 
@@ -33,11 +35,13 @@ func (s *Sim) FetchPRReviews(owner, repo string, prNumber int) ([]gh.PRReview, e
 //
 //   - the most recent submission wins, and authors keep first-submission order;
 //   - except that a COMMENTED follow-up never supersedes an author's existing
-//     formal verdict (APPROVED, CHANGES_REQUESTED, DISMISSED). GitHub treats
+//     *formal verdict* (APPROVED, CHANGES_REQUESTED, DISMISSED). GitHub treats
 //     COMMENTED as informational, not a state transition, so a reviewer who
 //     requests changes and later comments still has an active
-//     CHANGES_REQUESTED. Only when an author's *first* submission is COMMENTED
-//     does it become their entry.
+//     CHANGES_REQUESTED. A stored COMMENTED entry, by contrast, IS superseded
+//     by a newer COMMENTED — the newer body is the author's current review.
+//     (Before #1953 the sim skipped any later COMMENTED, which hid a bot's
+//     second body-only review — the #616 shape — from every read.)
 func latestReviewsByAuthor(reviews []gh.PRReview) []gh.PRReview {
 	latest := make(map[string]gh.PRReview, len(reviews))
 	order := make([]string, 0, len(reviews))
@@ -45,9 +49,10 @@ func latestReviewsByAuthor(reviews []gh.PRReview) []gh.PRReview {
 		if rev.Author == "" {
 			continue
 		}
-		if _, seen := latest[rev.Author]; !seen {
+		stored, seen := latest[rev.Author]
+		if !seen {
 			order = append(order, rev.Author)
-		} else if rev.State == "COMMENTED" {
+		} else if rev.State == "COMMENTED" && isFormalVerdict(stored.State) {
 			continue
 		}
 		latest[rev.Author] = rev
@@ -193,4 +198,95 @@ func (s *Sim) FetchPRReviewDecision(owner, repo string, prNumber int) (string, e
 		return "APPROVED", nil
 	}
 	return "REVIEW_REQUIRED", nil
+}
+
+// isFormalVerdict mirrors github.isFormalReviewVerdict (unexported there).
+func isFormalVerdict(state string) bool {
+	switch state {
+	case "APPROVED", "CHANGES_REQUESTED", "DISMISSED":
+		return true
+	}
+	return false
+}
+
+// ensureReviewNodeID gives a review a GraphQL node ID when the scenario did not
+// set one, mirroring production where every review carries one. Derived from
+// the PR and the review's position so it is stable and unique per PR. offset is the
+// number of reviews about to be appended ahead of this one (0 for a single
+// review; the batch index for SeedReviewsAt, whose reviews are all appended
+// only after every ID is assigned). Caller must hold s.mu.
+func ensureReviewNodeID(pr *prRecord, rev *gh.PRReview, offset int) {
+	if rev.NodeID != "" {
+		return
+	}
+	rev.NodeID = fmt.Sprintf("PRR_sim_%d_%d", pr.number, len(pr.reviews)+offset+1)
+}
+
+func cloneReviewReactions(in map[string]map[string]int) map[string]map[string]int {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]map[string]int, len(in))
+	for id, m := range in {
+		dup := make(map[string]int, len(m))
+		for k, v := range m {
+			dup[k] = v
+		}
+		out[id] = dup
+	}
+	return out
+}
+
+// AddReviewReaction reacts to a review by its GraphQL node ID (#1953 R8).
+// Reactions are stored per review and are idempotent per content, like comment
+// reactions. An unknown node ID is an error, as GraphQL would report NOT_FOUND.
+func (s *Sim) AddReviewReaction(subjectNodeID, content string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, r := range s.repos {
+		for _, pr := range r.prs {
+			s.drainReviews(pr)
+			for _, rev := range pr.reviews {
+				if rev.NodeID != subjectNodeID {
+					continue
+				}
+				if pr.reviewReactions == nil {
+					pr.reviewReactions = make(map[string]map[string]int)
+				}
+				if pr.reviewReactions[subjectNodeID] == nil {
+					pr.reviewReactions[subjectNodeID] = make(map[string]int)
+				}
+				pr.reviewReactions[subjectNodeID][content] = 1
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("simgh: review node %q not found", subjectNodeID)
+}
+
+// ReviewReactions returns the reactions recorded on the review with the given
+// database ID on ownerRepo#prNumber, keyed by content. It is the assertion
+// accessor for R8 scenarios; nil when the review has none or does not exist.
+func (s *Sim) ReviewReactions(ownerRepo string, prNumber, reviewDatabaseID int) map[string]int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.repos[ownerRepo]
+	if !ok {
+		return nil
+	}
+	pr, ok := r.prs[prNumber]
+	if !ok {
+		return nil
+	}
+	s.drainReviews(pr)
+	for _, rev := range pr.reviews {
+		if rev.DatabaseID == reviewDatabaseID {
+			out := make(map[string]int)
+			for k, v := range pr.reviewReactions[rev.NodeID] {
+				out[k] = v
+			}
+			return out
+		}
+	}
+	return nil
 }

@@ -113,6 +113,8 @@ type mockGitHubClient struct {
 	createDraftPRCalls               []createDraftPRCall
 	resolveReviewThreadCalls         []string
 	addPRReviewCommentReactionCalls  []prReviewCommentReactionCall
+	addReviewReactionCalls           []addReviewReactionCall
+	addReviewReactionFn              func(subjectNodeID, content string) error
 	deleteReviewRequestCalls         []reviewRequestCall
 	addReviewRequestCalls            []reviewRequestCall
 	seedLabelsCalls                  []seedLabelsCall
@@ -248,6 +250,10 @@ type addCommentReactionCall struct {
 	content           string
 }
 
+type addReviewReactionCall struct {
+	subjectNodeID, content string
+}
+
 type updateStatusCall struct {
 	projectID, itemID, fieldID, optionID string
 }
@@ -360,6 +366,17 @@ func (m *mockGitHubClient) AddPRReviewCommentReaction(owner, repo string, commen
 	m.mu.Lock()
 	m.addPRReviewCommentReactionCalls = append(m.addPRReviewCommentReactionCalls, prReviewCommentReactionCall{owner, repo, commentDatabaseID, content})
 	m.mu.Unlock()
+	return nil
+}
+
+func (m *mockGitHubClient) AddReviewReaction(subjectNodeID, content string) error {
+	m.mu.Lock()
+	m.addReviewReactionCalls = append(m.addReviewReactionCalls, addReviewReactionCall{subjectNodeID, content})
+	fn := m.addReviewReactionFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(subjectNodeID, content)
+	}
 	return nil
 }
 

@@ -1773,3 +1773,122 @@ func TestHandleEngineUnpause_NotPaused_NoOp(t *testing.T) {
 		t.Errorf("expected no label mutations for a never-paused item, got %d", labelCalls)
 	}
 }
+
+// ---- #1953 R1: detection runs in every state ----
+
+func reviewGateBodyPctx(hasComplete bool, labels []string, stage *stages.Stage, advanced map[string]bool) *phase1Ctx {
+	return &phase1Ctx{
+		ctx:   context.Background(),
+		board: &gh.ProjectBoard{ProjectID: "PVT_1"},
+		item: gh.ProjectItem{
+			Number: 616, Repo: "owner/repo", Labels: labels,
+			LinkedPRNumber: 618,
+			LinkedPRReviews: []gh.PRReview{{
+				Author: "handarbeit-pruefer", State: "COMMENTED", Body: "a real defect",
+				DatabaseID: 5356295491, NodeID: "PRR_x",
+			}},
+		},
+		stage:         stage,
+		hasComplete:   hasComplete,
+		advancedItems: advanced,
+	}
+}
+
+// The #616 hole: during the CI-await window (fabrik:awaiting-ci, no complete
+// label) a body-only COMMENTED review must be dispatched as a review reinvoke —
+// and, for #617, without writing fabrik:awaiting-review.
+func TestHandleReviewGate_AwaitingCIWindow_DispatchesReviewBody(t *testing.T) {
+	client := &mockGitHubClient{}
+	stgs := []*stages.Stage{{Name: "Validate", Order: 1, Prompt: "validate"}}
+	eng := testEngineWithStages(t, client, stgs)
+	eng.cfg.MaxReviewCycles = 5
+	wait := true
+	stage := &stages.Stage{Name: "Validate", Order: 1, Prompt: "validate", WaitForCI: &wait, WaitForReviews: &wait}
+	advanced := map[string]bool{}
+	pctx := reviewGateBodyPctx(false, []string{"fabrik:awaiting-ci"}, stage, advanced)
+
+	if !eng.handleReviewGate(pctx) {
+		t.Fatal("handleReviewGate must claim an item it dispatched a review reinvoke for")
+	}
+	eng.wg.Wait()
+	snap, _ := eng.store.Get("owner/repo", 616)
+	if snap.ReviewCycles("Validate") != 1 {
+		t.Errorf("ReviewCycles = %d, want 1 (a reinvoke was dispatched)", snap.ReviewCycles("Validate"))
+	}
+	if !advanced["owner/repo#616"] {
+		t.Error("expected the item to be marked advanced/dispatched this poll")
+	}
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:awaiting-review" {
+			t.Error("#617: no fabrik:awaiting-review may be written while !hasComplete")
+		}
+	}
+}
+
+// With nothing to dispatch and no completion, the handler neither claims the
+// item nor touches the gate, leaving the CI gate to run.
+func TestHandleReviewGate_AwaitingCIWindow_NothingPending_DoesNotClaim(t *testing.T) {
+	eng := testEngineWithStages(t, &mockGitHubClient{}, []*stages.Stage{{Name: "Validate", Order: 1}})
+	wait := true
+	stage := &stages.Stage{Name: "Validate", Order: 1, WaitForCI: &wait, WaitForReviews: &wait}
+	pctx := reviewGateBodyPctx(false, []string{"fabrik:awaiting-ci"}, stage, map[string]bool{})
+	pctx.item.LinkedPRReviews = nil
+	pctx.item.LinkedPRReviewRequests = []gh.ReviewRequest{{Login: "copilot-pull-request-reviewer", IsBot: true}}
+	if eng.handleReviewGate(pctx) {
+		t.Error("nothing to dispatch and !hasComplete: the handler must not claim the item")
+	}
+	client := eng.client.(*mockGitHubClient)
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:awaiting-review" {
+			t.Error("#617: no fabrik:awaiting-review may be written while !hasComplete")
+		}
+	}
+}
+
+// A completed stage that does not declare wait_for_reviews never ran the gate,
+// so checkReviewGate handed back no reviews and bodies were silently dropped.
+func TestHandleReviewGate_NoWaitForReviews_StillDispatchesReviewBody(t *testing.T) {
+	eng := testEngineWithStages(t, &mockGitHubClient{}, []*stages.Stage{{Name: "Review", Order: 1, Prompt: "review"}})
+	eng.cfg.MaxReviewCycles = 5
+	stage := &stages.Stage{Name: "Review", Order: 1, Prompt: "review"}
+	pctx := reviewGateBodyPctx(true, []string{"stage:Review:complete"}, stage, map[string]bool{})
+	if !eng.handleReviewGate(pctx) {
+		t.Fatal("expected the review body to be dispatched and the item claimed")
+	}
+	eng.wg.Wait()
+	snap, _ := eng.store.Get("owner/repo", 616)
+	if snap.ReviewCycles("Review") != 1 {
+		t.Errorf("ReviewCycles = %d, want 1", snap.ReviewCycles("Review"))
+	}
+}
+
+// #1953 R4: a review reinvoke dispatched while feedback stands between the item
+// and its advance/landing is charged to the never-refunded ReviewBlockedCycles
+// counter; one with nothing pending behind it stays forgivable (#1045).
+func TestFeedbackHoldsProgress(t *testing.T) {
+	yoloItem := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:yolo"}}
+	cases := map[string]struct {
+		ctx  phase1Ctx
+		yolo bool
+		want bool
+	}{
+		"incomplete stage (CI wait)":           {phase1Ctx{item: gh.ProjectItem{Number: 1}, stage: &stages.Stage{Name: "Validate"}}, false, true},
+		"complete, no automation":              {phase1Ctx{hasComplete: true, item: gh.ProjectItem{Number: 1}, stage: &stages.Stage{Name: "Review"}}, false, false},
+		"complete, yolo label, non-Validate":   {phase1Ctx{hasComplete: true, item: yoloItem, stage: &stages.Stage{Name: "Review"}}, false, true},
+		"complete, yolo label, Validate":       {phase1Ctx{hasComplete: true, item: yoloItem, stage: &stages.Stage{Name: "Validate"}}, false, true},
+		"complete, cruise label, Validate":     {phase1Ctx{hasComplete: true, item: gh.ProjectItem{Number: 1, Labels: []string{"fabrik:cruise"}}, stage: &stages.Stage{Name: "Validate"}}, false, false},
+		"complete, cfg yolo, auto_advance off": {phase1Ctx{hasComplete: true, item: gh.ProjectItem{Number: 1}, stage: &stages.Stage{Name: "Review", AutoAdvance: boolPtrForGate(false)}}, true, false},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			eng := testEngineWithStages(t, &mockGitHubClient{}, []*stages.Stage{{Name: "Review", Order: 1}})
+			eng.cfg.Yolo = tc.yolo
+			pctx := tc.ctx
+			if got := eng.feedbackHoldsProgress(&pctx); got != tc.want {
+				t.Errorf("feedbackHoldsProgress = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func boolPtrForGate(b bool) *bool { return &b }

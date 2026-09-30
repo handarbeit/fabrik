@@ -335,7 +335,7 @@ func TestEveryInterfaceMethodIsInstrumented(t *testing.T) {
 func TestMutationFlagMatchesTheInterfaceSemantics(t *testing.T) {
 	wantMutations := map[string]bool{
 		"AddBlockedByIssue": true, "AddComment": true, "AddCommentReaction": true,
-		"AddLabelToIssue": true, "AddPRReviewCommentReaction": true, "AddProjectV2ItemById": true,
+		"AddLabelToIssue": true, "AddPRReviewCommentReaction": true, "AddProjectV2ItemById": true, "AddReviewReaction": true,
 		"AddReviewRequest": true, "ArchiveProjectItem": true, "CloseIssue": true,
 		"CreateDraftPR": true, "CreateIssue": true, "CreatePR": true,
 		"DeleteForwardingHooks": true, "DeleteReviewRequest": true,

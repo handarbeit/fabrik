@@ -1469,7 +1469,7 @@ func TestEjectQueuedMemberForReviewFindings_Success(t *testing.T) {
 	if !strings.Contains(calls[0].body, "has left the Queued column") {
 		t.Errorf("expected ejection comment to use the leaves-Queued wording, got: %s", calls[0].body)
 	}
-	if !strings.Contains(calls[0].body, "2 unresolved review-thread finding") {
+	if !strings.Contains(calls[0].body, "2 unprocessed review finding") {
 		t.Errorf("expected ejection comment to name the finding count, got: %s", calls[0].body)
 	}
 
