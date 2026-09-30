@@ -197,9 +197,6 @@ func (e *Engine) handleDependencies(pctx *phase1Ctx) bool {
 // returns unprocessed feedback) is what stops this from firing every poll for
 // the same review.
 func (e *Engine) handleReviewGate(pctx *phase1Ctx) bool {
-	if !pctx.hasComplete {
-		return false
-	}
 	var (
 		blocked, timedOut bool
 		resolvedReviews   []gh.PRReview
