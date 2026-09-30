@@ -2217,7 +2217,9 @@ func RequestPRReviewer(t *testing.T, env *Env, repo string, prNumber int, review
 // RequestPRReviewer (GitHub forbids requesting/approving a review from the
 // PR author) and wastes a full 60-100 min run before failing downstream.
 // Checking PR authorship directly against GitHub (not the test bed's .env)
-// catches either possible shadowing mechanism within seconds.
+// catches either possible shadowing mechanism within seconds. When the bed
+// runs under GitHub App auth, the expected author is the App's bot login from
+// the bed's startup banner instead.
 func AssertPRAuthorIsExpectedIdentity(t *testing.T, env *Env, repo string, prNumber int) {
 	t.Helper()
 	owner, name, ok := splitRepo(repo)
@@ -2230,6 +2232,14 @@ func AssertPRAuthorIsExpectedIdentity(t *testing.T, env *Env, repo string, prNum
 	}
 	actual := strings.TrimSpace(out)
 	expected := TokenLogin(t, env.GHToken)
+	// On an App-auth bed the engine authors as the App installation
+	// (<slug>[bot]), not as the token's user: expect the login its startup
+	// banner reports.
+	if data, rerr := os.ReadFile(bedRunLogPath(env)); rerr == nil {
+		if login := bedAuthIdentity(string(data)); login != "" {
+			expected = login
+		}
+	}
 	if actual != expected {
 		t.Fatalf("engine identity mismatch: PR #%d on %s was authored by %q but the test bed's token resolves to %q — "+
 			"the engine process is very likely authenticating as a different identity than FABRIK_TOKEN "+
