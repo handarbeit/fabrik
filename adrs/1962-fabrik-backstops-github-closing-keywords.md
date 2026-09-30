@@ -40,6 +40,13 @@ GitHub's linkage and auto-close are no longer relied on.
 - **R1, broken-linkage check.** `handleBrokenReviewLinkage` parses the PR body
   with `FetchPRClosingIssues` on every path before pausing. It pauses only when
   the body has no closing keyword for the issue. A read error never pauses.
+- **R1a, review data on a missing link.** The review gate's reviewers and
+  requests, and the feedback gate's review bodies, ride the same
+  `closedByPullRequestsReferences` link, so they are empty whenever the link
+  is. On the default base, when `LinkedPRNumber == 0` and both GraphQL review
+  slices are empty (`reviewDataRidesMissingLink`), both gates resolve reviews
+  over REST, as a `base:<branch>` item always does. A REST read error holds.
+  It never clears.
 - **R2, default-base close backstop.** At every Done transition credited to a
   merged PR on the default base, `closeIssueIfNonDefaultBase` calls
   `guardDefaultBaseAutoClose`. That function live-reads the issue. If it is

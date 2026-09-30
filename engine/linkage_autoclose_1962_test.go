@@ -1,11 +1,13 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/stages"
 )
 
 // #1962 R1 — the broken-linkage pause confirms against the PR body on every
@@ -232,5 +234,63 @@ func TestSettleClose_BaseLabelled_StaleSnapshotLiveClosed_NoReclose(t *testing.T
 	if len(client.closeIssueCalls) != 0 || len(client.addCommentCalls) != 0 {
 		t.Errorf("live-closed issue must not be re-closed or commented on: got %d close(s), %d comment(s)",
 			len(client.closeIssueCalls), len(client.addCommentCalls))
+	}
+}
+
+// Pruefer round 4 on #1965: once R1 stops pausing a default-base item whose PR
+// body confirms the linkage, the gate must evaluate the PR's REAL review state.
+// The GraphQL review data (item.LinkedPRReviews/ReviewRequests) rides the same
+// closing-keyword link and is empty when the link is missing, so it must come
+// over REST — as it already does on a base:<branch> item.
+func TestCheckReviewGate_DefaultBaseLinkMissing_UsesRESTReviews(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(_, _ string, _ int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 77, State: "open"}, nil
+		},
+		fetchPRClosingIssuesFn: func(_, _ string, _ int) ([]int, error) { return []int{10}, nil },
+		fetchPRReviewsFn: func(_, _ string, _ int) ([]gh.PRReview, error) {
+			return []gh.PRReview{{Author: "reviewer", State: "APPROVED", DatabaseID: 1}}, nil
+		},
+		fetchPRReviewRequestsFn: func(_, _ string, _ int) ([]gh.ReviewRequest, error) { return nil, nil },
+	}
+	stage := &stages.Stage{Name: "Validate", Order: 5, Prompt: "validate", WaitForReviews: boolPtr(true)}
+	eng := testEngineWithStages(t, client, []*stages.Stage{stage})
+	// Unlabelled (default base), link missing, GraphQL review data empty.
+	item := gh.ProjectItem{Number: 10, Repo: "owner/repo", Status: "Validate", LinkedPRNumber: 0,
+		Labels: []string{"stage:Validate:complete"}}
+
+	blocked, timedOut, terminated, reviews := eng.checkReviewGate(&gh.ProjectBoard{ProjectID: "PVT_1"}, item, stage)
+
+	if terminated {
+		t.Fatal("PR body confirms the linkage: the gate must not pause as broken linkage")
+	}
+	if blocked || timedOut {
+		t.Errorf("an APPROVED review exists (over REST) and nothing is outstanding: want the gate clear, got blocked=%v timedOut=%v", blocked, timedOut)
+	}
+	if len(reviews) != 1 || reviews[0].Author != "reviewer" {
+		t.Errorf("gate must evaluate the REST-sourced reviews, got %+v", reviews)
+	}
+}
+
+// TestAttemptMergeOnValidate_LinkMissing_FeedbackReadErrorHolds pins the
+// landing-decision side of round 4: a default-base item whose closing-keyword
+// link is missing has its reviews resolved over REST by the feedback gate, and
+// a failed PR resolution there holds the landing (deferred, no auto-merge)
+// rather than trusting the empty GraphQL review data.
+func TestAttemptMergeOnValidate_LinkMissing_FeedbackReadErrorHolds(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(_, _ string, _ int) (*gh.PRDetails, error) {
+			return nil, errors.New("network error")
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
+
+	enabled, deferred, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
+	if err != nil || enabled || !deferred {
+		t.Fatalf("want held (deferred, no error, not enabled); got enabled=%v deferred=%v err=%v", enabled, deferred, err)
+	}
+	if len(client.enablePullRequestAutoMergeCalls) != 0 {
+		t.Errorf("auto-merge must not be enabled while feedback state is unknown, got %d call(s)", len(client.enablePullRequestAutoMergeCalls))
 	}
 }

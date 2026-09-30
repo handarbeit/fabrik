@@ -336,7 +336,10 @@ func TestAttemptMergeOnValidate_FetchLinkedPRError_ReturnsError(t *testing.T) {
 		},
 	}
 	eng := testEngineForMerge(t, client)
-	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
+	// LinkedPRNumber set: a linked item, so the feedback gate trusts its GraphQL
+	// review data and the only FetchLinkedPR is the auto-merge path's own. The
+	// link-missing shape is covered in linkage_autoclose_1962_test.go.
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", LinkedPRNumber: 10}
 
 	_, _, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
 	if err == nil {
@@ -1986,7 +1989,9 @@ func TestAttemptMergeOnValidate_ReviewGate_OptOutCostsNothing(t *testing.T) {
 	}
 	eng := testEngineForMerge(t, client)
 	eng.cfg.MergeTrain = "off"
-	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
+	// LinkedPRNumber set: a linked item, so the feedback gate reads GraphQL
+	// review data rather than resolving the PR over REST (#1962).
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", LinkedPRNumber: 10}
 
 	if _, _, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item,
 		&stages.Stage{Name: "Validate"}); err != nil {

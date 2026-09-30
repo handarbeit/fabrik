@@ -182,8 +182,12 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 	// item.LinkedPRReviewRequests/LinkedPRReviews are always empty regardless of the
 	// PR's actual review state. Fetch reviews/requests directly via REST, keyed on the
 	// PR number handleBrokenReviewLinkage already resolved. See #1046/#1047/#1050.
+	// The same holds on the default base whenever the PR was resolved by branch
+	// (item.LinkedPRNumber == 0): the nested review data rides the same
+	// closing-keyword link, so it is empty when that link is missing — stale
+	// snapshot, indexing lag, or GitHub not creating it at all (#1962).
 	var fetchFailed bool
-	if itemHasBaseLabel(item) && prNumber > 0 {
+	if prNumber > 0 && (itemHasBaseLabel(item) || reviewDataRidesMissingLink(item)) {
 		restReviews, reviewsErr := e.readClient.FetchPRReviews(owner, repo, prNumber)
 		restRequests, requestsErr := e.readClient.FetchPRReviewRequests(owner, repo, prNumber)
 		fetchFailed = reviewsErr != nil || requestsErr != nil
@@ -1322,7 +1326,10 @@ func (e *Engine) resolveReviewsForFeedback(item gh.ProjectItem) []gh.PRReview {
 // exist resolves to (nil, nil) — nothing to review — exactly as before.
 func (e *Engine) resolveReviewsForFeedbackChecked(item gh.ProjectItem) ([]gh.PRReview, error) {
 	reviews := item.LinkedPRReviews
-	if itemHasBaseLabel(item) {
+	// Resolve over REST when the GraphQL review data cannot be trusted: always on
+	// a base:<branch> item, and on the default base whenever the closing-keyword
+	// link — which the nested review data rides — is missing (#1962).
+	if itemHasBaseLabel(item) || reviewDataRidesMissingLink(item) {
 		owner, repo := itemOwnerRepo(item, e.defaultRepo())
 		prNumber := item.LinkedPRNumber
 		if prNumber == 0 {
@@ -2059,4 +2066,15 @@ func declaredReviewersOutstanding(declared []string, reviews []gh.PRReview) []st
 		}
 	}
 	return outstanding
+}
+
+// reviewDataRidesMissingLink reports whether a default-base item's GraphQL
+// review data cannot be trusted because the closing-keyword link it rides is
+// missing (#1962): no linked PR and no nested review data at all. GraphQL review
+// data that IS present is valid by construction (it can only arrive through the
+// link), so it is used as before; only the empty-and-unlinked case — a stale
+// snapshot, indexing lag, or GitHub not creating the link at all — is re-read
+// over REST, as a base:<branch> item always is.
+func reviewDataRidesMissingLink(item gh.ProjectItem) bool {
+	return item.LinkedPRNumber == 0 && len(item.LinkedPRReviews) == 0 && len(item.LinkedPRReviewRequests) == 0
 }
