@@ -116,6 +116,14 @@ type DerivedInstallationSummary struct {
 	InstallationID      int64
 	RepositorySelection string
 	RepoCount           int
+	// ListingFailed is true when this round's repo listing failed (#1951).
+	// With Stale, RepoCount is the retained last successful listing; without
+	// it (a cold start) RepoCount is 0 and means unknown, not "zero".
+	ListingFailed bool
+	Stale         bool
+	// RetryNotBefore is non-zero while a rate-limit reset defers the next
+	// listing attempt.
+	RetryNotBefore time.Time
 }
 
 // DerivedRepoEntry pairs one derived repo with the installation ID that

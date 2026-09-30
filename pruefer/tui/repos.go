@@ -204,6 +204,20 @@ func (r RepoPaneComponent) provenanceNotes() []string {
 	if r.capped {
 		notes = append(notes, failStyle.Render(fmt.Sprintf("⚠ capped at %d repos (max_derived_repos) — raise the cap or narrow watched_repos to review the rest", r.capApplied)))
 	}
+	for _, inst := range r.installations {
+		if !inst.ListingFailed {
+			continue
+		}
+		retry := "will retry on the next re-derivation"
+		if !inst.RetryNotBefore.IsZero() {
+			retry = "not retrying before " + inst.RetryNotBefore.UTC().Format(time.RFC3339)
+		}
+		if inst.Stale {
+			notes = append(notes, failStyle.Render(fmt.Sprintf("⚠ STALE: installation %d (%s) repo listing failed — showing its last successful listing of %d repo(s); %s", inst.InstallationID, inst.Account, inst.RepoCount, retry)))
+		} else {
+			notes = append(notes, failStyle.Render(fmt.Sprintf("⚠ installation %d (%s) repo listing failed with no earlier listing — its repos are unknown, none derived; %s", inst.InstallationID, inst.Account, retry)))
+		}
+	}
 	if len(r.filteredOut) > 0 {
 		notes = append(notes, dimStyle.Render(fmt.Sprintf("%d watched_repos entr(ies) not covered by any installation: %s", len(r.filteredOut), strings.Join(r.filteredOut, ", "))))
 	}

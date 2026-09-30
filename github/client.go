@@ -239,7 +239,7 @@ func (c *Client) graphqlRequest(query string, variables map[string]interface{}, 
 	}
 
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("GitHub API returned %d: %s%s", resp.StatusCode, string(respBody), authErrorHint(resp.StatusCode))
+		return apiStatusError(resp.StatusCode, resp.Header, respBody)
 	}
 
 	// Check for GraphQL errors

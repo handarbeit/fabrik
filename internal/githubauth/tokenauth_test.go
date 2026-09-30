@@ -84,11 +84,52 @@ type fakeAppServer struct {
 	// without affecting any other installation.
 	failDelete func(installationID int64) bool
 
+	// listOverride, guarded by mu, makes /installation/repositories answer
+	// with a canned response for one installation (see setListOverride);
+	// listHits counts every listing request (any page) per installation.
+	listOverride map[int64]listOverride
+	listHits     map[int64]int
+
 	mu                sync.Mutex
 	mintCountByInst   map[int64]int
 	installTokenToID  map[string]int64
 	installationHits  []int64 // access_tokens calls, in order, for assertion
 	deletedInstallIDs []int64 // successful DELETE /app/installations/{id} calls, in order
+}
+
+// listOverride is a canned /installation/repositories failure. fromPage is
+// the first page number it applies to (0 or 1 = every page; 2 = only pages
+// after the first, i.e. a failure partway through pagination).
+type listOverride struct {
+	status   int
+	headers  map[string]string
+	body     string
+	fromPage int
+}
+
+// setListOverride makes listing requests for instID answer o until
+// clearListOverride is called.
+func (f *fakeAppServer) setListOverride(instID int64, o listOverride) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.listOverride == nil {
+		f.listOverride = map[int64]listOverride{}
+	}
+	f.listOverride[instID] = o
+}
+
+func (f *fakeAppServer) clearListOverride(instID int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.listOverride, instID)
+}
+
+// listHitsFor returns how many /installation/repositories requests instID's
+// token has made.
+func (f *fakeAppServer) listHitsFor(instID int64) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.listHits[instID]
 }
 
 func newFakeAppServer(slug string, installations []gh.AppInstallation, tokenExpiry func() time.Time) (*httptest.Server, *fakeAppServer) {
@@ -201,6 +242,25 @@ func newFakeAppServer(slug string, installations []gh.AppInstallation, tokenExpi
 		if !ok {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
+		}
+		f.mu.Lock()
+		if f.listHits == nil {
+			f.listHits = map[int64]int{}
+		}
+		f.listHits[instID]++
+		ov, hasOv := f.listOverride[instID]
+		f.mu.Unlock()
+		if hasOv {
+			page := 1
+			fmt.Sscanf(r.URL.Query().Get("page"), "%d", &page)
+			if ov.fromPage <= 1 || page >= ov.fromPage {
+				for k, v := range ov.headers {
+					w.Header().Set(k, v)
+				}
+				w.WriteHeader(ov.status)
+				w.Write([]byte(ov.body))
+				return
+			}
 		}
 		if f.failRepoList != nil && f.failRepoList(instID) {
 			w.WriteHeader(http.StatusInternalServerError)

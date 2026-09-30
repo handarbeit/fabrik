@@ -286,6 +286,41 @@ type Reconciler struct {
 	// the one Reconcile itself performs) — see LastDerived and Derive's own
 	// doc comment.
 	lastDerived DerivedRepoSet
+
+	// lastGood holds, per installation ID, the raw repo listing (before the
+	// watched_repos filter and the max_derived_repos cap) from that
+	// installation's most recent *successful* FetchInstallationRepositories
+	// call. It is the fallback derive substitutes when a later listing fails,
+	// so a transient error is never mistaken for an empty grant (#1951, R1).
+	// Only a successful listing overwrites it; an installation that is no
+	// longer wanted is pruned at the end of every derive. In-memory only.
+	lastGood map[int64][]string
+
+	// holds records, per installation ID, that listing is deferred until a
+	// rate-limit reset (R3). Consulted and updated only by derive's listing
+	// step; pruned alongside lastGood.
+	holds map[int64]listingHold
+
+	// nowFn is the clock derive's hold logic reads; nil means time.Now. A test
+	// seam — see clock.
+	nowFn func() time.Time
+}
+
+// listingHold defers an installation's repo listing until `until` because
+// GitHub reported a rate limit resetting then.
+type listingHold struct {
+	until  time.Time
+	reason string
+}
+
+func (r *Reconciler) clock() time.Time {
+	r.mu.Lock()
+	fn := r.nowFn
+	r.mu.Unlock()
+	if fn != nil {
+		return fn()
+	}
+	return time.Now()
 }
 
 // BotLogin returns the App's own identity as it appears as a PR/review

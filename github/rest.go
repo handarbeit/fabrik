@@ -79,7 +79,10 @@ func isDiffTooLarge(body []byte) bool {
 }
 
 // authErrorHint returns an actionable hint string for 401/403 HTTP errors and
-// an empty string for all other status codes. The hint advises users to switch
+// an empty string for all other status codes. It is keyed on status alone, so
+// callers must classify rate limits first (classifyRateLimit): GitHub also
+// returns 403 for rate limiting, where this hint would be wrong. The App
+// client never uses it. The hint advises users to switch
 // to a classic personal access token, which is required for GitHub Projects v2
 // GraphQL operations that fine-grained tokens do not support.
 func authErrorHint(statusCode int) string {
@@ -87,6 +90,17 @@ func authErrorHint(statusCode int) string {
 		return " If you used a fine-grained access token (github_pat_...), switch to a classic personal access token with 'repo', 'project', and 'workflow' scopes. See: https://github.com/settings/tokens"
 	}
 	return ""
+}
+
+// apiStatusError builds the generic "GitHub API returned N" error for a
+// non-2xx response on the PAT client. A rate-limited response becomes a
+// *RateLimitError with no hint; otherwise the fine-grained-PAT hint is appended
+// for a genuine 401/403 only (R4).
+func apiStatusError(status int, header http.Header, body []byte) error {
+	if rl := classifyRateLimit("GitHub API", status, header, body); rl != nil {
+		return rl
+	}
+	return fmt.Errorf("GitHub API returned %d: %s%s", status, string(body), authErrorHint(status))
 }
 
 // do is the shared REST request core, using GitHub's standard JSON media
@@ -181,7 +195,7 @@ func (c *Client) doWithHeaders(method, url, accept string, extra http.Header, bo
 		case 422:
 			return resp, respBody, fmt.Errorf("GitHub API returned 422: %s: %w", string(respBody), ErrUnprocessableEntity)
 		}
-		return resp, respBody, fmt.Errorf("GitHub API returned %d: %s%s", resp.StatusCode, string(respBody), authErrorHint(resp.StatusCode))
+		return resp, respBody, apiStatusError(resp.StatusCode, resp.Header, respBody)
 	}
 
 	return resp, respBody, nil

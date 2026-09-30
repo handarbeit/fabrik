@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
 )
@@ -47,6 +48,15 @@ type DerivedInstallation struct {
 	// (see logDerivedSet) must say so rather than implying the installation
 	// was actually confirmed to grant nothing.
 	RepoListError string
+	// Stale is true when RepoListError is set and RepoCount/the derived
+	// repos are the installation's last *successful* listing, retained
+	// because a failed read is not evidence the grant changed (#1951, R1).
+	// False with RepoListError set means a cold start: no earlier listing
+	// exists, RepoCount is 0 and means unknown, not "zero accessible".
+	Stale bool
+	// RetryNotBefore is non-zero when this installation's listing is held
+	// until a rate-limit reset (R3): no listing call is made before it.
+	RetryNotBefore time.Time
 	// MintError is non-empty when minting a token for this installation
 	// itself failed (e.g. a transient GitHub API error) — RepoListError is
 	// always empty in that case, since FetchInstallationRepositories was
@@ -380,6 +390,9 @@ func (r *Reconciler) derive(ctx context.Context, filter []string, maxRepos int, 
 	// (present in byAccount) but not in wantOwners loses its client exactly
 	// like one whose installation disappeared entirely.
 	wantOwners := make(map[string]bool, len(installations))
+	// wantedInstallations is wantOwners' installation-ID twin, used to prune
+	// the retained listings and holds of installations that no longer count.
+	wantedInstallations := make(map[int64]bool, len(installations))
 
 	for _, inst := range installations {
 		key := strings.ToLower(inst.Account)
@@ -434,6 +447,7 @@ func (r *Reconciler) derive(ctx context.Context, filter []string, maxRepos int, 
 		}
 
 		wantOwners[key] = true
+		wantedInstallations[inst.ID] = true
 
 		client, ok := existingClients[key]
 		if !ok {
@@ -469,24 +483,21 @@ func (r *Reconciler) derive(ctx context.Context, filter []string, maxRepos int, 
 			}
 		}
 
-		repos, repoTruncated, err := gh.FetchInstallationRepositories(baseURL, client.Token())
-		repoListErr := ""
-		if err != nil {
-			logf("! listing accessible repositories for installation %d (account %q) failed: %v", inst.ID, inst.Account, err)
-			repoListErr = err.Error()
-		}
-		if repoTruncated {
+		listing := r.listInstallationRepos(inst, client.Token(), baseURL, logf)
+		if listing.truncated {
 			truncated = true
 		}
-		for _, full := range repos {
+		for _, full := range listing.repos {
 			if dr, ok := derivedRepoFromFullName(full, inst.ID); ok {
 				allRepos = append(allRepos, dr)
 			}
 		}
 		instSummaries = append(instSummaries, DerivedInstallation{
 			Account: inst.Account, InstallationID: inst.ID,
-			RepositorySelection: inst.RepositorySelection, RepoCount: len(repos),
-			RepoListError:        repoListErr,
+			RepositorySelection: inst.RepositorySelection, RepoCount: len(listing.repos),
+			RepoListError:        listing.errMsg,
+			Stale:                listing.stale,
+			RetryNotBefore:       listing.retryNotBefore,
 			PermissionShortfalls: checkGrantedPermissions(inst.Permissions, requiredPermissions),
 		})
 	}
@@ -514,6 +525,12 @@ func (r *Reconciler) derive(ctx context.Context, filter []string, maxRepos int, 
 	detached := r.RemoveOwners(goneOwners)
 
 	set := DerivedRepoSet{Truncated: truncated, Installations: instSummaries}
+	unknownGrantOwners := map[string]bool{}
+	for _, in := range instSummaries {
+		if in.RepoListError != "" && !in.Stale {
+			unknownGrantOwners[strings.ToLower(in.Account)] = true
+		}
+	}
 
 	if len(filter) > 0 {
 		filterSet := make(map[string]bool, len(filter))
@@ -531,9 +548,16 @@ func (r *Reconciler) derive(ctx context.Context, filter []string, maxRepos int, 
 			}
 		}
 		for _, f := range filter {
-			if !granted[strings.ToLower(f)] {
-				set.FilteredOut = append(set.FilteredOut, f)
+			if granted[strings.ToLower(f)] {
+				continue
 			}
+			// An owner whose listing failed with nothing to fall back on has
+			// an unknown grant, not an uncovered one — its per-installation
+			// ERROR line already says so; "not covered" would be false.
+			if owner, _, ok := splitOwnerRepo(f); ok && unknownGrantOwners[strings.ToLower(owner)] {
+				continue
+			}
+			set.FilteredOut = append(set.FilteredOut, f)
 		}
 		allRepos = kept
 	}
@@ -554,10 +578,120 @@ func (r *Reconciler) derive(ctx context.Context, filter []string, maxRepos int, 
 	for k, v := range newMintErrors {
 		r.mintErrors[k] = v
 	}
+	// A retained listing must not outlive its installation: one that left the
+	// list, was removed by R4, is unrecognized, or is narrowed out by R3 is
+	// dropped, so a revoked grant cannot keep its repos alive.
+	for id := range r.lastGood {
+		if !wantedInstallations[id] {
+			delete(r.lastGood, id)
+		}
+	}
+	for id := range r.holds {
+		if !wantedInstallations[id] {
+			delete(r.holds, id)
+		}
+	}
 	r.lastDerived = set
 	r.mu.Unlock()
 
 	return set, detached, nil
+}
+
+// maxListingHold bounds how long a rate-limit reset may defer an
+// installation's listing. An hour is the primary rate-limit window, so nothing
+// legitimate exceeds it, and it stops a bogus far-future Retry-After from
+// pinning an installation on stale data (cf. ADR-1815's clamp for Claude).
+const maxListingHold = time.Hour
+
+// listingResult is one installation's listing outcome for a derive round.
+type listingResult struct {
+	repos     []string
+	truncated bool
+	// errMsg is non-empty when the live listing failed or was deferred.
+	errMsg string
+	// stale is true when errMsg is set and repos is the retained last-good
+	// listing; false with errMsg set is a cold start (repos is nil).
+	stale          bool
+	retryNotBefore time.Time
+}
+
+// listInstallationRepos lists inst's accessible repositories, applying #1951's
+// rules: only a *successful* listing changes what is retained (R1); a failed
+// or deferred one falls back to the last successful listing, or is reported as
+// a cold-start failure when there is none; and a rate-limited failure holds
+// further listing of this installation until the reported reset (R3). State is
+// per installation and guarded by r.mu at each access, so overlapping Derive
+// calls never clobber each other.
+func (r *Reconciler) listInstallationRepos(inst gh.AppInstallation, token, baseURL string, logf func(format string, args ...any)) listingResult {
+	now := r.clock()
+
+	r.mu.Lock()
+	hold, held := r.holds[inst.ID]
+	r.mu.Unlock()
+
+	var (
+		repos     []string
+		truncated bool
+		err       error
+	)
+	if held && now.Before(hold.until) {
+		err = fmt.Errorf("listing deferred until %s: %s", hold.until.UTC().Format(time.RFC3339), hold.reason)
+	} else {
+		repos, truncated, err = gh.FetchInstallationRepositories(baseURL, token)
+	}
+
+	if err == nil {
+		r.mu.Lock()
+		if r.lastGood == nil {
+			r.lastGood = map[int64][]string{}
+		}
+		r.lastGood[inst.ID] = append([]string(nil), repos...)
+		delete(r.holds, inst.ID)
+		r.mu.Unlock()
+		return listingResult{repos: repos, truncated: truncated}
+	}
+
+	// A hold-skipped round keeps the existing hold; a real failure may set,
+	// replace or clear it.
+	retryNotBefore := time.Time{}
+	if held && now.Before(hold.until) {
+		retryNotBefore = hold.until
+	} else {
+		var rl *gh.RateLimitError
+		r.mu.Lock()
+		if errors.As(err, &rl) && rl.ResetAt.After(now) {
+			until := rl.ResetAt
+			if limit := now.Add(maxListingHold); until.After(limit) {
+				until = limit
+			}
+			if r.holds == nil {
+				r.holds = map[int64]listingHold{}
+			}
+			r.holds[inst.ID] = listingHold{until: until, reason: err.Error()}
+			retryNotBefore = until
+		} else {
+			delete(r.holds, inst.ID)
+		}
+		r.mu.Unlock()
+	}
+
+	r.mu.Lock()
+	last, haveLast := r.lastGood[inst.ID]
+	last = append([]string(nil), last...)
+	r.mu.Unlock()
+
+	res := listingResult{errMsg: err.Error(), retryNotBefore: retryNotBefore}
+	retry := "will retry on the next re-derivation"
+	if !retryNotBefore.IsZero() {
+		retry = "will not retry before " + retryNotBefore.UTC().Format(time.RFC3339)
+	}
+	if haveLast {
+		res.repos, res.stale = last, true
+		logf("! STALE: listing accessible repositories for installation %d (account %q) failed: %v — keeping its last successful listing of %d repo(s); %s", inst.ID, inst.Account, err, len(last), retry)
+	} else {
+		logf("! ERROR: listing accessible repositories for installation %d (account %q) failed: %v — no earlier listing to fall back on, so no repos are derived for this installation (unknown, not confirmed empty); %s", inst.ID, inst.Account, err, retry)
+	}
+	return res
 }
 
 // logDerivedSet logs a DerivedRepoSet's contents for R4's "make the derived
@@ -589,8 +723,10 @@ func logDerivedSet(set DerivedRepoSet, logf func(format string, args ...any)) {
 			logf("installation %d (%s, repository_selection=%s): not named in watched_repos — no token minted for it (R3)", inst.InstallationID, inst.Account, inst.RepositorySelection)
 		case inst.MintError != "":
 			logf("! installation %d (%s, repository_selection=%s): minting a token failed this round (%s) — the installation exists but is not yet usable; retry reconciliation", inst.InstallationID, inst.Account, inst.RepositorySelection, inst.MintError)
+		case inst.RepoListError != "" && inst.Stale:
+			logf("! STALE: installation %d (%s, repository_selection=%s): repo listing failed this round (%s) — still reviewing its last successful listing of %d repo(s)%s", inst.InstallationID, inst.Account, inst.RepositorySelection, inst.RepoListError, inst.RepoCount, retryNotBeforeClause(inst.RetryNotBefore))
 		case inst.RepoListError != "":
-			logf("✓ installation %d (%s, repository_selection=%s): repo-access verification was skipped this round (listing failed — see error above); the installation is still authorized", inst.InstallationID, inst.Account, inst.RepositorySelection)
+			logf("! ERROR: installation %d (%s, repository_selection=%s): repo listing failed and there is no earlier listing to fall back on (%s) — no repos derived for it; its grant is unknown, not confirmed empty%s", inst.InstallationID, inst.Account, inst.RepositorySelection, inst.RepoListError, retryNotBeforeClause(inst.RetryNotBefore))
 		default:
 			logf("✓ installation %d (%s, repository_selection=%s): %d repo(s) accessible", inst.InstallationID, inst.Account, inst.RepositorySelection, inst.RepoCount)
 		}
@@ -617,6 +753,14 @@ func logDerivedSet(set DerivedRepoSet, logf func(format string, args ...any)) {
 	for _, f := range set.FilteredOut {
 		logf("! watched_repos entry %q is not covered by any installation's grant — excluded", f)
 	}
+}
+
+// retryNotBeforeClause renders R3's hold for a log line; empty when none.
+func retryNotBeforeClause(t time.Time) string {
+	if t.IsZero() {
+		return "; will retry on the next re-derivation"
+	}
+	return "; will not retry before " + t.UTC().Format(time.RFC3339)
 }
 
 // guideMissingInstallations logs (and, at most once per Reconcile call,

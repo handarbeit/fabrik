@@ -183,13 +183,21 @@ func appRequest(method, baseURL, path, jwt string, result interface{}) error {
 		return fmt.Errorf("reading response: %w", err)
 	}
 	if resp.StatusCode >= 400 {
+		// A rate-limited 403/429 is checked first: GitHub reuses 403 for
+		// rate limiting, and a request-volume problem must never read as the
+		// App's identity being rejected (#1951).
+		if rl := classifyRateLimit("GitHub App API", resp.StatusCode, resp.Header, body); rl != nil {
+			return rl
+		}
 		switch resp.StatusCode {
 		case 401, 403:
-			return fmt.Errorf("GitHub App API returned %d: %s%s: %w", resp.StatusCode, string(body), authErrorHint(resp.StatusCode), ErrAppUnauthorized)
+			// No authErrorHint: it advises switching a fine-grained PAT to a
+			// classic one, and the App client uses no PAT at all (R4).
+			return fmt.Errorf("GitHub App API returned %d: %s: %w", resp.StatusCode, string(body), ErrAppUnauthorized)
 		case 404:
 			return fmt.Errorf("GitHub App API returned 404: %s: %w", string(body), ErrNotFound)
 		}
-		return fmt.Errorf("GitHub App API returned %d: %s%s", resp.StatusCode, string(body), authErrorHint(resp.StatusCode))
+		return fmt.Errorf("GitHub App API returned %d: %s", resp.StatusCode, string(body))
 	}
 	if result == nil {
 		return nil
