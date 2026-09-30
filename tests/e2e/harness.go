@@ -732,10 +732,47 @@ func MergePR(t *testing.T, env *Env, repo string, prNumber int) {
 	// Without it, a merge issued before the ~10-min slow-gate (and other required
 	// checks) go green is rejected with "the base branch policy prohibits the
 	// merge" — a non-deterministic failure that depends on CI timing.
-	out, err := ghOutput(env, "pr", "merge", fmt.Sprint(prNumber), "-R", repo, "--merge", "--admin")
-	if err != nil {
-		t.Fatalf("merge PR #%d in %s: %v\n%s", prNumber, repo, err, out)
+	//
+	// Retried on transient GitHub failures. A single "GraphQL: Something went
+	// wrong while executing your query" on the merge call failed a 12-minute
+	// scenario after all its assertions had passed (0.0.83 gate run 13,
+	// TestCruiseFullPipeline). A failed-looking call can still have merged, so
+	// the PR's own merged state is checked before each retry.
+	var out string
+	var err error
+	for attempt := 1; attempt <= 4; attempt++ {
+		out, err = ghOutput(env, "pr", "merge", fmt.Sprint(prNumber), "-R", repo, "--merge", "--admin")
+		if err == nil {
+			return
+		}
+		if at, merr := prMergedAt(env, repo, prNumber); merr == nil && !at.IsZero() {
+			t.Logf("merge PR #%d: call reported an error but the PR is merged (%s) — treating as success", prNumber, at.Format(time.RFC3339))
+			return
+		}
+		if !isTransientGitHubError(out) || attempt == 4 {
+			break
+		}
+		t.Logf("merge PR #%d: transient GitHub error (attempt %d/4), retrying: %s", prNumber, attempt, strings.TrimSpace(out))
+		time.Sleep(time.Duration(attempt*5) * time.Second)
 	}
+	t.Fatalf("merge PR #%d in %s: %v\n%s", prNumber, repo, err, out)
+}
+
+// isTransientGitHubError reports whether gh output carries one of GitHub's
+// retryable server-side failures (not a policy refusal such as an unmergeable
+// PR, which retrying cannot fix).
+func isTransientGitHubError(out string) bool {
+	for _, s := range []string{
+		"Something went wrong while executing your query",
+		"HTTP 502", "HTTP 503", "HTTP 504",
+		"Bad Gateway", "Service Unavailable", "Gateway Timeout",
+		"timed out", "connection reset",
+	} {
+		if strings.Contains(out, s) {
+			return true
+		}
+	}
+	return false
 }
 
 // CreateThrowawayBaseBranch creates a throwaway branch on repo, forked off
