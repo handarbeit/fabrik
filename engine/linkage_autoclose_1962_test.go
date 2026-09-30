@@ -212,3 +212,25 @@ func TestSettleDefaultBaseClose_LiveReadError_Defers(t *testing.T) {
 			len(client.closeIssueCalls), len(client.addCommentCalls), len(client.removeLabelCalls))
 	}
 }
+
+// Pruefer finding on #1965 (round 2): the live read applies on every base — a
+// base:-labelled item (including one naming the default branch) whose issue a
+// stale snapshot still shows open but which is live-closed must not be
+// re-closed (CloseIssue would overwrite its state_reason).
+func TestSettleClose_BaseLabelled_StaleSnapshotLiveClosed_NoReclose(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchIssueFn: func(_, _ string, n int) (*gh.IssueData, error) { return &gh.IssueData{Number: n, State: "closed"}, nil },
+	}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	item := gh.ProjectItem{Number: 21, Repo: "owner/repo", IsClosed: false,
+		Labels: []string{nonDefaultBaseAwaitingCloseLabel, "base:main"}}
+
+	eng.settleNonDefaultBaseClose(item)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.closeIssueCalls) != 0 || len(client.addCommentCalls) != 0 {
+		t.Errorf("live-closed issue must not be re-closed or commented on: got %d close(s), %d comment(s)",
+			len(client.closeIssueCalls), len(client.addCommentCalls))
+	}
+}

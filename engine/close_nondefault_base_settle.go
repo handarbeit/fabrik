@@ -65,22 +65,21 @@ func (e *Engine) settleNonDefaultBaseClose(item gh.ProjectItem) {
 		e.clearNonDefaultBaseCloseMarker(item, owner, repo)
 		return
 	}
-	if itemOnDefaultBase(item) {
-		// The board snapshot can lag a late GitHub auto-close by a poll, and
-		// CloseIssue is a bare PATCH that succeeds on an already-closed issue — so
-		// without a live read this path could re-close it and post a false "auto-close
-		// did not fire" comment. Decide on live state; an unreadable state waits for
-		// the next poll rather than risk the wrong claim.
-		iss, err := e.client.FetchIssue(owner, repo, item.Number)
-		if err != nil || iss == nil {
-			e.logf(item.Number, "pr-terminal", "could not read #%d's state (%v) — deferring the default-base close check to the next poll\n", item.Number, err)
-			return
-		}
-		if iss.State == "closed" {
-			e.logf(item.Number, "pr-terminal", "issue #%d already closed (GitHub's auto-close landed) — clearing awaiting-close marker\n", item.Number)
-			e.clearNonDefaultBaseCloseMarker(item, owner, repo)
-			return
-		}
+	// Decide on the live state, on every base. The board snapshot can lag a close
+	// (a late GitHub auto-close, or any other actor) by a poll, and CloseIssue is a
+	// bare PATCH that succeeds on an already-closed issue — so without a live read
+	// this path could re-close it (overwriting its state_reason) and, on the
+	// default base, post a false "auto-close did not fire" comment. An unreadable
+	// state waits for the next poll rather than risk either.
+	iss, err := e.client.FetchIssue(owner, repo, item.Number)
+	if err != nil || iss == nil {
+		e.logf(item.Number, "pr-terminal", "could not read #%d's state (%v) — deferring the close check to the next poll\n", item.Number, err)
+		return
+	}
+	if iss.State == "closed" {
+		e.logf(item.Number, "pr-terminal", "issue #%d already closed — clearing awaiting-close marker\n", item.Number)
+		e.clearNonDefaultBaseCloseMarker(item, owner, repo)
+		return
 	}
 
 	if err := e.client.CloseIssue(owner, repo, item.Number); err != nil {
@@ -113,8 +112,10 @@ func (e *Engine) settleNonDefaultBaseClose(item gh.ProjectItem) {
 
 // itemOnDefaultBase reports whether the item targets the repository default
 // branch as far as the settle scan can tell without a worktree: no base:
-// label. (A base: label naming the default branch is treated as non-default
-// here, which only changes the wording of the log line, never the close.)
+// label. It decides only wording — the "closed after merge" comment and the
+// escalation text — never whether or how the issue is closed (the live read
+// above runs on every base). A base: label that names the default branch is
+// therefore worded as non-default: rare, and cosmetic.
 func itemOnDefaultBase(item gh.ProjectItem) bool {
 	return !itemHasBaseLabel(item)
 }
