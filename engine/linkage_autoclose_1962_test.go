@@ -294,3 +294,32 @@ func TestAttemptMergeOnValidate_LinkMissing_FeedbackReadErrorHolds(t *testing.T)
 		t.Errorf("auto-merge must not be enabled while feedback state is unknown, got %d call(s)", len(client.enablePullRequestAutoMergeCalls))
 	}
 }
+
+// Pruefer round 5 on #1965: a live read that keeps failing (a persistent
+// permission or 404 problem) must count toward the ADR-1097 retry budget and
+// escalate, not leave a Done item with an open issue stalled behind a log line.
+func TestSettleClose_PersistentLiveReadError_Escalates(t *testing.T) {
+	client := &mockGitHubClient{} // default FetchIssue returns an error
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	eng.cfg.MaxRetries = 2
+	item := gh.ProjectItem{Number: 22, Repo: "owner/repo", Labels: []string{nonDefaultBaseAwaitingCloseLabel}}
+
+	for i := 0; i < eng.cfg.MaxRetries; i++ {
+		eng.settleNonDefaultBaseClose(item)
+	}
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.closeIssueCalls) != 0 {
+		t.Errorf("an unreadable issue must never be closed blind, got %d close(s)", len(client.closeIssueCalls))
+	}
+	paused := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			paused = true
+		}
+	}
+	if !paused {
+		t.Error("expected fabrik:paused after MaxRetries unreadable settle passes")
+	}
+}

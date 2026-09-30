@@ -61,7 +61,8 @@ GitHub's linkage and auto-close are no longer relied on.
     decides on a **live** `FetchIssue`, not the board snapshot, which can lag
     that close by a poll. `CloseIssue` succeeds on an already-closed issue, so
     a stale snapshot would otherwise re-close it and post a false miss. An
-    unreadable state waits for the next poll. The live read runs on every
+    unreadable state waits for the next poll, counting toward the ADR-1097
+    retry budget so a persistent read failure escalates. The live read runs on every
     base: a `base:` label only changes the wording of the comments.
   - **Where the issue set comes from.** It comes from Fabrik's own knowledge
     (the landed item), never `closingIssuesReferences`. When the auto-close

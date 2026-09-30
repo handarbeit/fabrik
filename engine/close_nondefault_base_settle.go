@@ -70,10 +70,13 @@ func (e *Engine) settleNonDefaultBaseClose(item gh.ProjectItem) {
 	// bare PATCH that succeeds on an already-closed issue — so without a live read
 	// this path could re-close it (overwriting its state_reason) and, on the
 	// default base, post a false "auto-close did not fire" comment. An unreadable
-	// state waits for the next poll rather than risk either.
+	// state waits for the next poll rather than risk either, but counts toward the
+	// same retry budget as a failed close, so a persistently unreadable issue still
+	// escalates (ADR-1097) instead of stalling silently.
 	iss, err := e.client.FetchIssue(owner, repo, item.Number)
 	if err != nil || iss == nil {
-		e.logf(item.Number, "pr-terminal", "could not read #%d's state (%v) — deferring the close check to the next poll\n", item.Number, err)
+		e.logf(item.Number, "pr-terminal", "retry: could not read #%d's state (%v) — deferring the close check to the next poll\n", item.Number, err)
+		e.recordNonDefaultBaseCloseRetry(item)
 		return
 	}
 	if iss.State == "closed" {
