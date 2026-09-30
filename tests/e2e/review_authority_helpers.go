@@ -4,6 +4,8 @@ package e2e
 
 import (
 	"fmt"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -80,10 +82,45 @@ func seedReviewGateItemImpl(t *testing.T, env *Env, repo, baseBranch, column, ma
 	// Confirm the PR is resolvable by the fabrik/issue-<N> branch convention
 	// (mirrors the engine's resolver) before seeding the completion label.
 	LinkedPRNumber(t, env, repo, num)
+	// And, for a default-base PR, wait until GitHub reports the Closes-keyword
+	// linkage (closedByPullRequestsReferences — what the engine's LinkedPRNumber
+	// comes from). GitHub fills it in asynchronously; exposing the item at the
+	// review gate before then makes handleBrokenReviewLinkage pause it for
+	// "broken linkage" (0.0.83 gate run 13: both expected_reviewers seeds paused
+	// seconds after their PRs were created). In production Review runs minutes
+	// after Implement opens the PR, so the linkage is always there by then.
+	if baseBranch == "" || baseBranch == "main" {
+		waitForClosingLinkage(t, env, repo, num, prNum)
+	}
 
 	AddLabel(t, env, repo, num, "stage:"+column+":complete")
 	SetIssueStatus(t, env, itemID, column)
 	t.Logf("seeded review-gate item: issue #%d, PR #%d, stage:%s:complete, Status=%s (marker=%s, draft=%v)",
 		num, prNum, column, column, marker, draft)
 	return num, prNum, itemID
+}
+
+// waitForClosingLinkage polls the issue's closedByPullRequestsReferences until
+// it lists prNum (the PR body's Closes #N keyword has been indexed).
+func waitForClosingLinkage(t *testing.T, env *Env, repo string, issueNum, prNum int) {
+	t.Helper()
+	owner, name, ok := splitRepo(repo)
+	if !ok {
+		t.Fatalf("bad repo: %q", repo)
+	}
+	q := fmt.Sprintf(`query { repository(owner: %q, name: %q) { issue(number: %d) { closedByPullRequestsReferences(first: 10, includeClosedPrs: true) { nodes { number } } } } }`, owner, name, issueNum)
+	deadline := time.Now().Add(5 * time.Minute)
+	for time.Now().Before(deadline) {
+		out, err := ghOutput(env, "api", "graphql", "-f", "query="+q,
+			"--jq", "[.data.repository.issue.closedByPullRequestsReferences.nodes[].number]")
+		if err == nil {
+			for _, f := range strings.Split(strings.Trim(strings.TrimSpace(out), "[]"), ",") {
+				if strings.TrimSpace(f) == strconv.Itoa(prNum) {
+					return
+				}
+			}
+		}
+		time.Sleep(5 * time.Second)
+	}
+	t.Fatalf("PR #%d's Closes #%d linkage never appeared in %s#%d's closedByPullRequestsReferences within 5m", prNum, issueNum, repo, issueNum)
 }
