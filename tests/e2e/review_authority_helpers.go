@@ -82,16 +82,7 @@ func seedReviewGateItemImpl(t *testing.T, env *Env, repo, baseBranch, column, ma
 	// Confirm the PR is resolvable by the fabrik/issue-<N> branch convention
 	// (mirrors the engine's resolver) before seeding the completion label.
 	LinkedPRNumber(t, env, repo, num)
-	// And, for a default-base PR, wait until GitHub reports the Closes-keyword
-	// linkage (closedByPullRequestsReferences — what the engine's LinkedPRNumber
-	// comes from). GitHub fills it in asynchronously; exposing the item at the
-	// review gate before then makes handleBrokenReviewLinkage pause it for
-	// "broken linkage" (0.0.83 gate run 13: both expected_reviewers seeds paused
-	// seconds after their PRs were created). In production Review runs minutes
-	// after Implement opens the PR, so the linkage is always there by then.
-	if baseBranch == "" || baseBranch == "main" {
-		waitForClosingLinkage(t, env, repo, num, prNum)
-	}
+	// (createMemberPR also waited for the Closes linkage — see waitForClosingLinkage.)
 
 	AddLabel(t, env, repo, num, "stage:"+column+":complete")
 	SetIssueStatus(t, env, itemID, column)
