@@ -223,7 +223,10 @@ GIT_TOKEN="${TOKEN:-$(gh_ auth token)}"
 git -C "$WORKDIR" clone -q "https://x-access-token:${GIT_TOKEN}@github.com/$ALPHA.git" repo
 BRANCH="wire-contract-fixture-pr-$$"
 git -C "$WORKDIR/repo" checkout -q -b "$BRANCH"
-echo "wire-contract fixture PR — disposable, safe to delete" > "$WORKDIR/repo/WIRE_CONTRACT_FIXTURE.md"
+# Unique content per run: a fixed body is a no-op commit once an earlier run
+# has merged the same file into the sandbox's main, and the empty commit then
+# aborts the script (set -e) before the PR is created.
+echo "wire-contract fixture PR — disposable, safe to delete ($(date -u +%FT%TZ), pid $$)" > "$WORKDIR/repo/WIRE_CONTRACT_FIXTURE.md"
 git -C "$WORKDIR/repo" add WIRE_CONTRACT_FIXTURE.md
 git -C "$WORKDIR/repo" -c user.email="wire-contract-fixture@handarbeit.io" -c user.name="wire-contract-fixture" commit -q -m "chore: wire-contract fixture PR (disposable)"
 git -C "$WORKDIR/repo" push -q -u origin "$BRANCH"

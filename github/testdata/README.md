@@ -174,11 +174,9 @@ set was migrated):
 - `addReactionMutation` (#1953 R8 — the first reaction mutation, and the first
   with a `PullRequestReview` subject; REST cannot react to a review). Its
   request shape (`subjectId` = review node ID, uppercase `content`) is pinned
-  by `review_reaction_test.go`, whose response literal is hand-authored.
-  `record-fixtures.sh` has an `add_review_reaction` step that records the real
-  response against a disposable sandbox PR review; that recording has **not yet
-  been captured** (it needs sandbox credentials an automated stage lacks) — run
-  the script and migrate the test to `loadRecording(t, "add_review_reaction")`.
+  by `review_reaction_test.go`, which serves the real recorded response
+  (`recordings/add_review_reaction.json`, captured by `record-fixtures.sh`'s
+  `add_review_reaction` step against a disposable sandbox PR review).
 
 **REST surface not in R5's named list**: `FetchLatestRelease`,
 `FetchRepoAccess`, `FetchInstalledVersion` (`github/client.go`),

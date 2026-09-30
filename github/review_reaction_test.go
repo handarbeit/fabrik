@@ -12,15 +12,18 @@ import (
 // a PullRequestReview reaction (#1953 R8): the review's node ID as subjectId
 // and the *uppercase* GraphQL enum, not REST's lowercase name.
 //
-// The response below is hand-authored, not a recording — see
-// github/testdata/README.md ("addReaction"). The operation itself is validated
-// against the vendored schema by TestWireContract_AllQueriesValidateAgainstSchema.
+// The server replies with the real recorded addReaction response
+// (testdata/recordings/add_review_reaction.json, captured against a sandbox PR
+// review by scripts/wire-contract/record-fixtures.sh). The operation itself is
+// validated against the vendored schema by
+// TestWireContract_AllQueriesValidateAgainstSchema.
 func TestAddReviewReaction_RequestShape(t *testing.T) {
 	tests := []struct{ in, want string }{
 		{"eyes", "EYES"},
 		{"rocket", "ROCKET"},
 		{"+1", "THUMBS_UP"},
 	}
+	recorded := loadRecording(t, "add_review_reaction")
 	for _, tc := range tests {
 		t.Run(tc.in, func(t *testing.T) {
 			var got struct {
@@ -38,7 +41,7 @@ func TestAddReviewReaction_RequestShape(t *testing.T) {
 					t.Errorf("decoding request: %v", err)
 				}
 				w.Header().Set("Content-Type", "application/json")
-				w.Write([]byte(`{"data":{"addReaction":{"reaction":{"content":"` + tc.want + `"}}}}`))
+				w.Write(recorded)
 			}))
 			defer srv.Close()
 

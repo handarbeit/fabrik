@@ -1,0 +1,18 @@
+{
+  "provenance": {
+    "operation": "add_review_reaction",
+    "endpoint": "https://api.github.com/graphql",
+    "recorded_at": "2026-09-30T03:31:17Z",
+    "source_repo": "handarbeit/fabrik-test-alpha#7091 (disposable sandbox PR review)",
+    "scrubbed": true
+  },
+  "response": {
+    "data": {
+      "addReaction": {
+        "reaction": {
+          "content": "EYES"
+        }
+      }
+    }
+  }
+}
