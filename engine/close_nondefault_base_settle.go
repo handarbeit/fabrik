@@ -65,6 +65,23 @@ func (e *Engine) settleNonDefaultBaseClose(item gh.ProjectItem) {
 		e.clearNonDefaultBaseCloseMarker(item, owner, repo)
 		return
 	}
+	if itemOnDefaultBase(item) {
+		// The board snapshot can lag a late GitHub auto-close by a poll, and
+		// CloseIssue is a bare PATCH that succeeds on an already-closed issue — so
+		// without a live read this path could re-close it and post a false "auto-close
+		// did not fire" comment. Decide on live state; an unreadable state waits for
+		// the next poll rather than risk the wrong claim.
+		iss, err := e.client.FetchIssue(owner, repo, item.Number)
+		if err != nil || iss == nil {
+			e.logf(item.Number, "pr-terminal", "could not read #%d's state (%v) — deferring the default-base close check to the next poll\n", item.Number, err)
+			return
+		}
+		if iss.State == "closed" {
+			e.logf(item.Number, "pr-terminal", "issue #%d already closed (GitHub's auto-close landed) — clearing awaiting-close marker\n", item.Number)
+			e.clearNonDefaultBaseCloseMarker(item, owner, repo)
+			return
+		}
+	}
 
 	if err := e.client.CloseIssue(owner, repo, item.Number); err != nil {
 		e.logf(item.Number, "pr-terminal", "retry: could not close #%d: %v\n", item.Number, err)

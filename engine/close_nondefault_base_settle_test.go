@@ -18,7 +18,7 @@ func TestSettleNonDefaultBaseClose_AlreadyClosed_SkipsCloseAndClearsMarker(t *te
 
 	item := gh.ProjectItem{
 		Number: 9, Repo: "owner/repo", IsClosed: true,
-		Labels: []string{nonDefaultBaseAwaitingCloseLabel},
+		Labels: []string{nonDefaultBaseAwaitingCloseLabel, "base:release"}, // non-default base (#1962: unlabelled = default base)
 	}
 
 	eng.settleNonDefaultBaseClose(item)
@@ -49,7 +49,7 @@ func TestSettleNonDefaultBaseClose_RetrySucceeds(t *testing.T) {
 
 	item := gh.ProjectItem{
 		Number: 10, Repo: "owner/repo", IsClosed: false,
-		Labels: []string{nonDefaultBaseAwaitingCloseLabel},
+		Labels: []string{nonDefaultBaseAwaitingCloseLabel, "base:release"}, // non-default base (#1962: unlabelled = default base)
 	}
 
 	eng.settleNonDefaultBaseClose(item)
@@ -81,7 +81,7 @@ func TestSettleNonDefaultBaseClose_RetryFails_MarkerStays(t *testing.T) {
 
 	item := gh.ProjectItem{
 		Number: 11, Repo: "owner/repo", IsClosed: false,
-		Labels: []string{nonDefaultBaseAwaitingCloseLabel},
+		Labels: []string{nonDefaultBaseAwaitingCloseLabel, "base:release"}, // non-default base (#1962: unlabelled = default base)
 	}
 
 	eng.settleNonDefaultBaseClose(item)
@@ -161,7 +161,7 @@ func TestRecordNonDefaultBaseCloseRetry_EscalatesAtMaxRetries(t *testing.T) {
 
 	item := gh.ProjectItem{
 		Number: 12, Repo: "owner/repo", IsClosed: false, LinkedPRNumber: 55,
-		Labels: []string{nonDefaultBaseAwaitingCloseLabel},
+		Labels: []string{nonDefaultBaseAwaitingCloseLabel, "base:release"}, // non-default base (#1962: unlabelled = default base)
 	}
 
 	for i := 0; i < eng.cfg.MaxRetries; i++ {
@@ -214,7 +214,7 @@ func TestRecordNonDefaultBaseCloseRetry_UnlimitedWhenMaxRetriesZero(t *testing.T
 
 	item := gh.ProjectItem{
 		Number: 13, Repo: "owner/repo", IsClosed: false,
-		Labels: []string{nonDefaultBaseAwaitingCloseLabel},
+		Labels: []string{nonDefaultBaseAwaitingCloseLabel, "base:release"}, // non-default base (#1962: unlabelled = default base)
 	}
 
 	for i := 0; i < 10; i++ {

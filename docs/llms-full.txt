@@ -4697,7 +4697,7 @@ Everything else a closed item needs — advancing to Done, clearing stale labels
 - **Already closed:** GitHub did its job, and nothing happens.
 - **Still open, or the read failed:** it applies `fabrik:awaiting-close`.
 
-`settleNonDefaultBaseCloses` then works through the same retry and escalation path. A late GitHub auto-close clears the marker silently. Otherwise the settle scan closes the issue with `state_reason: completed` and posts `🏭 **Fabrik — closed after merge**`, naming the merged PR. It resolves the PR through `FetchLinkedPR` (by branch), since GitHub's closing-keyword link is exactly what may be missing. Its escalation comment is worded for the default base ("post-merge explicit close failed").
+`settleNonDefaultBaseCloses` then works through the same retry and escalation path. On the default base it **also live-reads** the issue before acting, because the board snapshot can lag a late auto-close by a poll and `CloseIssue` is a bare PATCH that succeeds on an already-closed issue. If the live read shows the issue closed, the marker clears silently. If the read fails, the check waits for the next poll, and no "did not fire" comment is posted. Otherwise the settle scan closes the issue with `state_reason: completed` and posts `🏭 **Fabrik — closed after merge**`, naming the merged PR. It resolves the PR through `FetchLinkedPR` (by branch), since GitHub's closing-keyword link is exactly what may be missing. Its escalation comment is worded for the default base ("post-merge explicit close failed").
 
 ### 2.9 Review Reinvoke
 

@@ -118,6 +118,7 @@ func TestGuardDefaultBaseAutoClose_MarksOnlyAnOpenIssue(t *testing.T) {
 
 func TestSettleDefaultBaseClose_ClosesAndSaysAutoCloseMissed(t *testing.T) {
 	client := &mockGitHubClient{
+		fetchIssueFn: func(_, _ string, n int) (*gh.IssueData, error) { return &gh.IssueData{Number: n, State: "open"}, nil },
 		fetchLinkedPRFn: func(_, _ string, _ int) (*gh.PRDetails, error) {
 			return &gh.PRDetails{Number: 55, State: "closed", Merged: true}, nil
 		},
@@ -165,5 +166,49 @@ func TestSettleDefaultBaseClose_AlreadyClosed_ClearsSilently(t *testing.T) {
 	if len(client.closeIssueCalls) != 0 || len(client.addCommentCalls) != 0 {
 		t.Errorf("GitHub's auto-close landed late: want no close and no comment, got %d close(s), %d comment(s)",
 			len(client.closeIssueCalls), len(client.addCommentCalls))
+	}
+}
+
+// Pruefer finding on #1965: the board snapshot can lag a late GitHub auto-close
+// by a poll. The settle path must decide on the live state, never re-close an
+// issue GitHub already closed, and never post a false "did not fire" comment.
+func TestSettleDefaultBaseClose_StaleSnapshotLiveClosed_ClearsSilently(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchIssueFn: func(_, _ string, n int) (*gh.IssueData, error) { return &gh.IssueData{Number: n, State: "closed"}, nil },
+	}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	item := gh.ProjectItem{Number: 20, Repo: "owner/repo", IsClosed: false, Labels: []string{nonDefaultBaseAwaitingCloseLabel}}
+
+	eng.settleNonDefaultBaseClose(item)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.closeIssueCalls) != 0 || len(client.addCommentCalls) != 0 {
+		t.Errorf("live state is closed: want no close and no comment, got %d close(s), %d comment(s)",
+			len(client.closeIssueCalls), len(client.addCommentCalls))
+	}
+	removed := false
+	for _, l := range client.removeLabelCalls {
+		if l.labelName == nonDefaultBaseAwaitingCloseLabel {
+			removed = true
+		}
+	}
+	if !removed {
+		t.Error("the marker must be cleared once the live read shows the issue closed")
+	}
+}
+
+func TestSettleDefaultBaseClose_LiveReadError_Defers(t *testing.T) {
+	client := &mockGitHubClient{} // default FetchIssue returns an error
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	item := gh.ProjectItem{Number: 20, Repo: "owner/repo", Labels: []string{nonDefaultBaseAwaitingCloseLabel}}
+
+	eng.settleNonDefaultBaseClose(item)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.closeIssueCalls) != 0 || len(client.addCommentCalls) != 0 || len(client.removeLabelCalls) != 0 {
+		t.Errorf("unreadable live state must defer (no close, no comment, marker kept): got %d close(s), %d comment(s), %d removal(s)",
+			len(client.closeIssueCalls), len(client.addCommentCalls), len(client.removeLabelCalls))
 	}
 }

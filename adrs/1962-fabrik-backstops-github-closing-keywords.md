@@ -50,7 +50,11 @@ GitHub's linkage and auto-close are no longer relied on.
   - **Why not close immediately.** The singleton fast path reaches the guard
     within the auto-close's own 1–2 s latency. Closing there would race GitHub
     and misreport a miss. Deferring the close to a later poll lets a working
-    auto-close land first and clear the marker silently.
+    auto-close land first and clear the marker silently. The settle scan
+    decides on a **live** `FetchIssue`, not the board snapshot, which can lag
+    that close by a poll. `CloseIssue` succeeds on an already-closed issue, so
+    a stale snapshot would otherwise re-close it and post a false miss. An
+    unreadable state waits for the next poll.
   - **Where the issue set comes from.** It comes from Fabrik's own knowledge
     (the landed item), never `closingIssuesReferences`. When the auto-close
     fails, that field is empty too.
