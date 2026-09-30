@@ -55,7 +55,12 @@ const (
 )
 
 var (
-	commentGateHoldRE = regexp.MustCompile(`\[#(\d+) comment-gate\] holding landing decision: (\d+) unprocessed comment\(s\) pending — will re-evaluate once processed`)
+	// The landing hold for a pending comment. Since #1953 the feedback gate
+	// (engine/feedback_gate.go, tag feedback-gate) runs ahead of the #1862
+	// comment gate in attemptMergeOnValidate and holds first, logging
+	// "holding landing decision — N unprocessed comment(s) (<ids>)"; the legacy
+	// comment-gate line is still accepted.
+	commentGateHoldRE = regexp.MustCompile(`\[#(\d+) (?:comment-gate\] holding landing decision: (\d+) unprocessed comment\(s\) pending — will re-evaluate once processed|feedback-gate\] holding landing decision — (\d+) unprocessed comment\(s\) )`)
 	commentEjectRE    = regexp.MustCompile(`\[#(\d+) merge-train\] #(\d+) ejected for an unprocessed comment: rerouted to (.+) \(not paused, no ejection counted\)\s*$`)
 	cappedEjectRE     = regexp.MustCompile(`\[#(\d+) merge-train\] #(\d+) ejected (\d+) time\(s\) — pausing`)
 	postMergeLogRE    = regexp.MustCompile(`\[#(\d+) post-merge\] work already landed — not applying (\d+) comment\(s\); replying instead`)
