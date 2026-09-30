@@ -73,9 +73,17 @@ import (
 // by tracing round 2 hanging indefinitely with RegisterObservers uncalled.
 func reinvokeCycleCountersEnv(t *testing.T, maxReviewCycles, maxNoOpCommentCycles int) *Env {
 	t.Helper()
+	// Yolo is off on purpose (#1953): a review reinvoke dispatched while
+	// feedback stands between the item and an automatic advance is charged to
+	// the never-refunded ReviewBlockedCycles (feedbackHoldsProgress), which
+	// would confound the refund semantics these scenarios isolate. With no
+	// auto-advance configured nothing is pending behind the feedback, so the
+	// #1045 forgive-forever behavior applies unchanged.
+	noYolo := false
 	env := NewEnv(t, EnvOptions{
 		Stages:    reviewAuthorityStages(),
 		StartTime: time.Now(),
+		Yolo:      &noYolo,
 		ConfigureCfg: func(cfg *engine.Config) {
 			cfg.ReviewWaitTimeout = time.Hour // generous — never times out mid-test
 			cfg.MaxReviewCycles = maxReviewCycles
