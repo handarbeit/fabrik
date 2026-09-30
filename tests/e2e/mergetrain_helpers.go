@@ -127,7 +127,16 @@ func createMemberPR(t *testing.T, env *Env, repo, baseBranch, branch, path, cont
 	t.Helper()
 	// Open the PR with the Closes #N linkage.
 	body := fmt.Sprintf("e2e merge-train member.\n\nCloses #%d\n", issueNum)
-	return createMemberPRBody(t, env, repo, baseBranch, branch, path, content, issueTitle, body, issueNum, draft)
+	prNum := createMemberPRBody(t, env, repo, baseBranch, branch, path, content, issueTitle, body, issueNum, draft)
+	// Every seeding path goes through here, so wait here — not per helper —
+	// until GitHub reports the Closes linkage for a default-base PR. Exposing the
+	// item before then lets the review gate's broken-linkage check pause it
+	// (#1962): 0.0.83 gate run 13 lost TestExpectedReviewers* (review-gate seed)
+	// and TestQueuedMemberCommentEjection (PrepareMemberExactPath) to it.
+	if baseBranch == "" || baseBranch == "main" {
+		waitForClosingLinkage(t, env, repo, issueNum, prNum)
+	}
+	return prNum
 }
 
 // createMemberPRBody is createMemberPR with a caller-supplied PR body. Callers
