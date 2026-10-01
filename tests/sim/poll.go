@@ -46,7 +46,12 @@ const workerQuiescencePollInterval = 5 * time.Millisecond
 // moments later, confirming genuine scheduling contention rather than a
 // logic bug. A "generous" timeout (per #1450's own request) has to be
 // generous enough to survive the condition it exists to be robust against.
-const workerQuiescenceTimeout = 60 * time.Second
+// Raised again to 180s: on 2026-10-01, with load averages of 15–40 from
+// unrelated processes on the gate host, TestMergeTrainRunaway_DoesNotTripWithGenerousWindow
+// hit the 60s bound in three separate pre-gate runs. It passed in isolation
+// (37s) and on quieter runs. A genuine hang still fails well
+// inside the package's 20m -timeout.
+const workerQuiescenceTimeout = 180 * time.Second
 
 // RunPoll advances Clock by env.PollInterval, drives exactly one engine poll
 // cycle via the Engine.PollOnce test seam (ADR-1449), fails the test on
