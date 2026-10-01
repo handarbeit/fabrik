@@ -555,6 +555,20 @@ fabrik --auto-upgrade</pre>
           SIGINT/SIGTERM triggers a clean stop, not a kill — in-flight issues are paused durably and worktree progress is committed and pushed, all within a bounded drain deadline. Force-quit stays available if it gets stuck.
         </div>
       </a>
+      <a class="feature-card" href="{{ '/USER_GUIDE' | relative_url }}#github-app-authentication" aria-label="GitHub App Auth &amp; One-Command Board Setup — open documentation">
+        <span class="feature-icon">🔑</span>
+        <div class="feature-title">GitHub App Auth &amp; One-Command Board Setup</div>
+        <div class="feature-desc">
+          Authenticate as a GitHub App installation instead of a personal token — a co-equal alternative to a PAT, set up with <code>fabrik init --github-app</code>. <code>fabrik init --create-board</code> builds a fully-configured Projects board from your stages, and <code>fabrik repair-board</code> adds any missing columns.
+        </div>
+      </a>
+      <a class="feature-card" href="{{ '/USER_GUIDE' | relative_url }}#pending-reviewer-gate" aria-label="Won't Advance Past Unprocessed Feedback — open documentation">
+        <span class="feature-icon">✋</span>
+        <div class="feature-title">Won't Advance Past Unprocessed Feedback</div>
+        <div class="feature-desc">
+          Fabrik holds every stage advance and merge while any comment, unresolved review thread or unaddressed review body is outstanding — feedback is processed first, and a comment on a queued issue sends it back for rework instead of being ignored.
+        </div>
+      </a>
     </div>
 
     <div class="factory-callout">
