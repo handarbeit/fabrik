@@ -1521,3 +1521,45 @@ func TestFetchPRReviewRequests_NotFound(t *testing.T) {
 		t.Errorf("expected nil requests on 404, got %+v", requests)
 	}
 }
+
+func TestFetchCheckRunAnnotations_ParsesFields(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/owner/repo/check-runs/42/annotations" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("per_page"); got != "50" {
+			t.Errorf("per_page = %q, want 50", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`[
+			{"path":".github","start_line":7,"annotation_level":"failure","title":"ci-fix-sentinel","message":"create CI_FIX_ACK containing ack:123"},
+			{"path":".github","start_line":1,"annotation_level":"failure","title":"","message":"Process completed with exit code 1."}
+		]`))
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	got, err := c.FetchCheckRunAnnotations("owner", "repo", 42)
+	if err != nil {
+		t.Fatalf("FetchCheckRunAnnotations: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d annotations, want 2", len(got))
+	}
+	want := CheckRunAnnotation{Path: ".github", StartLine: 7, Level: "failure", Title: "ci-fix-sentinel", Message: "create CI_FIX_ACK containing ack:123"}
+	if got[0] != want {
+		t.Errorf("got[0] = %+v, want %+v", got[0], want)
+	}
+}
+
+func TestFetchCheckRunAnnotations_ErrorPropagates(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "nope", http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	if _, err := c.FetchCheckRunAnnotations("owner", "repo", 42); err == nil {
+		t.Fatal("expected an error on HTTP 403")
+	}
+}

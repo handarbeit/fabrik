@@ -691,6 +691,43 @@ func (c *Client) FetchCheckRuns(owner, repo, sha string) ([]CheckRun, error) {
 	return out, nil
 }
 
+// CheckRunAnnotation is one annotation attached to a check run — for a GitHub
+// Actions job, the `::error::` / `::warning::` workflow commands and the
+// generic "Process completed with exit code N." line Actions adds itself.
+type CheckRunAnnotation struct {
+	Path      string
+	StartLine int
+	Level     string // "notice", "warning" or "failure"
+	Title     string
+	Message   string
+}
+
+// FetchCheckRunAnnotations returns the first page (up to 50) of annotations for
+// a check run. Annotations are the only confirmed channel that carries an
+// Actions workflow's `::error::` text to the API — `$GITHUB_STEP_SUMMARY` never
+// reaches the check run's output.summary (#916) — and the list-check-runs
+// endpoint does not return them, so this is one call per check run. Only the
+// first page is fetched: the caller embeds a handful into a prompt, not the lot.
+func (c *Client) FetchCheckRunAnnotations(owner, repo string, checkRunID int64) ([]CheckRunAnnotation, error) {
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/check-runs/%d/annotations?per_page=50",
+		c.baseURL, owner, repo, checkRunID)
+	var raw []struct {
+		Path      string `json:"path"`
+		StartLine int    `json:"start_line"`
+		Level     string `json:"annotation_level"`
+		Title     string `json:"title"`
+		Message   string `json:"message"`
+	}
+	if err := c.restGetJSON(apiURL, &raw); err != nil {
+		return nil, fmt.Errorf("fetching annotations for check run %d: %w", checkRunID, err)
+	}
+	out := make([]CheckRunAnnotation, len(raw))
+	for i, a := range raw {
+		out[i] = CheckRunAnnotation{Path: a.Path, StartLine: a.StartLine, Level: a.Level, Title: a.Title, Message: a.Message}
+	}
+	return out, nil
+}
+
 // FetchLinkedPR finds the PR linked to an issue by searching for a PR with the
 // head branch fabrik/issue-N (Fabrik's naming convention). Returns nil, nil if
 // no PR is found.

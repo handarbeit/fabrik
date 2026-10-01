@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -186,12 +187,12 @@ func gitCommitCount(t *testing.T, dir, from, to string) int {
 
 // TestCIFixReinvoke ports tests/e2e/ci_fix_reinvoke_test.go's TestCIFixReinvoke
 // — the positive-path regression test for the CI-fix reinvoke loop
-// (engine/ci.go, #900). The live test is permanently skipped pending #916 (a
-// capable live Claude agent tends to make CI green before the first push, so
-// the induced-failure premise never fires there) — sim scripts Claude
-// directly, so this constraint doesn't exist here. This is a place sim
-// exceeds current live coverage (R2): the positive path is provably
-// exercised in sim today, live only once #916 unblocks it.
+// (engine/ci.go, #900). The live twin forces its first CI failure with a
+// run-ID acknowledgement nonce the Implement agent cannot pre-empt (#1991);
+// sim scripts Claude directly, so it needs no such device. The sim twin also
+// asserts the reinvoke's prompt carried the failing check's output (#1991 R1);
+// the live suite adds what sim cannot see — real Actions annotations
+// (live-only: real-ci).
 //
 // Sequence proven: Validate's initial dispatch pushes a commit and completes
 // (wait_for_ci defers stage:Validate:complete); the sim seeds a FAILING
@@ -247,7 +248,22 @@ func TestCIFixReinvoke(t *testing.T) {
 	// (commits but never pushes) isn't sufficient for this scenario. The
 	// reinvoke's own commit gets a "success" check run — it's meant to be
 	// the fix that clears the gate.
-	env.Claude.ForStageComments("Validate", ciFixCommentScript(env.Sim, env.OwnerRepo, "success"))
+	//
+	// The script is wrapped to capture the comment batch the engine hands the
+	// reinvoke: the synthetic ci-fix comment is never posted to GitHub, so
+	// this is the only place its content (the CI failure context, #1991) is
+	// observable in sim.
+	var (
+		seenMu       sync.Mutex
+		seenComments []gh.Comment
+	)
+	fixScript := ciFixCommentScript(env.Sim, env.OwnerRepo, "success")
+	env.Claude.ForStageComments("Validate", func(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts engine.InvokeOptions) (string, bool, engine.TokenUsage, error) {
+		seenMu.Lock()
+		seenComments = append(seenComments, comments...)
+		seenMu.Unlock()
+		return fixScript(ctx, stage, issue, comments, workDir, opts)
+	})
 	// Direct-merge fallback (matches smoke_test.go): deterministic Done
 	// advancement once the gate clears, without simulating an async native
 	// auto-merge convergence (auto_merge_test.go's concern, not this one's).
@@ -288,7 +304,12 @@ func TestCIFixReinvoke(t *testing.T) {
 	}
 	baselineSHA := sha1 // commit count baseline anchored post-initial-dispatch — see doc comment
 
-	env.Sim.Sim().SeedCheckRun(env.OwnerRepo, sha1, gh.CheckRun{Name: ciFixSentinel, Status: "completed", Conclusion: "failure"})
+	// The failing run carries output the engine must forward into the CI-fix
+	// prompt (asserted below). simgh implements no annotations endpoint, so
+	// the sim covers the OutputSummary half; the live suite covers real
+	// Actions annotations (live-only: real-ci).
+	const failureOutput = "sentinel-output-3f9c: the gate wants the acknowledgement file"
+	env.Sim.Sim().SeedCheckRun(env.OwnerRepo, sha1, gh.CheckRun{Name: ciFixSentinel, Status: "completed", Conclusion: "failure", OutputSummary: failureOutput})
 	if err := env.Sim.Sim().Err(); err != nil {
 		t.Fatalf("SeedCheckRun: %v", err)
 	}
@@ -317,6 +338,26 @@ func TestCIFixReinvoke(t *testing.T) {
 		t.Fatal("CI-fix reinvoke did not push a new commit — head SHA unchanged")
 	}
 	t.Logf("CI-fix reinvoke landed new SHA %s (check run seeded atomically by the script)", sha2)
+
+	// The prompt must carry the CI failure, not merely prove the engine
+	// retried (#1991 R1): the synthetic comment names the failing check and
+	// embeds the check's output.
+	seenMu.Lock()
+	var ciFixBody string
+	for _, c := range seenComments {
+		if c.ID == "ci-fix-synthetic" {
+			ciFixBody = c.Body
+		}
+	}
+	seenMu.Unlock()
+	if ciFixBody == "" {
+		t.Fatal("the CI-fix reinvoke received no ci-fix-synthetic comment")
+	}
+	for _, want := range []string{ciFixSentinel, "NEW REGRESSION", failureOutput} {
+		if !strings.Contains(ciFixBody, want) {
+			t.Errorf("ci-fix prompt missing %q:\n%s", want, ciFixBody)
+		}
+	}
 
 	WaitForLabelAbsent(t, env, num, "fabrik:awaiting-ci", 80)
 	WaitForIssueLabel(t, env, num, "stage:Validate:complete", 80)

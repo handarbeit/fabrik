@@ -430,6 +430,83 @@ func (e *Engine) addCompleteLabelAndRemoveCI(owner, repo string, item gh.Project
 	e.removeAwaitingCILabel(owner, repo, item)
 }
 
+// CI-fix prompt failure-context bounds (#1991). The detail is advisory context
+// for the reinvoked agent, not a log mirror, so it is capped hard per annotation,
+// per check and in annotation count.
+const (
+	ciFixMaxAnnotations       = 5
+	ciFixAnnotationMax        = 500
+	ciFixPerCheckDetailMax    = 2000
+	ciFixPromptLogMax         = 4096
+	ciFixDetailIndent         = "  "
+	ciFixGenericAnnotationMsg = "Process completed with exit code"
+)
+
+// checkRunAnnotationFetcher is the optional capability of a GitHubClient that can
+// read a check run's annotations. It is asserted for rather than added to
+// GitHubClient so the interface and every mock/sim implementer stay unchanged;
+// a client without it simply yields no annotations.
+type checkRunAnnotationFetcher interface {
+	FetchCheckRunAnnotations(owner, repo string, checkRunID int64) ([]gh.CheckRunAnnotation, error)
+}
+
+// ciFailureDetail renders the failure context of one failing check run for the
+// CI-fix prompt: its non-empty annotations (an Actions job's `::error::` text only
+// reaches the API this way — $GITHUB_STEP_SUMMARY never populates output.summary,
+// #916) plus any output.summary/output.text the check set. Annotations are read
+// live through e.client, never the board cache. Every failure is soft: a fetch
+// error is logged and the prompt degrades to the check name and conclusion.
+// Returns "" or a string beginning with a newline.
+func (e *Engine) ciFailureDetail(item gh.ProjectItem, owner, repo string, cr gh.CheckRun) string {
+	var parts []string
+	if f, ok := e.client.(checkRunAnnotationFetcher); ok && cr.ID != 0 {
+		anns, err := f.FetchCheckRunAnnotations(owner, repo, cr.ID)
+		if err != nil {
+			e.logf(item.Number, "ci-fix-reinvoke", "warn: could not fetch annotations for check %q (run %d): %v\n", cr.Name, cr.ID, err)
+		}
+		generic := []string{}
+		n := 0
+		for _, a := range anns {
+			msg := strings.TrimSpace(a.Message)
+			if msg == "" {
+				continue
+			}
+			if a.Title != "" {
+				msg = a.Title + ": " + msg
+			}
+			if strings.HasPrefix(strings.TrimSpace(a.Message), ciFixGenericAnnotationMsg) {
+				// Actions' own boilerplate: keep only if nothing better turns up.
+				generic = append(generic, msg)
+				continue
+			}
+			if n >= ciFixMaxAnnotations {
+				break
+			}
+			parts = append(parts, "annotation: "+truncateMiddle(msg, ciFixAnnotationMax, ciFixAnnotationMax*3/4, ciFixAnnotationMax/4))
+			n++
+		}
+		if n == 0 && len(generic) > 0 {
+			parts = append(parts, "annotation: "+truncateMiddle(generic[0], ciFixAnnotationMax, ciFixAnnotationMax*3/4, ciFixAnnotationMax/4))
+		}
+	}
+	if s := strings.TrimSpace(cr.OutputSummary); s != "" {
+		parts = append(parts, "summary: "+truncateMiddle(s, ciFixAnnotationMax, ciFixAnnotationMax*3/4, ciFixAnnotationMax/4))
+	}
+	if t := strings.TrimSpace(cr.OutputText); t != "" {
+		parts = append(parts, "output: "+truncateMiddle(t, ciFixAnnotationMax, ciFixAnnotationMax*3/4, ciFixAnnotationMax/4))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	detail := strings.Join(parts, "\n")
+	detail = truncateMiddle(detail, ciFixPerCheckDetailMax, ciFixPerCheckDetailMax*3/4, ciFixPerCheckDetailMax/4)
+	var b strings.Builder
+	for _, l := range strings.Split(detail, "\n") {
+		b.WriteString("\n" + ciFixDetailIndent + l)
+	}
+	return b.String()
+}
+
 // buildCIFixComment constructs the synthetic comment body for a CI-fix reinvocation.
 // It uses PR check runs from the settle result and fetches base branch CI status for
 // comparison. The base-branch fetch (different SHA) remains a direct API call.
@@ -470,7 +547,13 @@ func (e *Engine) buildCIFixComment(item gh.ProjectItem, stage *stages.Stage, wor
 				if baseFailedNames[cr.Name] {
 					note = "pre-existing (also fails on base branch)"
 				}
-				failedLines = append(failedLines, fmt.Sprintf("- **%s**: %s [%s]", cr.Name, cr.Conclusion, note))
+				line := fmt.Sprintf("- **%s**: %s [%s]", cr.Name, cr.Conclusion, note)
+				if !baseFailedNames[cr.Name] {
+					// Only NEW REGRESSION checks get failure detail: the
+					// instructions tell the agent not to touch pre-existing ones.
+					line += e.ciFailureDetail(item, owner, repo, cr)
+				}
+				failedLines = append(failedLines, line)
 			}
 		}
 	}
@@ -557,7 +640,14 @@ func (e *Engine) dispatchCIFixReinvoke(ctx context.Context, board *gh.ProjectBoa
 			// on the next poll instead of burning further CI-fix cycle budget
 			// while the current head's CI is still resolving (#958 leg 2).
 			headBefore, _ = gitHeadSHA(workDir)
-			return []gh.Comment{e.buildCIFixComment(item, stage, workDir, settle)}
+			comment := e.buildCIFixComment(item, stage, workDir, settle)
+			// The synthetic comment is never posted to GitHub, so without this
+			// the prompt's content — the CI failure the agent was handed — is
+			// unobservable. Bounded and %q-rendered so it stays one log line;
+			// the live e2e asserts on it (#1991).
+			e.logf(item.Number, "ci-fix-reinvoke", "prompt (%d bytes): %q\n", len(comment.Body),
+				truncateMiddle(comment.Body, ciFixPromptLogMax, ciFixPromptLogMax*3/4, ciFixPromptLogMax/4))
+			return []gh.Comment{comment}
 		},
 		stageVariant: func(s *stages.Stage) *stages.Stage {
 			// Use ci_fix_skill if configured; fall back to comment_skill.
