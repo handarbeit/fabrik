@@ -90,6 +90,12 @@ func TestCommentLandingGateHolds(t *testing.T) {
 		t.Fatalf("comment %d on %s#%d is not yet readable via REST — refusing to expose the item to the engine", commentID, repo, issue)
 	}
 
+	// GitHub recomputes mergeability lazily (after the approval, or whenever the
+	// base moves under a concurrent test's merge). Until it is computed, the merge
+	// gate claims the item and the comment is processed before any landing
+	// decision runs, so the scenario would observe nothing.
+	WaitForPRMergeableClean(t, env, repo, pr, 10*time.Minute)
+
 	offset := LogOffset(t, env)
 	SetIssueStatus(t, env, itemID, "Validate")
 	t.Logf("comment %d posted, item moved into Validate (train mode %s); scanning bed log from offset %d", commentID, trainMode, offset)

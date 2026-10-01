@@ -1736,6 +1736,30 @@ func tryPRMergeableState(env *Env, repo string, prNumber int) (string, error) {
 	return strings.TrimSpace(out), nil
 }
 
+// WaitForPRMergeableClean blocks until the PR's mergeable_state is "clean": GitHub
+// has finished computing mergeability for the current head and base, and nothing
+// (CI, reviews, conflicts, a moved base) blocks the merge. A scenario that needs
+// the engine's landing decision to run on its first look at an item calls this
+// before exposing the item, because "unknown" (still computing) makes the merge
+// gate claim the item and defer, so the landing decision never runs in that poll.
+// It fails the test if the state is not clean within timeout.
+func WaitForPRMergeableClean(t *testing.T, env *Env, repo string, prNumber int, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	last := ""
+	for time.Now().Before(deadline) {
+		state, err := tryPRMergeableState(env, repo, prNumber)
+		if err == nil {
+			last = state
+			if state == "clean" {
+				return
+			}
+		}
+		time.Sleep(10 * time.Second)
+	}
+	t.Fatalf("PR %s#%d mergeable_state never became \"clean\" within %s (last %q)", repo, prNumber, timeout, last)
+}
+
 // PRCheckRunConclusions returns the check-run conclusions for the PR's head SHA
 // (in-progress runs appear as "pending"). Fails the test on error.
 func PRCheckRunConclusions(t *testing.T, env *Env, repo string, prNumber int) []string {
