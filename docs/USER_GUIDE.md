@@ -756,7 +756,8 @@ fetch`.
 > for details.
 >
 > In both contexts, when customizations are present and the refresh is skipped, the
-> `[u] custom workflow` badge appears on next TUI startup.
+> `[u] custom workflow` badge appears on next TUI startup (shown as `[u] custom workflow (N stale)` when
+> the embedded skills have also moved on — run `fabrik upgrade --reconcile` to resolve).
 
 ```bash
 ./fabrik --auto-upgrade --owner your-org --repo your-repo --project 1 --user you
@@ -1004,6 +1005,19 @@ user: your-github-username
 # github_app_private_key_path: /path/to/private-key.pem
 # github_app_installation_id: 789012
 
+# Suppress automatic browser-opening for GitHub App guided-install prompts.
+# Default true (suppressed) — the engine is a long-running daemon. See
+# "Browser-opening during reconcile" above.
+# no_browser: true
+
+# Event ingestion transport: "poll" (default) or "hookdeck". hookdeck requires
+# GitHub App auth and cannot be combined with `webhooks: true`. The two *_env keys
+# name environment variables holding the secrets — never the secrets themselves.
+# See "Event-Driven Ingestion via Hookdeck (App Auth)" above.
+# event_source: hookdeck
+# hookdeck_api_key_env: HOOKDECK_API_KEY
+# hookdeck_webhook_secret_env: FABRIK_GITHUB_WEBHOOK_SECRET
+
 # Path to stage YAML configs directory.
 # stages: ./.fabrik/stages
 
@@ -1011,6 +1025,10 @@ user: your-github-username
 # reduce GitHub API usage. Tradeoff: 10s is very responsive but consumes ~360 REST
 # requests/hour; 30s (default) is a good balance.
 # poll: 30
+
+# Seconds to wait before re-dispatching a stage that did not complete. Independent
+# of poll. Minimum 1.
+# retry_backoff: 60
 
 # Maximum number of parallel Claude sessions. Tune based on your API tier capacity.
 # Each active session counts against your Anthropic API concurrency limit.
@@ -1224,6 +1242,9 @@ FABRIK_USER=my-personal-username
 | `--github-app-private-key-path` | Path to the GitHub App's private key PEM file. Also `FABRIK_GITHUB_APP_PRIVATE_KEY_PATH`. | `""` |
 | `--github-app-installation-id` | GitHub App installation ID to authenticate as. Also `FABRIK_GITHUB_APP_INSTALLATION_ID`. | `0` |
 | `--no-browser` | Suppress automatic browser-opening for GitHub App guided-install prompts during reconcile. Also `FABRIK_NO_BROWSER`. See [Browser-opening during reconcile](#browser-opening-during-reconcile). Distinct from `fabrik init --github-app --no-browser`'s setup-time flag, whose default is unchanged. | `true` (suppressed) |
+| `--event-source` | Event ingestion transport: `poll` (default) or `hookdeck`. `hookdeck` requires GitHub App auth and cannot be combined with `--webhooks`. Also `FABRIK_EVENT_SOURCE`. See [Event-Driven Ingestion via Hookdeck](#event-driven-ingestion-via-hookdeck-app-auth). | `poll` |
+| `--hookdeck-api-key-env` | Name of the environment variable holding the Hookdeck API key (only used with `--event-source hookdeck`). Also `FABRIK_HOOKDECK_API_KEY_ENV`. | `HOOKDECK_API_KEY` |
+| `--hookdeck-webhook-secret-env` | Name of the environment variable holding the GitHub App's webhook secret (only used with `--event-source hookdeck`). Also `FABRIK_HOOKDECK_WEBHOOK_SECRET_ENV`. | `FABRIK_GITHUB_WEBHOOK_SECRET` |
 
 #### Unrecognized `config.yaml` Key Warnings
 
@@ -1301,6 +1322,9 @@ The flag/env suggestion is derived mechanically from Fabrik's snake_case (`confi
 | `FABRIK_GITHUB_APP_PRIVATE_KEY_PATH` | `github_app_private_key_path` | Path to the GitHub App's private key PEM file. | `""` |
 | `FABRIK_GITHUB_APP_INSTALLATION_ID` | `github_app_installation_id` | GitHub App installation ID to authenticate as. | `0` |
 | `FABRIK_NO_BROWSER` | `no_browser` | Suppress automatic browser-opening for GitHub App guided-install prompts during reconcile. See [Browser-opening during reconcile](#browser-opening-during-reconcile). | `true` (suppressed) |
+| `FABRIK_EVENT_SOURCE` | `event_source` | Event ingestion transport: `poll` (default) or `hookdeck`. `hookdeck` requires GitHub App auth and cannot be combined with `FABRIK_WEBHOOKS`. See [Event-Driven Ingestion via Hookdeck](#event-driven-ingestion-via-hookdeck-app-auth). | `poll` |
+| `FABRIK_HOOKDECK_API_KEY_ENV` | `hookdeck_api_key_env` | Name of the environment variable holding the Hookdeck API key (only used when `event_source: hookdeck`). | `HOOKDECK_API_KEY` |
+| `FABRIK_HOOKDECK_WEBHOOK_SECRET_ENV` | `hookdeck_webhook_secret_env` | Name of the environment variable holding the GitHub App's webhook secret (only used when `event_source: hookdeck`). | `FABRIK_GITHUB_WEBHOOK_SECRET` |
 
 Token precedence: `--token` flag > `FABRIK_TOKEN` > `GITHUB_TOKEN`
 
@@ -1554,6 +1578,8 @@ issue to Queued) until that comment has been processed. Fabrik processes the com
 any change it makes is re-verified by CI before the PR lands. Comments from Fabrik itself and
 known bot service notices never hold a merge.
 
+**So does any other unprocessed feedback.** The same hold applies to unresolved review threads and to review bodies Fabrik has not yet addressed: while any comment, unresolved review thread or unaddressed review body is outstanding, Fabrik will neither advance the issue to the next stage nor land its PR. Feedback that arrives mid-run or while CI is running is dispatched as a review re-invocation rather than waiting for the stage to finish. See [Pending Reviewer Gate](#pending-reviewer-gate).
+
 A comment you post on an issue that is already sitting in `Queued` waiting for a merge-train batch is not ignored either: Fabrik moves the issue back to the stage before `Queued` (normally Validate), processes the comment, and the issue re-queues once Validate completes again. This is not a train failure — the issue is not paused and the move does not count toward the merge train's three-strikes ejection limit. Only human comments do this; bot and Fabrik comments never take an issue out of `Queued`.
 
 **Comments after the work has merged.** Fabrik never pushes to a branch whose PR has already
@@ -1676,6 +1702,14 @@ Both engines drain the same `Queued` column and advance their members to **Done*
 
 **Batch tuning.** `--max-batch-size` (default 5) caps how many `Queued` items land in one batch, **per (repo, base) partition** — a repo with `Queued` members on two different base branches runs two independent trains, each capped independently, not sharing one combined total (#1648). A red batch (a genuine cross-PR conflict — rare, since every member already passed Validate alone) is isolated by halving bisection, bounded by `--max-bisect-validations`; the poisoner is ejected and the survivors re-form. If the base branch moves under an in-flight batch (an external push), the trial is rebased and re-validated up to `--max-train-rebase-cycles` times before the batch dissolves back to `Queued`. See the flag reference above for all knobs.
 
+**Member order.** `Queued` members are ordered by when they entered `Queued` (ties broken by issue number), so `--max-batch-size` always selects the members that have waited longest.
+
+**Confirmed-red members are deferred, not batched.** When a fresh batch forms, Fabrik checks each member's own PR check-runs at its head commit. A member whose own checks are confirmed failing is moved back to the stage before `Queued` (normally Validate) instead of being merged into a trial — it is not paused and does not count toward the ejection limit, and CI-fix re-invocation takes over from there. This only applies when the stage before the holding stage has `wait_for_ci: true` (otherwise nothing would re-detect the deferred member), and it fails open: pending, green, zero-run or unreadable CI all admit the member as before. See [state-machine §6.25](state-machine.md#625-merge-train-own-pr-ci-admission-gate-adr-1821).
+
+**Base-contradiction refusal.** Before opening or reusing an integration PR on the repository's default branch, Fabrik re-reads each member's live `base:<branch>` label. If any member declares a different base — or the read fails — it refuses to proceed, leaves the members in `Queued` and logs the reason, rather than landing a batch onto the wrong branch. A healthy batch is unaffected. See [state-machine §6.24](state-machine.md#624-merge-train-base-sanity-check-1773).
+
+**Conflict-resolution time limit.** Each inline conflict-resolution invocation runs under a wall-clock deadline: the holding stage's `max_wall_time` if set, otherwise a 30-minute fallback (see [`max_wall_time`](#stage-yaml-reference)), so a stuck resolution cannot hang a train indefinitely.
+
 **Conflict resolutions are reused, not re-paid.** When two members conflict during trial assembly, Fabrik dispatches Claude to resolve it inline and commits the result. That commit is recorded by `git rerere` — no configuration needed — so if the identical conflict recurs later (a bisection sub-trial, a re-form after an ejection, a rebuild after the base moved, or an entirely separate later batch), git replays the recorded resolution itself, for free, without a second Claude invocation. A conflict that only partially matches a recorded resolution still dispatches Claude for whatever's left; a conflict git has never seen behaves exactly as before. The replayed resolution is validated by the same combined CI as any other, so this changes cost, not trust.
 
 **Unaffected merge work is reused too, not just conflict resolutions.** Fabrik remembers the chain of merges each trial assembly builds, for as long as a batch's bisection and re-form cycle is in flight. When a later trial's member list starts with an already-built prefix — bisection's first probe, or the survivors re-formed after ejecting a poisoner — Fabrik resumes from that already-assembled commit instead of rebuilding it from scratch, skipping the merge itself (not only any conflict resolution it needed) for every member before the point that actually changed. This is why bisecting a red batch typically costs nothing extra for its first half, and why re-forming after an ejection only ever re-merges the members after the ejected one. Changing the base branch, or a member re-pushing its PR, ends the reusable prefix exactly at that point — everything before it is still reused. This memory doesn't persist across a poll cycle or a restart; it only ever helps within a single batch's own bisection/re-form cycle, and its absence simply means Fabrik rebuilds from scratch as it always has.
@@ -1719,7 +1753,18 @@ Closes #841
 
 The `Closes #N` first line links the PR to the issue so Fabrik can discover PR comments via GraphQL. Every downstream gate (review gate, CI gate, auto-merge) depends on this linkage. If the closing keyword is ever missing from an existing PR body, Fabrik detects it post-Implement and auto-heals by prepending `Closes #N` to the body.
 
+**Linkage is confirmed against the PR body.** GitHub's own issue↔PR link (the Development panel) can lag a new PR or be missing entirely, so when Fabrik cannot see that link it reads the PR body for the closing keyword instead. If the body references the issue, the review gate proceeds normally. If the body cannot be read, nothing is paused and the check retries on the next poll. Only a PR body with no closing keyword at all pauses a default-branch issue with a comment asking you to add `Closes #N` and remove `fabrik:paused`.
+
 **Verification auto-update**: For draft PRs created with `create_draft_pr: true`, Fabrik updates the `## Verification` section only when it can extract a summary block delimited by `FABRIK_SUMMARY_BEGIN` and `FABRIK_SUMMARY_END` from stage output. This keeps the PR description current when a stage provides a structured summary for PR-body updates.
+
+### Closing a Landed Issue
+
+Fabrik does not rely on GitHub's `Closes #N` auto-close to close an issue once its PR has landed — GitHub stopped reliably honouring closing keywords on 2026-09-30. After every merge-driven move to Done, Fabrik checks the issue:
+
+- **Non-default base (`base:<branch>`):** GitHub never auto-closes these, so Fabrik closes the issue explicitly.
+- **Default base:** Fabrik live-reads the issue after the landing. If GitHub already closed it, nothing more happens. If it is still open (or the read failed), Fabrik applies `fabrik:awaiting-close`, and a later poll closes the issue and posts a "closed after merge" comment naming the merged PR. A late GitHub auto-close simply clears the label.
+
+A failed close is retried every poll and escalates to `fabrik:paused` after `--max-retries` attempts. See the `fabrik:awaiting-close` row in [Fabrik-Managed Labels](#fabrik-managed-labels) and [state-machine §6.13](state-machine.md#613-non-default-base-explicit-close-retry).
 
 ### How do I ask Fabrik to change something on an open PR?
 
@@ -1902,9 +1947,9 @@ it just needs a question answered.
 When a stage outputs `FABRIK_BLOCKED_ON_INPUT`:
 1. `fabrik:paused` and `fabrik:awaiting-input` labels are added to the issue
 2. The retry counter is **not** incremented — this does not count as a failure
-3. The issue waits silently until the configured Fabrik user (`--user` / `FABRIK_USER`) posts a new comment
+3. The issue waits silently until a **human** posts a new comment (any human commenter, not only the configured Fabrik user; comments from bot accounts never resume it)
 
-When the configured user posts a new comment:
+When a human posts a new comment:
 1. Fabrik detects the comment and automatically removes both labels
 2. Comment processing is triggered immediately (no manual card move needed)
 3. The comment processing run can output `FABRIK_STAGE_COMPLETE` to finish the stage
@@ -1914,7 +1959,7 @@ Only a comment posted **after** the pause resumes it: a comment that was already
 unprocessable comment would lift the pause on every poll). If Fabrik cannot determine when the pause began, it resumes rather than leave the issue stuck.
 
 This is the intended mechanism for Q&A in stages like Specify — Claude asks a question,
-the configured user answers it in a comment, and the stage resumes automatically.
+a human answers it in a comment, and the stage resumes automatically.
 
 When Fabrik adds `fabrik:awaiting-input`, it also posts a notification comment beginning
 with `🏭 **Fabrik** — @<user>:` so GitHub delivers a mobile push notification to the
@@ -2205,6 +2250,8 @@ fabrik --max-review-cycles=3
 ```
 
 The cycle count resets on engine restart.
+
+A re-invocation that provably never ran — the account was usage-limited or suspended, the API returned an `api_error` before any work was done, or an `apiKeyHelper` was detected — is refunded: it does not spend the cycle budget, so a cycle-limit pause is never caused by Claude being unavailable. A run that did execute and made no progress is still charged. See [state-machine §6.2](state-machine.md#62-review-reinvoke-mechanics).
 
 #### Timeout Configuration
 
@@ -3020,7 +3067,7 @@ For developing the plugin itself, use `--plugin-dir` to point at your working co
 | `fabrik:locked:<user>` | Issue being processed by this user's instance |
 | `fabrik:editing` | Issue body being updated (comment processing) |
 | `fabrik:paused` | Processing paused (max retries exceeded or manual) |
-| `fabrik:awaiting-input` | Stage paused waiting for user input; auto-clears on a new comment from the configured user, or when a subsequent `FABRIK_STAGE_COMPLETE` is emitted (clears any orphaned label that survived a manual `fabrik:paused` removal) |
+| `fabrik:awaiting-input` | Stage paused waiting for user input; auto-clears on a new human comment posted after the pause, or when a subsequent `FABRIK_STAGE_COMPLETE` is emitted (clears any orphaned label that survived a manual `fabrik:paused` removal) |
 | `fabrik:awaiting-review` | Set when a `wait_for_reviews: true` stage completes with outstanding reviewer requests; cleared when no requested reviewers are outstanding **and** at least one review has been submitted (then re-invocation fires unconditionally), or when the `FABRIK_REVIEW_WAIT_TIMEOUT` elapses (then issue is paused with `fabrik:awaiting-input`). With `review_authority: authoritative` (default: `advisory`), the same clearing condition additionally requires no outstanding `CHANGES_REQUESTED` review and required approvals satisfied — see [§3 Authoritative Mode](#authoritative-mode). With `expected_reviewers: []` declared and nothing requested, the gate skips waiting entirely and clears immediately — see [§3 Declaring Expected Reviewers](#declaring-expected-reviewers) |
 | `fabrik:awaiting-ci` | Applied immediately when a `wait_for_ci: true` stage emits `FABRIK_STAGE_COMPLETE`; means "CI gate active" and covers both pending and failed CI states; `stage:X:complete` is applied only when CI passes — not when this label is cleared by timeout (conjunctive gate, ADR 032). Triggers `itemMayNeedWork` cache bypass so CI results are re-evaluated on every poll. Cleared when all checks pass, or when a genuine liveness dwell elapses (then issue is paused with `fabrik:awaiting-input`) — a confirmed CI failure does not clear this via a timeout; it triggers CI-fix re-invocation instead and the label stays applied (ADR-1410). See [§3 CI Gate](USER_GUIDE.md#ci-gate-and-ci-fix-workflow). |
 | `fabrik:rebase-needed` | Set when GitHub reports the linked PR as `mergeable: false` on a `wait_for_ci: true` stage — typically because another PR merged into the base branch during the CI-await window. The engine dispatches a rebase re-invocation instructing Claude to `git fetch && git rebase origin/<base>`, resolve conflicts conservatively (watching for semantic collisions like duplicated ADR numbers), and force-push. The label clears when GitHub flips `mergeable` back to `true`. Triggers `itemMayNeedWork` cache bypass because base-branch advances don't bump the item's `updatedAt`. |
@@ -3034,6 +3081,16 @@ For developing the plugin itself, use `--plugin-dir` to point at your working co
 | `fabrik:awaiting-landing-verification` | Set immediately after a Done transition attributable to a merge (merge-train batch/singleton landing, or the ordinary auto-merge path) succeeds. The post-Done settle scan confirms the credited PR actually reached `MERGED`. Clears automatically once confirmed. See [§6.19 Post-Done Landing Verification](state-machine.md#619-post-done-landing-verification-adr-1616) (ADR-1616). |
 | `fabrik:credited-pr:<N>` | Set alongside `fabrik:awaiting-landing-verification`, but only by the two merge-train landing paths, recording which PR (the integration/singleton PR, distinct from the member's own closed-not-merged PR) was credited for the Done transition. Clears whenever `fabrik:awaiting-landing-verification` clears. See §6.19. |
 | `fabrik:landing-verification-failed` | Set only on a **confirmed** non-merge of the credited PR — the issue is simultaneously reopened and moved back to `Validate`. **Not self-clearing** — remove manually once the credited PR is re-landed and re-verified. See §6.19. |
+| `fabrik:awaiting-done` | Set the instant a stage emits `FABRIK_NO_WORK_NEEDED`, so the decision survives a failed Done move/issue close or an engine restart. While present, no non-cleanup stage is dispatched. Retried every poll until the board move to Done and the issue close both succeed, then cleared; escalates to `fabrik:paused` after `--max-retries` failed attempts. See [§6.8 No Work Needed Path](state-machine.md#68-no-work-needed-path) (ADR-060). |
+| `fabrik:awaiting-close` | Set when Fabrik's explicit close of a landed issue did not succeed, or was needed in the first place. Covers two cases: a PR merged onto a non-default `base:<branch>` (GitHub's `Closes #N` never auto-fires there), and — on the **default** base — an issue that is still open (or unreadable) right after its PR landed, because GitHub's `Closes #N` auto-close can no longer be relied on (#1962). Retried every poll; Fabrik closes the issue on a later poll and posts a "closed after merge" comment naming the PR. Cleared silently if GitHub's own auto-close lands first; escalates to `fabrik:paused` after `--max-retries` failed attempts. See [Closing a Landed Issue](#closing-a-landed-issue) and [§6.13](state-machine.md#613-non-default-base-explicit-close-retry) (ADR-1097, ADR-1962). |
+| `fabrik:awaiting-pr-ready` | Set when a `mark_pr_ready_on_complete: true` stage completes but marking the draft PR ready for review failed (non-transient error, or its in-process retries were exhausted). Retried every poll until the PR is ready, closed, merged or gone; escalates to `fabrik:paused` after `--max-retries` failed attempts, naming the PR and the manual `gh pr ready <N>` fix. Unlike most `awaiting-*` labels it does **not** hold the item back — it keeps advancing through later stages. See [§6.22](state-machine.md#622-mark-pr-ready-durable-retry-adr-1582) (ADR-1582). |
+| `fabrik:awaiting-advance` | Set when a terminal advance (after a merged Validate PR) fails to move the project-board Status forward — most commonly because the target Status column is missing from the board. Fabrik posts a one-time comment naming the failing stage and the error, then retries every poll; adding the missing column is enough, with no restart. Cleared once the advance succeeds; escalates to `fabrik:paused` after `--max-retries` failed attempts. See [§6.17](state-machine.md#617-terminal-advance-escalation-and-settle-scan-adr-1422) (ADR-1422). |
+| `fabrik:reworking:<Stage>` | Transient marker set while a comment re-enters a stage that was already marked `stage:<Stage>:complete`: the engine adds it, then temporarily removes the stale completion label so the board never claims a completion that is being reworked. Removed when the rework finishes; if the engine crashes mid-rework, startup restores the completion label for the named stage. Changes no dispatch gate. See [§1.4](state-machine.md#14-label-semantics-reference) and [§4.2](state-machine.md#42-the-11-step-flow) (ADR-1802). |
+| `fabrik:toolchain-stale` | Set (with a one-time explanatory comment) when a worktree declares a toolchain version (`.nvmrc`, `package.json` `engines.node`, `go.mod`, or `.tool-versions`) that the version on the daemon's own `PATH` does not satisfy — typically because the shell that launched `fabrik` predates a toolchain upgrade. **Warn-only**: the invocation still runs and nothing counts against `max_retries`. Clears automatically once a later invocation sees no mismatch; restart `fabrik` from a shell with the corrected `PATH`. See [§7.3e](state-machine.md#73e-toolchain-declaration-drift-detection) (ADR-1786). |
+| `fabrik:claude-limit` | Set when a Claude invocation exits because the account's usage limit was hit. The stage never ran, so it does not count against `max_retries` and neither `stage:<name>:failed` nor `fabrik:paused` is applied. Cleared on the issue's next invocation that is not a usage-limit exit, and account-wide once the suspension lifts. See [Claude Usage-Limit Suspension](#claude-usage-limit-suspension) (ADR-1119, ADR-1183). |
+| `fabrik:children-spawned` | Set on a parent after all `FABRIK_SPAWN_CHILD_*` children in a batch have been created, added to the board and linked as blockers. For Plan-declared spawns it also guards against re-spawning the same batch; remove it manually (and close the children) to force a fresh spawn. See [§6.7](state-machine.md#67-pre-implement-spawn-path) (ADR-1419). |
+| `fabrik:spawned-child:<index>:<number>` | Transient marker on the **parent**, written as each Plan-declared spawn block's child issue is created, recording that block's child by 1-based block index and issue number. It lets a retried spawn (after an un-pause or restart) resume an already-created child instead of duplicating it. Removed once the whole batch succeeds; remove one manually to force that block's child to be re-created. See [§6.7](state-machine.md#67-pre-implement-spawn-path) (ADR-1583). |
+| `fabrik:sub-issue` | Applied to each spawned child issue for human-visible filtering. Informational only — no engine gate semantics. See [§6.7](state-machine.md#67-pre-implement-spawn-path). |
 | `stage:<name>:in_progress` | Stage actively running |
 | `stage:<name>:complete` | Stage completed successfully |
 | `stage:<name>:failed` | Stage hit max retries |
@@ -3333,7 +3390,9 @@ The poll log captures:
 - GitHub API rate limit stats per poll cycle
 - `[#N extend-turns]` verdict lines — emitted on every `detectProgress` call (pass or fail) without `--debug-output`; useful for diagnosing why a stage did or didn't receive a turn extension
 
-The poll log is written in both TUI and non-TUI modes. It is most useful for post-mortem debugging of engine-level behavior — for example, diagnosing why an issue was not picked up during a poll cycle.
+- Claude-invocation lines — `invoking`, kill/reap notices, `max_wall_time` and idle-timeout kills, session expiry. In `-notui` mode these reach `fabrik.log` like every other engine line (they are not written to a separate stream).
+
+The poll log is written in both TUI and non-TUI modes. In `-notui` (plain-text) mode the per-issue and poll-level engine log lines are printed to **stdout** — not stderr — and `fabrik.log` carries the same lines with a timestamp. Startup warnings and shutdown notices (stage drift, config-key and flag-value warnings, SIGINT/SIGTERM messages) are still written to **stderr**, so redirect both streams if you want everything. It is most useful for post-mortem debugging of engine-level behavior — for example, diagnosing why an issue was not picked up during a poll cycle.
 
 ### Auto-migration from `~/.fabrik/`
 
