@@ -627,6 +627,7 @@ func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (Revi
 
 	watchdogCtx, watchdogCancel := context.WithCancel(context.Background())
 	defer watchdogCancel()
+	var inactivityFired atomic.Bool
 
 	cmd.Cancel = func() error {
 		if cmd.Process != nil {
@@ -654,6 +655,7 @@ func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (Revi
 				since := time.Since(time.Unix(0, lastActivity.Load()))
 				if since >= reviewInactivityTimeout {
 					logf(req.PRNumber, "warn", "review invocation idle for %s with no output — killing\n", reviewInactivityTimeout)
+					inactivityFired.Store(true)
 					killProcGroupGraceful(pid, req.PRNumber, "review", "inactivity_timeout", reviewKillGrace, reviewKillGrace)
 					return
 				}
@@ -669,7 +671,7 @@ func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (Revi
 	killProcGroup(cmd, req.PRNumber, "review")
 	// #1989: reap the session too — separate-group members the group kill misses.
 	exitKind := "clean_exit"
-	if stageCtx.Err() != nil {
+	if inactivityFired.Load() || stageCtx.Err() != nil {
 		exitKind = "after_stop"
 	}
 	reapReviewSession(pid, req.PRNumber, exitKind)
