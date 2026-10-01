@@ -667,6 +667,12 @@ func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (Revi
 	runErr := cmd.Wait()
 	watchdogCancel()
 	killProcGroup(cmd, req.PRNumber, "review")
+	// #1989: reap the session too — separate-group members the group kill misses.
+	exitKind := "clean_exit"
+	if stageCtx.Err() != nil {
+		exitKind = "after_stop"
+	}
+	reapReviewSession(pid, req.PRNumber, exitKind)
 
 	if errors.Is(runErr, exec.ErrWaitDelay) && ctx.Err() == nil {
 		logf(req.PRNumber, "warn", "WaitDelay fired: claude exited but grandchild processes held stdout pipe open; processing buffered output (%d bytes)\n", stdout.Len())
