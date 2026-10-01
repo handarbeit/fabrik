@@ -271,6 +271,38 @@ else
   FAILED=1
 fi
 
+# append_known_version: inserts exactly once, inside KnownEmbeddedVersions only,
+# and leaves the real file's later functions alone (the v0.0.83 regression).
+KV_SCRATCH="$(mktemp -d)"
+cp "$REPO_ROOT/plugin/known_embedded_versions.go" "$KV_SCRATCH/kv.go"
+before_funcs="$(grep -c '^}$' "$KV_SCRATCH/kv.go")"
+if append_known_version "$KV_SCRATCH/kv.go" "deadbeef" "v9.9.9"; then
+  if [ "$(grep -c 'deadbeef' "$KV_SCRATCH/kv.go")" -eq 1 ] \
+    && awk '/^var KnownEmbeddedVersions = \[\]string\{$/{s=1} s&&/deadbeef/{print "ok"; exit} s&&/^\}$/{exit}' "$KV_SCRATCH/kv.go" | grep -q ok \
+    && [ "$(grep -c '^}$' "$KV_SCRATCH/kv.go")" -eq "$before_funcs" ] \
+    && gofmt -e "$KV_SCRATCH/kv.go" >/dev/null 2>&1; then
+    echo "PASS: append_known_version inserts once, inside KnownEmbeddedVersions, and the file still parses"
+  else
+    echo "FAIL: append_known_version inserted in the wrong place, more than once, or produced unparseable Go"
+    FAILED=1
+  fi
+else
+  echo "FAIL: append_known_version returned non-zero on the real known_embedded_versions.go"
+  FAILED=1
+fi
+printf 'package plugin\n\nfunc f() {\n}\n' > "$KV_SCRATCH/noslice.go"
+cp "$KV_SCRATCH/noslice.go" "$KV_SCRATCH/noslice.orig"
+if append_known_version "$KV_SCRATCH/noslice.go" "deadbeef" "v9.9.9"; then
+  echo "FAIL: append_known_version succeeded on a file with no KnownEmbeddedVersions slice"
+  FAILED=1
+elif cmp -s "$KV_SCRATCH/noslice.go" "$KV_SCRATCH/noslice.orig"; then
+  echo "PASS: append_known_version refuses, and leaves the file untouched, when the slice is missing"
+else
+  echo "FAIL: append_known_version modified a file it refused"
+  FAILED=1
+fi
+rm -rf "$KV_SCRATCH"
+
 if [ "$FAILED" -ne 0 ]; then
   echo "=== cut_release_gate_test.sh: FAILED ==="
   exit 1

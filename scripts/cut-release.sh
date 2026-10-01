@@ -185,6 +185,24 @@ export_pregate_verified_sha() {
   export FABRIK_PREGATE_ALLOWED_DIRTY_REGEX
 }
 
+# append_known_version inserts `"<hash>", // <version>` as the last element of
+# the KnownEmbeddedVersions slice in <file>: before the first top-level `}`
+# AFTER `var KnownEmbeddedVersions = []string{`, and nowhere else. The file also
+# holds functions (#1787's VersionsBehind and friends), whose own top-level `}`
+# lines an unanchored match would hit too, producing uncompilable Go. That broke
+# the first v0.0.83 cut attempt. Returns non-zero, leaving <file> untouched,
+# when the slice is not found or never closes.
+append_known_version() {
+  local file="$1" hash="$2" version="$3"
+  awk -v hash="$hash" -v version="$version" '
+    /^var KnownEmbeddedVersions = \[\]string\{$/ { inslice = 1 }
+    inslice && /^\}$/ { print "\t\"" hash "\", // " version; inslice = 0; done = 1 }
+    { print }
+    END { exit done ? 0 : 1 }
+  ' "$file" > "${file}.tmp" || { rm -f "${file}.tmp"; return 1; }
+  mv "${file}.tmp" "$file"
+}
+
 # interpret_e2e_exit_code prints the operator-facing message for a given
 # scripts/e2e/run.sh exit code ($1) and returns 0 if that code means success,
 # 1 otherwise — main() calls `ok`/`die` with the result accordingly. Extracted
@@ -383,12 +401,8 @@ KNOWN_VERSIONS_FILE="plugin/known_embedded_versions.go"
 if grep -qF "\"${PLUGIN_HASH}\"" "$KNOWN_VERSIONS_FILE"; then
   ok "hash already recorded in $KNOWN_VERSIONS_FILE (no change needed)"
 else
-  # Insert the new hash before the closing } of the KnownEmbeddedVersions slice.
-  awk -v hash="$PLUGIN_HASH" -v version="$VERSION" '
-    /^\}$/ { print "\t\"" hash "\", // " version }
-    { print }
-  ' "$KNOWN_VERSIONS_FILE" > "${KNOWN_VERSIONS_FILE}.tmp"
-  mv "${KNOWN_VERSIONS_FILE}.tmp" "$KNOWN_VERSIONS_FILE"
+  append_known_version "$KNOWN_VERSIONS_FILE" "$PLUGIN_HASH" "$VERSION" \
+    || die "could not append $PLUGIN_HASH to $KNOWN_VERSIONS_FILE (KnownEmbeddedVersions slice not found)"
   ok "appended $PLUGIN_HASH to $KNOWN_VERSIONS_FILE"
 fi
 
