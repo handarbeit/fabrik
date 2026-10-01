@@ -57,6 +57,8 @@ Instead: Pruefer's Go code (`github.Client.SubmitPRReview`, `pruefer/review.go`)
 
 `pruefer/procattr_unix.go` / `_windows.go` duplicate this logic (~80 lines) rather than extracting it into a new shared `internal/` package. These are small, stable OS primitives; extracting them would touch `engine`'s existing call sites for a security-relevant piece of code for the sake of a one-time copy. Duplication is the lower-risk choice for V1.
 
+> **Amended by [ADR 1989](1989-session-wide-worker-reap.md):** the session-wide escalation and post-exit sweep are no longer duplicated — they live in the shared `internal/sessionreap` package used by both `engine` and `pruefer`, and Pruefer now starts Claude with `Setsid`. The small `setCmdProcAttr`/`killProcGroup`/`isProcessAlive` copies remain.
+
 ### 7. Defaults
 
 | Setting | Default | Rationale |
