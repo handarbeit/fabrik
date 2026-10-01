@@ -1570,6 +1570,15 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 	// inactivity-watchdog goroutine, so this cannot hang.
 	watchdogWG.Wait()
 	killProcGroup(cmd, issueNumber, label)
+	// #1989: reap the worker's whole session — separate-group members (a Bash
+	// tool's `go test`) that the group kill above cannot reach. Runs first so
+	// its count is the truthful "left running" signal; the registry-driven and
+	// registry-independent reapers below remain as the backstop.
+	exitKind := "clean_exit"
+	if inactivityFired.Load() || stageCtx.Err() != nil {
+		exitKind = "after_stop"
+	}
+	reapWorkerSession(pid, issueNumber, exitKind)
 	// R2: reap any session-scoped descendant that survived killProcGroup's
 	// PGID-scoped kill (e.g. detached via nohup/disown, or otherwise no
 	// longer a member of the worker's process group) — unconditional, on

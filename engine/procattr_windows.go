@@ -21,3 +21,6 @@ func killProcGroupGraceful(pid, issueNumber int, label, reason string, sigintGra
 // isProcessAlive returns true on Windows — process liveness via signal 0
 // is Unix-specific. The stale-lock detector is conservative on Windows.
 func isProcessAlive(pid int) bool { return true }
+
+// reapWorkerSession is a no-op on Windows (no POSIX sessions).
+func reapWorkerSession(pid, issueNumber int, exitKind string) int { return 0 }
