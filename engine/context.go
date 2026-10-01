@@ -60,6 +60,7 @@ func parseMainSHA(commentBody string) string {
 //   - .fabrik/issue.md — the issue body (always)
 //   - .fabrik/stage-{Name}.md — body of the most recent Fabrik comment for each stage
 //   - .fabrik/pr-description.md — linked PR body, for post_to_pr stage invocations only
+//   - .fabrik-context/ci-status.md — PR head SHA and CI verdict, when the item has a linked open PR (#1997)
 //
 // For stage invocations (isCommentProcessing=false): writes context for stages
 // with Order strictly less than currentStage.Order (prior stages only).
@@ -125,6 +126,11 @@ func (e *Engine) writeContextFiles(item gh.ProjectItem, currentStage *stages.Sta
 	if !isCommentProcessing {
 		e.writeCodebaseChanges(item, currentStage, workDir, fabrikDir)
 	}
+
+	// Write the CI status snapshot (#1997) for both stage and comment-processing
+	// invocations. Must precede the pr-description block below, whose bare
+	// returns would otherwise skip it.
+	e.writeCIStatus(item, currentStage, fabrikDir)
 
 	// Write PR description for post_to_pr stage invocations.
 	if !isCommentProcessing && currentStage.PostToPR {
