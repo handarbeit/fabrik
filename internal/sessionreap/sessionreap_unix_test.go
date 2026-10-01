@@ -64,13 +64,12 @@ func waitFile(t *testing.T, p string) string {
 	return ""
 }
 
-// worker starts a session leader whose child lands, under job control, in a
+// worker starts a session leader whose child setpgrp()s itself (via perl; dash has no usable `set -m`) into a
 // separate process group of the same session. The child traps INT/TERM into
 // marker files and keeps running. Returns leader and child PIDs.
 func worker(t *testing.T, dir string) (leader, child int) {
 	t.Helper()
-	script := "set -m\n" +
-		"sh -c \"trap 'echo x >> " + dir + "/sigs' INT TERM; echo \\$\\$ > " + dir + "/child.pid; while :; do sleep 0.05; done\" >/dev/null 2>&1 &\n" +
+	script := "perl -e '$SIG{INT}=q(DEFAULT); $SIG{QUIT}=q(DEFAULT); setpgrp(0,0); exec @ARGV' sh -c \"trap 'echo x >> " + dir + "/sigs' INT TERM; echo \\$\\$ > " + dir + "/child.pid; while :; do sleep 0.05; done\" >/dev/null 2>&1 &\n" +
 		"sleep 60\n"
 	cmd := exec.Command("sh", "-c", script)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}

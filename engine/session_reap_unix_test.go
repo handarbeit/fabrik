@@ -21,14 +21,14 @@ import (
 	"github.com/handarbeit/fabrik/stages"
 )
 
-// sessionChildScript backgrounds, under job control (`set -m`), a child shell
-// that lands in its own process group of the SAME session as the worker — the
+// sessionChildScript backgrounds a child shell that setpgrp()s itself (via perl,
+// so it does not depend on the shell honouring `set -m` — dash, /bin/sh on the
+// Linux CI runners, does not) into its own process group of the SAME session as the worker — the
 // shape a Claude Bash-tool command has (#1989 R1). The child traps SIGINT and
 // SIGTERM, recording each in a marker file, and keeps running, so a graceful
 // signal is observable without the child dying from it. SIGKILL is untrappable.
 func sessionChildScript(dir string) string {
-	return "set -m\n" +
-		"sh -c \"trap 'echo x > " + dir + "/int.mark' INT; trap 'echo x > " + dir + "/term.mark' TERM; echo \\$\\$ > " + dir + "/child.pid; while :; do sleep 0.05; done\" >/dev/null 2>&1 &\n"
+	return "perl -e '$SIG{INT}=q(DEFAULT); $SIG{QUIT}=q(DEFAULT); setpgrp(0,0); exec @ARGV' sh -c \"trap 'echo x > " + dir + "/int.mark' INT; trap 'echo x > " + dir + "/term.mark' TERM; echo \\$\\$ > " + dir + "/child.pid; while :; do sleep 0.05; done\" >/dev/null 2>&1 &\n"
 }
 
 func fileExists(p string) bool {

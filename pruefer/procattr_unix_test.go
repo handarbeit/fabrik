@@ -103,13 +103,13 @@ func TestKillProcGroup_NilProcess_NoOp(t *testing.T) {
 	killProcGroup(cmd, 42, "test") // must not panic
 }
 
-// startSessionWorker starts a Setsid worker whose child, under job control
-// (`set -m`), sits in a separate process group of the same session — the
+// startSessionWorker starts a Setsid worker whose child setpgrp()s itself
+// (via perl; dash has no usable `set -m`) into a separate process group of the same session — the
 // shape of a Claude Bash-tool command that kill(-pid, …) cannot reach (#1989).
 func startSessionWorker(t *testing.T) (worker *exec.Cmd, childPID int) {
 	t.Helper()
 	pidFile := t.TempDir() + "/child.pid"
-	cmd := exec.Command("sh", "-c", "set -m\nsleep 60 &\necho $! > "+pidFile+"\nwait\n")
+	cmd := exec.Command("sh", "-c", "perl -e '$SIG{INT}=q(DEFAULT); $SIG{QUIT}=q(DEFAULT); setpgrp(0,0); exec @ARGV' sleep 60 &\necho $! > "+pidFile+"\nwait\n")
 	setCmdProcAttr(cmd)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
