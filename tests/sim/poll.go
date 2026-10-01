@@ -35,7 +35,7 @@ const workerQuiescencePollInterval = 5 * time.Millisecond
 // largest under normal conditions — so a legitimate, if slow, dispatch is
 // never mistaken for a hang, while a genuinely stuck worker still fails
 // well within a single package's -timeout budget instead of hanging the
-// suite. Set to 60s rather than something closer to lockVerifyDelay's 2s:
+// suite. Set well above lockVerifyDelay's 2s (first 60s, now 180s — below):
 // an initial 15s value, chosen against an idle machine, itself produced two
 // spurious timeouts (`TestReviewAuthorityReinvokesOnChangesRequested`,
 // `TestReviewAuthorityCycleLimitPauses`) when the full package's ~30
