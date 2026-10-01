@@ -87,6 +87,13 @@ func TestKillProcGroupGraceful_SigIntSufficient(t *testing.T) {
 	cmd := startSleeper(t)
 	pid := cmd.Process.Pid
 	killProcGroupGraceful(pid, 42, "test", "unit_test", 50*time.Millisecond, 2*time.Second)
+	// The session reap treats a dead-but-unreaped process as gone, so it can
+	// return a moment before startSleeper's reaper goroutine collects the exit
+	// status; poll rather than probe once.
+	deadline := time.Now().Add(time.Second)
+	for isProcessAlive(pid) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
 	if isProcessAlive(pid) {
 		t.Error("expected process to be dead after SIGINT grace window (sleep exits on SIGINT)")
 	}
