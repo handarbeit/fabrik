@@ -1813,7 +1813,10 @@ Every escape-from-release regression earns a new scenario in this table.
    read it via `markerPath("Test...")` when building the issue body. See the
    "Marker-path convention (#1394)" section above; `TestMarkerPathsAreUnique`
    will fail the build if the new path collides with an existing one.
-6. **Assert on something that can only be produced by the engine, on the
+6. **Add a sim-parity registry entry** to `tests/e2e/registry/registry.json`
+   (see "Sim parity registry (#1933)" below). `go test ./...` fails until the new
+   live test is listed, and prefer adding the sim twin in the same PR.
+7. **Assert on something that can only be produced by the engine, on the
    specific path under test** (handarbeit/fabrik#1355). A scenario that
    passes just as easily against a broken engine as a working one is worse
    than no scenario at all — it looks like coverage but proves nothing, and
@@ -1859,6 +1862,37 @@ Every escape-from-release regression earns a new scenario in this table.
      not configured") is honest about missing coverage; a green check that
      doesn't actually exercise the path under test is worse, because it
      hides the gap.
+
+## Sim parity registry (#1933)
+
+`tests/e2e/registry/registry.json` is the single checked-in, machine-readable
+registry keyed by live e2e test name. Its first field records whether the sim bed
+(`tests/sim`) covers the same engine path, so the "green sim ⇒ green live run"
+promise of the pre-gate (ADR-1454) is something you can check rather than assume.
+Later per-test metadata (e.g. auth/train sensitivity, packs, exclusivity) is added
+as **fields on the same entries**, not as separate lists.
+
+- **What is a live test?** By rule, not by hand: a top-level `Test*` function in
+  `tests/e2e/*_test.go` whose body (nested closures included) calls `LoadEnv`.
+  Harness unit tests such as `TestMarkerPathsAreUnique` are excluded by that rule.
+  A `LoadEnv` call anywhere that is *not* inside such a body (e.g. through a
+  helper) is an error, so an unusual shape is caught rather than silently excluded.
+- **Entry shape:** `{"name", "parity": "sim" | "live-only" | "gap", "sim": [...],
+  "live_only_reason": "...", "note": "..."}`; the top level is
+  `{"version": 1, "tests": [...]}`, sorted by `name`. The vocabulary for
+  `live_only_reason` (`model-judgement`, `wire-format`, `review-bot`, `real-ci`,
+  `app-auth`, `other`+note) and the rules for `sim`/`gap` are in
+  `tests/sim/README.md`'s "Sim parity registry" section.
+- **Enforcement:** `tests/e2e/registry` is an untagged Go package, so its
+  completeness test runs in plain `go test ./...` on every PR. It fails on a live
+  test with no entry, an entry for a test that no longer exists, a sim reference
+  that does not exist, or a malformed entry. It discovers tests by parsing source
+  (`go/parser`), never by importing the build-tagged e2e package.
+- **Reading it from shell:** it is plain JSON, so `jq` works directly —
+  `jq -r '.tests[] | select(.parity=="gap") | .name' tests/e2e/registry/registry.json`.
+  `scripts/e2e/run.sh` prints `sim parity: N covered, M live-only, K gap` from it
+  before the pre-gate (and even when the pre-gate is skipped); the line is
+  informational and never gates.
 
 ## Design notes
 
