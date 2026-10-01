@@ -243,8 +243,12 @@ and record each leg's `== GraphQL budget (leg: ...): N -> M remaining
 
 5. **`ci-fix-sentinel` enrolled as a required status check** on
    `handarbeit/fabrik-test-alpha/main`. Both tests skip gracefully (via
-   `t.Skip`) if this check is not enrolled — safe to merge before the sibling
-   sub-issue adds the sentinel CI job.
+   `t.Skip`) if this check is not enrolled — an environment gate, citing no
+   issue.
+   `TestCIFixReinvoke` additionally needs the bed's **run-ID acknowledgement
+   branch** of the sentinel job (next section) and **fails** — it does not
+   skip — if the bed's `ci.yml` lacks it, since a skip there would silently
+   reintroduce a test that can never run.
 6. **`FABRIK_MAX_CI_FIX_CYCLES=2` in the test bed `.env`** (for
    `TestCIFixReinvokeCycleLimit` only). The test skips with an instructional
    message if the value is `> 3`. After editing `.env`, restart the test-bed
@@ -292,6 +296,60 @@ and record each leg's `== GraphQL budget (leg: ...): N -> M remaining
    fixed fixture is what should supply real numbers if the wait-timeout timer
    does turn out to race in practice.
 
+### Bed workflow for `TestCIFixReinvoke` (#1991)
+
+`TestCIFixReinvoke` was skipped for ~2.5 months because a capable Implement
+agent reads `ci.yml`, satisfies the sentinel in its first commit, and the first
+CI run is green — so the reinvoke never fires (#916). The test now forces the
+first failure with a **run-ID acknowledgement nonce** (ADR 1991):
+
+- The nonce `T` is the ID of the **earliest `ci.yml` `pull_request` run on the
+  PR's head branch** (`fabrik/issue-N`). That run is red by construction — its
+  own ID cannot be inside a file committed before it existed — and `T` is a
+  future GitHub-assigned number, not derivable from the worktree, git history
+  or `ci.yml`.
+- The sentinel passes only if the repo root holds `CI_FIX_ACK` containing the
+  line `ack:<T>` **and** the current run is not run `T`.
+- On failure the job emits `::error title=ci-fix-sentinel::…ack:<T>`. The engine
+  embeds that annotation (`github.FetchCheckRunAnnotations`) in the CI-fix prompt
+  (`engine/ci.go` `ciFailureDetail`) and logs the prompt, so `T` reaches the
+  agent only through the reinvoke.
+
+The two sibling branches (`ci-fix-sentinel-required`, `ci-fix-sentinel-unfixable`
+— used by `TestCIFixReinvokeCycleLimit` and the conjunctive-gate test) are left
+untouched. **This workflow change lives in the external
+`handarbeit/fabrik-test-alpha` repo and must be applied by an operator with bed
+access before the live run** (the engine/harness change is independent of it).
+Add this branch to the sentinel job's script, alongside the existing ones, and
+give the job `permissions: { contents: read, actions: read }` and
+`GH_TOKEN: ${{ github.token }}` in its env, with `PR_BODY` and `BRANCH` taken
+from `github.event.pull_request.body` and `github.head_ref`:
+
+```bash
+if printf '%s' "$PR_BODY" | grep -q 'ci-fix-sentinel-ack'; then
+  WF=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --jq .workflow_id)
+  T=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$WF/runs?branch=$BRANCH&event=pull_request&per_page=100" \
+        --jq '[.workflow_runs[].id] | min')
+  if [ "$GITHUB_RUN_ID" != "$T" ] && grep -qx "ack:$T" CI_FIX_ACK 2>/dev/null; then
+    echo "ci-fix-sentinel: acknowledgement ack:$T found"
+    exit 0
+  fi
+  echo "::error title=ci-fix-sentinel::CI-fix required: create CI_FIX_ACK at the repo root containing the line ack:$T"
+  exit 1
+fi
+```
+
+The harness derives `T` independently through the same API (`ci.yml` runs on
+the branch, `event=pull_request`, minimum ID), so the bed's `ci.yml` file name
+must stay `ci.yml` (`bedCIWorkflowFile` in `ci_fix_ack.go`).
+
+What the test asserts (all `Fatalf`, never `Skip`): the first CI run is red and
+its annotation carries `ack:<T>` (fail-fast; a green first run is named as the
+agent pre-empting the sentinel); the engine logs
+`[#N ci-fix-reinvoke] re-invoking stage`; the logged `prompt (` line carries the
+failing check's name and `ack:<T>`; CI converges; the PR head tree contains
+`CI_FIX_ACK` with `ack:<T>`; exactly one commit lands after `fabrik:awaiting-ci`.
+
 ### Marker-substring assertion audit (#1320)
 
 `TestCIFixReinvokeCycleLimit` used to assert on a `🏭 **Fabrik —` marker via
@@ -317,16 +375,15 @@ A repo-wide search (`grep -rn "🏭" tests/e2e/*.go`) found every call site in
    `ci_fix_reinvoke_marker_test.go` for a fast, non-e2e proof that this
    rejects a comment shaped like the `#4049` false-pass evidence while still
    accepting a genuine engine comment.
-2. **`ci_fix_reinvoke_test.go` (`TestCIFixReinvoke`) — same class of flaw,
-   currently dormant.** Line ~99-100 calls
-   `WaitForPRCommentContaining(t, env, ..., "🏭 **Fabrik — stage: Validate**", ...)`,
-   which resolves to a `strings.Contains` scan (`harness.go`) across all PR
-   comments — the same unscoped-match shape as the original defect, just
-   against a different marker. This has not caused an observed false pass
-   because the whole test is `t.Skip`'d pending #916 and has never run
-   against real data. **Not fixed here** — out of scope per #1320 (only
-   auditing this test was in scope; fixing it is deferred to whoever
-   un-skips it for #916, at which point this note should be revisited).
+2. **`ci_fix_reinvoke_test.go` (`TestCIFixReinvoke`) — fixed in #1991.**
+   It called `WaitForPRCommentContaining(…, "🏭 **Fabrik — stage: Validate**", …)`,
+   a `strings.Contains` scan across all PR comments (the same unscoped-match
+   shape as the original defect), left unfixed while the test was skipped. The
+   assertion is gone: dispatch is now proven by the engine's own
+   `[#N ci-fix-reinvoke] re-invoking stage` log line, and prompt content by its
+   `prompt (` line (`WaitForLogLine`, scoped to this issue number and to log
+   lines written after the issue was filed) — see "Bed workflow for
+   `TestCIFixReinvoke`" above.
 3. **`expected_reviewers_test.go:175` and `review_authority_test.go:174`
    (`WaitForPRCommentContainingAny`) — already sound, not `🏭` markers.**
    Both call sites match on non-marker substrings specific to their scenario
@@ -1677,7 +1734,7 @@ the `Queued` column is absent, so it only runs in the gate's `on` leg.
 | `TestConvergenceRace` | Deterministic post-Validate auto-merge race (#829): two conflicting yolo PRs; mode-appropriate `fabrik:auto-merge-enabled` contract, both land within budget, neither ends `fabrik:paused` | Both (mode-aware) | 80–100 min | $2–4 |
 | `TestCruiseFullPipeline` | `fabrik:cruise` auto-advances to Validate-complete without auto-merge; PR merged by human closes issue | Both | 30–50 min | $0.80–2.00 |
 | `TestBaseBranchPipeline` | `base:<branch>` non-default base branch: throwaway branch created off main, PR targets it (not main), pipeline does not falsely pause at end of Implement, review gate clears via the base-independent REST feed | Both | 35–55 min | $0.80–2.00 |
-| `TestCIFixReinvoke` | CI-fix reinvoke positive path: sentinel fails on first push, Claude fixes, CI passes, issue closes | Both | 75–90 min | $1.00–3.00 |
+| `TestCIFixReinvoke` | CI-fix reinvoke positive path: the first CI run is forced red by a run-ID ack nonce the agent cannot pre-empt, the engine dispatches a reinvoke whose prompt carries the failure (asserted via the engine log), Claude fixes, CI passes, issue closes | Both | 75–90 min | $1.00–3.00 |
 | `TestCIFixReinvokeCycleLimit` | CI-fix reinvoke negative path: unfixable sentinel exhausts MaxCiFixCycles, issue pauses | Both | 30–60 min | $0.50–1.50 |
 | `TestPausedMergedPRRecovery` | paused + gate-label at Validate with merged PR heals to CLOSED (3 sequential sub-tests: awaiting-ci, awaiting-review, no-gate-label); regression guard for #874 class | Both | 60–90 min (3 sequential sub-tests, ~20–30 min each); covered by the default `E2E_TIMEOUT=4h` | $1.50–4.50 |
 | `TestConjunctiveCIReviewGate` | Conjunctive CI∧review gate: fabrik:awaiting-ci holds before CI, PR comment during CI-await not dropped, fabrik:awaiting-review holds before approval, advance suppressed until both gates clear | Both | 80–115 min (approval path) / 50–75 min (timeout path) | $1.00–2.50 |
