@@ -11,74 +11,101 @@ import (
 )
 
 // TestCIFixReinvoke is the positive-path regression test for the CI-fix
-// reinvoke loop (engine/ci.go). The sentinel CI job "ci-fix-sentinel" in
-// handarbeit/fabrik-test-alpha fails on the first push but passes after a
-// trivial fix commit — exercising the full failure → reinvoke → recovery path.
+// reinvoke loop (engine/ci.go): CI fails, the engine reinvokes the stage with
+// the failure, and the fix lands.
+//
+// How the first failure is forced (#1991, ADR 1991 — supersedes #916's
+// attempts): the bed's ci-fix-sentinel job, for a PR whose body carries
+// "ci-fix-sentinel-ack", passes only if the repo root holds a CI_FIX_ACK file
+// with the line "ack:<T>", where T is the ID of the earliest ci.yml
+// pull_request run on the branch. That run is red by construction, and T is a
+// future GitHub-assigned ID the Implement agent cannot derive or pre-empt. T
+// reaches the agent only through the sentinel's failure annotation, which the
+// engine embeds in the CI-fix prompt (engine/ci.go ciFailureDetail).
 //
 // Pass criteria:
-//   - fabrik:awaiting-ci appears after Validate (CI gate holds).
-//   - stage:Validate:complete does NOT appear during the 2-minute withheld window.
-//   - A second "🏭 **Fabrik — stage: Validate**" PR comment appears (reinvoke fired).
-//   - CI eventually passes and the issue closes.
-//   - The PR has exactly baseCommits+1 commits (one CI-fix commit; no rebase storm).
+//   - Precondition (fail fast): the FIRST ci.yml run on the branch concluded
+//     failure and its annotation carries ack:<T>. A green first run means the
+//     agent pre-empted the sentinel; the test fails there rather than burning
+//     the rest of the run.
+//   - fabrik:awaiting-ci appears and stage:Validate:complete does NOT appear
+//     while CI is red and before the engine has dispatched the reinvoke.
+//   - The engine logs "[#N ci-fix-reinvoke] re-invoking stage" (dispatch), and
+//     its "prompt (" log line carries both the failing check's name and
+//     ack:<T> — proving the reinvoke prompt carried the CI failure, not merely
+//     that the engine retried.
+//   - CI converges green, the issue closes, and the PR head tree contains
+//     CI_FIX_ACK with ack:<T> (the agent used the prompt's information).
+//   - The PR gained exactly one commit after fabrik:awaiting-ci first appeared
+//     (the CI-fix commit; no rebase storm).
 //
-// Prerequisite: "ci-fix-sentinel" must be enrolled as a required status check
-// on handarbeit/fabrik-test-alpha/main. The test skips gracefully if not.
+// Every timeout and assertion below is a Fatalf. Only the environment gates
+// (bed not running, sentinel not enrolled as a required check) may skip — so
+// neutralising the engine's CI-fix dispatch makes this test fail, not skip.
+//
+// Prerequisites: "ci-fix-sentinel" enrolled as a required status check on
+// handarbeit/fabrik-test-alpha/main, and the bed workflow's ack branch — see
+// "Bed workflow for TestCIFixReinvoke" in tests/e2e/README.md. A bed without
+// the ack branch fails loudly in preflight.
 //
 // Wall-clock: ~75–90 min when run in isolation. Use E2E_TIMEOUT=3h.
 // Cost: ~$1–3.
 func TestCIFixReinvoke(t *testing.T) {
 	t.Parallel()
-	// Skipped pending handarbeit/fabrik#916. A capable Implement-stage agent makes
-	// CI green on the first push (it satisfies the sentinel during Implement), so
-	// the sentinel never fails and the reinvoke loop never fires. Forcing a
-	// deterministic first failure needs the engine change (surface failing-check
-	// output in buildCIFixComment) + a per-run-nonce sentinel the agent cannot
-	// pre-satisfy. The harness hardening below (SENTINEL_FIX body, no-workflow-edit
-	// guard, sentinel-failure precondition) is retained for when #916 unblocks this.
-	t.Skip("blocked on #916: agent satisfies ci-fix-sentinel during Implement; first failure not yet deterministically forceable")
 	env := LoadEnv(t)
 	AssertFabrikRunning(t, env)
 	assertSentinelCheckRequired(t, env, env.RepoAlpha)
+	assertSentinelAckWorkflow(t, env, env.RepoAlpha)
 
 	stamp := time.Now().UTC().Format("20060102-150405")
 	title := fmt.Sprintf("e2e ci-fix-reinvoke (%s)", stamp)
 	path := markerPath("TestCIFixReinvoke")
 	body := fmt.Sprintf(ciFixReinvokeBody, path, path)
 
+	// Captured before filing so no engine log line for this run can be missed.
+	logStart := LogOffset(t, env)
+
 	num := FileIssue(t, env, env.RepoAlpha, title, body, "fabrik:yolo")
 	itemID := AddIssueToProject(t, env, env.RepoAlpha, num)
 	SetIssueStatus(t, env, itemID, "Specify")
 	t.Logf("filed %s#%d", env.RepoAlpha, num)
+	branch := fmt.Sprintf("fabrik/issue-%d", num)
 
-	// Wait for Implement to complete, then capture baseline commit count.
+	// Wait for Implement to complete.
 	WaitForIssueLabel(t, env, env.RepoAlpha, num, "stage:Implement:complete", 60*time.Minute)
 	prNumber := LinkedPRNumber(t, env, env.RepoAlpha, num)
-	baseCommits := PRCommitCount(t, env, env.RepoAlpha, prNumber)
-	t.Logf("PR #%d has %d commits at baseline (before Validate)", prNumber, baseCommits)
 
 	// Guard: the agent must NOT have modified the CI workflow. The ci-fix-sentinel
 	// job is immutable test infrastructure; if the agent edited it (e.g. to relax
 	// the failing condition) the whole CI-fix scenario is invalid.
 	AssertPRDidNotTouchWorkflows(t, env, env.RepoAlpha, prNumber)
 
-	// Validate fires, CI fails, engine adds fabrik:awaiting-ci.
-	WaitForIssueLabel(t, env, env.RepoAlpha, num, "fabrik:awaiting-ci", 30*time.Minute)
+	// Validate completes and the engine applies fabrik:awaiting-ci. With yolo,
+	// Review and Validate may commit too, so the no-rebase-storm baseline is
+	// taken HERE, not after Implement.
+	WaitForIssueLabel(t, env, env.RepoAlpha, num, "fabrik:awaiting-ci", 60*time.Minute)
 	AssertLabelWasApplied(t, env, env.RepoAlpha, num, "fabrik:awaiting-ci")
-	t.Logf("fabrik:awaiting-ci confirmed on %s#%d", env.RepoAlpha, num)
+	baseCommits := PRCommitCount(t, env, env.RepoAlpha, prNumber)
+	t.Logf("fabrik:awaiting-ci on %s#%d; PR #%d has %d commits at the CI-gate baseline", env.RepoAlpha, num, prNumber, baseCommits)
 
-	// Establish the precondition for the withheld-window assertion: confirm the
-	// sentinel check has GENUINELY FAILED. fabrik:awaiting-ci is applied
-	// unconditionally on every wait_for_ci Validate completion (engine/stages.go)
-	// — it is NOT proof that CI is failing. Without this guard, a sentinel that
-	// passed (e.g. because the agent satisfied it prematurely) would let
-	// stage:Validate:complete appear and be misread as a CI-gate leak.
-	WaitForCheckConclusion(t, env, env.RepoAlpha, prNumber, "ci-fix-sentinel", "failure", 10*time.Minute)
-	t.Logf("ci-fix-sentinel confirmed FAILED on PR #%d — withheld window is now meaningful", prNumber)
+	// Precondition: the first CI run was genuinely red and carries the nonce.
+	// fabrik:awaiting-ci is applied unconditionally on every wait_for_ci
+	// Validate completion (engine/stages.go) — it is NOT proof CI is failing.
+	nonce := waitForFirstSentinelRunRed(t, env, env.RepoAlpha, branch, 15*time.Minute)
+	t.Logf("first CI run %d is red and its annotation carries %s — the forced failure is real", nonce, ackLine(nonce))
 
-	// 2-minute withheld window: Validate must NOT complete while CI is failing.
+	// The engine must dispatch the CI-fix reinvoke. Withheld window: until it
+	// has, Validate must NOT complete while CI is red — a leaked
+	// stage:Validate:complete here is a CI-gate bug. The window ends early the
+	// moment the engine's dispatch line appears (after which completion is
+	// legitimately possible once the fix is green).
+	reinvokeLine := fmt.Sprintf("[#%d ci-fix-reinvoke] re-invoking stage", num)
+	promptLinePrefix := fmt.Sprintf("[#%d ci-fix-reinvoke] prompt (", num)
 	withheldDeadline := time.Now().Add(2 * time.Minute)
 	for time.Now().Before(withheldDeadline) {
+		if line, _ := tryLogLineContaining(env, reinvokeLine, logStart); line != "" {
+			break
+		}
 		labels, err := tryIssueLabels(env, env.RepoAlpha, num)
 		if err != nil {
 			t.Logf("transient error fetching labels during withheld window: %v (retrying)", err)
@@ -87,23 +114,28 @@ func TestCIFixReinvoke(t *testing.T) {
 		}
 		for _, l := range labels {
 			if l == "stage:Validate:complete" {
-				t.Fatalf("stage:Validate:complete appeared during withheld window — CI gate did not hold on %s#%d",
+				t.Fatalf("stage:Validate:complete appeared while CI was red and before any ci-fix reinvoke — CI gate did not hold on %s#%d",
 					env.RepoAlpha, num)
 			}
 		}
 		pollSleep(pollBase())
 	}
-	t.Logf("withheld window passed: CI gate held for 2 minutes on %s#%d", env.RepoAlpha, num)
 
-	// A second Validate comment on the PR confirms the CI-fix reinvoke fired.
-	// (The first "🏭 **Fabrik — stage: Validate**" comment is from the initial
-	// Validate run; the reinvoke posts a second one.)
-	WaitForPRCommentContaining(t, env, env.RepoAlpha, prNumber,
-		"🏭 **Fabrik — stage: Validate**", 10*time.Minute)
-	t.Logf("CI-fix reinvoke confirmed via second Validate PR comment on #%d", prNumber)
+	// Proof 1: the engine dispatched a ci-fix-reinvoke.
+	t.Logf("waiting for the engine to dispatch the ci-fix-reinvoke on %s#%d", env.RepoAlpha, num)
+	WaitForLogLine(t, env, reinvokeLine, logStart, 15*time.Minute)
+
+	// Proof 2: the reinvoke prompt carried the CI failure. The synthetic
+	// comment is never posted to GitHub, so the engine logs it (bounded, one
+	// line); the nonce was resolved above independently of the prompt.
+	promptLine := WaitForLogLine(t, env, promptLinePrefix, logStart, 2*time.Minute)
+	if missing := promptMissing(promptLine, nonce); len(missing) != 0 {
+		t.Fatalf("the ci-fix-reinvoke prompt did not carry the CI failure: missing %v in %s", missing, promptLine)
+	}
+	t.Logf("ci-fix-reinvoke dispatched and its prompt carried %s and %s", sentinelCheckName, ackLine(nonce))
 
 	// Poll until all CI check conclusions are "success" (pending = still running).
-	ciDeadline := time.Now().Add(20 * time.Minute)
+	ciDeadline := time.Now().Add(30 * time.Minute)
 	ciPassed := false
 	for time.Now().Before(ciDeadline) {
 		conclusions, err := tryPRCheckRunConclusions(env, env.RepoAlpha, prNumber)
@@ -128,7 +160,22 @@ func TestCIFixReinvoke(t *testing.T) {
 		time.Sleep(30 * time.Second)
 	}
 	if !ciPassed {
-		t.Fatalf("timed out waiting for all CI checks to pass on PR #%d", prNumber)
+		t.Fatalf("timed out waiting for all CI checks to pass on PR #%d after the ci-fix reinvoke", prNumber)
+	}
+
+	// The fix must have used the information the prompt carried: the PR head
+	// tree holds CI_FIX_ACK with ack:<T>. Read at the head SHA, which stays
+	// fetchable after the PR merges and its branch is deleted.
+	headSHA, err := ghOutput(env, "api", fmt.Sprintf("repos/%s/pulls/%d", env.RepoAlpha, prNumber), "--jq", ".head.sha")
+	if err != nil {
+		t.Fatalf("resolving PR #%d head SHA: %v: %s", prNumber, err, strings.TrimSpace(headSHA))
+	}
+	ack, err := tryFileAtRef(env, env.RepoAlpha, ackFile, strings.TrimSpace(headSHA))
+	if err != nil {
+		t.Fatalf("PR #%d head %s has no %s — the CI-fix commit did not create it: %v", prNumber, strings.TrimSpace(headSHA), ackFile, err)
+	}
+	if !strings.Contains(ack, ackLine(nonce)) {
+		t.Fatalf("%s on PR #%d does not contain %q (content: %q)", ackFile, prNumber, ackLine(nonce), ack)
 	}
 
 	// Issue must close (Validate completes and yolo auto-merges the PR).
@@ -136,7 +183,9 @@ func TestCIFixReinvoke(t *testing.T) {
 	AssertLabelWasApplied(t, env, env.RepoAlpha, num, "stage:Validate:complete")
 	t.Logf("%s#%d closed with stage:Validate:complete", env.RepoAlpha, num)
 
-	// Rebase storm guard: expect exactly one CI-fix commit beyond baseline.
+	// Rebase storm guard: expect exactly one CI-fix commit beyond the
+	// awaiting-ci baseline. (Not a count of log lines: ADR-1812 refunds a
+	// did-not-run reinvoke, so one log line is not one charged cycle.)
 	finalCommits := PRCommitCount(t, env, env.RepoAlpha, prNumber)
 	if finalCommits > baseCommits+1 {
 		t.Fatalf("rebase storm on PR #%d: expected %d commits, got %d",
@@ -254,15 +303,13 @@ func hasEngineCIWaitTimeoutComment(bodies []string) bool {
 // fragility — there is no cheaper way to distinguish them than the manual
 // pauseForCIFixCycleLimit-neutralization check described above.
 //
-// Why PRCommitCount rather than an engine-observable signal (PR #1324
-// review): asserting directly on the engine's own CIFixCycleIncremented
-// application (catch_up_handlers.go) would remove the one-layer-removed gap
-// above, but the e2e harness has no mechanism to read the live bed's engine
-// process logs or internal state — only GitHub-visible signals (labels,
-// comments, commits) are observable from here. Adding one would be new
-// engine-side observability infrastructure, which is outside this issue's
-// explicit scope ("No change to engine behavior is implied by this issue").
-// PRCommitCount is the strongest non-vacuous signal available without it.
+// Why PRCommitCount rather than an engine-log signal: the harness CAN read
+// the bed's engine log (LogOffset/WaitForLogLine/CountLogLines read
+// env.LogPath, as TestCIFixReinvoke does — #1991), but a count of
+// "re-invoking stage" lines is not a count of charged cycles (ADR-1812
+// refunds a reinvoke that provably never ran). Commits pushed are the
+// mechanically verifiable result of a dispatch that genuinely ran, and the
+// strongest non-vacuous signal for this scenario.
 //
 // Wall-clock: ~30–60 min. Cost: ~$0.50–1.50.
 func TestCIFixReinvokeCycleLimit(t *testing.T) {
@@ -376,17 +423,17 @@ func TestCIFixReinvokeCycleLimit(t *testing.T) {
 // placeholders are the scenario's unique marker file path (see markerPath in
 // harness.go, #1394), repeated verbatim.
 //
-// The PR body must contain "ci-fix-sentinel-required" so the test-alpha CI
-// workflow triggers the ci-fix-sentinel check. That check
-// FAILS until a file named SENTINEL_FIX (at the repo root) contains the line
-// "ci-fix-satisfied" — the only sanctioned way to satisfy it. Claude must
-// create that file ONLY on the CI-fix reinvoke, producing the failure →
-// reinvoke → recovery sequence the test exercises.
-//
-// The SENTINEL_FIX mechanism is deliberately the sole satisfaction path and the
-// workflow is off-limits (see hard constraints) so the agent cannot satisfy or
-// weaken the sentinel prematurely — the historical failure mode that made the
-// sentinel pass before the CI-fix loop ever ran.
+// The PR body must contain "ci-fix-sentinel-ack" so the test-alpha CI workflow
+// runs the run-ID acknowledgement branch of the ci-fix-sentinel job (see
+// ci_fix_ack.go). That job FAILS on the first CI run by construction and passes
+// only once a root file CI_FIX_ACK holds the line "ack:<N>", where N is shown
+// to the agent ONLY by the engine's CI-fix prompt. The body therefore tells the
+// agent what to do on the reinvoke without being able to say what N is — a
+// static, readable value (the old SENTINEL_FIX/"ci-fix-satisfied" scheme) was
+// pre-emptable, which is why this test sat skipped for #916. The agent is told
+// not to wait on or inspect CI: an agent that pushes, watches the first run go
+// red and fixes it itself would make the reinvoke never fire (the harness fails
+// fast with a named diagnostic if so).
 const ciFixReinvokeBody = `## Goal
 
 End-to-end regression test for the Fabrik CI-fix reinvoke loop (handarbeit/fabrik#900).
@@ -399,28 +446,28 @@ exist):
 
     <!-- ci-fix-reinvoke-initial -->
 
-Make NO other changes on this commit. In particular do NOT create the
-SENTINEL_FIX file yet. The ci-fix-sentinel check WILL fail on this first push —
-that failure is expected and required.
+Make NO other changes on this commit. In particular do NOT create a file named
+` + "`CI_FIX_ACK`" + `. The ci-fix-sentinel check WILL fail on this first push — that
+failure is expected and required. Do NOT wait for CI, poll it, or inspect its
+results during Implement, Review or Validate; do not try to make it pass.
 
 **When the CI-fix reinvoke fires** (you will be prompted with a message about
-the CI failure), and ONLY then, push a second commit that creates a new file
-named exactly ` + "`SENTINEL_FIX`" + ` at the repository root, containing exactly this
-single line:
-
-    ci-fix-satisfied
-
-That second commit makes the sentinel pass. Do not rebase or squash — the two
-commits must remain distinct so the e2e test can verify the commit count.
+the CI failure, including the failing check's details), and ONLY then, read the
+failure details in that message. They state exactly what the sentinel needs: a
+new file named exactly ` + "`CI_FIX_ACK`" + ` at the repository root containing the
+line the details give (of the form ` + "`ack:<number>`" + `). Create it with exactly
+that line, commit, and push. Do not invent the number: it appears only in the
+CI failure details. Do not rebase or squash — the initial commit and the fix
+commit must remain distinct so the e2e test can verify the commit count.
 
 ## Hard constraints (do NOT violate)
 
 - NEVER modify any file under ` + "`.github/`" + `. The CI workflow — including the
   ci-fix-sentinel job — is immutable test infrastructure. Editing it invalidates
   the test and will fail the run.
-- Do NOT create the SENTINEL_FIX file on the initial commit; create it ONLY on
+- Do NOT create the CI_FIX_ACK file on the initial commit; create it ONLY on
   the CI-fix reinvoke.
-- The PR body MUST contain the literal marker ` + "`ci-fix-sentinel-required`" + ` so the
+- The PR body MUST contain the literal marker ` + "`ci-fix-sentinel-ack`" + ` so the
   sentinel fires.
 
 ## CI behaviour required
@@ -428,11 +475,11 @@ commits must remain distinct so the e2e test can verify the commit count.
 The PR body MUST carry the literal marker below so the test repo's CI sentinel
 check fires (and initially fails):
 
-ci-fix-sentinel-required
+ci-fix-sentinel-ack
 
 ## Scope
 
-` + "`%s`" + ` on the initial commit; a new SENTINEL_FIX file on the CI-fix reinvoke.
+` + "`%s`" + ` on the initial commit; a new CI_FIX_ACK file on the CI-fix reinvoke.
 No other files. No decomposition. One commit on the initial push, one CI-fix
 commit.
 `
