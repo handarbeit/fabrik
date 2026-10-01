@@ -3392,7 +3392,7 @@ The poll log captures:
 
 - Claude-invocation lines — `invoking`, kill/reap notices, `max_wall_time` and idle-timeout kills, session expiry. In `-notui` mode these reach `fabrik.log` like every other engine line (they are not written to a separate stream).
 
-The poll log is written in both TUI and non-TUI modes. In `-notui` (plain-text) mode every engine log line is also printed to **stdout** — not stderr — so redirect stdout if you want to capture it; `fabrik.log` carries the same lines with a timestamp. It is most useful for post-mortem debugging of engine-level behavior — for example, diagnosing why an issue was not picked up during a poll cycle.
+The poll log is written in both TUI and non-TUI modes. In `-notui` (plain-text) mode the per-issue and poll-level engine log lines are printed to **stdout** — not stderr — and `fabrik.log` carries the same lines with a timestamp. Startup warnings and shutdown notices (stage drift, config-key and flag-value warnings, SIGINT/SIGTERM messages) are still written to **stderr**, so redirect both streams if you want everything. It is most useful for post-mortem debugging of engine-level behavior — for example, diagnosing why an issue was not picked up during a poll cycle.
 
 ### Auto-migration from `~/.fabrik/`
 
