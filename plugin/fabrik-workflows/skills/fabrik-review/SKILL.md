@@ -71,7 +71,7 @@ When resolving merge conflicts during rebase, you MUST be conservative:
 
 4. **Check for new files on the base branch.** Rebase conflicts in existing files are visible, but new files added to the base (new source files, new test files, new subcommands) won't show as conflicts — they just appear. Never delete files that came from the base.
 
-5. **After the full rebase, run `go test ./...`** before proceeding with review. If tests fail, the conflict resolution was wrong — investigate and fix before continuing.
+5. **After the full rebase, run the tests** before proceeding with review: a rebase moves HEAD, so the CI-green skip rule (see "Push and verify") does not apply to the rebased head. In a CI-gated stage (`ci_gated: true` in `.fabrik-context/ci-status.md`) run the build plus the tests for the packages the conflicts touched and rely on the engine's CI gate for the rest; otherwise run `go test ./...`. If tests fail, the conflict resolution was wrong — investigate and fix before continuing.
 
 Common mistake: a feature branch that doesn't have a function added on the base will "resolve" the conflict by keeping its version (without the function). This silently deletes working code. Always check `git diff origin/<base-branch>..HEAD` after rebase to verify you haven't lost anything from the base.
 
@@ -145,7 +145,7 @@ git diff origin/<base-branch>..HEAD
 - Are there tests for new functionality?
 - Do tests cover error paths, not just happy paths?
 - Are tests actually testing behavior, not just exercising code?
-- Run the test suite: do all tests pass?
+- Run the test suite: do all tests pass? (Or, when the CI-green skip rule under "Push and verify" holds, cite CI's green result on that SHA instead of rerunning.)
 - (#1687, R1) If a test's purpose is to prove a specific guard rejects, does its
   assertion distinguish that guard's rejection from every other possible rejection
   reason — not just a boolean/exit-code outcome that any rejection would satisfy? See
@@ -192,7 +192,23 @@ Commit after each fix, not in bulk. This makes it easy to review your review.
 
 ### Push and verify
 
-After all fixes, run the project's build and test commands. **Always include a per-test timeout** appropriate to the framework (e.g., `pytest --timeout=60`, `go test -timeout 5m`, `jest --testTimeout=30000`). Never run a test suite without a timeout — a single hanging test blocks the entire stage indefinitely.
+### Skipping a redundant full-suite run — `.fabrik-context/ci-status.md`
+
+When the item has a linked PR, the engine writes `.fabrik-context/ci-status.md` before this invocation: the PR number, `head_sha` (the PR head), `verdict` (`green`, `red`, `pending`, `none` or `unknown`), `ci_gated` (`true` when this stage waits for CI) and `written_at`. CI has already run the whole suite on `head_sha` when the verdict is `green`, so rerunning it locally on the same commit repeats work CI did.
+
+**Skip the full-suite run only when ALL three of these hold** — a partial match is not a match:
+
+1. `verdict` in `.fabrik-context/ci-status.md` is exactly `green`.
+2. `git rev-parse HEAD` (run it as its own command) prints the same SHA as `head_sha`.
+3. `git status --porcelain` (run it as its own command) prints nothing.
+
+When all three hold, skip the test invocation and say so in your output, naming the SHA and the file's `written_at` (for example: `Full suite skipped — CI green on <sha> (ci-status.md written <timestamp>)`). In every other case — the file is absent, the verdict is anything other than `green`, HEAD differs from `head_sha`, or the tree is dirty — run the step exactly as written below.
+
+**After you change code** (including a rebase that moves HEAD, such as the pre-completion rebase): HEAD no longer matches `head_sha`, so condition 2 fails. If `ci_gated` is `true`, run the build plus the tests for the packages or modules you touched, then push — the full suite is CI's job, and the engine's `wait_for_ci` gate on the new head is the backstop. If `ci_gated` is `false`, no CI gate backstops this stage, so run the full suite as written below.
+
+**Everything else in this stage stays.** Skipping the suite skips only the test invocation. The code review itself, the rebase, and every fix-and-push step still run. In your report, say `Tests: SKIPPED — CI green on <sha>` instead of claiming tests passed.
+
+After all fixes, run the project's build and test commands (unless the skip rule above applies). **Always include a per-test timeout** appropriate to the framework (e.g., `pytest --timeout=60`, `go test -timeout 5m`, `jest --testTimeout=30000`). Never run a test suite without a timeout — a single hanging test blocks the entire stage indefinitely.
 
 ```bash
 go build ./...        # or equivalent
@@ -269,7 +285,7 @@ Organize your findings:
 - **Issue**: Description. **Fix**: What was changed.
 
 ### Verified
-- Tests pass (N tests, M packages)
+- Tests pass (N tests, M packages) — or `SKIPPED — CI green on <sha>` when the CI-green skip rule held
 - No race conditions detected
 - Rebased onto latest main
 

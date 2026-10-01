@@ -134,8 +134,24 @@ Tests are not optional and not deferred. When implementing a function, write its
 - Use the same test framework the project uses
 - Follow naming conventions from existing tests
 - Test both success and error paths
-- Run the full test suite before marking a task complete
+- Run the full test suite before marking a task complete — except where the CI-green skip rule under "Skipping a redundant full-suite run" below applies
 - **Always run tests with a per-test timeout** appropriate to the project's test framework (e.g., `pytest --timeout=60`, `go test -timeout 5m`, `jest --testTimeout=30000`). Never run a test suite without a timeout — a single hanging test blocks the entire stage indefinitely and wastes CI budget.
+
+### Skipping a redundant full-suite run — `.fabrik-context/ci-status.md`
+
+When the item has a linked PR, the engine writes `.fabrik-context/ci-status.md` before this invocation: the PR number, `head_sha` (the PR head), `verdict` (`green`, `red`, `pending`, `none` or `unknown`), `ci_gated` (`true` when this stage waits for CI) and `written_at`. CI has already run the whole suite on `head_sha` when the verdict is `green`, so rerunning it locally on the same commit repeats work CI did.
+
+**Skip the full-suite run only when ALL three of these hold** — a partial match is not a match:
+
+1. `verdict` in `.fabrik-context/ci-status.md` is exactly `green`.
+2. `git rev-parse HEAD` (run it as its own command) prints the same SHA as `head_sha`.
+3. `git status --porcelain` (run it as its own command) prints nothing.
+
+When all three hold, skip the test invocation and say so in your output, naming the SHA and the file's `written_at` (for example: `Full suite skipped — CI green on <sha> (ci-status.md written <timestamp>)`). In every other case — the file is absent, the verdict is anything other than `green`, HEAD differs from `head_sha`, or the tree is dirty — run the step exactly as written below.
+
+**After you change code** (including a rebase that moves HEAD, such as the pre-completion rebase): HEAD no longer matches `head_sha`, so condition 2 fails. If `ci_gated` is `true`, run the build plus the tests for the packages or modules you touched, then push — the full suite is CI's job, and the engine's `wait_for_ci` gate on the new head is the backstop. If `ci_gated` is `false`, no CI gate backstops this stage, so run the full suite as written below.
+
+**Everything else in this stage stays.** Skipping the suite skips only the test invocation. Writing code, tests, commits, pushes and plan-checklist updates all still happen as written.
 
 ### Update documentation
 
@@ -155,7 +171,7 @@ Before checking off a task:
 - No obvious regressions
 
 Before signaling completion:
-- Full test suite passes
+- Full test suite passes (or was skipped under the CI-green rule, and you said so in your output)
 - `go vet` (or equivalent linter) is clean
 - All changes committed and pushed
 
