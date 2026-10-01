@@ -25,7 +25,7 @@ max_concurrent: 5
 auto_upgrade: true
 # Re-enabled 2026-05-05 after the cache-coherency cluster landed (Phase 3-A through 3-H,
 # plus #537 single-Store unification). Verification per docs/cache-refactor/04-phase4-audit.md §6.
-webhooks: true
+webhooks: false  # App auth: gh webhook forward is user-token only; event_source: hookdeck is the App-mode path
 tui: true
 
 # Merge train (ADR-059): yolo items completing Validate advance to the Queued
