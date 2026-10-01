@@ -372,3 +372,45 @@ func TestEscalate_StopsWhenLeaderPIDIsRecycledMidEscalation(t *testing.T) {
 		t.Errorf("escalated after leader PID recycled: %q", sink.joined())
 	}
 }
+
+func TestMembers_ExcludesZombies(t *testing.T) {
+	// Seam: a Getsid-matching entry reported as a zombie is not a member.
+	o := Options{
+		List:   func() ([]int, error) { return []int{90000010, 90000011}, nil },
+		Getsid: func(int) (int, error) { return 90000010, nil },
+		Zombie: func(pid int) bool { return pid == 90000011 },
+	}
+	got, err := Members(90000010, o)
+	if err != nil || len(got) != 1 || got[0] != 90000010 {
+		t.Fatalf("Members = %v, %v; want only the non-zombie", got, err)
+	}
+}
+
+func TestMembers_RealZombieIsNotAMember(t *testing.T) {
+	// A session leader that exited and was deliberately never waited on stays a
+	// zombie child of this process; Getsid still answers for it.
+	cmd := exec.Command("sh", "-c", "exit 0")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := cmd.Process.Pid
+	t.Cleanup(func() { _ = cmd.Wait() }) // reap at the end so the test leaves no zombie
+	deadline := time.Now().Add(5 * time.Second)
+	for !isZombie(pid) {
+		if time.Now().After(deadline) {
+			t.Fatalf("pid %d never became a detectable zombie", pid)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if sid, err := unix.Getsid(pid); err == nil && sid == pid {
+		// the raw Getsid check alone would count it; Members must not
+		m, merr := Members(pid, Options{})
+		if merr != nil {
+			t.Fatal(merr)
+		}
+		if len(m) != 0 {
+			t.Errorf("Members = %v; a zombie must not count as a member", m)
+		}
+	}
+}

@@ -34,3 +34,16 @@ func commOf(pid int) string {
 	}
 	return string(b)
 }
+
+// szomb is the BSD p_stat value of a dead-but-unreaped process (SZOMB).
+const szomb = 5
+
+// isZombie reports whether pid is a dead-but-unreaped process. An unreadable
+// entry means "not known to be a zombie".
+func isZombie(pid int) bool {
+	kp, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
+	if err != nil {
+		return false
+	}
+	return kp.Proc.P_stat == szomb
+}

@@ -36,6 +36,7 @@ type Options struct {
 	List   func() ([]int, error)  // PIDs of every live process
 	Getsid func(int) (int, error) // session ID of one PID
 	Comm   func(int) string       // best-effort command name for the R5 line
+	Zombie func(int) bool         // reports a dead-but-unreaped process (default: platform check)
 	Poll   time.Duration          // liveness poll interval during a grace window (default 50ms)
 }
 

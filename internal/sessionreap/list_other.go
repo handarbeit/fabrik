@@ -28,3 +28,6 @@ func listPIDs() ([]int, error) {
 }
 
 func commOf(int) string { return "" }
+
+// isZombie cannot be determined without a platform API; treat as live.
+func isZombie(int) bool { return false }

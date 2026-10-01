@@ -37,6 +37,13 @@ func (o Options) list() ([]int, error) {
 	return listPIDs()
 }
 
+func (o Options) zombie(pid int) bool {
+	if o.Zombie != nil {
+		return o.Zombie(pid)
+	}
+	return isZombie(pid)
+}
+
 func (o Options) comm(pid int) string {
 	if o.Comm != nil {
 		return o.Comm(pid)
@@ -46,7 +53,10 @@ func (o Options) comm(pid int) string {
 
 // Members returns the live PIDs whose session ID is sid, including the
 // session leader (pid == sid) if it is still present. One process listing and
-// one Getsid per entry — no per-candidate subprocess.
+// one Getsid per entry — no per-candidate subprocess. A zombie (dead but not
+// yet reaped by its parent) still answers Getsid but can neither run nor be
+// signalled to any effect, so it is not a member: counting it would hold a
+// grace window open and inflate the R5 "left work running" count.
 func Members(sid int, o Options) ([]int, error) {
 	if err := CheckSID(sid); err != nil {
 		return nil, err
@@ -57,7 +67,7 @@ func Members(sid int, o Options) ([]int, error) {
 	}
 	var out []int
 	for _, pid := range pids {
-		if got, gerr := o.getsid(pid); gerr == nil && got == sid {
+		if got, gerr := o.getsid(pid); gerr == nil && got == sid && !o.zombie(pid) {
 			out = append(out, pid)
 		}
 	}
