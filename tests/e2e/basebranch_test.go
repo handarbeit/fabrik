@@ -99,7 +99,7 @@ func TestBaseBranchPipeline(t *testing.T) {
 	// clear-path assertion below reviewer-independent.
 	reviewerToken := readEnvFileReviewerToken(t, env)
 	if reviewerToken == "" {
-		t.Skip("FABRIK_REVIEWER_TOKEN not set in bed .env — required to deterministically exercise the base:<branch> review-gate clear-path (#1050)")
+		t.Skip("FABRIK_REVIEWER_TOKEN not set in bed .env — required to deterministically exercise the base:<branch> review-gate clear-path")
 	}
 	SubmitPRReview(t, env, reviewerToken, env.RepoAlpha, prNum, "APPROVE")
 	t.Logf("submitted APPROVE review on PR #%d via reviewer token — #1050's base-independent feed should now clear the gate", prNum)
