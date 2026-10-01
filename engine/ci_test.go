@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -1763,5 +1764,165 @@ func TestCheckCIGate_WiresCoverageWarning(t *testing.T) {
 
 	if _, warned := eng.ciGateCoverageWarnedSet.Load("owner/repo|Validate"); !warned {
 		t.Error("expected checkCIGate to invoke warnIfCIGateCoverageDegenerate on the fall-through path")
+	}
+}
+
+// annotatingClient layers the optional checkRunAnnotationFetcher capability on
+// top of the shared mock, so only these tests opt in to annotations.
+type annotatingClient struct {
+	*mockGitHubClient
+	annotations map[int64][]gh.CheckRunAnnotation
+	err         error
+	calls       []int64
+}
+
+func (a *annotatingClient) FetchCheckRunAnnotations(owner, repo string, id int64) ([]gh.CheckRunAnnotation, error) {
+	a.calls = append(a.calls, id)
+	return a.annotations[id], a.err
+}
+
+func ciFixAnnotationEngine(t *testing.T, ac *annotatingClient) *Engine {
+	t.Helper()
+	eng := testEngineForMerge(t, ac.mockGitHubClient)
+	eng.client = ac
+	return eng
+}
+
+func TestBuildCIFixComment_EmbedsAnnotationsAndOutput(t *testing.T) {
+	ac := &annotatingClient{mockGitHubClient: &mockGitHubClient{}, annotations: map[int64][]gh.CheckRunAnnotation{
+		7: {
+			{Title: "ci-fix-sentinel", Message: "create CI_FIX_ACK containing ack:98765"},
+			{Message: "Process completed with exit code 1."},
+		},
+	}}
+	eng := ciFixAnnotationEngine(t, ac)
+	settle := PRSettleResult{CheckRuns: []gh.CheckRun{
+		{ID: 7, Name: "ci-fix-sentinel", Status: "completed", Conclusion: "failure", OutputSummary: "sum text"},
+	}}
+	body := eng.buildCIFixComment(gh.ProjectItem{Number: 1}, &stages.Stage{Name: "Validate"}, "/tmp", settle).Body
+	for _, want := range []string{"ci-fix-sentinel: create CI_FIX_ACK containing ack:98765", "summary: sum text"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body missing %q:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "Process completed with exit code") {
+		t.Errorf("generic Actions annotation should be dropped when a specific one exists:\n%s", body)
+	}
+}
+
+func TestBuildCIFixComment_GenericAnnotationKeptWhenAlone(t *testing.T) {
+	ac := &annotatingClient{mockGitHubClient: &mockGitHubClient{}, annotations: map[int64][]gh.CheckRunAnnotation{
+		7: {{Message: "Process completed with exit code 1."}},
+	}}
+	eng := ciFixAnnotationEngine(t, ac)
+	settle := PRSettleResult{CheckRuns: []gh.CheckRun{{ID: 7, Name: "build", Status: "completed", Conclusion: "failure"}}}
+	body := eng.buildCIFixComment(gh.ProjectItem{Number: 1}, &stages.Stage{Name: "Validate"}, "/tmp", settle).Body
+	if !strings.Contains(body, "Process completed with exit code 1.") {
+		t.Errorf("lone generic annotation should still be shown:\n%s", body)
+	}
+}
+
+func TestBuildCIFixComment_AnnotationCaps(t *testing.T) {
+	var anns []gh.CheckRunAnnotation
+	for i := 0; i < 10; i++ {
+		anns = append(anns, gh.CheckRunAnnotation{Message: fmt.Sprintf("problem-%d %s", i, strings.Repeat("x", 3000))})
+	}
+	ac := &annotatingClient{mockGitHubClient: &mockGitHubClient{}, annotations: map[int64][]gh.CheckRunAnnotation{7: anns}}
+	eng := ciFixAnnotationEngine(t, ac)
+	settle := PRSettleResult{CheckRuns: []gh.CheckRun{{ID: 7, Name: "build", Status: "completed", Conclusion: "failure"}}}
+	body := eng.buildCIFixComment(gh.ProjectItem{Number: 1}, &stages.Stage{Name: "Validate"}, "/tmp", settle).Body
+	if strings.Contains(body, "problem-5") {
+		t.Errorf("more than %d annotations embedded:\n%s", ciFixMaxAnnotations, body)
+	}
+	if !strings.Contains(body, "problem-0") {
+		t.Errorf("leading annotations should be embedded")
+	}
+	if !strings.Contains(body, "chars omitted") {
+		t.Errorf("per-check detail cap should mark the omission")
+	}
+	if len(body) > 6000 {
+		t.Errorf("body is %d bytes; per-check detail cap not applied", len(body))
+	}
+}
+
+func TestBuildCIFixComment_AnnotationFetchErrorIsSoft(t *testing.T) {
+	ac := &annotatingClient{mockGitHubClient: &mockGitHubClient{}, err: fmt.Errorf("GitHub API 503")}
+	eng := ciFixAnnotationEngine(t, ac)
+	settle := PRSettleResult{CheckRuns: []gh.CheckRun{{ID: 7, Name: "build", Status: "completed", Conclusion: "failure"}}}
+	body := eng.buildCIFixComment(gh.ProjectItem{Number: 1}, &stages.Stage{Name: "Validate"}, "/tmp", settle).Body
+	if !strings.Contains(body, "**build**: failure [NEW REGRESSION]") {
+		t.Errorf("prompt must degrade to name+conclusion on a fetch error:\n%s", body)
+	}
+}
+
+func TestBuildCIFixComment_NoAnnotationFetch_ForClientWithoutCapability(t *testing.T) {
+	eng := testEngineForMerge(t, &mockGitHubClient{})
+	settle := PRSettleResult{CheckRuns: []gh.CheckRun{{ID: 7, Name: "build", Status: "completed", Conclusion: "failure"}}}
+	body := eng.buildCIFixComment(gh.ProjectItem{Number: 1}, &stages.Stage{Name: "Validate"}, "/tmp", settle).Body
+	if strings.Contains(body, "annotation:") {
+		t.Errorf("unexpected annotation text:\n%s", body)
+	}
+}
+
+func TestCIFailureDetail_PreExistingChecksSkipFetch(t *testing.T) {
+	// Pre-existing failures are classified from base-branch runs, which needs a
+	// real worktree; exercise the detail helper's skip rule via its caller's
+	// contract instead: a zero check-run ID never triggers a fetch.
+	ac := &annotatingClient{mockGitHubClient: &mockGitHubClient{}}
+	eng := ciFixAnnotationEngine(t, ac)
+	if got := eng.ciFailureDetail(gh.ProjectItem{Number: 1}, "o", "r", gh.CheckRun{Name: "x"}); got != "" {
+		t.Errorf("detail = %q, want empty", got)
+	}
+	if len(ac.calls) != 0 {
+		t.Errorf("fetched annotations for a check with no ID: %v", ac.calls)
+	}
+}
+
+// TestDispatchCIFixReinvoke_LogsBoundedPrompt pins #1991's observability
+// contract: the synthetic CI-fix comment is never posted to GitHub, so the
+// reinvoke logs it (bounded, one line) and the live e2e asserts on that line.
+func TestDispatchCIFixReinvoke_LogsBoundedPrompt(t *testing.T) {
+	skipIfNoGit(t)
+
+	claude := &mockClaudeInvoker{
+		invokeForCommentsFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			return "fixed", false, TokenUsage{}, nil
+		},
+	}
+	ac := &annotatingClient{mockGitHubClient: &mockGitHubClient{}, annotations: map[int64][]gh.CheckRunAnnotation{
+		7: {{Title: "ci-fix-sentinel", Message: "create CI_FIX_ACK containing ack:424242"}},
+	}}
+	waitTrue := true
+	stgs := []*stages.Stage{{Name: "Implement", Order: 1, Prompt: "implement", WaitForCI: &waitTrue}}
+	eng, _ := testEngineWithRepoAndStages(t, ac.mockGitHubClient, claude, stgs)
+	eng.client = ac
+	ev := make(chan tui.Event, 256)
+	eng.events = ev
+
+	item := gh.ProjectItem{Number: 61, Repo: "owner/repo", Labels: []string{"fabrik:awaiting-ci"}}
+	settle := PRSettleResult{
+		Status:    PRMergeBlocked,
+		CheckRuns: []gh.CheckRun{{ID: 7, Name: "ci-fix-sentinel", Status: "completed", Conclusion: "failure"}},
+	}
+	eng.dispatchCIFixReinvoke(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, item, stgs[0], settle)
+	eng.wg.Wait()
+	close(ev)
+
+	var prompt string
+	for e := range ev {
+		if le, ok := e.(tui.LogEvent); ok && le.Tag == "ci-fix-reinvoke" && strings.HasPrefix(le.Message, "prompt (") {
+			prompt = le.Message
+		}
+	}
+	if prompt == "" {
+		t.Fatal("no `prompt (` log line from the ci-fix-reinvoke dispatch")
+	}
+	for _, want := range []string{"ci-fix-sentinel", "ack:424242"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt log line missing %q: %s", want, prompt)
+		}
+	}
+	if strings.Count(strings.TrimRight(prompt, "\n"), "\n") != 0 {
+		t.Errorf("prompt log line must be a single line: %q", prompt)
 	}
 }
