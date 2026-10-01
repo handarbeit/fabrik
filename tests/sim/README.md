@@ -262,7 +262,7 @@ as authoritative — `engine/poll.go`'s `dispatched == 0` branch, `shutdown.go`'
 `inFlightSnapshot`), and `RunPoll` now waits for the *dispatched worker's own
 completion* rather than a guessed duration whenever a poll cycle actually
 dispatched something: `waitForWorkerQuiescence` polls
-`Engine.HasInFlightWorker()` at a 5ms interval, bounded by a 60s safety
+`Engine.HasInFlightWorker()` at a 5ms interval, bounded by a 180s safety
 timeout that fails the test loudly (not a silent proceed) if a worker is
 genuinely stuck. This restores the poll-count bound's meaning regardless of
 runner load, and tends to be *faster* for the common case (a scripted
@@ -278,7 +278,9 @@ external load, see below — produced two spurious timeouts of its own when
 the full package's ~30 `t.Parallel()` scenarios ran concurrently under
 `-race`; both passed cleanly in isolation, confirming scheduling contention
 rather than a logic bug, and a "generous" bound has to survive the condition
-it exists to be robust against.) See `poll.go`'s doc comments for the full
+it exists to be robust against. It was raised again, to 180s, after load
+averages of 15–40 on the gate host pushed a merge-train scenario past 60s in
+three pre-gate runs.) See `poll.go`'s doc comments for the full
 detail. This is still the dominant contributor to this package's own
 runtime; see Runtime below.
 
