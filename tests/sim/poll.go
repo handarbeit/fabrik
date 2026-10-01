@@ -49,8 +49,11 @@ const workerQuiescencePollInterval = 5 * time.Millisecond
 // Raised again to 180s: on 2026-10-01, with load averages of 15–40 from
 // unrelated processes on the gate host, TestMergeTrainRunaway_DoesNotTripWithGenerousWindow
 // hit the 60s bound in three separate pre-gate runs. It passed in isolation
-// (37s) and on quieter runs. A genuine hang still fails well
-// inside the package's 20m -timeout.
+// (37s) and on quieter runs. A genuine hang still fails: as this t.Fatalf
+// under scripts/sim/run.sh and scripts/cut-release.sh (20m -timeout), or, in
+// CI's `go test -race -timeout 5m ./...`, possibly as the binary's -timeout
+// panic instead, if it hangs late in the package's run. Either way the test
+// fails rather than stalling the suite. Only the diagnostic is less specific.
 const workerQuiescenceTimeout = 180 * time.Second
 
 // RunPoll advances Clock by env.PollInterval, drives exactly one engine poll
