@@ -26,6 +26,12 @@ auto_upgrade: true
 # Re-enabled 2026-05-05 after the cache-coherency cluster landed (Phase 3-A through 3-H,
 # plus #537 single-Store unification). Verification per docs/cache-refactor/04-phase4-audit.md §6.
 webhooks: false  # App auth: gh webhook forward is user-token only; event_source: hookdeck is the App-mode path
+# Event-driven ingestion under App auth (#1142): GitHub App fabrik-dev-daemon's webhook
+# -> Hookdeck source -> CLI session. The secrets are named, not stored: HOOKDECK_API_KEY and
+# FABRIK_GITHUB_WEBHOOK_SECRET live in .env. Polling stays on as the correctness backstop.
+event_source: hookdeck
+hookdeck_api_key_env: HOOKDECK_API_KEY
+hookdeck_webhook_secret_env: FABRIK_GITHUB_WEBHOOK_SECRET
 tui: true
 
 # Merge train (ADR-059): yolo items completing Validate advance to the Queued
