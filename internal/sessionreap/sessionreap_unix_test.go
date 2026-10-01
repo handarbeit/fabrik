@@ -280,20 +280,20 @@ func TestSweep_QuietWhenNothingToReap(t *testing.T) {
 	}
 }
 
-func TestSweep_ExcludesRecycledLeaderPID(t *testing.T) {
-	// A live process whose PID equals the SID is the "leader" slot; after the
-	// worker exited that can only be a recycled PID, so Sweep must not touch it.
-	cmd := exec.Command("sleep", "30")
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
+func TestSweep_RefusesWhenLeaderPIDIsRecycled(t *testing.T) {
+	// A live process whose PID equals the SID is, after the worker exited, a
+	// recycled PID that became a session leader. Its session's members carry the
+	// same SID value, so Sweep must refuse outright and touch nothing.
+	leader, child := worker(t, t.TempDir())
+	sink := &logSink{}
+	if n := Sweep(leader, "after_stop", Options{Log: sink.log}); n != 0 {
+		t.Errorf("Sweep signalled %d; a recycled leader PID must refuse the sweep", n)
 	}
-	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
-	if n := Sweep(cmd.Process.Pid, "after_stop", Options{}); n != 0 {
-		t.Errorf("Sweep signalled %d; the leader-PID holder must be excluded", n)
+	if !alive(leader) || !alive(child) {
+		t.Fatal("leader-PID holder or its session member was killed")
 	}
-	if !alive(cmd.Process.Pid) {
-		t.Fatal("leader-PID holder was killed")
+	if !strings.Contains(sink.joined(), "refused") {
+		t.Errorf("refusal not logged: %q", sink.joined())
 	}
 }
 
