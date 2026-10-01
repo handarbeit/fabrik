@@ -108,6 +108,12 @@ jobs:
       - name: pre-gate regression test (#1454)
         run: bash scripts/e2e/pregate_test.sh
 
+      # R6's sim-parity summary line (#1933): print_sim_parity_summary reads
+      # tests/e2e/registry/registry.json with jq. Sources run.sh for function
+      # definitions only, like the tests above; no bed/token/network.
+      - name: sim-parity summary test (#1933)
+        run: bash scripts/e2e/parity_summary_test.sh
+
       # R1's competing-token-consumer preflight (scripts/e2e/run.sh's
       # check_competing_token_consumers, #1684) exists so a gate run refuses
       # (rather than silently burning an hour into backoff) when another
