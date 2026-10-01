@@ -42,7 +42,9 @@ import (
 // on it. The scenario then waits for the PR's slow-gate to go green and submits
 // a reviewer-token APPROVE (so neither the CI gate, the review gate nor
 // reviewGateBlocksLanding can claim the item first), posts the human comment,
-// verifies it through REST, and only THEN moves the item into Validate. The
+// verifies it through REST, waits for GitHub to finish computing the PR's
+// mergeability (so the merge gate cannot claim it on an "unknown"
+// mergeable_state either), and only THEN moves the item into Validate. The
 // engine's first landing evaluation therefore always sees the comment.
 //
 // # Identity
@@ -94,7 +96,7 @@ func TestCommentLandingGateHolds(t *testing.T) {
 	// base moves under a concurrent test's merge). Until it is computed, the merge
 	// gate claims the item and the comment is processed before any landing
 	// decision runs, so the scenario would observe nothing.
-	WaitForPRMergeableClean(t, env, repo, pr, 10*time.Minute)
+	WaitForPRMergeableSettled(t, env, repo, pr, 10*time.Minute)
 
 	offset := LogOffset(t, env)
 	SetIssueStatus(t, env, itemID, "Validate")
