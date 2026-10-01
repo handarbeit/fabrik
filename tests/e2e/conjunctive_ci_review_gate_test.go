@@ -152,7 +152,7 @@ func TestConjunctiveCIReviewGate(t *testing.T) {
 	// Preflight confound 1: fail fast (seconds) if the engine's actual PR-author
 	// identity doesn't match the test bed's token, instead of discovering a
 	// silently-broken RequestPRReviewer 60-100 min into the run.
-	AssertPRAuthorIsExpectedIdentity(t, env, env.RepoAlpha, prNumber)
+	AssertPRAuthorIsEngineIdentity(t, env, env.RepoAlpha, prNumber)
 	t.Logf("confirmed PR #%d author matches the test bed's engine identity", prNumber)
 
 	// R1: fabrik:awaiting-ci must appear after Validate fires (CI gate holds).
