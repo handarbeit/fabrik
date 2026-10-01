@@ -115,6 +115,7 @@ func Escalate(sid int, reason string, sigintGrace, sigtermGrace time.Duration, o
 		o.logf("kill", "session reap refused (reason=%s): %v\n", reason, err)
 		return
 	}
+	w := &leaderWatch{sid: sid}
 	step := func(sig syscall.Signal, name string) (int, bool) {
 		members, err := Members(sid, o)
 		if err != nil {
@@ -124,6 +125,9 @@ func Escalate(sid int, reason string, sigintGrace, sigtermGrace time.Duration, o
 			}
 			return 0, true // unknown membership: keep escalating
 		}
+		if w.observe(members) {
+			return 0, false
+		}
 		if len(members) == 0 {
 			return 0, false
 		}
@@ -132,26 +136,65 @@ func Escalate(sid int, reason string, sigintGrace, sigtermGrace time.Duration, o
 			name, sid, reason, len(sent), formatComms(o.names(sent)))
 		return len(sent), true
 	}
+	defer func() {
+		if w.recycled {
+			o.logf("kill", "session reap stopped (reason=%s): PID %d reappeared as a session leader after the worker's leader was gone (recycled PID); SID %d is ambiguous\n", reason, sid, sid)
+		}
+	}()
 	if sigintGrace > 0 {
-		if _, live := step(syscall.SIGINT, "SIGINT"); !live || o.waitEmpty(sid, sigintGrace) {
+		if _, live := step(syscall.SIGINT, "SIGINT"); !live || o.waitEmpty(w, sigintGrace) {
 			return
 		}
 	}
 	if sigtermGrace > 0 {
-		if _, live := step(syscall.SIGTERM, "SIGTERM"); !live || o.waitEmpty(sid, sigtermGrace) {
+		if _, live := step(syscall.SIGTERM, "SIGTERM"); !live || o.waitEmpty(w, sigtermGrace) {
 			return
 		}
 	}
 	step(syscall.SIGKILL, "SIGKILL")
 }
 
+// leaderWatch guards Escalate against a recycled leader PID. The worker's
+// leader is reaped by cmd.Wait while Escalate is still inside a grace window,
+// freeing its PID. Once any listing has shown the session without its leader,
+// a later listing that shows PID == sid again is a different process that
+// became a session leader — its members carry the same SID value but are not
+// the worker's, so escalation must stop rather than signal them.
+type leaderWatch struct {
+	sid        int
+	leaderGone bool
+	recycled   bool
+}
+
+// observe records one membership listing and reports whether it shows a
+// recycled leader PID.
+func (w *leaderWatch) observe(members []int) bool {
+	hasLeader := false
+	for _, pid := range members {
+		if pid == w.sid {
+			hasLeader = true
+			break
+		}
+	}
+	switch {
+	case hasLeader && w.leaderGone:
+		w.recycled = true
+	case !hasLeader && len(members) > 0:
+		w.leaderGone = true
+	}
+	return w.recycled
+}
+
 // waitEmpty polls until session sid has no members or grace elapses; it
-// reports whether the session emptied. A listing error is "not empty".
-func (o Options) waitEmpty(sid int, grace time.Duration) bool {
+// reports whether escalation should stop — the session emptied, or the leader
+// PID was recycled. A listing error is "not empty".
+func (o Options) waitEmpty(w *leaderWatch, grace time.Duration) bool {
 	deadline := time.Now().Add(grace)
 	for {
-		if m, err := Members(sid, o); err == nil && len(m) == 0 {
-			return true
+		if m, err := Members(w.sid, o); err == nil {
+			if w.observe(m) || len(m) == 0 {
+				return true
+			}
 		}
 		left := time.Until(deadline)
 		if left <= 0 {

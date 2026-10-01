@@ -326,3 +326,50 @@ func TestMembers_RealProcessTable(t *testing.T) {
 		t.Errorf("Members(%d) = %v; want leader and child", leader, m)
 	}
 }
+
+func TestEscalate_StopsWhenLeaderPIDIsRecycledMidEscalation(t *testing.T) {
+	// The worker's leader is reaped during a grace window and its PID is reused
+	// by an unrelated process that becomes a session leader. Members of that
+	// session carry the same SID value; Escalate must not signal them.
+	// PIDs above any kernel pid_max, so the real kill(2) in signalMembers is ESRCH.
+	const sid, orphan, impostor = 90000001, 90000002, 90000003
+	var mu sync.Mutex
+	listing := 0
+	o := Options{
+		Log:  func(string, string, ...any) {},
+		Poll: time.Millisecond,
+		List: func() ([]int, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			listing++
+			switch {
+			case listing == 1: // first step: leader and one member
+				return []int{sid, orphan}, nil
+			case listing == 2: // leader reaped, member still running
+				return []int{orphan}, nil
+			default: // PID reused: a new leader with its own session member
+				return []int{sid, impostor}, nil
+			}
+		},
+		Getsid: func(pid int) (int, error) { return sid, nil },
+		Comm:   func(int) string { return "x" },
+	}
+	sink := &logSink{}
+	o.Log = sink.log
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		Escalate(sid, "test", 50*time.Millisecond, 50*time.Millisecond, o)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Escalate did not stop")
+	}
+	if !strings.Contains(sink.joined(), "recycled PID") {
+		t.Errorf("recycled-leader stop not logged: %q", sink.joined())
+	}
+	if strings.Contains(sink.joined(), "SIGTERM") || strings.Contains(sink.joined(), "SIGKILL") {
+		t.Errorf("escalated after leader PID recycled: %q", sink.joined())
+	}
+}
