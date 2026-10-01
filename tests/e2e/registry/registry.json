@@ -1,0 +1,310 @@
+{
+  "version": 1,
+  "tests": [
+    {
+      "name": "TestAppSelfRecognitionBlockedCommentUpdatedInPlace",
+      "parity": "live-only",
+      "live_only_reason": "app-auth",
+      "note": "real GitHub App bot-author shapes (REST \"<slug>[bot]\" vs GraphQL bare login); sim only has TestGitHubAppAuth_* identity helpers, not comment ingestion"
+    },
+    {
+      "name": "TestAppSelfRecognitionBotCommentNeverResumes",
+      "parity": "live-only",
+      "live_only_reason": "app-auth",
+      "note": "real GitHub App bot-author shapes (REST \"<slug>[bot]\" vs GraphQL bare login); sim only has TestGitHubAppAuth_* identity helpers, not comment ingestion"
+    },
+    {
+      "name": "TestAppSelfRecognitionDurableReviewSuppression",
+      "parity": "live-only",
+      "live_only_reason": "app-auth",
+      "note": "real GitHub App bot-author shapes (REST \"<slug>[bot]\" vs GraphQL bare login); sim only has TestGitHubAppAuth_* identity helpers, not comment ingestion"
+    },
+    {
+      "name": "TestBaseBranchPipeline",
+      "parity": "sim",
+      "sim": [
+        "TestBaseBranchPipeline"
+      ]
+    },
+    {
+      "name": "TestBlockedOnInput",
+      "parity": "sim",
+      "sim": [
+        "TestBlockedOnInput"
+      ]
+    },
+    {
+      "name": "TestCIFixReinvoke",
+      "parity": "sim",
+      "sim": [
+        "TestCIFixReinvoke"
+      ]
+    },
+    {
+      "name": "TestCIFixReinvokeCycleLimit",
+      "parity": "sim",
+      "sim": [
+        "TestCIFixReinvokeCycleLimit"
+      ]
+    },
+    {
+      "name": "TestCommentLandingGateHolds",
+      "parity": "sim",
+      "sim": [
+        "TestCommentLandingGate_HoldsAdvanceToQueued",
+        "TestCommentLandingGate_HoldsMergeUntilProcessed"
+      ]
+    },
+    {
+      "name": "TestCommentReentryShowsReworking",
+      "parity": "gap",
+      "note": "fabrik:reworking:<stage> label sequence on comment re-entry; unit coverage only (engine/stage_rework_test.go), no sim scenario"
+    },
+    {
+      "name": "TestConjunctiveCIReviewGate",
+      "parity": "sim",
+      "sim": [
+        "TestConjunctiveCIReviewGate"
+      ]
+    },
+    {
+      "name": "TestConvergenceRace",
+      "parity": "live-only",
+      "live_only_reason": "other",
+      "note": "server-side atomic auto-merge race is unreproducible in the sim"
+    },
+    {
+      "name": "TestCrossRepoSpawn",
+      "parity": "sim",
+      "sim": [
+        "TestCrossRepoSpawn"
+      ]
+    },
+    {
+      "name": "TestCruiseFullPipeline",
+      "parity": "sim",
+      "sim": [
+        "TestCruiseFullPipeline"
+      ]
+    },
+    {
+      "name": "TestExpectedReviewersDeclaredWaitsAndReprompts",
+      "parity": "sim",
+      "sim": [
+        "TestExpectedReviewersDeclaredWaitsAndReprompts"
+      ]
+    },
+    {
+      "name": "TestExpectedReviewersFastAdvance",
+      "parity": "sim",
+      "sim": [
+        "TestExpectedReviewersFastAdvance"
+      ]
+    },
+    {
+      "name": "TestExpectedReviewersFastAdvanceComposesWithAuthoritative",
+      "parity": "sim",
+      "sim": [
+        "TestExpectedReviewersFastAdvanceComposesWithAuthoritative"
+      ]
+    },
+    {
+      "name": "TestExpectedReviewersUndeclaredRegressionGuard",
+      "parity": "sim",
+      "sim": [
+        "TestExpectedReviewersUndeclaredRegressionGuard"
+      ]
+    },
+    {
+      "name": "TestLateCheckRunSuiteGate",
+      "parity": "sim",
+      "sim": [
+        "TestCISuiteGate_IncidentReproduction",
+        "TestCISuiteGate_PostPushWindowHoldsThenClears"
+      ]
+    },
+    {
+      "name": "TestMergeTrainBisectionEjectsPoisoner",
+      "parity": "sim",
+      "sim": [
+        "TestMergeTrainAssembly_PoisonMatrix",
+        "TestMergeTrainBisect_TrialCountsMatchExpected"
+      ]
+    },
+    {
+      "name": "TestMergeTrainColdCacheBaseMember",
+      "parity": "live-only",
+      "live_only_reason": "other",
+      "note": "needs a cold boardcache.CacheImpl after an engine restart; tests/sim never wires the board cache in"
+    },
+    {
+      "name": "TestMergeTrainConflictBisectPrefixRerere",
+      "parity": "sim",
+      "sim": [
+        "TestMergeTrainConflict_RerereReplaysAcrossIndependentTrials",
+        "TestMergeTrainConflict_UnresolvableEjectsMember"
+      ]
+    },
+    {
+      "name": "TestMergeTrainHappyPathLanding",
+      "parity": "sim",
+      "sim": [
+        "TestMergeTrainMode_On",
+        "TestMergeTrainAssembly_PoisonMatrix"
+      ],
+      "note": "assembly all-green is a subtest of TestMergeTrainAssembly_PoisonMatrix, which cannot be referenced separately"
+    },
+    {
+      "name": "TestMergeTrainQueuedDeeperThanBatchCap",
+      "parity": "gap",
+      "note": "sim touches max_batch_size only inside the queued-comment-eject tests; no deterministic-ordering / two-batch landing scenario"
+    },
+    {
+      "name": "TestMergeTrainRedSingletonReroutesOffQueued",
+      "parity": "sim",
+      "sim": [
+        "TestMergeTrainRedSingleton_ReroutesOffQueued"
+      ]
+    },
+    {
+      "name": "TestMergeTrainRestartSafety",
+      "parity": "sim",
+      "sim": [
+        "TestMergeTrainRestart_CompletesDeferredLandingAfterMerge",
+        "TestMergeTrainRestart_ResumesOpenTrialFromLiveBranch"
+      ]
+    },
+    {
+      "name": "TestMergeTrainRunawayGuardPausesBatch",
+      "parity": "sim",
+      "sim": [
+        "TestMergeTrainRunaway_TripsAndPausesQueuedMembers"
+      ]
+    },
+    {
+      "name": "TestMergeTrainSingletonFastPathLandsExactlyOnce",
+      "parity": "sim",
+      "sim": [
+        "TestMergeTrainSingletonFastPath_UpToDateAndGreen_LandsWithoutTrial",
+        "TestMergeTrainStaleSnapshot_SingletonFastPath_LandedExactlyOnce"
+      ]
+    },
+    {
+      "name": "TestMergeTrainTwoBasesConcurrent",
+      "parity": "gap",
+      "note": "no sim scenario for concurrent per-(repo,base) trains"
+    },
+    {
+      "name": "TestNoWorkNeeded",
+      "parity": "sim",
+      "sim": [
+        "TestNoWorkNeeded"
+      ]
+    },
+    {
+      "name": "TestPauseLiftedOnlyByPostPauseHumanComment",
+      "parity": "sim",
+      "sim": [
+        "TestPauseHoldsAgainstUnprocessableComment_ResumesOnPostPauseComment"
+      ]
+    },
+    {
+      "name": "TestPausedMergedPRRecovery",
+      "parity": "sim",
+      "sim": [
+        "TestPausedMergedPRRecovery"
+      ]
+    },
+    {
+      "name": "TestPostMergeCommentNotApplied",
+      "parity": "sim",
+      "sim": [
+        "TestPostMergeGuard_LateCommentIsNotApplied",
+        "TestPostMergeGuard_MergeTrainMemberIsNotApplied"
+      ]
+    },
+    {
+      "name": "TestQueuedMemberCommentEjection",
+      "parity": "sim",
+      "sim": [
+        "TestQueuedCommentEject_NotInLiveBatch_EjectedDirectly",
+        "TestQueuedCommentEject_WorkerInFlight_BatchContinues"
+      ]
+    },
+    {
+      "name": "TestReviewAuthorityAdvisoryRegressionGuard",
+      "parity": "sim",
+      "sim": [
+        "TestReviewAuthorityAdvisoryRegressionGuard"
+      ]
+    },
+    {
+      "name": "TestReviewAuthorityClearsOnApproval",
+      "parity": "sim",
+      "sim": [
+        "TestReviewAuthorityClearsOnApproval"
+      ]
+    },
+    {
+      "name": "TestReviewAuthorityCycleLimitPauses",
+      "parity": "sim",
+      "sim": [
+        "TestReviewAuthorityCycleLimitPauses"
+      ]
+    },
+    {
+      "name": "TestReviewAuthorityDeclaredBotDoesNotDeferHumanEscalation",
+      "parity": "sim",
+      "sim": [
+        "TestReviewAuthorityDeclaredBotDoesNotDeferHumanEscalation"
+      ]
+    },
+    {
+      "name": "TestReviewAuthorityReinvokesOnChangesRequested",
+      "parity": "sim",
+      "sim": [
+        "TestReviewAuthorityReinvokesOnChangesRequested"
+      ]
+    },
+    {
+      "name": "TestReviewAuthorityYoloDoesNotBypassBlock",
+      "parity": "sim",
+      "sim": [
+        "TestReviewAuthorityYoloDoesNotBypassBlock"
+      ]
+    },
+    {
+      "name": "TestSmokeSingleRepoDispatch",
+      "parity": "sim",
+      "sim": [
+        "TestSmoke_FullPipelineToDone"
+      ]
+    },
+    {
+      "name": "TestSmokeSingleRepoFullPipeline",
+      "parity": "sim",
+      "sim": [
+        "TestSmoke_FullPipelineToDone"
+      ]
+    },
+    {
+      "name": "TestSwitchTrainMode",
+      "parity": "live-only",
+      "live_only_reason": "other",
+      "note": "needs a bed process restart to flip merge_train; the sim covers each mode in TestMergeTrainMode_On/_Off but not the live switch"
+    },
+    {
+      "name": "TestYoloAutoMergeLabel",
+      "parity": "sim",
+      "sim": [
+        "TestYoloAutoMergeLabel"
+      ],
+      "note": "train-off leg only in the sim; the live test also covers the train-on leg"
+    },
+    {
+      "name": "TestYoloRemovedMidValidateBlocksMerge",
+      "parity": "gap",
+      "note": "no sim scenario for removing fabrik:yolo mid-Validate"
+    }
+  ]
+}

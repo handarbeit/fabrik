@@ -2069,6 +2069,41 @@ switch_and_run() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# Sim-parity summary (R6, #1933): one informational line saying how many live
+# scenarios have a sim twin, are live-only, or are gaps — computed with jq from
+# tests/e2e/registry/registry.json, the single per-test registry (see
+# adrs/1933-per-test-registry-and-sim-parity.md). It needs no budget, so it is
+# called from the dispatch guard OUTSIDE run_pregate and prints even when the
+# pre-gate is skipped (E2E_SKIP_PREGATE / FABRIK_PREGATE_VERIFIED_SHA). It never
+# changes the pre-gate's ordering or pass criteria: it always returns 0, and on
+# any problem (no jq, missing or unparseable registry) prints "unavailable"
+# rather than a wrong count. E2E_PARITY_REGISTRY overrides the path (tests).
+# ---------------------------------------------------------------------------
+print_sim_parity_summary() {
+  local registry="${E2E_PARITY_REGISTRY:-$REPO_ROOT/tests/e2e/registry/registry.json}"
+  local counts
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "sim parity: unavailable (jq not found)"
+    return 0
+  fi
+  if [ ! -f "$registry" ]; then
+    echo "sim parity: unavailable (registry not found: $registry)"
+    return 0
+  fi
+  if ! counts="$(jq -r '
+      .tests
+      | [ (map(select(.parity == "sim")) | length),
+          (map(select(.parity == "live-only")) | length),
+          (map(select(.parity == "gap")) | length) ]
+      | "\(.[0]) covered, \(.[1]) live-only, \(.[2]) gap"' "$registry" 2>/dev/null)"; then
+    echo "sim parity: unavailable (cannot parse $registry)"
+    return 0
+  fi
+  echo "sim parity: $counts"
+  return 0
+}
+
 # Guarded so scripts/e2e/backoff_detection_test.sh and
 # scripts/e2e/pregate_test.sh can `source` this file to reach
 # detect_rate_limit_backoff / run_pregate (and the other helper functions
@@ -2087,6 +2122,11 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
   check_auth_mode_preconditions
   check_competing_token_consumers
   check_reviewer_reachable "$@"
+
+  # Sim-parity summary (R6, #1933): informational, needs no budget, never
+  # gates — and deliberately outside run_pregate so it prints even when the
+  # pre-gate is skipped.
+  print_sim_parity_summary
 
   # Pre-gate NEXT (R1, #1454) — strictly before any bed preflight, build,
   # restart, or live GitHub/Claude call. See run_pregate's own comment for

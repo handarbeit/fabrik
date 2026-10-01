@@ -303,12 +303,49 @@ rather than re-explained per function.
 | *(none)* | `WaitForIssueClosed(t, env, issueNumber, maxPolls int)` | New — no live-harness equivalent. Added because AC1 requires driving to "a closed issue in the Done column," and every scenario in this package needs to assert that explicitly rather than infer it from a label. |
 | *(none)* | `RunPoll(t, env)` / `RunPolls(t, env, n)` / `AdvanceUntil(t, env, cond, maxPolls)` | New — the live harness has no equivalent because it never drives poll cycles itself; it waits on wall-clock timeouts against a daemon it doesn't control. This is R4's deterministic poll-advancement vocabulary. |
 
-## Coverage matrix: `tests/e2e` → `tests/sim` (R4, #1450)
+## Sim parity registry: the live → sim mapping (#1933)
 
-One row per entry currently in `tests/e2e/` (30 total: 28 files, `README.md`,
-`testdata/`). Status is one of **Ported** / **Partially ported** / **Live-only**
-for scenario files, or **N/A** for support/harness/pure-logic files that were
-never scenarios to begin with. No row is blank.
+**The authoritative live → sim mapping is
+[`tests/e2e/registry/registry.json`](../e2e/registry/registry.json)** — one entry
+per live e2e scenario test (a top-level `Test*` in `tests/e2e/*_test.go` whose
+body calls `LoadEnv(t)`), keyed by test name. It is checked in `go test ./...`
+(`tests/e2e/registry`, no build tag), so it cannot drift: an unmapped live test, a
+stale entry, a dangling sim reference or a malformed entry fails the build.
+`scripts/e2e/run.sh` prints a one-line summary from it before the live legs start
+(`sim parity: N covered, M live-only, K gap`).
+
+Each entry's `parity` is exactly one of:
+
+- **`sim`** — `sim` lists the top-level `Test*` function(s) in `tests/sim` (this
+  directory only, not `simgh`/`simclaude`/`ghfault`, and not unit tests elsewhere)
+  that cover the same engine path. A `t.Run` subtest cannot be referenced; cite its
+  parent and say so in `note`. Only *existence* is enforced — whether the sim test
+  really asserts the same behaviour stays a review judgement.
+- **`live-only`** — no sim twin, with `live_only_reason` from a fixed vocabulary:
+  `model-judgement` (depends on what a real model decides), `wire-format` (the
+  shape of a GitHub request/response — see the wire-contract layer), `review-bot`
+  (real external reviewer behaviour), `real-ci` (real Actions/check-suite timing),
+  `app-auth` (real App token minting or installation behaviour), or `other` (a
+  `note` is required). Use the narrowest reason; `live-only` is never a way to
+  retire a live test (ADR-1454).
+- **`gap`** — no sim twin and no legitimate live-only reason. Allowed, but counted.
+  A unit test elsewhere (e.g. `engine/stage_rework_test.go`) is *not* a sim twin:
+  such a test is a `gap`, with the unit coverage named in `note`.
+
+**Rule for adding a live test:** add its registry entry in the same PR (the
+completeness test fails without one), and prefer adding the sim twin in the same
+PR too. When you add a sim scenario that closes a `gap`, update that entry to
+`sim`. When a sim test is renamed or removed, the dangling-reference check tells
+you which entries to fix. See `adrs/1933-per-test-registry-and-sim-parity.md`.
+
+### Historical: the per-file coverage matrix (#1450)
+
+> **Frozen — not maintained.** This table was the hand-written, per-*file* mapping
+> written for #1450 (30 entries). It has drifted (it predates most later live
+> scenarios and lists support files that are not live scenarios), and the registry
+> above supersedes it. It is kept only because its prose records fidelity
+> limitations that source comments still point at ("see the coverage matrix").
+> Do not extend it; add to the registry instead.
 
 | `tests/e2e` file | Status | Sim counterpart / reason |
 |---|---|---|
