@@ -122,6 +122,8 @@ Fabrik can receive GitHub events in near-real-time (within ~2 seconds) instead o
 
 > **Single-user constraint:** GitHub allows only one active `gh webhook forward` subscription per repository or organization at a time. Coordinate across your team so only one Fabrik instance runs with `--webhooks`; other instances can run without it and will still process issues via polling. See [§10 of the User Guide](docs/USER_GUIDE.md#10-webhook-mode) for full setup, configuration, and troubleshooting details.
 
+> **GitHub App auth:** `--webhooks` cannot be combined with [GitHub App authentication](#github-app-authentication). App-auth setups — including multi-repo ones — can get near-real-time delivery through Hookdeck instead (`--event-source hookdeck`); polling stays the correctness backstop either way. See [Event-Driven Ingestion via Hookdeck](docs/USER_GUIDE.md#event-driven-ingestion-via-hookdeck-app-auth).
+
 ### Merge Train & Merge Queue (Optional)
 
 On a repo with `strict` branch protection, landing several ready PRs serially produces an O(N²) rebase-and-retest cascade — each merge invalidates every other ready PR's "up-to-date + green" status, forcing a rebase and a full required-check re-run before the next one can land. Fabrik solves this by batching ready PRs and validating the combined result once instead of retesting each one against every prior merge.
@@ -337,6 +339,10 @@ GITHUB_TOKEN=ghp_...    # Fallback
 
 **Unrecognized `config.yaml` keys:** At startup, Fabrik now reports any `.fabrik/config.yaml` key that doesn't match a real config field — a typo, a stale key, or an entry for a knob that's actually CLI/env-only — instead of silently discarding it, and names the corresponding `--flag`/`FABRIK_ENV_VAR` to use when one exists. See [Unrecognized `config.yaml` Key Warnings](docs/USER_GUIDE.md#unrecognized-configyaml-key-warnings) in the User Guide for details.
 
+### GitHub App Authentication
+
+Fabrik can authenticate as a **GitHub App installation** instead of a personal access token. This is a co-equal alternative, not a replacement: a PAT remains fully supported and is the default, and is permanent. App auth requires an **organization-owned** project board — user-owned boards cannot use it. Set `github_app_id`, `github_app_private_key_path` and `github_app_installation_id` together (or the matching `--github-app-*` flags / `FABRIK_GITHUB_APP_*` env vars), or let `fabrik init --github-app --owner <org>` register the App and write the config for you. See [GitHub App Authentication](docs/USER_GUIDE.md#github-app-authentication) in the User Guide.
+
 ## Flags
 
 | Flag | Description | Default |
@@ -352,6 +358,7 @@ GITHUB_TOKEN=ghp_...    # Fallback
 | `--auto-merge-strategy` | Merge method Fabrik attempts first, for both GitHub native auto-merge (yolo PRs) and direct merges (e.g. merge-train landings): `MERGE`, `SQUASH`, or `REBASE`; falls back to a repo-allowed method if the configured one is disallowed (also `FABRIK_AUTO_MERGE_STRATEGY`) | `MERGE` |
 | `--auto-upgrade` | Self-upgrade from handarbeit/fabrik GitHub Releases at startup and when idle (after 2 idle polls) | `false` |
 | `--poll` | Poll interval in seconds | `30` |
+| `--retry-backoff` | Seconds before re-dispatching a stage that did not complete; independent of `--poll` (also `FABRIK_RETRY_BACKOFF`; minimum 1) | `60` |
 | `--notui` | Disable the interactive TUI dashboard | TUI on by default |
 | `--max-concurrent` | Maximum number of concurrent issue workers | `5` |
 | `--max-retries` | Max failed stage attempts before pausing the issue (0 = unlimited) | `3` |
@@ -371,6 +378,11 @@ GITHUB_TOKEN=ghp_...    # Fallback
 | `--symlink-env` | Create a relative symlink at `<worktree>/.env` pointing to the fabrikDir `.env` at worktree setup time. Enables stage code to read project secrets without copying them. Also `FABRIK_SYMLINK_ENV`. | `false` |
 | `--plugin-dir` | Path to Fabrik plugin directory (overrides installed plugin) | `""` |
 | `--webhooks` | Enable real-time webhook event delivery via `gh webhook forward` (requires `cli/gh-webhook` extension; also `FABRIK_WEBHOOKS`) | `false` |
+| `--github-app-id` | GitHub App ID for App-installation auth — set together with `--github-app-private-key-path` and `--github-app-installation-id`, or not at all (also `FABRIK_GITHUB_APP_ID`) | `0` |
+| `--github-app-private-key-path` | Path to the GitHub App's private key PEM (also `FABRIK_GITHUB_APP_PRIVATE_KEY_PATH`) | `""` |
+| `--github-app-installation-id` | GitHub App installation ID to authenticate as (also `FABRIK_GITHUB_APP_INSTALLATION_ID`) | `0` |
+| `--no-browser` | Suppress automatic browser-opening for GitHub App guided-install prompts; use `--no-browser=false` to re-enable (also `FABRIK_NO_BROWSER`) | `true` |
+| `--event-source` | Event ingestion transport: `poll` or `hookdeck` (requires GitHub App auth; not combinable with `--webhooks`; also `FABRIK_EVENT_SOURCE`). The `--hookdeck-api-key-env` / `--hookdeck-webhook-secret-env` flags are described in the [User Guide](docs/USER_GUIDE.md#event-driven-ingestion-via-hookdeck-app-auth) | `poll` |
 | `--reconcile-interval` | Seconds between periodic light-reconcile health checks when webhooks are enabled (0 = default 180; also `FABRIK_RECONCILE_INTERVAL`) | `0` (180 s) |
 
 > **Prerequisite for yolo auto-merge:** GitHub's `allow_auto_merge` setting must be enabled on the repository before Fabrik can enable native auto-merge on yolo PRs. Enable it under **Settings → General → Pull Requests → "Allow auto-merge"**, or run:
@@ -386,6 +398,9 @@ GITHUB_TOKEN=ghp_...    # Fallback
 | Command | Description |
 |---------|-------------|
 | `fabrik init` | Initialize `.fabrik/stages/`, `.fabrik/plugin/`, and `.fabrik/config.yaml` in the current repo |
+| `fabrik init --github-app --owner <org>` | Guided GitHub App setup: register a new App (or adopt one with `--github-app-id`/`--github-app-private-key-path`), verify its permissions and write `github_app_*` into `.fabrik/config.yaml`. Organization-owned targets only |
+| `fabrik init --create-board --owner <org> [--repo <repo>] [--title <title>]` | Create a fully-configured GitHub Projects v2 board from your stage configs (Status columns in stage order, linked to the repo) and write it into `.fabrik/config.yaml`. Organization-owned targets only |
+| `fabrik repair-board [--apply]` | Diagnose an already-configured board for missing Status columns; with `--apply`, add them (never removes or reorders existing columns) |
 | `fabrik watch <issue-number>` | Open a real-time TUI for a single issue — live Claude output, stage history, PR/CI status |
 | `fabrik stream-filter` | Read NDJSON Claude output from stdin and render it as human-readable text |
 | `fabrik resume <issue-number>` | Resume an interrupted Claude session for an issue |
@@ -425,7 +440,7 @@ Fabrik uses labels to track state:
 | `fabrik:locked:<user>` | Issue is being processed by this user's Fabrik instance |
 | `fabrik:editing` | Issue body is being updated (prevents concurrent processing) |
 | `fabrik:paused` | Issue is skipped entirely — no stage processing or comment processing occurs |
-| `fabrik:awaiting-input` | Stage is paused waiting for user input; auto-clears when a new comment from the configured user (`--user`) is received |
+| `fabrik:awaiting-input` | Stage is paused waiting for user input; auto-clears when a new human comment is posted after the pause |
 | `fabrik:blocked` | Issue is waiting for one or more blocking issues to close; managed automatically by the engine |
 | `fabrik:awaiting-review` | Applied optimistically by the engine whenever a `wait_for_reviews: true` stage completes (reviewer request data may still be stale at that moment); removed when no requested reviewers are outstanding and at least one review has been submitted (the dual condition catches bot reviewers like Copilot and Gemini that self-trigger via webhook without appearing in the formal reviewer list), or when the reviewer-wait timeout elapses as a fallback (`--review-wait-timeout` / `FABRIK_REVIEW_WAIT_TIMEOUT`), at which point the issue is paused with `fabrik:awaiting-input` |
 | `fabrik:awaiting-ci` | Applied immediately when a `wait_for_ci: true` stage emits `FABRIK_STAGE_COMPLETE`; means "CI gate active" and covers both pending and failed CI states; `stage:X:complete` is deferred until CI passes (conjunctive gate). Triggers cache bypass so CI results are re-evaluated on every poll. Cleared when all checks pass or the CI wait timeout elapses, at which point the issue is paused with `fabrik:awaiting-input` |
@@ -433,6 +448,14 @@ Fabrik uses labels to track state:
 | `fabrik:awaiting-runaway-alert` | Applied when the merge-train runaway guard (ADR-059 D8) pauses a `Queued` member (`fabrik:paused` + `fabrik:awaiting-input`) but its alert comment fails to post; retried every poll by a settle scan until the alert succeeds or a fallback comment lands. See [Runaway Guard Alert Retry](docs/state-machine.md#618-runaway-guard-alert-retry-adr-1533) in the State Machine spec. |
 | `fabrik:api-key-helper-detected` | Applied when a stage invocation is skipped because the worktree's own `.claude/settings.json` sets `apiKeyHelper`; does not count against `max_retries`. Clears automatically once `apiKeyHelper` is removed and a later invocation reaches Claude successfully. See [Anthropic Auth Namespace Scrub & `apiKeyHelper` Refusal](docs/USER_GUIDE.md#anthropic-auth-namespace-scrub--apikeyhelper-refusal) in the User Guide. |
 | `fabrik:tools-denied` | Applied when Claude's own permission layer denies one or more tool calls during an invocation; does not count against `max_retries`, bounded instead by its own `--max-tools-denied-retries` counter (default 3). Clears automatically on the next invocation that isn't itself denied. See [Retry and Escalation](docs/USER_GUIDE.md#retry-and-escalation) in the User Guide for the "Troubleshooting: an issue carries `fabrik:tools-denied`" note. |
+| `fabrik:awaiting-done` | Set when a stage emits `FABRIK_NO_WORK_NEEDED`; the Done move / issue close is retried every poll until it succeeds. See [Labels Reference](docs/USER_GUIDE.md#fabrik-managed-labels) |
+| `fabrik:awaiting-close` | Set when a landed issue is still open after its PR merged (non-default `base:` branch, or the default base when GitHub's `Closes #N` auto-close did not fire); Fabrik closes it on a later poll with a "closed after merge" comment. See [Closing a Landed Issue](docs/USER_GUIDE.md#closing-a-landed-issue) |
+| `fabrik:awaiting-pr-ready` | Set when marking the draft PR ready for review failed; retried every poll without holding the item back. See [Labels Reference](docs/USER_GUIDE.md#fabrik-managed-labels) |
+| `fabrik:awaiting-advance` | Set when a terminal advance failed to move the board Status (e.g. a missing column); retried every poll. See [Labels Reference](docs/USER_GUIDE.md#fabrik-managed-labels) |
+| `fabrik:reworking:<Stage>` | Transient marker while a comment re-enters an already-completed stage; removed when the rework finishes. See [Labels Reference](docs/USER_GUIDE.md#fabrik-managed-labels) |
+| `fabrik:toolchain-stale` | Warn-only: the worktree declares a toolchain version the daemon's `PATH` does not satisfy; clears automatically. See [Labels Reference](docs/USER_GUIDE.md#fabrik-managed-labels) |
+| `fabrik:claude-limit` | Claude account usage limit hit; does not count against `max_retries`. See [Claude Usage-Limit Suspension](docs/USER_GUIDE.md#claude-usage-limit-suspension) |
+| `fabrik:children-spawned` / `fabrik:spawned-child:<index>:<number>` / `fabrik:sub-issue` | Sub-issue spawn bookkeeping: batch-complete guard on the parent, resume markers for an interrupted spawn, and a filter label on each child. See [Labels Reference](docs/USER_GUIDE.md#fabrik-managed-labels) |
 | `stage:<name>:complete` | Stage has been completed |
 | `stage:<name>:in_progress` | Stage is actively running |
 | `stage:<name>:failed` | Stage hit max retries and was paused |
