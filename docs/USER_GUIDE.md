@@ -2251,7 +2251,7 @@ fabrik --max-review-cycles=3
 
 The cycle count resets on engine restart.
 
-A re-invocation that provably never ran — the account was usage-limited or suspended, the API returned an `api_error` before any work was done, or an `apiKeyHelper` was detected — is refunded: it does not spend the cycle budget, so a cycle-limit pause is never caused by Claude being unavailable. A run that did execute and made no progress is still charged. See [state-machine §6.1](state-machine.md#62-review-reinvoke-mechanics).
+A re-invocation that provably never ran — the account was usage-limited or suspended, the API returned an `api_error` before any work was done, or an `apiKeyHelper` was detected — is refunded: it does not spend the cycle budget, so a cycle-limit pause is never caused by Claude being unavailable. A run that did execute and made no progress is still charged. See [state-machine §6.2](state-machine.md#62-review-reinvoke-mechanics).
 
 #### Timeout Configuration
 
