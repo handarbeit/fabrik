@@ -43,7 +43,7 @@ const (
 var configGitHubAppKeyRe = regexp.MustCompile(`(?m)^\s*github_app_(id|private_key_path|installation_id)\s*:`)
 
 // normalizeAuthMode validates E2E_AUTH_MODE. Empty means "leave the bed's
-// auth as it is" (a switch step invoked outside run.sh's auth legs).
+// auth as it is" (a switch step invoked outside the gate runner's auth legs).
 func normalizeAuthMode(raw string) (string, error) {
 	switch m := strings.ToLower(strings.TrimSpace(raw)); m {
 	case "", "pat", "app":
@@ -53,8 +53,8 @@ func normalizeAuthMode(raw string) (string, error) {
 	}
 }
 
-// bedRunLogPath is where the bed's stdout/stderr go (run.sh's
-// preflight_bed_start and StartFabrikTestBed both write it).
+// bedRunLogPath is where the bed's stdout/stderr go (the gate runner's
+// StartBed in tests/gate/bed.go and StartFabrikTestBed both write it).
 func bedRunLogPath(env *Env) string {
 	return filepath.Join(env.FabrikTestDir, "bed-run.log")
 }

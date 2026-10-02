@@ -1978,7 +1978,7 @@ func normalizeTrainMode(v string) (string, error) {
 }
 
 // resolveTrainMode determines the e2e suite's merge-train mode for the
-// current process. E2E_TRAIN_MODE (set by scripts/e2e/run.sh's two-mode
+// current process. E2E_TRAIN_MODE (set by the gate runner's two-mode
 // validation gate — see TestSwitchTrainMode) takes precedence when set,
 // satisfying FR-2: mode must be explicit and legible at the suite level, not
 // an ambient property of the bed's .env that a reader has to go look up. An

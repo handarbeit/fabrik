@@ -82,89 +82,16 @@ jobs:
       - name: compile e2e suite (not run)
         run: go test -tags e2e -run '^$' ./tests/e2e/...
 
-      # scripts/e2e/run.sh's own header states this script exists so a future
-      # edit that regresses R2's rate-limit-backoff detection (#1527) — e.g.
-      # reintroducing the byte-offset scan that fabrik.log's O_TRUNC-on-startup
-      # silently defeated — fails a check instead of only being caught by a
-      # real, multi-hour release-gate run. That guarantee only holds if this
-      # actually runs somewhere; wired in here per #1547's review. Needs no
-      # test bed, token, or network: it sources run.sh for the function
-      # definitions only (guarded so sourcing doesn't trigger a gate run) and
-      # drives fixtures entirely via mktemp. On a bare runner with no
-      # ~/dev/fabrik-test, run.sh's TEST_BED/BED_TOKEN resolution degrades to
-      # a stderr warning rather than failing under set -euo pipefail.
-      - name: backoff-detection regression test (#1527)
-        run: bash scripts/e2e/backoff_detection_test.sh
-
-      # R1's pre-gate (scripts/e2e/run.sh's run_pregate, #1454) exists so a
-      # live-gate run refuses to spend GraphQL/Claude budget on a sim/wire-
-      # contract-layer failure the free layers already caught. Regression
-      # coverage for its exit-code contract and call ordering, following the
-      # same pattern as the backoff-detection test above: sources run.sh for
-      # the function definitions only (the sourcing guard prevents an actual
-      # gate run) and drives it entirely via a PATH-shadowed fake `go`
-      # binary, so no real (multi-minute) test run and no bed/token/network
-      # dependency.
-      - name: pre-gate regression test (#1454)
-        run: bash scripts/e2e/pregate_test.sh
-
-      # R6's sim-parity summary line (#1933): print_sim_parity_summary reads
-      # tests/e2e/registry/registry.json with jq. Sources run.sh for function
-      # definitions only, like the tests above; no bed/token/network.
-      - name: sim-parity summary test (#1933)
-        run: bash scripts/e2e/parity_summary_test.sh
-
-      # R1's competing-token-consumer preflight (scripts/e2e/run.sh's
-      # check_competing_token_consumers, #1684) exists so a gate run refuses
-      # (rather than silently burning an hour into backoff) when another
-      # local Fabrik instance shares the bed's @arbeithand GraphQL token.
-      # Regression coverage for the pure filter (find_competing_token_consumers)
-      # plus the orchestration wrapper's skip/degrade paths, following the
-      # same sourced-fixture pattern as the two tests above: no fake
-      # binaries, no live competing process, no network.
-      - name: competing-token-consumer regression test (#1684)
-        run: bash scripts/e2e/token_consumer_check_test.sh
-
-      # Auth-mode legs (#1861): E2E_AUTH_MODE resolution, the auth-mode
-      # preconditions against fixture beds, and the token check's downgrade to
-      # a warning when no pat leg is planned. Same sourced-fixture pattern.
-      - name: auth-mode legs regression test (#1861)
-        run: bash scripts/e2e/auth_mode_check_test.sh
-
-      # R2's review-bot-reachable preflight (scripts/e2e/run.sh's
-      # check_reviewer_reachable, #1684) exists so a gate run fails fast when
-      # Pruefer is confidently down, instead of every review-gated scenario
-      # timing out ~10 minutes in. Regression coverage exercises real PIDs
-      # ($$ for "alive", an unused PID for "dead") against a fixture
-      # .pruefer/pruefer.lock — no live Pruefer deployment, no network.
-      - name: reviewer-reachable regression test (#1684)
-        run: bash scripts/e2e/reviewer_reachable_check_test.sh
-
-      # E2E_BED_REF resolution (scripts/e2e/run.sh's preflight_bed, #1693)
-      # exists so a gate run against a non-main ref actually tests that ref,
-      # instead of silently building the bed from origin/main while go test
-      # ran assertions for the intended ref — a confidently wrong result.
-      # Regression coverage against two scratch git repos (a bare "origin"
-      # and a single-branch "bed" clone matching the real bed's refspec
-      # shape) exercises the fetch/resolve step directly: a never-fetched
-      # branch resolves, a bogus ref fails with a wrapped preflight-context
-      # message (not git's raw error), and the unset-default path (origin/main)
-      # is unaffected. No network, no real ~/dev/fabrik-test involved.
-      - name: preflight_bed ref resolution regression test (#1693)
-        run: bash scripts/e2e/preflight_bed_ref_test.sh
-
-      # Bed git-config isolation (scripts/e2e/run.sh's
-      # write_isolated_bed_gitconfig, #1756/R5) exists so the live e2e bed's
-      # git behavior does not depend on the operator's own ~/.gitconfig —
-      # specifically, so a url.*.insteadOf SSH rewrite can no longer mask an
-      # App-auth+HTTPS worker-git 403 (see ADR-1756) the way it does on an
-      # operator's own machine. Regression coverage sources run.sh for the
-      # function definition only (the sourcing guard prevents an actual gate
-      # run) and drives it against a synthetic host gitconfig via
-      # GIT_CONFIG_GLOBAL — no live bed, network, or real ~/.gitconfig
-      # involved.
-      - name: bed git-config isolation regression test (#1756)
-        run: bash scripts/e2e/bed_gitconfig_isolation_test.sh
+      # The live-gate runner (scripts/e2e/run.sh is a shim over tests/gate,
+      # #1994, ADR-1994) is ordinary Go with no build tag, so its regression
+      # coverage — the pre-gate and its SHA dedup (#1454, #1624), the
+      # rate-limit-backoff scan (#1527, #1547), the competing-token and
+      # reviewer-reachable preconditions (#1684), the auth-mode legs (#1861),
+      # E2E_BED_REF resolution (#1693), bed git-config isolation (#1756), the
+      # hang-protection and exit-code contract (#1676, #1694) — runs inside the
+      # `go test -race ./...` step above. It needs no bed, token, network or `gh`
+      # login: fake subprocesses, recorded `go test -json` streams and real git
+      # on scratch repos. (These were nine `bash scripts/e2e/*_test.sh` steps.)
 
       # cut-release.sh's flag parsing — in particular --skip-integration's
       # validation (R2, #1454) — sourced and exercised directly via

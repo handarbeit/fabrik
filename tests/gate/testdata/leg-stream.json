@@ -1,0 +1,31 @@
+go: downloading example.com/dep v1.2.3
+{"Action":"start","Package":"p"}
+this line is not json at all
+{"Action":"run","Package":"p","Test":"TestSmokeSingleRepoDispatch"}
+{"Action":"output","Package":"p","Test":"TestSmokeSingleRepoDispatch","Output":"=== RUN   TestSmokeSingleRepoDispatch\n"}
+{"Action":"pause","Package":"p","Test":"TestSmokeSingleRepoDispatch"}
+{"Action":"run","Package":"p","Test":"TestMergeTrainHappyPath"}
+{"Action":"pause","Package":"p","Test":"TestMergeTrainHappyPath"}
+{"Action":"run","Package":"p","Test":"TestCrossRepoSpawn"}
+{"Action":"pause","Package":"p","Test":"TestCrossRepoSpawn"}
+{"Action":"run","Package":"p","Test":"TestBlockedOnInput"}
+{"Action":"pause","Package":"p","Test":"TestBlockedOnInput"}
+{"Action":"run","Package":"p","Test":"TestNoWorkNeeded"}
+{"Action":"pause","Package":"p","Test":"TestNoWorkNeeded"}
+{truncated json
+{"Action":"run","Package":"p","Test":"TestNeverStarted"}
+{"Action":"pause","Package":"p","Test":"TestNeverStarted"}
+{"Action":"cont","Package":"p","Test":"TestSmokeSingleRepoDispatch"}
+{"Action":"run","Package":"p","Test":"TestSmokeSingleRepoDispatch/sub"}
+{"Action":"pass","Package":"p","Test":"TestSmokeSingleRepoDispatch/sub","Elapsed":0.5}
+{"Action":"output","Package":"p","Test":"TestSmokeSingleRepoDispatch","Output":"--- PASS: TestSmokeSingleRepoDispatch (312.45s)\n"}
+{"Action":"pass","Package":"p","Test":"TestSmokeSingleRepoDispatch","Elapsed":312.45}
+{"Action":"cont","Package":"p","Test":"TestBlockedOnInput"}
+{"Action":"skip","Package":"p","Test":"TestBlockedOnInput","Elapsed":0}
+{"Action":"cont","Package":"p","Test":"TestNoWorkNeeded"}
+{"Action":"fail","Package":"p","Test":"TestNoWorkNeeded","Elapsed":98.7}
+{"Action":"cont","Package":"p","Test":"TestMergeTrainHappyPath"}
+{"Action":"cont","Package":"p","Test":"TestCrossRepoSpawn"}
+{"Action":"pass","Package":"p","Test":"TestCrossRepoSpawn","Elapsed":312.45}
+{"Action":"output","Package":"p","Test":"TestMergeTrainHappyPath","Output":"panic: test timed out after 4h0m0s\n"}
+{"Action":"output","Package":"p","Test":"TestMergeTrainHappyPath","Output":"\trunning tests:\n\t\tTestMergeTrainHappyPath (4h0m0s)\n"}

@@ -98,7 +98,7 @@ func Decode(data []byte) (*Registry, error) {
 	return &r, nil
 }
 
-// Counts is the parity summary printed by scripts/e2e/run.sh.
+// Counts is the parity summary printed by the gate runner (tests/gate/parity.go).
 type Counts struct {
 	Covered  int
 	LiveOnly int

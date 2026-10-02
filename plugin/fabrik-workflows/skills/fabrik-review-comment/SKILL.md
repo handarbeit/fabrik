@@ -94,7 +94,7 @@ Read the user's comment carefully to understand their intent for each finding:
 
 **Fix it**: Apply the fix to the code. The user has confirmed the finding is valid and wants it addressed.
 - Make the minimal, targeted fix
-- Verify it compiles and tests pass
+- Verify it compiles and the tests for the changed area pass (see "Skipping a redundant full-suite run" below)
 - Commit with a message referencing the finding: `Fix review finding: <brief description>`
 
 **Dismiss**: The user has indicated the finding is a false positive or acceptable risk.
@@ -113,9 +113,25 @@ Read the user's comment carefully to understand their intent for each finding:
 ### Push after fixes
 
 After applying any fixes:
-1. Verify the code compiles and tests pass
+1. Verify the code compiles and the tests for the changed area pass (see "Skipping a redundant full-suite run" below)
 2. Commit with a clear message
 3. Push to the remote branch
+
+### Skipping a redundant full-suite run — `.fabrik-context/ci-status.md`
+
+When the item has a linked PR, the engine writes `.fabrik-context/ci-status.md` before this invocation: the PR number, `head_sha` (the PR head), `verdict` (`green`, `red`, `pending`, `none` or `unknown`), `ci_gated` (`true` when this stage waits for CI) and `written_at`. CI has already run the whole suite on `head_sha` when the verdict is `green`, so rerunning it locally on the same commit repeats work CI did.
+
+**Skip a full-suite run only when ALL three of these hold** — a partial match is not a match:
+
+1. `verdict` in `.fabrik-context/ci-status.md` is exactly `green`.
+2. `git rev-parse HEAD` (run it as its own command) prints the same SHA as `head_sha`.
+3. `git status --porcelain` (run it as its own command) prints nothing.
+
+When all three hold, skip the test invocation and say so in your output, naming the SHA and the file's `written_at` (for example: `Full suite skipped — CI green on <sha> (ci-status.md written <timestamp>)`). In every other case — the file is absent, the verdict is anything other than `green`, HEAD differs from `head_sha`, or the tree is dirty — run the step as described in this skill.
+
+**After you change code** (including a rebase that moves HEAD, such as the pre-completion rebase): HEAD no longer matches `head_sha`, so condition 2 fails. Comment processing does not complete the stage, and the engine's `wait_for_ci` gate runs only when a stage completes, so a push made from a comment has no CI gate behind it — whatever `ci_gated` says. Treat `ci_gated` as `false` here: run the full suite as written below. Do not fall back to targeted tests only.
+
+**Everything else in this stage stays.** Skipping the suite skips only the test invocation. The code review itself, the rebase, and every fix-and-push step still run. In your report, say `Tests: SKIPPED — CI green on <sha>` instead of claiming tests passed.
 
 ### Verifying with a live server or a long-running command
 
