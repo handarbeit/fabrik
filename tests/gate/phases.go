@@ -119,6 +119,27 @@ func retryPhases(cell Cell, names []string, classes map[string]registry.Isolatio
 	return PlanPhases(cell, names, classes), nil
 }
 
+// exclusiveRan reports whether phases include an exclusive phase.
+func exclusiveRan(phases []Phase) bool {
+	for _, p := range phases {
+		if p.Name == string(registry.IsolationExclusive) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasNonExclusive reports whether phases include a phase that is not exclusive
+// (the undivided no-registry phase counts: it is never exclusive-only).
+func hasNonExclusive(phases []Phase) bool {
+	for _, p := range phases {
+		if p.Name != string(registry.IsolationExclusive) {
+			return true
+		}
+	}
+	return false
+}
+
 // phaseLogPath names a phase's log next to base: base itself for the undivided
 // phase, otherwise ".../go-test.json" becomes ".../go-test.shared.json".
 func phaseLogPath(base string, p Phase) string {

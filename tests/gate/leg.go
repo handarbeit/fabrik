@@ -161,17 +161,8 @@ func (g *Gate) RunLeg(ctx context.Context, cell Cell) error {
 		defer arch.Finish()
 	}
 
-	g.outf("== switching test bed to FABRIK_MERGE_TRAIN=%s, auth=%s (leg %s) ==\n", mode, cell.Auth, label)
-	res := g.Exec.Run(ctx, Cmd{
-		Name: "go", Args: []string{"test", "-tags=e2e", "-v", "-count=1", "-timeout", "3m", "-run", "^TestSwitchTrainMode$", "./tests/e2e/..."},
-		Dir: g.Cfg.RepoRoot, Env: withEnv(legEnv, "E2E_TRAIN_SWITCH=1", "E2E_TRAIN_MODE="+mode),
-		Stdout: g.Out, Stderr: g.Err, Session: true, Grace: g.Cfg.KillGrace,
-	})
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-	if res.ExitCode != 0 {
-		return &ExitError{Code: res.ExitCode}
+	if err := g.restartBed(ctx, cell, legEnv); err != nil {
+		return err
 	}
 
 	phases := PlanPhases(cell, g.liveTests, g.isolation)
@@ -277,7 +268,7 @@ func (g *Gate) RunLeg(ctx context.Context, cell Cell) error {
 	if rerr == nil {
 		var rretry int
 		var err error
-		events, logs, rretry, inc, err = g.retryInconclusive(ctx, cell, label, legEnv, mode, jsonlog, logs, events, recorder)
+		events, logs, rretry, inc, err = g.retryInconclusive(ctx, cell, label, legEnv, mode, jsonlog, logs, events, recorder, exclusiveRan(phases))
 		if err != nil {
 			return err
 		}
@@ -340,6 +331,27 @@ func (g *Gate) RunLeg(ctx context.Context, cell Cell) error {
 		}
 		return &ExitError{Code: ExitPostSuiteWatchdog}
 	}
+}
+
+// restartBed is the leg's bed restart: the TestSwitchTrainMode invocation that
+// (re)starts the bed in the cell's train mode and auth. RunLeg runs it once before
+// the first phase; retryInconclusive runs it again before re-running non-exclusive
+// tests after an exclusive phase (#1977). A non-zero exit is an *ExitError.
+func (g *Gate) restartBed(ctx context.Context, cell Cell, legEnv []string) error {
+	mode := cell.Train
+	g.outf("== switching test bed to FABRIK_MERGE_TRAIN=%s, auth=%s (leg %s) ==\n", mode, cell.Auth, cell.Label())
+	res := g.Exec.Run(ctx, Cmd{
+		Name: "go", Args: []string{"test", "-tags=e2e", "-v", "-count=1", "-timeout", "3m", "-run", "^TestSwitchTrainMode$", "./tests/e2e/..."},
+		Dir: g.Cfg.RepoRoot, Env: withEnv(legEnv, "E2E_TRAIN_SWITCH=1", "E2E_TRAIN_MODE="+mode),
+		Stdout: g.Out, Stderr: g.Err, Session: true, Grace: g.Cfg.KillGrace,
+	})
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if res.ExitCode != 0 {
+		return &ExitError{Code: res.ExitCode}
+	}
+	return nil
 }
 
 // runSuiteAttempt is one `go test -json` invocation of the leg's suite: it
@@ -411,7 +423,13 @@ func (g *Gate) runSuiteAttempt(ctx context.Context, label string, legEnv []strin
 //     top-level names would widen it);
 //   - the engine's rate-limit backoff has already engaged (the run is RUN INVALID;
 //     postSuiteTail will say so and void the cell — more spend would only add to it).
-func (g *Gate) retryInconclusive(ctx context.Context, cell Cell, label string, legEnv []string, mode, base string, firstLogs []string, events []Event, recorder *legRecorder) (merged []Event, logs []string, retryRC int, out retryOutcome, err error) {
+//
+// The retries run after every first-run phase, so exclusiveRan (the first run
+// included an exclusive phase) means the bed may carry state an exclusive test left
+// behind. Before each attempt that re-runs a non-exclusive test the bed is therefore
+// restarted, the same fresh bed the first run's shared tests had (#1977 R2.1); if
+// that restart fails the retries stop and the tests stay inconclusive (uncovered).
+func (g *Gate) retryInconclusive(ctx context.Context, cell Cell, label string, legEnv []string, mode, base string, firstLogs []string, events []Event, recorder *legRecorder, exclusiveRan bool) (merged []Event, logs []string, retryRC int, out retryOutcome, err error) {
 	merged, logs = events, append([]string(nil), firstLogs...)
 	cls := Classify(merged)
 	first := cls.Inconclusive
@@ -448,14 +466,25 @@ func (g *Gate) retryInconclusive(ctx context.Context, cell Cell, label string, l
 			return
 		}
 		// #1977 R2.3: the retry keeps each test's class — a retried exclusive test
-		// runs exclusively, a retried shared test at the shared parallelism — and
-		// the same phase order, so a retry never breaks the rule the first run kept.
+		// runs exclusively, a retried shared test at the shared parallelism — in the
+		// same phase order. The retries run after the exclusive phase, so a bed that
+		// phase may have poisoned is restarted below before any non-exclusive retry.
 		phases, serr := retryPhases(cell, cls.Inconclusive, g.isolation)
 		if serr != nil {
 			g.errf("warning: cannot retry the inconclusive tests (leg: %s): %v\n", label, serr)
 			return
 		}
 		g.outf("== retrying %d inconclusive test(s) (leg: %s, attempt %d of %d): %s ==\n", len(cls.Inconclusive), label, n, g.Cfg.InconclusiveRetries, strings.Join(cls.Inconclusive, ", "))
+		if exclusiveRan && hasNonExclusive(phases) {
+			if rerr := g.restartBed(ctx, cell, legEnv); rerr != nil {
+				if ctx.Err() != nil {
+					err = ctx.Err()
+					return
+				}
+				g.errf("warning: cannot restart the bed before retrying shared tests (leg: %s): %v — stopping the retries\n", label, rerr)
+				return
+			}
+		}
 		// Like the first run, every phase of an attempt runs even after a red one, so
 		// a failed retried shared test never leaves a retried exclusive test unretried
 		// (and so uncovered); the first non-zero exit code is the attempt's. The

@@ -271,6 +271,11 @@ func TestLegRetryPreservesClassification(t *testing.T) {
 	if err := g.RunLeg(context.Background(), defaultCell); err != nil {
 		t.Fatal(err)
 	}
+	// The exclusive phase ran, so the retried shared test gets a freshly restarted
+	// bed (the first run's own restart plus one before the retry attempt).
+	if len(lf.switchCmds) != 2 {
+		t.Errorf("restarts = %d, want 2 (first run + before the shared retry)", len(lf.switchCmds))
+	}
 	want := []string{
 		"4 ^(TestShareA|TestShareB)$", "1 ^(TestBase)$", "1 ^(TestExcl)$",
 		"4 ^(TestShareA)$", "1 ^(TestExcl)$",
@@ -280,6 +285,39 @@ func TestLegRetryPreservesClassification(t *testing.T) {
 	}
 	if got := g.leftInconclusiveTests(); len(got) != 0 {
 		t.Errorf("both retried tests passed: %v", got)
+	}
+}
+
+// A retried shared test must not inherit state an exclusive test left behind: the
+// bed is restarted before the retry attempt, in order — and only when the attempt
+// actually re-runs a non-exclusive test.
+func TestLegRetryRestartsTheBedOnlyForNonExclusiveRetries(t *testing.T) {
+	// Only the exclusive test is inconclusive: nothing non-exclusive to protect.
+	g, lf, _ := phaseGate(t, threeClasses,
+		legAttempt{out: streams(pass("TestShareA"), pass("TestShareB"))},
+		legAttempt{out: pass("TestBase")},
+		legAttempt{out: inc("TestExcl", "race")},
+		legAttempt{out: pass("TestExcl")},
+	)
+	if err := g.RunLeg(context.Background(), defaultCell); err != nil {
+		t.Fatal(err)
+	}
+	if len(lf.switchCmds) != 1 {
+		t.Errorf("restarts = %d, want 1: an exclusive-only retry needs no restart", len(lf.switchCmds))
+	}
+
+	// No exclusive phase in the first run: the bed was never exposed to one.
+	g, lf, _ = phaseGate(t, map[string]registry.Isolation{"TestShareA": shared, "TestShareB": shared, "TestBase": defBase},
+		legAttempt{out: streams(inc("TestShareA", "race"), pass("TestShareB"))},
+		legAttempt{out: pass("TestBase")},
+		legAttempt{out: pass("TestShareA")},
+	)
+	g.liveTests = []string{"TestBase", "TestShareA", "TestShareB"}
+	if err := g.RunLeg(context.Background(), defaultCell); err != nil {
+		t.Fatal(err)
+	}
+	if len(lf.switchCmds) != 1 {
+		t.Errorf("restarts = %d, want 1: no exclusive phase ran", len(lf.switchCmds))
 	}
 }
 

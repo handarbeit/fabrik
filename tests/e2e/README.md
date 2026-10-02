@@ -1560,7 +1560,10 @@ first non-zero exit code is the leg's); the run stops early only on a cancelled
 context, a phase that did not complete (a timeout kill — the bed state is unknown)
 or the engine's rate-limit backoff. INCONCLUSIVE retries (#1973) keep each test's
 class: a retried shared test re-runs at the shared `-parallel`, an exclusive one
-serially, in the same phase order. `TestSwitchTrainMode` is exclusive in the
+serially, in the same phase order. Because retries run after the exclusive phase, the
+bed is restarted before each retry attempt that re-runs a shared or default-base-train
+test (when the first run included an exclusive phase), so a retried test never inherits
+state an exclusive test left behind; a failed restart stops the retries. `TestSwitchTrainMode` is exclusive in the
 registry but is the leg's own restart step, so it is never a phase member.
 Without a readable registry the leg falls back to one undivided `go test`.
 
@@ -2041,7 +2044,7 @@ never inherits un-paused Queued members.
 
 **What the gate does.** At the end of each leg it re-runs **only that leg's inconclusive tests**
 (one `-run '^(A|B)$'` invocation per attempt, same cell: same auth/train mode, `-parallel`, bed,
-no restart; each attempt in its own log, `go-test.retry-N.<phase>.json`), at most
+no restart — except the one before a non-exclusive retry after an exclusive phase ran, see the two-phase section; each attempt in its own log, `go-test.retry-N.<phase>.json`), at most
 `E2E_INCONCLUSIVE_RETRIES` times (default **2**, `0` disables). Retries run before the post-suite
 watchdog starts and before the RUN INVALID scan, so a long retry is not killed and throttling
 during one still voids the cell. No retry is attempted after a timeout kill, for a
