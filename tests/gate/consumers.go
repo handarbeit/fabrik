@@ -88,13 +88,25 @@ func realPath(dir string) string {
 // directory doesn't exist, or has no .env or no FABRIK_TOKEN line, is silently
 // excluded.
 func FindCompetingTokenConsumers(bedDir, bedToken string, candidates []Candidate) []Candidate {
+	return FindCompetingTokenConsumersExcluding([]string{bedDir}, bedToken, candidates)
+}
+
+// FindCompetingTokenConsumersExcluding is FindCompetingTokenConsumers with a SET
+// of excluded directories (#1976, D5): on a multi-bed run every configured bed's
+// own engine is excluded — the beds' engines sharing an identity is the
+// scheduler's business (it serializes them), not a refusal — while any OTHER
+// process sharing bedToken, the dev daemon above all, is still reported.
+func FindCompetingTokenConsumersExcluding(exclude []string, bedToken string, candidates []Candidate) []Candidate {
 	var found []Candidate
-	bedAbs := realPath(bedDir)
+	excluded := map[string]bool{}
+	for _, d := range exclude {
+		excluded[realPath(d)] = true
+	}
 	for _, c := range candidates {
 		if c.PID == 0 || c.Dir == "" {
 			continue
 		}
-		if realPath(c.Dir) == bedAbs {
+		if excluded[realPath(c.Dir)] {
 			continue
 		}
 		tok := EnvFileValue(filepath.Join(c.Dir, ".env"), "FABRIK_TOKEN")
@@ -113,17 +125,49 @@ func FindCompetingTokenConsumers(bedDir, bedToken string, candidates []Candidate
 // ExitPreconditionFailed naming every competing PID/directory: a silent
 // proceed-into-backoff costs an hour of already-spent budget, strictly worse
 // than one operator round-trip.
+//
+// On a multi-bed run (#1976, D5) the check runs once per bed, against that bed's
+// own token, with EVERY configured bed's directory excluded; the process listing
+// is taken once. It uses all the requested auth modes for every bed — the greedy
+// fallback can route any cell to any bed — which can only turn a warning into a
+// refusal, never weaken it.
 func (g *Gate) CheckCompetingTokenConsumers(ctx context.Context, modes []string) error {
 	if g.Getenv("E2E_SKIP_TOKEN_CHECK") != "" {
 		g.outln("== competing-token-consumer check skipped (E2E_SKIP_TOKEN_CHECK set) ==")
 		return nil
 	}
+	var cands []Candidate
+	discovered := false
+	discover := func() []Candidate {
+		if !discovered {
+			cands, discovered = g.DiscoverFabrikProcessDirs(ctx), true
+		}
+		return cands
+	}
+	if !g.multiBed() {
+		return g.checkBedTokenConsumers(modes, []string{g.Cfg.TestBed}, discover)
+	}
+	var msgs []string
+	for _, b := range g.bedGates {
+		if err := b.checkBedTokenConsumers(modes, g.Cfg.BedDirs, discover); err != nil {
+			msgs = append(msgs, err.Error())
+		}
+	}
+	if len(msgs) > 0 {
+		return &ExitError{Code: ExitPreconditionFailed, Msg: strings.Join(msgs, "\n")}
+	}
+	return nil
+}
+
+// checkBedTokenConsumers is the check for one bed: g's own token, the given
+// directories excluded.
+func (g *Gate) checkBedTokenConsumers(modes, exclude []string, discover func() []Candidate) error {
 	if g.Cfg.BedToken == "" {
 		g.errln("warning: BED_TOKEN unreadable — skipping competing-token-consumer check (R1, #1684): nothing to compare candidate processes' tokens against")
 		return nil
 	}
 	g.outln("== checking for competing consumers of the bed's GraphQL token (R1, #1684) ==")
-	matches := FindCompetingTokenConsumers(g.Cfg.TestBed, g.Cfg.BedToken, g.DiscoverFabrikProcessDirs(ctx))
+	matches := FindCompetingTokenConsumersExcluding(exclude, g.Cfg.BedToken, discover())
 	if len(matches) > 0 && !authModesInclude(modes, "pat") {
 		g.errf("warning: other local Fabrik process(es) share the bed's FABRIK_TOKEN, but no pat leg is planned (auth legs: %s) — the bed engine uses the App installation's budget, so only the harness's own calls compete:\n", strings.Join(modes, " "))
 		for _, m := range matches {

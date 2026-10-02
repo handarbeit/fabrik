@@ -22,20 +22,22 @@ legs, each a bed restart (`TestSwitchTrainMode`) plus `go test -tags=e2e -json` 
 
 ## Where the follow-on chain plugs in (R5)
 
-The seams below are all in use: #1972 (ledger), #1973 (INCONCLUSIVE), #1974 (probes) and
-#1975 (the sparse plan) plug into them; #1976 is still to come (#1977 added the phase seam).
+The seams below are all in use: #1972 (ledger), #1973 (INCONCLUSIVE), #1974 (probes),
+#1975 (the sparse plan), #1976 (multi-bed) and #1977 (the phase seam) plug into them.
 
 | Seam | Where | Used by |
 |---|---|---|
-| `Cell` (auth, train, parallel, args) and `PlanCells` (`PlanInput.Sparse` selects the sparse plan) | `schedule.go` | **#1975's sparse matrix** (below), #1976 multi-bed |
-| `Scheduler` interface (`SerialScheduler` today) on `Gate` | `schedule.go` | #1976 multi-bed |
+| `Cell` (auth, train, parallel, args) and `PlanCells` (`PlanInput.Sparse` selects the sparse plan) | `schedule.go` | **#1975's sparse matrix** (below), #1976's bed assignment |
+| `Scheduler` interface on `Gate` (`SerialScheduler` for one bed, `MultiBedScheduler` for two or more) | `schedule.go`, `multibed.go` | **#1976 multi-bed** (below) |
 | `Phase`, `PlanPhases`, `retryPhases` — a cell's shared / default-base-train / exclusive `go test` invocations | `phases.go` | **#1977's two-phase leg** (below) |
 | `LegResult` (cell, exit code, log path, decoded `[]Event`, budget before/after) delivered to `Gate.OnLeg` | `leg.go` | other observers. **#1972's ledger does not use it** — it records from `suiteWriter`'s event sink (`ledger_recorder.go`), because `OnLeg` never fires for a killed, RUN INVALID, watchdog or restart-failed leg |
 | `Classification` (pass/fail/skip/**inconclusive**/running/never-started) | `events.go` | #1973 added INCONCLUSIVE — see "INCONCLUSIVE and bounded retry" below |
 | `Ledger`, `Evaluator`, `Report` and `RequiredTests`/`ResumeCells` over `PlanCells` output | `ledger*.go`, `coverage.go`, `resume.go` | #1972; #1975's sparse plan changed the required set with no change here — `Report` only gained the `Matrix`/`FullMatrixPairs` fields for the summary |
 | `[]Preflight` (`Gate.Preflights`, ordered, each returns an `*ExitError`) | `gate.go` | #1974's host-load probe (`host-load-probe`) |
 | `[]Preflight` (`Gate.LivePreflights`, run **after** the pre-gate, before the bed is built) | `gate.go` | #1974's board-lag probe — a live write, so it cannot precede the pre-gate (ADR-1454) |
-| `Commander` (`Run`/`Start`), `Gate.Env`, `Sleep`, `Now`, `ProcCwd` | `exec.go`, `gate.go` | every test; #1976's per-bed environments |
+| `[]Preflight` again: `bed-topology` (static) and `bed-identity` (live) | `beds.go`, `identity.go` | #1976 |
+| `Commander` (`Run`/`Start`), `Gate.Env`, `Sleep`, `Now`, `ProcCwd` | `exec.go`, `gate.go` | every test; #1976's per-bed views |
+| `IdentityOps` (`ResolveLogin`, `Budget`, `MintAppToken`) on `Gate.Identity` | `identity.go` | #1976's identity scheduling and budget lines; `nil` (a hand-built `Gate`) disables both |
 
 ## The sparse plan and `E2E_MATRIX` (#1975, ADR-1975)
 
@@ -256,6 +258,108 @@ Two probes run before live budget is spent. `tests/e2e/README.md` has the knobs;
   list / swept-leftover count. A zero threshold (a hand-built `Config`) disables a probe, so the
   existing runner tests are undisturbed.
 
+## Multi-bed runs (#1976, ADR-1976)
+
+`E2E_BEDS` is a comma-separated list of bed directories; the first is **bed A**. Unset — the
+default — it is the single `FABRIK_TEST_DIR` bed and the run is the single-bed gate described
+everywhere else in this file. With two or more beds the gate runs them **concurrently in one
+process**, serialized only where they share a GitHub identity.
+
+| File | What |
+|---|---|
+| `config.go` | `Config.BedDirs`, `parseBeds` (absolute paths; an empty entry, a duplicate by real path — symlinks included — or more than 26 beds is `ExitUsage`) |
+| `beds.go` | `BedSpec`, `resolveBedSpec`, the per-bed views (`buildBedGates`/`newBedGate`), `bedEnv`, `prefixWriter`, `CheckBedTopology`, `prepareBeds` |
+| `identity.go` | `Identity`, `IdentityOps`/`osIdentityOps`, `ResolveBedIdentities`, `identitySet`, `parseBedAppBanner`/`verifyBedAppIdentity`, `logIdentityBudget` |
+| `multibed.go` | `MultiBedScheduler`: assignment, identity-set registry, D8 failure semantics, the closing summary |
+| `consumers.go` | `FindCompetingTokenConsumersExcluding`; the #1684 check per bed |
+| `reset.go`, `cmd/gate/main.go` | `ResetBeds`, `gate reset --bed <dir>` |
+| `ledger.go`, `ledger_recorder.go`, `archive.go` | `Record.Bed`, `VoidBed`, `bed.json`, per-bed `NoteBedConfig` |
+
+* **Per-bed views.** Every piece of bed state already derives from `Cfg.TestBed`, `Cfg.EngineLog`,
+  `Cfg.BedToken` and `resetConfig()`: the lock, `bed-run.log`, the isolated gitconfig, build, start
+  and stop, the archive's engine-log sampler and `bed-run.log` copy, the RUN INVALID scan, the
+  board-lag probe and the reset. So a bed is a **view** of the invocation's `Gate` with its own
+  values of those (`newBedGate` copies every field explicitly; a field added to `Gate` must be
+  classified there). Shared mutable state is reached through `parent` (the INCONCLUSIVE list) or a
+  pointer (`cov`, the one ledger). With one bed there are no views: `beds()` is the root `Gate`.
+* **Per-bed resolution (D1).** A bed's `FABRIK_TEST_REPO_ALPHA`/`_BETA`/`FABRIK_TEST_PROJECT_OWNER`/
+  `_NUMBER` come from its own `.env`, else the environment, else the defaults; its token is the
+  `.env` `FABRIK_TOKEN`; its App installation is the `.env` `E2E_APP_INSTALLATION_ID`. Each leg's
+  restart and suite invocations get `FABRIK_TEST_DIR` and those four (`bedEnv`, D2), and the live
+  harness honours `FABRIK_TEST_PROJECT_NUMBER`.
+* **Order (ADR-1454 kept).** Static preflights once per bed where bed-scoped — auth mode over every
+  bed, then `bed-topology`, then the competing-consumer check per bed; the reviewer check, parity
+  summary and host-load probe once. The pre-gate once (its record is repo-scoped, D10). Then the live
+  preflights: `bed-identity` (each bed token's login, one `gh api user` per distinct token) and the
+  board-lag probe on each bed's own board. Then `prepareBeds`: `PrepareBedAndReset` per bed,
+  **serially**, followed by the engine-SHA check. Nothing live runs before the pre-gate.
+* **Topology refusal (exit 7, before the pre-gate).** Two beds with the same App installation (when an
+  app leg is planned), the same board, or a shared repo, or a bed with no `FABRIK_TOKEN`. Two beds
+  sharing a harness login are **not** refused — they serialize.
+* **Competing consumers (D5).** The #1684 check runs per bed against that bed's token with **every**
+  configured bed's directory excluded, over one process listing, using all requested auth modes
+  (the greedy fallback can send any cell to any bed). Another bed's engine is never a competitor; any
+  other process on a bed's token — the dev daemon — still refuses.
+* **Engine SHA (D11).** `E2E_BED_REF`, `E2E_BED_NO_BUILD` and `E2E_SKIP_PREP` apply to every bed;
+  beds resolving to different engine SHAs (including `E2E_SKIP_PREP`'s bed-HEAD path) refuse with
+  exit 7, because the ledger is per SHA.
+* **Identities (D3/D4).** A cell charges a **set**: `app:<installation id>` on an app leg, plus
+  `user:<login>` of the bed's `FABRIK_TOKEN` (the engine's PAT on a pat leg and the harness's token
+  on every leg), deduplicated and sorted. An unresolvable login refuses (exit 7); with no resolver
+  configured, the key falls back to `token:<hash>` so equal tokens still collide. After every app
+  leg's restart, `verifyBedAppIdentity` reads the last startup in `bed-run.log` and refuses (exit 7)
+  unless its `identity: GitHub App installation <N>` line names the `.env` installation;
+  `TestBannerFormatsArePinned` pins the parser to the engine's format strings.
+* **Scheduling (R3, D6).** Under the sparse matrix with the baseline in the plan, bed A runs the
+  baseline cell (`app/on`) and nothing else; the other beds serve a shared
+  queue in `sparseOrder`. Otherwise (`--resume`, a filtered or partial run, `E2E_MATRIX=full`) every
+  bed serves the shared queue. A cell starts only when its **whole** identity set is free, acquired
+  atomically under one mutex (no partial holds, so no hold-and-wait). A shared-queue bed takes the
+  first cell whose set is free now and waits only if none is; bed A's own queue is strict. Beds start
+  in order, each after the previous one has claimed a cell or registered a wait, so bed A gets first
+  claim on a shared identity, and while bed A's next cell waits it **reserves** that cell's
+  identities, so a shared-queue bed cannot keep re-acquiring them ahead of it. Each wait is
+  logged once: `== waiting: <cell> on bed B needs <identity>, held by bed A (<cell>) ==` (or
+  `…, reserved for bed A's next cell ==`).
+* **Idle engines are stopped.** A running engine polls with its identity whether or not a leg is
+  using it, so a bed's engine is stopped (`stopIdleEngine`, SIGTERM via `StopBedInstance`) while
+  the bed waits for an identity and once it has no more cells; every leg's `TestSwitchTrainMode`
+  restart starts it again. This is what keeps D5's exclusion of the beds' own engines from the
+  #1684 check safe: no bed's engine spends an identity another bed's leg holds. (A single-bed run
+  leaves its bed running after the last leg, as before.)
+* **Failure (D8).** A failing leg lets the other beds' **running** legs finish but no new cell starts.
+  RUN INVALID (exit 3) is narrower: that bed's records for the cell are voided (`VoidBed`), its
+  engine identity is marked exhausted, cells charging it are not started, and everything else goes on.
+  The exit code is the first failure's, by time; a cancel returns 130. The per-identity budget
+  probes at a leg's end share one `GHAPITimeout` bound, so they can never trip the post-suite
+  watchdog. `== multi-bed summary ==` lists
+  every bed's cells with their outcome, every cell that never started with why, and any exhausted
+  identity.
+* **Budget lines (R5, also on one bed).** At leg start and end, one
+  `== identity budget (leg: app/on, start): app:12345 fabrik-bed[bot] — 4210 remaining, resets … ==`
+  line per identity in the cell's set (`rateLimit { remaining resetAt }`; App identities mint an
+  installation token per probe). A failure warns and never gates; no token text reaches the output.
+  The existing `budget_before`/`budget_after` harness-token lines are unchanged.
+* **Ledger and archive (R4).** Every bed writes the one per-SHA ledger. Records carry `bed` (the
+  directory, `omitempty`, so the format version is unchanged); a void line with a bed voids only
+  that bed's records; each leg archive has `bed.json`; `bedconfig.json` is keyed
+  `<invocation>@<bed>` so two beds' legitimately different configs are not drift (legacy
+  invocation-only keys are ignored). `RequiredTests`, `ResumeCells`, the evaluator and
+  `gate coverage` are unchanged: a pair covered on any bed counts. **One gate process must drive
+  every bed**: `Ledger.mu` is process-local, so two gate processes on one ledger are unsupported.
+* **Output (D12).** With two or more beds every bed-scoped line is prefixed `[bed A] ` / `[bed B] `,
+  written a whole line at a time under a lock shared per stream, so beds never interleave mid-line.
+  One bed: no prefix. With the ledger disabled the per-leg log name gains `-bed<X>`.
+* **Reset (D9).** `gate reset` resets every configured bed, each with its own token, repos and board,
+  serially, continuing past a failure and returning the first failure's code; `--bed <dir>` (or
+  `--bed=<dir>`) resets just that directory.
+
+Single-bed behaviour (R6) is unchanged by construction: no views, `SerialScheduler`, no prefix, no
+bed variables in a leg's environment. The only additions are the identity budget lines, the
+`bed-identity` live preflight (a warning, not a refusal, when the login cannot be resolved), the
+banner cross-check on app legs, and the bed attribution in records and archives. The live two-bed
+run, and standing up the second bed, are #1990's.
+
 ## Behaviour deltas and quirks
 
 The port changes no behaviour on purpose. What follows is every place it differs, or where a
@@ -277,14 +381,16 @@ Deliberate differences, forced by the process model (all in ADR-1994):
    yielded an empty `dirty`, vouching for any tree). A pattern that does not compile now counts
    every change as dirty, so the full pre-gate runs.
 5. **`reset` aborts on a failed `gh pr list` / `gh issue list`** with a clear message and exit 1
-   (it aborted silently under `set -e` before); the exit status is unchanged.
+   (it aborted silently under `set -e` before); the exit status is unchanged. With several beds
+   (#1976) `gate reset` resets each in turn, continues past a failed bed, and takes `--bed <dir>`.
 6. **A wedged output pipe is detected for a failing suite too.** `exec.Cmd.WaitDelay` reports it
    only for a successful exit, so the runner copies the pipe itself.
 
 Quirks preserved on purpose:
 
 - The per-leg log is `${TMPDIR:-/tmp}/fabrik-e2e-<auth>-<mode>-<runner pid>.json`, so the two
-  "on" sub-legs of an auth mode overwrite each other. (#1972 owns the per-cell archive.)
+  "on" sub-legs of an auth mode overwrite each other. (#1972 owns the per-cell archive; a
+  multi-bed run, #1976, appends `-bed<X>` so two beds never share a name.)
 - The terminal echo of suite output is double-spaced (`jq -r` appended a newline to an `Output`
   that already ended in one).
 - The timeout-teardown trigger is still a literal `panic: test timed out after` match against the

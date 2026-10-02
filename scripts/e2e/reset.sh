@@ -8,6 +8,8 @@
 #                                    # alpha + beta, delete leftover fabrik/* branches, drain the board
 #   scripts/e2e/reset.sh --worktrees # ALSO remove Fabrik's worktrees + bare clones from the bed
 #                                    # (destructive; refuses while the bed engine is running)
+#   scripts/e2e/reset.sh --bed <dir> # reset only that bed; without it, every E2E_BEDS bed is
+#                                    # reset with its own token, repos and board (#1976)
 #
 # Overridable via env: FABRIK_TEST_DIR, FABRIK_TEST_REPO_ALPHA, FABRIK_TEST_REPO_BETA,
 # FABRIK_TEST_PROJECT_OWNER, FABRIK_TEST_PROJECT_NUMBER.

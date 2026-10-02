@@ -119,3 +119,25 @@ func TestUnknownSubcommandRunsTheGate(t *testing.T) {
 		t.Errorf("got %q %v", sub, rest)
 	}
 }
+
+func TestParseResetArgs(t *testing.T) {
+	for _, tc := range []struct {
+		argv      []string
+		worktrees bool
+		bed       string
+		err       bool
+	}{
+		{argv: nil},
+		{argv: []string{"--worktrees"}, worktrees: true},
+		{argv: []string{"--bed", "/beds/b"}, bed: "/beds/b"},
+		{argv: []string{"--worktrees", "--bed=/beds/a"}, worktrees: true, bed: "/beds/a"},
+		{argv: []string{"--bed"}, err: true},
+		{argv: []string{"--bed="}, err: true},
+		{argv: []string{"--bed", ""}, err: true},
+	} {
+		opts, bed, err := parseResetArgs(tc.argv)
+		if (err != nil) != tc.err || opts.Worktrees != tc.worktrees || bed != tc.bed {
+			t.Errorf("%v: opts=%+v bed=%q err=%v", tc.argv, opts, bed, err)
+		}
+	}
+}

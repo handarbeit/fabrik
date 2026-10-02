@@ -25,6 +25,7 @@ type legRecorder struct {
 	hashes     map[string]string // test -> source hash
 	live       map[string]bool   // the live-test set; non-nil restricts what is recorded
 	warn       func(format string, args ...any)
+	bed        string // the bed directory the cell runs on (#1976, R4); set before the first event
 
 	mu       sync.Mutex
 	output   map[string]*testOutput // top-level test -> its own output
@@ -117,7 +118,7 @@ func (r *legRecorder) Observe(e Event) {
 	if r.live != nil && !r.live[e.Test] {
 		return
 	}
-	rec := Record{Test: e.Test, Leg: r.leg, Cell: r.cell, Invocation: r.invocation, Hash: r.hashes[e.Test], Head: r.head}
+	rec := Record{Test: e.Test, Leg: r.leg, Cell: r.cell, Invocation: r.invocation, Hash: r.hashes[e.Test], Head: r.head, Bed: r.bed}
 	switch e.Action {
 	case "pass":
 		rec.Outcome = OutcomePass

@@ -143,7 +143,9 @@ func (w *suiteWriter) last() string {
 func (g *Gate) RunLeg(ctx context.Context, cell Cell) error {
 	mode := cell.Train
 	label := cell.Label()
-	legEnv := withEnv(g.Env, "E2E_AUTH_MODE="+cell.Auth)
+	// A multi-bed leg also aims the live harness at its own bed, repos and board
+	// (#1976, D2); bedEnv is nil on a single-bed run.
+	legEnv := withEnv(g.Env, append([]string{"E2E_AUTH_MODE=" + cell.Auth}, g.bedEnv()...)...)
 
 	// #1972: when the coverage ledger is live, this leg's logs are archived and
 	// its outcomes recorded as they stream in. The archive's sampler starts before
@@ -164,6 +166,13 @@ func (g *Gate) RunLeg(ctx context.Context, cell Cell) error {
 	if err := g.restartBed(ctx, cell, legEnv); err != nil {
 		return err
 	}
+	// #1976 (D3): the restarted bed must be the App installation this leg was
+	// scheduled on.
+	if cell.Auth == "app" {
+		if err := g.verifyBedAppIdentity(label); err != nil {
+			return err
+		}
+	}
 
 	phases := PlanPhases(cell, g.liveTests, g.isolation)
 	if len(phases) == 0 {
@@ -176,7 +185,13 @@ func (g *Gate) RunLeg(ctx context.Context, cell Cell) error {
 	// Without the ledger the log name carries no per-leg uniqueness beyond auth
 	// and mode (the pre-#1972 quirk). With it, the log lives in the leg's own
 	// archive directory. A multi-phase leg suffixes each phase's name (phaseLogPath).
-	jsonlog := filepath.Join(g.Cfg.TmpDir, fmt.Sprintf("fabrik-e2e-%s-%s-%d.json", cell.Auth, mode, g.Self))
+	// Two beds' legs of one label run in one process, so a multi-bed name also
+	// carries the bed.
+	bedSuffix := ""
+	if g.bed != nil {
+		bedSuffix = "-bed" + g.bed.Name
+	}
+	jsonlog := filepath.Join(g.Cfg.TmpDir, fmt.Sprintf("fabrik-e2e-%s-%s-%d%s.json", cell.Auth, mode, g.Self, bedSuffix))
 	if arch != nil && arch.dir != "" {
 		jsonlog = filepath.Join(arch.dir, "go-test.json")
 	}
@@ -186,10 +201,12 @@ func (g *Gate) RunLeg(ctx context.Context, cell Cell) error {
 	// restart step's (unlike the backoff scan, which deliberately covers the
 	// restart too).
 	budgetBefore := g.probeBudget(ctx, "budget_before", label)
+	g.logIdentityBudget(ctx, cell, "start") // R5 (#1976)
 
 	var recorder *legRecorder
 	if cs != nil && !cs.noRecord {
 		recorder = newLegRecorder(cs.ledger, cell, cs.invocation, cs.head, cs.inputs.hashes, cs.inputs.liveSet, g.errf)
+		recorder.bed = g.Cfg.TestBed // R4 (#1976): which bed produced each record
 	}
 
 	// The phases run in order into ONE recorder, so each streams its outcomes as
@@ -636,6 +653,11 @@ func (g *Gate) postSuiteTail(ctx context.Context, cell Cell, label string, logs 
 	} else {
 		g.errf("warning: could not read GraphQL rate_limit before/after leg %s (gh api call failed) — skipping budget report\n", label)
 	}
+	checkpoint.Store("identity budget probes (leg end)")
+	g.logIdentityBudget(ctx, cell, "end") // R5 (#1976)
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 
 	checkpoint.Store("leg summary")
 	g.outf("%s", summary.Format())
@@ -696,7 +718,7 @@ func (g *Gate) postSuiteTail(ctx context.Context, cell Cell, label string, logs 
 		// #1972: this verdict cannot be trusted, so nothing this cell recorded
 		// counts — not even its PASSes. Fail closed.
 		if g.cov != nil {
-			if err := g.cov.ledger.Void(label, cellDirName(cell), g.cov.invocation); err != nil {
+			if err := g.cov.ledger.VoidBed(label, cellDirName(cell), g.cov.invocation, g.Cfg.TestBed); err != nil {
 				g.errf("warning: could not void this cell's ledger records (%v) — they may count as coverage\n", err)
 			} else {
 				g.errf("== the coverage ledger discarded every outcome this cell recorded (RUN INVALID) ==\n")

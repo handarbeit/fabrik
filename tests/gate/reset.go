@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // ResetOptions selects the form of the reset (scripts/e2e/reset.sh's flags).
@@ -23,12 +24,18 @@ type ResetConfig struct {
 	ProjectNumber string
 }
 
+// resetConfig is the bed's repo pair and board: a per-bed view's own resolved
+// values (#1976, D1), or — on a single-bed run — the gate's environment and the
+// defaults, as reset.sh read them.
 func (g *Gate) resetConfig() ResetConfig {
+	if g.bed != nil {
+		return g.bed.Reset
+	}
 	return ResetConfig{
-		Alpha:         orDefault(g.Getenv("FABRIK_TEST_REPO_ALPHA"), "handarbeit/fabrik-test-alpha"),
-		Beta:          orDefault(g.Getenv("FABRIK_TEST_REPO_BETA"), "handarbeit/fabrik-test-beta"),
-		ProjectOwner:  orDefault(g.Getenv("FABRIK_TEST_PROJECT_OWNER"), "handarbeit"),
-		ProjectNumber: orDefault(g.Getenv("FABRIK_TEST_PROJECT_NUMBER"), "2"),
+		Alpha:         orDefault(g.Getenv("FABRIK_TEST_REPO_ALPHA"), defaultRepoAlpha),
+		Beta:          orDefault(g.Getenv("FABRIK_TEST_REPO_BETA"), defaultRepoBeta),
+		ProjectOwner:  orDefault(g.Getenv("FABRIK_TEST_PROJECT_OWNER"), defaultProjectOwner),
+		ProjectNumber: orDefault(g.Getenv("FABRIK_TEST_PROJECT_NUMBER"), defaultProjectNumber),
 	}
 }
 
@@ -200,6 +207,49 @@ func (g *Gate) Reset(ctx context.Context, opts ResetOptions) error {
 
 	g.outln("done.")
 	return nil
+}
+
+// ResetBeds is `gate reset` (#1976, D9): every configured bed resets its OWN
+// board and repos with its OWN token. With bedDir set only that directory is
+// reset (resolved like any bed: its .env, then the environment, then the
+// defaults). With one bed and no bedDir it is exactly Reset. Beds are reset
+// serially; a failure on one bed does not stop the next, and the first failure's
+// error is returned.
+func (g *Gate) ResetBeds(ctx context.Context, opts ResetOptions, bedDir string) error {
+	if bedDir != "" {
+		abs, err := filepath.Abs(bedDir)
+		if err != nil {
+			return exitErr(ExitUsage, "reset --bed %s: %v", bedDir, err)
+		}
+		spec := g.resolveBedSpec("", abs)
+		b := g.newBedGate(spec, &sync.Mutex{}, &sync.Mutex{})
+		b.Out, b.Err = g.Out, g.Err // one bed: unprefixed
+		return b.Reset(ctx, opts)
+	}
+	g.buildBedGates()
+	if !g.multiBed() {
+		return g.Reset(ctx, opts)
+	}
+	// Two beds resolving to one board or a shared repo (say, bed B's .env without
+	// its own keys, falling back to the defaults) would have the later reset drain
+	// the earlier bed's state with the wrong token: refuse, as `gate run` does.
+	if err := g.CheckBedTopology(nil); err != nil {
+		return err
+	}
+	var first error
+	for _, b := range g.bedGates {
+		b.outf("== resetting %s (board %s/#%s; repos %s, %s) ==\n", b.bedLabel(), b.bed.Reset.ProjectOwner, b.bed.Reset.ProjectNumber, b.bed.Reset.Alpha, b.bed.Reset.Beta)
+		err := b.Reset(ctx, opts)
+		b.flushOutput()
+		if err != nil {
+			b.errf("reset of %s failed: %v\n", b.bedLabel(), err)
+			b.flushOutput()
+			if first == nil {
+				first = err
+			}
+		}
+	}
+	return first
 }
 
 // resolveProjectNodeID is the board's ProjectV2 node ID ("" if it cannot be

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -264,13 +265,24 @@ func (g *Gate) beginArchive(cell Cell, cs *covState) *legArchive {
 			g.errf("warning: archiving preflight output: %v\n", err)
 		}
 	}
+	// #1976 (R4): which bed produced this leg.
+	bedRec := struct {
+		Name string `json:"name,omitempty"`
+		Dir  string `json:"dir"`
+	}{Dir: g.Cfg.TestBed}
+	if g.bed != nil {
+		bedRec.Name = g.bed.Name
+	}
+	if err := os.WriteFile(filepath.Join(dir, "bed.json"), mustJSON(bedRec), 0o644); err != nil {
+		g.errf("warning: archiving the bed attribution: %v\n", err)
+	}
 	if h, err := BedConfigHash(g.Cfg.TestBed); err != nil {
 		g.errf("warning: hashing the bed configuration: %v\n", err)
 	} else {
 		if err := os.WriteFile(filepath.Join(dir, "bed-config.sha256"), []byte(h+"\n"), 0o644); err != nil {
 			g.errf("warning: archiving the bed config hash: %v\n", err)
 		}
-		if prev := cs.ledger.NoteBedConfig(cs.invocation, h); len(prev) > 0 {
+		if prev := cs.ledger.NoteBedConfig(cs.invocation, g.Cfg.TestBed, h); len(prev) > 0 {
 			g.errf("warning: the bed configuration (.fabrik/stages/, config.yaml) differs from an earlier invocation of this ledger (%s) — results from different configurations are being combined\n", shortSHA(prev[0]))
 		}
 	}
@@ -375,9 +387,13 @@ func BedConfigHash(bed string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// NoteBedConfig records this invocation's bed-config hash in the ledger and
-// returns the DIFFERENT hashes other invocations recorded (empty when all agree).
-func (l *Ledger) NoteBedConfig(invocation, hash string) (differing []string) {
+// NoteBedConfig records this invocation's hash of bed's configuration in the
+// ledger and returns the DIFFERENT hashes other invocations recorded for the SAME
+// bed (empty when all agree). Entries are keyed "<invocation>@<bed>" (#1976): two
+// beds legitimately differ (their own boards and repos in config.yaml), so only a
+// bed's change against itself is drift. A legacy entry keyed by invocation alone
+// names no bed and is ignored.
+func (l *Ledger) NoteBedConfig(invocation, bed, hash string) (differing []string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	path := filepath.Join(l.Dir(), "bedconfig.json")
@@ -385,15 +401,18 @@ func (l *Ledger) NoteBedConfig(invocation, hash string) (differing []string) {
 	if data, err := os.ReadFile(path); err == nil {
 		_ = json.Unmarshal(data, &m) // a corrupt file is advisory data: start over
 	}
+	key := invocation + "@" + bed
 	seen := map[string]bool{}
-	for inv, h := range m {
-		if inv != invocation && h != hash && !seen[h] {
-			seen[h] = true
-			differing = append(differing, h)
+	for k, h := range m {
+		inv, b, ok := strings.Cut(k, "@")
+		if !ok || b != bed || inv == invocation || h == hash || seen[h] {
+			continue
 		}
+		seen[h] = true
+		differing = append(differing, h)
 	}
 	sort.Strings(differing)
-	m[invocation] = hash
+	m[key] = hash
 	_ = writeFileAtomic(path, mustJSON(m)) // advisory; a failed write must not fail a leg
 	return differing
 }

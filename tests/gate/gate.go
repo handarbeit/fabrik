@@ -65,6 +65,8 @@ type Gate struct {
 	// (ExitPostSuiteWatchdog), or a failed restart step: bash gave those no
 	// per-leg result either. The ledger's reading of them: RUN INVALID voids the
 	// cell's records, a watchdog leg's completed PASSes count (ADR-1972).
+	// On a multi-bed run (#1976) it is called from several bed goroutines at
+	// once, so it must be safe for concurrent use.
 	OnLeg func(LegResult)
 
 	// Seams for time and the OS.
@@ -112,6 +114,37 @@ type Gate struct {
 
 	// runLegFn replaces RunLeg for scheduler tests.
 	runLegFn func(context.Context, Cell) error
+
+	// ---- multi-bed (#1976, ADR-1976; beds.go, identity.go, multibed.go) ----
+	//
+	// A field added above must be classified in newBedGate (beds.go): per-bed,
+	// shared read-only, or shared mutable through parent or a pointer.
+
+	// Identity resolves token logins, reads an identity's GraphQL budget and mints
+	// App installation tokens. NewGate wires the real implementation; nil (a Gate
+	// built by hand) disables identity resolution and the per-identity budget
+	// lines.
+	Identity IdentityOps
+
+	// parent is the invocation's root Gate when g is a per-bed view; nil on the root.
+	parent *Gate
+	// bed is this view's bed; nil on the root (and so on every single-bed run).
+	bed *BedSpec
+	// bedGates are the per-bed views of a multi-bed run (root only; empty with one bed).
+	bedGates []*Gate
+
+	// login is the bed token's resolved GitHub login ("" until resolved, or when
+	// it could not be); appSlug is the bed App's slug, read from the startup
+	// banner of the bed's last app leg. Both are per bed.
+	login   string
+	appSlug string
+	// loginCache memoises ResolveLogin per token across beds (root only).
+	idMu       sync.Mutex
+	loginCache map[string]string
+
+	// schedWaitHook, if set, observes each identity wait the multi-bed scheduler
+	// logs (tests synchronise on it instead of sleeping).
+	schedWaitHook func(bed string, c Cell, identity string)
 }
 
 // NewGate wires a Gate around the real OS.
@@ -127,6 +160,7 @@ func NewGate(cfg Config, out, errw io.Writer) *Gate {
 		Self:  os.Getpid(),
 	}
 	g.ProcCwd = g.defaultProcCwd
+	g.Identity = osIdentityOps{g: g}
 	g.Scheduler = SerialScheduler{}
 	g.Preflights = DefaultPreflights()
 	g.LivePreflights = DefaultLivePreflights()
@@ -139,6 +173,8 @@ func NewGate(cfg Config, out, errw io.Writer) *Gate {
 func DefaultPreflights() []Preflight {
 	return []Preflight{
 		{Name: "auth-mode", Run: func(_ context.Context, g *Gate, p *Plan) error { return g.CheckAuthModePreconditions(p.AuthModes) }},
+		// Multi-bed only (#1976): beds that can never run together are refused here.
+		{Name: "bed-topology", Run: func(_ context.Context, g *Gate, p *Plan) error { return g.CheckBedTopology(p.AuthModes) }},
 		{Name: "competing-token-consumers", Run: func(ctx context.Context, g *Gate, p *Plan) error {
 			return g.CheckCompetingTokenConsumers(ctx, p.AuthModes)
 		}},
@@ -151,15 +187,29 @@ func DefaultPreflights() []Preflight {
 }
 
 // DefaultLivePreflights are the probes that make a live GitHub call and so run
-// only after the pre-gate has passed (#1974).
+// only after the pre-gate has passed (#1974): each bed token's identity (#1976)
+// and each bed's own board-listing lag.
 func DefaultLivePreflights() []Preflight {
 	return []Preflight{
-		{Name: "board-lag-probe", Run: func(ctx context.Context, g *Gate, _ *Plan) error { return g.ProbeBoardLag(ctx) }},
+		{Name: "bed-identity", Run: func(ctx context.Context, g *Gate, _ *Plan) error { return g.ResolveBedIdentities(ctx) }},
+		{Name: "board-lag-probe", Run: func(ctx context.Context, g *Gate, _ *Plan) error {
+			for _, b := range g.beds() {
+				if err := b.ProbeBoardLag(ctx); err != nil {
+					return err
+				}
+			}
+			return nil
+		}},
 	}
 }
 
 // noteLeftInconclusive records the tests a leg left INCONCLUSIVE after retries.
+// A per-bed view records on the root, so every bed's leftovers decide one exit.
 func (g *Gate) noteLeftInconclusive(label string, tests []string) {
+	if g.parent != nil {
+		g.parent.noteLeftInconclusive(label, tests)
+		return
+	}
 	g.incMu.Lock()
 	defer g.incMu.Unlock()
 	for _, t := range tests {
@@ -168,6 +218,9 @@ func (g *Gate) noteLeftInconclusive(label string, tests []string) {
 }
 
 func (g *Gate) leftInconclusiveTests() []string {
+	if g.parent != nil {
+		return g.parent.leftInconclusiveTests()
+	}
 	g.incMu.Lock()
 	defer g.incMu.Unlock()
 	return append([]string(nil), g.leftInconclusive...)
@@ -258,9 +311,12 @@ func (g *Gate) run(ctx context.Context, argv []string) error {
 	args := ParseRunArgs(argv)
 
 	// BED_TOKEN: a missing token only degrades the budget report and the
-	// competing-consumer check — it is a warning, not fatal.
+	// competing-consumer check — it is a warning, not fatal. With two or more
+	// beds (#1976) each per-bed view reads its own, and CheckBedTopology refuses
+	// a bed without one.
 	g.Cfg.BedToken = EnvFileValue(g.Cfg.TestBed+"/.env", "FABRIK_TOKEN")
-	if g.Cfg.BedToken == "" {
+	g.buildBedGates()
+	if g.Cfg.BedToken == "" && !g.multiBed() {
 		g.errf("warning: could not read FABRIK_TOKEN from %s/.env — GraphQL budget reporting and the competing-token-consumer check will be skipped\n", g.Cfg.TestBed)
 	}
 
@@ -301,6 +357,7 @@ func (g *Gate) run(ctx context.Context, argv []string) error {
 		return exitErr(ExitUsage, "--resume cannot be combined with a subtest-level -run/-skip: a subtest-filtered run executes only part of a test, so it could never be credited")
 	}
 	g.resume = plan.Resume
+	g.propagateToBeds() // the host-load reading
 
 	if err := g.RunPregate(ctx); err != nil {
 		return err
@@ -310,7 +367,12 @@ func (g *Gate) run(ctx context.Context, argv []string) error {
 			return err
 		}
 	}
-	preflightText, err := g.teeOutput(func() error { return g.PrepareBedAndReset(ctx, plan.Clean) })
+	var preflightText string
+	if g.multiBed() {
+		preflightText, err = g.prepareBeds(ctx, plan.Clean)
+	} else {
+		preflightText, err = g.teeOutput(func() error { return g.PrepareBedAndReset(ctx, plan.Clean) })
+	}
 	if err != nil {
 		return err
 	}
@@ -349,11 +411,21 @@ func (g *Gate) run(ctx context.Context, argv []string) error {
 		}
 	}
 
+	// #1976: two or more beds run their cells concurrently, serialized only on
+	// shared identities; one bed keeps the configured (serial) scheduler, R6.
+	sched := g.Scheduler
+	if g.multiBed() {
+		g.propagateToBeds() // the coverage ledger and --resume
+		sched = MultiBedScheduler{}
+		if len(cells) > 0 {
+			g.outf("== bed assignment: %s ==\n", describeAssignment(g, cells))
+		}
+	}
 	var runErr error
 	if g.cov != nil && plan.Resume && len(cells) == 0 {
 		g.outln("== --resume: nothing left to run for the selected tests ==")
 	} else {
-		runErr = g.Scheduler.Run(ctx, g, cells)
+		runErr = sched.Run(ctx, g, cells)
 	}
 
 	if g.cov == nil {
