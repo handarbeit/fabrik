@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "column": "Validate",
+  "status": "Validate",
+  "labels": [
+    "stage:Implement:complete",
+    "stage:Plan:complete",
+    "stage:Research:complete",
+    "stage:Review:complete",
+    "stage:Specify:complete",
+    "stage:Validate:complete"
+  ],
+  "pr": {
+    "draft": false,
+    "base": "main",
+    "head_is_issue_branch": true,
+    "closes_issue": true
+  },
+  "provenance": "sim-engine",
+  "engine_sha": "929f00eb09581043a0d9846b6b1a3dbbcb2f3549"
+}
