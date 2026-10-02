@@ -159,3 +159,48 @@ func TestBaselineWithoutEntryStagesKeepsItsTimingsAndOmitsTheProxy(t *testing.T)
 		t.Errorf("comparison invented a baseline proxy of 0:\n%s", out)
 	}
 }
+
+// An INCONCLUSIVE test is retried into go-test.retry-N.json next to go-test.json; the gate
+// counts the last attempt per test, so the report must too — otherwise a test that skipped
+// as inconclusive and then ran in the retry reads as unmeasured and skews the before/after.
+func TestBuildRuntimeReportMergesInconclusiveRetries(t *testing.T) {
+	archive := t.TempDir()
+	inconclusive := `{"Action":"skip","Package":"p","Test":"TestSeeded","Elapsed":3,"Output":"E2E-INCONCLUSIVE: lag"}` + "\n"
+	writeStream(t, archive, "app-on", "20260101T000000Z", reportEv("pass", "TestFull", 600)+inconclusive)
+	dir := filepath.Join(archive, "app-on", "20260101T000000Z")
+	if err := os.WriteFile(filepath.Join(dir, "go-test.retry-1.json"), []byte(reportEv("pass", "TestSeeded", 240)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := BuildRuntimeReport("s", archive, testRegistry())
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]RuntimeRow{}
+	for _, r := range rep.Rows {
+		byName[r.Test] = r
+	}
+	if got := byName["TestSeeded"].Seconds["app-on"]; got != 240 {
+		t.Fatalf("TestSeeded app-on = %v, want the retry's 240", got)
+	}
+	if got := byName["TestFull"].Seconds["app-on"]; got != 600 {
+		t.Fatalf("TestFull app-on = %v, want the first attempt's 600 (the retry did not re-run it)", got)
+	}
+	for _, u := range rep.Unmeasured {
+		if u == "TestSeeded" {
+			t.Fatalf("TestSeeded ran in a retry yet is listed as unmeasured: %v", rep.Unmeasured)
+		}
+	}
+}
+
+// An explicit --sha is the key a run recorded under; it need not exist in this checkout, so
+// it is never rev-parsed (an uppercase or abbreviated one included).
+func TestExplicitSHAIsUsedVerbatim(t *testing.T) {
+	var out, errb strings.Builder
+	g := NewGate(Config{CoverageDir: t.TempDir()}, &out, &errb)
+	for _, sha := range []string{strings.Repeat("A", 40), "abc1234", strings.Repeat("e", 40)} {
+		got, code := g.resolveSHA(t.Context(), "coverage", sha, true)
+		if code != 0 || got != sha {
+			t.Errorf("resolveSHA(%q, verbatim) = %q, %d; want it returned unchanged", sha, got, code)
+		}
+	}
+}

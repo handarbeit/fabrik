@@ -49,7 +49,7 @@ func (g *Gate) Coverage(ctx context.Context, argv []string) int {
 		g.errln("gate coverage: the coverage ledger is disabled (E2E_COVERAGE_DIR resolved to nothing)")
 		return ExitUsage
 	}
-	sha, code := g.resolveSHA(ctx, "coverage", sha)
+	sha, code := g.resolveSHA(ctx, "coverage", sha, true)
 	if code != 0 {
 		return code
 	}

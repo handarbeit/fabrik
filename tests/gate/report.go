@@ -104,17 +104,9 @@ func BuildRuntimeReport(sha, archiveDir string, reg *registry.Registry) (Runtime
 		}
 		sort.Strings(names) // oldest first, so a later invocation overwrites an earlier one
 		for _, inv := range names {
-			f, err := os.Open(filepath.Join(archiveDir, cell.Name(), inv, "go-test.json"))
+			events, err := readInvocationEvents(filepath.Join(archiveDir, cell.Name(), inv))
 			if err != nil {
-				if os.IsNotExist(err) {
-					continue
-				}
-				return RuntimeReport{}, err
-			}
-			events, rerr := ReadEvents(f)
-			f.Close()
-			if rerr != nil {
-				return RuntimeReport{}, fmt.Errorf("reading %s/%s/go-test.json: %w", cell.Name(), inv, rerr)
+				return RuntimeReport{}, fmt.Errorf("reading %s/%s: %w", cell.Name(), inv, err)
 			}
 			for _, t := range Timings(events) {
 				if t.Result == "skip" {
@@ -153,6 +145,32 @@ func BuildRuntimeReport(sha, archiveDir string, reg *registry.Registry) (Runtime
 	}
 	sort.SliceStable(rep.Rows, func(i, j int) bool { return rep.Rows[i].Total > rep.Rows[j].Total })
 	return rep, nil
+}
+
+// readInvocationEvents is one invocation's effective event stream: go-test.json with every
+// go-test.retry-N.json (the INCONCLUSIVE retries, #1973) merged in by mergeAttempts, so the
+// last attempt wins per test exactly as the gate itself classifies it. A test that
+// self-skipped as inconclusive and then ran in a retry is therefore timed from the retry.
+// An invocation with no go-test.json yields nil events.
+func readInvocationEvents(dir string) ([]Event, error) {
+	first := filepath.Join(dir, "go-test.json")
+	events, err := readEventsFile(first)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	for n := 1; ; n++ {
+		retry, err := readEventsFile(retryLogPath(first, n))
+		if err != nil {
+			if os.IsNotExist(err) {
+				return events, nil
+			}
+			return nil, err
+		}
+		events = mergeAttempts(events, retry)
+	}
 }
 
 // Format renders the table for a terminal.
@@ -264,7 +282,7 @@ func (g *Gate) ReportCmd(ctx context.Context, argv []string) int {
 		g.errln("gate report: the coverage ledger is disabled (E2E_COVERAGE_DIR resolved to nothing)")
 		return ExitUsage
 	}
-	sha, code := g.resolveSHA(ctx, "report", sha)
+	sha, code := g.resolveSHA(ctx, "report", sha, true)
 	if code != 0 {
 		return code
 	}
@@ -297,7 +315,7 @@ func (g *Gate) ReportCmd(ctx context.Context, argv []string) int {
 		g.outln(after.Format())
 		return 0
 	}
-	baseline, code = g.resolveSHA(ctx, "report", baseline)
+	baseline, code = g.resolveSHA(ctx, "report", baseline, false)
 	if code != 0 {
 		return code
 	}
@@ -338,9 +356,15 @@ func (g *Gate) registryAt(ctx context.Context, sha string) *registry.Registry {
 	return &registry.Registry{}
 }
 
-// resolveSHA turns an explicit sha, or E2E_BED_REF (default origin/main), into a full
-// commit SHA. On failure it returns the exit code to use.
-func (g *Gate) resolveSHA(ctx context.Context, cmd, sha string) (string, int) {
+// resolveSHA turns sha, or E2E_BED_REF (default origin/main) when sha is empty, into a full
+// commit SHA. An explicit sha is used verbatim when verbatim is set: the ledger and archive
+// are keyed on whatever SHA a run recorded, which need not exist in this checkout (another
+// machine's archive, a pruned object), so it must not be rev-parsed. Otherwise a ref is
+// resolved with git. On failure it returns the exit code to use.
+func (g *Gate) resolveSHA(ctx context.Context, cmd, sha string, verbatim bool) (string, int) {
+	if sha != "" && verbatim {
+		return sha, 0
+	}
 	ref := sha
 	if ref == "" {
 		ref = orDefault(g.Getenv("E2E_BED_REF"), "origin/main")
