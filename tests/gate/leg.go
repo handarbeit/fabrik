@@ -456,6 +456,12 @@ func (g *Gate) retryInconclusive(ctx context.Context, cell Cell, label string, l
 			return
 		}
 		g.outf("== retrying %d inconclusive test(s) (leg: %s, attempt %d of %d): %s ==\n", len(cls.Inconclusive), label, n, g.Cfg.InconclusiveRetries, strings.Join(cls.Inconclusive, ", "))
+		// Like the first run, every phase of an attempt runs even after a red one, so
+		// a failed retried shared test never leaves a retried exclusive test unretried
+		// (and so uncovered); the first non-zero exit code is the attempt's. The
+		// attempt stops early only when the bed cannot be trusted (an unreadable or
+		// incomplete log, the rate-limit backoff), and a failed attempt ends the
+		// retries: a failure is never retried.
 		for _, ph := range phases {
 			logPath := phaseLogPath(retryLogPath(base, n), ph)
 			args := cat([]string{"test", "-tags=e2e", "-json", "-count=1", "-timeout", g.Cfg.Timeout, "-parallel", ph.Parallel, "./tests/e2e/..."}, ph.Args)
@@ -470,25 +476,24 @@ func (g *Gate) retryInconclusive(ctx context.Context, cell Cell, label string, l
 			}
 			out.Attempts = n
 			logs = append(logs, logPath)
+			if sres.ExitCode != 0 && retryRC == 0 {
+				retryRC = sres.ExitCode // a retried test failed, or the retry run died
+			}
 			revents, rerr := readEventsFile(logPath)
 			if rerr != nil {
 				g.errf("warning: cannot read the retry log %s: %v — stopping the retries\n", logPath, rerr)
-				if sres.ExitCode != 0 {
-					retryRC = sres.ExitCode
-				}
 				return
 			}
 			merged = mergeAttempts(merged, revents)
-			if sres.ExitCode != 0 {
-				retryRC = sres.ExitCode // a retried test failed, or the retry run died
-				return
-			}
 			if suiteIncomplete(Classify(merged)) {
 				return
 			}
 			if DetectRateLimitBackoff(g.Cfg.EngineLog) {
 				return // postSuiteTail voids the cell
 			}
+		}
+		if retryRC != 0 {
+			return
 		}
 	}
 	return

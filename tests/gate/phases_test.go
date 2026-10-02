@@ -283,6 +283,33 @@ func TestLegRetryPreservesClassification(t *testing.T) {
 	}
 }
 
+// A retried shared test that fails must not leave a retried exclusive test
+// unretried: like the first run, every phase of the attempt runs.
+func TestLegRetryRunsEveryPhaseAfterAFailedOne(t *testing.T) {
+	g, lf, _ := phaseGate(t, threeClasses,
+		legAttempt{out: streams(inc("TestShareA", "race"), pass("TestShareB"))},
+		legAttempt{out: pass("TestBase")},
+		legAttempt{out: inc("TestExcl", "race")},
+		// retry 1: the shared test fails, the exclusive one must still be retried
+		legAttempt{out: fail("TestShareA"), rc: 1},
+		legAttempt{out: pass("TestExcl")},
+	)
+	err := g.RunLeg(context.Background(), defaultCell)
+	if ee, ok := err.(*ExitError); !ok || ee.Code != 1 {
+		t.Fatalf("err = %v, want exit 1 (the failed retry)", err)
+	}
+	want := []string{
+		"4 ^(TestShareA|TestShareB)$", "1 ^(TestBase)$", "1 ^(TestExcl)$",
+		"4 ^(TestShareA)$", "1 ^(TestExcl)$",
+	}
+	if got := suiteRuns(lf); !reflect.DeepEqual(got, want) {
+		t.Errorf("suite invocations\n got: %q\nwant: %q", got, want)
+	}
+	if got := g.leftInconclusiveTests(); len(got) != 0 {
+		t.Errorf("the exclusive test was retried and passed: %v", got)
+	}
+}
+
 func TestLegWithoutARegistryIsOneInvocation(t *testing.T) {
 	lf := &legFake{suiteOut: passStream}
 	g, _, _ := newLegGate(t, lf)

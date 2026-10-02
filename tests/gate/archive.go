@@ -17,7 +17,10 @@ import (
 // Per-leg log archive (R7). Nothing a leg produces is overwritten by the next
 // one. Under <sha>/archive/<cell>/<invocation>/ every leg keeps:
 //
-//	go-test.json        the leg's `go test -json` stream (written there directly)
+//	go-test.<phase>.json  one `go test -json` stream per phase of the two-phase leg (#1977): go-test.shared.json,
+//	                    go-test.default-base-train.json, go-test.exclusive.json (written there directly); an
+//	                    INCONCLUSIVE retry adds go-test.retry-<n>.<phase>.json. Only the no-registry
+//	                    fallback, one undivided `go test`, writes a bare go-test.json / go-test.retry-<n>.json
 //	fabrik.log.<n>      the bed ENGINE log, one file per engine run (see below)
 //	bed-run.log         the bed's stdout/stderr (append-only across harness restarts)
 //	preflight.txt       the invocation's preflight output

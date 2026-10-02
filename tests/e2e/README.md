@@ -1983,7 +1983,7 @@ ledger drift check: engine SHA 1a2b3c4 — VALID (3 test/gate-only path(s) diffe
 (exit 0 complete, 8 not) — what `cut-release.sh` calls. It never touches the bed.
 
 **Per-leg log archive.** Nothing a leg produces is overwritten by the next. Under
-`archive/<cell>/<invocation>/`: `go-test.json` (the `go test -json` stream), `fabrik.log.<n>`
+`archive/<cell>/<invocation>/`: one `go-test.<phase>.json` per phase (`shared`, `default-base-train`, `exclusive`; the `go test -json` stream — a bare `go-test.json` only without a registry), `fabrik.log.<n>`
 (the bed **engine** log, one file per engine run), `bed-run.log`, `preflight.txt`, `load.json`
 (the host's 1-minute load average at leg start and end) and `bed-config.sha256` (a hash of the
 bed's `.fabrik/stages/` and `config.yaml`; the runner warns when it differs between invocations
@@ -2041,7 +2041,7 @@ never inherits un-paused Queued members.
 
 **What the gate does.** At the end of each leg it re-runs **only that leg's inconclusive tests**
 (one `-run '^(A|B)$'` invocation per attempt, same cell: same auth/train mode, `-parallel`, bed,
-no restart; each attempt in its own log, `go-test.retry-N.json`), at most
+no restart; each attempt in its own log, `go-test.retry-N.<phase>.json`), at most
 `E2E_INCONCLUSIVE_RETRIES` times (default **2**, `0` disables). Retries run before the post-suite
 watchdog starts and before the RUN INVALID scan, so a long retry is not killed and throttling
 during one still voids the cell. No retry is attempted after a timeout kill, for a
