@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/handarbeit/fabrik/tests/e2e/registry"
 )
 
 // Plan is what the preconditions and the scheduler agree on for one invocation.
@@ -89,6 +91,11 @@ type Gate struct {
 	engineSHA string
 	// resume mirrors Plan.Resume for RunPregate, which consults the pre-gate record.
 	resume bool
+	// liveTests and isolation are the two-phase leg's inputs (#1977): the live
+	// set and each test's registry class. isolation == nil means "no registry":
+	// every leg then runs as the single undivided `go test` it did before.
+	liveTests []string
+	isolation map[string]registry.Isolation
 	// cov is the live coverage ledger context; nil when the ledger is disabled or
 	// unavailable (existing behaviour, unchanged).
 	cov *covState
@@ -289,6 +296,7 @@ func (g *Gate) run(ctx context.Context, argv []string) error {
 			return exitErr(ExitPreflightFailed, "sparse matrix: %v", err)
 		}
 	}
+	g.setPhaseInputs(sel)
 	if plan.Resume && hasSubtestFilter(plan.Args) {
 		return exitErr(ExitUsage, "--resume cannot be combined with a subtest-level -run/-skip: a subtest-filtered run executes only part of a test, so it could never be credited")
 	}

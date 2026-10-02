@@ -234,7 +234,8 @@ func TestFullMatrixKeepsTheWholeSuitePerLeg(t *testing.T) {
 	if code := f.g.Run(context.Background(), nil); code != 0 {
 		t.Fatalf("exit = %d", code)
 	}
-	if got := strings.Join(lastSuite(f).Args, " "); strings.Contains(got, "-run") {
+	// The phase split names every selected test (#1977) but must not drop any.
+	if got := strings.Join(lastSuite(f).Args, " "); !strings.Contains(got, "TestAlpha") || !strings.Contains(got, "TestBravo") {
 		t.Errorf("E2E_MATRIX=full must not narrow the leg: %s", got)
 	}
 }

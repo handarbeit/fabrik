@@ -57,6 +57,24 @@ func (g *Gate) loadSelection() (*SparseInput, error) {
 	return sel, nil
 }
 
+// setPhaseInputs records what the two-phase leg classifies tests with (#1977).
+// sel is nil only under E2E_MATRIX=full with the ledger disabled; the registry is
+// then read here, and if it cannot be the legs run undivided, loudly.
+func (g *Gate) setPhaseInputs(sel *SparseInput) {
+	if sel == nil {
+		var err error
+		if sel, err = g.loadSelection(); err != nil {
+			g.errf("warning: the two-phase leg is unavailable (%v) — every leg runs as one undivided go test\n", err)
+			return
+		}
+	}
+	g.liveTests = sel.Live
+	g.isolation = make(map[string]registry.Isolation, len(sel.Entries))
+	for n, e := range sel.Entries {
+		g.isolation[n] = e.Isolation()
+	}
+}
+
 // loadCoverageInputs is loadSelection plus the per-test source hashes (R3).
 func (g *Gate) loadCoverageInputs() (*covInputs, error) {
 	sel, err := g.loadSelection()

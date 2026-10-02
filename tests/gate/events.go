@@ -133,6 +133,16 @@ func Classify(events []Event) Classification {
 	return c
 }
 
+// All is every top-level test the stream mentions, in the Classification's own
+// bucket order.
+func (c Classification) All() []string {
+	var out []string
+	for _, s := range [][]string{c.Pass, c.Fail, c.Skip, c.Inconclusive, c.Running, c.NeverStarted} {
+		out = append(out, s...)
+	}
+	return out
+}
+
 // Report renders the five-line completed/still-running/never-started breakdown
 // exactly as the jq report did (including the trailing space after an empty
 // list's colon). The inconclusive line (#1973) is added only when there is one,
@@ -213,4 +223,36 @@ func LastCompletedTest(events []Event) string {
 		}
 	}
 	return name
+}
+
+// PeakConcurrent is the most top-level tests that were executing at once in a
+// `go test -json` stream, derived from stream order alone (the events carry no
+// timestamps): run and cont start a test running, pause (a t.Parallel test
+// waiting for a -parallel slot) and every terminal event stop it. A test that
+// calls t.Parallel() is therefore not counted while it queues. Tests with no
+// terminal event (a killed run) stay counted, which is the truth at kill time.
+func PeakConcurrent(events []Event) int {
+	cur, peak := 0, 0
+	running := map[string]bool{}
+	for _, e := range events {
+		if !topLevel(e) {
+			continue
+		}
+		switch e.Action {
+		case "run", "cont":
+			if !running[e.Test] {
+				running[e.Test] = true
+				cur++
+			}
+		case "pause", "pass", "fail", "skip":
+			if running[e.Test] {
+				delete(running, e.Test)
+				cur--
+			}
+		}
+		if cur > peak {
+			peak = cur
+		}
+	}
+	return peak
 }

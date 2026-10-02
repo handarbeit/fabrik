@@ -21,7 +21,9 @@ import (
 //	fabrik.log.<n>      the bed ENGINE log, one file per engine run (see below)
 //	bed-run.log         the bed's stdout/stderr (append-only across harness restarts)
 //	preflight.txt       the invocation's preflight output
-//	load.json           the host's 1-minute load average at leg start and end
+//	load.json           the host's 1-minute load average at leg start and end, plus the peak seen while the leg ran (#1977)
+//	phases.json         per-phase wall-clock, peak concurrent tests and GraphQL spend, with the host's peak load (#1977)
+//	bed-concurrency.json the bed engine's effective max_concurrent (#1977)
 //	probes.json         the preflight environment probes' results (#1974): host load + orphans, board-listing lag
 //	bed-config.sha256   a hash of the bed's .fabrik/stages/ and config.yaml
 //
@@ -173,6 +175,70 @@ type legArchive struct {
 	loadFrom float64
 	loadOK   bool
 	finished bool
+
+	// The load sampler (#1977, R5.1): the highest 1-minute load average seen while
+	// the leg ran, sampled on the archive's cadence (start and end included).
+	loadMu      sync.Mutex
+	loadPeak    float64
+	loadSamples int
+	loadStop    chan struct{}
+	loadDone    chan struct{}
+}
+
+// sampleLoad folds one reading of the host's load average into the peak.
+func (a *legArchive) sampleLoad() {
+	v, ok := a.g.loadAvg()
+	if !ok {
+		return
+	}
+	a.loadMu.Lock()
+	defer a.loadMu.Unlock()
+	if a.loadSamples == 0 || v > a.loadPeak {
+		a.loadPeak = v
+	}
+	a.loadSamples++
+}
+
+// startLoadSampler samples the load average until stopLoadSampler. With a
+// non-positive interval only the start and end readings are taken.
+func (a *legArchive) startLoadSampler(interval time.Duration) {
+	a.loadStop, a.loadDone = make(chan struct{}), make(chan struct{})
+	a.sampleLoad()
+	go func() {
+		defer close(a.loadDone)
+		if interval <= 0 {
+			<-a.loadStop
+			return
+		}
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-a.loadStop:
+				return
+			case <-t.C:
+				a.sampleLoad()
+			}
+		}
+	}()
+}
+
+func (a *legArchive) stopLoadSampler() {
+	if a.loadStop == nil {
+		return
+	}
+	close(a.loadStop)
+	<-a.loadDone
+	a.loadStop = nil
+	a.sampleLoad()
+}
+
+// LoadStats is the peak 1-minute load and the number of readings behind it;
+// ok is false when the host reported none.
+func (a *legArchive) LoadStats() (peak float64, samples int, ok bool) {
+	a.loadMu.Lock()
+	defer a.loadMu.Unlock()
+	return a.loadPeak, a.loadSamples, a.loadSamples > 0
 }
 
 // ArchiveCellDir is <ledger>/archive/<cell>/<invocation>.
@@ -207,6 +273,7 @@ func (g *Gate) beginArchive(cell Cell, cs *covState) *legArchive {
 	}
 	g.writeProbes(dir)
 	a.loadFrom, a.loadOK = g.loadAvg()
+	a.startLoadSampler(g.Cfg.ArchiveLogInterval)
 	a.arch = newLogArchiver(g.Cfg.EngineLog, dir, g.Cfg.ArchiveLogInterval)
 	a.arch.Start()
 	return a
@@ -226,6 +293,7 @@ func (a *legArchive) Finish() {
 		return
 	}
 	a.finished = true
+	a.stopLoadSampler()
 	if a.arch != nil {
 		if err := a.arch.Stop(); err != nil {
 			a.g.errf("warning: archiving the engine log: %v\n", err)
@@ -241,8 +309,10 @@ func (a *legArchive) Finish() {
 		a.g.errf("warning: archiving bed-run.log: %v\n", err)
 	}
 	type load struct {
-		Start *float64 `json:"start_1m"`
-		End   *float64 `json:"end_1m"`
+		Start   *float64 `json:"start_1m"`
+		End     *float64 `json:"end_1m"`
+		Peak    *float64 `json:"peak_1m,omitempty"`
+		Samples int      `json:"samples,omitempty"`
 	}
 	var l load
 	if a.loadOK {
@@ -251,6 +321,9 @@ func (a *legArchive) Finish() {
 	}
 	if v, ok := a.g.loadAvg(); ok {
 		l.End = &v
+	}
+	if peak, n, ok := a.LoadStats(); ok {
+		l.Peak, l.Samples = &peak, n
 	}
 	if err := os.WriteFile(filepath.Join(a.dir, "load.json"), mustJSON(l), 0o644); err != nil {
 		a.g.errf("warning: archiving load average: %v\n", err)

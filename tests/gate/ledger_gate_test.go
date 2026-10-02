@@ -81,7 +81,8 @@ func TestRunResumeAddsUpToCompleteCoverage(t *testing.T) {
 	if code := f.g.Run(ctx, nil); code != 1 {
 		t.Fatalf("run 1 exit = %d", code)
 	}
-	if got := strings.Join(lastSuite(f).Args, " "); strings.Contains(got, "-run") {
+	// The phase split names every selected test (#1977) but must not drop any.
+	if got := strings.Join(lastSuite(f).Args, " "); !strings.Contains(got, "TestAlpha") || !strings.Contains(got, "TestBravo") {
 		t.Errorf("a plain run must not narrow the selection: %s", got)
 	}
 	l := f.ledger(t)
