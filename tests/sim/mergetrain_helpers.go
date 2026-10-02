@@ -261,6 +261,47 @@ func QueueMember(t *testing.T, env *Env, marker string, files map[string]string)
 	return num, pr.Number
 }
 
+// QueueMemberOnBase is QueueMember for a member whose partition is a
+// non-default base branch (ADR-1648): the issue carries a `base:<base>` label,
+// its commit branches from `base`, and its PR targets `base`. The caller must
+// have created `base` in the sim (Sim().SeedBranch) before calling, and before
+// the first poll, so the engine's resolveBaseLabelBranch finds it on origin —
+// a missing branch makes baseBranchForItem silently fall back to the default
+// and collapses the partition. QueueMember itself is deliberately untouched so
+// its many existing callers cannot be disturbed.
+func QueueMemberOnBase(t *testing.T, env *Env, base, marker string, files map[string]string) (issueNum, prNum int) {
+	t.Helper()
+	title := fmt.Sprintf("merge-train member %s", marker)
+	num := FileIssue(t, env, title, "merge-train member. marker="+marker, "Queued", "base:"+base)
+	branch := fmt.Sprintf("fabrik/issue-%d", num)
+
+	env.Sim.Sim().SeedCommitFrom(env.OwnerRepo, branch, base, files,
+		fmt.Sprintf("merge-train member commit for #%d (%s)", num, marker))
+	if err := env.Sim.Sim().Err(); err != nil {
+		t.Fatalf("QueueMemberOnBase(#%d): seeding commit: %v", num, err)
+	}
+
+	// Reserve the PR number from the shared Env sequence — see QueueMember.
+	env.issueSeqMu.Lock()
+	env.issueSeqNext++
+	prNum = env.issueSeqNext
+	env.issueSeqMu.Unlock()
+
+	env.Sim.Sim().SeedPR(env.OwnerRepo, simgh.PRSeed{
+		Number:      prNum,
+		Head:        branch,
+		Base:        base,
+		Title:       title,
+		Body:        fmt.Sprintf("merge-train member PR for #%d.\n\nCloses #%d\n", num, num),
+		IssueNumber: num,
+	})
+	if err := env.Sim.Sim().Err(); err != nil {
+		t.Fatalf("QueueMemberOnBase(#%d): seeding PR: %v", num, err)
+	}
+	t.Logf("queued member on base %q: issue #%d, PR #%d, marker=%s", base, num, prNum, marker)
+	return num, prNum
+}
+
 // resyncIssueSeqAfterEngineActivity re-synchronizes env's own issue/PR
 // number reservation counter (issueSeqNext) with the sim's real internal
 // per-repo counter after a poll has run. Engine activity — chiefly

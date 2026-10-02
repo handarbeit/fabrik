@@ -221,8 +221,11 @@
     },
     {
       "name": "TestMergeTrainTwoBasesConcurrent",
-      "parity": "gap",
-      "note": "no sim scenario for concurrent per-(repo,base) trains",
+      "parity": "sim",
+      "sim": [
+        "TestMergeTrainTwoBasesConcurrent"
+      ],
+      "note": "proves partition mechanics (distinct per-base trains landing in one poll); in-flight markers are unexported so independence is proven by proxy, and simgh links PR to issue by branch convention so the base-conditional GraphQL linkage has no sim analogue",
       "skip_ok_legs": [
         "*/off"
       ]
