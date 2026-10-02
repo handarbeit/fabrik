@@ -194,7 +194,7 @@ func writeFileAtomic(path string, data []byte) error {
 // appendLine appends one JSON line to path and fsyncs it. If a previous writer
 // was killed mid-line (the file does not end in a newline) the torn fragment is
 // terminated first, so the new record never glues onto it.
-func appendLine(path string, v any) error {
+func appendLine(path string, v any) (retErr error) {
 	line, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -203,7 +203,13 @@ func appendLine(path string, v any) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	// A failed Close on a writable file can mean lost data: report it, but never
+	// mask an earlier write/sync error.
+	defer func() {
+		if cerr := f.Close(); cerr != nil && retErr == nil {
+			retErr = cerr
+		}
+	}()
 	if st, err := f.Stat(); err == nil && st.Size() > 0 {
 		last := make([]byte, 1)
 		if _, err := f.ReadAt(last, st.Size()-1); err == nil && last[0] != '\n' {
