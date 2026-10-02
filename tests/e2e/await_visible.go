@@ -233,6 +233,22 @@ func AwaitLabelVisible(t testing.TB, env *Env, repo string, issueNumber int, lab
 	}))
 }
 
+// AwaitLabelGone is AwaitLabelVisible's counterpart for a label the HARNESS
+// removed: it blocks until a fresh read of the issue no longer shows label. Use it
+// before a poll is expected to observe the removal (#1978's BatchCap waits on the
+// REST issue read after unpausing, then triggers one poll).
+func AwaitLabelGone(t testing.TB, env *Env, repo string, issueNumber int, label string, timeout time.Duration) {
+	t.Helper()
+	what := fmt.Sprintf("label %q gone from %s#%d", label, repo, issueNumber)
+	finishAwait(t, awaitvisible.Poll(awaitSpec(t, what, timeout, awaitRESTInterval), func() (bool, string, error) {
+		labels, err := tryIssueLabels(env, repo, issueNumber)
+		if err != nil {
+			return false, "", err
+		}
+		return !awaitvisible.HasLabel(labels, label), fmt.Sprintf("labels %v", labels), nil
+	}))
+}
+
 // AwaitPRForBranchVisible blocks until the PR the HARNESS opened on
 // fabrik/issue-<N> is resolvable by the engine's own convention
 // (FetchLinkedPR: GET /pulls?head=<owner>:fabrik/issue-N). It returns the PR

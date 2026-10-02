@@ -29,7 +29,7 @@ import (
 // defect at all: it uses the pass-through adapter, never the map-backed
 // itemstate.Store (ADR-1833, "Non-vacuity proof").
 //
-// # Gating the batch with fabrik:paused
+// # Gating the batch with fabrik:paused, then holding polls (#1978)
 //
 // The engine has no batching dwell: the first poll that sees a non-paused
 // Queued member dispatches a worker. Queuing seven members sequentially takes
@@ -38,11 +38,24 @@ import (
 // therefore files every member already carrying fabrik:paused, places all seven
 // in Queued (paused Queued members are excluded from the partition and cause no
 // engine side effect — itemNeedsWork returns early for holding stages), then
-// removes the label from all seven concurrently. The unpause window is about one
-// API round-trip, not zero: if a poll lands inside it the scenario detects the
-// partial view (first cap line not "7 Queued", or first snapshot under five
-// members) and fails with an explicit "re-run" message rather than reporting an
-// engine regression.
+// removes the label from all seven concurrently.
+//
+// That unpause is a multi-step write: about one API round-trip wide, not zero. A
+// free-running poll landing inside it would see only some of the members (the
+// "poll boundary straddled the unpause" race, which #1973 could only downgrade to
+// Inconclusive and a ~30–60 minute re-run). The scenario now closes it with the
+// bed's poll seam: HoldPolls after seeding, unpause all seven, wait until every
+// removal is visible on the REST issue read, then TriggerPoll — exactly one
+// complete poll, which sees the whole window — assert on that poll's batch
+// snapshot, and release polls so batch 1's landing, batch 2 and the exactly-once
+// settle run free-running as before. Seeding stays free-running: paused members are
+// inert, and the engine must poll and hydrate them anyway; holding across the
+// slow seed would starve the bed for no benefit.
+//
+// What the seam does NOT remove is lag between GitHub's REST read and the
+// GraphQL/updatedAt surfaces the engine's probe and deep-fetch read. The
+// precondition guard below therefore stays, as a defensive check, and still ends
+// Inconclusive: it now covers residual read lag only, never the poll boundary.
 //
 // # What "first five by entry order" means here
 //
@@ -68,11 +81,13 @@ import (
 // change. A pre-flight fails loudly if a stale open, non-paused Queued item is
 // already on the board.
 //
-// Default-base train group (#1977, ADR-1977): registry class default_base_train. It is
-// NOT moved onto a throwaway base: its A2/A3 assertions count "merged integration PR"
-// and "opened draft CI PR" log lines, which the engine logs per REPO, not per
-// partition, so a concurrent train on another base of RepoAlpha would add lines it
-// would mistake for its own. The gate therefore runs it serially in its own phase.
+// Exclusive (#1977, #1978, ADR-1977, ADR-1978): registry class exclusive, because
+// holding polls stops the whole bed (HoldPolls fails any other class). It also still
+// needs the default-base partition to itself: its A2/A3 assertions count "merged
+// integration PR" and "opened draft CI PR" log lines, which the engine logs per REPO,
+// not per partition, so a concurrent train on another base of RepoAlpha would add
+// lines it would mistake for its own. The exclusive phase runs serially, last, with
+// no sibling test active.
 //
 // # Log scoping (R5)
 //
@@ -146,18 +161,35 @@ func TestMergeTrainQueuedDeeperThanBatchCap(t *testing.T) {
 	firstFive, lastTwo := nums[:batchCap], nums[batchCap:]
 	t.Logf("queued %d paused members %v (PRs %v); expected batches: %v then %v", memberCount, nums, prs, firstFive, lastTwo)
 
-	// --- Release all seven at once. ---
+	// --- Build the release window under a poll hold, then release all seven. ---
+	// HoldPolls returns once no poll is running and none will start; it fails the
+	// test unless this test is exclusive in the registry, and registers the release
+	// with t.Cleanup so a failure here never leaves the bed held.
+	HoldPolls(t)
 	offset := LogOffset(t, env)
 	if errs := removePausedConcurrently(env, repo, nums); len(errs) > 0 {
 		t.Fatalf("could not release the batch (members stay paused; nothing has formed): %v", errs)
 	}
-	t.Logf("removed %s from all %d members; scanning bed log from offset %d", pausedLabel, memberCount, offset)
+	t.Logf("removed %s from all %d members under a poll hold; scanning bed log from offset %d", pausedLabel, memberCount, offset)
+
+	// Wait until the unpause is visible, then let exactly one poll see it. Waiting
+	// for a HARNESS write's visibility is lag, so a timeout is Inconclusive (#1974);
+	// the Status listing is re-confirmed too, as the probe reads that surface.
+	for _, n := range nums {
+		AwaitLabelGone(t, env, repo, n, pausedLabel, awaitSeedTimeout)
+	}
+	for _, n := range nums {
+		AwaitBoardItemVisible(t, env, repo, n, awaitSeedTimeout)
+	}
+	TriggerPoll(t)
 
 	isSnapshot := func(l string) bool { _, ok := parseBatchSnapshot(l, trainKey); return ok }
 	isMerged := func(l string) bool { _, ok := parseMergedIntegration(l, repo); return ok }
 
 	// --- A1: the first batch the engine forms. ---
-	waitForLogMatch(t, env, offset, 10*time.Minute, "first \"batch snapshot for "+trainKey+"\" after the unpause", isSnapshot)
+	// The triggered poll has finished, and the snapshot is logged by the poll itself,
+	// so this only absorbs log-read latency.
+	waitForLogMatch(t, env, offset, 2*time.Minute, "first \"batch snapshot for "+trainKey+"\" after the triggered poll", isSnapshot)
 	lines := logLinesSince(t, env, offset)
 	snapIdx := indexOfLine(lines, 0, isSnapshot)
 	snapMembers, _ := parseBatchSnapshot(lines[snapIdx], trainKey)
@@ -192,6 +224,11 @@ func TestMergeTrainQueuedDeeperThanBatchCap(t *testing.T) {
 			snapMembers, firstFive, capMax, capQueued, dumpLines(lines[:snapIdx+1]))
 	}
 	t.Logf("A1: cap line %d Queued / max_batch_size=%d; first snapshot %v (listed order) == first five %v", capQueued, capMax, snapMembers, firstFive)
+
+	// A1 is decided on the triggered poll alone. Resume free-running polls now so
+	// the rest of the scenario (batch 1's landing, batch 2, the exactly-once settle)
+	// runs as it always has; the t.Cleanup HoldPolls registered makes this idempotent.
+	ReleasePolls(t)
 
 	// --- A2: stability, from first snapshot to the batch-1 landing. ---
 	// The window ends at "merged integration PR", not at "landing complete":
