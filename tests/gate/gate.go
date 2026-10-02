@@ -49,12 +49,13 @@ type Gate struct {
 	Preflights []Preflight
 	// Scheduler runs the cells; default is the serial auth × train loop.
 	Scheduler Scheduler
-	// OnLeg, if set, observes each leg that ran to a normal post-suite result
-	// (the #1972 ledger seam). It is NOT called for a leg that ended in the
-	// RUN INVALID backoff banner (ExitBudgetExhausted), the post-suite watchdog
+	// OnLeg, if set, observes each leg that ran to a normal post-suite result.
+	// (#1972's coverage ledger does NOT hang off it: it records from the suite's
+	// event stream so a killed leg keeps what had finished.) It is NOT called for
+	// a leg that ended in the RUN INVALID backoff banner (ExitBudgetExhausted), the post-suite watchdog
 	// (ExitPostSuiteWatchdog), or a failed restart step: bash gave those no
-	// per-leg result either, and how a ledger should record them
-	// (invalid/inconclusive) is #1972/#1973's decision, not this port's.
+	// per-leg result either. The ledger's reading of them: RUN INVALID voids the
+	// cell's records, a watchdog leg's completed PASSes count (ADR-1972).
 	OnLeg func(LegResult)
 
 	// Seams for time and the OS.

@@ -28,8 +28,9 @@ Structure only — none of the features exist yet.
 |---|---|---|
 | `Cell` (auth, train, parallel, args, isolated) and `PlanCells` | `schedule.go` | #1975 sparse matrix, #1976 multi-bed |
 | `Scheduler` interface (`SerialScheduler` today) on `Gate` | `schedule.go` | #1975, #1976, #1977 two-phase legs |
-| `LegResult` (cell, exit code, log path, decoded `[]Event`, budget before/after) delivered to `Gate.OnLeg` | `leg.go` | #1972 per-SHA ledger |
-| `Classification` (pass/fail/skip/running/never-started) | `events.go` | #1973 adds INCONCLUSIVE |
+| `LegResult` (cell, exit code, log path, decoded `[]Event`, budget before/after) delivered to `Gate.OnLeg` | `leg.go` | other observers. **#1972's ledger does not use it** — it records from `suiteWriter`'s event sink (`ledger_recorder.go`), because `OnLeg` never fires for a killed, RUN INVALID, watchdog or restart-failed leg |
+| `Classification` (pass/fail/skip/running/never-started) | `events.go` | #1973 adds INCONCLUSIVE (the ledger's `Outcome` is already an open enum with INCONCLUSIVE reserved) |
+| `Ledger`, `Evaluator`, `Report` and `RequiredTests`/`ResumeCells` over `PlanCells` output | `ledger*.go`, `coverage.go`, `resume.go` | #1972; #1975's sparse plan changes the required set with no change here |
 | `[]Preflight` (`Gate.Preflights`, ordered, each returns an `*ExitError`) | `gate.go` | #1974 environment probes |
 | `Commander` (`Run`/`Start`), `Gate.Env`, `Sleep`, `Now`, `ProcCwd` | `exec.go`, `gate.go` | every test; #1976's per-bed environments |
 
@@ -108,6 +109,29 @@ New coverage with no bash counterpart: the leg executor's happy path, argv/env c
 failure classification, timeout teardown and RUN INVALID (`leg_test.go`); every exit code end
 to end (`gate_test.go`); the reset port and its pagination bounds (`reset_test.go`); the leg
 shape table (`schedule_test.go`); the golden reports (`events_test.go`).
+
+## Coverage ledger (#1972, ADR-1972)
+
+The gate is coverage-based: outcomes are recorded per leg under the engine SHA and `--resume`
+runs only what is missing. `tests/e2e/README.md`'s "Coverage ledger, `--resume`, and suspending
+a run" is the operator's view; this is the map.
+
+| File | What |
+|---|---|
+| `ledger.go` | `Ledger`: layout, append-only fsynced JSONL, tolerant reader (torn tail skipped, unknown version = corrupt leg), `void`, `invocations.jsonl`, `Snapshot.Covered` |
+| `ledger_recorder.go` | `legRecorder`: terminal-event recording from the stream, skip message and `#N` extraction |
+| `ledger_hash.go` | `HashTests`: per-test source hash over the same-package reference closure |
+| `ledger_drift.go` | `Gate.DriftCheck` (R2) against the engine SHA |
+| `ledger_skips.go` | `ClassifySkip` (known / structural / missing), `gh issue view` via the `Commander` |
+| `ledger_wire.go` | coverage inputs, `openCoverage`, preflight tee, pre-gate record |
+| `resume.go` | `SelectedTests` (Go `-run`/`-skip` rules), `RequiredTests`, `ResumeCells`, regex builder + size guard |
+| `coverage.go`, `coverage_cmd.go` | `Evaluator`, `Report`, `gate coverage` (exit 0 / `ExitCoverageIncomplete` 8) |
+| `archive.go`, `loadavg*.go` | per-leg archive, engine-log segment sampler, bed-config hash, load average, retention |
+
+Deltas this adds to the port: `ParseRunArgs` consumes `--clean` **and** `--resume` as leading flags
+in either order; exit code 8 exists (only under `--resume` and `coverage`); the per-leg `-json` log
+moves into the archive when the ledger is on (the `$TMPDIR` name, and its main/isolated overwrite
+quirk, remain when it is off); and `RunLeg` starts an archive/sampler before the restart step.
 
 ## Behaviour deltas and quirks
 
