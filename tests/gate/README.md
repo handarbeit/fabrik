@@ -97,7 +97,7 @@ All 29 functions of the bash `run.sh`, plus its top-level code.
 | `preflight_bed` | `bed.go`: `Gate.PreflightBed` |
 | `stop_bed_instance` | `bed.go`: `Gate.StopBedInstance` |
 | `write_isolated_bed_gitconfig` | `bed.go`: `Gate.WriteIsolatedBedGitconfig` |
-| `preflight_bed_start` | `bed.go`: `Gate.StartBed` and `Gate.BedStartCmd` |
+| `preflight_bed_start` | `bed.go`: `Gate.StartBed` and `Gate.BedStartCmd` — which also enables the test-only poll hold/trigger seam (#1978) via `pollctl.Env`; `lifecycle.go`'s `StartFabrikTestBed` appends the same entry so a restarted bed keeps it |
 | `prepare_bed_and_reset` | `bed.go`: `Gate.PrepareBedAndReset` |
 | `drain_output_consumer` | `exec.go`: `Cmd.WaitDelay` / `Result.PipeWedged`; the warning is printed in `leg.go` |
 | `graphql_budget_remaining` | `budget.go`: `Gate.GraphQLBudgetRemaining` |

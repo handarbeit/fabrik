@@ -1035,7 +1035,7 @@ field, so the live test remains the only cover for that asymmetry.
 
 `mergetrain_batchcap_test.go` (`TestMergeTrainQueuedDeeperThanBatchCap`, the twin of the live scenario of the
 same name, #1850 / ADR-1833) seeds **7** clean members against `mergeTrainEnv`'s `MaxBatchSize = 5` before the
-first poll (no straddle — the live test's poll-boundary race, #1978, does not exist here) and runs exactly
+first poll (no straddle — the live test's poll-boundary race is closed there by the bed's poll hold/trigger seam, #1978, and does not exist here) and runs exactly
 two `RunPoll`s with assertions between. After poll 1 exactly one merged `fabrik/merge-train/*` landing PR
 exists, closing the first five; those are Done and closed and the other two are still Queued, unpaused. After
 poll 2 a second landing PR closes exactly the remaining two; the two `Closes` sets are disjoint and cover all

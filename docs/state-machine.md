@@ -3866,6 +3866,29 @@ Webhooks continue to apply deltas to the cache via `ApplyDelta` but no longer dr
 
 **References:** [ADR-032: Webhook-Driven Event Delivery](../adrs/032-webhook-event-delivery.md)
 
+### 7.8a Test-Only Poll Hold/Trigger Seam (#1978)
+
+> **Test-only — not a production feature.** Enabled solely by the hidden environment variable `FABRIK_TEST_POLL_CONTROL` (`Config.PollControlFile`), which the live e2e gate runner and harness set on the bed engine and nothing else does. It has no flag, no YAML key and no entry in `docs/USER_GUIDE.md`. Unset (the production state) `Engine.pollSeam` is nil, every hook below is a nil check, and the engine starts no goroutine, touches no file and logs nothing extra — the poll loop is behaviourally identical to one without the seam. Distinct from the sim's `Engine.PollOnce` seam (ADR-1449), which bypasses `Run()`; this one gates the real `Run()` loop. See ADR-1978.
+
+Some live scenarios need the engine to take one decision in one specific poll — their subject is a *state window* (`TestMergeTrainQueuedDeeperThanBatchCap`: "the engine sees exactly 7 Queued members at once"). With the seam enabled the harness can **hold** automatic polls, build the window, then **trigger exactly one complete poll** and read back when it finished.
+
+**What "held" covers.** Every path that starts `poll()` or poll-equivalent work goes through one of two hooks, and a held cycle is *dropped*, never queued, so the window cannot move:
+
+| Trigger | Hook |
+|---|---|
+| Startup poll, ticker, `wakeCh` wake (including `PollWithBackoff`'s own GraphQL-recovery self-wake, which only ever sends on `wakeCh`) | `doPollCycle` → `pollSeam.ordinary`; no `select` in `Run()` is restructured |
+| `reconcileLoop` tick (`LightReconcile`, cache reconcile) | `pollSeam.runUnlessHeld` around the extracted `reconcileTick` |
+
+No dispatch, catch-up phase, settle scan or light reconcile runs while held. Workers already dispatched by an earlier poll (item workers, a merge-train worker goroutine) keep running: hold gates *new* cycles only. A hold never blocks `ctx.Done()`/the drain — the held path returns immediately.
+
+**A trigger runs one complete poll**: `Run()`'s own `pollCycle` closure (`PollWithBackoff` — minimum-poll-interval floor, REST hard gate, `poll()`, idle/GraphQL backoff bookkeeping — then the ticker reset), so backoff state is real, not reduced. `PollBackoffResult.Ran` is true only when `poll()` executed. A call that hit the 500 ms floor is retried a bounded number of times; anything else that ran no poll is reported `blocked`, never `ran`. A poll error is reported `error`.
+
+**Protocol** (`internal/pollctl`; two single-writer JSON files, both replaced by atomic rename). The harness writes `<bed>/.fabrik/poll-control.json` (`hold`, `hold_until`, `hold_gen`, `trigger_seq`); a watcher goroutine — started only when the seam is enabled, polling every 200 ms — applies it and writes `poll-control.ack.json` (`held`, applied `hold_gen`, `done_seq`, `outcome` ∈ `ran`/`error`/`blocked`, `detail`). `poll_seam.go`'s `pollMu` serializes poll execution: an ordinary poll, a triggered poll and the *application of a hold* all take it, so two polls never overlap, a trigger during a running poll waits for it, and a hold is acknowledged only once no poll is running and none will start (`reconMu` does the same for reconcile ticks).
+
+**Lifecycle.** The engine deletes any stale request at startup and writes a fresh released ack — its existence is the harness's "seam is live on this bed" signal — so a hold never survives a restart (both bed launch sites, `tests/gate/bed.go` and `tests/e2e/lifecycle.go`, append `pollctl.Env`, so a restarted bed keeps the seam; enabled-but-released it is a normal free-running bed). A hold carries `hold_until` (the harness stamps now + `pollctl.MaxHold`, 10 min); past it the engine releases on its own, so a hard-killed harness cannot leave a bed held.
+
+**Who may use it.** Holding polls starves the whole bed, so the harness helpers (`HoldPolls`/`TriggerPoll`/`ReleasePolls`, `tests/e2e/poll_control.go` over `tests/e2e/pollhold`) fail any test not marked `exclusive` in `tests/e2e/registry/registry.json`, and the registry check (plain `go test ./...`) fails any test that reaches them without being exclusive. `HoldPolls` registers the release with `t.Cleanup`. The only user is `TestMergeTrainQueuedDeeperThanBatchCap`; pipeline, convergence and gate tests stay free-running.
+
 ### 7.9 Webhook Wake Semantics: Burst Coalescence and Self-Feedback
 
 **Burst coalescence.** `wakeCh` is a buffered channel with capacity 1. When multiple webhook events arrive in rapid succession, at most one wake is queued. The wakeChObserver uses a non-blocking send (`select { case wakeCh <- struct{}{}: default: }`), so additional fires while the channel is full are dropped. A burst of N simultaneous events produces at most 1 extra poll cycle. Test: `TestHandleWebhookBurstCoalescence` in `engine/webhook_test.go`.
