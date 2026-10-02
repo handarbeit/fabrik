@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/handarbeit/fabrik/config"
 	"github.com/handarbeit/fabrik/engine"
+	"github.com/handarbeit/fabrik/internal/pollctl"
 	fabrikplugin "github.com/handarbeit/fabrik/plugin"
 	"github.com/handarbeit/fabrik/stages"
 	"github.com/handarbeit/fabrik/tui"
@@ -940,6 +941,7 @@ func Execute() error {
 		GitHubAppInstallationID:   cfg.GitHubAppInstallationID,
 		NoBrowser:                 cfg.NoBrowser,
 		ReadyCh:                   testReadyCh,
+		PollControlFile:           os.Getenv(pollctl.EnvVar), // TEST-ONLY (#1978): env only — deliberately no flag, YAML key, help or USER_GUIDE entry
 	})
 	if err != nil {
 		return err

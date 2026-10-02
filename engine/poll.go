@@ -613,6 +613,12 @@ func (e *Engine) Run() error {
 	// not be gated on the webhook manager starting. e.webhookMgr is nil when
 	// webhooks are disabled or failed to start; reconcileLoop skips health-state
 	// signaling in that case.
+	//
+	// TEST-ONLY (#1978): the bed's poll hold/trigger seam is built here, before
+	// reconcileLoop starts, because reconcileLoop consults it. nil in production.
+	if e.cfg.PollControlFile != "" {
+		e.pollSeam = newPollSeam(e, e.cfg.PollControlFile)
+	}
 	if cacheImpl != nil {
 		go e.reconcileLoop(ctx, cacheImpl, e.webhookMgr)
 	}
@@ -631,13 +637,26 @@ func (e *Engine) Run() error {
 	// effective interval. Returns the error from poll(). See
 	// Engine.PollWithBackoff's own doc comment for why the backoff state
 	// itself lives on Engine, not as closure locals here.
-	doPollCycle := func() error {
+	pollCycle := func() (PollBackoffResult, error) {
 		result, err := e.PollWithBackoff(ctx, configuredInterval)
 		if err != nil {
-			return err
+			return result, err
 		}
 		ticker.Reset(result.NextInterval)
-		return nil
+		return result, nil
+	}
+	// With the test-only poll seam (#1978) unset this is exactly pollCycle; with
+	// it set, every automatic trigger (startup, ticker, wake) funnels through the
+	// seam's hold gate here, so no select shape needs restructuring.
+	doPollCycle := func() error {
+		if e.pollSeam != nil {
+			return e.pollSeam.ordinary(pollCycle)
+		}
+		_, err := pollCycle()
+		return err
+	}
+	if e.pollSeam != nil {
+		e.pollSeam.start(ctx, pollCycle)
 	}
 
 	// Startup upgrade check: no workers are in flight yet, making this the safest call site.
@@ -1031,6 +1050,11 @@ type PollBackoffResult struct {
 	// Run()'s original behavior of leaving the ticker on its prior schedule
 	// when poll() itself fails, rather than resetting to some fallback value.
 	NextInterval time.Duration
+	// Ran reports that poll() actually executed to completion — false for a
+	// floor-blocked or REST-gated call, which returns only a NextInterval. Used
+	// by the test-only poll seam (#1978) so a triggered poll that ran nothing is
+	// never reported as a completed one.
+	Ran bool
 }
 
 // PollWithBackoff is a verbatim extraction of what Run()'s doPollCycle
@@ -1213,7 +1237,7 @@ func (e *Engine) PollWithBackoff(ctx context.Context, configuredInterval time.Du
 		GraphQLStats:      tui.RateLimitStats{Limit: graphqlStats.Limit, Remaining: graphqlStats.Remaining, Reset: graphqlStats.Reset},
 		EffectiveInterval: effectiveInterval,
 	})
-	return PollBackoffResult{NextInterval: effectiveInterval}, nil
+	return PollBackoffResult{NextInterval: effectiveInterval, Ran: true}, nil
 }
 
 // PollOnce runs exactly one poll cycle and reports only whether it errored —

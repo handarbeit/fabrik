@@ -125,6 +125,12 @@ type Config struct {
 	// ReadyCh is closed once Run() has registered signal handlers. Tests use
 	// this to avoid sending SIGINT before signal.Notify is installed.
 	ReadyCh chan struct{}
+	// PollControlFile enables the bed-only poll hold/trigger seam (#1978,
+	// ADR-1978) when non-empty: the path of the control file the live e2e
+	// harness writes. TEST-ONLY — set solely from FABRIK_TEST_POLL_CONTROL by
+	// cmd/root.go, with no flag, no YAML key and no documentation; empty (the
+	// production state) leaves the poll loop untouched.
+	PollControlFile string
 }
 
 // EventSource values and defaults for the Hookdeck (App-auth-only) ingestion
@@ -235,6 +241,7 @@ type Engine struct {
 	// subprocesses. Production leaves this nil.
 	stalenessCompareFn          func(selfupgrade.DevBuildConfig) (selfupgrade.DevBuildStatus, error)
 	lastProjectUpdatedAt        time.Time                     // last seen project.updatedAt from FetchProjectUpdatedAt gate; zero = not yet checked
+	pollSeam                    *pollSeam                     // TEST-ONLY (#1978): bed poll hold/trigger seam; nil unless Config.PollControlFile is set; built in Run()
 	wakeCh                      chan struct{}                 // TUI sends on this to wake the poll loop immediately; nil if no TUI
 	stopCh                      chan tui.StopRequest          // TUI sends on this to stop a specific in-flight issue; nil if no TUI
 	sem                         chan struct{}                 // semaphore bounding concurrent workers across poll cycles
