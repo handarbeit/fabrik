@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/handarbeit/fabrik/internal/events"
+	"github.com/handarbeit/fabrik/internal/sessionreap"
 	"github.com/handarbeit/fabrik/tui"
 )
 
@@ -714,6 +715,15 @@ func (wm *webhookManager) UpdateRepos(repos map[string]bool) {
 // It blocks on repoReadyCh before launching the first subprocess so that multi-repo
 // boards don't attempt a subscription with an empty repo list.
 func (wm *webhookManager) supervise(ctx context.Context) {
+	// The subprocess's start token (sessionreap.RecordStart) is kept past its exit
+	// so a later killFn on the stale currentCmd can tell a recycled PID from ours
+	// (#1957); drop the last one when supervision ends.
+	defer func() {
+		wm.mu.Lock()
+		last := wm.currentCmd
+		wm.mu.Unlock()
+		forgetWebhookStart(last)
+	}()
 	// Wait until at least one repo is known before starting the subprocess.
 	// On single-repo boards repoReadyCh is already closed at construction.
 	// On multi-repo boards it is closed by the first UpdateRepos call.
@@ -804,6 +814,7 @@ func (wm *webhookManager) supervise(ctx context.Context) {
 		wm.logFn(0, "webhook", "%s\n", effectiveSubscriptionMessage(org, repos))
 
 		wm.mu.Lock()
+		forgetWebhookStart(wm.currentCmd) // the previous subprocess is gone; its token is no longer needed
 		wm.currentCmd = cmd
 		wm.state = WebhookStreamStartingUp
 		wm.subscriptionNote = subscriptionCoverageNote(org, repos)
@@ -963,6 +974,13 @@ func classifyExit(elapsed, probeTimeout time.Duration, stderrContent string) exi
 	}
 }
 
+// forgetWebhookStart drops the start token recorded for cmd's PID.
+func forgetWebhookStart(cmd *exec.Cmd) {
+	if cmd != nil && cmd.Process != nil {
+		sessionreap.ForgetStart(cmd.Process.Pid)
+	}
+}
+
 // startSubprocessInternal starts `gh webhook forward` with the given args.
 // Returns the started cmd and a channel that receives the accumulated stderr content
 // once the drainer goroutine finishes (use with a timeout when reading).
@@ -978,6 +996,10 @@ func (wm *webhookManager) startSubprocessInternal(ctx context.Context, args []st
 	if err := cmd.Start(); err != nil {
 		return nil, nil, fmt.Errorf("starting gh webhook forward: %w", err)
 	}
+	// Record the start token right away: killProcGroup runs on this cmd long
+	// after it may have exited (Stop, secret rotation, repo discovery), and the
+	// token is what tells our group from a recycled PID's (#1957, R1).
+	sessionreap.RecordStart(cmd.Process.Pid, sessionreap.Options{})
 
 	stderrCh := make(chan string, 1)
 
