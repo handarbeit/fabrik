@@ -103,8 +103,7 @@ func TestExpectedReviewersFastAdvance(t *testing.T) {
 	env := LoadEnv(t)
 	AssertFabrikRunning(t, env)
 
-	num, prNum, _ := seedReviewGateItemDraft(t, env, env.RepoAlpha, "main", "Review", "expected-none-fast-advance", expectedReviewersNoneLabel)
-	AssertPRAuthorIsExpectedIdentity(t, env, env.RepoAlpha, prNum)
+	num, _, _ := seedReviewGateItemDraft(t, env, env.RepoAlpha, "main", "Review", "expected-none-fast-advance", expectedReviewersNoneLabel)
 
 	// The gate must never apply fabrik:awaiting-review at all — a fast
 	// advance clears before the label-apply branch is ever reached. Poll for
@@ -156,7 +155,6 @@ func TestExpectedReviewersDeclaredWaitsAndReprompts(t *testing.T) {
 	reviewWaitTimeout := readEnvFileReviewWaitTimeout(t, env)
 
 	num, prNum, _ := seedReviewGateItemDraft(t, env, env.RepoAlpha, "main", "Review", "expected-declared-reprompt", expectedReviewersDeclaredLabel)
-	AssertPRAuthorIsExpectedIdentity(t, env, env.RepoAlpha, prNum)
 
 	// Contrast with TestExpectedReviewersFastAdvance: a declared-but-unmatched
 	// reviewer must NOT fast-advance — fabrik:awaiting-review is applied
@@ -213,8 +211,7 @@ func TestExpectedReviewersUndeclaredRegressionGuard(t *testing.T) {
 	env := LoadEnv(t)
 	AssertFabrikRunning(t, env)
 
-	num, prNum, _ := seedReviewGateItemDraft(t, env, env.RepoAlpha, "main", "Review", "expected-nil-regression")
-	AssertPRAuthorIsExpectedIdentity(t, env, env.RepoAlpha, prNum)
+	num, _, _ := seedReviewGateItemDraft(t, env, env.RepoAlpha, "main", "Review", "expected-nil-regression")
 
 	// Undeclared (nil) must behave exactly as it did before #1283: the gate
 	// blocks unconditionally on "nothing requested, nothing reviewed yet",
@@ -250,9 +247,8 @@ func TestExpectedReviewersFastAdvanceComposesWithAuthoritative(t *testing.T) {
 	env := LoadEnv(t)
 	AssertFabrikRunning(t, env)
 
-	num, prNum, _ := seedReviewGateItemDraft(t, env, env.RepoAlpha, "main", "Review", "expected-none-authoritative",
+	num, _, _ := seedReviewGateItemDraft(t, env, env.RepoAlpha, "main", "Review", "expected-none-authoritative",
 		expectedReviewersNoneLabel, "review-authority:authoritative")
-	AssertPRAuthorIsExpectedIdentity(t, env, env.RepoAlpha, prNum)
 
 	// Same bounded-window assertion as TestExpectedReviewersFastAdvance:
 	// fast-advance must fire before any authority-verdict branch is ever
@@ -314,7 +310,6 @@ func TestReviewAuthorityDeclaredBotDoesNotDeferHumanEscalation(t *testing.T) {
 	num, prNum, _ := seedReviewGateItem(t, env, env.RepoAlpha, "main", "Review", "declared-bot-no-defer",
 		"review-authority:authoritative", expectedReviewersDeclaredLabel)
 
-	AssertPRAuthorIsExpectedIdentity(t, env, env.RepoAlpha, prNum)
 	reviewerLogin := TokenLogin(t, reviewerToken)
 	if engineLogin := TokenLogin(t, env.GHToken); engineLogin == reviewerLogin {
 		t.Fatalf("FABRIK_REVIEWER_TOKEN resolves to %q, the same identity as the engine/PR author — "+

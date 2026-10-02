@@ -92,12 +92,66 @@ func validateEntry(e Entry, simSet map[string]bool) []string {
 	default:
 		add("unknown parity %q (want %q, %q or %q)", e.Parity, ParitySim, ParityLiveOnly, ParityGap)
 	}
+	out = append(out, validateSensitivity(e)...)
 	for _, p := range e.SkipOKLegs {
 		if !validLegPattern(p) {
 			add("malformed skip_ok_legs pattern %q (want \"<auth>/<train>\" with auth pat|app|*, train off|on|*)", p)
 		}
 	}
 	return out
+}
+
+// selfRecognitionMarker is the name fragment that makes a test a self-recognition
+// test: such a test is about who "we" are, so it is auth-sensitive by definition.
+const selfRecognitionMarker = "SelfRecognition"
+
+func validateSensitivity(e Entry) []string {
+	var out []string
+	add := func(format string, args ...any) {
+		out = append(out, e.Name+": "+fmt.Sprintf(format, args...))
+	}
+	axis := func(field string, v Sensitivity, reason string) {
+		switch v {
+		case Sensitive:
+			if strings.TrimSpace(reason) == "" {
+				add("%s is %q but %s_reason is empty (every sensitive mark needs a one-line reason)", field, Sensitive, field)
+			}
+			if strings.ContainsAny(reason, "\r\n") {
+				add("%s_reason must be a single line", field)
+			}
+		case Neutral:
+			if reason != "" {
+				add("%s_reason is only valid with %s %q", field, field, Sensitive)
+			}
+		default:
+			add("%s is %q (want %q or %q; there is no default)", field, v, Sensitive, Neutral)
+		}
+	}
+	axis("auth", e.Auth, e.AuthReason)
+	axis("train", e.Train, e.TrainReason)
+	if strings.Contains(e.Name, selfRecognitionMarker) && e.Auth != Sensitive {
+		add("a %s test must be auth: %s", selfRecognitionMarker, Sensitive)
+	}
+	return out
+}
+
+// CheckIdentityCallers reports every live test in callers (the set of tests that
+// reach an author-identity assertion, from ScanIdentityAssertCallers) whose
+// registry entry is not auth: sensitive. Entries that do not exist are Check's
+// concern, not this one's.
+func CheckIdentityCallers(reg *Registry, callers []string) []string {
+	byName := map[string]Entry{}
+	for _, e := range reg.Tests {
+		byName[e.Name] = e
+	}
+	var problems []string
+	for _, n := range callers {
+		if e, ok := byName[n]; ok && e.Auth != Sensitive {
+			problems = append(problems, fmt.Sprintf("%s: reaches an author-identity assertion (%s) and so must be auth: %s",
+				n, strings.Join(IdentityAssertions, " / "), Sensitive))
+		}
+	}
+	return problems
 }
 
 func validLegPattern(p string) bool {

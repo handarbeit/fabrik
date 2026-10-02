@@ -69,6 +69,14 @@ func exitErr(code int, format string, args ...any) *ExitError {
 // poisons RepoBeta for an hour, which TestCrossRepoSpawn would inherit).
 const TrainIsolatedRE = "TestMergeTrainRunawayGuardPausesBatch"
 
+// The E2E_MATRIX modes (#1975, ADR-1975). Sparse is the default: one baseline
+// cell runs every live test and each other cell runs only the tests sensitive to
+// what that cell changes. Full restores the four complete auth × train legs.
+const (
+	MatrixSparse = "sparse"
+	MatrixFull   = "full"
+)
+
 // Config is everything the gate reads from its environment, resolved once.
 // Numeric-looking knobs that are only ever passed through to `go test`
 // (-timeout, -parallel) stay strings, exactly as the bash passed them.
@@ -84,6 +92,11 @@ type Config struct {
 	ParallelOn string // E2E_PARALLEL_ON, default 2
 
 	BedPollSeconds string // E2E_BED_POLL_SECONDS, default 60
+
+	// Matrix is E2E_MATRIX: MatrixSparse (default via LoadConfig) or MatrixFull.
+	// The zero value means full, so a Config built by hand (the tests') keeps the
+	// pre-#1975 plan shapes.
+	Matrix string
 
 	GHAPITimeout          time.Duration // E2E_GH_API_TIMEOUT (secs), default 30s
 	PostSuiteDrainTimeout time.Duration // E2E_POST_SUITE_DRAIN_TIMEOUT (secs), default 30s
@@ -154,6 +167,9 @@ func LoadConfig(getenv func(string) string, repoRoot string) (Config, error) {
 		LagPollInterval: 3 * time.Second,
 	}
 	var err error
+	if c.Matrix, err = parseMatrix(getenv("E2E_MATRIX")); err != nil {
+		return c, err
+	}
 	if c.LagProbeThreshold, err = secsEnv(getenv, "E2E_LAG_PROBE_THRESHOLD", 30); err != nil {
 		return c, err
 	}
@@ -199,6 +215,22 @@ func LoadConfig(getenv func(string) string, repoRoot string) (Config, error) {
 	c.StallWarn = mins * 60
 	return c, nil
 }
+
+// parseMatrix resolves E2E_MATRIX. Unset or "sparse" is sparse, "full" is full;
+// anything else is rejected rather than silently falling back to either.
+func parseMatrix(v string) (string, error) {
+	switch m := strings.ToLower(strings.TrimSpace(v)); m {
+	case "", MatrixSparse:
+		return MatrixSparse, nil
+	case MatrixFull:
+		return MatrixFull, nil
+	default:
+		return "", fmt.Errorf("E2E_MATRIX=%q is invalid (must be %s, %s, or unset for %s)", v, MatrixSparse, MatrixFull, MatrixSparse)
+	}
+}
+
+// sparseMatrix reports whether the sparse auth × train plan applies.
+func (c Config) sparseMatrix() bool { return c.Matrix == MatrixSparse }
 
 func orDefault(v, def string) string {
 	if v == "" {

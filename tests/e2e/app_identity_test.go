@@ -132,3 +132,92 @@ func TestMintAppInstallationTokenErrors(t *testing.T) {
 		t.Errorf("error echoed key material: %v", err)
 	}
 }
+
+func TestDecidePATLegRun(t *testing.T) {
+	tests := []struct {
+		name       string
+		mode       string
+		identity   string
+		wantRun    bool
+		wantReason string
+		wantErr    bool
+	}{
+		{name: "app skips even without an identity", mode: "app", wantReason: "App auth leg"},
+		{name: "app skips with an identity", mode: "app", identity: "fabrik-bed[bot]", wantReason: "App auth leg"},
+		{name: "pat without an App banner runs", mode: "pat", wantRun: true},
+		{name: "pat with an App banner fails loudly", mode: "pat", identity: "fabrik-bed[bot]", wantErr: true},
+		{name: "unset without a banner runs", mode: "", wantRun: true},
+		{name: "unset with a banner skips", mode: "", identity: "fabrik-bed[bot]", wantReason: "needs the PAT identity"},
+		{name: "unknown mode is an error", mode: "both", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			run, reason, err := decidePATLegRun(tc.mode, tc.identity)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if run != tc.wantRun {
+				t.Errorf("run = %v, want %v", run, tc.wantRun)
+			}
+			if tc.wantReason == "" && reason != "" {
+				t.Errorf("reason = %q, want none", reason)
+			}
+			if tc.wantReason != "" && !strings.Contains(reason, tc.wantReason) {
+				t.Errorf("reason = %q, want it to contain %q", reason, tc.wantReason)
+			}
+		})
+	}
+}
+
+func TestLockLabelProblem(t *testing.T) {
+	pat := authLeg{Mode: "pat", Login: "arbeithand"}
+	app := authLeg{Mode: "app", BotLogin: "fabrik-bed[bot]", Login: "fabrik-bed[bot]"}
+	long := authLeg{Mode: "app", BotLogin: strings.Repeat("a", 40) + "[bot]"}
+	trailingDash := authLeg{Mode: "app", BotLogin: strings.Repeat("a", maxLockSlugLen-1) + "-bbbb[bot]"}
+	tests := []struct {
+		name  string
+		leg   authLeg
+		label string
+		ok    bool
+	}{
+		{"pat: the login verbatim", pat, "fabrik:locked:arbeithand", true},
+		{"pat: another login", pat, "fabrik:locked:someone", false},
+		{"pat: an App-shaped label", pat, "fabrik:locked:fabrik-bed-0a1b2c", false},
+		{"app: slug and six hex", app, "fabrik:locked:fabrik-bed-0a1b2c", true},
+		{"app: the operator login leaked", app, "fabrik:locked:arbeithand", false},
+		{"app: upper-case hex rejected", app, "fabrik:locked:fabrik-bed-0A1B2C", false},
+		{"app: five hex rejected", app, "fabrik:locked:fabrik-bed-0a1b2", false},
+		{"app: the [bot] suffix is not part of the slug", app, "fabrik:locked:fabrik-bed[bot]-0a1b2c", false},
+		{"app: an over-long slug is truncated", long, "fabrik:locked:" + strings.Repeat("a", maxLockSlugLen) + "-0a1b2c", true},
+		{"app: an over-long slug untruncated is wrong", long, "fabrik:locked:" + strings.Repeat("a", 40) + "-0a1b2c", false},
+		{"app: truncation trims a trailing dash", trailingDash, "fabrik:locked:" + strings.Repeat("a", maxLockSlugLen-1) + "-0a1b2c", true},
+		{"not a lock label", pat, "fabrik:paused", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if p := lockLabelProblem(tc.leg, tc.label); (p == "") != tc.ok {
+				t.Errorf("lockLabelProblem(%q) = %q, want ok=%v", tc.label, p, tc.ok)
+			}
+		})
+	}
+}
+
+// The lock-label constants mirror the engine's; pin them to its source so an
+// engine-side change fails here, not silently in a live run.
+func TestAuthLockLabelShapeMatchesEngineSource(t *testing.T) {
+	src := engineSource(t, "app_identity.go")
+	for _, want := range []string{
+		`lockLabelPrefix      = "` + lockLabelPrefix + `"`,
+		`maxLockIdentityLen   = 50 - len(lockLabelPrefix)`,
+		`lockIdentitySuffixLn = 6`,
+		`maxLockSlugLen       = maxLockIdentityLen - 1 - lockIdentitySuffixLn`,
+		`slug = strings.TrimRight(slug[:maxLockSlugLen], "-")`,
+	} {
+		if !strings.Contains(src, want) {
+			t.Errorf("engine/app_identity.go no longer contains %q — update the e2e lock-label matcher", want)
+		}
+	}
+	if maxLockSlugLen != 29 {
+		t.Errorf("maxLockSlugLen = %d, want 29 (50 - len(%q) - 1 - 6)", maxLockSlugLen, lockLabelPrefix)
+	}
+}

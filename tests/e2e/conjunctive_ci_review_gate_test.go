@@ -54,8 +54,9 @@ import (
 //     (len(outstanding)==0 && hasReviews), so the gate clears without any
 //     human approval ever happening.
 //
-// Redesign (this version): AssertPRAuthorIsExpectedIdentity preflights
-// confound 1 within seconds instead of after a 60-100 min run. The held-out
+// Redesign (this version): confound 1 is preflighted within seconds by
+// TestAuthEnginePRAuthorIdentity (#1975, the focused identity test) and, here,
+// by the reviewer-is-not-the-PR-author guard before RequestPRReviewer. The held-out
 // reviewer request is deferred until fabrik:awaiting-ci is observed (R1) —
 // NOT until stage:Review:complete, which handleStageComplete applies
 // immediately when Review's Claude invocation finishes, simultaneously with
@@ -97,8 +98,8 @@ import (
 //     Test skips gracefully if not enrolled.
 //   - The engine process must actually authenticate as the identity FABRIK_TOKEN
 //     resolves to in the test bed's .env — verify no shell export shadows it
-//     (see tests/e2e/README.md prerequisites). AssertPRAuthorIsExpectedIdentity
-//     below fails fast, in seconds, if this drifts.
+//     (see tests/e2e/README.md prerequisites). TestAuthEnginePRAuthorIdentity
+//     fails fast, in seconds, if this drifts.
 //   - FABRIK_REVIEWER_TOKEN in test bed .env for the approval path, set to a PAT
 //     for an identity distinct from FABRIK_TOKEN's. If absent AND
 //     FABRIK_REVIEW_WAIT_TIMEOUT > 5, the test skips with an instructional message.
@@ -149,11 +150,9 @@ func TestConjunctiveCIReviewGate(t *testing.T) {
 	prNumber := LinkedPRNumber(t, env, env.RepoAlpha, num)
 	t.Logf("Implement complete; PR #%d created for %s#%d", prNumber, env.RepoAlpha, num)
 
-	// Preflight confound 1: fail fast (seconds) if the engine's actual PR-author
-	// identity doesn't match the test bed's token, instead of discovering a
-	// silently-broken RequestPRReviewer 60-100 min into the run.
-	AssertPRAuthorIsEngineIdentity(t, env, env.RepoAlpha, prNumber)
-	t.Logf("confirmed PR #%d author matches the test bed's engine identity", prNumber)
+	// The engine-authored-PR identity assertion lives in TestAuthEnginePRAuthorIdentity
+	// (#1975); the reviewer-is-not-the-PR-author guard below is what protects
+	// RequestPRReviewer here.
 
 	// R1: fabrik:awaiting-ci must appear after Validate fires (CI gate holds).
 	// This also confirms the item has advanced past Review — Validate is only
