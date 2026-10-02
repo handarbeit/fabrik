@@ -124,6 +124,11 @@ func (w *suiteWriter) last() string {
 //  2. The bed token's GraphQL budget before the suite (a report, never a gate).
 //  3. The suite, `go test -json`, teed to a per-leg log under $TMPDIR, with a
 //     stall warning (advisory) if its output goes quiet while it still runs.
+//     (#1973) When tests in it ended INCONCLUSIVE, only those are re-run, in the
+//     same cell and bed, up to E2E_INCONCLUSIVE_RETRIES times — before the
+//     watchdog below starts and before the RUN INVALID scan, so a long retry is
+//     not killed and throttling during one still voids the cell. What stays
+//     inconclusive is uncovered, not failed (see Gate.withLeftInconclusive).
 //  4. A post-suite watchdog over everything after `go test` exits (budget probe,
 //     reports, backoff scan): if the tail has not finished within
 //     E2E_POST_SUITE_WATCHDOG the leg is aborted with ExitPostSuiteWatchdog.
@@ -184,37 +189,40 @@ func (g *Gate) RunLeg(ctx context.Context, cell Cell) error {
 	// restart too).
 	budgetBefore := g.probeBudget(ctx, "budget_before", label)
 
-	logf, err := os.Create(jsonlog)
-	if err != nil {
-		return exitErr(1, "gate: cannot create the leg log %s: %v", jsonlog, err)
-	}
-	defer logf.Close()
-	w := newSuiteWriter(logf, g.Out, g.Now)
 	var recorder *legRecorder
 	if cs != nil && !cs.noRecord {
 		recorder = newLegRecorder(cs.ledger, cell, cs.invocation, cs.head, cs.inputs.hashes, cs.inputs.liveSet, g.errf)
-		w.sink = recorder.Observe
 	}
 
-	// R3 (#1676): stall detector — advisory only, never touches the exit code.
-	stallCtx, stopStall := context.WithCancel(ctx)
-	var stallDone sync.WaitGroup
-	stallDone.Add(1)
-	go func() {
-		defer stallDone.Done()
-		g.watchStall(stallCtx, label, w)
-	}()
-
-	drain := g.Cfg.PostSuiteDrainTimeout
-	if drain <= 0 {
-		drain = time.Millisecond
-	}
 	suiteArgs := cat([]string{"test", "-tags=e2e", "-json", "-count=1", "-timeout", g.Cfg.Timeout, "-parallel", cell.Parallel, "./tests/e2e/..."}, cell.Args)
-	sres := g.Exec.Run(ctx, Cmd{
-		Name: "go", Args: suiteArgs, Dir: g.Cfg.RepoRoot, Env: withEnv(legEnv, "E2E_TRAIN_MODE="+mode),
-		Stdout: w, Stderr: w, Session: true, Grace: g.Cfg.KillGrace, WaitDelay: drain,
-	})
-	w.Flush()
+	sres, err := g.runSuiteAttempt(ctx, label, legEnv, mode, suiteArgs, jsonlog, recorder)
+	if err != nil {
+		return err
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	rc := sres.ExitCode
+	logs := []string{jsonlog}
+	events, rerr := readEventsFile(jsonlog)
+	var inc retryOutcome
+
+	// #1973: bounded in-leg retry of the tests that declared themselves
+	// INCONCLUSIVE. It runs BEFORE the post-suite watchdog starts (a legitimately
+	// long retry must not be killed by a bound meant for seconds of bookkeeping)
+	// and BEFORE the RUN INVALID scan in postSuiteTail (throttling during a retry
+	// must still void the cell). Retries stop early on anything that makes the bed
+	// state untrustworthy; see retryInconclusive.
+	if rerr == nil {
+		var rretry int
+		events, logs, rretry, inc, err = g.retryInconclusive(ctx, cell, label, legEnv, mode, jsonlog, events, recorder)
+		if err != nil {
+			return err
+		}
+		if rretry != 0 && rc == 0 {
+			rc = rretry // a retried test FAILED (or the retry run died): the leg is red
+		}
+	}
 	if recorder != nil {
 		n, failed := recorder.Counts()
 		g.outf("== coverage ledger (leg: %s): recorded %d test outcome(s)", label, n)
@@ -223,24 +231,7 @@ func (g *Gate) RunLeg(ctx context.Context, cell Cell) error {
 		}
 		g.outln(" ==")
 	}
-	// go test has exited — stop the stall detector immediately.
-	stopStall()
-	stallDone.Wait()
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-	rc := sres.ExitCode
 	suiteExit := g.Now()
-
-	if sres.PipeWedged {
-		// Something that outlived go test (the detached bed was the real-world
-		// case, #1694) is holding the output pipe open. go test has exited, so its
-		// JSON log is complete and this leg's results are unaffected.
-		g.errf("warning: output consumer did not drain within %ds after go test exited (leg: %s).\n", int(drain.Seconds()), label)
-		g.errln("         Something that outlived go test is holding the output pipe open — find the leaked")
-		g.errln("         descriptor with lsof. go test has already exited, so its JSON log is complete and")
-		g.errln("         this leg's results are unaffected; continuing to the next leg.")
-	}
 
 	// R2 (#1676): post-suite watchdog. From here through this function's return
 	// is bookkeeping that normally takes seconds. The v0.0.81 cut hung ~17 hours
@@ -253,7 +244,7 @@ func (g *Gate) RunLeg(ctx context.Context, cell Cell) error {
 	defer cancelTail()
 	result := make(chan error, 1)
 	go func() {
-		result <- g.postSuiteTail(tailCtx, cell, label, jsonlog, rc, budgetBefore, &checkpoint)
+		result <- g.postSuiteTail(tailCtx, cell, label, logs, events, rerr, inc, rc, budgetBefore, &checkpoint)
 	}()
 	timer := time.NewTimer(g.Cfg.PostSuiteWatchdog)
 	defer timer.Stop()
@@ -283,6 +274,153 @@ func (g *Gate) RunLeg(ctx context.Context, cell Cell) error {
 		}
 		return &ExitError{Code: ExitPostSuiteWatchdog}
 	}
+}
+
+// runSuiteAttempt is one `go test -json` invocation of the leg's suite: it
+// tees the raw stream to logPath, echoes output events to the terminal, feeds the
+// ledger recorder (if any) as events stream in, and runs the advisory stall
+// detector for the attempt's lifetime. The first attempt and each #1973 retry go
+// through it, so a retry is exactly as observable — and as recorded — as the
+// suite itself. A non-nil error means the attempt could not even be set up.
+func (g *Gate) runSuiteAttempt(ctx context.Context, label string, legEnv []string, mode string, args []string, logPath string, recorder *legRecorder) (Result, error) {
+	logf, err := os.Create(logPath)
+	if err != nil {
+		return Result{}, exitErr(1, "gate: cannot create the leg log %s: %v", logPath, err)
+	}
+	defer logf.Close()
+	w := newSuiteWriter(logf, g.Out, g.Now)
+	if recorder != nil {
+		w.sink = recorder.Observe
+	}
+
+	// R3 (#1676): stall detector — advisory only, never touches the exit code.
+	stallCtx, stopStall := context.WithCancel(ctx)
+	var stallDone sync.WaitGroup
+	stallDone.Add(1)
+	go func() {
+		defer stallDone.Done()
+		g.watchStall(stallCtx, label, w)
+	}()
+
+	drain := g.Cfg.PostSuiteDrainTimeout
+	if drain <= 0 {
+		drain = time.Millisecond
+	}
+	sres := g.Exec.Run(ctx, Cmd{
+		Name: "go", Args: args, Dir: g.Cfg.RepoRoot, Env: withEnv(legEnv, "E2E_TRAIN_MODE="+mode),
+		Stdout: w, Stderr: w, Session: true, Grace: g.Cfg.KillGrace, WaitDelay: drain,
+	})
+	w.Flush()
+	// go test has exited — stop the stall detector immediately.
+	stopStall()
+	stallDone.Wait()
+	if ctx.Err() != nil {
+		return sres, nil
+	}
+	if sres.PipeWedged {
+		// Something that outlived go test (the detached bed was the real-world
+		// case, #1694) is holding the output pipe open. go test has exited, so its
+		// JSON log is complete and this leg's results are unaffected.
+		g.errf("warning: output consumer did not drain within %ds after go test exited (leg: %s).\n", int(drain.Seconds()), label)
+		g.errln("         Something that outlived go test is holding the output pipe open — find the leaked")
+		g.errln("         descriptor with lsof. go test has already exited, so its JSON log is complete and")
+		g.errln("         this leg's results are unaffected; continuing to the next leg.")
+	}
+	return sres, nil
+}
+
+// retryInconclusive is R3 (#1973): re-run the leg's INCONCLUSIVE tests, and only
+// those, up to Config.InconclusiveRetries times in the same cell — same env,
+// -parallel and bed, no restart, each attempt in its own log. It returns the
+// leg's merged event stream (last attempt wins per test), every log written, the
+// exit code of a retry that went RED (0 if none did), and what the retries
+// amounted to.
+//
+// Only a test that declared itself inconclusive is ever retried; a failure is
+// never retried. No retry is attempted when:
+//   - retries are disabled (E2E_INCONCLUSIVE_RETRIES=0) or nothing is inconclusive;
+//   - the suite did not finish (a test still running or never started — a timeout
+//     kill leaves the bed in an unknown state);
+//   - the cell's -run/-skip narrows to subtests (rewriting the selection to
+//     top-level names would widen it);
+//   - the engine's rate-limit backoff has already engaged (the run is RUN INVALID;
+//     postSuiteTail will say so and void the cell — more spend would only add to it).
+func (g *Gate) retryInconclusive(ctx context.Context, cell Cell, label string, legEnv []string, mode, firstLog string, events []Event, recorder *legRecorder) (merged []Event, logs []string, retryRC int, out retryOutcome, err error) {
+	merged, logs = events, []string{firstLog}
+	cls := Classify(merged)
+	first := cls.Inconclusive
+	if len(first) == 0 {
+		return merged, logs, 0, out, nil
+	}
+	out = summarizeRetries(first, cls, 0)
+	defer func() {
+		out = summarizeRetries(first, Classify(merged), out.Attempts)
+		g.outf("%s", out.Summary(label, g.Cfg.InconclusiveWarn))
+	}()
+
+	skip := func(why string) {
+		g.outf("== inconclusive (leg: %s): not retrying — %s ==\n", label, why)
+	}
+	switch {
+	case g.Cfg.InconclusiveRetries <= 0:
+		skip("retries disabled (E2E_INCONCLUSIVE_RETRIES=0)")
+		return
+	case suiteIncomplete(cls) || fileContains(firstLog, "panic: test timed out after"):
+		skip("the suite did not complete, so the bed state is unknown")
+		return
+	case hasSubtestFilter(cell.Args):
+		skip("the cell's -run/-skip narrows to subtests")
+		return
+	case DetectRateLimitBackoff(g.Cfg.EngineLog):
+		skip("the engine's rate-limit backoff engaged (RUN INVALID)")
+		return
+	}
+
+	for n := 1; n <= g.Cfg.InconclusiveRetries; n++ {
+		cls = Classify(merged)
+		if len(cls.Inconclusive) == 0 {
+			return
+		}
+		sel, serr := rewriteSelection(cell.Args, cls.Inconclusive)
+		if serr != nil {
+			g.errf("warning: cannot retry the inconclusive tests (leg: %s): %v\n", label, serr)
+			return
+		}
+		logPath := retryLogPath(firstLog, n)
+		g.outf("== retrying %d inconclusive test(s) (leg: %s, attempt %d of %d): %s ==\n", len(cls.Inconclusive), label, n, g.Cfg.InconclusiveRetries, strings.Join(cls.Inconclusive, ", "))
+		args := cat([]string{"test", "-tags=e2e", "-json", "-count=1", "-timeout", g.Cfg.Timeout, "-parallel", cell.Parallel, "./tests/e2e/..."}, sel)
+		sres, rerr := g.runSuiteAttempt(ctx, label, legEnv, mode, args, logPath, recorder)
+		if rerr != nil {
+			err = rerr
+			return
+		}
+		if ctx.Err() != nil {
+			err = ctx.Err()
+			return
+		}
+		out.Attempts = n
+		logs = append(logs, logPath)
+		revents, rerr := readEventsFile(logPath)
+		if rerr != nil {
+			g.errf("warning: cannot read the retry log %s: %v — stopping the retries\n", logPath, rerr)
+			if sres.ExitCode != 0 {
+				retryRC = sres.ExitCode
+			}
+			return
+		}
+		merged = mergeAttempts(merged, revents)
+		if sres.ExitCode != 0 {
+			retryRC = sres.ExitCode // a retried test failed, or the retry run died
+			return
+		}
+		if suiteIncomplete(Classify(merged)) {
+			return
+		}
+		if DetectRateLimitBackoff(g.Cfg.EngineLog) {
+			return // postSuiteTail voids the cell
+		}
+	}
+	return
 }
 
 // lastLogLine is `tail -n1 file`, or "(unavailable)".
@@ -350,7 +488,13 @@ func (g *Gate) watchStall(ctx context.Context, label string, w *suiteWriter) {
 
 // postSuiteTail is everything after `go test` exits. Each step updates the
 // watchdog's checkpoint first so a firing watchdog can name the stuck step.
-func (g *Gate) postSuiteTail(ctx context.Context, cell Cell, label, jsonlog string, rc, budgetBefore int, checkpoint *atomic.Value) error {
+//
+// logs are every `go test -json` log of the leg (the first attempt, then each
+// #1973 retry); events is the merged stream the reports and OnLeg are built from
+// (rerr non-nil: the first log could not be read). inc is what the retries of the
+// leg's inconclusive tests amounted to.
+func (g *Gate) postSuiteTail(ctx context.Context, cell Cell, label string, logs []string, events []Event, rerr error, inc retryOutcome, rc, budgetBefore int, checkpoint *atomic.Value) error {
+	jsonlog := logs[0]
 	checkpoint.Store("gh api rate_limit budget_after probe")
 	budgetAfter := g.probeBudget(ctx, "budget_after", label)
 	if ctx.Err() != nil {
@@ -370,7 +514,6 @@ func (g *Gate) postSuiteTail(ctx context.Context, cell Cell, label, jsonlog stri
 	}
 
 	checkpoint.Store("report_test_timings")
-	events, rerr := readEventsFile(jsonlog)
 	g.outf("== per-test wall-clock (leg: %s), slowest first ==\n", label)
 	if rerr != nil {
 		g.errf("warning: failed to compute test timings (read error) — inspect the raw JSON log directly: %s\n", jsonlog)
@@ -434,6 +577,11 @@ func (g *Gate) postSuiteTail(ctx context.Context, cell Cell, label, jsonlog stri
 		return &ExitError{Code: ExitBudgetExhausted}
 	}
 
+	// #1973: what is STILL inconclusive after the retries is uncovered, not failed
+	// — remembered so the invocation cannot end reading as success. Recorded only
+	// after the RUN INVALID check above, which discards the cell's verdict whole.
+	g.noteLeftInconclusive(label, inc.Still)
+
 	if g.OnLeg != nil {
 		g.OnLeg(LegResult{Cell: cell, ExitCode: rc, LogPath: jsonlog, Events: events, BudgetBefore: budgetBefore, BudgetAfter: budgetAfter})
 	}
@@ -450,4 +598,13 @@ func readEventsFile(path string) ([]Event, error) {
 	}
 	defer f.Close()
 	return ReadEvents(f)
+}
+
+func anyFileContains(paths []string, needle string) bool {
+	for _, p := range paths {
+		if fileContains(p, needle) {
+			return true
+		}
+	}
+	return false
 }
