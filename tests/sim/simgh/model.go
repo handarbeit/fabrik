@@ -185,9 +185,9 @@ type issueRecord struct {
 	// LabelEvents). A no-op re-add or an absent-label remove records nothing.
 	labelEvents []LabelEvent
 	comments    []*commentRecord
-	blockedBy      []gh.Dependency
-	createdAt      time.Time
-	updatedAt      time.Time
+	blockedBy   []gh.Dependency
+	createdAt   time.Time
+	updatedAt   time.Time
 }
 
 // nodeID synthesises the issue's GraphQL node ID. Sim node IDs are readable
