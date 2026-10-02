@@ -75,3 +75,6 @@ SITE-OPS.md
 .fabrik/github-app-key.pem
 .fabrik/github-app-state.json
 *.pem
+
+# Live e2e gate per-SHA coverage ledger and archived leg logs (#1972)
+/.e2e-coverage/
