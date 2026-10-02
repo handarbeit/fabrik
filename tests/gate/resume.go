@@ -96,14 +96,19 @@ func SelectedTests(live []string, args []string) ([]string, error) {
 	return out, nil
 }
 
-// anchoredRunRegex is `^(A|B|…)$` over names. Go test names are identifiers, so
-// they need no escaping; the quoting is defensive.
-func anchoredRunRegex(names []string) (string, error) {
+// anchoredRun is the uncapped `^(A|B|…)$`.
+func anchoredRun(names []string) string {
 	quoted := make([]string, len(names))
 	for i, n := range names {
 		quoted[i] = regexp.QuoteMeta(n)
 	}
-	re := "^(" + strings.Join(quoted, "|") + ")$"
+	return "^(" + strings.Join(quoted, "|") + ")$"
+}
+
+// anchoredRunRegex is `^(A|B|…)$` over names. Go test names are identifiers, so
+// they need no escaping; the quoting is defensive.
+func anchoredRunRegex(names []string) (string, error) {
+	re := anchoredRun(names)
 	if len(re) > maxRunRegexLen {
 		return "", fmt.Errorf("--resume: the -run regex for %d tests is %d bytes, over the %d-byte limit", len(names), len(re), maxRunRegexLen)
 	}

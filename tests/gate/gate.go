@@ -274,12 +274,20 @@ func (g *Gate) run(ctx context.Context, argv []string) error {
 	// ANY live spend, so a source file that cannot be parsed fails here (exit 4)
 	// rather than hours into a gate.
 	var inputs *covInputs
+	var sel *SparseInput
 	if g.Cfg.CoverageDir != "" {
 		if inputs, err = g.loadCoverageInputs(); err != nil {
 			return exitErr(ExitPreflightFailed, "coverage ledger: %v", err)
 		}
+		sel = inputs.selection()
 	} else if plan.Resume {
 		return exitErr(ExitUsage, "--resume needs the coverage ledger, which is disabled (E2E_COVERAGE_DIR resolved to nothing)")
+	}
+	if sel == nil && g.Cfg.sparseMatrix() {
+		// The sparse plan reads the registry even with the ledger disabled.
+		if sel, err = g.loadSelection(); err != nil {
+			return exitErr(ExitPreflightFailed, "sparse matrix: %v", err)
+		}
 	}
 	if plan.Resume && hasSubtestFilter(plan.Args) {
 		return exitErr(ExitUsage, "--resume cannot be combined with a subtest-level -run/-skip: a subtest-filtered run executes only part of a test, so it could never be credited")
@@ -299,15 +307,9 @@ func (g *Gate) run(ctx context.Context, argv []string) error {
 		return err
 	}
 
-	planInput := PlanInput{
-		AuthModes:    plan.AuthModes,
-		TrainMode:    g.Getenv("E2E_TRAIN_MODE"),
-		CallerHasRun: HasRunFlag(plan.Args),
-		Parallel:     g.Cfg.Parallel,
-		ParallelOn:   g.Cfg.ParallelOn,
-		Args:         plan.Args,
-	}
+	planInput := g.buildPlanInput(plan.AuthModes, plan.Args, sel)
 	cells := PlanCells(planInput)
+	g.outf("== E2E_MATRIX=%s: %s ==\n", orDefault(g.Cfg.Matrix, MatrixFull), describePlan(cells))
 
 	var (
 		legs     []string

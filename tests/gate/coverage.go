@@ -117,6 +117,20 @@ type Report struct {
 	Pregate     string // informational pre-gate status line ("" omits it)
 	Invocations int
 	Warnings    []string
+	// Matrix is the E2E_MATRIX mode the required set was planned under, and
+	// FullMatrixPairs the size of the full 2×2 over the same live set (4 × tests),
+	// so the summary can say how much narrower the sparse set is (#1975, R5).
+	Matrix          string
+	FullMatrixPairs int
+}
+
+// Required is the number of (test, leg) pairs the gate requires.
+func (r *Report) Required() int {
+	n := 0
+	for _, l := range r.Legs {
+		n += len(l.Pairs)
+	}
+	return n
 }
 
 // BuildReport evaluates every required pair. legs gives the order; required maps
@@ -200,6 +214,10 @@ func (r *Report) Format() string {
 	}
 	fmt.Fprintf(&b, "== coverage %s: %d covered, %d missing, %d known-skip, %d structural-skip, %d inconclusive; %d invocation(s) ==",
 		verdict, cov, miss, known, structural, inc, r.Invocations)
+	if r.FullMatrixPairs > 0 {
+		fmt.Fprintf(&b, "\n== required set (E2E_MATRIX=%s): %d (test, leg) pairs of %d in the full 2×2 ==",
+			orDefault(r.Matrix, MatrixFull), r.Required(), r.FullMatrixPairs)
+	}
 	return b.String()
 }
 
@@ -212,6 +230,10 @@ func (r *Report) NotesLine() string {
 	if n == 1 {
 		plural = ""
 	}
-	return fmt.Sprintf("Live e2e gate: coverage complete for engine SHA %s (%d test/leg pairs passed, %d known skip(s), %d structural skip(s)) across %d gate invocation%s.",
-		r.SHA, cov, known, structural, n, plural)
+	matrix := ""
+	if r.FullMatrixPairs > 0 {
+		matrix = fmt.Sprintf(" under E2E_MATRIX=%s (%d required pairs of %d in the full 2×2)", orDefault(r.Matrix, MatrixFull), r.Required(), r.FullMatrixPairs)
+	}
+	return fmt.Sprintf("Live e2e gate: coverage complete for engine SHA %s (%d test/leg pairs passed, %d known skip(s), %d structural skip(s))%s across %d gate invocation%s.",
+		r.SHA, cov, known, structural, matrix, n, plural)
 }

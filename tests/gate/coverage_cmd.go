@@ -68,9 +68,7 @@ func (g *Gate) Coverage(ctx context.Context, argv []string) int {
 		g.errf("gate coverage: %v\n", err)
 		return ExitPreflightFailed
 	}
-	legs, required, err := RequiredTests(in.live, PlanCells(PlanInput{
-		AuthModes: modes, TrainMode: g.Getenv("E2E_TRAIN_MODE"), Parallel: g.Cfg.Parallel, ParallelOn: g.Cfg.ParallelOn,
-	}))
+	legs, required, err := RequiredTests(in.live, PlanCells(g.buildPlanInput(modes, nil, in.selection())))
 	if err != nil {
 		g.errf("gate coverage: %v\n", err)
 		return ExitPreflightFailed

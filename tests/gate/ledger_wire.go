@@ -34,17 +34,13 @@ func (g *Gate) registryPath() string {
 	return filepath.Join(g.Cfg.RepoRoot, "tests", "e2e", "registry", "registry.json")
 }
 
-// loadCoverageInputs scans tests/e2e for the live set (#1933's rule), hashes
-// every test (R3) and reads the registry for skip_ok_legs.
-func (g *Gate) loadCoverageInputs() (*covInputs, error) {
-	e2eDir := filepath.Join(g.Cfg.RepoRoot, "tests", "e2e")
-	live, err := registry.ScanLiveTests(e2eDir)
+// loadSelection scans tests/e2e for the live set (#1933's rule) and reads the
+// registry. It is what the sparse plan (#1975) needs, and it is loaded whether or
+// not the ledger is enabled: the plan must not depend on E2E_COVERAGE_DIR.
+func (g *Gate) loadSelection() (*SparseInput, error) {
+	live, err := registry.ScanLiveTests(filepath.Join(g.Cfg.RepoRoot, "tests", "e2e"))
 	if err != nil {
 		return nil, fmt.Errorf("scanning the live tests: %w", err)
-	}
-	hashes, err := HashTests(e2eDir)
-	if err != nil {
-		return nil, fmt.Errorf("hashing the live tests: %w", err)
 	}
 	data, err := os.ReadFile(g.registryPath())
 	if err != nil {
@@ -54,14 +50,52 @@ func (g *Gate) loadCoverageInputs() (*covInputs, error) {
 	if err != nil {
 		return nil, fmt.Errorf("decoding the registry: %w", err)
 	}
-	in := &covInputs{live: live, liveSet: map[string]bool{}, hashes: hashes, entries: map[string]registry.Entry{}}
-	for _, n := range live {
+	sel := &SparseInput{Live: live, Entries: map[string]registry.Entry{}}
+	for _, e := range reg.Tests {
+		sel.Entries[e.Name] = e
+	}
+	return sel, nil
+}
+
+// loadCoverageInputs is loadSelection plus the per-test source hashes (R3).
+func (g *Gate) loadCoverageInputs() (*covInputs, error) {
+	sel, err := g.loadSelection()
+	if err != nil {
+		return nil, err
+	}
+	hashes, err := HashTests(filepath.Join(g.Cfg.RepoRoot, "tests", "e2e"))
+	if err != nil {
+		return nil, fmt.Errorf("hashing the live tests: %w", err)
+	}
+	in := &covInputs{live: sel.Live, liveSet: map[string]bool{}, hashes: hashes, entries: sel.Entries}
+	for _, n := range sel.Live {
 		in.liveSet[n] = true
 	}
-	for _, e := range reg.Tests {
-		in.entries[e.Name] = e
-	}
 	return in, nil
+}
+
+// selection is the sparse-plan input of already loaded coverage inputs.
+func (in *covInputs) selection() *SparseInput {
+	return &SparseInput{Live: in.live, Entries: in.entries}
+}
+
+// buildPlanInput is the ONE place a PlanInput is made, for both `gate run` and
+// `gate coverage`, so the plan the gate runs and the required set the ledger
+// checks can never be built from different inputs. sel is nil only under
+// E2E_MATRIX=full, which plans the full 2×2.
+func (g *Gate) buildPlanInput(modes []string, callerArgs []string, sel *SparseInput) PlanInput {
+	p := PlanInput{
+		AuthModes:    modes,
+		TrainMode:    g.Getenv("E2E_TRAIN_MODE"),
+		CallerHasRun: HasRunFlag(callerArgs),
+		Parallel:     g.Cfg.Parallel,
+		ParallelOn:   g.Cfg.ParallelOn,
+		Args:         callerArgs,
+	}
+	if g.Cfg.sparseMatrix() {
+		p.Sparse = sel
+	}
+	return p
 }
 
 // covState is one invocation's live ledger context, shared by every leg.
@@ -168,6 +202,7 @@ func (g *Gate) coverageReport(ctx context.Context, l *Ledger, in *covInputs, leg
 	ev := &Evaluator{Snap: l.Load(), Hashes: in.hashes, Entries: in.entries, States: g.newIssueStates()}
 	r := BuildReport(ctx, ev, l.SHA, legs, required)
 	r.Invocations = l.InvocationCount()
+	r.Matrix, r.FullMatrixPairs = g.Cfg.Matrix, 4*len(in.live)
 	if withDrift {
 		d := g.DriftCheck(ctx, l.SHA)
 		r.Drift = &d
