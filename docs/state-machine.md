@@ -3808,7 +3808,7 @@ Two proactive kill mechanisms cap how long a single Claude invocation can run. B
 
 **`wasTimedOut` flag:** `inactivityFired.Load() || (stageCtx.Err() == context.DeadlineExceeded && ctx.Err() == nil)` — distinguishes our kills from engine-shutdown context cancellation. When `wasTimedOut=true`, the no-marker path follows the same cooldown/retry flow as a clean exit without markers. When `ctx.Err() != nil && !wasTimedOut` (engine shutdown), `runClaude` returns immediately with zero output.
 
-**Kill sequence:** `killProcGroupGraceful(pid, issueNumber, label)` sends `syscall.SIGTERM` to `-pid` (the entire process group), sleeps 10 seconds, then sends `syscall.SIGKILL`. This terminates grandchild processes (e.g., background `sleep` spawned by Monitor tool) that would otherwise hold the stdout pipe open past `cmd.WaitDelay`.
+**Kill sequence:** `killProcGroupGraceful(pid, issueNumber, label, reason, sigintGrace, sigtermGrace)` runs the session-wide SIGINT → grace → SIGTERM → grace → SIGKILL escalation of `internal/sessionreap` over every process in the worker's session and its sampled command sessions (#1989; see `docs/stage-lifecycle.md` "Kill escalation"), not a single `SIGTERM` to `-pid`. This terminates grandchild processes (e.g., background `sleep` spawned by Monitor tool) that would otherwise hold the stdout pipe open past `cmd.WaitDelay`. The post-exit `killProcGroup` group signal and the escalation's listing-failure fallback are ownership-checked before they signal (#1957, "Stored-PID group kills" in the same doc).
 
 **No-op on Windows:** `killProcGroupGraceful` is a no-op on Windows (process groups work differently). Both timeout mechanisms still fire and set their flags, but the kill is a best-effort `cmd.Cancel`.
 
