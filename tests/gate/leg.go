@@ -311,6 +311,9 @@ func (g *Gate) watchStall(ctx context.Context, label string, w *suiteWriter) {
 func (g *Gate) postSuiteTail(ctx context.Context, cell Cell, label, jsonlog string, rc, budgetBefore int, checkpoint *atomic.Value) error {
 	checkpoint.Store("gh api rate_limit budget_after probe")
 	budgetAfter := g.probeBudget(ctx, "budget_after", label)
+	if ctx.Err() != nil {
+		return ctx.Err() // cancelled (a signal or the watchdog): print nothing more
+	}
 	if budgetBefore >= 0 && budgetAfter >= 0 {
 		if budgetAfter <= budgetBefore {
 			g.outf("== GraphQL budget (leg: %s): %d -> %d remaining (consumed %d pts) ==\n", label, budgetBefore, budgetAfter, budgetBefore-budgetAfter)
@@ -322,9 +325,6 @@ func (g *Gate) postSuiteTail(ctx context.Context, cell Cell, label, jsonlog stri
 		}
 	} else {
 		g.errf("warning: could not read GraphQL rate_limit before/after leg %s (gh api call failed) — skipping budget report\n", label)
-	}
-	if ctx.Err() != nil {
-		return ctx.Err()
 	}
 
 	checkpoint.Store("report_test_timings")
