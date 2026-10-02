@@ -208,7 +208,7 @@ func (g *Gate) Reset(ctx context.Context, opts ResetOptions) error {
 // token (the bed's own PAT) via GH_TOKEN.
 func (g *Gate) resolveProjectNodeID(ctx context.Context, token string, rc ResetConfig) string {
 	gh := func(args ...string) string {
-		so, _, _ := output(ctx, g.Exec, Cmd{Name: "gh", Args: args, Env: withEnv(g.Env, "GH_TOKEN="+token), Session: true, Grace: g.Cfg.KillGrace})
+		so, _, _ := output(ctx, g.Exec, Cmd{Name: "gh", Args: args, Env: withEnv(g.Env, "GH_TOKEN="+token), Session: true, Timeout: g.Cfg.GHAPITimeout, Grace: g.Cfg.KillGrace})
 		return so
 	}
 	q := fmt.Sprintf(`query { organization(login:"%s"){ projectV2(number:%s){ id } } }`, rc.ProjectOwner, rc.ProjectNumber)

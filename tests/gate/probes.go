@@ -119,7 +119,7 @@ func parseOrphans(ps string) []Orphan {
 	return out
 }
 
-// probesDisabled reports E2E_SKIP_PROBES (the same escape-hatch convention as the
+// probesSkipped reports E2E_SKIP_PROBES (the same escape-hatch convention as the
 // other E2E_SKIP_* knobs) and records it in the report.
 func (g *Gate) probesSkipped() bool { return g.Getenv("E2E_SKIP_PROBES") != "" }
 
