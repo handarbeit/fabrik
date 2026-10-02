@@ -22,6 +22,7 @@ import (
 //	bed-run.log         the bed's stdout/stderr (append-only across harness restarts)
 //	preflight.txt       the invocation's preflight output
 //	load.json           the host's 1-minute load average at leg start and end
+//	probes.json         the preflight environment probes' results (#1974): host load + orphans, board-listing lag
 //	bed-config.sha256   a hash of the bed's .fabrik/stages/ and config.yaml
 //
 // The log that used to vanish is NOT bed-run.log: the engine opens
@@ -204,6 +205,7 @@ func (g *Gate) beginArchive(cell Cell, cs *covState) *legArchive {
 			g.errf("warning: the bed configuration (.fabrik/stages/, config.yaml) differs from an earlier invocation of this ledger (%s) — results from different configurations are being combined\n", shortSHA(prev[0]))
 		}
 	}
+	g.writeProbes(dir)
 	a.loadFrom, a.loadOK = g.loadAvg()
 	a.arch = newLogArchiver(g.Cfg.EngineLog, dir, g.Cfg.ArchiveLogInterval)
 	a.arch.Start()

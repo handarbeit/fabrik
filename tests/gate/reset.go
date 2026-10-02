@@ -128,19 +128,7 @@ func (g *Gate) Reset(ctx context.Context, opts ResetOptions) error {
 			ghQuiet("api", "-X", "DELETE", "repos/"+repo+"/git/refs/"+strings.TrimPrefix(r, "refs/"))
 		}
 	}
-	resolveProjectID := func() string {
-		q := fmt.Sprintf(`query { organization(login:"%s"){ projectV2(number:%s){ id } } }`, rc.ProjectOwner, rc.ProjectNumber)
-		so, _ := gh("api", "graphql", "-f", "query="+q, "--jq", ".data.organization.projectV2.id")
-		if id := strings.TrimSpace(so); id != "" && id != "null" {
-			return id
-		}
-		q = fmt.Sprintf(`query { user(login:"%s"){ projectV2(number:%s){ id } } }`, rc.ProjectOwner, rc.ProjectNumber)
-		so, _ = gh("api", "graphql", "-f", "query="+q, "--jq", ".data.user.projectV2.id")
-		if id := strings.TrimSpace(so); id != "null" {
-			return id
-		}
-		return ""
-	}
+	resolveProjectID := func() string { return g.resolveProjectNodeID(ctx, token, rc) }
 	drainBoard := func() {
 		pid := resolveProjectID()
 		if pid == "" {
@@ -212,4 +200,24 @@ func (g *Gate) Reset(ctx context.Context, opts ResetOptions) error {
 
 	g.outln("done.")
 	return nil
+}
+
+// resolveProjectNodeID is the board's ProjectV2 node ID ("" if it cannot be
+// resolved): the org lookup first, then the user lookup. Shared by Reset's board
+// drain and the lag probe, so both name the same board. The calls are scoped to
+// token (the bed's own PAT) via GH_TOKEN.
+func (g *Gate) resolveProjectNodeID(ctx context.Context, token string, rc ResetConfig) string {
+	gh := func(args ...string) string {
+		so, _, _ := output(ctx, g.Exec, Cmd{Name: "gh", Args: args, Env: withEnv(g.Env, "GH_TOKEN="+token), Session: true, Grace: g.Cfg.KillGrace})
+		return so
+	}
+	q := fmt.Sprintf(`query { organization(login:"%s"){ projectV2(number:%s){ id } } }`, rc.ProjectOwner, rc.ProjectNumber)
+	if id := strings.TrimSpace(gh("api", "graphql", "-f", "query="+q, "--jq", ".data.organization.projectV2.id")); id != "" && id != "null" {
+		return id
+	}
+	q = fmt.Sprintf(`query { user(login:"%s"){ projectV2(number:%s){ id } } }`, rc.ProjectOwner, rc.ProjectNumber)
+	if id := strings.TrimSpace(gh("api", "graphql", "-f", "query="+q, "--jq", ".data.user.projectV2.id")); id != "null" {
+		return id
+	}
+	return ""
 }
