@@ -116,7 +116,10 @@ func (e *Engine) ciStatusVerdictFor(owner, repo, mergeableState, headSHA string,
 }
 
 // allCheckRunsPassed reports whether the latest run of every check name is
-// completed with a passing conclusion (success, neutral or skipped).
+// completed with a passing conclusion (success or neutral). skipped is
+// deliberately not passing: a path-filtered or conditional test job reports
+// skipped without having run the suite on this head, so it must never license a
+// local skip. Demoting it only ever removes a skip.
 func allCheckRunsPassed(runs []gh.CheckRun) bool {
 	latest := make(map[string]gh.CheckRun, len(runs))
 	for _, cr := range runs {
@@ -129,7 +132,7 @@ func allCheckRunsPassed(runs []gh.CheckRun) bool {
 			return false
 		}
 		switch cr.Conclusion {
-		case "success", "neutral", "skipped":
+		case "success", "neutral":
 		default:
 			return false
 		}

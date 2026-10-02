@@ -74,9 +74,12 @@ func TestCIStatus_VerdictMapping(t *testing.T) {
 		{"unknown conclusion demoted", []gh.CheckRun{{ID: 1, Name: "a", Status: "completed", Conclusion: "stale"}}, nil, nil, "pending"},
 		{"superseded failure with newer success", []gh.CheckRun{
 			{ID: 1, Name: "test", Status: "completed", Conclusion: "failure"}, passRun("test", 2)}, nil, nil, "green"},
-		{"skipped and neutral are passing", []gh.CheckRun{
-			{ID: 1, Name: "a", Status: "completed", Conclusion: "skipped"},
+		{"neutral is passing", []gh.CheckRun{
+			passRun("a", 1),
 			{ID: 2, Name: "b", Status: "completed", Conclusion: "neutral"}}, nil, nil, "green"},
+		{"skipped demoted (a skipped test job proves nothing ran)", []gh.CheckRun{
+			passRun("lint", 1),
+			{ID: 2, Name: "test", Status: "completed", Conclusion: "skipped"}}, nil, nil, "pending"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
