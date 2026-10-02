@@ -336,6 +336,7 @@ func cloneIssueRecord(i *issueRecord) *issueRecord {
 	for k, v := range i.labelAppliedAt {
 		out.labelAppliedAt[k] = v
 	}
+	out.labelEvents = append([]LabelEvent(nil), i.labelEvents...)
 	out.comments = cloneComments(i.comments)
 	return out
 }
@@ -572,6 +573,7 @@ var snapshotFieldRegistry = map[string]map[string]fieldDisposition{
 		"labels":         fieldCopied,
 		"assignees":      fieldCopied,
 		"labelAppliedAt": fieldCopied,
+		"labelEvents":    fieldCopied,
 		"comments":       fieldCopied,
 		"blockedBy":      fieldCopied,
 		"createdAt":      fieldCopied,

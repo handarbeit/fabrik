@@ -40,6 +40,7 @@ func (s *Sim) AddLabelToIssue(owner, repo string, issueNumber int, labelName str
 	now := s.now()
 	iss.labels = append(iss.labels, labelName)
 	iss.labelAppliedAt[labelName] = now
+	iss.recordLabelEvent(LabelEventLabeled, labelName)
 	iss.updatedAt = now
 	r.labelVocab[labelName] = true
 	return nil
@@ -74,8 +75,63 @@ func (s *Sim) RemoveLabelFromIssue(owner, repo string, issueNumber int, labelNam
 	}
 	iss.labels = updated
 	delete(iss.labelAppliedAt, labelName)
+	iss.recordLabelEvent(LabelEventUnlabeled, labelName)
 	iss.updatedAt = s.now()
 	return nil
+}
+
+// LabelEventKind names the two issue-event kinds GitHub's events log records
+// for labels.
+type LabelEventKind string
+
+const (
+	LabelEventLabeled   LabelEventKind = "labeled"
+	LabelEventUnlabeled LabelEventKind = "unlabeled"
+)
+
+// LabelEvent is one entry in an issue's label-event log. Seq is 1-based and
+// strictly increasing per issue; there is no timestamp or actor (see
+// FIDELITY.md).
+type LabelEvent struct {
+	Seq   int64
+	Kind  LabelEventKind
+	Label string
+}
+
+// recordLabelEvent appends to the issue's event log. Caller must hold mu.
+func (i *issueRecord) recordLabelEvent(kind LabelEventKind, label string) {
+	i.labelEvents = append(i.labelEvents, LabelEvent{
+		Seq: int64(len(i.labelEvents)) + 1, Kind: kind, Label: label,
+	})
+}
+
+// LabelEvents returns the issue's ordered label-event log: one "labeled" entry
+// per add that actually changed state and one "unlabeled" per remove that
+// actually did. Unlike the mutation log, a no-op re-add of a present label
+// records nothing — exactly as GitHub's events log emits no event for it — so
+// it can prove a label really left and returned.
+func (s *Sim) LabelEvents(owner, repo string, issueNumber int) ([]LabelEvent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	iss, err := s.issueLocked(owner, repo, issueNumber)
+	if err != nil {
+		return nil, err
+	}
+	return append([]LabelEvent(nil), iss.labelEvents...), nil
+}
+
+// LastLabelEventSeq returns the Seq of the issue's most recent label event, or 0
+// if none. Capture it before an action to scope a later LabelEvents scan to
+// events after that point.
+func (s *Sim) LastLabelEventSeq(owner, repo string, issueNumber int) (int64, error) {
+	evs, err := s.LabelEvents(owner, repo, issueNumber)
+	if err != nil {
+		return 0, err
+	}
+	if len(evs) == 0 {
+		return 0, nil
+	}
+	return evs[len(evs)-1].Seq, nil
 }
 
 // FetchLabelAppliedAt returns when a label was applied to an issue.
