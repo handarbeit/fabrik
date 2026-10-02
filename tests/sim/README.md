@@ -1033,6 +1033,24 @@ by proxy (both finish in one poll, distinct trial branches and landing PRs, disj
 Fidelity caveat: simgh links PR to issue by head-branch convention, not the base-conditional GraphQL
 field, so the live test remains the only cover for that asymmetry.
 
+`mergetrain_batchcap_test.go` (`TestMergeTrainQueuedDeeperThanBatchCap`, the twin of the live scenario of the
+same name, #1850 / ADR-1833) seeds **7** clean members against `mergeTrainEnv`'s `MaxBatchSize = 5` before the
+first poll (no straddle — the live test's poll-boundary race, #1978, does not exist here) and runs exactly
+two `RunPoll`s with assertions between. After poll 1 exactly one merged `fabrik/merge-train/*` landing PR
+exists, closing the first five; those are Done and closed and the other two are still Queued, unpaused. After
+poll 2 a second landing PR closes exactly the remaining two; the two `Closes` sets are disjoint and cover all
+seven, there are exactly two `MergePR` calls and two trials (5 then 2), every member has exactly one
+`Landed via` comment, and no trial PR is open or closed-unmerged and no trial branch is left. Members are
+seeded with `QueueMemberUnplaced` and put on the board with `PlaceQueued` in a **scrambled order**, so the
+board's first five differ from the five lowest issue numbers and the ordering assertion can actually fail
+(simgh lists the board in insertion order and the pass-through adapter never stamps `StatusEnteredAt`, so
+ordering otherwise degenerates to number). `..._SortDisabledPicksBoardOrder` reruns the same fixture with
+`SetMergeTrainQueueSortDisabledForTest(true)` and must land the board-order five instead — a permanent
+non-vacuity proof of the sort. Neutralising `capBatch` (one batch of 7) or the sort each make the main twin
+fail. Limits: the sim cannot reproduce ADR-1833's pre-fix board-cache map-iteration churn (stays covered by
+`engine/merge_train_queue_churn_test.go`), and it has no log scraping, so the "batch capped … 7 Queued … max_batch_size=5"
+line is proven by proxy (first trial exactly five, second exactly two).
+
 ## Guard-testing convention (R1–R4, #1687)
 
 Three times in one working session, a guard (a check that rejects, refuses, or falls
