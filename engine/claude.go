@@ -1990,6 +1990,7 @@ func buildPrompt(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Com
 	if stage.PostToPR {
 		b.WriteString("- `.fabrik-context/pr-description.md` — the linked PR description\n")
 	}
+	b.WriteString("- `.fabrik-context/ci-status.md` — PR head SHA and CI verdict for that head (present only when the item has a linked PR)\n")
 	b.WriteString("\n")
 	if stage.PostToPR {
 		b.WriteString("Your detailed output will be posted on the PR. Provide a brief summary (2-4 sentences)\n")
@@ -2109,6 +2110,7 @@ func buildCommentReviewPrompt(stage *stages.Stage, item gh.ProjectItem, comments
 	b.WriteString("Context files are available in `.fabrik-context/` in your working directory:\n")
 	b.WriteString("- `.fabrik-context/issue.md` — the issue body (spec)\n")
 	b.WriteString("- `.fabrik-context/stage-{Name}.md` — the current stage output (e.g. `.fabrik-context/stage-Specify.md`) and prior stage outputs\n")
+	b.WriteString("- `.fabrik-context/ci-status.md` — head SHA of the linked pull request and the CI verdict for that head (present only when one exists)\n")
 	b.WriteString("\n")
 	b.WriteString("First, perform any actions requested in the comments using available tools.\n")
 	if item.IsPR {

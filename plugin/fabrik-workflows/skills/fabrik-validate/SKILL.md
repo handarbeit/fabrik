@@ -56,7 +56,7 @@ Read these files before starting validation. The spec in `.fabrik-context/issue.
 If the rebase produces conflicts, resolve them conservatively:
 
 - **Never drop code from the base branch.** Code on the base was merged from other PRs and must be preserved. Your branch adds to the base, it doesn't replace it.
-- **After resolving conflicts, run `go build ./...` and `go test ./...` immediately.** If either fails, the resolution was wrong — fix it before proceeding with validation.
+- **After resolving conflicts, run `go build ./...` immediately, then the tests for the packages the conflicts touched.** A rebase moves HEAD, so the CI-green skip rule under "Skipping a redundant full-suite run" (above "Test suite") no longer applies to the rebased head; in a CI-gated stage (`ci_gated: true` in `.fabrik-context/ci-status.md`) the engine's CI gate covers the full suite on the pushed head, otherwise run `go test ./...` in full. If anything fails, the resolution was wrong — fix it before proceeding with validation.
 - **Check for missing files.** Run `git diff origin/<base-branch>..HEAD --name-only` and verify no files from the base were accidentally deleted. New files added to the base (source, tests, subcommands) should all be present.
 - **If unsure about a conflict, abort the rebase** (`git rebase --abort`) and do NOT signal completion. Describe the conflict and let the human resolve it.
 
@@ -115,9 +115,25 @@ In preference order:
 
 **Never end a turn waiting on a background task or a CI run.** Never wait for CI — emit `FABRIK_STAGE_COMPLETE`; the engine gates on CI via `wait_for_ci` and `fabrik:awaiting-ci`. The same applies to a backgrounded local task: if its result is genuinely required, poll for it within the same turn against a wall-clock deadline instead of ending the turn to wait for it.
 
+### Skipping a redundant full-suite run — `.fabrik-context/ci-status.md`
+
+When the item has a linked PR, the engine writes `.fabrik-context/ci-status.md` before this invocation: the PR number, `head_sha` (the PR head), `verdict` (`green`, `red`, `pending`, `none` or `unknown`), `ci_gated` (`true` when this stage waits for CI) and `written_at`. CI has already run the whole suite on `head_sha` when the verdict is `green`, so rerunning it locally on the same commit repeats work CI did.
+
+**Skip the full-suite run only when ALL three of these hold** — a partial match is not a match:
+
+1. `verdict` in `.fabrik-context/ci-status.md` is exactly `green`.
+2. `git rev-parse HEAD` (run it as its own command) prints the same SHA as `head_sha`.
+3. `git status --porcelain` (run it as its own command) prints nothing.
+
+When all three hold, skip the test invocation and say so in your output, naming the SHA and the file's `written_at` (for example: `Full suite skipped — CI green on <sha> (ci-status.md written <timestamp>)`). In every other case — the file is absent, the verdict is anything other than `green`, HEAD differs from `head_sha`, or the tree is dirty — run the step exactly as written below.
+
+**After you change code** (including a rebase that moves HEAD, such as the pre-completion rebase): HEAD no longer matches `head_sha`, so condition 2 fails. If `ci_gated` is `true`, run the build plus the tests for the packages or modules you touched, then push — the full suite is CI's job, and the engine's `wait_for_ci` gate on the new head is the backstop. If `ci_gated` is `false`, no CI gate backstops this stage, so run the full suite as written below.
+
+**Everything else in this stage stays.** Skipping the suite skips only the test invocation. Requirements verification, the regression check, the PR description audit, the rebase and its Pre-Completion Gate all still run. Report the suite as `Test Suite: SKIPPED — CI green on <sha>` instead of `PASSED`.
+
 ### Test suite
 
-Run the full test suite. **Always include a per-test timeout** appropriate to the project's test framework (e.g., `pytest --timeout=60`, `go test -timeout 5m`, `jest --testTimeout=30000`). Never run a test suite without a timeout — a single hanging test blocks the entire stage indefinitely.
+Run the full test suite (unless the skip rule above applies). **Always include a per-test timeout** appropriate to the project's test framework (e.g., `pytest --timeout=60`, `go test -timeout 5m`, `jest --testTimeout=30000`). Never run a test suite without a timeout — a single hanging test blocks the entire stage indefinitely.
 
 ```bash
 go test -race -timeout 5m ./...    # or project-equivalent — always with timeout
@@ -162,8 +178,8 @@ Structure your output clearly:
 - [x] Requirement 1: How verified
 - [x] Requirement 2: How verified
 
-### Test Suite: PASSED
-- N tests across M packages
+### Test Suite: PASSED | SKIPPED — CI green on <sha>
+- N tests across M packages (or, when skipped, the SHA and `written_at` from ci-status.md; when only targeted tests ran after a rebase, which packages)
 - Race detector: clean
 - Build: clean
 - Vet: clean
@@ -180,7 +196,7 @@ Structure your output clearly:
 
 **You MUST signal completion when** all of these hold:
 - All requirements verified
-- Full test suite passes
+- Full test suite passes, or was skipped under the CI-green rule above (`ci-status.md` verdict `green`, HEAD equal to `head_sha`, clean tree)
 - No regressions detected
 - Branch is clean and pushed
 
@@ -438,7 +454,7 @@ When writing the `FABRIK_SUMMARY_BEGIN`/`FABRIK_SUMMARY_END` block, always inclu
 
 ```
 FABRIK_SUMMARY_BEGIN
-Rebase: skipped-up-to-date. PR mergeable: MERGEABLE, mergeStateStatus: CLEAN. Required checks: Analyze (go): pass, Verify llms-full.txt is up to date: pass. Requirements: N/N verified against issue spec. Local test suite: N tests across M packages, all passed.
+Rebase: skipped-up-to-date. PR mergeable: MERGEABLE, mergeStateStatus: CLEAN. Required checks: Analyze (go): pass, Verify llms-full.txt is up to date: pass. Requirements: N/N verified against issue spec. Local test suite: N tests across M packages, all passed (or: skipped — CI green on <sha>).
 FABRIK_SUMMARY_END
 ```
 
@@ -446,7 +462,7 @@ FABRIK_SUMMARY_END
 
 ```
 FABRIK_SUMMARY_BEGIN
-Rebase: rebased. PR mergeable: MERGEABLE, mergeStateStatus: CLEAN. Required checks: Analyze (go): pass, Verify llms-full.txt is up to date: pending. Verify llms-full.txt is up to date has not yet reported a conclusion; the engine's CI gate will decide whether this PR advances. Requirements: N/N verified against issue spec. Local test suite: N tests across M packages, all passed.
+Rebase: rebased. PR mergeable: MERGEABLE, mergeStateStatus: CLEAN. Required checks: Analyze (go): pass, Verify llms-full.txt is up to date: pending. Verify llms-full.txt is up to date has not yet reported a conclusion; the engine's CI gate will decide whether this PR advances. Requirements: N/N verified against issue spec. Local test suite: N tests across M packages, all passed (or: skipped — CI green on <sha>).
 FABRIK_SUMMARY_END
 ```
 
