@@ -216,8 +216,36 @@ func restartMergeTrainEnv(t *testing.T, env *Env) *Env {
 // files, mirroring the live harness's path/content parameters.
 func QueueMember(t *testing.T, env *Env, marker string, files map[string]string) (issueNum, prNum int) {
 	t.Helper()
+	return queueMemberAt(t, env, "Queued", marker, files)
+}
+
+// QueueMemberUnplaced is QueueMember minus the board card: the issue, commit
+// and linked PR are seeded, but the issue is not placed on the project board
+// (an empty status makes simgh skip the board). A scenario that needs to
+// control the order Queued members appear in the board listing — simgh lists
+// the board in insertion order — seeds its members unplaced and then calls
+// PlaceQueued in whatever order it wants.
+func QueueMemberUnplaced(t *testing.T, env *Env, marker string, files map[string]string) (issueNum, prNum int) {
+	t.Helper()
+	return queueMemberAt(t, env, "", marker, files)
+}
+
+// PlaceQueued puts an issue seeded by QueueMemberUnplaced onto the project
+// board at "Queued". Board order is placement order.
+func PlaceQueued(t *testing.T, env *Env, issueNum int) {
+	t.Helper()
+	env.Sim.Sim().SeedProjectItem(env.Owner, env.ProjectNum, env.OwnerRepo, issueNum, false, "Queued")
+	if err := env.Sim.Sim().Err(); err != nil {
+		t.Fatalf("PlaceQueued(#%d): %v", issueNum, err)
+	}
+}
+
+// queueMemberAt is the shared body of QueueMember and QueueMemberUnplaced;
+// status is the board column the issue is filed at ("" = not on the board).
+func queueMemberAt(t *testing.T, env *Env, status, marker string, files map[string]string) (issueNum, prNum int) {
+	t.Helper()
 	title := fmt.Sprintf("merge-train member %s", marker)
-	num := FileIssue(t, env, title, "merge-train member. marker="+marker, "Queued")
+	num := FileIssue(t, env, title, "merge-train member. marker="+marker, status)
 	branch := fmt.Sprintf("fabrik/issue-%d", num)
 
 	env.Sim.Sim().SeedCommitFrom(env.OwnerRepo, branch, "main", files,
