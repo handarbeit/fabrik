@@ -46,6 +46,7 @@ func Check(reg *Registry, live, sim []string) []string {
 			add("%s: live scenario test has no registry entry (add one to tests/e2e/registry/registry.json)", n)
 		}
 	}
+	problems = append(problems, checkFullTraversalSet(reg)...)
 	return problems
 }
 
@@ -94,6 +95,7 @@ func validateEntry(e Entry, simSet map[string]bool) []string {
 	}
 	out = append(out, validateSensitivity(e)...)
 	out = append(out, validateIsolation(e)...)
+	out = append(out, validateTraversal(e)...)
 	for _, p := range e.SkipOKLegs {
 		if !validLegPattern(p) {
 			add("malformed skip_ok_legs pattern %q (want \"<auth>/<train>\" with auth pat|app|*, train off|on|*)", p)
@@ -163,6 +165,37 @@ func validateIsolation(e Entry) []string {
 	return out
 }
 
+// validateTraversal enforces the #1992 entry-stage / traversal fields.
+func validateTraversal(e Entry) []string {
+	var out []string
+	add := func(format string, args ...any) {
+		out = append(out, e.Name+": "+fmt.Sprintf(format, args...))
+	}
+	if !validStage(e.EntryStage) {
+		add("entry is %q (want one of %v; there is no default)", e.EntryStage, Stages)
+	}
+	switch e.Traversal {
+	case TraversalSubject, TraversalNone:
+	default:
+		add("traversal is %q (want %q or %q; there is no default — %q is deliberately not a value: a test whose traversal is only set-up must seed the state instead)",
+			e.Traversal, TraversalSubject, TraversalNone, "setup")
+	}
+	needsReason := e.Traversal == TraversalSubject || e.EntryStage == StageSpecify
+	if needsReason && strings.TrimSpace(e.TraversalReason) == "" {
+		add("traversal_reason is empty (required for traversal %q and for any test entering at %s: say why it is not seeded)", TraversalSubject, StageSpecify)
+	}
+	if !needsReason && e.TraversalReason != "" {
+		add("traversal_reason is only valid with traversal %q or entry %q", TraversalSubject, StageSpecify)
+	}
+	if strings.ContainsAny(e.TraversalReason, "\r\n") {
+		add("traversal_reason must be a single line")
+	}
+	if e.FullTraversal && (e.Traversal != TraversalSubject || e.EntryStage != StageSpecify) {
+		add("full_traversal requires traversal %q and entry %q", TraversalSubject, StageSpecify)
+	}
+	return out
+}
+
 // CheckBedLifecycleCallers reports every live test in callers (the set that
 // reaches a bed stop/start/restart or a bed .env rewrite, from
 // ScanBedLifecycleCallers) whose registry entry is not exclusive. Entries that do
@@ -202,6 +235,44 @@ func CheckParallelConsistency(reg *Registry, parallel []string) []string {
 	return problems
 }
 
+// checkFullTraversalSet fails when no entry is marked full_traversal (R3): the
+// named set that drives each pipeline path end to end must never become empty.
+func checkFullTraversalSet(reg *Registry) []string {
+	for _, e := range reg.Tests {
+		if e.FullTraversal {
+			return nil
+		}
+	}
+	return []string{"no registry entry is marked full_traversal: the named full-traversal set (R3) must not be empty"}
+}
+
+// CheckEntryLiterals reports every live test whose declared entry is not Specify
+// but whose same-package reference closure (specifyDrivers, from
+// ScanSpecifyDrivers) places an item at Specify — a stale or dishonest entry
+// claim, the signature of a late-subject test that still drives the pipeline from
+// its start. exempt names tests allowed to do so (a cheap primer filing, not a
+// traversal of the subject), each with a reason. Entries that do not exist are
+// Check's concern.
+func CheckEntryLiterals(reg *Registry, specifyDrivers []string, exempt map[string]string) []string {
+	byName := map[string]Entry{}
+	for _, e := range reg.Tests {
+		byName[e.Name] = e
+	}
+	var problems []string
+	for _, n := range specifyDrivers {
+		e, ok := byName[n]
+		if !ok || e.EntryStage == StageSpecify {
+			continue
+		}
+		if _, ok := exempt[n]; ok {
+			continue
+		}
+		problems = append(problems, fmt.Sprintf("%s: declares entry %q but reaches SetIssueStatus(..., %q) — either it enters at %s, or the Specify traversal must be replaced by a seed",
+			n, e.EntryStage, "Specify", StageSpecify))
+	}
+	return problems
+}
+
 // CheckIdentityCallers reports every live test in callers (the set of tests that
 // reach an author-identity assertion, from ScanIdentityAssertCallers) whose
 // registry entry is not auth: sensitive. Entries that do not exist are Check's
@@ -219,6 +290,15 @@ func CheckIdentityCallers(reg *Registry, callers []string) []string {
 		}
 	}
 	return problems
+}
+
+func validStage(s Stage) bool {
+	for _, v := range Stages {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
 
 func validLegPattern(p string) bool {

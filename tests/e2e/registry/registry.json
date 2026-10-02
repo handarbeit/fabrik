@@ -11,7 +11,10 @@
       ],
       "auth": "sensitive",
       "auth_reason": "self-recognition: the engine's own-author comparisons (selfLogin, bot author shapes) under a GitHub App identity",
-      "train": "neutral"
+      "train": "neutral",
+      "entry": "Specify",
+      "traversal": "none",
+      "traversal_reason": "filed paused/blocked at Specify so no Claude stage runs; only comment authorship is exercised"
     },
     {
       "name": "TestAppSelfRecognitionBotCommentNeverResumes",
@@ -23,7 +26,10 @@
       ],
       "auth": "sensitive",
       "auth_reason": "self-recognition: the engine's own-author comparisons (selfLogin, bot author shapes) under a GitHub App identity",
-      "train": "neutral"
+      "train": "neutral",
+      "entry": "Specify",
+      "traversal": "none",
+      "traversal_reason": "filed paused at Specify so no Claude stage runs; only comment authorship is exercised"
     },
     {
       "name": "TestAppSelfRecognitionDurableReviewSuppression",
@@ -35,7 +41,9 @@
       ],
       "auth": "sensitive",
       "auth_reason": "self-recognition: the engine's own-author comparisons (selfLogin, bot author shapes) under a GitHub App identity",
-      "train": "neutral"
+      "train": "neutral",
+      "entry": "Review",
+      "traversal": "none"
     },
     {
       "name": "TestAuthEnginePRAuthorIdentity",
@@ -44,7 +52,9 @@
       "note": "real credentialed push and PR creation; the sim never pushes or authors a PR on GitHub",
       "auth": "sensitive",
       "auth_reason": "credentialed push, PR creation and PR authorship under each auth mode (ADR-1846)",
-      "train": "neutral"
+      "train": "neutral",
+      "entry": "Implement",
+      "traversal": "none"
     },
     {
       "name": "TestAuthLockLabelShape",
@@ -53,7 +63,10 @@
       "note": "lock-label derivation is unit-tested in engine/; live adds the real installation slug and the label write",
       "auth": "sensitive",
       "auth_reason": "lock label shape per auth mode: PAT login vs App slug-hash (ADR-1893)",
-      "train": "neutral"
+      "train": "neutral",
+      "entry": "Specify",
+      "traversal": "subject",
+      "traversal_reason": "needs a real worker dispatch holding the lock to observe the lock label"
     },
     {
       "name": "TestAuthReviewGateIdentity",
@@ -62,7 +75,9 @@
       "note": "real reviewer request and PR author semantics (GitHub forbids self-review)",
       "auth": "sensitive",
       "auth_reason": "review-gate reads and the first label write on a PR-bearing item under each mode's grants",
-      "train": "neutral"
+      "train": "neutral",
+      "entry": "Review",
+      "traversal": "none"
     },
     {
       "name": "TestBaseBranchPipeline",
@@ -72,7 +87,11 @@
       ],
       "auth": "neutral",
       "train": "sensitive",
-      "train_reason": "ends with the PR merged onto a non-default base and the landing path closing the issue"
+      "train_reason": "ends with the PR merged onto a non-default base and the landing path closing the issue",
+      "entry": "Specify",
+      "traversal": "subject",
+      "traversal_reason": "an engine-authored PR on a non-default base must survive the end of Implement; only a real Implement produces one",
+      "full_traversal": true
     },
     {
       "name": "TestBlockedOnInput",
@@ -83,7 +102,10 @@
       "auth": "sensitive",
       "auth_reason": "awaiting-input @mention targets (mentionTargets) and pause/resume by a human comment depend on the engine identity",
       "train": "sensitive",
-      "train_reason": "yolo run ends in the landing decision that closes the issue"
+      "train_reason": "yolo run ends in the landing decision that closes the issue",
+      "entry": "Specify",
+      "traversal": "subject",
+      "traversal_reason": "the Specify-stage FABRIK_BLOCKED_ON_INPUT pause and resume flow is the subject"
     },
     {
       "name": "TestCIFixReinvoke",
@@ -93,7 +115,9 @@
       ],
       "auth": "neutral",
       "train": "sensitive",
-      "train_reason": "yolo run ends in the landing decision that closes the issue after the CI fix"
+      "train_reason": "yolo run ends in the landing decision that closes the issue after the CI fix",
+      "entry": "Validate",
+      "traversal": "none"
     },
     {
       "name": "TestCIFixReinvokeCycleLimit",
@@ -102,7 +126,9 @@
         "TestCIFixReinvokeCycleLimit"
       ],
       "auth": "neutral",
-      "train": "neutral"
+      "train": "neutral",
+      "entry": "Validate",
+      "traversal": "none"
     },
     {
       "name": "TestCommentLandingGateHolds",
@@ -113,7 +139,9 @@
       ],
       "auth": "neutral",
       "train": "sensitive",
-      "train_reason": "its subject is the landing gate holding a merge until comments are processed"
+      "train_reason": "its subject is the landing gate holding a merge until comments are processed",
+      "entry": "Validate",
+      "traversal": "none"
     },
     {
       "name": "TestCommentReentryShowsReworking",
@@ -123,7 +151,10 @@
         "TestCommentReentryShowsReworking_NonCompletingExit"
       ],
       "auth": "neutral",
-      "train": "neutral"
+      "train": "neutral",
+      "entry": "Research",
+      "traversal": "subject",
+      "traversal_reason": "needs a real Research output to park on; the rework marker is observed across that run and the re-entry comment run"
     },
     {
       "name": "TestConjunctiveCIReviewGate",
@@ -133,7 +164,9 @@
       ],
       "auth": "neutral",
       "train": "sensitive",
-      "train_reason": "yolo run ends in the landing decision once the CI and review gates clear"
+      "train_reason": "yolo run ends in the landing decision once the CI and review gates clear",
+      "entry": "Validate",
+      "traversal": "none"
     },
     {
       "name": "TestConvergenceRace",
@@ -142,7 +175,9 @@
       "note": "server-side atomic auto-merge race is unreproducible in the sim",
       "auth": "neutral",
       "train": "sensitive",
-      "train_reason": "its subject is the server-side auto-merge race on the landing path"
+      "train_reason": "its subject is the server-side auto-merge race on the landing path",
+      "entry": "Validate",
+      "traversal": "none"
     },
     {
       "name": "TestCrossRepoSpawn",
@@ -153,7 +188,11 @@
       "auth": "sensitive",
       "auth_reason": "spawned children are assigned via spawnAssignees (the engine identity)",
       "train": "sensitive",
-      "train_reason": "parent and child both run to the landing decision"
+      "train_reason": "parent and child both run to the landing decision",
+      "entry": "Specify",
+      "traversal": "subject",
+      "traversal_reason": "a Plan-declared cross-repo spawn needs a real Plan to parse; the spawn path itself is the subject",
+      "full_traversal": true
     },
     {
       "name": "TestCruiseFullPipeline",
@@ -162,7 +201,11 @@
         "TestCruiseFullPipeline"
       ],
       "auth": "neutral",
-      "train": "neutral"
+      "train": "neutral",
+      "entry": "Specify",
+      "traversal": "subject",
+      "traversal_reason": "the cruise auto-advance chain from Specify to Validate with no merge",
+      "full_traversal": true
     },
     {
       "name": "TestExpectedReviewersDeclaredWaitsAndReprompts",
@@ -171,7 +214,9 @@
         "TestExpectedReviewersDeclaredWaitsAndReprompts"
       ],
       "auth": "neutral",
-      "train": "neutral"
+      "train": "neutral",
+      "entry": "Review",
+      "traversal": "none"
     },
     {
       "name": "TestExpectedReviewersFastAdvance",
@@ -180,7 +225,9 @@
         "TestExpectedReviewersFastAdvance"
       ],
       "auth": "neutral",
-      "train": "neutral"
+      "train": "neutral",
+      "entry": "Review",
+      "traversal": "none"
     },
     {
       "name": "TestExpectedReviewersFastAdvanceComposesWithAuthoritative",
@@ -189,7 +236,9 @@
         "TestExpectedReviewersFastAdvanceComposesWithAuthoritative"
       ],
       "auth": "neutral",
-      "train": "neutral"
+      "train": "neutral",
+      "entry": "Review",
+      "traversal": "none"
     },
     {
       "name": "TestExpectedReviewersUndeclaredRegressionGuard",
@@ -198,7 +247,9 @@
         "TestExpectedReviewersUndeclaredRegressionGuard"
       ],
       "auth": "neutral",
-      "train": "neutral"
+      "train": "neutral",
+      "entry": "Review",
+      "traversal": "none"
     },
     {
       "name": "TestLateCheckRunSuiteGate",
@@ -208,7 +259,9 @@
         "TestCISuiteGate_PostPushWindowHoldsThenClears"
       ],
       "auth": "neutral",
-      "train": "neutral"
+      "train": "neutral",
+      "entry": "Validate",
+      "traversal": "none"
     },
     {
       "name": "TestMergeTrainBisectionEjectsPoisoner",
@@ -222,7 +275,9 @@
       ],
       "auth": "neutral",
       "train": "sensitive",
-      "train_reason": "its subject is the merge train"
+      "train_reason": "its subject is the merge train",
+      "entry": "Queued",
+      "traversal": "none"
     },
     {
       "name": "TestMergeTrainColdCacheBaseMember",
@@ -236,7 +291,9 @@
       "train": "sensitive",
       "train_reason": "its subject is the merge train",
       "exclusive": true,
-      "exclusive_reason": "stops and starts the bed to cold-start the engine's base-branch cache"
+      "exclusive_reason": "stops and starts the bed to cold-start the engine's base-branch cache",
+      "entry": "Queued",
+      "traversal": "none"
     },
     {
       "name": "TestMergeTrainConflictBisectPrefixRerere",
@@ -252,7 +309,9 @@
       "train": "sensitive",
       "train_reason": "its subject is the merge train",
       "default_base_train": true,
-      "default_base_train_reason": "analyses the whole repo log window (Claude invocation, prefix reuse, 'main moved' lines are not partition-scoped) and needs an exact [A,B,C,P] batch on RepoAlpha/main"
+      "default_base_train_reason": "analyses the whole repo log window (Claude invocation, prefix reuse, 'main moved' lines are not partition-scoped) and needs an exact [A,B,C,P] batch on RepoAlpha/main",
+      "entry": "Queued",
+      "traversal": "none"
     },
     {
       "name": "TestMergeTrainHappyPathLanding",
@@ -270,7 +329,9 @@
       "train": "sensitive",
       "train_reason": "its subject is the merge train",
       "default_base_train": true,
-      "default_base_train_reason": "stays on protected main as the production-shaped default-partition landing proof (ADR-1648); shared yolo tests also enqueue there under train on"
+      "default_base_train_reason": "stays on protected main as the production-shaped default-partition landing proof (ADR-1648); shared yolo tests also enqueue there under train on",
+      "entry": "Queued",
+      "traversal": "none"
     },
     {
       "name": "TestMergeTrainQueuedDeeperThanBatchCap",
@@ -287,7 +348,9 @@
       "train": "sensitive",
       "train_reason": "its subject is the merge train",
       "default_base_train": true,
-      "default_base_train_reason": "asserts exact batch composition and counts per-repo (not per-partition) 'merged integration PR' / 'opened draft CI PR' log lines on RepoAlpha/main"
+      "default_base_train_reason": "asserts exact batch composition and counts per-repo (not per-partition) 'merged integration PR' / 'opened draft CI PR' log lines on RepoAlpha/main",
+      "entry": "Queued",
+      "traversal": "none"
     },
     {
       "name": "TestMergeTrainRedSingletonReroutesOffQueued",
@@ -300,7 +363,9 @@
       ],
       "auth": "neutral",
       "train": "sensitive",
-      "train_reason": "its subject is the merge train"
+      "train_reason": "its subject is the merge train",
+      "entry": "Queued",
+      "traversal": "none"
     },
     {
       "name": "TestMergeTrainRestartSafety",
@@ -316,7 +381,9 @@
       "train": "sensitive",
       "train_reason": "its subject is the merge train",
       "exclusive": true,
-      "exclusive_reason": "restarts the bed mid-landing (RestartFabrikTestBed), dropping every other test's in-flight work"
+      "exclusive_reason": "restarts the bed mid-landing (RestartFabrikTestBed), dropping every other test's in-flight work",
+      "entry": "Queued",
+      "traversal": "none"
     },
     {
       "name": "TestMergeTrainRunawayGuardPausesBatch",
@@ -331,7 +398,9 @@
       "train": "sensitive",
       "train_reason": "its subject is the merge train",
       "exclusive": true,
-      "exclusive_reason": "deliberately trips the bed-wide merge-train runaway guard, poisoning the repo's trial counters and pausing members (collides with TestCrossRepoSpawn, #1395); not statically detectable"
+      "exclusive_reason": "deliberately trips the bed-wide merge-train runaway guard, poisoning the repo's trial counters and pausing members (collides with TestCrossRepoSpawn, #1395); not statically detectable",
+      "entry": "Queued",
+      "traversal": "none"
     },
     {
       "name": "TestMergeTrainSingletonFastPathLandsExactlyOnce",
@@ -345,7 +414,9 @@
       ],
       "auth": "neutral",
       "train": "sensitive",
-      "train_reason": "its subject is the merge train"
+      "train_reason": "its subject is the merge train",
+      "entry": "Queued",
+      "traversal": "none"
     },
     {
       "name": "TestMergeTrainTwoBasesConcurrent",
@@ -361,7 +432,9 @@
       "train": "sensitive",
       "train_reason": "its subject is the merge train",
       "default_base_train": true,
-      "default_base_train_reason": "its subject is the default-base (main) partition running next to a throwaway base's"
+      "default_base_train_reason": "its subject is the default-base (main) partition running next to a throwaway base's",
+      "entry": "Queued",
+      "traversal": "none"
     },
     {
       "name": "TestNoWorkNeeded",
@@ -370,7 +443,10 @@
         "TestNoWorkNeeded"
       ],
       "auth": "neutral",
-      "train": "neutral"
+      "train": "neutral",
+      "entry": "Specify",
+      "traversal": "subject",
+      "traversal_reason": "the Specify-stage FABRIK_NO_WORK_NEEDED marker flow is the subject"
     },
     {
       "name": "TestPATSelfRecognitionBlockedCommentUpdatedInPlace",
@@ -382,7 +458,10 @@
       ],
       "auth": "sensitive",
       "auth_reason": "self-recognition: findBlockedComment/selfLogin under a User-typed PAT identity",
-      "train": "neutral"
+      "train": "neutral",
+      "entry": "Specify",
+      "traversal": "none",
+      "traversal_reason": "filed paused/blocked at Specify so no Claude stage runs; only comment authorship is exercised"
     },
     {
       "name": "TestPATSelfRecognitionDurableReviewSuppression",
@@ -394,7 +473,9 @@
       ],
       "auth": "sensitive",
       "auth_reason": "self-recognition: durablyAddressedReviewIDs/selfLogin under a User-typed PAT identity",
-      "train": "neutral"
+      "train": "neutral",
+      "entry": "Review",
+      "traversal": "none"
     },
     {
       "name": "TestPATSelfRecognitionOwnMarkedCommentNeverResumes",
@@ -406,7 +487,10 @@
       ],
       "auth": "sensitive",
       "auth_reason": "self-recognition: the engine's own-comment recognition under a User-typed PAT identity",
-      "train": "neutral"
+      "train": "neutral",
+      "entry": "Specify",
+      "traversal": "none",
+      "traversal_reason": "filed paused at Specify so no Claude stage runs; only comment authorship is exercised"
     },
     {
       "name": "TestPauseLiftedOnlyByPostPauseHumanComment",
@@ -416,7 +500,10 @@
       ],
       "auth": "sensitive",
       "auth_reason": "resume by a human comment relies on filterHuman and selfLogin recognising the engine's own comments",
-      "train": "neutral"
+      "train": "neutral",
+      "entry": "Specify",
+      "traversal": "none",
+      "traversal_reason": "filed off-board at Specify with no stage traversal; only the comment-resume step runs Claude, once"
     },
     {
       "name": "TestPausedMergedPRRecovery",
@@ -426,7 +513,9 @@
       ],
       "auth": "neutral",
       "train": "sensitive",
-      "train_reason": "recovers a pause on an item whose PR has already landed"
+      "train_reason": "recovers a pause on an item whose PR has already landed",
+      "entry": "Implement",
+      "traversal": "none"
     },
     {
       "name": "TestPostMergeCommentNotApplied",
@@ -437,7 +526,9 @@
       ],
       "auth": "neutral",
       "train": "sensitive",
-      "train_reason": "its subject is the post-merge guard on a landed item, including merge-train members"
+      "train_reason": "its subject is the post-merge guard on a landed item, including merge-train members",
+      "entry": "Implement",
+      "traversal": "none"
     },
     {
       "name": "TestQueuedMemberCommentEjection",
@@ -453,7 +544,9 @@
       "train": "sensitive",
       "train_reason": "its subject is the Queued holding stage and the train's comment eject",
       "default_base_train": true,
-      "default_base_train_reason": "needs the slow-gate required check on main; unverifiable that it fires on a non-default base, and asserts exact batch composition on RepoAlpha/main"
+      "default_base_train_reason": "needs the slow-gate required check on main; unverifiable that it fires on a non-default base, and asserts exact batch composition on RepoAlpha/main",
+      "entry": "Queued",
+      "traversal": "none"
     },
     {
       "name": "TestReviewAuthorityAdvisoryRegressionGuard",
@@ -462,7 +555,9 @@
         "TestReviewAuthorityAdvisoryRegressionGuard"
       ],
       "auth": "neutral",
-      "train": "neutral"
+      "train": "neutral",
+      "entry": "Review",
+      "traversal": "none"
     },
     {
       "name": "TestReviewAuthorityClearsOnApproval",
@@ -471,7 +566,9 @@
         "TestReviewAuthorityClearsOnApproval"
       ],
       "auth": "neutral",
-      "train": "neutral"
+      "train": "neutral",
+      "entry": "Review",
+      "traversal": "none"
     },
     {
       "name": "TestReviewAuthorityCycleLimitPauses",
@@ -480,7 +577,9 @@
         "TestReviewAuthorityCycleLimitPauses"
       ],
       "auth": "neutral",
-      "train": "neutral"
+      "train": "neutral",
+      "entry": "Review",
+      "traversal": "none"
     },
     {
       "name": "TestReviewAuthorityDeclaredBotDoesNotDeferHumanEscalation",
@@ -489,7 +588,9 @@
         "TestReviewAuthorityDeclaredBotDoesNotDeferHumanEscalation"
       ],
       "auth": "neutral",
-      "train": "neutral"
+      "train": "neutral",
+      "entry": "Review",
+      "traversal": "none"
     },
     {
       "name": "TestReviewAuthorityReinvokesOnChangesRequested",
@@ -498,7 +599,9 @@
         "TestReviewAuthorityReinvokesOnChangesRequested"
       ],
       "auth": "neutral",
-      "train": "neutral"
+      "train": "neutral",
+      "entry": "Review",
+      "traversal": "none"
     },
     {
       "name": "TestReviewAuthorityYoloDoesNotBypassBlock",
@@ -507,7 +610,9 @@
         "TestReviewAuthorityYoloDoesNotBypassBlock"
       ],
       "auth": "neutral",
-      "train": "neutral"
+      "train": "neutral",
+      "entry": "Review",
+      "traversal": "none"
     },
     {
       "name": "TestSmokeSingleRepoDispatch",
@@ -516,7 +621,10 @@
         "TestSmoke_FullPipelineToDone"
       ],
       "auth": "neutral",
-      "train": "neutral"
+      "train": "neutral",
+      "entry": "Specify",
+      "traversal": "subject",
+      "traversal_reason": "one real Specify dispatch is the subject (dispatch and stage completion)"
     },
     {
       "name": "TestSmokeSingleRepoFullPipeline",
@@ -527,7 +635,11 @@
       "auth": "sensitive",
       "auth_reason": "one pass of every first write per object type (push, PR, comments, labels, board) — the App grant surface, ADR-1846/ADR-1893",
       "train": "sensitive",
-      "train_reason": "runs Specify to a merged PR through the landing path"
+      "train_reason": "runs Specify to a merged PR through the landing path",
+      "entry": "Specify",
+      "traversal": "subject",
+      "traversal_reason": "the ordinary yolo path Specify to Done: every stage, the Review to Validate hand-off, the merge and the close",
+      "full_traversal": true
     },
     {
       "name": "TestSwitchTrainMode",
@@ -540,7 +652,9 @@
       "auth": "neutral",
       "train": "neutral",
       "exclusive": true,
-      "exclusive_reason": "stops the bed and rewrites its train-mode .env, then restarts it (the gate also runs it as each leg's restart step)"
+      "exclusive_reason": "stops the bed and rewrites its train-mode .env, then restarts it (the gate also runs it as each leg's restart step)",
+      "entry": "none",
+      "traversal": "none"
     },
     {
       "name": "TestYoloAutoMergeLabel",
@@ -551,7 +665,9 @@
       "note": "train-off leg only in the sim; the live test also covers the train-on leg",
       "auth": "neutral",
       "train": "sensitive",
-      "train_reason": "its subject is the auto-merge decision on the landing path"
+      "train_reason": "its subject is the auto-merge decision on the landing path",
+      "entry": "Validate",
+      "traversal": "none"
     },
     {
       "name": "TestYoloRemovedMidValidateBlocksMerge",
@@ -565,7 +681,9 @@
       "note": "train-off only in the sim; the wait_for_ci:false twin is the one that discriminates on the dispatch snapshot (the sim board is always fresh, so the wait_for_ci:true twin guards the end-to-end outcome); the live REST-poll window proof has no sim analogue because the worker removes the label synchronously",
       "auth": "neutral",
       "train": "sensitive",
-      "train_reason": "its subject is the merge decision at Validate on the landing path"
+      "train_reason": "its subject is the merge decision at Validate on the landing path",
+      "entry": "Validate",
+      "traversal": "none"
     }
   ]
 }

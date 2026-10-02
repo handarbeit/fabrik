@@ -28,9 +28,12 @@ func mustContain(t *testing.T, problems []string, sub string) {
 
 func baseRegistry() *Registry {
 	return &Registry{Version: Version, Tests: []Entry{
-		{Name: "TestA", Parity: ParitySim, Sim: []string{"TestSimA"}, Auth: Neutral, Train: Neutral},
-		{Name: "TestB", Parity: ParityLiveOnly, LiveOnlyReason: ReasonRealCI, Auth: Sensitive, AuthReason: "identity", Train: Neutral},
-		{Name: "TestC", Parity: ParityGap, Note: "unit only", Auth: Neutral, Train: Sensitive, TrainReason: "landing path"},
+		{Name: "TestA", Parity: ParitySim, Sim: []string{"TestSimA"}, Auth: Neutral, Train: Neutral,
+			EntryStage: StageSpecify, Traversal: TraversalSubject, TraversalReason: "the ordinary path to Done", FullTraversal: true},
+		{Name: "TestB", Parity: ParityLiveOnly, LiveOnlyReason: ReasonRealCI, Auth: Sensitive, AuthReason: "identity", Train: Neutral,
+			EntryStage: StageValidate, Traversal: TraversalNone},
+		{Name: "TestC", Parity: ParityGap, Note: "unit only", Auth: Neutral, Train: Sensitive, TrainReason: "landing path",
+			EntryStage: StageQueued, Traversal: TraversalNone},
 	}}
 }
 
@@ -89,6 +92,21 @@ func TestCheckMalformedEntries(t *testing.T) {
 		{"multi-line reason", func(r *Registry) { r.Tests[1].AuthReason = "a\nb" }, "single line"},
 		{"reason on a neutral auth", func(r *Registry) { r.Tests[0].AuthReason = "why" }, "auth_reason is only valid"},
 		{"reason on a neutral train", func(r *Registry) { r.Tests[1].TrainReason = "why" }, "train_reason is only valid"},
+		{"missing entry", func(r *Registry) { r.Tests[1].EntryStage = "" }, "entry is \"\""},
+		{"unknown entry", func(r *Registry) { r.Tests[1].EntryStage = "Done" }, "entry is \"Done\""},
+		{"missing traversal", func(r *Registry) { r.Tests[1].Traversal = "" }, "traversal is \"\""},
+		{"setup traversal is not a value", func(r *Registry) { r.Tests[1].Traversal = "setup" }, "traversal is \"setup\""},
+		{"subject traversal without a reason", func(r *Registry) { r.Tests[0].TraversalReason = "" }, "traversal_reason is empty"},
+		{"specify entry without a reason", func(r *Registry) {
+			r.Tests[1].EntryStage, r.Tests[1].Traversal = StageSpecify, TraversalNone
+		}, "traversal_reason is empty"},
+		{"reason on a seeded none", func(r *Registry) { r.Tests[1].TraversalReason = "why" }, "traversal_reason is only valid"},
+		{"multi-line traversal reason", func(r *Registry) { r.Tests[0].TraversalReason = "a\nb" }, "traversal_reason must be a single line"},
+		{"full_traversal on a seeded test", func(r *Registry) { r.Tests[1].FullTraversal = true }, "full_traversal requires"},
+		{"full_traversal on a none traversal", func(r *Registry) {
+			r.Tests[0].Traversal = TraversalNone
+		}, "full_traversal requires"},
+		{"empty full-traversal set", func(r *Registry) { r.Tests[0].FullTraversal = false }, "full-traversal set (R3) must not be empty"},
 		{"unknown skip_ok_legs train", func(r *Registry) { r.Tests[1].SkipOKLegs = []string{"pat/maybe"} }, "malformed skip_ok_legs"},
 	}
 	for _, c := range cases {
@@ -102,7 +120,8 @@ func TestCheckMalformedEntries(t *testing.T) {
 
 func TestCheckSelfRecognitionMustBeAuthSensitive(t *testing.T) {
 	r := &Registry{Version: Version, Tests: []Entry{
-		{Name: "TestPATSelfRecognitionX", Parity: ParityGap, Auth: Neutral, Train: Neutral},
+		{Name: "TestPATSelfRecognitionX", Parity: ParityGap, Auth: Neutral, Train: Neutral,
+			EntryStage: StageSpecify, Traversal: TraversalSubject, TraversalReason: "x", FullTraversal: true},
 	}}
 	mustContain(t, Check(r, []string{"TestPATSelfRecognitionX"}, nil), "SelfRecognition test must be auth: sensitive")
 	r.Tests[0].Auth, r.Tests[0].AuthReason = Sensitive, "identity"
@@ -150,6 +169,49 @@ func Testimony(t *testing.T) { AssertPRAuthorIsExpectedIdentity(t) }
 	}
 	if strings.Join(got, ",") != "TestDirect,TestInClosure,TestViaHelper" {
 		t.Fatalf("callers = %v", got)
+	}
+}
+
+func TestCheckEntryLiterals(t *testing.T) {
+	r := baseRegistry()
+	// TestA enters at Specify, so driving Specify is honest; TestB claims Validate.
+	p := CheckEntryLiterals(r, []string{"TestA", "TestB"}, nil)
+	if len(p) != 1 {
+		t.Fatalf("want exactly TestB flagged, got %v", p)
+	}
+	mustContain(t, p, "TestB: declares entry \"Validate\" but reaches SetIssueStatus")
+	if p := CheckEntryLiterals(r, []string{"TestB"}, map[string]string{"TestB": "primer"}); len(p) != 0 {
+		t.Fatalf("exempt test flagged: %v", p)
+	}
+	if p := CheckEntryLiterals(r, []string{"TestGone"}, nil); len(p) != 0 {
+		t.Fatalf("missing entry is Check's concern: %v", p)
+	}
+}
+
+func TestScanSpecifyDrivers(t *testing.T) {
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{
+		"harness.go": `package e2e
+func SetIssueStatus(a, b, c, d any) {}
+func seedAtSpecify() { SetIssueStatus(1, 2, 3, "Specify") }
+func viaDeeper() { seedAtSpecify() }
+func seedAtValidate() { SetIssueStatus(1, 2, 3, "Validate") }
+`,
+		"a_test.go": `package e2e
+import "testing"
+func TestDirect(t *testing.T) { SetIssueStatus(t, 1, 2, "Specify") }
+func TestInClosure(t *testing.T) { t.Run("x", func(t *testing.T) { SetIssueStatus(t, 1, 2, "Specify") }) }
+func TestViaHelper(t *testing.T) { viaDeeper() }
+func TestSeeded(t *testing.T) { seedAtValidate(); SetIssueStatus(t, 1, 2, "Validate") }
+func TestVariable(t *testing.T) { col := "Specify"; SetIssueStatus(t, 1, 2, col) }
+`,
+	})
+	got, err := ScanSpecifyDrivers(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(got, ",") != "TestDirect,TestInClosure,TestViaHelper" {
+		t.Fatalf("drivers = %v", got)
 	}
 }
 
@@ -251,6 +313,13 @@ func TestScanSimTests(t *testing.T) {
 	}
 }
 
+// specifyPrimerExemptions names the tests that may declare a late entry stage
+// while still placing a cheap item at Specify: a primer filed to warm a cache,
+// never a traversal of the subject.
+var specifyPrimerExemptions = map[string]string{
+	"TestMergeTrainColdCacheBaseMember": "files a blocked primer at Specify to warm the base-branch cache; the subject is seeded at Queued",
+}
+
 // TestRegistryMatchesTree is the R4 enforcement: it runs in plain `go test ./...`
 // (no build tag) on every PR and fails when the registry and the live suite
 // disagree — an unmapped live test, a stale entry, a dangling sim reference or a
@@ -294,6 +363,12 @@ func TestRegistryMatchesTree(t *testing.T) {
 		t.Fatal("ScanParallelTests found no parallel live test")
 	}
 	problems = append(problems, CheckParallelConsistency(reg, parallel)...)
+	// #1992: a test that declares a late entry stage must not drive the pipeline from Specify.
+	drivers, err := ScanSpecifyDrivers("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	problems = append(problems, CheckEntryLiterals(reg, drivers, specifyPrimerExemptions)...)
 	if len(problems) > 0 {
 		t.Fatalf("tests/e2e/registry/registry.json is out of sync with the tree:\n  %s",
 			strings.Join(problems, "\n  "))
