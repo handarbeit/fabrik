@@ -26,8 +26,10 @@ import (
 //
 // Which assertion kills which regression (verified by local neutralisation):
 //   - groupQueuedByRepoAndBase collapsing everything into one partition: the
-//     maint members land on main, so the landing-PR base, distinct-train-PR and
-//     branch-content assertions fail.
+//     maint members are batched under the default partition, where ADR-1773's
+//     refuseIfBaseContradictsMembers refuses the landing (defence in depth), so
+//     they stay Queued and the Done / two-landing-PR assertions fail; were that
+//     guard absent, the landing-PR base and branch-content assertions would.
 //   - mergeTrainInFlight keyed by bare repo instead of mergeTrainKey: the second
 //     partition's dispatch is skipped ("already assembling"), so its members are
 //     still Queued after the single poll and the Done assertion fails.

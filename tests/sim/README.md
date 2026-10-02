@@ -1020,6 +1020,19 @@ and must observe the duplicate (non-vacuity). A third scenario merges a member's
 without the Done move and restarts, asserting the interrupted landing still completes once.
 See ADR-1871 and `docs/state-machine.md` §6.28.
 
+`mergetrain_twobase_test.go` (`TestMergeTrainTwoBasesConcurrent`, the twin of the live scenario of the
+same name, ADR-1648) queues two members on `main` and two on a seeded `base:<branch>` (via
+`QueueMemberOnBase`) before the first poll, then runs exactly **one** `RunPoll` and asserts with no retry
+loop that all four land: two distinct merged `fabrik/merge-train/*` PRs, one targeting each base, each
+closing only its own partition's members, each base carrying only its own members' files, and no stale
+trial branch or open train PR left behind. The single poll is the point — a looser wait would let a
+partition that only lands on a later poll pass. Neutralising `groupQueuedByRepoAndBase` (collapse to one
+partition) or keying `mergeTrainInFlight` by bare repo instead of `mergeTrainKey` each make it fail. The
+in-flight markers themselves are unexported and not read; "independent per-(repo, base) workers" is proven
+by proxy (both finish in one poll, distinct trial branches and landing PRs, disjoint member sets).
+Fidelity caveat: simgh links PR to issue by head-branch convention, not the base-conditional GraphQL
+field, so the live test remains the only cover for that asymmetry.
+
 ## Guard-testing convention (R1–R4, #1687)
 
 Three times in one working session, a guard (a check that rejects, refuses, or falls
