@@ -11,12 +11,16 @@
 #
 #   scripts/e2e/run.sh                       # full gate: off then on, under pat then app auth
 #   scripts/e2e/run.sh --clean               # reset boards/PRs/branches first (must be the first argument)
+#   scripts/e2e/run.sh --resume              # run only the (test, leg) pairs the per-SHA coverage ledger still lacks (#1972)
+#   scripts/e2e/run.sh --clean --resume      # both, in either order; both must LEAD the arguments
+#   scripts/e2e/run.sh coverage [--sha S] [--format notes]   # read-only: is live coverage complete for S? (exit 0 / 8)
 #   scripts/e2e/run.sh -run TestSmokeSingleRepoDispatch   # anything else is passed to `go test`
 #   E2E_TRAIN_MODE=off E2E_AUTH_MODE=pat scripts/e2e/run.sh -run Smoke
 #
 # Exit codes: 3 budget exhausted (RUN INVALID), 4 bed preflight failed, 5 pre-gate
-# failed, 6 post-suite watchdog, 7 operational precondition failed; otherwise the
-# suite's own code.
+# failed, 6 post-suite watchdog, 7 operational precondition failed, 8 (--resume and
+# `coverage`) every leg passed but required live coverage is still incomplete;
+# otherwise the suite's own code.
 #
 # E2E_GATE_BIN_DIR overrides where the runner binary is built (default:
 # a per-user directory under $TMPDIR).

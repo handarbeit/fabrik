@@ -79,3 +79,46 @@ func TestDriftReportTruncatesLongPathLists(t *testing.T) {
 		t.Errorf("long lists must be truncated: %s", rep)
 	}
 }
+
+// cut-release.sh's own step-4 self-writes (declared via
+// FABRIK_PREGATE_ALLOWED_DIRTY_REGEX) must not invalidate the ledger it is about
+// to accept — but a COMMITTED change to the same path still does.
+func TestDriftDeclaredDirtyPathsAreExcusedOnlyWhenUncommitted(t *testing.T) {
+	sha := strings.Repeat("b", 40)
+	re := `^\?\? release-notes/v1\.md$| M plugin/known_embedded_versions\.go$`
+	handler := func(committed string) func(context.Context, Cmd) Result {
+		return func(_ context.Context, c Cmd) Result {
+			line := strings.Join(c.Args, " ")
+			switch {
+			case strings.HasPrefix(line, "diff --name-only") && strings.HasSuffix(line, "HEAD"):
+				writeStdout(c, committed)
+			case strings.HasPrefix(line, "diff --name-only"):
+				writeStdout(c, "plugin/known_embedded_versions.go\ntests/e2e/x_test.go\n")
+			case strings.HasPrefix(line, "ls-files --others"):
+				writeStdout(c, "release-notes/v1.md\n")
+			case strings.HasPrefix(line, "status --porcelain"):
+				writeStdout(c, "?? release-notes/v1.md\n M plugin/known_embedded_versions.go\n M engine/poll.go\n")
+			}
+			return Result{}
+		}
+	}
+	g, fe, _, _ := testGate(t, "FABRIK_PREGATE_ALLOWED_DIRTY_REGEX="+re)
+	fe.handler = handler("")
+	d := g.DriftCheck(context.Background(), sha)
+	if !d.Valid {
+		t.Fatalf("declared uncommitted self-writes must be excused: %+v", d)
+	}
+
+	fe.handler = handler("plugin/known_embedded_versions.go\n") // also changed by a commit
+	d = g.DriftCheck(context.Background(), sha)
+	if d.Valid || len(d.Paths) != 1 || d.Paths[0] != "plugin/known_embedded_versions.go" {
+		t.Fatalf("a committed change must still invalidate: %+v", d)
+	}
+
+	// Without the declaration nothing is excused.
+	g, fe, _, _ = testGate(t)
+	fe.handler = handler("")
+	if d = g.DriftCheck(context.Background(), sha); d.Valid {
+		t.Fatalf("undeclared engine-side edits must invalidate: %+v", d)
+	}
+}

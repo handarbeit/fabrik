@@ -12,6 +12,7 @@
 #       # comment and adrs/1454-sim-pre-gate-not-replacement.md for why the
 #       # live suite is mandatory by default and what this flag costs. A bare
 #       # `--skip-integration` (no reason) is refused.
+#   scripts/cut-release.sh --help                      # print this header
 #
 # Prereqs:
 #   - On main, clean working tree, ff'd to origin/main
@@ -35,6 +36,18 @@
 #      one sanctioned, loud, release-notes-recorded escape hatch (R2, #1454). Always
 #      passes --clean (REQ1, #1677) to reset the shared bed first — a release cut and
 #      concurrent manual e2e testing on the bed can no longer safely overlap.
+#      COVERAGE-BASED (#1972, ADR-1972): the gate is accepted when every required
+#      (live test, leg) pair has a valid PASS in the per-SHA coverage ledger
+#      (.e2e-coverage/<engine-sha>/) — however many invocations that took, so a
+#      ~10-hour run that GitHub or the quota interrupts is not thrown away. The step
+#      first asks `scripts/e2e/run.sh coverage` whether coverage is already complete
+#      for the SHA under test; if not it runs `scripts/e2e/run.sh --clean --resume`
+#      (only the missing pairs), then asks again. Re-running this script after an
+#      interrupted gate therefore resumes rather than restarts. A leg's PASS is
+#      void if the engine changed since (a new SHA, a new ledger) or the test's own
+#      source did; a declared skip counts only while its cited issue is open. The
+#      release notes record the engine SHA and how many gate invocations the
+#      coverage took.
 #      FIDELITY-DRIFT CHECK (R4, #1454): if this step fails on something step 3's
 #      pre-gate passed, that's a fidelity bug in the sim, not just a live regression —
 #      file it and fix it in tests/sim too (procedure: tests/sim/README.md's
@@ -214,7 +227,7 @@ append_known_version() {
 # falling through to the generic "real regression, check fidelity-drift"
 # branch, which would wrongly send an operator investigating a stuck lock or
 # an unreachable SSH remote down the fidelity-drift procedure instead.
-# Mirrors scripts/e2e/run.sh's own exit-code convention (3/4/5/7) exactly —
+# Mirrors scripts/e2e/run.sh's own exit-code convention (3/4/5/7/8) exactly —
 # see that script's header comment for where each code originates. (Exit 6,
 # POST_SUITE_WATCHDOG_EXIT (#1676), has no dedicated case here yet — it falls
 # through to the generic branch below; a pre-existing gap from #1676, not
@@ -237,6 +250,9 @@ interpret_e2e_exit_code() {
     7)
       echo "live e2e integration suite aborted: an operational precondition was not met (exit 7, PRECONDITION_FAILED_EXIT) inside scripts/e2e/run.sh — a competing local Fabrik instance is sharing the bed's @arbeithand GraphQL token, the review bot (Pruefer) is confidently unreachable, or the bed is not set up for the App auth legs (#1861: E2E_APP_* missing from its .env, or github_app_* set in its config.yaml). This is an operational problem, NOT a regression and NOT a fidelity-drift case — see scripts/e2e/run.sh's own output above for which precondition failed and what it found, fix it (stop the competing instance, start Pruefer, or fix the bed's App identity), and re-run scripts/cut-release.sh $VERSION. See tests/e2e/README.md's 'Operational up/down contract' (#1684) for the full mechanism."
       ;;
+    8)
+      echo "live e2e integration gate: every leg this invocation ran passed, but required live coverage is still incomplete (exit 8, COVERAGE_INCOMPLETE_EXIT) — see the per-leg coverage summary above for the (test, leg) pairs still missing. Coverage accumulates per engine SHA in the ledger (.e2e-coverage/), so this is NOT a regression: re-run scripts/cut-release.sh $VERSION and it resumes with only the missing pairs."
+      ;;
     *)
       echo "live e2e integration suite FAILED (exit $rc) — see scripts/e2e/run.sh output above. This is a real regression; do not retry with --skip-integration to work around it. FIDELITY-DRIFT CHECK (R4, #1454): this script's own sim + wire-contract pre-gate (step 3) already passed against this same tree, so whatever the live suite just caught is exactly the case that policy covers — file a fidelity issue, add the scenario to tests/sim, and update tests/sim/simgh/FIDELITY.md (see tests/sim/README.md's 'Fidelity-drift policy' section) once the underlying regression itself is fixed."
       ;;
@@ -244,8 +260,16 @@ interpret_e2e_exit_code() {
   [ "$rc" -eq 0 ]
 }
 
+# print_usage prints this file's leading comment block (up to the first blank
+# line) — the usage, prerequisites and step list, including step 5's
+# coverage-based live gate (#1972).
+print_usage() {
+  sed -n '2,/^$/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'
+}
+
 # ─── arg parsing ──────────────────────────────────────────────────────────────
 parse_args() {
+  case "${1:-}" in -h|--help) print_usage; exit 0 ;; esac
   VERSION="${1:-}"
   SKIP_TESTS=0
   NO_DOC_ISSUE=0
@@ -274,7 +298,7 @@ parse_args() {
   done
 
   if [ -z "$VERSION" ]; then
-    echo "Usage: $0 vX.Y.Z [--skip-tests] [--no-doc-issue] [--no-plugin-bump] [--skip-integration=<reason>]" >&2
+    echo "Usage: $0 vX.Y.Z [--skip-tests] [--no-doc-issue] [--no-plugin-bump] [--skip-integration=<reason>]  (see --help; the live gate is coverage-based and resumable, #1972)" >&2
     exit 2
   fi
   if ! printf '%s' "$VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
@@ -481,15 +505,36 @@ EOF
   insert_notes_line "$NOTES_FILE" "- ⚠️ Live e2e integration suite SKIPPED for this release: $INTEGRATION_SKIP_REASON"
   warn "live e2e integration suite SKIPPED — reason recorded in $NOTES_FILE"
 else
-  echo "   running scripts/e2e/run.sh --clean against origin/main (this can take hours — see tests/e2e/README.md)"
-  E2E_RC=0
-  "$REPO_ROOT/scripts/e2e/run.sh" --clean || E2E_RC=$?
-  E2E_MSG="$(interpret_e2e_exit_code "$E2E_RC")"
-  if [ "$E2E_RC" -eq 0 ]; then
-    ok "$E2E_MSG"
+  # Coverage-based (#1972): the gate passes when the per-SHA ledger holds a
+  # valid PASS for every required (test, leg) pair, however many invocations
+  # that took. The engine SHA under test is what scripts/e2e/run.sh resolves
+  # E2E_BED_REF (default origin/main) to at bed preflight — step 1 guarantees
+  # local main equals origin/main, so it is resolvable here too. The release-notes
+  # and known-versions edits this script itself leaves uncommitted are excused by
+  # the drift check through FABRIK_PREGATE_ALLOWED_DIRTY_REGEX (exported at step 3).
+  GATE_SHA="$(git rev-parse --verify "${E2E_BED_REF:-origin/main}^{commit}")" \
+    || die "cannot resolve ${E2E_BED_REF:-origin/main} to an engine SHA for the live-gate coverage check"
+  echo "   checking live-gate coverage for engine SHA $GATE_SHA (per-SHA ledger — see tests/e2e/README.md)"
+  COVERAGE_RC=0
+  COVERAGE_LINE="$("$REPO_ROOT/scripts/e2e/run.sh" coverage --sha "$GATE_SHA" --format notes)" || COVERAGE_RC=$?
+  if [ "$COVERAGE_RC" -eq 0 ]; then
+    ok "live e2e coverage is already complete for $GATE_SHA — no live run needed"
+  elif [ "$COVERAGE_RC" -ne 8 ]; then
+    die "live-gate coverage check failed (exit $COVERAGE_RC) — see its output above"
   else
-    die "$E2E_MSG"
+    echo "   running scripts/e2e/run.sh --clean --resume against ${E2E_BED_REF:-origin/main} (only the missing pairs; this can take hours — see tests/e2e/README.md)"
+    E2E_RC=0
+    "$REPO_ROOT/scripts/e2e/run.sh" --clean --resume || E2E_RC=$?
+    E2E_MSG="$(interpret_e2e_exit_code "$E2E_RC")"
+    if [ "$E2E_RC" -eq 0 ]; then
+      ok "$E2E_MSG"
+    else
+      die "$E2E_MSG"
+    fi
+    COVERAGE_LINE="$("$REPO_ROOT/scripts/e2e/run.sh" coverage --sha "$GATE_SHA" --format notes)" \
+      || die "live-gate coverage is not complete after the resume run — see the coverage summary above, then re-run scripts/cut-release.sh $VERSION"
   fi
+  insert_notes_line "$NOTES_FILE" "- $COVERAGE_LINE"
 fi
 
 # ─── 6. commit release notes as arbeithand ────────────────────────────────────

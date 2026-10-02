@@ -3,6 +3,7 @@ package gate
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -54,13 +55,33 @@ func (g *Gate) DriftCheck(ctx context.Context, engineSHA string) Drift {
 	}
 	changed = append(changed, splitLines(so)...)
 
+	// A caller that declares its own benign self-writes (cut-release.sh's step-4
+	// release-notes and known-versions edits, via FABRIK_PREGATE_ALLOWED_DIRTY_REGEX)
+	// has them excused here too — but only while they are UNCOMMITTED edits: a
+	// path also changed by a commit since the engine SHA is a real difference.
+	declared, err := g.declaredDirtyPaths(ctx)
+	if err != nil {
+		d.Reason = err.Error()
+		return d
+	}
+	if len(declared) > 0 {
+		so, res = git("diff", "--name-only", engineSHA, "HEAD")
+		if res.ExitCode != 0 || res.Err != nil {
+			d.Reason = fmt.Sprintf("git diff --name-only %s HEAD failed (exit %d)", shortSHA(engineSHA), res.ExitCode)
+			return d
+		}
+		for _, p := range splitLines(so) {
+			delete(declared, p)
+		}
+	}
+
 	seen := map[string]bool{}
 	for _, p := range changed {
 		if seen[p] {
 			continue
 		}
 		seen[p] = true
-		if driftAllowed(p) {
+		if driftAllowed(p) || declared[p] {
 			d.Changed++
 		} else {
 			d.Paths = append(d.Paths, p)
@@ -69,6 +90,31 @@ func (g *Gate) DriftCheck(ctx context.Context, engineSHA string) Drift {
 	sort.Strings(d.Paths)
 	d.Valid = len(d.Paths) == 0
 	return d
+}
+
+// declaredDirtyPaths are the working-tree paths whose `git status --porcelain`
+// line matches FABRIK_PREGATE_ALLOWED_DIRTY_REGEX (empty when it is unset or does
+// not compile — fail closed, nothing is excused).
+func (g *Gate) declaredDirtyPaths(ctx context.Context) (map[string]bool, error) {
+	out := map[string]bool{}
+	pat := g.Getenv("FABRIK_PREGATE_ALLOWED_DIRTY_REGEX")
+	if pat == "" {
+		return out, nil
+	}
+	re, err := regexp.Compile(pat)
+	if err != nil {
+		return out, nil
+	}
+	so, _, res := output(ctx, g.Exec, Cmd{Name: "git", Args: []string{"status", "--porcelain"}, Dir: g.Cfg.RepoRoot, Env: g.Env})
+	if res.ExitCode != 0 || res.Err != nil {
+		return nil, fmt.Errorf("git status --porcelain failed (exit %d)", res.ExitCode)
+	}
+	for _, line := range strings.Split(so, "\n") {
+		if len(line) > 3 && re.MatchString(line) {
+			out[strings.TrimSpace(line[3:])] = true
+		}
+	}
+	return out, nil
 }
 
 func driftAllowed(path string) bool {
