@@ -1,8 +1,10 @@
 # scripts/lib/killgroup.sh — ownership-checked process-group signalling (#1957).
 #
 # Meant to be `source`d, not executed. Defines kill_own_group and kill_own_pid
-# and nothing else — no side effects on source, no traps (run.sh is itself
-# sourced by tests that install their own EXIT traps).
+# and nothing else — no side effects on source, no traps.
+#
+# Used only by scripts/sim/run.sh. scripts/e2e/run.sh is a shim over the Go
+# gate runner (tests/gate, #1994), which sends no negative-PID group signal.
 #
 # Why: `kill -TERM -"$pid"` signals whatever process group currently has ID
 # $pid. When $pid was stored earlier (a job already `wait`ed, a watcher that
