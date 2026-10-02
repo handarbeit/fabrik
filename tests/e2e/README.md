@@ -2407,7 +2407,9 @@ exemption: it files a cheap blocked primer to warm a cache).
 
 **Measuring.** `gate report [--sha S] [--baseline B]` totals each test's `go test -json`
 `Elapsed` per cell from the per-leg archive and joins the registry's `entry`/`traversal`
-columns; with `--baseline` it prints the per-test and total runtime delta. Model-quota use
+columns; with `--baseline` it prints the per-test and total runtime delta, taking the
+baseline's entry stages from the registry *as of the baseline SHA* (a baseline from before
+#1992 has none, so its entry column reads `-` and its proxy is omitted). Model-quota use
 is **not recorded** by the ledger or the archive (the engine log carries no token counts;
 the `Used N/M turns, … tokens` footer is on the stage comments in GitHub), so the report
 carries a clearly-labelled proxy instead: pipeline stages not driven (entering at stage *k*

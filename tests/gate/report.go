@@ -57,7 +57,7 @@ type RuntimeReport struct {
 	Unmeasured []string `json:"unmeasured,omitempty"`
 }
 
-// stageOrder maps an entry stage to the number of pipeline stages before it.
+// stagesBefore maps an entry stage to the number of pipeline stages before it.
 func stagesBefore(s registry.Stage) int {
 	for i, v := range []registry.Stage{
 		registry.StageSpecify, registry.StageResearch, registry.StagePlan,
@@ -70,7 +70,7 @@ func stagesBefore(s registry.Stage) int {
 	if s == registry.StageQueued { // the holding stage sits after Validate
 		return 6
 	}
-	return 0 // "none": files no item
+	return 0 // "none" (files no item) or unrecorded
 }
 
 // BuildRuntimeReport reads <archiveDir>/<cell>/<invocation>/go-test.json for every cell and
@@ -129,7 +129,13 @@ func BuildRuntimeReport(sha, archiveDir string, reg *registry.Registry) (Runtime
 	}
 
 	rep := RuntimeReport{SHA: sha, ByEntry: map[registry.Stage]float64{}}
-	for _, e := range reg.Tests {
+	tests := append([]registry.Entry(nil), reg.Tests...)
+	for name := range seconds {
+		if _, known := byName[name]; !known { // archived but not in this registry: keep its time
+			tests = append(tests, registry.Entry{Name: name})
+		}
+	}
+	for _, e := range tests {
 		row := RuntimeRow{
 			Test: e.Name, Entry: e.EntryStage, Traversal: e.Traversal, FullTraversal: e.FullTraversal,
 			StagesSkipped: stagesBefore(e.EntryStage), Seconds: seconds[e.Name],
@@ -176,6 +182,24 @@ func (r RuntimeReport) Format() string {
 	return b.String()
 }
 
+// hasEntries reports whether any row carries an entry stage: a baseline from before
+// #1992 has none, and its stages-not-driven count would read as a spurious 0.
+func (r RuntimeReport) hasEntries() bool {
+	for _, row := range r.Rows {
+		if row.Entry != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func entryLabel(s registry.Stage) string {
+	if s == "" {
+		return "-"
+	}
+	return string(s)
+}
+
 // FormatComparison renders after against the baseline report: per-test and total
 // runtime deltas (negative is faster) and the change in the stages-not-driven proxy.
 func FormatComparison(before, after RuntimeReport) string {
@@ -195,10 +219,14 @@ func FormatComparison(before, after RuntimeReport) string {
 		if old.Total == 0 && row.Total == 0 {
 			continue
 		}
-		fmt.Fprintf(&b, "%-10s -> %-10s  %9.0f  %9.0f  %+9.0f  %s\n", old.Entry, row.Entry, old.Total, row.Total, row.Total-old.Total, row.Test)
+		fmt.Fprintf(&b, "%-10s -> %-10s  %9.0f  %9.0f  %+9.0f  %s\n", entryLabel(old.Entry), entryLabel(row.Entry), old.Total, row.Total, row.Total-old.Total, row.Test)
 	}
 	fmt.Fprintf(&b, "\ntotal: %.0fs -> %.0fs (%+.0fs, %+.1f min)\n", before.Total, after.Total, after.Total-before.Total, (after.Total-before.Total)/60)
-	fmt.Fprintf(&b, "stages not driven (model-quota proxy): %d -> %d\n", before.StagesSkipped, after.StagesSkipped)
+	if before.hasEntries() {
+		fmt.Fprintf(&b, "stages not driven (model-quota proxy): %d -> %d\n", before.StagesSkipped, after.StagesSkipped)
+	} else {
+		fmt.Fprintf(&b, "stages not driven (model-quota proxy): %d after; not recorded for the baseline (its registry has no entry stages)\n", after.StagesSkipped)
+	}
 	return b.String()
 }
 
@@ -245,7 +273,7 @@ func (g *Gate) ReportCmd(ctx context.Context, argv []string) int {
 		g.errf("gate report: %v\n", err)
 		return ExitPreflightFailed
 	}
-	build := func(s string) (RuntimeReport, bool) {
+	build := func(s string, reg *registry.Registry) (RuntimeReport, bool) {
 		l := &Ledger{Root: g.Cfg.CoverageDir, SHA: s, now: g.Now}
 		if _, err := os.Stat(l.ArchiveDir()); err != nil {
 			g.errf("gate report: no archive for %s under %s (run the gate first, or pass --sha)\n", shortSHA(s), g.Cfg.CoverageDir)
@@ -258,7 +286,7 @@ func (g *Gate) ReportCmd(ctx context.Context, argv []string) int {
 		}
 		return rep, true
 	}
-	after, ok := build(sha)
+	after, ok := build(sha, reg)
 	if !ok {
 		return ExitPreflightFailed
 	}
@@ -273,7 +301,10 @@ func (g *Gate) ReportCmd(ctx context.Context, argv []string) int {
 	if code != 0 {
 		return code
 	}
-	before, ok := build(baseline)
+	// The baseline's entry stages are those of ITS registry, not today's: joining its
+	// timings with the current registry would show every test at its new entry and
+	// make the before/after comparison vacuous.
+	before, ok := build(baseline, g.registryAt(ctx, baseline))
 	if !ok {
 		return ExitPreflightFailed
 	}
@@ -292,6 +323,19 @@ func (g *Gate) printJSON(v any) int {
 	}
 	g.outln(string(data))
 	return 0
+}
+
+// registryAt loads tests/e2e/registry/registry.json as of sha. A commit that predates the
+// registry, or whose registry cannot be decoded, yields an empty one: its tests then
+// report no entry stage ("-") rather than borrowing today's.
+func (g *Gate) registryAt(ctx context.Context, sha string) *registry.Registry {
+	so, _, res := output(ctx, g.Exec, Cmd{Name: "git", Args: []string{"show", sha + ":tests/e2e/registry/registry.json"}, Dir: g.Cfg.RepoRoot, Env: g.Env})
+	if res.ExitCode == 0 {
+		if reg, err := registry.Decode([]byte(so)); err == nil {
+			return reg
+		}
+	}
+	return &registry.Registry{}
 }
 
 // resolveSHA turns an explicit sha, or E2E_BED_REF (default origin/main), into a full

@@ -128,3 +128,34 @@ func TestReportCmdAgainstAFakeArchive(t *testing.T) {
 		t.Fatalf("unknown flag exit = %d", code)
 	}
 }
+
+// A baseline from before #1992 has a registry with no entry stages. Its archived timings
+// must still be reported (under no entry), and the comparison must not claim a
+// stages-not-driven figure for it — nor borrow today's entry stages for it.
+func TestBaselineWithoutEntryStagesKeepsItsTimingsAndOmitsTheProxy(t *testing.T) {
+	archive := t.TempDir()
+	writeStream(t, archive, "app-on", "20260101T000000Z", reportEv("pass", "TestSeeded", 5400))
+	old := &registry.Registry{Version: registry.Version, Tests: []registry.Entry{{Name: "TestSeeded"}}}
+	before, err := BuildRuntimeReport("b", archive, old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.Total != 5400 || before.hasEntries() {
+		t.Fatalf("before = %+v, want its 5400s kept and no entry stages", before)
+	}
+	// A test archived but absent from the registry keeps its time too.
+	orphan, err := BuildRuntimeReport("b", archive, &registry.Registry{Version: registry.Version})
+	if err != nil || orphan.Total != 5400 {
+		t.Fatalf("archived test missing from the registry lost its time: %+v, %v", orphan, err)
+	}
+	after := RuntimeReport{SHA: "a", StagesSkipped: 5, Total: 900, Rows: []RuntimeRow{{Test: "TestSeeded", Entry: registry.StageValidate, Total: 900}}}
+	out := FormatComparison(before, after)
+	for _, want := range []string{"-          -> Validate", "5400s -> 900s", "not recorded for the baseline"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("comparison missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "0 -> 5") {
+		t.Errorf("comparison invented a baseline proxy of 0:\n%s", out)
+	}
+}
