@@ -191,7 +191,8 @@ func (c *Controller) Hold(t TB) {
 // Trigger makes the held engine run exactly one complete poll and returns once it
 // has finished. A poll that errored fails the test; one that ran nothing (the
 // engine's rate-limit gate or minimum-poll-interval floor refused it) is
-// Inconclusive — the precondition never arose — never a pass; one that never
+// Inconclusive — the precondition never arose — never a pass; so is a hold that
+// already lapsed (the engine's hold_until self-release) before the trigger; one that never
 // reports completion fails the test after TriggerTimeout.
 func (c *Controller) Trigger(t TB) {
 	t.Helper()
@@ -202,6 +203,15 @@ func (c *Controller) Trigger(t TB) {
 	req, ack := pollctl.ReadRequest(c.Path), pollctl.ReadAck(c.Path)
 	if !req.Hold {
 		t.Fatalf("TriggerPoll: polls are not held — call HoldPolls first")
+		return
+	}
+	// The engine self-releases at hold_until (and acks that), but the request file
+	// still says hold — so a hold that lapsed during the harness's own waits
+	// (#1978 review) must be detected here, not inferred from req.Hold: free-running
+	// polls may have seen part of the window, so it was never observed whole.
+	if !ack.Held || (req.HoldUntil != 0 && !c.now().Before(time.Unix(req.HoldUntil, 0))) {
+		t.Skip(inconclusive.Message("TriggerPoll: the poll hold lapsed before the trigger (engine ack held=%v, hold_until=%d) — free-running polls may have seen part of the state window; the seam only holds for %s",
+			ack.Held, req.HoldUntil, c.MaxHold))
 		return
 	}
 	seq := maxInt64(req.TriggerSeq, ack.DoneSeq) + 1

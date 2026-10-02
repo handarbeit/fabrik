@@ -400,3 +400,51 @@ func TestLaunchSitesEnableTheSeam(t *testing.T) {
 		}
 	}
 }
+
+// A hold the engine already self-released (hold_until passed) must not be
+// triggered as if still held: the request file still says hold, so Trigger has to
+// read the deadline and the ack (#1978 review).
+func TestTrigger_LapsedHoldIsInconclusive(t *testing.T) {
+	t.Run("deadline passed", func(t *testing.T) {
+		path := pollctl.ControlPath(t.TempDir())
+		fe := startFakeEngine(t, path)
+		c := testController(path, true)
+		clock := time.Now()
+		c.Now = func() time.Time { return clock }
+		tb := &fakeTB{name: "TestOwner"}
+		tb.run(func() {
+			c.Hold(tb)
+			clock = clock.Add(c.MaxHold + time.Second) // the harness's waits outlast the hold
+			c.Trigger(tb)
+		})
+		if !inconclusive.IsMarked(tb.skipped) || !strings.Contains(tb.skipped, "lapsed") {
+			t.Fatalf("skipped = %q fatal = %q, want an Inconclusive 'lapsed' skip", tb.skipped, tb.fatal)
+		}
+		if fe.pollCount() != 0 {
+			t.Fatalf("a trigger was issued for a lapsed hold (%d polls)", fe.pollCount())
+		}
+	})
+	t.Run("engine acked a release", func(t *testing.T) {
+		path := pollctl.ControlPath(t.TempDir())
+		fe := startFakeEngine(t, path)
+		c := testController(path, true)
+		tb := &fakeTB{name: "TestOwner"}
+		tb.run(func() {
+			c.Hold(tb)
+			// The engine self-released: ack says not held, request still says hold.
+			fe.set(func(e *fakeEngine) { e.neverAck = true })
+			a := pollctl.ReadAck(path)
+			a.Held = false
+			if err := pollctl.WriteAck(path, a); err != nil {
+				t.Fatal(err)
+			}
+			c.Trigger(tb)
+		})
+		if !inconclusive.IsMarked(tb.skipped) || !strings.Contains(tb.skipped, "lapsed") {
+			t.Fatalf("skipped = %q fatal = %q, want an Inconclusive 'lapsed' skip", tb.skipped, tb.fatal)
+		}
+		if fe.pollCount() != 0 {
+			t.Fatalf("a trigger was issued for a lapsed hold (%d polls)", fe.pollCount())
+		}
+	})
+}
