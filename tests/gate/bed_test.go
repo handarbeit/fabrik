@@ -66,6 +66,8 @@ func TestPreflightBedRefResolution(t *testing.T) {
 	// condition under which the pre-#1693 bare `git fetch origin` never saw
 	// any branch but main.
 	git(t, scratch, "clone", "-q", "--single-branch", "--branch", "main", origin, bed)
+	git(t, bed, "config", "user.email", "test@example.com")
+	git(t, bed, "config", "user.name", "test")
 	if got := git(t, bed, "config", "--get-all", "remote.origin.fetch"); got != "+refs/heads/main:refs/remotes/origin/main" {
 		t.Fatalf("scratch bed does not reproduce the single-branch refspec: %q", got)
 	}
