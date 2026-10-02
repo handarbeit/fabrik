@@ -41,8 +41,6 @@ import (
 // analogue. Train-off only: with no autonomy label runCatchUpPhase2 returns
 // before the advanceToQueued fork, so the property is mode-invariant.
 
-const yoloMidValidateCheck = "yolo-mid-validate-ci"
-
 // yoloMidValidateProbe records what the scripted Validate worker saw.
 type yoloMidValidateProbe struct {
 	mu          sync.Mutex
