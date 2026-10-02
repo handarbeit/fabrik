@@ -342,8 +342,14 @@
     },
     {
       "name": "TestYoloRemovedMidValidateBlocksMerge",
-      "parity": "gap",
-      "note": "no sim scenario for removing fabrik:yolo mid-Validate"
+      "parity": "sim",
+      "sim": [
+        "TestYoloRemovedMidValidateBlocksMerge_NoWaitForCI",
+        "TestYoloRemovedMidValidateBlocksMerge_NoWaitForCI_PositiveControl",
+        "TestYoloRemovedMidValidateBlocksMerge_WaitForCI",
+        "TestYoloRemovedMidValidateBlocksMerge_WaitForCI_PositiveControl"
+      ],
+      "note": "train-off only in the sim; the wait_for_ci:false twin is the one that discriminates on the dispatch snapshot (the sim board is always fresh, so the wait_for_ci:true twin guards the end-to-end outcome); the live REST-poll window proof has no sim analogue because the worker removes the label synchronously"
     }
   ]
 }

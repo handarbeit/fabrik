@@ -749,7 +749,7 @@ framing and the settle-scan table above's convention: a mechanism belongs
 here if the assertion that actually distinguishes correct from incorrect
 behavior is an ordering or sequence claim, not a state claim. Four
 mechanisms qualified when #1592 was filed; the comment re-entry rework swap
-(#2005) is a fifth — if a sixth is ever added without a row here, that is the
+(#2005) is a fifth and the mid-Validate `fabrik:yolo` removal (#2006) a sixth — if a seventh is ever added without a row here, that is the
 gap this table exists to make visible instead of leaving it latent in prose.
 
 | mechanism | covering scenario | seam needed |
@@ -759,6 +759,7 @@ gap this table exists to make visible instead of leaving it latent in prose.
 | Stale-worker-label reaping (`forEachStaleUnworkedItem`, `engine/worker_liveness.go`) | `stale_worker_reap_test.go`: `TestStaleWorkerReap_OrphanedLockAndEditingLabels` | `Engine.RunStartupCleanup` + `RestartEnv` |
 | Review/no-op reinvoke-cycle counters and their interaction (`ReviewCycleDecremented`/#1045/ADR-1518, `NoOpCommentCycles`/#1555) | `reinvoke_cycle_counters_test.go`: `TestReviewCycleDecremented_NoCommitRefundsIndefinitely`, `TestNoOpCommentCycles_TripsBreakerAndResetsOnProgress`, `TestReviewCycleVsNoOpCommentCycle_Invariant` | no new engine seam, but reuses `Engine.RegisterObservers` — see that file's own doc comment |
 | Comment re-entry rework label swap (`beginStageRework`/`endStageRework`, ADR-1802) — the live `TestCommentReentryShowsReworking`'s twin | `comment_reentry_rework_test.go`: `TestCommentReentryShowsReworking_CompletingExit`, `TestCommentReentryShowsReworking_NonCompletingExit` | `simgh.Sim.LabelEvents` (state-change-only label-event log; the mutation log cannot tell a real `labeled` event from a no-op re-add) |
+| Live re-read of autonomy labels at the landing decision (`refreshAutonomyLabels`, ADR-1769) — the live `TestYoloRemovedMidValidateBlocksMerge`'s twin | `yolo_removed_mid_validate_test.go`: `TestYoloRemovedMidValidateBlocksMerge_NoWaitForCI`/`_WaitForCI`, each with a `_PositiveControl` (same setup, yolo retained, must merge). The `NoWaitForCI` twin is the discriminating one: the decision runs in `handleStageComplete` on the dispatch-time snapshot, so short-circuiting `refreshAutonomyLabels` makes it fail. The sim board is refetched every poll, so the `WaitForCI` twin (the live bed's shape, decided in `runCatchUpPhase2`) guards the end-to-end outcome and only fails if the catch-up autonomy gate itself is defeated — the same limit the live test documents. Train-off only (mode-invariant: no autonomy label returns before the `advanceToQueued` fork). | none — `Sim.RemoveLabelFromIssue` called from a scripted `ForStage` worker, which runs synchronously, so the removal strictly follows dispatch and precedes `handleStageComplete` |
 
 ### Gap 1 — dependency blocking and unblocking
 
