@@ -1412,6 +1412,19 @@ Done-archive scan (`engine/archive_done_settle.go`) all anchor deadlines on it.
 An absent label returns the zero time rather than an error, mirroring
 production's "no such event found".
 
+### Label events — **Modelled (order only)**
+
+`LabelEvents`/`LastLabelEventSeq` expose an ordered per-issue log of label
+*state changes*: `AddLabelToIssue` records a `labeled` event only when the label
+was absent, `RemoveLabelFromIssue` an `unlabeled` event only when it was
+present. A no-op re-add records nothing, as GitHub's issue-events log emits no
+event for it — which is what the mutation log cannot say, since it records the
+no-op add as a successful call. A scenario can therefore prove a label really
+left and came back. `Seq` is 1-based and per issue; order is exact because the
+writes happen under the model's lock. There is **no timestamp and no actor**,
+and labels passed to `SeedIssue` produce no events (they model pre-existing
+state).
+
 ---
 
 ## Time
