@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -79,6 +80,16 @@ type Gate struct {
 	// unavailable (existing behaviour, unchanged).
 	cov *covState
 
+	// pregateRetry is set when a pre-gate step passed (or finally failed) after its
+	// one TSan-crash retry (#1973 R5); recordPregatePass folds it into the record.
+	pregateRetry *pregateRetryNote
+
+	// leftInconclusive is every "leg: test" still INCONCLUSIVE after its leg's
+	// retries (#1973): uncovered, not failed. run() turns a non-empty set into
+	// ExitCoverageIncomplete so an uncovered leg never reads as success.
+	incMu            sync.Mutex
+	leftInconclusive []string
+
 	// runLegFn replaces RunLeg for scheduler tests.
 	runLegFn func(context.Context, Cell) error
 }
@@ -113,6 +124,21 @@ func DefaultPreflights() []Preflight {
 		{Name: "reviewer-reachable", Run: func(_ context.Context, g *Gate, p *Plan) error { return g.CheckReviewerReachable(p.RawArgs) }},
 		{Name: "sim-parity", Run: func(_ context.Context, g *Gate, _ *Plan) error { g.PrintSimParitySummary(); return nil }},
 	}
+}
+
+// noteLeftInconclusive records the tests a leg left INCONCLUSIVE after retries.
+func (g *Gate) noteLeftInconclusive(label string, tests []string) {
+	g.incMu.Lock()
+	defer g.incMu.Unlock()
+	for _, t := range tests {
+		g.leftInconclusive = append(g.leftInconclusive, label+": "+t)
+	}
+}
+
+func (g *Gate) leftInconclusiveTests() []string {
+	g.incMu.Lock()
+	defer g.incMu.Unlock()
+	return append([]string(nil), g.leftInconclusive...)
 }
 
 // Getenv looks a variable up in g.Env (last assignment wins, as in a real
@@ -291,7 +317,7 @@ func (g *Gate) run(ctx context.Context, argv []string) error {
 	}
 
 	if g.cov == nil {
-		return runErr
+		return g.withLeftInconclusive(runErr)
 	}
 	// Print the coverage summary on every path — pass, fail, kill. A cancelled
 	// run still gets one, on a fresh, bounded context for the gh lookups.
@@ -300,10 +326,30 @@ func (g *Gate) run(ctx context.Context, argv []string) error {
 	rep := g.coverageReport(sctx, g.cov.ledger, inputs, legs, required, true)
 	rep.Pregate = g.pregateLine(sctx)
 	g.outln(rep.Format())
+	if err := g.withLeftInconclusive(runErr); err != runErr {
+		return err
+	}
 	if runErr == nil && plan.Resume && !rep.Complete() {
 		return &ExitError{Code: ExitCoverageIncomplete, Msg: "every leg this invocation ran passed, but required live coverage is still incomplete — run scripts/e2e/run.sh --resume again"}
 	}
 	return runErr
+}
+
+// withLeftInconclusive is #1973's exit-status rule: a run that otherwise ended
+// cleanly but left tests INCONCLUSIVE after their legs' retries is UNCOVERED, not
+// failed — and an uncovered leg must never read as success, with or without
+// --resume and whether or not the ledger is enabled. It becomes
+// ExitCoverageIncomplete (8), which scripts/cut-release.sh already maps and which
+// it re-checks against the ledger anyway. A real failure (runErr != nil) keeps
+// its own, more specific, exit code.
+func (g *Gate) withLeftInconclusive(runErr error) error {
+	left := g.leftInconclusiveTests()
+	if runErr != nil || len(left) == 0 {
+		return runErr
+	}
+	return &ExitError{Code: ExitCoverageIncomplete, Msg: fmt.Sprintf(
+		"every test that ran passed or was skipped, but %d stayed INCONCLUSIVE after the bounded retries — UNCOVERED, not failed (%s). They must pass live before a release: run scripts/e2e/run.sh --resume",
+		len(left), strings.Join(left, "; "))}
 }
 
 // gitToplevel resolves the repo root from the current directory.

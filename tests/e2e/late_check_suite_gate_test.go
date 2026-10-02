@@ -132,7 +132,9 @@ func TestLateCheckRunSuiteGate(t *testing.T) {
 	t.Logf("informational: %d 'check suite(s) still running ... holding the CI gate' settle log line(s) since test start", held)
 
 	if err := checkLateCheckOrdering(runs, awaitingCIAt, validateCompleteAt); err != nil {
-		t.Fatal(err)
+		// Only the A3 vacuity guard is INCONCLUSIVE-tagged; A1/A2 and the check-run
+		// presence/conclusion checks are assertions about the engine and stay failures.
+		failOrInconclusive(t, err)
 	}
 	t.Logf("late check-run ordering verified: gate active -> fast green -> late run started -> late run completed -> stage:Validate:complete")
 }

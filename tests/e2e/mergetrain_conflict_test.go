@@ -137,6 +137,10 @@ func TestMergeTrainConflictBisectPrefixRerere(t *testing.T) {
 		t.Fatalf("batch snapshot line for %s vanished after being observed", repo)
 	}
 	if want := []int{aIssue, bIssue, cIssue, pIssue}; !intsEqual(snapshot, want) {
+		// Deliberately a Fatalf, not Inconclusive (#1973): the two causes named below
+		// (a partial batch from a poll straddle, or stale Queued items from an earlier
+		// run) cannot be told apart here, and a retry clears only the first — stale
+		// bed state would fail every retry. Disambiguating them is #1974's work.
 		t.Fatalf("first batch snapshot for %s listed %v, want exactly %v in that order — a partial batch formed before all four were Queued, "+
 			"or stale Queued items from an earlier run joined it; clear the Queued column and re-run", repo, snapshot, want)
 	}

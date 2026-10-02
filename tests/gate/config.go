@@ -103,6 +103,10 @@ type Config struct {
 	CoverageKeepSHAs   int           // E2E_COVERAGE_KEEP_SHAS: SHAs whose bulky archive logs are kept (default 5)
 	IssueRepo          string        // E2E_ISSUE_REPO: where a skip's cited #N lives (default handarbeit/fabrik)
 	ArchiveLogInterval time.Duration // how often the engine log is sampled during a leg (10s)
+
+	// The INCONCLUSIVE outcome (#1973, ADR-1973).
+	InconclusiveRetries int // E2E_INCONCLUSIVE_RETRIES: in-leg re-runs of the inconclusive tests (default 2; 0 disables)
+	InconclusiveWarn    int // E2E_INCONCLUSIVE_WARN: a leg with MORE inconclusives than this warns, pointing at #1974 (default 3)
 }
 
 // LoadConfig resolves a Config from getenv. repoRoot is the git toplevel the
@@ -133,8 +137,17 @@ func LoadConfig(getenv func(string) string, repoRoot string) (Config, error) {
 		CoverageKeepSHAs:   5,
 		IssueRepo:          orDefault(getenv("E2E_ISSUE_REPO"), "handarbeit/fabrik"),
 		ArchiveLogInterval: 10 * time.Second,
+
+		InconclusiveRetries: 2,
+		InconclusiveWarn:    3,
 	}
 	var err error
+	if c.InconclusiveRetries, err = countEnv(getenv, "E2E_INCONCLUSIVE_RETRIES", c.InconclusiveRetries); err != nil {
+		return c, err
+	}
+	if c.InconclusiveWarn, err = countEnv(getenv, "E2E_INCONCLUSIVE_WARN", c.InconclusiveWarn); err != nil {
+		return c, err
+	}
 	if c.GHAPITimeout, err = secsEnv(getenv, "E2E_GH_API_TIMEOUT", 30); err != nil {
 		return c, err
 	}
@@ -165,6 +178,21 @@ func orDefault(v, def string) string {
 		return def
 	}
 	return v
+}
+
+// countEnv parses an integer env var that must be a non-negative count; unset
+// keeps def. Like the other tunables, garbage is a hard error, never a silent
+// default.
+func countEnv(getenv func(string) string, key string, def int) (int, error) {
+	v := strings.TrimSpace(getenv(key))
+	if v == "" {
+		return def, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("%s=%q is not a non-negative integer", key, v)
+	}
+	return n, nil
 }
 
 // secsEnv parses an integer env var as a count of seconds (bash did integer

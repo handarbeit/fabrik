@@ -3,7 +3,9 @@ package gate
 import (
 	"context"
 	"fmt"
+	"io"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -61,23 +63,75 @@ func (g *Gate) RunPregate(ctx context.Context) error {
 	}
 
 	g.outln("== pre-gate: sim suite + github wire-contract tests (R1, #1454) ==")
-	res := g.Exec.Run(ctx, Cmd{
-		Name: g.Cfg.RepoRoot + "/scripts/sim/run.sh", Args: []string{"--all"},
-		Dir: g.Cfg.RepoRoot, Env: g.Env, Stdout: g.Out, Stderr: g.Err,
-	})
-	if res.ExitCode != 0 {
-		return &ExitError{Code: ExitPregateFailed, Msg: "pre-gate: sim suite failed — aborting before touching the live bed or making any live call."}
+	g.pregateRetry = nil
+	if err := g.runPregateStep(ctx, "sim suite", func(out, errw io.Writer) Cmd {
+		return Cmd{
+			Name: g.Cfg.RepoRoot + "/scripts/sim/run.sh", Args: []string{"--all"},
+			Dir: g.Cfg.RepoRoot, Env: g.Env, Stdout: out, Stderr: errw,
+		}
+	}, "pre-gate: sim suite failed — aborting before touching the live bed or making any live call."); err != nil {
+		return err
 	}
-	res = g.Exec.Run(ctx, Cmd{
-		Name: "go", Args: []string{"test", "-race", "-count=1", "./github/..."},
-		Dir: g.Cfg.RepoRoot, Env: g.Env, Stdout: g.Out, Stderr: g.Err, Session: true, Grace: g.Cfg.KillGrace,
-	})
-	if res.ExitCode != 0 {
-		return &ExitError{Code: ExitPregateFailed, Msg: "pre-gate: github wire-contract tests failed — aborting before touching the live bed or making any live call."}
+	if err := g.runPregateStep(ctx, "github wire-contract tests", func(out, errw io.Writer) Cmd {
+		return Cmd{
+			Name: "go", Args: []string{"test", "-race", "-count=1", "./github/..."},
+			Dir: g.Cfg.RepoRoot, Env: g.Env, Stdout: out, Stderr: errw, Session: true, Grace: g.Cfg.KillGrace,
+		}
+	}, "pre-gate: github wire-contract tests failed — aborting before touching the live bed or making any live call."); err != nil {
+		return err
 	}
 	g.outln("== pre-gate passed ==")
 	g.recordPregatePass(ctx)
 	return nil
+}
+
+// runPregateStep runs one pre-gate step. A non-zero exit is a hard stop
+// (ExitPregateFailed) — except when the output carries ONLY the known TSan
+// fork/exec crash signature (#1973 R5, IsTSanForkCrash): then the step is re-run
+// once, the retry is recorded (with the host load average, which is the usual
+// cause) and the second result is final. A second crash, or any other failure,
+// is the same hard stop as ever. Output still streams to the terminal as it
+// arrives; it is only scanned, never buffered.
+func (g *Gate) runPregateStep(ctx context.Context, name string, mk func(out, errw io.Writer) Cmd, failMsg string) error {
+	run := func() (Result, *crashScanner) {
+		sc := &crashScanner{}
+		res := g.Exec.Run(ctx, mk(io.MultiWriter(g.Out, sc), io.MultiWriter(g.Err, sc)))
+		return res, sc
+	}
+	res, sc := run()
+	if res.ExitCode == 0 {
+		return nil
+	}
+	if ctx.Err() != nil || !sc.IsCrash() {
+		return &ExitError{Code: ExitPregateFailed, Msg: failMsg}
+	}
+	load := g.loadAvgText()
+	sig := sc.Signature()
+	g.outf("== pre-gate: the %s hit the known TSan fork/exec crash (%s, #1624/#1677 — not an engine verdict); retrying once (host load average %s) ==\n", name, sig, load)
+	res, sc2 := run()
+	note := pregateRetryNote{Step: name, Signature: sig, LoadAvg: load, Outcome: "pass"}
+	if res.ExitCode != 0 {
+		note.Outcome = "fail"
+		if sc2.IsCrash() {
+			note.Outcome = "crashed again"
+		}
+	}
+	g.pregateRetry = &note
+	g.recordPregateRetry(ctx, note)
+	if res.ExitCode == 0 {
+		g.outf("== pre-gate: the %s passed on its one crash retry ==\n", name)
+		return nil
+	}
+	return &ExitError{Code: ExitPregateFailed, Msg: failMsg + " (after its one TSan-crash retry)"}
+}
+
+// loadAvgText is the host's 1-minute load average for a note, "unavailable" when
+// the probe cannot read it.
+func (g *Gate) loadAvgText() string {
+	if v, ok := g.loadAvg(); ok {
+		return strconv.FormatFloat(v, 'f', 2, 64)
+	}
+	return "unavailable"
 }
 
 // dirtyLines is the working tree's `git status --porcelain` lines that are NOT

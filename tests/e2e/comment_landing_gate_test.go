@@ -131,7 +131,11 @@ func TestCommentLandingGateHolds(t *testing.T) {
 	}
 
 	// --- A1: the gate engages. ---
-	holdLine := waitForLogMatch(t, env, offset, 15*time.Minute,
+	// A precondition guard (#1973): if the engine never reached the landing decision
+	// with the comment pending (a Phase 1 CI/review gate claimed the item first) the
+	// gate under test was never exercised. Only this TIMEOUT is inconclusive;
+	// assertHeld and every later check stay Fatalf.
+	holdLine := waitForLogMatchInconclusive(t, env, offset, 15*time.Minute,
 		"the comment-gate hold line for #"+strconv.Itoa(issue)+" — the engine never reached the landing decision with the comment pending "+
 			"(a Phase 1 CI/review gate may have claimed the item first)",
 		func(l string) bool { return countCommentGateHolds([]string{l}, issue) > 0 })

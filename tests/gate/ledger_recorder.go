@@ -5,6 +5,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/handarbeit/fabrik/tests/e2e/inconclusive"
 )
 
 // legRecorder turns the live `go test -json` event stream of one cell into
@@ -25,7 +27,7 @@ type legRecorder struct {
 	warn       func(format string, args ...any)
 
 	mu       sync.Mutex
-	output   map[string]*strings.Builder // top-level test -> its own output
+	output   map[string]*testOutput // top-level test -> its own output
 	recorded int
 	failed   int // ledger writes that failed
 }
@@ -33,10 +35,53 @@ type legRecorder struct {
 // maxRecordedOutput caps the per-test output kept to extract a skip message.
 const maxRecordedOutput = 64 << 10
 
+// maxMarkerOverflow bounds what testOutput keeps past maxRecordedOutput: only
+// inconclusive-marker lines (and their continuations), so it stays small.
+const maxMarkerOverflow = 16 << 10
+
+// testOutput is one top-level test's own output, capped at maxRecordedOutput.
+// The cap would otherwise hide the INCONCLUSIVE marker — t.Skipf writes it at
+// the END of a test, after every poll-loop t.Logf — and silently turn an
+// inconclusive test into an ordinary skip (no retry, no exit 8; #1973). So once
+// the cap is reached, marker lines (plus their indented continuation lines) are
+// still kept, in a separate small budget; everything else is dropped as before.
+type testOutput struct {
+	b        strings.Builder
+	overflow int  // bytes kept past the cap
+	cont     bool // the last kept overflow line was a marker line
+}
+
+func (o *testOutput) add(chunk string) {
+	if o.b.Len() < maxRecordedOutput {
+		o.b.WriteString(chunk)
+		return
+	}
+	for _, l := range strings.SplitAfter(chunk, "\n") {
+		if l == "" {
+			continue
+		}
+		keep := false
+		if m := skipLineRE.FindStringSubmatch(strings.TrimRight(l, "\n")); m != nil {
+			keep = inconclusive.IsMarked(m[1])
+			o.cont = keep
+		} else if o.cont && (l[0] == ' ' || l[0] == '\t') && strings.TrimSpace(l) != "" {
+			keep = true
+		} else {
+			o.cont = false
+		}
+		if keep && o.overflow < maxMarkerOverflow {
+			o.overflow += len(l)
+			o.b.WriteString(l)
+		}
+	}
+}
+
+func (o *testOutput) String() string { return o.b.String() }
+
 func newLegRecorder(l *Ledger, cell Cell, invocation, head string, hashes map[string]string, live map[string]bool, warn func(string, ...any)) *legRecorder {
 	return &legRecorder{
 		ledger: l, leg: cell.Label(), cell: cellDirName(cell), invocation: invocation, head: head,
-		hashes: hashes, live: live, warn: warn, output: map[string]*strings.Builder{},
+		hashes: hashes, live: live, warn: warn, output: map[string]*testOutput{},
 	}
 }
 
@@ -60,12 +105,10 @@ func (r *legRecorder) Observe(e Event) {
 	if e.Action == "output" {
 		b := r.output[e.Test]
 		if b == nil {
-			b = &strings.Builder{}
+			b = &testOutput{}
 			r.output[e.Test] = b
 		}
-		if b.Len() < maxRecordedOutput {
-			b.WriteString(e.Output)
-		}
+		b.add(e.Output)
 		return
 	}
 	if !terminal(e) {
@@ -86,9 +129,18 @@ func (r *legRecorder) Observe(e Event) {
 	case "fail":
 		rec.Outcome = OutcomeFail
 	case "skip":
-		rec.Outcome = OutcomeSkip
 		rec.SkipMsg = skipMessage(text)
-		rec.Issues = citedIssues(rec.SkipMsg)
+		if msg := inconclusiveMessage(text); msg != "" {
+			// #1973: "the precondition never arose" — uncovered, retried by the
+			// leg, re-run by --resume; never a SKIP (so skip_ok_legs and the skip
+			// classifier never see it) and never a PASS. The reason rides in
+			// SkipMsg (the marker line, even when a cleanup logged after it).
+			rec.SkipMsg = msg
+			rec.Outcome = OutcomeInconclusive
+		} else {
+			rec.Outcome = OutcomeSkip
+			rec.Issues = citedIssues(rec.SkipMsg)
+		}
 	}
 	if err := r.ledger.Append(rec); err != nil {
 		r.failed++
@@ -110,6 +162,11 @@ var skipLineRE = regexp.MustCompile(`^\s+[\w.\-]+\.go:\d+: (.*)$`)
 // skipMessage extracts the t.Skip message from a test's output: the last
 // "file.go:N: text" log line (t.Skip logs its message last), plus any indented
 // continuation lines. "" when the output has none.
+//
+// "Last" is only right for an ORDINARY skip: a t.Cleanup that logs after the
+// skip (the bed-restart cleanups do) pushes its own line behind it. The
+// INCONCLUSIVE marker therefore does not go through here — see
+// inconclusiveMessage.
 func skipMessage(out string) string {
 	lines := strings.Split(out, "\n")
 	idx := -1
@@ -121,6 +178,29 @@ func skipMessage(out string) string {
 	if idx < 0 {
 		return ""
 	}
+	return messageAt(lines, idx)
+}
+
+// inconclusiveMessage is the message of the first "file.go:N: text" log line in
+// a test's own output that STARTS with the inconclusive marker, or "" when none
+// does. It is order-independent on purpose: Cleanup functions run after t.Skip
+// and may log after it, so the marker line is not necessarily the last log line
+// (#1973). The marker must still start the message — a line that merely
+// mentions it does not match — and callers only consult this for a test whose
+// terminal action is "skip", so a test that logs the marker and then goes on to
+// pass or fail is never inconclusive.
+func inconclusiveMessage(out string) string {
+	lines := strings.Split(out, "\n")
+	for i, l := range lines {
+		if m := skipLineRE.FindStringSubmatch(l); m != nil && inconclusive.IsMarked(m[1]) {
+			return messageAt(lines, i)
+		}
+	}
+	return ""
+}
+
+// messageAt is the log line at idx plus its indented continuation lines.
+func messageAt(lines []string, idx int) string {
 	msg := skipLineRE.FindStringSubmatch(lines[idx])[1]
 	for _, l := range lines[idx+1:] {
 		if strings.HasPrefix(l, "---") || strings.HasPrefix(l, "===") || strings.TrimSpace(l) == "" {

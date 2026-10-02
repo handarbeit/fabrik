@@ -1,0 +1,7 @@
+--- FAIL: TestReviewAuthorityCycleLimitPauses (2.90s)
+    env.go:212: seeding the bare repo: git config user.name fabrik-sim: signal: segmentation fault
+panic: send on closed channel
+
+goroutine 88 [running]:
+github.com/handarbeit/fabrik/engine.(*Engine).worker(0xc000200000)
+FAIL	github.com/handarbeit/fabrik/tests/sim	55.100s

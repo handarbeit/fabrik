@@ -181,6 +181,49 @@ type pregateRecord struct {
 	V    int    `json:"v"`
 	Head string `json:"head"`
 	TS   string `json:"ts"`
+	// Retried / LoadAvg (#1973 R5): the pre-gate passed only after one retry of a
+	// step that hit the known TSan fork/exec crash, on a host with this load.
+	Retried bool   `json:"retried,omitempty"`
+	LoadAvg string `json:"load_avg,omitempty"`
+}
+
+// pregateRetryNote is one crash retry of a pre-gate step (#1973 R5), appended to
+// pregate/<head>.retries.jsonl whether or not the retry passed — a retry that
+// fails again writes no pass record, so it needs a home of its own.
+type pregateRetryNote struct {
+	V         int    `json:"v"`
+	Head      string `json:"head"`
+	TS        string `json:"ts"`
+	Step      string `json:"step"`
+	Signature string `json:"signature"`
+	LoadAvg   string `json:"load_avg"`
+	Outcome   string `json:"outcome"` // "pass" | "fail" | "crashed again"
+}
+
+func (g *Gate) pregateRetriesPath(head string) string {
+	return filepath.Join(g.Cfg.CoverageDir, "pregate", head+".retries.jsonl")
+}
+
+// recordPregateRetry appends the note. Unlike the pass record it needs no clean
+// tree: it documents what happened, it does not vouch for anything. It is
+// best-effort — the pre-gate runs before the ledger is open and a failure to
+// write a note must never change its verdict.
+func (g *Gate) recordPregateRetry(ctx context.Context, n pregateRetryNote) {
+	if g.Cfg.CoverageDir == "" {
+		return
+	}
+	head := g.repoHead(ctx)
+	if head == "" {
+		return
+	}
+	n.V, n.Head, n.TS = LedgerVersion, head, g.Now().UTC().Format(time.RFC3339)
+	err := os.MkdirAll(filepath.Dir(g.pregateRetriesPath(head)), 0o755)
+	if err == nil {
+		err = appendLine(g.pregateRetriesPath(head), n)
+	}
+	if err != nil {
+		g.errf("warning: recording the pre-gate crash retry: %v\n", err)
+	}
 }
 
 func (g *Gate) pregatePath(head string) string {
@@ -222,9 +265,22 @@ func (g *Gate) recordPregatePass(ctx context.Context) {
 		g.errf("warning: recording the pre-gate pass: %v\n", err)
 		return
 	}
-	if err := writeFileAtomic(g.pregatePath(head), mustJSON(pregateRecord{V: LedgerVersion, Head: head, TS: g.Now().UTC().Format(time.RFC3339)})); err != nil {
+	rec := pregateRecord{V: LedgerVersion, Head: head, TS: g.Now().UTC().Format(time.RFC3339)}
+	if r := g.pregateRetry; r != nil && r.Outcome == "pass" {
+		rec.Retried, rec.LoadAvg = true, r.LoadAvg
+	}
+	if err := writeFileAtomic(g.pregatePath(head), mustJSON(rec)); err != nil {
 		g.errf("warning: recording the pre-gate pass: %v\n", err)
 	}
+}
+
+func (g *Gate) readPregateRecord(head string) (pregateRecord, bool) {
+	var rec pregateRecord
+	data, err := os.ReadFile(g.pregatePath(head))
+	if err != nil || json.Unmarshal(data, &rec) != nil {
+		return rec, false
+	}
+	return rec, true
 }
 
 // pregateLine is the informational pre-gate status for the coverage summary.
@@ -234,7 +290,11 @@ func (g *Gate) pregateLine(ctx context.Context) string {
 	case head == "":
 		return ""
 	case ok:
-		return fmt.Sprintf("pre-gate (sim + wire-contract): recorded as passed for HEAD %s", shortSHA(head))
+		line := fmt.Sprintf("pre-gate (sim + wire-contract): recorded as passed for HEAD %s", shortSHA(head))
+		if rec, ok := g.readPregateRecord(head); ok && rec.Retried {
+			line += fmt.Sprintf(" (after 1 TSan-crash retry, load average %s)", rec.LoadAvg)
+		}
+		return line
 	default:
 		return fmt.Sprintf("pre-gate (sim + wire-contract): no clean-tree pass on record for HEAD %s", shortSHA(head))
 	}

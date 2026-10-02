@@ -47,7 +47,8 @@ const (
 	OutcomePass Outcome = "PASS"
 	OutcomeFail Outcome = "FAIL"
 	OutcomeSkip Outcome = "SKIP"
-	// OutcomeInconclusive is reserved for #1973; nothing emits it yet.
+	// OutcomeInconclusive (#1973): the test ended with the E2E-INCONCLUSIVE marker —
+	// the precondition it needs never arose. Uncovered; never a PASS, never a FAIL.
 	OutcomeInconclusive Outcome = "INCONCLUSIVE"
 )
 

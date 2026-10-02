@@ -82,8 +82,10 @@ func TestMergeTrainBisectionEjectsPoisoner(t *testing.T) {
 	}
 	for _, n := range members {
 		if !slices.Contains(snapshot, n) {
-			t.Fatalf("fixture: first batch snapshot for %s listed %v, missing #%d — the release straddled a poll boundary, "+
-				"so there may be nothing to bisect. Not an engine regression; re-run", env.RepoAlpha, snapshot, n)
+			// A precondition guard (#1973): fires before any bisection assertion; the
+			// poll saw the release mid-flight, so there is nothing to bisect.
+			Inconclusive(t, "fixture: first batch snapshot for %s listed %v, missing #%d — the release straddled a poll boundary, "+
+				"so there may be nothing to bisect. Not an engine regression", env.RepoAlpha, snapshot, n)
 		}
 	}
 	t.Logf("first batch %v contains all three members; awaiting bisection", snapshot)

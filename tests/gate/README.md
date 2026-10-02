@@ -29,7 +29,7 @@ Structure only — none of the features exist yet.
 | `Cell` (auth, train, parallel, args, isolated) and `PlanCells` | `schedule.go` | #1975 sparse matrix, #1976 multi-bed |
 | `Scheduler` interface (`SerialScheduler` today) on `Gate` | `schedule.go` | #1975, #1976, #1977 two-phase legs |
 | `LegResult` (cell, exit code, log path, decoded `[]Event`, budget before/after) delivered to `Gate.OnLeg` | `leg.go` | other observers. **#1972's ledger does not use it** — it records from `suiteWriter`'s event sink (`ledger_recorder.go`), because `OnLeg` never fires for a killed, RUN INVALID, watchdog or restart-failed leg |
-| `Classification` (pass/fail/skip/running/never-started) | `events.go` | #1973 adds INCONCLUSIVE (the ledger's `Outcome` is already an open enum with INCONCLUSIVE reserved) |
+| `Classification` (pass/fail/skip/**inconclusive**/running/never-started) | `events.go` | #1973 added INCONCLUSIVE — see "INCONCLUSIVE and bounded retry" below |
 | `Ledger`, `Evaluator`, `Report` and `RequiredTests`/`ResumeCells` over `PlanCells` output | `ledger*.go`, `coverage.go`, `resume.go` | #1972; #1975's sparse plan changes the required set with no change here |
 | `[]Preflight` (`Gate.Preflights`, ordered, each returns an `*ExitError`) | `gate.go` | #1974 environment probes |
 | `Commander` (`Run`/`Start`), `Gate.Env`, `Sleep`, `Now`, `ProcCwd` | `exec.go`, `gate.go` | every test; #1976's per-bed environments |
@@ -132,6 +132,30 @@ Deltas this adds to the port: `ParseRunArgs` consumes `--clean` **and** `--resum
 in either order; exit code 8 exists (only under `--resume` and `coverage`); the per-leg `-json` log
 moves into the archive when the ledger is on (the `$TMPDIR` name, and its main/isolated overwrite
 quirk, remain when it is off); and `RunLeg` starts an archive/sampler before the restart step.
+
+## INCONCLUSIVE and bounded retry (#1973, ADR-1973)
+
+`tests/e2e/README.md`'s "The INCONCLUSIVE outcome and bounded retry" is the operator's view and
+the guard audit; this is the map.
+
+| File | What |
+|---|---|
+| `tests/e2e/inconclusive` (untagged) | the marker contract: `Marker`, `Message`, `IsMarked` (prefix match only), shared by the tagged live tests and this package |
+| `events.go` | `Classification.Inconclusive`; `isInconclusiveSkip`, the **one** predicate shared by `Classify` and the recorder; the report line appears only when non-empty |
+| `ledger_recorder.go` | a marked skip is recorded `OutcomeInconclusive` (reason in `SkipMsg`), never `SKIP` |
+| `retry.go` | `retryLogPath`, `mergeAttempts` (last attempt wins per test), `summarizeRetries`, the per-leg summary and `#1974` warning |
+| `leg.go` | `runSuiteAttempt` (one `go test -json` invocation: log, stall watcher, recorder), `retryInconclusive` (the bounded in-leg loop and its stop conditions), the tail's `anyFileContains` timeout scan over every attempt's log |
+| `gate.go` | `leftInconclusive` / `withLeftInconclusive`: a clean run that left inconclusives exits `ExitCoverageIncomplete` (8) |
+| `config.go` | `InconclusiveRetries` (`E2E_INCONCLUSIVE_RETRIES`, default 2, 0 disables), `InconclusiveWarn` (`E2E_INCONCLUSIVE_WARN`, default 3) |
+| `pregate_signature.go`, `pregate.go` | `crashScanner`/`IsTSanForkCrash` (streamed, per-line, vetoed by any panic / `fatal error:` / `WARNING: DATA RACE` / goroutine dump) and `runPregateStep`'s one-shot retry |
+| `ledger_wire.go` | `pregateRetryNote` → `pregate/<head>.retries.jsonl`; `retried`/`load_avg` on the pass record; the pre-gate line in the coverage summary |
+
+Deltas this adds: the suite step of `RunLeg` is now `runSuiteAttempt` and may run more than once
+per leg (only for the leg's own inconclusive tests, before the post-suite watchdog and the RUN
+INVALID scan); a clean run can now exit `8` without `--resume`; `RunPregate` captures (scans, never
+buffers) its steps' output. The `3/4/5/6/7` exit-code contract of `scripts/cut-release.sh` is
+unchanged. `testdata/pregate/` holds **synthetic** crash logs (see its README) — add a real one if
+a crashed gate run is ever captured.
 
 ## Behaviour deltas and quirks
 

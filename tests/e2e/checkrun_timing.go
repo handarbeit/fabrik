@@ -144,8 +144,9 @@ func latestRunNamed(runs []CheckRunTiming, name string) (CheckRunTiming, bool) {
 //
 //	A3 (vacuity guard): the fast job completed at/after fabrik:awaiting-ci was
 //	   applied — i.e. the CI gate was already active when the fast job went
-//	   green. Otherwise the run is inconclusive (a pre-#1822 engine would pass
-//	   it too).
+//	   green. Otherwise the run is inconclusive — the error is prefixed
+//	   INCONCLUSIVE and the caller ends the test with failOrInconclusive (a
+//	   pre-#1822 engine would pass it too).
 //	A1: the late job started at/after the fast job completed — the window in
 //	   which "all existing check runs are green" existed.
 //	A2: stage:Validate:complete was applied at/after the late job completed

@@ -1,0 +1,7 @@
+=== RUN   TestMergeTrainHappyPath
+=== PAUSE TestMergeTrainHappyPath
+=== CONT  TestMergeTrainHappyPath
+FATAL: ThreadSanitizer CHECK failed: tsan_rtl.cpp:94 "((thr->cur_tctx == 0)) != (0)" (0x0, 0x0)
+FAIL	github.com/handarbeit/fabrik/tests/sim	412.337s
+exit status 66
+== sim suite finished in 413s (exit 1) ==

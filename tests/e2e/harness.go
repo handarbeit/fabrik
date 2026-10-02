@@ -18,6 +18,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/handarbeit/fabrik/tests/e2e/inconclusive"
 )
 
 // Defaults wire to the canonical test bed. Override via env vars in CI or
@@ -115,6 +117,53 @@ func LoadEnv(t *testing.T) *Env {
 		GHToken:       token,
 	}
 }
+
+// Inconclusive ends the test with the third live-test outcome (#1973,
+// ADR-1973): "the precondition this scenario needs never arose". The gate
+// runner classifies it from the go test -json stream, re-runs it a bounded
+// number of times and, if it stays inconclusive, records it as UNCOVERED — never
+// as a PASS and never as a FAIL.
+//
+// Use it ONLY for a guard that fires BEFORE any assertion about engine
+// behaviour, when the harness failed to produce the state the scenario needs
+// (a poll boundary straddled a release, the cold-cache line never appeared, a
+// bed reviewer ejected a member). An assertion about what the engine DID stays
+// t.Fatalf: an inconclusive outcome retried into green would mask a regression.
+//
+// It must be called from the test's own goroutine (it ends the test via
+// t.SkipNow, i.e. runtime.Goexit) and from a TOP-LEVEL test: the runner reads
+// only a top-level test's own output, so a subtest's marker would be invisible
+// and the parent would report PASS. Misuse is therefore loud — a subtest caller
+// gets a t.Fatalf instead.
+func Inconclusive(t testing.TB, format string, args ...any) {
+	t.Helper()
+	if !isTopLevelTest(t.Name()) {
+		t.Fatalf("Inconclusive called from subtest %q: it must be called from a top-level test (the gate runner reads only a top-level test's own output). Reason was: "+format,
+			append([]any{t.Name()}, args...)...)
+		return
+	}
+	t.Skip(inconclusive.Message(format, args...))
+}
+
+// failOrInconclusive ends the test for an error returned by one of the pure
+// timing/ordering checkers (checkYoloRemovedMidValidate, checkLateCheckOrdering).
+// Those checkers already tag a precondition that never arose with an
+// "INCONCLUSIVE" prefix (the run cannot demonstrate the property) and leave
+// every assertion about engine behaviour untagged; the tag decides the outcome:
+// INCONCLUSIVE-prefixed → Inconclusive (uncovered, retried), anything else →
+// t.Fatalf. The checkers' unit tests pin the prefix, so the split cannot drift.
+func failOrInconclusive(t testing.TB, err error) {
+	t.Helper()
+	if strings.HasPrefix(err.Error(), "INCONCLUSIVE") {
+		Inconclusive(t, "%v", err)
+		return
+	}
+	t.Fatalf("%v", err)
+}
+
+// isTopLevelTest reports whether a test name is a top-level test (no subtest
+// separator).
+func isTopLevelTest(name string) bool { return !strings.Contains(name, "/") }
 
 // AssertFabrikRunning verifies the test-bed Fabrik instance is alive.
 // Skips the test if not — we don't auto-start it (yet).

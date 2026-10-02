@@ -128,3 +128,136 @@ func TestFormatTimingsAlignsLikeColumn(t *testing.T) {
 		t.Error("an empty table prints nothing")
 	}
 }
+
+// inconclusive-stream.json is a REAL `go test -json` recording (a scratch
+// package of tests ending each way), not a hand-written stream: a marked skip,
+// an ordinary skip, a test that only LOGS the marker and passes, a skip whose
+// message mentions the marker mid-line, a failure, and a subtest that skips with
+// the marker (#1973).
+func TestClassifyInconclusiveIsDistinctFromSkipAndFail(t *testing.T) {
+	c := Classify(readStream(t, "inconclusive-stream.json"))
+	eq := func(name string, got []string, want ...string) {
+		t.Helper()
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Errorf("%s = %v, want %v", name, got, want)
+		}
+	}
+	eq("inconclusive", c.Inconclusive, "TestInconclusiveGuard")
+	eq("skip", c.Skip, "TestOrdinarySkip", "TestSkipQuotingMarkerMidLine")
+	eq("fail", c.Fail, "TestFailsAfterGuardWouldHave")
+	// A test that merely logs the marker and passes is a pass; a subtest's marker
+	// is invisible by design (the helper refuses to run in a subtest).
+	eq("pass", c.Pass, "TestMentionsMarkerButPasses", "TestRealPass", "TestSubtestMarker")
+}
+
+func TestReportShowsInconclusiveLineOnlyWhenPresent(t *testing.T) {
+	with := Classify(readStream(t, "inconclusive-stream.json")).Report()
+	if !strings.Contains(with, "completed - inconclusive (1): TestInconclusiveGuard\n") {
+		t.Errorf("report lacks the inconclusive line:\n%s", with)
+	}
+	if without := Classify(readStream(t, "leg-stream.json")).Report(); strings.Contains(without, "inconclusive") {
+		t.Errorf("a leg with no inconclusive tests must read as before:\n%s", without)
+	}
+}
+
+// A t.Cleanup that logs AFTER the skip (the bed-restart cleanups do) puts its own
+// "file.go:N:" line behind the marker line. The marker must still be recognised
+// (#1973 review): otherwise the test is treated as an ordinary skip — not
+// retried, no exit 8.
+func TestInconclusiveMarkerSurvivesACleanupLogAfterTheSkip(t *testing.T) {
+	const test = "TestColdBase"
+	events := func(extra ...string) []Event {
+		lines := []string{
+			jsonEv(Event{Action: "run", Test: test}),
+			jsonEv(Event{Action: "output", Test: test, Output: "    a_test.go:9: seeded\n"}),
+			jsonEv(Event{Action: "output", Test: test, Output: "    a_test.go:42: E2E-INCONCLUSIVE: cold-cache line never appeared\n"}),
+		}
+		lines = append(lines, extra...)
+		lines = append(lines,
+			jsonEv(Event{Action: "output", Test: test, Output: "--- SKIP: " + test + " (1.00s)\n"}),
+			jsonEv(Event{Action: "skip", Test: test, Elapsed: 1}),
+		)
+		evs, err := ReadEvents(strings.NewReader(strings.Join(lines, "\n") + "\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return evs
+	}
+	cleanup := jsonEv(Event{Action: "output", Test: test, Output: "    lifecycle.go:261: StartFabrikTestBed: bed already running — nothing to start\n"})
+
+	for name, evs := range map[string][]Event{"no cleanup output": events(), "cleanup logs after the skip": events(cleanup)} {
+		c := Classify(evs)
+		if strings.Join(c.Inconclusive, ",") != test || len(c.Skip) != 0 {
+			t.Errorf("%s: Classify = inconclusive %v skip %v, want %s inconclusive", name, c.Inconclusive, c.Skip, test)
+		}
+		l := testLedger(t)
+		rec := newLegRecorder(l, appOff, "i1", "head", map[string]string{test: "h"}, map[string]bool{test: true},
+			func(f string, a ...any) { t.Errorf("recorder warning: "+f, a...) })
+		for _, e := range evs {
+			rec.Observe(e)
+		}
+		r, ok := l.Load().Record("app/off", test)
+		if !ok || r.Outcome != OutcomeInconclusive {
+			t.Errorf("%s: recorded %+v (found %v), want INCONCLUSIVE", name, r, ok)
+		}
+		if !strings.HasPrefix(r.SkipMsg, "E2E-INCONCLUSIVE: cold-cache") {
+			t.Errorf("%s: SkipMsg = %q, want the marker line's reason", name, r.SkipMsg)
+		}
+	}
+}
+
+// A polling-heavy test can log more than maxRecordedOutput before it skips; the
+// marker is written last, so a plain head-cap would hide it and turn an
+// INCONCLUSIVE into an ordinary skip (no retry, no exit 8).
+func TestInconclusiveMarkerSurvivesTheOutputCap(t *testing.T) {
+	const test = "TestChatty"
+	filler := "    poll_test.go:7: still waiting " + strings.Repeat("x", 200) + "\n"
+	build := func(final ...string) []Event {
+		lines := []string{jsonEv(Event{Action: "run", Test: test})}
+		for n := 0; n < (maxRecordedOutput/len(filler))+50; n++ {
+			lines = append(lines, jsonEv(Event{Action: "output", Test: test, Output: filler}))
+		}
+		for _, f := range final {
+			lines = append(lines, jsonEv(Event{Action: "output", Test: test, Output: f}))
+		}
+		lines = append(lines,
+			jsonEv(Event{Action: "output", Test: test, Output: "--- SKIP: " + test + " (9.00s)\n"}),
+			jsonEv(Event{Action: "skip", Test: test, Elapsed: 9}))
+		evs, err := ReadEvents(strings.NewReader(strings.Join(lines, "\n") + "\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return evs
+	}
+	marker := "    a_test.go:42: E2E-INCONCLUSIVE: straddled the unpause\n"
+	cont := "        second line of the reason\n"
+	cleanup := "    lifecycle.go:261: bed already running\n"
+
+	for name, tc := range map[string]struct {
+		evs  []Event
+		want bool
+	}{
+		"marker past the cap":               {build(marker), true},
+		"marker, continuation, cleanup":     {build(marker, cont, cleanup), true},
+		"only a line mentioning the marker": {build("    a_test.go:42: note: E2E-INCONCLUSIVE: is the marker\n"), false},
+		"ordinary skip past the cap":        {build("    a_test.go:42: no token configured\n"), false},
+	} {
+		c := Classify(tc.evs)
+		if got := len(c.Inconclusive) == 1 && len(c.Skip) == 0; got != tc.want {
+			t.Errorf("%s: Classify = inconclusive %v skip %v, want inconclusive=%v", name, c.Inconclusive, c.Skip, tc.want)
+		}
+		l := testLedger(t)
+		rec := newLegRecorder(l, appOff, "i1", "head", map[string]string{test: "h"}, map[string]bool{test: true},
+			func(f string, a ...any) { t.Errorf("recorder warning: "+f, a...) })
+		for _, e := range tc.evs {
+			rec.Observe(e)
+		}
+		r, ok := l.Load().Record("app/off", test)
+		if !ok || (r.Outcome == OutcomeInconclusive) != tc.want {
+			t.Errorf("%s: recorded %+v (found %v), want inconclusive=%v", name, r, ok, tc.want)
+		}
+		if tc.want && name == "marker, continuation, cleanup" && !strings.Contains(r.SkipMsg, "second line of the reason") {
+			t.Errorf("%s: SkipMsg = %q, want the continuation line", name, r.SkipMsg)
+		}
+	}
+}

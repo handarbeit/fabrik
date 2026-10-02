@@ -59,12 +59,25 @@ func topLevel(e Event) bool { return e.Test != "" && !strings.Contains(e.Test, "
 
 // Classification is every top-level test bucketed by its LAST state-transition
 // action. pass/fail/skip are completed; run/cont mean it was executing when the
-// run was killed; pause means it never got a -parallel slot. This is the type a
-// #1973 INCONCLUSIVE outcome extends.
+// run was killed; pause means it never got a -parallel slot. A skip whose own
+// message starts with the inconclusive marker (#1973) is bucketed as
+// Inconclusive instead of Skip: the precondition the scenario needs never arose,
+// which is neither a pass nor a failure and is never coverage.
 type Classification struct {
 	Pass, Fail, Skip []string
+	Inconclusive     []string // skipped with the E2E-INCONCLUSIVE marker (#1973)
 	Running          []string // was executing at kill time (last action run or cont)
 	NeverStarted     []string // queued behind -parallel (last action pause)
+}
+
+// isInconclusiveSkip is THE predicate for the third outcome, shared by Classify
+// and the ledger recorder so they can never disagree: a test's own output
+// carries a "file.go:N:" log line whose message starts with the marker. It need
+// not be the LAST such line — a cleanup may log after the skip — but a line that
+// merely mentions the marker does not qualify, and it is only consulted for a
+// test whose terminal action is skip.
+func isInconclusiveSkip(testOutput string) bool {
+	return inconclusiveMessage(testOutput) != ""
 }
 
 // Classify is run.sh's report_test_outcomes core. "output" events are excluded
@@ -73,12 +86,27 @@ type Classification struct {
 // timed out the entire panic dump), so without the exclusion the last action
 // would be "output" for nearly every test and the timed-out test itself would
 // vanish from every bucket instead of showing up as still-running.
+//
+// Each top-level test's OWN output is gathered (capped like the recorder's, but never dropping a marker line) only
+// to tell an inconclusive skip from an ordinary one; subtests fold into their
+// parent, so a subtest's marker is never seen here.
 func Classify(events []Event) Classification {
 	last := map[string]string{}
+	out := map[string]*testOutput{}
 	for _, e := range events {
-		if topLevel(e) && e.Action != "output" {
-			last[e.Test] = e.Action
+		if !topLevel(e) {
+			continue
 		}
+		if e.Action == "output" {
+			b := out[e.Test]
+			if b == nil {
+				b = &testOutput{}
+				out[e.Test] = b
+			}
+			b.add(e.Output)
+			continue
+		}
+		last[e.Test] = e.Action
 	}
 	var c Classification
 	for t, a := range last {
@@ -88,14 +116,18 @@ func Classify(events []Event) Classification {
 		case "fail":
 			c.Fail = append(c.Fail, t)
 		case "skip":
-			c.Skip = append(c.Skip, t)
+			if b := out[t]; b != nil && isInconclusiveSkip(b.String()) {
+				c.Inconclusive = append(c.Inconclusive, t)
+			} else {
+				c.Skip = append(c.Skip, t)
+			}
 		case "run", "cont":
 			c.Running = append(c.Running, t)
 		case "pause":
 			c.NeverStarted = append(c.NeverStarted, t)
 		}
 	}
-	for _, s := range [][]string{c.Pass, c.Fail, c.Skip, c.Running, c.NeverStarted} {
+	for _, s := range [][]string{c.Pass, c.Fail, c.Skip, c.Inconclusive, c.Running, c.NeverStarted} {
 		sort.Strings(s)
 	}
 	return c
@@ -103,11 +135,17 @@ func Classify(events []Event) Classification {
 
 // Report renders the five-line completed/still-running/never-started breakdown
 // exactly as the jq report did (including the trailing space after an empty
-// list's colon).
+// list's colon). The inconclusive line (#1973) is added only when there is one,
+// so a leg with none reads exactly as before.
 func (c Classification) Report() string {
+	inc := ""
+	if len(c.Inconclusive) > 0 {
+		inc = fmt.Sprintf("completed - inconclusive (%d): %s\n", len(c.Inconclusive), strings.Join(c.Inconclusive, ", "))
+	}
 	return fmt.Sprintf("completed - pass (%d): %s\n", len(c.Pass), strings.Join(c.Pass, ", ")) +
 		fmt.Sprintf("completed - fail (%d): %s\n", len(c.Fail), strings.Join(c.Fail, ", ")) +
 		fmt.Sprintf("completed - skip (%d): %s\n", len(c.Skip), strings.Join(c.Skip, ", ")) +
+		inc +
 		fmt.Sprintf("still running at kill time (%d): %s\n", len(c.Running), strings.Join(c.Running, ", ")) +
 		fmt.Sprintf("never started - queued behind -parallel cap (%d): %s", len(c.NeverStarted), strings.Join(c.NeverStarted, ", "))
 }

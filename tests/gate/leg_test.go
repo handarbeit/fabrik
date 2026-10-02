@@ -24,6 +24,15 @@ type legFake struct {
 	ghCalls    []string
 	suiteCmds  []Cmd
 	switchCmds []Cmd
+	// suiteScript, if set, scripts successive suite invocations (the first run,
+	// then each #1973 retry); the last entry repeats once exhausted.
+	suiteScript []legAttempt
+}
+
+// legAttempt is one scripted `go test -json` invocation.
+type legAttempt struct {
+	out string
+	rc  int
 }
 
 func isSwitch(c Cmd) bool {
@@ -44,14 +53,22 @@ func (f *legFake) handle(ctx context.Context, c Cmd) Result {
 	case isSuite(c):
 		f.mu.Lock()
 		f.suiteCmds = append(f.suiteCmds, c)
+		out, rc := f.suiteOut, f.suiteRC
+		if n := len(f.suiteScript); n > 0 {
+			i := len(f.suiteCmds) - 1
+			if i >= n {
+				i = n - 1
+			}
+			out, rc = f.suiteScript[i].out, f.suiteScript[i].rc
+		}
 		f.mu.Unlock()
 		if c.Stdout != nil {
-			writeStdout(c, f.suiteOut)
+			writeStdout(c, out)
 		}
 		if f.suiteHook != nil {
 			f.suiteHook(c)
 		}
-		return Result{ExitCode: f.suiteRC, PipeWedged: f.suiteWedge}
+		return Result{ExitCode: rc, PipeWedged: f.suiteWedge}
 	case c.Name == "gh" && len(c.Args) >= 2 && c.Args[0] == "api" && c.Args[1] == "graphql" && strings.Contains(strings.Join(c.Args, " "), "rateLimit"):
 		f.mu.Lock()
 		ans := "1000"
