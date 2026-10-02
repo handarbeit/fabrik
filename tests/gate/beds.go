@@ -67,7 +67,7 @@ func (g *Gate) resolveBedSpec(name, dir string) BedSpec {
 		Name:              name,
 		Dir:               dir,
 		Token:             EnvFileValue(envFile, "FABRIK_TOKEN"),
-		AppInstallationID: envFileLastValue(envFile, "E2E_APP_INSTALLATION_ID"),
+		AppInstallationID: envAppInstallationID(envFile),
 		Reset: ResetConfig{
 			Alpha:         pick("FABRIK_TEST_REPO_ALPHA", defaultRepoAlpha),
 			Beta:          pick("FABRIK_TEST_REPO_BETA", defaultRepoBeta),

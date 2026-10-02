@@ -140,6 +140,14 @@ func TestVerifyBedAppIdentity(t *testing.T) {
 			t.Errorf("got %v", err)
 		}
 	})
+	t.Run("a CRLF or quoted .env value still matches the banner", func(t *testing.T) {
+		for _, v := range []string{"77\r", "\"77\"\r", " 77 "} {
+			g := setup(t, v, appBanner(77, "fabrik-bed[bot]"))
+			if err := g.verifyBedAppIdentity("app/on"); err != nil {
+				t.Errorf("E2E_APP_INSTALLATION_ID=%q: %v", v, err)
+			}
+		}
+	})
 	t.Run("skipped when the bed configures no installation", func(t *testing.T) {
 		g := setup(t, "", "")
 		if err := g.verifyBedAppIdentity("app/on"); err != nil {

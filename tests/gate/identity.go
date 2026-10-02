@@ -100,7 +100,7 @@ func (o osIdentityOps) MintAppToken(ctx context.Context, bedDir string) (string,
 	envFile := filepath.Join(bedDir, ".env")
 	appID := envFileLastValue(envFile, "E2E_APP_ID")
 	keyPath := envFileLastValue(envFile, "E2E_APP_PRIVATE_KEY_PATH")
-	instStr := envFileLastValue(envFile, "E2E_APP_INSTALLATION_ID")
+	instStr := envAppInstallationID(envFile)
 	if appID == "" || keyPath == "" || instStr == "" {
 		return "", fmt.Errorf("E2E_APP_ID / E2E_APP_PRIVATE_KEY_PATH / E2E_APP_INSTALLATION_ID not all set in %s", envFile)
 	}
@@ -206,7 +206,16 @@ func (g *Gate) appInstallationID() string {
 	if g.bed != nil {
 		return g.bed.AppInstallationID
 	}
-	return envFileLastValue(filepath.Join(g.Cfg.TestBed, ".env"), "E2E_APP_INSTALLATION_ID")
+	return envAppInstallationID(filepath.Join(g.Cfg.TestBed, ".env"))
+}
+
+// envAppInstallationID is an env file's E2E_APP_INSTALLATION_ID with
+// whitespace and quotes trimmed. It is an integer, compared verbatim against the
+// bed's startup banner and used as a scheduling key, so a CRLF line ending or a
+// stray space must not fail an app leg (the harness, which configures the
+// engine, trims it too).
+func envAppInstallationID(envFile string) string {
+	return strings.Trim(envFileLastValue(envFile, "E2E_APP_INSTALLATION_ID"), "\"' \t\r")
 }
 
 // tokenIdentity is the bed token's identity: its user when resolved, else a key
