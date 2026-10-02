@@ -69,7 +69,7 @@ func TestLedgerVoid(t *testing.T) {
 	l := testLedger(t)
 	l.Append(rec("TestA", "app/on", "app-on", "i1", OutcomePass, "h"))
 	l.Append(rec("TestB", "app/on", "app-on", "i1", OutcomePass, "h"))
-	l.Append(rec("TestC", "app/on", "app-on-isolated", "i1", OutcomePass, "h"))
+	l.Append(rec("TestC", "app/on", "app-on-other", "i1", OutcomePass, "h"))
 	l.Append(rec("TestD", "app/on", "app-on", "i0", OutcomePass, "h"))
 	if err := l.Void("app/on", "app-on", "i1"); err != nil {
 		t.Fatal(err)
@@ -79,7 +79,7 @@ func TestLedgerVoid(t *testing.T) {
 		t.Error("void must discard the invocation-cell's records")
 	}
 	if !s.Covered("app/on", "TestC", "h") {
-		t.Error("void is scoped to one cell: the isolated cell's record survives")
+		t.Error("void is scoped to one cell: another cell's record survives")
 	}
 	if !s.Covered("app/on", "TestD", "h") {
 		t.Error("void is scoped to one invocation: an earlier invocation's PASS survives")
