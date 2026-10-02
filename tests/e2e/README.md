@@ -1677,7 +1677,9 @@ charges its engine identity (the bed's App installation on an app leg, its token
 pat leg) plus the user of the harness token (the bed's `FABRIK_TOKEN`); it starts only when
 none of them is in use by another running leg, and otherwise waits and says why
 (`== waiting: app/off on bed B needs user:arbeithand, held by bed A (app/on) ==`). The
-pre-gate runs once; each bed is prepared, reset and probed on its own; beds that would run
+pre-gate runs once; a bed's engine is stopped while the bed waits or has nothing left to run,
+so an idle engine never polls on an identity another bed's leg holds; each bed is prepared,
+reset and probed on its own; beds that would run
 different engine SHAs are refused. A failed leg lets the other bed's running leg finish but
 starts nothing new; a RUN INVALID voids only that bed's cell and stops only the cells that
 would charge the exhausted identity. Both beds write the one per-SHA coverage ledger, each

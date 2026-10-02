@@ -18,6 +18,8 @@ type fakeIdentity struct {
 	budgets   map[string]int    // token -> remaining
 	budgetErr error
 	mintErr   error
+	mintEmpty bool     // the mint "succeeds" with no token
+	block     bool     // Budget blocks until its context ends
 	resolves  []string // tokens ResolveLogin was asked about
 	mints     []string // bed dirs MintAppToken was asked about
 }
@@ -35,7 +37,11 @@ func (f *fakeIdentity) ResolveLogin(_ context.Context, token string) (string, er
 	return "", errors.New("HTTP 401: Bad credentials")
 }
 
-func (f *fakeIdentity) Budget(_ context.Context, token string) (int, string, error) {
+func (f *fakeIdentity) Budget(ctx context.Context, token string) (int, string, error) {
+	if f.block {
+		<-ctx.Done()
+		return 0, "", ctx.Err()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.budgetErr != nil {
@@ -50,6 +56,9 @@ func (f *fakeIdentity) MintAppToken(_ context.Context, bedDir string) (string, e
 	f.mints = append(f.mints, bedDir)
 	if f.mintErr != nil {
 		return "", f.mintErr
+	}
+	if f.mintEmpty {
+		return "", nil
 	}
 	return mintedToken, nil
 }
@@ -322,6 +331,34 @@ func TestLogIdentityBudget(t *testing.T) {
 		}
 		if g.Out.(interface{ String() string }).String() != "" {
 			t.Error("no budget line without a reading")
+		}
+	})
+	t.Run("an empty minted token is never probed with", func(t *testing.T) {
+		// gh would fall back to the operator's ambient login and report its budget
+		// under the App's name.
+		fi := &fakeIdentity{mintEmpty: true, budgets: map[string]int{"": 9999, "token-a": 3000}}
+		g := setup(t, fi)
+		g.logIdentityBudget(context.Background(), Cell{Auth: "app", Train: "on"}, "start")
+		out, errs := g.Out.(interface{ String() string }).String(), g.Err.(interface{ String() string }).String()
+		if strings.Contains(out, "9999") || !strings.Contains(errs, "no token for app:77") || !strings.Contains(out, "user:alice — 3000") {
+			t.Errorf("out=%q err=%q", out, errs)
+		}
+	})
+	t.Run("all probes share one bound so the post-suite watchdog never trips on them", func(t *testing.T) {
+		g := setup(t, &fakeIdentity{block: true})
+		g.Cfg.GHAPITimeout = 50 * time.Millisecond
+		done := make(chan struct{})
+		go func() {
+			g.logIdentityBudget(context.Background(), Cell{Auth: "app", Train: "on"}, "end")
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(failsafe):
+			t.Fatal("the identity probes ignored their bound")
+		}
+		if errs := g.Err.(interface{ String() string }).String(); !strings.Contains(errs, "warning: identity budget (leg: app/on, end)") {
+			t.Errorf("err=%q", errs)
 		}
 	})
 	t.Run("no resolver prints nothing", func(t *testing.T) {

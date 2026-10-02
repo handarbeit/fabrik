@@ -55,12 +55,12 @@ type multiSched struct {
 	g    *Gate
 	beds []*Gate
 
-	mu        sync.Mutex
-	wake      chan struct{} // closed and replaced on every release/stop: waiters rescan
-	fixed     map[int][]*queued
-	shared    []*queued
-	serves    map[int]bool // beds that serve the shared queue
-	held      map[string]holder
+	mu     sync.Mutex
+	wake   chan struct{} // closed and replaced on every release/stop: waiters rescan
+	fixed  map[int][]*queued
+	shared []*queued
+	serves map[int]bool // beds that serve the shared queue
+	held   map[string]holder
 	// reserved maps an identity to the bed whose strict-queue head is waiting
 	// for it: a shared-queue bed may not take it first, so bed A's baseline is
 	// never starved by a bed that keeps re-acquiring a shared identity.

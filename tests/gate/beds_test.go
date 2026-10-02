@@ -195,6 +195,20 @@ func TestLegEnvCarriesItsOwnBed(t *testing.T) {
 	if envValue(lf.suiteCmds[0].Env, "FABRIK_TEST_DIR") != "" || envValue(lf.switchCmds[0].Env, "FABRIK_TEST_PROJECT_NUMBER") != "" {
 		t.Error("a single-bed leg must not gain bed variables")
 	}
+
+	// One bed named by E2E_BEDS rather than FABRIK_TEST_DIR: the harness must be
+	// told which directory that is, or it would fall back to its default bed.
+	named, nfe, _, _ := testGate(t, "E2E_BEDS=/somewhere")
+	lf = &legFake{suiteOut: passStream}
+	nfe.handler = lf.handle
+	if err := named.RunLeg(context.Background(), defaultCell); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range append(lf.switchCmds, lf.suiteCmds...) {
+		if got := envValue(c.Env, "FABRIK_TEST_DIR"); got != named.Cfg.TestBed {
+			t.Errorf("%s: FABRIK_TEST_DIR=%q, want %q", argsLine(c), got, named.Cfg.TestBed)
+		}
+	}
 }
 
 func TestPrefixWriterNeverInterleavesLines(t *testing.T) {

@@ -3,6 +3,8 @@ package gate
 import (
 	"context"
 	"errors"
+	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -436,5 +438,85 @@ func TestDescribeAssignment(t *testing.T) {
 	}
 	if got := describeAssignment(g, []Cell{cPatOn}); got != "every bed (next free bed, in order): pat/on" {
 		t.Errorf("got %q", got)
+	}
+}
+
+// Bed A's waiting strict-queue head reserves its identities, so a shared-queue
+// bed that keeps freeing and re-acquiring a shared identity can never starve
+// the baseline.
+func TestMultiBedReservationKeepsBedAFirst(t *testing.T) {
+	h := newSchedHarness(t, "arbeithand", "arbeithand", MatrixSparse)
+	s := newMultiSched(h.g, sparseAll)
+	ctx := context.Background()
+	s.held["user:arbeithand"] = holder{bed: "B", cell: "app/off"} // bed B's leg is running
+	if q, _, wait, done, _ := s.next(ctx, 0); q != nil || wait == nil || done {
+		t.Fatal("bed A's head must wait while bed B holds the login")
+	}
+	if s.reserved["user:arbeithand"] != 0 || s.reserved["app:77"] != 0 {
+		t.Fatalf("bed A's waiting head must reserve its set: %v", s.reserved)
+	}
+	delete(s.held, "user:arbeithand") // bed B's leg finished
+	q, _, wait, done, hooks := s.next(ctx, 1)
+	if q != nil || wait == nil || done || len(hooks) == 0 || hooks[0].identity != "user:arbeithand" {
+		t.Fatalf("bed B must not take the identity bed A is waiting for: q=%v wait=%v done=%v hooks=%v", q, wait != nil, done, hooks)
+	}
+	if !strings.Contains(h.out(), "[bed B] == waiting: pat/on on bed B needs user:arbeithand, reserved for bed A's next cell ==") {
+		t.Errorf("out:\n%s", h.out())
+	}
+	q, _, _, _, _ = s.next(ctx, 0)
+	if q == nil || q.cell.Label() != "app/on" || len(s.reserved) != 0 {
+		t.Errorf("bed A then takes its head and drops the reservation: q=%v reserved=%v", q, s.reserved)
+	}
+}
+
+// A bed that waits for an identity (or has nothing left) stops its engine, which
+// would otherwise keep polling with an identity another bed's leg may hold.
+func TestMultiBedStopsAnIdleBedsEngine(t *testing.T) {
+	h := newSchedHarness(t, "arbeithand", "arbeithand", MatrixSparse)
+	engine := exec.Command("sleep", "30")
+	if err := engine.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan struct{})
+	go func() { engine.Wait(); close(exited) }()
+	defer engine.Process.Kill()
+	mustWrite(t, h.g.Cfg.BedDirs[1]+"/.fabrik/fabrik.lock", strconv.Itoa(engine.Process.Pid)+"\n")
+
+	_, done := h.run(context.Background(), sparseAll)
+	h.expectStart("A app/on")
+	h.expectWait("B app/off user:arbeithand")
+	select {
+	case <-exited:
+	case <-time.After(failsafe):
+		t.Fatal("the waiting bed's engine was not stopped")
+	}
+	h.finish("A app/on", nil)
+	for n := 0; n < 4; n++ {
+		select {
+		case key := <-h.started:
+			h.finish(key, nil)
+		case <-time.After(failsafe):
+			t.Fatalf("stalled; ran %v", h.ran)
+		}
+	}
+	if err := h.result(done); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(h.out(), "[bed B] == stopping this bed's engine while it waits for an identity") {
+		t.Errorf("out:\n%s", h.out())
+	}
+}
+
+// RUN INVALID on a bed with no identity to scope it to fails safe: nothing new
+// starts (unreachable on a real run, where CheckBedTopology refuses a bed
+// without a token).
+func TestMultiBedRunInvalidWithoutAnIdentityStopsNewCells(t *testing.T) {
+	h := newSchedHarness(t, "alice", "bob", MatrixSparse)
+	b := h.g.beds()[1]
+	b.Cfg.BedToken, b.login = "", ""
+	s := newMultiSched(h.g, sparseAll)
+	s.finish(context.Background(), 1, &queued{cell: cPatOn}, nil, &ExitError{Code: ExitBudgetExhausted})
+	if !s.stopNew || len(s.exhausted) != 0 || exitCode(s.firstErr) != ExitBudgetExhausted {
+		t.Errorf("stopNew=%v exhausted=%v firstErr=%v", s.stopNew, s.exhausted, s.firstErr)
 	}
 }

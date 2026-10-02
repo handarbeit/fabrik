@@ -317,12 +317,22 @@ process**, serialized only where they share a GitHub identity.
   atomically under one mutex (no partial holds, so no hold-and-wait). A shared-queue bed takes the
   first cell whose set is free now and waits only if none is; bed A's own queue is strict. Beds start
   in order, each after the previous one has claimed a cell or registered a wait, so bed A gets first
-  claim on a shared identity. Each wait is logged once:
-  `== waiting: <cell> on bed B needs <identity>, held by bed A (<cell>) ==`.
+  claim on a shared identity, and while bed A's next cell waits it **reserves** that cell's
+  identities, so a shared-queue bed cannot keep re-acquiring them ahead of it. Each wait is
+  logged once: `== waiting: <cell> on bed B needs <identity>, held by bed A (<cell>) ==` (or
+  `…, reserved for bed A's next cell ==`).
+* **Idle engines are stopped.** A running engine polls with its identity whether or not a leg is
+  using it, so a bed's engine is stopped (`stopIdleEngine`, SIGTERM via `StopBedInstance`) while
+  the bed waits for an identity and once it has no more cells; every leg's `TestSwitchTrainMode`
+  restart starts it again. This is what keeps D5's exclusion of the beds' own engines from the
+  #1684 check safe: no bed's engine spends an identity another bed's leg holds. (A single-bed run
+  leaves its bed running after the last leg, as before.)
 * **Failure (D8).** A failing leg lets the other beds' **running** legs finish but no new cell starts.
   RUN INVALID (exit 3) is narrower: that bed's records for the cell are voided (`VoidBed`), its
   engine identity is marked exhausted, cells charging it are not started, and everything else goes on.
-  The exit code is the first failure's, by time; a cancel returns 130. `== multi-bed summary ==` lists
+  The exit code is the first failure's, by time; a cancel returns 130. The per-identity budget
+  probes at a leg's end share one `GHAPITimeout` bound, so they can never trip the post-suite
+  watchdog. `== multi-bed summary ==` lists
   every bed's cells with their outcome, every cell that never started with why, and any exhausted
   identity.
 * **Budget lines (R5, also on one bed).** At leg start and end, one
