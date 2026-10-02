@@ -354,6 +354,12 @@ func TestRegistryMatchesTree(t *testing.T) {
 		t.Fatal(err)
 	}
 	problems = append(problems, CheckBedLifecycleCallers(reg, lifecycle)...)
+	// #1978: every test that holds, triggers or releases the bed's polls is exclusive.
+	pollSeam, err := ScanPollSeamCallers("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	problems = append(problems, CheckPollSeamCallers(reg, pollSeam)...)
 	// #1977: t.Parallel() matches the class — shared tests call it, serial classes do not.
 	parallel, err := ScanParallelTests("..")
 	if err != nil {
@@ -444,6 +450,44 @@ func TestCheckBedLifecycleCallers(t *testing.T) {
 		t.Fatalf("want exactly TestA flagged, got %v", p)
 	}
 	mustContain(t, p, "TestA: reaches a bed lifecycle call")
+}
+
+func TestCheckPollSeamCallers(t *testing.T) {
+	r := baseRegistry()
+	r.Tests[1].Exclusive, r.Tests[1].ExclusiveReason = true, "holds polls"
+	p := CheckPollSeamCallers(r, []string{"TestA", "TestB", "TestGone"})
+	if len(p) != 1 {
+		t.Fatalf("want exactly TestA flagged, got %v", p)
+	}
+	mustContain(t, p, "TestA: reaches a poll-seam call")
+}
+
+func TestScanPollSeamCallers(t *testing.T) {
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{
+		"seam.go": `package e2e
+import "testing"
+func HoldPolls(t *testing.T) {}
+func TriggerPoll(t *testing.T) {}
+func ReleasePolls(t *testing.T) {}
+func window(t *testing.T) { HoldPolls(t); TriggerPoll(t) }
+func unrelated(t *testing.T) {}
+`,
+		"a_test.go": `package e2e
+import "testing"
+func TestDirect(t *testing.T) { HoldPolls(t) }
+func TestInCleanup(t *testing.T) { t.Cleanup(func() { ReleasePolls(t) }) }
+func TestViaHelper(t *testing.T) { window(t) }
+func TestClean(t *testing.T) { unrelated(t) }
+`,
+	})
+	got, err := ScanPollSeamCallers(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(got, ",") != "TestDirect,TestInCleanup,TestViaHelper" {
+		t.Fatalf("callers = %v", got)
+	}
 }
 
 func TestCheckParallelConsistency(t *testing.T) {

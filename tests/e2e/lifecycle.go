@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/handarbeit/fabrik/internal/pollctl"
 )
 
 // Fabrik test-bed lifecycle management. Until now the harness assumed an
@@ -284,6 +286,10 @@ func StartFabrikTestBed(t *testing.T, env *Env) {
 		cmd.Env = stripEnv(cmd.Env, k)
 	}
 	cmd.Env = append(cmd.Env, bedGitConfigIsolationEnv(t, env)...)
+	// The bed-only poll hold/trigger seam (#1978, ADR-1978) — the same entry the
+	// gate runner's BedStartCmd adds, so a restarted bed keeps it. Enabled but
+	// released it is a normal free-running bed.
+	cmd.Env = append(cmd.Env, pollctl.Env(env.FabrikTestDir))
 	// Detach: new process group + /dev/null stdio so the child outlives the test.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if devnull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0); err == nil {

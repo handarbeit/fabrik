@@ -215,6 +215,25 @@ func CheckBedLifecycleCallers(reg *Registry, callers []string) []string {
 	return problems
 }
 
+// CheckPollSeamCallers reports every live test in callers (the set that reaches
+// HoldPolls/TriggerPoll/ReleasePolls, from ScanPollSeamCallers) whose registry
+// entry is not exclusive (#1978). The harness helper enforces the same rule at
+// run time; this catches it in plain `go test ./...`, before a live run.
+func CheckPollSeamCallers(reg *Registry, callers []string) []string {
+	byName := map[string]Entry{}
+	for _, e := range reg.Tests {
+		byName[e.Name] = e
+	}
+	var problems []string
+	for _, n := range callers {
+		if e, ok := byName[n]; ok && !e.Exclusive {
+			problems = append(problems, fmt.Sprintf("%s: reaches a poll-seam call (%s), which holds the whole bed's polls, and so must be exclusive: true with an exclusive_reason",
+				n, strings.Join(PollSeamCalls, " / ")))
+		}
+	}
+	return problems
+}
+
 // CheckParallelConsistency reports every live test whose t.Parallel() use
 // disagrees with its class: a shared test must call t.Parallel() (otherwise it
 // would silently run serially at the head of the shared phase, with no gain) and

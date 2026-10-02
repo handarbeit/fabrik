@@ -37,38 +37,51 @@ func (e *Engine) reconcileLoop(ctx context.Context, cacheImpl *boardcache.CacheI
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			// R5 periodic coverage re-check (#1142): a hook deleted (or a
-			// newly-managed repo added, or an installation's granted-repo set
-			// changed) mid-run should be caught here, not just at startup.
-			// Best-effort; never blocks or fails the reconcile pass.
-			if wm, ok := mgr.(*webhookManager); ok {
-				e.checkWebhookHookCoverage(wm)
-			} else if hm, ok := mgr.(*hookdeckManager); ok {
-				e.checkHookdeckInstallationCoverage(hm)
+			// TEST-ONLY (#1978): with the bed's poll seam enabled a held bed drops
+			// the tick; unset (production) this is a direct call.
+			if e.pollSeam != nil {
+				e.pollSeam.runUnlessHeld(func() { e.reconcileTick(cacheImpl, mgr) })
+			} else {
+				e.reconcileTick(cacheImpl, mgr)
 			}
-			driftCount, driftedKeys, freshBoard, err := cacheImpl.LightReconcile(
-				e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum, e.cfg.OwnerType,
-			)
-			if err != nil {
-				e.logf(0, "reconcile", "light reconcile failed (no health state change): %v\n", err)
-				continue
-			}
-			if driftCount == 0 {
-				transitionMgrHealthState(mgr, WebhookStreamHealthy, "")
-				continue
-			}
-			keyStr := fmt.Sprintf("%v", driftedKeys)
-			if len(driftedKeys) > 5 {
-				keyStr = fmt.Sprintf("%v … %d more", driftedKeys[:5], len(driftedKeys)-5)
-			}
-			e.logf(0, "reconcile", "light reconcile: %d item(s) drifted (%s) — reconciling cache\n", driftCount, keyStr)
-			transitionMgrHealthState(mgr, WebhookStreamUnhealthy, fmt.Sprintf("%d item(s) drifted", driftCount))
-			cacheImpl.Pause()
-			cacheImpl.Reconcile(freshBoard)
-			cacheImpl.Resume()
-			transitionMgrHealthState(mgr, WebhookStreamHealthy, "drift reconciled")
 		}
 	}
+}
+
+// reconcileTick is one reconcileLoop tick: the hook-coverage re-check, a
+// LightReconcile drift compare and, on drift, a cache reconcile. Extracted
+// unchanged from the loop body so the test-only poll seam (#1978) can gate it.
+func (e *Engine) reconcileTick(cacheImpl *boardcache.CacheImpl, mgr eventIngestionManager) {
+	// R5 periodic coverage re-check (#1142): a hook deleted (or a
+	// newly-managed repo added, or an installation's granted-repo set
+	// changed) mid-run should be caught here, not just at startup.
+	// Best-effort; never blocks or fails the reconcile pass.
+	if wm, ok := mgr.(*webhookManager); ok {
+		e.checkWebhookHookCoverage(wm)
+	} else if hm, ok := mgr.(*hookdeckManager); ok {
+		e.checkHookdeckInstallationCoverage(hm)
+	}
+	driftCount, driftedKeys, freshBoard, err := cacheImpl.LightReconcile(
+		e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum, e.cfg.OwnerType,
+	)
+	if err != nil {
+		e.logf(0, "reconcile", "light reconcile failed (no health state change): %v\n", err)
+		return
+	}
+	if driftCount == 0 {
+		transitionMgrHealthState(mgr, WebhookStreamHealthy, "")
+		return
+	}
+	keyStr := fmt.Sprintf("%v", driftedKeys)
+	if len(driftedKeys) > 5 {
+		keyStr = fmt.Sprintf("%v … %d more", driftedKeys[:5], len(driftedKeys)-5)
+	}
+	e.logf(0, "reconcile", "light reconcile: %d item(s) drifted (%s) — reconciling cache\n", driftCount, keyStr)
+	transitionMgrHealthState(mgr, WebhookStreamUnhealthy, fmt.Sprintf("%d item(s) drifted", driftCount))
+	cacheImpl.Pause()
+	cacheImpl.Reconcile(freshBoard)
+	cacheImpl.Resume()
+	transitionMgrHealthState(mgr, WebhookStreamHealthy, "drift reconciled")
 }
 
 // transitionMgrHealthState applies a health-state transition to whichever

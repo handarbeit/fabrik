@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/handarbeit/fabrik/internal/pollctl"
 )
 
 // The bed (~/dev/fabrik-test) is a full fabrik source checkout with its own
@@ -248,7 +250,11 @@ var bedAppEnvKeys = []string{"FABRIK_GITHUB_APP_ID", "FABRIK_GITHUB_APP_PRIVATE_
 // the bed through the Go path on every mode switch, so a cadence set only here
 // would be silently reverted for the legs that actually matter.
 func (g *Gate) BedStartCmd(isolatedGitconfig string) Cmd {
-	env := withEnv(withoutEnv(g.Env, bedAppEnvKeys...), "GIT_CONFIG_GLOBAL="+isolatedGitconfig, "GIT_CONFIG_NOSYSTEM=1")
+	// pollctl.Env enables the bed-only poll hold/trigger seam (#1978, ADR-1978).
+	// Enabled-but-released the bed is a normal free-running one, so every phase
+	// shares this one start; lifecycle.go's StartFabrikTestBed appends the same
+	// entry so a restarted bed cannot silently lose it.
+	env := withEnv(withoutEnv(g.Env, bedAppEnvKeys...), "GIT_CONFIG_GLOBAL="+isolatedGitconfig, "GIT_CONFIG_NOSYSTEM=1", pollctl.Env(g.Cfg.TestBed))
 	return Cmd{
 		Name: "./fabrik",
 		Args: []string{"-notui", "-poll", g.Cfg.BedPollSeconds},

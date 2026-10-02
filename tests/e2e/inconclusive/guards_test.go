@@ -30,7 +30,7 @@ var inconclusiveHelpers = map[string]bool{
 	"Inconclusive": true, "waitForLogMatchInconclusive": true, "failOrInconclusive": true,
 	"finishAwait": true, "AwaitBoardItemVisible": true, "AwaitStatusVisible": true,
 	"AwaitClosingLinkage": true, "AwaitPRMergeableComputed": true, "AwaitPRMergeableSettled": true,
-	"AwaitLabelVisible": true, "AwaitPRForBranchVisible": true,
+	"AwaitLabelVisible": true, "AwaitLabelGone": true, "AwaitPRForBranchVisible": true,
 }
 
 var namedGuards = []struct{ file, test string }{

@@ -160,6 +160,12 @@ var BedLifecycleCalls = []string{
 	"writeEnvFileValue", "applyBedAuthMode",
 }
 
+// PollSeamCalls are the harness functions that hold, trigger or release the
+// bed's polls through the test-only poll seam (#1978, ADR-1978). Holding polls
+// stops dispatch, catch-up, settle scans and reconcile for the WHOLE bed, so a
+// test that reaches one must be exclusive.
+var PollSeamCalls = []string{"HoldPolls", "TriggerPoll", "ReleasePolls"}
+
 // ScanIdentityAssertCallers returns the top-level Test* functions in dir
 // (tests/e2e) that reach one of IdentityAssertions: by calling it directly, or by
 // calling — transitively, by name, through same-directory non-test functions — a
@@ -176,6 +182,13 @@ func ScanIdentityAssertCallers(dir string) ([]string, error) {
 // sorted.
 func ScanBedLifecycleCallers(dir string) ([]string, error) {
 	return scanReachingTests(dir, BedLifecycleCalls)
+}
+
+// ScanPollSeamCallers returns the top-level Test* functions in dir that reach
+// one of PollSeamCalls, directly, from a nested closure or through a
+// same-directory helper. Result is sorted.
+func ScanPollSeamCallers(dir string) ([]string, error) {
+	return scanReachingTests(dir, PollSeamCalls)
 }
 
 // ScanParallelTests returns the top-level Test* functions in dir whose own body

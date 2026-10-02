@@ -737,19 +737,30 @@ timeout instead of skipping. Only run in the `on` leg of the two-mode gate.
     - **Not parallel**, on `RepoAlpha`/`main` (the default partition production
       uses). Any other Queued member on the same (repo, base) would join the
       partition and change the batch composition, so it is registry class
-      `default_base_train` (#1977): the gate runs it serially, after the shared
-      phase. Its A2/A3 assertions count per-repo (not per-partition) engine log
-      lines, which is why it was not moved onto a throwaway base.
+      `exclusive` (#1977, #1978): the gate runs it serially, last. Exclusive
+      because it holds the bed's polls (see "Batch gating"), which stops the whole
+      bed; it still needs the default-base partition to itself because its A2/A3
+      assertions count per-repo (not per-partition) engine log lines, which is why
+      it was not moved onto a throwaway base.
     - **Batch gating.** The engine has no batching dwell, so members are filed
       carrying `fabrik:paused`, all seven are placed in `Queued`, then the label
       is removed from all seven concurrently (REST). Paused Queued members are
-      excluded from the partition and cause no engine side effect. The unpause
-      window is about one API round-trip, not zero: if a poll lands inside it the
-      scenario fails with a **"poll boundary straddled the unpause … re-run"**
-      message (first cap line not `7 Queued`, or first snapshot under five
-      members). That is a harness race, not an engine regression — re-run. A
-      failed run re-pauses any still-open member so it cannot leak into a later
-      scenario's batch. The `fabrik:paused` label itself is never deleted.
+      excluded from the partition and cause no engine side effect. That unpause
+      is a multi-step write about one API round-trip wide, and a free-running poll
+      landing inside it used to see only some of the members (the old "poll
+      boundary straddled the unpause" `Inconclusive`, a ~30–60 min re-run). Since
+      #1978 the scenario closes the window with the **poll seam**: seed
+      free-running, `HoldPolls`, unpause, wait until the removal is visible
+      (`AwaitLabelGone` ×7 on the REST read, `AwaitBoardItemVisible` ×7), then
+      `TriggerPoll` — exactly one complete poll, which sees all seven — assert A1
+      on that poll's batch snapshot, and `ReleasePolls` so A2/A3 run free-running.
+      The `Inconclusive` guard stays as a defensive check but now covers only
+      residual read lag between the REST read the harness waited on and the
+      GraphQL/`updatedAt` surfaces the engine's probe reads. With
+      `E2E_POLL_SEAM=off` the helpers no-op and the old straddle reappears as
+      `Inconclusive` (the neutralisation check). A failed run re-pauses any
+      still-open member so it cannot leak into a later scenario's batch. The
+      `fabrik:paused` label itself is never deleted.
     - **Placement order.** Members are filed and placed sequentially, so
       placement order equals issue-number order under either observation timing
       of the engine's `StatusEnteredAt`. "First five by entry order" therefore
@@ -1618,7 +1629,7 @@ Without a readable registry the leg falls back to one undivided `go test`.
 | `TestMergeTrainSingletonFastPathLandsExactlyOnce` | shared, own partition | throwaway base nothing else writes to |
 | `TestMergeTrainHappyPathLanding` | default-base-train | stays on protected main as the production-shaped landing proof |
 | `TestMergeTrainTwoBasesConcurrent` | default-base-train | its subject is main next to a throwaway base |
-| `TestMergeTrainQueuedDeeperThanBatchCap` | default-base-train | counts per-repo `merged integration PR` / `opened draft CI PR` log lines, which the engine does not scope to a partition |
+| `TestMergeTrainQueuedDeeperThanBatchCap` | exclusive | holds the bed's polls (`HoldPolls`, #1978) so the engine sees all 7 members in one poll; also counts per-repo `merged integration PR` / `opened draft CI PR` log lines, which the engine does not scope to a partition |
 | `TestMergeTrainConflictBisectPrefixRerere` | default-base-train | analyses the whole repo log window; needs an exact batch on main |
 | `TestQueuedMemberCommentEjection` | default-base-train | needs the `slow-gate` required check on main; not verifiable on a non-default base |
 
@@ -2145,7 +2156,7 @@ failure is the same hard stop (exit 5) as before.
 
 | Guard | Disposition |
 |---|---|
-| `mergetrain_batchcap_test.go` — "poll boundary straddled the unpause" | **Converted.** Fires before A1's selection assertion. Its two sibling `switch` cases (cap mismatch; no cap line with ≥ members) are bed-configuration errors and stay `Fatalf`. |
+| `mergetrain_batchcap_test.go` — "the triggered poll saw fewer than 7" (was "poll boundary straddled the unpause") | **Converted**, and since #1978 a defensive check: polls are held across the unpause and exactly one is triggered, so the poll-boundary straddle cannot occur; what remains is residual read lag. Fires before A1's selection assertion. Its two sibling `switch` cases (cap mismatch; no cap line with ≥ members) are bed-configuration errors and stay `Fatalf`. |
 | `mergetrain_batchcap_test.go` — A2 "ejected for reviewer feedback" | **Converted.** Bed-reviewer artifact; fires before any A2 assertion. |
 | `mergetrain_coldbase_test.go` — cold-cache "not yet hydrated" never appeared ("vacuous") | **Converted** (timeout only, via `waitForLogMatchInconclusive`). #1974 fixed the *cause*: the seed now awaits the board listing showing every member (and the primer) before the bed starts — see "The awaitVisible family". |
 | `mergetrain_coldbase_test.go` — landed via the singleton fast path | **Converted.** Members did not batch together; fires before the A1/A2 assertions it protects. |
@@ -2215,8 +2226,36 @@ called from a subtest (or a goroutine) it is a loud `t.Fatalf`. A seed helper ca
 (`auto_merge_test.go`, `convergence_race_test.go`) therefore turns an await timeout into a failure with
 a clear message rather than an invisible marker. Seed at the top level where you can.
 
-`TestMergeTrainQueuedDeeperThanBatchCap` is a poll-boundary race, not a consistency race: it stays
-Inconclusive here and is #1978's.
+`TestMergeTrainQueuedDeeperThanBatchCap` was a poll-boundary race, not a consistency race, so waiting for
+GitHub could not close it; #1978 closed it with the bed's poll hold/trigger seam (below).
+
+#### The poll hold/trigger seam (#1978, ADR-1978)
+
+For a test whose **subject is a state window** ("the engine sees exactly 7 Queued members at once"),
+`HoldPolls(t)` / `TriggerPoll(t)` / `ReleasePolls(t)` (`poll_control.go`, controller and protocol in the
+untagged `tests/e2e/pollhold` over `internal/pollctl`) hold the bed engine's automatic polls — the whole
+poll, including settle scans and the reconcile loop; already-dispatched workers keep running — let the test
+build the window, run **exactly one complete poll** and wait for the engine's ack, then release.
+
+- **Exclusive-only.** Holding polls stops the whole bed, so `HoldPolls` fails any test that is not
+  `exclusive` in `registry.json`, and the registry check (`ScanPollSeamCallers` /
+  `CheckPollSeamCallers`, plain `go test ./...`) fails the build for a non-exclusive test that reaches any
+  of the three. `HoldPolls` registers the release with `t.Cleanup`, so a failing test never leaves the bed
+  held; the engine additionally self-releases `pollctl.MaxHold` (10 min) after the hold request, covering a
+  hard-killed harness.
+- **Outcomes.** The ack distinguishes `ran` from `error` (`Fatalf`) and `blocked` (the engine's rate-limit
+  gate or minimum-poll-interval floor refused the poll — `Inconclusive`, never a pass). A poll that never
+  completes is a bounded-timeout `Fatalf`, never a hang.
+- **Enabled by the launch.** Both bed launch sites (`tests/gate/bed.go`, `lifecycle.go`'s
+  `StartFabrikTestBed`) append `pollctl.Env`, so a bed restarted by `TestSwitchTrainMode` keeps the seam;
+  enabled-but-released it is a normal free-running bed. The engine starts released and clears any stale
+  request, so a hold never survives a restart.
+- **Use sparingly.** Live e2e is the one layer with real timing, and free-running polls are part of what it
+  tests: pipeline, convergence and gate tests stay free-running. The only user today is
+  `TestMergeTrainQueuedDeeperThanBatchCap`.
+- **Cache-mode caveat.** In poll mode the engine's cache only catches up inside `poll()`, so "visible"
+  means visible on the GitHub surfaces the probe and deep-fetch read; the harness waits on the REST label
+  read and the ProjectV2 listing, and the straddle `Inconclusive` guard covers any residual lag.
 
 The wrapper layer is tested against an `httptest` fake GitHub through a fake `gh` on `PATH`
 (`await_visible_test.go`, `-tags e2e`, local only); the loop and the pure classifiers are tested in the
