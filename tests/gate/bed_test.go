@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/handarbeit/fabrik/internal/pollctl"
 )
 
 // realGate is a Gate over the real OS (real git) with an isolated environment.
@@ -247,6 +249,11 @@ func TestBedStartCmdContracts(t *testing.T) {
 	}
 	if got := envOf("FABRIK_TOKEN"); len(got) != 1 {
 		t.Errorf("unrelated env must pass through, got %v", got)
+	}
+	// The bed-only poll hold/trigger seam (#1978) must be enabled on every bed
+	// start, naming a control file under the bed itself.
+	if got := envOf(pollctl.EnvVar); len(got) != 1 || got[0] != pollctl.Env(g.Cfg.TestBed) {
+		t.Errorf("the poll-control seam must be enabled with the bed's own control file: %v", got)
 	}
 }
 
