@@ -1,0 +1,15 @@
+{"Action":"start","Package":"example.com/e2e"}
+{"Action":"run","Package":"example.com/e2e","Test":"TestCharlie"}
+{"Action":"output","Package":"example.com/e2e","Test":"TestCharlie","Output":"=== RUN   TestCharlie\n"}
+{"Action":"run","Package":"example.com/e2e","Test":"TestDelta"}
+{"Action":"output","Package":"example.com/e2e","Test":"TestDelta","Output":"=== RUN   TestDelta\n"}
+{"Action":"run","Package":"example.com/e2e","Test":"TestEcho"}
+{"Action":"output","Package":"example.com/e2e","Test":"TestEcho","Output":"=== RUN   TestEcho\n"}
+{"Action":"output","Package":"example.com/e2e","Test":"TestCharlie","Output":"--- PASS: TestCharlie (31s)\n"}
+{"Action":"pass","Package":"example.com/e2e","Test":"TestCharlie","Elapsed":31}
+{"Action":"output","Package":"example.com/e2e","Test":"TestDelta","Output":"    delta_test.go:34: blocked on #916\n"}
+{"Action":"output","Package":"example.com/e2e","Test":"TestDelta","Output":"--- SKIP: TestDelta (0s)\n"}
+{"Action":"skip","Package":"example.com/e2e","Test":"TestDelta","Elapsed":0}
+{"Action":"output","Package":"example.com/e2e","Test":"TestEcho","Output":"--- PASS: TestEcho (40s)\n"}
+{"Action":"pass","Package":"example.com/e2e","Test":"TestEcho","Elapsed":40}
+{"Action":"pass","Package":"example.com/e2e","Elapsed":80}

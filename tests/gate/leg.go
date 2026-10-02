@@ -45,6 +45,11 @@ type suiteWriter struct {
 
 	lastWrite atomic.Int64 // unix nanos of the most recent Write; the stall signal
 	now       func() time.Time
+
+	// sink, if set, observes every decoded event as it streams in — the coverage
+	// ledger's recorder (#1972). It runs on the stream, not at leg end, so a leg
+	// killed mid-way keeps what had already completed.
+	sink func(Event)
 }
 
 func newSuiteWriter(log, term io.Writer, now func() time.Time) *suiteWriter {
@@ -89,6 +94,9 @@ func (w *suiteWriter) line(s string) {
 	}
 	if terminal(e) {
 		w.lastCompleted = e.Test
+	}
+	if w.sink != nil {
+		w.sink(e)
 	}
 	if e.Action == "output" {
 		// jq -r prints the string and then a newline of its own, so the terminal

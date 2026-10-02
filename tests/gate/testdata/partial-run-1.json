@@ -1,0 +1,25 @@
+go: downloading example.com/dep v1.2.3
+{"Action":"start","Package":"example.com/e2e"}
+{"Action":"run","Package":"example.com/e2e","Test":"TestAlpha"}
+{"Action":"output","Package":"example.com/e2e","Test":"TestAlpha","Output":"=== RUN   TestAlpha\n"}
+{"Action":"run","Package":"example.com/e2e","Test":"TestBravo"}
+{"Action":"output","Package":"example.com/e2e","Test":"TestBravo","Output":"=== RUN   TestBravo\n"}
+{"Action":"run","Package":"example.com/e2e","Test":"TestCharlie"}
+{"Action":"output","Package":"example.com/e2e","Test":"TestCharlie","Output":"=== RUN   TestCharlie\n"}
+{"Action":"run","Package":"example.com/e2e","Test":"TestDelta"}
+{"Action":"output","Package":"example.com/e2e","Test":"TestDelta","Output":"=== RUN   TestDelta\n"}
+{"Action":"run","Package":"example.com/e2e","Test":"TestEcho"}
+{"Action":"output","Package":"example.com/e2e","Test":"TestEcho","Output":"=== RUN   TestEcho\n"}
+{"Action":"run","Package":"example.com/e2e","Test":"TestBravo/sub"}
+{"Action":"pass","Package":"example.com/e2e","Test":"TestBravo/sub","Elapsed":1}
+{"Action":"output","Package":"example.com/e2e","Test":"TestAlpha","Output":"--- PASS: TestAlpha (10.5s)\n"}
+{"Action":"pass","Package":"example.com/e2e","Test":"TestAlpha","Elapsed":10.5}
+{"Action":"output","Package":"example.com/e2e","Test":"TestBravo","Output":"--- PASS: TestBravo (20s)\n"}
+{"Action":"pass","Package":"example.com/e2e","Test":"TestBravo","Elapsed":20}
+{"Action":"output","Package":"example.com/e2e","Test":"TestCharlie","Output":"    charlie_test.go:55: scenario assertion failed\n"}
+{"Action":"output","Package":"example.com/e2e","Test":"TestCharlie","Output":"--- FAIL: TestCharlie (30s)\n"}
+{"Action":"fail","Package":"example.com/e2e","Test":"TestCharlie","Elapsed":30}
+{"Action":"output","Package":"example.com/e2e","Test":"TestDelta","Output":"    delta_test.go:12: log before the skip, see #1\n"}
+{"Action":"output","Package":"example.com/e2e","Test":"TestDelta","Output":"    delta_test.go:34: blocked on #916\n"}
+{"Action":"output","Package":"example.com/e2e","Test":"TestDelta","Output":"--- SKIP: TestDelta (0s)\n"}
+{"Action":"skip","Package":"example.com/e2e","Test":"TestDelta","Elapsed":0}
