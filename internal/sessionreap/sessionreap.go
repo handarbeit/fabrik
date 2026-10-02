@@ -32,12 +32,33 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"syscall"
 	"time"
 )
 
 // ErrUnsafeSID is returned (and logged) for a session ID that must never be
 // signalled: 0, 1, or the caller's own session (R4).
 var ErrUnsafeSID = errors.New("unsafe session id")
+
+// ErrUnsafeGroup is returned (and logged) for a process-group target that must
+// never be signalled: a PGID of 0 or 1 (which would make kill(-pgid) address
+// -0/-1, i.e. the caller's own group or every process) or the caller's own
+// group (#1957, R4).
+var ErrUnsafeGroup = errors.New("unsafe process group")
+
+// ErrGroupNotOwned is returned (and logged) when the group a stored PID names
+// cannot be confirmed to still be the one we started — the PID was recycled, or
+// ownership could not be established — so no signal was sent (#1957, R1).
+var ErrGroupNotOwned = errors.New("process group not owned")
+
+// Owner identifies the process that leads a process group we started: its PID
+// (== the group's PGID, since workers start with Setsid/Setpgid) and, when
+// known, its start-time token captured right after it was started. Start == ""
+// means no token was recorded and the parent check applies instead.
+type Owner struct {
+	PID   int
+	Start string
+}
 
 // Logger writes one tagged line. The caller binds the issue/PR number.
 type Logger func(tag, format string, args ...any)
@@ -52,6 +73,11 @@ type Options struct {
 	Zombie func(int) bool         // reports a dead-but-unreaped process (default: platform check)
 	Procs  func() ([]Proc, error) // process table with parents; default platform lister. Falls back to List (no parent info, so no command-session discovery)
 	Start  func(pid int) string   // process start-time token; "" if unknown (default: platform)
+
+	// Group-signal seams (#1957). Zero values use the real syscalls.
+	Getpgid func(int) (int, error)          // process-group ID of one PID
+	Ppid    func(int) (int, bool)           // parent PID of one PID; false if unknown
+	Kill    func(int, syscall.Signal) error // kill(2); pid may be negative (group) and sig 0 probes existence
 
 	// WorkerSIDOnly restricts every operation to the worker's own SID — the
 	// pre-command-session behaviour. Test seam: a twin that runs with it set

@@ -99,7 +99,7 @@ func (o Options) names(pids []int) []string {
 
 // Signal sends sig to every member of session sid, leader included, and
 // returns how many were signalled. On a listing error it degrades to the
-// leader's process group (today's pre-#1989 behaviour) rather than widening.
+// leader's process group (pre-#1989 behaviour) rather than widening — only after SignalGroup's ownership check (#1957).
 func Signal(sid int, sig syscall.Signal, o Options) (int, error) {
 	members, err := Members(sid, o)
 	if err != nil {
@@ -108,7 +108,7 @@ func Signal(sid int, sig syscall.Signal, o Options) (int, error) {
 			return 0, err
 		}
 		o.logf("warn", "session reap: %v — falling back to the process group of %d\n", err, sid)
-		if kerr := syscall.Kill(-sid, sig); kerr != nil {
+		if kerr := SignalGroup(OwnerOf(sid), sig, o); kerr != nil {
 			return 0, kerr
 		}
 		return 1, nil
@@ -214,7 +214,9 @@ func (e *escalation) step(sig syscall.Signal, name string) (int, bool) {
 		if err != nil {
 			if s.SID == e.sid {
 				o.logf("warn", "session reap: %v — falling back to the process group of %d\n", err, s.SID)
-				if kerr := syscall.Kill(-s.SID, sig); kerr != nil && kerr != syscall.ESRCH {
+				// Ownership-checked (#1957): the worker's recorded start token, never a bare kill(-sid).
+				if kerr := SignalGroup(Owner{PID: s.SID, Start: e.workerStart}, sig, o); kerr != nil &&
+					!errors.Is(kerr, ErrUnsafeGroup) && !errors.Is(kerr, ErrGroupNotOwned) {
 					o.logf("warn", "session reap: group %s of %d: %v\n", name, s.SID, kerr)
 				}
 				live = true // unknown membership: keep escalating

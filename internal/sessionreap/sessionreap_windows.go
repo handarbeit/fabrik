@@ -4,6 +4,7 @@ package sessionreap
 
 import (
 	"context"
+	"syscall"
 	"time"
 )
 
@@ -51,3 +52,21 @@ func (*Tracker) Sample() []Session { return nil }
 
 // Run blocks until ctx is done, sampling nothing.
 func (*Tracker) Run(ctx context.Context, _ time.Duration) { <-ctx.Done() }
+
+// CheckPGID always reports nothing to refuse: there is nothing to signal.
+func CheckPGID(int) error { return nil }
+
+// SignalGroup is a no-op on Windows.
+func SignalGroup(Owner, syscall.Signal, Options) error { return nil }
+
+// OwnsGroup reports nothing: there are no process groups to own.
+func OwnsGroup(Owner, Options) (bool, bool, string) { return false, true, "" }
+
+// RecordStart records nothing.
+func RecordStart(int, Options) string { return "" }
+
+// ForgetStart is a no-op.
+func ForgetStart(int) {}
+
+// OwnerOf returns an Owner with no token.
+func OwnerOf(pid int) Owner { return Owner{PID: pid} }
