@@ -1160,7 +1160,9 @@ boundary (see `adrs/1873-e2e-comment-landing-coverage.md`).
   and auth leg; eject ~35–60 min and ~$0.10–0.50, on-leg only; post-merge ~3–8 min
   and no Claude. Across both auth legs and both train modes that adds roughly
   2×(2×25 + 45 + 5) ≈ 200 min of scenario time (much of it overlapping the parallel
-  pool) and ~$1–3 to a full gate run.
+  pool) and ~$1–3 to a full gate run — that is the `E2E_MATRIX=full` figure. The default
+  sparse matrix (#1975) runs the merge-train scenarios in the baseline `app/on` cell and,
+  for the credentialed-push check, `TestMergeTrainHappyPathLanding` in `pat/on` only.
 
 ### Additional prerequisites for `TestAppSelfRecognition*` (#1877)
 
@@ -1438,7 +1440,9 @@ loudly instead of reporting success.
 The train-mode legs above run once per auth mode: first with the bed engine on
 its PAT (`FABRIK_TOKEN`), then as the GitHub App installation. Auth mode changes
 Fabrik's own identity: every "is this mine or a human's?" decision, every push
-and merge, and repo-access resolution. So the App legs rerun the full suite.
+and merge, and repo-access resolution. The App legs rerun the identity-bearing
+tests (the whole suite under `E2E_MATRIX=full`) — see "The sparse auth × train
+matrix" below.
 
 The same `TestSwitchTrainMode` restart applies it. When `E2E_AUTH_MODE` is set,
 it writes `FABRIK_GITHUB_APP_*` into the bed's `.env` from the bed's own
@@ -1447,8 +1451,9 @@ bed's stdout (`bed-run.log`) to verify the identity it started as. A bed that
 comes up as the wrong identity fails the switch step before any scenario runs.
 
 ```bash
-scripts/e2e/run.sh                          # pat/off, pat/on, then app/off, app/on
-E2E_AUTH_MODE=app scripts/e2e/run.sh        # App legs only
+scripts/e2e/run.sh                          # sparse plan: app/on, app/off, pat/on, pat/off
+E2E_MATRIX=full scripts/e2e/run.sh          # the full 2×2: pat/off, pat/on, then app/off, app/on
+E2E_AUTH_MODE=app scripts/e2e/run.sh        # App legs only (a partial run: no pat cells)
 E2E_AUTH_MODE=pat E2E_TRAIN_MODE=off scripts/e2e/run.sh -run TestSmokeSingleRepoDispatch
 ```
 
@@ -1473,6 +1478,46 @@ with a stated reason: `requireAppLeg` decides from `E2E_AUTH_MODE`
 (`bedAuthIdentity`) via the pure `decideAppLegRun`. An `app` leg whose bed shows no
 App identity fails loudly rather than skipping. See "Additional prerequisites for
 `TestAppSelfRecognition*`" below.
+
+**PAT counterparts and focused auth tests (#1975).** `TestPATSelfRecognition*` are the
+PAT-leg mirrors of the App-only cases (`requirePATLeg`/`decidePATLegRun` skip them on
+an App leg); `TestAuthLockLabelShape`, `TestAuthEnginePRAuthorIdentity` and
+`TestAuthReviewGateIdentity` check one identity or permission behaviour each, in
+whichever auth cell the sparse plan gives them. See the next section.
+
+#### The sparse auth × train matrix (#1975, ADR-1975)
+
+Running all 44 behaviours in all four auth × train cells re-proved most of them three
+extra times. Auth mode changes only **access** (token source, git credentials, worker
+`GH_TOKEN`, which rate-limit bucket), **identity** (self-recognition, lock labels,
+@mention/assignee targets, commit and PR authorship) and **permissions**; train mode
+changes only the **landing path**. So each test declares, in
+`tests/e2e/registry/registry.json`, whether it is `sensitive` or `neutral` to each axis
+(`auth`, `train` — no default; a `sensitive` mark needs a one-line `auth_reason` /
+`train_reason`), and the gate runs:
+
+| Cell | Runs |
+|---|---|
+| `app/on` — the **baseline** | every live test |
+| `app/off` — other train mode, same auth | `train: sensitive` |
+| `pat/on` — other auth mode, same train | `auth: sensitive` |
+| `pat/off` — the diagonal | sensitive on **both** axes |
+
+Every live scenario still runs live before every release (ADR-1454 is unchanged); a test
+just runs once, plus once per axis it is sensitive to. A (test, cell) pair the registry's
+`skip_ok_legs` marks as a structural skip (every merge-train scenario under train `off`,
+the App-only cases on `pat/*`) is not planned at all, so no bed restart is spent watching
+a test skip itself. The coverage summary prints the required-set size against the full
+2×2 (`required set (E2E_MATRIX=sparse): N (test, leg) pairs of M in the full 2×2`).
+
+`E2E_MATRIX` selects the plan: unset or `sparse` is the above, `full` restores the four
+complete legs, and anything else is a hard error. **Use `E2E_MATRIX=full` for a release
+that changes the auth layer, the landing path, or the sensitivity classification itself.**
+The accepted risk of the sparse default is an auth × train *interaction* in a test marked
+`neutral` — classification is explicit and reviewed precisely for that reason.
+`E2E_AUTH_MODE` / `E2E_TRAIN_MODE` filter the sparse plan after it is built, so
+`E2E_AUTH_MODE=pat` or `E2E_TRAIN_MODE=off` leaves out the baseline and is a **partial
+run** — the coverage ledger keeps it incomplete.
 
 Scenarios resolve mode via `resolveTrainMode` (`harness.go`): `E2E_TRAIN_MODE`
 takes precedence when set (an invalid value is a hard test failure), falling
@@ -2144,6 +2189,12 @@ scenarios" for their per-scenario cost and wall-clock.
 | `TestAppSelfRecognitionBotCommentNeverResumes` | #1754 (`selfLogin()`), #1877; guards `filterHuman`/`gh.IsBotLogin` on the real wire shape and ADR-1813's resume rule (does not discriminate #1754's cache write-through delta) |
 | `TestAppSelfRecognitionBlockedCommentUpdatedInPlace` | #1754 (`findBlockedComment` under App auth), #1877; expected red on the App leg until comment authors are normalised at ingestion |
 | `TestAppSelfRecognitionDurableReviewSuppression` | #1754 (`durablyAddressedReviewIDs`), #1555, #1877 |
+| `TestPATSelfRecognitionOwnMarkedCommentNeverResumes` | #1975 — PAT form of A1: a comment carrying Fabrik's own prefix, authored by the User-typed PAT account, never resumes a pause (guards the prefix exclusion, not `selfLogin()`) |
+| `TestPATSelfRecognitionBlockedCommentUpdatedInPlace` | #1975 — PAT form of A2 (shared body): `findBlockedComment` under a User-typed identity |
+| `TestPATSelfRecognitionDurableReviewSuppression` | #1975 — PAT form of A3 (shared body): `durablyAddressedReviewIDs`, control marker from the reviewer account |
+| `TestAuthLockLabelShape` | #1975, ADR-1893 — lock label `fabrik:locked:<login>` (PAT) vs `<slug>-<6 hex>` (App) |
+| `TestAuthEnginePRAuthorIdentity` | #1975, ADR-1846 — the PR the engine opens is authored by the engine's identity (extracted from `TestConjunctiveCIReviewGate`) |
+| `TestAuthReviewGateIdentity` | #1975 — review gate engages for a harness-authored PR with a distinct reviewer (extracted from the `TestReviewAuthority*`/`TestExpectedReviewers*` identity assertions) |
 | `TestMergeTrainHappyPathLanding` | ADR-059 D1/D3 (#946, #947, #948) — Queued column, trial-branch build, integration-PR landing + member lifecycle |
 | `TestMergeTrainBisectionEjectsPoisoner` | ADR-059 D4 (#949) — halving bisection, ejection, one-at-a-time fallback |
 | `TestMergeTrainConflictBisectPrefixRerere` | #1841 (conflict prompt without build/test commands; turn-limited-but-resolved exit kept), #1835 (trial-prefix reuse), #1834 (rerere replay, `forgetPoisonerResolutions`), #1833 (deterministic Queued order), #1848 (this scenario) |
@@ -2176,7 +2227,11 @@ Every escape-from-release regression earns a new scenario in this table.
    will fail the build if the new path collides with an existing one.
 6. **Add a sim-parity registry entry** to `tests/e2e/registry/registry.json`
    (see "Sim parity registry (#1933)" below). `go test ./...` fails until the new
-   live test is listed, and prefer adding the sim twin in the same PR.
+   live test is listed, and prefer adding the sim twin in the same PR. The entry must
+   also declare `auth` and `train` sensitivity (`sensitive` with a one-line reason, or
+   `neutral`; there is no default — see "The sparse auth × train matrix" above): a test
+   that never lands is `train: neutral`, and one that calls an author-identity assertion
+   (directly or through a helper) must be `auth: sensitive`.
 7. **Assert on something that can only be produced by the engine, on the
    specific path under test** (handarbeit/fabrik#1355). A scenario that
    passes just as easily against a broken engine as a working one is worse
@@ -2230,8 +2285,8 @@ Every escape-from-release regression earns a new scenario in this table.
 registry keyed by live e2e test name. Its first field records whether the sim bed
 (`tests/sim`) covers the same engine path, so the "green sim ⇒ green live run"
 promise of the pre-gate (ADR-1454) is something you can check rather than assume.
-Later per-test metadata (e.g. auth/train sensitivity, packs, exclusivity) is added
-as **fields on the same entries**, not as separate lists.
+Later per-test metadata (the auth/train sensitivity fields of #1975, then packs,
+exclusivity) is added as **fields on the same entries**, not as separate lists.
 
 - **What is a live test?** By rule, not by hand: a top-level `Test*` function in
   `tests/e2e/*_test.go` whose body (nested closures included) calls `LoadEnv`.
@@ -2244,10 +2299,18 @@ as **fields on the same entries**, not as separate lists.
   `live_only_reason` (`model-judgement`, `wire-format`, `review-bot`, `real-ci`,
   `app-auth`, `other`+note) and the rules for `sim`/`gap` are in
   `tests/sim/README.md`'s "Sim parity registry" section.
+- **Sensitivity fields (#1975):** `"auth"` and `"train"` are each `"sensitive"` or
+  `"neutral"` and have **no default**; a `sensitive` axis needs a non-empty one-line
+  `"auth_reason"` / `"train_reason"` and a `neutral` one must not carry a reason.
+  `skip_ok_legs` stays a separate field: sensitivity says where a test *should* run,
+  `skip_ok_legs` where a skip is *expected* (the sparse plan prunes such pairs).
 - **Enforcement:** `tests/e2e/registry` is an untagged Go package, so its
   completeness test runs in plain `go test ./...` on every PR. It fails on a live
   test with no entry, an entry for a test that no longer exists, a sim reference
-  that does not exist, or a malformed entry. It discovers tests by parsing source
+  that does not exist, a malformed entry, a missing or invalid `auth`/`train`, a
+  `*SelfRecognition*` test that is not `auth: sensitive`, or a test that reaches
+  `AssertPRAuthorIsExpectedIdentity`/`AssertPRAuthorIsEngineIdentity` (directly or
+  through a same-directory helper) without being `auth: sensitive`. It discovers tests by parsing source
   (`go/parser`), never by importing the build-tagged e2e package.
 - **Reading it from shell:** it is plain JSON, so `jq` works directly —
   `jq -r '.tests[] | select(.parity=="gap") | .name' tests/e2e/registry/registry.json`.

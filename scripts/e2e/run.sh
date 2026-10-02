@@ -9,7 +9,8 @@
 # lives there; see tests/gate/README.md and tests/e2e/README.md. Its flags and
 # environment variables are unchanged:
 #
-#   scripts/e2e/run.sh                       # full gate: off then on, under pat then app auth
+#   scripts/e2e/run.sh                       # the sparse auth × train gate (#1975): app/on baseline, then app/off, pat/on, pat/off
+#   E2E_MATRIX=full scripts/e2e/run.sh       # the full 2×2: every live test in all four cells (auth layer / landing path / classification releases)
 #   scripts/e2e/run.sh --clean               # reset boards/PRs/branches first (must be the first argument)
 #   scripts/e2e/run.sh --resume              # run only the (test, leg) pairs the per-SHA coverage ledger still lacks (#1972)
 #   scripts/e2e/run.sh --clean --resume      # both, in either order; both must LEAD the arguments

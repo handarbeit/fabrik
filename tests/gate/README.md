@@ -22,18 +22,52 @@ legs, each a bed restart (`TestSwitchTrainMode`) plus `go test -tags=e2e -json` 
 
 ## Where the follow-on chain plugs in (R5)
 
-Structure only — none of the features exist yet.
+The seams below are all in use: #1972 (ledger), #1973 (INCONCLUSIVE), #1974 (probes) and
+#1975 (the sparse plan) plug into them; #1976/#1977 are still to come.
 
 | Seam | Where | Used by |
 |---|---|---|
-| `Cell` (auth, train, parallel, args, isolated) and `PlanCells` | `schedule.go` | #1975 sparse matrix, #1976 multi-bed |
-| `Scheduler` interface (`SerialScheduler` today) on `Gate` | `schedule.go` | #1975, #1976, #1977 two-phase legs |
+| `Cell` (auth, train, parallel, args, isolated) and `PlanCells` (`PlanInput.Sparse` selects the sparse plan) | `schedule.go` | **#1975's sparse matrix** (below), #1976 multi-bed |
+| `Scheduler` interface (`SerialScheduler` today) on `Gate` | `schedule.go` | #1976, #1977 two-phase legs |
 | `LegResult` (cell, exit code, log path, decoded `[]Event`, budget before/after) delivered to `Gate.OnLeg` | `leg.go` | other observers. **#1972's ledger does not use it** — it records from `suiteWriter`'s event sink (`ledger_recorder.go`), because `OnLeg` never fires for a killed, RUN INVALID, watchdog or restart-failed leg |
 | `Classification` (pass/fail/skip/**inconclusive**/running/never-started) | `events.go` | #1973 added INCONCLUSIVE — see "INCONCLUSIVE and bounded retry" below |
-| `Ledger`, `Evaluator`, `Report` and `RequiredTests`/`ResumeCells` over `PlanCells` output | `ledger*.go`, `coverage.go`, `resume.go` | #1972; #1975's sparse plan changes the required set with no change here |
+| `Ledger`, `Evaluator`, `Report` and `RequiredTests`/`ResumeCells` over `PlanCells` output | `ledger*.go`, `coverage.go`, `resume.go` | #1972; #1975's sparse plan changed the required set with no change here — `Report` only gained the `Matrix`/`FullMatrixPairs` fields for the summary |
 | `[]Preflight` (`Gate.Preflights`, ordered, each returns an `*ExitError`) | `gate.go` | #1974's host-load probe (`host-load-probe`) |
 | `[]Preflight` (`Gate.LivePreflights`, run **after** the pre-gate, before the bed is built) | `gate.go` | #1974's board-lag probe — a live write, so it cannot precede the pre-gate (ADR-1454) |
 | `Commander` (`Run`/`Start`), `Gate.Env`, `Sleep`, `Now`, `ProcCwd` | `exec.go`, `gate.go` | every test; #1976's per-bed environments |
+
+## The sparse plan and `E2E_MATRIX` (#1975, ADR-1975)
+
+`PlanCells` has two modes. With `PlanInput.Sparse == nil` it is the full auth × train matrix
+above, byte-for-byte. With `Sparse` set (`SparseInput{Live, Entries}` — the live set and each
+test's registry entry) it plans four logical cells in run order, grouped by auth:
+
+| Cell | Selected tests |
+|---|---|
+| `app/on` (baseline) | every live test; `-skip TrainIsolatedRE` plus the isolated cell, as before |
+| `app/off` | `train: sensitive` |
+| `pat/on` | `auth: sensitive` |
+| `pat/off` | sensitive on both axes |
+
+A non-baseline cell drops the pairs a test's `skip_ok_legs` matches, selects the rest with one
+anchored `-run ^(…)$` (`narrowArgs`, keeping other passthrough arguments and any caller subtest
+filter), splits the isolated scenario into its own cell only when it is selected, and is dropped
+entirely — bed restart included — when nothing is left. A caller `-run` is intersected with each
+cell's selection; `E2E_AUTH_MODE` / `E2E_TRAIN_MODE` filter the finished plan, so a `pat`-only or
+`off`-only invocation omits the baseline and is a partial run. A forced train mode other than
+`on`/`off` falls through to the full plan (the restart step rejects it). A live test with no
+registry entry is planned in every cell.
+
+`Config.Matrix` (`E2E_MATRIX`, `sparse` default, `full`, anything else an error → `ExitUsage`; the
+zero value means full so hand-built test `Config`s keep the full shapes) decides whether `Gate`
+passes `Sparse`. `Gate.buildPlanInput` is the one place a `PlanInput` is built, shared by `gate run`
+and `gate coverage`, and the registry is loaded for the plan whether or not the ledger is enabled.
+The required set is still `RequiredTests(PlanCells(…))` with no caller arguments — the plan and the
+set cannot diverge. `gate run` prints `== E2E_MATRIX=<mode>: N cell(s): …` before the first leg, and
+the coverage summary ends with `required set (E2E_MATRIX=<mode>): N (test, leg) pairs of M in the
+full 2×2` (also on the release-notes line). `sparse_test.go` covers the plan, the filters, the
+isolated-scenario placement, the gate-level agreement of plan and required set, and `--resume` over
+a sparse plan, all with the fake `Commander`.
 
 ## `run.sh` function → Go
 
@@ -147,7 +181,7 @@ the guard audit; this is the map.
 | `retry.go` | `retryLogPath`, `mergeAttempts` (last attempt wins per test), `summarizeRetries`, the per-leg summary and `#1974` warning |
 | `leg.go` | `runSuiteAttempt` (one `go test -json` invocation: log, stall watcher, recorder), `retryInconclusive` (the bounded in-leg loop and its stop conditions), the tail's `anyFileContains` timeout scan over every attempt's log |
 | `gate.go` | `leftInconclusive` / `withLeftInconclusive`: a clean run that left inconclusives exits `ExitCoverageIncomplete` (8) |
-| `config.go` | `InconclusiveRetries` (`E2E_INCONCLUSIVE_RETRIES`, default 2, 0 disables), `InconclusiveWarn` (`E2E_INCONCLUSIVE_WARN`, default 3) |
+| `config.go` | `Matrix` (`E2E_MATRIX`: `sparse` default, `full`, else `ExitUsage`; zero value = full), `InconclusiveRetries` (`E2E_INCONCLUSIVE_RETRIES`, default 2, 0 disables), `InconclusiveWarn` (`E2E_INCONCLUSIVE_WARN`, default 3) |
 | `pregate_signature.go`, `pregate.go` | `crashScanner`/`IsTSanForkCrash` (streamed, per-line, vetoed by any panic / `fatal error:` / `WARNING: DATA RACE` / goroutine dump) and `runPregateStep`'s one-shot retry |
 | `ledger_wire.go` | `pregateRetryNote` → `pregate/<head>.retries.jsonl`; `retried`/`load_avg` on the pass record; the pre-gate line in the coverage summary |
 
