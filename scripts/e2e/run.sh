@@ -41,4 +41,9 @@ if ! go build -o "$TMP_BIN" ./tests/gate/cmd/gate; then
 fi
 mv -f "$TMP_BIN" "$BIN_DIR/gate"
 
+# `run.sh coverage ...` is the read-only ledger acceptance check; anything else
+# is the gate itself.
+if [[ "${1:-}" == "coverage" ]]; then
+  exec "$BIN_DIR/gate" "$@"
+fi
 exec "$BIN_DIR/gate" run "$@"
