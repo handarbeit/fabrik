@@ -582,8 +582,8 @@ func (d *Daemon) lockPath() string {
 // Once the flock is held, our PID is written into the file for diagnostics
 // — not used for locking (flock handles that) — mirroring engine/poll.go's
 // identical fabrik.lock idiom exactly. This is what makes the lock file
-// externally inspectable (e.g. scripts/e2e/run.sh's check_reviewer_reachable,
-// #1684 R2): a liveness check needs a PID to `kill -0`, and prior to this the
+// externally inspectable (e.g. the e2e gate runner's CheckReviewerReachable in
+// tests/gate/consumers.go, #1684 R2): a liveness check needs a PID to `kill -0`, and prior to this the
 // file's content was never written at all.
 func acquireLock(fabrikDir string) (*os.File, error) {
 	dir := fabrikDir

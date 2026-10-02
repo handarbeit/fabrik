@@ -53,7 +53,7 @@
 # exact cleanup commands you'd need so you can decide whether to scrub and retry.
 #
 # parse_args() and main() are split, and both sit behind the same
-# BASH_SOURCE[0]==$0 dispatch guard scripts/e2e/run.sh already uses (see that
+# BASH_SOURCE[0]==$0 dispatch guard scripts/sim/run.sh uses (see that
 # script's own precedent). This lets scripts/cut_release_gate_test.sh `source`
 # this file and exercise parse_args()'s flag validation — including the
 # mandatory-by-default live suite's --skip-integration handling — directly,
@@ -127,7 +127,8 @@ insert_notes_line() {
 # one definition rather than maintaining two separate lists (#1677):
 #   - step 1's own pre-flight DIRTY check (below) — unchanged behavior,
 #     just no longer a second, hand-copied regex.
-#   - run_pregate's dirty-tree check (scripts/e2e/run.sh), via the exported
+#   - the gate runner's pre-gate dirty-tree check (RunPregate in tests/gate/pregate.go,
+#     behind scripts/e2e/run.sh), via the exported
 #     FABRIK_PREGATE_ALLOWED_DIRTY_REGEX — see export_pregate_verified_sha.
 #
 # release-notes/<version>.md is written before step 1 even runs (a
@@ -135,11 +136,11 @@ insert_notes_line() {
 # invocation; plugin/known_embedded_versions.go is step 4's own conditional
 # write (only when a new plugin hash isn't already recorded); the
 # plugin/*/.claude-plugin/plugin.json pattern covers step 6b's marketplace
-# version bumps (not yet run when this fires for run_pregate's purposes,
+# version bumps (not yet run when this fires for the gate runner's pre-gate,
 # but a retry after a partial step 6b could legitimately see it dirty too).
 # Nothing outside this declared, named set is ever treated as expected —
 # any other dirty file still fails both checks exactly as before this was
-# extracted (see run_pregate's own comment on the TOCTOU gap this
+# extracted (see RunPregate's own comment on the TOCTOU gap this
 # preserves).
 allowed_dirty_regex() {
   local version="$1"
@@ -154,11 +155,11 @@ allowed_dirty_regex() {
 # after step 5's live e2e gate runs) — so the value names the exact tree
 # that was checked, not merely "some release."
 #
-# scripts/e2e/run.sh's own pre-gate (run_pregate) checks FABRIK_PREGATE_VERIFIED_SHA
+# The gate runner's own pre-gate (RunPregate, behind scripts/e2e/run.sh) checks FABRIK_PREGATE_VERIFIED_SHA
 # against a freshly-resolved `git rev-parse HEAD` of its own before deciding
 # whether to re-run the identical sim + wire-contract checks (R5, #1624) —
 # see that function's own comment. An exported env var, not a file marker:
-# run.sh is invoked as this script's direct child process (step 5), so
+# the gate runner is invoked as this script's direct child process (step 5), so
 # there is no on-disk staleness/cleanup concern, and the value is naturally
 # scoped to exactly this invocation (env vars do not outlive the child
 # process) — unlike E2E_SKIP_PREGATE, a blanket opt-out this script
@@ -170,10 +171,10 @@ allowed_dirty_regex() {
 # REQ7 (#1677): the SHA match alone was never sufficient on a real release —
 # step 4's "Record embedded plugin hash" write to
 # plugin/known_embedded_versions.go lands on disk, uncommitted, between
-# this function running (end of step 3) and run_pregate's own dirty-tree
+# this function running (end of step 3) and the gate runner's own dirty-tree
 # check (step 5), so the tree was dirty on essentially every real release
 # and the SHA guard never actually engaged. FABRIK_PREGATE_ALLOWED_DIRTY_REGEX
-# tells run_pregate which specific, already-known-benign self-writes to
+# tells RunPregate which specific, already-known-benign self-writes to
 # disregard when deciding "dirty" — the same allowlist step 1's own
 # preflight already trusts, not a new or wider one. A standalone
 # scripts/e2e/run.sh invocation never sets this var, so its dirty-tree
@@ -364,8 +365,8 @@ ok "FABRIK_TOKEN authenticated as @$BOT_LOGIN"
 # ─── 3. sim + wire-contract pre-gate (unconditional — R1/R2, #1454) ──────────
 # Unlike the full go test -race ./... below, this step is NEVER skippable —
 # not even by --skip-tests. It's the same free, fast pre-gate
-# scripts/e2e/run.sh runs ahead of its own live suite (see that script's
-# run_pregate), re-run here so a release cut through this script pays the
+# scripts/e2e/run.sh runs ahead of its own live suite (see the gate runner's
+# RunPregate in tests/gate/pregate.go), re-run here so a release cut through this script pays the
 # same "cheap layers first" ordering even if someone hand-invokes
 # scripts/e2e/run.sh separately with E2E_SKIP_PREGATE set. Cheap (~107s
 # total per tests/sim/README.md), so making it unconditional costs nothing

@@ -58,7 +58,7 @@ func lockedPID(env *Env) int {
 // backlog) can make the engine's own startup janitors and shutdown drain
 // consume close to their full budget, leaving those short, fixed waits with
 // no margin. 90s is deliberately generous — mirroring the 90s convention
-// scripts/e2e/run.sh's own preflight_bed_start already uses for bed
+// the gate runner's own StartBed (tests/gate/bed.go) already uses for bed
 // startup — rather than deriving a value from the engine's own
 // --drain-deadline config, which would couple this test harness to engine
 // internals for a precision gain that a fixed-but-generous timeout plus
@@ -205,7 +205,7 @@ func bedPollSeconds() string {
 
 // markInheritedFDsCloseOnExec marks every descriptor above stdio close-on-exec,
 // so processes this test spawns from here on do not inherit descriptors this
-// test itself inherited — most importantly run.sh's JSON pipe (see the call
+// test itself inherited — most importantly the gate runner's JSON pipe (see the call
 // site in StartFabrikTestBed for the full #1694 history).
 //
 // Marking a descriptor close-on-exec does not affect this process's own use of
@@ -232,14 +232,16 @@ func markInheritedFDsCloseOnExec() {
 }
 
 // bedGitConfigIsolationEnv returns the git-config isolation env for a bed
-// launch, matching scripts/e2e/run.sh's preflight_bed_start (#1756/R5): its
-// GIT_CONFIG_GLOBAL points at the credential-only config run.sh writes to
+// launch, matching the gate runner's StartBed / BedStartCmd in tests/gate/bed.go
+// (#1756/R5; the runner is untagged and cannot import this package, so the two
+// launch sites are independent and pinned by TestBedStartCmdContracts): its
+// GIT_CONFIG_GLOBAL points at the credential-only config the runner writes to
 // .fabrik/git-config-isolated, so the operator's url.*.insteadOf rewrite
-// cannot silently move the bed's HTTPS git onto SSH. run.sh sets these only
-// in its own launch subshell, so a bed restarted here (every train-mode
+// cannot silently move the bed's HTTPS git onto SSH. The runner sets these only
+// in its own launch, so a bed restarted here (every train-mode
 // switch) would otherwise run on the operator's real ~/.gitconfig — which
 // is how an App-mode leg could pass over SSH while HTTPS (#1846) was never
-// exercised. Missing file (a go test run outside run.sh) → no isolation,
+// exercised. Missing file (a go test run outside the gate runner) → no isolation,
 // logged.
 func bedGitConfigIsolationEnv(t *testing.T, env *Env) []string {
 	t.Helper()
@@ -264,6 +266,12 @@ func StartFabrikTestBed(t *testing.T, env *Env) {
 		t.Fatalf("bed binary not found at %s: %v", bin, err)
 	}
 
+	// Launch contract shared with the gate runner's StartBed (tests/gate/bed.go,
+	// BedStartCmd): `-notui -poll <secs>` with no --auto-upgrade, the isolated
+	// gitconfig (bedGitConfigIsolationEnv), and no ambient FABRIK_GITHUB_APP_*.
+	// The runner is untagged and cannot import this package, so the two launch
+	// sites are independent — keep them in agreement (the runner's half is pinned
+	// by TestBedStartCmdContracts).
 	cmd := exec.Command(bin, "-notui", "-poll", bedPollSeconds())
 	cmd.Dir = env.FabrikTestDir
 	// Strip GITHUB_TOKEN so Fabrik uses FABRIK_TOKEN (@arbeithand) from the bed's
@@ -282,10 +290,10 @@ func StartFabrikTestBed(t *testing.T, env *Env) {
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = devnull, devnull, devnull
 		defer devnull.Close()
 	}
-	// Stdout/stderr go to bed-run.log, like run.sh's own launch
-	// (preflight_bed_start), so the startup banner — including the identity
+	// Stdout/stderr go to bed-run.log, like the gate runner's own launch
+	// (tests/gate/bed.go StartBed), so the startup banner — including the identity
 	// line verifyBedAuthIdentity checks (#1861) — is readable after a
-	// harness restart too. Appended, not truncated: run.sh truncates once at
+	// harness restart too. Appended, not truncated: the gate runner truncates once at
 	// the start of a run, and every restart after that (mode switches,
 	// TestMergeTrainRestartSafety) keeps its predecessors' output for
 	// post-mortems. verifyBedAuthIdentity reads only the latest startup.
@@ -302,13 +310,14 @@ func StartFabrikTestBed(t *testing.T, env *Env) {
 	// up ProcAttr.Files and ExtraFiles but does not close arbitrary inherited
 	// fds, and descriptors created by a parent shell are not close-on-exec.
 	//
-	// That leaked scripts/e2e/run.sh's JSON pipe into a daemon designed to
-	// outlive the run, and wedged the gate (#1694). run.sh feeds `go test`'s
-	// output through a FIFO — `exec 3> "$fifo"`, `go test ... >&3`, then
-	// `exec 3>&-` to drop the shell's own copy — and afterwards waits for the
-	// consumer to drain, which requires EOF, which requires every write end to
-	// be closed. `go test` inherits fd 3, the test binary inherits it, and
+	// That leaked the gate runner's output pipe into a daemon designed to
+	// outlive the run, and wedged the gate (#1694). The (then bash) runner fed
+	// `go test`'s output through a FIFO and afterwards waited for the consumer
+	// to drain, which requires EOF, which requires every write end to be
+	// closed. `go test` inherits the descriptor, the test binary inherits it, and
 	// this detached bed inherited it too and then held it open indefinitely.
+	// (The Go runner copies the pipe itself and bounds that wait — see
+	// tests/gate/exec.go's WaitDelay — but this fix at the source stays.)
 	// Confirmed by lsof against a bed still running hours after its run:
 	//
 	//   fabrik 13897 bpja 3w FIFO ... /tmp.xHMuUtjYKA/fifo
@@ -317,7 +326,7 @@ func StartFabrikTestBed(t *testing.T, env *Env) {
 	// the #1676 watchdog aborted the script — silently skipping the isolated
 	// runaway-guard leg that should have run next. It only ever bit the "on"
 	// leg because that is where the bed is (re)started from inside a `go test`
-	// invocation rather than by run.sh before the pipe exists.
+	// invocation rather than by the gate runner before the pipe exists.
 	markInheritedFDsCloseOnExec()
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start bed Fabrik (%s): %v", bin, err)

@@ -477,8 +477,8 @@ func TestDaemonRun_LockPreventsSecondInstance(t *testing.T) {
 }
 
 // TestAcquireLock_WritesPID covers the diagnostic PID write added to
-// acquireLock (#1684 R2): scripts/e2e/run.sh's check_reviewer_reachable
-// depends on pruefer.lock actually containing the acquiring process's PID
+// acquireLock (#1684 R2): the e2e gate runner's CheckReviewerReachable
+// (tests/gate/consumers.go) depends on pruefer.lock actually containing the acquiring process's PID
 // to `kill -0` against — a silent regression here (e.g. a refactor that
 // drops the Fprintf, or writes it in the wrong format) would break that
 // external liveness check without any Go test catching it, since acquiring

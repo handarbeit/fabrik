@@ -15,7 +15,7 @@ import (
 // Fabrik startup, so switching it requires a restart — never an in-run flip
 // while other scenarios' t.Parallel() invocations might be in flight.
 //
-// This is deliberately its own `go test` invocation (see scripts/e2e/run.sh),
+// This is deliberately its own `go test` invocation (see the gate runner, tests/gate, behind scripts/e2e/run.sh),
 // not folded into the main suite run: a dedicated invocation whose only test
 // is this one completes — bed fully back up in the new mode — before the
 // suite invocation that follows it even starts. That makes "the restart
@@ -27,11 +27,11 @@ import (
 // Gated on E2E_TRAIN_SWITCH=1 in addition to requiring E2E_TRAIN_MODE, so a
 // broad -run pattern (or a plain full-suite invocation with E2E_TRAIN_MODE
 // set) doesn't accidentally sweep this test into the main suite run and
-// restart the bed a second, redundant time. scripts/e2e/run.sh's dedicated
-// switch step is the only caller that sets it.
+// restart the bed a second, redundant time. The gate runner's dedicated
+// switch step (tests/gate/leg.go) is the only caller that sets it.
 func TestSwitchTrainMode(t *testing.T) {
 	if os.Getenv("E2E_TRAIN_SWITCH") != "1" {
-		t.Skip("only runs when E2E_TRAIN_SWITCH=1 (set by scripts/e2e/run.sh's mode-switch step)")
+		t.Skip("only runs when E2E_TRAIN_SWITCH=1 (set by the gate runner's mode-switch step)")
 	}
 
 	rawMode := os.Getenv("E2E_TRAIN_MODE")
@@ -63,7 +63,7 @@ func TestSwitchTrainMode(t *testing.T) {
 	}
 
 	// Auth mode (#1861): applied in the same stopped window, so one restart
-	// covers both. Empty E2E_AUTH_MODE (a switch outside run.sh's auth legs)
+	// covers both. Empty E2E_AUTH_MODE (a switch outside the gate runner's auth legs)
 	// leaves the bed's auth untouched.
 	if authMode != "" {
 		t.Logf("switching test bed to auth mode %s", authMode)

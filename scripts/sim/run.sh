@@ -9,7 +9,7 @@
 #
 # This is BOTH the frictionless manual entry point ("run the sim layer by
 # hand at any point before committing to a full live e2e run") AND what
-# scripts/e2e/run.sh's pre-gate (run_pregate) calls with --all — there is
+# the e2e gate runner's pre-gate (tests/gate/pregate.go, behind scripts/e2e/run.sh) calls with --all — there is
 # exactly one definition of "the sim suite" in this repo, so the two never
 # drift apart.
 #
@@ -62,7 +62,7 @@
 # ./...` and the CI workflow's equivalent step, since both exercise the
 # same git-forking tests/sim package `./...` includes; see that file's own
 # header comment. Override via the environment for experimentation, but the
-# pre-gate (scripts/e2e/run.sh's run_pregate, and scripts/cut-release.sh
+# pre-gate (the gate runner's RunPregate behind scripts/e2e/run.sh, and scripts/cut-release.sh
 # transitively) always goes through this one script, so there is exactly
 # one place the sim suite's own number lives.
 #
