@@ -61,6 +61,10 @@ type multiSched struct {
 	shared    []*queued
 	serves    map[int]bool // beds that serve the shared queue
 	held      map[string]holder
+	// reserved maps an identity to the bed whose strict-queue head is waiting
+	// for it: a shared-queue bed may not take it first, so bed A's baseline is
+	// never starved by a bed that keeps re-acquiring a shared identity.
+	reserved  map[string]int
 	exhausted map[string]bool
 	stopNew   bool
 	firstErr  error
@@ -128,7 +132,7 @@ func newMultiSched(g *Gate, cells []Cell) *multiSched {
 		wake:   make(chan struct{}),
 		fixed:  map[int][]*queued{},
 		serves: map[int]bool{},
-		held:   map[string]holder{}, exhausted: map[string]bool{},
+		held:   map[string]holder{}, reserved: map[string]int{}, exhausted: map[string]bool{},
 		results: map[int][]string{}, waitedFor: map[string]bool{},
 	}
 	bedA, shared := assignCells(cells, g.Cfg.sparseMatrix())
@@ -200,14 +204,25 @@ func (s *multiSched) next(ctx context.Context, i int) (q *queued, set []Identity
 		}
 		return false
 	}
-	// blockedBy is the first identity of set someone else holds ("" if none).
+	// blockedBy is the first identity of set someone else holds, or another
+	// bed's waiting strict-queue head has reserved ("" if none).
 	blockedBy := func(set []Identity) string {
 		for _, id := range set {
 			if _, busy := s.held[id.Key]; busy {
 				return id.Key
 			}
+			if r, ok := s.reserved[id.Key]; ok && r != i {
+				return id.Key
+			}
 		}
 		return ""
+	}
+	unreserve := func() {
+		for k, r := range s.reserved {
+			if r == i {
+				delete(s.reserved, k)
+			}
+		}
 	}
 	acquire := func(q *queued, set []Identity) {
 		for _, id := range set {
@@ -220,8 +235,11 @@ func (s *multiSched) next(ctx context.Context, i int) (q *queued, set []Identity
 			return
 		}
 		s.waitedFor[k] = true
-		h := s.held[key]
-		b.outf("== waiting: %s on bed %s needs %s, held by bed %s (%s) ==\n", cellDesc(q.cell), b.bed.Name, key, h.bed, h.cell)
+		if h, held := s.held[key]; held {
+			b.outf("== waiting: %s on bed %s needs %s, held by bed %s (%s) ==\n", cellDesc(q.cell), b.bed.Name, key, h.bed, h.cell)
+		} else {
+			b.outf("== waiting: %s on bed %s needs %s, reserved for bed %s's next cell ==\n", cellDesc(q.cell), b.bed.Name, key, s.beds[s.reserved[key]].bed.Name)
+		}
 		hooks = append(hooks, pending{bed: b.bed.Name, cell: q.cell, identity: key})
 	}
 
@@ -230,18 +248,24 @@ func (s *multiSched) next(ctx context.Context, i int) (q *queued, set []Identity
 		head := s.fixed[i][0]
 		hs := b.identitySet(head.cell.Auth)
 		if exhausted(hs) {
+			unreserve()
 			s.fixed[i] = s.fixed[i][1:]
 			s.results[i] = append(s.results[i], fmt.Sprintf("%s — not started (%s)", cellDesc(head.cell), s.exhaustedReason(hs)))
 			continue
 		}
 		if key := blockedBy(hs); key != "" {
+			for _, id := range hs {
+				s.reserved[id.Key] = i
+			}
 			noteWait(head, key)
 			return nil, nil, s.wake, false, hooks
 		}
+		unreserve()
 		s.fixed[i] = s.fixed[i][1:]
 		acquire(head, hs)
 		return head, hs, nil, false, hooks
 	}
+	unreserve()
 	if !s.serves[i] {
 		return nil, nil, nil, true, nil
 	}
@@ -303,9 +327,15 @@ func (s *multiSched) finish(ctx context.Context, i int, q *queued, set []Identit
 		outcome = "cancelled"
 		s.stopNew = true
 	case errors.As(err, &ee) && ee.Code == ExitBudgetExhausted:
-		engine, _ := b.engineIdentity(q.cell.Auth)
-		s.exhausted[engine.Key] = true
-		outcome = fmt.Sprintf("exit %d (RUN INVALID: %s budget exhausted; this cell's records voided)", ee.Code, engine.Key)
+		outcome = fmt.Sprintf("exit %d (RUN INVALID; this cell's records voided)", ee.Code)
+		if engine, ok := b.engineIdentity(q.cell.Auth); ok {
+			s.exhausted[engine.Key] = true
+			outcome = fmt.Sprintf("exit %d (RUN INVALID: %s budget exhausted; this cell's records voided)", ee.Code, engine.Key)
+		} else {
+			// No identity to scope it to (no token: CheckBedTopology makes this
+			// unreachable on a real run) — fail safe and start nothing new.
+			s.stopNew = true
+		}
 	case errors.As(err, &ee):
 		outcome = fmt.Sprintf("exit %d", ee.Code)
 		s.stopNew = true
@@ -327,6 +357,7 @@ func (s *multiSched) bedLoop(ctx context.Context, i int, ready chan struct{}) {
 	defer signal()
 	defer b.flushOutput()
 	lastAuth := ""
+	idle := false // this bed's engine was stopped and no leg has restarted it since
 	for {
 		q, set, wait, done, hooks := s.next(ctx, i)
 		for _, h := range hooks {
@@ -335,10 +366,19 @@ func (s *multiSched) bedLoop(ctx context.Context, i int, ready chan struct{}) {
 			}
 		}
 		if done {
+			if ctx.Err() == nil && !idle {
+				b.stopIdleEngine("it has no more cells to run")
+			}
 			return
 		}
 		signal()
 		if q == nil {
+			// A waiting bed's engine would keep polling with an identity another
+			// bed's leg may be holding: stop it until this bed's next leg.
+			if !idle {
+				b.stopIdleEngine("it waits for an identity")
+				idle = true
+			}
 			select {
 			case <-wait:
 			case <-ctx.Done():
@@ -351,6 +391,7 @@ func (s *multiSched) bedLoop(ctx context.Context, i int, ready chan struct{}) {
 			lastAuth = q.cell.Auth
 		}
 		s.runOne(ctx, i, q, set)
+		idle = false // the leg's restart step started the engine again
 	}
 }
 

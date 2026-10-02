@@ -140,6 +140,9 @@ func (o osIdentityOps) MintAppToken(ctx context.Context, bedDir string) (string,
 	}()
 	select {
 	case m := <-ch:
+		if m.err == nil && m.tok == "" {
+			return "", fmt.Errorf("the installation-token mint returned no token")
+		}
 		return m.tok, m.err
 	case <-ctx.Done():
 		return "", ctx.Err()
@@ -265,13 +268,22 @@ func (g *Gate) identityLabel(id Identity) string {
 // pressure on every identity shows up in the output. App identities mint an
 // installation token per probe. A failure warns and never gates; no token text
 // ever reaches the output.
+//
+// All of a call's probes share one bound, GHAPITimeout: the end-of-leg call
+// runs inside the post-suite watchdog, and a report must never be what trips it.
 func (g *Gate) logIdentityBudget(ctx context.Context, cell Cell, which string) {
 	if g.Identity == nil {
 		return
 	}
+	if g.Cfg.GHAPITimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, g.Cfg.GHAPITimeout)
+		defer cancel()
+	}
 	label := cell.Label()
 	for _, id := range g.identitySet(cell.Auth) {
 		if ctx.Err() != nil {
+			g.errf("warning: identity budget (leg: %s, %s): probes stopped after %ds\n", label, which, int(g.Cfg.GHAPITimeout.Seconds()))
 			return
 		}
 		token := id.token
@@ -282,6 +294,12 @@ func (g *Gate) logIdentityBudget(ctx context.Context, cell Cell, which string) {
 				continue
 			}
 			token = t
+		}
+		if token == "" {
+			// gh would fall back to the operator's ambient login and report ITS
+			// budget under this identity's name.
+			g.errf("warning: identity budget (leg: %s, %s): no token for %s\n", label, which, id.Key)
+			continue
 		}
 		rem, reset, err := g.Identity.Budget(ctx, token)
 		if err != nil {

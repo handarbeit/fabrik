@@ -65,6 +65,8 @@ type Gate struct {
 	// (ExitPostSuiteWatchdog), or a failed restart step: bash gave those no
 	// per-leg result either. The ledger's reading of them: RUN INVALID voids the
 	// cell's records, a watchdog leg's completed PASSes count (ADR-1972).
+	// On a multi-bed run (#1976) it is called from several bed goroutines at
+	// once, so it must be safe for concurrent use.
 	OnLeg func(LegResult)
 
 	// Seams for time and the OS.

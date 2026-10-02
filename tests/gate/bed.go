@@ -170,13 +170,8 @@ func shortSHA(s string) string {
 // and wait for it to exit. SIGTERM, not SIGKILL: the engine's clean-stop path
 // (#1393) durably pauses in-flight issues rather than abandoning them mid-stage.
 func (g *Gate) StopBedInstance(ctx context.Context) error {
-	data, err := os.ReadFile(filepath.Join(g.Cfg.TestBed, ".fabrik", "fabrik.lock"))
-	if err != nil {
-		return nil
-	}
-	pidStr := strings.TrimSpace(string(data))
-	pid, perr := strconv.Atoi(pidStr)
-	if pidStr == "" || perr != nil || !pidAlive(pid) {
+	pid := lockedBedPID(g.Cfg.TestBed)
+	if pid == 0 {
 		return nil
 	}
 	g.outf("   stopping running bed instance (pid %d)\n", pid)
@@ -191,6 +186,24 @@ func (g *Gate) StopBedInstance(ctx context.Context) error {
 	}
 	return nil
 }
+
+// lockedBedPID is the live PID in the bed's .fabrik/fabrik.lock, or 0 when there
+// is no lock, it is unreadable, or it names no live process.
+func lockedBedPID(bed string) int {
+	data, err := os.ReadFile(filepath.Join(bed, ".fabrik", "fabrik.lock"))
+	if err != nil {
+		return 0
+	}
+	pidStr := strings.TrimSpace(string(data))
+	pid, perr := strconv.Atoi(pidStr)
+	if pidStr == "" || perr != nil || !pidAlive(pid) {
+		return 0
+	}
+	return pid
+}
+
+// bedEngineRunning reports whether the bed's engine holds its lock.
+func bedEngineRunning(bed string) bool { return lockedBedPID(bed) != 0 }
 
 // WriteIsolatedBedGitconfig is run.sh's write_isolated_bed_gitconfig: write a
 // bed-local git config at out containing only the operating user's credential.*

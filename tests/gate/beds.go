@@ -166,10 +166,14 @@ func (g *Gate) propagateToBeds() {
 
 // bedEnv is what a multi-bed leg's `go test` invocations must see to aim the
 // live harness at its own bed (D2): the bed directory, its repo pair and its
-// board. nil on a single-bed run, whose legs inherit the gate's environment
-// unchanged.
+// board. On a single-bed run the legs inherit the gate's environment unchanged
+// (nil) — unless the one bed was named by E2E_BEDS rather than FABRIK_TEST_DIR,
+// when the harness must be told which directory that is.
 func (g *Gate) bedEnv() []string {
 	if g.bed == nil {
+		if g.Getenv("E2E_BEDS") != "" {
+			return []string{"FABRIK_TEST_DIR=" + g.Cfg.TestBed}
+		}
 		return nil
 	}
 	rc := g.bed.Reset
@@ -179,6 +183,22 @@ func (g *Gate) bedEnv() []string {
 		"FABRIK_TEST_REPO_BETA=" + rc.Beta,
 		"FABRIK_TEST_PROJECT_OWNER=" + rc.ProjectOwner,
 		"FABRIK_TEST_PROJECT_NUMBER=" + rc.ProjectNumber,
+	}
+}
+
+// stopIdleEngine stops a bed's engine while the bed has no leg running — while it
+// waits for an identity, and once it has no more cells. A running engine polls
+// with its identity whether or not a leg is using it, so an idle bed's engine
+// would spend the budget of an identity another bed's leg holds (the #1684 shape,
+// between two beds). Every leg restarts its bed (TestSwitchTrainMode starts a
+// stopped bed), so nothing is lost. A failure to stop only warns.
+func (g *Gate) stopIdleEngine(why string) {
+	if !bedEngineRunning(g.Cfg.TestBed) {
+		return
+	}
+	g.outf("== stopping this bed's engine while %s, so it spends no identity's budget ==\n", why)
+	if err := g.StopBedInstance(context.Background()); err != nil {
+		g.errf("warning: could not stop the idle bed engine: %v\n", err)
 	}
 }
 
