@@ -17,6 +17,13 @@
 #   scripts/e2e/run.sh coverage [--sha S] [--format notes]   # read-only: is live coverage complete for S? (exit 0 / 8)
 #   scripts/e2e/run.sh -run TestSmokeSingleRepoDispatch   # anything else is passed to `go test`
 #   E2E_TRAIN_MODE=off E2E_AUTH_MODE=pat scripts/e2e/run.sh -run Smoke
+#   E2E_BEDS=~/dev/fabrik-test,~/dev/fabrik-test-2 scripts/e2e/run.sh
+#                                            # two beds at once, serialized on shared GitHub
+#                                            # identities (#1976); bed A runs the app/on baseline
+#
+# E2E_BEDS (comma-separated bed directories, bed A first) defaults to the single
+# FABRIK_TEST_DIR bed. scripts/e2e/reset.sh resets every configured bed, or one
+# with --bed <dir>.
 #
 # Exit codes: 3 budget exhausted (RUN INVALID), 4 bed preflight failed, 5 pre-gate
 # failed, 6 post-suite watchdog, 7 operational precondition failed, 8 (--resume and

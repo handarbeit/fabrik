@@ -129,6 +129,22 @@ These tests assume:
    per leg through `.env`, and a config key would silently turn every PAT leg
    into App auth. `run.sh` refuses up front if either is wrong.
 
+6. **For a multi-bed run (`E2E_BEDS`, #1976):** every additional bed is its own
+   full bed directory with its own `.env` naming **its own** repo pair and board —
+   `FABRIK_TEST_REPO_ALPHA`, `FABRIK_TEST_REPO_BETA`, `FABRIK_TEST_PROJECT_OWNER`,
+   `FABRIK_TEST_PROJECT_NUMBER` (each falls back to the environment, then to the
+   defaults above, which bed A normally keeps) — its own `FABRIK_TOKEN`, and, for app
+   legs, its **own** App (`E2E_APP_*`; an App installs once per org, so a second bed needs
+   a second App such as `fabrik-bed-2`). The gate refuses two beds that share an App
+   installation, a board or a repo. Give bed B a `FABRIK_TOKEN` for a **different** user
+   than bed A's to get real concurrency: two beds whose tokens resolve to the same login
+   share that user's 5,000/h GraphQL budget, so their overlapping cells serialize (safe,
+   but no faster). Pruefer must cover every bed's repos. Standing up the second bed is #1990.
+
+The harness reads `FABRIK_TEST_DIR`, the repo pair, `FABRIK_TEST_PROJECT_OWNER` and
+`FABRIK_TEST_PROJECT_NUMBER` (default `2`; a non-positive or non-integer value fails the
+test) from its environment; on a multi-bed run the gate runner sets all five per leg.
+
 See `~/fabrik-oss-launch-notes.md` (under "Files and where they live") for
 the canonical setup.
 
@@ -1366,7 +1382,15 @@ before any live GitHub/Claude call, ahead of the sim+wire-contract pre-gate
 
 Both checks are local-only and make no live GitHub/Claude call themselves
 (process/file inspection only), so they add negligible wall-clock ahead of
-the checks they front-run. See `tests/gate/consumers.go` for the mechanism, and
+the checks they front-run.
+
+**With several beds (`E2E_BEDS`, #1976)** the contract holds per bed. The
+competing-consumer check runs once per bed, against that bed's own token, and
+excludes **every** configured bed's directory: another bed's engine is never
+reported — two beds' engines on one identity are serialized by the gate's
+identity scheduler instead (see "Two beds at once" below). Any **other** process
+on a bed's token, the dev daemon above all, is still refused. Pruefer must be up
+and must review every bed's repos. See `tests/gate/consumers.go` for the mechanism, and
 `tests/gate/preconditions_test.go` for their regression coverage (ported from the
 former `token_consumer_check_test.sh` / `reviewer_reachable_check_test.sh`).
 
@@ -1631,6 +1655,35 @@ keep two issues in flight. Each leg's archive records the effective value
 blocks — when it is below the widest `-parallel`. Raising `max_concurrent` in
 `config.yaml` changes the bed-config hash, so the ledger's "configurations differ"
 warning fires once for a SHA whose earlier invocations ran before the change.
+
+#### Two beds at once (#1976, ADR-1976)
+
+Almost all of a leg's wall-clock is spent waiting on GitHub, CI and review bots, so a
+second bed roughly halves a gate's wall-clock without competing for much CPU. Set
+`E2E_BEDS` to a comma-separated list of bed directories (the first is **bed A**; unset,
+the gate is the single `FABRIK_TEST_DIR` bed, unchanged):
+
+```bash
+E2E_BEDS=~/dev/fabrik-test,~/dev/fabrik-test-2 scripts/e2e/run.sh
+```
+
+By default bed A runs the baseline (`app/on`) while bed B runs
+`app/off`, `pat/on` and `pat/off` in sequence. With no baseline in the plan (`--resume`, a
+filtered or partial run) or under `E2E_MATRIX=full`, each bed takes the next cell it can run.
+
+GitHub's GraphQL budget belongs to an **identity** — a user, shared by all of that user's
+PATs, or an App installation — so identity, not bed, is what the gate schedules on. A cell
+charges its engine identity (the bed's App installation on an app leg, its token's user on a
+pat leg) plus the user of the harness token (the bed's `FABRIK_TOKEN`); it starts only when
+none of them is in use by another running leg, and otherwise waits and says why
+(`== waiting: app/off on bed B needs user:arbeithand, held by bed A (app/on) ==`). The
+pre-gate runs once; each bed is prepared, reset and probed on its own; beds that would run
+different engine SHAs are refused. A failed leg lets the other bed's running leg finish but
+starts nothing new; a RUN INVALID voids only that bed's cell and stops only the cells that
+would charge the exhausted identity. Both beds write the one per-SHA coverage ledger, each
+record naming its bed. Every leg logs `== identity budget (leg: …): <identity> — N remaining,
+resets … ==` for each identity it charges, at start and end (also on a single bed). Bed
+output is prefixed `[bed A]` / `[bed B]`. `tests/gate/README.md` has the mechanics.
 
 #### Parallelism cap — the shared bed oversubscribes easily
 
@@ -1914,6 +1967,10 @@ is what an earlier issues-only reset missed). Overridable via `FABRIK_TEST_PROJE
 
 The `--worktrees` form is for when the test bed itself is wedged — stop Fabrik first,
 it will refuse otherwise.
+
+With `E2E_BEDS` set, `reset.sh` resets **every** configured bed, each with its own token,
+repos and board, and reports the first failure after trying them all;
+`scripts/e2e/reset.sh --bed <dir>` resets just that one bed (#1976).
 
 > Do **not** run reset while a suite is in flight — it will drain the board out from
 > under the running tests.
