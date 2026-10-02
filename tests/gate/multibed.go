@@ -217,11 +217,19 @@ func (s *multiSched) next(ctx context.Context, i int) (q *queued, set []Identity
 		}
 		return ""
 	}
+	// unreserve drops this bed's reservations, waking every waiter if it dropped
+	// any: a bed blocked only by a reservation must rescan, or it would sleep
+	// until some unrelated leg finished.
 	unreserve := func() {
+		dropped := false
 		for k, r := range s.reserved {
 			if r == i {
 				delete(s.reserved, k)
+				dropped = true
 			}
+		}
+		if dropped {
+			s.broadcast()
 		}
 	}
 	acquire := func(q *queued, set []Identity) {
@@ -391,7 +399,9 @@ func (s *multiSched) bedLoop(ctx context.Context, i int, ready chan struct{}) {
 			lastAuth = q.cell.Auth
 		}
 		s.runOne(ctx, i, q, set)
-		idle = false // the leg's restart step started the engine again
+		// runOne stopped the engine the leg's restart step had started; on a
+		// cancel it did not, and the loop ends at the next pass anyway.
+		idle = ctx.Err() == nil
 	}
 }
 
@@ -408,6 +418,12 @@ func (s *multiSched) runOne(ctx context.Context, i int, q *queued, set []Identit
 	}()
 	err = s.beds[i].runLeg(ctx, q.cell)
 	finished = true
+	// Stop the engine BEFORE finish releases the identities: otherwise another
+	// bed's leg could start on one of them while this engine still polls with it
+	// (#1684's shape, between two beds). The next leg's restart starts it again.
+	if ctx.Err() == nil {
+		s.beds[i].stopIdleEngine("its leg's identities are released")
+	}
 	s.finish(ctx, i, q, set, err)
 	if s.afterFinish != nil {
 		s.afterFinish(s.beds[i].bed.Name, q.cell)

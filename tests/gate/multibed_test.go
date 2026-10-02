@@ -520,3 +520,70 @@ func TestMultiBedRunInvalidWithoutAnIdentityStopsNewCells(t *testing.T) {
 		t.Errorf("stopNew=%v exhausted=%v firstErr=%v", s.stopNew, s.exhausted, s.firstErr)
 	}
 }
+
+// A bed's engine is stopped BEFORE its leg's identities are released: once they
+// are, another bed's leg may start on one of them, and this engine must no
+// longer be polling with it (#1684's shape, between two beds).
+func TestMultiBedStopsTheEngineBeforeReleasingALegsIdentities(t *testing.T) {
+	h := newSchedHarness(t, "arbeithand", "arbeithand", MatrixSparse)
+	_, done := h.run(context.Background(), []Cell{cAppOn, cAppOff})
+	h.expectStart("A app/on")
+	h.expectWait("B app/off user:arbeithand")
+
+	// The leg's restart step started bed A's engine.
+	engine := exec.Command("sleep", "30")
+	if err := engine.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan struct{})
+	go func() { engine.Wait(); close(exited) }()
+	defer engine.Process.Kill()
+	mustWrite(t, h.g.Cfg.BedDirs[0]+"/.fabrik/fabrik.lock", strconv.Itoa(engine.Process.Pid)+"\n")
+
+	h.finish("A app/on", nil)
+	h.expectStart("B app/off")
+	// Bed B could start only after bed A released user:arbeithand, so the stop
+	// must already be in the output.
+	if !strings.Contains(h.out(), "[bed A] == stopping this bed's engine while its leg's identities are released") {
+		t.Errorf("bed A's engine was not stopped before its identities were released; out:\n%s", h.out())
+	}
+	select {
+	case <-exited:
+	case <-time.After(failsafe):
+		t.Fatal("bed A's engine was not stopped")
+	}
+	h.finish("B app/off", nil)
+	if err := h.result(done); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Dropping a reservation wakes every waiter: a bed blocked only by bed A's
+// reservation must rescan once bed A gives it up (here, because bed A's head
+// became unrunnable), not sleep until some unrelated leg finishes.
+func TestMultiBedDroppingAReservationWakesWaiters(t *testing.T) {
+	h := newSchedHarness(t, "arbeithand", "arbeithand", MatrixSparse)
+	s := newMultiSched(h.g, []Cell{cAppOn, cPatOn})
+	ctx := context.Background()
+	s.held["user:arbeithand"] = holder{bed: "B", cell: "app/off"}
+	if q, _, wait, _, _ := s.next(ctx, 0); q != nil || wait == nil {
+		t.Fatal("bed A's head must wait and reserve while bed B holds the login")
+	}
+	delete(s.held, "user:arbeithand")
+	_, _, waitB, _, _ := s.next(ctx, 1)
+	if waitB == nil {
+		t.Fatal("bed B must wait on bed A's reservation")
+	}
+	s.exhausted["app:77"] = true // bed A's head can no longer run
+	if q, _, _, done, _ := s.next(ctx, 0); q != nil || !done {
+		t.Fatalf("bed A drops its exhausted head and is done: q=%v done=%v", q, done)
+	}
+	select {
+	case <-waitB:
+	default:
+		t.Fatal("bed B was not woken when bed A dropped its reservation")
+	}
+	if q, _, _, _, _ := s.next(ctx, 1); q == nil || q.cell.Label() != "pat/on" {
+		t.Errorf("bed B then takes pat/on: q=%v", q)
+	}
+}
