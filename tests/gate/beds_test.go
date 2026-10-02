@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/handarbeit/fabrik/tests/e2e/registry"
 )
 
 // twoBedGate is testGate with a second bed: bed A is testGate's own bed, bed B a
@@ -106,6 +108,25 @@ func TestResolveBedSpecPrecedence(t *testing.T) {
 	}
 	if s.Name != "B" || s.Dir != bed || s.Token != "tok" || s.AppInstallationID != "42" {
 		t.Errorf("spec = %+v", s)
+	}
+}
+
+// The views get the two-phase leg's inputs (#1977) from the root: without them
+// RunLeg on a view plans one undivided go test, so exclusive tests would run
+// alongside the shared ones on every multi-bed leg.
+func TestBedViewsGetThePhaseInputs(t *testing.T) {
+	g, _, _, _ := twoBedGate(t)
+	g.liveTests = []string{"TestBase", "TestExcl", "TestShareA", "TestShareB"}
+	g.isolation = map[string]registry.Isolation{
+		"TestShareA": registry.IsolationShared, "TestShareB": registry.IsolationShared,
+		"TestBase": registry.IsolationDefaultBaseTrain, "TestExcl": registry.IsolationExclusive,
+	}
+	g.propagateToBeds()
+	for _, b := range g.beds() {
+		phases := PlanPhases(defaultCell, b.liveTests, b.isolation)
+		if len(phases) != 3 {
+			t.Errorf("%s: a multi-bed leg plans %d phase(s), want shared, default-base-train and exclusive: %+v", b.bedLabel(), len(phases), phases)
+		}
 	}
 }
 

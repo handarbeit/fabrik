@@ -155,10 +155,15 @@ func (g *Gate) newBedGate(spec BedSpec, outLock, errLock *sync.Mutex) *Gate {
 }
 
 // propagateToBeds hands the views what the root learned after they were built:
-// the host-load probe's reading, the coverage ledger and --resume.
+// the host-load probe's reading, the two-phase leg's inputs (#1977 — without
+// them every leg on a view would run as one undivided go test, exclusive tests
+// alongside shared ones), the coverage ledger and --resume. liveTests and
+// isolation are read-only once setPhaseInputs has run, so the views share them.
 func (g *Gate) propagateToBeds() {
 	for _, b := range g.bedGates {
 		b.probes.Load = g.probes.Load
+		b.liveTests = g.liveTests
+		b.isolation = g.isolation
 		b.cov = g.cov
 		b.resume = g.resume
 	}
