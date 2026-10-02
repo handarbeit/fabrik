@@ -38,6 +38,33 @@
       "train": "neutral"
     },
     {
+      "name": "TestAuthEnginePRAuthorIdentity",
+      "parity": "live-only",
+      "live_only_reason": "app-auth",
+      "note": "real credentialed push and PR creation; the sim never pushes or authors a PR on GitHub",
+      "auth": "sensitive",
+      "auth_reason": "credentialed push, PR creation and PR authorship under each auth mode (ADR-1846)",
+      "train": "neutral"
+    },
+    {
+      "name": "TestAuthLockLabelShape",
+      "parity": "live-only",
+      "live_only_reason": "other",
+      "note": "lock-label derivation is unit-tested in engine/; live adds the real installation slug and the label write",
+      "auth": "sensitive",
+      "auth_reason": "lock label shape per auth mode: PAT login vs App slug-hash (ADR-1893)",
+      "train": "neutral"
+    },
+    {
+      "name": "TestAuthReviewGateIdentity",
+      "parity": "live-only",
+      "live_only_reason": "other",
+      "note": "real reviewer request and PR author semantics (GitHub forbids self-review)",
+      "auth": "sensitive",
+      "auth_reason": "review-gate reads and the first label write on a PR-bearing item under each mode's grants",
+      "train": "neutral"
+    },
+    {
       "name": "TestBaseBranchPipeline",
       "parity": "sim",
       "sim": [
@@ -325,6 +352,42 @@
         "TestNoWorkNeeded"
       ],
       "auth": "neutral",
+      "train": "neutral"
+    },
+    {
+      "name": "TestPATSelfRecognitionBlockedCommentUpdatedInPlace",
+      "parity": "live-only",
+      "live_only_reason": "other",
+      "note": "no sim twin: the sim has no comment-ingestion path with a real User-typed GitHub author; the engine's cfg.User comparison is unit-tested",
+      "skip_ok_legs": [
+        "app/*"
+      ],
+      "auth": "sensitive",
+      "auth_reason": "self-recognition: findBlockedComment/selfLogin under a User-typed PAT identity",
+      "train": "neutral"
+    },
+    {
+      "name": "TestPATSelfRecognitionDurableReviewSuppression",
+      "parity": "live-only",
+      "live_only_reason": "other",
+      "note": "no sim twin: the sim has no comment-ingestion path with a real User-typed GitHub author; the engine's cfg.User comparison is unit-tested",
+      "skip_ok_legs": [
+        "app/*"
+      ],
+      "auth": "sensitive",
+      "auth_reason": "self-recognition: durablyAddressedReviewIDs/selfLogin under a User-typed PAT identity",
+      "train": "neutral"
+    },
+    {
+      "name": "TestPATSelfRecognitionOwnMarkedCommentNeverResumes",
+      "parity": "live-only",
+      "live_only_reason": "other",
+      "note": "real User-typed PAT author shape for the engine's own prefixed comment; guards the Fabrik-prefix exclusion, not selfLogin()",
+      "skip_ok_legs": [
+        "app/*"
+      ],
+      "auth": "sensitive",
+      "auth_reason": "self-recognition: the engine's own-comment recognition under a User-typed PAT identity",
       "train": "neutral"
     },
     {

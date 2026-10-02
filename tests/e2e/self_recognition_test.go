@@ -152,16 +152,23 @@ func TestAppSelfRecognitionBlockedCommentUpdatedInPlace(t *testing.T) {
 	t.Parallel()
 	env := LoadEnv(t)
 	AssertFabrikRunning(t, env)
-	leg := requireAppLeg(t, env)
+	blockedCommentUpdatedInPlace(t, env, appSelfRecognitionLeg(t, env))
+}
+
+// blockedCommentUpdatedInPlace is A2's body, shared with its PAT counterpart
+// (TestPATSelfRecognitionBlockedCommentUpdatedInPlace, #1975): the scenario is
+// identical, only who the engine is differs.
+func blockedCommentUpdatedInPlace(t *testing.T, env *Env, leg selfRecognitionLeg) {
+	t.Helper()
 	repo := env.RepoAlpha
 
 	off := LogOffset(t, env)
 	stamp := time.Now().UTC().Format("150405.000")
 	// Blockers are plain open issues kept OFF the board, so Fabrik never works
 	// them and they read as open (no store entry → dep.State != CLOSED).
-	b1 := FileIssue(t, env, repo, fmt.Sprintf("e2e app self-recognition: blocker 1 (%s)", stamp), "e2e blocker for #1877 (A2). Never worked; closed at teardown.")
-	b2 := FileIssue(t, env, repo, fmt.Sprintf("e2e app self-recognition: blocker 2 (%s)", stamp), "e2e blocker for #1877 (A2). Never worked; closed at teardown.")
-	num := FileIssue(t, env, repo, fmt.Sprintf("e2e app self-recognition: blocked comment edited in place (%s)", stamp),
+	b1 := FileIssue(t, env, repo, fmt.Sprintf("e2e %s self-recognition: blocker 1 (%s)", leg.Mode, stamp), "e2e blocker for #1877 (A2). Never worked; closed at teardown.")
+	b2 := FileIssue(t, env, repo, fmt.Sprintf("e2e %s self-recognition: blocker 2 (%s)", leg.Mode, stamp), "e2e blocker for #1877 (A2). Never worked; closed at teardown.")
+	num := FileIssue(t, env, repo, fmt.Sprintf("e2e %s self-recognition: blocked comment edited in place (%s)", leg.Mode, stamp),
 		"e2e scenario for #1877 (A2). Blocked on a changing dependency set.")
 
 	// Edge first, board placement second: the engine must never see this item
@@ -171,13 +178,13 @@ func TestAppSelfRecognitionBlockedCommentUpdatedInPlace(t *testing.T) {
 	itemID := AddIssueToProject(t, env, repo, num)
 	SetIssueStatus(t, env, itemID, "Specify")
 
-	// First block: Fabrik posts its blocked comment (as the bot).
+	// First block: Fabrik posts its blocked comment (as itself).
 	first := waitForBlockedComment(t, env, repo, num, 15*time.Minute, func(c restComment, deps []string) bool { return true })
 	t.Logf("blocked comment %d posted by %s: deps %v", first.ID, first.Login, mustDeps(t, first.Body))
 	logCommentAuthorShapes(t, env, repo, num, first.ID)
-	if first.Login != leg.BotLogin {
-		t.Fatalf("blocked comment %d on %s#%d was authored by %q, want the bed's bot login %q — the App identity is not what the engine posts as",
-			first.ID, repo, num, first.Login, leg.BotLogin)
+	if first.Login != leg.Login {
+		t.Fatalf("blocked comment %d on %s#%d was authored by %q, want the engine's own login %q (%s leg) — that is not the identity the engine posts as",
+			first.ID, repo, num, first.Login, leg.Login, leg.Mode)
 	}
 	if deps := mustDeps(t, first.Body); !sameDepSet(deps, b1) {
 		t.Fatalf("first blocked comment lists %v, want exactly #%d", deps, b1)
@@ -222,10 +229,10 @@ func TestAppSelfRecognitionBlockedCommentUpdatedInPlace(t *testing.T) {
 	if comments[0].ID != first.ID {
 		t.Fatalf("blocked comment id changed %d -> %d: it was replaced, not edited in place", first.ID, comments[0].ID)
 	}
-	if comments[0].Login != leg.BotLogin {
-		t.Fatalf("edited blocked comment is authored by %q, want %q", comments[0].Login, leg.BotLogin)
+	if comments[0].Login != leg.Login {
+		t.Fatalf("edited blocked comment is authored by %q, want %q", comments[0].Login, leg.Login)
 	}
-	t.Logf("A2 verified: one blocked comment (%d) on %s#%d edited in place to {#%d, #%d}", first.ID, repo, num, b1, b2)
+	t.Logf("A2 (%s) verified: one blocked comment (%d) on %s#%d edited in place to {#%d, #%d}", leg.Mode, first.ID, repo, num, b1, b2)
 }
 
 // TestAppSelfRecognitionDurableReviewSuppression (A3): a review-ids-addressed
@@ -261,7 +268,17 @@ func TestAppSelfRecognitionDurableReviewSuppression(t *testing.T) {
 	t.Parallel()
 	env := LoadEnv(t)
 	AssertFabrikRunning(t, env)
-	leg := requireAppLeg(t, env)
+	durableReviewSuppression(t, env, appSelfRecognitionLeg(t, env))
+}
+
+// durableReviewSuppression is A3's body, shared with its PAT counterpart
+// (TestPATSelfRecognitionDurableReviewSuppression, #1975). The "self" marker is
+// authored by the engine's own identity on the running leg; the control marker
+// by an account the engine must not recognise as itself (the harness account on
+// the App leg, the reviewer account on the PAT leg, where the harness account IS
+// the engine).
+func durableReviewSuppression(t *testing.T, env *Env, leg selfRecognitionLeg) {
+	t.Helper()
 	repo := env.RepoAlpha
 
 	reviewerToken := readEnvFileReviewerToken(t, env)
@@ -289,20 +306,14 @@ func TestAppSelfRecognitionDurableReviewSuppression(t *testing.T) {
 	// Suppressed arm: bot marker for R, posted BEFORE R is visible.
 	const body = "e2e self-recognition review (#1877): please change something."
 	rSup := createPendingReview(t, reviewerToken, repo, supPR, body)
-	botMarker := postBotComment(t, leg, repo, supPR, reviewAddressedMarkerComment(rSup))
+	botMarker := leg.PostSelf(t, repo, supPR, reviewAddressedMarkerComment(rSup))
 	logCommentAuthorShapes(t, env, repo, supPR, botMarker.ID)
 	submitPendingReview(t, reviewerToken, repo, supPR, rSup, "REQUEST_CHANGES", body)
-	t.Logf("suppressed arm: review %d on %s PR #%d submitted after bot marker comment %d (author %s)", rSup, repo, supPR, botMarker.ID, botMarker.Login)
+	t.Logf("suppressed arm: review %d on %s PR #%d submitted after self marker comment %d (author %s)", rSup, repo, supPR, botMarker.ID, botMarker.Login)
 
-	// Control arm: the same marker, authored by the harness account, for R2.
+	// Control arm: the same marker, authored by a non-self account, for R2.
 	rCtl := createPendingReview(t, reviewerToken, repo, ctlPR, body)
-	spoof, err := postCommentAs(env.GHToken, repo, ctlPR, reviewAddressedMarkerComment(rCtl))
-	if err != nil {
-		t.Fatalf("posting spoofed marker: %v", err)
-	}
-	if spoof.Login == leg.BotLogin {
-		t.Fatalf("the spoofed marker was attributed to the bot login %q — the control would not test author scoping", spoof.Login)
-	}
+	spoof := leg.PostOther(t, env, reviewerToken, repo, ctlPR, reviewAddressedMarkerComment(rCtl))
 	submitPendingReview(t, reviewerToken, repo, ctlPR, rCtl, "REQUEST_CHANGES", body)
 	t.Logf("control arm: review %d on %s PR #%d submitted after non-self marker comment %d (author %s)", rCtl, repo, ctlPR, spoof.ID, spoof.Login)
 
@@ -323,13 +334,13 @@ func TestAppSelfRecognitionDurableReviewSuppression(t *testing.T) {
 		}
 		for _, l := range lines {
 			if dispatchesReview(l, rSup) {
-				t.Fatalf("review %d on #%d was dispatched despite the bot-authored review-ids-addressed marker: %s — "+
+				t.Fatalf("review %d on #%d was dispatched despite the self-authored review-ids-addressed marker: %s — "+
 					"durablyAddressedReviewIDs did not recognise the marker comment as the engine's own (selfLogin() vs REST author %q)",
-					rSup, supNum, strings.TrimSpace(l), leg.BotLogin)
+					rSup, supNum, strings.TrimSpace(l), leg.Login)
 			}
 		}
 	})
-	t.Logf("A3 verified: review %d on %s#%d suppressed by the bot's marker; review %d on #%d (non-self marker) was delivered", rSup, repo, supNum, rCtl, ctlNum)
+	t.Logf("A3 (%s) verified: review %d on %s#%d suppressed by the engine's own marker; review %d on #%d (non-self marker) was delivered", leg.Mode, rSup, repo, supNum, rCtl, ctlNum)
 }
 
 // awaitingInputLabel is the engine's awaiting-input half of the pause pair.

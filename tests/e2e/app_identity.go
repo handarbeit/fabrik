@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -280,4 +281,205 @@ func logCommentAuthorShapes(t *testing.T, env *Env, repo string, issueNumber int
 	t.Logf("comment %d author shapes on %s#%d: REST=%q (err %v) GraphQL=%q (err %v) — a bare GraphQL login here means selfLogin() "+
 		"comparisons against GraphQL-sourced comments cannot match", commentID, repo, issueNumber,
 		strings.TrimSpace(restOut), restErr, strings.TrimSpace(gqlOut), gqlErr)
+}
+
+// ---- PAT counterparts and the focused auth tests (#1975, ADR-1975) ----
+
+// decidePATLegRun is decideAppLegRun's mirror for PAT-only scenarios. mode is
+// the normalised E2E_AUTH_MODE and identity is bedAuthIdentity of the bed's
+// stdout (the App login, or "" when the last startup ran without App auth).
+//
+//   - app: skip. The identity is the App installation, which the App-only
+//     scenarios already exercise.
+//   - pat: run, but a bed whose startup shows an App identity is an error — the
+//     leg was asked to run as a PAT and the bed says it did not.
+//   - unset: follow the bed's own identity; an App banner means skip.
+func decidePATLegRun(mode, identity string) (run bool, reason string, err error) {
+	switch mode {
+	case "app":
+		return false, "App auth leg: Fabrik's identity is the GitHub App installation; this scenario needs the User-typed PAT identity", nil
+	case "pat":
+		if identity != "" {
+			return false, "", fmt.Errorf("E2E_AUTH_MODE=pat but the bed's startup shows the GitHub App identity %q", identity)
+		}
+		return true, "", nil
+	case "":
+		if identity != "" {
+			return false, "the bed's startup shows a GitHub App identity and E2E_AUTH_MODE is unset: this scenario needs the PAT identity", nil
+		}
+		return true, "", nil
+	}
+	return false, "", fmt.Errorf("unrecognised auth mode %q", mode)
+}
+
+// bedBannerIdentity is the App login in the bed's startup banner ("" under PAT).
+func bedBannerIdentity(t *testing.T, env *Env, mode string) string {
+	t.Helper()
+	data, err := os.ReadFile(bedRunLogPath(env))
+	if err != nil {
+		if mode == "app" {
+			t.Fatalf("reading bed stdout %s to confirm the App identity: %v", bedRunLogPath(env), err)
+		}
+		return ""
+	}
+	return bedAuthIdentity(string(data))
+}
+
+// patLeg is what requirePATLeg hands the scenario: the engine's identity on a
+// PAT leg is the harness account itself (engine.selfLogin() = cfg.User).
+type patLeg struct {
+	Login string // the PAT's login — User-typed, never a bot
+}
+
+// requirePATLeg skips unless the running leg is the PAT leg and returns the
+// engine's login. It fails (does not skip) when the account classifies as a bot:
+// a User-typed identity is the whole premise of the PAT counterparts.
+func requirePATLeg(t *testing.T, env *Env) patLeg {
+	t.Helper()
+	mode, err := normalizeAuthMode(os.Getenv("E2E_AUTH_MODE"))
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	run, reason, err := decidePATLegRun(mode, bedBannerIdentity(t, env, mode))
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if !run {
+		t.Skip(reason)
+	}
+	return patLeg{Login: assertHarnessAccountIsHuman(t, env)}
+}
+
+// authLeg is the running leg's mode and engine identity.
+type authLeg struct {
+	Mode     string // "pat" | "app"
+	BotLogin string // "<slug>[bot]" under App auth, "" under PAT
+	Login    string // the engine's own GitHub login: BotLogin under App auth, the PAT's login otherwise
+}
+
+// detectAuthLeg resolves the running leg for the mode-agnostic focused tests:
+// the leg pinned by E2E_AUTH_MODE, or — when unset — the one the bed's own
+// startup banner shows. An App leg without an App banner is an error.
+func detectAuthLeg(t *testing.T, env *Env) authLeg {
+	t.Helper()
+	mode, err := normalizeAuthMode(os.Getenv("E2E_AUTH_MODE"))
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	identity := bedBannerIdentity(t, env, mode)
+	switch {
+	case mode == "app" && identity == "":
+		t.Fatalf("E2E_AUTH_MODE=app but the bed's startup shows no GitHub App identity")
+	case mode == "pat" && identity != "":
+		t.Fatalf("E2E_AUTH_MODE=pat but the bed's startup shows the GitHub App identity %q", identity)
+	}
+	if identity != "" {
+		return authLeg{Mode: "app", BotLogin: identity, Login: identity}
+	}
+	return authLeg{Mode: "pat", Login: TokenLogin(t, env.GHToken)}
+}
+
+// lockLabelPrefix mirrors engine.lockLabelPrefix; the string constants are
+// pinned to the engine source by TestAuthLockLabelShapeMatchesEngineSource.
+const lockLabelPrefix = "fabrik:locked:"
+
+// maxLockSlugLen mirrors engine.maxLockSlugLen: 50 (GitHub's label limit) minus
+// the prefix, the "-" and the 6-hex suffix.
+const maxLockSlugLen = 50 - len(lockLabelPrefix) - 1 - 6
+
+// lockLabelProblem checks a fabrik:locked:* label against the shape the running
+// leg must produce (ADR-1893): under PAT the engine's own login verbatim, under
+// App "<slug>-<6 hex>" with the slug the bot login minus "[bot]", truncated to
+// maxLockSlugLen with trailing dashes trimmed. "" means the label is as expected.
+func lockLabelProblem(leg authLeg, label string) string {
+	if !strings.HasPrefix(label, lockLabelPrefix) {
+		return fmt.Sprintf("%q is not a %s* label", label, lockLabelPrefix)
+	}
+	id := strings.TrimPrefix(label, lockLabelPrefix)
+	if leg.Mode == "pat" {
+		if id != leg.Login {
+			return fmt.Sprintf("PAT lock label is %q, want %s%s (the engine's own login)", label, lockLabelPrefix, leg.Login)
+		}
+		return ""
+	}
+	slug := strings.TrimSuffix(leg.BotLogin, "[bot]")
+	if len(slug) > maxLockSlugLen {
+		slug = strings.TrimRight(slug[:maxLockSlugLen], "-")
+	}
+	if !regexp.MustCompile("^" + regexp.QuoteMeta(slug) + "-[0-9a-f]{6}$").MatchString(id) {
+		return fmt.Sprintf("App lock label is %q, want %s%s-<6 hex> — a PAT-shaped lock label under App auth means the operator identity leaked back in", label, lockLabelPrefix, slug)
+	}
+	return ""
+}
+
+// selfRecognitionLeg is the leg-dependent half of the shared self-recognition
+// scenario bodies (self_recognition_test.go): who the engine is, how to post as
+// it, and how to post as someone it must NOT recognise as itself.
+type selfRecognitionLeg struct {
+	Mode  string // "app" | "pat"
+	Login string // the engine's own login
+	// PostSelf posts a plain comment authored by the engine's own identity.
+	PostSelf func(t *testing.T, repo string, number int, body string) postedComment
+	// PostOther posts a comment authored by a different account. reviewerToken is
+	// the distinct reviewer account's token (the PAT leg's only second identity).
+	PostOther func(t *testing.T, env *Env, reviewerToken, repo string, number int, body string) postedComment
+}
+
+// appSelfRecognitionLeg is the App leg: the engine is the installation bot; the
+// harness account is the "someone else".
+func appSelfRecognitionLeg(t *testing.T, env *Env) selfRecognitionLeg {
+	t.Helper()
+	leg := requireAppLeg(t, env)
+	return selfRecognitionLeg{
+		Mode:  "app",
+		Login: leg.BotLogin,
+		PostSelf: func(t *testing.T, repo string, number int, body string) postedComment {
+			return postBotComment(t, leg, repo, number, body)
+		},
+		PostOther: func(t *testing.T, env *Env, _ string, repo string, number int, body string) postedComment {
+			c, err := postCommentAs(env.GHToken, repo, number, body)
+			if err != nil {
+				t.Fatalf("posting non-self comment: %v", err)
+			}
+			if c.Login == leg.BotLogin {
+				t.Fatalf("the non-self comment was attributed to the bot login %q — the control would not test author scoping", c.Login)
+			}
+			return c
+		},
+	}
+}
+
+// patSelfRecognitionLeg is the PAT leg: the engine IS the harness account
+// (User-typed), so the control must come from the distinct reviewer account.
+func patSelfRecognitionLeg(t *testing.T, env *Env) selfRecognitionLeg {
+	t.Helper()
+	leg := requirePATLeg(t, env)
+	return selfRecognitionLeg{
+		Mode:  "pat",
+		Login: leg.Login,
+		PostSelf: func(t *testing.T, repo string, number int, body string) postedComment {
+			c, err := postCommentAs(env.GHToken, repo, number, body)
+			if err != nil {
+				t.Fatalf("posting self comment: %v", err)
+			}
+			if c.Login != leg.Login || c.UserType != "User" {
+				t.Fatalf("comment %d on %s#%d was attributed to %q (type %q); want the PAT identity %q (type User)",
+					c.ID, repo, number, c.Login, c.UserType, leg.Login)
+			}
+			return c
+		},
+		PostOther: func(t *testing.T, env *Env, reviewerToken, repo string, number int, body string) postedComment {
+			if reviewerToken == "" {
+				t.Fatalf("a PAT-leg control needs FABRIK_REVIEWER_TOKEN")
+			}
+			c, err := postCommentAs(reviewerToken, repo, number, body)
+			if err != nil {
+				t.Fatalf("posting non-self comment: %v", err)
+			}
+			if c.Login == leg.Login {
+				t.Fatalf("the non-self comment was attributed to the engine's own login %q — FABRIK_REVIEWER_TOKEN must be a distinct account", c.Login)
+			}
+			return c
+		},
+	}
 }
