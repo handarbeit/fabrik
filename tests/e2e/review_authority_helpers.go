@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/handarbeit/fabrik/tests/e2e/seedspec"
 )
 
 // review_authority e2e helpers (ADR-1250, issue #1258). Authoritative-mode
@@ -64,29 +66,18 @@ func seedReviewGateItemDraft(t *testing.T, env *Env, repo, baseBranch, column, m
 func seedReviewGateItemImpl(t *testing.T, env *Env, repo, baseBranch, column, marker string, draft bool, extraLabels ...string) (issueNum, prNum int, itemID string) {
 	t.Helper()
 	stamp := time.Now().UTC().Format("150405.000")
-	title := fmt.Sprintf("e2e review-authority %s (%s)", marker, stamp)
-	num := FileIssue(t, env, repo, title,
-		fmt.Sprintf("e2e review_authority gate/settle test. marker=%s", marker), extraLabels...)
-	itemID = AddIssueToProject(t, env, repo, num)
-
-	branch := fmt.Sprintf("fabrik/issue-%d", num)
-	path := fmt.Sprintf("e2e/review-authority/%s-%d.md", marker, num)
-	content := fmt.Sprintf("# e2e review-authority marker\n\nmarker=%s\n", marker)
-	if draft {
-		prNum = CreateMemberPRDraft(t, env, repo, baseBranch, branch, path, content, title, num)
-	} else {
-		prNum = CreateMemberPR(t, env, repo, baseBranch, branch, path, content, title, num)
-	}
-	// Confirm the PR is resolvable by the fabrik/issue-<N> branch convention
-	// (mirrors the engine's resolver) before seeding the completion label.
-	AwaitPRForBranchVisible(t, env, repo, num, awaitSeedTimeout)
-	// (createMemberPR also waited for the Closes linkage — see AwaitClosingLinkage.)
-
-	AddLabel(t, env, repo, num, "stage:"+column+":complete")
-	AwaitLabelVisible(t, env, repo, num, "stage:"+column+":complete", awaitSeedTimeout)
-	SetIssueStatus(t, env, itemID, column)
-	AwaitBoardItemVisible(t, env, repo, num, awaitSeedTimeout)
-	t.Logf("seeded review-gate item: issue #%d, PR #%d, stage:%s:complete, Status=%s (marker=%s, draft=%v)",
-		num, prNum, column, column, marker, draft)
-	return num, prNum, itemID
+	// A thin wrapper over seedAtStage (#1992) with the minimal labelling it always had:
+	// only stage:<column>:complete, then Status=<column>. The PR is ready unless draft.
+	return seedAtStage(t, env, repo, seedspec.Spec{
+		Column:      column,
+		BaseBranch:  baseBranch,
+		Title:       fmt.Sprintf("e2e review-authority %s (%s)", marker, stamp),
+		IssueBody:   fmt.Sprintf("e2e review_authority gate/settle test. marker=%s", marker),
+		ExtraLabels: extraLabels,
+		Path:        fmt.Sprintf("e2e/review-authority/%s.md", marker),
+		PathMode:    seedspec.PathUnique,
+		Content:     fmt.Sprintf("# e2e review-authority marker\n\nmarker=%s\n", marker),
+		Draft:       draft,
+		Minimal:     true,
+	})
 }

@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/handarbeit/fabrik/tests/e2e/seedspec"
 )
 
 // Helpers for the unprocessed-comment landing scenarios (issue #1873):
@@ -312,27 +314,26 @@ func prMergedAt(env *Env, repo string, prNumber int) (time.Time, error) {
 
 // seedLandingCandidate files an issue carrying extraLabels, adds it to the
 // project WITHOUT a Status, opens a non-draft member PR on fabrik/issue-<N>,
-// confirms the engine can resolve it, and applies stage:Validate:complete. The
+// confirms the engine can resolve it, and applies stage:Validate:complete (a thin
+// wrapper over seedAtStage, #1992, with the minimal labelling it always had). The
 // caller decides when to expose the item to the engine (SetIssueStatus): with no
 // Status the engine cannot act on it, so a comment posted first is deterministically
 // present at the engine's first landing evaluation — no timing luck.
 func seedLandingCandidate(t *testing.T, env *Env, repo, baseBranch, marker, path string, extraLabels ...string) (issueNum, prNum int, itemID string) {
 	t.Helper()
 	stamp := time.Now().UTC().Format("150405.000")
-	title := fmt.Sprintf("e2e comment-landing %s (%s)", marker, stamp)
-	issueNum = FileIssue(t, env, repo, title,
-		fmt.Sprintf("e2e unprocessed-comment landing scenario. marker=%s", marker), extraLabels...)
-	itemID = AddIssueToProject(t, env, repo, issueNum)
-	branch := fmt.Sprintf("fabrik/issue-%d", issueNum)
-	uPath := uniqueMemberPath(path, issueNum)
-	prNum = CreateMemberPR(t, env, repo, baseBranch, branch, uPath,
-		fmt.Sprintf("# e2e comment-landing marker\n\nmarker=%s\n", marker), title, issueNum)
-	AwaitPRForBranchVisible(t, env, repo, issueNum, awaitSeedTimeout)
-	AddLabel(t, env, repo, issueNum, "stage:Validate:complete")
-	AwaitLabelVisible(t, env, repo, issueNum, "stage:Validate:complete", awaitSeedTimeout)
-	AwaitBoardItemVisible(t, env, repo, issueNum, awaitSeedTimeout)
-	t.Logf("seeded landing candidate %s: issue #%d, PR #%d, path %s, stage:Validate:complete, no Status yet", marker, issueNum, prNum, uPath)
-	return issueNum, prNum, itemID
+	return seedAtStage(t, env, repo, seedspec.Spec{
+		Column:      "Validate",
+		BaseBranch:  baseBranch,
+		Title:       fmt.Sprintf("e2e comment-landing %s (%s)", marker, stamp),
+		IssueBody:   fmt.Sprintf("e2e unprocessed-comment landing scenario. marker=%s", marker),
+		Path:        path,
+		PathMode:    seedspec.PathUnique,
+		Content:     fmt.Sprintf("# e2e comment-landing marker\n\nmarker=%s\n", marker),
+		ExtraLabels: extraLabels,
+		Minimal:     true,
+		DeferStatus: true,
+	})
 }
 
 // waitForCommentRocket polls until the comment carries a 🚀, returning both

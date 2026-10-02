@@ -152,8 +152,9 @@ var seedPaths = []struct{ file, fn string }{
 	{"mergetrain_helpers.go", "QueueMemberOnBase"},
 	{"mergetrain_helpers.go", "queueMemberPaused"},      // QueueMemberPaused / QueueMemberPausedOnBase (#1977)
 	{"mergetrain_helpers.go", "prepareMemberExactPath"}, // PrepareMemberExactPath / PrepareMemberExactPathOnBase (#1977)
-	{"review_authority_helpers.go", "seedReviewGateItemImpl"},
-	{"comment_landing_helpers.go", "seedLandingCandidate"},
+	// seedReviewGateItemImpl and seedLandingCandidate are thin wrappers over seedAtStage
+	// (#1992) and so carry no waits of their own.
+	{"seed.go", "seedAtStage"},
 }
 
 func TestSeedPathsUseTheAwaitFamilyAndKeepNoWaitLoopOfTheirOwn(t *testing.T) {
