@@ -66,6 +66,10 @@ type multiSched struct {
 	firstErr  error
 	results   map[int][]string // per bed: "<cell> — <outcome>", in run order
 	waitedFor map[string]bool  // "<bed>|<seq>|<identity>": each wait is logged once
+
+	// afterFinish, if set, observes each leg once its result has been applied
+	// (tests sequence completions on it).
+	afterFinish func(bed string, c Cell)
 }
 
 // assignCells splits the plan into bed A's own queue and the shared queue (D6).
@@ -114,6 +118,11 @@ func describeAssignment(g *Gate, cells []Cell) string {
 }
 
 func (MultiBedScheduler) Run(ctx context.Context, g *Gate, cells []Cell) error {
+	return newMultiSched(g, cells).run(ctx)
+}
+
+// newMultiSched queues the plan per D6.
+func newMultiSched(g *Gate, cells []Cell) *multiSched {
 	s := &multiSched{
 		g: g, beds: g.beds(),
 		wake:   make(chan struct{}),
@@ -135,7 +144,10 @@ func (MultiBedScheduler) Run(ctx context.Context, g *Gate, cells []Cell) error {
 	for i := range s.beds {
 		s.serves[i] = bedA == nil || i > 0
 	}
+	return s
+}
 
+func (s *multiSched) run(ctx context.Context) error {
 	// Beds start in order, each only once the previous one has claimed its first
 	// cell or registered a wait: bed A — whose baseline dominates the wall-clock —
 	// always gets first claim on an identity it shares with another bed.
@@ -342,8 +354,9 @@ func (s *multiSched) bedLoop(ctx context.Context, i int, ready chan struct{}) {
 	}
 }
 
-// runOne runs one leg and releases its identities on every exit path — a panic
-// included, which is re-raised once the other beds can no longer block on it.
+// runOne runs one leg and releases its identities on every exit path: a leg
+// that panics still releases them (and stops new cells) before the panic
+// propagates, so no other bed is left waiting on an identity nobody holds.
 func (s *multiSched) runOne(ctx context.Context, i int, q *queued, set []Identity) {
 	var err error
 	finished := false
@@ -355,6 +368,9 @@ func (s *multiSched) runOne(ctx context.Context, i int, q *queued, set []Identit
 	err = s.beds[i].runLeg(ctx, q.cell)
 	finished = true
 	s.finish(ctx, i, q, set, err)
+	if s.afterFinish != nil {
+		s.afterFinish(s.beds[i].bed.Name, q.cell)
+	}
 }
 
 // summarize prints every bed's outcomes and every cell that never started.
