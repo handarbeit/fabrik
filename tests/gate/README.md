@@ -163,6 +163,7 @@ a run" is the operator's view; this is the map.
 | `resume.go` | `SelectedTests` (Go `-run`/`-skip` rules), `RequiredTests`, `ResumeCells`, regex builder + size guard |
 | `coverage.go`, `coverage_cmd.go` | `Evaluator`, `Report`, `gate coverage` (exit 0 / `ExitCoverageIncomplete` 8) |
 | `archive.go`, `loadavg*.go` | per-leg archive, engine-log segment sampler, bed-config hash, load average, retention |
+| `report.go` | `gate report` (#1992): measured per-test runtime from the archive's `go-test.json`, joined with the registry's `entry`/`traversal` fields; `--baseline` prints the before/after delta. Model quota is not recorded anywhere, so it reports a labelled proxy (pipeline stages not driven) |
 
 Deltas this adds to the port: `ParseRunArgs` consumes `--clean` **and** `--resume` as leading flags
 in either order; exit code 8 exists (only under `--resume` and `coverage`); the per-leg `-json` log

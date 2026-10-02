@@ -2196,14 +2196,14 @@ the `Queued` column is absent, so it only runs in the gate's `on` leg.
 | `TestNoWorkNeeded` | `FABRIK_NO_WORK_NEEDED` short-circuit closes issue without PR | Both | 10–15 min | $0.30–0.50 |
 | `TestBlockedOnInput` | `FABRIK_BLOCKED_ON_INPUT` pause + comment-driven resume | Both | 10–15 min | $0.30–0.50 |
 | `TestCrossRepoSpawn` | Cross-repo decomposition (spawn child in beta, gate parent, resume on close); final assertion reads back a per-run-unique sentinel string from the merged beta-side file, not merely the `fabrik:children-spawned` label | Both | 45–60 min | $1.00–2.00 |
-| `TestYoloAutoMergeLabel` | `fabrik:yolo` auto-advance to Done; mode-appropriate landing contract (native auto-merge + `fabrik:auto-merge-enabled` under "off"; train close-not-merge + label never applied under "on") | Both (mode-aware) | 20–40 min | $0.50–1.50 |
-| `TestConvergenceRace` | Deterministic post-Validate auto-merge race (#829): two conflicting yolo PRs; mode-appropriate `fabrik:auto-merge-enabled` contract, both land within budget, neither ends `fabrik:paused` | Both (mode-aware) | 80–100 min | $2–4 |
+| `TestYoloAutoMergeLabel` | `fabrik:yolo` auto-advance to Done; mode-appropriate landing contract (native auto-merge + `fabrik:auto-merge-enabled` under "off"; train close-not-merge + label never applied under "on") | Both (mode-aware) | 5–15 min (seeded at Validate-complete, #1992; was 20–40 min) | $0 (no Claude; was $0.50–1.50) |
+| `TestConvergenceRace` | Deterministic post-Validate auto-merge race (#829): two conflicting yolo PRs; mode-appropriate `fabrik:auto-merge-enabled` contract, both land within budget, neither ends `fabrik:paused` | Both (mode-aware) | 30–45 min (seeded at Validate-complete, #1992; was 80–100 min) | $0.30–1 (the rebase reinvoke only; was $2–4) |
 | `TestCruiseFullPipeline` | `fabrik:cruise` auto-advances to Validate-complete without auto-merge; PR merged by human closes issue | Both | 30–50 min | $0.80–2.00 |
 | `TestBaseBranchPipeline` | `base:<branch>` non-default base branch: throwaway branch created off main, PR targets it (not main), pipeline does not falsely pause at end of Implement, review gate clears via the base-independent REST feed | Both | 35–55 min | $0.80–2.00 |
-| `TestCIFixReinvoke` | CI-fix reinvoke positive path: the first CI run is forced red by a run-ID ack nonce the agent cannot pre-empt, the engine dispatches a reinvoke whose prompt carries the failure (asserted via the engine log), Claude fixes, CI passes, issue closes | Both | 75–90 min | $1.00–3.00 |
-| `TestCIFixReinvokeCycleLimit` | CI-fix reinvoke negative path: unfixable sentinel exhausts MaxCiFixCycles, issue pauses | Both | 30–60 min | $0.50–1.50 |
-| `TestPausedMergedPRRecovery` | paused + gate-label at Validate with merged PR heals to CLOSED (3 sequential sub-tests: awaiting-ci, awaiting-review, no-gate-label); regression guard for #874 class | Both | 60–90 min (3 sequential sub-tests, ~20–30 min each); covered by the default `E2E_TIMEOUT=4h` | $1.50–4.50 |
-| `TestConjunctiveCIReviewGate` | Conjunctive CI∧review gate: fabrik:awaiting-ci holds before CI, PR comment during CI-await not dropped, fabrik:awaiting-review holds before approval, advance suppressed until both gates clear | Both | 80–115 min (approval path) / 50–75 min (timeout path) | $1.00–2.50 |
+| `TestCIFixReinvoke` | CI-fix reinvoke positive path: the first CI run is forced red by a run-ID ack nonce the agent cannot pre-empt, the engine dispatches a reinvoke whose prompt carries the failure (asserted via the engine log), Claude fixes, CI passes, issue closes | Both | 35–50 min (seeded at Validate, #1992; was 75–90 min) | $0.50–1.50 (was $1.00–3.00) |
+| `TestCIFixReinvokeCycleLimit` | CI-fix reinvoke negative path: unfixable sentinel exhausts MaxCiFixCycles, issue pauses | Both | 20–45 min (seeded at Validate, #1992; was 30–60 min) | $0.30–1.00 (was $0.50–1.50) |
+| `TestPausedMergedPRRecovery` | paused + gate-label at Validate with merged PR heals to CLOSED (3 sequential sub-tests: awaiting-ci, awaiting-review, no-gate-label); regression guard for #874 class | Both | 10–20 min (3 sequential sub-tests seeded at Implement-complete, #1992; was 60–90 min); covered by the default `E2E_TIMEOUT=4h` | $0 (was $1.50–4.50) |
+| `TestConjunctiveCIReviewGate` | Conjunctive CI∧review gate: fabrik:awaiting-ci holds before CI, PR comment during CI-await not dropped, fabrik:awaiting-review holds before approval, advance suppressed until both gates clear | Both | 45–70 min (approval path) / 35–50 min (timeout path) (seeded at Validate, #1992; was 80–115 / 50–75 min) | $0.30–0.60 (was $1.00–2.50) |
 | `TestReviewAuthorityReinvokesOnChangesRequested` | ADR-1250/ADR-1375 authoritative mode (via `review-authority:authoritative` label): CHANGES_REQUESTED verdict blocks checkReviewGate, but a bounded reinvoke fires immediately (AC1/AC6, engine log assertion, not a label transition) — the body-only review shape SubmitPRReview produces is enough with zero inline comments; the same review is not re-dispatched on a later poll (AC7) | Both | several min (one real Claude invocation) + 90s settle window | $0.10–0.50 (one Claude invocation) |
 | `TestReviewAuthorityCycleLimitPauses` | ADR-1375 R5 terminal fallback (via `review-authority:authoritative` label): repeated distinct CHANGES_REQUESTED reviews up to `FABRIK_MAX_REVIEW_CYCLES` (bed-configured small) terminate in `pauseForReviewCycleLimit`, not an unbounded reinvoke loop (AC4) | Both | ~`FABRIK_MAX_REVIEW_CYCLES` × several min (one Claude invocation per cycle) | $0.20–1.00 (`FABRIK_MAX_REVIEW_CYCLES` Claude invocations) |
 | `TestReviewAuthorityClearsOnApproval` | ADR-1250 authoritative mode (via `review-authority:authoritative` label, requires #1261): APPROVED verdict clears the gate; fabrik:paused never applied | Both | 2–5 min | ~$0.02 (no Claude) |
@@ -2327,6 +2327,92 @@ scenarios" for their per-scenario cost and wall-clock.
 
 Every escape-from-release regression earns a new scenario in this table.
 
+## Seeding at the state under test (#1992, ADR-1992)
+
+A live test drives the pipeline from Specify only when walking the pipeline **is its
+subject**. A test about something late — a Validate-time gate, a landing decision, a
+post-merge behaviour — seeds the state it needs directly through the GitHub API and
+spends no Claude quota (or only the one stage it is about) on set-up. Every converted
+test still runs live (ADR-1454): seeding changes how a state is reached, never whether a
+behaviour is proven live.
+
+**The helper.** `seedAtStage(t, env, repo, seedspec.Spec{...})` (`seed.go`) files the
+issue, adds it to the board, opens a member PR with `Closes #N` (for a column from
+Implement on), applies the `stage:<S>:complete` labels and sets the board column. It waits
+only through the `Await*Visible` family (#1974), so a seed is never reported ready before
+GitHub shows it on the read path the engine uses; `inconclusive/guards_test.go` pins that.
+`seedLandingCandidate` and `seedReviewGateItem*` are thin wrappers over it. Two shapes:
+
+| `Spec` | The state | Use when |
+|---|---|---|
+| `Column: "Validate"` | Validate **complete**: `stage:Specify..Validate:complete`, ready PR, Status Validate | the subject starts at the landing decision (`TestYoloAutoMergeLabel`, `TestConvergenceRace`) |
+| `Column: "Validate", RunColumn: true` | Validate **arrival**: stages before it complete; the engine runs ONE real Validate invocation | the subject needs that stage's real output — it sets the CI gate, then the CI-fix loop or the review gate (`TestCIFixReinvoke*`, `TestConjunctiveCIReviewGate`) |
+
+Other fields: `ExtraLabels` (autonomy labels, e.g. `fabrik:yolo`, `expected-reviewers:none`),
+`PRBodySuffix` (the `slow-ci-required*` / `ci-fix-sentinel-*` markers CI reads), `Draft`,
+`BaseBranch`, `PathMode` (`PathUnique` inserts `-<issue>` before the extension — landed
+files persist on the base branch and a raw Contents-API PUT cannot overwrite an existing
+blob), `DeferStatus` (leave the card off the board's columns until the caller decides),
+`Minimal` (the pre-#1992 labelling: only `stage:<column>:complete`) and `Comments`
+(prior-stage comments in the format `findStageComment` reads — default none; the engine
+tolerates their absence and no converted test reads one).
+
+Two things a seed cannot lean on: harness PRs carry `pruefer:ignore`, so **no real review
+bot ever reviews a seeded PR** — a test that needs the review gate out of the way adds
+`expected-reviewers:none` (or drives reviews itself with `FABRIK_REVIEWER_TOKEN`); and a
+test whose subject is an *engine-authored* PR (`TestBaseBranchPipeline`) cannot seed one.
+
+**Fidelity (R4).** A seeded state must be one the engine could have produced, or a test can
+pass from an impossible state. *What* to create is decided by `seedspec.Build`, a pure
+function in the untagged `tests/e2e/seedspec` package, so it is checked in plain
+`go test ./...`: `seedspec.CheckFidelity` compares each plan with a **recorded
+real-traversal fixture** (`seedspec/testdata/<column>.json`: the labels, board column and PR
+shape of an item parked after a real traversal). The rule is **may omit, never invent** — a
+seed may leave out labels a traversal carries, but every label it adds must be one the
+traversal carries, and the column and the PR's existence, base, linkage and draft state must
+match (a draft PR is the one declared deviation: it keeps the real review bot away, #1312).
+An arrival seed (`RunColumn`) is compared with the previous stage's parked state. The
+fixtures are recorded from the **real `Engine`** driven through each stage by the sim bed's
+scripted invoker, and `tests/sim`'s `TestSeedFixturesMatchEngineTraversal` re-derives them on
+every PR, so an engine change to the labels, column or PR shape fails there (the fixtures
+drifted) and an impossible seed fails in `seedspec` — both with no live budget.
+
+*Recapturing the fixtures* after an intended engine change:
+
+```bash
+go test ./tests/sim -run TestSeedFixturesMatchEngineTraversal -update-seed-fixtures
+git diff tests/e2e/seedspec/testdata     # review: this is the engine's state shape changing
+go test ./tests/e2e/seedspec             # fix any seed CheckFidelity now rejects
+```
+
+The `engine_sha` in each fixture is informational and never compared. Optional live
+cross-check (not required): file an issue with no auto-advance label, move it one stage at a
+time, and compare its labels, column and PR at each park with the matching fixture.
+
+**What the registry enforces.** Every entry carries `entry` (where the engine first sees the
+item: `Specify … Validate`, `Queued`, or `none` for a test that files no item) and
+`traversal` (`subject` or `none`; there is deliberately no `setup` value — a test whose
+traversal is only the way to its subject must seed instead). A test that enters at `Specify`
+or whose traversal is the subject must say why in `traversal_reason`. The **named
+full-traversal set** — `full_traversal: true`, only valid on `entry: Specify` +
+`traversal: subject`, and never allowed to become empty — is the tests that together drive
+every pipeline path end to end once: `TestSmokeSingleRepoFullPipeline` (the ordinary yolo
+path to Done, including the Review → Validate hand-off the seeded Validate tests skip),
+`TestCruiseFullPipeline` (the cruise auto-advance chain), `TestBaseBranchPipeline` (an
+engine-authored PR on a non-default base) and `TestCrossRepoSpawn` (a Plan-declared spawn).
+A scan cross-check fails a test whose declared `entry` is later than Specify but whose
+helpers still call `SetIssueStatus(..., "Specify")` — the signature of a late-subject test
+that never got converted (`TestMergeTrainColdCacheBaseMember` is the one documented
+exemption: it files a cheap blocked primer to warm a cache).
+
+**Measuring.** `gate report [--sha S] [--baseline B]` totals each test's `go test -json`
+`Elapsed` per cell from the per-leg archive and joins the registry's `entry`/`traversal`
+columns; with `--baseline` it prints the per-test and total runtime delta. Model-quota use
+is **not recorded** by the ledger or the archive (the engine log carries no token counts;
+the `Used N/M turns, … tokens` footer is on the stage comments in GitHub), so the report
+carries a clearly-labelled proxy instead: pipeline stages not driven (entering at stage *k*
+skips *k* real Claude invocations and their CI/review waits).
+
 ## Adding a scenario
 
 1. Pick a name like `cross_repo_spawn_test.go`. Use `Test<DescriptiveName>` for the
@@ -2348,7 +2434,11 @@ Every escape-from-release regression earns a new scenario in this table.
    also declare `auth` and `train` sensitivity (`sensitive` with a one-line reason, or
    `neutral`; there is no default — see "The sparse auth × train matrix" above): a test
    that never lands is `train: neutral`, and one that calls an author-identity assertion
-   (directly or through a helper) must be `auth: sensitive`.
+   (directly or through a helper) must be `auth: sensitive`. It must also declare `entry`
+   and `traversal` (#1992 — see "Seeding at the state under test" above): **if the
+   subject is late in the pipeline, seed it with `seedAtStage` rather than driving
+   Specify → … to reach it**; a test that still places an item at `Specify` must declare
+   `entry: Specify` with a `traversal_reason`.
 7. **Assert on something that can only be produced by the engine, on the
    specific path under test** (handarbeit/fabrik#1355). A scenario that
    passes just as easily against a broken engine as a working one is worse
@@ -2421,13 +2511,22 @@ exclusivity) is added as **fields on the same entries**, not as separate lists.
   `"auth_reason"` / `"train_reason"` and a `neutral` one must not carry a reason.
   `skip_ok_legs` stays a separate field: sensitivity says where a test *should* run,
   `skip_ok_legs` where a skip is *expected* (the sparse plan prunes such pairs).
+- **Entry-stage and traversal fields (#1992):** `"entry"` (`Specify`, `Research`, `Plan`,
+  `Implement`, `Review`, `Validate`, `Queued`, or `none`) and `"traversal"` (`subject` |
+  `none`) have **no default**; `"traversal_reason"` (one line) is required for
+  `traversal: subject` and for any `entry: Specify`; `"full_traversal": true` marks the
+  named set that drives each pipeline path end to end (R3) and is valid only with
+  `entry: Specify` + `traversal: subject`. See "Seeding at the state under test".
 - **Enforcement:** `tests/e2e/registry` is an untagged Go package, so its
   completeness test runs in plain `go test ./...` on every PR. It fails on a live
   test with no entry, an entry for a test that no longer exists, a sim reference
   that does not exist, a malformed entry, a missing or invalid `auth`/`train`, a
   `*SelfRecognition*` test that is not `auth: sensitive`, or a test that reaches
   `AssertPRAuthorIsExpectedIdentity`/`AssertPRAuthorIsEngineIdentity` (directly or
-  through a same-directory helper) without being `auth: sensitive`. It discovers tests by parsing source
+  through a same-directory helper) without being `auth: sensitive`; and (#1992) a missing
+  or invalid `entry`/`traversal`/`traversal_reason`, a misplaced `full_traversal`, an empty
+  full-traversal set, or a test declaring a late `entry` whose helpers still reach
+  `SetIssueStatus(..., "Specify")`. It discovers tests by parsing source
   (`go/parser`), never by importing the build-tagged e2e package.
 - **Reading it from shell:** it is plain JSON, so `jq` works directly —
   `jq -r '.tests[] | select(.parity=="gap") | .name' tests/e2e/registry/registry.json`.
