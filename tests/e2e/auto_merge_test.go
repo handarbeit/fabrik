@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/handarbeit/fabrik/tests/e2e/seedspec"
 )
 
 // TestYoloAutoMergeLabel is the regression test for #829 — replacing Fabrik's
@@ -50,6 +52,15 @@ import (
 //     issue was filed, and fabrik:auto-merge-enabled is never applied at any
 //     point.
 //
+// Seeded at Validate (#1992, ADR-1992): the pipeline traversal before Validate is
+// set-up for this test, not its subject, so the item is seeded directly at
+// Validate-complete (seedAtStage) — the full yolo path to Done stays covered by
+// TestSmokeSingleRepoFullPipeline. Non-vacuity: neutralise the landing contract in
+// the engine (e.g. stop attemptMergeOnValidate enabling native auto-merge in train
+// mode "off", or stop advanceToQueued in mode "on") and the item never closes /
+// never reaches Done, failing the wait below. Wall-clock saved: the ~20-30 min
+// Specify → Review traversal.
+//
 // Out of scope here (better suited to unit/integration tests because
 // provoking them deterministically in e2e is hard):
 //   - convergence budget exhaustion (Story 3 / SC-003)
@@ -57,8 +68,8 @@ import (
 //   - cruise preservation (Story 4 / SC-004 — covered by unit tests of the
 //     yolo/cruise gating logic)
 //
-// Wall-clock: ~20-40 min (+~3 min under train mode "on" for the #1874 exactly-once
-// settle wait). Cost: ~$0.50-1.50.
+// Wall-clock: ~5-15 min (+~3 min under train mode "on" for the #1874 exactly-once
+// settle wait). Cost: $0 (no Claude invocation — the seed is GitHub-only).
 func TestYoloAutoMergeLabel(t *testing.T) {
 	t.Parallel()
 	env := LoadEnv(t)
@@ -69,22 +80,22 @@ func TestYoloAutoMergeLabel(t *testing.T) {
 
 	stamp := time.Now().UTC().Format("20060102-150405")
 	marker := fmt.Sprintf("auto-merge-yolo-%s", stamp)
-	path := markerPath("TestYoloAutoMergeLabel")
-	body := fmt.Sprintf(autoMergeBodyTemplate, "`", path, "`", "```", marker, "```")
 
+	// Seeded at Validate (#1992): the subject is the Validate-complete landing
+	// contract, so the item arrives with stage:Validate:complete and a ready member PR
+	// instead of being driven Specify → Review at real model, CI and quota cost. The
+	// seed gives the member PR's number up front — no WaitForLinkedPR needed.
 	logStart := LogOffset(t, env)
-	num := FileIssue(t, env, env.RepoAlpha,
-		fmt.Sprintf("e2e yolo auto-merge (%s)", stamp),
-		body, "fabrik:yolo")
-	itemID := AddIssueToProject(t, env, env.RepoAlpha, num)
-	SetIssueStatus(t, env, itemID, "Specify")
-	t.Logf("filed %s#%d at Status=Specify, marker=%s", env.RepoAlpha, num, marker)
-
-	// Captured once, before branching: the member's own PR closes shortly
-	// after Validate completes in both modes (native auto-merge or the
-	// train's close-not-merge landing), and WaitForLinkedPR only finds it
-	// while still open.
-	prNum := WaitForLinkedPR(t, env, env.RepoAlpha, num, 30*time.Minute)
+	num, prNum, _ := seedAtStage(t, env, env.RepoAlpha, seedspec.Spec{
+		Column:      "Validate",
+		Title:       fmt.Sprintf("e2e yolo auto-merge (%s)", stamp),
+		IssueBody:   fmt.Sprintf("e2e verification of the yolo landing contract (#829, #980). marker=%s", marker),
+		ExtraLabels: []string{"fabrik:yolo"},
+		Path:        markerPath("TestYoloAutoMergeLabel"),
+		PathMode:    seedspec.PathUnique,
+		Content:     fmt.Sprintf("# e2e yolo auto-merge marker\n\nmarker=%s\n", marker),
+	})
+	t.Logf("seeded %s#%d at Validate (PR #%d), marker=%s", env.RepoAlpha, num, prNum, marker)
 
 	if trainMode == "on" {
 		t.Run("train-mode=on", func(t *testing.T) {
@@ -168,28 +179,3 @@ func TestYoloAutoMergeLabel(t *testing.T) {
 		t.Logf("fabrik:auto-merge-enabled was cleaned up after merge — FR-005 verified")
 	})
 }
-
-// autoMergeBodyTemplate is the issue body for TestYoloAutoMergeLabel. The six
-// %s placeholders are: backtick, marker path, backtick, codefence, marker,
-// codefence (Go raw strings can't contain backticks).
-const autoMergeBodyTemplate = `## Goal
-
-End-to-end verification of the GitHub native auto-merge path for yolo issues (#829).
-
-## Trivial change
-
-Append a single HTML comment line to %s%s%s at the very end of the file (create the file first if it doesn't already exist):
-
-%s
-<!-- %s -->
-%s
-
-That is the entire change. One file, one line. Plan should NOT decompose.
-
-## Scope
-
-Single repo only. This issue exists purely to drive a yolo PR through the new
-post-Validate convergence flow and verify Fabrik enables GitHub auto-merge
-(applying the fabrik:auto-merge-enabled label) rather than running the legacy
-poll-merge loop.
-`

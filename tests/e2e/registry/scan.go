@@ -272,3 +272,100 @@ func scanReachingTests(dir string, targetNames []string) ([]string, error) {
 	sort.Strings(out)
 	return out, nil
 }
+
+// specifyStatus is the board column whose placement is a full-pipeline entry.
+const specifyStatus = "Specify"
+
+// callsSetStatusSpecify reports whether n directly contains a call to
+// SetIssueStatus with the string literal "Specify" as an argument.
+func callsSetStatusSpecify(n ast.Node) bool {
+	found := false
+	ast.Inspect(n, func(x ast.Node) bool {
+		call, ok := x.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if id, ok := call.Fun.(*ast.Ident); !ok || id.Name != "SetIssueStatus" {
+			return true
+		}
+		for _, a := range call.Args {
+			if lit, ok := a.(*ast.BasicLit); ok && lit.Kind == token.STRING && lit.Value == `"`+specifyStatus+`"` {
+				found = true
+			}
+		}
+		return true
+	})
+	return found
+}
+
+// ScanSpecifyDrivers returns the top-level Test* functions in dir (tests/e2e)
+// that place an item at Specify with SetIssueStatus(..., "Specify"): directly, or
+// — transitively, by name, through same-directory non-test functions — via a
+// helper that does. It follows the same reference-closure shape as
+// ScanIdentityAssertCallers. Result is sorted.
+func ScanSpecifyDrivers(dir string) ([]string, error) {
+	_, files, err := parseDir(dir, false)
+	if err != nil {
+		return nil, err
+	}
+	type fn struct {
+		name   string
+		calls  map[string]bool
+		direct bool
+		test   bool
+	}
+	var fns []fn
+	for path, f := range files {
+		isTestFile := strings.HasSuffix(path, "_test.go")
+		for _, d := range f.Decls {
+			fd, ok := d.(*ast.FuncDecl)
+			if !ok || fd.Body == nil || fd.Recv != nil {
+				continue
+			}
+			fns = append(fns, fn{
+				name:   fd.Name.Name,
+				calls:  calledIdents(fd.Body),
+				direct: callsSetStatusSpecify(fd.Body),
+				test:   isTestFile && isTestFunc(fd),
+			})
+		}
+	}
+	reaching := map[string]bool{}
+	for _, f := range fns {
+		if !f.test && f.direct {
+			reaching[f.name] = true
+		}
+	}
+	for changed := true; changed; {
+		changed = false
+		for _, f := range fns {
+			if f.test || reaching[f.name] {
+				continue
+			}
+			for c := range f.calls {
+				if reaching[c] {
+					reaching[f.name] = true
+					changed = true
+					break
+				}
+			}
+		}
+	}
+	var out []string
+	for _, f := range fns {
+		if !f.test {
+			continue
+		}
+		hit := f.direct
+		for c := range f.calls {
+			if reaching[c] {
+				hit = true
+			}
+		}
+		if hit {
+			out = append(out, f.name)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}

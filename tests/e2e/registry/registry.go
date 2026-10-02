@@ -1,6 +1,7 @@
 // Package registry is the single per-test registry for the live e2e suite
 // (tests/e2e). It is keyed by live-test function name and currently carries
-// the sim-parity field and the auth/train sensitivity fields (#1975); later
+// the sim-parity field, the auth/train sensitivity fields (#1975) and the
+// entry-stage/traversal fields (#1992); later
 // issues add fields (pack, exclusive, ...) to Entry rather than creating their
 // own lists.
 //
@@ -67,6 +68,43 @@ const (
 	Neutral Sensitivity = "neutral"
 )
 
+// Stage is the pipeline column a live test enters the pipeline at (#1992,
+// ADR-1992): where the engine first sees the item.
+type Stage string
+
+const (
+	StageSpecify   Stage = "Specify"
+	StageResearch  Stage = "Research"
+	StagePlan      Stage = "Plan"
+	StageImplement Stage = "Implement"
+	StageReview    Stage = "Review"
+	StageValidate  Stage = "Validate"
+	StageQueued    Stage = "Queued"
+	// StageNone: the test files no pipeline item at all (the bed-restart step).
+	StageNone Stage = "none"
+)
+
+// Stages lists the accepted entry stages in pipeline order.
+var Stages = []Stage{
+	StageSpecify, StageResearch, StagePlan, StageImplement,
+	StageReview, StageValidate, StageQueued, StageNone,
+}
+
+// Traversal says whether the pipeline stages a test walks between its entry and
+// its assertion are themselves what it tests (#1992). There is deliberately no
+// "setup" value: a test whose traversal is merely the way to reach its subject
+// must seed that state instead of driving the pipeline to it.
+type Traversal string
+
+const (
+	// TraversalSubject: the stages walked are the subject (the smoke test, the
+	// Specify blocked-on-input flow, the cruise auto-advance chain, ...).
+	TraversalSubject Traversal = "subject"
+	// TraversalNone: no stage is walked as set-up — the state is seeded, or the
+	// test never drives a stage at all.
+	TraversalNone Traversal = "none"
+)
+
 // Entry is one live test's registry record. JSON keys are named, never
 // positional, so fields can be added without restructuring.
 type Entry struct {
@@ -118,6 +156,20 @@ type Entry struct {
 	DefaultBaseTrain bool `json:"default_base_train,omitempty"`
 	// DefaultBaseTrainReason is one non-empty line, required iff DefaultBaseTrain.
 	DefaultBaseTrainReason string `json:"default_base_train_reason,omitempty"`
+	// EntryStage is the pipeline column the test enters the pipeline at (#1992).
+	// Required, no default.
+	EntryStage Stage `json:"entry"`
+	// Traversal is subject | none: whether walking the pipeline from the entry
+	// stage is itself the test's subject. Required, no default.
+	Traversal Traversal `json:"traversal"`
+	// TraversalReason is one non-empty line, required iff Traversal == subject or
+	// EntryStage == Specify: it says why a test that enters at the very start of the
+	// pipeline is not seeded (the traversal is the subject, or no stage runs).
+	TraversalReason string `json:"traversal_reason,omitempty"`
+	// FullTraversal marks the named set of tests that together drive each pipeline
+	// path end to end once (R3). Only valid with Traversal == subject and
+	// EntryStage == Specify; at least one entry must carry it.
+	FullTraversal bool `json:"full_traversal,omitempty"`
 }
 
 // Isolation is the class of a live test for the gate's two-phase leg (#1977).

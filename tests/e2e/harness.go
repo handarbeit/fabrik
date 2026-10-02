@@ -44,6 +44,12 @@ const (
 // statically (AC1) rather than needing to execute the tests to know the
 // paths.
 //
+// Scenarios converted to seeds (#1992: TestYoloAutoMergeLabel, TestCIFixReinvoke,
+// TestConjunctiveCIReviewGate, TestPausedMergedPRRecovery) write their file with a
+// raw Contents-API PUT after all, so for them markerPath is the BASE of a path made
+// unique per issue (seedspec.PathUnique) — landed files persist on main and a fixed
+// path would collide with the existing blob.
+//
 // TestPausedMergedPRRecovery's 3 sub-variants deliberately share one path:
 // they run strictly sequentially (t.Run, no t.Parallel between them) and each
 // variant's PR merges before the next is filed, so there is no concurrent
@@ -62,7 +68,6 @@ var markerPaths = map[string]string{
 	"TestBaseBranchPipeline":          "e2e/markers/base-branch-pipeline.md",
 	"TestCruiseFullPipeline":          "e2e/markers/cruise-full-pipeline.md",
 	"TestCIFixReinvoke":               "e2e/markers/ci-fix-reinvoke.md",
-	"TestCIFixReinvokeCycleLimit":     "e2e/markers/ci-fix-reinvoke-cycle-limit.md",
 	"TestConjunctiveCIReviewGate":     "e2e/markers/conjunctive-ci-review-gate.md",
 }
 

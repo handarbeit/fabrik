@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/handarbeit/fabrik/tests/e2e/seedspec"
 )
 
 // TestConjunctiveCIReviewGate is the regression test for the conjunctive
@@ -110,9 +112,15 @@ import (
 //     the sequencing this redesign depends on. Use FABRIK_REVIEW_WAIT_TIMEOUT=2
 //     only for the timeout-fallback path.
 //
-// Wall-clock: ~80–115 min (approval path); ~50–75 min (timeout path) — the 25-min
+// Seeded at Validate (#1992, ADR-1992): the Specify → Review traversal was set-up, not
+// subject. The Review → Validate hand-off it used to exercise stays covered by
+// TestSmokeSingleRepoFullPipeline. Non-vacuity: neutralise the CI gate (let Validate
+// complete without waiting for CI) and stage:Validate:complete appears inside the R1
+// window; neutralise the review gate and the issue closes before the approval.
+//
+// Wall-clock: ~45–70 min (approval path); ~35–50 min (timeout path) — the 25-min
 // slow-gate window is most of it. Use E2E_TIMEOUT=2h or more.
-// Cost: ~$1.00–2.50.
+// Cost: ~$0.30–0.60 (one real Validate invocation).
 func TestConjunctiveCIReviewGate(t *testing.T) {
 	t.Parallel()
 	env := LoadEnv(t)
@@ -137,34 +145,36 @@ func TestConjunctiveCIReviewGate(t *testing.T) {
 
 	stamp := time.Now().UTC().Format("20060102-150405")
 	title := fmt.Sprintf("e2e conjunctive-ci-review-gate (%s)", stamp)
-	path := markerPath("TestConjunctiveCIReviewGate")
-	body := fmt.Sprintf(conjunctiveCIReviewGateBody, path, path)
 
-	num := FileIssue(t, env, env.RepoAlpha, title, body, "fabrik:yolo")
-	itemID := AddIssueToProject(t, env, env.RepoAlpha, num)
-	SetIssueStatus(t, env, itemID, "Specify")
-	t.Logf("filed %s#%d — waiting for Implement to complete", env.RepoAlpha, num)
-
-	// Wait for Implement to complete so the linked PR exists.
-	WaitForIssueLabel(t, env, env.RepoAlpha, num, "stage:Implement:complete", 60*time.Minute)
-	prNumber := LinkedPRNumber(t, env, env.RepoAlpha, num)
-	t.Logf("Implement complete; PR #%d created for %s#%d", prNumber, env.RepoAlpha, num)
+	// Seeded at Validate (#1992): the subject is the Validate-time CI∧review gate, so the
+	// item arrives with Specify..Review complete and a ready harness PR whose body
+	// carries slow-ci-required-long; the engine then runs ONE real Validate invocation,
+	// whose completion applies fabrik:awaiting-ci (R1). Specify → Review are not driven.
+	num, prNumber, _ := seedAtStage(t, env, env.RepoAlpha, seedspec.Spec{
+		Column:       "Validate",
+		RunColumn:    true,
+		Title:        title,
+		IssueBody:    conjunctiveCIReviewGateBody,
+		ExtraLabels:  []string{"fabrik:yolo"},
+		Path:         markerPath("TestConjunctiveCIReviewGate"),
+		PathMode:     seedspec.PathUnique,
+		Content:      "<!-- conjunctive-ci-review-gate-test -->\n",
+		PRBodySuffix: "\nslow-ci-required-long\n",
+	})
+	t.Logf("seeded %s#%d at Validate (PR #%d, slow-gate starts now)", env.RepoAlpha, num, prNumber)
 
 	// The engine-authored-PR identity assertion lives in TestAuthEnginePRAuthorIdentity
 	// (#1975); the reviewer-is-not-the-PR-author guard below is what protects
 	// RequestPRReviewer here.
 
 	// R1: fabrik:awaiting-ci must appear after Validate fires (CI gate holds).
-	// This also confirms the item has advanced past Review — Validate is only
-	// dispatched once Review's own wait_for_reviews gate has genuinely
-	// cleared, via the incidental gemini-code-assist review since no reviewer
-	// is requested yet (confound 2). Waiting for this label — rather than
-	// stage:Review:complete, which is applied immediately when Review's
-	// Claude invocation finishes, simultaneously with fabrik:awaiting-review —
-	// is what actually signals it's safe to request the held-out reviewer.
+	// The item was seeded past Review, so Review's own wait_for_reviews gate (and the
+	// incidental-review confounds it carried, 2 and 3 above) never arises here: this
+	// label is simply the signal that Validate has run and it is safe to request the
+	// held-out reviewer.
 	WaitForIssueLabel(t, env, env.RepoAlpha, num, "fabrik:awaiting-ci", 30*time.Minute)
 	AssertLabelWasApplied(t, env, env.RepoAlpha, num, "fabrik:awaiting-ci")
-	t.Logf("fabrik:awaiting-ci confirmed on %s#%d (CI gate is holding; Review's own review gate has cleared)", env.RepoAlpha, num)
+	t.Logf("fabrik:awaiting-ci confirmed on %s#%d (CI gate is holding)", env.RepoAlpha, num)
 
 	// The R1 withheld window below is only meaningful while slow-gate is still
 	// running with room to spare. When upstream latency has already consumed the
@@ -189,9 +199,8 @@ func TestConjunctiveCIReviewGate(t *testing.T) {
 	}
 
 	// Now establish a genuinely outstanding reviewer request so Validate's
-	// gate has something real to hold on. Review's own gate has already
-	// cleared (the item has advanced to Validate, above), so this request
-	// only engages once Validate's own checkReviewGate call evaluates it
+	// gate has something real to hold on. The item was seeded at Validate, so this
+	// request engages only once Validate's own checkReviewGate call evaluates it
 	// (after CI clears, several minutes away) — well ahead of that window.
 	if reviewerToken != "" {
 		reviewerLogin := TokenLogin(t, reviewerToken)
@@ -340,44 +349,34 @@ func TestConjunctiveCIReviewGate(t *testing.T) {
 	}
 }
 
-// conjunctiveCIReviewGateBody is the issue body template for
-// TestConjunctiveCIReviewGate. Both %s placeholders are the scenario's unique
-// marker file path (see markerPath in harness.go, #1394), repeated verbatim.
-// Claude makes a minimal change to that file and includes "slow-ci-required-long"
-// in the PR body to trigger the ~25-minute slow-gate required CI check, creating
-// a wide CI-await window for the conjunctive gate test.
+// conjunctiveCIReviewGateBody is the issue body for TestConjunctiveCIReviewGate. It
+// describes the state the harness seeds (#1992): the PR already exists, carrying
+// "slow-ci-required-long" in its body to trigger the ~25-minute slow-gate required CI
+// check and so create a wide CI-await window for the conjunctive gate test.
 const conjunctiveCIReviewGateBody = `## Goal
 
 End-to-end regression test for the Fabrik conjunctive CI∧review gate
 (handarbeit/fabrik#895, ADR-056 D2). Validates that both the CI gate and the
 review gate must both be satisfied before Validate advances the issue.
 
-## The change
+## State of this issue
 
-Add exactly one new HTML comment as a new line at the end of ` + "`%s`" + `
-(create the file first if it doesn't already exist). The comment must be
-EXACTLY:
+The e2e harness has already implemented and reviewed this issue: a pull request
+is open on this issue's branch with its one-line change (an HTML comment in a
+marker file under e2e/markers/), and Specify through Review are complete. There is
+nothing left to implement. Validate should confirm that the PR exists and that the
+marker file is on its branch, and then complete. Do not modify any file, and do
+not wait for or inspect CI.
 
-    <!-- conjunctive-ci-review-gate-test -->
+## CI behaviour
 
-This is the only change needed. No other files should be modified. Do NOT
-reuse any other HTML comment from prior tests — the marker above is unique
-to this test.
-
-## CI behaviour required
-
-The PR body MUST carry the literal marker below so the test repo's CI
-slow-gate check fires (~25 minutes, enrolled as a required check):
-
-slow-ci-required-long
-
-This creates the CI-await window the test needs to verify the conjunctive gate
-behaviour. Do NOT include ci-fix-sentinel-required in the PR body.
+The PR body already carries the literal marker ` + "`slow-ci-required-long`" + `, which
+fires the test repo's ~25-minute slow-gate required check. This creates the
+CI-await window the test needs. Do not edit the PR body.
 
 ## Scope
 
-Single file (` + "`%s`" + `). Minimal one-line change. No decomposition.
-Plan and Implement should be a one-commit change.
+No decomposition. No code changes.
 `
 
 // slowGateLongDuration is slow-gate's sleep under the slow-ci-required-long

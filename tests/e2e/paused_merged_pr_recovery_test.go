@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/handarbeit/fabrik/tests/e2e/seedspec"
 )
 
 // TestPausedMergedPRRecovery is the e2e regression guard for the #874 bug
@@ -13,7 +15,7 @@ import (
 // the settle-owner (runValidatePRTerminalAdvance, ADR-056 D2) regardless of
 // which gate label it carries.
 //
-// Each sub-test drives a cruise issue through Implement (creating an open PR),
+// Each sub-test seeds an issue at Implement-complete (with an open PR, #1992),
 // forces the #874-class stuck state (fabrik:paused + fabrik:awaiting-input +
 // optional gate label, board at Validate), merges the PR externally, and
 // asserts the settle-owner heals the issue.
@@ -33,9 +35,14 @@ import (
 // fabrik:cruise, fabrik:paused, fabrik:awaiting-input, fabrik:awaiting-ci, and
 // fabrik:awaiting-review seeded (all are production labels and should exist).
 //
-// Wall-clock: ~60–90 min (3 sequential sub-tests, ~20–30 min each).
+// Seeded at Implement-complete (#1992, ADR-1992): the Specify → Implement traversal was
+// set-up, not subject, so each variant seeds its state directly instead of driving three
+// real stages. Non-vacuity: neutralise the Validate settle-owner's terminal-PR advance
+// (runValidatePRTerminalAdvance) and stage:Validate:complete never appears, failing R5.
+//
+// Wall-clock: ~10–20 min (3 sequential sub-tests, ~3–6 min each).
 // Run with: E2E_TIMEOUT=3h scripts/e2e/run.sh -run TestPausedMergedPRRecovery
-// Cost: ~$1.50–4.50.
+// Cost: $0 (no Claude invocation — the seed is GitHub-only).
 func TestPausedMergedPRRecovery(t *testing.T) {
 	t.Parallel()
 	env := LoadEnv(t)
@@ -55,42 +62,26 @@ func TestPausedMergedPRRecovery(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			stamp := time.Now().UTC().Format("20060102-150405")
 			marker := fmt.Sprintf("paused-merged-pr-%s-%s", tc.name, stamp)
-			// All 3 sub-variants share one marker file (markerPath is keyed by
-			// the parent test function, not the sub-test name): they run
-			// strictly sequentially (no t.Parallel inside t.Run, per R6/the
-			// comment above), and each variant's PR merges (step 7 below)
-			// before the next variant is filed, so there is no concurrent
-			// write to race.
-			path := markerPath("TestPausedMergedPRRecovery")
-			body := fmt.Sprintf(pausedMergedPRBodyTemplate, "`", path, "`", "```", marker, "```")
 
-			// File WITHOUT an auto-advance label. With global yolo off and
-			// auto_advance unset (nil, not true) on Research..Validate, the engine
-			// advances NOTHING on its own (poll.go:1286) — it runs only the stage
-			// whose column we set. This gives the test total control of the board
-			// position and removes the cruise race that previously let the issue
-			// reach Review before we could pin it at Validate.
-			num := FileIssue(t, env, env.RepoAlpha,
-				fmt.Sprintf("e2e paused merged-PR recovery (%s %s)", tc.name, stamp),
-				body)
-			itemID := AddIssueToProject(t, env, env.RepoAlpha, num)
-			t.Logf("filed %s#%d (no auto-advance label), variant=%s marker=%s",
-				env.RepoAlpha, num, tc.name, marker)
-
-			// Step 1: Drive Specify→Implement one stage at a time. Because nothing
-			// auto-advances, the engine stops after each stage's :complete, so it
-			// never runs past where we intend to pin the item. The draft PR is
-			// created during Implement and is open once Implement completes.
-			for _, st := range []string{"Specify", "Research", "Plan", "Implement"} {
-				SetIssueStatus(t, env, itemID, st)
-				WaitForIssueLabel(t, env, env.RepoAlpha, num, "stage:"+st+":complete", 30*time.Minute)
-			}
-			t.Logf("%s#%d reached stage:Implement:complete (manual drive)", env.RepoAlpha, num)
-
-			// Step 2: Discover the linked PR. The PR is created during Implement;
-			// 5 minutes is generous for the GraphQL query to surface it.
-			prNum := WaitForLinkedPR(t, env, env.RepoAlpha, num, 5*time.Minute)
-			t.Logf("linked PR: #%d", prNum)
+			// Seeded at Implement-complete (#1992): the subject is the settle-owner healing
+			// a paused item whose PR merged, so the Specify → Implement traversal (three
+			// real Claude stages per variant) was set-up. The item arrives with
+			// Specify..Implement complete, a ready harness PR with Closes #N, and no
+			// auto-advance label. With global yolo off and auto_advance unset (nil, not
+			// true) on Research..Validate, the engine advances NOTHING on its own
+			// (poll.go:1286), so — as when the stages were driven by hand — the item sits at
+			// Implement until the test moves it. Each variant's file path is unique per
+			// issue (the sequential run is kept: parallelism is #1977's).
+			num, prNum, itemID := seedAtStage(t, env, env.RepoAlpha, seedspec.Spec{
+				Column:    "Implement",
+				Title:     fmt.Sprintf("e2e paused merged-PR recovery (%s %s)", tc.name, stamp),
+				IssueBody: fmt.Sprintf("e2e guard for the #874 bug class (paused item + merged PR recovery, ADR-056 D2). variant=%s marker=%s", tc.name, marker),
+				Path:      markerPath("TestPausedMergedPRRecovery"),
+				PathMode:  seedspec.PathUnique,
+				Content:   fmt.Sprintf("# e2e paused merged-PR marker\n\nmarker=%s\n", marker),
+			})
+			t.Logf("seeded %s#%d at Implement-complete (PR #%d, no auto-advance label), variant=%s marker=%s",
+				env.RepoAlpha, num, prNum, tc.name, marker)
 
 			// Step 3–5: Force the stuck state. Nothing is auto-advancing (no
 			// cruise/yolo label), so the item sits at Implement until we move it —
@@ -160,29 +151,3 @@ func TestPausedMergedPRRecovery(t *testing.T) {
 		})
 	}
 }
-
-// pausedMergedPRBodyTemplate is the issue body for TestPausedMergedPRRecovery.
-// The six %s placeholders are: backtick, marker path, backtick, codefence,
-// marker, codefence (Go raw strings can't contain backticks).
-const pausedMergedPRBodyTemplate = `## Goal
-
-End-to-end regression guard for the #874 bug class (paused item + merged PR
-recovery via the settle-owner, ADR-056 D2).
-
-## Trivial change
-
-Append a single HTML comment line to %s%s%s at the very end of the file (create the file first if it doesn't already exist):
-
-%s
-<!-- %s -->
-%s
-
-That is the entire change. One file, one line. Plan should NOT decompose.
-
-## Scope
-
-Single repo only. This issue verifies that when a cruise issue's linked PR is
-merged externally while the issue is in the stuck state (fabrik:paused +
-fabrik:awaiting-input + optional gate label at Validate), the settle-owner
-heals the issue to CLOSED without Validate having been invoked.
-`

@@ -16,6 +16,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/handarbeit/fabrik/tests/e2e/seedspec"
 )
 
 // Merge-train e2e helpers (ADR-059). These build member PRs directly via the
@@ -486,12 +488,7 @@ func WaitForIssueComment(t *testing.T, env *Env, repo string, issueNumber int, s
 // file is unique (landed files persist on main). "e2e/train/entries/clean1.txt" +
 // 42 → "e2e/train/entries/clean1-42.txt".
 func uniqueMemberPath(path string, num int) string {
-	slash := strings.LastIndex(path, "/")
-	dot := strings.LastIndex(path, ".")
-	if dot <= slash { // no extension in the basename
-		return fmt.Sprintf("%s-%d", path, num)
-	}
-	return fmt.Sprintf("%s-%d%s", path[:dot], num, path[dot:])
+	return seedspec.UniquePath(path, num)
 }
 
 // parseFirstInt extracts a leading integer from s (jq may emit "null").
