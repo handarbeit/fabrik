@@ -266,9 +266,12 @@ func (g *Gate) StartBed(ctx context.Context, wantShort string) error {
 	cmd := g.BedStartCmd(isolated)
 	cmd.Stdout, cmd.Stderr = logf, logf
 	serr := g.Exec.Start(cmd)
-	logf.Close()
+	cerr := logf.Close()
 	if serr != nil {
 		return preflightFail("preflight: starting the bed failed: %v", serr)
+	}
+	if cerr != nil {
+		return preflightFail("preflight: closing %s after starting the bed failed: %v", bedStdout, cerr)
 	}
 
 	// The startup banner goes to the engine's STDOUT (captured in bed-run.log),
