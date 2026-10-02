@@ -116,3 +116,19 @@ func TestResetBedsSingleBedIsReset(t *testing.T) {
 		t.Errorf("one bed: today's reset, unprefixed:\n%s", out)
 	}
 }
+
+// Two beds resolving to one board (bed B's .env without its own board, falling
+// back to the default) are refused before anything is reset: otherwise bed B's
+// reset would drain bed A's board with bed B's token.
+func TestResetBedsRefusesBedsSharingABoard(t *testing.T) {
+	g, rf := resetBedsSetup(t)
+	mustWrite(t, g.Cfg.BedDirs[1]+"/.env", "FABRIK_TOKEN=token-b\nFABRIK_TEST_REPO_ALPHA=o/alpha-b\nFABRIK_TEST_REPO_BETA=o/beta-b\n")
+	g.bedGates = nil // re-resolve the beds from their .env files, as `gate reset` does
+	err := g.ResetBeds(context.Background(), ResetOptions{}, "")
+	if exitCode(err) != ExitPreconditionFailed || !strings.Contains(err.Error(), "use the same board") {
+		t.Fatalf("got %v", err)
+	}
+	if len(rf.calls) != 0 {
+		t.Errorf("nothing may be reset after the refusal; calls: %v", rf.calls)
+	}
+}

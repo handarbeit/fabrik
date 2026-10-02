@@ -230,6 +230,12 @@ func (g *Gate) ResetBeds(ctx context.Context, opts ResetOptions, bedDir string) 
 	if !g.multiBed() {
 		return g.Reset(ctx, opts)
 	}
+	// Two beds resolving to one board or a shared repo (say, bed B's .env without
+	// its own keys, falling back to the defaults) would have the later reset drain
+	// the earlier bed's state with the wrong token: refuse, as `gate run` does.
+	if err := g.CheckBedTopology(nil); err != nil {
+		return err
+	}
 	var first error
 	for _, b := range g.bedGates {
 		b.outf("== resetting %s (board %s/#%s; repos %s, %s) ==\n", b.bedLabel(), b.bed.Reset.ProjectOwner, b.bed.Reset.ProjectNumber, b.bed.Reset.Alpha, b.bed.Reset.Beta)
