@@ -159,3 +159,49 @@ func TestReportShowsInconclusiveLineOnlyWhenPresent(t *testing.T) {
 		t.Errorf("a leg with no inconclusive tests must read as before:\n%s", without)
 	}
 }
+
+// A t.Cleanup that logs AFTER the skip (the bed-restart cleanups do) puts its own
+// "file.go:N:" line behind the marker line. The marker must still be recognised
+// (#1973 review): otherwise the test is treated as an ordinary skip — not
+// retried, no exit 8.
+func TestInconclusiveMarkerSurvivesACleanupLogAfterTheSkip(t *testing.T) {
+	const test = "TestColdBase"
+	events := func(extra ...string) []Event {
+		lines := []string{
+			jsonEv(Event{Action: "run", Test: test}),
+			jsonEv(Event{Action: "output", Test: test, Output: "    a_test.go:9: seeded\n"}),
+			jsonEv(Event{Action: "output", Test: test, Output: "    a_test.go:42: E2E-INCONCLUSIVE: cold-cache line never appeared\n"}),
+		}
+		lines = append(lines, extra...)
+		lines = append(lines,
+			jsonEv(Event{Action: "output", Test: test, Output: "--- SKIP: " + test + " (1.00s)\n"}),
+			jsonEv(Event{Action: "skip", Test: test, Elapsed: 1}),
+		)
+		evs, err := ReadEvents(strings.NewReader(strings.Join(lines, "\n") + "\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return evs
+	}
+	cleanup := jsonEv(Event{Action: "output", Test: test, Output: "    lifecycle.go:261: StartFabrikTestBed: bed already running — nothing to start\n"})
+
+	for name, evs := range map[string][]Event{"no cleanup output": events(), "cleanup logs after the skip": events(cleanup)} {
+		c := Classify(evs)
+		if strings.Join(c.Inconclusive, ",") != test || len(c.Skip) != 0 {
+			t.Errorf("%s: Classify = inconclusive %v skip %v, want %s inconclusive", name, c.Inconclusive, c.Skip, test)
+		}
+		l := testLedger(t)
+		rec := newLegRecorder(l, appOff, "i1", "head", map[string]string{test: "h"}, map[string]bool{test: true},
+			func(f string, a ...any) { t.Errorf("recorder warning: "+f, a...) })
+		for _, e := range evs {
+			rec.Observe(e)
+		}
+		r, ok := l.Load().Record("app/off", test)
+		if !ok || r.Outcome != OutcomeInconclusive {
+			t.Errorf("%s: recorded %+v (found %v), want INCONCLUSIVE", name, r, ok)
+		}
+		if !strings.HasPrefix(r.SkipMsg, "E2E-INCONCLUSIVE: cold-cache") {
+			t.Errorf("%s: SkipMsg = %q, want the marker line's reason", name, r.SkipMsg)
+		}
+	}
+}

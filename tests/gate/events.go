@@ -8,8 +8,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-
-	"github.com/handarbeit/fabrik/tests/e2e/inconclusive"
 )
 
 // Event is one decoded `go test -json` (test2json) line.
@@ -73,12 +71,13 @@ type Classification struct {
 }
 
 // isInconclusiveSkip is THE predicate for the third outcome, shared by Classify
-// and the ledger recorder so they can never disagree: a test's own output, as
-// of its skip, carries a skip message that starts with the marker. A log line
-// that merely mentions the marker does not qualify (the message is the LAST
-// file.go:N: line, and it must start with the marker).
+// and the ledger recorder so they can never disagree: a test's own output
+// carries a "file.go:N:" log line whose message starts with the marker. It need
+// not be the LAST such line — a cleanup may log after the skip — but a line that
+// merely mentions the marker does not qualify, and it is only consulted for a
+// test whose terminal action is skip.
 func isInconclusiveSkip(testOutput string) bool {
-	return inconclusive.IsMarked(skipMessage(testOutput))
+	return inconclusiveMessage(testOutput) != ""
 }
 
 // Classify is run.sh's report_test_outcomes core. "output" events are excluded

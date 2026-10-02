@@ -5,6 +5,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/handarbeit/fabrik/tests/e2e/inconclusive"
 )
 
 // legRecorder turns the live `go test -json` event stream of one cell into
@@ -87,11 +89,12 @@ func (r *legRecorder) Observe(e Event) {
 		rec.Outcome = OutcomeFail
 	case "skip":
 		rec.SkipMsg = skipMessage(text)
-		if isInconclusiveSkip(text) {
+		if msg := inconclusiveMessage(text); msg != "" {
 			// #1973: "the precondition never arose" — uncovered, retried by the
 			// leg, re-run by --resume; never a SKIP (so skip_ok_legs and the skip
 			// classifier never see it) and never a PASS. The reason rides in
-			// SkipMsg.
+			// SkipMsg (the marker line, even when a cleanup logged after it).
+			rec.SkipMsg = msg
 			rec.Outcome = OutcomeInconclusive
 		} else {
 			rec.Outcome = OutcomeSkip
@@ -118,6 +121,11 @@ var skipLineRE = regexp.MustCompile(`^\s+[\w.\-]+\.go:\d+: (.*)$`)
 // skipMessage extracts the t.Skip message from a test's output: the last
 // "file.go:N: text" log line (t.Skip logs its message last), plus any indented
 // continuation lines. "" when the output has none.
+//
+// "Last" is only right for an ORDINARY skip: a t.Cleanup that logs after the
+// skip (the bed-restart cleanups do) pushes its own line behind it. The
+// INCONCLUSIVE marker therefore does not go through here — see
+// inconclusiveMessage.
 func skipMessage(out string) string {
 	lines := strings.Split(out, "\n")
 	idx := -1
@@ -129,6 +137,29 @@ func skipMessage(out string) string {
 	if idx < 0 {
 		return ""
 	}
+	return messageAt(lines, idx)
+}
+
+// inconclusiveMessage is the message of the first "file.go:N: text" log line in
+// a test's own output that STARTS with the inconclusive marker, or "" when none
+// does. It is order-independent on purpose: Cleanup functions run after t.Skip
+// and may log after it, so the marker line is not necessarily the last log line
+// (#1973). The marker must still start the message — a line that merely
+// mentions it does not match — and callers only consult this for a test whose
+// terminal action is "skip", so a test that logs the marker and then goes on to
+// pass or fail is never inconclusive.
+func inconclusiveMessage(out string) string {
+	lines := strings.Split(out, "\n")
+	for i, l := range lines {
+		if m := skipLineRE.FindStringSubmatch(l); m != nil && inconclusive.IsMarked(m[1]) {
+			return messageAt(lines, i)
+		}
+	}
+	return ""
+}
+
+// messageAt is the log line at idx plus its indented continuation lines.
+func messageAt(lines []string, idx int) string {
 	msg := skipLineRE.FindStringSubmatch(lines[idx])[1]
 	for _, l := range lines[idx+1:] {
 		if strings.HasPrefix(l, "---") || strings.HasPrefix(l, "===") || strings.TrimSpace(l) == "" {
