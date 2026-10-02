@@ -13,7 +13,8 @@ import (
 	"time"
 )
 
-// LegResult is what one finished leg hands to Gate.OnLeg: the typed outcome
+// LegResult is what a leg that reached a normal post-suite result hands to
+// Gate.OnLeg (not RUN INVALID, watchdog or restart-failure legs; see OnLeg): the typed outcome
 // stream #1972's per-SHA ledger consumes, and where #1973 classifies
 // INCONCLUSIVE.
 type LegResult struct {
