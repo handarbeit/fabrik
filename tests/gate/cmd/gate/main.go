@@ -21,10 +21,7 @@ import (
 func main() { os.Exit(realMain(os.Args[1:])) }
 
 func realMain(argv []string) int {
-	sub := "run"
-	if len(argv) > 0 && (argv[0] == "run" || argv[0] == "reset") {
-		sub, argv = argv[0], argv[1:]
-	}
+	sub, argv := splitSubcommand(argv)
 
 	// INT/TERM cancel the context; every child the gate started is then reaped
 	// (internal/sessionreap), so nothing is left behind headless. The exit code
@@ -53,6 +50,15 @@ func realMain(argv []string) int {
 	default:
 	}
 	return code
+}
+
+// splitSubcommand peels an explicit "run" or "reset" off the front; anything
+// else is the gate's own arguments (--clean, go test flags).
+func splitSubcommand(argv []string) (string, []string) {
+	if len(argv) > 0 && (argv[0] == "run" || argv[0] == "reset") {
+		return argv[0], argv[1:]
+	}
+	return "run", argv
 }
 
 func run(ctx context.Context, sub string, argv []string) int {
