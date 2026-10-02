@@ -53,7 +53,7 @@ var batchCapPlacement = []int{6, 2, 5, 0, 4, 1, 3}
 //   - A2 (batch membership stable, no abandoned trial): exactly two trial PRs
 //     ever opened, none closed unmerged, none left open.
 //   - A3 (5 then 2, all land): two merged landing PRs, the second being the
-//     remainder; the two MergePR calls are ordered batch 1 then batch 2.
+//     remainder; exactly two MergePR calls, batch 1 landing before poll 2 starts.
 //   - exactly-once: Closes sets are disjoint and cover all members; every member
 //     is Done, closed, with exactly one "Landed via" comment (posted on its member PR).
 //
@@ -196,7 +196,8 @@ func runBatchCapScenario(t *testing.T, sortDisabled bool) {
 		}
 	}
 
-	// Batch 1's merge precedes batch 2's, and there are exactly two merges.
+	// Exactly two merges, one per batch (batch order is pinned by the
+	// per-poll landing assertions above).
 	if got := len(env.Sim.Log().ByMethod("MergePR")); got != 2 {
 		t.Errorf("MergePR called %d times, want exactly 2 (one per batch)", got)
 	}
