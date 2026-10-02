@@ -268,8 +268,12 @@
     },
     {
       "name": "TestMergeTrainQueuedDeeperThanBatchCap",
-      "parity": "gap",
-      "note": "sim touches max_batch_size only inside the queued-comment-eject tests; no deterministic-ordering / two-batch landing scenario",
+      "parity": "sim",
+      "sim": [
+        "TestMergeTrainQueuedDeeperThanBatchCap",
+        "TestMergeTrainQueuedDeeperThanBatchCap_SortDisabledPicksBoardOrder"
+      ],
+      "note": "guards cap truncation, the (StatusEnteredAt, Number) ordering, two-batch landing (5 then 2) and exactly-once landing; the sim uses the pass-through adapter so the pre-#1833 board-cache map-iteration churn cannot be reproduced (stays covered by engine/merge_train_queue_churn_test.go), and the 'batch capped' log line is proven by proxy (trial sizes 5 then 2)",
       "skip_ok_legs": [
         "*/off"
       ],
