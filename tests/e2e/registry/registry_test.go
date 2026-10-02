@@ -279,6 +279,12 @@ func TestRegistryMatchesTree(t *testing.T) {
 		t.Fatal(err)
 	}
 	problems = append(problems, CheckIdentityCallers(reg, callers)...)
+	// #1977: every test that reaches a bed stop/start/restart or .env rewrite is exclusive.
+	lifecycle, err := ScanBedLifecycleCallers("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	problems = append(problems, CheckBedLifecycleCallers(reg, lifecycle)...)
 	if len(problems) > 0 {
 		t.Fatalf("tests/e2e/registry/registry.json is out of sync with the tree:\n  %s",
 			strings.Join(problems, "\n  "))
@@ -306,5 +312,117 @@ func TestMatchLegAndSkipOK(t *testing.T) {
 	e := Entry{SkipOKLegs: []string{"*/off"}}
 	if !e.SkipOK("pat/off") || e.SkipOK("pat/on") {
 		t.Error("Entry.SkipOK mismatch")
+	}
+}
+
+func TestCheckIsolationMarkers(t *testing.T) {
+	cases := []struct {
+		name string
+		mut  func(*Registry)
+		want string
+	}{
+		{"exclusive without a reason", func(r *Registry) { r.Tests[0].Exclusive = true }, "exclusive_reason is empty"},
+		{"exclusive blank reason", func(r *Registry) { r.Tests[0].Exclusive, r.Tests[0].ExclusiveReason = true, "  " }, "exclusive_reason is empty"},
+		{"exclusive multi-line reason", func(r *Registry) { r.Tests[0].Exclusive, r.Tests[0].ExclusiveReason = true, "a\nb" }, "single line"},
+		{"reason without the flag", func(r *Registry) { r.Tests[0].ExclusiveReason = "why" }, "exclusive_reason is only valid"},
+		{"default-base without a reason", func(r *Registry) { r.Tests[1].DefaultBaseTrain = true }, "default_base_train_reason is empty"},
+		{"default-base reason without the flag", func(r *Registry) { r.Tests[1].DefaultBaseTrainReason = "why" }, "default_base_train_reason is only valid"},
+		{"both classes", func(r *Registry) {
+			e := &r.Tests[0]
+			e.Exclusive, e.ExclusiveReason = true, "restarts"
+			e.DefaultBaseTrain, e.DefaultBaseTrainReason = true, "main"
+		}, "mutually exclusive"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := baseRegistry()
+			c.mut(r)
+			mustContain(t, Check(r, liveNames, simNames), c.want)
+		})
+	}
+	r := baseRegistry()
+	r.Tests[0].Exclusive, r.Tests[0].ExclusiveReason = true, "restarts the bed"
+	r.Tests[1].DefaultBaseTrain, r.Tests[1].DefaultBaseTrainReason = true, "asserts on main's batch"
+	if p := Check(r, liveNames, simNames); len(p) != 0 {
+		t.Fatalf("unexpected problems: %v", p)
+	}
+	got := r.IsolationOf()
+	if got["TestA"] != IsolationExclusive || got["TestB"] != IsolationDefaultBaseTrain || got["TestC"] != IsolationShared {
+		t.Fatalf("IsolationOf = %v", got)
+	}
+}
+
+func TestCheckBedLifecycleCallers(t *testing.T) {
+	r := baseRegistry()
+	r.Tests[1].Exclusive, r.Tests[1].ExclusiveReason = true, "restarts"
+	p := CheckBedLifecycleCallers(r, []string{"TestA", "TestB", "TestGone"})
+	if len(p) != 1 {
+		t.Fatalf("want exactly TestA flagged, got %v", p)
+	}
+	mustContain(t, p, "TestA: reaches a bed lifecycle call")
+}
+
+func TestCheckParallelConsistency(t *testing.T) {
+	r := baseRegistry()
+	r.Tests[1].DefaultBaseTrain, r.Tests[1].DefaultBaseTrainReason = true, "main"
+	r.Tests[2].Exclusive, r.Tests[2].ExclusiveReason = true, "restarts"
+	// TestA shared + parallel (ok); TestB default-base + serial (ok); TestC exclusive + serial (ok).
+	if p := CheckParallelConsistency(r, []string{"TestA"}); len(p) != 0 {
+		t.Fatalf("unexpected problems: %v", p)
+	}
+	mustContain(t, CheckParallelConsistency(r, nil), "TestA: is shared but does not call t.Parallel()")
+	p := CheckParallelConsistency(r, []string{"TestA", "TestB", "TestC"})
+	mustContain(t, p, "TestB: is default-base-train but calls t.Parallel()")
+	mustContain(t, p, "TestC: is exclusive but calls t.Parallel()")
+}
+
+func TestScanBedLifecycleCallers(t *testing.T) {
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{
+		"lifecycle.go": `package e2e
+import "testing"
+func StopFabrikTestBed(t *testing.T) {}
+func StartFabrikTestBed(t *testing.T) {}
+func RestartFabrikTestBed(t *testing.T) { StopFabrikTestBed(t); StartFabrikTestBed(t) }
+func writeEnvFileValue() {}
+func switchMode() { writeEnvFileValue() }
+func unrelated(t *testing.T) {}
+`,
+		"a_test.go": `package e2e
+import "testing"
+func TestDirect(t *testing.T) { StopFabrikTestBed(t) }
+func TestInCleanup(t *testing.T) { t.Cleanup(func() { StartFabrikTestBed(t) }) }
+func TestRestart(t *testing.T) { RestartFabrikTestBed(t) }
+func TestViaHelper(t *testing.T) { switchMode() }
+func TestClean(t *testing.T) { unrelated(t) }
+`,
+	})
+	got, err := ScanBedLifecycleCallers(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(got, ",") != "TestDirect,TestInCleanup,TestRestart,TestViaHelper" {
+		t.Fatalf("callers = %v", got)
+	}
+}
+
+func TestScanParallelTests(t *testing.T) {
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{
+		"a_test.go": `package e2e
+import "testing"
+func TestPar(t *testing.T) { t.Parallel() }
+func TestParLater(t *testing.T) { LoadEnv(t); t.Parallel() }
+func TestSerial(t *testing.T) { LoadEnv(t) }
+func TestSubParallel(t *testing.T) { t.Run("x", func(t *testing.T) { t.Parallel() }) }
+func helper(t *testing.T) { t.Parallel() }
+`,
+	})
+	got, err := ScanParallelTests(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(got, ",") != "TestPar,TestParLater" {
+		t.Fatalf("parallel = %v", got)
 	}
 }

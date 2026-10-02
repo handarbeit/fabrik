@@ -104,6 +104,52 @@ type Entry struct {
 	Train Sensitivity `json:"train"`
 	// TrainReason is one non-empty line, required iff Train == sensitive.
 	TrainReason string `json:"train_reason,omitempty"`
+	// Exclusive marks a test that takes over the whole bed: it stops, restarts or
+	// reconfigures it, or holds or poisons bed-wide state (#1977, ADR-1977). The
+	// gate runs exclusive tests serially, last in the leg, so no shared test ever
+	// inherits what one leaves behind. Mutually exclusive with DefaultBaseTrain.
+	Exclusive bool `json:"exclusive,omitempty"`
+	// ExclusiveReason is one non-empty line, required iff Exclusive.
+	ExclusiveReason string `json:"exclusive_reason,omitempty"`
+	// DefaultBaseTrain marks a test that needs the default-base merge-train
+	// partition (the repository's default branch) and asserts on it, so it must
+	// not overlap any other test that can enqueue there. The gate runs these
+	// serially, after the shared phase and before the exclusive one (#1977).
+	DefaultBaseTrain bool `json:"default_base_train,omitempty"`
+	// DefaultBaseTrainReason is one non-empty line, required iff DefaultBaseTrain.
+	DefaultBaseTrainReason string `json:"default_base_train_reason,omitempty"`
+}
+
+// Isolation is the class of a live test for the gate's two-phase leg (#1977).
+type Isolation string
+
+const (
+	// IsolationShared tests run concurrently with each other at the shared -parallel.
+	IsolationShared Isolation = "shared"
+	// IsolationDefaultBaseTrain tests run serially after the shared phase.
+	IsolationDefaultBaseTrain Isolation = "default-base-train"
+	// IsolationExclusive tests run serially, last.
+	IsolationExclusive Isolation = "exclusive"
+)
+
+// Isolation derives the entry's class from its two markers.
+func (e Entry) Isolation() Isolation {
+	switch {
+	case e.Exclusive:
+		return IsolationExclusive
+	case e.DefaultBaseTrain:
+		return IsolationDefaultBaseTrain
+	}
+	return IsolationShared
+}
+
+// IsolationOf returns the class of every registered test, keyed by name.
+func (r *Registry) IsolationOf() map[string]Isolation {
+	out := make(map[string]Isolation, len(r.Tests))
+	for _, e := range r.Tests {
+		out[e.Name] = e.Isolation()
+	}
+	return out
 }
 
 // MatchLeg reports whether the leg label ("auth/train", e.g. "app/off") matches
