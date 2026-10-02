@@ -129,7 +129,7 @@ When the item has a linked PR, the engine writes `.fabrik-context/ci-status.md` 
 
 When all three hold, skip the test invocation and say so in your output, naming the SHA and the file's `written_at` (for example: `Full suite skipped — CI green on <sha> (ci-status.md written <timestamp>)`). In every other case — the file is absent, the verdict is anything other than `green`, HEAD differs from `head_sha`, or the tree is dirty — run the step as described in this skill.
 
-**After you change code** (including a rebase that moves HEAD, such as the pre-completion rebase): HEAD no longer matches `head_sha`, so condition 2 fails. If `ci_gated` is `true`, run the build plus the tests for the packages or modules you touched, then push — the full suite is CI's job, and the engine's `wait_for_ci` gate on the new head is the backstop. If `ci_gated` is `false`, no CI gate backstops this stage, so run the full suite as written below.
+**After you change code** (including a rebase that moves HEAD, such as the pre-completion rebase): HEAD no longer matches `head_sha`, so condition 2 fails. Comment processing does not complete the stage, and the engine's `wait_for_ci` gate runs only when a stage completes, so a push made from a comment has no CI gate behind it — whatever `ci_gated` says. Treat `ci_gated` as `false` here: run the full suite as written below. Do not fall back to targeted tests only.
 
 **Everything else in this stage stays.** Skipping the suite skips only the test invocation. The code review itself, the rebase, and every fix-and-push step still run. In your report, say `Tests: SKIPPED — CI green on <sha>` instead of claiming tests passed.
 
