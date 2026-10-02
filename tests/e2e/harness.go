@@ -112,13 +112,24 @@ func LoadEnv(t *testing.T) *Env {
 		t.Fatalf("could not read FABRIK_TOKEN from %s: %v", envFile, err)
 	}
 
+	// The board number is honoured like the repo pair (#1976): the gate runner
+	// injects each bed's own into its legs, so a second bed runs on its own board.
+	projectNumber := defaultProjectNumber
+	if v := strings.TrimSpace(os.Getenv("FABRIK_TEST_PROJECT_NUMBER")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			t.Fatalf("FABRIK_TEST_PROJECT_NUMBER=%q is not a positive integer", v)
+		}
+		projectNumber = n
+	}
+
 	return &Env{
 		FabrikTestDir: dir,
 		LogPath:       filepath.Join(dir, ".fabrik", "fabrik.log"),
 		RepoAlpha:     getenvOr("FABRIK_TEST_REPO_ALPHA", defaultRepoAlpha),
 		RepoBeta:      getenvOr("FABRIK_TEST_REPO_BETA", defaultRepoBeta),
 		ProjectOwner:  getenvOr("FABRIK_TEST_PROJECT_OWNER", defaultProjectOwner),
-		ProjectNumber: defaultProjectNumber,
+		ProjectNumber: projectNumber,
 		GHToken:       token,
 	}
 }
