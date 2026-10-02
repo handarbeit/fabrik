@@ -94,6 +94,10 @@ cd "$REPO_ROOT"
 
 # shellcheck source=../lib/parallel.sh
 source "$REPO_ROOT/scripts/lib/parallel.sh"
+# kill_own_group (#1957): the trap below signals a stored PID, so it goes through
+# the ownership-checked helper rather than a bare `kill -TERM -"$pid"`.
+# shellcheck source=../lib/killgroup.sh
+source "$REPO_ROOT/scripts/lib/killgroup.sh"
 
 # Default is min(4, host cores) — see the "Parallelism cap" comment above,
 # and scripts/lib/parallel.sh's own header, for the full rationale and why
@@ -122,7 +126,7 @@ START_TS=$(date +%s)
 # it's assigned is safe -- `kill -TERM -""` is a harmless no-op under
 # `|| true`.
 GO_TEST_PID=""
-trap 'kill -TERM -"$GO_TEST_PID" 2>/dev/null || true' EXIT INT TERM
+trap 'kill_own_group "$GO_TEST_PID" TERM 2>/dev/null || true' EXIT INT TERM
 go test -race -count=1 -parallel "$SIM_PARALLEL" -timeout "$SIM_TIMEOUT" "$TARGET" "$@" &
 GO_TEST_PID=$!
 

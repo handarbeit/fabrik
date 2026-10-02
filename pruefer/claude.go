@@ -648,20 +648,23 @@ func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (Revi
 	// #1989: sample the command sessions the Bash tool creates for itself.
 	stopSessionTracking := trackReviewSessions(watchdogCtx, pid, req.PRNumber)
 
+	// Snapshot the tunables before the goroutine starts: it may first run after
+	// Review has returned, and tests reassign these package vars between calls.
+	idleLimit, killGrace := reviewInactivityTimeout, reviewKillGrace
 	go func(pid int) {
-		timer := time.NewTimer(reviewInactivityTimeout)
+		timer := time.NewTimer(idleLimit)
 		defer timer.Stop()
 		for {
 			select {
 			case <-timer.C:
 				since := time.Since(time.Unix(0, lastActivity.Load()))
-				if since >= reviewInactivityTimeout {
-					logf(req.PRNumber, "warn", "review invocation idle for %s with no output — killing\n", reviewInactivityTimeout)
+				if since >= idleLimit {
+					logf(req.PRNumber, "warn", "review invocation idle for %s with no output — killing\n", idleLimit)
 					inactivityFired.Store(true)
-					killProcGroupGraceful(pid, req.PRNumber, "review", "inactivity_timeout", reviewKillGrace, reviewKillGrace)
+					killProcGroupGraceful(pid, req.PRNumber, "review", "inactivity_timeout", killGrace, killGrace)
 					return
 				}
-				timer.Reset(reviewInactivityTimeout - since)
+				timer.Reset(idleLimit - since)
 			case <-watchdogCtx.Done():
 				return
 			}

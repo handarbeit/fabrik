@@ -9,6 +9,7 @@ package pruefer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -28,20 +29,21 @@ func setCmdProcAttr(cmd *exec.Cmd) {
 }
 
 // killProcGroup sends SIGKILL to cmd's entire process group, cleaning up any
-// grandchild processes that outlived the claude process. ESRCH (no such
-// process) is silently ignored — the group may already be gone. Unexpected
-// errors are logged so cleanup failures are diagnosable.
+// grandchild processes that outlived the claude process. The signal goes through
+// sessionreap.SignalGroup, which refuses catastrophic targets and skips a stored
+// PID whose group is no longer ours (#1957, ADR-1957). ESRCH is silently ignored.
+// Unexpected errors are logged so cleanup failures are diagnosable.
 func killProcGroup(cmd *exec.Cmd, prNumber int, label string) {
 	if cmd.Process == nil {
 		return
 	}
 	pid := cmd.Process.Pid
-	if pid <= 0 {
-		return
-	}
+	// SignalGroup refuses -1/0/1 and the caller's own group (R4) and skips a
+	// stored PID that no longer names the group we started (R1, #1957). Both
+	// cases are logged there; nothing is ever signalled instead.
 	logf(prNumber, "kill", "sending SIGKILL to PGID %d (grandchild cleanup)\n", pid)
-	// Negative PID targets the process group (PGID == claude's PID when Setpgid is set).
-	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
+	err := sessionreap.SignalGroup(sessionreap.OwnerOf(pid), syscall.SIGKILL, sessionReapOptions(prNumber))
+	if err != nil && !errors.Is(err, sessionreap.ErrUnsafeGroup) && !errors.Is(err, sessionreap.ErrGroupNotOwned) {
 		fmt.Fprintf(os.Stderr, "[pr#%d pruefer] killProcGroup %q: unexpected error killing process group %d: %v\n", prNumber, label, pid, err)
 	}
 }
