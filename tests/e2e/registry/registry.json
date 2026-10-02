@@ -347,8 +347,8 @@
       "auth": "neutral",
       "train": "sensitive",
       "train_reason": "its subject is the merge train",
-      "default_base_train": true,
-      "default_base_train_reason": "asserts exact batch composition and counts per-repo (not per-partition) 'merged integration PR' / 'opened draft CI PR' log lines on RepoAlpha/main",
+      "exclusive": true,
+      "exclusive_reason": "holds the bed's polls (HoldPolls, #1978) so the engine sees all 7 members in one poll, and asserts exact batch composition and per-repo 'merged integration PR' / 'opened draft CI PR' counts on RepoAlpha/main",
       "entry": "Queued",
       "traversal": "none"
     },
