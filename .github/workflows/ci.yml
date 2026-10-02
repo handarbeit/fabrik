@@ -93,6 +93,14 @@ jobs:
       # login: fake subprocesses, recorded `go test -json` streams and real git
       # on scratch repos. (These were nine `bash scripts/e2e/*_test.sh` steps.)
 
+      # #1957: scripts/lib/killgroup.sh is the ownership-checked group-kill
+      # helper scripts/sim/run.sh sources (the e2e gate runner is Go now and
+      # reaps through internal/sessionreap). killgroup_test.sh covers the
+      # helper directly: R4 refusals, live own group, post-exit grandchild,
+      # foreign leader.
+      - name: killgroup helper test (#1957)
+        run: bash scripts/lib/killgroup_test.sh
+
       # cut-release.sh's flag parsing — in particular --skip-integration's
       # validation (R2, #1454) — sourced and exercised directly via
       # parse_args(), never reaching main() (the real publish sequence). No
