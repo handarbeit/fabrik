@@ -19,7 +19,7 @@ import (
 type legRecorder struct {
 	ledger     *Ledger
 	leg        string // "auth/train"
-	cell       string // archive-safe cell name (distinguishes the isolated cell)
+	cell       string // archive-safe cell name
 	invocation string
 	head       string
 	hashes     map[string]string // test -> source hash
@@ -85,14 +85,9 @@ func newLegRecorder(l *Ledger, cell Cell, invocation, head string, hashes map[st
 	}
 }
 
-// cellDirName names a cell for the archive and for void scoping: the two "on"
-// cells of one auth mode share a leg label but not a cell name.
+// cellDirName names a cell for the archive and for void scoping.
 func cellDirName(c Cell) string {
-	n := c.Auth + "-" + c.Train
-	if c.Isolated {
-		n += "-isolated"
-	}
-	return n
+	return c.Auth + "-" + c.Train
 }
 
 // Observe consumes one decoded event.

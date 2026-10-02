@@ -234,7 +234,9 @@
       ],
       "auth": "neutral",
       "train": "sensitive",
-      "train_reason": "its subject is the merge train"
+      "train_reason": "its subject is the merge train",
+      "exclusive": true,
+      "exclusive_reason": "stops and starts the bed to cold-start the engine's base-branch cache"
     },
     {
       "name": "TestMergeTrainConflictBisectPrefixRerere",
@@ -248,7 +250,9 @@
       ],
       "auth": "neutral",
       "train": "sensitive",
-      "train_reason": "its subject is the merge train"
+      "train_reason": "its subject is the merge train",
+      "default_base_train": true,
+      "default_base_train_reason": "analyses the whole repo log window (Claude invocation, prefix reuse, 'main moved' lines are not partition-scoped) and needs an exact [A,B,C,P] batch on RepoAlpha/main"
     },
     {
       "name": "TestMergeTrainHappyPathLanding",
@@ -264,7 +268,9 @@
       "auth": "sensitive",
       "auth_reason": "credentialed trial-branch push, integration PR and landing under each auth mode (ADR-1846); the one train test that carries the credential check",
       "train": "sensitive",
-      "train_reason": "its subject is the merge train"
+      "train_reason": "its subject is the merge train",
+      "default_base_train": true,
+      "default_base_train_reason": "stays on protected main as the production-shaped default-partition landing proof (ADR-1648); shared yolo tests also enqueue there under train on"
     },
     {
       "name": "TestMergeTrainQueuedDeeperThanBatchCap",
@@ -279,7 +285,9 @@
       ],
       "auth": "neutral",
       "train": "sensitive",
-      "train_reason": "its subject is the merge train"
+      "train_reason": "its subject is the merge train",
+      "default_base_train": true,
+      "default_base_train_reason": "asserts exact batch composition and counts per-repo (not per-partition) 'merged integration PR' / 'opened draft CI PR' log lines on RepoAlpha/main"
     },
     {
       "name": "TestMergeTrainRedSingletonReroutesOffQueued",
@@ -306,7 +314,9 @@
       ],
       "auth": "neutral",
       "train": "sensitive",
-      "train_reason": "its subject is the merge train"
+      "train_reason": "its subject is the merge train",
+      "exclusive": true,
+      "exclusive_reason": "restarts the bed mid-landing (RestartFabrikTestBed), dropping every other test's in-flight work"
     },
     {
       "name": "TestMergeTrainRunawayGuardPausesBatch",
@@ -319,7 +329,9 @@
       ],
       "auth": "neutral",
       "train": "sensitive",
-      "train_reason": "its subject is the merge train"
+      "train_reason": "its subject is the merge train",
+      "exclusive": true,
+      "exclusive_reason": "deliberately trips the bed-wide merge-train runaway guard, poisoning the repo's trial counters and pausing members (collides with TestCrossRepoSpawn, #1395); not statically detectable"
     },
     {
       "name": "TestMergeTrainSingletonFastPathLandsExactlyOnce",
@@ -347,7 +359,9 @@
       ],
       "auth": "neutral",
       "train": "sensitive",
-      "train_reason": "its subject is the merge train"
+      "train_reason": "its subject is the merge train",
+      "default_base_train": true,
+      "default_base_train_reason": "its subject is the default-base (main) partition running next to a throwaway base's"
     },
     {
       "name": "TestNoWorkNeeded",
@@ -437,7 +451,9 @@
       ],
       "auth": "neutral",
       "train": "sensitive",
-      "train_reason": "its subject is the Queued holding stage and the train's comment eject"
+      "train_reason": "its subject is the Queued holding stage and the train's comment eject",
+      "default_base_train": true,
+      "default_base_train_reason": "needs the slow-gate required check on main; unverifiable that it fires on a non-default base, and asserts exact batch composition on RepoAlpha/main"
     },
     {
       "name": "TestReviewAuthorityAdvisoryRegressionGuard",
@@ -522,7 +538,9 @@
         "*/*"
       ],
       "auth": "neutral",
-      "train": "neutral"
+      "train": "neutral",
+      "exclusive": true,
+      "exclusive_reason": "stops the bed and rewrites its train-mode .env, then restarts it (the gate also runs it as each leg's restart step)"
     },
     {
       "name": "TestYoloAutoMergeLabel",

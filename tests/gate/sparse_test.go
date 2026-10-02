@@ -60,13 +60,11 @@ func sparseIn(modes ...string) PlanInput {
 }
 
 func TestPlanCellsSparseDefault(t *testing.T) {
-	iso := "^(" + TrainIsolatedRE + ")$"
-	skip := "-skip " + TrainIsolatedRE
 	got := summaries(PlanCells(sparseIn("pat", "app")))
 	want := []string{
-		// baseline first: every test, with the isolated scenario split off as today
-		"app/on@2 " + skip,
-		"app/on@2 -run " + iso + " [isolated]",
+		// baseline first: every test (the exclusive runaway-guard scenario is the
+		// last phase of this cell, not a cell of its own — #1977)
+		"app/on@2",
 		// other train mode, same auth: train-sensitive, minus structural */off skips
 		"app/off@4 -run ^(TestBoth|TestTrainOnly)$",
 		// other auth mode, same train: auth-sensitive, minus the App-only test
@@ -96,8 +94,7 @@ func TestPlanCellsSparseRequiredSet(t *testing.T) {
 		!reflect.DeepEqual(req["pat/off"], []string{"TestBoth"}) {
 		t.Errorf("required = %v", req)
 	}
-	// Every test runs in the baseline exactly once, and the isolated scenario in
-	// exactly one cell per leg label.
+	// Every test is selected by exactly one cell per leg label.
 	runs := map[string]int{}
 	for _, c := range PlanCells(in) {
 		sel, _ := SelectedTests(in.Sparse.Live, c.Args)
@@ -112,37 +109,7 @@ func TestPlanCellsSparseRequiredSet(t *testing.T) {
 	}
 }
 
-func TestPlanCellsSparseIsolatedScenarioPlacement(t *testing.T) {
-	in := sparseIn("app", "pat")
-	// Make the isolated scenario auth- and train-sensitive: it must then get its
-	// own cell in every leg it belongs to, and never share one with the main cell.
-	e := in.Sparse.Entries[TrainIsolatedRE]
-	e.Auth, e.SkipOKLegs = registry.Sensitive, nil
-	in.Sparse.Entries[TrainIsolatedRE] = e
-	iso := "^(" + TrainIsolatedRE + ")$"
-	per := map[string]int{}
-	for _, c := range PlanCells(in) {
-		if c.Isolated {
-			per[c.Label()]++
-			if !reflect.DeepEqual(c.Args, []string{"-run", iso}) {
-				t.Errorf("isolated cell args = %v", c.Args)
-			}
-			continue
-		}
-		if strings.Contains(strings.Join(c.Args, " "), TrainIsolatedRE) && !reflect.DeepEqual(c.Args, []string{"-skip", TrainIsolatedRE}) {
-			t.Errorf("%s main cell must not select the isolated scenario: %v", c.Label(), c.Args)
-		}
-	}
-	for _, l := range []string{"app/on", "app/off", "pat/on", "pat/off"} {
-		if per[l] != 1 {
-			t.Errorf("%s has %d isolated cells, want 1", l, per[l])
-		}
-	}
-}
-
 func TestPlanCellsSparseNarrowingFilters(t *testing.T) {
-	skip := "-skip " + TrainIsolatedRE
-	iso := "^(" + TrainIsolatedRE + ")$"
 	cases := []struct {
 		name string
 		mut  func(*PlanInput)
@@ -151,9 +118,9 @@ func TestPlanCellsSparseNarrowingFilters(t *testing.T) {
 		{"E2E_AUTH_MODE=pat is a partial run: no baseline", func(p *PlanInput) { p.AuthModes = []string{"pat"} },
 			[]string{"pat/on@2 -run ^(TestAuthOnly|TestBoth|TestPATOnly)$", "pat/off@4 -run ^(TestBoth)$"}},
 		{"E2E_AUTH_MODE=app", func(p *PlanInput) { p.AuthModes = []string{"app"} },
-			[]string{"app/on@2 " + skip, "app/on@2 -run " + iso + " [isolated]", "app/off@4 -run ^(TestBoth|TestTrainOnly)$"}},
+			[]string{"app/on@2", "app/off@4 -run ^(TestBoth|TestTrainOnly)$"}},
 		{"E2E_TRAIN_MODE=on runs at E2E_PARALLEL", func(p *PlanInput) { p.TrainMode = "on" },
-			[]string{"app/on@4 " + skip, "app/on@4 -run " + iso + " [isolated]", "pat/on@4 -run ^(TestAuthOnly|TestBoth|TestPATOnly)$"}},
+			[]string{"app/on@4", "pat/on@4 -run ^(TestAuthOnly|TestBoth|TestPATOnly)$"}},
 		{"E2E_TRAIN_MODE=off", func(p *PlanInput) { p.TrainMode = "off" },
 			[]string{"app/off@4 -run ^(TestBoth|TestTrainOnly)$", "pat/off@4 -run ^(TestBoth)$"}},
 		{"a caller -run is intersected with every cell and keeps passthrough args", func(p *PlanInput) {
@@ -169,10 +136,10 @@ func TestPlanCellsSparseNarrowingFilters(t *testing.T) {
 		}, []string{
 			"app/on@2 -run ^(TestBoth)$/case", "app/off@4 -run ^(TestBoth)$/case",
 			"pat/on@2 -run ^(TestBoth)$/case", "pat/off@4 -run ^(TestBoth)$/case"}},
-		{"passthrough args follow the narrowed -run and never reach the isolated cell", func(p *PlanInput) {
+		{"passthrough args follow the narrowed -run", func(p *PlanInput) {
 			p.Args = []string{"-v"}
 		}, []string{
-			"app/on@2 " + skip + " -v", "app/on@2 -run " + iso + " [isolated]",
+			"app/on@2 -v",
 			"app/off@4 -run ^(TestBoth|TestTrainOnly)$ -v", "pat/on@2 -run ^(TestAuthOnly|TestBoth|TestPATOnly)$ -v",
 			"pat/off@4 -run ^(TestBoth)$ -v"}},
 		{"an unrecognised forced train mode falls through to the full plan (the restart step rejects it)", func(p *PlanInput) {
@@ -195,7 +162,7 @@ func TestPlanCellsNilSparseIsTheFullMatrix(t *testing.T) {
 	in := PlanInput{AuthModes: []string{"pat", "app"}, Parallel: "4", ParallelOn: "2"}
 	withNil := in
 	withNil.Sparse = nil
-	if !reflect.DeepEqual(PlanCells(in), PlanCells(withNil)) || len(PlanCells(in)) != 6 {
+	if !reflect.DeepEqual(PlanCells(in), PlanCells(withNil)) || len(PlanCells(in)) != 4 {
 		t.Fatalf("a nil Sparse must plan the full 2×2: %q", summaries(PlanCells(in)))
 	}
 }
@@ -267,7 +234,8 @@ func TestFullMatrixKeepsTheWholeSuitePerLeg(t *testing.T) {
 	if code := f.g.Run(context.Background(), nil); code != 0 {
 		t.Fatalf("exit = %d", code)
 	}
-	if got := strings.Join(lastSuite(f).Args, " "); strings.Contains(got, "-run") {
+	// The phase split names every selected test (#1977) but must not drop any.
+	if got := strings.Join(lastSuite(f).Args, " "); !strings.Contains(got, "TestAlpha") || !strings.Contains(got, "TestBravo") {
 		t.Errorf("E2E_MATRIX=full must not narrow the leg: %s", got)
 	}
 }

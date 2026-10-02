@@ -165,8 +165,8 @@ func TestSkipMessageAndCitedIssues(t *testing.T) {
 			}
 		}
 	}
-	if !strings.Contains(cellDirName(Cell{Auth: "app", Train: "on", Isolated: true}), "isolated") {
-		t.Error("isolated cells need their own name")
+	if got := cellDirName(Cell{Auth: "app", Train: "on"}); got != "app-on" {
+		t.Errorf("cellDirName = %q", got)
 	}
 }
 

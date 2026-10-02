@@ -23,12 +23,13 @@ legs, each a bed restart (`TestSwitchTrainMode`) plus `go test -tags=e2e -json` 
 ## Where the follow-on chain plugs in (R5)
 
 The seams below are all in use: #1972 (ledger), #1973 (INCONCLUSIVE), #1974 (probes) and
-#1975 (the sparse plan) plug into them; #1976/#1977 are still to come.
+#1975 (the sparse plan) plug into them; #1976 is still to come (#1977 added the phase seam).
 
 | Seam | Where | Used by |
 |---|---|---|
-| `Cell` (auth, train, parallel, args, isolated) and `PlanCells` (`PlanInput.Sparse` selects the sparse plan) | `schedule.go` | **#1975's sparse matrix** (below), #1976 multi-bed |
-| `Scheduler` interface (`SerialScheduler` today) on `Gate` | `schedule.go` | #1976, #1977 two-phase legs |
+| `Cell` (auth, train, parallel, args) and `PlanCells` (`PlanInput.Sparse` selects the sparse plan) | `schedule.go` | **#1975's sparse matrix** (below), #1976 multi-bed |
+| `Scheduler` interface (`SerialScheduler` today) on `Gate` | `schedule.go` | #1976 multi-bed |
+| `Phase`, `PlanPhases`, `retryPhases` — a cell's shared / default-base-train / exclusive `go test` invocations | `phases.go` | **#1977's two-phase leg** (below) |
 | `LegResult` (cell, exit code, log path, decoded `[]Event`, budget before/after) delivered to `Gate.OnLeg` | `leg.go` | other observers. **#1972's ledger does not use it** — it records from `suiteWriter`'s event sink (`ledger_recorder.go`), because `OnLeg` never fires for a killed, RUN INVALID, watchdog or restart-failed leg |
 | `Classification` (pass/fail/skip/**inconclusive**/running/never-started) | `events.go` | #1973 added INCONCLUSIVE — see "INCONCLUSIVE and bounded retry" below |
 | `Ledger`, `Evaluator`, `Report` and `RequiredTests`/`ResumeCells` over `PlanCells` output | `ledger*.go`, `coverage.go`, `resume.go` | #1972; #1975's sparse plan changed the required set with no change here — `Report` only gained the `Matrix`/`FullMatrixPairs` fields for the summary |
@@ -44,14 +45,14 @@ test's registry entry) it plans four logical cells in run order, grouped by auth
 
 | Cell | Selected tests |
 |---|---|
-| `app/on` (baseline) | every live test; `-skip TrainIsolatedRE` plus the isolated cell, as before |
+| `app/on` (baseline) | every live test (the caller's arguments pass through; the exclusive runaway-guard test is the last phase of this cell, #1977) |
 | `app/off` | `train: sensitive` |
 | `pat/on` | `auth: sensitive` |
 | `pat/off` | sensitive on both axes |
 
 A non-baseline cell drops the pairs a test's `skip_ok_legs` matches, selects the rest with one
 anchored `-run ^(…)$` (`narrowArgs`, keeping other passthrough arguments and any caller subtest
-filter), splits the isolated scenario into its own cell only when it is selected, and is dropped
+filter), and is dropped
 entirely — bed restart included — when nothing is left. A caller `-run` is intersected with each
 cell's selection; `E2E_AUTH_MODE` / `E2E_TRAIN_MODE` filter the finished plan, so a `pat`-only or
 `off`-only invocation omits the baseline and is a partial run. A forced train mode other than
@@ -66,7 +67,7 @@ The required set is still `RequiredTests(PlanCells(…))` with no caller argumen
 set cannot diverge. `gate run` prints `== E2E_MATRIX=<mode>: N cell(s): …` before the first leg, and
 the coverage summary ends with `required set (E2E_MATRIX=<mode>): N (test, leg) pairs of M in the
 full 2×2` (also on the release-notes line). `sparse_test.go` covers the plan, the filters, the
-isolated-scenario placement, the gate-level agreement of plan and required set, and `--resume` over
+the gate-level agreement of plan and required set, and `--resume` over
 a sparse plan, all with the fake `Commander`.
 
 ## `run.sh` function → Go
@@ -106,7 +107,7 @@ All 29 functions of the bash `run.sh`, plus its top-level code.
 | `_post_suite_watchdog_signal` | `leg.go`: the `timer.C` branch of `RunLeg`'s `select` |
 | `switch_and_run` | `leg.go`: `Gate.RunLeg`, `postSuiteTail`, `watchStall`, `suiteWriter` |
 | `print_sim_parity_summary` | `parity.go`: `Gate.PrintSimParitySummary` (reads the registry through `tests/e2e/registry`) |
-| dispatch guard: precondition order, `TRAIN_ISOLATED_RE`, `caller_has_run`, the auth × train loop | `gate.go`: `Gate.Run`; `schedule.go`: `TrainIsolatedRE`, `PlanCells`, `SerialScheduler`; `args.go`: `ParseRunArgs`, `HasRunFlag` |
+| dispatch guard: precondition order, `TRAIN_ISOLATED_RE`, `caller_has_run`, the auth × train loop | `gate.go`: `Gate.Run`; `schedule.go`: `PlanCells`, `SerialScheduler`; `args.go`: `ParseRunArgs`, `HasRunFlag`. `TRAIN_ISOLATED_RE` and its separate cell are gone (#1977): the runaway-guard test is `exclusive` in the registry and the last phase of its cell (`phases.go`) |
 | `reset.sh` (`gh_`, `close_open_prs_in`, `close_open_issues_in`, `delete_fabrik_branches_in`, `resolve_project_id`, `drain_board`, `--worktrees`) | `reset.go`: `Gate.Reset` (`gate reset [--worktrees]`) |
 
 ## Bash test case → Go test
@@ -165,8 +166,32 @@ a run" is the operator's view; this is the map.
 
 Deltas this adds to the port: `ParseRunArgs` consumes `--clean` **and** `--resume` as leading flags
 in either order; exit code 8 exists (only under `--resume` and `coverage`); the per-leg `-json` log
-moves into the archive when the ledger is on (the `$TMPDIR` name, and its main/isolated overwrite
-quirk, remain when it is off); and `RunLeg` starts an archive/sampler before the restart step.
+moves into the archive when the ledger is on (the `$TMPDIR` name remains when it is off; a multi-phase leg suffixes each phase, `go-test.shared.json`); and `RunLeg` starts an archive/sampler before the restart step.
+
+## The two-phase leg (#1977, ADR-1977)
+
+One cell is still one bed restart (`TestSwitchTrainMode`), but the `go test` after it is split by
+the registry's isolation class (`exclusive`, `default_base_train`, else shared) into up to three
+invocations run in this order: **shared** at the cell's `-parallel` (`E2E_PARALLEL` /
+`E2E_PARALLEL_ON`, defaults 4 / 2 — unchanged from before #1977; 8 / 4 is the value to try once the bed's `max_concurrent` is 10 and a measured leg supports it; INCONCLUSIVE-retry spend is its own `retry` entry in `phases.json`), then **default-base-train** at `-parallel 1`, then **exclusive** at
+`-parallel 1`. Exclusive last means a shared test never inherits what an exclusive one left, with no
+extra bed restart; default-base-train follows shared because shared yolo tests also enqueue on
+`RepoAlpha/main` under train `on`.
+
+| Piece | Where | Notes |
+|---|---|---|
+| `PlanPhases(cell, live, classes)` | `phases.go` | pure; runs *after* every selection mechanism (caller `-run`/`-skip`, `--resume` rewrite, sparse narrowing) via `SelectedTests`, then one `narrowArgs` per phase (a caller subtest suffix survives). Excludes `TestSwitchTrainMode` (the leg's own restart step); an unknown test is exclusive; nil `classes` is the single undivided phase |
+| `RunLeg` | `leg.go` | phases run in order into **one** `legRecorder` (ledger keys and the required set are unchanged; a killed leg keeps what finished). Every phase runs even after a red one, the first non-zero exit is the leg's; it stops early only on cancel, an incomplete phase (timeout kill) or the rate-limit backoff. RUN INVALID, the watchdog and the budget report stay once per leg in `postSuiteTail` |
+| `retryPhases` | `phases.go` | a #1973 retry regroups the inconclusive set through the same phase builder, so a retried exclusive test is re-run serially and a retried shared test at the shared `-parallel`, in phase order |
+| `Gate.liveTests`/`isolation` | `gate.go`, `ledger_wire.go` | set by `setPhaseInputs` from the registry the plan already loads; unavailable → loud warning and one undivided `go test` per leg |
+| `PeakConcurrent`, `PhaseStat`, `LegSummary` | `events.go`, `metrics.go` | per-phase wall-clock, peak concurrent tests (from stream order: `run`/`cont` +1, `pause`/terminal −1), GraphQL spend (a budget probe at each phase boundary) and the host's peak load; printed after the suite and archived as `phases.json` |
+| load sampler | `archive.go` | `legArchive` samples the load average on the archive cadence; `load.json` gains `peak_1m` and `samples` |
+| `BedMaxConcurrent`, `noteBedConcurrency` | `bedconcurrency.go` | reads the bed's effective `max_concurrent` (`.env` `FABRIK_MAX_CONCURRENT`, then `config.yaml`, then 5), archives it as `bed-concurrency.json` and warns — never blocks — when it is below the widest `-parallel` |
+
+Tests (`phases_test.go`, fake `Commander`, no bed or network): phase order and the "shared never
+follows a serial phase" rule, selection by `-run` / `--resume` rewrite / subtest suffix, retry
+classification, first-non-zero-exit, early stop on an incomplete phase, killed-leg recording, the
+summary and peak-concurrent derivations, the load sampler and the `max_concurrent` precedence.
 
 ## INCONCLUSIVE and bounded retry (#1973, ADR-1973)
 
@@ -266,7 +291,7 @@ Quirks preserved on purpose:
 - `cut-release.sh`'s `interpret_e2e_exit_code` has no case for exit `6`; it falls through to its
   generic branch, exactly as before. Not changed here.
 - `--clean` is honoured only as the first argument; a `-run` anywhere in the arguments skips the
-  reviewer check and the forced isolated leg.
+  reviewer check.
 - The restart step (`TestSwitchTrainMode`) still has none of the classification/teardown
   machinery the suite step has (its documented KNOWN GAP).
 

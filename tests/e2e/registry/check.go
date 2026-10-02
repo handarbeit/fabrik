@@ -93,6 +93,7 @@ func validateEntry(e Entry, simSet map[string]bool) []string {
 		add("unknown parity %q (want %q, %q or %q)", e.Parity, ParitySim, ParityLiveOnly, ParityGap)
 	}
 	out = append(out, validateSensitivity(e)...)
+	out = append(out, validateIsolation(e)...)
 	for _, p := range e.SkipOKLegs {
 		if !validLegPattern(p) {
 			add("malformed skip_ok_legs pattern %q (want \"<auth>/<train>\" with auth pat|app|*, train off|on|*)", p)
@@ -133,6 +134,72 @@ func validateSensitivity(e Entry) []string {
 		add("a %s test must be auth: %s", selfRecognitionMarker, Sensitive)
 	}
 	return out
+}
+
+// validateIsolation checks the two #1977 markers: a reason is required and must
+// be one non-empty line iff its flag is set, and a test is at most one class.
+func validateIsolation(e Entry) []string {
+	var out []string
+	add := func(format string, args ...any) {
+		out = append(out, e.Name+": "+fmt.Sprintf(format, args...))
+	}
+	marker := func(field string, on bool, reason string) {
+		if on {
+			if strings.TrimSpace(reason) == "" {
+				add("%s is true but %s_reason is empty (every isolation mark needs a one-line reason)", field, field)
+			}
+			if strings.ContainsAny(reason, "\r\n") {
+				add("%s_reason must be a single line", field)
+			}
+		} else if reason != "" {
+			add("%s_reason is only valid with %s: true", field, field)
+		}
+	}
+	marker("exclusive", e.Exclusive, e.ExclusiveReason)
+	marker("default_base_train", e.DefaultBaseTrain, e.DefaultBaseTrainReason)
+	if e.Exclusive && e.DefaultBaseTrain {
+		add("exclusive and default_base_train are mutually exclusive (a test has one isolation class)")
+	}
+	return out
+}
+
+// CheckBedLifecycleCallers reports every live test in callers (the set that
+// reaches a bed stop/start/restart or a bed .env rewrite, from
+// ScanBedLifecycleCallers) whose registry entry is not exclusive. Entries that do
+// not exist are Check's concern, not this one's.
+func CheckBedLifecycleCallers(reg *Registry, callers []string) []string {
+	byName := map[string]Entry{}
+	for _, e := range reg.Tests {
+		byName[e.Name] = e
+	}
+	var problems []string
+	for _, n := range callers {
+		if e, ok := byName[n]; ok && !e.Exclusive {
+			problems = append(problems, fmt.Sprintf("%s: reaches a bed lifecycle call (%s) and so must be exclusive: true with an exclusive_reason",
+				n, strings.Join(BedLifecycleCalls, " / ")))
+		}
+	}
+	return problems
+}
+
+// CheckParallelConsistency reports every live test whose t.Parallel() use
+// disagrees with its class: a shared test must call t.Parallel() (otherwise it
+// would silently run serially at the head of the shared phase, with no gain) and
+// a default-base-train or exclusive test must not (it is serialised by its phase,
+// and a stray t.Parallel() would let it overlap its phase peers). parallel is the
+// set from ScanParallelTests.
+func CheckParallelConsistency(reg *Registry, parallel []string) []string {
+	par := toSet(parallel)
+	var problems []string
+	for _, e := range reg.Tests {
+		switch cls := e.Isolation(); {
+		case cls == IsolationShared && !par[e.Name]:
+			problems = append(problems, fmt.Sprintf("%s: is shared but does not call t.Parallel() (it would run serially in the shared phase)", e.Name))
+		case cls != IsolationShared && par[e.Name]:
+			problems = append(problems, fmt.Sprintf("%s: is %s but calls t.Parallel() (it must run serially in its phase)", e.Name, cls))
+		}
+	}
+	return problems
 }
 
 // CheckIdentityCallers reports every live test in callers (the set of tests that

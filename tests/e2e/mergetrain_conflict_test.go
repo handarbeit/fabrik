@@ -72,6 +72,12 @@ import (
 // with TestMergeTrainRedSingletonReroutesOffQueued, a non-parallel test runs to
 // completion before any parallel Alpha merge-train scenario resumes.
 //
+// Default-base train group (#1977, ADR-1977): registry class default_base_train. It is
+// NOT moved onto a throwaway base: analyzeConflictTrainLog reads the whole repo log
+// window (Claude-invocation, "reusing a recorded prefix" and "main moved" lines that
+// are not partition-scoped), so a concurrent train on another base of RepoAlpha would
+// corrupt A4/A5. The gate runs it serially in its own phase, after the shared one.
+//
 // Batch-composition race. A worker dispatches on the first poll that sees ANY Queued
 // member, and each member's creation is many seconds of gh calls. So all four members
 // are fully prepared first (P's PR last, giving its own CI the least time to finish),

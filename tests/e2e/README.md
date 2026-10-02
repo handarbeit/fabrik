@@ -224,9 +224,10 @@ instantly under `off`) is the one that exhausts the budget.
 **Mitigation shipped in #1527 (does not touch the settle scans' per-item
 correctness guarantees):**
 
-- **`E2E_PARALLEL_ON`** (default 2, half of `E2E_PARALLEL`'s default 4) caps
-  concurrency specifically on the two-mode gate's `on` leg, shrinking the
-  population those scans iterate. `off` and any forced single-mode run
+- **`E2E_PARALLEL_ON`** (default 2, half of `E2E_PARALLEL`'s default 4; both
+  unchanged by #1977) caps the shared phase's concurrency specifically
+  on the two-mode gate's `on` leg, shrinking the population those scans
+  iterate. `off` and any forced single-mode run
   (`E2E_TRAIN_MODE` set explicitly) are unaffected — they keep using
   `E2E_PARALLEL`.
 - **Fail-loud detection (R2), independent of whether the cap above is enough:**
@@ -719,8 +720,10 @@ timeout instead of skipping. Only run in the `on` leg of the two-mode gate.
       the mode the defect needs. ADR-1833's wording is historical.
     - **Not parallel**, on `RepoAlpha`/`main` (the default partition production
       uses). Any other Queued member on the same (repo, base) would join the
-      partition and change the batch composition; Go runs non-parallel tests to
-      completion before resuming parallel ones, so no `run.sh` change is needed.
+      partition and change the batch composition, so it is registry class
+      `default_base_train` (#1977): the gate runs it serially, after the shared
+      phase. Its A2/A3 assertions count per-repo (not per-partition) engine log
+      lines, which is why it was not moved onto a throwaway base.
     - **Batch gating.** The engine has no batching dwell, so members are filed
       carrying `fabrik:paused`, all seven are placed in `Queued`, then the label
       is removed from all seven concurrently (REST). Paused Queued members are
@@ -762,10 +765,11 @@ timeout instead of skipping. Only run in the `on` leg of the two-mode gate.
     `train-poison-guard` required on Alpha) plus:
     - **Real Claude usable from the `Queued` holding stage.** The default tool set
       (`Bash(git:*)`, Edit, Write) is enough; nothing else is configured.
-    - **Non-parallel** (no `t.Parallel()`), for the same reason as the red-singleton
-      scenario: the train batches every item in `Queued` on a repo, so a concurrent
-      sibling would join and break the batch shape. It runs to completion before any
-      parallel Alpha train scenario resumes.
+    - **Non-parallel** (no `t.Parallel()`): the train batches every item in `Queued`
+      on a (repo, base) partition, so a concurrent sibling would join and break the
+      batch shape. Registry class `default_base_train` (#1977): the gate runs it
+      serially after the shared phase. It reads the whole repo log window, so it was
+      not moved onto a throwaway base.
     - **Shape.** Four members queued A, B, C, P: A and B write the same path
       (`e2e/train/conflict/shared-<stamp>.txt`, outside `e2e/train/entries/`, so
       `train-poison-guard` cannot trip on it) with divergent content; C is clean; P
@@ -820,9 +824,10 @@ timeout instead of skipping. Only run in the `on` leg of the two-mode gate.
     #15–#18 (Queued column, `queued.yaml`, train-capable binary, `train-poison-guard`
     required on Alpha, which supplies the member's own check run — the scenario skips
     cleanly where it is not enrolled).
-    - **Non-parallel** (no `t.Parallel()`): `main` must not move (the fast path needs
-      the pinned base to be an ancestor of the member head) and no sibling may join the
-      batch. It runs to completion before any parallel Alpha train scenario resumes.
+    - **Own partition, shared** (#1977): the member runs on its own throwaway
+      `base:<branch>` that nothing else writes to, so the base cannot move (the fast
+      path needs the pinned base to be an ancestor of the member head) and no sibling
+      can join the batch. It is `t.Parallel()` and runs in the shared phase.
     - The member is *prepared*, not queued, until its own CI is complete and green and
       its `mergeable_state` is `clean`/`unstable`; it then fails loudly (never skips)
       if the log shows `singleton fast path not taken for #N`, so a bed that cannot
@@ -1458,8 +1463,8 @@ E2E_AUTH_MODE=pat E2E_TRAIN_MODE=off scripts/e2e/run.sh -run TestSmokeSingleRepo
 ```
 
 Leg labels in the reports carry both modes (e.g. `app/on`). The full default
-gate is therefore four suite runs (six `go test` legs, counting the isolated
-runaway-guard leg under each auth mode), roughly double the Claude quota of the
+gate is therefore four suite runs (each a bed restart followed by up to three
+phases, see "The two-phase leg" below), roughly double the Claude quota of the
 PAT-only gate. When only App legs are planned, the competing-token check warns
 instead of refusing: the bed engine spends the installation's own GraphQL
 budget, and only the harness's own calls share `FABRIK_TOKEN`'s. For the same
@@ -1525,6 +1530,108 @@ back to a lenient read of the bed's own `.env` for ad-hoc/manual runs where
 the switch step never ran. The "Mode" column in the Scenarios table below
 records which scenarios assert a mode-specific contract.
 
+#### The two-phase leg: exclusive, default-base-train and shared tests (#1977, ADR-1977)
+
+Each registry entry (`tests/e2e/registry/registry.json`, the only per-test list)
+has an isolation class, and the gate splits each leg into up to three `go test`
+invocations after the leg's single bed restart:
+
+| Phase | Registry marker | `-parallel` | Which tests |
+|---|---|---|---|
+| 1. shared | (none) | `E2E_PARALLEL` / `E2E_PARALLEL_ON` | everything that can run next to anything else |
+| 2. default-base-train | `default_base_train: true` + `default_base_train_reason` | 1 | tests that assert on the default-base (`RepoAlpha/main`) merge-train partition |
+| 3. exclusive | `exclusive: true` + `exclusive_reason` | 1 | tests that stop, restart or reconfigure the bed, or hold/poison bed-wide state |
+
+**Order.** Exclusive runs **last**, with no bed restart between phases, so a shared
+test always inherits a freshly restarted bed and never state an exclusive test left
+behind (the runaway guard poisoning RepoBeta's train counters for an hour is the
+motivating case). The default-base-train phase runs after the shared one because
+the shared yolo pipeline tests also enqueue into `RepoAlpha/main` under train `on`;
+the default-base tests assert on exact batch composition there, so they must
+overlap nothing shared.
+
+**The selection is unchanged.** The split sits after every selection mechanism —
+a caller `-run`/`-skip`, a `--resume` rewrite, the sparse plan's narrowing — and
+each phase just receives an anchored `-run` over its share of that selection
+(a caller's subtest suffix is kept). The coverage ledger's required (test, leg) set
+and keys are untouched, and one recorder takes every phase's event stream, so a
+killed leg keeps what had finished. Every phase runs even after a red one (the
+first non-zero exit code is the leg's); the run stops early only on a cancelled
+context, a phase that did not complete (a timeout kill — the bed state is unknown)
+or the engine's rate-limit backoff. INCONCLUSIVE retries (#1973) keep each test's
+class: a retried shared test re-runs at the shared `-parallel`, an exclusive one
+serially, in the same phase order. Because retries run after the exclusive phase, the
+bed is restarted before each retry attempt that re-runs a shared or default-base-train
+test (when the first run included an exclusive phase), so a retried test never inherits
+state an exclusive test left behind; a failed restart stops the retries. `TestSwitchTrainMode` is exclusive in the
+registry but is the leg's own restart step, so it is never a phase member.
+Without a readable registry the leg falls back to one undivided `go test`.
+
+**Classification rules** (all checked in plain `go test ./...`, `tests/e2e/registry`):
+
+- A test that reaches `StopFabrikTestBed`, `StartFabrikTestBed`,
+  `RestartFabrikTestBed` or a bed `.env` rewrite (`writeEnvFileValue`,
+  `applyBedAuthMode`) — directly, from a `t.Cleanup` closure or through a
+  same-package helper — must be `exclusive` with a reason
+  (`ScanBedLifecycleCallers`). A test that trips a bed-wide guard is not
+  statically detectable and is classified by hand: `TestMergeTrainRunawayGuardPausesBatch`.
+- A shared test must call `t.Parallel()` (otherwise it would run serially at the
+  head of the shared phase, with no gain) and a default-base-train or exclusive
+  test must not (`ScanParallelTests`).
+- A reason is required and one line when a marker is set, forbidden when not, and
+  a test has at most one class.
+
+**Merge-train tests and their outcome:**
+
+| Test | Class | Why |
+|---|---|---|
+| `TestSwitchTrainMode` | exclusive | stops the bed and rewrites its train-mode `.env` |
+| `TestMergeTrainRestartSafety` | exclusive | restarts the bed mid-landing |
+| `TestMergeTrainColdCacheBaseMember` | exclusive | stops and starts the bed (already on its own base) |
+| `TestMergeTrainRunawayGuardPausesBatch` | exclusive | trips the bed-wide runaway guard (hand-classified) |
+| `TestMergeTrainBisectionEjectsPoisoner` | shared, own partition | throwaway `base:` branch; removes a latent overlap with the other `RepoAlpha/main` tests |
+| `TestMergeTrainRedSingletonReroutesOffQueued` | shared, own partition | throwaway base; also stops writing to shared main |
+| `TestMergeTrainSingletonFastPathLandsExactlyOnce` | shared, own partition | throwaway base nothing else writes to |
+| `TestMergeTrainHappyPathLanding` | default-base-train | stays on protected main as the production-shaped landing proof |
+| `TestMergeTrainTwoBasesConcurrent` | default-base-train | its subject is main next to a throwaway base |
+| `TestMergeTrainQueuedDeeperThanBatchCap` | default-base-train | counts per-repo `merged integration PR` / `opened draft CI PR` log lines, which the engine does not scope to a partition |
+| `TestMergeTrainConflictBisectPrefixRerere` | default-base-train | analyses the whole repo log window; needs an exact batch on main |
+| `TestQueuedMemberCommentEjection` | default-base-train | needs the `slow-gate` required check on main; not verifiable on a non-default base |
+
+A test on its own base creates a throwaway branch (`CreateThrowawayBaseBranch`),
+queues members with the `base:<branch>` label (`QueueMemberPausedOnBase`,
+`PrepareMemberExactPathOnBase`), scopes its log reads to the `owner/repo:branch`
+train key and waits on `WaitForNoStaleTrainArtifactsOnBase`. The `train-poison-guard`
+workflow fires on any `pull_request` and is only *required* on main, so on a
+throwaway base the trial is still red but landing needs no branch protection. The
+three moves have not yet had a live pass on a throwaway base; if one cannot work
+there, move it back to `default_base_train` with the reason rather than forcing it.
+`staleQueuedMembers` is partition-aware (`""` is the default base, a branch name
+its own partition, `anyBase` the whole repo).
+
+**Per-phase measurements.** Each leg prints a summary (and archives it as
+`phases.json` next to `load.json`): wall-clock per phase and total, peak concurrent
+tests (derived from the `go test -json` stream), GraphQL points spent and the
+host's peak 1-minute load (`load.json` gains `peak_1m` and `samples`, sampled on the
+archive cadence). To choose `E2E_PARALLEL` for your bed, run one leg at the
+current defaults and one at the candidate and compare that block, the INCONCLUSIVE
+count and `peak_1m`; keep the value that holds the INCONCLUSIVE rate and peak load
+near their previous levels.
+
+**Bed concurrency.** The bed engine's worker cap must not be what bounds test
+parallelism. The gate cannot set it (the bed is launched with `-notui -poll N`
+and no `--max-concurrent`); it resolves as `FABRIK_MAX_CONCURRENT` in the bed's
+`.env`, then `max_concurrent` in `.fabrik/config.yaml`, then the default of 5.
+Set **`max_concurrent: 10`** in the bed's `config.yaml`. Every running test needs at
+least one slot, and the merge-train worker shares the same semaphore as the
+per-issue workers (one slot per active (repo, base) partition), so the working
+rule is `max_concurrent ≥ shared-phase -parallel`, with headroom for the tests that
+keep two issues in flight. Each leg's archive records the effective value
+(`bed-concurrency.json`, and the leg summary), and the gate warns — it never
+blocks — when it is below the widest `-parallel`. Raising `max_concurrent` in
+`config.yaml` changes the bed-config hash, so the ledger's "configurations differ"
+warning fires once for a SHA whose earlier invocations ran before the change.
+
 #### Parallelism cap — the shared bed oversubscribes easily
 
 16 of the 18 scenarios are `t.Parallel()`, but they **all drive one shared
@@ -1534,12 +1641,21 @@ an unbounded full run fires ~16 scenarios at once, floods the 5-worker bed, and
 saturates the API — producing cascading `transient gh error … (will retry)`
 timeouts **even though every scenario passes standalone** (see issue #971).
 
-`run.sh` therefore caps concurrency with `-parallel`, defaulting to **4**
-(`E2E_PARALLEL`):
+`run.sh` therefore caps concurrency with `-parallel`. Since #1977 the cap governs
+the **shared phase** of each leg and keeps its old defaults: **4** with train `off`
+(`E2E_PARALLEL`) and **2** with train `on` (`E2E_PARALLEL_ON`); the default-base-train
+and exclusive phases run serially and need no knob. **8 / 4 are the values to try**
+(`E2E_PARALLEL=8 E2E_PARALLEL_ON=4`), only once the bed's `max_concurrent` is 10 (see
+"Bed concurrency" above): at the bed's default of 5 they would run 8 tests against 5 engine
+workers, an untuned timing change that produces timeouts and INCONCLUSIVE outcomes. The
+defaults are raised only after a measured leg — wall-clock, INCONCLUSIVE rate and peak host
+load, from the leg summary and `phases.json` (INCONCLUSIVE-retry spend is its own `retry`
+entry there) — shows the higher values hold. The history below was derived at 4 and 2.
 
 ```bash
 E2E_PARALLEL=2 scripts/e2e/run.sh   # tighter cap for a heavy/merge-train-heavy run
-E2E_PARALLEL=6 scripts/e2e/run.sh   # looser, only if the bed's --max-concurrent is raised too
+E2E_PARALLEL=8 E2E_PARALLEL_ON=4 scripts/e2e/run.sh  # the values to try, with max_concurrent 10
+E2E_PARALLEL=12 scripts/e2e/run.sh  # looser, only if the bed's max_concurrent is raised too
 ```
 
 Lower values reduce oversubscription at the cost of wall-clock. The long
@@ -1649,12 +1765,13 @@ multi-scenario "on" leg (see "How the timeout/parallelism defaults are
 derived" above) — sits comfortably under the 15-minute default, so nothing
 found during Research/Plan indicted the issue's own starting-point values.
 
-**Expected warning on the isolated `TestMergeTrainRunawayGuardPausesBatch`
-leg.** This scenario runs alone (see `TrainIsolatedRE` in `tests/gate/config.go`),
+**Expected warning during the exclusive phase's `TestMergeTrainRunawayGuardPausesBatch`.**
+This scenario runs alone (it is `exclusive` in the registry, #1977; it replaced
+the old `TrainIsolatedRE` cell),
 deliberately queuing poison members until a 1-hour-windowed runaway guard
 fires, with no other parallel scenario keeping the combined output stream
 busy in the meantime. The stall detector is expected to warn during this
-leg on every healthy run — that is not a regression, and the warning text
+phase on every healthy run — that is not a regression, and the warning text
 is worded to read as informational rather than alarming.
 
 Composition with `E2E_GH_API_TIMEOUT`: a single hung `gh api` call is
@@ -1872,7 +1989,7 @@ ledger drift check: engine SHA 1a2b3c4 — VALID (3 test/gate-only path(s) diffe
 (exit 0 complete, 8 not) — what `cut-release.sh` calls. It never touches the bed.
 
 **Per-leg log archive.** Nothing a leg produces is overwritten by the next. Under
-`archive/<cell>/<invocation>/`: `go-test.json` (the `go test -json` stream), `fabrik.log.<n>`
+`archive/<cell>/<invocation>/`: one `go-test.<phase>.json` per phase (`shared`, `default-base-train`, `exclusive`; the `go test -json` stream — a bare `go-test.json` only without a registry), `fabrik.log.<n>`
 (the bed **engine** log, one file per engine run), `bed-run.log`, `preflight.txt`, `load.json`
 (the host's 1-minute load average at leg start and end) and `bed-config.sha256` (a hash of the
 bed's `.fabrik/stages/` and `config.yaml`; the runner warns when it differs between invocations
@@ -1930,7 +2047,7 @@ never inherits un-paused Queued members.
 
 **What the gate does.** At the end of each leg it re-runs **only that leg's inconclusive tests**
 (one `-run '^(A|B)$'` invocation per attempt, same cell: same auth/train mode, `-parallel`, bed,
-no restart; each attempt in its own log, `go-test.retry-N.json`), at most
+no restart — except the one before a non-exclusive retry after an exclusive phase ran, see the two-phase section; each attempt in its own log, `go-test.retry-N.<phase>.json`), at most
 `E2E_INCONCLUSIVE_RETRIES` times (default **2**, `0` disables). Retries run before the post-suite
 watchdog starts and before the RUN INVALID scan, so a long retry is not killed and throttling
 during one still voids the cell. No retry is attempted after a timeout kill, for a
@@ -2104,16 +2221,16 @@ the `Queued` column is absent, so it only runs in the gate's `on` leg.
 | `TestAppSelfRecognitionBlockedCommentUpdatedInPlace` | #1877 A2 (guards #1754): a changed `blockedBy` set edits Fabrik's single blocked comment in place; body reflects the new set | App legs only (skips in `pat`) | ~12–25 min (dep-blocked cooldown) | none |
 | `TestAppSelfRecognitionDurableReviewSuppression` | #1877 A3 (guards #1754): a bot-authored `review-ids-addressed` marker suppresses that review's redelivery; a non-self marker does not | App legs only (skips in `pat`) | ~8–15 min | ~$0.10–0.30 (one review-reinvoke) |
 | `TestMergeTrainHappyPathLanding` | ADR-059 internal train: 3 clean Queued members → one integration PR → all advance Queued→Done, PRs closed, no O(N²) per-member retests | Train-only (on) | 13–28 min (incl. exactly-once settle wait, #1874) | low (no Claude) |
-| `TestMergeTrainSingletonFastPathLandsExactlyOnce` | #1874 / ADR-1871: one clean member with green own CI, queued alone → landed by the **singleton fast path** (log `singleton fast path taken`, comment `Landed via singleton fast path PR #N.` citing its own PR) → exactly one landing comment and one issue close after a 3-poll settle wait. **Not parallel** (prerequisite #22a). Needs the `train-poison-guard` required check | Train-only (on) | 10–15 min (est.) | low (no Claude) |
+| `TestMergeTrainSingletonFastPathLandsExactlyOnce` | #1874 / ADR-1871: one clean member with green own CI, queued alone → landed by the **singleton fast path** (log `singleton fast path taken`, comment `Landed via singleton fast path PR #N.` citing its own PR) → exactly one landing comment and one issue close after a 3-poll settle wait. **Own throwaway base, shared** (#1977; prerequisite #22a). Needs the `train-poison-guard` required check | Train-only (on) | 10–15 min (est.) | low (no Claude) |
 | `TestMergeTrainBisectionEjectsPoisoner` | ADR-059 D4: red combined batch → halving bisection isolates the poison member → ejected → survivors land. Needs the `train-poison-guard` required check | Train-only (on) | 20–40 min | low–moderate |
-| `TestMergeTrainConflictBisectPrefixRerere` | #1848: 4-member batch (A/B same-path conflict, clean C, poison P) → **real Claude** resolves B onto A (small turn count) → red trial → bisect ejects P → first half reuses the recorded prefix with no Claude → A, B, C land, P off Queued; rerere replay asserted only if main moves. Needs the `train-poison-guard` required check. **Not parallel** — the train batches every Queued item (prerequisite #22) | Train-only (on) | 45–80 min (est.) | 1 Claude invocation (~$0.05–0.30) + ~11 CI cycles |
-| `TestMergeTrainRestartSafety` | ADR-059 D5 / #960: after a landing, a restart with the historical merged integration PR present does NOT stall the next batch (reconstruct proceeds fresh). **Not parallel** — restarts the bed | Train-only (on) | 28–53 min (incl. exactly-once settle wait, #1874) | low |
-| `TestMergeTrainColdCacheBaseMember` | ADR-1772 / ADR-1773: two `base:<branch>` members are queued **while the bed is stopped**, then the bed is started, so the first poll of the fresh process sees them with a cold cache. Asserts they are excluded as "not yet hydrated" (fail-as-vacuous if not), then land on the declared base: every `fabrik/merge-train/*` PR carrying a member targets that branch (state=all, whole window), no batch forms under the bare default key, member files are absent from `main`, and #1773's `REFUSING to open/reuse` line never fires. Files a blocked Specify "primer" issue to register the repo's `WorktreeManager` after the restart. Skips on a webhook-enabled bed. Posts no comments. **Not parallel** — stops the bed | Train-only (on) | 15–30 min | low (no Claude) |
-| `TestMergeTrainRunawayGuardPausesBatch` | ADR-059 D8 (#964/#965): persistently-red 4-member batch trips the runaway guard at cap=6, pauses all Queued members, no member reaches Done. Runs on RepoBeta for counter isolation. **Not parallel** — induces a repo-wide fault on RepoBeta that would collide with `TestCrossRepoSpawn`'s use of the same repo (#1395) | Train-only (on) | 10–20 min | low (no Claude) |
-| `TestMergeTrainQueuedDeeperThanBatchCap` | ADR-1833 / #1850: 7 clean members Queued against `max_batch_size` 5 → first trial holds exactly the first five, membership stays stable (one snapshot line, no unmerged-closed trial PR), all seven land as 5 then 2. Members are queued paused then released together. **Not parallel** — shares the (RepoAlpha, main) partition | Train-only (on) | 33–63 min (incl. exactly-once settle wait, #1874) | low (no Claude) |
+| `TestMergeTrainConflictBisectPrefixRerere` | #1848: 4-member batch (A/B same-path conflict, clean C, poison P) → **real Claude** resolves B onto A (small turn count) → red trial → bisect ejects P → first half reuses the recorded prefix with no Claude → A, B, C land, P off Queued; rerere replay asserted only if main moves. Needs the `train-poison-guard` required check. **Not parallel** — default-base-train class (#1977): the train batches every Queued item (prerequisite #22) | Train-only (on) | 45–80 min (est.) | 1 Claude invocation (~$0.05–0.30) + ~11 CI cycles |
+| `TestMergeTrainRestartSafety` | ADR-059 D5 / #960: after a landing, a restart with the historical merged integration PR present does NOT stall the next batch (reconstruct proceeds fresh). **Not parallel** — exclusive class (#1977): restarts the bed | Train-only (on) | 28–53 min (incl. exactly-once settle wait, #1874) | low |
+| `TestMergeTrainColdCacheBaseMember` | ADR-1772 / ADR-1773: two `base:<branch>` members are queued **while the bed is stopped**, then the bed is started, so the first poll of the fresh process sees them with a cold cache. Asserts they are excluded as "not yet hydrated" (fail-as-vacuous if not), then land on the declared base: every `fabrik/merge-train/*` PR carrying a member targets that branch (state=all, whole window), no batch forms under the bare default key, member files are absent from `main`, and #1773's `REFUSING to open/reuse` line never fires. Files a blocked Specify "primer" issue to register the repo's `WorktreeManager` after the restart. Skips on a webhook-enabled bed. Posts no comments. **Not parallel** — exclusive class (#1977): stops the bed | Train-only (on) | 15–30 min | low (no Claude) |
+| `TestMergeTrainRunawayGuardPausesBatch` | ADR-059 D8 (#964/#965): persistently-red 4-member batch trips the runaway guard at cap=6, pauses all Queued members, no member reaches Done. Runs on RepoBeta for counter isolation. **Not parallel** — exclusive class (#1977): induces a repo-wide fault on RepoBeta that would collide with `TestCrossRepoSpawn`'s use of the same repo (#1395) | Train-only (on) | 10–20 min | low (no Claude) |
+| `TestMergeTrainQueuedDeeperThanBatchCap` | ADR-1833 / #1850: 7 clean members Queued against `max_batch_size` 5 → first trial holds exactly the first five, membership stays stable (one snapshot line, no unmerged-closed trial PR), all seven land as 5 then 2. Members are queued paused then released together. **Not parallel** — default-base-train class (#1977): shares the (RepoAlpha, main) partition | Train-only (on) | 33–63 min (incl. exactly-once settle wait, #1874) | low (no Claude) |
 | `TestPauseLiftedOnlyByPostPauseHumanComment` | ADR-1813 / #1876: a human comment that predates a pause does not lift it (item parked off-board, commented, paused, then moved to Specify: refusal log line, labels hold ≥4 min, no 👀/🚀 on the old comment, exactly one `labeled` and no `unlabeled` `fabrik:paused` event); a post-pause human comment resumes it (👀→🚀 + `unlabeled` event) | Both | 10–15 min | $0.15–0.40 |
 | `TestCommentLandingGateHolds` | #1862 landing gate (ADR-1862): a human comment posted while the item has no Status, then the item moved into Validate (yolo, green CI, reviewer APPROVE) — the `comment-gate` hold line appears, the item is not merged/Queued/`fabrik:auto-merge-enabled` while the comment has no 🚀, the comment gets 👀 then 🚀, and only then does the item land (`closed_at` >= 🚀). Holds under both train modes; the `advance` "skipping stage" line the issue text names fires only for non-Validate stages, so `comment-gate` is asserted in both. Needs `FABRIK_REVIEWER_TOKEN` and `slow-gate`; skips otherwise | Both | 20–35 min per mode and auth leg | ~$0.10–0.50 (one comment-review Claude invocation) + one CI wait |
-| `TestQueuedMemberCommentEjection` | #1863 (ADR-1863): a Queued member receiving an unprocessed human comment is ejected — `🏭 **Fabrik merge-train — ejected (unprocessed comment)**` comment + `ejected for an unprocessed comment … (not paused, no ejection counted)` log line; never `fabrik:paused`, and no counted-ejection artifact (comment, `pausing after N ejections`, `ejected N time(s) — pausing`); the comment is then processed (👀 then 🚀) and the member re-queues and lands. An occupant member M1 holds a slow-gate trial so M2 is deterministically outside the batch. "Not counted" is asserted indirectly (the counter is in memory). **Not parallel** — shares the (RepoAlpha, main) partition. Needs `FABRIK_REVIEWER_TOKEN` and `slow-gate` | Train-only (on) | 35–60 min | ~$0.10–0.50 (one comment-review Claude invocation) + two trial CI cycles |
+| `TestQueuedMemberCommentEjection` | #1863 (ADR-1863): a Queued member receiving an unprocessed human comment is ejected — `🏭 **Fabrik merge-train — ejected (unprocessed comment)**` comment + `ejected for an unprocessed comment … (not paused, no ejection counted)` log line; never `fabrik:paused`, and no counted-ejection artifact (comment, `pausing after N ejections`, `ejected N time(s) — pausing`); the comment is then processed (👀 then 🚀) and the member re-queues and lands. An occupant member M1 holds a slow-gate trial so M2 is deterministically outside the batch. "Not counted" is asserted indirectly (the counter is in memory). **Not parallel** — default-base-train class (#1977): shares the (RepoAlpha, main) partition. Needs `FABRIK_REVIEWER_TOKEN` and `slow-gate` | Train-only (on) | 35–60 min | ~$0.10–0.50 (one comment-review Claude invocation) + two trial CI cycles |
 | `TestPostMergeCommentNotApplied` | #1862 post-merge guard: a human comment on an OPEN item whose PR already merged (member PR without a closing keyword, item parked at Implement, admin merge) gets `🏭 **Fabrik — comment not applied**` exactly once on the issue and on the PR, no 👀/🚀 on the comment, no `comments … processing` line, no `stage:Implement:in_progress`, branch tip unchanged. Fails loudly (never passes vacuously) if the item was already closed/moved before the comment | Both | 3–8 min | none (no Claude) |
 
 **Exactly-once landing assertion (#1874, regression coverage for #1871 / ADR-1871).**
@@ -2333,7 +2450,9 @@ exclusivity) is added as **fields on the same entries**, not as separate lists.
   queues its members while it is down, then starts it — see below) and
   `TestSwitchTrainMode` (restarts to flip `FABRIK_MERGE_TRAIN` for the
   two-mode gate — not itself a scenario, run only via `run.sh`'s mode-switch
-  step). All three are deliberately **not** `t.Parallel()`.
+  step). All three are deliberately **not** `t.Parallel()`, and all three are
+  registry class `exclusive` (#1977), as is `TestMergeTrainRunawayGuardPausesBatch`:
+  the gate runs them last in each leg, after every shared test.
 - `TestMergeTrainColdCacheBaseMember` is ordered **stop → queue → start**, not
   "queue, then restart". The bed polls every 60s, so a batch can form between
   queueing and a literal restart and the scenario would prove nothing. With the

@@ -44,26 +44,29 @@ import (
 // train-poison-guard required check on fabrik-test-alpha). Skips cleanly if
 // either prerequisite is absent.
 //
-// NOT t.Parallel(): the train forms from every item in Queued on a repo
-// (handleMergeTrainBatch snapshots the whole column), so a single-member batch run
-// concurrently with TestMergeTrainHappyPathLanding/TestMergeTrainBisectionEjectsPoisoner
-// (both t.Parallel() on the same RepoAlpha) risks this test's lone poison member being
-// batched together with a sibling test's clean members — which would route through
-// bisection/landOneAtATime instead of the top-level arity guard this test exists to
-// exercise. Dropping t.Parallel() guarantees this test runs to completion (Queued,
-// disposed, and cleaned up) before any parallel Alpha merge-train scenario begins
-// queueing its own members — the same "non-parallel completes first" guarantee
-// TestMergeTrainRunawayGuardPausesBatch's doc comment already documents and relies on.
+// Own partition (#1977, ADR-1977): the member runs on its own throwaway base:<branch>,
+// so it is the only Queued item in its (repo, base) partition (ADR-1648) however many
+// other train tests run alongside, and the arity guard it exists to exercise cannot be
+// bypassed by a sibling's clean members joining the batch. Before #1977 the test was
+// non-parallel on RepoAlpha/main for exactly that reason. A private base also stops
+// the "advance the base past the member" step from writing to shared main. The
+// train-poison-guard workflow fires on any pull_request and is only REQUIRED on main
+// (assertTrainPoisonGuardRequired still checks main: it proves the workflow is
+// enrolled); the trial's red result comes from the check run either way.
 //
 // Wall-clock: ~10–20 min (one combined validation — no bisection, no landing CI).
 // Cost: low (no Claude invocations).
 func TestMergeTrainRedSingletonReroutesOffQueued(t *testing.T) {
+	t.Parallel()
 	env := LoadEnv(t)
 	AssertFabrikRunning(t, env)
 	requireTrainBed(t, env)
 	assertTrainPoisonGuardRequired(t, env, env.RepoAlpha)
 
-	const base = "main"
+	repo := env.RepoAlpha
+	base := fmt.Sprintf("e2e-redsingleton-%s", time.Now().UTC().Format("20060102-150405"))
+	trainKey := repo + ":" + base // a non-default partition's key (mergeTrainKey)
+	CreateThrowawayBaseBranch(t, env, repo, base)
 	logStart := LogOffset(t, env)
 
 	// The member's own PR CI is pending at queue time (train-poison-guard delays its
@@ -73,18 +76,18 @@ func TestMergeTrainRedSingletonReroutesOffQueued(t *testing.T) {
 	// path is refused ("pinned base is N commit(s) ahead of the member's head"), so
 	// the train must build the single-member trial whose red result this tests.
 	stamp := time.Now().UTC().Format("20060102-150405.000")
-	issue, _, itemID := PrepareMemberExactPath(t, env, env.RepoAlpha, base, "redsingleton",
+	issue, _, itemID := PrepareMemberExactPathOnBase(t, env, repo, base, "redsingleton",
 		fmt.Sprintf("e2e/train/entries/redsingleton-%s.txt", stamp),
 		"POISON — #1545 red-singleton e2e member\n",
 	)
-	AdvanceBaseBranch(t, env, env.RepoAlpha, base,
+	AdvanceBaseBranch(t, env, repo, base,
 		fmt.Sprintf("e2e/train/entries/redsingleton-basebump-%s.txt", stamp), "base bump for the red-singleton member\n")
 	SetIssueStatus(t, env, itemID, "Queued")
-	AwaitBoardItemVisible(t, env, env.RepoAlpha, issue, awaitSeedTimeout)
+	AwaitBoardItemVisible(t, env, repo, issue, awaitSeedTimeout)
 	t.Logf("queued single poison member (issue #%d); awaiting red-singleton disposition", issue)
 
 	// The top-level arity guard's own log line — proves bisection was never reached.
-	WaitForLogLine(t, env, fmt.Sprintf("combined Validate RED for %s with a single member (#%d)", env.RepoAlpha, issue), logStart, 25*time.Minute)
+	WaitForLogLine(t, env, fmt.Sprintf("combined Validate RED for %s with a single member (#%d)", trainKey, issue), logStart, 25*time.Minute)
 	t.Logf("red-singleton disposition confirmed (bisection skipped)")
 
 	// R1: the board Status must have left Queued for the reroute target
@@ -94,7 +97,7 @@ func TestMergeTrainRedSingletonReroutesOffQueued(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Minute)
 	var lastStatus string
 	for time.Now().Before(deadline) {
-		lastStatus = projectStatus(t, env, env.RepoAlpha, issue)
+		lastStatus = projectStatus(t, env, repo, issue)
 		if lastStatus == "Validate" {
 			break
 		}
@@ -107,23 +110,23 @@ func TestMergeTrainRedSingletonReroutesOffQueued(t *testing.T) {
 
 	// The member is paused there — reachable this time, unlike the pre-#1545 pause
 	// inside Queued.
-	WaitForIssueLabel(t, env, env.RepoAlpha, issue, "fabrik:paused", 5*time.Minute)
-	WaitForIssueLabel(t, env, env.RepoAlpha, issue, "fabrik:awaiting-input", 5*time.Minute)
+	WaitForIssueLabel(t, env, repo, issue, "fabrik:paused", 5*time.Minute)
+	WaitForIssueLabel(t, env, repo, issue, "fabrik:awaiting-input", 5*time.Minute)
 	t.Logf("member #%d has fabrik:paused + fabrik:awaiting-input", issue)
 
 	// R4: the disposition comment names the reroute target and the working recovery
 	// action (fabrik:revalidate), not the stale "remove fabrik:paused" instruction
 	// that silently no-op'd against an already-stage:Validate:complete item.
-	WaitForIssueComment(t, env, env.RepoAlpha, issue, "own combined Validate is failing", 5*time.Minute)
-	WaitForIssueComment(t, env, env.RepoAlpha, issue, "has left the Queued column for Validate", 5*time.Minute)
-	WaitForIssueComment(t, env, env.RepoAlpha, issue, "fabrik:revalidate", 5*time.Minute)
+	WaitForIssueComment(t, env, repo, issue, "own combined Validate is failing", 5*time.Minute)
+	WaitForIssueComment(t, env, repo, issue, "has left the Queued column for Validate", 5*time.Minute)
+	WaitForIssueComment(t, env, repo, issue, "fabrik:revalidate", 5*time.Minute)
 	t.Logf("disposition comment confirmed: names Validate as the reroute target and fabrik:revalidate as the recovery action")
 
 	// Never landed.
-	if st := projectStatus(t, env, env.RepoAlpha, issue); st == "Done" {
+	if st := projectStatus(t, env, repo, issue); st == "Done" {
 		t.Fatalf("member #%d reached Done — red-singleton disposition should never land", issue)
 	}
 
-	WaitForNoStaleTrainArtifacts(t, env, env.RepoAlpha, 2*time.Minute)
+	WaitForNoStaleTrainArtifactsOnBase(t, env, repo, base, 2*time.Minute)
 	t.Logf("red-singleton reroute contract verified: single-member red batch -> arity guard -> reroute off Queued to Validate -> paused, reachable, correct recovery instruction")
 }

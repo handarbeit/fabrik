@@ -151,6 +151,15 @@ func calledIdents(n ast.Node) map[string]bool {
 	return out
 }
 
+// BedLifecycleCalls are the harness functions that stop, start, restart or
+// reconfigure the running bed. A test that reaches one takes over the whole bed
+// and so must be exclusive (#1977). writeEnvFileValue and applyBedAuthMode are the
+// bed .env rewrites behind a train-mode or auth-mode change.
+var BedLifecycleCalls = []string{
+	"StopFabrikTestBed", "StartFabrikTestBed", "RestartFabrikTestBed",
+	"writeEnvFileValue", "applyBedAuthMode",
+}
+
 // ScanIdentityAssertCallers returns the top-level Test* functions in dir
 // (tests/e2e) that reach one of IdentityAssertions: by calling it directly, or by
 // calling — transitively, by name, through same-directory non-test functions — a
@@ -158,11 +167,63 @@ func calledIdents(n ast.Node) map[string]bool {
 // identity assertion from the registry rule. The assertions themselves, and
 // anything they call, are never reported. Result is sorted.
 func ScanIdentityAssertCallers(dir string) ([]string, error) {
+	return scanReachingTests(dir, IdentityAssertions)
+}
+
+// ScanBedLifecycleCallers returns the top-level Test* functions in dir that reach
+// one of BedLifecycleCalls, directly, from a nested closure (a t.Cleanup that
+// brings the bed back up counts) or through a same-directory helper. Result is
+// sorted.
+func ScanBedLifecycleCallers(dir string) ([]string, error) {
+	return scanReachingTests(dir, BedLifecycleCalls)
+}
+
+// ScanParallelTests returns the top-level Test* functions in dir whose own body
+// calls t.Parallel() (any `<ident>.Parallel()`) outside a nested closure.
+// Result is sorted.
+func ScanParallelTests(dir string) ([]string, error) {
+	_, files, err := parseDir(dir, true)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, f := range files {
+		for _, d := range f.Decls {
+			fd, ok := d.(*ast.FuncDecl)
+			if !ok || !isTestFunc(fd) {
+				continue
+			}
+			found := false
+			ast.Inspect(fd.Body, func(x ast.Node) bool {
+				if _, ok := x.(*ast.FuncLit); ok {
+					return false // a subtest's t.Parallel() does not parallelise the top-level test
+				}
+				call, ok := x.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Parallel" && len(call.Args) == 0 {
+					found = true
+				}
+				return !found
+			})
+			if found {
+				out = append(out, fd.Name.Name)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// scanReachingTests returns the top-level Test* functions in dir that call one of
+// targets directly or transitively through same-directory non-test helpers.
+func scanReachingTests(dir string, targetNames []string) ([]string, error) {
 	_, files, err := parseDir(dir, false)
 	if err != nil {
 		return nil, err
 	}
-	targets := toSet(IdentityAssertions)
+	targets := toSet(targetNames)
 	type fn struct {
 		name  string
 		calls map[string]bool

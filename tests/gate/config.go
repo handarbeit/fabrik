@@ -63,12 +63,6 @@ func exitErr(code int, format string, args ...any) *ExitError {
 	return &ExitError{Code: code, Msg: fmt.Sprintf(format, args...)}
 }
 
-// TrainIsolatedRE names the scenarios that deliberately exhaust a repo's
-// merge-train state and so cannot share that repo with anything else under
-// "on" (see the long comment this replaced in run.sh: the runaway-guard scenario
-// poisons RepoBeta for an hour, which TestCrossRepoSpawn would inherit).
-const TrainIsolatedRE = "TestMergeTrainRunawayGuardPausesBatch"
-
 // The E2E_MATRIX modes (#1975, ADR-1975). Sparse is the default: one baseline
 // cell runs every live test and each other cell runs only the tests sensitive to
 // what that cell changes. Full restores the four complete auth × train legs.
@@ -88,8 +82,8 @@ type Config struct {
 	PrueferDir string
 
 	Timeout    string // E2E_TIMEOUT, default 4h (a go duration string, passed through)
-	Parallel   string // E2E_PARALLEL, default 4
-	ParallelOn string // E2E_PARALLEL_ON, default 2
+	Parallel   string // E2E_PARALLEL, default 4: the shared phase's -parallel (#1977; 8 is the value to try, not the default)
+	ParallelOn string // E2E_PARALLEL_ON, default 2: the shared phase of a default-gate "on" leg (4 is the value to try)
 
 	BedPollSeconds string // E2E_BED_POLL_SECONDS, default 60
 

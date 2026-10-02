@@ -28,11 +28,18 @@ import (
 //   - AC3: the two integration PRs are distinct numbers (no cross-contamination via
 //     findIntegrationPR / trial-branch identity — the #1617/#1614 regression shape).
 //
+// Default-base train group (#1977, ADR-1977): registry class default_base_train, so
+// the gate runs it serially in its own phase after the shared phase and before the
+// exclusive one. Its subject is the default-base (RepoAlpha/main) partition, which the
+// shared yolo pipeline tests also enqueue into under train "on", so it must overlap
+// nothing else that can enqueue there — and, deliberately, it stays on protected main
+// as the production-shaped landing proof (ADR-1648: the default partition's bare key).
+// It is not t.Parallel(): the registry check pins that.
+//
 // Wall-clock: ~10–25 min (two concurrent combined validations + integration-PR CI,
 // running in parallel — not sequential). Cost: low (no Claude invocations — no
 // conflicts to resolve on either base's clean batch).
 func TestMergeTrainTwoBasesConcurrent(t *testing.T) {
-	t.Parallel()
 	env := LoadEnv(t)
 	AssertFabrikRunning(t, env)
 	requireTrainBed(t, env)

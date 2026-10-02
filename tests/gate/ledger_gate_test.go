@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/handarbeit/fabrik/tests/e2e/registry"
 )
 
 const covSHA = "cccccccccccccccccccccccccccccccccccccccc"
@@ -81,7 +83,8 @@ func TestRunResumeAddsUpToCompleteCoverage(t *testing.T) {
 	if code := f.g.Run(ctx, nil); code != 1 {
 		t.Fatalf("run 1 exit = %d", code)
 	}
-	if got := strings.Join(lastSuite(f).Args, " "); strings.Contains(got, "-run") {
+	// The phase split names every selected test (#1977) but must not drop any.
+	if got := strings.Join(lastSuite(f).Args, " "); !strings.Contains(got, "TestAlpha") || !strings.Contains(got, "TestBravo") {
 		t.Errorf("a plain run must not narrow the selection: %s", got)
 	}
 	l := f.ledger(t)
@@ -259,6 +262,41 @@ func TestConsecutiveLegsArchiveDistinctLogs(t *testing.T) {
 	}
 	if ld, _ := os.ReadFile(first + "/load.json"); !strings.Contains(string(ld), `"start_1m": 1.5`) || !strings.Contains(string(ld), `"end_1m": 1.5`) {
 		t.Errorf("load.json = %s", ld)
+	}
+}
+
+// With a registry the leg's archive holds one log per phase, not a bare
+// go-test.json (#1977).
+func TestLegArchivesOneLogPerPhase(t *testing.T) {
+	f := covFixture(t)
+	g := f.g
+	g.LoadAvg = func() (float64, bool) { return 1.5, true }
+	l, err := OpenLedger(f.dir, covSHA, g.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in, err := g.loadCoverageInputs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.cov = &covState{ledger: l, inputs: in, invocation: "inv1", head: "h"}
+	mustWrite(t, g.Cfg.TestBed+"/.fabrik/config.yaml", "x: 1\n")
+	mustWrite(t, g.Cfg.EngineLog, "engine log\n")
+	g.liveTests = []string{"TestAlpha", "TestBravo"}
+	g.isolation = map[string]registry.Isolation{"TestAlpha": registry.IsolationShared, "TestBravo": registry.IsolationExclusive}
+	f.lf.suiteOut = stream(pass("TestAlpha"), pass("TestBravo"))
+
+	if err := g.RunLeg(context.Background(), Cell{Auth: "pat", Train: "off", Parallel: "4"}); err != nil {
+		t.Fatal(err)
+	}
+	dir := l.ArchiveCellDir("pat-off", "inv1")
+	for _, name := range []string{"go-test.shared.json", "go-test.exclusive.json", "phases.json", "bed-concurrency.json"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Errorf("missing %s: %v", name, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "go-test.json")); err == nil {
+		t.Error("a multi-phase leg must not write a bare go-test.json")
 	}
 }
 

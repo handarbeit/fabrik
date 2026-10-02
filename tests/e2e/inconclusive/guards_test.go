@@ -150,8 +150,8 @@ var seedPaths = []struct{ file, fn string }{
 	{"mergetrain_helpers.go", "createMemberPR"},
 	{"mergetrain_helpers.go", "QueueMember"},
 	{"mergetrain_helpers.go", "QueueMemberOnBase"},
-	{"mergetrain_helpers.go", "QueueMemberPaused"},
-	{"mergetrain_helpers.go", "PrepareMemberExactPath"},
+	{"mergetrain_helpers.go", "queueMemberPaused"},      // QueueMemberPaused / QueueMemberPausedOnBase (#1977)
+	{"mergetrain_helpers.go", "prepareMemberExactPath"}, // PrepareMemberExactPath / PrepareMemberExactPathOnBase (#1977)
 	{"review_authority_helpers.go", "seedReviewGateItemImpl"},
 	{"comment_landing_helpers.go", "seedLandingCandidate"},
 }

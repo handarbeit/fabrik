@@ -161,23 +161,21 @@ func (g *Gate) RunLeg(ctx context.Context, cell Cell) error {
 		defer arch.Finish()
 	}
 
-	g.outf("== switching test bed to FABRIK_MERGE_TRAIN=%s, auth=%s (leg %s) ==\n", mode, cell.Auth, label)
-	res := g.Exec.Run(ctx, Cmd{
-		Name: "go", Args: []string{"test", "-tags=e2e", "-v", "-count=1", "-timeout", "3m", "-run", "^TestSwitchTrainMode$", "./tests/e2e/..."},
-		Dir: g.Cfg.RepoRoot, Env: withEnv(legEnv, "E2E_TRAIN_SWITCH=1", "E2E_TRAIN_MODE="+mode),
-		Stdout: g.Out, Stderr: g.Err, Session: true, Grace: g.Cfg.KillGrace,
-	})
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-	if res.ExitCode != 0 {
-		return &ExitError{Code: res.ExitCode}
+	if err := g.restartBed(ctx, cell, legEnv); err != nil {
+		return err
 	}
 
+	phases := PlanPhases(cell, g.liveTests, g.isolation)
+	if len(phases) == 0 {
+		phases = single(cell) // the selection was only the restart step's own test
+	}
 	g.outf("== running suite with E2E_TRAIN_MODE=%s, E2E_AUTH_MODE=%s, -parallel=%s (leg %s) ==\n", mode, cell.Auth, cell.Parallel, label)
+	if len(phases) != 1 || phases[0].Name != "" {
+		g.outf("== %s ==\n", describePhases(phases))
+	}
 	// Without the ledger the log name carries no per-leg uniqueness beyond auth
-	// and mode (the two "on" cells overwrite each other — the pre-#1972 quirk).
-	// With it, the log lives in the leg's own archive directory.
+	// and mode (the pre-#1972 quirk). With it, the log lives in the leg's own
+	// archive directory. A multi-phase leg suffixes each phase's name (phaseLogPath).
 	jsonlog := filepath.Join(g.Cfg.TmpDir, fmt.Sprintf("fabrik-e2e-%s-%s-%d.json", cell.Auth, mode, g.Self))
 	if arch != nil && arch.dir != "" {
 		jsonlog = filepath.Join(arch.dir, "go-test.json")
@@ -194,17 +192,71 @@ func (g *Gate) RunLeg(ctx context.Context, cell Cell) error {
 		recorder = newLegRecorder(cs.ledger, cell, cs.invocation, cs.head, cs.inputs.hashes, cs.inputs.liveSet, g.errf)
 	}
 
-	suiteArgs := cat([]string{"test", "-tags=e2e", "-json", "-count=1", "-timeout", g.Cfg.Timeout, "-parallel", cell.Parallel, "./tests/e2e/..."}, cell.Args)
-	sres, err := g.runSuiteAttempt(ctx, label, legEnv, mode, suiteArgs, jsonlog, recorder)
-	if err != nil {
-		return err
+	// The phases run in order into ONE recorder, so each streams its outcomes as
+	// they land (a killed leg keeps what had finished) and the ledger's keys are
+	// the same as for an undivided leg. Every phase runs even after a failed one,
+	// so a red phase never leaves the next one uncovered; the first non-zero exit
+	// code is the leg's. The run stops early only when the bed cannot be trusted:
+	// a cancelled context, an incomplete phase (a timeout kill), or the engine's
+	// rate-limit backoff (postSuiteTail voids the cell).
+	summary := &LegSummary{Label: label}
+	var (
+		events []Event
+		logs   []string
+		rc     int
+		rerr   error
+	)
+	for i, ph := range phases {
+		logPath := phaseLogPath(jsonlog, ph)
+		if len(phases) > 1 || ph.Name != "" {
+			g.outf("== phase %d/%d: %s (leg: %s, %d test(s), -parallel=%s) ==\n", i+1, len(phases), ph.label(), label, len(ph.Tests), ph.Parallel)
+		}
+		before := budgetBefore
+		if i > 0 {
+			before = summary.Phases[i-1].BudgetAfter
+		}
+		start := g.Now()
+		suiteArgs := cat([]string{"test", "-tags=e2e", "-json", "-count=1", "-timeout", g.Cfg.Timeout, "-parallel", ph.Parallel, "./tests/e2e/..."}, ph.Args)
+		sres, err := g.runSuiteAttempt(ctx, label, legEnv, mode, suiteArgs, logPath, recorder)
+		if err != nil {
+			return err
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		logs = append(logs, logPath)
+		pevents, perr := readEventsFile(logPath)
+		if perr != nil && rerr == nil {
+			rerr = perr
+		}
+		events = append(events, pevents...)
+		if sres.ExitCode != 0 && rc == 0 {
+			rc = sres.ExitCode
+		}
+		stat := PhaseStat{
+			Name: ph.Name, Tests: len(ph.Tests), Parallel: ph.Parallel, Wall: g.Now().Sub(start),
+			PeakConcurrent: PeakConcurrent(pevents), BudgetBefore: before, BudgetAfter: -1, ExitCode: sres.ExitCode,
+		}
+		if ph.Name == "" {
+			stat.Tests = len(Classify(pevents).All())
+		}
+		summary.Phases = append(summary.Phases, stat)
+		if i == len(phases)-1 {
+			break // the last phase's closing probe is postSuiteTail's budget_after
+		}
+		stop := ""
+		switch {
+		case perr == nil && suiteIncomplete(Classify(pevents)), fileContains(logPath, "panic: test timed out after"):
+			stop = "the phase did not complete, so the bed state is unknown"
+		case DetectRateLimitBackoff(g.Cfg.EngineLog):
+			stop = "the engine's rate-limit backoff engaged (RUN INVALID)"
+		}
+		if stop != "" {
+			g.outf("== not running the remaining phase(s) (leg: %s) — %s ==\n", label, stop)
+			break
+		}
+		summary.Phases[i].BudgetAfter = g.probeBudget(ctx, "budget_after_phase", label)
 	}
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-	rc := sres.ExitCode
-	logs := []string{jsonlog}
-	events, rerr := readEventsFile(jsonlog)
 	var inc retryOutcome
 
 	// #1973: bounded in-leg retry of the tests that declared themselves
@@ -215,9 +267,24 @@ func (g *Gate) RunLeg(ctx context.Context, cell Cell) error {
 	// state untrustworthy; see retryInconclusive.
 	if rerr == nil {
 		var rretry int
-		events, logs, rretry, inc, err = g.retryInconclusive(ctx, cell, label, legEnv, mode, jsonlog, events, recorder)
+		var err error
+		// Close the last phase's budget window BEFORE any retry, so retry spend is
+		// reported as its own entry rather than folded into that phase's figure.
+		retryBefore := -1
+		if g.Cfg.InconclusiveRetries > 0 && len(Classify(events).Inconclusive) > 0 && len(summary.Phases) > 0 {
+			retryBefore = g.probeBudget(ctx, "budget_before_retry", label)
+			summary.Phases[len(summary.Phases)-1].BudgetAfter = retryBefore
+		}
+		retryStart := g.Now()
+		events, logs, rretry, inc, err = g.retryInconclusive(ctx, cell, label, legEnv, mode, jsonlog, logs, events, recorder, exclusiveRan(phases))
 		if err != nil {
 			return err
+		}
+		if inc.Attempts > 0 {
+			summary.Retry = &PhaseStat{
+				Name: "retry", Tests: len(inc.First), Parallel: "-", Wall: g.Now().Sub(retryStart),
+				BudgetBefore: retryBefore, BudgetAfter: -1, ExitCode: rretry,
+			}
 		}
 		if rretry != 0 && rc == 0 {
 			rc = rretry // a retried test FAILED (or the retry run died): the leg is red
@@ -231,6 +298,10 @@ func (g *Gate) RunLeg(ctx context.Context, cell Cell) error {
 		}
 		g.outln(" ==")
 	}
+	if arch != nil {
+		summary.PeakLoad1m, summary.LoadSamples, summary.HasLoad = arch.LoadStats()
+	}
+	summary.BedMaxConcurrent = g.noteBedConcurrency(arch, cell, phases)
 	suiteExit := g.Now()
 
 	// R2 (#1676): post-suite watchdog. From here through this function's return
@@ -244,7 +315,7 @@ func (g *Gate) RunLeg(ctx context.Context, cell Cell) error {
 	defer cancelTail()
 	result := make(chan error, 1)
 	go func() {
-		result <- g.postSuiteTail(tailCtx, cell, label, logs, events, rerr, inc, rc, budgetBefore, &checkpoint)
+		result <- g.postSuiteTail(tailCtx, cell, label, logs, events, rerr, inc, rc, budgetBefore, summary, &checkpoint)
 	}()
 	timer := time.NewTimer(g.Cfg.PostSuiteWatchdog)
 	defer timer.Stop()
@@ -274,6 +345,27 @@ func (g *Gate) RunLeg(ctx context.Context, cell Cell) error {
 		}
 		return &ExitError{Code: ExitPostSuiteWatchdog}
 	}
+}
+
+// restartBed is the leg's bed restart: the TestSwitchTrainMode invocation that
+// (re)starts the bed in the cell's train mode and auth. RunLeg runs it once before
+// the first phase; retryInconclusive runs it again before re-running non-exclusive
+// tests after an exclusive phase (#1977). A non-zero exit is an *ExitError.
+func (g *Gate) restartBed(ctx context.Context, cell Cell, legEnv []string) error {
+	mode := cell.Train
+	g.outf("== switching test bed to FABRIK_MERGE_TRAIN=%s, auth=%s (leg %s) ==\n", mode, cell.Auth, cell.Label())
+	res := g.Exec.Run(ctx, Cmd{
+		Name: "go", Args: []string{"test", "-tags=e2e", "-v", "-count=1", "-timeout", "3m", "-run", "^TestSwitchTrainMode$", "./tests/e2e/..."},
+		Dir: g.Cfg.RepoRoot, Env: withEnv(legEnv, "E2E_TRAIN_SWITCH=1", "E2E_TRAIN_MODE="+mode),
+		Stdout: g.Out, Stderr: g.Err, Session: true, Grace: g.Cfg.KillGrace,
+	})
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if res.ExitCode != 0 {
+		return &ExitError{Code: res.ExitCode}
+	}
+	return nil
 }
 
 // runSuiteAttempt is one `go test -json` invocation of the leg's suite: it
@@ -345,8 +437,14 @@ func (g *Gate) runSuiteAttempt(ctx context.Context, label string, legEnv []strin
 //     top-level names would widen it);
 //   - the engine's rate-limit backoff has already engaged (the run is RUN INVALID;
 //     postSuiteTail will say so and void the cell — more spend would only add to it).
-func (g *Gate) retryInconclusive(ctx context.Context, cell Cell, label string, legEnv []string, mode, firstLog string, events []Event, recorder *legRecorder) (merged []Event, logs []string, retryRC int, out retryOutcome, err error) {
-	merged, logs = events, []string{firstLog}
+//
+// The retries run after every first-run phase, so exclusiveRan (the first run
+// included an exclusive phase) means the bed may carry state an exclusive test left
+// behind. Before each attempt that re-runs a non-exclusive test the bed is therefore
+// restarted, the same fresh bed the first run's shared tests had (#1977 R2.1); if
+// that restart fails the retries stop and the tests stay inconclusive (uncovered).
+func (g *Gate) retryInconclusive(ctx context.Context, cell Cell, label string, legEnv []string, mode, base string, firstLogs []string, events []Event, recorder *legRecorder, exclusiveRan bool) (merged []Event, logs []string, retryRC int, out retryOutcome, err error) {
+	merged, logs = events, append([]string(nil), firstLogs...)
 	cls := Classify(merged)
 	first := cls.Inconclusive
 	if len(first) == 0 {
@@ -365,7 +463,7 @@ func (g *Gate) retryInconclusive(ctx context.Context, cell Cell, label string, l
 	case g.Cfg.InconclusiveRetries <= 0:
 		skip("retries disabled (E2E_INCONCLUSIVE_RETRIES=0)")
 		return
-	case suiteIncomplete(cls) || fileContains(firstLog, "panic: test timed out after"):
+	case suiteIncomplete(cls) || anyFileContains(firstLogs, "panic: test timed out after"):
 		skip("the suite did not complete, so the bed state is unknown")
 		return
 	case hasSubtestFilter(cell.Args):
@@ -381,43 +479,64 @@ func (g *Gate) retryInconclusive(ctx context.Context, cell Cell, label string, l
 		if len(cls.Inconclusive) == 0 {
 			return
 		}
-		sel, serr := rewriteSelection(cell.Args, cls.Inconclusive)
+		// #1977 R2.3: the retry keeps each test's class — a retried exclusive test
+		// runs exclusively, a retried shared test at the shared parallelism — in the
+		// same phase order. The retries run after the exclusive phase, so a bed that
+		// phase may have poisoned is restarted below before any non-exclusive retry.
+		phases, serr := retryPhases(cell, cls.Inconclusive, g.isolation)
 		if serr != nil {
 			g.errf("warning: cannot retry the inconclusive tests (leg: %s): %v\n", label, serr)
 			return
 		}
-		logPath := retryLogPath(firstLog, n)
 		g.outf("== retrying %d inconclusive test(s) (leg: %s, attempt %d of %d): %s ==\n", len(cls.Inconclusive), label, n, g.Cfg.InconclusiveRetries, strings.Join(cls.Inconclusive, ", "))
-		args := cat([]string{"test", "-tags=e2e", "-json", "-count=1", "-timeout", g.Cfg.Timeout, "-parallel", cell.Parallel, "./tests/e2e/..."}, sel)
-		sres, rerr := g.runSuiteAttempt(ctx, label, legEnv, mode, args, logPath, recorder)
-		if rerr != nil {
-			err = rerr
-			return
-		}
-		if ctx.Err() != nil {
-			err = ctx.Err()
-			return
-		}
-		out.Attempts = n
-		logs = append(logs, logPath)
-		revents, rerr := readEventsFile(logPath)
-		if rerr != nil {
-			g.errf("warning: cannot read the retry log %s: %v — stopping the retries\n", logPath, rerr)
-			if sres.ExitCode != 0 {
-				retryRC = sres.ExitCode
+		if exclusiveRan && hasNonExclusive(phases) {
+			if rerr := g.restartBed(ctx, cell, legEnv); rerr != nil {
+				if ctx.Err() != nil {
+					err = ctx.Err()
+					return
+				}
+				g.errf("warning: cannot restart the bed before retrying shared tests (leg: %s): %v — stopping the retries\n", label, rerr)
+				return
 			}
-			return
 		}
-		merged = mergeAttempts(merged, revents)
-		if sres.ExitCode != 0 {
-			retryRC = sres.ExitCode // a retried test failed, or the retry run died
-			return
+		// Like the first run, every phase of an attempt runs even after a red one, so
+		// a failed retried shared test never leaves a retried exclusive test unretried
+		// (and so uncovered); the first non-zero exit code is the attempt's. The
+		// attempt stops early only when the bed cannot be trusted (an unreadable or
+		// incomplete log, the rate-limit backoff), and a failed attempt ends the
+		// retries: a failure is never retried.
+		for _, ph := range phases {
+			logPath := phaseLogPath(retryLogPath(base, n), ph)
+			args := cat([]string{"test", "-tags=e2e", "-json", "-count=1", "-timeout", g.Cfg.Timeout, "-parallel", ph.Parallel, "./tests/e2e/..."}, ph.Args)
+			sres, rerr := g.runSuiteAttempt(ctx, label, legEnv, mode, args, logPath, recorder)
+			if rerr != nil {
+				err = rerr
+				return
+			}
+			if ctx.Err() != nil {
+				err = ctx.Err()
+				return
+			}
+			out.Attempts = n
+			logs = append(logs, logPath)
+			if sres.ExitCode != 0 && retryRC == 0 {
+				retryRC = sres.ExitCode // a retried test failed, or the retry run died
+			}
+			revents, rerr := readEventsFile(logPath)
+			if rerr != nil {
+				g.errf("warning: cannot read the retry log %s: %v — stopping the retries\n", logPath, rerr)
+				return
+			}
+			merged = mergeAttempts(merged, revents)
+			if suiteIncomplete(Classify(merged)) {
+				return
+			}
+			if DetectRateLimitBackoff(g.Cfg.EngineLog) {
+				return // postSuiteTail voids the cell
+			}
 		}
-		if suiteIncomplete(Classify(merged)) {
+		if retryRC != 0 {
 			return
-		}
-		if DetectRateLimitBackoff(g.Cfg.EngineLog) {
-			return // postSuiteTail voids the cell
 		}
 	}
 	return
@@ -453,7 +572,7 @@ func (g *Gate) probeBudget(ctx context.Context, which, label string) int {
 // scenario can legitimately wait on Claude for extended periods, so silence
 // alone is never treated as a hang, only surfaced so it is never mistaken for
 // progress either. It warns once per window rather than once ever or on every
-// check, so a deliberately idle leg (the isolated runaway-guard scenario) warns
+// check, so a deliberately idle phase (the runaway-guard scenario) warns
 // each window. The signal is the time of the last output write; bash polled the
 // log file's mtime, which is the same thing observed from outside.
 func (g *Gate) watchStall(ctx context.Context, label string, w *suiteWriter) {
@@ -493,12 +612,17 @@ func (g *Gate) watchStall(ctx context.Context, label string, w *suiteWriter) {
 // #1973 retry); events is the merged stream the reports and OnLeg are built from
 // (rerr non-nil: the first log could not be read). inc is what the retries of the
 // leg's inconclusive tests amounted to.
-func (g *Gate) postSuiteTail(ctx context.Context, cell Cell, label string, logs []string, events []Event, rerr error, inc retryOutcome, rc, budgetBefore int, checkpoint *atomic.Value) error {
+func (g *Gate) postSuiteTail(ctx context.Context, cell Cell, label string, logs []string, events []Event, rerr error, inc retryOutcome, rc, budgetBefore int, summary *LegSummary, checkpoint *atomic.Value) error {
 	jsonlog := logs[0]
 	checkpoint.Store("gh api rate_limit budget_after probe")
 	budgetAfter := g.probeBudget(ctx, "budget_after", label)
 	if ctx.Err() != nil {
 		return ctx.Err() // cancelled (a signal or the watchdog): print nothing more
+	}
+	if summary.Retry != nil {
+		summary.Retry.BudgetAfter = budgetAfter // the retries' own window; the last phase closed before them
+	} else if n := len(summary.Phases); n > 0 {
+		summary.Phases[n-1].BudgetAfter = budgetAfter
 	}
 	if budgetBefore >= 0 && budgetAfter >= 0 {
 		if budgetAfter <= budgetBefore {
@@ -512,6 +636,10 @@ func (g *Gate) postSuiteTail(ctx context.Context, cell Cell, label string, logs 
 	} else {
 		g.errf("warning: could not read GraphQL rate_limit before/after leg %s (gh api call failed) — skipping budget report\n", label)
 	}
+
+	checkpoint.Store("leg summary")
+	g.outf("%s", summary.Format())
+	g.writePhasesJSON(cell, summary)
 
 	checkpoint.Store("report_test_timings")
 	g.outf("== per-test wall-clock (leg: %s), slowest first ==\n", label)
