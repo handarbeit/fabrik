@@ -1769,6 +1769,7 @@ share it). It is local to one machine and never committed.
   invocations.jsonl               one line per gate invocation that started a leg
   archive/<cell>/<invocation>/    the bulky per-leg logs (below)
 .e2e-coverage/pregate/<head>.json pre-gate pass for a clean checkout HEAD
+.e2e-coverage/pregate/<head>.retries.jsonl  pre-gate TSan-crash retries (#1973)
 ```
 
 **What counts as covered.** A (test, leg) pair — the leg is `<auth>/<train>`, e.g.
@@ -1790,7 +1791,7 @@ terminal `pass`/`fail`/`skip` event is never recorded as a PASS.
 | Anything else differs (engine code, docs, …) | A different engine SHA, a new and empty ledger. The check prints which paths. |
 | A test's source changed | Only that test loses its PASS. The hash covers the test function, its whole file, and every package-level declaration in `tests/e2e` it transitively references (so a `harness.go` helper edit reopens its dependents — extra reruns, never a false certification). Not hashed: non-Go inputs. |
 | The leg ended in the RUN INVALID backoff banner (exit 3) | Everything that cell recorded in that invocation is discarded. |
-| The test's last outcome was FAIL, or a skip the ledger does not accept | Uncovered. |
+| The test's last outcome was FAIL, INCONCLUSIVE (#1973, below), or a skip the ledger does not accept | Uncovered. |
 
 **Skips.** A test that skips citing an issue (`#N`) is a **known skip** — listed
 separately, not counted as covered, not blocking — **only while that issue (any one of
@@ -1854,6 +1855,96 @@ degraded.
 - **A scenario's worktrees, branches and PRs** from the interrupted leg are cleaned by `--clean`
   (and by the reset in "Reset between runs").
 
+## The INCONCLUSIVE outcome and bounded retry (#1973)
+
+A live test has three terminal outcomes the gate cares about, plus an ordinary skip:
+
+| Outcome | How a test gets there | Coverage |
+|---|---|---|
+| PASS | the test passes | covered |
+| FAIL | any assertion about what the engine did (`t.Fatalf`/`t.Errorf`) | uncovered; **never retried** |
+| SKIP | an env-gated or known-issue `t.Skip` | known / structural / missing, per "Skips" above |
+| **INCONCLUSIVE** | `Inconclusive(t, "reason")` — *the precondition this scenario needs never arose* | **uncovered, not failed**; retried, then re-run by `--resume` |
+
+**The marker contract.** `Inconclusive(t, format, args...)` (`tests/e2e/harness.go`) ends the
+test with `t.Skip("E2E-INCONCLUSIVE: <reason>")`. The string lives in the untagged package
+`tests/e2e/inconclusive` (the gate runner cannot import the `e2e`-tagged package), whose
+`IsMarked` matches only a skip message that **starts** with the marker — a log line that merely
+mentions it, or an ordinary skip quoting it, is not a declaration. It must be called from a
+**top-level** test's own goroutine (a subtest's output is invisible to the runner, so a call
+from `t.Run` is a `t.Fatalf`).
+
+**Use it only for a guard that fires before any assertion about engine behaviour**, when the
+harness failed to produce the state the scenario needs (a poll boundary straddled a release, a
+cold-cache line never appeared, a bed reviewer ejected a member). An assertion about what the
+engine did stays a failure: retrying a failure would mask a regression. Where the awaited line
+is itself the engine behaviour under test, keep `waitForLogMatch` (timeout = `t.Fatalf`); a
+guard whose timeout means "the setup never happened" uses `waitForLogMatchInconclusive`.
+Cleanups that key on failure (`repauseOnFailure`) also run for an inconclusive skip, so a retry
+never inherits un-paused Queued members.
+
+**What the gate does.** At the end of each leg it re-runs **only that leg's inconclusive tests**
+(one `-run '^(A|B)$'` invocation per attempt, same cell: same auth/train mode, `-parallel`, bed,
+no restart; each attempt in its own log, `go-test.retry-N.json`), at most
+`E2E_INCONCLUSIVE_RETRIES` times (default **2**, `0` disables). Retries run before the post-suite
+watchdog starts and before the RUN INVALID scan, so a long retry is not killed and throttling
+during one still voids the cell. No retry is attempted after a timeout kill, for a
+subtest-filtered cell, or once the engine's rate-limit backoff has engaged. A test that passes
+on retry is covered; one that fails on retry is a FAIL; one still inconclusive after the last
+retry is recorded `INCONCLUSIVE` in the ledger (uncovered — the coverage summary's
+`inconclusive` column) and re-run by `--resume`.
+
+**Visible rate.** Each leg prints, whenever any test ended inconclusive:
+
+```
+== inconclusive (leg: app/on): 2 on the first attempt: TestA, TestB ==
+   after 2 retry attempt(s): passed on retry: TestA; failed on retry: none; still inconclusive (UNCOVERED, not failed): TestB
+```
+
+— so a leg that is quietly flaky is never invisible, even when every retry passed. When the
+first-attempt count exceeds `E2E_INCONCLUSIVE_WARN` (default **3**) a warning points at #1974
+(the underlying harness races).
+
+**An uncovered leg never reads as success.** If an invocation otherwise ends cleanly but tests
+stayed inconclusive, it exits **8** (`ExitCoverageIncomplete`), with or without `--resume` and
+whether or not the ledger is on, and names them. A real failure keeps its own exit code.
+`scripts/cut-release.sh` already maps 8 and re-checks coverage after its resume run, so a
+release can never be cut on INCONCLUSIVE; the 3/4/5/6/7 contract is unchanged.
+
+**Pre-gate crash retry (R5).** Separately, when a pre-gate step (the sim suite or the github
+wire-contract tests) fails **only** with the known TSan fork/exec crash signature (#1624/#1677:
+a TSan `CHECK failed … tsan_*.cpp` abort, or a child `git` killed by `signal: segmentation
+fault`, with no Go panic, `fatal error:`, `WARNING: DATA RACE` or goroutine dump anywhere in the
+output) that step is re-run **once**. The retry is recorded with the host load average in
+`.e2e-coverage/pregate/<head>.retries.jsonl` (also when it fails again) and, on a pass, in
+`pregate/<head>.json` and the coverage summary's pre-gate line. A second crash or any other
+failure is the same hard stop (exit 5) as before.
+
+### Audit of the "harness race / vacuous / re-run" guards (#1973 R2)
+
+| Guard | Disposition |
+|---|---|
+| `mergetrain_batchcap_test.go` — "poll boundary straddled the unpause" | **Converted.** Fires before A1's selection assertion. Its two sibling `switch` cases (cap mismatch; no cap line with ≥ members) are bed-configuration errors and stay `Fatalf`. |
+| `mergetrain_batchcap_test.go` — A2 "ejected for reviewer feedback" | **Converted.** Bed-reviewer artifact; fires before any A2 assertion. |
+| `mergetrain_coldbase_test.go` — cold-cache "not yet hydrated" never appeared ("vacuous") | **Converted** (timeout only, via `waitForLogMatchInconclusive`). |
+| `mergetrain_coldbase_test.go` — landed via the singleton fast path | **Converted.** Members did not batch together; fires before the A1/A2 assertions it protects. |
+| `comment_landing_gate_test.go` — landing decision never reached with the comment pending | **Converted** (timeout only). `assertHeld` and every later check stay `Fatalf`. |
+| `comment_queued_eject_test.go` — "occupant window closed" | **Converted.** Precondition (M2 not owned by a live batch) of the direct-route assertion. |
+| `mergetrain_bisect_test.go` — release straddled a poll boundary | **Converted.** Same class as batchcap. |
+| `mid_stage_label_test.go` — Research judged "no work needed" | **Converted.** Claude non-determinism; fires before any rework-marker assertion. |
+| `mid_stage_label_test.go` / `label_events.go` / `checkrun_timing.go` — existing `INCONCLUSIVE:` fatals | **Migrated** at the call sites (`failOrInconclusive`/`Inconclusive`); the pure checkers keep their `INCONCLUSIVE` error prefix. Their contract changes from "fails" to "uncovered, retried". |
+| `conjunctive_ci_review_gate_test.go` — slow-gate window already consumed / too short | **Converted.** |
+| `conjunctive_ci_review_gate_test.go` — `stage:Validate:complete` inside the R1 window though slow-gate had completed | **Left `Fatalf`.** Fires after an engine behaviour was observed. The sibling "no slow-gate check run on PR head" is a bed-config error: left. |
+| `mergetrain_batchcap_test.go`, `comment_queued_eject_test.go` — stale Queued items, "clear the Queued column and re-run" | **Left `Fatalf`.** Bed state an operator must clear; a retry hits the same state. |
+| `mergetrain_conflict_test.go` — partial batch, or stale Queued items | **Left `Fatalf`.** The two causes are indistinguishable and a retry clears only one (#1974). |
+| `comment_queued_eject_test.go` — occupant took the singleton fast path | **Left `Fatalf`.** Not in the race class; a fast-path change is an engine-side signal. |
+| `convergence_race_test.go` — "setup failed … not an engine regression, re-run" | **Left `Fatalf`.** A setup *error*, not a precondition that never arose; could be a permanent harness bug a retry would turn into "uncovered". |
+| `mergetrain_helpers.go` — landed-comment post failed transiently (#1275) | **Left `Fatalf`.** A known engine defect; retrying would mask it. |
+
+`tests/e2e/inconclusive/guards_test.go` pins, statically (it parses the tagged sources), that the
+three named guards use an inconclusive helper, that each still has assertion `Fatalf`s after it,
+and that `Inconclusive` is never called from a goroutine or a subtest.
+
 ## Scenarios
 
 "Mode" records each scenario's classification from the #1217 mode audit (FR-2/FR-3/FR-4):
@@ -1890,7 +1981,7 @@ the `Queued` column is absent, so it only runs in the gate's `on` leg.
 | `TestExpectedReviewersFastAdvanceComposesWithAuthoritative` | ADR-1283 composition guard (via `expected-reviewers:none` + `review-authority:authoritative` labels, requires follow-up engine issue + #1261): fast-advance still fires ahead of the authority-verdict branch, since it only activates once hasReviews is true | Both | 2–5 min | ~$0.02 (no Claude) |
 | `TestReviewAuthorityDeclaredBotDoesNotDeferHumanEscalation` | ADR-1375 Finding 2/AC2 (via `expected-reviewers:declared` + `review-authority:authoritative` labels, human requested via `RequestPRReviewer`): a declared bot's re-prompt ladder must never defer an outstanding human's authoritative CHANGES_REQUESTED escalation — the reinvoke fires and `fabrik:bot-reprompted` never applies | Both | ~`FABRIK_REVIEW_WAIT_TIMEOUT` + ~15 min | $0.10–0.50 (one Claude invocation) |
 | `TestLateCheckRunSuiteGate` | ADR-1822/#1829 suite-aware CI gate (yolo item taken to Validate, `wait_for_ci`): the gate must not clear while a `needs:`-gated late check run is outstanding. Asserts on GitHub timestamps — late run starts after the fast run completes (A1), `stage:Validate:complete` is applied only after the late run completes (A2), and the fast run finished after `fabrik:awaiting-ci` (A3, vacuity guard). Needs `late-check-suite-gate.yml` installed on Alpha (not required); skips if absent. Mode-invariant | Both | 20–35 min (incl. ~4 min sleep) | ~$0.10–0.50 (one Validate Claude invocation) + one CI cycle |
-| `TestYoloRemovedMidValidateBlocksMerge` | ADR-1769/#1769 live re-read of autonomy labels (yolo item taken to Validate): `fabrik:yolo` is removed over REST the moment `stage:Validate:in_progress` appears; the PR must not merge — no `fabrik:auto-merge-enabled`, PR and issue stay OPEN, board Status stays `Validate` with `stage:Validate:complete` present. The mid-stage window is proven from the events log by event id (`in_progress` < yolo removal < `awaiting-ci`); a missed window fails as INCONCLUSIVE, never skips. On the bed's `wait_for_ci` Validate a pre-fix engine can also pass when the board cache had already caught up — the scenario guards the operator-trust property and the cache-lag window. Mode-invariant | Both | 15–30 min | ~$0.10–0.50 (one Validate Claude invocation) + one CI cycle |
+| `TestYoloRemovedMidValidateBlocksMerge` | ADR-1769/#1769 live re-read of autonomy labels (yolo item taken to Validate): `fabrik:yolo` is removed over REST the moment `stage:Validate:in_progress` appears; the PR must not merge — no `fabrik:auto-merge-enabled`, PR and issue stay OPEN, board Status stays `Validate` with `stage:Validate:complete` present. The mid-stage window is proven from the events log by event id (`in_progress` < yolo removal < `awaiting-ci`); a missed window ends the test INCONCLUSIVE (#1973: uncovered, retried by the gate, never green). On the bed's `wait_for_ci` Validate a pre-fix engine can also pass when the board cache had already caught up — the scenario guards the operator-trust property and the cache-lag window. Mode-invariant | Both | 15–30 min | ~$0.10–0.50 (one Validate Claude invocation) + one CI cycle |
 | `TestCommentReentryShowsReworking` | ADR-1802/#1802 comment re-entry rework marker: after a real Research run parks the item, a human comment triggers re-entry; the events log (after the pre-comment event id) must show `fabrik:reworking:Research` labeled, `stage:Research:complete` unlabeled, `stage:Research:complete` re-labeled, then the marker unlabeled — in that order — and the item ends with `:complete` restored, marker gone, still at Research. Events-log ordering is the proof (the window is sub-second); a live poll is informational only. Mode-invariant | Both | 10–20 min | ~$0.20–0.60 (two Claude invocations) |
 | `TestAppSelfRecognitionBotCommentNeverResumes` | #1877 A1 (guards #1754): a plain bot-authored comment never resumes a paused item; a human comment does (control). See "Additional prerequisites for `TestAppSelfRecognition*`" | App legs only (skips in `pat`) | ~6–10 min | ~$0.10–0.30 (one comment-processing invocation) |
 | `TestAppSelfRecognitionBlockedCommentUpdatedInPlace` | #1877 A2 (guards #1754): a changed `blockedBy` set edits Fabrik's single blocked comment in place; body reflects the new set | App legs only (skips in `pat`) | ~12–25 min (dep-blocked cooldown) | none |
@@ -2091,6 +2182,11 @@ as **fields on the same entries**, not as separate lists.
   `scripts/e2e/run.sh` prints `sim parity: N covered, M live-only, K gap` from it
   before the pre-gate (and even when the pre-gate is skipped); the line is
   informational and never gates.
+- **Outcomes (#1973).** The registry describes *which* live tests have a sim twin, not
+  how a run ended, and needs no schema change for the INCONCLUSIVE outcome: an
+  inconclusive test is an ordinary live test whose latest ledger record is
+  `INCONCLUSIVE` (uncovered, never a skip — so `skip_ok_legs` never applies to it). See
+  "The INCONCLUSIVE outcome and bounded retry" above.
 
 ## Design notes
 
