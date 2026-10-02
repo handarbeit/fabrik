@@ -264,59 +264,85 @@ func sweepOrphanedWorkerSessions() (records, reaped, skipped, pruned int) {
 		return 0, 0, 0, 0
 	}
 	records = len(recs)
-	procs, err := sharedProcessTableScan()
-	if err != nil {
-		return records, 0, 0, 0 // fail open: change nothing
+	// A command-session record (ParentID != "") must never be treated as a
+	// worker: it has no worker identity, and sweeping it as one would reap the
+	// session of a live invocation's Bash-tool command.
+	var workers, cmds []workerRecord
+	for _, r := range recs {
+		if r.ParentID != "" {
+			cmds = append(cmds, r)
+		} else {
+			workers = append(workers, r)
+		}
 	}
 
 	type verdict struct {
 		state  workerState
 		holder string
 	}
-	verdicts := make([]verdict, len(recs))
+	verdicts := make([]verdict, len(workers))
 	want := make(map[int]bool)
-	for i, r := range recs {
+	for i, r := range workers {
 		s, h := classifyWorker(r)
 		verdicts[i] = verdict{s, h}
 		if s == workerDead || s == workerRecycled {
 			want[r.PID] = true
 		}
 	}
-	if len(want) == 0 {
-		return records, 0, 0, 0
-	}
-	bySID := collectSessionMembers(procs, want)
 
-	var prune []string
+	prune := make(map[string]bool)
 	emptyScans := make(map[string]int)
-	for i, r := range recs {
-		v := verdicts[i]
-		if v.state != workerDead && v.state != workerRecycled {
-			continue
-		}
-		t := reapWorkerSessionMembers(r, bySID[r.PID], v.holder, make(map[int]bool), "session_sweep_periodic")
-		reaped += t.reaped
-		skipped += t.skipped
-		if t.members == 0 && t.skipped == 0 {
-			if r.EmptyScans+1 >= 2 {
-				prune = append(prune, r.ID)
-			} else {
-				emptyScans[r.ID] = r.EmptyScans + 1
+
+	// One process-table scan and one Getsid pass serve all worker records. The
+	// scan may be the shared cached one: every candidate is re-verified before
+	// any kill, and a stale snapshot can only cause a missed member, which the
+	// EmptyScans >= 2 prune rule tolerates. A failed scan changes nothing for the
+	// worker half (fail open); the command-session half does not depend on it.
+	if procs, serr := sharedProcessTableScan(); serr == nil && len(want) > 0 {
+		bySID := collectSessionMembers(procs, want)
+		for i, r := range workers {
+			v := verdicts[i]
+			if v.state != workerDead && v.state != workerRecycled {
+				continue
 			}
-		} else if r.EmptyScans != 0 {
-			emptyScans[r.ID] = 0
+			t := reapWorkerSessionMembers(r, bySID[r.PID], v.holder, make(map[int]bool), "session_sweep_periodic")
+			reaped += t.reaped
+			skipped += t.skipped
+			if t.members == 0 && t.skipped == 0 {
+				if r.EmptyScans+1 >= 2 {
+					prune[r.ID] = true
+				} else {
+					emptyScans[r.ID] = r.EmptyScans + 1
+				}
+			} else if r.EmptyScans != 0 {
+				emptyScans[r.ID] = 0
+			}
 		}
 	}
+
+	// Command sessions (#1989): reaped only once the worker that owned them is
+	// confirmed gone — dead or recycled, or no longer recorded at all (its own
+	// record was pruned only after its session emptied twice).
+	if len(cmds) > 0 {
+		state := make(map[string]workerState, len(workers))
+		for i, r := range workers {
+			state[r.ID] = verdicts[i].state
+		}
+		parentGone := func(id string) bool {
+			st, ok := state[id]
+			return !ok || st == workerDead || st == workerRecycled
+		}
+		cr, cs := sweepOrphanedCommandSessions(cmds, parentGone, prune, emptyScans)
+		reaped += cr
+		skipped += cs
+	}
+
 	pruned = len(prune)
 	if pruned > 0 || len(emptyScans) > 0 {
-		drop := make(map[string]bool, len(prune))
-		for _, id := range prune {
-			drop[id] = true
-		}
 		_ = mutateWorkerRecords(func(cur []workerRecord) []workerRecord {
 			kept := cur[:0]
 			for _, r := range cur {
-				if drop[r.ID] {
+				if prune[r.ID] {
 					continue
 				}
 				if n, ok := emptyScans[r.ID]; ok {

@@ -627,6 +627,7 @@ func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (Revi
 
 	watchdogCtx, watchdogCancel := context.WithCancel(context.Background())
 	defer watchdogCancel()
+	var inactivityFired atomic.Bool
 
 	cmd.Cancel = func() error {
 		if cmd.Process != nil {
@@ -644,6 +645,8 @@ func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (Revi
 		return ReviewResult{}, fmt.Errorf("starting claude: %w", err)
 	}
 	pid := cmd.Process.Pid
+	// #1989: sample the command sessions the Bash tool creates for itself.
+	stopSessionTracking := trackReviewSessions(watchdogCtx, pid, req.PRNumber)
 
 	go func(pid int) {
 		timer := time.NewTimer(reviewInactivityTimeout)
@@ -654,6 +657,7 @@ func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (Revi
 				since := time.Since(time.Unix(0, lastActivity.Load()))
 				if since >= reviewInactivityTimeout {
 					logf(req.PRNumber, "warn", "review invocation idle for %s with no output — killing\n", reviewInactivityTimeout)
+					inactivityFired.Store(true)
 					killProcGroupGraceful(pid, req.PRNumber, "review", "inactivity_timeout", reviewKillGrace, reviewKillGrace)
 					return
 				}
@@ -667,6 +671,13 @@ func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (Revi
 	runErr := cmd.Wait()
 	watchdogCancel()
 	killProcGroup(cmd, req.PRNumber, "review")
+	// #1989: reap the session too — separate-group members the group kill misses.
+	exitKind := "clean_exit"
+	if inactivityFired.Load() || stageCtx.Err() != nil {
+		exitKind = "after_stop"
+	}
+	reapReviewSession(pid, req.PRNumber, exitKind)
+	stopSessionTracking()
 
 	if errors.Is(runErr, exec.ErrWaitDelay) && ctx.Err() == nil {
 		logf(req.PRNumber, "warn", "WaitDelay fired: claude exited but grandchild processes held stdout pipe open; processing buffered output (%d bytes)\n", stdout.Len())

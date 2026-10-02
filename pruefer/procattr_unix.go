@@ -2,24 +2,29 @@
 
 package pruefer
 
-// Duplicated from engine/procattr_unix.go rather than extracted into a
-// shared internal package: these are small, stable OS primitives, and
-// extracting them would touch engine's existing call sites for a
-// security-relevant piece of code for the sake of a one-time ~80-line copy
-// (see adrs/1113-pruefer-v1-architecture.md).
+// setCmdProcAttr / killProcGroup / isProcessAlive remain a small copy of
+// engine/procattr_unix.go (adrs/1113-pruefer-v1-architecture.md). The
+// session-wide escalation and post-exit sweep are NOT copied: they live in
+// internal/sessionreap, shared with the engine (#1989, adrs/1989-session-wide-worker-reap.md).
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"syscall"
 	"time"
+
+	"github.com/handarbeit/fabrik/internal/sessionreap"
 )
 
-// setCmdProcAttr starts cmd in its own process group so grandchild processes
-// can be cleaned up after cmd exits.
+// setCmdProcAttr starts cmd as a new session leader (setsid(2)): cmd's PID is
+// then its process group ID and its session ID, so every descendant carries
+// that SID however it detaches or is reparented, and internal/sessionreap can
+// reap the whole session (#1989). Setsid also makes cmd a group leader, so
+// killProcGroup's kill(-pid, …) is unchanged.
 func setCmdProcAttr(cmd *exec.Cmd) {
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 }
 
 // killProcGroup sends SIGKILL to cmd's entire process group, cleaning up any
@@ -50,45 +55,48 @@ func isProcessAlive(pid int) bool {
 	return err == nil || err == syscall.EPERM
 }
 
-// killProcGroupGraceful sends signals in escalating order to the process
-// group: SIGINT → (sigintGrace) → SIGTERM → (sigtermGrace) → SIGKILL. A zero
-// sigintGrace skips the SIGINT step entirely; a zero sigtermGrace skips the
-// SIGTERM step (falls straight to SIGKILL). Liveness is re-probed before
-// each subsequent signal; ESRCH stops escalation early.
+// killProcGroupGraceful stops the worker's whole SESSION with escalating
+// signals: SIGINT → (sigintGrace) → SIGTERM → (sigtermGrace) → SIGKILL. pid
+// is also the session ID because setCmdProcAttr uses Setsid. A zero
+// sigintGrace skips SIGINT; a zero sigtermGrace skips SIGTERM. Shared with the
+// engine via internal/sessionreap (#1989, ADR-1989).
 func killProcGroupGraceful(pid, prNumber int, label, reason string, sigintGrace, sigtermGrace time.Duration) {
 	if pid <= 0 {
 		return
 	}
-	if sigintGrace > 0 {
-		logf(prNumber, "kill", "sending SIGINT to PGID %d (reason=%s)\n", pid, reason)
-		if err := syscall.Kill(-pid, syscall.SIGINT); err != nil {
-			if err == syscall.ESRCH {
-				return // group already gone
-			}
-			fmt.Fprintf(os.Stderr, "[pr#%d pruefer] killProcGroupGraceful %q: SIGINT error on pgid %d: %v\n", prNumber, label, pid, err)
-		}
-		time.Sleep(sigintGrace)
-		if err := syscall.Kill(-pid, 0); err == syscall.ESRCH {
-			return // group exited during SIGINT grace window
-		}
-	}
+	sessionreap.Escalate(pid, reason, sigintGrace, sigtermGrace, sessionReapOptions(prNumber))
+}
 
-	if sigtermGrace > 0 {
-		logf(prNumber, "kill", "sending SIGTERM to PGID %d (reason=%s)\n", pid, reason)
-		if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil {
-			if err == syscall.ESRCH {
-				return
-			}
-			fmt.Fprintf(os.Stderr, "[pr#%d pruefer] killProcGroupGraceful %q: SIGTERM error on pgid %d: %v\n", prNumber, label, pid, err)
-		}
-		time.Sleep(sigtermGrace)
-		if err := syscall.Kill(-pid, 0); err == syscall.ESRCH {
-			return // group exited during SIGTERM grace window
-		}
+// reapReviewSession is the post-exit session sweep: SIGKILL anything still in
+// the exited worker's session (a Bash-tool command in a separate process
+// group, which killProcGroup cannot reach). exitKind is "clean_exit" or
+// "after_stop"; a non-zero count on a clean exit means the worker left work
+// running.
+func reapReviewSession(pid, prNumber int, exitKind string) int {
+	if pid <= 0 {
+		return 0
 	}
+	return sessionreap.Sweep(pid, exitKind, sessionReapOptions(prNumber))
+}
 
-	logf(prNumber, "kill", "sending SIGKILL to PGID %d (reason=%s)\n", pid, reason)
-	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
-		fmt.Fprintf(os.Stderr, "[pr#%d pruefer] killProcGroupGraceful %q: SIGKILL error on pgid %d: %v\n", prNumber, label, pid, err)
+func sessionReapOptions(prNumber int) sessionreap.Options {
+	return sessionreap.Options{
+		Log: func(tag, format string, args ...any) { logf(prNumber, tag, format, args...) },
 	}
+}
+
+// reviewSessionSampleInterval is how often a running review's process tree is
+// sampled for the command sessions its Bash-tool shells create. Test-overridable.
+var reviewSessionSampleInterval = 2 * time.Second
+
+// trackReviewSessions registers a command-session tracker for the review
+// worker pid and samples it until ctx is done. The Bash tool runs every command
+// in a session of its own (the shell calls setsid), which the worker's SID does
+// not reach; sampling while the parent chain exists is what lets the post-exit
+// sweep find them. The returned func unregisters the tracker — call it after
+// reapReviewSession.
+func trackReviewSessions(ctx context.Context, pid, prNumber int) (stop func()) {
+	tr := sessionreap.Track(pid, sessionReapOptions(prNumber), nil)
+	go tr.Run(ctx, reviewSessionSampleInterval)
+	return tr.Close
 }

@@ -34,6 +34,15 @@ type workerRecord struct {
 	Repo        string    `json:"repo,omitempty"`
 	Stage       string    `json:"stage"`
 	SpawnedAt   time.Time `json:"spawned_at"`
+	// ParentID is non-empty for a command-session record (#1989): the session
+	// a Bash-tool command's shell created for itself, observed under the worker
+	// whose record ID this is. PID is then the session ID (the shell's PID) and
+	// StartToken the leader's start-time token, with which a recycled PID is told
+	// apart from the sampled leader. A command-session record is swept only once
+	// its parent worker is gone — never while the worker lives, since a command
+	// the worker deliberately left running is its own business until it exits.
+	ParentID   string `json:"parent_id,omitempty"`
+	StartToken string `json:"start_token,omitempty"`
 	// EmptyScans counts consecutive successful periodic scans that found no
 	// live member of this dead worker's session. A record is pruned only at
 	// >= 2, guarding against a truncated process table (R9).

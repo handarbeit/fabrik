@@ -3,6 +3,7 @@
 package pruefer
 
 import (
+	"context"
 	"os/exec"
 	"time"
 )
@@ -21,3 +22,9 @@ func killProcGroupGraceful(pid, prNumber int, label, reason string, sigintGrace,
 // isProcessAlive returns true on Windows — process liveness via signal 0 is
 // Unix-specific. Conservative default.
 func isProcessAlive(pid int) bool { return true }
+
+// reapReviewSession is a no-op on Windows (no POSIX sessions).
+func reapReviewSession(pid, prNumber int, exitKind string) int { return 0 }
+
+// trackReviewSessions is a no-op on Windows (no POSIX sessions).
+func trackReviewSessions(ctx context.Context, pid, prNumber int) (stop func()) { return func() {} }

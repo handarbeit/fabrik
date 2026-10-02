@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"syscall"
 	"time"
+
+	"github.com/handarbeit/fabrik/internal/sessionreap"
 )
 
 // setCmdProcAttr starts cmd as a new session leader (setsid(2)) rather than
@@ -34,7 +36,9 @@ func setCmdProcAttr(cmd *exec.Cmd) {
 }
 
 // killProcGroup sends SIGKILL to cmd's entire process group, cleaning up any
-// grandchild processes that outlived the Claude process. ESRCH (no such process)
+// grandchild processes that outlived the Claude process. It is group-scoped
+// only (the webhook subprocess also uses it); session members outside the
+// group are reaped by reapWorkerSession. ESRCH (no such process)
 // is silently ignored — the group may already be gone. Unexpected errors are
 // logged to stderr so cleanup failures are diagnosable.
 func killProcGroup(cmd *exec.Cmd, issueNumber int, label string) {
@@ -61,47 +65,48 @@ func isProcessAlive(pid int) bool {
 	return err == nil || err == syscall.EPERM
 }
 
-// killProcGroupGraceful sends signals in escalating order to the process group:
-// SIGINT → (sigintGrace) → SIGTERM → (sigtermGrace) → SIGKILL.
-// A zero sigintGrace skips the SIGINT step entirely (e.g. when stage yaml has sigint: 0s).
-// A zero sigtermGrace skips the SIGTERM step (falls straight to SIGKILL).
-// Liveness is re-probed before each subsequent signal; ESRCH stops escalation.
-// This gives well-behaved child processes (e.g. test runners posting Commit Statuses)
-// a chance to flush and exit cleanly before the heavier signals land.
+// sessionEscalateFn and sessionSweepFn are the session-wide reap primitives
+// (#1989, internal/sessionreap). Package-level seams so tests can swap in the
+// pre-#1989 group-only behaviour to prove the session reap is load-bearing.
+var (
+	sessionEscalateFn = sessionreap.Escalate
+	sessionSweepFn    = sessionreap.Sweep
+)
+
+// sessionReapOptions binds the engine's issue-scoped logger to sessionreap.
+func sessionReapOptions(issueNumber int) sessionreap.Options {
+	return sessionreap.Options{
+		Log:           func(tag, format string, args ...any) { claudeLog(issueNumber, tag, format, args...) },
+		WorkerSIDOnly: sessionReapWorkerSIDOnly,
+	}
+}
+
+// killProcGroupGraceful stops a worker's whole SESSION with escalating
+// signals: SIGINT → (sigintGrace) → SIGTERM → (sigtermGrace) → SIGKILL.
+// pid is the worker's PID, which is also its session ID because
+// setCmdProcAttr starts it with Setsid. The target is every process whose
+// session ID is pid, not just its process group: Claude's Bash tool puts each
+// command in a process group of its own within the worker's session, which
+// kill(-pid, sig) misses (#1989). A zero sigintGrace skips SIGINT; a zero
+// sigtermGrace skips SIGTERM. A grace window ends early once the session is
+// empty, and escalation stops when nothing is left. This gives well-behaved
+// children (e.g. test runners posting Commit Statuses) a chance to flush and
+// exit cleanly before the heavier signals land.
 func killProcGroupGraceful(pid, issueNumber int, label, reason string, sigintGrace, sigtermGrace time.Duration) {
 	if pid <= 0 {
 		return
 	}
-	if sigintGrace > 0 {
-		claudeLog(issueNumber, "kill", "sending SIGINT to PGID %d (reason=%s)\n", pid, reason)
-		if err := syscall.Kill(-pid, syscall.SIGINT); err != nil {
-			if err == syscall.ESRCH {
-				return // group already gone
-			}
-			fmt.Fprintf(os.Stderr, "[#%d engine] killProcGroupGraceful %q: SIGINT error on pgid %d: %v\n", issueNumber, label, pid, err)
-		}
-		time.Sleep(sigintGrace)
-		if err := syscall.Kill(-pid, 0); err == syscall.ESRCH {
-			return // group exited during SIGINT grace window
-		}
-	}
+	sessionEscalateFn(pid, reason, sigintGrace, sigtermGrace, sessionReapOptions(issueNumber))
+}
 
-	if sigtermGrace > 0 {
-		claudeLog(issueNumber, "kill", "sending SIGTERM to PGID %d (reason=%s)\n", pid, reason)
-		if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil {
-			if err == syscall.ESRCH {
-				return
-			}
-			fmt.Fprintf(os.Stderr, "[#%d engine] killProcGroupGraceful %q: SIGTERM error on pgid %d: %v\n", issueNumber, label, pid, err)
-		}
-		time.Sleep(sigtermGrace)
-		if err := syscall.Kill(-pid, 0); err == syscall.ESRCH {
-			return // group exited during SIGTERM grace window
-		}
+// reapWorkerSession is the post-exit session sweep (#1989): after the worker
+// has exited and been waited on, SIGKILL anything still in its session. A
+// non-zero count with exitKind "clean_exit" means the worker left work
+// running. Runs ahead of #1798's reapTrackedDescendants and #1814's registry-
+// independent sweep, which remain as the backstop.
+func reapWorkerSession(pid, issueNumber int, exitKind string) int {
+	if pid <= 0 {
+		return 0
 	}
-
-	claudeLog(issueNumber, "kill", "sending SIGKILL to PGID %d (reason=%s)\n", pid, reason)
-	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
-		fmt.Fprintf(os.Stderr, "[#%d engine] killProcGroupGraceful %q: SIGKILL error on pgid %d: %v\n", issueNumber, label, pid, err)
-	}
+	return sessionSweepFn(pid, exitKind, sessionReapOptions(issueNumber))
 }
