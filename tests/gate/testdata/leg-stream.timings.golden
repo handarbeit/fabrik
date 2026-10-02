@@ -1,0 +1,5 @@
+== per-test wall-clock (leg: pat/off), slowest first ==
+312.45s  pass  TestCrossRepoSpawn
+312.45s  pass  TestSmokeSingleRepoDispatch
+98.7s    fail  TestNoWorkNeeded
+0s       skip  TestBlockedOnInput

@@ -111,9 +111,16 @@ func (SerialScheduler) Run(ctx context.Context, g *Gate, cells []Cell) error {
 			g.outf("== auth leg: %s ==\n", c.Auth)
 			lastAuth = c.Auth
 		}
-		if err := g.RunLeg(ctx, c); err != nil {
+		if err := g.runLeg(ctx, c); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (g *Gate) runLeg(ctx context.Context, c Cell) error {
+	if g.runLegFn != nil {
+		return g.runLegFn(ctx, c)
+	}
+	return g.RunLeg(ctx, c)
 }

@@ -57,6 +57,9 @@ type Gate struct {
 	ProcCwd func(ctx context.Context, pid int) string
 	// Self is this process's PID (excluded from competing-consumer discovery).
 	Self int
+
+	// runLegFn replaces RunLeg for scheduler tests.
+	runLegFn func(context.Context, Cell) error
 }
 
 // NewGate wires a Gate around the real OS.
