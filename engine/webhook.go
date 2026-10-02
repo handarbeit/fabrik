@@ -814,7 +814,7 @@ func (wm *webhookManager) supervise(ctx context.Context) {
 		wm.logFn(0, "webhook", "%s\n", effectiveSubscriptionMessage(org, repos))
 
 		wm.mu.Lock()
-		forgetWebhookStart(wm.currentCmd) // the previous subprocess is gone; its token is no longer needed
+		forgetSupersededWebhookStart(wm.currentCmd, cmd) // the previous subprocess is gone; its token is no longer needed
 		wm.currentCmd = cmd
 		wm.state = WebhookStreamStartingUp
 		wm.subscriptionNote = subscriptionCoverageNote(org, repos)
@@ -979,6 +979,20 @@ func forgetWebhookStart(cmd *exec.Cmd) {
 	if cmd != nil && cmd.Process != nil {
 		sessionreap.ForgetStart(cmd.Process.Pid)
 	}
+}
+
+// forgetSupersededWebhookStart drops prev's recorded start token once next has
+// replaced it. startSubprocessInternal has already recorded next's token by the
+// time this runs, so when the new subprocess was handed the old one's PID (the
+// old group had emptied) forgetting by PID would wipe the fresh token; skip then.
+func forgetSupersededWebhookStart(prev, next *exec.Cmd) {
+	if prev == nil || prev.Process == nil {
+		return
+	}
+	if next != nil && next.Process != nil && next.Process.Pid == prev.Process.Pid {
+		return
+	}
+	forgetWebhookStart(prev)
 }
 
 // startSubprocessInternal starts `gh webhook forward` with the given args.
