@@ -748,9 +748,9 @@ The set below is defined by property, not enumeration, matching R1's own
 framing and the settle-scan table above's convention: a mechanism belongs
 here if the assertion that actually distinguishes correct from incorrect
 behavior is an ordering or sequence claim, not a state claim. Four
-mechanisms qualified when #1592 was filed — if a fifth is ever added
-without a row here, that is the gap this table exists to make visible
-instead of leaving it latent in prose.
+mechanisms qualified when #1592 was filed; the comment re-entry rework swap
+(#2005) is a fifth — if a sixth is ever added without a row here, that is the
+gap this table exists to make visible instead of leaving it latent in prose.
 
 | mechanism | covering scenario | seam needed |
 |---|---|---|
@@ -758,6 +758,7 @@ instead of leaving it latent in prose.
 | GraphQL rate-limit backoff / REST hard gate (`engine/backoff.go`) | `backoff_test.go`: `TestBackoff_GraphQLRateLimitIntervalEscalatesAndRecovers`, `TestBackoff_RESTHardGateSkipsPollUntilReset` | `Engine.PollWithBackoff` |
 | Stale-worker-label reaping (`forEachStaleUnworkedItem`, `engine/worker_liveness.go`) | `stale_worker_reap_test.go`: `TestStaleWorkerReap_OrphanedLockAndEditingLabels` | `Engine.RunStartupCleanup` + `RestartEnv` |
 | Review/no-op reinvoke-cycle counters and their interaction (`ReviewCycleDecremented`/#1045/ADR-1518, `NoOpCommentCycles`/#1555) | `reinvoke_cycle_counters_test.go`: `TestReviewCycleDecremented_NoCommitRefundsIndefinitely`, `TestNoOpCommentCycles_TripsBreakerAndResetsOnProgress`, `TestReviewCycleVsNoOpCommentCycle_Invariant` | no new engine seam, but reuses `Engine.RegisterObservers` — see that file's own doc comment |
+| Comment re-entry rework label swap (`beginStageRework`/`endStageRework`, ADR-1802) — the live `TestCommentReentryShowsReworking`'s twin | `comment_reentry_rework_test.go`: `TestCommentReentryShowsReworking_CompletingExit`, `TestCommentReentryShowsReworking_NonCompletingExit` | `simgh.Sim.LabelEvents` (state-change-only label-event log; the mutation log cannot tell a real `labeled` event from a no-op re-add) |
 
 ### Gap 1 — dependency blocking and unblocking
 
