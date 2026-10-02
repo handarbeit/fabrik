@@ -1,6 +1,7 @@
 package gate
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -60,7 +61,7 @@ func (w *suiteWriter) Write(p []byte) (int, error) {
 	defer w.mu.Unlock()
 	w.buf = append(w.buf, p...)
 	for {
-		i := strings.IndexByte(string(w.buf), '\n')
+		i := bytes.IndexByte(w.buf, '\n')
 		if i < 0 {
 			break
 		}
