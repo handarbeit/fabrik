@@ -21,6 +21,8 @@ type Plan struct {
 	RawArgs []string
 	// Clean: reset the bed before the run.
 	Clean bool
+	// Resume: run only what the per-SHA coverage ledger still lacks (#1972).
+	Resume bool
 }
 
 // Preflight is one precondition probe. The list is ordered and runs before ANY
@@ -47,12 +49,13 @@ type Gate struct {
 	Preflights []Preflight
 	// Scheduler runs the cells; default is the serial auth × train loop.
 	Scheduler Scheduler
-	// OnLeg, if set, observes each leg that ran to a normal post-suite result
-	// (the #1972 ledger seam). It is NOT called for a leg that ended in the
-	// RUN INVALID backoff banner (ExitBudgetExhausted), the post-suite watchdog
+	// OnLeg, if set, observes each leg that ran to a normal post-suite result.
+	// (#1972's coverage ledger does NOT hang off it: it records from the suite's
+	// event stream so a killed leg keeps what had finished.) It is NOT called for
+	// a leg that ended in the RUN INVALID backoff banner (ExitBudgetExhausted), the post-suite watchdog
 	// (ExitPostSuiteWatchdog), or a failed restart step: bash gave those no
-	// per-leg result either, and how a ledger should record them
-	// (invalid/inconclusive) is #1972/#1973's decision, not this port's.
+	// per-leg result either. The ledger's reading of them: RUN INVALID voids the
+	// cell's records, a watchdog leg's completed PASSes count (ADR-1972).
 	OnLeg func(LegResult)
 
 	// Seams for time and the OS.
@@ -62,6 +65,19 @@ type Gate struct {
 	ProcCwd func(ctx context.Context, pid int) string
 	// Self is this process's PID (excluded from competing-consumer discovery).
 	Self int
+
+	// LoadAvg reads the host's 1-minute load average for the leg archive
+	// (default: the per-OS probe; ok=false means unavailable).
+	LoadAvg func() (float64, bool)
+
+	// engineSHA is the FULL SHA of the engine under test, set by PreflightBed: the
+	// coverage ledger's key (#1972).
+	engineSHA string
+	// resume mirrors Plan.Resume for RunPregate, which consults the pre-gate record.
+	resume bool
+	// cov is the live coverage ledger context; nil when the ledger is disabled or
+	// unavailable (existing behaviour, unchanged).
+	cov *covState
 
 	// runLegFn replaces RunLeg for scheduler tests.
 	runLegFn func(context.Context, Cell) error
@@ -195,7 +211,7 @@ func (g *Gate) run(ctx context.Context, argv []string) error {
 		g.errln(err.Error())
 		return &ExitError{Code: ExitPreconditionFailed}
 	}
-	plan := &Plan{AuthModes: modes, Args: args.Rest, RawArgs: argv, Clean: args.Clean}
+	plan := &Plan{AuthModes: modes, Args: args.Rest, RawArgs: argv, Clean: args.Clean, Resume: args.Resume}
 
 	for _, pf := range g.Preflights {
 		if err := pf.Run(ctx, g, plan); err != nil {
@@ -203,22 +219,91 @@ func (g *Gate) run(ctx context.Context, argv []string) error {
 		}
 	}
 
+	// The coverage inputs (live set, source hashes, registry) are computed before
+	// ANY live spend, so a source file that cannot be parsed fails here (exit 4)
+	// rather than hours into a gate.
+	var inputs *covInputs
+	if g.Cfg.CoverageDir != "" {
+		if inputs, err = g.loadCoverageInputs(); err != nil {
+			return exitErr(ExitPreflightFailed, "coverage ledger: %v", err)
+		}
+	} else if plan.Resume {
+		return exitErr(ExitUsage, "--resume needs the coverage ledger, which is disabled (E2E_COVERAGE_DIR resolved to nothing)")
+	}
+	if plan.Resume && hasSubtestFilter(plan.Args) {
+		return exitErr(ExitUsage, "--resume cannot be combined with a subtest-level -run/-skip: a subtest-filtered run executes only part of a test, so it could never be credited")
+	}
+	g.resume = plan.Resume
+
 	if err := g.RunPregate(ctx); err != nil {
 		return err
 	}
-	if err := g.PrepareBedAndReset(ctx, plan.Clean); err != nil {
+	preflightText, err := g.teeOutput(func() error { return g.PrepareBedAndReset(ctx, plan.Clean) })
+	if err != nil {
 		return err
 	}
 
-	cells := PlanCells(PlanInput{
+	planInput := PlanInput{
 		AuthModes:    plan.AuthModes,
 		TrainMode:    g.Getenv("E2E_TRAIN_MODE"),
 		CallerHasRun: HasRunFlag(plan.Args),
 		Parallel:     g.Cfg.Parallel,
 		ParallelOn:   g.Cfg.ParallelOn,
 		Args:         plan.Args,
-	})
-	return g.Scheduler.Run(ctx, g, cells)
+	}
+	cells := PlanCells(planInput)
+
+	var (
+		legs     []string
+		required map[string][]string
+	)
+	if inputs != nil {
+		cs, err := g.openCoverage(ctx, inputs, args, plan.Args, preflightText)
+		if err != nil {
+			return err
+		}
+		g.cov = cs
+	}
+	if g.cov != nil {
+		// The REQUIRED set is the plan the gate would build with no caller
+		// arguments at all — a caller's -run narrows what this invocation runs,
+		// never what the gate requires.
+		full := planInput
+		full.CallerHasRun, full.Args = false, nil
+		if legs, required, err = RequiredTests(inputs.live, PlanCells(full)); err != nil {
+			return exitErr(ExitPreflightFailed, "coverage ledger: %v", err)
+		}
+		if plan.Resume {
+			var resolved int
+			ev := &Evaluator{Snap: g.cov.ledger.Load(), Hashes: inputs.hashes, Entries: inputs.entries, States: g.newIssueStates()}
+			if cells, resolved, err = ResumeCells(ctx, cells, inputs.live, ev); err != nil {
+				return exitErr(ExitUsage, "%v", err)
+			}
+			g.outf("== --resume: %d (test, leg) pair(s) already resolved; running %d cell(s) ==\n", resolved, len(cells))
+		}
+	}
+
+	var runErr error
+	if g.cov != nil && plan.Resume && len(cells) == 0 {
+		g.outln("== --resume: nothing left to run for the selected tests ==")
+	} else {
+		runErr = g.Scheduler.Run(ctx, g, cells)
+	}
+
+	if g.cov == nil {
+		return runErr
+	}
+	// Print the coverage summary on every path — pass, fail, kill. A cancelled
+	// run still gets one, on a fresh, bounded context for the gh lookups.
+	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+	defer cancel()
+	rep := g.coverageReport(sctx, g.cov.ledger, inputs, legs, required, true)
+	rep.Pregate = g.pregateLine(sctx)
+	g.outln(rep.Format())
+	if runErr == nil && plan.Resume && !rep.Complete() {
+		return &ExitError{Code: ExitCoverageIncomplete, Msg: "every leg this invocation ran passed, but required live coverage is still incomplete — run scripts/e2e/run.sh --resume again"}
+	}
+	return runErr
 }
 
 // gitToplevel resolves the repo root from the current directory.

@@ -129,13 +129,19 @@
       "sim": [
         "TestMergeTrainAssembly_PoisonMatrix",
         "TestMergeTrainBisect_TrialCountsMatchExpected"
+      ],
+      "skip_ok_legs": [
+        "*/off"
       ]
     },
     {
       "name": "TestMergeTrainColdCacheBaseMember",
       "parity": "live-only",
       "live_only_reason": "other",
-      "note": "needs a cold boardcache.CacheImpl after an engine restart; tests/sim never wires the board cache in"
+      "note": "needs a cold boardcache.CacheImpl after an engine restart; tests/sim never wires the board cache in",
+      "skip_ok_legs": [
+        "*/off"
+      ]
     },
     {
       "name": "TestMergeTrainConflictBisectPrefixRerere",
@@ -143,6 +149,9 @@
       "sim": [
         "TestMergeTrainConflict_RerereReplaysAcrossIndependentTrials",
         "TestMergeTrainConflict_UnresolvableEjectsMember"
+      ],
+      "skip_ok_legs": [
+        "*/off"
       ]
     },
     {
@@ -152,18 +161,27 @@
         "TestMergeTrainMode_On",
         "TestMergeTrainAssembly_PoisonMatrix"
       ],
-      "note": "assembly all-green is a subtest of TestMergeTrainAssembly_PoisonMatrix, which cannot be referenced separately"
+      "note": "assembly all-green is a subtest of TestMergeTrainAssembly_PoisonMatrix, which cannot be referenced separately",
+      "skip_ok_legs": [
+        "*/off"
+      ]
     },
     {
       "name": "TestMergeTrainQueuedDeeperThanBatchCap",
       "parity": "gap",
-      "note": "sim touches max_batch_size only inside the queued-comment-eject tests; no deterministic-ordering / two-batch landing scenario"
+      "note": "sim touches max_batch_size only inside the queued-comment-eject tests; no deterministic-ordering / two-batch landing scenario",
+      "skip_ok_legs": [
+        "*/off"
+      ]
     },
     {
       "name": "TestMergeTrainRedSingletonReroutesOffQueued",
       "parity": "sim",
       "sim": [
         "TestMergeTrainRedSingleton_ReroutesOffQueued"
+      ],
+      "skip_ok_legs": [
+        "*/off"
       ]
     },
     {
@@ -172,6 +190,9 @@
       "sim": [
         "TestMergeTrainRestart_CompletesDeferredLandingAfterMerge",
         "TestMergeTrainRestart_ResumesOpenTrialFromLiveBranch"
+      ],
+      "skip_ok_legs": [
+        "*/off"
       ]
     },
     {
@@ -179,6 +200,9 @@
       "parity": "sim",
       "sim": [
         "TestMergeTrainRunaway_TripsAndPausesQueuedMembers"
+      ],
+      "skip_ok_legs": [
+        "*/off"
       ]
     },
     {
@@ -187,12 +211,18 @@
       "sim": [
         "TestMergeTrainSingletonFastPath_UpToDateAndGreen_LandsWithoutTrial",
         "TestMergeTrainStaleSnapshot_SingletonFastPath_LandedExactlyOnce"
+      ],
+      "skip_ok_legs": [
+        "*/off"
       ]
     },
     {
       "name": "TestMergeTrainTwoBasesConcurrent",
       "parity": "gap",
-      "note": "no sim scenario for concurrent per-(repo,base) trains"
+      "note": "no sim scenario for concurrent per-(repo,base) trains",
+      "skip_ok_legs": [
+        "*/off"
+      ]
     },
     {
       "name": "TestNoWorkNeeded",
@@ -229,6 +259,9 @@
       "sim": [
         "TestQueuedCommentEject_NotInLiveBatch_EjectedDirectly",
         "TestQueuedCommentEject_WorkerInFlight_BatchContinues"
+      ],
+      "skip_ok_legs": [
+        "*/off"
       ]
     },
     {
@@ -291,7 +324,10 @@
       "name": "TestSwitchTrainMode",
       "parity": "live-only",
       "live_only_reason": "other",
-      "note": "needs a bed process restart to flip merge_train; the sim covers each mode in TestMergeTrainMode_On/_Off but not the live switch"
+      "note": "needs a bed process restart to flip merge_train; the sim covers each mode in TestMergeTrainMode_On/_Off but not the live switch",
+      "skip_ok_legs": [
+        "*/*"
+      ]
     },
     {
       "name": "TestYoloAutoMergeLabel",

@@ -6,17 +6,32 @@ import "strings"
 type RunArgs struct {
 	// Clean: the first argument was --clean (the bed is reset before the run).
 	Clean bool
+	// Resume: run only the (test, leg) pairs the per-SHA coverage ledger still
+	// lacks a valid PASS for (#1972, ADR-1972).
+	Resume bool
 	// Rest is everything else, passed through to `go test`.
 	Rest []string
 }
 
-// ParseRunArgs consumes --clean — only when it is the FIRST argument, exactly as
-// run.sh did — and leaves the rest for `go test`.
+// ParseRunArgs consumes the gate's own flags — --clean and --resume — only while
+// they lead the command line, exactly as run.sh did for --clean, in either order.
+// Everything after the first other argument is left for `go test`, so a
+// `-run ... --resume` never has its flag swallowed from the middle.
 func ParseRunArgs(argv []string) RunArgs {
-	if len(argv) > 0 && argv[0] == "--clean" {
-		return RunArgs{Clean: true, Rest: append([]string(nil), argv[1:]...)}
+	var a RunArgs
+	i := 0
+	for ; i < len(argv); i++ {
+		switch argv[i] {
+		case "--clean":
+			a.Clean = true
+		case "--resume":
+			a.Resume = true
+		default:
+			a.Rest = append([]string(nil), argv[i:]...)
+			return a
+		}
 	}
-	return RunArgs{Rest: append([]string(nil), argv...)}
+	return a
 }
 
 // HasRunFlag reports whether the caller supplied -run/--run (with or without

@@ -40,6 +40,10 @@ const (
 	ExitPregateFailed      = 5 // sim suite or github wire-contract tests failed
 	ExitPostSuiteWatchdog  = 6 // go test exited but the post-suite tail stalled (#1676)
 	ExitPreconditionFailed = 7 // competing token consumer / Pruefer down / auth-mode precondition
+	// ExitCoverageIncomplete (#1972): every leg this invocation ran passed, but the
+	// ledger still lacks a valid PASS for some required (test, leg) pair — or the
+	// coverage check run by `gate coverage` found the gate not yet accepted.
+	ExitCoverageIncomplete = 8
 )
 
 // ExitError carries the process exit code a failed step wants.
@@ -93,6 +97,12 @@ type Config struct {
 	KillGrace          time.Duration // SIGTERM → SIGKILL grace for a reaped child (10s)
 
 	TmpDir string // $TMPDIR, default /tmp
+
+	// The per-SHA coverage ledger (#1972, ADR-1972).
+	CoverageDir        string        // E2E_COVERAGE_DIR, default <RepoRoot>/.e2e-coverage ("" disables the ledger)
+	CoverageKeepSHAs   int           // E2E_COVERAGE_KEEP_SHAS: SHAs whose bulky archive logs are kept (default 5)
+	IssueRepo          string        // E2E_ISSUE_REPO: where a skip's cited #N lives (default handarbeit/fabrik)
+	ArchiveLogInterval time.Duration // how often the engine log is sampled during a leg (10s)
 }
 
 // LoadConfig resolves a Config from getenv. repoRoot is the git toplevel the
@@ -118,6 +128,11 @@ func LoadConfig(getenv func(string) string, repoRoot string) (Config, error) {
 		StopWait:           60 * time.Second,
 		KillGrace:          10 * time.Second,
 		TmpDir:             orDefault(getenv("TMPDIR"), "/tmp"),
+
+		CoverageDir:        orDefault(getenv("E2E_COVERAGE_DIR"), filepath.Join(repoRoot, ".e2e-coverage")),
+		CoverageKeepSHAs:   5,
+		IssueRepo:          orDefault(getenv("E2E_ISSUE_REPO"), "handarbeit/fabrik"),
+		ArchiveLogInterval: 10 * time.Second,
 	}
 	var err error
 	if c.GHAPITimeout, err = secsEnv(getenv, "E2E_GH_API_TIMEOUT", 30); err != nil {
@@ -128,6 +143,13 @@ func LoadConfig(getenv func(string) string, repoRoot string) (Config, error) {
 	}
 	if c.PostSuiteWatchdog, err = secsEnv(getenv, "E2E_POST_SUITE_WATCHDOG", 300); err != nil {
 		return c, err
+	}
+	if v := strings.TrimSpace(getenv("E2E_COVERAGE_KEEP_SHAS")); v != "" {
+		n, perr := strconv.Atoi(v)
+		if perr != nil || n < 1 {
+			return c, fmt.Errorf("E2E_COVERAGE_KEEP_SHAS=%q is not a positive integer", v)
+		}
+		c.CoverageKeepSHAs = n
 	}
 	mins, err := secsEnv(getenv, "E2E_STALL_WARN_MINUTES", 15)
 	if err != nil {

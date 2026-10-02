@@ -93,6 +93,15 @@ assert_eq "--skip-tests + --skip-integration: SKIP_INTEGRATION" "1" "$SKIP_INTEG
 # --- missing version is a hard usage error (pre-existing behavior) ---
 assert_exits "missing version exits 2" "2"
 
+# --- --help prints the header, which documents the coverage-based live gate
+# (#1972), and exits 0 without needing a version ---
+help_out="$(parse_args --help 2>&1)"; rc=$?
+assert_eq "--help exits 0" "0" "$rc"
+case "$help_out" in
+  *"COVERAGE-BASED"*"--resume"*) echo "PASS: --help mentions coverage-based gating and --resume" ;;
+  *) echo "FAIL: --help does not mention coverage-based gating: $help_out"; FAILED=1 ;;
+esac
+
 # --- malformed version is a hard usage error (pre-existing behavior) ---
 assert_exits "malformed version exits 2" "2" not-a-version
 
@@ -154,6 +163,21 @@ case "$msg" in
   *) echo "PASS: exit 7 message does not mention the fidelity-drift procedure" ;;
 esac
 assert_eq "exit 7 classified as failure" "1" "$rc"
+
+# --- exit 8 (COVERAGE_INCOMPLETE_EXIT, #1972): every leg passed but the per-SHA
+# ledger still lacks required pairs. Not a regression and not fidelity-drift:
+# the operator re-runs and it resumes. ---
+msg="$(interpret_e2e_exit_code 8)"; rc=$?
+case "$msg" in
+  *"coverage is still incomplete"*"NOT a regression"*"resumes"*)
+    echo "PASS: exit 8 message is distinct, says re-run resumes, and disclaims regression" ;;
+  *) echo "FAIL: exit 8 message does not explain resumable incomplete coverage: $msg"; FAILED=1 ;;
+esac
+case "$msg" in
+  *"FIDELITY-DRIFT"*) echo "FAIL: exit 8 message wrongly mentions the fidelity-drift procedure"; FAILED=1 ;;
+  *) echo "PASS: exit 8 message does not mention the fidelity-drift procedure" ;;
+esac
+assert_eq "exit 8 classified as failure" "1" "$rc"
 
 msg="$(interpret_e2e_exit_code 1)"; rc=$?
 case "$msg" in
@@ -231,6 +255,18 @@ if grep -Eq '"\$REPO_ROOT/scripts/e2e/run\.sh"[[:space:]]+--clean([[:space:]]|$)
   echo "PASS: step 5 invokes scripts/e2e/run.sh with --clean"
 else
   echo "FAIL: step 5 does not invoke scripts/e2e/run.sh with --clean"
+  FAILED=1
+fi
+
+# --- Static check (#1972): step 5 is coverage-based — it asks the read-only
+# `coverage` check first, resumes (never restarts) the gate, and records the
+# coverage line in the release notes. ---
+if grep -Eq '"\$REPO_ROOT/scripts/e2e/run\.sh"[[:space:]]+--clean[[:space:]]+--resume' "$REPO_ROOT/scripts/cut-release.sh" \
+   && grep -Eq 'run\.sh"[[:space:]]+coverage[[:space:]]+--sha' "$REPO_ROOT/scripts/cut-release.sh" \
+   && grep -Fq 'insert_notes_line "$NOTES_FILE" "- $COVERAGE_LINE"' "$REPO_ROOT/scripts/cut-release.sh"; then
+  echo "PASS: step 5 is coverage-based (coverage check, --clean --resume, notes line)"
+else
+  echo "FAIL: step 5 does not gate on the coverage ledger"
   FAILED=1
 fi
 

@@ -81,6 +81,7 @@ func (g *Gate) PreflightBed(ctx context.Context) (wantShort string, err error) {
 		return "", preflightFail("preflight: cannot resolve %s in %s", ref, bed)
 	}
 	wantShort = shortSHA(want)
+	g.engineSHA = want // the coverage ledger's key (#1972)
 	so, _, res = g.bedGit(ctx, "rev-parse", "HEAD")
 	have := strings.TrimSpace(so)
 	if res.ExitCode != 0 || have == "" {

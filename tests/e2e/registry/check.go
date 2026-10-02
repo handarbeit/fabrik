@@ -3,6 +3,7 @@ package registry
 import (
 	"fmt"
 	"sort"
+	"strings"
 )
 
 // Check validates reg against the discovered live and sim test names and
@@ -91,7 +92,20 @@ func validateEntry(e Entry, simSet map[string]bool) []string {
 	default:
 		add("unknown parity %q (want %q, %q or %q)", e.Parity, ParitySim, ParityLiveOnly, ParityGap)
 	}
+	for _, p := range e.SkipOKLegs {
+		if !validLegPattern(p) {
+			add("malformed skip_ok_legs pattern %q (want \"<auth>/<train>\" with auth pat|app|*, train off|on|*)", p)
+		}
+	}
 	return out
+}
+
+func validLegPattern(p string) bool {
+	auth, train, ok := strings.Cut(p, "/")
+	if !ok {
+		return false
+	}
+	return (auth == "*" || auth == "pat" || auth == "app") && (train == "*" || train == "off" || train == "on")
 }
 
 func validReason(r Reason) bool {

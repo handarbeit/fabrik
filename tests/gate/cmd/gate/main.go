@@ -4,6 +4,8 @@
 //
 //	gate [run] [--clean] [go test flags...]   # the gate (what run.sh did)
 //	gate reset [--worktrees]                  # clear the bed (what reset.sh did)
+//	gate [run] --resume [--clean] ...         # run only what the coverage ledger lacks (#1972)
+//	gate coverage [--sha S] [--format notes]  # is live coverage complete for S? (exit 0 / 8)
 //
 // It is not part of the fabrik binary.
 package main
@@ -52,10 +54,10 @@ func realMain(argv []string) int {
 	return code
 }
 
-// splitSubcommand peels an explicit "run" or "reset" off the front; anything
+// splitSubcommand peels an explicit "run", "reset" or "coverage" off the front; anything
 // else is the gate's own arguments (--clean, go test flags).
 func splitSubcommand(argv []string) (string, []string) {
-	if len(argv) > 0 && (argv[0] == "run" || argv[0] == "reset") {
+	if len(argv) > 0 && (argv[0] == "run" || argv[0] == "reset" || argv[0] == "coverage") {
 		return argv[0], argv[1:]
 	}
 	return "run", argv
@@ -75,6 +77,9 @@ func run(ctx context.Context, sub string, argv []string) int {
 	}
 	g := gate.NewGate(cfg, os.Stdout, os.Stderr)
 
+	if sub == "coverage" {
+		return g.Coverage(ctx, argv)
+	}
 	if sub == "reset" {
 		var opts gate.ResetOptions
 		for _, a := range argv {

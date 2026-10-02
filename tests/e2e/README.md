@@ -73,6 +73,19 @@ A bare `--skip-integration` (no reason) is a hard usage error, by design — see
 `adrs/1454-sim-pre-gate-not-replacement.md`'s R2 section for why "no flag at all" was
 rejected in favor of this loudly-labelled one.
 
+**The live gate is coverage-based, not invocation-based (#1972, ADR-1972).** A ~10-hour
+run rarely survives unbroken — GitHub has outages, a scenario hits a harness race, the
+operator suspends the run, the quota runs out — and none of the passes already recorded
+for the same engine SHA should be thrown away. The gate runner records every live
+scenario's outcome, per leg, in a durable per-SHA ledger as it streams in, and
+`cut-release.sh` accepts the live gate when **every required (test, leg) pair has a valid
+PASS for the SHA being released**, across however many invocations that took. Step 5 asks
+`scripts/e2e/run.sh coverage` first, runs `scripts/e2e/run.sh --clean --resume` (only the
+missing pairs) if coverage is incomplete, asks again, and records the engine SHA and the
+number of gate invocations in the release notes. Re-running `cut-release.sh` after an
+interrupted gate therefore resumes it. See "Coverage ledger, `--resume`, and suspending a
+run" below.
+
 `scripts/e2e/run.sh` itself also runs the sim + wire-contract pre-gate first (R1,
 #1454) — before any bed preflight, build, or live call — whether invoked standalone or
 via `cut-release.sh`, so a live-gate run never spends live budget on a bug the free
@@ -1363,6 +1376,14 @@ scripts/e2e/run.sh -run TestSmokeSingleRepoDispatch
 
 # Subset by name pattern, both modes
 scripts/e2e/run.sh -run 'Smoke|NoWork'
+
+# Resume an interrupted gate: run only the (test, leg) pairs the per-SHA ledger
+# still lacks a valid PASS for (details: "Coverage ledger, --resume, ..." below)
+scripts/e2e/run.sh --resume
+scripts/e2e/run.sh --clean --resume
+
+# Read-only: is live coverage complete for this SHA? (exit 0 yes, 8 no)
+scripts/e2e/run.sh coverage
 ```
 
 Anything after the script name is passed through to `go test`. Override the
@@ -1734,6 +1755,104 @@ it will refuse otherwise.
 
 > Do **not** run reset while a suite is in flight — it will drain the board out from
 > under the running tests.
+
+## Coverage ledger, `--resume`, and suspending a run (#1972)
+
+The gate records what it has proven, so partial runs add up to a complete gate
+(ADR-1972). The ledger is **git-ignored** and lives at `.e2e-coverage/` in the repo root
+(override with `E2E_COVERAGE_DIR`; point a clean checkout at an operator's directory to
+share it). It is local to one machine and never committed.
+
+```
+.e2e-coverage/<full engine sha>/
+  outcomes/<auth>-<train>.jsonl   append-only; one line per recorded test outcome
+  invocations.jsonl               one line per gate invocation that started a leg
+  archive/<cell>/<invocation>/    the bulky per-leg logs (below)
+.e2e-coverage/pregate/<head>.json pre-gate pass for a clean checkout HEAD
+```
+
+**What counts as covered.** A (test, leg) pair — the leg is `<auth>/<train>`, e.g.
+`app/off` — is covered when its latest recorded outcome is a **PASS against the test's
+current source hash**. The set of required pairs comes from the plan the gate itself
+builds (every live test × every leg), never from a hard-coded matrix, and ignores any
+`-run` you pass: a `-run` narrows what one invocation runs, not what the gate needs.
+Only live scenario tests are entries (a top-level `Test*` calling `LoadEnv`, per the
+registry); subtests roll up into their parent.
+
+**Outcomes are recorded as they stream in**, not at leg end, each fsynced. A test with no
+terminal `pass`/`fail`/`skip` event is never recorded as a PASS.
+
+**When coverage is reopened.**
+
+| Change since the PASS was recorded | Effect |
+|---|---|
+| Only `tests/e2e/`, `scripts/e2e/`, `tests/gate/` differ from the engine SHA | The ledger stays valid. |
+| Anything else differs (engine code, docs, …) | A different engine SHA, a new and empty ledger. The check prints which paths. |
+| A test's source changed | Only that test loses its PASS. The hash covers the test function, its whole file, and every package-level declaration in `tests/e2e` it transitively references (so a `harness.go` helper edit reopens its dependents — extra reruns, never a false certification). Not hashed: non-Go inputs. |
+| The leg ended in the RUN INVALID backoff banner (exit 3) | Everything that cell recorded in that invocation is discarded. |
+| The test's last outcome was FAIL, or a skip the ledger does not accept | Uncovered. |
+
+**Skips.** A test that skips citing an issue (`#N`) is a **known skip** — listed
+separately, not counted as covered, not blocking — **only while that issue (any one of
+them, in `E2E_ISSUE_REPO`, default `handarbeit/fabrik`) is open.** Cite no issue, cite only
+closed ones, or run where `gh` cannot read the issue, and the skip counts as **missing**.
+Skips that are structural — merge-train scenarios under train `off`, `TestSwitchTrainMode`
+outside its restart step — are declared in the registry (`skip_ok_legs`, e.g. `["*/off"]`)
+and reported as **structural skips**: listed, not blocking, not counted as covered. If a
+first real run shows a skip the registry does not explain, the summary prints its message;
+the fix is a one-line registry edit.
+
+**`--resume`.** `scripts/e2e/run.sh --resume` (with `--clean` in either order; both must
+lead the arguments) runs, per cell, only the tests with no valid PASS for that SHA and leg,
+as one anchored `-run '^(A|B|…)$'`; skips legs already fully covered (including their bed
+restart); runs the pre-gate once per clean HEAD; and exits **8** if every leg it ran passed
+but required coverage is still incomplete. A caller `-run` intersects with the resume set
+and never credits a test it did not run; a subtest filter (`-run 'TestX/case'`) is refused,
+since it exercises only part of a test. Without `--resume` the gate runs everything as before
+(and still records, and prints the summary — exit codes unchanged).
+
+**Reading the summary.** Printed at the end of every run, passing, failing or killed:
+
+```
+== live coverage for engine SHA 1a2b3c4 ==
+ledger drift check: engine SHA 1a2b3c4 — VALID (3 test/gate-only path(s) differ; none touch the engine)
+  app/off  covered 40/44  missing 3  known-skip 1  structural-skip 0  inconclusive 0
+    missing          TestX: no record
+    known-skip       TestY: blocked on open #123 — "blocked on #123"
+== coverage INCOMPLETE: … ; 2 invocation(s) ==
+```
+
+`scripts/e2e/run.sh coverage [--sha S] [--format notes]` prints the same summary read-only
+(exit 0 complete, 8 not) — what `cut-release.sh` calls. It never touches the bed.
+
+**Per-leg log archive.** Nothing a leg produces is overwritten by the next. Under
+`archive/<cell>/<invocation>/`: `go-test.json` (the `go test -json` stream), `fabrik.log.<n>`
+(the bed **engine** log, one file per engine run), `bed-run.log`, `preflight.txt`, `load.json`
+(the host's 1-minute load average at leg start and end) and `bed-config.sha256` (a hash of the
+bed's `.fabrik/stages/` and `config.yaml`; the runner warns when it differs between invocations
+of one ledger). The log that used to vanish is the engine's `.fabrik/fabrik.log`, which the
+engine truncates on every start — so it is sampled while the leg runs and a new segment starts
+at each restart. Archives are pruned by SHA: the newest `E2E_COVERAGE_KEEP_SHAS` (default 5)
+keep their `archive/`; the outcome records are never pruned.
+
+### Suspending and resuming a run
+
+Stopping a gate mid-leg is safe, and is meant to be done — for instance while GitHub is
+degraded.
+
+- **Stop it** with Ctrl-C, or `kill -TERM <pid of the gate runner>` (`pgrep -f 'gate run'`).
+  The runner reaps its whole process tree — `go test`, the scenarios' `gh`/`git` children, and
+  any command sessions they started — so nothing is left running under the suite. Scope the
+  signal to **that** process: do not `pkill go` or `pkill fabrik`.
+- **The bed** (`~/dev/fabrik-test`'s engine) is deliberately a detached process that outlives
+  the gate. Leave it running if you will resume soon, or stop it with the bed's own lock
+  (`.fabrik/fabrik.lock`) → `kill -TERM`. A `--resume` re-runs preflight and restarts it either way.
+- **What is lost:** only the tests in flight at that moment (they had no terminal event, so
+  nothing was recorded for them). Everything that had already passed stays recorded.
+- **Resume** with `scripts/e2e/run.sh --resume` (add `--clean` to reset the bed first). It runs
+  only what is still missing. Check where you are any time with `scripts/e2e/run.sh coverage`.
+- **A scenario's worktrees, branches and PRs** from the interrupted leg are cleaned by `--clean`
+  (and by the reset in "Reset between runs").
 
 ## Scenarios
 

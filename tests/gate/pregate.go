@@ -50,6 +50,16 @@ func (g *Gate) RunPregate(ctx context.Context) error {
 		}
 	}
 
+	// #1972 R4: --resume consults the per-SHA record of an earlier pass, so the
+	// pre-gate runs once per HEAD across partial invocations. Same bar as the
+	// signal above: the SAME HEAD and a clean tree, re-resolved here.
+	if g.resume {
+		if head, ok := g.pregateRecorded(ctx); ok {
+			g.outf("== pre-gate skipped (already passed for clean HEAD %s — recorded in the coverage ledger, #1972) ==\n", head)
+			return nil
+		}
+	}
+
 	g.outln("== pre-gate: sim suite + github wire-contract tests (R1, #1454) ==")
 	res := g.Exec.Run(ctx, Cmd{
 		Name: g.Cfg.RepoRoot + "/scripts/sim/run.sh", Args: []string{"--all"},
@@ -66,6 +76,7 @@ func (g *Gate) RunPregate(ctx context.Context) error {
 		return &ExitError{Code: ExitPregateFailed, Msg: "pre-gate: github wire-contract tests failed — aborting before touching the live bed or making any live call."}
 	}
 	g.outln("== pre-gate passed ==")
+	g.recordPregatePass(ctx)
 	return nil
 }
 

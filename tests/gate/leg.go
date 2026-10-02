@@ -45,6 +45,11 @@ type suiteWriter struct {
 
 	lastWrite atomic.Int64 // unix nanos of the most recent Write; the stall signal
 	now       func() time.Time
+
+	// sink, if set, observes every decoded event as it streams in — the coverage
+	// ledger's recorder (#1972). It runs on the stream, not at leg end, so a leg
+	// killed mid-way keeps what had already completed.
+	sink func(Event)
 }
 
 func newSuiteWriter(log, term io.Writer, now func() time.Time) *suiteWriter {
@@ -90,6 +95,9 @@ func (w *suiteWriter) line(s string) {
 	if terminal(e) {
 		w.lastCompleted = e.Test
 	}
+	if w.sink != nil {
+		w.sink(e)
+	}
 	if e.Action == "output" {
 		// jq -r prints the string and then a newline of its own, so the terminal
 		// has always been double-spaced; kept as-is (a quirk, not fixed here).
@@ -132,6 +140,22 @@ func (g *Gate) RunLeg(ctx context.Context, cell Cell) error {
 	label := cell.Label()
 	legEnv := withEnv(g.Env, "E2E_AUTH_MODE="+cell.Auth)
 
+	// #1972: when the coverage ledger is live, this leg's logs are archived and
+	// its outcomes recorded as they stream in. The archive's sampler starts before
+	// the restart step so the engine log is captured across the mode switch, and
+	// Finish runs on EVERY exit path (a cancelled or killed leg included).
+	cs := g.cov
+	var arch *legArchive
+	if cs != nil {
+		cs.once.Do(func() {
+			if err := cs.ledger.NoteInvocation(cs.invocation, cs.head, cs.resume); err != nil {
+				g.errf("warning: cannot record this invocation in the coverage ledger: %v\n", err)
+			}
+		})
+		arch = g.beginArchive(cell, cs)
+		defer arch.Finish()
+	}
+
 	g.outf("== switching test bed to FABRIK_MERGE_TRAIN=%s, auth=%s (leg %s) ==\n", mode, cell.Auth, label)
 	res := g.Exec.Run(ctx, Cmd{
 		Name: "go", Args: []string{"test", "-tags=e2e", "-v", "-count=1", "-timeout", "3m", "-run", "^TestSwitchTrainMode$", "./tests/e2e/..."},
@@ -146,10 +170,13 @@ func (g *Gate) RunLeg(ctx context.Context, cell Cell) error {
 	}
 
 	g.outf("== running suite with E2E_TRAIN_MODE=%s, E2E_AUTH_MODE=%s, -parallel=%s (leg %s) ==\n", mode, cell.Auth, cell.Parallel, label)
-	// The log name carries no per-leg uniqueness beyond auth and mode, so the two
-	// "on" sub-legs overwrite each other — preserved quirk; #1972 owns the
-	// per-cell archive.
+	// Without the ledger the log name carries no per-leg uniqueness beyond auth
+	// and mode (the two "on" cells overwrite each other — the pre-#1972 quirk).
+	// With it, the log lives in the leg's own archive directory.
 	jsonlog := filepath.Join(g.Cfg.TmpDir, fmt.Sprintf("fabrik-e2e-%s-%s-%d.json", cell.Auth, mode, g.Self))
+	if arch != nil && arch.dir != "" {
+		jsonlog = filepath.Join(arch.dir, "go-test.json")
+	}
 
 	// Snapshot the bed's GraphQL budget right before the suite runs — purely for
 	// the cost report, which should reflect the suite's own consumption, not the
@@ -163,6 +190,11 @@ func (g *Gate) RunLeg(ctx context.Context, cell Cell) error {
 	}
 	defer logf.Close()
 	w := newSuiteWriter(logf, g.Out, g.Now)
+	var recorder *legRecorder
+	if cs != nil && !cs.noRecord {
+		recorder = newLegRecorder(cs.ledger, cell, cs.invocation, cs.head, cs.inputs.hashes, cs.inputs.liveSet, g.errf)
+		w.sink = recorder.Observe
+	}
 
 	// R3 (#1676): stall detector — advisory only, never touches the exit code.
 	stallCtx, stopStall := context.WithCancel(ctx)
@@ -183,6 +215,14 @@ func (g *Gate) RunLeg(ctx context.Context, cell Cell) error {
 		Stdout: w, Stderr: w, Session: true, Grace: g.Cfg.KillGrace, WaitDelay: drain,
 	})
 	w.Flush()
+	if recorder != nil {
+		n, failed := recorder.Counts()
+		g.outf("== coverage ledger (leg: %s): recorded %d test outcome(s)", label, n)
+		if failed > 0 {
+			g.outf(", %d FAILED to record", failed)
+		}
+		g.outln(" ==")
+	}
 	// go test has exited — stop the stall detector immediately.
 	stopStall()
 	stallDone.Wait()
@@ -382,6 +422,15 @@ func (g *Gate) postSuiteTail(ctx context.Context, cell Cell, label, jsonlog stri
 		b.WriteString("## (E2E_PARALLEL_ON, splitting the leg across budget windows).\n")
 		b.WriteString("############################################################\n")
 		g.errf("%s", b.String())
+		// #1972: this verdict cannot be trusted, so nothing this cell recorded
+		// counts — not even its PASSes. Fail closed.
+		if g.cov != nil {
+			if err := g.cov.ledger.Void(label, cellDirName(cell), g.cov.invocation); err != nil {
+				g.errf("warning: could not void this cell's ledger records (%v) — they may count as coverage\n", err)
+			} else {
+				g.errf("== the coverage ledger discarded every outcome this cell recorded (RUN INVALID) ==\n")
+			}
+		}
 		return &ExitError{Code: ExitBudgetExhausted}
 	}
 
