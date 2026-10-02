@@ -49,14 +49,9 @@ func (g *Gate) Coverage(ctx context.Context, argv []string) int {
 		g.errln("gate coverage: the coverage ledger is disabled (E2E_COVERAGE_DIR resolved to nothing)")
 		return ExitUsage
 	}
-	if sha == "" {
-		ref := orDefault(g.Getenv("E2E_BED_REF"), "origin/main")
-		so, se, res := output(ctx, g.Exec, Cmd{Name: "git", Args: []string{"rev-parse", "--verify", ref + "^{commit}"}, Dir: g.Cfg.RepoRoot, Env: g.Env})
-		if res.ExitCode != 0 {
-			g.errf("gate coverage: cannot resolve %s: %s\n", ref, strings.TrimSpace(se))
-			return ExitPreflightFailed
-		}
-		sha = strings.TrimSpace(so)
+	sha, code := g.resolveSHA(ctx, "coverage", sha)
+	if code != 0 {
+		return code
 	}
 	modes, err := ResolveAuthModes(g.Getenv("E2E_AUTH_MODE"))
 	if err != nil {
