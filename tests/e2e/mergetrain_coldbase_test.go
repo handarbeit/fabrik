@@ -127,7 +127,7 @@ func TestMergeTrainColdCacheBaseMember(t *testing.T) {
 	}
 
 	repo := env.RepoAlpha
-	stale, err := staleQueuedMembers(env, repo)
+	stale, err := staleQueuedMembers(env, repo, anyBase)
 	if err != nil {
 		t.Fatalf("pre-flight: could not list stale Queued members on %s: %v", repo, err)
 	}

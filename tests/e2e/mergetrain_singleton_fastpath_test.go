@@ -21,12 +21,13 @@ import (
 // either path and is parallel, so main moves under it; every other train scenario
 // queues 2+ members). This one makes the fast path deterministic:
 //
-//   - NOT t.Parallel(): go runs non-parallel tests to completion before resuming
-//     parallel ones, so main cannot move (the fast path requires the pinned base to be
-//     an ancestor of the member head) and no sibling can join the batch (the train
-//     batches every Queued item on the repo/base partition). Same rationale as
-//     TestMergeTrainRedSingletonReroutesOffQueued.
-//   - The member is PREPARED (PrepareMemberExactPath) but not queued until its own CI
+//   - Own partition (#1977, ADR-1977): the member runs on its own throwaway base:<branch>,
+//     which nothing else writes to, so the base cannot move (the fast path requires the
+//     pinned base to be an ancestor of the member head) and no sibling can join the
+//     batch (the train batches every Queued item in the repo/base partition, ADR-1648).
+//     Before #1977 this needed t.Parallel() omitted on main — the same rationale as
+//     TestMergeTrainRedSingletonReroutesOffQueued, which made it a serial test.
+//   - The member is PREPARED (PrepareMemberExactPathOnBase) but not queued until its own CI
 //     is complete and green and its mergeable_state is clean/unstable. Queuing first
 //     would let the first train poll see pending CI and take the trial path, which
 //     lands via "Landed via batch PR" and proves nothing about the fast path.
@@ -44,18 +45,21 @@ import (
 // Wall-clock: ~10–15 min (member CI ~1–2 min, one poll, landing, 3-poll settle wait).
 // Cost: low (no Claude invocations).
 func TestMergeTrainSingletonFastPathLandsExactlyOnce(t *testing.T) {
+	t.Parallel()
 	env := LoadEnv(t)
 	AssertFabrikRunning(t, env)
 	requireTrainBed(t, env)
 	assertTrainPoisonGuardRequired(t, env, env.RepoAlpha)
 
-	const base = "main"
+	repo := env.RepoAlpha
+	base := fmt.Sprintf("e2e-fastpath-%s", time.Now().UTC().Format("20060102-150405"))
+	CreateThrowawayBaseBranch(t, env, repo, base)
 	logStart := LogOffset(t, env)
 
-	// A unique path under e2e/train/entries/ (the poison-guard's scanned directory):
-	// landed files persist on main, so a fixed path would collide on the next run.
+	// A unique path under e2e/train/entries/ (the poison-guard's scanned directory),
+	// so the member exercises the same required-check path as its siblings.
 	path := fmt.Sprintf("e2e/train/entries/singleton-fastpath-%d.txt", time.Now().UnixNano())
-	issue, pr, itemID := PrepareMemberExactPath(t, env, env.RepoAlpha, base, "singleton-fastpath", path,
+	issue, pr, itemID := PrepareMemberExactPathOnBase(t, env, repo, base, "singleton-fastpath", path,
 		"singleton fast-path member (clean) — #1874 exactly-once landing\n")
 
 	// Wait until the member's own CI is complete and green and the PR is mergeable,
@@ -64,8 +68,8 @@ func TestMergeTrainSingletonFastPathLandsExactlyOnce(t *testing.T) {
 	var conclusions []string
 	var mergeState string
 	for {
-		cs, cerr := tryPRCheckRunConclusions(env, env.RepoAlpha, pr)
-		ms, merr := tryPRMergeableState(env, env.RepoAlpha, pr)
+		cs, cerr := tryPRCheckRunConclusions(env, repo, pr)
+		ms, merr := tryPRMergeableState(env, repo, pr)
 		switch {
 		case cerr != nil:
 			t.Logf("transient error reading check runs of PR #%d: %v (will retry)", pr, cerr)
@@ -79,7 +83,7 @@ func TestMergeTrainSingletonFastPathLandsExactlyOnce(t *testing.T) {
 			// outstanding (#1822, ciSuiteHold) — including a run-less suite younger
 			// than the post-push dwell, such as the bed's inert "claude" App suite.
 			// Queuing before that clears sends the member down the trial path.
-			out, serr := outstandingSuitesOnPRHead(env, env.RepoAlpha, pr)
+			out, serr := outstandingSuitesOnPRHead(env, repo, pr)
 			if serr != nil {
 				t.Logf("transient error reading check suites of PR #%d: %v (will retry)", pr, serr)
 			} else if len(out) == 0 {
@@ -99,7 +103,7 @@ func TestMergeTrainSingletonFastPathLandsExactlyOnce(t *testing.T) {
 	}
 	t.Logf("member PR #%d is fast-path eligible (check runs %v, mergeable_state %q); queuing issue #%d", pr, conclusions, mergeState, issue)
 	SetIssueStatus(t, env, itemID, "Queued")
-	AwaitBoardItemVisible(t, env, env.RepoAlpha, issue, awaitSeedTimeout)
+	AwaitBoardItemVisible(t, env, repo, issue, awaitSeedTimeout)
 
 	// The fast path, not the trial path, must land it.
 	taken := waitForLogLineOrFail(t, env,
@@ -109,20 +113,20 @@ func TestMergeTrainSingletonFastPathLandsExactlyOnce(t *testing.T) {
 		}, logStart, 25*time.Minute)
 	t.Logf("fast path taken: %s", strings.TrimSpace(taken))
 
-	WaitForMemberLanded(t, env, env.RepoAlpha, issue, 10*time.Minute)
-	WaitForIssueClosed(t, env, env.RepoAlpha, issue, 10*time.Minute)
+	WaitForMemberLanded(t, env, repo, issue, 10*time.Minute)
+	WaitForIssueClosed(t, env, repo, issue, 10*time.Minute)
 
 	// The landing comment must be the fast path's own, and cite the member's own PR.
-	landingPR, viaFastPath := waitForLandingPRDetail(t, env, env.RepoAlpha, pr, 5*time.Minute)
+	landingPR, viaFastPath := waitForLandingPRDetail(t, env, repo, pr, 5*time.Minute)
 	if !viaFastPath || landingPR != pr {
 		t.Fatalf("member PR #%d landing comment cites PR #%d (viaFastPath=%v); want the singleton fast path citing its own PR", pr, landingPR, viaFastPath)
 	}
 	t.Logf("member #%d landed via the singleton fast path (PR #%d)", issue, pr)
 
-	AssertMembersLandedExactlyOnce(t, env, env.RepoAlpha,
+	AssertMembersLandedExactlyOnce(t, env, repo,
 		[]landedMember{{Name: "singleton-fastpath", Issue: issue, PR: pr}}, logStart)
 
-	WaitForNoStaleTrainArtifacts(t, env, env.RepoAlpha, 2*time.Minute)
+	WaitForNoStaleTrainArtifactsOnBase(t, env, repo, base, 2*time.Minute)
 	t.Logf("singleton fast path verified: landed once, one landing comment, one close, no stale train artifacts")
 }
 

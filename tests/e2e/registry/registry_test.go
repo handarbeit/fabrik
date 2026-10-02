@@ -285,6 +285,15 @@ func TestRegistryMatchesTree(t *testing.T) {
 		t.Fatal(err)
 	}
 	problems = append(problems, CheckBedLifecycleCallers(reg, lifecycle)...)
+	// #1977: t.Parallel() matches the class — shared tests call it, serial classes do not.
+	parallel, err := ScanParallelTests("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parallel) == 0 {
+		t.Fatal("ScanParallelTests found no parallel live test")
+	}
+	problems = append(problems, CheckParallelConsistency(reg, parallel)...)
 	if len(problems) > 0 {
 		t.Fatalf("tests/e2e/registry/registry.json is out of sync with the tree:\n  %s",
 			strings.Join(problems, "\n  "))

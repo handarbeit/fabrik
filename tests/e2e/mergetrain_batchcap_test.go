@@ -68,6 +68,12 @@ import (
 // change. A pre-flight fails loudly if a stale open, non-paused Queued item is
 // already on the board.
 //
+// Default-base train group (#1977, ADR-1977): registry class default_base_train. It is
+// NOT moved onto a throwaway base: its A2/A3 assertions count "merged integration PR"
+// and "opened draft CI PR" log lines, which the engine logs per REPO, not per
+// partition, so a concurrent train on another base of RepoAlpha would add lines it
+// would mistake for its own. The gate therefore runs it serially in its own phase.
+//
 // # Log scoping (R5)
 //
 // Every log read starts at a LogOffset taken immediately before the unpause and
@@ -102,7 +108,7 @@ func TestMergeTrainQueuedDeeperThanBatchCap(t *testing.T) {
 	}
 
 	// R4 pre-flight: nothing else may already be Queued on this partition.
-	stale, err := staleQueuedMembers(env, repo)
+	stale, err := staleQueuedMembers(env, repo, "")
 	if err != nil {
 		t.Fatalf("pre-flight: could not check %s for stale Queued items: %v", repo, err)
 	}

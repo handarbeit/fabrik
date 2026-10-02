@@ -42,6 +42,10 @@ import (
 // body and assertions below are unchanged; only the scheduling annotation was
 // removed.
 //
+// Registry class exclusive (#1977, ADR-1977): the gate runs it last in its leg, after
+// every shared test has finished, so nothing shared inherits the poisoned RepoBeta
+// state (this replaces the gate's former TrainIsolatedRE cell).
+//
 // Wall-clock: ~10–20 min (~6 trials × 2 required checks ≈ 12 Actions runs).
 // Cost: low (no Claude invocations).
 func TestMergeTrainRunawayGuardPausesBatch(t *testing.T) {

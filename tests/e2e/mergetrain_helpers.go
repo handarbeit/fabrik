@@ -242,10 +242,26 @@ func QueueMember(t *testing.T, env *Env, repo, baseBranch, marker, path, content
 // runs (a landed batch merges its files into main).
 func PrepareMemberExactPath(t *testing.T, env *Env, repo, baseBranch, marker, path, content string) (issueNum, prNum int, itemID string) {
 	t.Helper()
+	return prepareMemberExactPath(t, env, repo, baseBranch, marker, path, content)
+}
+
+// PrepareMemberExactPathOnBase is PrepareMemberExactPath for a non-default
+// baseBranch (#1977): the issue additionally carries the base:<branch> label the
+// engine partitions on (see QueueMemberOnBase), so the member joins its own
+// (repo, base) train partition.
+func PrepareMemberExactPathOnBase(t *testing.T, env *Env, repo, baseBranch, marker, path, content string) (issueNum, prNum int, itemID string) {
+	t.Helper()
+	baseLabel := "base:" + baseBranch
+	ensureLabelExists(t, env, repo, baseLabel)
+	return prepareMemberExactPath(t, env, repo, baseBranch, marker, path, content, baseLabel)
+}
+
+func prepareMemberExactPath(t *testing.T, env *Env, repo, baseBranch, marker, path, content string, labels ...string) (issueNum, prNum int, itemID string) {
+	t.Helper()
 	stamp := time.Now().UTC().Format("150405.000")
 	title := fmt.Sprintf("e2e merge-train member %s (%s)", marker, stamp)
 	issueNum = FileIssue(t, env, repo, title,
-		fmt.Sprintf("e2e merge-train member. marker=%s", marker))
+		fmt.Sprintf("e2e merge-train member. marker=%s", marker), labels...)
 	itemID = AddIssueToProject(t, env, repo, issueNum)
 	branch := fmt.Sprintf("fabrik/issue-%d", issueNum)
 	prNum = CreateMemberPR(t, env, repo, baseBranch, branch, path, content, title, issueNum)
@@ -628,13 +644,33 @@ func assertPRMerged(t *testing.T, env *Env, repo string, prNumber int) {
 // (but hasn't yet completed) cleanup.
 func WaitForNoStaleTrainArtifacts(t *testing.T, env *Env, repo string, timeout time.Duration) {
 	t.Helper()
+	waitForNoStaleTrainArtifacts(t, env, repo, "", timeout)
+}
+
+// WaitForNoStaleTrainArtifactsOnBase is WaitForNoStaleTrainArtifacts scoped to the
+// integration PRs that target base (#1977): a test on its own throwaway base must
+// not wait on — or be failed by — another test's train PRs on a different base of
+// the same repo, which is exactly what concurrent shared-phase tests have.
+func WaitForNoStaleTrainArtifactsOnBase(t *testing.T, env *Env, repo, base string, timeout time.Duration) {
+	t.Helper()
+	waitForNoStaleTrainArtifacts(t, env, repo, base, timeout)
+}
+
+func waitForNoStaleTrainArtifacts(t *testing.T, env *Env, repo, base string, timeout time.Duration) {
+	t.Helper()
+	scope := repo
+	sel := `select(.headRefName | startswith("fabrik/merge-train/"))`
+	if base != "" {
+		scope = repo + " (base " + base + ")"
+		sel += ` | select(.baseRefName == "` + base + `")`
+	}
 	deadline := time.Now().Add(timeout)
 	var lastCount int
 	var lastErr error
 	var sawReading bool
 	for {
 		out, err := ghOutput(env, "pr", "list", "-R", repo, "--state", "open",
-			"--json", "headRefName", "--jq", `[.[] | select(.headRefName | startswith("fabrik/merge-train/"))] | length`)
+			"--json", "headRefName,baseRefName", "--jq", `[.[] | `+sel+`] | length`)
 		lastErr = err
 		if err == nil {
 			sawReading = true
@@ -642,15 +678,15 @@ func WaitForNoStaleTrainArtifacts(t *testing.T, env *Env, repo string, timeout t
 			if lastCount == 0 {
 				return
 			}
-			t.Logf("WaitForNoStaleTrainArtifacts: %d open merge-train integration PR(s) still on %s (will retry)", lastCount, repo)
+			t.Logf("WaitForNoStaleTrainArtifacts: %d open merge-train integration PR(s) still on %s (will retry)", lastCount, scope)
 		} else {
-			t.Logf("WaitForNoStaleTrainArtifacts: transient gh error checking for stale train PRs on %s: %v (will retry)", repo, err)
+			t.Logf("WaitForNoStaleTrainArtifacts: transient gh error checking for stale train PRs on %s: %v (will retry)", scope, err)
 		}
 		if time.Now().After(deadline) {
 			if !sawReading {
-				t.Fatalf("could not check for stale merge-train PRs on %s after %s — no successful reading (last err: %v)", repo, timeout, lastErr)
+				t.Fatalf("could not check for stale merge-train PRs on %s after %s — no successful reading (last err: %v)", scope, timeout, lastErr)
 			}
-			t.Fatalf("found %d open merge-train integration PR(s) still on %s after %s", lastCount, repo, timeout)
+			t.Fatalf("found %d open merge-train integration PR(s) still on %s after %s", lastCount, scope, timeout)
 		}
 		time.Sleep(10 * time.Second)
 	}
@@ -686,10 +722,25 @@ func ensurePausedLabelExists(t *testing.T, env *Env, repo string) {
 // untouched for its existing callers.
 func QueueMemberPaused(t *testing.T, env *Env, repo, baseBranch, marker, path, content string) (int, int) {
 	t.Helper()
+	return queueMemberPaused(t, env, repo, baseBranch, marker, path, content)
+}
+
+// QueueMemberPausedOnBase is QueueMemberPaused for a non-default baseBranch
+// (#1977): the issue also carries base:<branch>, so it joins that branch's own
+// train partition (see QueueMemberOnBase).
+func QueueMemberPausedOnBase(t *testing.T, env *Env, repo, baseBranch, marker, path, content string) (int, int) {
+	t.Helper()
+	baseLabel := "base:" + baseBranch
+	ensureLabelExists(t, env, repo, baseLabel)
+	return queueMemberPaused(t, env, repo, baseBranch, marker, path, content, baseLabel)
+}
+
+func queueMemberPaused(t *testing.T, env *Env, repo, baseBranch, marker, path, content string, extraLabels ...string) (int, int) {
+	t.Helper()
 	stamp := time.Now().UTC().Format("150405.000")
 	title := fmt.Sprintf("e2e merge-train member %s (%s)", marker, stamp)
 	num := FileIssue(t, env, repo, title,
-		fmt.Sprintf("e2e merge-train member. marker=%s", marker), pausedLabel)
+		fmt.Sprintf("e2e merge-train member. marker=%s", marker), append([]string{pausedLabel}, extraLabels...)...)
 	itemID := AddIssueToProject(t, env, repo, num)
 	uPath := uniqueMemberPath(path, num)
 	branch := fmt.Sprintf("fabrik/issue-%d", num)
@@ -752,10 +803,29 @@ func repauseOnFailure(t *testing.T, env *Env, repo string, num int) {
 	})
 }
 
+// anyBase makes staleQueuedMembers repo-wide: every open, non-paused Queued item
+// counts whatever base it targets.
+const anyBase = "*"
+
+// baseLabelOf returns the branch of the first base:<branch> label, "" when none —
+// the engine's own resolution (baseBranchForItem): no label means the default base.
+func baseLabelOf(labels []string) string {
+	for _, l := range labels {
+		if b, ok := strings.CutPrefix(l, "base:"); ok && b != "" {
+			return b
+		}
+	}
+	return ""
+}
+
 // staleQueuedMembers returns open, non-paused issues on repo that already sit in
-// Queued. Any such item would join this scenario's (repo, base) partition and
-// change the batch composition, so the caller fails loudly rather than run.
-func staleQueuedMembers(env *Env, repo string) ([]int, error) {
+// Queued in the (repo, base) partition the caller is about to use: base "" is the
+// default partition (items with no base: label), a branch name is that branch's own
+// partition, and anyBase is the whole repo. Any such item would join this
+// scenario's batch and change its composition, so the caller fails loudly rather
+// than run. Scoping to the partition (#1977) keeps a test on a throwaway base from
+// tripping over another test's members on a different base of the same repo.
+func staleQueuedMembers(env *Env, repo, base string) ([]int, error) {
 	items, err := fetchBoardItems(env)
 	if err != nil {
 		return nil, err
@@ -775,6 +845,9 @@ func staleQueuedMembers(env *Env, repo string) ([]int, error) {
 		labels, err := tryIssueLabels(env, repo, it.Number)
 		if err != nil {
 			return nil, fmt.Errorf("read labels of %s#%d: %w", repo, it.Number, err)
+		}
+		if base != anyBase && baseLabelOf(labels) != base {
+			continue
 		}
 		paused := false
 		for _, l := range labels {

@@ -82,8 +82,8 @@ type Config struct {
 	PrueferDir string
 
 	Timeout    string // E2E_TIMEOUT, default 4h (a go duration string, passed through)
-	Parallel   string // E2E_PARALLEL, default 4
-	ParallelOn string // E2E_PARALLEL_ON, default 2
+	Parallel   string // E2E_PARALLEL, default 8: the shared phase's -parallel (#1977)
+	ParallelOn string // E2E_PARALLEL_ON, default 4: the shared phase of a default-gate "on" leg
 
 	BedPollSeconds string // E2E_BED_POLL_SECONDS, default 60
 
@@ -139,8 +139,8 @@ func LoadConfig(getenv func(string) string, repoRoot string) (Config, error) {
 		EngineLog:      filepath.Join(testBed, ".fabrik", "fabrik.log"),
 		PrueferDir:     orDefault(getenv("PRUEFER_DIR"), filepath.Join(home, "dev", "fabrik")),
 		Timeout:        orDefault(getenv("E2E_TIMEOUT"), "4h"),
-		Parallel:       orDefault(getenv("E2E_PARALLEL"), "4"),
-		ParallelOn:     orDefault(getenv("E2E_PARALLEL_ON"), "2"),
+		Parallel:       orDefault(getenv("E2E_PARALLEL"), "8"),
+		ParallelOn:     orDefault(getenv("E2E_PARALLEL_ON"), "4"),
 		BedPollSeconds: orDefault(getenv("E2E_BED_POLL_SECONDS"), "60"),
 
 		StallCheckInterval: 60 * time.Second,

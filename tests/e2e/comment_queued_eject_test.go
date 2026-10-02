@@ -62,9 +62,13 @@ import (
 //
 // # Isolation
 //
-// NOT t.Parallel(), on RepoAlpha/main — like the batch-cap, conflict and restart
-// scenarios: a foreign Queued member on the partition would join M1's batch and
-// change its composition. A pre-flight fails loudly on stale Queued items.
+// NOT t.Parallel(), on RepoAlpha/main — like the batch-cap and conflict scenarios: a
+// foreign Queued member on the partition would join M1's batch and change its
+// composition. A pre-flight fails loudly on stale Queued items. Registry class
+// default_base_train (#1977, ADR-1977): the gate runs it serially in its own phase after
+// the shared one. It is not moved onto a throwaway base because it needs the
+// `slow-gate` required check, and whether that fires on a non-default base cannot be
+// confirmed from this repo (its workflow lives on the bed repo).
 //
 // Wall-clock: ~35–60 min (M1's slow-gate trial, then M2's comment processing and
 // re-queue trial). Cost: one comment-review Claude invocation.
@@ -84,7 +88,7 @@ func TestQueuedMemberCommentEjection(t *testing.T) {
 	const base = "main"
 	trainKey := repo // default-base partition (mergeTrainKey)
 
-	stale, err := staleQueuedMembers(env, repo)
+	stale, err := staleQueuedMembers(env, repo, "")
 	if err != nil {
 		t.Fatalf("pre-flight: could not check %s for stale Queued items: %v", repo, err)
 	}
