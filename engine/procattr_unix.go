@@ -76,7 +76,8 @@ var (
 // sessionReapOptions binds the engine's issue-scoped logger to sessionreap.
 func sessionReapOptions(issueNumber int) sessionreap.Options {
 	return sessionreap.Options{
-		Log: func(tag, format string, args ...any) { claudeLog(issueNumber, tag, format, args...) },
+		Log:           func(tag, format string, args ...any) { claudeLog(issueNumber, tag, format, args...) },
+		WorkerSIDOnly: sessionReapWorkerSIDOnly,
 	}
 }
 

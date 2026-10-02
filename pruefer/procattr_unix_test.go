@@ -203,3 +203,92 @@ func TestReapReviewSession_RefusesUnsafeSIDs(t *testing.T) {
 		}
 	}
 }
+
+// startBashToolWorker models the real Claude CLI shape (#1989 validation
+// finding): the worker leads a session, and its Bash-tool command shell calls
+// setsid(), so the command and the test tree below it live in a session of
+// their own that the worker's SID does not reach.
+//
+//	worker W (sid W) ── command shell C (sid C) ── child G (sid C, own pgid)
+func startBashToolWorker(t *testing.T) (worker *exec.Cmd, shell, child int) {
+	t.Helper()
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		p := dir + "/" + name
+		if err := os.WriteFile(p, []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	childSh := write("child.sh", "trap 'echo x >> "+dir+"/sigs' INT TERM\necho $$ > "+dir+"/child.pid\nwhile :; do sleep 0.05; done\n")
+	cmdSh := write("cmd.sh", "perl -e '$SIG{INT}=q(DEFAULT); $SIG{QUIT}=q(DEFAULT); setpgrp(0,0); exec @ARGV' sh "+childSh+" >/dev/null 2>&1 &\necho $$ > "+dir+"/shell.pid\nwait\n")
+	workerSh := write("worker.sh", "perl -MPOSIX -e 'POSIX::setsid(); $SIG{INT}=q(DEFAULT); $SIG{QUIT}=q(DEFAULT); exec @ARGV' sh "+cmdSh+" >/dev/null 2>&1 &\nsleep 60\n")
+	worker = exec.Command("sh", workerSh)
+	setCmdProcAttr(worker)
+	if err := worker.Start(); err != nil {
+		t.Fatal(err)
+	}
+	go worker.Wait()
+	readPID := func(name string) int {
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if b, err := os.ReadFile(dir + "/" + name); err == nil {
+				if pid, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil && pid > 0 {
+					return pid
+				}
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		t.Fatalf("%s never written", name)
+		return 0
+	}
+	shell, child = readPID("shell.pid"), readPID("child.pid")
+	t.Cleanup(func() {
+		for _, p := range []int{child, shell} {
+			_ = syscall.Kill(p, syscall.SIGKILL)
+		}
+		_ = syscall.Kill(-worker.Process.Pid, syscall.SIGKILL)
+	})
+	if sid, _ := unix.Getsid(shell); sid != shell || shell == worker.Process.Pid {
+		t.Fatalf("fixture: command shell sid=%d pid=%d worker=%d; it must lead its own session", sid, shell, worker.Process.Pid)
+	}
+	if sid, _ := unix.Getsid(child); sid != shell {
+		t.Fatalf("fixture: child sid=%d, want the command shell's session %d", sid, shell)
+	}
+	return worker, shell, child
+}
+
+func TestKillProcGroupGraceful_ReapsBashToolCommandSession(t *testing.T) {
+	worker, shell, child := startBashToolWorker(t)
+	stop := trackReviewSessions(t.Context(), worker.Process.Pid, 1)
+	defer stop()
+	killProcGroupGraceful(worker.Process.Pid, 1, "t", "max_wall_time", 300*time.Millisecond, 300*time.Millisecond)
+	if !waitDead(child, 3*time.Second) || !waitDead(shell, 3*time.Second) {
+		t.Fatalf("Bash-tool command session survived the stop (child alive=%v shell alive=%v)", isProcessAlive(child), isProcessAlive(shell))
+	}
+}
+
+func TestReapReviewSession_PostExitSweepReapsSampledCommandSession(t *testing.T) {
+	worker, shell, child := startBashToolWorker(t)
+	prev := reviewSessionSampleInterval
+	reviewSessionSampleInterval = 20 * time.Millisecond
+	defer func() { reviewSessionSampleInterval = prev }()
+	stop := trackReviewSessions(t.Context(), worker.Process.Pid, 1)
+	defer stop()
+	time.Sleep(300 * time.Millisecond) // let the sampler see the command session
+	if err := syscall.Kill(worker.Process.Pid, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	if !waitDead(worker.Process.Pid, 3*time.Second) {
+		t.Fatal("worker did not die")
+	}
+	if !isProcessAlive(child) || !isProcessAlive(shell) {
+		t.Fatal("fixture: command session died with the worker")
+	}
+	if n := reapReviewSession(worker.Process.Pid, 1, "clean_exit"); n < 2 {
+		t.Errorf("reapReviewSession = %d, want >= 2 (shell and child)", n)
+	}
+	if !waitDead(child, 3*time.Second) || !waitDead(shell, 3*time.Second) {
+		t.Fatalf("command session survived the post-exit sweep (child alive=%v shell alive=%v)", isProcessAlive(child), isProcessAlive(shell))
+	}
+}

@@ -8,6 +8,7 @@ package pruefer
 // internal/sessionreap, shared with the engine (#1989, adrs/1989-session-wide-worker-reap.md).
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -82,4 +83,20 @@ func sessionReapOptions(prNumber int) sessionreap.Options {
 	return sessionreap.Options{
 		Log: func(tag, format string, args ...any) { logf(prNumber, tag, format, args...) },
 	}
+}
+
+// reviewSessionSampleInterval is how often a running review's process tree is
+// sampled for the command sessions its Bash-tool shells create. Test-overridable.
+var reviewSessionSampleInterval = 2 * time.Second
+
+// trackReviewSessions registers a command-session tracker for the review
+// worker pid and samples it until ctx is done. The Bash tool runs every command
+// in a session of its own (the shell calls setsid), which the worker's SID does
+// not reach; sampling while the parent chain exists is what lets the post-exit
+// sweep find them. The returned func unregisters the tracker — call it after
+// reapReviewSession.
+func trackReviewSessions(ctx context.Context, pid, prNumber int) (stop func()) {
+	tr := sessionreap.Track(pid, sessionReapOptions(prNumber), nil)
+	go tr.Run(ctx, reviewSessionSampleInterval)
+	return tr.Close
 }

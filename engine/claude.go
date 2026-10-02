@@ -1527,6 +1527,11 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 	// failed, retry it in the background so the record's live-worker phase stays
 	// identifiable.
 	workerRec := beginWorkerRecord(pid, issueNumber, repo, label)
+	// #1989: the sessions Claude's Bash-tool commands create for themselves
+	// (setsid) are invisible to a SID == worker-PID filter. Sample them while the
+	// parent chain still exists; Escalate and the post-exit sweep consult the
+	// tracker through its registry.
+	cmdSessions := startCommandSessionTracking(watchdogCtx, &watchdogWG, pid, issueNumber, workerRec)
 	if workerRec.LStart == "" {
 		watchdogWG.Add(1)
 		go func() {
@@ -1579,6 +1584,7 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 		exitKind = "after_stop"
 	}
 	reapWorkerSession(pid, issueNumber, exitKind)
+	finishCommandSessions(cmdSessions, workerRec, issueNumber)
 	// R2: reap any session-scoped descendant that survived killProcGroup's
 	// PGID-scoped kill (e.g. detached via nohup/disown, or otherwise no
 	// longer a member of the worker's process group) — unconditional, on

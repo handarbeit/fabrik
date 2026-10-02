@@ -645,6 +645,8 @@ func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (Revi
 		return ReviewResult{}, fmt.Errorf("starting claude: %w", err)
 	}
 	pid := cmd.Process.Pid
+	// #1989: sample the command sessions the Bash tool creates for itself.
+	stopSessionTracking := trackReviewSessions(watchdogCtx, pid, req.PRNumber)
 
 	go func(pid int) {
 		timer := time.NewTimer(reviewInactivityTimeout)
@@ -675,6 +677,7 @@ func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (Revi
 		exitKind = "after_stop"
 	}
 	reapReviewSession(pid, req.PRNumber, exitKind)
+	stopSessionTracking()
 
 	if errors.Is(runErr, exec.ErrWaitDelay) && ctx.Err() == nil {
 		logf(req.PRNumber, "warn", "WaitDelay fired: claude exited but grandchild processes held stdout pipe open; processing buffered output (%d bytes)\n", stdout.Len())

@@ -414,3 +414,225 @@ func TestMembers_RealZombieIsNotAMember(t *testing.T) {
 		}
 	}
 }
+
+// commandWorker models the real Claude CLI shape (#1989 validation finding): the
+// worker is a session leader, and each Bash-tool command runs in a session of
+// its own created by the command shell's setsid(), with the test tree below it
+// in a separate process group of THAT session:
+//
+//	worker W (sid W) ── command shell C (sid C, setsid) ── child G (sid C, own pgid)
+//
+// The shell is started from the worker with `&`, so its PPID chain leads to W
+// while W lives. perl does the setsid()/setpgrp() so the fixture does not depend
+// on the shell: dash (the Linux CI /bin/sh) has no usable `set -m`, and it also
+// ignores SIGINT for background jobs, which perl resets so G's INT trap works.
+func commandWorker(t *testing.T, dir string) (cmd *exec.Cmd, worker, shell, child int) {
+	t.Helper()
+	write := func(name, body string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	childSh := write("child.sh", "trap 'echo x >> "+dir+"/sigs' INT TERM\necho $$ > "+dir+"/child.pid\nwhile :; do sleep 0.05; done\n")
+	cmdSh := write("cmd.sh", "perl -e '$SIG{INT}=q(DEFAULT); $SIG{QUIT}=q(DEFAULT); setpgrp(0,0); exec @ARGV' sh "+childSh+" >/dev/null 2>&1 &\necho $$ > "+dir+"/shell.pid\nwait\n")
+	workerSh := write("worker.sh", "perl -MPOSIX -e 'POSIX::setsid(); $SIG{INT}=q(DEFAULT); $SIG{QUIT}=q(DEFAULT); exec @ARGV' sh "+cmdSh+" >/dev/null 2>&1 &\nsleep 60\n")
+	cmd = exec.Command("sh", workerSh)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = cmd.Wait() }()
+	worker = cmd.Process.Pid
+	shell, _ = strconv.Atoi(waitFile(t, filepath.Join(dir, "shell.pid")))
+	child, _ = strconv.Atoi(waitFile(t, filepath.Join(dir, "child.pid")))
+	t.Cleanup(func() {
+		for _, p := range []int{child, shell, worker} {
+			_ = syscall.Kill(p, syscall.SIGKILL)
+		}
+		_ = syscall.Kill(-worker, syscall.SIGKILL)
+	})
+	if got, _ := unix.Getsid(shell); got != shell || shell == worker {
+		t.Fatalf("command shell sid=%d pid=%d worker=%d; fixture must put the shell in its own session", got, shell, worker)
+	}
+	if got, _ := unix.Getsid(child); got != shell {
+		t.Fatalf("child sid=%d, want the shell's session %d", got, shell)
+	}
+	if pg, _ := unix.Getpgid(child); pg == shell {
+		t.Fatalf("child shares the shell's process group; fixture is vacuous")
+	}
+	if got, _ := unix.Getsid(worker); got != worker {
+		t.Fatalf("worker sid=%d, want its own pid %d", got, worker)
+	}
+	return cmd, worker, shell, child
+}
+
+func TestDiscover_FindsCommandSessionBelowWorker(t *testing.T) {
+	_, worker, shell, _ := commandWorker(t, t.TempDir())
+	got, err := Discover(worker, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].SID != shell {
+		t.Fatalf("Discover = %+v, want exactly the command shell's session %d", got, shell)
+	}
+	if got[0].Start == "" {
+		t.Errorf("a live leader must carry a start token on this platform")
+	}
+	if r, _ := Discover(worker, Options{WorkerSIDOnly: true}); len(r) != 0 {
+		t.Errorf("WorkerSIDOnly must discover nothing, got %+v", r)
+	}
+}
+
+func TestEscalate_ReapsBashToolCommandSessionGracefully(t *testing.T) {
+	dir := t.TempDir()
+	_, worker, shell, child := commandWorker(t, dir)
+	bystander := exec.Command("sleep", "60")
+	bystander.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := bystander.Start(); err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = bystander.Wait() }()
+	t.Cleanup(func() { _ = syscall.Kill(bystander.Process.Pid, syscall.SIGKILL) })
+
+	sink := &logSink{}
+	tr := Track(worker, Options{Log: sink.log}, nil) // discovery needs the start token Track records
+	defer tr.Close()
+	Escalate(worker, "max_wall_time", 400*time.Millisecond, 400*time.Millisecond, Options{Log: sink.log, Poll: 10 * time.Millisecond})
+
+	if !waitDead(child, 3*time.Second) || !waitDead(shell, 3*time.Second) {
+		t.Fatalf("command session survived (child alive=%v shell alive=%v); log:\n%s", alive(child), alive(shell), sink.joined())
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "sigs")); err != nil || len(strings.TrimSpace(string(b))) == 0 {
+		t.Errorf("child never received a graceful signal before dying: %v", err)
+	}
+	if !alive(bystander.Process.Pid) {
+		t.Error("a process in an unrelated session was killed")
+	}
+	if !strings.Contains(sink.joined(), "command session(s)") || !strings.Contains(sink.joined(), strconv.Itoa(shell)) {
+		t.Errorf("R5 line does not name the command session %d:\n%s", shell, sink.joined())
+	}
+}
+
+func TestEscalate_WorkerSIDOnlyLeavesBashToolCommandAlive(t *testing.T) {
+	// Neutralised twin: the pre-command-session behaviour (worker SID only).
+	// The worker dies but its command session survives untouched — the shape
+	// that made the live orphans — so the test above is not vacuous.
+	dir := t.TempDir()
+	_, worker, shell, child := commandWorker(t, dir)
+	Escalate(worker, "max_wall_time", 100*time.Millisecond, 100*time.Millisecond, Options{WorkerSIDOnly: true, Poll: 10 * time.Millisecond})
+	if !waitDead(worker, 3*time.Second) {
+		t.Fatal("worker survived")
+	}
+	if !alive(child) || !alive(shell) {
+		t.Fatalf("worker-SID-only reap reached the command session (child alive=%v shell alive=%v); fixture or twin is broken", alive(child), alive(shell))
+	}
+}
+
+func TestSweep_ReapsSampledCommandSessionAfterWorkerExit(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		sample   bool
+		only     bool
+		wantGone bool
+	}{
+		{"sampled", true, false, true},
+		{"never sampled leaves the residual gap", false, false, false},
+		{"worker-SID-only twin", true, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			_, worker, shell, child := commandWorker(t, dir)
+			o := Options{Poll: 10 * time.Millisecond, WorkerSIDOnly: tc.only}
+			tr := Track(worker, o, nil)
+			defer tr.Close()
+			if tc.sample {
+				if n := len(tr.Sample()); n != 1 && !tc.only {
+					t.Fatalf("Sample found %d sessions, want 1", n)
+				}
+			}
+			// The worker exits (its leader is reaped); the command shell is
+			// reparented to PID 1 and the parent chain is gone.
+			_ = syscall.Kill(worker, syscall.SIGKILL)
+			if !waitDead(worker, 3*time.Second) {
+				t.Fatal("worker survived SIGKILL")
+			}
+			sink := &logSink{}
+			o.Log = sink.log
+			n := Sweep(worker, "clean_exit", o)
+			if tc.wantGone {
+				if !waitDead(child, 3*time.Second) || !waitDead(shell, 3*time.Second) {
+					t.Fatalf("sampled command session survived the post-exit sweep; log:\n%s", sink.joined())
+				}
+				if n < 2 || !strings.Contains(sink.joined(), "exit=clean_exit") {
+					t.Errorf("Sweep returned %d, log %q; want >=2 members and an R5 clean_exit line", n, sink.joined())
+				}
+			} else if !alive(child) {
+				t.Errorf("command session was reaped without a sample / under the worker-SID-only twin")
+			}
+		})
+	}
+}
+
+func TestReap_RefusesCommandSessionWhoseLeaderPIDWasRecycled(t *testing.T) {
+	_, worker, _, child := commandWorker(t, t.TempDir())
+	// A live process holds PID == SID. With a start token that does not match,
+	// it is a recycled PID that became a session leader — never ours.
+	stale := Session{SID: worker, Start: "not-the-recorded-token"}
+	if ValidSession(stale, Options{}) {
+		t.Fatal("a live leader with a different start token was trusted")
+	}
+	if n, rem := Reap(stale, Options{}); n != 0 || rem != 0 {
+		t.Fatalf("Reap on a recycled session signalled %d (remaining %d)", n, rem)
+	}
+	if !alive(worker) || !alive(child) {
+		t.Fatal("recycled-leader session members were killed")
+	}
+	// The recorded token matches: the leader is the sampled one and is reaped.
+	good := Session{SID: worker, Start: startToken(worker)}
+	if good.Start == "" {
+		t.Skip("no start token on this platform")
+	}
+	if !ValidSession(good, Options{}) {
+		t.Fatal("a live leader with the recorded token was not trusted")
+	}
+	if n, _ := Reap(good, Options{}); n < 1 {
+		t.Fatalf("Reap of a valid session signalled %d", n)
+	}
+	if !waitDead(worker, 3*time.Second) {
+		t.Error("leader survived Reap")
+	}
+}
+
+func TestDiscover_NeverUsesAnUnrelatedProcessTree(t *testing.T) {
+	// workerIsOurs gates discovery on the worker's recorded start token: with a
+	// different token (a recycled PID) nothing below that PID may be adopted.
+	_, worker, _, child := commandWorker(t, t.TempDir())
+	o := Options{}
+	if o.workerIsOurs(worker, "stale") || o.workerIsOurs(worker, "") {
+		t.Fatal("discovery trusted a PID whose start token does not match")
+	}
+	tr := Track(worker, Options{Start: func(int) string { return "" }}, nil)
+	defer tr.Close()
+	if got := tr.Sample(); len(got) != 0 {
+		t.Fatalf("Sample with no worker token adopted %+v", got)
+	}
+	if !alive(child) {
+		t.Fatal("child died")
+	}
+}
+
+func TestEscalate_WithoutTrackerNeverDiscoversCommandSessions(t *testing.T) {
+	// No registered Tracker means no proof the live holder of PID sid is still
+	// the worker, so Escalate acts on the worker's own SID only.
+	dir := t.TempDir()
+	_, worker, shell, child := commandWorker(t, dir)
+	Escalate(worker, "max_wall_time", 100*time.Millisecond, 100*time.Millisecond, Options{Poll: 10 * time.Millisecond})
+	if !waitDead(worker, 3*time.Second) {
+		t.Fatal("worker survived")
+	}
+	if !alive(child) || !alive(shell) {
+		t.Fatalf("an untracked Escalate reached the command session (child alive=%v shell alive=%v)", alive(child), alive(shell))
+	}
+}

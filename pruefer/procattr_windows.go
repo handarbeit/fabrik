@@ -3,6 +3,7 @@
 package pruefer
 
 import (
+	"context"
 	"os/exec"
 	"time"
 )
@@ -24,3 +25,6 @@ func isProcessAlive(pid int) bool { return true }
 
 // reapReviewSession is a no-op on Windows (no POSIX sessions).
 func reapReviewSession(pid, prNumber int, exitKind string) int { return 0 }
+
+// trackReviewSessions is a no-op on Windows (no POSIX sessions).
+func trackReviewSessions(ctx context.Context, pid, prNumber int) (stop func()) { return func() {} }

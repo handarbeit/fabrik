@@ -117,59 +117,185 @@ func Signal(sid int, sig syscall.Signal, o Options) (int, error) {
 }
 
 // Escalate runs SIGINT → sigintGrace → SIGTERM → sigtermGrace → SIGKILL over
-// every member of session sid. A zero grace skips that signal; each grace
-// window ends early once no member is left, and escalation stops as soon as
-// the session is empty. One R5 line is logged per signal step.
+// every member of every session the worker owns: its own SID plus the command
+// sessions its Bash-tool shells created (see the package doc). The set is
+// re-resolved before each signal while the worker is still provably ours, so a
+// command started during a grace window is still reached. A zero grace skips
+// that signal; each grace window ends early once no member is left, and
+// escalation stops as soon as every session is empty. One R5 line is logged
+// per signal step, naming the command sessions when there are any.
 func Escalate(sid int, reason string, sigintGrace, sigtermGrace time.Duration, o Options) {
 	if err := CheckSID(sid); err != nil {
 		o.logf("kill", "session reap refused (reason=%s): %v\n", reason, err)
 		return
 	}
-	w := &leaderWatch{sid: sid}
-	step := func(sig syscall.Signal, name string) (int, bool) {
-		members, err := Members(sid, o)
-		if err != nil {
-			o.logf("warn", "session reap: %v — falling back to the process group of %d\n", err, sid)
-			if kerr := syscall.Kill(-sid, sig); kerr != nil && kerr != syscall.ESRCH {
-				o.logf("warn", "session reap: group %s of %d: %v\n", name, sid, kerr)
-			}
-			return 0, true // unknown membership: keep escalating
-		}
-		if w.observe(members) {
-			return 0, false
-		}
-		if len(members) == 0 {
-			return 0, false
-		}
-		sent := signalMembers(sid, members, sig, o)
-		o.logf("kill", "sending %s to session %d (reason=%s): signalled %d member(s): %s\n",
-			name, sid, reason, len(sent), formatComms(o.names(sent)))
-		return len(sent), true
+	e := &escalation{sid: sid, reason: reason, o: o, watch: map[int]*leaderWatch{}, dropped: map[int]bool{}}
+	// Discovery needs the start token captured when the worker was started, i.e.
+	// a registered Tracker. Without one there is nothing to prove the live
+	// holder of PID sid is still the worker (it may have been reaped and its PID
+	// recycled), so only the worker's own SID is acted on — never a guess.
+	if t := trackerFor(sid); t != nil {
+		e.workerStart = t.workerStart
 	}
-	defer func() {
-		if w.recycled {
-			o.logf("kill", "session reap stopped (reason=%s): PID %d reappeared as a session leader after the worker's leader was gone (recycled PID); SID %d is ambiguous\n", reason, sid, sid)
-		}
-	}()
 	if sigintGrace > 0 {
-		if _, live := step(syscall.SIGINT, "SIGINT"); !live || o.waitEmpty(w, sigintGrace) {
+		if _, live := e.step(syscall.SIGINT, "SIGINT"); !live || e.waitEmpty(sigintGrace) {
 			return
 		}
 	}
 	if sigtermGrace > 0 {
-		if _, live := step(syscall.SIGTERM, "SIGTERM"); !live || o.waitEmpty(w, sigtermGrace) {
+		if _, live := e.step(syscall.SIGTERM, "SIGTERM"); !live || e.waitEmpty(sigtermGrace) {
 			return
 		}
 	}
-	step(syscall.SIGKILL, "SIGKILL")
+	e.step(syscall.SIGKILL, "SIGKILL")
 }
 
-// leaderWatch guards Escalate against a recycled leader PID. The worker's
-// leader is reaped by cmd.Wait while Escalate is still inside a grace window,
-// freeing its PID. Once any listing has shown the session without its leader,
-// a later listing that shows PID == sid again is a different process that
-// became a session leader — its members carry the same SID value but are not
-// the worker's, so escalation must stop rather than signal them.
+type escalation struct {
+	sid         int
+	reason      string
+	o           Options
+	workerStart string
+	targets     []Session
+	watch       map[int]*leaderWatch
+	dropped     map[int]bool // sessions abandoned because their leader PID was recycled
+}
+
+// observe feeds one membership listing of session sid to its leaderWatch and
+// abandons the session if its leader PID was recycled.
+func (e *escalation) observe(sid int, members []int) bool {
+	w := e.watch[sid]
+	if w == nil {
+		w = &leaderWatch{sid: sid}
+		e.watch[sid] = w
+	}
+	if !w.observe(members) {
+		return false
+	}
+	if !e.dropped[sid] {
+		e.dropped[sid] = true
+		e.o.logf("kill", "session reap stopped for session %d (reason=%s): PID %d reappeared as a session leader after the leader was gone (recycled PID); SID %d is ambiguous\n", sid, e.reason, sid, sid)
+	}
+	return true
+}
+
+// resolve refreshes the target set. Sessions found at an earlier step are kept
+// (re-validated) even when this step can no longer rediscover them — the worker
+// that anchored the parent chain may have exited during the grace window, and a
+// command session it started must still be escalated through SIGTERM/SIGKILL.
+func (e *escalation) resolve() {
+	fresh := e.o.targets(e.sid, e.workerStart, true)
+	have := make(map[int]bool, len(fresh))
+	for _, s := range fresh {
+		have[s.SID] = true
+	}
+	for _, s := range e.targets {
+		if s.SID == e.sid || have[s.SID] {
+			continue
+		}
+		if ValidSession(s, e.o) {
+			fresh = append(fresh, s)
+			have[s.SID] = true
+		}
+	}
+	e.targets = fresh
+}
+
+func (e *escalation) step(sig syscall.Signal, name string) (int, bool) {
+	o := e.o
+	e.resolve()
+	total, live := 0, false
+	var names []string
+	var cmdSIDs []int
+	for _, s := range e.targets {
+		if e.dropped[s.SID] {
+			continue
+		}
+		members, err := Members(s.SID, o)
+		if err != nil {
+			if s.SID == e.sid {
+				o.logf("warn", "session reap: %v — falling back to the process group of %d\n", err, s.SID)
+				if kerr := syscall.Kill(-s.SID, sig); kerr != nil && kerr != syscall.ESRCH {
+					o.logf("warn", "session reap: group %s of %d: %v\n", name, s.SID, kerr)
+				}
+				live = true // unknown membership: keep escalating
+			}
+			continue
+		}
+		if e.observe(s.SID, members) || len(members) == 0 {
+			continue
+		}
+		live = true
+		// Look names up before the signal: a process killed by it cannot be queried.
+		byPID := make(map[int]string, len(members))
+		for _, pid := range members {
+			byPID[pid] = o.comm(pid)
+		}
+		sent := signalMembers(s.SID, members, sig, o)
+		total += len(sent)
+		for _, pid := range sent {
+			names = append(names, byPID[pid])
+		}
+		if s.SID != e.sid && len(sent) > 0 {
+			cmdSIDs = append(cmdSIDs, s.SID)
+		}
+	}
+	if !live {
+		return 0, false
+	}
+	o.logf("kill", "sending %s to session %d%s (reason=%s): signalled %d member(s): %s\n",
+		name, e.sid, commandSessionNote(cmdSIDs), e.reason, total, formatComms(names))
+	return total, true
+}
+
+// commandSessionNote renders " + command session(s) [a b]" for the R5 line.
+func commandSessionNote(sids []int) string {
+	if len(sids) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" + %d command session(s) %v", len(sids), sids)
+}
+
+// waitEmpty polls until no target session has members or grace elapses; it
+// reports whether escalation should stop — every session emptied (or was
+// abandoned as recycled). A listing error is "not empty".
+func (e *escalation) waitEmpty(grace time.Duration) bool {
+	deadline := time.Now().Add(grace)
+	for {
+		empty := true
+		for _, s := range e.targets {
+			if e.dropped[s.SID] {
+				continue
+			}
+			m, err := Members(s.SID, e.o)
+			if err != nil {
+				empty = false
+				continue
+			}
+			if e.observe(s.SID, m) {
+				continue
+			}
+			if len(m) > 0 {
+				empty = false
+			}
+		}
+		if empty {
+			return true
+		}
+		left := time.Until(deadline)
+		if left <= 0 {
+			return false
+		}
+		time.Sleep(min(e.o.poll(), left))
+	}
+}
+
+// leaderWatch guards Escalate against a recycled leader PID. A session leader
+// is reaped (cmd.Wait for the worker, the Bash tool for a command shell) while
+// Escalate may still be inside a grace window, freeing its PID. Once any
+// listing has shown the session without its leader, a later listing that shows
+// PID == sid again is a different process that became a session leader — its
+// members carry the same SID value but are not ours, so that session must be
+// abandoned rather than signalled.
 type leaderWatch struct {
 	sid        int
 	leaderGone bool
@@ -195,78 +321,90 @@ func (w *leaderWatch) observe(members []int) bool {
 	return w.recycled
 }
 
-// waitEmpty polls until session sid has no members or grace elapses; it
-// reports whether escalation should stop — the session emptied, or the leader
-// PID was recycled. A listing error is "not empty".
-func (o Options) waitEmpty(w *leaderWatch, grace time.Duration) bool {
-	deadline := time.Now().Add(grace)
-	for {
-		if m, err := Members(w.sid, o); err == nil {
-			if w.observe(m) || len(m) == 0 {
-				return true
-			}
-		}
-		left := time.Until(deadline)
-		if left <= 0 {
-			return false
-		}
-		time.Sleep(min(o.poll(), left))
-	}
-}
-
-// Sweep is the post-exit step: SIGKILL every remaining member of session sid.
-// The leader is gone by now, so a live process whose PID equals sid is a
-// recycled PID: the sweep then refuses outright, since members carrying that
-// SID value may belong to the recycled leader's own session. It rescans once briefly for a fork that raced the
-// first pass and logs a single R5 line when anything was signalled. exitKind
-// ("clean_exit" / "after_stop") is only for the log: a non-zero count on a
-// clean exit means the worker left work running. Returns the number signalled.
+// Sweep is the post-exit step: SIGKILL every remaining member of the worker's
+// sessions — its own SID and the command sessions the Tracker sampled while it
+// ran. The leader is gone by now, so for the worker's own SID a live process
+// whose PID equals sid is a recycled PID: that SID is then refused outright,
+// since members carrying it may belong to the recycled leader's own session. A
+// command session is acted on only while ValidSession holds (re-checked every
+// pass); its leader, if still alive with the sampled start token, is itself a
+// target — typically the orphaned Bash-tool shell. No discovery runs here: with
+// the worker reaped the parent chain is gone and its PID may be recycled, so
+// only sessions sampled while it lived are used. It rescans once briefly for a
+// fork that raced the first pass and logs a single R5 line when anything was
+// signalled. exitKind ("clean_exit" / "after_stop") is only for the log: a
+// non-zero count on a clean exit means the worker left work running. Returns
+// the number signalled.
 func Sweep(sid int, exitKind string, o Options) int {
 	if err := CheckSID(sid); err != nil {
 		o.logf("kill", "session reap refused (exit=%s): %v\n", exitKind, err)
 		return 0
 	}
+	targets := o.targets(sid, "", false)
 	var names []string
+	var cmdSIDs []int
+	inCmd := map[int]bool{}
 	total := 0
+	refused := false
 	for pass := 0; pass < 2; pass++ {
 		if pass > 0 {
 			time.Sleep(o.poll() / 2)
 		}
-		members, err := Members(sid, o)
-		if err != nil {
-			o.logf("warn", "session reap sweep: %v\n", err)
-			break
-		}
-		var targets []int
-		for _, pid := range members {
-			if pid == sid {
-				// The leader has been reaped, so a live process with PID == sid
-				// is a recycled PID that became a session leader itself: every
-				// member now carrying this SID value may belong to ITS session,
-				// and the SID can no longer tell the two apart. Refuse the whole
-				// sweep (R4); the #1814 sweep's start-time bounds can discriminate.
-				o.logf("warn", "session reap sweep refused (exit=%s): PID %d is live and a member of its own session (recycled leader PID); SID %d is ambiguous\n", exitKind, sid, sid)
-				return total
+		signalledThisPass := 0
+		for _, s := range targets {
+			if s.SID != sid && !ValidSession(s, o) {
+				continue
 			}
-			targets = append(targets, pid)
+			members, err := Members(s.SID, o)
+			if err != nil {
+				o.logf("warn", "session reap sweep: %v\n", err)
+				continue
+			}
+			var tg []int
+			skip := false
+			for _, pid := range members {
+				if pid == s.SID && s.SID == sid {
+					// The worker's leader has been reaped, so a live process with
+					// PID == sid is a recycled PID that became a session leader
+					// itself: every member now carrying this SID value may belong to
+					// ITS session, and the SID can no longer tell the two apart.
+					// Refuse this SID (R4); the #1814 sweep's start-time bounds can
+					// discriminate.
+					if !refused {
+						refused = true
+						o.logf("warn", "session reap sweep refused (exit=%s): PID %d is live and a member of its own session (recycled leader PID); SID %d is ambiguous\n", exitKind, sid, sid)
+					}
+					skip = true
+					break
+				}
+				tg = append(tg, pid)
+			}
+			if skip {
+				continue
+			}
+			// Look names up before the kill: a dead process cannot be queried.
+			byPID := make(map[int]string, len(tg))
+			for _, pid := range tg {
+				byPID[pid] = o.comm(pid)
+			}
+			sent := signalMembers(s.SID, tg, syscall.SIGKILL, o)
+			for _, pid := range sent {
+				names = append(names, byPID[pid])
+			}
+			if s.SID != sid && len(sent) > 0 && !inCmd[s.SID] {
+				inCmd[s.SID] = true
+				cmdSIDs = append(cmdSIDs, s.SID)
+			}
+			signalledThisPass += len(sent)
+			total += len(sent)
 		}
-		// Look names up before the kill: a dead process cannot be queried.
-		byPID := make(map[int]string, len(targets))
-		for _, pid := range targets {
-			byPID[pid] = o.comm(pid)
-		}
-		sent := signalMembers(sid, targets, syscall.SIGKILL, o)
-		for _, pid := range sent {
-			names = append(names, byPID[pid])
-		}
-		total += len(sent)
-		if len(sent) == 0 {
+		if signalledThisPass == 0 {
 			break
 		}
 	}
 	if total > 0 {
-		o.logf("kill", "session reap: signalled %d member(s) of session %d (exit=%s): %s\n",
-			total, sid, exitKind, formatComms(names))
+		o.logf("kill", "session reap: signalled %d member(s) of session %d%s (exit=%s): %s\n",
+			total, sid, commandSessionNote(cmdSIDs), exitKind, formatComms(names))
 	}
 	return total
 }
