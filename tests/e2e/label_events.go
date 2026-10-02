@@ -107,7 +107,8 @@ func firstEvent(events []issueEvent, kind, label string, afterID int64) (issueEv
 // finishes, so a yolo removal that lands between the first two events happened
 // while Validate was running — the window #1769's live re-read exists for. Any
 // other ordering means the run cannot demonstrate the property, so the error is
-// prefixed INCONCLUSIVE and the caller must fail (never skip) on it.
+// prefixed INCONCLUSIVE and the caller ends the test with failOrInconclusive
+// (#1973: uncovered and retried, never green).
 func checkYoloRemovedMidValidate(events []issueEvent) error {
 	const yolo = "fabrik:yolo"
 	inProgress, ok := firstEvent(events, eventLabeled, "stage:Validate:in_progress", 0)

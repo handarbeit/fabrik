@@ -107,6 +107,8 @@ func TestMergeTrainQueuedDeeperThanBatchCap(t *testing.T) {
 		t.Fatalf("pre-flight: could not check %s for stale Queued items: %v", repo, err)
 	}
 	if len(stale) > 0 {
+		// Deliberately a Fatalf, not Inconclusive (#1973): this is bed STATE an
+		// operator must clear — an automatic retry would hit the same stale items.
 		t.Fatalf("pre-flight: %s already has open, non-paused Queued item(s) %v — they would join this batch and change its "+
 			"composition; move them out of Queued (or close them) and re-run", repo, stale)
 	}

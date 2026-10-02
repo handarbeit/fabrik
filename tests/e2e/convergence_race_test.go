@@ -109,6 +109,10 @@ func TestConvergenceRace(t *testing.T) {
 	// (0.0.83 gate run 13). Fail fast instead.
 	for i, n := range nums {
 		if n == 0 {
+			// Deliberately a Fatalf, not Inconclusive (#1973): a setup ERROR is not a
+			// precondition that "never arose" — it can equally be a permanent harness
+			// bug, which an automatic retry would turn into "uncovered" where a FAIL is
+			// the better signal. The underlying error is logged above.
 			t.Fatalf("setup failed for contention issue %d (%q) — see the setup error above; not an engine regression, re-run", i, pairs[i].title)
 		}
 	}

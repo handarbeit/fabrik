@@ -33,8 +33,9 @@ import (
 
 // waitForValidateInProgressAndRemoveYolo polls the issue's labels over REST (not
 // the shared GraphQL budget) and removes fabrik:yolo the moment
-// stage:Validate:in_progress appears. It fails as INCONCLUSIVE if Validate is
-// seen to have progressed past the in-progress window first.
+// stage:Validate:in_progress appears. It ends the test INCONCLUSIVE (uncovered,
+// retried by the gate — never green) if Validate is seen to have progressed past
+// the in-progress window first.
 func waitForValidateInProgressAndRemoveYolo(t *testing.T, env *Env, repo string, num int, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -55,7 +56,7 @@ func waitForValidateInProgressAndRemoveYolo(t *testing.T, env *Env, repo string,
 			return
 		}
 		if has["fabrik:awaiting-ci"] || has["stage:Validate:complete"] {
-			t.Fatalf("INCONCLUSIVE: %s#%d reached fabrik:awaiting-ci / stage:Validate:complete (labels %v) without stage:Validate:in_progress ever being observed — the removal window was missed", repo, num, labels)
+			Inconclusive(t, "%s#%d reached fabrik:awaiting-ci / stage:Validate:complete (labels %v) without stage:Validate:in_progress ever being observed — the removal window was missed", repo, num, labels)
 		}
 		pollSleep(5 * time.Second)
 	}
@@ -77,8 +78,9 @@ func waitForValidateInProgressAndRemoveYolo(t *testing.T, env *Env, repo string,
 // Window proof (checkYoloRemovedMidValidate, on the durable events log, by event
 // id): labeled stage:Validate:in_progress < unlabeled fabrik:yolo < labeled
 // fabrik:awaiting-ci (applied by handleStageComplete the instant Validate
-// finishes). A missed window fails as INCONCLUSIVE rather than skipping, so the
-// release gate never goes quietly green.
+// finishes). A missed window ends the test INCONCLUSIVE (#1973): the gate retries
+// it, and what stays inconclusive is recorded as uncovered — so the release gate
+// never goes quietly green.
 //
 // Assertions once stage:Validate:complete is applied (the CI gate has cleared —
 // the moment the merge decision runs) and a settle window of three polls has
@@ -145,7 +147,7 @@ func TestYoloRemovedMidValidateBlocksMerge(t *testing.T) {
 	t.Logf("stage:Validate:complete first applied at %s", completeAt.Format(time.RFC3339))
 
 	if err := checkYoloRemovedMidValidate(mustFetchIssueEvents(t, env, env.RepoAlpha, num)); err != nil {
-		t.Fatalf("%v", err)
+		failOrInconclusive(t, err)
 	}
 
 	// Give a wrongly-triggered merge time to show up: the decision runs in the same
@@ -259,8 +261,10 @@ func TestCommentReentryShowsReworking(t *testing.T) {
 	if _, found, err := tryLabelFirstAppliedAt(env, env.RepoAlpha, num, "fabrik:awaiting-done"); err != nil {
 		t.Logf("could not check %s#%d for fabrik:awaiting-done (%v) — skipping the no-work-needed fast-fail", env.RepoAlpha, num, err)
 	} else if found {
-		t.Fatalf("fixture: Research judged %s#%d to need no work (fabrik:awaiting-done applied), so the item went to Done "+
-			"instead of parking after Research — the re-entry scenario cannot run; re-run, and if it recurs make the issue body "+
+		// A precondition guard (#1973): fires before any assertion about the rework
+		// marker. Claude's judgement is non-deterministic, so a retry can clear it.
+		Inconclusive(t, "fixture: Research judged %s#%d to need no work (fabrik:awaiting-done applied), so the item went to Done "+
+			"instead of parking after Research — the re-entry scenario cannot run; if it recurs make the issue body "+
 			"describe more concrete work", env.RepoAlpha, num)
 	}
 	t.Logf("%s applied — Research complete, item parked", completeLabel)

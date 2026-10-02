@@ -349,3 +349,20 @@ func runFake(fn func()) {
 	}()
 	<-done
 }
+
+// failOrInconclusive splits on the checkers' own INCONCLUSIVE tag: tagged →
+// marked skip, untagged → Fatalf (an assertion about the engine stays a failure).
+func TestFailOrInconclusiveSplitsOnTheTag(t *testing.T) {
+	f := &fakeTB{name: "TestTop"}
+	runFake(func() {
+		failOrInconclusive(f, fmt.Errorf("INCONCLUSIVE (A3): fast job green before the gate was active"))
+	})
+	if !strings.HasPrefix(f.skipped, "E2E-INCONCLUSIVE: INCONCLUSIVE (A3)") || f.fatal != "" {
+		t.Fatalf("tagged: skipped=%q fatal=%q", f.skipped, f.fatal)
+	}
+	g := &fakeTB{name: "TestTop"}
+	runFake(func() { failOrInconclusive(g, fmt.Errorf("A1: late job started before the fast job completed")) })
+	if g.skipped != "" || !strings.Contains(g.fatal, "A1:") {
+		t.Fatalf("untagged must Fatalf: skipped=%q fatal=%q", g.skipped, g.fatal)
+	}
+}

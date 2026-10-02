@@ -145,6 +145,22 @@ func Inconclusive(t testing.TB, format string, args ...any) {
 	t.Skip(inconclusive.Message(format, args...))
 }
 
+// failOrInconclusive ends the test for an error returned by one of the pure
+// timing/ordering checkers (checkYoloRemovedMidValidate, checkLateCheckOrdering).
+// Those checkers already tag a precondition that never arose with an
+// "INCONCLUSIVE" prefix (the run cannot demonstrate the property) and leave
+// every assertion about engine behaviour untagged; the tag decides the outcome:
+// INCONCLUSIVE-prefixed → Inconclusive (uncovered, retried), anything else →
+// t.Fatalf. The checkers' unit tests pin the prefix, so the split cannot drift.
+func failOrInconclusive(t testing.TB, err error) {
+	t.Helper()
+	if strings.HasPrefix(err.Error(), "INCONCLUSIVE") {
+		Inconclusive(t, "%v", err)
+		return
+	}
+	t.Fatalf("%v", err)
+}
+
 // isTopLevelTest reports whether a test name is a top-level test (no subtest
 // separator).
 func isTopLevelTest(name string) bool { return !strings.Contains(name, "/") }

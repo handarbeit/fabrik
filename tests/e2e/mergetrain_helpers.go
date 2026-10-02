@@ -590,6 +590,9 @@ func waitForLandingPRDetail(t *testing.T, env *Env, repo string, memberPRNum int
 			t.Logf("waitForLandingPRNumber: transient error reading PR #%d comments on %s: %v (will retry)", memberPRNum, repo, err)
 		}
 		if time.Now().After(deadline) {
+			// Deliberately a Fatalf, not Inconclusive (#1973): the transient post failure
+			// is an ENGINE defect (#1275, best-effort comment never retried), and an
+			// automatic retry would mask it.
 			t.Fatalf("timed out waiting for a \"landed via ...\" comment on member PR #%d on %s (last err: %v) — "+
 				"if the bed log shows \"warn: could not post landed comment on PR #%d\" around this landing, "+
 				"the engine's best-effort comment post failed transiently (not retried, tracked as #1275); this "+

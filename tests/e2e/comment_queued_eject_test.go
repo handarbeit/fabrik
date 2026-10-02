@@ -89,6 +89,8 @@ func TestQueuedMemberCommentEjection(t *testing.T) {
 		t.Fatalf("pre-flight: could not check %s for stale Queued items: %v", repo, err)
 	}
 	if len(stale) > 0 {
+		// Deliberately a Fatalf, not Inconclusive (#1973): bed STATE an operator must
+		// clear — an automatic retry would hit the same stale items.
 		t.Fatalf("pre-flight: %s already has open, non-paused Queued item(s) %v — they would join the occupant's batch and change "+
 			"its composition; move them out of Queued (or close them) and re-run", repo, stale)
 	}
@@ -153,9 +155,12 @@ func TestQueuedMemberCommentEjection(t *testing.T) {
 	sawDirect := false
 	for _, l := range logLinesSince(t, env, offset) {
 		if strings.Contains(l, pendingLine) {
-			t.Fatalf("occupant window closed: M2 #%d was owned by the live batch and took the pending-signal eject route (%s) — "+
+			// A precondition guard (#1973): it fires before the direct-route assertion
+			// below, and means the occupant's trial finished before M2 was queued, so
+			// the scenario's precondition (M2 not owned by a live batch) never arose.
+			Inconclusive(t, "occupant window closed: M2 #%d was owned by the live batch and took the pending-signal eject route (%s) — "+
 				"the occupant's trial finished before M2 was queued (or the slow-gate is not holding it). This is a harness/bed "+
-				"problem, not an engine regression — re-run.", m2, strings.TrimSpace(l))
+				"problem, not an engine regression.", m2, strings.TrimSpace(l))
 		}
 		if strings.Contains(l, directLine) {
 			sawDirect = true

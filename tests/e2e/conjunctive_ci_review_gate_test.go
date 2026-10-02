@@ -168,20 +168,22 @@ func TestConjunctiveCIReviewGate(t *testing.T) {
 	t.Logf("fabrik:awaiting-ci confirmed on %s#%d (CI gate is holding; Review's own review gate has cleared)", env.RepoAlpha, num)
 
 	// The R1 withheld window below is only meaningful while slow-gate is still
-	// running with room to spare. Fail as a fixture problem — not an engine
-	// one — when upstream latency has already consumed the window.
+	// running with room to spare. When upstream latency has already consumed the
+	// window the scenario's precondition never arose: INCONCLUSIVE (#1973), not an
+	// engine failure. A missing slow-gate check run is a bed-configuration error
+	// (a retry would see the same PR body) and stays a Fatalf.
 	if run, ok, err := slowGateOnPRHead(env, env.RepoAlpha, prNumber); err != nil {
 		t.Logf("could not read slow-gate on PR #%d (%v) — continuing without the window check", prNumber, err)
 	} else if !ok {
 		t.Fatalf("fixture: no slow-gate check run on PR #%d's head — is the PR body missing slow-ci-required-long?", prNumber)
 	} else if run.Status == "completed" {
-		t.Fatalf("fixture: slow-gate on PR #%d already completed (%s) before fabrik:awaiting-ci was observed — Review latency consumed "+
+		Inconclusive(t, "fixture: slow-gate on PR #%d already completed (%s) before fabrik:awaiting-ci was observed — Review latency consumed "+
 			"the CI-await window, so R1 cannot be tested; this is not an engine regression", prNumber, run.CompletedAt.Format(time.RFC3339))
 	} else if run.StartedAt.IsZero() {
 		// Still queued (GitHub reports started_at: null): none of the window is used yet.
 		t.Logf("slow-gate on PR #%d still queued — its full ~%s window is ahead", prNumber, slowGateLongDuration)
 	} else if left := time.Until(run.StartedAt.Add(slowGateLongDuration)); left < 4*time.Minute {
-		t.Fatalf("fixture: only ~%s of slow-gate's window left on PR #%d when fabrik:awaiting-ci was observed — too little for the "+
+		Inconclusive(t, "fixture: only ~%s of slow-gate's window left on PR #%d when fabrik:awaiting-ci was observed — too little for the "+
 			"2-minute R1 window; this is not an engine regression", left.Round(time.Second), prNumber)
 	} else {
 		t.Logf("slow-gate on PR #%d still running, ~%s of its window left", prNumber, left.Round(time.Minute))
@@ -221,7 +223,10 @@ func TestConjunctiveCIReviewGate(t *testing.T) {
 		r1Checked = true
 		for _, l := range labels {
 			if l == "stage:Validate:complete" {
-				// An engine failure only if slow-gate is genuinely still running.
+				// An engine failure only if slow-gate is genuinely still running. The
+				// "window too short" Fatalf below is deliberately NOT converted (#1973):
+				// it fires after an engine behaviour was observed inside the R1 window,
+				// so it is not a pure precondition guard.
 				if run, ok, err := slowGateOnPRHead(env, env.RepoAlpha, prNumber); err == nil && ok && run.Status == "completed" {
 					t.Fatalf("fixture: stage:Validate:complete appeared on %s#%d inside the R1 window, but slow-gate had already "+
 						"completed (%s) — the gate cleared correctly; the window was too short. Not an engine regression",
