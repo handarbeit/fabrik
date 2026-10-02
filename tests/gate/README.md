@@ -310,8 +310,8 @@ process**, serialized only where they share a GitHub identity.
   leg's restart, `verifyBedAppIdentity` reads the last startup in `bed-run.log` and refuses (exit 7)
   unless its `identity: GitHub App installation <N>` line names the `.env` installation;
   `TestBannerFormatsArePinned` pins the parser to the engine's format strings.
-* **Scheduling (R3, D6/D7).** Under the sparse matrix with the baseline in the plan, bed A runs the
-  baseline cells (`app/on`, then its isolated sibling) and nothing else; the other beds serve a shared
+* **Scheduling (R3, D6).** Under the sparse matrix with the baseline in the plan, bed A runs the
+  baseline cell (`app/on`) and nothing else; the other beds serve a shared
   queue in `sparseOrder`. Otherwise (`--resume`, a filtered or partial run, `E2E_MATRIX=full`) every
   bed serves the shared queue. A cell starts only when its **whole** identity set is free, acquired
   atomically under one mutex (no partial holds, so no hold-and-wait). A shared-queue bed takes the

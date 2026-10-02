@@ -171,7 +171,7 @@ func TestSingleBedRunIsUnchanged(t *testing.T) {
 // R4 end to end: both beds' legs land in one per-SHA ledger, attributed.
 func TestMultiBedRunSharesOneLedger(t *testing.T) {
 	f := covFixture(t)
-	f.g.Env = withoutEnv(f.g.Env, "E2E_TRAIN_MODE") // pat/off, pat/on (+ isolated): more cells than beds
+	f.g.Env = withoutEnv(f.g.Env, "E2E_TRAIN_MODE") // pat/off and pat/on: one cell per bed
 	bedB := t.TempDir()
 	mustWrite(t, bedB+"/.env", "FABRIK_TOKEN=token-b\nFABRIK_TEST_PROJECT_NUMBER=3\n")
 	f.g.Cfg.BedDirs = []string{f.g.Cfg.TestBed, bedB}

@@ -187,16 +187,15 @@ func (h *schedHarness) out() string { return h.g.Out.(interface{ String() string
 
 var (
 	cAppOn    = Cell{Auth: "app", Train: "on"}
-	cAppOnIso = Cell{Auth: "app", Train: "on", Isolated: true}
 	cAppOff   = Cell{Auth: "app", Train: "off"}
 	cPatOn    = Cell{Auth: "pat", Train: "on"}
 	cPatOff   = Cell{Auth: "pat", Train: "off"}
-	sparseAll = []Cell{cAppOn, cAppOnIso, cAppOff, cPatOn, cPatOff}
+	sparseAll = []Cell{cAppOn, cAppOff, cPatOn, cPatOff}
 )
 
 func TestAssignCells(t *testing.T) {
 	a, shared := assignCells(sparseAll, true)
-	if len(a) != 2 || a[0].Label() != "app/on" || a[0].Isolated || !a[1].Isolated {
+	if len(a) != 1 || a[0].Label() != "app/on" {
 		t.Errorf("bed A: %v", a)
 	}
 	if len(shared) != 3 || shared[0].Label() != "app/off" || shared[1].Label() != "pat/on" || shared[2].Label() != "pat/off" {
@@ -205,12 +204,12 @@ func TestAssignCells(t *testing.T) {
 	if a, shared := assignCells([]Cell{cAppOff, cPatOn}, true); a != nil || len(shared) != 2 {
 		t.Error("no baseline in the plan: every bed serves the shared queue")
 	}
-	if a, shared := assignCells(sparseAll, false); a != nil || len(shared) != 5 {
+	if a, shared := assignCells(sparseAll, false); a != nil || len(shared) != 4 {
 		t.Error("E2E_MATRIX=full: every bed serves the shared queue")
 	}
 }
 
-// D6/D7: the baseline (main, then isolated) runs on bed A while bed B runs the
+// D6: the baseline (app/on) runs on bed A while bed B runs the
 // other cells in sparse order — concurrently, since no identity is shared.
 func TestMultiBedDefaultAssignmentRunsConcurrently(t *testing.T) {
 	h := newSchedHarness(t, "alice", "bob", MatrixSparse)
@@ -219,11 +218,9 @@ func TestMultiBedDefaultAssignmentRunsConcurrently(t *testing.T) {
 	h.finish("B app/off", nil)
 	h.expectStart("B pat/on")
 	h.finish("A app/on", nil)
-	h.expectStart("A app/on (isolated)")
 	h.finish("B pat/on", nil)
 	h.expectStart("B pat/off")
 	h.finish("B pat/off", nil)
-	h.finish("A app/on (isolated)", nil)
 	if err := h.result(done); err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +232,7 @@ func TestMultiBedDefaultAssignmentRunsConcurrently(t *testing.T) {
 		"[bed A] == auth leg: app ==",
 		"[bed B] == auth leg: pat ==",
 		"== multi-bed summary ==",
-		"bed A (" + h.g.Cfg.BedDirs[0] + "): app/on — passed; app/on (isolated) — passed",
+		"bed A (" + h.g.Cfg.BedDirs[0] + "): app/on — passed\n",
 		"bed B (" + h.g.Cfg.BedDirs[1] + "): app/off — passed; pat/on — passed; pat/off — passed",
 	} {
 		if !strings.Contains(out, want) {
@@ -258,7 +255,7 @@ func TestMultiBedSerializesASharedIdentity(t *testing.T) {
 	}
 	// Drive the rest: finish whatever starts. Never two at once on the login.
 	h.finish("A app/on", nil)
-	for n := 0; n < 4; n++ {
+	for n := 0; n < 3; n++ {
 		select {
 		case key := <-h.started:
 			h.mu.Lock()
@@ -275,7 +272,7 @@ func TestMultiBedSerializesASharedIdentity(t *testing.T) {
 	if err := h.result(done); err != nil {
 		t.Fatal(err)
 	}
-	if h.maxActive["user:arbeithand"] != 1 || len(h.ran) != 5 {
+	if h.maxActive["user:arbeithand"] != 1 || len(h.ran) != 4 {
 		t.Errorf("max concurrent=%d ran=%v", h.maxActive["user:arbeithand"], h.ran)
 	}
 }
@@ -351,7 +348,7 @@ func TestMultiBedFailureStopsNewCells(t *testing.T) {
 		t.Errorf("no new cell may start after a failure: %v", h.ran)
 	}
 	out := h.out()
-	for _, want := range []string{"app/on — passed; app/on (isolated) — not started (a leg failed", "app/off — exit 1", "pat/on — not started (a leg failed", "pat/off — not started (a leg failed"} {
+	for _, want := range []string{"app/on — passed", "app/off — exit 1", "pat/on — not started (a leg failed", "pat/off — not started (a leg failed"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in:\n%s", want, out)
 		}
@@ -362,24 +359,27 @@ func TestMultiBedFailureStopsNewCells(t *testing.T) {
 // are dropped; every other cell — on both beds — still runs; exit 3.
 func TestMultiBedRunInvalidDropsOnlyTheExhaustedIdentity(t *testing.T) {
 	h := newSchedHarness(t, "alice", "bob", MatrixSparse)
-	cAppOffIso := Cell{Auth: "app", Train: "off", Isolated: true} // a second cell on bed B's App
-	_, done := h.run(context.Background(), []Cell{cAppOn, cAppOnIso, cAppOff, cPatOn, cAppOffIso})
+	_, done := h.run(context.Background(), sparseAll)
 	h.expectStarts("A app/on", "B app/off")
-	h.finish("B app/off", &ExitError{Code: ExitBudgetExhausted})
-	h.expectStart("B pat/on") // user:bob is not exhausted: B continues
-	h.finish("A app/on", nil)
-	h.expectStart("A app/on (isolated)") // bed A is untouched
-	h.finish("B pat/on", nil)
-	h.finish("A app/on (isolated)", nil)
+	h.finish("B app/off", nil)
+	h.expectStart("B pat/on")
+	h.finish("B pat/on", &ExitError{Code: ExitBudgetExhausted}) // exhausts user:bob
+	h.noStart()                                                 // pat/off charges user:bob: dropped
+	h.finish("A app/on", nil)                                   // bed A's identities are untouched
 	err := h.result(done)
 	if exitCode(err) != ExitBudgetExhausted {
 		t.Fatalf("got %v", err)
 	}
-	out := h.out()
-	if !strings.Contains(out, "app/off (isolated) — not started (identity app:88 budget exhausted") {
-		t.Errorf("the cell on the exhausted App must be reported as not started:\n%s", out)
+	if len(h.ran) != 3 {
+		t.Errorf("ran %v", h.ran)
 	}
-	if !strings.Contains(out, "exhausted identities: app:88") {
+	out := h.out()
+	for _, want := range []string{"app/on — passed", "pat/off — not started (identity user:bob budget exhausted"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+	if !strings.Contains(out, "exhausted identities: user:bob") {
 		t.Errorf("summary:\n%s", out)
 	}
 }
@@ -433,7 +433,7 @@ func TestMultiBedCancelReleasesEveryIdentity(t *testing.T) {
 func TestDescribeAssignment(t *testing.T) {
 	g, _, _, _ := twoBedGate(t)
 	g.Cfg.Matrix = MatrixSparse
-	if got := describeAssignment(g, sparseAll); got != "bed A: app/on, app/on (isolated); bed B (in order, next free bed): app/off, pat/on, pat/off" {
+	if got := describeAssignment(g, sparseAll); got != "bed A: app/on; bed B (in order, next free bed): app/off, pat/on, pat/off" {
 		t.Errorf("got %q", got)
 	}
 	if got := describeAssignment(g, []Cell{cPatOn}); got != "every bed (next free bed, in order): pat/on" {
@@ -491,7 +491,7 @@ func TestMultiBedStopsAnIdleBedsEngine(t *testing.T) {
 		t.Fatal("the waiting bed's engine was not stopped")
 	}
 	h.finish("A app/on", nil)
-	for n := 0; n < 4; n++ {
+	for n := 0; n < 3; n++ {
 		select {
 		case key := <-h.started:
 			h.finish(key, nil)

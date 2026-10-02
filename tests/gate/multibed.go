@@ -16,9 +16,8 @@ import (
 // later one waits, and says so. A single-bed run never uses it (R6): it keeps
 // SerialScheduler and today's failure semantics.
 //
-// Assignment (D6/D7). Under the sparse matrix, when the plan holds a baseline
-// cell (app/on — and its isolated sibling, which follows it), bed A runs exactly
-// those, in plan order, and nothing else; the other beds serve a shared queue of
+// Assignment (D6). Under the sparse matrix, when the plan holds a baseline
+// cell (app/on), bed A runs exactly that cell and nothing else; the other beds serve a shared queue of
 // the remaining cells in sparseOrder. With two beds that is "bed B runs app/off,
 // pat/on, pat/off in sequence". With no baseline cell in the plan (--resume, a
 // filtered or partial run) and always under E2E_MATRIX=full, every bed serves
@@ -40,12 +39,7 @@ type queued struct {
 	seq  int // plan position, for the summary
 }
 
-func cellDesc(c Cell) string {
-	if c.Isolated {
-		return c.Label() + " (isolated)"
-	}
-	return c.Label()
-}
+func cellDesc(c Cell) string { return c.Label() }
 
 // holder is who holds an identity.
 type holder struct{ bed, cell string }

@@ -41,7 +41,7 @@ func TestTwoBedsShareOneLedger(t *testing.T) {
 		{Cell{Auth: "app", Train: "on"}, bedA},
 		{Cell{Auth: "app", Train: "off"}, bedB},
 		{Cell{Auth: "pat", Train: "on"}, bedA},
-		{Cell{Auth: "pat", Train: "on", Isolated: true}, bedB},
+		{Cell{Auth: "pat", Train: "on"}, bedB},
 	} {
 		wg.Add(1)
 		go func(c Cell, bed string) {
