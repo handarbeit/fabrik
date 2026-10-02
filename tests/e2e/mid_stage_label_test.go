@@ -137,7 +137,7 @@ func TestYoloRemovedMidValidateBlocksMerge(t *testing.T) {
 
 	AddLabel(t, env, env.RepoAlpha, num, "stage:Review:complete")
 	SetIssueStatus(t, env, itemID, "Validate")
-	AwaitStatusVisible(t, env, env.RepoAlpha, num, "Validate", awaitSeedTimeout)
+	AwaitBoardItemVisible(t, env, env.RepoAlpha, num, awaitSeedTimeout)
 	t.Logf("seeded %s#%d (PR #%d, path %s) at Status=Validate with fabrik:yolo", env.RepoAlpha, num, prNum, path)
 
 	waitForValidateInProgressAndRemoveYolo(t, env, env.RepoAlpha, num, 15*time.Minute)

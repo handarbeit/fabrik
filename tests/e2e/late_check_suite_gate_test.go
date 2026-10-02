@@ -100,7 +100,7 @@ func TestLateCheckRunSuiteGate(t *testing.T) {
 	// seedReviewGateItem).
 	AddLabel(t, env, env.RepoAlpha, num, "stage:Review:complete")
 	SetIssueStatus(t, env, itemID, "Validate")
-	AwaitStatusVisible(t, env, env.RepoAlpha, num, "Validate", awaitSeedTimeout)
+	AwaitBoardItemVisible(t, env, env.RepoAlpha, num, awaitSeedTimeout)
 	t.Logf("seeded %s#%d (PR #%d, path %s) at Status=Validate; awaiting the CI gate", env.RepoAlpha, num, prNum, path)
 
 	// The gate is active once Validate completes and the engine applies

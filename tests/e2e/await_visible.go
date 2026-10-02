@@ -103,6 +103,14 @@ func AwaitBoardItemVisible(t testing.TB, env *Env, repo string, issueNumber int,
 // AwaitStatusVisible is AwaitBoardItemVisible and additionally requires the
 // item's Status in the listing to equal status — the read-your-write check after
 // SetIssueStatus.
+//
+// Use it ONLY while the bed is down, or for an item the engine will not act on in
+// that Status. With a running bed the engine can move the item on within a poll;
+// a lagging first read then sees the old Status, and the item never shows status
+// again, so the wait would burn the whole timeout and end Inconclusive for a
+// legitimate engine action — breaking the "harness-write lag only" rule. Against a
+// running bed use AwaitBoardItemVisible: an item that has appeared in the listing
+// stays in it, whatever the engine does next.
 func AwaitStatusVisible(t testing.TB, env *Env, repo string, issueNumber int, status string, timeout time.Duration) {
 	t.Helper()
 	finishAwait(t, awaitBoardItem(t, env, repo, issueNumber, status, timeout))

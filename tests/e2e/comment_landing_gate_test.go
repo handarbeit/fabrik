@@ -100,7 +100,7 @@ func TestCommentLandingGateHolds(t *testing.T) {
 
 	offset := LogOffset(t, env)
 	SetIssueStatus(t, env, itemID, "Validate")
-	AwaitStatusVisible(t, env, repo, issue, "Validate", awaitSeedTimeout)
+	AwaitBoardItemVisible(t, env, repo, issue, awaitSeedTimeout)
 	t.Logf("comment %d posted, item moved into Validate (train mode %s); scanning bed log from offset %d", commentID, trainMode, offset)
 
 	// assertHeld fails if the item shows any sign of having landed (or been queued)

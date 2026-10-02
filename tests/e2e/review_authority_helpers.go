@@ -85,7 +85,7 @@ func seedReviewGateItemImpl(t *testing.T, env *Env, repo, baseBranch, column, ma
 	AddLabel(t, env, repo, num, "stage:"+column+":complete")
 	AwaitLabelVisible(t, env, repo, num, "stage:"+column+":complete", awaitSeedTimeout)
 	SetIssueStatus(t, env, itemID, column)
-	AwaitStatusVisible(t, env, repo, num, column, awaitSeedTimeout)
+	AwaitBoardItemVisible(t, env, repo, num, awaitSeedTimeout)
 	t.Logf("seeded review-gate item: issue #%d, PR #%d, stage:%s:complete, Status=%s (marker=%s, draft=%v)",
 		num, prNum, column, column, marker, draft)
 	return num, prNum, itemID

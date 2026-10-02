@@ -72,7 +72,7 @@ func TestPostMergeCommentNotApplied(t *testing.T) {
 
 	AddLabel(t, env, repo, issue, "stage:Implement:complete")
 	SetIssueStatus(t, env, itemID, "Implement")
-	AwaitStatusVisible(t, env, repo, issue, "Implement", awaitSeedTimeout)
+	AwaitBoardItemVisible(t, env, repo, issue, awaitSeedTimeout)
 	MergePR(t, env, repo, pr) // --admin: does not wait for slow-gate
 	t.Logf("parked #%d at Implement (stage:Implement:complete), merged PR #%d without a closing keyword", issue, pr)
 

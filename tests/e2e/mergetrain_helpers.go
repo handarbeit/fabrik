@@ -223,7 +223,7 @@ func QueueMember(t *testing.T, env *Env, repo, baseBranch, marker, path, content
 	// Placing directly in Queued: the train is column-driven, so this is a valid
 	// member without running the full pipeline.
 	SetIssueStatus(t, env, itemID, "Queued")
-	AwaitStatusVisible(t, env, repo, num, "Queued", awaitSeedTimeout)
+	AwaitBoardItemVisible(t, env, repo, num, awaitSeedTimeout)
 	t.Logf("queued member: issue #%d, PR #%d, at Status=Queued", num, prNum)
 	return num, prNum
 }
@@ -358,7 +358,7 @@ func QueueMemberOnBase(t *testing.T, env *Env, repo, baseBranch, marker, path, c
 	prNum := CreateMemberPR(t, env, repo, baseBranch, branch, uPath, content, title, num)
 	AwaitPRForBranchVisible(t, env, repo, num, awaitSeedTimeout)
 	SetIssueStatus(t, env, itemID, "Queued")
-	AwaitStatusVisible(t, env, repo, num, "Queued", awaitSeedTimeout)
+	AwaitBoardItemVisible(t, env, repo, num, awaitSeedTimeout)
 	t.Logf("queued member on base %q: issue #%d (label %s), PR #%d, at Status=Queued", baseBranch, num, baseLabel, prNum)
 	return num, prNum
 }
@@ -696,7 +696,7 @@ func QueueMemberPaused(t *testing.T, env *Env, repo, baseBranch, marker, path, c
 	prNum := CreateMemberPR(t, env, repo, baseBranch, branch, uPath, content, title, num)
 	AwaitPRForBranchVisible(t, env, repo, num, awaitSeedTimeout)
 	SetIssueStatus(t, env, itemID, "Queued")
-	AwaitStatusVisible(t, env, repo, num, "Queued", awaitSeedTimeout)
+	AwaitBoardItemVisible(t, env, repo, num, awaitSeedTimeout)
 	t.Logf("queued PAUSED member: issue #%d, PR #%d, at Status=Queued", num, prNum)
 	return num, prNum
 }

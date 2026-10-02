@@ -1962,7 +1962,7 @@ on every PR; CI only *compiles* this tagged package).
 
 | Helper | Waits for | Read path |
 |---|---|---|
-| `AwaitBoardItemVisible` / `AwaitStatusVisible` | the issue in the ProjectV2 item listing (with a given Status) | `projectV2.items(first:100)` GraphQL — what the engine's bootstrap fetch lists |
+| `AwaitBoardItemVisible` / `AwaitStatusVisible` | the issue in the ProjectV2 item listing (with a given Status) | `projectV2.items(first:100)` GraphQL — what the engine's bootstrap fetch lists. **Against a running bed use `AwaitBoardItemVisible`**: the engine can move the item on within a poll, so a Status await after a lagging first read would never see the awaited Status and would burn the whole timeout. `AwaitStatusVisible` is for a bed that is down (ColdCache) or a Status the engine will not act on |
 | `AwaitClosingLinkage` | `Closes #N` visible on **both** sides | `issue.closedByPullRequestsReferences` (the engine's read) and `pullRequest.closingIssuesReferences`, one GraphQL call. Default-base PRs only: GitHub makes no link for a non-default base |
 | `AwaitPRMergeableComputed` | `mergeable` computed (`mergeable_state` ≠ `unknown`) | REST `/pulls/N` |
 | `AwaitPRMergeableSettled` | computed **and** `clean`/`unstable` (#1982's verdict, layered on the primitive: `blocked`/`unknown` keep waiting, `dirty`/`behind` fail fast) | REST `/pulls/N` |
