@@ -311,7 +311,7 @@ per live e2e scenario test (a top-level `Test*` in `tests/e2e/*_test.go` whose
 body calls `LoadEnv(t)`), keyed by test name. It is checked in `go test ./...`
 (`tests/e2e/registry`, no build tag), so it cannot drift: an unmapped live test, a
 stale entry, a dangling sim reference or a malformed entry fails the build.
-`scripts/e2e/run.sh` prints a one-line summary from it before the live legs start
+The e2e gate runner (`scripts/e2e/run.sh`, a shim over `tests/gate`) prints a one-line summary from it before the live legs start
 (`sim parity: N covered, M live-only, K gap`).
 
 Each entry's `parity` is exactly one of:
@@ -532,7 +532,7 @@ depend on which machine happened to run it — a bigger machine made the same
 suite *less* reliable, backwards from the intended relationship.
 
 `scripts/sim/run.sh` (the sole entry point both manual runs and
-`scripts/e2e/run.sh`'s pre-gate go through — see that script's own header
+the e2e gate runner's pre-gate (behind `scripts/e2e/run.sh`) go through — see that script's own header
 comment) passes an explicit `-parallel "$SIM_PARALLEL"`, defaulting to
 `scripts/lib/parallel.sh`'s `default_race_parallel` — **`min(4, host
 cores)`**, overridable via the environment — not a flat number: a flat cap
@@ -1070,13 +1070,15 @@ how the guard's loss would be caught, per this rule.
 where the orchestrator/call site is exercised end to end and the guard's effect is
 observable — not only a unit test of the guard's own logic in isolation.
 
-*Worked example:* `scripts/e2e/run.sh`'s `check_competing_token_consumers` orchestrator
-wraps a well-tested pure detection function (`find_competing_token_consumers`, six cases
-in `scripts/e2e/token_consumer_check_test.sh`) but, until #1687, had no test exercising
+*Worked example:* the e2e gate runner's `CheckCompetingTokenConsumers` orchestrator
+(`tests/gate/consumers.go`; it was `check_competing_token_consumers` in `scripts/e2e/run.sh`
+before #1994) wraps a well-tested pure detection function (`FindCompetingTokenConsumers`,
+the cases in `tests/gate/preconditions_test.go`, ported from the former
+`token_consumer_check_test.sh`) but, until #1687, had no test exercising
 its own match→refuse path — replacing its body with `return 0` left every existing case
-green. The fix added a case that overrides the untestable OS-dependent half
-(`discover_fabrik_process_dirs`) with a canned candidate, then asserts the orchestrator
-itself detects the match and exits `PRECONDITION_FAILED_EXIT` — proving the wiring, not
+green. The fix added a case that stubs the untestable OS-dependent half
+(process discovery) with a canned candidate, then asserts the orchestrator
+itself detects the match and exits `ExitPreconditionFailed` — proving the wiring, not
 just the detection logic it calls.
 
 **Neutralize before trusting a guard test.** The only way any of the three gaps above
