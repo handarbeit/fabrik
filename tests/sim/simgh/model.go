@@ -181,10 +181,13 @@ type issueRecord struct {
 	// read back by FetchLabelAppliedAt. Three separate engine mechanisms
 	// anchor timeouts on this value, so it is load-bearing, not metadata.
 	labelAppliedAt map[string]time.Time
-	comments       []*commentRecord
-	blockedBy      []gh.Dependency
-	createdAt      time.Time
-	updatedAt      time.Time
+	// labelEvents is the ordered log of real label state changes (see
+	// LabelEvents). A no-op re-add or an absent-label remove records nothing.
+	labelEvents []LabelEvent
+	comments    []*commentRecord
+	blockedBy   []gh.Dependency
+	createdAt   time.Time
+	updatedAt   time.Time
 }
 
 // nodeID synthesises the issue's GraphQL node ID. Sim node IDs are readable

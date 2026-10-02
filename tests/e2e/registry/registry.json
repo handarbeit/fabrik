@@ -57,8 +57,11 @@
     },
     {
       "name": "TestCommentReentryShowsReworking",
-      "parity": "gap",
-      "note": "fabrik:reworking:<stage> label sequence on comment re-entry; unit coverage only (engine/stage_rework_test.go), no sim scenario"
+      "parity": "sim",
+      "sim": [
+        "TestCommentReentryShowsReworking_CompletingExit",
+        "TestCommentReentryShowsReworking_NonCompletingExit"
+      ]
     },
     {
       "name": "TestConjunctiveCIReviewGate",
