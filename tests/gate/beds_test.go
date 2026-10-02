@@ -29,20 +29,26 @@ func twoBedGate(t *testing.T, env ...string) (*Gate, *fakeExec, *bytes.Buffer, *
 
 func TestParseBeds(t *testing.T) {
 	t.Run("unset is the single FABRIK_TEST_DIR bed as given", func(t *testing.T) {
-		got, err := parseBeds("  ", "rel/bed")
+		got, err := parseBeds("  ", "rel/bed", "/h")
 		if err != nil || len(got) != 1 || got[0] != "rel/bed" {
 			t.Errorf("got %v, %v", got, err)
 		}
 	})
 	t.Run("a list is made absolute in order", func(t *testing.T) {
 		a, b := t.TempDir(), t.TempDir()
-		got, err := parseBeds(a+" , "+b, "ignored")
+		got, err := parseBeds(a+" , "+b, "ignored", "/h")
 		if err != nil || len(got) != 2 || got[0] != a || got[1] != b {
 			t.Errorf("got %v, %v", got, err)
 		}
 	})
+	t.Run("a leading ~/ is expanded in every entry", func(t *testing.T) {
+		got, err := parseBeds("/beds/a,~/dev/fabrik-test-2", "", "/home/op")
+		if err != nil || len(got) != 2 || got[1] != "/home/op/dev/fabrik-test-2" {
+			t.Errorf("got %v, %v", got, err)
+		}
+	})
 	t.Run("an empty entry is refused", func(t *testing.T) {
-		if _, err := parseBeds(t.TempDir()+",,"+t.TempDir(), ""); err == nil || !strings.Contains(err.Error(), "empty entry") {
+		if _, err := parseBeds(t.TempDir()+",,"+t.TempDir(), "", "/h"); err == nil || !strings.Contains(err.Error(), "empty entry") {
 			t.Errorf("got %v", err)
 		}
 	})
@@ -52,10 +58,10 @@ func TestParseBeds(t *testing.T) {
 		if err := os.Symlink(a, link); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := parseBeds(a+","+a, ""); err == nil {
+		if _, err := parseBeds(a+","+a, "", "/h"); err == nil {
 			t.Error("a literal duplicate must be refused")
 		}
-		if _, err := parseBeds(a+","+link, ""); err == nil || !strings.Contains(err.Error(), "same directory") {
+		if _, err := parseBeds(a+","+link, "", "/h"); err == nil || !strings.Contains(err.Error(), "same directory") {
 			t.Errorf("a symlinked duplicate must be refused: %v", err)
 		}
 	})
@@ -64,7 +70,7 @@ func TestParseBeds(t *testing.T) {
 		for i := 0; i < 27; i++ {
 			dirs = append(dirs, fmt.Sprintf("/beds/%d", i))
 		}
-		if _, err := parseBeds(strings.Join(dirs, ","), ""); err == nil || !strings.Contains(err.Error(), "at most 26") {
+		if _, err := parseBeds(strings.Join(dirs, ","), "", "/h"); err == nil || !strings.Contains(err.Error(), "at most 26") {
 			t.Errorf("got %v", err)
 		}
 	})

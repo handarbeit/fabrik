@@ -166,7 +166,7 @@ func LoadConfig(getenv func(string) string, repoRoot string) (Config, error) {
 		LagPollInterval: 3 * time.Second,
 	}
 	var err error
-	if c.BedDirs, err = parseBeds(getenv("E2E_BEDS"), testBed); err != nil {
+	if c.BedDirs, err = parseBeds(getenv("E2E_BEDS"), testBed, home); err != nil {
 		return c, err
 	}
 	// E2E_BEDS, when set, names bed A explicitly and FABRIK_TEST_DIR is ignored;
@@ -240,10 +240,12 @@ const maxBeds = 26
 
 // parseBeds resolves E2E_BEDS (#1976). Unset or blank is the single bed
 // [testBed], exactly as before. Otherwise every comma-separated entry must be a
-// non-empty directory path, made absolute; an empty entry, two entries naming the
-// same directory (compared by resolved real path, so a symlink is caught) or more
-// than maxBeds entries is an error, never a silent repair.
-func parseBeds(v, testBed string) ([]string, error) {
+// non-empty directory path, made absolute; a leading "~/" is expanded against
+// home, because the shell expands only the first entry's (after the "=", not
+// after a comma). An empty entry, two entries naming the same directory
+// (compared by resolved real path, so a symlink is caught) or more than maxBeds
+// entries is an error, never a silent repair.
+func parseBeds(v, testBed, home string) ([]string, error) {
 	if strings.TrimSpace(v) == "" {
 		return []string{testBed}, nil
 	}
@@ -257,6 +259,9 @@ func parseBeds(v, testBed string) ([]string, error) {
 		p = strings.TrimSpace(p)
 		if p == "" {
 			return nil, fmt.Errorf("E2E_BEDS=%q has an empty entry (position %d)", v, i+1)
+		}
+		if rest, ok := strings.CutPrefix(p, "~/"); ok && home != "" {
+			p = filepath.Join(home, rest)
 		}
 		abs, err := filepath.Abs(p)
 		if err != nil {
