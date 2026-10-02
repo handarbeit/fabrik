@@ -1,0 +1,5 @@
+=== RUN   TestSomething
+unexpected fault address 0x0
+fatal error: fault
+[signal SIGSEGV: segmentation violation code=0x1 addr=0x0 pc=0x4a1b2c]
+FAIL	github.com/handarbeit/fabrik/tests/sim	9.810s

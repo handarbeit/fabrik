@@ -80,6 +80,10 @@ type Gate struct {
 	// unavailable (existing behaviour, unchanged).
 	cov *covState
 
+	// pregateRetry is set when a pre-gate step passed (or finally failed) after its
+	// one TSan-crash retry (#1973 R5); recordPregatePass folds it into the record.
+	pregateRetry *pregateRetryNote
+
 	// leftInconclusive is every "leg: test" still INCONCLUSIVE after its leg's
 	// retries (#1973): uncovered, not failed. run() turns a non-empty set into
 	// ExitCoverageIncomplete so an uncovered leg never reads as success.

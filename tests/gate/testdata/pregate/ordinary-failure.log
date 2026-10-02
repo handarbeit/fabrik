@@ -1,0 +1,7 @@
+=== RUN   TestCommentLandingGate
+--- FAIL: TestCommentLandingGate (1.02s)
+    comment_landing_gate_test.go:88: item #7 advanced to Done with an unprocessed comment pending
+FAIL
+FAIL	github.com/handarbeit/fabrik/tests/sim	101.440s
+FAIL
+== sim suite finished in 102s (exit 1) ==

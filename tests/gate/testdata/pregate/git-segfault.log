@@ -1,0 +1,7 @@
+=== RUN   TestReviewAuthorityReinvokesOnChangesRequested
+--- FAIL: TestReviewAuthorityReinvokesOnChangesRequested (3.21s)
+    env.go:212: seeding the bare repo: git config user.name fabrik-sim: signal: segmentation fault
+FAIL
+FAIL	github.com/handarbeit/fabrik/tests/sim	188.902s
+FAIL
+== sim suite finished in 189s (exit 1) ==

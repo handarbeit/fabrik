@@ -3,6 +3,7 @@ package gate
 import (
 	"bytes"
 	"context"
+	"os"
 	"strings"
 	"testing"
 )
@@ -190,4 +191,155 @@ func TestPregate(t *testing.T) {
 			t.Errorf("an undeclared change must still fail the dedup: want 2 runs, got %d", n)
 		}
 	})
+}
+
+// ---- #1973 R5: the one-shot retry of the known TSan fork/exec crash ----
+
+type pgAttempt struct {
+	out string
+	rc  int
+}
+
+func pregateFixture(t *testing.T, name string) string {
+	t.Helper()
+	return string(fixtureBytes(t, "pregate/"+name))
+}
+
+// scriptedPregate wires a fake whose successive sim runs follow simScript and
+// whose github wire-contract run follows goScript (the last entry repeats).
+func scriptedPregate(t *testing.T, simScript, goScript []pgAttempt) (*Gate, *fakeExec, *bytes.Buffer) {
+	t.Helper()
+	g, fe, out, _ := testGate(t)
+	g.Cfg.CoverageDir = t.TempDir() + "/cov"
+	g.LoadAvg = func() (float64, bool) { return 3.4, true }
+	var simN, goN int
+	pick := func(s []pgAttempt, n *int) pgAttempt {
+		i := *n
+		*n++
+		if i >= len(s) {
+			i = len(s) - 1
+		}
+		return s[i]
+	}
+	fe.handler = func(_ context.Context, c Cmd) Result {
+		switch {
+		case c.Name == "git" && len(c.Args) > 0 && c.Args[0] == "rev-parse":
+			writeStdout(c, testHEAD+"\n")
+		case strings.HasSuffix(c.Name, "scripts/sim/run.sh"):
+			a := pick(simScript, &simN)
+			writeStdout(c, a.out)
+			return Result{ExitCode: a.rc}
+		case c.Name == "go":
+			a := pick(goScript, &goN)
+			writeStdout(c, a.out)
+			return Result{ExitCode: a.rc}
+		}
+		return Result{}
+	}
+	return g, fe, out
+}
+
+func simRuns(fe *fakeExec) int {
+	n := 0
+	for _, l := range fe.lines() {
+		if strings.Contains(l, "scripts/sim/run.sh") {
+			n++
+		}
+	}
+	return n
+}
+
+var okRun = []pgAttempt{{rc: 0}}
+
+func TestPregateRetriesTheKnownCrashOnceAndRecordsIt(t *testing.T) {
+	for _, crash := range []string{"tsan-abort.log", "git-segfault.log"} {
+		t.Run(crash, func(t *testing.T) {
+			g, fe, out := scriptedPregate(t, []pgAttempt{{out: pregateFixture(t, crash), rc: 1}, {rc: 0}}, okRun)
+			if err := g.RunPregate(context.Background()); err != nil {
+				t.Fatalf("a crash followed by a pass must pass: %v", err)
+			}
+			if n := simRuns(fe); n != 2 {
+				t.Errorf("sim runs = %d, want exactly 2 (one retry)", n)
+			}
+			if !strings.Contains(out.String(), "retrying once (host load average 3.40)") {
+				t.Errorf("the retry and the load average must be announced:\n%s", out.String())
+			}
+			// Recorded: the pass record carries the retry, and a note exists.
+			rec, ok := g.readPregateRecord(testHEAD)
+			if !ok || !rec.Retried || rec.LoadAvg != "3.40" {
+				t.Errorf("pass record = %+v ok=%v", rec, ok)
+			}
+			note, err := os.ReadFile(g.pregateRetriesPath(testHEAD))
+			if err != nil || !strings.Contains(string(note), `"outcome":"pass"`) || !strings.Contains(string(note), `"load_avg":"3.40"`) || !strings.Contains(string(note), `"step":"sim suite"`) {
+				t.Errorf("retry note = %q (%v)", note, err)
+			}
+			if line := g.pregateLine(context.Background()); !strings.Contains(line, "after 1 TSan-crash retry, load average 3.40") {
+				t.Errorf("pregateLine = %q", line)
+			}
+		})
+	}
+}
+
+func TestPregateSecondCrashIsAHardStopAndIsStillRecorded(t *testing.T) {
+	crash := pgAttempt{out: pregateFixture(t, "tsan-abort.log"), rc: 1}
+	g, fe, _ := scriptedPregate(t, []pgAttempt{crash}, okRun)
+	err := g.RunPregate(context.Background())
+	if exitCode(err) != ExitPregateFailed {
+		t.Fatalf("a second crash is a hard stop (5): %v", err)
+	}
+	if n := simRuns(fe); n != 2 {
+		t.Errorf("sim runs = %d, want 2 — never a second retry", n)
+	}
+	note, _ := os.ReadFile(g.pregateRetriesPath(testHEAD))
+	if !strings.Contains(string(note), `"outcome":"crashed again"`) {
+		t.Errorf("a retry that fails must still be recorded: %q", note)
+	}
+	if _, ok := g.readPregateRecord(testHEAD); ok {
+		t.Error("a failed pre-gate must leave no pass record")
+	}
+}
+
+func TestPregateDoesNotRetryOrdinaryFailuresOrEnginePanics(t *testing.T) {
+	for _, f := range []string{"ordinary-failure.log", "engine-panic.log", "segfault-and-panic.log", "bare-sigsegv.log"} {
+		t.Run(f, func(t *testing.T) {
+			g, fe, _ := scriptedPregate(t, []pgAttempt{{out: pregateFixture(t, f), rc: 1}}, okRun)
+			if exitCode(g.RunPregate(context.Background())) != ExitPregateFailed {
+				t.Fatal("must be a hard stop")
+			}
+			if n := simRuns(fe); n != 1 {
+				t.Errorf("sim runs = %d, want 1 — no retry", n)
+			}
+			if _, err := os.Stat(g.pregateRetriesPath(testHEAD)); err == nil {
+				t.Error("no retry, so no retry note")
+			}
+		})
+	}
+}
+
+func TestPregateWireContractStepGetsTheSameTreatment(t *testing.T) {
+	g, fe, _ := scriptedPregate(t, okRun, []pgAttempt{{out: pregateFixture(t, "git-segfault.log"), rc: 1}, {rc: 0}})
+	if err := g.RunPregate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(fe.callsNamed("go")); n != 2 {
+		t.Errorf("wire-contract runs = %d, want 2", n)
+	}
+	if n := simRuns(fe); n != 1 {
+		t.Errorf("the passing sim step must not re-run: %d", n)
+	}
+	// And an ordinary wire-contract failure is not retried.
+	g, fe, _ = scriptedPregate(t, okRun, []pgAttempt{{out: pregateFixture(t, "ordinary-failure.log"), rc: 1}})
+	if exitCode(g.RunPregate(context.Background())) != ExitPregateFailed || len(fe.callsNamed("go")) != 1 {
+		t.Error("an ordinary wire-contract failure is a hard stop with no retry")
+	}
+}
+
+func TestPregateAPassOnTheFirstRunRecordsNoRetry(t *testing.T) {
+	g, _, _ := scriptedPregate(t, okRun, okRun)
+	if err := g.RunPregate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if rec, ok := g.readPregateRecord(testHEAD); !ok || rec.Retried || rec.LoadAvg != "" {
+		t.Errorf("record = %+v ok=%v", rec, ok)
+	}
 }
