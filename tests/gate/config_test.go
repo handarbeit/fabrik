@@ -23,3 +23,17 @@ func TestLoadConfigInconclusiveTunables(t *testing.T) {
 		}
 	}
 }
+
+// #1977: the shared phase keeps the pre-#1977 caps until a measured leg justifies
+// raising them; 8/4 are the values to try, opt-in through the environment.
+func TestLoadConfigParallelDefaultsAreUnchangedAndOptInRaises(t *testing.T) {
+	get := func(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
+	c, err := LoadConfig(get(nil), "/repo")
+	if err != nil || c.Parallel != "4" || c.ParallelOn != "2" {
+		t.Fatalf("defaults = %s/%s err=%v, want 4/2", c.Parallel, c.ParallelOn, err)
+	}
+	c, err = LoadConfig(get(map[string]string{"E2E_PARALLEL": "8", "E2E_PARALLEL_ON": "4"}), "/repo")
+	if err != nil || c.Parallel != "8" || c.ParallelOn != "4" {
+		t.Fatalf("opt-in = %s/%s err=%v, want 8/4", c.Parallel, c.ParallelOn, err)
+	}
+}

@@ -69,8 +69,8 @@ func (g *Gate) noteBedConcurrency(arch *legArchive, cell Cell, phases []Phase) i
 		}
 	}
 	if par > 0 && n < par {
-		g.errf("warning: the bed's max_concurrent is %d (%s) but leg %s runs up to -parallel=%d: the engine's worker cap, not the host, will bound the run. Raise max_concurrent (tests/e2e/README.md, \"Bed concurrency\") — this is a warning, not a gate.\n",
-			n, src, cell.Label(), par)
+		g.errf("warning: leg %s runs the shared phase at -parallel=%d but the bed's max_concurrent is %d (%s): the engine's worker cap, not the host, will bound the run. Raise max_concurrent or lower E2E_PARALLEL / E2E_PARALLEL_ON (tests/e2e/README.md, \"Bed concurrency\") — this is a warning, not a gate.\n",
+			cell.Label(), par, n, src)
 	}
 	return n
 }

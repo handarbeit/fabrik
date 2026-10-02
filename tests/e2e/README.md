@@ -224,8 +224,8 @@ instantly under `off`) is the one that exhausts the budget.
 **Mitigation shipped in #1527 (does not touch the settle scans' per-item
 correctness guarantees):**
 
-- **`E2E_PARALLEL_ON`** (default 4, half of `E2E_PARALLEL`'s default 8; both
-  were 2 and 4 before #1977) caps the shared phase's concurrency specifically
+- **`E2E_PARALLEL_ON`** (default 2, half of `E2E_PARALLEL`'s default 4; both
+  unchanged by #1977) caps the shared phase's concurrency specifically
   on the two-mode gate's `on` leg, shrinking the population those scans
   iterate. `off` and any forced single-mode run
   (`E2E_TRAIN_MODE` set explicitly) are unaffected — they keep using
@@ -1642,16 +1642,19 @@ saturates the API — producing cascading `transient gh error … (will retry)`
 timeouts **even though every scenario passes standalone** (see issue #971).
 
 `run.sh` therefore caps concurrency with `-parallel`. Since #1977 the cap governs
-the **shared phase** of each leg and defaults to **8** with train `off`
-(`E2E_PARALLEL`) and **4** with train `on` (`E2E_PARALLEL_ON`); the default-base-train
-and exclusive phases run serially and need no knob. These defaults are
-**provisional**: they assume the bed's `max_concurrent` is raised to 10 (see "Bed
-concurrency" above), and the before/after measurement that confirms them on a real
-bed (wall-clock, INCONCLUSIVE rate and peak host load, from the leg summary) is an
-operator step. The history below was derived at the old values of 4 and 2.
+the **shared phase** of each leg and keeps its old defaults: **4** with train `off`
+(`E2E_PARALLEL`) and **2** with train `on` (`E2E_PARALLEL_ON`); the default-base-train
+and exclusive phases run serially and need no knob. **8 / 4 are the values to try**
+(`E2E_PARALLEL=8 E2E_PARALLEL_ON=4`), only once the bed's `max_concurrent` is 10 (see
+"Bed concurrency" above): at the bed's default of 5 they would run 8 tests against 5 engine
+workers, an untuned timing change that produces timeouts and INCONCLUSIVE outcomes. The
+defaults are raised only after a measured leg — wall-clock, INCONCLUSIVE rate and peak host
+load, from the leg summary and `phases.json` (INCONCLUSIVE-retry spend is its own `retry`
+entry there) — shows the higher values hold. The history below was derived at 4 and 2.
 
 ```bash
-E2E_PARALLEL=4 scripts/e2e/run.sh   # tighter cap for a heavy/merge-train-heavy run
+E2E_PARALLEL=2 scripts/e2e/run.sh   # tighter cap for a heavy/merge-train-heavy run
+E2E_PARALLEL=8 E2E_PARALLEL_ON=4 scripts/e2e/run.sh  # the values to try, with max_concurrent 10
 E2E_PARALLEL=12 scripts/e2e/run.sh  # looser, only if the bed's max_concurrent is raised too
 ```
 

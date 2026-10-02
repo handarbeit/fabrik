@@ -46,6 +46,10 @@ func (p PhaseStat) consumed() int {
 type LegSummary struct {
 	Label  string      `json:"label"`
 	Phases []PhaseStat `json:"phases"`
+	// Retry is the #1973 INCONCLUSIVE retries' own wall-clock and GraphQL spend
+	// (nil when none ran), kept apart so the last phase's figures — which drive the
+	// -parallel defaults — do not include them.
+	Retry *PhaseStat `json:"retry,omitempty"`
 	// PeakLoad1m is the highest 1-minute load average the archive's sampler saw
 	// during the leg; HasLoad is false when the host reports none (or there is no
 	// archive, i.e. the ledger is disabled).
@@ -56,13 +60,21 @@ type LegSummary struct {
 	BedMaxConcurrent int `json:"bed_max_concurrent,omitempty"`
 }
 
-// Wall is the leg's suite wall-clock: the sum of its phases.
+// Wall is the leg's suite wall-clock: the sum of its phases and any retries.
 func (s LegSummary) Wall() time.Duration {
 	var d time.Duration
-	for _, p := range s.Phases {
+	for _, p := range s.stats() {
 		d += p.Wall
 	}
 	return d
+}
+
+// stats is the phases followed by the retry entry, if any.
+func (s LegSummary) stats() []PhaseStat {
+	if s.Retry == nil {
+		return s.Phases
+	}
+	return append(append([]PhaseStat(nil), s.Phases...), *s.Retry)
 }
 
 // PeakConcurrent is the highest phase peak (phases run one after another).
@@ -80,7 +92,7 @@ func (s LegSummary) PeakConcurrent() int {
 // and whether every phase's was.
 func (s LegSummary) Consumed() (pts int, complete bool) {
 	complete = true
-	for _, p := range s.Phases {
+	for _, p := range s.stats() {
 		if c := p.consumed(); c >= 0 {
 			pts += c
 		} else {
@@ -94,7 +106,7 @@ func (s LegSummary) Consumed() (pts int, complete bool) {
 func (s LegSummary) Format() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "== leg summary (leg: %s) ==\n", s.Label)
-	for _, p := range s.Phases {
+	for _, p := range s.stats() {
 		spent := "n/a"
 		if c := p.consumed(); c >= 0 {
 			spent = fmt.Sprintf("%d pts", c)

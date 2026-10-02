@@ -173,7 +173,7 @@ moves into the archive when the ledger is on (the `$TMPDIR` name remains when it
 One cell is still one bed restart (`TestSwitchTrainMode`), but the `go test` after it is split by
 the registry's isolation class (`exclusive`, `default_base_train`, else shared) into up to three
 invocations run in this order: **shared** at the cell's `-parallel` (`E2E_PARALLEL` /
-`E2E_PARALLEL_ON`, now 8 / 4), then **default-base-train** at `-parallel 1`, then **exclusive** at
+`E2E_PARALLEL_ON`, defaults 4 / 2 — unchanged from before #1977; 8 / 4 is the value to try), then **default-base-train** at `-parallel 1`, then **exclusive** at
 `-parallel 1`. Exclusive last means a shared test never inherits what an exclusive one left, with no
 extra bed restart; default-base-train follows shared because shared yolo tests also enqueue on
 `RepoAlpha/main` under train `on`.

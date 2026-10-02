@@ -268,9 +268,23 @@ func (g *Gate) RunLeg(ctx context.Context, cell Cell) error {
 	if rerr == nil {
 		var rretry int
 		var err error
+		// Close the last phase's budget window BEFORE any retry, so retry spend is
+		// reported as its own entry rather than folded into that phase's figure.
+		retryBefore := -1
+		if g.Cfg.InconclusiveRetries > 0 && len(Classify(events).Inconclusive) > 0 && len(summary.Phases) > 0 {
+			retryBefore = g.probeBudget(ctx, "budget_before_retry", label)
+			summary.Phases[len(summary.Phases)-1].BudgetAfter = retryBefore
+		}
+		retryStart := g.Now()
 		events, logs, rretry, inc, err = g.retryInconclusive(ctx, cell, label, legEnv, mode, jsonlog, logs, events, recorder, exclusiveRan(phases))
 		if err != nil {
 			return err
+		}
+		if inc.Attempts > 0 {
+			summary.Retry = &PhaseStat{
+				Name: "retry", Tests: len(inc.First), Parallel: "-", Wall: g.Now().Sub(retryStart),
+				BudgetBefore: retryBefore, BudgetAfter: -1, ExitCode: rretry,
+			}
 		}
 		if rretry != 0 && rc == 0 {
 			rc = rretry // a retried test FAILED (or the retry run died): the leg is red
@@ -605,7 +619,9 @@ func (g *Gate) postSuiteTail(ctx context.Context, cell Cell, label string, logs 
 	if ctx.Err() != nil {
 		return ctx.Err() // cancelled (a signal or the watchdog): print nothing more
 	}
-	if n := len(summary.Phases); n > 0 {
+	if summary.Retry != nil {
+		summary.Retry.BudgetAfter = budgetAfter // the retries' own window; the last phase closed before them
+	} else if n := len(summary.Phases); n > 0 {
 		summary.Phases[n-1].BudgetAfter = budgetAfter
 	}
 	if budgetBefore >= 0 && budgetAfter >= 0 {

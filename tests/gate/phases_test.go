@@ -174,6 +174,47 @@ func TestLegSummaryFormat(t *testing.T) {
 	}
 }
 
+// Retry spend is its own entry: the last phase's figures (which drive the
+// -parallel defaults) must not include it.
+func TestLegSummaryRetryIsReportedSeparately(t *testing.T) {
+	s := LegSummary{
+		Label:  "pat/off",
+		Phases: []PhaseStat{{Name: "shared", Tests: 2, Parallel: "4", Wall: time.Hour, PeakConcurrent: 4, BudgetBefore: 4000, BudgetAfter: 3000}},
+		Retry:  &PhaseStat{Name: "retry", Tests: 1, Parallel: "-", Wall: 10 * time.Minute, BudgetBefore: 3000, BudgetAfter: 2700},
+	}
+	out := s.Format()
+	for _, want := range []string{"retry", "GraphQL 300 pts", "GraphQL 1000 pts", "total               wall 1h10m0s  peak concurrent 4  GraphQL 1300 pts"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("summary missing %q:\n%s", want, out)
+		}
+	}
+	if got := s.Phases[0].consumed(); got != 1000 {
+		t.Errorf("the phase's own spend = %d, want 1000 (retries excluded)", got)
+	}
+}
+
+func TestLegRetrySpendIsNotFoldedIntoTheLastPhase(t *testing.T) {
+	g, lf, _ := phaseGate(t, threeClasses,
+		legAttempt{out: streams(inc("TestShareA", "race"), pass("TestShareB"))},
+		legAttempt{out: pass("TestBase")},
+		legAttempt{out: pass("TestExcl")},
+		legAttempt{out: pass("TestShareA")},
+	)
+	// budget probes in order: before, after shared, after default-base, after the
+	// last phase (before the retries), then the post-suite probe.
+	lf.budgets = []string{"4000", "3900", "3800", "3700", "3000"}
+	if err := g.RunLeg(context.Background(), defaultCell); err != nil {
+		t.Fatal(err)
+	}
+	out := g.Out.(interface{ String() string }).String()
+	if !strings.Contains(out, "retry ") || !strings.Contains(out, "GraphQL 700 pts") {
+		t.Errorf("the retries' spend (3700 -> 3000) must be its own entry:\n%s", out)
+	}
+	if !strings.Contains(out, "exclusive            1 test(s)  -parallel=1   wall 0s  peak concurrent 1  GraphQL 100 pts") || !strings.Contains(out, "peak concurrent 1  GraphQL 1000 pts") {
+		t.Errorf("the last phase must keep only its own 100 pts and the total stay 4000 -> 3000:\n%s", out)
+	}
+}
+
 // ---- RunLeg over phases (fake Commander: no bed, no network) ----
 
 func phaseGate(t *testing.T, classes map[string]registry.Isolation, script ...legAttempt) (*Gate, *legFake, *strings.Builder) {
@@ -467,7 +508,7 @@ func TestNoteBedConcurrencyWarnsWithoutBlocking(t *testing.T) {
 	if n := g.noteBedConcurrency(arch, Cell{Auth: "pat", Train: "on"}, phases); n != 4 {
 		t.Errorf("returned %d", n)
 	}
-	if !strings.Contains(errb.String(), "max_concurrent is 4") || !strings.Contains(errb.String(), "-parallel=8") {
+	if !strings.Contains(errb.String(), "shared phase at -parallel=8 but the bed's max_concurrent is 4") {
 		t.Errorf("expected a warning, got %q", errb)
 	}
 	data, err := os.ReadFile(filepath.Join(dir, "bed-concurrency.json"))
