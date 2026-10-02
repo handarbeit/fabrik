@@ -6,7 +6,7 @@ import "testing"
 // suite invocation. In sim, cfg.MergeTrain is construction-time
 // configuration (mergeTrainEnvOptions.Mode, plumbed straight through to
 // engine.Config — see mergeTrainEnv), not a bed restart, so there is no
-// scripts/e2e/run.sh-style two-pass dance to reproduce: TestMergeTrainMode_On
+// e2e gate-runner-style two-pass dance to reproduce: TestMergeTrainMode_On
 // and TestMergeTrainMode_Off below run as ordinary parallel subtests of one
 // `go test` invocation, each with its own independent *Env/*Engine.
 //

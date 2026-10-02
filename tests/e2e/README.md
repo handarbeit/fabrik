@@ -78,6 +78,17 @@ rejected in favor of this loudly-labelled one.
 via `cut-release.sh`, so a live-gate run never spends live budget on a bug the free
 layers would have caught for $0.
 
+**`run.sh` is a shim over a Go program (#1994, ADR-1994).** The orchestration — preconditions,
+pre-gate, bed preflight and start, the auth × train legs, hang protection, the reports, and
+the exit-code contract `cut-release.sh` keys on — lives in [`tests/gate`](../gate/README.md)
+(`tests/gate/cmd/gate` is the `main`). It compiles **without** the `e2e` build tag, so its
+tests run in plain `go test -race ./...` on every PR, and it sits beside rather than under
+this directory so the live legs' `./tests/e2e/...` package set (and their outcome report)
+is untouched. `scripts/e2e/run.sh` builds it and `exec`s it, so the runner — not a
+`go run` wrapper — receives INT/TERM and reaps everything it started. Every flag and
+environment variable below keeps its meaning. `scripts/e2e/reset.sh` is likewise a shim
+(`gate reset`). The shim builds into `${E2E_GATE_BIN_DIR:-$TMPDIR/fabrik-e2e-gate-<uid>}`.
+
 ## Test bed prerequisites
 
 These tests assume:
@@ -206,18 +217,18 @@ correctness guarantees):**
   (`E2E_TRAIN_MODE` set explicitly) are unaffected — they keep using
   `E2E_PARALLEL`.
 - **Fail-loud detection (R2), independent of whether the cap above is enough:**
-  `scripts/e2e/run.sh` now scans the bed's `fabrik.log` after each leg (scoped
+  the gate runner (`scripts/e2e/run.sh`) now scans the bed's `fabrik.log` after each leg (scoped
   to just that leg's own output) for the engine's one-shot
   `"...activating rate-limit backoff"` line. On a match — regardless of the
   leg's own pass/fail exit code — the script prints a `RUN INVALID` banner and
   exits with a dedicated code (`3`, distinct from `go test`'s propagated `1`),
   short-circuiting any remaining leg. A throttled run must never be reported
-  in a way that reads like a normal pass/fail; see `scripts/e2e/run.sh`'s
-  header comment ("GraphQL budget exhaustion detection") for the full
-  mechanism.
+  in a way that reads like a normal pass/fail; see `tests/gate/backoff.go` and
+  `tests/gate/leg.go` for the full mechanism.
 - **Per-leg cost visibility (A3):** each leg is now bracketed with
-  `gh api rate_limit --jq '.resources.graphql.remaining'` calls, so every run
-  reports its own actual GraphQL consumption — the manual check documented
+  inline GraphQL `rateLimit { remaining }` queries (1 point each — the REST
+  `rate_limit` endpoint reports a dead, permanently full bucket for the bed's
+  token), so every run reports its own actual GraphQL consumption — the manual check documented
   above is now automatic, per leg, on every invocation.
 
 **Measured per-leg cost:** not yet captured — obtaining it requires a live
@@ -1312,14 +1323,14 @@ eliminate — the two constraints are independent, not in tension.
 before any live GitHub/Claude call, ahead of the sim+wire-contract pre-gate
 (#1454) and the bed preflight:
 
-- `check_competing_token_consumers` (R1) enumerates locally-running `fabrik`
+- `CheckCompetingTokenConsumers` (R1) enumerates locally-running `fabrik`
   processes, resolves each one's working directory, and compares its `.env`
   `FABRIK_TOKEN` against the bed's own — excluding the bed's own directory
   (already budgeted into the ~4,000/5,000 estimate). **Refuses by default**
   on a match, naming the offending PID(s) and directory/directories: a silent
   proceed-into-backoff is strictly worse than one operator round-trip.
   Escape hatch: `E2E_SKIP_TOKEN_CHECK=1`.
-- `check_reviewer_reachable` (R2) checks Pruefer's own liveness via
+- `CheckReviewerReachable` (R2) checks Pruefer's own liveness via
   `$PRUEFER_DIR/.pruefer/pruefer.lock` (default `PRUEFER_DIR`:
   `$HOME/dev/fabrik`, matching the observed co-located deployment
   convention) — `kill -0` against the PID Pruefer writes into that lock file
@@ -1335,9 +1346,9 @@ before any live GitHub/Claude call, ahead of the sim+wire-contract pre-gate
 
 Both checks are local-only and make no live GitHub/Claude call themselves
 (process/file inspection only), so they add negligible wall-clock ahead of
-the checks they front-run. See `scripts/e2e/run.sh`'s own header comment for
-the full mechanism, and `scripts/e2e/token_consumer_check_test.sh` /
-`scripts/e2e/reviewer_reachable_check_test.sh` for their regression coverage.
+the checks they front-run. See `tests/gate/consumers.go` for the mechanism, and
+`tests/gate/preconditions_test.go` for their regression coverage (ported from the
+former `token_consumer_check_test.sh` / `reviewer_reachable_check_test.sh`).
 
 ## Running
 
@@ -1390,7 +1401,7 @@ A two-mode run is roughly double the single-mode GitHub API cost — see #1219
 for the budget headroom this assumes, and merge it before attempting a full
 two-mode run.
 
-Both `go test` invocations inside `switch_and_run()` (the `TestSwitchTrainMode`
+Both `go test` invocations inside the leg executor (`RunLeg`; the `TestSwitchTrainMode`
 step and the suite invocation that follows it) pass `-count=1`, Go's standard
 mechanism for defeating the test cache. Neither is safe to serve from cache:
 the switch step is deliberately side-effecting (it stops/restarts the shared
@@ -1533,21 +1544,23 @@ larger cost driver (#1527)" above.
 
 The v0.0.81 cut hung for **17h19m** — with its log untouched for the last
 ~19 of them, and the `e2e.test` binary long gone — because the two `gh api
-rate_limit` budget-probe calls in `switch_and_run` (`budget_before`/
+rate_limit` budget-probe calls in the (then bash) leg executor (`budget_before`/
 `budget_after`) had no timeout at all: `|| echo ""` only guards a *failing*
-call, not a *hanging* one. `run.sh` now guards against a repeat at three
-independent layers (see the script's own header comment, "Hang hardening",
-for the full mechanism):
+call, not a *hanging* one. The gate runner now guards against a repeat at three
+independent layers (see `tests/gate/leg.go` and `tests/gate/exec.go`; since #1994
+these are contexts and `internal/sessionreap` rather than bash job control —
+ADR-1994 maps each mechanism):
 
 - **`E2E_GH_API_TIMEOUT`** (default `30`, seconds) — every ancillary network
-  call (currently: the two `gh api rate_limit` budget probes) is wrapped in
-  a `with_timeout` helper and killed — whole process group — if it exceeds
-  this. These are lightweight REST metadata calls (see "GraphQL budget
+  call (currently: the two GraphQL budget probes) runs through the runner's
+  `Commander` with a `Timeout` and is killed — its whole session — if it exceeds
+  this. A caught hang prints `with_timeout: command exceeded Ns, killed: …` as a
+  warning, so it is distinguishable from an ordinary `gh` error. These are lightweight REST metadata calls (see "GraphQL budget
   exhaustion detection" above), so 30s is generous, not tight.
 - **`E2E_POST_SUITE_WATCHDOG`** (default `300`, seconds) — a background
-  watchdog, armed the instant `go test` exits, aborts the script loudly
-  (a distinct exit code, `POST_SUITE_WATCHDOG_EXIT=6`) with a diagnostic
-  naming the stuck step if `switch_and_run`'s own post-suite bookkeeping
+  watchdog, armed the instant `go test` exits, aborts the run loudly
+  (a distinct exit code, `ExitPostSuiteWatchdog = 6`) with a diagnostic
+  naming the stuck step if the leg executor's own post-suite bookkeeping
   (the budget probe, timing/outcome reports, the backoff scan — normally
   seconds, not minutes) hasn't finished within this window. This is the
   exact failure mode from the v0.0.81 incident: `go test` long gone, no
@@ -1561,8 +1574,8 @@ for the full mechanism):
   only surfaced, so it's never mistaken for progress either.
 
 **Defaults kept as proposed, not further tuned.** Nothing in the
-post-`go test` tail this watchdog covers (a couple of REST calls plus `jq`
-parsing over the JSON log) plausibly approaches minutes, so `300s` is a
+post-`go test` tail this watchdog covers (a couple of GraphQL calls plus
+parsing the JSON log) plausibly approaches minutes, so `300s` is a
 generous backstop relative to normal completion time. For the stall
 detector, the one measured real-world inter-event gap already on record in
 this file — **5½ minutes**, `TestReviewAuthorityClearsOnApproval`, in a
@@ -1571,7 +1584,7 @@ derived" above) — sits comfortably under the 15-minute default, so nothing
 found during Research/Plan indicted the issue's own starting-point values.
 
 **Expected warning on the isolated `TestMergeTrainRunawayGuardPausesBatch`
-leg.** This scenario runs alone (see `run.sh`'s own dispatch-guard comment),
+leg.** This scenario runs alone (see `TrainIsolatedRE` in `tests/gate/config.go`),
 deliberately queuing poison members until a 1-hour-windowed runaway guard
 fires, with no other parallel scenario keeping the combined output stream
 busy in the meantime. The stall detector is expected to warn during this
@@ -1583,8 +1596,15 @@ bounded well within the post-suite watchdog's own window (30s default vs.
 300s default), so in the common case the watchdog should never actually
 fire — `E2E_GH_API_TIMEOUT` already removes the only two calls known to
 cause the original hang. The watchdog exists as a backstop against a
-*future* regression (a call added to that tail without routing through
-`with_timeout`), not the expected path.
+*future* regression (a call added to that tail without a bound), not the
+expected path. Any new network call goes through `Commander` with a `Timeout`.
+
+**Wedged output pipe (#1694).** If something that outlived `go test` (the
+detached bed was the real case) inherited the suite's output pipe, the runner
+stops waiting for EOF after `E2E_POST_SUITE_DRAIN_TIMEOUT` (default `30`
+seconds), prints a warning, and carries on to the remaining legs — the JSON log
+is already complete. (The bash runner's named-pipe `tee | jq` consumer is gone;
+the runner copies the pipe itself.)
 
 #### Timeout & failure reporting
 
@@ -1611,7 +1631,7 @@ follow-up debugging at the path printed above.
 
 #### Per-test wall-clock summary (#1355)
 
-Unlike the failure classification above, `report_test_timings` runs
+Unlike the failure classification above, the timing report runs
 unconditionally — pass or fail — right after each leg's suite invocation
 finishes, so "which scenarios cost the most" is a measured number from every
 gate run rather than a guess:
@@ -1629,12 +1649,14 @@ Elapsed is Go's own per-test `Elapsed` field from the `go test -json` stream
 (only meaningful on a test's terminal pass/fail/skip event), sorted
 descending; subtests are folded into their parent, same as the failure
 classification above. Printed once per leg — a combined cross-leg table
-isn't possible without changing `switch_and_run`'s per-leg `jsonlog` scoping
-(see the function's own doc comment for why).
+isn't possible without changing the per-leg `jsonlog` scoping (the log is named
+by auth and train mode, so the two "on" sub-legs overwrite each other; the
+per-cell archive is #1972's).
 
-**Verification status:** the `jq` pipeline itself is proven against
-synthetic `go test -json` fixtures (multiple tests, a subtest, all three
-terminal actions, sorted correctly) — not by inspection. A full smoke test
+**Verification status:** the report code is proven against a recorded
+`go test -json` stream whose golden outputs were generated by the original
+`jq | column -t` pipeline (multiple tests, a subtest, all three terminal actions,
+non-JSON lines, sorted correctly) — see `tests/gate/events_test.go`. A full smoke test
 of the integrated `scripts/e2e/run.sh` output (AC4) against a live gate run
 was not performed for the same reason as `TestNoWorkNeeded`'s live-bed
 verification above: doing so touches `~/dev/fabrik-test`, outside any

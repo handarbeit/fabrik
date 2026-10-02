@@ -64,7 +64,7 @@ import (
 // Any other Queued member on the same (repo, base) would join the partition and
 // change the batch composition. Go runs non-parallel tests to completion before
 // resuming any t.Parallel() test, so this runs with no sibling train scenario
-// active (like restart, redsingleton and runaway); the run.sh "on" leg needs no
+// active (like restart, redsingleton and runaway); the gate runner's "on" leg needs no
 // change. A pre-flight fails loudly if a stale open, non-paused Queued item is
 // already on the board.
 //
