@@ -1,6 +1,7 @@
 package gate
 
 import (
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -10,7 +11,8 @@ func TestRetryLogPath(t *testing.T) {
 	if got := retryLogPath("/a/go-test.json", 2); got != "/a/go-test.retry-2.json" {
 		t.Errorf("got %q", got)
 	}
-	if got := retryLogPath("/tmp/fabrik-e2e-pat-off-1.json", 1); got != "/tmp/fabrik-e2e-pat-off-1.retry-1.json" {
+	dir := t.TempDir()
+	if got := retryLogPath(filepath.Join(dir, "fabrik-e2e-pat-off-1.json"), 1); got != filepath.Join(dir, "fabrik-e2e-pat-off-1.retry-1.json") {
 		t.Errorf("got %q", got)
 	}
 }
