@@ -63,9 +63,13 @@ func AuthModeProblems(bed string, modes []string) []string {
 }
 
 // CheckAuthModePreconditions refuses (ExitPreconditionFailed) before any live
-// spend when a planned auth leg cannot run.
+// spend when a planned auth leg cannot run — on any configured bed (#1976); each
+// problem names its bed's directory.
 func (g *Gate) CheckAuthModePreconditions(modes []string) error {
-	problems := AuthModeProblems(g.Cfg.TestBed, modes)
+	var problems []string
+	for _, b := range g.beds() {
+		problems = append(problems, AuthModeProblems(b.Cfg.TestBed, modes)...)
+	}
 	if len(problems) > 0 {
 		var b strings.Builder
 		b.WriteString("\n")

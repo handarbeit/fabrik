@@ -3,7 +3,7 @@
 // are now thin shims that exec it.
 //
 //	gate [run] [--clean] [go test flags...]   # the gate (what run.sh did)
-//	gate reset [--worktrees]                  # clear the bed (what reset.sh did)
+//	gate reset [--worktrees] [--bed <dir>]    # clear the bed(s) (what reset.sh did; every E2E_BEDS bed by default, #1976)
 //	gate [run] --resume [--clean] ...         # run only what the coverage ledger lacks (#1972)
 //	gate coverage [--sha S] [--format notes]  # is live coverage complete for S? (exit 0 / 8)
 //	gate report [--sha S] [--baseline B]      # measured per-test runtime from the archive (#1992)
@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/handarbeit/fabrik/tests/gate"
@@ -85,13 +86,12 @@ func run(ctx context.Context, sub string, argv []string) int {
 		return g.ReportCmd(ctx, argv)
 	}
 	if sub == "reset" {
-		var opts gate.ResetOptions
-		for _, a := range argv {
-			if a == "--worktrees" {
-				opts.Worktrees = true
-			}
+		opts, bed, err := parseResetArgs(argv)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "gate reset: %v\n", err)
+			return gate.ExitUsage
 		}
-		if err := g.Reset(ctx, opts); err != nil {
+		if err := g.ResetBeds(ctx, opts, bed); err != nil {
 			if ee, ok := err.(*gate.ExitError); ok {
 				fmt.Fprintln(os.Stderr, ee.Msg)
 				return ee.Code
@@ -102,4 +102,27 @@ func run(ctx context.Context, sub string, argv []string) int {
 		return 0
 	}
 	return g.Run(ctx, argv)
+}
+
+// parseResetArgs reads `gate reset`'s flags: --worktrees, and --bed <dir> /
+// --bed=<dir> to reset only that bed (#1976; the default is every configured
+// bed). Other arguments are ignored, as reset.sh ignored them.
+func parseResetArgs(argv []string) (opts gate.ResetOptions, bed string, err error) {
+	for i := 0; i < len(argv); i++ {
+		switch a := argv[i]; {
+		case a == "--worktrees":
+			opts.Worktrees = true
+		case a == "--bed":
+			if i+1 >= len(argv) || argv[i+1] == "" {
+				return opts, "", fmt.Errorf("--bed needs a bed directory")
+			}
+			i++
+			bed = argv[i]
+		case strings.HasPrefix(a, "--bed="):
+			if bed = strings.TrimPrefix(a, "--bed="); bed == "" {
+				return opts, "", fmt.Errorf("--bed needs a bed directory")
+			}
+		}
+	}
+	return opts, bed, nil
 }

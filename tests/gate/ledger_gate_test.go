@@ -319,13 +319,13 @@ func TestBedConfigHashAndDriftWarning(t *testing.T) {
 		t.Error("a stage edit must change the hash")
 	}
 	l := testLedger(t)
-	if d := l.NoteBedConfig("i1", h1); len(d) != 0 {
+	if d := l.NoteBedConfig("i1", bed, h1); len(d) != 0 {
 		t.Errorf("first invocation has nothing to differ from: %v", d)
 	}
-	if d := l.NoteBedConfig("i2", h1); len(d) != 0 {
+	if d := l.NoteBedConfig("i2", bed, h1); len(d) != 0 {
 		t.Errorf("same hash: %v", d)
 	}
-	if d := l.NoteBedConfig("i3", h3); len(d) != 1 || d[0] != h1 {
+	if d := l.NoteBedConfig("i3", bed, h3); len(d) != 1 || d[0] != h1 {
 		t.Errorf("a changed config must be reported: %v", d)
 	}
 }

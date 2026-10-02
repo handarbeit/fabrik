@@ -74,6 +74,11 @@ type Record struct {
 	// issue numbers it cites (R6).
 	SkipMsg string `json:"skip_msg,omitempty"`
 	Issues  []int  `json:"issues,omitempty"`
+	// Bed is the bed directory that produced the record (#1976, R4). Every bed of
+	// one invocation writes to this one ledger, and a (test, leg) pair covered on
+	// any bed counts; the field is attribution only. Absent on older records. On
+	// a void line it scopes the void to that bed's records.
+	Bed string `json:"bed,omitempty"`
 }
 
 // ledgerMeta is meta.json.
@@ -243,7 +248,13 @@ func (l *Ledger) Append(rec Record) error {
 // Void discards every earlier record of (invocation, cell) on the leg — the
 // RUN INVALID reading of "this verdict cannot be trusted".
 func (l *Ledger) Void(leg, cell, invocation string) error {
-	return l.Append(Record{Kind: recordKindVoid, Leg: leg, Cell: cell, Invocation: invocation})
+	return l.VoidBed(leg, cell, invocation, "")
+}
+
+// VoidBed is Void scoped to one bed's records (#1976): a RUN INVALID on one bed
+// never discards what another bed recorded. bed "" voids every bed's.
+func (l *Ledger) VoidBed(leg, cell, invocation, bed string) error {
+	return l.Append(Record{Kind: recordKindVoid, Leg: leg, Cell: cell, Invocation: invocation, Bed: bed})
 }
 
 // NoteInvocation writes the invocation line (once per invocation — callers guard
@@ -371,14 +382,15 @@ func readRecords(path string) ([]Record, []string, error) {
 }
 
 // latestRecords applies void lines (each discards every earlier record of the
-// same invocation+cell) and keeps the last remaining outcome record per test.
+// same invocation+cell — of the void's bed only, when it names one) and keeps the
+// last remaining outcome record per test.
 func latestRecords(recs []Record) map[string]Record {
 	var live []Record
 	for _, r := range recs {
 		if r.Kind == recordKindVoid {
 			kept := live[:0:0]
 			for _, p := range live {
-				if p.Invocation == r.Invocation && p.Cell == r.Cell {
+				if p.Invocation == r.Invocation && p.Cell == r.Cell && (r.Bed == "" || p.Bed == r.Bed) {
 					continue
 				}
 				kept = append(kept, p)

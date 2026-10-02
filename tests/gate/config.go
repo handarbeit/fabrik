@@ -75,8 +75,13 @@ const (
 // Numeric-looking knobs that are only ever passed through to `go test`
 // (-timeout, -parallel) stay strings, exactly as the bash passed them.
 type Config struct {
-	RepoRoot   string
-	TestBed    string // FABRIK_TEST_DIR, default $HOME/dev/fabrik-test
+	RepoRoot string
+	TestBed  string // FABRIK_TEST_DIR, default $HOME/dev/fabrik-test; bed A under E2E_BEDS
+	// BedDirs are the configured beds (#1976): E2E_BEDS, a comma-separated list of
+	// bed directories whose first entry is bed A, or [TestBed] when it is unset.
+	// Two or more entries make the run multi-bed (beds.go); one — the default —
+	// is today's single-bed gate, unchanged. nil (a Config built by hand) is one bed.
+	BedDirs    []string
 	EngineLog  string // $TestBed/.fabrik/fabrik.log
 	BedToken   string // FABRIK_TOKEN from $TestBed/.env; "" when unreadable
 	PrueferDir string
@@ -161,6 +166,13 @@ func LoadConfig(getenv func(string) string, repoRoot string) (Config, error) {
 		LagPollInterval: 3 * time.Second,
 	}
 	var err error
+	if c.BedDirs, err = parseBeds(getenv("E2E_BEDS"), testBed); err != nil {
+		return c, err
+	}
+	// E2E_BEDS, when set, names bed A explicitly and FABRIK_TEST_DIR is ignored;
+	// unset, BedDirs[0] is FABRIK_TEST_DIR itself and nothing changes.
+	c.TestBed = c.BedDirs[0]
+	c.EngineLog = filepath.Join(c.TestBed, ".fabrik", "fabrik.log")
 	if c.Matrix, err = parseMatrix(getenv("E2E_MATRIX")); err != nil {
 		return c, err
 	}
@@ -221,6 +233,43 @@ func parseMatrix(v string) (string, error) {
 	default:
 		return "", fmt.Errorf("E2E_MATRIX=%q is invalid (must be %s, %s, or unset for %s)", v, MatrixSparse, MatrixFull, MatrixSparse)
 	}
+}
+
+// maxBeds bounds E2E_BEDS: beds are named A, B, … in output and the summary.
+const maxBeds = 26
+
+// parseBeds resolves E2E_BEDS (#1976). Unset or blank is the single bed
+// [testBed], exactly as before. Otherwise every comma-separated entry must be a
+// non-empty directory path, made absolute; an empty entry, two entries naming the
+// same directory (compared by resolved real path, so a symlink is caught) or more
+// than maxBeds entries is an error, never a silent repair.
+func parseBeds(v, testBed string) ([]string, error) {
+	if strings.TrimSpace(v) == "" {
+		return []string{testBed}, nil
+	}
+	parts := strings.Split(v, ",")
+	if len(parts) > maxBeds {
+		return nil, fmt.Errorf("E2E_BEDS names %d beds; at most %d are supported", len(parts), maxBeds)
+	}
+	var dirs []string
+	seen := map[string]int{}
+	for i, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			return nil, fmt.Errorf("E2E_BEDS=%q has an empty entry (position %d)", v, i+1)
+		}
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			return nil, fmt.Errorf("E2E_BEDS entry %q: %v", p, err)
+		}
+		real := realPath(abs)
+		if j, dup := seen[real]; dup {
+			return nil, fmt.Errorf("E2E_BEDS entries %d (%s) and %d (%s) are the same directory", j+1, dirs[j], i+1, abs)
+		}
+		seen[real] = i
+		dirs = append(dirs, abs)
+	}
+	return dirs, nil
 }
 
 // sparseMatrix reports whether the sparse auth × train plan applies.
