@@ -3,9 +3,12 @@
 package e2e
 
 import (
+	"fmt"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -289,4 +292,60 @@ func TestNormalizeTrainMode(t *testing.T) {
 			t.Errorf("normalizeTrainMode(%q) = %q, want %q", c.in, got, c.want)
 		}
 	}
+}
+
+// TestIsTopLevelTest pins the guard that keeps Inconclusive out of subtests
+// (#1973): the gate runner reads only a top-level test's own output.
+func TestIsTopLevelTest(t *testing.T) {
+	if !isTopLevelTest("TestMergeTrainBatchCap") {
+		t.Error("a plain test name must be top-level")
+	}
+	if isTopLevelTest("TestX/case") {
+		t.Error("a subtest name must not be top-level")
+	}
+}
+
+// TestInconclusiveEndsWithMarkedSkip checks the helper against a recording
+// testing.TB: a top-level caller ends in a skip carrying the marker (the
+// contract itself is pinned in tests/e2e/inconclusive), a subtest caller gets a
+// Fatalf instead.
+func TestInconclusiveEndsWithMarkedSkip(t *testing.T) {
+	f := &fakeTB{name: "TestTopLevel"}
+	runFake(func() { Inconclusive(f, "precondition %s never arose", "X") })
+	if f.skipped != "E2E-INCONCLUSIVE: precondition X never arose" || f.fatal != "" {
+		t.Fatalf("skipped=%q fatal=%q", f.skipped, f.fatal)
+	}
+	g := &fakeTB{name: "TestParent/sub"}
+	runFake(func() { Inconclusive(g, "why") })
+	if g.skipped != "" || !strings.Contains(g.fatal, "top-level") {
+		t.Fatalf("subtest use must Fatalf, skipped=%q fatal=%q", g.skipped, g.fatal)
+	}
+}
+
+// fakeTB records Skip/Fatalf; like the real ones both end the goroutine's work
+// via runtime.Goexit, which runFake absorbs by running f on its own goroutine.
+type fakeTB struct {
+	testing.TB
+	name           string
+	skipped, fatal string
+}
+
+func (f *fakeTB) Helper()      {}
+func (f *fakeTB) Name() string { return f.name }
+func (f *fakeTB) Skip(args ...any) {
+	f.skipped = fmt.Sprint(args...)
+	runtime.Goexit()
+}
+func (f *fakeTB) Fatalf(format string, args ...any) {
+	f.fatal = fmt.Sprintf(format, args...)
+	runtime.Goexit()
+}
+
+func runFake(fn func()) {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fn()
+	}()
+	<-done
 }
