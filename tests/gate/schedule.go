@@ -17,11 +17,10 @@ type Cell struct {
 	Train string // the E2E_TRAIN_MODE for the leg: "off" | "on" (passed through verbatim)
 	// Parallel is the `go test -parallel` cap, a string passed through verbatim.
 	Parallel string
-	// Args are the `go test` arguments after ./tests/e2e/... — the isolation
-	// flags (-skip/-run) and/or the caller's own passthrough arguments.
+	// Args are the `go test` arguments after ./tests/e2e/... — the cell's own
+	// narrowing -run (sparse plan) and/or the caller's passthrough arguments.
+	// RunLeg splits the selection into its isolation phases (#1977, phases.go).
 	Args []string
-	// Isolated marks the leg that runs only the TrainIsolatedRE scenarios.
-	Isolated bool
 }
 
 // Label is the report label: auth mode / train mode, e.g. "app/on" (#1861).
@@ -33,8 +32,7 @@ type PlanInput struct {
 	// TrainMode is E2E_TRAIN_MODE: when set the caller forces a single mode.
 	TrainMode string
 	// CallerHasRun: the caller supplied -run/--run, so they are targeting
-	// specific scenarios; honour that exactly rather than forcing an isolated
-	// leg they did not ask for.
+	// specific scenarios; honour that exactly.
 	CallerHasRun bool
 	Parallel     string // E2E_PARALLEL
 	ParallelOn   string // E2E_PARALLEL_ON: the default gate's "on" leg cap only
@@ -53,8 +51,6 @@ type SparseInput struct {
 	Entries map[string]registry.Entry
 }
 
-func isolatedRunArg() string { return "^(" + TrainIsolatedRE + ")$" }
-
 func cat(parts ...[]string) []string {
 	var out []string
 	for _, p := range parts {
@@ -69,43 +65,28 @@ func cat(parts ...[]string) []string {
 // so a regression there surfaces before the App legs spend anything. Within an
 // auth mode:
 //
-//   - E2E_TRAIN_MODE set: a single forced mode, always at E2E_PARALLEL. "on"
-//     without a caller -run is split into a main leg (-skip the isolated
-//     scenarios) and the isolated leg, both at E2E_PARALLEL.
+//   - E2E_TRAIN_MODE set: a single forced mode, always at E2E_PARALLEL.
 //   - unset (the default gate): "off" first (the path nearly all real usage
 //     takes, so a regression there surfaces before the less-common train-on
-//     run), then "on" at the tighter E2E_PARALLEL_ON cap, split the same way
-//     unless the caller supplied -run.
+//     run), then "on" at the tighter E2E_PARALLEL_ON cap.
 //
-// The isolated leg never receives the caller's passthrough arguments. The bed
-// restarts between legs, which also clears the runaway guard's in-memory state,
-// so the isolation is explicit, not merely dependent on ordering.
+// A cell is one bed restart; the exclusive scenarios that used to get a cell of
+// their own (the runaway guard, TrainIsolatedRE) are now the last phase of the
+// cell that selects them, chosen by the registry (#1977, phases.go).
 func PlanCells(p PlanInput) []Cell {
 	if p.Sparse != nil && (p.TrainMode == "" || p.TrainMode == "on" || p.TrainMode == "off") {
 		return planSparse(p)
 	}
 	var cells []Cell
 	for _, auth := range p.AuthModes {
-		mk := func(train, parallel string, args []string, isolated bool) Cell {
-			return Cell{Auth: auth, Train: train, Parallel: parallel, Args: args, Isolated: isolated}
+		mk := func(train, parallel string) Cell {
+			return Cell{Auth: auth, Train: train, Parallel: parallel, Args: p.Args}
 		}
-		switch {
-		case p.TrainMode != "" && p.TrainMode == "on" && !p.CallerHasRun:
-			cells = append(cells,
-				mk("on", p.Parallel, cat([]string{"-skip", TrainIsolatedRE}, p.Args), false),
-				mk("on", p.Parallel, []string{"-run", isolatedRunArg()}, true))
-		case p.TrainMode != "":
-			cells = append(cells, mk(p.TrainMode, p.Parallel, p.Args, false))
-		default:
-			cells = append(cells, mk("off", p.Parallel, p.Args, false))
-			if !p.CallerHasRun {
-				cells = append(cells,
-					mk("on", p.ParallelOn, cat([]string{"-skip", TrainIsolatedRE}, p.Args), false),
-					mk("on", p.ParallelOn, []string{"-run", isolatedRunArg()}, true))
-			} else {
-				cells = append(cells, mk("on", p.ParallelOn, p.Args, false))
-			}
+		if p.TrainMode != "" {
+			cells = append(cells, mk(p.TrainMode, p.Parallel))
+			continue
 		}
+		cells = append(cells, mk("off", p.Parallel), mk("on", p.ParallelOn))
 	}
 	return cells
 }
@@ -213,11 +194,10 @@ func narrowArgs(args, names []string) []string {
 // filter selects a subset of the sparse cells — and a pat-only or off-only run
 // therefore omits the baseline and is a partial run.
 //
-// The baseline keeps today's shape: the main cell skips the isolated scenario,
-// which gets a cell of its own. A narrowed cell carries one anchored -run over
-// its selection; the isolated scenario is split into its own cell only when it
-// is in that cell's selection. An empty selection drops the cell, and with it
-// the bed restart. A caller -run is intersected with each cell's selection.
+// The baseline passes the caller's arguments through (it runs every live test).
+// A narrowed cell carries one anchored -run over its selection. An empty
+// selection drops the cell, and with it the bed restart. A caller -run is
+// intersected with each cell's selection.
 func planSparse(p PlanInput) []Cell {
 	var cells []Cell
 	for _, sc := range sparseOrder {
@@ -229,8 +209,8 @@ func planSparse(p PlanInput) []Cell {
 			parallel = p.ParallelOn
 		}
 		names := sparseSelection(p.Sparse, sc.auth, sc.train)
-		mk := func(args []string, isolated bool) Cell {
-			return Cell{Auth: sc.auth, Train: sc.train, Parallel: parallel, Args: args, Isolated: isolated}
+		mk := func(args []string) Cell {
+			return Cell{Auth: sc.auth, Train: sc.train, Parallel: parallel, Args: args}
 		}
 		baseline := sc.auth == baselineAuth && sc.train == baselineTrain
 		if p.CallerHasRun {
@@ -239,35 +219,24 @@ func planSparse(p PlanInput) []Cell {
 			case err != nil:
 				// An unparsable caller regexp must fail where go test is run, not
 				// vanish from the plan.
-				cells = append(cells, mk(p.Args, false))
+				cells = append(cells, mk(p.Args))
 			case len(sel) > 0:
-				cells = append(cells, mk(narrowArgs(p.Args, sel), false))
+				cells = append(cells, mk(narrowArgs(p.Args, sel)))
 			}
 			continue
 		}
-		var main, isolated []string
-		for _, n := range names {
-			if n == TrainIsolatedRE {
-				isolated = append(isolated, n)
-			} else {
-				main = append(main, n)
-			}
-		}
 		switch {
 		case baseline:
-			cells = append(cells, mk(cat([]string{"-skip", TrainIsolatedRE}, p.Args), false))
-		case len(main) > 0:
-			cells = append(cells, mk(narrowArgs(p.Args, main), false))
-		}
-		if len(isolated) > 0 {
-			cells = append(cells, mk([]string{"-run", isolatedRunArg()}, true))
+			cells = append(cells, mk(p.Args))
+		case len(names) > 0:
+			cells = append(cells, mk(narrowArgs(p.Args, names)))
 		}
 	}
 	return cells
 }
 
 // describePlan is the one-line summary printed before the first leg: the cells in
-// order, with their labels (an isolated cell is marked).
+// order, with their labels.
 func describePlan(cells []Cell) string {
 	if len(cells) == 0 {
 		return "no cells to run"
@@ -275,9 +244,6 @@ func describePlan(cells []Cell) string {
 	parts := make([]string, len(cells))
 	for i, c := range cells {
 		parts[i] = c.Label()
-		if c.Isolated {
-			parts[i] += " (isolated)"
-		}
 	}
 	return fmt.Sprintf("%d cell(s): %s", len(cells), strings.Join(parts, ", "))
 }

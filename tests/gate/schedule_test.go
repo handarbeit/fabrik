@@ -45,9 +45,6 @@ func cellSummary(c Cell) string {
 	for _, a := range c.Args {
 		s += " " + a
 	}
-	if c.Isolated {
-		s += " [isolated]"
-	}
 	return s
 }
 
@@ -61,41 +58,39 @@ func summaries(cells []Cell) []string {
 
 // The leg-shape table: every env / -run combination run.sh's dispatch loop had.
 func TestPlanCells(t *testing.T) {
-	iso := "^(" + TrainIsolatedRE + ")$"
-	skip := "-skip " + TrainIsolatedRE
 	both := []string{"pat", "app"}
 	cases := []struct {
 		name string
 		in   PlanInput
 		want []string
 	}{
-		{"default gate: off, then on split into main + isolated; on uses the tighter cap",
-			PlanInput{AuthModes: []string{"pat"}, Parallel: "4", ParallelOn: "2"},
-			[]string{"pat/off@4", "pat/on@2 " + skip, "pat/on@2 -run " + iso + " [isolated]"}},
+		{"default gate: off, then on; on uses the tighter cap",
+			PlanInput{AuthModes: []string{"pat"}, Parallel: "8", ParallelOn: "4"},
+			[]string{"pat/off@8", "pat/on@4"}},
 		{"default gate runs pat first, then app",
-			PlanInput{AuthModes: both, Parallel: "4", ParallelOn: "2"},
-			[]string{"pat/off@4", "pat/on@2 " + skip, "pat/on@2 -run " + iso + " [isolated]", "app/off@4", "app/on@2 " + skip, "app/on@2 -run " + iso + " [isolated]"}},
-		{"caller passthrough args follow -skip and never reach the isolated leg",
-			PlanInput{AuthModes: []string{"pat"}, Parallel: "4", ParallelOn: "2", Args: []string{"-v"}},
-			[]string{"pat/off@4 -v", "pat/on@2 " + skip + " -v", "pat/on@2 -run " + iso + " [isolated]"}},
-		{"a caller -run: off, then a single on leg, no isolated leg forced",
-			PlanInput{AuthModes: []string{"pat"}, Parallel: "4", ParallelOn: "2", CallerHasRun: true, Args: []string{"-run", "Smoke"}},
-			[]string{"pat/off@4 -run Smoke", "pat/on@2 -run Smoke"}},
+			PlanInput{AuthModes: both, Parallel: "8", ParallelOn: "4"},
+			[]string{"pat/off@8", "pat/on@4", "app/off@8", "app/on@4"}},
+		{"caller passthrough args reach every cell",
+			PlanInput{AuthModes: []string{"pat"}, Parallel: "8", ParallelOn: "4", Args: []string{"-v"}},
+			[]string{"pat/off@8 -v", "pat/on@4 -v"}},
+		{"a caller -run: off, then a single on leg",
+			PlanInput{AuthModes: []string{"pat"}, Parallel: "8", ParallelOn: "4", CallerHasRun: true, Args: []string{"-run", "Smoke"}},
+			[]string{"pat/off@8 -run Smoke", "pat/on@4 -run Smoke"}},
 		{"E2E_TRAIN_MODE=off: one leg at E2E_PARALLEL",
-			PlanInput{AuthModes: []string{"pat"}, TrainMode: "off", Parallel: "4", ParallelOn: "2"},
-			[]string{"pat/off@4"}},
-		{"E2E_TRAIN_MODE=on: main + isolated, both at E2E_PARALLEL (not E2E_PARALLEL_ON)",
-			PlanInput{AuthModes: []string{"pat"}, TrainMode: "on", Parallel: "4", ParallelOn: "2"},
-			[]string{"pat/on@4 " + skip, "pat/on@4 -run " + iso + " [isolated]"}},
+			PlanInput{AuthModes: []string{"pat"}, TrainMode: "off", Parallel: "8", ParallelOn: "4"},
+			[]string{"pat/off@8"}},
+		{"E2E_TRAIN_MODE=on: one leg at E2E_PARALLEL (not E2E_PARALLEL_ON)",
+			PlanInput{AuthModes: []string{"pat"}, TrainMode: "on", Parallel: "8", ParallelOn: "4"},
+			[]string{"pat/on@8"}},
 		{"E2E_TRAIN_MODE=on with a caller -run: a single leg",
-			PlanInput{AuthModes: []string{"pat"}, TrainMode: "on", Parallel: "4", ParallelOn: "2", CallerHasRun: true, Args: []string{"-run=X"}},
-			[]string{"pat/on@4 -run=X"}},
+			PlanInput{AuthModes: []string{"pat"}, TrainMode: "on", Parallel: "8", ParallelOn: "4", CallerHasRun: true, Args: []string{"-run=X"}},
+			[]string{"pat/on@8 -run=X"}},
 		{"an unrecognised forced mode is passed through verbatim (the restart step then rejects it)",
-			PlanInput{AuthModes: []string{"app"}, TrainMode: "maybe", Parallel: "4", ParallelOn: "2"},
-			[]string{"app/maybe@4"}},
+			PlanInput{AuthModes: []string{"app"}, TrainMode: "maybe", Parallel: "8", ParallelOn: "4"},
+			[]string{"app/maybe@8"}},
 		{"E2E_PARALLEL / E2E_PARALLEL_ON are passed through as given",
 			PlanInput{AuthModes: []string{"app"}, Parallel: "1", ParallelOn: "1"},
-			[]string{"app/off@1", "app/on@1 " + skip, "app/on@1 -run " + iso + " [isolated]"}},
+			[]string{"app/off@1", "app/on@1"}},
 	}
 	for _, c := range cases {
 		if got := summaries(PlanCells(c.in)); !reflect.DeepEqual(got, c.want) {

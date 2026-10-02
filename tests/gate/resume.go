@@ -168,8 +168,7 @@ func dedupSorted(s []string) []string {
 // -run, so the caller's selection is INTERSECTED with the uncovered set), minus
 // those already resolved for that leg, become one anchored -run. A cell with
 // nothing left is dropped, so a fully covered leg is skipped — and with it the
-// bed restart. The isolated cell keeps its own, separate regex. A caller's -run
-// can only ever shrink the work; the recorder credits only tests that emit a
+// bed restart. A caller's -run can only ever shrink the work; the recorder credits only tests that emit a
 // terminal event, so nothing outside the selection is recorded.
 //
 // resolved is how many selected pairs were already resolved (for reporting).

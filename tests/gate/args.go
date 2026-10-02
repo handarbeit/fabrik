@@ -36,7 +36,7 @@ func ParseRunArgs(argv []string) RunArgs {
 
 // HasRunFlag reports whether the caller supplied -run/--run (with or without
 // =value). A caller-supplied -run means they are targeting specific scenarios:
-// the reviewer check is skipped and no isolated leg is forced on them.
+// the reviewer check is skipped.
 func HasRunFlag(args []string) bool {
 	for _, a := range args {
 		if a == "-run" || a == "--run" || strings.HasPrefix(a, "-run=") || strings.HasPrefix(a, "--run=") {

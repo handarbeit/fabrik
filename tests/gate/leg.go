@@ -453,7 +453,7 @@ func (g *Gate) probeBudget(ctx context.Context, which, label string) int {
 // scenario can legitimately wait on Claude for extended periods, so silence
 // alone is never treated as a hang, only surfaced so it is never mistaken for
 // progress either. It warns once per window rather than once ever or on every
-// check, so a deliberately idle leg (the isolated runaway-guard scenario) warns
+// check, so a deliberately idle phase (the runaway-guard scenario) warns
 // each window. The signal is the time of the last output write; bash polled the
 // log file's mtime, which is the same thing observed from outside.
 func (g *Gate) watchStall(ctx context.Context, label string, w *suiteWriter) {

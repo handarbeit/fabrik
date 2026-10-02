@@ -49,8 +49,8 @@ func TestSelectedTests(t *testing.T) {
 		want []string
 	}{
 		{"no flags", nil, live},
-		{"skip isolated", []string{"-skip", TrainIsolatedRE}, []string{"TestMergeTrainHappy", "TestSmoke", "TestSwitchTrainMode"}},
-		{"isolated run", []string{"-run", isolatedRunArg()}, []string{"TestMergeTrainRunawayGuardPausesBatch"}},
+		{"skip one", []string{"-skip", "TestMergeTrainRunawayGuardPausesBatch"}, []string{"TestMergeTrainHappy", "TestSmoke", "TestSwitchTrainMode"}},
+		{"anchored run", []string{"-run", "^(TestMergeTrainRunawayGuardPausesBatch)$"}, []string{"TestMergeTrainRunawayGuardPausesBatch"}},
 		{"unanchored run", []string{"-run", "Smoke"}, []string{"TestSmoke"}},
 		{"run=form", []string{"-run=Smoke|Happy"}, []string{"TestMergeTrainHappy", "TestSmoke"}},
 		{"run and skip", []string{"-run", "TestMerge", "-skip", "Runaway"}, []string{"TestMergeTrainHappy"}},
@@ -87,7 +87,7 @@ func TestRequiredTestsUnionsCellsPerLabel(t *testing.T) {
 	if !reflect.DeepEqual(legs, []string{"pat/off", "pat/on"}) {
 		t.Fatalf("legs = %v", legs)
 	}
-	// "on" is two cells (main + isolated) under one label: the union covers every live test.
+	// "on" is one cell: it requires every live test.
 	if !reflect.DeepEqual(req["pat/on"], []string{"TestMergeTrainRunawayGuardPausesBatch", "TestSmoke"}) {
 		t.Errorf("pat/on required = %v", req["pat/on"])
 	}
@@ -190,7 +190,7 @@ func TestResumeCallerRunIntersectsAndKeepsPassthrough(t *testing.T) {
 	}
 }
 
-func TestResumeKeepsIsolatedCellSeparate(t *testing.T) {
+func TestResumeRewritesTheOneCellPerLabel(t *testing.T) {
 	ctx := context.Background()
 	live := []string{"TestMergeTrainRunawayGuardPausesBatch", "TestSmoke", "TestOther"}
 	hashes := map[string]string{}
@@ -201,18 +201,17 @@ func TestResumeKeepsIsolatedCellSeparate(t *testing.T) {
 	l.Append(Record{Test: "TestSmoke", Leg: "pat/on", Cell: "pat-on", Invocation: "i1", Outcome: OutcomePass, Hash: "h"})
 	ev := &Evaluator{Snap: l.Load(), Hashes: hashes, Entries: map[string]registry.Entry{}, States: fakeStates{}}
 	cells := PlanCells(PlanInput{AuthModes: []string{"pat"}, TrainMode: "on", Parallel: "4", ParallelOn: "2"})
-	if len(cells) != 2 {
+	if len(cells) != 1 {
 		t.Fatalf("setup: %v", cells)
 	}
 	out, _, err := ResumeCells(ctx, cells, live, ev)
-	if err != nil || len(out) != 2 {
+	if err != nil || len(out) != 1 {
 		t.Fatal(out, err)
 	}
-	if runArg(out[0]) != "^(TestOther)$" || out[0].Isolated {
-		t.Errorf("main cell = %+v", out[0])
-	}
-	if runArg(out[1]) != "^(TestMergeTrainRunawayGuardPausesBatch)$" || !out[1].Isolated {
-		t.Errorf("isolated cell = %+v", out[1])
+	// The exclusive scenario stays in the same cell's selection; RunLeg's phase
+	// split (phases.go), not the plan, serialises it.
+	if runArg(out[0]) != "^(TestMergeTrainRunawayGuardPausesBatch|TestOther)$" {
+		t.Errorf("cell = %+v", out[0])
 	}
 }
 
