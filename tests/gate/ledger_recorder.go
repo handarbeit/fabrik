@@ -86,9 +86,17 @@ func (r *legRecorder) Observe(e Event) {
 	case "fail":
 		rec.Outcome = OutcomeFail
 	case "skip":
-		rec.Outcome = OutcomeSkip
 		rec.SkipMsg = skipMessage(text)
-		rec.Issues = citedIssues(rec.SkipMsg)
+		if isInconclusiveSkip(text) {
+			// #1973: "the precondition never arose" — uncovered, retried by the
+			// leg, re-run by --resume; never a SKIP (so skip_ok_legs and the skip
+			// classifier never see it) and never a PASS. The reason rides in
+			// SkipMsg.
+			rec.Outcome = OutcomeInconclusive
+		} else {
+			rec.Outcome = OutcomeSkip
+			rec.Issues = citedIssues(rec.SkipMsg)
+		}
 	}
 	if err := r.ledger.Append(rec); err != nil {
 		r.failed++

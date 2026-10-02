@@ -1,0 +1,44 @@
+{"Time":"2026-10-02T01:27:20.24436-04:00","Action":"start","Package":"incfix"}
+{"Time":"2026-10-02T01:27:20.363581-04:00","Action":"run","Package":"incfix","Test":"TestRealPass"}
+{"Time":"2026-10-02T01:27:20.36366-04:00","Action":"output","Package":"incfix","Test":"TestRealPass","Output":"=== RUN   TestRealPass\n"}
+{"Time":"2026-10-02T01:27:20.3637-04:00","Action":"output","Package":"incfix","Test":"TestRealPass","Output":"    x_test.go:5: fine\n"}
+{"Time":"2026-10-02T01:27:20.363717-04:00","Action":"output","Package":"incfix","Test":"TestRealPass","Output":"--- PASS: TestRealPass (0.00s)\n"}
+{"Time":"2026-10-02T01:27:20.363727-04:00","Action":"pass","Package":"incfix","Test":"TestRealPass","Elapsed":0}
+{"Time":"2026-10-02T01:27:20.363743-04:00","Action":"run","Package":"incfix","Test":"TestInconclusiveGuard"}
+{"Time":"2026-10-02T01:27:20.363749-04:00","Action":"output","Package":"incfix","Test":"TestInconclusiveGuard","Output":"=== RUN   TestInconclusiveGuard\n"}
+{"Time":"2026-10-02T01:27:20.363754-04:00","Action":"output","Package":"incfix","Test":"TestInconclusiveGuard","Output":"    x_test.go:8: waiting for the hold line\n"}
+{"Time":"2026-10-02T01:27:20.363761-04:00","Action":"output","Package":"incfix","Test":"TestInconclusiveGuard","Output":"    x_test.go:9: E2E-INCONCLUSIVE: poll boundary straddled the unpause\n"}
+{"Time":"2026-10-02T01:27:20.363772-04:00","Action":"output","Package":"incfix","Test":"TestInconclusiveGuard","Output":"--- SKIP: TestInconclusiveGuard (0.00s)\n"}
+{"Time":"2026-10-02T01:27:20.363776-04:00","Action":"skip","Package":"incfix","Test":"TestInconclusiveGuard","Elapsed":0}
+{"Time":"2026-10-02T01:27:20.36378-04:00","Action":"run","Package":"incfix","Test":"TestOrdinarySkip"}
+{"Time":"2026-10-02T01:27:20.363784-04:00","Action":"output","Package":"incfix","Test":"TestOrdinarySkip","Output":"=== RUN   TestOrdinarySkip\n"}
+{"Time":"2026-10-02T01:27:20.363788-04:00","Action":"output","Package":"incfix","Test":"TestOrdinarySkip","Output":"    x_test.go:12: test bed not present at /nope\n"}
+{"Time":"2026-10-02T01:27:20.363792-04:00","Action":"output","Package":"incfix","Test":"TestOrdinarySkip","Output":"--- SKIP: TestOrdinarySkip (0.00s)\n"}
+{"Time":"2026-10-02T01:27:20.363796-04:00","Action":"skip","Package":"incfix","Test":"TestOrdinarySkip","Elapsed":0}
+{"Time":"2026-10-02T01:27:20.3638-04:00","Action":"run","Package":"incfix","Test":"TestMentionsMarkerButPasses"}
+{"Time":"2026-10-02T01:27:20.363804-04:00","Action":"output","Package":"incfix","Test":"TestMentionsMarkerButPasses","Output":"=== RUN   TestMentionsMarkerButPasses\n"}
+{"Time":"2026-10-02T01:27:20.363807-04:00","Action":"output","Package":"incfix","Test":"TestMentionsMarkerButPasses","Output":"    x_test.go:15: E2E-INCONCLUSIVE: this is only logged, the test then passes\n"}
+{"Time":"2026-10-02T01:27:20.363819-04:00","Action":"output","Package":"incfix","Test":"TestMentionsMarkerButPasses","Output":"--- PASS: TestMentionsMarkerButPasses (0.00s)\n"}
+{"Time":"2026-10-02T01:27:20.363829-04:00","Action":"pass","Package":"incfix","Test":"TestMentionsMarkerButPasses","Elapsed":0}
+{"Time":"2026-10-02T01:27:20.363833-04:00","Action":"run","Package":"incfix","Test":"TestSkipQuotingMarkerMidLine"}
+{"Time":"2026-10-02T01:27:20.363837-04:00","Action":"output","Package":"incfix","Test":"TestSkipQuotingMarkerMidLine","Output":"=== RUN   TestSkipQuotingMarkerMidLine\n"}
+{"Time":"2026-10-02T01:27:20.36384-04:00","Action":"output","Package":"incfix","Test":"TestSkipQuotingMarkerMidLine","Output":"    x_test.go:19: skipped because the previous run said E2E-INCONCLUSIVE: x\n"}
+{"Time":"2026-10-02T01:27:20.363844-04:00","Action":"output","Package":"incfix","Test":"TestSkipQuotingMarkerMidLine","Output":"--- SKIP: TestSkipQuotingMarkerMidLine (0.00s)\n"}
+{"Time":"2026-10-02T01:27:20.363853-04:00","Action":"skip","Package":"incfix","Test":"TestSkipQuotingMarkerMidLine","Elapsed":0}
+{"Time":"2026-10-02T01:27:20.363857-04:00","Action":"run","Package":"incfix","Test":"TestFailsAfterGuardWouldHave"}
+{"Time":"2026-10-02T01:27:20.363861-04:00","Action":"output","Package":"incfix","Test":"TestFailsAfterGuardWouldHave","Output":"=== RUN   TestFailsAfterGuardWouldHave\n"}
+{"Time":"2026-10-02T01:27:20.363886-04:00","Action":"output","Package":"incfix","Test":"TestFailsAfterGuardWouldHave","Output":"    x_test.go:22: engine did the wrong thing\n"}
+{"Time":"2026-10-02T01:27:20.363891-04:00","Action":"output","Package":"incfix","Test":"TestFailsAfterGuardWouldHave","Output":"--- FAIL: TestFailsAfterGuardWouldHave (0.00s)\n"}
+{"Time":"2026-10-02T01:27:20.363894-04:00","Action":"fail","Package":"incfix","Test":"TestFailsAfterGuardWouldHave","Elapsed":0}
+{"Time":"2026-10-02T01:27:20.363897-04:00","Action":"run","Package":"incfix","Test":"TestSubtestMarker"}
+{"Time":"2026-10-02T01:27:20.3639-04:00","Action":"output","Package":"incfix","Test":"TestSubtestMarker","Output":"=== RUN   TestSubtestMarker\n"}
+{"Time":"2026-10-02T01:27:20.363902-04:00","Action":"run","Package":"incfix","Test":"TestSubtestMarker/child"}
+{"Time":"2026-10-02T01:27:20.363912-04:00","Action":"output","Package":"incfix","Test":"TestSubtestMarker/child","Output":"=== RUN   TestSubtestMarker/child\n"}
+{"Time":"2026-10-02T01:27:20.363921-04:00","Action":"output","Package":"incfix","Test":"TestSubtestMarker/child","Output":"    x_test.go:25: E2E-INCONCLUSIVE: from a subtest\n"}
+{"Time":"2026-10-02T01:27:20.363925-04:00","Action":"output","Package":"incfix","Test":"TestSubtestMarker/child","Output":"--- SKIP: TestSubtestMarker/child (0.00s)\n"}
+{"Time":"2026-10-02T01:27:20.363928-04:00","Action":"skip","Package":"incfix","Test":"TestSubtestMarker/child","Elapsed":0}
+{"Time":"2026-10-02T01:27:20.363932-04:00","Action":"output","Package":"incfix","Test":"TestSubtestMarker","Output":"--- PASS: TestSubtestMarker (0.00s)\n"}
+{"Time":"2026-10-02T01:27:20.363935-04:00","Action":"pass","Package":"incfix","Test":"TestSubtestMarker","Elapsed":0}
+{"Time":"2026-10-02T01:27:20.363938-04:00","Action":"output","Package":"incfix","Output":"FAIL\n"}
+{"Time":"2026-10-02T01:27:20.364277-04:00","Action":"output","Package":"incfix","Output":"FAIL\tincfix\t0.120s\n"}
+{"Time":"2026-10-02T01:27:20.36431-04:00","Action":"fail","Package":"incfix","Elapsed":0.12}

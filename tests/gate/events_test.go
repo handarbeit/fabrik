@@ -128,3 +128,34 @@ func TestFormatTimingsAlignsLikeColumn(t *testing.T) {
 		t.Error("an empty table prints nothing")
 	}
 }
+
+// inconclusive-stream.json is a REAL `go test -json` recording (a scratch
+// package of tests ending each way), not a hand-written stream: a marked skip,
+// an ordinary skip, a test that only LOGS the marker and passes, a skip whose
+// message mentions the marker mid-line, a failure, and a subtest that skips with
+// the marker (#1973).
+func TestClassifyInconclusiveIsDistinctFromSkipAndFail(t *testing.T) {
+	c := Classify(readStream(t, "inconclusive-stream.json"))
+	eq := func(name string, got []string, want ...string) {
+		t.Helper()
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Errorf("%s = %v, want %v", name, got, want)
+		}
+	}
+	eq("inconclusive", c.Inconclusive, "TestInconclusiveGuard")
+	eq("skip", c.Skip, "TestOrdinarySkip", "TestSkipQuotingMarkerMidLine")
+	eq("fail", c.Fail, "TestFailsAfterGuardWouldHave")
+	// A test that merely logs the marker and passes is a pass; a subtest's marker
+	// is invisible by design (the helper refuses to run in a subtest).
+	eq("pass", c.Pass, "TestMentionsMarkerButPasses", "TestRealPass", "TestSubtestMarker")
+}
+
+func TestReportShowsInconclusiveLineOnlyWhenPresent(t *testing.T) {
+	with := Classify(readStream(t, "inconclusive-stream.json")).Report()
+	if !strings.Contains(with, "completed - inconclusive (1): TestInconclusiveGuard\n") {
+		t.Errorf("report lacks the inconclusive line:\n%s", with)
+	}
+	if without := Classify(readStream(t, "leg-stream.json")).Report(); strings.Contains(without, "inconclusive") {
+		t.Errorf("a leg with no inconclusive tests must read as before:\n%s", without)
+	}
+}

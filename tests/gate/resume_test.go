@@ -236,3 +236,28 @@ func TestAnchoredRunRegexLongListAndGuard(t *testing.T) {
 		t.Errorf("an oversized regex must be a loud error, got %v", err)
 	}
 }
+
+// #1973: an INCONCLUSIVE record is uncovered and is re-run by --resume; it never
+// satisfies the gate, and the report names it as inconclusive rather than failed.
+func TestResumeReRunsInconclusiveAndNeverCountsItCovered(t *testing.T) {
+	ctx := context.Background()
+	l := testLedger(t)
+	for _, n := range []string{"TestAlpha", "TestBravo"} {
+		l.Append(Record{Test: n, Leg: "app/off", Cell: "app-off", Invocation: "i1", Hash: "hash-" + n, Head: "head", Outcome: OutcomePass})
+	}
+	l.Append(Record{Test: "TestCharlie", Leg: "app/off", Cell: "app-off", Invocation: "i1", Hash: "hash-TestCharlie", Head: "head", Outcome: OutcomeInconclusive, SkipMsg: "E2E-INCONCLUSIVE: straddled"})
+	live := []string{"TestAlpha", "TestBravo", "TestCharlie"}
+	ev := evaluatorFor(l, fakeStates{})
+	out, resolved, err := ResumeCells(ctx, []Cell{appOff}, live, ev)
+	if err != nil || resolved != 2 || len(out) != 1 || runArg(out[0]) != "^(TestCharlie)$" {
+		t.Fatalf("resume must re-run exactly the inconclusive test: %v resolved=%d err=%v", out, resolved, err)
+	}
+	legs, req, _ := RequiredTests(live, []Cell{appOff})
+	rep := BuildReport(ctx, ev, "sha", legs, req)
+	if rep.Complete() {
+		t.Fatalf("an INCONCLUSIVE test must leave the gate incomplete:\n%s", rep.Format())
+	}
+	if !strings.Contains(rep.Format(), "inconclusive") {
+		t.Errorf("the summary must name the inconclusive count:\n%s", rep.Format())
+	}
+}

@@ -169,3 +169,64 @@ func TestSkipMessageAndCitedIssues(t *testing.T) {
 		t.Error("isolated cells need their own name")
 	}
 }
+
+// A marked skip is recorded as INCONCLUSIVE (never SKIP, never PASS); an
+// ordinary skip and a test that merely logs the marker are unaffected; and a
+// later retry outcome supersedes it (append-only, last record per (leg, test)).
+func TestRecorderRecordsInconclusiveDistinctly(t *testing.T) {
+	l := testLedger(t)
+	live := map[string]bool{"TestRealPass": true, "TestInconclusiveGuard": true, "TestOrdinarySkip": true,
+		"TestMentionsMarkerButPasses": true, "TestSkipQuotingMarkerMidLine": true, "TestFailsAfterGuardWouldHave": true}
+	hashes := map[string]string{}
+	for n := range live {
+		hashes[n] = "h-" + n
+	}
+	rec := newLegRecorder(l, appOff, "i1", "head", hashes, live, func(f string, a ...any) { t.Errorf("recorder warning: "+f, a...) })
+	for _, e := range readStream(t, "inconclusive-stream.json") {
+		rec.Observe(e)
+	}
+	s := l.Load()
+	for test, want := range map[string]Outcome{
+		"TestInconclusiveGuard":        OutcomeInconclusive,
+		"TestOrdinarySkip":             OutcomeSkip,
+		"TestSkipQuotingMarkerMidLine": OutcomeSkip,
+		"TestMentionsMarkerButPasses":  OutcomePass,
+		"TestFailsAfterGuardWouldHave": OutcomeFail,
+	} {
+		r, ok := s.Record("app/off", test)
+		if !ok || r.Outcome != want {
+			t.Errorf("%s = %+v (found %v), want %s", test, r, ok, want)
+		}
+	}
+	r, _ := s.Record("app/off", "TestInconclusiveGuard")
+	if !strings.Contains(r.SkipMsg, "poll boundary straddled the unpause") {
+		t.Errorf("the reason must ride in SkipMsg, got %q", r.SkipMsg)
+	}
+	if len(r.Issues) != 0 {
+		t.Errorf("an inconclusive record is not a skip citing issues: %v", r.Issues)
+	}
+	if s.Covered("app/off", "TestInconclusiveGuard", "h-TestInconclusiveGuard") {
+		t.Error("INCONCLUSIVE must never count as coverage")
+	}
+}
+
+func TestInconclusiveSupersededByRetryOutcome(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		retry   Outcome
+		covered bool
+	}{{"pass", OutcomePass, true}, {"fail", OutcomeFail, false}, {"inconclusive again", OutcomeInconclusive, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := testLedger(t)
+			l.Append(Record{Test: "TestA", Leg: "app/off", Cell: "app-off", Invocation: "i1", Hash: "h", Head: "head", Outcome: OutcomeInconclusive})
+			l.Append(Record{Test: "TestA", Leg: "app/off", Cell: "app-off", Invocation: "i1", Hash: "h", Head: "head", Outcome: tc.retry})
+			s := l.Load()
+			if r, _ := s.Record("app/off", "TestA"); r.Outcome != tc.retry {
+				t.Fatalf("latest = %s, want %s", r.Outcome, tc.retry)
+			}
+			if got := s.Covered("app/off", "TestA", "h"); got != tc.covered {
+				t.Errorf("covered = %v, want %v", got, tc.covered)
+			}
+		})
+	}
+}
