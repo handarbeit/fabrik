@@ -5,8 +5,6 @@ package engine
 import (
 	"os"
 	"os/exec"
-	"strconv"
-	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -20,17 +18,7 @@ import (
 func TestWebhookKillFn_StaleCurrentCmdSendsNothing(t *testing.T) {
 	wm, _ := newTestWebhookManager(t)
 
-	starter := exec.Command("sh", "-c", "sleep 60 >/dev/null 2>&1 & echo $!")
-	setCmdProcAttr(starter)
-	out, err := starter.Output()
-	if err != nil {
-		t.Fatal(err)
-	}
-	bystander, err := strconv.Atoi(strings.TrimSpace(string(out)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = syscall.Kill(bystander, syscall.SIGKILL) })
+	bystander := startForeignGroupLeader(t)
 
 	wm.killFn(&exec.Cmd{Process: &os.Process{Pid: bystander}})
 	time.Sleep(200 * time.Millisecond)

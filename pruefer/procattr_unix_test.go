@@ -327,20 +327,10 @@ func TestKillProcGroup_PostExitGrandchildIsKilled(t *testing.T) {
 	}
 }
 
-// A stored PID whose live holder does not lead its own group — the shape of a
+// A stored PID whose live holder leads its own group but is not ours — the shape of a
 // recycled PID — must not be group-signalled (#1957 R1).
 func TestKillProcGroup_StaleStoredPIDIsSkipped(t *testing.T) {
-	starter := exec.Command("sh", "-c", "sleep 60 >/dev/null 2>&1 & echo $!")
-	setCmdProcAttr(starter)
-	out, err := starter.Output()
-	if err != nil {
-		t.Fatal(err)
-	}
-	bystander, err := strconv.Atoi(strings.TrimSpace(string(out)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = syscall.Kill(bystander, syscall.SIGKILL) })
+	bystander := startForeignGroupLeader(t)
 
 	// A cmd whose recorded PID is now held by an unrelated live process.
 	stale := &exec.Cmd{Process: &os.Process{Pid: bystander}}
@@ -357,4 +347,28 @@ func TestKillProcGroup_CatastrophicPIDsRefused(t *testing.T) {
 		// is the assertion for the own-group case).
 		killProcGroup(&exec.Cmd{Process: &os.Process{Pid: pid}}, 42, "test")
 	}
+}
+
+// startForeignGroupLeader returns the PID of a live process that leads its own
+// process group but is neither our child nor recorded anywhere — the shape of a
+// recycled stored PID. `set -m` gives the background job its own group, and the
+// starter shell is reaped by Output(), so the bystander is reparented. Without
+// the ownership check, kill(-pid) would hit it.
+func startForeignGroupLeader(t *testing.T) int {
+	t.Helper()
+	starter := exec.Command("sh", "-c", "set -m; sleep 60 >/dev/null 2>&1 & echo $!")
+	setCmdProcAttr(starter)
+	out, err := starter.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		t.Fatalf("bystander pid from %q: %v", out, err)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+	if pgid, err := syscall.Getpgid(pid); err != nil || pgid != pid {
+		t.Skipf("fixture: bystander %d does not lead its own group (pgid=%d, err=%v)", pid, pgid, err)
+	}
+	return pid
 }
