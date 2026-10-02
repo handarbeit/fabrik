@@ -327,8 +327,10 @@ func seedLandingCandidate(t *testing.T, env *Env, repo, baseBranch, marker, path
 	uPath := uniqueMemberPath(path, issueNum)
 	prNum = CreateMemberPR(t, env, repo, baseBranch, branch, uPath,
 		fmt.Sprintf("# e2e comment-landing marker\n\nmarker=%s\n", marker), title, issueNum)
-	LinkedPRNumber(t, env, repo, issueNum)
+	AwaitPRForBranchVisible(t, env, repo, issueNum, awaitSeedTimeout)
 	AddLabel(t, env, repo, issueNum, "stage:Validate:complete")
+	AwaitLabelVisible(t, env, repo, issueNum, "stage:Validate:complete", awaitSeedTimeout)
+	AwaitBoardItemVisible(t, env, repo, issueNum, awaitSeedTimeout)
 	t.Logf("seeded landing candidate %s: issue #%d, PR #%d, path %s, stage:Validate:complete, no Status yet", marker, issueNum, prNum, uPath)
 	return issueNum, prNum, itemID
 }

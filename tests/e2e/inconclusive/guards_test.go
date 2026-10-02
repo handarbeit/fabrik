@@ -5,6 +5,7 @@ import (
 	"go/parser"
 	"go/token"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -23,7 +24,14 @@ import (
 //
 // A live neutralisation check is recorded manually in the PR.
 
-var inconclusiveHelpers = map[string]bool{"Inconclusive": true, "waitForLogMatchInconclusive": true, "failOrInconclusive": true}
+// The awaitVisible family (#1974) ends a timed-out wait through Inconclusive, so
+// its wrappers carry the same constraints as Inconclusive itself.
+var inconclusiveHelpers = map[string]bool{
+	"Inconclusive": true, "waitForLogMatchInconclusive": true, "failOrInconclusive": true,
+	"finishAwait": true, "AwaitBoardItemVisible": true, "AwaitStatusVisible": true,
+	"AwaitClosingLinkage": true, "AwaitPRMergeableComputed": true, "AwaitPRMergeableSettled": true,
+	"AwaitLabelVisible": true, "AwaitPRForBranchVisible": true,
+}
 
 var namedGuards = []struct{ file, test string }{
 	{"mergetrain_batchcap_test.go", "TestMergeTrainQueuedDeeperThanBatchCap"},
@@ -132,5 +140,58 @@ func TestInconclusiveIsNeverCalledFromAGoroutineOrSubtest(t *testing.T) {
 			})
 		}
 		walk(f, "")
+	}
+}
+
+// seedPaths are the harness seed functions that hand an item to the engine. Since
+// #1974 each waits for GitHub to reflect its writes through the awaitVisible
+// family — and carries no wait loop of its own.
+var seedPaths = []struct{ file, fn string }{
+	{"mergetrain_helpers.go", "createMemberPR"},
+	{"mergetrain_helpers.go", "QueueMember"},
+	{"mergetrain_helpers.go", "QueueMemberOnBase"},
+	{"mergetrain_helpers.go", "QueueMemberPaused"},
+	{"mergetrain_helpers.go", "PrepareMemberExactPath"},
+	{"review_authority_helpers.go", "seedReviewGateItemImpl"},
+	{"comment_landing_helpers.go", "seedLandingCandidate"},
+}
+
+func TestSeedPathsUseTheAwaitFamilyAndKeepNoWaitLoopOfTheirOwn(t *testing.T) {
+	for _, sp := range seedPaths {
+		_, f := parseE2E(t, sp.file)
+		fd := findFunc(f, sp.fn)
+		if fd == nil {
+			t.Fatalf("%s: %s not found", sp.file, sp.fn)
+		}
+		var awaits int
+		ast.Inspect(fd.Body, func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.ForStmt, *ast.RangeStmt:
+				t.Errorf("%s: seed path %s has its own loop — waits go through the awaitVisible family (tests/e2e/awaitvisible)", sp.file, sp.fn)
+			case *ast.CallExpr:
+				switch name := calleeName(x); {
+				case name == "Sleep" || name == "pollSleep":
+					t.Errorf("%s: seed path %s sleeps itself — waits go through the awaitVisible family", sp.file, sp.fn)
+				case inconclusiveHelpers[name] && strings.HasPrefix(name, "Await"):
+					awaits++
+				}
+			}
+			return true
+		})
+		if awaits == 0 {
+			t.Errorf("%s: seed path %s never awaits visibility of its writes through the awaitVisible family", sp.file, sp.fn)
+		}
+	}
+}
+
+// The one-off waits #1974 folded into the family must not creep back as parallel copies.
+func TestFoldedOneOffWaitsAreGone(t *testing.T) {
+	for _, file := range []string{"harness.go", "review_authority_helpers.go", "mergetrain_helpers.go"} {
+		_, f := parseE2E(t, file)
+		for _, gone := range []string{"waitForClosingLinkage", "WaitForPRMergeableSettled"} {
+			if findFunc(f, gone) != nil {
+				t.Errorf("%s: %s is back — use the awaitVisible family (AwaitClosingLinkage / AwaitPRMergeableSettled)", file, gone)
+			}
+		}
 	}
 }

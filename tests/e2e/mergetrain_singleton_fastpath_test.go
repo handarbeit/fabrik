@@ -99,6 +99,7 @@ func TestMergeTrainSingletonFastPathLandsExactlyOnce(t *testing.T) {
 	}
 	t.Logf("member PR #%d is fast-path eligible (check runs %v, mergeable_state %q); queuing issue #%d", pr, conclusions, mergeState, issue)
 	SetIssueStatus(t, env, itemID, "Queued")
+	AwaitStatusVisible(t, env, env.RepoAlpha, issue, "Queued", awaitSeedTimeout)
 
 	// The fast path, not the trial path, must land it.
 	taken := waitForLogLineOrFail(t, env,

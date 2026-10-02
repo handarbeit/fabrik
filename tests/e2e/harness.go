@@ -1785,36 +1785,6 @@ func tryPRMergeableState(env *Env, repo string, prNumber int) (string, error) {
 	return strings.TrimSpace(out), nil
 }
 
-// WaitForPRMergeableSettled blocks until GitHub has computed the PR's
-// mergeability and it is one the engine's merge gate can clear on: "clean", or
-// "unstable" (the gate then classifies the individual checks). A scenario that
-// needs the engine's landing decision to run on its first look at an item calls
-// this before exposing the item: while the state is "unknown" (still computing)
-// the merge gate claims the item and defers, so the landing decision never runs
-// in that poll. "blocked" can still clear (CI or reviews settling) and is waited
-// out. "dirty" and "behind" will not resolve by themselves in a scenario, so
-// they fail immediately instead of burning the timeout. This narrows the window
-// in which a concurrent merge can move the base; it does not close it.
-func WaitForPRMergeableSettled(t *testing.T, env *Env, repo string, prNumber int, timeout time.Duration) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	last := ""
-	for time.Now().Before(deadline) {
-		state, err := tryPRMergeableState(env, repo, prNumber)
-		if err == nil {
-			last = state
-			switch state {
-			case "clean", "unstable":
-				return
-			case "dirty", "behind":
-				t.Fatalf("PR %s#%d mergeable_state is %q — it will not settle by itself; the scenario cannot place its item", repo, prNumber, state)
-			}
-		}
-		time.Sleep(10 * time.Second)
-	}
-	t.Fatalf("PR %s#%d mergeable_state never settled to clean/unstable within %s (last %q)", repo, prNumber, timeout, last)
-}
-
 // PRCheckRunConclusions returns the check-run conclusions for the PR's head SHA
 // (in-progress runs appear as "pending"). Fails the test on error.
 func PRCheckRunConclusions(t *testing.T, env *Env, repo string, prNumber int) []string {

@@ -134,7 +134,7 @@ func createMemberPR(t *testing.T, env *Env, repo, baseBranch, branch, path, cont
 	// (#1962): 0.0.83 gate run 13 lost TestExpectedReviewers* (review-gate seed)
 	// and TestQueuedMemberCommentEjection (PrepareMemberExactPath) to it.
 	if baseBranch == "" || baseBranch == "main" {
-		waitForClosingLinkage(t, env, repo, issueNum, prNum)
+		AwaitClosingLinkage(t, env, repo, issueNum, prNum, awaitSeedTimeout)
 	}
 	return prNum
 }
@@ -219,10 +219,11 @@ func QueueMember(t *testing.T, env *Env, repo, baseBranch, marker, path, content
 	prNum := CreateMemberPR(t, env, repo, baseBranch, branch, uPath, content, title, num)
 	// Confirm the PR is resolvable by that branch (mirrors the engine's resolver)
 	// BEFORE placing the item in Queued, so the train's first poll can fetch it.
-	LinkedPRNumber(t, env, repo, num)
+	AwaitPRForBranchVisible(t, env, repo, num, awaitSeedTimeout)
 	// Placing directly in Queued: the train is column-driven, so this is a valid
 	// member without running the full pipeline.
 	SetIssueStatus(t, env, itemID, "Queued")
+	AwaitStatusVisible(t, env, repo, num, "Queued", awaitSeedTimeout)
 	t.Logf("queued member: issue #%d, PR #%d, at Status=Queued", num, prNum)
 	return num, prNum
 }
@@ -248,7 +249,8 @@ func PrepareMemberExactPath(t *testing.T, env *Env, repo, baseBranch, marker, pa
 	itemID = AddIssueToProject(t, env, repo, issueNum)
 	branch := fmt.Sprintf("fabrik/issue-%d", issueNum)
 	prNum = CreateMemberPR(t, env, repo, baseBranch, branch, path, content, title, issueNum)
-	LinkedPRNumber(t, env, repo, issueNum)
+	AwaitPRForBranchVisible(t, env, repo, issueNum, awaitSeedTimeout)
+	AwaitBoardItemVisible(t, env, repo, issueNum, awaitSeedTimeout)
 	t.Logf("prepared member %s: issue #%d, PR #%d, path %s (not yet Queued)", marker, issueNum, prNum, path)
 	return issueNum, prNum, itemID
 }
@@ -354,8 +356,9 @@ func QueueMemberOnBase(t *testing.T, env *Env, repo, baseBranch, marker, path, c
 	uPath := uniqueMemberPath(path, num)
 	branch := fmt.Sprintf("fabrik/issue-%d", num)
 	prNum := CreateMemberPR(t, env, repo, baseBranch, branch, uPath, content, title, num)
-	LinkedPRNumber(t, env, repo, num)
+	AwaitPRForBranchVisible(t, env, repo, num, awaitSeedTimeout)
 	SetIssueStatus(t, env, itemID, "Queued")
+	AwaitStatusVisible(t, env, repo, num, "Queued", awaitSeedTimeout)
 	t.Logf("queued member on base %q: issue #%d (label %s), PR #%d, at Status=Queued", baseBranch, num, baseLabel, prNum)
 	return num, prNum
 }
@@ -691,8 +694,9 @@ func QueueMemberPaused(t *testing.T, env *Env, repo, baseBranch, marker, path, c
 	uPath := uniqueMemberPath(path, num)
 	branch := fmt.Sprintf("fabrik/issue-%d", num)
 	prNum := CreateMemberPR(t, env, repo, baseBranch, branch, uPath, content, title, num)
-	LinkedPRNumber(t, env, repo, num)
+	AwaitPRForBranchVisible(t, env, repo, num, awaitSeedTimeout)
 	SetIssueStatus(t, env, itemID, "Queued")
+	AwaitStatusVisible(t, env, repo, num, "Queued", awaitSeedTimeout)
 	t.Logf("queued PAUSED member: issue #%d, PR #%d, at Status=Queued", num, prNum)
 	return num, prNum
 }

@@ -128,6 +128,11 @@ func TestMergeTrainConflictBisectPrefixRerere(t *testing.T) {
 	}{{aIssue, aItem}, {bIssue, bItem}, {cIssue, cItem}, {pIssue, pItem}} {
 		SetIssueStatus(t, env, m.item, "Queued")
 	}
+	// Only after every member is placed (the placement above stays back to back):
+	// confirm the board listing shows each in Queued, as the train worker will read it.
+	for _, m := range []int{aIssue, bIssue, cIssue, pIssue} {
+		AwaitStatusVisible(t, env, repo, m, "Queued", awaitSeedTimeout)
+	}
 	t.Logf("queued A=#%d B=#%d C=#%d P=#%d (shared path %s); verifying batch composition", aIssue, bIssue, cIssue, pIssue, sharedPath)
 
 	// The batch must be exactly [A,B,C,P] in that order.

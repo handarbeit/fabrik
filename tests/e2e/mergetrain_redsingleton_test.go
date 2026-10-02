@@ -80,6 +80,7 @@ func TestMergeTrainRedSingletonReroutesOffQueued(t *testing.T) {
 	AdvanceBaseBranch(t, env, env.RepoAlpha, base,
 		fmt.Sprintf("e2e/train/entries/redsingleton-basebump-%s.txt", stamp), "base bump for the red-singleton member\n")
 	SetIssueStatus(t, env, itemID, "Queued")
+	AwaitStatusVisible(t, env, env.RepoAlpha, issue, "Queued", awaitSeedTimeout)
 	t.Logf("queued single poison member (issue #%d); awaiting red-singleton disposition", issue)
 
 	// The top-level arity guard's own log line — proves bisection was never reached.

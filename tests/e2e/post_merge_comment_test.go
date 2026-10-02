@@ -68,10 +68,11 @@ func TestPostMergeCommentNotApplied(t *testing.T) {
 	// No closing keyword by design: the issue must stay open after the merge.
 	prBody := "e2e post-merge comment guard scenario member PR. Deliberately carries no closing keyword, so merging it leaves the issue open."
 	pr := createMemberPRBody(t, env, repo, base, branch, path, "# e2e post-merge comment marker\n", title, prBody, issue, false)
-	LinkedPRNumber(t, env, repo, issue)
+	AwaitPRForBranchVisible(t, env, repo, issue, awaitSeedTimeout)
 
 	AddLabel(t, env, repo, issue, "stage:Implement:complete")
 	SetIssueStatus(t, env, itemID, "Implement")
+	AwaitStatusVisible(t, env, repo, issue, "Implement", awaitSeedTimeout)
 	MergePR(t, env, repo, pr) // --admin: does not wait for slow-gate
 	t.Logf("parked #%d at Implement (stage:Implement:complete), merged PR #%d without a closing keyword", issue, pr)
 
