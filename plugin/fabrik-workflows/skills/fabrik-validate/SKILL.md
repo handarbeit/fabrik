@@ -56,7 +56,7 @@ Read these files before starting validation. The spec in `.fabrik-context/issue.
 If the rebase produces conflicts, resolve them conservatively:
 
 - **Never drop code from the base branch.** Code on the base was merged from other PRs and must be preserved. Your branch adds to the base, it doesn't replace it.
-- **After resolving conflicts, run `go build ./...` immediately, then the tests for the packages the conflicts touched.** A rebase moves HEAD, so the CI-green skip rule under "Test suite" no longer applies to the rebased head; in a CI-gated stage (`ci_gated: true` in `.fabrik-context/ci-status.md`) the engine's CI gate covers the full suite on the pushed head, otherwise run `go test ./...` in full. If anything fails, the resolution was wrong — fix it before proceeding with validation.
+- **After resolving conflicts, run `go build ./...` immediately, then the tests for the packages the conflicts touched.** A rebase moves HEAD, so the CI-green skip rule under "Skipping a redundant full-suite run" no longer applies to the rebased head; in a CI-gated stage (`ci_gated: true` in `.fabrik-context/ci-status.md`) the engine's CI gate covers the full suite on the pushed head, otherwise run `go test ./...` in full. If anything fails, the resolution was wrong — fix it before proceeding with validation.
 - **Check for missing files.** Run `git diff origin/<base-branch>..HEAD --name-only` and verify no files from the base were accidentally deleted. New files added to the base (source, tests, subcommands) should all be present.
 - **If unsure about a conflict, abort the rebase** (`git rebase --abort`) and do NOT signal completion. Describe the conflict and let the human resolve it.
 

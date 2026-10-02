@@ -192,7 +192,7 @@ Commit after each fix, not in bulk. This makes it easy to review your review.
 
 ### Push and verify
 
-### Skipping a redundant full-suite run — `.fabrik-context/ci-status.md`
+#### Skipping a redundant full-suite run — `.fabrik-context/ci-status.md`
 
 When the item has a linked PR, the engine writes `.fabrik-context/ci-status.md` before this invocation: the PR number, `head_sha` (the PR head), `verdict` (`green`, `red`, `pending`, `none` or `unknown`), `ci_gated` (`true` when this stage waits for CI) and `written_at`. CI has already run the whole suite on `head_sha` when the verdict is `green`, so rerunning it locally on the same commit repeats work CI did.
 
