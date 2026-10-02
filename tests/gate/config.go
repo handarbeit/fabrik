@@ -107,6 +107,15 @@ type Config struct {
 	// The INCONCLUSIVE outcome (#1973, ADR-1973).
 	InconclusiveRetries int // E2E_INCONCLUSIVE_RETRIES: in-leg re-runs of the inconclusive tests (default 2; 0 disables)
 	InconclusiveWarn    int // E2E_INCONCLUSIVE_WARN: a leg with MORE inconclusives than this warns, pointing at #1974 (default 3)
+
+	// The environment probes (#1974, ADR-1974). A zero threshold disables that
+	// probe, so a Config built by hand (the tests') probes nothing.
+	LagProbeThreshold  time.Duration // E2E_LAG_PROBE_THRESHOLD (secs): board-add→listing lag above which preflight waits (default 30s)
+	LoadProbeFactor    float64       // E2E_LOAD_PROBE_FACTOR: 1-minute load threshold as a multiple of the CPU count (default 2)
+	LoadProbeThreshold float64       // E2E_LOAD_PROBE_THRESHOLD: an absolute 1-minute load threshold, overriding the factor (0 = unset)
+	ProbeWaitMax       time.Duration // E2E_PROBE_WAIT_MAX (secs): bound on each probe's wait-and-re-probe loop (default 10m)
+	ProbeInterval      time.Duration // E2E_PROBE_INTERVAL (secs): pause between re-probes (default 30s)
+	LagPollInterval    time.Duration // how often the lag probe re-reads the board listing within one measurement (3s)
 }
 
 // LoadConfig resolves a Config from getenv. repoRoot is the git toplevel the
@@ -140,8 +149,26 @@ func LoadConfig(getenv func(string) string, repoRoot string) (Config, error) {
 
 		InconclusiveRetries: 2,
 		InconclusiveWarn:    3,
+
+		LoadProbeFactor: 2,
+		LagPollInterval: 3 * time.Second,
 	}
 	var err error
+	if c.LagProbeThreshold, err = secsEnv(getenv, "E2E_LAG_PROBE_THRESHOLD", 30); err != nil {
+		return c, err
+	}
+	if c.ProbeWaitMax, err = secsEnv(getenv, "E2E_PROBE_WAIT_MAX", 600); err != nil {
+		return c, err
+	}
+	if c.ProbeInterval, err = secsEnv(getenv, "E2E_PROBE_INTERVAL", 30); err != nil {
+		return c, err
+	}
+	if c.LoadProbeFactor, err = floatEnv(getenv, "E2E_LOAD_PROBE_FACTOR", c.LoadProbeFactor); err != nil {
+		return c, err
+	}
+	if c.LoadProbeThreshold, err = floatEnv(getenv, "E2E_LOAD_PROBE_THRESHOLD", 0); err != nil {
+		return c, err
+	}
 	if c.InconclusiveRetries, err = countEnv(getenv, "E2E_INCONCLUSIVE_RETRIES", c.InconclusiveRetries); err != nil {
 		return c, err
 	}
@@ -193,6 +220,20 @@ func countEnv(getenv func(string) string, key string, def int) (int, error) {
 		return 0, fmt.Errorf("%s=%q is not a non-negative integer", key, v)
 	}
 	return n, nil
+}
+
+// floatEnv parses a non-negative decimal env var; unset keeps def. Garbage is a
+// hard error, like the other tunables.
+func floatEnv(getenv func(string) string, key string, def float64) (float64, error) {
+	v := strings.TrimSpace(getenv(key))
+	if v == "" {
+		return def, nil
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil || f < 0 || f != f {
+		return 0, fmt.Errorf("%s=%q is not a non-negative number", key, v)
+	}
+	return f, nil
 }
 
 // secsEnv parses an integer env var as a count of seconds (bash did integer

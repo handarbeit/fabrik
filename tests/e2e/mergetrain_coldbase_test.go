@@ -175,6 +175,19 @@ func TestMergeTrainColdCacheBaseMember(t *testing.T) {
 	SetIssueStatus(t, env, primerItem, "Specify")
 	t.Logf("seeded while bed down: members %v on base %q, primer #%d blocked by #%d", members, branch, primer, blocker)
 
+	// The restart's bootstrap board fetch lists the ProjectV2 items. Until that
+	// listing shows every seeded member in Queued (and the primer), the fetch can
+	// miss them and the engine then DISCOVERS them as new items and deep-fetches
+	// them at once — the cold-cache state this scenario targets never exists (0.0.83
+	// gate, 18:45:59Z: the listing lagged the adds). QueueMemberOnBase already
+	// awaited each member; re-confirm every one together, right before the start,
+	// plus the primer, so the scenario starts cold only when the listing agrees.
+	// Only a timeout here is Inconclusive (#1973, #1974); the assertions below are untouched.
+	for _, n := range members {
+		AwaitStatusVisible(t, env, repo, n, "Queued", awaitSeedTimeout)
+	}
+	AwaitStatusVisible(t, env, repo, primer, "Specify", awaitSeedTimeout)
+
 	// --- restart: first poll of the fresh process is the first batch opportunity ---
 	StartFabrikTestBed(t, env)
 	// Run() truncates fabrik.log on every start (O_TRUNC), so a pre-restart

@@ -112,6 +112,7 @@ func TestQueuedMemberCommentEjection(t *testing.T) {
 		fmt.Sprintf("e2e/train/entries/comment-eject-basebump-%s.txt", stamp), "base bump for the comment-eject occupant\n")
 	offset := LogOffset(t, env)
 	SetIssueStatus(t, env, m1Item, "Queued")
+	AwaitBoardItemVisible(t, env, repo, m1, awaitSeedTimeout)
 	t.Logf("occupant M1 = #%d (PR #%d), member under test M2 = #%d (PR #%d)", m1, m1PR, m2, m2PR)
 
 	fastPathTaken := fmt.Sprintf("singleton fast path taken for #%d:", m1)
@@ -128,6 +129,7 @@ func TestQueuedMemberCommentEjection(t *testing.T) {
 
 	// --- Queue M2 and post the unprocessed human comment. ---
 	SetIssueStatus(t, env, m2Item, "Queued")
+	AwaitBoardItemVisible(t, env, repo, m2, awaitSeedTimeout)
 	commentID := postHumanIssueComment(t, env, repo, m2,
 		"Reviewer note: please double-check the wording of this change. No code change is required — acknowledge only, do not modify or push anything.")
 	t.Logf("M2 #%d queued and comment %d posted", m2, commentID)

@@ -96,10 +96,11 @@ func TestCommentLandingGateHolds(t *testing.T) {
 	// base moves under a concurrent test's merge). Until it is computed, the merge
 	// gate claims the item and the comment is processed before any landing
 	// decision runs, so the scenario would observe nothing.
-	WaitForPRMergeableSettled(t, env, repo, pr, 10*time.Minute)
+	AwaitPRMergeableSettled(t, env, repo, pr, 10*time.Minute)
 
 	offset := LogOffset(t, env)
 	SetIssueStatus(t, env, itemID, "Validate")
+	AwaitBoardItemVisible(t, env, repo, issue, awaitSeedTimeout)
 	t.Logf("comment %d posted, item moved into Validate (train mode %s); scanning bed log from offset %d", commentID, trainMode, offset)
 
 	// assertHeld fails if the item shows any sign of having landed (or been queued)

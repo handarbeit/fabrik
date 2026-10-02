@@ -1926,9 +1926,10 @@ failure is the same hard stop (exit 5) as before.
 |---|---|
 | `mergetrain_batchcap_test.go` — "poll boundary straddled the unpause" | **Converted.** Fires before A1's selection assertion. Its two sibling `switch` cases (cap mismatch; no cap line with ≥ members) are bed-configuration errors and stay `Fatalf`. |
 | `mergetrain_batchcap_test.go` — A2 "ejected for reviewer feedback" | **Converted.** Bed-reviewer artifact; fires before any A2 assertion. |
-| `mergetrain_coldbase_test.go` — cold-cache "not yet hydrated" never appeared ("vacuous") | **Converted** (timeout only, via `waitForLogMatchInconclusive`). |
+| `mergetrain_coldbase_test.go` — cold-cache "not yet hydrated" never appeared ("vacuous") | **Converted** (timeout only, via `waitForLogMatchInconclusive`). #1974 fixed the *cause*: the seed now awaits the board listing showing every member (and the primer) before the bed starts — see "The awaitVisible family". |
 | `mergetrain_coldbase_test.go` — landed via the singleton fast path | **Converted.** Members did not batch together; fires before the A1/A2 assertions it protects. |
-| `comment_landing_gate_test.go` — landing decision never reached with the comment pending | **Converted** (timeout only). `assertHeld` and every later check stay `Fatalf`. |
+| `comment_landing_gate_test.go` — landing decision never reached with the comment pending | **Converted** (timeout only). `assertHeld` and every later check stay `Fatalf`. #1974: the `mergeable` wait before placing the item is `AwaitPRMergeableSettled`. |
+| `awaitVisible` timeouts in every seed path (#1974) | **Converted** — a harness write that never became visible is "the precondition never arose". `dirty`/`behind` mergeability stays `Fatalf` (a scenario assertion, not lag). See "The awaitVisible family". |
 | `comment_queued_eject_test.go` — "occupant window closed" | **Converted.** Precondition (M2 not owned by a live batch) of the direct-route assertion. |
 | `mergetrain_bisect_test.go` — release straddled a poll boundary | **Converted.** Same class as batchcap. |
 | `mid_stage_label_test.go` — Research judged "no work needed" | **Converted.** Claude non-determinism; fires before any rework-marker assertion. |
@@ -1944,6 +1945,77 @@ failure is the same hard stop (exit 5) as before.
 `tests/e2e/inconclusive/guards_test.go` pins, statically (it parses the tagged sources), that the
 three named guards use an inconclusive helper, that each still has assertion `Fatalf`s after it,
 and that `Inconclusive` is never called from a goroutine or a subtest.
+
+## The awaitVisible family (#1974, ADR-1974)
+
+GitHub is eventually consistent, and the engine reads through paths that lag independently of the
+harness's writes. A harness that writes (adds a board item, opens a PR with `Closes #N`, moves a
+Status) and carries on as if every reader can already see it races the engine: the scenario either
+never reaches the state it tests (a vacuous pass — 0.0.83's `TestMergeTrainColdCacheBaseMember`,
+whose bootstrap board fetch missed two members the listing had not yet shown) or fails for a reason
+that is not the engine's (`TestCommentLandingGateHolds`, `mergeable` still `null`).
+
+`tests/e2e/await_visible.go` is the one family of helpers that block until a write is visible
+**through the surface the engine itself consults**, within an explicit per-call timeout. They all
+share one polling loop, `awaitvisible.Poll` (`tests/e2e/awaitvisible`, untagged so its unit tests run
+on every PR; CI only *compiles* this tagged package).
+
+| Helper | Waits for | Read path |
+|---|---|---|
+| `AwaitBoardItemVisible` / `AwaitStatusVisible` | the issue in the ProjectV2 item listing (with a given Status) | `projectV2.items(first:100)` GraphQL — what the engine's bootstrap fetch lists. **Against a running bed use `AwaitBoardItemVisible`**: the engine can move the item on within a poll, so a Status await after a lagging first read would never see the awaited Status and would burn the whole timeout. `AwaitStatusVisible` is for a bed that is down (ColdCache) or a Status the engine will not act on |
+| `AwaitClosingLinkage` | `Closes #N` visible on **both** sides | `issue.closedByPullRequestsReferences` (the engine's read) and `pullRequest.closingIssuesReferences`, one GraphQL call. Default-base PRs only: GitHub makes no link for a non-default base |
+| `AwaitPRMergeableComputed` | `mergeable` computed (`mergeable_state` ≠ `unknown`) | REST `/pulls/N` |
+| `AwaitPRMergeableSettled` | computed **and** `clean`/`unstable` (#1982's verdict, layered on the primitive: `blocked`/`unknown` keep waiting, `dirty`/`behind` fail fast) | REST `/pulls/N` |
+| `AwaitLabelVisible` | a label the **harness** applied | REST issue read |
+| `AwaitPRForBranchVisible` | the harness-opened PR on `fabrik/issue-N` | REST `/pulls?head=owner:branch`, as the engine's `FetchLinkedPR` |
+
+**Classification rule.** Waiting for a *harness write* to become visible is lag: a timeout ends the
+test **Inconclusive** (#1973 — uncovered, retried, never a PASS, never a FAIL), and the reason names
+what was waited for, for how long, how many reads, and the last observation or read error. Waiting for
+the *engine* to do something (`WaitForProjectStatus` after the engine moves an item,
+`WaitForIssueLabel` for an engine-applied label, `LinkedPRNumber` for an engine-created PR,
+`WaitForCheckConclusion`, the `waitForLogMatch*` family) is an assertion about engine behaviour and
+stays `t.Fatalf` — retried into green it would mask a regression. A state that will not resolve by
+waiting (`mergeable_state` `dirty`/`behind`) is a scenario assertion and also stays `Fatalf`.
+
+A *read error* (a transient `gh` failure) is retried and logged, never counted as "not visible".
+Timeouts are explicit per call; the seed helpers use `awaitSeedTimeout` (10 min — the 2026-09-30
+outage stretched listing lag past five minutes). GraphQL waits poll every 10 s (the budget is shared
+with the bed engine, #1695); REST waits every 5 s.
+
+**Seed paths.** `createMemberPR` (so `QueueMember*`, `PrepareMemberExactPath`, `seedReviewGateItemImpl`
+and `seedLandingCandidate` reach it) awaits the closing linkage; the seeders await the harness-opened PR,
+the labels they apply and the board item/Status they place. `waitForClosingLinkage` and
+`WaitForPRMergeableSettled` are gone — `inconclusive/guards_test.go` pins that they stay gone and that
+no seed path grows a loop or sleep of its own.
+
+**Seed in the top-level test.** `Inconclusive` must end a *top-level* test from its own goroutine;
+called from a subtest (or a goroutine) it is a loud `t.Fatalf`. A seed helper called inside `t.Run`
+(`auto_merge_test.go`, `convergence_race_test.go`) therefore turns an await timeout into a failure with
+a clear message rather than an invisible marker. Seed at the top level where you can.
+
+`TestMergeTrainQueuedDeeperThanBatchCap` is a poll-boundary race, not a consistency race: it stays
+Inconclusive here and is #1978's.
+
+The wrapper layer is tested against an `httptest` fake GitHub through a fake `gh` on `PATH`
+(`await_visible_test.go`, `-tags e2e`, local only); the loop and the pure classifiers are tested in the
+untagged package on every PR. The neutralised-wait check — with an await stubbed out, ColdCache and
+CommentLanding reproduce their old vacuous outcome, now reported Inconclusive — needs a live bed and is
+recorded manually in the PR.
+
+### Environment probes (#1974)
+
+Before any live budget is spent the gate runner probes two environmental causes of the 0.0.83 flakes.
+Both wait, re-probe and report; neither ever kills anything. See `tests/gate/README.md`.
+
+| Knob | Meaning | Default |
+|---|---|---|
+| `E2E_LAG_PROBE_THRESHOLD` | seconds a freshly added board item may take to appear in the listing | 30 |
+| `E2E_LOAD_PROBE_FACTOR` | 1-minute load threshold, as a multiple of the CPU count | 2 |
+| `E2E_LOAD_PROBE_THRESHOLD` | absolute 1-minute load threshold (overrides the factor) | unset |
+| `E2E_PROBE_WAIT_MAX` | seconds each probe may spend waiting and re-probing before preflight fails (exit 4) | 600 |
+| `E2E_PROBE_INTERVAL` | seconds between re-probes | 30 |
+| `E2E_SKIP_PROBES` | skip both probes (recorded as skipped) | off |
 
 ## Scenarios
 

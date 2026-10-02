@@ -4,8 +4,6 @@ package e2e
 
 import (
 	"fmt"
-	"strconv"
-	"strings"
 	"testing"
 	"time"
 )
@@ -81,37 +79,14 @@ func seedReviewGateItemImpl(t *testing.T, env *Env, repo, baseBranch, column, ma
 	}
 	// Confirm the PR is resolvable by the fabrik/issue-<N> branch convention
 	// (mirrors the engine's resolver) before seeding the completion label.
-	LinkedPRNumber(t, env, repo, num)
-	// (createMemberPR also waited for the Closes linkage — see waitForClosingLinkage.)
+	AwaitPRForBranchVisible(t, env, repo, num, awaitSeedTimeout)
+	// (createMemberPR also waited for the Closes linkage — see AwaitClosingLinkage.)
 
 	AddLabel(t, env, repo, num, "stage:"+column+":complete")
+	AwaitLabelVisible(t, env, repo, num, "stage:"+column+":complete", awaitSeedTimeout)
 	SetIssueStatus(t, env, itemID, column)
+	AwaitBoardItemVisible(t, env, repo, num, awaitSeedTimeout)
 	t.Logf("seeded review-gate item: issue #%d, PR #%d, stage:%s:complete, Status=%s (marker=%s, draft=%v)",
 		num, prNum, column, column, marker, draft)
 	return num, prNum, itemID
-}
-
-// waitForClosingLinkage polls the issue's closedByPullRequestsReferences until
-// it lists prNum (the PR body's Closes #N keyword has been indexed).
-func waitForClosingLinkage(t *testing.T, env *Env, repo string, issueNum, prNum int) {
-	t.Helper()
-	owner, name, ok := splitRepo(repo)
-	if !ok {
-		t.Fatalf("bad repo: %q", repo)
-	}
-	q := fmt.Sprintf(`query { repository(owner: %q, name: %q) { issue(number: %d) { closedByPullRequestsReferences(first: 10, includeClosedPrs: true) { nodes { number } } } } }`, owner, name, issueNum)
-	deadline := time.Now().Add(5 * time.Minute)
-	for time.Now().Before(deadline) {
-		out, err := ghOutput(env, "api", "graphql", "-f", "query="+q,
-			"--jq", "[.data.repository.issue.closedByPullRequestsReferences.nodes[].number]")
-		if err == nil {
-			for _, f := range strings.Split(strings.Trim(strings.TrimSpace(out), "[]"), ",") {
-				if strings.TrimSpace(f) == strconv.Itoa(prNum) {
-					return
-				}
-			}
-		}
-		time.Sleep(5 * time.Second)
-	}
-	t.Fatalf("PR #%d's Closes #%d linkage never appeared in %s#%d's closedByPullRequestsReferences within 5m", prNum, issueNum, repo, issueNum)
 }

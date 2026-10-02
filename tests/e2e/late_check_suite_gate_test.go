@@ -93,13 +93,14 @@ func TestLateCheckRunSuiteGate(t *testing.T) {
 	path := uniqueMemberPath("e2e/late-check/entries/late-check.txt", num)
 	prNum := CreateMemberPR(t, env, env.RepoAlpha, "main", branch, path,
 		"late check-run suite-gate scenario member\n", title, num)
-	LinkedPRNumber(t, env, env.RepoAlpha, num)
+	AwaitPRForBranchVisible(t, env, env.RepoAlpha, num, awaitSeedTimeout)
 
 	// Seed the prior stage as complete and place the card at Validate, so the
 	// engine dispatches one real Validate invocation (same seeding as
 	// seedReviewGateItem).
 	AddLabel(t, env, env.RepoAlpha, num, "stage:Review:complete")
 	SetIssueStatus(t, env, itemID, "Validate")
+	AwaitBoardItemVisible(t, env, env.RepoAlpha, num, awaitSeedTimeout)
 	t.Logf("seeded %s#%d (PR #%d, path %s) at Status=Validate; awaiting the CI gate", env.RepoAlpha, num, prNum, path)
 
 	// The gate is active once Validate completes and the engine applies

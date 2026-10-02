@@ -31,7 +31,8 @@ Structure only — none of the features exist yet.
 | `LegResult` (cell, exit code, log path, decoded `[]Event`, budget before/after) delivered to `Gate.OnLeg` | `leg.go` | other observers. **#1972's ledger does not use it** — it records from `suiteWriter`'s event sink (`ledger_recorder.go`), because `OnLeg` never fires for a killed, RUN INVALID, watchdog or restart-failed leg |
 | `Classification` (pass/fail/skip/**inconclusive**/running/never-started) | `events.go` | #1973 added INCONCLUSIVE — see "INCONCLUSIVE and bounded retry" below |
 | `Ledger`, `Evaluator`, `Report` and `RequiredTests`/`ResumeCells` over `PlanCells` output | `ledger*.go`, `coverage.go`, `resume.go` | #1972; #1975's sparse plan changes the required set with no change here |
-| `[]Preflight` (`Gate.Preflights`, ordered, each returns an `*ExitError`) | `gate.go` | #1974 environment probes |
+| `[]Preflight` (`Gate.Preflights`, ordered, each returns an `*ExitError`) | `gate.go` | #1974's host-load probe (`host-load-probe`) |
+| `[]Preflight` (`Gate.LivePreflights`, run **after** the pre-gate, before the bed is built) | `gate.go` | #1974's board-lag probe — a live write, so it cannot precede the pre-gate (ADR-1454) |
 | `Commander` (`Run`/`Start`), `Gate.Env`, `Sleep`, `Now`, `ProcCwd` | `exec.go`, `gate.go` | every test; #1976's per-bed environments |
 
 ## `run.sh` function → Go
@@ -156,6 +157,44 @@ INVALID scan); a clean run can now exit `8` without `--resume`; `RunPregate` cap
 buffers) its steps' output. The `3/4/5/6/7` exit-code contract of `scripts/cut-release.sh` is
 unchanged. `testdata/pregate/` holds **synthetic** crash logs (see its README) — add a real one if
 a crashed gate run is ever captured.
+
+## Environment probes (#1974, ADR-1974)
+
+Two probes run before live budget is spent. `tests/e2e/README.md` has the knobs; this is the map.
+
+| File | What |
+|---|---|
+| `probes.go` | `ProbeHostLoad`, `ProbeBoardLag`, the shared bounded `reprobe` loop, `parseOrphans`/`listOrphans`, `lagBoard` (draft-item add / listing / delete / leftover sweep), `ProbeReport` and `writeProbes` |
+| `gate.go` | `DefaultPreflights` gains `host-load-probe` (host-only, **before** the pre-gate); `Gate.LivePreflights`/`DefaultLivePreflights` hold `board-lag-probe`, run in `run()` **after** `RunPregate` and before `PrepareBedAndReset` |
+| `archive.go` | `beginArchive` writes `probes.json` beside `load.json` in every leg's archive directory |
+| `config.go` | `LagProbeThreshold`, `LoadProbeFactor`, `LoadProbeThreshold`, `ProbeWaitMax`, `ProbeInterval`, `LagPollInterval`; `floatEnv` |
+| `reset.go` | `resolveProjectNodeID`, extracted so `Reset` and the lag probe name the same board |
+
+* **Load probe.** Reuses `Gate.loadAvg` (the reading the leg archive already takes — no second parser)
+  against `E2E_LOAD_PROBE_THRESHOLD`, else `E2E_LOAD_PROBE_FACTOR` × CPU count. It also lists orphaned
+  `sim.test` / `e2e.test` / `fabrik.test` processes (`ppid` 1, from `ps -axo pid=,ppid=,comm=`) with
+  their working directory (`ResolvePIDCwd`; unresolvable → `unknown`, never an error), so it is clear
+  which tree they came from. The list is informational and never gates; Linux orphans re-parented to a
+  per-user subreaper, a truncated `comm` or a missing `lsof` can hide one.
+* **Lag probe.** Adds a temporary **draft** project item (`addProjectV2DraftIssue`, title prefix
+  `e2e-lag-probe-`) to the bed's own board, polls the same `projectV2.items` listing until it appears,
+  and removes it again on success, timeout, error **and cancel** (on a context detached from the
+  cancelled one). A draft creates no repository issue, so it cannot trip the bed's stale-Queued-member
+  checks. A leftover from a SIGKILL mid-probe is swept by title prefix at the start of the next run.
+  Every `gh` call is `Session`, `Timeout: GHAPITimeout`, scoped to the bed token (the `budget.go`
+  routing shape).
+* **Waiting.** A reading above its threshold pauses `E2E_PROBE_INTERVAL` and re-probes, at most
+  `E2E_PROBE_WAIT_MAX` / interval times (counted in attempts, so the bound is deterministic). Still
+  above at the bound → preflight fails with exit **4** naming the probe. A probe that cannot take a
+  reading (no load source, no bed token, add/list failing) reports `unavailable` and never blocks.
+* **Never kills.** There is no signalling code path: `TestProbeSourceHasNoSignallingCodePath` pins on
+  `probes.go`'s AST that it imports no `syscall`/`os/signal`/`sessionreap` and names no `Kill`/`Signal`/
+  `termPID`/`pkill`/`killall`, and the runner tests assert the `Commander` fake never sees a kill
+  invocation. The operator decides what to do about an orphan.
+* **Archive.** `probes.json` records, per probe: status (`ok`, `recovered`, `exceeded`, `unavailable`,
+  `cancelled`, `skipped`), every reading, the threshold, attempts and seconds waited, and the orphan
+  list / swept-leftover count. A zero threshold (a hand-built `Config`) disables a probe, so the
+  existing runner tests are undisturbed.
 
 ## Behaviour deltas and quirks
 

@@ -133,10 +133,11 @@ func TestYoloRemovedMidValidateBlocksMerge(t *testing.T) {
 	path := uniqueMemberPath("e2e/mid-stage-yolo/entries/mid-stage-yolo.txt", num)
 	prNum := CreateMemberPR(t, env, env.RepoAlpha, "main", branch, path,
 		"yolo-removed-mid-Validate scenario member\n", title, num)
-	LinkedPRNumber(t, env, env.RepoAlpha, num)
+	AwaitPRForBranchVisible(t, env, env.RepoAlpha, num, awaitSeedTimeout)
 
 	AddLabel(t, env, env.RepoAlpha, num, "stage:Review:complete")
 	SetIssueStatus(t, env, itemID, "Validate")
+	AwaitBoardItemVisible(t, env, env.RepoAlpha, num, awaitSeedTimeout)
 	t.Logf("seeded %s#%d (PR #%d, path %s) at Status=Validate with fabrik:yolo", env.RepoAlpha, num, prNum, path)
 
 	waitForValidateInProgressAndRemoveYolo(t, env, env.RepoAlpha, num, 15*time.Minute)

@@ -28,8 +28,9 @@ type Plan struct {
 
 // Preflight is one precondition probe. The list is ordered and runs before ANY
 // live spend (before the pre-gate, let alone the bed). A probe fails the run
-// by returning an *ExitError, normally ExitPreconditionFailed. #1974 adds its
-// environment probes by appending here; nothing else changes.
+// by returning an *ExitError, normally ExitPreconditionFailed. #1974's host-load
+// probe is appended here; its board-lag probe is a LIVE write and so lives in
+// Gate.LivePreflights, which runs after the pre-gate.
 type Preflight struct {
 	Name string
 	Run  func(ctx context.Context, g *Gate, p *Plan) error
@@ -48,6 +49,11 @@ type Gate struct {
 
 	// Preflights is the ordered probe list; NewGate fills in the defaults.
 	Preflights []Preflight
+	// LivePreflights run after the pre-gate passes and before the bed is built or
+	// started: probes that need a live GitHub call, which the pre-gate-spends-
+	// nothing rule (ADR-1454) forbids ahead of the pre-gate. NewGate fills in the
+	// defaults (#1974's board-lag probe).
+	LivePreflights []Preflight
 	// Scheduler runs the cells; default is the serial auth × train loop.
 	Scheduler Scheduler
 	// OnLeg, if set, observes each leg that ran to a normal post-suite result.
@@ -66,6 +72,13 @@ type Gate struct {
 	ProcCwd func(ctx context.Context, pid int) string
 	// Self is this process's PID (excluded from competing-consumer discovery).
 	Self int
+
+	// CPUs overrides the CPU count the load threshold scales with (0 = runtime.NumCPU).
+	CPUs int
+
+	// probes is what the environment probes measured (#1974), archived as
+	// probes.json in every leg's directory.
+	probes ProbeReport
 
 	// LoadAvg reads the host's 1-minute load average for the leg archive
 	// (default: the per-OS probe; ok=false means unavailable).
@@ -109,6 +122,7 @@ func NewGate(cfg Config, out, errw io.Writer) *Gate {
 	g.ProcCwd = g.defaultProcCwd
 	g.Scheduler = SerialScheduler{}
 	g.Preflights = DefaultPreflights()
+	g.LivePreflights = DefaultLivePreflights()
 	return g
 }
 
@@ -123,6 +137,17 @@ func DefaultPreflights() []Preflight {
 		}},
 		{Name: "reviewer-reachable", Run: func(_ context.Context, g *Gate, p *Plan) error { return g.CheckReviewerReachable(p.RawArgs) }},
 		{Name: "sim-parity", Run: func(_ context.Context, g *Gate, _ *Plan) error { g.PrintSimParitySummary(); return nil }},
+		// Host-only (no live spend), so it sits before the pre-gate whose
+		// load-sensitive sim suite it protects (#1974).
+		{Name: "host-load-probe", Run: func(ctx context.Context, g *Gate, _ *Plan) error { return g.ProbeHostLoad(ctx) }},
+	}
+}
+
+// DefaultLivePreflights are the probes that make a live GitHub call and so run
+// only after the pre-gate has passed (#1974).
+func DefaultLivePreflights() []Preflight {
+	return []Preflight{
+		{Name: "board-lag-probe", Run: func(ctx context.Context, g *Gate, _ *Plan) error { return g.ProbeBoardLag(ctx) }},
 	}
 }
 
@@ -263,6 +288,11 @@ func (g *Gate) run(ctx context.Context, argv []string) error {
 
 	if err := g.RunPregate(ctx); err != nil {
 		return err
+	}
+	for _, pf := range g.LivePreflights {
+		if err := pf.Run(ctx, g, plan); err != nil {
+			return err
+		}
 	}
 	preflightText, err := g.teeOutput(func() error { return g.PrepareBedAndReset(ctx, plan.Clean) })
 	if err != nil {
