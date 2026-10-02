@@ -27,7 +27,7 @@ type legRecorder struct {
 	warn       func(format string, args ...any)
 
 	mu       sync.Mutex
-	output   map[string]*strings.Builder // top-level test -> its own output
+	output   map[string]*testOutput // top-level test -> its own output
 	recorded int
 	failed   int // ledger writes that failed
 }
@@ -35,10 +35,53 @@ type legRecorder struct {
 // maxRecordedOutput caps the per-test output kept to extract a skip message.
 const maxRecordedOutput = 64 << 10
 
+// maxMarkerOverflow bounds what testOutput keeps past maxRecordedOutput: only
+// inconclusive-marker lines (and their continuations), so it stays small.
+const maxMarkerOverflow = 16 << 10
+
+// testOutput is one top-level test's own output, capped at maxRecordedOutput.
+// The cap would otherwise hide the INCONCLUSIVE marker — t.Skipf writes it at
+// the END of a test, after every poll-loop t.Logf — and silently turn an
+// inconclusive test into an ordinary skip (no retry, no exit 8; #1973). So once
+// the cap is reached, marker lines (plus their indented continuation lines) are
+// still kept, in a separate small budget; everything else is dropped as before.
+type testOutput struct {
+	b        strings.Builder
+	overflow int  // bytes kept past the cap
+	cont     bool // the last kept overflow line was a marker line
+}
+
+func (o *testOutput) add(chunk string) {
+	if o.b.Len() < maxRecordedOutput {
+		o.b.WriteString(chunk)
+		return
+	}
+	for _, l := range strings.SplitAfter(chunk, "\n") {
+		if l == "" {
+			continue
+		}
+		keep := false
+		if m := skipLineRE.FindStringSubmatch(strings.TrimRight(l, "\n")); m != nil {
+			keep = inconclusive.IsMarked(m[1])
+			o.cont = keep
+		} else if o.cont && (l[0] == ' ' || l[0] == '\t') && strings.TrimSpace(l) != "" {
+			keep = true
+		} else {
+			o.cont = false
+		}
+		if keep && o.overflow < maxMarkerOverflow {
+			o.overflow += len(l)
+			o.b.WriteString(l)
+		}
+	}
+}
+
+func (o *testOutput) String() string { return o.b.String() }
+
 func newLegRecorder(l *Ledger, cell Cell, invocation, head string, hashes map[string]string, live map[string]bool, warn func(string, ...any)) *legRecorder {
 	return &legRecorder{
 		ledger: l, leg: cell.Label(), cell: cellDirName(cell), invocation: invocation, head: head,
-		hashes: hashes, live: live, warn: warn, output: map[string]*strings.Builder{},
+		hashes: hashes, live: live, warn: warn, output: map[string]*testOutput{},
 	}
 }
 
@@ -62,12 +105,10 @@ func (r *legRecorder) Observe(e Event) {
 	if e.Action == "output" {
 		b := r.output[e.Test]
 		if b == nil {
-			b = &strings.Builder{}
+			b = &testOutput{}
 			r.output[e.Test] = b
 		}
-		if b.Len() < maxRecordedOutput {
-			b.WriteString(e.Output)
-		}
+		b.add(e.Output)
 		return
 	}
 	if !terminal(e) {

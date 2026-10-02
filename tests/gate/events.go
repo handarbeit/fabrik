@@ -87,12 +87,12 @@ func isInconclusiveSkip(testOutput string) bool {
 // would be "output" for nearly every test and the timed-out test itself would
 // vanish from every bucket instead of showing up as still-running.
 //
-// Each top-level test's OWN output is gathered (capped like the recorder's) only
+// Each top-level test's OWN output is gathered (capped like the recorder's, but never dropping a marker line) only
 // to tell an inconclusive skip from an ordinary one; subtests fold into their
 // parent, so a subtest's marker is never seen here.
 func Classify(events []Event) Classification {
 	last := map[string]string{}
-	out := map[string]*strings.Builder{}
+	out := map[string]*testOutput{}
 	for _, e := range events {
 		if !topLevel(e) {
 			continue
@@ -100,12 +100,10 @@ func Classify(events []Event) Classification {
 		if e.Action == "output" {
 			b := out[e.Test]
 			if b == nil {
-				b = &strings.Builder{}
+				b = &testOutput{}
 				out[e.Test] = b
 			}
-			if b.Len() < maxRecordedOutput {
-				b.WriteString(e.Output)
-			}
+			b.add(e.Output)
 			continue
 		}
 		last[e.Test] = e.Action

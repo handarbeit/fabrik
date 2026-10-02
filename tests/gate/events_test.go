@@ -205,3 +205,59 @@ func TestInconclusiveMarkerSurvivesACleanupLogAfterTheSkip(t *testing.T) {
 		}
 	}
 }
+
+// A polling-heavy test can log more than maxRecordedOutput before it skips; the
+// marker is written last, so a plain head-cap would hide it and turn an
+// INCONCLUSIVE into an ordinary skip (no retry, no exit 8).
+func TestInconclusiveMarkerSurvivesTheOutputCap(t *testing.T) {
+	const test = "TestChatty"
+	filler := "    poll_test.go:7: still waiting " + strings.Repeat("x", 200) + "\n"
+	build := func(final ...string) []Event {
+		lines := []string{jsonEv(Event{Action: "run", Test: test})}
+		for n := 0; n < (maxRecordedOutput/len(filler))+50; n++ {
+			lines = append(lines, jsonEv(Event{Action: "output", Test: test, Output: filler}))
+		}
+		for _, f := range final {
+			lines = append(lines, jsonEv(Event{Action: "output", Test: test, Output: f}))
+		}
+		lines = append(lines,
+			jsonEv(Event{Action: "output", Test: test, Output: "--- SKIP: " + test + " (9.00s)\n"}),
+			jsonEv(Event{Action: "skip", Test: test, Elapsed: 9}))
+		evs, err := ReadEvents(strings.NewReader(strings.Join(lines, "\n") + "\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return evs
+	}
+	marker := "    a_test.go:42: E2E-INCONCLUSIVE: straddled the unpause\n"
+	cont := "        second line of the reason\n"
+	cleanup := "    lifecycle.go:261: bed already running\n"
+
+	for name, tc := range map[string]struct {
+		evs  []Event
+		want bool
+	}{
+		"marker past the cap":               {build(marker), true},
+		"marker, continuation, cleanup":     {build(marker, cont, cleanup), true},
+		"only a line mentioning the marker": {build("    a_test.go:42: note: E2E-INCONCLUSIVE: is the marker\n"), false},
+		"ordinary skip past the cap":        {build("    a_test.go:42: no token configured\n"), false},
+	} {
+		c := Classify(tc.evs)
+		if got := len(c.Inconclusive) == 1 && len(c.Skip) == 0; got != tc.want {
+			t.Errorf("%s: Classify = inconclusive %v skip %v, want inconclusive=%v", name, c.Inconclusive, c.Skip, tc.want)
+		}
+		l := testLedger(t)
+		rec := newLegRecorder(l, appOff, "i1", "head", map[string]string{test: "h"}, map[string]bool{test: true},
+			func(f string, a ...any) { t.Errorf("recorder warning: "+f, a...) })
+		for _, e := range tc.evs {
+			rec.Observe(e)
+		}
+		r, ok := l.Load().Record("app/off", test)
+		if !ok || (r.Outcome == OutcomeInconclusive) != tc.want {
+			t.Errorf("%s: recorded %+v (found %v), want inconclusive=%v", name, r, ok, tc.want)
+		}
+		if tc.want && name == "marker, continuation, cleanup" && !strings.Contains(r.SkipMsg, "second line of the reason") {
+			t.Errorf("%s: SkipMsg = %q, want the continuation line", name, r.SkipMsg)
+		}
+	}
+}
