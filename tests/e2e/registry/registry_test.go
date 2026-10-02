@@ -79,6 +79,8 @@ func TestCheckMalformedEntries(t *testing.T) {
 		{"duplicate entry", func(r *Registry) { r.Tests = append(r.Tests, r.Tests[2]) }, "duplicate registry entry"},
 		{"unsorted", func(r *Registry) { r.Tests[0], r.Tests[1] = r.Tests[1], r.Tests[0] }, "not sorted"},
 		{"bad version", func(r *Registry) { r.Version = 99 }, "registry version"},
+		{"malformed skip_ok_legs", func(r *Registry) { r.Tests[1].SkipOKLegs = []string{"nonsense"} }, "malformed skip_ok_legs"},
+		{"unknown skip_ok_legs train", func(r *Registry) { r.Tests[1].SkipOKLegs = []string{"pat/maybe"} }, "malformed skip_ok_legs"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -211,5 +213,29 @@ func TestRegistryMatchesTree(t *testing.T) {
 	if problems := Check(reg, live, sim); len(problems) > 0 {
 		t.Fatalf("tests/e2e/registry/registry.json is out of sync with the tree:\n  %s",
 			strings.Join(problems, "\n  "))
+	}
+}
+
+func TestMatchLegAndSkipOK(t *testing.T) {
+	cases := []struct {
+		pattern, label string
+		want           bool
+	}{
+		{"*/off", "app/off", true},
+		{"*/off", "pat/on", false},
+		{"pat/*", "pat/on", true},
+		{"*/*", "app/on", true},
+		{"app/on", "app/on", true},
+		{"app/on", "pat/on", false},
+		{"bogus", "app/on", false},
+	}
+	for _, c := range cases {
+		if got := MatchLeg(c.pattern, c.label); got != c.want {
+			t.Errorf("MatchLeg(%q, %q) = %v, want %v", c.pattern, c.label, got, c.want)
+		}
+	}
+	e := Entry{SkipOKLegs: []string{"*/off"}}
+	if !e.SkipOK("pat/off") || e.SkipOK("pat/on") {
+		t.Error("Entry.SkipOK mismatch")
 	}
 }

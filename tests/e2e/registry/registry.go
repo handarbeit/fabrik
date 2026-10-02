@@ -17,6 +17,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // Version is the registry.json schema version. New fields are additive and do
@@ -68,6 +69,34 @@ type Entry struct {
 	// Note is free text: required for reason "other"; optional elsewhere
 	// (a unit-test pointer for a gap, "train-off leg only" for a partial twin).
 	Note string `json:"note,omitempty"`
+	// SkipOKLegs lists leg-label patterns ("<auth>/<train>", "*" matches any
+	// part) on which this test is EXPECTED to skip itself for a structural reason
+	// (e.g. a merge-train scenario under train mode "off"). The coverage ledger
+	// (#1972, ADR-1972) reports such a skip as structural: it neither blocks the
+	// gate nor counts as covered. Any other skip with no open cited issue counts as
+	// missing. #1975's sensitivity fields will subsume this.
+	SkipOKLegs []string `json:"skip_ok_legs,omitempty"`
+}
+
+// MatchLeg reports whether the leg label ("auth/train", e.g. "app/off") matches
+// pattern, a "<auth>/<train>" pair in which either part may be "*".
+func MatchLeg(pattern, label string) bool {
+	pa, pt, ok := strings.Cut(pattern, "/")
+	la, lt, ok2 := strings.Cut(label, "/")
+	if !ok || !ok2 {
+		return false
+	}
+	return (pa == "*" || pa == la) && (pt == "*" || pt == lt)
+}
+
+// SkipOK reports whether a skip of this test on the leg is structurally expected.
+func (e Entry) SkipOK(label string) bool {
+	for _, p := range e.SkipOKLegs {
+		if MatchLeg(p, label) {
+			return true
+		}
+	}
+	return false
 }
 
 // Registry is the top-level registry.json document. It is never a bare map.
