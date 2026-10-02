@@ -28,9 +28,9 @@ func mustContain(t *testing.T, problems []string, sub string) {
 
 func baseRegistry() *Registry {
 	return &Registry{Version: Version, Tests: []Entry{
-		{Name: "TestA", Parity: ParitySim, Sim: []string{"TestSimA"}},
-		{Name: "TestB", Parity: ParityLiveOnly, LiveOnlyReason: ReasonRealCI},
-		{Name: "TestC", Parity: ParityGap, Note: "unit only"},
+		{Name: "TestA", Parity: ParitySim, Sim: []string{"TestSimA"}, Auth: Neutral, Train: Neutral},
+		{Name: "TestB", Parity: ParityLiveOnly, LiveOnlyReason: ReasonRealCI, Auth: Sensitive, AuthReason: "identity", Train: Neutral},
+		{Name: "TestC", Parity: ParityGap, Note: "unit only", Auth: Neutral, Train: Sensitive, TrainReason: "landing path"},
 	}}
 }
 
@@ -80,6 +80,15 @@ func TestCheckMalformedEntries(t *testing.T) {
 		{"unsorted", func(r *Registry) { r.Tests[0], r.Tests[1] = r.Tests[1], r.Tests[0] }, "not sorted"},
 		{"bad version", func(r *Registry) { r.Version = 99 }, "registry version"},
 		{"malformed skip_ok_legs", func(r *Registry) { r.Tests[1].SkipOKLegs = []string{"nonsense"} }, "malformed skip_ok_legs"},
+		{"missing auth", func(r *Registry) { r.Tests[0].Auth = "" }, "auth is \"\""},
+		{"missing train", func(r *Registry) { r.Tests[0].Train = "" }, "train is \"\""},
+		{"unknown auth value", func(r *Registry) { r.Tests[0].Auth = "maybe" }, "auth is \"maybe\""},
+		{"unknown train value", func(r *Registry) { r.Tests[2].Train = "Sensitive" }, "train is \"Sensitive\""},
+		{"sensitive auth without a reason", func(r *Registry) { r.Tests[1].AuthReason = "" }, "auth_reason is empty"},
+		{"sensitive train without a reason", func(r *Registry) { r.Tests[2].TrainReason = "  " }, "train_reason is empty"},
+		{"multi-line reason", func(r *Registry) { r.Tests[1].AuthReason = "a\nb" }, "single line"},
+		{"reason on a neutral auth", func(r *Registry) { r.Tests[0].AuthReason = "why" }, "auth_reason is only valid"},
+		{"reason on a neutral train", func(r *Registry) { r.Tests[1].TrainReason = "why" }, "train_reason is only valid"},
 		{"unknown skip_ok_legs train", func(r *Registry) { r.Tests[1].SkipOKLegs = []string{"pat/maybe"} }, "malformed skip_ok_legs"},
 	}
 	for _, c := range cases {
@@ -88,6 +97,59 @@ func TestCheckMalformedEntries(t *testing.T) {
 			c.mut(r)
 			mustContain(t, Check(r, liveNames, simNames), c.want)
 		})
+	}
+}
+
+func TestCheckSelfRecognitionMustBeAuthSensitive(t *testing.T) {
+	r := &Registry{Version: Version, Tests: []Entry{
+		{Name: "TestPATSelfRecognitionX", Parity: ParityGap, Auth: Neutral, Train: Neutral},
+	}}
+	mustContain(t, Check(r, []string{"TestPATSelfRecognitionX"}, nil), "SelfRecognition test must be auth: sensitive")
+	r.Tests[0].Auth, r.Tests[0].AuthReason = Sensitive, "identity"
+	if p := Check(r, []string{"TestPATSelfRecognitionX"}, nil); len(p) != 0 {
+		t.Fatalf("unexpected problems: %v", p)
+	}
+}
+
+func TestCheckIdentityCallers(t *testing.T) {
+	r := baseRegistry()
+	p := CheckIdentityCallers(r, []string{"TestA", "TestB"})
+	if len(p) != 1 {
+		t.Fatalf("want exactly TestA flagged, got %v", p)
+	}
+	mustContain(t, p, "TestA: reaches an author-identity assertion")
+	// A caller with no entry is Check's concern, not this rule's.
+	if p := CheckIdentityCallers(r, []string{"TestGone"}); len(p) != 0 {
+		t.Fatalf("unexpected problems: %v", p)
+	}
+}
+
+func TestScanIdentityAssertCallers(t *testing.T) {
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{
+		"harness.go": `package e2e
+import "testing"
+func AssertPRAuthorIsExpectedIdentity(t *testing.T) {}
+func AssertPRAuthorIsEngineIdentity(t *testing.T) {}
+func seed(t *testing.T) { viaDeeper(t) }
+func viaDeeper(t *testing.T) { AssertPRAuthorIsEngineIdentity(t) }
+func unrelated(t *testing.T) {}
+`,
+		"a_test.go": `package e2e
+import "testing"
+func TestDirect(t *testing.T) { AssertPRAuthorIsExpectedIdentity(t) }
+func TestInClosure(t *testing.T) { t.Run("x", func(t *testing.T) { AssertPRAuthorIsEngineIdentity(t) }) }
+func TestViaHelper(t *testing.T) { seed(t) }
+func TestClean(t *testing.T) { unrelated(t) }
+func Testimony(t *testing.T) { AssertPRAuthorIsExpectedIdentity(t) }
+`,
+	})
+	got, err := ScanIdentityAssertCallers(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(got, ",") != "TestDirect,TestInClosure,TestViaHelper" {
+		t.Fatalf("callers = %v", got)
 	}
 }
 
@@ -210,7 +272,14 @@ func TestRegistryMatchesTree(t *testing.T) {
 	if len(live) == 0 || len(sim) == 0 {
 		t.Fatalf("scanner found %d live and %d sim tests", len(live), len(sim))
 	}
-	if problems := Check(reg, live, sim); len(problems) > 0 {
+	problems := Check(reg, live, sim)
+	// #1975: every test that reaches an author-identity assertion is auth-sensitive.
+	callers, err := ScanIdentityAssertCallers("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	problems = append(problems, CheckIdentityCallers(reg, callers)...)
+	if len(problems) > 0 {
 		t.Fatalf("tests/e2e/registry/registry.json is out of sync with the tree:\n  %s",
 			strings.Join(problems, "\n  "))
 	}

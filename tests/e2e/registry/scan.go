@@ -130,3 +130,84 @@ func ScanSimTests(dir string) ([]string, error) {
 	sort.Strings(names)
 	return names, nil
 }
+
+// IdentityAssertions are the harness assertions that pin whose identity authored
+// a PR. A test that reaches either one is auth-sensitive by definition (#1975).
+var IdentityAssertions = []string{"AssertPRAuthorIsExpectedIdentity", "AssertPRAuthorIsEngineIdentity"}
+
+// calledIdents returns the names of every plain-identifier call (`f(...)`) in n,
+// nested closures included. Method and package-qualified calls are not followed:
+// the harness assertions and the helpers around them are top-level functions.
+func calledIdents(n ast.Node) map[string]bool {
+	out := map[string]bool{}
+	ast.Inspect(n, func(x ast.Node) bool {
+		if call, ok := x.(*ast.CallExpr); ok {
+			if id, ok := call.Fun.(*ast.Ident); ok {
+				out[id.Name] = true
+			}
+		}
+		return true
+	})
+	return out
+}
+
+// ScanIdentityAssertCallers returns the top-level Test* functions in dir
+// (tests/e2e) that reach one of IdentityAssertions: by calling it directly, or by
+// calling — transitively, by name, through same-directory non-test functions — a
+// helper that does. The transitive closure is what stops a helper from hiding an
+// identity assertion from the registry rule. The assertions themselves, and
+// anything they call, are never reported. Result is sorted.
+func ScanIdentityAssertCallers(dir string) ([]string, error) {
+	_, files, err := parseDir(dir, false)
+	if err != nil {
+		return nil, err
+	}
+	targets := toSet(IdentityAssertions)
+	type fn struct {
+		name  string
+		calls map[string]bool
+		test  bool
+	}
+	var fns []fn
+	for path, f := range files {
+		isTestFile := strings.HasSuffix(path, "_test.go")
+		for _, d := range f.Decls {
+			fd, ok := d.(*ast.FuncDecl)
+			if !ok || fd.Body == nil || fd.Recv != nil {
+				continue
+			}
+			fns = append(fns, fn{name: fd.Name.Name, calls: calledIdents(fd.Body), test: isTestFile && isTestFunc(fd)})
+		}
+	}
+	// reaching: helpers (non-test functions) that call a target, or a reaching helper.
+	reaching := map[string]bool{}
+	for changed := true; changed; {
+		changed = false
+		for _, f := range fns {
+			if f.test || targets[f.name] || reaching[f.name] {
+				continue
+			}
+			for c := range f.calls {
+				if targets[c] || reaching[c] {
+					reaching[f.name] = true
+					changed = true
+					break
+				}
+			}
+		}
+	}
+	var out []string
+	for _, f := range fns {
+		if !f.test {
+			continue
+		}
+		for c := range f.calls {
+			if targets[c] || reaching[c] {
+				out = append(out, f.name)
+				break
+			}
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}

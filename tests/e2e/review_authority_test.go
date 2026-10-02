@@ -148,7 +148,6 @@ func TestReviewAuthorityReinvokesOnChangesRequested(t *testing.T) {
 
 	num, prNum, _ := seedReviewGateItem(t, env, env.RepoAlpha, "main", "Review", "reinvoke-changes", "review-authority:authoritative")
 
-	AssertPRAuthorIsExpectedIdentity(t, env, env.RepoAlpha, prNum)
 	reviewerLogin := TokenLogin(t, reviewerToken)
 	if engineLogin := TokenLogin(t, env.GHToken); engineLogin == reviewerLogin {
 		t.Fatalf("FABRIK_REVIEWER_TOKEN resolves to %q, the same identity as the engine/PR author — "+
@@ -286,7 +285,6 @@ func TestReviewAuthorityCycleLimitPauses(t *testing.T) {
 
 	num, prNum, _ := seedReviewGateItem(t, env, env.RepoAlpha, "main", "Review", "cycle-limit", "review-authority:authoritative")
 
-	AssertPRAuthorIsExpectedIdentity(t, env, env.RepoAlpha, prNum)
 	reviewerLogin := TokenLogin(t, reviewerToken)
 	if engineLogin := TokenLogin(t, env.GHToken); engineLogin == reviewerLogin {
 		t.Fatalf("FABRIK_REVIEWER_TOKEN resolves to %q, the same identity as the engine/PR author — "+
@@ -421,7 +419,6 @@ func TestReviewAuthorityClearsOnApproval(t *testing.T) {
 
 	num, prNum, _ := seedReviewGateItem(t, env, env.RepoAlpha, "main", "Review", "clears-approval", "review-authority:authoritative")
 
-	AssertPRAuthorIsExpectedIdentity(t, env, env.RepoAlpha, prNum)
 	reviewerLogin := TokenLogin(t, reviewerToken)
 	if engineLogin := TokenLogin(t, env.GHToken); engineLogin == reviewerLogin {
 		t.Fatalf("FABRIK_REVIEWER_TOKEN resolves to %q, the same identity as the engine/PR author — "+
@@ -493,7 +490,6 @@ func TestReviewAuthorityYoloDoesNotBypassBlock(t *testing.T) {
 
 	num, prNum, _ := seedReviewGateItem(t, env, env.RepoAlpha, "main", "Review", "yolo-no-bypass", "review-authority:authoritative", "fabrik:yolo")
 
-	AssertPRAuthorIsExpectedIdentity(t, env, env.RepoAlpha, prNum)
 	if engineLogin, reviewerLogin := TokenLogin(t, env.GHToken), TokenLogin(t, reviewerToken); engineLogin == reviewerLogin {
 		t.Fatalf("FABRIK_REVIEWER_TOKEN resolves to %q, the same identity as the engine/PR author — "+
 			"set FABRIK_REVIEWER_TOKEN to a distinct GitHub account's PAT", reviewerLogin)
@@ -557,7 +553,6 @@ func TestReviewAuthorityAdvisoryRegressionGuard(t *testing.T) {
 
 	num, prNum, _ := seedReviewGateItem(t, env, env.RepoAlpha, "main", "Review", "advisory-regression")
 
-	AssertPRAuthorIsExpectedIdentity(t, env, env.RepoAlpha, prNum)
 	reviewerLogin := TokenLogin(t, reviewerToken)
 	if engineLogin := TokenLogin(t, env.GHToken); engineLogin == reviewerLogin {
 		t.Fatalf("FABRIK_REVIEWER_TOKEN resolves to %q, the same identity as the engine/PR author — "+

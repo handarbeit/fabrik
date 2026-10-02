@@ -1,7 +1,8 @@
 // Package registry is the single per-test registry for the live e2e suite
 // (tests/e2e). It is keyed by live-test function name and currently carries
-// the sim-parity field; later issues add fields (pack, exclusive, ...) to Entry
-// rather than creating their own lists.
+// the sim-parity field and the auth/train sensitivity fields (#1975); later
+// issues add fields (pack, exclusive, ...) to Entry rather than creating their
+// own lists.
 //
 // The package is deliberately NOT behind the `e2e` build tag: the live suite is
 // tagged, but the completeness check must run in plain `go test ./...`. Live and
@@ -54,6 +55,18 @@ var Reasons = []Reason{
 	ReasonRealCI, ReasonAppAuth, ReasonOther,
 }
 
+// Sensitivity says whether a live test's outcome can depend on one axis of the
+// gate's auth x train matrix (#1975, ADR-1975). There is deliberately no default:
+// every test declares both axes.
+type Sensitivity string
+
+const (
+	// Sensitive: the test's subject, or something it depends on, changes with the axis.
+	Sensitive Sensitivity = "sensitive"
+	// Neutral: the axis changes nothing the test can observe.
+	Neutral Sensitivity = "neutral"
+)
+
 // Entry is one live test's registry record. JSON keys are named, never
 // positional, so fields can be added without restructuring.
 type Entry struct {
@@ -74,8 +87,23 @@ type Entry struct {
 	// (e.g. a merge-train scenario under train mode "off"). The coverage ledger
 	// (#1972, ADR-1972) reports such a skip as structural: it neither blocks the
 	// gate nor counts as covered. Any other skip with no open cited issue counts as
-	// missing. #1975's sensitivity fields will subsume this.
+	// missing. Complementary to Auth/Train, not subsumed by them: sensitivity says
+	// where a test SHOULD run, this says where a skip is EXPECTED — and the sparse
+	// plan (ADR-1975) drops a (test, cell) pair this matches from every non-baseline
+	// cell rather than restart the bed just to watch the test skip.
 	SkipOKLegs []string `json:"skip_ok_legs,omitempty"`
+	// Auth is whether the test is sensitive to the auth mode (pat | app): access
+	// (token source, git credentials, worker GH_TOKEN), identity (self-recognition,
+	// lock labels, mentions, assignees, commit/PR authorship) or permissions.
+	// Required, no default (#1975).
+	Auth Sensitivity `json:"auth"`
+	// AuthReason is one non-empty line, required iff Auth == sensitive.
+	AuthReason string `json:"auth_reason,omitempty"`
+	// Train is whether the test is sensitive to the merge-train mode (off | on):
+	// its subject is, or depends on, the landing path. Required, no default (#1975).
+	Train Sensitivity `json:"train"`
+	// TrainReason is one non-empty line, required iff Train == sensitive.
+	TrainReason string `json:"train_reason,omitempty"`
 }
 
 // MatchLeg reports whether the leg label ("auth/train", e.g. "app/off") matches

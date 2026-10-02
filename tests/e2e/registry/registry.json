@@ -5,47 +5,77 @@
       "name": "TestAppSelfRecognitionBlockedCommentUpdatedInPlace",
       "parity": "live-only",
       "live_only_reason": "app-auth",
-      "note": "real GitHub App bot-author shapes (REST \"<slug>[bot]\" vs GraphQL bare login); sim only has TestGitHubAppAuth_* identity helpers, not comment ingestion"
+      "note": "real GitHub App bot-author shapes (REST \"<slug>[bot]\" vs GraphQL bare login); sim only has TestGitHubAppAuth_* identity helpers, not comment ingestion",
+      "skip_ok_legs": [
+        "pat/*"
+      ],
+      "auth": "sensitive",
+      "auth_reason": "self-recognition: the engine's own-author comparisons (selfLogin, bot author shapes) under a GitHub App identity",
+      "train": "neutral"
     },
     {
       "name": "TestAppSelfRecognitionBotCommentNeverResumes",
       "parity": "live-only",
       "live_only_reason": "app-auth",
-      "note": "real GitHub App bot-author shapes (REST \"<slug>[bot]\" vs GraphQL bare login); sim only has TestGitHubAppAuth_* identity helpers, not comment ingestion"
+      "note": "real GitHub App bot-author shapes (REST \"<slug>[bot]\" vs GraphQL bare login); sim only has TestGitHubAppAuth_* identity helpers, not comment ingestion",
+      "skip_ok_legs": [
+        "pat/*"
+      ],
+      "auth": "sensitive",
+      "auth_reason": "self-recognition: the engine's own-author comparisons (selfLogin, bot author shapes) under a GitHub App identity",
+      "train": "neutral"
     },
     {
       "name": "TestAppSelfRecognitionDurableReviewSuppression",
       "parity": "live-only",
       "live_only_reason": "app-auth",
-      "note": "real GitHub App bot-author shapes (REST \"<slug>[bot]\" vs GraphQL bare login); sim only has TestGitHubAppAuth_* identity helpers, not comment ingestion"
+      "note": "real GitHub App bot-author shapes (REST \"<slug>[bot]\" vs GraphQL bare login); sim only has TestGitHubAppAuth_* identity helpers, not comment ingestion",
+      "skip_ok_legs": [
+        "pat/*"
+      ],
+      "auth": "sensitive",
+      "auth_reason": "self-recognition: the engine's own-author comparisons (selfLogin, bot author shapes) under a GitHub App identity",
+      "train": "neutral"
     },
     {
       "name": "TestBaseBranchPipeline",
       "parity": "sim",
       "sim": [
         "TestBaseBranchPipeline"
-      ]
+      ],
+      "auth": "neutral",
+      "train": "sensitive",
+      "train_reason": "ends with the PR merged onto a non-default base and the landing path closing the issue"
     },
     {
       "name": "TestBlockedOnInput",
       "parity": "sim",
       "sim": [
         "TestBlockedOnInput"
-      ]
+      ],
+      "auth": "sensitive",
+      "auth_reason": "awaiting-input @mention targets (mentionTargets) and pause/resume by a human comment depend on the engine identity",
+      "train": "sensitive",
+      "train_reason": "yolo run ends in the landing decision that closes the issue"
     },
     {
       "name": "TestCIFixReinvoke",
       "parity": "sim",
       "sim": [
         "TestCIFixReinvoke"
-      ]
+      ],
+      "auth": "neutral",
+      "train": "sensitive",
+      "train_reason": "yolo run ends in the landing decision that closes the issue after the CI fix"
     },
     {
       "name": "TestCIFixReinvokeCycleLimit",
       "parity": "sim",
       "sim": [
         "TestCIFixReinvokeCycleLimit"
-      ]
+      ],
+      "auth": "neutral",
+      "train": "neutral"
     },
     {
       "name": "TestCommentLandingGateHolds",
@@ -53,7 +83,10 @@
       "sim": [
         "TestCommentLandingGate_HoldsAdvanceToQueued",
         "TestCommentLandingGate_HoldsMergeUntilProcessed"
-      ]
+      ],
+      "auth": "neutral",
+      "train": "sensitive",
+      "train_reason": "its subject is the landing gate holding a merge until comments are processed"
     },
     {
       "name": "TestCommentReentryShowsReworking",
@@ -61,62 +94,84 @@
       "sim": [
         "TestCommentReentryShowsReworking_CompletingExit",
         "TestCommentReentryShowsReworking_NonCompletingExit"
-      ]
+      ],
+      "auth": "neutral",
+      "train": "neutral"
     },
     {
       "name": "TestConjunctiveCIReviewGate",
       "parity": "sim",
       "sim": [
         "TestConjunctiveCIReviewGate"
-      ]
+      ],
+      "auth": "neutral",
+      "train": "sensitive",
+      "train_reason": "yolo run ends in the landing decision once the CI and review gates clear"
     },
     {
       "name": "TestConvergenceRace",
       "parity": "live-only",
       "live_only_reason": "other",
-      "note": "server-side atomic auto-merge race is unreproducible in the sim"
+      "note": "server-side atomic auto-merge race is unreproducible in the sim",
+      "auth": "neutral",
+      "train": "sensitive",
+      "train_reason": "its subject is the server-side auto-merge race on the landing path"
     },
     {
       "name": "TestCrossRepoSpawn",
       "parity": "sim",
       "sim": [
         "TestCrossRepoSpawn"
-      ]
+      ],
+      "auth": "sensitive",
+      "auth_reason": "spawned children are assigned via spawnAssignees (the engine identity)",
+      "train": "sensitive",
+      "train_reason": "parent and child both run to the landing decision"
     },
     {
       "name": "TestCruiseFullPipeline",
       "parity": "sim",
       "sim": [
         "TestCruiseFullPipeline"
-      ]
+      ],
+      "auth": "neutral",
+      "train": "neutral"
     },
     {
       "name": "TestExpectedReviewersDeclaredWaitsAndReprompts",
       "parity": "sim",
       "sim": [
         "TestExpectedReviewersDeclaredWaitsAndReprompts"
-      ]
+      ],
+      "auth": "neutral",
+      "train": "neutral"
     },
     {
       "name": "TestExpectedReviewersFastAdvance",
       "parity": "sim",
       "sim": [
         "TestExpectedReviewersFastAdvance"
-      ]
+      ],
+      "auth": "neutral",
+      "train": "neutral"
     },
     {
       "name": "TestExpectedReviewersFastAdvanceComposesWithAuthoritative",
       "parity": "sim",
       "sim": [
         "TestExpectedReviewersFastAdvanceComposesWithAuthoritative"
-      ]
+      ],
+      "auth": "neutral",
+      "train": "neutral"
     },
     {
       "name": "TestExpectedReviewersUndeclaredRegressionGuard",
       "parity": "sim",
       "sim": [
         "TestExpectedReviewersUndeclaredRegressionGuard"
-      ]
+      ],
+      "auth": "neutral",
+      "train": "neutral"
     },
     {
       "name": "TestLateCheckRunSuiteGate",
@@ -124,7 +179,9 @@
       "sim": [
         "TestCISuiteGate_IncidentReproduction",
         "TestCISuiteGate_PostPushWindowHoldsThenClears"
-      ]
+      ],
+      "auth": "neutral",
+      "train": "neutral"
     },
     {
       "name": "TestMergeTrainBisectionEjectsPoisoner",
@@ -135,7 +192,10 @@
       ],
       "skip_ok_legs": [
         "*/off"
-      ]
+      ],
+      "auth": "neutral",
+      "train": "sensitive",
+      "train_reason": "its subject is the merge train"
     },
     {
       "name": "TestMergeTrainColdCacheBaseMember",
@@ -144,7 +204,10 @@
       "note": "needs a cold boardcache.CacheImpl after an engine restart; tests/sim never wires the board cache in",
       "skip_ok_legs": [
         "*/off"
-      ]
+      ],
+      "auth": "neutral",
+      "train": "sensitive",
+      "train_reason": "its subject is the merge train"
     },
     {
       "name": "TestMergeTrainConflictBisectPrefixRerere",
@@ -155,7 +218,10 @@
       ],
       "skip_ok_legs": [
         "*/off"
-      ]
+      ],
+      "auth": "neutral",
+      "train": "sensitive",
+      "train_reason": "its subject is the merge train"
     },
     {
       "name": "TestMergeTrainHappyPathLanding",
@@ -167,7 +233,11 @@
       "note": "assembly all-green is a subtest of TestMergeTrainAssembly_PoisonMatrix, which cannot be referenced separately",
       "skip_ok_legs": [
         "*/off"
-      ]
+      ],
+      "auth": "sensitive",
+      "auth_reason": "credentialed trial-branch push, integration PR and landing under each auth mode (ADR-1846); the one train test that carries the credential check",
+      "train": "sensitive",
+      "train_reason": "its subject is the merge train"
     },
     {
       "name": "TestMergeTrainQueuedDeeperThanBatchCap",
@@ -175,7 +245,10 @@
       "note": "sim touches max_batch_size only inside the queued-comment-eject tests; no deterministic-ordering / two-batch landing scenario",
       "skip_ok_legs": [
         "*/off"
-      ]
+      ],
+      "auth": "neutral",
+      "train": "sensitive",
+      "train_reason": "its subject is the merge train"
     },
     {
       "name": "TestMergeTrainRedSingletonReroutesOffQueued",
@@ -185,7 +258,10 @@
       ],
       "skip_ok_legs": [
         "*/off"
-      ]
+      ],
+      "auth": "neutral",
+      "train": "sensitive",
+      "train_reason": "its subject is the merge train"
     },
     {
       "name": "TestMergeTrainRestartSafety",
@@ -196,7 +272,10 @@
       ],
       "skip_ok_legs": [
         "*/off"
-      ]
+      ],
+      "auth": "neutral",
+      "train": "sensitive",
+      "train_reason": "its subject is the merge train"
     },
     {
       "name": "TestMergeTrainRunawayGuardPausesBatch",
@@ -206,7 +285,10 @@
       ],
       "skip_ok_legs": [
         "*/off"
-      ]
+      ],
+      "auth": "neutral",
+      "train": "sensitive",
+      "train_reason": "its subject is the merge train"
     },
     {
       "name": "TestMergeTrainSingletonFastPathLandsExactlyOnce",
@@ -217,7 +299,10 @@
       ],
       "skip_ok_legs": [
         "*/off"
-      ]
+      ],
+      "auth": "neutral",
+      "train": "sensitive",
+      "train_reason": "its subject is the merge train"
     },
     {
       "name": "TestMergeTrainTwoBasesConcurrent",
@@ -228,28 +313,39 @@
       "note": "proves partition mechanics (distinct per-base trains landing in one poll); in-flight markers are unexported so independence is proven by proxy, and simgh links PR to issue by branch convention so the base-conditional GraphQL linkage has no sim analogue",
       "skip_ok_legs": [
         "*/off"
-      ]
+      ],
+      "auth": "neutral",
+      "train": "sensitive",
+      "train_reason": "its subject is the merge train"
     },
     {
       "name": "TestNoWorkNeeded",
       "parity": "sim",
       "sim": [
         "TestNoWorkNeeded"
-      ]
+      ],
+      "auth": "neutral",
+      "train": "neutral"
     },
     {
       "name": "TestPauseLiftedOnlyByPostPauseHumanComment",
       "parity": "sim",
       "sim": [
         "TestPauseHoldsAgainstUnprocessableComment_ResumesOnPostPauseComment"
-      ]
+      ],
+      "auth": "sensitive",
+      "auth_reason": "resume by a human comment relies on filterHuman and selfLogin recognising the engine's own comments",
+      "train": "neutral"
     },
     {
       "name": "TestPausedMergedPRRecovery",
       "parity": "sim",
       "sim": [
         "TestPausedMergedPRRecovery"
-      ]
+      ],
+      "auth": "neutral",
+      "train": "sensitive",
+      "train_reason": "recovers a pause on an item whose PR has already landed"
     },
     {
       "name": "TestPostMergeCommentNotApplied",
@@ -257,7 +353,10 @@
       "sim": [
         "TestPostMergeGuard_LateCommentIsNotApplied",
         "TestPostMergeGuard_MergeTrainMemberIsNotApplied"
-      ]
+      ],
+      "auth": "neutral",
+      "train": "sensitive",
+      "train_reason": "its subject is the post-merge guard on a landed item, including merge-train members"
     },
     {
       "name": "TestQueuedMemberCommentEjection",
@@ -268,63 +367,84 @@
       ],
       "skip_ok_legs": [
         "*/off"
-      ]
+      ],
+      "auth": "neutral",
+      "train": "sensitive",
+      "train_reason": "its subject is the Queued holding stage and the train's comment eject"
     },
     {
       "name": "TestReviewAuthorityAdvisoryRegressionGuard",
       "parity": "sim",
       "sim": [
         "TestReviewAuthorityAdvisoryRegressionGuard"
-      ]
+      ],
+      "auth": "neutral",
+      "train": "neutral"
     },
     {
       "name": "TestReviewAuthorityClearsOnApproval",
       "parity": "sim",
       "sim": [
         "TestReviewAuthorityClearsOnApproval"
-      ]
+      ],
+      "auth": "neutral",
+      "train": "neutral"
     },
     {
       "name": "TestReviewAuthorityCycleLimitPauses",
       "parity": "sim",
       "sim": [
         "TestReviewAuthorityCycleLimitPauses"
-      ]
+      ],
+      "auth": "neutral",
+      "train": "neutral"
     },
     {
       "name": "TestReviewAuthorityDeclaredBotDoesNotDeferHumanEscalation",
       "parity": "sim",
       "sim": [
         "TestReviewAuthorityDeclaredBotDoesNotDeferHumanEscalation"
-      ]
+      ],
+      "auth": "neutral",
+      "train": "neutral"
     },
     {
       "name": "TestReviewAuthorityReinvokesOnChangesRequested",
       "parity": "sim",
       "sim": [
         "TestReviewAuthorityReinvokesOnChangesRequested"
-      ]
+      ],
+      "auth": "neutral",
+      "train": "neutral"
     },
     {
       "name": "TestReviewAuthorityYoloDoesNotBypassBlock",
       "parity": "sim",
       "sim": [
         "TestReviewAuthorityYoloDoesNotBypassBlock"
-      ]
+      ],
+      "auth": "neutral",
+      "train": "neutral"
     },
     {
       "name": "TestSmokeSingleRepoDispatch",
       "parity": "sim",
       "sim": [
         "TestSmoke_FullPipelineToDone"
-      ]
+      ],
+      "auth": "neutral",
+      "train": "neutral"
     },
     {
       "name": "TestSmokeSingleRepoFullPipeline",
       "parity": "sim",
       "sim": [
         "TestSmoke_FullPipelineToDone"
-      ]
+      ],
+      "auth": "sensitive",
+      "auth_reason": "one pass of every first write per object type (push, PR, comments, labels, board) — the App grant surface, ADR-1846/ADR-1893",
+      "train": "sensitive",
+      "train_reason": "runs Specify to a merged PR through the landing path"
     },
     {
       "name": "TestSwitchTrainMode",
@@ -333,7 +453,9 @@
       "note": "needs a bed process restart to flip merge_train; the sim covers each mode in TestMergeTrainMode_On/_Off but not the live switch",
       "skip_ok_legs": [
         "*/*"
-      ]
+      ],
+      "auth": "neutral",
+      "train": "neutral"
     },
     {
       "name": "TestYoloAutoMergeLabel",
@@ -341,7 +463,10 @@
       "sim": [
         "TestYoloAutoMergeLabel"
       ],
-      "note": "train-off leg only in the sim; the live test also covers the train-on leg"
+      "note": "train-off leg only in the sim; the live test also covers the train-on leg",
+      "auth": "neutral",
+      "train": "sensitive",
+      "train_reason": "its subject is the auto-merge decision on the landing path"
     },
     {
       "name": "TestYoloRemovedMidValidateBlocksMerge",
@@ -352,7 +477,10 @@
         "TestYoloRemovedMidValidateBlocksMerge_WaitForCI",
         "TestYoloRemovedMidValidateBlocksMerge_WaitForCI_PositiveControl"
       ],
-      "note": "train-off only in the sim; the wait_for_ci:false twin is the one that discriminates on the dispatch snapshot (the sim board is always fresh, so the wait_for_ci:true twin guards the end-to-end outcome); the live REST-poll window proof has no sim analogue because the worker removes the label synchronously"
+      "note": "train-off only in the sim; the wait_for_ci:false twin is the one that discriminates on the dispatch snapshot (the sim board is always fresh, so the wait_for_ci:true twin guards the end-to-end outcome); the live REST-poll window proof has no sim analogue because the worker removes the label synchronously",
+      "auth": "neutral",
+      "train": "sensitive",
+      "train_reason": "its subject is the merge decision at Validate on the landing path"
     }
   ]
 }
