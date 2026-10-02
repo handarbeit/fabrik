@@ -69,9 +69,16 @@ type StageComment struct {
 
 // Spec describes the state to seed.
 type Spec struct {
-	// Column is the board column the item is placed at, and the stage whose
-	// completion the seed represents: Research, Plan, Implement, Review or Validate.
+	// Column is the board column the item is placed at: Research, Plan, Implement,
+	// Review or Validate. By default the seed represents that stage's completion
+	// (stage:<Column>:complete, the state an item parks in after the stage ran).
 	Column string
+	// RunColumn instead leaves Column's own stage for the engine to run: only the
+	// stages before Column are marked complete, so the engine dispatches one real
+	// invocation of Column (the state an item is in the moment it arrives). Use it
+	// when the subject needs that stage's real output — a Validate run that sets the
+	// CI gate, a CI-fix reinvoke — but not the stages before it.
+	RunColumn bool
 	// BaseBranch is the PR's base; empty means DefaultBase.
 	BaseBranch string
 	// Title and IssueBody are the filed issue's.
@@ -106,7 +113,9 @@ type Spec struct {
 
 // Plan is what Build decides: every field is an exact input to the executor.
 type Plan struct {
-	Column      string
+	Column string
+	// RunsColumn: the engine runs Column's stage itself; Column is not marked complete.
+	RunsColumn  bool
 	Status      string
 	DeferStatus bool
 	IssueLabels []string
@@ -133,6 +142,14 @@ func stageIndex(name string) int {
 	return -1
 }
 
+// doneIndex is the index of the last stage the seed marks complete.
+func (s Spec) doneIndex() int {
+	if s.RunColumn {
+		return stageIndex(s.Column) - 1
+	}
+	return stageIndex(s.Column)
+}
+
 // Validate reports a malformed spec.
 func (s Spec) Validate() error {
 	ci := stageIndex(s.Column)
@@ -148,7 +165,7 @@ func (s Spec) Validate() error {
 			return fmt.Errorf("prior-stage comment for %q: want a stage at or before %s", c.Stage, s.Column)
 		}
 	}
-	if ci < stageIndex(firstPRStage) {
+	if s.doneIndex() < stageIndex(firstPRStage) {
 		switch {
 		case s.Draft:
 			return fmt.Errorf("seed at %s carries no PR, so Draft cannot apply", s.Column)
@@ -186,9 +203,10 @@ func Build(spec Spec, issue int) (Plan, error) {
 	if err := spec.Validate(); err != nil {
 		return Plan{}, err
 	}
-	ci := stageIndex(spec.Column)
+	ci := spec.doneIndex()
 	p := Plan{
 		Column:      spec.Column,
+		RunsColumn:  spec.RunColumn,
 		Status:      spec.Column,
 		DeferStatus: spec.DeferStatus,
 		IssueLabels: append([]string(nil), spec.ExtraLabels...),
@@ -289,12 +307,22 @@ func CheckFidelity(plan Plan, fx Fixture) []string {
 	var problems []string
 	add := func(format string, args ...any) { problems = append(problems, fmt.Sprintf(format, args...)) }
 
-	if plan.Column != fx.Column {
-		add("plan is for column %q but the fixture is for %q", plan.Column, fx.Column)
+	// A seed that leaves Column for the engine to run is the state an item is in on
+	// arrival: the board has advanced to Column but nothing else has changed, so it
+	// is compared with the previous stage's parked state, at Column's Status.
+	wantFixtureColumn, wantStatus := plan.Column, fx.Status
+	if plan.RunsColumn {
+		if i := stageIndex(plan.Column); i > 0 {
+			wantFixtureColumn = Stages[i-1]
+		}
+		wantStatus = plan.Column
+	}
+	if fx.Column != wantFixtureColumn {
+		add("plan for column %q (runs column: %v) needs the %q fixture, got %q", plan.Column, plan.RunsColumn, wantFixtureColumn, fx.Column)
 		return problems
 	}
-	if plan.Status != fx.Status {
-		add("seeded board Status %q, but a real traversal parks at %q", plan.Status, fx.Status)
+	if plan.Status != wantStatus {
+		add("seeded board Status %q, but a real traversal parks at %q", plan.Status, wantStatus)
 	}
 	have := toSet(fx.Labels)
 	for _, l := range plan.StageLabels {
@@ -304,6 +332,9 @@ func CheckFidelity(plan Plan, fx Fixture) []string {
 	}
 	if want := "stage:" + fx.Column + ":complete"; !contains(plan.StageLabels, want) {
 		add("seed omits %q, the label that says the stage the item is parked at has completed", want)
+	}
+	if plan.RunsColumn && contains(plan.StageLabels, "stage:"+plan.Column+":complete") {
+		add("seed marks %s complete although the engine is to run it", plan.Column)
 	}
 	switch {
 	case plan.CreatePR && fx.PR == nil:

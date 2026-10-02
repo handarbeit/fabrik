@@ -1,10 +1,8 @@
 {
   "version": 1,
-  "column": "Plan",
-  "status": "Plan",
+  "column": "Specify",
+  "status": "Specify",
   "labels": [
-    "stage:Plan:complete",
-    "stage:Research:complete",
     "stage:Specify:complete"
   ],
   "provenance": "sim-engine",

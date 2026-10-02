@@ -57,13 +57,8 @@ func seedAtStage(t *testing.T, env *Env, repo string, spec seedspec.Spec) (issue
 		// (mirrors the engine's resolver) before seeding the completion labels.
 		AwaitPRForBranchVisible(t, env, repo, issueNum, awaitSeedTimeout)
 	}
-	for _, body := range plan.Comments {
-		CommentOnIssue(t, env, repo, issueNum, body)
-	}
-	for _, label := range plan.StageLabels {
-		AddLabel(t, env, repo, issueNum, label)
-		AwaitLabelVisible(t, env, repo, issueNum, label, awaitSeedTimeout)
-	}
+	postSeedComments(t, env, repo, issueNum, plan.Comments)
+	addSeedLabels(t, env, repo, issueNum, plan.StageLabels)
 	if !plan.DeferStatus {
 		SetIssueStatus(t, env, itemID, plan.Status)
 	}
@@ -71,4 +66,24 @@ func seedAtStage(t *testing.T, env *Env, repo string, spec seedspec.Spec) (issue
 	t.Logf("seeded %s: issue #%d, PR #%d, labels %v, Status=%q (deferred=%v, draft=%v, path %s)",
 		plan.Column, issueNum, prNum, plan.StageLabels, plan.Status, plan.DeferStatus, plan.PRDraft, plan.Path)
 	return issueNum, prNum, itemID
+}
+
+// postSeedComments posts the plan's prior-stage comments (none by default). It is a
+// plain iteration over a list, kept out of seedAtStage so that function stays free of
+// loops of any kind (the seed-path guard in tests/e2e/inconclusive).
+func postSeedComments(t *testing.T, env *Env, repo string, issueNum int, bodies []string) {
+	t.Helper()
+	for _, body := range bodies {
+		CommentOnIssue(t, env, repo, issueNum, body)
+	}
+}
+
+// addSeedLabels applies each label and waits for it to be visible on the engine's
+// read path (awaitVisible, #1974) before the next, so none is reported ready early.
+func addSeedLabels(t *testing.T, env *Env, repo string, issueNum int, labels []string) {
+	t.Helper()
+	for _, label := range labels {
+		AddLabel(t, env, repo, issueNum, label)
+		AwaitLabelVisible(t, env, repo, issueNum, label, awaitSeedTimeout)
+	}
 }

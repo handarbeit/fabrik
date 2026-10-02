@@ -124,7 +124,7 @@ func engineSHA(t *testing.T) string {
 //
 // EngineSHA is informational and never compared: it moves with every commit.
 func TestSeedFixturesMatchEngineTraversal(t *testing.T) {
-	for _, column := range seedspec.Stages[1:] {
+	for _, column := range seedspec.Stages {
 		column := column
 		t.Run(column, func(t *testing.T) {
 			t.Parallel()

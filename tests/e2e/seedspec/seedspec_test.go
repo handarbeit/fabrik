@@ -63,6 +63,34 @@ func TestMinimalPlansMatchRecordedTraversal(t *testing.T) {
 	}
 }
 
+// TestRunColumnPlansMatchRecordedTraversal: a seed that leaves a column's own stage
+// for the engine to run is the arrival state — the previous stage's parked labels and
+// PR, at the new column's Status.
+func TestRunColumnPlansMatchRecordedTraversal(t *testing.T) {
+	for i, column := range Stages[1:] {
+		prev := Stages[i]
+		t.Run(column, func(t *testing.T) {
+			s := specFor(column)
+			s.RunColumn = true
+			p := mustBuild(t, s, 7)
+			if !p.RunsColumn || contains(p.StageLabels, "stage:"+column+":complete") {
+				t.Fatalf("plan must leave %s to the engine: %+v", column, p)
+			}
+			if problems := CheckFidelity(p, loadFixture(t, prev)); len(problems) != 0 {
+				t.Fatalf("arrival seed at %s is not a state the engine produces:\n  %s", column, strings.Join(problems, "\n  "))
+			}
+			// The Implement run creates its own draft PR; every later column inherits one.
+			if wantPR := stageIndex(column)-1 >= stageIndex(firstPRStage); p.CreatePR != wantPR {
+				t.Fatalf("CreatePR=%v at %s, want %v", p.CreatePR, column, wantPR)
+			}
+			// ...and it must not pass against the wrong fixture.
+			if problems := CheckFidelity(p, loadFixture(t, column)); len(problems) == 0 {
+				t.Fatalf("arrival seed at %s passed against its own completed-state fixture", column)
+			}
+		})
+	}
+}
+
 func TestDraftSeedIsADeclaredDeviation(t *testing.T) {
 	s := specFor("Review")
 	s.Draft = true
@@ -105,7 +133,7 @@ func TestFidelityRejectsImpossibleSeeds(t *testing.T) {
 			}
 		})
 	}
-	// A PR where the traversal has none yet.
+	// A plan for a different column must not pass.
 	p := mustBuild(t, specFor("Implement"), 7)
 	if problems := CheckFidelity(p, loadFixture(t, "Plan")); len(problems) == 0 {
 		t.Fatal("plan for a different column must not pass")
