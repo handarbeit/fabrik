@@ -536,7 +536,7 @@ func (g *Gate) postSuiteTail(ctx context.Context, cell Cell, label string, logs 
 		// tests/e2e/*.go), so nothing today could print this string other than the
 		// outer suite's own -timeout kill. If one ever does, this misfires and
 		// triggers teardown on a run that was not actually a timeout kill.
-		if fileContains(jsonlog, "panic: test timed out after") {
+		if anyFileContains(logs, "panic: test timed out after") {
 			g.errf("== E2E_TIMEOUT kill detected (leg: %s) — running best-effort teardown ==\n", label)
 			if err := g.Reset(ctx, ResetOptions{}); err != nil {
 				g.errln("warning: automatic teardown failed; run scripts/e2e/reset.sh manually")

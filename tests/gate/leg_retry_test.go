@@ -307,3 +307,20 @@ func TestRunRealFailureKeepsItsOwnExitCodeOverInconclusive(t *testing.T) {
 		t.Fatalf("exit = %d, want the suite's own 1", code)
 	}
 }
+
+// A retry that dies on the suite's own -timeout must trigger the same
+// best-effort teardown as a first-attempt timeout kill: postSuiteTail scans every
+// log of the leg, not only the first.
+func TestLegTimeoutKillInARetryStillTriggersTeardown(t *testing.T) {
+	g, _, eb := retryGate(t,
+		legAttempt{out: inc("TestB", "straddled")},
+		legAttempt{out: streams(`{"Action":"run","Test":"TestB"}`, `{"Action":"output","Test":"TestB","Output":"panic: test timed out after 4h0m0s\n"}`), rc: 2},
+	)
+	err := g.RunLeg(context.Background(), defaultCell)
+	if exitCode(err) != 2 {
+		t.Fatalf("a retry killed by the suite timeout is red (rc 2), got %v", err)
+	}
+	if !strings.Contains(eb.String(), "E2E_TIMEOUT kill detected") {
+		t.Errorf("a timeout kill in a retry log must trigger teardown, stderr:\n%s", eb.String())
+	}
+}
