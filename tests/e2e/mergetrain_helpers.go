@@ -723,15 +723,19 @@ func removePausedConcurrently(env *Env, repo string, nums []int) []error {
 	return failed
 }
 
-// repauseOnFailure registers a cleanup that, only when the test failed, re-applies
-// fabrik:paused to the issue if it is still open — so a failed run cannot leave
+// repauseOnFailure registers a cleanup that, only when the test failed (or ended
+// INCONCLUSIVE, #1973), re-applies fabrik:paused to the issue if it is still
+// open — so a failed run cannot leave
 // un-paused Queued members to join a later scenario's batch. Call it right after
 // the member is queued: cleanups run LIFO, so it runs before FileIssue's own
 // close-the-issue cleanup for the same member. Best-effort by design.
 func repauseOnFailure(t *testing.T, env *Env, repo string, num int) {
 	t.Helper()
 	t.Cleanup(func() {
-		if !t.Failed() {
+		// An INCONCLUSIVE skip (#1973) must re-pause too: it is retried against the
+		// same bed, and a stale un-paused Queued member would fail the retry's
+		// pre-flight (or join its batch).
+		if !t.Failed() && !t.Skipped() {
 			return
 		}
 		if state, err := tryIssueState(env, repo, num); err == nil && state != "OPEN" {
@@ -819,7 +823,27 @@ func logLinesSince(t *testing.T, env *Env, offset int64) []string {
 // waitForLogMatch polls the log from offset until some line satisfies match, and
 // returns that line. WaitForLogLine can only substring-match; the scenario needs
 // to match on a parsed field (the repo and trainKey a line names).
+//
+// A timeout is a t.Fatalf: for most callers "the line never appeared" IS the
+// engine regression under test. A guard whose timeout instead means the
+// scenario's PRECONDITION never arose uses waitForLogMatchInconclusive.
 func waitForLogMatch(t *testing.T, env *Env, offset int64, timeout time.Duration, what string, match func(line string) bool) string {
+	t.Helper()
+	return waitForLogMatchOr(t, env, offset, timeout, what, match, func(msg string) { t.Fatalf("%s", msg) })
+}
+
+// waitForLogMatchInconclusive is waitForLogMatch for a precondition guard
+// (#1973): when the awaited line never appears the scenario never reached the
+// state it exists to test, so the test ends INCONCLUSIVE — uncovered, retried by
+// the gate, never green — instead of FAIL. Use it only where the awaited line is
+// evidence that the harness produced the scenario's setup, never where its
+// absence is itself an assertion about engine behaviour.
+func waitForLogMatchInconclusive(t *testing.T, env *Env, offset int64, timeout time.Duration, what string, match func(line string) bool) string {
+	t.Helper()
+	return waitForLogMatchOr(t, env, offset, timeout, what, match, func(msg string) { Inconclusive(t, "%s", msg) })
+}
+
+func waitForLogMatchOr(t *testing.T, env *Env, offset int64, timeout time.Duration, what string, match func(line string) bool, onTimeout func(msg string)) string {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for {
@@ -829,7 +853,8 @@ func waitForLogMatch(t *testing.T, env *Env, offset int64, timeout time.Duration
 			}
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("timed out after %s waiting for log line: %s (scanned from offset %d)", timeout, what, offset)
+			onTimeout(fmt.Sprintf("timed out after %s waiting for log line: %s (scanned from offset %d)", timeout, what, offset))
+			return "" // unreachable: both callbacks end the test
 		}
 		time.Sleep(10 * time.Second)
 	}

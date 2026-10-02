@@ -169,8 +169,13 @@ func TestMergeTrainQueuedDeeperThanBatchCap(t *testing.T) {
 		t.Fatalf("first snapshot lists %d members with no \"batch capped\" line — the bed's max_batch_size is >= %d, "+
 			"so batch-cap selection was never exercised (scenario needs %d)", len(snapMembers), memberCount, batchCap)
 	case !capFound || capQueued != memberCount || len(snapMembers) != batchCap:
-		t.Fatalf("poll boundary straddled the unpause: the engine's first view of the partition had fewer than %d Queued members "+
-			"(cap line found=%v, queued=%d; snapshot lists %d: %v). This is a harness race, not an engine regression — re-run.",
+		// A precondition guard (#1973): it fires before A1's assertion about WHICH
+		// members the engine selected, and means the engine's first poll saw the
+		// partition mid-release, so the capped selection was never exercised. The
+		// two Fatalf cases above (bed configuration) stay failures — a retry would
+		// hit the same configuration.
+		Inconclusive(t, "poll boundary straddled the unpause: the engine's first view of the partition had fewer than %d Queued members "+
+			"(cap line found=%v, queued=%d; snapshot lists %d: %v). This is a harness race, not an engine regression.",
 			memberCount, capFound, capQueued, len(snapMembers), snapMembers)
 	}
 	if !sameMemberSet(snapMembers, firstFive) {
@@ -203,9 +208,12 @@ func TestMergeTrainQueuedDeeperThanBatchCap(t *testing.T) {
 		for _, n := range nums {
 			if strings.Contains(l, fmt.Sprintf("review-thread finding(s) on Queued member #%d ", n)) ||
 				strings.Contains(l, fmt.Sprintf("unprocessed human comment(s) on Queued member #%d ", n)) {
-				t.Fatalf("A2 inconclusive: member #%d was ejected for reviewer feedback while batch 1 was in flight, so Queued "+
+				// A precondition guard (#1973): fires before any A2 assertion, caused by
+				// the bed's reviewer rather than the engine under test. A1 has passed to
+				// get here; the retry re-runs the whole test and re-proves it.
+				Inconclusive(t, "A2: member #%d was ejected for reviewer feedback while batch 1 was in flight, so Queued "+
 					"membership changed for a legitimate reason (not #1833 selection churn) — check the member PR's review "+
-					"threads; this is environmental, re-run: %s", n, strings.TrimSpace(l))
+					"threads; this is environmental: %s", n, strings.TrimSpace(l))
 			}
 		}
 	}

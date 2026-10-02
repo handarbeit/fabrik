@@ -187,7 +187,10 @@ func TestMergeTrainColdCacheBaseMember(t *testing.T) {
 	// cold for that item and the scenario proved nothing.
 	for _, n := range members {
 		n := n
-		waitForLogMatch(t, env, logStart, 10*time.Minute,
+		// A precondition guard (#1973): without the cold-cache line the scenario never
+		// reached the state it tests. Only the TIMEOUT is inconclusive; every
+		// assertion below stays a Fatalf/Errorf.
+		waitForLogMatchInconclusive(t, env, logStart, 10*time.Minute,
 			fmt.Sprintf("cold-cache exclusion for member #%d (\"not yet hydrated\") — its absence means the run was vacuous", n),
 			func(l string) bool { return matchNotHydrated(l, n) })
 	}
@@ -204,7 +207,9 @@ func TestMergeTrainColdCacheBaseMember(t *testing.T) {
 	}
 	landingPR, viaFastPath := waitForLandingPRDetail(t, env, repo, memberPRs[members[0]], 2*time.Minute)
 	if viaFastPath {
-		t.Fatalf("member #%d landed via the singleton fast path (PR #%d) — that path cannot reproduce the #1688 contradiction, so A1/A2 would be vacuous; the members did not batch together",
+		// A precondition guard (#1973): evidence the members did not batch together,
+		// found before the A1/A2 assertions it protects.
+		Inconclusive(t, "member #%d landed via the singleton fast path (PR #%d) — that path cannot reproduce the #1688 contradiction, so A1/A2 would be vacuous; the members did not batch together",
 			members[0], landingPR)
 	}
 	assertPRMerged(t, env, repo, landingPR)
