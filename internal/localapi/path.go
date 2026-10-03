@@ -37,7 +37,12 @@ func SocketPath(fabrikDir string) string {
 		return primary
 	}
 	sum := sha256.Sum256([]byte(abs))
-	return filepath.Join(os.TempDir(), fmt.Sprintf("fabrik-%d", os.Getuid()), hex.EncodeToString(sum[:6])+".sock")
+	return filepath.Join(fallbackDir(), hex.EncodeToString(sum[:6])+".sock")
+}
+
+// fallbackDir is the private per-user directory holding fallback sockets.
+func fallbackDir() string {
+	return filepath.Join(os.TempDir(), fmt.Sprintf("fabrik-%d", os.Getuid()))
 }
 
 // prepareDir makes sure the directory that will hold the socket exists. A
@@ -57,6 +62,13 @@ func prepareDir(dir string) error {
 	}
 	if st, ok := fi.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Getuid() {
 		return fmt.Errorf("socket directory %s is owned by uid %d, not %d", dir, st.Uid, os.Getuid())
+	}
+	// Only the per-user fallback directory is ours to tighten; the primary
+	// <fabrikDir>/.fabrik/state directory also holds other engine state files.
+	if dir == fallbackDir() && fi.Mode().Perm() != 0o700 {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return fmt.Errorf("tightening socket directory %s to 0700: %w", dir, err)
+		}
 	}
 	return nil
 }

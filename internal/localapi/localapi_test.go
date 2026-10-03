@@ -214,6 +214,39 @@ func TestSocketPathFallbackAndDistinct(t *testing.T) {
 	}
 }
 
+func TestPrepareDirTightensExistingFallbackDir(t *testing.T) {
+	t.Setenv("TMPDIR", shortDir(t))
+	dir := fallbackDir()
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareDir(dir); err != nil {
+		t.Fatalf("prepareDir: %v", err)
+	}
+	fi, err := os.Lstat(dir)
+	if err != nil || fi.Mode().Perm() != 0o700 {
+		t.Errorf("existing fallback dir must be tightened to 0700, got %v %v", fi.Mode().Perm(), err)
+	}
+
+	// A non-fallback directory (the primary state dir) is left as it is.
+	other := filepath.Join(shortDir(t), "state")
+	if err := os.Mkdir(other, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(other, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareDir(other); err != nil {
+		t.Fatalf("prepareDir: %v", err)
+	}
+	if fi, _ := os.Lstat(other); fi.Mode().Perm() != 0o755 {
+		t.Errorf("non-fallback dir must not be chmodded, got %v", fi.Mode().Perm())
+	}
+}
+
 func TestConnectionCapRejectsExtras(t *testing.T) {
 	srv := startServer(t, echoBackend())
 	var held []net.Conn
