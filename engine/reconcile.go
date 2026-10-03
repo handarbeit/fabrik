@@ -68,6 +68,7 @@ func (e *Engine) reconcileTick(cacheImpl *boardcache.CacheImpl, mgr eventIngesti
 		e.logf(0, "reconcile", "light reconcile failed (no health state change): %v\n", err)
 		return
 	}
+	e.health.noteReconcileOK(e.now())
 	if driftCount == 0 {
 		transitionMgrHealthState(mgr, WebhookStreamHealthy, "")
 		return
