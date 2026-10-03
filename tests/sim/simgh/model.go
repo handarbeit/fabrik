@@ -177,6 +177,8 @@ type issueRecord struct {
 	author    string
 	labels    []string
 	assignees []string
+	// milestone is the issue's milestone, nil when it has none (#1967 R10).
+	milestone *gh.Milestone
 	// labelAppliedAt records when each currently-applied label was applied,
 	// read back by FetchLabelAppliedAt. Three separate engine mechanisms
 	// anchor timeouts on this value, so it is load-bearing, not metadata.

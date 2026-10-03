@@ -748,6 +748,20 @@ func (e *Engine) SimulateCacheStatusWriteThroughForTest(repo string, number int,
 	e.store.Apply(itemstate.LocalStatusUpdated{Repo: repo, Number: number, NewStatus: status})
 }
 
+// ItemMilestoneForTest reports the milestone the engine's store holds for an
+// item (#1967 R10): the milestone (nil when known-none), whether the store has
+// captured it at all, and whether the item is in the store. Reads the store
+// directly with no GitHub fallback. Test seam only (tests/sim); production
+// never calls this.
+func (e *Engine) ItemMilestoneForTest(repo string, number int) (ms *gh.Milestone, known, inStore bool) {
+	snap, ok := e.store.Peek(repo, number)
+	if !ok {
+		return nil, false, false
+	}
+	st := snap.State()
+	return st.Milestone, st.MilestoneKnown, true
+}
+
 // SetMergeTrainQueueSortDisabledForTest disables groupQueuedByRepoAndBase's
 // deterministic Queued-ordering sort (#1833) — see the
 // mergeTrainQueueSortDisabledForTest field's doc comment. Test seam only

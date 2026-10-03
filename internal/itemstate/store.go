@@ -172,6 +172,51 @@ func (s *Store) Get(repo string, number int) (Snapshot, error) {
 	return snap, nil
 }
 
+// Peek returns an immutable snapshot of the item, or ok=false when it is not in
+// the cache. Unlike Get it NEVER calls the FallbackFetcher, so it can never
+// reach GitHub — the read path for local introspection that must cost zero
+// API calls (#1967 R7).
+func (s *Store) Peek(repo string, number int) (Snapshot, bool) {
+	key := itemKeyFor(repo, number)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	item, ok := s.items[key]
+	if !ok {
+		return Snapshot{}, false
+	}
+	return newSnapshot(*item), true
+}
+
+// Scan calls visit once per cached item while holding the Store's read lock,
+// passing a pointer to the live ItemState. It avoids All()'s deep copy of
+// comments, reviews and check runs for callers that need only a few fields
+// from every item (the overseer board view, #1967).
+//
+// visit MUST NOT retain the pointer or anything reachable from it (copy out
+// what it needs), MUST NOT mutate it, and MUST NOT block or call back into the
+// Store — the read lock is held for the whole scan. Iteration order is
+// unspecified.
+func (s *Store) Scan(visit func(item *ItemState)) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, item := range s.items {
+		visit(item)
+	}
+}
+
+// RepoWorkerKeys returns the keys of every active repo-scoped worker marker
+// (see EnterRepoWorker), in unspecified order. Read-only enumeration for local
+// introspection (#1967).
+func (s *Store) RepoWorkerKeys() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	keys := make([]string, 0, len(s.repoWorkers))
+	for k := range s.repoWorkers {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
 // Subscribe registers an observer that will be called after every successful
 // non-no-op Apply. Returns an unsubscribe function; calling it removes the
 // observer. The unsubscribe function is safe to call concurrently.
