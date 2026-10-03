@@ -287,6 +287,9 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		}
 		return applyProjectItem(item, merged)
 
+	case IssueMilestoneUpdated:
+		return applyMilestone(item, v.Milestone, true)
+
 	case IssueLabeled:
 		if !containsString(item.Labels, v.Label) {
 			item.Labels = append(item.Labels, v.Label)
