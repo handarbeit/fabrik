@@ -14,6 +14,7 @@ import (
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/githubauth"
 	"github.com/handarbeit/fabrik/internal/itemstate"
+	"github.com/handarbeit/fabrik/internal/localapi"
 	"github.com/handarbeit/fabrik/internal/selfupgrade"
 	"github.com/handarbeit/fabrik/stages"
 	"github.com/handarbeit/fabrik/tui"
@@ -237,6 +238,10 @@ type Engine struct {
 	// stay single-goroutine; their write sites also publish here. Zero-value
 	// ready.
 	health daemonHealth
+	// localAPI is the local read API server (#1967); nil until Run() binds it
+	// (and when binding failed). Guarded by localAPIMu.
+	localAPIMu sync.Mutex
+	localAPI   *localapi.Server
 	// logThrottle is the shared dedup state behind logfThrottled (R4,
 	// logthrottle.go) — collapses repeated identical log lines (e.g. the
 	// per-poll rate-limit stats lines) into one emission per throttle window

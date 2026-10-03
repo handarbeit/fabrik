@@ -625,6 +625,13 @@ func (e *Engine) Run() error {
 		go e.reconcileLoop(ctx, cacheImpl, e.webhookMgr)
 	}
 
+	// Local read API (#1967): bound after the instance lock is held (so a
+	// leftover socket is provably stale) and after e.webhookMgr is final, and
+	// before the first poll. Closed when Run() returns, and explicitly before a
+	// SIGHUP re-exec (performSighupRestart).
+	e.startLocalAPI()
+	defer e.closeLocalAPI()
+
 	if e.events == nil {
 		fmt.Println("\nFabrik is running. Press Ctrl+C to stop.")
 		fmt.Println()

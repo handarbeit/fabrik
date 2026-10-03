@@ -59,6 +59,9 @@ func performSighupRestart(e *Engine, lockFile *os.File) {
 	if e.webhookMgr != nil {
 		e.webhookMgr.Stop()
 	}
+	// An exec never runs deferred cleanup: close the local API (unlinking its
+	// socket) first. The next process also replaces a stale socket at startup.
+	e.closeLocalAPI()
 
 	// Release the lock explicitly before exec. O_CLOEXEC means the fd is also
 	// closed atomically at exec time, but doing it here makes the intent clear.
