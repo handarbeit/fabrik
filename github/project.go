@@ -1,6 +1,7 @@
 package github
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -89,7 +90,10 @@ type itemNode struct {
 		Repository *struct {
 			NameWithOwner string `json:"nameWithOwner"`
 		} `json:"repository"`
-		Labels struct {
+		// Milestone is raw so an absent key (never captured) stays
+		// distinguishable from an explicit null (no milestone) — #1967 R10.
+		Milestone json.RawMessage `json:"milestone"`
+		Labels    struct {
 			Nodes []struct {
 				Name string `json:"name"`
 			} `json:"nodes"`
@@ -260,6 +264,10 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
               title
               state
               updatedAt
+              milestone {
+                title
+                number
+              }
               repository {
                 nameWithOwner
               }
@@ -411,6 +419,8 @@ func (c *Client) fetchProjectBoardOnce(owner, repo string, projectNum int, owner
 			item.Status = node.FieldValueByName.Name
 		}
 
+		item.Milestone, item.MilestoneKnown = parseMilestone(node.Content.Milestone)
+
 		// Populate minimal label set (first:5) for cleanupClosedIssueLocks on
 		// closed items (which are never deep-fetched). Open items receive a full,
 		// authoritative label set from FetchItemDetails.
@@ -422,6 +432,26 @@ func (c *Client) fetchProjectBoardOnce(owner, repo string, projectNum int, owner
 	}
 
 	return board, len(allNodes), maxTotalCount, nil
+}
+
+// parseMilestone decodes the raw `milestone` field of an Issue content node.
+// An absent key (len(raw)==0) is unknown; an explicit null is known-none; an
+// object is known-set. A malformed value is treated as unknown (never "none").
+func parseMilestone(raw json.RawMessage) (*Milestone, bool) {
+	if len(raw) == 0 {
+		return nil, false
+	}
+	if string(raw) == "null" {
+		return nil, true
+	}
+	var m struct {
+		Title  string `json:"title"`
+		Number int    `json:"number"`
+	}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, false
+	}
+	return &Milestone{Title: m.Title, Number: m.Number}, true
 }
 
 // probeItemNode mirrors one element of items.nodes in the ProbeProjectBoard query.
