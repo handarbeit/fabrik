@@ -164,6 +164,24 @@ type ProjectItem struct {
 	// LinkedPRMergeQueueEntry holds the queue position and state when the PR is
 	// enqueued. Nil when the PR is not in the queue or mergeQueueEntry was null.
 	LinkedPRMergeQueueEntry *MergeQueueEntry
+
+	// Milestone is the issue's milestone (title and number) from the shallow
+	// board query's `milestone { title number }` field (#1967 R10). Nil means
+	// "no milestone" ONLY when MilestoneKnown is true; when MilestoneKnown is
+	// false the value was simply never captured by whatever produced this item
+	// (deep fetch, PR content nodes, a fallback fetch) and consumers must treat
+	// it as unknown, never as "none".
+	Milestone *Milestone
+	// MilestoneKnown is true when the producer of this ProjectItem observed the
+	// milestone (set or explicitly null). Store write paths copy Milestone only
+	// when this is true, so paths that do not carry it can never wipe it.
+	MilestoneKnown bool
+}
+
+// Milestone is the minimal milestone identity Fabrik caches per item.
+type Milestone struct {
+	Title  string
+	Number int
 }
 
 // Comment represents a comment on an issue or linked PR.

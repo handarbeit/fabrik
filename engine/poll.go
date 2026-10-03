@@ -464,6 +464,7 @@ func (e *Engine) Run() error {
 		var deltaFn func(string, []byte)
 		if cacheImpl != nil {
 			deltaFn = func(eventType string, payload []byte) {
+				e.health.noteWebhookEvent(e.now())
 				cacheImpl.ApplyDelta(eventType, payload)
 				e.applyLayer1StatusRefresh(eventType, payload, cacheImpl)
 			}
@@ -572,6 +573,7 @@ func (e *Engine) Run() error {
 			var deltaFn func(string, []byte)
 			if cacheImpl != nil {
 				deltaFn = func(eventType string, payload []byte) {
+					e.health.noteWebhookEvent(e.now())
 					cacheImpl.ApplyDelta(eventType, payload)
 					e.applyLayer1StatusRefresh(eventType, payload, cacheImpl)
 				}
@@ -622,6 +624,13 @@ func (e *Engine) Run() error {
 	if cacheImpl != nil {
 		go e.reconcileLoop(ctx, cacheImpl, e.webhookMgr)
 	}
+
+	// Local read API (#1967): bound after the instance lock is held (so a
+	// leftover socket is provably stale) and after e.webhookMgr is final, and
+	// before the first poll. Closed when Run() returns, and explicitly before a
+	// SIGHUP re-exec (performSighupRestart).
+	e.startLocalAPI()
+	defer e.closeLocalAPI()
 
 	if e.events == nil {
 		fmt.Println("\nFabrik is running. Press Ctrl+C to stop.")
@@ -1115,6 +1124,7 @@ func (e *Engine) PollWithBackoff(ctx context.Context, configuredInterval time.Du
 		}
 	}
 	e.lastPollAttemptAt = e.now()
+	e.health.notePollAttempt(e.lastPollAttemptAt)
 
 	// REST/core rate-limit hard gate. The GraphQL-driven interval backoff below
 	// conserves the GraphQL budget (spent by the poll read) but does nothing for
@@ -1144,6 +1154,7 @@ func (e *Engine) PollWithBackoff(ctx context.Context, configuredInterval time.Du
 				restStats.Remaining, restStats.Limit, restStats.Reset.Format(time.RFC3339))
 			e.emitStructural(tui.RateLimitAlertEvent{Bucket: tui.RateLimitBucketREST, Exhausted: true, Reset: restStats.Reset})
 			e.backoffRestPaused = true
+			e.health.setRestPaused(true)
 		}
 		return PollBackoffResult{NextInterval: restStats.Reset.Sub(e.now()) + rateLimitResetBuffer}, nil
 	}
@@ -1152,12 +1163,14 @@ func (e *Engine) PollWithBackoff(ctx context.Context, configuredInterval time.Du
 			restStats.Remaining, restStats.Limit)
 		e.emitStructural(tui.RateLimitAlertEvent{Bucket: tui.RateLimitBucketREST, Exhausted: false})
 		e.backoffRestPaused = false
+		e.health.setRestPaused(false)
 	}
 
 	result, err := e.poll(ctx)
 	if err != nil {
 		return PollBackoffResult{}, err
 	}
+	e.health.notePollSuccess(e.now())
 
 	// Update idle timer.
 	if result.Active {
@@ -1199,6 +1212,7 @@ func (e *Engine) PollWithBackoff(ctx context.Context, configuredInterval time.Du
 			e.backoffRateLimitRatio = 1.0
 		}
 		e.backoffLastRemaining = graphqlStats.Remaining
+		e.health.setGraphQLBackoff(e.backoffRateLimitLow, e.backoffRateLimitRatio, graphqlStats.Remaining)
 	}
 
 	// Compute and apply effective interval.
@@ -1260,7 +1274,11 @@ func (e *Engine) PollWithBackoff(ctx context.Context, configuredInterval time.Du
 // diagnostics with no bearing on a single poll cycle. Do not "restore" any of
 // this later as a fix for some unrelated symptom — it was omitted on purpose.
 func (e *Engine) PollOnce(ctx context.Context) error {
+	e.health.notePollAttempt(e.now())
 	_, err := e.poll(ctx)
+	if err == nil {
+		e.health.notePollSuccess(e.now())
+	}
 	return err
 }
 

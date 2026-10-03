@@ -45,6 +45,19 @@ func (m IssueOpened) itemKey() string {
 	return itemKeyFor(m.Item.Repo, m.Item.Number)
 }
 
+// IssueMilestoneUpdated is emitted for the "issues" webhook actions
+// "milestoned" and "demilestoned" (#1967 R10). A nil Milestone means the issue
+// now has no milestone (demilestoned); either way the value is authoritative,
+// so the item's MilestoneKnown becomes true.
+type IssueMilestoneUpdated struct {
+	Repo      string
+	Number    int
+	Milestone *gh.Milestone
+}
+
+func (IssueMilestoneUpdated) isMutation()       {}
+func (m IssueMilestoneUpdated) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
 // IssueLabeled is emitted when a label is added to an issue.
 type IssueLabeled struct {
 	Repo   string

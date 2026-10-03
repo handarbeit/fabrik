@@ -25,6 +25,7 @@ type Snapshot struct {
 //   - ItemState.Assignees
 //   - ItemState.Comments
 //   - ItemState.BlockedBy
+//   - ItemState.Milestone (pointer)
 //   - ItemState.CooldownAt
 //   - ItemState.LabelAppliedAt
 //   - ItemState.BaseBranchWarned
@@ -51,6 +52,10 @@ func newSnapshot(s ItemState) Snapshot {
 	c.Assignees = copyStrings(s.Assignees)
 	c.Comments = copyComments(s.Comments)
 	c.BlockedBy = copyDeps(s.BlockedBy)
+	if s.Milestone != nil {
+		ms := *s.Milestone
+		c.Milestone = &ms
+	}
 	c.CooldownAt = copyMap(s.CooldownAt)
 	c.LabelAppliedAt = copyMap(s.LabelAppliedAt)
 	c.BaseBranchWarned = copyMap(s.BaseBranchWarned)

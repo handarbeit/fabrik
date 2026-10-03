@@ -14,6 +14,7 @@ import (
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/githubauth"
 	"github.com/handarbeit/fabrik/internal/itemstate"
+	"github.com/handarbeit/fabrik/internal/localapi"
 	"github.com/handarbeit/fabrik/internal/selfupgrade"
 	"github.com/handarbeit/fabrik/stages"
 	"github.com/handarbeit/fabrik/tui"
@@ -40,6 +41,7 @@ type Config struct {
 	ReviewWaitTimeout         time.Duration       // How long to wait for PR reviewers before auto-advancing anyway (default 15m)
 	ReconcileInterval         time.Duration       // Reconcile ticker cadence (0 = use lightReconcileInterval default of 3m)
 	MaxReviewCycles           int                 // Max review re-invocation cycles per issue before pausing (default 5)
+	StallThreshold            time.Duration       // how long an item may show no observable progress (no worker activity, no status or label change) before the local read API classifies it stalled (default 30m; #1967, docs/state-machine.md §7.9). Zero disables stall classification.
 	CIWaitTimeout             time.Duration       // CI-gate liveness-stall dwell: how long CI may show no observable progress before pausing (default 30m; ADR-1410 — no longer a total-wait bound, see CIBackstopTimeout)
 	CIBackstopTimeout         time.Duration       // Absolute cap on how long an item may sit in fabrik:awaiting-ci under any classification, bounding per-poll cost independent of CI duration (default 4h; ADR-1410, R5)
 	RequiredStatusContexts    map[string][]string // Per "owner/repo" required status/check-run context names the ci-gate must confirm success on before clearing (ADR-933); unconfigured repos = no behavior change
@@ -231,6 +233,15 @@ type Engine struct {
 	// Unguarded like its backoff* siblings above — single-goroutine-only in
 	// production (only Run()'s own goroutine calls PollWithBackoff there).
 	lastPollAttemptAt time.Time
+	// health is the guarded copy of the freshness timestamps and backoff state
+	// that the local read API (#1967) serves. The poll loop's own fields above
+	// stay single-goroutine; their write sites also publish here. Zero-value
+	// ready.
+	health daemonHealth
+	// localAPI is the local read API server (#1967); nil until Run() binds it
+	// (and when binding failed). Guarded by localAPIMu.
+	localAPIMu sync.Mutex
+	localAPI   *localapi.Server
 	// logThrottle is the shared dedup state behind logfThrottled (R4,
 	// logthrottle.go) — collapses repeated identical log lines (e.g. the
 	// per-poll rate-limit stats lines) into one emission per throttle window
@@ -572,6 +583,7 @@ func New(cfg Config) (*Engine, error) {
 		backoffPrevMultiplier:     1,
 		backoffRateLimitRatio:     1.0,
 	}
+	eng.health.markStarted(time.Now())
 
 	// App-auth's per-repo access signal (#1750 R1): fetched once, eagerly,
 	// here — rather than lazily inside resolveRepoAccess — so this single API
@@ -685,6 +697,7 @@ func NewWithDeps(cfg Config, client GitHubClient, claude ClaudeInvoker, worktree
 		backoffPrevMultiplier:     1,
 		backoffRateLimitRatio:     1.0,
 	}
+	eng.health.markStarted(time.Now())
 	if worktrees != nil {
 		worktrees.logfFn = eng.logf
 		key := cfg.Owner + "/" + cfg.Repo
@@ -746,6 +759,20 @@ func (e *Engine) SetTrainCIPollIntervalForTest(d time.Duration) {
 // production never calls this.
 func (e *Engine) SimulateCacheStatusWriteThroughForTest(repo string, number int, status string) {
 	e.store.Apply(itemstate.LocalStatusUpdated{Repo: repo, Number: number, NewStatus: status})
+}
+
+// ItemMilestoneForTest reports the milestone the engine's store holds for an
+// item (#1967 R10): the milestone (nil when known-none), whether the store has
+// captured it at all, and whether the item is in the store. Reads the store
+// directly with no GitHub fallback. Test seam only (tests/sim); production
+// never calls this.
+func (e *Engine) ItemMilestoneForTest(repo string, number int) (ms *gh.Milestone, known, inStore bool) {
+	snap, ok := e.store.Peek(repo, number)
+	if !ok {
+		return nil, false, false
+	}
+	st := snap.State()
+	return st.Milestone, st.MilestoneKnown, true
 }
 
 // SetMergeTrainQueueSortDisabledForTest disables groupQueuedByRepoAndBase's

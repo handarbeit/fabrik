@@ -53,6 +53,13 @@ func applyProjectItem(item *ItemState, pi gh.ProjectItem) ChangeFlags {
 		item.UpdatedAt = pi.UpdatedAt
 	}
 
+	// Copy the milestone only when the producer actually observed it, so write
+	// paths that do not carry it (deep fetch, fallback fetch, PR nodes) cannot
+	// wipe a captured value (#1967 R10).
+	if pi.MilestoneKnown {
+		flags |= applyMilestone(item, pi.Milestone, true)
+	}
+
 	if !reflect.DeepEqual(item.BlockedBy, pi.BlockedBy) {
 		item.BlockedBy = copyDeps(pi.BlockedBy)
 		flags |= BlockedByChanged
@@ -177,7 +184,35 @@ func applyShallowItem(item *ItemState, pi gh.ProjectItem) ChangeFlags {
 		item.UpdatedAt = pi.UpdatedAt
 	}
 
+	if pi.MilestoneKnown {
+		flags |= applyMilestone(item, pi.Milestone, true)
+	}
+
 	return flags
+}
+
+// applyMilestone sets item's milestone state and reports MilestoneChanged when
+// the (known, title, number) triple differs. The milestone is stored as a copy.
+func applyMilestone(item *ItemState, m *gh.Milestone, known bool) ChangeFlags {
+	same := item.MilestoneKnown == known
+	switch {
+	case !same:
+	case item.Milestone == nil && m == nil:
+	case item.Milestone != nil && m != nil && *item.Milestone == *m:
+	default:
+		same = false
+	}
+	if same {
+		return 0
+	}
+	item.MilestoneKnown = known
+	if m != nil {
+		cp := *m
+		item.Milestone = &cp
+	} else {
+		item.Milestone = nil
+	}
+	return MilestoneChanged
 }
 
 // applyProbeItem updates only the probe-visible fields of item from pi.

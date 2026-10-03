@@ -232,6 +232,8 @@ func snapshotToProjectItem(snap itemstate.Snapshot) gh.ProjectItem {
 		Comments:        s.Comments,
 		Author:          s.Author,
 		BlockedBy:       s.BlockedBy,
+		Milestone:       s.Milestone,
+		MilestoneKnown:  s.MilestoneKnown,
 	}
 	if s.LinkedPR != nil {
 		pi.LinkedPRNumber = s.LinkedPR.Number

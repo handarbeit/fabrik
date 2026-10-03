@@ -80,10 +80,33 @@ type issuesPayload struct {
 		Assignees []struct {
 			Login string `json:"login"`
 		} `json:"assignees"`
+		// Milestone is raw: an explicit null (no milestone, e.g. after
+		// "demilestoned") must stay distinguishable from an absent key (#1967 R10).
+		Milestone json.RawMessage `json:"milestone"`
 	} `json:"issue"`
 	Repository struct {
 		FullName string `json:"full_name"`
 	} `json:"repository"`
+}
+
+// milestoneFromPayload decodes issue.milestone from an "issues" webhook payload.
+// known is false when the key is absent or malformed — callers must then leave
+// the Store's milestone untouched rather than recording "none".
+func milestoneFromPayload(raw json.RawMessage) (m *gh.Milestone, known bool) {
+	if len(raw) == 0 {
+		return nil, false
+	}
+	if string(raw) == "null" {
+		return nil, true
+	}
+	var ms struct {
+		Title  string `json:"title"`
+		Number int    `json:"number"`
+	}
+	if err := json.Unmarshal(raw, &ms); err != nil {
+		return nil, false
+	}
+	return &gh.Milestone{Title: ms.Title, Number: ms.Number}, true
 }
 
 type pullRequestPayload struct {
@@ -371,6 +394,9 @@ func (c *CacheImpl) applyIssuesDelta(payload []byte) {
 			Labels:    labels,
 			Assignees: assignees,
 		}
+		// An "opened" payload always carries issue.milestone (null or object);
+		// carry it so the item is not left unknown until the next reconcile.
+		pi.Milestone, pi.MilestoneKnown = milestoneFromPayload(p.Issue.Milestone)
 		// PreserveBlockedBy: this payload never carries Issue Dependency data,
 		// so an "opened" delivery arriving after a synchronous
 		// BlockedByEdgeAdded write (spawnChildren, #1783) — e.g. for a child
@@ -454,8 +480,31 @@ func (c *CacheImpl) applyIssuesDelta(payload []byte) {
 		c.applyIssueLabelMutationDelta(owner, fullRepo, issNum, key, "unlabeled", p.Label.Name,
 			itemstate.IssueUnlabeled{Repo: fullRepo, Number: issNum, Label: p.Label.Name})
 
-		// milestoned, demilestoned, locked, unlocked, pinned, unpinned:
-		// no state in the engine's pipeline depends on these fields.
+	case "milestoned", "demilestoned":
+		// issue.milestone is the post-event value: the new milestone on
+		// "milestoned", null on "demilestoned". Applied directly so a change
+		// does not wait for the next reconcile (#1967 R10). An absent or
+		// malformed key leaves the cached value untouched (never "none").
+		ms, known := milestoneFromPayload(p.Issue.Milestone)
+		if !known {
+			c.logFn("[cache] applyIssuesDelta(%s): #%d payload has no readable issue.milestone; ignoring\n", p.Action, issNum)
+			return
+		}
+		if p.Action == "demilestoned" {
+			ms = nil
+		}
+		if err := c.ensureIssueInStore(owner, fullRepo, issNum); err != nil {
+			c.logFn("[cache] applyIssuesDelta(%s): ensure #%d: %v\n", p.Action, issNum, err)
+			return
+		}
+		_, changes, _ := c.store.Apply(itemstate.IssueMilestoneUpdated{Repo: fullRepo, Number: issNum, Milestone: ms})
+		if len(changes) == 0 {
+			return
+		}
+		c.bumpLocalDeltaAt(key)
+
+		// locked, unlocked, pinned, unpinned: no state in the engine's
+		// pipeline depends on these fields.
 	}
 }
 

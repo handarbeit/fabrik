@@ -716,3 +716,15 @@ func TestExecute_HelpIncludesSubcommands(t *testing.T) {
 		}
 	}
 }
+
+func TestStallThreshold(t *testing.T) {
+	if got := stallThreshold(0); got != 30*time.Minute {
+		t.Errorf("stallThreshold(0) = %v, want default 30m", got)
+	}
+	if got := stallThreshold(-5); got != 30*time.Minute {
+		t.Errorf("stallThreshold(-5) = %v, want default 30m", got)
+	}
+	if got := stallThreshold(10); got != 10*time.Minute {
+		t.Errorf("stallThreshold(10) = %v, want 10m", got)
+	}
+}

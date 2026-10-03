@@ -49,6 +49,10 @@ type IssueSeed struct {
 	Assignees []string
 	State     string // "OPEN" (default) or "CLOSED"
 
+	// Milestone, when non-nil, puts the issue in that milestone (title and
+	// number, as the board query reads them). Nil means no milestone.
+	Milestone *gh.Milestone
+
 	// Status, when non-empty, also places the issue on the default project
 	// (the first one seeded) in that column.
 	Status string
@@ -313,6 +317,7 @@ func (s *Sim) SeedIssue(ownerRepo string, seed IssueSeed) *Sim {
 		author:         seed.Author,
 		labels:         cloneStrings(seed.Labels),
 		assignees:      cloneStrings(seed.Assignees),
+		milestone:      cloneMilestone(seed.Milestone),
 		labelAppliedAt: make(map[string]time.Time),
 		createdAt:      now,
 		updatedAt:      now,

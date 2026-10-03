@@ -1,0 +1,290 @@
+// Package mcpstdio is a minimal, stdlib-only Model Context Protocol server over
+// stdio (newline-delimited JSON-RPC 2.0) that proxies three read tools to the
+// Fabrik daemon's local socket (#1967, ADR-1966-a).
+//
+// stdout is the protocol channel: this package writes nothing to Out except
+// JSON-RPC frames, one per line. Diagnostics go to Err.
+//
+// A tool failure — including "no daemon is listening" — is a tool *result* with
+// isError set, not a JSON-RPC error, so the model sees and can act on the
+// message; JSON-RPC errors are reserved for protocol problems (malformed
+// frames, unknown methods, unknown tools). Every daemon call is bounded by
+// CallTimeout, so a wedged or absent daemon can never hang the session.
+package mcpstdio
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"sync"
+	"time"
+
+	"github.com/handarbeit/fabrik/internal/localapi"
+)
+
+// Latest first. initialize echoes the client's version when it is one of these.
+var supportedProtocolVersions = []string{"2025-06-18", "2025-03-26", "2024-11-05"}
+
+// DefaultCallTimeout bounds one proxied daemon call.
+const DefaultCallTimeout = 20 * time.Second
+
+// maxLineBytes bounds one inbound JSON-RPC line.
+const maxLineBytes = 4 << 20
+
+// CallFunc performs one daemon call. localapi.Call is the production value.
+type CallFunc func(ctx context.Context, socketPath, method string, params, result any) error
+
+// Server is the MCP server. Zero values for Call and CallTimeout select the
+// production defaults.
+type Server struct {
+	// SocketPath is the daemon socket every tool call dials.
+	SocketPath string
+	// Version is reported as serverInfo.version.
+	Version string
+	// In and Out are the protocol channel (stdin/stdout); Err receives diagnostics.
+	In  io.Reader
+	Out io.Writer
+	Err io.Writer
+
+	Call        CallFunc
+	CallTimeout time.Duration
+
+	wmu sync.Mutex
+}
+
+type request struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      json.RawMessage `json:"id,omitempty"`
+	Method  string          `json:"method"`
+	Params  json.RawMessage `json:"params,omitempty"`
+}
+
+type rpcError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+type response struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      json.RawMessage `json:"id"`
+	Result  any             `json:"result,omitempty"`
+	Error   *rpcError       `json:"error,omitempty"`
+}
+
+// JSON-RPC error codes.
+const (
+	errParse          = -32700
+	errInvalidRequest = -32600
+	errMethodNotFound = -32601
+	errInvalidParams  = -32602
+)
+
+func (s *Server) logf(format string, args ...any) {
+	if s.Err != nil {
+		fmt.Fprintf(s.Err, "fabrik mcp: "+format+"\n", args...)
+	}
+}
+
+// Serve reads requests until In reaches EOF or ctx is cancelled, handling each
+// in its own goroutine so a slow tool call never blocks ping or a second
+// call. It returns after every in-flight request has been answered.
+func (s *Server) Serve(ctx context.Context) error {
+	if s.Call == nil {
+		s.Call = localapi.Call
+	}
+	if s.CallTimeout <= 0 {
+		s.CallTimeout = DefaultCallTimeout
+	}
+	var wg sync.WaitGroup
+	defer wg.Wait()
+
+	br := bufio.NewReaderSize(s.In, 64*1024)
+	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		line, err := readLine(br)
+		if len(bytes.TrimSpace(line)) > 0 {
+			line := line
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				s.handleLine(ctx, line)
+			}()
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return fmt.Errorf("reading stdin: %w", err)
+		}
+	}
+}
+
+func readLine(br *bufio.Reader) ([]byte, error) {
+	var buf []byte
+	for {
+		chunk, err := br.ReadSlice('\n')
+		buf = append(buf, chunk...)
+		if len(buf) > maxLineBytes {
+			return nil, fmt.Errorf("line exceeds %d bytes", maxLineBytes)
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
+		}
+		return buf, err
+	}
+}
+
+func (s *Server) write(v any) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		s.logf("encoding response: %v", err)
+		return
+	}
+	b = append(b, '\n')
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+	if _, err := s.Out.Write(b); err != nil {
+		s.logf("writing response: %v", err)
+	}
+}
+
+func (s *Server) reply(id json.RawMessage, result any) {
+	s.write(response{JSONRPC: "2.0", ID: id, Result: result})
+}
+
+func (s *Server) fail(id json.RawMessage, code int, msg string) {
+	if len(id) == 0 {
+		id = json.RawMessage("null")
+	}
+	s.write(response{JSONRPC: "2.0", ID: id, Error: &rpcError{Code: code, Message: msg}})
+}
+
+func (s *Server) handleLine(ctx context.Context, line []byte) {
+	line = bytes.TrimSpace(line)
+	if len(line) > 0 && line[0] == '[' {
+		s.fail(nil, errInvalidRequest, "batch requests are not supported")
+		return
+	}
+	var req request
+	if err := json.Unmarshal(line, &req); err != nil {
+		s.fail(nil, errParse, "parse error: "+err.Error())
+		return
+	}
+	isNotification := len(req.ID) == 0
+	if req.Method == "" {
+		if !isNotification {
+			s.fail(req.ID, errInvalidRequest, "missing method")
+		}
+		return
+	}
+
+	switch req.Method {
+	case "initialize":
+		s.reply(req.ID, s.initialize(req.Params))
+	case "ping":
+		s.reply(req.ID, struct{}{})
+	case "tools/list":
+		s.reply(req.ID, map[string]any{"tools": toolDefs()})
+	case "tools/call":
+		s.toolsCall(ctx, req)
+	default:
+		if isNotification {
+			return // notifications/initialized, notifications/cancelled, ...: nothing to do
+		}
+		s.fail(req.ID, errMethodNotFound, fmt.Sprintf("method not found: %s", req.Method))
+	}
+}
+
+func (s *Server) initialize(params json.RawMessage) map[string]any {
+	version := supportedProtocolVersions[0]
+	var p struct {
+		ProtocolVersion string `json:"protocolVersion"`
+	}
+	if json.Unmarshal(params, &p) == nil {
+		for _, v := range supportedProtocolVersions {
+			if v == p.ProtocolVersion {
+				version = v
+			}
+		}
+	}
+	return map[string]any{
+		"protocolVersion": version,
+		"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
+		"serverInfo":      map[string]any{"name": "fabrik", "version": s.Version},
+		"instructions": "Read-only view of a running Fabrik daemon's in-memory state, served from the daemon's cache at no GitHub cost. " +
+			"Every response states how fresh it is (as_of); a value the daemon cannot vouch for is the string \"unknown\", never a default. " +
+			"Start with fabrik_board (attention) to see what needs looking at, then fabrik_status for one issue.",
+	}
+}
+
+type toolResult struct {
+	Content []toolContent `json:"content"`
+	IsError bool          `json:"isError"`
+}
+
+type toolContent struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+func textResult(text string, isError bool) toolResult {
+	return toolResult{Content: []toolContent{{Type: "text", Text: text}}, IsError: isError}
+}
+
+func (s *Server) toolsCall(ctx context.Context, req request) {
+	var p struct {
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
+	}
+	if err := json.Unmarshal(req.Params, &p); err != nil || p.Name == "" {
+		s.fail(req.ID, errInvalidParams, "tools/call needs params {name, arguments}")
+		return
+	}
+
+	method, params, err := buildCall(p.Name, p.Arguments)
+	if err != nil {
+		var ue *unknownToolError
+		if errors.As(err, &ue) {
+			s.fail(req.ID, errInvalidParams, err.Error())
+			return
+		}
+		s.reply(req.ID, textResult("invalid arguments: "+err.Error(), true))
+		return
+	}
+
+	cctx, cancel := context.WithTimeout(ctx, s.CallTimeout)
+	defer cancel()
+	var result json.RawMessage
+	if err := s.Call(cctx, s.SocketPath, method, params, &result); err != nil {
+		s.reply(req.ID, textResult(describeCallError(err), true))
+		return
+	}
+	var pretty bytes.Buffer
+	if json.Indent(&pretty, result, "", "  ") != nil {
+		pretty.Reset()
+		pretty.Write(result)
+	}
+	s.reply(req.ID, textResult(pretty.String(), false))
+}
+
+// describeCallError turns a daemon-call failure into the text the model sees.
+func describeCallError(err error) string {
+	var nd *localapi.NoDaemonError
+	if errors.As(err, &nd) {
+		return nd.Error() + ". Start the daemon (fabrik) in that directory, or point this server at the right one with --dir."
+	}
+	var pe *localapi.Error
+	if errors.As(err, &pe) {
+		return fmt.Sprintf("fabrik daemon error (%s): %s", pe.Code, pe.Message)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "the Fabrik daemon did not answer in time"
+	}
+	return "fabrik daemon call failed: " + err.Error()
+}

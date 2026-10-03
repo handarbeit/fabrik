@@ -62,6 +62,16 @@ type ItemState struct {
 	// Comments holds all comments on this issue.
 	Comments []gh.Comment
 
+	// Milestone is the issue's milestone (#1967 R10). Nil means "no milestone"
+	// only when MilestoneKnown is true; with MilestoneKnown false the cache has
+	// never captured it and readers must report it as unknown, never as none.
+	// Written by the board fetch (applyProjectItem/applyShallowItem, only when
+	// the incoming item has MilestoneKnown) and the milestoned/demilestoned/
+	// opened webhook deltas, so write paths that do not carry the field cannot
+	// wipe it.
+	Milestone      *gh.Milestone
+	MilestoneKnown bool
+
 	// LinkedPR is the state of the closing PR; nil if none.
 	LinkedPR *LinkedPRState
 

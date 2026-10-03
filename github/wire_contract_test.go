@@ -278,3 +278,48 @@ func TestWireContract_SchemaFilePresent(t *testing.T) {
 		t.Fatalf("vendored schema not found at %s (relative to github/): %v", wireSchemaPath, err)
 	}
 }
+
+// TestWireContract_BoardQuerySelectsIssueMilestone pins #1967 R10's board-query
+// addition: the shallow board query selects `milestone { title number }` on the
+// Issue fragment, and the vendored schema's Issue.milestone is a nullable
+// Milestone with those scalar fields — so the query and the recorded schema stay
+// in step. (The recorded fetch_project_board.json response predates the field
+// and is only re-recorded by scripts/wire-contract/record-fixtures.sh; the
+// httptest cases in project_milestone_test.go cover the response shape,
+// including the absent-key case that recording represents.)
+func TestWireContract_BoardQuerySelectsIssueMilestone(t *testing.T) {
+	schema := loadWireSchema(t)
+
+	issue := schema.Types["Issue"]
+	if issue == nil {
+		t.Fatal("schema has no Issue type")
+	}
+	var found bool
+	for _, f := range issue.Fields {
+		if f.Name != "milestone" {
+			continue
+		}
+		found = true
+		if f.Type.NonNull {
+			t.Errorf("Issue.milestone is non-null in the schema; the unknown/none handling assumes nullable")
+		}
+		if f.Type.NamedType != "Milestone" {
+			t.Errorf("Issue.milestone type = %q, want Milestone", f.Type.NamedType)
+		}
+	}
+	if !found {
+		t.Fatal("Issue.milestone missing from vendored schema")
+	}
+	ms := schema.Types["Milestone"]
+	if ms == nil || ms.Fields.ForName("title") == nil || ms.Fields.ForName("number") == nil {
+		t.Fatal("Milestone type lacks title/number in vendored schema")
+	}
+
+	doc := fmt.Sprintf(fetchProjectBoardQueryTemplate, "organization")
+	if !strings.Contains(doc, "milestone {") || !strings.Contains(doc, "title") {
+		t.Fatal("board query does not select milestone { title number }")
+	}
+	if _, errs := gqlparser.LoadQuery(schema, doc); errs != nil {
+		t.Fatalf("board query with milestone failed schema validation: %v", errs)
+	}
+}

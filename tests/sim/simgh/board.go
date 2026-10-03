@@ -171,6 +171,10 @@ func (s *Sim) buildProjectItem(p *projectState, ref itemRef) (*gh.ProjectItem, e
 		Assignees: cloneStrings(iss.assignees),
 		Author:    iss.author,
 		BlockedBy: s.resolveDependenciesLocked(ref.ownerRepo, iss.blockedBy),
+		// Production's board query selects milestone on Issue content only
+		// (PR cards stay unknown), and a null milestone is still "known".
+		Milestone:      cloneMilestone(iss.milestone),
+		MilestoneKnown: !isPR,
 	}
 	for _, c := range iss.comments {
 		item.Comments = append(item.Comments, c.toGH())
