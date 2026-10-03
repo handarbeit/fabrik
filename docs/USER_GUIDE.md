@@ -827,6 +827,8 @@ Custom stages (names not present in any embedded default) are silently skipped �
 > **Note:** When Fabrik starts, it creates a PID lock file at `.fabrik/fabrik.lock`. If a second instance attempts to start in the same directory, it reads the lock file, logs an error identifying the running process, and exits immediately. The lock is automatically released when the process exits — including on crash or SIGKILL — so there is no need to manually delete the file after an unclean shutdown.
 >
 > See [§11 Troubleshooting → Multiple Fabrik Instances](#11-troubleshooting) if you encounter a stale lock or need to run multiple instances against different projects.
+>
+> While it runs, the daemon also serves a read-only local API on `.fabrik/state/fabrik.sock` (mode `0600`, per directory — see [Overseer Tools: `fabrik mcp`](#overseer-tools-fabrik-mcp)). The socket is only ever bound after the lock is held, so a socket file left by a crash or a re-exec is known to be stale and is replaced at startup.
 
 ### Graceful Shutdown
 
@@ -859,6 +861,8 @@ when the ordinary clean stop is visibly wedged.
 
 An idle daemon (no workers in flight) stops exactly as fast and quietly as it always did — the pause
 phase writes nothing when there is nothing to pause.
+
+The local API socket (`.fabrik/state/fabrik.sock`) is closed and removed when the daemon stops, and before a SIGHUP in-place restart; a crash or a self-upgrade re-exec can leave the file behind, and the next start replaces it.
 
 See `--drain-deadline`/`FABRIK_DRAIN_DEADLINE` in [§2 Configuration Reference](#2-configuration-reference) to change the drain bound, and [ADR-1393](https://github.com/handarbeit/fabrik/blob/main/adrs/1393-clean-stop-shutdown.md) for the full design record.
 
@@ -1208,6 +1212,7 @@ FABRIK_USER=my-personal-username
 | `--max-review-cycles` | Maximum number of review-and-fix cycles per issue (0 = use default of 5; also `FABRIK_MAX_REVIEW_CYCLES`) | `0` (5 cycles) |
 | `--ci-wait-timeout` | Minutes of CI *inactivity* (no observable progress) before pausing — not total CI wait time; a suite that keeps reporting fresh check-run activity waits indefinitely, however long it takes (0 = use default of 30; also `FABRIK_CI_WAIT_TIMEOUT`; ADR-1410) | `0` (30 min) |
 | `--ci-backstop-timeout` | Absolute cap in minutes on how long an item may sit in `fabrik:awaiting-ci` under any classification, bounding per-poll cost independent of CI duration — sized much larger than `--ci-wait-timeout` on purpose (0 = use default of 240 = 4h; also `FABRIK_CI_BACKSTOP_TIMEOUT`; ADR-1410) | `0` (240 min / 4h) |
+| `--stall-threshold` | Minutes an item may show no observable progress (no worker activity, no status or label change) before the [`fabrik mcp`](#overseer-tools-fabrik-mcp) overseer tools classify it `stalled` (0 = use default of 30; also `FABRIK_STALL_THRESHOLD`; `fabrik_board` can override it per call). Reporting only — it changes nothing the engine does | `0` (30 min) |
 | `--post-push-dwell` | Seconds to wait after a PR force-push before clearing the CI gate as "no CI configured" (0 = use default of 90; also `FABRIK_POST_PUSH_DWELL`). Prevents premature gate-clear in the brief post-push window when GitHub has not yet computed mergeability or started CI for the new SHA. | `0` (90 sec) |
 | `--worker-stale-timeout` | Minutes before a stale worker heartbeat triggers PID-liveness check and handle clearing (0 = use default of 5; must be > `heartbeatInterval×2`; also `FABRIK_WORKER_STALE_TIMEOUT`) | `0` (5 min) |
 | `--max-ci-fix-cycles` | Maximum number of CI-fix re-invocation cycles per issue (0 = use default of 5; also `FABRIK_MAX_CI_FIX_CYCLES`) | `0` (5 cycles) |
@@ -3363,6 +3368,85 @@ The session ID for the active Claude session is shown in the header when availab
 #### Credentials
 
 `fabrik watch` reads owner, repo, and poll interval from `.fabrik/config.yaml` (see §2). Without a GitHub token, it shows local log output and stage history but skips GitHub API calls (PR/CI/comments).
+
+### Overseer Tools: `fabrik mcp`
+
+**The problem.** If you run a Claude Code session as product manager and overseer of a Fabrik pipeline, it sees what GitHub shows — labels and a board column — and nothing of what the daemon knows: how close an item is to a pause limit, what the engine will do next and when, whether a worker is alive and making progress, how the last invocation ended, whether the pipeline itself is healthy. Polling GitHub for the visible part spends the same REST/GraphQL budget the daemon needs, and it lags; the rest is not on GitHub at all.
+
+**What Fabrik gives you.** `fabrik mcp` is a stdio [MCP](https://modelcontextprotocol.io) server that exposes three **read-only** tools backed by the running daemon's in-memory state. They make **no GitHub API call** — everything is served from what the daemon already holds — and every response says how fresh it is.
+
+Register it once from your Fabrik directory (Claude Code launches it per session):
+
+```bash
+claude mcp add fabrik -- fabrik mcp
+```
+
+Claude Code starts the server in *its own* working directory, which is not necessarily your Fabrik directory (the one that contains `.fabrik/`). Point it at the right one with `--dir`:
+
+```bash
+claude mcp add --scope user fabrik -- fabrik mcp --dir /path/to/your/fabrik-dir
+```
+
+`fabrik mcp` loads no config or `.env`, prints nothing to stdout except protocol frames, and needs no token. If no daemon is listening it does not hang or crash the session: each tool returns an error such as `Fabrik daemon not running at /path/.fabrik/state/fabrik.sock` — start `fabrik` in that directory, or fix `--dir`.
+
+#### How it reaches the daemon
+
+The daemon serves a small newline-delimited-JSON API on a Unix socket, `.fabrik/state/fabrik.sock` under its Fabrik directory:
+
+- **Per daemon.** The socket lives in the daemon's own directory, so several instances on one machine never collide, and each only ever serves the repos and projects *it* manages.
+- **Private.** Mode `0600`, a Unix socket (not reachable over TCP). There is no authentication beyond filesystem permissions: any process of your own user can read the daemon's operational state (issue titles, labels, counters).
+- **Long paths.** A Unix socket path is limited to about 104 bytes. If `<fabrik-dir>/.fabrik/state/fabrik.sock` would be longer, both the daemon and `fabrik mcp` use `$TMPDIR/fabrik-<uid>/<hash>.sock` instead (a private directory, derived from the Fabrik directory) — you never need to know which.
+- **Lifecycle.** Bound after the [instance lock](#instance-lock) is held; a stale socket from a crash or re-exec is replaced at startup; removed on clean shutdown. If it cannot be bound, the daemon logs it and carries on without the API.
+
+#### The freshness rule
+
+Every response carries `as_of` (when the daemon took the snapshot), the time since the last successful poll, and daemon uptime; per item, the cache age (`last_deep_fetch_at`). **Anything the daemon cannot vouch for is the string `"unknown"` — never a healthy default.** In particular:
+
+- Deadlines derived from when the engine applied a label (the CI backstop, the review wait, the bot re-prompt) are `unknown` after a daemon restart, because that timestamp is not persisted. They are never reported as "now".
+- A milestone the cache has not captured yet is `unknown`; `none` means the daemon saw the item and it has no milestone.
+- PR, CI, mergeability and blockers are `unknown` for an item the daemon has not yet fetched in full.
+- Turns used by an *in-flight* worker are always `unknown` (the daemon records turns only when an invocation finishes); the last completed invocation's turns are shown.
+- A cycle limit that is not configured is `unknown`, not `0`.
+
+**Time in column is daemon-observed.** The daemon resets it on every restart, so it means "since this daemon first saw the item in this column". Responses say so, and report daemon uptime so you can interpret it.
+
+#### `fabrik_status(issue)`
+
+One issue, given as `owner/repo#N`, or just `N` when the daemon manages exactly one repo. An issue the daemon has not cached is `not_found` — it does not fetch. Returns:
+
+- **Identity and place:** title, URL, milestone, board Status and time in it, `stage:*` labels, every `fabrik:*` label, and the autonomy mode (`cruise`, `yolo` or `none`; cruise wins).
+- **Limits:** each cycle counter that is nonzero or has a configured limit, as `n` of `max` — attempts, review / CI-fix / rebase / enqueue cycles, tools-denied and slice retries (per stage).
+- **Worker:** whether one is in flight, its stage, `started_at`, `last_sign_at`, and `max_turns`. (`last_sign_at` is a heartbeat from the engine, not proof Claude is making progress.)
+- **Last invocation:** completed, blocked, errored, turn-limited or incomplete; its duration and tokens.
+- **PR:** the linked PR, mergeability and CI verdict *as the cache holds them*, and, for an item in the holding stage, its place in its (repo, base) merge-train partition (derived from the cached `base:` label).
+- **Blockers:** each blocking issue with its open/closed state.
+- **`attention`** — for *every* item, not just paused ones — which answers *"stuck, or waiting correctly?"*: a state, the reason (each relevant `fabrik:*` label with a one-line meaning), a link to the most recent 🏭 Fabrik comment when the daemon has comments cached, and **what the engine will do next, and when** (the cooldown expiry, the CI or review-wait deadline, the bot re-prompt time, the end of a Claude usage-limit suspension).
+
+#### `fabrik_board(view, filter?)`
+
+- **`attention`** lists only items that need looking at, most urgent first: `needs-human`, `escalated`, `stalled`, then items *settled at Validate awaiting a human merge decision* (cruise never merges). Each has a one-line reason and what happens next.
+- **`flow`** gives, per column, the item count, the longest-resident item and the in-flight workers.
+
+Filters (all optional, combinable): `milestone` (a title, or `none`), `label`, `repo`, `column`, `has_open_blockers`. An item the cache cannot evaluate for a filter — milestone not yet captured, blockers not yet fetched — is **excluded and counted** in the response (`excluded`), never guessed. The stall threshold in force is echoed; pass `stall_threshold_minutes` to try another for one call.
+
+#### `fabrik_health()`
+
+Daemon version and uptime; time since the last poll attempt and the last success; webhook mode and last-event time; time since the last successful reconcile; the account-wide Claude usage-limit suspension deadline, if any; the GraphQL backoff state; worker slots in use against `max_concurrent`; and, per (repo, base) merge-train partition, its members and whether a train worker is in flight.
+
+#### Attention states
+
+| State | Meaning |
+|---|---|
+| `needs-human` | The engine is paused and only a human comment resumes it (a question, or `fabrik:paused`). Also: settled at Validate under cruise, waiting for you to merge. |
+| `escalated` | The engine stopped on its own account: paused by the engine after exhausting retries, a cycle counter at its limit, a merge-train runaway pause, or a failed landing verification. A human must intervene. |
+| `waiting` | The engine is correctly waiting: CI, reviewers, dependencies, a retry cooldown, the merge train, a Claude usage-limit suspension, or a `fabrik:awaiting-*` settle retry. |
+| `working` | A worker is in flight and something observable changed recently. |
+| `stalled` | Nothing is correctly waited on and nothing observable changed for longer than the stall threshold (default 30 min, `--stall-threshold`); or an engine-owned wait whose deadline passed more than a threshold ago (`overdue`). |
+| `idle` | Nothing to do, or nothing wrong: closed, done, a parking column, or recently active. |
+
+"Progress" is the latest of: entering the column, a stage attempt, the engine applying a label, CI activity, and a worker starting. The worker heartbeat is deliberately *not* progress (it stays fresh while Claude hangs). Because time in column resets on restart, nothing is reported `stalled` until one threshold has elapsed since the daemon started. The precise precedence is in [`docs/state-machine.md` §7.13](state-machine.md#713-overseer-attention-classification-and-the-local-read-api-1967).
+
+---
 
 ### Log Files
 
