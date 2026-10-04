@@ -51,6 +51,7 @@ type Config struct {
 	ReviewWaitTimeout         int    // minutes; 0 means use default (15)
 	MaxReviewCycles           int    // 0 means use default (5)
 	CIWaitTimeout             int    // minutes; CI-gate liveness-stall dwell; 0 means use default (30) (ADR-1410)
+	ChannelHeldMax            int    // events held per MCP channel subscriber while no session is attached; 0 means use default (200); oldest are dropped with a notice (#1968)
 	StallThreshold            int    // minutes; how long an item may show no observable progress before the local read API (fabrik mcp) classifies it stalled; 0 means use default (30) (#1967)
 	CIBackstopTimeout         int    // minutes; absolute fabrik:awaiting-ci cap independent of CI duration; 0 means use default (240 = 4h) (ADR-1410, R5)
 	WorkerStaleMins           int    // minutes; 0 means use default (5)
@@ -194,6 +195,7 @@ func Execute() error {
 	flag.IntVar(&cfg.ReviewWaitTimeout, "review-wait-timeout", 0, "Maximum time in minutes to wait for PR reviewers before advancing (0 = use default of 15; also FABRIK_REVIEW_WAIT_TIMEOUT)")
 	flag.IntVar(&cfg.MaxReviewCycles, "max-review-cycles", 0, "Maximum number of review-and-fix cycles per issue (0 = use default of 5; also FABRIK_MAX_REVIEW_CYCLES)")
 	flag.IntVar(&cfg.CIWaitTimeout, "ci-wait-timeout", 0, "CI-gate liveness-stall dwell in minutes: how long CI may show no observable progress before pausing (0 = use default of 30; also FABRIK_CI_WAIT_TIMEOUT). Does NOT bound total CI duration — a suite that is alive and progressing waits indefinitely; see --ci-backstop-timeout for the absolute cap (ADR-1410)")
+	flag.IntVar(&cfg.ChannelHeldMax, "channel-held-max", 0, "Events held per fabrik mcp channel subscriber while no session with that name is attached; beyond it the oldest are dropped with a notice (0 = use default of 200; also FABRIK_CHANNEL_HELD_MAX)")
 	flag.IntVar(&cfg.StallThreshold, "stall-threshold", 0, "Minutes an item may show no observable progress (no worker activity, no status or label change) before the fabrik mcp overseer tools classify it stalled (0 = use default of 30; also FABRIK_STALL_THRESHOLD)")
 	flag.IntVar(&cfg.CIBackstopTimeout, "ci-backstop-timeout", 0, "Absolute cap in minutes on how long an item may sit in fabrik:awaiting-ci under any classification, bounding per-poll cost independent of CI duration (0 = use default of 240 = 4h; also FABRIK_CI_BACKSTOP_TIMEOUT; ADR-1410)")
 	flag.IntVar(&cfg.WorkerStaleMins, "worker-stale-timeout", 0, "Minutes before a stale worker heartbeat triggers PID-liveness check (0 = use default of 5; also FABRIK_WORKER_STALE_TIMEOUT)")
@@ -422,6 +424,9 @@ func Execute() error {
 	}
 	if !explicitFlags["ci-wait-timeout"] {
 		cfg.CIWaitTimeout = resolveInt(cfg.CIWaitTimeout, "FABRIK_CI_WAIT_TIMEOUT", "of minutes", 30)
+	}
+	if !explicitFlags["channel-held-max"] {
+		cfg.ChannelHeldMax = resolveInt(cfg.ChannelHeldMax, "FABRIK_CHANNEL_HELD_MAX", "", 200)
 	}
 	if !explicitFlags["stall-threshold"] {
 		cfg.StallThreshold = resolveInt(cfg.StallThreshold, "FABRIK_STALL_THRESHOLD", "of minutes", 30)
@@ -903,6 +908,7 @@ func Execute() error {
 		CIWaitTimeout:             ciWaitTimeout(cfg.CIWaitTimeout),
 		CIBackstopTimeout:         ciBackstopTimeout(cfg.CIBackstopTimeout),
 		StallThreshold:            stallThreshold(cfg.StallThreshold),
+		ChannelHeldMax:            cfg.ChannelHeldMax,
 		RequiredStatusContexts:    pc.RequiredStatusContexts, // keyed by "owner/repo"; nil = no behavior change (ADR-933)
 		PostPushDwell:             postPushDwell(cfg.PostPushDwell),
 		WorkerStaleTimeout:        workerStaleTimeout(cfg.WorkerStaleMins),

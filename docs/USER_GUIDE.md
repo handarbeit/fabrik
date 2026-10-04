@@ -828,7 +828,7 @@ Custom stages (names not present in any embedded default) are silently skipped �
 >
 > See [§11 Troubleshooting → Multiple Fabrik Instances](#11-troubleshooting) if you encounter a stale lock or need to run multiple instances against different projects.
 >
-> While it runs, the daemon also serves a read-only local API on `.fabrik/state/fabrik.sock` (mode `0600`, per directory — see [Overseer Tools: `fabrik mcp`](#overseer-tools-fabrik-mcp)). The socket is only ever bound after the lock is held, so a socket file left by a crash or a re-exec is known to be stale and is replaced at startup.
+> While it runs, the daemon also serves a local API (read tools, plus subscriptions and a push stream) on `.fabrik/state/fabrik.sock` (mode `0600`, per directory — see [Overseer Tools: `fabrik mcp`](#overseer-tools-fabrik-mcp)). The socket is only ever bound after the lock is held, so a socket file left by a crash or a re-exec is known to be stale and is replaced at startup.
 
 ### Graceful Shutdown
 
@@ -1213,6 +1213,7 @@ FABRIK_USER=my-personal-username
 | `--ci-wait-timeout` | Minutes of CI *inactivity* (no observable progress) before pausing — not total CI wait time; a suite that keeps reporting fresh check-run activity waits indefinitely, however long it takes (0 = use default of 30; also `FABRIK_CI_WAIT_TIMEOUT`; ADR-1410) | `0` (30 min) |
 | `--ci-backstop-timeout` | Absolute cap in minutes on how long an item may sit in `fabrik:awaiting-ci` under any classification, bounding per-poll cost independent of CI duration — sized much larger than `--ci-wait-timeout` on purpose (0 = use default of 240 = 4h; also `FABRIK_CI_BACKSTOP_TIMEOUT`; ADR-1410) | `0` (240 min / 4h) |
 | `--stall-threshold` | Minutes an item may show no observable progress (no worker activity, no status or label change) before the [`fabrik mcp`](#overseer-tools-fabrik-mcp) overseer tools classify it `stalled` (0 = use default of 30; also `FABRIK_STALL_THRESHOLD`; `fabrik_board` can override it per call). Reporting only — it changes nothing the engine does | `0` (30 min) |
+| `--channel-held-max` | Events held per [`fabrik mcp`](#overseer-tools-fabrik-mcp) channel subscriber while no session with that name is attached; beyond it the oldest are dropped and the next delivery starts with an `events-dropped` notice (0 = use default of 200; also `FABRIK_CHANNEL_HELD_MAX`). Reporting only — it changes nothing the engine does | `0` (200) |
 | `--post-push-dwell` | Seconds to wait after a PR force-push before clearing the CI gate as "no CI configured" (0 = use default of 90; also `FABRIK_POST_PUSH_DWELL`). Prevents premature gate-clear in the brief post-push window when GitHub has not yet computed mergeability or started CI for the new SHA. | `0` (90 sec) |
 | `--worker-stale-timeout` | Minutes before a stale worker heartbeat triggers PID-liveness check and handle clearing (0 = use default of 5; must be > `heartbeatInterval×2`; also `FABRIK_WORKER_STALE_TIMEOUT`) | `0` (5 min) |
 | `--max-ci-fix-cycles` | Maximum number of CI-fix re-invocation cycles per issue (0 = use default of 5; also `FABRIK_MAX_CI_FIX_CYCLES`) | `0` (5 cycles) |
@@ -3374,7 +3375,7 @@ The session ID for the active Claude session is shown in the header when availab
 
 **The problem.** If you run a Claude Code session as product manager and overseer of a Fabrik pipeline, it sees what GitHub shows — labels and a board column — and nothing of what the daemon knows: how close an item is to a pause limit, what the engine will do next and when, whether a worker is alive and making progress, how the last invocation ended, whether the pipeline itself is healthy. Polling GitHub for the visible part spends the same REST/GraphQL budget the daemon needs, and it lags; the rest is not on GitHub at all.
 
-**What Fabrik gives you.** `fabrik mcp` is a stdio [MCP](https://modelcontextprotocol.io) server that exposes three **read-only** tools backed by the running daemon's in-memory state. They make **no GitHub API call** — everything is served from what the daemon already holds — and every response says how fresh it is.
+**What Fabrik gives you.** `fabrik mcp` is a stdio [MCP](https://modelcontextprotocol.io) server that exposes three **read-only** tools backed by the running daemon's in-memory state. They make **no GitHub API call** — everything is served from what the daemon already holds — and every response says how fresh it is. It can also **push** events into the session so you do not have to poll or know to ask — see [Proactive push](#proactive-push-claude-code-channels-research-preview).
 
 Register it once from your Fabrik directory (Claude Code launches it per session):
 
@@ -3395,7 +3396,8 @@ claude mcp add --scope user fabrik -- fabrik mcp --dir /path/to/your/fabrik-dir
 The daemon serves a small newline-delimited-JSON API on a Unix socket, `.fabrik/state/fabrik.sock` under its Fabrik directory:
 
 - **Per daemon.** The socket lives in the daemon's own directory, so several instances on one machine never collide, and each only ever serves the repos and projects *it* manages.
-- **Private.** Mode `0600`, a Unix socket (not reachable over TCP). There is no authentication beyond filesystem permissions: any process of your own user can read the daemon's operational state (issue titles, labels, counters).
+- **Private.** Mode `0600`, a Unix socket (not reachable over TCP). There is no authentication beyond filesystem permissions: any process of your own user can read the daemon's operational state (issue titles, labels, counters) and — since the push stream — attach under any subscriber name and receive that name's events.
+- **Long-lived push connection.** A session that subscribes to pushes holds one connection open and mostly *receives*. The daemon sends a heartbeat every 30 s, which also keeps the connection from hitting the 10-minute idle limit that applies to a connection that sends nothing; a dead peer is detected at the next heartbeat. At most 32 connections are served at once (each attached session holds one).
 - **Long paths.** A Unix socket path is limited to about 104 bytes. If `<fabrik-dir>/.fabrik/state/fabrik.sock` would be longer, both the daemon and `fabrik mcp` use `/tmp/fabrik-<uid>/<hash>.sock` instead (a private directory; the hash is of the symlink-resolved Fabrik directory, and the location is a fixed `/tmp`, not `$TMPDIR`, so a daemon and a Claude-launched `fabrik mcp` with different environments still agree) — you never need to know which.
 - **Lifecycle.** Bound after the [instance lock](#instance-lock) is held; a stale socket from a crash or re-exec is replaced at startup; removed on clean shutdown. If it cannot be bound, the daemon logs it and carries on without the API.
 
@@ -3446,6 +3448,59 @@ Daemon version and uptime; time since the last poll attempt and the last success
 | `idle` | Nothing to do, or nothing wrong: closed, done, a parking column, or recently active. |
 
 "Progress" is the latest of: entering the column, a stage attempt, the engine applying a label, CI activity, and a worker starting. The worker heartbeat is deliberately *not* progress (it stays fresh while Claude hangs). Because time in column resets on restart, nothing is reported `stalled` until one threshold has elapsed since the daemon started. The precise precedence is in [`docs/state-machine.md` §7.13](state-machine.md#713-overseer-attention-classification-and-the-local-read-api-1967).
+
+#### Proactive push: Claude Code Channels (research preview)
+
+**The problem.** The tools above answer a question, but they cannot make a session ask it. An issue can lose a day to a pause, an ejection or a timeout that the session supervising it never hears about; on a `fabrik:cruise` issue nothing further happens at Validate until a human acts, so the moment it settles is exactly the moment someone needs to know.
+
+**What Fabrik gives you.** The daemon already observes every label change and gate transition the instant it happens. With a *subscriber name* set, `fabrik mcp` holds a connection to the daemon and writes those events into your Claude Code session as `<channel source="fabrik" event="validate-settled" repo="owner/repo" issue="12" …>one-line summary</channel>` messages, with no GitHub call and no polling. Events observe; they never change what the engine does.
+
+**Requirements — this is a research preview.** Channels is an experimental Claude Code feature; the notification contract, the flags below and org policy may change.
+
+- Launch the server with a stable name — your topic or session name, **never a PID** — so held events and subscriptions find you again after a restart: `claude mcp add --scope user fabrik -- fabrik mcp --dir /path/to/fabrik-dir --subscriber my-topic` (or set `FABRIK_SUBSCRIBER`). Without a name the read tools work as before and no push connection is made.
+- Start Claude Code with the channel enabled for this server. Fabrik is not on the approved channel allowlist, so during the research preview that is `claude --dangerously-load-development-channels server:fabrik` (a full-screen warning dialog); `--channels` is for allowlisted servers only. On Team and Enterprise plans an admin must also allow channels (`channelsEnabled`), and that policy still applies to the development flag.
+- **If the session did not enable the channel, Claude Code drops the events silently** — it never acknowledges a notification and the daemon cannot tell. "Delivered" therefore means "written to `fabrik mcp`". The server's instructions and the `fabrik_subscribe` description say this too.
+
+**Choosing what you hear about: `fabrik_subscribe` / `fabrik_unsubscribe`.** A subscription belongs to the subscriber name and is stored under `.fabrik/state/channel/`, so it survives daemon restarts; re-subscribing with identical filters changes nothing.
+
+| Argument | Meaning |
+|---|---|
+| `issues` | `owner/repo#N`, or `N` when the daemon manages exactly one repo (same rules as `fabrik_status`) |
+| `repos` | `owner/repo` |
+| `milestone` | a milestone title, or `#N` for a number. An item whose milestone the daemon has not captured yet never matches |
+| `labels` / `exclude_labels` | glob patterns for **label events only** (`*` matches any run of characters, so `fabrik:*`, `stage:*:complete`). By default `fabrik:locked:*`, `stage:*:in_progress`, `fabrik:spawned-child:*`, `fabrik:credited-pr:*` and `fabrik:editing` are excluded as churn; pass `exclude_labels: []` to receive every change |
+| `events` | which event types to receive (default: all) |
+| `digest_seconds` | 30–3600: batch ordinary events into one `digest` message per interval. `validate-settled`, `escalated`, `paused` and `daemon-unreachable` are always delivered at once |
+| `subscriber` | override the launch name |
+
+Scopes combine with AND; entries within one list with OR. Account-wide events (`claude-limit-*`, `daemon-*`) have no issue and ignore the issue, repo and milestone scopes. `fabrik_unsubscribe` takes the subscription `id` (from `fabrik_subscribe`'s response), or removes all of the subscriber's subscriptions when omitted.
+
+**Held delivery.** Channels reach only a live session, so while no `fabrik mcp` with your name is attached the daemon keeps matching events (persisted, at most `--channel-held-max` per subscriber — default 200 — with the oldest dropped and a single `events-dropped` notice next time; entries older than 7 days and subscribers unseen for 30 days are pruned). On reconnect they arrive first, in order, then live ones. `fabrik mcp` reconnects by itself after a daemon restart (including a SIGHUP re-exec) and re-registers its name, so none of this needs any action from the session. A second `fabrik mcp` attaching under the same name replaces the first.
+
+**The events.** Every event carries `meta` keys `repo`, `issue`, `event`, and, when known, `stage`, `pr` and `comment` (a link to the 🏭 Fabrik comment that was most recently posted on the issue, when it is not the one the previous event for that issue already carried), plus the keys below.
+
+| Event | When | Extra `meta` |
+|---|---|---|
+| `validate-settled` | Validate is gate-complete: `stage:Validate:complete` is applied (under `wait_for_ci`, deferred until CI passes), the review gate has cleared and nothing unprocessed is holding it. Once per settle episode — never at `FABRIK_STAGE_COMPLETE` while `fabrik:awaiting-ci` is present; `fabrik:revalidate` or a reopen starts a new episode | `next` (`waiting-for-human` for cruise or no autonomy, `auto-merge`, `merge-train`), `autonomy`, `ci` (from cached check runs; `unknown` when none are cached), `ci_gate` (`cleared`/`not-gated`), `reviews` (who reviewed, and how), `unresolved_threads`, `head_sha` |
+| `label-applied`, `label-removed` | any label change on a subscribed issue; one event per actual change | `label`, `actor` (`fabrik`, `human`, `bot`, or `unknown` when a poll saw it first — under PAT auth the operator's own login looks like Fabrik's and counts as `human`) |
+| `paused`, `awaiting-input`, `escalated` | the item became `needs-human` (with a question: `awaiting-input`) or `escalated` — the same classification `fabrik_board` shows | `code`, `reason` |
+| `awaiting-input-stale` | `fabrik:awaiting-input` is present but the latest run finished without `FABRIK_BLOCKED_ON_INPUT` | |
+| `stalled` | no progress past the same `--stall-threshold` the `attention` view uses (a long-running healthy worker and an expired cooldown are not stalls) | `code`, `reason`, `progress_age_seconds` |
+| `cycle-limit-near` | a cycle or retry counter is one short of its pause limit | `counter`, `count`, `limit` |
+| `merge-train-ejected` | a member left the batch | `cause`, `reason`, `failing_checks`, `ejections`, `max_ejections`, `stays_queued` |
+| `merge-train-failed` | the train failed for a member (red singleton, landing failure, runaway guard) | `cause`, `reason`, `failing_checks` |
+| `ci-timeout`, `review-timeout` | the CI or review gate timed out and the item was paused | `timeout`, `ci` / `pending_reviewers`, `reviews_before_wait` (reviewers who had already reviewed before the gate began waiting; `unknown` after a daemon restart) |
+| `merged` | the PR landed (for a merge-train member, `pr` is the integration PR that merged) | |
+| `blocker-cleared` | the last open blocker closed and work resumes | |
+| `children-spawned` | the item's scope grew: child issues were created | `children`, `count` |
+| `landing-verification-failed` | the credited PR did not merge; the issue was reopened | |
+| `claude-limit-suspended`, `claude-limit-lifted` | the account-wide Claude usage-limit suspension began or ended | `until` |
+| `daemon-unreachable`, `daemon-reachable` | emitted by `fabrik mcp` itself when the daemon connection stays down more than 10 s and when it recovers | `error` / `down_for_seconds` |
+| `events-dropped`, `digest` | bookkeeping: the held queue overflowed; a batched delivery | `count` |
+
+A pause is reported once, as the transition into the state — not once per poll — and a restart announces nothing about items already paused. The exact derivation of each event is in [`docs/state-machine.md` §7.14](state-machine.md#714-channel-events-proactive-push-to-fabrik-mcp-sessions-1968).
+
+**Cost.** Deriving, routing and delivering events makes no GitHub API call. The only cost is one local socket connection per attached session.
 
 ---
 

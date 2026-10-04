@@ -1782,6 +1782,8 @@ Together these mean a genuinely-stuck failure still reaches `PRMergeBlocked` (th
 
 ### 6.5 CI Gate and CI-Fix Reinvoke
 
+> **Channel events (#1968):** `pauseForCITimeout` (a fresh CI-gate timeout pause) emits `ci-timeout`; the CI-fix cycle counter reaching one short of its limit emits `cycle-limit-near`; see §7.14.
+
 #### 6.5.1 Two-Phase CI Gate
 
 The CI gate has two paths that handle different timing scenarios:
@@ -1933,6 +1935,8 @@ The cost is a re-invocation rather than an inline `exec.Cmd`. This is why `MaxRe
 
 ### 6.6.6 CI ∧ Review Gate Joint-Clearing Sequence
 
+> **Channel events (#1968):** The moment both gates have cleared and the engine reaches `runCatchUpPhase2` (or, for yolo, the landing decision in `attemptMergeOnValidate`) is where `validate-settled` is emitted; `pauseForReviewTimeout` emits `review-timeout`; see §7.14.
+
 When a stage has both `wait_for_ci: true` and `wait_for_reviews: true`, the two gates are enforced by **two distinct owners**: `handleReviewGate` (which owns escalation and the timeout) and `reviewGateBlocksLanding` inside `attemptMergeOnValidate` (which owns the landing decision). The second owner exists because the Phase 1 handler chain alone cannot gate the poll pass in which CI clears.
 
 **Within a single poll pass, CI clearing and landing are not separated by a poll boundary.** `pctx.hasComplete` is computed once, before the Phase 1 handler chain runs, and `catchUpPhase1Handlers` orders `reviewGate` ahead of `mergeAndCIGates`. As of #1270, a not-yet-complete `fabrik:awaiting-ci` item on a `wait_for_ci` stage reaches this chain via `settleAwaitingCIScan` (§6.5.1 Path 2), not the main catch-up loop — the main loop's admission gate is `hasComplete`-only, so it never sees these items while CI is still pending. `settleAwaitingCIScan` runs `runCatchUpPhase2` (the same gated stage-advancement/landing step the main loop's Phase 2 performs) immediately after the handler chain if no handler claimed the item, so the same-poll handoff below is unchanged in *outcome*, only in *which iteration* performs it. So on the pass where CI turns green:
@@ -1981,6 +1985,8 @@ There is therefore no poll pass in which the item sits at Validate with `hasComp
 **References:** [ADR-1216: Review gate checked at the landing decision](../adrs/1216-review-gate-at-landing-decision.md), [ADR-1250: Review authority — advisory vs. authoritative, an axis orthogonal to autonomy](../adrs/1250-review-authority-orthogonal-to-autonomy.md)
 
 ### 6.7 Pre-Implement Spawn Path
+
+> **Channel events (#1968):** `spawnChildren`, once every child is created and wired and `fabrik:children-spawned` is applied, emits `children-spawned` (scope grew); see §7.14.
 
 **Trigger:** The Implement stage dispatcher calls `preImplement()` before the Claude invocation on every Implement dispatch. `preImplement` is a no-op unless the Plan stage comment contains `FABRIK_SPAWN_CHILD_BEGIN/END` blocks AND the parent issue does not yet have `fabrik:children-spawned`.
 
@@ -2541,6 +2547,8 @@ The previous unanchored substring match also hit a fragment merely quoted elsewh
 
 ### 6.16 Queued Review-Finding Ejection (Settle Scan)
 
+> **Channel events (#1968):** `ejectMember` and `ejectQueuedMemberForComments` emit `merge-train-ejected`; see §7.14.
+
 **Trigger:** Issue #1208. While a merge-train member sits in the `Queued` holding stage awaiting a batch, Fabrik processes **no PR feedback at all** — the `HoldingStage` exclusion shared by `itemMayNeedWork` (§6.14's admission-independence framing applies equally here: `deepFetchCandidates` never even deep-fetches a Queued item, so `reviewThreads`/`LinkedPRReviewThreadComments` are never populated) and the main catch-up loop's own per-item admission gate blacks out review-reinvoke and comment processing for as long as the item remains Queued. This window is not brief: batch formation, trial-branch assembly, CI, and possibly inline conflict resolution and bisection can span tens of minutes, and a live merge-train worker can block synchronously inside `pollTrainCI` for up to `CIWaitTimeout` (default 30 min) — precisely the window in which a self-submitting review bot (Pruefer) is most likely to post a fresh finding, since it re-reviews on every new head SHA and train activity produces new SHAs. #1207 (§ADR-1207, the sibling Validate-side race) narrows this issue's practical exposure to the *mid-flight* case — a finding that lands after the member is already in Queued — since a member with unresolved threads at the moment Validate would hand off to Queued is now guarded there, but the code path this section fixes has no such guard of its own.
 
 **Same failure class as §6.9/§6.10/§6.13/§6.14/§6.15: a durable condition invisible to the shared, admission-gated catch-up path, recovered by a dedicated `board.Items`-sourced settle scan.** `settleQueuedReviewFindings` is the sixth instance of the ADR-1270 pattern. Unlike those five siblings, this scan does not merely make an already-evaluable gate reachable — it introduces a **new ejection trigger** on top of the pre-existing `ejectMember` mechanism (ADR-059), because a Queued member cannot address a review finding in place: pushing a fix would change the member's head SHA mid-batch, invalidating a trial branch the train may have already assembled, CI'd, or bisected.
@@ -2656,6 +2664,8 @@ Three other `advanceToNextStage` call sites exist in the codebase (`poll.go`, `s
 
 ### 6.18 Runaway Guard Alert Retry (ADR-1533)
 
+> **Channel events (#1968):** `fireRunawayGuard` pausing a member emits `merge-train-failed` (cause `runaway-guard`); see §7.14.
+
 **Trigger:** Issue #1533. `fireRunawayGuard` (see the "Runaway guard (ADR-059 D8)" section above for its full pause+alert contract) pauses every member it's given, but its alert `AddComment` call and its `fabrik:paused`/`fabrik:awaiting-input` label calls were independent, unconditional GitHub API calls — a comment failure was logged and the loop continued straight into the label calls anyway. Because `groupQueuedByRepoAndBase` (Hook 2's snapshot source) excludes any `fabrik:paused` member from every subsequent poll's Queued snapshot, and Hook 1 (the worker goroutine) only ever knows the members it started with, a member whose comment failed had **no path back** to a retry — it stayed `fabrik:paused` with no explanation, permanently, unless an operator noticed and investigated by other means (e.g. a sibling member's comment in the same batch). This is the same "stranded with no signal" shape ADR-060/#1422/#1408 already treat as a defect.
 
 **Same failure class as §6.8/§6.9/§6.10/§6.13/§6.14/§6.15/§6.16/§6.17 — the eighth instance of the ADR-1270 dedicated-settle-scan pattern.** The durable marker (`fabrik:awaiting-runaway-alert`), retry-owner settle scan (`settleRunawayGuardAlertScan`), and `MaxRetries`-bounded escalation all reuse the shared `recordSettleRetry`/`clearSettleMarker`/`escalateSettle` helpers (`engine/settle.go`) this whole family shares.
@@ -2688,6 +2698,8 @@ Three other `advanceToNextStage` call sites exist in the codebase (`poll.go`, `s
 **References:** [ADR-1533: Runaway Guard Atomic Pause and Alert](../adrs/1533-runaway-guard-atomic-pause-and-alert.md), [ADR-059: Internal Merge Train](../adrs/059-internal-merge-train.md) §D8 (original runaway guard design — see ADR-1533's correction note), [ADR-061: Merge-Train Singleton Member-Issue Close Retry](../adrs/061-merge-train-member-close-retry.md) (§6.10, the closest structural precedent among this family), issue #1533
 
 ### 6.19 Post-Done Landing Verification (ADR-1616)
+
+> **Channel events (#1968):** The `fabrik:awaiting-landing-verification` label (applied right after a merge-attributable Done transition) is what emits `merged`; `failLandingVerification` applying `fabrik:landing-verification-failed` emits `landing-verification-failed`; see §7.14.
 
 **Trigger:** Issue #1614. A merge-train batch attribution bug closed two issues as `COMPLETED` whose work was never actually merged — the Done transition is driven entirely by *inferred* success (a merge call returned, or a PR was believed merged), never by observing the credited work actually landing. This is silent and self-certifying: the issue reads `COMPLETED`, the PR reads landed, and no dispatch path ever revisits a Done item, so there is no signal for anything to notice later. Issue #1615 fixes the specific root cause; this is the cause-agnostic backstop that would have caught it — and would catch the next one, whatever its cause.
 
@@ -3179,6 +3191,8 @@ When Claude runs but does not output any completion marker, the engine enters a 
 
 ### 7.2 Failed Stage / Pause on Retry Limit
 
+> **Channel events (#1968):** A pause or escalation is reported as `paused`, `awaiting-input` or `escalated` — the transition into the same `internal/attention` state the read API shows (§7.13) — and a counter one short of its limit as `cycle-limit-near`; see §7.14.
+
 When a stage fails `MaxRetries` times (default: configurable, 0 disables):
 
 1. `escalateFailedStage()` adds `fabrik:paused` + `stage:<X>:failed`
@@ -3221,6 +3235,8 @@ All four now-fixed sites apply `itemstate.EnginePaused` in both their fresh-paus
 **Restart durability:** `handleEngineUnpause` reads `PausedByEngine`, which is in-memory-only (does not survive an engine restart — `internal/itemstate/snapshot.go`). This is not a gap: `ReviewCycles`/`CIFixCycles`/`RebaseCycles`/`EnqueueCycles` live in the same in-memory `StageState`, constructed empty by `NewStore(nil)` on every process start with no persistence layer for any `StageState` field — so a restart clears the pause flag *and* the triggering counter together, never one without the other. A restart before a human unpauses an item is equivalent to `handleEngineUnpause` having already fired for free (both read back as zero); there is no interleaving that reproduces this section's defect via a restart. See ADR-1460's "Restart Durability" section.
 
 ### 7.3 Claude Usage-Limit Exemption
+
+> **Channel events (#1968):** `activateClaudeSuspension` / `clearClaudeSuspension`, and the suspension's deadline simply passing, emit the account-wide `claude-limit-suspended` / `claude-limit-lifted`; see §7.14.
 
 When a Claude invocation exits because the account's usage limit was hit (e.g. `You've hit your
 session limit · resets 10:20pm (America/Edmonton)`), it is a distinct condition from both §7.2
@@ -3783,6 +3799,8 @@ Closed issues are normally skipped by `itemMayNeedWork()` and `itemNeedsWork()`.
 | Lock tracking | `itemstate.Store` → `ItemState.Lock` | `fabrik:locked:<user>` label | Label may survive if process crashes; `cleanupLockedIssues()` runs on graceful shutdown |
 | Change-feed set | `Engine.mayNeedWork[iKey]` (`Engine.mayNeedWorkMu`) | None | Lost — all items re-evaluated on first poll |
 | Deep-fetch failure | `itemstate.Store` → `ItemState.LastDeepFetchFailureAt` | None | Lost — failed items retried immediately |
+| Channel subscriptions, held events, dedup keys, settle-episode counters (#1968) | `channelevents.Hub` (mirrors of the files) | `.fabrik/state/channel/subscriptions.json`, `held-<hash>.json`, `dedup.json` (atomic writes, corrupt files quarantined) | Survive — loaded before the socket binds; held events are delivered in order on re-attach |
+| Channel deriver's per-item memory (last pause-family state, counter arming, last comment link) | `engine.channelEvents` (consumer goroutine only) | None | Lost — re-seeded silently from the store, so a restart announces nothing about the existing board |
 
 ### 7.7 Invocation-Level Kill Mechanisms
 
@@ -4122,6 +4140,45 @@ is untouched by any number of turn-cap preemptions.
 **Zero GitHub cost.** `engine/localapi*.go` reads the Store only through `Peek` (no `FallbackFetcher`) and `Scan`, and never the engine's GitHub clients, `Store.Get` or `labelAppliedAt` — enforced by `TestLocalAPISourceDoesNotReachGitHub` and a nil-client test. The poll loop's single-goroutine fields reach the API only through the mutex-guarded `daemonHealth` mirror.
 
 **Local API lifecycle.** `Run()` binds `.fabrik/state/fabrik.sock` (mode 0600) after the instance lock (§7.4) is held and after the webhook manager is assigned, before the first poll. A socket file already there is stale — replaced, but only if it is a socket. The socket is closed and unlinked when `Run()` returns and before the SIGHUP re-exec; the self-upgrade exec, a crash and an exec failure leave a file that the next start replaces. A bind failure only disables the API.
+
+### 7.14 Channel Events: Proactive Push to `fabrik mcp` Sessions (#1968)
+
+[ADR-1966-b](../adrs/1966-b-fabrik-mcp-channel-events.md). Where §7.13's read API answers a question, channel events tell a session that a question is due. The daemon derives events from transitions it already observes, routes them to named subscribers through a persisted hub, and `fabrik mcp` writes them to the session as Claude Code Channels `notifications/claude/channel` messages (a research preview — see USER_GUIDE §9, "Proactive push"). **Events observe; they never cause or alter an engine decision (R10), and they cost no GitHub call (R9).**
+
+**Sources.** (1) The `itemstate` observer: every non-no-op `Store.Apply` delivers a `Change` whose `LabelDeltas` list each label the mutation actually added or removed (a before/after diff, computed only for an item the store already held — a board population, `Reset` or an item's first creation is a baseline, not a change), plus its `Origin` (`LocalLabel*` write-through = the engine; webhook; anything else = a poll/reconcile) and, for webhooks, the `sender.login` and whether the engine's echo registry matched. (2) A small number of nil-safe, void hooks at engine transition points that have no store signal of their own. (3) A 30 s ticker for the time-driven events. The observer only appends to a queue; one consumer goroutine owns all per-item memory and is the only publisher, which is what serialises ordering and dedup.
+
+**One event per actual change.** The engine's `LocalLabelAdded` write-through changes the store; the webhook echo that follows is an idempotent no-op that never reaches an observer. A reconcile that re-observes an unchanged label is a no-op diff. Residual race: a webhook delivered between the REST call returning and the write-through is applied first, so its event is attributed by the webhook (`actor` = `fabrik` when the echo registry matched, else from the sender) — never duplicated.
+
+**Actor of a label event:** `fabrik` (the engine's write-through, a webhook that matched the engine's echo registry, or — under GitHub App auth — a sender equal to the App's bot login), `bot` (another `[bot]` sender), `human` (any other sender, including the operator's own login under PAT auth, which cannot be told apart from Fabrik's), `unknown` (first observed by a poll or reconcile, so nobody told us who did it).
+
+**Where each event comes from:**
+
+| Event | Produced by | Notes |
+|---|---|---|
+| `validate-settled` | `runCatchUpPhase2` (the settle point — reached only when no Phase 1 handler claimed the item, i.e. dependencies, review gate, auto-merge convergence and the CI/merge gates are clear; §6.4, §6.6.6) via `noteValidateSettled`, called **before** the autonomy gate so cruise is covered; and `attemptMergeOnValidate` after its dependency, review-thread, review and feedback gates passed (via `noteValidateLanding`) — the settle point for yolo, whose landing happens inside that call and never reaches Phase 2 | Never at `FABRIK_STAGE_COMPLETE` while `fabrik:awaiting-ci` is present (the complete label is deferred and the predicate requires it). A cache-only predicate confirms: Validate, open linked PR, `stage:Validate:complete`, none of `awaiting-ci`/`awaiting-review`/`bot-reprompted`/`paused`/`blocked`/`rebase-needed`/`revalidate`, no open blocker, no worker, and no unprocessed feedback (the feedback gate's own pure cores, §2.2, read from the store; `TestCachedFeedbackMatchesLiveGate` pins the agreement). The event is captured on the calling goroutine, because a yolo item can be merged and moved to Done in the same pass. **Episodes:** one event per episode; an episode ends when the complete label is removed (`fabrik:revalidate`), the item is closed or leaves Validate, or the PR head moves after Validate completed; the episode counter and dedup key persist, so a restart neither replays an announced episode nor loses an unannounced one. `meta.next`: `waiting-for-human` (cruise — the raw cruise label wins over yolo — or no autonomy), `auto-merge` (yolo, merge train off, or `fabrik:auto-merge-enabled`), `merge-train` (yolo, `merge_train: on`). `meta.ci` is read from cached check runs and is `unknown` when the cache holds none (the cache fills from `check_run` webhooks, so absence is not "no checks"); `meta.ci_gate` says whether the engine's own CI gate was configured and cleared |
+| `label-applied`, `label-removed` | the observer's `LabelDeltas` | `label`, `actor`, `stage`. Label patterns filter only these |
+| `paused`, `awaiting-input`, `escalated`, `stalled` | the same `internal/attention` classification the read API uses (§7.13), re-evaluated after a short debounce when an item's labels, stage state, status or invocation change, and on the ticker; one event per *transition into* the state | `paused` and `awaiting-input` are the classifier's `needs-human` (`fabrik:awaiting-input` present → `awaiting-input`); `escalated` is its `escalated` (`PausedByEngine` — set by `escalateSettle` and every `pauseFor*` that arms it — a counter at its limit, or `fabrik:awaiting-runaway-alert`; the §6.x settle-scan exhaustion paths and §7.2 pause-on-retry-limit all land here); `stalled` is its `stalled` with the one `--stall-threshold`, so a push is never looser than `fabrik_board` and a subscription cannot override it. The debounce means a pause's labels and `EnginePaused` are classified together, not as two events. A cruise item settled at Validate (`awaiting-merge-decision`) is `validate-settled`'s business and a failed landing verification is its own event, so neither is reported here |
+| `awaiting-input-stale` | the observer, when an invocation is recorded while `fabrik:awaiting-input` is present, that run did not emit `FABRIK_BLOCKED_ON_INPUT` and the engine did not pause the item itself | once per awaiting-input episode; after a restart the invocation fields are empty, so no event (unknown, not guessed) |
+| `cycle-limit-near` | the observer, on a stage-state change | a cycle/retry counter (not attempts) reaches `limit - 1` (needs a known limit ≥ 2; zero config is unknown, never "limit 0"); re-arms when the counter drops below `limit - 1`, so a no-op refund (§2.9) followed by a new approach fires again |
+| `merge-train-ejected` | `ejectMember` (§6.16: trial/conflict/bisection causes stay queued, `review-findings` leaves it) and `ejectQueuedMemberForComments` (§6.16, #1863) | `cause`, `reason`, `failing_checks` (from the `trainCIDiagnostic` the engine already holds), `ejections`, `max_ejections`, `stays_queued` |
+| `merge-train-failed` | `ejectRedSingleton` (own validation failing; "Merge-Train Red-Batch Bisection"), `escalateStrandedTrainMember` (landing failed, also the closed-unmerged-trial path) and `fireRunawayGuard` (§6.18) | `cause`, `reason`, `failing_checks` when held |
+| `ci-timeout` | `pauseForCITimeout`, only on a fresh pause (a reapplied pause on an episode that already announced itself is silent) | `timeout`, `ci` |
+| `review-timeout` | `pauseForReviewTimeout` | `reviews_before_wait` names reviewers whose review predates the engine applying `fabrik:awaiting-review` — `unknown` after a restart, when that record-on-write timestamp is gone — and `pending_reviewers` |
+| `merged` | the `fabrik:awaiting-landing-verification` label delta (§6.19: every landing path — merge-train batch and singleton, the singleton fast path, the ordinary auto-merge path — applies it immediately after the Done transition) | `pr` is the credited PR (`fabrik:credited-pr:<N>`, applied first, for merge-train members whose own PR is closed, not merged) else the linked PR; dedup per (issue, PR) |
+| `blocker-cleared` | the `fabrik:blocked` removal delta (the push-unblock path and the `checkDependencies` defense-in-depth path, see the `fabrik:blocked` label row) | per dependent issue |
+| `children-spawned` | `spawnChildren`, after every child is created, wired and `fabrik:children-spawned` applied (§6.7) | `children`, `count` |
+| `landing-verification-failed` | the `fabrik:landing-verification-failed` label delta (`failLandingVerification`, §6.19) | |
+| `claude-limit-suspended`, `claude-limit-lifted` | the edge of `claudeSuspendedUntilTime` (§7.3), checked on `activateClaudeSuspension`/`clearClaudeSuspension` and on the ticker, so a suspension that simply expires is also reported | account-wide: no issue or repo; they ignore repo/issue/milestone scopes and reach every subscriber whose event filter admits them |
+| `daemon-unreachable`, `daemon-reachable` | the `fabrik mcp` shim, when the held connection stays down past a 10 s grace and when it re-attaches | live only: a daemon that is down cannot hold them |
+| `events-dropped`, `digest` | the hub (synthetic) | `count` |
+
+**Hub, subscriptions and held delivery.** Subscribers are keyed by a stable *name* (the operator's topic or session name — never a PID; supplied by `fabrik mcp --subscriber` / `FABRIK_SUBSCRIBER`). A subscription ANDs its set scopes (repos, issues, milestone, label patterns for label events, event types) and ORs the entries within a list; an item whose milestone is unknown never matches a milestone scope. One event reaches a subscriber at most once however many of its subscriptions match. The hub appends to a per-subscriber persisted queue before any delivery; the attached session's drain loop sends in order and removes an entry only after a successful write, so held events (no session attached) go out first, in order and individually, then live ones. The queue is bounded (`--channel-held-max`, default 200): the oldest entries are dropped and the next delivery starts with one `events-dropped` notice; entries older than 7 days and subscribers with no attach for 30 days are pruned. A second attach under the same name supersedes the first (it receives a `superseded` frame and stops reconnecting). Digest mode batches ordinary events per subscription (30 s–1 h); `validate-settled`, `escalated`, `paused` and `daemon-unreachable` bypass it, and events replayed after a reconnect are delivered individually, not re-digested. Delivery means "written to the shim": Claude Code never acknowledges a channel message and drops it silently when the session did not enable the channel, which the daemon cannot detect.
+
+**Durable vs in-memory.** Subscriptions, held queues, dedup keys and settle-episode counters live under `.fabrik/state/channel/` (`subscriptions.json`, `held-<hash>.json`, `dedup.json`), written atomically on every change and quarantined (`.corrupt-<unix>`) when unreadable, like `workers.json`. They are loaded before the socket binds, so a reconnect during startup finds them, and nothing needs flushing before the SIGHUP exec. The per-item memory the deriver keeps (last pause-family state, counter arming) is in-memory only and re-seeded silently from the store at startup, so a restart announces nothing about the existing board. Events that occur while the daemon is down, or during a self-upgrade exec, are not captured.
+
+**Connection lifetime (protocol v2).** `hello` reports `protocol_version` 2 and lists `subscribe`/`unsubscribe`/`attach` only when the channel hub is running; a client that does not find `attach` degrades to read tools. After `attach` the server writes a `heartbeat` frame every 30 s (`Server.HeartbeatInterval`); every successful write moves the connection's read deadline out by the idle timeout (`Server.IdleTimeout`, default 10 min), so a push-only subscriber is never dropped, and a write that fails (the 5 s write deadline) reaps a dead peer within one heartbeat. The client treats 3 missed heartbeats as a half-open connection and reconnects with jittered exponential backoff (250 ms → 30 s), re-attaching under the same name every time; a `busy` refusal at the 32-connection cap is retried. Each attached shim holds one of the 32 slots.
+
+**Zero GitHub cost and observation only.** `engine/channel_*.go` and `internal/channelevents` read item state only through `Peek`/`Scan` and the guarded engine state, and never the engine's GitHub clients, `Store.Get`, the live label-timestamp fallback or the live feedback/review gates — enforced by `TestChannelEventsSourceDoesNotReachGitHub`; `TestChannelEventsAreObservationOnly` (tests/sim) shows a run with a hub and a subscriber makes exactly the same GitHub mutations in the same order as a run without one.
 
 ---
 
