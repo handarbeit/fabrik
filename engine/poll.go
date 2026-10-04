@@ -632,6 +632,11 @@ func (e *Engine) Run() error {
 	// leftover socket is provably stale) and after e.webhookMgr is final, and
 	// before the first poll. Closed when Run() returns, and explicitly before a
 	// SIGHUP re-exec (performSighupRestart).
+	// Channel events (#1968) start first so the socket's streaming methods can
+	// bind to the hub, and are closed after the socket (deferred LIFO), so no
+	// session is attached to a stopped hub.
+	e.startChannelEvents()
+	defer e.closeChannelEvents()
 	e.startLocalAPI()
 	defer e.closeLocalAPI()
 

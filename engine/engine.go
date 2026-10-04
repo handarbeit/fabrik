@@ -42,6 +42,7 @@ type Config struct {
 	ReviewWaitTimeout         time.Duration       // How long to wait for PR reviewers before auto-advancing anyway (default 15m)
 	ReconcileInterval         time.Duration       // Reconcile ticker cadence (0 = use lightReconcileInterval default of 3m)
 	MaxReviewCycles           int                 // Max review re-invocation cycles per issue before pausing (default 5)
+	ChannelHeldMax            int                 // per-subscriber bound on events held for the MCP channel push while no session is attached (default 200; oldest dropped with a notice; #1968)
 	StallThreshold            time.Duration       // how long an item may show no observable progress (no worker activity, no status or label change) before the local read API classifies it stalled (default 30m; #1967, docs/state-machine.md §7.9). Zero disables stall classification.
 	CIWaitTimeout             time.Duration       // CI-gate liveness-stall dwell: how long CI may show no observable progress before pausing (default 30m; ADR-1410 — no longer a total-wait bound, see CIBackstopTimeout)
 	CIBackstopTimeout         time.Duration       // Absolute cap on how long an item may sit in fabrik:awaiting-ci under any classification, bounding per-poll cost independent of CI duration (default 4h; ADR-1410, R5)
@@ -243,6 +244,10 @@ type Engine struct {
 	// (and when binding failed). Guarded by localAPIMu.
 	localAPIMu sync.Mutex
 	localAPI   *localapi.Server
+	// channel is the MCP channel-event deriver and hub (#1968); nil until Run()
+	// starts it (and when the hub failed to open). Guarded by channelMu.
+	channelMu sync.Mutex
+	channel   *channelEvents
 	// logThrottle is the shared dedup state behind logfThrottled (R4,
 	// logthrottle.go) — collapses repeated identical log lines (e.g. the
 	// per-poll rate-limit stats lines) into one emission per throttle window
