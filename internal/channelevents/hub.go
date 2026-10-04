@@ -440,6 +440,9 @@ func (h *Hub) Attach(name string, sink Sink) func() {
 	}
 	h.lastAttach[name] = h.opt.Now()
 	h.saveRegistryLocked()
+	// Registered while still holding h.mu, so Close (which sets closed under it)
+	// either sees this drain goroutine in its WaitGroup or this Attach saw closed.
+	h.wg.Add(1)
 	h.mu.Unlock()
 
 	a := &attachment{sink: sink, stop: make(chan struct{})}
@@ -454,8 +457,15 @@ func (h *Hub) Attach(name string, sink Sink) func() {
 		close(old.stop)
 		old.sink.Superseded()
 	}
-	h.wg.Add(1)
 	go h.drain(s, a)
+	h.mu.Lock()
+	closed := h.closed
+	h.mu.Unlock()
+	if closed {
+		// Close ran between the registration above and s.att being set, so it did
+		// not stop this attachment; do it here or Close's wait never returns.
+		h.detach(s, a)
+	}
 	select {
 	case s.wake <- struct{}{}:
 	default:

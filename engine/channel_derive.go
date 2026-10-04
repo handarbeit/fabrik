@@ -226,7 +226,12 @@ func (ce *channelEvents) onTick() {
 		m := ce.memo[key]
 		if m == nil {
 			// First sight of an item outside an observed change: baseline only.
-			ce.memoFor(key).pauseKey = pauseFamilyKey(attention.Classify(e.attentionInput(st, now, threshold, suspended)))
+			// Same baseline derive() records, so a later non-seed evaluation cannot
+			// read an item already at limit-1 as a fresh transition.
+			m = ce.memoFor(key)
+			m.pauseKey = pauseFamilyKey(attention.Classify(e.attentionInput(st, now, threshold, suspended)))
+			m.staleDone = hasLabelStr(st.Labels, "fabrik:awaiting-input")
+			ce.cycleNearEvents(m, st, true)
 			return
 		}
 		res := attention.Classify(e.attentionInput(st, now, threshold, suspended))

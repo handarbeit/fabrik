@@ -163,6 +163,11 @@ func (e *Engine) emitTrainEvent(owner, repo string, issue int, typ channelevents
 	e.hookEvent(gh.ProjectItem{Repo: owner + "/" + repo, Number: issue}, string(typ), func(st *itemstate.ItemState) []channelevents.Event {
 		ev := e.baseEvent(st, typ)
 		ev.Meta["cause"] = cause
+		if cause == "runaway-guard" {
+			// The guard can re-enter for the same member while its alert comment keeps
+			// failing; one event per (member, trial count).
+			ev.DedupKey = fmt.Sprintf("train-runaway:%s:%s", issueRef(st.Repo, st.Number), extra["trials"])
+		}
 		line := strings.TrimSpace(strings.SplitN(reason, "\n", 2)[0])
 		if len(line) > 240 {
 			line = line[:240] + "…"

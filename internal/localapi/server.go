@@ -365,7 +365,14 @@ func (k sessionSink) Deliver(ev channelevents.Event) error {
 	if err != nil {
 		return fmt.Errorf("encoding event: %w", err)
 	}
-	return k.sess.Send(Frame{Event: EventChannel, Sub: k.subscriber, Params: b})
+	if err := k.sess.Send(Frame{Event: EventChannel, Sub: k.subscriber, Params: b}); err != nil {
+		// A failed (possibly partial) write leaves the stream unusable and heartbeats
+		// would keep it looking healthy: end the connection so the client re-attaches
+		// and the unremoved queue entry is redelivered.
+		k.sess.Close()
+		return err
+	}
+	return nil
 }
 
 func (k sessionSink) Superseded() {

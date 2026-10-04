@@ -3952,7 +3952,7 @@ func (e *Engine) fireRunawayGuard(ctx context.Context, owner, repo, partitionBas
 		e.addLabel(item, "fabrik:paused")
 		e.addLabel(item, "fabrik:awaiting-input")
 		e.emitTrainEvent(owner, repo, item.Number, channelevents.MergeTrainFailed, "runaway-guard",
-			fmt.Sprintf("%d trial(s) with zero successful lands within %s", count, window), nil, nil) // observation only (#1968)
+			fmt.Sprintf("%d trial(s) with zero successful lands within %s", count, window), nil, map[string]string{"trials": strconv.Itoa(count)}) // observation only (#1968)
 
 		if _, commentErr := e.postComment(item, runawayGuardAlertMessage(count, trainKey, window), false, true); commentErr != nil {
 			e.logf(item.Number, "merge-train", "warn: could not post runaway guard comment: %v — will retry via settle scan\n", commentErr)
