@@ -54,9 +54,6 @@ jobs:
           fi
 
       - name: go test
-        # TestExecute_ConfigYAMLApplied is a timing-sensitive SIGINT integration
-        # test that fails intermittently on CI; it is tracked separately.
-        #
         # -parallel capped via scripts/lib/parallel.sh's default_race_parallel
         # (REQ4, #1677): this invocation includes the same git-forking
         # tests/sim package that scripts/sim/run.sh's own SIM_PARALLEL caps
@@ -68,7 +65,7 @@ jobs:
         # guards against — see scripts/lib/parallel.sh's own header comment.
         run: |
           source scripts/lib/parallel.sh
-          go test -race -timeout 5m -parallel "$(default_race_parallel)" -skip TestExecute_ConfigYAMLApplied ./...
+          go test -race -timeout 5m -parallel "$(default_race_parallel)" ./...
 
       # Compile the e2e suite without running it. The scenarios are behind the
       # `e2e` build tag and drive a real Fabrik bed against real repos, so they
@@ -126,3 +123,22 @@ jobs:
       # review. Pure text check: no build, no network.
       - name: Entwurf plugin consistency
         run: python3 scripts/check-entwurf-consistency.py
+
+  # The suite again, in a worker-shaped environment (#2027, ADR-2027): dummy
+  # App/PAT/webhook/reviewer/GH_TOKEN values plus an ADR-1846-shaped
+  # GIT_CONFIG_* credential helper, as a Fabrik stage worker inherits them.
+  # Guards the worker-env scrub and test hermeticity, which plain CI (with
+  # none of those variables set) can never exercise. A separate job so it
+  # runs in parallel with `test` rather than doubling its wall time.
+  worker-shaped:
+    name: Test in a worker-shaped environment
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: go test (worker-shaped env)
+        run: bash scripts/ci/worker-shaped-test.sh
