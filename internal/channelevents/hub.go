@@ -642,4 +642,3 @@ func (h *Hub) Queued(name string) int {
 	defer s.mu.Unlock()
 	return len(s.q.Entries)
 }
-

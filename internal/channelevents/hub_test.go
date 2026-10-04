@@ -30,7 +30,7 @@ func (f *fakeSink) Deliver(ev Event) error {
 	f.ch <- ev
 	return nil
 }
-func (f *fakeSink) Superseded() { f.mu.Lock(); f.superseded = true; f.mu.Unlock() }
+func (f *fakeSink) Superseded()         { f.mu.Lock(); f.superseded = true; f.mu.Unlock() }
 func (f *fakeSink) wasSuperseded() bool { f.mu.Lock(); defer f.mu.Unlock(); return f.superseded }
 func (f *fakeSink) wait(t *testing.T) Event {
 	t.Helper()
