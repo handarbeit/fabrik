@@ -3672,7 +3672,7 @@ startup logs a notice naming each admitted variable:
 **Running the test suite inside a worker.** Workers run the repo's tests with the
 environment above, minus the scrubbed variables — but a developer shell or an
 older worker may still have them set. The suite is hermetic against all of it
-(`internal/testenv`), and CI proves it with `bash scripts/ci/worker-shaped-test.sh`,
+(`internal/testenv`), and `bash scripts/ci/worker-shaped-test.sh` proves it,
 which exports dummy App/PAT/webhook/`GH_TOKEN`/`GIT_CONFIG_*` values and runs the
 same `go test -race ./...`.
 

@@ -28,7 +28,7 @@ The second effect is on the tests. Workers run the repo's own suite, so every te
 
 7. **Bounded readiness waits.** Every receive on `testReadyCh` (and the `engine` equivalents) selects on `Execute()`/`Run()` returning and on a deadline, and fails with the returned error. A setup failure now fails fast instead of at the package timeout.
 
-8. **The property is checked in CI.** `scripts/ci/worker-shaped-test.sh` exports dummy values for all of the above plus an ADR-1846-shaped `GIT_CONFIG_*` helper pointing at a dummy token file, and runs the same `go test -race ./...` shape as the main step. It runs as a separate job (parallel, so wall time stays flat); the script is also the local command.
+8. **The property is checked in CI.** `scripts/ci/worker-shaped-test.sh` exports dummy values for all of the above plus an ADR-1846-shaped `GIT_CONFIG_*` helper pointing at a dummy token file, and runs the same `go test -race ./...` shape as the main step. It is meant to run as a separate CI job (parallel, so wall time stays flat); the script is also the local command. **Wiring status:** Fabrik's GitHub App token has no `workflows` permission, so the edit to `.github/workflows/ci.yml` (add the job, drop `-skip TestExecute_ConfigYAMLApplied`) could not be pushed; it is recorded in `scripts/ci/worker-shaped-job.yml` for a maintainer to apply.
 
 ## Consequences
 

@@ -1,0 +1,26 @@
+# CI wiring for scripts/ci/worker-shaped-test.sh (#2027, ADR-2027).
+#
+# NOT an active workflow: Fabrik's GitHub App token has no `workflows`
+# permission, so the push that would have added this to .github/workflows/ci.yml
+# was refused. A maintainer with that permission applies the two edits below.
+#
+# 1. Append this job under `jobs:` in .github/workflows/ci.yml (a separate job
+#    so it runs in parallel with `test` instead of doubling its wall time):
+#
+#   worker-shaped:
+#     name: Test in a worker-shaped environment
+#     runs-on: ubuntu-latest
+#     steps:
+#       - name: Checkout
+#         uses: actions/checkout@v4
+#       - name: Set up Go
+#         uses: actions/setup-go@v5
+#         with:
+#           go-version-file: go.mod
+#       - name: go test (worker-shaped env)
+#         run: bash scripts/ci/worker-shaped-test.sh
+#
+# 2. In the existing `go test` step, drop `-skip TestExecute_ConfigYAMLApplied`
+#    (and its "timing-sensitive" comment): the hang it papered over was the
+#    worker-environment dependency this change fixes, and the test is stable
+#    (-count=10 -race, worker-shaped env) with a bounded readiness wait.
