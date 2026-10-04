@@ -472,8 +472,8 @@ func TestSocketPathFallbackIgnoresTMPDIR(t *testing.T) {
 	if a != b {
 		t.Fatalf("fallback path depends on TMPDIR: %s vs %s", a, b)
 	}
-	if !strings.HasPrefix(a, "/tmp/fabrik-") {
-		t.Errorf("fallback = %s, want under /tmp/fabrik-<uid>", a)
+	if want := fallbackDir() + string(filepath.Separator); !strings.HasPrefix(a, want) {
+		t.Errorf("fallback = %s, want under %s", a, want)
 	}
 }
 
