@@ -10134,7 +10134,7 @@ Root cause (#2027, ADR-2027): `cmd/root.go` calls `config.LoadDotenv()`, so ever
 
 **Opt-in: `FABRIK_WORKER_ENV_PASSTHROUGH`.** Comma-separated exact scrubbed names, resolved once in `New()` via `workerenv.Resolve`. It works by *not emitting the sentinel* for an admitted name, so the value inherits from the base env and is never re-added as `KEY=VALUE` — it cannot shadow an engine-computed override. Non-scrubbed, `Protected`, the opt-in itself and the ADR-1346 control pair are ignored with a `[startup]` warning; admitted names get a `[startup]` notice (`logWorkerEnvOptIn`).
 
-**Test hermeticity.** `internal/testenv` (`Isolate`, `IsolateGit`, `ScrubProcess`) unsets every one of these, `GH_TOKEN`/`GITHUB_TOKEN`/`GH_HOST` and all `GIT_CONFIG_COUNT`/`KEY_<n>`/`VALUE_<n>` entries (enumerated) so a suite run inside a worker behaves as in CI; `cmd` and `engine` call `ScrubProcess` from `TestMain`. Readiness waits on `testReadyCh` select on `Execute()` returning and a deadline. `scripts/ci/worker-shaped-test.sh` runs the suite in a worker-shaped environment (CI job definition: `scripts/ci/worker-shaped-job.yml`).
+**Test hermeticity.** `internal/testenv` (`Isolate`, `IsolateGit`, `ScrubProcess`) unsets every one of these, `GH_TOKEN`/`GITHUB_TOKEN`/`GH_HOST` and all `GIT_CONFIG_COUNT`/`KEY_<n>`/`VALUE_<n>` entries (enumerated) so a suite run inside a worker behaves as in CI; `cmd` and `engine` call `ScrubProcess` from `TestMain`. Readiness waits on `testReadyCh` select on `Execute()` returning and a deadline. `scripts/ci/worker-shaped-test.sh` runs the suite in a worker-shaped environment (CI's `worker-shaped` job in `.github/workflows/ci.yml`).
 
 ### Worker Environment: Invocation Facts (`FABRIK_*`)
 
