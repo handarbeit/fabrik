@@ -94,6 +94,10 @@ const MaxUnlimited = -1
 // AtLimit reports whether the counter has reached a known positive limit.
 func (c Counter) AtLimit() bool { return c.Max > 0 && c.N >= c.Max }
 
+// WorkerStallMargin is added to a worker's wall-clock budget before a worker
+// that is still in flight is called stalled.
+const WorkerStallMargin = 5 * time.Minute
+
 // Config holds the timing thresholds the classification and deadlines use.
 // A zero timeout disables the deadline it anchors.
 type Config struct {
@@ -123,6 +127,11 @@ type Input struct {
 
 	HasWorker       bool
 	WorkerStartedAt time.Time
+	// WorkerBudget is the wall-clock budget of the in-flight worker's stage:
+	// its max_wall_time, or the Claude inactivity timeout when the stage sets
+	// none. Zero means unknown. A worker is not classified stalled before
+	// WorkerBudget + WorkerStallMargin has elapsed, however low StallThreshold is.
+	WorkerBudget time.Duration
 
 	// Cooldowns maps cooldown reason to expiry.
 	Cooldowns map[string]time.Time
@@ -300,14 +309,20 @@ func Classify(in Input) Result {
 
 	stalledAge := stallExceeded(res, in)
 
-	// 6. A worker is in flight.
+	// 6. A worker is in flight. The heartbeat is not progress (a hung process
+	// keeps beating), but a healthy long run is: the worker is only stalled once
+	// it has outlived its own stage's wall-clock budget plus a margin.
 	if in.HasWorker {
-		if stalledAge {
+		if workerOverdue(res, in) {
 			return finish(Stalled, CodeWorkerNoProgress,
 				fmt.Sprintf("a worker is in flight but nothing observable changed for %s", res.ProgressAge.Round(time.Second)),
 				"the worker's own inactivity/wall-time limits will end it; the engine then reads its result", RankStalled)
 		}
-		return finish(Working, "worker-in-flight", "a worker is running",
+		summary := "a worker is running"
+		if in.Cfg.StallThreshold > 0 && res.ProgressAge > in.Cfg.StallThreshold {
+			summary = fmt.Sprintf("a worker is running (long-running: %s, within its stage's wall-clock budget)", res.ProgressAge.Round(time.Second))
+		}
+		return finish(Working, "worker-in-flight", summary,
 			"the engine reads the invocation result when the worker exits", NotRanked)
 	}
 
@@ -423,6 +438,18 @@ func stallExceeded(res Result, in Input) bool {
 	return in.Cfg.StallThreshold > 0 && !res.ProgressAt.IsZero() && res.ProgressAge > in.Cfg.StallThreshold
 }
 
+// workerOverdue reports whether an in-flight worker has run longer than both the
+// stall threshold and its stage's wall-clock budget plus WorkerStallMargin.
+func workerOverdue(res Result, in Input) bool {
+	if !stallExceeded(res, in) {
+		return false
+	}
+	if in.WorkerBudget > 0 && res.ProgressAge <= in.WorkerBudget+WorkerStallMargin {
+		return false
+	}
+	return true
+}
+
 func overdueBy(ds []Deadline, in Input) (bool, Deadline) {
 	if in.Cfg.StallThreshold <= 0 {
 		return false, Deadline{}
@@ -526,7 +553,9 @@ func deadlinesFor(in Input) []Deadline {
 	}
 	sort.Strings(cds)
 	for _, r := range cds {
-		if t := in.Cooldowns[r]; !t.IsZero() {
+		// The store never deletes cooldown entries: an expired one is history,
+		// not something the engine is still going to act on.
+		if t := in.Cooldowns[r]; t.After(in.Now) {
 			ds = append(ds, Deadline{Kind: "cooldown:" + r, At: t, Basis: "cooldown expiry"})
 		}
 	}

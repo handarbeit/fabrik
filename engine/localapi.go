@@ -97,6 +97,16 @@ func (e *Engine) stageByName(name string) *stages.Stage {
 	return nil
 }
 
+// workerBudget is the wall-clock budget of a worker running the stage at
+// status: its max_wall_time, or the Claude inactivity timeout when the stage
+// sets none (a silent worker is killed at that point).
+func (e *Engine) workerBudget(status string) time.Duration {
+	if s := e.stageByName(status); s != nil && s.MaxWallTime > 0 {
+		return s.MaxWallTime
+	}
+	return claudeInactivityTimeout
+}
+
 func (e *Engine) attentionStageKind(status string) attention.StageKind {
 	s := e.stageByName(status)
 	switch {
@@ -221,6 +231,7 @@ func (e *Engine) attentionInput(st *itemstate.ItemState, now time.Time, threshol
 	if w := st.Worker; w != nil {
 		in.HasWorker = true
 		in.WorkerStartedAt = w.StartedAt
+		in.WorkerBudget = e.workerBudget(st.Status)
 	}
 	if len(st.CooldownAt) > 0 {
 		in.Cooldowns = make(map[string]time.Time, len(st.CooldownAt))

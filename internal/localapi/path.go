@@ -22,7 +22,13 @@ const SocketName = "fabrik.sock"
 // directory is fabrikDir: <fabrikDir>/.fabrik/state/fabrik.sock. When that path
 // would exceed sun_path (a deep checkout, or t.TempDir() on macOS), it falls
 // back to a short, deterministic path in a private per-user directory:
-// $TMPDIR/fabrik-<uid>/<12 hex of sha256(abs fabrikDir)>.sock.
+// /tmp/fabrik-<uid>/<12 hex of sha256(resolved fabrikDir)>.sock.
+//
+// fabrikDir is symlink-resolved first, so /tmp vs /private/tmp (or any other
+// spelling of one directory) gives the same primary-vs-fallback decision and
+// the same hash. The fallback is a fixed /tmp, not $TMPDIR: the daemon and a
+// Claude-launched `fabrik mcp` need not share an environment, and a differing
+// $TMPDIR would read as "daemon not running".
 //
 // The daemon and `fabrik mcp --dir` both call this with the same directory, so
 // they always agree, and two daemons in different directories never share a
@@ -32,6 +38,9 @@ func SocketPath(fabrikDir string) string {
 	if err != nil {
 		abs = fabrikDir
 	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = resolved
+	}
 	primary := filepath.Join(abs, ".fabrik", "state", SocketName)
 	if len(primary) <= maxSocketPath {
 		return primary
@@ -40,9 +49,13 @@ func SocketPath(fabrikDir string) string {
 	return filepath.Join(fallbackDir(), hex.EncodeToString(sum[:6])+".sock")
 }
 
+// fallbackRoot is where fallback socket directories live. Fixed rather than
+// $TMPDIR (see SocketPath); a var only so tests can point it at a short temp dir.
+var fallbackRoot = "/tmp"
+
 // fallbackDir is the private per-user directory holding fallback sockets.
 func fallbackDir() string {
-	return filepath.Join(os.TempDir(), fmt.Sprintf("fabrik-%d", os.Getuid()))
+	return filepath.Join(fallbackRoot, fmt.Sprintf("fabrik-%d", os.Getuid()))
 }
 
 // prepareDir makes sure the directory that will hold the socket exists. A

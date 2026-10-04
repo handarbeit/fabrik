@@ -457,6 +457,28 @@ func (c *CacheImpl) Reconcile(board *gh.ProjectBoard) {
 	}
 }
 
+// ApplyBoardMilestones copies each item's milestone from a freshly fetched
+// board into the Store, for items already cached and whose milestone the board
+// query captured (#1967 R10). It touches nothing else, so it is safe on a
+// zero-drift reconcile tick where the full Reconcile is deliberately skipped:
+// without it a quiet board would never learn any milestone after startup. The
+// board is already in hand, so this makes no GitHub call.
+func (c *CacheImpl) ApplyBoardMilestones(board *gh.ProjectBoard) {
+	if board == nil {
+		return
+	}
+	for i := range board.Items {
+		pi := &board.Items[i]
+		if !pi.MilestoneKnown {
+			continue
+		}
+		if _, ok := c.store.Peek(pi.Repo, pi.Number); !ok {
+			continue
+		}
+		c.store.Apply(itemstate.IssueMilestoneUpdated{Repo: pi.Repo, Number: pi.Number, Milestone: pi.Milestone})
+	}
+}
+
 // RecordPRLinkage records an authoritative PR→issue mapping in the Store index.
 // fullRepo must be in "owner/repo" format. Called by the engine immediately after
 // CreateDraftPR succeeds, so all subsequent webhooks for this PR resolve to the

@@ -67,6 +67,9 @@ func (s *Server) Path() string { return s.path }
 // path is an error, never deleted. The caller must already hold the instance
 // lock: that is what makes a pre-existing socket stale rather than live.
 func Listen(path string) (net.Listener, error) {
+	if len(path) > maxSocketPath {
+		return nil, fmt.Errorf("socket path %s is %d bytes, over the %d-byte sun_path limit", path, len(path), maxSocketPath)
+	}
 	if err := prepareDir(filepath.Dir(path)); err != nil {
 		return nil, err
 	}

@@ -185,6 +185,9 @@ func TestCloseUnlinksAndIsIdempotent(t *testing.T) {
 
 func TestSocketPathFallbackAndDistinct(t *testing.T) {
 	short := shortDir(t)
+	if r, err := filepath.EvalSymlinks(short); err == nil {
+		short = r // SocketPath resolves symlinks (/tmp -> /private/tmp on macOS)
+	}
 	if got := SocketPath(short); got != filepath.Join(short, ".fabrik", "state", SocketName) {
 		t.Errorf("short dir path = %s", got)
 	}
@@ -193,8 +196,8 @@ func TestSocketPathFallbackAndDistinct(t *testing.T) {
 	if len(p) > maxSocketPath {
 		t.Errorf("fallback path too long (%d): %s", len(p), p)
 	}
-	if !strings.HasPrefix(p, os.TempDir()) {
-		t.Errorf("fallback should live under TMPDIR, got %s", p)
+	if !strings.HasPrefix(p, fallbackRoot+"/") {
+		t.Errorf("fallback should live under the fixed %s, got %s", fallbackRoot, p)
 	}
 	if p != SocketPath(long) {
 		t.Error("fallback path must be deterministic")
@@ -215,7 +218,9 @@ func TestSocketPathFallbackAndDistinct(t *testing.T) {
 }
 
 func TestPrepareDirTightensExistingFallbackDir(t *testing.T) {
-	t.Setenv("TMPDIR", shortDir(t))
+	old := fallbackRoot
+	fallbackRoot = shortDir(t)
+	t.Cleanup(func() { fallbackRoot = old })
 	dir := fallbackDir()
 	if err := os.Mkdir(dir, 0o755); err != nil {
 		t.Fatal(err)
@@ -453,5 +458,43 @@ func TestCallHonorsContextDeadline(t *testing.T) {
 	}
 	if time.Since(start) > 5*time.Second {
 		t.Fatalf("Call hung for %v", time.Since(start))
+	}
+}
+
+// The fallback must not depend on $TMPDIR: a daemon and a Claude-launched
+// `fabrik mcp` need not share an environment.
+func TestSocketPathFallbackIgnoresTMPDIR(t *testing.T) {
+	long := filepath.Join(shortDir(t), strings.Repeat("d", 120))
+	t.Setenv("TMPDIR", "/var/tmp/one")
+	a := SocketPath(long)
+	t.Setenv("TMPDIR", "/var/tmp/two")
+	b := SocketPath(long)
+	if a != b {
+		t.Fatalf("fallback path depends on TMPDIR: %s vs %s", a, b)
+	}
+	if !strings.HasPrefix(a, "/tmp/fabrik-") {
+		t.Errorf("fallback = %s, want under /tmp/fabrik-<uid>", a)
+	}
+}
+
+// Two spellings of one directory (a symlink, /tmp vs /private/tmp) must agree.
+func TestSocketPathResolvesSymlinks(t *testing.T) {
+	real := filepath.Join(shortDir(t), strings.Repeat("d", 120))
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Skipf("cannot create long dir: %v", err)
+	}
+	link := filepath.Join(shortDir(t), "ln")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	if a, b := SocketPath(real), SocketPath(link); a != b {
+		t.Fatalf("symlinked spelling disagrees: %s vs %s", a, b)
+	}
+}
+
+func TestListenRefusesOverlongPath(t *testing.T) {
+	p := filepath.Join(shortDir(t), strings.Repeat("s", 120)+".sock")
+	if _, err := Listen(p); err == nil || !strings.Contains(err.Error(), "sun_path") {
+		t.Fatalf("Listen(%d-byte path) = %v, want a sun_path error", len(p), err)
 	}
 }

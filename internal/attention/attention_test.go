@@ -308,3 +308,63 @@ func TestClassifyIsDeterministic(t *testing.T) {
 		}
 	}
 }
+
+// The store never deletes cooldown entries, so an expired one must be history:
+// not a deadline, not an "overdue" trigger, not the next action.
+func TestExpiredCooldownIsNotADeadline(t *testing.T) {
+	in := baseInput()
+	in.Labels = []string{"fabrik:blocked"}
+	in.Cooldowns = map[string]time.Time{"retry": t0.Add(-3 * time.Hour)}
+	in.StatusEnteredAt = t0.Add(-5 * time.Minute)
+	got := Classify(in)
+	if got.State != Waiting || got.Code != "fabrik:blocked" {
+		t.Fatalf("got %s/%s (%s), want waiting/fabrik:blocked", got.State, got.Code, got.Summary)
+	}
+	if got.Rank != NotRanked {
+		t.Errorf("a correctly waiting item must not rank, got %d", got.Rank)
+	}
+	for _, d := range got.Next.Deadlines {
+		if strings.HasPrefix(d.Kind, "cooldown:") {
+			t.Errorf("expired cooldown listed as a deadline: %+v", d)
+		}
+	}
+	if !got.Next.At.IsZero() && !got.Next.At.After(t0) {
+		t.Errorf("next action is in the past: %v", got.Next.At)
+	}
+	if strings.Contains(got.Next.Action, "cooldown") {
+		t.Errorf("next action names an expired cooldown: %q", got.Next.Action)
+	}
+	for _, r := range got.Reasons {
+		if strings.HasPrefix(r.Code, "cooldown:") {
+			t.Errorf("expired cooldown reported as a reason: %+v", r)
+		}
+	}
+}
+
+// A healthy worker running past the stall threshold but inside its stage's
+// wall-clock budget is working; one well past the budget is stalled.
+func TestWorkerStalledOnlyPastItsWallClockBudget(t *testing.T) {
+	mk := func(running, budget time.Duration) Input {
+		in := baseInput()
+		in.HasWorker = true
+		in.WorkerStartedAt = t0.Add(-running)
+		in.StatusEnteredAt = t0.Add(-3 * time.Hour)
+		in.WorkerBudget = budget
+		return in
+	}
+	got := Classify(mk(40*time.Minute, 45*time.Minute))
+	if got.State != Working || got.Rank != NotRanked {
+		t.Fatalf("40m in under a 45m budget: got %s/%s rank=%d, want working", got.State, got.Code, got.Rank)
+	}
+	if !strings.Contains(got.Summary, "long-running") {
+		t.Errorf("a worker past the stall threshold should be flagged long-running: %q", got.Summary)
+	}
+	// Inside budget + margin is still working.
+	if got := Classify(mk(45*time.Minute+WorkerStallMargin-time.Minute, 45*time.Minute)); got.State != Working {
+		t.Errorf("inside budget+margin: got %s, want working", got.State)
+	}
+	got = Classify(mk(2*time.Hour, 45*time.Minute))
+	if got.State != Stalled || got.Code != CodeWorkerNoProgress || got.Rank != RankStalled {
+		t.Fatalf("well past budget: got %s/%s rank=%d, want stalled/worker-no-progress", got.State, got.Code, got.Rank)
+	}
+}

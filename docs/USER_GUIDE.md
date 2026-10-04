@@ -3395,7 +3395,7 @@ The daemon serves a small newline-delimited-JSON API on a Unix socket, `.fabrik/
 
 - **Per daemon.** The socket lives in the daemon's own directory, so several instances on one machine never collide, and each only ever serves the repos and projects *it* manages.
 - **Private.** Mode `0600`, a Unix socket (not reachable over TCP). There is no authentication beyond filesystem permissions: any process of your own user can read the daemon's operational state (issue titles, labels, counters).
-- **Long paths.** A Unix socket path is limited to about 104 bytes. If `<fabrik-dir>/.fabrik/state/fabrik.sock` would be longer, both the daemon and `fabrik mcp` use `$TMPDIR/fabrik-<uid>/<hash>.sock` instead (a private directory, derived from the Fabrik directory) — you never need to know which.
+- **Long paths.** A Unix socket path is limited to about 104 bytes. If `<fabrik-dir>/.fabrik/state/fabrik.sock` would be longer, both the daemon and `fabrik mcp` use `/tmp/fabrik-<uid>/<hash>.sock` instead (a private directory; the hash is of the symlink-resolved Fabrik directory, and the location is a fixed `/tmp`, not `$TMPDIR`, so a daemon and a Claude-launched `fabrik mcp` with different environments still agree) — you never need to know which.
 - **Lifecycle.** Bound after the [instance lock](#instance-lock) is held; a stale socket from a crash or re-exec is replaced at startup; removed on clean shutdown. If it cannot be bound, the daemon logs it and carries on without the API.
 
 #### The freshness rule
@@ -3403,7 +3403,7 @@ The daemon serves a small newline-delimited-JSON API on a Unix socket, `.fabrik/
 Every response carries `as_of` (when the daemon took the snapshot), the time since the last successful poll, and daemon uptime; per item, the cache age (`last_deep_fetch_at`). **Anything the daemon cannot vouch for is the string `"unknown"` — never a healthy default.** In particular:
 
 - Deadlines derived from when the engine applied a label (the CI backstop, the review wait, the bot re-prompt) are `unknown` after a daemon restart, because that timestamp is not persisted. They are never reported as "now".
-- A milestone the cache has not captured yet is `unknown`; `none` means the daemon saw the item and it has no milestone.
+- A milestone the cache has not captured yet is `unknown`; `none` means the daemon saw the item and it has no milestone. Milestones are captured from the board query on every reconcile tick (including ticks that find no drift) and updated by `milestoned`/`demilestoned` webhooks for items already cached; such an event for an item the cache does not hold is skipped (no GitHub fetch) and the next reconcile captures it.
 - PR, CI, mergeability and blockers are `unknown` for an item the daemon has not yet fetched in full.
 - Turns used by an *in-flight* worker are always `unknown` (the daemon records turns only when an invocation finishes); the last completed invocation's turns are shown.
 - A cycle limit that is not configured is `unknown`, not `0`.

@@ -493,8 +493,11 @@ func (c *CacheImpl) applyIssuesDelta(payload []byte) {
 		if p.Action == "demilestoned" {
 			ms = nil
 		}
-		if err := c.ensureIssueInStore(owner, fullRepo, issNum); err != nil {
-			c.logFn("[cache] applyIssuesDelta(%s): ensure #%d: %v\n", p.Action, issNum, err)
+		// Peek, never ensureIssueInStore: an uncached item would trigger a
+		// FetchProjectItem, a GitHub call R10 rules out. The next reconcile
+		// captures the milestone for an item the store does not hold yet.
+		if _, ok := c.store.Peek(fullRepo, issNum); !ok {
+			c.logFn("[cache] applyIssuesDelta(%s): #%d not in store; skipping (next reconcile captures its milestone)\n", p.Action, issNum)
 			return
 		}
 		_, changes, _ := c.store.Apply(itemstate.IssueMilestoneUpdated{Repo: fullRepo, Number: issNum, Milestone: ms})

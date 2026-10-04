@@ -98,3 +98,40 @@ func mustGet(t *testing.T, c *CacheImpl, n int) itemstate.Snapshot {
 	}
 	return snap
 }
+
+// milestoned/demilestoned for an item the store does not hold must not fetch it
+// from GitHub (R10 rules out new API calls); the next reconcile captures it.
+func TestIssuesMilestonedUncachedItemMakesNoGitHubCall(t *testing.T) {
+	mc := &mockClient{projectItemResult: &gh.ProjectItem{ID: "I_9", ItemID: "PVTI_9", Number: 9, Repo: "owner/repo", Status: "Plan"}}
+	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
+	c.BootstrapFromProbe([]gh.BoardProbeItem{{ContentID: "I_001", ItemID: "PVTI_001", Number: 1, Repo: "owner/repo", Status: "Research"}}, "PID")
+
+	c.ApplyDelta("issues", milestonePayload("milestoned", "owner/repo", 9, `{"title":"v2","number":9}`))
+	c.ApplyDelta("issues", milestonePayload("demilestoned", "owner/repo", 9, `null`))
+
+	if mc.fetchProjectItemCount != 0 {
+		t.Fatalf("FetchProjectItem called %d time(s) for an uncached item; R10 allows none", mc.fetchProjectItemCount)
+	}
+	if _, ok := c.store.Peek("owner/repo", 9); ok {
+		t.Fatal("an uncached item must not be added to the store by a milestone event")
+	}
+}
+
+func TestApplyBoardMilestonesOnlyTouchesCachedKnownItems(t *testing.T) {
+	c := seedCache(t)
+	c.ApplyBoardMilestones(&gh.ProjectBoard{Items: []gh.ProjectItem{
+		{Number: 1, Repo: "owner/repo", Milestone: &gh.Milestone{Title: "v1", Number: 1}, MilestoneKnown: true},
+		{Number: 2, Repo: "owner/repo"}, // milestone not captured on this item: stays unknown
+		{Number: 7, Repo: "owner/repo", MilestoneKnown: true},
+	}})
+	if s := testGetState(t, c, "owner/repo", 1); !s.MilestoneKnown || s.Milestone == nil || s.Milestone.Title != "v1" {
+		t.Fatalf("#1: known=%v ms=%+v", s.MilestoneKnown, s.Milestone)
+	}
+	if s := testGetState(t, c, "owner/repo", 2); s.MilestoneKnown {
+		t.Fatalf("#2 must stay unknown, got known=%v", s.MilestoneKnown)
+	}
+	if _, ok := c.store.Peek("owner/repo", 7); ok {
+		t.Fatal("an item absent from the store must not be created")
+	}
+	c.ApplyBoardMilestones(nil) // must not panic
+}
