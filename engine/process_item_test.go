@@ -14,6 +14,7 @@ import (
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/itemstate"
+	"github.com/handarbeit/fabrik/internal/testenv"
 	"github.com/handarbeit/fabrik/stages"
 )
 
@@ -75,6 +76,11 @@ func TestMain(m *testing.M) {
 		}
 	}
 	lockVerifyDelay = 0
+	// Hermetic against a worker's inherited environment (#2027): a stage
+	// worker runs this suite with the daemon's credentials, GH_TOKEN and
+	// ADR-1846 GIT_CONFIG_* helper entries in its env, none of which CI has.
+	// Tests that need one set it explicitly with t.Setenv.
+	testenv.ScrubProcess()
 	// Keep spawn-time worker records (#1814) out of the package directory:
 	// most InvokeClaude tests run without t.Chdir.
 	if dir, err := os.MkdirTemp("", "fabrik-worker-records-*"); err == nil {
