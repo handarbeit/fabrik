@@ -8,6 +8,13 @@ on:
 permissions:
   contents: read
 
+# Cancel a run when a newer commit lands on the same PR or branch. Every run for the default
+# branch or a tag gets a group of its own (keyed by run id), so it is never cancelled or replaced:
+# GitHub keeps only one pending run per group, and a tag and a main push can share a commit.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || ((github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/')) && github.run_id) || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     name: Test and vet
