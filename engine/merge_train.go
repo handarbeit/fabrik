@@ -1966,6 +1966,11 @@ func (e *Engine) landSingleton(ctx context.Context, state *mergeTrainWorkerState
 		prNum, alreadyMerged = existing.Number, true
 		e.logf(m.item.Number, "merge-train", "singleton trial PR #%d for #%d is already merged — completing the landing\n", prNum, m.item.Number)
 	case existing != nil && existing.State == "closed":
+		// Unlike landMergeTrainBatch, no escalateClosedUnmergedTrial: that path reuses
+		// one trial branch across restarts, so a closed PR there would recur. Here the
+		// next pass builds a fresh trial (nextTrialName) with its own branch and draft
+		// PR, so this closed PR is never matched again and leaving the member Queued
+		// cannot loop.
 		e.logf(m.item.Number, "merge-train", "singleton trial PR #%d for #%d is closed and unmerged — leaving in Queued\n", existing.Number, m.item.Number)
 		return
 	case existing != nil:
