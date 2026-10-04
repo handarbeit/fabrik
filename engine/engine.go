@@ -16,6 +16,7 @@ import (
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/internal/localapi"
 	"github.com/handarbeit/fabrik/internal/selfupgrade"
+	"github.com/handarbeit/fabrik/internal/workerenv"
 	"github.com/handarbeit/fabrik/stages"
 	"github.com/handarbeit/fabrik/tui"
 )
@@ -446,6 +447,9 @@ func New(cfg Config) (*Engine, error) {
 	claudeGHHost = cfg.GHESHost
 	claudeAnthropicAPIKey = os.Getenv("FABRIK_ANTHROPIC_API_KEY")
 	claudeAnthropicEnvPassthrough = parseAnthropicEnvPassthrough(os.Getenv("FABRIK_ANTHROPIC_ENV_PASSTHROUGH"))
+	claudeWorkerEnv = workerenv.Resolve(
+		[]string{cfg.HookdeckAPIKeyEnv, cfg.HookdeckWebhookSecretEnv},
+		os.Getenv(workerenv.OptInVar))
 
 	// One-time, process-lifetime capability probe (see claudeNameFlagSupported):
 	// older claude binaries reject unknown flags outright, which would kill

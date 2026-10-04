@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/workerenv"
 	"github.com/handarbeit/fabrik/stages"
 )
 
@@ -149,12 +150,14 @@ func envTestIssue() gh.ProjectItem {
 // t.Cleanup precedent (invoke_claude_test.go).
 func resetAnthropicEnvVars(t *testing.T) {
 	t.Helper()
-	prevKey, prevPassthrough := claudeAnthropicAPIKey, claudeAnthropicEnvPassthrough
+	prevKey, prevPassthrough, prevWorkerEnv := claudeAnthropicAPIKey, claudeAnthropicEnvPassthrough, claudeWorkerEnv
 	claudeAnthropicAPIKey = ""
 	claudeAnthropicEnvPassthrough = nil
+	claudeWorkerEnv = workerenv.Resolved{}
 	t.Cleanup(func() {
 		claudeAnthropicAPIKey = prevKey
 		claudeAnthropicEnvPassthrough = prevPassthrough
+		claudeWorkerEnv = prevWorkerEnv
 	})
 }
 
