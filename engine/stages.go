@@ -442,6 +442,11 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 		return false, true, nil
 	}
 
+	// Observation only (#1968 R2, R10): every landing gate has passed — the
+	// engine is about to queue or merge. Recorded here because a yolo item lands
+	// inside this call and never reaches runCatchUpPhase2. Changes nothing.
+	e.noteValidateLanding(item, stage)
+
 	// Merge-train gate: when merge_train: on, advance to Queued instead of enabling auto-merge.
 	// Cruise items always bypass this (handled above). New items never reach fabrik:auto-merge-enabled
 	// when merge_train: on, so this gate fires exactly once per qualifying Validate completion.

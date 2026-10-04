@@ -77,7 +77,7 @@ type channelEvents struct {
 	dirty map[string]*dirtyItem
 	// settleCand holds items whose Validate stage reached the engine's own
 	// "gates clear" point (runCatchUpPhase2) since the last drain.
-	settleCand map[string]channelevents.Event
+	settleCand map[string]settleCandidate
 	// nudge asks the consumer to re-check account-wide state (the Claude
 	// usage-limit suspension) without waiting for the next tick.
 	nudge bool

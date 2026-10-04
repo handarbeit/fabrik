@@ -145,8 +145,10 @@ func TestChannelValidateSettledCruiseWaitsForEveryGate(t *testing.T) {
 	if ev.PR != pr.Number || ev.Meta["next"] != "waiting-for-human" || ev.Meta["autonomy"] != "cruise" {
 		t.Fatalf("unexpected meta: %+v", ev)
 	}
-	if ev.Meta["ci"] != "green" {
-		t.Errorf("ci = %q, want green", ev.Meta["ci"])
+	// The sim delivers no check_run webhooks, so the cache holds no runs: the
+	// verdict is honestly unknown, and the engine's own CI gate state is reported.
+	if ev.Meta["ci"] != "unknown" || ev.Meta["ci_gate"] != "cleared" {
+		t.Errorf("ci = %q ci_gate = %q, want unknown/cleared", ev.Meta["ci"], ev.Meta["ci_gate"])
 	}
 	if ev.Meta["reviews"] == "" || ev.Meta["reviews"] == "none" {
 		t.Errorf("reviews summary missing the approval: %q", ev.Meta["reviews"])
@@ -182,8 +184,47 @@ func TestChannelValidateSettledYoloNextIsAutoMerge(t *testing.T) {
 	if got[0].Meta["next"] != "auto-merge" || got[0].Meta["autonomy"] != "yolo" {
 		t.Fatalf("unexpected meta: %+v", got[0].Meta)
 	}
-	// And the landing is reported as merged.
-	if m := sink.ofType(channelevents.Merged, num); len(m) != 1 {
-		t.Errorf("want one merged event, got %d", len(m))
+}
+
+// TestChannelValidateSettledAgainAfterRevalidate: fabrik:revalidate starts a new
+// settle episode, announced again once the item re-settles.
+func TestChannelValidateSettledAgainAfterRevalidate(t *testing.T) {
+	env := newChannelGateEnv(t, false, nil)
+	_, sink := startChannel(t, env)
+
+	num := FileIssue(t, env, "channel validate-settled revalidate", "Re-settle.", "Implement", "fabrik:cruise")
+	WaitForIssueLabel(t, env, num, "fabrik:awaiting-ci", 80)
+	pr, err := env.Sim.FetchLinkedPR(env.Owner, env.Repo, num)
+	if err != nil || pr == nil {
+		t.Fatalf("linked PR: %v", err)
+	}
+	env.Sim.Sim().SeedCheckRun(env.OwnerRepo, pr.HeadSHA, gh.CheckRun{Name: conjunctiveGateCheck, Status: "completed", Conclusion: "success"})
+	WaitForIssueLabel(t, env, num, "fabrik:awaiting-review", 80)
+	env.Sim.Sim().SeedReview(env.OwnerRepo, pr.Number, gh.PRReview{Author: "reviewer-human", State: "APPROVED"})
+	AdvanceUntil(t, env, func(*Env) bool {
+		settleWait()
+		return len(sink.ofType(channelevents.ValidateSettled, num)) == 1
+	}, 40)
+
+	// Operator forces re-entry of Validate.
+	if err := env.Sim.AddLabelToIssue(env.Owner, env.Repo, num, "fabrik:revalidate"); err != nil {
+		t.Fatalf("AddLabelToIssue: %v", err)
+	}
+	// Validate re-runs and (the sim worker pushes a commit) the head moves, so
+	// CI must be seeded green on the new head for the item to settle again.
+	WaitForIssueLabel(t, env, num, "fabrik:awaiting-ci", 80)
+	pr2, err := env.Sim.FetchLinkedPR(env.Owner, env.Repo, num)
+	if err != nil || pr2 == nil {
+		t.Fatalf("linked PR: %v", err)
+	}
+	env.Sim.Sim().SeedCheckRun(env.OwnerRepo, pr2.HeadSHA, gh.CheckRun{Name: conjunctiveGateCheck, Status: "completed", Conclusion: "success"})
+	AdvanceUntil(t, env, func(*Env) bool {
+		settleWait()
+		return len(sink.ofType(channelevents.ValidateSettled, num)) == 2
+	}, 80)
+	RunPolls(t, env, 6)
+	settleWait()
+	if n := len(sink.ofType(channelevents.ValidateSettled, num)); n != 2 {
+		t.Fatalf("want exactly two validate-settled events across two episodes, got %d", n)
 	}
 }

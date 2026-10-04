@@ -27,15 +27,39 @@ import (
 // changes no return value and no decision (R10). The consumer then confirms
 // with a cache-only predicate and emits once per episode.
 
-// noteValidateSettled records that item reached the engine's settle point and,
-// when the cache-only predicate holds right now, captures the event as it
-// stands. The event is built here, on the poll goroutine, rather than later on
-// the consumer: a yolo item can be merged and moved to Done within the very same
-// pass, and an evaluation deferred past that would find it no longer at
-// Validate and silently drop the headline event. Everything here is a store
-// Peek plus pure CPU — no GitHub call, no engine decision touched (R9, R10).
-// A void, non-blocking call, safe with no hub running.
+// noteValidateSettled records that item reached the engine's settle point
+// (runCatchUpPhase2). See recordValidateSettle.
 func (e *Engine) noteValidateSettled(item gh.ProjectItem, stage *stages.Stage) {
+	e.recordValidateSettle(item, stage, false)
+}
+
+// noteValidateLanding records that item reached the engine's landing decision
+// (attemptMergeOnValidate, after its dependency, review-thread, review and
+// feedback gates passed). A yolo item is merged or queued inside that call —
+// in the CI-gated flow from checkCIGate's Phase 1 handler, which claims the
+// item so Phase 2 is never reached, and in the ungated flow from
+// handleStageComplete before the complete label is even applied — so this is
+// the settle point for yolo. The gates were just evaluated live by the engine,
+// so the cache-only predicate is relaxed to the identity checks.
+func (e *Engine) noteValidateLanding(item gh.ProjectItem, stage *stages.Stage) {
+	e.recordValidateSettle(item, stage, true)
+}
+
+// settleCandidate is one settle point captured on the poll goroutine.
+type settleCandidate struct {
+	ev      channelevents.Event
+	relaxed bool
+}
+
+// recordValidateSettle captures the event as it stands when the cache-only
+// predicate holds right now. The event is built here, on the calling
+// goroutine, rather than later on the consumer: a yolo item can be merged and
+// moved to Done within the very same pass, and an evaluation deferred past
+// that would find it no longer at Validate and silently drop the headline
+// event. Everything here is a store Peek plus pure CPU — no GitHub call, no
+// engine decision touched (R9, R10). A void, non-blocking call, safe with no
+// hub running.
+func (e *Engine) recordValidateSettle(item gh.ProjectItem, stage *stages.Stage, atLanding bool) {
 	if stage == nil || stage.Name != "Validate" {
 		return
 	}
@@ -54,16 +78,18 @@ func (e *Engine) noteValidateSettled(item gh.ProjectItem, stage *stages.Stage) {
 		return
 	}
 	st := snap.State()
-	if !e.validateSettledSnap(snap, &st) {
+	if !e.validateSettledSnap(snap, &st, atLanding) {
 		return
 	}
-	ev := e.validateSettledEvent(snap, &st)
+	ev := e.validateSettledEvent(snap, &st, stage)
 	key := issueRef(repo, item.Number)
 	ce.mu.Lock()
 	if ce.settleCand == nil {
-		ce.settleCand = map[string]channelevents.Event{}
+		ce.settleCand = map[string]settleCandidate{}
 	}
-	ce.settleCand[key] = ev
+	if prev, held := ce.settleCand[key]; !held || (prev.relaxed && !atLanding) {
+		ce.settleCand[key] = settleCandidate{ev: ev, relaxed: atLanding}
+	}
 	ce.mu.Unlock()
 	ce.signal()
 }
@@ -121,20 +147,31 @@ func (e *Engine) cachedAddressedReviewIDs(st *itemstate.ItemState) map[int]bool 
 
 // validateSettledSnap reports whether the item currently satisfies the
 // cache-only validate-settled predicate. It is only consulted after the engine
-// itself reached the settle point, so it checks the remaining cache-visible
-// conditions rather than re-deriving the gates.
-func (e *Engine) validateSettledSnap(snap itemstate.Snapshot, st *itemstate.ItemState) bool {
-	if st.IsPR || st.IsClosed || st.Status != "Validate" || st.Worker != nil {
+// itself reached a settle point, so it checks the remaining cache-visible
+// conditions rather than re-deriving the gates. atLanding relaxes it to the
+// identity checks (Validate, open, an open PR, not paused or blocked): the
+// landing decision just evaluated every gate live, and the item still has its
+// worker and may not yet carry the complete label.
+func (e *Engine) validateSettledSnap(snap itemstate.Snapshot, st *itemstate.ItemState, atLanding bool) bool {
+	if st.IsPR || st.IsClosed || st.Status != "Validate" {
 		return false
 	}
-	if !hasLabelStr(st.Labels, "stage:Validate:complete") {
+	for _, l := range []string{"fabrik:paused", "fabrik:blocked", "fabrik:rebase-needed", "fabrik:revalidate", "fabrik:awaiting-landing-verification"} {
+		if hasLabelStr(st.Labels, l) {
+			return false
+		}
+	}
+	lpr := st.LinkedPR
+	if lpr == nil || lpr.Number == 0 || lpr.Merged || lpr.State == "closed" {
 		return false
 	}
-	for _, l := range []string{
-		"fabrik:awaiting-ci", "fabrik:awaiting-review", "fabrik:bot-reprompted",
-		"fabrik:paused", "fabrik:blocked", "fabrik:rebase-needed", "fabrik:revalidate",
-		"fabrik:awaiting-landing-verification",
-	} {
+	if atLanding {
+		return true
+	}
+	if st.Worker != nil || !hasLabelStr(st.Labels, "stage:Validate:complete") {
+		return false
+	}
+	for _, l := range []string{"fabrik:awaiting-ci", "fabrik:awaiting-review", "fabrik:bot-reprompted"} {
 		if hasLabelStr(st.Labels, l) {
 			return false
 		}
@@ -143,10 +180,6 @@ func (e *Engine) validateSettledSnap(snap itemstate.Snapshot, st *itemstate.Item
 		if !strings.EqualFold(d.State, "CLOSED") {
 			return false
 		}
-	}
-	lpr := st.LinkedPR
-	if lpr == nil || lpr.Number == 0 || lpr.Merged || lpr.State == "closed" {
-		return false
 	}
 	return !e.cachedPendingFeedback(snap, st).any()
 }
@@ -170,12 +203,25 @@ func validateSettledEpisodeEnded(st *itemstate.ItemState) bool {
 
 func vsKeys(ref string) (started, closed string) { return "vs:" + ref, "vsclosed:" + ref }
 
+// vsRelaxedKey marks an episode opened at the landing decision, before the
+// complete label existed: such an episode must not be closed merely because the
+// label is not (yet) there.
+func vsRelaxedKey(ref string) string { return "vsrelaxed:" + ref }
+
 // closeSettleEpisode closes an open episode whose ending conditions hold.
 // Consumer goroutine only.
 func (ce *channelEvents) closeSettleEpisode(ref string, st *itemstate.ItemState) {
 	started, closed := vsKeys(ref)
 	n := ce.hub.Counter(started)
-	if n > ce.hub.Counter(closed) && validateSettledEpisodeEnded(st) {
+	if n <= ce.hub.Counter(closed) {
+		return
+	}
+	ended := validateSettledEpisodeEnded(st)
+	if ce.hub.Counter(vsRelaxedKey(ref)) == n && !hasLabelStr(st.Labels, "stage:Validate:complete") &&
+		!st.IsClosed && st.Status == "Validate" && !hasLabelStr(st.Labels, "fabrik:revalidate") {
+		ended = false
+	}
+	if ended {
 		ce.hub.SetCounter(closed, n)
 	}
 }
@@ -184,7 +230,8 @@ func (ce *channelEvents) closeSettleEpisode(ref string, st *itemstate.ItemState)
 // finished episode, then emit the captured validate-settled event if no episode
 // is open. The episode counter and the dedup key persist in the hub, so a
 // restart neither re-emits an announced episode nor loses an unannounced one.
-func (ce *channelEvents) settleCandidate(ref string, ev channelevents.Event) {
+func (ce *channelEvents) settleCandidate(ref string, cand settleCandidate) {
+	ev := cand.ev
 	repo, n, ok := parseIssueRef(ref)
 	if !ok {
 		return
@@ -200,6 +247,9 @@ func (ce *channelEvents) settleCandidate(ref string, ev channelevents.Event) {
 		return // an episode is already open: announced once
 	}
 	ep := ce.hub.BumpCounter(started)
+	if cand.relaxed {
+		ce.hub.SetCounter(vsRelaxedKey(ref), ep)
+	}
 	ev.DedupKey = started + ":" + strconv.Itoa(ep)
 	m := ce.memoFor(ref)
 	var st itemstate.ItemState
@@ -240,9 +290,13 @@ func (e *Engine) validateSettledNext(st *itemstate.ItemState) string {
 
 // cachedCIVerdict classifies the cached check runs of the PR head with the
 // engine's own classifier. Never a live read.
+//
+// A PR with no cached check runs reports "unknown", not "none": the cache fills
+// from check_run webhooks and gate reads, so absence here does not prove the head
+// has no checks. The engine's own gate state is reported separately (ci_gate).
 func cachedCIVerdict(lpr *itemstate.LinkedPRState) string {
 	if lpr == nil || len(lpr.CheckRuns) == 0 {
-		return "none"
+		return "unknown"
 	}
 	status, _, _ := gh.ClassifyCheckRuns(lpr.CheckRuns)
 	switch status {
@@ -284,7 +338,7 @@ func reviewSummary(lpr *itemstate.LinkedPRState) string {
 	return strings.Join(parts, ", ")
 }
 
-func (e *Engine) validateSettledEvent(snap itemstate.Snapshot, st *itemstate.ItemState) channelevents.Event {
+func (e *Engine) validateSettledEvent(snap itemstate.Snapshot, st *itemstate.ItemState, stage *stages.Stage) channelevents.Event {
 	lpr := st.LinkedPR
 	ev := e.baseEvent(st, channelevents.ValidateSettled)
 	next := e.validateSettledNext(st)
@@ -296,6 +350,12 @@ func (e *Engine) validateSettledEvent(snap itemstate.Snapshot, st *itemstate.Ite
 	}
 	ev.Meta["next"] = next
 	ev.Meta["ci"] = ci
+	if stage != nil && stage.WaitForCI != nil && *stage.WaitForCI {
+		// Reaching the settle point means the engine's own CI gate cleared.
+		ev.Meta["ci_gate"] = "cleared"
+	} else {
+		ev.Meta["ci_gate"] = "not-gated"
+	}
 	ev.Meta["reviews"] = reviews
 	ev.Meta["unresolved_threads"] = strconv.Itoa(unresolved)
 	ev.Meta["autonomy"] = e.autonomyMode(st)
