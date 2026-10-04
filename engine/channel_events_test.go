@@ -272,8 +272,6 @@ func TestChannelStateSurvivesDaemonRestart(t *testing.T) {
 	seedValidate(t, e1, 1, "stage:Validate:complete")
 	time.Sleep(120 * time.Millisecond)
 	hook(e1, 1) // announces episode 1; "X" is not attached, so it is held
-	// Three label events occur while no session is attached.
-	lbl(e1, 1, "fabrik:a1", "fabrik:a2", "fabrik:a3")
 	waitHeld := func(e *Engine, n int) {
 		t.Helper()
 		deadline := time.Now().Add(3 * time.Second)
@@ -285,6 +283,9 @@ func TestChannelStateSurvivesDaemonRestart(t *testing.T) {
 		}
 		t.Fatalf("only %d events held", e.channelEvents().hub.Queued("X"))
 	}
+	waitHeld(e1, 1) // events from different sources have no relative order guarantee; settle the first
+	// Three label events occur while no session is attached.
+	lbl(e1, 1, "fabrik:a1", "fabrik:a2", "fabrik:a3")
 	waitHeld(e1, 4)
 	e1.closeChannelEvents() // the restart
 
