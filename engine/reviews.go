@@ -1884,6 +1884,7 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 		awaitingInput: true,
 		reactRocket:   true,
 	})
+	e.emitReviewTimeout(item, stage) // observation only (#1968)
 }
 
 // dispatchReviewReinvoke re-invokes the stage agent via processComments with

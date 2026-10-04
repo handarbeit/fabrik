@@ -250,6 +250,7 @@ func (ce *channelEvents) onChange(c itemstate.Change, snap itemstate.Snapshot) {
 	var evs []channelevents.Event
 	for _, d := range c.LabelDeltas {
 		evs = append(evs, ce.e.labelEvent(&st, c, d))
+		evs = append(evs, ce.e.labelDerivedEvents(&st, d)...)
 	}
 	staleCand := c.Fields&itemstate.InvocationChanged != 0 && hasLabelStr(st.Labels, "fabrik:awaiting-input")
 	const interesting = itemstate.LabelsChanged | itemstate.StageStateChanged | itemstate.StatusChanged |

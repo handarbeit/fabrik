@@ -74,11 +74,21 @@ func (s *chanSink) quiet(t *testing.T, window time.Duration) {
 // (everything, opted into all labels, when sub is nil).
 func channelEngine(t *testing.T, ahead time.Duration, sub *channelevents.Subscription) (*Engine, *chanSink) {
 	t.Helper()
+	return channelEngineTick(t, ahead, sub, time.Hour)
+}
+
+// channelEngineTick is channelEngine with a chosen ticker period, for the
+// time-driven events.
+func channelEngineTick(t *testing.T, ahead time.Duration, sub *channelevents.Subscription, tick time.Duration) (*Engine, *chanSink) {
+	t.Helper()
 	oldD, oldT := channelDebounce, channelTick
-	channelDebounce, channelTick = 20*time.Millisecond, time.Hour
+	channelDebounce, channelTick = 20*time.Millisecond, tick
 	t.Cleanup(func() { channelDebounce, channelTick = oldD, oldT })
 
 	e := apiEngine(t, ahead)
+	// An adjustable clock installed before any goroutine starts, so a test can
+	// move time (a deadline passing) without racing the deriver.
+	e.SetClock(&adjClock{t: time.Now().Add(ahead)})
 	e.fabrikDir = t.TempDir()
 	e.startChannelEvents()
 	t.Cleanup(e.closeChannelEvents)
@@ -224,3 +234,12 @@ func TestChannelEventsSourceDoesNotReachGitHub(t *testing.T) {
 		}
 	}
 }
+
+// adjClock is a goroutine-safe settable clock.
+type adjClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func (c *adjClock) Now() time.Time  { c.mu.Lock(); defer c.mu.Unlock(); return c.t }
+func (c *adjClock) set(t time.Time) { c.mu.Lock(); c.t = t; c.mu.Unlock() }
