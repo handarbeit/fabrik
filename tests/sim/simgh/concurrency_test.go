@@ -726,8 +726,12 @@ func TestConcurrentCreateIssueAndCreatePRDoNotClobberNumbers(t *testing.T) {
 	// CreatePR's own hammer needs a head/base pair distinct from every
 	// SeedPR merge candidate, so its numbering attempts aren't gated on git
 	// state a merge might be consuming — only the numbering path is under
-	// test here.
-	s.SeedCommit(ownerRepo, "hammer-head", map[string]string{"hammer.txt": "hammer\n"}, "hammer")
+	// test here. Each CreatePR hammer gets its own head and closes every PR it
+	// opens, since GitHub (and simgh) refuse a second open PR on one head/base
+	// pair (#2032).
+	for i := 0; i < hammers; i++ {
+		s.SeedCommit(ownerRepo, fmt.Sprintf("hammer-head-%d", i), map[string]string{fmt.Sprintf("hammer%d.txt", i): "hammer\n"}, "hammer")
+	}
 	if err := s.Err(); err != nil {
 		t.Fatalf("seeding: %v", err)
 	}
@@ -751,6 +755,7 @@ func TestConcurrentCreateIssueAndCreatePRDoNotClobberNumbers(t *testing.T) {
 	for i := 0; i < hammers; i++ {
 		hammerDone.Add(1)
 		useCreatePR := i%2 == 0
+		head := fmt.Sprintf("hammer-head-%d", i)
 		go func() {
 			defer hammerDone.Done()
 			start.Wait()
@@ -760,8 +765,13 @@ func TestConcurrentCreateIssueAndCreatePRDoNotClobberNumbers(t *testing.T) {
 					return
 				default:
 					if useCreatePR {
-						if _, err := s.CreatePR(owner, repo, "hammer pr", "hammer-head", "main", ""); err != nil {
+						num, err := s.CreatePR(owner, repo, "hammer pr", head, "main", "")
+						if err != nil {
 							t.Errorf("CreatePR: %v", err)
+							return
+						}
+						if err := s.CloseIssue(owner, repo, num); err != nil {
+							t.Errorf("closing hammer PR #%d: %v", num, err)
 							return
 						}
 						createPRHammerCount.Add(1)
