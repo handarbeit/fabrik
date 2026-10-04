@@ -16,6 +16,7 @@ import (
 
 	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/channelevents"
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
 	"github.com/handarbeit/fabrik/tui"
@@ -3335,6 +3336,8 @@ func (e *Engine) ejectRedSingleton(projectID, owner, repo string, m trainMember,
 
 	e.logf(m.item.Number, "merge-train", "#%d is a red singleton (own validation failing, not a batch interaction) — rerouted to %s and pausing without bisection\n", m.item.Number, targetName)
 	e.pauseMergeTrainMember(owner, repo, m.item.Number)
+	e.emitTrainEvent(owner, repo, m.item.Number, channelevents.MergeTrainFailed, "red-singleton",
+		"its own combined Validate is failing, independent of the other batch members", diag, nil) // observation only (#1968)
 }
 
 // reentryInstruction returns the closing guidance sentence for a merge-train
@@ -3442,6 +3445,16 @@ func (e *Engine) ejectMember(owner, repo string, memberItem gh.ProjectItem, reas
 		}
 		e.pauseMergeTrainMember(owner, repo, memberItem.Number)
 	}
+	// Observation only (#1968): the member left the batch.
+	cause := "trial"
+	if !stayInQueue {
+		cause = "review-findings"
+	}
+	e.emitTrainEvent(owner, repo, memberItem.Number, channelevents.MergeTrainEjected, cause, reason, diag, map[string]string{
+		"ejections":     strconv.Itoa(count),
+		"stays_queued":  strconv.FormatBool(stayInQueue),
+		"max_ejections": strconv.Itoa(maxEjections),
+	})
 }
 
 // pauseMergeTrainMember applies fabrik:paused and fabrik:awaiting-input to a merge-train
@@ -3701,6 +3714,8 @@ func (e *Engine) ejectQueuedMemberForComments(projectID string, item gh.ProjectI
 		e.logf(item.Number, "merge-train", "warn: could not post comment-eject comment: %v\n", err)
 	}
 	e.logf(item.Number, "merge-train", "#%d ejected for an unprocessed comment: rerouted to %s (not paused, no ejection counted)\n", item.Number, targetName)
+	e.emitTrainEvent(owner, repo, item.Number, channelevents.MergeTrainEjected, "unprocessed-comment",
+		"an unprocessed comment arrived while Queued; moved back to "+targetName, nil, map[string]string{"stays_queued": "false"}) // observation only (#1968)
 }
 
 // markPendingCommentEject records that issueNumber (in repoKey) has an unprocessed human
@@ -3936,6 +3951,8 @@ func (e *Engine) fireRunawayGuard(ctx context.Context, owner, repo, partitionBas
 		// marker applied to a member that was never actually paused (#1533 review).
 		e.addLabel(item, "fabrik:paused")
 		e.addLabel(item, "fabrik:awaiting-input")
+		e.emitTrainEvent(owner, repo, item.Number, channelevents.MergeTrainFailed, "runaway-guard",
+			fmt.Sprintf("%d trial(s) with zero successful lands within %s", count, window), nil, nil) // observation only (#1968)
 
 		if _, commentErr := e.postComment(item, runawayGuardAlertMessage(count, trainKey, window), false, true); commentErr != nil {
 			e.logf(item.Number, "merge-train", "warn: could not post runaway guard comment: %v — will retry via settle scan\n", commentErr)
@@ -4340,6 +4357,7 @@ func (e *Engine) escalateStrandedTrainMember(projectID, owner, repo string, item
 
 	e.logf(item.Number, "merge-train", "#%d rerouted off Queued to %s and paused after a landing failure: %s\n", item.Number, targetName, reason)
 	e.pauseMergeTrainMember(owner, repo, item.Number)
+	e.emitTrainEvent(owner, repo, item.Number, channelevents.MergeTrainFailed, "landing-failed", reason, nil, nil) // observation only (#1968)
 }
 
 // escalateClosedUnmergedTrial handles the R5 case: findIntegrationPR matched THIS

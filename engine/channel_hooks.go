@@ -155,3 +155,54 @@ func (e *Engine) labelDerivedEvents(st *itemstate.ItemState, d itemstate.LabelDe
 	}
 	return nil
 }
+
+// trainEvent builds a merge-train event for one member. reason is flattened to
+// one short line; failing check names come from the diagnostic the engine
+// already holds (never a GitHub read).
+func (e *Engine) emitTrainEvent(owner, repo string, issue int, typ channelevents.EventType, cause, reason string, diag *trainCIDiagnostic, extra map[string]string) {
+	e.hookEvent(gh.ProjectItem{Repo: owner + "/" + repo, Number: issue}, string(typ), func(st *itemstate.ItemState) []channelevents.Event {
+		ev := e.baseEvent(st, typ)
+		ev.Meta["cause"] = cause
+		line := strings.TrimSpace(strings.SplitN(reason, "\n", 2)[0])
+		if len(line) > 240 {
+			line = line[:240] + "…"
+		}
+		if line != "" {
+			ev.Meta["reason"] = line
+		}
+		if names := diagFailingChecks(diag); len(names) > 0 {
+			ev.Meta["failing_checks"] = strings.Join(names, ",")
+		}
+		for k, v := range extra {
+			ev.Meta[k] = v
+		}
+		verb := "was ejected from the merge train"
+		if typ == channelevents.MergeTrainFailed {
+			verb = "failed in the merge train"
+		}
+		ev.Content = fmt.Sprintf("%s %s (%s)", issueRef(st.Repo, st.Number), verb, cause)
+		if line != "" {
+			ev.Content += ": " + line
+		}
+		if f := ev.Meta["failing_checks"]; f != "" {
+			ev.Content += " — failing: " + f
+		}
+		return []channelevents.Event{ev}
+	})
+}
+
+// diagFailingChecks lists the failing check names a trial diagnostic carries.
+func diagFailingChecks(diag *trainCIDiagnostic) []string {
+	if diag == nil {
+		return nil
+	}
+	var names []string
+	for _, c := range diag.FailedChecks {
+		if c.Name != "" {
+			names = append(names, c.Name)
+		}
+	}
+	names = append(names, diag.FailedContexts...)
+	sort.Strings(names)
+	return names
+}
