@@ -114,7 +114,11 @@ type syncBuf struct {
 	buf bytes.Buffer
 }
 
-func (b *syncBuf) Write(p []byte) (int, error) { b.mu.Lock(); defer b.mu.Unlock(); return b.buf.Write(p) }
+func (b *syncBuf) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
 
 // notifications returns every channel notification written so far.
 func (b *syncBuf) notifications() []map[string]any {
