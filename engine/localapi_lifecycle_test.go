@@ -81,7 +81,7 @@ func TestRun_LocalAPILifecycleAcrossSighupRestart(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() { done <- eng.Run() }()
-	<-readyCh
+	awaitRunReady(t, readyCh, done)
 	waitForAPI(t, path) // the stale file was replaced and the daemon serves
 
 	var health localapi.HealthResult
@@ -129,7 +129,7 @@ func TestRun_LocalAPIRemovedOnCleanShutdownAndBindFailureIsNonFatal(t *testing.T
 	eng.cfg.ReadyCh = readyCh
 	done := make(chan error, 1)
 	go func() { done <- eng.Run() }()
-	<-readyCh
+	awaitRunReady(t, readyCh, done)
 	waitForAPI(t, path)
 	p, _ := os.FindProcess(os.Getpid())
 	p.Signal(syscall.SIGINT)

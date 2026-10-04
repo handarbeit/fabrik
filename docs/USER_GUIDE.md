@@ -1321,6 +1321,7 @@ The flag/env suggestion is derived mechanically from Fabrik's snake_case (`confi
 | `FABRIK_ARCHIVE_DONE` | *(no config.yaml key)* | Auto-archive Done items after `FABRIK_ARCHIVE_AFTER` elapses: `"on"` or `"off"` (case-insensitive; unrecognized values fall back to `"on"`) | `""` (on) |
 | `FABRIK_ANTHROPIC_API_KEY` | *(no config.yaml key)* | Explicit opt-in for API billing: when set and non-empty, translated into `ANTHROPIC_API_KEY` on every Claude worker invocation. The only supported way to obtain API billing through this variable — an ambient `ANTHROPIC_API_KEY` in the engine's own environment is scrubbed and never reaches the worker on its own. Never forwarded to the worker itself; a one-time `[startup]` notice fires when active. See "Anthropic Auth Namespace Scrub & `apiKeyHelper` Refusal" below. | -- |
 | `FABRIK_ANTHROPIC_ENV_PASSTHROUGH` | *(no config.yaml key)* | Comma-separated exact variable names to re-inherit unchanged from the engine's ambient environment into the worker, overriding the Anthropic auth namespace scrub for only those names (e.g. Bedrock/Vertex selectors). Never forwarded to the worker itself; a one-time `[startup]` notice names which variables were passed through when non-empty. See "Anthropic Auth Namespace Scrub & `apiKeyHelper` Refusal" below. | -- |
+| `FABRIK_WORKER_ENV_PASSTHROUGH` | *(no config.yaml key)* | Comma-separated exact names of Fabrik-scrubbed variables (see "Fabrik Daemon Secrets Workers Never See" below) to let through to every Claude worker unchanged. Names not on the scrub list, `GH_TOKEN`/`GITHUB_TOKEN`/`GH_HOST`, `GIT_CONFIG_*` and this variable itself are ignored with a `[startup]` warning. Can admit credentials, so a `[startup]` notice names each admitted variable. Never forwarded to the worker itself. | -- |
 | `FABRIK_INSTANCE_ID` | *(no config.yaml key)* | GitHub App auth only. Stable per-instance string that replaces the hostname in the hash behind the `fabrik:locked:<slug>-<hash>` lock label, so it survives hostname changes (container/pod restarts). Ignored in PAT mode. Absent (default) means the hostname is used. See [GitHub App Authentication](#github-app-authentication). | `""` (hostname) |
 | `FABRIK_GHES_HOST` | `ghes_host` | GitHub Enterprise Server hostname (no scheme, no trailing slash). Absent means github.com, byte-identical to today's behavior. See [GitHub Enterprise Server Support](#github-enterprise-server-support). | `""` (github.com) |
 | `FABRIK_GITHUB_APP_ID` | `github_app_id` | GitHub App ID for App-installation auth — co-equal with `FABRIK_TOKEN`/`GITHUB_TOKEN`, not a replacement. Must be set together with `FABRIK_GITHUB_APP_PRIVATE_KEY_PATH` and `FABRIK_GITHUB_APP_INSTALLATION_ID`, or not at all. See [GitHub App Authentication](#github-app-authentication). | `0` (PAT mode) |
@@ -3614,6 +3615,66 @@ count against `max_retries`, and self-clears once a human removes
 `apiKeyHelper` from the repo and a later invocation reaches Claude successfully.
 There is no support for actually using `apiKeyHelper` with Fabrik; it is refused
 outright.
+
+### Fabrik Daemon Secrets Workers Never See
+
+`fabrik` loads your `.env` into its own process environment, and a Claude worker
+is started from that same environment. Anything you keep in `.env` would
+therefore reach every worker — including the GitHub App private-key path (a
+worker could mint installation tokens indefinitely), the webhook secret (a
+worker could forge deliveries) and your PAT. Fabrik removes its own daemon-only
+variables from every worker's environment, in addition to the Anthropic
+namespace scrub above.
+
+**What workers never see** (exact names, never a `FABRIK_*` wildcard):
+
+- Credentials: `FABRIK_TOKEN`, `FABRIK_GITHUB_APP_ID`,
+  `FABRIK_GITHUB_APP_INSTALLATION_ID`, `FABRIK_GITHUB_APP_PRIVATE_KEY_PATH`,
+  `FABRIK_GITHUB_WEBHOOK_SECRET`, `FABRIK_REVIEWER_TOKEN`,
+  `FABRIK_ANTHROPIC_API_KEY`, `FABRIK_ANTHROPIC_ENV_PASSTHROUGH`.
+- Hookdeck: `FABRIK_HOOKDECK_API_KEY_ENV`, `FABRIK_HOOKDECK_WEBHOOK_SECRET_ENV`,
+  **and the variables they name** (resolved when the engine starts — the names are
+  yours to choose), plus the defaults `HOOKDECK_API_KEY` and
+  `FABRIK_GITHUB_WEBHOOK_SECRET`.
+- Every other `FABRIK_*` setting the engine reads (owner, repo, project, tuning
+  knobs, timeouts, `FABRIK_INSTANCE_ID`, …). The default is *scrubbed*; a
+  variable is forwarded only if the engine itself sets it for workers.
+
+**What workers do receive:**
+
+- `GH_TOKEN` / `GITHUB_TOKEN` — the installation token Fabrik mints under App
+  auth, or the configured token in PAT mode (only the `FABRIK_TOKEN` *variable*
+  is removed).
+- `GH_HOST` when GHES is configured.
+- Under App auth with HTTPS git, the `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_<n>`/
+  `GIT_CONFIG_VALUE_<n>` credential-helper entries that read the minted token, so
+  `git fetch`/`push` and `gh` work with **only** the App token — no operator SSH
+  key, keychain helper or PAT is needed.
+- The invocation facts `FABRIK_ISSUE`, `FABRIK_REPO`, `FABRIK_WORKTREE`,
+  `FABRIK_ROOT` and `FABRIK_PR` (see the stage-lifecycle doc).
+
+**Opting a variable back in.** If a workflow genuinely needs a scrubbed variable
+inside a worker, name it explicitly:
+
+```bash
+FABRIK_WORKER_ENV_PASSTHROUGH=FABRIK_REVIEWER_TOKEN
+```
+
+Exact names only, and only names from the scrub list: `GH_TOKEN`,
+`GITHUB_TOKEN`, `GH_HOST` and `GIT_CONFIG_*` can never be overridden through it,
+and neither can the opt-in variable itself. Because it can admit credentials,
+startup logs a notice naming each admitted variable:
+
+```
+[startup] notice: FABRIK_WORKER_ENV_PASSTHROUGH passes FABRIK_REVIEWER_TOKEN through to every Claude worker — a worker can read and use these. See docs/USER_GUIDE.md.
+```
+
+**Running the test suite inside a worker.** Workers run the repo's tests with the
+environment above, minus the scrubbed variables — but a developer shell or an
+older worker may still have them set. The suite is hermetic against all of it
+(`internal/testenv`), and `bash scripts/ci/worker-shaped-test.sh` proves it,
+which exports dummy App/PAT/webhook/`GH_TOKEN`/`GIT_CONFIG_*` values and runs the
+same `go test -race ./...`.
 
 ### Alternate Claude Profile (`CLAUDE_CONFIG_DIR`)
 

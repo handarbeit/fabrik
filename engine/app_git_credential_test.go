@@ -11,18 +11,8 @@ import (
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/testenv"
 )
-
-// isolateGitConfigEnv blanks the GIT_CONFIG_COUNT family for the test, so
-// applyGitConfigEnv's os.Setenv/os.Unsetenv calls are undone by t.Setenv's
-// cleanup rather than leaking into later tests.
-func isolateGitConfigEnv(t *testing.T) {
-	t.Helper()
-	for _, k := range []string{"GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
-		"GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_1", "GIT_CONFIG_KEY_2", "GIT_CONFIG_VALUE_2"} {
-		t.Setenv(k, "")
-	}
-}
 
 func TestGitConfigEnvEdit(t *testing.T) {
 	ours := appGitCredentialHelper("/x/token")
@@ -141,11 +131,11 @@ func credentialFill(t *testing.T, env []string) string {
 // must produce no credential rather than falling back to the ambient one.
 func TestAppGitCredentialHelper_ServesTokenFileOverAmbientHelper(t *testing.T) {
 	skipIfNoGit(t)
-	isolateGitConfig(t, "[credential \"https://github.com\"]\n\thelper = \"!f() { echo username=ambient; echo password=ambient-token; }; f\"\n")
+	testenv.IsolateGit(t, "[credential \"https://github.com\"]\n\thelper = \"!f() { echo username=ambient; echo password=ambient-token; }; f\"\n")
 
 	dir := filepath.Join(t.TempDir(), "it's a dir") // space and quote exercise shellSingleQuote
 	tokenPath := filepath.Join(dir, "token")
-	base := append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	base := append(os.Environ(), "GIT_TERMINAL_PROMPT=0") // IsolateGit above removed every inherited GIT_CONFIG_* entry
 
 	if got := credentialFill(t, base); got != "ambient-token" {
 		t.Fatalf("precondition: ambient helper did not answer without injection (value withheld; empty=%v)", got == "")
@@ -190,8 +180,7 @@ func TestAppGitCredentialHelper_ServesTokenFileOverAmbientHelper(t *testing.T) {
 // startup refusal: App auth + HTTPS git now starts, with the helper
 // injected into the process environment and the token file written.
 func TestRun_GitHubAppAuth_HTTPS_InjectsCredentialHelper(t *testing.T) {
-	isolateGitConfig(t, "")
-	isolateGitConfigEnv(t)
+	testenv.IsolateGit(t, "")
 	eng := newAppAuthTestEngine(t)
 	eng.hostClient = gh.NewClient("ghs_installation_token")
 
@@ -222,8 +211,7 @@ func TestRun_GitHubAppAuth_HTTPS_InjectsCredentialHelper(t *testing.T) {
 // with git_ssh the new exec must strip it rather than keep serving the
 // installation token.
 func TestRun_GitHubAppAuth_GitSSH_StripsStaleHelper(t *testing.T) {
-	isolateGitConfig(t, "")
-	isolateGitConfigEnv(t)
+	testenv.IsolateGit(t, "")
 	t.Setenv("GIT_CONFIG_COUNT", "2")
 	t.Setenv("GIT_CONFIG_KEY_0", appGitCredentialKey)
 	t.Setenv("GIT_CONFIG_KEY_1", appGitCredentialKey)
@@ -316,7 +304,7 @@ func TestSetUpGitHubAppAuth_HTTPSGitRequiresContentsWrite(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			isolateGitConfig(t, tt.rewrite)
+			testenv.IsolateGit(t, tt.rewrite)
 			dir := t.TempDir()
 			keyPath := writeEngineTestAppKey(t, dir)
 			srv := newFakeGitHubAppServer(t, 999, "handarbeit", "organization", tt.perms)

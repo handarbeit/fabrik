@@ -600,7 +600,7 @@ func TestRun_ShutdownOnSignal_WithGitHubAppAuth_WaitsForRefreshLoop(t *testing.T
 	done := make(chan error, 1)
 	go func() { done <- eng.Run() }()
 
-	<-readyCh
+	awaitRunReady(t, readyCh, done)
 	p, _ := os.FindProcess(os.Getpid())
 	p.Signal(syscall.SIGINT)
 

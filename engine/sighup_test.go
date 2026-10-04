@@ -61,7 +61,7 @@ func TestRun_SighupRestart(t *testing.T) {
 	}()
 
 	// Wait for Run to register signal handlers before sending SIGHUP.
-	<-readyCh
+	awaitRunReady(t, readyCh, done)
 	p, _ := os.FindProcess(os.Getpid())
 	p.Signal(syscall.SIGHUP)
 

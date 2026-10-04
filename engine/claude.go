@@ -22,6 +22,7 @@ import (
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/claudeerr"
 	"github.com/handarbeit/fabrik/internal/itemstate"
+	"github.com/handarbeit/fabrik/internal/workerenv"
 	"github.com/handarbeit/fabrik/stages"
 )
 
@@ -488,6 +489,15 @@ var claudeAnthropicAPIKey string
 // Nil/empty (the default) means no passthrough — the scrub applies
 // unconditionally.
 var claudeAnthropicEnvPassthrough []string
+
+// claudeWorkerEnv is the engine's resolved dynamic part of the Fabrik-secret
+// scrub (#2027, ADR-2027): the operator-chosen Hookdeck variable names
+// (cfg.HookdeckAPIKeyEnv / HookdeckWebhookSecretEnv — the names are free-form,
+// so a fixed list alone cannot cover the secrets they point at) and the
+// FABRIK_WORKER_ENV_PASSTHROUGH opt-in. Set once by Engine.New, mirroring
+// claudeAnthropicEnvPassthrough. The zero value still scrubs the whole fixed
+// list (workerenv.Scrubbed plus the Hookdeck defaults).
+var claudeWorkerEnv workerenv.Resolved
 
 // killReasonCtxKey is the context key for kill reason annotation.
 type killReasonCtxKey struct{}
@@ -1056,6 +1066,17 @@ func buildClaudeEnv(stage *stages.Stage, issue gh.ProjectItem, workDir string, o
 	if claudeAnthropicAPIKey != "" {
 		env = append(env, "ANTHROPIC_API_KEY="+claudeAnthropicAPIKey)
 	}
+	// Fabrik's own daemon-only secrets and config (#2027): the .env →
+	// process env → worker env path would otherwise hand every worker the App
+	// private-key path, the webhook secret, the PAT and the rest. Bare removal
+	// sentinels for exact names only (never a FABRIK_* wildcard — the
+	// invocation facts above share the prefix). GH_TOKEN/GITHUB_TOKEN/GH_HOST
+	// and the ADR-1846 GIT_CONFIG_* helper entries are on no list
+	// (workerenv.Protected), so the worker's sanctioned GitHub access survives.
+	// Names the operator admitted via FABRIK_WORKER_ENV_PASSTHROUGH are simply
+	// not sentineled and so inherit from the base env unchanged — never
+	// re-added as KEY=VALUE, so they cannot shadow an override computed above.
+	env = append(env, workerenv.Sentinels(claudeWorkerEnv)...)
 	return env
 }
 

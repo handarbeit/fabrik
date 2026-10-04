@@ -5,6 +5,8 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/handarbeit/fabrik/internal/testenv"
 )
 
 func TestMain_Help(t *testing.T) {
@@ -13,6 +15,10 @@ func TestMain_Help(t *testing.T) {
 		main()
 		return
 	}
+
+	// Drop everything a stage worker inherits from the daemon (credentials,
+	// GH_TOKEN, GIT_CONFIG_* helper entries — #2027) before copying the env.
+	testenv.Isolate(t)
 
 	// Build a clean environment that strips all FABRIK_* vars so the subprocess
 	// sees no config and exits with an error (missing required flags).

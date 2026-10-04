@@ -426,7 +426,7 @@ func TestRun_ShutdownOnSignal(t *testing.T) {
 	}()
 
 	// Wait for Run to register signal handlers before sending SIGINT.
-	<-readyCh
+	awaitRunReady(t, readyCh, done)
 	p, _ := os.FindProcess(os.Getpid())
 	p.Signal(syscall.SIGINT)
 
@@ -516,7 +516,7 @@ func TestRun_WakeDuringRateLimitBackoff_DropsWake(t *testing.T) {
 		done <- eng.Run()
 	}()
 
-	<-readyCh
+	awaitRunReady(t, readyCh, done)
 
 	select {
 	case <-firstPollDone:

@@ -10,26 +10,8 @@ import (
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/githubauth"
+	"github.com/handarbeit/fabrik/internal/testenv"
 )
-
-// isolateGitConfig points the git-config lookups checkURLRewrite (and hence
-// the HTTPS-git decision in setUpGitHubAppAuth/setUpAppGitCredential) makes at a
-// test-local global config file, so these tests are deterministic regardless
-// of the host's own ~/.gitconfig — mirroring tests/sim/simgh/git.go's
-// GIT_CONFIG_GLOBAL/GIT_CONFIG_NOSYSTEM precedent (#1756, same class of
-// problem R5 solves for the live e2e bed). rewrite, when non-empty, is
-// written verbatim into the global config file so callers can opt a subtest
-// into an active url.git@github.com:.insteadOf rewrite.
-func isolateGitConfig(t *testing.T, rewrite string) {
-	t.Helper()
-	dir := t.TempDir()
-	cfgPath := filepath.Join(dir, "gitconfig")
-	if err := os.WriteFile(cfgPath, []byte(rewrite), 0644); err != nil {
-		t.Fatalf("writing isolated git config: %v", err)
-	}
-	t.Setenv("GIT_CONFIG_GLOBAL", cfgPath)
-	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
-}
 
 const sshRewriteGitConfig = "[url \"git@github.com:\"]\n\tinsteadOf = https://github.com/\n"
 
@@ -117,7 +99,7 @@ func newAppAuthTestEngine(t *testing.T) *Engine {
 // starts without injecting a helper and Run() proceeds to a normal, signal-driven
 // shutdown.
 func TestRun_GitHubAppAuth_GitSSH_StartsCleanly(t *testing.T) {
-	isolateGitConfig(t, "")
+	testenv.IsolateGit(t, "")
 	eng := newAppAuthTestEngine(t)
 	eng.cfg.GitSSH = true
 	runEngineUntilShutdown(t, eng)
@@ -127,7 +109,7 @@ func TestRun_GitHubAppAuth_GitSSH_StartsCleanly(t *testing.T) {
 // url.git@github.com:.insteadOf rewrite is treated like git_ssh, since it
 // redirects HTTPS git to SSH before any credential helper is consulted.
 func TestRun_GitHubAppAuth_SSHRewrite_StartsCleanly(t *testing.T) {
-	isolateGitConfig(t, sshRewriteGitConfig)
+	testenv.IsolateGit(t, sshRewriteGitConfig)
 	eng := newAppAuthTestEngine(t)
 	// eng.cfg.GitSSH stays false — the rewrite alone must be sufficient.
 	runEngineUntilShutdown(t, eng)
@@ -137,7 +119,7 @@ func TestRun_GitHubAppAuth_SSHRewrite_StartsCleanly(t *testing.T) {
 // configured, e.ghAppAuth == nil) starts normally under HTTPS with no
 // rewrite, and gets no injected helper.
 func TestRun_PATMode_HTTPSNoRewrite_Unaffected(t *testing.T) {
-	isolateGitConfig(t, "")
+	testenv.IsolateGit(t, "")
 	client := &mockGitHubClient{
 		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
 			return &gh.ProjectBoard{}, nil

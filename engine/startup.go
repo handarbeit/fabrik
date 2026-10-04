@@ -15,6 +15,7 @@ import (
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/workerenv"
 	"github.com/handarbeit/fabrik/tui"
 	"github.com/handarbeit/fabrik/warnings"
 )
@@ -834,4 +835,23 @@ func logAnthropicEnvPassthrough(names []string, w io.Writer) {
 	}
 	fmt.Fprintf(w, "[startup] notice: FABRIK_ANTHROPIC_ENV_PASSTHROUGH passes through %s — Claude invocations may not "+
 		"be subscription-billed as a result. See docs/USER_GUIDE.md.\n", strings.Join(names, ", "))
+}
+
+// logWorkerEnvOptIn announces the FABRIK_WORKER_ENV_PASSTHROUGH opt-in (#2027,
+// R1b): each admitted name reaches every worker, credentials included, so the
+// notice is loud. Ignored and refused names are reported too, so a typo or an
+// attempt to touch GH_TOKEN is visible rather than silently dropped.
+func logWorkerEnvOptIn(r workerenv.Resolved, w io.Writer) {
+	if len(r.Admitted) > 0 {
+		fmt.Fprintf(w, "[startup] notice: %s passes %s through to every Claude worker — a worker can read and "+
+			"use these. See docs/USER_GUIDE.md.\n", workerenv.OptInVar, strings.Join(r.Admitted, ", "))
+	}
+	if len(r.Ignored) > 0 {
+		fmt.Fprintf(w, "[startup] warning: %s entries ignored (not on the worker scrub list, or protected): %s\n",
+			workerenv.OptInVar, strings.Join(r.Ignored, ", "))
+	}
+	if len(r.Dropped) > 0 {
+		fmt.Fprintf(w, "[startup] warning: Hookdeck env-var names not scrubbed from workers (protected): %s\n",
+			strings.Join(r.Dropped, ", "))
+	}
 }
