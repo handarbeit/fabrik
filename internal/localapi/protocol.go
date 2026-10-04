@@ -9,26 +9,47 @@
 // One JSON object per line, in both directions, never containing a raw
 // newline. A request carries an id and a method; the response echoes the id
 // with either a result or an error. A frame with no id is a server-initiated
-// message (it carries an event and a sub); nothing in this package emits one
-// yet, but the codec reads and writes them and a Session can push one at any
-// time, so the long-lived streaming connection the next issue needs shares the
-// connection with request/response traffic without a framing change.
+// message (it carries an event and a sub). Protocol v2 (#1968, ADR-1966-b)
+// emits them: after a successful "attach" request the server pushes
+// "channel" frames (one pushed event each, in params), periodic "heartbeat"
+// frames, and a final "superseded" frame if a newer attach under the same
+// subscriber name displaces this connection. The long-lived streaming
+// connection shares the socket with request/response traffic without a
+// framing change.
 package localapi
 
 import (
 	"encoding/json"
 	"fmt"
+
+	"github.com/handarbeit/fabrik/internal/channelevents"
 )
 
-// ProtocolVersion is returned by the "hello" method.
-const ProtocolVersion = 1
+// ProtocolVersion is returned by the "hello" method. Version 2 adds the
+// streaming methods; a v1 daemon lacks them, which a client detects from
+// hello's "methods" list and degrades to read-only.
+const ProtocolVersion = 2
 
 // Methods.
 const (
-	MethodHello  = "hello"
-	MethodStatus = "status"
-	MethodBoard  = "board"
-	MethodHealth = "health"
+	MethodHello       = "hello"
+	MethodStatus      = "status"
+	MethodBoard       = "board"
+	MethodHealth      = "health"
+	MethodSubscribe   = "subscribe"
+	MethodUnsubscribe = "unsubscribe"
+	MethodAttach      = "attach"
+)
+
+// Server-initiated event names (Frame.Event).
+const (
+	// EventChannel carries one channelevents.Event in Params.
+	EventChannel = "channel"
+	// EventHeartbeat keeps an attached connection's idle deadline moving and
+	// lets either side notice a dead peer; clients swallow it.
+	EventHeartbeat = "heartbeat"
+	// EventSuperseded tells a displaced session to stop reconnecting.
+	EventSuperseded = "superseded"
 )
 
 // Error codes.
@@ -78,6 +99,17 @@ func Errorf(code, format string, args ...any) *Error {
 
 // MaxLineBytes bounds one frame (request line) the server will read.
 const MaxLineBytes = 1 << 20
+
+// Streamer is the optional streaming half of the daemon API (protocol v2). A
+// Backend that also implements it enables subscribe/unsubscribe/attach; the
+// three-method Backend contract is unchanged.
+type Streamer interface {
+	Subscribe(SubscribeParams) (*SubscribeResult, error)
+	Unsubscribe(UnsubscribeParams) (*UnsubscribeResult, error)
+	// Attach binds sink as the live session for p.Subscriber and returns the
+	// detach func the server calls when the connection ends.
+	Attach(p AttachParams, sink channelevents.Sink) (detach func(), err error)
+}
 
 // Backend serves the three read methods. Every method must be answered purely
 // from in-memory state: no GitHub call, ever (R7). A returned *Error is sent
