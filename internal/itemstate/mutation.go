@@ -63,6 +63,11 @@ type IssueLabeled struct {
 	Repo   string
 	Number int
 	Label  string
+	// Sender is the webhook's sender.login ("" when unknown).
+	Sender string
+	// EchoOfEngine is true when the engine's echo registry matched this
+	// webhook, i.e. it is the echo of a label write Fabrik made itself.
+	EchoOfEngine bool
 }
 
 func (IssueLabeled) isMutation()       {}
@@ -73,6 +78,11 @@ type IssueUnlabeled struct {
 	Repo   string
 	Number int
 	Label  string
+	// Sender is the webhook's sender.login ("" when unknown).
+	Sender string
+	// EchoOfEngine is true when the engine's echo registry matched this
+	// webhook, i.e. it is the echo of a label write Fabrik made itself.
+	EchoOfEngine bool
 }
 
 func (IssueUnlabeled) isMutation()       {}

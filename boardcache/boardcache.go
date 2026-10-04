@@ -310,6 +310,16 @@ type CacheImpl struct {
 	fallback    ReadClient
 	logFn       func(format string, args ...any)
 	matchEchoFn func(eventType, action, key string) // injected by engine; nil when cache disabled
+	// matchEchoReportedFn is matchEchoFn that reports whether an echo entry
+	// matched. Optional; used only to attribute label webhooks to Fabrik (#1968).
+	matchEchoReportedFn func(eventType, action, key string) bool
+}
+
+// SetMatchEchoReportedFn injects the echo matcher that reports whether the
+// inbound webhook matched one of the engine's own writes. When set it replaces
+// matchEchoFn for label deltas.
+func (c *CacheImpl) SetMatchEchoReportedFn(fn func(eventType, action, key string) bool) {
+	c.matchEchoReportedFn = fn
 }
 
 // SetMatchEchoFn injects the MatchEcho function from the webhook manager.

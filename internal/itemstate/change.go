@@ -94,4 +94,59 @@ type Change struct {
 	Number int
 	// Fields is a bitmask of ChangeFlags indicating which field groups changed.
 	Fields ChangeFlags
+	// LabelDeltas lists each label the mutation actually added or removed, in a
+	// deterministic order (additions in item order, then removals in prior order).
+	// It is computed from a before/after diff, so an idempotent write or a
+	// reconcile that re-observes an unchanged label contributes nothing, and a
+	// webhook echo that follows the engine's own write-through is a no-op that
+	// never reaches observers (#1968 R3). Empty for an item's first population
+	// (Reset, a BoardReconciled/mutation that creates the item) — that is a
+	// baseline, not a change.
+	LabelDeltas []LabelDelta
+	// Origin records which kind of mutation produced the change. Meaningful for
+	// LabelDeltas attribution.
+	Origin ChangeOrigin
+	// Sender is the GitHub login that triggered a webhook label mutation; empty
+	// when unknown or not a webhook.
+	Sender string
+	// EchoOfEngine is true when a webhook label mutation matched the engine's
+	// own echo registry, i.e. it is the echo of a write Fabrik made.
+	EchoOfEngine bool
+}
+
+// LabelDelta is one label added to or removed from an item.
+type LabelDelta struct {
+	Label string
+	Added bool
+}
+
+// ChangeOrigin classifies the mutation behind a Change.
+type ChangeOrigin uint8
+
+const (
+	// OriginOther is any mutation that is not a label write: a board reconcile,
+	// deep fetch, probe, or other state change. A label delta with this origin
+	// was first observed by polling, so its actor is unknown.
+	OriginOther ChangeOrigin = iota
+	// OriginEngine is a LocalLabelAdded/LocalLabelRemoved write-through — Fabrik
+	// wrote this label.
+	OriginEngine
+	// OriginWebhook is an IssueLabeled/IssueUnlabeled delta from a webhook.
+	OriginWebhook
+)
+
+// diffLabels returns the labels added to and removed from before to reach after.
+func diffLabels(before, after []string) []LabelDelta {
+	var out []LabelDelta
+	for _, l := range after {
+		if !containsString(before, l) {
+			out = append(out, LabelDelta{Label: l, Added: true})
+		}
+	}
+	for _, l := range before {
+		if !containsString(after, l) {
+			out = append(out, LabelDelta{Label: l, Added: false})
+		}
+	}
+	return out
 }

@@ -65,7 +65,10 @@ type issueCommentPayload struct {
 
 type issuesPayload struct {
 	Action string `json:"action"`
-	Label  struct {
+	Sender struct {
+		Login string `json:"login"`
+	} `json:"sender"`
+	Label struct {
 		Name string `json:"name"`
 	} `json:"label"`
 	Issue struct {
@@ -474,11 +477,11 @@ func (c *CacheImpl) applyIssuesDelta(payload []byte) {
 
 	case "labeled":
 		c.applyIssueLabelMutationDelta(owner, fullRepo, issNum, key, "labeled", p.Label.Name,
-			itemstate.IssueLabeled{Repo: fullRepo, Number: issNum, Label: p.Label.Name})
+			itemstate.IssueLabeled{Repo: fullRepo, Number: issNum, Label: p.Label.Name, Sender: p.Sender.Login})
 
 	case "unlabeled":
 		c.applyIssueLabelMutationDelta(owner, fullRepo, issNum, key, "unlabeled", p.Label.Name,
-			itemstate.IssueUnlabeled{Repo: fullRepo, Number: issNum, Label: p.Label.Name})
+			itemstate.IssueUnlabeled{Repo: fullRepo, Number: issNum, Label: p.Label.Name, Sender: p.Sender.Login})
 
 	case "milestoned", "demilestoned":
 		// issue.milestone is the post-event value: the new milestone on
@@ -515,8 +518,19 @@ func (c *CacheImpl) applyIssuesDelta(payload []byte) {
 // cases of applyIssuesDelta: echo the match, ensure the issue is in the Store,
 // apply the given mutation, and bump the local delta on a real change.
 func (c *CacheImpl) applyIssueLabelMutationDelta(owner, fullRepo string, issNum int, key, action, labelName string, mutation itemstate.Mutation) {
-	if c.matchEchoFn != nil {
+	echoed := false
+	if c.matchEchoReportedFn != nil {
+		echoed = c.matchEchoReportedFn("issues", action, key+"+"+labelName)
+	} else if c.matchEchoFn != nil {
 		c.matchEchoFn("issues", action, key+"+"+labelName)
+	}
+	switch v := mutation.(type) {
+	case itemstate.IssueLabeled:
+		v.EchoOfEngine = echoed
+		mutation = v
+	case itemstate.IssueUnlabeled:
+		v.EchoOfEngine = echoed
+		mutation = v
 	}
 	if err := c.ensureIssueInStore(owner, fullRepo, issNum); err != nil {
 		c.logFn("[cache] applyIssuesDelta(%s): ensure #%d: %v\n", action, issNum, err)
