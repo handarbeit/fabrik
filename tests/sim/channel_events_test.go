@@ -1,0 +1,189 @@
+package sim
+
+import (
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/handarbeit/fabrik/engine"
+	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/channelevents"
+)
+
+// Channel-event scenarios (#1968, ADR-1966-b). They run the real engine through
+// PollOnce with the channel hub started via the engine's test seam, so the
+// validate-settled anchor (runCatchUpPhase2's settle point) is exercised against
+// the real gate chain rather than a hand-built snapshot.
+//
+// These tests are deliberately NOT t.Parallel: SetChannelTimingForTest changes
+// package-level timing the deriver reads, and serial tests finish before any
+// parallel test resumes.
+
+type simSink struct {
+	mu  sync.Mutex
+	got []channelevents.Event
+}
+
+func (s *simSink) Deliver(ev channelevents.Event) error {
+	s.mu.Lock()
+	s.got = append(s.got, ev)
+	s.mu.Unlock()
+	return nil
+}
+func (s *simSink) Superseded() {}
+
+func (s *simSink) all() []channelevents.Event {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]channelevents.Event(nil), s.got...)
+}
+
+func (s *simSink) ofType(typ channelevents.EventType, issue int) []channelevents.Event {
+	var out []channelevents.Event
+	for _, ev := range s.all() {
+		if ev.Type == typ && (issue == 0 || ev.Issue == issue) {
+			out = append(out, ev)
+		}
+	}
+	return out
+}
+
+// startChannel starts the hub, subscribes "S" to everything (all label churn
+// included) and attaches a sink.
+func startChannel(t *testing.T, env *Env) (*channelevents.Hub, *simSink) {
+	t.Helper()
+	restore := engine.SetChannelTimingForTest(20*time.Millisecond, time.Hour)
+	t.Cleanup(restore)
+	hub := env.Engine.StartChannelEventsForTest(t.TempDir())
+	if hub == nil {
+		t.Fatal("channel hub did not start")
+	}
+	t.Cleanup(env.Engine.StopChannelEventsForTest)
+	none := []string{}
+	if _, err := hub.Subscribe(channelevents.Subscription{Subscriber: "S", ExcludeLabels: &none}); err != nil {
+		t.Fatal(err)
+	}
+	sink := &simSink{}
+	hub.Attach("S", sink)
+	return hub, sink
+}
+
+// settleWait gives the consumer goroutine a moment to publish after a poll.
+func settleWait() { time.Sleep(150 * time.Millisecond) }
+
+func newChannelGateEnv(t *testing.T, yolo bool, mod func(*engine.Config)) *Env {
+	t.Helper()
+	env := NewEnv(t, EnvOptions{
+		Stages:    conjunctiveGateStages(),
+		StartTime: time.Now(),
+		Yolo:      boolPtr(yolo),
+		ConfigureCfg: func(cfg *engine.Config) {
+			cfg.ReviewWaitTimeout = 15 * time.Minute
+			cfg.MaxReviewCycles = 5
+			if mod != nil {
+				mod(cfg)
+			}
+		},
+	})
+	env.Sim.Sim().SeedRepoAccess(env.OwnerRepo, gh.RepoAccess{AllowAutoMerge: false, CanPush: true})
+	env.Sim.Sim().SeedRequiredContexts(env.OwnerRepo, "main", []string{conjunctiveGateCheck})
+	if err := env.Sim.Sim().Err(); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+	return env
+}
+
+// TestChannelValidateSettledCruiseWaitsForEveryGate is the headline scenario:
+// under cruise with wait_for_ci and wait_for_reviews, validate-settled must NOT
+// fire at FABRIK_STAGE_COMPLETE (awaiting-ci present), nor once CI clears but
+// the review gate holds; it fires exactly once when both gates have cleared,
+// and says a human decides next.
+func TestChannelValidateSettledCruiseWaitsForEveryGate(t *testing.T) {
+	env := newChannelGateEnv(t, false, nil)
+	_, sink := startChannel(t, env)
+
+	num := FileIssue(t, env, "channel validate-settled (cruise)", "Prove validate-settled waits for every gate.", "Implement", "fabrik:cruise")
+	WaitForIssueLabel(t, env, num, "stage:Review:complete", 80)
+	WaitForIssueLabel(t, env, num, "fabrik:awaiting-ci", 80)
+
+	// FABRIK_STAGE_COMPLETE has been emitted but awaiting-ci holds.
+	RunPolls(t, env, 5)
+	settleWait()
+	if got := sink.ofType(channelevents.ValidateSettled, num); len(got) != 0 {
+		t.Fatalf("validate-settled emitted while fabrik:awaiting-ci is present: %+v", got)
+	}
+
+	pr, err := env.Sim.FetchLinkedPR(env.Owner, env.Repo, num)
+	if err != nil || pr == nil || pr.Number == 0 {
+		t.Fatalf("expected a linked PR: %v", err)
+	}
+	env.Sim.Sim().SeedCheckRun(env.OwnerRepo, pr.HeadSHA, gh.CheckRun{Name: conjunctiveGateCheck, Status: "completed", Conclusion: "success"})
+
+	// CI clears; the review gate now holds.
+	WaitForLabelAbsent(t, env, num, "fabrik:awaiting-ci", 80)
+	WaitForIssueLabel(t, env, num, "fabrik:awaiting-review", 80)
+	RunPolls(t, env, 8)
+	settleWait()
+	if got := sink.ofType(channelevents.ValidateSettled, num); len(got) != 0 {
+		t.Fatalf("validate-settled emitted while the review gate holds: %+v", got)
+	}
+
+	// The review arrives; both gates clear.
+	env.Sim.Sim().SeedReview(env.OwnerRepo, pr.Number, gh.PRReview{Author: "reviewer-human", State: "APPROVED"})
+	AdvanceUntil(t, env, func(*Env) bool {
+		settleWait()
+		return len(sink.ofType(channelevents.ValidateSettled, num)) > 0
+	}, 40)
+
+	RunPolls(t, env, 10)
+	settleWait()
+	got := sink.ofType(channelevents.ValidateSettled, num)
+	if len(got) != 1 {
+		t.Fatalf("want exactly one validate-settled, got %d: %+v", len(got), got)
+	}
+	ev := got[0]
+	if ev.PR != pr.Number || ev.Meta["next"] != "waiting-for-human" || ev.Meta["autonomy"] != "cruise" {
+		t.Fatalf("unexpected meta: %+v", ev)
+	}
+	if ev.Meta["ci"] != "green" {
+		t.Errorf("ci = %q, want green", ev.Meta["ci"])
+	}
+	if ev.Meta["reviews"] == "" || ev.Meta["reviews"] == "none" {
+		t.Errorf("reviews summary missing the approval: %q", ev.Meta["reviews"])
+	}
+	if projectItem(t, env, num).IsClosed {
+		t.Fatal("cruise must not land the PR")
+	}
+}
+
+// TestChannelValidateSettledYoloNextIsAutoMerge: under yolo without the merge
+// train the settle event is captured before the engine lands the PR in the very
+// same pass, and says the engine will auto-merge.
+func TestChannelValidateSettledYoloNextIsAutoMerge(t *testing.T) {
+	env := newChannelGateEnv(t, true, nil)
+	_, sink := startChannel(t, env)
+
+	num := FileIssue(t, env, "channel validate-settled (yolo)", "Yolo settle.", "Implement", "fabrik:yolo")
+	WaitForIssueLabel(t, env, num, "fabrik:awaiting-ci", 80)
+	pr, err := env.Sim.FetchLinkedPR(env.Owner, env.Repo, num)
+	if err != nil || pr == nil {
+		t.Fatalf("linked PR: %v", err)
+	}
+	env.Sim.Sim().SeedCheckRun(env.OwnerRepo, pr.HeadSHA, gh.CheckRun{Name: conjunctiveGateCheck, Status: "completed", Conclusion: "success"})
+	WaitForIssueLabel(t, env, num, "fabrik:awaiting-review", 80)
+	env.Sim.Sim().SeedReview(env.OwnerRepo, pr.Number, gh.PRReview{Author: "reviewer-human", State: "APPROVED"})
+	WaitForIssueClosed(t, env, num, 80)
+	settleWait()
+
+	got := sink.ofType(channelevents.ValidateSettled, num)
+	if len(got) != 1 {
+		t.Fatalf("want exactly one validate-settled before the merge, got %d", len(got))
+	}
+	if got[0].Meta["next"] != "auto-merge" || got[0].Meta["autonomy"] != "yolo" {
+		t.Fatalf("unexpected meta: %+v", got[0].Meta)
+	}
+	// And the landing is reported as merged.
+	if m := sink.ofType(channelevents.Merged, num); len(m) != 1 {
+		t.Errorf("want one merged event, got %d", len(m))
+	}
+}

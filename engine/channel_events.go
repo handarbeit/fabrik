@@ -57,8 +57,6 @@ type itemMemo struct {
 	near map[string]bool
 	// lastComment is the comment link the previous event for this item carried.
 	lastComment string
-	// vsEpisode is the validate-settled episode currently open ("" = none).
-	vsOpen bool
 }
 
 // dirtyItem is a pending debounced re-evaluation.
@@ -77,6 +75,9 @@ type channelEvents struct {
 	mu    sync.Mutex
 	queue []channelevents.Event
 	dirty map[string]*dirtyItem
+	// settleCand holds items whose Validate stage reached the engine's own
+	// "gates clear" point (runCatchUpPhase2) since the last drain.
+	settleCand map[string]channelevents.Event
 	// nudge asks the consumer to re-check account-wide state (the Claude
 	// usage-limit suspension) without waiting for the next tick.
 	nudge bool
@@ -102,8 +103,12 @@ func channelStateDir(fabrikDir string) string {
 // the observer and starts the consumer. Failure is non-fatal: without a hub the
 // read API keeps working and push is simply off.
 func (e *Engine) startChannelEvents() {
+	e.startChannelEventsIn(channelStateDir(e.fabrikDir))
+}
+
+func (e *Engine) startChannelEventsIn(dir string) {
 	hub, err := channelevents.Open(channelevents.Options{
-		Dir:     channelStateDir(e.fabrikDir),
+		Dir:     dir,
 		HeldMax: e.cfg.ChannelHeldMax,
 		Now:     e.now,
 		Logf: func(format string, args ...any) {
@@ -214,7 +219,6 @@ func (ce *channelEvents) seed() {
 		m.pauseKey = pauseFamilyKey(res)
 		ce.armCounters(m, st, true)
 		m.staleDone = hasLabelStr(st.Labels, "fabrik:awaiting-input")
-		m.vsOpen = e.validateSettledNow(st)
 	})
 }
 
@@ -311,7 +315,7 @@ func (ce *channelEvents) safely(what string, fn func()) {
 func (ce *channelEvents) nextDue() time.Duration {
 	ce.mu.Lock()
 	defer ce.mu.Unlock()
-	if len(ce.queue) > 0 || ce.nudge {
+	if len(ce.queue) > 0 || ce.nudge || len(ce.settleCand) > 0 {
 		return 0
 	}
 	wait := time.Hour
@@ -335,6 +339,8 @@ func (ce *channelEvents) drain() {
 	ce.queue = nil
 	nudged := ce.nudge
 	ce.nudge = false
+	settle := ce.settleCand
+	ce.settleCand = nil
 	now := time.Now()
 	var due []string
 	flags := map[string]*dirtyItem{}
@@ -351,6 +357,9 @@ func (ce *channelEvents) drain() {
 	}
 	for _, k := range due {
 		ce.evaluateItem(k, flags[k])
+	}
+	for k, ev := range settle {
+		ce.settleCandidate(k, ev)
 	}
 	if nudged {
 		ce.checkClaudeLimit()

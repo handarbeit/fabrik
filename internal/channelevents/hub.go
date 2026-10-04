@@ -309,6 +309,14 @@ func (h *Hub) Counter(key string) int {
 	return h.counters[key]
 }
 
+// SetCounter sets and persists a counter.
+func (h *Hub) SetCounter(key string, v int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.counters[key] = v
+	h.saveStateLocked()
+}
+
 // BumpCounter increments and persists a counter, returning the new value.
 func (h *Hub) BumpCounter(key string) int {
 	h.mu.Lock()

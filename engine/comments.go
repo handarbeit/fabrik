@@ -15,12 +15,20 @@ import (
 )
 
 func (e *Engine) findNewComments(item gh.ProjectItem) []gh.Comment {
-	var newComments []gh.Comment
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
 	snap, _ := e.store.Get(repoStr, item.Number)
-	for _, c := range item.Comments {
+	return filterNewComments(item.Comments, func(id string) bool { return !snap.CommentProcessed(id).IsZero() })
+}
+
+// filterNewComments is findNewComments' pure core: the comments no one has
+// processed yet, given a predicate for the store's processed watermark. It is
+// shared with the cache-only channel-event path (#1968), which must apply the
+// identical definition without the store.Get GitHub fallback.
+func filterNewComments(comments []gh.Comment, processed func(id string) bool) []gh.Comment {
+	var newComments []gh.Comment
+	for _, c := range comments {
 		// Skip comments we've already processed
-		if !snap.CommentProcessed(c.ID).IsZero() {
+		if processed(c.ID) {
 			continue
 		}
 		// Skip comments that look like Fabrik output

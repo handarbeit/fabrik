@@ -1884,6 +1884,11 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 // must be reached immediately, not deferred to the next poll — applies
 // regardless of which of the two owns a given item's admission this poll.
 func (e *Engine) runCatchUpPhase2(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, advancedItems map[string]bool) {
+	// Observation only (#1968 R2, R10): reaching here means no Phase 1 handler
+	// claimed the item, i.e. the engine's own gates are clear. Recorded before
+	// the autonomy gate because a cruise item returns there. Changes nothing.
+	e.noteValidateSettled(item, stage)
+
 	// Live re-read before any autonomy-label decision (#1769, D2): item.Labels
 	// here is not guaranteed fresh even immediately after a deep fetch in the
 	// same poll pass — Labels is not part of the deep-fetch cache contract

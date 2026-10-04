@@ -83,6 +83,7 @@ func (ce *channelEvents) evaluateItem(key string, d *dirtyItem) {
 		return
 	}
 	st := snap.State()
+	ce.closeSettleEpisode(key, &st)
 	ce.enqueueDerived(ce.derive(key, &st, d))
 }
 
@@ -113,7 +114,6 @@ func (ce *channelEvents) derive(key string, st *itemstate.ItemState, d *dirtyIte
 		m.pauseKey = pauseFamilyKey(res)
 		m.staleDone = hasLabelStr(st.Labels, "fabrik:awaiting-input")
 		ce.cycleNearEvents(m, st, true)
-		m.vsOpen = e.validateSettledNow(st)
 		return nil
 	}
 	var out []channelevents.Event
@@ -263,6 +263,3 @@ func (ce *channelEvents) checkClaudeLimit() {
 	}
 	ce.enqueueDerived([]channelevents.Event{ev})
 }
-
-// validateSettledNow is defined in channel_settled.go.
-var _ = itemstate.ItemState{}
