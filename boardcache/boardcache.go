@@ -232,6 +232,8 @@ func snapshotToProjectItem(snap itemstate.Snapshot) gh.ProjectItem {
 		Comments:        s.Comments,
 		Author:          s.Author,
 		BlockedBy:       s.BlockedBy,
+		Milestone:       s.Milestone,
+		MilestoneKnown:  s.MilestoneKnown,
 	}
 	if s.LinkedPR != nil {
 		pi.LinkedPRNumber = s.LinkedPR.Number
@@ -452,6 +454,28 @@ func (c *CacheImpl) Reconcile(board *gh.ProjectBoard) {
 
 	if drifted > 0 {
 		c.logFn("[reconciliation] %d items differed\n", drifted)
+	}
+}
+
+// ApplyBoardMilestones copies each item's milestone from a freshly fetched
+// board into the Store, for items already cached and whose milestone the board
+// query captured (#1967 R10). It touches nothing else, so it is safe on a
+// zero-drift reconcile tick where the full Reconcile is deliberately skipped:
+// without it a quiet board would never learn any milestone after startup. The
+// board is already in hand, so this makes no GitHub call.
+func (c *CacheImpl) ApplyBoardMilestones(board *gh.ProjectBoard) {
+	if board == nil {
+		return
+	}
+	for i := range board.Items {
+		pi := &board.Items[i]
+		if !pi.MilestoneKnown {
+			continue
+		}
+		if _, ok := c.store.Peek(pi.Repo, pi.Number); !ok {
+			continue
+		}
+		c.store.Apply(itemstate.IssueMilestoneUpdated{Repo: pi.Repo, Number: pi.Number, Milestone: pi.Milestone})
 	}
 }
 

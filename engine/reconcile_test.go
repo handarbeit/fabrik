@@ -270,3 +270,48 @@ func TestTransitionMgrHealthState_HookdeckCacheDriftSurvivesConcurrentHealthEven
 		t.Error("transitionMgrHealthState(Healthy, \"drift reconciled\") should clear the cache-drift condition")
 	}
 }
+
+// Zero-drift reconcile ticks skip the full Reconcile, but the board is already
+// in hand: they must still capture milestones (#1967 R10), or on a quiet board
+// every item's milestone stays unknown and the milestone filter returns nothing.
+func TestReconcileTick_ZeroDriftCapturesMilestones(t *testing.T) {
+	t1 := time.Now().Truncate(time.Second)
+	client := &mockGitHubClient{}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
+	testBootstrapFromBoard(cache, &gh.ProjectBoard{
+		ProjectID: "PVT_1",
+		Items: []gh.ProjectItem{
+			{ID: "I_1", ItemID: "PVTI_1", Number: 1, Repo: "owner/repo", Status: "Plan", UpdatedAt: t1},
+			{ID: "I_2", ItemID: "PVTI_2", Number: 2, Repo: "owner/repo", Status: "Plan", UpdatedAt: t1},
+		},
+	})
+	eng.readClient = cache
+	for _, n := range []int{1, 2} {
+		if snap, _ := eng.store.Peek("owner/repo", n); snap.State().MilestoneKnown {
+			t.Fatalf("#%d must start with an unknown milestone", n)
+		}
+	}
+
+	// Identical status, labels and updatedAt: zero drift. Only the milestone differs.
+	client.fetchProjectBoardFn = func(_, _ string, _ int, _ string) (*gh.ProjectBoard, error) {
+		return &gh.ProjectBoard{
+			ProjectID: "PVT_1",
+			Items: []gh.ProjectItem{
+				{ID: "I_1", ItemID: "PVTI_1", Number: 1, Repo: "owner/repo", Status: "Plan", UpdatedAt: t1,
+					Milestone: &gh.Milestone{Title: "v1", Number: 3}, MilestoneKnown: true},
+				{ID: "I_2", ItemID: "PVTI_2", Number: 2, Repo: "owner/repo", Status: "Plan", UpdatedAt: t1, MilestoneKnown: true},
+			},
+		}, nil
+	}
+	eng.reconcileTick(cache, nil)
+
+	s1, _ := eng.store.Peek("owner/repo", 1)
+	if st := s1.State(); !st.MilestoneKnown || st.Milestone == nil || st.Milestone.Title != "v1" || st.Milestone.Number != 3 {
+		t.Fatalf("#1 after zero-drift tick: known=%v ms=%+v, want v1 #3", st.MilestoneKnown, st.Milestone)
+	}
+	s2, _ := eng.store.Peek("owner/repo", 2)
+	if st := s2.State(); !st.MilestoneKnown || st.Milestone != nil {
+		t.Fatalf("#2 after zero-drift tick: known=%v ms=%+v, want known-none", st.MilestoneKnown, st.Milestone)
+	}
+}

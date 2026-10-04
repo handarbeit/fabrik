@@ -894,6 +894,19 @@ child issue to the configured user, so a child-spawn scenario asserts on a real
 value. Assignee *permissions* (GitHub silently drops an assignee who lacks
 repository access) are **absent**: the sim stores whatever it is given.
 
+### Milestones — **Modelled (board reads only)** (#1967)
+
+Stored per issue (`IssueSeed.Milestone`, `SeedIssueMilestone` to set/clear) and
+surfaced on `ProjectItem.Milestone` with `MilestoneKnown` true for issue cards
+(a null milestone is still "known"; PR cards stay unknown, matching the board
+query, which selects `milestone` on `Issue` only). Fabrik never writes a
+milestone, so there is no mutation path. **Absent:** the `milestoned` /
+`demilestoned` webhooks (there is no webhook subsystem) and the cache refresh
+that turns a changed board value into a changed store value
+(`boardcache.CacheImpl.Reconcile`, which the sim bed never wires in) — both are
+covered by `boardcache`'s own tests. The milestone *wire shape* (the GraphQL
+field, absent vs null) is covered by `github`'s wire-contract tests, not here.
+
 ### PR-to-issue linkage — **Modelled**
 
 `FindPRForIssue` and `FetchLinkedPR` match on the head branch `fabrik/issue-<N>`,

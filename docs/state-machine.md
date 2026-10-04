@@ -4090,6 +4090,39 @@ post-completion, unlike this section's mid-stage slice-limit pause.)
 accidental ceiling per #1191) is never paused as long as it stays within `MaxSliceRetries` — `Attempts`
 is untouched by any number of turn-cap preemptions.
 
+### 7.13 Overseer Attention Classification and the Local Read API (#1967)
+
+[ADR-1966-a](../adrs/1966-a-fabrik-mcp-read-api.md). The running engine serves a read-only, zero-GitHub-cost view of its in-memory state on a per-daemon Unix socket; `fabrik mcp` proxies three tools to it (see USER_GUIDE §9, "Overseer Tools: `fabrik mcp`"). This section is the as-built definition of the *attention* classification those tools report, in `internal/attention` (pure — no engine, store or GitHub dependency — so the push-event work reuses it). It is a product definition, pinned by `internal/attention/attention_test.go`.
+
+**States.** `needs-human` (the engine is paused and only a human reply resumes it), `escalated` (the engine stopped on its own account), `waiting` (the engine is correctly waiting on something it owns), `working` (a worker is in flight and progress is recent), `stalled` (nothing is correctly waited on, and no progress for longer than the threshold), `idle`.
+
+**Precedence — first match wins:**
+
+| # | Condition | State / code |
+|---|---|---|
+| 1 | Closed; or `Terminal`; or the cleanup stage; or an `Unmanaged` column; or a column with no configured stage | `idle` (`closed`, `done`, `unmanaged-column`, `no-stage`) |
+| 2 | `fabrik:landing-verification-failed`, **or** `fabrik:paused` with an escalation signal: `StageState.PausedByEngine` for the item's stage, any cycle counter at its known positive limit (`limit:<counter>`), or `fabrik:awaiting-runaway-alert` | `escalated` |
+| 3 | `fabrik:paused` without an escalation signal | `needs-human` (`fabrik:awaiting-input` when that label is present, else `fabrik:paused`) |
+| 4 | `Status == Validate`, `stage:Validate:complete`, `fabrik:cruise`, an open unmerged linked PR, no worker | `needs-human`, code `awaiting-merge-decision` (cruise never merges; ranked last in the attention view) |
+| 4b | `fabrik:api-key-helper-detected` (the engine skips the item until a human removes `apiKeyHelper` from the worktree settings; no retry or deadline clears it) | `needs-human` (`fabrik:api-key-helper-detected`, ranked with the paused items) |
+| 5 | Any state-bearing `waiting` label (`fabrik:awaiting-*` except `awaiting-input`, `fabrik:blocked`, `fabrik:rebase-needed`, `fabrik:bot-reprompted`, `fabrik:claude-limit`, `fabrik:tools-denied`), an unexpired cooldown, or the holding stage | `waiting` — **unless** a known deadline for it passed more than the stall threshold ago, then `stalled` (`overdue`); or, when it has **no known deadline** and no progress for longer than the stall threshold, `stalled` (`no-progress`) — except the open-ended waits `fabrik:blocked`, `fabrik:claude-limit`, an unexpired cooldown and the holding stage |
+| 6 | A worker is in flight | `working`; `stalled` (`worker-no-progress`) only when progress age exceeds both the threshold **and** the stage's wall-clock budget (`max_wall_time`, or the 15-minute Claude inactivity timeout when unset) plus a 5-minute margin — a healthy 30–45 minute run is `working` (its summary is flagged long-running past the threshold), never `stalled` |
+| 7 | Otherwise | `stalled` (`no-progress`, or `stage-complete-not-advanced` when the stage's complete label is present) past the threshold; else `idle` |
+
+`fabrik:toolchain-stale`, `fabrik:children-spawned` and `fabrik:nondefault-base-pr-noted` are listed as reasons but never change the state.
+
+**Attention-view rank** (lower is more urgent; items with no rank are omitted): `needs-human` 0, `escalated` 1, `stalled` 2, settled-at-Validate `awaiting-merge-decision` 3.
+
+**Progress anchor.** The latest of `StatusEnteredAt`, every stage's `LastAttemptAt`, every `LabelAppliedAt` entry, `LinkedPR.LastCIProgressAt` and `Worker.StartedAt`. It deliberately excludes `Worker.LastSignAt` (a ticker heartbeat from the engine's own goroutine, fresh even while Claude is hung) and `UpdatedAt` (bumped by Fabrik's own writes). An anchor of zero is *unknown* and never stalls an item. **Stall threshold:** `--stall-threshold` / `FABRIK_STALL_THRESHOLD` (minutes, default 30); `fabrik_board` accepts a per-call override; the effective value is echoed in every response. Zero disables stalling.
+
+**Restart caveat.** `StatusEnteredAt` is reset to *now* on every store reset (ADR-1833), so right after a restart every item's anchor is "just now": nothing classifies `stalled` until one threshold has elapsed since the daemon started, and "time in column" means "since this daemon first saw it" (responses carry `status_entered_basis` and daemon uptime). This is a deliberate fail-safe.
+
+**Next action and deadlines.** The result lists every deadline the engine will act on: unexpired cooldowns (`cooldown:<reason>`; the store never deletes cooldown entries, so an expired one is history and is neither a deadline nor a reason); the CI liveness stall (`LinkedPR.LastCIProgressAt` + `CIWaitTimeout`); the CI backstop (`LabelAppliedAt[awaiting-ci]` + `CIBackstopTimeout`); the review wait (`LabelAppliedAt[awaiting-review]` + `ReviewWaitTimeout`); the bot re-prompt escalation (`LabelAppliedAt[bot-reprompted]` + `ReviewWaitTimeout`); the end of the account-wide Claude suspension. `next.at` is the earliest *known* deadline. A deadline anchored on a value the cache does not hold — `LabelAppliedAt` is record-on-write and empty after a restart, and the API may not use the live `FetchLabelAppliedAt` fallback — is listed with an `unknown` time, and `next.at` is `unknown` when none is known; it is never "now".
+
+**Zero GitHub cost.** `engine/localapi*.go` reads the Store only through `Peek` (no `FallbackFetcher`) and `Scan`, and never the engine's GitHub clients, `Store.Get` or `labelAppliedAt` — enforced by `TestLocalAPISourceDoesNotReachGitHub` and a nil-client test. The poll loop's single-goroutine fields reach the API only through the mutex-guarded `daemonHealth` mirror.
+
+**Local API lifecycle.** `Run()` binds `.fabrik/state/fabrik.sock` (mode 0600) after the instance lock (§7.4) is held and after the webhook manager is assigned, before the first poll. A socket file already there is stale — replaced, but only if it is a socket. The socket is closed and unlinked when `Run()` returns and before the SIGHUP re-exec; the self-upgrade exec, a crash and an exec failure leave a file that the next start replaces. A bind failure only disables the API.
+
 ---
 
 ## 8. Invalid / Unexpected States

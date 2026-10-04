@@ -78,6 +78,11 @@ const (
 	// cycleSetFlags so it never wakes the poll loop or bypasses the dispatch
 	// cooldown.
 	LabelAppliedAtChanged
+	// MilestoneChanged indicates ItemState.Milestone or MilestoneKnown changed
+	// (#1967 R10) — a board fetch or a milestoned/demilestoned webhook delta.
+	// Informational only, intentionally excluded from wakeChFlags/cycleSetFlags
+	// so a milestone change never wakes the poll loop.
+	MilestoneChanged
 )
 
 // Change describes what fields a mutation altered. Delivered to every Observer

@@ -68,7 +68,11 @@ func (e *Engine) reconcileTick(cacheImpl *boardcache.CacheImpl, mgr eventIngesti
 		e.logf(0, "reconcile", "light reconcile failed (no health state change): %v\n", err)
 		return
 	}
+	e.health.noteReconcileOK(e.now())
 	if driftCount == 0 {
+		// The full Reconcile is skipped on zero drift, but the board is already
+		// fetched: capture milestones from it so they become known on a quiet board.
+		cacheImpl.ApplyBoardMilestones(freshBoard)
 		transitionMgrHealthState(mgr, WebhookStreamHealthy, "")
 		return
 	}
