@@ -11,6 +11,7 @@ import (
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/channelevents"
 	"github.com/handarbeit/fabrik/internal/itemstate"
+	"github.com/handarbeit/fabrik/internal/localapi"
 )
 
 type chanSink struct {
@@ -317,4 +318,38 @@ func TestChannelStateSurvivesDaemonRestart(t *testing.T) {
 		t.Fatalf("live event after held: %+v", ev)
 	}
 	sink.quiet(t, 200*time.Millisecond)
+}
+
+// The Streamer resolves bare issue numbers with the read API's resolver (and its
+// ambiguity error) and surfaces validation errors as bad requests.
+func TestChannelStreamerSubscribeResolvesIssuesAndValidates(t *testing.T) {
+	e, _ := channelEngine(t, 0, nil)
+	e.seedAPIItem(t, 7, "Implement")
+	st := e.channelStreamer()
+	if st == nil {
+		t.Fatal("no streamer with the hub running")
+	}
+	res, err := st.Subscribe(localapi.SubscribeParams{Subscriber: "S", Issues: []string{"7", "owner/repo#8"}, Milestone: "v1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := res.Subscription.Issues
+	if len(got) != 2 || got[0] != (channelevents.IssueRef{Repo: apiRepo, Number: 7}) || got[1].Number != 8 {
+		t.Fatalf("issues resolved to %+v", got)
+	}
+	if _, err := st.Subscribe(localapi.SubscribeParams{Subscriber: "S", Events: []string{"nope"}}); err == nil {
+		t.Fatal("unknown event type accepted")
+	}
+	if _, err := st.Subscribe(localapi.SubscribeParams{Subscriber: ""}); err == nil {
+		t.Fatal("empty subscriber accepted")
+	}
+	// A second repo on the board makes a bare number ambiguous.
+	e.store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{ID: "I_X", Number: 1, Repo: "other/repo", Status: "Implement"}})
+	if _, err := st.Subscribe(localapi.SubscribeParams{Subscriber: "S", Issues: []string{"7"}}); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("bare number across two repos must be ambiguous, got %v", err)
+	}
+	un, err := st.Unsubscribe(localapi.UnsubscribeParams{Subscriber: "S"})
+	if err != nil || un.Removed != 1 {
+		t.Fatalf("unsubscribe: %+v %v", un, err)
+	}
 }
