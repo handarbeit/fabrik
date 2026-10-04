@@ -15,6 +15,9 @@ type entry struct {
 	// Digest entries wait for Due and are then sent as one batch.
 	Digest bool      `json:"digest,omitempty"`
 	Due    time.Time `json:"due,omitempty"`
+	// Away marks a digest entry queued while the subscriber had no attached
+	// session: the next attach delivers it individually (R8) instead of batching.
+	Away bool `json:"away,omitempty"`
 }
 
 // queueFile is the persisted held queue of one subscriber.
@@ -28,7 +31,7 @@ type queueFile struct {
 // push appends ev, skipping a duplicate dedup key already queued, and drops the
 // oldest entries beyond max, counting them toward the drop notice (R8). It
 // reports whether the queue changed.
-func (q *queueFile) push(ev Event, digest bool, due time.Time, max int) bool {
+func (q *queueFile) push(ev Event, digest bool, due time.Time, away bool, max int) bool {
 	if ev.DedupKey != "" {
 		for _, e := range q.Entries {
 			if e.Event.DedupKey == ev.DedupKey {
@@ -37,7 +40,7 @@ func (q *queueFile) push(ev Event, digest bool, due time.Time, max int) bool {
 		}
 	}
 	q.NextSeq++
-	q.Entries = append(q.Entries, entry{Seq: q.NextSeq, Event: ev, Digest: digest, Due: due})
+	q.Entries = append(q.Entries, entry{Seq: q.NextSeq, Event: ev, Digest: digest, Due: due, Away: digest && away})
 	if max > 0 && len(q.Entries) > max {
 		over := len(q.Entries) - max
 		q.Dropped += over
@@ -73,13 +76,16 @@ func (q *queueFile) pruneOlderThan(cutoff time.Time) bool {
 	return changed
 }
 
-// releaseDigests turns every pending digest entry into an immediate one. A
-// reconnecting subscriber gets held events individually, in order (R8).
+// releaseDigests turns the digest entries queued while the subscriber was away
+// into immediate ones: a returning subscriber gets what it missed individually,
+// in order (R8). A digest collected while a session was attached keeps batching
+// across a brief reconnect (heartbeat reset, daemon re-exec) and is sent when due.
 func (q *queueFile) releaseDigests() bool {
 	changed := false
 	for i := range q.Entries {
-		if q.Entries[i].Digest {
+		if q.Entries[i].Digest && q.Entries[i].Away {
 			q.Entries[i].Digest = false
+			q.Entries[i].Away = false
 			changed = true
 		}
 	}

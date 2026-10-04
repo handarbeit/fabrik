@@ -338,3 +338,53 @@ func TestHubConcurrentPublishAttachRace(t *testing.T) {
 		}
 	}
 }
+
+// Publish runs on the engine's poll and tick paths, so a burst of deduplicated
+// events must not rewrite dedup.json once per event; the keys still survive a
+// restart because Close flushes.
+func TestHubCoalescesDedupStateWrites(t *testing.T) {
+	dir := t.TempDir()
+	h := openHub(t, dir, nil)
+	h.Subscribe(Subscription{Subscriber: "X"})
+	before := h.stateWrites.Load()
+	const n = 50
+	for i := 1; i <= n; i++ {
+		e := ev(i, Merged)
+		e.DedupKey = fmt.Sprintf("merged:%d", i)
+		h.Publish(e)
+	}
+	if w := h.stateWrites.Load() - before; w > 5 {
+		t.Fatalf("%d dedup.json writes for %d events; writes must be coalesced", w, n)
+	}
+	h.Close()
+
+	h2 := openHub(t, dir, nil)
+	again := ev(1, Merged)
+	again.DedupKey = "merged:1"
+	h2.Publish(again)
+	if got := h2.Queued("X"); got != n {
+		t.Fatalf("Queued=%d want %d: dedup keys lost across restart (replayed event queued)", got, n)
+	}
+}
+
+// A digest collected while a session was attached keeps batching across a brief
+// reconnect; only digests queued while the subscriber was away replay one by one.
+func TestHubReconnectKeepsDigestCollectedWhileAttached(t *testing.T) {
+	h := openHub(t, t.TempDir(), nil)
+	h.Subscribe(Subscription{Subscriber: "X", DigestSeconds: 3600})
+	a := newSink()
+	detach := h.Attach("X", a)
+	h.Publish(ev(1, Merged)) // collected while attached
+	detach()
+	h.Publish(ev(2, Merged)) // queued while away
+
+	b := newSink()
+	h.Attach("X", b)
+	if got := b.wait(t); got.Issue != 2 || got.Type == Digest {
+		t.Fatalf("event queued while away must replay individually first, got %+v", got)
+	}
+	b.none(t) // event 1 stays in the pending hour-long digest
+	if got := h.Queued("X"); got != 1 {
+		t.Fatalf("Queued=%d want 1 pending digest entry", got)
+	}
+}

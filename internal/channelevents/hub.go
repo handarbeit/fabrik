@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -19,6 +20,9 @@ const (
 	DefaultSubscriberTTL = 30 * 24 * time.Hour
 	seenMax              = 5000
 	seenTTL              = 14 * 24 * time.Hour
+	// stateFlushDelay coalesces dedup/counter writes: Publish runs on the
+	// engine's poll and tick paths, so it must not rewrite dedup.json per event.
+	stateFlushDelay = 250 * time.Millisecond
 )
 
 // Sink is one attached subscriber session. Deliver blocks until the event is
@@ -84,6 +88,14 @@ type Hub struct {
 	seen        map[string]time.Time
 	counters    map[string]int
 	closed      bool
+
+	// Dedup keys and counters are persisted lazily: stateDirty marks unwritten
+	// changes, stateTimer is the pending flush, stateWriteMu orders the writes
+	// (taken before h.mu, never while holding it) and stateWrites counts them.
+	stateDirty   bool
+	stateTimer   *time.Timer
+	stateWriteMu sync.Mutex
+	stateWrites  atomic.Int64
 
 	wg sync.WaitGroup
 }
@@ -188,7 +200,45 @@ func (h *Hub) saveRegistryLocked() {
 	}
 }
 
+// saveStateLocked schedules a coalesced write of the dedup state. h.mu held; it
+// does no I/O. A crash inside the delay can lose the newest dedup keys (an event
+// could then be published once more after restart); Close and the SIGHUP path
+// flush synchronously.
 func (h *Hub) saveStateLocked() {
+	h.stateDirty = true
+	if h.stateTimer == nil && !h.closed {
+		h.stateTimer = time.AfterFunc(stateFlushDelay, h.flushState)
+	}
+}
+
+// flushState writes the dedup state if it changed, without holding h.mu across
+// the disk write.
+func (h *Hub) flushState() {
+	h.stateWriteMu.Lock()
+	defer h.stateWriteMu.Unlock()
+	h.mu.Lock()
+	h.stateTimer = nil
+	if !h.stateDirty {
+		h.mu.Unlock()
+		return
+	}
+	h.stateDirty = false
+	h.trimSeenLocked()
+	st := stateFile{Seen: make(map[string]time.Time, len(h.seen)), Counters: make(map[string]int, len(h.counters))}
+	for k, v := range h.seen {
+		st.Seen[k] = v
+	}
+	for k, v := range h.counters {
+		st.Counters[k] = v
+	}
+	h.mu.Unlock()
+	h.stateWrites.Add(1)
+	if err := saveJSON(h.statePath(), st); err != nil {
+		h.opt.Logf("channel: saving dedup state: %v\n", err)
+	}
+}
+
+func (h *Hub) trimSeenLocked() {
 	if len(h.seen) > seenMax {
 		type kv struct {
 			k string
@@ -202,9 +252,6 @@ func (h *Hub) saveStateLocked() {
 		for _, e := range all[:len(all)-seenMax] {
 			delete(h.seen, e.k)
 		}
-	}
-	if err := saveJSON(h.statePath(), stateFile{Seen: h.seen, Counters: h.counters}); err != nil {
-		h.opt.Logf("channel: saving dedup state: %v\n", err)
 	}
 }
 
@@ -409,7 +456,7 @@ func (h *Hub) enqueue(s *subscriber, ev Event, digest time.Duration, now time.Ti
 			due = now.Add(digest)
 		}
 	}
-	changed := s.q.push(ev, digest > 0, due, h.opt.HeldMax)
+	changed := s.q.push(ev, digest > 0, due, s.att == nil, h.opt.HeldMax)
 	if changed {
 		h.saveQueue(s)
 	}
@@ -605,7 +652,8 @@ func (h *Hub) Prune(now time.Time) {
 	h.mu.Unlock()
 }
 
-// Close stops every drain loop. Queued events stay on disk.
+// Close stops every drain loop and flushes the dedup state. Queued events stay
+// on disk.
 func (h *Hub) Close() {
 	h.mu.Lock()
 	if h.closed {
@@ -627,6 +675,12 @@ func (h *Hub) Close() {
 		s.mu.Unlock()
 	}
 	h.wg.Wait()
+	h.mu.Lock()
+	if h.stateTimer != nil {
+		h.stateTimer.Stop()
+	}
+	h.mu.Unlock()
+	h.flushState()
 }
 
 // Subscribers lists known subscriber names (with a subscription or a queue).
