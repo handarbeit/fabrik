@@ -1929,12 +1929,13 @@ func (e *Engine) refuseIfBaseContradictsMembers(owner, repo, baseBranch, trainKe
 	return true
 }
 
-// landSingleton lands a single member from its own validated-green trial branch. It creates a
-// dedicated integration PR WITHOUT the shared batch marker — sequential singleton lands must
-// not collide on findIntegrationPR (which matches merged PRs via ListPRs state=all), which
-// would make a later singleton skip its own merge and advance without landing its code (a
-// data-loss bug; see the ADR-059 D4 landSingleton note). It merges the PR, advances the
-// member Queued→Done, closes the member's linked PR, and resets its ejection counter.
+// landSingleton lands a single member from its own validated-green trial branch. It lands
+// through the draft CI PR the trial was validated on (marked ready), and creates a landing
+// PR only when none exists on the trial branch (the test seam, which opens no draft PR).
+// Each trial branch is unique, so findIntegrationPR's branch match can never pick up an
+// earlier singleton's merged PR, which would skip this member's merge (the data-loss bug in
+// the ADR-059 D4 landSingleton note). It merges the PR, advances the member Queued→Done,
+// closes the member's linked PR, and resets its ejection counter.
 func (e *Engine) landSingleton(ctx context.Context, state *mergeTrainWorkerState, p trialParams, m trainMember, trialName string) {
 	trialBranch := "fabrik/merge-train/" + trialName
 	defer e.cleanupTrialArtifacts(p.repoKey(), p.wm, trialName)
@@ -1946,26 +1947,64 @@ func (e *Engine) landSingleton(ctx context.Context, state *mergeTrainWorkerState
 		return
 	}
 
-	title := fmt.Sprintf("[merge-train] singleton: #%d", m.item.Number)
-	body := fmt.Sprintf("🏭 **Fabrik merge-train singleton landing PR**\n\n"+
-		"Lands #%d — %s — one-at-a-time after the batch could not be landed together.\n\n"+
-		"Do not merge manually; Fabrik manages the landing step.",
-		m.item.Number, m.item.Title)
-
-	prNum, err := e.client.CreatePR(p.owner, p.repo, title, trialBranch, p.baseBranch, body)
+	// The green trial was validated through a draft CI PR opened on this same trial
+	// branch (assembleAndValidateInner). GitHub allows one open PR per head branch, so
+	// CreatePR here would 422 "a pull request already exists" and the green trial would
+	// be discarded. Reuse that PR, exactly as landMergeTrainBatch does. findIntegrationPR
+	// matches on the trial branch, which is unique to this trial, so it can never return
+	// another singleton's PR.
+	existing, err := e.findIntegrationPR(p.owner, p.repo, trialBranch)
 	if err != nil {
-		e.logf(m.item.Number, "merge-train", "cannot create singleton landing PR for #%d: %v\n", m.item.Number, err)
+		e.logf(m.item.Number, "merge-train", "cannot search for singleton trial PR for #%d: %v — leaving in Queued\n", m.item.Number, err)
 		return
 	}
 
-	if !e.pollForMergeable(ctx, p.owner, p.repo, prNum, []trainMember{m}) {
-		return // timeout / dirty — leave in Queued
-	}
-	if err := e.client.MergePR(p.owner, p.repo, prNum); err != nil {
-		e.logf(m.item.Number, "merge-train", "merge of singleton PR #%d failed: %v\n", prNum, err)
+	var prNum int
+	alreadyMerged := false
+	switch {
+	case existing != nil && existing.Merged:
+		prNum, alreadyMerged = existing.Number, true
+		e.logf(m.item.Number, "merge-train", "singleton trial PR #%d for #%d is already merged — completing the landing\n", prNum, m.item.Number)
+	case existing != nil && existing.State == "closed":
+		// Unlike landMergeTrainBatch, no escalateClosedUnmergedTrial: that path reuses
+		// one trial branch across restarts, so a closed PR there would recur. Here the
+		// next pass builds a fresh trial (nextTrialName) with its own branch and draft
+		// PR, so this closed PR is never matched again and leaving the member Queued
+		// cannot loop.
+		e.logf(m.item.Number, "merge-train", "singleton trial PR #%d for #%d is closed and unmerged — leaving in Queued\n", existing.Number, m.item.Number)
 		return
+	case existing != nil:
+		prNum = existing.Number
+		if existing.Draft {
+			if rerr := e.client.MarkPRReady(p.owner, p.repo, prNum); rerr != nil {
+				e.logf(m.item.Number, "merge-train", "cannot mark singleton trial PR #%d ready for #%d: %v — leaving in Queued\n", prNum, m.item.Number, rerr)
+				return
+			}
+		}
+		e.logf(m.item.Number, "merge-train", "reusing trial PR #%d as the singleton landing PR for #%d\n", prNum, m.item.Number)
+	default:
+		title := fmt.Sprintf("[merge-train] singleton: #%d", m.item.Number)
+		body := fmt.Sprintf("🏭 **Fabrik merge-train singleton landing PR**\n\n"+
+			"Lands #%d — %s — one-at-a-time after the batch could not be landed together.\n\n"+
+			"Do not merge manually; Fabrik manages the landing step.",
+			m.item.Number, m.item.Title)
+		prNum, err = e.client.CreatePR(p.owner, p.repo, title, trialBranch, p.baseBranch, body)
+		if err != nil {
+			e.logf(m.item.Number, "merge-train", "cannot create singleton landing PR for #%d: %v\n", m.item.Number, err)
+			return
+		}
 	}
-	e.logf(m.item.Number, "merge-train", "merged singleton landing PR #%d for #%d\n", prNum, m.item.Number)
+
+	if !alreadyMerged {
+		if !e.pollForMergeable(ctx, p.owner, p.repo, prNum, []trainMember{m}) {
+			return // timeout / dirty — leave in Queued
+		}
+		if err := e.client.MergePR(p.owner, p.repo, prNum); err != nil {
+			e.logf(m.item.Number, "merge-train", "merge of singleton PR #%d failed: %v\n", prNum, err)
+			return
+		}
+		e.logf(m.item.Number, "merge-train", "merged singleton landing PR #%d for #%d\n", prNum, m.item.Number)
+	}
 
 	// Advance Queued → Done (unless already Done from a prior partial run).
 	if m.item.Status != "Done" {

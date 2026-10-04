@@ -24,7 +24,7 @@ var errInjectedLandingFault = errors.New("simgh: injected landing fault")
 // TestMergeTrainAssembly_PoisonMatrix's "member poisonous only in
 // combination" subtest, which already proves the fallback triggers — this
 // scenario is the R6-focused counterpart, asserting the landing mechanics
-// specifically: each member gets its own dedicated singleton landing PR,
+// specifically: each member lands through its own singleton trial's PR,
 // and landSingleton's marker-free PR body means neither collides with
 // findIntegrationPR — both members land independently in the same worker
 // dispatch).
@@ -49,10 +49,33 @@ func TestMergeTrainLanding_OneAtATimeViaInteractionOnlyPoison(t *testing.T) {
 	WaitForIssueClosed(t, env, numA, 5)
 	WaitForIssueClosed(t, env, numB, 5)
 
-	// Each landed via its own singleton PR, not a shared combined-batch
-	// landing PR — landSingleton's whole reason for a marker-free PR body.
-	if got := len(env.Sim.Log().ByMethod("CreatePR")); got < 2 {
-		t.Errorf("expected at least 2 singleton landing PRs (one per member), got %d CreatePR call(s)", got)
+	// Each landed via its own singleton trial's draft CI PR, marked ready and
+	// merged — not a shared combined-batch landing PR, and not a second PR on
+	// the trial branch (GitHub, and simgh, refuse that with a 422; #2032).
+	log := env.Sim.Log()
+	for _, e := range log.ByMethod("CreatePR") {
+		if e.Err != nil {
+			t.Errorf("CreatePR failed: %v — landSingleton must reuse the trial's own PR", e.Err)
+		}
+	}
+	readied := map[int]bool{}
+	for _, e := range log.ByMethod("MarkPRReady") {
+		if e.Err == nil {
+			readied[e.Args.Number] = true
+		}
+	}
+	merged := map[int]bool{}
+	for _, e := range log.ByMethod("MergePR") {
+		if e.Err != nil {
+			continue
+		}
+		merged[e.Args.Number] = true
+		if !readied[e.Args.Number] {
+			t.Errorf("merged PR #%d was never marked ready — expected the trial's draft CI PR to be reused", e.Args.Number)
+		}
+	}
+	if len(merged) < 2 {
+		t.Errorf("expected at least 2 distinct singleton landing PRs merged (one per member), got %d: %v", len(merged), merged)
 	}
 }
 

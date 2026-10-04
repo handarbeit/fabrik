@@ -213,6 +213,15 @@ func (s *Sim) createPR(owner, repo, title, head, base, body string, issueNumber 
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// GitHub allows one open PR per head/base pair: a second is a 422 "A pull
+	// request already exists for <owner>:<head>." Without this the sim passed a
+	// landSingleton that opened a second PR on its own trial's draft CI PR
+	// branch, which 422'd on every green singleton in production (#2032).
+	for _, existing := range r.prs {
+		if existing.state == "open" && existing.head == head && existing.base == base {
+			return 0, fmt.Errorf("GitHub API returned 422: A pull request already exists for %s:%s (simgh: PR #%d)", owner, head, existing.number)
+		}
+	}
 	num := r.allocNumber()
 	now := s.now()
 	r.prs[num] = &prRecord{
