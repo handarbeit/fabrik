@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"strings"
 
+	"github.com/handarbeit/fabrik/internal/channelevents"
 	"github.com/handarbeit/fabrik/internal/localapi"
 )
 
@@ -17,6 +19,9 @@ const (
 	ToolStatus = "fabrik_status"
 	ToolBoard  = "fabrik_board"
 	ToolHealth = "fabrik_health"
+
+	ToolSubscribe   = "fabrik_subscribe"
+	ToolUnsubscribe = "fabrik_unsubscribe"
 )
 
 func obj(props map[string]any, required ...string) map[string]any {
@@ -67,12 +72,53 @@ func toolDefs() []map[string]any {
 			"inputSchema": obj(map[string]any{}),
 			"annotations": readOnly,
 		},
+		{
+			"name": ToolSubscribe,
+			"description": "Choose which Fabrik events are pushed into this session (Claude Code Channels, research preview) instead of polling. Costs no GitHub call. " +
+				"Scopes combine with AND (entries inside one list with OR): issues, repos, a milestone, and label patterns (* matches any run of characters, e.g. fabrik:* or stage:*:complete; " +
+				"patterns only affect label-applied/label-removed events). By default label events skip high-churn labels (fabrik:locked:*, stage:*:in_progress, fabrik:spawned-child:*, fabrik:credited-pr:*, fabrik:editing); " +
+				"pass exclude_labels: [] to receive every label change. events filters by type: " + eventList() + ". " +
+				"digest_seconds (30-3600) batches ordinary events into one message; validate-settled, escalated, paused and daemon-unreachable always arrive at once. " +
+				"Events are held (persisted, bounded) while no session with this subscriber name is attached and delivered in order on reconnect. " +
+				"Pushes only appear if the session was started with Channels enabled for this server (claude --dangerously-load-development-channels server:fabrik); the daemon cannot tell whether it was, so a successful subscribe does not prove delivery. " +
+				"Re-subscribing with the same filters is harmless.",
+			"inputSchema": obj(map[string]any{
+				"issues":         map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "owner/repo#N, or N when the daemon manages exactly one repo"},
+				"repos":          map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "owner/repo"},
+				"milestone":      map[string]any{"type": "string", "description": "milestone title, or #N for a milestone number; items whose milestone the daemon has not captured never match"},
+				"labels":         map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "include patterns for label events (default: every label)"},
+				"exclude_labels": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "exclude patterns for label events; omit for the default churn exclusions, [] for none"},
+				"events":         map[string]any{"type": "array", "items": map[string]any{"type": "string", "enum": eventNames()}, "description": "event types to receive (default: all)"},
+				"digest_seconds": map[string]any{"type": "integer", "minimum": 30, "maximum": 3600, "description": "batch ordinary events into one message per interval"},
+				"subscriber":     map[string]any{"type": "string", "description": "subscriber name; defaults to the name this server was launched with (--subscriber / FABRIK_SUBSCRIBER)"},
+			}),
+			"annotations": map[string]any{"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},
+		},
+		{
+			"name":        ToolUnsubscribe,
+			"description": "Remove one subscription by id (from fabrik_subscribe's response), or every subscription of the subscriber when id is omitted. Held events for a subscriber with no subscriptions left are discarded.",
+			"inputSchema": obj(map[string]any{
+				"id":         map[string]any{"type": "string", "description": "subscription id; omit to remove them all"},
+				"subscriber": map[string]any{"type": "string", "description": "subscriber name; defaults to the name this server was launched with"},
+			}),
+			"annotations": map[string]any{"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": false},
+		},
 	}
 }
 
+func eventNames() []string {
+	var out []string
+	for _, t := range channelevents.Subscribable() {
+		out = append(out, string(t))
+	}
+	return out
+}
+
+func eventList() string { return strings.Join(eventNames(), ", ") }
+
 // buildCall validates a tool call's arguments and maps it to a daemon method
 // and params.
-func buildCall(name string, args json.RawMessage) (method string, params any, err error) {
+func buildCall(name string, args json.RawMessage, defaultSubscriber string) (method string, params any, err error) {
 	switch name {
 	case ToolStatus:
 		var a struct {
@@ -103,8 +149,60 @@ func buildCall(name string, args json.RawMessage) (method string, params any, er
 		return localapi.MethodBoard, localapi.BoardParams{View: a.View, Filter: a.Filter, StallThresholdSeconds: a.StallMi * 60}, nil
 	case ToolHealth:
 		return localapi.MethodHealth, nil, nil
+	case ToolSubscribe:
+		var a struct {
+			Issues        []string  `json:"issues"`
+			Repos         []string  `json:"repos"`
+			Milestone     string    `json:"milestone"`
+			Labels        []string  `json:"labels"`
+			ExcludeLabels *[]string `json:"exclude_labels"`
+			Events        []string  `json:"events"`
+			DigestSeconds int       `json:"digest_seconds"`
+			Subscriber    string    `json:"subscriber"`
+		}
+		if err := decodeArgs(args, &a); err != nil {
+			return "", nil, err
+		}
+		who, err := subscriberName(a.Subscriber, defaultSubscriber)
+		if err != nil {
+			return "", nil, err
+		}
+		if a.DigestSeconds < 0 {
+			return "", nil, fmt.Errorf("digest_seconds must be positive")
+		}
+		return localapi.MethodSubscribe, localapi.SubscribeParams{
+			Subscriber: who, Repos: a.Repos, Issues: a.Issues, Milestone: a.Milestone,
+			Labels: a.Labels, ExcludeLabels: a.ExcludeLabels, Events: a.Events, DigestSeconds: a.DigestSeconds,
+		}, nil
+	case ToolUnsubscribe:
+		var a struct {
+			ID         string `json:"id"`
+			Subscriber string `json:"subscriber"`
+		}
+		if err := decodeArgs(args, &a); err != nil {
+			return "", nil, err
+		}
+		who, err := subscriberName(a.Subscriber, defaultSubscriber)
+		if err != nil {
+			return "", nil, err
+		}
+		return localapi.MethodUnsubscribe, localapi.UnsubscribeParams{Subscriber: who, ID: a.ID}, nil
 	}
 	return "", nil, &unknownToolError{name: name}
+}
+
+// subscriberName resolves the subscriber a subscribe/unsubscribe call acts for:
+// the explicit argument, else the name this shim was launched with. There is no
+// generated or PID-derived fallback — the name keys the held queue and must
+// survive the session, so a call with neither is refused with the fix.
+func subscriberName(explicit, launched string) (string, error) {
+	switch {
+	case explicit != "":
+		return explicit, nil
+	case launched != "":
+		return launched, nil
+	}
+	return "", fmt.Errorf("no subscriber name: launch this server with --subscriber <name> (or FABRIK_SUBSCRIBER), using a stable name such as your topic or session name, or pass subscriber in the call")
 }
 
 // decodeArgs strictly decodes tool arguments; empty or null arguments decode to

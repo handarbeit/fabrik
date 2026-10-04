@@ -145,8 +145,15 @@ func TestInitializeToolsListAndOneCallEach(t *testing.T) {
 	if si := init["serverInfo"].(map[string]any); si["name"] != "fabrik" || si["version"] != "v-test" {
 		t.Errorf("serverInfo = %v", si)
 	}
-	if caps := init["capabilities"].(map[string]any); caps["tools"] == nil {
+	caps := init["capabilities"].(map[string]any)
+	if caps["tools"] == nil {
 		t.Errorf("capabilities = %v", caps)
+	}
+	if exp, _ := caps["experimental"].(map[string]any); exp == nil || exp["claude/channel"] == nil {
+		t.Errorf("initialize must declare experimental claude/channel: %v", caps)
+	}
+	if ins, _ := init["instructions"].(string); !strings.Contains(ins, "--dangerously-load-development-channels") {
+		t.Errorf("instructions must state the Channels launch requirement: %q", ins)
 	}
 	if _, ok := ids["2"]["result"].(map[string]any); !ok {
 		t.Errorf("ping must return an empty result object: %v", ids["2"])
@@ -160,11 +167,19 @@ func TestInitializeToolsListAndOneCallEach(t *testing.T) {
 		if m["description"] == "" || m["inputSchema"].(map[string]any)["type"] != "object" {
 			t.Errorf("tool %v is missing a description or object schema", m["name"])
 		}
-		if ann := m["annotations"].(map[string]any); ann["readOnlyHint"] != true {
-			t.Errorf("tool %v must be annotated read-only", m["name"])
+		readOnly := m["annotations"].(map[string]any)["readOnlyHint"] == true
+		switch m["name"] {
+		case ToolSubscribe, ToolUnsubscribe:
+			if readOnly {
+				t.Errorf("tool %v changes daemon state and must not be annotated read-only", m["name"])
+			}
+		default:
+			if !readOnly {
+				t.Errorf("tool %v must be annotated read-only", m["name"])
+			}
 		}
 	}
-	if strings.Join(names, ",") != "fabrik_status,fabrik_board,fabrik_health" {
+	if strings.Join(names, ",") != "fabrik_status,fabrik_board,fabrik_health,fabrik_subscribe,fabrik_unsubscribe" {
 		t.Errorf("tools = %v", names)
 	}
 

@@ -25,10 +25,14 @@ func runMCP(args []string) error {
 	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	dir := fs.String("dir", "", "Fabrik directory of the daemon to talk to (default: the current directory)")
+	subscriber := fs.String("subscriber", "", "stable name this server attaches to the daemon under for pushed channel events — your topic or session name, never a PID (default: $FABRIK_SUBSCRIBER; empty disables push)")
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: fabrik mcp [--dir <fabrik-dir>]\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: fabrik mcp [--dir <fabrik-dir>] [--subscriber <name>]\n\n")
 		fmt.Fprintf(os.Stderr, "Run a stdio MCP server exposing read-only overseer tools backed by the running\n")
 		fmt.Fprintf(os.Stderr, "daemon's local socket. Register it with: claude mcp add fabrik -- fabrik mcp\n\n")
+		fmt.Fprintf(os.Stderr, "With --subscriber (or FABRIK_SUBSCRIBER) it also pushes events into the session via\n")
+		fmt.Fprintf(os.Stderr, "Claude Code Channels (research preview); start claude with\n")
+		fmt.Fprintf(os.Stderr, "--dangerously-load-development-channels server:fabrik to receive them.\n\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -57,6 +61,7 @@ func runMCP(args []string) error {
 	srv := &mcpstdio.Server{
 		SocketPath: localapi.SocketPath(fabrikDir),
 		Version:    Version,
+		Subscriber: subscriberName(*subscriber),
 		In:         os.Stdin,
 		Out:        os.Stdout,
 		Err:        os.Stderr,
@@ -65,4 +70,14 @@ func runMCP(args []string) error {
 		return fmt.Errorf("fabrik mcp: %w", err)
 	}
 	return nil
+}
+
+// subscriberName resolves the subscriber: the flag, else FABRIK_SUBSCRIBER. There
+// is deliberately no generated default — the name keys the daemon's held queue,
+// so it must be stable across sessions (#1968).
+func subscriberName(flagValue string) string {
+	if flagValue != "" {
+		return flagValue
+	}
+	return os.Getenv("FABRIK_SUBSCRIBER")
 }
