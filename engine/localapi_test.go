@@ -384,6 +384,23 @@ func TestLocalAPIStatusNotFoundAndRefParsing(t *testing.T) {
 	}
 }
 
+// A daemon with a configured default repo that also carries items from another
+// repo manages two repos: a bare N must be ambiguous, never silently resolved
+// to the default repo.
+func TestLocalAPIBareNAmbiguousWhenDefaultRepoPlusOtherRepoInStore(t *testing.T) {
+	e := apiEngine(t, 0)
+	e.seedAPIItem(t, 12, "Implement")
+	e.store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{ID: "x", Number: 12, Repo: "other/y", Status: "Implement"}})
+	b := e.LocalAPIBackend()
+	_, err := b.Status(localapi.StatusParams{Issue: "12"})
+	if pe, ok := err.(*localapi.Error); !ok || pe.Code != localapi.CodeAmbiguous {
+		t.Fatalf("bare N with a default repo plus another cached repo: err = %v, want %s", err, localapi.CodeAmbiguous)
+	}
+	if _, err := b.Status(localapi.StatusParams{Issue: "other/y#12"}); err != nil {
+		t.Errorf("qualified ref to the non-default repo: %v", err)
+	}
+}
+
 func TestLocalAPIBoardAttentionViewRanksStalledNotRecentWaiting(t *testing.T) {
 	// The clock is 2h ahead, so every item's StatusEnteredAt is 2h old.
 	e := apiEngine(t, 2*time.Hour)

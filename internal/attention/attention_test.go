@@ -368,3 +368,48 @@ func TestWorkerStalledOnlyPastItsWallClockBudget(t *testing.T) {
 		t.Fatalf("well past budget: got %s/%s rank=%d, want stalled/worker-no-progress", got.State, got.Code, got.Rank)
 	}
 }
+
+// A label that only a human can clear is never "waiting correctly": it is
+// needs-human and ranks in the attention view.
+func TestAPIKeyHelperDetectedNeedsHuman(t *testing.T) {
+	in := baseInput()
+	in.Labels = []string{"fabrik:api-key-helper-detected"}
+	in.StatusEnteredAt = t0.Add(-time.Minute)
+	got := Classify(in)
+	if got.State != NeedsHuman || got.Code != "fabrik:api-key-helper-detected" || got.Rank != RankNeedsHuman {
+		t.Fatalf("got %s/%s rank %d (%s), want needs-human/api-key-helper-detected ranked", got.State, got.Code, got.Rank, got.Summary)
+	}
+}
+
+// An engine-retried wait with no known deadline must not read as waiting
+// forever: past the stall threshold with no progress it is stalled. Open-ended
+// waits (blocked, queued, claude-limit) and recently active waits are not.
+func TestWaitWithNoDeadlineBecomesStalled(t *testing.T) {
+	old := t0.Add(-3 * time.Hour)
+	cases := []struct {
+		name    string
+		labels  []string
+		entered time.Time
+		want    State
+	}{
+		{"awaiting-advance stuck", []string{"fabrik:awaiting-advance"}, old, Stalled},
+		{"awaiting-advance recent", []string{"fabrik:awaiting-advance"}, t0.Add(-time.Minute), Waiting},
+		{"blocked is open-ended", []string{"fabrik:blocked"}, old, Waiting},
+		{"claude-limit is open-ended", []string{"fabrik:claude-limit"}, old, Waiting},
+	}
+	for _, c := range cases {
+		in := baseInput()
+		in.Labels = c.labels
+		in.StatusEnteredAt = c.entered
+		got := Classify(in)
+		if got.State != c.want {
+			t.Errorf("%s: got %s/%s (%s), want %s", c.name, got.State, got.Code, got.Summary, c.want)
+		}
+		if c.want == Stalled && got.Rank != RankStalled {
+			t.Errorf("%s: stalled wait must rank, got %d", c.name, got.Rank)
+		}
+		if c.want == Waiting && got.Rank != NotRanked {
+			t.Errorf("%s: waiting must not rank, got %d", c.name, got.Rank)
+		}
+	}
+}

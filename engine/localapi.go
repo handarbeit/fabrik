@@ -349,13 +349,15 @@ func (b localAPIBackend) resolveIssue(ref string) (repo string, number int, err 
 	}
 }
 
-// managedRepos is the repo set this daemon serves: its configured repo, else
-// the distinct repos of the cached items.
+// managedRepos is the repo set this daemon serves: its configured repo plus
+// the distinct repos of the cached items. A daemon with a default repo can still
+// carry items from other repos on its board, so the default alone is not the
+// set.
 func (b localAPIBackend) managedRepos() []string {
-	if r := b.e.defaultRepo(); r != "" {
-		return []string{r}
-	}
 	seen := map[string]bool{}
+	if r := b.e.defaultRepo(); r != "" {
+		seen[r] = true
+	}
 	b.e.store.Scan(func(it *itemstate.ItemState) {
 		if !it.IsPR && it.Repo != "" {
 			seen[it.Repo] = true

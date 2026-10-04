@@ -218,7 +218,7 @@ var labelTable = map[string]labelInfo{
 	"fabrik:children-spawned":              {"child issues were spawned and block this one", false},
 	"fabrik:claude-limit":                  {"the Claude account usage limit was hit; the engine retries once the suspension lifts", true},
 	"fabrik:tools-denied":                  {"a tool call was denied by the permission layer; the engine retries, bounded by its own counter", true},
-	"fabrik:api-key-helper-detected":       {"the worktree sets apiKeyHelper, which Fabrik refuses; remove it from the worktree settings", true},
+	"fabrik:api-key-helper-detected":       {"the worktree sets apiKeyHelper, which Fabrik refuses; remove it from the worktree settings", false},
 	"fabrik:toolchain-stale":               {"the daemon's PATH toolchain does not satisfy the repo's declared version (warn-only)", false},
 	"fabrik:landing-verification-failed":   {"the credited PR did not merge; the issue was reopened and needs a human", false},
 	"fabrik:nondefault-base-pr-noted":      {"informational: PR targets a non-default base branch", false},
@@ -295,6 +295,14 @@ func Classify(in Input) Result {
 			"nothing automatic: cruise never merges; a human merges the PR", RankMergeDecision)
 	}
 
+	// 4b. The engine refuses to run until a human edits something it cannot
+	// edit itself; no retry or deadline will ever clear it.
+	if hasLabel(in.Labels, "fabrik:api-key-helper-detected") {
+		return finish(NeedsHuman, "fabrik:api-key-helper-detected",
+			labelTable["fabrik:api-key-helper-detected"].meaning,
+			"nothing automatic: the engine skips this item until apiKeyHelper is removed from the worktree settings", RankNeedsHuman)
+	}
+
 	// 5. Waiting on something the engine owns.
 	if code, summary, ok := waitingCause(in); ok {
 		// An engine-owned wait whose known deadline passed more than the stall
@@ -303,6 +311,16 @@ func Classify(in Input) Result {
 			return finish(Stalled, CodeOverdue,
 				fmt.Sprintf("%s, but the %s deadline passed %s ago", summary, d.Kind, in.Now.Sub(d.At).Round(time.Second)),
 				actionFor(res.Next.Deadlines, "the engine should act on the next poll"), RankStalled)
+		}
+		// An engine-retried wait with no known deadline cannot go overdue, so
+		// it would otherwise read as "waiting correctly" forever. Once nothing
+		// observable has changed for longer than the stall threshold it is
+		// stalled. Waits that are legitimately open-ended (dependencies owned
+		// elsewhere, the merge train, the account-wide usage limit) are exempt.
+		if !hasKnownDeadline(res.Next.Deadlines) && !openEndedWaitExempt(code) && stallExceeded(res, in) {
+			return finish(Stalled, CodeNoProgress,
+				fmt.Sprintf("%s, with no known deadline and no observable change for %s", summary, res.ProgressAge.Round(time.Second)),
+				"nothing scheduled that the cache can see; the next poll re-evaluates the item", RankStalled)
 		}
 		return finish(Waiting, code, summary, actionFor(res.Next.Deadlines, waitAction(code)), NotRanked)
 	}
@@ -388,6 +406,25 @@ func waitingCause(in Input) (code, summary string, ok bool) {
 		return "queued", "held in the merge-train holding stage; the train worker batches it", true
 	}
 	return "", "", false
+}
+
+func hasKnownDeadline(ds []Deadline) bool {
+	for _, d := range ds {
+		if d.Known() {
+			return true
+		}
+	}
+	return false
+}
+
+// openEndedWaitExempt reports whether a wait may legitimately last longer than
+// the stall threshold with no deadline the cache can see.
+func openEndedWaitExempt(code string) bool {
+	switch code {
+	case "fabrik:blocked", "fabrik:claude-limit", "queued":
+		return true
+	}
+	return strings.HasPrefix(code, "cooldown:")
 }
 
 func waitAction(code string) string {
