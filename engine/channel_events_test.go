@@ -243,3 +243,78 @@ type adjClock struct {
 
 func (c *adjClock) Now() time.Time  { c.mu.Lock(); defer c.mu.Unlock(); return c.t }
 func (c *adjClock) set(t time.Time) { c.mu.Lock(); c.t = t; c.mu.Unlock() }
+
+// A daemon restart (SIGHUP re-exec or crash) keeps subscriptions and held
+// events, delivers the held ones in order on re-attach, and does not replay a
+// settle episode it already announced.
+func TestChannelStateSurvivesDaemonRestart(t *testing.T) {
+	oldD, oldT := channelDebounce, channelTick
+	channelDebounce, channelTick = 20*time.Millisecond, time.Hour
+	t.Cleanup(func() { channelDebounce, channelTick = oldD, oldT })
+	dir := t.TempDir()
+
+	start := func() *Engine {
+		e := apiEngine(t, 0)
+		e.fabrikDir = t.TempDir()
+		e.startChannelEventsIn(dir)
+		t.Cleanup(e.closeChannelEvents)
+		return e
+	}
+
+	e1 := start()
+	if _, err := e1.channelEvents().hub.Subscribe(channelevents.Subscription{
+		Subscriber: "X",
+		Events:     []channelevents.EventType{channelevents.LabelApplied, channelevents.ValidateSettled},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	seedValidate(t, e1, 1, "stage:Validate:complete")
+	time.Sleep(120 * time.Millisecond)
+	hook(e1, 1) // announces episode 1; "X" is not attached, so it is held
+	// Three label events occur while no session is attached.
+	lbl(e1, 1, "fabrik:a1", "fabrik:a2", "fabrik:a3")
+	waitHeld := func(e *Engine, n int) {
+		t.Helper()
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			if e.channelEvents().hub.Queued("X") >= n {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("only %d events held", e.channelEvents().hub.Queued("X"))
+	}
+	waitHeld(e1, 4)
+	e1.closeChannelEvents() // the restart
+
+	e2 := start()
+	hub := e2.channelEvents().hub
+	if got := hub.Subscriptions("X"); len(got) != 1 {
+		t.Fatalf("subscription lost across restart: %+v", got)
+	}
+	// The same settled item is seen again by the new process; its episode was
+	// already announced, so the settle hook must not announce it again.
+	seedValidate(t, e2, 1, "stage:Validate:complete")
+	time.Sleep(120 * time.Millisecond)
+	hook(e2, 1)
+	time.Sleep(200 * time.Millisecond)
+
+	sink := newChanSink()
+	hub.Attach("X", sink)
+	var types []channelevents.EventType
+	var labels []string
+	for i := 0; i < 4; i++ {
+		ev := sink.next(t)
+		types = append(types, ev.Type)
+		labels = append(labels, ev.Label)
+	}
+	if types[0] != channelevents.ValidateSettled || labels[1] != "fabrik:a1" || labels[2] != "fabrik:a2" || labels[3] != "fabrik:a3" {
+		t.Fatalf("held events not delivered in order: %v %v", types, labels)
+	}
+	// Live events follow the held ones; nothing was replayed.
+	lbl(e2, 1, "fabrik:live")
+	if ev := sink.next(t); ev.Label != "fabrik:live" {
+		t.Fatalf("live event after held: %+v", ev)
+	}
+	sink.quiet(t, 200*time.Millisecond)
+}

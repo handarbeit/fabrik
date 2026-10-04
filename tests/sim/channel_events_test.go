@@ -1,6 +1,9 @@
 package sim
 
 import (
+	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -228,3 +231,54 @@ func TestChannelValidateSettledAgainAfterRevalidate(t *testing.T) {
 		t.Fatalf("want exactly two validate-settled events across two episodes, got %d", n)
 	}
 }
+
+// runCruiseToSettled drives the conjunctive-gate cruise scenario to its settled
+// state and returns the ordered mutation signatures the engine made, plus the
+// final labels. Used by the R10 parity test.
+func runCruiseToSettled(t *testing.T, withHub bool) (mutations []string, labels []string) {
+	t.Helper()
+	env := newChannelGateEnv(t, false, nil)
+	if withHub {
+		startChannel(t, env)
+	}
+	num := FileIssue(t, env, "channel parity", "Parity.", "Implement", "fabrik:cruise")
+	WaitForIssueLabel(t, env, num, "fabrik:awaiting-ci", 80)
+	pr, err := env.Sim.FetchLinkedPR(env.Owner, env.Repo, num)
+	if err != nil || pr == nil {
+		t.Fatalf("linked PR: %v", err)
+	}
+	env.Sim.Sim().SeedCheckRun(env.OwnerRepo, pr.HeadSHA, gh.CheckRun{Name: conjunctiveGateCheck, Status: "completed", Conclusion: "success"})
+	WaitForIssueLabel(t, env, num, "fabrik:awaiting-review", 80)
+	env.Sim.Sim().SeedReview(env.OwnerRepo, pr.Number, gh.PRReview{Author: "reviewer-human", State: "APPROVED"})
+	WaitForLabelAbsent(t, env, num, "fabrik:awaiting-review", 80)
+	RunPolls(t, env, 10)
+	for _, m := range env.Sim.Log().Mutations() {
+		// Commit SHAs and generated IDs differ between runs; the method, target
+		// issue, label and free-form values are the engine's decisions.
+		mutations = append(mutations, m.Method+" #"+strconvItoa(m.Args.Number)+" "+m.Args.Label+" "+strings.Join(m.Args.Values, ","))
+	}
+	return mutations, IssueLabels(t, env, num)
+}
+
+// TestChannelEventsAreObservationOnly (R10): a run with the channel hub and a
+// subscriber makes exactly the same GitHub mutations, in the same order, and
+// ends in the same label state as a run without any hub.
+func TestChannelEventsAreObservationOnly(t *testing.T) {
+	baseMut, baseLabels := runCruiseToSettled(t, false)
+	hubMut, hubLabels := runCruiseToSettled(t, true)
+	if strings.Join(baseMut, "\n") != strings.Join(hubMut, "\n") {
+		t.Fatalf("the hub changed engine mutations\n--- without hub ---\n%s\n--- with hub ---\n%s",
+			strings.Join(baseMut, "\n"), strings.Join(hubMut, "\n"))
+	}
+	if strings.Join(sortedCopy(baseLabels), ",") != strings.Join(sortedCopy(hubLabels), ",") {
+		t.Fatalf("final labels differ: %v vs %v", baseLabels, hubLabels)
+	}
+}
+
+func sortedCopy(in []string) []string {
+	out := append([]string(nil), in...)
+	sort.Strings(out)
+	return out
+}
+
+func strconvItoa(n int) string { return strconv.Itoa(n) }
