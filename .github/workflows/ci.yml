@@ -8,6 +8,12 @@ on:
 permissions:
   contents: read
 
+# Cancel a run when a newer commit lands on the same PR or branch; never on the default
+# branch, so every commit there still gets a result.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.ref != format('refs/heads/{0}', github.event.repository.default_branch) }}
+
 jobs:
   test:
     name: Test and vet
