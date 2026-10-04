@@ -326,7 +326,7 @@ func TestExecute_ConfigYAMLApplied(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- Execute() }()
 
-	<-readyCh
+	mustAwaitReady(t, readyCh, done)
 	p, _ := os.FindProcess(os.Getpid())
 	p.Signal(syscall.SIGINT)
 
@@ -405,7 +405,7 @@ prompt: "Do research"
 		done <- Execute()
 	}()
 
-	<-readyCh
+	mustAwaitReady(t, readyCh, done)
 	p, _ := os.FindProcess(os.Getpid())
 	p.Signal(syscall.SIGINT)
 
