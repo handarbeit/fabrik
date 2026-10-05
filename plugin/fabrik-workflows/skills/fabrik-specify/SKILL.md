@@ -48,7 +48,9 @@ Explicitly state:
 
 ### Rewrite the issue body
 
-Update the issue body (via FABRIK_ISSUE_UPDATE markers) with a structured spec. **Preserve the user's original motivation and problem statement** — the "why" is as important as the "what." Never reduce a detailed problem description to a terse summary that loses context. Use this structure:
+Update the issue body (via FABRIK_ISSUE_UPDATE markers) with a structured spec. **Preserve the user's original motivation and problem statement** — the "why" is as important as the "what." Never reduce a detailed problem description to a terse summary that loses context.
+
+The structure follows Spec Kit's content structure (section names and FR/SC numbering only — no Spec Kit tooling, scaffolding or scripts is involved):
 
 ```
 ## Problem
@@ -58,22 +60,54 @@ Preserve the original issue's motivation — don't compress it away.
 ## Summary
 One-paragraph description of what this feature does to solve the problem.
 
+## User Scenarios & Testing
+
+### Story 1 — <short title> (Priority: P1)
+<Plain-language description of the user journey and the value it delivers.>
+- *Independent test:* how this story alone can be verified and still deliver value.
+
+### Story 2 — <short title> (Priority: P2)
+...
+
 ## Requirements
-Bulleted list of specific, testable requirements.
+- **FR-001** — <Specific, testable capability: "The system MUST ...">
+- **FR-002** — ...
+- **FR-003** — <Unclear requirement> [NEEDS CLARIFICATION: <the specific question>]
+
+## Success Criteria
+- **SC-001** — <Measurable, technology-agnostic outcome>
+- **SC-002** — ...
+
+## Edge Cases
+- <Boundary condition or failure mode, and the expected behavior>
+
+## Assumptions
+- <Reasonable default you chose where the issue was silent>
 
 ## Scope
-What's in and what's out.
-
-## Open Questions
-- [ ] Question 1
-- [ ] Question 2
+**In scope:** ...
+**Out of scope:** ...
 
 ## Prior Art / Context
 Relevant findings from web research or codebase analysis.
 
 ## Risks / Dependencies
 Anything that could complicate or block this work.
+
+## Open Questions
+- [ ] Question 1
+- [ ] Question 2
 ```
+
+Guidance for each section:
+- **User stories** are prioritized (P1 most important) and each one must be independently testable — implementing only that story should still deliver a usable slice. Name stories by title (`Story 1`), never with a bare `#1`.
+- **Requirements** use stable `FR-NNN` identifiers, one testable statement each. Number them in order and never renumber an existing requirement during clarification rounds; retire a requirement by removing it, add new ones at the end.
+- **Success criteria** use stable `SC-NNN` identifiers and describe measurable outcomes from the user's or operator's point of view, not implementation details.
+- **Edge cases** cover boundaries, failure modes and "what happens when" situations the story list does not.
+- **Assumptions** record the defaults you chose so a reader can challenge them; prefer a documented assumption over a question when the choice is low-impact and reversible.
+- **Open Questions** goes **last** and is the only section that is removed when answered. Every `[NEEDS CLARIFICATION]` marker in the body must have a matching question here.
+
+Omit a section only when it genuinely has nothing to say — do not pad. Keep the spec at the **what and why** level: no file paths to change, no designs, no technology choices.
 
 ## What You Do NOT Do
 
@@ -100,13 +134,13 @@ See `../../LABELS.md` for the full label reference.
 
 ## Engine Context
 
-**Before you run**: The engine has created a worktree and rebased onto main. You're in a read-only stage — the worktree will be stashed/restored around your invocation.
+**Before you run**: The engine has created a worktree and rebased onto main. You're in a read-only stage — the worktree will be stashed/restored around your invocation. **Do not create, edit or commit any files yourself.** The issue body you emit is the canonical spec; after each round that updates it, the engine writes it to `specs/<issue number>-<slug>/spec.md` on the issue's branch and commits that single file, so the spec appears in the PR diff and stays in the repo. The `## Open Questions` section is stripped from that file, and the slug is fixed at the first commit — a later title change does not rename the directory. The file is a one-way projection of the issue body and is never read back, so never rely on it as input and never edit it.
 
 **Completing the stage**: When the spec is clear and all questions are resolved, emit the literal token `FABRIK_STAGE_COMPLETE` as the sole content of its own line — no backticks, no code fence, no markdown formatting, no trailing punctuation. The engine matches `^FABRIK_STAGE_COMPLETE$` exactly; backtick-wrapped or formatted variants are silently rejected and you will be re-invoked in a wasteful loop. Once you emit it, stop immediately. Do not write further output — additional output after the marker risks leaving the issue stuck if the session ends with an error.
 
 **Blocking on input**: If you have open questions that must be answered before you can produce a complete spec, output `FABRIK_BLOCKED_ON_INPUT` on its own line instead of `FABRIK_STAGE_COMPLETE`. The engine will pause the issue with both `fabrik:paused` and `fabrik:awaiting-input` labels and automatically resume when the user responds with a comment. Do not remove these labels manually. These two markers are mutually exclusive — never output both. When outputting `FABRIK_BLOCKED_ON_INPUT`, you MUST also emit a `FABRIK_SUMMARY_BEGIN`…`FABRIK_SUMMARY_END` block containing a direct, concise (1–3 sentence) statement of exactly what input is needed — no preamble; the user reads this on a small screen.
 
-**Updating the issue body**: Wrap the complete updated issue body in:
+**Updating the issue body**: Every round that changes the spec — including a round that ends in `FABRIK_BLOCKED_ON_INPUT` — must emit the complete updated body, because that is what the engine persists. Wrap it in:
 ```
 FABRIK_ISSUE_UPDATE_BEGIN
 <entire issue body>
@@ -118,7 +152,11 @@ FABRIK_ISSUE_UPDATE_END
 ## Quality Checklist
 
 Before signaling completion, verify:
-- [ ] Every requirement is specific and testable
+- [ ] Every requirement is specific and testable and carries an `FR-NNN` identifier
+- [ ] User stories are prioritized and each has an independent test
+- [ ] Success criteria are measurable and carry `SC-NNN` identifiers
+- [ ] Edge cases and assumptions are recorded
+- [ ] `## Open Questions` is last (and absent once everything is resolved)
 - [ ] Scope boundaries are explicit
 - [ ] No open questions remain
 - [ ] No contradictions with existing features

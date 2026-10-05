@@ -31,31 +31,53 @@ If an answer raises new ambiguities or reveals additional gaps:
 
 ### Maintain spec structure
 
-The issue body should always follow this structure after your update:
+The issue body should always follow this structure after your update (Spec Kit's content structure — section names and FR/SC numbering only, no Spec Kit tooling):
 
 ```
+## Problem
+Why this change is needed (preserve the original motivation).
+
 ## Summary
 One-paragraph description of what this feature does and why.
 
+## User Scenarios & Testing
+
+### Story 1 — <short title> (Priority: P1)
+<User journey and the value it delivers.>
+- *Independent test:* how this story alone can be verified.
+
 ## Requirements
-Bulleted list of specific, testable requirements.
+- **FR-001** — <Specific, testable requirement>
+
+## Success Criteria
+- **SC-001** — <Measurable, technology-agnostic outcome>
+
+## Edge Cases
+- <Boundary condition or failure mode, and the expected behavior>
+
+## Assumptions
+- <Default chosen where the issue was silent>
 
 ## Scope
-What's in and what's out.
-
-## Open Questions
-- [ ] Question (only if unresolved questions remain)
+**In scope:** ... **Out of scope:** ...
 
 ## Prior Art / Context
 Relevant findings from web research or codebase analysis.
 
 ## Risks / Dependencies
 Anything that could complicate or block this work.
+
+## Open Questions
+- [ ] Question (only if unresolved questions remain)
 ```
 
-Remove the Open Questions section entirely when all questions are resolved.
+When folding in an answer, put it where it belongs structurally: a new behavior becomes an `FR-NNN` requirement (appended with the next free number — **never renumber existing FR/SC identifiers**), a measurable outcome becomes an `SC-NNN`, a boundary condition goes under Edge Cases, and a default you adopted goes under Assumptions. Replace any `[NEEDS CLARIFICATION]` marker the answer resolves. Stories are named `Story 1`, `Story 2` — never `#1`.
+
+Open Questions stays **last** and is removed entirely when all questions are resolved.
 
 ### Update the issue body
+
+The engine persists this body as `specs/<issue number>-<slug>/spec.md` on the issue's branch after every round that updates it (with `## Open Questions` stripped and the directory name fixed at the first commit), so the body you emit is also the committed spec. **Do not create, edit or commit files yourself** — the engine does the write.
 
 Always output the complete updated issue body using the FABRIK_ISSUE_UPDATE markers:
 
