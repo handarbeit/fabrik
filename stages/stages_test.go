@@ -916,3 +916,24 @@ func TestIsFirstStage(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadAll_PersistSpec(t *testing.T) {
+	dir := t.TempDir()
+	writeStageFile(t, dir, "specify.yaml", "name: Specify\nskill: fabrik-specify\nread_only: true\npersist_spec: true\n")
+	writeStageFile(t, dir, "other.yaml", "name: Other\norder: 1\nskill: fabrik-research\n")
+
+	got, err := LoadAll(dir)
+	if err != nil {
+		t.Fatalf("LoadAll: %v", err)
+	}
+	byName := map[string]*Stage{}
+	for _, s := range got {
+		byName[s.Name] = s
+	}
+	if !byName["Specify"].PersistSpec || !byName["Specify"].ReadOnly {
+		t.Errorf("Specify: PersistSpec=%v ReadOnly=%v, want both true", byName["Specify"].PersistSpec, byName["Specify"].ReadOnly)
+	}
+	if byName["Other"].PersistSpec {
+		t.Error("PersistSpec must default to false")
+	}
+}

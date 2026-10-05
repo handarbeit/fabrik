@@ -6,6 +6,7 @@ auto_advance: false
 model: sonnet
 max_turns: 50
 read_only: true
+persist_spec: true
 allowed_tools:
   - Read
   - Grep
