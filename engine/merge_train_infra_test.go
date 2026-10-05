@@ -140,12 +140,12 @@ func TestMergeTrainInfra_CooldownHoldsOffRedispatch(t *testing.T) {
 	if v.count() != 1 {
 		t.Fatalf("setup: validations = %d", v.count())
 	}
-	eng.dispatchMergeTrainWorker(context.Background(), makeSeamBatch(2), "PVT_test", "")
+	eng.dispatchMergeTrainWorker(context.Background(), makeSeamBatch(2), "PVT_test", "main")
 	eng.wg.Wait()
 	if v.count() != 1 {
 		t.Fatalf("a worker ran inside the cooldown (validations = %d)", v.count())
 	}
-	if _, ok := eng.mergeTrainInFlight.Load(mergeTrainKey("owner/repo", "")); ok {
+	if _, ok := eng.mergeTrainInFlight.Load(mergeTrainKey("owner/repo", "main")); ok {
 		t.Error("a worker marker was registered inside the cooldown")
 	}
 }
