@@ -3475,7 +3475,9 @@ Daemon version and uptime; time since the last poll attempt and the last success
 
 Scopes combine with AND; entries within one list with OR. Account-wide events (`claude-limit-*`, `daemon-*`) have no issue and ignore the issue, repo and milestone scopes. `fabrik_unsubscribe` takes the subscription `id` (from `fabrik_subscribe`'s response), or removes all of the subscriber's subscriptions when omitted.
 
-**Held delivery.** Channels reach only a live session, so while no `fabrik mcp` with your name is attached the daemon keeps matching events (persisted, at most `--channel-held-max` per subscriber — default 200 — with the oldest dropped and a single `events-dropped` notice next time; entries older than 7 days and subscribers unseen for 30 days are pruned). On reconnect they arrive first, in order, then live ones. `fabrik mcp` reconnects by itself after a daemon restart (including a SIGHUP re-exec) and re-registers its name, so none of this needs any action from the session. A second `fabrik mcp` attaching under the same name replaces the first.
+**Held delivery.** Channels reach only a live session, so while no `fabrik mcp` with your name is attached the daemon keeps matching events (persisted, at most `--channel-held-max` per subscriber — default 200 — on overflow the oldest non-urgent events are dropped first (a held `validate-settled`, `escalated` or `paused` is only dropped when nothing else can be) and a single `events-dropped` notice naming what was lost follows; entries older than 7 days and subscribers unseen for 30 days are pruned). On reconnect they arrive first, in order, then live ones. `fabrik mcp` reconnects by itself after a daemon restart (including a SIGHUP re-exec) and re-registers its name, so none of this needs any action from the session. A second `fabrik mcp` attaching under the same name replaces the first, and the replaced session is told so with one `stream-superseded` notice (use a distinct `--subscriber` per session to keep both).
+
+**Catch-up.** An event is announced at its transition, so a subscriber that arrives later would otherwise never hear about an item already settled at Validate and waiting on you (the `fabrik:cruise` case) or already paused or escalated. A **new subscription** and the **first attach of a session** (not a reconnect after a blip or a daemon restart) therefore each receive one catch-up batch: an event per matching item that is settled and waiting on a human, or currently `needs-human` / `escalated`, marked `catch_up` = `true` in `meta` and `(catch-up)` in the text. It is a snapshot of current state, not a transition, so it never affects the once-per-episode rule for live events. It costs no GitHub call.
 
 **The events.** Every event carries `meta` keys `repo`, `issue`, `event`, and, when known, `stage`, `pr` and `comment` (a link to the 🏭 Fabrik comment that was most recently posted on the issue, when it is not the one the previous event for that issue already carried), plus the keys below.
 
@@ -3496,9 +3498,18 @@ Scopes combine with AND; entries within one list with OR. Account-wide events (`
 | `landing-verification-failed` | the credited PR did not merge; the issue was reopened | |
 | `claude-limit-suspended`, `claude-limit-lifted` | the account-wide Claude usage-limit suspension began or ended | `until` |
 | `daemon-unreachable`, `daemon-reachable` | emitted by `fabrik mcp` itself when the daemon connection stays down more than 10 s and when it recovers | `error` / `down_for_seconds` |
-| `events-dropped`, `digest` | bookkeeping: the held queue overflowed; a batched delivery | `count` |
+| `events-dropped`, `digest` | bookkeeping: the held queue overflowed; a batched delivery | `count`, `dropped_types` (e.g. `label-applied x4`) |
+| `stream-superseded` | emitted by `fabrik mcp` itself: another session attached under the same subscriber name and took over this stream | `subscriber` |
 
 A pause is reported once, as the transition into the state — not once per poll — and a restart announces nothing about items already paused. The exact derivation of each event is in [`docs/state-machine.md` §7.14](state-machine.md#714-channel-events-proactive-push-to-fabrik-mcp-sessions-1968).
+
+**Known limits.**
+
+- Delivery is at-most-once to the session: there is no acknowledgement, and a half-open connection can lose up to roughly one heartbeat window of events.
+- Label events can arrive reordered in a narrow race between two concurrent applies of the same label.
+- The `actor` is `unknown` for label changes only a poll saw. Under PAT auth, a worker's own `gh` label write whose echo was missed reads as `human`.
+- One incident can produce several related pushes, e.g. `paused` + `ci-timeout` + `label-applied`.
+- For a `fabrik:yolo` item, `validate-settled` is sent only once the merge (or queue move) went through; a landing that fails sends nothing, and the settle after the rebase is announced afresh.
 
 **Cost.** Deriving, routing and delivering events makes no GitHub API call. The only cost is one local socket connection per attached session.
 

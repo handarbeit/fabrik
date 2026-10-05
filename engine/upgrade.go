@@ -45,6 +45,7 @@ func (e *Engine) checkAndUpgrade() {
 		Logf:           logf,
 		StatusFn:       pollStatus,
 		StatusClearFn:  pollStatusClear,
+		PreExecHook:    e.flushChannelEvents,
 		PostBuildHook: func(exe, dir string) error {
 			// Refresh plugin skills from the new binary.
 			e.logf(0, "upgrade", "refreshing plugin skills\n")
@@ -94,14 +95,15 @@ func (e *Engine) checkReleaseUpgrade() {
 	// contract is non-fatal — the poll loop continues regardless (unlike the
 	// foreground `fabrik upgrade` command).
 	_ = selfupgrade.PerformReleaseUpgrade(selfupgrade.ReleaseConfig{
-		Client:     e.releaseClient,
-		Owner:      fabrikOwner,
-		Repo:       fabrikRepo,
-		BinaryName: "fabrik",
-		Version:    e.cfg.Version,
-		Token:      releaseUpgradeToken(e.cfg),
-		ExtraEnv:   []string{"FABRIK_AUTO_UPGRADED=1"},
-		Logf:       logf,
+		Client:      e.releaseClient,
+		Owner:       fabrikOwner,
+		Repo:        fabrikRepo,
+		BinaryName:  "fabrik",
+		Version:     e.cfg.Version,
+		Token:       releaseUpgradeToken(e.cfg),
+		ExtraEnv:    []string{"FABRIK_AUTO_UPGRADED=1"},
+		Logf:        logf,
+		PreExecHook: e.flushChannelEvents,
 	})
 }
 

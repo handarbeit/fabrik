@@ -288,3 +288,34 @@ func TestShimDegradesAgainstDaemonWithoutStreaming(t *testing.T) {
 		t.Fatalf("no push and no daemon-unreachable against a reachable v1 daemon: %v", n)
 	}
 }
+
+// A second session attaching under the same subscriber name takes the stream
+// over; the first shim must say so in its session instead of going silent.
+func TestShimTellsItsSessionWhenAnotherSessionTakesTheName(t *testing.T) {
+	sock := filepath.Join(shortDir(t), "d.sock")
+	hub := openTestHub(t, t.TempDir())
+	defer hub.Close()
+	daemon := startDaemon(t, sock, hub)
+	defer daemon.Close()
+	if _, err := hub.Subscribe(channelevents.Subscription{Subscriber: "topic"}); err != nil {
+		t.Fatal(err)
+	}
+
+	out, stop := runShim(t, sock, "topic", 100*time.Millisecond)
+	defer stop()
+	hub.Publish(channelevents.Event{Type: channelevents.Merged, Repo: "o/r", Issue: 1, Content: "first"})
+	waitNotifications(t, out, 1) // attached and live
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go localapi.RunStream(ctx, localapi.StreamOptions{Path: sock, Subscriber: "topic", OnEvent: func(channelevents.Event) {}}) //nolint:errcheck
+
+	n := waitNotifications(t, out, 2)[1]
+	meta := metaOf(n)
+	if meta["event"] != "stream-superseded" || meta["subscriber"] != "topic" {
+		t.Fatalf("want a stream-superseded notice, got %v", n)
+	}
+	if c, _ := n["content"].(string); !strings.Contains(c, "took over") {
+		t.Fatalf("the notice must explain what happened: %q", c)
+	}
+}

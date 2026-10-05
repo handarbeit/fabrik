@@ -22,15 +22,42 @@ type entry struct {
 
 // queueFile is the persisted held queue of one subscriber.
 type queueFile struct {
-	Name    string  `json:"name"`
-	Dropped int     `json:"dropped,omitempty"`
-	NextSeq uint64  `json:"next_seq"`
-	Entries []entry `json:"entries"`
+	Name    string `json:"name"`
+	Dropped int    `json:"dropped,omitempty"`
+	// DroppedTypes breaks Dropped down by event type so the drop notice can name
+	// what was lost (a lost validate-settled is not the same as a lost label event).
+	DroppedTypes map[EventType]int `json:"dropped_types,omitempty"`
+	NextSeq      uint64            `json:"next_seq"`
+	Entries      []entry           `json:"entries"`
 }
 
-// push appends ev, skipping a duplicate dedup key already queued, and drops the
-// oldest entries beyond max, counting them toward the drop notice (R8). It
-// reports whether the queue changed.
+// noteDropped counts one discarded entry of type t toward the drop notice.
+func (q *queueFile) noteDropped(t EventType) {
+	q.Dropped++
+	if q.DroppedTypes == nil {
+		q.DroppedTypes = map[EventType]int{}
+	}
+	q.DroppedTypes[t]++
+}
+
+// evictOne discards one entry to make room: the oldest non-immediate entry, or
+// the oldest entry overall only when every entry is immediate. A flood of label
+// events must not push out a held validate-settled, escalated or paused.
+func (q *queueFile) evictOne() {
+	idx := 0
+	for i, e := range q.Entries {
+		if !IsImmediate(e.Event.Type) {
+			idx = i
+			break
+		}
+	}
+	q.noteDropped(q.Entries[idx].Event.Type)
+	q.Entries = append(q.Entries[:idx:idx], q.Entries[idx+1:]...)
+}
+
+// push appends ev, skipping a duplicate dedup key already queued, and evicts
+// entries beyond max (non-immediate first, oldest first), counting them toward
+// the drop notice (R8). It reports whether the queue changed.
 func (q *queueFile) push(ev Event, digest bool, due time.Time, away bool, max int) bool {
 	if ev.DedupKey != "" {
 		for _, e := range q.Entries {
@@ -42,9 +69,9 @@ func (q *queueFile) push(ev Event, digest bool, due time.Time, away bool, max in
 	q.NextSeq++
 	q.Entries = append(q.Entries, entry{Seq: q.NextSeq, Event: ev, Digest: digest, Due: due, Away: digest && away})
 	if max > 0 && len(q.Entries) > max {
-		over := len(q.Entries) - max
-		q.Dropped += over
-		q.Entries = append([]entry(nil), q.Entries[over:]...)
+		for len(q.Entries) > max {
+			q.evictOne()
+		}
 	}
 	return true
 }
@@ -98,6 +125,22 @@ type batch struct {
 	events  []Event
 	seqs    map[uint64]bool
 	dropped int
+	// droppedTypes is the per-type breakdown the notice reports; subtracted from
+	// the queue once the notice is delivered.
+	droppedTypes map[EventType]int
+}
+
+// clearDropped subtracts a delivered notice's counts from the queue.
+func (q *queueFile) clearDropped(b batch) {
+	q.Dropped -= b.dropped
+	for t, n := range b.droppedTypes {
+		if q.DroppedTypes[t] -= n; q.DroppedTypes[t] <= 0 {
+			delete(q.DroppedTypes, t)
+		}
+	}
+	if q.Dropped <= 0 {
+		q.Dropped, q.DroppedTypes = 0, nil
+	}
 }
 
 // next picks the next deliverable batch at time now. When nothing is due it
@@ -105,8 +148,9 @@ type batch struct {
 func (q *queueFile) next(now time.Time) (b batch, wait time.Duration, ok bool) {
 	if q.Dropped > 0 {
 		return batch{
-			events:  []Event{dropNotice(q.Dropped, now)},
-			dropped: q.Dropped,
+			events:       []Event{dropNotice(q.Dropped, q.DroppedTypes, now)},
+			dropped:      q.Dropped,
+			droppedTypes: copyCounts(q.DroppedTypes),
 		}, 0, true
 	}
 	for _, e := range q.Entries {
@@ -137,15 +181,48 @@ func (q *queueFile) next(now time.Time) (b batch, wait time.Duration, ok bool) {
 	return batch{}, due.Sub(now), false
 }
 
-func dropNotice(n int, now time.Time) Event {
+func copyCounts(m map[EventType]int) map[EventType]int {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[EventType]int, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+// describeCounts renders per-type counts in a stable order, e.g.
+// "label-applied x3, validate-settled x1".
+func describeCounts(m map[EventType]int) string {
+	types := make([]string, 0, len(m))
+	for t := range m {
+		types = append(types, string(t))
+	}
+	sort.Strings(types)
+	parts := make([]string, 0, len(types))
+	for _, t := range types {
+		parts = append(parts, fmt.Sprintf("%s x%d", t, m[EventType(t)]))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func dropNotice(n int, types map[EventType]int, now time.Time) Event {
 	word := "events"
 	if n == 1 {
 		word = "event"
 	}
+	content := fmt.Sprintf("%d %s dropped while no session was attached (queue overflow); non-urgent events are discarded first, oldest first", n, word)
+	meta := map[string]string{"count": strconv.Itoa(n)}
+	if len(types) > 0 {
+		desc := describeCounts(types)
+		content += ": " + desc
+		meta["dropped_types"] = desc
+	}
 	return Event{
 		Type:    EventsDropped,
-		Content: fmt.Sprintf("%d %s dropped while no session was attached (queue overflow); the oldest were discarded", n, word),
-		Meta:    map[string]string{"count": strconv.Itoa(n)},
+		Content: content,
+		Meta:    meta,
 		At:      now,
 	}
 }

@@ -30,7 +30,14 @@ import (
 // noteValidateSettled records that item reached the engine's settle point
 // (runCatchUpPhase2). See recordValidateSettle.
 func (e *Engine) noteValidateSettled(item gh.ProjectItem, stage *stages.Stage) {
-	e.recordValidateSettle(item, stage, false)
+	if l := e.captureValidateSettle(item, stage, false); l.ok {
+		// A yolo item acts on its own: the landing decision announces it only once
+		// the merge or enqueue went through, never ahead of that attempt. Anything
+		// that waits for a human is settled right here.
+		if l.cand.ev.Meta["next"] == "waiting-for-human" {
+			l.finish(true)
+		}
+	}
 }
 
 // noteValidateLanding records that item reached the engine's landing decision
@@ -41,8 +48,15 @@ func (e *Engine) noteValidateSettled(item gh.ProjectItem, stage *stages.Stage) {
 // handleStageComplete before the complete label is even applied — so this is
 // the settle point for yolo. The gates were just evaluated live by the engine,
 // so the cache-only predicate is relaxed to the identity checks.
-func (e *Engine) noteValidateLanding(item gh.ProjectItem, stage *stages.Stage) {
-	e.recordValidateSettle(item, stage, true)
+//
+// The event is captured here, before the landing call (a successful queue move
+// takes the item off Validate), but it is only announced by the returned
+// handle's finish(true), after the merge or enqueue succeeded. A landing that
+// fails — a conflict that leads to fabrik:rebase-needed, an enqueue error —
+// announces nothing, so the overseer is never told "will auto-merge" for a merge
+// that did not happen and the re-settle after the rebase is a fresh episode.
+func (e *Engine) noteValidateLanding(item gh.ProjectItem, stage *stages.Stage) settleLanding {
+	return e.captureValidateSettle(item, stage, true)
 }
 
 // settleCandidate is one settle point captured on the poll goroutine.
@@ -51,7 +65,37 @@ type settleCandidate struct {
 	relaxed bool
 }
 
-// recordValidateSettle captures the event as it stands when the cache-only
+// settleLanding is a captured settle point waiting for its landing outcome. The
+// zero value (nothing captured, no hub) is a no-op.
+type settleLanding struct {
+	e    *Engine
+	key  string
+	cand settleCandidate
+	ok   bool
+}
+
+// finish announces the captured settle point when landed is true and drops it
+// otherwise. A void call: it never alters a decision (R10).
+func (l settleLanding) finish(landed bool) {
+	if !l.ok || !landed {
+		return
+	}
+	ce := l.e.channelEvents()
+	if ce == nil {
+		return
+	}
+	ce.mu.Lock()
+	if ce.settleCand == nil {
+		ce.settleCand = map[string]settleCandidate{}
+	}
+	if prev, held := ce.settleCand[l.key]; !held || (prev.relaxed && !l.cand.relaxed) {
+		ce.settleCand[l.key] = l.cand
+	}
+	ce.mu.Unlock()
+	ce.signal()
+}
+
+// captureValidateSettle captures the event as it stands when the cache-only
 // predicate holds right now. The event is built here, on the calling
 // goroutine, rather than later on the consumer: a yolo item can be merged and
 // moved to Done within the very same pass, and an evaluation deferred past
@@ -59,13 +103,13 @@ type settleCandidate struct {
 // event. Everything here is a store Peek plus pure CPU — no GitHub call, no
 // engine decision touched (R9, R10). A void, non-blocking call, safe with no
 // hub running.
-func (e *Engine) recordValidateSettle(item gh.ProjectItem, stage *stages.Stage, atLanding bool) {
+func (e *Engine) captureValidateSettle(item gh.ProjectItem, stage *stages.Stage, atLanding bool) settleLanding {
 	if stage == nil || stage.Name != "Validate" {
-		return
+		return settleLanding{}
 	}
 	ce := e.channelEvents()
 	if ce == nil {
-		return
+		return settleLanding{}
 	}
 	defer func() {
 		if r := recover(); r != nil {
@@ -75,23 +119,14 @@ func (e *Engine) recordValidateSettle(item gh.ProjectItem, stage *stages.Stage, 
 	repo := itemOwnerRepoString(item, e.defaultRepo())
 	snap, ok := e.store.Peek(repo, item.Number)
 	if !ok {
-		return
+		return settleLanding{}
 	}
 	st := snap.State()
 	if !e.validateSettledSnap(snap, &st, atLanding) {
-		return
+		return settleLanding{}
 	}
 	ev := e.validateSettledEvent(snap, &st, stage)
-	key := issueRef(repo, item.Number)
-	ce.mu.Lock()
-	if ce.settleCand == nil {
-		ce.settleCand = map[string]settleCandidate{}
-	}
-	if prev, held := ce.settleCand[key]; !held || (prev.relaxed && !atLanding) {
-		ce.settleCand[key] = settleCandidate{ev: ev, relaxed: atLanding}
-	}
-	ce.mu.Unlock()
-	ce.signal()
+	return settleLanding{e: e, key: issueRef(repo, item.Number), cand: settleCandidate{ev: ev, relaxed: atLanding}, ok: true}
 }
 
 // cachedFeedback is the cache-only count of unprocessed feedback on an item.
@@ -194,6 +229,11 @@ func validateSettledEpisodeEnded(st *itemstate.ItemState) bool {
 		hasLabelStr(st.Labels, "fabrik:revalidate") {
 		return true
 	}
+	// A landing that bounced (the PR stopped merging cleanly) ends the episode:
+	// the re-settle after the rebase is announced afresh.
+	if hasLabelStr(st.Labels, "fabrik:rebase-needed") {
+		return true
+	}
 	if lpr := st.LinkedPR; lpr != nil && lpr.ValidateCompletedSHA != "" && lpr.HeadSHA != "" &&
 		lpr.ValidateCompletedSHA != lpr.HeadSHA {
 		return true
@@ -218,7 +258,8 @@ func (ce *channelEvents) closeSettleEpisode(ref string, st *itemstate.ItemState)
 	}
 	ended := validateSettledEpisodeEnded(st)
 	if ce.hub.Counter(vsRelaxedKey(ref)) == n && !hasLabelStr(st.Labels, "stage:Validate:complete") &&
-		!st.IsClosed && st.Status == "Validate" && !hasLabelStr(st.Labels, "fabrik:revalidate") {
+		!st.IsClosed && st.Status == "Validate" && !hasLabelStr(st.Labels, "fabrik:revalidate") &&
+		!hasLabelStr(st.Labels, "fabrik:rebase-needed") {
 		ended = false
 	}
 	if ended {

@@ -211,6 +211,10 @@ func (h *Hub) saveStateLocked() {
 	}
 }
 
+// Flush writes any pending dedup and counter state to disk now. The queues and
+// the registry are written on every change; only the dedup state is coalesced.
+func (h *Hub) Flush() { h.flushState() }
+
 // flushState writes the dedup state if it changed, without holding h.mu across
 // the disk write.
 func (h *Hub) flushState() {
@@ -271,15 +275,22 @@ func newID() string {
 // fields) already present is returned unchanged, so a session re-subscribing on
 // every start does not accumulate duplicates.
 func (h *Hub) Subscribe(sub Subscription) (Subscription, error) {
+	stored, _, err := h.SubscribeNew(sub)
+	return stored, err
+}
+
+// SubscribeNew is Subscribe that also reports whether the subscription was newly
+// created (false: an identical one already existed).
+func (h *Hub) SubscribeNew(sub Subscription) (Subscription, bool, error) {
 	if err := sub.Validate(h.opt.MinDigest); err != nil {
-		return Subscription{}, err
+		return Subscription{}, false, err
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	key := sub.canonical()
 	for _, ex := range h.subs {
 		if ex.Subscriber == sub.Subscriber && ex.canonical() == key {
-			return ex, nil
+			return ex, false, nil
 		}
 	}
 	sub.ID = newID()
@@ -288,7 +299,72 @@ func (h *Hub) Subscribe(sub Subscription) (Subscription, error) {
 		h.lastAttach[sub.Subscriber] = h.opt.Now()
 	}
 	h.saveRegistryLocked()
-	return sub, nil
+	return sub, true, nil
+}
+
+// CatchUp queues a snapshot of current state for one subscriber: every event of
+// evs that one of its subscriptions matches (only the subscription subID when it
+// is non-empty), immediately and in order, after anything already held. A
+// catch-up carries no dedup key, so it never interferes with the per-episode
+// dedup of live events, and an event the queue already holds for the same
+// (type, repo, issue) is skipped so a held announcement is not doubled. It
+// returns how many events were queued.
+func (h *Hub) CatchUp(name, subID string, evs []Event) int {
+	now := h.opt.Now()
+	h.mu.Lock()
+	if h.closed {
+		h.mu.Unlock()
+		return 0
+	}
+	var subs []Subscription
+	for _, sub := range h.subs {
+		if sub.Subscriber == name && (subID == "" || sub.ID == subID) {
+			subs = append(subs, sub)
+		}
+	}
+	if len(subs) == 0 {
+		h.mu.Unlock()
+		return 0
+	}
+	s := h.subscribers[name]
+	if s == nil {
+		s = newSubscriber(name, h.heldPath(name), queueFile{})
+		h.subscribers[name] = s
+	}
+	h.mu.Unlock()
+
+	queued := 0
+	for _, ev := range evs {
+		matched := false
+		for _, sub := range subs {
+			if sub.Matches(ev) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		if ev.At.IsZero() {
+			ev.At = now
+		}
+		ev.DedupKey = ""
+		s.mu.Lock()
+		held := false
+		for _, e := range s.q.Entries {
+			if e.Event.Type == ev.Type && e.Event.Repo == ev.Repo && e.Event.Issue == ev.Issue {
+				held = true
+				break
+			}
+		}
+		s.mu.Unlock()
+		if held {
+			continue
+		}
+		h.enqueue(s, ev, 0, now)
+		queued++
+	}
+	return queued
 }
 
 // Unsubscribe removes one subscription by id, or every subscription of the
@@ -316,7 +392,7 @@ func (h *Hub) Unsubscribe(subscriberName, id string) int {
 	h.mu.Unlock()
 	if drop != nil {
 		drop.mu.Lock()
-		drop.q.Entries, drop.q.Dropped = nil, 0
+		drop.q.Entries, drop.q.Dropped, drop.q.DroppedTypes = nil, 0, nil
 		if drop.att == nil {
 			_ = os.Remove(drop.path)
 		} else {
@@ -568,10 +644,7 @@ func (h *Hub) drain(s *subscriber, a *attachment) {
 			}
 			s.mu.Lock()
 			s.q.remove(b.seqs)
-			s.q.Dropped -= b.dropped
-			if s.q.Dropped < 0 {
-				s.q.Dropped = 0
-			}
+			s.q.clearDropped(b)
 			h.saveQueue(s)
 			s.mu.Unlock()
 			s.sendMu.Unlock()

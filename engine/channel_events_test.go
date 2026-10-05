@@ -354,3 +354,104 @@ func TestChannelStreamerSubscribeResolvesIssuesAndValidates(t *testing.T) {
 		t.Fatalf("unsubscribe: %+v %v", un, err)
 	}
 }
+
+// The self-upgrade exec runs no deferred cleanup, so the engine flushes the
+// hub's lazily written dedup state right before it (ADR-1966-b). With no hub
+// the flush is a no-op.
+func TestFlushChannelEventsPersistsDedupBeforeExec(t *testing.T) {
+	apiEngine(t, 0).flushChannelEvents() // no hub: must not panic
+
+	e, sink := channelEngine(t, 0, nil)
+	ce := e.channelEvents()
+	ce.hub.Publish(channelevents.Event{Type: channelevents.Merged, Repo: "owner/repo", Issue: 7, Content: "merged", DedupKey: "merged:owner/repo#7"})
+	sink.next(t)
+
+	path := filepath.Join(e.fabrikDir, ".fabrik", "state", "channel", "dedup.json")
+	e.flushChannelEvents()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("dedup state not on disk right after the flush: %v", err)
+	}
+	if !strings.Contains(string(data), "merged:owner/repo#7") {
+		t.Fatalf("flushed dedup state is missing the announced key: %s", data)
+	}
+}
+
+// A subscriber that arrives after items already settled or paused still learns
+// about them: a new subscription and a fresh session each get one catch-up
+// snapshot of current state, tagged catch_up=true, while a reconnect does not.
+func TestCatchUpDeliversWaitingItemsToLateSubscriber(t *testing.T) {
+	e, live := channelEngine(t, 0, settledOnly())
+	seedValidate(t, e, 1, "fabrik:cruise", "stage:Validate:complete")
+	hook(e, 1)
+	live.next(t) // announced live, to a subscriber that existed at the time
+
+	e.seedAPIItem(t, 2, "Implement", "fabrik:paused", "fabrik:awaiting-input")
+	e.seedAPIItem(t, 3, "Implement") // nothing waiting on anyone
+
+	st := e.channelStreamer()
+	if _, err := st.Subscribe(localapi.SubscribeParams{Subscriber: "late"}); err != nil {
+		t.Fatal(err)
+	}
+	// The same subscription again is not a new subscription: no second catch-up.
+	if _, err := st.Subscribe(localapi.SubscribeParams{Subscriber: "late"}); err != nil {
+		t.Fatal(err)
+	}
+
+	collect := func(catchUp bool) map[int]channelevents.Event {
+		sink := newChanSink()
+		detach, err := st.Attach(localapi.AttachParams{Subscriber: "late", CatchUp: catchUp}, sink)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := map[int]channelevents.Event{}
+		timeout := time.After(400 * time.Millisecond)
+		for {
+			select {
+			case ev := <-sink.ch:
+				if _, dup := got[ev.Issue]; dup {
+					t.Errorf("issue %d announced twice: %+v", ev.Issue, ev)
+				}
+				got[ev.Issue] = ev
+			case <-timeout:
+				detach()
+				return got
+			}
+		}
+	}
+
+	first := collect(false) // holds exactly the subscribe-time catch-up
+	if len(first) != 2 {
+		t.Fatalf("want one catch-up event each for #1 and #2, got %+v", first)
+	}
+	if ev := first[1]; ev.Type != channelevents.ValidateSettled || ev.Meta["catch_up"] != "true" || ev.Meta["next"] != "waiting-for-human" {
+		t.Errorf("settled catch-up: %+v", ev)
+	}
+	if ev := first[2]; ev.Type != channelevents.AwaitingInput || ev.Meta["catch_up"] != "true" {
+		t.Errorf("paused catch-up: %+v", ev)
+	}
+	if _, ok := first[3]; ok {
+		t.Error("an item waiting on nobody must not be announced")
+	}
+
+	if again := collect(false); len(again) != 0 { // a reconnect: nothing new
+		t.Fatalf("a reconnect must not repeat the catch-up, got %+v", again)
+	}
+	if fresh := collect(true); len(fresh) != 2 { // a new session under the same name
+		t.Fatalf("a fresh session wants the snapshot again, got %+v", fresh)
+	}
+}
+
+// Catch-up is a snapshot, not a transition: it must not consume the live
+// event's episode, so a later live settle is still announced exactly once.
+func TestCatchUpDoesNotInterfereWithEpisodeDedup(t *testing.T) {
+	e, live := channelEngine(t, 0, settledOnly())
+	seedValidate(t, e, 1, "fabrik:cruise", "stage:Validate:complete")
+	e.catchUp("T", "")
+	live.next(t) // the snapshot
+	hook(e, 1)
+	ev := live.next(t) // the live settle of the same item is still announced
+	if ev.Meta["catch_up"] == "true" || ev.DedupKey == "" {
+		t.Fatalf("expected the live episode event, got %+v", ev)
+	}
+}

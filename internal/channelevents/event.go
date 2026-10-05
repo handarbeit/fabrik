@@ -34,6 +34,9 @@ const (
 	EventsDropped EventType = "events-dropped"
 	// Digest is synthetic: one batched delivery of several ordinary events.
 	Digest EventType = "digest"
+	// StreamSuperseded is synthetic and shim-generated: another session attached
+	// under the same subscriber name, so this session's push has stopped.
+	StreamSuperseded EventType = "stream-superseded"
 )
 
 // Event is one thing that happened, ready to route and deliver.
@@ -105,6 +108,7 @@ var catalog = map[EventType]Info{
 	DaemonReachable:           {AccountWide: true, ShimGenerated: true},
 	EventsDropped:             {Immediate: true, AccountWide: true, Synthetic: true},
 	Digest:                    {Immediate: true, AccountWide: true, Synthetic: true},
+	StreamSuperseded:          {Immediate: true, AccountWide: true, ShimGenerated: true, Synthetic: true},
 }
 
 // Lookup returns the catalogue entry for t.

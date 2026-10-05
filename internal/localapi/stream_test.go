@@ -306,3 +306,95 @@ func TestStreamWatchdogDropsSilentConnection(t *testing.T) {
 }
 
 func unmarshal(b []byte, f *Frame) error { return json.Unmarshal(bytes.TrimSpace(b), f) }
+
+// recordingStreamer records the CatchUp flag of every attach.
+type recordingStreamer struct {
+	hubStreamer
+	mu      sync.Mutex
+	catchUp []bool
+}
+
+func (r *recordingStreamer) Attach(p AttachParams, sink channelevents.Sink) (func(), error) {
+	r.mu.Lock()
+	r.catchUp = append(r.catchUp, p.CatchUp)
+	r.mu.Unlock()
+	return r.hubStreamer.Attach(p, sink)
+}
+
+// The first attach of a session asks for a catch-up snapshot; a reconnect after a
+// daemon restart does not, or every blip would replay what is waiting on a human.
+func TestStreamAsksForCatchUpOnFirstAttachOnly(t *testing.T) {
+	sock := filepath.Join(shortDir(t), "s.sock")
+	hub := newHub(t, t.TempDir())
+	defer hub.Close()
+	rec := &recordingStreamer{hubStreamer: hubStreamer{hub}}
+	start := func() *Server {
+		srv := NewServer(sock, echoBackend(), nil)
+		srv.Streamer = rec
+		srv.HeartbeatInterval = 50 * time.Millisecond
+		if err := srv.Start(); err != nil {
+			t.Fatal(err)
+		}
+		return srv
+	}
+	srv := start()
+
+	sts := newStateLog()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		RunStream(ctx, StreamOptions{Path: sock, Subscriber: "X", OnEvent: func(channelevents.Event) {}, OnState: sts.add,
+			MinBackoff: 20 * time.Millisecond, MaxBackoff: 100 * time.Millisecond})
+	}()
+	defer func() { cancel(); <-done }()
+	if st := sts.next(t); !st.Connected {
+		t.Fatalf("first state: %+v", st)
+	}
+	srv.Close()
+	if st := sts.next(t); st.Connected {
+		t.Fatalf("expected a disconnect, got %+v", st)
+	}
+	srv2 := start()
+	defer srv2.Close()
+	if st := sts.next(t); !st.Connected {
+		t.Fatalf("expected reconnect, got %+v", st)
+	}
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.catchUp) != 2 || !rec.catchUp[0] || rec.catchUp[1] {
+		t.Fatalf("catch_up flags per attach = %v, want [true false]", rec.catchUp)
+	}
+}
+
+// A superseded stream says so (Superseded) before RunStream returns, so its owner
+// can tell the session why push stopped.
+func TestStreamReportsSupersededBeforeStopping(t *testing.T) {
+	sock := filepath.Join(shortDir(t), "s.sock")
+	hub := newHub(t, t.TempDir())
+	defer hub.Close()
+	srv := serveOn(t, sock, hub)
+	defer srv.Close()
+	hub.Subscribe(channelevents.Subscription{Subscriber: "X"})
+
+	sts := newStateLog()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		RunStream(context.Background(), StreamOptions{Path: sock, Subscriber: "X", OnEvent: func(channelevents.Event) {}, OnState: sts.add,
+			MinBackoff: 10 * time.Millisecond})
+	}()
+	if st := sts.next(t); !st.Connected {
+		t.Fatalf("%+v", st)
+	}
+	rawAttach(t, sock, "X")
+	if st := sts.next(t); st.Connected || !st.Superseded {
+		t.Fatalf("want a Superseded state, got %+v", st)
+	}
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("RunStream should return once superseded")
+	}
+}

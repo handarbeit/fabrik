@@ -540,3 +540,28 @@ func TestExtractBinarySHA(t *testing.T) {
 		}
 	}
 }
+
+// TestCheckAndRebuildDev_PreExecHookRunsImmediatelyBeforeExec verifies the hook
+// fires after the rebuild and PostBuildHook but strictly before the exec, which
+// is the last point a caller can flush state an exec would lose.
+func TestCheckAndRebuildDev_PreExecHookRunsImmediatelyBeforeExec(t *testing.T) {
+	skipIfNoGit(t)
+	dir := initDevSourceCheckout(t, "handarbeit/fabrik")
+
+	cfg, postBuildCalled, execCalled, logs := testDevBuildConfig(t, dir, "dev(0000000)", "handarbeit/fabrik")
+	var calls int
+	cfg.PreExecHook = func() {
+		calls++
+		if !*postBuildCalled {
+			t.Error("PreExecHook ran before PostBuildHook")
+		}
+		if *execCalled {
+			t.Error("PreExecHook ran after the exec")
+		}
+	}
+	CheckAndRebuildDev(cfg)
+
+	if calls != 1 || !*execCalled {
+		t.Errorf("PreExecHook calls = %d, exec called = %v, logs: %v", calls, *execCalled, *logs)
+	}
+}

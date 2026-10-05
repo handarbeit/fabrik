@@ -24,7 +24,7 @@ func TestEveryEventIsDocumented(t *testing.T) {
 	}
 	var events []EventType
 	events = append(events, Subscribable()...)
-	events = append(events, EventsDropped, Digest)
+	events = append(events, EventsDropped, Digest, StreamSuperseded)
 	for _, e := range events {
 		for _, name := range []string{"USER_GUIDE", "state-machine"} {
 			if !strings.Contains(docs[name], "`"+string(e)+"`") {

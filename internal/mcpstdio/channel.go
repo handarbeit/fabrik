@@ -140,6 +140,20 @@ type reachability struct {
 func (r *reachability) onState(st localapi.StreamState) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if st.Superseded {
+		// The stream is over for good: tell the session why its push stopped,
+		// instead of going silent. Any pending unreachable report is moot.
+		if r.timer != nil {
+			r.timer.Stop()
+			r.timer = nil
+		}
+		r.srv.notifyChannel(channelevents.Event{
+			Type:    channelevents.StreamSuperseded,
+			Content: fmt.Sprintf("Another session attached as subscriber %q and took over this stream; this session will receive no more Fabrik events. Use a distinct --subscriber name per session to keep both.", r.srv.Subscriber),
+			Meta:    map[string]string{"event": string(channelevents.StreamSuperseded), "subscriber": r.srv.Subscriber},
+		})
+		return
+	}
 	if st.Connected {
 		if r.timer != nil {
 			r.timer.Stop()

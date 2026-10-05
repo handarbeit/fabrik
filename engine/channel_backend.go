@@ -43,9 +43,14 @@ func (s channelStreamer) Subscribe(p localapi.SubscribeParams) (*localapi.Subscr
 		}
 		sub.Issues = append(sub.Issues, channelevents.IssueRef{Repo: repo, Number: n})
 	}
-	stored, err := s.hub.Subscribe(sub)
+	stored, created, err := s.hub.SubscribeNew(sub)
 	if err != nil {
 		return nil, localapi.Errorf(localapi.CodeBadRequest, "%v", err)
+	}
+	if created {
+		// A subscriber that arrives after an item settled would otherwise never
+		// hear about it: queue a snapshot of what is waiting on a human right now.
+		s.e.catchUp(stored.Subscriber, stored.ID)
 	}
 	return &localapi.SubscribeResult{Subscription: stored, Subscriptions: s.hub.Subscriptions(p.Subscriber)}, nil
 }
@@ -59,5 +64,10 @@ func (s channelStreamer) Unsubscribe(p localapi.UnsubscribeParams) (*localapi.Un
 }
 
 func (s channelStreamer) Attach(p localapi.AttachParams, sink channelevents.Sink) (func(), error) {
+	if p.CatchUp {
+		// A fresh session (not a reconnect): queued before the attach so it is
+		// delivered after anything already held, in order, ahead of live events.
+		s.e.catchUp(p.Subscriber, "")
+	}
 	return s.hub.Attach(p.Subscriber, sink), nil
 }

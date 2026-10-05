@@ -11,6 +11,7 @@ import (
 	"github.com/handarbeit/fabrik/engine"
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/channelevents"
+	"github.com/handarbeit/fabrik/tests/sim/simgh"
 )
 
 // Channel-event scenarios (#1968, ADR-1966-b). They run the real engine through
@@ -282,3 +283,55 @@ func sortedCopy(in []string) []string {
 }
 
 func strconvItoa(n int) string { return strconv.Itoa(n) }
+
+// TestChannelValidateSettledYoloNotAnnouncedBeforeLandingSucceeds: under yolo a
+// landing that bounces (the merge is refused as not mergeable, which sends the
+// item toward fabrik:rebase-needed) must not have been announced as "will
+// auto-merge"; the settle that follows the recovered landing is announced
+// exactly once.
+func TestChannelValidateSettledYoloNotAnnouncedBeforeLandingSucceeds(t *testing.T) {
+	env := newChannelGateEnv(t, true, nil)
+	_, sink := startChannel(t, env)
+
+	num := FileIssue(t, env, "channel validate-settled (yolo bounce)", "Yolo landing refused once.", "Implement", "fabrik:yolo")
+	WaitForIssueLabel(t, env, num, "fabrik:awaiting-ci", 80)
+	pr, err := env.Sim.FetchLinkedPR(env.Owner, env.Repo, num)
+	if err != nil || pr == nil {
+		t.Fatalf("linked PR: %v", err)
+	}
+	env.Sim.Sim().SeedCheckRun(env.OwnerRepo, pr.HeadSHA, gh.CheckRun{Name: conjunctiveGateCheck, Status: "completed", Conclusion: "success"})
+	WaitForIssueLabel(t, env, num, "fabrik:awaiting-review", 80)
+
+	// Refuse every landing call until released: whichever of auto-merge, enqueue
+	// or direct merge the engine tries, the PR "no longer merges cleanly".
+	bounce := simgh.WrapErr(gh.ErrNotMergeable, "simgh: injected conflict")
+	for _, m := range []string{"MergePR", "EnablePullRequestAutoMerge", "EnqueuePullRequest"} {
+		env.Sim.Faults().FailAlways(m, bounce)
+	}
+	env.Sim.Sim().SeedReview(env.OwnerRepo, pr.Number, gh.PRReview{Author: "reviewer-human", State: "APPROVED"})
+	AdvanceUntil(t, env, func(env *Env) bool {
+		fired := 0
+		for _, m := range []string{"MergePR", "EnablePullRequestAutoMerge", "EnqueuePullRequest"} {
+			fired += env.Sim.Faults().FiredCount(m)
+		}
+		return fired > 0
+	}, 80)
+	settleWait()
+	if got := sink.ofType(channelevents.ValidateSettled, num); len(got) != 0 {
+		t.Fatalf("validate-settled announced before the landing succeeded: %+v", got)
+	}
+
+	// Heal the base: the landing now goes through and is announced once.
+	for _, m := range []string{"MergePR", "EnablePullRequestAutoMerge", "EnqueuePullRequest"} {
+		env.Sim.Faults().Clear(m)
+	}
+	WaitForIssueClosed(t, env, num, 120)
+	settleWait()
+	got := sink.ofType(channelevents.ValidateSettled, num)
+	if len(got) != 1 {
+		t.Fatalf("want exactly one validate-settled after the landing succeeded, got %d: %+v", len(got), got)
+	}
+	if got[0].Meta["next"] != "auto-merge" {
+		t.Fatalf("unexpected meta: %+v", got[0].Meta)
+	}
+}

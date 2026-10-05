@@ -390,6 +390,10 @@ type UnsubscribeResult struct {
 // AttachParams binds the connection as the live session of a subscriber.
 type AttachParams struct {
 	Subscriber string `json:"subscriber"`
+	// CatchUp asks for a snapshot of what is waiting on a human right now (items
+	// settled at Validate, needs-human, escalated), tagged catch_up=true. The
+	// client sets it on the first attach of a session only, never on a reconnect.
+	CatchUp bool `json:"catch_up,omitempty"`
 }
 
 // AttachResult acknowledges an attach and tells the client the heartbeat

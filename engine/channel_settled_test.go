@@ -28,6 +28,10 @@ func hook(e *Engine, n int) {
 	e.noteValidateSettled(gh.ProjectItem{Repo: "owner/repo", Number: n}, settleValidateStage)
 }
 
+func landing(e *Engine, n int) settleLanding {
+	return e.noteValidateLanding(gh.ProjectItem{Repo: "owner/repo", Number: n}, settleValidateStage)
+}
+
 func TestValidateSettledNotEmittedWhileAwaitingCI(t *testing.T) {
 	e, sink := channelEngine(t, 0, settledOnly())
 	// FABRIK_STAGE_COMPLETE under wait_for_ci: awaiting-ci present, no complete label.
@@ -93,7 +97,12 @@ func TestValidateSettledNext(t *testing.T) {
 		e, sink := channelEngine(t, 0, settledOnly())
 		e.cfg.MergeTrain = c.train
 		seedValidate(t, e, 1, append([]string{"stage:Validate:complete"}, c.labels...)...)
-		hook(e, 1)
+		if c.want == "waiting-for-human" {
+			hook(e, 1)
+		} else {
+			// An acting item is announced by the landing decision, once it succeeded.
+			landing(e, 1).finish(true)
+		}
 		ev := sink.next(t)
 		if ev.Meta["next"] != c.want {
 			t.Errorf("%s: next=%q want %q", c.name, ev.Meta["next"], c.want)
@@ -202,5 +211,42 @@ func TestCachedAddressedReviewIDsOnlyTrustsFabrik(t *testing.T) {
 	st.Comments = []gh.Comment{{ID: "m2", DatabaseID: 6, Author: self, Body: marker}}
 	if eng.cachedPendingFeedback(snap, &st).any() {
 		t.Fatal("Fabrik's own marker must mark the review addressed")
+	}
+}
+
+// A yolo item acts on its own, so the settle point must not announce it ahead of
+// the landing attempt; the landing announces it only once it succeeded.
+func TestValidateSettledYoloAnnouncedOnlyAfterLandingSucceeds(t *testing.T) {
+	e, sink := channelEngine(t, 0, settledOnly())
+	seedValidate(t, e, 1, "fabrik:yolo", "stage:Validate:complete")
+
+	hook(e, 1) // Phase 2 settle point: the landing attempt is still to come
+	sink.quiet(t, 250*time.Millisecond)
+
+	landing(e, 1).finish(false) // the merge or enqueue failed
+	sink.quiet(t, 250*time.Millisecond)
+
+	landing(e, 1).finish(true)
+	ev := sink.next(t)
+	if ev.Type != channelevents.ValidateSettled || ev.Meta["next"] != "auto-merge" {
+		t.Fatalf("unexpected: %+v", ev)
+	}
+}
+
+// A landing that bounced ends the episode (fabrik:rebase-needed), so the settle
+// after the rebase is announced afresh instead of being deduplicated away.
+func TestValidateSettledReannouncedAfterRebaseNeeded(t *testing.T) {
+	e, sink := channelEngine(t, 0, settledOnly())
+	seedValidate(t, e, 1, "fabrik:cruise", "stage:Validate:complete")
+	hook(e, 1)
+	first := sink.next(t)
+
+	e.store.Apply(itemstate.LocalLabelAdded{Repo: "owner/repo", Number: 1, Label: "fabrik:rebase-needed"})
+	time.Sleep(150 * time.Millisecond) // let the debounced episode close run
+	e.store.Apply(itemstate.LocalLabelRemoved{Repo: "owner/repo", Number: 1, Label: "fabrik:rebase-needed"})
+	hook(e, 1)
+	again := sink.next(t)
+	if again.Type != channelevents.ValidateSettled || again.DedupKey == first.DedupKey {
+		t.Fatalf("expected a new episode after the rebase, got %+v (first key %q)", again, first.DedupKey)
 	}
 }

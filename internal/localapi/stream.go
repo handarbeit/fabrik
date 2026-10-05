@@ -36,6 +36,10 @@ type StreamState struct {
 	// but speaks no streaming protocol (a v1 daemon): push is off and the
 	// client keeps probing at the slow backoff in case the daemon is upgraded.
 	Unsupported bool
+	// Superseded is set (with Connected false) once, just before RunStream
+	// returns, when a newer attach under the same subscriber name took over: no
+	// reconnect will follow, so the owner should tell its session why push stopped.
+	Superseded bool
 }
 
 // StreamOptions configures RunStream.
@@ -89,11 +93,12 @@ func RunStream(ctx context.Context, opts StreamOptions) error {
 	}
 
 	backoff := opts.MinBackoff
-	down := false // a down transition has been reported and no attach has succeeded since
+	catchUp := true // the first attach of this session asks for a catch-up; reconnects do not
+	down := false   // a down transition has been reported and no attach has succeeded since
 	for ctx.Err() == nil {
 		attached := false
-		err := streamOnce(ctx, opts, func() {
-			attached, down = true, false
+		err := streamOnce(ctx, opts, catchUp, func() {
+			attached, down, catchUp = true, false, false
 			report(StreamState{Connected: true})
 		})
 		if ctx.Err() != nil {
@@ -101,6 +106,7 @@ func RunStream(ctx context.Context, opts StreamOptions) error {
 		}
 		if errors.Is(err, errSuperseded) {
 			opts.Logf("[stream] %v\n", err)
+			report(StreamState{Connected: false, Err: err, Superseded: true})
 			return nil
 		}
 		unsupported := errors.Is(err, errUnsupported)
@@ -134,7 +140,7 @@ func jitter(d time.Duration) time.Duration {
 
 // streamOnce runs one connection: dial, hello, attach, then read frames until
 // the connection fails. onAttached fires after the attach acknowledgement.
-func streamOnce(ctx context.Context, opts StreamOptions, onAttached func()) error {
+func streamOnce(ctx context.Context, opts StreamOptions, catchUp bool, onAttached func()) error {
 	d := net.Dialer{Timeout: DialTimeout}
 	conn, err := d.DialContext(ctx, "unix", opts.Path)
 	if err != nil {
@@ -208,7 +214,7 @@ func streamOnce(ctx context.Context, opts StreamOptions, onAttached func()) erro
 		return errUnsupported
 	}
 	var ack AttachResult
-	if err := roundTrip("a", MethodAttach, AttachParams{Subscriber: opts.Subscriber}, &ack); err != nil {
+	if err := roundTrip("a", MethodAttach, AttachParams{Subscriber: opts.Subscriber, CatchUp: catchUp}, &ack); err != nil {
 		return err
 	}
 	onAttached()

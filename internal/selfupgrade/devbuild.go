@@ -32,6 +32,11 @@ type DevBuildConfig struct {
 	// regardless (e.g. Fabrik's plugin-skill refresh, where old skills still
 	// work if the refresh fails).
 	PostBuildHook func(exe, dir string) error
+	// PreExecHook, if non-nil, runs immediately before the re-exec — the last
+	// point a caller can flush state an exec would otherwise lose (an exec runs
+	// no deferred cleanup). It must not tear anything down: if the exec fails the
+	// process keeps running.
+	PreExecHook func()
 }
 
 func (cfg DevBuildConfig) status(format string, args ...any) {
@@ -235,6 +240,9 @@ func CheckAndRebuildDev(cfg DevBuildConfig) {
 
 	cfg.Logf("re-executing new binary\n")
 
+	if cfg.PreExecHook != nil {
+		cfg.PreExecHook()
+	}
 	if err := execFn(exe, os.Args, os.Environ()); err != nil {
 		cfg.Logf("exec failed: %v\n", err)
 	}

@@ -136,6 +136,18 @@ func (e *Engine) startChannelEventsIn(dir string) {
 	go ce.run()
 }
 
+// flushChannelEvents persists the hub's coalesced dedup and counter state without
+// tearing anything down. The self-upgrade exec calls it just before replacing the
+// process: that exec runs no deferred cleanup, and the dedup state is written
+// lazily, so a settle announced within the flush window would otherwise be
+// announced again by the new process. Nothing is closed because a failed exec
+// leaves this process running. Safe with no hub, and idempotent.
+func (e *Engine) flushChannelEvents() {
+	if ce := e.channelEvents(); ce != nil {
+		ce.hub.Flush()
+	}
+}
+
 // closeChannelEvents stops the consumer and closes the hub. Idempotent. Hub
 // state is persisted on every write, so nothing needs flushing before an exec.
 func (e *Engine) closeChannelEvents() {

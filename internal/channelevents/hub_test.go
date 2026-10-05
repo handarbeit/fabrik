@@ -388,3 +388,100 @@ func TestHubReconnectKeepsDigestCollectedWhileAttached(t *testing.T) {
 		t.Fatalf("Queued=%d want 1 pending digest entry", got)
 	}
 }
+
+// A flood of label events while the subscriber is away must not evict a held
+// headline event; the drop notice names what was lost.
+func TestHubOverflowKeepsImmediateEventsAndNamesDroppedTypes(t *testing.T) {
+	h := openHub(t, t.TempDir(), func(o *Options) { o.HeldMax = 3 })
+	h.Subscribe(Subscription{Subscriber: "X"})
+	h.Publish(ev(1, ValidateSettled))
+	h.Publish(ev(2, Escalated))
+	for i := 10; i < 15; i++ {
+		h.Publish(ev(i, LabelApplied))
+	}
+	s := newSink()
+	h.Attach("X", s)
+	notice := s.wait(t)
+	if notice.Type != EventsDropped || notice.Meta["count"] != "4" || notice.Meta["dropped_types"] != "label-applied x4" {
+		t.Fatalf("want drop notice for 4 label-applied, got %+v", notice)
+	}
+	for _, want := range []EventType{ValidateSettled, Escalated, LabelApplied} {
+		if got := s.wait(t); got.Type != want {
+			t.Fatalf("got %s want %s", got.Type, want)
+		}
+	}
+}
+
+// When every held entry is immediate, the oldest one is the one evicted, and the
+// notice still names it.
+func TestHubOverflowEvictsImmediateOnlyWhenNothingElseIs(t *testing.T) {
+	h := openHub(t, t.TempDir(), func(o *Options) { o.HeldMax = 2 })
+	h.Subscribe(Subscription{Subscriber: "X"})
+	h.Publish(ev(1, Paused))
+	h.Publish(ev(2, Escalated))
+	h.Publish(ev(3, ValidateSettled))
+	s := newSink()
+	h.Attach("X", s)
+	if n := s.wait(t); n.Type != EventsDropped || n.Meta["dropped_types"] != "paused x1" {
+		t.Fatalf("want notice naming paused, got %+v", n)
+	}
+	for _, want := range []int{2, 3} {
+		if got := s.wait(t); got.Issue != want {
+			t.Fatalf("got issue %d want %d", got.Issue, want)
+		}
+	}
+}
+
+// Flush persists the coalesced dedup state at once: an exec runs no deferred
+// Close, so the engine flushes right before one. A second hub opened over the
+// same directory without closing the first stands in for the re-exec'd process.
+func TestHubFlushPersistsDedupWithoutClose(t *testing.T) {
+	dir := t.TempDir()
+	h := openHub(t, dir, nil)
+	h.Subscribe(Subscription{Subscriber: "X"})
+	s := newSink()
+	h.Attach("X", s)
+	e := ev(1, ValidateSettled)
+	e.DedupKey = "vs:o/r#1:1"
+	h.Publish(e)
+	s.wait(t) // delivered live: only the dedup state remembers it
+	h.Flush()
+
+	h2 := openHub(t, dir, nil)
+	h2.Publish(e)
+	if got := h2.Queued("X"); got != 0 {
+		t.Fatalf("Queued=%d want 0: the announced settle was replayed after the exec (dedup state not flushed)", got)
+	}
+}
+
+// CatchUp queues a snapshot for one subscriber, only for events its subscriptions
+// match, without a dedup key, and never doubles an announcement the queue already
+// holds for the same (type, repo, issue).
+func TestHubCatchUp(t *testing.T) {
+	h := openHub(t, t.TempDir(), nil)
+	sub, _, err := h.SubscribeNew(Subscription{Subscriber: "X", Events: []EventType{ValidateSettled}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	held := ev(1, ValidateSettled)
+	held.DedupKey = "vs:o/r#1:1"
+	h.Publish(held) // already held for X
+
+	snapshot := []Event{ev(1, ValidateSettled), ev(2, ValidateSettled), ev(3, Merged)}
+	snapshot[0].DedupKey = "ignored"
+	if n := h.CatchUp("X", sub.ID, snapshot); n != 1 {
+		t.Fatalf("CatchUp queued %d, want 1 (#1 already held, #3 not subscribed)", n)
+	}
+	if n := h.CatchUp("nobody", "", snapshot); n != 0 {
+		t.Fatalf("CatchUp for an unknown subscriber queued %d", n)
+	}
+	s := newSink()
+	h.Attach("X", s)
+	if got := s.wait(t); got.Issue != 1 {
+		t.Fatalf("held event first, got %+v", got)
+	}
+	if got := s.wait(t); got.Issue != 2 || got.DedupKey != "" {
+		t.Fatalf("catch-up event second and without a dedup key, got %+v", got)
+	}
+	s.none(t)
+}

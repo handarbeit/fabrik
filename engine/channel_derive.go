@@ -145,6 +145,12 @@ func (ce *channelEvents) derive(key string, st *itemstate.ItemState, d *dirtyIte
 }
 
 func (ce *channelEvents) pauseEvent(m *itemMemo, st *itemstate.ItemState, key string, res attention.Result, now time.Time) channelevents.Event {
+	return ce.withComment(m, st, ce.e.pauseEventFor(st, key, res, now))
+}
+
+// pauseEventFor builds the pause-family event for an item without touching any
+// per-item memory, so the live deriver and the catch-up snapshot share it.
+func (e *Engine) pauseEventFor(st *itemstate.ItemState, key string, res attention.Result, now time.Time) channelevents.Event {
 	var typ channelevents.EventType
 	var lead string
 	switch key {
@@ -157,14 +163,14 @@ func (ce *channelEvents) pauseEvent(m *itemMemo, st *itemstate.ItemState, key st
 	default:
 		typ, lead = channelevents.Paused, "is paused"
 	}
-	ev := ce.e.baseEvent(st, typ)
+	ev := e.baseEvent(st, typ)
 	ev.Content = fmt.Sprintf("%s %s: %s", issueRef(st.Repo, st.Number), lead, res.Summary)
 	ev.Meta["code"] = res.Code
 	ev.Meta["reason"] = res.Summary
 	if !res.ProgressAt.IsZero() {
 		ev.Meta["progress_age_seconds"] = strconv.FormatInt(secs(now.Sub(res.ProgressAt)), 10)
 	}
-	return ce.withComment(m, st, ev)
+	return ev
 }
 
 // cycleNearEvents fires cycle-limit-near when a counter reaches limit-1, once
