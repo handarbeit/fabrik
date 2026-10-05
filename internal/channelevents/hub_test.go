@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -295,8 +296,16 @@ func TestHubPruneAbandonedSubscriberAndOldEvents(t *testing.T) {
 	h.Prune(now.Add(2 * time.Hour))
 	s := newSink()
 	h.Attach("old", s)
-	if got := s.wait(t); got.Type != EventsDropped {
+	got := s.wait(t)
+	if got.Type != EventsDropped {
 		t.Fatalf("aged-out event should be replaced by a drop notice, got %+v", got)
+	}
+	// An expiry must name the lost event type and blame expiry, not overflow.
+	if got.Meta["dropped_types"] != "merged x1" || got.Meta["expired"] != "1" {
+		t.Errorf("expiry notice meta = %v, want dropped_types=merged x1 expired=1", got.Meta)
+	}
+	if strings.Contains(got.Content, "overflow") || !strings.Contains(got.Content, "expired") {
+		t.Errorf("expiry notice content = %q, want an expiry cause, not overflow", got.Content)
 	}
 	setClock(now.Add(72 * time.Hour))
 	h.Subscribe(Subscription{Subscriber: "gone", Repos: []string{"o/r"}})

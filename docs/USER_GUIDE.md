@@ -3498,7 +3498,7 @@ Scopes combine with AND; entries within one list with OR. Account-wide events (`
 | `landing-verification-failed` | the credited PR did not merge; the issue was reopened | |
 | `claude-limit-suspended`, `claude-limit-lifted` | the account-wide Claude usage-limit suspension began or ended | `until` |
 | `daemon-unreachable`, `daemon-reachable` | emitted by `fabrik mcp` itself when the daemon connection stays down more than 10 s and when it recovers | `error` / `down_for_seconds` |
-| `events-dropped`, `digest` | bookkeeping: the held queue overflowed; a batched delivery | `count`, `dropped_types` (e.g. `label-applied x4`) |
+| `events-dropped`, `digest` | bookkeeping: held events were lost to queue overflow or aged out; a batched delivery | `count`, `dropped_types` (e.g. `label-applied x4`), `expired` (how many aged out, when any did) |
 | `stream-superseded` | emitted by `fabrik mcp` itself: another session attached under the same subscriber name and took over this stream | `subscriber` |
 
 A pause is reported once, as the transition into the state — not once per poll — and a restart announces nothing about items already paused. The exact derivation of each event is in [`docs/state-machine.md` §7.14](state-machine.md#714-channel-events-proactive-push-to-fabrik-mcp-sessions-1968).

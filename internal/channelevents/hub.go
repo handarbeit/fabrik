@@ -392,7 +392,7 @@ func (h *Hub) Unsubscribe(subscriberName, id string) int {
 	h.mu.Unlock()
 	if drop != nil {
 		drop.mu.Lock()
-		drop.q.Entries, drop.q.Dropped, drop.q.DroppedTypes = nil, 0, nil
+		drop.q.Entries, drop.q.Dropped, drop.q.DroppedTypes, drop.q.Expired = nil, 0, nil, 0
 		if drop.att == nil {
 			_ = os.Remove(drop.path)
 		} else {

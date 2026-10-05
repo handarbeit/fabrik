@@ -27,8 +27,11 @@ type queueFile struct {
 	// DroppedTypes breaks Dropped down by event type so the drop notice can name
 	// what was lost (a lost validate-settled is not the same as a lost label event).
 	DroppedTypes map[EventType]int `json:"dropped_types,omitempty"`
-	NextSeq      uint64            `json:"next_seq"`
-	Entries      []entry           `json:"entries"`
+	// Expired is how many of Dropped aged out (MaxAge) rather than being evicted
+	// by overflow, so the notice names the right cause.
+	Expired int     `json:"expired,omitempty"`
+	NextSeq uint64  `json:"next_seq"`
+	Entries []entry `json:"entries"`
 }
 
 // noteDropped counts one discarded entry of type t toward the drop notice.
@@ -87,13 +90,15 @@ func (q *queueFile) remove(seqs map[uint64]bool) {
 	q.Entries = out
 }
 
-// pruneOlderThan drops entries older than cutoff, counting them as dropped.
+// pruneOlderThan drops entries older than cutoff, counting them (by type) as
+// dropped and as expired.
 func (q *queueFile) pruneOlderThan(cutoff time.Time) bool {
 	changed := false
 	out := q.Entries[:0:0]
 	for _, e := range q.Entries {
 		if e.Event.At.Before(cutoff) && !e.Event.At.IsZero() {
-			q.Dropped++
+			q.noteDropped(e.Event.Type)
+			q.Expired++
 			changed = true
 			continue
 		}
@@ -125,6 +130,8 @@ type batch struct {
 	events  []Event
 	seqs    map[uint64]bool
 	dropped int
+	// expired is how many of dropped aged out rather than overflowed.
+	expired int
 	// droppedTypes is the per-type breakdown the notice reports; subtracted from
 	// the queue once the notice is delivered.
 	droppedTypes map[EventType]int
@@ -133,6 +140,7 @@ type batch struct {
 // clearDropped subtracts a delivered notice's counts from the queue.
 func (q *queueFile) clearDropped(b batch) {
 	q.Dropped -= b.dropped
+	q.Expired -= b.expired
 	for t, n := range b.droppedTypes {
 		if q.DroppedTypes[t] -= n; q.DroppedTypes[t] <= 0 {
 			delete(q.DroppedTypes, t)
@@ -141,6 +149,9 @@ func (q *queueFile) clearDropped(b batch) {
 	if q.Dropped <= 0 {
 		q.Dropped, q.DroppedTypes = 0, nil
 	}
+	if q.Expired < 0 || q.Dropped == 0 {
+		q.Expired = 0
+	}
 }
 
 // next picks the next deliverable batch at time now. When nothing is due it
@@ -148,8 +159,9 @@ func (q *queueFile) clearDropped(b batch) {
 func (q *queueFile) next(now time.Time) (b batch, wait time.Duration, ok bool) {
 	if q.Dropped > 0 {
 		return batch{
-			events:       []Event{dropNotice(q.Dropped, q.DroppedTypes, now)},
+			events:       []Event{dropNotice(q.Dropped, q.Expired, q.DroppedTypes, now)},
 			dropped:      q.Dropped,
+			expired:      q.Expired,
 			droppedTypes: copyCounts(q.DroppedTypes),
 		}, 0, true
 	}
@@ -207,13 +219,25 @@ func describeCounts(m map[EventType]int) string {
 	return strings.Join(parts, ", ")
 }
 
-func dropNotice(n int, types map[EventType]int, now time.Time) Event {
+func dropNotice(n, expired int, types map[EventType]int, now time.Time) Event {
 	word := "events"
 	if n == 1 {
 		word = "event"
 	}
-	content := fmt.Sprintf("%d %s dropped while no session was attached (queue overflow); non-urgent events are discarded first, oldest first", n, word)
+	var cause string
+	switch {
+	case expired >= n:
+		cause = "expired: held longer than the retention window"
+	case expired > 0:
+		cause = fmt.Sprintf("queue overflow, and %d expired after the retention window", expired)
+	default:
+		cause = "queue overflow; non-urgent events are discarded first, oldest first"
+	}
+	content := fmt.Sprintf("%d %s dropped while no session was attached (%s)", n, word, cause)
 	meta := map[string]string{"count": strconv.Itoa(n)}
+	if expired > 0 {
+		meta["expired"] = strconv.Itoa(expired)
+	}
 	if len(types) > 0 {
 		desc := describeCounts(types)
 		content += ": " + desc
