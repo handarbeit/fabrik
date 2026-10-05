@@ -1,0 +1,10 @@
+{
+  "provenance": {
+    "operation": "rerun_failed_jobs",
+    "endpoint": "POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun-failed-jobs",
+    "recorded_at": "2026-10-05T00:00:00Z",
+    "source_repo": "shape transcribed from GitHub's documented rerun-failed-jobs response (201, empty object); NOT recorded live",
+    "scrubbed": true
+  },
+  "response": {}
+}

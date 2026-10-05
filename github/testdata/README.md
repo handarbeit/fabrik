@@ -151,6 +151,13 @@ finding.
 | `mark_pr_ready` | GraphQL mutation | sandbox (`fabrik-test-alpha`) |
 | `merge_pr` | REST mutation | sandbox (`fabrik-test-alpha`) |
 
+**Transcribed, not recorded (#2052).** `fetch_workflow_runs`, `fetch_workflow_run_jobs`
+and `rerun_failed_jobs` (REST, Actions) are transcribed from GitHub's documented
+response shapes — the `provenance.source_repo` field says so. The engine's own
+credentials may lack the `actions` permission, and a `startup_failure` run cannot
+be induced on demand, so they were not captured live; re-record them with
+`record-fixtures.sh` once a bed with the permission and such a run exists.
+
 **Schema-validated (R1) but fixture-free (R2).** These are enumerated in
 `wire_contract_test.go`'s registry and validated against the real schema on
 every `go test` run, but their `httptest` tests (where they still exist)

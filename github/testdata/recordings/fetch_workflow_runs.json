@@ -1,0 +1,50 @@
+{
+  "provenance": {
+    "operation": "fetch_workflow_runs",
+    "endpoint": "GET /repos/{owner}/{repo}/actions/runs?head_sha={sha}",
+    "recorded_at": "2026-10-05T00:00:00Z",
+    "source_repo": "shape transcribed from GitHub's documented workflow-runs response (docs.github.com/rest/actions/workflow-runs); NOT recorded live — re-record with scripts/wire-contract/record-fixtures.sh when a startup_failure run is available",
+    "scrubbed": true
+  },
+  "response": {
+    "total_count": 2,
+    "workflow_runs": [
+      {
+        "id": 37244372903,
+        "name": "CI",
+        "node_id": "WFR_kwLOExample",
+        "head_branch": "fabrik/merge-train-trial-1",
+        "head_sha": "498cb6489d52d89ec4e189e6cf00e9be24fb496a",
+        "path": ".github/workflows/ci.yml",
+        "run_number": 412,
+        "event": "pull_request",
+        "status": "completed",
+        "conclusion": "startup_failure",
+        "workflow_id": 1234567,
+        "url": "https://api.github.com/repos/example-org/example-repo/actions/runs/37244372903",
+        "html_url": "https://github.com/example-org/example-repo/actions/runs/37244372903",
+        "created_at": "2026-10-04T10:00:00Z",
+        "updated_at": "2026-10-04T10:00:03Z",
+        "run_attempt": 1
+      },
+      {
+        "id": 37244372904,
+        "name": "Lint",
+        "node_id": "WFR_kwLOExample2",
+        "head_branch": "fabrik/merge-train-trial-1",
+        "head_sha": "498cb6489d52d89ec4e189e6cf00e9be24fb496a",
+        "path": ".github/workflows/lint.yml",
+        "run_number": 98,
+        "event": "pull_request",
+        "status": "completed",
+        "conclusion": "success",
+        "workflow_id": 1234568,
+        "url": "https://api.github.com/repos/example-org/example-repo/actions/runs/37244372904",
+        "html_url": "https://github.com/example-org/example-repo/actions/runs/37244372904",
+        "created_at": "2026-10-04T10:00:00Z",
+        "updated_at": "2026-10-04T10:02:00Z",
+        "run_attempt": 1
+      }
+    ]
+  }
+}
