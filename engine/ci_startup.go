@@ -321,3 +321,39 @@ func (e *Engine) rerunFailedWorkflowRuns(logRepo, owner, repo string, failed []g
 	}
 	return true
 }
+
+// infraNote renders a TrainCIInfra diagnostic's note for logs.
+func infraNote(diag *trainCIDiagnostic) string {
+	if diag == nil || diag.Note == "" {
+		return "no detail"
+	}
+	return diag.Note
+}
+
+// markInfraAbandon starts the post-abandon cooldown for a train partition.
+func (e *Engine) markInfraAbandon(trainKey string) {
+	until := time.Now().Add(e.ciInfraTimingOrDefault().abandonCooldown)
+	e.mergeTrainInfraMu.Lock()
+	defer e.mergeTrainInfraMu.Unlock()
+	if e.mergeTrainInfraCooldown == nil {
+		e.mergeTrainInfraCooldown = make(map[string]time.Time)
+	}
+	e.mergeTrainInfraCooldown[trainKey] = until
+}
+
+// infraCooldownRemaining reports whether trainKey is still inside its
+// post-abandon cooldown and how long remains. An elapsed entry is dropped.
+func (e *Engine) infraCooldownRemaining(trainKey string) (time.Duration, bool) {
+	e.mergeTrainInfraMu.Lock()
+	defer e.mergeTrainInfraMu.Unlock()
+	until, ok := e.mergeTrainInfraCooldown[trainKey]
+	if !ok {
+		return 0, false
+	}
+	remaining := time.Until(until)
+	if remaining <= 0 {
+		delete(e.mergeTrainInfraCooldown, trainKey)
+		return 0, false
+	}
+	return remaining, true
+}

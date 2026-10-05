@@ -29,6 +29,14 @@ const (
 	TrainCIPending TrainCIResult = iota // CI not yet resolved (timeout or still running)
 	TrainCIGreen                        // all required checks passed
 	TrainCIRed                          // at least one required check failed
+	// TrainCIInfra means the CI provider, not the code under test, failed to
+	// produce a verdict: CI never started (a startup_failure run) and
+	// retriggering it did not help (#2052, ADR 2052). It is never red, never
+	// pending and never charged — the members stay Queued, nothing is ejected,
+	// paused or counted toward MaxMergeTrainEjections or the runaway guard's
+	// trial counters, and the (repo, base) partition's train is held off for
+	// trainInfraAbandonCooldown. Placed last so existing iota values do not shift.
+	TrainCIInfra
 )
 
 // trainMember pairs a batch member's ProjectItem with its linked PR number and head SHA.
@@ -455,6 +463,14 @@ func (e *Engine) dispatchMergeTrainWorker(ctx context.Context, batch []gh.Projec
 		batchNumbers[item.Number] = true
 	}
 
+	// #2052: a trial was recently abandoned because CI never started. Nothing was
+	// charged, so the runaway guard cannot bound a permanently broken workflow;
+	// this cooldown does, retrying every few minutes rather than every poll.
+	if remaining, held := e.infraCooldownRemaining(trainKey); held {
+		e.logfRepo(repoKey, "merge-train", "train for %s held off for %s after CI infrastructure failure on the last trial\n", trainKey, remaining.Round(time.Second))
+		return
+	}
+
 	// Use LoadOrStore so the check-and-register is atomic: two concurrent callers
 	// can never both pass the "not loaded" path and launch duplicate workers.
 	// Keyed on trainKey (repo, base), not bare repoKey (#1648 R2): two different
@@ -480,6 +496,8 @@ func (e *Engine) dispatchMergeTrainWorker(ctx context.Context, batch []gh.Projec
 				e.logfRepo(repoKey, "merge-train", "train CI green for %s (PR #%d) — awaiting landing step\n", trainKey, prNum)
 			case TrainCIRed:
 				e.logfRepo(repoKey, "merge-train", "train CI red for %s (PR #%d) — needs attention\n", trainKey, prNum)
+			case TrainCIInfra:
+				e.logfRepo(repoKey, "merge-train", "train CI infrastructure failure for %s (PR #%d) — trial being abandoned\n", trainKey, prNum)
 			default:
 				e.logfRepo(repoKey, "merge-train", "train CI pending for %s (PR #%d) — still polling\n", trainKey, prNum)
 			}
@@ -1139,6 +1157,14 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 			e.logfRepo(repoKey, "merge-train", "combined Validate pending/timed out for %s — will retry next poll\n", trainKey)
 			e.cleanupTrialArtifacts(p.repoKey(), p.wm, trialName)
 			return
+		case TrainCIInfra:
+			// #2052: CI never started and retriggering did not help. Not the members'
+			// fault: no bisection, ejection, pause or counter — they stay Queued and a
+			// fresh trial forms once the cooldown lapses.
+			e.logfRepo(repoKey, "merge-train", "combined Validate abandoned for %s — CI infrastructure failure (%s); %d member(s) left in Queued, nothing charged\n", trainKey, infraNote(diag), len(survivors))
+			e.cleanupTrialArtifacts(p.repoKey(), p.wm, trialName)
+			e.markInfraAbandon(trainKey)
+			return
 		default: // TrainCIRed
 			if len(survivors) == 1 {
 				// #1440 R1: a red batch of exactly one member has no poisoner to isolate —
@@ -1157,10 +1183,18 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 			state.mu.Lock()
 			state.bisecting = true
 			state.mu.Unlock()
-			nextSurvivors, fellBack, runaway := e.handleRedBatch(ctx, state, p, survivors, diag)
+			nextSurvivors, fellBack, runaway, infra := e.handleRedBatch(ctx, state, p, survivors, diag)
 			state.mu.Lock()
 			state.bisecting = false
 			state.mu.Unlock()
+			if infra {
+				// #2052: a bisection sub-trial hit a CI infrastructure failure. Abort the
+				// whole episode — nothing was ejected yet (ejection follows bisection),
+				// every member stays Queued, nothing is charged for the abandoned trial.
+				e.logfRepo(repoKey, "merge-train", "bisection for %s aborted — CI infrastructure failure on a sub-trial; %d member(s) left in Queued, nothing charged\n", trainKey, len(survivors))
+				e.markInfraAbandon(trainKey)
+				return
+			}
 			if runaway {
 				// Runaway guard fired inside bisect or landOneAtATime. partitionBase
 				// (sentinel-aware), not p.baseBranch — see the Hook 1 call above.
@@ -1398,10 +1432,14 @@ func (e *Engine) assembleTrialBranch(ctx context.Context, p trialParams, members
 // entire premise. Counting it turned a successful bisection into a false runaway trip: the
 // survivor-validation trial that was about to land got counted as a failure one second before
 // landing. Red results, TrainCIPending, and assembly errors are still counted unconditionally —
-// they represent no progress, exactly as before this fix.
+// they represent no progress, exactly as before this fix. TrainCIInfra (#2052) is the one other
+// exemption: CI never ran, so the trial carries no information about the members.
 func (e *Engine) assembleAndValidate(ctx context.Context, p trialParams, members []trainMember, trialName string) ([]trainMember, TrainCIResult, int, *trainCIDiagnostic, error) {
 	survivors, result, prNum, diag, err := e.assembleAndValidateInner(ctx, p, members, trialName)
-	if result != TrainCIGreen {
+	// #2052: an abandoned-for-CI-infrastructure trial is not a trial in the
+	// guard's sense — it says nothing about the members — so it is not recorded
+	// either; that is what "leave the members uncharged" means for R2/R4.
+	if result != TrainCIGreen && result != TrainCIInfra {
 		e.recordTrial(p.trainKey)
 	}
 	return survivors, result, prNum, diag, err
@@ -1474,10 +1512,13 @@ func (e *Engine) assembleAndValidateInner(ctx context.Context, p trialParams, me
 // diagnostic, (nil, nil, true, false) when the redness is a non-isolable cross-PR interaction
 // (both halves green) or the per-episode cost budget (*used vs costCap) is exhausted — either
 // degrades to the FR-5 one-at-a-time fallback (D-e) — or (nil, nil, false, true) when the
-// runaway guard fires. red is assumed to be a validated-red set.
-func (e *Engine) bisect(ctx context.Context, p trialParams, red []trainMember, diag *trainCIDiagnostic, used *int, costCap int) (*trainMember, *trainCIDiagnostic, bool, bool) {
+// runaway guard fires. red is assumed to be a validated-red set. The fifth return is
+// true when a sub-trial was abandoned for CI infrastructure (#2052): the caller must abort
+// the episode — an infra sub-trial is neither a red half nor a green one, and treating it as
+// green would read "both halves green" and mis-degrade to one-at-a-time landing.
+func (e *Engine) bisect(ctx context.Context, p trialParams, red []trainMember, diag *trainCIDiagnostic, used *int, costCap int) (*trainMember, *trainCIDiagnostic, bool, bool, bool) {
 	if len(red) == 1 {
-		return &red[0], diag, false, false
+		return &red[0], diag, false, false, false
 	}
 
 	repoKey := p.repoKey()
@@ -1486,7 +1527,7 @@ func (e *Engine) bisect(ctx context.Context, p trialParams, red []trainMember, d
 	for _, half := range [][]trainMember{red[:mid], red[mid:]} {
 		if *used >= costCap {
 			e.logfRepo(repoKey, "merge-train", "bisection cost cap (%d validations) reached — degrading to one-at-a-time fallback\n", costCap)
-			return nil, nil, true, false
+			return nil, nil, true, false, false
 		}
 		trialName := p.nextTrialName()
 		survivors, result, _, halfDiag, err := e.assembleAndValidate(ctx, p, half, trialName)
@@ -1495,12 +1536,15 @@ func (e *Engine) bisect(ctx context.Context, p trialParams, red []trainMember, d
 		if err != nil {
 			e.logfRepo(repoKey, "merge-train", "bisection trial failed to assemble: %v — degrading to one-at-a-time fallback\n", err)
 			if _, tripped := e.isRunawayTripped(trainKey); tripped {
-				return nil, nil, false, true
+				return nil, nil, false, true, false
 			}
-			return nil, nil, true, false
+			return nil, nil, true, false, false
 		}
 		if _, tripped := e.isRunawayTripped(trainKey); tripped {
-			return nil, nil, false, true
+			return nil, nil, false, true, false
+		}
+		if result == TrainCIInfra {
+			return nil, nil, false, false, true
 		}
 		if result == TrainCIRed && len(survivors) > 0 {
 			return e.bisect(ctx, p, survivors, halfDiag, used, costCap)
@@ -1508,7 +1552,7 @@ func (e *Engine) bisect(ctx context.Context, p trialParams, red []trainMember, d
 	}
 
 	// Both halves green: the redness spans the split — a non-isolable interaction (D-e).
-	return nil, nil, true, false
+	return nil, nil, true, false, false
 }
 
 // handleRedBatch bisects a red batch to isolate and eject the poisoning member (FR-1/FR-2),
@@ -1519,23 +1563,28 @@ func (e *Engine) bisect(ctx context.Context, p trialParams, red []trainMember, d
 // isolate a single culprit within the cost budget (a non-isolable interaction or cost-cap
 // exhaustion), it degrades to the one-at-a-time fallback (FR-5), which lands/ejects every
 // member itself, and returns (nil, true, false). Returns (nil, false, true) when the runaway
-// guard fires inside bisect or landOneAtATime. The cost budget is per red-batch episode: it
+// guard fires inside bisect or landOneAtATime. The fourth return is true when a bisection
+// sub-trial was abandoned for CI infrastructure (#2052) — nothing was ejected and the caller
+// leaves every member Queued. The cost budget is per red-batch episode: it
 // starts at 1 (the initial red validation) and is capped at effectiveBisectCap().
-func (e *Engine) handleRedBatch(ctx context.Context, state *mergeTrainWorkerState, p trialParams, red []trainMember, diag *trainCIDiagnostic) ([]trainMember, bool, bool) {
+func (e *Engine) handleRedBatch(ctx context.Context, state *mergeTrainWorkerState, p trialParams, red []trainMember, diag *trainCIDiagnostic) ([]trainMember, bool, bool, bool) {
 	if e.trainRedBatchHook != nil {
 		e.trainRedBatchHook()
 	}
 	used := 1 // the initial red validation counts toward the per-episode budget
 	costCap := e.effectiveBisectCap()
 
-	poisoner, isolationDiag, fellBack, runaway := e.bisect(ctx, p, red, diag, &used, costCap)
+	poisoner, isolationDiag, fellBack, runaway, infra := e.bisect(ctx, p, red, diag, &used, costCap)
+	if infra {
+		return nil, false, false, true
+	}
 	if runaway {
-		return nil, false, true
+		return nil, false, true, false
 	}
 	if fellBack {
 		e.logfRepo(p.repoKey(), "merge-train", "could not isolate a single poisoner for %s/%s (%d/%d validations used) — degrading to one-at-a-time landing of %d member(s)\n", p.owner, p.repo, used, costCap, len(red))
 		runaway = e.landOneAtATime(ctx, state, p, red)
-		return nil, true, runaway
+		return nil, true, runaway, false
 	}
 
 	// Eject the isolated poisoner (D-a shared counter, D-c comment, cap→pause reuse). red —
@@ -1555,7 +1604,7 @@ func (e *Engine) handleRedBatch(ctx context.Context, state *mergeTrainWorkerStat
 			survivors = append(survivors, red[i])
 		}
 	}
-	return survivors, false, false
+	return survivors, false, false, false
 }
 
 // conflictInLineRE matches a git merge conflict line whose path follows "Merge
@@ -1810,6 +1859,13 @@ func (e *Engine) landOneAtATime(ctx context.Context, state *mergeTrainWorkerStat
 			// rather than ejectMember's multi-member wording, which would be equally
 			// misleading here.
 			e.ejectRedSingleton(state.projectID, p.owner, p.repo, m, diag)
+		case TrainCIInfra:
+			// #2052: CI never started for this singleton. Every later member would hit the
+			// same provider failure, so stop the whole fallback; all stay Queued, nothing charged.
+			e.cleanupTrialArtifacts(p.repoKey(), p.wm, trialName)
+			e.logf(m.item.Number, "merge-train", "combined Validate for singleton #%d abandoned — CI infrastructure failure (%s); leaving the remaining member(s) in Queued\n", m.item.Number, infraNote(diag))
+			e.markInfraAbandon(trainKey)
+			return false
 		default: // TrainCIPending
 			e.cleanupTrialArtifacts(p.repoKey(), p.wm, trialName)
 			e.logf(m.item.Number, "merge-train", "combined Validate pending for singleton #%d — leaving in Queued\n", m.item.Number)
@@ -4706,7 +4762,7 @@ func (e *Engine) landGreenBatch(ctx context.Context, state *mergeTrainWorkerStat
 		// The rebase re-validate's diagnostic is intentionally discarded: a non-green
 		// result here dissolves the batch (see below), and dissolveBatch's messaging is
 		// out of this issue's scope (#1420) — only ejectMember's comments are in scope.
-		newSurvivors, result, newPRNum, _, aerr := e.assembleAndValidate(ctx, p, survivors, newTrialName)
+		newSurvivors, result, newPRNum, diag, aerr := e.assembleAndValidate(ctx, p, survivors, newTrialName)
 		e.cleanupTrialArtifacts(p.repoKey(), p.wm, oldTrialName)
 
 		state.mu.Lock()
@@ -4740,6 +4796,15 @@ func (e *Engine) landGreenBatch(ctx context.Context, state *mergeTrainWorkerStat
 			return
 		}
 
+		if result == TrainCIInfra {
+			// #2052: CI never started on the rebased trial. Not a verdict on the members —
+			// discard the trial and leave them Queued, without the "batch dissolved"
+			// comment a red re-validation earns.
+			e.logfRepo(p.repoKey(), "merge-train", "re-validation after rebase abandoned for %s/%s — CI infrastructure failure (%s); %d member(s) left in Queued, nothing charged\n", p.owner, p.repo, infraNote(diag), len(newSurvivors))
+			e.cleanupTrialArtifacts(p.repoKey(), p.wm, newTrialName)
+			e.markInfraAbandon(p.trainKey)
+			return
+		}
 		if result != TrainCIGreen {
 			// A red/pending re-validation after a rebase dissolves (disjoint from
 			// bisection); the next poll re-forms a fresh train that bisects cleanly.
@@ -4991,7 +5056,14 @@ func (e *Engine) resumeTrain(ctx context.Context, state *mergeTrainWorkerState, 
 	if e.trainValidateFn != nil {
 		result, _ = e.trainValidateFn(ctx, survivors)
 	} else {
-		result, _ = e.pollTrainCI(ctx, p.owner, p.repo, pr.Number, pr.HeadSHA)
+		var diag *trainCIDiagnostic
+		result, diag = e.pollTrainCI(ctx, p.owner, p.repo, pr.Number, pr.HeadSHA)
+		if result == TrainCIInfra {
+			// #2052: keep today's pending behaviour (dissolve and re-form), but hold the
+			// partition off for the cooldown so a broken workflow is not retried every poll.
+			e.logfRepo(repoKey, "merge-train", "reconstruct: resumed trial abandoned — CI infrastructure failure (%s)\n", infraNote(diag))
+			e.markInfraAbandon(p.trainKey)
+		}
 	}
 
 	if result == TrainCIGreen {
@@ -5059,6 +5131,15 @@ func (e *Engine) pollTrainCI(ctx context.Context, owner, repo string, prNum int,
 
 	var lastPending, lastFailed []gh.CheckRun
 
+	// #2052: per-trial CI-infrastructure state. Local to this call — one call is
+	// one trial — so it is single-goroutine by construction and every bisection
+	// sub-trial gets its own retrigger budget and its own single failed-job re-run.
+	var sw startupWatch
+	var rr rerunState
+	actionsRefused := false
+	timing := e.ciInfraTimingOrDefault()
+	logRepo := owner + "/" + repo
+
 	logTimeout := func() {
 		if len(lastFailed) > 0 || len(lastPending) > 0 {
 			e.logfRepo(owner+"/"+repo, "merge-train", "CI wait timeout for integration PR #%d — pending: %s; failed: %s\n",
@@ -5114,8 +5195,28 @@ func (e *Engine) pollTrainCI(ctx context.Context, owner, repo string, prNum int,
 				// beyond the opt-in RequiredStatusContexts config, and a
 				// wrong-direction Strict call costs one bisection cycle, not
 				// a silently reintroduced version of this issue.
-				e.logfRepo(owner+"/"+repo, "merge-train", "trial %s red — failed check(s): %s\n", trialSHA, describeCheckRuns(failed))
-				return TrainCIRed, &trainCIDiagnostic{FailedChecks: failed, PRNum: prNum, TrialSHA: trialSHA}
+				//
+				// #2052 R5 softens "any failure is red" by exactly one re-run: the first
+				// failure re-runs the failed jobs and keeps polling, only a second failure
+				// is red. A failure with no re-runnable Actions run behind it, or a re-run
+				// request that errors, is red at once, exactly as before.
+				if !rr.done {
+					if e.rerunFailedWorkflowRuns(logRepo, owner, repo, failed) {
+						rr = rerunState{done: true, firstFailedIDs: checkRunIDSet(failed), at: time.Now()}
+						e.logfRepo(logRepo, "merge-train", "trial %s: failed check(s): %s — re-running the failed jobs once before judging the trial red\n", trialSHA, describeCheckRuns(failed))
+					} else {
+						e.logfRepo(logRepo, "merge-train", "trial %s red — failed check(s): %s\n", trialSHA, describeCheckRuns(failed))
+						return TrainCIRed, &trainCIDiagnostic{FailedChecks: failed, PRNum: prNum, TrialSHA: trialSHA}
+					}
+				} else if hasNewCheckRun(failed, rr.firstFailedIDs) || time.Since(rr.at) >= timing.rerunSettleDwell {
+					// A failing latest-per-name run the first failure did not contain means the
+					// re-run itself failed; the dwell bounds the case where the re-run never
+					// materialised and only the stale original is visible.
+					e.logfRepo(logRepo, "merge-train", "trial %s red after the failed-job re-run — failed check(s): %s\n", trialSHA, describeCheckRuns(failed))
+					return TrainCIRed, &trainCIDiagnostic{FailedChecks: failed, PRNum: prNum, TrialSHA: trialSHA}
+				}
+				// Otherwise the re-run was accepted but its check runs have not replaced
+				// the stale failure yet: keep polling rather than count the same failure twice.
 			}
 			if status == gh.CheckRunsReady {
 				// ADR-933: don't declare the trial green until any configured
@@ -5162,12 +5263,55 @@ func (e *Engine) pollTrainCI(ctx context.Context, owner, repo string, prNum int,
 				e.logfRepo(owner+"/"+repo, "merge-train", "required status context(s) failed for %s: %v\n", trialSHA, rcFailed)
 				return TrainCIRed, &trainCIDiagnostic{FailedContexts: rcFailed, PRNum: prNum, TrialSHA: trialSHA}
 			}
+			// #2052: zero check runs may be a CI run that never started (a
+			// startup_failure creates no job, so no check run). Read the workflow
+			// runs — only on this path, so the extra API cost is bounded — BEFORE the
+			// green shortcut below, which would otherwise land a trial whose CI never
+			// ran whenever branch protection requires no checks. A refused or failed
+			// read behaves exactly as before.
+			holdForCI := false
+			if !actionsRefused {
+				runs, ok, refused := e.fetchWorkflowRunsSoft(logRepo, owner, repo, trialSHA)
+				actionsRefused = refused
+				if ok {
+					now := time.Now()
+					action, run := sw.observe(runs, now, timing.retriggerNewRunDwell)
+					switch action {
+					case startupRetrigger:
+						e.logfRepo(logRepo, "merge-train", "trial %s: CI never started — %s; retriggering by closing and reopening PR #%d (retrigger %d/%d)\n",
+							trialSHA, describeStartupRun(run), prNum, sw.retriggers+1, maxCIRetriggers)
+						if err := e.retriggerPR(logRepo, owner, repo, prNum); err != nil {
+							e.logfRepo(logRepo, "merge-train", "trial %s: %v — abandoning the trial\n", trialSHA, err)
+							return TrainCIInfra, &trainCIDiagnostic{Note: err.Error(), PRNum: prNum, TrialSHA: trialSHA}
+						}
+						sw.retriggered(runs, time.Now())
+						holdForCI = true
+					case startupWait:
+						holdForCI = true
+					case startupAbandon:
+						note := fmt.Sprintf("CI never started on the trial after %d retrigger(s): %s", sw.retriggers, describeStartupRun(run))
+						e.logfRepo(logRepo, "merge-train", "trial %s: %s — abandoning the trial; members stay Queued, nothing charged\n", trialSHA, note)
+						return TrainCIInfra, &trainCIDiagnostic{Note: note, PRNum: prNum, TrialSHA: trialSHA}
+					default:
+						// A workflow run that exists but has not finished is CI on its way:
+						// with no check run yet there is nothing else to say so, and the green
+						// shortcut would read the absence as completeness.
+						for _, r := range runs {
+							if r.Status != "completed" {
+								e.logfRepo(logRepo, "merge-train", "trial %s has zero check runs but %s is %s — still waiting\n", trialSHA, describeStartupRun(r), r.Status)
+								holdForCI = true
+								break
+							}
+						}
+					}
+				}
+			}
 			// #1153: with zero check runs there is no per-check completeness
 			// signal to consult at all, so an accepted mergeable_state is the
 			// only remaining evidence that nothing is outstanding — this is
 			// the one place mergeable_state is genuinely load-bearing for
 			// green.
-			if mergeableAccepted && rcStatus == gh.RequiredContextsSatisfied {
+			if !holdForCI && mergeableAccepted && rcStatus == gh.RequiredContextsSatisfied {
 				// #1822: see the all-green branch above.
 				if hold, why := e.ciSuiteHold(e.client, owner, repo, trialSHA); hold {
 					e.logfRepo(owner+"/"+repo, "merge-train", "trial %s has zero check runs but %s — still waiting\n", trialSHA, why)
