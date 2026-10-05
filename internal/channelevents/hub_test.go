@@ -494,3 +494,57 @@ func TestHubCatchUp(t *testing.T) {
 	}
 	s.none(t)
 }
+
+// A subscriber that stayed attached longer than SubscriberTTL is not abandoned:
+// lastAttach means "last connected", so neither a prune while it is live, nor the
+// prune right after it drops, nor a daemon restart may delete its subscriptions.
+func TestHubPruneKeepsLongAttachedSubscriber(t *testing.T) {
+	now := time.Date(2026, 10, 4, 0, 0, 0, 0, time.UTC)
+	var cmu sync.Mutex
+	clock := now
+	setClock := func(t time.Time) { cmu.Lock(); clock = t; cmu.Unlock() }
+	mod := func(o *Options) {
+		o.Now = func() time.Time { cmu.Lock(); defer cmu.Unlock(); return clock }
+		o.SubscriberTTL = 24 * time.Hour
+	}
+	dir := t.TempDir()
+	h := openHub(t, dir, mod)
+	if _, err := h.Subscribe(Subscription{Subscriber: "X"}); err != nil {
+		t.Fatal(err)
+	}
+	s := newSink()
+	detach := h.Attach("X", s)
+
+	// Attached for far longer than the TTL, then pruned while still live.
+	setClock(now.Add(48 * time.Hour))
+	h.Prune(clock)
+	if n := len(h.Subscriptions("X")); n != 1 {
+		t.Fatalf("live subscriber pruned: %d subscriptions", n)
+	}
+
+	// It drops briefly; the next prune must still see a recent connection.
+	setClock(now.Add(49 * time.Hour))
+	detach()
+	h.Prune(clock)
+	if n := len(h.Subscriptions("X")); n != 1 {
+		t.Fatalf("subscriber pruned right after detaching: %d subscriptions", n)
+	}
+
+	// A subscriber attached at shutdown counts as connected at shutdown, so a
+	// restart after the TTL (Open prunes before anyone re-attaches) keeps it.
+	h.Attach("X", newSink())
+	setClock(now.Add(200 * time.Hour))
+	h.Close()
+	setClock(now.Add(210 * time.Hour))
+	h2 := openHub(t, dir, mod)
+	if n := len(h2.Subscriptions("X")); n != 1 {
+		t.Fatalf("subscriber attached at shutdown pruned on restart: %d subscriptions", n)
+	}
+
+	// An abandoned one is still pruned once it has been away longer than the TTL.
+	setClock(now.Add(300 * time.Hour))
+	h2.Prune(clock)
+	if n := len(h2.Subscriptions("X")); n != 0 {
+		t.Fatalf("abandoned subscriber kept: %d subscriptions", n)
+	}
+}

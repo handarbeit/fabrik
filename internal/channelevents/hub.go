@@ -598,11 +598,21 @@ func (h *Hub) Attach(name string, sink Sink) func() {
 
 func (h *Hub) detach(s *subscriber, a *attachment) {
 	s.mu.Lock()
-	if s.att == a {
+	was := s.att == a
+	if was {
 		s.att = nil
 		close(a.stop)
 	}
 	s.mu.Unlock()
+	if was {
+		// lastAttach is when the subscriber was last connected, so a session that
+		// stayed attached for a long time is not mistaken for an abandoned one the
+		// moment it drops (taken after s.mu is released: h.mu is acquired first).
+		h.mu.Lock()
+		h.lastAttach[s.name] = h.opt.Now()
+		h.saveRegistryLocked()
+		h.mu.Unlock()
+	}
 }
 
 func (h *Hub) drain(s *subscriber, a *attachment) {
@@ -686,6 +696,8 @@ func (h *Hub) Prune(now time.Time) {
 				live := s.att != nil
 				s.mu.Unlock()
 				if live {
+					// Connected right now: fresh, however long ago it attached.
+					h.lastAttach[name] = now
 					continue
 				}
 			}
@@ -739,16 +751,27 @@ func (h *Hub) Close() {
 		atts = append(atts, s)
 	}
 	h.mu.Unlock()
+	var wasAttached []string
 	for _, s := range atts {
 		s.mu.Lock()
 		if s.att != nil {
 			close(s.att.stop)
 			s.att = nil
+			wasAttached = append(wasAttached, s.name)
 		}
 		s.mu.Unlock()
 	}
 	h.wg.Wait()
 	h.mu.Lock()
+	// A session connected at shutdown was connected "now", not at its attach time;
+	// without this a daemon restart after SubscriberTTL would prune it on Open.
+	if len(wasAttached) > 0 {
+		now := h.opt.Now()
+		for _, name := range wasAttached {
+			h.lastAttach[name] = now
+		}
+		h.saveRegistryLocked()
+	}
 	if h.stateTimer != nil {
 		h.stateTimer.Stop()
 	}
