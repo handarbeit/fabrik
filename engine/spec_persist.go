@@ -132,25 +132,30 @@ func (e *Engine) persistSpec(item gh.ProjectItem, stage *stages.Stage, workDir, 
 	content := strings.TrimRight(stripOpenQuestions(body), " \t\r\n") + "\n"
 
 	existing, readErr := os.ReadFile(abs)
-	if readErr == nil && string(existing) == content {
-		return false
-	}
 	if readErr != nil && !os.IsNotExist(readErr) {
 		e.logf(item.Number, "warn", "could not read %s: %v\n", rel, readErr)
 		return false
 	}
-
-	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
-		e.logf(item.Number, "warn", "could not create %s: %v\n", dir, err)
+	// The file matching on disk is not enough: a previous round may have written
+	// it and then failed to commit (index.lock, hook failure), leaving it dirty
+	// or untracked. Only a clean, tracked match means there is nothing to do.
+	if readErr == nil && string(existing) == content && specCleanInHead(workDir, rel) {
 		return false
 	}
-	if err := os.WriteFile(abs, []byte(content), 0o644); err != nil {
-		e.logf(item.Number, "warn", "could not write %s: %v\n", rel, err)
-		return false
+
+	if readErr != nil || string(existing) != content {
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			e.logf(item.Number, "warn", "could not create %s: %v\n", dir, err)
+			return false
+		}
+		if err := os.WriteFile(abs, []byte(content), 0o644); err != nil {
+			e.logf(item.Number, "warn", "could not write %s: %v\n", rel, err)
+			return false
+		}
 	}
 
 	verb := "update"
-	if readErr != nil {
+	if _, err := runGitIn(workDir, "cat-file", "-e", "HEAD:"+rel); err != nil {
 		verb = "add"
 	}
 	if out, err := runGitIn(workDir, "add", "--", rel); err != nil {
@@ -164,6 +169,17 @@ func (e *Engine) persistSpec(item gh.ProjectItem, stage *stages.Stage, workDir, 
 	}
 	e.logf(item.Number, "spec", "%s %s\n", verb, rel)
 	return true
+}
+
+// specCleanInHead reports whether rel is tracked and has no staged or unstaged
+// changes, i.e. the on-disk spec is exactly what HEAD holds. Any git error
+// reports false so the caller falls through to (idempotent) add and commit.
+func specCleanInHead(workDir, rel string) bool {
+	if _, err := runGitIn(workDir, "cat-file", "-e", "HEAD:"+rel); err != nil {
+		return false
+	}
+	out, err := runGitIn(workDir, "status", "--porcelain", "--", rel)
+	return err == nil && strings.TrimSpace(out) == ""
 }
 
 // runGitIn runs git in dir and returns its combined output.

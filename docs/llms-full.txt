@@ -8706,7 +8706,7 @@ Because it keys on the body update rather than on `completed`, a round ending in
 **Rules.**
 - *Slug lock.* If `specs/<issue>-*/` already exists in the worktree (lexically first match), it is reused. Otherwise the slug is derived once from `item.Title` (lowercase ASCII alphanumerics, other runs collapsed to `-`, ≤ 50 characters cut on a `-` boundary, `spec` when nothing remains). The filesystem is the only restart-safe lock (`itemstate` is in-memory); the directory is never renamed.
 - *Projection.* `## Open Questions` — the heading through the next `## ` heading or EOF — is stripped; the rest is written verbatim with one trailing newline. The file is never read back as input.
-- *Commit.* `git add -- <path>` then `git commit -m "docs(spec): add|update <path> for #N" -- <path>`; the pathspec scopes the commit so other dirty or staged worktree state is never captured. A byte-identical projection commits nothing (no empty commits).
+- *Commit.* `git add -- <path>` then `git commit -m "docs(spec): add|update <path> for #N" -- <path>`; the pathspec scopes the commit so other dirty or staged worktree state is never captured. A projection that matches the file **as committed in HEAD** commits nothing (no empty commits); one that matches the file on disk but not HEAD — a previous round wrote it and then failed to commit — is committed on the next round, so a failed commit is retried rather than silently lost.
 - *Failure.* Every error is logged (`[#N warn]`) and non-fatal; the issue body is already updated and remains canonical.
 - *#921 interaction.* `commitsAheadOfBase` ignores commits touching only the item's own spec (§6.7.1), so a delegated coordinator still self-heals to Done.
 

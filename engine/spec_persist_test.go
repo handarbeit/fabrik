@@ -166,6 +166,46 @@ func TestPersistSpec_PathspecCommitIgnoresOtherDirtyState(t *testing.T) {
 	}
 }
 
+// TestPersistSpec_RetriesAfterFailedCommit pins the recovery path: a round that
+// wrote the file but failed to commit must not leave it uncommitted forever
+// when the next round projects the same content.
+func TestPersistSpec_RetriesAfterFailedCommit(t *testing.T) {
+	skipIfNoGit(t)
+	dir := initBareRepo(t)
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+	item := gh.ProjectItem{Number: 14, Title: "Retry"}
+
+	// A failing pre-commit hook makes the first round write the file but not commit it.
+	hook := filepath.Join(dir, ".git", "hooks", "pre-commit")
+	if err := os.MkdirAll(filepath.Dir(hook), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	before := gitOut(t, dir, "rev-parse", "HEAD")
+	if eng.persistSpec(item, specStage(), dir, "## A\nb\n") {
+		t.Fatal("commit should have failed")
+	}
+	if gitOut(t, dir, "rev-parse", "HEAD") != before {
+		t.Fatal("HEAD moved despite failing hook")
+	}
+
+	// Hook fixed; the same body must now be committed as an add.
+	if err := os.Remove(hook); err != nil {
+		t.Fatal(err)
+	}
+	if !eng.persistSpec(item, specStage(), dir, "## A\nb\n") {
+		t.Fatal("unchanged-but-uncommitted spec must be committed on the next round")
+	}
+	if msg := gitOut(t, dir, "log", "-1", "--format=%s"); !strings.HasPrefix(msg, "docs(spec): add specs/14-retry/spec.md") {
+		t.Errorf("commit msg = %q", msg)
+	}
+	if eng.persistSpec(item, specStage(), dir, "## A\nb\n") {
+		t.Error("now-committed spec must be a no-op")
+	}
+}
+
 func TestPersistSpec_ReusesExistingDirAfterRestart(t *testing.T) {
 	skipIfNoGit(t)
 	dir := initBareRepo(t)
