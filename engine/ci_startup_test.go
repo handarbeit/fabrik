@@ -235,3 +235,26 @@ func TestHasNewCheckRun(t *testing.T) {
 		t.Error("a new id: want true")
 	}
 }
+
+// #2052 review: the stage gate's per-PR retrigger state must not grow without
+// bound — an entry not consulted for startupStateTTL is dropped on the next
+// consultation, while a fresh one and the PR being consulted survive.
+func TestStartupStateForLocked_PrunesStaleEntries(t *testing.T) {
+	e := &Engine{}
+	e.startupWatchMu.Lock()
+	defer e.startupWatchMu.Unlock()
+	e.startupStateForLocked("o/r", 1, "sha1")
+	e.startupStateForLocked("o/r", 2, "sha2")
+	e.startupWatches[startupWatchKey("o/r", 1)].touched = time.Now().Add(-2 * startupStateTTL)
+
+	e.startupStateForLocked("o/r", 3, "sha3")
+
+	if _, ok := e.startupWatches[startupWatchKey("o/r", 1)]; ok {
+		t.Errorf("stale entry for PR 1 was not pruned")
+	}
+	for _, n := range []int{2, 3} {
+		if _, ok := e.startupWatches[startupWatchKey("o/r", n)]; !ok {
+			t.Errorf("live entry for PR %d was pruned", n)
+		}
+	}
+}

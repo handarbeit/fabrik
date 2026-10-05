@@ -363,7 +363,14 @@ type prStartupState struct {
 	headSHA       string
 	watch         startupWatch
 	lastRetrigger time.Time
+	touched       time.Time // last consultation, for pruning
 }
+
+// startupStateTTL is how long a PR's retrigger state is kept after the gate last
+// consulted it. Entries are only ever created for PRs on the zero-check-run
+// path, and nothing else removes them (a merged or closed PR is simply never
+// consulted again), so each consultation prunes the entries past this age.
+const startupStateTTL = 24 * time.Hour
 
 // ciRetriggerGrace is how long after a retrigger a closed PR reads as
 // transient rather than "closed without merging" (see settlePRMergeStateWith).
@@ -379,12 +386,19 @@ func (e *Engine) startupStateForLocked(repoStr string, prNum int, headSHA string
 	if e.startupWatches == nil {
 		e.startupWatches = make(map[string]*prStartupState)
 	}
+	now := time.Now()
+	for k, old := range e.startupWatches {
+		if now.Sub(old.touched) > startupStateTTL {
+			delete(e.startupWatches, k)
+		}
+	}
 	key := startupWatchKey(repoStr, prNum)
 	st := e.startupWatches[key]
 	if st == nil || st.headSHA != headSHA {
 		st = &prStartupState{headSHA: headSHA}
 		e.startupWatches[key] = st
 	}
+	st.touched = now
 	return st
 }
 

@@ -1,6 +1,7 @@
 package simgh
 
 import (
+	"strconv"
 	"time"
 
 	"github.com/handarbeit/fabrik/engine"
@@ -468,7 +469,7 @@ func (in *Instrumented) FetchWorkflowRuns(owner, repo, sha string) ([]gh.Workflo
 }
 
 func (in *Instrumented) RerunFailedJobs(owner, repo string, runID int64) error {
-	return do0(in, "RerunFailedJobs", true, Args{Owner: owner, Repo: repo, Number: int(runID)},
+	return do0(in, "RerunFailedJobs", true, Args{Owner: owner, Repo: repo, ID: strconv.FormatInt(runID, 10)},
 		func() error { return in.sim.RerunFailedJobs(owner, repo, runID) })
 }
 
