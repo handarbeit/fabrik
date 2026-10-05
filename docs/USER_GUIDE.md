@@ -1411,6 +1411,12 @@ kill_grace:               # Optional. Per-signal grace windows for the kill sequ
 read_only: true           # Optional. Stashes the dirty worktree before Claude runs and
                           #   restores it after. Use for analysis stages that should not
                           #   modify files (e.g., Specify, Research).
+persist_spec: true        # Optional. Only meaningful on a stage that rewrites the issue
+                          #   body (Specify). After every round that emits a
+                          #   FABRIK_ISSUE_UPDATE body, the *engine* (not Claude) writes it
+                          #   to specs/<issue>-<slug>/spec.md and commits that one file.
+                          #   The stage stays read_only: Claude still writes nothing. See
+                          #   "The Specify Stage" -> "Persisted spec".
 post_to_pr: true          # Optional. Routes detailed Claude output to the linked PR; a
                           #   brief summary is still posted on the issue. Falls back to
                           #   posting on the issue if no linked PR is found.
@@ -1551,11 +1557,27 @@ refines it into a clear, unambiguous spec:
 - Surfaces missing requirements, ambiguities, and edge cases as questions
 - Checks consistency with existing project features and documentation
 - Researches prior art and established patterns on the web
-- Rewrites the issue body with a structured spec
+- Rewrites the issue body with a structured spec in [Spec Kit](https://github.com/github/spec-kit)'s content structure: prioritized user stories (each with an independent test), `FR-NNN` requirements, `SC-NNN` success criteria, edge cases and assumptions, with `## Open Questions` last. Only the structure is adopted — nothing in your repo needs Spec Kit, `.specify/` scaffolding or `uv`.
 
 The user answers questions via comments. Claude incorporates the answers and updates
 the issue body. Once all questions are resolved, the stage completes and the issue is
 ready for Research.
+
+#### Persisted spec
+
+The issue body stays the canonical spec while you clarify it, but a spec that lives only in an issue disappears from the repo. So the Specify stage (`persist_spec: true`, the default) also writes it down: after every round that updates the issue body, **the engine** writes that body to `specs/<issue-number>-<slug>/spec.md` in the issue's worktree and commits just that file. The file lands in the PR diff next to the code and stays discoverable in the repo afterwards.
+
+- **A projection, never an input.** The file is a one-way copy of the issue body. Fabrik never reads it back — edit the issue (or answer in comments), not the file.
+- **Every round.** The first round that produces a body creates the file (`docs(spec): add …`); each later round that changes it commits an `update`. This includes a round that ends in `FABRIK_BLOCKED_ON_INPUT` with questions outstanding. Clarification rounds triggered by your comments push the commit too, so the file reaches the remote right away.
+- **`## Open Questions` is stripped** from the committed file. During clarification it exists only in the issue body.
+- **The slug is fixed at the first commit.** It is derived once from the issue title (lowercase ASCII, `-`-separated, at most 50 characters; `spec` if nothing usable remains). If the title changes later, or Fabrik restarts, an existing `specs/<issue-number>-*/` directory is reused — it is never renamed or duplicated.
+- **No empty commits.** A round whose projected file is byte-identical to the one on disk, or that emits no body update at all, commits nothing. A `FABRIK_NO_WORK_NEEDED` round writes no file, since the issue goes straight to Done with no PR.
+- **Only that file is committed.** The commit is scoped to the spec path, so other uncommitted state in the worktree is never swept in. Specify stays `read_only: true`; Claude gains no write access.
+- **Doesn't count as work.** A branch whose only commits are the item's own spec commits still counts as having no commits of its own, so a parent that delegated everything to spawned children still completes as "no work needed".
+
+Issues already past Specify when this shipped are not backfilled.
+
+**Upgrading an existing `specify.yaml`.** `persist_spec` is opt-in per stage YAML, so a `.fabrik/stages/specify.yaml` created before it existed keeps working but writes no spec file. The [stage drift warning](#stage-yaml-drift-warning) reports the missing key at startup; run `fabrik refresh-stages --apply` to add it. If you have replaced the `fabrik-specify` skill with your own copy, `fabrik upgrade` reports a customization until you reconcile or run `fabrik upgrade --force`.
 
 ### Steering with Comments
 
@@ -3176,7 +3198,7 @@ Fabrik passes `--permission-mode dontAsk` to every Claude Code invocation. In th
 | Python | `Bash(python:*)`, `Bash(pip:*)`, `Bash(uv:*)`, `Bash(pytest:*)` |
 | Shell utilities | `Bash(ls:*)`, `Bash(cat:*)`, `Bash(rm:*)`, `Bash(cp:*)`, `Bash(mv:*)`, `Bash(mkdir:*)`, `Bash(find:*)`, `Bash(date:*)` |
 
-**`allowed_tools` replaces the defaults — it is not additive.** When a stage sets `allowed_tools`, only those tools are permitted; the default list above is not merged in. This is intentional: Research, Plan, and Specify stages set `allowed_tools` to a read-only subset to prevent Claude from writing files during those stages.
+**`allowed_tools` replaces the defaults — it is not additive.** When a stage sets `allowed_tools`, only those tools are permitted; the default list above is not merged in. This is intentional: Research, Plan, and Specify stages set `allowed_tools` to a read-only subset to prevent Claude from writing files during those stages. (Specify's spec file is written by the engine, not by Claude — see [Persisted spec](#persisted-spec) — so it needs no extra tool permission.)
 
 **`fabrik:unrestricted` bypasses everything** — passes `--dangerously-skip-permissions` instead, granting Claude full tool access. Use this label only when a stage requires tools outside the default set (e.g. `deno`, `bun`, or other non-standard toolchains).
 
