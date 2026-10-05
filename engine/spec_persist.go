@@ -15,6 +15,10 @@ import (
 // specSlugMaxLen caps the title-derived part of a spec directory name.
 const specSlugMaxLen = 50
 
+// specCommitPrefix starts every commit persistSpec makes; specOwnedByFabrik
+// recognises Fabrik-authored specs by it.
+const specCommitPrefix = "docs(spec): "
+
 // specSlugFallback names the directory when the title slugifies to nothing
 // (all punctuation, non-ASCII).
 const specSlugFallback = "spec"
@@ -52,10 +56,12 @@ func specSlug(title string) string {
 }
 
 // existingSpecDir returns the worktree-relative specs/<N>-* directory already
-// present for the issue (lexically first match), or "". The filesystem is the
-// slug lock (FR-003): itemstate is in-memory, so reuse of an existing
+// present for the issue (lexically first usable match), or "". The filesystem
+// is the slug lock (FR-003): itemstate is in-memory, so reuse of an existing
 // directory is the only restart-safe way to keep a title change from forking
-// the spec into a second directory.
+// the spec into a second directory. A directory whose spec.md was not written
+// by Fabrik (see specOwnedByFabrik) is skipped, so a repo's own
+// specs/<N>-something/ that happens to share the issue number is never reused.
 func existingSpecDir(workDir string, issueNumber int) string {
 	matches, err := filepath.Glob(filepath.Join(workDir, "specs", fmt.Sprintf("%d-*", issueNumber)))
 	if err != nil {
@@ -63,11 +69,36 @@ func existingSpecDir(workDir string, issueNumber int) string {
 	}
 	sort.Strings(matches)
 	for _, m := range matches {
-		if fi, err := os.Stat(m); err == nil && fi.IsDir() {
-			return filepath.ToSlash(filepath.Join("specs", filepath.Base(m)))
+		fi, err := os.Stat(m)
+		if err != nil || !fi.IsDir() {
+			continue
+		}
+		rel := filepath.ToSlash(filepath.Join("specs", filepath.Base(m)))
+		if specOwnedByFabrik(workDir, rel+"/spec.md") {
+			return rel
 		}
 	}
 	return ""
+}
+
+// specOwnedByFabrik reports whether it is safe for persistSpec to write rel:
+// the file does not exist, exists only in the worktree (a round that wrote it
+// and failed to commit), or was added in HEAD's history by a "docs(spec): "
+// commit — the subject persistSpec itself uses. Anything else, including a git
+// error, is treated as someone else's file and left alone.
+func specOwnedByFabrik(workDir, rel string) bool {
+	if _, err := os.Stat(filepath.Join(workDir, filepath.FromSlash(rel))); err != nil {
+		return os.IsNotExist(err)
+	}
+	if _, err := runGitIn(workDir, "cat-file", "-e", "HEAD:"+rel); err != nil {
+		return true
+	}
+	out, err := runGitIn(workDir, "log", "--diff-filter=A", "--format=%s", "--", rel)
+	if err != nil {
+		return false
+	}
+	subjects := strings.Split(strings.TrimSpace(out), "\n")
+	return strings.HasPrefix(subjects[len(subjects)-1], specCommitPrefix)
 }
 
 // stripOpenQuestions removes the "## Open Questions" section — the heading
@@ -127,6 +158,10 @@ func (e *Engine) persistSpec(item gh.ProjectItem, stage *stages.Stage, workDir, 
 		dir = fmt.Sprintf("specs/%d-%s", item.Number, specSlug(item.Title))
 	}
 	rel := dir + "/spec.md"
+	if isNew && !specOwnedByFabrik(workDir, rel) {
+		e.logf(item.Number, "warn", "%s exists and was not written by Fabrik; not overwriting it, spec not persisted\n", rel)
+		return false
+	}
 	abs := filepath.Join(workDir, filepath.FromSlash(rel))
 
 	content := strings.TrimRight(stripOpenQuestions(body), " \t\r\n") + "\n"
@@ -162,7 +197,7 @@ func (e *Engine) persistSpec(item gh.ProjectItem, stage *stages.Stage, workDir, 
 		e.logf(item.Number, "warn", "could not stage %s: %v: %s\n", rel, err, strings.TrimSpace(out))
 		return false
 	}
-	msg := fmt.Sprintf("docs(spec): %s %s for #%d", verb, rel, item.Number)
+	msg := fmt.Sprintf("%s%s %s for #%d", specCommitPrefix, verb, rel, item.Number)
 	if out, err := runGitIn(workDir, "commit", "-m", msg, "--", rel); err != nil {
 		e.logf(item.Number, "warn", "could not commit %s: %v: %s\n", rel, err, strings.TrimSpace(out))
 		return false

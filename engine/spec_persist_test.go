@@ -224,6 +224,63 @@ func TestPersistSpec_ReusesExistingDirAfterRestart(t *testing.T) {
 	}
 }
 
+// A repo's own hand-written specs/<N>-*/spec.md that shares the issue number
+// must never be reused or overwritten.
+func TestPersistSpec_DoesNotOverwriteForeignSpec(t *testing.T) {
+	skipIfNoGit(t)
+	dir := initBareRepo(t)
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+	foreign := filepath.Join(dir, "specs/12-auth/spec.md")
+	if err := os.MkdirAll(filepath.Dir(foreign), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(foreign, []byte("hand written\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitOut(t, dir, "add", "specs/12-auth/spec.md")
+	gitOut(t, dir, "commit", "-m", "docs: auth spec")
+
+	item := gh.ProjectItem{Number: 12, Title: "My Feature"}
+	if !eng.persistSpec(item, specStage(), dir, "## Problem\nv1\n") {
+		t.Fatal("expected a new directory to be created beside the foreign one")
+	}
+	if data, _ := os.ReadFile(foreign); string(data) != "hand written\n" {
+		t.Errorf("foreign spec overwritten: %q", data)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "specs/12-my-feature/spec.md")); err != nil {
+		t.Errorf("fabrik spec not written to its own directory: %v", err)
+	}
+	// The next round locks onto the Fabrik directory, not the foreign one.
+	if !eng.persistSpec(item, specStage(), dir, "## Problem\nv2\n") {
+		t.Fatal("second round should commit")
+	}
+	if msg := gitOut(t, dir, "log", "-1", "--format=%s"); !strings.HasPrefix(msg, "docs(spec): update specs/12-my-feature/spec.md") {
+		t.Errorf("second commit msg = %q", msg)
+	}
+	if data, _ := os.ReadFile(foreign); string(data) != "hand written\n" {
+		t.Errorf("foreign spec overwritten on round 2: %q", data)
+	}
+
+	// A derived directory that is itself foreign is left alone, not overwritten.
+	other := gh.ProjectItem{Number: 12, Title: "Auth"}
+	dir2 := initBareRepo(t)
+	f2 := filepath.Join(dir2, "specs/12-auth/spec.md")
+	if err := os.MkdirAll(filepath.Dir(f2), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f2, []byte("hand written\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitOut(t, dir2, "add", "specs/12-auth/spec.md")
+	gitOut(t, dir2, "commit", "-m", "docs: auth spec")
+	if eng.persistSpec(other, specStage(), dir2, "## Problem\nv1\n") {
+		t.Error("must not persist over a foreign spec at the derived path")
+	}
+	if data, _ := os.ReadFile(f2); string(data) != "hand written\n" {
+		t.Errorf("foreign spec overwritten: %q", data)
+	}
+}
+
 // TestCommitsAheadOfBase_SpecOnlyCommitNotCounted pins the #921 interaction:
 // Specify's engine-written spec commit must not make a delegated coordinator
 // look like it has work of its own, while real commits (also mixed ones) count.
