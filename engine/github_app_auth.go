@@ -118,6 +118,26 @@ func RequiredGitHubAppPermissions(webhooksEnabled bool) map[string]string {
 	return perms
 }
 
+// OptionalGitHubAppPermissions returns the permissions that enable optional
+// engine behaviour but are deliberately NOT part of RequiredGitHubAppPermissions
+// and never enter the fail-hard startup grant check (#2052, ADR 2052): adding
+// one there would stop every existing installation from starting until an admin
+// accepted it.
+//
+//   - "actions": "write" — read the workflow runs of a commit (detect a CI run
+//     that failed before creating any job) and re-run a run's failed jobs. Without
+//     it the engine behaves exactly as before: a refused read or re-run (403/404)
+//     is logged once and degraded, never fatal. `actions: write` covers the read
+//     too; GitHub has no separate read-only re-run.
+//
+// `fabrik init --github-app` includes these in a NEW App's manifest (so a fresh
+// install gets the behaviour); an existing installation opts in by granting the
+// permission in the App's settings. Documented as optional-but-recommended in
+// docs/USER_GUIDE.md.
+func OptionalGitHubAppPermissions() map[string]string {
+	return map[string]string{"actions": "write"}
+}
+
 // RequiredGitHubAppPermissionsForGit is RequiredGitHubAppPermissions with
 // contents raised to write when git runs over HTTPS as the installation
 // (httpsGit — see AppGitUsesHTTPS): engine and worker git then push with the

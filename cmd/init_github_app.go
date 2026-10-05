@@ -98,7 +98,8 @@ type githubAppSetupResult struct {
 // githubAppSetupPermissions returns the permission set runGitHubAppSetup
 // verifies (the engine's own startup rule, so init never accepts an
 // installation the engine would then refuse) and the set it puts in a new
-// App's manifest — always including contents:write, since the App outlives
+// App's manifest — always including contents:write (and the optional
+// permissions, #2052), since the App outlives
 // this machine's git transport and HTTPS is the default (#1846). On the
 // adopt path the manifest set is never sent anywhere, so it equals verify.
 func githubAppSetupPermissions(opts githubAppSetupOptions) (verify, manifest map[string]string, httpsGit bool) {
@@ -107,6 +108,11 @@ func githubAppSetupPermissions(opts githubAppSetupOptions) (verify, manifest map
 	manifest = verify
 	if opts.AppID == 0 {
 		manifest = engine.RequiredGitHubAppPermissionsForGit(opts.Webhooks, true)
+		// #2052: a new App also asks for the optional permissions (never verified,
+		// never required — see engine.OptionalGitHubAppPermissions).
+		for k, v := range engine.OptionalGitHubAppPermissions() {
+			manifest[k] = v
+		}
 	}
 	return verify, manifest, httpsGit
 }
