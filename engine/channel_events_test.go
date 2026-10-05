@@ -86,7 +86,14 @@ func channelEngineTick(t *testing.T, ahead time.Duration, sub *channelevents.Sub
 	channelDebounce, channelTick = 20*time.Millisecond, tick
 	t.Cleanup(func() { channelDebounce, channelTick = oldD, oldT })
 
-	e := apiEngine(t, ahead)
+	return channelEngineOn(t, apiEngine(t, ahead), ahead, sub)
+}
+
+// channelEngineOn starts the channel hub on an already-built engine (one wired
+// with a mock GitHub client, say) and attaches subscriber "T" as channelEngine
+// does. The caller has set channelDebounce/channelTick.
+func channelEngineOn(t *testing.T, e *Engine, ahead time.Duration, sub *channelevents.Subscription) (*Engine, *chanSink) {
+	t.Helper()
 	// An adjustable clock installed before any goroutine starts, so a test can
 	// move time (a deadline passing) without racing the deriver.
 	e.SetClock(&adjClock{t: time.Now().Add(ahead)})
@@ -358,7 +365,7 @@ func TestChannelStreamerSubscribeResolvesIssuesAndValidates(t *testing.T) {
 // The self-upgrade exec runs no deferred cleanup, so the engine flushes the
 // hub's lazily written dedup state right before it (ADR-1966-b). With no hub
 // the flush is a no-op.
-func TestFlushChannelEventsPersistsDedupBeforeExec(t *testing.T) {
+func TestFlushChannelEventsPersistsDedupImmediately(t *testing.T) {
 	apiEngine(t, 0).flushChannelEvents() // no hub: must not panic
 
 	e, sink := channelEngine(t, 0, nil)
@@ -374,6 +381,37 @@ func TestFlushChannelEventsPersistsDedupBeforeExec(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "merged:owner/repo#7") {
 		t.Fatalf("flushed dedup state is missing the announced key: %s", data)
+	}
+}
+
+// Both self-upgrade paths (release and dev build) must flush the channel state
+// right before the exec, which runs no deferred cleanup. The configs the engine
+// really hands to internal/selfupgrade are built by devBuildConfig and
+// releaseUpgradeConfig; running each one's PreExecHook must persist an announced
+// dedup key that is otherwise still inside the coalescing delay. (The order
+// relative to the exec is covered by internal/selfupgrade's own tests.)
+func TestSelfUpgradeConfigsFlushChannelStateBeforeExec(t *testing.T) {
+	hooks := map[string]func(*Engine) func(){
+		"release": func(e *Engine) func() { return e.releaseUpgradeConfig().PreExecHook },
+		"dev":     func(e *Engine) func() { return e.devBuildConfig().PreExecHook },
+	}
+	for name, hookOf := range hooks {
+		t.Run(name, func(t *testing.T) {
+			e, sink := channelEngine(t, 0, nil)
+			key := "merged:owner/repo#" + name
+			e.channelEvents().hub.Publish(channelevents.Event{Type: channelevents.Merged, Repo: "owner/repo", Issue: 7, Content: "merged", DedupKey: key})
+			sink.next(t)
+
+			hook := hookOf(e)
+			if hook == nil {
+				t.Fatal("the engine's self-upgrade config has no PreExecHook")
+			}
+			hook()
+			data, err := os.ReadFile(filepath.Join(e.fabrikDir, ".fabrik", "state", "channel", "dedup.json"))
+			if err != nil || !strings.Contains(string(data), key) {
+				t.Fatalf("PreExecHook did not persist the dedup key (err=%v): %s", err, data)
+			}
+		})
 	}
 }
 

@@ -1,6 +1,9 @@
 package engine
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -24,10 +27,19 @@ func seedValidate(t *testing.T, e *Engine, n int, labels ...string) {
 	e.store.Apply(itemstate.PRHeadSHAUpdated{Repo: "owner/repo", Number: n, LinkedPRNum: 34, SHA: "abc123"})
 }
 
+// hook calls the Phase 2 settle-point hook directly. The tests below that use it
+// cover the hook's own cache-only predicate and episode rules; that the real
+// runCatchUpPhase2 reaches the hook at the right moment (and not at
+// FABRIK_STAGE_COMPLETE under fabrik:awaiting-ci) is covered end to end by the
+// PollOnce scenarios in tests/sim/channel_events_test.go.
 func hook(e *Engine, n int) {
 	e.noteValidateSettled(gh.ProjectItem{Repo: "owner/repo", Number: n}, settleValidateStage)
 }
 
+// landing captures a landing-time settle point directly, for tests of how the
+// announcement is built. Whether attemptMergeOnValidate announces only a landing
+// that succeeded is TestValidateSettledYoloAnnouncedOnlyAfterLandingSucceeds,
+// which drives the production call site.
 func landing(e *Engine, n int) settleLanding {
 	return e.noteValidateLanding(gh.ProjectItem{Repo: "owner/repo", Number: n}, settleValidateStage)
 }
@@ -79,7 +91,10 @@ func TestValidateSettledEmittedOnceThenAgainAfterRevalidate(t *testing.T) {
 	}
 }
 
-func TestValidateSettledNext(t *testing.T) {
+// TestValidateSettledNextFromLabelsAndConfig covers how meta.next is derived from
+// the item's labels and merge_train for a captured settle point. It calls the
+// capture/announce helpers directly, so it does not claim the landing wiring.
+func TestValidateSettledNextFromLabelsAndConfig(t *testing.T) {
 	cases := []struct {
 		name   string
 		labels []string
@@ -100,7 +115,8 @@ func TestValidateSettledNext(t *testing.T) {
 		if c.want == "waiting-for-human" {
 			hook(e, 1)
 		} else {
-			// An acting item is announced by the landing decision, once it succeeded.
+			// An acting item is announced by the landing decision once it succeeded
+			// (finish(true) stands in for that outcome here).
 			landing(e, 1).finish(true)
 		}
 		ev := sink.next(t)
@@ -214,23 +230,129 @@ func TestCachedAddressedReviewIDsOnlyTrustsFabrik(t *testing.T) {
 	}
 }
 
-// A yolo item acts on its own, so the settle point must not announce it ahead of
-// the landing attempt; the landing announces it only once it succeeded.
-func TestValidateSettledYoloAnnouncedOnlyAfterLandingSucceeds(t *testing.T) {
-	e, sink := channelEngine(t, 0, settledOnly())
+// landingEngine builds an engine wired with a mock GitHub client (so the real
+// attemptMergeOnValidate landing path runs end to end), with the channel hub
+// started and one yolo item at Validate in the store.
+func landingEngine(t *testing.T, client *mockGitHubClient, train string) (*Engine, *chanSink) {
+	t.Helper()
+	oldD, oldT := channelDebounce, channelTick
+	channelDebounce, channelTick = 20*time.Millisecond, time.Hour
+	t.Cleanup(func() { channelDebounce, channelTick = oldD, oldT })
+
+	e := testEngineWithStages(t, client, testStagesWithValidateAndHolding())
+	e.cfg.MergeTrain = train
+	e.health.markStarted(time.Now().Add(-time.Hour))
+	e, sink := channelEngineOn(t, e, 0, settledOnly())
 	seedValidate(t, e, 1, "fabrik:yolo", "stage:Validate:complete")
+	return e, sink
+}
 
-	hook(e, 1) // Phase 2 settle point: the landing attempt is still to come
-	sink.quiet(t, 250*time.Millisecond)
+// landYolo drives the production landing decision for issue 1 and returns what
+// it reported.
+func landYolo(t *testing.T, e *Engine) (enabled, deferred bool, err error) {
+	t.Helper()
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Repo: "owner/repo", Labels: []string{"fabrik:yolo"}}
+	return e.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, item, validateStage())
+}
 
-	landing(e, 1).finish(false) // the merge or enqueue failed
-	sink.quiet(t, 250*time.Millisecond)
-
-	landing(e, 1).finish(true)
-	ev := sink.next(t)
-	if ev.Type != channelevents.ValidateSettled || ev.Meta["next"] != "auto-merge" {
-		t.Fatalf("unexpected: %+v", ev)
+// directMergeClient has a linked PR and an auto-merge enable that fails as
+// "already clean", so the landing falls back to a direct MergePR.
+func directMergeClient(mergeErr error) *mockGitHubClient {
+	c := landingClient()
+	c.enablePullRequestAutoMergeFn = func(owner, repo string, prNumber int, strategy string) error {
+		return fmt.Errorf("%w: clean status", gh.ErrAutoMergeAlreadyClean)
 	}
+	c.mergePRFn = func(owner, repo string, prNumber int) error { return mergeErr }
+	return c
+}
+
+// A yolo item acts on its own, so the settle point must not announce it ahead of
+// the landing attempt; attemptMergeOnValidate announces it only once the merge or
+// enqueue succeeded. These drive the real landing path against a mock GitHub
+// client, so they protect the success condition at the call site in stages.go.
+func TestValidateSettledYoloAnnouncedOnlyAfterLandingSucceeds(t *testing.T) {
+	t.Run("the Phase 2 settle point does not announce a yolo item", func(t *testing.T) {
+		e, sink := landingEngine(t, landingClient(), "off")
+		hook(e, 1) // the landing attempt is still to come
+		sink.quiet(t, 250*time.Millisecond)
+	})
+
+	t.Run("merge not mergeable: no event", func(t *testing.T) {
+		e, sink := landingEngine(t, directMergeClient(gh.ErrNotMergeable), "off")
+		if _, _, err := landYolo(t, e); !errors.Is(err, gh.ErrNotMergeable) {
+			t.Fatalf("landing error = %v, want ErrNotMergeable", err)
+		}
+		sink.quiet(t, 250*time.Millisecond)
+	})
+
+	t.Run("enqueue to Queued fails: no event", func(t *testing.T) {
+		c := &mockGitHubClient{updateProjectItemStatusFn: func(projectID, itemID, fieldID, optionID string) error {
+			return fmt.Errorf("boom")
+		}}
+		e, sink := landingEngine(t, c, "on")
+		if _, _, err := landYolo(t, e); err == nil {
+			t.Fatal("expected the move to Queued to fail")
+		}
+		sink.quiet(t, 250*time.Millisecond)
+	})
+
+	t.Run("deferred by the direct-merge feedback recheck: no event", func(t *testing.T) {
+		c := directMergeClient(nil)
+		reads := 0
+		c.fetchItemDetailsFn = func(item *gh.ProjectItem) error {
+			if reads++; reads >= 2 { // a comment arrives after the first read
+				item.Comments = []gh.Comment{humanComment}
+			}
+			return nil
+		}
+		e, sink := landingEngine(t, c, "off")
+		if enabled, deferred, err := landYolo(t, e); enabled || !deferred || err != nil {
+			t.Fatalf("want deferred without error, got enabled=%v deferred=%v err=%v", enabled, deferred, err)
+		}
+		if n := len(c.mergePRCalls); n != 0 {
+			t.Fatalf("MergePR called %d time(s) while feedback was pending", n)
+		}
+		sink.quiet(t, 250*time.Millisecond)
+	})
+
+	t.Run("auto-merge enabled: one auto-merge event", func(t *testing.T) {
+		e, sink := landingEngine(t, landingClient(), "off")
+		if enabled, deferred, err := landYolo(t, e); !enabled || deferred || err != nil {
+			t.Fatalf("want enabled, got enabled=%v deferred=%v err=%v", enabled, deferred, err)
+		}
+		ev := sink.next(t)
+		if ev.Type != channelevents.ValidateSettled || ev.Meta["next"] != "auto-merge" {
+			t.Fatalf("unexpected: %+v", ev)
+		}
+		sink.quiet(t, 250*time.Millisecond) // exactly one
+	})
+
+	t.Run("direct merge succeeds: one auto-merge event", func(t *testing.T) {
+		e, sink := landingEngine(t, directMergeClient(nil), "off")
+		if enabled, _, err := landYolo(t, e); !enabled || err != nil {
+			t.Fatalf("want merged, got enabled=%v err=%v", enabled, err)
+		}
+		if ev := sink.next(t); ev.Meta["next"] != "auto-merge" {
+			t.Fatalf("unexpected: %+v", ev)
+		}
+		sink.quiet(t, 250*time.Millisecond)
+	})
+
+	t.Run("merge train on and the move to Queued succeeds: one merge-train event", func(t *testing.T) {
+		c := &mockGitHubClient{}
+		e, sink := landingEngine(t, c, "on")
+		if _, _, err := landYolo(t, e); err != nil {
+			t.Fatalf("landing: %v", err)
+		}
+		if len(c.updateStatusCalls) != 1 {
+			t.Fatalf("expected one move to the holding stage, got %d", len(c.updateStatusCalls))
+		}
+		ev := sink.next(t)
+		if ev.Type != channelevents.ValidateSettled || ev.Meta["next"] != "merge-train" {
+			t.Fatalf("unexpected: %+v", ev)
+		}
+		sink.quiet(t, 250*time.Millisecond)
+	})
 }
 
 // A landing that bounced ends the episode (fabrik:rebase-needed), so the settle

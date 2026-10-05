@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -193,56 +195,107 @@ func TestChannelLandingVerificationFailedBlockerClearedAndMerged(t *testing.T) {
 
 // ---- hooks ----
 
-func hookItem(e *Engine, n int) gh.ProjectItem {
-	return gh.ProjectItem{Repo: apiRepo, Number: n}
+// hookedEngine builds an engine wired with a mock GitHub client, so the real
+// production call sites (pauseForCITimeout, pauseForReviewTimeout,
+// spawnChildren) run end to end, with the channel hub started and subscriber "T"
+// attached. build supplies the engine (testEngineWithStages, spawnTestEngine, ...).
+func hookedEngine(t *testing.T, eng *Engine, sub *channelevents.Subscription) (*Engine, *chanSink) {
+	t.Helper()
+	oldD, oldT := channelDebounce, channelTick
+	channelDebounce, channelTick = 20*time.Millisecond, time.Hour
+	t.Cleanup(func() { channelDebounce, channelTick = oldD, oldT })
+	eng.health.markStarted(time.Now().Add(-time.Hour))
+	return channelEngineOn(t, eng, 0, sub)
 }
 
-func TestChannelCITimeoutHook(t *testing.T) {
-	e, sink := channelEngine(t, 0, onlyTypes(channelevents.CITimeout))
+// ci-timeout, review-timeout and children-spawned are emitted from inside the
+// production transition (pauseForCITimeout, pauseForReviewTimeout,
+// spawnChildren), so each test drives that function and not the emit helper: it
+// would otherwise pass with the call site deleted.
+
+func TestChannelCITimeoutFiresFromPauseForCITimeout(t *testing.T) {
+	client := &mockGitHubClient{}
+	e, sink := hookedEngine(t, testEngineWithStages(t, client, testStagesWithValidate()), onlyTypes(channelevents.CITimeout))
 	seedBaseline(t, e, 1, "Validate")
 	e.store.Apply(itemstate.PRDetailsUpdated{Repo: apiRepo, Number: 1, PRNumber: 34, State: "open"})
-	e.emitCITimeout(hookItem(e, 1), &stages.Stage{Name: "Validate"})
+	stage := &stages.Stage{Name: "Validate"}
+	item := gh.ProjectItem{Repo: apiRepo, Number: 1, ItemID: "PVTI_1"}
+
+	if !e.pauseForCITimeout(&gh.ProjectBoard{ProjectID: "PVT_1"}, item, stage) {
+		t.Fatal("expected a fresh CI-timeout pause")
+	}
 	ev := sink.next(t)
 	if ev.Type != channelevents.CITimeout || ev.PR != 34 || ev.Stage != "Validate" {
 		t.Fatalf("%+v", ev)
 	}
 	requireMeta(t, ev, "stage", "pr", "timeout", "ci")
+	sink.quiet(t, 150*time.Millisecond)
+
+	// An episode that already has its pause comment is reapplied, not re-announced.
+	again := item
+	again.Comments = []gh.Comment{{ID: "c1", DatabaseID: 1, Author: e.selfLogin(),
+		Body: "🏭 **Fabrik — CI wait timeout**\n\nThe CI gate for stage **Validate** timed out waiting for checks to pass."}}
+	if e.pauseForCITimeout(&gh.ProjectBoard{ProjectID: "PVT_1"}, again, stage) {
+		t.Fatal("a reapplied pause must not report a fresh episode")
+	}
+	sink.quiet(t, 200*time.Millisecond)
 }
 
-func TestChannelReviewTimeoutHookNotesEarlyReviews(t *testing.T) {
-	e, sink := channelEngine(t, 0, onlyTypes(channelevents.ReviewTimeout))
+func TestChannelReviewTimeoutFiresFromPauseForReviewTimeoutAndNotesEarlyReviews(t *testing.T) {
+	client := &mockGitHubClient{}
+	e, sink := hookedEngine(t, testEngineWithStages(t, client, testStagesWithValidate()), onlyTypes(channelevents.ReviewTimeout))
 	seedBaseline(t, e, 1, "Validate")
 	e.store.Apply(itemstate.PRDetailsUpdated{Repo: apiRepo, Number: 1, PRNumber: 34, State: "open"})
 	waitStart := time.Now()
 	e.store.Apply(itemstate.LabelAppliedAtRecorded{Repo: apiRepo, Number: 1, Label: "fabrik:awaiting-review", At: waitStart})
 	e.store.Apply(itemstate.PRReviewSubmitted{Repo: apiRepo, Number: 1, Review: gh.PRReview{Author: "early-bird", State: "COMMENTED", DatabaseID: 1, SubmittedAt: waitStart.Add(-time.Hour)}})
 	e.store.Apply(itemstate.PRReviewSubmitted{Repo: apiRepo, Number: 1, Review: gh.PRReview{Author: "latecomer", State: "COMMENTED", DatabaseID: 2, SubmittedAt: waitStart.Add(time.Minute)}})
-	e.emitReviewTimeout(hookItem(e, 1), &stages.Stage{Name: "Validate"})
+
+	item := gh.ProjectItem{Repo: apiRepo, Number: 1, ItemID: "PVTI_1", Labels: []string{"fabrik:awaiting-review"}}
+	e.pauseForReviewTimeout(&gh.ProjectBoard{ProjectID: "PVT_1"}, item, &stages.Stage{Name: "Validate", WaitForReviews: boolPtr(true)})
 	ev := sink.next(t)
 	if ev.Type != channelevents.ReviewTimeout || ev.Meta["reviews_before_wait"] != "early-bird" {
 		t.Fatalf("%+v", ev)
 	}
 	requireMeta(t, ev, "stage", "pr", "timeout", "pending_reviewers", "reviews_before_wait")
+	sink.quiet(t, 150*time.Millisecond)
 }
 
 func TestChannelReviewTimeoutUnknownWaitStartAfterRestart(t *testing.T) {
-	e, sink := channelEngine(t, 0, onlyTypes(channelevents.ReviewTimeout))
+	client := &mockGitHubClient{}
+	e, sink := hookedEngine(t, testEngineWithStages(t, client, testStagesWithValidate()), onlyTypes(channelevents.ReviewTimeout))
 	seedBaseline(t, e, 1, "Validate")
-	e.emitReviewTimeout(hookItem(e, 1), &stages.Stage{Name: "Validate"})
+	item := gh.ProjectItem{Repo: apiRepo, Number: 1, ItemID: "PVTI_1"}
+	e.pauseForReviewTimeout(&gh.ProjectBoard{ProjectID: "PVT_1"}, item, &stages.Stage{Name: "Validate", WaitForReviews: boolPtr(true)})
 	if ev := sink.next(t); ev.Meta["reviews_before_wait"] != "unknown" {
 		t.Fatalf("an unrecorded wait start must read unknown, got %+v", ev.Meta)
 	}
 }
 
-func TestChannelChildrenSpawnedHook(t *testing.T) {
-	e, sink := channelEngine(t, 0, onlyTypes(channelevents.ChildrenSpawned))
-	seedBaseline(t, e, 1, "Implement")
-	e.emitChildrenSpawned(hookItem(e, 1), []string{"owner/repo#101", "owner/repo#102"})
+func TestChannelChildrenSpawnedFiresFromSpawnChildren(t *testing.T) {
+	next := 100
+	client := &mockGitHubClient{
+		createIssueFn: func(owner, repo, title, body string, assignees []string) (int, string, error) {
+			next++
+			return next, fmt.Sprintf("I_child%d", next), nil
+		},
+		addProjectV2ItemByIdFn: func(projectID, contentNodeID string) (string, error) { return "PVTI_c", nil },
+	}
+	e, sink := hookedEngine(t, spawnTestEngine(t, client), onlyTypes(channelevents.ChildrenSpawned))
+	parent, board := spawnParentAndBoard()
+	seedBaseline(t, e, parent.Number, "Implement")
+
+	spawned, _, err := e.spawnChildren(context.Background(), board, parent, "owner", "repo",
+		[]SpawnBlock{{Repo: "owner/repo", Title: "One", Body: "b"}, {Repo: "owner/repo", Title: "Two", Body: "b"}}, false)
+	if err != nil || len(spawned) != 2 {
+		t.Fatalf("spawned=%v err=%v", spawned, err)
+	}
 	ev := sink.next(t)
-	if ev.Type != channelevents.ChildrenSpawned || ev.Meta["count"] != "2" || !strings.Contains(ev.Meta["children"], "owner/repo#102") {
-		t.Fatalf("%+v", ev)
+	if ev.Type != channelevents.ChildrenSpawned || ev.Meta["count"] != "2" || !strings.Contains(ev.Meta["children"], spawned[1]) {
+		t.Fatalf("%+v (spawned %v)", ev, spawned)
 	}
 	requireMeta(t, ev, "stage", "children", "count")
+	sink.quiet(t, 150*time.Millisecond)
 }
 
 // ---- stalled: agrees with the read API's attention view ----
