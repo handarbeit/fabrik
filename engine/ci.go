@@ -878,18 +878,21 @@ func (e *Engine) pauseForCIStartupFailure(_ *gh.ProjectBoard, item gh.ProjectIte
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	e.logf(item.Number, "ci-gate", "CI never started — pausing for human intervention (%s)\n", describeStartupRun(f.Run))
 
-	var b strings.Builder
-	fmt.Fprintf(&b, "🏭 **Fabrik — CI never started**\n\nThe pull request's CI did not start: %s. "+
-		"GitHub reports a startup failure — the workflow run was rejected before it created any job, so there are no checks to wait for. "+
-		"This is usually a workflow-file error (invalid YAML, a bad reusable-workflow reference) or a GitHub Actions outage, not a code failure.\n\n", describeStartupRun(f.Run))
+	// What happened to the retrigger. Built first so msg below is a single
+	// fmt.Sprintf with a literal "🏭 **Fabrik" prefix (the comment-compliance rule).
+	retriggerNote := fmt.Sprintf("Fabrik retriggered CI by closing and reopening the pull request %d time(s); it still did not start.", f.Retriggers)
 	if f.ReopenErr != nil {
-		fmt.Fprintf(&b, "Fabrik tried to retrigger CI by closing and reopening the pull request, but **the pull request could not be reopened** (%v) — it may still be closed; reopen it by hand.\n\n", f.ReopenErr)
-	} else {
-		fmt.Fprintf(&b, "Fabrik retriggered CI by closing and reopening the pull request %d time(s); it still did not start.\n\n", f.Retriggers)
+		retriggerNote = fmt.Sprintf("Fabrik tried to retrigger CI by closing and reopening the pull request, but **the pull request could not be reopened** (%v) — it may still be closed; reopen it by hand.", f.ReopenErr)
 	}
-	fmt.Fprintf(&b, "Fabrik has paused this issue while waiting for stage **%s** to complete. To resume: fix the workflow (or wait out the outage), make sure CI runs on the pull request, and remove the `fabrik:paused` label.", stage.Name)
+	msg := fmt.Sprintf("🏭 **Fabrik — CI never started**\n\n"+
+		"The pull request's CI did not start: %s. "+
+		"GitHub reports a startup failure — the workflow run was rejected before it created any job, so there are no checks to wait for. "+
+		"This is usually a workflow-file error (invalid YAML, a bad reusable-workflow reference) or a GitHub Actions outage, not a code failure.\n\n"+
+		"%s\n\n"+
+		"Fabrik has paused this issue while waiting for stage **%s** to complete. To resume: fix the workflow (or wait out the outage), make sure CI runs on the pull request, and remove the `fabrik:paused` label.",
+		describeStartupRun(f.Run), retriggerNote, stage.Name)
 
-	e.pauseIssue(item, b.String(), pauseOpts{
+	e.pauseIssue(item, msg, pauseOpts{
 		awaitingInput: true,
 		reactRocket:   true,
 	})
