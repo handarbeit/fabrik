@@ -5201,21 +5201,22 @@ func (e *Engine) pollTrainCI(ctx context.Context, owner, repo string, prNum int,
 				// is red. A failure with no re-runnable Actions run behind it, or a re-run
 				// request that errors, is red at once, exactly as before.
 				if !rr.done {
-					if e.rerunFailedWorkflowRuns(logRepo, owner, repo, failed) {
-						rr = rerunState{done: true, firstFailedIDs: checkRunIDSet(failed), at: time.Now()}
+					if rerunIDs, ok := e.rerunFailedWorkflowRuns(logRepo, owner, repo, failed); ok {
+						rr = rerunState{done: true, runIDs: rerunIDs, firstFailedIDs: checkRunIDSet(failed), at: time.Now()}
 						e.logfRepo(logRepo, "merge-train", "trial %s: failed check(s): %s — re-running the failed jobs once before judging the trial red\n", trialSHA, describeCheckRuns(failed))
 					} else {
 						e.logfRepo(logRepo, "merge-train", "trial %s red — failed check(s): %s\n", trialSHA, describeCheckRuns(failed))
 						return TrainCIRed, &trainCIDiagnostic{FailedChecks: failed, PRNum: prNum, TrialSHA: trialSHA}
 					}
 				} else if hasNewCheckRun(failed, rr.firstFailedIDs) ||
-					(time.Since(rr.at) >= timing.rerunSettleDwell && !e.rerunInFlight(logRepo, owner, repo, trialSHA)) {
+					(time.Since(rr.at) >= timing.rerunSettleDwell &&
+						(time.Since(rr.at) >= timing.rerunSettleDwell+timing.rerunMaxWait || !e.rerunInFlight(logRepo, owner, repo, trialSHA, rr.runIDs))) {
 					// A failing latest-per-name run the first failure did not contain means the
 					// re-run itself failed; the dwell bounds the case where the re-run never
 					// materialised and only the stale original is visible. A workflow run still
 					// queued or running on the SHA means the re-run is merely waiting for a
-					// runner, so the stale failure is not yet a verdict (CIBackstopTimeout
-					// still bounds the wait).
+					// runner, so the stale failure is not yet a verdict — for at most
+					// rerunMaxWait past the dwell, its own bound rather than CIBackstopTimeout.
 					e.logfRepo(logRepo, "merge-train", "trial %s red after the failed-job re-run — failed check(s): %s\n", trialSHA, describeCheckRuns(failed))
 					return TrainCIRed, &trainCIDiagnostic{FailedChecks: failed, PRNum: prNum, TrialSHA: trialSHA}
 				}

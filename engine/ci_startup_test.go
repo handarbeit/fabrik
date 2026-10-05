@@ -209,8 +209,9 @@ func TestRerunFailedWorkflowRuns(t *testing.T) {
 	}
 	var reran []int64
 	e.client = &mockGitHubClient{rerunFailedJobsFn: func(o, r string, id int64) error { reran = append(reran, id); return nil }}
-	if !e.rerunFailedWorkflowRuns("o/r", "o", "r", failed) {
-		t.Fatal("want success")
+	ids, ok := e.rerunFailedWorkflowRuns("o/r", "o", "r", failed)
+	if !ok || fmt.Sprint(ids) != "[10 11]" {
+		t.Fatalf("want success reporting the re-run run IDs, got %v ok=%v", ids, ok)
 	}
 	if fmt.Sprint(reran) != "[10 11]" {
 		t.Fatalf("re-ran %v, want each distinct run once", reran)
@@ -219,13 +220,13 @@ func TestRerunFailedWorkflowRuns(t *testing.T) {
 	// A third-party failing check has no run to re-run: nothing is re-run.
 	reran = nil
 	mixed := append([]gh.CheckRun{{ID: 9, Name: "ci/circle", DetailsURL: "https://circleci.com/x"}}, failed...)
-	if e.rerunFailedWorkflowRuns("o/r", "o", "r", mixed) || len(reran) != 0 {
+	if _, ok := e.rerunFailedWorkflowRuns("o/r", "o", "r", mixed); ok || len(reran) != 0 {
 		t.Fatalf("third-party failure must stay red without re-running; reran %v", reran)
 	}
 
 	// An erroring re-run falls back to red.
 	e.client = &mockGitHubClient{rerunFailedJobsFn: func(o, r string, id int64) error { return fmt.Errorf("x: %w", gh.ErrForbidden) }}
-	if e.rerunFailedWorkflowRuns("o/r", "o", "r", failed) {
+	if _, ok := e.rerunFailedWorkflowRuns("o/r", "o", "r", failed); ok {
 		t.Fatal("a refused re-run must report false")
 	}
 }

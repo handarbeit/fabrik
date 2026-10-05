@@ -41,6 +41,12 @@ const (
 	// the verdict (R5; see pollTrainCI's guard).
 	defaultTrainRerunSettleDwell = 2 * time.Minute
 
+	// defaultTrainRerunMaxWait caps how long, past the settle dwell, a trial keeps
+	// waiting for a re-run that is still queued or running before the stale first
+	// failure becomes the verdict. It is its own bound, far below
+	// CIBackstopTimeout, so one wedged re-run cannot hold a worker slot for hours.
+	defaultTrainRerunMaxWait = 30 * time.Minute
+
 	// defaultTrainInfraAbandonCooldown delays re-dispatching a (repo, base)
 	// partition's train after a trial was abandoned for CI infrastructure, so a
 	// permanently broken workflow retries every few minutes instead of every
@@ -62,6 +68,7 @@ const (
 type ciInfraTiming struct {
 	retriggerNewRunDwell time.Duration
 	rerunSettleDwell     time.Duration
+	rerunMaxWait         time.Duration
 	abandonCooldown      time.Duration
 	reopenBackoff        time.Duration
 }
@@ -73,6 +80,9 @@ func (e *Engine) ciInfraTimingOrDefault() ciInfraTiming {
 	}
 	if t.rerunSettleDwell <= 0 {
 		t.rerunSettleDwell = defaultTrainRerunSettleDwell
+	}
+	if t.rerunMaxWait <= 0 {
+		t.rerunMaxWait = defaultTrainRerunMaxWait
 	}
 	if t.abandonCooldown <= 0 {
 		t.abandonCooldown = defaultTrainInfraAbandonCooldown
@@ -95,6 +105,12 @@ func (e *Engine) SetCIInfraTimingForTest(retriggerNewRunDwell, rerunSettleDwell,
 		abandonCooldown:      abandonCooldown,
 		reopenBackoff:        reopenBackoff,
 	}
+}
+
+// SetRerunMaxWaitForTest overrides the cap on waiting for an in-flight re-run.
+// Test-only: production never calls it.
+func (e *Engine) SetRerunMaxWaitForTest(d time.Duration) {
+	e.ciInfraTiming.rerunMaxWait = d
 }
 
 // isStartupFailure reports whether a workflow run is a CI startup failure
@@ -272,6 +288,7 @@ func (e *Engine) retriggerPR(logRepo, owner, repo string, prNum int) error {
 // rerunState is the per-trial single-re-run bookkeeping for R5.
 type rerunState struct {
 	done           bool
+	runIDs         []int64 // the workflow runs whose failed jobs were re-run
 	firstFailedIDs map[int64]bool
 	at             time.Time
 }
@@ -296,20 +313,30 @@ func hasNewCheckRun(failed []gh.CheckRun, seen map[int64]bool) bool {
 	return false
 }
 
-// rerunInFlight reports whether any workflow run on sha is still queued or
-// running — i.e. a re-run of failed jobs that has not finished. pollTrainCI
-// consults it once the re-run settle dwell has elapsed with only the stale
-// original failure visible, so a re-run queued behind runner capacity is waited
-// for (bounded by CIBackstopTimeout) instead of the stale failure being counted
-// as the second one. A read error or refused permission reports false: the
-// caller then falls back to the dwell's verdict, as before.
-func (e *Engine) rerunInFlight(logRepo, owner, repo, sha string) bool {
+// rerunInFlight reports whether one of the workflow runs that were re-run
+// (runIDs) is still queued or running on sha. pollTrainCI consults it once the
+// re-run settle dwell has elapsed with only the stale original failure visible,
+// so a re-run waiting behind runner capacity is waited for instead of the stale
+// failure being counted as the second one. Only the re-run runs count, and only
+// in the `queued`/`in_progress` states: an unrelated workflow, or a run held in
+// `waiting`/`pending` for an approval, would otherwise postpone the verdict
+// indefinitely. The caller bounds the wait with rerunMaxWait. A read error or
+// refused permission reports false: the caller then falls back to the dwell's
+// verdict, as before.
+func (e *Engine) rerunInFlight(logRepo, owner, repo, sha string, runIDs []int64) bool {
+	if len(runIDs) == 0 {
+		return false
+	}
 	runs, ok, _ := e.fetchWorkflowRunsSoft(logRepo, owner, repo, sha)
 	if !ok {
 		return false
 	}
+	reran := make(map[int64]bool, len(runIDs))
+	for _, id := range runIDs {
+		reran[id] = true
+	}
 	for _, r := range runs {
-		if r.Status != "completed" {
+		if reran[r.ID] && (r.Status == "queued" || r.Status == "in_progress") {
 			return true
 		}
 	}
@@ -320,14 +347,15 @@ func (e *Engine) rerunInFlight(logRepo, owner, repo, sha string) bool {
 // workflow run behind the failed check runs (R5). It returns false — and the
 // caller keeps today's behaviour, red — when any failed check has no Actions
 // workflow run behind it (a third-party status), or any re-run request errors.
-func (e *Engine) rerunFailedWorkflowRuns(logRepo, owner, repo string, failed []gh.CheckRun) bool {
+// On success it returns the IDs of the workflow runs that were re-run.
+func (e *Engine) rerunFailedWorkflowRuns(logRepo, owner, repo string, failed []gh.CheckRun) ([]int64, bool) {
 	var runIDs []int64
 	seen := map[int64]bool{}
 	for _, cr := range failed {
 		id, ok := gh.ActionsRunIDFromDetailsURL(cr.DetailsURL)
 		if !ok {
 			e.logfRepo(logRepo, "ci-infra", "failed check %q has no re-runnable Actions workflow run (details: %q) — treating the failure as real\n", cr.Name, cr.DetailsURL)
-			return false
+			return nil, false
 		}
 		if !seen[id] {
 			seen[id] = true
@@ -335,7 +363,7 @@ func (e *Engine) rerunFailedWorkflowRuns(logRepo, owner, repo string, failed []g
 		}
 	}
 	if len(runIDs) == 0 {
-		return false
+		return nil, false
 	}
 	for _, id := range runIDs {
 		if err := e.client.RerunFailedJobs(owner, repo, id); err != nil {
@@ -343,10 +371,10 @@ func (e *Engine) rerunFailedWorkflowRuns(logRepo, owner, repo string, failed []g
 				e.logActionsDegradedOnce(logRepo, err)
 			}
 			e.logfRepo(logRepo, "ci-infra", "warn: re-running failed jobs of workflow run %d failed: %v — treating the failure as real\n", id, err)
-			return false
+			return nil, false
 		}
 	}
-	return true
+	return runIDs, true
 }
 
 // infraNote renders a TrainCIInfra diagnostic's note for logs.

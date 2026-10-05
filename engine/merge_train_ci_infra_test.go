@@ -390,6 +390,52 @@ func TestPollTrainCI_RerunQueuedPastSettleDwell_IsNotTheSecondFailure(t *testing
 	}
 }
 
+// Only the re-run workflow runs count as "still in flight". An unrelated
+// workflow still running, or a run held in `waiting` for an approval, must not
+// postpone the stale failure's verdict past the settle dwell.
+func TestPollTrainCI_UnrelatedInFlightRun_DoesNotDelayRed(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  gh.WorkflowRun
+	}{
+		{"unrelated workflow running", gh.WorkflowRun{ID: 99, Name: "Other", Status: "in_progress"}},
+		{"re-run run held for approval", gh.WorkflowRun{ID: 10, Name: "CI", Status: "waiting"}},
+	} {
+		it := failedFirstTrial()
+		it.runs = []gh.WorkflowRun{tc.run}
+		eng := infraTestEngine(t, it)
+
+		start := time.Now()
+		result, _ := pollInfraTrial(t, eng)
+		if result != TrainCIRed {
+			t.Fatalf("%s: result = %v, want red after the settle dwell", tc.name, result)
+		}
+		if time.Since(start) > 10*time.Second {
+			t.Fatalf("%s: red took %v — held by a run that is not the re-run", tc.name, time.Since(start))
+		}
+	}
+}
+
+// A re-run that stays queued is waited for only up to rerunMaxWait past the
+// settle dwell — its own bound, not the 4h backstop.
+func TestPollTrainCI_RerunStuckQueued_RedAfterMaxWait(t *testing.T) {
+	it := failedFirstTrial()
+	it.onRerun = func(it *infraTrial) {
+		it.runs = []gh.WorkflowRun{{ID: 10, Name: "CI", Status: "queued"}}
+	}
+	eng := infraTestEngine(t, it) // settle dwell 150ms
+	eng.SetRerunMaxWaitForTest(300 * time.Millisecond)
+
+	start := time.Now()
+	result, _ := pollInfraTrial(t, eng)
+	if result != TrainCIRed {
+		t.Fatalf("result = %v, want red once the max wait elapsed", result)
+	}
+	if time.Since(start) < 400*time.Millisecond || time.Since(start) > 10*time.Second {
+		t.Fatalf("red after %v, want after dwell+maxWait and far below the backstop", time.Since(start))
+	}
+}
+
 // Each pollTrainCI call is one trial with its own single re-run — the property
 // a bisection sub-trial relies on.
 func TestPollTrainCI_EachTrialGetsItsOwnRerun(t *testing.T) {
