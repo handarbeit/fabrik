@@ -57,6 +57,22 @@ type PRSettleResult struct {
 	RequiredMissing        []string
 	RequiredPending        []string
 	RequiredFailed         []string
+
+	// StartupFailure is set (#2052 R6) when the PR head's CI never started — a
+	// startup_failure workflow run left zero check runs — and retriggering did not
+	// help (or the PR could not be reopened after a retrigger closed it). It is
+	// only ever populated for a stage gated by wait_for_ci, and handleMergeAndCIGates
+	// routes it to pauseForCIStartupFailure ahead of every other gate.
+	StartupFailure *CIStartupFailure
+}
+
+// CIStartupFailure describes a PR whose CI never started (#2052 R6).
+type CIStartupFailure struct {
+	Run        gh.WorkflowRun
+	Retriggers int
+	// ReopenErr is non-nil when a retrigger closed the PR but it could not be
+	// reopened; the PR is then left closed and the pause message says so.
+	ReopenErr error
 }
 
 // settlePRMergeState fetches all PR merge/CI state in a single pass and returns
@@ -66,8 +82,24 @@ type PRSettleResult struct {
 //
 // The stage parameter is accepted for API consistency (callers already have it)
 // but is not used by the primitive itself; gating on WaitForCI is the caller's
-// responsibility.
-func (e *Engine) settlePRMergeState(item gh.ProjectItem, _ *stages.Stage) PRSettleResult {
+// responsibility. This form never retriggers CI (#2052): use
+// settlePRMergeStateForCIGate for the wait_for_ci gate.
+func (e *Engine) settlePRMergeState(item gh.ProjectItem, stage *stages.Stage) PRSettleResult {
+	return e.settlePRMergeStateWith(item, stage, false)
+}
+
+// settlePRMergeStateForCIGate is settlePRMergeState for the stage wait_for_ci
+// gate (handleMergeAndCIGates): when the stage waits for CI and the PR head has
+// zero check runs, it also reads the workflow runs and treats a startup failure
+// as CI infrastructure (#2052 R6) — retriggering by close/reopen up to
+// maxCIRetriggers times, then reporting PRSettleResult.StartupFailure. The
+// auto-merge convergence path keeps the plain form: GitHub owns that merge.
+func (e *Engine) settlePRMergeStateForCIGate(item gh.ProjectItem, stage *stages.Stage) PRSettleResult {
+	return e.settlePRMergeStateWith(item, stage, true)
+}
+
+func (e *Engine) settlePRMergeStateWith(item gh.ProjectItem, stage *stages.Stage, ciInfra bool) PRSettleResult {
+	ciInfra = ciInfra && stage != nil && stage.WaitForCI != nil && *stage.WaitForCI
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	itemRepo := itemOwnerRepoString(item, e.defaultRepo())
 
@@ -89,6 +121,15 @@ func (e *Engine) settlePRMergeState(item gh.ProjectItem, _ *stages.Stage) PRSett
 		// authoritative single-PR endpoint before treating a closed PR as never-merged —
 		// a PR the engine just merged (e.g. the direct-merge fallback) must never be
 		// misclassified as "closed without merging" and used to pause the issue.
+		//
+		// #2052: a PR this engine closed a moment ago to retrigger CI is not "closed
+		// without merging" — it is being reopened. The board cache can lag the
+		// reopen (the `closed` webhook may be read before `reopened`), so inside a
+		// short grace window after a retrigger a closed PR is transient.
+		if ciInfra && e.ciRetriggerGraceActive(itemRepo, pr.Number) {
+			e.logf(item.Number, "settle", "PR #%d reads closed inside the CI-retrigger window — transient\n", pr.Number)
+			return PRSettleResult{Status: PRMergeUnsettled, Reason: "PR closed inside the CI-retrigger window", PR: pr}
+		}
 		merged, mErr := e.readClient.FetchPRMerged(owner, repo, pr.Number)
 		if mErr != nil {
 			// Don't pause on an unconfirmable closed state — re-evaluate next poll.
@@ -155,6 +196,17 @@ func (e *Engine) settlePRMergeState(item gh.ProjectItem, _ *stages.Stage) PRSett
 		if r, held := e.suiteHoldResult(item.Number, owner, repo, pr, nil); held {
 			return r
 		}
+		// #2052 R6: "clean" is also what a startup_failure run with no required
+		// checks reports, and it would clear the gate with CI never run. The
+		// shortcut never reads check runs, so for a wait_for_ci stage it reads them
+		// here (the cached read) and only on zero runs consults the workflow runs.
+		if ciInfra {
+			if runs, rerr := e.readClient.FetchCheckRuns(owner, repo, pr.HeadSHA); rerr == nil && len(runs) == 0 {
+				if r, handled := e.ciStartupCheck(item, owner, repo, itemRepo, pr); handled {
+					return r
+				}
+			}
+		}
 		e.logf(item.Number, "settle", "PR #%d mergeable_state=%q — ready\n", pr.Number, mergeableState)
 		return PRSettleResult{Status: PRMergeReady, Reason: fmt.Sprintf("mergeable_state=%q", mergeableState), MergeableState: mergeableState, PR: pr}
 	}
@@ -195,6 +247,16 @@ func (e *Engine) settlePRMergeState(item gh.ProjectItem, _ *stages.Stage) PRSett
 		// required_status_contexts isn't configured for the repo).
 		if rcStatus, rcMissing, rcPending, rcFailed := e.classifyRequiredContexts(item.Number, owner, repo, pr.HeadSHA, nil); rcStatus == gh.RequiredContextsFailed {
 			return e.requiredContextsSettleResult(item.Number, mergeableState, nil, pr, rcStatus, rcMissing, rcPending, rcFailed)
+		}
+
+		// #2052 R6: zero check runs may be a CI run that never started. Checked
+		// before the hadChecks/dwell/R3 returns below, none of which can tell a
+		// startup failure from "CI has not reported yet" (a startup_failure run is
+		// already completed, so it is never a registration delay).
+		if ciInfra {
+			if r, handled := e.ciStartupCheck(item, owner, repo, itemRepo, pr); handled {
+				return r
+			}
 		}
 
 		var hadChecks bool

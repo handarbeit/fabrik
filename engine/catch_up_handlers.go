@@ -490,7 +490,16 @@ func (e *Engine) handleMergeAndCIGates(pctx *phase1Ctx) bool {
 	// this result, ensuring they see identical GitHub state within one poll
 	// cycle and eliminating the mergeable vs mergeable_state split-brain that
 	// separate REST calls could produce.
-	settle := e.settlePRMergeState(pctx.item, pctx.stage)
+	settle := e.settlePRMergeStateForCIGate(pctx.item, pctx.stage)
+
+	// #2052 R6: CI never started and retriggering did not help — escalate through
+	// the CI pause machinery, naming the startup failure. Ahead of every other
+	// gate: the settle result is PRMergeUnsettled, which the merge gate would
+	// otherwise claim and hold until the CI backstop.
+	if settle.StartupFailure != nil {
+		e.pauseForCIStartupFailure(pctx.board, pctx.item, pctx.stage, settle.StartupFailure)
+		return true
+	}
 
 	mergeBlocked, mergeConflict := e.checkMergeabilityGate(pctx.item, pctx.stage, settle)
 	if mergeConflict {

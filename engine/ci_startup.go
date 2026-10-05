@@ -357,3 +357,94 @@ func (e *Engine) infraCooldownRemaining(trainKey string) (time.Duration, bool) {
 	}
 	return remaining, true
 }
+
+// prStartupState is the stage gate's retrigger bookkeeping for one PR head.
+type prStartupState struct {
+	headSHA       string
+	watch         startupWatch
+	lastRetrigger time.Time
+}
+
+// ciRetriggerGrace is how long after a retrigger a closed PR reads as
+// transient rather than "closed without merging" (see settlePRMergeStateWith).
+const ciRetriggerGrace = 2 * time.Minute
+
+func startupWatchKey(repoStr string, prNum int) string {
+	return fmt.Sprintf("%s#%d", repoStr, prNum)
+}
+
+// startupStateFor returns the retrigger state for a PR, resetting it when the
+// head SHA moved (a push is a fresh CI opportunity). Caller holds startupWatchMu.
+func (e *Engine) startupStateForLocked(repoStr string, prNum int, headSHA string) *prStartupState {
+	if e.startupWatches == nil {
+		e.startupWatches = make(map[string]*prStartupState)
+	}
+	key := startupWatchKey(repoStr, prNum)
+	st := e.startupWatches[key]
+	if st == nil || st.headSHA != headSHA {
+		st = &prStartupState{headSHA: headSHA}
+		e.startupWatches[key] = st
+	}
+	return st
+}
+
+// ciRetriggerGraceActive reports whether the engine retriggered this PR within
+// ciRetriggerGrace.
+func (e *Engine) ciRetriggerGraceActive(repoStr string, prNum int) bool {
+	e.startupWatchMu.Lock()
+	defer e.startupWatchMu.Unlock()
+	st := e.startupWatches[startupWatchKey(repoStr, prNum)]
+	return st != nil && !st.lastRetrigger.IsZero() && time.Since(st.lastRetrigger) < ciRetriggerGrace
+}
+
+// ciStartupCheck is the stage gate's counterpart of pollTrainCI's zero-check-run
+// handling (#2052 R6): the PR head has no check runs, so read its workflow runs
+// and act on a startup failure. handled is false when nothing needs doing (no
+// startup failure in view, or the read was refused or failed) and the caller
+// continues exactly as before.
+func (e *Engine) ciStartupCheck(item gh.ProjectItem, owner, repo, repoStr string, pr *gh.PRDetails) (PRSettleResult, bool) {
+	runs, ok, _ := e.fetchWorkflowRunsSoft(repoStr, owner, repo, pr.HeadSHA)
+	if !ok {
+		return PRSettleResult{}, false
+	}
+	timing := e.ciInfraTimingOrDefault()
+	now := time.Now()
+
+	e.startupWatchMu.Lock()
+	st := e.startupStateForLocked(repoStr, pr.Number, pr.HeadSHA)
+	action, run := st.watch.observe(runs, now, timing.retriggerNewRunDwell)
+	retriggers := st.watch.retriggers
+	e.startupWatchMu.Unlock()
+
+	switch action {
+	case startupRetrigger:
+		e.logf(item.Number, "ci-gate", "CI never started on PR #%d — %s; retriggering by closing and reopening it (retrigger %d/%d)\n",
+			pr.Number, describeStartupRun(run), retriggers+1, maxCIRetriggers)
+		// Mark the retrigger window before closing, so no read in between can see a
+		// closed PR as terminal.
+		e.startupWatchMu.Lock()
+		st.lastRetrigger = time.Now()
+		e.startupWatchMu.Unlock()
+		if err := e.retriggerPR(repoStr, owner, repo, pr.Number); err != nil {
+			e.logf(item.Number, "ci-gate", "%v\n", err)
+			return PRSettleResult{
+				Status: PRMergeUnsettled, Reason: err.Error(), PR: pr,
+				StartupFailure: &CIStartupFailure{Run: run, Retriggers: retriggers, ReopenErr: err},
+			}, true
+		}
+		e.startupWatchMu.Lock()
+		st.watch.retriggered(runs, time.Now())
+		e.startupWatchMu.Unlock()
+		// MergeableState omitted: this is a wait for a fresh run, not an R3 case.
+		return PRSettleResult{Status: PRMergeUnsettled, Reason: "CI startup failure — retriggered", PR: pr}, true
+	case startupWait:
+		return PRSettleResult{Status: PRMergeUnsettled, Reason: "CI startup failure — waiting for the retriggered run", PR: pr}, true
+	case startupAbandon:
+		e.logf(item.Number, "ci-gate", "CI never started on PR #%d after %d retrigger(s) — %s\n", pr.Number, retriggers, describeStartupRun(run))
+		return PRSettleResult{
+			Status: PRMergeUnsettled, Reason: "CI startup failure — retriggering did not help", PR: pr,
+			StartupFailure: &CIStartupFailure{Run: run, Retriggers: retriggers},
+		}, true
+	}
+	return PRSettleResult{}, false
+}

@@ -385,7 +385,7 @@ func TestMergeTrainInfra_OwnershipIsStructural(t *testing.T) {
 		got = append(got, fn)
 	}
 	sort.Strings(got)
-	if fmt.Sprint(got) != "[pollTrainCI]" {
-		t.Errorf("retriggerPR callers = %v, want exactly [pollTrainCI]", got)
+	if fmt.Sprint(got) != "[ciStartupCheck pollTrainCI]" {
+		t.Errorf("retriggerPR callers = %v, want exactly [ciStartupCheck pollTrainCI]", got)
 	}
 }
