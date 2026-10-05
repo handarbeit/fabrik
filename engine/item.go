@@ -92,16 +92,27 @@ func hasLabel(labels []string, want string) bool {
 // not on origin/baseBranch. It fails safe: any git or parse error is returned
 // as a non-nil error rather than assumed to mean zero commits, so callers must
 // treat an error as "unknown" and not short-circuit to a no-commits outcome.
-func commitsAheadOfBase(workDir, baseBranch string) (int, error) {
-	cmd := exec.Command("git", "rev-list", "--count", "origin/"+baseBranch+"..HEAD")
+//
+// A commit touching only the item's own persisted spec (specs/<issueNumber>-*/spec.md,
+// ADR 2034) is not counted: Specify's engine-written spec commit is on every
+// branch and must not defeat the empty-coordinator rule (#921).
+func commitsAheadOfBase(workDir, baseBranch string, issueNumber int) (int, error) {
+	// One record per commit: a NUL-prefixed SHA line followed by the files it touches.
+	cmd := exec.Command("git", "log", "--format=%x00%H", "--name-only", "origin/"+baseBranch+"..HEAD")
 	cmd.Dir = workDir
 	out, err := cmd.Output()
 	if err != nil {
 		return 0, fmt.Errorf("counting commits ahead of origin/%s: %w", baseBranch, err)
 	}
-	count, err := strconv.Atoi(strings.TrimSpace(string(out)))
-	if err != nil {
-		return 0, fmt.Errorf("parsing commit count ahead of origin/%s: %w", baseBranch, err)
+	count := 0
+	for _, rec := range strings.Split(string(out), "\x00") {
+		if strings.TrimSpace(rec) == "" {
+			continue
+		}
+		lines := strings.Split(strings.TrimSpace(rec), "\n")
+		if !isSpecOnlyCommit(lines[1:], issueNumber) {
+			count++
+		}
 	}
 	return count, nil
 }
@@ -725,7 +736,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 			// fix shipped) recover to Done on its next poll instead of continuing to
 			// hammer ensureDraftPR toward escalation.
 			if stage.Name == "Implement" && hasLabel(item.Labels, "fabrik:children-spawned") {
-				if ahead, aErr := commitsAheadOfBase(workDir, baseBranch); aErr == nil && ahead == 0 {
+				if ahead, aErr := commitsAheadOfBase(workDir, baseBranch, item.Number); aErr == nil && ahead == 0 {
 					releaseLock()
 					e.store.Apply(itemstate.StageRetryCleared{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 					e.store.Apply(itemstate.EngineUnpaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
@@ -1390,6 +1401,13 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 			} else if e.webhookMgr != nil {
 				e.webhookMgr.RegisterEcho("issues", "edited", boardcache.ItemKey(owner+"/"+repo, item.Number))
 			}
+			// Persist the same canonical body as specs/<N>-<slug>/spec.md (ADR 2034).
+			// Runs on every round that updates the body — including a blocked one —
+			// but not on FABRIK_NO_WORK_NEEDED, where the item goes to Done with no PR.
+			// The existing claudeRan push below carries the commit to the remote.
+			if !CheckNoWorkNeeded(output) {
+				e.persistSpec(item, stage, workDir, updatedBody)
+			}
 			output = stripMarkers(output, "FABRIK_ISSUE_UPDATE_BEGIN", "FABRIK_ISSUE_UPDATE_END")
 		}
 	}
@@ -1515,7 +1533,7 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 	// commitsAheadOfBase fails safe: any git error leaves noWorkNeeded untouched and
 	// falls through to the normal PR-creation path.
 	if !noWorkNeeded && completed && stage.Name == "Implement" && hasLabel(item.Labels, "fabrik:children-spawned") {
-		if ahead, aErr := commitsAheadOfBase(workDir, baseBranch); aErr == nil && ahead == 0 {
+		if ahead, aErr := commitsAheadOfBase(workDir, baseBranch, item.Number); aErr == nil && ahead == 0 {
 			noWorkNeeded = true
 		}
 	}

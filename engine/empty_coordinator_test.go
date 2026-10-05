@@ -33,7 +33,7 @@ func TestCommitsAheadOfBase(t *testing.T) {
 	dir := initBareRepo(t)
 	fakeOriginRef(t, dir, "main")
 
-	ahead, err := commitsAheadOfBase(dir, "main")
+	ahead, err := commitsAheadOfBase(dir, "main", 7)
 	if err != nil {
 		t.Fatalf("commitsAheadOfBase: %v", err)
 	}
@@ -47,7 +47,7 @@ func TestCommitsAheadOfBase(t *testing.T) {
 		t.Fatalf("git commit: %s: %v", out, err)
 	}
 
-	ahead, err = commitsAheadOfBase(dir, "main")
+	ahead, err = commitsAheadOfBase(dir, "main", 7)
 	if err != nil {
 		t.Fatalf("commitsAheadOfBase: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestCommitsAheadOfBase(t *testing.T) {
 		t.Errorf("ahead = %d, want 1", ahead)
 	}
 
-	if _, err := commitsAheadOfBase(dir, "does-not-exist"); err == nil {
+	if _, err := commitsAheadOfBase(dir, "does-not-exist", 7); err == nil {
 		t.Error("expected error for unresolvable base branch, got nil")
 	}
 }
