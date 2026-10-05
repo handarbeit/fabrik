@@ -462,6 +462,16 @@ func (in *Instrumented) FetchCheckSuites(owner, repo, sha string) ([]gh.CheckSui
 		func() ([]gh.CheckSuite, error) { return in.sim.FetchCheckSuites(owner, repo, sha) })
 }
 
+func (in *Instrumented) FetchWorkflowRuns(owner, repo, sha string) ([]gh.WorkflowRun, error) {
+	return do1(in, "FetchWorkflowRuns", false, Args{Owner: owner, Repo: repo, SHA: sha},
+		func() ([]gh.WorkflowRun, error) { return in.sim.FetchWorkflowRuns(owner, repo, sha) })
+}
+
+func (in *Instrumented) RerunFailedJobs(owner, repo string, runID int64) error {
+	return do0(in, "RerunFailedJobs", true, Args{Owner: owner, Repo: repo, Number: int(runID)},
+		func() error { return in.sim.RerunFailedJobs(owner, repo, runID) })
+}
+
 func (in *Instrumented) FetchCombinedStatus(owner, repo, ref string) ([]gh.CommitStatus, error) {
 	return do1(in, "FetchCombinedStatus", false, Args{Owner: owner, Repo: repo, SHA: ref},
 		func() ([]gh.CommitStatus, error) { return in.sim.FetchCombinedStatus(owner, repo, ref) })

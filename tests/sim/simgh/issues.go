@@ -84,15 +84,32 @@ func (s *Sim) CloseIssue(owner, repo string, issueNumber int) error {
 	return nil
 }
 
-// ReopenIssue reopens a closed issue. Mirrors CloseIssue's shape but only
-// operates on the issue map — the engine only ever reopens a credited
-// *issue*, never a PR, so there is no PR fallback to mirror here.
+// ReopenIssue reopens a closed issue, or — like CloseIssue — a closed PR, since
+// production's reopen is the same issues endpoint. The PR fallback exists for
+// the merge train's CI retrigger (#2052): closing and reopening a trial's draft
+// PR is how a run that never started is started again. A reopened PR consumes
+// the next scripted ReopenStep (see workflowruns.go), the model of "reopening
+// fires a fresh pull_request run".
 func (s *Sim) ReopenIssue(owner, repo string, issueNumber int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	iss, err := s.issueLocked(owner, repo, issueNumber)
 	if err != nil {
-		return err
+		r, rerr := s.lookupRepo(owner, repo)
+		if rerr != nil {
+			return err
+		}
+		pr, ok := r.prs[issueNumber]
+		if !ok {
+			return err
+		}
+		if pr.state == "open" {
+			return nil
+		}
+		pr.state = "open"
+		pr.updatedAt = s.now()
+		s.applyReopenStep(r, issueNumber)
+		return nil
 	}
 	if iss.state == "OPEN" {
 		return nil

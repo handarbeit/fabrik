@@ -94,6 +94,17 @@ type repoState struct {
 	// GitHub reports it while a job is unscheduled.
 	checkSuites map[string][]gh.CheckSuite
 
+	// workflowRuns is the per-SHA Actions workflow-run list (#2052) — a fourth
+	// CI collection, kept separate because a run that failed before creating
+	// any job (startup_failure) exists here while checkRuns stays empty.
+	// reopenScripts and rerunScripts are the scenario's scripted answers to
+	// "what does reopening this PR / re-running this run produce"; see
+	// workflowruns.go. nextWorkflowRunID auto-assigns run IDs.
+	workflowRuns      map[string][]gh.WorkflowRun
+	reopenScripts     map[int][]ReopenStep
+	rerunScripts      map[int64]RerunStep
+	nextWorkflowRunID int64
+
 	// ciSchedule holds pending clock-driven mutations to checkRuns and
 	// commitStatuses: "this SHA goes red at T". Applied lazily by drainCI on
 	// every read of either collection, so a scenario expresses a CI transition
