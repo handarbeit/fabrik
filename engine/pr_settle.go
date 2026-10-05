@@ -69,6 +69,7 @@ type PRSettleResult struct {
 // CIStartupFailure describes a PR whose CI never started (#2052 R6).
 type CIStartupFailure struct {
 	Run        gh.WorkflowRun
+	PRNum      int
 	Retriggers int
 	// ReopenErr is non-nil when a retrigger closed the PR but it could not be
 	// reopened; the PR is then left closed and the pause message says so.

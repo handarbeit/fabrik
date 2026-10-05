@@ -889,7 +889,7 @@ func (e *Engine) pauseForCIStartupFailure(_ *gh.ProjectBoard, item gh.ProjectIte
 		"GitHub reports a startup failure — the workflow run was rejected before it created any job, so there are no checks to wait for. "+
 		"This is usually a workflow-file error (invalid YAML, a bad reusable-workflow reference) or a GitHub Actions outage, not a code failure.\n\n"+
 		"%s\n\n"+
-		"Fabrik has paused this issue while waiting for stage **%s** to complete. To resume: fix the workflow (or wait out the outage), make sure CI runs on the pull request, and remove the `fabrik:paused` label.",
+		"Fabrik has paused this issue while waiting for stage **%s** to complete. To resume: fix the workflow (or wait out the outage), and remove the `fabrik:paused` label — Fabrik will then retrigger CI again (up to twice) on the pull request.",
 		describeStartupRun(f.Run), retriggerNote, stage.Name)
 
 	e.pauseIssue(item, msg, pauseOpts{
@@ -897,4 +897,6 @@ func (e *Engine) pauseForCIStartupFailure(_ *gh.ProjectBoard, item gh.ProjectIte
 		reactRocket:   true,
 	})
 	e.removeAwaitingCILabel(owner, repo, item)
+	// A resume starts with a fresh retrigger budget (see resetStartupState).
+	e.resetStartupState(itemOwnerRepoString(item, e.defaultRepo()), f.PRNum)
 }

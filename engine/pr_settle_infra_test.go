@@ -308,6 +308,46 @@ func TestHandleMergeAndCIGates_StartupFailure_PausesNamingTheRun(t *testing.T) {
 	}
 }
 
+// After the gate pauses for a startup failure, the retrigger state is reset: a
+// workflow fix lands on the base branch and does not move the PR head SHA, so
+// without the reset the spent budget and old baseline would make the resumed
+// item abandon at once, with no retrigger, and re-pause.
+func TestHandleMergeAndCIGates_StartupFailure_ResumeStartsWithFreshRetriggerBudget(t *testing.T) {
+	g := newGateInfra("blocked")
+	mc := g.client()
+	waitTrue := true
+	eng := testEngineWithStages(t, mc, []*stages.Stage{
+		{Name: "Implement", Order: 1, Prompt: "implement", WaitForCI: &waitTrue},
+		{Name: "Review", Order: 2, Prompt: "review"},
+	})
+	eng.SetCIInfraTimingForTest(time.Millisecond, 0, 0, -1)
+
+	pctx := makeMergeGatePctx(&gh.ProjectBoard{ProjectID: "PVT_1"}, map[string]bool{})
+	for i := 0; i < 5 && !hasPausedLabel(mc); i++ {
+		eng.handleMergeAndCIGates(pctx)
+		time.Sleep(3 * time.Millisecond)
+	}
+	if !hasPausedLabel(mc) {
+		t.Fatal("expected the item to be paused for the startup failure")
+	}
+	g.mu.Lock()
+	closesAtPause := g.closes
+	g.mu.Unlock()
+
+	// The human resumes; the head SHA is unchanged and the dead run is still on it.
+	time.Sleep(5 * time.Millisecond)
+	r := eng.settlePRMergeStateForCIGate(settleItem(1), gateStage(true))
+	g.mu.Lock()
+	closes := g.closes
+	g.mu.Unlock()
+	if r.StartupFailure != nil {
+		t.Fatalf("resumed item was abandoned at once (%+v) instead of retriggering afresh", r.StartupFailure)
+	}
+	if closes != closesAtPause+1 {
+		t.Fatalf("closes after resume = %d, want %d — no fresh retrigger", closes, closesAtPause+1)
+	}
+}
+
 func hasPausedLabel(mc *mockGitHubClient) bool {
 	mc.mu.Lock()
 	defer mc.mu.Unlock()

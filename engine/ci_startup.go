@@ -457,6 +457,17 @@ func (e *Engine) startupStateForLocked(repoStr string, prNum int, headSHA string
 	return st
 }
 
+// resetStartupState forgets a PR's retrigger state. The stage gate calls it when
+// it pauses an item for a CI startup failure: the human who resumes it has
+// usually fixed the workflow on the base branch, which does not move the PR's
+// head SHA, so without a reset the spent budget and the old baseline would make
+// the next consultation abandon straight away, with no retrigger, and re-pause.
+func (e *Engine) resetStartupState(repoStr string, prNum int) {
+	e.startupWatchMu.Lock()
+	defer e.startupWatchMu.Unlock()
+	delete(e.startupWatches, startupWatchKey(repoStr, prNum))
+}
+
 // ciRetriggerGraceActive reports whether the engine retriggered this PR within
 // ciRetriggerGrace.
 func (e *Engine) ciRetriggerGraceActive(repoStr string, prNum int) bool {
@@ -498,7 +509,7 @@ func (e *Engine) ciStartupCheck(item gh.ProjectItem, owner, repo, repoStr string
 			e.logf(item.Number, "ci-gate", "%v\n", err)
 			return PRSettleResult{
 				Status: PRMergeUnsettled, Reason: err.Error(), PR: pr,
-				StartupFailure: &CIStartupFailure{Run: run, Retriggers: retriggers, ReopenErr: err},
+				StartupFailure: &CIStartupFailure{Run: run, PRNum: pr.Number, Retriggers: retriggers, ReopenErr: err},
 			}, true
 		}
 		e.startupWatchMu.Lock()
@@ -512,7 +523,7 @@ func (e *Engine) ciStartupCheck(item gh.ProjectItem, owner, repo, repoStr string
 		e.logf(item.Number, "ci-gate", "CI never started on PR #%d after %d retrigger(s) — %s\n", pr.Number, retriggers, describeStartupRun(run))
 		return PRSettleResult{
 			Status: PRMergeUnsettled, Reason: "CI startup failure — retriggering did not help", PR: pr,
-			StartupFailure: &CIStartupFailure{Run: run, Retriggers: retriggers},
+			StartupFailure: &CIStartupFailure{Run: run, PRNum: pr.Number, Retriggers: retriggers},
 		}, true
 	}
 	return PRSettleResult{}, false
