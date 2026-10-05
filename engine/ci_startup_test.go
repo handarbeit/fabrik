@@ -17,7 +17,11 @@ func TestIsStartupFailure(t *testing.T) {
 	}{
 		{"startup_failure conclusion", gh.WorkflowRun{Status: "completed", Conclusion: "startup_failure"}, true},
 		{"completed zero jobs", gh.WorkflowRun{Status: "completed", Conclusion: "failure", JobCount: 0}, true},
-		{"completed zero jobs success", gh.WorkflowRun{Status: "completed", Conclusion: "success", JobCount: 0}, true},
+		{"completed zero jobs success is not a failure", gh.WorkflowRun{Status: "completed", Conclusion: "success", JobCount: 0}, false},
+		// A run held for manual approval completes with no jobs; a human, not a retrigger, resolves it.
+		{"zero-job action_required is not infrastructure", gh.WorkflowRun{Status: "completed", Conclusion: "action_required", JobCount: 0}, false},
+		{"zero-job skipped is not infrastructure", gh.WorkflowRun{Status: "completed", Conclusion: "skipped", JobCount: 0}, false},
+		{"zero-job stale is not infrastructure", gh.WorkflowRun{Status: "completed", Conclusion: "stale", JobCount: 0}, false},
 		// #2033: a concurrency-group supersession cancels the run before any job.
 		{"zero-job cancelled is not infrastructure", gh.WorkflowRun{Status: "completed", Conclusion: "cancelled", JobCount: 0}, false},
 		{"completed with jobs", gh.WorkflowRun{Status: "completed", Conclusion: "failure", JobCount: 3}, false},

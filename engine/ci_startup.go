@@ -106,6 +106,13 @@ func (e *Engine) SetCIInfraTimingForTest(retriggerNewRunDwell, rerunSettleDwell,
 // it as infrastructure would close and reopen a PR over a deliberate cancel.
 // A genuine startup failure that reports `cancelled` falls through to the
 // pre-#2052 behaviour.
+//
+// The zero-job fallback is an allow-list: only a `failure` conclusion counts.
+// Other zero-job completions are not provider failures — `action_required` is a
+// run held for a human's approval (a first-time or fork contributor), `skipped`
+// and `stale` are deliberate, `neutral`/`success` are not failures at all — and
+// closing and reopening a PR over any of them would burn the retrigger budget
+// and then abandon or pause on a run that needs no retrigger.
 func isStartupFailure(run gh.WorkflowRun) bool {
 	if run.Status != "completed" {
 		return false
@@ -113,7 +120,7 @@ func isStartupFailure(run gh.WorkflowRun) bool {
 	if run.Conclusion == "startup_failure" {
 		return true
 	}
-	return run.JobCount == 0 && run.Conclusion != "cancelled"
+	return run.JobCount == 0 && run.Conclusion == "failure"
 }
 
 // startupAction is what a startupWatch tells its caller to do next.
@@ -283,6 +290,26 @@ func checkRunIDSet(runs []gh.CheckRun) map[int64]bool {
 func hasNewCheckRun(failed []gh.CheckRun, seen map[int64]bool) bool {
 	for _, r := range failed {
 		if !seen[r.ID] {
+			return true
+		}
+	}
+	return false
+}
+
+// rerunInFlight reports whether any workflow run on sha is still queued or
+// running — i.e. a re-run of failed jobs that has not finished. pollTrainCI
+// consults it once the re-run settle dwell has elapsed with only the stale
+// original failure visible, so a re-run queued behind runner capacity is waited
+// for (bounded by CIBackstopTimeout) instead of the stale failure being counted
+// as the second one. A read error or refused permission reports false: the
+// caller then falls back to the dwell's verdict, as before.
+func (e *Engine) rerunInFlight(logRepo, owner, repo, sha string) bool {
+	runs, ok, _ := e.fetchWorkflowRunsSoft(logRepo, owner, repo, sha)
+	if !ok {
+		return false
+	}
+	for _, r := range runs {
+		if r.Status != "completed" {
 			return true
 		}
 	}

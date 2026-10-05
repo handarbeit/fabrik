@@ -5208,10 +5208,14 @@ func (e *Engine) pollTrainCI(ctx context.Context, owner, repo string, prNum int,
 						e.logfRepo(logRepo, "merge-train", "trial %s red — failed check(s): %s\n", trialSHA, describeCheckRuns(failed))
 						return TrainCIRed, &trainCIDiagnostic{FailedChecks: failed, PRNum: prNum, TrialSHA: trialSHA}
 					}
-				} else if hasNewCheckRun(failed, rr.firstFailedIDs) || time.Since(rr.at) >= timing.rerunSettleDwell {
+				} else if hasNewCheckRun(failed, rr.firstFailedIDs) ||
+					(time.Since(rr.at) >= timing.rerunSettleDwell && !e.rerunInFlight(logRepo, owner, repo, trialSHA)) {
 					// A failing latest-per-name run the first failure did not contain means the
 					// re-run itself failed; the dwell bounds the case where the re-run never
-					// materialised and only the stale original is visible.
+					// materialised and only the stale original is visible. A workflow run still
+					// queued or running on the SHA means the re-run is merely waiting for a
+					// runner, so the stale failure is not yet a verdict (CIBackstopTimeout
+					// still bounds the wait).
 					e.logfRepo(logRepo, "merge-train", "trial %s red after the failed-job re-run — failed check(s): %s\n", trialSHA, describeCheckRuns(failed))
 					return TrainCIRed, &trainCIDiagnostic{FailedChecks: failed, PRNum: prNum, TrialSHA: trialSHA}
 				}

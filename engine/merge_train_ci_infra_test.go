@@ -358,6 +358,38 @@ func TestPollTrainCI_RerunNeverMaterialises_RedAfterSettleDwell(t *testing.T) {
 	}
 }
 
+// A re-run still queued behind runner capacity when the settle dwell elapses is
+// not a second failure: the workflow run on the SHA is not completed, so the
+// trial keeps waiting for it.
+func TestPollTrainCI_RerunQueuedPastSettleDwell_IsNotTheSecondFailure(t *testing.T) {
+	it := failedFirstTrial()
+	it.onRerun = func(it *infraTrial) {
+		it.runs = []gh.WorkflowRun{{ID: 10, Name: "CI", Status: "queued"}}
+	}
+	eng := infraTestEngine(t, it) // settle dwell 150ms
+	go func() {
+		for {
+			it.mu.Lock()
+			reran := len(it.rerunIDs) > 0
+			it.mu.Unlock()
+			if reran {
+				time.Sleep(400 * time.Millisecond) // well past the dwell, still queued
+				it.mu.Lock()
+				it.runs = []gh.WorkflowRun{healthyWorkflowRun(10)}
+				it.checkRuns = []gh.CheckRun{actionsCheck(11, 10, "build", "success"), actionsCheck(13, 10, "test", "success")}
+				it.mu.Unlock()
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+
+	result, _ := pollInfraTrial(t, eng)
+	if result != TrainCIGreen {
+		t.Fatalf("result = %v, want green — a queued re-run was counted as a second failure", result)
+	}
+}
+
 // Each pollTrainCI call is one trial with its own single re-run — the property
 // a bisection sub-trial relies on.
 func TestPollTrainCI_EachTrialGetsItsOwnRerun(t *testing.T) {
