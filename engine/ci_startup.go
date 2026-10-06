@@ -71,6 +71,20 @@ type ciInfraTiming struct {
 	rerunMaxWait         time.Duration
 	abandonCooldown      time.Duration
 	reopenBackoff        time.Duration
+
+	// clock, when set (tests only), is the time source of pollTrainCI's retrigger
+	// and re-run dwells. It is deliberately not the engine clock: the sim's engine
+	// clock advances only between polls, so a dwell inside one worker's polling
+	// loop would never elapse on it.
+	clock Clock
+}
+
+// now is the time source for the dwells above: the injected clock, else real time.
+func (t ciInfraTiming) now() time.Time {
+	if t.clock != nil {
+		return t.clock.Now()
+	}
+	return time.Now()
 }
 
 func (e *Engine) ciInfraTimingOrDefault() ciInfraTiming {
@@ -104,7 +118,14 @@ func (e *Engine) SetCIInfraTimingForTest(retriggerNewRunDwell, rerunSettleDwell,
 		rerunSettleDwell:     rerunSettleDwell,
 		abandonCooldown:      abandonCooldown,
 		reopenBackoff:        reopenBackoff,
+		clock:                e.ciInfraTiming.clock,
 	}
+}
+
+// SetCIInfraClockForTest makes pollTrainCI's retrigger and re-run dwells elapse
+// on c instead of real time, so a test advances them explicitly. Test-only.
+func (e *Engine) SetCIInfraClockForTest(c Clock) {
+	e.ciInfraTiming.clock = c
 }
 
 // SetRerunMaxWaitForTest overrides the cap on waiting for an in-flight re-run.

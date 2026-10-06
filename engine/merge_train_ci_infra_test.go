@@ -153,11 +153,12 @@ func (c *advClock) Advance(d time.Duration) {
 // infraDwell is the re-run settle dwell infraTestEngine configures.
 const infraDwell = 150 * time.Millisecond
 
-// useClock gives the engine an explicit clock for a test that scripts dwells.
-// The default is the real clock, which the retrigger tests rely on.
+// useClock gives pollTrainCI's retrigger and re-run dwells an explicit clock for
+// a test that scripts them. The default is the real clock, which the retrigger
+// tests rely on.
 func (it *infraTrial) useClock(eng *Engine) *advClock {
 	c := newAdvClock()
-	eng.SetClock(c)
+	eng.SetCIInfraClockForTest(c)
 	return c
 }
 
