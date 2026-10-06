@@ -1139,3 +1139,7 @@ file no longer commits a specific number to prose.
 
 The tests use the real `git` binary and skip when it is unavailable, following
 the repo-wide `skipIfNoGit` convention.
+
+## Channel events (`channel_events_test.go`, #1968)
+
+Scenarios that drive the real engine through `PollOnce` with the channel hub started through the engine's `StartChannelEventsForTest` seam (and `SetChannelTimingForTest` to shorten the deriver's debounce), so the validate-settled anchor is exercised against the real gate chain: not emitted at `FABRIK_STAGE_COMPLETE` while `fabrik:awaiting-ci` holds nor while the review gate holds; emitted exactly once when both clear (cruise: `next=waiting-for-human`; yolo: captured before the same-pass merge, `next=auto-merge`); emitted again after `fabrik:revalidate`; and `TestChannelEventsAreObservationOnly` (R10), which runs one scenario with and without a hub and subscriber and requires the same ordered GitHub mutations and the same final labels. These tests are not `t.Parallel`: the deriver's timing is package-level and serial tests finish before any parallel test resumes. The sim delivers no `check_run` webhooks, so a settled event's `ci` is `unknown` here by design.

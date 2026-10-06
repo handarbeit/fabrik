@@ -1,6 +1,10 @@
 package localapi
 
-import "time"
+import (
+	"time"
+
+	"github.com/handarbeit/fabrik/internal/channelevents"
+)
 
 // Envelope is the freshness envelope every result carries (R3).
 type Envelope struct {
@@ -343,4 +347,59 @@ type TrainPartition struct {
 	Base           string   `json:"base"`
 	Members        []string `json:"members"`
 	WorkerInFlight bool     `json:"worker_in_flight"`
+}
+
+// ---- streaming (protocol v2, #1968) ----
+
+// SubscribeParams registers a subscription. Subscriber is the stable name the
+// held queue is keyed on. Issues are "owner/repo#N", or a bare "N" when the
+// daemon manages exactly one repo (the same resolver as status). ExcludeLabels
+// distinguishes absent (nil: the default churn exclusions) from an explicit
+// empty list (opt into every label).
+type SubscribeParams struct {
+	Subscriber    string    `json:"subscriber"`
+	Repos         []string  `json:"repos,omitempty"`
+	Issues        []string  `json:"issues,omitempty"`
+	Milestone     string    `json:"milestone,omitempty"`
+	Labels        []string  `json:"labels,omitempty"`
+	ExcludeLabels *[]string `json:"exclude_labels,omitempty"`
+	Events        []string  `json:"events,omitempty"`
+	DigestSeconds int       `json:"digest_seconds,omitempty"`
+}
+
+// SubscribeResult echoes the stored subscription and everything the subscriber
+// now has.
+type SubscribeResult struct {
+	Subscription  channelevents.Subscription   `json:"subscription"`
+	Subscriptions []channelevents.Subscription `json:"subscriptions"`
+}
+
+// UnsubscribeParams removes one subscription by id, or all of a subscriber's
+// when ID is empty.
+type UnsubscribeParams struct {
+	Subscriber string `json:"subscriber"`
+	ID         string `json:"id,omitempty"`
+}
+
+// UnsubscribeResult reports how many subscriptions were removed.
+type UnsubscribeResult struct {
+	Removed       int                          `json:"removed"`
+	Subscriptions []channelevents.Subscription `json:"subscriptions"`
+}
+
+// AttachParams binds the connection as the live session of a subscriber.
+type AttachParams struct {
+	Subscriber string `json:"subscriber"`
+	// CatchUp asks for a snapshot of what is waiting on a human right now (items
+	// settled at Validate, needs-human, escalated), tagged catch_up=true. The
+	// client sets it on the first attach of a session only, never on a reconnect.
+	CatchUp bool `json:"catch_up,omitempty"`
+}
+
+// AttachResult acknowledges an attach and tells the client the heartbeat
+// cadence so it can size its dead-peer watchdog.
+type AttachResult struct {
+	Subscriber        string `json:"subscriber"`
+	HeartbeatMillis   int64  `json:"heartbeat_ms"`
+	IdleTimeoutMillis int64  `json:"idle_timeout_ms"`
 }

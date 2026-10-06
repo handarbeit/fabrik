@@ -987,6 +987,7 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 	// than duplicating them) on the next attempt.
 	// No webhook echo here — preserving prior behavior (never echoed at this site).
 	e.applyLabelAdd(item, "fabrik:children-spawned", false)
+	e.emitChildrenSpawned(item, spawned) // observation only (#1968)
 
 	e.logf(item.Number, "spawn", "spawned %d child(ren); parent will be gated until all close\n", len(blocks))
 	return spawned, true, nil

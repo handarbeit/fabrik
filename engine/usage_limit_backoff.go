@@ -61,6 +61,7 @@ func (e *Engine) activateClaudeSuspension(issueNumber int, limitErr *claudeUsage
 		e.logf(issueNumber, "claude-limit", "account usage-limit hit; no usable structured reset (reason=%s), falling back to a %s suspension of Claude dispatch account-wide until %s", reason, claudeUsageLimitFallbackBackoff, deadline.Format(time.RFC3339))
 	}
 	e.emitStructural(tui.ClaudeUsageLimitAlertEvent{Suspended: true, Reset: deadline})
+	e.channelNudge() // observation only (#1968): re-check account-wide state
 }
 
 // clearClaudeSuspension clears an active account-wide Claude suspension, if
@@ -79,4 +80,5 @@ func (e *Engine) clearClaudeSuspension(reason string) {
 	}
 	e.logf(0, "claude-limit", "clearing account-wide Claude dispatch suspension: %s", reason)
 	e.emitStructural(tui.ClaudeUsageLimitAlertEvent{Suspended: false})
+	e.channelNudge() // observation only (#1968)
 }

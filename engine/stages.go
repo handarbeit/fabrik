@@ -442,6 +442,20 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 		return false, true, nil
 	}
 
+	// Observation only (#1968 R2, R10): every landing gate has passed — the
+	// engine is about to queue or merge. Recorded here because a yolo item lands
+	// inside this call and never reaches runCatchUpPhase2. Changes nothing.
+	landing := e.noteValidateLanding(item, stage)
+	enabled, deferred, err = e.landValidated(ctx, board, item, owner, repo)
+	// Announced only once the merge or enqueue went through (#1968 R2): a failed
+	// landing, e.g. a conflict leading to fabrik:rebase-needed, announces nothing.
+	landing.finish(err == nil && !deferred && (enabled || e.cfg.MergeTrain == "on"))
+	return enabled, deferred, err
+}
+
+// landValidated performs the landing action once every gate has passed: advance
+// to Queued under the merge train, otherwise enqueue, auto-merge or merge directly.
+func (e *Engine) landValidated(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, owner, repo string) (enabled bool, deferred bool, err error) {
 	// Merge-train gate: when merge_train: on, advance to Queued instead of enabling auto-merge.
 	// Cruise items always bypass this (handled above). New items never reach fabrik:auto-merge-enabled
 	// when merge_train: on, so this gate fires exactly once per qualifying Validate completion.

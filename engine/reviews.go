@@ -1191,12 +1191,20 @@ func (e *Engine) removeAwaitingReviewLabel(owner, repo string, item gh.ProjectIt
 func (e *Engine) buildReviewThreadComments(item gh.ProjectItem) []gh.Comment {
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
 	snap, _ := e.store.Get(repoStr, item.Number)
-	out := make([]gh.Comment, 0, len(item.LinkedPRReviewThreadComments))
-	for _, c := range item.LinkedPRReviewThreadComments {
+	return filterReviewThreadComments(item.LinkedPRReviewThreadComments, func(id string) bool { return !snap.CommentProcessed(id).IsZero() })
+}
+
+// filterReviewThreadComments is buildReviewThreadComments' pure core: the
+// unresolved thread comments no one has processed, given a predicate for the
+// store's processed watermark. Shared with the cache-only channel-event path
+// (#1968).
+func filterReviewThreadComments(threads []gh.Comment, processed func(id string) bool) []gh.Comment {
+	out := make([]gh.Comment, 0, len(threads))
+	for _, c := range threads {
 		if c.HasReaction("ROCKET") {
 			continue
 		}
-		if !snap.CommentProcessed(c.ID).IsZero() {
+		if processed(c.ID) {
 			continue
 		}
 		out = append(out, c)
@@ -1213,7 +1221,12 @@ func (e *Engine) buildReviewThreadComments(item gh.ProjectItem) []gh.Comment {
 // isOutdated from whether the commented lines still exist unchanged in the
 // current diff, so no separate SHA-comparison logic is needed here.
 func (e *Engine) currentHeadReviewThreadComments(item gh.ProjectItem) []gh.Comment {
-	all := e.buildReviewThreadComments(item)
+	return dropOutdatedThreadComments(e.buildReviewThreadComments(item))
+}
+
+// dropOutdatedThreadComments narrows thread comments to those on the current
+// head — currentHeadReviewThreadComments' pure core, shared with #1968.
+func dropOutdatedThreadComments(all []gh.Comment) []gh.Comment {
 	out := make([]gh.Comment, 0, len(all))
 	for _, c := range all {
 		if c.IsOutdated {
@@ -1385,31 +1398,7 @@ func (e *Engine) buildReviewBodyCommentsFromReviews(item gh.ProjectItem, reviews
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
 	snap, _ := e.store.Get(repoStr, item.Number)
 
-	type candidate struct {
-		review gh.PRReview
-		id     string
-	}
-	var candidates []candidate
-	for _, r := range reviews {
-		if r.DatabaseID == 0 {
-			continue
-		}
-		// Any non-DISMISSED, non-PENDING review body is treated as
-		// actionable (#1045, superseding #1375's CHANGES_REQUESTED-only
-		// filter) — see buildReviewBodyComments' doc comment above for the
-		// full rationale and the no-op cycle exemption that pays for it.
-		if r.State == "DISMISSED" || r.State == "PENDING" {
-			continue
-		}
-		if r.Body == "" {
-			continue
-		}
-		id := reviewBodyCommentID(r)
-		if !snap.CommentProcessed(id).IsZero() {
-			continue
-		}
-		candidates = append(candidates, candidate{review: r, id: id})
-	}
+	candidates := reviewBodyCandidates(reviews, func(id string) bool { return !snap.CommentProcessed(id).IsZero() })
 
 	out := make([]gh.Comment, 0, len(candidates))
 	if len(candidates) == 0 {
@@ -1448,6 +1437,43 @@ func (e *Engine) buildReviewBodyCommentsFromReviews(item gh.ProjectItem, reviews
 		})
 	}
 	return out
+}
+
+// reviewBodyCandidate is one review whose body may need addressing.
+type reviewBodyCandidate struct {
+	review gh.PRReview
+	id     string
+}
+
+// reviewBodyCandidates is the pure first half of buildReviewBodyCommentsFromReviews:
+// the reviews whose body is actionable (#1045: any non-DISMISSED, non-PENDING
+// review with a body and a stable ID) and not already recorded as processed.
+// It does not consult the durable #1555 marker — that needs a live fetch — which
+// the cache-only channel-event path (#1968) resolves from cached comments
+// instead.
+func reviewBodyCandidates(reviews []gh.PRReview, processed func(id string) bool) []reviewBodyCandidate {
+	var candidates []reviewBodyCandidate
+	for _, r := range reviews {
+		if r.DatabaseID == 0 {
+			continue
+		}
+		// Any non-DISMISSED, non-PENDING review body is treated as
+		// actionable (#1045, superseding #1375's CHANGES_REQUESTED-only
+		// filter) — see buildReviewBodyComments' doc comment above for the
+		// full rationale and the no-op cycle exemption that pays for it.
+		if r.State == "DISMISSED" || r.State == "PENDING" {
+			continue
+		}
+		if r.Body == "" {
+			continue
+		}
+		id := reviewBodyCommentID(r)
+		if processed(id) {
+			continue
+		}
+		candidates = append(candidates, reviewBodyCandidate{review: r, id: id})
+	}
+	return candidates
 }
 
 // durablyAddressedReviewIDs resolves the linked PR for item and returns the
@@ -1858,6 +1884,7 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 		awaitingInput: true,
 		reactRocket:   true,
 	})
+	e.emitReviewTimeout(item, stage) // observation only (#1968)
 }
 
 // dispatchReviewReinvoke re-invokes the stage agent via processComments with

@@ -1,6 +1,7 @@
 // Package mcpstdio is a minimal, stdlib-only Model Context Protocol server over
 // stdio (newline-delimited JSON-RPC 2.0) that proxies three read tools to the
-// Fabrik daemon's local socket (#1967, ADR-1966-a).
+// Fabrik daemon's local socket (#1967, ADR-1966-a), plus the subscribe tools
+// and the Claude Code Channels push of #1968 (ADR-1966-b, channel.go).
 //
 // stdout is the protocol channel: this package writes nothing to Out except
 // JSON-RPC frames, one per line. Diagnostics go to Err.
@@ -53,7 +54,19 @@ type Server struct {
 	Call        CallFunc
 	CallTimeout time.Duration
 
-	wmu sync.Mutex
+	// Subscriber is the stable name this shim attaches to the daemon under (the
+	// operator's topic or session name — never a PID). Empty disables push:
+	// the read tools work unchanged and fabrik_subscribe reports why it cannot
+	// default a name. #1968.
+	Subscriber string
+	// Stream runs the held connection; nil selects localapi.RunStream.
+	Stream StreamFunc
+	// UnreachableGrace overrides DefaultUnreachableGrace.
+	UnreachableGrace time.Duration
+
+	wmu        sync.Mutex
+	streamOnce sync.Once
+	streamWG   sync.WaitGroup
 }
 
 type request struct {
@@ -99,6 +112,11 @@ func (s *Server) Serve(ctx context.Context) error {
 	if s.CallTimeout <= 0 {
 		s.CallTimeout = DefaultCallTimeout
 	}
+	// The held stream ends with Serve: on stdin EOF or cancellation it is
+	// stopped and joined before Serve returns.
+	sctx, stopStream := context.WithCancel(ctx)
+	defer s.streamWG.Wait()
+	defer stopStream()
 	var wg sync.WaitGroup
 	defer wg.Wait()
 
@@ -113,7 +131,7 @@ func (s *Server) Serve(ctx context.Context) error {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				s.handleLine(ctx, line)
+				s.handleLine(sctx, line)
 			}()
 		}
 		if err != nil {
@@ -193,9 +211,11 @@ func (s *Server) handleLine(ctx context.Context, line []byte) {
 		s.reply(req.ID, map[string]any{"tools": toolDefs()})
 	case "tools/call":
 		s.toolsCall(ctx, req)
+	case "notifications/initialized":
+		s.startStream(ctx)
 	default:
 		if isNotification {
-			return // notifications/initialized, notifications/cancelled, ...: nothing to do
+			return // notifications/cancelled, ...: nothing to do
 		}
 		s.fail(req.ID, errMethodNotFound, fmt.Sprintf("method not found: %s", req.Method))
 	}
@@ -215,11 +235,16 @@ func (s *Server) initialize(params json.RawMessage) map[string]any {
 	}
 	return map[string]any{
 		"protocolVersion": version,
-		"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
-		"serverInfo":      map[string]any{"name": "fabrik", "version": s.Version},
+		"capabilities": map[string]any{
+			"tools": map[string]any{"listChanged": false},
+			// Claude Code Channels (research preview): this server may push
+			// notifications/claude/channel into the session (#1968).
+			"experimental": map[string]any{"claude/channel": map[string]any{}},
+		},
+		"serverInfo": map[string]any{"name": "fabrik", "version": s.Version},
 		"instructions": "Read-only view of a running Fabrik daemon's in-memory state, served from the daemon's cache at no GitHub cost. " +
 			"Every response states how fresh it is (as_of); a value the daemon cannot vouch for is the string \"unknown\", never a default. " +
-			"Start with fabrik_board (attention) to see what needs looking at, then fabrik_status for one issue.",
+			"Start with fabrik_board (attention) to see what needs looking at, then fabrik_status for one issue." + channelInstructions,
 	}
 }
 
@@ -247,7 +272,7 @@ func (s *Server) toolsCall(ctx context.Context, req request) {
 		return
 	}
 
-	method, params, err := buildCall(p.Name, p.Arguments)
+	method, params, err := buildCall(p.Name, p.Arguments, s.Subscriber)
 	if err != nil {
 		var ue *unknownToolError
 		if errors.As(err, &ue) {
@@ -270,7 +295,22 @@ func (s *Server) toolsCall(ctx context.Context, req request) {
 		pretty.Reset()
 		pretty.Write(result)
 	}
-	s.reply(req.ID, textResult(pretty.String(), false))
+	res := textResult(pretty.String(), false)
+	if p.Name == ToolSubscribe {
+		// The daemon cannot know whether this session loaded the shim as a channel;
+		// say so rather than let a successful subscribe imply delivery.
+		res.Content = append(res.Content, toolContent{Type: "text", Text: subscribeNote(s.Subscriber)})
+	}
+	s.reply(req.ID, res)
+}
+
+func subscribeNote(attached string) string {
+	note := "Note: Fabrik cannot tell whether this session receives channel pushes. They appear only if Claude Code was started with Channels enabled for this server " +
+		"(research preview: claude --dangerously-load-development-channels server:fabrik; Team/Enterprise orgs must also allow channels). Otherwise events are dropped silently."
+	if attached == "" {
+		note += " This server was launched without --subscriber, so it holds no push connection: events for this subscription are held by the daemon and delivered once a server with that name attaches."
+	}
+	return note
 }
 
 // describeCallError turns a daemon-call failure into the text the model sees.

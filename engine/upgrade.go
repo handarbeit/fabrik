@@ -33,11 +33,18 @@ func (e *Engine) checkAndUpgrade() {
 		return
 	}
 
+	selfupgrade.CheckAndRebuildDev(e.devBuildConfig())
+}
+
+// devBuildConfig is the dev-build self-upgrade configuration. PreExecHook flushes
+// the channel hub's coalesced dedup state right before the re-exec (#1968): the
+// exec runs no deferred cleanup, so a settle announced inside the flush delay
+// would otherwise be announced again after the restart.
+func (e *Engine) devBuildConfig() selfupgrade.DevBuildConfig {
 	logf := func(format string, args ...any) {
 		e.logf(0, "upgrade", format, args...)
 	}
-
-	selfupgrade.CheckAndRebuildDev(selfupgrade.DevBuildConfig{
+	return selfupgrade.DevBuildConfig{
 		Dir:            e.fabrikDir,
 		Version:        e.cfg.Version,
 		BaseBranch:     "main",
@@ -45,6 +52,7 @@ func (e *Engine) checkAndUpgrade() {
 		Logf:           logf,
 		StatusFn:       pollStatus,
 		StatusClearFn:  pollStatusClear,
+		PreExecHook:    e.flushChannelEvents,
 		PostBuildHook: func(exe, dir string) error {
 			// Refresh plugin skills from the new binary.
 			e.logf(0, "upgrade", "refreshing plugin skills\n")
@@ -55,7 +63,7 @@ func (e *Engine) checkAndUpgrade() {
 			}
 			return nil
 		},
-	})
+	}
 }
 
 // releaseUpgradeToken returns the token to authenticate self-upgrade's
@@ -86,23 +94,30 @@ func releaseUpgradeToken(cfg Config) string {
 //
 // All failures are non-fatal: a warning is logged and the poll loop continues.
 func (e *Engine) checkReleaseUpgrade() {
-	logf := func(format string, args ...any) {
-		e.logf(0, "upgrade", format, args...)
-	}
 	// Error discarded intentionally: failures are logged by
 	// selfupgrade.PerformReleaseUpgrade itself via logf, and this caller's
 	// contract is non-fatal — the poll loop continues regardless (unlike the
 	// foreground `fabrik upgrade` command).
-	_ = selfupgrade.PerformReleaseUpgrade(selfupgrade.ReleaseConfig{
-		Client:     e.releaseClient,
-		Owner:      fabrikOwner,
-		Repo:       fabrikRepo,
-		BinaryName: "fabrik",
-		Version:    e.cfg.Version,
-		Token:      releaseUpgradeToken(e.cfg),
-		ExtraEnv:   []string{"FABRIK_AUTO_UPGRADED=1"},
-		Logf:       logf,
-	})
+	_ = selfupgrade.PerformReleaseUpgrade(e.releaseUpgradeConfig())
+}
+
+// releaseUpgradeConfig is the release self-upgrade configuration; PreExecHook is
+// the same channel-state flush as devBuildConfig's.
+func (e *Engine) releaseUpgradeConfig() selfupgrade.ReleaseConfig {
+	logf := func(format string, args ...any) {
+		e.logf(0, "upgrade", format, args...)
+	}
+	return selfupgrade.ReleaseConfig{
+		Client:      e.releaseClient,
+		Owner:       fabrikOwner,
+		Repo:        fabrikRepo,
+		BinaryName:  "fabrik",
+		Version:     e.cfg.Version,
+		Token:       releaseUpgradeToken(e.cfg),
+		ExtraEnv:    []string{"FABRIK_AUTO_UPGRADED=1"},
+		Logf:        logf,
+		PreExecHook: e.flushChannelEvents,
+	}
 }
 
 // versionSkewExecutableFn resolves the path to the currently-running

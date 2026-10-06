@@ -729,6 +729,7 @@ func (e *Engine) pauseForCITimeout(board *gh.ProjectBoard, item gh.ProjectItem, 
 		awaitingInput: true,
 		reactRocket:   true,
 	})
+	e.emitCITimeout(item, stage) // observation only (#1968)
 	return true
 }
 

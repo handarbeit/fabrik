@@ -128,3 +128,17 @@ func TestRunMCPRejectsStrayArguments(t *testing.T) {
 		t.Error("an unknown flag must be an error")
 	}
 }
+
+func TestSubscriberNameFlagBeatsEnvAndThereIsNoGeneratedDefault(t *testing.T) {
+	t.Setenv("FABRIK_SUBSCRIBER", "from-env")
+	if got := subscriberName("from-flag"); got != "from-flag" {
+		t.Errorf("flag must win: %q", got)
+	}
+	if got := subscriberName(""); got != "from-env" {
+		t.Errorf("env fallback: %q", got)
+	}
+	t.Setenv("FABRIK_SUBSCRIBER", "")
+	if got := subscriberName(""); got != "" {
+		t.Errorf("no name must stay empty (push off), got %q", got)
+	}
+}

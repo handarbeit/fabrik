@@ -1087,9 +1087,19 @@ func (wm *webhookManager) RegisterEchoIfSubscribed(eventType, action, key string
 // MatchEcho removes the pending echo entry for an inbound webhook that matched a mutation.
 // Called from CacheImpl.ApplyDelta via the injected matchEchoFn.
 func (wm *webhookManager) MatchEcho(eventType, action, key string) {
+	wm.MatchEchoReported(eventType, action, key)
+}
+
+// MatchEchoReported is MatchEcho that also reports whether a pending echo entry
+// existed — i.e. whether the inbound webhook is the echo of a write Fabrik made.
+// Channel-event actor attribution (#1968 R3) is its only consumer.
+func (wm *webhookManager) MatchEchoReported(eventType, action, key string) bool {
+	k := echoKey(eventType, action, key)
 	wm.mu.Lock()
-	delete(wm.pendingEchoes, echoKey(eventType, action, key))
+	_, ok := wm.pendingEchoes[k]
+	delete(wm.pendingEchoes, k)
 	wm.mu.Unlock()
+	return ok
 }
 
 // doEchoSweep scans pendingEchoes for stale entries, records misses, and

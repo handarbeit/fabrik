@@ -19,6 +19,11 @@ func (e *Engine) startLocalAPI() {
 	srv := localapi.NewServer(path, e.LocalAPIBackend(), func(format string, args ...any) {
 		e.logf(0, "localapi", format, args...)
 	})
+	// Streaming (protocol v2, #1968) is advertised only when the channel hub
+	// is running; a v1-style server is the fallback and read tools still work.
+	if st := e.channelStreamer(); st != nil {
+		srv.Streamer = st
+	}
 	if err := srv.Start(); err != nil {
 		e.logf(0, "localapi", "local API unavailable (continuing without it): %v\n", err)
 		return

@@ -273,6 +273,7 @@ func (s *Store) applySingleItem(m Mutation) (Snapshot, []Change, error) {
 
 	s.mu.Lock()
 
+	_, existed := s.items[key]
 	item := s.getOrCreate(key)
 	// Deep-copy before state so no-op detection is not fooled by shared maps/pointers.
 	before := newSnapshot(*item).state
@@ -293,10 +294,31 @@ func (s *Store) applySingleItem(m Mutation) (Snapshot, []Change, error) {
 	s.mu.Unlock()
 
 	change := Change{Repo: repo, Number: number, Fields: flags}
+	annotateLabelChange(&change, m, before.Labels, snap.state.Labels, existed)
 	obs := s.captureObservers()
 	s.notify(obs, change, snap)
 
 	return snap, []Change{change}, nil
+}
+
+// annotateLabelChange fills the label-delta fields of change from a before/after
+// label diff. A mutation that creates the item contributes deltas only when it
+// is itself a label write (a webhook label event for an item not yet cached);
+// any other first population is a baseline and emits none (#1968 R3).
+func annotateLabelChange(change *Change, m Mutation, before, after []string, existed bool) {
+	switch v := m.(type) {
+	case LocalLabelAdded, LocalLabelRemoved:
+		change.Origin = OriginEngine
+	case IssueLabeled:
+		change.Origin, change.Sender, change.EchoOfEngine = OriginWebhook, v.Sender, v.EchoOfEngine
+	case IssueUnlabeled:
+		change.Origin, change.Sender, change.EchoOfEngine = OriginWebhook, v.Sender, v.EchoOfEngine
+	default:
+		if !existed {
+			return
+		}
+	}
+	change.LabelDeltas = diffLabels(before, after)
 }
 
 // getOrCreate returns the existing *ItemState for key, or creates a new zero-value one.
@@ -883,6 +905,7 @@ func (s *Store) applyBoardReconciled(v BoardReconciled) (Snapshot, []Change, err
 		}
 
 		s.mu.Lock()
+		_, existed := s.items[key]
 		item := s.getOrCreate(key)
 		before := newSnapshot(*item).state
 		flags := applyProjectItem(item, pi)
@@ -898,6 +921,9 @@ func (s *Store) applyBoardReconciled(v BoardReconciled) (Snapshot, []Change, err
 		s.mu.Unlock()
 
 		change := Change{Repo: repo, Number: number, Fields: flags}
+		if existed {
+			change.LabelDeltas = diffLabels(before.Labels, snap.state.Labels)
+		}
 		s.notify(obs, change, snap)
 		changes = append(changes, change)
 	}
