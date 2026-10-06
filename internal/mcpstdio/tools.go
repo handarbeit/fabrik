@@ -22,7 +22,31 @@ const (
 
 	ToolSubscribe   = "fabrik_subscribe"
 	ToolUnsubscribe = "fabrik_unsubscribe"
+
+	// Overseer actions (#1969, ADR-1966-c): the first tools that change
+	// GitHub-visible state. There is deliberately no tool that lifts a pause
+	// (removes fabrik:paused / fabrik:awaiting-input) and none that posts a
+	// free-form comment: a pause is lifted only by a human comment.
+	ToolPromote          = "fabrik_promote"
+	ToolSetAutonomy      = "fabrik_set_autonomy"
+	ToolRevalidate       = "fabrik_revalidate"
+	ToolClearClaudeLimit = "fabrik_clear_claude_limit"
 )
+
+// ActionTools lists the tools that make the daemon write to GitHub.
+func ActionTools() []string {
+	return []string{ToolPromote, ToolSetAutonomy, ToolRevalidate, ToolClearClaudeLimit}
+}
+
+// IsActionTool reports whether name is one of ActionTools.
+func IsActionTool(name string) bool {
+	for _, t := range ActionTools() {
+		if t == name {
+			return true
+		}
+	}
+	return false
+}
 
 func obj(props map[string]any, required ...string) map[string]any {
 	s := map[string]any{"type": "object", "properties": props, "additionalProperties": false}
@@ -103,7 +127,50 @@ func toolDefs() []map[string]any {
 			}),
 			"annotations": map[string]any{"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": false},
 		},
+		{
+			"name": ToolPromote,
+			"description": "Move an item out of an unmanaged parking column (e.g. Backlog) into a pipeline column. The daemon writes the board Status itself, with the ids it already holds (one live read of the item's current column confirms the cache first); it refuses, with the current state and the valid targets, when the item is not in a parking column, `to` is not a pipeline stage (holding, cleanup and unmanaged columns are engine-managed), or the daemon cannot establish a fact. " +
+				"If the item carries fabrik:cruise or fabrik:yolo the result says it will auto-advance through the stages from `to`. Posts a short Fabrik audit comment on the issue naming the requesting subscriber. Requires the server to be launched with --subscriber.",
+			"inputSchema": obj(map[string]any{
+				"issue": map[string]any{"type": "string", "description": "owner/repo#N, or just N when the daemon manages exactly one repo"},
+				"to":    map[string]any{"type": "string", "description": "the pipeline column to move the item into, e.g. Specify"},
+			}, "issue", "to"),
+			"annotations": action(false),
+		},
+		{
+			"name": ToolSetAutonomy,
+			"description": "Make an item's autonomy exactly the requested mode: cruise (auto-advance every stage but never auto-merge), yolo (auto-advance AND auto-merge the PR when Validate completes) or none. " +
+				"Setting one mode removes the other label, so the outcome is exactly what was asked (cruise would otherwise silently beat yolo). Already in the requested mode: nothing is written and no comment is posted. " +
+				"yolo can cause a merge: prefer cruise unless the item should land unattended. Posts a Fabrik audit comment naming the requesting subscriber. Requires --subscriber.",
+			"inputSchema": obj(map[string]any{
+				"issue":    map[string]any{"type": "string", "description": "owner/repo#N, or just N when the daemon manages exactly one repo"},
+				"autonomy": map[string]any{"type": "string", "enum": []string{"cruise", "yolo", "none"}, "description": "the autonomy the item should end up with"},
+			}, "issue", "autonomy"),
+			"annotations": action(true),
+		},
+		{
+			"name": ToolRevalidate,
+			"description": "Force a Validate re-run: applies fabrik:revalidate to an item sitting in the Validate column, and the engine clears the Validate completion and CI labels and re-dispatches on a following poll (deferred until an in-flight Validate worker exits). " +
+				"Refused, with the current state, when the item is not in Validate, already carries the label, or is paused or awaiting input: a pause is lifted only by a human comment on the issue, never by this tool. Posts a Fabrik audit comment naming the requesting subscriber. Requires --subscriber.",
+			"inputSchema": obj(map[string]any{
+				"issue": map[string]any{"type": "string", "description": "owner/repo#N, or just N when the daemon manages exactly one repo"},
+			}, "issue"),
+			"annotations": action(false),
+		},
+		{
+			"name": ToolClearClaudeLimit,
+			"description": "Clear an active account-wide Claude usage-limit suspension without restarting the daemon, by applying fabrik:clear-claude-limit to one managed open issue (the daemon picks it: one already carrying fabrik:claude-limit first, else the lowest-numbered, and names it in the result and its audit comment). " +
+				"Refused when no suspension is active. The suspension is account-wide, so the chosen issue is only the carrier of the label. Posts a Fabrik audit comment on that issue naming the requesting subscriber. Requires --subscriber.",
+			"inputSchema": obj(map[string]any{}),
+			"annotations": action(true),
+		},
 	}
+}
+
+// action is the MCP annotation block of a tool that writes to GitHub through
+// the daemon: never read-only, never destructive, open-world (GitHub).
+func action(idempotent bool) map[string]any {
+	return map[string]any{"readOnlyHint": false, "destructiveHint": false, "idempotentHint": idempotent, "openWorldHint": true}
 }
 
 func eventNames() []string {
@@ -187,6 +254,68 @@ func buildCall(name string, args json.RawMessage, defaultSubscriber string) (met
 			return "", nil, err
 		}
 		return localapi.MethodUnsubscribe, localapi.UnsubscribeParams{Subscriber: who, ID: a.ID}, nil
+	case ToolPromote:
+		var a struct {
+			Issue string `json:"issue"`
+			To    string `json:"to"`
+		}
+		if err := decodeArgs(args, &a); err != nil {
+			return "", nil, err
+		}
+		who, err := requesterName(defaultSubscriber)
+		if err != nil {
+			return "", nil, err
+		}
+		if a.Issue == "" || a.To == "" {
+			return "", nil, fmt.Errorf("issue and to are required")
+		}
+		return localapi.MethodPromote, localapi.PromoteParams{Subscriber: who, Issue: a.Issue, To: a.To}, nil
+	case ToolSetAutonomy:
+		var a struct {
+			Issue    string `json:"issue"`
+			Autonomy string `json:"autonomy"`
+		}
+		if err := decodeArgs(args, &a); err != nil {
+			return "", nil, err
+		}
+		who, err := requesterName(defaultSubscriber)
+		if err != nil {
+			return "", nil, err
+		}
+		if a.Issue == "" {
+			return "", nil, fmt.Errorf("issue is required")
+		}
+		switch a.Autonomy {
+		case "cruise", "yolo", "none":
+		default:
+			return "", nil, fmt.Errorf("autonomy must be one of cruise, yolo, none (got %q)", a.Autonomy)
+		}
+		return localapi.MethodSetAutonomy, localapi.SetAutonomyParams{Subscriber: who, Issue: a.Issue, Mode: a.Autonomy}, nil
+	case ToolRevalidate:
+		var a struct {
+			Issue string `json:"issue"`
+		}
+		if err := decodeArgs(args, &a); err != nil {
+			return "", nil, err
+		}
+		who, err := requesterName(defaultSubscriber)
+		if err != nil {
+			return "", nil, err
+		}
+		if a.Issue == "" {
+			return "", nil, fmt.Errorf("issue is required")
+		}
+		return localapi.MethodRevalidate, localapi.RevalidateParams{Subscriber: who, Issue: a.Issue}, nil
+	case ToolClearClaudeLimit:
+		var a struct{}
+		if err := decodeArgs(args, &a); err != nil {
+			return "", nil, err
+		}
+		who, err := requesterName(defaultSubscriber)
+		if err != nil {
+			return "", nil, err
+		}
+		return localapi.MethodClearClaudeLimit, localapi.ClearClaudeLimitParams{Subscriber: who}, nil
 	}
 	return "", nil, &unknownToolError{name: name}
 }
@@ -203,6 +332,17 @@ func subscriberName(explicit, launched string) (string, error) {
 		return launched, nil
 	}
 	return "", fmt.Errorf("no subscriber name: launch this server with --subscriber <name> (or FABRIK_SUBSCRIBER), using a stable name such as your topic or session name, or pass subscriber in the call")
+}
+
+// requesterName is the subscriber an action is attributed to: only the name this
+// server was launched with. Actions take no per-call override — the audit
+// comment names who asked, so a call cannot choose another name — and are
+// refused when the server has none.
+func requesterName(launched string) (string, error) {
+	if launched == "" {
+		return "", fmt.Errorf("this action is refused: it posts an audit comment naming who requested it, and this server was launched without a subscriber name — launch it with --subscriber <name> (or FABRIK_SUBSCRIBER), using a stable name such as your topic or session name")
+	}
+	return launched, nil
 }
 
 // decodeArgs strictly decodes tool arguments; empty or null arguments decode to
