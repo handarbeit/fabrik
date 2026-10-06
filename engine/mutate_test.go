@@ -653,3 +653,41 @@ func TestApplyLabelAdd_AdvancesStalenessWithoutWebhookMgr(t *testing.T) {
 		t.Errorf("LastSeenSourceUpdatedAt = %v; want advanced to >= %v in polling-only mode (webhookMgr == nil)", got, before)
 	}
 }
+
+// ── removeLabelChecked (#1969) ───────────────────────────────────────────
+
+func TestRemoveLabelChecked(t *testing.T) {
+	cases := []struct {
+		name        string
+		clientErr   error
+		wantErr     bool
+		wantRemoved bool // cache write-through happened
+	}{
+		{"success", nil, false, true},
+		{"already absent is success", gh.ErrNotFound, false, true},
+		{"other error is returned and writes nothing through", errors.New("network error"), true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &mockGitHubClient{
+				removeLabelFromIssueFn: func(owner, repo string, issueNumber int, labelName string) error {
+					return tc.clientErr
+				},
+			}
+			eng, cache := testEngineWithCache(t, client, &mockClaudeInvoker{})
+			cache.ApplyLabelAdded(boardcache.ItemKey("owner/repo", 1), "fabrik:yolo")
+
+			err := eng.removeLabelChecked(gh.ProjectItem{Number: 1, Repo: "owner/repo"}, "fabrik:yolo")
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if tc.wantErr && !errors.Is(err, tc.clientErr) {
+				t.Errorf("err = %v, want it to wrap %v", err, tc.clientErr)
+			}
+			labels, _ := cache.FetchLabels("owner", "repo", 1)
+			if has := containsLabel(labels, "fabrik:yolo"); has == tc.wantRemoved {
+				t.Errorf("label present=%v after call, wantRemoved=%v", has, tc.wantRemoved)
+			}
+		})
+	}
+}

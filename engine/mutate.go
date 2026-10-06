@@ -215,6 +215,22 @@ func (e *Engine) applyLabelRemove(item gh.ProjectItem, label string, echo bool) 
 	e.syncLabelRemoval(item, label, echo && err == nil)
 }
 
+// removeLabelChecked is removeLabel's error-surfacing variant (#1969), mirroring
+// addLabelChecked: for a caller that reports what actually happened (the
+// overseer actions) rather than logging a warning and carrying on. A failed
+// RemoveLabelFromIssue is returned and nothing is written through; gh.ErrNotFound
+// is success (the label is already absent), synced to the cache without an echo,
+// exactly as applyLabelRemove does.
+func (e *Engine) removeLabelChecked(item gh.ProjectItem, label string) error {
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, label)
+	if err != nil && !errors.Is(err, gh.ErrNotFound) {
+		return err
+	}
+	e.syncLabelRemoval(item, label, err == nil)
+	return nil
+}
+
 // removeLabel is the always-echoing (on success) public entry point for
 // applyLabelRemove, used by every call site except pauseIssue's non-echoing
 // pauseFor* pattern.
