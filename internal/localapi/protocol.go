@@ -41,6 +41,31 @@ const (
 	MethodAttach      = "attach"
 )
 
+// Action methods (#1969, ADR-1966-c): the mutating method set. They are served
+// only when the Server has an Actor, by a dispatch function the read switch
+// never reaches, and are advertised by hello only then.
+const (
+	MethodPromote          = "promote"
+	MethodSetAutonomy      = "set_autonomy"
+	MethodRevalidate       = "revalidate"
+	MethodClearClaudeLimit = "clear_claude_limit"
+)
+
+// ActionMethods lists the mutating methods, in hello order.
+func ActionMethods() []string {
+	return []string{MethodPromote, MethodSetAutonomy, MethodRevalidate, MethodClearClaudeLimit}
+}
+
+// IsActionMethod reports whether m is a mutating method.
+func IsActionMethod(m string) bool {
+	for _, a := range ActionMethods() {
+		if a == m {
+			return true
+		}
+	}
+	return false
+}
+
 // Server-initiated event names (Frame.Event).
 const (
 	// EventChannel carries one channelevents.Event in Params.
@@ -60,6 +85,9 @@ const (
 	CodeAmbiguous     = "ambiguous"
 	CodeInternal      = "internal"
 	CodeBusy          = "busy"
+	// CodeRefused means an action's guard did not hold; Error.Data carries the
+	// item's current state so the caller can see why (#1969, R3).
+	CodeRefused = "refused"
 )
 
 // Frame is one protocol message. Request: ID+Method(+Params). Response: ID plus
@@ -88,6 +116,9 @@ func (f Frame) IsServerInitiated() bool { return f.ID == "" && f.Event != "" }
 type Error struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
+	// Data is optional structured detail; a refused action puts the current
+	// state here (RefusalState).
+	Data json.RawMessage `json:"data,omitempty"`
 }
 
 func (e *Error) Error() string { return fmt.Sprintf("%s: %s", e.Code, e.Message) }
@@ -95,6 +126,15 @@ func (e *Error) Error() string { return fmt.Sprintf("%s: %s", e.Code, e.Message)
 // Errorf builds an *Error.
 func Errorf(code, format string, args ...any) *Error {
 	return &Error{Code: code, Message: fmt.Sprintf(format, args...)}
+}
+
+// Refused builds a CodeRefused error carrying the item's current state.
+func Refused(state RefusalState, format string, args ...any) *Error {
+	e := Errorf(CodeRefused, format, args...)
+	if b, err := json.Marshal(state); err == nil {
+		e.Data = b
+	}
+	return e
 }
 
 // MaxLineBytes bounds one frame (request line) the server will read.
@@ -118,4 +158,17 @@ type Backend interface {
 	Status(StatusParams) (*StatusResult, error)
 	Board(BoardParams) (*BoardResult, error)
 	Health(HealthParams) (*HealthResult, error)
+}
+
+// Actor is the optional mutating half of the daemon API (#1969, ADR-1966-c). A
+// server with an Actor serves promote/set_autonomy/revalidate/clear_claude_limit
+// through Server.handleAction; the three-method read Backend is unchanged and
+// can never reach these. Each method performs a GitHub write through the
+// daemon's own client, so unlike Backend it is not read-only. A refusal is a
+// *Error from Refused.
+type Actor interface {
+	Promote(PromoteParams) (*ActionResult, error)
+	SetAutonomy(SetAutonomyParams) (*ActionResult, error)
+	Revalidate(RevalidateParams) (*ActionResult, error)
+	ClearClaudeLimit(ClearClaudeLimitParams) (*ActionResult, error)
 }

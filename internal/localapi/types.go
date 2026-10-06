@@ -403,3 +403,68 @@ type AttachResult struct {
 	HeartbeatMillis   int64  `json:"heartbeat_ms"`
 	IdleTimeoutMillis int64  `json:"idle_timeout_ms"`
 }
+
+// ---- actions (protocol v2 additive, #1969) ----
+
+// PromoteParams moves an item out of an unmanaged parking column into the
+// pipeline column To. Subscriber is the requester's name (audit trail).
+type PromoteParams struct {
+	Subscriber string `json:"subscriber"`
+	Issue      string `json:"issue"`
+	To         string `json:"to"`
+}
+
+// SetAutonomyParams sets an item's autonomy to exactly Mode: "cruise", "yolo"
+// or "none".
+type SetAutonomyParams struct {
+	Subscriber string `json:"subscriber"`
+	Issue      string `json:"issue"`
+	Mode       string `json:"mode"`
+}
+
+// RevalidateParams applies fabrik:revalidate to a Validate-column item.
+type RevalidateParams struct {
+	Subscriber string `json:"subscriber"`
+	Issue      string `json:"issue"`
+}
+
+// ClearClaudeLimitParams has no issue: the daemon picks the carrier item.
+type ClearClaudeLimitParams struct {
+	Subscriber string `json:"subscriber"`
+}
+
+// Audit-comment outcomes in ActionResult.AuditComment.
+const (
+	AuditPosted = "posted"
+	AuditFailed = "failed"
+	// AuditNone means no write happened (the item was already in the requested
+	// state), so no comment was due.
+	AuditNone = "none"
+)
+
+// ActionResult reports what an action did.
+type ActionResult struct {
+	Action string `json:"action"`
+	Issue  string `json:"issue"`
+	// Changed is false when the item was already in the requested state.
+	Changed bool   `json:"changed"`
+	Summary string `json:"summary"`
+	// Writes lists the GitHub-visible writes performed, in order.
+	Writes       []string `json:"writes,omitempty"`
+	AuditComment string   `json:"audit_comment"`
+	// Notes carry caveats: will auto-advance, yolo may auto-merge, deferred
+	// while a worker is in flight, which item carried a clear-claude-limit.
+	Notes []string `json:"notes,omitempty"`
+}
+
+// RefusalState is the Error.Data payload of a refused action: the item's
+// current state as the daemon sees it.
+type RefusalState struct {
+	Issue  string `json:"issue,omitempty"`
+	Status string `json:"status,omitempty"`
+	// Labels are the item's fabrik-relevant labels.
+	Labels []string `json:"labels,omitempty"`
+	// ValidTargets lists the columns a promote could name.
+	ValidTargets []string `json:"valid_targets,omitempty"`
+	Autonomy     string   `json:"autonomy,omitempty"`
+}
