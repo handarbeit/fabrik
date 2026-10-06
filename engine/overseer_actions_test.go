@@ -458,6 +458,18 @@ func TestOverseerSetAutonomy_BadModeAndRefusals(t *testing.T) {
 	wantNoWrites(t, client)
 }
 
+func TestOverseerSetAutonomy_FirstWriteFailurePostsNoComment(t *testing.T) {
+	// Nothing landed, so there is nothing to audit.
+	client := &mockGitHubClient{addLabelToIssueFn: func(_, _ string, _ int, _ string) error { return errors.New("boom") }}
+	_, _, act := overseerEngine(t, client, ovItem{number: 5, status: "Implement"})
+	if _, err := act.SetAutonomy(localapi.SetAutonomyParams{Subscriber: "s", Issue: "5", Mode: "cruise"}); err == nil {
+		t.Fatal("want error")
+	}
+	if len(client.addCommentCalls) != 0 {
+		t.Errorf("no audit comment when no write landed: %v", client.addCommentCalls)
+	}
+}
+
 func TestOverseerSetAutonomy_PartialFailureStaysConservative(t *testing.T) {
 	// cruise -> yolo: yolo is added first; if the cruise removal then fails,
 	// both labels remain and cruise (the conservative one) still wins.
@@ -467,8 +479,11 @@ func TestOverseerSetAutonomy_PartialFailureStaysConservative(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "rate limited") || !strings.Contains(err.Error(), "added "+labelYolo) {
 		t.Fatalf("err = %v", err)
 	}
-	if len(client.addCommentCalls) != 0 {
-		t.Errorf("no audit comment on a failed write: %v", client.addCommentCalls)
+	// A write landed, so the audit trail must say so (as a partial application).
+	bodies := commentBodies(client)
+	if len(bodies) != 1 || !strings.HasPrefix(bodies[0], "🏭 **Fabrik — overseer action: set_autonomy**") ||
+		!strings.Contains(bodies[0], "PARTIALLY") || !strings.Contains(bodies[0], "added "+labelYolo) || !strings.Contains(bodies[0], "`s`") {
+		t.Errorf("partial failure must post a partial-application audit comment, got %q", bodies)
 	}
 	if got := autonomyOf(labelsOf(t, eng, 5)); got != "cruise" {
 		t.Errorf("effective autonomy after partial failure = %s, want cruise", got)
@@ -792,7 +807,7 @@ func TestOverseerNoPauseLiftOrFreeFormCommentSurface(t *testing.T) {
 	if strings.Contains(code, "applyLabelRemove") || regexp.MustCompile(`remove\w*\([^)]*"fabrik:(paused|awaiting-input)"`).MatchString(code) {
 		t.Error("overseer actions must never remove fabrik:paused / fabrik:awaiting-input")
 	}
-	// Exactly one comment is ever posted, through finish().
+	// Every comment is posted through the single postAudit helper.
 	if n := strings.Count(code, "postComment("); n != 1 {
 		t.Errorf("postComment appears %d times in overseer_actions.go, want 1 (the audit comment)", n)
 	}

@@ -162,14 +162,20 @@ func (a *overseerActor) confirmLiveStatus(t *overseerTarget) (string, error) {
 // does not undo the action (a revert would be a second unaudited write): the
 // result says so and it is logged by postComment.
 func (a *overseerActor) finish(res *localapi.ActionResult, t *overseerTarget, what, requester string) *localapi.ActionResult {
-	body := overseerAuditBody(res.Action, what, requester)
-	if _, err := a.e.postComment(t.item, body, false, true); err != nil {
+	if err := a.postAudit(t, res.Action, what, requester); err != nil {
 		res.AuditComment = localapi.AuditFailed
 		res.Notes = append(res.Notes, fmt.Sprintf("the audit comment could not be posted (%v); the action itself was applied", err))
 		return res
 	}
 	res.AuditComment = localapi.AuditPosted
 	return res
+}
+
+// postAudit is the one place an overseer audit comment is posted (pinned by
+// TestOverseerNoPauseLiftOrFreeFormCommentSurface).
+func (a *overseerActor) postAudit(t *overseerTarget, action, what, requester string) error {
+	_, err := a.e.postComment(t.item, overseerAuditBody(action, what, requester), false, true)
+	return err
 }
 
 // promotableTargets lists the pipeline columns a promote may name: configured
@@ -395,11 +401,19 @@ func (a *overseerActor) SetAutonomy(p localapi.SetAutonomyParams) (*localapi.Act
 			werr = e.removeLabelChecked(t.item, s.label)
 		}
 		if werr != nil {
-			done := "no writes had landed"
-			if len(res.Writes) > 0 {
-				done = "already applied: " + strings.Join(res.Writes, ", ")
+			if len(res.Writes) == 0 {
+				return nil, fmt.Errorf("setting autonomy %q on %s failed at %s %s (%v); no writes had landed; no audit comment posted", p.Mode, t.ref, doing, s.label, werr)
 			}
-			return nil, fmt.Errorf("setting autonomy %q on %s failed at %s %s (%v); %s; no audit comment posted", p.Mode, t.ref, doing, s.label, werr, done)
+			// An earlier step already changed a label, so the audit trail must
+			// record it even though the action did not finish.
+			applied := strings.Join(res.Writes, ", ")
+			note := "audit comment posted"
+			what := fmt.Sprintf("PARTIALLY applied autonomy `%s` to %s: %s, then failed at %s `%s`; the item may carry both autonomy labels (cruise wins)", p.Mode, t.ref, applied, doing, s.label)
+			if cerr := a.postAudit(t, localapi.MethodSetAutonomy, what, requester); cerr != nil {
+				note = fmt.Sprintf("the audit comment also failed (%v)", cerr)
+			}
+			e.logf(t.st.Number, "overseer", "autonomy of %s partially set to %s (%s; failed at %s %s: %v; requested by %s)\n", t.ref, p.Mode, applied, doing, s.label, werr, requester)
+			return nil, fmt.Errorf("setting autonomy %q on %s failed at %s %s (%v); already applied: %s; %s", p.Mode, t.ref, doing, s.label, werr, applied, note)
 		}
 		res.Writes = append(res.Writes, verb+" "+s.label)
 	}
