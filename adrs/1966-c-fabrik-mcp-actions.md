@@ -1,0 +1,66 @@
+# ADR 1966-c: Fabrik MCP overseer actions
+
+Status: accepted (issue #1969; builds on [ADR-1966-a](1966-a-fabrik-mcp-read-api.md) and [ADR-1966-b](1966-b-fabrik-mcp-channel-events.md); proposed in #1966)
+
+## Context
+
+ADR-1966-a gave an overseeing Claude Code session read tools, and ADR-1966-b pushed it the events that say an item needs a decision. The decisions it then takes are a small, recurring set: promote an item out of Backlog, set or clear its autonomy (`fabrik:cruise` / `fabrik:yolo`), force a Validate re-run, clear a Claude usage-limit suspension. Today it makes them with `gh`, which spends the GitHub budget the daemon shares, needs board and field node IDs, and bypasses the daemon's own view of the item.
+
+Until now the local socket has never written to GitHub: `fabrik_subscribe` / `fabrik_unsubscribe` change daemon state, not GitHub-visible state. Actions are the first code path where a socket request causes a GitHub write, so the decisions below are about *how little* that is allowed to be.
+
+## Decisions
+
+### 1. Four narrow actions, each an existing transition
+
+`fabrik_promote(issue, to)`, `fabrik_set_autonomy(issue, autonomy)`, `fabrik_revalidate(issue)` and `fabrik_clear_claude_limit()`. Each applies a transition the engine already documents — a board Status move out of a parking column, the autonomy labels, and the one-shot `fabrik:revalidate` / `fabrik:clear-claude-limit` command labels the engine's settle scans already consume. **No new engine state transition is added**: the engine neither knows nor cares whether an operator or the daemon applied the label.
+
+### 2. A separate method set, a separate interface
+
+Actions are `promote`, `set_autonomy`, `revalidate` and `clear_claude_limit` on the socket, served through an optional `localapi.Actor` interface beside the unchanged three-method read `Backend` (the `Streamer` precedent). `Server.handle` hands them to `Server.handleAction`, the only caller of the `Actor`; `hello` lists them only when an `Actor` is wired, and a server without one answers `unknown_method`. The read path therefore cannot be used to mutate, and an older daemon degrades to a clear "does not support overseer actions" tool message rather than an opaque protocol error. `ProtocolVersion` stays 2 — `hello`'s `methods` list is the capability signal, as it was for v2's streaming methods. Rejected: widening `Backend` (breaks every fake backend and merges two trust levels).
+
+### 3. Action code lives outside the read-path scans
+
+The engine side is `engine/overseer_actions.go`. ADR-1966-a pinned "the read API never reaches GitHub" with a static scan over `engine/localapi*.go`, and ADR-1966-b the same over `engine/channel_*.go`; both forbid exactly the identifiers an action needs (`e.client`, `e.readClient`, `store.Get(`). The actions therefore sit in a differently named file and the scans stay **unchanged**. Rejected: weakening a scan or adding an allow-list entry, which would trade the read guarantee for convenience.
+
+### 4. Guarded, and fail closed on unknown facts
+
+Every action requires the issue to resolve (same resolver as `fabrik_status`) to one open, non-PR item the daemon manages, and treats a fact the cache marks unknown as "precondition not established": it refuses, returning the item's current state in the error, and never writes blindly. `promote` additionally requires the target to be a configured pipeline stage that is not holding, unmanaged or the cleanup stage — those moves are engine-managed — and the item to be in an unmanaged parking column.
+
+**A live confirmation for the two transitions that are expensive to undo.** The daemon's cache lags GitHub (webhooks and the reconcile tick), and a `promote` against a stale "Backlog" would move a card the operator already dragged to Implement *backwards*. `promote` and `revalidate` therefore make one ID-keyed `FetchProjectItemStatus` read (the #1871 `liveLandingState` precedent) and decide on the live column; a read error refuses. It is not a lookup of the project, field or item IDs — `promote` takes those from state the engine already holds (project ID from the board cache, item ID from the store, field and option IDs from the loaded status field) and a test fails on any `FetchStatusField` / `FetchProjectBoard` / `LookupIssueProjectItem` call. The label-only actions are idempotent, cheap and trivially undone, so they use the cache.
+
+### 5. Why pause-lifting is excluded
+
+There is no tool that removes `fabrik:paused` / `fabrik:awaiting-input`, and none that posts a free-form comment. A pause is lifted only by a human comment made after the pause (`resumeAuthorised`, ADR-1813). That rule exists because an unprocessable or machine-generated event must never be able to lift a pause — the #1752 loop zeroed the comment breakers ten times over — and because a pause means the engine decided a human has to look. A tool that removes the label would let an overseer session, which is itself an automated agent, clear exactly the guard that is there to put a human in the loop, and would do it with no trace in the comment thread the resume rule is built on. Steering, including answering a pause, therefore stays as ordinary issue comments, so it stays on the audit trail through the normal comment path. A stale `fabrik:awaiting-input` is a bug to fix in the engine, not to work around with a tool.
+
+The same reasoning applies to a side channel: `handleRevalidateLabel` clears `fabrik:paused` / `fabrik:awaiting-input` while re-entering Validate. `fabrik_revalidate` is therefore **refused on a paused item**, with a message pointing to a human comment; allowing it would be a label-based pause lift under another name. The tests pin both the method/tool lists and the source of `overseer_actions.go` (the only label removals are the autonomy pair; exactly one comment is ever posted).
+
+### 6. Autonomy is exactly the requested mode
+
+`cruise` → `fabrik:cruise` present and `fabrik:yolo` removed; `yolo` → the reverse; `none` → both removed. Otherwise `cruise` would silently beat `yolo`, so a caller asking for yolo would get something else. The writes are ordered add-before-remove (and yolo before cruise for `none`), so a partial failure leaves the more conservative mode. Cruise → yolo is allowed — the issue specifies it — and the result and docs state plainly that **yolo auto-merges** when Validate completes; cruise is the conservative label and never merges. If the item is already in the requested state nothing is written and no comment is posted.
+
+### 7. Attribution: a mandatory requester name and an audit comment
+
+Every action requires the subscriber name from `fabrik mcp --subscriber` / `FABRIK_SUBSCRIBER` (ADR-1966-b §3) and the shim refuses without it, so every mutation is attributable. The tools take **no per-call override**: a model cannot choose which name the audit comment carries. After the write the daemon posts `🏭 **Fabrik — overseer action: <action>**` naming the action and the requester.
+
+The socket is mode `0600` and unauthenticated, so any process of the same user can dial it and claim any name: the name is **advisory**, an audit aid and not authorisation. This widens the trust statement of ADR-1966-a/b from "can read the daemon's state and attach under any name" to "can also ask the daemon to make these four changes under its own GitHub identity". It is the same boundary — filesystem permissions on the socket — with higher stakes, and per-tool authorisation or a subscriber allow-list is out of scope. The name is validated again by the daemon and reduced to `[A-Za-z0-9._:/-]`, truncated to 64 characters, because it is rendered into a public comment: a free-form name must not `@`-mention anyone or break out of the code span.
+
+### 8. The audit comment must be inert, and is tested to be
+
+The engine treats its own output as its own: `filterNewComments` drops any comment whose body starts with `🏭 **Fabrik`. Under PAT auth the comment's author is the operator's own non-bot login, so `filterHuman` does not exclude it and **the prefix is the only protection**. A header typo, or leading whitespace, would make every action produce a "human" comment that could resume a paused item and start a comment-review cycle. The body is therefore built in one function (`overseerAuditBody`), the compliance scan treats it as a compliant source, and tests pin the real predicates — `findNewComments`, `resumeAuthorised`, `unprocessedFeedback` / `feedbackGateBlocks` and the cached shape `postComment` writes — for operator-authored and `[bot]`-authored comments, plus a `tests/sim` run through the real poll loop that replays the posted body under an operator login and shows a paused item stays paused and no worker runs. Mutating the prefix makes those tests fail.
+
+### 9. Write first, then comment; a failed comment does not undo the action
+
+If the write fails the tool reports the error and posts no comment. If only the comment fails the action stands and the result says `audit_comment: failed` (and the daemon logs it): reverting would itself be a second unaudited write. Writes go through the engine's own write-through helpers (`addLabelChecked`, the new error-returning `removeLabelChecked`, and `moveItemToStatus` — the status-move idiom `advanceToNextStage` and `moveItemToValidate` each hand-copy, used only by new code so the merge-train paths are untouched), so the cache, the staleness baseline and webhook echo registration stay consistent.
+
+### 10. `fabrik_clear_claude_limit` picks the carrier item itself
+
+The suspension it clears is account-wide, but the engine's settle scan reads the command label from *any* open board item, so the label has to sit on some item. The signature takes no `issue`; the daemon picks deterministically — an open, non-PR item already carrying `fabrik:claude-limit` first, else the lowest-numbered — and names it in the result and in the audit comment. It refuses when `claudeSuspendedUntilTime` reports no active suspension, and reports (rather than repeats) a clear request already pending.
+
+## Consequences
+
+- The socket now carries GitHub-writing methods. They are a separate, opt-in method set, guarded, audited and bounded to four existing transitions; the read guarantees of ADR-1966-a/b are unchanged and still enforced by the same scans.
+- An overseer cannot lift a pause, comment, move an item backwards or into a holding or cleanup column; those stay with a human or the engine.
+- The audit trail is advisory (self-asserted name on an unauthenticated socket) and lives in issue comments, one per action.
+- `promote` and `revalidate` cost one extra GitHub read each (an ID-keyed single query); everything else costs only the write and the comment.
+- An action's own label write appears on the requester's own subscription as a `label-applied` event with actor `fabrik`. Accepted and documented: observation-only, and suppressing it would need the channel layer to learn about actions.
+- Because the daemon acts on its cache (plus one live read for two actions), a stale cache can still refuse a valid action; it cannot make a wrong one succeed for the two expensive transitions.
