@@ -24,6 +24,9 @@ func (e *Engine) startLocalAPI() {
 	if st := e.channelStreamer(); st != nil {
 		srv.Streamer = st
 	}
+	// The mutating action methods (#1969, ADR-1966-c) are a separate optional
+	// interface, dispatched apart from the read switch.
+	srv.Actor = e.overseerActor()
 	if err := srv.Start(); err != nil {
 		e.logf(0, "localapi", "local API unavailable (continuing without it): %v\n", err)
 		return
@@ -31,7 +34,7 @@ func (e *Engine) startLocalAPI() {
 	e.localAPIMu.Lock()
 	e.localAPI = srv
 	e.localAPIMu.Unlock()
-	e.logf(0, "localapi", "serving read API on %s\n", path)
+	e.logf(0, "localapi", "serving local API on %s\n", path)
 }
 
 // closeLocalAPI stops the local API and removes its socket. Idempotent. It is
