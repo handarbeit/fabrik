@@ -471,6 +471,23 @@ func (a *overseerActor) Revalidate(p localapi.RevalidateParams) (*localapi.Actio
 		t.st.Status = live
 		return nil, refuse("%s is in %q on GitHub, not %s (the daemon's cache was stale)", t.ref, live, validate)
 	}
+	// The pause guard above read cached labels, but the engine's revalidate
+	// handling strips the pause labels unconditionally, so a pause applied
+	// since the cache last refreshed would be lifted by this label. Re-read the
+	// labels live and fail closed, for the same reason the column is.
+	owner, repo := itemOwnerRepo(t.item, e.defaultRepo())
+	liveLabels, err := e.client.FetchLabels(owner, repo, t.st.Number)
+	if err != nil {
+		return nil, refuse("could not confirm %s's labels live (%v); refusing rather than risk lifting a pause the cache has not seen", t.ref, err)
+	}
+	if hasLabelStr(liveLabels, "fabrik:paused") || hasLabelStr(liveLabels, "fabrik:awaiting-input") {
+		t.st.Labels = liveLabels
+		return nil, refuse("%s is paused or awaiting input on GitHub (the daemon's cache was stale); revalidate would clear the pause, and only a human comment lifts a pause — comment on the issue instead", t.ref)
+	}
+	if hasLabelStr(liveLabels, labelRevalidate) {
+		t.st.Labels = liveLabels
+		return nil, refuse("%s already carries %s on GitHub; the engine consumes it on a later poll", t.ref, labelRevalidate)
+	}
 
 	if err := e.addLabelChecked(t.item, labelRevalidate); err != nil {
 		return nil, fmt.Errorf("adding %s to %s: %w", labelRevalidate, t.ref, err)

@@ -60,6 +60,11 @@ func liveStatus(client *mockGitHubClient, status string) {
 	client.fetchProjectItemStatusFn = func(string) (string, error) { return status, nil }
 }
 
+// liveLabels models what GitHub returns for a live label read.
+func liveLabels(client *mockGitHubClient, labels ...string) {
+	client.fetchLabelsFn = func(_, _ string, _ int) ([]string, error) { return labels, nil }
+}
+
 func refusedErr(t *testing.T, err error) (*localapi.Error, localapi.RefusalState) {
 	t.Helper()
 	var pe *localapi.Error
@@ -495,6 +500,7 @@ func TestOverseerSetAutonomy_PartialFailureStaysConservative(t *testing.T) {
 func TestOverseerRevalidate_ExactWrite(t *testing.T) {
 	client := &mockGitHubClient{}
 	liveStatus(client, "Validate")
+	liveLabels(client, "stage:Validate:failed")
 	eng, _, act := overseerEngine(t, client, ovItem{number: 5, status: "Validate", labels: []string{"stage:Validate:failed"}})
 	res, err := act.Revalidate(localapi.RevalidateParams{Subscriber: "ovr", Issue: "5"})
 	if err != nil {
@@ -554,9 +560,45 @@ func TestOverseerRevalidate_Refusals(t *testing.T) {
 	}
 }
 
+// The cached labels can lag GitHub: a pause applied since the last refresh must
+// still refuse, because the engine's revalidate handling would clear it.
+func TestOverseerRevalidate_LiveLabelsGuardPauseLift(t *testing.T) {
+	cases := []struct {
+		name string
+		live []string
+		err  error
+		want string
+	}{
+		{name: "paused on GitHub, cache stale", live: []string{"fabrik:paused", "fabrik:awaiting-input"}, want: "only a human comment lifts a pause"},
+		{name: "awaiting-input only on GitHub", live: []string{"fabrik:awaiting-input"}, want: "only a human comment lifts a pause"},
+		{name: "already labelled on GitHub", live: []string{labelRevalidate}, want: "already carries"},
+		{name: "live label read fails closed", err: errors.New("boom"), want: "could not confirm"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &mockGitHubClient{}
+			liveStatus(client, "Validate")
+			if tc.err != nil {
+				client.fetchLabelsFn = func(_, _ string, _ int) ([]string, error) { return nil, tc.err }
+			} else {
+				liveLabels(client, tc.live...)
+			}
+			// The cache shows a clean Validate item.
+			_, _, act := overseerEngine(t, client, ovItem{number: 5, status: "Validate"})
+			_, err := act.Revalidate(localapi.RevalidateParams{Subscriber: "s", Issue: "5"})
+			pe, _ := refusedErr(t, err)
+			if !strings.Contains(pe.Message, tc.want) {
+				t.Errorf("message %q lacks %q", pe.Message, tc.want)
+			}
+			wantNoWrites(t, client)
+		})
+	}
+}
+
 func TestOverseerRevalidate_WorkerInFlightIsDeferredNotRefused(t *testing.T) {
 	client := &mockGitHubClient{}
 	liveStatus(client, "Validate")
+	liveLabels(client)
 	eng, _, act := overseerEngine(t, client, ovItem{number: 5, status: "Validate"})
 	eng.store.Apply(itemstate.WorkerEntered{Repo: "owner/repo", Number: 5, StageName: "Validate", StartedAt: time.Now()})
 	res, err := act.Revalidate(localapi.RevalidateParams{Subscriber: "s", Issue: "5"})
