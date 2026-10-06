@@ -27,27 +27,57 @@ type infraTrial struct {
 	// provider "fires a new pull_request run").
 	onReopen func(t *infraTrial)
 	// onRerun, if set, mutates the state when a re-run is accepted.
-	onRerun   func(t *infraTrial)
-	rerunErr  error
-	runsError error
+	onRerun func(t *infraTrial)
+	// Poll-scripting hooks, called under mu with the number of reads made so far
+	// of that endpoint after the re-run was accepted (0 before it). They replace
+	// goroutines and sleeps: the state changes on a read count, never on wall time.
+	onMergeableRead func(t *infraTrial, sinceRerun int)
+	onCheckRunsRead func(t *infraTrial, sinceRerun int)
+	onRunsRead      func(t *infraTrial, sinceRerun int)
+
+	checkRunReads, runReads            int
+	checkReadsAtRerun, runReadsAtRerun int
+	rerunMergeableReads                int // mergeable reads since the re-run was accepted
+	rerunErr                           error
+	runsError                          error
 }
 
 func (it *infraTrial) client() *mockGitHubClient {
+	sinceRerun := func(n int) int {
+		if len(it.rerunIDs) == 0 {
+			return 0
+		}
+		return n
+	}
 	return &mockGitHubClient{
 		fetchPRMergeableFieldsFn: func(owner, repo string, n int) (*bool, string, error) {
 			it.mu.Lock()
 			defer it.mu.Unlock()
+			if len(it.rerunIDs) > 0 {
+				it.rerunMergeableReads++
+			}
+			if it.onMergeableRead != nil {
+				it.onMergeableRead(it, it.rerunMergeableReads)
+			}
 			return nil, it.mergeable, nil
 		},
 		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
 			it.mu.Lock()
 			defer it.mu.Unlock()
+			it.checkRunReads++
+			if it.onCheckRunsRead != nil {
+				it.onCheckRunsRead(it, sinceRerun(it.checkRunReads-it.checkReadsAtRerun))
+			}
 			return append([]gh.CheckRun(nil), it.checkRuns...), nil
 		},
 		fetchWorkflowRunsFn: func(owner, repo, sha string) ([]gh.WorkflowRun, error) {
 			it.mu.Lock()
 			defer it.mu.Unlock()
 			it.runListReads++
+			it.runReads++
+			if it.onRunsRead != nil {
+				it.onRunsRead(it, sinceRerun(it.runReads-it.runReadsAtRerun))
+			}
 			if it.runsError != nil {
 				return nil, it.runsError
 			}
@@ -57,6 +87,7 @@ func (it *infraTrial) client() *mockGitHubClient {
 			it.mu.Lock()
 			defer it.mu.Unlock()
 			it.rerunIDs = append(it.rerunIDs, id)
+			it.checkReadsAtRerun, it.runReadsAtRerun = it.checkRunReads, it.runReads
 			if it.rerunErr != nil {
 				return it.rerunErr
 			}
@@ -95,6 +126,39 @@ func healthyWorkflowRun(id int64) gh.WorkflowRun {
 func actionsCheck(id, runID int64, name, conclusion string) gh.CheckRun {
 	return gh.CheckRun{ID: id, Name: name, Status: "completed", Conclusion: conclusion,
 		DetailsURL: fmt.Sprintf("https://github.com/owner/repo/actions/runs/%d/job/%d", runID, id)}
+}
+
+// advClock is an engine clock the test advances explicitly, so a dwell or a
+// timeout elapses on a scripted read count, not on wall time. Fixing the
+// scheduling this way is what keeps these tests deterministic on a loaded host.
+type advClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func newAdvClock() *advClock { return &advClock{t: time.Date(2026, 10, 6, 9, 0, 0, 0, time.UTC)} }
+
+func (c *advClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *advClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = c.t.Add(d)
+}
+
+// infraDwell is the re-run settle dwell infraTestEngine configures.
+const infraDwell = 150 * time.Millisecond
+
+// useClock gives the engine an explicit clock for a test that scripts dwells.
+// The default is the real clock, which the retrigger tests rely on.
+func (it *infraTrial) useClock(eng *Engine) *advClock {
+	c := newAdvClock()
+	eng.SetClock(c)
+	return c
 }
 
 // infraTestEngine is trainTestEngine with a fast poll, a generous backstop (so a
@@ -213,20 +277,42 @@ func TestPollTrainCI_CancelledZeroJobRunIsNotInfrastructure(t *testing.T) {
 func TestPollTrainCI_UnfinishedRunHoldsZeroCheckGreen(t *testing.T) {
 	it := &infraTrial{mergeable: "clean", runs: []gh.WorkflowRun{{ID: 1, Name: "CI", Status: "queued"}}}
 	eng := infraTestEngine(t, it)
-	go func() {
-		time.Sleep(60 * time.Millisecond)
-		it.mu.Lock()
-		it.runs = []gh.WorkflowRun{healthyWorkflowRun(1)}
-		it.checkRuns = []gh.CheckRun{actionsCheck(11, 1, "build", "success")}
-		it.mu.Unlock()
-	}()
-	start := time.Now()
+	// The run stays queued, with no check run, for the first three reads of the
+	// workflow runs, then CI shows up.
+	it.onRunsRead = func(it *infraTrial, _ int) {
+		if it.runReads > 3 {
+			it.runs = []gh.WorkflowRun{healthyWorkflowRun(1)}
+			it.checkRuns = []gh.CheckRun{actionsCheck(11, 1, "build", "success")}
+		}
+	}
 	result, _ := pollInfraTrial(t, eng)
 	if result != TrainCIGreen {
 		t.Fatalf("result = %v, want green", result)
 	}
-	if time.Since(start) < 50*time.Millisecond {
-		t.Fatal("went green while a workflow run was still queued with no check run")
+	if it.runReads <= 3 {
+		t.Fatalf("went green after %d run read(s), while a workflow run was still queued with no check run", it.runReads)
+	}
+}
+
+// Only a queued or running workflow run holds the zero-check green shortcut. A
+// run held in `waiting` (environment approval) or `pending` is not CI on its
+// way; before #2052 such a trial went green, and it must not sit to the backstop.
+func TestPollTrainCI_WaitingOrPendingRunDoesNotHoldZeroCheckGreen(t *testing.T) {
+	for _, status := range []string{"waiting", "pending", "requested"} {
+		it := &infraTrial{mergeable: "clean", runs: []gh.WorkflowRun{{ID: 1, Name: "Deploy", Status: status}}}
+		eng := infraTestEngine(t, it)
+
+		start := time.Now()
+		result, _ := pollInfraTrial(t, eng)
+		if result != TrainCIGreen {
+			t.Fatalf("status %q: result = %v, want today's green", status, result)
+		}
+		if time.Since(start) > 10*time.Second {
+			t.Fatalf("status %q: held for %v by a run that is not CI on its way", status, time.Since(start))
+		}
+		if it.closes != 0 {
+			t.Fatalf("status %q: a non-failed run must not retrigger (closes = %d)", status, it.closes)
+		}
 	}
 }
 
@@ -320,21 +406,15 @@ func TestPollTrainCI_ThirdPartyFailure_FallsBackToRed(t *testing.T) {
 func TestPollTrainCI_RerunStaleFailureIsNotTheSecondFailure(t *testing.T) {
 	it := failedFirstTrial()
 	eng := infraTestEngine(t, it)
-	go func() {
-		for {
-			it.mu.Lock()
-			reran := len(it.rerunIDs) > 0
-			it.mu.Unlock()
-			if reran {
-				time.Sleep(40 * time.Millisecond) // the stale failure stays visible for a while
-				it.mu.Lock()
-				it.checkRuns = []gh.CheckRun{actionsCheck(11, 10, "build", "success"), actionsCheck(13, 10, "test", "success")}
-				it.mu.Unlock()
-				return
-			}
-			time.Sleep(time.Millisecond)
+	// The stale failure stays the latest for the first few reads after the
+	// re-run was accepted (the settle dwell never elapses: the clock is frozen),
+	// then the re-run's check runs replace it.
+	it.onCheckRunsRead = func(it *infraTrial, sinceRerun int) {
+		if sinceRerun >= 4 {
+			it.checkRuns = []gh.CheckRun{actionsCheck(11, 10, "build", "success"), actionsCheck(13, 10, "test", "success")}
 		}
-	}()
+	}
+	it.useClock(eng)
 
 	result, _ := pollInfraTrial(t, eng)
 	if result != TrainCIGreen {
@@ -347,14 +427,21 @@ func TestPollTrainCI_RerunStaleFailureIsNotTheSecondFailure(t *testing.T) {
 func TestPollTrainCI_RerunNeverMaterialises_RedAfterSettleDwell(t *testing.T) {
 	it := failedFirstTrial()
 	eng := infraTestEngine(t, it)
+	clock := it.useClock(eng)
+	// The re-run never produces anything and no run is in flight; the settle
+	// dwell elapses on the third poll after the re-run was accepted.
+	it.onMergeableRead = func(it *infraTrial, sinceRerun int) {
+		if sinceRerun == 3 {
+			clock.Advance(infraDwell + time.Millisecond)
+		}
+	}
 
-	start := time.Now()
 	result, _ := pollInfraTrial(t, eng)
 	if result != TrainCIRed {
 		t.Fatalf("result = %v, want red", result)
 	}
-	if time.Since(start) < 100*time.Millisecond {
-		t.Fatal("red was returned before the settle dwell elapsed")
+	if it.rerunMergeableReads < 3 {
+		t.Fatalf("red after %d poll(s) since the re-run, before the settle dwell elapsed", it.rerunMergeableReads)
 	}
 }
 
@@ -366,27 +453,31 @@ func TestPollTrainCI_RerunQueuedPastSettleDwell_IsNotTheSecondFailure(t *testing
 	it.onRerun = func(it *infraTrial) {
 		it.runs = []gh.WorkflowRun{{ID: 10, Name: "CI", Status: "queued"}}
 	}
-	eng := infraTestEngine(t, it) // settle dwell 150ms
-	go func() {
-		for {
-			it.mu.Lock()
-			reran := len(it.rerunIDs) > 0
-			it.mu.Unlock()
-			if reran {
-				time.Sleep(400 * time.Millisecond) // well past the dwell, still queued
-				it.mu.Lock()
-				it.runs = []gh.WorkflowRun{healthyWorkflowRun(10)}
-				it.checkRuns = []gh.CheckRun{actionsCheck(11, 10, "build", "success"), actionsCheck(13, 10, "test", "success")}
-				it.mu.Unlock()
-				return
-			}
-			time.Sleep(time.Millisecond)
+	eng := infraTestEngine(t, it)
+	clock := it.useClock(eng)
+	it.onMergeableRead = func(it *infraTrial, sinceRerun int) {
+		if sinceRerun == 2 {
+			clock.Advance(infraDwell + time.Millisecond)
 		}
-	}()
+	}
+	// Past the dwell the run stays queued for three reads of the workflow runs,
+	// then completes — on the read itself, i.e. between the two reads of one poll
+	// iteration, which is the window a naive check-runs-then-runs order misses.
+	pastDwellReads := 0
+	it.onRunsRead = func(it *infraTrial, sinceRerun int) {
+		pastDwellReads++
+		if pastDwellReads > 3 {
+			it.runs = []gh.WorkflowRun{healthyWorkflowRun(10)}
+			it.checkRuns = []gh.CheckRun{actionsCheck(11, 10, "build", "success"), actionsCheck(13, 10, "test", "success")}
+		}
+	}
 
 	result, _ := pollInfraTrial(t, eng)
 	if result != TrainCIGreen {
-		t.Fatalf("result = %v, want green — a queued re-run was counted as a second failure", result)
+		t.Fatalf("result = %v, want green — a queued re-run, or one finishing between the two reads, was counted as a second failure", result)
+	}
+	if pastDwellReads <= 3 {
+		t.Fatalf("settled after %d in-flight read(s); the queued re-run was not waited for", pastDwellReads)
 	}
 }
 
@@ -404,14 +495,19 @@ func TestPollTrainCI_UnrelatedInFlightRun_DoesNotDelayRed(t *testing.T) {
 		it := failedFirstTrial()
 		it.runs = []gh.WorkflowRun{tc.run}
 		eng := infraTestEngine(t, it)
+		clock := it.useClock(eng)
+		it.onMergeableRead = func(it *infraTrial, sinceRerun int) {
+			if sinceRerun == 2 {
+				clock.Advance(infraDwell + time.Millisecond)
+			}
+		}
 
-		start := time.Now()
 		result, _ := pollInfraTrial(t, eng)
 		if result != TrainCIRed {
 			t.Fatalf("%s: result = %v, want red after the settle dwell", tc.name, result)
 		}
-		if time.Since(start) > 10*time.Second {
-			t.Fatalf("%s: red took %v — held by a run that is not the re-run", tc.name, time.Since(start))
+		if it.rerunMergeableReads < 2 {
+			t.Fatalf("%s: red after %d poll(s) since the re-run, before the settle dwell elapsed", tc.name, it.rerunMergeableReads)
 		}
 	}
 }
@@ -423,16 +519,25 @@ func TestPollTrainCI_RerunStuckQueued_RedAfterMaxWait(t *testing.T) {
 	it.onRerun = func(it *infraTrial) {
 		it.runs = []gh.WorkflowRun{{ID: 10, Name: "CI", Status: "queued"}}
 	}
-	eng := infraTestEngine(t, it) // settle dwell 150ms
-	eng.SetRerunMaxWaitForTest(300 * time.Millisecond)
+	eng := infraTestEngine(t, it)
+	const maxWait = 300 * time.Millisecond
+	eng.SetRerunMaxWaitForTest(maxWait)
+	clock := it.useClock(eng)
+	it.onMergeableRead = func(it *infraTrial, sinceRerun int) {
+		switch sinceRerun {
+		case 2: // past the settle dwell: the queued re-run is waited for
+			clock.Advance(infraDwell + time.Millisecond)
+		case 6: // past dwell + max wait: the stale failure is the verdict
+			clock.Advance(maxWait)
+		}
+	}
 
-	start := time.Now()
 	result, _ := pollInfraTrial(t, eng)
 	if result != TrainCIRed {
 		t.Fatalf("result = %v, want red once the max wait elapsed", result)
 	}
-	if time.Since(start) < 400*time.Millisecond || time.Since(start) > 10*time.Second {
-		t.Fatalf("red after %v, want after dwell+maxWait and far below the backstop", time.Since(start))
+	if it.rerunMergeableReads < 6 {
+		t.Fatalf("red after %d poll(s) since the re-run, before dwell + max wait elapsed", it.rerunMergeableReads)
 	}
 }
 

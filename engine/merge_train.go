@@ -5127,7 +5127,9 @@ func describeCheckRuns(runs []gh.CheckRun) string {
 // branch below), since in that case there is no per-check signal to fall
 // back on.
 func (e *Engine) pollTrainCI(ctx context.Context, owner, repo string, prNum int, trialSHA string) (TrainCIResult, *trainCIDiagnostic) {
-	deadline := time.Now().Add(e.ciBackstopTimeout())
+	// Time is read through e.now() so a test can drive the deadline and the
+	// re-run / retrigger dwells with an injected clock instead of real sleeps.
+	deadline := e.now().Add(e.ciBackstopTimeout())
 
 	var lastPending, lastFailed []gh.CheckRun
 
@@ -5157,7 +5159,7 @@ func (e *Engine) pollTrainCI(ctx context.Context, owner, repo string, prNum int,
 		default:
 		}
 
-		if time.Now().After(deadline) {
+		if e.now().After(deadline) {
 			logTimeout()
 			return TrainCIPending, nil
 		}
@@ -5182,6 +5184,18 @@ func (e *Engine) pollTrainCI(ctx context.Context, owner, repo string, prNum int,
 		// fixes that as a side effect of sharing it here). This is now
 		// reachable on every iteration regardless of mergeable_state, so it
 		// is the thing that actually determines completeness.
+		//
+		// #2052 R5: once the re-run's settle dwell has passed, whether one of the
+		// re-run workflow runs is still queued or running MUST be read BEFORE the
+		// check runs. Read the other way round, a re-run finishing between the two
+		// reads is seen as "failure still latest" (stale check runs) plus "nothing
+		// in flight" (fresh workflow runs), and the stale failure is judged the
+		// second one. Read in this order, "not in flight" means the re-run had
+		// already finished before the check-run read, so its check runs are in it.
+		rerunPastDwell := rr.done && e.now().Sub(rr.at) >= timing.rerunSettleDwell
+		rerunWaiting := rerunPastDwell && e.now().Sub(rr.at) < timing.rerunSettleDwell+timing.rerunMaxWait &&
+			e.rerunInFlight(logRepo, owner, repo, trialSHA, rr.runIDs)
+
 		checkRuns, err := e.client.FetchCheckRuns(owner, repo, trialSHA)
 		if err != nil {
 			e.logfRepo(owner+"/"+repo, "merge-train", "warn: FetchCheckRuns failed for %s: %v\n", trialSHA, err)
@@ -5202,15 +5216,13 @@ func (e *Engine) pollTrainCI(ctx context.Context, owner, repo string, prNum int,
 				// request that errors, is red at once, exactly as before.
 				if !rr.done {
 					if rerunIDs, ok := e.rerunFailedWorkflowRuns(logRepo, owner, repo, failed); ok {
-						rr = rerunState{done: true, runIDs: rerunIDs, firstFailedIDs: checkRunIDSet(failed), at: time.Now()}
+						rr = rerunState{done: true, runIDs: rerunIDs, firstFailedIDs: checkRunIDSet(failed), at: e.now()}
 						e.logfRepo(logRepo, "merge-train", "trial %s: failed check(s): %s — re-running the failed jobs once before judging the trial red\n", trialSHA, describeCheckRuns(failed))
 					} else {
 						e.logfRepo(logRepo, "merge-train", "trial %s red — failed check(s): %s\n", trialSHA, describeCheckRuns(failed))
 						return TrainCIRed, &trainCIDiagnostic{FailedChecks: failed, PRNum: prNum, TrialSHA: trialSHA}
 					}
-				} else if hasNewCheckRun(failed, rr.firstFailedIDs) ||
-					(time.Since(rr.at) >= timing.rerunSettleDwell &&
-						(time.Since(rr.at) >= timing.rerunSettleDwell+timing.rerunMaxWait || !e.rerunInFlight(logRepo, owner, repo, trialSHA, rr.runIDs))) {
+				} else if hasNewCheckRun(failed, rr.firstFailedIDs) || (rerunPastDwell && !rerunWaiting) {
 					// A failing latest-per-name run the first failure did not contain means the
 					// re-run itself failed; the dwell bounds the case where the re-run never
 					// materialised and only the stale original is visible. A workflow run still
@@ -5279,7 +5291,7 @@ func (e *Engine) pollTrainCI(ctx context.Context, owner, repo string, prNum int,
 				runs, ok, refused := e.fetchWorkflowRunsSoft(logRepo, owner, repo, trialSHA)
 				actionsRefused = refused
 				if ok {
-					now := time.Now()
+					now := e.now()
 					action, run := sw.observe(runs, now, timing.retriggerNewRunDwell)
 					switch action {
 					case startupRetrigger:
@@ -5289,7 +5301,7 @@ func (e *Engine) pollTrainCI(ctx context.Context, owner, repo string, prNum int,
 							e.logfRepo(logRepo, "merge-train", "trial %s: %v — abandoning the trial\n", trialSHA, err)
 							return TrainCIInfra, &trainCIDiagnostic{Note: err.Error(), PRNum: prNum, TrialSHA: trialSHA}
 						}
-						sw.retriggered(runs, time.Now())
+						sw.retriggered(runs, e.now())
 						holdForCI = true
 					case startupWait:
 						holdForCI = true
@@ -5298,11 +5310,14 @@ func (e *Engine) pollTrainCI(ctx context.Context, owner, repo string, prNum int,
 						e.logfRepo(logRepo, "merge-train", "trial %s: %s — abandoning the trial; members stay Queued, nothing charged\n", trialSHA, note)
 						return TrainCIInfra, &trainCIDiagnostic{Note: note, PRNum: prNum, TrialSHA: trialSHA}
 					default:
-						// A workflow run that exists but has not finished is CI on its way:
-						// with no check run yet there is nothing else to say so, and the green
-						// shortcut would read the absence as completeness.
+						// A workflow run that is queued or running is CI on its way: with no
+						// check run yet there is nothing else to say so, and the green shortcut
+						// would read the absence as completeness. Only those two states hold —
+						// a run in `waiting` (environment approval) or `pending` is not CI on
+						// its way, and holding for it would sit on the worker slot to the 4h
+						// backstop where the trial used to go green.
 						for _, r := range runs {
-							if r.Status != "completed" {
+							if r.Status == "queued" || r.Status == "in_progress" {
 								e.logfRepo(logRepo, "merge-train", "trial %s has zero check runs but %s is %s — still waiting\n", trialSHA, describeStartupRun(r), r.Status)
 								holdForCI = true
 								break
@@ -5330,7 +5345,7 @@ func (e *Engine) pollTrainCI(ctx context.Context, owner, repo string, prNum int,
 		// Check deadline again before the sleep so a short CIBackstopTimeout
 		// doesn't block unnecessarily in the poll interval when the deadline
 		// has already elapsed.
-		if time.Now().After(deadline) {
+		if e.now().After(deadline) {
 			logTimeout()
 			return TrainCIPending, nil
 		}
