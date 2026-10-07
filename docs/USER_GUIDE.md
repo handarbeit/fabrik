@@ -1557,7 +1557,7 @@ refines it into a clear, unambiguous spec:
 - Surfaces missing requirements, ambiguities, and edge cases as questions
 - Checks consistency with existing project features and documentation
 - Researches prior art and established patterns on the web
-- Rewrites the issue body with a structured spec in [Spec Kit](https://github.com/github/spec-kit)'s content structure: prioritized user stories (each with an independent test), `FR-NNN` requirements, `SC-NNN` success criteria, edge cases and assumptions, with `## Open Questions` last. Only the structure is adopted — nothing in your repo needs Spec Kit, `.specify/` scaffolding or `uv`.
+- Rewrites the issue body as a [Spec Kit](https://github.com/github/spec-kit)-style feature specification: a `# Feature Specification:` title with `Feature Branch`, `Created`, `Status` and `Input` (the original request, verbatim) fields; `## Background` (the original motivation); `## User Scenarios & Testing` with prioritized user stories (each with *Why this priority*, an *Independent Test* and *Acceptance Scenarios*) and `### Edge Cases`; `## Requirements` with `FR-NNN` functional requirements and optional `Key Entities`; `## Success Criteria` with `SC-NNN` measurable outcomes; `## Assumptions`; and optional `## Out of Scope` and `## Source References`. `**Status**` is `Draft` while open questions remain and `Specified` once none do, and `## Open Questions` exists only while questions remain. The template is built into the `fabrik-specify` skill; only the structure is adopted — nothing in your repo needs Spec Kit, `.specify/` scaffolding or `uv`.
 
 The user answers questions via comments. Claude incorporates the answers and updates
 the issue body. Once all questions are resolved, the stage completes and the issue is
@@ -2798,7 +2798,7 @@ The default skills are:
 
 | Skill | Purpose |
 |-------|---------|
-| `fabrik-specify` | Requirements clarification, consistency checks, prior art research; preserves the Problem section verbatim (never compressed) and places it first in the spec |
+| `fabrik-specify` | Requirements clarification, consistency checks, prior art research; preserves the original request verbatim in `Input` and the original motivation in `Background` (never compressed), and writes the spec in the Spec Kit feature-specification template |
 | `fabrik-research` | Codebase exploration, technical analysis, constraint discovery; includes a Documentation Impact section for user-facing features |
 | `fabrik-plan` | Implementation design, task checklist, decision documentation; includes explicit doc update tasks in the checklist for user-facing features |
 | `fabrik-implement` | Code writing, testing, committing, pushing; updates `USER_GUIDE.md` and/or `README.md` in the same PR for user-facing features — never defers documentation to a follow-up issue |

@@ -41,73 +41,97 @@ Do not prescribe. The user may be innovating. Present options and let them decid
 ### Define scope boundaries
 
 Explicitly state:
-- What is in scope for this issue
-- What is explicitly out of scope
+- What is in scope for this issue (the user stories and requirements)
+- What is explicitly out of scope (the `## Out of Scope` section)
 - What related work might be needed as follow-up issues
-- What assumptions you're making
+- What assumptions you're making (the `## Assumptions` section)
 
 ### Rewrite the issue body
 
-Update the issue body (via FABRIK_ISSUE_UPDATE markers) with a structured spec. **Preserve the user's original motivation and problem statement** — the "why" is as important as the "what." Never reduce a detailed problem description to a terse summary that loses context.
+Update the issue body (via FABRIK_ISSUE_UPDATE markers) with a structured spec. **Preserve the user's original motivation and problem statement** — the "why" is as important as the "what." Never reduce a detailed problem description to a terse summary that loses context: the original motivation goes in `## Background` and the original request goes **verbatim** in `**Input**`.
 
-The structure follows Spec Kit's content structure (section names and FR/SC numbering only — no Spec Kit tooling, scaffolding or scripts is involved):
+## Spec template
+
+The body follows the Spec Kit spec template — the format downstream projects already produce. Only its content structure (section names, `FR-NNN`/`SC-NNN` numbering) is used; no Spec Kit tooling, scaffolding or scripts is involved, and nothing in the repository needs to exist for this to work. This section is the single canonical copy; `fabrik-specify-comment` refers to it rather than restating it.
 
 ```
-## Problem
+# Feature Specification: [Feature Title]
+
+**Feature Branch**: `fabrik/issue-<N>`
+**Created**: [YYYY-MM-DD]
+**Status**: Draft
+**Input**: User description: "[original request]"
+
+## Background
+
 Why this change is needed. What pain point, gap, or opportunity does it address?
-Preserve the original issue's motivation — don't compress it away.
 
-## Summary
-One-paragraph description of what this feature does to solve the problem.
+## User Scenarios & Testing *(mandatory)*
 
-## User Scenarios & Testing
+### User Story 1 - [Brief Title] (Priority: P1)
 
-### Story 1 — <short title> (Priority: P1)
-<Plain-language description of the user journey and the value it delivers.>
-- *Independent test:* how this story alone can be verified and still deliver value.
+[User journey description]
 
-### Story 2 — <short title> (Priority: P2)
-...
+**Why this priority**: [Rationale]
 
-## Requirements
-- **FR-001** — <Specific, testable capability: "The system MUST ...">
-- **FR-002** — ...
-- **FR-003** — <Unclear requirement> [NEEDS CLARIFICATION: <the specific question>]
+**Independent Test**: [How to test independently]
 
-## Success Criteria
-- **SC-001** — <Measurable, technology-agnostic outcome>
-- **SC-002** — ...
+**Acceptance Scenarios**:
 
-## Edge Cases
-- <Boundary condition or failure mode, and the expected behavior>
+1. **Given** [state], **When** [action], **Then** [outcome]
+
+---
+
+### Edge Cases
+
+- [Edge case]
+
+## Requirements *(mandatory)*
+
+### Functional Requirements
+
+- **FR-001**: [Specific, testable requirement]
+
+### Key Entities *(if applicable)*
+
+- **[Entity]**: [Description]
+
+## Success Criteria *(mandatory)*
+
+### Measurable Outcomes
+
+- **SC-001**: [Measurable, technology-agnostic outcome]
 
 ## Assumptions
-- <Reasonable default you chose where the issue was silent>
 
-## Scope
-**In scope:** ...
-**Out of scope:** ...
+- [Assumption]
 
-## Prior Art / Context
-Relevant findings from web research or codebase analysis.
+## Out of Scope *(optional)*
 
-## Risks / Dependencies
-Anything that could complicate or block this work.
+- [Excluded work]
 
-## Open Questions
-- [ ] Question 1
-- [ ] Question 2
+## Open Questions *(only if unresolved questions remain)*
+
+- [ ] [Question]
+
+## Source References *(optional)*
+
+- [Reference]
 ```
 
-Guidance for each section:
-- **User stories** are prioritized (P1 most important) and each one must be independently testable — implementing only that story should still deliver a usable slice. Name stories by title (`Story 1`), never with a bare `#1`.
-- **Requirements** use stable `FR-NNN` identifiers, one testable statement each. Number them in order and never renumber an existing requirement during clarification rounds; retire a requirement by removing it, add new ones at the end.
-- **Success criteria** use stable `SC-NNN` identifiers and describe measurable outcomes from the user's or operator's point of view, not implementation details.
-- **Edge cases** cover boundaries, failure modes and "what happens when" situations the story list does not.
-- **Assumptions** record the defaults you chose so a reader can challenge them; prefer a documented assumption over a question when the choice is low-impact and reversible.
-- **Open Questions** goes **last** and is the only section that is removed when answered. Every `[NEEDS CLARIFICATION]` marker in the body must have a matching question here.
+Rules that go with the template:
 
-Omit a section only when it genuinely has nothing to say — do not pad. Keep the spec at the **what and why** level: no file paths to change, no designs, no technology choices.
+- **Fill the header fields.** `**Feature Branch**` is `fabrik/issue-<N>` with the real issue number. `**Created**` is the date the spec was first written, as `YYYY-MM-DD`; keep that value unchanged on later rounds. `**Input**` is the original request, verbatim, from the first round; never rewrite or shorten it on later rounds.
+- **`**Status**` is `Draft` while any open question remains and `Specified` once none do.** Maintain it on every body update. The engine projects the body as-is, so the committed file carries the same value.
+- **`## Open Questions` exists only while questions remain** and is removed when the last one is resolved. It stays in the issue body only; the engine strips it from the committed file. **Write its heading as exactly `## Open Questions`** — without the italic `*(only if unresolved questions remain)*` hint — because the engine locates the section by that exact heading text. The engine removes the section up to the next `## ` heading, so `## Source References` after it is kept.
+- **Every other heading stays exactly as in the template**, including the italic `*(mandatory)*`/`*(optional)*`/`*(if applicable)*` hints. Omit an optional section (`Key Entities`, `Out of Scope`, `Source References`) only when it genuinely has nothing to say; keep `Background`, `User Scenarios & Testing`, `Requirements`, `Success Criteria` and `Assumptions` always.
+- **Stories** are `### User Story N - <title> (Priority: Pn)`, prioritized (P1 most important), each with `Why this priority`, `Independent Test` and `Acceptance Scenarios` — implementing only one story must still deliver a usable slice. Name them `User Story 1`, never a bare `#1`. Add as many stories as the work needs, separated by `---`; `### Edge Cases` follows the last one.
+- **Requirements** use stable `FR-NNN` identifiers, one testable statement each. Number them in order and never renumber an existing requirement during clarification rounds; retire one by removing it, add new ones at the end. Mark an unclear one inline with `[NEEDS CLARIFICATION: <the specific question>]` and give it a matching entry under `## Open Questions`.
+- **Success criteria** use stable `SC-NNN` identifiers under `### Measurable Outcomes` and describe measurable outcomes from the user's or operator's point of view, not implementation details.
+- **Assumptions** record the defaults you chose so a reader can challenge them; prefer a documented assumption over a question when the choice is low-impact and reversible.
+- Findings from web research or codebase analysis go in `## Background` or `## Source References`.
+
+Keep the spec at the **what and why** level: no file paths to change, no designs, no technology choices.
 
 ## What You Do NOT Do
 
@@ -152,12 +176,13 @@ FABRIK_ISSUE_UPDATE_END
 ## Quality Checklist
 
 Before signaling completion, verify:
+- [ ] The body follows the Spec template exactly: header fields filled, headings and order unchanged
+- [ ] `**Input**` still holds the original request verbatim and `## Background` preserves the original motivation
 - [ ] Every requirement is specific and testable and carries an `FR-NNN` identifier
-- [ ] User stories are prioritized and each has an independent test
+- [ ] User stories are prioritized, each with an Independent Test and Acceptance Scenarios
 - [ ] Success criteria are measurable and carry `SC-NNN` identifiers
 - [ ] Edge cases and assumptions are recorded
-- [ ] `## Open Questions` is last (and absent once everything is resolved)
-- [ ] Scope boundaries are explicit
-- [ ] No open questions remain
+- [ ] Scope boundaries are explicit (`## Out of Scope`)
+- [ ] `**Status**` is `Specified` and `## Open Questions` is gone — no open questions remain
 - [ ] No contradictions with existing features
 - [ ] A researcher could understand this spec without additional context

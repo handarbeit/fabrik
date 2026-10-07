@@ -54,6 +54,21 @@ func TestStripOpenQuestions(t *testing.T) {
 	}
 }
 
+// The Specify skill's template puts "## Open Questions" before an optional
+// "## Source References"; stripping must drop the former and keep the latter.
+func TestStripOpenQuestions_TemplateShape(t *testing.T) {
+	body := "# Feature Specification: T\n\n**Status**: Draft\n\n## Assumptions\n\n- a\n\n## Out of Scope *(optional)*\n\n- x\n\n## Open Questions\n\n- [ ] q1\n\n## Source References *(optional)*\n\n- ref\n"
+	got := stripOpenQuestions(body)
+	if strings.Contains(got, "Open Questions") || strings.Contains(got, "q1") {
+		t.Errorf("section not stripped: %q", got)
+	}
+	for _, keep := range []string{"**Status**: Draft", "## Assumptions", "## Out of Scope *(optional)*", "## Source References *(optional)*", "- ref"} {
+		if !strings.Contains(got, keep) {
+			t.Errorf("lost %q: %q", keep, got)
+		}
+	}
+}
+
 func TestIsSpecOnlyCommit(t *testing.T) {
 	if !isSpecOnlyCommit([]string{"specs/7-foo/spec.md"}, 7) {
 		t.Error("own spec should be spec-only")
