@@ -2,6 +2,8 @@ package sim
 
 import (
 	"testing"
+
+	"github.com/handarbeit/fabrik/engine"
 )
 
 // This file covers #1644's Scope requirement of "e2e coverage of both arms":
@@ -86,9 +88,14 @@ func TestMergeTrainSingletonFastPath_UpToDateAndGreen_LandsWithoutTrial(t *testi
 // ordinary trial — a real draft CI PR, a real combined-Validate poll, a real
 // landing integration PR distinct from the member's own PR — must run
 // exactly as it did before this feature existed.
+//
+// Pinned to singleton_catch_up: off (#2044): with the default (merge) a behind singleton is
+// caught up on its own branch and lands through the fast path instead — see
+// mergetrain_singleton_catchup_test.go. This scenario is the regression guard that "off"
+// reproduces today's trial path exactly.
 func TestMergeTrainSingletonFastPath_BaseMoved_StillBuildsTrial(t *testing.T) {
 	t.Parallel()
-	env := mergeTrainEnv(t, mergeTrainEnvOptions{})
+	env := mergeTrainEnv(t, mergeTrainEnvOptions{ConfigureCfg: func(c *engine.Config) { c.SingletonCatchUp = "off" }})
 
 	num, prNum := QueueMember(t, env, "fastpath-basemoved", map[string]string{"fastpath-b.txt": "b\n"})
 

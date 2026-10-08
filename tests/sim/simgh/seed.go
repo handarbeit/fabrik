@@ -841,6 +841,26 @@ func (s *Sim) SeedReviewThreadComment(ownerRepo string, prNumber int, author, bo
 	return s
 }
 
+// SeedReviewThreadCommentAt is SeedReviewThreadComment with the commit the comment was
+// posted against (GraphQL originalCommit.oid), the attribution the merge-train singleton
+// catch-up's review-churn recognition keys on (#2044). A real reviewer's inline comment
+// always carries the head it was made against.
+func (s *Sim) SeedReviewThreadCommentAt(ownerRepo string, prNumber int, commitOID, author, body, path string, line int) *Sim {
+	s.SeedReviewThreadComment(ownerRepo, prNumber, author, body, path, line)
+	r, ok := s.repoForSeed(ownerRepo)
+	if !ok {
+		return s
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	pr, ok := r.prs[prNumber]
+	if !ok || len(pr.reviewThreadComment) == 0 {
+		return s
+	}
+	pr.reviewThreadComment[len(pr.reviewThreadComment)-1].commitOID = commitOID
+	return s
+}
+
 // SeedReviewThreadReply attaches a further comment to an existing review
 // thread, sharing threadID with the comment(s) already on it — the shape of
 // more than one comment landing in one conversation, which
