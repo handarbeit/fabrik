@@ -129,8 +129,11 @@ func (e *Engine) queuedReviewFindings(item gh.ProjectItem) []gh.Comment {
 	reviews, err := e.resolveReviewsForFeedbackChecked(item)
 	if err != nil {
 		e.logf(item.Number, "queued-review-settle", "could not resolve reviews for body detection: %v — bodies skipped this poll\n", err)
+		findings, _ = e.dropCatchUpFeedback(item, findings, nil)
 		return findings
 	}
+	// #2044: a bot review of a pure catch-up push is non-actionable for this landing.
+	findings, reviews = e.dropCatchUpFeedback(item, findings, reviews)
 	return append(findings, e.buildReviewBodyCommentsFromReviews(item, reviews)...)
 }
 
