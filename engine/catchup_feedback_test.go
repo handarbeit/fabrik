@@ -3,6 +3,7 @@ package engine
 import (
 	"errors"
 	"testing"
+	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/stages"
@@ -212,5 +213,83 @@ func TestIsCatchUpReviewBot(t *testing.T) {
 	eng.cfg.Stages = append(eng.cfg.Stages, &stages.Stage{Name: "Review", ExpectedReviewers: &declared})
 	if !eng.isCatchUpReviewBot("handarbeit-pruefer") {
 		t.Error("a declared expected_reviewers identity must be recognised")
+	}
+}
+
+// Neutralisation: TestCatchUpMarkerCache_* fail if catchUpFeedbackFilterFor reads the
+// comments directly (the repeated-read test) or if the TTL / forgetCatchUpMarker is
+// removed (the expiry and invalidation tests).
+func TestCatchUpMarkerCache_BotReviewedHeadReadsCommentsOncePerTTL(t *testing.T) {
+	reads := 0
+	client := &mockGitHubClient{fetchIssueCommentsFn: func(o, r string, n int) ([]gh.Comment, error) {
+		reads++
+		return nil, nil
+	}}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.User = cuSelf
+	start := time.Now()
+	eng.SetClock(stubClock{t: start})
+	item := catchUpItem(cuHead)
+	// Each gate call also reads the PR's comments once for the durably-addressed review
+	// IDs (durablyAddressedReviewIDs), independent of catch-up recognition: n calls cost n
+	// of those reads, plus the marker lookup — one per TTL window, not one per call.
+	const calls = 5
+	for i := 0; i < calls; i++ {
+		eng.feedbackGateBlocks(item, true, "landing decision")
+	}
+	if want := calls + 1; reads != want {
+		t.Fatalf("FetchIssueComments called %d times over %d gate calls on one bot-reviewed head with no marker; want %d (one marker lookup)", reads, calls, want)
+	}
+	eng.SetClock(stubClock{t: start.Add(catchUpNoMarkerTTL + time.Second)})
+	eng.feedbackGateBlocks(item, true, "landing decision")
+	if want := calls + 1 + 2; reads != want {
+		t.Fatalf("after the TTL FetchIssueComments called %d times in total; want %d (a second marker lookup)", reads, want)
+	}
+}
+
+func TestCatchUpMarkerCache_FoundMarkerIsCachedAndErrorsAreNot(t *testing.T) {
+	reads, fail := 0, true
+	client := &mockGitHubClient{fetchIssueCommentsFn: func(o, r string, n int) ([]gh.Comment, error) {
+		reads++
+		if fail {
+			return nil, errors.New("boom")
+		}
+		return []gh.Comment{markerComment(cuSelf, true, cuHead)}, nil
+	}}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.User = cuSelf
+	start := time.Now()
+	eng.SetClock(stubClock{t: start})
+	item := catchUpItem(cuHead)
+	if !eng.feedbackGateBlocks(item, true, "landing decision") {
+		t.Fatal("a failed marker read must leave the findings actionable")
+	}
+	fail = false
+	if eng.feedbackGateBlocks(item, true, "landing decision") {
+		t.Fatal("after a successful read the pure catch-up head's bot review must not hold")
+	}
+	// A found marker never expires: no further reads, even far past the negative TTL.
+	eng.SetClock(stubClock{t: start.Add(time.Hour)})
+	before := reads
+	eng.feedbackGateBlocks(item, true, "landing decision")
+	if reads != before {
+		t.Fatalf("a found marker was re-read (%d reads, want %d)", reads, before)
+	}
+}
+
+func TestCatchUpMarkerCache_PostingTheMarkerInvalidatesANegativeEntry(t *testing.T) {
+	var posted []gh.Comment
+	client := &mockGitHubClient{fetchIssueCommentsFn: func(o, r string, n int) ([]gh.Comment, error) { return posted, nil }}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.User = cuSelf
+	eng.SetClock(stubClock{t: time.Now()})
+	item := catchUpItem(cuHead)
+	if !eng.feedbackGateBlocks(item, true, "landing decision") {
+		t.Fatal("with no marker yet the bot review must be actionable")
+	}
+	posted = []gh.Comment{markerComment(cuSelf, true, cuHead)}
+	eng.forgetCatchUpMarker("owner", "repo", 10, cuHead)
+	if eng.feedbackGateBlocks(item, true, "landing decision") {
+		t.Fatal("after the marker is posted and the cache entry forgotten, the review must not hold")
 	}
 }

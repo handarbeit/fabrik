@@ -3,6 +3,7 @@ package engine
 import (
 	"fmt"
 	"regexp"
+	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
 )
@@ -158,9 +159,10 @@ func (e *Engine) isCatchUpReviewBot(author string) bool {
 }
 
 // catchUpFeedbackFilterFor builds the filter for item. The marker is read (one
-// FetchIssueComments on the linked PR) only when at least one finding is a bot's, made
-// against the live head — so an item with no such finding, the steady state, costs
-// nothing. Any missing input (no linked PR, no live head, a failed read, no marker)
+// FetchIssueComments on the linked PR, cached per PR head — see catchUpMarkerCached) only
+// when at least one finding is a bot's, made against the live head — so an item with no
+// such finding costs nothing, and one with a bot-reviewed head costs at most one read per
+// catchUpNoMarkerTTL. Any missing input (no linked PR, no live head, a failed read, no marker)
 // returns the zero filter: nothing is suppressed.
 func (e *Engine) catchUpFeedbackFilterFor(item gh.ProjectItem, threads []gh.Comment, reviews []gh.PRReview) catchUpFeedbackFilter {
 	liveHead := item.LinkedPRHeadSHA
@@ -186,12 +188,11 @@ func (e *Engine) catchUpFeedbackFilterFor(item gh.ProjectItem, threads []gh.Comm
 		return catchUpFeedbackFilter{}
 	}
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
-	comments, err := e.client.FetchIssueComments(owner, repo, item.LinkedPRNumber)
+	mk, ok, err := e.catchUpMarkerCached(owner, repo, item.LinkedPRNumber, liveHead)
 	if err != nil {
 		e.logf(item.Number, "warn", "catch-up recognition: could not read PR #%d comments: %v — findings stay actionable\n", item.LinkedPRNumber, err)
 		return catchUpFeedbackFilter{}
 	}
-	mk, ok := catchUpMarkerForHead(comments, e.selfLogin(), liveHead)
 	if !ok {
 		return catchUpFeedbackFilter{}
 	}
@@ -213,4 +214,61 @@ func (e *Engine) dropCatchUpFeedback(item gh.ProjectItem, threads []gh.Comment, 
 		e.logf(item.Number, "merge-train", "%d bot review finding(s) on #%d are of the pure catch-up head %s (base %s merged in, no conflict edits) — non-actionable for this landing\n", dropped, item.Number, f.marker.Head, f.marker.Base)
 	}
 	return keptThreads, keptReviews
+}
+
+// catchUpNoMarkerTTL bounds how long "this head has no catch-up marker" is remembered.
+// A head's marker never changes once posted, so a found marker is cached for good; the
+// negative answer is the common one (a bot-reviewed head that was never caught up) and is
+// re-read only this often, so the Queued settle scan does not read the PR's comments every
+// poll for every bot-reviewed member. It errs on the fail-closed side: a stale negative
+// only keeps findings actionable. The worker invalidates the entry when it posts a marker.
+const catchUpNoMarkerTTL = 2 * time.Minute
+
+// catchUpMarkerCacheMax caps the cache; past it the map is dropped wholesale (entries are
+// cheap to recompute and the cap is only a leak guard).
+const catchUpMarkerCacheMax = 512
+
+// catchUpMarkerEntry is one cached lookup.
+type catchUpMarkerEntry struct {
+	marker catchUpMarker
+	found  bool
+	at     time.Time
+}
+
+func catchUpMarkerCacheKey(owner, repo string, pr int, head string) string {
+	return fmt.Sprintf("%s/%s#%d@%s", owner, repo, pr, head)
+}
+
+// catchUpMarkerCached returns the catch-up marker for head on the PR, reading the PR's
+// comments at most once per catchUpNoMarkerTTL (found markers: once). A read error is
+// returned and never cached.
+func (e *Engine) catchUpMarkerCached(owner, repo string, pr int, head string) (catchUpMarker, bool, error) {
+	key := catchUpMarkerCacheKey(owner, repo, pr, head)
+	now := e.now()
+	e.trainCatchUp.mu.Lock()
+	ent, hit := e.trainCatchUp.markers[key]
+	e.trainCatchUp.mu.Unlock()
+	if hit && (ent.found || now.Sub(ent.at) < catchUpNoMarkerTTL) {
+		return ent.marker, ent.found, nil
+	}
+	comments, err := e.client.FetchIssueComments(owner, repo, pr)
+	if err != nil {
+		return catchUpMarker{}, false, err
+	}
+	mk, ok := catchUpMarkerForHead(comments, e.selfLogin(), head)
+	e.trainCatchUp.mu.Lock()
+	if e.trainCatchUp.markers == nil || len(e.trainCatchUp.markers) >= catchUpMarkerCacheMax {
+		e.trainCatchUp.markers = make(map[string]catchUpMarkerEntry)
+	}
+	e.trainCatchUp.markers[key] = catchUpMarkerEntry{marker: mk, found: ok, at: now}
+	e.trainCatchUp.mu.Unlock()
+	return mk, ok, nil
+}
+
+// forgetCatchUpMarker drops the cached lookup for a head, called once the worker has
+// posted that head's marker.
+func (e *Engine) forgetCatchUpMarker(owner, repo string, pr int, head string) {
+	e.trainCatchUp.mu.Lock()
+	defer e.trainCatchUp.mu.Unlock()
+	delete(e.trainCatchUp.markers, catchUpMarkerCacheKey(owner, repo, pr, head))
 }

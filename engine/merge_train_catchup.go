@@ -72,6 +72,10 @@ type catchUpState struct {
 	// and a review — and past effectiveMaxTrainRebaseCycles the trial path takes over.
 	attempts map[string]int
 	timing   catchUpTiming
+	// markers caches the catch-up marker lookup per (PR, live head), so the gates'
+	// recognition read (catchUpFeedbackFilterFor) is not repeated on every poll for a
+	// head a review bot has already reviewed. See catchUpMarkerCache.
+	markers map[string]catchUpMarkerEntry
 }
 
 func catchUpKey(trainKey string, issue int) string { return fmt.Sprintf("%s#%d", trainKey, issue) }
@@ -342,6 +346,8 @@ func stampCatchUpTrailer(wtDir, baseSHA string) error {
 // retrying transient errors) is logged and leaves reviews actionable — the fail-closed direction.
 func (e *Engine) postCatchUpMarker(p trialParams, caughtUp trainMember, previousHead string, pure bool) {
 	mk := catchUpMarker{Head: caughtUp.headSHA, Base: p.baseSHA, Pure: pure}
+	// Whatever the gates cached for this head before the marker existed is stale now.
+	defer e.forgetCatchUpMarker(p.owner, p.repo, caughtUp.prNum, caughtUp.headSHA)
 	var effect string
 	if pure {
 		effect = "Only base commits were brought in (no conflict-resolution edits), so automated reviews of this push are not treated as actionable for this landing; the PR's own CI decides whether it lands."

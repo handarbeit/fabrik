@@ -94,6 +94,11 @@ an unreadable marker — stays actionable (fail closed). Human comments are neve
 is applied in the two shared places, `queuedReviewFindings` (the settle scan and the worker's eject
 checkpoints) and `unprocessedFeedback` (the landing/advance gate), so they cannot disagree.
 
+The marker lookup is cached per (PR, head): a found marker for good, "no marker" for two minutes
+(a stale negative only keeps findings actionable, the fail-closed direction), a read error never. The
+worker drops the entry when it posts that head's marker. Without the cache the Queued settle scan
+would read the PR's comments every poll for every bot-reviewed member, caught up or not.
+
 **The commit trailer is not trusted.** The member branch is writable by anyone with push access, so
 a forged trailer must not be able to mute review feedback. It is for audit and for a possible future
 Pruefer skip only; the engine's decision rests on the self-authored marker, the live head and the
