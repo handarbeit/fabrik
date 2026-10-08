@@ -454,6 +454,15 @@ func TestHubFlushPersistsDedupWithoutClose(t *testing.T) {
 	e.DedupKey = "vs:o/r#1:1"
 	h.Publish(e)
 	s.wait(t) // delivered live: only the dedup state remembers it
+	// The drain loop removes and persists the delivered entry after the sink
+	// write returns, so wait for that: otherwise the second hub can load a
+	// stale held queue and count the entry as replayed.
+	for deadline := time.Now().Add(5 * time.Second); h.Queued("X") != 0; {
+		if time.Now().After(deadline) {
+			t.Fatal("delivered entry was never removed from the held queue")
+		}
+		time.Sleep(time.Millisecond)
+	}
 	h.Flush()
 
 	h2 := openHub(t, dir, nil)
