@@ -233,6 +233,11 @@ func (in *Instrumented) RemoveLabelFromIssue(owner, repo string, issueNumber int
 		func() error { return in.sim.RemoveLabelFromIssue(owner, repo, issueNumber, labelName) })
 }
 
+func (in *Instrumented) FetchLabelRemovedAt(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
+	return do1(in, "FetchLabelRemovedAt", false, Args{Owner: owner, Repo: repo, Number: issueNumber, Label: labelName},
+		func() (time.Time, error) { return in.sim.FetchLabelRemovedAt(owner, repo, issueNumber, labelName) })
+}
+
 func (in *Instrumented) FetchLabelAppliedAt(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
 	return do1(in, "FetchLabelAppliedAt", false, Args{Owner: owner, Repo: repo, Number: issueNumber, Label: labelName},
 		func() (time.Time, error) { return in.sim.FetchLabelAppliedAt(owner, repo, issueNumber, labelName) })

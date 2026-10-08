@@ -134,6 +134,9 @@ func (m *testGitHubUpgradeClient) ResolveReviewThread(threadID string) error { r
 func (m *testGitHubUpgradeClient) FetchLabelAppliedAt(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
 	return time.Time{}, nil
 }
+func (m *testGitHubUpgradeClient) FetchLabelRemovedAt(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
+	return time.Time{}, nil
+}
 func (m *testGitHubUpgradeClient) ArchiveProjectItem(projectID, itemID string) error { return nil }
 func (m *testGitHubUpgradeClient) SeedLabels(owner, repo string, stageNames []string, lockedUser string) error {
 	return nil

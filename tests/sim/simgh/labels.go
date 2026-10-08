@@ -40,7 +40,7 @@ func (s *Sim) AddLabelToIssue(owner, repo string, issueNumber int, labelName str
 	now := s.now()
 	iss.labels = append(iss.labels, labelName)
 	iss.labelAppliedAt[labelName] = now
-	iss.recordLabelEvent(LabelEventLabeled, labelName)
+	iss.recordLabelEvent(LabelEventLabeled, labelName, now)
 	iss.updatedAt = now
 	r.labelVocab[labelName] = true
 	return nil
@@ -73,10 +73,11 @@ func (s *Sim) RemoveLabelFromIssue(owner, repo string, issueNumber int, labelNam
 		return fmt.Errorf("removing label %q from %s#%d: %w",
 			labelName, repoKey(owner, repo), issueNumber, gh.ErrNotFound)
 	}
+	now := s.now()
 	iss.labels = updated
 	delete(iss.labelAppliedAt, labelName)
-	iss.recordLabelEvent(LabelEventUnlabeled, labelName)
-	iss.updatedAt = s.now()
+	iss.recordLabelEvent(LabelEventUnlabeled, labelName, now)
+	iss.updatedAt = now
 	return nil
 }
 
@@ -90,18 +91,20 @@ const (
 )
 
 // LabelEvent is one entry in an issue's label-event log. Seq is 1-based and
-// strictly increasing per issue; there is no timestamp or actor (see
-// FIDELITY.md).
+// strictly increasing per issue; At is the injected clock's reading at the
+// mutation (#2059); there is no actor (see FIDELITY.md).
 type LabelEvent struct {
 	Seq   int64
 	Kind  LabelEventKind
 	Label string
+	At    time.Time
 }
 
-// recordLabelEvent appends to the issue's event log. Caller must hold mu.
-func (i *issueRecord) recordLabelEvent(kind LabelEventKind, label string) {
+// recordLabelEvent appends to the issue's event log, stamped at. Caller must
+// hold mu.
+func (i *issueRecord) recordLabelEvent(kind LabelEventKind, label string, at time.Time) {
 	i.labelEvents = append(i.labelEvents, LabelEvent{
-		Seq: int64(len(i.labelEvents)) + 1, Kind: kind, Label: label,
+		Seq: int64(len(i.labelEvents)) + 1, Kind: kind, Label: label, At: at,
 	})
 }
 
@@ -148,6 +151,27 @@ func (s *Sim) FetchLabelAppliedAt(owner, repo string, issueNumber int, labelName
 		return time.Time{}, err
 	}
 	return iss.labelAppliedAt[labelName], nil
+}
+
+// FetchLabelRemovedAt returns when a label was last removed from an issue: the
+// newest `unlabeled` event for it in the label-event log, or the zero time when
+// there is none — production's "no such event found" outcome (#2059). Unlike
+// FetchLabelAppliedAt this reads the event log, because removal deletes the
+// applied-at entry and GitHub keeps the history.
+func (s *Sim) FetchLabelRemovedAt(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	iss, err := s.issueLocked(owner, repo, issueNumber)
+	if err != nil {
+		return time.Time{}, err
+	}
+	var latest time.Time
+	for _, ev := range iss.labelEvents {
+		if ev.Kind == LabelEventUnlabeled && ev.Label == labelName && ev.At.After(latest) {
+			latest = ev.At
+		}
+	}
+	return latest, nil
 }
 
 // SeedLabels ensures the repo's label vocabulary contains the static and
