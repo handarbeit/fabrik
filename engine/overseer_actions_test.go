@@ -388,6 +388,7 @@ func TestOverseerSetAutonomy(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			client := &mockGitHubClient{}
+			liveLabels(client, tc.labels...)
 			eng, _, act := overseerEngine(t, client, ovItem{number: 5, status: "Implement", labels: tc.labels})
 			res, err := act.SetAutonomy(localapi.SetAutonomyParams{Subscriber: "ovr", Issue: "5", Mode: tc.mode})
 			if err != nil {
@@ -463,9 +464,59 @@ func TestOverseerSetAutonomy_BadModeAndRefusals(t *testing.T) {
 	wantNoWrites(t, client)
 }
 
+// The cache can lag GitHub, so set_autonomy decides from a live label read. Each
+// case gives the daemon a cache that disagrees with GitHub.
+func TestOverseerSetAutonomy_LiveLabelsOverrideStaleCache(t *testing.T) {
+	t.Run("live has cruise the cache missed: yolo drops it", func(t *testing.T) {
+		client := &mockGitHubClient{}
+		liveLabels(client, labelCruise)
+		eng, _, act := overseerEngine(t, client, ovItem{number: 5, status: "Implement"})
+		res, err := act.SetAutonomy(localapi.SetAutonomyParams{Subscriber: "s", Issue: "5", Mode: "yolo"})
+		if err != nil {
+			t.Fatalf("SetAutonomy: %v", err)
+		}
+		if !reflect.DeepEqual(client.addLabelCalls, []addLabelCall{{"owner", "repo", 5, labelYolo}}) ||
+			len(client.removeLabelCalls) != 1 || client.removeLabelCalls[0].labelName != labelCruise {
+			t.Errorf("writes: add=%v remove=%v", client.addLabelCalls, client.removeLabelCalls)
+		}
+		if !res.Changed || res.AuditComment != localapi.AuditPosted {
+			t.Errorf("result = %+v", res)
+		}
+		if got := autonomyOf(labelsOf(t, eng, 5)); got != "yolo" {
+			t.Errorf("effective autonomy = %s, want yolo", got)
+		}
+	})
+	t.Run("cache says yolo, live has none: yolo is added, not a no-op", func(t *testing.T) {
+		client := &mockGitHubClient{}
+		liveLabels(client)
+		_, _, act := overseerEngine(t, client, ovItem{number: 5, status: "Implement", labels: []string{labelYolo}})
+		res, err := act.SetAutonomy(localapi.SetAutonomyParams{Subscriber: "s", Issue: "5", Mode: "yolo"})
+		if err != nil {
+			t.Fatalf("SetAutonomy: %v", err)
+		}
+		if !reflect.DeepEqual(client.addLabelCalls, []addLabelCall{{"owner", "repo", 5, labelYolo}}) || len(client.removeLabelCalls) != 0 {
+			t.Errorf("writes: add=%v remove=%v", client.addLabelCalls, client.removeLabelCalls)
+		}
+		if !res.Changed || strings.Contains(res.Summary, "nothing changed") {
+			t.Errorf("result = %+v", res)
+		}
+	})
+	t.Run("live read fails: refused, nothing written", func(t *testing.T) {
+		client := &mockGitHubClient{fetchLabelsFn: func(_, _ string, _ int) ([]string, error) { return nil, errors.New("boom") }}
+		_, _, act := overseerEngine(t, client, ovItem{number: 5, status: "Implement"})
+		_, err := act.SetAutonomy(localapi.SetAutonomyParams{Subscriber: "s", Issue: "5", Mode: "cruise"})
+		pe, _ := refusedErr(t, err)
+		if !strings.Contains(pe.Message, "could not confirm") {
+			t.Errorf("message = %q", pe.Message)
+		}
+		wantNoWrites(t, client)
+	})
+}
+
 func TestOverseerSetAutonomy_FirstWriteFailurePostsNoComment(t *testing.T) {
 	// Nothing landed, so there is nothing to audit.
 	client := &mockGitHubClient{addLabelToIssueFn: func(_, _ string, _ int, _ string) error { return errors.New("boom") }}
+	liveLabels(client)
 	_, _, act := overseerEngine(t, client, ovItem{number: 5, status: "Implement"})
 	if _, err := act.SetAutonomy(localapi.SetAutonomyParams{Subscriber: "s", Issue: "5", Mode: "cruise"}); err == nil {
 		t.Fatal("want error")
@@ -479,6 +530,7 @@ func TestOverseerSetAutonomy_PartialFailureStaysConservative(t *testing.T) {
 	// cruise -> yolo: yolo is added first; if the cruise removal then fails,
 	// both labels remain and cruise (the conservative one) still wins.
 	client := &mockGitHubClient{removeLabelFromIssueFn: func(_, _ string, _ int, _ string) error { return errors.New("rate limited") }}
+	liveLabels(client, labelCruise)
 	eng, _, act := overseerEngine(t, client, ovItem{number: 5, status: "Implement", labels: []string{labelCruise}})
 	_, err := act.SetAutonomy(localapi.SetAutonomyParams{Subscriber: "s", Issue: "5", Mode: "yolo"})
 	if err == nil || !strings.Contains(err.Error(), "rate limited") || !strings.Contains(err.Error(), "added "+labelYolo) {

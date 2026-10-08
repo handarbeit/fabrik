@@ -4237,7 +4237,7 @@ is untouched by any number of turn-cap preemptions.
 | Action | Precondition (all on top of: one managed, open, non-PR item) | Writes |
 |---|---|---|
 | `promote` | `to` is a configured, non-unmanaged, non-holding, non-cleanup stage with a board option; the cached **and** live column is an `Unmanaged` stage; project ID, item ID and status field are known | one `UpdateProjectItemStatus` |
-| `set_autonomy` | `mode` ∈ {`cruise`,`yolo`,`none`}; if the labels already equal the mode, nothing is written | add the wanted label first, then remove the other (`none`: yolo then cruise), so a partial failure leaves the conservative state |
+| `set_autonomy` | `mode` ∈ {`cruise`,`yolo`,`none`}; the labels are read live (`FetchLabels`; a failed read refuses) and if they already equal the mode, nothing is written | add the wanted label first, then remove the other (`none`: yolo then cruise), so a partial failure leaves the conservative state |
 | `revalidate` | cached and live column is `Validate`; no `fabrik:revalidate`; **no `fabrik:paused` / `fabrik:awaiting-input`**, checked on the cache and again on a live `FetchLabels` read that fails closed (`handleRevalidateLabel` clears both, which would be a label-based pause lift) | add `fabrik:revalidate` (an in-flight Validate worker defers it to a later poll; the result notes this) |
 | `clear_claude_limit` | `claudeSuspendedUntilTime(now)` reports an active suspension; no clear request already pending | add `fabrik:clear-claude-limit` to the chosen item: open, non-PR, on the board; one carrying `fabrik:claude-limit` first, then the lowest number |
 

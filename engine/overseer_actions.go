@@ -355,7 +355,18 @@ func (a *overseerActor) SetAutonomy(p localapi.SetAutonomyParams) (*localapi.Act
 		return nil, err
 	}
 	e := a.e
-	hasCruise, hasYolo := hasLabelStr(t.st.Labels, labelCruise), hasLabelStr(t.st.Labels, labelYolo)
+	// Decide from the item's labels on GitHub, not the cache: a stale cache that
+	// missed an existing autonomy label would leave both labels set (cruise
+	// wins) under a result claiming the requested mode, or report "nothing
+	// changed" while GitHub differs. A failed read refuses, as promote and
+	// revalidate do.
+	owner, repo := itemOwnerRepo(t.item, e.defaultRepo())
+	liveLabels, err := e.client.FetchLabels(owner, repo, t.st.Number)
+	if err != nil {
+		return nil, localapi.Refused(a.refusalState(&t.st), "could not confirm %s's labels live (%v); refusing rather than set autonomy from a possibly stale cache", t.ref, err)
+	}
+	t.st.Labels = liveLabels
+	hasCruise, hasYolo := hasLabelStr(liveLabels, labelCruise), hasLabelStr(liveLabels, labelYolo)
 	res := &localapi.ActionResult{Action: localapi.MethodSetAutonomy, Issue: t.ref}
 	if hasCruise == wantCruise && hasYolo == wantYolo {
 		res.Summary = fmt.Sprintf("%s is already set to autonomy %q; nothing changed", t.ref, p.Mode)

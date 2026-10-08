@@ -1,6 +1,7 @@
 package sim
 
 import (
+	"errors"
 	"strconv"
 	"strings"
 	"testing"
@@ -110,5 +111,71 @@ func TestOverseerAuditCommentStartsNoReviewCycleOnASettledItem(t *testing.T) {
 	}
 	if n := len(auditComments(t, env, num)); n != 1 {
 		t.Errorf("%d audit comments, want 1", n)
+	}
+}
+
+// TestOverseerRevalidateRefusesAPausedItem (#1969 R2): fabrik_revalidate must
+// not become a label-based pause lift. The engine's revalidate handling strips
+// fabrik:paused / fabrik:awaiting-input unconditionally, so the action refuses a
+// paused Validate item and, driven through real polls, the pause is still there
+// afterwards and no Validate worker ran. Two shapes exercise the two guards:
+// the pause is already in the daemon's cache, or it was applied on GitHub after
+// the daemon last looked (a stale cache the live label read must catch).
+func TestOverseerRevalidateRefusesAPausedItem(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		// pauseBeforePolls: the daemon learns of the pause through its cache.
+		pauseBeforePolls bool
+		want             string
+	}{
+		{name: "pause in the cache", pauseBeforePolls: true, want: "paused or awaiting input"},
+		{name: "pause only on GitHub (stale cache)", pauseBeforePolls: false, want: "on GitHub"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			yolo := false
+			env := NewEnv(t, EnvOptions{Stages: smokeStages(), Yolo: &yolo})
+
+			labels := []string{"stage:Validate:complete"}
+			if tc.pauseBeforePolls {
+				labels = append(labels, "fabrik:paused", "fabrik:awaiting-input")
+			}
+			num := FileIssue(t, env, "overseer revalidate vs pause", "body", "Validate", labels...)
+			RunPolls(t, env, 2) // the daemon now knows the item
+			validateCalls := env.Claude.StageCallCount("Validate")
+
+			if !tc.pauseBeforePolls {
+				// Applied behind the daemon's back: no poll has run since.
+				for _, l := range []string{"fabrik:paused", "fabrik:awaiting-input"} {
+					if err := env.Sim.Sim().AddLabelToIssue(env.Owner, env.Repo, num, l); err != nil {
+						t.Fatalf("AddLabelToIssue(%s): %v", l, err)
+					}
+				}
+			}
+
+			act := env.Engine.OverseerActorForTest()
+			_, err := act.Revalidate(localapi.RevalidateParams{Subscriber: "overseer-session", Issue: strconv.Itoa(num)})
+			var pe *localapi.Error
+			if !errors.As(err, &pe) || pe.Code != localapi.CodeRefused || !strings.Contains(pe.Message, tc.want) {
+				t.Fatalf("Revalidate = %v, want a refusal mentioning %q", err, tc.want)
+			}
+			if n := len(auditComments(t, env, num)); n != 0 {
+				t.Errorf("a refused action posted %d audit comments", n)
+			}
+
+			RunPolls(t, env, 4)
+			got := IssueLabels(t, env, num)
+			if !hasLabel(got, "fabrik:paused") || !hasLabel(got, "fabrik:awaiting-input") {
+				t.Errorf("the pause was lifted; labels=%v", got)
+			}
+			if hasLabel(got, "fabrik:revalidate") {
+				t.Errorf("fabrik:revalidate was written despite the refusal; labels=%v", got)
+			}
+			if n := env.Claude.StageCallCount("Validate"); n != validateCalls {
+				t.Errorf("a Validate worker ran for a paused item: %d -> %d", validateCalls, n)
+			}
+		})
 	}
 }
