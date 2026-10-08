@@ -15,8 +15,9 @@ import (
 
 // runMCP implements `fabrik mcp`: a stdio MCP server (launched per session by
 // Claude Code — `claude mcp add fabrik -- fabrik mcp`) that proxies the
-// read-only fabrik_status / fabrik_board / fabrik_health tools to the running
-// daemon's local socket (#1967, ADR-1966-a).
+// read-only fabrik_status / fabrik_board / fabrik_health tools, and the four
+// overseer action tools (#1969, ADR-1966-c), to the running daemon's local
+// socket (#1967, ADR-1966-a).
 //
 // stdout is the protocol channel and carries JSON-RPC frames only. This command
 // deliberately loads no config or .env, prints no banner and starts no TUI; all
@@ -28,8 +29,10 @@ func runMCP(args []string) error {
 	subscriber := fs.String("subscriber", "", "stable name this server attaches to the daemon under for pushed channel events — your topic or session name, never a PID (default: $FABRIK_SUBSCRIBER; empty disables push)")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: fabrik mcp [--dir <fabrik-dir>] [--subscriber <name>]\n\n")
-		fmt.Fprintf(os.Stderr, "Run a stdio MCP server exposing read-only overseer tools backed by the running\n")
-		fmt.Fprintf(os.Stderr, "daemon's local socket. Register it with: claude mcp add fabrik -- fabrik mcp\n\n")
+		fmt.Fprintf(os.Stderr, "Run a stdio MCP server exposing overseer tools backed by the running daemon's\n")
+		fmt.Fprintf(os.Stderr, "local socket: read-only status/board/health, plus promote / set_autonomy /\n")
+		fmt.Fprintf(os.Stderr, "revalidate / clear_claude_limit actions that need --subscriber (they leave an\n")
+		fmt.Fprintf(os.Stderr, "audit comment naming it). Register it with: claude mcp add fabrik -- fabrik mcp\n\n")
 		fmt.Fprintf(os.Stderr, "With --subscriber (or FABRIK_SUBSCRIBER) it also pushes events into the session via\n")
 		fmt.Fprintf(os.Stderr, "Claude Code Channels (research preview); start claude with\n")
 		fmt.Fprintf(os.Stderr, "--dangerously-load-development-channels server:fabrik to receive them.\n\n")
