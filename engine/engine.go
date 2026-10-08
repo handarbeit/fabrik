@@ -55,6 +55,7 @@ type Config struct {
 	AutoMergeStrategy         string              // Merge method for enablePullRequestAutoMerge: MERGE, SQUASH, or REBASE (default MERGE)
 	MergeQueue                string              // Merge queue routing for yolo path: "auto" (enqueue when repo uses merge queue) or "off" (skip enqueue)
 	MergeTrain                string              // Fabrik-internal merge train: "on" (advance yolo Validate completions to Queued) or "off" (default; existing auto-merge path unchanged)
+	SingletonCatchUp          string              // Merge-train singleton catch-up: "merge" (default; merge the pinned base into a behind singleton's own branch, #2044) or "off" (build a trial branch instead)
 	MaxMergeTrainEjections    int                 // Max merge-train ejections before pausing a member (default 3; ADR-059)
 	MaxBatchSize              int                 // Max Queued items snapshotted into one merge-train batch (0 = derive default 5; ADR-059 D4/D-f)
 	MaxBisectValidations      int                 // Max combined validations per red batch before the one-at-a-time fallback (0 = derive 2·⌈log₂(MaxBatchSize)⌉+1; ADR-059 D4/D-f)

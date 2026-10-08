@@ -62,6 +62,7 @@ type Config struct {
 	AutoMergeStrategy         string // MERGE, SQUASH, or REBASE; "" means use default (MERGE)
 	MergeQueue                string // auto or off; "" means use default (auto)
 	MergeTrain                string // on or off; "" means use default (off)
+	SingletonCatchUp          string // merge or off; "" means use default (merge) (#2044)
 	MaxBatchSize              int    // 0 means use default (5)
 	MaxBisectValidations      int    // 0 means derive default (2·⌈log₂(MaxBatchSize)⌉+1)
 	MaxTrainRebaseCycles      int    // 0 means use default (3)
@@ -206,6 +207,7 @@ func Execute() error {
 	flag.StringVar(&cfg.AutoMergeStrategy, "auto-merge-strategy", "", "Merge method for GitHub auto-merge: MERGE, SQUASH, or REBASE (also FABRIK_AUTO_MERGE_STRATEGY; default MERGE)")
 	flag.StringVar(&cfg.MergeQueue, "merge-queue", "", "Merge queue routing for yolo path: auto (enqueue when repo uses merge queue) or off (skip enqueue; direct merge may fail on queue-required repos; also FABRIK_MERGE_QUEUE; default auto)")
 	flag.StringVar(&cfg.MergeTrain, "merge-train", "", "Fabrik-internal merge train: on (advance yolo Validate completions to Queued column for batched landing) or off (also FABRIK_MERGE_TRAIN; default off)")
+	flag.StringVar(&cfg.SingletonCatchUp, "singleton-catch-up", "", "Merge-train singleton catch-up: merge (merge the pinned base into a behind singleton's own branch and land it via the fast path) or off (build a trial branch instead, e.g. for repos that forbid merge commits on PR branches; also FABRIK_SINGLETON_CATCH_UP; default merge)")
 	flag.IntVar(&cfg.MaxBatchSize, "max-batch-size", 0, "Maximum Queued items landed in a single merge-train batch, ordered by entry (0 = use default of 5; smaller = cheaper worst-case bisection, fewer N² savings; also FABRIK_MAX_BATCH_SIZE)")
 	flag.IntVar(&cfg.MaxBisectValidations, "max-bisect-validations", 0, "Maximum combined validations per red merge-train batch before degrading to one-at-a-time landing (0 = derive 2·⌈log₂(max-batch-size)⌉+1, ≈7 at the default batch size; also FABRIK_MAX_BISECT_VALIDATIONS)")
 	flag.IntVar(&cfg.MaxTrainRebaseCycles, "max-train-rebase-cycles", 0, "Maximum main-moved rebase+revalidate cycles for a merge-train batch before dissolving it back to Queued (0 = use default of 3; also FABRIK_MAX_TRAIN_REBASE_CYCLES)")
@@ -466,6 +468,13 @@ func Execute() error {
 			cfg.MergeTrain = v // validated in mergeTrainMode() helper
 		} else if pc.MergeTrain != "" {
 			cfg.MergeTrain = pc.MergeTrain // validated in mergeTrainMode() helper
+		}
+	}
+	if !explicitFlags["singleton-catch-up"] {
+		if v := os.Getenv("FABRIK_SINGLETON_CATCH_UP"); v != "" {
+			cfg.SingletonCatchUp = v // validated in singletonCatchUpMode() helper
+		} else if pc.SingletonCatchUp != "" {
+			cfg.SingletonCatchUp = pc.SingletonCatchUp // validated in singletonCatchUpMode() helper
 		}
 	}
 	if !explicitFlags["max-batch-size"] {
@@ -919,6 +928,7 @@ func Execute() error {
 		AutoMergeStrategy:         autoMergeStrategy(cfg.AutoMergeStrategy),
 		MergeQueue:                mergeQueueMode(cfg.MergeQueue),
 		MergeTrain:                mergeTrainMode(cfg.MergeTrain),
+		SingletonCatchUp:          singletonCatchUpMode(cfg.SingletonCatchUp),
 		MaxMergeTrainEjections:    3,                                                     // ADR-059 default
 		MaxBatchSize:              cfg.MaxBatchSize,                                      // 0 = derive default (5) in engine
 		MaxBisectValidations:      cfg.MaxBisectValidations,                              // 0 = derive default in engine
@@ -1554,6 +1564,24 @@ func mergeTrainMode(s string) string {
 	default:
 		fmt.Fprintf(os.Stderr, "[warn] FABRIK_MERGE_TRAIN=%q is invalid (must be on or off); using default off\n", s)
 		return "off"
+	}
+}
+
+// singletonCatchUpMode normalizes the --singleton-catch-up / FABRIK_SINGLETON_CATCH_UP
+// value (#2044). Valid values are "merge" and "off" (case-insensitive). An empty
+// string defaults to "merge". Unrecognized values produce a warning and fall back to
+// "merge", matching the sibling merge-train knobs' warn-and-use-default convention.
+func singletonCatchUpMode(s string) string {
+	if s == "" {
+		return "merge"
+	}
+	lower := strings.ToLower(s)
+	switch lower {
+	case "merge", "off":
+		return lower
+	default:
+		fmt.Fprintf(os.Stderr, "[warn] FABRIK_SINGLETON_CATCH_UP=%q is invalid (must be merge or off); using default merge\n", s)
+		return "merge"
 	}
 }
 
