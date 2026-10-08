@@ -225,12 +225,37 @@ func (e *Engine) settleAwaitingCIScan(ctx context.Context, board *gh.ProjectBoar
 		// unchanged from before #1408. A FetchLabelAppliedAt error or zero
 		// timestamp also leaves this a no-op, falling through to the normal
 		// gate-driven path unchanged.
+		//
+		// #2059: three corrections keep the backstop from escalating blind. R3:
+		// never while a worker for the item is in flight. R2: not on the first
+		// evaluation since the daemon started (the chain below runs first). R1: the
+		// elapsed time is measured from the later of the label's applied time and
+		// the item's most recent resume (latest fabrik:paused removal), so paused
+		// time and daemon downtime do not count; an unreadable resume time falls
+		// back to the label anchor and still escalates. The timeout value, the
+		// #1408 deferral and the escalation message are unchanged.
 		owner, repoName := itemOwnerRepo(item, e.defaultRepo())
 		if appliedAt, err := e.labelAppliedAt(item, owner, repoName, "fabrik:awaiting-ci"); err != nil {
 			e.logf(item.Number, "awaiting-ci-settle", "could not fetch awaiting-ci label timestamp for CIBackstopTimeout backstop: %v\n", err)
 		} else if !appliedAt.IsZero() && time.Since(appliedAt) >= e.ciBackstopTimeout() {
 			if hasCIGatePauseComment(item, stage) {
 				e.logf(item.Number, "awaiting-ci-settle", "fabrik:awaiting-ci exceeded CIBackstopTimeout (%s) but a pause comment already exists for this episode — deferring to the live-data-informed handler chain instead of re-escalating blind\n", e.ciBackstopTimeout())
+			} else if stageName, inFlight := e.ciBackstopWorkerInFlight(repo, item.Number); inFlight {
+				// #2059 R3: a worker for this item is running (or was dispatched by an
+				// earlier phase this poll). Pausing now would re-pause an item whose
+				// resume just dispatched a comment worker, and the work that worker
+				// does would land under a pause that never lifts on its own. The next
+				// poll re-evaluates once the worker has exited.
+				e.logf(item.Number, "awaiting-ci-settle", "fabrik:awaiting-ci exceeded CIBackstopTimeout (%s) but a worker is in flight (stage=%s) — backstop deferred to a later poll\n", e.ciBackstopTimeout(), stageName)
+			} else if _, seen := e.ciBackstopLiveEvaluated.Load(ciBackstopKey(repo, item.Number)); !seen {
+				// #2059 R2: first evaluation since this daemon started. Downtime is
+				// not evidence CI is stuck, so the live-data handler chain below runs
+				// before the backstop may escalate; it applies from the next poll.
+				e.logf(item.Number, "awaiting-ci-settle", "fabrik:awaiting-ci exceeded CIBackstopTimeout (%s) but this is the first evaluation since daemon start — running the live-data handler chain first\n", e.ciBackstopTimeout())
+			} else if anchor := e.ciBackstopAnchor(item, owner, repoName, repo, appliedAt); time.Since(anchor) < e.ciBackstopTimeout() {
+				// #2059 R1: the item was resumed from a pause recently enough that it
+				// has not had the full timeout to progress; paused time does not count.
+				e.logf(item.Number, "awaiting-ci-settle", "fabrik:awaiting-ci exceeded CIBackstopTimeout (%s) since it was applied, but the item was resumed %s ago — backstop skipped\n", e.ciBackstopTimeout(), time.Since(anchor).Round(time.Second))
 			} else {
 				e.logf(item.Number, "awaiting-ci-settle", "fabrik:awaiting-ci exceeded CIBackstopTimeout (%s) while never reaching the CI gate — escalating\n", e.ciBackstopTimeout())
 				e.pauseForCITimeout(board, item, stage)
@@ -308,6 +333,8 @@ func (e *Engine) settleAwaitingCIScan(ctx context.Context, board *gh.ProjectBoar
 		if pctx.reachedCIGate {
 			gateReached++
 		}
+		// #2059 R2: the live-data chain has now run for this item in this process.
+		e.ciBackstopLiveEvaluated.Store(ciBackstopKey(repo, item.Number), struct{}{})
 	}
 	if examined > 0 {
 		e.logf(0, "awaiting-ci-settle", "examined %d fabrik:awaiting-ci item(s), %d reached the CI gate\n", examined, gateReached)
@@ -363,4 +390,63 @@ func (e *Engine) escalateAwaitingCIOrphanFailure(item gh.ProjectItem) {
 		)
 		e.postItemComment(item, comment, true)
 	})
+}
+
+// ciBackstopResumeLabel is the label whose latest removal marks an item's most recent
+// resume for the CIBackstopTimeout anchor (#2059 R1).
+const ciBackstopResumeLabel = "fabrik:paused"
+
+// ciBackstopKey keys the backstop's in-memory per-item markers.
+func ciBackstopKey(repo string, number int) string {
+	return fmt.Sprintf("%s#%d", repo, number)
+}
+
+// ciBackstopWorkerInFlight reports whether a worker is registered for the item
+// (the store sets it synchronously at dispatch, before the goroutine starts) and
+// the stage it runs. Covers workers started by earlier phases of this poll and
+// workers from a previous poll alike (#2059 R3).
+func (e *Engine) ciBackstopWorkerInFlight(repo string, number int) (string, bool) {
+	snap, err := e.store.Get(repo, number)
+	if err != nil {
+		return "", false
+	}
+	w := snap.Worker()
+	if w == nil {
+		return "", false
+	}
+	return w.StageName, true
+}
+
+// ciBackstopAnchor returns the instant the CIBackstopTimeout backstop measures
+// from: the later of appliedAt (when fabrik:awaiting-ci was applied) and the
+// item's latest fabrik:paused removal (#2059 R1).
+//
+// The removal time is read from GitHub's issue event log through
+// FetchLabelRemovedAt, never from the record-on-write label cache, so it
+// survives restarts and sees removals made in the UI (the same reasoning as
+// resumeAuthorised, ADR-1813). A read error or a missing event falls back to
+// appliedAt — the direction that still escalates; the backstop must never fail
+// open into "never escalate", or its per-poll cost bound is lost.
+//
+// A memoised resume still inside the timeout is returned without a read, so a
+// recently resumed item costs one events page-through per episode rather than
+// one per poll. The memo can only be older than the truth, so it can only
+// produce a skip, never an escalation: an escalation always follows a live read.
+func (e *Engine) ciBackstopAnchor(item gh.ProjectItem, owner, repoName, repo string, appliedAt time.Time) time.Time {
+	key := ciBackstopKey(repo, item.Number)
+	if v, ok := e.ciBackstopResumeSeen.Load(key); ok {
+		if memo, _ := v.(time.Time); memo.After(appliedAt) && time.Since(memo) < e.ciBackstopTimeout() {
+			return memo
+		}
+	}
+	resumedAt, err := e.client.FetchLabelRemovedAt(owner, repoName, item.Number, ciBackstopResumeLabel)
+	if err != nil {
+		e.logf(item.Number, "awaiting-ci-settle", "could not read %s removal time for CIBackstopTimeout backstop (using the awaiting-ci anchor): %v\n", ciBackstopResumeLabel, err)
+		return appliedAt
+	}
+	if resumedAt.After(appliedAt) {
+		e.ciBackstopResumeSeen.Store(key, resumedAt)
+		return resumedAt
+	}
+	return appliedAt
 }

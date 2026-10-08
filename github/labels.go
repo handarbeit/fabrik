@@ -169,7 +169,25 @@ func (c *Client) RemoveLabelFromIssue(owner, repo string, issueNumber int, label
 // far rather than an error, since a missed timestamp only means the timeout
 // this feeds does not fire — never a wrong action.
 func (c *Client) FetchLabelAppliedAt(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
-	var applied time.Time
+	return c.fetchLatestLabelEvent(owner, repo, issueNumber, labelName, "labeled")
+}
+
+// FetchLabelRemovedAt returns the time when labelName was last removed from the
+// given issue (the newest `unlabeled` event for it), read live from the issue
+// events API — never from a cache. Same contract as FetchLabelAppliedAt: a zero
+// time with a nil error when no removal event exists, and the same
+// restMaxPages bound. A non-nil error means the log could not be read; callers
+// decide which direction to fail (#2059: the CIBackstopTimeout backstop falls
+// back to its label anchor).
+func (c *Client) FetchLabelRemovedAt(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
+	return c.fetchLatestLabelEvent(owner, repo, issueNumber, labelName, "unlabeled")
+}
+
+// fetchLatestLabelEvent pages the issue events API and returns the newest
+// created_at of an event of the given kind ("labeled" or "unlabeled") for
+// labelName, or the zero time when there is none.
+func (c *Client) fetchLatestLabelEvent(owner, repo string, issueNumber int, labelName, kind string) (time.Time, error) {
+	var latest time.Time
 	for page := 1; page <= restMaxPages; page++ {
 		apiURL := fmt.Sprintf("%s/repos/%s/%s/issues/%d/events?per_page=%d&page=%d",
 			c.baseURL, owner, repo, issueNumber, restPageSize, page)
@@ -187,19 +205,19 @@ func (c *Client) FetchLabelAppliedAt(owner, repo string, issueNumber int, labelN
 			break
 		}
 		for _, ev := range events {
-			if ev.Event != "labeled" || ev.Label == nil || ev.Label.Name != labelName {
+			if ev.Event != kind || ev.Label == nil || ev.Label.Name != labelName {
 				continue
 			}
 			t, err := time.Parse(time.RFC3339, ev.CreatedAt)
 			if err != nil {
 				continue
 			}
-			if t.After(applied) {
-				applied = t
+			if t.After(latest) {
+				latest = t
 			}
 		}
 	}
-	return applied, nil
+	return latest, nil
 }
 
 // ensureLabel creates a label with the given description and color if it does

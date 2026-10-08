@@ -660,6 +660,7 @@ func TestSettleAwaitingCIScan_CIBackstopTimeout_PausesRegardlessOfGateClaim(t *t
 	// dwell, not merely reusing whichever var happens to be small.
 	eng.cfg.CIWaitTimeout = 6 * time.Hour
 	eng.cfg.CIBackstopTimeout = 30 * time.Minute
+	primeBackstopLive(eng, "owner/repo", 31)
 
 	board := &gh.ProjectBoard{
 		Items: []gh.ProjectItem{
@@ -784,6 +785,7 @@ func TestSettleAwaitingCIScan_342Repro_SlowButHealthyCI_DoesNotPause(t *testing.
 		client := newClient()
 		eng := testEngineWithStages(t, client, ciSettleWaitForCIStages())
 		eng.cfg.CIBackstopTimeout = 30 * time.Minute // pre-ADR-1410 CIWaitTimeout's own default
+		primeBackstopLive(eng, "owner/repo", 342)
 
 		eng.settleAwaitingCIScan(context.Background(), newBoard(), make(map[string]bool))
 		eng.wg.Wait()
@@ -1341,5 +1343,231 @@ func TestSettleAwaitingCIScan_CacheHitPath_RefreshCheckRunsLiveReached(t *testin
 	snap, _ := eng.store.Get("owner/repo", 34)
 	if got := snap.CIFixCycles("Validate"); got != 1 {
 		t.Errorf("CIFixCycles(Validate) = %d; want 1 — the live FAILED classification observed via the cache-hit RefreshCheckRunsLive call must drive the CI-fix reinvoke, not the stale cached PENDING one", got)
+	}
+}
+
+// primeBackstopLive marks the item as already live-evaluated in this process
+// (#2059 R2), so a test of the backstop's escalation does not also have to
+// spend a first pass on the once-per-start live evaluation.
+func primeBackstopLive(eng *Engine, repo string, number int) {
+	eng.ciBackstopLiveEvaluated.Store(ciBackstopKey(repo, number), struct{}{})
+}
+
+// backstopFixture builds the #2059 scenario shared by the guard tests: an item
+// whose fabrik:awaiting-ci label is 45m old against a 30m CIBackstopTimeout, no
+// fabrik:paused label and no CI-timeout pause comment (so the #1408 deferral does
+// not apply), with mergeable permanently unresolved so the handler chain claims
+// it silently and the ONLY thing that can pause it is the backstop. The label
+// anchor is on fabrik:awaiting-ci only — the resume time comes from the distinct
+// FetchLabelRemovedAt hook (resumedAt/resumeErr).
+func backstopFixture(t *testing.T, number int, resumedAt time.Time, resumeErr error) (*Engine, *mockGitHubClient, *gh.ProjectBoard) {
+	t.Helper()
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 900 + number, HeadSHA: "cafebabe", State: "open"}, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			return nil, "", nil
+		},
+		fetchLabelAppliedAtFn: func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
+			return time.Now().Add(-45 * time.Minute), nil
+		},
+		fetchLabelRemovedAtFn: func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
+			if labelName != "fabrik:paused" {
+				t.Errorf("FetchLabelRemovedAt called for %q, want fabrik:paused", labelName)
+			}
+			return resumedAt, resumeErr
+		},
+		addLabelToIssueFn:    func(_, _ string, _ int, _ string) error { return nil },
+		addCommentFn:         func(_, _ string, _ int, _ string) (int, error) { return 1, nil },
+		addCommentReactionFn: func(_, _ string, _ int, _ string) error { return nil },
+	}
+	eng := testEngineWithStages(t, client, ciSettleWaitForCIStages())
+	eng.cfg.CIBackstopTimeout = 30 * time.Minute
+	board := &gh.ProjectBoard{Items: []gh.ProjectItem{
+		{Number: number, Repo: "owner/repo", Status: "Validate", Labels: []string{"fabrik:awaiting-ci"}},
+	}}
+	return eng, client, board
+}
+
+func backstopPaused(client *mockGitHubClient) bool {
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			return true
+		}
+	}
+	return false
+}
+
+func runBackstopScan(eng *Engine, board *gh.ProjectBoard) {
+	eng.settleAwaitingCIScan(context.Background(), board, make(map[string]bool))
+	eng.wg.Wait()
+}
+
+// R1: paused time does not count. Guards 2 and 3 are open (marker primed, no
+// worker), so only the later-of anchor separates "escalated" from "not".
+func TestSettleAwaitingCIScan_Backstop_R1_ResumedUnderTimeoutAgo_NotEscalated(t *testing.T) {
+	eng, client, board := backstopFixture(t, 2101, time.Now().Add(-5*time.Minute), nil)
+	primeBackstopLive(eng, "owner/repo", 2101)
+	runBackstopScan(eng, board)
+	if backstopPaused(client) {
+		t.Fatal("an item resumed 5m ago (timeout 30m) must not be escalated, even though fabrik:awaiting-ci is 45m old")
+	}
+}
+
+func TestSettleAwaitingCIScan_Backstop_R1_ResumedOverTimeoutAgo_Escalated(t *testing.T) {
+	eng, client, board := backstopFixture(t, 2102, time.Now().Add(-40*time.Minute), nil)
+	primeBackstopLive(eng, "owner/repo", 2102)
+	runBackstopScan(eng, board)
+	if !backstopPaused(client) {
+		t.Fatal("an item resumed 40m ago (timeout 30m) must be escalated")
+	}
+}
+
+func TestSettleAwaitingCIScan_Backstop_R1_ResumeBeforeLabelIsIgnored(t *testing.T) {
+	// A removal older than the awaiting-ci label does not move the anchor later.
+	eng, client, board := backstopFixture(t, 2103, time.Now().Add(-3*time.Hour), nil)
+	primeBackstopLive(eng, "owner/repo", 2103)
+	runBackstopScan(eng, board)
+	if !backstopPaused(client) {
+		t.Fatal("a resume older than the label's applied time must not suppress escalation")
+	}
+}
+
+func TestSettleAwaitingCIScan_Backstop_R1_UnreadableResumeFallsBackToLabelAnchor(t *testing.T) {
+	for name, tc := range map[string]struct {
+		at  time.Time
+		err error
+	}{
+		"error": {err: errors.New("events API down")},
+		"zero":  {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			eng, client, board := backstopFixture(t, 2104, tc.at, tc.err)
+			primeBackstopLive(eng, "owner/repo", 2104)
+			runBackstopScan(eng, board)
+			if !backstopPaused(client) {
+				t.Fatal("an unreadable/absent resume time must fall back to the label anchor and still escalate — never fail open into never-escalate")
+			}
+		})
+	}
+}
+
+func TestSettleAwaitingCIScan_Backstop_R1_ResumeReadMemoisedWhileWithinTimeout(t *testing.T) {
+	eng, client, board := backstopFixture(t, 2105, time.Now().Add(-5*time.Minute), nil)
+	primeBackstopLive(eng, "owner/repo", 2105)
+	runBackstopScan(eng, board)
+	runBackstopScan(eng, board)
+	runBackstopScan(eng, board)
+	client.mu.Lock()
+	reads := len(client.fetchLabelRemovedAtCalls)
+	client.mu.Unlock()
+	if reads != 1 {
+		t.Errorf("FetchLabelRemovedAt called %d times across 3 polls of a recently resumed item; want 1 (memoised)", reads)
+	}
+	if backstopPaused(client) {
+		t.Error("recently resumed item escalated")
+	}
+}
+
+func TestSettleAwaitingCIScan_Backstop_R1_EscalationAlwaysFollowsLiveRead(t *testing.T) {
+	// A stale memo (resume recorded as 5m ago) must not decide an escalation:
+	// once it ages past the timeout the scan re-reads, and acts on the live value.
+	eng, client, board := backstopFixture(t, 2106, time.Now().Add(-40*time.Minute), nil)
+	primeBackstopLive(eng, "owner/repo", 2106)
+	eng.ciBackstopResumeSeen.Store(ciBackstopKey("owner/repo", 2106), time.Now().Add(-40*time.Minute))
+	runBackstopScan(eng, board)
+	client.mu.Lock()
+	reads := len(client.fetchLabelRemovedAtCalls)
+	client.mu.Unlock()
+	if reads != 1 {
+		t.Errorf("FetchLabelRemovedAt called %d times; want 1 live read before escalating", reads)
+	}
+	if !backstopPaused(client) {
+		t.Error("expected escalation after a live read confirmed the resume is over the timeout")
+	}
+}
+
+// R2: first evaluation after daemon start runs the live chain before the
+// backstop may escalate. Guards 1 and 3 are open (resume zero → label anchor
+// applies; no worker), so only the marker separates "escalated" from "not".
+func TestSettleAwaitingCIScan_Backstop_R2_FirstEvaluationDefersThenEnforces(t *testing.T) {
+	eng, client, board := backstopFixture(t, 2111, time.Time{}, nil)
+
+	runBackstopScan(eng, board)
+	if backstopPaused(client) {
+		t.Fatal("first evaluation since daemon start must not escalate blind")
+	}
+	if _, ok := eng.ciBackstopLiveEvaluated.Load(ciBackstopKey("owner/repo", 2111)); !ok {
+		t.Fatal("the live-evaluation marker must be set once the handler chain has run")
+	}
+
+	runBackstopScan(eng, board)
+	if !backstopPaused(client) {
+		t.Fatal("second evaluation (marker set), still over timeout, must escalate")
+	}
+}
+
+func TestSettleAwaitingCIScan_Backstop_R2_FirstEvaluationGreenCIClearsGateWithoutPause(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 2912, HeadSHA: "cafebabe", State: "open"}, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			tr := true
+			return &tr, "clean", nil
+		},
+		fetchLabelAppliedAtFn: func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
+			return time.Now().Add(-45 * time.Minute), nil
+		},
+		addLabelToIssueFn:      func(_, _ string, _ int, _ string) error { return nil },
+		removeLabelFromIssueFn: func(_, _ string, _ int, _ string) error { return nil },
+		addCommentFn:           func(_, _ string, _ int, _ string) (int, error) { return 1, nil },
+		addCommentReactionFn:   func(_, _ string, _ int, _ string) error { return nil },
+	}
+	eng := testEngineWithStages(t, client, ciSettleWaitForCIStages())
+	eng.cfg.CIBackstopTimeout = 30 * time.Minute
+	board := &gh.ProjectBoard{Items: []gh.ProjectItem{
+		{Number: 2112, Repo: "owner/repo", Status: "Validate", Labels: []string{"fabrik:awaiting-ci"}},
+	}}
+
+	runBackstopScan(eng, board)
+
+	if backstopPaused(client) {
+		t.Fatal("over-timeout item with green live CI after a daemon start must not be paused")
+	}
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	completeAdded := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "stage:Validate:complete" {
+			completeAdded = true
+		}
+	}
+	if !completeAdded {
+		t.Error("expected the CI gate to clear (stage:Validate:complete added)")
+	}
+}
+
+// R3: never escalate an item with a worker in flight. Guards 1 and 2 are open
+// (resume zero → label anchor applies; marker primed).
+func TestSettleAwaitingCIScan_Backstop_R3_WorkerInFlightDefersThenEnforcesAfterExit(t *testing.T) {
+	eng, client, board := backstopFixture(t, 2121, time.Time{}, nil)
+	primeBackstopLive(eng, "owner/repo", 2121)
+	eng.store.Apply(itemstate.WorkerEntered{
+		Repo: "owner/repo", Number: 2121, StageName: "Validate", StartedAt: time.Now(),
+	})
+
+	runBackstopScan(eng, board)
+	if backstopPaused(client) {
+		t.Fatal("an item with a worker in flight must not be escalated in that poll")
+	}
+
+	eng.store.Apply(itemstate.WorkerExited{Repo: "owner/repo", Number: 2121})
+	runBackstopScan(eng, board)
+	if !backstopPaused(client) {
+		t.Fatal("once the worker has gone the next poll must escalate (the bound still holds)")
 	}
 }

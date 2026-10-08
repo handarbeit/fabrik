@@ -1458,7 +1458,7 @@ Done-archive scan (`engine/archive_done_settle.go`) all anchor deadlines on it.
 An absent label returns the zero time rather than an error, mirroring
 production's "no such event found".
 
-### Label events — **Modelled (order only)**
+### Label events — **Modelled**
 
 `LabelEvents`/`LastLabelEventSeq` expose an ordered per-issue log of label
 *state changes*: `AddLabelToIssue` records a `labeled` event only when the label
@@ -1467,9 +1467,17 @@ present. A no-op re-add records nothing, as GitHub's issue-events log emits no
 event for it — which is what the mutation log cannot say, since it records the
 no-op add as a successful call. A scenario can therefore prove a label really
 left and came back. `Seq` is 1-based and per issue; order is exact because the
-writes happen under the model's lock. There is **no timestamp and no actor**,
-and labels passed to `SeedIssue` produce no events (they model pre-existing
-state).
+writes happen under the model's lock. Each event carries `At`, the injected
+clock's reading at the mutation (the same single read that stamps applied-at and
+updated-at); there is **no actor**, and labels passed to `SeedIssue` produce no
+events (they model pre-existing state).
+
+`FetchLabelRemovedAt` (#2059) answers "when was this label last removed" from
+that log — the newest `unlabeled` event's `At`, zero when none — mirroring
+production's live `unlabeled` events read. It is what the CI settle scan's
+`CIBackstopTimeout` backstop uses to find an item's most recent resume (the
+removal of `fabrik:paused`). Because `RemoveLabelFromIssue` deletes the
+applied-at entry, the log is the only place the removal time survives.
 
 ---
 
