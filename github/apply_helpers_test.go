@@ -157,6 +157,9 @@ func TestApplyLinkedPRs_MapsFirstPRAndReviews(t *testing.T) {
 					State       string `json:"state"`
 					Body        string `json:"body"`
 					SubmittedAt string `json:"submittedAt"`
+					Commit      *struct {
+						OID string `json:"oid"`
+					} `json:"commit"`
 				} `json:"nodes"`
 			} `json:"latestReviews"`
 			ReviewThreads struct {
@@ -208,6 +211,9 @@ func TestApplyLinkedPRs_MapsFirstPRAndReviews(t *testing.T) {
 				State       string `json:"state"`
 				Body        string `json:"body"`
 				SubmittedAt string `json:"submittedAt"`
+				Commit      *struct {
+					OID string `json:"oid"`
+				} `json:"commit"`
 			} `json:"nodes"`
 		} `json:"latestReviews"`
 		ReviewThreads struct {
@@ -250,6 +256,9 @@ func TestApplyLinkedPRs_MapsFirstPRAndReviews(t *testing.T) {
 		State       string `json:"state"`
 		Body        string `json:"body"`
 		SubmittedAt string `json:"submittedAt"`
+		Commit      *struct {
+			OID string `json:"oid"`
+		} `json:"commit"`
 	}{
 		{DatabaseID: 1, Author: &struct {
 			Typename string `json:"__typename"`
@@ -289,6 +298,9 @@ func TestApplyLinkedPRs_MapsFirstPRAndReviews(t *testing.T) {
 				State       string `json:"state"`
 				Body        string `json:"body"`
 				SubmittedAt string `json:"submittedAt"`
+				Commit      *struct {
+					OID string `json:"oid"`
+				} `json:"commit"`
 			} `json:"nodes"`
 		} `json:"latestReviews"`
 		ReviewThreads struct {
@@ -378,6 +390,9 @@ func TestApplyLinkedPRs_BotReviewAuthorGetsBotSuffix(t *testing.T) {
 					State       string `json:"state"`
 					Body        string `json:"body"`
 					SubmittedAt string `json:"submittedAt"`
+					Commit      *struct {
+						OID string `json:"oid"`
+					} `json:"commit"`
 				} `json:"nodes"`
 			} `json:"latestReviews"`
 			ReviewThreads struct {
@@ -429,6 +444,9 @@ func TestApplyLinkedPRs_BotReviewAuthorGetsBotSuffix(t *testing.T) {
 				State       string `json:"state"`
 				Body        string `json:"body"`
 				SubmittedAt string `json:"submittedAt"`
+				Commit      *struct {
+					OID string `json:"oid"`
+				} `json:"commit"`
 			} `json:"nodes"`
 		} `json:"latestReviews"`
 		ReviewThreads struct {
@@ -459,6 +477,9 @@ func TestApplyLinkedPRs_BotReviewAuthorGetsBotSuffix(t *testing.T) {
 		State       string `json:"state"`
 		Body        string `json:"body"`
 		SubmittedAt string `json:"submittedAt"`
+		Commit      *struct {
+			OID string `json:"oid"`
+		} `json:"commit"`
 	}{
 		// Bot, bare GraphQL login (Pruefer's actual shape) — must gain the
 		// "[bot]" suffix so gh.IsBotLogin recognizes it downstream.
@@ -510,6 +531,9 @@ func TestApplyLinkedPRs_BotReviewAuthorGetsBotSuffix(t *testing.T) {
 				State       string `json:"state"`
 				Body        string `json:"body"`
 				SubmittedAt string `json:"submittedAt"`
+				Commit      *struct {
+					OID string `json:"oid"`
+				} `json:"commit"`
 			} `json:"nodes"`
 		} `json:"latestReviews"`
 		ReviewThreads struct {
