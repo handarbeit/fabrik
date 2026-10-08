@@ -869,3 +869,34 @@ func (e *Engine) pauseForRequiredNeverRunningCheck(_ *gh.ProjectBoard, item gh.P
 	})
 	e.removeAwaitingCILabel(owner, repo, item)
 }
+
+// pauseForCIStartupFailure pauses an item whose PR's CI never started and
+// could not be started by retriggering (#2052 R6), naming the startup-failed
+// workflow run. It is the CI-timeout pause machinery with a message that says
+// what actually happened, rather than blaming branch protection.
+func (e *Engine) pauseForCIStartupFailure(_ *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, f *CIStartupFailure) {
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	e.logf(item.Number, "ci-gate", "CI never started — pausing for human intervention (%s)\n", describeStartupRun(f.Run))
+
+	// What happened to the retrigger. Built first so msg below is a single
+	// fmt.Sprintf with a literal "🏭 **Fabrik" prefix (the comment-compliance rule).
+	retriggerNote := fmt.Sprintf("Fabrik retriggered CI by closing and reopening the pull request %d time(s); it still did not start.", f.Retriggers)
+	if f.ReopenErr != nil {
+		retriggerNote = fmt.Sprintf("Fabrik tried to retrigger CI by closing and reopening the pull request, but **the pull request could not be reopened** (%v) — it may still be closed; reopen it by hand.", f.ReopenErr)
+	}
+	msg := fmt.Sprintf("🏭 **Fabrik — CI never started**\n\n"+
+		"The pull request's CI did not start: %s. "+
+		"GitHub reports a startup failure — the workflow run was rejected before it created any job, so there are no checks to wait for. "+
+		"This is usually a workflow-file error (invalid YAML, a bad reusable-workflow reference) or a GitHub Actions outage, not a code failure.\n\n"+
+		"%s\n\n"+
+		"Fabrik has paused this issue while waiting for stage **%s** to complete. To resume: fix the workflow (or wait out the outage), and remove the `fabrik:paused` label — Fabrik will then retrigger CI again (up to twice) on the pull request.",
+		describeStartupRun(f.Run), retriggerNote, stage.Name)
+
+	e.pauseIssue(item, msg, pauseOpts{
+		awaitingInput: true,
+		reactRocket:   true,
+	})
+	e.removeAwaitingCILabel(owner, repo, item)
+	// A resume starts with a fresh retrigger budget (see resetStartupState).
+	e.resetStartupState(itemOwnerRepoString(item, e.defaultRepo()), f.PRNum)
+}

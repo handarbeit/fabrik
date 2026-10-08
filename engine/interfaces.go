@@ -51,6 +51,11 @@ type GitHubClient interface {
 	FetchCheckRuns(owner, repo, sha string) ([]gh.CheckRun, error)
 	FetchCombinedStatus(owner, repo, ref string) ([]gh.CommitStatus, error)
 	FetchCheckSuites(owner, repo, sha string) ([]gh.CheckSuite, error)
+	// FetchWorkflowRuns / RerunFailedJobs (#2052) need the optional `actions`
+	// permission; a refusal (gh.ErrForbidden / gh.ErrNotFound) must be
+	// degraded to the pre-#2052 behaviour by the caller, never fatal.
+	FetchWorkflowRuns(owner, repo, sha string) ([]gh.WorkflowRun, error)
+	RerunFailedJobs(owner, repo string, runID int64) error
 	FetchPRClosingIssues(owner, repo string, prNumber int) ([]int, error)
 	FetchPRReviews(owner, repo string, prNumber int) ([]gh.PRReview, error)
 	FetchPRReviewRequests(owner, repo string, prNumber int) ([]gh.ReviewRequest, error)

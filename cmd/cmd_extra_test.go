@@ -84,6 +84,12 @@ func (m *testGitHubUpgradeClient) FetchCombinedStatus(owner, repo, ref string) (
 func (m *testGitHubUpgradeClient) FetchCheckSuites(owner, repo, sha string) ([]gh.CheckSuite, error) {
 	return nil, nil
 }
+func (m *testGitHubUpgradeClient) FetchWorkflowRuns(owner, repo, sha string) ([]gh.WorkflowRun, error) {
+	return nil, nil
+}
+func (m *testGitHubUpgradeClient) RerunFailedJobs(owner, repo string, runID int64) error {
+	return nil
+}
 func (m *testGitHubUpgradeClient) FetchPRMergeable(owner, repo string, prNumber int) (*bool, error) {
 	return nil, nil
 }

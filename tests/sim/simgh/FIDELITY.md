@@ -371,6 +371,39 @@ one clock). A suite carries only what the engine's gate reads: app slug,
 - **Multiple suites per SHA** are supported (GitHub Actions creates one per
   workflow run).
 
+### Workflow runs, reopen-fires-a-run and rerun-failed-jobs — **Simplified** (#2052)
+
+`FetchWorkflowRuns` reads a fourth SHA-keyed collection, `repoState.workflowRuns`
+(`SeedWorkflowRun`, same `ciSchedule` clock). It exists for the one state check
+runs cannot show: a run that failed before creating any job (`startup_failure`,
+or a completed run with `JobCount` 0) sits here while `checkRuns` stays empty.
+
+- **Reopen is scripted, not derived.** `ReopenIssue` accepts a PR number (the
+  issues endpoint does) and consumes the next `ReopenStep` queued with
+  `SeedReopenSteps` for that PR: new workflow runs and check runs land `Delay`
+  later. A reopen with no step queued starts nothing — which is also how a
+  workflow whose `on.pull_request.types` omits `reopened` is modelled. The sim
+  does **not** read workflow files, filter `types:`, or emit the `closed` /
+  `reopened` webhooks or any `closed`-reacting workflow.
+- **`RerunFailedJobs` refuses what GitHub refuses** — a run that is not
+  `completed`, or a startup-failed / zero-job run, returns `gh.ErrForbidden`;
+  an unknown run returns `gh.ErrNotFound`. An accepted run goes `in_progress`
+  and, if a `RerunStep` is scripted, finishes `Delay` later, adding the scripted
+  check runs under fresh (higher) IDs so production's latest-per-name reduction
+  supersedes the failure. With no step scripted it stays `in_progress` forever.
+  The sim does not re-run only the *failed* jobs of a run; the scenario scripts
+  which check runs the re-run produces.
+- **Runs and check runs are not linked.** Nothing derives a check run's
+  `DetailsURL` from a workflow run, so a scenario that expects the engine to
+  find the run to re-run must seed `DetailsURL` of the form
+  `…/actions/runs/<id>/job/<n>` on the failing check run itself.
+- **Permissions are not modelled.** The optional `actions` permission is
+  emulated by faulting `FetchWorkflowRuns` / `RerunFailedJobs` with an error
+  wrapping `gh.ErrForbidden`.
+- **Live coverage gap.** A `startup_failure` cannot be induced on demand against
+  the e2e bed, so there is no live twin; the sim and unit tests carry the proof
+  (ADR 2052).
+
 ### Required contexts — **Simplified**
 
 Branch protection's required-check configuration is modelled as a per-branch

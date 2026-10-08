@@ -39,6 +39,8 @@ type mockGitHubClient struct {
 	fetchCheckRunsFn              func(owner, repo, sha string) ([]gh.CheckRun, error)
 	fetchCombinedStatusFn         func(owner, repo, ref string) ([]gh.CommitStatus, error)
 	fetchCheckSuitesFn            func(owner, repo, sha string) ([]gh.CheckSuite, error)
+	fetchWorkflowRunsFn           func(owner, repo, sha string) ([]gh.WorkflowRun, error)
+	rerunFailedJobsFn             func(owner, repo string, runID int64) error
 	getPRBaseFn                   func(owner, repo string, prNumber int) (string, error)
 	updatePRBaseFn                func(owner, repo string, prNumber int, newBase string) error
 	mergePRFn                     func(owner, repo string, prNumber int) error
@@ -469,6 +471,26 @@ func (m *mockGitHubClient) FetchCheckSuites(owner, repo, sha string) ([]gh.Check
 		return fn(owner, repo, sha)
 	}
 	return nil, nil
+}
+
+func (m *mockGitHubClient) FetchWorkflowRuns(owner, repo, sha string) ([]gh.WorkflowRun, error) {
+	m.mu.Lock()
+	fn := m.fetchWorkflowRunsFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(owner, repo, sha)
+	}
+	return nil, nil
+}
+
+func (m *mockGitHubClient) RerunFailedJobs(owner, repo string, runID int64) error {
+	m.mu.Lock()
+	fn := m.rerunFailedJobsFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(owner, repo, runID)
+	}
+	return nil
 }
 
 func (m *mockGitHubClient) FetchPRMergeableFields(owner, repo string, prNumber int) (*bool, string, error) {

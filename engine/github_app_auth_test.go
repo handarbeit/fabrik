@@ -624,3 +624,19 @@ func TestEngineRequiredGitHubAppPermissions_WebhooksAddsScope(t *testing.T) {
 		t.Errorf("repository_hooks permission = %q, want %q when cfg.Webhooks is true", with["repository_hooks"], "write")
 	}
 }
+
+// TestActionsPermissionIsOptionalNotRequired (#2052): `actions` must stay out of
+// the fail-hard startup grant check for every variant, or every existing App
+// installation stops starting until an admin accepts a new permission.
+func TestActionsPermissionIsOptionalNotRequired(t *testing.T) {
+	for _, webhooks := range []bool{false, true} {
+		for _, https := range []bool{false, true} {
+			if _, ok := RequiredGitHubAppPermissionsForGit(webhooks, https)["actions"]; ok {
+				t.Errorf("webhooks=%v https=%v: actions must not be a required permission", webhooks, https)
+			}
+		}
+	}
+	if got := OptionalGitHubAppPermissions()["actions"]; got != "write" {
+		t.Errorf("optional actions = %q, want write", got)
+	}
+}

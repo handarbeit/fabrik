@@ -1,0 +1,22 @@
+{
+  "provenance": {
+    "operation": "fetch_workflow_run_jobs",
+    "endpoint": "GET /repos/{owner}/{repo}/actions/runs/{run_id}/jobs?per_page=1",
+    "recorded_at": "2026-10-05T00:00:00Z",
+    "source_repo": "shape transcribed from GitHub's documented workflow-jobs response (docs.github.com/rest/actions/workflow-jobs); NOT recorded live",
+    "scrubbed": true
+  },
+  "response": {
+    "total_count": 3,
+    "jobs": [
+      {
+        "id": 99887766,
+        "run_id": 37244372904,
+        "name": "lint",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "498cb6489d52d89ec4e189e6cf00e9be24fb496a"
+      }
+    ]
+  }
+}

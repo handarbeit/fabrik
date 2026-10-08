@@ -906,3 +906,25 @@ func TestInteractiveInstallWait(t *testing.T) {
 		t.Errorf("non-interactive: %s, want 0 (fail fast)", got)
 	}
 }
+
+// TestGitHubAppSetupPermissions_ActionsIsManifestOnly (#2052): a new App asks
+// for the optional `actions` permission, but it is never part of what is
+// verified — requiring it would stop every existing installation from starting.
+func TestGitHubAppSetupPermissions_ActionsIsManifestOnly(t *testing.T) {
+	isolateCmdGitConfig(t, "")
+	for _, adopt := range []bool{false, true} {
+		opts := githubAppSetupOptions{}
+		if adopt {
+			opts.AppID = 42
+		}
+		verify, manifest, _ := githubAppSetupPermissions(opts)
+		if _, ok := verify["actions"]; ok {
+			t.Errorf("adopt=%v: verify set must not require actions", adopt)
+		}
+		if got := manifest["actions"]; adopt && got != "" {
+			t.Errorf("adopt=%v: adopt path sends no manifest, got actions=%q", adopt, got)
+		} else if !adopt && got != "write" {
+			t.Errorf("create path manifest actions = %q, want write", got)
+		}
+	}
+}

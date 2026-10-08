@@ -14,6 +14,21 @@ import (
 // from other failures without fragile string matching.
 var ErrNotFound = errors.New("not found")
 
+// ErrForbidden is returned by REST methods when the server responds with a
+// 403 that is not a rate limit (#2052). Callers use errors.Is(err,
+// github.ErrForbidden) — typically alongside ErrNotFound — to treat "this
+// credential lacks the permission" as a soft, degradable condition (e.g. the
+// optional Actions permission) rather than a hard failure.
+var ErrForbidden = errors.New("forbidden")
+
+// forbiddenError carries the unchanged generic 403 message while matching
+// ErrForbidden under errors.Is, so existing message-based callers and tests
+// see exactly the text they always did.
+type forbiddenError struct{ msg string }
+
+func (e *forbiddenError) Error() string        { return e.msg }
+func (e *forbiddenError) Is(target error) bool { return target == ErrForbidden }
+
 // updateRestStats parses rate limit headers from a response and stores them when present.
 func (c *Client) updateRestStats(h http.Header) {
 	if stats := parseRateLimitHeaders(h); stats.Limit > 0 {
@@ -100,7 +115,11 @@ func apiStatusError(status int, header http.Header, body []byte) error {
 	if rl := classifyRateLimit("GitHub API", status, header, body); rl != nil {
 		return rl
 	}
-	return fmt.Errorf("GitHub API returned %d: %s%s", status, string(body), authErrorHint(status))
+	msg := fmt.Sprintf("GitHub API returned %d: %s%s", status, string(body), authErrorHint(status))
+	if status == http.StatusForbidden {
+		return &forbiddenError{msg: msg}
+	}
+	return errors.New(msg)
 }
 
 // do is the shared REST request core, using GitHub's standard JSON media

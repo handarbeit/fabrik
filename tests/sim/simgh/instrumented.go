@@ -1,6 +1,7 @@
 package simgh
 
 import (
+	"strconv"
 	"time"
 
 	"github.com/handarbeit/fabrik/engine"
@@ -460,6 +461,16 @@ func (in *Instrumented) FetchCheckRuns(owner, repo, sha string) ([]gh.CheckRun, 
 func (in *Instrumented) FetchCheckSuites(owner, repo, sha string) ([]gh.CheckSuite, error) {
 	return do1(in, "FetchCheckSuites", false, Args{Owner: owner, Repo: repo, SHA: sha},
 		func() ([]gh.CheckSuite, error) { return in.sim.FetchCheckSuites(owner, repo, sha) })
+}
+
+func (in *Instrumented) FetchWorkflowRuns(owner, repo, sha string) ([]gh.WorkflowRun, error) {
+	return do1(in, "FetchWorkflowRuns", false, Args{Owner: owner, Repo: repo, SHA: sha},
+		func() ([]gh.WorkflowRun, error) { return in.sim.FetchWorkflowRuns(owner, repo, sha) })
+}
+
+func (in *Instrumented) RerunFailedJobs(owner, repo string, runID int64) error {
+	return do0(in, "RerunFailedJobs", true, Args{Owner: owner, Repo: repo, ID: strconv.FormatInt(runID, 10)},
+		func() error { return in.sim.RerunFailedJobs(owner, repo, runID) })
 }
 
 func (in *Instrumented) FetchCombinedStatus(owner, repo, ref string) ([]gh.CommitStatus, error) {
