@@ -410,6 +410,13 @@ func (e *Engine) effectiveBisectCap() int {
 	return 2*ceilLog2(e.effectiveMaxBatchSize()) + 1
 }
 
+// singletonCatchUpEnabled reports whether a behind singleton is caught up on its own
+// branch before falling back to a trial (#2044, ADR-2044). Empty (unset) means the
+// default, "merge"; only an explicit "off" disables it.
+func (e *Engine) singletonCatchUpEnabled() bool {
+	return !strings.EqualFold(e.cfg.SingletonCatchUp, "off")
+}
+
 // effectiveMaxTrainRebaseCycles returns the maximum number of main-moved
 // rebase+revalidate cycles permitted per merge-train batch, defaulting to 3
 // (mirroring the per-issue MaxRebaseCycles default) when unset (≤ 0). Beyond
