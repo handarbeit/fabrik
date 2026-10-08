@@ -13,8 +13,10 @@ import (
 
 // Real-git tests of the catch-up's git half (#2044). Neutralisation: each fails with the
 // step it names removed — the merge (pure/two-parents), stampCatchUpTrailer (trailer),
-// restore() (every failure case's "worktree restored" assertion), PushCatchUp's lease
-// (push-rejected), or the busy re-check (dirty).
+// restore() (every failure case's "worktree restored" assertion) or the busy handling
+// (dirty). The push-rejected case is a hook-refused push; the lease itself is covered by
+// TestPushCatchUp_RejectedWhenRemoteMovedAfterPrepare (worktree_catchup_test.go), where a
+// concurrent push is refused rather than overwritten.
 
 type catchUpGitWorld struct {
 	wm      *WorktreeManager
