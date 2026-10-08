@@ -1907,16 +1907,23 @@ var landedCommentRetryDelay = 200 * time.Millisecond
 // transition, so on exhaustion this falls back to the pre-existing warn-and-continue behavior
 // unchanged; it must never block or delay landing.
 func (e *Engine) addLandedCommentWithRetry(owner, repo string, issueNumber, prNum int, body string) {
+	e.addCommentWithRetry(owner, repo, issueNumber, prNum, body, "landed comment")
+}
+
+// addCommentWithRetry posts body on PR prNum, retrying transient failures with exponential
+// backoff, and reports whether the comment was posted. what names the comment in the
+// warning logged when it is not. A non-transient error is not retried.
+func (e *Engine) addCommentWithRetry(owner, repo string, issueNumber, prNum int, body, what string) bool {
 	const maxAttempts = 3
 	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		_, err := e.client.AddComment(owner, repo, prNum, body)
 		if err == nil {
-			return
+			return true
 		}
 		if !isTransientError(err) {
-			e.logf(issueNumber, "merge-train", "warn: could not post landed comment on PR #%d: %v\n", prNum, err)
-			return
+			e.logf(issueNumber, "merge-train", "warn: could not post %s on PR #%d: %v\n", what, prNum, err)
+			return false
 		}
 		lastErr = err
 		if attempt < maxAttempts-1 {
@@ -1924,7 +1931,8 @@ func (e *Engine) addLandedCommentWithRetry(owner, repo string, issueNumber, prNu
 			time.Sleep(delay)
 		}
 	}
-	e.logf(issueNumber, "merge-train", "warn: could not post landed comment on PR #%d after %d attempts: %v\n", prNum, maxAttempts, lastErr)
+	e.logf(issueNumber, "merge-train", "warn: could not post %s on PR #%d after %d attempts: %v\n", what, prNum, maxAttempts, lastErr)
+	return false
 }
 
 // nonDefaultBaseLabelValue scans labels (fetched live — see refuseIfBaseContradictsMembers,

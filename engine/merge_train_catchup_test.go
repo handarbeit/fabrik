@@ -2,6 +2,8 @@ package engine
 
 import (
 	"context"
+	"fmt"
+	"net"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -22,7 +24,7 @@ import (
 //   - Red*                         : drop the memberCIRed arm / the failed-job re-run.
 //   - NoCI*, Timeout*, Moved*      : drop the matching waitMemberCI branch.
 //   - TOCTOU*                      : drop the live-head comparison in singletonFastPathEligible.
-//   - Marker*                      : drop postCatchUpMarker.
+//   - Marker*                      : drop postCatchUpMarker (MarkerRetries*: post it once, no retry).
 
 const (
 	cuMemberHead = "head-sha"
@@ -430,5 +432,31 @@ func TestSingletonCatchUp_ConflictEditedCatchUpPostsAnActionableMarker(t *testin
 	}
 	if !sawImpure {
 		t.Errorf("no pure=false marker posted; comments: %v", w.comments())
+	}
+}
+
+// A transient AddComment failure must not lose the marker: without it every bot review of
+// the pushed head is actionable. Neutralisation: make postCatchUpMarker post once (no retry)
+// and the test sees no marker.
+func TestSingletonCatchUp_MarkerRetriesTransientPostFailure(t *testing.T) {
+	orig := landedCommentRetryDelay
+	landedCommentRetryDelay = 0
+	t.Cleanup(func() { landedCommentRetryDelay = orig })
+	w := newCatchUpWorld(t)
+	var attempts atomic.Int32
+	var markerPosted atomic.Bool
+	w.client.addCommentFn = func(owner, repo string, n int, body string) (int, error) {
+		if strings.Contains(body, "fabrik:train-catch-up") {
+			if attempts.Add(1) < 3 {
+				return 0, fmt.Errorf("executing request: %w", &net.OpError{Op: "read", Net: "tcp"})
+			}
+			markerPosted.Store(true)
+		}
+		return 1, nil
+	}
+
+	w.run()
+	if !markerPosted.Load() || attempts.Load() != 3 {
+		t.Errorf("marker posted=%v after %d attempts; want posted on the third", markerPosted.Load(), attempts.Load())
 	}
 }

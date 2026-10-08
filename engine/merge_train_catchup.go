@@ -338,8 +338,8 @@ func stampCatchUpTrailer(wtDir, baseSHA string) error {
 }
 
 // postCatchUpMarker posts the authenticated catch-up record on the member's PR: a human
-// explanation plus the machine marker the review/comment gates read. A failed post is
-// logged and leaves reviews actionable — the fail-closed direction.
+// explanation plus the machine marker the review/comment gates read. A failed post (after
+// retrying transient errors) is logged and leaves reviews actionable — the fail-closed direction.
 func (e *Engine) postCatchUpMarker(p trialParams, caughtUp trainMember, previousHead string, pure bool) {
 	mk := catchUpMarker{Head: caughtUp.headSHA, Base: p.baseSHA, Pure: pure}
 	var effect string
@@ -353,8 +353,11 @@ func (e *Engine) postCatchUpMarker(p trialParams, caughtUp trainMember, previous
 		"(merge commit `%s`, previously `%s`; a merge commit, so no rebase or force-push) and will land the PR "+
 		"directly once its own CI is green and complete on the new head — no trial branch is built. %s\n\n%s",
 		shortSHA(p.baseSHA), shortSHA(caughtUp.headSHA), shortSHA(previousHead), effect, formatCatchUpMarker(mk))
-	if _, err := e.client.AddComment(p.owner, p.repo, caughtUp.prNum, body); err != nil {
-		e.logf(caughtUp.item.Number, "merge-train", "warn: could not post the catch-up marker on PR #%d: %v — reviews of this push stay actionable\n", caughtUp.prNum, err)
+	// Retried on transient errors: without the marker every bot review of the pushed head
+	// is actionable, and waitMemberCI's eject checkpoint would then eject the very member
+	// the catch-up was meant to land.
+	if !e.addCommentWithRetry(p.owner, p.repo, caughtUp.item.Number, caughtUp.prNum, body, "the catch-up marker") {
+		e.logf(caughtUp.item.Number, "merge-train", "warn: no catch-up marker on PR #%d — reviews of this push stay actionable\n", caughtUp.prNum)
 	}
 }
 
