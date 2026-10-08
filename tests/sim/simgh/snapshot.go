@@ -639,6 +639,7 @@ var snapshotFieldRegistry = map[string]map[string]fieldDisposition{
 		"diffHunk":       fieldCopied,
 		"isOutdated":     fieldCopied,
 		"threadResolved": fieldCopied,
+		"commitOID":      fieldCopied,
 	},
 	"projectState": {
 		"id":                 fieldCopied,
