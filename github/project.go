@@ -40,6 +40,13 @@ type commentNodeData struct {
 	Path         string `json:"path"`
 	Line         *int   `json:"line"`
 	OriginalLine *int   `json:"originalLine"`
+	// OriginalCommit is the commit the review-thread comment was originally
+	// posted against (GraphQL PullRequestReviewComment.originalCommit) —
+	// populated only for review-thread comments, and nil when GitHub returns
+	// null (#2044: attributes a finding to a PR head).
+	OriginalCommit *struct {
+		OID string `json:"oid"`
+	} `json:"originalCommit"`
 }
 
 // mergeQueueEntryData holds the raw merge-queue state/position/enqueuer for a
@@ -742,6 +749,7 @@ query($id: ID!) {
               state
               body
               submittedAt
+              commit { oid }
             }
           }
           reviewThreads(first: 50) {
@@ -764,6 +772,7 @@ query($id: ID!) {
                   path
                   line
                   originalLine
+                  originalCommit { oid }
                   reactionGroups {
                     content
                     reactors { totalCount }
@@ -878,6 +887,9 @@ type fetchItemDetailsNode struct {
 					State       string `json:"state"`
 					Body        string `json:"body"`
 					SubmittedAt string `json:"submittedAt"`
+					Commit      *struct {
+						OID string `json:"oid"`
+					} `json:"commit"`
 				} `json:"nodes"`
 			} `json:"latestReviews"`
 			ReviewThreads struct {
@@ -1106,6 +1118,9 @@ func (c *Client) applyLinkedPRs(item *ProjectItem, node *fetchItemDetailsNode) e
 					DatabaseID: rev.DatabaseID,
 					NodeID:     rev.ID,
 				}
+				if rev.Commit != nil {
+					review.CommitID = rev.Commit.OID
+				}
 				if t, err := parseTime(rev.SubmittedAt); err == nil {
 					review.SubmittedAt = t
 				}
@@ -1146,6 +1161,9 @@ func toComment(cm commentNodeData, fromPR int) Comment {
 		Line:         line,
 		OriginalLine: originalLine,
 		DiffHunk:     cm.DiffHunk,
+	}
+	if cm.OriginalCommit != nil {
+		c.CommitOID = cm.OriginalCommit.OID
 	}
 	if cm.Author != nil {
 		c.Author = restShapedLogin(cm.Author.Login, cm.Author.Typename)
