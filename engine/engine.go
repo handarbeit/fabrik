@@ -314,6 +314,13 @@ type Engine struct {
 	// (#1420 R1) so seam-based tests can exercise the ejection-comment diagnostic content,
 	// not only ejection sequencing. Production leaves this nil. See assembleAndValidate.
 	trainValidateFn func(ctx context.Context, members []trainMember) (TrainCIResult, *trainCIDiagnostic)
+	// trainCatchUpGitFn replaces the git half of the singleton catch-up (worktree, merge,
+	// push) when non-nil, so the catch-up's decision logic can be exercised under the
+	// trainValidateFn seam without real git. Production leaves this nil. See
+	// trySingletonCatchUp (#2044).
+	trainCatchUpGitFn func(ctx context.Context, p trialParams, m trainMember) catchUpGitOutcome
+	// catchUp is the singleton catch-up's attempt counter and CI-wait dwells (#2044).
+	trainCatchUp catchUpState
 	// trainRedBatchHook, when non-nil, is called as the first line of handleRedBatch — a
 	// test-only call-observation seam (#1440 AC1/AC6) proving handleRedBatch (multi-member
 	// bisection) is never reached for a red batch of exactly one member, which

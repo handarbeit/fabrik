@@ -120,6 +120,11 @@ type InvokeOptions struct {
 	// Set by consumeStallHint when a stall was detected on the stage's previous
 	// incomplete attempt (a turn-capped run followed by one using fewer turns).
 	CorrectiveHint string
+	// CatchUpBaseSHA, when non-empty, marks a merge-train singleton catch-up conflict
+	// resolution (#2044): the conflict is between this pinned base SHA and the member's
+	// own branch head, not a member PR and a trial branch, so the synthetic prompt is
+	// worded accordingly. Empty for every other invocation.
+	CatchUpBaseSHA string
 	// FabrikRoot is the absolute path to fabrikDir (where .fabrik/ config, stages,
 	// and plugin live), exported to the worker as FABRIK_ROOT (#1288). Empty means
 	// omit the variable entirely.
