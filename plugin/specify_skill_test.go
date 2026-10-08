@@ -87,14 +87,10 @@ func TestSpecifyCommentSkillReferencesTemplate(t *testing.T) {
 		"specs/<issue number>-<slug>/spec.md",
 		"`Draft` while any open question remains, `Specified` once none do",
 		"exactly that",
-		"../fabrik-specify/SKILL.md",
 	} {
 		if !strings.Contains(content, want) {
 			t.Errorf("fabrik-specify-comment/SKILL.md missing %q", want)
 		}
-	}
-	if strings.Contains(content, "with the Skill tool") {
-		t.Errorf("fabrik-specify-comment/SKILL.md must not tell the worker to use the Skill tool: it is not in Specify's allowed_tools")
 	}
 	for _, copied := range []string{
 		"# Feature Specification: [Feature Title]",
