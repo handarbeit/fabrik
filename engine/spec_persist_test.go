@@ -475,3 +475,31 @@ func TestFinalizeStageOutcome_SpecifyNoBodyUpdateWritesNothing(t *testing.T) {
 		t.Error("spec written on a round with no issue-body update")
 	}
 }
+
+// Models copy the template's italic hint onto the heading; the strip must still
+// match, and a following ## Source References must survive.
+func TestStripOpenQuestions_HintedHeading(t *testing.T) {
+	for _, heading := range []string{
+		"## Open Questions *(only if unresolved questions remain)*",
+		"## Open Questions (optional)",
+		"## open questions: pending",
+		"## Open Questions  ",
+	} {
+		body := "## Assumptions\n\n- a\n\n" + heading + "\n\n- [ ] secret-question\n\n## Source References *(optional)*\n\n- ref\n"
+		got := stripOpenQuestions(body)
+		if strings.Contains(got, "secret-question") || strings.Contains(got, "Open Questions") {
+			t.Errorf("%q: section not stripped: %q", heading, got)
+		}
+		if !strings.Contains(got, "## Source References *(optional)*") || !strings.Contains(got, "- ref") || !strings.Contains(got, "- a") {
+			t.Errorf("%q: neighbouring sections lost: %q", heading, got)
+		}
+	}
+}
+
+// A different section whose name merely begins with those words is kept.
+func TestStripOpenQuestions_SimilarHeadingKept(t *testing.T) {
+	body := "## Open Questions Resolved\n\n- done\n\n## Open Questionsnaire\n\nx\n"
+	if got := stripOpenQuestions(body); got != body {
+		t.Errorf("unrelated headings modified: %q", got)
+	}
+}

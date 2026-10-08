@@ -49,6 +49,75 @@ func firstParagraph(content string) string {
 	return strings.TrimSpace(strings.Join(para, "\n"))
 }
 
+// specTemplateTitlePrefix starts the title line of a body written in the Spec Kit
+// feature-specification template the Specify skill authors.
+const specTemplateTitlePrefix = "# Feature Specification:"
+
+// specTemplateHeaderFields are the bold header fields that follow that title.
+var specTemplateHeaderFields = []string{"Feature Branch", "Created", "Status", "Input"}
+
+// isSpecTemplateHeaderLine reports whether a line is the template's title line or
+// one of its bold header-field lines ("**Status**: Draft").
+func isSpecTemplateHeaderLine(line string) bool {
+	t := strings.TrimSpace(line)
+	if strings.HasPrefix(t, specTemplateTitlePrefix) {
+		return true
+	}
+	for _, f := range specTemplateHeaderFields {
+		if strings.HasPrefix(t, "**"+f+"**:") || strings.HasPrefix(t, "**"+f+":**") {
+			return true
+		}
+	}
+	return false
+}
+
+// firstBodyParagraph is firstParagraph over content with the Spec Kit template's
+// title and header-field lines removed, so a PR section is never filled with the
+// "# Feature Specification:" title. A body in any other shape is unchanged.
+func firstBodyParagraph(content string) string {
+	lines := strings.Split(content, "\n")
+	kept := lines[:0:0]
+	for _, l := range lines {
+		if !isSpecTemplateHeaderLine(l) {
+			kept = append(kept, l)
+		}
+	}
+	return firstParagraph(strings.Join(kept, "\n"))
+}
+
+// extractInputField returns the text of the template's "**Input**:" header field —
+// the original request — dropping the "User description:" label and one pair of
+// surrounding double quotes. A request wrapped over several lines continues until
+// a blank line or the next bold field. Returns "" if the field is absent or empty.
+func extractInputField(content string) string {
+	lines := strings.Split(content, "\n")
+	for i, line := range lines {
+		t := strings.TrimSpace(line)
+		rest, ok := strings.CutPrefix(t, "**Input**:")
+		if !ok {
+			rest, ok = strings.CutPrefix(t, "**Input:**")
+		}
+		if !ok {
+			continue
+		}
+		parts := []string{strings.TrimSpace(rest)}
+		for _, next := range lines[i+1:] {
+			nt := strings.TrimSpace(next)
+			if nt == "" || strings.HasPrefix(nt, "**") || strings.HasPrefix(nt, "#") {
+				break
+			}
+			parts = append(parts, nt)
+		}
+		text := strings.TrimSpace(strings.Join(parts, "\n"))
+		text = strings.TrimSpace(strings.TrimPrefix(text, "User description:"))
+		if len(text) >= 2 && strings.HasPrefix(text, `"`) && strings.HasSuffix(text, `"`) {
+			text = strings.TrimSpace(text[1 : len(text)-1])
+		}
+		return text
+	}
+	return ""
+}
+
 // balanceFences scans body for fence delimiter lines (any line whose trimmed content starts
 // with ``` or ~~~, including language hints such as ```bash) using an indentation-aware
 // state machine. A closer is valid only when its leading-space count is >= the opener's.
@@ -118,19 +187,27 @@ func balanceFences(body string) string {
 // GitHub's link extractor sees it regardless of code fence issues in the body) and the
 // redundant footer "Closes #N" (after ---, for defense-in-depth).
 func buildPRSeedBody(issueContent, planContent string, issueNumber int) string {
-	// Extract Summary from issue; fall back to first paragraph
+	// Extract Summary from issue: ## Summary, else the Spec Kit template's
+	// **Input** field, else the first paragraph of the body.
 	summary := extractMarkdownSection(issueContent, "Summary")
 	if summary == "" {
-		summary = firstParagraph(issueContent)
+		summary = extractInputField(issueContent)
+	}
+	if summary == "" {
+		summary = firstBodyParagraph(issueContent)
 	}
 	if summary == "" {
 		summary = "(no summary available)"
 	}
 
-	// Extract Problem from issue; fall back to first paragraph
+	// Extract Problem from issue: ## Problem, else the Spec Kit template's
+	// ## Background, else the first paragraph of the body.
 	problem := extractMarkdownSection(issueContent, "Problem")
 	if problem == "" {
-		problem = firstParagraph(issueContent)
+		problem = extractMarkdownSection(issueContent, "Background")
+	}
+	if problem == "" {
+		problem = firstBodyParagraph(issueContent)
 	}
 	if problem == "" {
 		problem = "(no problem description available)"

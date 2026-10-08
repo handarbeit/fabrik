@@ -31,7 +31,7 @@ If an answer raises new ambiguities or reveals additional gaps:
 
 ### Maintain spec structure
 
-The issue body follows the **Spec template** defined in the `fabrik-specify` skill (its "Spec template" section — the single canonical copy; it is deliberately not restated here so the two cannot drift). The current body already has that shape, so edit it in place: keep every heading, header field and the order exactly as they are. If you need the exact template text, for example because the body was written before this format existed and has to be restructured, load the `fabrik-specify` skill with the Skill tool and follow its Spec template section and rules.
+The issue body follows the **Spec template** defined in the `fabrik-specify` skill (its "Spec template" section — the single canonical copy; it is deliberately not restated here so the two cannot drift). The current body already has that shape, so edit it in place: keep every heading, header field and the order exactly as they are. If you need the exact template text, for example because the body was written before this format existed and has to be restructured, `Read` the sibling file `../fabrik-specify/SKILL.md` (relative to this skill's directory, the same pattern the skills use for `../../LABELS.md`) and follow its "Spec template" section and rules. Use `Read`, not the Skill tool: `Skill` is not in this stage's tool list, so calling it is denied.
 
 When folding in an answer, put it where it belongs structurally:
 - a new behavior becomes an `FR-NNN` requirement under `### Functional Requirements`, appended with the next free number — **never renumber existing FR/SC identifiers**;
@@ -42,7 +42,7 @@ When folding in an answer, put it where it belongs structurally:
 
 Replace any `[NEEDS CLARIFICATION]` marker the answer resolves. Stories are named `User Story 1`, `User Story 2` — never `#1`.
 
-Never rewrite `**Input**` (the original request, verbatim), `**Created**` or `## Background`. Keep the heading `## Open Questions` exactly that — without the template's italic hint — because the engine finds the section by that text.
+Never rewrite `**Input**` (the original request, verbatim), `**Created**` or `## Background`. Keep the heading `## Open Questions` exactly that — without the template's italic hint — as a convention (the engine also tolerates a copied hint when it strips the section).
 
 **Maintain `**Status**` on every update:** `Draft` while any open question remains, `Specified` once none do. `## Open Questions` stays in the issue body only while questions remain and is removed entirely when the last one is resolved (the engine strips it from the committed file either way).
 

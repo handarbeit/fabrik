@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/stages"
@@ -102,8 +104,11 @@ func specOwnedByFabrik(workDir, rel string) bool {
 }
 
 // stripOpenQuestions removes the "## Open Questions" section — the heading
-// through the line before the next level-2 heading, or EOF. Fenced code blocks
-// are not parsed; a body without the section is returned unchanged.
+// through the line before the next level-2 heading, or EOF. The heading may
+// carry trailing hint text such as the template's
+// "## Open Questions *(only if unresolved questions remain)*" (see
+// isOpenQuestionsHeading). Fenced code blocks are not parsed; a body without
+// the section is returned unchanged.
 func stripOpenQuestions(body string) string {
 	lines := strings.Split(body, "\n")
 	out := make([]string, 0, len(lines))
@@ -111,13 +116,32 @@ func stripOpenQuestions(body string) string {
 	for _, line := range lines {
 		trimmed := strings.TrimRight(line, " \t\r")
 		if strings.HasPrefix(line, "## ") || trimmed == "##" {
-			skipping = strings.EqualFold(strings.TrimSpace(strings.TrimPrefix(trimmed, "##")), "Open Questions")
+			skipping = isOpenQuestionsHeading(strings.TrimSpace(strings.TrimPrefix(trimmed, "##")))
 		}
 		if !skipping {
 			out = append(out, line)
 		}
 	}
 	return strings.Join(out, "\n")
+}
+
+// isOpenQuestionsHeading reports whether a level-2 heading's text (without the
+// leading "##") names the Open Questions section: "Open Questions"
+// case-insensitively, optionally followed by hint text that starts with a
+// non-alphanumeric character (the template's italic "*(…)*" hint, a colon, a
+// dash). A heading that merely begins with those words, such as
+// "Open Questions Resolved", is a different section and is kept.
+func isOpenQuestionsHeading(text string) bool {
+	const name = "open questions"
+	if len(text) < len(name) || !strings.EqualFold(text[:len(name)], name) {
+		return false
+	}
+	rest := strings.TrimSpace(text[len(name):])
+	if rest == "" {
+		return true
+	}
+	r, _ := utf8.DecodeRuneInString(rest)
+	return !unicode.IsLetter(r) && !unicode.IsDigit(r)
 }
 
 // isSpecOnlyCommit reports whether every file a commit touched is the item's own

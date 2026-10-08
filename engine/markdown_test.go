@@ -166,6 +166,83 @@ func TestBuildPRSeedBody_MissingSections_FallbackToFirstParagraph(t *testing.T) 
 	}
 }
 
+const specTemplateBody = `# Feature Specification: Widget export
+
+**Feature Branch**: ` + "`fabrik/issue-9`" + `
+**Created**: 2026-10-07
+**Status**: Draft
+**Input**: User description: "Let users export widgets
+as CSV from the list view."
+
+## Background
+
+Support keeps hand-copying widget lists.
+
+## User Scenarios & Testing *(mandatory)*
+
+### User Story 1 - Export (Priority: P1)
+
+Export.
+`
+
+// The Spec Kit template has no ## Summary / ## Problem: Problem comes from
+// ## Background, Summary from the **Input** text, and the title line is never used.
+func TestBuildPRSeedBody_SpecTemplateShape(t *testing.T) {
+	body := buildPRSeedBody(specTemplateBody, "", 9)
+	if strings.Contains(body, "# Feature Specification") {
+		t.Errorf("title line must not appear in the seed body: %q", body)
+	}
+	wantSummary := "## Summary\n\nLet users export widgets\nas CSV from the list view.\n\n## Problem"
+	if !strings.Contains(body, wantSummary) {
+		t.Errorf("Summary should be the Input text, got: %q", body)
+	}
+	wantProblem := "## Problem\n\nSupport keeps hand-copying widget lists.\n\n## Approach"
+	if !strings.Contains(body, wantProblem) {
+		t.Errorf("Problem should be the Background section, got: %q", body)
+	}
+}
+
+// Without ## Background or **Input**, the first-paragraph fallback still must not
+// return the template's title or header-field lines.
+func TestBuildPRSeedBody_SpecTemplateNoBackgroundOrInput(t *testing.T) {
+	issue := "# Feature Specification: T\n\n**Status**: Draft\n\nThe actual first paragraph.\n\n## Requirements\n\n- **FR-001**: x\n"
+	body := buildPRSeedBody(issue, "", 9)
+	if strings.Contains(body, "Feature Specification") || strings.Contains(body, "**Status**") {
+		t.Errorf("template header leaked into seed body: %q", body)
+	}
+	if !strings.Contains(body, "The actual first paragraph.") {
+		t.Errorf("expected first-paragraph fallback, got: %q", body)
+	}
+}
+
+// ## Summary and ## Problem win over the template fallbacks, and a body in the old
+// shape produces exactly what it did before.
+func TestBuildPRSeedBody_OldShapeUnchanged(t *testing.T) {
+	issue := "## Summary\n\nS text.\n\n## Problem\n\nP text.\n\n## Background\n\nB text.\n"
+	body := buildPRSeedBody(issue, "", 4)
+	if !strings.Contains(body, "## Summary\n\nS text.\n\n## Problem\n\nP text.\n\n## Approach") {
+		t.Errorf("old-shape Summary/Problem changed: %q", body)
+	}
+	if strings.Contains(body, "B text.") {
+		t.Errorf("## Background must not override ## Problem: %q", body)
+	}
+}
+
+func TestExtractInputField(t *testing.T) {
+	cases := map[string]string{
+		"**Input**: User description: \"hello\"\n":             "hello",
+		"**Input**: plain text\n\nnext":                        "plain text",
+		"**Input:** User description: \"a\nb\"\n**Status**: x": "a\nb",
+		"no field here": "",
+		"**Input**: \n": "",
+	}
+	for in, want := range cases {
+		if got := extractInputField(in); got != want {
+			t.Errorf("extractInputField(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestBuildPRSeedBody_PlanWithImplementationPlanHeading(t *testing.T) {
 	planContent := "## Implementation Plan\n\nDetailed plan here.\n"
 	body := buildPRSeedBody("## Summary\n\nS.\n", planContent, 5)

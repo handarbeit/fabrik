@@ -1202,7 +1202,7 @@ See [ADR-1555](../adrs/1555-success-agnostic-comment-cycle-breaker.md), which al
 **Flow (idempotent, up to 3 attempts with exponential backoff):**
 1. Check for an existing open PR via `FetchLinkedPR()` — if found open and not merged, ensure body contains `Closes #N` and return its number. Closed or merged PRs are ignored; a new PR will be created.
 2. Push the issue branch via `PushBranch()`
-3. Build a seed body from `.fabrik-context/` files (issue summary, plan approach, verification placeholder)
+3. Build a seed body from `.fabrik-context/` files (issue summary, plan approach, verification placeholder). The Summary is `## Summary`, else the Spec Kit template's `**Input**` text, else the issue's first paragraph; the Problem is `## Problem`, else `## Background`, else the first paragraph. The template's `# Feature Specification:` title and header-field lines are never used as either section
 4. Create draft PR via `CreateDraftPR()` with title from issue, targeting `baseBranch`, body ending with `Closes #N`
 
 Transient errors (network errors, 5xx) are retried with backoff (base delay 500ms, doubled each attempt). Non-transient errors (4xx including 422) return immediately without retry. Returns `(prNumber, nil)` on success, `(0, error)` on failure.
@@ -4242,7 +4242,7 @@ Because it keys on the body update rather than on `completed`, a round ending in
 
 **Rules.**
 - *Slug lock.* If `specs/<issue>-*/` already exists in the worktree (lexically first usable match), it is reused. A directory is *usable* only if its `spec.md` is absent, exists only in the worktree (a round that wrote it and failed to commit), or was added by a `docs(spec): ` commit (`specOwnedByFabrik`); a repo's own hand-written `specs/<issue>-*/spec.md` sharing the issue number is skipped and never overwritten. Otherwise the slug is derived once from `item.Title` (lowercase ASCII alphanumerics, other runs collapsed to `-`, ≤ 50 characters cut on a `-` boundary, `spec` when nothing remains). The filesystem is the only restart-safe lock (`itemstate` is in-memory); the directory is never renamed. If the derived path itself holds a spec Fabrik did not write, the round logs a warning and persists nothing.
-- *Projection.* `## Open Questions` — the heading through the next `## ` heading or EOF — is stripped; the rest is written verbatim with one trailing newline. The file is never read back as input.
+- *Projection.* `## Open Questions` — the heading (with or without trailing hint text such as the template's `*(only if unresolved questions remain)*`) through the next `## ` heading or EOF — is stripped; the rest is written verbatim with one trailing newline. The file is never read back as input.
 - *Commit.* `git add -- <path>` then `git commit -m "docs(spec): add|update <path> for #N" -- <path>`; the pathspec scopes the commit so other dirty or staged worktree state is never captured. A projection that matches the file **as committed in HEAD** commits nothing (no empty commits); one that matches the file on disk but not HEAD — a previous round wrote it and then failed to commit — is committed on the next round, so a failed commit is retried rather than silently lost.
 - *Failure.* Every error is logged (`[#N warn]`) and non-fatal; the issue body is already updated and remains canonical.
 - *#921 interaction.* `commitsAheadOfBase` ignores commits touching only the item's own spec (§6.7.1), so a delegated coordinator still self-heals to Done.
