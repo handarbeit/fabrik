@@ -167,8 +167,8 @@ func TestMergeTrainSingletonCatchUp_BehindMember_LandsWithoutTrial(t *testing.T)
 	if !hasCommentContaining(t, env, prNum, "fabrik:train-catch-up head="+newHead) {
 		t.Errorf("the catch-up marker comment is missing on PR #%d", prNum)
 	}
-	if !hasCommentContaining(t, env, num, "after a catch-up") {
-		t.Errorf("the landed comment does not mention the catch-up: %v", commentsOn(t, env, num))
+	if !hasCommentContaining(t, env, prNum, "after a catch-up") {
+		t.Errorf("the landed comment does not mention the catch-up: %v", commentsOn(t, env, prNum))
 	}
 }
 

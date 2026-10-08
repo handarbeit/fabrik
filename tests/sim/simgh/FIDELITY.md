@@ -541,6 +541,17 @@ pull request before merging", and what `reviewDecision` reports in that
 configuration is **not verified here** — which is the second reason to refuse
 rather than guess a semantic for it.
 
+### Review and thread-comment commit attribution — **Modelled, seeded** (#2044)
+
+A review carries the head it was made against (`PRReview.CommitID`, GraphQL `commit.oid`) and an
+inline thread comment the head it was originally posted against (`Comment.CommitOID`, GraphQL
+`originalCommit.oid`). `SeedReview` takes `CommitID` as given; `SeedReviewThreadCommentAt` seeds the
+thread comment's commit (plain `SeedReviewThreadComment` leaves it empty = GitHub's `null`). The sim
+does not derive either from the PR's history — a scenario states the commit explicitly, as a real
+reviewer's review always names a head. Also note the sim attributes its own comment writes to
+`simgh-bot`, which is not `Config.User`; a scenario that depends on the engine recognising its own
+comments (the catch-up marker, `selfLogin()`) sets `cfg.User` to `simgh-bot`.
+
 ### `FetchPRReviews` returns the latest review per author — **Modelled**
 
 Not the raw submission history. `github.Client.FetchPRReviews` reads a REST
