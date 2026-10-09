@@ -221,6 +221,11 @@ type prRecord struct {
 	// every read so a new seeded commit is immediately reflected.
 	head string
 	base string
+	// lastHeadSHA is the head SHA at the most recent read that could resolve
+	// the head branch. A PR outlives a deleted head branch on real GitHub (the
+	// PR closes and keeps its last head SHA), so reads fall back to this when
+	// the branch is gone. See resolvePRHead.
+	lastHeadSHA string
 	// state is the GitHub REST enum: "open" or "closed".
 	state  string
 	draft  bool
@@ -295,6 +300,9 @@ type commentRecord struct {
 	diffHunk       string
 	isOutdated     bool
 	threadResolved bool
+	// commitOID is the commit the review-thread comment was posted against (GraphQL
+	// originalCommit.oid); empty = GitHub returned null.
+	commitOID string
 }
 
 func (c *commentRecord) nodeID() string { return fmt.Sprintf("comment:%d", c.databaseID) }
@@ -315,6 +323,7 @@ func (c *commentRecord) toGH() gh.Comment {
 		OriginalLine:   c.originalLine,
 		DiffHunk:       c.diffHunk,
 		IsOutdated:     c.isOutdated,
+		CommitOID:      c.commitOID,
 	}
 	// Reaction groups are emitted in a stable order so tests comparing whole
 	// projections are not order-flaky; GitHub's own ordering is not

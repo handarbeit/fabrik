@@ -46,6 +46,10 @@ type trainMember struct {
 	item    gh.ProjectItem
 	prNum   int
 	headSHA string
+	// caughtUpFrom is the pinned base SHA a singleton catch-up merged into the member's
+	// own branch (#2044), making headSHA the pushed catch-up commit. Empty for every
+	// member that was not caught up.
+	caughtUpFrom string
 }
 
 // trainCIDiagnostic captures the combined Validate's failure output at the point of
@@ -408,6 +412,13 @@ func (e *Engine) effectiveBisectCap() int {
 		return e.cfg.MaxBisectValidations
 	}
 	return 2*ceilLog2(e.effectiveMaxBatchSize()) + 1
+}
+
+// singletonCatchUpEnabled reports whether a behind singleton is caught up on its own
+// branch before falling back to a trial (#2044, ADR-2044). Empty (unset) means the
+// default, "merge"; only an explicit "off" disables it.
+func (e *Engine) singletonCatchUpEnabled() bool {
+	return !strings.EqualFold(e.cfg.SingletonCatchUp, "off")
 }
 
 // effectiveMaxTrainRebaseCycles returns the maximum number of main-moved
@@ -1093,6 +1104,16 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 			if e.trySingletonFastPath(ctx, state, p, current[0]) {
 				return
 			}
+			// #2044: a singleton that is merely BEHIND the pinned base is caught up on
+			// its own branch and landed through the fast path rather than via a trial.
+			// Placed here, after a declined fast path and before the trial, for the same
+			// loop-level reason as the fast path itself (never inside assembleAndValidate,
+			// so bisection sub-trials and landOneAtATime are structurally out of reach).
+			caughtUp, decided := e.trySingletonCatchUp(ctx, state, p, current[0])
+			if decided {
+				return
+			}
+			current[0] = caughtUp
 		}
 
 		trialName := p.nextTrialName()
@@ -1886,16 +1907,23 @@ var landedCommentRetryDelay = 200 * time.Millisecond
 // transition, so on exhaustion this falls back to the pre-existing warn-and-continue behavior
 // unchanged; it must never block or delay landing.
 func (e *Engine) addLandedCommentWithRetry(owner, repo string, issueNumber, prNum int, body string) {
+	e.addCommentWithRetry(owner, repo, issueNumber, prNum, body, "landed comment")
+}
+
+// addCommentWithRetry posts body on PR prNum, retrying transient failures with exponential
+// backoff, and reports whether the comment was posted. what names the comment in the
+// warning logged when it is not. A non-transient error is not retried.
+func (e *Engine) addCommentWithRetry(owner, repo string, issueNumber, prNum int, body, what string) bool {
 	const maxAttempts = 3
 	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		_, err := e.client.AddComment(owner, repo, prNum, body)
 		if err == nil {
-			return
+			return true
 		}
 		if !isTransientError(err) {
-			e.logf(issueNumber, "merge-train", "warn: could not post landed comment on PR #%d: %v\n", prNum, err)
-			return
+			e.logf(issueNumber, "merge-train", "warn: could not post %s on PR #%d: %v\n", what, prNum, err)
+			return false
 		}
 		lastErr = err
 		if attempt < maxAttempts-1 {
@@ -1903,7 +1931,8 @@ func (e *Engine) addLandedCommentWithRetry(owner, repo string, issueNumber, prNu
 			time.Sleep(delay)
 		}
 	}
-	e.logf(issueNumber, "merge-train", "warn: could not post landed comment on PR #%d after %d attempts: %v\n", prNum, maxAttempts, lastErr)
+	e.logf(issueNumber, "merge-train", "warn: could not post %s on PR #%d after %d attempts: %v\n", what, prNum, maxAttempts, lastErr)
+	return false
 }
 
 // nonDefaultBaseLabelValue scans labels (fetched live — see refuseIfBaseContradictsMembers,
@@ -2298,11 +2327,19 @@ func (e *Engine) finishSingletonFastPathLanding(state *mergeTrainWorkerState, p 
 			"That is this PR: the pinned base was already an ancestor of this head, this PR was mergeable, "+
 			"and its own CI was green and complete, so it was landed directly — no trial branch was "+
 			"assembled and no separate integration PR exists. See ADR-1644.", m.prNum)
+		if m.caughtUpFrom != "" {
+			landedComment = fmt.Sprintf("🏭 **Fabrik merge-train** — Landed via singleton fast path PR #%d after a catch-up. "+
+				"That is this PR: it was behind the pinned base, so Fabrik merged base `%s` into its own branch "+
+				"(head `%s`), its own CI was then green and complete on that head and it was mergeable, so it was "+
+				"landed directly — no trial branch was assembled and no separate integration PR exists. "+
+				"See ADR-1644 and ADR-2044.", m.prNum, shortSHA(m.caughtUpFrom), shortSHA(m.headSHA))
+		}
 		e.addLandedCommentWithRetry(p.owner, p.repo, m.item.Number, m.prNum, landedComment)
 	}
 
 	e.resetEjectionCount(p.owner, p.repo, m.item.Number)
 	e.resetTrialCounter(p.trainKey)
+	e.resetCatchUpAttempts(p.trainKey, m.item.Number)
 
 	// The repo-level "landing complete" line landMergeTrainBatch emits: the
 	// train's terminal progress signal on its TUI job row, and the only
@@ -2605,6 +2642,17 @@ func formatPathsInline(paths []string) string {
 	return strings.Join(quoted, ", ")
 }
 
+// rewriteConflictCommentForCatchUp re-words buildTrainConflictComment's body for a
+// singleton catch-up (#2044), where baseSHA is merged INTO the member's own PR branch
+// rather than a member head into a trial integration branch. The instructions are
+// otherwise identical, so only the two trial-specific phrases change.
+func rewriteConflictCommentForCatchUp(body string, issueNumber int, baseSHA string) string {
+	body = strings.Replace(body,
+		fmt.Sprintf("The merge of PR head `%s` (issue #%d) into the trial integration branch", baseSHA, issueNumber),
+		fmt.Sprintf("The catch-up merge of the merge-train's base commit `%s` into the head of issue #%d's own PR branch", baseSHA, issueNumber), 1)
+	return strings.Replace(body, "the trial's own CI validates", "the PR's own CI validates", 1)
+}
+
 // buildConflictEjectionReason renders a conflict-resolution outcome's diagnostic
 // (from resolveTrainConflict, possibly nil) into the reason string passed to
 // ejectMember. Per #1841 Requirements 3/4, this must name which files remained
@@ -2726,6 +2774,9 @@ func (e *Engine) resolveConflictWithClaude(ctx context.Context, memberItem gh.Pr
 	}
 
 	comment := buildTrainConflictComment(memberItem, prSHA, generatedPaths)
+	if opts.CatchUpBaseSHA != "" {
+		comment.Body = rewriteConflictCommentForCatchUp(comment.Body, memberItem.Number, prSHA)
+	}
 
 	_, _, _, err := e.claude.InvokeForComments(ctx, conflictResolutionStage(holdingStg), memberItem, []gh.Comment{comment}, trainWorkDir, opts)
 	var limitErr *claudeUsageLimitError

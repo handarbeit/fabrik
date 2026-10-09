@@ -220,6 +220,11 @@ type Comment struct {
 	// push to the PR (the thread's diff no longer matches the current head).
 	// Only meaningful for review-thread comments (ReviewThreadID non-empty).
 	IsOutdated bool
+	// CommitOID is the SHA the review-thread comment was originally posted
+	// against (GraphQL originalCommit.oid). Empty for non-thread comments and
+	// when GitHub returned null. Used to attribute a finding to a specific PR
+	// head, e.g. to recognise a review of a merge-train catch-up push (#2044).
+	CommitOID string
 }
 
 // PRReviewThread is a single review thread on a pull request, grouped as

@@ -531,10 +531,19 @@ func (r *repoState) createBranch(branch, fromBranch string) error {
 // *not* folded into it: branchExists confirmed the ref a moment earlier, so a
 // failure here is a genuine git error (a corrupt object, a ref pointing at a
 // non-commit) and must surface as one rather than be miscategorised as
-// legitimate simulated GitHub state. Caller must hold gitMu.
+// legitimate simulated GitHub state. The one exception is a ref that vanished
+// between the existence check and the resolve: gitMu serialises the model's own
+// git calls, but the engine deletes trial branches with its own
+// `git push --delete`, which does not take it, so the delete can land in that
+// window. A re-check that finds the branch gone is the same legitimate state
+// ("deleted"), not a git error. Caller must hold gitMu.
 func (r *repoState) headSHA(branch string) (string, error) {
 	if !r.branchExists(branch) {
 		return "", nil
 	}
-	return r.resolveRef("refs/heads/" + branch)
+	sha, err := r.resolveRef("refs/heads/" + branch)
+	if err != nil && !r.branchExists(branch) {
+		return "", nil
+	}
+	return sha, err
 }

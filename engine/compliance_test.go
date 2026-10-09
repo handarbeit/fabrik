@@ -87,6 +87,7 @@ var bodyBearingCalls = map[string]int{
 	"postItemComment":           1, // (item, body string, react bool)
 	"pauseIssue":                1, // (item, comment string, opts pauseOpts)
 	"addLandedCommentWithRetry": 4, // (owner, repo string, issueNumber, prNum int, body string)
+	"addCommentWithRetry":       4, // (owner, repo string, issueNumber, prNum int, body, what string)
 	"pauseInterruptedIssue":     1, // (item, comment string)
 }
 
@@ -101,7 +102,8 @@ var funnelSkips = map[string]string{
 	"postComment":               "AddComment",
 	"postItemComment":           "postComment",
 	"pauseIssue":                "postComment",
-	"addLandedCommentWithRetry": "AddComment",
+	"addLandedCommentWithRetry": "addCommentWithRetry",
+	"addCommentWithRetry":       "AddComment",
 	"pauseInterruptedIssue":     "pauseIssue",
 }
 

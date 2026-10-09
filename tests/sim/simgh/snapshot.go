@@ -362,6 +362,7 @@ func clonePRRecord(p *prRecord) *prRecord {
 		body:                    p.body,
 		head:                    p.head,
 		base:                    p.base,
+		lastHeadSHA:             p.lastHeadSHA,
 		state:                   p.state,
 		draft:                   p.draft,
 		merged:                  p.merged,
@@ -604,6 +605,7 @@ var snapshotFieldRegistry = map[string]map[string]fieldDisposition{
 		"body":                    fieldCopied,
 		"head":                    fieldCopied,
 		"base":                    fieldCopied,
+		"lastHeadSHA":             fieldCopied,
 		"state":                   fieldCopied,
 		"draft":                   fieldCopied,
 		"merged":                  fieldCopied,
@@ -639,6 +641,7 @@ var snapshotFieldRegistry = map[string]map[string]fieldDisposition{
 		"diffHunk":       fieldCopied,
 		"isOutdated":     fieldCopied,
 		"threadResolved": fieldCopied,
+		"commitOID":      fieldCopied,
 	},
 	"projectState": {
 		"id":                 fieldCopied,
