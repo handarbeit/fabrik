@@ -200,6 +200,17 @@ all. Note the deliberate asymmetry: `headSHA` itself treats a missing branch as
 a legitimate state (empty string, no error) — it is `gitFacts` that decides
 mergeability cannot be computed without one.
 
+### A PR whose head branch is deleted keeps listing, closed, at its last SHA — **Modelled** (#2044)
+
+`FetchLinkedPR`, `ListPRs` and `FetchPRDetails` remember the head SHA of the last
+read that could resolve it. Once the head branch is deleted they return that SHA
+and report an open PR as `closed`, as GitHub does when a head branch is deleted;
+a deleted trial branch therefore cannot make every later PR read in the repo
+fail. `headSHA` also treats a ref that vanishes between its existence check and
+the resolve (the engine's `git push --delete` does not take `gitMu`) as deleted,
+not as a git error. The mergeability derivation still errors for such a PR (see
+above).
+
 ### Commits behind — **Modelled**
 
 `FetchCommitsBehind(base, head)` is `git rev-list --count <head>..<base>` —

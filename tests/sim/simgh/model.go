@@ -221,6 +221,11 @@ type prRecord struct {
 	// every read so a new seeded commit is immediately reflected.
 	head string
 	base string
+	// lastHeadSHA is the head SHA at the most recent read that could resolve
+	// the head branch. A PR outlives a deleted head branch on real GitHub (the
+	// PR closes and keeps its last head SHA), so reads fall back to this when
+	// the branch is gone. See resolvePRHead.
+	lastHeadSHA string
 	// state is the GitHub REST enum: "open" or "closed".
 	state  string
 	draft  bool
