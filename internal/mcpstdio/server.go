@@ -242,9 +242,11 @@ func (s *Server) initialize(params json.RawMessage) map[string]any {
 			"experimental": map[string]any{"claude/channel": map[string]any{}},
 		},
 		"serverInfo": map[string]any{"name": "fabrik", "version": s.Version},
-		"instructions": "Read-only view of a running Fabrik daemon's in-memory state, served from the daemon's cache at no GitHub cost. " +
+		"instructions": "View of a running Fabrik daemon's in-memory state, served from the daemon's cache at no GitHub cost (fabrik_status, fabrik_board, fabrik_health). " +
 			"Every response states how fresh it is (as_of); a value the daemon cannot vouch for is the string \"unknown\", never a default. " +
-			"Start with fabrik_board (attention) to see what needs looking at, then fabrik_status for one issue." + channelInstructions,
+			"Start with fabrik_board (attention) to see what needs looking at, then fabrik_status for one issue. " +
+			"Four action tools (fabrik_promote, fabrik_set_autonomy, fabrik_revalidate, fabrik_clear_claude_limit) make the daemon write to GitHub and leave a Fabrik audit comment naming this session's --subscriber name; they refuse, with the current state, when a precondition does not hold. " +
+			"There is no tool to lift a pause or to comment: answer a paused item with a comment on the issue itself." + channelInstructions,
 	}
 }
 
@@ -287,7 +289,7 @@ func (s *Server) toolsCall(ctx context.Context, req request) {
 	defer cancel()
 	var result json.RawMessage
 	if err := s.Call(cctx, s.SocketPath, method, params, &result); err != nil {
-		s.reply(req.ID, textResult(describeCallError(err), true))
+		s.reply(req.ID, textResult(describeToolError(p.Name, err), true))
 		return
 	}
 	var pretty bytes.Buffer
@@ -313,6 +315,17 @@ func subscribeNote(attached string) string {
 	return note
 }
 
+// describeToolError is describeCallError plus the action-specific cases: a
+// daemon that predates actions answers unknown_method, which is reported as
+// "does not support actions" rather than an opaque protocol code.
+func describeToolError(tool string, err error) string {
+	var pe *localapi.Error
+	if IsActionTool(tool) && errors.As(err, &pe) && pe.Code == localapi.CodeUnknownMethod {
+		return "this Fabrik daemon does not support overseer actions (it predates them or has them disabled); upgrade and restart it, or make the change as a human on GitHub"
+	}
+	return describeCallError(err)
+}
+
 // describeCallError turns a daemon-call failure into the text the model sees.
 func describeCallError(err error) string {
 	var nd *localapi.NoDaemonError
@@ -321,6 +334,18 @@ func describeCallError(err error) string {
 	}
 	var pe *localapi.Error
 	if errors.As(err, &pe) {
+		if pe.Code == localapi.CodeRefused {
+			// A refusal carries the item's current state; show it so the caller
+			// can see why without a second call.
+			msg := "refused: " + pe.Message
+			if len(pe.Data) > 0 {
+				var pretty bytes.Buffer
+				if json.Indent(&pretty, pe.Data, "", "  ") == nil {
+					msg += "\n\ncurrent state:\n" + pretty.String()
+				}
+			}
+			return msg
+		}
 		return fmt.Sprintf("fabrik daemon error (%s): %s", pe.Code, pe.Message)
 	}
 	if errors.Is(err, context.DeadlineExceeded) {

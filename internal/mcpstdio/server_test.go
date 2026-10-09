@@ -49,10 +49,16 @@ func (b *stubBackend) Health(localapi.HealthParams) (*localapi.HealthResult, err
 // session drives a Server with scripted stdin and returns its stdout lines.
 func session(t *testing.T, socket string, requests ...string) []map[string]any {
 	t.Helper()
+	return sessionAs(t, socket, "", requests...)
+}
+
+// sessionAs is session with the server launched under the given subscriber name.
+func sessionAs(t *testing.T, socket, subscriber string, requests ...string) []map[string]any {
+	t.Helper()
 	var out bytes.Buffer
 	var errBuf bytes.Buffer
 	srv := &Server{
-		SocketPath: socket, Version: "v-test",
+		SocketPath: socket, Version: "v-test", Subscriber: subscriber,
 		In:  strings.NewReader(strings.Join(requests, "\n") + "\n"),
 		Out: &out, Err: &errBuf,
 		CallTimeout: 3 * time.Second,
@@ -169,9 +175,9 @@ func TestInitializeToolsListAndOneCallEach(t *testing.T) {
 		}
 		readOnly := m["annotations"].(map[string]any)["readOnlyHint"] == true
 		switch m["name"] {
-		case ToolSubscribe, ToolUnsubscribe:
+		case ToolSubscribe, ToolUnsubscribe, ToolPromote, ToolSetAutonomy, ToolRevalidate, ToolClearClaudeLimit:
 			if readOnly {
-				t.Errorf("tool %v changes daemon state and must not be annotated read-only", m["name"])
+				t.Errorf("tool %v changes state and must not be annotated read-only", m["name"])
 			}
 		default:
 			if !readOnly {
@@ -179,7 +185,7 @@ func TestInitializeToolsListAndOneCallEach(t *testing.T) {
 			}
 		}
 	}
-	if strings.Join(names, ",") != "fabrik_status,fabrik_board,fabrik_health,fabrik_subscribe,fabrik_unsubscribe" {
+	if strings.Join(names, ",") != "fabrik_status,fabrik_board,fabrik_health,fabrik_subscribe,fabrik_unsubscribe,fabrik_promote,fabrik_set_autonomy,fabrik_revalidate,fabrik_clear_claude_limit" {
 		t.Errorf("tools = %v", names)
 	}
 

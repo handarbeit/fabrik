@@ -53,6 +53,8 @@ type mockGitHubClient struct {
 	createDraftPRFn               func(owner, repo, title, head, base, body string, issueNumber int) (int, error)
 	fetchLatestReleaseFn          func(owner, repo string) (*gh.LatestRelease, error)
 	fetchLabelAppliedAtFn         func(owner, repo string, issueNumber int, labelName string) (time.Time, error)
+	fetchLabelRemovedAtFn         func(owner, repo string, issueNumber int, labelName string) (time.Time, error)
+	fetchLabelRemovedAtCalls      []fetchLabelAppliedAtCall
 	archiveProjectItemFn          func(projectID, itemID string) error
 	deleteReviewRequestFn         func(owner, repo string, prNumber int, reviewers []string) error
 	addReviewRequestFn            func(owner, repo string, prNumber int, reviewers []string) error
@@ -675,6 +677,17 @@ func (m *mockGitHubClient) FetchLabelAppliedAt(owner, repo string, issueNumber i
 	m.mu.Lock()
 	m.fetchLabelAppliedAtCalls = append(m.fetchLabelAppliedAtCalls, fetchLabelAppliedAtCall{owner, repo, issueNumber, labelName})
 	fn := m.fetchLabelAppliedAtFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(owner, repo, issueNumber, labelName)
+	}
+	return time.Time{}, nil
+}
+
+func (m *mockGitHubClient) FetchLabelRemovedAt(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
+	m.mu.Lock()
+	m.fetchLabelRemovedAtCalls = append(m.fetchLabelRemovedAtCalls, fetchLabelAppliedAtCall{owner, repo, issueNumber, labelName})
+	fn := m.fetchLabelRemovedAtFn
 	m.mu.Unlock()
 	if fn != nil {
 		return fn(owner, repo, issueNumber, labelName)

@@ -86,6 +86,7 @@ type GitHubClient interface {
 	FetchIssue(owner, repo string, issueNumber int) (*gh.IssueData, error)
 	FetchRepoAccess(owner, repo string) (gh.RepoAccess, error)
 	FetchLabelAppliedAt(owner, repo string, issueNumber int, labelName string) (time.Time, error)
+	FetchLabelRemovedAt(owner, repo string, issueNumber int, labelName string) (time.Time, error)
 	SeedLabels(owner, repo string, stageNames []string, lockedUser string) error
 	RateLimitStats() (rest, graphql gh.RateLimitStats)
 	DeleteForwardingHooks(owner, repo string) error

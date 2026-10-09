@@ -47,6 +47,11 @@ type Server struct {
 	// Streamer, when set before Start, enables protocol v2's subscribe /
 	// unsubscribe / attach methods.
 	Streamer Streamer
+	// Actor, when set before Start, enables the mutating action methods
+	// (#1969). It is dispatched by handleAction, separately from the read
+	// switch in handle, so a server without one answers them unknown_method
+	// and the read path can never mutate.
+	Actor Actor
 	// IdleTimeout and HeartbeatInterval default to the constants above; tests
 	// shorten them.
 	IdleTimeout       time.Duration
@@ -476,6 +481,10 @@ func (s *Server) handle(req Frame) (resp Frame) {
 		}
 	}()
 
+	if IsActionMethod(req.Method) {
+		return s.handleAction(req)
+	}
+
 	var result any
 	var err error
 	switch req.Method {
@@ -483,6 +492,9 @@ func (s *Server) handle(req Frame) (resp Frame) {
 		methods := []string{MethodHello, MethodStatus, MethodBoard, MethodHealth}
 		if s.Streamer != nil {
 			methods = append(methods, MethodSubscribe, MethodUnsubscribe, MethodAttach)
+		}
+		if s.Actor != nil {
+			methods = append(methods, ActionMethods()...)
 		}
 		result = map[string]any{
 			"protocol_version": ProtocolVersion,
@@ -542,6 +554,57 @@ func (s *Server) handle(req Frame) (resp Frame) {
 	}
 	resp.Result = b
 	return resp
+}
+
+// handleAction serves the mutating method set. It is the only place an Actor
+// is reached. With no Actor every action method is unknown. A refusal or other
+// *Error from the actor is sent as-is; panics are recovered by handle's defer.
+func (s *Server) handleAction(req Frame) Frame {
+	if s.Actor == nil {
+		return Frame{ID: req.ID, Error: Errorf(CodeUnknownMethod, "unknown method %q", req.Method)}
+	}
+	var result any
+	var err error
+	switch req.Method {
+	case MethodPromote:
+		var p PromoteParams
+		if e := decodeParams(req.Params, &p); e != nil {
+			return Frame{ID: req.ID, Error: e}
+		}
+		result, err = s.Actor.Promote(p)
+	case MethodSetAutonomy:
+		var p SetAutonomyParams
+		if e := decodeParams(req.Params, &p); e != nil {
+			return Frame{ID: req.ID, Error: e}
+		}
+		result, err = s.Actor.SetAutonomy(p)
+	case MethodRevalidate:
+		var p RevalidateParams
+		if e := decodeParams(req.Params, &p); e != nil {
+			return Frame{ID: req.ID, Error: e}
+		}
+		result, err = s.Actor.Revalidate(p)
+	case MethodClearClaudeLimit:
+		var p ClearClaudeLimitParams
+		if e := decodeParams(req.Params, &p); e != nil {
+			return Frame{ID: req.ID, Error: e}
+		}
+		result, err = s.Actor.ClearClaudeLimit(p)
+	default:
+		return Frame{ID: req.ID, Error: Errorf(CodeUnknownMethod, "unknown method %q", req.Method)}
+	}
+	if err != nil {
+		var pe *Error
+		if errors.As(err, &pe) {
+			return Frame{ID: req.ID, Error: pe}
+		}
+		return Frame{ID: req.ID, Error: Errorf(CodeInternal, "%v", err)}
+	}
+	b, merr := json.Marshal(result)
+	if merr != nil {
+		return Frame{ID: req.ID, Error: Errorf(CodeInternal, "encoding result: %v", merr)}
+	}
+	return Frame{ID: req.ID, Result: b}
 }
 
 func decodeParams(raw json.RawMessage, into any) *Error {
