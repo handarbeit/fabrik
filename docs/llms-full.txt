@@ -1409,6 +1409,12 @@ kill_grace:               # Optional. Per-signal grace windows for the kill sequ
 read_only: true           # Optional. Stashes the dirty worktree before Claude runs and
                           #   restores it after. Use for analysis stages that should not
                           #   modify files (e.g., Specify, Research).
+persist_spec: true        # Optional. Only meaningful on a stage that rewrites the issue
+                          #   body (Specify). After every round that emits a
+                          #   FABRIK_ISSUE_UPDATE body, the *engine* (not Claude) writes it
+                          #   to specs/<issue>-<slug>/spec.md and commits that one file.
+                          #   The stage stays read_only: Claude still writes nothing. See
+                          #   "The Specify Stage" -> "Persisted spec".
 post_to_pr: true          # Optional. Routes detailed Claude output to the linked PR; a
                           #   brief summary is still posted on the issue. Falls back to
                           #   posting on the issue if no linked PR is found.
@@ -1549,11 +1555,27 @@ refines it into a clear, unambiguous spec:
 - Surfaces missing requirements, ambiguities, and edge cases as questions
 - Checks consistency with existing project features and documentation
 - Researches prior art and established patterns on the web
-- Rewrites the issue body with a structured spec
+- Rewrites the issue body as a [Spec Kit](https://github.com/github/spec-kit)-style feature specification: a `# Feature Specification:` title with `Feature Branch`, `Created`, `Status` and `Input` (the original request, verbatim) fields; `## Background` (the original motivation); `## User Scenarios & Testing` with prioritized user stories (each with *Why this priority*, an *Independent Test* and *Acceptance Scenarios*) and `### Edge Cases`; `## Requirements` with `FR-NNN` functional requirements and optional `Key Entities`; `## Success Criteria` with `SC-NNN` measurable outcomes; `## Assumptions`; and optional `## Out of Scope` and `## Source References`. `**Status**` is `Draft` while open questions remain and `Specified` once none do, and `## Open Questions` exists only while questions remain. The template is built into the `fabrik-specify` skill; only the structure is adopted — nothing in your repo needs Spec Kit, `.specify/` scaffolding or `uv`.
 
 The user answers questions via comments. Claude incorporates the answers and updates
 the issue body. Once all questions are resolved, the stage completes and the issue is
 ready for Research.
+
+#### Persisted spec
+
+The issue body stays the canonical spec while you clarify it, but a spec that lives only in an issue disappears from the repo. So the Specify stage (`persist_spec: true`, the default) also writes it down: after every round that updates the issue body, **the engine** writes that body to `specs/<issue-number>-<slug>/spec.md` in the issue's worktree and commits just that file. The file lands in the PR diff next to the code and stays discoverable in the repo afterwards.
+
+- **A projection, never an input.** The file is a one-way copy of the issue body. Fabrik never reads it back — edit the issue (or answer in comments), not the file.
+- **Every round.** The first round that produces a body creates the file (`docs(spec): add …`); each later round that changes it commits an `update`. This includes a round that ends in `FABRIK_BLOCKED_ON_INPUT` with questions outstanding. Clarification rounds triggered by your comments push the commit too, so the file reaches the remote right away.
+- **`## Open Questions` is stripped** from the committed file (also when the heading carries trailing hint text). During clarification it exists only in the issue body.
+- **The slug is fixed at the first commit.** It is derived once from the issue title (lowercase ASCII, `-`-separated, at most 50 characters; `spec` if nothing usable remains). If the title changes later, or Fabrik restarts, an existing `specs/<issue-number>-*/` directory that Fabrik wrote is reused — it is never renamed or duplicated. A hand-written `specs/<issue-number>-*/spec.md` that happens to share the issue number is never reused or overwritten.
+- **No empty commits.** A round whose projected file is byte-identical to the one on disk, or that emits no body update at all, commits nothing. A `FABRIK_NO_WORK_NEEDED` round writes no file, since the issue goes straight to Done with no PR.
+- **Only that file is committed.** The commit is scoped to the spec path, so other uncommitted state in the worktree is never swept in. Specify stays `read_only: true`; Claude gains no write access.
+- **Doesn't count as work.** A branch whose only commits are the item's own spec commits still counts as having no commits of its own, so a parent that delegated everything to spawned children still completes as "no work needed".
+
+Issues already past Specify when this shipped are not backfilled.
+
+**Upgrading an existing `specify.yaml`.** `persist_spec` is opt-in per stage YAML, so a `.fabrik/stages/specify.yaml` created before it existed keeps working but writes no spec file. The [stage drift warning](#stage-yaml-drift-warning) reports the missing key at startup; run `fabrik refresh-stages --apply` to add it. If you have replaced the `fabrik-specify` skill with your own copy, `fabrik upgrade` reports a customization until you reconcile or run `fabrik upgrade --force`.
 
 ### Steering with Comments
 
@@ -2774,7 +2796,7 @@ The default skills are:
 
 | Skill | Purpose |
 |-------|---------|
-| `fabrik-specify` | Requirements clarification, consistency checks, prior art research; preserves the Problem section verbatim (never compressed) and places it first in the spec |
+| `fabrik-specify` | Requirements clarification, consistency checks, prior art research; preserves the original request verbatim in `Input` and the original motivation in `Background` (never compressed), and writes the spec in the Spec Kit feature-specification template |
 | `fabrik-research` | Codebase exploration, technical analysis, constraint discovery; includes a Documentation Impact section for user-facing features |
 | `fabrik-plan` | Implementation design, task checklist, decision documentation; includes explicit doc update tasks in the checklist for user-facing features |
 | `fabrik-implement` | Code writing, testing, committing, pushing; updates `USER_GUIDE.md` and/or `README.md` in the same PR for user-facing features — never defers documentation to a follow-up issue |
@@ -3174,7 +3196,7 @@ Fabrik passes `--permission-mode dontAsk` to every Claude Code invocation. In th
 | Python | `Bash(python:*)`, `Bash(pip:*)`, `Bash(uv:*)`, `Bash(pytest:*)` |
 | Shell utilities | `Bash(ls:*)`, `Bash(cat:*)`, `Bash(rm:*)`, `Bash(cp:*)`, `Bash(mv:*)`, `Bash(mkdir:*)`, `Bash(find:*)`, `Bash(date:*)` |
 
-**`allowed_tools` replaces the defaults — it is not additive.** When a stage sets `allowed_tools`, only those tools are permitted; the default list above is not merged in. This is intentional: Research, Plan, and Specify stages set `allowed_tools` to a read-only subset to prevent Claude from writing files during those stages.
+**`allowed_tools` replaces the defaults — it is not additive.** When a stage sets `allowed_tools`, only those tools are permitted; the default list above is not merged in. This is intentional: Research, Plan, and Specify stages set `allowed_tools` to a read-only subset to prevent Claude from writing files during those stages. (Specify's spec file is written by the engine, not by Claude — see [Persisted spec](#persisted-spec) — so it needs no extra tool permission.)
 
 **`fabrik:unrestricted` bypasses everything** — passes `--dangerously-skip-permissions` instead, granting Claude full tool access. Use this label only when a stage requires tools outside the default set (e.g. `deno`, `bun`, or other non-standard toolchains).
 
@@ -4511,6 +4533,8 @@ Specify → Research → Plan → Implement → Review → Validate → [Queued�
 | Queued† | 6 | — | — | — | — | — | — |
 | Done | 99 | N/A | No | No | No | No | Yes |
 
+Specify additionally ships `persist_spec: true` (§7.16): it stays read-only, but the engine commits the issue-body spec to `specs/<issue>-<slug>/spec.md`.
+
 \* All flags in this table reflect the **default stage configuration** shipped in `.fabrik/stages/`. Each flag is opt-in per stage YAML and may differ in custom configurations. `wait_for_reviews` is enabled for Review and Validate in the defaults.
 
 † **Queued** is a *holding stage* (`holding_stage: true`) active only when `merge_train: on`. Items enter Queued when `attemptMergeOnValidate` routes to `advanceToQueued` instead of GitHub auto-merge. Per-item dispatch is suppressed (`itemMayNeedWork` / `itemNeedsWork` return false for holding stages); the batch handler `handleMergeTrainBatch` snapshots the Queued items once per poll cycle via `groupQueuedByRepoAndBase` (`engine/poll.go`, #1648), which **excludes closed and `fabrik:paused` members** (see the poison-well guard under [Merge-Train Red-Batch Bisection](#merge-train-red-batch-bisection-adr-059-d4)) and further **partitions the remaining items by resolved base branch** (`baseBranchForItem`) — one `queuedRepoGroup` per distinct (repo, base) pair actually present, not one group per repo. `routeQueuedGroup` runs once per partition and dispatches `runMergeTrainWorker` for each when its own batch is ready, so a repo with members on both the default branch and a `base:<branch>` label runs two fully independent trains simultaneously — each with its own pinned base SHA, trial branch, draft CI PR, and integration PR targeting its own base (ADR-1648, superseding ADR-1647's exclusion of such members from batching entirely). On a green trial-branch CI result, `landMergeTrainBatch` opens a landing integration PR, merges it, advances each member from Queued → Done via `advanceToNextStage`, and closes their individual PRs **and issues** (ADR-059 D3). The Queued column must exist on the GitHub Project board when `merge_train: on`; it is validated at startup.
@@ -5423,8 +5447,8 @@ The "baseline clean AND working tree dirty" guard for Implement prevents a pre-e
 | Current State | Event | Guard | Resulting State | Labels Added | Labels Removed | Side Effects |
 |--------------|-------|-------|-----------------|--------------|----------------|--------------|
 | Column `<X>`, Locked + In Progress | Turn limit hit | `totalMultiple < 3`; progress detected | Same column, Locked + In Progress (extension) | | | `totalMultiple++`; `resume=true`; output accumulated; no WIP commit or push between extensions |
-| Column `<X>`, Locked + In Progress | Turn limit hit | `totalMultiple >= 3` (hard cap) | Same column, Cooldown | | | Hard cap reached; slice ends (a **preemption**, not a failure — the session resumes on the next dispatch). Cooldown routes this to the slice counter (`SliceRetries`/`MaxSliceRetries`), never `MaxRetries` — see the "Slice count ≥ MaxSliceRetries" row above and §7.12 (#1199). `CooldownAt("periodic-re-eval")` recorded; WIP commit + push (skipped for `read_only` stages) |
-| Column `<X>`, Locked + In Progress | Turn limit hit | No progress detected or progress check failed | Same column, Cooldown | | | No extension; slice ends (a **preemption**, not a failure). Same as the row above: Cooldown routes this to the slice counter, never `MaxRetries` (#1199, §7.12). `CooldownAt("periodic-re-eval")` recorded; WIP commit + push (skipped for `read_only` stages) |
+| Column `<X>`, Locked + In Progress | Turn limit hit | `totalMultiple >= 3` (hard cap) | Same column, Cooldown | | | Hard cap reached; slice ends (a **preemption**, not a failure — the session resumes on the next dispatch). Cooldown routes this to the slice counter (`SliceRetries`/`MaxSliceRetries`), never `MaxRetries` — see the "Slice count ≥ MaxSliceRetries" row above and §7.12 (#1199). `CooldownAt("periodic-re-eval")` recorded; WIP commit + push (skipped for `read_only` stages; a `persist_spec` Specify stage has already committed its spec, §7.16) |
+| Column `<X>`, Locked + In Progress | Turn limit hit | No progress detected or progress check failed | Same column, Cooldown | | | No extension; slice ends (a **preemption**, not a failure). Same as the row above: Cooldown routes this to the slice counter, never `MaxRetries` (#1199, §7.12). `CooldownAt("periodic-re-eval")` recorded; WIP commit + push (skipped for `read_only` stages; a `persist_spec` Specify stage has already committed its spec, §7.16) |
 | Column `<X>`, Locked + In Progress | FABRIK_STAGE_COMPLETE (any extension) | `completed = true` | Same column, Complete | `stage:<X>:complete` | `fabrik:locked:<user>`, `stage:<X>:in_progress` | Normal completion flow; extend-turns label persists to next stage |
 
 #### Cleanup Stage
@@ -5665,7 +5689,7 @@ See [ADR-1555](../adrs/1555-success-agnostic-comment-cycle-breaker.md), which al
 **Flow (idempotent, up to 3 attempts with exponential backoff):**
 1. Check for an existing open PR via `FetchLinkedPR()` — if found open and not merged, ensure body contains `Closes #N` and return its number. Closed or merged PRs are ignored; a new PR will be created.
 2. Push the issue branch via `PushBranch()`
-3. Build a seed body from `.fabrik-context/` files (issue summary, plan approach, verification placeholder)
+3. Build a seed body from `.fabrik-context/` files (issue summary, plan approach, verification placeholder). The Summary is `## Summary`, else the Spec Kit template's `**Input**` text, else the issue's first paragraph; the Problem is `## Problem`, else `## Background`, else the first paragraph. The template's `# Feature Specification:` title and header-field lines are never used as either section
 4. Create draft PR via `CreateDraftPR()` with title from issue, targeting `baseBranch`, body ending with `Closes #N`
 
 Transient errors (network errors, 5xx) are retried with backoff (base delay 500ms, doubled each attempt). Non-transient errors (4xx including 422) return immediately without retry. Returns `(prNumber, nil)` on success, `(0, error)` on failure.
@@ -6534,11 +6558,11 @@ These blocks persist in the Plan stage comment — they are data, not consumed-a
 
 **Detection is commit-count-based, not label-based, and only runs after a completed Claude invocation.** Checking `fabrik:children-spawned` alone, before Claude even runs, would be unsafe: `specs/sub-issue-decomposition/spec.md` explicitly supports a *hybrid* parent — one whose Plan both spawns children **and** describes its own implementation work, which runs normally in Implement after all children close. On the first post-unblock Implement dispatch, "zero commits so far" is true for both a pure coordinator and a hybrid parent that hasn't started yet — the two are only distinguishable *after* Claude has had the chance to produce its own commits. Gating on `completed` (Claude ran to completion, no error) makes the check safe for both: a hybrid parent that does its own work ends up with commits ahead of base and is unaffected; a pure coordinator ends up with zero and is caught.
 
-**Implementation — `commitsAheadOfBase(workDir, baseBranch string) (int, error)`** (`engine/item.go`): runs `git rev-list --count origin/<baseBranch>..HEAD` in the worktree. Fails safe — any git or parse error returns a non-nil error, never an assumed zero, so callers must treat an error as "unknown" and fall through to the normal PR-creation path rather than short-circuiting to Done.
+**Implementation — `commitsAheadOfBase(workDir, baseBranch string, issueNumber int) (int, error)`** (`engine/item.go`): lists `git log --name-only origin/<baseBranch>..HEAD` in the worktree and counts every commit **except** those whose only changes are the item's own persisted spec (`specs/<issueNumber>-*/spec.md`, `isSpecOnlyCommit` — ADR 2034, §7.16), so the Specify stage's engine-written spec commit never makes a fully-delegated coordinator look like it has work of its own. Empty and merge commits (no touched files) still count. Fails safe — any git or parse error returns a non-nil error, never an assumed zero, so callers must treat an error as "unknown" and fall through to the normal PR-creation path rather than short-circuiting to Done.
 
 **Two call sites, both folding the result into the existing `noWorkNeeded` boolean rather than introducing a separate completion path — this lets the fully-built, ADR-060-hardened `handleNoWorkNeeded`/`settleNoWorkNeeded` machinery (§6.8) handle everything else (durable marker, idempotent settle, Done move, issue close, retry/escalation) with no new code:**
 
-1. **Primary path — `finalizeStageOutcome`** (called after every Claude invocation completes): after computing `noWorkNeeded := err == nil && CheckNoWorkNeeded(output)`, if `!noWorkNeeded && completed && stage.Name == "Implement" && hasLabel(item.Labels, "fabrik:children-spawned")`, calls `commitsAheadOfBase(workDir, baseBranch)`. On success with `ahead == 0`, sets `noWorkNeeded = true` — routing the rest of `finalizeStageOutcome` through the same `completed && noWorkNeeded` branch a Claude-emitted `FABRIK_NO_WORK_NEEDED` would take (§6.8), instead of the plain `completed` branch that calls `ensureDraftPR`. This computation runs *before* `finalizeStageOutcome`'s own separate eager `ensureDraftPR` call — the one gated on `completed && stage.CreateDraftPR && stage.PostToPR` that exists purely to guarantee a PR exists before posting output to it — so that eager call is itself gated on `!noWorkNeeded` and never fires for the empty-coordinator case either. Without this ordering, an empty coordinator would still trigger a real `CreateDraftPR` 422 from that eager call even though the later `completed && noWorkNeeded` branch correctly skips escalation — the real Implement stage config has both `create_draft_pr: true` and `post_to_pr: true`, so this eager call is always reachable in production.
+1. **Primary path — `finalizeStageOutcome`** (called after every Claude invocation completes): after computing `noWorkNeeded := err == nil && CheckNoWorkNeeded(output)`, if `!noWorkNeeded && completed && stage.Name == "Implement" && hasLabel(item.Labels, "fabrik:children-spawned")`, calls `commitsAheadOfBase(workDir, baseBranch, item.Number)`. On success with `ahead == 0`, sets `noWorkNeeded = true` — routing the rest of `finalizeStageOutcome` through the same `completed && noWorkNeeded` branch a Claude-emitted `FABRIK_NO_WORK_NEEDED` would take (§6.8), instead of the plain `completed` branch that calls `ensureDraftPR`. This computation runs *before* `finalizeStageOutcome`'s own separate eager `ensureDraftPR` call — the one gated on `completed && stage.CreateDraftPR && stage.PostToPR` that exists purely to guarantee a PR exists before posting output to it — so that eager call is itself gated on `!noWorkNeeded` and never fires for the empty-coordinator case either. Without this ordering, an empty coordinator would still trigger a real `CreateDraftPR` 422 from that eager call even though the later `completed && noWorkNeeded` branch correctly skips escalation — the real Implement stage config has both `create_draft_pr: true` and `post_to_pr: true`, so this eager call is always reachable in production.
 2. **R5 self-heal — the skip-Claude retry precheck** (`processItem`, §5.5): when an item already has `PRCreationFailed[stage.Name] == true` (e.g. from a pre-fix retry cycle, or from before this check existed), the same guard runs unconditionally — reaching this branch already proves Claude completed the stage at least once and still produced zero commits, so there is no hybrid-parent ambiguity to protect against here. On a match, the lock is released, `StageRetryCleared`/`EngineUnpaused` are applied, and `handleNoWorkNeeded` is called directly — before `ensureDraftPR` is attempted again. This lets an issue already stuck mid-retry-cycle when this fix ships (or a pre-fix issue with `fabrik:paused` manually removed) recover to Done on its next poll instead of continuing to hammer `ensureDraftPR` toward escalation.
 
 **Comment text is distinct from the marker-emitted case.** `noWorkNeededSkipComment` (`engine/no_work_needed_settle.go`) composes the "skipped: no work needed" comment body: for an Implement stage with `fabrik:children-spawned` (this path), it posts `_Skipped: no work needed — all work was delegated to spawned children and this issue has no commits of its own._` rather than the generic `_Skipped: no work needed (FABRIK_NO_WORK_NEEDED emitted by Implement)._` text used everywhere else. Earlier revisions of this fix reused the generic text, but it asserts something false — Claude never emitted `FABRIK_NO_WORK_NEEDED` here, the engine inferred completion from zero commits — and a durable GitHub comment that misdescribes its own mechanism erodes trust in the record later. No separate completion path was introduced to fix this: `hasSkippedComment`'s idempotency check derives the same way, so retries remain safe.
@@ -8734,6 +8758,28 @@ is untouched by any number of turn-cap preemptions.
 
 **Ordering and failure.** Write first, then comment. A failed write returns the error and posts no comment (a multi-label `set_autonomy` names the writes that did land). A failed comment leaves the action in place and reports `audit_comment: failed`. The action's own label write reaches the channel observer like any engine write-through and surfaces as a `label-applied` event with actor `fabrik`.
 
+### 7.16 Specify Spec Persistence (`persist_spec`, ADR 2034)
+
+A stage with `persist_spec: true` (the default Specify config) has the **engine** project its canonical issue-body update to `specs/<issue>-<slug>/spec.md` in the issue's worktree and commit that one file. The stage stays `read_only: true` — Claude writes nothing and gains no tool permission — so the stash/restore, the `commitWIP` skip and the worktree-boundary layers are unchanged. `docs/stage-lifecycle.md` "Read-Only Stage Stashing" covers the per-invocation view.
+
+**Where it runs.** `persistSpec` (`engine/spec_persist.go`) is called immediately after a successful or failed `UpdateIssueBody` from the same `extractUpdatedBody` string, on both entry points:
+
+| Path | Site | Push |
+|------|------|------|
+| Stage dispatch | `finalizeStageOutcome`, after the issue-body update (post stash-pop) | the existing post-run `pushBranchUnlessQueued` (runs after any invocation where Claude ran) |
+| Comment review | `publishCommentOutput`, after the issue-body update | `pushBranchUnlessQueued`, **only when `persistSpec` created a commit** — `processComments` has no push of its own |
+
+Because it keys on the body update rather than on `completed`, a round ending in `FABRIK_BLOCKED_ON_INPUT` persists the spec too. A round with no `FABRIK_ISSUE_UPDATE` block, or one that emits `FABRIK_NO_WORK_NEEDED`, writes nothing.
+
+**Rules.**
+- *Slug lock.* If `specs/<issue>-*/` already exists in the worktree (lexically first usable match), it is reused. A directory is *usable* only if its `spec.md` is absent, exists only in the worktree (a round that wrote it and failed to commit), or was added by a `docs(spec): ` commit (`specOwnedByFabrik`); a repo's own hand-written `specs/<issue>-*/spec.md` sharing the issue number is skipped and never overwritten. Otherwise the slug is derived once from `item.Title` (lowercase ASCII alphanumerics, other runs collapsed to `-`, ≤ 50 characters cut on a `-` boundary, `spec` when nothing remains). The filesystem is the only restart-safe lock (`itemstate` is in-memory); the directory is never renamed. If the derived path itself holds a spec Fabrik did not write, the round logs a warning and persists nothing.
+- *Projection.* `## Open Questions` — the heading (with or without trailing hint text such as the template's `*(only if unresolved questions remain)*`) through the next `## ` heading or EOF — is stripped; the rest is written verbatim with one trailing newline. The file is never read back as input.
+- *Commit.* `git add -- <path>` then `git commit -m "docs(spec): add|update <path> for #N" -- <path>`; the pathspec scopes the commit so other dirty or staged worktree state is never captured. A projection that matches the file **as committed in HEAD** commits nothing (no empty commits); one that matches the file on disk but not HEAD — a previous round wrote it and then failed to commit — is committed on the next round, so a failed commit is retried rather than silently lost.
+- *Failure.* Every error is logged (`[#N warn]`) and non-fatal; the issue body is already updated and remains canonical.
+- *#921 interaction.* `commitsAheadOfBase` ignores commits touching only the item's own spec (§6.7.1), so a delegated coordinator still self-heals to Done.
+
+**Upgrade behavior.** `persist_spec` is opt-in per stage YAML. A `specify.yaml` predating it silently writes no file (no denial, no pause); startup drift detection reports the missing key (it is not a no-op default) and `fabrik refresh-stages --apply` adds it.
+
 ---
 
 ## 8. Invalid / Unexpected States
@@ -10082,6 +10128,8 @@ The engine's `updateWorktreeFromMain` rebases the worktree onto main but does no
 
 For `read_only: true` stages (Specify, Research, Plan): dirty state is auto-stashed before Claude runs and restored after. Claude sees a clean worktree.
 
+**Engine-written spec (`persist_spec`, ADR 2034).** Specify is the one read-only stage with a write: when `persist_spec: true`, the engine itself projects the stage's `FABRIK_ISSUE_UPDATE` body to `specs/<issue>-<slug>/spec.md` and commits that single file (`persistSpec`, `engine/spec_persist.go`). The write happens after the issue-body update — after the stash pop on the stage path, and in `publishCommentOutput` on the comment-review path — so a committed file is never stashed or popped, and the pathspec-scoped commit (`git commit -- <path>`) never captures other dirty state. Claude's permissions are unchanged (no `Write`, no git), so there is no worktree-boundary rewrite or audit to consider. `commitWIP` stays skipped for read-only stages. The stage path relies on the existing post-run branch push; the comment-review path, which never pushes by itself, pushes (`pushBranchUnlessQueued`) only when a spec commit was actually created. See [USER_GUIDE](USER_GUIDE.md#persisted-spec).
+
 ### Context Files
 
 Before each Claude invocation, the engine writes context documents to `.fabrik-context/` in the worktree. These files are excluded from git by two mechanisms: a `.gitignore` file written inside `.fabrik-context/` that excludes all files in the directory, and a pre-rebase step that runs `git rm -rf --cached .fabrik-context/` to remove any accidentally tracked context files before rebasing.
@@ -10182,7 +10230,7 @@ For non-read-only, non-unrestricted stages (Implement, Review, Validate, and any
 
 This proactively restricts Claude Code's file-editing tools to the assigned worktree directory. If Claude attempts to edit or write a file outside the worktree, it receives an error from Claude Code and the stage continues running (the attempt is blocked, not the whole stage).
 
-**Scope:** Enforced for all stages where `read_only: false`. Skipped for read-only stages (Specify, Research, Plan by default) — they do not write files and receive bare `Edit`/`Write` entries (or none, if `allowed_tools:` is overridden in stage YAML).
+**Scope:** Enforced for all stages where `read_only: false`. Skipped for read-only stages (Specify, Research, Plan by default) — they do not write files and receive bare `Edit`/`Write` entries (or none, if `allowed_tools:` is overridden in stage YAML). Specify's `persist_spec` write is made by the engine, not by Claude, so it is outside this layer by construction.
 
 **Bypass:** When `fabrik:unrestricted` is present on the issue, `--dangerously-skip-permissions` is passed instead of `--allowedTools`, bypassing this restriction entirely (consistent with the existing semantics of that label).
 
@@ -10701,7 +10749,7 @@ When `FABRIK_BLOCKED_ON_INPUT` is detected (and Claude ran without error):
 
 ### Incomplete Path (No Marker)
 
-1. Partial-progress commit (unless read-only): `git add -A && git commit -m "chore: partial <StageName> stage progress (incomplete)"`
+1. Partial-progress commit (unless read-only): `git add -A && git commit -m "chore: partial <StageName> stage progress (incomplete)"`. A read-only Specify stage with `persist_spec` has already committed its spec file itself (including on a blocked round), so nothing is left for this step.
 2. Branch pushed
 3. Cooldown timer: `pollSeconds * 10` seconds
 4. Lock held through cooldown

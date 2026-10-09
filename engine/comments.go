@@ -874,6 +874,14 @@ func (e *Engine) publishCommentOutput(owner, repo string, item gh.ProjectItem, s
 				e.webhookMgr.RegisterEcho("issues", "edited", boardcache.ItemKey(owner+"/"+repo, item.Number))
 			}
 		}
+		// Persist the canonical body as specs/<N>-<slug>/spec.md (ADR 2034). Comment
+		// rounds never push on their own, so push only when a commit was made —
+		// clarification rounds then reach the remote. Skipped on FABRIK_NO_WORK_NEEDED.
+		if !noWorkNeeded && e.persistSpec(item, stage, workDir, updatedBody) {
+			if pushErr := e.pushBranchUnlessQueued(item, e.worktreesFor(item.Repo)); pushErr != nil {
+				e.logf(item.Number, "warn", "could not push spec commit: %v\n", pushErr)
+			}
+		}
 		output = stripMarkers(output, "FABRIK_ISSUE_UPDATE_BEGIN", "FABRIK_ISSUE_UPDATE_END")
 		// Circuit breaker (#1089): a FABRIK_ISSUE_UPDATE is the only forward-progress
 		// signal pre-PR stages (Specify/Research/Plan) produce — no commit, no PR,

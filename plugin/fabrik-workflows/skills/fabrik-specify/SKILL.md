@@ -41,39 +41,97 @@ Do not prescribe. The user may be innovating. Present options and let them decid
 ### Define scope boundaries
 
 Explicitly state:
-- What is in scope for this issue
-- What is explicitly out of scope
+- What is in scope for this issue (the user stories and requirements)
+- What is explicitly out of scope (the `## Out of Scope` section)
 - What related work might be needed as follow-up issues
-- What assumptions you're making
+- What assumptions you're making (the `## Assumptions` section)
 
 ### Rewrite the issue body
 
-Update the issue body (via FABRIK_ISSUE_UPDATE markers) with a structured spec. **Preserve the user's original motivation and problem statement** — the "why" is as important as the "what." Never reduce a detailed problem description to a terse summary that loses context. Use this structure:
+Update the issue body (via FABRIK_ISSUE_UPDATE markers) with a structured spec. **Preserve the user's original motivation and problem statement** — the "why" is as important as the "what." Never reduce a detailed problem description to a terse summary that loses context: the original motivation goes in `## Background` and the original request goes **verbatim** in `**Input**`.
+
+## Spec template
+
+The body follows the Spec Kit spec template — the format downstream projects already produce. Only its content structure (section names, `FR-NNN`/`SC-NNN` numbering) is used; no Spec Kit tooling, scaffolding or scripts is involved, and nothing in the repository needs to exist for this to work. This section is the single canonical copy; `fabrik-specify-comment` refers to it rather than restating it.
 
 ```
-## Problem
+# Feature Specification: [Feature Title]
+
+**Feature Branch**: `fabrik/issue-<N>`
+**Created**: [YYYY-MM-DD]
+**Status**: Draft
+**Input**: User description: "[original request]"
+
+## Background
+
 Why this change is needed. What pain point, gap, or opportunity does it address?
-Preserve the original issue's motivation — don't compress it away.
 
-## Summary
-One-paragraph description of what this feature does to solve the problem.
+## User Scenarios & Testing *(mandatory)*
 
-## Requirements
-Bulleted list of specific, testable requirements.
+### User Story 1 - [Brief Title] (Priority: P1)
 
-## Scope
-What's in and what's out.
+[User journey description]
 
-## Open Questions
-- [ ] Question 1
-- [ ] Question 2
+**Why this priority**: [Rationale]
 
-## Prior Art / Context
-Relevant findings from web research or codebase analysis.
+**Independent Test**: [How to test independently]
 
-## Risks / Dependencies
-Anything that could complicate or block this work.
+**Acceptance Scenarios**:
+
+1. **Given** [state], **When** [action], **Then** [outcome]
+
+---
+
+### Edge Cases
+
+- [Edge case]
+
+## Requirements *(mandatory)*
+
+### Functional Requirements
+
+- **FR-001**: [Specific, testable requirement]
+
+### Key Entities *(if applicable)*
+
+- **[Entity]**: [Description]
+
+## Success Criteria *(mandatory)*
+
+### Measurable Outcomes
+
+- **SC-001**: [Measurable, technology-agnostic outcome]
+
+## Assumptions
+
+- [Assumption]
+
+## Out of Scope *(optional)*
+
+- [Excluded work]
+
+## Open Questions *(only if unresolved questions remain)*
+
+- [ ] [Question]
+
+## Source References *(optional)*
+
+- [Reference]
 ```
+
+Rules that go with the template:
+
+- **Fill the header fields.** `**Feature Branch**` is `fabrik/issue-<N>` with the real issue number. `**Created**` is the date the spec was first written, as `YYYY-MM-DD`; keep that value unchanged on later rounds. `**Input**` is the original request, verbatim, from the first round; never rewrite or shorten it on later rounds.
+- **`**Status**` is `Draft` while any open question remains and `Specified` once none do.** Maintain it on every body update. The engine projects the body as-is, so the committed file carries the same value.
+- **`## Open Questions` exists only while questions remain** and is removed when the last one is resolved. It stays in the issue body only; the engine strips it from the committed file. **Write its heading as exactly `## Open Questions`** — without the italic `*(only if unresolved questions remain)*` hint — so the committed file can never carry the hint. (The engine also tolerates a copied hint, so correctness does not depend on this, but the plain heading is the convention.) The engine removes the section up to the next `## ` heading, so `## Source References` after it is kept.
+- **Every other heading stays exactly as in the template**, including the italic `*(mandatory)*`/`*(optional)*`/`*(if applicable)*` hints. Omit an optional section (`Key Entities`, `Out of Scope`, `Source References`) only when it genuinely has nothing to say; keep `Background`, `User Scenarios & Testing`, `Requirements`, `Success Criteria` and `Assumptions` always.
+- **Stories** are `### User Story N - <title> (Priority: Pn)`, prioritized (P1 most important), each with `Why this priority`, `Independent Test` and `Acceptance Scenarios` — implementing only one story must still deliver a usable slice. Name them `User Story 1`, never a bare `#1`. Add as many stories as the work needs, separated by `---`; `### Edge Cases` follows the last one.
+- **Requirements** use stable `FR-NNN` identifiers, one testable statement each. Number them in order and never renumber an existing requirement during clarification rounds; retire one by removing it, add new ones at the end. Mark an unclear one inline with `[NEEDS CLARIFICATION: <the specific question>]` and give it a matching entry under `## Open Questions`.
+- **Success criteria** use stable `SC-NNN` identifiers under `### Measurable Outcomes` and describe measurable outcomes from the user's or operator's point of view, not implementation details.
+- **Assumptions** record the defaults you chose so a reader can challenge them; prefer a documented assumption over a question when the choice is low-impact and reversible.
+- Findings from web research or codebase analysis go in `## Background` or `## Source References`.
+
+Keep the spec at the **what and why** level: no file paths to change, no designs, no technology choices.
 
 ## What You Do NOT Do
 
@@ -100,13 +158,13 @@ See `../../LABELS.md` for the full label reference.
 
 ## Engine Context
 
-**Before you run**: The engine has created a worktree and rebased onto main. You're in a read-only stage — the worktree will be stashed/restored around your invocation.
+**Before you run**: The engine has created a worktree and rebased onto main. You're in a read-only stage — the worktree will be stashed/restored around your invocation. **Do not create, edit or commit any files yourself.** The issue body you emit is the canonical spec; after each round that updates it, the engine writes it to `specs/<issue number>-<slug>/spec.md` on the issue's branch and commits that single file, so the spec appears in the PR diff and stays in the repo. The `## Open Questions` section is stripped from that file, and the slug is fixed at the first commit — a later title change does not rename the directory. The file is a one-way projection of the issue body and is never read back, so never rely on it as input and never edit it.
 
 **Completing the stage**: When the spec is clear and all questions are resolved, emit the literal token `FABRIK_STAGE_COMPLETE` as the sole content of its own line — no backticks, no code fence, no markdown formatting, no trailing punctuation. The engine matches `^FABRIK_STAGE_COMPLETE$` exactly; backtick-wrapped or formatted variants are silently rejected and you will be re-invoked in a wasteful loop. Once you emit it, stop immediately. Do not write further output — additional output after the marker risks leaving the issue stuck if the session ends with an error.
 
 **Blocking on input**: If you have open questions that must be answered before you can produce a complete spec, output `FABRIK_BLOCKED_ON_INPUT` on its own line instead of `FABRIK_STAGE_COMPLETE`. The engine will pause the issue with both `fabrik:paused` and `fabrik:awaiting-input` labels and automatically resume when the user responds with a comment. Do not remove these labels manually. These two markers are mutually exclusive — never output both. When outputting `FABRIK_BLOCKED_ON_INPUT`, you MUST also emit a `FABRIK_SUMMARY_BEGIN`…`FABRIK_SUMMARY_END` block containing a direct, concise (1–3 sentence) statement of exactly what input is needed — no preamble; the user reads this on a small screen.
 
-**Updating the issue body**: Wrap the complete updated issue body in:
+**Updating the issue body**: Every round that changes the spec — including a round that ends in `FABRIK_BLOCKED_ON_INPUT` — must emit the complete updated body, because that is what the engine persists. Wrap it in:
 ```
 FABRIK_ISSUE_UPDATE_BEGIN
 <entire issue body>
@@ -118,8 +176,13 @@ FABRIK_ISSUE_UPDATE_END
 ## Quality Checklist
 
 Before signaling completion, verify:
-- [ ] Every requirement is specific and testable
-- [ ] Scope boundaries are explicit
-- [ ] No open questions remain
+- [ ] The body follows the Spec template exactly: header fields filled, headings and order unchanged
+- [ ] `**Input**` still holds the original request verbatim and `## Background` preserves the original motivation
+- [ ] Every requirement is specific and testable and carries an `FR-NNN` identifier
+- [ ] User stories are prioritized, each with an Independent Test and Acceptance Scenarios
+- [ ] Success criteria are measurable and carry `SC-NNN` identifiers
+- [ ] Edge cases and assumptions are recorded
+- [ ] Scope boundaries are explicit (`## Out of Scope`)
+- [ ] `**Status**` is `Specified` and `## Open Questions` is gone — no open questions remain
 - [ ] No contradictions with existing features
 - [ ] A researcher could understand this spec without additional context
