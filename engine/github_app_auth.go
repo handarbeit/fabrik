@@ -135,7 +135,65 @@ func RequiredGitHubAppPermissions(webhooksEnabled bool) map[string]string {
 // permission in the App's settings. Documented as optional-but-recommended in
 // docs/USER_GUIDE.md.
 func OptionalGitHubAppPermissions() map[string]string {
-	return map[string]string{"actions": "write"}
+	perms := make(map[string]string, len(optionalPermissions))
+	for _, p := range optionalPermissions {
+		perms[p.Name] = p.Level
+	}
+	return perms
+}
+
+// optionalPermission describes one optional App permission: its name and
+// wanted level, and what it enables. It is the single source of truth shared
+// by OptionalGitHubAppPermissions (and through it the new-App manifest) and
+// the advisory notices OptionalPermissionNotices builds for `fabrik init` and
+// engine startup (#2071), so the three can never drift.
+type optionalPermission struct {
+	Name    string
+	Level   string
+	Enables string
+}
+
+var optionalPermissions = []optionalPermission{
+	{
+		Name:  "actions",
+		Level: "write",
+		Enables: "re-running a merge-train trial's failed jobs on its first red, retriggering CI runs that " +
+			"never started (startup_failure), and a worker's own `gh run rerun`",
+	},
+}
+
+// OptionalPermissionNotices builds one advisory notice per optional-permission
+// shortfall (as returned by Reconciler.VerifyGrants(OptionalGitHubAppPermissions())),
+// shared by engine startup and `fabrik init` so their wording cannot drift
+// (#2071). Each notice is multi-line and carries no log prefix; callers add
+// their own. GitHub offers no API for an App to gain a permission, so the
+// notices only direct the operator to the two manual steps: an App owner
+// changes the App's settings, then an org admin accepts the request on the
+// installation. owner is always an organization here (App auth refuses
+// user-owned boards).
+func OptionalPermissionNotices(shortfalls []githubauth.RequiredPermissionShortfall, owner, slug string, installationID int64) []string {
+	notices := make([]string, 0, len(shortfalls))
+	for _, sf := range shortfalls {
+		granted := sf.Granted
+		if granted == "" {
+			granted = "none"
+		}
+		enables := ""
+		for _, p := range optionalPermissions {
+			if p.Name == sf.Permission {
+				enables = p.Enables
+				break
+			}
+		}
+		notices = append(notices, fmt.Sprintf(
+			"optional permission %q is not fully granted (granted %q, wanted %q). It enables %s. "+
+				"Fabrik runs without it and falls back to its earlier behaviour, and cannot change it itself — "+
+				"ask an App owner and an org admin:\n"+
+				"  1. App owner: set the permission at https://github.com/organizations/%s/settings/apps/%s/permissions\n"+
+				"  2. Org admin: accept the permission request at https://github.com/organizations/%s/settings/installations/%d",
+			sf.Permission, granted, sf.Required, enables, owner, slug, owner, installationID))
+	}
+	return notices
 }
 
 // RequiredGitHubAppPermissionsForGit is RequiredGitHubAppPermissions with
@@ -443,6 +501,19 @@ func setUpGitHubAppAuth(ctx context.Context, cfg Config, fabrikDir, baseURL stri
 		return nil, nil, fmt.Errorf("GitHub App installation %d is missing required permissions: %s%s — "+
 			"grant these permissions to the installation (App settings → Install App → Configure) and "+
 			"restart Fabrik", cfg.GitHubAppInstallationID, FormatPermissionShortfalls(shortfalls), hint)
+	}
+
+	// Optional permissions (#2071): a second, soft check, deliberately separate
+	// from the fail-hard required one above — merging them would make a failed
+	// grant read fatal again. Advisory only; runs once per process start.
+	optShortfalls, err := reconciler.VerifyGrants(OptionalGitHubAppPermissions())
+	if err != nil {
+		fmt.Printf("[startup] github-app: could not check optional permissions: %v\n", err)
+	} else {
+		slug := strings.TrimSuffix(reconciler.BotLogin(), "[bot]")
+		for _, n := range OptionalPermissionNotices(optShortfalls, cfg.Owner, slug, cfg.GitHubAppInstallationID) {
+			fmt.Printf("[startup] github-app: %s\n", n)
+		}
 	}
 
 	fmt.Printf("[startup] authenticated as %s (GitHub App installation, organization %q)\n", reconciler.BotLogin(), cfg.Owner)
