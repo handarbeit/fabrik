@@ -39,6 +39,12 @@ type Stage struct {
 	// any dirty worktree state before invoking Claude and restore it afterward.
 	ReadOnly bool `yaml:"read_only,omitempty"`
 
+	// PersistSpec makes the engine project the stage's issue-body update to
+	// specs/<issue>-<slug>/spec.md in the worktree and commit that one file
+	// (ADR 2034). It is the narrow, engine-performed write a ReadOnly stage
+	// (Specify) is permitted: the worker itself still writes nothing.
+	PersistSpec bool `yaml:"persist_spec,omitempty"`
+
 	// MaxTurns limits how many turns Claude Code can take per invocation.
 	MaxTurns int `yaml:"max_turns,omitempty"`
 

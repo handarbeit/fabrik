@@ -250,7 +250,9 @@ fabrik --auto-upgrade</pre>
       <p>
         Specify reads the raw issue and works it into a clear specification, asking
         clarifying questions when the request is ambiguous. It runs read-only — the
-        worktree is stashed clean and no code is written.
+        worktree is stashed clean and no code is written — and the engine commits the
+        finished spec to <code>specs/&lt;issue&gt;-&lt;slug&gt;/spec.md</code> so it
+        shows up in the PR beside the code.
       </p>
       <ul class="stage-detail-facts">
         <li>The only stage that rewrites the issue body itself, via <code>FABRIK_ISSUE_UPDATE</code> markers.</li>

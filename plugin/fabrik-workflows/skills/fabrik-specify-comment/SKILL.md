@@ -20,7 +20,7 @@ The content in `.fabrik-context/stage-Specify.md` is the most recent authoritati
 
 Read each new comment carefully. For each answered question:
 - Mark the question as resolved (remove it from the Open Questions list)
-- Add the answer's content to the appropriate section of the spec (Requirements, Scope, etc.)
+- Add the answer's content to the appropriate section of the spec (Functional Requirements, Edge Cases, Assumptions, Out of Scope, etc.)
 - If the answer introduces new precision, update the relevant requirements
 
 ### Surface follow-ups
@@ -31,31 +31,24 @@ If an answer raises new ambiguities or reveals additional gaps:
 
 ### Maintain spec structure
 
-The issue body should always follow this structure after your update:
+The issue body follows the **Spec template** defined in the `fabrik-specify` skill (its "Spec template" section — the single canonical copy; it is deliberately not restated here so the two cannot drift). The current body already has that shape, so edit it in place: keep every heading, header field and the order exactly as they are. If you need the exact template text, for example because the body was written before this format existed and has to be restructured, load the `fabrik-specify` skill with the Skill tool and follow its Spec template section and rules.
 
-```
-## Summary
-One-paragraph description of what this feature does and why.
+When folding in an answer, put it where it belongs structurally:
+- a new behavior becomes an `FR-NNN` requirement under `### Functional Requirements`, appended with the next free number — **never renumber existing FR/SC identifiers**;
+- a measurable outcome becomes an `SC-NNN` under `### Measurable Outcomes`;
+- a new user journey becomes the next `### User Story N - <title> (Priority: Pn)` with its Why this priority, Independent Test and Acceptance Scenarios;
+- a boundary condition goes under `### Edge Cases`, a default you adopted goes under `## Assumptions`, and excluded work goes under `## Out of Scope`;
+- a domain object goes under `### Key Entities`, a source or reference under `## Source References`.
 
-## Requirements
-Bulleted list of specific, testable requirements.
+Replace any `[NEEDS CLARIFICATION]` marker the answer resolves. Stories are named `User Story 1`, `User Story 2` — never `#1`.
 
-## Scope
-What's in and what's out.
+Never rewrite `**Input**` (the original request, verbatim), `**Created**` or `## Background`. Keep the heading `## Open Questions` exactly that — without the template's italic hint — as a convention (the engine also tolerates a copied hint when it strips the section).
 
-## Open Questions
-- [ ] Question (only if unresolved questions remain)
-
-## Prior Art / Context
-Relevant findings from web research or codebase analysis.
-
-## Risks / Dependencies
-Anything that could complicate or block this work.
-```
-
-Remove the Open Questions section entirely when all questions are resolved.
+**Maintain `**Status**` on every update:** `Draft` while any open question remains, `Specified` once none do. `## Open Questions` stays in the issue body only while questions remain and is removed entirely when the last one is resolved (the engine strips it from the committed file either way).
 
 ### Update the issue body
+
+The engine persists this body as `specs/<issue number>-<slug>/spec.md` on the issue's branch after every round that updates it (with `## Open Questions` stripped and the directory name fixed at the first commit), so the body you emit is also the committed spec. **Do not create, edit or commit files yourself** — the engine does the write.
 
 Always output the complete updated issue body using the FABRIK_ISSUE_UPDATE markers:
 

@@ -555,3 +555,19 @@ func TestDriftTitle_NamesMissingFields(t *testing.T) {
 		t.Errorf("expected both fields named, got %q", multi)
 	}
 }
+
+// TestWarnStageDrift_PersistSpecMissingWarns pins that an existing specify.yaml
+// predating persist_spec (ADR 2034) is told about the new key against the
+// real embedded default: the default sets it true, so omitting it is not a no-op.
+func TestWarnStageDrift_PersistSpecMissingWarns(t *testing.T) {
+	setWarningsOverride(t)
+	dir := t.TempDir()
+	userStage := makeUserStage(t, dir, "specify.yaml", "name: Specify\nskill: fabrik-specify\nread_only: true\n")
+
+	var out strings.Builder
+	WarnStageDrift([]*Stage{userStage}, "v0.0.99", &out)
+
+	if !strings.Contains(out.String(), "persist_spec") {
+		t.Errorf("expected drift warning to name persist_spec, got: %q", out.String())
+	}
+}

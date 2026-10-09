@@ -285,6 +285,7 @@ model: sonnet             # Optional: claude model to use
 max_turns: 50             # Optional: max conversation turns per stage invocation
 comment_max_turns: 15     # Optional: max turns when processing user comments (default: min(max_turns,15))
 read_only: false          # Optional: stash/restore worktree; use for analysis stages (Specify, Research)
+persist_spec: true         # Optional: engine commits the issue-body spec to specs/<issue>-<slug>/spec.md (Specify)
 post_to_pr: true          # Optional: post output on linked PR instead of issue
 create_draft_pr: true     # Optional: push branch and create draft PR before Claude runs
 mark_pr_ready_on_complete: true  # Optional: mark PR ready after stage completes

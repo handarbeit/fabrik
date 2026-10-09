@@ -66,6 +66,8 @@ The engine's `updateWorktreeFromMain` rebases the worktree onto main but does no
 
 For `read_only: true` stages (Specify, Research, Plan): dirty state is auto-stashed before Claude runs and restored after. Claude sees a clean worktree.
 
+**Engine-written spec (`persist_spec`, ADR 2034).** Specify is the one read-only stage with a write: when `persist_spec: true`, the engine itself projects the stage's `FABRIK_ISSUE_UPDATE` body to `specs/<issue>-<slug>/spec.md` and commits that single file (`persistSpec`, `engine/spec_persist.go`). The write happens after the issue-body update — after the stash pop on the stage path, and in `publishCommentOutput` on the comment-review path — so a committed file is never stashed or popped, and the pathspec-scoped commit (`git commit -- <path>`) never captures other dirty state. Claude's permissions are unchanged (no `Write`, no git), so there is no worktree-boundary rewrite or audit to consider. `commitWIP` stays skipped for read-only stages. The stage path relies on the existing post-run branch push; the comment-review path, which never pushes by itself, pushes (`pushBranchUnlessQueued`) only when a spec commit was actually created. See [USER_GUIDE](USER_GUIDE.md#persisted-spec).
+
 ### Context Files
 
 Before each Claude invocation, the engine writes context documents to `.fabrik-context/` in the worktree. These files are excluded from git by two mechanisms: a `.gitignore` file written inside `.fabrik-context/` that excludes all files in the directory, and a pre-rebase step that runs `git rm -rf --cached .fabrik-context/` to remove any accidentally tracked context files before rebasing.
@@ -166,7 +168,7 @@ For non-read-only, non-unrestricted stages (Implement, Review, Validate, and any
 
 This proactively restricts Claude Code's file-editing tools to the assigned worktree directory. If Claude attempts to edit or write a file outside the worktree, it receives an error from Claude Code and the stage continues running (the attempt is blocked, not the whole stage).
 
-**Scope:** Enforced for all stages where `read_only: false`. Skipped for read-only stages (Specify, Research, Plan by default) — they do not write files and receive bare `Edit`/`Write` entries (or none, if `allowed_tools:` is overridden in stage YAML).
+**Scope:** Enforced for all stages where `read_only: false`. Skipped for read-only stages (Specify, Research, Plan by default) — they do not write files and receive bare `Edit`/`Write` entries (or none, if `allowed_tools:` is overridden in stage YAML). Specify's `persist_spec` write is made by the engine, not by Claude, so it is outside this layer by construction.
 
 **Bypass:** When `fabrik:unrestricted` is present on the issue, `--dangerously-skip-permissions` is passed instead of `--allowedTools`, bypassing this restriction entirely (consistent with the existing semantics of that label).
 
@@ -685,7 +687,7 @@ When `FABRIK_BLOCKED_ON_INPUT` is detected (and Claude ran without error):
 
 ### Incomplete Path (No Marker)
 
-1. Partial-progress commit (unless read-only): `git add -A && git commit -m "chore: partial <StageName> stage progress (incomplete)"`
+1. Partial-progress commit (unless read-only): `git add -A && git commit -m "chore: partial <StageName> stage progress (incomplete)"`. A read-only Specify stage with `persist_spec` has already committed its spec file itself (including on a blocked round), so nothing is left for this step.
 2. Branch pushed
 3. Cooldown timer: `pollSeconds * 10` seconds
 4. Lock held through cooldown
