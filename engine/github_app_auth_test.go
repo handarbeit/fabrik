@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -52,6 +53,11 @@ type fakeGitHubAppServerConfig struct {
 	accessibleRepos []string // full_name entries served by /installation/repositories
 	reposTruncated  bool     // when true, never returns a short page — forces the pagination ceiling
 	failRepoList    bool     // when true, /installation/repositories always 500s
+	// failInstallationGetAfter, when > 0, makes every GET /app/installations/{id}
+	// after the Nth one answer 500 (#2071: the optional-permission read is the
+	// call after the required one). Zero means never fail.
+	failInstallationGetAfter int
+	installationGets         *atomic.Int32 // when set, counts every GET /app/installations/{id}
 }
 
 // fakeGitHubAppServerOption configures fakeGitHubAppServerConfig — see
@@ -78,6 +84,18 @@ func withFailRepoList() fakeGitHubAppServerOption {
 	return func(c *fakeGitHubAppServerConfig) { c.failRepoList = true }
 }
 
+// withFailInstallationGetAfter makes GET /app/installations/{id} fail with a
+// 500 from call n+1 onwards, so a test can let the required-permission read
+// succeed and fail only the later optional one.
+func withFailInstallationGetAfter(n int) fakeGitHubAppServerOption {
+	return func(c *fakeGitHubAppServerConfig) { c.failInstallationGetAfter = n }
+}
+
+// withInstallationGetCounter counts GET /app/installations/{id} calls into n.
+func withInstallationGetCounter(n *atomic.Int32) fakeGitHubAppServerOption {
+	return func(c *fakeGitHubAppServerConfig) { c.installationGets = n }
+}
+
 // newFakeGitHubAppServer serves just enough of the GitHub App + GraphQL
 // surface for setUpGitHubAppAuth/resolveGitHubAppAuth to run end-to-end
 // against an httptest server: /app (identity), /app/installations (list —
@@ -96,6 +114,10 @@ func newFakeGitHubAppServer(t *testing.T, installationID int64, account, ownerTy
 		opt(&cfg)
 	}
 	mux := http.NewServeMux()
+	installationGets := cfg.installationGets
+	if installationGets == nil {
+		installationGets = new(atomic.Int32)
+	}
 	mux.HandleFunc("/installation/repositories", func(w http.ResponseWriter, r *http.Request) {
 		if cfg.failRepoList {
 			w.WriteHeader(http.StatusInternalServerError)
@@ -131,6 +153,11 @@ func newFakeGitHubAppServer(t *testing.T, installationID int64, account, ownerTy
 				"token":      "ghs_test_token",
 				"expires_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
 			})
+			return
+		}
+		if n := installationGets.Add(1); cfg.failInstallationGetAfter > 0 && int(n) > cfg.failInstallationGetAfter {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{"message":"simulated installation read failure"}`))
 			return
 		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -638,5 +665,126 @@ func TestActionsPermissionIsOptionalNotRequired(t *testing.T) {
 	}
 	if got := OptionalGitHubAppPermissions()["actions"]; got != "write" {
 		t.Errorf("optional actions = %q, want write", got)
+	}
+}
+
+// optionalNoticeMarker is a phrase unique to the optional-permission notice
+// built by OptionalPermissionNotices.
+const optionalNoticeMarker = `optional permission "actions" is not fully granted`
+
+func runOptionalSetUp(t *testing.T, perms map[string]string, opts ...fakeGitHubAppServerOption) (string, error) {
+	t.Helper()
+	dir := t.TempDir()
+	keyPath := writeEngineTestAppKey(t, dir)
+	srv := newFakeGitHubAppServer(t, 999, "handarbeit", "organization", perms, opts...)
+	cfg := Config{
+		Owner: "handarbeit", Repo: "fabrik",
+		GitHubAppID: 42, GitHubAppPrivateKeyPath: keyPath, GitHubAppInstallationID: 999,
+	}
+	var err error
+	out := captureStdout(func() {
+		_, _, err = setUpGitHubAppAuth(context.Background(), cfg, dir, srv.URL)
+	})
+	return out, err
+}
+
+// TestSetUpGitHubAppAuth_OptionalShortfall_NoticeOnceAndContinues is the
+// neutralisation-sensitive test for #2071 R3: removing the startup check
+// drops the notice count to 0.
+func TestSetUpGitHubAppAuth_OptionalShortfall_NoticeOnceAndContinues(t *testing.T) {
+	out, err := runOptionalSetUp(t, httpsGitAppPerms()) // lacks actions
+	if err != nil {
+		t.Fatalf("setUpGitHubAppAuth: %v", err)
+	}
+	if got := strings.Count(out, optionalNoticeMarker); got != 1 {
+		t.Fatalf("optional notice count = %d, want 1; output: %q", got, out)
+	}
+	for _, want := range []string{
+		"[startup] github-app: ",
+		`granted "none", wanted "write"`,
+		"https://github.com/organizations/handarbeit/settings/apps/fabrik/permissions",
+		"https://github.com/organizations/handarbeit/settings/installations/999",
+		"[startup] authenticated as",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q: %q", want, out)
+		}
+	}
+}
+
+func TestSetUpGitHubAppAuth_OptionalGranted_NoNotice(t *testing.T) {
+	perms := httpsGitAppPerms()
+	perms["actions"] = "write"
+	out, err := runOptionalSetUp(t, perms)
+	if err != nil {
+		t.Fatalf("setUpGitHubAppAuth: %v", err)
+	}
+	if strings.Contains(out, optionalNoticeMarker) || strings.Contains(out, "could not check optional") {
+		t.Errorf("unexpected optional-permission output: %q", out)
+	}
+}
+
+func TestSetUpGitHubAppAuth_OptionalGrantReadError_LoggedOnceNonFatal(t *testing.T) {
+	// Learn how many installation GETs a healthy start makes; the optional
+	// read is the last of them, so fail from that one onwards.
+	var gets atomic.Int32
+	if _, err := runOptionalSetUp(t, httpsGitAppPerms(), withInstallationGetCounter(&gets)); err != nil {
+		t.Fatalf("baseline setUpGitHubAppAuth: %v", err)
+	}
+	total := int(gets.Load())
+	if total < 2 {
+		t.Fatalf("expected at least 2 installation GETs (required + optional), saw %d", total)
+	}
+	out, err := runOptionalSetUp(t, httpsGitAppPerms(), withFailInstallationGetAfter(total-1))
+	if err != nil {
+		t.Fatalf("a failed optional read must not fail startup: %v", err)
+	}
+	if got := strings.Count(out, "could not check optional permissions"); got != 1 {
+		t.Errorf("read-error line count = %d, want 1; output: %q", got, out)
+	}
+	if strings.Contains(out, optionalNoticeMarker) {
+		t.Errorf("no shortfall notice expected when the read failed: %q", out)
+	}
+}
+
+func TestOptionalPermissionNotices(t *testing.T) {
+	if got := OptionalPermissionNotices(nil, "o", "s", 1); len(got) != 0 {
+		t.Errorf("no shortfalls = %d notices, want 0", len(got))
+	}
+	notices := OptionalPermissionNotices([]githubauth.RequiredPermissionShortfall{
+		{Permission: "actions", Required: "write", Granted: "read"},
+	}, "acme", "my-app", 77)
+	if len(notices) != 1 {
+		t.Fatalf("got %d notices, want 1", len(notices))
+	}
+	n := notices[0]
+	for _, want := range []string{
+		`"actions"`, `granted "read"`, `wanted "write"`,
+		"gh run rerun", "cannot change it itself",
+		"https://github.com/organizations/acme/settings/apps/my-app/permissions",
+		"https://github.com/organizations/acme/settings/installations/77",
+	} {
+		if !strings.Contains(n, want) {
+			t.Errorf("notice missing %q:\n%s", want, n)
+		}
+	}
+}
+
+// TestOptionalPermissions_DescriptorsComplete guards R4: every optional
+// permission has a name, level and "enables" text, and the accessor map
+// matches the descriptors, so a future optional permission cannot print a
+// blank notice or drift from the manifest.
+func TestOptionalPermissions_DescriptorsComplete(t *testing.T) {
+	perms := OptionalGitHubAppPermissions()
+	if len(perms) != len(optionalPermissions) {
+		t.Fatalf("accessor has %d entries, descriptors %d", len(perms), len(optionalPermissions))
+	}
+	for _, p := range optionalPermissions {
+		if p.Name == "" || p.Level == "" || strings.TrimSpace(p.Enables) == "" {
+			t.Errorf("incomplete optional permission descriptor: %+v", p)
+		}
+		if perms[p.Name] != p.Level {
+			t.Errorf("accessor[%q] = %q, want %q", p.Name, perms[p.Name], p.Level)
+		}
 	}
 }
