@@ -160,21 +160,46 @@ func (e *Engine) ciFlakeRerun(pctx *phase1Ctx, settle PRSettleResult) bool {
 	short := pr.HeadSHA[:min(8, len(pr.HeadSHA))]
 
 	// Everything that reads or writes the state, including marking the budget
-	// spent, happens under the lock before any API call: the poll loop and
+	// spent, happens under the lock before any re-run API call: the poll loop and
 	// settleAwaitingCIScan can both reach this code, and a head must never be
 	// re-run twice (R3).
-	e.flakeRerunMu.Lock()
-	if e.flakeRerunDisabled {
-		e.flakeRerunMu.Unlock()
+	//
+	// rerunInFlight is a GitHub read, so it never runs under the lock (one slow
+	// call would stall every other PR's flake handling). decideFlakeRerun is run
+	// once with a probe that only notes the read is needed and answers "still in
+	// flight" (which makes it return flakeWait without touching the state); the
+	// read then happens unlocked, and the decision is re-taken against the state
+	// as it is by then, with the probed answer.
+	var (
+		st             *prFlakeState
+		action         flakeAction
+		probeRunIDs    []int64
+		inFlightNeeded bool
+	)
+	decide := func(inFlight func([]int64) bool) bool {
+		e.flakeRerunMu.Lock()
+		if e.flakeRerunDisabled {
+			e.flakeRerunMu.Unlock()
+			return false
+		}
+		st = e.flakeStateForLocked(repoStr, pr.Number, pr.HeadSHA, now)
+		action = decideFlakeRerun(st, failed, noOp, now, timing.rerunSettleDwell, timing.rerunMaxWait, inFlight)
+		return true
+	}
+	if !decide(func(runIDs []int64) bool {
+		inFlightNeeded = true
+		probeRunIDs = append([]int64(nil), runIDs...)
+		return true
+	}) {
 		return false
 	}
-	st := e.flakeStateForLocked(repoStr, pr.Number, pr.HeadSHA, now)
-	// rerunInFlight does a network read; the lock is held across it only on the
-	// rare path where the settle dwell has elapsed with just the stale failure
-	// visible. Holding it keeps the decision and the state it clears atomic.
-	action := decideFlakeRerun(st, failed, noOp, now, timing.rerunSettleDwell, timing.rerunMaxWait, func(runIDs []int64) bool {
-		return e.rerunInFlight(repoStr, owner, repo, pr.HeadSHA, runIDs)
-	})
+	if inFlightNeeded {
+		e.flakeRerunMu.Unlock()
+		inFlight := e.rerunInFlight(repoStr, owner, repo, pr.HeadSHA, probeRunIDs)
+		if !decide(func([]int64) bool { return inFlight }) {
+			return false
+		}
+	}
 	var label string
 	switch action {
 	case flakeRerunR1:

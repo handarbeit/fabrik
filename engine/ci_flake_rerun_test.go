@@ -195,6 +195,36 @@ func TestFlakeRerun_InFlightExtendsWaitUntilMaxWait(t *testing.T) {
 	}
 }
 
+// The in-flight workflow-run read is a GitHub call and must not run while
+// flakeRerunMu is held, or one slow read would stall every other PR's flake
+// handling (and SetCIFlakeRerunDisabledForTest).
+func TestFlakeRerun_InFlightReadRunsWithoutHoldingTheLock(t *testing.T) {
+	f := newFlakeFixture(t)
+	f.poll(t)
+
+	var reads, lockedReads atomic.Int32
+	f.client.fetchWorkflowRunsFn = func(owner, repo, sha string) ([]gh.WorkflowRun, error) {
+		reads.Add(1)
+		if !f.eng.flakeRerunMu.TryLock() {
+			lockedReads.Add(1)
+		} else {
+			f.eng.flakeRerunMu.Unlock()
+		}
+		return []gh.WorkflowRun{{ID: 900, Status: "in_progress", JobCount: 1}}, nil
+	}
+
+	f.clock.Advance(defaultTrainRerunSettleDwell + time.Minute)
+	if f.poll(t) {
+		t.Fatal("in-flight re-run past the dwell dispatched a worker")
+	}
+	if reads.Load() == 0 {
+		t.Fatal("the in-flight read was never made")
+	}
+	if n := lockedReads.Load(); n != 0 {
+		t.Fatalf("%d in-flight read(s) ran while flakeRerunMu was held", n)
+	}
+}
+
 // With the re-run finished (not in flight) and only the stale failure visible,
 // the dwell elapsing makes the failure the verdict.
 func TestFlakeRerun_StaleFailurePastDwellDispatches(t *testing.T) {
