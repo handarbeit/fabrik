@@ -274,6 +274,17 @@ func runGitHubAppSetup(ctx context.Context, opts githubAppSetupOptions) (*github
 			installationID, engine.FormatPermissionShortfalls(shortfalls), hint, approvalURL)
 	}
 
+	// Optional permissions (#2071): advisory only, never fails init.
+	optShortfalls, err := reconciler.VerifyGrants(engine.OptionalGitHubAppPermissions())
+	if err != nil {
+		fmt.Printf("  github-app: warning: could not check optional permissions: %v\n", err)
+	} else {
+		slug := strings.TrimSuffix(reconciler.BotLogin(), "[bot]")
+		for _, n := range engine.OptionalPermissionNotices(optShortfalls, opts.Owner, slug, installationID) {
+			fmt.Printf("  github-app: %s\n", n)
+		}
+	}
+
 	fmt.Printf("  github-app: authenticated as %s (installation %d, organization %q)\n", reconciler.BotLogin(), installationID, opts.Owner)
 
 	return &githubAppSetupResult{
