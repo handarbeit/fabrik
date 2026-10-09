@@ -489,6 +489,8 @@ https://github.com/settings/installations/789012 (an org admin may be required),
 then re-run `fabrik init --github-app`
 ```
 
+Optional permissions (currently `actions: write`) are checked separately and only ever produce an advisory notice — see "Upgrading an existing App" under [Startup permission verification](#startup-permission-verification).
+
 **Contents permission.** A newly created App always requests `contents: write`, because by default git runs over HTTPS as the installation (see [Git under App auth](#git-under-app-auth)). Verification follows the engine's own rule: `contents: write` is required unless git runs over SSH — `git_ssh: true` in an existing `.fabrik/config.yaml`, `FABRIK_GIT_SSH`, or a global `url.git@github.com:.insteadOf` rewrite. An App created before this change requested only `contents: read`; there is nothing for the installation to approve until the App itself asks for more, so the error names the App's permissions page as the first step:
 
 ```
@@ -581,7 +583,13 @@ GitHub App installation 789012 is missing required permissions: organization_pro
 
 The engine currently requires: `metadata:read`, `organization_projects:write`, `issues:write`, `pull_requests:write`, `checks:read`, `statuses:read`, `contents:read` — `contents:write` instead when git runs over HTTPS (the default; see "Git under App auth" below). (`--webhooks` cannot be combined with App auth at all — see Known limitations below — so no webhook-management permission is ever required here.) Notably absent: `actions` — see "Worker `gh` CLI authentication" below for what that means for `gh run` usage.
 
-**Optional but recommended: `actions: write`.** With it, Fabrik can tell a CI run that never started (a GitHub Actions `startup_failure`) and a single flaky test from a real failure, instead of waiting hours or blaming a member (see "CI infrastructure failures" under Merge Train). It is **not** checked at startup and an installation without it keeps working exactly as before — a refused workflow-run read or re-run is logged once and skipped. `fabrik init --github-app` requests it for a *newly created* App; for an existing installation, grant `Actions: Read and write` in the App's settings (Permissions & events) and accept the updated permissions on the installation. A personal access token with the classic `repo` scope already covers it.
+**Optional but recommended: `actions: write`.** With it, Fabrik can tell a CI run that never started (a GitHub Actions `startup_failure`) and a single flaky test from a real failure, instead of waiting hours or blaming a member (see "CI infrastructure failures" under Merge Train). It is **never required**: the fail-hard startup check ignores it, and an installation without it keeps working exactly as before — a refused workflow-run read or re-run is logged once and skipped. Fabrik does tell you about the gap, though: at startup it logs one advisory `[startup] github-app: optional permission "actions" is not fully granted …` notice, and `fabrik init --github-app` prints the same notice when it adopts an installation that lacks it. Neither is ever fatal. `fabrik init --github-app` requests it for a *newly created* App; an App created earlier needs the manual steps below. A personal access token with the classic `repo` scope already covers it.
+
+**Upgrading an existing App.** GitHub offers no API for an App to gain a permission, so Fabrik can only detect the gap and point you at the two manual steps (each notice carries both URLs):
+
+1. An App owner or manager opens the App's settings → *Permissions & events* (`https://github.com/organizations/<owner>/settings/apps/<app-slug>/permissions`), sets *Actions* to *Read and write*, and saves. GitHub then sends a permission-change request to every installation.
+2. An org admin opens the installation (`https://github.com/organizations/<owner>/settings/installations/<installation-id>`, or Settings → GitHub Apps → Configure) and accepts the pending request.
+3. Restart Fabrik. The notice disappears once the installation grants the permission.
 
 #### Per-repo access coverage
 
