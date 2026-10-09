@@ -78,7 +78,7 @@ func (s *Sim) FetchLinkedPR(owner, repo string, issueNumber int) (*gh.PRDetails,
 	snap := *found
 	s.mu.Unlock()
 
-	headSHA, err := s.resolveRefSHA(owner, repo, snap.head)
+	headSHA, headGone, err := s.resolvePRHead(owner, repo, snap.number, snap.head)
 	if err != nil {
 		return nil, err
 	}
@@ -86,7 +86,7 @@ func (s *Sim) FetchLinkedPR(owner, repo string, issueNumber int) (*gh.PRDetails,
 	return &gh.PRDetails{
 		Number:              snap.number,
 		Title:               snap.title,
-		State:               snap.state,
+		State:               stateWithHeadGone(snap.state, snap.merged, headGone),
 		Merged:              snap.merged,
 		Draft:               snap.draft,
 		HeadSHA:             headSHA,
@@ -100,6 +100,43 @@ func (s *Sim) FetchLinkedPR(owner, repo string, issueNumber int) (*gh.PRDetails,
 		Author:              snap.author,
 		Labels:              cloneStrings(snap.labels),
 	}, nil
+}
+
+// resolvePRHead resolves a PR's head SHA for a read. While the head branch
+// exists it returns the live tip and remembers it on the record. Once the
+// branch is gone it returns the last SHA remembered and gone=true: real GitHub
+// closes a PR whose head branch is deleted and keeps listing it with its last
+// head SHA, so a deleted trial branch must not make every later PR read fail.
+// Takes gitMu then mu, never both at once; must not be called holding mu.
+func (s *Sim) resolvePRHead(owner, repo string, number int, branch string) (sha string, gone bool, err error) {
+	live, err := s.resolveRefSHA(owner, repo, branch)
+	if err != nil {
+		return "", false, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, err := s.lookupRepo(owner, repo)
+	if err != nil {
+		return "", false, err
+	}
+	pr := r.prs[number]
+	if pr == nil {
+		return live, live == "", nil
+	}
+	if live != "" {
+		pr.lastHeadSHA = live
+		return live, false, nil
+	}
+	return pr.lastHeadSHA, true, nil
+}
+
+// stateWithHeadGone reports an open PR whose head branch no longer exists as
+// closed, as GitHub does. A merged or already-closed PR keeps its state.
+func stateWithHeadGone(state string, merged, headGone bool) string {
+	if headGone && !merged && state == "open" {
+		return "closed"
+	}
+	return state
 }
 
 // ListPRs returns every PR in the repo, most-recently-updated first. Like
@@ -146,14 +183,14 @@ func (s *Sim) ListPRs(owner, repo string) ([]gh.PRDetails, error) {
 
 	out := make([]gh.PRDetails, 0, len(snaps))
 	for i := range snaps {
-		headSHA, err := s.resolveRefSHA(owner, repo, snaps[i].head)
+		headSHA, headGone, err := s.resolvePRHead(owner, repo, snaps[i].number, snaps[i].head)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, gh.PRDetails{
 			Number:      snaps[i].number,
 			Title:       snaps[i].title,
-			State:       snaps[i].state,
+			State:       stateWithHeadGone(snaps[i].state, snaps[i].merged, headGone),
 			Merged:      snaps[i].merged,
 			Draft:       snaps[i].draft,
 			HeadSHA:     headSHA,
@@ -452,7 +489,7 @@ func (s *Sim) FetchPRDetails(owner, repo string, prNumber int) (*gh.PRDetails, e
 		return nil, err
 	}
 
-	headSHA, err := s.resolveRefSHA(owner, repo, snap.head)
+	headSHA, headGone, err := s.resolvePRHead(owner, repo, snap.number, snap.head)
 	if err != nil {
 		return nil, err
 	}
@@ -460,7 +497,7 @@ func (s *Sim) FetchPRDetails(owner, repo string, prNumber int) (*gh.PRDetails, e
 	return &gh.PRDetails{
 		Number:           snap.number,
 		Title:            snap.title,
-		State:            snap.state,
+		State:            stateWithHeadGone(snap.state, snap.merged, headGone),
 		Merged:           snap.merged,
 		Draft:            snap.draft,
 		Body:             snap.body,

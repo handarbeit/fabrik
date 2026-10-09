@@ -934,3 +934,75 @@ func TestExecute_PATMode_StillRequiresUser(t *testing.T) {
 		t.Fatalf("err = %v, want 'user is required'", err)
 	}
 }
+
+func TestSingletonCatchUpMode(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"", "merge"},
+		{"merge", "merge"},
+		{"MERGE", "merge"},
+		{"off", "off"},
+		{"OFF", "off"},
+		{"rebase", "merge"},
+	}
+	for _, c := range cases {
+		if got := singletonCatchUpMode(c.in); got != c.want {
+			t.Errorf("singletonCatchUpMode(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestExecute_SingletonCatchUpConfigOnly(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755)
+	os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte("singleton_catch_up: off\n"), 0644)
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}
+
+	cfg := executeWithConfigHook(t)
+	if got := singletonCatchUpMode(cfg.SingletonCatchUp); got != "off" {
+		t.Errorf("resolved singleton catch-up = %q, want off (config.yaml should set it)", got)
+	}
+}
+
+func TestExecute_SingletonCatchUpDefault(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}
+
+	cfg := executeWithConfigHook(t)
+	if got := singletonCatchUpMode(cfg.SingletonCatchUp); got != "merge" {
+		t.Errorf("resolved singleton catch-up = %q, want merge (the default)", got)
+	}
+}
+
+func TestExecute_SingletonCatchUpFlagBeatsEnvBeatsConfig(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755)
+	os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte("singleton_catch_up: off\n"), 0644)
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	t.Setenv("FABRIK_SINGLETON_CATCH_UP", "off")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir, "--singleton-catch-up", "merge"}
+	cfg := executeWithConfigHook(t)
+	if got := singletonCatchUpMode(cfg.SingletonCatchUp); got != "merge" {
+		t.Errorf("flag should beat env and config: got %q, want merge", got)
+	}
+
+	// env beats config.
+	dir2, stagesDir2 := setupValidStages(t)
+	chdirTest(t, dir2)
+	os.MkdirAll(filepath.Join(dir2, ".fabrik"), 0755)
+	os.WriteFile(filepath.Join(dir2, ".fabrik", "config.yaml"), []byte("singleton_catch_up: off\n"), 0644)
+	resetFlags()
+	t.Setenv("FABRIK_SINGLETON_CATCH_UP", "merge")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir2}
+	cfg = executeWithConfigHook(t)
+	if got := singletonCatchUpMode(cfg.SingletonCatchUp); got != "merge" {
+		t.Errorf("env should beat config: got %q, want merge", got)
+	}
+}

@@ -59,7 +59,11 @@ func (e *Engine) unprocessedFeedback(item gh.ProjectItem, alreadyLive bool) pend
 		reviews = item.LinkedPRReviews
 	}
 	pf.Comments = e.findNewComments(item)
-	pf.Threads = e.currentHeadReviewThreadComments(item)
+	// #2044: a bot review of a pure merge-train catch-up push is non-actionable for this
+	// landing. Applied here and in queuedReviewFindings so the eject scan and this gate
+	// share one answer.
+	threads, reviews := e.dropCatchUpFeedback(item, e.currentHeadReviewThreadComments(item), reviews)
+	pf.Threads = threads
 	pf.Bodies = e.buildReviewBodyCommentsFromReviews(item, reviews)
 	return pf
 }
