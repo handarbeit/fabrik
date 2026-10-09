@@ -2536,7 +2536,7 @@ Fabrik distinguishes CI that is *slow* from CI that is *dead*, and bounds only t
 - **CI checks failed:** never a timeout. A confirmed failure always triggers the CI-fix re-invocation above, however long `fabrik:awaiting-ci` has been present. This is a verdict, not a wait.
 - **CI checks still pending, and observably progressing** (a check-run status changed, or a fresh commit was pushed, since the last poll): Fabrik waits indefinitely. An 18-minute suite and a 3-hour suite are both fine — nothing about their duration counts against a deadline.
 - **CI checks still pending, with no progress observed for `FABRIK_CI_WAIT_TIMEOUT` minutes:** Fabrik pauses the issue with `fabrik:awaiting-input`. This is the genuine stall case — something stopped reporting.
-- **A required check that never starts, or a legacy Commit Status actively blocking merge with no check runs at all:** also governed by `FABRIK_CI_WAIT_TIMEOUT`, unchanged — there is no check-run signal in these cases to observe progress on, so a plain elapsed-time dwell remains the right instrument (see R3 above).
+- **A required check that never starts, or a legacy Commit Status actively blocking merge with no check runs at all:** also governed by `FABRIK_CI_WAIT_TIMEOUT`, unchanged — there is no check-run signal in these cases to observe progress on, so a plain elapsed-time dwell remains the right instrument (see R3 above). Time the issue spent paused does not count toward this dwell (nor toward the merge-queue stall dwell): it is measured from the later of `fabrik:awaiting-ci` being applied and the issue's most recent resume.
 
 > **Known gap — the pending-and-stalled case above is not currently reached via the normal catch-up loop.** The merge gate (`checkMergeabilityGate`) unconditionally claims any item with check runs still pending before the CI gate is ever evaluated, so `FABRIK_CI_WAIT_TIMEOUT` never actually fires for "checks pending but frozen" in practice — only `FABRIK_CI_BACKSTOP_TIMEOUT` (below, default 4h) escalates that case today. If you lower `FABRIK_CI_WAIT_TIMEOUT` expecting a stalled-but-pending PR to escalate sooner, it won't; lower `FABRIK_CI_BACKSTOP_TIMEOUT` instead. See ADR-1410's "Architectural discovery" section for the full detail.
 
@@ -2587,7 +2587,7 @@ If both labels are present, cruise takes precedence for both decisions — the P
 
 **Convergence budget**
 
-Fabrik gives the PR a wall-clock window (default: 30 minutes) to reach a terminal state after auto-merge is enabled. The budget starts when the `fabrik:auto-merge-enabled` label is applied and is durable across engine restarts (the label's creation timestamp is fetched from the GitHub events API).
+Fabrik gives the PR a wall-clock window (default: 30 minutes) to reach a terminal state after auto-merge is enabled. The budget starts when the `fabrik:auto-merge-enabled` label is applied and is durable across engine restarts (the label's creation timestamp is fetched from the GitHub events API). Time spent paused does not count: if the issue was paused and then resumed, the budget is measured from the resume.
 
 ```bash
 FABRIK_CONVERGENCE_BUDGET=1h    # Wait up to 1 hour (default: 30m)

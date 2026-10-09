@@ -351,7 +351,10 @@ func (e *Engine) classifyCIFromRequiredContexts(owner, repo string, item gh.Proj
 // check-run signal to observe progress on at all — there is nothing coming
 // without human intervention — so they keep the original labelAppliedAt-anchored
 // elapsed-time dwell (ADR-1410): the only classifier for which a plain elapsed
-// clock remains the right instrument.
+// clock remains the right instrument. The dwell is measured from the later of
+// that label anchor and the item's latest fabrik:paused removal
+// (effectiveAnchor, #2064), so paused time never counts; the event-log read is
+// paid only once the label anchor is already past the timeout.
 //
 // The R3 pause branch reports terminated=true (rather than reusing the
 // all-false "gate cleared" tuple) since it calls pauseForRequiredNeverRunningCheck
@@ -364,7 +367,8 @@ func (e *Engine) classifyCIFromMergeableState(board *gh.ProjectBoard, item gh.Pr
 			appliedAt, err := e.labelAppliedAt(item, owner, repo, "fabrik:awaiting-ci")
 			if err != nil {
 				e.logf(item.Number, "warn", "R3: could not fetch awaiting-ci label timestamp: %v\n", err)
-			} else if !appliedAt.IsZero() && time.Since(appliedAt) >= e.ciWaitTimeout() {
+			} else if !appliedAt.IsZero() && time.Since(appliedAt) >= e.ciWaitTimeout() &&
+				time.Since(e.effectiveAnchor(item, owner, repo, "ci-gate", "the CIWaitTimeout never-checked dwell", appliedAt, e.ciWaitTimeout())) >= e.ciWaitTimeout() {
 				e.logf(item.Number, "ci-gate", "R3: PR #%d OPEN+BLOCKED with no check runs ever — required check likely never triggers on PRs; pausing\n", prNum)
 				e.pauseForRequiredNeverRunningCheck(board, item, stage, prNum)
 				return false, false, false, true
@@ -379,7 +383,8 @@ func (e *Engine) classifyCIFromMergeableState(board *gh.ProjectBoard, item gh.Pr
 			appliedAt, err := e.labelAppliedAt(item, owner, repo, "fabrik:awaiting-ci")
 			if err != nil {
 				e.logf(item.Number, "warn", "could not fetch awaiting-ci label timestamp: %v\n", err)
-			} else if !appliedAt.IsZero() && time.Since(appliedAt) >= e.ciWaitTimeout() {
+			} else if !appliedAt.IsZero() && time.Since(appliedAt) >= e.ciWaitTimeout() &&
+				time.Since(e.effectiveAnchor(item, owner, repo, "ci-gate", "the CIWaitTimeout mergeable-state dwell", appliedAt, e.ciWaitTimeout())) >= e.ciWaitTimeout() {
 				e.logf(item.Number, "warn", "CI wait timeout elapsed for mergeable_state=%q with no check_runs — pausing issue\n", mergeableState)
 				e.removeAwaitingCILabel(owner, repo, item)
 				return false, false, true, false

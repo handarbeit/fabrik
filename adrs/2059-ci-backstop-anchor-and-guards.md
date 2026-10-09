@@ -37,9 +37,19 @@ The comparison stays on wall-clock `time.Since`, as every sibling timeout does. 
 
 There is no repo convention or production test hook for proving a guard's test fails without the guard, and none is added. Each guard has a unit test that leaves the other two open, so that guard alone separates "escalated" from "not". A manual mutation pass (remove each guard in turn, restore it) confirmed that exactly the matching tests fail; the sim twin (`tests/sim/ci_backstop_resume_test.go`) fails with the R1 anchor removed.
 
-## Sibling timeouts (recorded, out of scope)
+## Sibling timeouts (fixed by #2064)
 
-The same "paused time counts" defect exists wherever a timeout anchors on a never-reset label timestamp: `classifyCIFromMergeableState`'s R3 never-checked and mergeable-state-blocked dwells (`engine/ci.go`, `CIWaitTimeout`), the merge-queue stall dwell (anchored on `fabrik:auto-merge-enabled`) and `ConvergenceBudget` (`engine/merge_gate.go`). They are reached only after a live CI read, so they are not blind pauses, but a just-resumed over-timeout item whose live state is "no check runs and blocked" can still be re-paused through them with the smaller `CIWaitTimeout`. `classifyCIFromCheckRuns`'s liveness stall uses the in-memory `LastCIProgressAt`, which a restart resets to "never observed" (already safe). A follow-up issue is to be filed for the label-anchored ones.
+The same "paused time counts" defect existed wherever a timeout anchors on a never-reset label timestamp: `classifyCIFromMergeableState`'s R3 never-checked and mergeable-state-blocked dwells (`engine/ci.go`, `CIWaitTimeout`), the merge-queue stall dwell (anchored on `fabrik:auto-merge-enabled`) and `ConvergenceBudget` (`engine/merge_gate.go`). They are reached only after a live CI read, so they were not blind pauses, but a just-resumed over-timeout item whose live state is "no check runs and blocked" could still be re-paused through them with the smaller `CIWaitTimeout`.
+
+#2064 fixed all four by moving the anchor logic into one shared helper, `effectiveAnchor` (`engine/resume_anchor.go`): the later of the label's applied time and the latest `fabrik:paused` removal, with the same fail direction (unreadable falls back to the label anchor and still escalates). The #2059 backstop now calls it too. Decisions:
+
+- **Comparison stays at the call site.** The helper returns only a time. The dwells keep `>=` and `ConvergenceBudget` keeps its strict `>`; the `CIWaitTimeout > 0` and `ConvergenceBudget > 0` disable guards and the escalation messages are untouched. Each site tests the cheap label anchor first and calls the helper only once already over its timeout, so items under the timeout cost no event-log read.
+- **One shared resume memo, per-call window.** The memo stores only the raw removal time; each caller tests it against its own timeout (4h backstop, 30m dwell, budget), so a resume that is recent for one site cannot wrongly skip at a shorter one.
+- **`pauseForConvergenceFailed` reports elapsed from the effective anchor** — the time that actually counted toward the budget.
+
+`classifyCIFromCheckRuns`'s liveness stall uses the in-memory `LastCIProgressAt`, which a restart resets to "never observed" (already safe, unchanged).
+
+Neutralisation (same manual mutation pass as above): replacing the `effectiveAnchor` call with the raw label anchor at each of the five sites in turn makes exactly that site's "resumed recently is not escalated" test fail (`TestCIWaitDwells_ExcludePausedTime` for each dwell, `TestMergeQueueStall_ExcludesPausedTime`, `TestConvergenceBudget_ExcludesPausedTime`, and the #2059 `Backstop_R1` tests).
 
 ## Consequences
 

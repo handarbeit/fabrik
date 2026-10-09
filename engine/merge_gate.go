@@ -354,13 +354,16 @@ func (e *Engine) checkAutoMergeConvergence(ctx context.Context, board *gh.Projec
 		// past CIWaitTimeout with no merge-group CI ever reporting (observable as
 		// settle.Status remaining PRMergeQueued past the dwell), pause the issue with
 		// an instructional comment. The dwell is anchored to fabrik:auto-merge-enabled
-		// applied-at (set at first enqueue) so it survives restarts. Guard on
+		// applied-at (set at first enqueue) so it survives restarts, measured from the
+		// later of that and the latest fabrik:paused removal so paused time does not
+		// count (effectiveAnchor, #2064). Guard on
 		// CIWaitTimeout > 0 so operators can disable the check.
 		if e.cfg.CIWaitTimeout > 0 {
 			appliedAt, faErr := e.labelAppliedAt(item, owner, repo, "fabrik:auto-merge-enabled")
 			if faErr != nil {
 				e.logf(item.Number, "auto-merge", "could not fetch fabrik:auto-merge-enabled applied-at for stall check: %v\n", faErr)
-			} else if !appliedAt.IsZero() && time.Since(appliedAt) >= e.cfg.CIWaitTimeout {
+			} else if !appliedAt.IsZero() && time.Since(appliedAt) >= e.cfg.CIWaitTimeout &&
+				time.Since(e.effectiveAnchor(item, owner, repo, "auto-merge", "the merge-queue stall dwell", appliedAt, e.cfg.CIWaitTimeout)) >= e.cfg.CIWaitTimeout {
 				e.logf(item.Number, "auto-merge", "PR #%d in merge queue past dwell (%s) with no merge-group CI — stall detected\n",
 					pr.Number, e.cfg.CIWaitTimeout)
 				e.pauseForMergeGroupStall(item, pr.Number)
@@ -405,7 +408,13 @@ func (e *Engine) checkAutoMergeConvergence(ctx context.Context, board *gh.Projec
 		if berr != nil {
 			e.logf(item.Number, "auto-merge", "could not fetch fabrik:auto-merge-enabled applied-at: %v\n", berr)
 		} else if !budgetStart.IsZero() {
+			// Cheap label-anchor test first; the event-log read (effectiveAnchor,
+			// #2064) is paid only by items already past the budget. elapsed is
+			// then measured from the effective anchor, i.e. excludes paused time.
 			elapsed := time.Since(budgetStart)
+			if elapsed > e.cfg.ConvergenceBudget {
+				elapsed = time.Since(e.effectiveAnchor(item, owner, repo, "auto-merge", "ConvergenceBudget", budgetStart, e.cfg.ConvergenceBudget))
+			}
 			if elapsed > e.cfg.ConvergenceBudget {
 				e.logf(item.Number, "auto-merge", "convergence budget exhausted (%.0fs / %.0fs) — pausing\n",
 					elapsed.Seconds(), e.cfg.ConvergenceBudget.Seconds())

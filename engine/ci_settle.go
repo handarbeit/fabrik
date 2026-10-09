@@ -252,7 +252,7 @@ func (e *Engine) settleAwaitingCIScan(ctx context.Context, board *gh.ProjectBoar
 				// not evidence CI is stuck, so the live-data handler chain below runs
 				// before the backstop may escalate; it applies from the next poll.
 				e.logf(item.Number, "awaiting-ci-settle", "fabrik:awaiting-ci exceeded CIBackstopTimeout (%s) but this is the first evaluation since daemon start — running the live-data handler chain first\n", e.ciBackstopTimeout())
-			} else if anchor := e.ciBackstopAnchor(item, owner, repoName, repo, appliedAt); time.Since(anchor) < e.ciBackstopTimeout() {
+			} else if anchor := e.effectiveAnchor(item, owner, repoName, "awaiting-ci-settle", "the CIBackstopTimeout backstop", appliedAt, e.ciBackstopTimeout()); time.Since(anchor) < e.ciBackstopTimeout() {
 				// #2059 R1: the item was resumed from a pause recently enough that it
 				// has not had the full timeout to progress; paused time does not count.
 				e.logf(item.Number, "awaiting-ci-settle", "fabrik:awaiting-ci exceeded CIBackstopTimeout (%s) since it was applied, but the item was resumed %s ago — backstop skipped\n", e.ciBackstopTimeout(), time.Since(anchor).Round(time.Second))
@@ -393,10 +393,12 @@ func (e *Engine) escalateAwaitingCIOrphanFailure(item gh.ProjectItem) {
 }
 
 // ciBackstopResumeLabel is the label whose latest removal marks an item's most recent
-// resume for the CIBackstopTimeout anchor (#2059 R1).
+// resume for every label-anchored timeout's effective anchor (#2059 R1, shared by
+// effectiveAnchor since #2064).
 const ciBackstopResumeLabel = "fabrik:paused"
 
-// ciBackstopKey keys the backstop's in-memory per-item markers.
+// ciBackstopKey keys the backstop's in-memory per-item markers, and the resume
+// memo that effectiveAnchor shares across all label-anchored timeouts.
 func ciBackstopKey(repo string, number int) string {
 	return fmt.Sprintf("%s#%d", repo, number)
 }
@@ -415,38 +417,4 @@ func (e *Engine) ciBackstopWorkerInFlight(repo string, number int) (string, bool
 		return "", false
 	}
 	return w.StageName, true
-}
-
-// ciBackstopAnchor returns the instant the CIBackstopTimeout backstop measures
-// from: the later of appliedAt (when fabrik:awaiting-ci was applied) and the
-// item's latest fabrik:paused removal (#2059 R1).
-//
-// The removal time is read from GitHub's issue event log through
-// FetchLabelRemovedAt, never from the record-on-write label cache, so it
-// survives restarts and sees removals made in the UI (the same reasoning as
-// resumeAuthorised, ADR-1813). A read error or a missing event falls back to
-// appliedAt — the direction that still escalates; the backstop must never fail
-// open into "never escalate", or its per-poll cost bound is lost.
-//
-// A memoised resume still inside the timeout is returned without a read, so a
-// recently resumed item costs one events page-through per episode rather than
-// one per poll. The memo can only be older than the truth, so it can only
-// produce a skip, never an escalation: an escalation always follows a live read.
-func (e *Engine) ciBackstopAnchor(item gh.ProjectItem, owner, repoName, repo string, appliedAt time.Time) time.Time {
-	key := ciBackstopKey(repo, item.Number)
-	if v, ok := e.ciBackstopResumeSeen.Load(key); ok {
-		if memo, _ := v.(time.Time); memo.After(appliedAt) && time.Since(memo) < e.ciBackstopTimeout() {
-			return memo
-		}
-	}
-	resumedAt, err := e.client.FetchLabelRemovedAt(owner, repoName, item.Number, ciBackstopResumeLabel)
-	if err != nil {
-		e.logf(item.Number, "awaiting-ci-settle", "could not read %s removal time for CIBackstopTimeout backstop (using the awaiting-ci anchor): %v\n", ciBackstopResumeLabel, err)
-		return appliedAt
-	}
-	if resumedAt.After(appliedAt) {
-		e.ciBackstopResumeSeen.Store(key, resumedAt)
-		return resumedAt
-	}
-	return appliedAt
 }
