@@ -295,6 +295,9 @@ type commentRecord struct {
 	diffHunk       string
 	isOutdated     bool
 	threadResolved bool
+	// commitOID is the commit the review-thread comment was posted against (GraphQL
+	// originalCommit.oid); empty = GitHub returned null.
+	commitOID string
 }
 
 func (c *commentRecord) nodeID() string { return fmt.Sprintf("comment:%d", c.databaseID) }
@@ -315,6 +318,7 @@ func (c *commentRecord) toGH() gh.Comment {
 		OriginalLine:   c.originalLine,
 		DiffHunk:       c.diffHunk,
 		IsOutdated:     c.isOutdated,
+		CommitOID:      c.commitOID,
 	}
 	// Reaction groups are emitted in a stable order so tests comparing whole
 	// projections are not order-flaky; GitHub's own ordering is not

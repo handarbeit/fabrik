@@ -55,6 +55,7 @@ type ProjectConfig struct {
 	SessionRetentionDays      *int   `yaml:"session_retention_days"`
 	MergeTrain                string `yaml:"merge_train"`
 	AutoMergeStrategy         string `yaml:"auto_merge_strategy"`
+	SingletonCatchUp          string `yaml:"singleton_catch_up"`
 	MaxBatchSize              *int   `yaml:"max_batch_size"`
 	MaxBisectValidations      *int   `yaml:"max_bisect_validations"`
 	MaxTrainRebaseCycles      *int   `yaml:"max_train_rebase_cycles"`

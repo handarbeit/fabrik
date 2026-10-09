@@ -55,6 +55,7 @@ type Config struct {
 	AutoMergeStrategy         string              // Merge method for enablePullRequestAutoMerge: MERGE, SQUASH, or REBASE (default MERGE)
 	MergeQueue                string              // Merge queue routing for yolo path: "auto" (enqueue when repo uses merge queue) or "off" (skip enqueue)
 	MergeTrain                string              // Fabrik-internal merge train: "on" (advance yolo Validate completions to Queued) or "off" (default; existing auto-merge path unchanged)
+	SingletonCatchUp          string              // Merge-train singleton catch-up: "merge" (default; merge the pinned base into a behind singleton's own branch, #2044) or "off" (build a trial branch instead)
 	MaxMergeTrainEjections    int                 // Max merge-train ejections before pausing a member (default 3; ADR-059)
 	MaxBatchSize              int                 // Max Queued items snapshotted into one merge-train batch (0 = derive default 5; ADR-059 D4/D-f)
 	MaxBisectValidations      int                 // Max combined validations per red batch before the one-at-a-time fallback (0 = derive 2·⌈log₂(MaxBatchSize)⌉+1; ADR-059 D4/D-f)
@@ -313,6 +314,13 @@ type Engine struct {
 	// (#1420 R1) so seam-based tests can exercise the ejection-comment diagnostic content,
 	// not only ejection sequencing. Production leaves this nil. See assembleAndValidate.
 	trainValidateFn func(ctx context.Context, members []trainMember) (TrainCIResult, *trainCIDiagnostic)
+	// trainCatchUpGitFn replaces the git half of the singleton catch-up (worktree, merge,
+	// push) when non-nil, so the catch-up's decision logic can be exercised under the
+	// trainValidateFn seam without real git. Production leaves this nil. See
+	// trySingletonCatchUp (#2044).
+	trainCatchUpGitFn func(ctx context.Context, p trialParams, m trainMember) catchUpGitOutcome
+	// catchUp is the singleton catch-up's attempt counter and CI-wait dwells (#2044).
+	trainCatchUp catchUpState
 	// trainRedBatchHook, when non-nil, is called as the first line of handleRedBatch — a
 	// test-only call-observation seam (#1440 AC1/AC6) proving handleRedBatch (multi-member
 	// bisection) is never reached for a red batch of exactly one member, which
