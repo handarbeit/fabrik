@@ -72,7 +72,7 @@ jobs:
         # guards against — see scripts/lib/parallel.sh's own header comment.
         run: |
           source scripts/lib/parallel.sh
-          go test -race -timeout 5m -parallel "$(default_race_parallel)" ./...
+          go test -race -timeout 10m -parallel "$(default_race_parallel)" ./...
 
       # Compile the e2e suite without running it. The scenarios are behind the
       # `e2e` build tag and drive a real Fabrik bed against real repos, so they

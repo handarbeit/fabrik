@@ -50,4 +50,4 @@ pkgs=("$@")
 [ ${#pkgs[@]} -gt 0 ] || pkgs=(./...)
 
 set -x
-go test -race -timeout "${WORKER_SHAPED_TIMEOUT:-5m}" -parallel "$(default_race_parallel)" "${pkgs[@]}"
+go test -race -timeout "${WORKER_SHAPED_TIMEOUT:-10m}" -parallel "$(default_race_parallel)" "${pkgs[@]}"

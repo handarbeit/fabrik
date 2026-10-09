@@ -159,6 +159,10 @@ listed out of scope). **If CI latency becomes a problem, file it as its own issu
   `tests/sim` run hit a 10-minute timeout in
   `TestMergeTrainEjection_NoQueuedMemberWithoutComment`, passing on rerun — both looked
   load-induced and did not reproduce on CI.)
+  **Triggered 2026-10-09:** `tests/sim` reached 270–300 s on CI runners (`main`
+  included), and PR #2061 timed out at 300.02 s with no failing test. The cap was raised
+  to 10m in `ci.yml` and `scripts/ci/worker-shaped-test.sh` as a stopgap. The decision
+  here (no per-PR test selection) stands; speeding up the sim package is the follow-up.
 - #1439 moves Pruefer-only code out of `github/`, shrinking its blast radius so more PRs
   narrow meaningfully.
 - The shape of PR traffic changes so that a large share of PRs touch only leaf packages.
