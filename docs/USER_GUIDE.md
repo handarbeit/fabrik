@@ -1854,6 +1854,9 @@ project_fields:
 | `paused: CI timeout` | The item was paused; the reason is the first line of the pause comment. |
 | `claude-limit until 18:05` | This item's invocation hit the Claude usage limit; the time is the end of the account-wide suspension in the **daemon's local time**. Only the item that hit the limit is written. |
 | `awaiting CI on PR #1615` | The stage finished and is waiting for CI. |
+| `awaiting review` | The stage finished and is waiting for PR reviewers (`fabrik:awaiting-review` was first applied). |
+
+When a stage worker ends and nothing replaced its `<Stage> · running` line (for example the stage failed), the line is cleared rather than left claiming the card is running.
 
 Lines are capped at 60 characters (counting characters, not bytes), ending in `…` when cut. States with no cheap, already-logged transition do not have a line yet.
 

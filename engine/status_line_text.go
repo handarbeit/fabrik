@@ -72,6 +72,9 @@ func statusLineClaudeLimit(until time.Time) string {
 	return "claude-limit until " + until.Local().Format("15:04")
 }
 
+// statusLineAwaitingReview: a stage finished and is waiting on PR reviewers.
+const statusLineAwaitingReview = "awaiting review"
+
 // statusLineAwaitingCI: a stage is waiting on CI for a PR.
 func statusLineAwaitingCI(prNum int) string {
 	if prNum <= 0 {

@@ -231,6 +231,24 @@ func truncateStatusLine(line string) string {
 	return strings.TrimRight(string(runes[:statusLineMaxLen-1]), " ") + statusLineEllipsis
 }
 
+// clearStatusLineIfShowing clears item's line only while it is still exactly
+// line. It ends an activity line (e.g. "<Stage> · running") that nothing
+// replaced, so an idle card does not keep claiming to be running, without
+// disturbing a newer line another transition wrote in the meantime.
+func (e *Engine) clearStatusLineIfShowing(item gh.ProjectItem, line string) {
+	if e.cfg.StatusLineField == "" {
+		return
+	}
+	key := issueKey(item, e.defaultRepo())
+	s := &e.statusLine
+	s.mu.Lock()
+	cur, known := s.last[key]
+	s.mu.Unlock()
+	if known && cur == truncateStatusLine(line) {
+		e.clearStatusLine(item)
+	}
+}
+
 // setMembersStatusLine writes the same line for every merge-train member. One
 // mutation per member; each is skipped when that member's line is unchanged.
 func (e *Engine) setMembersStatusLine(members []trainMember, line string) {

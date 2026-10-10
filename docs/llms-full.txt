@@ -1852,6 +1852,9 @@ project_fields:
 | `paused: CI timeout` | The item was paused; the reason is the first line of the pause comment. |
 | `claude-limit until 18:05` | This item's invocation hit the Claude usage limit; the time is the end of the account-wide suspension in the **daemon's local time**. Only the item that hit the limit is written. |
 | `awaiting CI on PR #1615` | The stage finished and is waiting for CI. |
+| `awaiting review` | The stage finished and is waiting for PR reviewers (`fabrik:awaiting-review` was first applied). |
+
+When a stage worker ends and nothing replaced its `<Stage> · running` line (for example the stage failed), the line is cleared rather than left claiming the card is running.
 
 Lines are capped at 60 characters (counting characters, not bytes), ending in `…` when cut. States with no cheap, already-logged transition do not have a line yet.
 
@@ -9046,8 +9049,9 @@ The engine projects a one-line description of what an item is doing or waiting o
 | `paused: <reason>` | `pauseIssue` (reason = the pause comment's header), `blockOnInput`, the merge-train pause paths, the settle escalations |
 | `claude-limit until HH:MM` | `handleUsageLimitExit`, for the item whose invocation hit the limit only (daemon local time) |
 | `awaiting CI on PR #N` | `finalizeStageOutcome`, when `fabrik:awaiting-ci` is first applied |
+| `awaiting review` | the review gate (`engine/reviews.go`), when `fabrik:awaiting-review` is first applied |
 
-**Cleared** by `advanceToNextStage` (merge-train landings, ordinary merge, and every stage-to-stage advance), by the two Done moves that bypass it (the no-work-needed settle and the closed-item advance), by `rerouteQueuedMemberOffHolding`, and when `fabrik:blocked` is lifted. Lines can still go stale where no transition fires (a crash mid-phase); they are overwritten by the item's next transition or Done and are not repaired by a read-back.
+**Cleared** by `advanceToNextStage` (merge-train landings, ordinary merge, and every stage-to-stage advance), by the two Done moves that bypass it (the no-work-needed settle and the closed-item advance), by `rerouteQueuedMemberOffHolding`, when `fabrik:blocked` is lifted, and by the stage worker's `release` when its `<Stage> · running` line is still showing (`clearStatusLineIfShowing`: the stage ended into a state with no line of its own, so the card must not keep claiming to be running). Lines can still go stale where no transition fires (a crash mid-phase); they are overwritten by the item's next transition or Done and are not repaired by a read-back.
 
 **No webhook echo is registered** for a status-line write. `RegisterEchoIfSubscribed("projects_v2_item", "edited", <ItemID>)` has no field discriminator, so a registration would collide with Status-move registrations, and a delivery that never arrives would inflate the ADR-042 miss counter.
 

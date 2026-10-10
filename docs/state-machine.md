@@ -4447,8 +4447,9 @@ The engine projects a one-line description of what an item is doing or waiting o
 | `paused: <reason>` | `pauseIssue` (reason = the pause comment's header), `blockOnInput`, the merge-train pause paths, the settle escalations |
 | `claude-limit until HH:MM` | `handleUsageLimitExit`, for the item whose invocation hit the limit only (daemon local time) |
 | `awaiting CI on PR #N` | `finalizeStageOutcome`, when `fabrik:awaiting-ci` is first applied |
+| `awaiting review` | the review gate (`engine/reviews.go`), when `fabrik:awaiting-review` is first applied |
 
-**Cleared** by `advanceToNextStage` (merge-train landings, ordinary merge, and every stage-to-stage advance), by the two Done moves that bypass it (the no-work-needed settle and the closed-item advance), by `rerouteQueuedMemberOffHolding`, and when `fabrik:blocked` is lifted. Lines can still go stale where no transition fires (a crash mid-phase); they are overwritten by the item's next transition or Done and are not repaired by a read-back.
+**Cleared** by `advanceToNextStage` (merge-train landings, ordinary merge, and every stage-to-stage advance), by the two Done moves that bypass it (the no-work-needed settle and the closed-item advance), by `rerouteQueuedMemberOffHolding`, when `fabrik:blocked` is lifted, and by the stage worker's `release` when its `<Stage> · running` line is still showing (`clearStatusLineIfShowing`: the stage ended into a state with no line of its own, so the card must not keep claiming to be running). Lines can still go stale where no transition fires (a crash mid-phase); they are overwritten by the item's next transition or Done and are not repaired by a read-back.
 
 **No webhook echo is registered** for a status-line write. `RegisterEchoIfSubscribed("projects_v2_item", "edited", <ItemID>)` has no field discriminator, so a registration would collide with Status-move registrations, and a delivery that never arrives would inflate the ADR-042 miss counter.
 

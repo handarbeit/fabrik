@@ -348,6 +348,7 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 	}
 	if !alreadyWaiting {
 		e.applyLabelAdd(item, "fabrik:awaiting-review", false)
+		e.setStatusLine(item, statusLineAwaitingReview) // display-only (#2048)
 	}
 
 	return true, false, false, reviews

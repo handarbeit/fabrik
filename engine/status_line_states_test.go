@@ -186,3 +186,24 @@ func TestStatusLine_ClosedItemAdvanceClears(t *testing.T) {
 		t.Errorf("lines = %q", got)
 	}
 }
+
+// A worker that ends with its "<Stage> · running" line still showing clears
+// it; a newer line written meanwhile is left alone.
+func TestStatusLine_ClearIfShowing(t *testing.T) {
+	eng, client := statusLineStatesEngine(t)
+	item := stateItem(17)
+
+	eng.setStatusLine(item, statusLineStageRunning("Implement"))
+	eng.clearStatusLineIfShowing(item, statusLineStageRunning("Implement"))
+	if got := statusLineSeq(client, "PVTI_state"); !equalSeq(got, []string{"Implement · running", "<cleared>"}) {
+		t.Fatalf("lines = %q", got)
+	}
+
+	eng.setStatusLine(item, statusLineStageRunning("Review"))
+	eng.setStatusLine(item, statusLineAwaitingReview)
+	eng.clearStatusLineIfShowing(item, statusLineStageRunning("Review"))
+	want := []string{"Implement · running", "<cleared>", "Review · running", "awaiting review"}
+	if got := statusLineSeq(client, "PVTI_state"); !equalSeq(got, want) {
+		t.Errorf("lines = %q, want %q", got, want)
+	}
+}

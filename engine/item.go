@@ -982,6 +982,11 @@ func (e *Engine) acquireLockAndVerify(ctx context.Context, item gh.ProjectItem, 
 		if inProgressAdded {
 			e.removeInProgressLabel(owner, repo, item.Number, stage.Name)
 		}
+		// The worker is done. If nothing replaced "<Stage> · running" (the stage
+		// ended into a state with no line of its own: a failure, an auto-advance
+		// still pending), the card is idle, not running — drop the stale line.
+		// Display-only (#2048).
+		e.clearStatusLineIfShowing(item, statusLineStageRunning(stage.Name))
 	}
 
 	// Lock-then-verify: after acquiring our lock, wait briefly to let a

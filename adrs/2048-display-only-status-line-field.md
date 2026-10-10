@@ -107,6 +107,9 @@ field already shows. A board filter on the text field covers "in the train now".
   every engine clear is adjacent to a Status move or a label removal that bumps `updatedAt` anyway
   and is covered by the same `SelfWriteObserved` baseline advance (#1090). The sim models the clear
   this way (no value write time), and the re-record script prints the post-clear `updatedAt`.
+- A stage worker's `release` clears its `<Stage> · running` line if nothing replaced it, so an idle
+  card never keeps claiming to be running; `awaiting review` is written when the review gate first
+  applies `fabrik:awaiting-review`.
 - A failing field lookup is retried at most every five minutes and warned about once per outage,
   rather than on every transition.
 - Each new state needs an explicit hook; states without a cheap, already-logged transition are left
