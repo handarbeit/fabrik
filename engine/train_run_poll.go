@@ -178,7 +178,12 @@ func (e *Engine) adoptTrainRun(ctx context.Context, board *gh.ProjectBoard, rec 
 			need[n] = true
 		}
 	}
-	add(rec.Current)
+	// In the one-at-a-time fallback Current is still the pre-bisection batch: nothing
+	// narrows it as the cursor advances, so it names members already landed or ejected.
+	// The cursor and the open trial say who is still live.
+	if rec.OAT == nil {
+		add(rec.Current)
+	}
 	if rec.Trial != nil {
 		add(rec.Trial.Members)
 	}
@@ -389,7 +394,11 @@ func (e *Engine) adoptTrainRun(ctx context.Context, board *gh.ProjectBoard, rec 
 	}
 	state.bisecting = rec.Bisect != nil || rec.OAT != nil
 	r.rec.Version = trainRunVersion
-	ep.setActive(r.memberList(rec.Current))
+	if rec.OAT != nil {
+		ep.setActive(r.memberList(liveOATMembers(rec.OAT)))
+	} else {
+		ep.setActive(r.memberList(rec.Current))
+	}
 	if rec.OAT != nil {
 		ep.noteOneAtATime()
 	}
@@ -399,6 +408,14 @@ func (e *Engine) adoptTrainRun(ctx context.Context, board *gh.ProjectBoard, rec 
 	e.syncRunPhase(r)
 	e.logfRepo(repoKey, "merge-train", "resumed train run for %s after a restart: step %s, %d member(s)%s\n",
 		rec.TrainKey, rec.Step, len(items), resumedTrialNote(rec.Trial))
+}
+
+// liveOATMembers is the part of the one-at-a-time fallback still to be processed.
+func liveOATMembers(o *runOATRecord) []int {
+	if o.Index >= len(o.Members) {
+		return nil
+	}
+	return o.Members[o.Index:]
 }
 
 func resumedTrialNote(t *runTrialRecord) string {

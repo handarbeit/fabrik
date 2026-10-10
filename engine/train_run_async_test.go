@@ -289,6 +289,69 @@ func TestTrainRunAsync_RestartAtEveryPointResumesSameRun(t *testing.T) {
 	}
 }
 
+// reflectLeftQueued mirrors what GitHub would show after the engine's board moves: every
+// member the engine moved off the holding column (landed to Done, or rerouted by an
+// ejection) is no longer Queued. The default harness board is static, which hides any
+// adoption check that wrongly insists on members that already left.
+func (a *asyncTrain) reflectLeftQueued() {
+	a.t.Helper()
+	a.client.mu.Lock()
+	moved := map[string]bool{}
+	for _, c := range a.client.updateStatusCalls {
+		moved[c.itemID] = true
+	}
+	a.client.mu.Unlock()
+	for i := range a.board.Items {
+		if moved[a.board.Items[i].ItemID] {
+			a.board.Items[i].Status = "Done"
+		}
+	}
+}
+
+// Review finding (adoption in the one-at-a-time fallback): Current stays the pre-bisection
+// batch, so adoption must look at the OAT cursor, not Current, or a restart after the first
+// member has landed or been ejected discards the run and loses the remaining progress.
+func TestTrainRunAsync_RestartInOneAtATimeAfterMembersLeftQueuedResumes(t *testing.T) {
+	interaction := func(set []int) TrainCIResult {
+		if refHas(set, 1) && refHas(set, 4) {
+			return TrainCIRed
+		}
+		return TrainCIGreen
+	}
+	ref := newAsyncTrain(t, 4, interaction)
+	ref.dispatch()
+	total := ref.runToEnd(100)
+	want := refOutcome{calls: ref.calls(), ejected: ref.disposed(), landed: ref.merges()}
+
+	resumedPastFirstMember := false
+	for restartAfter := 0; restartAfter <= total; restartAfter++ {
+		restartAfter := restartAfter
+		t.Run(fmt.Sprintf("restart_after_%d", restartAfter), func(t *testing.T) {
+			a := newAsyncTrain(t, 4, interaction)
+			a.dispatch()
+			for i := 0; i < restartAfter && a.open(); i++ {
+				a.round()
+			}
+			if a.open() {
+				a.reflectLeftQueued()
+				if a.merges() > 0 {
+					resumedPastFirstMember = true
+				}
+				a.restart()
+				a.settleHeld()
+				if !a.open() {
+					t.Fatalf("restarted engine discarded a run whose remaining members are all still Queued")
+				}
+			}
+			a.runToEnd(100)
+			assertParity(t, refOutcome{calls: a.calls(), ejected: a.disposed(), landed: a.merges()}, want)
+		})
+	}
+	if !resumedPastFirstMember {
+		t.Fatal("the scenario never restarted after a member had left Queued — the test is vacuous")
+	}
+}
+
 // R2/FR-010/SC-003: a trial with no CI progress is surfaced by the poll within one poll of
 // its deadline and handled as a timed-out trial (members stay Queued, nothing landed).
 func TestTrainRunAsync_StuckTrialSurfacedWithinOnePollOfDeadline(t *testing.T) {
