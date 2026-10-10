@@ -280,7 +280,7 @@ func TestRun_LostLockStopsEngine(t *testing.T) {
 // lock): the record embeds the fabrik directory path, which can approach PATH_MAX.
 func TestVerify_LongDirRecordIsNotTruncated(t *testing.T) {
 	dirA, _ := lockTestDirs(t)
-	long := dirA + "/" + strings.Repeat("d", 900)
+	long := dirA + "/" + strings.Repeat("d", 5000)
 	l, err := acquireBoardLock(boardCfg("acme", 7), long)
 	if err != nil {
 		t.Fatal(err)

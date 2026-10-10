@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -45,6 +46,9 @@ const (
 	boardOwnerReadDelay    = 100 * time.Millisecond
 )
 
+// maxLockRecordBytes bounds how much of a lock file verify() reads.
+const maxLockRecordBytes = 64 << 10
+
 // boardRecord is the content of a board lock file.
 type boardRecord struct {
 	PID     int    `json:"pid"`
@@ -73,7 +77,9 @@ func (l *instanceLocks) Release() {
 	for _, h := range []*heldLock{l.board, l.dir} {
 		if h != nil && h.f != nil {
 			syscall.Flock(int(h.f.Fd()), syscall.LOCK_UN) //nolint:errcheck // closing releases it anyway
-			h.f.Close()                                   //nolint:errcheck
+			if err := h.f.Close(); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: closing %s %s: %v\n", h.name, h.path, err)
+			}
 			h.f = nil
 		}
 	}
@@ -112,14 +118,13 @@ func (h *heldLock) verify() error {
 	if uint64(fdSt.Dev) != uint64(pathSt.Dev) || uint64(fdSt.Ino) != uint64(pathSt.Ino) { //nolint:unconvert // Dev/Ino widths differ by platform
 		return errors.New("lock file was replaced by a different file")
 	}
-	// 4 KiB: the board record embeds the directory path (up to PATH_MAX), and a
-	// truncated JSON record would read as a false lost lock.
-	buf := make([]byte, 4096)
-	n, err := h.f.ReadAt(buf, 0)
-	if err != nil && n == 0 {
+	// Read the whole record (bounded): the board record embeds the directory path
+	// and its JSON escaping, and a truncated record would read as a false lost lock.
+	rec, err := io.ReadAll(io.NewSectionReader(h.f, 0, maxLockRecordBytes))
+	if err != nil {
 		return fmt.Errorf("could not read lock record: %w", err)
 	}
-	pid, perr := parseLockPID(buf[:n])
+	pid, perr := parseLockPID(rec)
 	if perr != nil {
 		return fmt.Errorf("lock record unreadable: %w", perr)
 	}
