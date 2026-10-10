@@ -294,6 +294,8 @@ type Engine struct {
 	lastActivity                          displayFieldState             // display-only "Last activity" date field writer state (#2049) — in memory only
 	lastRun                               displayFieldState             // display-only "Last run" text field writer state (#2049) — in memory only
 	flakeRerunMu                          sync.Mutex                    // guards flakeReruns and flakeRerunDisabled
+	layer1OffBoardMu                      sync.Mutex                    // guards layer1OffBoard
+	layer1OffBoard                        map[string]time.Time          // key: "<projectID>|<repo>#<n>" → expiry; Layer 1's negative cache of "not on the board" lookups (#2093) — in memory only
 	flakeReruns                           map[string]*prFlakeState      // key: "owner/repo#PR"; the stage wait_for_ci gate's flake re-run budget (#2072), reset when the PR's head SHA moves — in memory only, so a restart may grant one extra re-run
 	flakeRerunDisabled                    bool                          // test-only neutralisation seam (SetCIFlakeRerunDisabledForTest)
 	mergeTrainRunawayMu                   sync.Mutex                    // guards mergeTrainRunawayAlerted AND serializes fireRunawayGuard's pause+alert critical section across all three call sites (Hook 1 x2, Hook 2) — see fireRunawayGuard (#1533). Still a single engine-wide mutex, not sharded per (repo,base) — #1648 widens its blast radius to also serialize concurrent per-base workers within the same repo, not just across repos, but the trade-off (rare/exceptional event) is unchanged.
