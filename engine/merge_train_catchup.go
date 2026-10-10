@@ -76,6 +76,10 @@ type catchUpState struct {
 	// recognition read (catchUpFeedbackFilterFor) is not repeated on every poll for a
 	// head a review bot has already reviewed. See catchUpMarkerCache.
 	markers map[string]catchUpMarkerEntry
+	// policy remembers, per repo ("owner/repo"), that catch-up pushes are rejected by
+	// repo policy, so singletons there skip the catch-up until the memo expires (#2065,
+	// ADR-2065). In-memory only: a restart re-probes.
+	policy map[string]catchUpPolicyMemo
 }
 
 func catchUpKey(trainKey string, issue int) string { return fmt.Sprintf("%s#%d", trainKey, issue) }
@@ -113,7 +117,8 @@ const (
 	catchUpDefer
 	// catchUpFallback: the catch-up cannot be done safely or was refused (push rejected,
 	// local branch carries unpushed work, unexpected merge shape, git error). The caller
-	// builds today's trial, uncharged.
+	// builds today's trial, uncharged. A push the repo's rules positively rejected also
+	// carries policyReason, which makes the caller remember the repo (#2065).
 	catchUpFallback
 	// catchUpConflict: the base conflicts with the member's branch and the conflict could
 	// not be resolved. The member is ejected exactly as a trial would eject it.
@@ -126,6 +131,10 @@ type catchUpGitOutcome struct {
 	newHead string // the pushed merge commit (catchUpPushed)
 	pure    bool   // true: only base commits were brought in — no conflict-resolution edits
 	reason  string // log text for defer/fallback; the ejection reason for catchUpConflict
+	// policyReason, set only on a catchUpFallback, is the one-line rejection text GitHub
+	// returned for a push positively identified as repo policy (classifyCatchUpPushRejection).
+	// Empty for every other fallback, which sets no memo.
+	policyReason string
 }
 
 // catchUpBusyReason reports why the member's branch is not ours to push to right now, or
@@ -167,6 +176,12 @@ func (e *Engine) trySingletonCatchUp(ctx context.Context, state *mergeTrainWorke
 	if p.baseSHA == "" {
 		return m, false
 	}
+	// A repo that rejected a recent catch-up push by policy: skip the attempt entirely — no
+	// GitHub call, worktree, merge or push — and take the trial path. Silent by design: the
+	// operator was told once when the memo was set (#2065).
+	if e.catchUpPolicyBackoff(p.repoKey()) {
+		return m, false
+	}
 	behind, err := e.client.FetchCommitsBehind(p.owner, p.repo, p.baseSHA, m.headSHA)
 	if err != nil {
 		e.logf(m.item.Number, "merge-train", "singleton catch-up: could not confirm #%d is behind the pinned base: %v — building trial\n", m.item.Number, err)
@@ -197,6 +212,9 @@ func (e *Engine) trySingletonCatchUp(ctx context.Context, state *mergeTrainWorke
 		return m, true
 	case catchUpFallback:
 		e.logf(m.item.Number, "merge-train", "singleton catch-up not done for #%d: %s — building trial\n", m.item.Number, out.reason)
+		if out.policyReason != "" && e.recordCatchUpPolicyRejection(p.repoKey(), out.policyReason) {
+			e.logf(m.item.Number, "merge-train", "singleton catch-up: %s rejects catch-up pushes by repository policy (%s) — skipping the catch-up on this repo for %s (singletons build a trial instead); set singleton_catch_up: off (--singleton-catch-up / FABRIK_SINGLETON_CATCH_UP) to stop probing permanently\n", p.repoKey(), out.policyReason, catchUpPolicyMemoTTL)
+		}
 		return m, false
 	case catchUpConflict:
 		e.logf(m.item.Number, "merge-train", "singleton catch-up: cannot resolve the conflict between pinned base %s and #%d — ejecting\n", p.baseSHA, m.item.Number)
@@ -312,6 +330,12 @@ func (e *Engine) runCatchUpGit(ctx context.Context, p trialParams, m trainMember
 		// Branch protection, a signed-commits requirement, or the member moved: nothing
 		// was pushed. Reset so the local branch is not left ahead of the remote.
 		restore()
+		var pushErr *CatchUpPushError
+		if errors.As(perr, &pushErr) {
+			if reason, policy := classifyCatchUpPushRejection(pushErr.Output); policy {
+				return catchUpGitOutcome{kind: catchUpFallback, reason: catchUpPolicyAttemptReason, policyReason: reason}
+			}
+		}
 		return catchUpGitOutcome{kind: catchUpFallback, reason: perr.Error()}
 	}
 	return catchUpGitOutcome{kind: catchUpPushed, newHead: newHead, pure: pure}
