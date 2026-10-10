@@ -98,6 +98,13 @@ type trainPhaseRecord struct {
 // no worker context) still gets the board line, so behaviour without a TUI is
 // exactly the pre-#2050 one.
 func (e *Engine) noteTrainPhase(ep *trainEpisode, repoKey string, members []trainMember, ph trainPhase) {
+	e.noteTrainPhaseAt(ep, repoKey, members, ph, time.Now())
+}
+
+// noteTrainPhaseAt is noteTrainPhase with an explicit phase start time. A run adopted
+// after a restart restores its persisted phase start (#2051 R5), so the TUI row's elapsed
+// time does not restart at zero.
+func (e *Engine) noteTrainPhaseAt(ep *trainEpisode, repoKey string, members []trainMember, ph trainPhase, now time.Time) {
 	if ph.board != "" && len(members) > 0 {
 		e.setMembersStatusLine(members, ph.board)
 	}
@@ -107,7 +114,6 @@ func (e *Engine) noteTrainPhase(ep *trainEpisode, repoKey string, members []trai
 	if ep == nil {
 		return
 	}
-	now := time.Now()
 	ep.mu.Lock()
 	if ph.activeSet && members != nil {
 		nums := make([]int, len(members))

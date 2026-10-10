@@ -102,6 +102,10 @@ func RestartEnv(t *testing.T, env *Env) *Env {
 
 	eng := engine.NewWithDeps(env.cfg, restored, env.Claude, env.WM)
 	eng.SetClock(env.Clock)
+	if env.TrainStateDir != "" {
+		// The persisted merge-train runs survive a restart; the in-memory state does not.
+		eng.EnableTrainRunsForTest(env.TrainStateDir)
+	}
 	// Deliberately does NOT call Engine.RegisterObservers (ADR-1592) — see
 	// NewEnv's own doc comment for why this package leaves it uncalled by
 	// default. A scenario needing reactive-observer behavior on a restarted
@@ -126,5 +130,7 @@ func RestartEnv(t *testing.T, env *Env) *Env {
 		PollInterval:  env.PollInterval,
 		issueSeqNext:  nextIssue,
 		cfg:           env.cfg,
+
+		TrainStateDir: env.TrainStateDir,
 	}
 }
