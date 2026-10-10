@@ -1156,13 +1156,6 @@ func resolveDuration(current string, envVar string) string {
 	return current
 }
 
-// handleReexecPluginRefresh checks and unsets envVar (a re-exec marker set
-// before this process replaced itself via syscall.Exec, or before a SIGHUP
-// restart), then conditionally refreshes embedded plugin skills using a
-// three-way comparison: skip when the operator has local customizations (disk
-// ≠ installed-version). msgSuffix is appended to warning messages to
-// distinguish the auto-upgrade re-exec path from the SIGHUP-restart path
-// (e.g. "" or " after SIGHUP restart").
 // reexecStartReason names why this process started, from the re-exec markers
 // the previous process set, for the fabrik.log start banner (#2094). It must run
 // before handleReexecPluginRefresh unsets FABRIK_AUTO_UPGRADED and
@@ -1184,6 +1177,13 @@ func reexecStartReason() string {
 	return "fresh start"
 }
 
+// handleReexecPluginRefresh checks and unsets envVar (a re-exec marker set
+// before this process replaced itself via syscall.Exec, or before a SIGHUP
+// restart), then conditionally refreshes embedded plugin skills using a
+// three-way comparison: skip when the operator has local customizations (disk
+// ≠ installed-version). msgSuffix is appended to warning messages to
+// distinguish the auto-upgrade re-exec path from the SIGHUP-restart path
+// (e.g. "" or " after SIGHUP restart").
 func handleReexecPluginRefresh(envVar, msgSuffix string) {
 	if os.Getenv(envVar) != "1" {
 		return
