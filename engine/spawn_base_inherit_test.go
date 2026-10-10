@@ -224,7 +224,9 @@ func TestInheritChildLabels_RepoComparisonIsCaseInsensitive(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng := spawnTestEngine(t, client)
 	parent := gh.ProjectItem{Number: 42, Labels: []string{"base:develop"}}
-	eng.inheritChildLabels(parent, "owner", "repo", "Owner/Repo", "Owner", "Repo", 7, false, nil)
+	if err := eng.inheritChildLabels(parent, "owner", "repo", "Owner/Repo", "Owner", "Repo", 7, false, nil); err != nil {
+		t.Fatal(err)
+	}
 	if got := labelWrites(client, "Repo", 7); !hasLabel(got, "base:develop") {
 		t.Errorf("differently-cased same repo must inherit base:, writes %v", got)
 	}
@@ -310,9 +312,11 @@ func TestSpawnChildren_Resume_PlacedChild_GetsLabelsButKeepsStatus(t *testing.T)
 	}
 }
 
-// TestSpawnChildren_BaseLabelFailure_IsNonFatal: a failed inherited-label write
-// is logged and the spawn completes, still placing the child.
-func TestSpawnChildren_BaseLabelFailure_IsNonFatal(t *testing.T) {
+// TestSpawnChildren_BaseLabelFailure_FailsClosed: a failed base: write aborts
+// the spawn before the child's Status placement and returns an error, so the
+// child is never dispatchable against the wrong base branch. The failing
+// child carries no Status write, and the issue is paused.
+func TestSpawnChildren_BaseLabelFailure_FailsClosed(t *testing.T) {
 	client := newOrderedSpawnClient(&spawnOrderRecorder{})
 	client.addLabelToIssueFn = func(owner, repo string, n int, label string) error {
 		if strings.HasPrefix(label, "base:") {
@@ -322,13 +326,87 @@ func TestSpawnChildren_BaseLabelFailure_IsNonFatal(t *testing.T) {
 	}
 	eng := spawnTestEngineWithSpecify(t, client)
 	item := planItemWithBlocks(sameRepoTwoChildren)
-	item.Labels = append(item.Labels, "base:develop")
+	item.Labels = append(item.Labels, "base:develop", "fabrik:yolo")
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	spawned, err := eng.preImplement(context.Background(), board, item)
+	if err == nil || spawned {
+		t.Fatalf("a failed base: write must abort the spawn: spawned=%v err=%v", spawned, err)
+	}
+	if len(client.updateStatusCalls) != 0 {
+		t.Errorf("no child may be placed after a failed base: write, got %d Status writes", len(client.updateStatusCalls))
+	}
+	if len(client.createIssueCalls) != 1 {
+		t.Errorf("the spawn must stop at the first failing child, created %d", len(client.createIssueCalls))
+	}
+	paused := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			paused = true
+		}
+	}
+	if !paused {
+		t.Error("the parent should be paused so the operator can retry")
+	}
+}
+
+// TestSpawnChildren_BaseLabelFailure_ThenResume_AddsBaseAndPlaces: after the
+// abort above, the retry resumes the already-created child through its
+// fabrik:spawned-child marker, writes the missing base: and then places it.
+func TestSpawnChildren_BaseLabelFailure_ThenResume_AddsBaseAndPlaces(t *testing.T) {
+	rec := &spawnOrderRecorder{}
+	client := &mockGitHubClient{
+		fetchProjectItemFn: func(owner, repo string, n int) (*gh.ProjectItem, error) {
+			return &gh.ProjectItem{ID: "I_child101", Number: 101, Repo: "owner/repo"}, nil
+		},
+		lookupIssueProjectItemFn: func(projectID, repo string, n int) (string, string, error) {
+			return "PVTI_existing", "", nil
+		},
+		addLabelToIssueFn: func(owner, repo string, n int, label string) error {
+			rec.add("label:" + label)
+			return nil
+		},
+		updateProjectItemStatusFn: func(projectID, itemID, fieldID, optionID string) error {
+			rec.add("status:" + itemID)
+			return nil
+		},
+	}
+	eng := spawnTestEngineWithSpecify(t, client)
+	item := resumeParent("base:develop")
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	spawned, err := eng.preImplement(context.Background(), board, item)
 	if err != nil || !spawned {
-		t.Fatalf("spawn must survive a failed base: label write: spawned=%v err=%v", spawned, err)
+		t.Fatalf("resume after a failed base: write: spawned=%v err=%v", spawned, err)
+	}
+	events := rec.snapshot()
+	b, st := spawnEventIndex(events, "label:base:develop"), spawnEventIndex(events, "status:PVTI_existing")
+	if b < 0 || st < 0 || b > st {
+		t.Errorf("resume must write base:develop (at %d) before placing the child (at %d): %v", b, st, events)
+	}
+}
+
+// TestSpawnChildren_AutonomyLabelFailure_StillPlaces: fabrik:yolo and
+// fabrik:cruise stay best-effort — a failed write is logged and the child is
+// still placed.
+func TestSpawnChildren_AutonomyLabelFailure_StillPlaces(t *testing.T) {
+	client := newOrderedSpawnClient(&spawnOrderRecorder{})
+	client.addLabelToIssueFn = func(owner, repo string, n int, label string) error {
+		if label == "fabrik:yolo" || label == "fabrik:cruise" {
+			return errors.New("boom")
+		}
+		return nil
+	}
+	eng := spawnTestEngineWithSpecify(t, client)
+	item := planItemWithBlocks(sameRepoTwoChildren)
+	item.Labels = append(item.Labels, "base:develop", "fabrik:yolo", "fabrik:cruise")
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	spawned, err := eng.preImplement(context.Background(), board, item)
+	if err != nil || !spawned {
+		t.Fatalf("spawn must survive a failed autonomy label write: spawned=%v err=%v", spawned, err)
 	}
 	if len(client.updateStatusCalls) != 2 {
 		t.Errorf("both children should still be placed, got %d Status writes", len(client.updateStatusCalls))
+	}
+	if got := labelWrites(client, "repo", 101); !hasLabel(got, "base:develop") {
+		t.Errorf("base:develop should still be written, writes %v", got)
 	}
 }
