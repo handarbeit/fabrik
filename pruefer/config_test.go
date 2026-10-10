@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -1273,5 +1274,55 @@ func TestDiffRepos_OrderInsensitive(t *testing.T) {
 	added, removed := diffRepos([]string{"a/one", "a/two"}, []string{"a/two", "a/one"})
 	if len(added) != 0 || len(removed) != 0 {
 		t.Errorf("diffRepos with reordered-only input = added:%v removed:%v, want both empty", added, removed)
+	}
+}
+
+func TestLoadConfig_CatchUpMarkerAuthors(t *testing.T) {
+	dir := t.TempDir()
+
+	// Default: unset, so the skip is off.
+	cfg, err := LoadConfig([]string{"-config", writeYAMLConfig(t, dir, `model: opus`)})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if len(cfg.CatchUpMarkerAuthors) != 0 {
+		t.Errorf("default CatchUpMarkerAuthors = %v, want empty", cfg.CatchUpMarkerAuthors)
+	}
+
+	path := writeYAMLConfig(t, dir, "catch_up_marker_authors:\n  - fabrik-dev[bot]\n")
+	cfg, err = LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if len(cfg.CatchUpMarkerAuthors) != 1 || cfg.CatchUpMarkerAuthors[0] != "fabrik-dev[bot]" {
+		t.Errorf("yaml CatchUpMarkerAuthors = %v", cfg.CatchUpMarkerAuthors)
+	}
+
+	t.Setenv("PRUEFER_CATCH_UP_MARKER_AUTHORS", "alice, bob[bot]")
+	cfg, err = LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if len(cfg.CatchUpMarkerAuthors) != 2 || cfg.CatchUpMarkerAuthors[1] != "bob[bot]" {
+		t.Errorf("env CatchUpMarkerAuthors = %v, want [alice bob[bot]] (env overrides YAML)", cfg.CatchUpMarkerAuthors)
+	}
+
+	cfg, err = LoadConfig([]string{"-config", path, "-catch-up-marker-authors", "carol"})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if len(cfg.CatchUpMarkerAuthors) != 1 || cfg.CatchUpMarkerAuthors[0] != "carol" {
+		t.Errorf("flag CatchUpMarkerAuthors = %v, want [carol] (flag overrides env)", cfg.CatchUpMarkerAuthors)
+	}
+}
+
+func TestLoadConfig_CatchUpMarkerAuthorsRejectsMalformedLogin(t *testing.T) {
+	for _, bad := range []string{"@alice", "al ice"} {
+		t.Run(bad, func(t *testing.T) {
+			_, err := LoadConfig([]string{"-config", writeYAMLConfig(t, t.TempDir(), "model: opus"), "-catch-up-marker-authors", bad})
+			if err == nil || !strings.Contains(err.Error(), "catch_up_marker_authors") {
+				t.Fatalf("err = %v, want a catch_up_marker_authors validation error", err)
+			}
+		})
 	}
 }

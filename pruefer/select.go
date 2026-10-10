@@ -43,6 +43,11 @@ const (
 	// this case in practice; kept here for parity/observability alongside
 	// SkipCadenceOnce and any future direct callers of Eligible.
 	SkipCadenceOnRequest SkipReason = "cadence=on-request: no /pruefer review command pending"
+
+	// SkipCatchUp is reported when the head is a pure merge-train catch-up
+	// (#2066) the engine has vouched for via its marker comment, over a head
+	// Pruefer already reviewed. Decided in ReviewPR (catchup.go), not Eligible.
+	SkipCatchUp SkipReason = "pure merge-train catch-up of an already-reviewed head"
 )
 
 // IgnoreLabel is the built-in opt-out: a PR carrying it is never reviewed, on

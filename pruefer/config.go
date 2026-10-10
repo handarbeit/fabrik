@@ -173,6 +173,14 @@ type Config struct {
 	ExcludedPaths   []string      `reload:"live"` // glob patterns, applied per file before max_diff_bytes is measured (#1462); a PR is skipped whole only if ALL touched paths match
 	ExcludedLabels  []string      `reload:"live"` // a PR is skipped if ANY label matches
 
+	// CatchUpMarkerAuthors lists the logins whose merge-train catch-up
+	// marker comments (#2066) Pruefer trusts: the engine's own identity — the
+	// App's "<slug>[bot]" login under GitHub App auth, the operator's user
+	// login under PAT auth. Empty (the default) disables the pure catch-up
+	// skip entirely. Operator-only by construction: it is a trust anchor, so
+	// it is deliberately absent from the repo-resident allowlist (ADR 1642).
+	CatchUpMarkerAuthors []string `reload:"live"`
+
 	// RequestChangesThreshold gates Pruefer's severity-based REQUEST_CHANGES
 	// escalation (see decideEvent in pruefer/review.go). The zero value
 	// ("") means the feature is off: every review submits COMMENT,
@@ -384,6 +392,7 @@ type yamlConfig struct {
 	ExcludedAuthors         []string `yaml:"excluded_authors"`
 	ExcludedPaths           []string `yaml:"excluded_paths"`
 	ExcludedLabels          []string `yaml:"excluded_labels"`
+	CatchUpMarkerAuthors    []string `yaml:"catch_up_marker_authors"`
 	RequestChangesThreshold string   `yaml:"request_changes_threshold"`
 	// ReviewGuidance/ReviewGuidanceMode are #1446's operator-level review
 	// guidance override — see Config.ReviewGuidance's doc comment.
@@ -460,6 +469,7 @@ type flagValues struct {
 	excludedAuthors         string
 	excludedPaths           string
 	excludedLabels          string
+	catchUpMarkerAuthors    string
 	requestChangesThreshold string
 	reviewGuidance          string
 	reviewGuidanceMode      string
@@ -503,6 +513,7 @@ func LoadConfig(args []string) (Config, error) {
 	fs.Int64Var(&fv.maxDiffBytes, "max-diff-bytes", 0, "Skip PRs whose diff exceeds this many bytes")
 	fs.IntVar(&fv.maxWallTimeSec, "max-wall-time", 0, "Wall-clock cap in seconds for a single claude review invocation (0 = no cap)")
 	fs.StringVar(&fv.excludedAuthors, "excluded-authors", "", "Comma-separated PR authors to skip")
+	fs.StringVar(&fv.catchUpMarkerAuthors, "catch-up-marker-authors", "", "Comma-separated logins trusted to author merge-train catch-up markers (the engine's login); empty disables the pure catch-up skip")
 	fs.StringVar(&fv.excludedPaths, "excluded-paths", "", "Comma-separated path globs, filtered per file before max_diff_bytes is measured; a PR is skipped whole only if all touched paths match")
 	fs.StringVar(&fv.excludedLabels, "excluded-labels", "", "Comma-separated labels to skip (any match)")
 	fs.StringVar(&fv.requestChangesThreshold, "request-changes-threshold", "", "Severity tier (low, medium, high, critical) at or above which Pruefer submits REQUEST_CHANGES instead of COMMENT; empty disables severity-gated REQUEST_CHANGES entirely")
@@ -550,24 +561,25 @@ func LoadConfig(args []string) (Config, error) {
 	}
 
 	cfg := Config{
-		WatchedRepos:      yc.WatchedRepos,
-		ServedAccounts:    yc.ServedAccounts,
-		PollInterval:      DefaultPollInterval,
-		Model:             DefaultModel,
-		Effort:            DefaultEffort,
-		ConcurrencyCap:    DefaultConcurrencyCap,
-		MaxDiffBytes:      DefaultMaxDiffBytes,
-		ExcludedAuthors:   yc.ExcludedAuthors,
-		ExcludedPaths:     yc.ExcludedPaths,
-		ExcludedLabels:    yc.ExcludedLabels,
-		Cadence:           DefaultCadence,
-		RepoCadence:       yc.RepoCadence,
-		AppPrivateKeyPath: DefaultPrivateKeyPath,
-		AppStatePath:      DefaultAppStatePath,
-		TUI:               true,
-		LogFile:           DefaultLogPath,
-		AutoUpgrade:       false,
-		MaxDerivedRepos:   DefaultMaxDerivedRepos,
+		WatchedRepos:         yc.WatchedRepos,
+		ServedAccounts:       yc.ServedAccounts,
+		PollInterval:         DefaultPollInterval,
+		Model:                DefaultModel,
+		Effort:               DefaultEffort,
+		ConcurrencyCap:       DefaultConcurrencyCap,
+		MaxDiffBytes:         DefaultMaxDiffBytes,
+		ExcludedAuthors:      yc.ExcludedAuthors,
+		ExcludedPaths:        yc.ExcludedPaths,
+		ExcludedLabels:       yc.ExcludedLabels,
+		CatchUpMarkerAuthors: yc.CatchUpMarkerAuthors,
+		Cadence:              DefaultCadence,
+		RepoCadence:          yc.RepoCadence,
+		AppPrivateKeyPath:    DefaultPrivateKeyPath,
+		AppStatePath:         DefaultAppStatePath,
+		TUI:                  true,
+		LogFile:              DefaultLogPath,
+		AutoUpgrade:          false,
+		MaxDerivedRepos:      DefaultMaxDerivedRepos,
 
 		RepoRederivationInterval: DefaultRepoRederivationInterval,
 
@@ -711,6 +723,9 @@ func LoadConfig(args []string) (Config, error) {
 	if explicit["excluded-authors"] {
 		cfg.ExcludedAuthors = splitCSV(fv.excludedAuthors)
 	}
+	if explicit["catch-up-marker-authors"] {
+		cfg.CatchUpMarkerAuthors = splitCSV(fv.catchUpMarkerAuthors)
+	}
 	if explicit["excluded-paths"] {
 		cfg.ExcludedPaths = splitCSV(fv.excludedPaths)
 	}
@@ -814,6 +829,12 @@ func LoadConfig(args []string) (Config, error) {
 		}
 	}
 
+	for _, a := range cfg.CatchUpMarkerAuthors {
+		if a == "" || strings.HasPrefix(a, "@") || strings.ContainsAny(a, " \t\r\n") {
+			return Config{}, fmt.Errorf("catch_up_marker_authors: %q is not a bare login (no leading \"@\", no whitespace; an App login is \"<slug>[bot]\")", a)
+		}
+	}
+
 	return cfg, nil
 }
 
@@ -854,6 +875,9 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("PRUEFER_EXCLUDED_AUTHORS"); v != "" {
 		cfg.ExcludedAuthors = splitCSV(v)
+	}
+	if v := os.Getenv("PRUEFER_CATCH_UP_MARKER_AUTHORS"); v != "" {
+		cfg.CatchUpMarkerAuthors = splitCSV(v)
 	}
 	if v := os.Getenv("PRUEFER_EXCLUDED_PATHS"); v != "" {
 		cfg.ExcludedPaths = splitCSV(v)

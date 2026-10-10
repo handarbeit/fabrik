@@ -1563,3 +1563,39 @@ func TestFetchCheckRunAnnotations_ErrorPropagates(t *testing.T) {
 		t.Fatal("expected an error on HTTP 403")
 	}
 }
+
+func TestFetchCommit(t *testing.T) {
+	tests := []struct {
+		name    string
+		status  int
+		body    string
+		want    []string
+		wantMsg string
+		wantErr bool
+	}{
+		{"two parents in order", 200, `{"message":"Merge x\n\nFabrik-Train-Catch-Up: bbb","parents":[{"sha":"aaa"},{"sha":"bbb"}]}`, []string{"aaa", "bbb"}, "Merge x\n\nFabrik-Train-Catch-Up: bbb", false},
+		{"one parent", 200, `{"parents":[{"sha":"aaa"}]}`, []string{"aaa"}, "", false},
+		{"root commit", 200, `{"parents":[]}`, []string{}, "", false},
+		{"not found", 404, `{"message":"Not Found"}`, nil, "", true},
+		{"malformed JSON", 200, `{"parents":`, nil, "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/repos/owner/repo/git/commits/abc123", func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tt.status)
+				_, _ = w.Write([]byte(tt.body))
+			})
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+			c := NewClientWithBaseURL("test-token", srv.URL)
+			got, err := c.FetchCommit("owner", "repo", "abc123")
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
+			}
+			if !tt.wantErr && (!slices.Equal(got.Parents, tt.want) || got.Message != tt.wantMsg) {
+				t.Errorf("got %+v, want parents %v message %q", got, tt.want, tt.wantMsg)
+			}
+		})
+	}
+}

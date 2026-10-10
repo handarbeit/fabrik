@@ -440,6 +440,7 @@ Every field is classified as either **live** (applied immediately) or **restart-
 | `excluded_authors` | Live. |
 | `excluded_paths` | Live. |
 | `excluded_labels` | Live. |
+| `catch_up_marker_authors` | Live. |
 | `request_changes_threshold` | Live. |
 | `review_guidance` | Live. |
 | `review_guidance_mode` | Live. |
@@ -495,6 +496,24 @@ repo_cadence:
 
 Cadence is deliberately **not** one of the settings a reviewed repo can narrow for itself in its own resident `.pruefer/config.yaml` (see [What a repo may and may not set](#what-a-repo-may-and-may-not-set) below) — unlike `excluded_paths` or `max_diff_bytes`, reducing review frequency widens what can reach `main` unreviewed rather than narrowing scope, and it spends the *operator's* Claude budget. See [adrs/1610-pruefer-review-cadence.md](../../adrs/1610-pruefer-review-cadence.md) for the full argument.
 
+## Skipping a pure merge-train catch-up
+
+Fabrik's merge train can push a *catch-up* merge commit onto a queued PR's own branch (it merges the current base branch in, so the branch is no longer behind). Pruefer reviews on every push, so without this feature each catch-up would get a full review of a diff that only brought in base commits already reviewed and merged.
+
+When `catch_up_marker_authors` is set, Pruefer skips a head only if **all** of these hold:
+
+- the PR has a comment, authored by one of the configured logins, carrying the engine's marker `<!-- fabrik:train-catch-up head=<sha> base=<sha> pure=true -->` for **exactly this head** (full-length SHAs; `pure=false`, meaning the merge needed conflict-resolution edits, is always reviewed);
+- the head is a merge commit with exactly two parents: the previous head and the marker's `base` commit, and that `base` is on the PR's base branch;
+- the previous head was **already reviewed by Pruefer** — or is itself a verified pure catch-up over a reviewed head, followed at most 4 catch-ups deep. A PR Pruefer never reviewed is therefore always reviewed at its first catch-up.
+
+The skip posts nothing on the PR; it logs a `select` line (`skipping …: pure merge-train catch-up of an already-reviewed head`). It is decided in the shared review path, so webhook events, the poll and the reconciliation sweep all agree. `/pruefer review` still forces a review.
+
+**It fails toward reviewing.** A missing marker, a marker by another author, a marker for another head, a read error, an unexpected parent shape, an unreviewed previous head, or an unset setting all mean the head is reviewed exactly as before. A review caused by a failed read is never remembered as settled, so it is retried. The commit trailer `Fabrik-Train-Catch-Up:` is never trusted — anyone with push access can type it; only the marker comment, authored by the engine's own login, counts.
+
+The engine posts the marker just after pushing, so the webhook can arrive first. For a head that already looks like a catch-up (two parents, second parent on the base branch) and whose commit message carries the engine's `Fabrik-Train-Catch-Up:` trailer — used only as a hint that a marker is coming, never as evidence — Pruefer re-reads the comments up to three more times (about 8 seconds in total, cancellable) before concluding there is no marker; ordinary pushes, and a developer's own merge of the base branch (no trailer), never wait. If the marker is still absent the head is reviewed, and a later poll skips it once the marker exists.
+
+**Trust model.** `catch_up_marker_authors` is operator-only and cannot be set from a reviewed repo's `.pruefer/config.yaml`. Under GitHub App auth the engine's login is its App bot (`<slug>[bot]`), which nobody else can comment as. Under PAT auth it is a human account, so marker authenticity is only as good as that account's access. `pure` is taken from the engine as is; Pruefer does not re-derive it. See [adrs/2066-pruefer-skip-pure-catch-up.md](../../adrs/2066-pruefer-skip-pure-catch-up.md).
+
 ## Severity-gated REQUEST_CHANGES
 
 By default, `request_changes_threshold` is unset and every review submits `event: COMMENT` — byte-for-byte the original behavior. Setting it to one of four ordinal tiers turns on blocking reviews: if any finding's severity ranks at or above the threshold, Pruefer submits `event: REQUEST_CHANGES` instead. This is the setting `review_authority: authoritative` (a per-stage Fabrik YAML field — see [adrs/1250-review-authority-orthogonal-to-autonomy.md](../../adrs/1250-review-authority-orthogonal-to-autonomy.md)) is designed to honor once Pruefer is a repo's sole reviewer.
@@ -541,6 +560,7 @@ A repo's config can only **narrow** the operator's settings — it can never wid
 | `excluded_authors` | Yes | Union, same as above. |
 | `max_diff_bytes` | Yes, narrowing only | A repo may only **lower** the operator's cap, never raise it or uncap it. |
 | `request_changes_threshold` | Yes, narrowing only | A repo may only move it to an **equal-or-stricter** severity tier than the operator's — including turning it on (any tier) when the operator left it off — never to a more lenient tier, and never back to off if the operator configured one. See [Severity-gated REQUEST_CHANGES](#severity-gated-request_changes) for tier ordering. |
+| `catch_up_marker_authors` | No | Operator-only trust anchor (the engine's login); a repo naming its own trusted marker author would let it mute its own review. See [Skipping a pure merge-train catch-up](#skipping-a-pure-merge-train-catch-up). |
 | `cadence` / `repo_cadence` | No | Operator-only, never repo-narrowable — reducing review cadence is a *widening* of what can reach `main` unreviewed, not a narrowing of scope, and it spends the operator's own Claude budget. See [Review cadence](#review-cadence) and [adrs/1610-pruefer-review-cadence.md](../../adrs/1610-pruefer-review-cadence.md). |
 | Everything else | No | `model`, `effort`, `concurrency_cap`, `poll_interval_seconds`, `max_wall_time_seconds`, `tui`, `auto_upgrade`, `no_browser`, `github_app_*`, `event_source`, `hookdeck.*`, `reconciliation.*`, `log_file`, `watched_repos`, `served_accounts`, `max_derived_repos`, `repo_rederivation_interval`, and any unrecognized key — all operator-scoped (cost, credentials, capability, or discovery/resource-management knobs), and all silently ignored with a logged warning if a repo sets them. |
 
@@ -625,6 +645,7 @@ Precedence, highest to lowest: **flag > environment variable > YAML config file 
 | `--excluded-authors` | `PRUEFER_EXCLUDED_AUTHORS` | `excluded_authors` | (none) | Comma-separated logins |
 | `--excluded-labels` | `PRUEFER_EXCLUDED_LABELS` | `excluded_labels` | (none) | Skip if any label matches |
 | `--excluded-paths` | `PRUEFER_EXCLUDED_PATHS` | `excluded_paths` | (none) | Glob patterns, filtered **per file** and applied before `max_diff_bytes` is measured; a PR is skipped whole only if **every** touched path matches |
+| `--catch-up-marker-authors` | `PRUEFER_CATCH_UP_MARKER_AUTHORS` | `catch_up_marker_authors` | (none — skip disabled) | Comma-separated bare logins trusted to author the Fabrik engine's merge-train catch-up marker: the App's `<slug>[bot]` under GitHub App auth, the operator's user login under PAT auth. Unset means a catch-up push is always reviewed. Operator-only. See [Skipping a pure merge-train catch-up](#skipping-a-pure-merge-train-catch-up). |
 | `--request-changes-threshold` | `PRUEFER_REQUEST_CHANGES_THRESHOLD` | `request_changes_threshold` | (none — disabled) | `low`, `medium`, `high`, or `critical`; submits `REQUEST_CHANGES` when a finding's severity meets or exceeds this tier. See [Severity-gated REQUEST_CHANGES](#severity-gated-request_changes). |
 | `--review-guidance` | `PRUEFER_REVIEW_GUIDANCE` | `review_guidance` | (none) | Operator-level review guidance text, composed onto the embedded default (and, per repo, a repo's own skill file) per `review_guidance_mode`. See [Review guidance skill](#review-guidance-skill-prueferskillsreviewskillmd-in-the-reviewed-repo). |
 | `--review-guidance-mode` | `PRUEFER_REVIEW_GUIDANCE_MODE` | `review_guidance_mode` | `append` | `append` or `replace`; how `review_guidance` composes onto the embedded default guidance. An unrecognized value fails `LoadConfig` at startup (operator-authored config is validated strictly, unlike the repo skill's own mode, which degrades instead). |

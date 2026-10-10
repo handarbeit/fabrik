@@ -1403,6 +1403,33 @@ func (c *Client) FetchCommitsBehind(owner, repo, base, head string) (int, error)
 	return raw.BehindBy, nil
 }
 
+// CommitInfo is the part of a commit object FetchCommit returns.
+type CommitInfo struct {
+	Parents []string // parent SHAs, first parent first; empty for a root commit
+	Message string   // the full commit message
+}
+
+// FetchCommit returns a commit's parent SHAs (first parent first) and message
+// via GET /repos/{o}/{r}/git/commits/{sha}. That endpoint returns only the
+// commit object, not the file list, so it is far lighter than /commits/{sha}.
+func (c *Client) FetchCommit(owner, repo, sha string) (CommitInfo, error) {
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/git/commits/%s", c.baseURL, owner, repo, url.PathEscape(sha))
+	var raw struct {
+		Message string `json:"message"`
+		Parents []struct {
+			SHA string `json:"sha"`
+		} `json:"parents"`
+	}
+	if err := c.restGetJSON(apiURL, &raw); err != nil {
+		return CommitInfo{}, fmt.Errorf("fetching commit %s: %w", sha, err)
+	}
+	info := CommitInfo{Parents: make([]string, 0, len(raw.Parents)), Message: raw.Message}
+	for _, p := range raw.Parents {
+		info.Parents = append(info.Parents, p.SHA)
+	}
+	return info, nil
+}
+
 // mergeMethodAttemptOrder returns the ordered, de-duplicated list of REST
 // merge_method values to try, starting with the configured strategy
 // (lower-cased, defaulting to "merge" when unset or unrecognized) followed by
