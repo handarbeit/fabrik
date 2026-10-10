@@ -1149,6 +1149,13 @@ user: your-github-username
 # green, instead of building a throwaway trial; "off" always builds the trial
 # (for repos that forbid merge commits on PR branches).
 # singleton_catch_up: merge
+# Path globs left out of the merge-train overlap check. A fresh batch never
+# contains two members that change the same path; list lockfiles, changelogs and
+# generated files here so they do not serialise every PR. "*" does not cross "/"
+# ("*.lock" matches only a top-level file; use "**/*.lock"), "**" spans directories.
+# Default: none (every path counts). Also --merge-train-overlap-ignore /
+# FABRIK_MERGE_TRAIN_OVERLAP_IGNORE (comma-separated).
+# merge_train_overlap_ignore: ["**/*.lock", "CHANGELOG.md"]
 # A Queued item whose own combined Validate fails against the moved base is
 # repaired automatically: Validate is re-entered for it (up to this many times per
 # item per base commit) before it pauses for a human. 0 disables auto-repair.
@@ -1251,6 +1258,7 @@ FABRIK_USER=my-personal-username
 | `--max-train-rebase-cycles` | Maximum main-moved rebase+revalidate cycles for a merge-train batch before it is dissolved back to Queued (0 = use default of 3; also `FABRIK_MAX_TRAIN_REBASE_CYCLES`). When an external direct push advances the base branch under an in-flight batch, the trial branch is rebased onto the new base and the combined Validate re-runs before landing; after this many failed catch-up attempts the batch is dissolved (integration PR closed, trial branch deleted, members left untouched in Queued) and a fresh train forms on the next poll. | `0` (3) |
 | `--max-train-auto-repair-attempts` | How many times per item and per base commit the merge train re-enters Validate itself to repair a `Queued` item whose own combined Validate fails against the moved base, before pausing it for a human (default 1; `0` disables auto-repair and restores the pause; negative values warn and use the default; also `FABRIK_MAX_TRAIN_AUTO_REPAIR_ATTEMPTS`). The count is kept in memory, so a restart resets it. See the "Red singleton: automatic repair" paragraph in the merge-train section |
 | `--singleton-catch-up` | What a lone `Queued` item whose own branch is **behind** the base does: `merge` merges the pinned base into the item's own branch (a merge commit — no rebase, no force-push), waits for the PR's own CI on the new head and lands the PR directly, with no trial branch or draft CI PR; `off` builds a trial branch as before, for repos that forbid merge commits on PR branches or require linear history or signed commits. An invalid value logs a warning and uses `merge`. Also `FABRIK_SINGLETON_CATCH_UP`. See "Behind-the-base singleton" under Merge Train. | `merge` |
+| `--merge-train-overlap-ignore` | Comma-separated path globs excluded from the merge-train batch overlap check (for example `**/*.lock,CHANGELOG.md`). A fresh batch never contains two members that change the same non-ignored path; the later one stays `Queued` for a later train. `*` does not cross `/` (use `**/*.lock` for a lockfile at any depth); `**` matches any number of directories. Default: none — every changed path counts. Also `FABRIK_MERGE_TRAIN_OVERLAP_IGNORE` and `merge_train_overlap_ignore` in `config.yaml`. |
 | `--max-train-trials-per-window` | Runaway guard (ADR-059 §D8): maximum trial-branch creations with zero successful lands within the rolling window before pausing all `Queued` members, scoped **per (repo, base) partition** (#1648 — a runaway trip on one base never pauses a healthy sibling base's members in the same repo; 0 = use default of 20; also `FABRIK_MAX_TRAIN_TRIALS_PER_WINDOW`). Composition-agnostic within a partition — counts trials regardless of which batch composition produced them. | `0` (20) |
 | `--train-trial-window` | Runaway guard (ADR-059 §D8): rolling window in minutes over which `--max-train-trials-per-window` is measured, per (repo, base) partition (0 = use default of 60; also `FABRIK_TRAIN_TRIAL_WINDOW`). | `0` (60 min) |
 | `--max-comment-cycles-per-window` | Comment-processing circuit breaker (#1089): maximum non-advancing comment-processing invocations for a single issue within the window before pausing it with `fabrik:paused` + `fabrik:awaiting-input` (0 = use default of 10; also `FABRIK_MAX_COMMENT_CYCLES_PER_WINDOW`). Defense-in-depth backstop of last resort against a self-sustaining comment loop (see incident #1083) — resets on any forward progress (stage completion, new commit, PR state change, issue-body edit, or manual unpause). | `0` (10) |
@@ -1329,6 +1337,7 @@ The flag/env suggestion is derived mechanically from Fabrik's snake_case (`confi
 | `FABRIK_MAX_BISECT_VALIDATIONS` | `max_bisect_validations` | Maximum combined validations per red merge-train batch before degrading to one-at-a-time landing (positive integer; invalid or unset values derive `2·⌈log₂(max_batch_size)⌉ + 1`, ≈ 7 at the default batch size). The fallback is logged, never silent. See `--max-bisect-validations`. | derived (≈7) |
 | `FABRIK_MAX_TRAIN_AUTO_REPAIR_ATTEMPTS` | `max_train_auto_repair_attempts` | Red-singleton auto-repair attempts per item per base commit (non-negative integer; `0` disables; invalid values warn and use the default). See `--max-train-auto-repair-attempts`. | `1` |
 | `FABRIK_SINGLETON_CATCH_UP` | `singleton_catch_up` | `merge` (default) or `off` (case-insensitive); anything else logs a warning and uses `merge`. See `--singleton-catch-up`. | `merge` |
+| `FABRIK_MERGE_TRAIN_OVERLAP_IGNORE` | `merge_train_overlap_ignore` | Comma-separated path globs excluded from the merge-train overlap check (a YAML list in `config.yaml`). Default none. See `--merge-train-overlap-ignore`. |
 | `FABRIK_MAX_TRAIN_REBASE_CYCLES` | `max_train_rebase_cycles` | Maximum main-moved rebase+revalidate cycles for a merge-train batch before dissolving it back to Queued (positive integer; invalid or unset values default to 3). On exhaustion the batch's integration PR is closed and trial branch deleted, members remain in Queued, and a fresh train forms next poll. See `--max-train-rebase-cycles`. | `3` |
 | `FABRIK_MAX_TRAIN_TRIALS_PER_WINDOW` | `max_train_trials_per_window` | Runaway guard (ADR-059 §D8): maximum trial-branch creations with zero successful lands within the rolling window before pausing all `Queued` members, scoped per (repo, base) partition (#1648; positive integer; invalid or unset values default to 20). See `--max-train-trials-per-window`. | `20` |
 | `FABRIK_TRAIN_TRIAL_WINDOW` | `train_trial_window` | Runaway guard (ADR-059 §D8): rolling window in minutes over which `FABRIK_MAX_TRAIN_TRIALS_PER_WINDOW` is measured, per (repo, base) partition (positive integer; invalid or unset values default to 60). See `--train-trial-window`. | `60` |
@@ -1795,6 +1804,11 @@ Two observable differences from the batch-landing path: nothing on `--max-batch-
 - Set `max_train_auto_repair_attempts: 0` to turn the whole feature off (including the "already fixed" check) and get the previous behaviour: the item is moved to Validate and paused, and you apply `fabrik:revalidate`.
 - It applies only when the stage before the holding stage is literally named `Validate`; a customised stage set keeps the pause. Failures isolated by bisection in a multi-member batch, the runaway guard and landing-verification failures keep their human gate.
 - **Caveats.** The attempt count lives in memory, so a daemon restart resets it (at worst one extra repair per item per base commit) and drops a pending failure report (Validate still runs, just without the file). The cap limits repairs per base commit, not in total: on a very busy base an item can be repaired again each time the base moves, and each repair is a real Validate run.
+
+**Overlapping members and stale members.** When many parallel PRs edit the same few files, two things used to cost trial CI runs: a batch of mutually overlapping PRs needed conflict resolution or went red and bisected, and after a PR landed every other `Queued` PR that now genuinely conflicted with the new base was only discovered by spending a trial (and often a pause) on it. Two mechanisms address this:
+
+- **Fresh batches avoid overlap.** When a new batch is formed, Fabrik reads each member's changed files once per PR head commit and admits members in the usual order, skipping any whose files intersect a member already admitted. A skipped member stays in `Queued` — nothing is posted, no pause, no ejection counted — and joins a later batch; the log line is `deferred #1555: overlaps #1549 on mcp/src/index.ts`. A member skipped three formations in a row is considered first in the next one, so a PR on a hot file is never starved. If a PR's file list cannot be read (or is the 3000-file maximum GitHub will list), the member is admitted as before. List lockfiles, changelogs and generated files in `merge_train_overlap_ignore` so they do not count as overlap; **an unignored hot file serialises every PR that touches it** (the batch becomes a single member and each landing is one trial).
+- **Members that really conflict are rerouted early.** After a landing, once no train worker is running for that repository and base branch, Fabrik checks every other `Queued` member of that partition locally (`git merge-tree` against the new base — no CI run, no GitHub API reads). A member whose merge actually conflicts is moved back to **Validate** with `fabrik:rebase-needed`, with one `🏭 **Fabrik merge-train — rerouted (conflicts with new base)**` comment, before a trial is spent on it; the ordinary rebase path resolves it and the item re-queues afterwards. It is **not paused** and the move does **not** count toward the ejection limit. A member that overlaps the landed files but still merges cleanly is left alone: file overlap alone never moves anything. If the check cannot be completed (git error, branch not fetched), the member simply stays `Queued`. The check is best-effort and in memory: a daemon restart can skip one, which costs at most the trial it would have saved. Overlap-aware composition applies only to fresh batches; bisection, restart recovery and one-at-a-time landing are unchanged.
 
 **Scope note.** In v1 the train batches **yolo** `Queued` items only. `fabrik:cruise` and manual-merge items return early at Validate (before the train gate) and never enter the train — batching human-merge items behind an explicit "go" is a planned fast-follow.
 
@@ -7850,6 +7864,45 @@ After an abandon `dispatchMergeTrainWorker` refuses the `(repo, base)` partition
 | Queued singleton, red trial | reroute fails | Queued (unchanged); retried next poll, nothing posted or counted | — | — |
 
 **References:** [ADR-2045](../adrs/2045-merge-train-red-singleton-auto-repair.md), [ADR-1545](../adrs/1545-red-singleton-reroute-before-pause.md), [ADR-1208](../adrs/1208-queued-review-finding-ejection.md), [ADR-1644](../adrs/1644-merge-train-singleton-fast-path.md), [ADR-2044](../adrs/2044-singleton-catch-up.md).
+
+---
+
+### 6.32 Merge-Train Overlap-Aware Batch Composition and Post-Landing Invalidation (#2047, ADR-2047)
+
+**Trigger:** Issue #2047 (reported in #2040; proposal 2 of #1826). Batches were formed in entry order and conflicts were found only by spending trials; after a landing every Queued member that now conflicts with the new base cost a trial (and often a pause) to discover. Two mechanisms, with opposite failure polarities on purpose.
+
+**A. Fresh-batch composition (`admitByOverlap`, `engine/merge_train_overlap.go`).** The third fresh-formation filter in `prepareTrainWorker`, after `dropLiveLandedMembers` (§6.28) and `admitTrainMembers` (§6.25). Fresh formation only — both restart routes return from `reconstructTrainState` first; bisection, `landOneAtATime` and `landGreenBatch` never call it. It runs on the already-capped batch (`routeQueuedGroup` caps first), so a deferral can leave the batch smaller than the cap.
+
+1. **Order.** Members that were deferred for overlap `overlapStarvationThreshold` (3) consecutive formations of their partition are considered first (FR-003); otherwise today's `(StatusEnteredAt, Number)` order (§6.16/ADR-1833). Survivors keep their original relative order.
+2. **Changed files.** `FetchPRFiles` on the live client, read once per `(repo, PR, head SHA)` and cached in memory (a new head SHA overwrites). A read error, an empty/404 list or a list of 3000 or more (GitHub's silent cap) is *unreadable*: the member is admitted unchecked, contributes nothing to the union, and an error is never cached.
+3. **Walk.** Paths matching `merge_train_overlap_ignore` (`internal/pathglob`: `*` never crosses `/`, `**` spans segments) are dropped from both sides. A member is kept if its remaining paths are disjoint from those already kept, else deferred. The first member considered is always admitted.
+4. **Deferral.** The member simply stays Queued — no reroute, comment, ejection count or pause. One log line: `deferred #B: overlaps #A on <smallest shared path>`. The skip count increments; it resets when the member is admitted or is absent from a formation of its partition (counts are per `trainKey`).
+
+**B. Post-landing invalidation (`invalidateConflictingQueued`, `engine/merge_train_invalidate.go`).** Every landing path (`landSingleton`, `finishSingletonFastPathLanding`, both branches of `landMergeTrainBatch`) records the landed member with `noteTrainLanded`. `routeQueuedGroup` consumes the record for a partition only while **no worker is in flight** for its `trainKey` (the ADR-1208 ownership rule: with no worker, the poll goroutine owns the Queued members), before the cap and before dispatch, and skips it under the `trainValidateFn` seam.
+
+1. Skipped (members untouched, logged) unless the reroute target stage has `wait_for_ci` (ADR-1821 R9), a `WorktreeManager` is registered, the base resolves, and `git fetch origin` succeeds.
+2. For each candidate that is not a landed member and carries neither `fabrik:paused` nor `fabrik:editing`: resolve `refs/remotes/origin/fabrik/issue-N` and run `git merge-tree --write-tree --name-only --no-messages refs/remotes/origin/<base> <head>` in the bare clone — no CI, no GitHub API reads. A conflict is accepted only when both refs resolve and stdout starts with a result-tree OID (`git merge-tree` also exits 1 for an unresolvable ref).
+3. **Conflict** → `rerouteQueuedMemberOffHolding` first (reroute-before-side-effects, ADR-1208); on success any pending review/comment eject signal is consumed, `fabrik:rebase-needed` is applied best-effort (Validate's mergeability gate re-derives it from live mergeability, so a wrong application self-heals, and applying it closes the yolo/cruise bounce window), one `invalidated #N: conflicts with landed #M (merge-tree)` line is logged (M = landed members whose cached file lists intersect the conflicted paths, else all landed this pass) and one `🏭 **Fabrik merge-train — rerouted (conflicts with new base)**` comment is posted, deduplicated per (member, head SHA). It never calls `ejectMember`, never touches `mergeTrainEjectionCounts` and never pauses (FR-009); the rebase cycle is charged normally by `dispatchRebaseReinvoke`.
+4. **Clean merge** (even when the member overlaps the landed files) → left alone. **Any error** (git < 2.38, missing ref/object, failed fetch) → left Queued and logged (fail-safe). A failed reroute leaves the member Queued for a trial.
+
+**State.** `Engine.overlap` (file cache, skip counts) and `Engine.invalidate` (landed record, comment dedupe), each behind its own mutex; in memory only, so a restart delays the starvation guard and drops a pending scan (cost: one trial, no worse than before). The signal is consumed once — no retry loop. Test seams: `SetMergeTrainOverlapDisabledForTest`, `SetMergeTrainInvalidationDisabledForTest`.
+
+**Out of scope.** Bisection, restart reconstruction, one-at-a-time and green-batch landing paths; rerouting on file overlap alone; persisting counts or the cache.
+
+**Code path:** `engine/merge_train_overlap.go`, `engine/merge_train_invalidate.go`, `prepareTrainWorker` and the landing sites (`engine/merge_train.go`), `routeQueuedGroup` (`engine/poll.go`), `internal/pathglob`, `FetchPRFiles` (`github/prs.go`, `engine/interfaces.go`).
+
+**State transitions:**
+
+| Before | Trigger | After | Labels Added | Labels Removed |
+|---|---|---|---|---|
+| Queued candidate | fresh formation, files overlap an already-admitted member | Queued (unchanged; skip count +1) | — | — |
+| Queued candidate | fresh formation, files unreadable / not known complete | admitted as before | — | — |
+| Queued candidate | skipped 3 consecutive formations | considered first in the next formation | — | — |
+| Queued member | post-landing scan, `merge-tree` conflict | Validate (rerouted), not paused, no ejection counted | `fabrik:rebase-needed` | — |
+| Queued member | post-landing scan, clean merge (overlap or not) | Queued (unchanged) | — | — |
+| Queued member | post-landing scan, git error / unresolvable ref / fetch failed / no `wait_for_ci` target | Queued (unchanged), logged | — | — |
+
+**References:** [ADR-2047](../adrs/2047-merge-train-overlap-aware-composition.md), [ADR-1821](../adrs/1821-merge-train-red-member-admission-gate.md), [ADR-1208](../adrs/1208-queued-review-finding-ejection.md), [ADR-1833](../adrs/1833-deterministic-queued-batch-ordering.md), [ADR-1648](../adrs/1648-merge-train-per-base-partitioning.md), [ADR-2044](../adrs/2044-singleton-catch-up.md), [ADR-2045](../adrs/2045-merge-train-red-singleton-auto-repair.md).
 
 ---
 

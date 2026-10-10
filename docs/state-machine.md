@@ -3322,6 +3322,45 @@ After an abandon `dispatchMergeTrainWorker` refuses the `(repo, base)` partition
 
 ---
 
+### 6.32 Merge-Train Overlap-Aware Batch Composition and Post-Landing Invalidation (#2047, ADR-2047)
+
+**Trigger:** Issue #2047 (reported in #2040; proposal 2 of #1826). Batches were formed in entry order and conflicts were found only by spending trials; after a landing every Queued member that now conflicts with the new base cost a trial (and often a pause) to discover. Two mechanisms, with opposite failure polarities on purpose.
+
+**A. Fresh-batch composition (`admitByOverlap`, `engine/merge_train_overlap.go`).** The third fresh-formation filter in `prepareTrainWorker`, after `dropLiveLandedMembers` (§6.28) and `admitTrainMembers` (§6.25). Fresh formation only — both restart routes return from `reconstructTrainState` first; bisection, `landOneAtATime` and `landGreenBatch` never call it. It runs on the already-capped batch (`routeQueuedGroup` caps first), so a deferral can leave the batch smaller than the cap.
+
+1. **Order.** Members that were deferred for overlap `overlapStarvationThreshold` (3) consecutive formations of their partition are considered first (FR-003); otherwise today's `(StatusEnteredAt, Number)` order (§6.16/ADR-1833). Survivors keep their original relative order.
+2. **Changed files.** `FetchPRFiles` on the live client, read once per `(repo, PR, head SHA)` and cached in memory (a new head SHA overwrites). A read error, an empty/404 list or a list of 3000 or more (GitHub's silent cap) is *unreadable*: the member is admitted unchecked, contributes nothing to the union, and an error is never cached.
+3. **Walk.** Paths matching `merge_train_overlap_ignore` (`internal/pathglob`: `*` never crosses `/`, `**` spans segments) are dropped from both sides. A member is kept if its remaining paths are disjoint from those already kept, else deferred. The first member considered is always admitted.
+4. **Deferral.** The member simply stays Queued — no reroute, comment, ejection count or pause. One log line: `deferred #B: overlaps #A on <smallest shared path>`. The skip count increments; it resets when the member is admitted or is absent from a formation of its partition (counts are per `trainKey`).
+
+**B. Post-landing invalidation (`invalidateConflictingQueued`, `engine/merge_train_invalidate.go`).** Every landing path (`landSingleton`, `finishSingletonFastPathLanding`, both branches of `landMergeTrainBatch`) records the landed member with `noteTrainLanded`. `routeQueuedGroup` consumes the record for a partition only while **no worker is in flight** for its `trainKey` (the ADR-1208 ownership rule: with no worker, the poll goroutine owns the Queued members), before the cap and before dispatch, and skips it under the `trainValidateFn` seam.
+
+1. Skipped (members untouched, logged) unless the reroute target stage has `wait_for_ci` (ADR-1821 R9), a `WorktreeManager` is registered, the base resolves, and `git fetch origin` succeeds.
+2. For each candidate that is not a landed member and carries neither `fabrik:paused` nor `fabrik:editing`: resolve `refs/remotes/origin/fabrik/issue-N` and run `git merge-tree --write-tree --name-only --no-messages refs/remotes/origin/<base> <head>` in the bare clone — no CI, no GitHub API reads. A conflict is accepted only when both refs resolve and stdout starts with a result-tree OID (`git merge-tree` also exits 1 for an unresolvable ref).
+3. **Conflict** → `rerouteQueuedMemberOffHolding` first (reroute-before-side-effects, ADR-1208); on success any pending review/comment eject signal is consumed, `fabrik:rebase-needed` is applied best-effort (Validate's mergeability gate re-derives it from live mergeability, so a wrong application self-heals, and applying it closes the yolo/cruise bounce window), one `invalidated #N: conflicts with landed #M (merge-tree)` line is logged (M = landed members whose cached file lists intersect the conflicted paths, else all landed this pass) and one `🏭 **Fabrik merge-train — rerouted (conflicts with new base)**` comment is posted, deduplicated per (member, head SHA). It never calls `ejectMember`, never touches `mergeTrainEjectionCounts` and never pauses (FR-009); the rebase cycle is charged normally by `dispatchRebaseReinvoke`.
+4. **Clean merge** (even when the member overlaps the landed files) → left alone. **Any error** (git < 2.38, missing ref/object, failed fetch) → left Queued and logged (fail-safe). A failed reroute leaves the member Queued for a trial.
+
+**State.** `Engine.overlap` (file cache, skip counts) and `Engine.invalidate` (landed record, comment dedupe), each behind its own mutex; in memory only, so a restart delays the starvation guard and drops a pending scan (cost: one trial, no worse than before). The signal is consumed once — no retry loop. Test seams: `SetMergeTrainOverlapDisabledForTest`, `SetMergeTrainInvalidationDisabledForTest`.
+
+**Out of scope.** Bisection, restart reconstruction, one-at-a-time and green-batch landing paths; rerouting on file overlap alone; persisting counts or the cache.
+
+**Code path:** `engine/merge_train_overlap.go`, `engine/merge_train_invalidate.go`, `prepareTrainWorker` and the landing sites (`engine/merge_train.go`), `routeQueuedGroup` (`engine/poll.go`), `internal/pathglob`, `FetchPRFiles` (`github/prs.go`, `engine/interfaces.go`).
+
+**State transitions:**
+
+| Before | Trigger | After | Labels Added | Labels Removed |
+|---|---|---|---|---|
+| Queued candidate | fresh formation, files overlap an already-admitted member | Queued (unchanged; skip count +1) | — | — |
+| Queued candidate | fresh formation, files unreadable / not known complete | admitted as before | — | — |
+| Queued candidate | skipped 3 consecutive formations | considered first in the next formation | — | — |
+| Queued member | post-landing scan, `merge-tree` conflict | Validate (rerouted), not paused, no ejection counted | `fabrik:rebase-needed` | — |
+| Queued member | post-landing scan, clean merge (overlap or not) | Queued (unchanged) | — | — |
+| Queued member | post-landing scan, git error / unresolvable ref / fetch failed / no `wait_for_ci` target | Queued (unchanged), logged | — | — |
+
+**References:** [ADR-2047](../adrs/2047-merge-train-overlap-aware-composition.md), [ADR-1821](../adrs/1821-merge-train-red-member-admission-gate.md), [ADR-1208](../adrs/1208-queued-review-finding-ejection.md), [ADR-1833](../adrs/1833-deterministic-queued-batch-ordering.md), [ADR-1648](../adrs/1648-merge-train-per-base-partitioning.md), [ADR-2044](../adrs/2044-singleton-catch-up.md), [ADR-2045](../adrs/2045-merge-train-red-singleton-auto-repair.md).
+
+---
+
 ## 7. Edge Case States
 
 ### 7.1 Cooldown Retry

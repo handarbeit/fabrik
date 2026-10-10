@@ -53,6 +53,12 @@ merge_train: "on"
 # The counter is in memory — a restart resets it. Also: --max-train-auto-repair-attempts
 # flag / FABRIK_MAX_TRAIN_AUTO_REPAIR_ATTEMPTS env var.
 # max_train_auto_repair_attempts: 1
+# Path globs left out of the merge-train overlap check (#2047): a fresh batch never
+# holds two members that change the same non-ignored path. "*" does not cross "/"
+# ("*.lock" is top-level only; use "**/*.lock"); "**" spans directories. Default none.
+# Also: --merge-train-overlap-ignore flag (comma-separated) /
+# FABRIK_MERGE_TRAIN_OVERLAP_IGNORE env var.
+# merge_train_overlap_ignore: ["**/*.lock", "CHANGELOG.md"]
 # debug_output: false
 # symlink_env: false    # When true, creates a relative symlink at <worktree>/.env pointing to the fabrikDir .env.
 #                       # Enables worktree-based stages to pick up credentials (e.g. ANTHROPIC_API_KEY) from .env.
