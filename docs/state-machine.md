@@ -4416,6 +4416,49 @@ Because it keys on the body update rather than on `completed`, a round ending in
 
 **Upgrade behavior.** `persist_spec` is opt-in per stage YAML. A `specify.yaml` predating it silently writes no file (no denial, no pause); startup drift detection reports the missing key (it is not a no-op default) and `fabrik refresh-stages --apply` adds it.
 
+
+### 7.17 Display-Only Status-Line Field (#2048, ADR 2048)
+
+The engine projects a one-line description of what an item is doing or waiting on into an optional ProjectV2 **text** field (`project_fields.status_line`, default name `Fabrik`; `off` disables). **The field is display-only and is not state.** No handler, gate, settle scan or cache reads it back — not from GitHub, not from the Store, not from the writer's own record of what it wrote. Labels and the item store remain the only state; an operator editing the field by hand changes nothing the engine does.
+
+**Writer.** `engine/status_line.go`: `setStatusLine(item, line)` / `clearStatusLine(item)` are the only entry points (`setMembersStatusLine` for a train's members, `withStatusLine` for a bracketed activity such as comment review). The wording lives in `engine/status_line_text.go`.
+- *Write-on-change.* An in-memory `issueKey → last line written` map (own mutex, per-item write lock) skips a write when the line equals the last one written; the record is updated only after a successful write, so a failed write is retried at the next transition. It is lost on restart: the first transition of an item afterwards may rewrite an identical line once, and a Done item with no record gets one blind clear.
+- *Never per turn or per poll.* Calls sit at the engine's existing transitions only (below).
+- *Truncation.* At most 60 characters (runes), ending in `…`.
+- *Missing / off.* The field is resolved once (startup `checkStageColumnAlignment`, or lazily from the poll loop) with a TEXT-only lookup. If it is absent, not a text field, or the feature is off, every call is a silent no-op and exactly one `[startup] status-line field unavailable …` line is logged. A field created later, or renamed, needs a restart.
+- *Failure.* A failed write is logged (`[#N status-line]`) and swallowed — it never alters, retries-in-a-blocking-way or pauses the transition that triggered it.
+- *Self-write.* A successful write applies `itemstate.SelfWriteObserved` (§7.9) like every other project-field write, so the probe does not re-fetch the item for the engine's own write.
+
+**Transitions that write.**
+
+| Line | Hook |
+|---|---|
+| `queued · batch of N` | end of `prepareTrainWorker` (fresh formation) |
+| `queued` | `advanceToQueued`; a trial abandoned (pending, infra, cancelled, assemble error); a member ejected but staying Queued; a dissolved batch; a catch-up decided for this poll |
+| `deferred: overlaps #M` | `admitByOverlap` |
+| `trial · resolving conflicts` | `assembleTrialBranch`, when a member's merge conflicts (no trial PR exists yet, so no number) |
+| `trial #<PR> · CI running` | `assembleAndValidateInner`, after the draft CI PR is created (PR number = the draft CI PR) |
+| `bisecting · step i of n` | `bisect`, before each sub-trial (`i` = the validation about to run, `n` = the cost cap; sub-trials write no trial line of their own) |
+| `catch-up · CI on PR #N` | `trySingletonCatchUp`, while `waitMemberCI` waits on the member's own PR |
+| `landing` | `landMergeTrainBatch`, `landSingleton`, the singleton fast path |
+| `<Stage> · running` | `acquireLockAndVerify`, once the in-progress label is set (not for the cleanup stage) |
+| `<Stage> · comment review` | `processCommentsClassified`, restored to the previous line afterwards unless something newer was written |
+| `blocked by #N` | `checkDependencies`, on the first-time block |
+| `paused: <reason>` | `pauseIssue` (reason = the pause comment's header), `blockOnInput`, the merge-train pause paths, the settle escalations |
+| `claude-limit until HH:MM` | `handleUsageLimitExit`, for the item whose invocation hit the limit only (daemon local time) |
+| `awaiting CI on PR #N` | `finalizeStageOutcome`, when `fabrik:awaiting-ci` is first applied |
+
+**Cleared** by `advanceToNextStage` — the single funnel for every Done move (merge-train landings, ordinary merge, no-work-needed, closed-item advance) and for every stage-to-stage advance — by `rerouteQueuedMemberOffHolding`, and when `fabrik:blocked` is lifted. Lines can still go stale where no transition fires (a crash mid-phase); they are overwritten by the item's next transition or Done and are not repaired by a read-back.
+
+**No webhook echo is registered** for a status-line write. `RegisterEchoIfSubscribed("projects_v2_item", "edited", <ItemID>)` has no field discriminator, so a registration would collide with Status-move registrations, and a delivery that never arrives would inflate the ADR-042 miss counter.
+
+**Cache and drift (R5).** Three places must treat a display-field write as a no-op:
+1. *Webhook.* `applyProjectsV2ItemDelta` (`boardcache/delta.go`) still runs the echo match first, then returns for any edit whose `field_type` is not `single_select`, before the Store is touched: no Store change (so no wake), no `localDeltaAt` stamp (so no invalidation), no drift. `changes.field_value.to` is decoded as `json.RawMessage` because its type depends on the field type; a text edit's value never causes an unmarshal error.
+2. *`updatedAt`.* A field write is assumed to bump the project item's `updatedAt` (unverified for text fields). The board and probe queries therefore select the display field's own `updatedAt` (`statusLine: fieldValueByName(...) @include(if: $withStatusLine)`, set through `github.Client.SetStatusLineField`), and the parsers drop the project-item contribution to `UpdatedAt` / `EffectiveUpdatedAt` when it is not after that value (2 s tolerance). The probe, `LightReconcile` and the store all read that one parsed value, so none count a display write as drift or a reason to deep-fetch. Status is compared directly, so a real Status move is still seen even if a display write shortly follows it. With the feature off the selection is not sent and parsing is unchanged.
+3. *Project-level gate.* `project.updatedAt` may still advance, so the layer-2 status batch can run once per write burst; it wakes nothing.
+
+Neutralisation seams: `CacheImpl.SetTextEditSuppressionDisabledForTest` (boardcache) and leaving `SetStatusLineField` unset (the discount); the tests that pin the behaviour are shown to fail without them.
+
 ---
 
 ## 8. Invalid / Unexpected States

@@ -1169,6 +1169,14 @@ user: your-github-username
 # max_train_trials_per_window is measured.
 # train_trial_window: 60
 
+# Display-only "status line" project field (#2048). Fabrik writes one short line
+# saying what each item is doing or waiting on right now into a TEXT field on
+# your project board. The field must already exist on the board — Fabrik never
+# creates it. Default name "Fabrik"; "off" disables the feature. YAML only (no
+# flag or environment variable). See "Project Board Status Line" in section 3.
+# project_fields:
+#   status_line: Fabrik
+
 # Comment-processing circuit breaker (#1089): maximum non-advancing
 # comment-processing invocations for a single issue within the rolling window
 # before pausing it with fabrik:paused + fabrik:awaiting-input. Defense-in-depth
@@ -1812,7 +1820,53 @@ Two observable differences from the batch-landing path: nothing on `--max-batch-
 - **Fresh batches avoid overlap.** When a new batch is formed, Fabrik reads each member's changed files once per PR head commit and admits members in the usual order, skipping any whose files intersect a member already admitted. A skipped member stays in `Queued` — nothing is posted, no pause, no ejection counted — and joins a later batch; the log line is `deferred #1555: overlaps #1549 on mcp/src/index.ts`. A member skipped three formations in a row is considered first in the next one, so a PR on a hot file is never starved. If a PR's file list cannot be read (or is the 3000-file maximum GitHub will list), the member is admitted as before. List lockfiles, changelogs and generated files in `merge_train_overlap_ignore` so they do not count as overlap; **an unignored hot file serialises every PR that touches it** (the batch becomes a single member and each landing is one trial). The overlap check runs on the batch *after* it has been capped at `max_batch_size`, so a deferral can leave a batch smaller than the cap and a disjoint `Queued` member beyond the cap is not pulled in to fill it (this bounds the file reads to one batch's worth of PRs). A renamed file counts under its new path only, so a PR that edits a file's old path can be batched with the PR that renames it; the post-landing check catches the resulting conflict.
 - **Members that really conflict are rerouted early.** After a landing, once no train worker is running for that repository and base branch, Fabrik checks every other `Queued` member of that partition locally (`git merge-tree` against the new base — no CI run, no GitHub API reads). A member whose merge actually conflicts is moved back to **Validate** with `fabrik:rebase-needed`, with one `🏭 **Fabrik merge-train — rerouted (conflicts with new base)**` comment, before a trial is spent on it; the ordinary rebase path resolves it and the item re-queues afterwards. It is **not paused** and the move does **not** count toward the ejection limit. A member that overlaps the landed files but still merges cleanly is left alone: file overlap alone never moves anything. If the check cannot be completed (git error, branch not fetched), the member simply stays `Queued`. The check is best-effort and in memory: a daemon restart can skip one, which costs at most the trial it would have saved. Overlap-aware composition applies only to fresh batches; bisection, restart recovery and one-at-a-time landing are unchanged.
 
+**Seeing the train from the board.** Each `Queued` card can show what the train is doing with it — `queued · batch of 3`, `trial #1692 · CI running`, `bisecting · step 2 of 3`, `landing`, `deferred: overlaps #1549` — in an optional text field on your project. See [Project Board Status Line](#project-board-status-line).
+
 **Scope note.** In v1 the train batches **yolo** `Queued` items only. `fabrik:cruise` and manual-merge items return early at Validate (before the train gate) and never enter the train — batching human-merge items behind an explicit "go" is a planned fast-follow.
+
+### Project Board Status Line
+
+On the board, a card in `Queued` looks the same whether the train is waiting its turn, resolving a conflict, waiting on trial CI, bisecting or landing — and a paused, blocked or CI-waiting card looks like any other. To tell working from stuck you would otherwise read the daemon log or the TUI. Fabrik can instead write one short line, saying what the item is doing or waiting on **right now**, into a text field on the board.
+
+**Set it up.** Add a **Text** field to your GitHub Project (Project settings → New field → Text) named `Fabrik`, or any name you set with `project_fields.status_line` in `.fabrik/config.yaml`. That is all: Fabrik never creates the field itself. If the field is absent (or is not a Text field), Fabrik logs one `[startup] status-line field unavailable …` line and writes nothing, so the board behaves exactly as before. `project_fields.status_line: off` disables the feature and logs the same single line. Filter the board on the field (for example `Fabrik:landing`) to see what is in the train now. A field you add later, or rename, is picked up on the next restart.
+
+```yaml
+# .fabrik/config.yaml
+project_fields:
+  status_line: Fabrik   # or another field name, or "off"
+```
+
+**What it says.**
+
+| Line | When |
+|---|---|
+| `queued` | Just moved to `Queued`, or left in it with no batch in flight (a trial was abandoned, a member was ejected for a later train). |
+| `queued · batch of 3` | Admitted to a freshly formed train batch of 3. |
+| `deferred: overlaps #1549` | Held out of a batch because it changes the same files as #1549 (overlap-aware batching). It stays `Queued`. |
+| `trial · resolving conflicts` | The trial branch is being assembled and a merge conflict is being resolved. No trial PR exists yet, so there is no number. |
+| `trial #1692 · CI running` | The batch's draft CI PR (#1692) is waiting on CI. |
+| `bisecting · step 2 of 3` | A red batch is being bisected. The number is the validation about to run out of the **cost cap**, not a prediction: how many halves remain is not known up front. |
+| `catch-up · CI on PR #77` | A singleton catch-up is waiting on **its own PR's** CI (not a trial PR). |
+| `landing` | The batch (or a singleton) is being landed. |
+| `Implement · running` | A stage worker is running. |
+| `Validate · comment review` | A comment-review pass is running; the previous line is restored afterwards. |
+| `blocked by #1568` | Waiting on a `blockedBy` dependency. |
+| `paused: CI timeout` | The item was paused; the reason is the first line of the pause comment. |
+| `claude-limit until 18:05` | This item's invocation hit the Claude usage limit; the time is the end of the account-wide suspension in the **daemon's local time**. Only the item that hit the limit is written. |
+| `awaiting CI on PR #1615` | The stage finished and is waiting for CI. |
+
+Lines are capped at 60 characters (counting characters, not bytes), ending in `…` when cut. States with no cheap, already-logged transition do not have a line yet.
+
+**The rules it follows.**
+
+- **Display only.** Nothing reads the field back — not from the board, not from a cache. Labels and the engine's state stay the only source of truth. Edit the field by hand if you like: the next transition overwrites it and nothing else notices.
+- **Write only on a transition, and only when the line changed.** Never per Claude turn and never per poll. The record of the last line written is in memory, so after a restart the first transition of an item may rewrite an identical line once.
+- **Cleared when the item moves on.** The field is cleared when an item reaches **Done**, and also when it leaves its stage or the train for another column (the next stage writes its own line).
+- **A failed write changes nothing.** It is logged and swallowed; the transition that triggered it proceeds exactly as if the write had succeeded, and the next transition tries again.
+- **Stale lines are possible, and documented.** If the daemon dies mid-phase the line stays as it was until the item's next transition or Done; nothing sweeps the board at startup, because that would mean reading it back.
+- **No label.** There is deliberately no `fabrik:merge-train` label: labels are engine state in Fabrik, and adding and removing one on every member of every train would add issue events and cache churn for information the field already shows.
+
+**Cost.** Project-field mutations do not count against the GraphQL rate-limit budget, which is why a write per transition is acceptable; writing only on change still keeps it small — one mutation per affected item per distinct change (a batch of five is five writes per phase). Every write comes back as a `projects_v2_item` edit webhook; Fabrik treats an edit to a text field as a no-op (no cache change, no poll wake, no drift), registers no echo for it, and ignores the bump a write causes to the item's `updatedAt` when it compares board snapshots, so the field adds no reconcile cycles.
 
 ### Draft PR Workflow
 
