@@ -46,6 +46,9 @@ import (
 // worker's process group (so killProcGroup's PGID-scoped kill cannot reach
 // it) while remaining in the worker's session (so the new session-scoped
 // reaper still can).
+// lockDirCleanup removes the per-process FABRIK_LOCK_DIR TestMain creates (#2097).
+var lockDirCleanup = func() {}
+
 func TestMain(m *testing.M) {
 	if sentinel := os.Getenv("FABRIK_TEST_SIGINT_SENTINEL"); sentinel != "" {
 		go io.Copy(io.Discard, os.Stdin)
@@ -81,15 +84,25 @@ func TestMain(m *testing.M) {
 	// ADR-1846 GIT_CONFIG_* helper entries in its env, none of which CI has.
 	// Tests that need one set it explicitly with t.Setenv.
 	testenv.ScrubProcess()
+	// Keep the board-scoped host lock (#2097) out of the developer's real cache
+	// dir and out of contention with other processes running this suite: many
+	// tests share one board identity. Subprocess helpers inherit it.
+	if dir, err := os.MkdirTemp("", "fabrik-lock-dir-*"); err == nil {
+		os.Setenv("FABRIK_LOCK_DIR", dir)
+		lockDirCleanup = func() { os.RemoveAll(dir) }
+	}
 	// Keep spawn-time worker records (#1814) out of the package directory:
 	// most InvokeClaude tests run without t.Chdir.
 	if dir, err := os.MkdirTemp("", "fabrik-worker-records-*"); err == nil {
 		workerRecordsPathOverride = filepath.Join(dir, "workers.json")
 		code := m.Run()
 		os.RemoveAll(dir)
+		lockDirCleanup()
 		os.Exit(code)
 	}
-	os.Exit(m.Run())
+	code := m.Run()
+	lockDirCleanup()
+	os.Exit(code)
 }
 
 func TestProcessItem_SkipsUnknownStage(t *testing.T) {

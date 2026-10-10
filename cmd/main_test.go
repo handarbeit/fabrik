@@ -15,5 +15,15 @@ import (
 // suite behaved differently there. Tests that need one set it with t.Setenv.
 func TestMain(m *testing.M) {
 	testenv.ScrubProcess()
-	os.Exit(m.Run())
+	// Keep the board-scoped host lock (#2097) out of the real cache dir and out
+	// of contention with concurrent runs of this suite.
+	dir, err := os.MkdirTemp("", "fabrik-lock-dir-*")
+	if err == nil {
+		os.Setenv("FABRIK_LOCK_DIR", dir)
+	}
+	code := m.Run()
+	if err == nil {
+		os.RemoveAll(dir)
+	}
+	os.Exit(code)
 }

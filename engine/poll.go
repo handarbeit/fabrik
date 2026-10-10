@@ -209,24 +209,18 @@ func (e *Engine) drainDeadline() time.Duration {
 }
 
 func (e *Engine) Run() error {
-	// Acquire an exclusive file lock to prevent multiple Fabrik instances from
-	// processing the same project board concurrently. The lock file lives in
-	// .fabrik/ so it's scoped to the project. syscall.Flock is advisory but
-	// sufficient — it's automatically released on process exit or crash.
-	lockPath := filepath.Join(e.fabrikDir, ".fabrik", "fabrik.lock")
-	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
+	// Acquire the instance locks (#2097, ADR 2097) before anything else touches
+	// disk: refuse to run inside an issue worktree, take the per-directory flock
+	// (.fabrik/fabrik.lock) and then the board-scoped host flock, so two engines
+	// can neither share a directory nor serve one board from different
+	// directories. Taken before log rotation so a refused loser never rotates the
+	// winner's log. flocks are advisory but sufficient — released on process exit
+	// or crash.
+	locks, err := acquireInstanceLocks(e.cfg, e.fabrikDir)
 	if err != nil {
-		return fmt.Errorf("could not open lock file %s: %w", lockPath, err)
+		return err
 	}
-	defer lockFile.Close()
-	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		return fmt.Errorf("another Fabrik instance is already running for this project (lock file: %s)", lockPath)
-	}
-	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
-	// Write our PID for diagnostics (not used for locking — flock handles that).
-	lockFile.Truncate(0)
-	lockFile.Seek(0, 0)
-	fmt.Fprintf(lockFile, "%d\n", os.Getpid())
+	defer locks.Release()
 
 	// Open the persistent poll log file (#2094). The previous run's log is
 	// rotated to fabrik.log.1 … fabrik.log.N first, so the file always holds
@@ -684,6 +678,19 @@ func (e *Engine) Run() error {
 	// it set, every automatic trigger (startup, ticker, wake) funnels through the
 	// seam's hold gate here, so no select shape needs restructuring.
 	doPollCycle := func() error {
+		// Per-poll lock verification (#2097 R3). Deliberately here and not in
+		// poll()/PollOnce: the sim seam skips the lock preamble (ADR-1449).
+		if e.lockLost.Load() {
+			return errInstanceLockLost // already reported; a racing wake must not re-report
+		}
+		if err := locks.Verify(); err != nil {
+			msg := fmt.Sprintf("%s (%v)", lockLostMessage, err)
+			fmt.Fprintf(os.Stderr, "\nFATAL: %s\n", msg)
+			e.logf(0, "fatal", "%s\n", msg)
+			e.lockLost.Store(true)
+			cancel()
+			return errInstanceLockLost
+		}
 		if e.pollSeam != nil {
 			return e.pollSeam.ordinary(pollCycle)
 		}
@@ -706,6 +713,9 @@ func (e *Engine) Run() error {
 
 	// Run immediately on start, then on tick
 	firstPollErr := doPollCycle()
+	if e.lockLost.Load() {
+		return e.drainAndExit(locks, restartDone)
+	}
 	if firstPollErr != nil && ctx.Err() == nil {
 		e.logf(0, "warn", "poll error: %v\n", firstPollErr)
 	}
@@ -755,10 +765,10 @@ func (e *Engine) Run() error {
 		if e.wakeCh != nil {
 			select {
 			case <-ctx.Done():
-				return e.drainAndExit(lockFile, restartDone)
+				return e.drainAndExit(locks, restartDone)
 			case <-ticker.C:
 				if ctx.Err() != nil {
-					return e.drainAndExit(lockFile, restartDone)
+					return e.drainAndExit(locks, restartDone)
 				}
 				if err := doPollCycle(); err != nil {
 					e.logf(0, "warn", "poll error: %v\n", err)
@@ -793,10 +803,10 @@ func (e *Engine) Run() error {
 		} else {
 			select {
 			case <-ctx.Done():
-				return e.drainAndExit(lockFile, restartDone)
+				return e.drainAndExit(locks, restartDone)
 			case <-ticker.C:
 				if ctx.Err() != nil {
-					return e.drainAndExit(lockFile, restartDone)
+					return e.drainAndExit(locks, restartDone)
 				}
 				if err := doPollCycle(); err != nil {
 					e.logf(0, "warn", "poll error: %v\n", err)
