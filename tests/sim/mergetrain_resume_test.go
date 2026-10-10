@@ -63,7 +63,7 @@ func pollUntilRun(t *testing.T, env *Env, cond func([]engine.TrainRunPhase) bool
 // Acceptance 1: a restart mid-trial resumes the same trial PR and lands it.
 func TestMergeTrainResume_RestartMidTrialResumesSameTrialAndLands(t *testing.T) {
 	t.Parallel()
-	env := mergeTrainEnv(t, mergeTrainEnvOptions{})
+	env := mergeTrainEnv(t, mergeTrainEnvOptions{AsyncTrain: true})
 	numA, _ := QueueMember(t, env, "resume-a", map[string]string{"a.txt": "a\n"})
 	numB, _ := QueueMember(t, env, "resume-b", map[string]string{"b.txt": "b\n"})
 
@@ -113,7 +113,7 @@ func TestMergeTrainResume_RestartMidBisectionResumesAtSameStep(t *testing.T) {
 	t.Parallel()
 
 	run := func(t *testing.T, restart bool) (trials int, ejected int, survivorsDone bool) {
-		env := mergeTrainEnv(t, mergeTrainEnvOptions{})
+		env := mergeTrainEnv(t, mergeTrainEnvOptions{AsyncTrain: true})
 		nums := make([]int, 3)
 		files := []map[string]string{{"a.txt": "a\n"}, {"b.txt": "b\n"}, {"c.txt": "c\n"}}
 		for i := range nums {
@@ -156,7 +156,7 @@ func TestMergeTrainResume_RestartMidBisectionResumesAtSameStep(t *testing.T) {
 // poll of its deadline.
 func TestMergeTrainResume_StuckTrialSurfacedWithinOnePollOfDeadline(t *testing.T) {
 	t.Parallel()
-	env := mergeTrainEnv(t, mergeTrainEnvOptions{})
+	env := mergeTrainEnv(t, mergeTrainEnvOptions{AsyncTrain: true})
 	numA, _ := QueueMember(t, env, "stuck-a", map[string]string{"a.txt": "a\n"})
 	numB, _ := QueueMember(t, env, "stuck-b", map[string]string{"b.txt": "b\n"})
 
@@ -199,7 +199,7 @@ func TestMergeTrainResume_StuckTrialSurfacedWithinOnePollOfDeadline(t *testing.T
 // partition forms fresh and lands — never wedges.
 func TestMergeTrainResume_CorruptRecordFallsBackToFreshTrain(t *testing.T) {
 	t.Parallel()
-	env := mergeTrainEnv(t, mergeTrainEnvOptions{})
+	env := mergeTrainEnv(t, mergeTrainEnvOptions{AsyncTrain: true})
 	numA, _ := QueueMember(t, env, "corrupt-a", map[string]string{"a.txt": "a\n"})
 	numB, _ := QueueMember(t, env, "corrupt-b", map[string]string{"b.txt": "b\n"})
 
@@ -225,7 +225,7 @@ func TestMergeTrainResume_CorruptRecordFallsBackToFreshTrain(t *testing.T) {
 // state; the record is discarded and the partition re-forms without it.
 func TestMergeTrainResume_MemberPausedWhileDownIsNotLandedFromStaleState(t *testing.T) {
 	t.Parallel()
-	env := mergeTrainEnv(t, mergeTrainEnvOptions{})
+	env := mergeTrainEnv(t, mergeTrainEnvOptions{AsyncTrain: true})
 	numA, _ := QueueMember(t, env, "paused-a", map[string]string{"a.txt": "a\n"})
 	numB, _ := QueueMember(t, env, "paused-b", map[string]string{"b.txt": "b\n"})
 
