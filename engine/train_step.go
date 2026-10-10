@@ -8,7 +8,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/tui"
 )
 
@@ -654,7 +653,7 @@ func (e *Engine) stepHalfVerdict(ctx context.Context, r *trainRun, v trialVerdic
 // order the old code checked it: spend, cleanup, cancel, assembly error, runaway, infra,
 // then red/not-red.
 func (e *Engine) halfOutcome(ctx context.Context, r *trainRun, trialName string, survivors []trainMember, result TrainCIResult, diag *trainCIDiagnostic, err error) stepOut {
-	p, ep := r.p, r.ep
+	p := r.p
 	repoKey := p.repoKey()
 	trainKey := p.trainKey
 
@@ -695,7 +694,6 @@ func (e *Engine) halfOutcome(ctx context.Context, r *trainRun, trialName string,
 	r.remember(survivors...)
 	r.setStep(stepBisect)
 	r.persist()
-	_ = ep
 	return outContinue
 }
 
@@ -1064,5 +1062,3 @@ func (e *Engine) landOneAtATime(ctx context.Context, state *mergeTrainWorkerStat
 	e.driveSync(ctx, r)
 	return r.sawRunaway
 }
-
-var _ = gh.ProjectItem{}
