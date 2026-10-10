@@ -1858,6 +1858,19 @@ project_fields:
 
 When a stage worker ends and nothing replaced its `<Stage> · running` line (for example the stage failed), the line is cleared rather than left claiming the card is running.
 
+Lines are capped at 60 characters (counting characters, not bytes), ending in `…` when cut. States with no cheap, already-logged transition do not have a line yet.
+
+**The rules it follows.**
+
+- **Display only.** Nothing reads the field back — not from the board, not from a cache. Labels and the engine's state stay the only source of truth. Edit the field by hand if you like: the next transition overwrites it and nothing else notices.
+- **Write only on a transition, and only when the line changed.** Never per Claude turn and never per poll. The record of the last line written is in memory, so after a restart the first transition of an item may rewrite an identical line once.
+- **Cleared when the item moves on.** The field is cleared when an item reaches **Done**, and also when it leaves its stage or the train for another column (the next stage writes its own line).
+- **A failed write changes nothing.** It is logged and swallowed; the transition that triggered it proceeds exactly as if the write had succeeded, and the next transition tries again.
+- **Stale lines are possible, and documented.** If the daemon dies mid-phase the line stays as it was until the item's next transition or Done; nothing sweeps the board at startup, because that would mean reading it back.
+- **No label.** There is deliberately no `fabrik:merge-train` label: labels are engine state in Fabrik, and adding and removing one on every member of every train would add issue events and cache churn for information the field already shows.
+
+**Cost.** Project-field mutations do not count against the GraphQL rate-limit budget, which is why a write per transition is acceptable; writing only on change still keeps it small — one mutation per affected item per distinct change (a batch of five is five writes per phase). Every write comes back as a `projects_v2_item` edit webhook; Fabrik treats an edit to a text field as a no-op (no cache change, no poll wake, no drift), registers no echo for it, and ignores the bump a write causes to the item's `updatedAt` when it compares board snapshots, so the field adds no reconcile cycles.
+
 #### Last activity and Last run
 
 From the board you cannot otherwise sort or group items by how recently Fabrik worked on them, or by how their last run ended — spotting a stalled, thrashing or turn-exhausted item means reading comments one issue at a time, the daemon log or the TUI. Two more optional fields on your project answer that, using values the engine already computes:
@@ -1881,19 +1894,6 @@ project_fields:
 **How and when it is written.** Like the status line, both fields are display-only: nothing reads them back, and the engine's decisions never depend on them. A write happens only when a job starts or finishes (never per turn or per poll) and only when the value differs from the last one this process wrote for that item, so several events on one day write `Last activity` once. A failed write is logged and swallowed. The values stay in place when an item reaches Done, as history. A ProjectV2 date field has no time of day, so `Last activity` has day granularity, and it is the UTC date regardless of the host's time zone. Cost in dollars or tokens is deliberately not included, and merge-train batch jobs (which belong to no single item) write nothing.
 
 **Restart caveat.** The writer remembers what it last wrote only in memory, and nothing is read back from the board. After a daemon restart the first run for an item rewrites both fields once, even with an identical value; until an item has a run, whatever is on the board from before the restart stays. Nothing is persisted and no counters are added for these fields.
-
-Lines are capped at 60 characters (counting characters, not bytes), ending in `…` when cut. States with no cheap, already-logged transition do not have a line yet.
-
-**The rules it follows.**
-
-- **Display only.** Nothing reads the field back — not from the board, not from a cache. Labels and the engine's state stay the only source of truth. Edit the field by hand if you like: the next transition overwrites it and nothing else notices.
-- **Write only on a transition, and only when the line changed.** Never per Claude turn and never per poll. The record of the last line written is in memory, so after a restart the first transition of an item may rewrite an identical line once.
-- **Cleared when the item moves on.** The field is cleared when an item reaches **Done**, and also when it leaves its stage or the train for another column (the next stage writes its own line).
-- **A failed write changes nothing.** It is logged and swallowed; the transition that triggered it proceeds exactly as if the write had succeeded, and the next transition tries again.
-- **Stale lines are possible, and documented.** If the daemon dies mid-phase the line stays as it was until the item's next transition or Done; nothing sweeps the board at startup, because that would mean reading it back.
-- **No label.** There is deliberately no `fabrik:merge-train` label: labels are engine state in Fabrik, and adding and removing one on every member of every train would add issue events and cache churn for information the field already shows.
-
-**Cost.** Project-field mutations do not count against the GraphQL rate-limit budget, which is why a write per transition is acceptable; writing only on change still keeps it small — one mutation per affected item per distinct change (a batch of five is five writes per phase). Every write comes back as a `projects_v2_item` edit webhook; Fabrik treats an edit to a text field as a no-op (no cache change, no poll wake, no drift), registers no echo for it, and ignores the bump a write causes to the item's `updatedAt` when it compares board snapshots, so the field adds no reconcile cycles.
 
 ### Draft PR Workflow
 
