@@ -67,8 +67,8 @@ func TestSKey_ActivePane_WithSelectedJob(t *testing.T) {
 	if nm.pendingStopRequest.StageName != "Implement" {
 		t.Errorf("StageName = %q, want %q", nm.pendingStopRequest.StageName, "Implement")
 	}
-	if !strings.Contains(nm.header.statusMsg, "42") {
-		t.Errorf("statusMsg should contain issue number, got %q", nm.header.statusMsg)
+	if !strings.Contains(bannerText(nm), "Stop #42 and pause? [y/N]") {
+		t.Errorf("banner should contain the stop prompt, got %q", bannerText(nm))
 	}
 }
 
@@ -224,8 +224,8 @@ func TestSKey_ThenEsc_ClearsConfirm(t *testing.T) {
 	}
 }
 
-// TestSKey_TickEvent_RepromptsPersists verifies that a TickEvent re-shows the stop
-// prompt when confirmStop is active.
+// TestSKey_TickEvent_PromptPersists verifies that the stop prompt stays visible
+// across a TickEvent while confirmStop is active.
 func TestSKey_TickEvent_PromptPersists(t *testing.T) {
 	m := New(30, ProjectInfo{}, "", nil, nil, 0, false)
 	m.focusPane = paneActive
@@ -237,18 +237,14 @@ func TestSKey_TickEvent_PromptPersists(t *testing.T) {
 		t.Fatal("precondition: confirmStop should be true")
 	}
 
-	// TickEvent should re-show the prompt.
 	next, _ = m.Update(TickEvent{At: time.Now()})
 	nm := next.(Model)
 
 	if !nm.confirmStop {
 		t.Error("expected confirmStop still true after tick")
 	}
-	if nm.header.statusMsg == "" {
-		t.Error("expected prompt to be re-shown after tick cleared statusMsg")
-	}
-	if !strings.Contains(nm.header.statusMsg, "77") {
-		t.Errorf("re-shown prompt should reference issue number, got %q", nm.header.statusMsg)
+	if !strings.Contains(bannerText(nm), "Stop #77") {
+		t.Errorf("prompt should reference issue number after tick, got %q", bannerText(nm))
 	}
 }
 

@@ -20,7 +20,7 @@ KEYBOARD SHORTCUTS
     ↑/↓  k/j  Navigate items in the focused pane
     enter      Toggle inline detail panel (History); toggle detail (Warnings)
     esc        Close open panels; with none open, triggers quit confirmation
-    n / N      Cancel quit or clear-all confirmation
+    n / N      Cancel an armed confirmation (any other key, or 10 s, also cancels)
 
   Active Jobs (In Progress pane)
     l          Open fabrik watch for selected issue (live output)
