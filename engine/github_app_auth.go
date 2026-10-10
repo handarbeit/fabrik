@@ -134,8 +134,10 @@ func PermissionShortfallRemedy(shortfalls []githubauth.RequiredPermissionShortfa
 	var b strings.Builder
 	for _, sf := range shortfalls {
 		if sf.Permission == "actions" {
-			b.WriteString("\n`actions: write` is required so a worker's `gh run view --log-failed` and `gh run rerun` work, " +
-				"for the merge-train trial re-run of failed jobs, and to retrigger CI runs that never started (startup_failure).")
+			b.WriteString("\n`actions: write` (read alone is not enough) is required for:\n" +
+				"  - a worker's `gh run view --log-failed` and `gh run rerun`\n" +
+				"  - the merge-train trial re-run of failed jobs\n" +
+				"  - retriggering CI runs that never started (startup_failure)")
 			break
 		}
 	}
