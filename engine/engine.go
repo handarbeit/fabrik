@@ -55,6 +55,7 @@ type Config struct {
 	AutoMergeStrategy          string              // Merge method for enablePullRequestAutoMerge: MERGE, SQUASH, or REBASE (default MERGE)
 	MergeQueue                 string              // Merge queue routing for yolo path: "auto" (enqueue when repo uses merge queue) or "off" (skip enqueue)
 	MergeTrain                 string              // Fabrik-internal merge train: "on" (advance yolo Validate completions to Queued) or "off" (default; existing auto-merge path unchanged)
+	StatusLineField            string              // Name of the display-only ProjectV2 text field the engine writes a one-line status to (#2048); "" = feature off
 	SingletonCatchUp           string              // Merge-train singleton catch-up: "merge" (default; merge the pinned base into a behind singleton's own branch, #2044) or "off" (build a trial branch instead)
 	MergeTrainOverlapIgnore    []string            // Path globs (internal/pathglob) excluded from the merge-train batch overlap check; nil = every path counts (#2047)
 	MaxMergeTrainEjections     int                 // Max merge-train ejections before pausing a member (default 3; ADR-059)
@@ -287,6 +288,7 @@ type Engine struct {
 	probeDriftConvergenceDisabledForTest  bool                          // neutralisation seam (#2080): the drift ledger never suppresses a repeat, restoring the pre-fix per-poll invalidation
 	probeTerminalDriftSkipDisabledForTest bool                          // neutralisation seam (#2080): terminal items are no longer exempt from the linkage-drift check
 	probeDrift                            probeDriftLedger              // the probe loop's linkage-drift ledger (#2080) — per-item last-invalidated pair and loop counter; in memory only
+	statusLine                            statusLineState               // the display-only status-line writer's state (#2048) — in memory only; a restart forgets what was written
 	flakeRerunMu                          sync.Mutex                    // guards flakeReruns and flakeRerunDisabled
 	flakeReruns                           map[string]*prFlakeState      // key: "owner/repo#PR"; the stage wait_for_ci gate's flake re-run budget (#2072), reset when the PR's head SHA moves — in memory only, so a restart may grant one extra re-run
 	flakeRerunDisabled                    bool                          // test-only neutralisation seam (SetCIFlakeRerunDisabledForTest)
@@ -582,6 +584,7 @@ func New(cfg Config) (*Engine, error) {
 		ghClient = gh.NewClient(cfg.Token)
 	}
 	ghClient.SetMergeStrategy(cfg.AutoMergeStrategy)
+	ghClient.SetStatusLineField(cfg.StatusLineField) // lets the board/probe queries discount display-only writes (#2048)
 	// Worker gh CLI auth (constraint from #1713's research): in App-auth
 	// mode there is no static token to inject — read the live, already-
 	// refreshed installation token off the minted client instead, riding

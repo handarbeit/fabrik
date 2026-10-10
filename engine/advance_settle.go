@@ -195,6 +195,7 @@ func (e *Engine) escalateAwaitingAdvanceFailure(item gh.ProjectItem) {
 	e.logf(item.Number, "escalate", "terminal advance failed %d time(s) — pausing issue\n", e.cfg.MaxRetries)
 
 	e.addLabel(item, "fabrik:paused")
+	e.setStatusLine(item, statusLinePaused("terminal advance failed")) // display-only (#2048)
 	comment := fmt.Sprintf(
 		"🏭 **Fabrik — terminal advance failed repeatedly**\n\nFabrik could not move this issue's project-board Status forward after %d attempt(s). The issue has been paused.\n\nCheck that every stage name in your stage config has a matching Status option on the project board, then remove the `fabrik:paused` label to resume.",
 		e.cfg.MaxRetries,

@@ -422,8 +422,24 @@ func cloneProjectState(p *projectState) *projectState {
 	for k, v := range p.statusOptions {
 		out.statusOptions[k] = v
 	}
+	if p.textFields != nil {
+		out.textFields = make(map[string]string, len(p.textFields))
+		for k, v := range p.textFields {
+			out.textFields[k] = v
+		}
+	}
 	for k, v := range p.items {
 		dup := *v
+		if v.textValues != nil {
+			dup.textValues = make(map[string]string, len(v.textValues))
+			for fk, fv := range v.textValues {
+				dup.textValues[fk] = fv
+			}
+			dup.textUpdatedAt = make(map[string]time.Time, len(v.textUpdatedAt))
+			for fk, fv := range v.textUpdatedAt {
+				dup.textUpdatedAt[fk] = fv
+			}
+		}
 		out.items[k] = &dup
 	}
 	return out
@@ -558,6 +574,9 @@ var snapshotFieldRegistry = map[string]map[string]fieldDisposition{
 		// (WithClosedPRsOmittedFromBoard, #2080), like clock: Restore writes into
 		// the Sim that already carries it.
 		"omitClosedPRsFromBoard": fieldSkipped,
+		// statusLineField is construction-time configuration
+		// (WithStatusLineField, #2048), like omitClosedPRsFromBoard.
+		"statusLineField": fieldSkipped,
 	},
 	"repoState": {
 		"owner":             fieldCopied,
@@ -657,16 +676,19 @@ var snapshotFieldRegistry = map[string]map[string]fieldDisposition{
 		"orderedStatusNames": fieldCopied,
 		"items":              fieldCopied,
 		"itemOrder":          fieldCopied,
+		"textFields":         fieldCopied,
 		"updatedAt":          fieldCopied,
 	},
 	"itemState": {
-		"itemID":    fieldCopied,
-		"ownerRepo": fieldCopied,
-		"number":    fieldCopied,
-		"isPR":      fieldCopied,
-		"status":    fieldCopied,
-		"archived":  fieldCopied,
-		"updatedAt": fieldCopied,
+		"itemID":        fieldCopied,
+		"ownerRepo":     fieldCopied,
+		"number":        fieldCopied,
+		"isPR":          fieldCopied,
+		"status":        fieldCopied,
+		"archived":      fieldCopied,
+		"updatedAt":     fieldCopied,
+		"textValues":    fieldCopied,
+		"textUpdatedAt": fieldCopied,
 	},
 }
 

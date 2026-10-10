@@ -52,6 +52,10 @@ func (e *Engine) checkStageColumnAlignment(ctx context.Context) error {
 		e.emitStructural(tui.ProjectMetaEvent{BoardTitle: board.Title, BoardURL: boardURL})
 	}
 
+	// Resolve the display-only status-line field once, here, so an absent field
+	// produces exactly one startup line (#2048).
+	e.resolveStatusLineField(board.ProjectID)
+
 	sf, err := e.readClient.FetchStatusField(board.ProjectID)
 	if err != nil {
 		e.logf(0, "startup", "warning: could not fetch status field for startup check: %v\n", err)

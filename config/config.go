@@ -93,6 +93,38 @@ type ProjectConfig struct {
 	// behavior change (ADR-933). Checked against the union of check-run names
 	// and classic commit-status contexts observed on the head SHA.
 	RequiredStatusContexts map[string][]string `yaml:"required_status_contexts"`
+	// ProjectFields configures optional display-only project fields Fabrik
+	// writes (#2048). Nil/unset sub-keys mean "use the default".
+	ProjectFields ProjectFieldsConfig `yaml:"project_fields"`
+}
+
+// ProjectFieldsConfig holds the names of the optional ProjectV2 fields Fabrik
+// writes for display (#2048, ADR 2048).
+type ProjectFieldsConfig struct {
+	// StatusLine is the name of the ProjectV2 text field that holds the
+	// one-line status. nil (unset) means the default name, "Fabrik"; "off"
+	// (any case) disables the feature.
+	StatusLine *string `yaml:"status_line"`
+}
+
+// DefaultStatusLineField is the default name of the status-line text field.
+const DefaultStatusLineField = "Fabrik"
+
+// ResolveStatusLineField returns the status-line field name to use, or "" when
+// the feature is disabled (`off`, any case). Unset or blank means the default.
+func (p ProjectFieldsConfig) ResolveStatusLineField() string {
+	if p.StatusLine == nil {
+		return DefaultStatusLineField
+	}
+	name := strings.TrimSpace(*p.StatusLine)
+	switch {
+	case name == "":
+		return DefaultStatusLineField
+	case strings.EqualFold(name, "off"):
+		return ""
+	default:
+		return name
+	}
 }
 
 // LoadProjectConfig reads .fabrik/config.yaml from CWD.

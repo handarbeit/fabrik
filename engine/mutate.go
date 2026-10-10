@@ -313,6 +313,10 @@ type pauseOpts struct {
 // pauseForPRClosedNotMerged's fabrik:awaiting-ci removal) do so themselves
 // around this call — those steps are outside the shared pause tail.
 func (e *Engine) pauseIssue(item gh.ProjectItem, comment string, opts pauseOpts) {
+	// Display-only status line (#2048): the one-line reason comes from the
+	// comment's stable header. Written before the label so a failed label write
+	// cannot hide why the engine tried to pause.
+	e.setStatusLine(item, statusLinePaused(pauseReasonFromComment(comment)))
 	// Note: the two branches below are intentionally not factored into a
 	// shared closure — TestAddCommentCompliance's funnel-skip exemption for
 	// pauseIssue's postComment call is keyed off this function's own name and

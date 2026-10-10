@@ -128,4 +128,7 @@ func (e *Engine) advanceClosedItemToDone(board *gh.ProjectBoard, item gh.Project
 	if e.webhookMgr != nil {
 		e.webhookMgr.RegisterEchoIfSubscribed("projects_v2_item", "edited", item.ItemID)
 	}
+	// A Done move that bypasses advanceToNextStage: clear the display-only
+	// status line (#2048).
+	e.clearStatusLine(item)
 }

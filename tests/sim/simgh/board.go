@@ -142,7 +142,7 @@ func (s *Sim) buildProjectItem(p *projectState, ref itemRef) (*gh.ProjectItem, e
 		s.mu.Unlock()
 		return nil, nil
 	}
-	status, isPR, cardUpdatedAt := live.status, live.isPR, live.updatedAt
+	status, isPR, cardUpdatedAt := live.status, live.isPR, s.cardActivityAt(p, live)
 
 	r, ok := s.repos[ref.ownerRepo]
 	if !ok {
@@ -356,7 +356,7 @@ func (s *Sim) buildProbeItem(p *projectState, ref itemRef) (*gh.BoardProbeItem, 
 		Status:    live.status,
 	}
 	// effectiveUpdatedAt is max(content, project item, linked PR).
-	probe.EffectiveUpdatedAt = laterOf(iss.updatedAt, live.updatedAt)
+	probe.EffectiveUpdatedAt = laterOf(iss.updatedAt, s.cardActivityAt(p, live))
 	linked := s.boardLinkedPRLocked(r, issueBranch(iss.number))
 	var linkedHead string
 	if linked != nil {
@@ -574,6 +574,30 @@ func (s *Sim) UpdateProjectItemStatus(projectID, itemID, statusFieldID, statusOp
 		return nil
 	}
 	return fmt.Errorf("simgh: no status option %q in project %q", statusOptionID, projectID)
+}
+
+// cardActivityAt is the card's updatedAt as the board and probe projections
+// report it. When the display-only status-line field is configured and the
+// card's updatedAt is explained entirely by a write to it (not after that
+// value's own write time, within the real client's tolerance), the card
+// contributes nothing — the same discount github.Client applies from the
+// field's own updatedAt (#2048). Caller must hold mu.
+func (s *Sim) cardActivityAt(p *projectState, it *itemState) time.Time {
+	if s.statusLineField == "" {
+		return it.updatedAt
+	}
+	fieldID, ok := p.textFields[s.statusLineField]
+	if !ok {
+		return it.updatedAt
+	}
+	ft, ok := it.textUpdatedAt[fieldID]
+	if !ok {
+		return it.updatedAt
+	}
+	if !it.updatedAt.After(ft.Add(2 * time.Second)) {
+		return time.Time{}
+	}
+	return it.updatedAt
 }
 
 // ArchiveProjectItem archives a card. Archived cards disappear from board

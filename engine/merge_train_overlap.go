@@ -193,6 +193,7 @@ func (e *Engine) admitByOverlap(trainKey, owner, repo string, members []trainMem
 		}
 		if blocker != 0 {
 			e.logf(m.item.Number, "merge-train", "deferred #%d: overlaps #%d on %s\n", m.item.Number, blocker, shared)
+			e.setStatusLine(m.item, statusLineDeferred(blocker))
 			continue
 		}
 

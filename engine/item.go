@@ -982,6 +982,11 @@ func (e *Engine) acquireLockAndVerify(ctx context.Context, item gh.ProjectItem, 
 		if inProgressAdded {
 			e.removeInProgressLabel(owner, repo, item.Number, stage.Name)
 		}
+		// The worker is done. If nothing replaced "<Stage> · running" (the stage
+		// ended into a state with no line of its own: a failure, an auto-advance
+		// still pending), the card is idle, not running — drop the stale line.
+		// Display-only (#2048).
+		e.clearStatusLineIfShowing(item, statusLineStageRunning(stage.Name))
 	}
 
 	// Lock-then-verify: after acquiring our lock, wait briefly to let a
@@ -1019,6 +1024,12 @@ func (e *Engine) acquireLockAndVerify(ctx context.Context, item gh.ProjectItem, 
 	} else {
 		inProgressAdded = true
 		e.syncLabelAdd(item, inProgressLabel, true)
+	}
+	// Display-only status line (#2048). Cleanup stages never reach here (they
+	// return from handleCleanupStage earlier); the Done move itself clears the
+	// line, so this guard is only defensive.
+	if !stage.CleanupWorktree {
+		e.setStatusLine(item, statusLineStageRunning(stage.Name))
 	}
 
 	return release, workerStartedAt, workerDone, true
@@ -2293,6 +2304,7 @@ func (e *Engine) blockOnInput(item gh.ProjectItem, stage *stages.Stage, output s
 
 	e.addLabel(item, "fabrik:paused")
 	e.addLabel(item, "fabrik:awaiting-input")
+	e.setStatusLine(item, statusLinePaused("waiting for your input")) // display-only (#2048)
 
 	// Post a dedicated @mention notification comment so GitHub delivers a mobile
 	// push to the operator (PAT mode) or to the issue's assignees/author under
@@ -2847,6 +2859,7 @@ func (e *Engine) handleBoundaryViolation(owner, repo string, repoStr string, ite
 	// removes it. Without fabrik:paused the clearFailedStage path in
 	// processItem would auto-clear the failed label on the next poll cycle.
 	e.addLabel(item, "fabrik:paused")
+	e.setStatusLine(item, statusLinePaused("worktree boundary violation")) // display-only (#2048)
 
 	e.addFailedLabel(owner, repo, item.Number, stage.Name)
 
@@ -2933,6 +2946,12 @@ func (e *Engine) handleUsageLimitExit(p stageOutcomeParams, limitErr *claudeUsag
 		)
 		e.postItemComment(item, comment, false)
 		e.addLabel(item, "fabrik:claude-limit")
+		// Only the item whose invocation hit the limit is written (#2048): the
+		// suspension is account-wide, but one write per detection keeps volume low
+		// and the per-item label sweep already clears the label.
+		if until, ok := e.claudeSuspendedUntilTime(time.Now()); ok {
+			e.setStatusLine(item, statusLineClaudeLimit(until))
+		}
 	}
 
 	p.release()

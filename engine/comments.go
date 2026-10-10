@@ -388,6 +388,11 @@ func (e *Engine) processCommentsClassified(ctx context.Context, board *gh.Projec
 	// Write context files (all stages including current) before Claude runs.
 	e.writeContextFiles(item, stage, workDir, true)
 
+	// Display-only status line (#2048): show the review while it runs, then put
+	// back whatever the item showed — unless something wrote a newer line meanwhile
+	// (a pause, say), which is left alone.
+	defer e.withStatusLine(item, statusLineCommentReview(stage.Name))()
+
 	// #1786: same warn-and-continue toolchain drift check as the stage-dispatch
 	// path (runInvocationWithExtension) — R5 explicitly covers comment-review
 	// cycles too, closing the gap the apiKeyHelper precedent left open here.

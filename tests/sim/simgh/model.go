@@ -356,6 +356,10 @@ type projectState struct {
 	// deterministic sequence.
 	itemOrder []string
 
+	// textFields maps a text field's name to its node ID (#2048). Fabrik never
+	// creates one; a scenario adds it with SeedTextField.
+	textFields map[string]string
+
 	updatedAt time.Time
 }
 
@@ -368,6 +372,11 @@ type itemState struct {
 	status    string
 	archived  bool
 	updatedAt time.Time
+
+	// textValues / textUpdatedAt hold this card's text-field values and the
+	// time each was last written, keyed by field ID (#2048).
+	textValues    map[string]string
+	textUpdatedAt map[string]time.Time
 }
 
 // contentNodeID is the node ID of the issue or PR the card points at.

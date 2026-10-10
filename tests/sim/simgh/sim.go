@@ -199,6 +199,13 @@ type Sim struct {
 	// unmerged PRs from the board projections' linked-PR fields.
 	omitClosedPRsFromBoard bool
 
+	// statusLineField, set by WithStatusLineField, names the display-only
+	// status-line text field (#2048). When set, a project item's updatedAt that
+	// is explained entirely by a write to that field is left out of the
+	// board/probe projections, mirroring the real client's SetStatusLineField
+	// discount. Empty = feature off (the projections are unchanged).
+	statusLineField string
+
 	// seedErr holds the first error produced by a chained Seed* call. Checked
 	// with Err.
 	seedErr error
@@ -229,6 +236,14 @@ func WithClock(c Clock) Option {
 // scenario so existing scenarios keep their board reads. See FIDELITY.md.
 func WithClosedPRsOmittedFromBoard() Option {
 	return func(s *Sim) { s.omitClosedPRsFromBoard = true }
+}
+
+// WithStatusLineField names the display-only status-line text field, so the
+// board and probe projections discount a project item's updatedAt bump that
+// was caused only by a write to it, as the real client does (#2048). Off by
+// default.
+func WithStatusLineField(name string) Option {
+	return func(s *Sim) { s.statusLineField = name }
 }
 
 // WithRateLimits overrides the static rate-limit budgets reported by

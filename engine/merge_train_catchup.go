@@ -230,6 +230,9 @@ func (e *Engine) trySingletonCatchUp(ctx context.Context, state *mergeTrainWorke
 	caughtUp.caughtUpFrom = p.baseSHA
 	e.postCatchUpMarker(p, caughtUp, m.headSHA, out.pure)
 
+	// The CI being waited on is the member's own PR's (not a trial PR), so the line
+	// names that PR.
+	e.setStatusLine(caughtUp.item, statusLineCatchUp(caughtUp.prNum))
 	verdict, diag := e.waitMemberCI(ctx, state, p, caughtUp)
 	switch verdict {
 	case memberCIGreen:
@@ -254,6 +257,9 @@ func (e *Engine) trySingletonCatchUp(ctx context.Context, state *mergeTrainWorke
 	default: // memberCIPending, memberCIMoved, memberCIEjected
 		// Decided for this poll: the member stays Queued (or was already ejected) and the
 		// next poll re-evaluates it. Nothing is charged.
+		if verdict != memberCIEjected {
+			e.setStatusLine(caughtUp.item, statusLineQueuedWaiting)
+		}
 		return caughtUp, true
 	}
 }
@@ -546,6 +552,7 @@ func (e *Engine) ejectRedCatchUpSingleton(projectID string, p trialParams, m tra
 	}
 	e.logf(m.item.Number, "merge-train", "#%d is red on its caught-up head %s — rerouted to %s and pausing\n", m.item.Number, m.headSHA, targetName)
 	e.pauseMergeTrainMember(p.owner, p.repo, m.item.Number)
+	e.setStatusLine(m.item, statusLinePaused("CI failing after catch-up"))
 	e.emitTrainEvent(p.owner, p.repo, m.item.Number, channelevents.MergeTrainFailed, "red-singleton",
 		"its own CI is failing on the head Fabrik caught up with the base", diag, nil) // observation only (#1968)
 }

@@ -212,6 +212,7 @@ func (e *Engine) checkDependencies(board *gh.ProjectBoard, item gh.ProjectItem, 
 		for _, l := range item.Labels {
 			if l == "fabrik:blocked" {
 				e.applyLabelRemove(item, "fabrik:blocked", false)
+				e.clearStatusLine(item) // the "blocked by" line is stale; the next stage dispatch writes its own (#2048)
 				break
 			}
 		}
@@ -249,6 +250,7 @@ func (e *Engine) checkDependencies(board *gh.ProjectBoard, item gh.ProjectItem, 
 		// First-time block: post the comment and add the label.
 		e.postItemComment(item, newComment, true)
 		e.applyLabelAdd(item, "fabrik:blocked", false)
+		e.setStatusLine(item, statusLineBlocked(openDeps[0].Number)) // display-only (#2048)
 	} else {
 		// Already blocked: edit the existing comment in-place if the dep list changed.
 		existing := findBlockedComment(item.Comments, e.selfLogin())

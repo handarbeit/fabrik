@@ -108,6 +108,10 @@ type mergeTrainEnvOptions struct {
 	// mergetrain_overlap_test.go opt in.
 	OverlapAware bool
 
+	// StatusLineField / StatusLineFieldMissing: see EnvOptions (#2048).
+	StatusLineField        string
+	StatusLineFieldMissing bool
+
 	// ConfigureCfg, when non-nil, runs after this file's own merge-train
 	// defaults are applied (short CIBackstopTimeout, small MaxBatchSize) —
 	// an escape hatch for a scenario needing e.g. a smaller
@@ -183,6 +187,9 @@ func mergeTrainEnv(t *testing.T, opts mergeTrainEnvOptions) *Env {
 	env := NewEnv(t, EnvOptions{
 		Stages:    stgs,
 		StartTime: opts.StartTime,
+
+		StatusLineField:        opts.StatusLineField,
+		StatusLineFieldMissing: opts.StatusLineFieldMissing,
 		ConfigureCfg: func(cfg *engine.Config) {
 			cfg.MergeTrain = mode
 			cfg.CIBackstopTimeout = 10 * time.Second

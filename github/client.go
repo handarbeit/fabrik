@@ -42,6 +42,12 @@ type Client struct {
 
 	mergeStrategy string
 
+	// statusLineField is the name of the display-only status-line text field
+	// (#2048); "" means the feature is off. Read by the board and probe
+	// queries so the field's own updatedAt can be discounted. See
+	// SetStatusLineField.
+	statusLineField string
+
 	// reqTotal / reqNotModified count every HTTP request this client issued
 	// and how many of them came back 304 (#1952). Read via RequestStats.
 	reqTotal       atomic.Int64

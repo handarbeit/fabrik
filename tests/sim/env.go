@@ -149,6 +149,16 @@ type EnvOptions struct {
 	// asserting durations never depends on wall-clock reality.
 	StartTime time.Time
 
+	// StatusLineField, when non-empty, turns on the display-only status-line
+	// field (#2048) under that name: cfg.StatusLineField is set, simgh models the
+	// client-side updatedAt discount, and a TEXT field of that name is seeded on
+	// the project unless StatusLineFieldMissing. Off by default so every
+	// pre-existing scenario's mutation log is unchanged.
+	StatusLineField string
+	// StatusLineFieldMissing leaves the board without the field (the "operator
+	// never created it" case).
+	StatusLineFieldMissing bool
+
 	// ConfigureCfg, when non-nil, is called with the constructed Config
 	// before NewWithDeps — an escape hatch for fields not covered above
 	// (e.g. ReviewWaitTimeout, CIWaitTimeout) without growing this struct
@@ -262,9 +272,15 @@ func NewEnv(t *testing.T, opts EnvOptions) *Env {
 	if opts.BoardCache {
 		simOpts = append(simOpts, simgh.WithClosedPRsOmittedFromBoard())
 	}
+	if opts.StatusLineField != "" {
+		simOpts = append(simOpts, simgh.WithStatusLineField(opts.StatusLineField))
+	}
 	simModel := simgh.New(t.TempDir(), simOpts...).
 		SeedRepo(ownerRepo).
 		SeedProject(owner, projectNum, "Engineering", columns)
+	if opts.StatusLineField != "" && !opts.StatusLineFieldMissing {
+		simModel.SeedTextField(owner, projectNum, opts.StatusLineField)
+	}
 	if err := simModel.Err(); err != nil {
 		t.Fatalf("sim.NewEnv: seeding: %v", err)
 	}
@@ -320,6 +336,8 @@ func NewEnv(t *testing.T, opts EnvOptions) *Env {
 		MaxRetries:    3,
 		PollSeconds:   1,
 		Stages:        opts.Stages,
+
+		StatusLineField: opts.StatusLineField,
 	}
 	if opts.ConfigureCfg != nil {
 		opts.ConfigureCfg(&cfg)

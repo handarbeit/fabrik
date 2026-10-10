@@ -196,15 +196,34 @@ type checkRunPayload struct {
 	} `json:"repository"`
 }
 
+// singleSelectTo is the object form of changes.field_value.to for a
+// single_select edit.
+type singleSelectTo struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// editedStatusName extracts the new Status column name from a single_select
+// edit's raw "to". Returns "" when it is not the expected object.
+func editedStatusName(to json.RawMessage) string {
+	var t singleSelectTo
+	if len(to) == 0 || json.Unmarshal(to, &t) != nil {
+		return ""
+	}
+	return t.Name
+}
+
 type projectsV2ItemPayload struct {
 	Action  string `json:"action"`
 	Changes struct {
 		FieldValue struct {
 			FieldType string `json:"field_type"`
-			To        struct {
-				ID   string `json:"id"`
-				Name string `json:"name"`
-			} `json:"to"`
+			// To is raw because its JSON type depends on field_type: an object
+			// ({id, name}) for single_select, but a plain string or null for a
+			// text field (#2048). Decoding it as an object up front would turn
+			// every display-field echo into an unmarshal error before the echo
+			// match runs. It is only decoded for a single_select edit.
+			To json.RawMessage `json:"to"`
 		} `json:"field_value"`
 	} `json:"changes"`
 	ProjectsV2Item struct {
@@ -1104,10 +1123,26 @@ func (c *CacheImpl) applyProjectsV2ItemDelta(payload []byte) {
 		if c.matchEchoFn != nil {
 			c.matchEchoFn("projects_v2_item", "edited", p.ProjectsV2Item.ID)
 		}
-		if p.Changes.FieldValue.FieldType != "single_select" {
+		// Only a Status (single_select) edit changes anything the cache holds.
+		// A text-field edit — in particular the engine's own display-only
+		// status-line write echoing back (#2048), or a human editing it — is a
+		// deliberate no-op here: no Store change, no local-delta stamp (so no
+		// wake, no invalidation, no drift count). This guard, not an accident
+		// of a later empty-name check, is what makes that a named, testable
+		// rule (TestDeltaProjectsV2ItemTextEditIsNoOp).
+		suppress := !c.textEditSuppressionDisabledForTest.Load()
+		if suppress && p.Changes.FieldValue.FieldType != "single_select" {
 			return
 		}
-		newStatus := p.Changes.FieldValue.To.Name
+		newStatus := editedStatusName(p.Changes.FieldValue.To)
+		if !suppress && newStatus == "" {
+			// Neutralised (test seam): read any scalar "to" as a Status name, as
+			// an unguarded handler would.
+			var scalar string
+			if json.Unmarshal(p.Changes.FieldValue.To, &scalar) == nil {
+				newStatus = scalar
+			}
+		}
 		if newStatus == "" {
 			return
 		}

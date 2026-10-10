@@ -102,14 +102,22 @@ type mockGitHubClient struct {
 	archiveProjectItemCalls []archiveProjectItemCall
 
 	// Track calls — access under mu when accessed from concurrent goroutines.
-	getPRBaseCalls                   []getPRBaseCall
-	updatePRBaseCalls                []updatePRBaseCall
-	addLabelCalls                    []addLabelCall
-	removeLabelCalls                 []removeLabelCall
-	addCommentCalls                  []addCommentCall
-	addCommentReactionCalls          []addCommentReactionCall
-	updateCommentCalls               []updateCommentCall
-	updateStatusCalls                []updateStatusCall
+	getPRBaseCalls          []getPRBaseCall
+	updatePRBaseCalls       []updatePRBaseCall
+	addLabelCalls           []addLabelCall
+	removeLabelCalls        []removeLabelCall
+	addCommentCalls         []addCommentCall
+	addCommentReactionCalls []addCommentReactionCall
+	updateCommentCalls      []updateCommentCall
+	updateStatusCalls       []updateStatusCall
+	// Display-only status-line field (#2048). textField, when non-nil, is what
+	// FetchTextField returns; statusLineWrites records every set/clear in order
+	// (a clear has cleared=true and empty text).
+	textField                        *gh.TextField
+	fetchTextFieldErr                error
+	fetchTextFieldCalls              int
+	statusLineWrites                 []statusLineWrite
+	statusLineErr                    error
 	mergePRCalls                     []mergePRCall
 	mergePRAtHeadSHACalls            []mergePRAtHeadSHACall
 	closeIssueCalls                  []closeIssueCall
@@ -424,6 +432,44 @@ func (m *mockGitHubClient) UpdateProjectItemStatus(projectID, itemID, statusFiel
 	if fn != nil {
 		return fn(projectID, itemID, statusFieldID, statusOptionID)
 	}
+	return nil
+}
+
+// statusLineWrite is one recorded UpdateProjectItemTextField / ClearProjectItemField.
+type statusLineWrite struct {
+	itemID  string
+	fieldID string
+	text    string
+	cleared bool
+}
+
+func (m *mockGitHubClient) FetchTextField(projectID, name string) (*gh.TextField, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.fetchTextFieldCalls++
+	if m.fetchTextFieldErr != nil {
+		return nil, m.fetchTextFieldErr
+	}
+	return m.textField, nil
+}
+
+func (m *mockGitHubClient) UpdateProjectItemTextField(projectID, itemID, fieldID, text string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.statusLineErr != nil {
+		return m.statusLineErr
+	}
+	m.statusLineWrites = append(m.statusLineWrites, statusLineWrite{itemID: itemID, fieldID: fieldID, text: text})
+	return nil
+}
+
+func (m *mockGitHubClient) ClearProjectItemField(projectID, itemID, fieldID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.statusLineErr != nil {
+		return m.statusLineErr
+	}
+	m.statusLineWrites = append(m.statusLineWrites, statusLineWrite{itemID: itemID, fieldID: fieldID, cleared: true})
 	return nil
 }
 
