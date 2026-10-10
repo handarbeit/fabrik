@@ -179,6 +179,9 @@ func TestRunCatchUpGit_RejectedPushFallsBackAndLeavesTheLocalBranchEqualToTheRem
 	if out.kind != catchUpFallback {
 		t.Fatalf("outcome = %+v, want catchUpFallback", out)
 	}
+	if out.policyReason != "" {
+		t.Errorf("bare prose without a GH marker must not be classified as policy, got %q (#2065)", out.policyReason)
+	}
 	w.assertRestored(t)
 
 	// And the next attempt (hook removed) starts from a clean, equal branch.
@@ -186,6 +189,30 @@ func TestRunCatchUpGit_RejectedPushFallsBackAndLeavesTheLocalBranchEqualToTheRem
 	if out := w.eng.runCatchUpGit(context.Background(), w.p, w.m); out.kind != catchUpPushed {
 		t.Fatalf("retry outcome = %+v, want a push", out)
 	}
+}
+
+// A push refused with GitHub's repository-rule marker is a policy rejection (#2065): the
+// outcome carries the sanitised reason, and the worktree is restored like any other failure.
+// git itself prefixes a hook's stderr with `remote: `, as it does GitHub's own output.
+func TestRunCatchUpGit_RepoRuleRejectionIsClassifiedAsPolicy(t *testing.T) {
+	w := newCatchUpGitWorld(t, "member.txt", "member\n", "base.txt", "base\n", &mockClaudeInvoker{})
+	hook := filepath.Join(w.src, ".git", "hooks", "pre-receive")
+	script := "#!/bin/sh\n" +
+		"echo 'error: GH013: Repository rule violations found for refs/heads/fabrik/issue-7.' >&2\n" +
+		"echo '- This branch must not contain merge commits.' >&2\n" +
+		"exit 1\n"
+	if err := os.WriteFile(hook, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	out := w.eng.runCatchUpGit(context.Background(), w.p, w.m)
+	if out.kind != catchUpFallback {
+		t.Fatalf("outcome = %+v, want catchUpFallback", out)
+	}
+	if !strings.Contains(out.policyReason, "GH013") || !strings.Contains(out.policyReason, "must not contain merge commits") {
+		t.Errorf("policyReason = %q", out.policyReason)
+	}
+	w.assertRestored(t)
 }
 
 func TestRunCatchUpGit_DirtyWorktreeDefersAndKeepsTheUncommittedWork(t *testing.T) {

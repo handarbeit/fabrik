@@ -1,0 +1,8 @@
+# Synthetic fixture built from GitHub's documented push-rejection format (not recorded from a live repo).
+# The classifier trusts only the GH006/GH013 markers and the veto strings, not the prose. Expect: policy.
+---
+remote: error: GH006: Protected branch update failed for refs/heads/fabrik/issue-7.
+remote: error: Required status check "build" is expected.
+To github.com:owner/repo.git
+ ! [remote rejected] fabrik/issue-7 -> fabrik/issue-7 (protected branch hook declined)
+error: failed to push some refs to 'github.com:owner/repo.git'

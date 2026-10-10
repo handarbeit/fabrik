@@ -1,0 +1,6 @@
+# Synthetic fixture built from GitHub's documented push-rejection format (not recorded from a live repo).
+# The classifier trusts only the GH006/GH013 markers and the veto strings, not the prose. Expect: NOT policy (lease failure: the member's branch moved).
+---
+To github.com:owner/repo.git
+ ! [rejected]        fabrik/issue-7 -> fabrik/issue-7 (stale info)
+error: failed to push some refs to 'github.com:owner/repo.git'

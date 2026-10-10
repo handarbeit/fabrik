@@ -1,0 +1,5 @@
+# Synthetic fixture built from GitHub's documented push-rejection format (not recorded from a live repo).
+# The classifier trusts only the GH006/GH013 markers and the veto strings, not the prose. Expect: NOT policy (credentials/permission shortfall, no branch rule).
+---
+remote: Permission to owner/repo.git denied to fabrik-dev-daemon[bot].
+fatal: unable to access 'https://github.com/owner/repo.git/': The requested URL returned error: 403

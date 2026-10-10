@@ -1,0 +1,5 @@
+# Synthetic fixture built from GitHub's documented push-rejection format (not recorded from a live repo).
+# The classifier trusts only the GH006/GH013 markers and the veto strings, not the prose. Expect: NOT policy (transport, server error).
+---
+remote: Internal Server Error
+fatal: unable to access 'https://github.com/owner/repo.git/': The requested URL returned error: 502

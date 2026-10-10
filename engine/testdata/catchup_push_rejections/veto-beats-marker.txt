@@ -1,0 +1,5 @@
+# Synthetic fixture built from GitHub's documented push-rejection format (not recorded from a live repo).
+# The classifier trusts only the GH006/GH013 markers and the veto strings, not the prose. Expect: NOT policy (veto wins over a marker).
+---
+remote: error: GH006: Protected branch update failed for refs/heads/fabrik/issue-7.
+fatal: unable to access 'https://github.com/owner/repo.git/': Connection reset by peer
