@@ -258,7 +258,12 @@ func (g *Gate) BedStartCmd(isolatedGitconfig string) Cmd {
 	// FABRIK_MAX_TRAIN_AUTO_REPAIR_ATTEMPTS=0 (#2045) disables red-singleton auto-repair
 	// on the bed: the live red-singleton test asserts the ADR-1545 pause, and the
 	// auto-repair path is covered by its sim twin. lifecycle.go appends the same entry.
-	env := withEnv(withoutEnv(g.Env, bedAppEnvKeys...), "GIT_CONFIG_GLOBAL="+isolatedGitconfig, "GIT_CONFIG_NOSYSTEM=1", pollctl.Env(g.Cfg.TestBed), "FABRIK_MAX_TRAIN_AUTO_REPAIR_ATTEMPTS=0")
+	//
+	// FABRIK_MERGE_TRAIN_OVERLAP_IGNORE=** (#2047) makes every path "ignored", which turns
+	// the overlap-aware batch filter off on the bed: the live conflict-resolution and
+	// bisection tests deliberately batch members that write the same path. The filter is
+	// covered by its sim twin. lifecycle.go appends the same entry.
+	env := withEnv(withoutEnv(g.Env, bedAppEnvKeys...), "GIT_CONFIG_GLOBAL="+isolatedGitconfig, "GIT_CONFIG_NOSYSTEM=1", pollctl.Env(g.Cfg.TestBed), "FABRIK_MAX_TRAIN_AUTO_REPAIR_ATTEMPTS=0", "FABRIK_MERGE_TRAIN_OVERLAP_IGNORE=**")
 	return Cmd{
 		Name: "./fabrik",
 		Args: []string{"-notui", "-poll", g.Cfg.BedPollSeconds},

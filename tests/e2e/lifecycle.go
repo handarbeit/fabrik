@@ -294,6 +294,9 @@ func StartFabrikTestBed(t *testing.T, env *Env) {
 	// asserts the ADR-1545 pause; the repair path is covered by its sim twin. The same
 	// entry the gate runner's BedStartCmd adds.
 	cmd.Env = append(cmd.Env, "FABRIK_MAX_TRAIN_AUTO_REPAIR_ATTEMPTS=0")
+	// The overlap-aware batch filter is off on the bed (#2047): "**" ignores every path,
+	// so the live conflict-resolution tests can still batch members writing one file.
+	cmd.Env = append(cmd.Env, "FABRIK_MERGE_TRAIN_OVERLAP_IGNORE=**")
 	// Detach: new process group + /dev/null stdio so the child outlives the test.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if devnull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0); err == nil {
