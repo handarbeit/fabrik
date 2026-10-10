@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os/exec"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -922,5 +923,31 @@ func TestProcessItem_PRCreationFailed_R5_CallsMarkPRReady(t *testing.T) {
 	// MarkPRReady must have been called.
 	if len(client.markPRReadyCalls) == 0 {
 		t.Error("expected MarkPRReady called in R5 path when mark_pr_ready_on_complete: true")
+	}
+}
+
+func TestBaseLabelFor(t *testing.T) {
+	tests := []struct {
+		name       string
+		labels     []string
+		wantBranch string
+		wantExtras []string
+	}{
+		{"none", []string{"fabrik:yolo", "stage:Plan:complete"}, "", nil},
+		{"empty value skipped", []string{"base:", "fabrik:yolo"}, "", nil},
+		{"single", []string{"fabrik:yolo", "base:develop"}, "develop", nil},
+		{"multiple first wins", []string{"base:develop", "base:release/1", "base:next"}, "develop", []string{"release/1", "next"}},
+		{"empty value does not shadow later label", []string{"base:", "base:develop"}, "develop", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			branch, extras := baseLabelFor(tt.labels)
+			if branch != tt.wantBranch {
+				t.Errorf("branch = %q, want %q", branch, tt.wantBranch)
+			}
+			if !reflect.DeepEqual(extras, tt.wantExtras) {
+				t.Errorf("extras = %v, want %v", extras, tt.wantExtras)
+			}
+		})
 	}
 }
