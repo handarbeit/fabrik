@@ -2067,7 +2067,7 @@ ledger drift check: engine SHA 1a2b3c4 — VALID (3 test/gate-only path(s) diffe
 (the host's 1-minute load average at leg start and end) and `bed-config.sha256` (a hash of the
 bed's `.fabrik/stages/` and `config.yaml`; the runner warns when it differs between invocations
 of one ledger). The log that used to vanish is the engine's `.fabrik/fabrik.log`, which the
-engine truncates on every start — so it is sampled while the leg runs and a new segment starts
+engine rotates to `fabrik.log.1` on every start, leaving a fresh file — so it is sampled while the leg runs and a new segment starts
 at each restart. Archives are pruned by SHA: the newest `E2E_COVERAGE_KEEP_SHAS` (default 5)
 keep their `archive/`; the outcome records are never pruned.
 
@@ -2673,7 +2673,7 @@ exclusivity) is added as **fields on the same entries**, not as separate lists.
     "nothing reaches `main`" assertion. The underlying engine gap (Queued
     `base:` members can wait indefinitely after a restart until another item in
     the repo is processed) is not fixed by this test-only scenario.
-  - `fabrik.log` is truncated on every engine start, so it reads from offset 0
+  - `fabrik.log` is a fresh file on every engine start (the previous run is rotated to `fabrik.log.1`), so it reads from offset 0
     and scopes every matcher to its own issue numbers and train key.
   - It fails (never passes) if a member has no "not yet hydrated" line, and skips
     on a webhook-enabled bed, where poll 1 hydrates members before batching.

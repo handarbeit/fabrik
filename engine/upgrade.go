@@ -53,6 +53,10 @@ func (e *Engine) devBuildConfig() selfupgrade.DevBuildConfig {
 		StatusFn:       pollStatus,
 		StatusClearFn:  pollStatusClear,
 		PreExecHook:    e.flushChannelEvents,
+		// A dedicated marker, not FABRIK_AUTO_UPGRADED: that one triggers the
+		// plugin refresh on startup, which PostBuildHook below already did. It
+		// only tells the new process why it started (the fabrik.log banner, #2094).
+		ExtraEnv: []string{"FABRIK_DEV_REEXEC=1"},
 		PostBuildHook: func(exe, dir string) error {
 			// Refresh plugin skills from the new binary.
 			e.logf(0, "upgrade", "refreshing plugin skills\n")
