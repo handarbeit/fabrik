@@ -275,3 +275,18 @@ func TestRun_LostLockStopsEngine(t *testing.T) {
 		t.Error("lockLost not set")
 	}
 }
+
+// Verify must not read a long-directory board record as truncated (a false lost
+// lock): the record embeds the fabrik directory path, which can approach PATH_MAX.
+func TestVerify_LongDirRecordIsNotTruncated(t *testing.T) {
+	dirA, _ := lockTestDirs(t)
+	long := dirA + "/" + strings.Repeat("d", 900)
+	l, err := acquireBoardLock(boardCfg("acme", 7), long)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer (&instanceLocks{board: l}).Release()
+	if err := (&instanceLocks{board: l}).Verify(); err != nil {
+		t.Errorf("long-dir board record must verify, got %v", err)
+	}
+}

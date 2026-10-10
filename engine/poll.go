@@ -680,6 +680,9 @@ func (e *Engine) Run() error {
 	doPollCycle := func() error {
 		// Per-poll lock verification (#2097 R3). Deliberately here and not in
 		// poll()/PollOnce: the sim seam skips the lock preamble (ADR-1449).
+		if e.lockLost.Load() {
+			return errInstanceLockLost // already reported; a racing wake must not re-report
+		}
 		if err := locks.Verify(); err != nil {
 			msg := fmt.Sprintf("%s (%v)", lockLostMessage, err)
 			fmt.Fprintf(os.Stderr, "\nFATAL: %s\n", msg)
