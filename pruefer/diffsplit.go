@@ -3,6 +3,8 @@ package pruefer
 import (
 	"sort"
 	"strings"
+
+	"github.com/handarbeit/fabrik/internal/pathglob"
 )
 
 // diffFileBlock is one file's contiguous block within a unified diff, as
@@ -16,7 +18,7 @@ type diffFileBlock struct {
 // splitDiffFiles splits a unified diff (as returned by FetchPRDiff) into its
 // per-file blocks, keyed by the b/-side path exactly like ParseChangedPaths —
 // so renames key by their destination path, consistent with existing
-// exclusion-glob matching (select.go's allPathsExcluded/matchesAny). preamble
+// exclusion-glob matching (select.go's allPathsExcluded/pathglob). preamble
 // carries any bytes before the first "diff --git" header; for a well-formed
 // diff this is empty, but a malformed or headerless diff must never lose
 // those bytes from the size accounting, since they can be neither excluded
@@ -145,7 +147,7 @@ func pathsOf(blocks []diffFileBlock) []string {
 
 // filterExcludedPaths splits blocks into those that survive patterns (kept)
 // and those matching at least one glob (dropped) — reusing the same
-// matchesAny/matchGlob matcher select.go's allPathsExcluded uses for its own
+// pathglob matcher select.go's allPathsExcluded uses for its own
 // terminal all-or-nothing check. Only the aggregation differs: per-file
 // here, not whole-diff. "every file excluded" falls out naturally as
 // len(kept) == 0, so no existing exclusion scenario is lost, only relocated
@@ -156,7 +158,7 @@ func filterExcludedPaths(blocks []diffFileBlock, patterns []string) (kept, dropp
 		return blocks, nil
 	}
 	for _, b := range blocks {
-		if matchesAny(b.Path, patterns) {
+		if pathglob.MatchAny(b.Path, patterns) {
 			dropped = append(dropped, b)
 		} else {
 			kept = append(kept, b)
