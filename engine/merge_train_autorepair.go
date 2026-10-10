@@ -29,6 +29,10 @@ import (
 const (
 	// mergeTrainRepairFile is the context file the repair's Validate dispatch reads.
 	mergeTrainRepairFile = "merge-train-repair.md"
+	// repairContextTTL bounds how long a pending repair context may wait for its Validate
+	// dispatch. A longer wait means the repair flow was left (paused, blocked, suspended) and
+	// the facts in the context are no longer trustworthy, so it is discarded.
+	repairContextTTL = 2 * time.Hour
 	// repairHistoryMax bounds the per-member attempt history kept for the pause comment.
 	repairHistoryMax = 20
 )
@@ -49,6 +53,7 @@ type repairContext struct {
 	memberHeadSHA string
 	attempt       int
 	cap           int
+	at            time.Time // when the repair was started; see repairContextTTL
 }
 
 // autoRepairState is the shared (worker goroutine ↔ poll goroutine) auto-repair state.
@@ -226,6 +231,17 @@ func (e *Engine) writeMergeTrainRepair(item gh.ProjectItem, repairDispatch bool,
 		owner, repo := itemOwnerRepo(item, e.defaultRepo())
 		rc = e.consumePendingRepair(autoRepairKey(owner, repo, item.Number))
 	}
+	if rc != nil {
+		// A context that outlived its repair flow must not leak into a later, unrelated
+		// Validate run: discard it when it is old or the member's head has since moved.
+		if age := e.now().Sub(rc.at); age > repairContextTTL {
+			e.logf(item.Number, "merge-train", "discarding stale auto-repair context (%s old) for the Validate dispatch\n", age.Round(time.Minute))
+			rc = nil
+		} else if item.LinkedPRHeadSHA != "" && item.LinkedPRHeadSHA != rc.memberHeadSHA {
+			e.logf(item.Number, "merge-train", "discarding stale auto-repair context: PR head moved from %s to %s since the repair started\n", rc.memberHeadSHA, item.LinkedPRHeadSHA)
+			rc = nil
+		}
+	}
 	if rc == nil {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			e.logf(item.Number, "warn", "could not remove stale .fabrik-context/%s: %v\n", mergeTrainRepairFile, err)
@@ -299,7 +315,7 @@ func (e *Engine) startAutoRepair(projectID, owner, repo string, m trainMember, p
 	key := autoRepairKey(owner, repo, m.item.Number)
 	attempt := e.autoRepairAttemptsAt(key, p.baseSHA) + 1
 	// Registered before re-entry so the next poll's dispatch cannot miss it.
-	e.setPendingRepair(key, &repairContext{diag: diag, baseSHA: p.baseSHA, memberHeadSHA: m.headSHA, attempt: attempt, cap: capN})
+	e.setPendingRepair(key, &repairContext{diag: diag, baseSHA: p.baseSHA, memberHeadSHA: m.headSHA, attempt: attempt, cap: capN, at: e.now()})
 
 	if !e.reenterValidate(m.item, owner, repo) {
 		if err := e.addLabelChecked(m.item, "fabrik:revalidate"); err != nil {

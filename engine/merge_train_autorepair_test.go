@@ -464,7 +464,7 @@ func TestWriteMergeTrainRepair_OnlyForRepairDispatch(t *testing.T) {
 	client := behindClient()
 	eng := autoRepairEngine(t, client, 1)
 	item := repairMember().item
-	eng.setPendingRepair("owner/repo#1", &repairContext{diag: repairDiag(), baseSHA: "b", memberHeadSHA: "h", attempt: 1, cap: 1})
+	eng.setPendingRepair("owner/repo#1", &repairContext{diag: repairDiag(), baseSHA: "b", memberHeadSHA: "h", attempt: 1, cap: 1, at: eng.now()})
 	dir := t.TempDir()
 	path := filepath.Join(dir, mergeTrainRepairFile)
 
@@ -489,6 +489,48 @@ func TestWriteMergeTrainRepair_OnlyForRepairDispatch(t *testing.T) {
 	if _, err := os.Stat(path); err == nil {
 		t.Fatal("stale file must be removed for later stages")
 	}
+}
+
+// A pending context that outlived its repair flow (item paused or blocked, then a later
+// Validate dispatch) must not be written: it carries outdated base/head SHAs and failures.
+func TestWriteMergeTrainRepair_DiscardsStaleContext(t *testing.T) {
+	item := repairMember().item
+	path := func(dir string) string { return filepath.Join(dir, mergeTrainRepairFile) }
+
+	t.Run("expired", func(t *testing.T) {
+		eng := autoRepairEngine(t, behindClient(), 1)
+		eng.setPendingRepair("owner/repo#1", &repairContext{diag: repairDiag(), baseSHA: "b", memberHeadSHA: "h", attempt: 1, cap: 1, at: eng.now().Add(-repairContextTTL - time.Minute)})
+		dir := t.TempDir()
+		eng.writeMergeTrainRepair(item, true, dir)
+		if _, err := os.Stat(path(dir)); err == nil {
+			t.Fatal("an expired repair context must not be written")
+		}
+		if eng.consumePendingRepair("owner/repo#1") != nil {
+			t.Fatal("an expired repair context must be consumed, not left pending")
+		}
+	})
+	t.Run("head moved", func(t *testing.T) {
+		eng := autoRepairEngine(t, behindClient(), 1)
+		eng.setPendingRepair("owner/repo#1", &repairContext{diag: repairDiag(), baseSHA: "b", memberHeadSHA: "h", attempt: 1, cap: 1, at: eng.now()})
+		moved := item
+		moved.LinkedPRHeadSHA = "h-new"
+		dir := t.TempDir()
+		eng.writeMergeTrainRepair(moved, true, dir)
+		if _, err := os.Stat(path(dir)); err == nil {
+			t.Fatal("a repair context for a superseded head must not be written")
+		}
+	})
+	t.Run("fresh and same head", func(t *testing.T) {
+		eng := autoRepairEngine(t, behindClient(), 1)
+		eng.setPendingRepair("owner/repo#1", &repairContext{diag: repairDiag(), baseSHA: "b", memberHeadSHA: "h", attempt: 1, cap: 1, at: eng.now()})
+		same := item
+		same.LinkedPRHeadSHA = "h"
+		dir := t.TempDir()
+		eng.writeMergeTrainRepair(same, true, dir)
+		if _, err := os.Stat(path(dir)); err != nil {
+			t.Fatalf("a fresh context for the same head must be written: %v", err)
+		}
+	})
 }
 
 // A missing diagnostic (e.g. after a restart) never blocks the repair: Validate is still

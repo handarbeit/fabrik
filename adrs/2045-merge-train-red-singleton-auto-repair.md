@@ -51,7 +51,9 @@ excerpts already gathered for `renderDiagnosticBlock` travel from the train work
 goroutine as an in-memory per-member record. `writeContextFiles` materialises it as
 `.fabrik-context/merge-train-repair.md` for that one Validate dispatch and consumes it; with no pending
 record (any later stage, a later Validate, comment processing, or a daemon restart between eject and
-dispatch) a leftover file is removed and Validate still runs without it. The file's text is
+dispatch) a leftover file is removed and Validate still runs without it. A pending record that waited
+more than 2 hours or whose member head no longer matches the item's PR head is discarded the same way,
+so it cannot leak into a later unrelated Validate run. The file's text is
 self-contained — base moved, rebase or merge onto it, reconcile with what landed, **never revert or work
 around the landed change** — and is also carried by the embedded `fabrik-validate` skill and one static
 `buildPrompt` line, so it reaches the worker without users refreshing their stage YAML.
