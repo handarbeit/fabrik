@@ -926,7 +926,7 @@ func projectsV2ItemPayloadJSON(action, itemID, statusName string) []byte {
 	p := projectsV2ItemPayload{Action: action}
 	p.ProjectsV2Item.ID = itemID
 	p.Changes.FieldValue.FieldType = "single_select"
-	p.Changes.FieldValue.To.Name = statusName
+	p.Changes.FieldValue.To, _ = json.Marshal(map[string]string{"name": statusName})
 	b, _ := json.Marshal(p)
 	return b
 }

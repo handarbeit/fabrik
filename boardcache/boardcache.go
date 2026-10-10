@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
@@ -267,6 +268,12 @@ type CacheImpl struct {
 
 	// paused is a stream-health control flag. When true, ApplyDelta is a no-op.
 	paused bool
+
+	// textEditSuppressionDisabledForTest is the neutralisation seam for the
+	// display-field echo suppression (#2048): when set, applyProjectsV2ItemDelta
+	// stops ignoring non-single-select edits, so the test that pins the
+	// suppression can be shown to fail without it.
+	textEditSuppressionDisabledForTest atomic.Bool
 
 	// pauseObsMu guards pauseObservers. Separate from mu to avoid deadlock
 	// when observers call back into CacheImpl (which acquires mu).
@@ -1256,6 +1263,13 @@ func (c *CacheImpl) ProjectID() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.projectID
+}
+
+// SetTextEditSuppressionDisabledForTest turns the display-field echo
+// suppression off (#2048). Test-only: it exists so the test pinning the
+// suppression can be shown to fail when it is neutralised.
+func (c *CacheImpl) SetTextEditSuppressionDisabledForTest(disabled bool) {
+	c.textEditSuppressionDisabledForTest.Store(disabled)
 }
 
 // LightReconcile fetches a fresh shallow board snapshot from GitHub and compares
