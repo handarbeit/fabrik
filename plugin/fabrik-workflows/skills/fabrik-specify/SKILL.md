@@ -48,7 +48,7 @@ Explicitly state:
 
 ### Rewrite the issue body
 
-Update the issue body (via FABRIK_ISSUE_UPDATE markers) with a structured spec. **Preserve the user's original motivation and problem statement** — the "why" is as important as the "what." Never reduce a detailed problem description to a terse summary that loses context: the original motivation goes in `## Background` and the original request goes **verbatim** in `**Input**`.
+Update the issue body (via FABRIK_ISSUE_UPDATE markers) with a structured spec. **Preserve the user's original motivation and problem statement** — the "why" is as important as the "what." Never reduce a detailed problem description to a terse summary that loses context: the original motivation goes in `## Background` and the original request goes **verbatim** in `**Input**`. Likewise, any section already in the current body that the Spec template does not define (for example a human-added `## Human Decisions`) must survive the rewrite: carry non-template sections forward verbatim (see the rules under "Spec template").
 
 ## Spec template
 
@@ -124,7 +124,8 @@ Rules that go with the template:
 - **Fill the header fields.** `**Feature Branch**` is `fabrik/issue-<N>` with the real issue number. `**Created**` is the date the spec was first written, as `YYYY-MM-DD`; keep that value unchanged on later rounds. `**Input**` is the original request, verbatim, from the first round; never rewrite or shorten it on later rounds.
 - **`**Status**` is `Draft` while any open question remains and `Specified` once none do.** Maintain it on every body update. The engine projects the body as-is, so the committed file carries the same value.
 - **`## Open Questions` exists only while questions remain** and is removed when the last one is resolved. It stays in the issue body only; the engine strips it from the committed file. **Write its heading as exactly `## Open Questions`** — without the italic `*(only if unresolved questions remain)*` hint — so the committed file can never carry the hint. (The engine also tolerates a copied hint, so correctness does not depend on this, but the plain heading is the convention.) The engine removes the section up to the next `## ` heading, so `## Source References` after it is kept.
-- **Every other heading stays exactly as in the template**, including the italic `*(mandatory)*`/`*(optional)*`/`*(if applicable)*` hints. Omit an optional section (`Key Entities`, `Out of Scope`, `Source References`) only when it genuinely has nothing to say; keep `Background`, `User Scenarios & Testing`, `Requirements`, `Success Criteria` and `Assumptions` always.
+- **Every other *template* heading stays exactly as in the template**, including the italic `*(mandatory)*`/`*(optional)*`/`*(if applicable)*` hints. Omit an optional section (`Key Entities`, `Out of Scope`, `Source References`) only when it genuinely has nothing to say; keep `Background`, `User Scenarios & Testing`, `Requirements`, `Success Criteria` and `Assumptions` always.
+- **Carry non-template sections forward verbatim.** The template rules in this list govern the template's own sections only. Any section in the *current body* that the template does not define (for example a human-added `## Human Decisions`) is kept with the same heading and the same content, and stays in the same position relative to its neighbouring sections; if a restructure leaves it no such place, put it after the last template section and before `## Source References` if present. Several such sections keep their order relative to each other. You may also fold a decision recorded in such a section into the relevant requirement, but never delete the section. A heading counts as a template heading only if it matches the template exactly, so a merely similar heading (a reworded `## Open Question`, say) is a non-template section; `## Open Questions` keeps its own removal rule above. This applies only to sections already present in the current body, never to sections you would invent.
 - **Stories** are `### User Story N - <title> (Priority: Pn)`, prioritized (P1 most important), each with `Why this priority`, `Independent Test` and `Acceptance Scenarios` — implementing only one story must still deliver a usable slice. Name them `User Story 1`, never a bare `#1`. Add as many stories as the work needs, separated by `---`; `### Edge Cases` follows the last one.
 - **Requirements** use stable `FR-NNN` identifiers, one testable statement each. Number them in order and never renumber an existing requirement during clarification rounds; retire one by removing it, add new ones at the end. Mark an unclear one inline with `[NEEDS CLARIFICATION: <the specific question>]` and give it a matching entry under `## Open Questions`.
 - **Success criteria** use stable `SC-NNN` identifiers under `### Measurable Outcomes` and describe measurable outcomes from the user's or operator's point of view, not implementation details.
@@ -176,7 +177,8 @@ FABRIK_ISSUE_UPDATE_END
 ## Quality Checklist
 
 Before signaling completion, verify:
-- [ ] The body follows the Spec template exactly: header fields filled, headings and order unchanged
+- [ ] The template sections follow the Spec template exactly: header fields filled, headings and order unchanged
+- [ ] Any non-template section from the current body was carried forward verbatim
 - [ ] `**Input**` still holds the original request verbatim and `## Background` preserves the original motivation
 - [ ] Every requirement is specific and testable and carries an `FR-NNN` identifier
 - [ ] User stories are prioritized, each with an Independent Test and Acceptance Scenarios
