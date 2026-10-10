@@ -3587,6 +3587,7 @@ func (e *Engine) pauseRedSingleton(projectID, owner, repo string, m trainMember,
 
 	e.logf(m.item.Number, "merge-train", "#%d is a red singleton (own validation failing, not a batch interaction) — rerouted to %s and pausing without bisection\n", m.item.Number, targetName)
 	e.pauseMergeTrainMember(owner, repo, m.item.Number)
+	e.setStatusLine(m.item, statusLinePaused("own validation failing"))
 	e.emitTrainEvent(owner, repo, m.item.Number, channelevents.MergeTrainFailed, "red-singleton",
 		"its own combined Validate is failing, independent of the other batch members", diag, nil) // observation only (#1968)
 }
@@ -3695,6 +3696,10 @@ func (e *Engine) ejectMember(owner, repo string, memberItem gh.ProjectItem, reas
 			e.logf(memberItem.Number, "merge-train", "warn: could not post pause comment: %v\n", err)
 		}
 		e.pauseMergeTrainMember(owner, repo, memberItem.Number)
+		e.setStatusLine(memberItem, statusLinePaused(fmt.Sprintf("ejected %d times", count)))
+	} else if stayInQueue {
+		// Left the batch but stays Queued for a later train.
+		e.setStatusLine(memberItem, statusLineQueuedWaiting)
 	}
 	// Observation only (#1968): the member left the batch.
 	cause := "trial"
@@ -3830,6 +3835,9 @@ func (e *Engine) rerouteQueuedMemberOffHolding(projectID string, item gh.Project
 	}
 
 	e.logf(item.Number, "merge-train", "rerouted off %s to %s\n", hs.Name, target.Name)
+	// Off the train: the old line is stale. A pause that follows writes its own,
+	// and the next stage dispatch writes "<Stage> · running" (#2048).
+	e.clearStatusLine(item)
 	return true
 }
 
@@ -4203,6 +4211,7 @@ func (e *Engine) fireRunawayGuard(ctx context.Context, owner, repo, partitionBas
 		// marker applied to a member that was never actually paused (#1533 review).
 		e.addLabel(item, "fabrik:paused")
 		e.addLabel(item, "fabrik:awaiting-input")
+		e.setStatusLine(item, statusLinePaused("merge-train runaway guard"))
 		e.emitTrainEvent(owner, repo, item.Number, channelevents.MergeTrainFailed, "runaway-guard",
 			fmt.Sprintf("%d trial(s) with zero successful lands within %s", count, window), nil, map[string]string{"trials": strconv.Itoa(count)}) // observation only (#1968)
 
@@ -4609,6 +4618,7 @@ func (e *Engine) escalateStrandedTrainMember(projectID, owner, repo string, item
 
 	e.logf(item.Number, "merge-train", "#%d rerouted off Queued to %s and paused after a landing failure: %s\n", item.Number, targetName, reason)
 	e.pauseMergeTrainMember(owner, repo, item.Number)
+	e.setStatusLine(item, statusLinePaused("landing failed"))
 	e.emitTrainEvent(owner, repo, item.Number, channelevents.MergeTrainFailed, "landing-failed", reason, nil, nil) // observation only (#1968)
 }
 
@@ -4884,6 +4894,7 @@ func (e *Engine) dissolveBatch(state *mergeTrainWorkerState, p trialParams, prNu
 		if _, err := e.client.AddComment(p.owner, p.repo, m.Number, msg); err != nil {
 			e.logf(m.Number, "merge-train", "warn: could not post dissolve comment: %v\n", err)
 		}
+		e.setStatusLine(m, statusLineQueuedWaiting)
 	}
 
 	// The in-flight marker itself is cleared by runMergeTrainWorker's top-level

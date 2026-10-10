@@ -196,6 +196,7 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 					e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:awaiting-ci")
 				}
 				e.recordLabelAppliedAtNow(item, "fabrik:awaiting-ci")
+				e.setStatusLine(item, statusLineAwaitingCI(item.LinkedPRNumber)) // display-only (#2048)
 			}
 		}
 		// fabrik:awaiting-review is NOT seeded here when wait_for_ci: true.

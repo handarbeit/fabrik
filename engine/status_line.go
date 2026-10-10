@@ -217,3 +217,33 @@ func (e *Engine) clearMembersStatusLine(members []trainMember) {
 		e.clearStatusLine(m.item)
 	}
 }
+
+// withStatusLine shows line for the duration of an activity and returns the
+// function that ends it: the previous line is put back (or the field cleared
+// when there was none), but only if nothing wrote a newer line in the
+// meantime. Use as `defer e.withStatusLine(item, line)()`.
+func (e *Engine) withStatusLine(item gh.ProjectItem, line string) func() {
+	if e.cfg.StatusLineField == "" {
+		return func() {}
+	}
+	key := issueKey(item, e.defaultRepo())
+	s := &e.statusLine
+	s.mu.Lock()
+	prev, hadPrev := s.last[key]
+	s.mu.Unlock()
+	shown := truncateStatusLine(line)
+	e.setStatusLine(item, line)
+	return func() {
+		s.mu.Lock()
+		cur, known := s.last[key]
+		s.mu.Unlock()
+		if !known || cur != shown {
+			return
+		}
+		if hadPrev && prev != "" {
+			e.setStatusLine(item, prev)
+		} else {
+			e.clearStatusLine(item)
+		}
+	}
+}

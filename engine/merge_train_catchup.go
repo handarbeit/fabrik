@@ -552,6 +552,7 @@ func (e *Engine) ejectRedCatchUpSingleton(projectID string, p trialParams, m tra
 	}
 	e.logf(m.item.Number, "merge-train", "#%d is red on its caught-up head %s — rerouted to %s and pausing\n", m.item.Number, m.headSHA, targetName)
 	e.pauseMergeTrainMember(p.owner, p.repo, m.item.Number)
+	e.setStatusLine(m.item, statusLinePaused("CI failing after catch-up"))
 	e.emitTrainEvent(p.owner, p.repo, m.item.Number, channelevents.MergeTrainFailed, "red-singleton",
 		"its own CI is failing on the head Fabrik caught up with the base", diag, nil) // observation only (#1968)
 }

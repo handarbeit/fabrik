@@ -74,6 +74,9 @@ func statusLineClaudeLimit(until time.Time) string {
 
 // statusLineAwaitingCI: a stage is waiting on CI for a PR.
 func statusLineAwaitingCI(prNum int) string {
+	if prNum <= 0 {
+		return "awaiting CI"
+	}
 	return fmt.Sprintf("awaiting CI on PR #%d", prNum)
 }
 

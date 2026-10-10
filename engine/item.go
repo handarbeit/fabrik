@@ -1020,6 +1020,11 @@ func (e *Engine) acquireLockAndVerify(ctx context.Context, item gh.ProjectItem, 
 		inProgressAdded = true
 		e.syncLabelAdd(item, inProgressLabel, true)
 	}
+	// Display-only status line (#2048). The cleanup stage (Done) clears the line
+	// on its way in rather than announcing itself.
+	if !stage.CleanupWorktree {
+		e.setStatusLine(item, statusLineStageRunning(stage.Name))
+	}
 
 	return release, workerStartedAt, workerDone, true
 }
@@ -2933,6 +2938,12 @@ func (e *Engine) handleUsageLimitExit(p stageOutcomeParams, limitErr *claudeUsag
 		)
 		e.postItemComment(item, comment, false)
 		e.addLabel(item, "fabrik:claude-limit")
+		// Only the item whose invocation hit the limit is written (#2048): the
+		// suspension is account-wide, but one write per detection keeps volume low
+		// and the per-item label sweep already clears the label.
+		if until, ok := e.claudeSuspendedUntilTime(time.Now()); ok {
+			e.setStatusLine(item, statusLineClaudeLimit(until))
+		}
 	}
 
 	p.release()
