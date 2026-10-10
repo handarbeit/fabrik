@@ -2151,15 +2151,19 @@ func TestMergeTrainWorker_TUIJobRow(t *testing.T) {
 				if ev.StageName != "Merge Train" {
 					t.Errorf("JobStartedEvent.StageName = %q, want %q", ev.StageName, "Merge Train")
 				}
-				if !strings.Contains(ev.Title, "#1") || !strings.Contains(ev.Title, "#2") {
-					t.Errorf("JobStartedEvent.Title = %q, want it to name #1 and #2", ev.Title)
+				if !strings.HasPrefix(ev.Title, "2 of 2:") || !strings.Contains(ev.Title, "#1") || !strings.Contains(ev.Title, "#2") {
+					t.Errorf("JobStartedEvent.Title = %q, want \"2 of 2: #1 #2\"", ev.Title)
 				}
 			}
 		case tui.JobCompletedEvent:
 			if ev.IssueNumber == 0 && ev.Repo == "owner/repo" && ev.StageName == "Merge Train" {
 				sawCompleted = true
-				if !ev.Skipped {
-					t.Error("expected JobCompletedEvent.Skipped=true (no per-train InvocationObserver)")
+				// #2050: the completion carries the episode's real outcome and reaches
+				// History (Skipped=false). This fixture's landing guard refuses (no
+				// fetchLabelsFn), so the honest outcome is abandoned; the per-outcome
+				// scripted trains live in merge_train_tui_test.go.
+				if ev.Skipped || ev.Outcome != "abandoned" || ev.Success {
+					t.Errorf("JobCompletedEvent = %+v, want Skipped=false Outcome=abandoned Success=false", ev)
 				}
 			}
 		case tui.LogEvent:

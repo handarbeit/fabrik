@@ -140,6 +140,11 @@ type InvokeOptions struct {
 	// own branch head, not a member PR and a trial branch, so the synthetic prompt is
 	// worded accordingly. Empty for every other invocation.
 	CatchUpBaseSHA string
+
+	// trainEpisode, set only by the merge-train conflict-resolution callers, lets
+	// acquireTrainSlot report "waiting for slot" to the train's TUI row (#2050).
+	// Never read by the Claude invocation itself.
+	trainEpisode *trainEpisode
 	// FabrikRoot is the absolute path to fabrikDir (where .fabrik/ config, stages,
 	// and plugin live), exported to the worker as FABRIK_ROOT (#1288). Empty means
 	// omit the variable entirely.

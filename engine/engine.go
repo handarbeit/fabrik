@@ -417,6 +417,13 @@ type Engine struct {
 	// gone with it on (the production default; New never sets this). See
 	// SetMergeTrainLandingGuardDisabledForTest and ADR-1871.
 	mergeTrainLandingGuardDisabledForTest bool
+
+	// trainPhaseObserverForTest, when set, sees every noteTrainPhase call (the TUI
+	// label and board text it produced) — the recorded sequence both projections
+	// derive from (#2050). trainOutcomeNeutralisedForTest restores the blanket
+	// Skipped completion (FR-013). Both are test seams; production leaves them zero.
+	trainPhaseObserverForTest      func(trainPhaseRecord)
+	trainOutcomeNeutralisedForTest bool
 	// mergeTrainPrefixReuseDisabledForTest disables assembleTrialBranch's trial-prefix
 	// reuse (#1835) when true, falling back to always forking fresh off the pinned base
 	// SHA and re-merging every member — i.e. exactly the pre-#1835 behavior. Exists
