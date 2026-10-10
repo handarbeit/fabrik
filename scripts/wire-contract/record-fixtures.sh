@@ -213,6 +213,47 @@ mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
 }' -f projectId="$PROJECT_ID" -f itemId="$ITEM" -f fieldId="$FIELD_ID" -f optionId="$OPTION_ID" > /tmp/wc-updatestatus.json
 write_recording update_project_item_status "https://api.github.com/graphql" "$LIVE_PROJECT_OWNER (project #$SANDBOX_PROJECT_NUMBER \"Fabrik Test\", disposable sandbox item)" /tmp/wc-updatestatus.json
 
+echo "-- fetch_text_field / update_project_item_text_field / clear_project_item_field (#2048) --"
+# The sandbox board must carry a plain TEXT field named "Fabrik" (Fabrik never
+# creates it — create it once in the board settings). Also prints the item and
+# project updatedAt before/after the text write, which is the evidence for
+# whether a display-field write bumps the item's updatedAt (ADR 2048).
+gh_ api graphql -f query='
+query($projectId: ID!, $name: String!) {
+  node(id: $projectId) {
+    ... on ProjectV2 {
+      field(name: $name) {
+        ... on ProjectV2Field { id name dataType }
+      }
+    }
+  }
+}' -f projectId="$PROJECT_ID" -f name="Fabrik" > /tmp/wc-fetchtextfield.json
+write_recording fetch_text_field "https://api.github.com/graphql" "$LIVE_PROJECT_OWNER (project #$SANDBOX_PROJECT_NUMBER \"Fabrik Test\", Fabrik text field)" /tmp/wc-fetchtextfield.json
+TEXT_FIELD_ID=$(python3 -c 'import json;print(json.load(open("/tmp/wc-fetchtextfield.json"))["data"]["node"]["field"]["id"])')
+echo "item updatedAt before text write:"
+gh_ api graphql -f query='query($id: ID!) { node(id: $id) { ... on ProjectV2Item { updatedAt project { updatedAt } } } }' -f id="$ITEM" --jq '.data.node'
+gh_ api graphql -f query='
+mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $text: String!) {
+  updateProjectV2ItemFieldValue(input: {
+    projectId: $projectId, itemId: $itemId, fieldId: $fieldId,
+    value: { text: $text }
+  }) {
+    projectV2Item { id }
+  }
+}' -f projectId="$PROJECT_ID" -f itemId="$ITEM" -f fieldId="$TEXT_FIELD_ID" -f text="queued · batch of 3" > /tmp/wc-updatetext.json
+write_recording update_project_item_text_field "https://api.github.com/graphql" "$LIVE_PROJECT_OWNER (project #$SANDBOX_PROJECT_NUMBER \"Fabrik Test\", disposable sandbox item)" /tmp/wc-updatetext.json
+echo "item updatedAt after text write:"
+gh_ api graphql -f query='query($id: ID!) { node(id: $id) { ... on ProjectV2Item { updatedAt project { updatedAt } } } }' -f id="$ITEM" --jq '.data.node'
+gh_ api graphql -f query='
+mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!) {
+  clearProjectV2ItemFieldValue(input: {
+    projectId: $projectId, itemId: $itemId, fieldId: $fieldId
+  }) {
+    projectV2Item { id }
+  }
+}' -f projectId="$PROJECT_ID" -f itemId="$ITEM" -f fieldId="$TEXT_FIELD_ID" > /tmp/wc-cleartext.json
+write_recording clear_project_item_field "https://api.github.com/graphql" "$LIVE_PROJECT_OWNER (project #$SANDBOX_PROJECT_NUMBER \"Fabrik Test\", disposable sandbox item)" /tmp/wc-cleartext.json
+
 echo "-- add_label_to_issue --"
 gh_ api -X POST "repos/$ALPHA/issues/$ISSUE_B/labels" -f "labels[]=wire-contract-fixture-test" > /tmp/wc-addlabel.json
 write_recording add_label_to_issue "POST /repos/{owner}/{repo}/issues/{issue_number}/labels" "$ALPHA#$ISSUE_B (disposable sandbox issue)" /tmp/wc-addlabel.json

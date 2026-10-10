@@ -1,0 +1,10 @@
+{
+  "provenance": {
+    "operation": "clear_project_item_field",
+    "endpoint": "https://api.github.com/graphql",
+    "recorded_at": "2026-10-10T08:00:00Z",
+    "source_repo": "hand-authored to the vendored schema; re-record with scripts/wire-contract/record-fixtures.sh against the \"Fabrik Test\" sandbox board (needs a \"Fabrik\" text field)",
+    "scrubbed": true
+  },
+  "response": {"data":{"clearProjectV2ItemFieldValue":{"projectV2Item":{"id":"PVTI_lADOENB0Ac4BYrazzg13dl8"}}}}
+}
