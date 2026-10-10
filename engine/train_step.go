@@ -95,6 +95,11 @@ type trainRun struct {
 	async      bool // true on the asynchronous driver
 	detached   bool // landOneAtATime wrapper: no claim, no store, no completion event
 	sawRunaway bool // detached only: the runaway guard tripped (the caller fires it)
+	// stepCtx is the context of the step goroutine currently executing the run (async only;
+	// written and read only by the actor holding stepping). A step that ends because this
+	// context was cancelled — shutdown, SIGHUP — keeps the persisted record, so the next
+	// daemon resumes the bisection position instead of forming fresh.
+	stepCtx context.Context
 
 	stepping atomic.Bool // FR-011: one actor advances a run at a time
 	finished atomic.Bool
@@ -263,7 +268,13 @@ func (r *trainRun) finish() {
 	r.p.prefixCache.cleanup()
 	e.finishTrain(r.trainKey)
 	if r.store != nil {
-		r.store.unregister(r.trainKey)
+		if r.stepCtx != nil && r.stepCtx.Err() != nil {
+			// Cancelled mid-step: keep the record. Adoption validates it against GitHub, so a
+			// stale one is discarded rather than trusted.
+			r.store.release(r.trainKey)
+		} else {
+			r.store.unregister(r.trainKey)
+		}
 	}
 	e.completeTrainEpisode(r.ep, r.repoKey(), r.started)
 }
@@ -1060,6 +1071,7 @@ func (e *Engine) driveSync(ctx context.Context, r *trainRun) {
 // caller has claimed r.stepping and marked the liveness; both are released here.
 func (e *Engine) stepAsync(ctx context.Context, r *trainRun, v *trialVerdict) {
 	defer r.stepping.Store(false)
+	r.stepCtx = ctx
 	e.advance(ctx, r, v)
 	r.leaveStep()
 }

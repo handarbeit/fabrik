@@ -365,6 +365,15 @@ func (s *trainRunStore) register(r *trainRun) {
 	s.mu.Unlock()
 }
 
+// release forgets the in-memory run but leaves its record on disk, for a step that was
+// cancelled by shutdown: the next daemon adopts the record.
+func (s *trainRunStore) release(trainKey string) {
+	s.mu.Lock()
+	delete(s.live, trainKey)
+	delete(s.pending, trainKey)
+	s.mu.Unlock()
+}
+
 func (s *trainRunStore) unregister(trainKey string) {
 	s.mu.Lock()
 	delete(s.live, trainKey)

@@ -352,6 +352,149 @@ func TestTrainRunAsync_RestartInOneAtATimeAfterMembersLeftQueuedResumes(t *testi
 	}
 }
 
+// Review finding (race): a run must be owned by its creating worker from the instant it is
+// visible to the per-poll scan. If it is registered before the worker holds `stepping`, a
+// concurrent settleTrainRuns wins the CAS, sees no trial and starts a second step over it.
+func TestTrainRunAsync_RegisteredRunIsOwnedByItsWorker(t *testing.T) {
+	a := newAsyncTrain(t, 3, poisonedBy())
+	a.hold.Store(true)
+	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test", batchNumbers: map[int]bool{1: true, 2: true, 3: true}}
+	r, ok := a.eng.beginTrainRun(context.Background(), state, "owner", "repo", asyncPartition, a.batch)
+	if !ok {
+		t.Fatal("beginTrainRun did not start the train")
+	}
+	if !r.stepping.Load() {
+		t.Fatal("a registered run must already be owned (stepping) by the worker that created it")
+	}
+	// A poll racing the registration must leave the run alone: no step goroutine, no trial.
+	a.eng.settleTrainRuns(context.Background(), a.board)
+	a.eng.wg.Wait()
+	if r.trial() != nil {
+		t.Fatal("a poll started a step over a run its worker still owns")
+	}
+	if got := a.calls(); len(got) != 0 {
+		t.Fatalf("a poll validated a trial for a run its worker still owns: %v", got)
+	}
+}
+
+// Review finding (stale trial): when adoption discards a run because a member left or its
+// PR head moved, the trial PR must be closed too. Otherwise reconstructTrainState's Route 2
+// finds the still-open trial PR (its body lists a Queued member) and lands the survivors
+// from a trial branch that still carries the departed member's commits.
+func TestTrainRunAsync_AdoptionDiscardClosesTheTrialPR(t *testing.T) {
+	const trialPR = 77
+	cases := []struct {
+		name   string
+		mutate func(a *asyncTrain)
+	}{
+		{"member_paused", func(a *asyncTrain) { a.board.Items[2].Labels = append(a.board.Items[2].Labels, "fabrik:paused") }},
+		{"member_left_queued", func(a *asyncTrain) { a.board.Items[0].Status = "Implement" }},
+		{"member_closed", func(a *asyncTrain) { a.board.Items[1].IsClosed = true }},
+		{"member_vanished", func(a *asyncTrain) { a.board.Items = a.board.Items[:2] }},
+		{"member_pr_head_moved", func(a *asyncTrain) { a.board.Items[0].LinkedPRHeadSHA = "deadbeefcafe" }},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			a := newAsyncTrain(t, 3, poisonedBy())
+			a.dispatch()
+			files, _ := filepath.Glob(filepath.Join(a.dir, "*.json"))
+			if len(files) != 1 {
+				t.Fatalf("want one persisted record, got %v", files)
+			}
+			// The seam opens no real PR; give the persisted trial one so the close is observable.
+			raw, err := os.ReadFile(files[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			var rec map[string]any
+			if err := json.Unmarshal(raw, &rec); err != nil {
+				t.Fatal(err)
+			}
+			trial, ok := rec["trial"].(map[string]any)
+			if !ok {
+				t.Fatalf("record has no open trial: %s", raw)
+			}
+			trial["pr"] = trialPR
+			raw, _ = json.Marshal(rec)
+			if err := os.WriteFile(files[0], raw, 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			a.restart()
+			tc.mutate(a)
+			a.settleHeld()
+			if a.open() {
+				t.Fatal("an invalid record must not be adopted")
+			}
+			a.client.mu.Lock()
+			closed := false
+			for _, c := range a.client.closeIssueCalls {
+				if c.issueNumber == trialPR {
+					closed = true
+				}
+			}
+			a.client.mu.Unlock()
+			if !closed {
+				t.Fatalf("discarding the run must close its trial PR #%d", trialPR)
+			}
+			if a.merges() != 0 {
+				t.Fatal("nothing may be landed from a discarded trial")
+			}
+		})
+	}
+}
+
+// Review follow-up: a step that ends because shutdown cancelled its context (mainOutcome's
+// assembly error, abortBisection, the one-at-a-time exits all finish the run) must keep the
+// persisted record, so a SIGHUP or stop mid-bisection does not lose the position and the
+// consumed cost cap. A step that ends for any other reason still removes it.
+func TestTrainRunAsync_FinishCancelledKeepsTheRecordOtherwiseRemovesIt(t *testing.T) {
+	records := func(a *asyncTrain) []string {
+		files, _ := filepath.Glob(filepath.Join(a.dir, "*.json"))
+		return files
+	}
+	t.Run("cancelled", func(t *testing.T) {
+		a := newAsyncTrain(t, 4, poisonedBy(3))
+		a.dispatch()
+		a.round() // red full batch → the run is now positioned in a bisection
+		runs := a.eng.trainRuns.liveRuns()
+		if len(runs) != 1 || len(records(a)) != 1 {
+			t.Fatalf("want one open run with one record, got %d runs, %v", len(runs), records(a))
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		runs[0].stepCtx = ctx
+		runs[0].finish()
+		if len(records(a)) != 1 {
+			t.Fatalf("a run finished by a cancelled step must keep its record, found %v", records(a))
+		}
+		a.restart()
+		a.settleHeld()
+		if !a.open() {
+			t.Fatal("the next daemon did not adopt the record a cancelled step left")
+		}
+		a.runToEnd(100)
+		if len(a.disposed()) != 1 || a.disposed()[0] != 3 {
+			t.Fatalf("resumed run ejected %v, want only the poisoner #3", a.disposed())
+		}
+	})
+	t.Run("not_cancelled", func(t *testing.T) {
+		a := newAsyncTrain(t, 4, poisonedBy(3))
+		a.dispatch()
+		a.round()
+		runs := a.eng.trainRuns.liveRuns()
+		if len(runs) != 1 {
+			t.Fatalf("want one open run, got %d", len(runs))
+		}
+		runs[0].stepCtx = context.Background()
+		runs[0].finish()
+		if len(records(a)) != 0 {
+			t.Fatalf("a run finished normally must remove its record, found %v", records(a))
+		}
+	})
+}
+
 // R2/FR-010/SC-003: a trial with no CI progress is surfaced by the poll within one poll of
 // its deadline and handled as a timed-out trial (members stay Queued, nothing landed).
 func TestTrainRunAsync_StuckTrialSurfacedWithinOnePollOfDeadline(t *testing.T) {

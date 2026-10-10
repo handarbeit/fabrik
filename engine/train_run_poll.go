@@ -140,7 +140,7 @@ func (e *Engine) adoptTrainRun(ctx context.Context, board *gh.ProjectBoard, rec 
 	if rec.Step == stepLanding {
 		// A landing was executing. Its effects are not recorded here; the durable
 		// reconstructTrainState routes finish a merged landing idempotently (ADR-1871).
-		e.discardTrainRun(rec, nil, "a landing was in progress — it is completed from GitHub's state")
+		e.discardTrainRunMode(rec, nil, "a landing was in progress — it is completed from GitHub's state", discardKeepTrial)
 		return
 	}
 	// A step that awaits a trial must have one; otherwise it is positioned between trials.
@@ -290,10 +290,10 @@ func (e *Engine) adoptTrainRun(ctx context.Context, board *gh.ProjectBoard, rec 
 		}
 		switch {
 		case pr == nil || strings.EqualFold(pr.State, "closed") && !pr.Merged:
-			e.discardTrainRun(rec, wm, fmt.Sprintf("trial PR #%d is closed", rec.Trial.PRNum))
+			e.discardTrainRunMode(rec, wm, fmt.Sprintf("trial PR #%d is closed", rec.Trial.PRNum), discardCleanOnly)
 			return
 		case pr.Merged:
-			e.discardTrainRun(rec, wm, fmt.Sprintf("trial PR #%d already merged — the landing is completed from the merged PR", rec.Trial.PRNum))
+			e.discardTrainRunMode(rec, wm, fmt.Sprintf("trial PR #%d already merged — the landing is completed from the merged PR", rec.Trial.PRNum), discardCleanOnly)
 			return
 		case pr.HeadSHA != "" && rec.Trial.HeadSHA != "" && pr.HeadSHA != rec.Trial.HeadSHA:
 			e.discardTrainRun(rec, wm, fmt.Sprintf("trial PR #%d head moved (%s → %s)", rec.Trial.PRNum, short(rec.Trial.HeadSHA), short(pr.HeadSHA)))
@@ -432,13 +432,48 @@ func short(sha string) string {
 	return sha
 }
 
-// discardTrainRun drops a record that cannot be resumed and cleans up the trial it
-// described; the partition then forms fresh and reconstructTrainState sweeps any remnant.
+// discardMode says what a discard does to the trial the record described.
+type discardMode int
+
+const (
+	// discardCloseTrial closes the trial PR and deletes its branch: the trial can no longer
+	// be trusted (a member left, a head moved), and reconstructTrainState's Route 2 must not
+	// find an open PR whose branch still carries the departed member's commits and land it.
+	discardCloseTrial discardMode = iota
+	// discardCleanOnly deletes the branch but does not close the PR (already merged/closed).
+	discardCleanOnly
+	// discardKeepTrial leaves the trial PR and branch alone: a landing was in progress and
+	// the durable reconstruction routes finish it from them.
+	discardKeepTrial
+)
+
+// discardTrainRun drops a record that cannot be resumed and closes the trial it described;
+// the partition then forms fresh and reconstructTrainState sweeps any remnant.
 func (e *Engine) discardTrainRun(rec *trainRunRecord, wm *WorktreeManager, why string) {
+	e.discardTrainRunMode(rec, wm, why, discardCloseTrial)
+}
+
+// discardTrainRunMode is discardTrainRun with an explicit treatment of the trial. A nil wm
+// is replaced by the repo's registered manager when there is one (a discard can happen
+// before ensureRepoReady ran); with none, the PR is still closed and the orphaned branch is
+// left to reconstructTrainState's Route 3 sweep.
+func (e *Engine) discardTrainRunMode(rec *trainRunRecord, wm *WorktreeManager, why string, mode discardMode) {
 	repoKey := rec.Owner + "/" + rec.Repo
 	e.logfRepo(repoKey, "merge-train", "not resuming the persisted train run for %s: %s — forming fresh\n", rec.TrainKey, why)
-	if wm != nil && rec.Trial != nil && rec.Trial.Name != "" {
-		e.cleanupTrialArtifacts(repoKey, wm, rec.Trial.Name)
+	if t := rec.Trial; t != nil && mode != discardKeepTrial {
+		if mode == discardCloseTrial && t.PRNum != 0 {
+			if err := e.client.CloseIssue(rec.Owner, rec.Repo, t.PRNum); err != nil {
+				e.logfRepo(repoKey, "merge-train", "warn: could not close discarded trial PR #%d: %v\n", t.PRNum, err)
+			}
+		}
+		if wm == nil {
+			e.mu.Lock()
+			wm = e.worktreeManagers[repoKey]
+			e.mu.Unlock()
+		}
+		if wm != nil && t.Name != "" {
+			e.cleanupTrialArtifacts(repoKey, wm, t.Name)
+		}
 	}
 	e.trainRuns.unregister(rec.TrainKey)
 }

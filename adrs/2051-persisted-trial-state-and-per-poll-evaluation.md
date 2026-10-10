@@ -54,7 +54,11 @@ way: the worker finishes and later polls evaluate. Report: #2037.
    every live member still Queued, open, unpaused, same PR head, live status not moved
    — ADR-1871; pinned base still in the clone). Otherwise it is discarded and the
    partition forms fresh through the unchanged `reconstructTrainState` Routes 1–3. A
-   merged trial PR is deliberately left to Route 1. A base that moved is *not* a
+   discard closes the trial PR and deletes its branch, so Route 2 cannot find an open
+   trial that still carries a departed member's commits and land it. A merged trial PR
+   (or a landing in progress) is deliberately left to Routes 1/2. A step that ends
+   because shutdown cancelled its context keeps the record, so the next daemon resumes
+   the bisection position; any other end of a run removes it. A base that moved is *not* a
    failure: `landGreenBatch`'s main-moved cycle handles it at landing.
 
 3. **Bisection is data.** The old `bisect`'s only recursive call was a tail call, so

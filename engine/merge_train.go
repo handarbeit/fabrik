@@ -1069,7 +1069,6 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 	if r.async {
 		// Production: open the trial, record it and let this goroutine exit; the per-poll
 		// evaluator (settleTrainRuns) takes it from here.
-		r.stepping.Store(true)
 		e.stepAsync(ctx, r, nil)
 		return
 	}
@@ -1165,6 +1164,10 @@ func (e *Engine) beginTrainRun(ctx context.Context, state *mergeTrainWorkerState
 	}
 	r.setCurrent(current)
 	if r.store != nil {
+		// The creating worker owns the run from the instant it is visible to the per-poll
+		// scan: register only after stepping is held, or a concurrent settleTrainRuns could
+		// win the CAS and start a second step over the same run.
+		r.stepping.Store(true)
 		r.store.register(r)
 	}
 	return r, true
