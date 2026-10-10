@@ -557,3 +557,77 @@ func TestTrainRunStore_ConcurrentWritesAreSafe(t *testing.T) {
 		t.Fatalf("want 3 records, got %d", len(s2.pending))
 	}
 }
+
+// A step cancelled by shutdown leaves the record exactly as it was: the verdict is simply
+// consumed by the next incarnation (or the next poll), and nothing lands or is ejected.
+func TestTrainRunAsync_CancelledStepLeavesRecordIntact(t *testing.T) {
+	a := newAsyncTrain(t, 3, poisonedBy(2))
+	a.dispatch()
+	before, err := os.ReadFile(trainRunFile(a.dir, asyncTrainKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	a.hold.Store(false)
+	a.eng.settleTrainRuns(ctx, a.board) // a verdict exists, but the daemon is shutting down
+	a.eng.wg.Wait()
+	a.hold.Store(true)
+
+	after, err := os.ReadFile(trainRunFile(a.dir, asyncTrainKey))
+	if err != nil {
+		t.Fatalf("record removed by a cancelled step: %v", err)
+	}
+	if string(before) != string(after) {
+		t.Fatalf("a cancelled step rewrote the record:\nbefore: %s\nafter:  %s", before, after)
+	}
+	if !a.open() || a.merges() != 0 || len(a.disposed()) != 0 {
+		t.Fatalf("a cancelled step must change nothing: open=%v merges=%d disposed=%v", a.open(), a.merges(), a.disposed())
+	}
+	if a.eng.HasInFlightWorker() {
+		t.Fatal("a cancelled step must release its liveness marker")
+	}
+	a.runToEnd(100) // and the next poll with a live context finishes the run
+}
+
+// Ownership (ADR-1208 / FR-011): while a trial waits on CI with no goroutine, the partition
+// is still owned — the claim, the batch numbers (pending-eject routing) and the repo-level
+// liveness answer used by the closed-item rescue all say so, while the auto-upgrade idle
+// guard (HasInFlightWorker) does not.
+func TestTrainRunAsync_OpenRunKeepsOwnershipWithoutALiveWorker(t *testing.T) {
+	a := newAsyncTrain(t, 3, poisonedBy())
+	a.dispatch()
+
+	members, owned := a.eng.mergeTrainBatchMembers(asyncTrainKey)
+	if !owned || !members[1] || !members[2] || !members[3] {
+		t.Fatalf("pending-eject routing must still see the run's members: %v owned=%v", members, owned)
+	}
+	if !a.eng.mergeTrainWorkerActiveForRepo("owner/repo") {
+		t.Fatal("an open run must count as live for the closed-item rescue")
+	}
+	if a.eng.HasInFlightWorker() {
+		t.Fatal("a trial only waiting on CI must not block an auto-upgrade restart")
+	}
+	a.runToEnd(10)
+	if a.eng.mergeTrainWorkerActiveForRepo("owner/repo") {
+		t.Fatal("a finished run must not count as live")
+	}
+}
+
+// A pending (unadopted) record holds the partition off: no fresh train is formed over it.
+func TestTrainRunAsync_PendingRecordBlocksFreshDispatch(t *testing.T) {
+	a := newAsyncTrain(t, 3, poisonedBy())
+	a.dispatch()
+	a.restart()
+	// Loaded but not yet adopted (no settle yet).
+	a.eng.trainRuns.loadDir()
+	if !a.eng.trainRuns.hasPending(asyncTrainKey) {
+		t.Fatal("the persisted record should be pending adoption")
+	}
+	a.eng.dispatchMergeTrainWorker(context.Background(), a.batch, "PVT_test", asyncPartition)
+	a.eng.wg.Wait()
+	if _, owned := a.eng.mergeTrainInFlight.Load(asyncTrainKey); owned {
+		t.Fatal("dispatch must not form a train over a record awaiting adoption")
+	}
+}
