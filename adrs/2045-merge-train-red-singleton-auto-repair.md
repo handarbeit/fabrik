@@ -54,7 +54,7 @@ so a retry of that same Validate (incomplete run, turn-limit slice, tools-denied
 again; the record is dropped when Validate completes (`handleStageComplete`). With no pending
 record (any other stage, a Validate after completion, comment processing, or a daemon restart between
 eject and dispatch) a leftover file is removed and Validate still runs without it. A pending record that waited
-more than 2 hours or whose member head no longer matches the item's PR head is discarded the same way,
+more than 2 hours, or (before it has first been written for a dispatch) whose member head no longer matches the item's PR head, is discarded the same way — after the first write a changed head is the repair run's own push and a retry still gets the file —
 so it cannot leak into a later unrelated Validate run. The file's text is
 self-contained — base moved, rebase or merge onto it, reconcile with what landed, **never revert or work
 around the landed change** — and is also carried by the embedded `fabrik-validate` skill and one static

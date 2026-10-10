@@ -54,6 +54,10 @@ type repairContext struct {
 	attempt       int
 	cap           int
 	at            time.Time // when the repair was started; see repairContextTTL
+	// delivered is set once the context has been written for a Validate dispatch. The
+	// head-moved staleness check applies only before delivery: after it, the repair run
+	// itself rebases/merges and pushes, so a changed PR head is expected, not staleness.
+	delivered bool
 }
 
 // autoRepairState is the shared (worker goroutine ↔ poll goroutine) auto-repair state.
@@ -149,13 +153,29 @@ func (e *Engine) dropPendingRepair(key string) {
 // peekPendingRepair returns the member's pending repair context (nil if none) without
 // removing it, so a retried Validate dispatch (turn-limit slice, tools-denied, resume) still
 // gets the same file. The record is dropped by dropPendingRepair when Validate completes, by
-// the TTL / head-move discards in writeMergeTrainRepair, by a new attempt replacing it, or by
+// the TTL / pre-delivery head-move discards in writeMergeTrainRepair, by a new attempt replacing it, or by
 // the landing reset.
 func (e *Engine) peekPendingRepair(key string) *repairContext {
 	s := &e.autoRepair
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.pending[key]
+	rc := s.pending[key]
+	if rc == nil {
+		return nil
+	}
+	cp := *rc // a copy: callers read it outside the lock
+	return &cp
+}
+
+// markRepairDelivered records that the pending context has been handed to a Validate
+// dispatch (see repairContext.delivered).
+func (e *Engine) markRepairDelivered(key string) {
+	s := &e.autoRepair
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if rc := s.pending[key]; rc != nil {
+		rc.delivered = true
+	}
 }
 
 // resetAutoRepair forgets everything recorded for a member; called with resetEjectionCount
@@ -226,8 +246,13 @@ func renderRepairContext(rc *repairContext) string {
 // rewrites it, so the failing checks and the never-revert instruction survive the retry; it
 // is dropped when Validate completes (handleStageComplete). Called by writeContextFiles on
 // every invocation: with no pending context (or for any other stage, or comment processing)
-// a leftover file is removed, so it can never leak into a later stage or a later Validate run. Errors are non-fatal and a
-// missing context never blocks the dispatch.
+// a leftover file is removed, so it can never leak into a later stage or a later Validate
+// run. Errors are non-fatal and a missing context never blocks the dispatch.
+//
+// Staleness: a context older than repairContextTTL is always discarded. A context whose
+// member head no longer matches the item's PR head is discarded only before its first
+// delivery — the repair run itself rebases/merges onto the moved base and pushes, so after
+// delivery a changed head is the repair's own work and a retry must still get the file.
 func (e *Engine) writeMergeTrainRepair(item gh.ProjectItem, repairDispatch bool, fabrikDir string) {
 	path := filepath.Join(fabrikDir, mergeTrainRepairFile)
 	var rc *repairContext
@@ -244,7 +269,7 @@ func (e *Engine) writeMergeTrainRepair(item gh.ProjectItem, repairDispatch bool,
 			e.logf(item.Number, "merge-train", "discarding stale auto-repair context (%s old) for the Validate dispatch\n", age.Round(time.Minute))
 			e.dropPendingRepair(key)
 			rc = nil
-		} else if item.LinkedPRHeadSHA != "" && item.LinkedPRHeadSHA != rc.memberHeadSHA {
+		} else if !rc.delivered && item.LinkedPRHeadSHA != "" && item.LinkedPRHeadSHA != rc.memberHeadSHA {
 			e.logf(item.Number, "merge-train", "discarding stale auto-repair context: PR head moved from %s to %s since the repair started\n", rc.memberHeadSHA, item.LinkedPRHeadSHA)
 			e.dropPendingRepair(key)
 			rc = nil
@@ -260,6 +285,7 @@ func (e *Engine) writeMergeTrainRepair(item gh.ProjectItem, repairDispatch bool,
 		e.logf(item.Number, "warn", "could not write .fabrik-context/%s: %v\n", mergeTrainRepairFile, err)
 		return
 	}
+	e.markRepairDelivered(key)
 	e.logf(item.Number, "merge-train", "wrote %s for the auto-repair Validate dispatch (attempt %d of %d)\n", mergeTrainRepairFile, rc.attempt, rc.cap)
 }
 

@@ -529,6 +529,26 @@ func TestWriteMergeTrainRepair_DiscardsStaleContext(t *testing.T) {
 			t.Fatal("a repair context for a superseded head must not be written")
 		}
 	})
+	// The repair run itself rebases/merges and pushes, so after the context was first written a
+	// moved head is the repair's own work: a retry must still be given the file.
+	t.Run("head moved by the repair itself after delivery", func(t *testing.T) {
+		eng := autoRepairEngine(t, behindClient(), 1)
+		eng.setPendingRepair("owner/repo#1", &repairContext{diag: repairDiag(), baseSHA: "b", memberHeadSHA: "h", attempt: 1, cap: 1, at: eng.now()})
+		first := item
+		first.LinkedPRHeadSHA = "h"
+		dir := t.TempDir()
+		eng.writeMergeTrainRepair(first, true, dir)
+		if _, err := os.Stat(path(dir)); err != nil {
+			t.Fatalf("first dispatch must be given the file: %v", err)
+		}
+		retry := item
+		retry.LinkedPRHeadSHA = "h-after-repair-push"
+		os.Remove(path(dir))
+		eng.writeMergeTrainRepair(retry, true, dir)
+		if _, err := os.Stat(path(dir)); err != nil {
+			t.Fatalf("a retry after the repair's own push must still be given the file: %v", err)
+		}
+	})
 	t.Run("fresh and same head", func(t *testing.T) {
 		eng := autoRepairEngine(t, behindClient(), 1)
 		eng.setPendingRepair("owner/repo#1", &repairContext{diag: repairDiag(), baseSHA: "b", memberHeadSHA: "h", attempt: 1, cap: 1, at: eng.now()})
