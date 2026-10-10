@@ -40,9 +40,14 @@ const cycleSetFlags = wakeChFlags &^ itemstate.WorkerLifecycleChanged
 // newWakeChObserver returns an Observer that sends a non-blocking wake signal on
 // wakeCh whenever a Change includes any of the wakeChFlags. This replaces the
 // unconditional wakeCh send in webhook.go, adding Change-flag-based filtering.
+//
+// Changes with OriginProbe (the per-poll board probe loop's own writes, #2080)
+// never wake: the probe runs at the start of the poll that dispatches, so its
+// writes are already seen by that poll and a wake would only schedule a
+// redundant early one. Webhook, worker and REST writes are untagged and wake.
 func newWakeChObserver(wakeCh chan struct{}) itemstate.Observer {
 	return itemstate.ObserverFunc(func(change itemstate.Change, _ itemstate.Snapshot) {
-		if change.Fields&wakeChFlags == 0 {
+		if change.Fields&wakeChFlags == 0 || change.Origin == itemstate.OriginProbe {
 			return
 		}
 		select {

@@ -1918,3 +1918,55 @@ func TestHeldSnapshotLinkedPRFieldsUnchanged(t *testing.T) {
 		t.Errorf("held snapshot LinkedPR became non-nil after mutations: %+v", lpr)
 	}
 }
+
+// TestFromProbe_SameStateAndFlagsOnlyOriginDiffers pins that wrapping a mutation
+// in FromProbe (#2080) changes nothing but the Change's Origin.
+func TestFromProbe_SameStateAndFlagsOnlyOriginDiffers(t *testing.T) {
+	bare := newStoreWithItem(t, testRepo, 1)
+	wrapped := newStoreWithItem(t, testRepo, 1)
+
+	var bareChange, wrappedChange Change
+	bare.Subscribe(ObserverFunc(func(c Change, _ Snapshot) { bareChange = c }))
+	wrapped.Subscribe(ObserverFunc(func(c Change, _ Snapshot) { wrappedChange = c }))
+
+	m := PRDetailsUpdated{Repo: testRepo, Number: 1, PRNumber: 42}
+	if _, _, err := bare.Apply(m); err != nil {
+		t.Fatalf("bare Apply: %v", err)
+	}
+	if _, _, err := wrapped.Apply(FromProbe{Inner: m}); err != nil {
+		t.Fatalf("wrapped Apply: %v", err)
+	}
+
+	if bareChange.Fields == 0 || bareChange.Fields != wrappedChange.Fields {
+		t.Fatalf("flags differ: bare=%b wrapped=%b", bareChange.Fields, wrappedChange.Fields)
+	}
+	if bareChange.Origin == OriginProbe {
+		t.Errorf("bare mutation must not carry OriginProbe")
+	}
+	if wrappedChange.Origin != OriginProbe {
+		t.Errorf("wrapped Origin = %v, want OriginProbe", wrappedChange.Origin)
+	}
+	bs, ws := getItem(t, bare, testRepo, 1), getItem(t, wrapped, testRepo, 1)
+	if !reflect.DeepEqual(bs.LinkedPR, ws.LinkedPR) {
+		t.Errorf("LinkedPR differs between bare and wrapped apply:\nbare=%+v\nwrapped=%+v", bs.LinkedPR, ws.LinkedPR)
+	}
+}
+
+// TestFromProbe_NoOpNotifiesNoObserver pins that a wrapped no-op mutation is
+// still suppressed by the Store's no-op detection.
+func TestFromProbe_NoOpNotifiesNoObserver(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	m := FromProbe{Inner: PRDetailsUpdated{Repo: testRepo, Number: 1, PRNumber: 7}}
+	if _, _, err := s.Apply(m); err != nil {
+		t.Fatalf("first Apply: %v", err)
+	}
+	calls := 0
+	s.Subscribe(ObserverFunc(func(Change, Snapshot) { calls++ }))
+	_, changes, err := s.Apply(m)
+	if err != nil {
+		t.Fatalf("second Apply: %v", err)
+	}
+	if calls != 0 || len(changes) != 0 {
+		t.Errorf("no-op wrapped mutation notified observers: calls=%d changes=%d", calls, len(changes))
+	}
+}

@@ -278,6 +278,11 @@ func (s *Store) applySingleItem(m Mutation) (Snapshot, []Change, error) {
 	// Deep-copy before state so no-op detection is not fooled by shared maps/pointers.
 	before := newSnapshot(*item).state
 
+	fromProbe := false
+	if fp, ok := m.(FromProbe); ok {
+		fromProbe = true
+		m = fp.Inner
+	}
 	flags := s.applyToItem(item, m)
 
 	// No-op detection: if nothing changed, skip observers.
@@ -295,6 +300,9 @@ func (s *Store) applySingleItem(m Mutation) (Snapshot, []Change, error) {
 
 	change := Change{Repo: repo, Number: number, Fields: flags}
 	annotateLabelChange(&change, m, before.Labels, snap.state.Labels, existed)
+	if fromProbe {
+		change.Origin = OriginProbe
+	}
 	obs := s.captureObservers()
 	s.notify(obs, change, snap)
 

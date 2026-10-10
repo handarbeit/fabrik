@@ -19,6 +19,19 @@ type Mutation interface {
 	itemKey() string
 }
 
+// FromProbe wraps a single-item mutation applied by the per-poll board probe
+// loop (#2080). The Store applies Inner unchanged and tags the resulting Change
+// with OriginProbe, which the wake observer ignores: the probe runs at the start
+// of the poll that dispatches, so its own writes must not request another poll.
+// Do not wrap multi-item mutations (BoardReconciled, ProjectV2ItemEdited,
+// CheckRunCompleted); Apply routes those by concrete type and would not unwrap.
+type FromProbe struct {
+	Inner Mutation
+}
+
+func (FromProbe) isMutation()       {}
+func (m FromProbe) itemKey() string { return m.Inner.itemKey() }
+
 // ---- Inbound webhook deltas ----
 
 // IssueOpened is emitted when a new issue is created or first observed.
