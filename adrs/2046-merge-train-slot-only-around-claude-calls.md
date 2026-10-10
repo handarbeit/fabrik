@@ -37,8 +37,11 @@ ordinary reinvoke path, which takes its own slot.
    The old start-of-train wait message is gone.
 3. **Cancellation is not a verdict.** A context cancellation while waiting (or a
    shutdown killing the invocation) returns the same non-nil "not attempted" error
-   a usage-limit exit does (ADR 1120) and is recognised by `trainCancelled`
-   (`ctx.Err()` or a wrapped context error). It ejects no member, pauses nothing,
+   a usage-limit exit does (ADR 1120). `trainCancelled` recognises it by the worker
+   context alone (`err != nil && ctx.Err() != nil`): an error that merely wraps
+   `context.Canceled`/`DeadlineExceeded` while the worker context is still live (an
+   HTTP client timeout, a derived-context timeout) is an ordinary failure and keeps
+   its existing handling. A cancellation ejects no member, pauses nothing,
    is not counted by the runaway guard (`assembleAndValidate` skips `recordTrial`),
    does not start `bisect`'s one-at-a-time fallback, stops `landOneAtATime`, does
    not dissolve a batch in `landGreenBatch`'s rebase loop, and defers the catch-up
