@@ -581,8 +581,11 @@ After minting the installation's first token, Fabrik reads the installation's ac
 
 ```
 GitHub App installation 789012 is missing required permissions: organization_projects
-(required "write", granted "none") — grant these permissions to the installation
-(App settings → Install App → Configure) and restart Fabrik
+(required "write", granted "none")
+Fabrik cannot change App permissions itself — ask an App owner and an org admin:
+  1. App owner: set the permission at https://github.com/organizations/myorg/settings/apps/fabrik/permissions
+  2. Org admin: accept the permission request at https://github.com/organizations/myorg/settings/installations/789012
+then restart Fabrik
 ```
 
 The engine currently requires: `metadata:read`, `organization_projects:write`, `issues:write`, `pull_requests:write`, `checks:read`, `statuses:read`, `actions:write`, `contents:read` — `contents:write` instead when git runs over HTTPS (the default; see "Git under App auth" below). (`--webhooks` cannot be combined with App auth at all — see Known limitations below — so no webhook-management permission is ever required here.)
@@ -4396,7 +4399,7 @@ Several startup checks are specific to [GitHub App Authentication](#github-app-a
 
 - **Partial configuration** — only some of `github_app_id`/`github_app_private_key_path`/`github_app_installation_id` are set. Fix: set all three, or remove all three to use a PAT instead.
 - **User-owned board** — App auth was configured against a project board owned by a GitHub user account rather than an organization. Fix: use a personal access token for this board instead — there is no App-auth path around GitHub's own restriction here.
-- **Missing granted permissions** — the installation's actually-granted permissions (checked live at startup) are narrower than what the engine requires. Fix: go to the App's installation settings (Install App → Configure) and grant the named permission(s), then restart Fabrik.
+- **Missing granted permissions** — the installation's actually-granted permissions (checked live at startup) are narrower than what the engine requires. Fix: the refusal prints two steps with the URLs filled in — an App owner sets the missing permission in the App's *Permissions & events* settings, then an org admin accepts the resulting request on the installation (a permission the App requests but nobody has accepted still shows as ungranted). Then restart Fabrik.
 - **`--webhooks` combined with App auth** — `gh webhook forward` cannot work under a GitHub App installation token, so the combination is refused rather than silently falling back to polling. Fix: drop `--webhooks` to use App auth with `--reconcile-interval` polling, or drop the GitHub App config to use `--webhooks` with a personal access token.
 
 See [GitHub App Authentication](#github-app-authentication) for example messages and full detail on each.

@@ -699,8 +699,10 @@ func TestSetUpGitHubAppAuth_ActionsGranted_NoNotice(t *testing.T) {
 		if err != nil {
 			t.Fatalf("actions:%s: setUpGitHubAppAuth: %v", level, err)
 		}
-		if strings.Contains(out, "actions") && strings.Contains(out, "permission") {
-			t.Errorf("actions:%s: unexpected permission output: %q", level, out)
+		for _, bad := range []string{"Fabrik cannot change App permissions", "missing required permissions"} {
+			if strings.Contains(out, bad) {
+				t.Errorf("actions:%s: unexpected permission output containing %q: %q", level, bad, out)
+			}
 		}
 	}
 }
