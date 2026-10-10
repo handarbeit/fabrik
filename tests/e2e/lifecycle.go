@@ -290,6 +290,10 @@ func StartFabrikTestBed(t *testing.T, env *Env) {
 	// gate runner's BedStartCmd adds, so a restarted bed keeps it. Enabled but
 	// released it is a normal free-running bed.
 	cmd.Env = append(cmd.Env, pollctl.Env(env.FabrikTestDir))
+	// Red-singleton auto-repair is off on the bed (#2045): the live red-singleton test
+	// asserts the ADR-1545 pause; the repair path is covered by its sim twin. The same
+	// entry the gate runner's BedStartCmd adds.
+	cmd.Env = append(cmd.Env, "FABRIK_MAX_TRAIN_AUTO_REPAIR_ATTEMPTS=0")
 	// Detach: new process group + /dev/null stdio so the child outlives the test.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if devnull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0); err == nil {

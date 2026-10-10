@@ -254,7 +254,11 @@ func (g *Gate) BedStartCmd(isolatedGitconfig string) Cmd {
 	// Enabled-but-released the bed is a normal free-running one, so every phase
 	// shares this one start; lifecycle.go's StartFabrikTestBed appends the same
 	// entry so a restarted bed cannot silently lose it.
-	env := withEnv(withoutEnv(g.Env, bedAppEnvKeys...), "GIT_CONFIG_GLOBAL="+isolatedGitconfig, "GIT_CONFIG_NOSYSTEM=1", pollctl.Env(g.Cfg.TestBed))
+	//
+	// FABRIK_MAX_TRAIN_AUTO_REPAIR_ATTEMPTS=0 (#2045) disables red-singleton auto-repair
+	// on the bed: the live red-singleton test asserts the ADR-1545 pause, and the
+	// auto-repair path is covered by its sim twin. lifecycle.go appends the same entry.
+	env := withEnv(withoutEnv(g.Env, bedAppEnvKeys...), "GIT_CONFIG_GLOBAL="+isolatedGitconfig, "GIT_CONFIG_NOSYSTEM=1", pollctl.Env(g.Cfg.TestBed), "FABRIK_MAX_TRAIN_AUTO_REPAIR_ATTEMPTS=0")
 	return Cmd{
 		Name: "./fabrik",
 		Args: []string{"-notui", "-poll", g.Cfg.BedPollSeconds},

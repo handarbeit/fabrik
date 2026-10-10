@@ -255,6 +255,11 @@ func TestBedStartCmdContracts(t *testing.T) {
 	if got := envOf(pollctl.EnvVar); len(got) != 1 || got[0] != pollctl.Env(g.Cfg.TestBed) {
 		t.Errorf("the poll-control seam must be enabled with the bed's own control file: %v", got)
 	}
+	// Red-singleton auto-repair stays off on the bed so the live red-singleton test
+	// keeps asserting the pause (#2045); lifecycle.go appends the same entry.
+	if got := envOf("FABRIK_MAX_TRAIN_AUTO_REPAIR_ATTEMPTS"); len(got) != 1 || got[0] != "FABRIK_MAX_TRAIN_AUTO_REPAIR_ATTEMPTS=0" {
+		t.Errorf("the bed must start with auto-repair disabled: %v", got)
+	}
 }
 
 func TestStartBedBannerChecks(t *testing.T) {
