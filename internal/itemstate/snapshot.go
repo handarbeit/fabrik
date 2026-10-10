@@ -168,7 +168,9 @@ func (s Snapshot) HasActiveCooldown(now time.Time) bool {
 }
 
 // HasExpiredCooldown reports whether any CooldownAt entry is non-zero and
-// has already expired relative to now. Reads directly from the snapshot's
+// has already expired relative to now. Admission consumes expired entries
+// (ExpiredCooldownsConsumed, #2096), so in practice this is true only for
+// expiries the engine has not yet acted on. Reads directly from the snapshot's
 // already-copied map — no additional allocation.
 func (s Snapshot) HasExpiredCooldown(now time.Time) bool {
 	for _, t := range s.state.CooldownAt {
@@ -177,6 +179,12 @@ func (s Snapshot) HasExpiredCooldown(now time.Time) bool {
 		}
 	}
 	return false
+}
+
+// PausedBackstopBaseline returns the baseline at which the paused-item
+// backstop last completed a live fetch, or zero if it never has.
+func (s Snapshot) PausedBackstopBaseline() time.Time {
+	return s.state.PausedBackstopBaseline
 }
 
 // LabelAppliedAt returns the time the engine itself most recently applied the

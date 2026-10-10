@@ -82,7 +82,16 @@ type ItemState struct {
 	// StageState holds per-stage attempt and cycle counters.
 	StageState StageState
 	// CooldownAt maps reason → expiry time (e.g. "retry", "review-blocked", "ci-await").
+	// An expired entry is consumed (deleted) when poll admission acts on it
+	// (ExpiredCooldownsConsumed, #2096), so it admits an item once; the only
+	// entry deliberately kept past expiry is "archive-eligible-at", an absolute
+	// "eligible since" timestamp rather than a gate.
 	CooldownAt map[string]time.Time
+	// PausedBackstopBaseline is the LastSeenSourceUpdatedAt value at which the
+	// paused-item backstop (#1944) last completed a live fetch. The backstop
+	// fetches only while the current baseline differs from it (#2096). Zero
+	// means never served. In memory only, like the rest of the store.
+	PausedBackstopBaseline time.Time
 	// LabelAppliedAt maps label name → the time the engine itself most recently
 	// applied that label to this issue (record-at-write, #1314). Deliberately a
 	// separate map from CooldownAt, not a repurposing of it: CooldownAt's
