@@ -124,13 +124,6 @@ jobs:
       - name: ADR reference integrity
         run: bash scripts/check-adr-references.sh
 
-      # Cross-file invariants in the entwurf plugin. Four review rounds found the
-      # same class of defect every time — a rule fixed in one skill and left broken
-      # in its mirror — so the mirrors are asserted mechanically rather than by
-      # review. Pure text check: no build, no network.
-      - name: Entwurf plugin consistency
-        run: python3 scripts/check-entwurf-consistency.py
-
   # The suite again, in a worker-shaped environment (#2027, ADR-2027): dummy
   # App/PAT/webhook/reviewer/GH_TOKEN values plus an ADR-1846-shaped
   # GIT_CONFIG_* credential helper, as a Fabrik stage worker inherits them.
