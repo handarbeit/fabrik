@@ -1403,6 +1403,27 @@ func (c *Client) FetchCommitsBehind(owner, repo, base, head string) (int, error)
 	return raw.BehindBy, nil
 }
 
+// FetchCommitParents returns the parent SHAs of a commit, in order (first
+// parent first), via GET /repos/{o}/{r}/git/commits/{sha}. That endpoint
+// returns only the commit object, not the file list, so it is far lighter than
+// /commits/{sha}. A root commit yields an empty slice.
+func (c *Client) FetchCommitParents(owner, repo, sha string) ([]string, error) {
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/git/commits/%s", c.baseURL, owner, repo, url.PathEscape(sha))
+	var raw struct {
+		Parents []struct {
+			SHA string `json:"sha"`
+		} `json:"parents"`
+	}
+	if err := c.restGetJSON(apiURL, &raw); err != nil {
+		return nil, fmt.Errorf("fetching commit %s: %w", sha, err)
+	}
+	parents := make([]string, 0, len(raw.Parents))
+	for _, p := range raw.Parents {
+		parents = append(parents, p.SHA)
+	}
+	return parents, nil
+}
+
 // mergeMethodAttemptOrder returns the ordered, de-duplicated list of REST
 // merge_method values to try, starting with the configured strategy
 // (lower-cased, defaulting to "merge" when unset or unrecognized) followed by
