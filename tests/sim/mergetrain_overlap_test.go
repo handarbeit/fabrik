@@ -43,7 +43,7 @@ func seedOverlapBase(t *testing.T, env *Env, file string) {
 
 func overlapEnv(t *testing.T, cfgure func(*engine.Config)) *Env {
 	t.Helper()
-	return mergeTrainEnv(t, mergeTrainEnvOptions{ValidateWaitForCI: true, ConfigureCfg: cfgure})
+	return mergeTrainEnv(t, mergeTrainEnvOptions{ValidateWaitForCI: true, OverlapAware: true, ConfigureCfg: cfgure})
 }
 
 // A and B edit the same path (different hunks, so they merge cleanly); C is disjoint. The

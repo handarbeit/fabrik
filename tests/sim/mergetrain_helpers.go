@@ -100,6 +100,14 @@ type mergeTrainEnvOptions struct {
 	// default 2026-01-01 start makes it fire on the first settle pass.
 	StartTime time.Time
 
+	// OverlapAware enables #2047's overlap-aware batch composition and post-landing
+	// invalidation. It is OFF by default: every merge-train scenario that predates it
+	// deliberately batches members that write the same path (to provoke conflict
+	// resolution, bisection, rerere, ...) and leaves conflicting members Queued, and
+	// both mechanisms would — correctly — change that. Only the scenarios of
+	// mergetrain_overlap_test.go opt in.
+	OverlapAware bool
+
 	// ConfigureCfg, when non-nil, runs after this file's own merge-train
 	// defaults are applied (short CIBackstopTimeout, small MaxBatchSize) —
 	// an escape hatch for a scenario needing e.g. a smaller
@@ -185,6 +193,8 @@ func mergeTrainEnv(t *testing.T, opts mergeTrainEnvOptions) *Env {
 		},
 	})
 	env.Engine.SetTrainCIPollIntervalForTest(15 * time.Millisecond)
+	env.Engine.SetMergeTrainOverlapDisabledForTest(!opts.OverlapAware)
+	env.Engine.SetMergeTrainInvalidationDisabledForTest(!opts.OverlapAware)
 	return env
 }
 
@@ -202,6 +212,9 @@ func restartMergeTrainEnv(t *testing.T, env *Env) *Env {
 	t.Helper()
 	restarted := RestartEnv(t, env)
 	restarted.Engine.SetTrainCIPollIntervalForTest(15 * time.Millisecond)
+	// As mergeTrainEnv: the restart scenarios predate #2047 and do not opt in.
+	restarted.Engine.SetMergeTrainOverlapDisabledForTest(true)
+	restarted.Engine.SetMergeTrainInvalidationDisabledForTest(true)
 	return restarted
 }
 
