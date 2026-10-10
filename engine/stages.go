@@ -712,6 +712,7 @@ func (e *Engine) advanceToQueued(_ context.Context, board *gh.ProjectBoard, item
 	}
 
 	e.logf(item.Number, "merge-train", "holding in %s — waiting for batch\n", hs.Name)
+	e.setStatusLine(item, statusLineQueuedWaiting)
 	return nil
 }
 
@@ -747,6 +748,12 @@ func (e *Engine) advanceToNextStage(board *gh.ProjectBoard, item gh.ProjectItem,
 		if e.webhookMgr != nil {
 			e.webhookMgr.RegisterEchoIfSubscribed("projects_v2_item", "edited", item.ItemID)
 		}
+		// The item left its stage: whatever line described the old one is stale.
+		// This is the single funnel for Done moves (merge-train landings, the
+		// ordinary merge, no-work-needed, closed-item advance), so it is also the
+		// "clear at Done" rule (#2048); a following stage dispatch writes its own
+		// line.
+		e.clearStatusLine(item)
 	}
 	return err
 }

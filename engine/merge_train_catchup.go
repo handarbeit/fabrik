@@ -230,6 +230,9 @@ func (e *Engine) trySingletonCatchUp(ctx context.Context, state *mergeTrainWorke
 	caughtUp.caughtUpFrom = p.baseSHA
 	e.postCatchUpMarker(p, caughtUp, m.headSHA, out.pure)
 
+	// The CI being waited on is the member's own PR's (not a trial PR), so the line
+	// names that PR.
+	e.setStatusLine(caughtUp.item, statusLineCatchUp(caughtUp.prNum))
 	verdict, diag := e.waitMemberCI(ctx, state, p, caughtUp)
 	switch verdict {
 	case memberCIGreen:
@@ -254,6 +257,9 @@ func (e *Engine) trySingletonCatchUp(ctx context.Context, state *mergeTrainWorke
 	default: // memberCIPending, memberCIMoved, memberCIEjected
 		// Decided for this poll: the member stays Queued (or was already ejected) and the
 		// next poll re-evaluates it. Nothing is charged.
+		if verdict != memberCIEjected {
+			e.setStatusLine(caughtUp.item, statusLineQueuedWaiting)
+		}
 		return caughtUp, true
 	}
 }

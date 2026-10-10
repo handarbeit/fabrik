@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -13,6 +14,11 @@ import (
 func statusLineQueued(batchSize int) string {
 	return fmt.Sprintf("queued · batch of %d", batchSize)
 }
+
+// statusLineQueuedWaiting: in the holding column with no batch in flight (just
+// advanced to Queued, or a trial was abandoned and the member awaits the next
+// formation).
+const statusLineQueuedWaiting = "queued"
 
 // statusLineTrial: a trial phase ("resolving conflicts", "CI running"). The
 // number is the draft CI PR, which only exists after assembly; before that the
@@ -69,4 +75,21 @@ func statusLineClaudeLimit(until time.Time) string {
 // statusLineAwaitingCI: a stage is waiting on CI for a PR.
 func statusLineAwaitingCI(prNum int) string {
 	return fmt.Sprintf("awaiting CI on PR #%d", prNum)
+}
+
+// pauseReasonFromComment derives the one-line reason for "paused: <reason>"
+// from an engine pause comment, whose first line is the stable header
+// "🏭 **Fabrik — <what happened>**" (or "🏭 **Fabrik merge-train — …**").
+// Falls back to "" (a bare "paused") for a comment that does not follow it.
+func pauseReasonFromComment(comment string) string {
+	first, _, _ := strings.Cut(strings.TrimSpace(comment), "\n")
+	first = strings.TrimSpace(strings.Trim(strings.TrimSpace(first), "*"))
+	first = strings.TrimSpace(strings.TrimPrefix(first, "🏭"))
+	first = strings.Trim(first, "* ")
+	for _, sep := range []string{" — ", " - ", ": "} {
+		if _, after, ok := strings.Cut(first, sep); ok && strings.HasPrefix(first, "Fabrik") {
+			return strings.TrimSpace(strings.Trim(after, "* "))
+		}
+	}
+	return ""
 }

@@ -572,6 +572,10 @@ type trialParams struct {
 	// nil-receiver-safe throughout, so both cases degrade to pre-#1835 behavior with no
 	// special-casing. See ADR-1835.
 	prefixCache *trainPrefixCache
+	// quietTrialLines suppresses the per-trial status-line writes ("trial … ·
+	// resolving conflicts" / "CI running") — bisect sets it on its by-value copy so
+	// a sub-trial does not overwrite the "bisecting · step i of n" line (#2048).
+	quietTrialLines bool
 }
 
 // repoKey returns the "owner/repo" identity for this trial, used to route
@@ -842,6 +846,7 @@ func (e *Engine) prepareTrainWorker(ctx context.Context, state *mergeTrainWorker
 	afterCI := len(current)
 	current = e.admitByOverlap(trainKey, owner, repo, current)
 	e.logfRepo(repoKey, "merge-train", "assembled %d train member(s) for %s (deferred %d for own-PR CI red, %d for file overlap)\n", len(current), repoKey, fetched-afterCI, afterCI-len(current))
+	e.setMembersStatusLine(current, statusLineQueued(len(current)))
 
 	return p, current, true
 }
@@ -1113,6 +1118,7 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 		if aerr != nil {
 			e.logfRepo(repoKey, "merge-train", "assemble/validate failed for %s: %v\n", trainKey, aerr)
 			e.cleanupTrialArtifacts(p.repoKey(), p.wm, trialName)
+			e.setMembersStatusLine(current, statusLineQueuedWaiting)
 			return
 		}
 		if len(survivors) == 0 {
@@ -1164,6 +1170,7 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 		case TrainCIPending:
 			e.logfRepo(repoKey, "merge-train", "combined Validate pending/timed out for %s — will retry next poll\n", trainKey)
 			e.cleanupTrialArtifacts(p.repoKey(), p.wm, trialName)
+			e.setMembersStatusLine(survivors, statusLineQueuedWaiting)
 			return
 		case TrainCIInfra:
 			// #2052: CI never started and retriggering did not help. Not the members'
@@ -1172,6 +1179,7 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 			e.logfRepo(repoKey, "merge-train", "combined Validate abandoned for %s — CI infrastructure failure (%s); %d member(s) left in Queued, nothing charged\n", trainKey, infraNote(diag), len(survivors))
 			e.cleanupTrialArtifacts(p.repoKey(), p.wm, trialName)
 			e.markInfraAbandon(trainKey)
+			e.setMembersStatusLine(survivors, statusLineQueuedWaiting)
 			return
 		default: // TrainCIRed
 			if len(survivors) == 1 {
@@ -1200,6 +1208,7 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 				// A cancel is not a CI infrastructure failure, so don't log it as one or
 				// start the partition's infra cooldown.
 				e.logfRepo(repoKey, "merge-train", "bisection for %s cancelled; %d member(s) left in Queued, nothing charged\n", trainKey, len(survivors))
+				e.setMembersStatusLine(survivors, statusLineQueuedWaiting)
 				return
 			}
 			if infra {
@@ -1208,6 +1217,7 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 				// every member stays Queued, nothing is charged for the abandoned trial.
 				e.logfRepo(repoKey, "merge-train", "bisection for %s aborted — CI infrastructure failure on a sub-trial; %d member(s) left in Queued, nothing charged\n", trainKey, len(survivors))
 				e.markInfraAbandon(trainKey)
+				e.setMembersStatusLine(survivors, statusLineQueuedWaiting)
 				return
 			}
 			if runaway {
@@ -1351,6 +1361,10 @@ func (e *Engine) assembleTrialBranch(ctx context.Context, p trialParams, members
 		// (possibly about a wholly different conflict) has no meaningful continuity
 		// to resume, and resuming it anyway was the source of a spurious "resume
 		// requested but none exists" warning on every member's first encounter.
+		// The draft CI PR does not exist yet, so the line carries no trial number.
+		if !p.quietTrialLines {
+			e.setMembersStatusLine(members, statusLineTrial(0, "resolving conflicts"))
+		}
 		opts := InvokeOptions{BaseBranch: p.baseBranch, MaxTurnsOverride: p.maxTurnsOverride, FabrikRoot: e.fabrikDir, FabrikRepo: e.defaultRepo(), MaxResumeFailures: e.cfg.MaxResumeFailures, NoResume: true}
 		resolved, diag, resolveErr := e.resolveTrainConflict(ctx, p.repoKey(), member.item, wtDir, p.holdingStg, member.headSHA, preMergeHEAD, string(mergeOut), opts)
 		if resolved {
@@ -1471,6 +1485,9 @@ func (e *Engine) assembleAndValidate(ctx context.Context, p trialParams, members
 // combined validation on the common path — a green result must never trigger bisection (D-d).
 func (e *Engine) assembleAndValidateInner(ctx context.Context, p trialParams, members []trainMember, trialName string) ([]trainMember, TrainCIResult, int, *trainCIDiagnostic, error) {
 	if e.trainValidateFn != nil {
+		if !p.quietTrialLines {
+			e.setMembersStatusLine(members, statusLineTrial(0, "CI running"))
+		}
 		result, diag := e.trainValidateFn(ctx, members)
 		return members, result, 0, diag, nil
 	}
@@ -1512,6 +1529,9 @@ func (e *Engine) assembleAndValidateInner(ctx context.Context, p trialParams, me
 		return nil, TrainCIPending, 0, nil, fmt.Errorf("creating draft CI PR: %w", err)
 	}
 	e.logfRepo(p.repoKey(), "merge-train", "opened draft CI PR #%d for %s/%s (%d survivor(s))\n", prNum, p.owner, p.repo, len(survivors))
+	if !p.quietTrialLines {
+		e.setMembersStatusLine(survivors, statusLineTrial(prNum, "CI running"))
+	}
 
 	result, diag := e.pollTrainCI(ctx, p.owner, p.repo, prNum, trialSHA)
 	return survivors, result, prNum, diag, nil
@@ -1538,6 +1558,7 @@ func (e *Engine) bisect(ctx context.Context, p trialParams, red []trainMember, d
 		return &red[0], diag, false, false, false
 	}
 
+	p.quietTrialLines = true // this by-value copy: the "bisecting" line below owns the status line (#2048)
 	repoKey := p.repoKey()
 	trainKey := p.trainKey
 	mid := len(red) / 2
@@ -1546,6 +1567,10 @@ func (e *Engine) bisect(ctx context.Context, p trialParams, red []trainMember, d
 			e.logfRepo(repoKey, "merge-train", "bisection cost cap (%d validations) reached — degrading to one-at-a-time fallback\n", costCap)
 			return nil, nil, true, false, false
 		}
+		// The step is the validation about to run (the episode's initial red
+		// validation counts as the first); the ceiling is the cost cap, not a
+		// prediction — the number of remaining halves is not known up front.
+		e.setMembersStatusLine(half, statusLineBisect(*used+1, costCap))
 		trialName := p.nextTrialName()
 		survivors, result, _, halfDiag, err := e.assembleAndValidate(ctx, p, half, trialName)
 		*used++
@@ -2034,6 +2059,7 @@ func (e *Engine) refuseIfBaseContradictsMembers(owner, repo, baseBranch, trainKe
 func (e *Engine) landSingleton(ctx context.Context, state *mergeTrainWorkerState, p trialParams, m trainMember, trialName string) {
 	trialBranch := "fabrik/merge-train/" + trialName
 	defer e.cleanupTrialArtifacts(p.repoKey(), p.wm, trialName)
+	e.setStatusLine(m.item, statusLineLanding)
 
 	// #1773 R1/R3: refuse to open a landing PR whose pinned base contradicts what this
 	// member declares live, rather than repairing or proceeding. See
@@ -2479,6 +2505,7 @@ func (e *Engine) trySingletonFastPath(ctx context.Context, state *mergeTrainWork
 		return false
 	}
 	e.logf(m.item.Number, "merge-train", "singleton fast path taken for #%d: %s — landing PR #%d directly, no trial branch, no draft CI PR\n", m.item.Number, reason, m.prNum)
+	e.setStatusLine(m.item, statusLineLanding)
 
 	// MergePRAtHeadSHA, not MergePR: singletonFastPathEligible's CI/mergeability
 	// evidence was gathered against pr.HeadSHA (== m.headSHA, confirmed equal
@@ -4622,6 +4649,7 @@ func (e *Engine) escalateClosedUnmergedTrial(projectID, owner, repo string, prNu
 func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorkerState, owner, repo, baseBranch, trainKey string, survivors []trainMember, wm *WorktreeManager) {
 	repoKey := owner + "/" + repo
 	trialName := state.trialName
+	e.setMembersStatusLine(survivors, statusLineLanding)
 
 	defer func() {
 		// FR-4: cleanup trial worktree and remote branch regardless of landing outcome.

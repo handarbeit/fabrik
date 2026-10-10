@@ -201,3 +201,19 @@ func truncateStatusLine(line string) string {
 	runes := []rune(line)
 	return strings.TrimRight(string(runes[:statusLineMaxLen-1]), " ") + statusLineEllipsis
 }
+
+// setMembersStatusLine writes the same line for every merge-train member. One
+// mutation per member; each is skipped when that member's line is unchanged.
+func (e *Engine) setMembersStatusLine(members []trainMember, line string) {
+	for _, m := range members {
+		e.setStatusLine(m.item, line)
+	}
+}
+
+// clearMembersStatusLine clears the line of every member (they left the train
+// for a column whose own transition will write a fresh line, or for Done).
+func (e *Engine) clearMembersStatusLine(members []trainMember) {
+	for _, m := range members {
+		e.clearStatusLine(m.item)
+	}
+}
