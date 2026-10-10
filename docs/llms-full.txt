@@ -10385,9 +10385,11 @@ This is a no-op when `e.readClient` is a `GitHubAdapter` (cache-disabled mode), 
 
 **`CacheImpl` existence guard**: All three new write-through methods (`ApplyLabelAdded`, `ApplyLabelRemoved`, `ApplyCommentAdded`) call `c.store.Get(repo, number)` before applying the mutation. If the key is not present in the Store (i.e., was never bootstrapped), the method returns without creating a phantom Store entry.
 
-**Layer 1 scope**: Only `issues` and `issue_comment` event types trigger a per-event status fetch. `pull_request`, `pull_request_review`, `check_run`, and other event types are excluded from Layer 1 (finding the linked issue for a PR event requires an O(N) cache scan; `check_run` does not carry an item ID). Layer 2's per-poll-cycle gate covers these cases within ~15 s.
+**Layer 1 scope**: Only `issues` and `issue_comment` event types trigger a per-event status fetch. `pull_request`, `pull_request_review`, `check_run`, and other event types are excluded from Layer 1 (finding the linked issue for a PR event requires an O(N) cache scan; `check_run` does not carry an item ID). Layer 2's per-poll-cycle gate covers these cases within ~15 s. **PR conversation comments are skipped** (#2093): an `issue_comment` whose `issue` object carries a `pull_request` key returns before any cache or GraphQL access and logs nothing, because `repository.issue(number:)` cannot resolve a PR number.
 
 For new issues whose `itemID` is not yet in the cache (e.g., added via `issues.opened` before a `projects_v2_item.created` event is received), Layer 1 falls back to `LookupIssueProjectItem` to populate both `itemID` and current Status in one GraphQL query (`repository.issue.projectItems`). If `cache.ProjectID()` is empty (Bootstrap not yet complete), the fallback is skipped. After a successful fallback, subsequent Layer 1 calls for the same issue use the cheaper `FetchProjectItemStatus` fast path.
+
+**Negative cache** (#2093, `engine/layer1_offboard.go`): a fallback lookup that succeeds with no item (the issue is not on the board) is remembered in memory for 10 minutes per `(project, repo, number)`, so further events for that issue make no call. Errors are never cached, so a transient failure is retried on the next event. The fast path (`GetItemID`) is consulted before the entry, so any path that gives the cache an `itemID` bypasses it, and every `projects_v2_item` `created` event clears all entries (that payload carries no repo/number to target one). A restart clears the cache.
 
 ## Appendix E: Goroutine-Boundary vs. Work-Boundary Lifecycle
 
