@@ -3,7 +3,7 @@
 **Date**: 2026-10-10
 **Status**: Accepted
 **Issue**: #2048 — board: a display-only "Fabrik" status-line project field, with the merge train as its first writer
-**Builds on**: [ADR 042](042-mutation-echo-check.md), [ADR 035](035-four-layer-status-reconciliation.md), [ADR 2047](2047-merge-train-overlap-aware-batching.md), [ADR 2044](2044-merge-train-singleton-catch-up.md)
+**Builds on**: [ADR 042](042-mutation-echo-check.md), [ADR 035](035-four-layer-status-reconciliation.md), [ADR 2047](2047-merge-train-overlap-aware-composition.md), [ADR 2044](2044-singleton-catch-up.md)
 
 Mentioned for context: #2042 (the report on the public triage board).
 
