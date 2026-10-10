@@ -339,3 +339,25 @@ func TestProbeDrift_EngineLoopWarning(t *testing.T) {
 		t.Errorf("loop warnings = %d, want 1\n%s", n, out)
 	}
 }
+
+// ---- neutralisation (#2080): each fix, switched off, brings the old behavior back ----
+
+func TestProbeDrift_Neutralised_ConvergenceRestoresPerPollInvalidation(t *testing.T) {
+	h := newProbeDriftHarness(t, "Research", false, 1654, 0, 0)
+	h.eng.SetProbeDriftNeutralisationForTest(true, false)
+	h.poll(25)
+	if got := h.deepFetchs.Load(); got != 25 {
+		t.Errorf("with convergence neutralised, deep fetches over 25 polls = %d, want 25 (the pre-fix loop)", got)
+	}
+}
+
+func TestProbeDrift_Neutralised_TerminalSkipRestoresInvalidation(t *testing.T) {
+	h := newProbeDriftHarness(t, "Done", true, 1654, 0, 0)
+	h.eng.store.Apply(itemstate.TerminalFlagSet{Repo: "owner/repo", Number: 1, Terminal: true})
+	before := getLastDeepFetch(t, h)
+	h.eng.SetProbeDriftNeutralisationForTest(false, true)
+	h.poll(1)
+	if after := getLastDeepFetch(t, h); after.Equal(before) {
+		t.Error("with the terminal skip neutralised the terminal item should have been invalidated by drift (pre-fix behavior)")
+	}
+}

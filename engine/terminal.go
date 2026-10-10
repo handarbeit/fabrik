@@ -128,7 +128,9 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 		// work, so nothing about its linkage matters. It skips the drift check
 		// entirely instead of invalidating and then being skipped.
 		driftExempt := false
-		if s.Terminal {
+		if e.probeTerminalDriftSkipDisabledForTest {
+			// neutralised (#2080 test seam): fall through to the drift check
+		} else if s.Terminal {
 			if pst := stages.FindStage(e.cfg.Stages, pi.Status); pst != nil && pst.CleanupWorktree && pi.Status == s.Status {
 				driftExempt = true
 			}

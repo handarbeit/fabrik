@@ -43,6 +43,8 @@ type probeDriftEntry struct {
 type probeDriftLedger struct {
 	mu    sync.Mutex
 	items map[string]*probeDriftEntry
+	// disabled is the neutralisation seam: a repeated pair is treated as new.
+	disabled bool
 }
 
 // probeDriftVerdict is the ledger's decision for one observed drift.
@@ -70,7 +72,7 @@ func (l *probeDriftLedger) observe(key string, cached, probe int, now time.Time)
 		en = &probeDriftEntry{}
 		l.items[key] = en
 	}
-	if en.hasPair && en.cached == cached && en.probe == probe {
+	if en.hasPair && en.cached == cached && en.probe == probe && !l.disabled {
 		v := probeDriftVerdict{LogSkip: !en.skipLogged}
 		en.skipLogged = true
 		return v
@@ -92,6 +94,13 @@ func (l *probeDriftLedger) observe(key string, cached, probe int, now time.Time)
 		v.Warn = true
 	}
 	return v
+}
+
+// setDisabled flips the neutralisation seam (see disabled).
+func (l *probeDriftLedger) setDisabled(v bool) {
+	l.mu.Lock()
+	l.disabled = v
+	l.mu.Unlock()
 }
 
 // converged records that cached and probe agree for key: the pair is forgotten,

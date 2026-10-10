@@ -181,7 +181,7 @@ func (s *Sim) buildProjectItem(p *projectState, ref itemRef) (*gh.ProjectItem, e
 	}
 
 	// The linked PR is found the same way production finds it: by head branch.
-	linked := findPRByHeadLocked(r, issueBranch(iss.number))
+	linked := s.boardLinkedPRLocked(r, issueBranch(iss.number))
 	var linkedHead string
 	if linked != nil {
 		s.drainReviews(linked)
@@ -242,6 +242,18 @@ func findPRByHeadLocked(r *repoState, head string) *prRecord {
 		}
 	}
 	return nil
+}
+
+// boardLinkedPRLocked is findPRByHeadLocked as the board's GraphQL projections
+// see it: with WithClosedPRsOmittedFromBoard a closed, unmerged PR is not a
+// "closing PR reference", so the card reports no linked PR. Merged PRs stay.
+// Caller must hold mu.
+func (s *Sim) boardLinkedPRLocked(r *repoState, head string) *prRecord {
+	linked := findPRByHeadLocked(r, head)
+	if linked != nil && s.omitClosedPRsFromBoard && linked.state == "closed" && !linked.merged {
+		return nil
+	}
+	return linked
 }
 
 // resolveDependenciesLocked fills in each blocker's live state, so closing a
@@ -345,7 +357,7 @@ func (s *Sim) buildProbeItem(p *projectState, ref itemRef) (*gh.BoardProbeItem, 
 	}
 	// effectiveUpdatedAt is max(content, project item, linked PR).
 	probe.EffectiveUpdatedAt = laterOf(iss.updatedAt, live.updatedAt)
-	linked := findPRByHeadLocked(r, issueBranch(iss.number))
+	linked := s.boardLinkedPRLocked(r, issueBranch(iss.number))
 	var linkedHead string
 	if linked != nil {
 		// The probe reads only the PR's updatedAt, but a due review step bumps

@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/handarbeit/fabrik/boardcache"
 	"github.com/handarbeit/fabrik/engine"
 	"github.com/handarbeit/fabrik/stages"
 	"github.com/handarbeit/fabrik/tests/sim/simclaude"
@@ -97,6 +98,12 @@ type Env struct {
 	issueSeqMu   sync.Mutex
 	issueSeqNext int
 
+	// BoardCache and Wake are set only under EnvOptions.BoardCache: the
+	// engine's CacheImpl and the channel the production wake observer sends on
+	// (one value per early poll the store's changes would have requested).
+	BoardCache *boardcache.CacheImpl
+	Wake       <-chan struct{}
+
 	// cfg is the exact engine.Config NewEnv built (after EnvOptions.ConfigureCfg
 	// ran) — retained so RestartEnv (restart.go, R3) can hand an identical
 	// Config to a freshly-constructed engine.Engine. Not exposed: a scenario
@@ -147,6 +154,14 @@ type EnvOptions struct {
 	// (e.g. ReviewWaitTimeout, CIWaitTimeout) without growing this struct
 	// for every engine.Config field a future scenario might need.
 	ConfigureCfg func(*engine.Config)
+
+	// BoardCache, when true, wires a real boardcache.CacheImpl into the engine
+	// (Engine.UseBoardCacheForTest) so poll() runs the probe-driven refresh, and
+	// makes simgh's board reads omit closed unmerged PRs as GitHub's
+	// closedByPullRequestsReferences does. Off by default: NewWithDeps's bare
+	// adapter is what every other scenario runs against. Exposes Env.BoardCache
+	// and Env.Wake. Used by the probe-drift scenario (#2080).
+	BoardCache bool
 
 	// SecondRepo, when non-nil, seeds a second repo in simgh (Env.OwnerRepoBeta)
 	// and forces cfg.Repo = "" so the one Env-managed engine legitimately
@@ -243,7 +258,11 @@ func NewEnv(t *testing.T, opts EnvOptions) *Env {
 	}
 	clk := NewClock(startTime)
 
-	simModel := simgh.New(t.TempDir(), simgh.WithClock(clk)).
+	simOpts := []simgh.Option{simgh.WithClock(clk)}
+	if opts.BoardCache {
+		simOpts = append(simOpts, simgh.WithClosedPRsOmittedFromBoard())
+	}
+	simModel := simgh.New(t.TempDir(), simOpts...).
 		SeedRepo(ownerRepo).
 		SeedProject(owner, projectNum, "Engineering", columns)
 	if err := simModel.Err(); err != nil {
@@ -322,8 +341,15 @@ func NewEnv(t *testing.T, opts EnvOptions) *Env {
 		eng = engine.NewWithDeps(cfg, inst, claude, wm)
 	}
 	eng.SetClock(clk)
+	var boardCache *boardcache.CacheImpl
+	var wake <-chan struct{}
+	if opts.BoardCache {
+		boardCache, wake = eng.UseBoardCacheForTest()
+	}
 
 	return &Env{
+		BoardCache:    boardCache,
+		Wake:          wake,
 		T:             t,
 		Engine:        eng,
 		Sim:           inst,
