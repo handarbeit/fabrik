@@ -11,6 +11,9 @@ import (
 	"github.com/handarbeit/fabrik/tui"
 )
 
+// rfNow is a fixed completion instant, late in the UTC day.
+var rfNow = time.Date(2026, 10, 10, 23, 30, 0, 0, time.UTC)
+
 const (
 	rfDateFieldID = "FIELD_DATE"
 	rfRunFieldID  = "FIELD_RUN"
@@ -19,7 +22,7 @@ const (
 
 // runFieldsEngine is a testEngine with the Last activity and Last run fields
 // on and resolved against a mock board carrying both. The status-line field is
-// also on, to show the three are independent. The clock is pinned.
+// also on, to show the three are independent.
 func runFieldsEngine(t *testing.T, client *mockGitHubClient) (*Engine, chan tui.Event) {
 	t.Helper()
 	if client.dateField == nil && client.fetchDateFieldErr == nil {
@@ -35,7 +38,6 @@ func runFieldsEngine(t *testing.T, client *mockGitHubClient) (*Engine, chan tui.
 	eng.cfg.StatusLineField = "Fabrik"
 	eng.cfg.LastActivityField = "Last activity"
 	eng.cfg.LastRunField = "Last run"
-	eng.SetClock(fixedClock{t: time.Date(2026, 10, 10, 23, 30, 0, 0, time.UTC)})
 	events := make(chan tui.Event, 64)
 	eng.events = events
 	eng.resolveStatusLineField("PVT_1")
@@ -68,7 +70,7 @@ func TestRunFields_CompletionWritesBothFromEventFields(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng, _ := runFieldsEngine(t, client)
 
-	eng.noteJobFinished(slItem(1), rfOutcome())
+	eng.noteJobFinished(slItem(1), rfNow, rfOutcome())
 
 	dw := rfDateWrites(client)
 	if len(dw) != 1 || dw[0].date != "2026-10-10" || dw[0].fieldID != rfDateFieldID || dw[0].itemID != slItem(1).ItemID {
@@ -116,10 +118,10 @@ func TestRunFields_UnchangedValueWritesNothing(t *testing.T) {
 
 	// Start and finish on the same day: one date write, one run write.
 	eng.noteJobStarted(slItem(1), day)
-	eng.noteJobFinished(slItem(1), rfOutcome())
+	eng.noteJobFinished(slItem(1), rfNow, rfOutcome())
 	// A second identical run: nothing at all.
 	eng.noteJobStarted(slItem(1), day.Add(time.Hour))
-	eng.noteJobFinished(slItem(1), rfOutcome())
+	eng.noteJobFinished(slItem(1), rfNow, rfOutcome())
 
 	if n := len(rfDateWrites(client)); n != 1 {
 		t.Errorf("date writes = %d, want 1 (several events on one day write once)", n)
@@ -131,8 +133,8 @@ func TestRunFields_UnchangedValueWritesNothing(t *testing.T) {
 	// A different outcome writes; a different item is tracked independently.
 	o := rfOutcome()
 	o.TurnLimited = true
-	eng.noteJobFinished(slItem(1), o)
-	eng.noteJobFinished(slItem(2), rfOutcome())
+	eng.noteJobFinished(slItem(1), rfNow, o)
+	eng.noteJobFinished(slItem(2), rfNow, rfOutcome())
 	if n := len(rfRunWrites(client)); n != 3 {
 		t.Errorf("run writes = %d, want 3", n)
 	}
@@ -144,9 +146,8 @@ func TestRunFields_UnchangedValueWritesNothing(t *testing.T) {
 func TestRunFields_NextDayWritesNewDate(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng, _ := runFieldsEngine(t, client)
-	eng.noteJobFinished(slItem(1), rfOutcome())
-	eng.SetClock(fixedClock{t: time.Date(2026, 10, 11, 0, 5, 0, 0, time.UTC)})
-	eng.noteJobFinished(slItem(1), rfOutcome())
+	eng.noteJobFinished(slItem(1), rfNow, rfOutcome())
+	eng.noteJobFinished(slItem(1), rfNow.Add(time.Hour), rfOutcome()) // crosses midnight UTC
 
 	dw := rfDateWrites(client)
 	if len(dw) != 2 || dw[1].date != "2026-10-11" {
@@ -172,7 +173,7 @@ func TestRunFields_MissingOrWrongTypeFieldIsSilentWithOneStartupLine(t *testing.
 	eng.resolveRunFields("PVT_1")
 	for i := 0; i < 5; i++ {
 		eng.noteJobStarted(slItem(i), time.Now())
-		eng.noteJobFinished(slItem(i), rfOutcome())
+		eng.noteJobFinished(slItem(i), rfNow, rfOutcome())
 	}
 
 	if n := len(rfDateWrites(client)) + len(slWrites(client)); n != 0 {
@@ -206,7 +207,7 @@ func TestRunFields_OneMissingFieldDoesNotAffectTheOthers(t *testing.T) {
 	eng.lastActivity = displayFieldState{}
 	eng.resolveRunFields("PVT_1")
 
-	eng.noteJobFinished(slItem(1), rfOutcome())
+	eng.noteJobFinished(slItem(1), rfNow, rfOutcome())
 	eng.setStatusLine(slItem(1), "landing")
 
 	if n := len(rfDateWrites(client)); n != 0 {
@@ -241,7 +242,7 @@ func TestRunFields_OffWritesNothingAndDoesNotLookUp(t *testing.T) {
 
 	eng.resolveRunFields("PVT_1")
 	eng.noteJobStarted(slItem(1), time.Now())
-	eng.noteJobFinished(slItem(1), rfOutcome())
+	eng.noteJobFinished(slItem(1), rfNow, rfOutcome())
 
 	if n := len(rfDateWrites(client)) + len(slWrites(client)); n != 0 {
 		t.Fatalf("writes = %d, want none when off", n)
@@ -257,7 +258,7 @@ func TestRunFields_FailedWriteIsSwallowedAndRetriedNextEvent(t *testing.T) {
 	client := &mockGitHubClient{dateWriteErr: errors.New("boom"), statusLineErr: errors.New("boom")}
 	eng, events := runFieldsEngine(t, client)
 
-	eng.noteJobFinished(slItem(1), rfOutcome()) // both fail; must not panic or block
+	eng.noteJobFinished(slItem(1), rfNow, rfOutcome()) // both fail; must not panic or block
 
 	logs := strings.Join(drainLogs(events), "\n")
 	if !strings.Contains(logs, "warning: could not write last-activity") || !strings.Contains(logs, "warning: could not write last-run") {
@@ -268,7 +269,7 @@ func TestRunFields_FailedWriteIsSwallowedAndRetriedNextEvent(t *testing.T) {
 	client.dateWriteErr = nil
 	client.statusLineErr = nil
 	client.mu.Unlock()
-	eng.noteJobFinished(slItem(1), rfOutcome()) // same values: retried because nothing was recorded
+	eng.noteJobFinished(slItem(1), rfNow, rfOutcome()) // same values: retried because nothing was recorded
 
 	if n := len(rfDateWrites(client)); n != 1 {
 		t.Errorf("date writes = %d, want 1 (retry after failure)", n)
@@ -281,12 +282,12 @@ func TestRunFields_FailedWriteIsSwallowedAndRetriedNextEvent(t *testing.T) {
 func TestRunFields_RestartRewritesOnceWithoutReadingBack(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng, _ := runFieldsEngine(t, client)
-	eng.noteJobFinished(slItem(1), rfOutcome())
+	eng.noteJobFinished(slItem(1), rfNow, rfOutcome())
 
 	// A restart forgets what was written: fresh writer state, same board.
 	eng2, _ := runFieldsEngine(t, client)
-	eng2.noteJobFinished(slItem(1), rfOutcome())
-	eng2.noteJobFinished(slItem(1), rfOutcome())
+	eng2.noteJobFinished(slItem(1), rfNow, rfOutcome())
+	eng2.noteJobFinished(slItem(1), rfNow, rfOutcome())
 
 	if n := len(rfDateWrites(client)); n != 2 {
 		t.Errorf("date writes = %d, want 2 (one identical rewrite after restart)", n)
@@ -299,7 +300,7 @@ func TestRunFields_RestartRewritesOnceWithoutReadingBack(t *testing.T) {
 func TestRunFields_ItemWithoutProjectItemIDWritesNothing(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng, _ := runFieldsEngine(t, client)
-	eng.noteJobFinished(gh.ProjectItem{Number: 9, Repo: "owner/repo"}, rfOutcome())
+	eng.noteJobFinished(gh.ProjectItem{Number: 9, Repo: "owner/repo"}, rfNow, rfOutcome())
 	if n := len(rfDateWrites(client)) + len(slWrites(client)); n != 0 {
 		t.Errorf("writes = %d, want none without an ItemID", n)
 	}

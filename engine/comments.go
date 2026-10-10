@@ -479,7 +479,7 @@ func (e *Engine) processCommentsClassified(ctx context.Context, board *gh.Projec
 		Duration:    time.Since(startedAt),
 	})
 	// Display-only Last activity / Last run (#2049), from the values just recorded.
-	e.noteJobFinished(item, runOutcome{
+	e.noteJobFinished(item, time.Now(), runOutcome{
 		StageName:   stage.Name,
 		IsComment:   true,
 		Completed:   completed,

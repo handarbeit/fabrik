@@ -1650,7 +1650,7 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 	// Display-only Last activity / Last run (#2049): one write per real stage
 	// run, from the same values just recorded. The Done-cleanup record above is
 	// deliberately not hooked — it is not a run.
-	e.noteJobFinished(item, runOutcome{
+	e.noteJobFinished(item, time.Now(), runOutcome{
 		StageName:   stage.Name,
 		Completed:   completed,
 		TurnLimited: turnLimited,

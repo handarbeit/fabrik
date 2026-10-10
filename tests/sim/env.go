@@ -159,6 +159,18 @@ type EnvOptions struct {
 	// never created it" case).
 	StatusLineFieldMissing bool
 
+	// LastActivityField / LastRunField, when non-empty, turn on the display-only
+	// Last activity (DATE) and Last run (TEXT) fields (#2049) under that name,
+	// seeded on the project unless the matching *Missing flag is set.
+	// LastActivityFieldWrongType seeds Last activity as a TEXT field instead
+	// (the "wrong type reads as missing" case). Off by default so every
+	// pre-existing scenario's mutation log is unchanged.
+	LastActivityField          string
+	LastActivityFieldMissing   bool
+	LastActivityFieldWrongType bool
+	LastRunField               string
+	LastRunFieldMissing        bool
+
 	// ConfigureCfg, when non-nil, is called with the constructed Config
 	// before NewWithDeps — an escape hatch for fields not covered above
 	// (e.g. ReviewWaitTimeout, CIWaitTimeout) without growing this struct
@@ -275,11 +287,27 @@ func NewEnv(t *testing.T, opts EnvOptions) *Env {
 	if opts.StatusLineField != "" {
 		simOpts = append(simOpts, simgh.WithStatusLineField(opts.StatusLineField))
 	}
+	if opts.LastActivityField != "" {
+		simOpts = append(simOpts, simgh.WithLastActivityField(opts.LastActivityField))
+	}
+	if opts.LastRunField != "" {
+		simOpts = append(simOpts, simgh.WithLastRunField(opts.LastRunField))
+	}
 	simModel := simgh.New(t.TempDir(), simOpts...).
 		SeedRepo(ownerRepo).
 		SeedProject(owner, projectNum, "Engineering", columns)
 	if opts.StatusLineField != "" && !opts.StatusLineFieldMissing {
 		simModel.SeedTextField(owner, projectNum, opts.StatusLineField)
+	}
+	if opts.LastActivityField != "" && !opts.LastActivityFieldMissing {
+		if opts.LastActivityFieldWrongType {
+			simModel.SeedTextField(owner, projectNum, opts.LastActivityField)
+		} else {
+			simModel.SeedDateField(owner, projectNum, opts.LastActivityField)
+		}
+	}
+	if opts.LastRunField != "" && !opts.LastRunFieldMissing {
+		simModel.SeedTextField(owner, projectNum, opts.LastRunField)
 	}
 	if err := simModel.Err(); err != nil {
 		t.Fatalf("sim.NewEnv: seeding: %v", err)
@@ -337,7 +365,9 @@ func NewEnv(t *testing.T, opts EnvOptions) *Env {
 		PollSeconds:   1,
 		Stages:        opts.Stages,
 
-		StatusLineField: opts.StatusLineField,
+		StatusLineField:   opts.StatusLineField,
+		LastActivityField: opts.LastActivityField,
+		LastRunField:      opts.LastRunField,
 	}
 	if opts.ConfigureCfg != nil {
 		opts.ConfigureCfg(&cfg)

@@ -29,10 +29,12 @@ func (e *Engine) noteJobStarted(item gh.ProjectItem, startedAt time.Time) {
 }
 
 // noteJobFinished records a finished run for item: Last activity shows the UTC
-// date of the completion instant and Last run the one-line outcome built from
-// the run's existing fields. Both writes are skipped when unchanged, so a
-// completion on the day the job started writes only Last run.
-func (e *Engine) noteJobFinished(item gh.ProjectItem, o runOutcome) {
-	e.writeDisplayField(e.lastActivitySpec(), &e.lastActivity, item, lastActivityDate(e.now()), false)
+// date of completedAt and Last run the one-line outcome built from the run's
+// existing fields. Both writes are skipped when unchanged, so a completion on
+// the day the job started writes only Last run. Callers pass the same
+// wall-clock source the job's start instant uses (time.Now, as the TUI
+// events do), so the two dates can never disagree about the day.
+func (e *Engine) noteJobFinished(item gh.ProjectItem, completedAt time.Time, o runOutcome) {
+	e.writeDisplayField(e.lastActivitySpec(), &e.lastActivity, item, lastActivityDate(completedAt), false)
 	e.writeDisplayField(e.lastRunSpec(), &e.lastRun, item, lastRunLine(o), false)
 }
