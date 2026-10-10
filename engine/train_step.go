@@ -357,6 +357,7 @@ func (e *Engine) openAndRecord(ctx context.Context, r *trainRun, p trialParams, 
 	now := e.now()
 	r.remember(survivors...)
 	r.mu.Lock()
+	r.rec.Ejected = appendEjected(r.rec.Ejected, members, survivors)
 	r.rec.Trial = &runTrialRecord{
 		Kind:     kind,
 		Name:     trialName,
@@ -374,6 +375,25 @@ func (e *Engine) openAndRecord(ctx context.Context, r *trainRun, p trialParams, 
 	r.state.assembling = false
 	r.state.mu.Unlock()
 	return survivors, nil, true
+}
+
+// appendEjected adds to ejected every member of input that did not survive assembly.
+func appendEjected(ejected []int, input, survivors []trainMember) []int {
+	kept := make(map[int]bool, len(survivors))
+	for _, m := range survivors {
+		kept[m.item.Number] = true
+	}
+	have := make(map[int]bool, len(ejected))
+	for _, n := range ejected {
+		have[n] = true
+	}
+	for _, m := range input {
+		if n := m.item.Number; !kept[n] && !have[n] {
+			ejected = append(ejected, n)
+			have[n] = true
+		}
+	}
+	return ejected
 }
 
 // recordTrialIfCounts is the runaway-guard accounting assembleAndValidate does after a
@@ -977,6 +997,11 @@ func (e *Engine) singleOutcome(ctx context.Context, r *trainRun, m trainMember, 
 
 	switch result {
 	case TrainCIGreen:
+		// Same write-ahead as the main trial's landing: while landSingleton runs, a restart
+		// must not resume at this member (its PR may already be merged) — the record is
+		// dropped and the durable reconstructTrainState routes finish the landing.
+		r.setStep(stepLanding)
+		r.persist()
 		e.landSingleton(ctx, state, p, m, trialName)
 	case TrainCIRed:
 		e.cleanupTrialArtifacts(p.repoKey(), p.wm, trialName)

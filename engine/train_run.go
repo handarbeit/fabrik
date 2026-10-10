@@ -118,6 +118,12 @@ type trainRunRecord struct {
 	Bisect *bisectState    `json:"bisect,omitempty"`
 	OAT    *runOATRecord   `json:"oat,omitempty"`
 
+	// Ejected is every member that assembly ejected from a trial of this run (an
+	// unresolvable conflict reroutes it off Queued). It still appears in Current /
+	// Bisect.Origin — those are the pre-assembly sets — so adoption must not require it to
+	// be Queued, or a restart after an assembly-time ejection would discard a good trial.
+	Ejected []int `json:"ejected,omitempty"`
+
 	// Poisoner is the write-ahead mark of an ejection about to happen: set (and
 	// persisted) BEFORE ejectMember so a restart finishes the ejection exactly once.
 	Poisoner int `json:"poisoner,omitempty"`

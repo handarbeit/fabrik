@@ -73,15 +73,9 @@ func (e *Engine) pollTrainRun(ctx context.Context, board *gh.ProjectBoard, r *tr
 		v       trialVerdict
 		decided bool
 	)
+	// The CI is always read first, even past the deadline: a restart that outlasted the
+	// remaining backstop must not abandon a trial whose CI already finished.
 	switch {
-	case !e.now().Before(t.Deadline):
-		// FR-010: no verdict by the deadline. The poll itself surfaces the stuck trial and
-		// hands it to the train's existing timed-out-trial handling (pending: clean up,
-		// members stay Queued).
-		e.logfRepo(r.repoKey(), "merge-train", "trial %s (PR #%d) for %s has no CI verdict %s after it opened (%s) — treating it as timed out\n",
-			t.Name, t.PRNum, r.trainKey, e.now().Sub(t.OpenedAt).Round(time.Second), t.OpenedAt.Format(time.RFC3339))
-		v = trialVerdict{result: TrainCIPending}
-		decided = true
 	case e.trainValidateFn != nil:
 		if e.trainValidateHoldForTest == nil || !e.trainValidateHoldForTest() {
 			v.result, v.diag = e.trainValidateFn(ctx, r.memberList(t.Members))
@@ -94,6 +88,15 @@ func (e *Engine) pollTrainRun(ctx context.Context, board *gh.ProjectBoard, r *tr
 		if !reflect.DeepEqual(before, r.ci.record()) {
 			r.persist() // a retrigger / re-run budget spent must survive a restart
 		}
+	}
+	if !decided && !e.now().Before(t.Deadline) {
+		// FR-010: no verdict by the deadline. The poll itself surfaces the stuck trial and
+		// hands it to the train's existing timed-out-trial handling (pending: clean up,
+		// members stay Queued).
+		e.logfRepo(r.repoKey(), "merge-train", "trial %s (PR #%d) for %s has no CI verdict %s after it opened (%s) — treating it as timed out\n",
+			t.Name, t.PRNum, r.trainKey, e.now().Sub(t.OpenedAt).Round(time.Second), t.OpenedAt.Format(time.RFC3339))
+		v = trialVerdict{result: TrainCIPending}
+		decided = true
 	}
 	if !decided {
 		r.stepping.Store(false)
@@ -186,6 +189,22 @@ func (e *Engine) adoptTrainRun(ctx context.Context, board *gh.ProjectBoard, rec 
 		if rec.OAT.Index < len(rec.OAT.Members) {
 			add(rec.OAT.Members[rec.OAT.Index:])
 		}
+	}
+
+	// Members that assembly ejected are still listed in the pre-assembly sets; they left
+	// Queued on purpose, so they neither keep the run alive nor re-enter a later trial.
+	for _, n := range rec.Ejected {
+		if it, ok := byNum[n]; ok && it.Status == hs.Name {
+			continue
+		}
+		delete(need, n)
+		kept := rec.Current[:0:0]
+		for _, c := range rec.Current {
+			if c != n {
+				kept = append(kept, c)
+			}
+		}
+		rec.Current = kept
 	}
 
 	// A poisoner marked (write-ahead) but possibly ejected before the restart: if it already

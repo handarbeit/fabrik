@@ -631,3 +631,105 @@ func TestTrainRunAsync_PendingRecordBlocksFreshDispatch(t *testing.T) {
 		t.Fatal("dispatch must not form a train over a record awaiting adoption")
 	}
 }
+
+// Review finding: a member that assembly ejected stays in the pre-assembly sets, but it left
+// Queued on purpose — a restart after that ejection must still adopt the trial.
+func TestTrainRunAsync_AssemblyEjectedMemberDoesNotVoidTheRun(t *testing.T) {
+	a := newAsyncTrain(t, 3, poisonedBy())
+	a.dispatch()
+	if !a.open() {
+		t.Fatal("trial should be open")
+	}
+	// Model "member 3 was ejected while the trial was assembling": the trial carries only
+	// the survivors, the record lists 3 as ejected, and the board shows it off Queued.
+	path := trainRunFile(a.dir, asyncTrainKey)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rec trainRunRecord
+	if err := json.Unmarshal(raw, &rec); err != nil {
+		t.Fatal(err)
+	}
+	rec.Trial.Members = []int{1, 2}
+	rec.Ejected = []int{3}
+	raw, err = json.Marshal(&rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	a.restart()
+	a.board.Items[2].Status = "Implement"
+	a.settleHeld()
+	if !a.open() {
+		t.Fatal("an assembly-ejected member must not void the persisted trial")
+	}
+	a.round()
+	if a.open() || a.merges() != 1 {
+		t.Fatalf("the resumed trial must land once: open=%v merges=%d", a.open(), a.merges())
+	}
+	if got := a.calls(); len(got) != 1 || !reflect.DeepEqual(got[0], []int{1, 2}) {
+		t.Fatalf("validated sets = %v, want only the survivors [1 2]", got)
+	}
+}
+
+// Review finding: a restart that outlasts the remaining backstop must not abandon a trial
+// whose CI already finished — the CI is read before the deadline is honoured.
+func TestTrainRunAsync_ExpiredDeadlineStillReadsFinishedCI(t *testing.T) {
+	a := newAsyncTrain(t, 3, poisonedBy())
+	clk := newAdvClock()
+	a.eng.SetClock(clk) // the deadline is persisted in clock time
+	a.dispatch()
+	a.restart()
+	a.eng.SetClock(clk)
+	a.settleHeld() // adopt
+	if !a.open() {
+		t.Fatal("restarted engine did not adopt the run")
+	}
+	clk.Advance(a.eng.ciBackstopTimeout() + time.Hour) // far past the persisted deadline
+	a.round()                                          // CI is green
+	if a.open() || a.merges() != 1 {
+		t.Fatalf("a green trial past its deadline must still land: open=%v merges=%d", a.open(), a.merges())
+	}
+}
+
+// Review finding: while landSingleton runs for a green one-at-a-time member, the persisted
+// step is `landing`, so a restart cannot resume at (and re-trial) a member whose PR may
+// already be merged.
+func TestTrainRunAsync_OneAtATimeLandingIsWriteAheadMarked(t *testing.T) {
+	interaction := func(set []int) TrainCIResult {
+		if refHas(set, 1) && refHas(set, 4) {
+			return TrainCIRed
+		}
+		return TrainCIGreen
+	}
+	a := newAsyncTrain(t, 4, interaction)
+	var steps []string
+	a.client.mu.Lock()
+	a.client.mergePRFn = func(owner, repo string, pr int) error {
+		raw, err := os.ReadFile(trainRunFile(a.dir, asyncTrainKey))
+		if err != nil {
+			return err
+		}
+		var rec trainRunRecord
+		if err := json.Unmarshal(raw, &rec); err != nil {
+			return err
+		}
+		steps = append(steps, rec.Step)
+		return nil
+	}
+	a.client.mu.Unlock()
+	a.dispatch()
+	a.runToEnd(100)
+	if len(steps) == 0 {
+		t.Fatal("expected at least one landing in the one-at-a-time fallback")
+	}
+	for _, s := range steps {
+		if s != stepLanding {
+			t.Fatalf("persisted step during a landing = %q, want %q", s, stepLanding)
+		}
+	}
+}

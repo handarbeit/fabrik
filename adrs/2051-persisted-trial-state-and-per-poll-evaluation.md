@@ -93,15 +93,15 @@ way: the worker finishes and later polls evaluate. Report: #2037.
    failed-job re-run are therefore identical. No slot is taken.
 
 7. **Deadline.** `Deadline = e.now() + ciBackstopTimeout()` is persisted at open and
-   compared with `e.now()` on each poll; expiry synthesises `TrainCIPending` through the
-   existing pending handling. Trial PRs have no `LastCIProgressAt` (their check runs are
+   compared with `e.now()` on each poll; the trial's CI is read first, and expiry with no
+   verdict synthesises `TrainCIPending` through the existing pending handling. Trial PRs have no `LastCIProgressAt` (their check runs are
    never attributed to a board item) and inventing a liveness signal is out of scope.
 
 8. **Scope of "per poll".** Only *trial* CI waits (main, bisection half, one-at-a-time
    singleton). Waits inside a landing path (`landGreenBatch`'s rebase revalidation,
    `pollForMergeable`, the ADR-2044 catch-up `waitMemberCI`) stay in a short step
    goroutine: landing paths are out of scope and the catch-up needs the pinned base.
-   A restart during `landing` drops the record; the durable Route 1/2 reconstruction
+   A restart during `landing` (set before each green main or one-at-a-time landing) drops the record; the durable Route 1/2 reconstruction
    finishes the landing idempotently.
 
 9. **Write-ahead.** `advance` persists the post-verdict state before the side effect it
