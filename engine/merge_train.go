@@ -1348,7 +1348,7 @@ func (e *Engine) assembleTrialBranch(ctx context.Context, p trialParams, members
 		// to resume, and resuming it anyway was the source of a spurious "resume
 		// requested but none exists" warning on every member's first encounter.
 		opts := InvokeOptions{BaseBranch: p.baseBranch, MaxTurnsOverride: p.maxTurnsOverride, FabrikRoot: e.fabrikDir, FabrikRepo: e.defaultRepo(), MaxResumeFailures: e.cfg.MaxResumeFailures, NoResume: true}
-		resolved, diag, resolveErr := e.resolveTrainConflict(ctx, member.item, wtDir, p.holdingStg, member.headSHA, preMergeHEAD, string(mergeOut), opts)
+		resolved, diag, resolveErr := e.resolveTrainConflict(ctx, p.repoKey(), member.item, wtDir, p.holdingStg, member.headSHA, preMergeHEAD, string(mergeOut), opts)
 		if resolved {
 			survivors = append(survivors, member)
 			if sha, shaErr := gitRevParse(wtDir, "HEAD"); shaErr == nil {
@@ -2772,7 +2772,7 @@ type conflictEjectionDiagnostic struct {
 // moved past preMergeHEAD is genuine progress; a MERGE_HEAD-less worktree still sitting
 // on preMergeHEAD means the member's entire contribution — not just the conflicted
 // path(s) — was silently discarded by the abort.
-func (e *Engine) resolveConflictWithClaude(ctx context.Context, memberItem gh.ProjectItem, trainWorkDir string, holdingStg *stages.Stage, prSHA string, generatedPaths []string, preMergeHEAD string, originalNonGeneratedPaths []string, opts InvokeOptions) (bool, *conflictEjectionDiagnostic, error) {
+func (e *Engine) resolveConflictWithClaude(ctx context.Context, repoKey string, memberItem gh.ProjectItem, trainWorkDir string, holdingStg *stages.Stage, prSHA string, generatedPaths []string, preMergeHEAD string, originalNonGeneratedPaths []string, opts InvokeOptions) (bool, *conflictEjectionDiagnostic, error) {
 	suspended := func() error {
 		if _, s := e.claudeSuspendedUntilTime(time.Now()); s {
 			e.logf(memberItem.Number, "claude-limit", "Claude dispatch suspended account-wide; skipping conflict resolution for #%d\n", memberItem.Number)
@@ -2794,7 +2794,7 @@ func (e *Engine) resolveConflictWithClaude(ctx context.Context, memberItem gh.Pr
 	// inspection below. A cancellation while waiting is "could not attempt", the
 	// same non-nil-error shape as the usage-limit case (ADR-1120): the callers
 	// eject nobody and charge nothing.
-	release, err := e.acquireTrainSlot(ctx, memberItem)
+	release, err := e.acquireTrainSlot(ctx, repoKey, memberItem)
 	if err != nil {
 		e.logf(memberItem.Number, "merge-train", "conflict resolution not attempted for #%d: %v\n", memberItem.Number, err)
 		return false, nil, err
@@ -2859,11 +2859,11 @@ func (e *Engine) resolveConflictWithClaude(ctx context.Context, memberItem gh.Pr
 // as "could not attempt" (see trainCancelled), never as an unresolvable conflict.
 // release is idempotent, so a defensive double call cannot drain another worker's
 // slot.
-func (e *Engine) acquireTrainSlot(ctx context.Context, memberItem gh.ProjectItem) (release func(), err error) {
+func (e *Engine) acquireTrainSlot(ctx context.Context, repoKey string, memberItem gh.ProjectItem) (release func(), err error) {
 	select {
 	case e.sem <- struct{}{}:
 	default:
-		e.logfRepo(memberItem.Repo, "merge-train", "waiting for a free worker slot for conflict resolution on #%d\n", memberItem.Number)
+		e.logfRepo(repoKey, "merge-train", "waiting for a free worker slot for conflict resolution on #%d\n", memberItem.Number)
 		select {
 		case e.sem <- struct{}{}:
 		case <-ctx.Done():
@@ -3293,7 +3293,7 @@ func (e *Engine) commitRerereReplayedMerge(wtDir string, memberNumber int) error
 // diag (possibly nil) is a diagnosable value for the caller's buildConflictEjectionReason;
 // a nil diag tells the caller to fall back to its own generic "unresolvable conflict"
 // message.
-func (e *Engine) resolveTrainConflict(ctx context.Context, memberItem gh.ProjectItem, wtDir string, holdingStg *stages.Stage, prSHA string, preMergeHEAD string, mergeOut string, opts InvokeOptions) (bool, *conflictEjectionDiagnostic, error) {
+func (e *Engine) resolveTrainConflict(ctx context.Context, repoKey string, memberItem gh.ProjectItem, wtDir string, holdingStg *stages.Stage, prSHA string, preMergeHEAD string, mergeOut string, opts InvokeOptions) (bool, *conflictEjectionDiagnostic, error) {
 	paths, err := unmergedPaths(wtDir)
 	if err != nil {
 		// Can't classify conflicted paths — fall back to the plain Claude path exactly
@@ -3301,7 +3301,7 @@ func (e *Engine) resolveTrainConflict(ctx context.Context, memberItem gh.Project
 		// original-path list is available to hand resolveConflictWithClaude (that's
 		// exactly what failed), so an abort-detected outcome from here reports no files.
 		e.logf(memberItem.Number, "merge-train", "could not list conflicted paths, falling back to Claude: %v\n", err)
-		resolved, diag, resolveErr := e.resolveConflictWithClaude(ctx, memberItem, wtDir, holdingStg, prSHA, nil, preMergeHEAD, nil, opts)
+		resolved, diag, resolveErr := e.resolveConflictWithClaude(ctx, repoKey, memberItem, wtDir, holdingStg, prSHA, nil, preMergeHEAD, nil, opts)
 		return resolved, diag, resolveErr
 	}
 
@@ -3347,7 +3347,7 @@ func (e *Engine) resolveTrainConflict(ctx context.Context, memberItem gh.Project
 		// involved at all, or one is (deletionExcluded) but it was routed to Claude
 		// because its status carries deletion intent, not a regenerable modification.
 		// Either way this is a plain Claude dispatch, matching pre-FR-1..5 behavior.
-		resolved, diag, resolveErr := e.resolveConflictWithClaude(ctx, memberItem, wtDir, holdingStg, prSHA, nil, preMergeHEAD, nonGenerated, opts)
+		resolved, diag, resolveErr := e.resolveConflictWithClaude(ctx, repoKey, memberItem, wtDir, holdingStg, prSHA, nil, preMergeHEAD, nonGenerated, opts)
 		return resolved, diag, resolveErr
 	}
 
@@ -3366,7 +3366,7 @@ func (e *Engine) resolveTrainConflict(ctx context.Context, memberItem gh.Project
 	for i, spec := range matched {
 		generatedPathNames[i] = spec.Path
 	}
-	resolved, diag, resolveErr := e.resolveConflictWithClaude(ctx, memberItem, wtDir, holdingStg, prSHA, generatedPathNames, preMergeHEAD, nonGenerated, opts)
+	resolved, diag, resolveErr := e.resolveConflictWithClaude(ctx, repoKey, memberItem, wtDir, holdingStg, prSHA, generatedPathNames, preMergeHEAD, nonGenerated, opts)
 	if resolveErr != nil || !resolved {
 		return resolved, diag, resolveErr
 	}

@@ -286,7 +286,7 @@ func (e *Engine) runCatchUpGit(ctx context.Context, p trialParams, m trainMember
 	if mergeErr != nil {
 		e.logf(n, "merge-train", "catch-up merge conflict for #%d: %s — resolving\n", n, strings.TrimSpace(mergeOut))
 		opts := InvokeOptions{BaseBranch: p.baseBranch, MaxTurnsOverride: p.maxTurnsOverride, FabrikRoot: e.fabrikDir, FabrikRepo: e.defaultRepo(), MaxResumeFailures: e.cfg.MaxResumeFailures, NoResume: true, CatchUpBaseSHA: p.baseSHA}
-		resolved, diag, resolveErr := e.resolveTrainConflict(ctx, m.item, wtDir, p.holdingStg, p.baseSHA, m.headSHA, mergeOut, opts)
+		resolved, diag, resolveErr := e.resolveTrainConflict(ctx, p.repoKey(), m.item, wtDir, p.holdingStg, p.baseSHA, m.headSHA, mergeOut, opts)
 		if resolveErr != nil {
 			// Resolution could not even be attempted (account-wide usage-limit
 			// suspension, ADR-1120): no verdict on the conflict, so no ejection.

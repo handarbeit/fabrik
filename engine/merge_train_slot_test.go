@@ -77,7 +77,7 @@ func TestAcquireTrainSlot_FreeSlotLogsNothingAndReleaseIsIdempotent(t *testing.T
 	ch := make(chan tui.Event, 64)
 	eng.events = ch
 
-	release, err := eng.acquireTrainSlot(context.Background(), makeTrainItem(3, "x"))
+	release, err := eng.acquireTrainSlot(context.Background(), "owner/repo", makeTrainItem(3, "x"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +107,11 @@ func TestAcquireTrainSlot_SaturatedLogsOnceThenAcquiresWhenFreed(t *testing.T) {
 	var release func()
 	go func() {
 		var err error
-		release, err = eng.acquireTrainSlot(context.Background(), makeTrainItem(3, "x"))
+		// Repo deliberately empty (ProjectItem.Repo can be empty on some board
+		// paths): the wait line must still reach the train's row via repoKey.
+		item := makeTrainItem(3, "x")
+		item.Repo = ""
+		release, err = eng.acquireTrainSlot(context.Background(), "owner/repo", item)
 		got <- err
 	}()
 
@@ -150,7 +154,7 @@ func TestAcquireTrainSlot_CancelWhileWaitingTakesNoSlot(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	release, err := eng.acquireTrainSlot(ctx, makeTrainItem(3, "x"))
+	release, err := eng.acquireTrainSlot(ctx, "owner/repo", makeTrainItem(3, "x"))
 	if err == nil {
 		release()
 		t.Fatal("expected an error from a cancelled wait")
