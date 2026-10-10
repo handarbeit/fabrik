@@ -388,6 +388,12 @@ type Engine struct {
 	// sighupRequested is set by the SIGHUP handler goroutine to signal that the
 	// main loop should re-exec after draining workers (Unix only).
 	sighupRequested atomic.Bool
+
+	// lockLost is set by Run() when per-poll verification finds a held instance
+	// lock replaced or removed (#2097). drainAndExit then skips lock-label cleanup
+	// (another engine may legitimately hold fabrik:locked:<user>) and Run() returns
+	// errInstanceLockLost.
+	lockLost atomic.Bool
 	// sighupExecFn overrides syscall.Exec in tests to prevent the test process
 	// from actually being replaced. Production code leaves this nil.
 	sighupExecFn func(argv0 string, argv []string, envv []string) error
