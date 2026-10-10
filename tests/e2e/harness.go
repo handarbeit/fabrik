@@ -184,9 +184,11 @@ func isTopLevelTest(name string) bool { return !strings.Contains(name, "/") }
 // AssertFabrikRunning verifies the test-bed Fabrik instance is alive.
 // Skips the test if not — we don't auto-start it (yet).
 //
-// Detection strategy: check the lock file. Fabrik atomically writes its PID
-// to .fabrik/fabrik.lock on startup and unlinks it on shutdown. If the file
-// exists and the named PID is still alive, Fabrik is running.
+// Detection strategy: check the lock file. Fabrik flocks .fabrik/fabrik.lock and
+// writes its PID into it on startup. It never unlinks the file on shutdown: the
+// flock is released by the OS when the process ends, so a leftover file naming
+// a dead PID is harmless and a restarted Fabrik re-acquires it by itself. If
+// the file exists and the named PID is still alive, Fabrik is running.
 func AssertFabrikRunning(t *testing.T, env *Env) {
 	t.Helper()
 	lockPath := filepath.Join(env.FabrikTestDir, ".fabrik", "fabrik.lock")
@@ -200,8 +202,10 @@ func AssertFabrikRunning(t *testing.T, env *Env) {
 		t.Skipf("Fabrik lock file at %s is malformed (%q)", lockPath, contents)
 	}
 	if err := syscallSignalZero(pid); err != nil {
-		t.Skipf("Fabrik lock file claims pid %d but process is dead (%v) — stale lock at %s; remove and restart",
-			pid, err, lockPath)
+		t.Skipf("Fabrik lock file claims pid %d but that process is not alive (%v) — leftover lock at %s. "+
+			"Fabrik never unlinks it and a restart re-acquires it, so do not delete it: first confirm with `ps -p %d` "+
+			"that the pid is really dead and that no other Fabrik is serving this board, then just restart the bed",
+			pid, err, lockPath, pid)
 	}
 }
 
