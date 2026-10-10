@@ -590,8 +590,9 @@ func deadlinesFor(in Input) []Deadline {
 	}
 	sort.Strings(cds)
 	for _, r := range cds {
-		// The store never deletes cooldown entries: an expired one is history,
-		// not something the engine is still going to act on.
+		// Only an entry still in the future is a deadline. An expired one is either
+		// history or an expiry poll admission has not yet acted on (the engine
+		// deletes it once it has, #2096) — neither is a future action to report.
 		if t := in.Cooldowns[r]; t.After(in.Now) {
 			ds = append(ds, Deadline{Kind: "cooldown:" + r, At: t, Basis: "cooldown expiry"})
 		}
