@@ -274,11 +274,13 @@ func (e *Engine) fetchWorkflowRunsSoft(logRepo, owner, repo, sha string) (runs [
 	return nil, false, false
 }
 
-// logActionsDegradedOnce logs, once per process, that the optional Actions
-// permission is missing and CI-infrastructure handling is therefore off.
+// logActionsDegradedOnce logs, once per process, that the Actions permission was
+// refused at runtime and CI-infrastructure handling is therefore off. Startup
+// guarantees `actions: write` was granted (#2105), so this means it was revoked
+// or the request was never accepted after startup.
 func (e *Engine) logActionsDegradedOnce(logRepo string, err error) {
 	if e.actionsDegradeLogged.CompareAndSwap(false, true) {
-		e.logfRepo(logRepo, "ci-infra", "warn: the GitHub credential lacks the optional `actions` permission (%v) — CI startup-failure detection and failed-job re-run are disabled; behaving as before. Grant `actions: read` (detection) and `actions: write` (re-run) to enable.\n", err)
+		e.logfRepo(logRepo, "ci-infra", "warn: the GitHub credential was refused the `actions` permission (%v) — it was granted at startup, so it has likely been revoked since. CI startup-failure detection and failed-job re-run are disabled until `actions: write` is granted again.\n", err)
 	}
 }
 

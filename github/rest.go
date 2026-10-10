@@ -17,8 +17,8 @@ var ErrNotFound = errors.New("not found")
 // ErrForbidden is returned by REST methods when the server responds with a
 // 403 that is not a rate limit (#2052). Callers use errors.Is(err,
 // github.ErrForbidden) — typically alongside ErrNotFound — to treat "this
-// credential lacks the permission" as a soft, degradable condition (e.g. the
-// optional Actions permission) rather than a hard failure.
+// credential lacks the permission" as a soft, degradable condition (e.g. an
+// Actions permission revoked while the daemon runs) rather than a hard failure.
 var ErrForbidden = errors.New("forbidden")
 
 // forbiddenError carries the unchanged generic 403 message while matching

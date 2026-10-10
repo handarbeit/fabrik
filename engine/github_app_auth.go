@@ -111,6 +111,10 @@ func RequiredGitHubAppPermissions(webhooksEnabled bool) map[string]string {
 		"checks":                "read",
 		"statuses":              "read",
 		"contents":              "read",
+		// actions:write (#2105, ADR 2105): worker `gh run view --log-failed` /
+		// `gh run rerun`, the merge-train trial re-run and the startup_failure
+		// retrigger (#2052). Write covers both; GitHub has no read-only re-run.
+		"actions": "write",
 	}
 	if webhooksEnabled {
 		perms["repository_hooks"] = "write"
@@ -118,82 +122,28 @@ func RequiredGitHubAppPermissions(webhooksEnabled bool) map[string]string {
 	return perms
 }
 
-// OptionalGitHubAppPermissions returns the permissions that enable optional
-// engine behaviour but are deliberately NOT part of RequiredGitHubAppPermissions
-// and never enter the fail-hard startup grant check (#2052, ADR 2052): adding
-// one there would stop every existing installation from starting until an admin
-// accepted it.
-//
-//   - "actions": "write" — read the workflow runs of a commit (detect a CI run
-//     that failed before creating any job) and re-run a run's failed jobs. Without
-//     it the engine behaves exactly as before: a refused read or re-run (403/404)
-//     is logged once and degraded, never fatal. `actions: write` covers the read
-//     too; GitHub has no separate read-only re-run.
-//
-// `fabrik init --github-app` includes these in a NEW App's manifest (so a fresh
-// install gets the behaviour); an existing installation opts in by granting the
-// permission in the App's settings. Documented as optional-but-recommended in
-// docs/USER_GUIDE.md.
-func OptionalGitHubAppPermissions() map[string]string {
-	perms := make(map[string]string, len(optionalPermissions))
-	for _, p := range optionalPermissions {
-		perms[p.Name] = p.Level
-	}
-	return perms
-}
-
-// optionalPermission describes one optional App permission: its name and
-// wanted level, and what it enables. It is the single source of truth shared
-// by OptionalGitHubAppPermissions (and through it the new-App manifest) and
-// the advisory notices OptionalPermissionNotices builds for `fabrik init` and
-// engine startup (#2071), so the three can never drift.
-type optionalPermission struct {
-	Name    string
-	Level   string
-	Enables string
-}
-
-var optionalPermissions = []optionalPermission{
-	{
-		Name:  "actions",
-		Level: "write",
-		Enables: "re-running a merge-train trial's failed jobs on its first red, retriggering CI runs that " +
-			"never started (startup_failure), and a worker's own `gh run rerun`",
-	},
-}
-
-// OptionalPermissionNotices builds one advisory notice per optional-permission
-// shortfall (as returned by Reconciler.VerifyGrants(OptionalGitHubAppPermissions())),
-// shared by engine startup and `fabrik init` so their wording cannot drift
-// (#2071). Each notice is multi-line and carries no log prefix; callers add
-// their own. GitHub offers no API for an App to gain a permission, so the
-// notices only direct the operator to the two manual steps: an App owner
-// changes the App's settings, then an org admin accepts the request on the
-// installation. owner is always an organization here (App auth refuses
-// user-owned boards).
-func OptionalPermissionNotices(shortfalls []githubauth.RequiredPermissionShortfall, owner, slug string, installationID int64) []string {
-	notices := make([]string, 0, len(shortfalls))
+// PermissionShortfallRemedy is the remediation text appended to every
+// required-permission refusal — engine startup and `fabrik init --github-app`
+// share it so their wording cannot drift (#2105). GitHub offers no API for an
+// App to gain a permission, so the text only directs the operator to the two
+// manual steps: an App owner changes the App's settings, then an org admin
+// accepts the request on the installation. owner is always an organization here
+// (App auth refuses user-owned boards before the grant check). When "actions"
+// is among the shortfalls it also says why the permission is needed.
+func PermissionShortfallRemedy(shortfalls []githubauth.RequiredPermissionShortfall, owner, slug string, installationID int64) string {
+	var b strings.Builder
 	for _, sf := range shortfalls {
-		granted := sf.Granted
-		if granted == "" {
-			granted = "none"
+		if sf.Permission == "actions" {
+			b.WriteString("\n`actions: write` is required so a worker's `gh run view --log-failed` and `gh run rerun` work, " +
+				"for the merge-train trial re-run of failed jobs, and to retrigger CI runs that never started (startup_failure).")
+			break
 		}
-		enables := ""
-		for _, p := range optionalPermissions {
-			if p.Name == sf.Permission {
-				enables = p.Enables
-				break
-			}
-		}
-		notices = append(notices, fmt.Sprintf(
-			"optional permission %q is not fully granted (granted %q, wanted %q). It enables %s. "+
-				"Fabrik runs without it and falls back to its earlier behaviour, and cannot change it itself — "+
-				"ask an App owner and an org admin:\n"+
-				"  1. App owner: set the permission at https://github.com/organizations/%s/settings/apps/%s/permissions\n"+
-				"  2. Org admin: accept the permission request at https://github.com/organizations/%s/settings/installations/%d",
-			sf.Permission, granted, sf.Required, enables, owner, slug, owner, installationID))
 	}
-	return notices
+	fmt.Fprintf(&b, "\nFabrik cannot change App permissions itself — ask an App owner and an org admin:\n"+
+		"  1. App owner: set the permission at https://github.com/organizations/%s/settings/apps/%s/permissions\n"+
+		"  2. Org admin: accept the permission request at https://github.com/organizations/%s/settings/installations/%d",
+		owner, slug, owner, installationID)
+	return b.String()
 }
 
 // RequiredGitHubAppPermissionsForGit is RequiredGitHubAppPermissions with
@@ -498,22 +448,10 @@ func setUpGitHubAppAuth(ctx context.Context, cfg Config, fabrikDir, baseURL stri
 				}
 			}
 		}
-		return nil, nil, fmt.Errorf("GitHub App installation %d is missing required permissions: %s%s — "+
-			"grant these permissions to the installation (App settings → Install App → Configure) and "+
-			"restart Fabrik", cfg.GitHubAppInstallationID, FormatPermissionShortfalls(shortfalls), hint)
-	}
-
-	// Optional permissions (#2071): a second, soft check, deliberately separate
-	// from the fail-hard required one above — merging them would make a failed
-	// grant read fatal again. Advisory only; runs once per process start.
-	optShortfalls, err := reconciler.VerifyGrants(OptionalGitHubAppPermissions())
-	if err != nil {
-		fmt.Printf("[startup] github-app: could not check optional permissions: %v\n", err)
-	} else {
 		slug := strings.TrimSuffix(reconciler.BotLogin(), "[bot]")
-		for _, n := range OptionalPermissionNotices(optShortfalls, cfg.Owner, slug, cfg.GitHubAppInstallationID) {
-			fmt.Printf("[startup] github-app: %s\n", n)
-		}
+		return nil, nil, fmt.Errorf("GitHub App installation %d is missing required permissions: %s%s%s\n"+
+			"then restart Fabrik", cfg.GitHubAppInstallationID, FormatPermissionShortfalls(shortfalls), hint,
+			PermissionShortfallRemedy(shortfalls, cfg.Owner, slug, cfg.GitHubAppInstallationID))
 	}
 
 	fmt.Printf("[startup] authenticated as %s (GitHub App installation, organization %q)\n", reconciler.BotLogin(), cfg.Owner)
