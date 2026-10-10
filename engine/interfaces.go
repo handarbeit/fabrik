@@ -73,6 +73,10 @@ type GitHubClient interface {
 	EnablePullRequestAutoMerge(owner, repo string, prNumber int, strategy string) error
 	DisablePullRequestAutoMerge(owner, repo string, prNumber int) error
 	FetchCommitsBehind(owner, repo, base, head string) (int, error)
+	// FetchPRFiles lists the paths a PR changes (GitHub's paginated /pulls/{n}/files; #2047).
+	// GitHub silently caps that listing at 3000 files; callers treat a result that large
+	// as not known to be complete.
+	FetchPRFiles(owner, repo string, prNumber int) ([]string, error)
 	CloseIssue(owner, repo string, issueNumber int) error
 	ReopenIssue(owner, repo string, issueNumber int) error
 	CreateIssue(owner, repo, title, body string, assignees []string) (number int, nodeID string, err error)

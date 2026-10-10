@@ -488,6 +488,11 @@ func (in *Instrumented) FetchCommitsBehind(owner, repo, base, head string) (int,
 		func() (int, error) { return in.sim.FetchCommitsBehind(owner, repo, base, head) })
 }
 
+func (in *Instrumented) FetchPRFiles(owner, repo string, prNumber int) ([]string, error) {
+	return do1(in, "FetchPRFiles", false, Args{Owner: owner, Repo: repo, Number: prNumber},
+		func() ([]string, error) { return in.sim.FetchPRFiles(owner, repo, prNumber) })
+}
+
 // --- misc ------------------------------------------------------------------
 
 func (in *Instrumented) FetchLatestRelease(owner, repo string) (*gh.LatestRelease, error) {

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -809,5 +810,31 @@ func TestWithWorktreePrunesAfterFailedAdd(t *testing.T) {
 	lines := strings.Split(strings.TrimSpace(out), "\n")
 	if len(lines) != 1 {
 		t.Fatalf("worktree list =\n%s\nwant only the bare repo entry — a failed worktree add left a stale administrative entry unpruned", out)
+	}
+}
+
+// TestFetchPRFilesIsTheThreeDotDiff pins FetchPRFiles to GitHub's
+// /pulls/{n}/files semantics: the files the head changed since it forked from
+// the base, not files the base changed afterwards.
+func TestFetchPRFilesIsTheThreeDotDiff(t *testing.T) {
+	s, _ := seedBasicBoard(t)
+	s.SeedCommit(repoName, "main", map[string]string{"a.txt": "1\n"}, "one").
+		SeedBranch(repoName, headBranch, "main").
+		SeedCommitFrom(repoName, headBranch, "main", map[string]string{"z/y.txt": "h\n", "b.txt": "h\n"}, "head work").
+		SeedCommit(repoName, "main", map[string]string{"only-on-base.txt": "2\n"}, "base moved")
+	s.SeedPR(repoName, PRSeed{Number: 42, Head: headBranch, Base: "main", Title: "files"})
+	if err := s.Err(); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	got, err := s.FetchPRFiles("acme", "widgets", 42)
+	if err != nil {
+		t.Fatalf("FetchPRFiles: %v", err)
+	}
+	if want := []string{"b.txt", "z/y.txt"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("FetchPRFiles = %v, want %v (base-only changes must not appear)", got, want)
+	}
+	if _, err := s.FetchPRFiles("acme", "widgets", 999); err == nil {
+		t.Fatal("expected an error for an unknown PR")
 	}
 }

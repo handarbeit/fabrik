@@ -1,6 +1,10 @@
 package simgh
 
-import gh "github.com/handarbeit/fabrik/github"
+import (
+	"strings"
+
+	gh "github.com/handarbeit/fabrik/github"
+)
 
 // Check runs and classic commit statuses are two genuinely separate
 // collections here, keyed by SHA, because production treats them separately: a
@@ -96,6 +100,44 @@ func (s *Sim) FetchCombinedStatus(owner, repo, ref string) ([]gh.CommitStatus, e
 	out := make([]gh.CommitStatus, len(r.commitStatuses[sha]))
 	copy(out, r.commitStatuses[sha])
 	return out, nil
+}
+
+// FetchPRFiles lists the paths a PR changes: the three-dot diff from the
+// merge-base of base and head to head, computed with real git against the
+// backing repository — GitHub's /pulls/{n}/files semantics — rather than
+// declared per PR. Returns nil, nil when the head branch no longer exists,
+// mirroring the production client's 404 handling. Sorted, like git's own
+// --name-only output.
+func (s *Sim) FetchPRFiles(owner, repo string, prNumber int) ([]string, error) {
+	s.mu.Lock()
+	r, pr, err := s.prLocked(owner, repo, prNumber)
+	if err != nil {
+		s.mu.Unlock()
+		return nil, err
+	}
+	base, head := pr.base, pr.head
+	s.mu.Unlock()
+
+	r.gitMu.Lock()
+	defer r.gitMu.Unlock()
+	if !r.branchExists(head) {
+		return nil, nil
+	}
+	baseRef, err := r.resolveCompareRef(base)
+	if err != nil {
+		return nil, err
+	}
+	out, err := runGit(r.bareDir, "diff", "--name-only", baseRef+"..."+"refs/heads/"+head)
+	if err != nil {
+		return nil, err
+	}
+	var files []string
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if line != "" {
+			files = append(files, line)
+		}
+	}
+	return files, nil
 }
 
 // FetchCommitsBehind reports how many commits base has that head does not —
