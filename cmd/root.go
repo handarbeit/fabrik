@@ -904,6 +904,9 @@ func Execute() error {
 	// If the process was re-exec'd after an auto-upgrade or a SIGHUP restart,
 	// conditionally refresh embedded plugin skills (three-way comparison: skip
 	// refresh when the operator has local customizations).
+	// Capture why this process started before the markers are consumed: the
+	// engine reports it in the fabrik.log banner (#2094).
+	startReason := reexecStartReason()
 	handleReexecPluginRefresh("FABRIK_AUTO_UPGRADED", "")
 	handleReexecPluginRefresh("FABRIK_SIGHUP_RESTART", " after SIGHUP restart")
 
@@ -933,6 +936,7 @@ func Execute() error {
 		User:                       cfg.User,
 		Token:                      cfg.Token,
 		Version:                    Version,
+		StartReason:                startReason,
 		Yolo:                       cfg.Yolo,
 		AutoUpgrade:                cfg.AutoUpgrade,
 		GitSSH:                     cfg.GitSSH,
@@ -1150,6 +1154,27 @@ func resolveDuration(current string, envVar string) string {
 		return v
 	}
 	return current
+}
+
+// reexecStartReason names why this process started, from the re-exec markers
+// the previous process set, for the fabrik.log start banner (#2094). It must run
+// before handleReexecPluginRefresh unsets FABRIK_AUTO_UPGRADED and
+// FABRIK_SIGHUP_RESTART. FABRIK_DEV_REEXEC has no plugin-refresh handler, so it
+// is unset here, which also keeps it from ever reaching a worker. Precedence
+// matches the order the markers could have been set in: an explicit SIGHUP
+// restart wins, then the upgrade re-execs.
+func reexecStartReason() string {
+	devReexec := os.Getenv("FABRIK_DEV_REEXEC") == "1"
+	os.Unsetenv("FABRIK_DEV_REEXEC")
+	switch {
+	case os.Getenv("FABRIK_SIGHUP_RESTART") == "1":
+		return "SIGHUP restart"
+	case os.Getenv("FABRIK_AUTO_UPGRADED") == "1":
+		return "self-upgrade re-exec"
+	case devReexec:
+		return "self-upgrade re-exec (dev build)"
+	}
+	return "fresh start"
 }
 
 // handleReexecPluginRefresh checks and unsets envVar (a re-exec marker set

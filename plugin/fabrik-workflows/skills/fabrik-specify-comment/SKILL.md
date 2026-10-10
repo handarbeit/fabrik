@@ -31,7 +31,7 @@ If an answer raises new ambiguities or reveals additional gaps:
 
 ### Maintain spec structure
 
-The issue body follows the **Spec template** defined in the `fabrik-specify` skill (its "Spec template" section — the single canonical copy; it is deliberately not restated here so the two cannot drift). The current body already has that shape, so edit it in place: keep every heading, header field and the order exactly as they are. If you need the exact template text, for example because the body was written before this format existed and has to be restructured, load the `fabrik-specify` skill with the Skill tool and follow its Spec template section and rules.
+The issue body follows the **Spec template** defined in the `fabrik-specify` skill (its "Spec template" section — the single canonical copy; it is deliberately not restated here so the two cannot drift). The current body already has that shape, so edit it in place: keep every *template* heading, header field and the order exactly as they are. If you need the exact template text, for example because the body was written before this format existed and has to be restructured, load the `fabrik-specify` skill with the Skill tool and follow its Spec template section and rules.
 
 When folding in an answer, put it where it belongs structurally:
 - a new behavior becomes an `FR-NNN` requirement under `### Functional Requirements`, appended with the next free number — **never renumber existing FR/SC identifiers**;
@@ -39,6 +39,8 @@ When folding in an answer, put it where it belongs structurally:
 - a new user journey becomes the next `### User Story N - <title> (Priority: Pn)` with its Why this priority, Independent Test and Acceptance Scenarios;
 - a boundary condition goes under `### Edge Cases`, a default you adopted goes under `## Assumptions`, and excluded work goes under `## Out of Scope`;
 - a domain object goes under `### Key Entities`, a source or reference under `## Source References`.
+
+Carry non-template sections forward verbatim, when the current body already starts with `# Feature Specification:`. In a body in template shape, a section the Spec template does not define (for example a human-added `## Human Decisions`) is input, not noise: keep its heading and content and its position relative to its neighbours (after the template sections and before `## Source References` if present, when it has no other place), and keep several such sections in their existing order. Fold any decision it records into the relevant requirements where appropriate, but the section itself is never deleted. The template rules above govern the template's own sections only; `## Open Questions` keeps its own removal rule below. A body that does not start with `# Feature Specification:` was written before this format existed: its sections are input to restructure, not sections to preserve, so fold their content into the template (original request verbatim in `**Input**`, motivation in `## Background`) and do not append the old body after it.
 
 Replace any `[NEEDS CLARIFICATION]` marker the answer resolves. Stories are named `User Story 1`, `User Story 2` — never `#1`.
 

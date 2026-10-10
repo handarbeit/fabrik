@@ -12,6 +12,7 @@
 .fabrik/state/
 .fabrik/fabrik.lock
 .fabrik/fabrik.log
+.fabrik/fabrik.log.*
 .fabrik/debug/
 .fabrik/history.json
 */.fabrik/history.json
