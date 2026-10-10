@@ -49,9 +49,11 @@ hardcoded to it); any other configuration keeps the pause.
 The failing checks, the trial head and pinned base SHAs, the member's head at failure and the job-log
 excerpts already gathered for `renderDiagnosticBlock` travel from the train worker to the poll
 goroutine as an in-memory per-member record. `writeContextFiles` materialises it as
-`.fabrik-context/merge-train-repair.md` for that one Validate dispatch and consumes it; with no pending
-record (any later stage, a later Validate, comment processing, or a daemon restart between eject and
-dispatch) a leftover file is removed and Validate still runs without it. A pending record that waited
+`.fabrik-context/merge-train-repair.md` for a Validate dispatch. The write does not consume the record,
+so a retry of that same Validate (incomplete run, turn-limit slice, tools-denied) is given the file
+again; the record is dropped when Validate completes (`handleStageComplete`). With no pending
+record (any other stage, a Validate after completion, comment processing, or a daemon restart between
+eject and dispatch) a leftover file is removed and Validate still runs without it. A pending record that waited
 more than 2 hours or whose member head no longer matches the item's PR head is discarded the same way,
 so it cannot leak into a later unrelated Validate run. The file's text is
 self-contained — base moved, rebase or merge onto it, reconcile with what landed, **never revert or work

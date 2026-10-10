@@ -146,14 +146,16 @@ func (e *Engine) dropPendingRepair(key string) {
 	delete(s.pending, key)
 }
 
-// consumePendingRepair removes and returns the member's pending repair context (nil if none).
-func (e *Engine) consumePendingRepair(key string) *repairContext {
+// peekPendingRepair returns the member's pending repair context (nil if none) without
+// removing it, so a retried Validate dispatch (turn-limit slice, tools-denied, resume) still
+// gets the same file. The record is dropped by dropPendingRepair when Validate completes, by
+// the TTL / head-move discards in writeMergeTrainRepair, by a new attempt replacing it, or by
+// the landing reset.
+func (e *Engine) peekPendingRepair(key string) *repairContext {
 	s := &e.autoRepair
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rc := s.pending[key]
-	delete(s.pending, key)
-	return rc
+	return s.pending[key]
 }
 
 // resetAutoRepair forgets everything recorded for a member; called with resetEjectionCount
@@ -219,26 +221,32 @@ func renderRepairContext(rc *repairContext) string {
 }
 
 // writeMergeTrainRepair materialises the member's pending repair context as
-// .fabrik-context/merge-train-repair.md for a Validate dispatch and consumes it, so the file
-// exists for that one dispatch only. Called by writeContextFiles on every invocation: with no
-// pending context (or for any other stage, or comment processing) a leftover file is removed,
-// so it can never leak into a later stage or a later Validate run. Errors are non-fatal and a
+// .fabrik-context/merge-train-repair.md for a Validate dispatch. The context is not consumed
+// by the write: a retry of the same Validate (incomplete run, turn-limit slice, tools-denied)
+// rewrites it, so the failing checks and the never-revert instruction survive the retry; it
+// is dropped when Validate completes (handleStageComplete). Called by writeContextFiles on
+// every invocation: with no pending context (or for any other stage, or comment processing)
+// a leftover file is removed, so it can never leak into a later stage or a later Validate run. Errors are non-fatal and a
 // missing context never blocks the dispatch.
 func (e *Engine) writeMergeTrainRepair(item gh.ProjectItem, repairDispatch bool, fabrikDir string) {
 	path := filepath.Join(fabrikDir, mergeTrainRepairFile)
 	var rc *repairContext
+	var key string
 	if repairDispatch {
 		owner, repo := itemOwnerRepo(item, e.defaultRepo())
-		rc = e.consumePendingRepair(autoRepairKey(owner, repo, item.Number))
+		key = autoRepairKey(owner, repo, item.Number)
+		rc = e.peekPendingRepair(key)
 	}
 	if rc != nil {
 		// A context that outlived its repair flow must not leak into a later, unrelated
 		// Validate run: discard it when it is old or the member's head has since moved.
 		if age := e.now().Sub(rc.at); age > repairContextTTL {
 			e.logf(item.Number, "merge-train", "discarding stale auto-repair context (%s old) for the Validate dispatch\n", age.Round(time.Minute))
+			e.dropPendingRepair(key)
 			rc = nil
 		} else if item.LinkedPRHeadSHA != "" && item.LinkedPRHeadSHA != rc.memberHeadSHA {
 			e.logf(item.Number, "merge-train", "discarding stale auto-repair context: PR head moved from %s to %s since the repair started\n", rc.memberHeadSHA, item.LinkedPRHeadSHA)
+			e.dropPendingRepair(key)
 			rc = nil
 		}
 	}

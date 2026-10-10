@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -358,7 +359,7 @@ func TestEjectRedSingleton_AutoRepair_RerouteFailureLeavesNothing(t *testing.T) 
 	if eng.autoRepairAttemptsAt("owner/repo#1", "base-1") != 0 {
 		t.Error("a failed reroute must not count an attempt")
 	}
-	if eng.consumePendingRepair("owner/repo#1") != nil {
+	if eng.peekPendingRepair("owner/repo#1") != nil {
 		t.Error("a failed reroute must leave no pending repair context")
 	}
 }
@@ -407,7 +408,7 @@ func TestEjectRedSingleton_AutoRepair_ClearAndTriggerFailurePausesUncounted(t *t
 	if !repairHasLabel(addedLabels(client, 1), "fabrik:paused") {
 		t.Fatal("when re-entry cannot be secured the member must be paused, never stranded")
 	}
-	if eng.autoRepairAttemptsAt("owner/repo#1", "base-1") != 0 || eng.consumePendingRepair("owner/repo#1") != nil {
+	if eng.autoRepairAttemptsAt("owner/repo#1", "base-1") != 0 || eng.peekPendingRepair("owner/repo#1") != nil {
 		t.Error("nothing may be counted or left pending")
 	}
 	if len(client.updateStatusCalls) != 1 {
@@ -473,12 +474,20 @@ func TestWriteMergeTrainRepair_OnlyForRepairDispatch(t *testing.T) {
 	if _, err := os.Stat(path); err == nil {
 		t.Fatal("file must not be written for a non-Validate / comment invocation")
 	}
-	// The repair dispatch writes and consumes it.
+	// The repair dispatch writes it.
 	eng.writeMergeTrainRepair(item, true, dir)
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("file must be written for the repair dispatch: %v", err)
 	}
-	// A later Validate run (nothing pending) removes the stale file.
+	// A retry of the same Validate (incomplete run, turn-limit slice, tools-denied) still gets
+	// it: the pending context is not consumed by the first write.
+	os.Remove(path)
+	eng.writeMergeTrainRepair(item, true, dir)
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("a retried repair dispatch must be given the file again: %v", err)
+	}
+	// Once the repair flow ends (Validate completed) a later Validate run removes the stale file.
+	eng.dropPendingRepair("owner/repo#1")
 	eng.writeMergeTrainRepair(item, true, dir)
 	if _, err := os.Stat(path); err == nil {
 		t.Fatal("stale file must be removed on a later Validate run")
@@ -505,7 +514,7 @@ func TestWriteMergeTrainRepair_DiscardsStaleContext(t *testing.T) {
 		if _, err := os.Stat(path(dir)); err == nil {
 			t.Fatal("an expired repair context must not be written")
 		}
-		if eng.consumePendingRepair("owner/repo#1") != nil {
+		if eng.peekPendingRepair("owner/repo#1") != nil {
 			t.Fatal("an expired repair context must be consumed, not left pending")
 		}
 	})
@@ -577,8 +586,31 @@ func TestAutoRepairState_ConcurrentAccess(t *testing.T) {
 			eng.takeRequeue(key, "b")
 			_ = eng.autoRepairAttemptsAt(key, "b")
 			_ = eng.renderRepairAttemptHistory(key)
-			eng.consumePendingRepair(key)
+			eng.peekPendingRepair(key)
 		}(i)
 	}
 	wg.Wait()
+}
+
+// Completing Validate ends the repair flow: handleStageComplete drops the pending context, so
+// a later, unrelated Validate run is not handed the repair file. Other stages leave it alone.
+func TestHandleStageComplete_DropsPendingRepairOnValidate(t *testing.T) {
+	client := behindClient()
+	eng := autoRepairEngine(t, client, 1)
+	item := repairMember().item
+	item.Labels = []string{"fabrik:yolo"}
+	pending := func() bool { return eng.peekPendingRepair("owner/repo#1") != nil }
+	set := func() {
+		eng.setPendingRepair("owner/repo#1", &repairContext{diag: repairDiag(), baseSHA: "b", memberHeadSHA: "h", attempt: 1, cap: 1, at: eng.now()})
+	}
+
+	set()
+	eng.handleStageComplete(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, item, &stages.Stage{Name: "Review"})
+	if !pending() {
+		t.Fatal("a non-Validate stage completing must not drop the pending repair context")
+	}
+	eng.handleStageComplete(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, item, &stages.Stage{Name: "Validate"})
+	if pending() {
+		t.Fatal("Validate completing must drop the pending repair context")
+	}
 }

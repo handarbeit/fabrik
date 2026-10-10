@@ -96,6 +96,12 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 
+	// A completed Validate ends the merge-train auto-repair flow (#2045): the pending
+	// repair context is kept across retries of that Validate and dropped here.
+	if stage.Name == "Validate" {
+		e.dropPendingRepair(autoRepairKey(owner, repo, item.Number))
+	}
+
 	// Clean up any failure label from a prior incomplete run.
 	e.removeFailedLabel(owner, repo, item.Number, stage.Name)
 
