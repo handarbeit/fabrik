@@ -124,7 +124,10 @@ These tests assume:
    GitHub App identity as `E2E_APP_ID`, `E2E_APP_PRIVATE_KEY_PATH` (relative
    to the bed dir, e.g. `.fabrik/github-app-key.pem`) and
    `E2E_APP_INSTALLATION_ID`, for an org-owned App installed on both test repos
-   with `contents: write` (git runs over HTTPS as the installation — ADR-1846).
+   with `contents: write` (git runs over HTTPS as the installation — ADR-1846)
+   and `actions: write` (required since #2105/ADR-2105 — engine startup and this
+   gate's preflight refuse an installation without it; grant it on the App and have
+   the org admin accept it on the installation before provisioning the bed).
    `.fabrik/config.yaml` must **not** set `github_app_*`: auth mode is applied
    per leg through `.env`, and a config key would silently turn every PAT leg
    into App auth. `run.sh` refuses up front if either is wrong.
