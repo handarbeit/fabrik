@@ -125,7 +125,9 @@ func tailFile(path string, n int) string {
 }
 
 // StopFabrikTestBed stops the running bed (SIGTERM to the locked pid) and waits
-// for the lock to clear (graceful shutdown unlinks it). No-op if not running.
+// for the lock to clear (the process exits and the OS releases the flock; the
+// file itself is never unlinked, so "cleared" means no live pid holds it).
+// No-op if not running.
 func StopFabrikTestBed(t *testing.T, env *Env) {
 	t.Helper()
 	pid := lockedPID(env)
