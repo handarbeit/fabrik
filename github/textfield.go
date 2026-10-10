@@ -3,6 +3,7 @@ package github
 import (
 	"fmt"
 	"strings"
+	"time"
 )
 
 // TextField identifies a ProjectV2 text field by node ID. It backs the
@@ -124,4 +125,60 @@ func (c *Client) ClearProjectItemField(projectID, itemID, fieldID string) error 
 		return fmt.Errorf("clearing field %s for item %s on project %s: %w", fieldID, itemID, projectID, err)
 	}
 	return nil
+}
+
+// statusLineValue is the display field's value node as selected by the board
+// and probe queries — only its own updatedAt, never the text (display-only,
+// #2048: nothing reads the value back).
+type statusLineValue struct {
+	UpdatedAt string `json:"updatedAt"`
+}
+
+// statusLineUpdatedAtTolerance absorbs timestamp skew between the field
+// value's updatedAt and the project item's updatedAt, which one mutation
+// bumps at (nearly) the same instant. A real change newer than this
+// still counts.
+const statusLineUpdatedAtTolerance = 2 * time.Second
+
+// SetStatusLineField tells the client the name of the display-only
+// status-line text field ("" = feature off). The board and probe queries then
+// also select that field's own updatedAt so a project item's updatedAt bump
+// that was caused only by a display-field write can be discounted — otherwise
+// every status-line write would look like a change to the item (drift, deep
+// fetch). Deliberately not on the engine's GitHubClient interface. Safe to
+// call concurrently.
+func (c *Client) SetStatusLineField(name string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.statusLineField = name
+}
+
+func (c *Client) addStatusLineVars(vars map[string]interface{}) {
+	c.mu.Lock()
+	name := c.statusLineField
+	c.mu.Unlock()
+	// $statusLine is non-null, so it is always sent; the @include directive
+	// keeps the selection off the wire when the feature is disabled.
+	vars["statusLine"] = name
+	vars["withStatusLine"] = name != ""
+}
+
+// projectItemUpdatedAt parses a project item's updatedAt for inclusion in an
+// item's effective updatedAt. It reports ok=false when the timestamp is
+// unparseable or when it is explained entirely by a write to the display
+// field (not after the field value's own updatedAt, within tolerance): such a
+// bump is Fabrik's own display write and must not read as item activity.
+// With no display-field value it behaves exactly as a plain parse. Status is
+// compared directly elsewhere, so a Status move is still detected.
+func projectItemUpdatedAt(itemUpdatedAt string, statusLine *statusLineValue) (time.Time, bool) {
+	t, err := parseTime(itemUpdatedAt)
+	if err != nil {
+		return time.Time{}, false
+	}
+	if statusLine != nil {
+		if ft, err := parseTime(statusLine.UpdatedAt); err == nil && !t.After(ft.Add(statusLineUpdatedAtTolerance)) {
+			return time.Time{}, false
+		}
+	}
+	return t, true
 }
