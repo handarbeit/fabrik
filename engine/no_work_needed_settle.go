@@ -195,6 +195,9 @@ func (e *Engine) settleNoWorkNeeded(board *gh.ProjectBoard, item gh.ProjectItem,
 		if e.webhookMgr != nil {
 			e.webhookMgr.RegisterEchoIfSubscribed("projects_v2_item", "edited", item.ItemID)
 		}
+		// Done move that bypasses advanceToNextStage: clear the display-only
+		// status line (#2048), e.g. the "<Stage> · running" the dispatch wrote.
+		e.clearStatusLine(item)
 	}
 
 	// Close the GitHub issue so it mirrors the normal pipeline close-on-merge path.

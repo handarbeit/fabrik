@@ -1020,8 +1020,9 @@ func (e *Engine) acquireLockAndVerify(ctx context.Context, item gh.ProjectItem, 
 		inProgressAdded = true
 		e.syncLabelAdd(item, inProgressLabel, true)
 	}
-	// Display-only status line (#2048). The cleanup stage (Done) clears the line
-	// on its way in rather than announcing itself.
+	// Display-only status line (#2048). Cleanup stages never reach here (they
+	// return from handleCleanupStage earlier); the Done move itself clears the
+	// line, so this guard is only defensive.
 	if !stage.CleanupWorktree {
 		e.setStatusLine(item, statusLineStageRunning(stage.Name))
 	}

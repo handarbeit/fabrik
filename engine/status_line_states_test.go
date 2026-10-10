@@ -159,3 +159,30 @@ func TestStatusLine_AwaitingCIWithoutPR(t *testing.T) {
 		t.Errorf("line = %q", got)
 	}
 }
+
+// Done moves that bypass advanceToNextStage must clear the line too.
+func TestStatusLine_NoWorkNeededDoneMoveClears(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineWithStages(t, client, testStagesWithCleanup())
+	enableStatusLine(t, eng, client)
+	item := gh.ProjectItem{Number: 15, ItemID: "PVTI_state", Repo: "owner/repo", Status: "Plan"}
+	eng.setStatusLine(item, statusLineStageRunning("Plan"))
+
+	eng.settleNoWorkNeeded(&gh.ProjectBoard{ProjectID: "PVT_1"}, item, &stages.Stage{Name: "Plan", Order: 2})
+	if got := statusLineSeq(client, "PVTI_state"); !equalSeq(got, []string{"Plan · running", "<cleared>"}) {
+		t.Errorf("lines = %q", got)
+	}
+}
+
+func TestStatusLine_ClosedItemAdvanceClears(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineWithStages(t, client, testStagesWithCleanup())
+	enableStatusLine(t, eng, client)
+	item := gh.ProjectItem{Number: 16, ItemID: "PVTI_state", Repo: "owner/repo", Status: "Plan"}
+	eng.setStatusLine(item, statusLineStageRunning("Plan"))
+
+	eng.advanceClosedItemToDone(&gh.ProjectBoard{ProjectID: "PVT_1"}, item, "opt-done", "Done")
+	if got := statusLineSeq(client, "PVTI_state"); !equalSeq(got, []string{"Plan · running", "<cleared>"}) {
+		t.Errorf("lines = %q", got)
+	}
+}
