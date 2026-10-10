@@ -137,7 +137,7 @@ bisection sub-trials are structurally out of reach.
   run, and a Fabrik-authored comment explaining it.
 - On upgrade with the default `merge`, repos that previously only got trials start receiving
   Fabrik merge commits on member branches. Repos that forbid them hit a rejected push and fall back
-  per poll (a per-repo memo is a possible follow-up), or set `off`.
+  per poll (ADR-2065 adds a per-repo memo for a positively identified policy rejection), or set `off`.
 - The worker holds its slot and the engine semaphore while it waits for the member's CI, bounded by
   `CIBackstopTimeout`, as a trial does; on timeout the member stays Queued.
 - The catch-up gives up the main-moved recovery the trial path has (`landGreenBatch`): base movement
