@@ -122,7 +122,24 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 		if s.LinkedPR != nil {
 			cachedPRNum = s.LinkedPR.Number
 		}
-		if pi.LinkedPRNumber != cachedPRNum {
+		driftKey := probeDriftKey(repo, pi.Number)
+		// R2 (#2080): a terminal item — flagged terminal in the same cleanup stage,
+		// or closed in a cleanup stage with no worktree — has no remaining Fabrik
+		// work, so nothing about its linkage matters. It skips the drift check
+		// entirely instead of invalidating and then being skipped.
+		driftExempt := false
+		if s.Terminal {
+			if pst := stages.FindStage(e.cfg.Stages, pi.Status); pst != nil && pst.CleanupWorktree && pi.Status == s.Status {
+				driftExempt = true
+			}
+		} else if e.probeOnlyTerminal(gh.ProjectItem{Number: pi.Number, IsClosed: pi.IsClosed, Status: pi.Status, Repo: repo}) {
+			driftExempt = true
+		}
+		if driftExempt {
+			e.probeDrift.forget(driftKey)
+		} else if pi.LinkedPRNumber == cachedPRNum {
+			e.probeDrift.converged(driftKey)
+		} else {
 			if s.LastDeepFetchAt.IsZero() {
 				// Never deep-fetched: no prior deep cache to invalidate.
 				// Treat the probe's value as authoritative — write it into LinkedPR.Number
@@ -132,11 +149,11 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 				// the old FetchProjectBoard path that did not populate LinkedPR.Number).
 				// Apply even when pi.LinkedPRNumber==0 to clear a stale prToKey entry
 				// if the PR was delinked between bootstrap and the first probe cycle.
-				e.store.Apply(itemstate.PRDetailsUpdated{
+				e.store.Apply(itemstate.FromProbe{Inner: itemstate.PRDetailsUpdated{
 					Repo:     repo,
 					Number:   pi.Number,
 					PRNumber: pi.LinkedPRNumber,
-				})
+				}})
 			} else if pi.LinkedPRNumber == 0 && itemHasBaseLabel(gh.ProjectItem{Labels: s.Labels}) {
 				// base:<branch> item: closedByPullRequestsReferences is only populated
 				// for PRs targeting the repo's default branch, so the shallow probe
@@ -147,10 +164,24 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 				// cached state (s), never the probe item pi — probe items never
 				// carry labels (see doc comment above).
 			} else {
-				// Warm cache (has been deep-fetched): real linkage drift — invalidate.
-				e.logf(pi.Number, "cache", "probe: linkage drift (was PR #%d, now PR #%d) — invalidating deep cache\n",
-					cachedPRNum, pi.LinkedPRNumber)
-				e.store.Apply(itemstate.DeepFetchInvalidated{Repo: repo, Number: pi.Number})
+				// Warm cache (has been deep-fetched): linkage drift. The ledger (#2080)
+				// invalidates once per (cached, probe) pair: if the deep fetch that
+				// follows keeps the cached value (e.g. a closed PR that
+				// closedByPullRequestsReferences omits), the same probe reading must not
+				// invalidate again on every poll.
+				v := e.probeDrift.observe(driftKey, cachedPRNum, pi.LinkedPRNumber, e.now())
+				switch {
+				case v.Invalidate:
+					e.logf(pi.Number, "cache", "probe: linkage drift (was PR #%d, now PR #%d) — invalidating deep cache\n",
+						cachedPRNum, pi.LinkedPRNumber)
+					e.store.Apply(itemstate.FromProbe{Inner: itemstate.DeepFetchInvalidated{Repo: repo, Number: pi.Number}})
+					if v.Warn {
+						e.logProbeDriftLoop(pi.Number, cachedPRNum, pi.LinkedPRNumber, v.Count)
+					}
+				case v.LogSkip:
+					e.logf(pi.Number, "cache", "probe: linkage disagreement persists after deep fetch (cached PR #%d, probe PR #%d) — not invalidating again\n",
+						cachedPRNum, pi.LinkedPRNumber)
+				}
 			}
 		}
 
@@ -167,25 +198,25 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 			}
 			// Status changed (left the cleanup stage or moved to a different one) — clear
 			// the flag and fall through to normal probe processing.
-			e.store.Apply(itemstate.TerminalFlagSet{Repo: repo, Number: pi.Number, Terminal: false})
+			e.store.Apply(itemstate.FromProbe{Inner: itemstate.TerminalFlagSet{Repo: repo, Number: pi.Number, Terminal: false}})
 			e.logf(pi.Number, "poll", "terminal flag cleared (status drifted to %q)\n", pi.Status)
 		}
 
 		// Apply probe state (updates IsClosed, State, IsPR, Status, UpdatedAt;
 		// intentionally skips Labels to preserve webhook-driven label state).
-		e.store.Apply(itemstate.ProbeBoardItemUpdated{Repo: repo, Number: pi.Number, Item: pi})
+		e.store.Apply(itemstate.FromProbe{Inner: itemstate.ProbeBoardItemUpdated{Repo: repo, Number: pi.Number, Item: pi}})
 
 		// Unconditionally write the probe's head SHA whenever present — the probe
 		// response is always authoritative, including for cache-fresh items that
 		// skip the deep-fetch below. This is the primary poll-mode path for keeping
 		// HeadSHA populated without relying solely on the REST FetchLinkedPR fallback.
 		if pi.LinkedPRHeadSHA != "" && pi.LinkedPRNumber != 0 {
-			e.store.Apply(itemstate.PRHeadSHAUpdated{
+			e.store.Apply(itemstate.FromProbe{Inner: itemstate.PRHeadSHAUpdated{
 				Repo:        repo,
 				Number:      pi.Number,
 				LinkedPRNum: pi.LinkedPRNumber,
 				SHA:         pi.LinkedPRHeadSHA,
-			})
+			}})
 		}
 
 		// Existing item in unconfigured column: probe state updated above (keeps
@@ -209,7 +240,7 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 			Repo:      repo,
 			UpdatedAt: pi.EffectiveUpdatedAt,
 		}
-		if fetchErr := e.readClient.FetchItemDetails(&minimal); fetchErr != nil {
+		if fetchErr := cacheImpl.FetchItemDetailsFromProbe(&minimal); fetchErr != nil {
 			e.logf(pi.Number, "warn", "probe: deep-fetch for stale item failed: %v\n", fetchErr)
 			e.store.Apply(itemstate.DeepFetchFailed{Repo: repo, Number: pi.Number, At: time.Now()})
 			continue
@@ -220,7 +251,7 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 			if !s.Terminal {
 				e.logf(pi.Number, "poll", "terminal flag set\n")
 			}
-			e.store.Apply(itemstate.TerminalFlagSet{Repo: repo, Number: pi.Number, Terminal: true})
+			e.store.Apply(itemstate.FromProbe{Inner: itemstate.TerminalFlagSet{Repo: repo, Number: pi.Number, Terminal: true}})
 		}
 	}
 
@@ -230,6 +261,7 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 		if !newKeys[key] {
 			e.logf(snap.Number(), "cache", "probe: item gone from board — removing from store\n")
 			e.store.Remove(snap.Repo(), snap.Number())
+			e.probeDrift.forget(probeDriftKey(snap.Repo(), snap.Number()))
 		}
 	}
 
@@ -287,12 +319,26 @@ func (e *Engine) isProbeOnlyTerminal(item gh.ProjectItem) bool {
 	if st == nil || !st.CleanupWorktree {
 		return false
 	}
-	if e.worktreeExistsForItem(item) {
+	if !e.probeOnlyTerminal(item) {
 		e.logf(item.Number, "cache", "probe: worktree present — not treating as terminal yet\n")
 		return false
 	}
 	e.logf(item.Number, "cache", "probe: no worktree on disk — treating as terminal\n")
 	return true
+}
+
+// probeOnlyTerminal is isProbeOnlyTerminal's predicate without the logging: it
+// runs per item per poll in the drift check (R2, #2080), where a log line per
+// closed Done item per poll would be noise.
+func (e *Engine) probeOnlyTerminal(item gh.ProjectItem) bool {
+	if !item.IsClosed {
+		return false
+	}
+	st := stages.FindStage(e.cfg.Stages, item.Status)
+	if st == nil || !st.CleanupWorktree {
+		return false
+	}
+	return !e.worktreeExistsForItem(item)
 }
 
 // seedTerminalFromProbeItems applies TerminalFlagSet for probe items that

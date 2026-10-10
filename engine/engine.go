@@ -281,6 +281,7 @@ type Engine struct {
 	ciInfraTiming               ciInfraTiming                 // test-shrinkable CI-infrastructure dwells (#2052); zero = defaults
 	startupWatchMu              sync.Mutex                    // guards startupWatches
 	startupWatches              map[string]*prStartupState    // key: "owner/repo#PR"; the stage wait_for_ci gate's retrigger state, reset when the PR's head SHA moves (#2052 R6) — in memory only, so a restart may grant one extra retrigger
+	probeDrift                  probeDriftLedger              // the probe loop's linkage-drift ledger (#2080) — per-item last-invalidated pair and loop counter; in memory only
 	flakeRerunMu                sync.Mutex                    // guards flakeReruns and flakeRerunDisabled
 	flakeReruns                 map[string]*prFlakeState      // key: "owner/repo#PR"; the stage wait_for_ci gate's flake re-run budget (#2072), reset when the PR's head SHA moves — in memory only, so a restart may grant one extra re-run
 	flakeRerunDisabled          bool                          // test-only neutralisation seam (SetCIFlakeRerunDisabledForTest)
