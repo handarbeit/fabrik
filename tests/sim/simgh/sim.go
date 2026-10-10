@@ -195,6 +195,10 @@ type Sim struct {
 	restRate    rateBudget
 	graphqlRate rateBudget
 
+	// omitClosedPRsFromBoard, set by WithClosedPRsOmittedFromBoard, hides closed
+	// unmerged PRs from the board projections' linked-PR fields.
+	omitClosedPRsFromBoard bool
+
 	// seedErr holds the first error produced by a chained Seed* call. Checked
 	// with Err.
 	seedErr error
@@ -214,6 +218,17 @@ type Option func(*Sim)
 // WithClock substitutes the clock every time-bearing value is read from.
 func WithClock(c Clock) Option {
 	return func(s *Sim) { s.clock = c }
+}
+
+// WithClosedPRsOmittedFromBoard makes the board reads (ProbeProjectBoard and the
+// deep FetchItemDetails/FetchProjectItem projection) leave a closed, unmerged PR
+// out of the item's linked-PR fields, as GitHub's closedByPullRequestsReferences
+// does by default (it needs includeClosedPrs to return one). The REST-style
+// FetchLinkedPR/FindPRForIssue still find it. Off by default: it is the
+// real-GitHub behaviour the probe-drift loop (#2080) depends on, opted into per
+// scenario so existing scenarios keep their board reads. See FIDELITY.md.
+func WithClosedPRsOmittedFromBoard() Option {
+	return func(s *Sim) { s.omitClosedPRsFromBoard = true }
 }
 
 // WithRateLimits overrides the static rate-limit budgets reported by

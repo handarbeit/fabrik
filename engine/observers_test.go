@@ -597,3 +597,23 @@ func TestPushUnblockObserver_BlockedByChanged_NoOpWhenBlockedByEmpty(t *testing.
 		// expected: no removal
 	}
 }
+
+// TestWakeChObserver_IgnoresProbeOrigin (#2080 R3): the probe loop's own writes
+// never wake the poll loop, while the same flags from any other origin do.
+func TestWakeChObserver_IgnoresProbeOrigin(t *testing.T) {
+	wakeCh := make(chan struct{}, 4)
+	obs := newWakeChObserver(wakeCh)
+	flags := itemstate.LinkedPRChanged | itemstate.StatusChanged
+
+	obs.OnChange(itemstate.Change{Repo: "o/r", Number: 1, Fields: flags, Origin: itemstate.OriginProbe}, itemstate.Snapshot{})
+	if len(wakeCh) != 0 {
+		t.Fatalf("probe-origin change woke the poll loop")
+	}
+	for _, origin := range []itemstate.ChangeOrigin{itemstate.OriginOther, itemstate.OriginEngine, itemstate.OriginWebhook} {
+		obs.OnChange(itemstate.Change{Repo: "o/r", Number: 1, Fields: flags, Origin: origin}, itemstate.Snapshot{})
+		if len(wakeCh) != 1 {
+			t.Fatalf("origin %v: expected a wake, got %d queued", origin, len(wakeCh))
+		}
+		<-wakeCh
+	}
+}

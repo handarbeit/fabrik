@@ -755,6 +755,25 @@ func (c *CacheImpl) FetchProjectBoard(owner, repo string, projectNum int, ownerT
 // Falls back to GitHub on cache miss or when the cache is stale, and populates
 // the cache with the result.
 func (c *CacheImpl) FetchItemDetails(item *gh.ProjectItem) error {
+	return c.fetchItemDetails(item, false)
+}
+
+// FetchItemDetailsFromProbe is FetchItemDetails for the per-poll probe loop
+// (#2080): identical behavior, but the Store writes it makes are tagged
+// OriginProbe so they never wake the poll loop — the probe runs at the start of
+// the poll that dispatches, so its own writes are already seen by that poll.
+// Deliberately not on the ReadClient interface; only the probe loop calls it.
+func (c *CacheImpl) FetchItemDetailsFromProbe(item *gh.ProjectItem) error {
+	return c.fetchItemDetails(item, true)
+}
+
+func (c *CacheImpl) fetchItemDetails(item *gh.ProjectItem, fromProbe bool) error {
+	apply := func(m itemstate.Mutation) {
+		if fromProbe {
+			m = itemstate.FromProbe{Inner: m}
+		}
+		c.store.Apply(m)
+	}
 	c.mu.RLock()
 	paused := c.paused
 	c.mu.RUnlock()
@@ -788,7 +807,7 @@ func (c *CacheImpl) FetchItemDetails(item *gh.ProjectItem) error {
 	// ItemDeepFetched → applyProjectItem → ensureLinkedPR sets lpr.Number = pi.LinkedPRNumber,
 	// which then triggers updateIndexes to populate the prToKey index automatically.
 	// No explicit prNumToKey backfill needed.
-	c.store.Apply(itemstate.ItemDeepFetched{
+	apply(itemstate.ItemDeepFetched{
 		Repo:       item.Repo,
 		Number:     item.Number,
 		FreshState: *item,
@@ -797,7 +816,7 @@ func (c *CacheImpl) FetchItemDetails(item *gh.ProjectItem) error {
 	// clobbering a webhook-populated SHA with an empty value from the shallow path.
 	// The deep fetch always carries an authoritative headRefOid from the GraphQL query.
 	if item.LinkedPRHeadSHA != "" && item.LinkedPRNumber != 0 {
-		c.store.Apply(itemstate.PRHeadSHAUpdated{
+		apply(itemstate.PRHeadSHAUpdated{
 			Repo:        item.Repo,
 			Number:      item.Number,
 			LinkedPRNum: item.LinkedPRNumber,

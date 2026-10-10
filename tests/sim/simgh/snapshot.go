@@ -554,6 +554,10 @@ var snapshotFieldRegistry = map[string]map[string]fieldDisposition{
 		// boardLag is a transient read-model perturbation installed by a scenario
 		// (LagBoardStatus, #1871), not model state — a restart reads the truth.
 		"boardLag": fieldSkipped,
+		// omitClosedPRsFromBoard is construction-time configuration
+		// (WithClosedPRsOmittedFromBoard, #2080), like clock: Restore writes into
+		// the Sim that already carries it.
+		"omitClosedPRsFromBoard": fieldSkipped,
 	},
 	"repoState": {
 		"owner":             fieldCopied,

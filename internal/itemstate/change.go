@@ -133,6 +133,11 @@ const (
 	OriginEngine
 	// OriginWebhook is an IssueLabeled/IssueUnlabeled delta from a webhook.
 	OriginWebhook
+	// OriginProbe is a mutation applied by the per-poll board probe loop
+	// (runProbeAndDeepFetch) wrapped in FromProbe (#2080). The probe runs at the
+	// start of the same poll that dispatches work, so waking the poll loop for its
+	// own writes only buys a redundant early poll; the wake observer ignores it.
+	OriginProbe
 )
 
 // diffLabels returns the labels added to and removed from before to reach after.
