@@ -334,7 +334,11 @@ Reconstruction reads only durable state (never the map) and never launches a gor
 
 **Compose-not-duplicate with bisection.** Main-moved rebase recovery lives **only** in `landGreenBatch` (the green landing path); a red re-validation after a rebase **dissolves** rather than entering bisection. The rebase-cycle budget (`MaxTrainRebaseCycles`) and the bisection cost cap (`MaxBisectValidations`) are therefore disjoint and never double-count — the next poll re-forms a fresh train that bisects cleanly.
 
-**Per-repo isolation (FR-3).** Serialization is keyed strictly `owner/repo`, so trains for different repos run concurrently under the shared `MaxConcurrent` semaphore; the per-repo guard never cross-blocks distinct repos.
+**Per-repo isolation (FR-3).** Serialization is keyed strictly `owner/repo`, so trains for different repos run concurrently; the per-repo guard never cross-blocks distinct repos.
+
+**Worker-slot scope (#2046, ADR 2046).** A train holds **no** `Engine.sem` slot for its lifecycle. `prepareTrainWorker` and `runMergeTrainWorker` acquire none; assembly git work, PR operations, `pollTrainCI`, bisection bookkeeping and landing all run slot-free, so the train is not counted against `MaxConcurrent` while it polls CI. The only slot use is `resolveConflictWithClaude`, which brackets exactly the `InvokeForComments` call via `acquireTrainSlot` (non-blocking try first; a real wait is announced once through `logfRepo` as `waiting for a free worker slot for conflict resolution on #N`, so the repo's job row shows it, ADR-1661) and releases it as soon as the call returns — before `finalizeConflictResolution`. This one site covers every path that reaches Claude: `assembleTrialBranch` (main re-form loop, `bisect`, `landOneAtATime`, `landGreenBatch`'s rebase loop) and the singleton catch-up merge (`runCatchUpGit`, §6.30). Rerere replay and the regenerate-only branches never take a slot. The usage-limit suspension is checked before the wait and again after it. The wait is bounded only by the context, not by the invocation's wall-time cap.
+
+**Cancellation is not a verdict (#2046).** A context cancellation while waiting for the slot (or killing an in-flight conflict-resolution invocation) returns the non-nil "not attempted" error (the same channel as a usage-limit exit): the member is not ejected, nothing is paused, the runaway trial counter is not charged (`assembleAndValidate` skips `recordTrial` when `trainCancelled`), `bisect` aborts the episode instead of degrading to one-at-a-time, `landOneAtATime` stops, `landGreenBatch`'s rebase loop returns without `dissolveBatch`, and the catch-up returns `catchUpDefer`. Members stay Queued. The in-flight marker is still cleared only by the two `finishTrain` defers (ADR-067).
 
 **References:** [ADR-1615: Structural Identity for Destructive Merge-Train Actions](../adrs/1615-structural-identity-for-destructive-actions.md).
 
@@ -4431,7 +4435,7 @@ No special handling. Each is independent. The engine only checks the in_progress
 
 ### 9.1 Semaphore
 
-`Engine.sem` is a buffered channel of size `MaxConcurrent` (default 5). The dispatch loop, `dispatchReviewReinvoke()`, and `dispatchCIFixReinvoke()` all acquire slots from this semaphore before invoking Claude.
+`Engine.sem` is a buffered channel of size `MaxConcurrent` (default 5). The dispatch loop, `dispatchReviewReinvoke()`, and `dispatchCIFixReinvoke()` all acquire slots from this semaphore before invoking Claude. The merge train takes a slot only around each of its own Claude conflict-resolution invocations (`acquireTrainSlot`, #2046) — never for its lifecycle (see "Merge-Train Serialization + Main-Moved Recovery", *Worker-slot scope*).
 
 ### 9.2 Worker In-Flight Guard (formerly inFlight Map)
 

@@ -49,8 +49,9 @@ func TestMergeTrainTwoBasesConcurrent(t *testing.T) {
 	const maint = "maint-2007"
 
 	env := mergeTrainEnv(t, mergeTrainEnvOptions{
-		// Each train worker holds one e.sem slot for its whole life; a lower
-		// cap could serialise the two workers into a quiet pass.
+		// A train takes an e.sem slot only around a conflict-resolution Claude
+		// call (#2046), so the cap no longer bounds the two workers; kept at 4
+		// as in the original scenario.
 		ConfigureCfg: func(cfg *engine.Config) { cfg.MaxConcurrent = 4 },
 	})
 

@@ -3563,13 +3563,14 @@ func TestMergeTrainWorker_ConflictResolvedByClaude(t *testing.T) {
 	}
 }
 
-// TestPrepareTrainWorker_FailurePathClearsMarkerAndSemaphore verifies the ADR-067
-// invariant directly: when prepareTrainWorker fails after acquiring the semaphore
-// (here, no holding stage configured), its own defer must release the semaphore AND
-// clear mergeTrainInFlight — since ok=false means runMergeTrainWorker's top-level
-// defer never gets registered, prepareTrainWorker's own-failure defer is the only
-// thing that can prevent a leaked semaphore slot or a permanently wedged train.
-func TestPrepareTrainWorker_FailurePathClearsMarkerAndSemaphore(t *testing.T) {
+// TestPrepareTrainWorker_FailurePathClearsMarkerAndTakesNoSlot verifies the ADR-067
+// invariant directly: when prepareTrainWorker fails (here, no holding stage
+// configured), its own defer must clear mergeTrainInFlight — since ok=false means
+// runMergeTrainWorker's top-level defer never gets registered, that defer is the only
+// thing that can prevent a permanently wedged train. Since #2046 it also takes no
+// e.sem slot at all: with every slot held by stage workers it returns promptly, and
+// the occupancy is exactly what it was before (no leak, no stray release).
+func TestPrepareTrainWorker_FailurePathClearsMarkerAndTakesNoSlot(t *testing.T) {
 	skipIfNoGit(t)
 	_, _, _, wm := setupTrainRepo(t)
 	client := &mockGitHubClient{}
@@ -3580,9 +3581,14 @@ func TestPrepareTrainWorker_FailurePathClearsMarkerAndSemaphore(t *testing.T) {
 	eng.mu.Unlock()
 
 	// Remove the holding stage so prepareTrainWorker's holdingStage(e.cfg) == nil
-	// check fires — one of its four early-return failure branches.
+	// check fires — one of its early-return failure branches.
 	eng.cfg.Stages = []*stages.Stage{
 		{Name: "Research", Order: 1, Prompt: "Do research"},
+	}
+
+	// Saturate every slot as if stage workers held them all.
+	for i := 0; i < cap(eng.sem); i++ {
+		eng.sem <- struct{}{}
 	}
 
 	batch := makeSeamBatch(1)
@@ -3590,9 +3596,17 @@ func TestPrepareTrainWorker_FailurePathClearsMarkerAndSemaphore(t *testing.T) {
 	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 	eng.store.EnterRepoWorker(mergeTrainKey("owner/repo", "main"))
 
-	_, _, ok := eng.prepareTrainWorker(context.Background(), state, "owner", "repo", "main", batch)
+	// A short-lived context: under the old lifecycle-long hold this blocked on e.sem
+	// until the context expired and returned without ever reaching the stage lookup.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	start := time.Now()
+	_, _, ok := eng.prepareTrainWorker(ctx, state, "owner", "repo", "main", batch)
 	if ok {
 		t.Fatal("expected prepareTrainWorker to fail with no holding stage configured")
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Fatal("prepareTrainWorker waited for a worker slot — the train must not hold or wait for one at start")
 	}
 
 	if _, found := eng.mergeTrainInFlight.Load(mergeTrainKey("owner/repo", "main")); found {
@@ -3601,81 +3615,8 @@ func TestPrepareTrainWorker_FailurePathClearsMarkerAndSemaphore(t *testing.T) {
 	if eng.store.RepoWorkerActive(mergeTrainKey("owner/repo", "main")) {
 		t.Error("expected store repo-worker liveness cleared by prepareTrainWorker's own-failure defer")
 	}
-
-	// The semaphore must be released too: acquiring MaxConcurrent slots must succeed
-	// without blocking if prepareTrainWorker didn't leak the one it took.
-	acquired := 0
-	for i := 0; i < eng.cfg.MaxConcurrent; i++ {
-		select {
-		case eng.sem <- struct{}{}:
-			acquired++
-		default:
-			t.Fatalf("semaphore slot %d unavailable — prepareTrainWorker leaked its acquired slot", i)
-		}
-	}
-	for i := 0; i < acquired; i++ {
-		<-eng.sem
-	}
-}
-
-// TestPrepareTrainWorker_SemaphoreWait_LogsWaitingMessage verifies a review
-// finding on #1661/PR #1663: since JobStartedEvent fires before
-// prepareTrainWorker is even called, a saturated e.sem (shared with every
-// per-issue Claude invocation) would otherwise leave the merge train's TUI
-// row sitting with an empty LastLine and a ticking elapsed timer while
-// merely queued for a slot — indistinguishable from a hung worker. When the
-// semaphore isn't immediately available, prepareTrainWorker must log once
-// before blocking on it.
-func TestPrepareTrainWorker_SemaphoreWait_LogsWaitingMessage(t *testing.T) {
-	skipIfNoGit(t)
-	_, _, _, wm := setupTrainRepo(t)
-	client := &mockGitHubClient{}
-	claude := &mockClaudeInvoker{}
-	eng := trainTestEngine(t, client, claude, wm)
-	eng.mu.Lock()
-	eng.worktreeManagers["owner/repo"] = wm
-	eng.mu.Unlock()
-
-	ch := make(chan tui.Event, 64)
-	eng.events = ch
-
-	// Saturate every slot so the semaphore acquire in prepareTrainWorker cannot
-	// succeed immediately.
-	for i := 0; i < eng.cfg.MaxConcurrent; i++ {
-		eng.sem <- struct{}{}
-	}
-	defer func() {
-		for i := 0; i < eng.cfg.MaxConcurrent; i++ {
-			<-eng.sem
-		}
-	}()
-
-	batch := makeSeamBatch(1)
-	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
-	eng.mergeTrainInFlight.Store("owner/repo", state)
-	eng.store.EnterRepoWorker("owner/repo")
-
-	// A short-lived context so the blocked semaphore acquire hits ctx.Done()
-	// instead of hanging forever (nothing else drains eng.sem in this test).
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-
-	_, _, ok := eng.prepareTrainWorker(ctx, state, "owner", "repo", defaultPartitionBase, batch)
-	if ok {
-		t.Fatal("expected prepareTrainWorker to fail — the semaphore was never freed")
-	}
-
-	events := collectEvents(ch, 20*time.Millisecond)
-	var sawWaiting bool
-	for _, raw := range events {
-		if ev, isLog := raw.(tui.LogEvent); isLog && ev.Tag == "merge-train" && ev.Repo == "owner/repo" {
-			if strings.Contains(ev.Message, "waiting for a free worker slot") {
-				sawWaiting = true
-			}
-		}
-	}
-	if !sawWaiting {
-		t.Errorf("expected a 'waiting for a free worker slot' LogEvent while the semaphore was saturated; events: %v", events)
+	if got := len(eng.sem); got != cap(eng.sem) {
+		t.Errorf("slot occupancy = %d, want %d — prepareTrainWorker must neither take nor release a slot", got, cap(eng.sem))
 	}
 }
 
@@ -9215,7 +9156,7 @@ func TestResolveTrainConflict_UnmergedPathsErrorFallsBackToPlainClaude(t *testin
 	// attempting to classify conflicted paths against the generated set.
 	wtDir := t.TempDir()
 
-	_, diag, err := eng.resolveTrainConflict(context.Background(), makeTrainItem(1, "Issue 1"), wtDir, holdingStage(eng.cfg), "deadbeef", "deadbeef", "", InvokeOptions{})
+	_, diag, err := eng.resolveTrainConflict(context.Background(), "owner/repo", makeTrainItem(1, "Issue 1"), wtDir, holdingStage(eng.cfg), "deadbeef", "deadbeef", "", InvokeOptions{})
 	if err != nil {
 		t.Fatalf("resolveTrainConflict: %v", err)
 	}
@@ -10118,7 +10059,7 @@ func TestResolveConflictWithClaude_FallbackKillsUnboundedInvocation(t *testing.T
 	ch := make(chan result, 1)
 	start := time.Now()
 	go func() {
-		resolved, _, err := eng.resolveConflictWithClaude(context.Background(), memberItem, trainWorkDir, holdingStg, "deadbeef", nil, "deadbeef", nil, InvokeOptions{})
+		resolved, _, err := eng.resolveConflictWithClaude(context.Background(), "owner/repo", memberItem, trainWorkDir, holdingStg, "deadbeef", nil, "deadbeef", nil, InvokeOptions{})
 		ch <- result{resolved, err}
 	}()
 

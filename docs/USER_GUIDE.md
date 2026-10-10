@@ -1046,6 +1046,12 @@ user: your-github-username
 
 # Maximum number of parallel Claude sessions. Tune based on your API tier capacity.
 # Each active session counts against your Anthropic API concurrency limit.
+# The merge train is not counted against this limit while it assembles trials,
+# waits for CI, bisects or lands. It takes a slot only briefly, around each Claude
+# conflict-resolution call (including the singleton catch-up merge), and gives it
+# back as soon as the call returns. On a saturated board, a train that needs
+# conflict resolution waits for a free slot (logged as "waiting for a free worker
+# slot for conflict resolution on #N") rather than failing.
 # max_concurrent: 5
 
 # Maximum stage failures before pausing an issue. When exceeded, fabrik:paused and
@@ -1300,7 +1306,7 @@ The flag/env suggestion is derived mechanically from Fabrik's snake_case (`confi
 | `FABRIK_YOLO` | `yolo` | Auto-advance (`true`/`1`/`yes`) | `false` |
 | `FABRIK_POLL` | `poll` | Poll interval in seconds. Governs GitHub API cadence; does not affect stage retry latency | `30` |
 | `FABRIK_RETRY_BACKOFF` | `retry_backoff` | Seconds before re-dispatching a stage that did not complete. Independent of `poll` — raise `poll` to protect a shared rate limit without slowing retries (#1831). Minimum 1 | `60` |
-| `FABRIK_MAX_CONCURRENT` | `max_concurrent` | Max parallel Claude sessions | `5` |
+| `FABRIK_MAX_CONCURRENT` | `max_concurrent` | Max parallel Claude sessions. The merge train counts against it only while running a conflict-resolution Claude call | `5` |
 | `FABRIK_MAX_RETRIES` | `max_retries` | Max retries before pausing (0 = unlimited). Genuine failures only — see `FABRIK_MAX_SLICE_RETRIES` for turn-cap preemptions | `3` |
 | `FABRIK_MAX_SLICE_RETRIES` | *(no config.yaml key)* | Maximum number of turn-cap preemption cycles per stage before pausing with `fabrik:paused` + `fabrik:awaiting-input` (positive integer; invalid or unset values default to 10). A large job resuming across several slices is not a failure and is bounded separately from `max_retries`. See `--max-slice-retries`. | `10` |
 | `FABRIK_MAX_RESUME_FAILURES` | *(no config.yaml key)* | Maximum number of consecutive failed `--resume` attempts for one (issue, stage) session before Fabrik discards the session pointer and cold-starts (positive integer; invalid or unset values default to 2). Independent of `max_retries` — see `--max-resume-failures`. | `2` |
