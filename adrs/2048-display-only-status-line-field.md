@@ -85,7 +85,8 @@ new state needs a hook added deliberately.
   `deferred: overlaps #M` until the next formation admits it.
 - `claude-limit until HH:MM` is written only for the item whose invocation hit the limit (the
   suspension is account-wide; one write per detection keeps volume down).
-- Done is cleared in `advanceToNextStage`, the single funnel for every Done move; it also clears on
+- Done is cleared in `advanceToNextStage` (merge-train landings, ordinary merge) and in the two Done moves
+  that bypass it (no-work-needed settle, closed-item advance); it also clears on
   any stage-to-stage advance and on reroute off the train, because the next stage writes its own line.
 
 ### No `fabrik:merge-train` label
