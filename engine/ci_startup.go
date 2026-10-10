@@ -251,8 +251,8 @@ func describeStartupRun(r gh.WorkflowRun) string {
 }
 
 // isPermissionRefusal reports whether err is GitHub refusing the credential
-// access to an endpoint (403/404) — the soft, degradable condition for the
-// optional `actions` permission (R7).
+// access to an endpoint (403/404) — the soft, degradable condition for an
+// `actions` permission revoked at runtime (R7; required at startup since #2105).
 func isPermissionRefusal(err error) bool {
 	return errors.Is(err, gh.ErrForbidden) || errors.Is(err, gh.ErrNotFound)
 }
