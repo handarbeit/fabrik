@@ -23,6 +23,13 @@ type GitHubReviewer interface {
 	// widen its own review) is structural for every GitHubReviewer, not
 	// opt-in.
 	FetchFileAtRef(owner, repo, path, ref string) ([]byte, error)
+	// FetchCommitParents and FetchCommitsBehind back the pure merge-train
+	// catch-up skip (#2066): the head's parent shape, and whether a commit is
+	// on the PR's base branch. Required unconditionally, not type-asserted,
+	// for the same structural reason as FetchFileAtRef — a fake that silently
+	// lacked them would silently disable a security-relevant check.
+	FetchCommitParents(owner, repo, sha string) ([]string, error)
+	FetchCommitsBehind(owner, repo, base, head string) (int, error)
 	FetchPRDiff(owner, repo string, prNumber int) (string, error)
 	// FetchPRFiles returns the changed-path list via the paginated
 	// /pulls/{n}/files endpoint, which has no 20,000-line ceiling — the
@@ -74,7 +81,7 @@ type ReviewOutcome struct {
 // ReviewPR runs the full per-PR pipeline: repo-resident config resolution
 // (#1642, at the PR's base ref — see the first block of the function body),
 // on-demand-comment detection, eligibility check, path exclusion,
-// diff-size guard, ephemeral clone, Claude invocation, and — on success —
+// pure-catch-up skip (#2066, catchup.go), diff-size guard, ephemeral clone, Claude invocation, and — on success —
 // formal review submission pinned to
 // the PR's current head SHA.
 //
@@ -224,6 +231,25 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 	if ok, reason := Eligible(cheapCheck); !ok {
 		logf(pr.Number, "select", "skipping %s/%s#%d: %s\n", owner, repo, pr.Number, reason)
 		return ReviewOutcome{Skipped: true, Reason: reason}
+	}
+
+	// #2066: a pure merge-train catch-up the engine has vouched for, over a
+	// head Pruefer already reviewed, is skipped before any costly work and
+	// without posting anything. Bypassed by forceReview — a human asked.
+	// Lives here, in the shared path, so the event dispatch, the poll and
+	// the reconciliation sweep all reach the same decision (R5).
+	if !forceReview {
+		v := catchUpSkip(ctx, client, cfg, botLogin, owner, repo, pr, reviews)
+		if v.Degraded {
+			degraded = true // a failed read is not a verdict (R4)
+		}
+		if v.Skip {
+			logf(pr.Number, "select", "skipping %s/%s#%d: %s (%s)\n", owner, repo, pr.Number, SkipCatchUp, v.Detail)
+			return ReviewOutcome{Skipped: true, Reason: SkipCatchUp}
+		}
+		if v.Detail != "" {
+			logf(pr.Number, "select", "catch-up check on %s/%s#%d: reviewing (%s)\n", owner, repo, pr.Number, v.Detail)
+		}
 	}
 
 	diff, err := client.FetchPRDiff(owner, repo, pr.Number)
