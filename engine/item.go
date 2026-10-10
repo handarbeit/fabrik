@@ -751,8 +751,9 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 				releaseLock()
 				e.store.Apply(itemstate.StageRetryCleared{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 				e.store.Apply(itemstate.EngineUnpaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
-				if stage.MarkPRReadyOnComplete {
-					e.markPRReady(item, r5PRNum)
+				if stage.MarkPRReadyOnComplete && e.markPRReady(item, r5PRNum) {
+					// Zero-ahead push guard (#2089) paused the item: skip completion.
+					return nil
 				}
 				e.handleStageComplete(ctx, board, item, stage)
 				return nil
@@ -1298,7 +1299,7 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 			if claudeRan && !stage.ReadOnly {
 				e.commitWIP(workDir, item.Number, stage.Name)
 				wm := e.worktreesFor(item.Repo)
-				if pushErr := e.pushBranchUnlessQueued(item, wm); pushErr != nil {
+				if pushErr := e.pushBranchOnCancel(item, wm); pushErr != nil {
 					e.logf(item.Number, "warn", "could not push branch after cancellation: %v\n", pushErr)
 				}
 			}
@@ -1619,10 +1620,13 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 	// pushing ejects it. The WIP-preservation push is forgone in that case, which is
 	// acceptable: queue entry happens at Validate completion, so stages rarely run while
 	// queued. No-op on non-queue repos (FR-3).
+	pushRefused := false
 	if claudeRan {
 		wm := e.worktreesFor(item.Repo)
 		if pushErr := e.pushBranchUnlessQueued(item, wm); pushErr != nil {
 			e.logf(item.Number, "warn", "could not push branch: %v\n", pushErr)
+			// The zero-ahead guard (#2089) has already paused the item.
+			pushRefused = errors.Is(pushErr, ErrPushRefusedZeroAhead)
 		}
 	}
 
@@ -1660,6 +1664,15 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 		MaxTurns:    usage.MaxTurns,
 		Duration:    time.Since(p.workerStartedAt),
 	})
+
+	if pushRefused {
+		// Zero-ahead push guard (#2089): the item is paused with awaiting-input.
+		// Do not run the completion/blocked/retry chain — handleStageComplete would
+		// strip awaiting-input and could advance or auto-merge a paused item. The
+		// stage stays incomplete and resumes through the normal human-comment path.
+		releaseLock()
+		return
+	}
 
 	if completed && noWorkNeeded {
 		// No-work path: stage declared itself complete AND signaled no code/doc changes
@@ -1710,8 +1723,9 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 		releaseLock()
 		e.store.Apply(itemstate.StageRetryCleared{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 		e.store.Apply(itemstate.EngineUnpaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
-		if stage.MarkPRReadyOnComplete {
-			e.markPRReady(item, prNumber)
+		if stage.MarkPRReadyOnComplete && e.markPRReady(item, prNumber) {
+			// Zero-ahead push guard (#2089) paused the item: skip completion.
+			return
 		}
 		e.handleStageComplete(p.ctx, p.board, item, stage)
 	} else if blockedOnInput {
