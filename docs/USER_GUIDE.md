@@ -3748,7 +3748,7 @@ The first line of every run's log is a banner naming the build and the start, fo
 2026-10-10T17:04:05Z [startup] fabrik v1.4.0 pid=48213 started=2026-10-10T17:04:05Z reason=fresh start
 ```
 
-It carries the Fabrik version (for a source build this is `dev(<commit>)`, with `+dirty` for a modified tree), the PID, the RFC3339 UTC start time and the reason for the start: `fresh start`, `SIGHUP restart`, `self-upgrade re-exec`, `self-upgrade re-exec (dev build)`, or `unknown` when the reason is not known. The PID is kept across restarts and re-execs, so the start time is what tells runs apart. This makes the log from just before an upgrade or restart easy to find: it is `fabrik.log.1` after the restart. Add `.fabrik/fabrik.log.*` to your `.gitignore` alongside `.fabrik/fabrik.log`.
+It carries the Fabrik version (for a source build this is `dev(<commit>)`, with `+dirty` for a modified tree), the PID, the RFC3339 UTC start time and the reason for the start: `fresh start`, `SIGHUP restart`, `self-upgrade re-exec`, `self-upgrade re-exec (dev build)`, or `unknown` when the reason is not known. The PID is kept across SIGHUP restarts and self-upgrade re-execs (a manual restart is a new process with a new PID), so the start time is what tells runs apart. This makes the log from just before an upgrade or restart easy to find: it is `fabrik.log.1` after the restart. Add `.fabrik/fabrik.log.*` to your `.gitignore` alongside `.fabrik/fabrik.log`.
 
 The poll log captures:
 - Deep-fetch decisions (which issues were shallow-skipped vs. fully fetched)

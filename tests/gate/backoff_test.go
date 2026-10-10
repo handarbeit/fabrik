@@ -26,9 +26,10 @@ func TestDetectRateLimitBackoff(t *testing.T) {
 	mustWrite(t, log, "2026-08-11T09:00:00Z [warn] GraphQL rate limit low (19% remaining) — activating rate-limit backoff\n")
 	check("activation line present", true)
 
-	// The #1547 field regression: the engine truncates fabrik.log at every
-	// startup, so by the time a leg ends the file is SHORTER than it was when
-	// the leg began. The activation line is logged only after that truncation.
+	// The #1547 field regression: the engine starts a fresh fabrik.log at every
+	// startup (rotating the old one to fabrik.log.1), so by the time a leg ends
+	// the file is SHORTER than it was when the leg began. The activation line is
+	// logged only after that restart.
 	mustWrite(t, log, strings.Repeat("2026-08-11T08:00:00Z [info] poll cycle complete, nothing to do\n", 50))
 	preRestartSize := int64(len(strings.Repeat("2026-08-11T08:00:00Z [info] poll cycle complete, nothing to do\n", 50)))
 	mustWrite(t, log, "2026-08-11T09:15:16Z [warn] GraphQL rate limit low (19% remaining) — activating rate-limit backoff\n")
