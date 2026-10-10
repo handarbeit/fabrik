@@ -1069,6 +1069,95 @@ func TestApplyCooldownRecorded(t *testing.T) {
 	}
 }
 
+// ---- ExpiredCooldownsConsumed (#2096) ----
+
+func TestApplyExpiredCooldownsConsumed(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	now := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+	s.Apply(CooldownRecorded{Repo: testRepo, Number: 1, Reason: "expired-before", Until: now.Add(-time.Minute)})
+	s.Apply(CooldownRecorded{Repo: testRepo, Number: 1, Reason: "expired-exactly", Until: now})
+	s.Apply(CooldownRecorded{Repo: testRepo, Number: 1, Reason: "active", Until: now.Add(time.Minute)})
+	s.Apply(CooldownRecorded{Repo: testRepo, Number: 1, Reason: ArchiveEligibleCooldown, Until: now.Add(-24 * time.Hour)})
+
+	snap := applyExpect(t, s, ExpiredCooldownsConsumed{Repo: testRepo, Number: 1, Now: now}, CooldownChanged)
+	got := snap.State().CooldownAt
+	if _, ok := got["expired-before"]; ok {
+		t.Error("expired-before should have been consumed")
+	}
+	if _, ok := got["expired-exactly"]; ok {
+		t.Error("an entry expiring exactly at Now counts as expired and should have been consumed")
+	}
+	if _, ok := got["active"]; !ok {
+		t.Error("active entry must survive consumption")
+	}
+	if _, ok := got[ArchiveEligibleCooldown]; !ok {
+		t.Error("archive-eligible-at is an absolute cache, not a gate: it must never be consumed")
+	}
+	if len(got) != 2 {
+		t.Errorf("remaining entries = %v; want only active and archive-eligible-at", got)
+	}
+}
+
+func TestApplyExpiredCooldownsConsumed_NoopWhenNothingExpired(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	now := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+	// Empty map.
+	if _, changes, err := s.Apply(ExpiredCooldownsConsumed{Repo: testRepo, Number: 1, Now: now}); err != nil || len(changes) != 0 {
+		t.Fatalf("empty map: changes=%v err=%v; want none", changes, err)
+	}
+	// Only active and zero entries.
+	s.Apply(CooldownRecorded{Repo: testRepo, Number: 1, Reason: "active", Until: now.Add(time.Minute)})
+	s.Apply(CooldownRecorded{Repo: testRepo, Number: 1, Reason: "zero", Until: time.Time{}})
+	if _, changes, err := s.Apply(ExpiredCooldownsConsumed{Repo: testRepo, Number: 1, Now: now}); err != nil || len(changes) != 0 {
+		t.Fatalf("active/zero only: changes=%v err=%v; want none", changes, err)
+	}
+	if len(getItem(t, s, testRepo, 1).CooldownAt) != 2 {
+		t.Error("active and zero entries must be left alone")
+	}
+}
+
+// A consumed expiry no longer counts, and a later cooldown that expires counts again.
+func TestExpiredCooldownsConsumed_AdmitsOncePerExpiry(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	now := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+	s.Apply(CooldownRecorded{Repo: testRepo, Number: 1, Reason: "r", Until: now.Add(-time.Second)})
+	snap, _ := s.Get(testRepo, 1)
+	if !snap.HasExpiredCooldown(now) {
+		t.Fatal("precondition: expired entry should count")
+	}
+	snap = applyExpect(t, s, ExpiredCooldownsConsumed{Repo: testRepo, Number: 1, Now: now}, CooldownChanged)
+	if snap.HasExpiredCooldown(now) || snap.HasExpiredCooldown(now.Add(time.Hour)) {
+		t.Error("consumed expiry must not count again")
+	}
+	s.Apply(CooldownRecorded{Repo: testRepo, Number: 1, Reason: "r", Until: now.Add(time.Minute)})
+	snap, _ = s.Get(testRepo, 1)
+	if snap.HasExpiredCooldown(now) {
+		t.Error("new cooldown is active, not expired")
+	}
+	if !snap.HasExpiredCooldown(now.Add(time.Minute)) {
+		t.Error("new cooldown must count once it expires")
+	}
+}
+
+// ---- PausedBackstopServed (#2096) ----
+
+func TestApplyPausedBackstopServed(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	if got := getItem(t, s, testRepo, 1).PausedBackstopBaseline; !got.IsZero() {
+		t.Fatalf("initial PausedBackstopBaseline = %v; want zero", got)
+	}
+	base := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+	snap := applyExpect(t, s, PausedBackstopServed{Repo: testRepo, Number: 1, Baseline: base}, 0)
+	if !snap.PausedBackstopBaseline().Equal(base) {
+		t.Errorf("PausedBackstopBaseline = %v; want %v", snap.PausedBackstopBaseline(), base)
+	}
+	// Idempotent.
+	snap = applyExpect(t, s, PausedBackstopServed{Repo: testRepo, Number: 1, Baseline: base}, 0)
+	if !snap.PausedBackstopBaseline().Equal(base) {
+		t.Errorf("after repeat, PausedBackstopBaseline = %v; want %v", snap.PausedBackstopBaseline(), base)
+	}
+}
+
 // ---- LabelAppliedAtRecorded ----
 
 func TestApplyLabelAppliedAtRecorded(t *testing.T) {
