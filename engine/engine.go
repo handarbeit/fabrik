@@ -270,6 +270,7 @@ type Engine struct {
 	mergeTrainInFlight                    sync.Map                      // key: trainKey ("owner/repo:baseBranch", mergeTrainKey — since #1648, was bare "owner/repo"), value: *mergeTrainWorkerState; per-(repo,base) train dispatch guard, so one base's train cannot block or be mistaken for another base's train in the same repo
 	mergeTrainEjectionsMu                 sync.Mutex                    // guards mergeTrainEjectionCounts
 	mergeTrainEjectionCounts              map[string]int                // key: "owner/repo#N", ejection count per member — deliberately stays issue-scoped, not re-keyed by base (#1648): an issue belongs to exactly one partition at a time
+	overlap                               overlapState                  // fresh-batch overlap filter state: file-list cache, skip counts, test seam (#2047)
 	mergeTrainCIDeferredMu                sync.Mutex                    // guards mergeTrainCIDeferred
 	mergeTrainCIDeferred                  map[string]string             // key: "owner/repo#N", value: head SHA last deferred at by the #1821 admission gate — suppresses a repeat comment when the same SHA is re-deferred (R9 ping-pong backstop); in-memory only, cleared when the member is next admitted non-red
 	mergeTrainCloneSkipMu                 sync.Mutex                    // guards mergeTrainCloneSkipCounts

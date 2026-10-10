@@ -837,7 +837,11 @@ func (e *Engine) prepareTrainWorker(ctx context.Context, state *mergeTrainWorker
 	// routes returned from reconstructTrainState above.
 	fetched := len(current)
 	current = e.admitTrainMembers(ctx, state, owner, repo, current)
-	e.logfRepo(repoKey, "merge-train", "assembled %d train member(s) for %s (deferred %d for own-PR CI red)\n", len(current), repoKey, fetched-len(current))
+	// #2047: keep members that change the same files out of one batch (fail-open; the
+	// deferred member stays Queued with no side effects).
+	afterCI := len(current)
+	current = e.admitByOverlap(trainKey, owner, repo, current)
+	e.logfRepo(repoKey, "merge-train", "assembled %d train member(s) for %s (deferred %d for own-PR CI red, %d for file overlap)\n", len(current), repoKey, fetched-afterCI, afterCI-len(current))
 
 	return p, current, true
 }
