@@ -260,6 +260,11 @@ func TestBedStartCmdContracts(t *testing.T) {
 	if got := envOf("FABRIK_MAX_TRAIN_AUTO_REPAIR_ATTEMPTS"); len(got) != 1 || got[0] != "FABRIK_MAX_TRAIN_AUTO_REPAIR_ATTEMPTS=0" {
 		t.Errorf("the bed must start with auto-repair disabled: %v", got)
 	}
+	// The overlap-aware batch filter stays off on the bed (#2047) so live tests that
+	// batch conflicting members keep working; lifecycle.go appends the same entry.
+	if got := envOf("FABRIK_MERGE_TRAIN_OVERLAP_IGNORE"); len(got) != 1 || got[0] != "FABRIK_MERGE_TRAIN_OVERLAP_IGNORE=**" {
+		t.Errorf("the bed must start with the overlap filter disabled: %v", got)
+	}
 }
 
 func TestStartBedBannerChecks(t *testing.T) {

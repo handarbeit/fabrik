@@ -196,6 +196,9 @@ func (m *testGitHubUpgradeClient) EnqueuePullRequest(owner, repo string, prNumbe
 func (m *testGitHubUpgradeClient) DequeuePullRequest(owner, repo string, prNumber int) error {
 	return nil
 }
+func (m *testGitHubUpgradeClient) FetchPRFiles(owner, repo string, prNumber int) ([]string, error) {
+	return nil, nil
+}
 func (m *testGitHubUpgradeClient) FetchCommitsBehind(owner, repo, base, head string) (int, error) {
 	return 0, nil
 }

@@ -2526,6 +2526,17 @@ func (e *Engine) routeQueuedGroup(ctx context.Context, g queuedRepoGroup, projec
 		trainCandidates = append(trainCandidates, item)
 	}
 
+	// #2047: after a landing moved this partition's base, send still-Queued members whose
+	// merge with the new base genuinely conflicts back to their own conflict path before a
+	// trial is spent on them. Only while no worker owns the partition (ADR-1208 ownership
+	// rule); a signal that arrives mid-flight simply waits for the worker to exit.
+	if _, inFlight := e.mergeTrainInFlight.Load(g.trainKey); !inFlight && e.hasTrainLanded(g.trainKey) {
+		landed := e.takeTrainLanded(g.trainKey)
+		if e.trainValidateFn == nil { // no real git under the unit-test seam, like base-SHA pinning
+			trainCandidates = e.invalidateConflictingQueued(g, projectID, landed, trainCandidates)
+		}
+	}
+
 	if len(trainCandidates) == 0 {
 		return
 	}

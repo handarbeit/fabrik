@@ -56,6 +56,7 @@ type Config struct {
 	MergeQueue                 string              // Merge queue routing for yolo path: "auto" (enqueue when repo uses merge queue) or "off" (skip enqueue)
 	MergeTrain                 string              // Fabrik-internal merge train: "on" (advance yolo Validate completions to Queued) or "off" (default; existing auto-merge path unchanged)
 	SingletonCatchUp           string              // Merge-train singleton catch-up: "merge" (default; merge the pinned base into a behind singleton's own branch, #2044) or "off" (build a trial branch instead)
+	MergeTrainOverlapIgnore    []string            // Path globs (internal/pathglob) excluded from the merge-train batch overlap check; nil = every path counts (#2047)
 	MaxMergeTrainEjections     int                 // Max merge-train ejections before pausing a member (default 3; ADR-059)
 	MaxBatchSize               int                 // Max Queued items snapshotted into one merge-train batch (0 = derive default 5; ADR-059 D4/D-f)
 	MaxBisectValidations       int                 // Max combined validations per red batch before the one-at-a-time fallback (0 = derive 2·⌈log₂(MaxBatchSize)⌉+1; ADR-059 D4/D-f)
@@ -269,6 +270,8 @@ type Engine struct {
 	mergeTrainInFlight                    sync.Map                      // key: trainKey ("owner/repo:baseBranch", mergeTrainKey — since #1648, was bare "owner/repo"), value: *mergeTrainWorkerState; per-(repo,base) train dispatch guard, so one base's train cannot block or be mistaken for another base's train in the same repo
 	mergeTrainEjectionsMu                 sync.Mutex                    // guards mergeTrainEjectionCounts
 	mergeTrainEjectionCounts              map[string]int                // key: "owner/repo#N", ejection count per member — deliberately stays issue-scoped, not re-keyed by base (#1648): an issue belongs to exactly one partition at a time
+	invalidate                            invalidateState               // post-landing invalidation state: landed-member record, comment dedupe, test seam (#2047)
+	overlap                               overlapState                  // fresh-batch overlap filter state: file-list cache, skip counts, test seam (#2047)
 	mergeTrainCIDeferredMu                sync.Mutex                    // guards mergeTrainCIDeferred
 	mergeTrainCIDeferred                  map[string]string             // key: "owner/repo#N", value: head SHA last deferred at by the #1821 admission gate — suppresses a repeat comment when the same SHA is re-deferred (R9 ping-pong backstop); in-memory only, cleared when the member is next admitted non-red
 	mergeTrainCloneSkipMu                 sync.Mutex                    // guards mergeTrainCloneSkipCounts

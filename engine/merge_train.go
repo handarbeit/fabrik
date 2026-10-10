@@ -837,7 +837,11 @@ func (e *Engine) prepareTrainWorker(ctx context.Context, state *mergeTrainWorker
 	// routes returned from reconstructTrainState above.
 	fetched := len(current)
 	current = e.admitTrainMembers(ctx, state, owner, repo, current)
-	e.logfRepo(repoKey, "merge-train", "assembled %d train member(s) for %s (deferred %d for own-PR CI red)\n", len(current), repoKey, fetched-len(current))
+	// #2047: keep members that change the same files out of one batch (fail-open; the
+	// deferred member stays Queued with no side effects).
+	afterCI := len(current)
+	current = e.admitByOverlap(trainKey, owner, repo, current)
+	e.logfRepo(repoKey, "merge-train", "assembled %d train member(s) for %s (deferred %d for own-PR CI red, %d for file overlap)\n", len(current), repoKey, fetched-afterCI, afterCI-len(current))
 
 	return p, current, true
 }
@@ -2142,6 +2146,7 @@ func (e *Engine) landSingleton(ctx context.Context, state *mergeTrainWorkerState
 	}
 
 	e.resetEjectionCount(p.owner, p.repo, m.item.Number)
+	e.noteTrainLanded(p.trainKey, m) // #2047: the base moved — scan still-Queued members for conflicts
 	e.resetTrialCounter(p.trainKey)
 }
 
@@ -2343,6 +2348,7 @@ func (e *Engine) finishSingletonFastPathLanding(state *mergeTrainWorkerState, p 
 	}
 
 	e.resetEjectionCount(p.owner, p.repo, m.item.Number)
+	e.noteTrainLanded(p.trainKey, m) // #2047
 	e.resetTrialCounter(p.trainKey)
 	e.resetCatchUpAttempts(p.trainKey, m.item.Number)
 
@@ -4739,6 +4745,7 @@ func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorke
 			e.logf(m.item.Number, "merge-train", "#%d already in Done column — skipping\n", m.item.Number)
 			// Still reset the ejection counter: this member landed successfully.
 			e.resetEjectionCount(owner, repo, m.item.Number)
+			e.noteTrainLanded(trainKey, m) // #2047: idempotent replay of a landing whose scan may have been lost
 			// #1616: still record the landing-verification markers. A prior run
 			// can have advanced this member to Done and then died before
 			// markCreditedLanding ran — advanceToNextStage and the label writes
@@ -4807,6 +4814,7 @@ func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorke
 		// Reset ejection counter: this member has landed; prior ejection history
 		// from earlier trains must not count toward the pause cap on future trains.
 		e.resetEjectionCount(owner, repo, m.item.Number)
+		e.noteTrainLanded(trainKey, m) // #2047
 	}
 	e.resetTrialCounter(trainKey)
 	e.logfRepo(repoKey, "merge-train", "landing complete for %s (integration PR #%d, %d members)\n", trainKey, integrationPRNum, len(survivors))

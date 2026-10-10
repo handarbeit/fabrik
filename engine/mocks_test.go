@@ -75,6 +75,7 @@ type mockGitHubClient struct {
 	enqueuePullRequestFn          func(owner, repo string, prNumber int, expectedHeadOID string) error
 	dequeuePullRequestFn          func(owner, repo string, prNumber int) error
 	fetchCommitsBehindFn          func(owner, repo, base, head string) (int, error)
+	fetchPRFilesFn                func(owner, repo string, prNumber int) ([]string, error)
 	fetchRepoAccessFn             func(owner, repo string) (gh.RepoAccess, error)
 	fetchIssueFn                  func(owner, repo string, issueNumber int) (*gh.IssueData, error)
 	createPRFn                    func(owner, repo, title, head, base, body string) (int, error)
@@ -131,6 +132,7 @@ type mockGitHubClient struct {
 	enqueuePullRequestCalls          []enqueuePullRequestCall
 	dequeuePullRequestCalls          []dequeuePullRequestCall
 	fetchCommitsBehindCalls          []fetchCommitsBehindCall
+	fetchPRFilesCalls                []fetchPRFilesCall
 	createPRCalls                    []createPRCall
 	listPRsCalls                     int
 
@@ -887,6 +889,11 @@ type disablePullRequestAutoMergeCall struct {
 	prNumber    int
 }
 
+type fetchPRFilesCall struct {
+	owner, repo string
+	prNumber    int
+}
+
 type fetchCommitsBehindCall struct {
 	owner, repo, base, head string
 }
@@ -944,6 +951,17 @@ func (m *mockGitHubClient) DequeuePullRequest(owner, repo string, prNumber int) 
 		return fn(owner, repo, prNumber)
 	}
 	return nil
+}
+
+func (m *mockGitHubClient) FetchPRFiles(owner, repo string, prNumber int) ([]string, error) {
+	m.mu.Lock()
+	m.fetchPRFilesCalls = append(m.fetchPRFilesCalls, fetchPRFilesCall{owner, repo, prNumber})
+	fn := m.fetchPRFilesFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(owner, repo, prNumber)
+	}
+	return nil, nil
 }
 
 func (m *mockGitHubClient) FetchCommitsBehind(owner, repo, base, head string) (int, error) {

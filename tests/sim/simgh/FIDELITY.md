@@ -224,6 +224,17 @@ base commit SHA against a member's head SHA (R3 — never a live branch read),
 which is the first production caller to pass a raw SHA rather than a branch
 name, and surfaced the gap.
 
+### PR changed files — **Modelled**
+
+`FetchPRFiles(pr)` is `git diff --name-only <base>...<head>` (three-dot, from
+the merge-base) against the backing repository, sorted — nothing is declared per
+PR, so a test that writes the same path on two branches gets a real overlap
+*and* a real merge conflict. It matches `/pulls/{n}/files` semantics. A deleted
+head branch yields `nil, nil`, as the production client does on a 404. **Not
+modelled:** GitHub's silent 3000-file cap, and `previous_filename` of renames
+(production returns only the new name, and so does this); the engine treats a
+list of 3000 or more as unreadable (#2047).
+
 ### Head SHAs — **Modelled**
 
 A PR's head SHA is resolved from the backing repo on every read, never frozen at
