@@ -108,6 +108,12 @@ type mergeTrainEnvOptions struct {
 	// mergetrain_overlap_test.go opt in.
 	OverlapAware bool
 
+	// SyncTrain keeps the synchronous merge-train driver (a worker goroutine per
+	// episode) instead of the production, asynchronous one (#2051): the trial's CI is
+	// evaluated per poll and the persisted run record survives RestartEnv. Off by
+	// default — the sim runs what production runs.
+	SyncTrain bool
+
 	// StatusLineField / StatusLineFieldMissing: see EnvOptions (#2048).
 	StatusLineField        string
 	StatusLineFieldMissing bool
@@ -199,6 +205,10 @@ func mergeTrainEnv(t *testing.T, opts mergeTrainEnvOptions) *Env {
 			}
 		},
 	})
+	if !opts.SyncTrain {
+		env.TrainStateDir = t.TempDir()
+		env.Engine.EnableTrainRunsForTest(env.TrainStateDir)
+	}
 	env.Engine.SetTrainCIPollIntervalForTest(15 * time.Millisecond)
 	env.Engine.SetMergeTrainOverlapDisabledForTest(!opts.OverlapAware)
 	env.Engine.SetMergeTrainInvalidationDisabledForTest(!opts.OverlapAware)
