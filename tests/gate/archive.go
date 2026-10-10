@@ -103,6 +103,7 @@ func (a *logArchiver) Sample() {
 	}
 	size := st.Size()
 	if a.restarted(size) {
+		a.recoverTail()
 		a.seg++
 		a.offset = 0
 		a.head = nil
@@ -135,6 +136,45 @@ func (a *logArchiver) Sample() {
 	if len(a.head) == 0 && a.offset > 0 {
 		a.head = a.readAt(0, 256)
 	}
+}
+
+// recoverTail copies what the run that just ended wrote after the last sample
+// into its segment. The engine rotates that run to <src>.1 on start (#2094), so
+// the tail still exists there — but only when .1 is provably the same run being
+// copied (its opening bytes equal the recorded head) and it is longer than what
+// was copied. Any other state, or any error, copies nothing: the archiver then
+// behaves exactly as it did before rotation existed.
+func (a *logArchiver) recoverTail() {
+	if len(a.head) == 0 {
+		return
+	}
+	f, err := os.Open(a.src + ".1")
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil || st.Size() <= a.offset {
+		return
+	}
+	head := make([]byte, len(a.head))
+	if _, err := f.ReadAt(head, 0); err != nil || !bytes.Equal(head, a.head) {
+		return
+	}
+	// Read the whole tail before writing so a read error cannot leave a partial copy.
+	tail := make([]byte, st.Size()-a.offset)
+	if _, err := f.ReadAt(tail, a.offset); err != nil {
+		return
+	}
+	out, err := os.OpenFile(a.segPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return
+	}
+	_, werr := out.Write(tail)
+	if cerr := out.Close(); werr == nil {
+		werr = cerr
+	}
+	_ = werr // best effort: a failed write loses only the tail, as before
 }
 
 func (a *logArchiver) segPath() string {

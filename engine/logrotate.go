@@ -50,12 +50,12 @@ func rotateEngineLog(path string, keep int) (warnings []string, truncateFallback
 // startBanner is the single first line of each run's fabrik.log (#2094): a
 // timestamped [startup] line (same prefix convention as logEvent) carrying the
 // version (which already holds dev(<sha>) and +dirty for source builds), the
-// PID, the start time and why the process started. PID alone does not tell runs
-// apart because the SIGHUP and self-upgrade execs keep it; the start time does.
+// PID and why the process started. The line's own timestamp is the start time:
+// PID alone does not tell runs apart because the SIGHUP and self-upgrade execs
+// keep it, so the start time does.
 func startBanner(now time.Time, version string, pid int, reason string) string {
 	if reason == "" {
 		reason = "unknown"
 	}
-	ts := now.UTC().Format(time.RFC3339)
-	return fmt.Sprintf("%s [startup] fabrik %s pid=%d started=%s reason=%s\n", ts, version, pid, ts, reason)
+	return fmt.Sprintf("%s [startup] fabrik %s pid=%d reason=%s\n", now.UTC().Format(time.RFC3339), version, pid, reason)
 }

@@ -70,7 +70,7 @@ func TestRotateEngineLog_ThreeStartsKeepEachRunWithItsBanner(t *testing.T) {
 		if !strings.Contains(lines[0], "[startup] fabrik v1.2.3 pid=4242") {
 			t.Errorf("%s line 1 is not the banner: %q", filepath.Base(file), lines[0])
 		}
-		if !strings.Contains(lines[0], fmt.Sprintf("started=2026-10-10T12:00:%02dZ", run)) {
+		if !strings.HasPrefix(lines[0], fmt.Sprintf("2026-10-10T12:00:%02dZ [startup]", run)) {
 			t.Errorf("%s banner has the wrong start time for run %d: %q", filepath.Base(file), run, lines[0])
 		}
 		if !strings.Contains(got, fmt.Sprintf("marker run-%d\n", run)) || strings.Count(got, "marker run-") != 1 {
@@ -182,7 +182,7 @@ func TestRotateEngineLog_UnremovableOldestSlotWarnsAndContinues(t *testing.T) {
 func TestStartBanner(t *testing.T) {
 	now := time.Date(2026, 10, 10, 17, 4, 5, 0, time.FixedZone("x", 3600))
 	got := startBanner(now, "dev(82b23bc)+dirty", 77, "SIGHUP restart")
-	want := "2026-10-10T16:04:05Z [startup] fabrik dev(82b23bc)+dirty pid=77 started=2026-10-10T16:04:05Z reason=SIGHUP restart\n"
+	want := "2026-10-10T16:04:05Z [startup] fabrik dev(82b23bc)+dirty pid=77 reason=SIGHUP restart\n"
 	if got != want {
 		t.Errorf("banner =\n%q\nwant\n%q", got, want)
 	}
