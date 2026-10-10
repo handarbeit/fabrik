@@ -994,7 +994,10 @@ func TestRunGitHubAppSetup_MissingActionsRefused(t *testing.T) {
 	}
 }
 
-func TestRunGitHubAppSetup_ActionsGranted_NoNotice(t *testing.T) {
+// TestRunGitHubAppSetup_ActionsGranted_Succeeds: an installation granting
+// actions:write is adopted, prints the authenticated line and mentions no
+// permission shortfall (#2105).
+func TestRunGitHubAppSetup_ActionsGranted_Succeeds(t *testing.T) {
 	isolateCmdGitConfig(t, "")
 	dir := t.TempDir()
 	chdirTest(t, dir)
@@ -1008,7 +1011,10 @@ func TestRunGitHubAppSetup_ActionsGranted_NoNotice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runGitHubAppSetup: %v", err)
 	}
-	if strings.Contains(out, "optional permission") {
-		t.Errorf("unexpected optional-permission output:\n%s", out)
+	if !strings.Contains(out, "authenticated as") {
+		t.Errorf("adoption did not report success:\n%s", out)
+	}
+	if strings.Contains(out, "missing required permissions") {
+		t.Errorf("unexpected permission shortfall output:\n%s", out)
 	}
 }
