@@ -101,6 +101,14 @@ field already shows. A board filter on the text field covers "in the train now".
   (board-structure administration is out of scope; ADR 1714 is where that would live).
 - A line can go stale where no transition fires (a daemon crash mid-phase). It is overwritten by the
   item's next transition or Done. There is no startup sweep, because that would be a read-back.
+- The `updatedAt` discount covers text *writes* only. A *clear* leaves no value node, so
+  `fieldValueByName` returns null and there is no field `updatedAt` to discount against; if GitHub
+  bumps the item on a clear, that bump reads as ordinary item activity. This adds no new exposure:
+  every engine clear is adjacent to a Status move or a label removal that bumps `updatedAt` anyway
+  and is covered by the same `SelfWriteObserved` baseline advance (#1090). The sim models the clear
+  this way (no value write time), and the re-record script prints the post-clear `updatedAt`.
+- A failing field lookup is retried at most every five minutes and warned about once per outage,
+  rather than on every transition.
 - Each new state needs an explicit hook; states without a cheap, already-logged transition are left
   for a follow-up.
 - The sim cannot prove GitHub's real `updatedAt` behaviour for a text write or the real webhook

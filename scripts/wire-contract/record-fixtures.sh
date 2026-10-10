@@ -253,6 +253,12 @@ mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!) {
   }
 }' -f projectId="$PROJECT_ID" -f itemId="$ITEM" -f fieldId="$TEXT_FIELD_ID" > /tmp/wc-cleartext.json
 write_recording clear_project_item_field "https://api.github.com/graphql" "$LIVE_PROJECT_OWNER (project #$SANDBOX_PROJECT_NUMBER \"Fabrik Test\", disposable sandbox item)" /tmp/wc-cleartext.json
+# A cleared field has no value node, so the client cannot discount the clear's
+# updatedAt bump against the field's own updatedAt. This shows whether a clear
+# bumps the item at all (ADR 2048); every engine clear is adjacent to a Status
+# move or label removal that bumps it anyway.
+echo "item updatedAt after text clear:"
+gh_ api graphql -f query='query($id: ID!) { node(id: $id) { ... on ProjectV2Item { updatedAt project { updatedAt } } } }' -f id="$ITEM" --jq '.data.node'
 
 echo "-- add_label_to_issue --"
 gh_ api -X POST "repos/$ALPHA/issues/$ISSUE_B/labels" -f "labels[]=wire-contract-fixture-test" > /tmp/wc-addlabel.json
