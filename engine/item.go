@@ -751,8 +751,9 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 				releaseLock()
 				e.store.Apply(itemstate.StageRetryCleared{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 				e.store.Apply(itemstate.EngineUnpaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
-				if stage.MarkPRReadyOnComplete {
-					e.markPRReady(item, r5PRNum)
+				if stage.MarkPRReadyOnComplete && e.markPRReady(item, r5PRNum) {
+					// Zero-ahead push guard (#2089) paused the item: skip completion.
+					return nil
 				}
 				e.handleStageComplete(ctx, board, item, stage)
 				return nil
@@ -1722,8 +1723,9 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 		releaseLock()
 		e.store.Apply(itemstate.StageRetryCleared{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 		e.store.Apply(itemstate.EngineUnpaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
-		if stage.MarkPRReadyOnComplete {
-			e.markPRReady(item, prNumber)
+		if stage.MarkPRReadyOnComplete && e.markPRReady(item, prNumber) {
+			// Zero-ahead push guard (#2089) paused the item: skip completion.
+			return
 		}
 		e.handleStageComplete(p.ctx, p.board, item, stage)
 	} else if blockedOnInput {

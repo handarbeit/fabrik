@@ -2,7 +2,9 @@ package engine
 
 import (
 	"errors"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -275,11 +277,54 @@ func TestPushGuard_MarkPRReadySkipsMarkReadyOnRefusal(t *testing.T) {
 		marked++
 		return nil
 	}
-	g.e.markPRReady(gh.ProjectItem{Number: 7}, 55)
+	if refused := g.e.markPRReady(gh.ProjectItem{Number: 7}, 55); !refused {
+		t.Error("markPRReady must report the refusal so callers skip stage completion")
+	}
 	mu.Lock()
 	defer mu.Unlock()
 	if marked != 0 {
 		t.Errorf("MarkPRReady called %d times after a refused push", marked)
+	}
+}
+
+func TestPushGuard_MarkPRReadyReportsNoRefusalOnNormalPush(t *testing.T) {
+	g := newPushGuardEnv(t, 7, openPR(55), nil)
+	g.commitLocal("own work")
+	g.client.markPRReadyFn = func(owner, repo string, prNumber int) error { return nil }
+	if refused := g.e.markPRReady(gh.ProjectItem{Number: 7}, 55); refused {
+		t.Error("an ahead-of-base branch must not be reported as refused")
+	}
+}
+
+// Every production caller of markPRReady must act on its refusal result: a
+// caller that ignores it falls through to handleStageComplete and advances (or
+// auto-merges) an item the guard just paused.
+func TestPushGuard_MarkPRReadyCallersActOnRefusal(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		data, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, line := range strings.Split(string(data), "\n") {
+			if !strings.Contains(line, "e.markPRReady(") {
+				continue
+			}
+			calls++
+			if !strings.Contains(line, "&& e.markPRReady(") {
+				t.Errorf("%s:%d: markPRReady result is not acted on: %s", f, i+1, strings.TrimSpace(line))
+			}
+		}
+	}
+	if calls != 3 {
+		t.Errorf("expected 3 production markPRReady call sites, found %d — update this test and docs/state-machine.md", calls)
 	}
 }
 

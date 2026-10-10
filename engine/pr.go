@@ -260,10 +260,14 @@ func (e *Engine) ensurePRLinksIssue(item gh.ProjectItem, prNumber int) {
 // A failed client.MarkPRReady call — non-transient, or after this function's own
 // 3-attempt retry budget is exhausted — durably records the outstanding call via
 // fabrik:awaiting-pr-ready (markPRReadyOutstanding) so settlePRReadyScan retries it
-// on a later poll, surviving an engine restart. This function's void signature and
-// logging style are otherwise unchanged (per #599); the marker is the only new
-// side effect. See ADR-1582.
-func (e *Engine) markPRReady(item gh.ProjectItem, knownPR int) {
+// on a later poll, surviving an engine restart. The marker is the only side effect
+// ADR-1582 added; the return value below was added later by #2089. See ADR-1582.
+//
+// It returns true only when the zero-ahead push guard (#2089) refused the push
+// and paused the item: MarkPRReady was then skipped and the caller must not
+// run stage-completion handling (which would advance or auto-merge a paused
+// item). Every other outcome — including failures — returns false, as before.
+func (e *Engine) markPRReady(item gh.ProjectItem, knownPR int) (pushRefused bool) {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	wm := e.worktreesFor(item.Repo)
 	// Merge-queue awareness (ADR-058 D3 FR-1): skip the push when queued (ejects it).
@@ -272,7 +276,7 @@ func (e *Engine) markPRReady(item gh.ProjectItem, knownPR int) {
 		if errors.Is(err, ErrPushRefusedZeroAhead) {
 			// The zero-ahead guard (#2089) paused the item: do not flip a stale
 			// PR to ready-for-review (it would trigger review bots on no diff).
-			return
+			return true
 		}
 		// Don't return — still try to mark ready if push is a no-op (already up to date)
 	}
@@ -283,12 +287,12 @@ func (e *Engine) markPRReady(item gh.ProjectItem, knownPR int) {
 		prNumber, err = e.client.FindPRForIssue(owner, repo, item.Number)
 		if err != nil {
 			e.logf(item.Number, "warn", "could not find PR: %v\n", err)
-			return
+			return false
 		}
 	}
 	if prNumber == 0 {
 		e.logf(item.Number, "warn", "no PR found to mark ready\n")
-		return
+		return false
 	}
 
 	// no write-through: excluded — MarkPRReady affects PR state, not issue/label cache
@@ -304,12 +308,12 @@ func (e *Engine) markPRReady(item gh.ProjectItem, knownPR int) {
 			if hasLabel(item.Labels, prReadyAwaitingLabel) {
 				e.clearPRReadyMarker(item, owner, repo)
 			}
-			return
+			return false
 		}
 		if !isTransientError(err) {
 			e.logf(item.Number, "warn", "could not mark PR #%d ready: %v\n", prNumber, err)
 			e.markPRReadyOutstanding(item, owner, repo)
-			return
+			return false
 		}
 		lastErr = err
 		if attempt < maxAttempts-1 {
@@ -318,6 +322,7 @@ func (e *Engine) markPRReady(item gh.ProjectItem, knownPR int) {
 	}
 	e.logf(item.Number, "warn", "could not mark PR #%d ready after %d attempts: %v\n", prNumber, maxAttempts, lastErr)
 	e.markPRReadyOutstanding(item, owner, repo)
+	return false
 }
 
 // postOutputToPR posts detailed output on the linked PR and a brief summary on the issue.
