@@ -1492,6 +1492,15 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		for _, item := range deepFetchCandidates {
 			iKey := issueKey(item, e.defaultRepo())
 			if advancedItems[iKey] {
+				// An advanced item must dispatch its new stage next poll (#544). Its
+				// expired cooldown was consumed at admission, so leave an already-expired
+				// marker that admits it exactly once (ADR 2096).
+				e.store.Apply(itemstate.CooldownRecorded{
+					Repo:   itemOwnerRepoString(item, e.defaultRepo()),
+					Number: item.Number,
+					Reason: stageAdvancedCooldownReason,
+					Until:  e.now(),
+				})
 				continue
 			}
 			if stage := stages.FindStage(e.cfg.Stages, item.Status); stage != nil && !stage.CleanupWorktree {
@@ -2111,6 +2120,46 @@ func (e *Engine) dispatchCandidates(ctx context.Context, board *gh.ProjectBoard,
 	return dispatched
 }
 
+// stageAdvancedCooldownReason is the CooldownAt key left on an item the yolo
+// catch-up loop advanced during a poll. It is stamped already expired, so the
+// item is admitted once on the next poll to dispatch its new stage (#544) and is
+// then consumed (ADR 2096).
+const stageAdvancedCooldownReason = "stage-advanced"
+
+// consumeExpiredCooldowns deletes the item's expired cooldown entries once poll
+// admission has acted on them (ExpiredCooldownsConsumed, #2096), so an expiry
+// admits the item once rather than on every later poll. Cleanup-stage items and
+// items not yet in the store are left alone. Reports whether anything expired
+// (and was therefore consumed).
+func (e *Engine) consumeExpiredCooldowns(repo string, item gh.ProjectItem, snap itemstate.Snapshot, snapErr error) bool {
+	if snapErr != nil {
+		return false
+	}
+	if st := stages.FindStage(e.cfg.Stages, item.Status); st != nil && st.CleanupWorktree {
+		return false
+	}
+	now := e.now()
+	if !snap.HasExpiredCooldown(now) {
+		return false
+	}
+	e.store.Apply(itemstate.ExpiredCooldownsConsumed{Repo: repo, Number: item.Number, Now: now})
+	return true
+}
+
+// rearmPeriodicReEval re-stamps the periodic re-evaluation cooldown for an item
+// that was admitted (and had its expired cooldowns consumed) but dropped before
+// joining deepFetchCandidates, which is the only place the poll defer re-stamps
+// it. Without this the item would have no cooldown entry and nothing would ever
+// re-admit it (ADR 2096, R4).
+func (e *Engine) rearmPeriodicReEval(item gh.ProjectItem) {
+	e.store.Apply(itemstate.CooldownRecorded{
+		Repo:   itemOwnerRepoString(item, e.defaultRepo()),
+		Number: item.Number,
+		Reason: "periodic-re-eval",
+		Until:  e.now().Add(e.githubRecheckInterval()),
+	})
+}
+
 // selectDeepFetchCandidates runs the deep-fetch pre-filter loop: for each board
 // item that passes the shallow admission checks (cycleSet membership, cleanup
 // stage, bypass label, expired cooldown, or not-yet-recorded-in-store), it calls
@@ -2194,12 +2243,20 @@ func (e *Engine) selectDeepFetchCandidates(board *gh.ProjectBoard, repoFilter st
 			}
 			periodicReeval = hasExpiredCooldown
 		}
+		// An expired cooldown admits the item once: consume it now that the
+		// pre-filter has acted on it (#2096, ADR 2096). Done for the cycleSet path
+		// too, so an expiry coinciding with another admission reason is still used
+		// up instead of re-admitting the item on the next poll.
+		consumedExpired := e.consumeExpiredCooldowns(repo, item, admitSnap, admitErr)
 		// recentBaseline: the item's staleness baseline moved within the last two
 		// recheck intervals — the only window in which a self-write (#1090) can have
 		// masked a concurrent human comment. See the paused skip below (#1944).
 		recentBaseline := admitErr == nil &&
 			e.now().Sub(admitSnap.State().LastSeenSourceUpdatedAt) < 2*e.githubRecheckInterval()
 		if !e.itemMayNeedWork(board.Items[i]) {
+			if consumedExpired {
+				e.rearmPeriodicReEval(item)
+			}
 			continue
 		}
 		// Cleanup stages don't need comments or linked-PR data — skip FetchItemDetails
@@ -2231,20 +2288,26 @@ func (e *Engine) selectDeepFetchCandidates(board *gh.ProjectBoard, repoFilter st
 		// second of it (typically a reply to the pause comment itself) reads as
 		// already seen. Without this nothing ever refreshed item.Comments and the
 		// resume comment (ADR-1813) was lost for good. Cost stays within #1379's
-		// intent: a long-parked item (old baseline) is still never fetched, and a
-		// fresh pause costs at most one or two extra fetches — the fetch itself
-		// re-anchors the baseline to GitHub's own updatedAt.
+		// intent: a long-parked item (old baseline) is still never fetched, and the
+		// backstop fetches at most once per distinct baseline value (#2096). The
+		// fetch re-anchors the baseline to GitHub's own updatedAt, so the baseline
+		// recorded as served is the one read AFTER a successful fetch
+		// (PausedBackstopServed): a fresh pause costs exactly one fetch, and a later
+		// self-write (a new baseline that may mask a new reply) earns one more. A
+		// failed fetch records nothing, so the next poll can retry.
+		var backstopFetch bool
 		if hasLabel(item.Labels, "fabrik:paused") && !cycleSet[iKey] {
 			switch {
 			case admitErr != nil:
 				// Not yet in the store (first sighting): fall through and fetch once to
 				// establish a baseline, mirroring the notInStore bypass in the pre-filter above.
-			case periodicReeval && recentBaseline:
+			case periodicReeval && recentBaseline && !admitSnap.PausedBackstopBaseline().Equal(admitSnap.State().LastSeenSourceUpdatedAt):
 				// Backstop fetch. It must reach GitHub: the board cache judges freshness
 				// by the same masked baseline, so it would otherwise hand back the cached
 				// comments without the reply this fetch exists to find.
 				e.logf(0, "poll", "re-fetching paused item #%d at periodic re-evaluation (recent self-write may have masked a reply)\n", board.Items[i].Number)
 				e.store.Apply(itemstate.DeepFetchInvalidated{Repo: repo, Number: item.Number})
+				backstopFetch = true
 			default:
 				e.logf(0, "poll", "skipping deep-fetch for paused item #%d (no new activity)\n", board.Items[i].Number)
 				deepFetchCandidates = append(deepFetchCandidates, board.Items[i])
@@ -2263,6 +2326,9 @@ func (e *Engine) selectDeepFetchCandidates(board *gh.ProjectBoard, repoFilter st
 				Number: board.Items[i].Number,
 				At:     time.Now(),
 			})
+			if consumedExpired {
+				e.rearmPeriodicReEval(item)
+			}
 			// Skip appending to deepFetchCandidates.
 			// The next poll will retry the deep-fetch for this item.
 			continue
@@ -2277,6 +2343,11 @@ func (e *Engine) selectDeepFetchCandidates(board *gh.ProjectBoard, repoFilter st
 			Number:     board.Items[i].Number,
 			FreshState: board.Items[i],
 		})
+		if backstopFetch {
+			if post, err := e.store.Get(admitRepo, board.Items[i].Number); err == nil {
+				e.store.Apply(itemstate.PausedBackstopServed{Repo: admitRepo, Number: board.Items[i].Number, Baseline: post.State().LastSeenSourceUpdatedAt})
+			}
+		}
 		// After a successful deep-fetch, check if this item just became terminal.
 		if isTerminalPredicate(board.Items[i].Labels, board.Items[i].Status, e.cfg.Stages) {
 			if admitPreErr != nil || !admitPreSnap.IsTerminal() {

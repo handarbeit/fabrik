@@ -168,12 +168,17 @@ func (s Snapshot) HasActiveCooldown(now time.Time) bool {
 }
 
 // HasExpiredCooldown reports whether any CooldownAt entry is non-zero and
-// has already expired relative to now. Admission consumes expired entries
+// has already expired relative to now, ignoring the absolute
+// ArchiveEligibleCooldown cache. Admission consumes expired entries
 // (ExpiredCooldownsConsumed, #2096), so in practice this is true only for
 // expiries the engine has not yet acted on. Reads directly from the snapshot's
 // already-copied map — no additional allocation.
 func (s Snapshot) HasExpiredCooldown(now time.Time) bool {
-	for _, t := range s.state.CooldownAt {
+	for reason, t := range s.state.CooldownAt {
+		// archive-eligible-at is an absolute "eligible since" cache, not a gate.
+		if reason == ArchiveEligibleCooldown {
+			continue
+		}
 		if !t.IsZero() && !now.Before(t) {
 			return true
 		}
