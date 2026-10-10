@@ -46,6 +46,13 @@ tui: true
 # of the merge-train gate (engine/stages.go:246), leaving the PR for a human.
 # Only fabrik:yolo items are batched.
 merge_train: "on"
+# Red-singleton auto-repair (#2045, ADR-2045): when a trial is red for one member alone,
+# re-enter Validate for it (with the failure details and an instruction to reconcile with
+# what landed) instead of pausing it for a human. Attempts per member per base commit
+# before it pauses; default 1, 0 disables auto-repair (restores the ADR-1545 pause).
+# The counter is in memory — a restart resets it. Also: --max-train-auto-repair-attempts
+# flag / FABRIK_MAX_TRAIN_AUTO_REPAIR_ATTEMPTS env var.
+# max_train_auto_repair_attempts: 1
 # debug_output: false
 # symlink_env: false    # When true, creates a relative symlink at <worktree>/.env pointing to the fabrikDir .env.
 #                       # Enables worktree-based stages to pick up credentials (e.g. ANTHROPIC_API_KEY) from .env.

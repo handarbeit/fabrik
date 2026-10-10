@@ -2,6 +2,7 @@
 
 **Date**: 2026-08-11
 **Status**: Accepted
+**Amended by**: [ADR 2045](2045-merge-train-red-singleton-auto-repair.md) — the "reroute + pause for a human" decision is replaced by a bounded engine-initiated Validate re-entry; the pause remains the fallback (cap reached, cap 0, non-`Validate` target)
 **Issue**: #1545 — merge-train: a member paused for its own validation failure is stranded in Queued, unreachable by any stage
 
 ## Context
