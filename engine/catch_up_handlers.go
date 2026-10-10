@@ -566,6 +566,11 @@ func (e *Engine) handleMergeAndCIGates(pctx *phase1Ctx) bool {
 		return true
 	}
 	if ciFailure {
+		// #2072: re-run the failed jobs once per head before (R1) and once after a
+		// no-op (R2) CI-fix dispatch; a claimed item is waiting on a re-run.
+		if e.ciFlakeRerun(pctx, settle) {
+			return true
+		}
 		return e.dispatchWithCycleLimit(
 			pctx,
 			"ci-fix-reinvoke",
