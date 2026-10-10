@@ -324,6 +324,11 @@ type Engine struct {
 	trainCatchUpGitFn func(ctx context.Context, p trialParams, m trainMember) catchUpGitOutcome
 	// catchUp is the singleton catch-up's attempt counter and CI-wait dwells (#2044).
 	trainCatchUp catchUpState
+	// catchUpPolicyMemoSkipDisabledForTest makes the singleton catch-up ignore its per-repo
+	// policy memo (#2065), i.e. exactly the pre-#2065 behavior of attempting the doomed push
+	// on every poll. Exists solely so a test can show the memo skip is non-vacuous; New never
+	// sets it. See SetCatchUpPolicyMemoSkipDisabledForTest and ADR-2065.
+	catchUpPolicyMemoSkipDisabledForTest bool
 	// trainRedBatchHook, when non-nil, is called as the first line of handleRedBatch — a
 	// test-only call-observation seam (#1440 AC1/AC6) proving handleRedBatch (multi-member
 	// bisection) is never reached for a red batch of exactly one member, which
@@ -816,6 +821,12 @@ func (e *Engine) SetMergeTrainQueueSortDisabledForTest(disabled bool) {
 // Test seam only (ADR-1871); production never calls this.
 func (e *Engine) SetMergeTrainLandingGuardDisabledForTest(disabled bool) {
 	e.mergeTrainLandingGuardDisabledForTest = disabled
+}
+
+// SetCatchUpPolicyMemoSkipDisabledForTest makes the singleton catch-up ignore its per-repo
+// push-policy memo (#2065). Test-only neutralisation seam.
+func (e *Engine) SetCatchUpPolicyMemoSkipDisabledForTest(disabled bool) {
+	e.catchUpPolicyMemoSkipDisabledForTest = disabled
 }
 
 // SetGitHubAppModeForTest puts e into App-auth mode for the App-auth

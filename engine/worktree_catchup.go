@@ -93,6 +93,21 @@ func (wm *WorktreeManager) PrepareCatchUp(issueNumber int, baseBranch, expectedH
 	return "", fmt.Errorf("%w: local %s, remote %s", ErrCatchUpLocalDiverged, local, expectedHead)
 }
 
+// CatchUpPushError is PushCatchUp's failure: git's combined output is kept raw so the
+// rejection can be classified (classifyCatchUpPushRejection, #2065) without parsing the
+// formatted message. Error() reads exactly as the flat error it replaced.
+type CatchUpPushError struct {
+	Branch string
+	Output string
+	Err    error
+}
+
+func (e *CatchUpPushError) Error() string {
+	return fmt.Sprintf("pushing catch-up to %s: %s: %v", e.Branch, e.Output, e.Err)
+}
+
+func (e *CatchUpPushError) Unwrap() error { return e.Err }
+
 // PushCatchUp pushes the member's worktree branch after a catch-up commit, as a
 // compare-and-swap: --force-with-lease=<ref>:<expectedHead> succeeds only if the remote
 // branch is still exactly the head the catch-up was built on, so a concurrent push (a
@@ -110,7 +125,7 @@ func (wm *WorktreeManager) PushCatchUp(issueNumber int, expectedHead string) err
 	cmd.Dir = wtDir
 	cmd.Env = nonInteractiveGitEnv()
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("pushing catch-up to %s: %s: %w", branch, strings.TrimSpace(string(out)), err)
+		return &CatchUpPushError{Branch: branch, Output: strings.TrimSpace(string(out)), Err: err}
 	}
 	if out, err := gitOutputIn(wtDir, "update-ref", "refs/remotes/origin/"+branch, "HEAD"); err != nil {
 		wm.logf(issueNumber, "worktree", "warn: could not advance the remote-tracking ref after the catch-up push: %s\n", out)

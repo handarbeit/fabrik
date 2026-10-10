@@ -1,0 +1,11 @@
+# Synthetic fixture built from GitHub's documented push-rejection format (not recorded from a live repo).
+# The classifier trusts only the GH006/GH013 markers and the veto strings, not the prose. Expect: policy.
+---
+remote: error: GH013: Repository rule violations found for refs/heads/fabrik/issue-7.
+remote: Review all repository rules at https://github.com/owner/repo/rules?ref=refs%2Fheads%2Ffabrik%2Fissue-7
+remote: 
+remote: - Merge commits are not allowed on this branch (ruleset "no-merge-commits").
+remote: 
+To github.com:owner/repo.git
+ ! [remote rejected] fabrik/issue-7 -> fabrik/issue-7 (push declined due to repository rule violations)
+error: failed to push some refs to 'github.com:owner/repo.git'

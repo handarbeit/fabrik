@@ -1,0 +1,4 @@
+# Synthetic fixture built from GitHub's documented push-rejection format (not recorded from a live repo).
+# The classifier trusts only the GH006/GH013 markers and the veto strings, not the prose. Expect: NOT policy (transport).
+---
+fatal: unable to access 'https://github.com/owner/repo.git/': Could not resolve host: github.com
