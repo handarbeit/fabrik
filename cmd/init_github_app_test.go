@@ -21,6 +21,7 @@ import (
 
 	"github.com/handarbeit/fabrik/engine"
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/githubauth"
 )
 
 // writeCmdTestAppKey generates a small (test-only) RSA key and writes it as
@@ -62,12 +63,6 @@ func writeCmdTestAppKey(t *testing.T, dir string) string {
 type fakeGitHubAppSetupServer struct {
 	installations []gh.AppInstallation
 	ownerType     map[string]string // login (lower-cased) -> "organization"/"user"
-
-	// installationGets counts GET /app/installations/{id}; when failAfter > 0
-	// every call after the failAfter-th answers 500 (#2071: lets the required
-	// read pass and only the optional one fail). Zero never fails.
-	installationGets atomic.Int32
-	failAfter        int
 }
 
 type fakeSetupServerOption func(*fakeGitHubAppSetupServer)
@@ -102,11 +97,6 @@ func newFakeGitHubAppSetupServer(t *testing.T, installations []gh.AppInstallatio
 				"token":      "ghs_test_token",
 				"expires_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
 			})
-			return
-		}
-		if n := f.installationGets.Add(1); f.failAfter > 0 && int(n) > f.failAfter {
-			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte(`{"message":"simulated installation read failure"}`))
 			return
 		}
 		var instID int64
@@ -168,6 +158,7 @@ func fullPermissions() map[string]string {
 		"checks":                "read",
 		"statuses":              "read",
 		"contents":              "write",
+		"actions":               "write",
 	}
 }
 
@@ -369,7 +360,7 @@ func TestRunGitHubAppSetup_PermissionShortfall_ReportsApprovalURL(t *testing.T) 
 		t.Fatal("expected a permission-shortfall error")
 	}
 	msg := err.Error()
-	for _, want := range []string{"issues", "organization_projects", "https://github.com/settings/installations/555"} {
+	for _, want := range []string{"issues", "organization_projects", "https://github.com/organizations/handarbeit/settings/installations/555", "https://github.com/organizations/handarbeit/settings/apps/fabrik/permissions"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("error %q missing %q", msg, want)
 		}
@@ -923,10 +914,11 @@ func TestInteractiveInstallWait(t *testing.T) {
 	}
 }
 
-// TestGitHubAppSetupPermissions_ActionsIsManifestOnly (#2052): a new App asks
-// for the optional `actions` permission, but it is never part of what is
-// verified — requiring it would stop every existing installation from starting.
-func TestGitHubAppSetupPermissions_ActionsIsManifestOnly(t *testing.T) {
+// TestGitHubAppSetupPermissions_ActionsIsRequired (#2105): a new App's manifest
+// asks for `actions: write` and the verify set requires it. Asserted on
+// githubAppSetupPermissions' manifest map because that is exactly what
+// githubauth.buildManifest (unexported) receives as default_permissions.
+func TestGitHubAppSetupPermissions_ActionsIsRequired(t *testing.T) {
 	isolateCmdGitConfig(t, "")
 	for _, adopt := range []bool{false, true} {
 		opts := githubAppSetupOptions{}
@@ -934,13 +926,11 @@ func TestGitHubAppSetupPermissions_ActionsIsManifestOnly(t *testing.T) {
 			opts.AppID = 42
 		}
 		verify, manifest, _ := githubAppSetupPermissions(opts)
-		if _, ok := verify["actions"]; ok {
-			t.Errorf("adopt=%v: verify set must not require actions", adopt)
+		if verify["actions"] != "write" {
+			t.Errorf("adopt=%v: verify actions = %q, want write", adopt, verify["actions"])
 		}
-		if got := manifest["actions"]; adopt && got != "" {
-			t.Errorf("adopt=%v: adopt path sends no manifest, got actions=%q", adopt, got)
-		} else if !adopt && got != "write" {
-			t.Errorf("create path manifest actions = %q, want write", got)
+		if manifest["actions"] != "write" {
+			t.Errorf("adopt=%v: manifest actions = %q, want write", adopt, manifest["actions"])
 		}
 	}
 }
@@ -964,69 +954,56 @@ func captureSetupStdout(t *testing.T, opts githubAppSetupOptions) (string, error
 	return buf.String(), setupErr
 }
 
-// TestGitHubAppSetupPermissions_ManifestHasEveryOptionalPermission pins #2071
-// R1: a newly created App's manifest requests every optional permission, at
-// the level OptionalGitHubAppPermissions names. Iterating the map means a new
-// optional permission is covered without editing this test.
-func TestGitHubAppSetupPermissions_ManifestHasEveryOptionalPermission(t *testing.T) {
-	isolateCmdGitConfig(t, "")
-	_, manifest, _ := githubAppSetupPermissions(githubAppSetupOptions{})
-	for name, level := range engine.OptionalGitHubAppPermissions() {
-		if manifest[name] != level {
-			t.Errorf("manifest[%q] = %q, want %q", name, manifest[name], level)
-		}
-	}
-}
-
 func adoptOptionsFor(srvURL, keyPath string) githubAppSetupOptions {
 	return githubAppSetupOptions{
 		Owner: "handarbeit", AppID: 42, PrivateKeyPath: keyPath, InstallationID: 555, BaseURL: srvURL, NoBrowser: true,
 	}
 }
 
-// R2: adopting an installation without the optional permission prints one
-// advisory notice and still succeeds.
-func TestRunGitHubAppSetup_OptionalShortfall_PrintsNoticeAndSucceeds(t *testing.T) {
+// #2105: adopting an installation without actions:write is refused with the
+// same remedy text the engine's startup refusal carries (both URLs).
+func TestRunGitHubAppSetup_MissingActionsRefused(t *testing.T) {
 	isolateCmdGitConfig(t, "")
-	dir := t.TempDir()
-	chdirTest(t, dir)
-	keyPath := writeCmdTestAppKey(t, dir)
-	perms := fullPermissions()
-	perms["actions"] = "read"
-	srv := newFakeGitHubAppSetupServer(t,
-		[]gh.AppInstallation{{ID: 555, Account: "handarbeit", Permissions: perms}},
-		map[string]string{"handarbeit": "organization"},
-	)
+	for _, level := range []string{"", "read"} {
+		dir := t.TempDir()
+		chdirTest(t, dir)
+		keyPath := writeCmdTestAppKey(t, dir)
+		perms := fullPermissions()
+		if level == "" {
+			delete(perms, "actions")
+		} else {
+			perms["actions"] = level
+		}
+		srv := newFakeGitHubAppSetupServer(t,
+			[]gh.AppInstallation{{ID: 555, Account: "handarbeit", Permissions: perms}},
+			map[string]string{"handarbeit": "organization"},
+		)
 
-	out, err := captureSetupStdout(t, adoptOptionsFor(srv.URL, keyPath))
-	if err != nil {
-		t.Fatalf("an optional shortfall must not fail init: %v", err)
-	}
-	if got := strings.Count(out, `optional permission "actions" is not fully granted`); got != 1 {
-		t.Errorf("notice count = %d, want 1; output:\n%s", got, out)
-	}
-	for _, want := range []string{
-		`granted "read", wanted "write"`,
-		"https://github.com/organizations/handarbeit/settings/apps/fabrik/permissions",
-		"https://github.com/organizations/handarbeit/settings/installations/555",
-		"gh run rerun",
-		"authenticated as",
-	} {
-		if !strings.Contains(out, want) {
-			t.Errorf("output missing %q:\n%s", want, out)
+		_, err := captureSetupStdout(t, adoptOptionsFor(srv.URL, keyPath))
+		if err == nil {
+			t.Fatalf("actions=%q: expected a refusal", level)
+		}
+		want := engine.PermissionShortfallRemedy(
+			[]githubauth.RequiredPermissionShortfall{{Permission: "actions", Required: "write"}}, "handarbeit", "fabrik", 555)
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("actions=%q: error does not carry the shared remedy text:\n%v\nwant substring:\n%s", level, err, want)
+		}
+		if !strings.Contains(err.Error(), "actions") {
+			t.Errorf("actions=%q: error does not name actions: %v", level, err)
 		}
 	}
 }
 
-func TestRunGitHubAppSetup_OptionalGranted_NoNotice(t *testing.T) {
+// TestRunGitHubAppSetup_ActionsGranted_Succeeds: an installation granting
+// actions:write is adopted, prints the authenticated line and mentions no
+// permission shortfall (#2105).
+func TestRunGitHubAppSetup_ActionsGranted_Succeeds(t *testing.T) {
 	isolateCmdGitConfig(t, "")
 	dir := t.TempDir()
 	chdirTest(t, dir)
 	keyPath := writeCmdTestAppKey(t, dir)
-	perms := fullPermissions()
-	perms["actions"] = "write"
 	srv := newFakeGitHubAppSetupServer(t,
-		[]gh.AppInstallation{{ID: 555, Account: "handarbeit", Permissions: perms}},
+		[]gh.AppInstallation{{ID: 555, Account: "handarbeit", Permissions: fullPermissions()}},
 		map[string]string{"handarbeit": "organization"},
 	)
 
@@ -1034,44 +1011,10 @@ func TestRunGitHubAppSetup_OptionalGranted_NoNotice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runGitHubAppSetup: %v", err)
 	}
-	if strings.Contains(out, "optional permission") {
-		t.Errorf("unexpected optional-permission output:\n%s", out)
+	if !strings.Contains(out, "authenticated as") {
+		t.Errorf("adoption did not report success:\n%s", out)
 	}
-}
-
-// A failed grant read for the optional check is a warning, never an init failure.
-func TestRunGitHubAppSetup_OptionalGrantReadError_WarnsAndSucceeds(t *testing.T) {
-	isolateCmdGitConfig(t, "")
-	dir := t.TempDir()
-	chdirTest(t, dir)
-	keyPath := writeCmdTestAppKey(t, dir)
-	insts := []gh.AppInstallation{{ID: 555, Account: "handarbeit", Permissions: fullPermissions()}}
-	owners := map[string]string{"handarbeit": "organization"}
-
-	// Baseline: how many installation GETs a healthy run makes (the optional read is the last).
-	var total int
-	{
-		var probe *httptest.Server
-		var f *fakeGitHubAppSetupServer
-		probe = newFakeGitHubAppSetupServer(t, insts, owners, func(s *fakeGitHubAppSetupServer) { f = s })
-		if _, err := captureSetupStdout(t, adoptOptionsFor(probe.URL, keyPath)); err != nil {
-			t.Fatalf("baseline run: %v", err)
-		}
-		total = int(f.installationGets.Load())
-	}
-	if total < 2 {
-		t.Fatalf("expected at least 2 installation GETs, saw %d", total)
-	}
-
-	srv := newFakeGitHubAppSetupServer(t, insts, owners, func(s *fakeGitHubAppSetupServer) { s.failAfter = total - 1 })
-	out, err := captureSetupStdout(t, adoptOptionsFor(srv.URL, keyPath))
-	if err != nil {
-		t.Fatalf("a failed optional read must not fail init: %v", err)
-	}
-	if got := strings.Count(out, "could not check optional permissions"); got != 1 {
-		t.Errorf("warning count = %d, want 1; output:\n%s", got, out)
-	}
-	if strings.Contains(out, `optional permission "actions"`) {
-		t.Errorf("no shortfall notice expected when the read failed:\n%s", out)
+	if strings.Contains(out, "missing required permissions") {
+		t.Errorf("unexpected permission shortfall output:\n%s", out)
 	}
 }

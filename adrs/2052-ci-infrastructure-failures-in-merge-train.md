@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (#2052). Amends ADR-1822 point 4 (the workflow-run read is now made, softly). Softens ADR-1153's Strict non-required-failure policy by exactly one failed-job re-run.
+Accepted (#2052). **Decision 7 (`actions` is optional) and the consequence "Without the `actions` permission nothing changes except one log line" are superseded by [ADR 2105](2105-actions-write-required-app-permission.md): `actions: write` is now a required permission.** Amends ADR-1822 point 4 (the workflow-run read is now made, softly). Softens ADR-1153's Strict non-required-failure policy by exactly one failed-job re-run.
 
 ## Context
 

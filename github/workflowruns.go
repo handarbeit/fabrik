@@ -32,9 +32,10 @@ type WorkflowRun struct {
 // that did not conclude `startup_failure`, reads its job count
 // (GET /repos/{o}/{r}/actions/runs/{id}/jobs, total_count only).
 //
-// Needs the `actions: read` permission, which the engine's GitHub App is not
-// required to hold: a 403/404 comes back wrapped as ErrForbidden/ErrNotFound
-// so the caller can degrade to its pre-#2052 behaviour. Paginated and
+// Needs the `actions` permission, which the engine's GitHub App must hold
+// (required at startup since #2105): a runtime 403/404 (the permission was
+// revoked after startup) comes back wrapped as ErrForbidden/ErrNotFound so the
+// caller can degrade to its pre-#2052 behaviour. Paginated and
 // total_count-verified like FetchCheckRuns, with the same fail-closed
 // polarity — an incomplete list is an error, never a verdict. There is no
 // cache: workflow-run state has no webhook-fed source.
