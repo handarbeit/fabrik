@@ -683,9 +683,8 @@ func conflictResolutionStage(holdingStg *stages.Stage) *stages.Stage {
 	return &cp
 }
 
-// prepareTrainWorker performs all one-time setup for a merge-train worker: semaphore
-// acquisition, repo readiness, holding-stage lookup, extend-turns computation,
-// trialParams construction, restart-time state reconstruction (ADR-059 D5,
+// prepareTrainWorker performs all one-time setup for a merge-train worker: repo
+// readiness, holding-stage lookup, extend-turns computation, trialParams construction, restart-time state reconstruction (ADR-059 D5,
 // FR-1/FR-4), base-SHA pinning, and member resolution. partitionBase is this
 // worker's partition-grouping key (#1648 R1) — the empty-string sentinel for the
 // default-base partition (never resolved via git at grouping time, so grouping
@@ -695,44 +694,28 @@ func conflictResolutionStage(holdingStg *stages.Stage) *stages.Stage {
 // lifetime and is what every guard/counter operation below and in every nested
 // helper must key on — never the real git branch name resolved a few lines down.
 //
-// On success (ok=true) it returns the assembled trialParams and members with the
-// semaphore still held — the caller (runMergeTrainWorker) owns releasing it and
-// clearing the in-flight marker for the remainder of the worker's lifetime.
+// It acquires no worker slot (#2046): the train takes an e.sem slot only around
+// each Claude invocation (resolveConflictWithClaude), never for its lifecycle.
 //
-// On failure (ok=false) it has already released the semaphore (if acquired) and
-// cleared the in-flight marker via finishTrain; the caller must simply return.
+// On success (ok=true) it returns the assembled trialParams and members — the
+// caller (runMergeTrainWorker) owns clearing the in-flight marker for the
+// remainder of the worker's lifetime.
+//
+// On failure (ok=false) it has already cleared the in-flight marker via
+// finishTrain; the caller must simply return.
 func (e *Engine) prepareTrainWorker(ctx context.Context, state *mergeTrainWorkerState, owner, repo, partitionBase string, batch []gh.ProjectItem) (p trialParams, members []trainMember, ok bool) {
 	repoKey := owner + "/" + repo
 	trainKey := mergeTrainKey(repoKey, partitionBase)
 
-	// The row already exists at this point (JobStartedEvent fires before
-	// prepareTrainWorker is even called — see runMergeTrainWorker and
-	// adrs/1661-*.md), so a saturated e.sem (shared with every per-issue Claude
-	// invocation) would otherwise leave the row's elapsed timer ticking with an
-	// empty LastLine and no indication the worker is merely queued for a slot,
-	// not doing anything yet. Try a non-blocking acquire first so the common
-	// case (a slot is free) logs nothing extra; only announce the wait when it's
-	// actually going to be a wait (review finding on #1661/PR #1663).
-	select {
-	case e.sem <- struct{}{}:
-	default:
-		e.logfRepo(repoKey, "merge-train", "waiting for a free worker slot for %s\n", trainKey)
-		select {
-		case e.sem <- struct{}{}:
-		case <-ctx.Done():
-			e.logfRepo(repoKey, "merge-train", "context cancelled before semaphore acquired for %s\n", trainKey)
-			e.finishTrain(trainKey)
-			return trialParams{}, nil, false
-		}
-	}
-
-	// The semaphore is now held. Every early-return below must release it, since
-	// only a successful (ok=true) return transfers semaphore ownership to the
-	// caller. Collapsing this into one deferred cleanup means a future early
-	// return added here can't forget to release the semaphore or clear the marker.
+	// The train holds no e.sem slot here (#2046): it takes one only around each
+	// Claude invocation it makes (resolveConflictWithClaude), so there is nothing to
+	// acquire at start and nothing to release on the early returns below. The only
+	// cleanup an ok=false return owes is clearing the in-flight marker, which one
+	// deferred finishTrain covers for every early return, so a future return added
+	// here can't forget it. A successful (ok=true) return transfers marker ownership
+	// to the caller (runMergeTrainWorker), which clears it via its own defer.
 	defer func() {
 		if !ok {
-			<-e.sem
 			e.finishTrain(trainKey)
 		}
 	}()
@@ -997,8 +980,8 @@ func trainBatchTitle(batch []gh.ProjectItem) string {
 // succeeds — so prepareTrainWorker's own diagnostic log lines (repo-not-ready,
 // cannot pin base SHA, no holding stage configured) land in a visible row instead
 // of nowhere; the accepted cost is a rare flash-then-vanish row if
-// prepareTrainWorker fails immediately (e.g. context cancelled before the
-// semaphore is acquired) — see adrs/1661-*.md. The completed event always carries
+// prepareTrainWorker fails immediately (e.g. repo not ready, or no holding stage
+// configured) — see adrs/1661-*.md. The completed event always carries
 // Skipped: true (there is no per-train equivalent of InvocationObserver), so the
 // row is simply removed, never added to history.
 //
@@ -1042,7 +1025,6 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 	if !ok {
 		return
 	}
-	defer func() { <-e.sem }()
 	defer e.finishTrain(trainKey)
 
 	// ADR-1834 Requirement 5: best-effort periodic pruning of the shared rr-cache.
@@ -1460,7 +1442,9 @@ func (e *Engine) assembleAndValidate(ctx context.Context, p trialParams, members
 	// #2052: an abandoned-for-CI-infrastructure trial is not a trial in the
 	// guard's sense — it says nothing about the members — so it is not recorded
 	// either; that is what "leave the members uncharged" means for R2/R4.
-	if result != TrainCIGreen && result != TrainCIInfra {
+	// #2046: a cancellation (e.g. while waiting for a conflict-resolution slot) is
+	// likewise not a trial.
+	if result != TrainCIGreen && result != TrainCIInfra && !trainCancelled(ctx, err) {
 		e.recordTrial(p.trainKey)
 	}
 	return survivors, result, prNum, diag, err
@@ -1554,6 +1538,13 @@ func (e *Engine) bisect(ctx context.Context, p trialParams, red []trainMember, d
 		survivors, result, _, halfDiag, err := e.assembleAndValidate(ctx, p, half, trialName)
 		*used++
 		e.cleanupTrialArtifacts(p.repoKey(), p.wm, trialName)
+		if trainCancelled(ctx, err) {
+			// #2046: a cancelled sub-trial is neither red nor green — abort the
+			// episode (members stay Queued) instead of degrading to a fallback
+			// that would start more work.
+			e.logfRepo(repoKey, "merge-train", "bisection cancelled: %v — leaving members in Queued\n", err)
+			return nil, nil, false, false, true
+		}
 		if err != nil {
 			e.logfRepo(repoKey, "merge-train", "bisection trial failed to assemble: %v — degrading to one-at-a-time fallback\n", err)
 			if _, tripped := e.isRunawayTripped(trainKey); tripped {
@@ -1843,6 +1834,12 @@ func (e *Engine) landOneAtATime(ctx context.Context, state *mergeTrainWorkerStat
 
 		trialName := p.nextTrialName()
 		survivors, result, _, diag, err := e.assembleAndValidate(ctx, p, []trainMember{m}, trialName)
+		if trainCancelled(ctx, err) {
+			// #2046: cancelled, not a verdict — stop without touching the rest.
+			e.logf(m.item.Number, "merge-train", "one-at-a-time landing cancelled: %v — leaving remaining members in Queued\n", err)
+			e.cleanupTrialArtifacts(p.repoKey(), p.wm, trialName)
+			return false
+		}
 		if err != nil || len(survivors) == 0 {
 			e.logf(m.item.Number, "merge-train", "could not assemble #%d in isolation: %v — leaving in Queued\n", m.item.Number, err)
 			e.cleanupTrialArtifacts(p.repoKey(), p.wm, trialName)
@@ -2768,9 +2765,15 @@ type conflictEjectionDiagnostic struct {
 // on preMergeHEAD means the member's entire contribution — not just the conflicted
 // path(s) — was silently discarded by the abort.
 func (e *Engine) resolveConflictWithClaude(ctx context.Context, memberItem gh.ProjectItem, trainWorkDir string, holdingStg *stages.Stage, prSHA string, generatedPaths []string, preMergeHEAD string, originalNonGeneratedPaths []string, opts InvokeOptions) (bool, *conflictEjectionDiagnostic, error) {
-	if _, suspended := e.claudeSuspendedUntilTime(time.Now()); suspended {
-		e.logf(memberItem.Number, "claude-limit", "Claude dispatch suspended account-wide; skipping conflict resolution for #%d\n", memberItem.Number)
-		return false, nil, &claudeUsageLimitError{Message: "account usage-limit suspension active"}
+	suspended := func() error {
+		if _, s := e.claudeSuspendedUntilTime(time.Now()); s {
+			e.logf(memberItem.Number, "claude-limit", "Claude dispatch suspended account-wide; skipping conflict resolution for #%d\n", memberItem.Number)
+			return &claudeUsageLimitError{Message: "account usage-limit suspension active"}
+		}
+		return nil
+	}
+	if err := suspended(); err != nil {
+		return false, nil, err
 	}
 
 	comment := buildTrainConflictComment(memberItem, prSHA, generatedPaths)
@@ -2778,7 +2781,24 @@ func (e *Engine) resolveConflictWithClaude(ctx context.Context, memberItem gh.Pr
 		comment.Body = rewriteConflictCommentForCatchUp(comment.Body, memberItem.Number, prSHA)
 	}
 
-	_, _, _, err := e.claude.InvokeForComments(ctx, conflictResolutionStage(holdingStg), memberItem, []gh.Comment{comment}, trainWorkDir, opts)
+	// #2046: the worker slot brackets exactly the Claude invocation — not the
+	// merge, commit and push around it, and not the finalizeConflictResolution
+	// inspection below. A cancellation while waiting is "could not attempt", the
+	// same non-nil-error shape as the usage-limit case (ADR-1120): the callers
+	// eject nobody and charge nothing.
+	release, err := e.acquireTrainSlot(ctx, memberItem)
+	if err != nil {
+		e.logf(memberItem.Number, "merge-train", "conflict resolution not attempted for #%d: %v\n", memberItem.Number, err)
+		return false, nil, err
+	}
+	// The wait can be long on a saturated board, so the account may have been
+	// suspended meanwhile — don't spend the slot on a doomed invocation.
+	if serr := suspended(); serr != nil {
+		release()
+		return false, nil, serr
+	}
+	_, _, _, err = e.claude.InvokeForComments(ctx, conflictResolutionStage(holdingStg), memberItem, []gh.Comment{comment}, trainWorkDir, opts)
+	release()
 	var limitErr *claudeUsageLimitError
 	if errors.As(err, &limitErr) {
 		e.activateClaudeSuspension(memberItem.Number, limitErr, time.Now())
@@ -2805,12 +2825,54 @@ func (e *Engine) resolveConflictWithClaude(ctx context.Context, memberItem gh.Pr
 		// and must not clear an active suspension (see the matching comment in item.go's
 		// runInvocationWithExtension) — only fall through to clear below on success.
 		e.logf(memberItem.Number, "merge-train", "Claude conflict resolution failed: %v\n", err)
+		if ctx.Err() != nil {
+			// Shutdown/cancel killed the invocation: it proves nothing about the
+			// conflict, so report "not attempted" rather than ejecting (#2046).
+			return false, nil, ctx.Err()
+		}
 		return false, nil, nil
 	}
 	e.clearClaudeSuspension("merge-train conflict resolution reached Claude")
 
 	resolved, diag := e.finalizeConflictResolution(memberItem, trainWorkDir, generatedPaths, preMergeHEAD, originalNonGeneratedPaths)
 	return resolved, diag, nil
+}
+
+// acquireTrainSlot takes one e.sem slot for a single merge-train Claude invocation
+// (#2046) and returns the function that gives it back. The train holds no slot for
+// its lifecycle — assembly git work, PR operations, the trial-CI wait, bisection and
+// landing all run without one — so this is the only place it ever takes one. A
+// non-blocking acquire is tried first so the common case (a slot is free) logs
+// nothing extra; only a real wait is announced, through logfRepo so the repo's job
+// row shows it (ADR-1661, #1661/PR #1663). While waiting the train holds no slot, so
+// stage workers always make progress and no slot-for-slot deadlock is possible.
+//
+// A cancellation while waiting returns an error wrapping ctx.Err(); callers treat it
+// as "could not attempt" (see trainCancelled), never as an unresolvable conflict.
+// release is idempotent, so a defensive double call cannot drain another worker's
+// slot.
+func (e *Engine) acquireTrainSlot(ctx context.Context, memberItem gh.ProjectItem) (release func(), err error) {
+	select {
+	case e.sem <- struct{}{}:
+	default:
+		e.logfRepo(memberItem.Repo, "merge-train", "waiting for a free worker slot for conflict resolution on #%d\n", memberItem.Number)
+		select {
+		case e.sem <- struct{}{}:
+		case <-ctx.Done():
+			return nil, fmt.Errorf("waiting for a worker slot: %w", ctx.Err())
+		}
+	}
+	var once sync.Once
+	return func() { once.Do(func() { <-e.sem }) }, nil
+}
+
+// trainCancelled reports whether err (an assembly/resolution error) is a
+// cancellation rather than a verdict about the trial or its members (#2046). It
+// keys on ctx as well as err so a shutdown that killed an in-flight invocation
+// (surfacing as a generic error) is covered too. Cancellation must never charge the
+// runaway counter, start a fallback, or dissolve a batch.
+func trainCancelled(ctx context.Context, err error) bool {
+	return err != nil && (ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded))
 }
 
 // finalizeConflictResolution inspects trainWorkDir after a conflict-resolution
@@ -4858,6 +4920,14 @@ func (e *Engine) landGreenBatch(ctx context.Context, state *mergeTrainWorkerStat
 		state.CIResult = result
 		state.mu.Unlock()
 
+		if trainCancelled(ctx, aerr) {
+			// #2046: a cancel is not "could not be re-assembled" — dissolving would
+			// close the integration PR and comment on every member. They stay Queued
+			// and re-form on the next cycle.
+			e.logfRepo(p.repoKey(), "merge-train", "rebase re-assembly cancelled: %v — leaving members in Queued\n", aerr)
+			e.cleanupTrialArtifacts(p.repoKey(), p.wm, newTrialName)
+			return
+		}
 		if aerr != nil || len(newSurvivors) == 0 {
 			e.dissolveBatch(state, p, newPRNum, newTrialName, membersToItems(survivors),
 				"the base branch advanced and the batch could not be re-assembled onto it")
