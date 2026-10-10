@@ -228,10 +228,23 @@ func (e *Engine) Run() error {
 	lockFile.Seek(0, 0)
 	fmt.Fprintf(lockFile, "%d\n", os.Getpid())
 
-	// Open the persistent poll log file. Truncated on each startup so the file
-	// always reflects the current run only. Non-fatal if the open fails.
+	// Open the persistent poll log file (#2094). The previous run's log is
+	// rotated to fabrik.log.1 … fabrik.log.N first, so the file always holds
+	// only the current run (the live gate depends on that) while earlier runs
+	// stay available. Rotation runs here, under the instance lock and before any
+	// logger holds the file. A failed rotation is reported and never blocks
+	// startup; if the log itself could not be moved it is truncated, as before.
+	// Non-fatal if the open fails.
 	logPath := filepath.Join(e.fabrikDir, ".fabrik", "fabrik.log")
-	if lf, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600); err != nil {
+	rotateWarnings, truncateFallback := rotateEngineLog(logPath, engineLogBackups)
+	for _, w := range rotateWarnings {
+		fmt.Fprintf(os.Stderr, "warning: log rotation: %s\n", w)
+	}
+	openFlags := os.O_CREATE | os.O_WRONLY
+	if truncateFallback {
+		openFlags |= os.O_TRUNC
+	}
+	if lf, err := os.OpenFile(logPath, openFlags, 0600); err != nil {
 		fmt.Printf("warning: could not open log file %s: %v\n", logPath, err)
 	} else {
 		e.logFile = lf
@@ -241,6 +254,11 @@ func (e *Engine) Run() error {
 			pollLogFile = nil
 			lf.Close()
 		}()
+		// The banner must be the file's first bytes, ahead of the startup warnings.
+		fmt.Fprint(lf, startBanner(e.now(), e.cfg.Version, os.Getpid(), e.cfg.StartReason))
+		for _, w := range rotateWarnings {
+			fmt.Fprintf(lf, "[startup] warning: log rotation: %s\n", w)
+		}
 	}
 
 	// Emit stage-config drift warnings, and the FR-7 undeclared-expected_reviewers

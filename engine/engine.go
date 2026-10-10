@@ -29,6 +29,7 @@ type Config struct {
 	User                       string
 	Token                      string
 	Version                    string
+	StartReason                string // why this process started ("fresh start", "SIGHUP restart", …), shown in the fabrik.log banner (#2094); empty renders as unknown
 	Yolo                       bool
 	AutoUpgrade                bool
 	GitSSH                     bool
