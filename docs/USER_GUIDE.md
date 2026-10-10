@@ -3740,7 +3740,15 @@ Logs are namespaced by repository: `.fabrik/logs/<owner>-<repo>/issue-<N>/`.
 
 ### Poll Log
 
-Fabrik writes engine-level output to `.fabrik/fabrik.log` in the project working directory. This file is **truncated on each startup** and contains only the current run.
+Fabrik writes engine-level output to `.fabrik/fabrik.log` in the project working directory. Each run gets its own file: on every startup (a fresh start, a SIGHUP restart or a self-upgrade re-exec) the previous run's log is **rotated**, not discarded. `fabrik.log` always contains only the current run, and the previous five runs are kept beside it as `fabrik.log.1` (the most recent) through `fabrik.log.5`; the oldest is dropped when a sixth would be created. The backups are plain uncompressed files in `.fabrik/`. A rotation step that fails (for example an unwritable backup slot) is reported on stderr and in the new log, and never prevents startup; if the old log cannot be moved aside it is truncated, as before. A single run's file is not size-capped.
+
+The first line of every run's log is a banner naming the build and the start, for example:
+
+```
+2026-10-10T17:04:05Z [startup] fabrik v1.4.0 pid=48213 started=2026-10-10T17:04:05Z reason=fresh start
+```
+
+It carries the Fabrik version (for a source build this is `dev(<commit>)`, with `+dirty` for a modified tree), the PID, the RFC3339 UTC start time and the reason for the start: `fresh start`, `SIGHUP restart`, `self-upgrade re-exec`, `self-upgrade re-exec (dev build)`, or `unknown` when the reason is not known. The PID is kept across restarts and re-execs, so the start time is what tells runs apart. This makes the log from just before an upgrade or restart easy to find: it is `fabrik.log.1` after the restart. Add `.fabrik/fabrik.log.*` to your `.gitignore` alongside `.fabrik/fabrik.log`.
 
 The poll log captures:
 - Deep-fetch decisions (which issues were shallow-skipped vs. fully fetched)
@@ -4636,11 +4644,11 @@ silently overwriting your changes.
 
 **In-flight Claude runs:** Any Claude session interrupted by the SIGHUP drain did not emit `FABRIK_STAGE_COMPLETE`, so the new process will re-dispatch those stages. The rocket-reaction guard prevents double-posting of already-processed comments. Expect the interrupted stage to restart from its session file.
 
-**Log truncation:** `fabrik.log` is opened with `O_TRUNC` on each startup, so the pre-restart log is cleared. If you need the pre-restart log for diagnostics, copy it first:
+**Log rotation:** the pre-restart log is not lost. On startup `fabrik.log` is rotated to `fabrik.log.1` and the new process opens a fresh `fabrik.log` whose first line is a banner with `reason=SIGHUP restart` (see [Poll Log](#poll-log)). No manual copy is needed before sending the signal:
 
 ```bash
-cp .fabrik/fabrik.log .fabrik/fabrik-pre-restart.log
 kill -HUP <fabrik-pid>
+less .fabrik/fabrik.log.1   # the pre-restart log
 ```
 
 **Windows:** SIGHUP is a Unix signal. This feature is silently absent on Windows.
