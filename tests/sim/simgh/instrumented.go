@@ -181,6 +181,21 @@ func (in *Instrumented) UpdateProjectItemStatus(projectID, itemID, statusFieldID
 		func() error { return in.sim.UpdateProjectItemStatus(projectID, itemID, statusFieldID, statusOptionID) })
 }
 
+func (in *Instrumented) FetchTextField(projectID, name string) (*gh.TextField, error) {
+	return do1(in, "FetchTextField", false, Args{ID: projectID, Values: []string{name}},
+		func() (*gh.TextField, error) { return in.sim.FetchTextField(projectID, name) })
+}
+
+func (in *Instrumented) UpdateProjectItemTextField(projectID, itemID, fieldID, text string) error {
+	return do0(in, "UpdateProjectItemTextField", true, Args{ID: projectID, Values: []string{itemID, fieldID, text}},
+		func() error { return in.sim.UpdateProjectItemTextField(projectID, itemID, fieldID, text) })
+}
+
+func (in *Instrumented) ClearProjectItemField(projectID, itemID, fieldID string) error {
+	return do0(in, "ClearProjectItemField", true, Args{ID: projectID, Values: []string{itemID, fieldID}},
+		func() error { return in.sim.ClearProjectItemField(projectID, itemID, fieldID) })
+}
+
 func (in *Instrumented) ArchiveProjectItem(projectID, itemID string) error {
 	return do0(in, "ArchiveProjectItem", true, Args{ID: projectID, Values: []string{itemID}},
 		func() error { return in.sim.ArchiveProjectItem(projectID, itemID) })

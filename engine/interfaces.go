@@ -40,6 +40,12 @@ type GitHubClient interface {
 	UpdateIssueBody(owner, repo string, issueNumber int, body string) error
 	UpdateProjectItemStatus(projectID, itemID, statusFieldID, statusOptionID string) error
 	ArchiveProjectItem(projectID, itemID string) error
+	// FetchTextField looks up a project's TEXT field by name; (nil, nil) when
+	// it is absent or not a text field. UpdateProjectItemTextField and
+	// ClearProjectItemField write the display-only status line (#2048).
+	FetchTextField(projectID, name string) (*gh.TextField, error)
+	UpdateProjectItemTextField(projectID, itemID, fieldID, text string) error
+	ClearProjectItemField(projectID, itemID, fieldID string) error
 	GetIssueBody(owner, repo string, issueNumber int) (string, error)
 	FindPRForIssue(owner, repo string, issueNumber int) (int, error)
 	FetchLinkedPR(owner, repo string, issueNumber int) (*gh.PRDetails, error)
