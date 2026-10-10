@@ -318,6 +318,12 @@ type Engine struct {
 	// (#1420 R1) so seam-based tests can exercise the ejection-comment diagnostic content,
 	// not only ejection sequencing. Production leaves this nil. See assembleAndValidate.
 	trainValidateFn func(ctx context.Context, members []trainMember) (TrainCIResult, *trainCIDiagnostic)
+	// trainLiveBaseFn replaces the live origin/<base> read used by the red-singleton R3
+	// "already fixed" check (#2045) when non-nil, for tests that run no real git.
+	trainLiveBaseFn func(p trialParams) (string, error)
+	// autoRepair is the red-singleton auto-repair state (#2045): attempt counts, spent R3
+	// requeues and pending repair contexts, shared by the train worker and the poll goroutine.
+	autoRepair autoRepairState
 	// trainCatchUpGitFn replaces the git half of the singleton catch-up (worktree, merge,
 	// push) when non-nil, so the catch-up's decision logic can be exercised under the
 	// trainValidateFn seam without real git. Production leaves this nil. See

@@ -6061,7 +6061,7 @@ func TestEjectRedSingleton_RerouteFailure_NoCommentNoPause(t *testing.T) {
 	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
 
 	m := trainMember{item: makeTrainItem(1, "Issue 1")}
-	eng.ejectRedSingleton("PVT_1", "owner", "repo", m, nil)
+	eng.ejectRedSingleton("PVT_1", "owner", "repo", m, trialParams{}, nil)
 
 	client.mu.Lock()
 	comments := len(client.addCommentCalls)
@@ -6098,7 +6098,7 @@ func TestEjectRedSingleton_Success(t *testing.T) {
 	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
 
 	m := trainMember{item: makeTrainItem(1, "Issue 1")}
-	eng.ejectRedSingleton("PVT_1", "owner", "repo", m, nil)
+	eng.ejectRedSingleton("PVT_1", "owner", "repo", m, trialParams{}, nil)
 
 	if len(client.updateStatusCalls) != 1 {
 		t.Fatalf("expected 1 status update call rerouting #1 off Queued, got %d", len(client.updateStatusCalls))
@@ -6191,7 +6191,7 @@ func TestEjectRedSingleton_Success_ValidateTarget(t *testing.T) {
 	}
 
 	m := trainMember{item: makeTrainItem(1, "Issue 1")}
-	eng.ejectRedSingleton("PVT_1", "owner", "repo", m, nil)
+	eng.ejectRedSingleton("PVT_1", "owner", "repo", m, trialParams{}, nil)
 
 	if len(client.updateStatusCalls) != 1 {
 		t.Fatalf("expected 1 status update call rerouting #1 off Queued, got %d", len(client.updateStatusCalls))

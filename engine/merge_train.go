@@ -1195,7 +1195,7 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 				// singleton disposition instead of calling handleRedBatch at all.
 				e.logf(survivors[0].item.Number, "merge-train", "combined Validate RED for %s with a single member (#%d) — no poisoner to isolate; disposing as a red singleton\n", trainKey, survivors[0].item.Number)
 				e.cleanupTrialArtifacts(p.repoKey(), p.wm, trialName)
-				e.ejectRedSingleton(state.projectID, p.owner, p.repo, survivors[0], diag)
+				e.ejectRedSingleton(state.projectID, p.owner, p.repo, survivors[0], p, diag)
 				return
 			}
 			e.logfRepo(repoKey, "merge-train", "combined Validate RED for %s (%d member(s)) — bisecting to isolate the poisoner\n", trainKey, len(survivors))
@@ -1879,7 +1879,7 @@ func (e *Engine) landOneAtATime(ctx context.Context, state *mergeTrainWorkerStat
 			// disposition (no "different composition" promise, no shared-counter churn)
 			// rather than ejectMember's multi-member wording, which would be equally
 			// misleading here.
-			e.ejectRedSingleton(state.projectID, p.owner, p.repo, m, diag)
+			e.ejectRedSingleton(state.projectID, p.owner, p.repo, m, p, diag)
 		case TrainCIInfra:
 			// #2052: CI never started for this singleton. Every later member would hit the
 			// same provider failure, so stop the whole fallback; all stay Queued, nothing charged.
@@ -3417,8 +3417,40 @@ func pauseCauseLine(diag *trainCIDiagnostic, owner, repo string, issueNumber, co
 // diag is threaded through the same rendering helpers ejectMember uses (renderBatchContext,
 // renderDiagnosticBlock) so the failing check(s) are named identically to every other
 // merge-train diagnostic (ADR-1420).
-func (e *Engine) ejectRedSingleton(projectID, owner, repo string, m trainMember, diag *trainCIDiagnostic) {
-	if !e.rerouteQueuedMemberOffHolding(projectID, m.item) {
+func (e *Engine) ejectRedSingleton(projectID, owner, repo string, m trainMember, p trialParams, diag *trainCIDiagnostic) {
+	// #2045: before pausing, try to repair the member through the normal pipeline. Applies
+	// only when the cap is above 0, the pinned base is known and the reroute target is
+	// literally "Validate" (reenterValidate is hardcoded to it); otherwise — and always at
+	// cap 0 — the unchanged ADR-1545 pause below runs.
+	if capN := e.effectiveAutoRepairCap(); capN > 0 && p.baseSHA != "" {
+		if target := stageBeforeHolding(e.cfg, holdingStage(e.cfg)); target != nil && target.Name == "Validate" {
+			key := autoRepairKey(owner, repo, m.item.Number)
+			// R3: already fixed — the live head contains the live base and its own CI is
+			// green. Stay in Queued and change nothing; allowed once per member per base SHA.
+			if fixed, why := e.memberFixedAgainstLiveBase(p, m); fixed && e.takeRequeue(key, p.baseSHA) {
+				e.logf(m.item.Number, "merge-train", "#%d was red in its trial but its live head already contains the live base and its own CI is green (%s) — leaving in Queued, no pause or Validate run\n", m.item.Number, why)
+				return
+			}
+			if e.autoRepairAttemptsAt(key, p.baseSHA) < capN {
+				switch e.startAutoRepair(projectID, owner, repo, m, p, diag, capN) {
+				case repairStarted, repairRerouteFailed:
+					return
+				case repairReentryFailed:
+					e.pauseRedSingleton(projectID, owner, repo, m, diag, true)
+					return
+				}
+			}
+		}
+	}
+	e.pauseRedSingleton(projectID, owner, repo, m, diag, false)
+}
+
+// pauseRedSingleton is ADR-1545's disposition: reroute the member off Queued (skipped when
+// alreadyRerouted — auto-repair rerouted it before failing to secure re-entry), post the
+// validation-failed comment (with the auto-repair attempt history when any was made) and
+// pause it for a human.
+func (e *Engine) pauseRedSingleton(projectID, owner, repo string, m trainMember, diag *trainCIDiagnostic, alreadyRerouted bool) {
+	if !alreadyRerouted && !e.rerouteQueuedMemberOffHolding(projectID, m.item) {
 		e.logf(m.item.Number, "merge-train", "#%d is a red singleton but could not be rerouted off Queued — leaving untouched for retry on the next poll\n", m.item.Number)
 		return
 	}
@@ -3433,6 +3465,9 @@ func (e *Engine) ejectRedSingleton(projectID, owner, repo string, m trainMember,
 	}
 	if block := renderDiagnosticBlock(diag); block != "" {
 		sections = append(sections, block)
+	}
+	if history := e.renderRepairAttemptHistory(autoRepairKey(owner, repo, m.item.Number)); history != "" {
+		sections = append(sections, "Automatic repair was attempted and did not converge, so this now needs a human. "+history)
 	}
 	sections = append(sections, reentryInstruction(targetName, "This is not a merge-train ejection to retry in a future batch — fix the failing check(s) on this PR"))
 	msg := fmt.Sprintf("🏭 **Fabrik merge-train — validation failed**\n\n%s", strings.Join(sections, "\n\n"))
@@ -3606,6 +3641,7 @@ func (e *Engine) resetEjectionCount(owner, repo string, memberNum int) {
 	e.mergeTrainEjectionsMu.Lock()
 	delete(e.mergeTrainEjectionCounts, counterKey)
 	e.mergeTrainEjectionsMu.Unlock()
+	e.resetAutoRepair(owner, repo, memberNum) // #2045: a landed member starts fresh
 }
 
 // stageBeforeHolding returns the non-Unmanaged stage with the highest Order strictly
