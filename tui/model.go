@@ -28,6 +28,8 @@ type HistoryEntry struct {
 	TurnsUsed      int
 	MaxTurns       int
 	CostUSD        float64
+	Outcome        string // merge-train episode outcome (#2050); empty for ordinary jobs and old entries
+	Detail         string // merge-train outcome detail; empty for ordinary jobs and old entries
 }
 
 // activeJob tracks an in-flight worker.
@@ -42,6 +44,9 @@ type activeJob struct {
 	LastLine    string
 	TurnsUsed   int
 	MaxTurns    int // 0 means unlimited
+	// Merge-train row only (#2050): the current phase and when it was entered.
+	Phase          string
+	PhaseStartedAt time.Time
 }
 
 // blockedIssue tracks an issue held at the dependency gate.
@@ -480,6 +485,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if entry == nil {
 					return m, nil
 				}
+				if entry.IssueNumber == 0 {
+					// A merge-train episode entry (#2050): no issue, no worktree.
+					m.header.SetStatusMsg("merge-train entry — nothing to resume")
+					return m, nil
+				}
 				if isActiveIssue(m.active.active, *entry) {
 					m.header.SetStatusMsg("stage in progress — use l to watch")
 					return m, nil
@@ -748,6 +758,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case TrainRowEvent:
+		comp, _ := m.active.Update(msg)
+		m.active = comp.(ActivePaneComponent)
+		return m, nil
+
 	case TurnProgressEvent:
 		comp, _ := m.active.Update(msg)
 		m.active = comp.(ActivePaneComponent)
@@ -881,6 +896,8 @@ func (m *Model) prepareDetailItem() {
 			MaxTurns:       entry.MaxTurns,
 			CostUSD:        entry.CostUSD,
 			CompletedAt:    entry.CompletedAt,
+			Outcome:        entry.Outcome,
+			OutcomeDetail:  entry.Detail,
 		})
 	} else {
 		m.detail.SetItem(nil)

@@ -114,6 +114,8 @@ func (h HistoryPaneComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
 			TurnsUsed:      ev.TurnsUsed,
 			MaxTurns:       ev.MaxTurns,
 			CostUSD:        ev.CostUSD,
+			Outcome:        ev.Outcome,
+			Detail:         ev.Detail,
 		}
 		h.history = append(h.history, entry)
 		SaveHistory(h.history)
@@ -159,6 +161,10 @@ func (h HistoryPaneComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
 				realIdx := len(h.history) - 1 - h.histIdx
 				if realIdx >= 0 && realIdx < len(h.history) {
 					he := h.history[realIdx]
+					if he.IssueNumber == 0 {
+						// A merge-train episode entry (#2050): no per-issue worktree.
+						return h, nil
+					}
 					return h, openWatchInlineCmd(he.IssueNumber, he.Repo)
 				}
 			}
@@ -240,7 +246,16 @@ func (h *HistoryPaneComponent) rebuildViewportContent(innerWidth int) {
 	for i := len(h.history) - 1; i >= 0; i-- {
 		he := h.history[i]
 		var status, result string
-		if !he.Success {
+		if he.Outcome != "" {
+			// Merge-train episode entry (#2050): the outcome text is the result;
+			// Completed/BlockedOnInput/TurnLimited do not apply.
+			if he.Success {
+				status = successStyle.Render("✓")
+			} else {
+				status = failStyle.Render("✗")
+			}
+			result = dimStyle.Render("  " + he.Outcome)
+		} else if !he.Success {
 			status = failStyle.Render("✗")
 			result = dimStyle.Render("  (error)")
 		} else if he.BlockedOnInput {

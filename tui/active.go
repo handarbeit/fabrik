@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // ActivePaneComponent manages the in-progress jobs pane.
@@ -94,6 +95,15 @@ func (a ActivePaneComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
 		}
 		if a.activeIdx >= len(a.active) && a.activeIdx > 0 {
 			a.activeIdx = len(a.active) - 1
+		}
+
+	case TrainRowEvent:
+		// Update-only: a late event for a row that has already been removed
+		// must not resurrect it.
+		if job, ok := a.active[activeJobKey(ev.Repo, 0)]; ok {
+			job.Title = ev.Title
+			job.Phase = ev.Phase
+			job.PhaseStartedAt = ev.PhaseStartedAt
 		}
 
 	case StageChangedEvent:
@@ -204,7 +214,12 @@ func (a ActivePaneComponent) View(width int) string {
 			badge += " "
 		}
 		line := essential + badge + titleStr + tag + " " + msg
-		if runes := []rune(line); len(runes) > maxWidth {
+		if job.Phase != "" {
+			// trainRowLine budgets visible cells and its title carries ANSI
+			// styling, so the rune-count cut below would mis-measure it and
+			// drop the phase tail; truncate by visible width instead.
+			line = ansi.Truncate(trainRowLine(essential, job, a.now, maxWidth), maxWidth, "…")
+		} else if runes := []rune(line); len(runes) > maxWidth {
 			line = string(runes[:maxWidth-1]) + "…"
 		}
 		if a.focused && idx == a.activeIdx {
@@ -283,6 +298,45 @@ func (a ActivePaneComponent) View(width int) string {
 	}
 	content := title + hint + "\n" + strings.Join(lines, "\n")
 	return borderStyle.Width(width - 4).Render(content)
+}
+
+// trainRowLine renders a merge-train row that has a phase (#2050):
+//
+//	#0     Merge Train ⠋ 12m  3 of 5: #1 #2 #3 (ejected #4 #5) · trial CI #4012 (47m) [tag] last line
+//
+// Truncation priority when the row is too narrow: the last log line goes
+// first, then the membership title is shortened; the phase and its elapsed
+// time are always kept, since "how long has this been stuck" is the point.
+func trainRowLine(essential string, job *activeJob, now time.Time, maxWidth int) string {
+	phase := job.Phase
+	if !job.PhaseStartedAt.IsZero() {
+		phase += " (" + fmtDuration(now.Sub(job.PhaseStartedAt)) + ")"
+	}
+	tail := " · " + phase
+	title := job.Title
+	room := maxWidth - lipgloss.Width(essential) - lipgloss.Width(tail)
+	if runes := []rune(title); len(runes) > room {
+		if room < 2 {
+			// A lone "…" says nothing and would push the phase tail past
+			// the edge; drop the title so the phase keeps its cells.
+			title = ""
+		} else {
+			// Keep the leading "N of M" count: cut the end of the title.
+			title = string(runes[:room-1]) + "…"
+		}
+	}
+	line := essential + dimStyle.Render(title) + tail
+	if job.LastLine != "" {
+		extra := ""
+		if job.LastTag != "" {
+			extra = " " + dimStyle.Render(fmt.Sprintf("[%s]", job.LastTag))
+		}
+		extra += " " + job.LastLine
+		if lipgloss.Width(line)+lipgloss.Width(extra) <= maxWidth {
+			line += extra
+		}
+	}
+	return line
 }
 
 func (a ActivePaneComponent) Height() int {

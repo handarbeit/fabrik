@@ -196,6 +196,7 @@ func (e *Engine) trySingletonCatchUp(ctx context.Context, state *mergeTrainWorke
 	}
 	if why := e.catchUpBusyReason(p, m); why != "" {
 		e.logf(m.item.Number, "merge-train", "singleton catch-up: deferring #%d — %s; leaving it in Queued, nothing charged\n", m.item.Number, why)
+		p.episode.noteAbandoned(fmt.Sprintf("catch-up of #%d deferred: %s", m.item.Number, why))
 		return m, true
 	}
 
@@ -209,6 +210,7 @@ func (e *Engine) trySingletonCatchUp(ctx context.Context, state *mergeTrainWorke
 	switch out.kind {
 	case catchUpDefer:
 		e.logf(m.item.Number, "merge-train", "singleton catch-up: deferring #%d — %s; leaving it in Queued, nothing charged\n", m.item.Number, out.reason)
+		p.episode.noteAbandoned(fmt.Sprintf("catch-up of #%d deferred: %s", m.item.Number, out.reason))
 		return m, true
 	case catchUpFallback:
 		e.logf(m.item.Number, "merge-train", "singleton catch-up not done for #%d: %s — building trial\n", m.item.Number, out.reason)
@@ -219,6 +221,7 @@ func (e *Engine) trySingletonCatchUp(ctx context.Context, state *mergeTrainWorke
 	case catchUpConflict:
 		e.logf(m.item.Number, "merge-train", "singleton catch-up: cannot resolve the conflict between pinned base %s and #%d — ejecting\n", p.baseSHA, m.item.Number)
 		e.ejectMember(p.owner, p.repo, m.item, out.reason, nil, nil, true)
+		e.noteTrainEjected(p.episode, p.repoKey(), m.item.Number, "unresolvable catch-up conflict", false)
 		e.resetCatchUpAttempts(p.trainKey, m.item.Number)
 		return m, true
 	}
@@ -232,14 +235,14 @@ func (e *Engine) trySingletonCatchUp(ctx context.Context, state *mergeTrainWorke
 
 	// The CI being waited on is the member's own PR's (not a trial PR), so the line
 	// names that PR.
-	e.setStatusLine(caughtUp.item, statusLineCatchUp(caughtUp.prNum))
+	e.noteTrainPhase(p.episode, p.repoKey(), []trainMember{caughtUp}, phaseCatchingUp(caughtUp.prNum))
 	verdict, diag := e.waitMemberCI(ctx, state, p, caughtUp)
 	switch verdict {
 	case memberCIGreen:
 		// Re-enter the existing fast path, whose eligibility checks (live head ==
 		// caughtUp.headSHA — R5's TOCTOU check — pinned base an ancestor, mergeable,
 		// non-zero green and complete CI) are the landing gate, unmodified.
-		if remaining, ejected := e.applyPendingReviewEjects(state.projectID, p.repoKey(), []trainMember{caughtUp}); ejected > 0 || len(remaining) == 0 {
+		if remaining, ejected := e.applyPendingReviewEjectsEp(p.episode, state.projectID, p.repoKey(), []trainMember{caughtUp}); ejected > 0 || len(remaining) == 0 {
 			return caughtUp, true
 		}
 		if e.trySingletonFastPath(ctx, state, p, caughtUp) {
@@ -248,6 +251,8 @@ func (e *Engine) trySingletonCatchUp(ctx context.Context, state *mergeTrainWorke
 		e.logf(m.item.Number, "merge-train", "singleton catch-up: #%d is green on its caught-up head but the fast path declined — building trial\n", m.item.Number)
 		return caughtUp, false
 	case memberCIRed:
+		p.episode.noteAbandoned(fmt.Sprintf("#%d is red after catch-up (paused)", caughtUp.item.Number))
+		e.noteTrainEjected(p.episode, p.repoKey(), caughtUp.item.Number, "red after catch-up", false)
 		e.ejectRedCatchUpSingleton(state.projectID, p, caughtUp, diag)
 		e.resetCatchUpAttempts(p.trainKey, m.item.Number)
 		return caughtUp, true
@@ -258,7 +263,10 @@ func (e *Engine) trySingletonCatchUp(ctx context.Context, state *mergeTrainWorke
 		// Decided for this poll: the member stays Queued (or was already ejected) and the
 		// next poll re-evaluates it. Nothing is charged.
 		if verdict != memberCIEjected {
-			e.setStatusLine(caughtUp.item, statusLineQueuedWaiting)
+			p.episode.noteAbandoned(fmt.Sprintf("catch-up of #%d did not finish (CI pending or head moved; left in Queued)", caughtUp.item.Number))
+			e.noteTrainPhase(p.episode, p.repoKey(), []trainMember{caughtUp}, phaseReleased())
+		} else {
+			p.episode.noteAbandoned(fmt.Sprintf("#%d left the train during catch-up", caughtUp.item.Number))
 		}
 		return caughtUp, true
 	}
@@ -291,7 +299,7 @@ func (e *Engine) runCatchUpGit(ctx context.Context, p trialParams, m trainMember
 	pure := mergeErr == nil
 	if mergeErr != nil {
 		e.logf(n, "merge-train", "catch-up merge conflict for #%d: %s — resolving\n", n, strings.TrimSpace(mergeOut))
-		opts := InvokeOptions{BaseBranch: p.baseBranch, MaxTurnsOverride: p.maxTurnsOverride, FabrikRoot: e.fabrikDir, FabrikRepo: e.defaultRepo(), MaxResumeFailures: e.cfg.MaxResumeFailures, NoResume: true, CatchUpBaseSHA: p.baseSHA}
+		opts := InvokeOptions{BaseBranch: p.baseBranch, MaxTurnsOverride: p.maxTurnsOverride, FabrikRoot: e.fabrikDir, FabrikRepo: e.defaultRepo(), MaxResumeFailures: e.cfg.MaxResumeFailures, NoResume: true, CatchUpBaseSHA: p.baseSHA, trainEpisode: p.episode}
 		resolved, diag, resolveErr := e.resolveTrainConflict(ctx, p.repoKey(), m.item, wtDir, p.holdingStg, p.baseSHA, m.headSHA, mergeOut, opts)
 		if resolveErr != nil {
 			// Resolution could not even be attempted (account-wide usage-limit

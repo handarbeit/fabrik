@@ -27,6 +27,8 @@ type DetailItem struct {
 	MaxTurns       int
 	CostUSD        float64
 	CompletedAt    time.Time
+	Outcome        string // merge-train episode outcome (#2050)
+	OutcomeDetail  string
 }
 
 // DetailPanelComponent renders metadata for a selected item.
@@ -91,6 +93,12 @@ func (d DetailPanelComponent) View(width int) string {
 			lines = append(lines, fmt.Sprintf("Model:    %s", item.StageModel))
 		}
 		lines = append(lines, fmt.Sprintf("Status:   %s", statusStr))
+		if item.Outcome != "" {
+			lines = append(lines, fmt.Sprintf("Outcome:  %s", item.Outcome))
+			if item.OutcomeDetail != "" {
+				lines = append(lines, fmt.Sprintf("Detail:   %s", item.OutcomeDetail))
+			}
+		}
 		lines = append(lines, fmt.Sprintf("Duration: %s", fmtDuration(item.Duration)))
 		if item.TurnsUsed > 0 {
 			if item.MaxTurns > 0 {

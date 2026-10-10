@@ -268,6 +268,22 @@ type mergeTrainWorkerState struct {
 	// in the same repo but excluded by the batch cap (safe to eject directly — the
 	// worker never looks at it, exactly like the no-worker-in-flight case).
 	batchNumbers map[int]bool
+
+	// episode is this worker run's #2050 state (live membership, phase, outcome
+	// facts), set once by runMergeTrainWorker before anything reads it. It is
+	// reachable here for the land*/catch-up helpers that take state, and through
+	// trialParams.episode for those that take p. Nil-safe everywhere.
+	episode *trainEpisode
+}
+
+// ep returns the worker's episode (nil-safe on a nil state).
+func (s *mergeTrainWorkerState) ep() *trainEpisode {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.episode
 }
 
 // sanitizeBranchName replaces characters that are invalid in directory names
@@ -576,6 +592,10 @@ type trialParams struct {
 	// resolving conflicts" / "CI running") — bisect sets it on its by-value copy so
 	// a sub-trial does not overwrite the "bisecting · step i of n" line (#2048).
 	quietTrialLines bool
+	// episode is the worker's #2050 state, shared by pointer through every
+	// by-value copy of trialParams (bisect, rebase loops, catch-up). Nil in
+	// tests that build trialParams by hand; every use is nil-safe.
+	episode *trainEpisode
 }
 
 // repoKey returns the "owner/repo" identity for this trial, used to route
@@ -796,6 +816,7 @@ func (e *Engine) prepareTrainWorker(ctx context.Context, state *mergeTrainWorker
 		holdingStg:       holdingStg,
 		maxTurnsOverride: maxTurnsOverride,
 		nextTrialName:    nextTrialName,
+		episode:          state.ep(),
 	}
 
 	// FR-1/FR-4: reconstruct durable in-flight state before forming a fresh batch, so
@@ -827,12 +848,29 @@ func (e *Engine) prepareTrainWorker(ctx context.Context, state *mergeTrainWorker
 	}
 
 	// Resolve each member's linked PR number + head SHA once, ejecting fetch failures.
+	ep := p.episode
 	current := e.fetchTrainMembers(ctx, owner, repo, batch)
+	for _, item := range batch {
+		found := false
+		for _, m := range current {
+			if m.item.Number == item.Number {
+				found = true
+				break
+			}
+		}
+		if !found {
+			e.noteTrainEjected(ep, repoKey, item.Number, "no usable linked PR", true)
+		}
+	}
 	// #1871: the batch is a board snapshot that may predate a landing that already
 	// completed; drop live-moved and live-unreadable members before they are
 	// admitted, assembled into a trial and re-landed.
 	beforeLive := len(current)
-	current = e.dropLiveLandedMembers(state, p, current)
+	liveKept := e.dropLiveLandedMembers(state, p, current)
+	for _, n := range droppedNumbers(current, liveKept) {
+		e.noteTrainDeferred(ep, repoKey, n, "live status")
+	}
+	current = liveKept
 	if dropped := beforeLive - len(current); dropped > 0 {
 		e.logfRepo(repoKey, "merge-train", "live-status guard excluded %d of %d fetched member(s) for %s from this batch (already landed, or live status read failed — see per-member lines above)\n", dropped, beforeLive, repoKey)
 	}
@@ -840,13 +878,21 @@ func (e *Engine) prepareTrainWorker(ctx context.Context, state *mergeTrainWorker
 	// batch (fail-open on every other outcome). Fresh formation only: both restart
 	// routes returned from reconstructTrainState above.
 	fetched := len(current)
-	current = e.admitTrainMembers(ctx, state, owner, repo, current)
+	admitted := e.admitTrainMembers(ctx, state, owner, repo, current)
+	for _, n := range droppedNumbers(current, admitted) {
+		e.noteTrainDeferred(ep, repoKey, n, "own CI red")
+	}
+	current = admitted
 	// #2047: keep members that change the same files out of one batch (fail-open; the
 	// deferred member stays Queued with no side effects).
 	afterCI := len(current)
-	current = e.admitByOverlap(trainKey, owner, repo, current)
+	overlapKept := e.admitByOverlap(trainKey, owner, repo, current)
+	for _, n := range droppedNumbers(current, overlapKept) {
+		e.noteTrainDeferred(ep, repoKey, n, "file overlap")
+	}
+	current = overlapKept
 	e.logfRepo(repoKey, "merge-train", "assembled %d train member(s) for %s (deferred %d for own-PR CI red, %d for file overlap)\n", len(current), repoKey, fetched-afterCI, afterCI-len(current))
-	e.setMembersStatusLine(current, statusLineQueued(len(current)))
+	e.noteTrainPhase(ep, repoKey, current, phaseAdmitted(len(current)))
 
 	return p, current, true
 }
@@ -1011,28 +1057,54 @@ func trainBatchTitle(batch []gh.ProjectItem) string {
 func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorkerState, owner, repo, partitionBase string, batch []gh.ProjectItem) {
 	repoKey := owner + "/" + repo
 	trainKey := mergeTrainKey(repoKey, partitionBase)
-	title := trainBatchTitle(batch)
-	if partitionBase != defaultPartitionBase {
-		title = fmt.Sprintf("[%s] %s", partitionBase, title)
+	nums := make([]int, len(batch))
+	for i, item := range batch {
+		nums[i] = item.Number
 	}
+	ep := newTrainEpisode(partitionBase, nums)
+	state.mu.Lock()
+	state.episode = ep
+	state.mu.Unlock()
+	startedAt := time.Now()
 
 	e.emitStructural(tui.JobStartedEvent{
 		IssueNumber: 0,
 		Repo:        repoKey,
-		Title:       title,
+		Title:       ep.title(),
 		StageName:   "Merge Train",
-		StartedAt:   time.Now(),
+		StartedAt:   startedAt,
 	})
-	defer e.emitStructural(tui.JobCompletedEvent{
-		IssueNumber: 0,
-		Repo:        repoKey,
-		Title:       title,
-		StageName:   "Merge Train",
-		Skipped:     true,
-	})
+	// The one and only completion event of the episode (#2050): deferred, so it
+	// runs on every exit path (including a failed prepareTrainWorker and a
+	// panic), and sites elsewhere only record facts on ep — exactly one History
+	// entry per episode by construction.
+	defer func() {
+		if e.trainOutcomeNeutralisedForTest {
+			// FR-013: the pre-#2050 blanket completion, for the neutralisation test.
+			e.emitStructural(tui.JobCompletedEvent{IssueNumber: 0, Repo: repoKey, Title: ep.title(), StageName: "Merge Train", Skipped: true})
+			return
+		}
+		out := ep.resolve()
+		now := time.Now()
+		e.emitStructural(tui.JobCompletedEvent{
+			IssueNumber: 0,
+			Repo:        repoKey,
+			Title:       ep.title(),
+			StageName:   "Merge Train",
+			Success:     out.Success,
+			Completed:   true,
+			Duration:    now.Sub(startedAt),
+			CompletedAt: now,
+			Outcome:     out.Outcome,
+			Detail:      out.Detail,
+		})
+	}()
 
 	p, current, ok := e.prepareTrainWorker(ctx, state, owner, repo, partitionBase, batch)
 	if !ok {
+		if ep.landedNothing() {
+			ep.noteAbandoned("train did not start (setup failed or nothing to resume)")
+		}
 		return
 	}
 	defer e.finishTrain(trainKey)
@@ -1068,6 +1140,7 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 	for {
 		if len(current) == 0 {
 			e.logfRepo(repoKey, "merge-train", "no survivors remaining for %s — train complete with nothing to land\n", trainKey)
+			ep.noteDissolved()
 			return
 		}
 
@@ -1088,7 +1161,7 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 			// the exact case #1208 exists to prevent. An ejected member leaves
 			// `current` empty, so `continue` re-enters the loop and the
 			// top-of-loop zero-survivors check returns.
-			if remaining, ejectedCount := e.applyPendingReviewEjects(state.projectID, repoKey, current); ejectedCount > 0 {
+			if remaining, ejectedCount := e.applyPendingReviewEjectsEp(ep, state.projectID, repoKey, current); ejectedCount > 0 {
 				e.logfRepo(repoKey, "merge-train", "%d member(s) ejected for unresolved review findings or unprocessed comments before the singleton fast path — re-forming for %s\n", ejectedCount, trainKey)
 				current = remaining
 				continue
@@ -1114,11 +1187,13 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 		state.assembling = true
 		state.mu.Unlock()
 
+		e.noteTrainPhase(ep, repoKey, nil, phaseAssembling())
 		survivors, result, prNum, diag, aerr := e.assembleAndValidate(ctx, p, current, trialName)
 		if aerr != nil {
 			e.logfRepo(repoKey, "merge-train", "assemble/validate failed for %s: %v\n", trainKey, aerr)
 			e.cleanupTrialArtifacts(p.repoKey(), p.wm, trialName)
-			e.setMembersStatusLine(current, statusLineQueuedWaiting)
+			ep.noteAbandoned("trial could not be assembled")
+			e.noteTrainPhase(ep, repoKey, current, phaseReleased())
 			return
 		}
 		if len(survivors) == 0 {
@@ -1135,6 +1210,7 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 		// isRunawayTripped just above (found in review, #1648).
 		if count, tripped := e.isRunawayTripped(trainKey); tripped {
 			e.cleanupTrialArtifacts(p.repoKey(), p.wm, trialName)
+			ep.noteAbandoned("runaway guard fired")
 			e.fireRunawayGuard(ctx, p.owner, p.repo, partitionBase, membersToItems(current), count)
 			return
 		}
@@ -1146,7 +1222,7 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 		// containing a flagged member must never reach landGreenBatch. An empty
 		// `remaining` falls through to continue and is caught by the top-of-loop
 		// zero-survivors return, so no special-casing is needed here.
-		if remaining, ejectedCount := e.applyPendingReviewEjects(state.projectID, repoKey, survivors); ejectedCount > 0 {
+		if remaining, ejectedCount := e.applyPendingReviewEjectsEp(ep, state.projectID, repoKey, survivors); ejectedCount > 0 {
 			e.logfRepo(repoKey, "merge-train", "%d member(s) ejected for unresolved review findings or unprocessed comments mid-trial — discarding trial and re-forming for %s\n", ejectedCount, trainKey)
 			e.cleanupTrialArtifacts(p.repoKey(), p.wm, trialName)
 			current = remaining
@@ -1170,7 +1246,8 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 		case TrainCIPending:
 			e.logfRepo(repoKey, "merge-train", "combined Validate pending/timed out for %s — will retry next poll\n", trainKey)
 			e.cleanupTrialArtifacts(p.repoKey(), p.wm, trialName)
-			e.setMembersStatusLine(survivors, statusLineQueuedWaiting)
+			ep.noteAbandoned("trial CI still pending at timeout")
+			e.noteTrainPhase(ep, repoKey, survivors, phaseReleased())
 			return
 		case TrainCIInfra:
 			// #2052: CI never started and retriggering did not help. Not the members'
@@ -1179,7 +1256,8 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 			e.logfRepo(repoKey, "merge-train", "combined Validate abandoned for %s — CI infrastructure failure (%s); %d member(s) left in Queued, nothing charged\n", trainKey, infraNote(diag), len(survivors))
 			e.cleanupTrialArtifacts(p.repoKey(), p.wm, trialName)
 			e.markInfraAbandon(trainKey)
-			e.setMembersStatusLine(survivors, statusLineQueuedWaiting)
+			ep.noteAbandoned("CI never started (infrastructure failure)")
+			e.noteTrainPhase(ep, repoKey, survivors, phaseReleased())
 			return
 		default: // TrainCIRed
 			if len(survivors) == 1 {
@@ -1208,7 +1286,8 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 				// A cancel is not a CI infrastructure failure, so don't log it as one or
 				// start the partition's infra cooldown.
 				e.logfRepo(repoKey, "merge-train", "bisection for %s cancelled; %d member(s) left in Queued, nothing charged\n", trainKey, len(survivors))
-				e.setMembersStatusLine(survivors, statusLineQueuedWaiting)
+				ep.noteAbandoned("cancelled during bisection")
+				e.noteTrainPhase(ep, repoKey, survivors, phaseReleased())
 				return
 			}
 			if infra {
@@ -1217,13 +1296,15 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 				// every member stays Queued, nothing is charged for the abandoned trial.
 				e.logfRepo(repoKey, "merge-train", "bisection for %s aborted — CI infrastructure failure on a sub-trial; %d member(s) left in Queued, nothing charged\n", trainKey, len(survivors))
 				e.markInfraAbandon(trainKey)
-				e.setMembersStatusLine(survivors, statusLineQueuedWaiting)
+				ep.noteAbandoned("CI never started on a bisection trial (infrastructure failure)")
+				e.noteTrainPhase(ep, repoKey, survivors, phaseReleased())
 				return
 			}
 			if runaway {
 				// Runaway guard fired inside bisect or landOneAtATime. partitionBase
 				// (sentinel-aware), not p.baseBranch — see the Hook 1 call above.
 				count, _ := e.isRunawayTripped(trainKey)
+				ep.noteAbandoned("runaway guard fired")
 				e.fireRunawayGuard(ctx, p.owner, p.repo, partitionBase, membersToItems(survivors), count)
 				return
 			}
@@ -1363,9 +1444,9 @@ func (e *Engine) assembleTrialBranch(ctx context.Context, p trialParams, members
 		// requested but none exists" warning on every member's first encounter.
 		// The draft CI PR does not exist yet, so the line carries no trial number.
 		if !p.quietTrialLines {
-			e.setMembersStatusLine(members, statusLineTrial(0, "resolving conflicts"))
+			e.noteTrainPhase(p.episode, p.repoKey(), members, phaseResolvingConflicts(member.item.Number))
 		}
-		opts := InvokeOptions{BaseBranch: p.baseBranch, MaxTurnsOverride: p.maxTurnsOverride, FabrikRoot: e.fabrikDir, FabrikRepo: e.defaultRepo(), MaxResumeFailures: e.cfg.MaxResumeFailures, NoResume: true}
+		opts := InvokeOptions{BaseBranch: p.baseBranch, MaxTurnsOverride: p.maxTurnsOverride, FabrikRoot: e.fabrikDir, FabrikRepo: e.defaultRepo(), MaxResumeFailures: e.cfg.MaxResumeFailures, NoResume: true, trainEpisode: p.episode}
 		resolved, diag, resolveErr := e.resolveTrainConflict(ctx, p.repoKey(), member.item, wtDir, p.holdingStg, member.headSHA, preMergeHEAD, string(mergeOut), opts)
 		if resolved {
 			survivors = append(survivors, member)
@@ -1430,6 +1511,7 @@ func (e *Engine) assembleTrialBranch(ctx context.Context, p trialParams, members
 		// trainCIDiagnostic (combined-Validate/CI failures, ADR-1420) — this
 		// conflict-resolution diagnostic is already folded into reason above.
 		e.ejectMember(p.owner, p.repo, member.item, reason, nil, nil, true)
+		e.noteTrainEjected(p.episode, p.repoKey(), member.item.Number, "unresolvable conflict", true)
 	}
 
 	if len(survivors) == 0 {
@@ -1486,7 +1568,7 @@ func (e *Engine) assembleAndValidate(ctx context.Context, p trialParams, members
 func (e *Engine) assembleAndValidateInner(ctx context.Context, p trialParams, members []trainMember, trialName string) ([]trainMember, TrainCIResult, int, *trainCIDiagnostic, error) {
 	if e.trainValidateFn != nil {
 		if !p.quietTrialLines {
-			e.setMembersStatusLine(members, statusLineTrial(0, "CI running"))
+			e.noteTrainPhase(p.episode, p.repoKey(), members, phaseTrialCI(0))
 		}
 		result, diag := e.trainValidateFn(ctx, members)
 		return members, result, 0, diag, nil
@@ -1530,7 +1612,7 @@ func (e *Engine) assembleAndValidateInner(ctx context.Context, p trialParams, me
 	}
 	e.logfRepo(p.repoKey(), "merge-train", "opened draft CI PR #%d for %s/%s (%d survivor(s))\n", prNum, p.owner, p.repo, len(survivors))
 	if !p.quietTrialLines {
-		e.setMembersStatusLine(survivors, statusLineTrial(prNum, "CI running"))
+		e.noteTrainPhase(p.episode, p.repoKey(), survivors, phaseTrialCI(prNum))
 	}
 
 	result, diag := e.pollTrainCI(ctx, p.owner, p.repo, prNum, trialSHA)
@@ -1570,7 +1652,7 @@ func (e *Engine) bisect(ctx context.Context, p trialParams, red []trainMember, d
 		// The step is the validation about to run (the episode's initial red
 		// validation counts as the first); the ceiling is the cost cap, not a
 		// prediction — the number of remaining halves is not known up front.
-		e.setMembersStatusLine(half, statusLineBisect(*used+1, costCap))
+		e.noteTrainPhase(p.episode, repoKey, half, phaseBisecting(*used+1, costCap))
 		trialName := p.nextTrialName()
 		survivors, result, _, halfDiag, err := e.assembleAndValidate(ctx, p, half, trialName)
 		*used++
@@ -1632,6 +1714,7 @@ func (e *Engine) handleRedBatch(ctx context.Context, state *mergeTrainWorkerStat
 	}
 	if fellBack {
 		e.logfRepo(p.repoKey(), "merge-train", "could not isolate a single poisoner for %s/%s (%d/%d validations used) — degrading to one-at-a-time landing of %d member(s)\n", p.owner, p.repo, used, costCap, len(red))
+		p.episode.noteOneAtATime()
 		runaway = e.landOneAtATime(ctx, state, p, red)
 		return nil, true, runaway, false
 	}
@@ -1645,6 +1728,8 @@ func (e *Engine) handleRedBatch(ctx context.Context, state *mergeTrainWorkerStat
 	e.ejectMember(p.owner, p.repo, poisoner.item,
 		fmt.Sprintf("ejected from merge-train — the combined Validate fails whenever #%d is in the batch (isolated by halving bisection). It will be retried in a future train with a different composition.", poisoner.item.Number),
 		isolationDiag, red, true)
+	p.episode.notePoisoner(poisoner.item.Number)
+	e.noteTrainEjected(p.episode, p.repoKey(), poisoner.item.Number, "poisoner", false)
 	e.forgetPoisonerResolutions(ctx, p, red, *poisoner)
 
 	var survivors []trainMember
@@ -1857,6 +1942,8 @@ func (e *Engine) landOneAtATime(ctx context.Context, state *mergeTrainWorkerStat
 	repoKey := p.owner + "/" + p.repo
 	trainKey := p.trainKey
 	e.logfRepo(repoKey, "merge-train", "one-at-a-time fallback: processing %d member(s) as singleton batches\n", len(members))
+	p.episode.noteOneAtATime()
+	e.noteTrainPhase(p.episode, repoKey, members, phaseOneAtATime())
 	for _, m := range members {
 		if e.trainValidateFn == nil {
 			// Re-pin the base to current origin/<base> so a prior singleton's land is
@@ -2059,7 +2146,12 @@ func (e *Engine) refuseIfBaseContradictsMembers(owner, repo, baseBranch, trainKe
 func (e *Engine) landSingleton(ctx context.Context, state *mergeTrainWorkerState, p trialParams, m trainMember, trialName string) {
 	trialBranch := "fabrik/merge-train/" + trialName
 	defer e.cleanupTrialArtifacts(p.repoKey(), p.wm, trialName)
-	e.setStatusLine(m.item, statusLineLanding)
+	defer func() {
+		if p.episode.landedNothing() {
+			p.episode.noteAbandoned(fmt.Sprintf("singleton landing of #%d did not complete (left in Queued)", m.item.Number))
+		}
+	}()
+	e.noteTrainPhase(p.episode, p.repoKey(), []trainMember{m}, phaseLanding())
 
 	// #1773 R1/R3: refuse to open a landing PR whose pinned base contradicts what this
 	// member declares live, rather than repairing or proceeding. See
@@ -2126,6 +2218,7 @@ func (e *Engine) landSingleton(ctx context.Context, state *mergeTrainWorkerState
 		}
 		e.logf(m.item.Number, "merge-train", "merged singleton landing PR #%d for #%d\n", prNum, m.item.Number)
 	}
+	p.episode.noteLanded(m.item.Number, prNum)
 
 	// Advance Queued → Done (unless already Done from a prior partial run).
 	if m.item.Status != "Done" {
@@ -2390,6 +2483,7 @@ func (e *Engine) finishSingletonFastPathLanding(state *mergeTrainWorkerState, p 
 	// on the landing-verification label: a repeat on re-entry is accurate (the
 	// landing did complete) and, being a log line rather than a durable artifact,
 	// costs nothing and is itself the signal that a re-entry happened.
+	p.episode.noteLanded(m.item.Number, m.prNum)
 	e.logfRepo(p.repoKey(), "merge-train", "landing complete for %s (singleton fast path, PR #%d, 1 member)\n", p.trainKey, m.prNum)
 }
 
@@ -2492,6 +2586,7 @@ func (e *Engine) trySingletonFastPath(ctx context.Context, state *mergeTrainWork
 		// interrupted landing; otherwise the disposition is decided (no trial, no
 		// re-landing) — the next poll re-evaluates a deferred read.
 		if s := e.liveLandingState(state, p, m.item); s == liveMoved || s == liveReadFailed {
+			p.episode.noteDissolved()
 			return true
 		}
 		e.logf(m.item.Number, "merge-train", "singleton fast path: PR #%d already merged (resuming a prior partial run) — completing Done transition\n", m.prNum)
@@ -2505,7 +2600,7 @@ func (e *Engine) trySingletonFastPath(ctx context.Context, state *mergeTrainWork
 		return false
 	}
 	e.logf(m.item.Number, "merge-train", "singleton fast path taken for #%d: %s — landing PR #%d directly, no trial branch, no draft CI PR\n", m.item.Number, reason, m.prNum)
-	e.setStatusLine(m.item, statusLineLanding)
+	e.noteTrainPhase(p.episode, p.repoKey(), []trainMember{m}, phaseLanding())
 
 	// MergePRAtHeadSHA, not MergePR: singletonFastPathEligible's CI/mergeability
 	// evidence was gathered against pr.HeadSHA (== m.headSHA, confirmed equal
@@ -2515,6 +2610,7 @@ func (e *Engine) trySingletonFastPath(ctx context.Context, state *mergeTrainWork
 	// from GitHub's 409) rather than silently merged unvalidated.
 	if err := e.client.MergePRAtHeadSHA(p.owner, p.repo, m.prNum, m.headSHA); err != nil {
 		e.logf(m.item.Number, "merge-train", "singleton fast path: merge of PR #%d failed: %v — leaving #%d in Queued for retry\n", m.prNum, err, m.item.Number)
+		p.episode.noteAbandoned(fmt.Sprintf("fast-path merge of PR #%d failed (left in Queued)", m.prNum))
 		return true
 	}
 	e.logf(m.item.Number, "merge-train", "singleton fast path: merged PR #%d for #%d\n", m.prNum, m.item.Number)
@@ -2827,7 +2923,7 @@ func (e *Engine) resolveConflictWithClaude(ctx context.Context, repoKey string, 
 	// inspection below. A cancellation while waiting is "could not attempt", the
 	// same non-nil-error shape as the usage-limit case (ADR-1120): the callers
 	// eject nobody and charge nothing.
-	release, err := e.acquireTrainSlot(ctx, repoKey, memberItem)
+	release, err := e.acquireTrainSlotEp(ctx, opts.trainEpisode, repoKey, memberItem)
 	if err != nil {
 		e.logf(memberItem.Number, "merge-train", "conflict resolution not attempted for #%d: %v\n", memberItem.Number, err)
 		return false, nil, err
@@ -2893,12 +2989,25 @@ func (e *Engine) resolveConflictWithClaude(ctx context.Context, repoKey string, 
 // release is idempotent, so a defensive double call cannot drain another worker's
 // slot.
 func (e *Engine) acquireTrainSlot(ctx context.Context, repoKey string, memberItem gh.ProjectItem) (release func(), err error) {
+	return e.acquireTrainSlotEp(ctx, nil, repoKey, memberItem)
+}
+
+// acquireTrainSlotEp is acquireTrainSlot plus the #2050 TUI phase: a real wait
+// (the non-blocking acquire failed) enters "waiting for slot", and obtaining the
+// slot puts the phase that was current before back. No board line is involved in
+// either direction, so the board is untouched.
+func (e *Engine) acquireTrainSlotEp(ctx context.Context, ep *trainEpisode, repoKey string, memberItem gh.ProjectItem) (release func(), err error) {
 	select {
 	case e.sem <- struct{}{}:
 	default:
 		e.logfRepo(repoKey, "merge-train", "waiting for a free worker slot for conflict resolution on #%d\n", memberItem.Number)
+		prev := ep.currentPhaseLabel()
+		e.noteTrainPhase(ep, repoKey, nil, phaseWaitingForSlot())
 		select {
 		case e.sem <- struct{}{}:
+			if prev != "" {
+				e.noteTrainPhase(ep, repoKey, nil, trainPhase{label: prev})
+			}
 		case <-ctx.Done():
 			return nil, fmt.Errorf("waiting for a worker slot: %w", ctx.Err())
 		}
@@ -3527,6 +3636,10 @@ func pauseCauseLine(diag *trainCIDiagnostic, owner, repo string, issueNumber, co
 // renderDiagnosticBlock) so the failing check(s) are named identically to every other
 // merge-train diagnostic (ADR-1420).
 func (e *Engine) ejectRedSingleton(projectID, owner, repo string, m trainMember, p trialParams, diag *trainCIDiagnostic) {
+	// #2050: the train's verdict on this episode, whichever disposition follows
+	// (auto-repair, left in Queued as already fixed, or the ADR-1545 pause).
+	p.episode.noteAbandoned(fmt.Sprintf("#%d fails its own validation (repair started, paused, or left in Queued)", m.item.Number))
+	e.noteTrainEjected(p.episode, p.repoKey(), m.item.Number, "red on its own", false)
 	// #2045: before pausing, try to repair the member through the normal pipeline. Applies
 	// only when the cap is above 0, the pinned base is known and the reroute target is
 	// literally "Validate" (reenterValidate is hardcoded to it); otherwise — and always at
@@ -3940,6 +4053,19 @@ func (e *Engine) applyPendingReviewEjects(projectID, repoKey string, members []t
 			continue
 		}
 		remaining = append(remaining, m)
+	}
+	return remaining, ejectedCount
+}
+
+// applyPendingReviewEjectsEp is applyPendingReviewEjects plus the #2050 episode
+// bookkeeping: each member it ejected is recorded on ep (and the TUI row title
+// refreshed). Behaviour of the ejection itself is unchanged.
+func (e *Engine) applyPendingReviewEjectsEp(ep *trainEpisode, projectID, repoKey string, members []trainMember) (remaining []trainMember, ejectedCount int) {
+	remaining, ejectedCount = e.applyPendingReviewEjects(projectID, repoKey, members)
+	if ejectedCount > 0 {
+		for _, n := range droppedNumbers(members, remaining) {
+			e.noteTrainEjected(ep, repoKey, n, "review feedback", false)
+		}
 	}
 	return remaining, ejectedCount
 }
@@ -4659,7 +4785,13 @@ func (e *Engine) escalateClosedUnmergedTrial(projectID, owner, repo string, prNu
 func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorkerState, owner, repo, baseBranch, trainKey string, survivors []trainMember, wm *WorktreeManager) {
 	repoKey := owner + "/" + repo
 	trialName := state.trialName
-	e.setMembersStatusLine(survivors, statusLineLanding)
+	ep := state.ep()
+	e.noteTrainPhase(ep, repoKey, survivors, phaseLanding())
+	defer func() {
+		if ep.landedNothing() {
+			ep.noteAbandoned("batch landing did not complete (members left in Queued)")
+		}
+	}()
 
 	defer func() {
 		// FR-4: cleanup trial worktree and remote branch regardless of landing outcome.
@@ -4783,6 +4915,7 @@ func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorke
 			e.logf(m.item.Number, "merge-train", "#%d already in Done column — skipping\n", m.item.Number)
 			// Still reset the ejection counter: this member landed successfully.
 			e.resetEjectionCount(owner, repo, m.item.Number)
+			ep.noteLanded(m.item.Number, integrationPRNum)
 			e.noteTrainLanded(trainKey, m) // #2047: idempotent replay of a landing whose scan may have been lost
 			// #1616: still record the landing-verification markers. A prior run
 			// can have advanced this member to Done and then died before
@@ -4812,6 +4945,11 @@ func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorke
 			e.escalateStrandedTrainMember(state.projectID, owner, repo, m.item, reason)
 			continue
 		}
+
+		// The integration PR merged and claims this member: it landed, whether or
+		// not the Done advance below succeeds (that is retried by its own settle
+		// scans). A member the PR body does not claim never reaches here (#2050).
+		ep.noteLanded(m.item.Number, integrationPRNum)
 
 		// Advance Queued → Done.
 		if e.statusField == nil {
@@ -4873,6 +5011,9 @@ func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorke
 func (e *Engine) dissolveBatch(state *mergeTrainWorkerState, p trialParams, prNum int, trialName string, members []gh.ProjectItem, reason string) {
 	repoKey := p.owner + "/" + p.repo
 	e.logfRepo(repoKey, "merge-train", "dissolving batch for %s (%s) — %d member(s) remain in Queued\n", repoKey, reason, len(members))
+	// "dissolved" in the History vocabulary means nothing was left to land; this
+	// engine teardown is a gave-up, so it is reported as abandoned (ADR 2050).
+	p.episode.noteAbandoned("batch dissolved: " + reason)
 
 	// Close the integration/CI PR if we have one (PRs are issues; no ClosePR).
 	if prNum != 0 {
@@ -4987,6 +5128,7 @@ func (e *Engine) landGreenBatch(ctx context.Context, state *mergeTrainWorkerStat
 			// and re-form on the next cycle.
 			e.logfRepo(p.repoKey(), "merge-train", "rebase re-assembly cancelled: %v — leaving members in Queued\n", aerr)
 			e.cleanupTrialArtifacts(p.repoKey(), p.wm, newTrialName)
+			p.episode.noteAbandoned("cancelled while rebasing onto the moved base")
 			return
 		}
 		if aerr != nil || len(newSurvivors) == 0 {
@@ -5008,7 +5150,7 @@ func (e *Engine) landGreenBatch(ctx context.Context, state *mergeTrainWorkerStat
 		// preemption" granularity the runaway guard and the other Hook 2 already
 		// have, rather than threading a resume-with-reduced-membership path back
 		// into this loop.
-		if _, ejectedCount := e.applyPendingReviewEjects(state.projectID, p.owner+"/"+p.repo, newSurvivors); ejectedCount > 0 {
+		if _, ejectedCount := e.applyPendingReviewEjectsEp(state.ep(), state.projectID, p.owner+"/"+p.repo, newSurvivors); ejectedCount > 0 {
 			e.logfRepo(p.repoKey(), "merge-train", "%d member(s) ejected for unresolved review findings or unprocessed comments during main-moved rebase for %s/%s — discarding trial; remaining survivors will re-form on a future poll\n", ejectedCount, p.owner, p.repo)
 			e.cleanupTrialArtifacts(p.repoKey(), p.wm, newTrialName)
 			return
@@ -5021,6 +5163,7 @@ func (e *Engine) landGreenBatch(ctx context.Context, state *mergeTrainWorkerStat
 			e.logfRepo(p.repoKey(), "merge-train", "re-validation after rebase abandoned for %s/%s — CI infrastructure failure (%s); %d member(s) left in Queued, nothing charged\n", p.owner, p.repo, infraNote(diag), len(newSurvivors))
 			e.cleanupTrialArtifacts(p.repoKey(), p.wm, newTrialName)
 			e.markInfraAbandon(p.trainKey)
+			p.episode.noteAbandoned("CI never started after rebasing onto the moved base (infrastructure failure)")
 			return
 		}
 		if result != TrainCIGreen {

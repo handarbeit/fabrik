@@ -72,10 +72,26 @@ type JobCompletedEvent struct {
 	TurnsUsed      int
 	MaxTurns       int
 	CostUSD        float64
-	Skipped        bool // synthetic fallback emit (deferred at emission site); InvocationObserver is authoritative (Skipped:false)
+	Skipped        bool   // synthetic fallback emit (deferred at emission site); InvocationObserver is authoritative (Skipped:false)
+	Outcome        string // merge-train episode outcome (e.g. "landed"); empty for ordinary jobs
+	Detail         string // merge-train outcome detail (members, PR, ejections); empty for ordinary jobs
 }
 
 func (JobCompletedEvent) tuiEvent() {}
+
+// TrainRowEvent updates the merge-train row (keyed by Repo, IssueNumber 0) in
+// the active pane with the train's live membership title and current phase
+// (#2050). It never creates a row — an event for a row that is gone is
+// ignored — and it is delivered structurally (never dropped), because a
+// dropped one would leave a stale phase on screen.
+type TrainRowEvent struct {
+	Repo           string
+	Title          string    // live membership title, e.g. "3 of 5: #1555 #1562 #1576 (ejected #1549 #1560)"
+	Phase          string    // e.g. "trial CI #4012"; empty = no phase yet
+	PhaseStartedAt time.Time // when Phase was entered; elapsed restarts on every transition
+}
+
+func (TrainRowEvent) tuiEvent() {}
 
 // IssueBlockedEvent is emitted when an issue is held at the dependency gate.
 // It is emitted each time checkDependencies fires for a blocked issue.
