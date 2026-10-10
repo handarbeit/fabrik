@@ -19,7 +19,7 @@ This issue covers the **skill-text half only**. The engine half, where an edit m
 
 ### User Story 1 - A human-added section survives a Specify comment round (Priority: P1)
 
-A human adds a section that is not part of the template, such as `## Human Decisions`, to the issue body and then comments on the issue. The Specify comment round runs and emits an updated body. The extra section is still there, with the same heading, the same content and the same position relative to the template sections.
+A human adds a section that is not part of the template, such as `## Human Decisions`, to an issue body that is already in template shape and then comments on the issue. The Specify comment round runs and emits an updated body. The extra section is still there, with the same heading, the same content and the same position relative to the template sections.
 
 **Why this priority**: This is the reported regression (#2056). Silent loss of human-authored content from the spec is the worst outcome, and it would ship with the next release.
 
@@ -33,17 +33,17 @@ A human adds a section that is not part of the template, such as `## Human Decis
 
 ---
 
-### User Story 2 - A human-added section survives the first Specify run (Priority: P2)
+### User Story 2 - A rough body is restructured on the first Specify run without duplication (Priority: P2)
 
-A human adds a non-template section to a rough issue body before Specify first runs. The initial Specify run restructures the body into the template. The extra section is carried forward verbatim rather than being normalised away.
+A rough issue body that is not yet in template shape (typically `## Problem` / `## Requirements` / `## Scope` / `## Acceptance`) is restructured by the first Specify run. Its sections are input to restructure, not sections to preserve: their content is folded into the template, with the original request verbatim in `**Input**` and the motivation in `## Background`. Nothing is lost and nothing is duplicated, so the rough body is never appended after the template.
 
-**Why this priority**: The same loss can happen on the first pass, but the initial run rewrites the body most heavily, so the preserve-versus-restructure boundary is less obvious there. The rule is the same, but it matters slightly less than the comment-round case that #2056 reports.
+**Why this priority**: Verbatim carry-forward cannot be applied on a first run, because a section a human deliberately added is indistinguishable from the rough body that Specify exists to restructure. Applying the rule there would append a duplicate of the original draft to every newly specified issue, and the engine would commit that duplicate into `specs/<N>-*/spec.md`.
 
-**Independent Test**: Give the Specify skill a rough body containing an extra `## Human Decisions` section. Confirm the emitted body keeps it verbatim after the template sections.
+**Independent Test**: Give the Specify skill a rough body written as `## Problem` / `## Requirements` / `## Scope` / `## Acceptance`. Confirm the skill text directs it to fold that content into the template and not to append the rough sections after it.
 
 **Acceptance Scenarios**:
 
-1. **Given** a rough issue body that includes a non-template section, **When** the Specify stage first runs, **Then** the emitted body is in template shape and also contains the non-template section verbatim.
+1. **Given** a rough issue body that does not start with `# Feature Specification:`, **When** the Specify stage first runs, **Then** the emitted body is in template shape, its content is folded into the template, and the rough body is not repeated after it.
 
 ---
 
@@ -63,7 +63,8 @@ The carry-forward rule must not weaken the existing template discipline. The tem
 
 ### Edge Cases
 
-- The extra section sits in the middle of the body, between template sections. The rule places it after the template sections, before `## Source References` if present. The issue defines no other position; see Assumptions.
+- The current body does not start with `# Feature Specification:` (a rough or pre-format body). The carry-forward rule does not apply; its sections are input to restructure into the template and are not appended after it.
+- The extra section sits in the middle of a template-shaped body, between template sections. It keeps its position relative to its neighbouring sections; only if a restructure leaves it no such place does it go after the last template section and before `## Source References` if present. See Assumptions.
 - There are several extra sections. Each is carried forward verbatim and their relative order is preserved.
 - The extra section duplicates information already in a requirement. It is still carried forward; the model may fold the decision into the requirement but never deletes the section.
 - The extra section's heading resembles a template heading, for example a differently worded `## Open Question`. It is treated as a non-template section unless it is exactly a template heading.
@@ -73,9 +74,9 @@ The carry-forward rule must not weaken the existing template discipline. The tem
 
 ### Functional Requirements
 
-- **FR-001**: `fabrik-specify/SKILL.md` MUST state that any section in the current body that is not part of the template is carried forward verbatim: same heading, same content, same relative position (after the template sections, before `## Source References` if present). It MUST state that the template rules govern the template's own sections only.
-- **FR-002**: The `fabrik-specify` Quality Checklist MUST include a matching item verifying that non-template sections were carried forward verbatim.
-- **FR-003**: `fabrik-specify-comment/SKILL.md` MUST state the same rule: non-template sections are preserved verbatim, content a human added to the body is treated as input, any decisions it records are folded into the relevant requirements where appropriate, and the section itself is never deleted.
+- **FR-001**: `fabrik-specify/SKILL.md` MUST state that, when the current body already starts with `# Feature Specification:`, any section in it that is not part of the template is carried forward verbatim: same heading, same content, same relative position (after the template sections, before `## Source References` if present, when it has no other place). It MUST state that the template rules govern the template's own sections only. It MUST also state that a body not yet in template shape is input to restructure, not sections to preserve: its content is folded into the template with the original request verbatim in `**Input**` and the motivation in `## Background`, so nothing is lost and nothing is duplicated.
+- **FR-002**: The `fabrik-specify` Quality Checklist MUST include a matching item verifying that non-template sections of a template-shaped body were carried forward verbatim, and that a pre-format body was folded into the template without duplication.
+- **FR-003**: `fabrik-specify-comment/SKILL.md` MUST state the same gated rule: in a body starting with `# Feature Specification:`, non-template sections are preserved verbatim, content a human added to the body is treated as input, any decisions it records are folded into the relevant requirements where appropriate, and the section itself is never deleted. It MUST also state that a body not starting with `# Feature Specification:` is restructured into the template, not preserved and appended.
 - **FR-004**: Every other skill that emits `FABRIK_ISSUE_UPDATE_BEGIN/END` MUST receive the same one-line rule if it contains a body-shape instruction that could cause sections to be dropped. The Plan stage enumerates the affected skills.
 - **FR-005**: The rule MUST be worded consistently across all affected skills so the same sentence or an obvious restatement appears in each.
 - **FR-006**: All edits MUST be made to the embedded source under `plugin/fabrik-workflows/skills/`, not to the deployed copy under `.fabrik/plugin/`.
@@ -93,13 +94,14 @@ The carry-forward rule must not weaken the existing template discipline. The tem
 
 - **SC-001**: In a Specify comment round over a body containing an extra `## Human Decisions` section, the emitted body contains that section with identical heading and content.
 - **SC-002**: The carry-forward rule appears in `fabrik-specify`, `fabrik-specify-comment` and every other skill Plan identifies as emitting an issue-body update with a shape instruction. A repository check confirms its presence in each.
-- **SC-003**: The rule's wording is consistent across all affected skills; a reviewer can match it by a single shared phrase.
+- **SC-003**: The rule's wording is consistent across all affected skills; a reviewer can match it by a single shared phrase, and both skills name the `# Feature Specification:` gate.
 - **SC-004**: The template rules for the template's own sections (headings, order, header fields, numbering) remain stated unchanged in the skills.
 - **SC-005**: No file under `.fabrik/plugin/` is changed by the PR.
 
 ## Assumptions
 
-- "Same relative position" means the extra section stays after all template sections and before `## Source References` when that section is present, as the issue specifies. For several extra sections, their order relative to each other is preserved.
+- "Same relative position" means the extra section keeps its place relative to its neighbouring sections. Only when a restructure leaves it no such place does it go after all template sections and before `## Source References` when that section is present. For several extra sections, their order relative to each other is preserved.
+- A body is "in template shape" when it starts with `# Feature Specification:`. Before that, a human-added section cannot be told apart from the rough body that Specify exists to restructure, so the carry-forward rule is gated on template shape.
 - The only skills currently known to emit `FABRIK_ISSUE_UPDATE_BEGIN/END` are `fabrik-specify` and `fabrik-specify-comment`. `plugin/fabrik-workflows/README.md` also mentions the marker. Plan confirms the full list.
 - Folding a human-recorded decision into a requirement is permitted but not required. The only hard rule is that the section is never deleted.
 - Whether the sim can exercise the skill text deterministically is decided in Plan. Because the sim uses a scripted Claude invoker, a skill-text assertion test is the expected fallback.

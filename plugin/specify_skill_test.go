@@ -125,8 +125,29 @@ func TestSpecifySkillsCarryNonTemplateSections(t *testing.T) {
 		}
 	}
 
-	if !strings.Contains(specify, "- [ ] Any non-template section from the current body was carried forward verbatim") {
-		t.Error("fabrik-specify: Quality Checklist is missing the carry-forward item")
+	if !strings.Contains(specify, "- [ ] If the current body already started with `# Feature Specification:`, any non-template section was carried forward verbatim") {
+		t.Error("fabrik-specify: Quality Checklist is missing the gated carry-forward item")
+	}
+
+	// The rule is gated on template shape: a rough first-run body is input to
+	// restructure, never preserved and appended after the template.
+	const gate = "when the current body already starts with `# Feature Specification:`"
+	const restructure = "input to restructure, not sections to preserve"
+	for name, body := range map[string]string{"fabrik-specify": specify, "fabrik-specify-comment": comment} {
+		if !strings.Contains(body, gate) {
+			t.Errorf("%s: carry-forward rule is missing the template-shape gate %q", name, gate)
+		}
+		if !strings.Contains(body, restructure) {
+			t.Errorf("%s: missing the pre-format restructure wording %q", name, restructure)
+		}
+	}
+	for _, p := range []string{
+		"the original request verbatim in `**Input**` and the motivation in `## Background`",
+		"never append the rough body after the template",
+	} {
+		if !strings.Contains(specify, p) {
+			t.Errorf("fabrik-specify: first-run restructure wording missing %q", p)
+		}
 	}
 
 	// The over-broad wordings that covered the whole body must be gone.
