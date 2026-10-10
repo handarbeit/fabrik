@@ -23,12 +23,12 @@ type GitHubReviewer interface {
 	// widen its own review) is structural for every GitHubReviewer, not
 	// opt-in.
 	FetchFileAtRef(owner, repo, path, ref string) ([]byte, error)
-	// FetchCommitParents and FetchCommitsBehind back the pure merge-train
+	// FetchCommit and FetchCommitsBehind back the pure merge-train
 	// catch-up skip (#2066): the head's parent shape, and whether a commit is
 	// on the PR's base branch. Required unconditionally, not type-asserted,
 	// for the same structural reason as FetchFileAtRef — a fake that silently
 	// lacked them would silently disable a security-relevant check.
-	FetchCommitParents(owner, repo, sha string) ([]string, error)
+	FetchCommit(owner, repo, sha string) (gh.CommitInfo, error)
 	FetchCommitsBehind(owner, repo, base, head string) (int, error)
 	FetchPRDiff(owner, repo string, prNumber int) (string, error)
 	// FetchPRFiles returns the changed-path list via the paginated

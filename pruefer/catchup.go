@@ -122,11 +122,29 @@ func findCatchUpMarker(comments []gh.Comment, authors []string, head string) (Ca
 	return found, status
 }
 
+// catchUpTrailerKey is the audit trailer the engine stamps on a catch-up merge
+// commit (engine/catchup_feedback.go). It is used here only as a hint that a
+// marker is probably on its way, so the bounded re-check below is worth its
+// wait; it is never evidence for the skip itself.
+const catchUpTrailerKey = "Fabrik-Train-Catch-Up:"
+
+// hasCatchUpTrailer reports whether message carries the engine's trailer on a
+// line of its own.
+func hasCatchUpTrailer(message string) bool {
+	for _, line := range strings.Split(message, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), catchUpTrailerKey) {
+			return true
+		}
+	}
+	return false
+}
+
 // catchUpRecheckDelays are the waits before each bounded re-read of the PR's
-// comments when the head is a merge of the base but no marker exists yet
-// (R8): the engine posts the marker after the push, so the synchronize event
-// can arrive first. Total ~8s, held only for a head that already looks like a
-// catch-up. Package-level so tests can zero it.
+// comments when the head is a merge of the base carrying the engine's trailer
+// but no marker exists yet (R8): the engine posts the marker after the push, so
+// the synchronize event can arrive first. Total ~8s. A developer's own
+// "git merge main" has no trailer and never waits. Package-level so tests can
+// zero it.
 var catchUpRecheckDelays = []time.Duration{2 * time.Second, 3 * time.Second, 3 * time.Second}
 
 // catchUpSleep waits d or until ctx is done, reporting whether the full wait
@@ -184,10 +202,11 @@ func catchUpSkip(ctx context.Context, client GitHubReviewer, cfg Config, botLogi
 
 	candidate := pr.HeadSHA
 	for depth := 0; depth < maxCatchUpChain; depth++ {
-		parents, err := client.FetchCommitParents(owner, repo, candidate)
+		commit, err := client.FetchCommit(owner, repo, candidate)
 		if err != nil {
 			return catchUpVerdict{Degraded: true, Detail: fmt.Sprintf("reading parents of %s failed: %v", shortSHA(candidate), err)}
 		}
+		parents := commit.Parents
 		if len(parents) != 2 {
 			if depth == 0 {
 				return catchUpVerdict{} // ordinary push: nothing to explain
@@ -218,7 +237,7 @@ func catchUpSkip(ctx context.Context, client GitHubReviewer, cfg Config, botLogi
 		mk, status := findCatchUpMarker(comments, cfg.CatchUpMarkerAuthors, candidate)
 		// R8: the marker follows the push. Re-read a bounded number of times
 		// for the current head only; older heads' markers long since exist.
-		for i := 0; depth == 0 && status == markerAbsent && i < len(catchUpRecheckDelays); i++ {
+		for i := 0; depth == 0 && status == markerAbsent && hasCatchUpTrailer(commit.Message) && i < len(catchUpRecheckDelays); i++ {
 			if !catchUpSleep(ctx, catchUpRecheckDelays[i]) {
 				return catchUpVerdict{Degraded: true, Detail: "marker re-check cancelled"}
 			}

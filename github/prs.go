@@ -1403,25 +1403,31 @@ func (c *Client) FetchCommitsBehind(owner, repo, base, head string) (int, error)
 	return raw.BehindBy, nil
 }
 
-// FetchCommitParents returns the parent SHAs of a commit, in order (first
-// parent first), via GET /repos/{o}/{r}/git/commits/{sha}. That endpoint
-// returns only the commit object, not the file list, so it is far lighter than
-// /commits/{sha}. A root commit yields an empty slice.
-func (c *Client) FetchCommitParents(owner, repo, sha string) ([]string, error) {
+// CommitInfo is the part of a commit object FetchCommit returns.
+type CommitInfo struct {
+	Parents []string // parent SHAs, first parent first; empty for a root commit
+	Message string   // the full commit message
+}
+
+// FetchCommit returns a commit's parent SHAs (first parent first) and message
+// via GET /repos/{o}/{r}/git/commits/{sha}. That endpoint returns only the
+// commit object, not the file list, so it is far lighter than /commits/{sha}.
+func (c *Client) FetchCommit(owner, repo, sha string) (CommitInfo, error) {
 	apiURL := fmt.Sprintf("%s/repos/%s/%s/git/commits/%s", c.baseURL, owner, repo, url.PathEscape(sha))
 	var raw struct {
+		Message string `json:"message"`
 		Parents []struct {
 			SHA string `json:"sha"`
 		} `json:"parents"`
 	}
 	if err := c.restGetJSON(apiURL, &raw); err != nil {
-		return nil, fmt.Errorf("fetching commit %s: %w", sha, err)
+		return CommitInfo{}, fmt.Errorf("fetching commit %s: %w", sha, err)
 	}
-	parents := make([]string, 0, len(raw.Parents))
+	info := CommitInfo{Parents: make([]string, 0, len(raw.Parents)), Message: raw.Message}
 	for _, p := range raw.Parents {
-		parents = append(parents, p.SHA)
+		info.Parents = append(info.Parents, p.SHA)
 	}
-	return parents, nil
+	return info, nil
 }
 
 // mergeMethodAttemptOrder returns the ordered, de-duplicated list of REST

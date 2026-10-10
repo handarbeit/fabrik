@@ -1564,19 +1564,20 @@ func TestFetchCheckRunAnnotations_ErrorPropagates(t *testing.T) {
 	}
 }
 
-func TestFetchCommitParents(t *testing.T) {
+func TestFetchCommit(t *testing.T) {
 	tests := []struct {
 		name    string
 		status  int
 		body    string
 		want    []string
+		wantMsg string
 		wantErr bool
 	}{
-		{"two parents in order", 200, `{"parents":[{"sha":"aaa"},{"sha":"bbb"}]}`, []string{"aaa", "bbb"}, false},
-		{"one parent", 200, `{"parents":[{"sha":"aaa"}]}`, []string{"aaa"}, false},
-		{"root commit", 200, `{"parents":[]}`, []string{}, false},
-		{"not found", 404, `{"message":"Not Found"}`, nil, true},
-		{"malformed JSON", 200, `{"parents":`, nil, true},
+		{"two parents in order", 200, `{"message":"Merge x\n\nFabrik-Train-Catch-Up: bbb","parents":[{"sha":"aaa"},{"sha":"bbb"}]}`, []string{"aaa", "bbb"}, "Merge x\n\nFabrik-Train-Catch-Up: bbb", false},
+		{"one parent", 200, `{"parents":[{"sha":"aaa"}]}`, []string{"aaa"}, "", false},
+		{"root commit", 200, `{"parents":[]}`, []string{}, "", false},
+		{"not found", 404, `{"message":"Not Found"}`, nil, "", true},
+		{"malformed JSON", 200, `{"parents":`, nil, "", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1588,12 +1589,12 @@ func TestFetchCommitParents(t *testing.T) {
 			srv := httptest.NewServer(mux)
 			defer srv.Close()
 			c := NewClientWithBaseURL("test-token", srv.URL)
-			got, err := c.FetchCommitParents("owner", "repo", "abc123")
+			got, err := c.FetchCommit("owner", "repo", "abc123")
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
 			}
-			if !tt.wantErr && !slices.Equal(got, tt.want) {
-				t.Errorf("got %v, want %v", got, tt.want)
+			if !tt.wantErr && (!slices.Equal(got.Parents, tt.want) || got.Message != tt.wantMsg) {
+				t.Errorf("got %+v, want parents %v message %q", got, tt.want, tt.wantMsg)
 			}
 		})
 	}

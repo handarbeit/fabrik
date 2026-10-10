@@ -48,6 +48,7 @@ func newCUFixture(t *testing.T) *cuFixture {
 	c.botLogin = cuBot
 	c.reviews = []gh.PRReview{{Author: cuBot, CommitID: cuPrev, State: "COMMENTED"}}
 	c.commitParents = map[string][]string{cuHead: {cuPrev, cuBase}}
+	c.commitMessages = map[string]string{cuHead: "Merge base into branch\n\nFabrik-Train-Catch-Up: " + cuBase}
 	c.comments = []gh.Comment{{Author: cuEngine, Body: cuMarker(cuHead, cuBase, true)}}
 	return &cuFixture{
 		t:      t,
@@ -280,6 +281,27 @@ func TestCatchUpSkip_NoRecheckForOrdinaryPushOrOffBaseMerge(t *testing.T) {
 	catchUpSleep = func(ctx context.Context, d time.Duration) bool { sleeps++; return true }
 	if out := f.review(); !out.Reviewed || sleeps != 0 {
 		t.Fatalf("off-base merge: outcome=%+v sleeps=%d, want review with no wait", out, sleeps)
+	}
+}
+
+func TestCatchUpSkip_NoRecheckWithoutTrailer(t *testing.T) {
+	// A developer's own "git merge main" has the same parent shape as a catch-up
+	// but carries no engine trailer: it must not pay the marker re-check wait.
+	f := newCUFixture(t)
+	f.client.comments = nil
+	f.client.commitMessages[cuHead] = "Merge branch 'main' into feature"
+	sleeps := 0
+	catchUpSleep = func(ctx context.Context, d time.Duration) bool { sleeps++; return true }
+	if out := f.review(); !out.Reviewed || sleeps != 0 {
+		t.Fatalf("outcome=%+v sleeps=%d, want review with no wait", out, sleeps)
+	}
+	// With the trailer the same head does wait (and, still unmarked, is reviewed).
+	f = newCUFixture(t)
+	f.client.comments = nil
+	sleeps = 0
+	catchUpSleep = func(ctx context.Context, d time.Duration) bool { sleeps++; return true }
+	if out := f.review(); !out.Reviewed || sleeps != len(catchUpRecheckDelays) {
+		t.Fatalf("outcome=%+v sleeps=%d, want review after %d waits", out, sleeps, len(catchUpRecheckDelays))
 	}
 }
 

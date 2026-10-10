@@ -65,16 +65,17 @@ type fakeReviewer struct {
 	repoSkillErr       error
 	repoSkillOnlyAtRef string
 
-	// commitParents/parentsErr/behindBy/behindErr control FetchCommitParents
+	// commitParents/commitMessages/parentsErr/behindBy/behindErr control FetchCommit
 	// and FetchCommitsBehind (#2066). An unlisted commit's parents read is an
 	// error (nothing in an existing test should reach it); behindBy defaults
 	// to 0 (an ancestor of the base branch), keyed by the commit asked about.
-	commitParents map[string][]string
-	parentsErr    error
-	behindBy      map[string]int
-	behindErr     error
-	parentCalls   int
-	behindCalls   int
+	commitParents  map[string][]string
+	commitMessages map[string]string
+	parentsErr     error
+	behindBy       map[string]int
+	behindErr      error
+	parentCalls    int
+	behindCalls    int
 
 	mu             sync.Mutex
 	submitCalls    []submitCall
@@ -137,18 +138,18 @@ func (f *fakeReviewer) fileAtRefCallArgs() []fileAtRefCall {
 	return out
 }
 
-func (f *fakeReviewer) FetchCommitParents(owner, repo, sha string) ([]string, error) {
+func (f *fakeReviewer) FetchCommit(owner, repo, sha string) (gh.CommitInfo, error) {
 	f.mu.Lock()
 	f.parentCalls++
 	f.mu.Unlock()
 	if f.parentsErr != nil {
-		return nil, f.parentsErr
+		return gh.CommitInfo{}, f.parentsErr
 	}
 	p, ok := f.commitParents[sha]
 	if !ok {
-		return nil, fmt.Errorf("fakeReviewer: no parents configured for %s", sha)
+		return gh.CommitInfo{}, fmt.Errorf("fakeReviewer: no parents configured for %s", sha)
 	}
-	return p, nil
+	return gh.CommitInfo{Parents: p, Message: f.commitMessages[sha]}, nil
 }
 
 func (f *fakeReviewer) FetchCommitsBehind(owner, repo, base, head string) (int, error) {
