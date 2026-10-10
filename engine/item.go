@@ -2298,6 +2298,7 @@ func (e *Engine) blockOnInput(item gh.ProjectItem, stage *stages.Stage, output s
 
 	e.addLabel(item, "fabrik:paused")
 	e.addLabel(item, "fabrik:awaiting-input")
+	e.setStatusLine(item, statusLinePaused("waiting for your input")) // display-only (#2048)
 
 	// Post a dedicated @mention notification comment so GitHub delivers a mobile
 	// push to the operator (PAT mode) or to the issue's assignees/author under
@@ -2852,6 +2853,7 @@ func (e *Engine) handleBoundaryViolation(owner, repo string, repoStr string, ite
 	// removes it. Without fabrik:paused the clearFailedStage path in
 	// processItem would auto-clear the failed label on the next poll cycle.
 	e.addLabel(item, "fabrik:paused")
+	e.setStatusLine(item, statusLinePaused("worktree boundary violation")) // display-only (#2048)
 
 	e.addFailedLabel(owner, repo, item.Number, stage.Name)
 

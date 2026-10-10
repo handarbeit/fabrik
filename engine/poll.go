@@ -1409,6 +1409,10 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	}
 	e.mu.Unlock()
 
+	// Resolve the display-only status-line field (#2048) once the project id is
+	// known; a no-op after the first successful lookup.
+	e.resolveStatusLineField(board.ProjectID)
+
 	e.logf(0, "poll", "found %d items on board\n", len(board.Items))
 
 	// Report rate limit stats when we have seen at least one response.
