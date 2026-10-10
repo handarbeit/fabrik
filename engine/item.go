@@ -1298,7 +1298,7 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 			if claudeRan && !stage.ReadOnly {
 				e.commitWIP(workDir, item.Number, stage.Name)
 				wm := e.worktreesFor(item.Repo)
-				if pushErr := e.pushBranchUnlessQueued(item, wm); pushErr != nil {
+				if pushErr := e.pushBranchOnCancel(item, wm); pushErr != nil {
 					e.logf(item.Number, "warn", "could not push branch after cancellation: %v\n", pushErr)
 				}
 			}

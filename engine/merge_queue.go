@@ -75,3 +75,20 @@ func (e *Engine) pushBranchForNewPR(item gh.ProjectItem, wm *WorktreeManager) er
 	}
 	return wm.PushBranch(item.Number)
 }
+
+// pushBranchOnCancel is the WIP-preservation push for a cancelled worker (R8,
+// #1393). It keeps the in-queue skip and the zero-ahead refusal (#2089) — the
+// overwrite is just as destructive on this path — but never pauses: the
+// interruption that cancelled the worker (daemon shutdown or TUI stop) already
+// pauses the item under pauseIssueMu, and a second pause from here would race
+// it. A refusal returns ErrPushRefusedZeroAhead with only a log line.
+func (e *Engine) pushBranchOnCancel(item gh.ProjectItem, wm *WorktreeManager) error {
+	if prInMergeQueue(item) {
+		e.logf(item.Number, "merge-queue", "PR in merge queue — skipping push (would eject from queue)\n")
+		return nil
+	}
+	if e.zeroAheadCheck(item, wm, false) {
+		return ErrPushRefusedZeroAhead
+	}
+	return wm.PushBranch(item.Number)
+}

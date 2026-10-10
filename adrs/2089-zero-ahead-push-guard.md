@@ -19,7 +19,8 @@ The complete fix (sync the branch before work, push with an explicit lease on th
 5. **Refuse = pause + sentinel.** The guard pauses through `pauseIssue` (`fabrik:paused` + `fabrik:awaiting-input`, header `🏭 **Fabrik — push refused: local branch has no commits**`) with #1408 episode dedup (`hasPauseComment` / `reapplyPauseLabels`), and `pushBranchUnlessQueued` returns `ErrPushRefusedZeroAhead`. The post-stage caller short-circuits before the completion chain so `handleStageComplete` cannot strip `awaiting-input` or advance a paused item; `markPRReady` skips `MarkPRReady`.
 6. **PR-creation callers are exempt.** `ensureDraftPR` and `processPRCreateMarker` use `pushBranchForNewPR` (in-queue skip only). They push because no open PR exists; a zero-ahead branch there is legitimate, and exempting them removes the race where GitHub auto-creates a PR between lookup and push.
 7. **No resync.** The guard never fetches the issue branch, fast-forwards or resets, or sets a lease SHA (R3).
-8. **Test seam.** `SetPushZeroAheadGuardDisabledForTest` lets the unit and sim tests show their refusal assertions fail when the guard is off.
+8. **Cancellation push refuses without pausing.** The R8 (#1393) WIP push of a cancelled worker uses `pushBranchOnCancel`: same in-queue skip and zero-ahead refusal (the overwrite is as destructive there), but no `pauseIssue` — the daemon-stop / TUI-stop interruption already pauses the item under `pauseIssueMu`, and a second unserialised pause from a stale snapshot could add a duplicate comment.
+9. **Test seam.** `SetPushZeroAheadGuardDisabledForTest` lets the unit and sim tests show their refusal assertions fail when the guard is off.
 
 ## Consequences
 

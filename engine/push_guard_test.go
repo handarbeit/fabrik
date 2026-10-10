@@ -307,3 +307,33 @@ func TestCommitsAheadOfRef(t *testing.T) {
 		t.Fatal("missing base ref must be an error, not zero")
 	}
 }
+
+// The cancellation push (R8, #1393) must still refuse to overwrite the remote,
+// but must not pause or comment: the interruption pause already owns that.
+func TestPushGuard_CancelPushRefusesWithoutPausing(t *testing.T) {
+	g := newPushGuardEnv(t, 7, openPR(55), nil)
+	human := g.humanPush("fabrik/issue-7")
+
+	err := g.e.pushBranchOnCancel(gh.ProjectItem{Number: 7}, g.wm)
+	if !errors.Is(err, ErrPushRefusedZeroAhead) {
+		t.Fatalf("want ErrPushRefusedZeroAhead, got %v", err)
+	}
+	if got := g.remoteRef("fabrik/issue-7"); got != human {
+		t.Errorf("remote ref changed: got %s want %s", got, human)
+	}
+	if labels := g.addedLabels(); len(labels) != 0 {
+		t.Errorf("cancellation push must not add labels, got %v", labels)
+	}
+	if comments := g.comments(); len(comments) != 0 {
+		t.Errorf("cancellation push must not comment, got %v", comments)
+	}
+
+	// Non-vacuity: guard off -> the stale branch overwrites the remote.
+	g.e.SetPushZeroAheadGuardDisabledForTest(true)
+	if err := g.e.pushBranchOnCancel(gh.ProjectItem{Number: 7}, g.wm); err != nil {
+		t.Fatalf("push with guard disabled: %v", err)
+	}
+	if got := g.remoteRef("fabrik/issue-7"); got == human {
+		t.Errorf("expected overwrite with guard disabled")
+	}
+}

@@ -55,6 +55,15 @@ func buildZeroAheadPauseComment(branch, baseBranch string, prNumber int) string 
 // is exactly zero make one live PR read (ADR-957). Every error fails open.
 // It never holds wm.mu across an API call or a pause.
 func (e *Engine) zeroAheadPushRefused(item gh.ProjectItem, wm *WorktreeManager) bool {
+	return e.zeroAheadCheck(item, wm, true)
+}
+
+// zeroAheadCheck is zeroAheadPushRefused with the pause made optional. The
+// cancellation push (pushBranchOnCancel) passes pause=false: a cancelled worker
+// is unwinding because a daemon stop or TUI stop is already pausing the item
+// under pauseIssueMu (pauseInterruptedIssue), so a second pause here would race
+// it and could add a second comment.
+func (e *Engine) zeroAheadCheck(item gh.ProjectItem, wm *WorktreeManager, pause bool) bool {
 	if e.pushGuardDisabled.Load() {
 		return false
 	}
@@ -82,6 +91,10 @@ func (e *Engine) zeroAheadPushRefused(item gh.ProjectItem, wm *WorktreeManager) 
 	}
 
 	branch := wm.branchName(item.Number)
+	if !pause {
+		e.logf(item.Number, "push-guard", "REFUSING to push %s: 0 commits ahead of origin/%s while PR #%d is open — remote branch left untouched (item already being paused by the interruption)\n", branch, baseBranch, pr.Number)
+		return true
+	}
 	e.logf(item.Number, "push-guard", "REFUSING to push %s: 0 commits ahead of origin/%s while PR #%d is open — remote branch left untouched, pausing\n", branch, baseBranch, pr.Number)
 	if hasPauseComment(item, zeroAheadPauseFragment) {
 		e.reapplyPauseLabels(item)

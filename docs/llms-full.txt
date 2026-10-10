@@ -6203,7 +6203,8 @@ When the linked PR's repository has GitHub's **merge queue** enabled, Fabrik's p
 | `engine/pr.go` `ensureDraftPR` | `git push --force-with-lease` | `pushBranchForNewPR` (in-queue skip only; no zero-ahead guard — no PR exists yet) | FR-1 |
 | `engine/pr.go` `markPRReady` | `git push --force-with-lease` | `pushBranchUnlessQueued` (in-queue skip, then the zero-ahead guard, #2089) | FR-1 |
 | `engine/prcreate.go` `processPRCreateMarker` | `git push --force-with-lease` | `pushBranchForNewPR` (in-queue skip only; runs after the existing-open-PR early return) | FR-1 |
-| `engine/item.go` post-stage push; cancellation WIP push; `engine/comments.go` spec push (#2034) | `git push --force-with-lease` | `pushBranchUnlessQueued` (in-queue skip, then the zero-ahead guard, #2089) | FR-1 |
+| `engine/item.go` post-stage push; `engine/comments.go` spec push (#2034) | `git push --force-with-lease` | `pushBranchUnlessQueued` (in-queue skip, then the zero-ahead guard, #2089) | FR-1 |
+| `engine/item.go` cancellation WIP push (R8, #1393) | `git push --force-with-lease` | `pushBranchOnCancel` (in-queue skip, then the zero-ahead refusal **without** the pause, #2089) | FR-1 |
 | `engine/pr.go` `syncPRBase` | `UpdatePRBase` (PR base change) | early-return `if prInMergeQueue(item)` | FR-1 |
 | `engine/catch_up_handlers.go` `handleMergeAndCIGates` | `dispatchRebaseReinvoke` (synthetic rebase + force-push) | for an in-queue PR `settlePRMergeState` returns `PRMergeQueued`, so `checkMergeabilityGate` clears `mergeConflict` and the rebase dispatch is never reached; the inline `prInMergeQueue \|\| settle.PR.IsInMergeQueue` guard at the dispatch site remains as a defensive backstop | FR-1 |
 | `engine/merge_gate.go` `checkAutoMergeConvergence` | `dispatchRebaseReinvoke` (synthetic rebase + force-push) | **D4 (landed):** the in-queue PR is intercepted by the `PRMergeQueued` hand-off (step ②) before the conflict branch — a `PRMergeConflicting` settle is therefore guaranteed not-in-queue, so the former inline conflict-branch guard is removed (dead). After the PR leaves the queue, the conflict branch dispatches the rebase (the ejection→resolve composition); see §5.5 | FR-1 |
@@ -6239,7 +6240,7 @@ An existing worktree's local `fabrik/issue-N` branch is never synced from `origi
 | Caller | Treatment |
 |---|---|
 | `item.go` post-stage push (every stage that ran Claude) | Guarded. On refusal `processItem` releases the lock and returns before the completion/blocked/retry chain, so `handleStageComplete` cannot strip `fabrik:awaiting-input` or advance/auto-merge a paused item; the stage stays incomplete. |
-| `item.go` cancellation WIP push | Guarded; a refusal is logged and the lock released as before. |
+| `item.go` cancellation WIP push | Guarded through `pushBranchOnCancel`: the push is refused (remote untouched) and logged, but the item is **not** paused or commented from here — the daemon-stop / TUI-stop interruption that cancelled the worker already pauses it under `pauseIssueMu`, and a second pause would race it. The lock is released as before. |
 | `comments.go` `publishCommentOutput` spec push (#2034) | Guarded; a refusal is logged. |
 | `pr.go` `markPRReady` | Guarded; on refusal it returns before `MarkPRReady`, so a stale PR is not flipped to ready-for-review. |
 | `pr.go` `ensureDraftPR`, `prcreate.go` `processPRCreateMarker` | **Exempt** (`pushBranchForNewPR`, in-queue skip only). They push because no open PR exists yet, so a zero-ahead push (for example a coordinator parent) is legitimate and there is no PR for the overwrite to close. |
