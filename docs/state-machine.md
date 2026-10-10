@@ -4479,6 +4479,32 @@ Never hooked: merge-train batch job events (repo-level, `IssueNumber 0`), the sy
 
 **Cache and drift.** The same three layers as the status line, extended to all three fields: the webhook guard already ignores any non-`single_select` edit (a date edit has `field_type: "date"`; pinned by `TestDeltaProjectsV2ItemDateEditIsNoOp`); the board and probe queries additionally select `lastActivity` (`ProjectV2ItemFieldDateValue { updatedAt }`) and `lastRun` (`ProjectV2ItemFieldTextValue { updatedAt }`) by alias, and `projectItemUpdatedAt` discounts the project item's `updatedAt` against the **latest** present display-field value `updatedAt` (2 s tolerance, nil values ignored). These fields are never cleared, so every bump of theirs has a value node to compare against (the status-line clear at Done remains the known uncovered bump). Whether GitHub bumps the item `updatedAt` for a date write is unverified; the sim models the conservative case.
 
+#### 7.17.2 Train phase hook, live row and episode outcomes (#2050, ADR 2050)
+
+The merge-train TUI row and the board status line are two projections of one train, driven by one hook so they cannot disagree. Presentation only: no train decision, ordering or timing changes, and the board's lines, dedupe and count are byte-identical to §7.17.
+
+**Hook.** `e.noteTrainPhase(ep, repoKey, members, phase)` (`engine/train_phase.go`) is the single "train phase changed" call. Every merge-train phase site — `prepareTrainWorker` (admitted), the loop's assembly, `assembleTrialBranch` (conflict), `assembleAndValidateInner` (trial CI), `bisect`, the three landing sites, `landOneAtATime`, `trySingletonCatchUp`, `acquireTrainSlotEp` (slot wait) and the worker-exit releases — calls it exactly once per transition, and it (1) writes the board line through the unchanged `setMembersStatusLine` builders (skipped for phases with no board text: `assembling`, `waiting for slot`, `one-at-a-time`), (2) records the phase and its start time on the episode, then (3) emits one `tui.TrainRowEvent` through `emitStructural` (never the droppable `emit`, never under the episode lock). `TestTrainPhaseSites_GoThroughTheHook` forbids the phase builders (`statusLineTrial/Bisect/Landing/CatchUp/Queued`) in `engine/merge_train*.go` outside comments, and `TestMergeTrainTUI_BoardAndRowSeeSamePhaseSequence` shows the TUI rows equal the hook records one to one and the board writes equal their board projection. Sub-trials under bisection stay quiet (`quietTrialLines`) on both projections.
+
+| TUI phase | Board line |
+|---|---|
+| `assembling` | `queued · batch of N` (once, at batch formation); none on later re-forms |
+| `waiting for slot` | none; the previous phase is restored once the slot is obtained |
+| `resolving conflicts on #N` | `trial · resolving conflicts` |
+| `trial CI #NNNN` | `trial #NNNN · CI running` |
+| `bisecting (step n)` | `bisecting · step n of cap` |
+| `landing` | `landing` |
+| `one-at-a-time` | none (each singleton's own trial writes its lines) |
+| `catching up #N` | `catch-up · CI on PR #N` |
+| `released` | `queued` |
+
+**Episode.** `trainEpisode` (`engine/train_episode.go`) is created per `runMergeTrainWorker` run (one `(repo, base)` partition), reachable as `state.episode` and `trialParams.episode`, nil-safe, with its own lock. It holds the original batch size, the held members, ejected and deferred members with short reasons, the current phase and its start, and the outcome facts. `ejectMember` is untouched (it also runs on the poll goroutine); ejections are recorded at worker-side call sites (`noteTrainEjected` / `noteTrainDeferred`), which refresh the row title and keep the phase clock. The live title is `[base] N of M: #a #b (ejected #x) (deferred #y)`, lists capped at three plus `+k`.
+
+**Outcomes.** Sites only record facts; the single `tui.JobCompletedEvent` (`Skipped: false`, `Completed: true`, `Outcome`, `Detail`, `Success`) is emitted from `runMergeTrainWorker`'s existing deferred completion, which runs on every exit including a failed `prepareTrainWorker` — exactly one History entry per episode, never zero, never two. `resolve()` applies a fixed precedence: `abandoned` (nothing landed and a fault/abandon cause was recorded; `Success=false`) > `one-at-a-time` > `red → bisected` > `landed` > `ejected at assembly` / `ejected` > `dissolved` (the loop ran out of members; nothing to land) > catch-all `ended — nothing landed` (`Success=false`). `Success` is true for everything except `abandoned` and the catch-all. Ejections and deferrals are always appended to the detail. "Landed" members are those the integration PR claims (and members already Done on replay), not `survivors`; the engine's own main-moved `dissolveBatch` is reported as `abandoned` (cause: base moved) so `dissolved` keeps its "nothing to land" meaning. A restart mid-train produces no entry for the interrupted run.
+
+**Neutralisation.** `SetTrainOutcomeNeutralisedForTest` restores the blanket `Skipped: true` completion; `TestMergeTrainTUI_OutcomeTestFailsWhenNeutralised` shows the per-outcome checks fail without the real emission.
+
+Sibling `(repo, base)` partitions still share the repo-keyed row (ADR 1661 caveat, display-only); each partition's episode emits its own History entry.
+
 ---
 
 ## 8. Invalid / Unexpected States

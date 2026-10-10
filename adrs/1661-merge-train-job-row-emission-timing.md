@@ -4,6 +4,8 @@
 **Status**: Accepted
 **Issue**: #1661 — give the merge train a TUI job row, emitted before setup rather than after
 
+> **Amended by ADR 2050**: the row title is no longer fixed at dispatch (it tracks live membership and phase), and the completion event now carries the episode outcome and reaches History. The emit-before-prepare rule and the single deferred completion below still stand.
+
 ## Context
 
 The merge train previously had no TUI representation at all: repo-level train activity
