@@ -684,8 +684,9 @@ func conflictResolutionStage(holdingStg *stages.Stage) *stages.Stage {
 }
 
 // prepareTrainWorker performs all one-time setup for a merge-train worker: repo
-// readiness, holding-stage lookup, extend-turns computation, trialParams construction, restart-time state reconstruction (ADR-059 D5,
-// FR-1/FR-4), base-SHA pinning, and member resolution. partitionBase is this
+// readiness, holding-stage lookup, extend-turns computation, trialParams
+// construction, restart-time state reconstruction (ADR-059 D5, FR-1/FR-4),
+// base-SHA pinning, and member resolution. partitionBase is this
 // worker's partition-grouping key (#1648 R1) — the empty-string sentinel for the
 // default-base partition (never resolved via git at grouping time, so grouping
 // stays zero-cost for the common case — see trialParams's doc comment), or the
@@ -1190,6 +1191,13 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 			state.mu.Lock()
 			state.bisecting = false
 			state.mu.Unlock()
+			if infra && ctx.Err() != nil {
+				// #2046: bisect reuses the infra abort shape for a cancelled sub-trial.
+				// A cancel is not a CI infrastructure failure, so don't log it as one or
+				// start the partition's infra cooldown.
+				e.logfRepo(repoKey, "merge-train", "bisection for %s cancelled; %d member(s) left in Queued, nothing charged\n", trainKey, len(survivors))
+				return
+			}
 			if infra {
 				// #2052: a bisection sub-trial hit a CI infrastructure failure. Abort the
 				// whole episode — nothing was ejected yet (ejection follows bisection),
