@@ -22,62 +22,63 @@ import (
 )
 
 type Config struct {
-	Owner                     string
-	Repo                      string
-	ProjectNum                int
-	OwnerType                 string
-	User                      string
-	Token                     string
-	Version                   string
-	Yolo                      bool
-	AutoUpgrade               bool
-	GitSSH                    bool
-	PollSeconds               int
-	RetryBackoff              time.Duration // Delay before re-dispatching a stage after an incomplete attempt; independent of PollSeconds (#1831). Zero = unset → falls back to githubRecheckInterval (see retry_backoff.go). The CLI always sets it.
-	MaxConcurrent             int
-	MaxRetries                int
-	MaxSliceRetries           int                 // Max turn-cap preemption ("slice") cycles per stage before pausing (default 10; #1199) — bounds a non-converging job independently of MaxRetries, which counts only genuine failures
-	MaxResumeFailures         int                 // Max consecutive failed --resume attempts for one (issue, stage) session before discarding the session pointer and cold-starting (default 2; #1414) — independent of MaxRetries, mirroring the fabrik:claude-limit StageAttempted-without-StageRetryIncremented exemption
-	MaxToolsDeniedRetries     int                 // Max consecutive tool-permission-denial exits per stage before pausing (default 3; #1523) — bounds a non-converging permission misconfiguration independently of MaxRetries, mirroring the fabrik:claude-limit StageAttempted-without-StageRetryIncremented exemption
-	ReviewWaitTimeout         time.Duration       // How long to wait for PR reviewers before auto-advancing anyway (default 15m)
-	ReconcileInterval         time.Duration       // Reconcile ticker cadence (0 = use lightReconcileInterval default of 3m)
-	MaxReviewCycles           int                 // Max review re-invocation cycles per issue before pausing (default 5)
-	ChannelHeldMax            int                 // per-subscriber bound on events held for the MCP channel push while no session is attached (default 200; oldest dropped with a notice; #1968)
-	StallThreshold            time.Duration       // how long an item may show no observable progress (no worker activity, no status or label change) before the local read API classifies it stalled (default 30m; #1967, docs/state-machine.md §7.9). Zero disables stall classification.
-	CIWaitTimeout             time.Duration       // CI-gate liveness-stall dwell: how long CI may show no observable progress before pausing (default 30m; ADR-1410 — no longer a total-wait bound, see CIBackstopTimeout)
-	CIBackstopTimeout         time.Duration       // Absolute cap on how long an item may sit in fabrik:awaiting-ci under any classification, bounding per-poll cost independent of CI duration (default 4h; ADR-1410, R5)
-	RequiredStatusContexts    map[string][]string // Per "owner/repo" required status/check-run context names the ci-gate must confirm success on before clearing (ADR-933); unconfigured repos = no behavior change
-	PostPushDwell             time.Duration       // How long to wait after a PR push before clearing CI gate as 'no CI configured' (default 90s)
-	MaxCiFixCycles            int                 // Max CI-fix re-invocation cycles per issue before pausing (default 5)
-	MaxRebaseCycles           int                 // Max rebase re-invocation cycles per issue before pausing (default 3)
-	MaxEnqueueCycles          int                 // Max merge-queue re-enqueue cycles per issue before pausing (default 5; ADR-058 D4)
-	ConvergenceBudget         time.Duration       // Wall-clock budget for post-Validate yolo convergence (default 30m; 0 = disabled, waits indefinitely)
-	AutoMergeStrategy         string              // Merge method for enablePullRequestAutoMerge: MERGE, SQUASH, or REBASE (default MERGE)
-	MergeQueue                string              // Merge queue routing for yolo path: "auto" (enqueue when repo uses merge queue) or "off" (skip enqueue)
-	MergeTrain                string              // Fabrik-internal merge train: "on" (advance yolo Validate completions to Queued) or "off" (default; existing auto-merge path unchanged)
-	SingletonCatchUp          string              // Merge-train singleton catch-up: "merge" (default; merge the pinned base into a behind singleton's own branch, #2044) or "off" (build a trial branch instead)
-	MaxMergeTrainEjections    int                 // Max merge-train ejections before pausing a member (default 3; ADR-059)
-	MaxBatchSize              int                 // Max Queued items snapshotted into one merge-train batch (0 = derive default 5; ADR-059 D4/D-f)
-	MaxBisectValidations      int                 // Max combined validations per red batch before the one-at-a-time fallback (0 = derive 2·⌈log₂(MaxBatchSize)⌉+1; ADR-059 D4/D-f)
-	MaxTrainRebaseCycles      int                 // Max main-moved rebase+revalidate cycles per merge-train batch before dissolving (0 = default 3; ADR-059 D5)
-	MaxTrainTrialsPerWindow   int                 // Runaway guard: max trial-branch creations with zero successful lands before pausing all Queued members (0 = default 20; ADR-059 D8)
-	TrainTrialWindowDuration  time.Duration       // Runaway guard: rolling window over which MaxTrainTrialsPerWindow is measured (0 = default 60m; ADR-059 D8)
-	MaxCommentCyclesPerWindow int                 // Comment-processing circuit breaker: max non-advancing comment-processing invocations per issue before pausing (0 = default 10; #1089)
-	CommentCycleWindow        time.Duration       // Comment-processing circuit breaker: rolling window over which MaxCommentCyclesPerWindow is measured (0 = default 30m; #1089)
-	MaxNoOpCommentCycles      int                 // Success-agnostic comment-processing circuit breaker: max consecutive no-progress comment-processing invocations per issue+stage before pausing, regardless of whether each invocation itself exited successfully. Deliberately higher than MaxReviewCycles's default — see effectiveMaxNoOpCommentCycles (0 = default 10; #1555, sibling of #1089/#1382)
-	KillGraceSigInt           time.Duration       // Grace window after SIGINT before SIGTERM (default 10s; 0 = skip SIGINT step)
-	KillGraceSigTerm          time.Duration       // Grace window after SIGTERM before SIGKILL (default 10s)
-	DrainDeadline             time.Duration       // Bound on a clean stop's worker drain, covering both the kill escalation and the shutdown pause-write phase (default 30s; ADR-1393). <= 0 falls back to the default in drainDeadline() — unlike kill_grace, a clean stop has no "0 = wait forever" mode.
-	ClaudeWaitDelay           time.Duration       // How long to wait after Claude exits before giving up on pipe drain and recovering output (default 30s)
-	WorkerStaleTimeout        time.Duration       // How long a worker heartbeat can be stale before PID-liveness is checked (default 5m; must be > HeartbeatInterval×2)
-	DebugOutput               bool
-	SymlinkEnv                bool
-	WorktreeBoundaryAudit     bool
-	PluginDir                 string
-	Stages                    []*stages.Stage
-	Webhooks                  bool
-	WebhookPort               int
-	WebhookEvents             []string
+	Owner                      string
+	Repo                       string
+	ProjectNum                 int
+	OwnerType                  string
+	User                       string
+	Token                      string
+	Version                    string
+	Yolo                       bool
+	AutoUpgrade                bool
+	GitSSH                     bool
+	PollSeconds                int
+	RetryBackoff               time.Duration // Delay before re-dispatching a stage after an incomplete attempt; independent of PollSeconds (#1831). Zero = unset → falls back to githubRecheckInterval (see retry_backoff.go). The CLI always sets it.
+	MaxConcurrent              int
+	MaxRetries                 int
+	MaxSliceRetries            int                 // Max turn-cap preemption ("slice") cycles per stage before pausing (default 10; #1199) — bounds a non-converging job independently of MaxRetries, which counts only genuine failures
+	MaxResumeFailures          int                 // Max consecutive failed --resume attempts for one (issue, stage) session before discarding the session pointer and cold-starting (default 2; #1414) — independent of MaxRetries, mirroring the fabrik:claude-limit StageAttempted-without-StageRetryIncremented exemption
+	MaxToolsDeniedRetries      int                 // Max consecutive tool-permission-denial exits per stage before pausing (default 3; #1523) — bounds a non-converging permission misconfiguration independently of MaxRetries, mirroring the fabrik:claude-limit StageAttempted-without-StageRetryIncremented exemption
+	ReviewWaitTimeout          time.Duration       // How long to wait for PR reviewers before auto-advancing anyway (default 15m)
+	ReconcileInterval          time.Duration       // Reconcile ticker cadence (0 = use lightReconcileInterval default of 3m)
+	MaxReviewCycles            int                 // Max review re-invocation cycles per issue before pausing (default 5)
+	ChannelHeldMax             int                 // per-subscriber bound on events held for the MCP channel push while no session is attached (default 200; oldest dropped with a notice; #1968)
+	StallThreshold             time.Duration       // how long an item may show no observable progress (no worker activity, no status or label change) before the local read API classifies it stalled (default 30m; #1967, docs/state-machine.md §7.9). Zero disables stall classification.
+	CIWaitTimeout              time.Duration       // CI-gate liveness-stall dwell: how long CI may show no observable progress before pausing (default 30m; ADR-1410 — no longer a total-wait bound, see CIBackstopTimeout)
+	CIBackstopTimeout          time.Duration       // Absolute cap on how long an item may sit in fabrik:awaiting-ci under any classification, bounding per-poll cost independent of CI duration (default 4h; ADR-1410, R5)
+	RequiredStatusContexts     map[string][]string // Per "owner/repo" required status/check-run context names the ci-gate must confirm success on before clearing (ADR-933); unconfigured repos = no behavior change
+	PostPushDwell              time.Duration       // How long to wait after a PR push before clearing CI gate as 'no CI configured' (default 90s)
+	MaxCiFixCycles             int                 // Max CI-fix re-invocation cycles per issue before pausing (default 5)
+	MaxRebaseCycles            int                 // Max rebase re-invocation cycles per issue before pausing (default 3)
+	MaxEnqueueCycles           int                 // Max merge-queue re-enqueue cycles per issue before pausing (default 5; ADR-058 D4)
+	ConvergenceBudget          time.Duration       // Wall-clock budget for post-Validate yolo convergence (default 30m; 0 = disabled, waits indefinitely)
+	AutoMergeStrategy          string              // Merge method for enablePullRequestAutoMerge: MERGE, SQUASH, or REBASE (default MERGE)
+	MergeQueue                 string              // Merge queue routing for yolo path: "auto" (enqueue when repo uses merge queue) or "off" (skip enqueue)
+	MergeTrain                 string              // Fabrik-internal merge train: "on" (advance yolo Validate completions to Queued) or "off" (default; existing auto-merge path unchanged)
+	SingletonCatchUp           string              // Merge-train singleton catch-up: "merge" (default; merge the pinned base into a behind singleton's own branch, #2044) or "off" (build a trial branch instead)
+	MaxMergeTrainEjections     int                 // Max merge-train ejections before pausing a member (default 3; ADR-059)
+	MaxBatchSize               int                 // Max Queued items snapshotted into one merge-train batch (0 = derive default 5; ADR-059 D4/D-f)
+	MaxBisectValidations       int                 // Max combined validations per red batch before the one-at-a-time fallback (0 = derive 2·⌈log₂(MaxBatchSize)⌉+1; ADR-059 D4/D-f)
+	MaxTrainRebaseCycles       int                 // Max main-moved rebase+revalidate cycles per merge-train batch before dissolving (0 = default 3; ADR-059 D5)
+	MaxTrainAutoRepairAttempts int                 // Red-singleton auto-repair attempts per member per base SHA (0 = disabled, pause as before; cmd applies the default of 1; #2045, ADR-2045)
+	MaxTrainTrialsPerWindow    int                 // Runaway guard: max trial-branch creations with zero successful lands before pausing all Queued members (0 = default 20; ADR-059 D8)
+	TrainTrialWindowDuration   time.Duration       // Runaway guard: rolling window over which MaxTrainTrialsPerWindow is measured (0 = default 60m; ADR-059 D8)
+	MaxCommentCyclesPerWindow  int                 // Comment-processing circuit breaker: max non-advancing comment-processing invocations per issue before pausing (0 = default 10; #1089)
+	CommentCycleWindow         time.Duration       // Comment-processing circuit breaker: rolling window over which MaxCommentCyclesPerWindow is measured (0 = default 30m; #1089)
+	MaxNoOpCommentCycles       int                 // Success-agnostic comment-processing circuit breaker: max consecutive no-progress comment-processing invocations per issue+stage before pausing, regardless of whether each invocation itself exited successfully. Deliberately higher than MaxReviewCycles's default — see effectiveMaxNoOpCommentCycles (0 = default 10; #1555, sibling of #1089/#1382)
+	KillGraceSigInt            time.Duration       // Grace window after SIGINT before SIGTERM (default 10s; 0 = skip SIGINT step)
+	KillGraceSigTerm           time.Duration       // Grace window after SIGTERM before SIGKILL (default 10s)
+	DrainDeadline              time.Duration       // Bound on a clean stop's worker drain, covering both the kill escalation and the shutdown pause-write phase (default 30s; ADR-1393). <= 0 falls back to the default in drainDeadline() — unlike kill_grace, a clean stop has no "0 = wait forever" mode.
+	ClaudeWaitDelay            time.Duration       // How long to wait after Claude exits before giving up on pipe drain and recovering output (default 30s)
+	WorkerStaleTimeout         time.Duration       // How long a worker heartbeat can be stale before PID-liveness is checked (default 5m; must be > HeartbeatInterval×2)
+	DebugOutput                bool
+	SymlinkEnv                 bool
+	WorktreeBoundaryAudit      bool
+	PluginDir                  string
+	Stages                     []*stages.Stage
+	Webhooks                   bool
+	WebhookPort                int
+	WebhookEvents              []string
 	// EventSource selects the ingestion transport: EventSourcePoll (default,
 	// "" or "poll") or EventSourceHookdeck ("hookdeck"). Deliberately a
 	// separate axis from Webhooks above — event_source: hookdeck is an

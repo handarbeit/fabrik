@@ -1006,3 +1006,55 @@ func TestExecute_SingletonCatchUpFlagBeatsEnvBeatsConfig(t *testing.T) {
 		t.Errorf("env should beat config: got %q, want merge", got)
 	}
 }
+
+// ---- Merge-train red-singleton auto-repair cap (#2045) ----
+
+// autoRepairCfg runs Execute with the given config.yaml body (empty = no file),
+// extra args and env, and returns the resolved cap.
+func autoRepairCfg(t *testing.T, yaml string, env map[string]string, extra ...string) int {
+	t.Helper()
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	if yaml != "" {
+		os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755)
+		os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte(yaml), 0644)
+	}
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	t.Setenv("FABRIK_MAX_TRAIN_AUTO_REPAIR_ATTEMPTS", "")
+	for k, v := range env {
+		t.Setenv(k, v)
+	}
+	os.Args = append([]string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}, extra...)
+	return executeWithConfigHook(t).MaxTrainAutoRepairAttempts
+}
+
+func TestExecute_MaxTrainAutoRepairAttempts(t *testing.T) {
+	const envName = "FABRIK_MAX_TRAIN_AUTO_REPAIR_ATTEMPTS"
+	cases := []struct {
+		name  string
+		yaml  string
+		env   map[string]string
+		extra []string
+		want  int
+	}{
+		{"default is 1", "", nil, nil, 1},
+		{"config only", "max_train_auto_repair_attempts: 3\n", nil, nil, 3},
+		{"config explicit 0 disables", "max_train_auto_repair_attempts: 0\n", nil, nil, 0},
+		{"config negative falls back to default", "max_train_auto_repair_attempts: -1\n", nil, nil, 1},
+		{"env beats config", "max_train_auto_repair_attempts: 3\n", map[string]string{envName: "2"}, nil, 2},
+		{"env 0 disables over config", "max_train_auto_repair_attempts: 3\n", map[string]string{envName: "0"}, nil, 0},
+		{"env invalid falls back to default (not config)", "max_train_auto_repair_attempts: 3\n", map[string]string{envName: "abc"}, nil, 1},
+		{"env negative falls back to default", "", map[string]string{envName: "-2"}, nil, 1},
+		{"flag beats env and config", "max_train_auto_repair_attempts: 3\n", map[string]string{envName: "2"}, []string{"--max-train-auto-repair-attempts", "4"}, 4},
+		{"flag 0 disables over env", "", map[string]string{envName: "2"}, []string{"--max-train-auto-repair-attempts", "0"}, 0},
+		{"flag negative falls back to default", "", nil, []string{"--max-train-auto-repair-attempts", "-3"}, 1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := autoRepairCfg(t, c.yaml, c.env, c.extra...); got != c.want {
+				t.Errorf("MaxTrainAutoRepairAttempts = %d, want %d", got, c.want)
+			}
+		})
+	}
+}
