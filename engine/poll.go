@@ -1492,15 +1492,6 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		for _, item := range deepFetchCandidates {
 			iKey := issueKey(item, e.defaultRepo())
 			if advancedItems[iKey] {
-				// An advanced item must dispatch its new stage next poll (#544). Its
-				// expired cooldown was consumed at admission, so leave an already-expired
-				// marker that admits it exactly once (ADR 2096).
-				e.store.Apply(itemstate.CooldownRecorded{
-					Repo:   itemOwnerRepoString(item, e.defaultRepo()),
-					Number: item.Number,
-					Reason: stageAdvancedCooldownReason,
-					Until:  e.now(),
-				})
 				continue
 			}
 			if stage := stages.FindStage(e.cfg.Stages, item.Status); stage != nil && !stage.CleanupWorktree {
@@ -2119,12 +2110,6 @@ func (e *Engine) dispatchCandidates(ctx context.Context, board *gh.ProjectBoard,
 
 	return dispatched
 }
-
-// stageAdvancedCooldownReason is the CooldownAt key left on an item the yolo
-// catch-up loop advanced during a poll. It is stamped already expired, so the
-// item is admitted once on the next poll to dispatch its new stage (#544) and is
-// then consumed (ADR 2096).
-const stageAdvancedCooldownReason = "stage-advanced"
 
 // consumeExpiredCooldowns deletes the item's expired cooldown entries once poll
 // admission has acted on them (ExpiredCooldownsConsumed, #2096), so an expiry
