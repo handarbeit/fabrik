@@ -190,8 +190,8 @@ func TestMergeTrainColdCacheBaseMember(t *testing.T) {
 
 	// --- restart: first poll of the fresh process is the first batch opportunity ---
 	StartFabrikTestBed(t, env)
-	// Run() truncates fabrik.log on every start (O_TRUNC), so a pre-restart
-	// LogOffset would point past the new EOF. Offset 0 is the whole new run; every
+	// Run() rotates the old fabrik.log to fabrik.log.1 and opens a fresh file on
+	// every start (#2094), so a pre-restart LogOffset would point past the new EOF. Offset 0 is the whole new run; every
 	// matcher below is additionally scoped to this scenario's own issue numbers and
 	// train key, so a line from any other activity is harmless.
 	const logStart = int64(0)

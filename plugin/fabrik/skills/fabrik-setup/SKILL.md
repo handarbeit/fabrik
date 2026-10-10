@@ -83,7 +83,7 @@ If the user runs `fabrik init` without `--create-board` or a URL, it falls back 
 `fabrik init` also updates `.git/info/exclude` (when run inside a git checkout) with `.fabrik/repos/`, `.fabrik/worktrees/`, `.fabrik/debug/`, `.fabrik/history.json`, and `.fabrik/warnings.json` — **not** `.fabrik/plugin/`. Two things worth telling the user:
 
 - `.git/info/exclude` is **machine-local** — it doesn't travel with the repo. A second machine or a fresh clone starts without any of it. If they want the exclusion to travel with the repo, recommend a `.gitignore` snippet instead (see below).
-- A few runtime artifacts a fresh setup will produce aren't excluded by `fabrik init` at all: `.fabrik/fabrik.lock`, `.fabrik/fabrik.log`, `.fabrik/logs/`, `.fabrik/sessions/`, `.fabrik/plugin/.installed-version`.
+- A few runtime artifacts a fresh setup will produce aren't excluded by `fabrik init` at all: `.fabrik/fabrik.lock`, `.fabrik/fabrik.log` (plus its rotated `.fabrik/fabrik.log.N` backups), `.fabrik/logs/`, `.fabrik/sessions/`, `.fabrik/plugin/.installed-version`.
 
 Suggested `.gitignore` snippet for anyone who wants this to travel (note `.fabrik/plugin/` is deliberately *not* in this list — see above):
 
@@ -95,6 +95,7 @@ Suggested `.gitignore` snippet for anyone who wants this to travel (note `.fabri
 .fabrik/warnings.json
 .fabrik/fabrik.lock
 .fabrik/fabrik.log
+.fabrik/fabrik.log.*
 .fabrik/logs/
 .fabrik/sessions/
 .fabrik/plugin/.installed-version

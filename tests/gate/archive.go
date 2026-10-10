@@ -32,9 +32,11 @@ import (
 //	bed-config.sha256   a hash of the bed's .fabrik/stages/ and config.yaml
 //
 // The log that used to vanish is NOT bed-run.log: the engine opens
-// .fabrik/fabrik.log with O_TRUNC on EVERY start, so each restart — the mode
-// switch that begins every leg, and a scenario that restarts the engine mid-leg —
-// erases the previous run. logArchiver therefore samples the file while the leg
+// .fabrik/fabrik.log on EVERY start: the previous run is rotated to
+// fabrik.log.1 (and older ones shift up, at most five are kept) and a fresh
+// fabrik.log holds only the new run, opening with a start banner (#2094). So each
+// restart — the mode switch that begins every leg, and a scenario that restarts
+// the engine mid-leg — leaves the live file holding only the latest run. logArchiver therefore samples the file while the leg
 // runs and starts a new segment whenever it sees a restart, instead of copying
 // once at the end (which would keep only the engine's last run).
 
