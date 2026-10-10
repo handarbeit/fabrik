@@ -90,8 +90,10 @@ func TestExecute_MCPSubcommandProxiesToDaemonForDir(t *testing.T) {
 			t.Errorf("stdout carries a non-protocol line: %q", l)
 		}
 	}
-	if !strings.Contains(lines[1], "from-daemon") {
-		t.Errorf("tools/call did not reach the daemon for --dir: %s", lines[1])
+	// The server handles each request line concurrently, so the two
+	// responses may arrive in either order (JSON-RPC matches by id).
+	if !strings.Contains(out, "from-daemon") {
+		t.Errorf("tools/call did not reach the daemon for --dir: %s", out)
 	}
 }
 

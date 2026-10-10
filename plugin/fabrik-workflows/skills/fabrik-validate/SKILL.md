@@ -20,6 +20,7 @@ The engine has written context files to `.fabrik-context/` in your working direc
 - `.fabrik-context/stage-Implement.md` — the implementation summary, if present
 - `.fabrik-context/stage-Review.md` — the review findings, if present
 - `.fabrik-context/pr-description.md` — the linked PR description, if present
+- `.fabrik-context/merge-train-repair.md` — present **only** when the merge train started this run to repair a failure; see "Merge-train repair run" below
 
 Read these files before starting validation. The spec in `.fabrik-context/issue.md` is your ground truth for requirements verification.
 
@@ -59,6 +60,16 @@ If the rebase produces conflicts, resolve them conservatively:
 - **After resolving conflicts, run `go build ./...` immediately, then the tests for the packages the conflicts touched.** A rebase moves HEAD, so the CI-green skip rule under "Skipping a redundant full-suite run" (above "Test suite") no longer applies to the rebased head; in a CI-gated stage (`ci_gated: true` in `.fabrik-context/ci-status.md`) the engine's CI gate covers the full suite on the pushed head, otherwise run `go test ./...` in full. If anything fails, the resolution was wrong — fix it before proceeding with validation.
 - **Check for missing files.** Run `git diff origin/<base-branch>..HEAD --name-only` and verify no files from the base were accidentally deleted. New files added to the base (source, tests, subcommands) should all be present.
 - **If unsure about a conflict, abort the rebase** (`git rebase --abort`) and do NOT signal completion. Describe the conflict and let the human resolve it.
+
+### Merge-train repair run — only when `.fabrik-context/merge-train-repair.md` exists
+
+If that file exists, the merge train started this Validate run itself (no person asked for it): this pull request's combined Validate failed on the train's trial branch, and the cause is this pull request alone — the base branch moved because other pull requests landed, and this change no longer fits it. Read the file first: it names the failing checks, the trial's head and base SHAs and this pull request's head at failure.
+
+- Bring the branch up to date with the base (fetch first and follow step 3 above; the base has moved, so the behind-count will normally be non-zero), then reconcile this change with what landed: compile errors, signatures and call sites, test expectations, lists that another pull request extended.
+- **Never revert, disable, skip or work around the change that landed on the base** to make this pull request green. The landed change is correct by definition; adapt this pull request to it. If the only way to satisfy the failing check is to undo or weaken what landed, do not do it — block the stage and describe the conflict instead.
+- Re-run the checks named in the file (and the relevant tests) after the fix, and report in your validation what you reconciled.
+
+If the file does not exist, ignore this section — an ordinary Validate run is unchanged.
 
 ### Install dependencies per CLAUDE.md
 
@@ -312,7 +323,7 @@ gh api graphql -f query='
 
 If that prints `true`, **skip the rebase** — record outcome `skipped-in-queue`. If the command errors, or prints anything other than exactly `true`/`false` (empty output, malformed JSON, `null`), also **skip the rebase** — record outcome `skipped-detection-failed`. This is a deliberate asymmetry from Check C below: skipping a rebase that was actually needed is self-healing (the engine's own rebase-needed path catches a stale branch after Validate completes), but rebasing a PR that was actually queued ejects it, which nothing downstream can undo. When this check can't tell, treat "unknown" as "queued."
 
-(The internal merge-train's `Queued` column has no equivalent live check here: it is a holding stage the engine never dispatches Validate from, so the two states can't coexist in a running Validate session — there is nothing for this check to observe.)
+(The internal merge-train's `Queued` column has no equivalent live check here: it is a holding stage the engine never dispatches Validate from, so the two states can't coexist in a running Validate session — there is nothing for this check to observe. A merge-train repair run (`.fabrik-context/merge-train-repair.md`) happens only after the engine has moved the item out of `Queued` back to Validate, so this holds there too.)
 
 **Check B — already up to date (skip if nothing to gain).** Only reached if Check A did not skip:
 

@@ -132,6 +132,10 @@ func (e *Engine) writeContextFiles(item gh.ProjectItem, currentStage *stages.Sta
 	// returns would otherwise skip it.
 	e.writeCIStatus(item, currentStage, fabrikDir)
 
+	// Merge-train auto-repair diagnostic (#2045): present for the repair's Validate dispatch
+	// only, removed otherwise. Must precede the pr-description block's bare returns.
+	e.writeMergeTrainRepair(item, !isCommentProcessing && currentStage != nil && currentStage.Name == "Validate", fabrikDir)
+
 	// Write PR description for post_to_pr stage invocations.
 	if !isCommentProcessing && currentStage.PostToPR {
 		owner, repo := itemOwnerRepo(item, e.defaultRepo())

@@ -30,71 +30,72 @@ var testReadyCh chan struct{}
 var testResolvedConfigHook func(Config)
 
 type Config struct {
-	Owner                     string
-	Repo                      string
-	ProjectNum                int
-	OwnerType                 string
-	User                      string
-	Token                     string
-	StagesDir                 string
-	Yolo                      bool
-	AutoUpgrade               bool
-	GitSSH                    bool
-	TUI                       bool
-	PollSeconds               int
-	RetryBackoffSeconds       int // seconds before re-dispatching an incomplete stage; independent of PollSeconds (#1831)
-	MaxConcurrent             int
-	MaxRetries                int
-	MaxSliceRetries           int    // Max turn-cap preemption cycles per stage; 0 means use default (10; #1199)
-	MaxResumeFailures         int    // Max consecutive failed --resume attempts per (issue, stage) session before discarding the session pointer and cold-starting; 0 means use default (2; #1414)
-	MaxToolsDeniedRetries     int    // Max consecutive tool-permission-denial exits per stage before pausing; 0 means use default (3; #1523)
-	ReviewWaitTimeout         int    // minutes; 0 means use default (15)
-	MaxReviewCycles           int    // 0 means use default (5)
-	CIWaitTimeout             int    // minutes; CI-gate liveness-stall dwell; 0 means use default (30) (ADR-1410)
-	ChannelHeldMax            int    // events held per MCP channel subscriber while no session is attached; 0 means use default (200); oldest are dropped with a notice (#1968)
-	StallThreshold            int    // minutes; how long an item may show no observable progress before the local read API (fabrik mcp) classifies it stalled; 0 means use default (30) (#1967)
-	CIBackstopTimeout         int    // minutes; absolute fabrik:awaiting-ci cap independent of CI duration; 0 means use default (240 = 4h) (ADR-1410, R5)
-	WorkerStaleMins           int    // minutes; 0 means use default (5)
-	MaxCiFixCycles            int    // 0 means use default (5)
-	MaxRebaseCycles           int    // 0 means use default (3)
-	MaxEnqueueCycles          int    // 0 means use default (5)
-	ConvergenceBudget         string // Go duration string; "" means use default (30m); "0" means disabled
-	AutoMergeStrategy         string // MERGE, SQUASH, or REBASE; "" means use default (MERGE)
-	MergeQueue                string // auto or off; "" means use default (auto)
-	MergeTrain                string // on or off; "" means use default (off)
-	SingletonCatchUp          string // merge or off; "" means use default (merge) (#2044)
-	MaxBatchSize              int    // 0 means use default (5)
-	MaxBisectValidations      int    // 0 means derive default (2·⌈log₂(MaxBatchSize)⌉+1)
-	MaxTrainRebaseCycles      int    // 0 means use default (3)
-	MaxTrainTrialsPerWindow   int    // 0 means use default (20)
-	TrainTrialWindowMinutes   int    // 0 means use default (60)
-	MaxCommentCyclesPerWindow int    // Comment-processing circuit breaker: 0 means use default (10)
-	CommentCycleWindowMinutes int    // Comment-processing circuit breaker: 0 means use default (30)
-	MaxNoOpCommentCycles      int    // Success-agnostic comment-processing circuit breaker: 0 means use default (10)
-	ClaudeWaitDelay           int    // seconds; 0 means use default (30)
-	PostPushDwell             int    // seconds; 0 means use default (90)
-	KillGraceSigInt           string // Go duration string; "" means use default (10s); "0s" skips SIGINT step
-	KillGraceSigTerm          string // Go duration string; "" means use default (10s)
-	DrainDeadline             string // Go duration string; "" means use default (30s); bounds the clean-stop drain (ADR-1393)
-	DebugOutput               bool
-	SymlinkEnv                bool
-	WorktreeBoundaryAudit     bool
-	PluginDir                 string
-	Webhooks                  bool
-	WebhookPort               int
-	WebhookEvents             string // comma-separated; empty means default event set
-	EventSource               string // "" or "poll" (default), or "hookdeck" — see engine.Config.EventSource
-	HookdeckAPIKeyEnv         string // env var name holding the Hookdeck API key; "" = use default
-	HookdeckWebhookSecretEnv  string // env var name holding the GitHub App webhook secret; "" = use default
-	StatusPollSeconds         int    // Layer 2 status-only sweep cadence in seconds; 0 = use default (15)
-	ReconcileInterval         int    // seconds; 0 means use default (180 = 3 min); also FABRIK_RECONCILE_INTERVAL
-	JanitorIntervalHours      int    // hours; 1 = default; 0 disables the janitor
-	LogRetentionDays          int    // days; 14 = default; 0 disables age-based log pruning
-	LogMaxBytes               int64  // bytes; 2147483648 = default; 0 disables size-cap pruning
-	SessionRetentionDays      int    // days; 14 = default; 0 disables age-based session pruning
-	ArchiveAfter              string // Go duration string; "" means use default (168h = 1 week); also FABRIK_ARCHIVE_AFTER
-	ArchiveDone               string // on or off; "" means use default (on); also FABRIK_ARCHIVE_DONE
-	GHESHost                  string // GitHub Enterprise Server hostname, e.g. "github.example.com"; "" means github.com (also FABRIK_GHES_HOST)
+	Owner                      string
+	Repo                       string
+	ProjectNum                 int
+	OwnerType                  string
+	User                       string
+	Token                      string
+	StagesDir                  string
+	Yolo                       bool
+	AutoUpgrade                bool
+	GitSSH                     bool
+	TUI                        bool
+	PollSeconds                int
+	RetryBackoffSeconds        int // seconds before re-dispatching an incomplete stage; independent of PollSeconds (#1831)
+	MaxConcurrent              int
+	MaxRetries                 int
+	MaxSliceRetries            int    // Max turn-cap preemption cycles per stage; 0 means use default (10; #1199)
+	MaxResumeFailures          int    // Max consecutive failed --resume attempts per (issue, stage) session before discarding the session pointer and cold-starting; 0 means use default (2; #1414)
+	MaxToolsDeniedRetries      int    // Max consecutive tool-permission-denial exits per stage before pausing; 0 means use default (3; #1523)
+	ReviewWaitTimeout          int    // minutes; 0 means use default (15)
+	MaxReviewCycles            int    // 0 means use default (5)
+	CIWaitTimeout              int    // minutes; CI-gate liveness-stall dwell; 0 means use default (30) (ADR-1410)
+	ChannelHeldMax             int    // events held per MCP channel subscriber while no session is attached; 0 means use default (200); oldest are dropped with a notice (#1968)
+	StallThreshold             int    // minutes; how long an item may show no observable progress before the local read API (fabrik mcp) classifies it stalled; 0 means use default (30) (#1967)
+	CIBackstopTimeout          int    // minutes; absolute fabrik:awaiting-ci cap independent of CI duration; 0 means use default (240 = 4h) (ADR-1410, R5)
+	WorkerStaleMins            int    // minutes; 0 means use default (5)
+	MaxCiFixCycles             int    // 0 means use default (5)
+	MaxRebaseCycles            int    // 0 means use default (3)
+	MaxEnqueueCycles           int    // 0 means use default (5)
+	ConvergenceBudget          string // Go duration string; "" means use default (30m); "0" means disabled
+	AutoMergeStrategy          string // MERGE, SQUASH, or REBASE; "" means use default (MERGE)
+	MergeQueue                 string // auto or off; "" means use default (auto)
+	MergeTrain                 string // on or off; "" means use default (off)
+	SingletonCatchUp           string // merge or off; "" means use default (merge) (#2044)
+	MaxBatchSize               int    // 0 means use default (5)
+	MaxBisectValidations       int    // 0 means derive default (2·⌈log₂(MaxBatchSize)⌉+1)
+	MaxTrainRebaseCycles       int    // 0 means use default (3)
+	MaxTrainAutoRepairAttempts int    // per member per base SHA; default 1; 0 disables red-singleton auto-repair (#2045)
+	MaxTrainTrialsPerWindow    int    // 0 means use default (20)
+	TrainTrialWindowMinutes    int    // 0 means use default (60)
+	MaxCommentCyclesPerWindow  int    // Comment-processing circuit breaker: 0 means use default (10)
+	CommentCycleWindowMinutes  int    // Comment-processing circuit breaker: 0 means use default (30)
+	MaxNoOpCommentCycles       int    // Success-agnostic comment-processing circuit breaker: 0 means use default (10)
+	ClaudeWaitDelay            int    // seconds; 0 means use default (30)
+	PostPushDwell              int    // seconds; 0 means use default (90)
+	KillGraceSigInt            string // Go duration string; "" means use default (10s); "0s" skips SIGINT step
+	KillGraceSigTerm           string // Go duration string; "" means use default (10s)
+	DrainDeadline              string // Go duration string; "" means use default (30s); bounds the clean-stop drain (ADR-1393)
+	DebugOutput                bool
+	SymlinkEnv                 bool
+	WorktreeBoundaryAudit      bool
+	PluginDir                  string
+	Webhooks                   bool
+	WebhookPort                int
+	WebhookEvents              string // comma-separated; empty means default event set
+	EventSource                string // "" or "poll" (default), or "hookdeck" — see engine.Config.EventSource
+	HookdeckAPIKeyEnv          string // env var name holding the Hookdeck API key; "" = use default
+	HookdeckWebhookSecretEnv   string // env var name holding the GitHub App webhook secret; "" = use default
+	StatusPollSeconds          int    // Layer 2 status-only sweep cadence in seconds; 0 = use default (15)
+	ReconcileInterval          int    // seconds; 0 means use default (180 = 3 min); also FABRIK_RECONCILE_INTERVAL
+	JanitorIntervalHours       int    // hours; 1 = default; 0 disables the janitor
+	LogRetentionDays           int    // days; 14 = default; 0 disables age-based log pruning
+	LogMaxBytes                int64  // bytes; 2147483648 = default; 0 disables size-cap pruning
+	SessionRetentionDays       int    // days; 14 = default; 0 disables age-based session pruning
+	ArchiveAfter               string // Go duration string; "" means use default (168h = 1 week); also FABRIK_ARCHIVE_AFTER
+	ArchiveDone                string // on or off; "" means use default (on); also FABRIK_ARCHIVE_DONE
+	GHESHost                   string // GitHub Enterprise Server hostname, e.g. "github.example.com"; "" means github.com (also FABRIK_GHES_HOST)
 	// GitHubAppID, GitHubAppPrivateKeyPath, and GitHubAppInstallationID
 	// together configure GitHub App authentication (#1713) as a second,
 	// co-equal path alongside Token — all three must be set together or
@@ -211,6 +212,7 @@ func Execute() error {
 	flag.IntVar(&cfg.MaxBatchSize, "max-batch-size", 0, "Maximum Queued items landed in a single merge-train batch, ordered by entry (0 = use default of 5; smaller = cheaper worst-case bisection, fewer N² savings; also FABRIK_MAX_BATCH_SIZE)")
 	flag.IntVar(&cfg.MaxBisectValidations, "max-bisect-validations", 0, "Maximum combined validations per red merge-train batch before degrading to one-at-a-time landing (0 = derive 2·⌈log₂(max-batch-size)⌉+1, ≈7 at the default batch size; also FABRIK_MAX_BISECT_VALIDATIONS)")
 	flag.IntVar(&cfg.MaxTrainRebaseCycles, "max-train-rebase-cycles", 0, "Maximum main-moved rebase+revalidate cycles for a merge-train batch before dissolving it back to Queued (0 = use default of 3; also FABRIK_MAX_TRAIN_REBASE_CYCLES)")
+	flag.IntVar(&cfg.MaxTrainAutoRepairAttempts, "max-train-auto-repair-attempts", defaultMaxTrainAutoRepairAttempts, "Merge-train red-singleton auto-repair: maximum repair Validate runs per member per base SHA before pausing for a human (0 = disable auto-repair and pause as before; default 1; also FABRIK_MAX_TRAIN_AUTO_REPAIR_ATTEMPTS)")
 	flag.IntVar(&cfg.MaxTrainTrialsPerWindow, "max-train-trials-per-window", 0, "Runaway guard: maximum trial-branch creations with zero successful lands within the window before pausing all Queued members (0 = use default of 20; also FABRIK_MAX_TRAIN_TRIALS_PER_WINDOW)")
 	flag.IntVar(&cfg.TrainTrialWindowMinutes, "train-trial-window", 0, "Runaway guard: rolling window in minutes over which max-train-trials-per-window is measured (0 = use default of 60; also FABRIK_TRAIN_TRIAL_WINDOW)")
 	flag.IntVar(&cfg.MaxCommentCyclesPerWindow, "max-comment-cycles-per-window", 0, "Comment-processing circuit breaker: maximum non-advancing comment-processing invocations for an issue within the window before pausing it (0 = use default of 10; also FABRIK_MAX_COMMENT_CYCLES_PER_WINDOW)")
@@ -519,6 +521,26 @@ func Execute() error {
 				fmt.Fprintf(os.Stderr, "[warn] config.yaml max_train_rebase_cycles=%d is invalid (must be a positive integer); using default 3\n", *pc.MaxTrainRebaseCycles)
 			} else {
 				cfg.MaxTrainRebaseCycles = *pc.MaxTrainRebaseCycles
+			}
+		}
+	}
+	if explicitFlags["max-train-auto-repair-attempts"] {
+		if cfg.MaxTrainAutoRepairAttempts < 0 {
+			fmt.Fprintf(os.Stderr, "[warn] --max-train-auto-repair-attempts=%d is invalid (must be a non-negative integer); using default %d\n", cfg.MaxTrainAutoRepairAttempts, defaultMaxTrainAutoRepairAttempts)
+			cfg.MaxTrainAutoRepairAttempts = defaultMaxTrainAutoRepairAttempts
+		}
+	} else {
+		if v := os.Getenv("FABRIK_MAX_TRAIN_AUTO_REPAIR_ATTEMPTS"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+				cfg.MaxTrainAutoRepairAttempts = n
+			} else {
+				fmt.Fprintf(os.Stderr, "[warn] FABRIK_MAX_TRAIN_AUTO_REPAIR_ATTEMPTS=%q is invalid (must be a non-negative integer; 0 disables); using default %d\n", v, defaultMaxTrainAutoRepairAttempts)
+			}
+		} else if pc.MaxTrainAutoRepairAttempts != nil {
+			if *pc.MaxTrainAutoRepairAttempts < 0 {
+				fmt.Fprintf(os.Stderr, "[warn] config.yaml max_train_auto_repair_attempts=%d is invalid (must be a non-negative integer; 0 disables); using default %d\n", *pc.MaxTrainAutoRepairAttempts, defaultMaxTrainAutoRepairAttempts)
+			} else {
+				cfg.MaxTrainAutoRepairAttempts = *pc.MaxTrainAutoRepairAttempts
 			}
 		}
 	}
@@ -895,79 +917,80 @@ func Execute() error {
 	}
 
 	eng, err := engine.New(engine.Config{
-		Owner:                     cfg.Owner,
-		Repo:                      cfg.Repo,
-		ProjectNum:                cfg.ProjectNum,
-		OwnerType:                 cfg.OwnerType,
-		User:                      cfg.User,
-		Token:                     cfg.Token,
-		Version:                   Version,
-		Yolo:                      cfg.Yolo,
-		AutoUpgrade:               cfg.AutoUpgrade,
-		GitSSH:                    cfg.GitSSH,
-		PollSeconds:               cfg.PollSeconds,
-		RetryBackoff:              time.Duration(cfg.RetryBackoffSeconds) * time.Second,
-		MaxConcurrent:             cfg.MaxConcurrent,
-		MaxRetries:                cfg.MaxRetries,
-		MaxSliceRetries:           maxSliceRetries(cfg.MaxSliceRetries),
-		MaxResumeFailures:         maxResumeFailures(cfg.MaxResumeFailures),
-		MaxToolsDeniedRetries:     maxToolsDeniedRetries(cfg.MaxToolsDeniedRetries),
-		ReviewWaitTimeout:         reviewWaitTimeout(cfg.ReviewWaitTimeout),
-		MaxReviewCycles:           maxReviewCycles(cfg.MaxReviewCycles),
-		CIWaitTimeout:             ciWaitTimeout(cfg.CIWaitTimeout),
-		CIBackstopTimeout:         ciBackstopTimeout(cfg.CIBackstopTimeout),
-		StallThreshold:            stallThreshold(cfg.StallThreshold),
-		ChannelHeldMax:            cfg.ChannelHeldMax,
-		RequiredStatusContexts:    pc.RequiredStatusContexts, // keyed by "owner/repo"; nil = no behavior change (ADR-933)
-		PostPushDwell:             postPushDwell(cfg.PostPushDwell),
-		WorkerStaleTimeout:        workerStaleTimeout(cfg.WorkerStaleMins),
-		MaxCiFixCycles:            maxCiFixCycles(cfg.MaxCiFixCycles),
-		MaxRebaseCycles:           maxRebaseCycles(cfg.MaxRebaseCycles),
-		MaxEnqueueCycles:          maxEnqueueCycles(cfg.MaxEnqueueCycles),
-		ConvergenceBudget:         convergenceBudget(cfg.ConvergenceBudget),
-		AutoMergeStrategy:         autoMergeStrategy(cfg.AutoMergeStrategy),
-		MergeQueue:                mergeQueueMode(cfg.MergeQueue),
-		MergeTrain:                mergeTrainMode(cfg.MergeTrain),
-		SingletonCatchUp:          singletonCatchUpMode(cfg.SingletonCatchUp),
-		MaxMergeTrainEjections:    3,                                                     // ADR-059 default
-		MaxBatchSize:              cfg.MaxBatchSize,                                      // 0 = derive default (5) in engine
-		MaxBisectValidations:      cfg.MaxBisectValidations,                              // 0 = derive default in engine
-		MaxTrainRebaseCycles:      cfg.MaxTrainRebaseCycles,                              // 0 = derive default (3) in engine
-		MaxTrainTrialsPerWindow:   cfg.MaxTrainTrialsPerWindow,                           // 0 = derive default (20) in engine
-		TrainTrialWindowDuration:  trainTrialWindowDuration(cfg.TrainTrialWindowMinutes), // 0 = derive default (60m) in engine
-		MaxCommentCyclesPerWindow: cfg.MaxCommentCyclesPerWindow,                         // 0 = derive default (10) in engine
-		CommentCycleWindow:        commentCycleWindow(cfg.CommentCycleWindowMinutes),     // 0 = derive default (30m) in engine
-		MaxNoOpCommentCycles:      cfg.MaxNoOpCommentCycles,                              // 0 = derive default (10) in engine
-		ClaudeWaitDelay:           claudeWaitDelay(cfg.ClaudeWaitDelay),
-		KillGraceSigInt:           killGraceSigInt(cfg.KillGraceSigInt),
-		KillGraceSigTerm:          killGraceSigTerm(cfg.KillGraceSigTerm),
-		DrainDeadline:             drainDeadline(cfg.DrainDeadline),
-		DebugOutput:               cfg.DebugOutput,
-		SymlinkEnv:                cfg.SymlinkEnv,
-		WorktreeBoundaryAudit:     cfg.WorktreeBoundaryAudit,
-		PluginDir:                 cfg.PluginDir,
-		Stages:                    stageCfgs,
-		Webhooks:                  cfg.Webhooks,
-		WebhookPort:               cfg.WebhookPort,
-		WebhookEvents:             webhookEvents,
-		EventSource:               cfg.EventSource,
-		HookdeckAPIKeyEnv:         cfg.HookdeckAPIKeyEnv,
-		HookdeckWebhookSecretEnv:  cfg.HookdeckWebhookSecretEnv,
-		ProjectStatusPollSeconds:  statusPollSeconds(cfg.StatusPollSeconds),
-		ReconcileInterval:         reconcileIntervalDuration(cfg.ReconcileInterval),
-		JanitorIntervalHours:      cfg.JanitorIntervalHours,
-		LogRetentionDays:          cfg.LogRetentionDays,
-		LogMaxBytes:               cfg.LogMaxBytes,
-		SessionRetentionDays:      cfg.SessionRetentionDays,
-		ArchiveAfter:              archiveAfter(cfg.ArchiveAfter),
-		ArchiveDone:               archiveDoneMode(cfg.ArchiveDone),
-		GHESHost:                  cfg.GHESHost,
-		GitHubAppID:               cfg.GitHubAppID,
-		GitHubAppPrivateKeyPath:   cfg.GitHubAppPrivateKeyPath,
-		GitHubAppInstallationID:   cfg.GitHubAppInstallationID,
-		NoBrowser:                 cfg.NoBrowser,
-		ReadyCh:                   testReadyCh,
-		PollControlFile:           os.Getenv(pollctl.EnvVar), // TEST-ONLY (#1978): env only — deliberately no flag, YAML key, help or USER_GUIDE entry
+		Owner:                      cfg.Owner,
+		Repo:                       cfg.Repo,
+		ProjectNum:                 cfg.ProjectNum,
+		OwnerType:                  cfg.OwnerType,
+		User:                       cfg.User,
+		Token:                      cfg.Token,
+		Version:                    Version,
+		Yolo:                       cfg.Yolo,
+		AutoUpgrade:                cfg.AutoUpgrade,
+		GitSSH:                     cfg.GitSSH,
+		PollSeconds:                cfg.PollSeconds,
+		RetryBackoff:               time.Duration(cfg.RetryBackoffSeconds) * time.Second,
+		MaxConcurrent:              cfg.MaxConcurrent,
+		MaxRetries:                 cfg.MaxRetries,
+		MaxSliceRetries:            maxSliceRetries(cfg.MaxSliceRetries),
+		MaxResumeFailures:          maxResumeFailures(cfg.MaxResumeFailures),
+		MaxToolsDeniedRetries:      maxToolsDeniedRetries(cfg.MaxToolsDeniedRetries),
+		ReviewWaitTimeout:          reviewWaitTimeout(cfg.ReviewWaitTimeout),
+		MaxReviewCycles:            maxReviewCycles(cfg.MaxReviewCycles),
+		CIWaitTimeout:              ciWaitTimeout(cfg.CIWaitTimeout),
+		CIBackstopTimeout:          ciBackstopTimeout(cfg.CIBackstopTimeout),
+		StallThreshold:             stallThreshold(cfg.StallThreshold),
+		ChannelHeldMax:             cfg.ChannelHeldMax,
+		RequiredStatusContexts:     pc.RequiredStatusContexts, // keyed by "owner/repo"; nil = no behavior change (ADR-933)
+		PostPushDwell:              postPushDwell(cfg.PostPushDwell),
+		WorkerStaleTimeout:         workerStaleTimeout(cfg.WorkerStaleMins),
+		MaxCiFixCycles:             maxCiFixCycles(cfg.MaxCiFixCycles),
+		MaxRebaseCycles:            maxRebaseCycles(cfg.MaxRebaseCycles),
+		MaxEnqueueCycles:           maxEnqueueCycles(cfg.MaxEnqueueCycles),
+		ConvergenceBudget:          convergenceBudget(cfg.ConvergenceBudget),
+		AutoMergeStrategy:          autoMergeStrategy(cfg.AutoMergeStrategy),
+		MergeQueue:                 mergeQueueMode(cfg.MergeQueue),
+		MergeTrain:                 mergeTrainMode(cfg.MergeTrain),
+		SingletonCatchUp:           singletonCatchUpMode(cfg.SingletonCatchUp),
+		MaxMergeTrainEjections:     3,                                                     // ADR-059 default
+		MaxBatchSize:               cfg.MaxBatchSize,                                      // 0 = derive default (5) in engine
+		MaxBisectValidations:       cfg.MaxBisectValidations,                              // 0 = derive default in engine
+		MaxTrainRebaseCycles:       cfg.MaxTrainRebaseCycles,                              // 0 = derive default (3) in engine
+		MaxTrainAutoRepairAttempts: cfg.MaxTrainAutoRepairAttempts,                        // 0 = auto-repair disabled; default 1 applied above (#2045)
+		MaxTrainTrialsPerWindow:    cfg.MaxTrainTrialsPerWindow,                           // 0 = derive default (20) in engine
+		TrainTrialWindowDuration:   trainTrialWindowDuration(cfg.TrainTrialWindowMinutes), // 0 = derive default (60m) in engine
+		MaxCommentCyclesPerWindow:  cfg.MaxCommentCyclesPerWindow,                         // 0 = derive default (10) in engine
+		CommentCycleWindow:         commentCycleWindow(cfg.CommentCycleWindowMinutes),     // 0 = derive default (30m) in engine
+		MaxNoOpCommentCycles:       cfg.MaxNoOpCommentCycles,                              // 0 = derive default (10) in engine
+		ClaudeWaitDelay:            claudeWaitDelay(cfg.ClaudeWaitDelay),
+		KillGraceSigInt:            killGraceSigInt(cfg.KillGraceSigInt),
+		KillGraceSigTerm:           killGraceSigTerm(cfg.KillGraceSigTerm),
+		DrainDeadline:              drainDeadline(cfg.DrainDeadline),
+		DebugOutput:                cfg.DebugOutput,
+		SymlinkEnv:                 cfg.SymlinkEnv,
+		WorktreeBoundaryAudit:      cfg.WorktreeBoundaryAudit,
+		PluginDir:                  cfg.PluginDir,
+		Stages:                     stageCfgs,
+		Webhooks:                   cfg.Webhooks,
+		WebhookPort:                cfg.WebhookPort,
+		WebhookEvents:              webhookEvents,
+		EventSource:                cfg.EventSource,
+		HookdeckAPIKeyEnv:          cfg.HookdeckAPIKeyEnv,
+		HookdeckWebhookSecretEnv:   cfg.HookdeckWebhookSecretEnv,
+		ProjectStatusPollSeconds:   statusPollSeconds(cfg.StatusPollSeconds),
+		ReconcileInterval:          reconcileIntervalDuration(cfg.ReconcileInterval),
+		JanitorIntervalHours:       cfg.JanitorIntervalHours,
+		LogRetentionDays:           cfg.LogRetentionDays,
+		LogMaxBytes:                cfg.LogMaxBytes,
+		SessionRetentionDays:       cfg.SessionRetentionDays,
+		ArchiveAfter:               archiveAfter(cfg.ArchiveAfter),
+		ArchiveDone:                archiveDoneMode(cfg.ArchiveDone),
+		GHESHost:                   cfg.GHESHost,
+		GitHubAppID:                cfg.GitHubAppID,
+		GitHubAppPrivateKeyPath:    cfg.GitHubAppPrivateKeyPath,
+		GitHubAppInstallationID:    cfg.GitHubAppInstallationID,
+		NoBrowser:                  cfg.NoBrowser,
+		ReadyCh:                    testReadyCh,
+		PollControlFile:            os.Getenv(pollctl.EnvVar), // TEST-ONLY (#1978): env only — deliberately no flag, YAML key, help or USER_GUIDE entry
 	})
 	if err != nil {
 		return err
@@ -1706,3 +1729,8 @@ func resolveRetryBackoff(envVal string, yamlVal *int, current int) int {
 	}
 	return current
 }
+
+// defaultMaxTrainAutoRepairAttempts is the default red-singleton auto-repair
+// cap (#2045). It is applied here rather than in the engine because the engine
+// cannot tell an explicit 0 ("disabled") from an unset field.
+const defaultMaxTrainAutoRepairAttempts = 1

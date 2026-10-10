@@ -2012,6 +2012,7 @@ func buildPrompt(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Com
 		b.WriteString("- `.fabrik-context/pr-description.md` — the linked PR description\n")
 	}
 	b.WriteString("- `.fabrik-context/ci-status.md` — PR head SHA and CI verdict for that head (present only when the item has a linked PR)\n")
+	b.WriteString("- `.fabrik-context/merge-train-repair.md` — present only when the merge train started this Validate run to repair a failure caused by the base branch moving; read it first and follow its instructions\n")
 	b.WriteString("\n")
 	if stage.PostToPR {
 		b.WriteString("Your detailed output will be posted on the PR. Provide a brief summary (2-4 sentences)\n")

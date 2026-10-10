@@ -679,7 +679,10 @@ timeout instead of skipping. Only run in the `on` leg of the two-mode gate.
     `TestMergeTrainRedSingletonReroutesOffQueued` queues exactly one poison
     member, so its own combined Validate goes red with nobody to bisect against —
     the top-level `len(survivors) == 1` arity guard short-circuits straight to
-    `ejectRedSingleton` instead. It deliberately does **not** call `t.Parallel()`:
+    `ejectRedSingleton` instead. Both bed launch sites start the bed with
+    `FABRIK_MAX_TRAIN_AUTO_REPAIR_ATTEMPTS=0` (#2045), so this test keeps
+    asserting the ADR-1545 pause; the auto-repair path is covered by its sim twin
+    (`TestMergeTrainAutoRepair_*`). It deliberately does **not** call `t.Parallel()`:
     the train forms from every item currently in `Queued` on a repo, so running
     concurrently with `TestMergeTrainHappyPathLanding`/
     `TestMergeTrainBisectionEjectsPoisoner` (both parallel, same repo) risks this

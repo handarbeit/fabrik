@@ -2146,6 +2146,16 @@ func (e *Engine) clearFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 // If any blocking label removal fails (non-404), defers trigger removal and store
 // resets to the next poll cycle so the operator label remains and retries automatically.
 func (e *Engine) handleRevalidateLabel(item gh.ProjectItem, owner, repo string) {
+	e.reenterValidate(item, owner, repo)
+}
+
+// reenterValidate is the body of handleRevalidateLabel, also used by the merge
+// train's red-singleton auto-repair (#2045, ADR-2045), which performs the same
+// effect without an operator-applied trigger label. It reports whether re-entry
+// completed (every blocking label cleared, the trigger label absent and the
+// store reset); false means it deferred to the next poll, leaving whatever
+// labels it could not remove in place.
+func (e *Engine) reenterValidate(item gh.ProjectItem, owner, repo string) bool {
 	e.logf(item.Number, "revalidate", "clearing gate/completion labels for Validate re-entry\n")
 
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
@@ -2175,7 +2185,7 @@ func (e *Engine) handleRevalidateLabel(item gh.ProjectItem, owner, repo string) 
 
 	if hasError {
 		e.logf(item.Number, "warn", "revalidate: some labels failed to remove; deferring trigger removal and store reset to next poll\n")
-		return
+		return false
 	}
 
 	if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:revalidate"); err != nil {
@@ -2183,7 +2193,7 @@ func (e *Engine) handleRevalidateLabel(item gh.ProjectItem, owner, repo string) 
 			e.syncLabelRemoval(item, "fabrik:revalidate", false)
 		} else {
 			e.logf(item.Number, "warn", "revalidate: could not remove trigger label: %v\n", err)
-			return
+			return false
 		}
 	} else {
 		e.logf(item.Number, "revalidate", "removed trigger label fabrik:revalidate\n")
@@ -2195,6 +2205,7 @@ func (e *Engine) handleRevalidateLabel(item gh.ProjectItem, owner, repo string) 
 	e.store.Apply(itemstate.StageLastAttemptCleared{Repo: repoStr, Number: item.Number, StageName: "Validate"})
 	e.store.Apply(itemstate.EngineCyclesCleared{Repo: repoStr, Number: item.Number, StageName: "Validate"})
 	e.logf(item.Number, "revalidate", "store reset complete; Validate will dispatch on next poll\n")
+	return true
 }
 
 // handleValidateSHAInvalidation clears stale Validate completion labels when the
