@@ -56,7 +56,7 @@ func TestTrainEpisode_NilSafe(t *testing.T) {
 	if got := ep.resolve(); got.Outcome != trainOutcomeNothingLands || got.Success {
 		t.Errorf("nil resolve = %+v", got)
 	}
-	if ep.title() != "" || ep.currentPhaseLabel() != "" || !ep.nothingRecorded() {
+	if ep.title() != "" || ep.currentPhaseLabel() != "" || !ep.landedNothing() {
 		t.Error("nil accessors not neutral")
 	}
 }
@@ -114,6 +114,33 @@ func TestTrainEpisode_ResolvePrecedenceAndSuccess(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// landedNothing is the guard for "gave up without landing": earlier ejections,
+// a poisoner, one-at-a-time or a dissolve must not count as an outcome, only a
+// landing or an already-recorded abandon cause does.
+func TestTrainEpisode_LandedNothing(t *testing.T) {
+	ep := newTrainEpisode(defaultPartitionBase, []int{1, 2, 3})
+	ep.recordEjected(1, "unresolvable conflict", true)
+	ep.notePoisoner(2)
+	ep.noteOneAtATime()
+	ep.noteDissolved()
+	if !ep.landedNothing() {
+		t.Fatal("earlier non-landing facts must leave landedNothing true")
+	}
+	ep.noteAbandoned("batch landing did not complete")
+	if ep.landedNothing() {
+		t.Error("an abandon cause is already recorded")
+	}
+	if got := ep.resolve(); got.Outcome != trainOutcomeAbandoned || got.Success {
+		t.Errorf("resolve = %+v, want abandoned / unsuccessful", got)
+	}
+
+	landed := newTrainEpisode(defaultPartitionBase, []int{1})
+	landed.noteLanded(1, 9)
+	if landed.landedNothing() {
+		t.Error("a landing was recorded")
 	}
 }
 

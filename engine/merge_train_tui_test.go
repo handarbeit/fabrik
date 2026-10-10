@@ -128,6 +128,21 @@ func outcomeScenarios() []outcomeScenario {
 			wantDetail: []string{"nothing to land", "deferred #1 (live status)", "#2 (live status)"},
 		},
 		{
+			// A fact recorded earlier (the poisoner) must not make a later failed
+			// landing look like a success: the survivors' merge fails, nothing
+			// lands, so the episode is abandoned, not "red → bisected" (review
+			// finding on nothingRecorded, now landedNothing).
+			name: "bisected-then-landing-fails", n: 4,
+			redWhen: func(present map[int]bool) bool { return present[2] },
+			setup: func(eng *Engine, client *mockGitHubClient) {
+				client.mergePRFn = func(owner, repo string, prNumber int) error {
+					return fmt.Errorf("merge refused")
+				}
+			},
+			wantOutcome: "abandoned", wantSuccess: false,
+			wantDetail: []string{"batch landing did not complete", "poisoner #2 ejected"},
+		},
+		{
 			name: "landed-with-assembly-ejection", n: 3,
 			redWhen:     func(map[int]bool) bool { return false },
 			setup:       prFails(2),

@@ -1102,7 +1102,7 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 
 	p, current, ok := e.prepareTrainWorker(ctx, state, owner, repo, partitionBase, batch)
 	if !ok {
-		if ep.nothingRecorded() {
+		if ep.landedNothing() {
 			ep.noteAbandoned("train did not start (setup failed or nothing to resume)")
 		}
 		return
@@ -2147,7 +2147,7 @@ func (e *Engine) landSingleton(ctx context.Context, state *mergeTrainWorkerState
 	trialBranch := "fabrik/merge-train/" + trialName
 	defer e.cleanupTrialArtifacts(p.repoKey(), p.wm, trialName)
 	defer func() {
-		if p.episode.nothingRecorded() {
+		if p.episode.landedNothing() {
 			p.episode.noteAbandoned(fmt.Sprintf("singleton landing of #%d did not complete (left in Queued)", m.item.Number))
 		}
 	}()
@@ -4788,7 +4788,7 @@ func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorke
 	ep := state.ep()
 	e.noteTrainPhase(ep, repoKey, survivors, phaseLanding())
 	defer func() {
-		if ep.nothingRecorded() {
+		if ep.landedNothing() {
 			ep.noteAbandoned("batch landing did not complete (members left in Queued)")
 		}
 	}()

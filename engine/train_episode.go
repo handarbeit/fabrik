@@ -238,15 +238,18 @@ func (ep *trainEpisode) noteDissolved() {
 	ep.mu.Unlock()
 }
 
-// nothingRecorded reports whether no outcome fact has been recorded yet.
-func (ep *trainEpisode) nothingRecorded() bool {
+// landedNothing reports whether nothing has landed and no abandon cause has been
+// recorded yet. The "gave up without landing" guards use it, not a test for any
+// fact at all: an earlier ejection, poisoner, one-at-a-time flag or dissolve does
+// not mean the batch landed, so a later failed landing must still be abandoned
+// (otherwise resolve() would report an earlier fact as a successful outcome).
+func (ep *trainEpisode) landedNothing() bool {
 	if ep == nil {
 		return true
 	}
 	ep.mu.Lock()
 	defer ep.mu.Unlock()
-	return len(ep.landed) == 0 && ep.poisoner == 0 && !ep.oneAtATime &&
-		ep.abandonCause == "" && !ep.dissolved && len(ep.ejected) == 0
+	return len(ep.landed) == 0 && ep.abandonCause == ""
 }
 
 // trainOutcome is the resolved terminal result of one episode.
@@ -283,6 +286,10 @@ func (ep *trainEpisode) resolve() trainOutcome {
 	case len(ep.landed) == 0 && ep.abandonCause != "":
 		out = trainOutcome{Outcome: trainOutcomeAbandoned, Success: false}
 		parts = append(parts, ep.abandonCause)
+		if ep.poisoner != 0 {
+			// No headline names the poisoner here, and the list below skips it.
+			parts = append(parts, fmt.Sprintf("poisoner #%d ejected", ep.poisoner))
+		}
 	case ep.oneAtATime:
 		out = trainOutcome{Outcome: trainOutcomeOneAtATime, Success: true}
 		if len(ep.landed) > 0 {
