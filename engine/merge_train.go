@@ -490,6 +490,13 @@ func (e *Engine) dispatchMergeTrainWorker(ctx context.Context, batch []gh.Projec
 		batchNumbers[item.Number] = true
 	}
 
+	// #2051: a persisted run record for this partition is waiting to be adopted (a restart
+	// is resuming it): forming a fresh train over it would orphan its open trial.
+	if e.trainRuns.hasPending(trainKey) {
+		e.logfRepo(repoKey, "merge-train", "persisted train run for %s awaiting adoption — not forming a new train yet\n", trainKey)
+		return
+	}
+
 	// #2052: a trial was recently abandoned because CI never started. Nothing was
 	// charged, so the runaway guard cannot bound a permanently broken workflow;
 	// this cooldown does, retrying every few minutes rather than every poll.
@@ -636,7 +643,9 @@ func (e *Engine) finishTrain(trainKey string) {
 // (#1648): since a repo can now have several concurrent per-base workers, the old
 // name's implied "the one worker for this repo" no longer holds.
 func (e *Engine) mergeTrainWorkerActiveForRepo(repoKey string) bool {
-	return e.store.RepoWorkerActiveForAnyBase(repoKey)
+	// An open run (#2051) counts as live even while no goroutine is executing one of its
+	// steps: its members belong to a trial that is waiting on CI.
+	return e.store.RepoWorkerActiveForAnyBase(repoKey) || e.trainRunOpenForRepo(repoKey)
 }
 
 // mergeTrainBatchMembers returns the dispatched-batch issue-number set of the

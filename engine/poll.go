@@ -1732,6 +1732,10 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	// Merge-train batch snapshot: log all items currently in the Queued column.
 	// Runs every poll cycle when merge_train: on. No dispatch, no mutation — D1 skeleton only.
 	if e.cfg.MergeTrain == "on" {
+		// #2051: evaluate (and, after a restart, adopt) the persisted merge-train runs
+		// BEFORE Queued routing, so a restarted partition is claimed by its own record and
+		// never formed fresh over it.
+		e.settleTrainRuns(ctx, board)
 		e.handleMergeTrainBatch(ctx, board)
 	}
 

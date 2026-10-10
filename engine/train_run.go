@@ -301,6 +301,9 @@ func (s *trainRunStore) loadDir() []string {
 			}
 			continue
 		}
+		if _, running := s.live[rec.TrainKey]; running {
+			continue // a run in this process already owns the partition; its record is current
+		}
 		s.pending[rec.TrainKey] = &rec
 	}
 	return notes
@@ -339,6 +342,14 @@ func (s *trainRunStore) liveFor(trainKey string) *trainRun {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.live[trainKey]
+}
+
+// dropPending forgets an unadopted record without touching its file (the partition's
+// current owner rewrites or removes the file itself).
+func (s *trainRunStore) dropPending(trainKey string) {
+	s.mu.Lock()
+	delete(s.pending, trainKey)
+	s.mu.Unlock()
 }
 
 func (s *trainRunStore) register(r *trainRun) {

@@ -275,6 +275,7 @@ type Engine struct {
 	// on engines that run the asynchronous driver (New()); nil — the synchronous driver —
 	// everywhere else, so every NewWithDeps engine and its tests are unchanged.
 	trainRuns                             *trainRunStore
+	trainRunsLoadOnce                     sync.Once                     // loads persisted run records on the first settleTrainRuns
 	mergeTrainInFlight                    sync.Map                      // key: trainKey ("owner/repo:baseBranch", mergeTrainKey — since #1648, was bare "owner/repo"), value: *mergeTrainWorkerState; per-(repo,base) train dispatch guard, so one base's train cannot block or be mistaken for another base's train in the same repo
 	mergeTrainEjectionsMu                 sync.Mutex                    // guards mergeTrainEjectionCounts
 	mergeTrainEjectionCounts              map[string]int                // key: "owner/repo#N", ejection count per member — deliberately stays issue-scoped, not re-keyed by base (#1648): an issue belongs to exactly one partition at a time
@@ -337,6 +338,11 @@ type Engine struct {
 	// (#1420 R1) so seam-based tests can exercise the ejection-comment diagnostic content,
 	// not only ejection sequencing. Production leaves this nil. See assembleAndValidate.
 	trainValidateFn func(ctx context.Context, members []trainMember) (TrainCIResult, *trainCIDiagnostic)
+	// trainValidateHoldForTest, when it returns true, makes the per-poll evaluator
+	// (settleTrainRuns) treat an open trial as "no verdict yet" under the trainValidateFn
+	// seam — the seam otherwise answers at once, which would leave nothing for a restart or
+	// a deadline to interrupt (#2051). Test-only; nil in production.
+	trainValidateHoldForTest func() bool
 	// trainLiveBaseFn replaces the live origin/<base> read used by the red-singleton R3
 	// "already fixed" check (#2045) when non-nil, for tests that run no real git.
 	trainLiveBaseFn func(p trialParams) (string, error)
@@ -653,6 +659,9 @@ func New(cfg Config) (*Engine, error) {
 		backoffRateLimitRatio:     1.0,
 	}
 	eng.health.markStarted(time.Now())
+	// #2051: the production engine runs the asynchronous merge-train driver — trial state
+	// is persisted under .fabrik/state/merge-train/ and evaluated per poll.
+	eng.trainRuns = newTrainRunStore(trainRunStateDir(fabrikDir))
 
 	// App-auth's per-repo access signal (#1750 R1): fetched once, eagerly,
 	// here — rather than lazily inside resolveRepoAccess — so this single API
