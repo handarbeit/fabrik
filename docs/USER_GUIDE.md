@@ -3415,18 +3415,20 @@ silently hiding the other.
 | `enter` | Toggle inline detail panel (History pane); toggle expanded detail (Warnings pane) |
 | `r` | Resume Claude session for selected history item (history pane only, item must not be active) |
 | `Escape` | Close open dialogs; with no dialog open, triggers quit confirmation |
-| `n` / `N` | Cancel quit or clear-all confirmation dialogs |
+| `n` / `N` | Cancel an armed confirmation (quit, stop, upgrade, reconcile, overwrite, clear-all) |
 | `c` | Delete selected history entry |
 | `C` | Clear all history (with confirmation) |
 | `F` | **Fix** selected warning (Warnings pane only) — tears down TUI, runs the fix command in the foreground, re-renders on exit |
 | `D` | **Dismiss / undismiss** selected warning (Warnings pane only) — sticky across restarts; dismissed entries are hidden by default |
 | `S` | **Show / hide dismissed** warnings (Warnings pane only) |
 | `a` | Open abtop AI session monitor (shows token usage, context window, rate limits for all Claude sessions) |
-| `u` | Upgrade plugin skills. When the `[u] skills out of date` badge is shown (embedded changed, no local edits), pressing `u` shows a `y/N` confirmation and applies the upgrade. When the `[u] custom workflow` (or combined `[u] custom workflow (N stale)`) badge is shown (local edits detected, possibly also stale), pressing `u` opens a three-option dialog: **[1] Reconcile** — quits the TUI and prints a Claude Code prompt to stderr for merging customizations; **[2] Overwrite** — prompts you to type `OVERWRITE` to confirm destructive reset; **[3] Cancel** — dismisses the dialog. When also stale, the dialog's status line names the stale count so reconciling is known to also pick up upstream changes. Active stage invocations pick up new files on next run. |
+| `u` | Upgrade plugin skills. When the `[u] skills out of date` badge is shown (embedded changed, no local edits), pressing `u` shows a `y/N` confirmation and applies the upgrade. When the `[u] custom workflow` (or combined `[u] custom workflow (N stale)`) badge is shown (local edits detected, possibly also stale), pressing `u` opens a three-option dialog: **[1] Reconcile** — quits the TUI and prints a Claude Code prompt to stderr for merging customizations (quitting stops the engine, so with jobs in progress `1` first asks the same active-workers quit confirmation as `q`; cancelling it prints nothing); **[2] Overwrite** — prompts you to type `OVERWRITE` to confirm destructive reset; **[3] Cancel** — dismisses the dialog. When also stale, the dialog's status line names the stale count so reconciling is known to also pick up upstream changes. Active stage invocations pick up new files on next run. |
 | `w` | Wake: reset idle backoff and poll immediately |
 | `ctrl+r` | Force refresh: drain in-flight workers and restart in place (same as SIGHUP — see [Recovering from Wedged State](#recovering-from-wedged-state)) |
 | `?` | Toggle help panel (keybindings and labels reference) |
 | `q` | Quit |
+
+**Confirmation prompts.** Every confirmation (quit, stop, plugin upgrade, reconcile, `OVERWRITE`, clear-all) shows its full prompt, answer keys included, on its own line directly under the header — it is never truncated or hidden by the header badges or a narrow terminal. Only one confirmation is armed at a time. Any key that is not one of its answers cancels it (and does nothing else), and so does waiting 10 seconds without answering; the prompt is then dismissed and the header briefly says it was cancelled. `ctrl+c` is never intercepted. For `OVERWRITE`, each letter of the word keeps the prompt armed (the progress is echoed and the 10 seconds restart); any other key discards the typed text and cancels. `1`, `2` and `3` do nothing unless the reconcile dialog is showing.
 
 #### Help Panel (`?`)
 

@@ -246,9 +246,13 @@ func TestViewHistory_ConfirmClear(t *testing.T) {
 	m.focusPane = paneHistory
 	m.history.history = []HistoryEntry{{IssueNumber: 1, StageName: "Research"}}
 	m.history.SetConfirmClear(true)
-	view := m.history.View(m.width)
-	if !strings.Contains(view, "Clear all history") {
-		t.Errorf("expected confirmation text in viewHistory, got: %q", view)
+	// The prompt is rendered by the model's confirm banner (#2092), not the pane.
+	m.updateLayout(false)
+	if banner := bannerText(m); !strings.Contains(banner, "Clear all history? [C]onfirm / [n]o") {
+		t.Errorf("expected confirmation text in the confirm banner, got: %q", banner)
+	}
+	if view := m.history.View(m.width); strings.Contains(view, "Clear all history") {
+		t.Errorf("history pane should no longer render the clear prompt, got: %q", view)
 	}
 }
 
@@ -371,12 +375,12 @@ func TestViewHistory_ConfirmQuit(t *testing.T) {
 	m.syncFocus()
 	m.updateLayout(false)
 
-	view := m.history.View(m.width)
-	if !strings.Contains(view, "Quit Fabrik?") {
-		t.Errorf("expected quit confirmation text in viewHistory, got: %q", view)
+	banner := bannerText(m)
+	if !strings.Contains(banner, "Quit Fabrik?") {
+		t.Errorf("expected quit confirmation text in the confirm banner, got: %q", banner)
 	}
-	if !strings.Contains(view, "1 jobs") {
-		t.Errorf("expected job count in viewHistory confirmation, got: %q", view)
+	if !strings.Contains(banner, "1 job(s)") {
+		t.Errorf("expected job count in the confirm banner, got: %q", banner)
 	}
 }
 

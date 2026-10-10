@@ -69,9 +69,6 @@ type HistoryPaneComponent struct {
 	focused      bool
 	confirmClear bool
 	defaultRepo  string // "owner/repo" fallback for single-repo projects where HistoryEntry.Repo is empty
-	// Layout state passed by root model via SetLayout for hint rendering.
-	confirmQuit bool
-	activeCount int
 	// availableH is the total vertical space (in lines) allocated by updateLayout.
 	// -1 means SetLayout has not been called yet (no height constraint).
 	// 0 means layout was applied but no space is available (View returns "").
@@ -185,7 +182,7 @@ func (h HistoryPaneComponent) View(width int) string {
 		focusIndicator = "▸"
 	}
 	title := dimStyle.Render(fmt.Sprintf("%s History (%d)", focusIndicator, len(h.history)))
-	hint := h.historyHint(lipgloss.Width(title), innerWidth, h.confirmQuit, h.activeCount)
+	hint := h.historyHint(lipgloss.Width(title), innerWidth)
 	content := title + hint + "\n" + h.historyVP.View()
 	result := borderStyle.Width(width - 4).Render(content)
 	// Safety net: trim rendered output to exactly availableH lines so that the
@@ -203,7 +200,7 @@ func (h HistoryPaneComponent) Height() int {
 	if h.availableH == 0 {
 		return 0
 	}
-	raw := h.historyVP.Height + h.titleAndHintLines(h.activeCount, h.confirmQuit) + 2 // +2 for border
+	raw := h.historyVP.Height + h.titleAndHintLines() + 2 // +2 for border
 	// When View() trims to availableH lines, Height() must match.
 	if h.availableH > 0 && raw > h.availableH {
 		return h.availableH
@@ -212,9 +209,7 @@ func (h HistoryPaneComponent) Height() int {
 }
 
 // SetLayout updates the viewport dimensions based on available space.
-func (h *HistoryPaneComponent) SetLayout(width, availableHeight int, confirmQuit bool, activeCount int) {
-	h.confirmQuit = confirmQuit
-	h.activeCount = activeCount
+func (h *HistoryPaneComponent) SetLayout(width, availableHeight int) {
 	h.availableH = availableHeight
 	innerWidth := max(width-6, 20)
 
@@ -222,7 +217,7 @@ func (h *HistoryPaneComponent) SetLayout(width, availableHeight int, confirmQuit
 	h.rebuildViewportContent(innerWidth)
 
 	h.historyVP.Width = innerWidth
-	titleAndHintLines := h.titleAndHintLines(activeCount, confirmQuit)
+	titleAndHintLines := h.titleAndHintLines()
 	vpHeight := max(availableHeight-2-titleAndHintLines, 1) // -2 for border
 	h.historyVP.Height = vpHeight
 }
@@ -331,21 +326,21 @@ func (h *HistoryPaneComponent) rebuildViewportContent(innerWidth int) {
 	h.historyVP.SetContent(strings.Join(lines, "\n"))
 }
 
-func (h HistoryPaneComponent) titleAndHintLines(activeCount int, confirmQuit bool) int {
+func (h HistoryPaneComponent) titleAndHintLines() int {
 	innerWidth := max(h.historyVP.Width, 20)
 	focusIndicator := " "
 	if h.focused {
 		focusIndicator = "▸"
 	}
 	vpTitle := dimStyle.Render(fmt.Sprintf("%s History (%d)", focusIndicator, len(h.history)))
-	vpHint := h.historyHint(lipgloss.Width(vpTitle), innerWidth, confirmQuit, activeCount)
+	vpHint := h.historyHint(lipgloss.Width(vpTitle), innerWidth)
 	if lipgloss.Width(vpTitle+vpHint) > innerWidth {
 		return 2
 	}
 	return 1
 }
 
-func (h HistoryPaneComponent) historyHint(titleDisplayWidth, innerWidth int, confirmQuit bool, activeCount int) string {
+func (h HistoryPaneComponent) historyHint(titleDisplayWidth, innerWidth int) string {
 	maxHintWidth := max(innerWidth-titleDisplayWidth, 0)
 	if maxHintWidth == 0 {
 		return ""
@@ -353,13 +348,8 @@ func (h HistoryPaneComponent) historyHint(titleDisplayWidth, innerWidth int, con
 
 	var plainText string
 	var style lipgloss.Style
-	if h.confirmClear {
-		plainText = "  Clear all history? [C]onfirm / [n]o"
-		style = failStyle
-	} else if confirmQuit {
-		plainText = fmt.Sprintf("  Quit Fabrik? %d jobs still in progress \u2014 they will be interrupted.  [q] Quit anyway   [n/Escape] Cancel", activeCount)
-		style = failStyle
-	} else if h.focused && len(h.history) > 0 {
+	// Armed confirms (quit, clear-all) are shown by the model's confirm banner.
+	if h.focused && len(h.history) > 0 {
 		plainText = "  [r]esume  [l] watch  [enter] details  [c]lear  [C]lear all  [tab] in-progress"
 		style = dimStyle
 	} else {

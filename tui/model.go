@@ -120,8 +120,14 @@ type Model struct {
 	confirmOverwrite       bool
 	overwriteTyped         string
 	pendingReconcilePrompt string
-	detailPanel            bool
-	helpPanel              bool
+	// quitReconcile marks the quit confirm as armed by [1] Reconcile, so that
+	// confirming it also sets pendingReconcilePrompt (#2092).
+	quitReconcile bool
+	// confirmArmedAt / confirmSigVal drive the confirm timeout; see confirm.go.
+	confirmArmedAt time.Time
+	confirmSigVal  string
+	detailPanel    bool
+	helpPanel      bool
 
 	// plugin directory
 	pluginDir string
@@ -228,10 +234,35 @@ func tickCmd() tea.Cmd {
 	})
 }
 
-// Update handles all messages (events and tea messages).
+// Update handles all messages (events and tea messages). It wraps update with
+// the armed-confirm bookkeeping: restamping the timeout clock when the armed
+// confirm changed, and re-laying out when the prompt banner's height changed.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	oldH := m.confirmBannerHeight()
+	nm, cmd := m.update(msg)
+	if mm, ok := nm.(Model); ok {
+		mm.syncConfirm()
+		if mm.confirmBannerHeight() != oldH {
+			mm.updateLayout(false)
+		}
+		return mm, cmd
+	}
+	return nm, cmd
+}
+
+func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch ev := msg.(type) {
 	case tea.KeyMsg:
+		// An armed confirm is cancelled by any key that is not one of its
+		// answers. The key is consumed: it only cancels (#2092). ctrl+c is
+		// never intercepted.
+		if k := ev.String(); k != "ctrl+c" && m.armedKind() != confirmNone && !m.isConfirmAnswer(k) {
+			m.disarmConfirms()
+			m.header.SetStatusMsg("confirmation cancelled")
+			m.updateLayout(false)
+			return m, nil
+		}
+
 		// When help panel is open, suppress most keybindings.
 		// Scroll keys are forwarded to the help viewport; ctrl+c still quits.
 		if m.helpPanel {
@@ -251,13 +282,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// When confirmOverwrite is active, collect OVERWRITE typed characters.
+		// The cancel pre-step above has already cancelled on any key that is
+		// not esc, a delete key or the next letter of the word.
 		if m.confirmOverwrite {
 			switch ev.String() {
 			case "ctrl+c":
 				return m, tea.Quit
 			case "esc":
-				m.confirmOverwrite = false
-				m.overwriteTyped = ""
+				m.disarmConfirms()
 				m.header.SetStatusMsg("")
 				return m, nil
 			case "backspace", "ctrl+h", "delete":
@@ -267,20 +299,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			default:
-				ch := ev.String()
-				if len([]rune(ch)) == 1 && len([]rune(m.overwriteTyped)) < len(overwriteConfirmWord) {
-					m.overwriteTyped += ch
-				}
+				m.overwriteTyped += ev.String()
 				if m.overwriteTyped == overwriteConfirmWord {
-					m.confirmOverwrite = false
-					m.overwriteTyped = ""
+					m.disarmConfirms()
 					return m, upgradePluginCmd(m.pluginDir)
-				}
-				if len([]rune(m.overwriteTyped)) == len(overwriteConfirmWord) && m.overwriteTyped != overwriteConfirmWord {
-					// Full word typed but wrong — clear and cancel.
-					m.confirmOverwrite = false
-					m.overwriteTyped = ""
-					m.header.SetStatusMsg("")
 				}
 				return m, nil
 			}
@@ -299,51 +321,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "q":
-			if m.history.ConfirmClear() {
-				m.history.SetConfirmClear(false)
-				m.updateLayout(false)
-				return m, nil
-			}
 			if m.confirmQuit {
+				if m.quitReconcile {
+					m.pendingReconcilePrompt = reconcilePromptText
+				}
 				return m, tea.Quit
 			}
 			if m.active.ActiveCount() > 0 {
-				m.confirmQuit = true
+				m.armConfirm(confirmKindQuit)
 				m.updateLayout(false)
 				return m, nil
 			}
 			return m, tea.Quit
 
 		case "n", "N":
-			if m.confirmReconcile {
-				m.confirmReconcile = false
+			if m.armedKind() != confirmNone {
+				m.disarmConfirms()
 				m.header.SetStatusMsg("")
-				return m, nil
-			}
-			if m.confirmOverwrite {
-				m.confirmOverwrite = false
-				m.overwriteTyped = ""
-				m.header.SetStatusMsg("")
-				return m, nil
-			}
-			if m.confirmStop {
-				m.confirmStop = false
-				m.pendingStopRequest = nil
-				m.header.SetStatusMsg("")
-				return m, nil
-			}
-			if m.confirmUpgrade {
-				m.confirmUpgrade = false
-				m.header.SetStatusMsg("")
-				return m, nil
-			}
-			if m.history.ConfirmClear() {
-				m.history.SetConfirmClear(false)
-				m.updateLayout(false)
-				return m, nil
-			}
-			if m.confirmQuit {
-				m.confirmQuit = false
 				m.updateLayout(false)
 				return m, nil
 			}
@@ -354,30 +348,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "esc":
-			if m.confirmReconcile {
-				m.confirmReconcile = false
+			if m.armedKind() != confirmNone {
+				m.disarmConfirms()
 				m.header.SetStatusMsg("")
-				return m, nil
-			}
-			if m.confirmOverwrite {
-				m.confirmOverwrite = false
-				m.overwriteTyped = ""
-				m.header.SetStatusMsg("")
-				return m, nil
-			}
-			if m.confirmStop {
-				m.confirmStop = false
-				m.pendingStopRequest = nil
-				m.header.SetStatusMsg("")
-				return m, nil
-			}
-			if m.confirmUpgrade {
-				m.confirmUpgrade = false
-				m.header.SetStatusMsg("")
-				return m, nil
-			}
-			if m.history.ConfirmClear() {
-				m.history.SetConfirmClear(false)
 				m.updateLayout(false)
 				return m, nil
 			}
@@ -386,13 +359,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.updateLayout(false)
 				return m, nil
 			}
-			if m.confirmQuit {
-				m.confirmQuit = false
-				m.updateLayout(false)
-				return m, nil
-			}
 			if m.active.ActiveCount() > 0 {
-				m.confirmQuit = true
+				m.armConfirm(confirmKindQuit)
 				m.updateLayout(false)
 				return m, nil
 			}
@@ -467,9 +435,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						Repo:        job.Repo,
 						StageName:   job.StageName,
 					}
+					m.armConfirm(confirmKindStop)
 					m.pendingStopRequest = req
-					m.confirmStop = true
-					m.header.SetStatusMsg(fmt.Sprintf("Stop #%d and pause? [y/N]", job.IssueNumber))
+					m.updateLayout(false)
 				}
 			}
 			return m, nil
@@ -521,14 +489,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "u":
 			if m.header.customWorkflow {
-				m.confirmReconcile = true
-				m.header.SetStatusMsg(reconcileStatusMsg(m.header.skillsStaleCount))
+				m.armConfirm(confirmKindReconcile)
+				m.updateLayout(false)
 			} else if m.header.skillsStaleCount > 0 {
-				m.confirmUpgrade = true
-				m.header.SetStatusMsg(fmt.Sprintf(
-					"Upgrade %d plugin file(s)? Active invocations pick up changes on next run. [y/N]",
-					m.header.skillsStaleCount,
-				))
+				m.armConfirm(confirmKindUpgrade)
+				m.updateLayout(false)
 			} else {
 				m.header.SetStatusMsg("plugin skills up to date")
 			}
@@ -536,7 +501,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "1":
 			if m.confirmReconcile {
-				m.confirmReconcile = false
+				m.disarmConfirms()
+				if m.active.ActiveCount() > 0 {
+					// Quitting the TUI stops the engine (runTUI), so [1] goes
+					// through the same active-workers confirmation as q (#2092).
+					m.armConfirm(confirmKindQuit)
+					m.quitReconcile = true
+					m.updateLayout(false)
+					return m, nil
+				}
 				m.pendingReconcilePrompt = reconcilePromptText
 				return m, tea.Quit
 			}
@@ -544,18 +517,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "2":
 			if m.confirmReconcile {
-				m.confirmReconcile = false
-				m.confirmOverwrite = true
-				m.overwriteTyped = ""
-				m.header.SetStatusMsg("This will discard your customizations. Type 'OVERWRITE' to confirm.")
+				m.armConfirm(confirmKindOverwrite)
+				m.updateLayout(false)
 				return m, nil
 			}
 			return m, nil
 
 		case "3":
 			if m.confirmReconcile {
-				m.confirmReconcile = false
+				m.disarmConfirms()
 				m.header.SetStatusMsg("")
+				m.updateLayout(false)
 				return m, nil
 			}
 			return m, nil
@@ -572,10 +544,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 				m.header.SetStatusMsg(fmt.Sprintf("stopped #%d — paused", req.IssueNumber))
+				m.updateLayout(false)
 				return m, nil
 			}
 			if m.confirmUpgrade {
-				m.confirmUpgrade = false
+				m.disarmConfirms()
+				m.updateLayout(false)
 				return m, upgradePluginCmd(m.pluginDir)
 			}
 			// Not confirming — forward to history viewport for scrolling.
@@ -657,20 +631,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Fan out to all components
 		comp, _ := m.header.Update(msg)
 		m.header = comp.(HeaderComponent)
-		// TickEvent clears statusMsg; re-show active confirmation prompts so
-		// they remain visible until the user responds.
-		if m.confirmReconcile {
-			m.header.SetStatusMsg(reconcileStatusMsg(m.header.skillsStaleCount))
-		} else if m.confirmOverwrite {
-			m.header.SetStatusMsg("This will discard your customizations. Type 'OVERWRITE' to confirm.")
-		} else if m.confirmStop && m.pendingStopRequest != nil {
-			m.header.SetStatusMsg(fmt.Sprintf("Stop #%d and pause? [y/N]", m.pendingStopRequest.IssueNumber))
-		} else if m.confirmUpgrade {
-			m.header.SetStatusMsg(fmt.Sprintf(
-				"Upgrade %d plugin file(s)? Active invocations pick up changes on next run. [y/N]",
-				m.header.skillsStaleCount,
-			))
-		}
+		// TickEvent clears statusMsg. Prompts no longer live there (the
+		// confirm banner derives them), so only the timeout is checked here.
+		m.expireConfirm(ev.At)
 		comp, _ = m.active.Update(msg)
 		m.active = comp.(ActivePaneComponent)
 		comp, _ = m.alert.Update(msg)
@@ -791,6 +754,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.confirmUpgrade = false
 		m.confirmOverwrite = false
 		m.overwriteTyped = ""
+		m.updateLayout(false)
 		if ev.Err != nil {
 			m.header.SetStatusMsg(fmt.Sprintf("plugin upgrade failed: %v", ev.Err))
 		} else {
@@ -840,7 +804,7 @@ func (m *Model) updateLayout(scrollToTop bool) {
 		m.prepareDetailItem()
 		detailH = m.detail.Height()
 	}
-	totalAvail := m.height - m.header.Height() - m.alert.Height() - m.usageLimit.Height() - activeH - detailH - m.footer.Height()
+	totalAvail := m.height - m.header.Height() - m.alert.Height() - m.usageLimit.Height() - m.confirmBannerHeight() - activeH - detailH - m.footer.Height()
 
 	helpH := 0
 	if m.helpPanel {
@@ -856,7 +820,7 @@ func (m *Model) updateLayout(scrollToTop bool) {
 	warningsH := min(m.warnings.Height(), available)
 	m.warnings.SetLayout(m.width, warningsH)
 	availableHistoryH := max(available-warningsH, 0)
-	m.history.SetLayout(m.width, availableHistoryH, m.confirmQuit, m.active.ActiveCount())
+	m.history.SetLayout(m.width, availableHistoryH)
 	if scrollToTop {
 		m.history.ScrollToTop()
 	} else {
@@ -915,6 +879,9 @@ func (m Model) View() string {
 	var sections []string
 
 	sections = append(sections, m.header.View(m.width))
+	if banner := m.viewConfirmBanner(); banner != "" {
+		sections = append(sections, banner)
+	}
 	if alertView := m.alert.View(m.width); alertView != "" {
 		sections = append(sections, alertView)
 	}
