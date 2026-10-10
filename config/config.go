@@ -46,25 +46,26 @@ type ProjectConfig struct {
 	// itself) — mirroring pruefer/config.go's hookdeck.api_key_env /
 	// hookdeck.webhook_secret_env convention exactly, so an operator already
 	// running Pruefer with Hookdeck recognizes the shape immediately.
-	HookdeckAPIKeyEnv          string `yaml:"hookdeck_api_key_env"`
-	HookdeckWebhookSecretEnv   string `yaml:"hookdeck_webhook_secret_env"`
-	StatusPoll                 *int   `yaml:"status_poll"`
-	JanitorIntervalHours       *int   `yaml:"janitor_interval_hours"`
-	LogRetentionDays           *int   `yaml:"log_retention_days"`
-	LogMaxBytes                *int64 `yaml:"log_max_bytes"`
-	SessionRetentionDays       *int   `yaml:"session_retention_days"`
-	MergeTrain                 string `yaml:"merge_train"`
-	AutoMergeStrategy          string `yaml:"auto_merge_strategy"`
-	SingletonCatchUp           string `yaml:"singleton_catch_up"`
-	MaxBatchSize               *int   `yaml:"max_batch_size"`
-	MaxBisectValidations       *int   `yaml:"max_bisect_validations"`
-	MaxTrainRebaseCycles       *int   `yaml:"max_train_rebase_cycles"`
-	MaxTrainAutoRepairAttempts *int   `yaml:"max_train_auto_repair_attempts"`
-	MaxTrainTrialsPerWindow    *int   `yaml:"max_train_trials_per_window"`
-	TrainTrialWindow           *int   `yaml:"train_trial_window"`
-	MaxCommentCyclesPerWindow  *int   `yaml:"max_comment_cycles_per_window"`
-	CommentCycleWindow         *int   `yaml:"comment_cycle_window"`
-	MaxNoOpCommentCycles       *int   `yaml:"max_no_op_comment_cycles"`
+	HookdeckAPIKeyEnv          string   `yaml:"hookdeck_api_key_env"`
+	HookdeckWebhookSecretEnv   string   `yaml:"hookdeck_webhook_secret_env"`
+	StatusPoll                 *int     `yaml:"status_poll"`
+	JanitorIntervalHours       *int     `yaml:"janitor_interval_hours"`
+	LogRetentionDays           *int     `yaml:"log_retention_days"`
+	LogMaxBytes                *int64   `yaml:"log_max_bytes"`
+	SessionRetentionDays       *int     `yaml:"session_retention_days"`
+	MergeTrain                 string   `yaml:"merge_train"`
+	AutoMergeStrategy          string   `yaml:"auto_merge_strategy"`
+	SingletonCatchUp           string   `yaml:"singleton_catch_up"`
+	MergeTrainOverlapIgnore    []string `yaml:"merge_train_overlap_ignore"`
+	MaxBatchSize               *int     `yaml:"max_batch_size"`
+	MaxBisectValidations       *int     `yaml:"max_bisect_validations"`
+	MaxTrainRebaseCycles       *int     `yaml:"max_train_rebase_cycles"`
+	MaxTrainAutoRepairAttempts *int     `yaml:"max_train_auto_repair_attempts"`
+	MaxTrainTrialsPerWindow    *int     `yaml:"max_train_trials_per_window"`
+	TrainTrialWindow           *int     `yaml:"train_trial_window"`
+	MaxCommentCyclesPerWindow  *int     `yaml:"max_comment_cycles_per_window"`
+	CommentCycleWindow         *int     `yaml:"comment_cycle_window"`
+	MaxNoOpCommentCycles       *int     `yaml:"max_no_op_comment_cycles"`
 	// GHESHost is the hostname of a GitHub Enterprise Server instance (e.g.
 	// "github.example.com"), with no scheme or trailing slash. Empty (the
 	// default) means github.com — no behavior change from before GHES

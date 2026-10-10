@@ -3,6 +3,7 @@ package cmd
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"syscall"
 	"testing"
@@ -1054,6 +1055,65 @@ func TestExecute_MaxTrainAutoRepairAttempts(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			if got := autoRepairCfg(t, c.yaml, c.env, c.extra...); got != c.want {
 				t.Errorf("MaxTrainAutoRepairAttempts = %d, want %d", got, c.want)
+			}
+		})
+	}
+}
+
+func TestSplitGlobList(t *testing.T) {
+	for _, c := range []struct {
+		in   string
+		want []string
+	}{
+		{"", nil},
+		{" , ,", nil},
+		{"**/*.lock", []string{"**/*.lock"}},
+		{" **/*.lock , CHANGELOG.md,, docs/** ", []string{"**/*.lock", "CHANGELOG.md", "docs/**"}},
+	} {
+		if got := splitGlobList(c.in); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("splitGlobList(%q) = %#v, want %#v", c.in, got, c.want)
+		}
+	}
+}
+
+// TestExecute_MergeTrainOverlapIgnoreResolution pins the flag > env >
+// config.yaml order (and the empty default) for #2047's overlap_ignore.
+func TestExecute_MergeTrainOverlapIgnoreResolution(t *testing.T) {
+	base := func(stagesDir string, extra ...string) []string {
+		return append([]string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}, extra...)
+	}
+	cases := []struct {
+		name   string
+		config string
+		env    string
+		flag   string
+		want   string
+	}{
+		{"default", "", "", "", ""},
+		{"config list", "merge_train_overlap_ignore:\n  - '**/*.lock'\n  - CHANGELOG.md\n", "", "", "**/*.lock,CHANGELOG.md"},
+		{"env beats config", "merge_train_overlap_ignore: ['from-config']\n", "from-env", "", "from-env"},
+		{"flag beats env and config", "merge_train_overlap_ignore: ['from-config']\n", "from-env", "from-flag", "from-flag"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir, stagesDir := setupValidStages(t)
+			chdirTest(t, dir)
+			if c.config != "" {
+				os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755)
+				os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte(c.config), 0644)
+			}
+			resetFlags()
+			t.Setenv("GITHUB_TOKEN", "tok")
+			t.Setenv("FABRIK_MERGE_TRAIN_OVERLAP_IGNORE", c.env)
+			args := base(stagesDir)
+			if c.flag != "" {
+				args = base(stagesDir, "--merge-train-overlap-ignore", c.flag)
+			}
+			os.Args = args
+
+			cfg := executeWithConfigHook(t)
+			if cfg.MergeTrainOverlapIgnore != c.want {
+				t.Errorf("resolved merge-train overlap ignore = %q, want %q", cfg.MergeTrainOverlapIgnore, c.want)
 			}
 		})
 	}
