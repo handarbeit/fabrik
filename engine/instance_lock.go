@@ -112,7 +112,9 @@ func (h *heldLock) verify() error {
 	if uint64(fdSt.Dev) != uint64(pathSt.Dev) || uint64(fdSt.Ino) != uint64(pathSt.Ino) { //nolint:unconvert // Dev/Ino widths differ by platform
 		return errors.New("lock file was replaced by a different file")
 	}
-	buf := make([]byte, 512)
+	// 4 KiB: the board record embeds the directory path (up to PATH_MAX), and a
+	// truncated JSON record would read as a false lost lock.
+	buf := make([]byte, 4096)
 	n, err := h.f.ReadAt(buf, 0)
 	if err != nil && n == 0 {
 		return fmt.Errorf("could not read lock record: %w", err)
