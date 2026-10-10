@@ -55,6 +55,7 @@ type Config struct {
 	AutoMergeStrategy          string              // Merge method for enablePullRequestAutoMerge: MERGE, SQUASH, or REBASE (default MERGE)
 	MergeQueue                 string              // Merge queue routing for yolo path: "auto" (enqueue when repo uses merge queue) or "off" (skip enqueue)
 	MergeTrain                 string              // Fabrik-internal merge train: "on" (advance yolo Validate completions to Queued) or "off" (default; existing auto-merge path unchanged)
+	StatusLineField            string              // Name of the display-only ProjectV2 text field the engine writes a one-line status to (#2048); "" = feature off
 	SingletonCatchUp           string              // Merge-train singleton catch-up: "merge" (default; merge the pinned base into a behind singleton's own branch, #2044) or "off" (build a trial branch instead)
 	MergeTrainOverlapIgnore    []string            // Path globs (internal/pathglob) excluded from the merge-train batch overlap check; nil = every path counts (#2047)
 	MaxMergeTrainEjections     int                 // Max merge-train ejections before pausing a member (default 3; ADR-059)

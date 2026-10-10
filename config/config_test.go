@@ -384,3 +384,36 @@ func TestToken_FallbackToGitHubToken(t *testing.T) {
 		t.Errorf("expected GITHUB_TOKEN fallback, got %q", got)
 	}
 }
+
+func TestProjectFields_StatusLine(t *testing.T) {
+	cases := []struct {
+		name string
+		yaml string
+		want string
+	}{
+		{"unset", "owner: org\n", "Fabrik"},
+		{"custom", "project_fields:\n  status_line: Now\n", "Now"},
+		{"off", "project_fields:\n  status_line: off\n", ""},
+		{"off mixed case", "project_fields:\n  status_line: OFF\n", ""},
+		{"blank", "project_fields:\n  status_line: \"\"\n", "Fabrik"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			chdir(t, dir)
+			if err := os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte(tc.yaml), 0644); err != nil {
+				t.Fatal(err)
+			}
+			pc, err := LoadProjectConfig()
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got := pc.ProjectFields.ResolveStatusLineField(); got != tc.want {
+				t.Errorf("ResolveStatusLineField() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
