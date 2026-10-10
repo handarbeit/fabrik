@@ -48,13 +48,53 @@ const statusLineEllipsis = "…"
 // transition, from the poll and train goroutines alike.
 const statusLineLookupRetry = 5 * time.Minute
 
-// statusLineState is the writer's shared state, owned by the Engine.
-type statusLineState struct {
+// displayFieldKind is the ProjectV2 field type a display field is written as.
+type displayFieldKind int
+
+const (
+	displayText displayFieldKind = iota
+	displayDate
+)
+
+func (k displayFieldKind) String() string {
+	if k == displayDate {
+		return "date"
+	}
+	return "text"
+}
+
+// displayFieldSpec is the immutable description of one display-only field the
+// writer maintains: the status line (#2048), Last activity and Last run
+// (#2049). The mutable per-field state lives in displayFieldState; every field
+// has its own, so a missing or failing field never affects another.
+type displayFieldSpec struct {
+	label  string // log tag and "unavailable" wording, e.g. "status-line"
+	cfgKey string // YAML key, for the startup line
+	kind   displayFieldKind
+	name   string // configured board field name; "" = off
+}
+
+func (e *Engine) statusLineSpec() displayFieldSpec {
+	return displayFieldSpec{"status-line", "project_fields.status_line", displayText, e.cfg.StatusLineField}
+}
+
+func (e *Engine) lastActivitySpec() displayFieldSpec {
+	return displayFieldSpec{"last-activity", "project_fields.last_activity", displayDate, e.cfg.LastActivityField}
+}
+
+func (e *Engine) lastRunSpec() displayFieldSpec {
+	return displayFieldSpec{"last-run", "project_fields.last_run", displayText, e.cfg.LastRunField}
+}
+
+// displayFieldState is one display field's writer state, owned by the Engine.
+// It is in memory only and never read to make a decision: last exists solely
+// to skip a write that would change nothing.
+type displayFieldState struct {
 	mu        sync.Mutex
-	attempted bool          // field lookup has completed (successfully) once
-	logged    bool          // the single "unavailable" startup line has been emitted
-	projectID string        // project the field was resolved on
-	field     *gh.TextField // nil = feature off or field missing/not text
+	attempted bool   // field lookup has completed (successfully) once
+	logged    bool   // the single "unavailable" startup line has been emitted
+	projectID string // project the field was resolved on
+	fieldID   string // "" = feature off or field missing / wrong type
 	last      map[string]string
 
 	// lookupMu serialises field lookups so concurrent first writes make one
@@ -68,22 +108,36 @@ type statusLineState struct {
 	keyLocks sync.Map // key -> *sync.Mutex
 }
 
-func (s *statusLineState) keyLock(key string) *sync.Mutex {
+func (s *displayFieldState) keyLock(key string) *sync.Mutex {
 	m, _ := s.keyLocks.LoadOrStore(key, &sync.Mutex{})
 	return m.(*sync.Mutex)
 }
 
-// resolveStatusLineField looks the configured field up on the project once and
+// lookupDisplayField fetches the field by name with the spec's type; "" when
+// it is absent or of another type.
+func (e *Engine) lookupDisplayField(spec displayFieldSpec, projectID string) (string, error) {
+	if spec.kind == displayDate {
+		f, err := e.client.FetchDateField(projectID, spec.name)
+		if err != nil || f == nil {
+			return "", err
+		}
+		return f.ID, nil
+	}
+	f, err := e.client.FetchTextField(projectID, spec.name)
+	if err != nil || f == nil {
+		return "", err
+	}
+	return f.ID, nil
+}
+
+// resolveDisplayField looks the configured field up on the project once and
 // logs the single startup line when the feature is unavailable. It is safe to
 // call repeatedly; only a successful lookup (found or definitively absent) is
 // final, so a transient API error at startup is retried lazily by a later
 // write rather than disabling the feature for the process lifetime. Failed
 // lookups are rate-limited to one per statusLineLookupRetry and warned about
 // once per outage.
-func (e *Engine) resolveStatusLineField(projectID string) {
-	name := e.cfg.StatusLineField
-	s := &e.statusLine
-
+func (e *Engine) resolveDisplayField(spec displayFieldSpec, s *displayFieldState, projectID string) {
 	s.lookupMu.Lock()
 	defer s.lookupMu.Unlock()
 
@@ -94,8 +148,8 @@ func (e *Engine) resolveStatusLineField(projectID string) {
 		return
 	}
 
-	if name == "" {
-		e.finishStatusLineResolve(projectID, nil, "disabled by project_fields.status_line: off")
+	if spec.name == "" {
+		e.finishDisplayFieldResolve(spec, s, projectID, "", "disabled by "+spec.cfgKey+": off")
 		return
 	}
 	if projectID == "" {
@@ -105,27 +159,26 @@ func (e *Engine) resolveStatusLineField(projectID string) {
 	if !s.lookupFailedAt.IsZero() && e.now().Sub(s.lookupFailedAt) < statusLineLookupRetry {
 		return
 	}
-	f, err := e.client.FetchTextField(projectID, name)
+	id, err := e.lookupDisplayField(spec, projectID)
 	if err != nil {
 		s.lookupFailedAt = e.now()
 		if !s.lookupWarned { // once per outage, not once per retry
 			s.lookupWarned = true
-			e.logf(0, "startup", "warning: could not look up the %q status-line field: %v — status lines are not written until it succeeds (retrying every %s)\n", name, err, statusLineLookupRetry)
+			e.logf(0, "startup", "warning: could not look up the %q %s field: %v — it is not written until this succeeds (retrying every %s)\n", spec.name, spec.label, err, statusLineLookupRetry)
 		}
 		return
 	}
 	s.lookupFailedAt = time.Time{}
 	s.lookupWarned = false
-	if f == nil {
-		e.finishStatusLineResolve(projectID, nil,
-			fmt.Sprintf("no text field named %q on the project board (create one to enable it)", name))
+	if id == "" {
+		e.finishDisplayFieldResolve(spec, s, projectID, "",
+			fmt.Sprintf("no %s field named %q on the project board (create one to enable it)", spec.kind, spec.name))
 		return
 	}
-	e.finishStatusLineResolve(projectID, f, "")
+	e.finishDisplayFieldResolve(spec, s, projectID, id, "")
 }
 
-func (e *Engine) finishStatusLineResolve(projectID string, f *gh.TextField, why string) {
-	s := &e.statusLine
+func (e *Engine) finishDisplayFieldResolve(spec displayFieldSpec, s *displayFieldState, projectID, fieldID, why string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.attempted {
@@ -133,17 +186,16 @@ func (e *Engine) finishStatusLineResolve(projectID string, f *gh.TextField, why 
 	}
 	s.attempted = true
 	s.projectID = projectID
-	s.field = f
-	if f == nil && !s.logged {
+	s.fieldID = fieldID
+	if fieldID == "" && !s.logged {
 		s.logged = true
-		e.logf(0, "startup", "status-line field unavailable — %s; project-board status lines will not be written\n", why)
+		e.logf(0, "startup", "%s field unavailable — %s; it will not be written\n", spec.label, why)
 	}
 }
 
-// statusLineField returns the resolved field and its project, resolving lazily
-// the first time a write is attempted if startup could not.
-func (e *Engine) statusLineField() (*gh.TextField, string) {
-	s := &e.statusLine
+// displayFieldHandle returns the resolved field ID and its project, resolving
+// lazily the first time a write is attempted if startup could not.
+func (e *Engine) displayFieldHandle(spec displayFieldSpec, s *displayFieldState) (string, string) {
 	s.mu.Lock()
 	attempted := s.attempted
 	s.mu.Unlock()
@@ -152,37 +204,53 @@ func (e *Engine) statusLineField() (*gh.TextField, string) {
 		if c := e.cache(); c != nil {
 			projectID = c.ProjectID()
 		}
-		e.resolveStatusLineField(projectID)
+		e.resolveDisplayField(spec, s, projectID)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.field, s.projectID
+	return s.fieldID, s.projectID
+}
+
+// resolveStatusLineField resolves the status-line field (see
+// resolveDisplayField).
+func (e *Engine) resolveStatusLineField(projectID string) {
+	e.resolveDisplayField(e.statusLineSpec(), &e.statusLine, projectID)
+}
+
+// resolveRunFields resolves the Last activity and Last run fields (#2049),
+// each with its own lookup and startup line.
+func (e *Engine) resolveRunFields(projectID string) {
+	e.resolveDisplayField(e.lastActivitySpec(), &e.lastActivity, projectID)
+	e.resolveDisplayField(e.lastRunSpec(), &e.lastRun, projectID)
 }
 
 // setStatusLine writes line to item's status-line field. It is a no-op when
 // the feature is unavailable or the line equals the last one written for the
 // item. Errors are logged and swallowed.
 func (e *Engine) setStatusLine(item gh.ProjectItem, line string) {
-	e.writeStatusLine(item, truncateStatusLine(line), false)
+	e.writeDisplayField(e.statusLineSpec(), &e.statusLine, item, truncateStatusLine(line), false)
 }
 
 // clearStatusLine clears item's status-line field (the item reached Done). With
 // no record for the item — a restart wiped it — one blind clear is made per
 // call until it succeeds; afterwards repeats are skipped.
 func (e *Engine) clearStatusLine(item gh.ProjectItem) {
-	e.writeStatusLine(item, "", true)
+	e.writeDisplayField(e.statusLineSpec(), &e.statusLine, item, "", true)
 }
 
-func (e *Engine) writeStatusLine(item gh.ProjectItem, line string, clear bool) {
-	if e.cfg.StatusLineField == "" || item.ItemID == "" {
+// writeDisplayField writes value to item's field described by spec. It is a
+// no-op when the field is off/unavailable or value equals the last one this
+// process wrote for the item. A failed write is logged and swallowed; the
+// record is updated only on success so the next transition retries.
+func (e *Engine) writeDisplayField(spec displayFieldSpec, s *displayFieldState, item gh.ProjectItem, value string, clear bool) {
+	if spec.name == "" || item.ItemID == "" {
 		return
 	}
-	field, projectID := e.statusLineField()
-	if field == nil || projectID == "" {
+	fieldID, projectID := e.displayFieldHandle(spec, s)
+	if fieldID == "" || projectID == "" {
 		return
 	}
 	key := issueKey(item, e.defaultRepo())
-	s := &e.statusLine
 
 	kl := s.keyLock(key)
 	kl.Lock()
@@ -191,18 +259,21 @@ func (e *Engine) writeStatusLine(item gh.ProjectItem, line string, clear bool) {
 	s.mu.Lock()
 	prev, known := s.last[key]
 	s.mu.Unlock()
-	if known && prev == line {
+	if known && prev == value {
 		return
 	}
 
 	var err error
-	if clear {
-		err = e.client.ClearProjectItemField(projectID, item.ItemID, field.ID)
-	} else {
-		err = e.client.UpdateProjectItemTextField(projectID, item.ItemID, field.ID, line)
+	switch {
+	case clear:
+		err = e.client.ClearProjectItemField(projectID, item.ItemID, fieldID)
+	case spec.kind == displayDate:
+		err = e.client.UpdateProjectItemDateField(projectID, item.ItemID, fieldID, value)
+	default:
+		err = e.client.UpdateProjectItemTextField(projectID, item.ItemID, fieldID, value)
 	}
 	if err != nil {
-		e.logf(item.Number, "status-line", "warning: could not write status line %q: %v\n", line, err)
+		e.logf(item.Number, spec.label, "warning: could not write %s %q: %v\n", spec.label, value, err)
 		return
 	}
 
@@ -210,7 +281,7 @@ func (e *Engine) writeStatusLine(item gh.ProjectItem, line string, clear bool) {
 	if s.last == nil {
 		s.last = make(map[string]string)
 	}
-	s.last[key] = line
+	s.last[key] = value
 	s.mu.Unlock()
 
 	// The write bumps the project item's updatedAt; advance the staleness

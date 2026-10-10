@@ -428,6 +428,12 @@ func cloneProjectState(p *projectState) *projectState {
 			out.textFields[k] = v
 		}
 	}
+	if p.dateFields != nil {
+		out.dateFields = make(map[string]string, len(p.dateFields))
+		for k, v := range p.dateFields {
+			out.dateFields[k] = v
+		}
+	}
 	for k, v := range p.items {
 		dup := *v
 		if v.textValues != nil {
@@ -577,6 +583,10 @@ var snapshotFieldRegistry = map[string]map[string]fieldDisposition{
 		// statusLineField is construction-time configuration
 		// (WithStatusLineField, #2048), like omitClosedPRsFromBoard.
 		"statusLineField": fieldSkipped,
+		// lastActivityField / lastRunField: same, WithLastActivityField /
+		// WithLastRunField (#2049).
+		"lastActivityField": fieldSkipped,
+		"lastRunField":      fieldSkipped,
 	},
 	"repoState": {
 		"owner":             fieldCopied,
@@ -677,6 +687,7 @@ var snapshotFieldRegistry = map[string]map[string]fieldDisposition{
 		"items":              fieldCopied,
 		"itemOrder":          fieldCopied,
 		"textFields":         fieldCopied,
+		"dateFields":         fieldCopied,
 		"updatedAt":          fieldCopied,
 	},
 	"itemState": {

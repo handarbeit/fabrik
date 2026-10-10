@@ -232,3 +232,41 @@ func TestLightReconcile_DisplayFieldBumpIsNotDrift_NeutralisationFails(t *testin
 		t.Fatalf("drift = %d, want 1 when the discount is neutralised (feature off)", got)
 	}
 }
+
+// TestDeltaProjectsV2ItemDateEditIsNoOp pins that an edit of the "Last
+// activity" date field (#2049) is as invisible to the cache as a text edit:
+// the guard keys on field_type != single_select, not on text.
+func TestDeltaProjectsV2ItemDateEditIsNoOp(t *testing.T) {
+	c, changes, mu, logs := seededCacheWithObserver(t)
+	before := testGetState(t, c, "owner/repo", 1)
+
+	payloads := map[string]string{
+		"string to": `"2026-10-10"`,
+		"null to":   `null`,
+		"object to": `{"date":"2026-10-10"}`,
+	}
+	for name, to := range payloads {
+		p := []byte(fmt.Sprintf(`{"action":"edited","projects_v2_item":{"id":"PVTI_001"},`+
+			`"changes":{"field_value":{"field_type":"date","to":%s,"from":null}}}`, to))
+		c.ApplyDelta("projects_v2_item", p)
+		if s := testGetState(t, c, "owner/repo", 1); s.Status != before.Status {
+			t.Errorf("%s: Status changed %q -> %q", name, before.Status, s.Status)
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*changes) != 0 {
+		t.Errorf("Store emitted %d change(s) (each would wake the poll)", len(*changes))
+	}
+	for _, l := range *logs {
+		if strings.Contains(l, "unmarshal") {
+			t.Errorf("unmarshal error logged: %s", strings.TrimSpace(l))
+		}
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if n := len(c.localDeltaAt); n != 0 {
+		t.Errorf("localDeltaAt stamped for %d item(s) (invalidates the item)", n)
+	}
+}

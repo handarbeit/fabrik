@@ -360,6 +360,10 @@ type projectState struct {
 	// creates one; a scenario adds it with SeedTextField.
 	textFields map[string]string
 
+	// dateFields maps a date field's name to its node ID (#2049). Fabrik
+	// never creates one; a scenario adds it with SeedDateField.
+	dateFields map[string]string
+
 	updatedAt time.Time
 }
 
@@ -374,7 +378,9 @@ type itemState struct {
 	updatedAt time.Time
 
 	// textValues / textUpdatedAt hold this card's text-field values and the
-	// time each was last written, keyed by field ID (#2048).
+	// time each was last written, keyed by field ID (#2048). Date fields
+	// (#2049) share the same maps — field IDs are unique across both kinds and
+	// a date is held as its YYYY-MM-DD string.
 	textValues    map[string]string
 	textUpdatedAt map[string]time.Time
 }

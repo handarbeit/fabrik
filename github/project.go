@@ -88,7 +88,10 @@ type itemNode struct {
 		Name string `json:"name"`
 	} `json:"fieldValueByName"`
 	StatusLine *statusLineValue `json:"statusLine"` // display field's own updatedAt (#2048); nil when off or unset
-	Content    struct {
+	// LastActivity / LastRun: the other display fields' own updatedAt (#2049).
+	LastActivity *statusLineValue `json:"lastActivity"`
+	LastRun      *statusLineValue `json:"lastRun"`
+	Content      struct {
 		Typename   string `json:"__typename"`
 		ID         string `json:"id"`
 		Number     int    `json:"number"`
@@ -245,7 +248,7 @@ func (c *Client) fetchProjectBoard(owner, repo string, projectNum int, ownerType
 // to fetch one page of project board items. The %s placeholder is filled with
 // "organization" or "user" depending on ownerType.
 const fetchProjectBoardQueryTemplate = `
-query($owner: String!, $projectNum: Int!, $cursor: String, $statusLine: String!, $withStatusLine: Boolean!) {
+query($owner: String!, $projectNum: Int!, $cursor: String, $statusLine: String!, $withStatusLine: Boolean!, $lastActivity: String!, $withLastActivity: Boolean!, $lastRun: String!, $withLastRun: Boolean!) {
   %s(login: $owner) {
     projectV2(number: $projectNum) {
       id
@@ -265,6 +268,16 @@ query($owner: String!, $projectNum: Int!, $cursor: String, $statusLine: String!,
             }
           }
           statusLine: fieldValueByName(name: $statusLine) @include(if: $withStatusLine) {
+            ... on ProjectV2ItemFieldTextValue {
+              updatedAt
+            }
+          }
+          lastActivity: fieldValueByName(name: $lastActivity) @include(if: $withLastActivity) {
+            ... on ProjectV2ItemFieldDateValue {
+              updatedAt
+            }
+          }
+          lastRun: fieldValueByName(name: $lastRun) @include(if: $withLastRun) {
             ... on ProjectV2ItemFieldTextValue {
               updatedAt
             }
@@ -341,7 +354,7 @@ func (c *Client) fetchProjectBoardOnce(owner, repo string, projectNum int, owner
 			"owner":      owner,
 			"projectNum": projectNum,
 		}
-		c.addStatusLineVars(vars)
+		c.addDisplayFieldVars(vars)
 		if cursor != "" {
 			vars["cursor"] = cursor
 		}
@@ -407,7 +420,7 @@ func (c *Client) fetchProjectBoardOnce(owner, repo string, projectNum int, owner
 		}
 		// Project item updatedAt is bumped by board column moves, which don't
 		// affect the issue's own updatedAt. Use whichever is later.
-		if t, ok := projectItemUpdatedAt(node.UpdatedAt, node.StatusLine); ok && t.After(item.UpdatedAt) {
+		if t, ok := projectItemUpdatedAt(node.UpdatedAt, node.StatusLine, node.LastActivity, node.LastRun); ok && t.After(item.UpdatedAt) {
 			item.UpdatedAt = t
 		}
 		// Use the latest updatedAt across the issue, project item, and linked PRs
@@ -478,7 +491,10 @@ type probeItemNode struct {
 		Name string `json:"name"`
 	} `json:"fieldValueByName"`
 	StatusLine *statusLineValue `json:"statusLine"` // display field's own updatedAt (#2048); nil when off or unset
-	Content    struct {
+	// LastActivity / LastRun: the other display fields' own updatedAt (#2049).
+	LastActivity *statusLineValue `json:"lastActivity"`
+	LastRun      *statusLineValue `json:"lastRun"`
+	Content      struct {
 		Typename   string `json:"__typename"`
 		ID         string `json:"id"`
 		Number     int    `json:"number"`
@@ -540,7 +556,7 @@ func (c *Client) probeProjectBoard(owner, repo string, projectNum int, ownerType
 // probeProjectBoardQueryTemplate is the GraphQL query used by probeProjectBoardOnce.
 // The %s placeholder is filled with "organization" or "user" depending on ownerType.
 const probeProjectBoardQueryTemplate = `
-query($owner: String!, $projectNum: Int!, $cursor: String, $statusLine: String!, $withStatusLine: Boolean!) {
+query($owner: String!, $projectNum: Int!, $cursor: String, $statusLine: String!, $withStatusLine: Boolean!, $lastActivity: String!, $withLastActivity: Boolean!, $lastRun: String!, $withLastRun: Boolean!) {
   %s(login: $owner) {
     projectV2(number: $projectNum) {
       id
@@ -559,6 +575,16 @@ query($owner: String!, $projectNum: Int!, $cursor: String, $statusLine: String!,
             }
           }
           statusLine: fieldValueByName(name: $statusLine) @include(if: $withStatusLine) {
+            ... on ProjectV2ItemFieldTextValue {
+              updatedAt
+            }
+          }
+          lastActivity: fieldValueByName(name: $lastActivity) @include(if: $withLastActivity) {
+            ... on ProjectV2ItemFieldDateValue {
+              updatedAt
+            }
+          }
+          lastRun: fieldValueByName(name: $lastRun) @include(if: $withLastRun) {
             ... on ProjectV2ItemFieldTextValue {
               updatedAt
             }
@@ -613,7 +639,7 @@ func (c *Client) probeProjectBoardOnce(owner, repo string, projectNum int, owner
 			"owner":      owner,
 			"projectNum": projectNum,
 		}
-		c.addStatusLineVars(vars)
+		c.addDisplayFieldVars(vars)
 		if cursor != "" {
 			vars["cursor"] = cursor
 		}
@@ -677,7 +703,7 @@ func (c *Client) probeProjectBoardOnce(owner, repo string, projectNum int, owner
 		if t, err := parseTime(node.Content.UpdatedAt); err == nil {
 			item.EffectiveUpdatedAt = t
 		}
-		if t, ok := projectItemUpdatedAt(node.UpdatedAt, node.StatusLine); ok && t.After(item.EffectiveUpdatedAt) {
+		if t, ok := projectItemUpdatedAt(node.UpdatedAt, node.StatusLine, node.LastActivity, node.LastRun); ok && t.After(item.EffectiveUpdatedAt) {
 			item.EffectiveUpdatedAt = t
 		}
 		if node.Content.LinkedPRs != nil && len(node.Content.LinkedPRs.Nodes) > 0 {

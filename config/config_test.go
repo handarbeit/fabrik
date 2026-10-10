@@ -417,3 +417,41 @@ func TestProjectFields_StatusLine(t *testing.T) {
 		})
 	}
 }
+
+func TestProjectFields_LastActivityAndLastRun(t *testing.T) {
+	cases := []struct {
+		name         string
+		yaml         string
+		wantActivity string
+		wantRun      string
+	}{
+		{"unset", "owner: org\n", "Last activity", "Last run"},
+		{"custom", "project_fields:\n  last_activity: Touched\n  last_run: Outcome\n", "Touched", "Outcome"},
+		{"off", "project_fields:\n  last_activity: off\n  last_run: off\n", "", ""},
+		{"off mixed case, independent", "project_fields:\n  last_activity: OFF\n", "", "Last run"},
+		{"blank", "project_fields:\n  last_activity: \"\"\n  last_run: \"  \"\n", "Last activity", "Last run"},
+		{"status_line unaffected", "project_fields:\n  status_line: off\n", "Last activity", "Last run"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			chdir(t, dir)
+			if err := os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte(tc.yaml), 0644); err != nil {
+				t.Fatal(err)
+			}
+			pc, err := LoadProjectConfig()
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got := pc.ProjectFields.ResolveLastActivityField(); got != tc.wantActivity {
+				t.Errorf("ResolveLastActivityField() = %q, want %q", got, tc.wantActivity)
+			}
+			if got := pc.ProjectFields.ResolveLastRunField(); got != tc.wantRun {
+				t.Errorf("ResolveLastRunField() = %q, want %q", got, tc.wantRun)
+			}
+		})
+	}
+}

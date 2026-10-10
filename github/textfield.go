@@ -33,11 +33,11 @@ query($projectId: ID!, $name: String!) {
   }
 }`
 
-// FetchTextField returns the project's text field with the given name. It
-// returns (nil, nil) when no such field exists or the field is not a TEXT
-// field — an absent display field is a normal, silent condition, not an
-// error. A transport or GraphQL failure is returned as an error.
-func (c *Client) FetchTextField(projectID, name string) (*TextField, error) {
+// fetchProjectFieldID looks a plain project field up by name and returns its
+// id and name when its dataType is want (case-insensitive). It returns
+// ("", "", nil) when the field is absent or has another type. Shared by
+// FetchTextField and FetchDateField so there is one query call site.
+func (c *Client) fetchProjectFieldID(projectID, name, want string) (id, fieldName string, err error) {
 	vars := map[string]interface{}{
 		"projectId": projectID,
 		"name":      name,
@@ -55,14 +55,26 @@ func (c *Client) FetchTextField(projectID, name string) (*TextField, error) {
 		} `json:"data"`
 	}
 	if err := c.graphqlRequest(fetchTextFieldQuery, vars, &result); err != nil {
-		return nil, fmt.Errorf("fetching text field %q for project %s: %w", name, projectID, err)
+		return "", "", fmt.Errorf("fetching %s field %q for project %s: %w", strings.ToLower(want), name, projectID, err)
 	}
 
 	f := result.Data.Node.Field
-	if f == nil || f.ID == "" || !strings.EqualFold(f.DataType, "TEXT") {
-		return nil, nil
+	if f == nil || f.ID == "" || !strings.EqualFold(f.DataType, want) {
+		return "", "", nil
 	}
-	return &TextField{ID: f.ID, Name: f.Name}, nil
+	return f.ID, f.Name, nil
+}
+
+// FetchTextField returns the project's text field with the given name. It
+// returns (nil, nil) when no such field exists or the field is not a TEXT
+// field — an absent display field is a normal, silent condition, not an
+// error. A transport or GraphQL failure is returned as an error.
+func (c *Client) FetchTextField(projectID, name string) (*TextField, error) {
+	id, fieldName, err := c.fetchProjectFieldID(projectID, name, "TEXT")
+	if err != nil || id == "" {
+		return nil, err
+	}
+	return &TextField{ID: id, Name: fieldName}, nil
 }
 
 // updateProjectItemTextFieldMutation is the GraphQL mutation used by
@@ -153,32 +165,61 @@ func (c *Client) SetStatusLineField(name string) {
 	c.statusLineField = name
 }
 
-func (c *Client) addStatusLineVars(vars map[string]interface{}) {
+// SetLastActivityField is SetStatusLineField for the "Last activity" date
+// field (#2049): "" = off.
+func (c *Client) SetLastActivityField(name string) {
 	c.mu.Lock()
-	name := c.statusLineField
+	defer c.mu.Unlock()
+	c.lastActivityField = name
+}
+
+// SetLastRunField is SetStatusLineField for the "Last run" text field
+// (#2049): "" = off.
+func (c *Client) SetLastRunField(name string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lastRunField = name
+}
+
+// addDisplayFieldVars adds the display-field query variables. Each name
+// variable is non-null, so it is always sent; the @include directive keeps the
+// selection off the wire when that field is disabled.
+func (c *Client) addDisplayFieldVars(vars map[string]interface{}) {
+	c.mu.Lock()
+	statusLine, lastActivity, lastRun := c.statusLineField, c.lastActivityField, c.lastRunField
 	c.mu.Unlock()
-	// $statusLine is non-null, so it is always sent; the @include directive
-	// keeps the selection off the wire when the feature is disabled.
-	vars["statusLine"] = name
-	vars["withStatusLine"] = name != ""
+	vars["statusLine"] = statusLine
+	vars["withStatusLine"] = statusLine != ""
+	vars["lastActivity"] = lastActivity
+	vars["withLastActivity"] = lastActivity != ""
+	vars["lastRun"] = lastRun
+	vars["withLastRun"] = lastRun != ""
 }
 
 // projectItemUpdatedAt parses a project item's updatedAt for inclusion in an
 // item's effective updatedAt. It reports ok=false when the timestamp is
-// unparseable or when it is explained entirely by a write to the display
-// field (not after the field value's own updatedAt, within tolerance): such a
-// bump is Fabrik's own display write and must not read as item activity.
-// With no display-field value it behaves exactly as a plain parse. Status is
-// compared directly elsewhere, so a Status move is still detected.
-func projectItemUpdatedAt(itemUpdatedAt string, statusLine *statusLineValue) (time.Time, bool) {
+// unparseable or when it is explained entirely by a write to a display field
+// (not after the latest present display-field value's own updatedAt, within
+// tolerance): such a bump is Fabrik's own display write and must not read as
+// item activity. With no display-field value it behaves exactly as a plain
+// parse. Status is compared directly elsewhere, so a Status move is still
+// detected. Nil values (field off or unset on the item) are ignored.
+func projectItemUpdatedAt(itemUpdatedAt string, display ...*statusLineValue) (time.Time, bool) {
 	t, err := parseTime(itemUpdatedAt)
 	if err != nil {
 		return time.Time{}, false
 	}
-	if statusLine != nil {
-		if ft, err := parseTime(statusLine.UpdatedAt); err == nil && !t.After(ft.Add(statusLineUpdatedAtTolerance)) {
-			return time.Time{}, false
+	var latest time.Time
+	for _, v := range display {
+		if v == nil {
+			continue
 		}
+		if ft, err := parseTime(v.UpdatedAt); err == nil && ft.After(latest) {
+			latest = ft
+		}
+	}
+	if !latest.IsZero() && !t.After(latest.Add(statusLineUpdatedAtTolerance)) {
+		return time.Time{}, false
 	}
 	return t, true
 }

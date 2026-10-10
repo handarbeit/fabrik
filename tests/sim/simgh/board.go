@@ -577,24 +577,38 @@ func (s *Sim) UpdateProjectItemStatus(projectID, itemID, statusFieldID, statusOp
 }
 
 // cardActivityAt is the card's updatedAt as the board and probe projections
-// report it. When the display-only status-line field is configured and the
-// card's updatedAt is explained entirely by a write to it (not after that
-// value's own write time, within the real client's tolerance), the card
-// contributes nothing — the same discount github.Client applies from the
-// field's own updatedAt (#2048). Caller must hold mu.
+// report it. When display-only fields are configured (status line, Last
+// activity, Last run) and the card's updatedAt is explained entirely by a
+// write to one of them (not after the latest such value's own write time,
+// within the real client's tolerance), the card contributes nothing — the
+// same discount github.Client applies from the fields' own updatedAt (#2048,
+// #2049). Caller must hold mu.
 func (s *Sim) cardActivityAt(p *projectState, it *itemState) time.Time {
-	if s.statusLineField == "" {
+	var latest time.Time
+	note := func(fieldID string, ok bool) {
+		if !ok {
+			return
+		}
+		if ft, ok := it.textUpdatedAt[fieldID]; ok && ft.After(latest) {
+			latest = ft
+		}
+	}
+	if s.statusLineField != "" {
+		id, ok := p.textFields[s.statusLineField]
+		note(id, ok)
+	}
+	if s.lastRunField != "" {
+		id, ok := p.textFields[s.lastRunField]
+		note(id, ok)
+	}
+	if s.lastActivityField != "" {
+		id, ok := p.dateFields[s.lastActivityField]
+		note(id, ok)
+	}
+	if latest.IsZero() {
 		return it.updatedAt
 	}
-	fieldID, ok := p.textFields[s.statusLineField]
-	if !ok {
-		return it.updatedAt
-	}
-	ft, ok := it.textUpdatedAt[fieldID]
-	if !ok {
-		return it.updatedAt
-	}
-	if !it.updatedAt.After(ft.Add(2 * time.Second)) {
+	if !it.updatedAt.After(latest.Add(2 * time.Second)) {
 		return time.Time{}
 	}
 	return it.updatedAt

@@ -48,6 +48,12 @@ type Client struct {
 	// SetStatusLineField.
 	statusLineField string
 
+	// lastActivityField / lastRunField are the names of the display-only
+	// "Last activity" date and "Last run" text fields (#2049); "" = off.
+	// Read by the board and probe queries exactly like statusLineField.
+	lastActivityField string
+	lastRunField      string
+
 	// reqTotal / reqNotModified count every HTTP request this client issued
 	// and how many of them came back 304 (#1952). Read via RequestStats.
 	reqTotal       atomic.Int64
