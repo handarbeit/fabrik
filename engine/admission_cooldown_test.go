@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -286,5 +287,25 @@ func TestMergeGateRecheckInterval(t *testing.T) {
 		if got := eng.mergeGateRecheckInterval(); got != tc.want {
 			t.Errorf("PollSeconds=%d: %v, want %v", tc.poll, got, tc.want)
 		}
+	}
+}
+
+// A failed non-Validate advance must not mark the item advanced: the poll defer
+// skips advanced items, and with the expired cooldown already consumed the
+// periodic-re-eval re-stamp is the only thing that retries the advance (#2096).
+func TestRunCatchUpPhase2_FailedAdvanceIsNotMarkedAdvanced(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineWithStages(t, client, testStagesWithValidate())
+	eng.cfg.Yolo = true
+	eng.statusField = nil // advanceToNextStage fails: "status field metadata not available"
+
+	advanced := map[string]bool{}
+	eng.runCatchUpPhase2(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"},
+		gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Repo: "owner/repo", Status: "Research"}, &stages.Stage{Name: "Research"}, advanced)
+	if len(client.updateStatusCalls) != 0 {
+		t.Fatalf("advance unexpectedly reached the board: %+v", client.updateStatusCalls)
+	}
+	if advanced["owner/repo#1"] {
+		t.Error("a failed advance was marked advanced, so the poll defer would skip the periodic re-arm and nothing would retry it")
 	}
 }

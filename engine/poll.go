@@ -1962,7 +1962,12 @@ func (e *Engine) runCatchUpPhase2(ctx context.Context, board *gh.ProjectBoard, i
 		return
 	}
 	if err := e.advanceToNextStage(board, item, stage); err != nil {
+		// A failed advance moved nothing, so there is no StatusChanged entry to
+		// re-admit the item. Leave it out of advancedItems: the poll defer then
+		// re-stamps periodic-re-eval, which is the only thing that retries the
+		// advance now that admission consumes expired cooldowns (#2096).
 		e.logf(item.Number, "warn", "could not advance: %v\n", err)
+		return
 	}
 	// Mark as advanced so the defer doesn't re-cache the old updatedAt.
 	// Board column moves don't bump updatedAt, so re-caching would
