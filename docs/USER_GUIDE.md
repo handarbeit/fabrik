@@ -839,7 +839,18 @@ Custom stages (names not present in any embedded default) are silently skipped �
 
 ### Instance Lock
 
-> **Note:** When Fabrik starts, it creates a PID lock file at `.fabrik/fabrik.lock`. If a second instance attempts to start in the same directory, it reads the lock file, logs an error identifying the running process, and exits immediately. The lock is automatically released when the process exits — including on crash or SIGKILL — so there is no need to manually delete the file after an unclean shutdown.
+> **Note:** Fabrik holds two exclusive file locks for as long as it runs:
+>
+> - **Directory lock** — `.fabrik/fabrik.lock` in the directory Fabrik was started from. It holds the PID and stops a second instance in the *same directory*.
+> - **Board lock** — one file per project board in a per-user directory outside any repository (`os.UserCacheDir()/fabrik/locks/`, i.e. `~/Library/Caches/fabrik/locks/` on macOS and `$XDG_CACHE_HOME` or `~/.cache/fabrik/locks/` on Linux; override with `FABRIK_LOCK_DIR`). The board is identified by GitHub host + project owner + project number, so a second Fabrik for the *same board on the same host* is refused **from any directory** — another clone, a sibling directory, a different worktree. The file records the holder's PID and directory, and the refusal names them: `another Fabrik instance (pid 4242, dir /home/me/work/proj) already holds the lock for board github.com/acme/7 (lock file: …)`. Boards with different numbers, owners or hosts never contend. If the lock directory cannot be determined or created, Fabrik fails at startup rather than running without the board lock.
+>
+> Both locks are released by the operating system when the process ends — including on crash or SIGKILL — so a leftover lock file is harmless and there is no need to delete it after an unclean shutdown. Fabrik never unlinks them. If you suspect a stale lock, check the recorded PID first (`ps -p <pid>`) and confirm no other Fabrik serves the board before touching the file; deleting the file of a *live* instance is exactly what lets a second one start unprotected.
+>
+> **Worktree refusal.** Every issue worktree (`.fabrik/worktrees/<owner>-<repo>/issue-N/`) contains a full copy of the board configuration, so Fabrik refuses to start when its working directory is inside any `.fabrik/worktrees/` directory. Start it from the project directory.
+>
+> **Per-poll verification.** Every poll cycle, Fabrik checks that both lock files on disk are still the files it holds locked (same device and inode) and that the recorded PID is its own. If either has been deleted or replaced by something outside Fabrik, it stops dispatching work, prints `lost the instance lock; another Fabrik may own this board`, and exits non-zero. It does not remove `fabrik:locked:<user>` labels on that exit, since another instance may legitimately hold them. The check is silent when it passes.
+>
+> The locks are held across a SIGHUP restart and a self-upgrade re-exec: released just before the process image is replaced and re-acquired by the new one. An instance started during that gap keeps the lock, and the re-exec'd one exits. Older Fabrik versions do not know the board lock, and two *hosts* serving one board are not detected.
 >
 > See [§11 Troubleshooting → Multiple Fabrik Instances](#11-troubleshooting) if you encounter a stale lock or need to run multiple instances against different projects.
 >
@@ -4536,14 +4547,11 @@ Running two Fabrik processes against the same project board causes duplicate
 dispatches, wasted API credits, and conflicting comments. Each instance has its
 own in-memory deduplication, so they can't detect each other.
 
-Starting with v0.0.30, Fabrik acquires an exclusive file lock on
-`.fabrik/fabrik.lock` at startup. If another instance is already running for
-the same project, it exits with a clear error. The lock is automatically
-released if the process crashes.
+Fabrik acquires an exclusive file lock on `.fabrik/fabrik.lock` at startup, and a second, board-scoped lock in a per-user directory (see [Instance Lock](#instance-lock)). If another instance is already running in the same directory, or for the same board on the same host from any directory, it exits with a clear error naming the holder's PID and directory. The locks are automatically released if the process crashes.
 
-To check for stale instances: `pgrep -la fabrik`
+To check for stale instances: `pgrep -la fabrik`. A leftover lock file naming a dead PID needs no cleanup; before ever deleting one, confirm with `ps -p <pid>` that the PID is dead and that no other Fabrik is serving the board.
 
-Instances in *different* directories (or on different hosts) against the same board are a separate case the file lock cannot see. In PAT mode they must run as different GitHub users, since the `fabrik:locked:<user>` label is what tells them apart; under [GitHub App authentication](#github-app-authentication) each derives its own lock label from the App slug plus a hash of hostname and directory, so they stay distinguishable without separate users.
+Instances on *different hosts* against the same board are a case neither lock can see, and neither can an older Fabrik without the board lock. In PAT mode such instances must run as different GitHub users, since the `fabrik:locked:<user>` label is what tells them apart; under [GitHub App authentication](#github-app-authentication) each derives its own lock label from the App slug plus a hash of hostname and directory, so they stay distinguishable without separate users.
 
 ### `unknown command "webhook" for "gh"` in Webhook Mode
 
@@ -4619,7 +4627,7 @@ pkill -HUP fabrik
 1. Fabrik logs `[signal] received SIGHUP — restarting in place to clear in-memory state` to `fabrik.log`.
 2. In-flight Claude workers are cancelled (same drain as Ctrl-C).
 3. `fabrik:locked:<user>` labels are removed from any issues that were mid-run.
-4. The lockfile (`.fabrik/fabrik.lock`) is released.
+4. The directory lock (`.fabrik/fabrik.lock`) and the board lock are released.
 5. `syscall.Exec` replaces the process image in place — the PID stays the same, the parent shell and TUI remain attached, and a brief TUI redraw may occur.
 6. The new process starts with a clean in-memory cache, Store, observers, and `mayNeedWork` set.
 

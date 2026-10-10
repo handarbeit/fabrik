@@ -837,7 +837,18 @@ Custom stages (names not present in any embedded default) are silently skipped �
 
 ### Instance Lock
 
-> **Note:** When Fabrik starts, it creates a PID lock file at `.fabrik/fabrik.lock`. If a second instance attempts to start in the same directory, it reads the lock file, logs an error identifying the running process, and exits immediately. The lock is automatically released when the process exits — including on crash or SIGKILL — so there is no need to manually delete the file after an unclean shutdown.
+> **Note:** Fabrik holds two exclusive file locks for as long as it runs:
+>
+> - **Directory lock** — `.fabrik/fabrik.lock` in the directory Fabrik was started from. It holds the PID and stops a second instance in the *same directory*.
+> - **Board lock** — one file per project board in a per-user directory outside any repository (`os.UserCacheDir()/fabrik/locks/`, i.e. `~/Library/Caches/fabrik/locks/` on macOS and `$XDG_CACHE_HOME` or `~/.cache/fabrik/locks/` on Linux; override with `FABRIK_LOCK_DIR`). The board is identified by GitHub host + project owner + project number, so a second Fabrik for the *same board on the same host* is refused **from any directory** — another clone, a sibling directory, a different worktree. The file records the holder's PID and directory, and the refusal names them: `another Fabrik instance (pid 4242, dir /home/me/work/proj) already holds the lock for board github.com/acme/7 (lock file: …)`. Boards with different numbers, owners or hosts never contend. If the lock directory cannot be determined or created, Fabrik fails at startup rather than running without the board lock.
+>
+> Both locks are released by the operating system when the process ends — including on crash or SIGKILL — so a leftover lock file is harmless and there is no need to delete it after an unclean shutdown. Fabrik never unlinks them. If you suspect a stale lock, check the recorded PID first (`ps -p <pid>`) and confirm no other Fabrik serves the board before touching the file; deleting the file of a *live* instance is exactly what lets a second one start unprotected.
+>
+> **Worktree refusal.** Every issue worktree (`.fabrik/worktrees/<owner>-<repo>/issue-N/`) contains a full copy of the board configuration, so Fabrik refuses to start when its working directory is inside any `.fabrik/worktrees/` directory. Start it from the project directory.
+>
+> **Per-poll verification.** Every poll cycle, Fabrik checks that both lock files on disk are still the files it holds locked (same device and inode) and that the recorded PID is its own. If either has been deleted or replaced by something outside Fabrik, it stops dispatching work, prints `lost the instance lock; another Fabrik may own this board`, and exits non-zero. It does not remove `fabrik:locked:<user>` labels on that exit, since another instance may legitimately hold them. The check is silent when it passes.
+>
+> The locks are held across a SIGHUP restart and a self-upgrade re-exec: released just before the process image is replaced and re-acquired by the new one. An instance started during that gap keeps the lock, and the re-exec'd one exits. Older Fabrik versions do not know the board lock, and two *hosts* serving one board are not detected.
 >
 > See [§11 Troubleshooting → Multiple Fabrik Instances](#11-troubleshooting) if you encounter a stale lock or need to run multiple instances against different projects.
 >
@@ -4534,14 +4545,11 @@ Running two Fabrik processes against the same project board causes duplicate
 dispatches, wasted API credits, and conflicting comments. Each instance has its
 own in-memory deduplication, so they can't detect each other.
 
-Starting with v0.0.30, Fabrik acquires an exclusive file lock on
-`.fabrik/fabrik.lock` at startup. If another instance is already running for
-the same project, it exits with a clear error. The lock is automatically
-released if the process crashes.
+Fabrik acquires an exclusive file lock on `.fabrik/fabrik.lock` at startup, and a second, board-scoped lock in a per-user directory (see [Instance Lock](#instance-lock)). If another instance is already running in the same directory, or for the same board on the same host from any directory, it exits with a clear error naming the holder's PID and directory. The locks are automatically released if the process crashes.
 
-To check for stale instances: `pgrep -la fabrik`
+To check for stale instances: `pgrep -la fabrik`. A leftover lock file naming a dead PID needs no cleanup; before ever deleting one, confirm with `ps -p <pid>` that the PID is dead and that no other Fabrik is serving the board.
 
-Instances in *different* directories (or on different hosts) against the same board are a separate case the file lock cannot see. In PAT mode they must run as different GitHub users, since the `fabrik:locked:<user>` label is what tells them apart; under [GitHub App authentication](#github-app-authentication) each derives its own lock label from the App slug plus a hash of hostname and directory, so they stay distinguishable without separate users.
+Instances on *different hosts* against the same board are a case neither lock can see, and neither can an older Fabrik without the board lock. In PAT mode such instances must run as different GitHub users, since the `fabrik:locked:<user>` label is what tells them apart; under [GitHub App authentication](#github-app-authentication) each derives its own lock label from the App slug plus a hash of hostname and directory, so they stay distinguishable without separate users.
 
 ### `unknown command "webhook" for "gh"` in Webhook Mode
 
@@ -4617,7 +4625,7 @@ pkill -HUP fabrik
 1. Fabrik logs `[signal] received SIGHUP — restarting in place to clear in-memory state` to `fabrik.log`.
 2. In-flight Claude workers are cancelled (same drain as Ctrl-C).
 3. `fabrik:locked:<user>` labels are removed from any issues that were mid-run.
-4. The lockfile (`.fabrik/fabrik.lock`) is released.
+4. The directory lock (`.fabrik/fabrik.lock`) and the board lock are released.
 5. `syscall.Exec` replaces the process image in place — the PID stays the same, the parent shell and TUI remain attached, and a brief TUI redraw may occur.
 6. The new process starts with a clean in-memory cache, Store, observers, and `mayNeedWork` set.
 
@@ -8650,6 +8658,12 @@ Per [ADR-007](../adrs/007-label-based-locking.md):
 **Legacy lock sweep.** A deployment that switches from PAT to App mode may have crashed holding `fabrik:locked:<user>`; under the new identity that label reads as "locked by another instance" and would strand the item. `runStartupCleanup` therefore additionally removes exactly `fabrik:locked:<cfg.User>` (only when App auth is active and `user:` is still set) from items with no live local `Worker()`. It does not sweep other `fabrik:locked:*` labels, which may belong to a live instance. Because nothing ties the `<cfg.User>` label to *this* instance (a PAT-mode instance still running as that user legitimately holds it), the sweep also skips a label applied less than `legacyLockMinAge` (2h) ago, or whose age cannot be read (`FetchLabelAppliedAt`, live), logging that the label was left for a human to remove.
 
 **Age-window limitation.** The 2h window is a heuristic, not a liveness proof: no process can see whether *another* process is alive. It only matters when a PAT-mode instance and an App-mode instance share a username and a board. In that case a PAT-mode stage that runs longer than 2h (possible with no `max_wall_time`) could have its live `fabrik:locked:<user>` lock swept when the App-mode instance starts. Deployments without that mix are unaffected.
+
+**Host and directory instance locks (#2097, [ADR-2097](../adrs/2097-board-scoped-instance-lock.md)).** The label protocol above arbitrates between engines that are already running; the flocks below keep a second engine from running at all. `Run()` takes them before anything else touches disk (`acquireInstanceLocks`, `engine/instance_lock.go`), in this order: (1) `checkNotInWorktree(fabrikDir)` refuses a directory with a `.fabrik`/`worktrees` path-component pair (symlinks resolved); (2) the **directory lock**, an exclusive non-blocking flock on `<fabrikDir>/.fabrik/fabrik.lock` whose content stays exactly `"<pid>\n"` (the live e2e gate parses it as a bare pid); (3) the **board lock**, a flock on `<lockdir>/<slug>-<8 hex>.lock` where `<lockdir>` is `$FABRIK_LOCK_DIR` or `os.UserCacheDir()/fabrik/locks` (mode `0700`; no resolvable directory is a startup error, never an unlocked start) and the key is `lower(host)/lower(owner)/projectNumber` (empty `ghes_host` = `github.com`; `OwnerType` excluded). The board file holds one JSON line `{"pid","dir","started"}`, written in a single write only after the flock is owned. A refused engine reads that record through a separate open, retrying briefly, and names the holder's pid and directory (or says the owner could not be identified); it releases the directory lock it had taken. All of this precedes log rotation, so a refused engine never rotates the winner's log. Both fds are close-on-exec and never given to a child.
+
+*Per-poll verification (R3).* `Run()`'s `doPollCycle` closure calls `instanceLocks.Verify()` before `PollWithBackoff`: for each lock, `fstat` of the held fd against `stat` of the path (dev+inode), then the recorded pid read from the held fd must equal `os.Getpid()`. It logs nothing on success. On failure it prints `lost the instance lock; another Fabrik may own this board (<which lock>: <reason>)` to stderr and `fabrik.log`, sets `Engine.lockLost`, cancels the run context and returns `errInstanceLockLost`; `drainAndExit` then skips `cleanupLockedIssues` (in PAT mode another engine may legitimately hold `fabrik:locked:<user>`), never takes the SIGHUP branch, waits the bounded drain and returns the error, so the process exits non-zero. Verification is not in `poll()`/`PollOnce` (the sim seam deliberately skips the lock preamble, ADR-1449), and cycles triggered through the test-only poll seam bypass it.
+
+*Re-exec.* `performSighupRestart` releases both locks immediately before `syscall.Exec`; a self-upgrade re-exec relies on close-on-exec. The pid is unchanged across exec, and `Run()` re-acquires both locks in the new image. If a competitor wins the gap it keeps the lock and the re-exec'd image exits. Older binaries and a second host are not covered.
 
 ### 7.5 Closed-Issue Catch-Up
 
