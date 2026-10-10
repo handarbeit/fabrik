@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	gh "github.com/handarbeit/fabrik/github"
@@ -41,6 +42,12 @@ const statusLineMaxLen = 60
 // statusLineEllipsis marks a truncated line.
 const statusLineEllipsis = "…"
 
+// statusLineLookupRetry is the minimum gap between two failed attempts to look
+// the field up. Without it a persistent failure (a token without project read
+// scope, an API outage) would cost a blocking GraphQL request on every
+// transition, from the poll and train goroutines alike.
+const statusLineLookupRetry = 5 * time.Minute
+
 // statusLineState is the writer's shared state, owned by the Engine.
 type statusLineState struct {
 	mu        sync.Mutex
@@ -49,6 +56,12 @@ type statusLineState struct {
 	projectID string        // project the field was resolved on
 	field     *gh.TextField // nil = feature off or field missing/not text
 	last      map[string]string
+
+	// lookupMu serialises field lookups so concurrent first writes make one
+	// request, and guards the failure bookkeeping below.
+	lookupMu       sync.Mutex
+	lookupFailedAt time.Time // time of the last failed lookup; zero = none outstanding
+	lookupWarned   bool      // the failure warning has been logged this outage
 
 	// keyLocks serialises writes per item so two goroutines (poll, train
 	// worker) cannot land their mutations out of order relative to the record.
@@ -63,17 +76,23 @@ func (s *statusLineState) keyLock(key string) *sync.Mutex {
 // resolveStatusLineField looks the configured field up on the project once and
 // logs the single startup line when the feature is unavailable. It is safe to
 // call repeatedly; only a successful lookup (found or definitively absent) is
-// final, so a transient API error at startup is retried lazily by the first
-// write rather than disabling the feature for the process lifetime.
+// final, so a transient API error at startup is retried lazily by a later
+// write rather than disabling the feature for the process lifetime. Failed
+// lookups are rate-limited to one per statusLineLookupRetry and warned about
+// once per outage.
 func (e *Engine) resolveStatusLineField(projectID string) {
 	name := e.cfg.StatusLineField
 	s := &e.statusLine
+
+	s.lookupMu.Lock()
+	defer s.lookupMu.Unlock()
+
 	s.mu.Lock()
-	if s.attempted {
-		s.mu.Unlock()
+	done := s.attempted
+	s.mu.Unlock()
+	if done {
 		return
 	}
-	s.mu.Unlock()
 
 	if name == "" {
 		e.finishStatusLineResolve(projectID, nil, "disabled by project_fields.status_line: off")
@@ -82,11 +101,21 @@ func (e *Engine) resolveStatusLineField(projectID string) {
 	if projectID == "" {
 		return // board metadata not known yet; try again later
 	}
-	f, err := e.client.FetchTextField(projectID, name)
-	if err != nil {
-		e.logf(0, "startup", "warning: could not look up the %q status-line field: %v\n", name, err)
+	// A recent failed lookup is not repeated on every transition.
+	if !s.lookupFailedAt.IsZero() && e.now().Sub(s.lookupFailedAt) < statusLineLookupRetry {
 		return
 	}
+	f, err := e.client.FetchTextField(projectID, name)
+	if err != nil {
+		s.lookupFailedAt = e.now()
+		if !s.lookupWarned { // once per outage, not once per retry
+			s.lookupWarned = true
+			e.logf(0, "startup", "warning: could not look up the %q status-line field: %v — status lines are not written until it succeeds (retrying every %s)\n", name, err, statusLineLookupRetry)
+		}
+		return
+	}
+	s.lookupFailedAt = time.Time{}
+	s.lookupWarned = false
 	if f == nil {
 		e.finishStatusLineResolve(projectID, nil,
 			fmt.Sprintf("no text field named %q on the project board (create one to enable it)", name))

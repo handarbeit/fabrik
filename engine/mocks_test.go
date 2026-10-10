@@ -115,6 +115,7 @@ type mockGitHubClient struct {
 	// (a clear has cleared=true and empty text).
 	textField                        *gh.TextField
 	fetchTextFieldErr                error
+	fetchTextFieldCalls              int
 	statusLineWrites                 []statusLineWrite
 	statusLineErr                    error
 	mergePRCalls                     []mergePRCall
@@ -445,6 +446,7 @@ type statusLineWrite struct {
 func (m *mockGitHubClient) FetchTextField(projectID, name string) (*gh.TextField, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.fetchTextFieldCalls++
 	if m.fetchTextFieldErr != nil {
 		return nil, m.fetchTextFieldErr
 	}

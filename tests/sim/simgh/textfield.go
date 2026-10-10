@@ -17,7 +17,8 @@ import (
 // Whether real GitHub bumps the item's updatedAt for a text write is not
 // verified (see ADR 2048); modelling the bump is the conservative choice, as
 // it is the case the client-side discount exists for. A write of the value
-// the field already holds still counts as a write.
+// the field already holds still counts as a write. A clear bumps the same way
+// but leaves no value node behind, so it cannot be discounted.
 
 // SeedTextField adds a TEXT field named name to the project. Idempotent.
 func (s *Sim) SeedTextField(owner string, num int, name string) *Sim {
@@ -94,10 +95,11 @@ func (s *Sim) ClearProjectItemField(projectID, itemID, fieldID string) error {
 	}
 	now := s.now()
 	delete(it.textValues, fieldID)
-	if it.textUpdatedAt == nil {
-		it.textUpdatedAt = make(map[string]time.Time)
-	}
-	it.textUpdatedAt[fieldID] = now
+	// A cleared field has no value node, so the real board/probe query
+	// (fieldValueByName) returns null and the client has no field updatedAt
+	// to discount the card's bump against. Drop the write time to match: the
+	// clear's bump then surfaces as ordinary card activity (#2048 review).
+	delete(it.textUpdatedAt, fieldID)
 	it.updatedAt = now
 	p.updatedAt = now
 	return nil

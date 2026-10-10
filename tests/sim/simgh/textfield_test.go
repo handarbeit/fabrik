@@ -57,6 +57,15 @@ func TestTextFieldRoundTripAndDiscount(t *testing.T) {
 	if got := s.TextFieldValue("o/r", 7, "Fabrik"); got != "" {
 		t.Errorf("value after clear = %q", got)
 	}
+	// A cleared field leaves no value node (so no field updatedAt), like the
+	// real fieldValueByName: the clear's bump is not discounted.
+	probe, _, err = s.ProbeProjectBoard("o", "r", 1, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if probe[0].EffectiveUpdatedAt.Before(clk.now) {
+		t.Errorf("EffectiveUpdatedAt after clear = %v, want the clear's bump at %v", probe[0].EffectiveUpdatedAt, clk.now)
+	}
 	if err := s.UpdateProjectItemTextField(proj.id, itemID, "bogus", "x"); err == nil {
 		t.Error("want an error for a foreign field ID")
 	}

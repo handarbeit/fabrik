@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	gh "github.com/handarbeit/fabrik/github"
@@ -181,6 +182,56 @@ func TestStatusLine_NoLookupMeansNoWriteAndNoPerTransitionLog(t *testing.T) {
 	}
 	if logs := drainLogs(events); len(logs) != 0 {
 		t.Fatalf("logs = %q, want none per transition", logs)
+	}
+}
+
+// A lookup that keeps failing is not repeated on every transition: it is
+// rate-limited, warned about once per outage, and retried once the gap passes.
+func TestStatusLine_FailedLookupIsRateLimitedAndWarnedOnce(t *testing.T) {
+	client := &mockGitHubClient{fetchTextFieldErr: errors.New("boom")}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	eng.cfg.StatusLineField = "Fabrik"
+	events := make(chan tui.Event, 64)
+	eng.events = events
+	start := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+	eng.SetClock(stubClock{t: start})
+
+	lookups := func() int {
+		client.mu.Lock()
+		defer client.mu.Unlock()
+		return client.fetchTextFieldCalls
+	}
+
+	for i := 0; i < 5; i++ {
+		eng.resolveStatusLineField("PVT_1")
+	}
+	if n := lookups(); n != 1 {
+		t.Fatalf("lookups within the retry gap = %d, want 1", n)
+	}
+	if logs := drainLogs(events); len(logs) != 1 {
+		t.Fatalf("logs = %q, want exactly one warning", logs)
+	}
+
+	// Past the gap it retries, but the outage is not warned about again.
+	eng.SetClock(stubClock{t: start.Add(statusLineLookupRetry + time.Second)})
+	eng.resolveStatusLineField("PVT_1")
+	if n := lookups(); n != 2 {
+		t.Fatalf("lookups after the gap = %d, want 2", n)
+	}
+	if logs := drainLogs(events); len(logs) != 0 {
+		t.Fatalf("logs = %q, want none for a repeat of the same outage", logs)
+	}
+
+	// Recovery resolves the field and writes start working.
+	client.mu.Lock()
+	client.fetchTextFieldErr = nil
+	client.textField = &gh.TextField{ID: "FIELD_TXT", Name: "Fabrik"}
+	client.mu.Unlock()
+	eng.SetClock(stubClock{t: start.Add(2*statusLineLookupRetry + 2*time.Second)})
+	eng.resolveStatusLineField("PVT_1")
+	eng.setStatusLine(slItem(1), "landing")
+	if w := slWrites(client); len(w) != 1 {
+		t.Fatalf("writes after recovery = %+v, want 1", w)
 	}
 }
 
