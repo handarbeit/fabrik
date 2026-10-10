@@ -1176,6 +1176,8 @@ user: your-github-username
 # flag or environment variable). See "Project Board Status Line" in section 3.
 # project_fields:
 #   status_line: Fabrik
+#   last_activity: Last activity   # DATE field (#2049); "off" disables
+#   last_run: Last run             # TEXT field (#2049); "off" disables
 
 # Comment-processing circuit breaker (#1089): maximum non-advancing
 # comment-processing invocations for a single issue within the rolling window
@@ -1857,6 +1859,30 @@ project_fields:
 | `awaiting review` | The stage finished and is waiting for PR reviewers (`fabrik:awaiting-review` was first applied). |
 
 When a stage worker ends and nothing replaced its `<Stage> · running` line (for example the stage failed), the line is cleared rather than left claiming the card is running.
+
+#### Last activity and Last run
+
+From the board you cannot otherwise sort or group items by how recently Fabrik worked on them, or by how their last run ended — spotting a stalled, thrashing or turn-exhausted item means reading comments one issue at a time, the daemon log or the TUI. Two more optional fields on your project answer that, using values the engine already computes:
+
+| Field | Type | Default name | Value | Source |
+|---|---|---|---|---|
+| Last activity | **Date** | `Last activity` | The UTC calendar date of the most recent job start or completion for the item. | The job's start instant (when the worker begins a stage run or a comment-review pass) and its completion instant. |
+| Last run | **Text** | `Last run` | One line describing the most recent finished run. | The run's stage, outcome flags, turns used / budget and duration — the same values the TUI shows for a completed job. |
+
+`Last run` reads like `Validate · completed · 42/250 turns · 18m`, `Implement · turn-limited · 250/250 turns` or `Review · blocked on input`. The outcome is one of `completed`, `turn-limited`, `blocked on input`, `failed` (the process faulted without completing) or `incomplete` (a clean exit without the completion marker, for example a run that had tool calls denied). A comment-review pass reads `Validate · comment review · completed`. Turns are shown for `completed` and `turn-limited` runs (`42 turns` when the stage has no turn budget), the duration only for `completed`. Lines are capped at 60 characters, ending in `…`.
+
+**Set it up.** Add a **Date** field named `Last activity` and/or a **Text** field named `Last run` (or any names you set with `project_fields.last_activity` / `project_fields.last_run`). Fabrik never creates the fields. Both are on by default; a missing field, or one of the wrong type, makes Fabrik log one `[startup] last-activity field unavailable …` (or `last-run`) line and write nothing for it — the other field and the status line are unaffected. `off` (any case) disables a field. The keys are YAML-only; a field you add later, or rename, is picked up on the next restart.
+
+```yaml
+# .fabrik/config.yaml
+project_fields:
+  last_activity: Last activity   # or another field name, or "off"
+  last_run: Last run             # or another field name, or "off"
+```
+
+**How and when it is written.** Like the status line, both fields are display-only: nothing reads them back, and the engine's decisions never depend on them. A write happens only when a job starts or finishes (never per turn or per poll) and only when the value differs from the last one this process wrote for that item, so several events on one day write `Last activity` once. A failed write is logged and swallowed. The values stay in place when an item reaches Done, as history. A ProjectV2 date field has no time of day, so `Last activity` has day granularity, and it is the UTC date regardless of the host's time zone. Cost in dollars or tokens is deliberately not included, and merge-train batch jobs (which belong to no single item) write nothing.
+
+**Restart caveat.** The writer remembers what it last wrote only in memory, and nothing is read back from the board. After a daemon restart the first run for an item rewrites both fields once, even with an identical value; until an item has a run, whatever is on the board from before the restart stays. Nothing is persisted and no counters are added for these fields.
 
 Lines are capped at 60 characters (counting characters, not bytes), ending in `…` when cut. States with no cheap, already-logged transition do not have a line yet.
 

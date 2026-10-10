@@ -4460,6 +4460,25 @@ The engine projects a one-line description of what an item is doing or waiting o
 
 Neutralisation seams: `CacheImpl.SetTextEditSuppressionDisabledForTest` (boardcache) and leaving `SetStatusLineField` unset (the discount); the tests that pin the behaviour are shown to fail without them.
 
+#### 7.17.1 Last activity and Last run fields (#2049, ADR 2049)
+
+Two more display-only fields share the writer: **Last activity** (ProjectV2 **date**, `project_fields.last_activity`, default `Last activity`) and **Last run** (**text**, `project_fields.last_run`, default `Last run`); `off` disables each independently. They follow every rule above — display-only and never read back (not from GitHub, the Store, or the writer's own record), write-on-change only, a missing / wrong-typed / `off` field is a silent no-op with one `[startup] last-activity|last-run field unavailable …` line, a failed write is logged and swallowed, a successful write applies `SelfWriteObserved`, and no webhook echo is registered. **No new state is introduced**: no `ItemState` field, no persistence, no counter; the only memory is the per-field skip-unchanged record (`displayFieldState.last`), forgotten on restart.
+
+**Writer.** `engine/status_line.go` is generalised to a `displayFieldState` per field (the status line, `Engine.lastActivity`, `Engine.lastRun`), each with its own lookup, startup line, lookup-retry back-off and per-item write lock, and a `displayFieldSpec` carrying the field kind (text or date). `engine/run_fields.go` holds the two entry points and `engine/run_fields_text.go` the wording (`lastActivityDate`, `lastRunLine`, `formatRunDuration`).
+
+**Hooks — call sites, not a subscription.** The values come from fields the TUI events also carry, but the writer is called at the sites that hold them rather than from the `InvocationObserver` / event channel: the observer would also see the Done-cleanup `InvocationRecorded` (not a run) and reads the board column at observation time rather than the stage that ran.
+
+| Write | Hook |
+|---|---|
+| `Last activity` ← UTC date of the start instant | `processItem`, after `acquireLockAndVerify` succeeds (beside the `JobStartedEvent`); `processCommentsClassified`, beside its `JobStartedEvent` |
+| `Last activity` ← UTC date of the completion instant, `Last run` ← `lastRunLine` | `finalizeStageOutcome`, beside `InvocationRecorded`; `processCommentsClassified`, beside its `InvocationRecorded` |
+
+Never hooked: merge-train batch job events (repo-level, `IssueNumber 0`), the synthetic `Skipped` completions, `TurnProgressEvent` (per turn), and the Done-cleanup record. Nothing clears either field at Done.
+
+**Value.** `Last activity` is the UTC `YYYY-MM-DD` of `StartedAt` / the completion time (both `time.Now`, the same source the events use). `Last run` is `<Stage>[ · comment review] · <outcome>[ · <used>/<budget> turns][ · <duration>]`; outcome precedence is turn-limited, blocked on input, completed, failed (errored, not completed), else incomplete; turns appear for completed and turn-limited runs, duration for completed runs only; capped at 60 characters like the status line.
+
+**Cache and drift.** The same three layers as the status line, extended to all three fields: the webhook guard already ignores any non-`single_select` edit (a date edit has `field_type: "date"`; pinned by `TestDeltaProjectsV2ItemDateEditIsNoOp`); the board and probe queries additionally select `lastActivity` (`ProjectV2ItemFieldDateValue { updatedAt }`) and `lastRun` (`ProjectV2ItemFieldTextValue { updatedAt }`) by alias, and `projectItemUpdatedAt` discounts the project item's `updatedAt` against the **latest** present display-field value `updatedAt` (2 s tolerance, nil values ignored). These fields are never cleared, so every bump of theirs has a value node to compare against (the status-line clear at Done remains the known uncovered bump). Whether GitHub bumps the item `updatedAt` for a date write is unverified; the sim models the conservative case.
+
 ---
 
 ## 8. Invalid / Unexpected States
