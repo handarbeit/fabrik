@@ -1,0 +1,31 @@
+# ADR 2090: Spawned Same-Repo Children Inherit the Parent's `base:<branch>`, Applied Before Status Placement
+
+**Date**: 2026-10-10
+**Status**: Accepted
+**Amends**: [ADR 1419](1419-cross-repo-spawn-servability-and-midflight-recognition.md), [ADR 1583](1583-spawn-children-resume-safe-retry.md)
+
+## Context
+
+`spawnChildren` (`engine/spawn.go`) is the single routine behind every spawn origin — Plan (`preImplement`, the missing-Plan-comment recovery) and the Review/Validate mid-flight hook (ADR 1419). It copied only `fabrik:yolo` and `fabrik:cruise` from the parent to a child. `baseBranchForItem` reads a child's base from the child's own labels only, so a child of a `base:develop` parent forked from, rebased onto and opened its PR against the repository default. Under yolo such a child could land on `main` while the parent targeted `develop` (report #2057). This was deterministic for every same-repo spawn from a non-default-base parent.
+
+The autonomy-label copy also ran *after* the child's board Status placement. Placement is what makes a child dispatchable, and the first dispatch's `EnsureWorktree` reads `base:`; a label written afterwards can lose that race.
+
+## Decision
+
+1. **Inherit `base:<branch>` for same-repo children only.** Same repo means `block.Repo` equals the parent's `owner/repo`, compared case-insensitively (GitHub owner/repo names are case-insensitive; `spawnTargetServedByThisInstance`'s plain `==` is left as is). Cross-repo children get no `base:` — the branch may not exist in another repo, and the existing fallback-to-default-with-comment behaviour stays. `fabrik:yolo`/`fabrik:cruise` continue to be inherited for every child.
+2. **One selection rule.** `baseLabelFor(labels)` (`engine/item.go`) — the first non-empty `base:<x>` in label order — is shared by `baseBranchForItem` and the spawn step, so "the label the parent resolves to" and the child's own resolution cannot drift. A parent with several `base:` labels passes on exactly one; a parent with none passes on none.
+3. **Copy the label, do not verify the branch.** Reading the parent's *effective* base would need a `WorktreeManager` and an `ls-remote` per spawn. Instead the label is copied as written; if the branch is missing, each child falls back to the default with the usual one-time comment at its own worktree creation, consistent with the parent. No spawn-time branch validation was added.
+4. **Labels before placement.** `inheritChildLabels` runs after the board add, the `blockedBy` link, the `BlockedByEdgeAdded` store write (ADR 1783's dispatch gate) and the `fabrik:sub-issue` add, and before the Status placement. `CreateIssue` takes no labels, so a separate add is unavoidable. The order is `base:`, `fabrik:yolo`, `fabrik:cruise`. Failures are logged at warn and never abort the spawn, as before.
+5. **Resume (ADR 1583).** For a child recovered through `fabrik:spawned-child:<i>:<n>`, the labels from the `FetchProjectItem` result already in hand are checked and only missing ones written, so a second retry makes no label writes. The step runs before the "already has a Status" skip, so a placed child still receives the labels; its Status is never touched.
+
+## Consequences
+
+- A label cannot repair a child that has already created its worktree from the default base; resume fixes only future dispatches. Documented in `docs/state-machine.md` §6.7.
+- Children of a non-default-base parent now target a non-default base, so GitHub creates no issue↔PR link or auto-close for them: they take the ADR 1096/1097 explicit-close path (`fabrik:awaiting-close`) and join the parent's base merge-train partition (ADR 1648). Both are existing, correct behaviour for such items.
+- The parent's label list may be the shallow board snapshot's capped set (`shallowFetchLabelLimit`); a `base:` label truncated out of it would silently not be inherited. `yolo`/`cruise` already shared this exposure, and `refreshForSpawnResume` refreshes it on resumable origins. Left as is.
+- Children created before this change are repaired only if their spawn is resumed; there is no bulk migration.
+- Out of scope: a per-child `BASE:` header in the spawn block grammar; inheriting any other label.
+
+## Testing
+
+Unit tests in `engine/spawn_base_inherit_test.go` (ordering recorder shared between label and Status writes, cross-repo, multiple/no `base:`, case-insensitive repo, resume missing/present/placed, non-fatal failure) and `engine/item_test.go` (`TestBaseLabelFor`). Sim twin `tests/sim/spawn_base_inherit_test.go`: the child carries the label before its Status placement and its PR targets the parent's base; a control without the parent label targets the default.

@@ -2263,7 +2263,7 @@ When the parent advances to Implement, the engine's `preImplement` step fires **
 3. Creates each child issue in its target repo (same repo or cross-repo) and **assigns it to the `user:` configured on this instance** — in PAT mode every spawned child gets an assignee, unconditionally. Under [GitHub App authentication](#github-app-authentication) there is no configured user: the child inherits the parent's human assignees (none if it has none)
 4. Adds each child to the same project board
 5. Links each child as a `blockedBy` dependency of the parent
-6. Applies `fabrik:sub-issue` label to each child (informational)
+6. Applies `fabrik:sub-issue` (informational) and the labels each child inherits from the parent — `base:<branch>` for same-repo children, plus `fabrik:yolo`/`fabrik:cruise` — before the child is moved into its first pipeline column
 7. Wires any declared `DEPENDS_ON` sibling edges, once all children exist
 8. Applies `fabrik:children-spawned` to the parent (idempotency guard, applied only after step 7 succeeds)
 
@@ -2294,6 +2294,7 @@ Once children are spawned, the parent is done for this dispatch — it does not 
 - After advancing to Implement: child issues appear on the project board in Specify, each labeled `fabrik:sub-issue`.
 - A child may transiently show `fabrik:awaiting-placement` if its initial board placement failed — it clears automatically once a later poll places it successfully, or escalates to `fabrik:paused` with an explanatory comment after repeated failures.
 - If the parent carries `fabrik:yolo` or `fabrik:cruise`, each child inherits those labels on creation — a yolo'd cross-repo parent spawns children that flow autonomously through all stages, while cruise children stop at Validate for manual merge.
+- If the parent carries a `base:<branch>` label, each child **in the same repository** inherits it, so the child forks from, rebases onto and opens its PR against the parent's branch rather than the repository default. Children in a different repository do not inherit `base:` (the branch may not exist there). The inherited labels (`base:`, `fabrik:yolo`, `fabrik:cruise`) are applied before the child is placed on the board, so no dispatch can see the child without them. A parent with several `base:` labels passes on the one it uses itself.
 - The parent shows `fabrik:blocked` + `fabrik:children-spawned`; a dependency comment lists all open children.
 - As children complete, the dependency comment updates in-place (no duplicate comments).
 - When all children close: `fabrik:blocked` clears, and the parent's own Implement runs.
