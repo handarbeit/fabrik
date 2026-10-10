@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -285,5 +286,37 @@ func TestRevalidate_ItemNeedsWorkAfterLabelClear(t *testing.T) {
 	}
 	if !eng.itemNeedsWork(cleanedItem) {
 		t.Error("expected itemNeedsWork to return true after revalidate scan cleared labels")
+	}
+}
+
+// TestReenterValidate_ReportsCompletionAndDeferral pins the bool contract of
+// reenterValidate (#2045): true once every label is cleared and the store reset,
+// false (trigger and store untouched) when any blocking label fails to clear.
+func TestReenterValidate_ReportsCompletionAndDeferral(t *testing.T) {
+	item := gh.ProjectItem{Number: 42, ItemID: "PVTI_42", Status: "Validate", Repo: "owner/repo",
+		Labels: []string{"stage:Validate:complete", "fabrik:paused"}}
+
+	ok := &mockGitHubClient{}
+	eng := testEngineWithStages(t, ok, testStagesForRevalidate())
+	if !eng.reenterValidate(item, "owner", "repo") {
+		t.Fatal("reenterValidate = false with every removal succeeding, want true")
+	}
+
+	failing := &mockGitHubClient{
+		removeLabelFromIssueFn: func(owner, repo string, n int, label string) error {
+			if label == "stage:Validate:complete" {
+				return errors.New("boom")
+			}
+			return nil
+		},
+	}
+	eng = testEngineWithStages(t, failing, testStagesForRevalidate())
+	if eng.reenterValidate(item, "owner", "repo") {
+		t.Fatal("reenterValidate = true although a blocking label failed to clear, want false")
+	}
+	for _, c := range failing.removeLabelCalls {
+		if c.labelName == "fabrik:revalidate" {
+			t.Error("trigger label removal attempted despite a failed blocking-label removal")
+		}
 	}
 }
