@@ -231,7 +231,7 @@ func isCompliantRHS(expr ast.Expr) bool {
 func isCompliantCallExpr(call *ast.CallExpr) bool {
 	switch fn := call.Fun.(type) {
 	case *ast.Ident:
-		return fn.Name == "formatOutputComment" || fn.Name == "formatPRSummaryComment" || fn.Name == "formatReviewFeedbackComment" || fn.Name == "buildAwaitingInputComment" || fn.Name == "buildBlockedComment" || fn.Name == "noWorkNeededSkipComment" || fn.Name == "runawayGuardAlertMessage" || fn.Name == "overseerAuditBody"
+		return fn.Name == "formatOutputComment" || fn.Name == "formatPRSummaryComment" || fn.Name == "formatReviewFeedbackComment" || fn.Name == "buildAwaitingInputComment" || fn.Name == "buildBlockedComment" || fn.Name == "noWorkNeededSkipComment" || fn.Name == "runawayGuardAlertMessage" || fn.Name == "overseerAuditBody" || fn.Name == "buildZeroAheadPauseComment"
 	case *ast.SelectorExpr:
 		// fmt.Sprintf("🏭 **Fabrik...", ...) — the first arg may be a plain literal
 		// or a binary string concatenation expression ("..." + "...").

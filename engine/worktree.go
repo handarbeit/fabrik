@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -463,6 +464,28 @@ func (wm *WorktreeManager) adoptRemoteIssueBranch(branch string, issueNumber int
 	}
 	wm.logf(issueNumber, "worktree", "%s already exists on origin — starting the local branch from it\n", branch)
 	return remoteRef, true
+}
+
+// CommitsAheadOfRef returns the literal number of commits on the issue
+// worktree's HEAD that are not in origin/<baseBranch> (git rev-list --count).
+// Unlike commitsAheadOfBase it does not discount spec-only commits: the #2089
+// push guard refuses a push, so it must be conservative. Any git or parse error
+// is returned, never folded into zero — callers treat an error as "unknown".
+// Takes mu so the read cannot interleave with a rebase in EnsureWorktree.
+func (wm *WorktreeManager) CommitsAheadOfRef(issueNumber int, baseBranch string) (int, error) {
+	wm.mu.Lock()
+	defer wm.mu.Unlock()
+	cmd := exec.Command("git", "rev-list", "--count", "origin/"+baseBranch+"..HEAD")
+	cmd.Dir = wm.worktreeDir(issueNumber)
+	out, err := cmd.Output()
+	if err != nil {
+		return 0, fmt.Errorf("counting commits ahead of origin/%s: %w", baseBranch, err)
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return 0, fmt.Errorf("parsing commit count %q: %w", strings.TrimSpace(string(out)), err)
+	}
+	return n, nil
 }
 
 // PushBranch pushes the issue's worktree branch to origin.

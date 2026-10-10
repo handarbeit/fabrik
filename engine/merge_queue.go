@@ -46,8 +46,29 @@ func (e *Engine) suppressPreemptiveRebase(item gh.ProjectItem) bool {
 // guard: pushing a queued PR's branch ejects it from the merge queue, so when the
 // linked PR is in the queue the push is skipped and nil is returned (a no-op, as
 // if the push had succeeded — callers treat push errors as non-fatal anyway).
-// Otherwise it delegates to wm.PushBranch unchanged.
+//
+// After the queue skip it applies the zero-ahead guard (#2089): a branch with no
+// commits ahead of its base while its linked PR is open is not pushed; the item
+// is paused and ErrPushRefusedZeroAhead is returned. Otherwise it delegates to
+// wm.PushBranch unchanged. PR-creation callers, which push precisely because no
+// PR exists yet, use pushBranchForNewPR instead.
 func (e *Engine) pushBranchUnlessQueued(item gh.ProjectItem, wm *WorktreeManager) error {
+	if prInMergeQueue(item) {
+		e.logf(item.Number, "merge-queue", "PR in merge queue — skipping push (would eject from queue)\n")
+		return nil
+	}
+	if e.zeroAheadPushRefused(item, wm) {
+		return ErrPushRefusedZeroAhead
+	}
+	return wm.PushBranch(item.Number)
+}
+
+// pushBranchForNewPR is the push for the PR-creation paths (ensureDraftPR,
+// processPRCreateMarker). It keeps the FR-1 in-queue skip but deliberately omits
+// the zero-ahead guard (#2089): those callers push because no open PR exists, so
+// a zero-ahead branch (e.g. a coordinator parent) is legitimate and there is no
+// PR for the overwrite to close.
+func (e *Engine) pushBranchForNewPR(item gh.ProjectItem, wm *WorktreeManager) error {
 	if prInMergeQueue(item) {
 		e.logf(item.Number, "merge-queue", "PR in merge queue — skipping push (would eject from queue)\n")
 		return nil

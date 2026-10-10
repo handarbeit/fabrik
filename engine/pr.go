@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -59,7 +60,7 @@ func (e *Engine) ensureDraftPR(item gh.ProjectItem, baseBranch string) (int, err
 
 		// Merge-queue awareness (ADR-058 D3 FR-1): skip the push when the PR is in
 		// the queue — pushing ejects it. No-op on non-queue repos (FR-3).
-		if err := e.pushBranchUnlessQueued(item, wm); err != nil {
+		if err := e.pushBranchForNewPR(item, wm); err != nil {
 			if !isTransientError(err) {
 				e.logf(item.Number, "pr", "failed to create draft PR for branch %s: %v\n", head, err)
 				return 0, fmt.Errorf("pushing branch: %w", err)
@@ -268,6 +269,11 @@ func (e *Engine) markPRReady(item gh.ProjectItem, knownPR int) {
 	// Merge-queue awareness (ADR-058 D3 FR-1): skip the push when queued (ejects it).
 	if err := e.pushBranchUnlessQueued(item, wm); err != nil {
 		e.logf(item.Number, "warn", "could not push branch: %v\n", err)
+		if errors.Is(err, ErrPushRefusedZeroAhead) {
+			// The zero-ahead guard (#2089) paused the item: do not flip a stale
+			// PR to ready-for-review (it would trigger review bots on no diff).
+			return
+		}
 		// Don't return — still try to mark ready if push is a no-op (already up to date)
 	}
 

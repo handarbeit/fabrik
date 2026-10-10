@@ -1619,10 +1619,13 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 	// pushing ejects it. The WIP-preservation push is forgone in that case, which is
 	// acceptable: queue entry happens at Validate completion, so stages rarely run while
 	// queued. No-op on non-queue repos (FR-3).
+	pushRefused := false
 	if claudeRan {
 		wm := e.worktreesFor(item.Repo)
 		if pushErr := e.pushBranchUnlessQueued(item, wm); pushErr != nil {
 			e.logf(item.Number, "warn", "could not push branch: %v\n", pushErr)
+			// The zero-ahead guard (#2089) has already paused the item.
+			pushRefused = errors.Is(pushErr, ErrPushRefusedZeroAhead)
 		}
 	}
 
@@ -1660,6 +1663,15 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 		MaxTurns:    usage.MaxTurns,
 		Duration:    time.Since(p.workerStartedAt),
 	})
+
+	if pushRefused {
+		// Zero-ahead push guard (#2089): the item is paused with awaiting-input.
+		// Do not run the completion/blocked/retry chain — handleStageComplete would
+		// strip awaiting-input and could advance or auto-merge a paused item. The
+		// stage stays incomplete and resumes through the normal human-comment path.
+		releaseLock()
+		return
+	}
 
 	if completed && noWorkNeeded {
 		// No-work path: stage declared itself complete AND signaled no code/doc changes
