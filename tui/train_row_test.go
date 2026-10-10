@@ -6,6 +6,9 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
+	"github.com/muesli/termenv"
 )
 
 func newTrainActive() ActivePaneComponent {
@@ -180,5 +183,40 @@ func TestDetail_TrainEntryOutcomeLine(t *testing.T) {
 	v := d.View(80)
 	if !strings.Contains(v, "Outcome:  landed") || !strings.Contains(v, "#1 via PR #50") {
 		t.Fatalf("detail missing outcome:\n%s", v)
+	}
+}
+
+// TestTrainRow_ColourTerminalKeepsPhaseAndElapsed pins the narrow-width
+// guarantee in a colour-capable terminal: the dim-styled title carries ANSI
+// escape sequences, so the final truncation must count visible cells, not
+// runes, or it cuts the " · phase (elapsed)" tail off.
+func TestTrainRow_ColourTerminalKeepsPhaseAndElapsed(t *testing.T) {
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(termenv.Ascii) })
+
+	t0 := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+	a := startTrainRow(newTrainActive(), t0)
+	c, _ := a.Update(TrainRowEvent{
+		Repo:           "o/r",
+		Title:          "3 of 5: #1555 #1562 #1576 (ejected #1549 #1560) (deferred #1570 #1571)",
+		Phase:          "trial CI #4012",
+		PhaseStartedAt: t0,
+	})
+	a = c.(ActivePaneComponent)
+	c, _ = a.Update(TickEvent{At: t0.Add(47 * time.Minute)})
+	a = c.(ActivePaneComponent)
+
+	// Below ~60 cells the fixed columns plus the phase tail alone no longer
+	// fit, so nothing could keep the phase there.
+	for _, width := range []int{60, 70, 80, 100} {
+		view := a.View(width)
+		if !strings.Contains(ansi.Strip(view), "trial CI #4012 (47:00)") {
+			t.Errorf("width %d: phase and elapsed dropped:\n%s", width, ansi.Strip(view))
+		}
+		for _, l := range strings.Split(view, "\n") {
+			if w := lipgloss.Width(l); w > width {
+				t.Errorf("width %d: line is %d cells wide: %q", width, w, ansi.Strip(l))
+			}
+		}
 	}
 }

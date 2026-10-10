@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // ActivePaneComponent manages the in-progress jobs pane.
@@ -214,9 +215,11 @@ func (a ActivePaneComponent) View(width int) string {
 		}
 		line := essential + badge + titleStr + tag + " " + msg
 		if job.Phase != "" {
-			line = trainRowLine(essential, job, a.now, maxWidth)
-		}
-		if runes := []rune(line); len(runes) > maxWidth {
+			// trainRowLine budgets visible cells and its title carries ANSI
+			// styling, so the rune-count cut below would mis-measure it and
+			// drop the phase tail; truncate by visible width instead.
+			line = ansi.Truncate(trainRowLine(essential, job, a.now, maxWidth), maxWidth, "…")
+		} else if runes := []rune(line); len(runes) > maxWidth {
 			line = string(runes[:maxWidth-1]) + "…"
 		}
 		if a.focused && idx == a.activeIdx {
@@ -312,13 +315,15 @@ func trainRowLine(essential string, job *activeJob, now time.Time, maxWidth int)
 	tail := " · " + phase
 	title := job.Title
 	room := maxWidth - lipgloss.Width(essential) - lipgloss.Width(tail)
-	if room < 1 {
-		room = 1
-	}
 	if runes := []rune(title); len(runes) > room {
-		// Keep the leading "N of M" count: cut the end of the title.
-		cut := max(room-1, 0)
-		title = string(runes[:cut]) + "…"
+		if room < 2 {
+			// A lone "…" says nothing and would push the phase tail past
+			// the edge; drop the title so the phase keeps its cells.
+			title = ""
+		} else {
+			// Keep the leading "N of M" count: cut the end of the title.
+			title = string(runes[:room-1]) + "…"
+		}
 	}
 	line := essential + dimStyle.Render(title) + tail
 	if job.LastLine != "" {
