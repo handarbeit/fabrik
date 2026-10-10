@@ -186,6 +186,17 @@ seams, not new capabilities:
   once `dispatchWithCycleLimit`'s `advancedItems` marking suppresses the
   periodic-re-eval stamp) — calls `env.Engine.RegisterObservers()` itself,
   scoping the timing change to exactly the scenarios that require it.
+- **`Engine.UseBoardCacheForTest() (*boardcache.CacheImpl, <-chan struct{})`**
+  (`engine/engine.go`, #2080/ADR-2080) — swaps the engine's read client for a
+  real `boardcache.CacheImpl` over the shared store (what `New()` wires in
+  production; `NewWithDeps` uses the bare adapter), so `poll()` runs the
+  probe-driven refresh, and subscribes the production wake observer to a
+  buffered channel the scenario can read. **Opt-in** via
+  `EnvOptions.BoardCache`, which also turns on simgh's
+  `WithClosedPRsOmittedFromBoard` (see `simgh/FIDELITY.md`); every other
+  scenario still runs the bare adapter. Used by `probe_drift_test.go`.
+  `Engine.SetProbeDriftNeutralisationForTest` switches the #2080 fixes off for
+  its non-vacuity check.
 - **`Engine.PollWithBackoff(ctx, configuredInterval) (PollBackoffResult, error)`**
   (`engine/poll.go`, #1592/ADR-1592) — moves `Run()`'s `doPollCycle` closure
   body (the REST/core rate-limit hard gate, `poll()` itself, idle-timer

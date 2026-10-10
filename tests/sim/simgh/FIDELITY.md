@@ -1004,6 +1004,21 @@ review — but it is not regression coverage for the #1046/#1047/#1050 defect
 itself. `tests/e2e/basebranch_test.go` remains the only coverage of that,
 and per ADR-1449/R3 stays live for exactly this reason.
 
+### A closed, unmerged PR is not a closing reference — **Modelled, opt-in** (#2080)
+
+GitHub's `closedByPullRequestsReferences` omits a closed PR unless the query
+passes `includeClosedPrs`, and neither the board probe nor the deep fetch does.
+So an issue whose only PR was closed unmerged reads as "no linked PR" on the
+board, while the REST lookup by head branch (`FetchLinkedPR`/`FindPRForIssue`)
+still finds it. That disagreement is what drove the probe linkage-drift loop
+(ADR 2080). `simgh.WithClosedPRsOmittedFromBoard()` reproduces it: board reads
+(`ProbeProjectBoard`, `FetchItemDetails`, `FetchProjectBoard`) leave a closed
+unmerged PR out of the linked-PR fields; merged PRs stay. **Off by default** so
+the existing scenarios keep their board reads; `sim.EnvOptions.BoardCache` turns
+it on together with a real `boardcache.CacheImpl`. Sibling gaps not modelled:
+the same omission for merged PRs on a non-default base (see the
+base-independent entry above).
+
 ### Issue and PR numbers share one sequence — **Modelled**
 
 GitHub allocates issue and pull-request numbers from a single per-repo counter,

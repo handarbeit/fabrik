@@ -200,3 +200,7 @@ This was deliberately **not** baked into the shared `LocalStatusUpdated`/`LocalL
 A Fabrik self-comment, self-label-add/remove, self-body-edit, or self-status-move no longer causes the very next probe cycle to treat the item as stale — the resulting `updatedAt` bump is already accounted for. A genuine external change (human/bot comment, label, or status change) landing with a later `effectiveUpdatedAt` still compares as stale and triggers a real deep-fetch on the next probe, since the baseline only ever advances to the self-write's own timestamp, never further.
 
 **Known scope boundary, left deliberately unaddressed**: PR-body self-writes (`engine/pr.go`'s `updatePRVerification`/`ensurePRLinksIssue`, `engine/prcreate.go`'s linkage-heal edit) and a second issue-body-edit site (`engine/item.go`'s stage-output publishing path) bump a component of `effectiveUpdatedAt` the same way but are outside the five call sites this issue scoped in. These will still reproduce the spurious-staleness pattern; a candidate follow-up issue if it proves to matter in practice, not a silent gap — documented here and in the PR description.
+
+### Addendum (#2080)
+
+The warm-cache linkage-drift rule above is refined by ADR 2080: terminal items skip the check, a repeated `(cached, probe)` pair invalidates only once, and the probe loop's own writes no longer wake the poll loop. See `adrs/2080-probe-drift-convergence-and-wake.md`.
