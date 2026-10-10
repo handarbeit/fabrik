@@ -2876,11 +2876,17 @@ func (e *Engine) acquireTrainSlot(ctx context.Context, repoKey string, memberIte
 
 // trainCancelled reports whether err (an assembly/resolution error) is a
 // cancellation rather than a verdict about the trial or its members (#2046). It
-// keys on ctx as well as err so a shutdown that killed an in-flight invocation
-// (surfacing as a generic error) is covered too. Cancellation must never charge the
-// runaway counter, start a fallback, or dissolve a batch.
+// keys on the worker ctx alone: a slot wait is only ever cancelled through ctx, and
+// a shutdown that killed an in-flight invocation (surfacing as a generic error)
+// leaves ctx.Err() set too. It deliberately does not match errors that merely wrap
+// context.Canceled/DeadlineExceeded while ctx is live (an HTTP client timeout, a
+// derived-context timeout): those are ordinary failures and keep their existing
+// handling. Because bisect's cancelled-sub-trial abort and its caller's
+// ctx.Err() check both reduce to the same condition, a cancel is never reported as
+// a CI-infrastructure abort. Cancellation must never charge the runaway counter,
+// start a fallback, or dissolve a batch.
 func trainCancelled(ctx context.Context, err error) bool {
-	return err != nil && (ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded))
+	return err != nil && ctx.Err() != nil
 }
 
 // finalizeConflictResolution inspects trainWorkDir after a conflict-resolution

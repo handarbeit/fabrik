@@ -181,8 +181,8 @@ func TestTrainCancelled(t *testing.T) {
 	if trainCancelled(live, generic) {
 		t.Error("a generic error on a live context is a verdict, not a cancellation")
 	}
-	if !trainCancelled(live, fmt.Errorf("x: %w", context.Canceled)) || !trainCancelled(live, context.DeadlineExceeded) {
-		t.Error("context errors are cancellations")
+	if trainCancelled(live, fmt.Errorf("x: %w", context.Canceled)) || trainCancelled(live, context.DeadlineExceeded) {
+		t.Error("a context-flavoured error on a live worker ctx (e.g. an HTTP client timeout) is an ordinary failure, not a cancellation")
 	}
 	if !trainCancelled(dead, generic) {
 		t.Error("any error on a dead context is a cancellation (killed in-flight invocation)")
