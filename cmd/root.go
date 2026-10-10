@@ -960,7 +960,9 @@ func Execute() error {
 		MergeQueue:                 mergeQueueMode(cfg.MergeQueue),
 		MergeTrain:                 mergeTrainMode(cfg.MergeTrain),
 		SingletonCatchUp:           singletonCatchUpMode(cfg.SingletonCatchUp),
-		StatusLineField:            pc.ProjectFields.ResolveStatusLineField(), // YAML-only; "" = off (#2048)
+		StatusLineField:            pc.ProjectFields.ResolveStatusLineField(),   // YAML-only; "" = off (#2048)
+		LastActivityField:          pc.ProjectFields.ResolveLastActivityField(), // YAML-only; "" = off (#2049)
+		LastRunField:               pc.ProjectFields.ResolveLastRunField(),      // YAML-only; "" = off (#2049)
 		MergeTrainOverlapIgnore:    splitGlobList(cfg.MergeTrainOverlapIgnore),
 		MaxMergeTrainEjections:     3,                                                     // ADR-059 default
 		MaxBatchSize:               cfg.MaxBatchSize,                                      // 0 = derive default (5) in engine

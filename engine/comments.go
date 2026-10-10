@@ -324,6 +324,7 @@ func (e *Engine) processCommentsClassified(ctx context.Context, board *gh.Projec
 		IsComment:   true,
 		StartedAt:   startedAt,
 	})
+	e.noteJobStarted(item, startedAt) // display-only Last activity (#2049)
 	defer e.emitStructural(tui.JobCompletedEvent{
 		IssueNumber: item.Number,
 		Repo:        itemRepo,
@@ -475,6 +476,17 @@ func (e *Engine) processCommentsClassified(ctx context.Context, board *gh.Projec
 		TurnLimited: turnLimited,
 		Usage:       usage,
 		IsComment:   true,
+		Duration:    time.Since(startedAt),
+	})
+	// Display-only Last activity / Last run (#2049), from the values just recorded.
+	e.noteJobFinished(item, runOutcome{
+		StageName:   stage.Name,
+		IsComment:   true,
+		Completed:   completed,
+		TurnLimited: turnLimited,
+		Errored:     err != nil && !turnLimited,
+		TurnsUsed:   usage.TurnsUsed,
+		MaxTurns:    usage.MaxTurns,
 		Duration:    time.Since(startedAt),
 	})
 	// Bail early ONLY if the stage did not complete. If FABRIK_STAGE_COMPLETE was

@@ -55,6 +55,7 @@ func (e *Engine) checkStageColumnAlignment(ctx context.Context) error {
 	// Resolve the display-only status-line field once, here, so an absent field
 	// produces exactly one startup line (#2048).
 	e.resolveStatusLineField(board.ProjectID)
+	e.resolveRunFields(board.ProjectID)
 
 	sf, err := e.readClient.FetchStatusField(board.ProjectID)
 	if err != nil {

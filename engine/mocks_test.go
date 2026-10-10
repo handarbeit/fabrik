@@ -120,9 +120,10 @@ type mockGitHubClient struct {
 	statusLineErr       error
 	// Display-only Last activity / Last run fields (#2049). dateField, when
 	// non-nil, is what FetchDateField returns; dateWrites records every date
-	// write. Last run is a text field and records into statusLineWrites like
-	// any text write (its fieldID tells them apart); lastRunTextField is not
-	// needed because textField is returned by name via textFieldsByName.
+	// write. Last run is a text field: its writes land in statusLineWrites like
+	// any text write (the fieldID tells them apart). When textFieldsByName is
+	// non-nil, FetchTextField looks the field up there by name (an absent name
+	// = no such field) instead of returning textField.
 	dateField                        *gh.DateField
 	fetchDateFieldErr                error
 	fetchDateFieldCalls              int
