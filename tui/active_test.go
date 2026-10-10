@@ -102,7 +102,7 @@ func TestUpdate_MergeTrainRow_NonVacuous(t *testing.T) {
 	next, _ := m.Update(JobStartedEvent{
 		IssueNumber: 0,
 		Repo:        "owner/repo",
-		Title:       "2 member(s): #1 #2",
+		Title:       "2 of 2: #1 #2",
 		StageName:   "Merge Train",
 		StartedAt:   start,
 	})
@@ -115,8 +115,8 @@ func TestUpdate_MergeTrainRow_NonVacuous(t *testing.T) {
 	if job.StageName != "Merge Train" {
 		t.Errorf("StageName = %q, want %q", job.StageName, "Merge Train")
 	}
-	if job.Title != "2 member(s): #1 #2" {
-		t.Errorf("Title = %q, want %q", job.Title, "2 member(s): #1 #2")
+	if job.Title != "2 of 2: #1 #2" {
+		t.Errorf("Title = %q, want %q", job.Title, "2 of 2: #1 #2")
 	}
 
 	// AC3: JobCompletedEvent removes the row.

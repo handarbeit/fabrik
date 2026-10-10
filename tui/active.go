@@ -96,6 +96,15 @@ func (a ActivePaneComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
 			a.activeIdx = len(a.active) - 1
 		}
 
+	case TrainRowEvent:
+		// Update-only: a late event for a row that has already been removed
+		// must not resurrect it.
+		if job, ok := a.active[activeJobKey(ev.Repo, 0)]; ok {
+			job.Title = ev.Title
+			job.Phase = ev.Phase
+			job.PhaseStartedAt = ev.PhaseStartedAt
+		}
+
 	case StageChangedEvent:
 		key := activeJobKey(ev.Repo, ev.Number)
 		if job, ok := a.active[key]; ok {
@@ -204,6 +213,9 @@ func (a ActivePaneComponent) View(width int) string {
 			badge += " "
 		}
 		line := essential + badge + titleStr + tag + " " + msg
+		if job.Phase != "" {
+			line = trainRowLine(essential, job, a.now, maxWidth)
+		}
 		if runes := []rune(line); len(runes) > maxWidth {
 			line = string(runes[:maxWidth-1]) + "…"
 		}
@@ -283,6 +295,43 @@ func (a ActivePaneComponent) View(width int) string {
 	}
 	content := title + hint + "\n" + strings.Join(lines, "\n")
 	return borderStyle.Width(width - 4).Render(content)
+}
+
+// trainRowLine renders a merge-train row that has a phase (#2050):
+//
+//	#0     Merge Train ⠋ 12m  3 of 5: #1 #2 #3 (ejected #4 #5) · trial CI #4012 (47m) [tag] last line
+//
+// Truncation priority when the row is too narrow: the last log line goes
+// first, then the membership title is shortened; the phase and its elapsed
+// time are always kept, since "how long has this been stuck" is the point.
+func trainRowLine(essential string, job *activeJob, now time.Time, maxWidth int) string {
+	phase := job.Phase
+	if !job.PhaseStartedAt.IsZero() {
+		phase += " (" + fmtDuration(now.Sub(job.PhaseStartedAt)) + ")"
+	}
+	tail := " · " + phase
+	title := job.Title
+	room := maxWidth - lipgloss.Width(essential) - lipgloss.Width(tail)
+	if room < 1 {
+		room = 1
+	}
+	if runes := []rune(title); len(runes) > room {
+		// Keep the leading "N of M" count: cut the end of the title.
+		cut := max(room-1, 0)
+		title = string(runes[:cut]) + "…"
+	}
+	line := essential + dimStyle.Render(title) + tail
+	if job.LastLine != "" {
+		extra := ""
+		if job.LastTag != "" {
+			extra = " " + dimStyle.Render(fmt.Sprintf("[%s]", job.LastTag))
+		}
+		extra += " " + job.LastLine
+		if lipgloss.Width(line)+lipgloss.Width(extra) <= maxWidth {
+			line += extra
+		}
+	}
+	return line
 }
 
 func (a ActivePaneComponent) Height() int {
