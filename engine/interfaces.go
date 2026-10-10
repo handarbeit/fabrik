@@ -46,6 +46,11 @@ type GitHubClient interface {
 	FetchTextField(projectID, name string) (*gh.TextField, error)
 	UpdateProjectItemTextField(projectID, itemID, fieldID, text string) error
 	ClearProjectItemField(projectID, itemID, fieldID string) error
+	// FetchDateField / UpdateProjectItemDateField are the date-typed twins
+	// used for the display-only "Last activity" field (#2049); date is
+	// YYYY-MM-DD.
+	FetchDateField(projectID, name string) (*gh.DateField, error)
+	UpdateProjectItemDateField(projectID, itemID, fieldID, date string) error
 	GetIssueBody(owner, repo string, issueNumber int) (string, error)
 	FindPRForIssue(owner, repo string, issueNumber int) (int, error)
 	FetchLinkedPR(owner, repo string, issueNumber int) (*gh.PRDetails, error)

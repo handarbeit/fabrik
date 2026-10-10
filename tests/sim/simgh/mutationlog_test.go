@@ -345,6 +345,7 @@ func TestMutationFlagMatchesTheInterfaceSemantics(t *testing.T) {
 		"ReopenIssue": true, "RerunFailedJobs": true, "ResolveReviewThread": true, "SeedLabels": true, "UpdateComment": true,
 		"UpdateIssueBody": true, "UpdatePRBase": true, "UpdateProjectItemStatus": true,
 		"UpdateProjectItemTextField": true, "ClearProjectItemField": true,
+		"UpdateProjectItemDateField": true,
 	}
 
 	for _, name := range InterfaceMethods() {

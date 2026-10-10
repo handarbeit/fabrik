@@ -206,6 +206,12 @@ type Sim struct {
 	// discount. Empty = feature off (the projections are unchanged).
 	statusLineField string
 
+	// lastActivityField / lastRunField, set by WithLastActivityField /
+	// WithLastRunField, name the display-only "Last activity" date and "Last
+	// run" text fields (#2049), discounted exactly like statusLineField.
+	lastActivityField string
+	lastRunField      string
+
 	// seedErr holds the first error produced by a chained Seed* call. Checked
 	// with Err.
 	seedErr error
@@ -244,6 +250,19 @@ func WithClosedPRsOmittedFromBoard() Option {
 // default.
 func WithStatusLineField(name string) Option {
 	return func(s *Sim) { s.statusLineField = name }
+}
+
+// WithLastActivityField names the display-only "Last activity" date field so
+// the board and probe projections discount a project item's updatedAt bump
+// caused only by a write to it (#2049). Off by default.
+func WithLastActivityField(name string) Option {
+	return func(s *Sim) { s.lastActivityField = name }
+}
+
+// WithLastRunField is WithLastActivityField for the "Last run" text field
+// (#2049).
+func WithLastRunField(name string) Option {
+	return func(s *Sim) { s.lastRunField = name }
 }
 
 // WithRateLimits overrides the static rate-limit budgets reported by

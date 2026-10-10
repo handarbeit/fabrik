@@ -113,11 +113,22 @@ type mockGitHubClient struct {
 	// Display-only status-line field (#2048). textField, when non-nil, is what
 	// FetchTextField returns; statusLineWrites records every set/clear in order
 	// (a clear has cleared=true and empty text).
-	textField                        *gh.TextField
-	fetchTextFieldErr                error
-	fetchTextFieldCalls              int
-	statusLineWrites                 []statusLineWrite
-	statusLineErr                    error
+	textField           *gh.TextField
+	fetchTextFieldErr   error
+	fetchTextFieldCalls int
+	statusLineWrites    []statusLineWrite
+	statusLineErr       error
+	// Display-only Last activity / Last run fields (#2049). dateField, when
+	// non-nil, is what FetchDateField returns; dateWrites records every date
+	// write. Last run is a text field and records into statusLineWrites like
+	// any text write (its fieldID tells them apart); lastRunTextField is not
+	// needed because textField is returned by name via textFieldsByName.
+	dateField                        *gh.DateField
+	fetchDateFieldErr                error
+	fetchDateFieldCalls              int
+	dateWrites                       []dateWrite
+	dateWriteErr                     error
+	textFieldsByName                 map[string]*gh.TextField
 	mergePRCalls                     []mergePRCall
 	mergePRAtHeadSHACalls            []mergePRAtHeadSHACall
 	closeIssueCalls                  []closeIssueCall
@@ -443,6 +454,13 @@ type statusLineWrite struct {
 	cleared bool
 }
 
+// dateWrite is one recorded UpdateProjectItemDateField.
+type dateWrite struct {
+	itemID  string
+	fieldID string
+	date    string
+}
+
 func (m *mockGitHubClient) FetchTextField(projectID, name string) (*gh.TextField, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -450,7 +468,33 @@ func (m *mockGitHubClient) FetchTextField(projectID, name string) (*gh.TextField
 	if m.fetchTextFieldErr != nil {
 		return nil, m.fetchTextFieldErr
 	}
+	if f, ok := m.textFieldsByName[name]; ok {
+		return f, nil
+	}
+	if m.textFieldsByName != nil {
+		return nil, nil
+	}
 	return m.textField, nil
+}
+
+func (m *mockGitHubClient) FetchDateField(projectID, name string) (*gh.DateField, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.fetchDateFieldCalls++
+	if m.fetchDateFieldErr != nil {
+		return nil, m.fetchDateFieldErr
+	}
+	return m.dateField, nil
+}
+
+func (m *mockGitHubClient) UpdateProjectItemDateField(projectID, itemID, fieldID, date string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.dateWriteErr != nil {
+		return m.dateWriteErr
+	}
+	m.dateWrites = append(m.dateWrites, dateWrite{itemID: itemID, fieldID: fieldID, date: date})
+	return nil
 }
 
 func (m *mockGitHubClient) UpdateProjectItemTextField(projectID, itemID, fieldID, text string) error {

@@ -191,6 +191,16 @@ func (in *Instrumented) UpdateProjectItemTextField(projectID, itemID, fieldID, t
 		func() error { return in.sim.UpdateProjectItemTextField(projectID, itemID, fieldID, text) })
 }
 
+func (in *Instrumented) FetchDateField(projectID, name string) (*gh.DateField, error) {
+	return do1(in, "FetchDateField", false, Args{ID: projectID, Values: []string{name}},
+		func() (*gh.DateField, error) { return in.sim.FetchDateField(projectID, name) })
+}
+
+func (in *Instrumented) UpdateProjectItemDateField(projectID, itemID, fieldID, date string) error {
+	return do0(in, "UpdateProjectItemDateField", true, Args{ID: projectID, Values: []string{itemID, fieldID, date}},
+		func() error { return in.sim.UpdateProjectItemDateField(projectID, itemID, fieldID, date) })
+}
+
 func (in *Instrumented) ClearProjectItemField(projectID, itemID, fieldID string) error {
 	return do0(in, "ClearProjectItemField", true, Args{ID: projectID, Values: []string{itemID, fieldID}},
 		func() error { return in.sim.ClearProjectItemField(projectID, itemID, fieldID) })

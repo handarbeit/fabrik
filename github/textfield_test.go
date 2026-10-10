@@ -255,3 +255,104 @@ func TestFetchProjectBoard_DisplayFieldBumpIsDiscounted(t *testing.T) {
 		t.Errorf("UpdatedAt = %v, want %v (display bump discounted)", board.Items[0].UpdatedAt, want)
 	}
 }
+
+func TestProjectItemUpdatedAt_MultipleDisplayFields(t *testing.T) {
+	status := &statusLineValue{UpdatedAt: "2026-10-10T09:00:00Z"}
+	activity := &statusLineValue{UpdatedAt: "2026-10-10T10:00:00Z"}
+	run := &statusLineValue{UpdatedAt: "2026-10-10T10:00:01Z"}
+	cases := []struct {
+		name   string
+		item   string
+		vals   []*statusLineValue
+		wantOK bool
+	}{
+		{"bump explained by the latest of three", "2026-10-10T10:00:01Z", []*statusLineValue{status, activity, run}, false},
+		{"bump explained only by a newer field than status", "2026-10-10T10:00:00Z", []*statusLineValue{status, activity, nil}, false},
+		{"nil values are ignored", "2026-10-10T10:00:00Z", []*statusLineValue{nil, nil, nil}, true},
+		{"later real change still counts", "2026-10-10T10:30:00Z", []*statusLineValue{status, activity, run}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, ok := projectItemUpdatedAt(tc.item, tc.vals...); ok != tc.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
+			}
+		})
+	}
+}
+
+// TestDisplayFieldBumpsAreDiscounted_NewFields pins that a project-item bump
+// explained only by a Last activity or Last run write is not item activity on
+// either query (#2049), and that a later change still counts.
+func TestDisplayFieldBumpsAreDiscounted_NewFields(t *testing.T) {
+	for _, tc := range []struct {
+		alias string
+		want  string
+		bump  string
+	}{
+		{"lastActivity", "2026-10-10T09:00:00Z", "2026-10-10T10:00:00Z"},
+		{"lastRun", "2026-10-10T09:00:00Z", "2026-10-10T10:00:00Z"},
+		{"lastActivity", "2026-10-10T10:30:00Z", "2026-10-10T10:30:00Z"},
+		{"lastRun", "2026-10-10T10:30:00Z", "2026-10-10T10:30:00Z"},
+	} {
+		t.Run(tc.alias+"/"+tc.want, func(t *testing.T) {
+			var probeVars, boardVars map[string]interface{}
+			probeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body map[string]interface{}
+				json.NewDecoder(r.Body).Decode(&body)
+				probeVars, _ = body["variables"].(map[string]interface{})
+				node := probeItemResponse("PVTI_1", "I_abc", 10, "Issue", "OPEN", "2026-10-10T09:00:00Z", tc.bump, "owner/repo", 0, "")
+				node[tc.alias] = map[string]interface{}{"updatedAt": "2026-10-10T10:00:00Z"}
+				json.NewEncoder(w).Encode(probeResponse("user", "PVT_1", []interface{}{node}, 1, false, ""))
+			}))
+			defer probeSrv.Close()
+			c := NewClientWithBaseURL("token", probeSrv.URL)
+			c.SetLastActivityField("Last activity")
+			c.SetLastRunField("Last run")
+			items, _, err := c.ProbeProjectBoard("owner", "repo", 1, "user")
+			if err != nil {
+				t.Fatalf("ProbeProjectBoard: %v", err)
+			}
+			want, _ := time.Parse(time.RFC3339, tc.want)
+			if !items[0].EffectiveUpdatedAt.Equal(want) {
+				t.Errorf("probe EffectiveUpdatedAt = %v, want %v", items[0].EffectiveUpdatedAt, want)
+			}
+			if probeVars["lastActivity"] != "Last activity" || probeVars["withLastActivity"] != true ||
+				probeVars["lastRun"] != "Last run" || probeVars["withLastRun"] != true ||
+				probeVars["withStatusLine"] != false {
+				t.Errorf("probe vars = %v", probeVars)
+			}
+
+			boardSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body map[string]interface{}
+				json.NewDecoder(r.Body).Decode(&body)
+				boardVars, _ = body["variables"].(map[string]interface{})
+				node := map[string]interface{}{
+					"id":        "PVTI_1",
+					"updatedAt": tc.bump,
+					tc.alias:    map[string]interface{}{"updatedAt": "2026-10-10T10:00:00Z"},
+					"content": map[string]interface{}{
+						"__typename": "Issue", "id": "I_1", "number": 1, "title": "t", "state": "OPEN",
+						"updatedAt":  "2026-10-10T09:00:00Z",
+						"repository": map[string]interface{}{"nameWithOwner": "owner/repo"},
+						"labels":     map[string]interface{}{"nodes": []interface{}{}},
+					},
+				}
+				json.NewEncoder(w).Encode(probeResponse("user", "PVT_1", []interface{}{node}, 1, false, ""))
+			}))
+			defer boardSrv.Close()
+			c = NewClientWithBaseURL("token", boardSrv.URL)
+			c.SetLastActivityField("Last activity")
+			c.SetLastRunField("Last run")
+			board, err := c.FetchProjectBoard("owner", "repo", 1, "user")
+			if err != nil {
+				t.Fatalf("FetchProjectBoard: %v", err)
+			}
+			if !board.Items[0].UpdatedAt.Equal(want) {
+				t.Errorf("board UpdatedAt = %v, want %v", board.Items[0].UpdatedAt, want)
+			}
+			if boardVars["withLastActivity"] != true || boardVars["withLastRun"] != true {
+				t.Errorf("board vars = %v", boardVars)
+			}
+		})
+	}
+}

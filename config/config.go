@@ -105,26 +105,58 @@ type ProjectFieldsConfig struct {
 	// one-line status. nil (unset) means the default name, "Fabrik"; "off"
 	// (any case) disables the feature.
 	StatusLine *string `yaml:"status_line"`
+	// LastActivity is the name of the ProjectV2 date field holding the date
+	// of the most recent job start/completion (#2049). nil (unset) means the
+	// default name, "Last activity"; "off" (any case) disables it.
+	LastActivity *string `yaml:"last_activity"`
+	// LastRun is the name of the ProjectV2 text field holding a one-line
+	// summary of the most recent finished job (#2049). nil (unset) means the
+	// default name, "Last run"; "off" (any case) disables it.
+	LastRun *string `yaml:"last_run"`
 }
 
 // DefaultStatusLineField is the default name of the status-line text field.
 const DefaultStatusLineField = "Fabrik"
 
-// ResolveStatusLineField returns the status-line field name to use, or "" when
-// the feature is disabled (`off`, any case). Unset or blank means the default.
-func (p ProjectFieldsConfig) ResolveStatusLineField() string {
-	if p.StatusLine == nil {
-		return DefaultStatusLineField
+// DefaultLastActivityField is the default name of the "Last activity" date field.
+const DefaultLastActivityField = "Last activity"
+
+// DefaultLastRunField is the default name of the "Last run" text field.
+const DefaultLastRunField = "Last run"
+
+// resolveFieldName maps a configured field name to the name to use: unset or
+// blank means def, `off` (any case) means "" (disabled).
+func resolveFieldName(configured *string, def string) string {
+	if configured == nil {
+		return def
 	}
-	name := strings.TrimSpace(*p.StatusLine)
+	name := strings.TrimSpace(*configured)
 	switch {
 	case name == "":
-		return DefaultStatusLineField
+		return def
 	case strings.EqualFold(name, "off"):
 		return ""
 	default:
 		return name
 	}
+}
+
+// ResolveStatusLineField returns the status-line field name to use, or "" when
+// the feature is disabled (`off`, any case). Unset or blank means the default.
+func (p ProjectFieldsConfig) ResolveStatusLineField() string {
+	return resolveFieldName(p.StatusLine, DefaultStatusLineField)
+}
+
+// ResolveLastActivityField returns the "Last activity" date field name to use,
+// or "" when disabled (#2049).
+func (p ProjectFieldsConfig) ResolveLastActivityField() string {
+	return resolveFieldName(p.LastActivity, DefaultLastActivityField)
+}
+
+// ResolveLastRunField returns the "Last run" text field name to use, or ""
+// when disabled (#2049).
+func (p ProjectFieldsConfig) ResolveLastRunField() string {
+	return resolveFieldName(p.LastRun, DefaultLastRunField)
 }
 
 // LoadProjectConfig reads .fabrik/config.yaml from CWD.

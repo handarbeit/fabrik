@@ -72,6 +72,12 @@ func (m *testGitHubUpgradeClient) FetchTextField(projectID, name string) (*gh.Te
 func (m *testGitHubUpgradeClient) UpdateProjectItemTextField(projectID, itemID, fieldID, text string) error {
 	return nil
 }
+func (m *testGitHubUpgradeClient) FetchDateField(projectID, name string) (*gh.DateField, error) {
+	return nil, nil
+}
+func (m *testGitHubUpgradeClient) UpdateProjectItemDateField(projectID, itemID, fieldID, date string) error {
+	return nil
+}
 func (m *testGitHubUpgradeClient) ClearProjectItemField(projectID, itemID, fieldID string) error {
 	return nil
 }

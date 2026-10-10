@@ -92,6 +92,9 @@ var wireContractRegistry = []wireOperation{
 	{"updateProjectItemTextFieldMutation", []string{updateProjectItemTextFieldMutation}},
 	{"clearProjectItemFieldMutation", []string{clearProjectItemFieldMutation}},
 
+	// datefield.go
+	{"updateProjectItemDateFieldMutation", []string{updateProjectItemDateFieldMutation}},
+
 	// project_admin.go
 	{"repositoryOwnerQuery", []string{repositoryOwnerQuery}},
 	{"repositoryIDForBoardQuery", []string{repositoryIDForBoardQuery}},
