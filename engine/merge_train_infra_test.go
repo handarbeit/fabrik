@@ -368,7 +368,9 @@ func TestMergeTrainInfra_OwnershipIsStructural(t *testing.T) {
 					callers[name] = map[string]bool{}
 				}
 				callers[name][fd.Name.Name] = true
-				if fd.Name.Name == "pollTrainCI" {
+				// #2051: pollTrainCI's loop body is now evalTrialCI (shared with the per-poll
+				// evaluator); the retrigger still lives in exactly that one trial-CI path.
+				if fd.Name.Name == "pollTrainCI" || fd.Name.Name == "evalTrialCI" {
 					inPoll[name] = true
 				}
 				return true
@@ -385,7 +387,7 @@ func TestMergeTrainInfra_OwnershipIsStructural(t *testing.T) {
 		got = append(got, fn)
 	}
 	sort.Strings(got)
-	if fmt.Sprint(got) != "[ciStartupCheck pollTrainCI]" {
-		t.Errorf("retriggerPR callers = %v, want exactly [ciStartupCheck pollTrainCI]", got)
+	if fmt.Sprint(got) != "[ciStartupCheck evalTrialCI]" {
+		t.Errorf("retriggerPR callers = %v, want exactly [ciStartupCheck evalTrialCI]", got)
 	}
 }

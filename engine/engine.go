@@ -263,14 +263,18 @@ type Engine struct {
 	// stalenessCompareFn overrides selfupgrade.CompareDevBuild when non-nil.
 	// Used by tests to inject a synthetic DevBuildStatus without real git
 	// subprocesses. Production leaves this nil.
-	stalenessCompareFn                    func(selfupgrade.DevBuildConfig) (selfupgrade.DevBuildStatus, error)
-	lastProjectUpdatedAt                  time.Time                     // last seen project.updatedAt from FetchProjectUpdatedAt gate; zero = not yet checked
-	pollSeam                              *pollSeam                     // TEST-ONLY (#1978): bed poll hold/trigger seam; nil unless Config.PollControlFile is set; built in Run()
-	wakeCh                                chan struct{}                 // TUI sends on this to wake the poll loop immediately; nil if no TUI
-	stopCh                                chan tui.StopRequest          // TUI sends on this to stop a specific in-flight issue; nil if no TUI
-	sem                                   chan struct{}                 // semaphore bounding concurrent workers across poll cycles
-	wg                                    sync.WaitGroup                // tracks in-flight workers for graceful shutdown; also tracks the shutdown pause-write phase (runShutdownPause, shutdown.go) so one waitGroupTimeout call bounds both (ADR-1393)
-	cloneInFlight                         sync.Map                      // key: "owner/repo" string, value: *cloneCall; per-repo bare-clone coordination
+	stalenessCompareFn   func(selfupgrade.DevBuildConfig) (selfupgrade.DevBuildStatus, error)
+	lastProjectUpdatedAt time.Time            // last seen project.updatedAt from FetchProjectUpdatedAt gate; zero = not yet checked
+	pollSeam             *pollSeam            // TEST-ONLY (#1978): bed poll hold/trigger seam; nil unless Config.PollControlFile is set; built in Run()
+	wakeCh               chan struct{}        // TUI sends on this to wake the poll loop immediately; nil if no TUI
+	stopCh               chan tui.StopRequest // TUI sends on this to stop a specific in-flight issue; nil if no TUI
+	sem                  chan struct{}        // semaphore bounding concurrent workers across poll cycles
+	wg                   sync.WaitGroup       // tracks in-flight workers for graceful shutdown; also tracks the shutdown pause-write phase (runShutdownPause, shutdown.go) so one waitGroupTimeout call bounds both (ADR-1393)
+	cloneInFlight        sync.Map             // key: "owner/repo" string, value: *cloneCall; per-repo bare-clone coordination
+	// trainRuns is the table of persisted merge-train runs (#2051, ADR 2051). Non-nil only
+	// on engines that run the asynchronous driver (New()); nil — the synchronous driver —
+	// everywhere else, so every NewWithDeps engine and its tests are unchanged.
+	trainRuns                             *trainRunStore
 	mergeTrainInFlight                    sync.Map                      // key: trainKey ("owner/repo:baseBranch", mergeTrainKey — since #1648, was bare "owner/repo"), value: *mergeTrainWorkerState; per-(repo,base) train dispatch guard, so one base's train cannot block or be mistaken for another base's train in the same repo
 	mergeTrainEjectionsMu                 sync.Mutex                    // guards mergeTrainEjectionCounts
 	mergeTrainEjectionCounts              map[string]int                // key: "owner/repo#N", ejection count per member — deliberately stays issue-scoped, not re-keyed by base (#1648): an issue belongs to exactly one partition at a time
