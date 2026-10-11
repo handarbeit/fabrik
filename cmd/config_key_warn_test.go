@@ -3,8 +3,11 @@ package cmd
 import (
 	"bytes"
 	"flag"
+	"os"
 	"strings"
 	"testing"
+
+	"github.com/handarbeit/fabrik/config"
 )
 
 func TestWarnUnrecognizedConfigKeys_NoMatchingFlag(t *testing.T) {
@@ -81,5 +84,25 @@ func TestWarnUnrecognizedConfigKeys_Empty(t *testing.T) {
 
 	if buf.Len() != 0 {
 		t.Errorf("expected no output for empty key list, got: %q", buf.String())
+	}
+}
+
+// plugin_dirs is a real config.yaml key (ADR 2136); the singular plugin_dir
+// stays CLI/env-only, so a stray one is still reported.
+func TestUnrecognizedConfigKeys_PluginDirs(t *testing.T) {
+	dir := t.TempDir()
+	chdirTest(t, dir)
+	if err := os.MkdirAll(".fabrik", 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(".fabrik/config.yaml", []byte("plugin_dirs:\n  - a\nplugin_dir: b\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := config.UnrecognizedTopLevelKeys()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != "plugin_dir" {
+		t.Fatalf("unrecognised = %v, want [plugin_dir]", got)
 	}
 }

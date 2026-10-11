@@ -390,9 +390,10 @@ var claudeTurnProgress func(issueNumber, turnsUsed, maxTurns int)
 // process stderr is sent only to the log file (not the terminal).
 var claudeTUI bool
 
-// claudePluginDir is the path to the Fabrik plugin directory. Set by the Engine
-// during construction. When non-empty, --plugin-dir is added to Claude args.
-var claudePluginDir string
+// claudePluginDirs are the plugin directories passed to every worker, base
+// plugin first, then any configured extras (ADR 2136). Set by the Engine
+// during construction. One --plugin-dir is added to Claude args per entry.
+var claudePluginDirs []string
 
 // claudeNameFlagSupported records whether the installed claude binary accepts
 // -n/--name, as determined once at startup by probeClaudeNameFlagSupport (see
@@ -1323,8 +1324,8 @@ func buildClaudeArgs(stage *stages.Stage, resumeSessionID string, modelOverride 
 		args = append(args, "--disallowedTools", tool)
 	}
 
-	if claudePluginDir != "" {
-		args = append(args, "--plugin-dir", claudePluginDir)
+	for _, dir := range claudePluginDirs {
+		args = append(args, "--plugin-dir", dir)
 	}
 
 	if resumeSessionID != "" {

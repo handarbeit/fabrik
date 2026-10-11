@@ -80,6 +80,7 @@ type Config struct {
 	SymlinkEnv                 bool
 	WorktreeBoundaryAudit      bool
 	PluginDir                  string
+	PluginDirs                 []string // additional workflow plugin directories, loaded after the base plugin (ADR 2136)
 	Stages                     []*stages.Stage
 	Webhooks                   bool
 	WebhookPort                int
@@ -486,19 +487,12 @@ func New(cfg Config) (*Engine, error) {
 	// Default to .fabrik/plugin in the fabrik dir (created by fabrik init).
 	// --plugin-dir flag overrides this for development.
 	// Path must be absolute since Claude runs in the worktree, not the repo root.
-	pluginDir := cfg.PluginDir
-	if pluginDir == "" {
-		defaultPluginDir := filepath.Join(fabrikDir, ".fabrik", "plugin")
-		if fi, err := os.Stat(defaultPluginDir); err == nil && fi.IsDir() {
-			pluginDir = defaultPluginDir
-		}
+	// Configured extras (--plugin-dirs) load after the base; see ADR 2136.
+	pluginDirs, err := resolvePluginDirs(fabrikDir, cfg.PluginDir, cfg.PluginDirs)
+	if err != nil {
+		return nil, err
 	}
-	if pluginDir != "" {
-		if abs, err := filepath.Abs(pluginDir); err == nil {
-			pluginDir = abs
-		}
-		claudePluginDir = pluginDir
-	}
+	claudePluginDirs = pluginDirs
 	claudeWaitDelay = cfg.ClaudeWaitDelay
 	// KillGraceSigInt >= 0: 0 = skip SIGINT step, positive = use that duration.
 	// Execute() maps "" → 10s, so 0 only arrives when user explicitly passed 0s.

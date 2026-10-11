@@ -1275,7 +1275,8 @@ FABRIK_USER=my-personal-username
 | `--yolo` | Auto-advance issues through stages without human approval; also auto-merges the linked PR when Validate completes | `false` |
 | `--auto-upgrade` | At startup and when idle (after 2 idle polls), check GitHub Releases for a newer version and self-upgrade; dev builds (built from source) rebuild from `origin/main` instead | `false` |
 | `--notui` | Disable the interactive TUI dashboard | TUI on by default |
-| `--plugin-dir` | Path to Fabrik plugin directory (overrides `.fabrik/plugin/`) | auto-detected |
+| `--plugin-dir` | Path to Fabrik plugin directory. **Replaces** the base plugin (`.fabrik/plugin/`); does not add to it — use `--plugin-dirs` to load more plugins | auto-detected |
+| `--plugin-dirs` | Comma-separated additional workflow plugin directories, loaded by every worker after the base plugin | none |
 | `--poll` | Poll interval in seconds. Governs GitHub API cadence; does not affect stage retry latency (see `--retry-backoff`) | `30` |
 | `--retry-backoff` | Seconds before re-dispatching a stage that did not complete. Independent of `--poll` (#1831). Minimum 1 | `60` |
 | `--max-concurrent` | Maximum number of concurrent issue workers | `5` |
@@ -1364,7 +1365,8 @@ The flag/env suggestion is derived mechanically from Fabrik's snake_case (`confi
 | `FABRIK_MAX_TOOLS_DENIED_RETRIES` | *(no config.yaml key)* | Maximum number of consecutive tool-permission-denial exits per stage before pausing with `fabrik:paused` + `fabrik:awaiting-input` (positive integer; invalid or unset values default to 3). Independent of `max_retries` — see `--max-tools-denied-retries`. | `3` |
 | `FABRIK_AUTO_UPGRADE` | `auto_upgrade` | Self-upgrade at startup and when idle (after 2 idle polls) (`true`/`1`/`yes`) | `false` |
 | `FABRIK_TUI` | `tui` | Disable TUI dashboard (`false`/`0`/`no`) | `true` |
-| `FABRIK_PLUGIN_DIR` | *(no config.yaml key)* | Override plugin directory | `.fabrik/plugin/` |
+| `FABRIK_PLUGIN_DIR` | *(no config.yaml key)* | Replace the base plugin directory | `.fabrik/plugin/` |
+| `FABRIK_PLUGIN_DIRS` | `plugin_dirs` | Additional workflow plugin directories, loaded after the base plugin (comma-separated; a YAML list in `config.yaml`) | none |
 | `FABRIK_DEBUG_OUTPUT` | `debug_output` | Save raw Claude output for debugging | `false` |
 | `FABRIK_SYMLINK_ENV` | `symlink_env` | Symlink fabrikDir `.env` into each worktree at setup time (`true`/`1`/`yes`) — see `--symlink-env` | `false` |
 | `FABRIK_REVIEW_WAIT_TIMEOUT` | *(no config.yaml key)* | Minutes to wait per review cycle at the review gate (whether waiting for requested reviewers to submit or for at least one review to exist) before pausing with `fabrik:awaiting-input` (positive integer; invalid or unset values default to 15) | `15` |
@@ -2970,7 +2972,8 @@ The `write-spec` and `clarify` skills are adapted from [github/spec-kit](https:/
 
 Each stage references a **skill** -- a markdown file that contains detailed methodology
 for how Claude should approach the stage. Skills are packaged as a Claude Code plugin
-in `.fabrik/plugin/` and loaded via `--plugin-dir` on each Claude invocation.
+in `.fabrik/plugin/` and loaded via `--plugin-dir` on each Claude invocation. Your own
+plugins can be loaded alongside it; see [Plugin Development](#plugin-development).
 
 The default skills are:
 
@@ -3258,7 +3261,36 @@ If no gaps are found, it reports: "No documentation gaps found — docs appear c
 
 ### Plugin Development
 
-For developing the plugin itself, use `--plugin-dir` to point at your working copy:
+Every worker receives Fabrik's base stage plugin (`.fabrik/plugin/`) plus any additional
+plugins you configure, one `--plugin-dir` per plugin, base first.
+
+**Adding your own plugin.** Set `plugin_dirs` in `.fabrik/config.yaml` (a list), or pass
+`--plugin-dirs` / set `FABRIK_PLUGIN_DIRS` (comma-separated; a path containing a comma
+can only be given in `config.yaml`). Flag beats environment beats config file.
+
+```yaml
+plugin_dirs:
+  - .fabrik/plugins/local-workflows
+```
+
+- The base plugin is never removed by adding plugins; with no extras configured the
+  worker arguments are exactly as before.
+- Relative paths resolve against the Fabrik directory (the directory containing
+  `.fabrik/`); `~` is not expanded. A repeated path, or one equal to the base, is
+  ignored.
+- Each additional directory must exist and contain `.claude-plugin/plugin.json` with a
+  `name`; otherwise startup fails naming the path.
+- Two loaded plugins must not declare the same manifest `name`; startup fails naming
+  both paths. In particular, a project plugin cannot call itself `fabrik` while the
+  default base plugin is loaded.
+- Additional plugins are yours: `fabrik upgrade`, staleness checks
+  and customization detection apply to `.fabrik/plugin/` only.
+- Interactive `resume` / `watch` sessions pass only the base plugin override, not the
+  additional plugins.
+
+**Developing the base plugin.** `--plugin-dir` (or `FABRIK_PLUGIN_DIR`) *replaces* the
+base plugin, so the deployed copy does not also load. Configured `plugin_dirs` are still
+added after it:
 ```bash
 ./fabrik --plugin-dir ./plugin/fabrik-workflows ...
 ```

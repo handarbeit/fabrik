@@ -82,6 +82,8 @@ type Config struct {
 	SymlinkEnv                 bool
 	WorktreeBoundaryAudit      bool
 	PluginDir                  string
+	PluginDirs                 string   // comma-separated --plugin-dirs flag / FABRIK_PLUGIN_DIRS value (ADR 2136)
+	PluginDirList              []string // resolved additional workflow plugin directories, loaded after the base plugin (ADR 2136)
 	Webhooks                   bool
 	WebhookPort                int
 	WebhookEvents              string // comma-separated; empty means default event set
@@ -225,7 +227,8 @@ func Execute() error {
 	flag.BoolVar(&cfg.DebugOutput, "debug-output", false, "Save Claude stage output to .fabrik/debug/ for debugging")
 	flag.BoolVar(&cfg.SymlinkEnv, "symlink-env", false, "Symlink the fabrik-dir .env file into each issue worktree at creation time (also FABRIK_SYMLINK_ENV)")
 	flag.BoolVar(&cfg.WorktreeBoundaryAudit, "worktree-boundary-audit", false, "Enable Layer 2 cross-repo ref-mutation audit (default off pending #808 root-cause fix; also FABRIK_WORKTREE_BOUNDARY_AUDIT)")
-	flag.StringVar(&cfg.PluginDir, "plugin-dir", "", "Path to Fabrik plugin directory (for development; overrides installed plugin)")
+	flag.StringVar(&cfg.PluginDir, "plugin-dir", "", "Path to Fabrik plugin directory (for development; REPLACES the base Fabrik plugin — use --plugin-dirs to add plugins alongside it; also FABRIK_PLUGIN_DIR, no config.yaml key)")
+	flag.StringVar(&cfg.PluginDirs, "plugin-dirs", "", "Comma-separated additional workflow plugin directories passed to every worker after the base Fabrik plugin; relative paths resolve against the Fabrik directory; each needs a .claude-plugin/plugin.json with a unique name (also FABRIK_PLUGIN_DIRS or plugin_dirs in config.yaml; ADR 2136)")
 	flag.BoolVar(&cfg.Webhooks, "webhooks", false, "Enable webhook-driven event delivery via gh webhook forward (requires gh ≥ 2.32.0; also FABRIK_WEBHOOKS)")
 	flag.IntVar(&cfg.WebhookPort, "webhook-port", 0, "Local port for the webhook HTTP listener (0 = OS-assigned; also FABRIK_WEBHOOK_PORT)")
 	flag.StringVar(&cfg.WebhookEvents, "webhook-events", "", "Comma-separated list of GitHub event types to subscribe to (default: all supported events; also FABRIK_WEBHOOK_EVENTS)")
@@ -768,6 +771,22 @@ func Execute() error {
 			cfg.PluginDir = v
 		}
 	}
+	// Flag and env are comma-separated and split here; the config.yaml list is
+	// kept as a list so an entry containing a comma survives intact (ADR 2136).
+	if !explicitFlags["plugin-dirs"] {
+		if v := os.Getenv("FABRIK_PLUGIN_DIRS"); v != "" {
+			cfg.PluginDirs = v
+		}
+	}
+	if cfg.PluginDirs != "" {
+		cfg.PluginDirList = splitGlobList(cfg.PluginDirs)
+	} else {
+		for _, d := range pc.PluginDirs {
+			if d = strings.TrimSpace(d); d != "" {
+				cfg.PluginDirList = append(cfg.PluginDirList, d)
+			}
+		}
+	}
 	if !explicitFlags["webhooks"] {
 		cfg.Webhooks = resolveBool("FABRIK_WEBHOOKS", pc.Webhooks)
 	}
@@ -990,6 +1009,7 @@ func Execute() error {
 		SymlinkEnv:                 cfg.SymlinkEnv,
 		WorktreeBoundaryAudit:      cfg.WorktreeBoundaryAudit,
 		PluginDir:                  cfg.PluginDir,
+		PluginDirs:                 cfg.PluginDirList,
 		Stages:                     stageCfgs,
 		Webhooks:                   cfg.Webhooks,
 		WebhookPort:                cfg.WebhookPort,
@@ -1632,8 +1652,8 @@ func mergeTrainMode(s string) string {
 	}
 }
 
-// splitGlobList parses the comma-separated --merge-train-overlap-ignore value
-// into trimmed, non-empty globs (#2047). Empty input yields nil.
+// splitGlobList parses a comma-separated flag/env value (--merge-train-overlap-ignore,
+// --plugin-dirs) into trimmed, non-empty entries (#2047, ADR 2136). Empty input yields nil.
 func splitGlobList(s string) []string {
 	var out []string
 	for _, g := range strings.Split(s, ",") {

@@ -306,6 +306,7 @@ Context files are available in .fabrik-context/
 
 ```
 --plugin-dir <absolute-path-to-.fabrik/plugin>
+--plugin-dir <absolute-path-of-each-configured-plugin_dirs-entry>  (zero or more, in configured order; ADR 2136)
 --output-format json
 --verbose
 --disallowedTools <tool> ...  (always: ScheduleWakeup, Workflow, Monitor, CronCreate — see below)
