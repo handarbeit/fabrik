@@ -62,10 +62,10 @@ func (e *Engine) reportStageSkills(stageList []*stages.Stage, w io.Writer) {
 		})
 	}
 	if err := warnings.Reconcile(w, skillDeprecatedType, deprecated); err != nil {
-		fmt.Fprintf(w, "[startup] warning: recording %s: %v\n", skillDeprecatedType, err)
+		fmt.Fprintf(w, "[startup] recording %s failed: %v\n", skillDeprecatedType, err)
 	}
 	if err := warnings.Reconcile(w, skillUnresolvedType, unresolved); err != nil {
-		fmt.Fprintf(w, "[startup] warning: recording %s: %v\n", skillUnresolvedType, err)
+		fmt.Fprintf(w, "[startup] recording %s failed: %v\n", skillUnresolvedType, err)
 	}
 }
 
