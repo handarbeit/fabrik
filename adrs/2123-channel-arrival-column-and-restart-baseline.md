@@ -59,3 +59,7 @@ The new code lives in `engine/channel_lifecycle.go` and the existing channel fil
 - `human` attribution of a column move needs a webhook; `unknown` is the common case and is documented.
 - Amends ADR-1966-b decision 4 ("first creation" → "first label-bearing population") and supersedes ADR 2125's `promote` note.
 - Documented in `docs/state-machine.md` §7.14/§7.15 and the `docs/USER_GUIDE.md` event table.
+
+## Known limit: landings GitHub completes itself
+
+`merged` is published from the landing path after the engine performs or observes the merge. For a landing GitHub completes on its own (native auto-merge, merge queue) the `issues closed` webhook can reach the store first; that `closed` is then published before `merged` with `landing=false`. The ordering guarantee (FR-015) therefore holds for engine-driven landings only.
