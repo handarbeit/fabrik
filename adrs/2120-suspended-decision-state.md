@@ -20,7 +20,7 @@ The overseer's question is "what needs me?". For the commonest human decision po
 
 `internal/attention` gains `State` `suspended` with two codes: `decision-pending` (a completed stage that does not auto-advance) and `parked-blocker` (blocked only by open work parked in an unmanaged column, directly or transitively). It is derived, never a label. It shares rank 0 with `needs-human`; within that rank the attention view lists a pause that needs an answer before a decision that waits. It sits after the cruise-at-Validate and `api-key-helper-detected` rows and **before** the wait rows, so a cooldown can no longer flip it between `waiting` and `stalled`; it is never `stalled`.
 
-The word "Suspended" is used only for this state: ADR 2129 renamed the Claude usage-limit hold, and the generic uses in `plugin/fabrik-workflows/LABELS.md` were reworded ("stop", "block").
+The word "Suspended" is used only for this state: #2129 renamed the Claude usage-limit hold, and the generic uses in `plugin/fabrik-workflows/LABELS.md` were reworded ("stop", "block").
 
 **Masks.** The state requires that nothing the engine owns is going on: no worker, no `fabrik:paused`, no in-flight marker (`fabrik:editing`, `fabrik:locked:*`, `stage:*:in_progress`), and no state-bearing wait label (for case (b), `fabrik:blocked` is the parking label and is exempt). For (a) it also requires no unprocessed feedback. **Cooldowns never mask**: a cooldown can only mean "re-check later". Unknown data fails closed to the old behaviour.
 
