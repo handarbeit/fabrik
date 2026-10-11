@@ -20,6 +20,21 @@ import (
 // #2135 (ADR 2135): each is recorded when the condition holds and clears
 // itself when it no longer does, and a repeated evaluation yields one entry.
 
+func warningDetail(t *testing.T, key string) string {
+	t.Helper()
+	es, err := warnings.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	for _, e := range es {
+		if e.Key == key {
+			return e.Detail
+		}
+	}
+	t.Fatalf("no warning %q", key)
+	return ""
+}
+
 func isolateWarnings(t *testing.T) {
 	t.Helper()
 	warnings.WarningsPathOverride = filepath.Join(t.TempDir(), "warnings.json")
@@ -186,6 +201,72 @@ func TestCheckWebhookHookCoverage_PanelRecordsAndClears(t *testing.T) {
 	e.checkWebhookHookCoverage(wm)
 	if k := warningKeys(t); len(k) != 0 {
 		t.Errorf("not cleared: %v", k)
+	}
+}
+
+func TestCheckWebhookHookCoverage_LookupErrorIsNotRecordedAsMissing(t *testing.T) {
+	isolateWarnings(t)
+	wm, events := newTestWebhookManager(t)
+	wm.mu.Lock()
+	wm.repos = map[string]bool{"a/one": true, "b/two": true}
+	wm.emitFn = func(e tui.Event) { events <- e }
+	wm.mu.Unlock()
+
+	// b/two's lookup errors (transient); a/one is confirmed missing.
+	e := &Engine{client: &mockGitHubClient{
+		hasForwardingHookFn: func(owner, repo string) (bool, error) {
+			if repo == "two" {
+				return false, errors.New("502 bad gateway")
+			}
+			return false, nil
+		},
+	}}
+	e.checkWebhookHookCoverage(wm)
+	if k := warningKeys(t); len(k) != 1 || !k["webhook_coverage:repos"] {
+		t.Fatalf("keys = %v", k)
+	}
+	if d := warningDetail(t, "webhook_coverage:repos"); strings.Contains(d, "b/two") || !strings.Contains(d, "a/one") {
+		t.Errorf("detail should list only the confirmed-missing repo: %q", d)
+	}
+
+	// Only an errored lookup remains: the prior entry must be left alone, not
+	// cleared and not rewritten with the unknown repo.
+	e.client = &mockGitHubClient{
+		hasForwardingHookFn: func(owner, repo string) (bool, error) {
+			if repo == "two" {
+				return false, errors.New("502 bad gateway")
+			}
+			return true, nil
+		},
+	}
+	e.checkWebhookHookCoverage(wm)
+	if k := warningKeys(t); len(k) != 1 || !k["webhook_coverage:repos"] {
+		t.Fatalf("prior entry should be untouched on an incomplete check, keys = %v", k)
+	}
+
+	// A complete, clean check clears it.
+	e.client = &mockGitHubClient{
+		hasForwardingHookFn: func(owner, repo string) (bool, error) { return true, nil },
+	}
+	e.checkWebhookHookCoverage(wm)
+	if k := warningKeys(t); len(k) != 0 {
+		t.Errorf("not cleared: %v", k)
+	}
+}
+
+func TestCheckWebhookHookCoverage_OnlyLookupErrorsRecordsNothing(t *testing.T) {
+	isolateWarnings(t)
+	wm, events := newTestWebhookManager(t)
+	wm.mu.Lock()
+	wm.repos = map[string]bool{"a/one": true}
+	wm.emitFn = func(e tui.Event) { events <- e }
+	wm.mu.Unlock()
+	e := &Engine{client: &mockGitHubClient{
+		hasForwardingHookFn: func(owner, repo string) (bool, error) { return false, errors.New("rate limited") },
+	}}
+	e.checkWebhookHookCoverage(wm)
+	if k := warningKeys(t); len(k) != 0 {
+		t.Errorf("transient lookup error must not create a panel entry: %v", k)
 	}
 }
 

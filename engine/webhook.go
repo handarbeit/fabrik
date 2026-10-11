@@ -496,7 +496,15 @@ type forwardingHookChecker interface {
 // hook found" (fail toward warning, not toward silently skipping a repo
 // that could genuinely be missing coverage).
 func checkForwardingHookCoverage(client forwardingHookChecker, repos []string, logFn func(issueNumber int, tag, format string, args ...any)) []string {
-	var missing []string
+	missing, _ := checkForwardingHookCoverageDetailed(client, repos, logFn)
+	return missing
+}
+
+// checkForwardingHookCoverageDetailed is checkForwardingHookCoverage plus the
+// sorted subset of missing whose lookup errored rather than confirmed absence.
+// The warnings panel records only the confirmed-missing repos: a transient
+// read failure is not a durable operator condition (ADR-2135).
+func checkForwardingHookCoverageDetailed(client forwardingHookChecker, repos []string, logFn func(issueNumber int, tag, format string, args ...any)) (missing, lookupFailed []string) {
 	for _, r := range repos {
 		owner, repo := parseOwnerRepo(r)
 		if owner == "" {
@@ -507,6 +515,7 @@ func checkForwardingHookCoverage(client forwardingHookChecker, repos []string, l
 		if err != nil {
 			logFn(0, "webhook", "WARNING: hook-coverage check failed for %s: %v — treating as missing\n", r, err)
 			missing = append(missing, r)
+			lookupFailed = append(lookupFailed, r)
 			continue
 		}
 		if !found {
@@ -514,7 +523,8 @@ func checkForwardingHookCoverage(client forwardingHookChecker, repos []string, l
 		}
 	}
 	sort.Strings(missing)
-	return missing
+	sort.Strings(lookupFailed)
+	return missing, lookupFailed
 }
 
 // checkWebhookHookCoverage runs the R5 startup/periodic hook-existence
@@ -530,21 +540,41 @@ func (e *Engine) checkWebhookHookCoverage(wm *webhookManager) {
 		_ = warnings.Reconcile(e.warnWriter("webhook"), "webhook_coverage", nil)
 		return
 	}
-	missing := checkForwardingHookCoverage(e.client, repos, e.logf)
+	missing, lookupFailed := checkForwardingHookCoverageDetailed(e.client, repos, e.logf)
+	// Only repos whose absence was confirmed reach the panel; a repo whose
+	// lookup errored is unknown, not missing.
+	confirmed := missing
+	if len(lookupFailed) > 0 {
+		failed := make(map[string]bool, len(lookupFailed))
+		for _, r := range lookupFailed {
+			failed[r] = true
+		}
+		confirmed = nil
+		for _, r := range missing {
+			if !failed[r] {
+				confirmed = append(confirmed, r)
+			}
+		}
+	}
 	var conds []warnings.Condition
-	if len(missing) > 0 {
-		list := strings.Join(missing, ", ")
+	if len(confirmed) > 0 {
+		list := strings.Join(confirmed, ", ")
 		conds = append(conds, warnings.Condition{
 			Subject: "repos",
-			Title:   fmt.Sprintf("No forwarding webhook for %d managed repo(s)", len(missing)),
+			Title:   fmt.Sprintf("No forwarding webhook for %d managed repo(s)", len(confirmed)),
 			Detail: fmt.Sprintf("These repos are receiving no webhooks (poll-only): %s\n\n"+
 				"Fix: restore the repository webhook forwarding to Fabrik (see #1142).", list),
 			LogLine: fmt.Sprintf("no forwarding hook found for %d of %d managed repo(s): %s — these repos are receiving no webhooks (poll-only); see #1142",
-				len(missing), len(repos), list),
+				len(confirmed), len(repos), list),
 		})
 	}
-	if err := warnings.Reconcile(e.warnWriter("webhook"), "webhook_coverage", conds); err != nil {
-		e.logf(0, "webhook", "recording webhook_coverage warning: %v\n", err)
+	// With nothing confirmed missing but some lookups unknown, the check did
+	// not run to completion: leave any prior entry untouched rather than
+	// clearing it (Reconcile with an empty set wipes the type).
+	if len(conds) > 0 || len(lookupFailed) == 0 {
+		if err := warnings.Reconcile(e.warnWriter("webhook"), "webhook_coverage", conds); err != nil {
+			e.logf(0, "webhook", "recording webhook_coverage warning: %v\n", err)
+		}
 	}
 	wm.setHookCoverageNote(missing)
 }

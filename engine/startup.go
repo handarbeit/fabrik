@@ -895,7 +895,7 @@ func logWorkerEnvOptIn(r workerenv.Resolved, w io.Writer) {
 		conds = append(conds, warnings.Condition{
 			Subject: "ignored",
 			Title:   workerenv.OptInVar + " entries ignored",
-			Detail: fmt.Sprintf("Not on the worker scrub list, or protected: %s\n\nFix: remove or correct these names in %s.", list, workerenv.OptInVar),
+			Detail:  fmt.Sprintf("Not on the worker scrub list, or protected: %s\n\nFix: remove or correct these names in %s.", list, workerenv.OptInVar),
 			LogLine: fmt.Sprintf("%s entries ignored (not on the worker scrub list, or protected): %s", workerenv.OptInVar, list),
 		})
 	}
