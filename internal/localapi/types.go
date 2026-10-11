@@ -161,6 +161,45 @@ type AttentionInfo struct {
 	Progress            ProgressInfo  `json:"progress"`
 	// StallThresholdSeconds is the threshold the classification used.
 	StallThresholdSeconds int64 `json:"stall_threshold_seconds"`
+	// Pending describes a suspended item's decision; absent otherwise (#2120).
+	Pending *PendingInfo `json:"pending,omitempty"`
+	// Options lists how a human can act on a decision-bearing item, each with
+	// the MCP tool that performs it when one exists (#2120 R-options-1).
+	Options []OptionInfo `json:"options,omitempty"`
+}
+
+// OptionInfo is one way a human can act on a decision-bearing item. Tool is
+// empty when no MCP tool performs it (the human acts directly, e.g. a merge).
+type OptionInfo struct {
+	Action string `json:"action"`
+	Tool   string `json:"tool,omitempty"`
+}
+
+// PendingInfo describes a suspended item (#2120): a completed stage that does
+// not auto-advance, or a dependency parked in an unmanaged column.
+type PendingInfo struct {
+	// Kind is "decision" or "parked-blocker".
+	Kind           string `json:"kind"`
+	CompletedStage string `json:"completed_stage"`
+	// NextStage is the stage an advance would move to (decision kind only).
+	NextStage string `json:"next_stage,omitempty"`
+	// Since is when the wait began. SinceBasis says where it came from:
+	// github-label, stage-comment, eligibility-change (all exact) or
+	// first-seen (the daemon's first sight: the wait is at least this long).
+	Since      Known[time.Time] `json:"since"`
+	SinceBasis string           `json:"since_basis"`
+	// AgeSeconds is the wait's age; unknown when Since is only a lower bound,
+	// in which case AtLeastAgeSeconds carries that bound.
+	AgeSeconds        Known[int64] `json:"age_seconds"`
+	AtLeastAgeSeconds Known[int64] `json:"at_least_age_seconds"`
+	// Blockers are the parked items (parked-blocker kind only).
+	Blockers []PendingBlocker `json:"blockers,omitempty"`
+}
+
+// PendingBlocker is one parked item blocking another.
+type PendingBlocker struct {
+	Issue  string `json:"issue"`
+	Column string `json:"column"`
 }
 
 // ReasonInfo is one label (or condition) with its one-line meaning.
@@ -258,6 +297,10 @@ type AttentionEntry struct {
 	NextAction string           `json:"next_action"`
 	NextAt     Known[time.Time] `json:"next_at"`
 	Cache      CacheInfo        `json:"cache"`
+	// Pending and Options mirror AttentionInfo's, for suspended and other
+	// decision-bearing entries (#2120).
+	Pending *PendingInfo `json:"pending,omitempty"`
+	Options []OptionInfo `json:"options,omitempty"`
 }
 
 // ColumnFlow is one board column in the flow view.

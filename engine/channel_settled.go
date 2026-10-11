@@ -145,7 +145,14 @@ func (f cachedFeedback) any() bool { return f.Comments+f.Threads+f.Bodies > 0 }
 // rather than fetched live. TestCachedFeedbackMatchesLiveGate pins the
 // agreement.
 func (e *Engine) cachedPendingFeedback(snap itemstate.Snapshot, st *itemstate.ItemState) cachedFeedback {
-	processed := func(id string) bool { return !snap.CommentProcessed(id).IsZero() }
+	return e.cachedPendingFeedbackOf(st)
+}
+
+// cachedPendingFeedbackOf is cachedPendingFeedback over the item state alone
+// (the processed-comment map is part of it), so attentionInput can ask it from
+// inside a Store.Scan visitor, where no Snapshot is at hand.
+func (e *Engine) cachedPendingFeedbackOf(st *itemstate.ItemState) cachedFeedback {
+	processed := func(id string) bool { return !st.StageState.ProcessedComments[id].IsZero() }
 	var f cachedFeedback
 	f.Comments = len(filterNewComments(st.Comments, processed))
 	if lpr := st.LinkedPR; lpr != nil {

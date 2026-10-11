@@ -182,13 +182,20 @@ func (e *Engine) pauseIssueForDaemonShutdown(snap itemstate.Snapshot) {
 	// finalizeStageOutcome) runs on the cancelled worker's own goroutine,
 	// unsynchronized with this pause-write phase, and a push failure there
 	// is only logged as a warning, not surfaced here (review finding).
-	comment := fmt.Sprintf(
+	e.pauseInterruptedIssue(item, cleanStopPauseComment(stageName))
+}
+
+// cleanStopPauseComment is the comment a daemon clean stop posts on the paused
+// item. It is a function of its own so the attention classifier's tests can pin
+// that the resume method it reports (#2120 R-options-2) is the one this text
+// actually gives: remove fabrik:paused.
+func cleanStopPauseComment(stageName string) string {
+	return fmt.Sprintf(
 		"🏭 **Fabrik — paused by a daemon clean stop**\n\nStage **%s** was interrupted by a daemon clean stop (SIGINT/SIGTERM). "+
 			"Fabrik attempts to commit and push any in-progress worktree changes automatically as part of the stop — check the branch "+
 			"(and the engine log, if the push did not land) before assuming it succeeded. Remove `fabrik:paused` to resume.",
 		stageName,
 	)
-	e.pauseInterruptedIssue(item, comment)
 }
 
 // drainAndExit is the single shared drain tail (#1393/ADR-1393) replacing the

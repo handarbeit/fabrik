@@ -45,6 +45,7 @@ func (e *Engine) catchUpEvents() []channelevents.Event {
 	now := e.now()
 	threshold := e.channelStallThreshold()
 	usageLimited := e.channelUsageLimitedUntil(now)
+	look := e.peekBlockerLookup()
 	var validate *stages.Stage
 	for _, s := range e.cfg.Stages {
 		if s.Name == "Validate" {
@@ -67,7 +68,7 @@ func (e *Engine) catchUpEvents() []channelevents.Event {
 			ev = e.validateSettledEvent(snap, &st, validate)
 			ev.Content = "(catch-up) " + ev.Content
 		default:
-			res := attention.Classify(e.attentionInput(&st, now, threshold, usageLimited))
+			res := attention.Classify(e.attentionInput(&st, now, threshold, usageLimited, look))
 			key := pauseFamilyKey(res)
 			if key == "" || key == "stalled" {
 				continue

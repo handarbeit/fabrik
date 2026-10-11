@@ -108,7 +108,7 @@ func (ce *channelEvents) derive(key string, st *itemstate.ItemState, d *dirtyIte
 		return nil
 	}
 	now := e.now()
-	res := attention.Classify(e.attentionInput(st, now, e.channelStallThreshold(), e.channelUsageLimitedUntil(now)))
+	res := attention.Classify(e.attentionInput(st, now, e.channelStallThreshold(), e.channelUsageLimitedUntil(now), e.peekBlockerLookup()))
 	m, known := ce.memo[key]
 	if !known {
 		// First sight of this item (a board population, or an item created
@@ -227,6 +227,7 @@ func (ce *channelEvents) onTick() {
 	now := e.now()
 	threshold := e.channelStallThreshold()
 	usageLimited := e.channelUsageLimitedUntil(now)
+	look := e.scanBlockerIndex()
 	var out []channelevents.Event
 	e.store.Scan(func(st *itemstate.ItemState) {
 		if st.IsPR || !st.LabelsKnown {
@@ -239,12 +240,12 @@ func (ce *channelEvents) onTick() {
 			// Same baseline derive() records, so a later non-seed evaluation cannot
 			// read an item already at limit-1 as a fresh transition.
 			m = ce.memoFor(key)
-			m.pauseKey = pauseFamilyKey(attention.Classify(e.attentionInput(st, now, threshold, usageLimited)))
+			m.pauseKey = pauseFamilyKey(attention.Classify(e.attentionInput(st, now, threshold, usageLimited, look)))
 			m.staleDone = hasLabelStr(st.Labels, "fabrik:awaiting-input")
 			ce.cycleNearEvents(m, st, true)
 			return
 		}
-		res := attention.Classify(e.attentionInput(st, now, threshold, usageLimited))
+		res := attention.Classify(e.attentionInput(st, now, threshold, usageLimited, look))
 		if k := pauseFamilyKey(res); k != m.pauseKey {
 			m.pauseKey = k
 			if k != "" {

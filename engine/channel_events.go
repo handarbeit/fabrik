@@ -240,6 +240,7 @@ func (ce *channelEvents) seed() {
 	threshold := e.channelStallThreshold()
 	usageLimited := e.channelUsageLimitedUntil(now)
 	ce.claudeLimited = !usageLimited.IsZero()
+	look := e.scanBlockerIndex()
 	e.store.Scan(func(st *itemstate.ItemState) {
 		// An item whose labels are not known yet (probe-seeded) has no meaningful
 		// classification; its first label-bearing evaluation is the baseline (#2123).
@@ -248,7 +249,7 @@ func (ce *channelEvents) seed() {
 		}
 		key := issueRef(st.Repo, st.Number)
 		m := ce.memoFor(key)
-		res := attention.Classify(e.attentionInput(st, now, threshold, usageLimited))
+		res := attention.Classify(e.attentionInput(st, now, threshold, usageLimited, look))
 		m.pauseKey = pauseFamilyKey(res)
 		ce.armCounters(m, st, true)
 		m.staleDone = hasLabelStr(st.Labels, "fabrik:awaiting-input")
