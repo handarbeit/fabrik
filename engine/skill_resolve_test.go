@@ -148,3 +148,19 @@ func TestResolveStageSkills_NoResolverOrNoSkills(t *testing.T) {
 		t.Errorf("no skills: got %p err %v", got, err)
 	}
 }
+
+// A miss against a snapshot another goroutine has already replaced shares that
+// newer snapshot instead of rescanning the plugin directories again.
+func TestSkillResolver_RebuildIfStaleCoalesces(t *testing.T) {
+	dir := t.TempDir()
+	r := newSkillResolver([]string{dir})
+	first := r.cat.Load()
+
+	second := r.rebuildIfStale(first)
+	if second == first {
+		t.Fatal("rebuild with the current snapshot did not rescan")
+	}
+	if got := r.rebuildIfStale(first); got != second {
+		t.Error("rebuild with a stale snapshot rescanned instead of reusing the newer one")
+	}
+}

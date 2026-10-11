@@ -120,12 +120,24 @@ func (r *skillResolver) Resolve(ref string) (resolvedSkill, string, *skillCatalo
 	if res, _, ok := cat.resolve(ref); ok {
 		return res, "", cat, true
 	}
-	r.mu.Lock()
-	fresh := buildSkillCatalogue(r.dirs)
-	r.cat.Store(fresh)
-	r.mu.Unlock()
+	fresh := r.rebuildIfStale(cat)
 	res, why, ok := fresh.resolve(ref)
 	return res, why, fresh, ok
+}
+
+// rebuildIfStale rescans the plugin directories unless another goroutine has
+// already replaced the snapshot the caller missed on, in which case that newer
+// snapshot is returned as is. Concurrent misses therefore share one rescan
+// instead of queueing a redundant one each behind the mutex.
+func (r *skillResolver) rebuildIfStale(seen *skillCatalogue) *skillCatalogue {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if cur := r.cat.Load(); cur != seen {
+		return cur
+	}
+	fresh := buildSkillCatalogue(r.dirs)
+	r.cat.Store(fresh)
+	return fresh
 }
 
 // stageSkillRefs returns the non-empty skill-valued keys of a stage in a

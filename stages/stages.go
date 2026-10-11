@@ -295,21 +295,6 @@ func expectedReviewerNormalize(name string) string {
 	return strings.ToLower(name)
 }
 
-// validateExpectedReviewers trims each declared identity and rejects any
-// entry that would not resolve as a live GitHub @mention (FR-8): empty after
-// trimming, a leading "@" (the declaration is a bare handle, not mention
-// syntax), or a trailing "[bot]" suffix (case-insensitive) — GitHub's REST
-// API reports self-submitting bot review authors with this suffix (e.g.
-// "handarbeit-pruefer[bot]"), but "@handarbeit-pruefer[bot]" does not resolve
-// as a mention. A malformed identity fails stage load entirely (not just a
-// warning) so a typo can't silently mean "this bot is never notified."
-//
-// Also rejects two entries that normalize (expectedReviewerNormalize) to the
-// same reviewer — e.g. "copilot"+"Copilot", or the same name declared twice.
-// Left undetected, a duplicate isn't a no-op: declaredReviewersOutstanding
-// preserves it, so Phase 1 re-prompts the same bot twice in one cycle and the
-// timeout message lists it twice — a duplicate is malformed in the same way
-// as the other rejected forms.
 // validateSkillRef checks the shape of a skill reference: either a bare skill
 // name or "<plugin>:<skill>" (ADR 2137). Only the format is checked here;
 // whether the plugin is loaded is decided by the engine at startup and dispatch.
@@ -327,6 +312,21 @@ func validateSkillRef(ref string) error {
 	return nil
 }
 
+// validateExpectedReviewers trims each declared identity and rejects any
+// entry that would not resolve as a live GitHub @mention (FR-8): empty after
+// trimming, a leading "@" (the declaration is a bare handle, not mention
+// syntax), or a trailing "[bot]" suffix (case-insensitive) — GitHub's REST
+// API reports self-submitting bot review authors with this suffix (e.g.
+// "handarbeit-pruefer[bot]"), but "@handarbeit-pruefer[bot]" does not resolve
+// as a mention. A malformed identity fails stage load entirely (not just a
+// warning) so a typo can't silently mean "this bot is never notified."
+//
+// Also rejects two entries that normalize (expectedReviewerNormalize) to the
+// same reviewer — e.g. "copilot"+"Copilot", or the same name declared twice.
+// Left undetected, a duplicate isn't a no-op: declaredReviewersOutstanding
+// preserves it, so Phase 1 re-prompts the same bot twice in one cycle and the
+// timeout message lists it twice — a duplicate is malformed in the same way
+// as the other rejected forms.
 func validateExpectedReviewers(stageName string, names []string) ([]string, error) {
 	out := make([]string, 0, len(names))
 	seen := make(map[string]string, len(names))
