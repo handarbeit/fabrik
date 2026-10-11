@@ -217,3 +217,29 @@ func TestProgressViaColumnPersistedCompat(t *testing.T) {
 		t.Error("option-off canonical form must omit the key")
 	}
 }
+
+func TestAnomalyEventsAreItemScopedAndSubscribable(t *testing.T) {
+	immediate := []EventType{RetryStarved, RetryResumed, ItemWedged, ItemUnwedged}
+	for _, e := range append(append([]EventType{}, immediate...), CacheDivergence) {
+		if IsAccountWide(e) {
+			t.Errorf("%s must be item-scoped, not account-wide", e)
+		}
+		if IsImmediate(e) != (e != CacheDivergence) {
+			t.Errorf("%s immediacy = %v", e, IsImmediate(e))
+		}
+		found := false
+		for _, s := range Subscribable() {
+			found = found || s == e
+		}
+		if !found {
+			t.Errorf("%s must be subscribable", e)
+		}
+		if err := (Subscription{Subscriber: "x", Events: []EventType{e}}).Validate(0); err != nil {
+			t.Errorf("%s must validate: %v", e, err)
+		}
+		other := Subscription{Subscriber: "x", Repos: []string{"o/x"}}
+		if other.Matches(Event{Type: e, Repo: "o/other", Issue: 1}) {
+			t.Errorf("%s must respect the repo scope", e)
+		}
+	}
+}
