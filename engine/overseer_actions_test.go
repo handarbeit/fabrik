@@ -1033,3 +1033,19 @@ func TestOverseerNoPauseLiftOrFreeFormCommentSurface(t *testing.T) {
 		}
 	}
 }
+
+// #2112: an action given a bare N resolves on a multi-repo daemon (owner, no
+// repo) whose cached issues are all in one repo.
+func TestOverseerPromote_BareNOnMultiRepoDaemon(t *testing.T) {
+	client := &mockGitHubClient{}
+	liveStatus(client, "Backlog")
+	eng, _, act := overseerEngine(t, client, ovItem{number: 5, status: "Backlog"})
+	eng.cfg.Owner, eng.cfg.Repo = "owner", ""
+	res, err := act.Promote(localapi.PromoteParams{Subscriber: "my-session", Issue: "5", To: "Specify"})
+	if err != nil {
+		t.Fatalf("Promote: %v", err)
+	}
+	if res.Issue != "owner/repo#5" {
+		t.Errorf("Issue = %q", res.Issue)
+	}
+}
