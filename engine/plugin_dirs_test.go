@@ -1,0 +1,261 @@
+package engine
+
+import (
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+
+	"github.com/handarbeit/fabrik/stages"
+)
+
+// writePlugin creates dir/.claude-plugin/plugin.json with the given manifest
+// body and returns dir.
+func writePlugin(t *testing.T, dir, manifest string) string {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(dir, ".claude-plugin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, pluginManifestRel), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func namedPlugin(t *testing.T, dir, name string) string {
+	t.Helper()
+	return writePlugin(t, dir, `{"name":"`+name+`"}`)
+}
+
+func TestResolvePluginDirs_NoBaseNoExtras(t *testing.T) {
+	got, err := resolvePluginDirs(t.TempDir(), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("got %v, want empty", got)
+	}
+}
+
+func TestResolvePluginDirs_DefaultBase(t *testing.T) {
+	root := t.TempDir()
+	base := namedPlugin(t, filepath.Join(root, ".fabrik", "plugin"), "fabrik")
+	got, err := resolvePluginDirs(root, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{base}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+func TestResolvePluginDirs_OverrideReplacesBase(t *testing.T) {
+	root := t.TempDir()
+	namedPlugin(t, filepath.Join(root, ".fabrik", "plugin"), "fabrik")
+	override := t.TempDir() // bare directory: no manifest, must be tolerated
+	extra := namedPlugin(t, filepath.Join(root, "proj"), "proj")
+	got, err := resolvePluginDirs(root, override, []string{extra})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{override, extra}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+func TestResolvePluginDirs_ExtrasInOrderRelativeToFabrikDir(t *testing.T) {
+	root := t.TempDir()
+	base := namedPlugin(t, filepath.Join(root, ".fabrik", "plugin"), "fabrik")
+	a := namedPlugin(t, filepath.Join(root, ".fabrik", "plugins", "a"), "a")
+	b := namedPlugin(t, t.TempDir(), "b")
+	got, err := resolvePluginDirs(root, "", []string{".fabrik/plugins/a", b})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{base, a, b}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+func TestResolvePluginDirs_ExtrasAloneWithoutBase(t *testing.T) {
+	root := t.TempDir()
+	a := namedPlugin(t, filepath.Join(root, "a"), "a")
+	got, err := resolvePluginDirs(root, "", []string{a})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{a}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+func TestResolvePluginDirs_DuplicatePathsDropped(t *testing.T) {
+	root := t.TempDir()
+	base := namedPlugin(t, filepath.Join(root, ".fabrik", "plugin"), "fabrik")
+	a := namedPlugin(t, filepath.Join(root, "a"), "a")
+	got, err := resolvePluginDirs(root, "", []string{a, base, "a", a + "/"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{base, a}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+func TestResolvePluginDirs_BadExtraNamesPath(t *testing.T) {
+	root := t.TempDir()
+	missing := filepath.Join(root, "missing")
+	noManifest := filepath.Join(root, "bare")
+	if err := os.MkdirAll(noManifest, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	malformed := writePlugin(t, filepath.Join(root, "bad"), `{not json`)
+	emptyName := writePlugin(t, filepath.Join(root, "noname"), `{"name":""}`)
+	file := filepath.Join(root, "afile")
+	if err := os.WriteFile(file, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, dir := range []string{missing, noManifest, malformed, emptyName, file} {
+		_, err := resolvePluginDirs(root, "", []string{dir})
+		if err == nil {
+			t.Errorf("%s: expected error", dir)
+			continue
+		}
+		if !strings.Contains(err.Error(), dir) {
+			t.Errorf("%s: error %q does not name the path", dir, err)
+		}
+	}
+}
+
+func TestResolvePluginDirs_DuplicateNameNamesBothPaths(t *testing.T) {
+	root := t.TempDir()
+	a := namedPlugin(t, filepath.Join(root, "a"), "same")
+	b := namedPlugin(t, filepath.Join(root, "b"), "same")
+	_, err := resolvePluginDirs(root, "", []string{a, b})
+	if err == nil {
+		t.Fatal("expected duplicate-name error")
+	}
+	if !strings.Contains(err.Error(), a) || !strings.Contains(err.Error(), b) {
+		t.Fatalf("error %q should name both %s and %s", err, a, b)
+	}
+}
+
+func TestResolvePluginDirs_ExtraNamedFabrikCollidesWithDefaultBase(t *testing.T) {
+	root := t.TempDir()
+	base := namedPlugin(t, filepath.Join(root, ".fabrik", "plugin"), "fabrik")
+	extra := namedPlugin(t, filepath.Join(root, "mine"), "fabrik")
+	_, err := resolvePluginDirs(root, "", []string{extra})
+	if err == nil {
+		t.Fatal("expected collision error")
+	}
+	if !strings.Contains(err.Error(), base) || !strings.Contains(err.Error(), extra) {
+		t.Fatalf("error %q should name both paths", err)
+	}
+}
+
+func TestResolvePluginDirs_BaseWithoutManifestSkippedInNameCheck(t *testing.T) {
+	root := t.TempDir()
+	base := t.TempDir()
+	extra := namedPlugin(t, filepath.Join(root, "x"), "fabrik")
+	got, err := resolvePluginDirs(root, base, []string{extra})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{base, extra}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+// withPluginDirs sets the package global for one test and restores it.
+func withPluginDirs(t *testing.T, dirs []string) {
+	t.Helper()
+	prev := claudePluginDirs
+	claudePluginDirs = dirs
+	t.Cleanup(func() { claudePluginDirs = prev })
+}
+
+func pluginDirArgs(args []string) []string {
+	var out []string
+	for i, a := range args {
+		if a == "--plugin-dir" && i+1 < len(args) {
+			out = append(out, args[i+1])
+		}
+	}
+	return out
+}
+
+func TestBuildClaudeArgs_PluginDirs(t *testing.T) {
+	stage := &stages.Stage{Name: "Plan", Prompt: "plan"}
+
+	t.Run("none emits no --plugin-dir", func(t *testing.T) {
+		withPluginDirs(t, nil)
+		args := buildClaudeArgs(stage, "", "", 0, false, "", "")
+		if got := pluginDirArgs(args); len(got) != 0 {
+			t.Fatalf("got %v, want none", got)
+		}
+	})
+
+	t.Run("single dir is exactly today's arguments", func(t *testing.T) {
+		withPluginDirs(t, nil)
+		without := buildClaudeArgs(stage, "sess", "", 0, false, "", "")
+		withPluginDirs(t, []string{"/base"})
+		with := buildClaudeArgs(stage, "sess", "", 0, false, "", "")
+		if got := pluginDirArgs(with); !reflect.DeepEqual(got, []string{"/base"}) {
+			t.Fatalf("got %v", got)
+		}
+		// Removing the one flag pair must give the no-plugin arguments.
+		var stripped []string
+		for i := 0; i < len(with); i++ {
+			if with[i] == "--plugin-dir" {
+				i++
+				continue
+			}
+			stripped = append(stripped, with[i])
+		}
+		if !reflect.DeepEqual(stripped, without) {
+			t.Fatalf("stripped %v != %v", stripped, without)
+		}
+	})
+
+	t.Run("base plus extras emit one flag each in order", func(t *testing.T) {
+		withPluginDirs(t, []string{"/base", "/x", "/y"})
+		args := buildClaudeArgs(stage, "", "", 0, false, "", "")
+		if got := pluginDirArgs(args); !reflect.DeepEqual(got, []string{"/base", "/x", "/y"}) {
+			t.Fatalf("got %v", got)
+		}
+	})
+
+	t.Run("plugin dirs precede --resume", func(t *testing.T) {
+		withPluginDirs(t, []string{"/base", "/x"})
+		args := buildClaudeArgs(stage, "sess_1", "", 0, false, "", "")
+		last, resume := -1, -1
+		for i, a := range args {
+			if a == "--plugin-dir" {
+				last = i
+			}
+			if a == "--resume" {
+				resume = i
+			}
+		}
+		if last < 0 || resume < 0 || last > resume {
+			t.Fatalf("plugin-dir at %d, resume at %d in %v", last, resume, args)
+		}
+	})
+}
+
+func TestNew_PluginDirsRefusedOnDuplicateName(t *testing.T) {
+	root := t.TempDir()
+	namedPlugin(t, filepath.Join(root, ".fabrik", "plugin"), "fabrik")
+	extra := namedPlugin(t, filepath.Join(root, "mine"), "fabrik")
+	t.Chdir(root)
+	withPluginDirs(t, []string{"sentinel"})
+	_, err := New(Config{PluginDirs: []string{extra}})
+	if err == nil || !strings.Contains(err.Error(), extra) {
+		t.Fatalf("expected error naming %s, got %v", extra, err)
+	}
+	if !reflect.DeepEqual(claudePluginDirs, []string{"sentinel"}) {
+		t.Fatalf("global modified by refused New: %v", claudePluginDirs)
+	}
+}
