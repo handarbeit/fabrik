@@ -81,6 +81,9 @@ func (e *Engine) catchUpEvents() []channelevents.Event {
 		}
 		out = append(out, finishEvent(ev))
 	}
+	// A pipeline stall is current account state, unlike an item's time-driven
+	// stalled, so an open one is part of the snapshot (#2124).
+	out = append(out, e.pipelineCatchUpEvents(now)...)
 	return out
 }
 

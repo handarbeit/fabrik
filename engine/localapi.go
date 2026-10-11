@@ -245,6 +245,7 @@ func (e *Engine) attentionInput(st *itemstate.ItemState, now time.Time, threshol
 			in.LabelAppliedAt[k] = v
 		}
 	}
+	in.PollStall, in.PollRecoveredAt = e.attentionPollStall(now)
 	for _, t := range st.StageState.LastAttemptAt {
 		if t.After(in.LastAttemptAt) {
 			in.LastAttemptAt = t
@@ -986,6 +987,8 @@ func (b localAPIBackend) Health(localapi.HealthParams) (*localapi.HealthResult, 
 		MergeTrain: []localapi.TrainPartition{},
 	}
 
+	b.fillPollLiveness(&res.Poll, h, now)
+
 	if until, usageLimited := e.claudeUsageLimitedUntilTime(now); usageLimited {
 		res.Claude = localapi.ClaudeHealth{UsageLimited: true, UsageLimitedUntil: localapi.Some(until.UTC())}
 	} else {
@@ -999,6 +1002,9 @@ func (b localAPIBackend) Health(localapi.HealthParams) (*localapi.HealthResult, 
 		Low:        localapi.Unknown[bool](),
 		Ratio:      localapi.Unknown[float64](),
 		RestPaused: localapi.Some(bo.RestPaused),
+		// As-of times move only when the poll refreshes the gauge; never "now".
+		AsOf:           localapi.KnownTime(h.BackoffAsOf),
+		RestPausedAsOf: localapi.KnownTime(h.RestPausedAsOf),
 	}
 	if bo.Observed {
 		res.Backoff.Remaining = localapi.Some(bo.Remaining)
@@ -1021,8 +1027,39 @@ func (b localAPIBackend) Health(localapi.HealthParams) (*localapi.HealthResult, 
 	res.Workers.TrainInUse = localapi.Some(trainInUse)
 	res.Workers.TrainMax = localapi.Some(trainMax)
 
-	res.MergeTrain = b.partitions()
+	res.MergeTrain = b.partitions(now, h)
 	return res, nil
+}
+
+// fillPollLiveness fills the #2124 poll liveness fields from the health mirror.
+func (b localAPIBackend) fillPollLiveness(p *localapi.PollHealth, h healthSnapshot, now time.Time) {
+	e := b.e
+	p.IntervalSeconds = localapi.Unknown[int64]()
+	if iv := e.pollInterval(); iv > 0 {
+		p.IntervalSeconds = localapi.Some(secs(iv))
+	}
+	p.InProgress = h.PollInProgress
+	p.CurrentStartedAt, p.InProgressSeconds = localapi.Unknown[time.Time](), localapi.Unknown[int64]()
+	p.Step = localapi.Unknown[string]()
+	if h.PollInProgress {
+		p.CurrentStartedAt = localapi.KnownTime(h.PollStartedAt)
+		p.InProgressSeconds = ageSince(now, h.PollStartedAt)
+		if h.PollStep != "" {
+			p.Step = localapi.Some(h.PollStep)
+		}
+	}
+	p.LastCompletedAt = localapi.KnownTime(h.PollCompletedAt)
+	p.NextDueAt = localapi.KnownTime(h.NextPollDueAt)
+	p.BackingOff = h.BackoffReason != ""
+	p.BackoffReason = h.BackoffReason
+	v := e.pollVerdictFor(h, now)
+	p.Overdue, p.OverdueAfterSeconds, p.BlockedSeconds = localapi.Unknown[bool](), localapi.Unknown[int64](), localapi.Unknown[int64]()
+	if v.Known {
+		p.Overdue = localapi.Some(v.Overdue)
+		p.OverdueAfterSeconds = localapi.Some(secs(v.OverdueAfter))
+		p.BlockedSeconds = localapi.Some(secs(v.Blocked))
+		p.OverdueCause = v.Cause
+	}
 }
 
 func (b localAPIBackend) webhookMode() string {
@@ -1039,36 +1076,31 @@ func (b localAPIBackend) webhookMode() string {
 	}
 }
 
-// partitions lists every (repo, base) partition that has members or a worker.
-func (b localAPIBackend) partitions() []localapi.TrainPartition {
-	type key struct{ repo, base string }
-	parts := map[key]*localapi.TrainPartition{}
-	get := func(repo, base string) *localapi.TrainPartition {
-		k := key{repo, base}
-		p := parts[k]
-		if p == nil {
-			p = &localapi.TrainPartition{Repo: repo, Base: base, Members: []string{}}
-			parts[k] = p
+// partitions lists every (repo, base) partition that has members or a worker,
+// with its liveness (#2124): the oldest queued time, the durable run phase and,
+// when members are queued with no run, why.
+func (b localAPIBackend) partitions(now time.Time, h healthSnapshot) []localapi.TrainPartition {
+	states := b.e.partitionStates(now, h)
+	out := make([]localapi.TrainPartition, 0, len(states))
+	for _, st := range states {
+		p := localapi.TrainPartition{
+			Repo:                st.Repo,
+			Base:                st.Base,
+			Members:             []string{},
+			WorkerInFlight:      b.trainWorkerActive(st.Repo, st.Base),
+			OldestQueuedSince:   localapi.KnownTime(st.OldestQueued),
+			OldestQueuedSeconds: ageSince(now, st.OldestQueued),
+			RunActive:           st.RunActive,
+			Phase:               st.Phase,
+			PhaseSince:          localapi.KnownTime(st.PhaseSince),
+			IdleReason:          st.Live.IdleReason,
+			IdleDetail:          st.Live.IdleDetail,
+			Stalled:             st.Live.Stalled,
 		}
-		return p
-	}
-	for _, r := range b.trainRows() {
-		p := get(r.repo, r.base)
-		p.Members = append(p.Members, issueRef(r.repo, r.number))
-	}
-	for _, k := range b.e.store.RepoWorkerKeys() {
-		repo, base, _ := strings.Cut(k, ":")
-		get(repo, base).WorkerInFlight = true
-	}
-	out := make([]localapi.TrainPartition, 0, len(parts))
-	for _, p := range parts {
-		out = append(out, *p)
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Repo != out[j].Repo {
-			return out[i].Repo < out[j].Repo
+		for _, r := range st.Members {
+			p.Members = append(p.Members, issueRef(r.repo, r.number))
 		}
-		return out[i].Base < out[j].Base
-	})
+		out = append(out, p)
+	}
 	return out
 }

@@ -1230,17 +1230,22 @@ func (e *Engine) PollWithBackoff(ctx context.Context, configuredInterval time.Du
 				restStats.Remaining, restStats.Limit, restStats.Reset.Format(time.RFC3339))
 			e.emitStructural(tui.RateLimitAlertEvent{Bucket: tui.RateLimitBucketREST, Exhausted: true, Reset: restStats.Reset})
 			e.backoffRestPaused = true
-			e.health.setRestPaused(true)
 		}
-		return PollBackoffResult{NextInterval: restStats.Reset.Sub(e.now()) + rateLimitResetBuffer}, nil
+		// Refreshed on every attempt (not only on a transition), so the as-of
+		// time means "last refreshed by a poll" (#2124).
+		e.health.setRestPaused(true, e.now())
+		restWait := restStats.Reset.Sub(e.now()) + rateLimitResetBuffer
+		e.health.setNextPollDue(e.now().Add(restWait), backoffReasonREST)
+		e.health.setPollPeriod(restWait, backoffReasonREST)
+		return PollBackoffResult{NextInterval: restWait}, nil
 	}
 	if e.backoffRestPaused {
 		e.logf(0, "info", "REST rate limit reset (%d/%d remaining) — resuming work\n",
 			restStats.Remaining, restStats.Limit)
 		e.emitStructural(tui.RateLimitAlertEvent{Bucket: tui.RateLimitBucketREST, Exhausted: false})
 		e.backoffRestPaused = false
-		e.health.setRestPaused(false)
 	}
+	e.health.setRestPaused(false, e.now())
 
 	result, err := e.poll(ctx)
 	if err != nil {
@@ -1288,7 +1293,7 @@ func (e *Engine) PollWithBackoff(ctx context.Context, configuredInterval time.Du
 			e.backoffRateLimitRatio = 1.0
 		}
 		e.backoffLastRemaining = graphqlStats.Remaining
-		e.health.setGraphQLBackoff(e.backoffRateLimitLow, e.backoffRateLimitRatio, graphqlStats.Remaining)
+		e.health.setGraphQLBackoff(e.backoffRateLimitLow, e.backoffRateLimitRatio, graphqlStats.Remaining, e.now())
 	}
 
 	// Compute and apply effective interval.
@@ -1327,6 +1332,17 @@ func (e *Engine) PollWithBackoff(ctx context.Context, configuredInterval time.Du
 		GraphQLStats:      tui.RateLimitStats{Limit: graphqlStats.Limit, Remaining: graphqlStats.Remaining, Reset: graphqlStats.Reset},
 		EffectiveInterval: effectiveInterval,
 	})
+	// Publish the engine's own next-poll-due time (#2124): the overdue verdict
+	// measures "no poll started" from it, so deliberate back-off is not a stall.
+	backoffReason := ""
+	switch {
+	case e.backoffRateLimitLow:
+		backoffReason = backoffReasonGraphQL
+	case effectiveInterval > configuredInterval:
+		backoffReason = backoffReasonIdle
+	}
+	e.health.setNextPollDue(e.now().Add(effectiveInterval), backoffReason)
+	e.health.setPollPeriod(effectiveInterval, backoffReason)
 	return PollBackoffResult{NextInterval: effectiveInterval, Ran: true}, nil
 }
 
@@ -1384,7 +1400,30 @@ func (e *Engine) HasInFlightWorker() bool {
 	return e.store.HasInFlightWorker()
 }
 
+// poll runs one poll cycle and records its lifecycle in the health mirror
+// (#2124): start, the step it is in, and — in a defer, so an error or early
+// return cannot leave in_progress stuck — completion. Both PollWithBackoff
+// (production) and PollOnce (the sim seam) come through here.
 func (e *Engine) poll(ctx context.Context) (pollResult, error) {
+	start := e.now()
+	e.health.beginPoll(start, e.pollVerdictFor(e.health.snapshot(), start))
+	defer func() {
+		end := e.now()
+		v := e.pollVerdictFor(e.health.snapshot(), end)
+		// An errored poll leaves the Run() ticker at its previous period, so the
+		// next poll is due after that period (a deliberate back-off included),
+		// not after the configured interval.
+		next := e.pollInterval()
+		if p := e.health.pollPeriodSnapshot(); p > next {
+			next = p
+		}
+		e.health.endPoll(end, v, end.Add(next))
+	}()
+	return e.pollCycle(ctx)
+}
+
+func (e *Engine) pollCycle(ctx context.Context) (pollResult, error) {
+	e.setPollStep("polling: refreshing the board cache")
 	e.emitStructural(tui.PollStartedEvent{Owner: e.cfg.Owner, Repo: e.cfg.Repo, Project: e.cfg.ProjectNum})
 	if c := e.cache(); c != nil && c.IsBootstrapped() && !c.IsPaused() {
 		e.logf(0, "poll", "reading project board from cache: %s/%s#%d\n", e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum)
@@ -1392,6 +1431,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		e.logf(0, "poll", "fetching project board from GitHub: %s/%s#%d\n", e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum)
 	}
 
+	e.setPollStep("layer 2 status sweep")
 	// Layer 2 gate: check project.updatedAt before the board read so the cache
 	// holds fresh Status values when poll() processes items this cycle.
 	// Only active when the in-memory cache is bootstrapped (cacheImpl != nil and
@@ -1440,6 +1480,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			// Paused: FetchProjectBoard below falls through to GitHub directly.
 		case c.IsBootstrapped() || c.ProjectID() != "":
 			// Bootstrapped: use probe-driven refresh (avoids full shallow fetch cost).
+			e.setPollStep("probe and deep fetch")
 			e.runProbeAndDeepFetch(c)
 		default:
 			// Virgin: probe bootstrap (~250 nodes vs ~2350 for full shallow fetch).
@@ -1459,6 +1500,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		}
 	}
 
+	e.setPollStep("fetching the project board")
 	board, err := e.readClient.FetchProjectBoard(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum, e.cfg.OwnerType)
 	if err != nil {
 		pollStatusClear()
@@ -1646,6 +1688,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		return s
 	}()
 
+	e.setPollStep("selecting deep-fetch candidates")
 	deepFetchCandidates, deepFetched := e.selectDeepFetchCandidates(board, repoFilter, cycleSet, priorInQueue)
 
 	// Catch-up loop: operates only on deepFetchCandidates so the full label set is available.
@@ -1723,6 +1766,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	// Open-item half only (ADR-1387) — sourced from deepFetchCandidates, which
 	// no longer admits closed items at Validate. The closed-item half is the
 	// board-sourced settleClosedValidateAdvance immediately below.
+	e.setPollStep("settle scans")
 	e.runValidatePRTerminalAdvance(board, deepFetchCandidates, advancedItems)
 
 	// Closed-item Validate terminal advance settle scan (ADR-1387): the
@@ -1784,6 +1828,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	// incorrectly pass shallow-label items (labels(first:5) only) to itemNeedsWork,
 	// which could miss stage-complete labels beyond position 5 and re-dispatch
 	// already-completed items on every poll after their updatedAt settles.
+	e.setPollStep("dispatch")
 	dispatched, slotDeferredKeys := e.dispatchCandidates(ctx, board, deepFetchCandidates)
 	for _, k := range slotDeferredKeys {
 		slotDeferred[k] = true
@@ -1796,6 +1841,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		// #2051: evaluate (and, after a restart, adopt) the persisted merge-train runs
 		// BEFORE Queued routing, so a restarted partition is claimed by its own record and
 		// never formed fresh over it.
+		e.setPollStep("merge train")
 		e.settleTrainRuns(ctx, board)
 		e.handleMergeTrainBatch(ctx, board)
 	}
@@ -1816,6 +1862,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	// fabrik:awaiting-member-close. Runs unconditionally, independent of merge_train:
 	// on/off, so a marker written while merge_train was enabled keeps draining even if
 	// the setting is later turned off.
+	e.setPollStep("post-dispatch settle scans")
 	e.settleMergeTrainMemberCloses(board)
 
 	// Runaway guard alert settle scan (ADR-1533): retries the outstanding
@@ -1876,6 +1923,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	// Remove stale fabrik:locked labels from closed issues. This handles the case
 	// where an issue was closed while a stage was in-flight, leaving the lock label
 	// behind. We do this every poll so it also catches locks from prior Fabrik runs.
+	e.setPollStep("cleanup")
 	e.cleanupClosedIssueLocks(board)
 	// Sweep transient lifecycle labels from closed issues every poll cycle (#617).
 	e.cleanupClosedIssueTransientLabels(board)

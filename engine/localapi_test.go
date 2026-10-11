@@ -556,7 +556,7 @@ func TestLocalAPIHealth(t *testing.T) {
 	e.health.notePollSuccess(now.Add(-45 * time.Second))
 	e.health.noteReconcileOK(now.Add(-2 * time.Minute))
 	e.health.noteWebhookEvent(now.Add(-10 * time.Second))
-	e.health.setGraphQLBackoff(true, 0.15, 750)
+	e.health.setGraphQLBackoff(true, 0.15, 750, time.Now())
 	e.claudeUsageLimitMu.Lock()
 	e.claudeUsageLimitedUntil = now.Add(3 * time.Hour)
 	e.claudeUsageLimitMu.Unlock()
@@ -770,7 +770,7 @@ func TestLocalAPIConcurrentWithPollSideWrites(t *testing.T) {
 			e.store.Apply(itemstate.ReviewCycleIncremented{Repo: "owner/repo", Number: n, StageName: "Implement"})
 			e.health.notePollAttempt(time.Now())
 			e.health.notePollSuccess(time.Now())
-			e.health.setGraphQLBackoff(i%2 == 0, 0.5, i)
+			e.health.setGraphQLBackoff(i%2 == 0, 0.5, i, time.Now())
 			e.store.Apply(itemstate.LocalLabelRemoved{Repo: "owner/repo", Number: n, Label: "fabrik:awaiting-ci"})
 		}
 	}()

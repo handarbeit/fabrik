@@ -413,3 +413,94 @@ func TestWaitWithNoDeadlineBecomesStalled(t *testing.T) {
 		}
 	}
 }
+
+func stalledNoProgress() Input {
+	in := baseInput()
+	in.StatusEnteredAt = t0.Add(-2 * time.Hour)
+	return in
+}
+
+func TestPollStallAttribution(t *testing.T) {
+	stall := PollStall{Active: true, Blocked: 923 * time.Second, Step: "dispatch: waiting for a worker slot"}
+
+	// Healthy poll: an item with no progress is stalled, exactly as before.
+	healthy := Classify(stalledNoProgress())
+	if healthy.State != Stalled || healthy.Rank != RankStalled {
+		t.Fatalf("healthy poll: got %s rank %d, want stalled", healthy.State, healthy.Rank)
+	}
+
+	// Overdue poll: the same item waits for the poll and is not ranked.
+	in := stalledNoProgress()
+	in.PollStall = stall
+	got := Classify(in)
+	if got.State != Waiting || got.Code != CodeWaitingForPoll || got.Rank != NotRanked {
+		t.Fatalf("overdue poll: got %s/%s rank %d, want waiting/%s unranked", got.State, got.Code, got.Rank, CodeWaitingForPoll)
+	}
+	want := "waiting for the poll: blocked for 923 s, in step dispatch: waiting for a worker slot"
+	if got.Summary != want || got.Next.Action != want {
+		t.Fatalf("summary %q / action %q, want %q", got.Summary, got.Next.Action, want)
+	}
+
+	// Stage-complete-stuck is also an engine-owned obstacle.
+	in = stalledNoProgress()
+	in.Labels = []string{"stage:Implement:complete"}
+	in.PollStall = stall
+	if got := Classify(in); got.State != Waiting || got.Code != CodeWaitingForPoll {
+		t.Fatalf("stage-complete-stuck under stalled poll: got %s/%s", got.State, got.Code)
+	}
+
+	// A wait keeps its state and code; the cause is prepended.
+	in = baseInput()
+	in.Labels = []string{"fabrik:awaiting-ci"}
+	in.PollStall = PollStall{Active: true, Blocked: 10 * time.Second}
+	got = Classify(in)
+	if got.State != Waiting || got.Code != "fabrik:awaiting-ci" || !strings.HasPrefix(got.Summary, "waiting for the poll: blocked for 10 s") {
+		t.Fatalf("wait under stalled poll: got %s/%s %q", got.State, got.Code, got.Summary)
+	}
+	if strings.Contains(got.Summary, ", in step") {
+		t.Fatalf("unknown step must not be invented: %q", got.Summary)
+	}
+
+	// Verdicts that need a human or a worker are untouched.
+	for _, mod := range []func(*Input){
+		func(in *Input) { in.Labels = []string{"fabrik:paused", "fabrik:awaiting-input"} },
+		func(in *Input) { in.Labels = []string{"fabrik:api-key-helper-detected"} },
+		func(in *Input) {
+			in.HasWorker = true
+			in.WorkerStartedAt = t0.Add(-3 * time.Hour)
+			in.StatusEnteredAt = t0.Add(-3 * time.Hour)
+		},
+		func(in *Input) { in.Closed = true },
+	} {
+		a := stalledNoProgress()
+		mod(&a)
+		b := a
+		b.PollStall = stall
+		ra, rb := Classify(a), Classify(b)
+		if ra.State != rb.State || ra.Code != rb.Code || ra.Summary != rb.Summary {
+			t.Fatalf("verdict changed under stalled poll: %s/%s %q -> %s/%s %q", ra.State, ra.Code, ra.Summary, rb.State, rb.Code, rb.Summary)
+		}
+	}
+}
+
+func TestPollRecoveryFloorsProgressAnchor(t *testing.T) {
+	in := stalledNoProgress()
+	in.PollRecoveredAt = t0.Add(-time.Minute)
+	got := Classify(in)
+	if got.State == Stalled {
+		t.Fatalf("an item must get a fresh stall window after the poll recovers, got %s/%s", got.State, got.Code)
+	}
+	// Unknown anchor stays unknown.
+	in = baseInput()
+	in.StatusEnteredAt = time.Time{}
+	in.PollRecoveredAt = t0.Add(-time.Hour)
+	if r := Classify(in); !r.ProgressAt.IsZero() {
+		t.Fatalf("unknown anchor must stay unknown, got %v", r.ProgressAt)
+	}
+	// A recovery long ago does not hide a real stall.
+	in = stalledNoProgress()
+	in.PollRecoveredAt = t0.Add(-90 * time.Minute)
+	if got := Classify(in); got.State != Stalled {
+		t.Fatalf("stall after an old recovery: got %s", got.State)
+	}
+}

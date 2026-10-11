@@ -43,6 +43,9 @@ func (realClock) Now() time.Time { return time.Now() }
 // are unaffected.
 func (e *Engine) SetClock(c Clock) {
 	e.clock = c
+	// The pipeline-liveness verdict (#2124) measures "no poll started" from the
+	// daemon's start; keep that stamp on the same clock as the verdict.
+	e.health.markStarted(e.now())
 }
 
 // now returns the current time, from the injected clock if one was set via
