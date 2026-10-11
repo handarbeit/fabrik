@@ -186,6 +186,21 @@ type ProjectItem struct {
 	// known, so the first label-bearing population is a silent baseline (#2123).
 	// Negative on purpose: a producer that forgets it fails noisy, never silent.
 	LabelsAbsent bool
+
+	// IssueLayerUpdatedAt is the issue-and-project-item part of UpdatedAt: the
+	// later of content.updatedAt and the project item's updatedAt (display-field
+	// bumps discounted), without the linked PR's updatedAt. Zero means the
+	// producer did not capture the layers separately; the cache then falls back
+	// to UpdatedAt (#2180).
+	IssueLayerUpdatedAt time.Time
+	// LinkedPRUpdatedAt is the first linked PR's own updatedAt (zero when there
+	// is no linked PR or the producer did not capture it). The engine never
+	// anchors this layer to its own writes (#2180).
+	LinkedPRUpdatedAt time.Time
+	// IssueCommentTotal is GitHub's `comments { totalCount }` for the issue
+	// (not the linked PR). Meaningful only when IssueCommentTotalKnown.
+	IssueCommentTotal      int
+	IssueCommentTotalKnown bool
 }
 
 // Milestone is the minimal milestone identity Fabrik caches per item.
@@ -312,8 +327,15 @@ type BoardProbeItem struct {
 	State              string
 	Repo               string
 	EffectiveUpdatedAt time.Time
-	LinkedPRNumber     int
-	LinkedPRUpdatedAt  time.Time
+	// IssueLayerUpdatedAt is EffectiveUpdatedAt without the linked PR's
+	// updatedAt: the issue and project-item layers only (#2180).
+	IssueLayerUpdatedAt time.Time
+	// IssueCommentTotal is GitHub's `comments { totalCount }` for the issue;
+	// meaningful only when IssueCommentTotalKnown (#2180).
+	IssueCommentTotal      int
+	IssueCommentTotalKnown bool
+	LinkedPRNumber         int
+	LinkedPRUpdatedAt      time.Time
 	LinkedPRHeadSHA    string // headRefOid from GraphQL probe query; empty if no linked PR
 	Status             string
 }
