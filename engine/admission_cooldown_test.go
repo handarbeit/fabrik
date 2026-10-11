@@ -328,7 +328,7 @@ func TestAdmission_RetryBackoffExpiryReadmitsOnce(t *testing.T) {
 
 	board := cooldownAdmissionBoard(item)
 	// The poll after the worker exits: admitted (label churn), refused by the backoff.
-	if n := eng.dispatchCandidates(context.Background(), board, []gh.ProjectItem{item}); n != 0 {
+	if n, _ := eng.dispatchCandidates(context.Background(), board, []gh.ProjectItem{item}); n != 0 {
 		t.Fatalf("dispatched %d item(s) inside the retry backoff, want 0", n)
 	}
 	snap, _ := eng.store.Get(cooldownTestRepo, 76)
@@ -389,7 +389,7 @@ func TestAdmission_SentinelLiveRefusalRecordsCooldown(t *testing.T) {
 		return []procArgvEntry{{PID: 4242, Argv: []string{"claude", sentinel}}}, nil
 	}
 
-	if n := eng.dispatchCandidates(context.Background(), cooldownAdmissionBoard(item), []gh.ProjectItem{item}); n != 0 {
+	if n, _ := eng.dispatchCandidates(context.Background(), cooldownAdmissionBoard(item), []gh.ProjectItem{item}); n != 0 {
 		t.Fatalf("dispatched %d item(s) with a live sentinel, want 0", n)
 	}
 	snap, _ := eng.store.Get(cooldownTestRepo, 78)
