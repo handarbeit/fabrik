@@ -21,7 +21,9 @@ func TestMain(m *testing.M) {
 	if err == nil {
 		os.Setenv("FABRIK_LOCK_DIR", dir)
 	}
+	cleanupWarnings := testenv.IsolateWarningsProcess()
 	code := m.Run()
+	cleanupWarnings()
 	if err == nil {
 		os.RemoveAll(dir)
 	}

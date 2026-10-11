@@ -175,6 +175,9 @@ func TestInvokeClaude_AC1_AC2_BackgroundDescendantOutsideWorktreeReaped(t *testi
 // "leaked," which is what this test independently confirms about the old
 // mechanism alone.
 func TestReapWorktreeProcesses_AC2_Neutralization(t *testing.T) {
+	// TestMain disables the macOS lsof enumeration process-wide (#1805); with it
+	// off this check would pass vacuously, so exercise the real reaper.
+	useRealLsofReaper(t)
 	worktreeDir := t.TempDir() // stands in for the issue's real worktree
 	outsideDir := t.TempDir()  // stands in for a t.TempDir()-rooted test fixture, outside the worktree
 	descendant := exec.Command("sh", "-c", "cd '"+outsideDir+"' && exec sleep 30")

@@ -2612,10 +2612,10 @@ func TestMergeTrainWorker_ConflictTurnLimitedButResolvedStaysInBatch(t *testing.
 			t.Error("issue #2 must not receive an ejection comment — the worktree shows the conflict was actually resolved")
 		}
 	}
-	// The account-wide suspension-clearing signal must still fire on a turn-limited
+	// The account-wide usage-limit hold-clearing signal must still fire on a turn-limited
 	// exit exactly as it does on a clean success (ADR-1120's principle applied here).
-	if _, suspended := eng.claudeSuspendedUntilTime(time.Now()); suspended {
-		t.Error("expected no account-wide Claude suspension after a turn-limited (not usage-limited) exit")
+	if _, usageLimited := eng.claudeUsageLimitedUntilTime(time.Now()); usageLimited {
+		t.Error("expected no account-wide Claude usage-limit hold after a turn-limited (not usage-limited) exit")
 	}
 }
 
@@ -3212,9 +3212,9 @@ func TestMergeTrainWorker_UsageLimitDuringConflictResolution(t *testing.T) {
 			t.Error("issue #2 must not be ejected on a Claude usage-limit hit")
 		}
 	}
-	// The account-wide suspension must have been activated by the detection.
-	if _, suspended := eng.claudeSuspendedUntilTime(time.Now()); !suspended {
-		t.Error("expected account-wide Claude suspension to be active after the usage-limit hit")
+	// The account-wide usage-limit hold must have been activated by the detection.
+	if _, usageLimited := eng.claudeUsageLimitedUntilTime(time.Now()); !usageLimited {
+		t.Error("expected account-wide Claude usage-limit hold to be active after the usage-limit hit")
 	}
 	// In-flight entry must still be cleared despite the fatal error (ADR-067).
 	if _, ok := eng.mergeTrainInFlight.Load(mergeTrainKey("owner/repo", "main")); ok {

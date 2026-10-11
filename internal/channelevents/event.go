@@ -24,8 +24,8 @@ const (
 	BlockerCleared            EventType = "blocker-cleared"
 	ChildrenSpawned           EventType = "children-spawned"
 	LandingVerificationFailed EventType = "landing-verification-failed"
-	ClaudeLimitSuspended      EventType = "claude-limit-suspended"
-	ClaudeLimitLifted         EventType = "claude-limit-lifted"
+	ClaudeUsageLimited        EventType = "claude-usage-limited"
+	ClaudeUsageLimitLifted    EventType = "claude-usage-limit-lifted"
 	DaemonUnreachable         EventType = "daemon-unreachable"
 	DaemonReachable           EventType = "daemon-reachable"
 
@@ -102,8 +102,8 @@ var catalog = map[EventType]Info{
 	BlockerCleared:            {},
 	ChildrenSpawned:           {},
 	LandingVerificationFailed: {},
-	ClaudeLimitSuspended:      {AccountWide: true},
-	ClaudeLimitLifted:         {AccountWide: true},
+	ClaudeUsageLimited:        {AccountWide: true},
+	ClaudeUsageLimitLifted:    {AccountWide: true},
 	DaemonUnreachable:         {Immediate: true, AccountWide: true, ShimGenerated: true},
 	DaemonReachable:           {AccountWide: true, ShimGenerated: true},
 	EventsDropped:             {Immediate: true, AccountWide: true, Synthetic: true},
@@ -129,7 +129,7 @@ func Subscribable() []EventType {
 		ValidateSettled, LabelApplied, LabelRemoved, Paused, AwaitingInput, AwaitingInputStale,
 		Escalated, Stalled, CycleLimitNear, MergeTrainEjected, MergeTrainFailed, CITimeout,
 		ReviewTimeout, Merged, BlockerCleared, ChildrenSpawned, LandingVerificationFailed,
-		ClaudeLimitSuspended, ClaudeLimitLifted, DaemonUnreachable, DaemonReachable,
+		ClaudeUsageLimited, ClaudeUsageLimitLifted, DaemonUnreachable, DaemonReachable,
 	}
 	return order
 }

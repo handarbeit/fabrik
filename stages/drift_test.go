@@ -571,3 +571,46 @@ func TestWarnStageDrift_PersistSpecMissingWarns(t *testing.T) {
 		t.Errorf("expected drift warning to name persist_spec, got: %q", out.String())
 	}
 }
+
+// A dismissed stage_drift warning stays dismissed while its missing-key set is
+// unchanged and reappears when the set changes (#2135).
+func TestWarnStageDrift_DismissalFollowsMissingKeys(t *testing.T) {
+	setWarningsOverride(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "specify.yaml")
+	write := func(body string) *Stage {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(body), 0644); err != nil {
+			t.Fatal(err)
+		}
+		return &Stage{Name: "Specify", FilePath: path}
+	}
+	key := "stage_drift:Specify"
+	state := func() (found, dismissed bool) {
+		es, _ := warnings.Load()
+		for _, e := range es {
+			if e.Key == key {
+				return true, e.Dismissed
+			}
+		}
+		return false, false
+	}
+
+	var out strings.Builder
+	WarnStageDrift([]*Stage{write("name: Specify\nskill: fabrik-specify\nread_only: true\n")}, "v0.0.99", &out)
+	if found, _ := state(); !found {
+		t.Fatal("expected a stage_drift entry")
+	}
+	_ = warnings.Dismiss(key)
+
+	WarnStageDrift([]*Stage{write("name: Specify\nskill: fabrik-specify\nread_only: true\n")}, "v0.0.99", &out)
+	if _, dismissed := state(); !dismissed {
+		t.Error("unchanged missing set must stay dismissed")
+	}
+
+	WarnStageDrift([]*Stage{write("name: Specify\nskill: fabrik-specify\nread_only: true\npersist_spec: true\n")}, "v0.0.99", &out)
+	found, dismissed := state()
+	if found && dismissed {
+		t.Error("a changed missing set must reappear")
+	}
+}

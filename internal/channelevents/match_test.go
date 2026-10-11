@@ -78,8 +78,8 @@ func TestSubscriptionScopes(t *testing.T) {
 		{"milestone unknown never matches", Subscription{Milestone: "v1"}, Event{Type: Paused, Repo: "o/r", Issue: 5}, false},
 		{"event filter miss", Subscription{Events: []EventType{Merged}}, ev, false},
 		{"event filter hit", Subscription{Events: []EventType{Paused, Merged}}, ev, true},
-		{"account-wide ignores scope", Subscription{Repos: []string{"o/x"}, Issues: []IssueRef{{Number: 1}}, Milestone: "v9"}, Event{Type: ClaudeLimitSuspended}, true},
-		{"account-wide still honours event filter", Subscription{Events: []EventType{Merged}}, Event{Type: ClaudeLimitSuspended}, false},
+		{"account-wide ignores scope", Subscription{Repos: []string{"o/x"}, Issues: []IssueRef{{Number: 1}}, Milestone: "v9"}, Event{Type: ClaudeUsageLimited}, true},
+		{"account-wide still honours event filter", Subscription{Events: []EventType{Merged}}, Event{Type: ClaudeUsageLimited}, false},
 	}
 	for _, c := range cases {
 		if got := c.sub.Matches(c.ev); got != c.want {

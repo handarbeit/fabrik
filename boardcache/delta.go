@@ -537,8 +537,10 @@ func (c *CacheImpl) applyIssuesDelta(payload []byte) {
 // cases of applyIssuesDelta: echo the match, ensure the issue is in the Store,
 // apply the given mutation, and bump the local delta on a real change.
 func (c *CacheImpl) applyIssueLabelMutationDelta(owner, fullRepo string, issNum int, key, action, labelName string, mutation itemstate.Mutation) {
-	echoed := false
-	if c.matchEchoReportedFn != nil {
+	echoed, via := false, ""
+	if c.matchEchoViaFn != nil {
+		echoed, via = c.matchEchoViaFn("issues", action, key+"+"+labelName)
+	} else if c.matchEchoReportedFn != nil {
 		echoed = c.matchEchoReportedFn("issues", action, key+"+"+labelName)
 	} else if c.matchEchoFn != nil {
 		c.matchEchoFn("issues", action, key+"+"+labelName)
@@ -546,9 +548,15 @@ func (c *CacheImpl) applyIssueLabelMutationDelta(owner, fullRepo string, issNum 
 	switch v := mutation.(type) {
 	case itemstate.IssueLabeled:
 		v.EchoOfEngine = echoed
+		if echoed {
+			v.Requester = via
+		}
 		mutation = v
 	case itemstate.IssueUnlabeled:
 		v.EchoOfEngine = echoed
+		if echoed {
+			v.Requester = via
+		}
 		mutation = v
 	}
 	if err := c.ensureIssueInStore(owner, fullRepo, issNum); err != nil {

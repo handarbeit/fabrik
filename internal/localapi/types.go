@@ -319,10 +319,10 @@ type ReconcileHealth struct {
 	SinceSuccessSeconds Known[int64]     `json:"since_success_seconds"`
 }
 
-// ClaudeHealth is the account-wide usage-limit suspension.
+// ClaudeHealth is the account-wide usage-limit hold.
 type ClaudeHealth struct {
-	Suspended      bool             `json:"suspended"`
-	SuspendedUntil Known[time.Time] `json:"suspended_until"`
+	UsageLimited      bool             `json:"usage_limited"`
+	UsageLimitedUntil Known[time.Time] `json:"usage_limited_until"`
 }
 
 // BackoffHealth mirrors the GraphQL rate-limit backoff state.
@@ -430,6 +430,14 @@ type SetAutonomyParams struct {
 
 // RevalidateParams applies fabrik:revalidate to a Validate-column item.
 type RevalidateParams struct {
+	Subscriber string `json:"subscriber"`
+	Issue      string `json:"issue"`
+}
+
+// AdvanceParams moves an item whose current stage is complete exactly one
+// configured stage forward (#2126). There is no target: the engine's own
+// advance decides the next stage.
+type AdvanceParams struct {
 	Subscriber string `json:"subscriber"`
 	Issue      string `json:"issue"`
 }

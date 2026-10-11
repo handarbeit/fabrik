@@ -385,6 +385,9 @@ func NewEnv(t *testing.T, opts EnvOptions) *Env {
 	// see that method's doc comment for why the single-key registration
 	// NewWithDeps does on its own is a no-op (registered under a key no real
 	// repo matches) once cfg.Repo is "".
+	// Cleanup-heavy scenarios must not spawn a real macOS `lsof` per worktree
+	// teardown (#1805); process-wide and idempotent.
+	engine.SetWorktreeReapLsofDisabledForTest(true)
 	var eng *engine.Engine
 	if opts.SecondRepo != nil {
 		eng = engine.NewWithDeps(cfg, inst, claude, nil)

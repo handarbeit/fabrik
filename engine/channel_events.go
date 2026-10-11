@@ -23,7 +23,7 @@ import (
 //   - explicit, nil-safe emitEvent calls at engine transition points that have
 //     no store signal of their own;
 //   - a ticker for the time-driven events (stalled, a lazily lifted Claude
-//     suspension).
+//     usage-limit hold).
 //
 // Zero-GitHub-cost rule (R9) and observation-only rule (R10): nothing here
 // reaches GitHub — no e.client/e.readClient, no Store.Get (it has a GitHub
@@ -79,7 +79,7 @@ type channelEvents struct {
 	// "gates clear" point (runCatchUpPhase2) since the last drain.
 	settleCand map[string]settleCandidate
 	// nudge asks the consumer to re-check account-wide state (the Claude
-	// usage-limit suspension) without waiting for the next tick.
+	// usage-limit hold) without waiting for the next tick.
 	nudge bool
 
 	// consumer-owned (no lock): only run() touches these.
@@ -194,7 +194,7 @@ func (ce *channelEvents) enqueue(evs ...channelevents.Event) {
 }
 
 // channelNudge asks the deriver to re-check account-wide state. Called from the
-// Claude suspension transition points; a void, non-blocking observation call.
+// Claude usage-limit hold transition points; a void, non-blocking observation call.
 func (e *Engine) channelNudge() {
 	ce := e.channelEvents()
 	if ce == nil {
@@ -219,15 +219,15 @@ func (ce *channelEvents) seed() {
 	e := ce.e
 	now := e.now()
 	threshold := e.channelStallThreshold()
-	suspended := e.channelSuspendedUntil(now)
-	ce.claudeLimited = !suspended.IsZero()
+	usageLimited := e.channelUsageLimitedUntil(now)
+	ce.claudeLimited = !usageLimited.IsZero()
 	e.store.Scan(func(st *itemstate.ItemState) {
 		if st.IsPR {
 			return
 		}
 		key := issueRef(st.Repo, st.Number)
 		m := ce.memoFor(key)
-		res := attention.Classify(e.attentionInput(st, now, threshold, suspended))
+		res := attention.Classify(e.attentionInput(st, now, threshold, usageLimited))
 		m.pauseKey = pauseFamilyKey(res)
 		ce.armCounters(m, st, true)
 		m.staleDone = hasLabelStr(st.Labels, "fabrik:awaiting-input")
@@ -379,28 +379,50 @@ func (ce *channelEvents) drain() {
 	}
 }
 
-// actorOf attributes a label change: fabrik (the engine's own write, or the
-// webhook echo of one), human, bot (another bot), or unknown (a reconcile or
-// deep fetch saw it first and no webhook told us who did it).
-func (e *Engine) labelActor(c itemstate.Change) string {
+// labelAttribution is who caused a label change, as pushed on a label event.
+type labelAttribution struct {
+	// Actor is fabrik, overseer, human, bot or unknown.
+	Actor string
+	// Login is the GitHub login of a human or bot actor; empty otherwise.
+	Login string
+	// Via is the sanitised overseer subscriber behind an overseer actor.
+	Via string
+}
+
+// labelAttribute attributes a label change (#1968 R3, #2125). In order:
+//  1. a requester carried by an engine write or a matched webhook echo: an
+//     overseer action, whatever the App-sender check would say;
+//  2. the engine's own write, or the webhook echo of one: fabrik;
+//  3. a webhook without a sender, and everything first seen by a reconcile,
+//     deep fetch or probe (no read the engine already makes names the actor, so
+//     none is added; ADR 2125): unknown;
+//  4. a sender equal to the App's own login under App auth: fabrik;
+//  5. a sender ending in [bot]: bot, with its login;
+//  6. any other sender: human, with its login.
+func (e *Engine) labelAttribute(c itemstate.Change) labelAttribution {
 	switch c.Origin {
 	case itemstate.OriginEngine:
-		return "fabrik"
+		if c.Requester != "" {
+			return labelAttribution{Actor: "overseer", Via: c.Requester}
+		}
+		return labelAttribution{Actor: "fabrik"}
 	case itemstate.OriginWebhook:
 		switch {
+		case c.EchoOfEngine && c.Requester != "":
+			return labelAttribution{Actor: "overseer", Via: c.Requester}
 		case c.EchoOfEngine:
-			return "fabrik"
+			return labelAttribution{Actor: "fabrik"}
 		case c.Sender == "":
-			return "unknown"
+			return labelAttribution{Actor: "unknown"}
 		case e.ghAppAuth != nil && strings.EqualFold(c.Sender, e.selfLogin()):
-			return "fabrik"
+			return labelAttribution{Actor: "fabrik"}
 		case strings.HasSuffix(strings.ToLower(c.Sender), "[bot]"):
-			return "bot"
+			return labelAttribution{Actor: "bot", Login: c.Sender}
 		default:
-			return "human"
+			return labelAttribution{Actor: "human", Login: c.Sender}
 		}
 	}
-	return "unknown"
+	return labelAttribution{Actor: "unknown"}
 }
 
 // baseEvent fills the routing and identity fields shared by every event.
@@ -430,12 +452,21 @@ func (e *Engine) labelEvent(st *itemstate.ItemState, c itemstate.Change, d items
 	if d.Added {
 		typ, verb = channelevents.LabelApplied, "applied"
 	}
-	actor := e.labelActor(c)
+	attr := e.labelAttribute(c)
 	ev := e.baseEvent(st, typ)
 	ev.Label = d.Label
 	ev.Meta["label"] = d.Label
-	ev.Meta["actor"] = actor
-	ev.Content = fmt.Sprintf("%s %s on %s (by %s)", d.Label, verb, issueRef(st.Repo, st.Number), actor)
+	ev.Meta["actor"] = attr.Actor
+	by := attr.Actor
+	if attr.Via != "" {
+		ev.Meta["via"] = attr.Via
+		by += " " + attr.Via
+	}
+	if attr.Login != "" {
+		ev.Meta["actor_login"] = attr.Login
+		by += " " + attr.Login
+	}
+	ev.Content = fmt.Sprintf("%s %s on %s (by %s)", d.Label, verb, issueRef(st.Repo, st.Number), by)
 	if st.Status != "" {
 		ev.Content += " at " + st.Status
 	}
