@@ -381,3 +381,23 @@ func printMigrationNotice(p *migrationPlan, out io.Writer) {
 		fmt.Fprintf(out, "fabrik upgrade: workflow migration refused: %s\n", p.Blocked)
 	}
 }
+
+// migrationPendingDetail describes what `fabrik upgrade` would do, for the
+// warnings panel. Unresolved bare names are not part of it: they cannot be
+// migrated, so they must not keep the entry raised.
+func migrationPendingDetail(p *migrationPlan) string {
+	var parts []string
+	if p.MoveTree {
+		parts = append(parts, fmt.Sprintf(".fabrik/plugin has local edits that will move to %s", fabrikplugin.LocalWorkflowsRelDir))
+	}
+	if p.RestoreBase && !p.MoveTree {
+		parts = append(parts, ".fabrik/plugin will be restored from the binary")
+	}
+	if p.NormaliseLocal && !p.MoveTree {
+		parts = append(parts, fmt.Sprintf("%s needs finishing (an interrupted migration)", fabrikplugin.LocalWorkflowsRelDir))
+	}
+	if n := len(p.StageEdits); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d stage file(s) have skill references to qualify", n))
+	}
+	return "A workflow migration is pending: " + strings.Join(parts, "; ") + "."
+}

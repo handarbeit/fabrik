@@ -492,3 +492,46 @@ func TestMigrate_UsesBasePluginNameConstant(t *testing.T) {
 		t.Error("upgrade_migrate.go hard-codes a qualified fabrik name; use plugin.BasePluginName")
 	}
 }
+
+func TestMigrate_PendingDetailNamesWhatWillChange(t *testing.T) {
+	dir := deployFixture(t, "v0.0.77")
+	editSkill(t, dir, "fabrik-plan")
+	plan, err := planMigration(".", true, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := migrationPendingDetail(plan)
+	for _, want := range []string{"local edits", "local-workflows", "stage file(s)"} {
+		if !strings.Contains(d, want) {
+			t.Errorf("detail %q lacks %q", d, want)
+		}
+	}
+}
+
+// Bare names nothing resolves cannot be migrated, so they must not keep the
+// "pending" entry raised.
+func TestMigrate_UnresolvedBareNamesAreNotPending(t *testing.T) {
+	dir := deployFixture(t, "v0.0.77")
+	files, _ := filepath.Glob(filepath.Join(dir, ".fabrik", "stages", "*.yaml"))
+	for _, f := range files {
+		data, _ := os.ReadFile(f)
+		out := string(data)
+		for _, s := range fabrikplugin.ShippedSkillNames() {
+			out = strings.ReplaceAll(out, ": "+s+"\n", ": fabrik:"+s+"\n")
+		}
+		if err := os.WriteFile(f, []byte(out), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	data, _ := os.ReadFile(files[0])
+	if err := os.WriteFile(files[0], append(data, []byte("rebase_skill: someone-elses-skill\n")...), 0644); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := planMigration(".", true, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Pending() || len(plan.Notes) == 0 {
+		t.Errorf("pending=%v notes=%v", plan.Pending(), plan.Notes)
+	}
+}

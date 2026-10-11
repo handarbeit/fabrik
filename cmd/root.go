@@ -1098,6 +1098,15 @@ func Execute() error {
 		// Staleness is unknown when the state check itself failed.
 		pluginState.RefreshSkipped = true
 	}
+	// A pending workflow migration (#2139) is only ever reported here — the
+	// daemon never moves files or rewrites stage YAML; `fabrik upgrade` does.
+	// A vendored development plugin set is not migratable, so it is not pending.
+	if cfg.PluginDir == "" && pluginEvalErr == nil {
+		if plan, planErr := planMigration(".", strings.HasPrefix(Version, "dev"), ""); planErr == nil && plan.Pending() {
+			pluginState.MigrationPending = true
+			pluginState.MigrationDetail = migrationPendingDetail(plan)
+		}
+	}
 	var pluginW io.Writer
 	if !useTUI {
 		pluginW = os.Stderr
@@ -1325,7 +1334,7 @@ func pluginCustomizationWarning(pluginDir string, staleCount int) string {
 	if diffing, diffErr := diffingPluginFiles(pluginDir); diffErr == nil && len(diffing) > 0 {
 		msg += fmt.Sprintf(" (differing: %s)", strings.Join(diffing, ", "))
 	}
-	msg += "; run 'fabrik upgrade --force' to overwrite, or 'fabrik upgrade --reconcile' for a reconciliation prompt"
+	msg += "; run 'fabrik upgrade' to move your edits into .fabrik/plugins/local-workflows and restore upgrades, 'fabrik upgrade --force' to overwrite them, or 'fabrik upgrade --reconcile' for a reconciliation prompt"
 	if staleCount > 0 {
 		msg += stalenessNote(pluginDir, staleCount)
 	}
