@@ -333,3 +333,23 @@ func TestChannelNotificationKeepsAttributionKeys(t *testing.T) {
 		}
 	}
 }
+
+func TestSubscribeToolPassesProgressViaColumn(t *testing.T) {
+	_, p, err := buildCall(ToolSubscribe, json.RawMessage(`{"progress_via_column":true,"events":["column-changed"]}`), "topic-x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sp := p.(localapi.SubscribeParams); !sp.ProgressViaColumn {
+		t.Fatalf("progress_via_column dropped: %+v", sp)
+	}
+	_, p, _ = buildCall(ToolSubscribe, json.RawMessage(`{}`), "topic-x")
+	if p.(localapi.SubscribeParams).ProgressViaColumn {
+		t.Fatal("option must default off")
+	}
+	// The new event names are offered in the tool schema.
+	for _, want := range []string{"item-added", "column-changed", "closed"} {
+		if !strings.Contains(eventList(), want) {
+			t.Errorf("event list lacks %q", want)
+		}
+	}
+}

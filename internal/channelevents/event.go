@@ -30,6 +30,12 @@ const (
 	DaemonReachable           EventType = "daemon-reachable"
 	PipelineStalled           EventType = "pipeline-stalled"
 	PipelineResumed           EventType = "pipeline-resumed"
+	// ItemAdded, ColumnChanged and Closed are the lifecycle events (#2123): a new
+	// managed open item arrived on the board after startup; an item's board
+	// Status changed; an issue was closed.
+	ItemAdded     EventType = "item-added"
+	ColumnChanged EventType = "column-changed"
+	Closed        EventType = "closed"
 
 	// EventsDropped is synthetic: the hub inserts it at the head of a
 	// subscriber's queue when overflow discarded the oldest events.
@@ -61,6 +67,10 @@ type Event struct {
 	// Label is the label a label-applied/-removed event is about; the
 	// subscription label patterns match it.
 	Label string `json:"label,omitempty"`
+	// Labels are the labels an item-added event arrived with. Subscription label
+	// include patterns match when any of them matches; the exclude list does not
+	// apply, so an arrival is never hidden by its own churn labels (#2123).
+	Labels []string `json:"labels,omitempty"`
 	// MilestoneKnown reports whether the item's milestone has been captured.
 	// An item whose milestone is unknown never matches a milestone scope.
 	MilestoneKnown  bool   `json:"milestone_known,omitempty"`
@@ -110,6 +120,9 @@ var catalog = map[EventType]Info{
 	DaemonReachable:           {AccountWide: true, ShimGenerated: true},
 	PipelineStalled:           {Immediate: true, AccountWide: true},
 	PipelineResumed:           {Immediate: true, AccountWide: true},
+	ItemAdded:                 {},
+	ColumnChanged:             {},
+	Closed:                    {},
 	EventsDropped:             {Immediate: true, AccountWide: true, Synthetic: true},
 	Digest:                    {Immediate: true, AccountWide: true, Synthetic: true},
 	StreamSuperseded:          {Immediate: true, AccountWide: true, ShimGenerated: true, Synthetic: true},
@@ -135,6 +148,7 @@ func Subscribable() []EventType {
 		ReviewTimeout, Merged, BlockerCleared, ChildrenSpawned, LandingVerificationFailed,
 		ClaudeUsageLimited, ClaudeUsageLimitLifted, DaemonUnreachable, DaemonReachable,
 		PipelineStalled, PipelineResumed,
+		ItemAdded, ColumnChanged, Closed,
 	}
 	return order
 }

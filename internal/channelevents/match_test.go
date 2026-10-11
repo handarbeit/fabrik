@@ -1,6 +1,10 @@
 package channelevents
 
-import "testing"
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
 
 func TestGlobMatch(t *testing.T) {
 	cases := []struct {
@@ -141,5 +145,75 @@ func TestPipelineEventsAreAccountWideAndSubscribable(t *testing.T) {
 		if err := (Subscription{Subscriber: "x", Events: []EventType{e}}).Validate(MinDigest); err != nil {
 			t.Errorf("events filter rejects %s: %v", e, err)
 		}
+	}
+}
+
+func TestItemAddedMatchesArrivalLabels(t *testing.T) {
+	ev := Event{Type: ItemAdded, Repo: "o/r", Issue: 4, Labels: []string{"fabrik:cruise", "fabrik:editing"}}
+	if !(Subscription{Subscriber: "x"}).Matches(ev) {
+		t.Error("an unscoped subscription takes item-added")
+	}
+	if !(Subscription{Subscriber: "x", Labels: []string{"fabrik:cruise"}}).Matches(ev) {
+		t.Error("a label scope must match an arrival label")
+	}
+	if (Subscription{Subscriber: "x", Labels: []string{"fabrik:yolo"}}).Matches(ev) {
+		t.Error("a label scope with no matching arrival label must not match")
+	}
+	// The default exclude list is not applied: arriving with fabrik:editing is
+	// still an arrival.
+	if !(Subscription{Subscriber: "x", Labels: []string{"fabrik:editing"}}).Matches(ev) {
+		t.Error("exclude list must not hide an arrival")
+	}
+	if (Subscription{Subscriber: "x", Repos: []string{"o/other"}}).Matches(ev) {
+		t.Error("repo scope must apply to item-added")
+	}
+	if (Subscription{Subscriber: "x", Milestone: "v1"}).Matches(ev) {
+		t.Error("unknown milestone must not match a milestone scope")
+	}
+}
+
+func TestProgressViaColumn(t *testing.T) {
+	stage := []Event{
+		{Type: LabelApplied, Label: "stage:Plan:complete"},
+		{Type: LabelRemoved, Label: "stage:Plan:in_progress"},
+	}
+	none := []string{}
+	on := Subscription{Subscriber: "x", ProgressViaColumn: true, ExcludeLabels: &none, Labels: []string{"stage:*"}}
+	for _, ev := range stage {
+		if on.Matches(ev) {
+			t.Errorf("progress_via_column should drop %q even past labels/exclude_labels", ev.Label)
+		}
+	}
+	if !on.Matches(Event{Type: ColumnChanged}) {
+		t.Error("column-changed must still be delivered")
+	}
+	other := Subscription{Subscriber: "x", ProgressViaColumn: true}
+	if !other.Matches(Event{Type: LabelApplied, Label: "fabrik:paused"}) {
+		t.Error("other labels must still be delivered")
+	}
+	off := Subscription{Subscriber: "x"}
+	if !off.Matches(stage[0]) {
+		t.Error("without the option delivery is unchanged")
+	}
+	// Events list that omits column-changed: Validate rejects the combination.
+	bad := Subscription{Subscriber: "x", ProgressViaColumn: true, Events: []EventType{LabelApplied}}
+	if err := bad.Validate(MinDigest); err == nil {
+		t.Error("progress_via_column without column-changed must be rejected")
+	}
+	ok := Subscription{Subscriber: "x", ProgressViaColumn: true, Events: []EventType{LabelApplied, ColumnChanged}}
+	if err := ok.Validate(MinDigest); err != nil {
+		t.Errorf("valid combination rejected: %v", err)
+	}
+}
+
+func TestProgressViaColumnPersistedCompat(t *testing.T) {
+	// An old persisted subscription (no field) loads with the option off, and the
+	// canonical form of an option-off subscription omits the key.
+	var s Subscription
+	if err := json.Unmarshal([]byte(`{"id":"a","subscriber":"x"}`), &s); err != nil || s.ProgressViaColumn {
+		t.Fatalf("old subscription: %v %+v", err, s)
+	}
+	if strings.Contains(s.canonical(), "progress_via_column") {
+		t.Error("option-off canonical form must omit the key")
 	}
 }

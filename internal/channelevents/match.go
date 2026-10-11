@@ -93,10 +93,28 @@ func (s Subscription) Matches(ev Event) bool {
 			return false
 		}
 	}
-	if IsLabelEvent(ev.Type) && !s.labelAllowed(ev.Label) {
+	if IsLabelEvent(ev.Type) {
+		if !s.labelAllowed(ev.Label) {
+			return false
+		}
+		if s.ProgressViaColumn && s.TakesColumnChanged() && matchAny(StageProgressLabels, ev.Label) {
+			return false
+		}
+	}
+	if ev.Type == ItemAdded && len(s.Labels) > 0 && !anyMatches(s.Labels, ev.Labels) {
 		return false
 	}
 	return true
+}
+
+// anyMatches reports whether any name matches any pattern.
+func anyMatches(patterns, names []string) bool {
+	for _, n := range names {
+		if matchAny(patterns, n) {
+			return true
+		}
+	}
+	return false
 }
 
 // milestoneMatches compares a subscription's milestone (a title, or "#N" for a
