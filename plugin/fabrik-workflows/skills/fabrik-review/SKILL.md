@@ -71,7 +71,7 @@ When resolving merge conflicts during rebase, you MUST be conservative:
 
 4. **Check for new files on the base branch.** Rebase conflicts in existing files are visible, but new files added to the base (new source files, new test files, new subcommands) won't show as conflicts — they just appear. Never delete files that came from the base.
 
-5. **After the full rebase, run the tests** before proceeding with review: a rebase moves HEAD, so the CI-green skip rule (see "Push and verify") does not apply to the rebased head. In a CI-gated stage (`ci_gated: true` in `.fabrik-context/ci-status.md`) run the build plus the tests for the packages the conflicts touched and rely on the engine's CI gate for the rest; otherwise run `go test ./...`. If tests fail, the conflict resolution was wrong — investigate and fix before continuing.
+5. **After the full rebase, run the tests** before proceeding with review: a rebase moves HEAD, so the CI-green skip (see "Which tests to run locally" under "Push and verify") does not apply to the rebased head. In a CI-gated stage (`ci_gated: true` in `.fabrik-context/ci-status.md`) run the build plus the tests for the packages the conflicts touched and rely on the engine's CI gate for the rest; only when `ci_gated` is `false` run the full suite. If tests fail, the conflict resolution was wrong — investigate and fix before continuing.
 
 Common mistake: a feature branch that doesn't have a function added on the base will "resolve" the conflict by keeping its version (without the function). This silently deletes working code. Always check `git diff origin/<base-branch>..HEAD` after rebase to verify you haven't lost anything from the base.
 
@@ -145,7 +145,7 @@ git diff origin/<base-branch>..HEAD
 - Are there tests for new functionality?
 - Do tests cover error paths, not just happy paths?
 - Are tests actually testing behavior, not just exercising code?
-- Run the test suite: do all tests pass? (Or, when the CI-green skip rule under "Push and verify" holds, cite CI's green result on that SHA instead of rerunning.)
+- Run the tests the table under "Which tests to run locally" (in "Push and verify") selects: do they pass? (On a CI-gated stage that is the targeted run, or CI's green result on the head SHA cited instead of rerunning.)
 - (#1687, R1) If a test's purpose is to prove a specific guard rejects, does its
   assertion distinguish that guard's rejection from every other possible rejection
   reason — not just a boolean/exit-code outcome that any rejection would satisfy? See
@@ -192,23 +192,34 @@ Commit after each fix, not in bulk. This makes it easy to review your review.
 
 ### Push and verify
 
-#### Skipping a redundant full-suite run — `.fabrik-context/ci-status.md`
+#### Which tests to run locally — `.fabrik-context/ci-status.md`
 
-When the item has a linked PR, the engine writes `.fabrik-context/ci-status.md` before this invocation: the PR number, `head_sha` (the PR head), `verdict` (`green`, `red`, `pending`, `none` or `unknown`), `ci_gated` (`true` when this stage waits for CI) and `written_at`. CI has already run the whole suite on `head_sha` when the verdict is `green`, so rerunning it locally on the same commit repeats work CI did.
+When the item has a linked PR, the engine writes `.fabrik-context/ci-status.md` before this invocation: the PR number, `head_sha` (the PR head), `verdict` (`green`, `red`, `pending`, `none` or `unknown`), `ci_gated` (`true` when this stage waits for CI via `wait_for_ci`) and `written_at`. Read it first and find the row below that matches; it decides what you run locally. Check the rows top to bottom and use the first that matches.
 
-**Skip the full-suite run only when ALL three of these hold** — a partial match is not a match:
+| Condition | Run locally | Test Suite line |
+|---|---|---|
+| `ci-status.md` is absent, or `ci_gated: false` | The full-suite step as written below, unchanged — nothing else will run it. | `PASSED` |
+| `ci_gated: true`, `verdict: green`, `git rev-parse HEAD` (its own command) prints `head_sha`, and `git status --porcelain` (its own command) prints nothing | Nothing — skip the test invocation, and name the SHA and the file's `written_at` in your output. | `SKIPPED — CI green on <sha>` |
+| `ci_gated: true`, `verdict: red` | Read the failing checks first (`gh pr checks`, or the run log) and reproduce only the failing tests, once. Never rerun the whole suite to find them. | `TARGETED — <packages>; full suite left to CI on <sha>` |
+| `ci_gated: true`, `verdict` is `pending`, `unknown` or `none`, **or** HEAD differs from `head_sha` (this run pushed or rebased, or a previous invocation pushed the head), **or** the tree is dirty | The build plus the tests for the packages the diff touches (including any package whose tests read the changed content, such as embedded skills or docs), once. | `TARGETED — <packages>; full suite left to CI on <sha>` |
 
-1. `verdict` in `.fabrik-context/ci-status.md` is exactly `green`.
-2. `git rev-parse HEAD` (run it as its own command) prints the same SHA as `head_sha`.
-3. `git status --porcelain` (run it as its own command) prints nothing.
+**On a CI-gated stage (`ci_gated: true`) you never run the full suite locally** — not the whole-module test command, and not an equivalent such as a list of every package. The full-suite verdict is CI's, and the engine's `wait_for_ci` gate on the pushed head is the backstop; a `pending` verdict is not a reason to run the suite yourself. Only when `ci_gated` is `false` (or there is no `ci-status.md`) does the full-suite step stay.
 
-When all three hold, skip the test invocation and say so in your output, naming the SHA and the file's `written_at` (for example: `Full suite skipped — CI green on <sha> (ci-status.md written <timestamp>)`). In every other case — the file is absent, the verdict is anything other than `green`, HEAD differs from `head_sha`, or the tree is dirty — run the step exactly as written below.
+**Test command rules (hard).** These apply to every local test command, whatever the verdict:
 
-**After you change code** (including a rebase that moves HEAD, such as the pre-completion rebase): HEAD no longer matches `head_sha`, so condition 2 fails. If `ci_gated` is `true`, run the build plus the tests for the packages or modules you touched, then push — the full suite is CI's job, and the engine's `wait_for_ci` gate on the new head is the backstop. If `ci_gated` is `false`, no CI gate backstops this stage, so run the full suite as written below.
+- Every test command carries the framework's own timeout, and for Go `-timeout` is 5m or less (for example `go test -race -timeout 5m ./engine`). The whole command must finish inside the Bash tool's limit (590 s). The Go timeout is per test binary, so a full-module run on the `ci_gated: false` path that cannot fit is split into several foreground commands by package group, each with `-timeout 5m`.
+- Never raise the timeout to fit a broader run — narrow the run instead.
+- Never background a test command and then poll it. Run it synchronously in the foreground.
+- Diagnose before retrying. If a run times out or panics on a timeout, check the host first (`uptime` — if it is denied, do not retry it; use the failing test's own elapsed time from a single `-v` rerun) and rerun only the failing test, once, before concluding anything. Never retry with a broader set of tests or a longer timeout.
+- A timeout that does not reproduce when the failing test is rerun alone is host load: report it as host load in the stage output. It is not a fix trigger and does not count as a failure of the change. A timeout that does reproduce in isolation is an ordinary test failure.
 
-**Everything else in this stage stays.** Skipping the suite skips only the test invocation. The code review itself, the rebase, and every fix-and-push step still run. In your report, say `Tests: SKIPPED — CI green on <sha>` instead of claiming tests passed.
+**Report what ran.** The Test Suite line of your stage output, the PR description audit and the final summary all use exactly one of these: `TARGETED — <packages>; full suite left to CI on <sha>`, `SKIPPED — CI green on <sha>`, or `PASSED` (a full run, `ci_gated: false` only).
 
-After all fixes, run the project's build and test commands (unless the skip rule above applies). **Always include a per-test timeout** appropriate to the framework (e.g., `pytest --timeout=60`, `go test -timeout 5m`, `jest --testTimeout=30000`). Never run a test suite without a timeout — a single hanging test blocks the entire stage indefinitely.
+**Everything else in this stage stays.** Skipping or narrowing the suite skips only the full test invocation. The code review itself, the rebase, and every fix-and-push step still run.
+
+After all fixes, run the build and the tests the table under "Which tests to run locally" selects. **Always include a per-test timeout** appropriate to the framework (e.g., `pytest --timeout=60`, `go test -timeout 5m`, `jest --testTimeout=30000`), and obey the "Test command rules (hard)" above. Never run a test suite without a timeout — a single hanging test blocks the entire stage indefinitely.
+
+Only when `ci_gated: false` (or there is no `ci-status.md`) is the full suite part of this step:
 
 ```bash
 go build ./...        # or equivalent
@@ -285,7 +296,7 @@ Organize your findings:
 - **Issue**: Description. **Fix**: What was changed.
 
 ### Verified
-- Tests pass (N tests, M packages) — or `SKIPPED — CI green on <sha>` when the CI-green skip rule held
+- Test Suite: `TARGETED — <packages>; full suite left to CI on <sha>`, `SKIPPED — CI green on <sha>`, or `PASSED` (a full run, `ci_gated: false` only) — with N tests, M packages when run
 - No race conditions detected
 - Rebased onto latest main
 
@@ -298,7 +309,7 @@ Organize your findings:
 When `post_to_pr` is true, provide a brief summary between markers:
 ```
 FABRIK_SUMMARY_BEGIN
-Reviewed implementation of <feature>. Fixed N issues (describe briefly). Tests pass. PR is ready for human review.
+Reviewed implementation of <feature>. Fixed N issues (describe briefly). Test Suite: <TARGETED / SKIPPED / PASSED line>. PR is ready for human review.
 FABRIK_SUMMARY_END
 ```
 
