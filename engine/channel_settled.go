@@ -297,7 +297,11 @@ func (ce *channelEvents) closeSettleEpisode(ref string, st *itemstate.ItemState)
 		!hasLabelStr(st.Labels, "fabrik:rebase-needed") {
 		ended = false
 	}
-	reason := ce.e.validateWithdrawalReason(st, ce.memoFor(ref).rebaseSeen)
+	m := ce.memo[ref]
+	if m == nil {
+		m = &itemMemo{} // closing an episode never creates the item's memo (derive owns the first-sight baseline)
+	}
+	reason := ce.e.validateWithdrawalReason(st, m.rebaseSeen)
 	// A worker dispatch or new feedback also withdraw a settlement that the
 	// older end conditions do not cover. An episode opened at the landing
 	// decision (yolo) still has its worker, so it is exempt.
@@ -311,7 +315,7 @@ func (ce *channelEvents) closeSettleEpisode(ref string, st *itemstate.ItemState)
 	if reason != "" && !settlementWithdrawalDisabled.Load() {
 		ev := ce.e.withdrawnEvent(st, string(channelevents.ValidateSettled), reason)
 		ev.DedupKey = fmt.Sprintf("swvs:%s:%d", ref, n)
-		ce.enqueueDerived([]channelevents.Event{ce.withComment(ce.memoFor(ref), st, ev)})
+		ce.enqueueDerived([]channelevents.Event{ce.withComment(m, st, ev)})
 	}
 }
 

@@ -84,9 +84,12 @@ func (ce *channelEvents) evaluateItem(key string, d *dirtyItem) {
 	}
 	st := snap.State()
 	ce.enqueueDerived(ce.announceArrival(key, &st))
-	m := ce.memoFor(key)
-	m.rebaseSeen = d != nil && d.rebaseSeen
-	defer func() { m.rebaseSeen = false }()
+	// The memo is not created here: derive() treats "no memo" as a first sight
+	// and records the silent baseline.
+	if m := ce.memo[key]; m != nil {
+		m.rebaseSeen = d != nil && d.rebaseSeen
+		defer func() { m.rebaseSeen = false }()
+	}
 	ce.closeSettleEpisode(key, &st)
 	ce.enqueueDerived(ce.derive(key, &st, d))
 }
