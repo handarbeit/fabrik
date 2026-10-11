@@ -51,6 +51,9 @@ const (
 	CodeWorkerNoProgress      = "worker-no-progress"
 	CodeNoProgress            = "no-progress"
 	CodeStageCompleteStuck    = "stage-complete-not-advanced"
+	// CodeWaitingForPoll marks an item whose only obstacle is that the daemon's
+	// poll loop is overdue (#2124); the engine, not the item, is stalled.
+	CodeWaitingForPoll = "waiting-for-poll"
 )
 
 // Attention-view ranks: lower is more urgent. NotRanked items are omitted from
@@ -107,6 +110,18 @@ type Config struct {
 	ReviewWaitTimeout time.Duration
 }
 
+// PollStall describes an overdue poll loop (#2124). The zero value means the
+// poll is healthy (or its state is unknown), so every classification is
+// exactly what it was before the field existed.
+type PollStall struct {
+	// Active is true while the poll loop is overdue.
+	Active bool
+	// Blocked is how long the poll has been in progress or absent.
+	Blocked time.Duration
+	// Step is the poll step the engine reports, or "" when unknown.
+	Step string
+}
+
 // Input is everything the classifier needs, already extracted from the cache.
 // Zero times mean unknown.
 type Input struct {
@@ -146,6 +161,13 @@ type Input struct {
 
 	// ClaudeUsageLimitedUntil is the account-wide usage-limit hold end; zero if none.
 	ClaudeUsageLimitedUntil time.Time
+
+	// PollStall is set while the daemon's poll loop is overdue.
+	PollStall PollStall
+	// PollRecoveredAt is when the last overdue poll episode ended; zero if none.
+	// It floors the progress anchor so items blocked by the stall get a fresh
+	// stall window instead of reading as stalled the instant the poll recovers.
+	PollRecoveredAt time.Time
 }
 
 // Reason is one label (or condition) contributing to the classification.
@@ -239,6 +261,41 @@ func hasLabel(labels []string, l string) bool {
 // Classify computes the attention Result for one item. It is a pure function
 // of in.
 func Classify(in Input) Result {
+	return attributePollStall(in, classify(in))
+}
+
+// attributePollStall blames the engine, not the item, when the poll loop is
+// overdue (#2124). A result that says the item itself has stalled becomes an
+// unranked wait for the poll; a wait or idle verdict (whose next step is a
+// poll) keeps its state and code with the cause prepended. Verdicts that need
+// a human or a running worker are untouched. With PollStall inactive the result
+// is returned as is.
+func attributePollStall(in Input, res Result) Result {
+	if !in.PollStall.Active {
+		return res
+	}
+	text := pollWaitText(in.PollStall)
+	switch {
+	case res.State == Stalled && (res.Code == CodeOverdue || res.Code == CodeNoProgress || res.Code == CodeStageCompleteStuck):
+		res.State, res.Code, res.Rank = Waiting, CodeWaitingForPoll, NotRanked
+		res.Summary = text
+		res.Next.Action = text
+	case res.State == Waiting, res.State == Idle && res.Code == "idle":
+		res.Summary = text + "; " + res.Summary
+		res.Next.Action = text + "; " + res.Next.Action
+	}
+	return res
+}
+
+func pollWaitText(p PollStall) string {
+	text := fmt.Sprintf("waiting for the poll: blocked for %d s", int64(p.Blocked.Seconds()))
+	if p.Step != "" {
+		text += ", in step " + p.Step
+	}
+	return text
+}
+
+func classify(in Input) Result {
 	res := Result{Rank: NotRanked}
 	res.ProgressAt = progressAnchor(in)
 	if !res.ProgressAt.IsZero() && !in.Now.IsZero() {
@@ -467,6 +524,11 @@ func progressAnchor(in Input) time.Time {
 	consider(in.WorkerStartedAt)
 	for _, t := range in.LabelAppliedAt {
 		consider(t)
+	}
+	// An unknown anchor stays unknown; a known one is floored at the end of the
+	// last overdue poll episode (#2124).
+	if !latest.IsZero() {
+		consider(in.PollRecoveredAt)
 	}
 	return latest
 }

@@ -28,6 +28,8 @@ const (
 	ClaudeUsageLimitLifted    EventType = "claude-usage-limit-lifted"
 	DaemonUnreachable         EventType = "daemon-unreachable"
 	DaemonReachable           EventType = "daemon-reachable"
+	PipelineStalled           EventType = "pipeline-stalled"
+	PipelineResumed           EventType = "pipeline-resumed"
 
 	// EventsDropped is synthetic: the hub inserts it at the head of a
 	// subscriber's queue when overflow discarded the oldest events.
@@ -106,6 +108,8 @@ var catalog = map[EventType]Info{
 	ClaudeUsageLimitLifted:    {AccountWide: true},
 	DaemonUnreachable:         {Immediate: true, AccountWide: true, ShimGenerated: true},
 	DaemonReachable:           {AccountWide: true, ShimGenerated: true},
+	PipelineStalled:           {Immediate: true, AccountWide: true},
+	PipelineResumed:           {Immediate: true, AccountWide: true},
 	EventsDropped:             {Immediate: true, AccountWide: true, Synthetic: true},
 	Digest:                    {Immediate: true, AccountWide: true, Synthetic: true},
 	StreamSuperseded:          {Immediate: true, AccountWide: true, ShimGenerated: true, Synthetic: true},
@@ -130,6 +134,7 @@ func Subscribable() []EventType {
 		Escalated, Stalled, CycleLimitNear, MergeTrainEjected, MergeTrainFailed, CITimeout,
 		ReviewTimeout, Merged, BlockerCleared, ChildrenSpawned, LandingVerificationFailed,
 		ClaudeUsageLimited, ClaudeUsageLimitLifted, DaemonUnreachable, DaemonReachable,
+		PipelineStalled, PipelineResumed,
 	}
 	return order
 }

@@ -410,7 +410,7 @@ func infraNote(diag *trainCIDiagnostic) string {
 
 // markInfraAbandon starts the post-abandon cooldown for a train partition.
 func (e *Engine) markInfraAbandon(trainKey string) {
-	until := time.Now().Add(e.ciInfraTimingOrDefault().abandonCooldown)
+	until := e.now().Add(e.ciInfraTimingOrDefault().abandonCooldown)
 	e.mergeTrainInfraMu.Lock()
 	defer e.mergeTrainInfraMu.Unlock()
 	if e.mergeTrainInfraCooldown == nil {
@@ -428,9 +428,27 @@ func (e *Engine) infraCooldownRemaining(trainKey string) (time.Duration, bool) {
 	if !ok {
 		return 0, false
 	}
-	remaining := time.Until(until)
+	remaining := until.Sub(e.now())
 	if remaining <= 0 {
 		delete(e.mergeTrainInfraCooldown, trainKey)
+		return 0, false
+	}
+	return remaining, true
+}
+
+// infraCooldownPeek is infraCooldownRemaining without the side effect: an
+// elapsed entry is reported as not held and left in place. The read-only
+// health path (#2124) uses it so observing the cooldown never mutates engine
+// state.
+func (e *Engine) infraCooldownPeek(trainKey string) (time.Duration, bool) {
+	e.mergeTrainInfraMu.Lock()
+	defer e.mergeTrainInfraMu.Unlock()
+	until, ok := e.mergeTrainInfraCooldown[trainKey]
+	if !ok {
+		return 0, false
+	}
+	remaining := until.Sub(e.now())
+	if remaining <= 0 {
 		return 0, false
 	}
 	return remaining, true
