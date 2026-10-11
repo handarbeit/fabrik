@@ -20,6 +20,10 @@ type ProjectBoard struct {
 	Title     string // display name of the project board (from projectV2.title)
 	OwnerType string // "organization" or "user", resolved by FetchProjectBoard
 	Items     []ProjectItem
+	// FetchedAt is the instant just before the listing was requested. Set only
+	// by CacheImpl.LightReconcile so Reconcile can tell which engine writes the
+	// listing cannot have seen (#2159). Zero means unknown: no protection.
+	FetchedAt time.Time
 }
 
 // Dependency represents a blocking issue relationship fetched from the GitHub API.

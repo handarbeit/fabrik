@@ -103,6 +103,14 @@ type ItemState struct {
 	// recordLabelAppliedAtNow call (engine/mutate.go); a label this map has no
 	// entry for simply falls back to the live FetchLabelAppliedAt REST fetch.
 	LabelAppliedAt map[string]time.Time
+	// EngineWriteAt records when the engine itself last wrote a cached field
+	// through the write-through path (#2159): keys are "label:<name>" (add or
+	// remove), "status" and "closed". A reconcile listing fetched before the
+	// write (plus a grace margin for GitHub's board-listing lag) must not undo
+	// it; see engine_write.go. Distinct from LabelAppliedAt, which is adds-only,
+	// keep-first and read by gates — this map is read only by the reconcile
+	// protection. In memory only; entries expire after the grace period.
+	EngineWriteAt map[string]time.Time
 	// Worker is present when a worker is in-flight for this item.
 	Worker *WorkerHandle
 

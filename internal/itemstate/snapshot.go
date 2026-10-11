@@ -28,6 +28,7 @@ type Snapshot struct {
 //   - ItemState.Milestone (pointer)
 //   - ItemState.CooldownAt
 //   - ItemState.LabelAppliedAt
+//   - ItemState.EngineWriteAt
 //   - ItemState.BaseBranchWarned
 //   - ItemState.StageState.Attempts
 //   - ItemState.StageState.LastAttemptAt
@@ -58,6 +59,7 @@ func newSnapshot(s ItemState) Snapshot {
 	}
 	c.CooldownAt = copyMap(s.CooldownAt)
 	c.LabelAppliedAt = copyMap(s.LabelAppliedAt)
+	c.EngineWriteAt = copyMap(s.EngineWriteAt)
 	c.BaseBranchWarned = copyMap(s.BaseBranchWarned)
 	c.StageState = copyStageState(s.StageState)
 	c.CommentBreaker.InvocationsAt = copyTimes(s.CommentBreaker.InvocationsAt)

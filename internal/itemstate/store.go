@@ -57,6 +57,10 @@ type Store struct {
 	// HasInFlightWorker. Guarded by mu, same as items.
 	repoWorkers map[string]struct{}
 
+	// engineWriteGrace is the reconcile-protection margin (#2159); zero means
+	// DefaultEngineWriteGrace. Guarded by mu.
+	engineWriteGrace time.Duration
+
 	observerMu sync.RWMutex
 	observers  []observerEntry
 
@@ -285,8 +289,13 @@ func (s *Store) applySingleItem(m Mutation) (Snapshot, []Change, error) {
 	}
 	flags := s.applyToItem(item, m)
 
-	// No-op detection: if nothing changed, skip observers.
-	if reflect.DeepEqual(before, *item) {
+	// No-op detection: if nothing changed, skip observers. EngineWriteAt is
+	// bookkeeping for the reconcile protection (#2159): a redundant engine write
+	// or a confirmed record must not surface as a change, so it is compared as
+	// equal here (the map itself is kept either way).
+	unchanged := before
+	unchanged.EngineWriteAt = item.EngineWriteAt
+	if reflect.DeepEqual(unchanged, *item) {
 		snap := newSnapshot(*item) // capture while lock held
 		s.mu.Unlock()
 		return snap, nil, nil
@@ -388,6 +397,12 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		item.IsClosed = true
 		return StateChanged
 
+	case LocalIssueClosed:
+		item.State = "closed"
+		item.IsClosed = true
+		recordEngineWrite(item, engineWriteClosedKey, time.Now(), s.graceLocked())
+		return StateChanged | EngineWriteRecordedChanged
+
 	case IssueReopened:
 		item.State = "open"
 		item.IsClosed = false
@@ -423,26 +438,34 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		return CommentsChanged
 
 	case LocalStatusUpdated:
+		recordEngineWrite(item, engineWriteStatusKey, time.Now(), s.graceLocked())
 		if item.Status != v.NewStatus {
 			item.Status = v.NewStatus
 			item.Terminal = false
 			item.StatusEnteredAt = time.Now()
+			return StatusChanged | EngineWriteRecordedChanged
 		}
-		return StatusChanged
+		return EngineWriteRecordedChanged
 
 	case TerminalFlagSet:
 		item.Terminal = v.Terminal
 		return TerminalChanged
 
 	case LocalLabelAdded:
+		recordEngineWrite(item, engineWriteLabelKey(v.Label), time.Now(), s.graceLocked())
 		if !containsString(item.Labels, v.Label) {
 			item.Labels = append(item.Labels, v.Label)
+			return LabelsChanged | EngineWriteRecordedChanged
 		}
-		return LabelsChanged
+		return EngineWriteRecordedChanged
 
 	case LocalLabelRemoved:
-		item.Labels = removeString(item.Labels, v.Label)
-		return LabelsChanged
+		recordEngineWrite(item, engineWriteLabelKey(v.Label), time.Now(), s.graceLocked())
+		if containsString(item.Labels, v.Label) {
+			item.Labels = removeString(item.Labels, v.Label)
+			return LabelsChanged | EngineWriteRecordedChanged
+		}
+		return EngineWriteRecordedChanged
 
 	case LocalCommentAdded:
 		// Idempotent: skip if comment with this DatabaseID already exists.
@@ -918,7 +941,7 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		return CommentBreakerChanged
 
 	case ShallowBoardItemUpdated:
-		return applyShallowItem(item, v.Item)
+		return applyShallowItem(item, v.Item, v.FetchedAt, s.graceLocked(), time.Now())
 
 	case ProbeBoardItemUpdated:
 		return applyProbeItem(item, v.Item)

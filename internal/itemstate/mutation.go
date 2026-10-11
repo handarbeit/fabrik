@@ -256,6 +256,17 @@ type LocalStatusUpdated struct {
 func (LocalStatusUpdated) isMutation()       {}
 func (m LocalStatusUpdated) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
+// LocalIssueClosed is applied after fabrik closes an issue. Unlike the webhook
+// IssueClosed it records an engine write so a reconcile listing fetched before
+// the close cannot reopen the cached item (#2159).
+type LocalIssueClosed struct {
+	Repo   string
+	Number int
+}
+
+func (LocalIssueClosed) isMutation()       {}
+func (m LocalIssueClosed) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
 // LocalLabelAdded is applied after fabrik adds a label to an issue.
 type LocalLabelAdded struct {
 	Repo   string
@@ -436,6 +447,10 @@ type ShallowBoardItemUpdated struct {
 	Repo   string
 	Number int
 	Item   gh.ProjectItem
+	// FetchedAt is the instant the listing was requested (#2159). Fields the
+	// engine wrote more recently than FetchedAt (plus a grace margin) keep their
+	// local value. Zero means unknown: no protection, the listing wins.
+	FetchedAt time.Time
 }
 
 func (ShallowBoardItemUpdated) isMutation()       {}

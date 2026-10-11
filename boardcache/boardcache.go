@@ -433,18 +433,21 @@ func (c *CacheImpl) Reconcile(board *gh.ProjectBoard) {
 
 		s := snap.State()
 
-		// Detect shallow drift to count items that differ.
-		if s.Status != pi.Status ||
-			len(s.Labels) != len(pi.Labels) ||
-			!s.UpdatedAt.Equal(pi.UpdatedAt) {
+		// Detect shallow drift to count items that differ, discounting engine
+		// writes the listing cannot have seen (#2159).
+		eff, active, _ := c.store.EffectiveShallow(*pi, board.FetchedAt)
+		if s.Status != eff.Status ||
+			len(s.Labels) != len(eff.Labels) ||
+			(!active && !s.UpdatedAt.Equal(pi.UpdatedAt)) {
 			drifted++
 		}
 
 		// Apply shallow update to Store (preserves deep fields).
 		c.store.Apply(itemstate.ShallowBoardItemUpdated{
-			Repo:   pi.Repo,
-			Number: pi.Number,
-			Item:   *pi,
+			Repo:      pi.Repo,
+			Number:    pi.Number,
+			Item:      *pi,
+			FetchedAt: board.FetchedAt,
 		})
 
 		// Propagate HeadSHA from the shallow board query when present. The reconcile
@@ -1192,7 +1195,7 @@ func (c *CacheImpl) ApplyLabelRemovedBy(key, label, requester string) {
 // No-op when the key is not in the cache. Safe for concurrent use.
 func (c *CacheImpl) ApplyIssueClosed(key string) {
 	c.applyKeyedMutation(key, "ApplyIssueClosed", func(repo string, number int) itemstate.Mutation {
-		return itemstate.IssueClosed{Repo: repo, Number: number}
+		return itemstate.LocalIssueClosed{Repo: repo, Number: number}
 	})
 }
 
@@ -1324,7 +1327,19 @@ func (c *CacheImpl) LightReconcile(owner, repo string, projectNum int, ownerType
 		gateLabel string
 	}
 
-	// Snapshot current cache items. Store.All() handles its own locking.
+	// Fetch fresh board from GitHub (no lock held). The fetch start is recorded
+	// on the board so Reconcile and the comparison below can tell which engine
+	// writes the listing cannot have seen (#2159).
+	fetchStart := time.Now()
+	freshBoard, err = c.fallback.FetchProjectBoard(owner, repo, projectNum, ownerType)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	freshBoard.FetchedAt = fetchStart
+
+	// Snapshot current cache items AFTER the fetch, so an engine write made
+	// during the fetch is visible to the comparison (#2159 R2). Store.All()
+	// handles its own locking.
 	snaps := c.store.All()
 	cached := make(map[string]entry, len(snaps))
 	for _, snap := range snaps {
@@ -1334,12 +1349,6 @@ func (c *CacheImpl) LightReconcile(owner, repo string, projectNum int, ownerType
 			updatedAt: s.UpdatedAt,
 			gateLabel: fabrikManagedLabelKey(s.Labels),
 		}
-	}
-
-	// Fetch fresh board from GitHub (no lock held).
-	freshBoard, err = c.fallback.FetchProjectBoard(owner, repo, projectNum, ownerType)
-	if err != nil {
-		return 0, nil, nil, err
 	}
 
 	freshKeys := make(map[string]bool, len(freshBoard.Items))
@@ -1362,9 +1371,16 @@ func (c *CacheImpl) LightReconcile(owner, repo string, projectNum int, ownerType
 		// diverges from GitHub with a matching updatedAt (e.g. updatedAt laundered
 		// by a deep-fetch that syncs updatedAt but not labels), which otherwise
 		// strands an item at a gate forever on webhook-less deployments (#955).
-		if e.status != pi.Status ||
-			!e.updatedAt.Equal(pi.UpdatedAt) ||
-			e.gateLabel != fabrikManagedLabelKey(pi.Labels) {
+		//
+		// The listing item is first passed through the same engine-write
+		// protection Reconcile applies (Store.EffectiveShallow, #2159 R2), so a
+		// difference that is only a recent engine write is not drift; an item
+		// still shielded by one also skips the updatedAt comparison, because
+		// engine writes never bump the cached updatedAt.
+		eff, active, _ := c.store.EffectiveShallow(*pi, freshBoard.FetchedAt)
+		if e.status != eff.Status ||
+			(!active && !e.updatedAt.Equal(pi.UpdatedAt)) ||
+			e.gateLabel != fabrikManagedLabelKey(eff.Labels) {
 			driftCount++
 			driftedKeys = append(driftedKeys, key)
 		}
