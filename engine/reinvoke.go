@@ -58,6 +58,9 @@ const (
 	didNotRunAPIError            didNotRunKind = "api-error"
 	didNotRunAPIKeyHelper        didNotRunKind = "api-key-helper"
 	didNotRunPostMerge           didNotRunKind = "post-merge"
+	// didNotRunSkillUnresolved: the stage's skill reference resolved to no
+	// loaded plugin (ADR 2137), so no worker was spawned.
+	didNotRunSkillUnresolved didNotRunKind = "skill-unresolved"
 )
 
 // classifyDidNotRun maps a processComments error to the did-not-run set the
@@ -83,6 +86,10 @@ func classifyDidNotRun(err error) didNotRunKind {
 	var keyHelperErr *apiKeyHelperDetectedError
 	if errors.As(err, &keyHelperErr) {
 		return didNotRunAPIKeyHelper
+	}
+	var skillErr *skillUnresolvedError
+	if errors.As(err, &skillErr) {
+		return didNotRunSkillUnresolved
 	}
 	return ""
 }

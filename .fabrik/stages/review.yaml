@@ -1,7 +1,7 @@
 name: Review
 order: 4
-skill: fabrik-review
-comment_skill: fabrik-review-comment
+skill: fabrik:fabrik-review
+comment_skill: fabrik:fabrik-review-comment
 model: sonnet
 max_turns: 100
 comment_max_turns: 50

@@ -321,6 +321,8 @@ Context files are available in .fabrik-context/
 --name <sentinel>             (if claude supports --name; probed once at startup)
 ```
 
+**Skill name in the prompt (ADR 2137).** The skill the prompt tells the worker to follow is the fully-qualified `<plugin>:<skill>` name. Before the invocation (after the suspension and `apiKeyHelper` gates, ahead of the toolchain check and `InvokeOptions`), `runInvocationWithExtension` resolves the stage's `skill` against the plugins loaded for the worker — the same directories the `--plugin-dir` arguments above name — into a copy of the stage; comment review, CI-fix and rebase do the same for `comment_skill` in `processCommentsClassified`. A bare name is qualified to the loaded plugin that provides it; a reference no loaded plugin provides is refused before a worker is spawned (no retry consumed, `fabrik:skill-unresolved`). See `docs/state-machine.md` §7.18.
+
 `--disallowedTools` is emitted unconditionally, outside the `--dangerously-skip-permissions`/`--permission-mode dontAsk` branch, so it applies on both invocation paths — it is a construction-time exclusion from the tool schema Claude is offered, not a call-time permission check like `--allowedTools`. `ScheduleWakeup`, `Workflow`, `Monitor`, and `CronCreate` are suppressed because each promises delivery to a future turn, session, or external callback a headless stage cannot receive — the membership test and full sweep (adds and rejects) are recorded in ADR-1365's #1558 amendment (see `disallowedTools` in `engine/claude.go`). `Agent` is deliberately not suppressed — subagents complete within the parent turn.
 
 ### Worker Session Naming (`--name`)
