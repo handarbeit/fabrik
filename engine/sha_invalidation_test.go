@@ -215,3 +215,209 @@ func TestSHAInvalidation_NoopWhenWorkerInFlight(t *testing.T) {
 		}
 	}
 }
+
+// --- #2158: landed/terminal exemption and pure catch-up recognition ---
+
+const shaCUHead = "aaaaaaa1111111"
+
+func shaGuardBoardFn(item gh.ProjectItem) func(string, string, int, string) (*gh.ProjectBoard, error) {
+	return func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+		item.ItemID = fmt.Sprintf("PVTI_%d", item.Number)
+		item.Repo = "owner/repo"
+		return &gh.ProjectBoard{ProjectID: "PVT_1", Items: []gh.ProjectItem{item}}, nil
+	}
+}
+
+func shaGuardMarkerComment(author, head string, pure bool) gh.Comment {
+	return gh.Comment{Author: author, Body: "🏭 **Fabrik merge-train** — caught up\n" + formatCatchUpMarker(catchUpMarker{Head: head, Base: "bbbbbbb2222222", Pure: pure})}
+}
+
+// shaGuardRun polls once against an item that completed Validate at "sha-N" and whose
+// PR head is head, and returns the labels removed from it.
+func shaGuardRun(t *testing.T, item gh.ProjectItem, head string, mutate func(*Engine), comments func(string, string, int) ([]gh.Comment, error)) (*Engine, []string) {
+	t.Helper()
+	item.Number = 60
+	item.Labels = append([]string{"stage:Validate:complete", "fabrik:auto-merge-enabled"}, item.Labels...)
+	if item.Status == "" {
+		item.Status = "Validate"
+	}
+	client := &mockGitHubClient{fetchProjectBoardFn: shaGuardBoardFn(item), fetchIssueCommentsFn: comments}
+	eng := testEngineWithStages(t, client, testStagesForSHAInvalidation())
+	eng.store.Apply(itemstate.PRHeadSHAUpdated{Repo: "owner/repo", Number: 60, LinkedPRNum: 201, SHA: head})
+	eng.store.Apply(itemstate.ValidateCompletedAtSHA{Repo: "owner/repo", Number: 60, SHA: "sha-N"})
+	if mutate != nil {
+		mutate(eng)
+	}
+	if _, err := eng.poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	var removed []string
+	for _, c := range client.removeLabelCalls {
+		if c.issueNumber == 60 {
+			removed = append(removed, c.labelName)
+		}
+	}
+	return eng, removed
+}
+
+func TestSHAInvalidation_LandedItemsAreExempt(t *testing.T) {
+	tests := map[string]struct {
+		item   gh.ProjectItem
+		mutate func(*Engine)
+	}{
+		"closed issue":               {item: gh.ProjectItem{IsClosed: true}},
+		"landing verification label": {item: gh.ProjectItem{Labels: []string{awaitingLandingVerificationLabel}}},
+		"credited pr label":          {item: gh.ProjectItem{Labels: []string{"fabrik:credited-pr:77"}}},
+		"linked PR merged": {item: gh.ProjectItem{}, mutate: func(e *Engine) {
+			e.store.Apply(itemstate.PRDetailsUpdated{Repo: "owner/repo", Number: 60, PRNumber: 201, State: "closed", Merged: true})
+		}},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			eng, removed := shaGuardRun(t, tc.item, "sha-M", tc.mutate, nil)
+			// Other poll paths may drop transient labels from a closed issue; the
+			// SHA-invalidation scan must leave stage:Validate:complete alone.
+			for _, l := range removed {
+				if l == "stage:Validate:complete" {
+					t.Errorf("landed item must keep stage:Validate:complete, removed %v", removed)
+				}
+			}
+			snap, _ := eng.store.Get("owner/repo", 60)
+			if snap.ValidateCompletedSHA() != "sha-N" {
+				t.Errorf("completion SHA must be untouched, got %q", snap.ValidateCompletedSHA())
+			}
+		})
+	}
+}
+
+func TestSHAInvalidation_CleanupStageIsExempt(t *testing.T) {
+	// Mirror the engine's Done stage: a CleanupWorktree stage.
+	client := &mockGitHubClient{fetchProjectBoardFn: shaGuardBoardFn(gh.ProjectItem{Number: 60, Status: "Done", Labels: []string{"stage:Validate:complete"}})}
+	stgs := append(testStagesForSHAInvalidation(), &stages.Stage{Name: "Done", Order: 9, CleanupWorktree: true})
+	eng := testEngineWithStages(t, client, stgs)
+	eng.store.Apply(itemstate.PRHeadSHAUpdated{Repo: "owner/repo", Number: 60, LinkedPRNum: 201, SHA: "sha-M"})
+	eng.store.Apply(itemstate.ValidateCompletedAtSHA{Repo: "owner/repo", Number: 60, SHA: "sha-N"})
+	if _, err := eng.poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	for _, c := range client.removeLabelCalls {
+		if c.issueNumber == 60 {
+			t.Errorf("Done item must keep completion labels, removed %q", c.labelName)
+		}
+	}
+}
+
+func TestSHAInvalidation_PureCatchUpHeadIsRecorded(t *testing.T) {
+	comments := func(o, r string, n int) ([]gh.Comment, error) {
+		return []gh.Comment{shaGuardMarkerComment("testuser", shaCUHead, true)}, nil
+	}
+	eng, removed := shaGuardRun(t, gh.ProjectItem{}, shaCUHead, nil, comments)
+	if len(removed) != 0 {
+		t.Fatalf("pure catch-up head must not invalidate, removed %v", removed)
+	}
+	snap, _ := eng.store.Get("owner/repo", 60)
+	if snap.ValidateCompletedSHA() != shaCUHead {
+		t.Errorf("completion SHA = %q, want the catch-up head %q", snap.ValidateCompletedSHA(), shaCUHead)
+	}
+
+	// A later external push moves the head again: it is invalidated (R3).
+	eng.store.Apply(itemstate.PRHeadSHAUpdated{Repo: "owner/repo", Number: 60, LinkedPRNum: 201, SHA: "ccccccc3333333"})
+	eng.settleSHAInvalidationScan([]gh.ProjectItem{{Number: 60, Repo: "owner/repo", Status: "Validate", Labels: []string{"stage:Validate:complete"}}})
+	snap, _ = eng.store.Get("owner/repo", 60)
+	if snap.ValidateCompletedSHA() != "" {
+		t.Errorf("later external push must clear the completion SHA, got %q", snap.ValidateCompletedSHA())
+	}
+}
+
+func TestSHAInvalidation_NonEngineCatchUpStillInvalidates(t *testing.T) {
+	tests := map[string]func(string, string, int) ([]gh.Comment, error){
+		"marker from another author": func(o, r string, n int) ([]gh.Comment, error) {
+			return []gh.Comment{shaGuardMarkerComment("mallory", shaCUHead, true)}, nil
+		},
+		"marker names a different head": func(o, r string, n int) ([]gh.Comment, error) {
+			return []gh.Comment{shaGuardMarkerComment("testuser", "ddddddd4444444", true)}, nil
+		},
+		"pure=false": func(o, r string, n int) ([]gh.Comment, error) {
+			return []gh.Comment{shaGuardMarkerComment("testuser", shaCUHead, false)}, nil
+		},
+		"trailer only, no marker": func(o, r string, n int) ([]gh.Comment, error) {
+			return []gh.Comment{{Author: "testuser", Body: catchUpTrailerKey + ": " + shaCUHead}}, nil
+		},
+	}
+	for name, comments := range tests {
+		t.Run(name, func(t *testing.T) {
+			_, removed := shaGuardRun(t, gh.ProjectItem{}, shaCUHead, nil, comments)
+			if len(removed) == 0 {
+				t.Error("expected invalidation, no labels removed")
+			}
+		})
+	}
+}
+
+func TestSHAInvalidation_EmptySelfLoginStillInvalidates(t *testing.T) {
+	comments := func(o, r string, n int) ([]gh.Comment, error) {
+		return []gh.Comment{shaGuardMarkerComment("", shaCUHead, true)}, nil
+	}
+	_, removed := shaGuardRun(t, gh.ProjectItem{}, shaCUHead, func(e *Engine) { e.cfg.User = "" }, comments)
+	if len(removed) == 0 {
+		t.Error("empty self login must fail closed (invalidate)")
+	}
+}
+
+func TestSHAInvalidation_MarkerReadErrorDefers(t *testing.T) {
+	comments := func(o, r string, n int) ([]gh.Comment, error) { return nil, fmt.Errorf("boom") }
+	eng, removed := shaGuardRun(t, gh.ProjectItem{}, shaCUHead, nil, comments)
+	if len(removed) != 0 {
+		t.Errorf("unreadable marker must defer, removed %v", removed)
+	}
+	snap, _ := eng.store.Get("owner/repo", 60)
+	if snap.ValidateCompletedSHA() != "sha-N" {
+		t.Errorf("completion SHA must be untouched on deferral, got %q", snap.ValidateCompletedSHA())
+	}
+}
+
+// A catch-up pushes before it posts its marker; while it is in flight the unmarked moved
+// head must not be read as external, and once the marker window closes the usual rules apply.
+func TestSHAInvalidation_DefersWhileCatchUpPushInFlight(t *testing.T) {
+	noMarker := func(o, r string, n int) ([]gh.Comment, error) { return nil, nil }
+	var end func()
+	eng, removed := shaGuardRun(t, gh.ProjectItem{}, shaCUHead, func(e *Engine) {
+		end = e.beginCatchUpPush("owner", "repo", 201)
+	}, noMarker)
+	if len(removed) != 0 {
+		t.Fatalf("catch-up in flight must defer invalidation, removed %v", removed)
+	}
+	snap, _ := eng.store.Get("owner/repo", 60)
+	if snap.ValidateCompletedSHA() != "sha-N" {
+		t.Errorf("completion SHA must be untouched while deferred, got %q", snap.ValidateCompletedSHA())
+	}
+
+	end()
+	end() // idempotent
+	if eng.catchUpPushInFlight("owner", "repo", 201) {
+		t.Fatal("in-flight mark must clear after end")
+	}
+	eng.settleSHAInvalidationScan([]gh.ProjectItem{{Number: 60, Repo: "owner/repo", Status: "Validate", Labels: []string{"stage:Validate:complete", "fabrik:auto-merge-enabled"}}})
+	snap, _ = eng.store.Get("owner/repo", 60)
+	if snap.ValidateCompletedSHA() != "" {
+		t.Errorf("without a marker the head is external once the catch-up is no longer in flight; completion SHA = %q", snap.ValidateCompletedSHA())
+	}
+}
+
+func TestCatchUpPushInFlight_CountsOverlap(t *testing.T) {
+	eng := testEngineWithStages(t, &mockGitHubClient{}, testStagesForSHAInvalidation())
+	a := eng.beginCatchUpPush("o", "r", 5)
+	b := eng.beginCatchUpPush("o", "r", 5)
+	a()
+	if !eng.catchUpPushInFlight("o", "r", 5) {
+		t.Error("second overlapping catch-up must keep the PR in flight")
+	}
+	b()
+	if eng.catchUpPushInFlight("o", "r", 5) {
+		t.Error("PR must not be in flight after both ended")
+	}
+}
