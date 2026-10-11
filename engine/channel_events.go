@@ -85,6 +85,10 @@ type channelEvents struct {
 	// consumer-owned (no lock): only run() touches these.
 	memo          map[string]*itemMemo
 	claudeLimited bool
+	// pollEp / partEp are the open pipeline stall episodes (#2124); in memory
+	// only, so a still-stalled daemon re-raises after a restart.
+	pollEp stallEpisode
+	partEp map[string]*stallEpisode
 
 	wake  chan struct{}
 	stop  chan struct{}
