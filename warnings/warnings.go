@@ -30,9 +30,9 @@ type Entry struct {
 	// fingerprint the stored entry already has, so a caller that does not know
 	// one (e.g. the TUI's fix-failed re-record) never un-dismisses an entry.
 	Fingerprint string    `json:"fingerprint,omitempty"`
-	FirstSeen time.Time         `json:"first_seen"`
-	LastSeen  time.Time         `json:"last_seen"`
-	Dismissed bool              `json:"dismissed"`
+	FirstSeen   time.Time `json:"first_seen"`
+	LastSeen    time.Time `json:"last_seen"`
+	Dismissed   bool      `json:"dismissed"`
 }
 
 type warningsFile struct {
