@@ -2284,7 +2284,9 @@ func (e *Engine) selectDeepFetchCandidates(board *gh.ProjectBoard, repoFilter st
 		// recorded as served is the one read AFTER a successful fetch
 		// (PausedBackstopServed): a fresh pause costs exactly one fetch, and a later
 		// self-write (a new baseline that may mask a new reply) earns one more. A
-		// failed fetch records nothing, so the next poll can retry.
+		// failed fetch records nothing, so it is retried at the next admission (the
+		// re-armed periodic re-evaluation, or any observer-driven change) — not
+		// necessarily the next poll.
 		var backstopFetch bool
 		if hasLabel(item.Labels, "fabrik:paused") && !cycleSet[iKey] {
 			switch {
@@ -2320,7 +2322,9 @@ func (e *Engine) selectDeepFetchCandidates(board *gh.ProjectBoard, repoFilter st
 				e.rearmPeriodicReEval(item)
 			}
 			// Skip appending to deepFetchCandidates.
-			// The next poll will retry the deep-fetch for this item.
+			// The deep-fetch is retried at the item's next admission: the re-armed
+			// periodic re-evaluation (githubRecheckInterval) when an expiry was
+			// consumed above, or any observer-driven change (cycleSet) sooner.
 			continue
 		}
 		admitRepo := itemOwnerRepoString(board.Items[i], e.defaultRepo())
