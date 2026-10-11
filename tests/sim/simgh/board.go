@@ -175,6 +175,12 @@ func (s *Sim) buildProjectItem(p *projectState, ref itemRef) (*gh.ProjectItem, e
 		// (PR cards stay unknown), and a null milestone is still "known".
 		Milestone:      cloneMilestone(iss.milestone),
 		MilestoneKnown: !isPR,
+		// Layered board evidence (#2180), as production's listing reports it:
+		// the issue and project-item layer without the linked PR, plus the
+		// issue's own comment count (Issue content nodes only).
+		IssueLayerUpdatedAt:    laterOf(iss.updatedAt, cardUpdatedAt),
+		IssueCommentTotal:      len(iss.comments),
+		IssueCommentTotalKnown: !isPR,
 	}
 	for _, c := range iss.comments {
 		item.Comments = append(item.Comments, c.toGH())
@@ -212,6 +218,7 @@ func (s *Sim) buildProjectItem(p *projectState, ref itemRef) (*gh.ProjectItem, e
 			}
 		}
 		item.UpdatedAt = laterOf(item.UpdatedAt, linked.updatedAt)
+		item.LinkedPRUpdatedAt = linked.updatedAt
 	}
 	s.mu.Unlock()
 
@@ -357,6 +364,9 @@ func (s *Sim) buildProbeItem(p *projectState, ref itemRef) (*gh.BoardProbeItem, 
 	}
 	// effectiveUpdatedAt is max(content, project item, linked PR).
 	probe.EffectiveUpdatedAt = laterOf(iss.updatedAt, s.cardActivityAt(p, live))
+	probe.IssueLayerUpdatedAt = probe.EffectiveUpdatedAt
+	probe.IssueCommentTotal = len(iss.comments)
+	probe.IssueCommentTotalKnown = !live.isPR
 	linked := s.boardLinkedPRLocked(r, issueBranch(iss.number))
 	var linkedHead string
 	if linked != nil {
