@@ -17,7 +17,7 @@ import (
 // owner.
 //
 //   - testlife.Guard installs the hard wall-time ceiling (SIM_TEST_CEILING,
-//     default 60m, ignoring -test.timeout), the owner watch (exit once the worker
+//     default 30m, ignoring -test.timeout), the owner watch (exit once the worker
 //     named by FABRIK_WORKER_OWNER is provably gone; a live worker with its
 //     launching shell long gone is left alone) and, for a helper started through
 //     testlife.ReExecCommand, the parent watch.

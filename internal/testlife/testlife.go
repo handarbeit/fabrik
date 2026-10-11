@@ -42,13 +42,16 @@ import (
 )
 
 const (
-	// DefaultCeiling is the hard wall-time ceiling of a test binary. It is
-	// sized well above the slowest legitimate full run: `go test -race
-	// ./tests/sim/` measured ~11 minutes at -parallel 4 on a 28-core host,
-	// scripts/sim/run.sh allows SIM_TIMEOUT=20m, and host load of 34-41 stretched
-	// runs further. 60 minutes keeps a healthy run clear of it while making a
-	// 32-hour orphan impossible.
-	DefaultCeiling = 60 * time.Minute
+	// DefaultCeiling is the hard wall-time ceiling of a test binary. It bounds
+	// a runaway, so it is no longer than it needs to be: an hour of a runaway
+	// sim.test at ~80% CPU is the host-load damage this guard exists to prevent.
+	// It still sits well clear of a healthy run: `go test -race ./tests/sim/`
+	// measured ~11 minutes at -parallel 4 on a 28-core host, CI's full suite
+	// takes ~7-8 minutes, and scripts/sim/run.sh allows SIM_TIMEOUT=20m, so an
+	// ordinary -test.timeout panic fires first and keeps its goroutine dump.
+	// 30 minutes also makes a 32-hour orphan impossible. SIM_TEST_CEILING
+	// overrides it for a deliberately long run.
+	DefaultCeiling = 30 * time.Minute
 
 	// CeilingEnv overrides the ceiling (a time.Duration string, e.g. "90m").
 	CeilingEnv = "SIM_TEST_CEILING"
