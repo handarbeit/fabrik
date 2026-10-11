@@ -1131,12 +1131,14 @@ func TestExecute_PluginDirsResolution(t *testing.T) {
 		config string
 		env    string
 		flag   string
-		want   string
+		want   []string
 	}{
-		{"default", "", "", "", ""},
-		{"config list", "plugin_dirs:\n  - .fabrik/plugins/a\n  - /abs/b\n", "", "", ".fabrik/plugins/a,/abs/b"},
-		{"env beats config", "plugin_dirs: ['from-config']\n", "from-env", "", "from-env"},
-		{"flag beats env and config", "plugin_dirs: ['from-config']\n", "from-env", "from-flag", "from-flag"},
+		{"default", "", "", "", nil},
+		{"config list", "plugin_dirs:\n  - .fabrik/plugins/a\n  - /abs/b\n", "", "", []string{".fabrik/plugins/a", "/abs/b"}},
+		{"config entry with a comma stays one entry", "plugin_dirs:\n  - '/opt/a,b'\n", "", "", []string{"/opt/a,b"}},
+		{"env beats config", "plugin_dirs: ['from-config']\n", "from-env", "", []string{"from-env"}},
+		{"env is comma-separated", "", "a, b", "", []string{"a", "b"}},
+		{"flag beats env and config", "plugin_dirs: ['from-config']\n", "from-env", "from-flag", []string{"from-flag"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -1156,8 +1158,8 @@ func TestExecute_PluginDirsResolution(t *testing.T) {
 			os.Args = args
 
 			cfg := executeWithConfigHook(t)
-			if cfg.PluginDirs != c.want {
-				t.Errorf("resolved plugin dirs = %q, want %q", cfg.PluginDirs, c.want)
+			if !reflect.DeepEqual(cfg.PluginDirList, c.want) {
+				t.Errorf("resolved plugin dirs = %q, want %q", cfg.PluginDirList, c.want)
 			}
 		})
 	}

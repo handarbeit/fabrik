@@ -82,7 +82,8 @@ type Config struct {
 	SymlinkEnv                 bool
 	WorktreeBoundaryAudit      bool
 	PluginDir                  string
-	PluginDirs                 string // comma-separated additional workflow plugin directories, loaded after the base plugin (ADR 2136)
+	PluginDirs                 string   // comma-separated --plugin-dirs flag / FABRIK_PLUGIN_DIRS value (ADR 2136)
+	PluginDirList              []string // resolved additional workflow plugin directories, loaded after the base plugin (ADR 2136)
 	Webhooks                   bool
 	WebhookPort                int
 	WebhookEvents              string // comma-separated; empty means default event set
@@ -770,11 +771,20 @@ func Execute() error {
 			cfg.PluginDir = v
 		}
 	}
+	// Flag and env are comma-separated and split here; the config.yaml list is
+	// kept as a list so an entry containing a comma survives intact (ADR 2136).
 	if !explicitFlags["plugin-dirs"] {
 		if v := os.Getenv("FABRIK_PLUGIN_DIRS"); v != "" {
 			cfg.PluginDirs = v
-		} else if len(pc.PluginDirs) > 0 {
-			cfg.PluginDirs = strings.Join(pc.PluginDirs, ",")
+		}
+	}
+	if cfg.PluginDirs != "" {
+		cfg.PluginDirList = splitGlobList(cfg.PluginDirs)
+	} else {
+		for _, d := range pc.PluginDirs {
+			if d = strings.TrimSpace(d); d != "" {
+				cfg.PluginDirList = append(cfg.PluginDirList, d)
+			}
 		}
 	}
 	if !explicitFlags["webhooks"] {
@@ -999,7 +1009,7 @@ func Execute() error {
 		SymlinkEnv:                 cfg.SymlinkEnv,
 		WorktreeBoundaryAudit:      cfg.WorktreeBoundaryAudit,
 		PluginDir:                  cfg.PluginDir,
-		PluginDirs:                 splitGlobList(cfg.PluginDirs),
+		PluginDirs:                 cfg.PluginDirList,
 		Stages:                     stageCfgs,
 		Webhooks:                   cfg.Webhooks,
 		WebhookPort:                cfg.WebhookPort,
