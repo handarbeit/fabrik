@@ -24,8 +24,10 @@
 // The package is a leaf shared by engine and pruefer; neither may import the
 // other, and log output goes through a caller-supplied Logger because the two
 // use different loggers. A command that starts and orphans itself between two
-// samples, after which the worker exits, is the residual gap (ADR 063's
-// worktree-cwd reaper is the cover).
+// samples, after which the worker exits, used to be the residual gap; since #2128
+// a process also carries an owner marker in its environment (ReapMarked), which
+// finds it whatever its session, parent or cwd — but only ever on positive
+// evidence: process-tree shape (ppid 1, empty group) is never a kill signal.
 package sessionreap
 
 import (
@@ -78,6 +80,12 @@ type Options struct {
 	Getpgid func(int) (int, error)          // process-group ID of one PID
 	Ppid    func(int) (int, bool)           // parent PID of one PID; false if unknown
 	Kill    func(int, syscall.Signal) error // kill(2); pid may be negative (group) and sig 0 probes existence
+
+	// Marker-reap seams (#2128). Zero values use the real platform reader.
+	Environ func(pid int) ([]string, error) // a process's initial environment; error = unreadable = "not marked"
+	// IgnoreMarkers makes ReapMarked find nothing. Test seam: a twin that runs
+	// with it set proves the marker scan is load-bearing.
+	IgnoreMarkers bool
 
 	// WorkerSIDOnly restricts every operation to the worker's own SID — the
 	// pre-command-session behaviour. Test seam: a twin that runs with it set

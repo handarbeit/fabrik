@@ -76,3 +76,9 @@ func StartToken(int) string { return "" }
 
 // Environ has no reader on Windows.
 func Environ(int) ([]string, error) { return nil, ErrEnvUnreadable }
+
+// MarkedPIDs finds nothing on Windows.
+func MarkedPIDs(string, map[string]struct{}, Options) (map[string][]int, error) { return nil, nil }
+
+// ReapMarked is a no-op on Windows.
+func ReapMarked(string, map[string]struct{}, string, time.Duration, Options) int { return 0 }
