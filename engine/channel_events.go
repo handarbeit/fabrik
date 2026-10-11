@@ -62,6 +62,8 @@ type itemMemo struct {
 	// time (real time), for decisionAnchorGrace.
 	dp     *decisionEpisode
 	dpSeen time.Time
+	// rebaseSeen mirrors dirtyItem.rebaseSeen for the evaluation in progress.
+	rebaseSeen bool
 }
 
 // dirtyItem is a pending debounced re-evaluation.
@@ -71,6 +73,11 @@ type dirtyItem struct {
 	// staleCandidate is set when an invocation was recorded while
 	// fabrik:awaiting-input was present at that moment.
 	staleCandidate bool
+	// rebaseSeen is set when fabrik:rebase-needed was applied to the item since
+	// the last evaluation, even if it was removed again before this one ran (the
+	// engine applies it and dispatches the rebase within one pass), so a
+	// withdrawal is attributed to the rebase rather than to the worker it caused.
+	rebaseSeen bool
 }
 
 type channelEvents struct {
@@ -321,9 +328,13 @@ func (ce *channelEvents) onChange(c itemstate.Change, snap itemstate.Snapshot) {
 	// phantom.
 	evs := ce.noteChangeForDivergence(c, &st, ce.e.now())
 	diverged := len(evs) // events from here on are built from the suspect change
+	rebaseApplied := false
 	for _, d := range c.LabelDeltas {
 		if d.Added && d.Label == "fabrik:landing-verification-failed" {
 			ce.clearLanding(key)
+		}
+		if d.Added && d.Label == "fabrik:rebase-needed" {
+			rebaseApplied = true
 		}
 		le := ce.e.labelEvent(&st, c, d)
 		if closeTrackingLabel(d.Label) && ce.isLanding(key) {
@@ -370,6 +381,7 @@ func (ce *channelEvents) onChange(c itemstate.Change, snap itemstate.Snapshot) {
 		}
 		d.flags |= c.Fields
 		d.staleCandidate = d.staleCandidate || staleCand
+		d.rebaseSeen = d.rebaseSeen || rebaseApplied
 	}
 	ce.mu.Unlock()
 	ce.signal()

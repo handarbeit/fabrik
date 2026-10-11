@@ -261,12 +261,12 @@ func vsRelaxedKey(ref string) string { return "vsrelaxed:" + ref }
 // again, a worker was dispatched, or new feedback arrived. "" when the item
 // merely moved on, was closed or was sent back through Validate on purpose
 // (fabrik:revalidate) — a human or engine decision, not a withdrawal.
-func (e *Engine) validateWithdrawalReason(st *itemstate.ItemState) string {
+func (e *Engine) validateWithdrawalReason(st *itemstate.ItemState, rebaseSeen bool) string {
 	if st.IsClosed || st.Status != "Validate" || hasLabelStr(st.Labels, "fabrik:revalidate") {
 		return ""
 	}
 	switch {
-	case hasLabelStr(st.Labels, "fabrik:rebase-needed"):
+	case hasLabelStr(st.Labels, "fabrik:rebase-needed") || rebaseSeen:
 		return reasonRebaseNeeded
 	case func() bool {
 		lpr := st.LinkedPR
@@ -297,7 +297,7 @@ func (ce *channelEvents) closeSettleEpisode(ref string, st *itemstate.ItemState)
 		!hasLabelStr(st.Labels, "fabrik:rebase-needed") {
 		ended = false
 	}
-	reason := ce.e.validateWithdrawalReason(st)
+	reason := ce.e.validateWithdrawalReason(st, ce.memoFor(ref).rebaseSeen)
 	// A worker dispatch or new feedback also withdraw a settlement that the
 	// older end conditions do not cover. An episode opened at the landing
 	// decision (yolo) still has its worker, so it is exempt.

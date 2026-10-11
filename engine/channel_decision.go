@@ -173,7 +173,7 @@ func (ce *channelEvents) decisionStep(ref string, m *itemMemo, st *itemstate.Ite
 	// The episode ended. A withdrawal is announced only when the engine took the
 	// item back; a human acting (or the item moving on) is silent.
 	var out []channelevents.Event
-	if reason := e.decisionWithdrawalReason(st, m.dp); reason != "" && !settlementWithdrawalDisabled.Load() {
+	if reason := e.decisionWithdrawalReason(st, m.dp, m.rebaseSeen); reason != "" && !settlementWithdrawalDisabled.Load() {
 		ev := e.withdrawnEvent(st, string(channelevents.DecisionPending), reason)
 		ev.DedupKey = fmt.Sprintf("swdp:%s:%d", ref, n)
 		out = append(out, ce.withComment(m, st, ev))
@@ -187,7 +187,7 @@ func (ce *channelEvents) decisionStep(ref string, m *itemMemo, st *itemstate.Ite
 // decisionWithdrawalReason says why the engine took a pending decision back, or
 // "" when the episode simply ended (a human decided, the item moved, it was
 // closed, paused or blocked).
-func (e *Engine) decisionWithdrawalReason(st *itemstate.ItemState, dp *decisionEpisode) string {
+func (e *Engine) decisionWithdrawalReason(st *itemstate.ItemState, dp *decisionEpisode, rebaseSeen bool) string {
 	if st.IsClosed || st.IsPR {
 		return ""
 	}
@@ -204,7 +204,7 @@ func (e *Engine) decisionWithdrawalReason(st *itemstate.ItemState, dp *decisionE
 	if dp == nil && !hasLabelStr(st.Labels, "stage:"+st.Status+":complete") && !hasReworkingLabel(st.Labels) {
 		return ""
 	}
-	return engineTookBack(e, st)
+	return engineTookBack(e, st, rebaseSeen)
 }
 
 func hasReworkingLabel(labels []string) bool {
@@ -218,9 +218,9 @@ func hasReworkingLabel(labels []string) bool {
 
 // engineTookBack names why an item that was waiting for a human no longer is,
 // for a reason on the closed list, or "".
-func engineTookBack(e *Engine, st *itemstate.ItemState) string {
+func engineTookBack(e *Engine, st *itemstate.ItemState, rebaseSeen bool) string {
 	switch {
-	case hasLabelStr(st.Labels, "fabrik:rebase-needed"):
+	case hasLabelStr(st.Labels, "fabrik:rebase-needed") || rebaseSeen:
 		return reasonRebaseNeeded
 	case st.Worker != nil || hasReworkingLabel(st.Labels) || hasLabelStr(st.Labels, "fabrik:editing"):
 		return reasonWorkerDispatched

@@ -101,6 +101,8 @@ func (e *Engine) settleDecisionAnchors(board *gh.ProjectBoard) {
 				continue
 			}
 			e.decisionAnchors.forget(key)
+			// The time just became known: let the deriver re-announce with it.
+			e.channelReevaluate(repo, item.Number)
 		}
 	}
 }
