@@ -459,11 +459,17 @@ func (m ShallowBoardItemUpdated) itemKey() string { return itemKeyFor(m.Repo, m.
 // ProbeBoardItemUpdated updates only the probe-visible fields of an existing item
 // from a ProbeProjectBoard result. Unlike ShallowBoardItemUpdated, it does NOT
 // touch Labels (the probe query fetches no labels). Updates ID, ItemID, State,
-// IsClosed, IsPR, Status, and UpdatedAt only.
+// IsClosed, IsPR, Status, and UpdatedAt only. Status and closed state go through
+// the engine-write protection (protectStatusClosed, #2178).
 type ProbeBoardItemUpdated struct {
 	Repo   string
 	Number int
 	Item   gh.BoardProbeItem
+	// FetchedAt is the instant the probe listing was requested, taken before the
+	// query was issued (#2178). Status and closed state the engine wrote more
+	// recently than FetchedAt (plus a grace margin) keep their local value. Zero
+	// means unknown: no protection, the listing wins.
+	FetchedAt time.Time
 }
 
 func (ProbeBoardItemUpdated) isMutation()       {}

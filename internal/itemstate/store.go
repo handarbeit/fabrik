@@ -948,7 +948,7 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		return applyShallowItem(item, v.Item, v.FetchedAt, s.graceLocked(), time.Now())
 
 	case ProbeBoardItemUpdated:
-		return applyProbeItem(item, v.Item)
+		return applyProbeItem(item, v.Item, v.FetchedAt, s.graceLocked(), time.Now())
 	}
 
 	return 0
