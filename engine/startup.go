@@ -382,17 +382,27 @@ func captureGitMeta(workDir, baseBranch string) (branch, commit, mainSHA, timest
 // effect for github.com — no credential helper is needed in either case.
 // This check is non-interactive and never prompts; it only reads git config.
 func (e *Engine) checkHTTPSCredentials(hasSSHRewrite bool) {
+	const key = "git_credentials:https"
 	// Under App auth, setUpAppGitCredential injects the helper itself (#1846).
 	if e.cfg.GitSSH || hasSSHRewrite || e.ghAppAuth != nil {
+		_ = warnings.Resolve(key)
 		return
 	}
 	cmd := exec.Command("git", "config", "credential.helper")
 	out, err := cmd.Output()
 	if err != nil || len(strings.TrimSpace(string(out))) == 0 {
-		fmt.Printf("[startup] warn: no git credential helper configured; HTTPS cloning may prompt for credentials.\n")
-		fmt.Printf("[startup] warn: configure one (e.g. git-credential-osxkeychain) or use --ssh / git_ssh: true in .fabrik/config.yaml.\n")
-		fmt.Printf("[startup] note: existing bare clones retain their original remote URL and are not affected by this setting.\n")
+		_ = warnings.Report(e.warnWriter("startup"), warnings.Condition{
+			Type:    "git_credentials",
+			Subject: "https",
+			Title:   "No git credential helper configured for HTTPS",
+			Detail: "HTTPS cloning may prompt for credentials, which a headless daemon cannot answer.\n\n" +
+				"Fix: configure a credential helper (e.g. git-credential-osxkeychain), or use --ssh / git_ssh: true in .fabrik/config.yaml. " +
+				"Existing bare clones retain their original remote URL and are not affected by this setting.",
+			LogLine: "no git credential helper configured; HTTPS cloning may prompt for credentials. Configure one (e.g. git-credential-osxkeychain) or use --ssh / git_ssh: true in .fabrik/config.yaml.",
+		})
+		return
 	}
+	_ = warnings.Resolve(key)
 }
 
 // resolveRepoAccess returns the cached write-access determination for
@@ -740,8 +750,22 @@ func (e *Engine) checkAPIKeyHelper() error {
 	)
 
 	found, warns := findAPIKeyHelper(layers)
-	for _, w := range warns {
-		e.logf(0, "startup", "warning: %s\n", w)
+	// An unreadable or unparseable settings file means the apiKeyHelper
+	// refusal may be bypassed by it — operator-level, so it reaches the panel
+	// (one aggregated entry; cleared when every file reads cleanly).
+	var conds []warnings.Condition
+	if len(warns) > 0 {
+		conds = append(conds, warnings.Condition{
+			Subject: "settings",
+			Title:   "Claude settings file unreadable — apiKeyHelper refusal may be bypassed",
+			Detail: strings.Join(warns, "\n") +
+				"\n\nFabrik refuses to run with apiKeyHelper configured but cannot see inside a file it cannot read.\n" +
+				"Fix: repair or remove the file(s) above.",
+			LogLine: strings.Join(warns, "; "),
+		})
+	}
+	if err := warnings.Reconcile(e.warnWriter("startup"), "api_key_helper_check", conds); err != nil {
+		e.logf(0, "startup", "recording api_key_helper_check warning: %v\n", err)
 	}
 	if found != nil {
 		return fmt.Errorf("apiKeyHelper is set in %s (%s layer) — Fabrik refuses to run with apiKeyHelper configured, "+
@@ -862,12 +886,29 @@ func logWorkerEnvOptIn(r workerenv.Resolved, w io.Writer) {
 		fmt.Fprintf(w, "[startup] notice: %s passes %s through to every Claude worker — a worker can read and "+
 			"use these. See docs/USER_GUIDE.md.\n", workerenv.OptInVar, strings.Join(r.Admitted, ", "))
 	}
+	// The two fault conditions below are operator-level (a typo or a refused
+	// name silently changes what workers can see), so they reach the panel and
+	// clear when the configuration is fixed.
+	var conds []warnings.Condition
 	if len(r.Ignored) > 0 {
-		fmt.Fprintf(w, "[startup] warning: %s entries ignored (not on the worker scrub list, or protected): %s\n",
-			workerenv.OptInVar, strings.Join(r.Ignored, ", "))
+		list := strings.Join(r.Ignored, ", ")
+		conds = append(conds, warnings.Condition{
+			Subject: "ignored",
+			Title:   workerenv.OptInVar + " entries ignored",
+			Detail: fmt.Sprintf("Not on the worker scrub list, or protected: %s\n\nFix: remove or correct these names in %s.", list, workerenv.OptInVar),
+			LogLine: fmt.Sprintf("%s entries ignored (not on the worker scrub list, or protected): %s", workerenv.OptInVar, list),
+		})
 	}
 	if len(r.Dropped) > 0 {
-		fmt.Fprintf(w, "[startup] warning: Hookdeck env-var names not scrubbed from workers (protected): %s\n",
-			strings.Join(r.Dropped, ", "))
+		list := strings.Join(r.Dropped, ", ")
+		conds = append(conds, warnings.Condition{
+			Subject: "hookdeck_dropped",
+			Title:   "Hookdeck env-var names not scrubbed from workers",
+			Detail:  fmt.Sprintf("These protected names are not removed from the worker environment: %s", list),
+			LogLine: fmt.Sprintf("Hookdeck env-var names not scrubbed from workers (protected): %s", list),
+		})
+	}
+	if err := warnings.Reconcile(w, "worker_env", conds); err != nil {
+		fmt.Fprintf(w, "[startup] warning: recording worker_env warnings: %v\n", err)
 	}
 }

@@ -21,6 +21,7 @@ import (
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
 	"github.com/handarbeit/fabrik/tui"
+	"github.com/handarbeit/fabrik/warnings"
 )
 
 const idleUpgradeThreshold = 2 // consecutive idle polls before checking for upgrades
@@ -165,15 +166,24 @@ func logCIWaitTimeoutSemantics(w io.Writer) {
 // suboptimal ordering (both timeouts remain valid, positive durations) should
 // not prevent the daemon from starting.
 func warnCIBackstopTimeoutOrdering(ciWaitTimeout, ciBackstopTimeout time.Duration, w io.Writer) {
+	const key = "timeout_ordering:ci_backstop"
 	if ciBackstopTimeout > ciWaitTimeout {
+		_ = warnings.Resolve(key)
 		return
 	}
-	fmt.Fprintf(w, "[startup] warning: CIBackstopTimeout (%s) is not greater than CIWaitTimeout (%s) — the "+
+	detail := fmt.Sprintf("CIBackstopTimeout (%s) is not greater than CIWaitTimeout (%s) — the "+
 		"unconditional per-poll-cost backstop (settleAwaitingCIScan) will fire before the CI-gate liveness dwell "+
 		"(classifyCIFromCheckRuns) ever gets a chance to distinguish a stalled CI run from one that is actively "+
-		"progressing, reintroducing the spurious-pause behavior ADR-1410 fixed. Set --ci-backstop-timeout/"+
-		"FABRIK_CI_BACKSTOP_TIMEOUT well above --ci-wait-timeout/FABRIK_CI_WAIT_TIMEOUT. See docs/USER_GUIDE.md "+
-		"and ADR-1410.\n", ciBackstopTimeout, ciWaitTimeout)
+		"progressing, reintroducing the spurious-pause behavior ADR-1410 fixed.\n\n"+
+		"Fix: set --ci-backstop-timeout/FABRIK_CI_BACKSTOP_TIMEOUT well above --ci-wait-timeout/"+
+		"FABRIK_CI_WAIT_TIMEOUT (see docs/USER_GUIDE.md and ADR-1410).", ciBackstopTimeout, ciWaitTimeout)
+	_ = warnings.Report(w, warnings.Condition{
+		Type:    "timeout_ordering",
+		Subject: "ci_backstop",
+		Title:   "CIBackstopTimeout is not greater than CIWaitTimeout",
+		Detail:  detail,
+		LogLine: strings.ReplaceAll(detail, "\n\n", " "),
+	})
 }
 
 // warnDrainDeadlineOrdering is the ADR-1393/R4 startup check: the drain
@@ -186,15 +196,25 @@ func warnCIBackstopTimeoutOrdering(ciWaitTimeout, ciBackstopTimeout time.Duratio
 // both values remain valid, positive durations and only their relative
 // ordering is suboptimal.
 func warnDrainDeadlineOrdering(drainDeadline, sigIntGrace, sigTermGrace time.Duration, w io.Writer) {
+	const key = "timeout_ordering:drain_deadline"
 	killEscalation := sigIntGrace + sigTermGrace
 	if drainDeadline > killEscalation {
+		_ = warnings.Resolve(key)
 		return
 	}
-	fmt.Fprintf(w, "[startup] warning: DrainDeadline (%s) is not greater than the kill escalation window "+
+	detail := fmt.Sprintf("DrainDeadline (%s) is not greater than the kill escalation window "+
 		"KillGraceSigInt+KillGraceSigTerm (%s) — a clean stop's bounded wait (waitGroupTimeout) will fire before "+
 		"killProcGroupGraceful's SIGINT->SIGTERM->SIGKILL escalation has a chance to let a worker exit on its own, "+
-		"preempting the escalation and defeating its purpose. Set --drain-deadline/FABRIK_DRAIN_DEADLINE well above "+
-		"--kill-grace-sigint + --kill-grace-sigterm. See docs/USER_GUIDE.md and ADR-1393.\n", drainDeadline, killEscalation)
+		"preempting the escalation and defeating its purpose.\n\n"+
+		"Fix: set --drain-deadline/FABRIK_DRAIN_DEADLINE well above --kill-grace-sigint + --kill-grace-sigterm "+
+		"(see docs/USER_GUIDE.md and ADR-1393).", drainDeadline, killEscalation)
+	_ = warnings.Report(w, warnings.Condition{
+		Type:    "timeout_ordering",
+		Subject: "drain_deadline",
+		Title:   "DrainDeadline is not greater than the kill escalation window",
+		Detail:  detail,
+		LogLine: strings.ReplaceAll(detail, "\n\n", " "),
+	})
 }
 
 // drainDeadline returns the configured bound on a clean stop's worker drain,
@@ -233,15 +253,29 @@ func (e *Engine) Run() error {
 	// Non-fatal if the open fails.
 	logPath := filepath.Join(e.fabrikDir, ".fabrik", "fabrik.log")
 	rotateWarnings, truncateFallback := rotateEngineLog(logPath, engineLogBackups)
-	for _, w := range rotateWarnings {
-		fmt.Fprintf(os.Stderr, "warning: log rotation: %s\n", w)
-	}
 	openFlags := os.O_CREATE | os.O_WRONLY
 	if truncateFallback {
 		openFlags |= os.O_TRUNC
 	}
+	var logConds []warnings.Condition
+	if len(rotateWarnings) > 0 {
+		logConds = append(logConds, warnings.Condition{
+			Subject: "rotation",
+			Title:   "Log rotation failed",
+			Detail: "Fabrik could not rotate fabrik.log at startup:\n" + strings.Join(rotateWarnings, "\n") +
+				"\n\nFix: check permissions and free space in .fabrik/.",
+			LogLine: "log rotation: " + strings.Join(rotateWarnings, "; "),
+		})
+	}
+	startupW := io.Writer(os.Stderr)
 	if lf, err := os.OpenFile(logPath, openFlags, 0600); err != nil {
-		fmt.Printf("warning: could not open log file %s: %v\n", logPath, err)
+		logConds = append(logConds, warnings.Condition{
+			Subject: "open",
+			Title:   "Could not open the Fabrik log file",
+			Detail: fmt.Sprintf("Could not open %s: %v\nThe persistent poll log will not be written this run.\n\n"+
+				"Fix: check permissions and free space in .fabrik/.", logPath, err),
+			LogLine: fmt.Sprintf("could not open log file %s: %v", logPath, err),
+		})
 	} else {
 		e.logFile = lf
 		pollLogFile = lf
@@ -252,40 +286,31 @@ func (e *Engine) Run() error {
 		}()
 		// The banner must be the file's first bytes, ahead of the startup warnings.
 		fmt.Fprint(lf, startBanner(e.now(), e.cfg.Version, os.Getpid(), e.cfg.StartReason))
-		for _, w := range rotateWarnings {
-			fmt.Fprintf(lf, "[startup] warning: log rotation: %s\n", w)
-		}
+		startupW = io.MultiWriter(os.Stderr, lf)
+	}
+	// Both log-file checks ran to completion, so Reconcile also clears an
+	// earlier run's entry once the problem is gone (#2135).
+	if err := warnings.Reconcile(startupW, "log_file", logConds); err != nil {
+		fmt.Fprintf(startupW, "[startup] warning: recording log_file warnings: %v\n", err)
 	}
 
 	// Emit stage-config drift warnings, and the FR-7 undeclared-expected_reviewers
 	// notice, to both stderr (visible at startup) and fabrik.log (durable for
 	// post-mortems). Without the log copy, recurrences of "same drift bit us
-	// again" are invisible from the persistent log alone.
+	// again" are invisible from the persistent log alone. startupW is the single
+	// writer for both the log-file-open and log-file-failed cases, so one branch
+	// can never skip a check (or its warnings-panel entry) the other runs.
 	configDir := os.Getenv("CLAUDE_CONFIG_DIR")
-	if e.logFile != nil {
-		w := io.MultiWriter(os.Stderr, e.logFile)
-		stages.WarnStageDrift(e.cfg.Stages, e.cfg.Version, w)
-		stages.WarnUndeclaredReviewers(e.cfg.Stages, w)
-		stages.SweepStaleWarnings(e.cfg.Stages, w)
-		logClaudeConfigDir(configDir, w)
-		logAnthropicAPIKeyOptIn(claudeAnthropicAPIKey != "", w)
-		logAnthropicEnvPassthrough(claudeAnthropicEnvPassthrough, w)
-		logWorkerEnvOptIn(claudeWorkerEnv, w)
-		logCIWaitTimeoutSemantics(w)
-		warnCIBackstopTimeoutOrdering(e.ciWaitTimeout(), e.ciBackstopTimeout(), w)
-		warnDrainDeadlineOrdering(e.drainDeadline(), claudeKillGraceSigInt, claudeKillGraceSigTerm, w)
-	} else {
-		stages.WarnStageDrift(e.cfg.Stages, e.cfg.Version, os.Stderr)
-		stages.WarnUndeclaredReviewers(e.cfg.Stages, os.Stderr)
-		stages.SweepStaleWarnings(e.cfg.Stages, os.Stderr)
-		logClaudeConfigDir(configDir, os.Stderr)
-		logAnthropicAPIKeyOptIn(claudeAnthropicAPIKey != "", os.Stderr)
-		logAnthropicEnvPassthrough(claudeAnthropicEnvPassthrough, os.Stderr)
-		logWorkerEnvOptIn(claudeWorkerEnv, os.Stderr)
-		logCIWaitTimeoutSemantics(os.Stderr)
-		warnCIBackstopTimeoutOrdering(e.ciWaitTimeout(), e.ciBackstopTimeout(), os.Stderr)
-		warnDrainDeadlineOrdering(e.drainDeadline(), claudeKillGraceSigInt, claudeKillGraceSigTerm, os.Stderr)
-	}
+	stages.WarnStageDrift(e.cfg.Stages, e.cfg.Version, startupW)
+	stages.WarnUndeclaredReviewers(e.cfg.Stages, startupW)
+	stages.SweepStaleWarnings(e.cfg.Stages, startupW)
+	logClaudeConfigDir(configDir, startupW)
+	logAnthropicAPIKeyOptIn(claudeAnthropicAPIKey != "", startupW)
+	logAnthropicEnvPassthrough(claudeAnthropicEnvPassthrough, startupW)
+	logWorkerEnvOptIn(claudeWorkerEnv, startupW)
+	logCIWaitTimeoutSemantics(startupW)
+	warnCIBackstopTimeoutOrdering(e.ciWaitTimeout(), e.ciBackstopTimeout(), startupW)
+	warnDrainDeadlineOrdering(e.drainDeadline(), claudeKillGraceSigInt, claudeKillGraceSigTerm, startupW)
 
 	ctx, cancel := context.WithCancel(context.Background())
 

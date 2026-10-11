@@ -19,6 +19,7 @@ import (
 	"github.com/handarbeit/fabrik/internal/events"
 	"github.com/handarbeit/fabrik/internal/sessionreap"
 	"github.com/handarbeit/fabrik/tui"
+	"github.com/handarbeit/fabrik/warnings"
 )
 
 // WebhookHealthState indicates the health of the gh webhook forward stream.
@@ -526,12 +527,24 @@ func (e *Engine) checkWebhookHookCoverage(wm *webhookManager) {
 	repos, orgModeActive := wm.ManagedRepos()
 	if orgModeActive || len(repos) == 0 {
 		wm.setHookCoverageNote(nil)
+		_ = warnings.Reconcile(e.warnWriter("webhook"), "webhook_coverage", nil)
 		return
 	}
 	missing := checkForwardingHookCoverage(e.client, repos, e.logf)
+	var conds []warnings.Condition
 	if len(missing) > 0 {
-		e.logf(0, "webhook", "WARNING: no forwarding hook found for %d of %d managed repo(s): %s — these repos are receiving no webhooks (poll-only); see #1142\n",
-			len(missing), len(repos), strings.Join(missing, ", "))
+		list := strings.Join(missing, ", ")
+		conds = append(conds, warnings.Condition{
+			Subject: "repos",
+			Title:   fmt.Sprintf("No forwarding webhook for %d managed repo(s)", len(missing)),
+			Detail: fmt.Sprintf("These repos are receiving no webhooks (poll-only): %s\n\n"+
+				"Fix: restore the repository webhook forwarding to Fabrik (see #1142).", list),
+			LogLine: fmt.Sprintf("no forwarding hook found for %d of %d managed repo(s): %s — these repos are receiving no webhooks (poll-only); see #1142",
+				len(missing), len(repos), list),
+		})
+	}
+	if err := warnings.Reconcile(e.warnWriter("webhook"), "webhook_coverage", conds); err != nil {
+		e.logf(0, "webhook", "recording webhook_coverage warning: %v\n", err)
 	}
 	wm.setHookCoverageNote(missing)
 }

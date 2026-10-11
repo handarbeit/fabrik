@@ -11,6 +11,7 @@ import (
 	"github.com/handarbeit/fabrik/internal/events"
 	"github.com/handarbeit/fabrik/internal/events/hookdeck"
 	"github.com/handarbeit/fabrik/tui"
+	"github.com/handarbeit/fabrik/warnings"
 )
 
 // hookdeckManager is the App-auth-only Hookdeck ingestion transport (#1142),
@@ -413,6 +414,7 @@ func (e *Engine) checkHookdeckInstallationCoverage(hm *hookdeckManager) {
 	repos := hm.ManagedRepos()
 	if len(repos) == 0 {
 		hm.setInstallationCoverageNote(nil, false)
+		_ = warnings.Reconcile(e.warnWriter("hookdeck"), "hookdeck_coverage", nil)
 		return
 	}
 	if e.hostClient == nil {
@@ -444,9 +446,20 @@ func (e *Engine) checkHookdeckInstallationCoverage(hm *hookdeckManager) {
 			// already have (PR review finding).
 			truncationNote = " (installation-repo listing was truncated by the pagination ceiling — this may be a false positive; see the FetchInstallationRepositories warning above)"
 		}
-		e.logf(0, "hookdeck", "WARNING: GitHub App installation does not cover %d of %d managed repo(s): %s — "+
-			"these repos are receiving no webhooks (poll-only); grant the installation access to them (App settings "+
-			"→ Install App → Configure); see #1142%s\n", len(missing), len(repos), strings.Join(missing, ", "), truncationNote)
+		list := strings.Join(missing, ", ")
+		if err := warnings.Reconcile(e.warnWriter("hookdeck"), "hookdeck_coverage", []warnings.Condition{{
+			Subject: "repos",
+			Title:   fmt.Sprintf("GitHub App installation does not cover %d managed repo(s)", len(missing)),
+			Detail: fmt.Sprintf("These repos are receiving no webhooks (poll-only): %s%s\n\n"+
+				"Fix: grant the installation access to them (App settings → Install App → Configure); see #1142.", list, truncationNote),
+			LogLine: fmt.Sprintf("GitHub App installation does not cover %d of %d managed repo(s): %s — "+
+				"these repos are receiving no webhooks (poll-only); grant the installation access to them (App settings "+
+				"→ Install App → Configure); see #1142%s", len(missing), len(repos), list, truncationNote),
+		}}); err != nil {
+			e.logf(0, "hookdeck", "recording hookdeck_coverage warning: %v\n", err)
+		}
+	} else if err := warnings.Reconcile(e.warnWriter("hookdeck"), "hookdeck_coverage", nil); err != nil {
+		e.logf(0, "hookdeck", "clearing hookdeck_coverage warning: %v\n", err)
 	}
 	hm.setInstallationCoverageNote(missing, truncated)
 }
