@@ -138,7 +138,7 @@ func commentIDsForLog(comments []gh.Comment) string {
 // dispatchers (dispatchCIFixReinvoke, dispatchReviewReinvoke,
 // dispatchRebaseReinvoke). It performs: optional precheck -> WorkerEntered ->
 // semaphore acquire -> ensureRepoReady (ErrSkipItem skips silently) ->
-// opts.build -> optional opts.stageVariant -> LocalLockAcquired + heartbeat +
+// opts.build -> optional opts.stageVariant -> WorkerRefreshed + heartbeat +
 // onPIDReady -> processCommentsClassified -> (did-not-run refund | optional opts.after) -> error logging
 // (ctx.Err() short-circuit) -> deferred WorkerExited.
 func (e *Engine) dispatchReinvoke(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, opts reinvokeOpts) {
@@ -191,14 +191,16 @@ func (e *Engine) dispatchReinvoke(ctx context.Context, board *gh.ProjectBoard, i
 			reinvokeStage = opts.stageVariant(stage)
 		}
 
-		// Register WorkerHandle so the heartbeat/liveness system tracks this goroutine.
-		now := time.Now()
-		e.store.Apply(itemstate.LocalLockAcquired{
-			Repo:       itemRepo,
-			Number:     item.Number,
-			User:       e.lockIdentity(),
-			AcquiredAt: now,
-			Worker:     &itemstate.WorkerHandle{StageName: stage.Name, StartedAt: now, LastSignAt: now},
+		// Refresh the WorkerHandle so the heartbeat/liveness system tracks this
+		// goroutine from now (not from dispatch). A reinvoke deliberately claims
+		// no store Lock: Lock mirrors the fabrik:locked label, which a reinvoke
+		// never applies (its cross-instance marker is fabrik:editing), so there
+		// is nothing to release (#2179, ADR 2179).
+		e.store.Apply(itemstate.WorkerRefreshed{
+			Repo:      itemRepo,
+			Number:    item.Number,
+			StageName: stage.Name,
+			StartedAt: time.Now(),
 		})
 		done := make(chan struct{})
 		defer close(done)

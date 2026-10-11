@@ -742,6 +742,10 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		item.Worker = &WorkerHandle{StageName: v.StageName, StartedAt: v.StartedAt, LastSignAt: v.StartedAt}
 		return WorkerChanged | WorkerLifecycleChanged
 
+	case WorkerRefreshed:
+		item.Worker = &WorkerHandle{StageName: v.StageName, StartedAt: v.StartedAt, LastSignAt: v.StartedAt}
+		return WorkerChanged
+
 	case WorkerHeartbeat:
 		if item.Worker == nil {
 			return 0 // no-op: heartbeat for a worker that has already exited
