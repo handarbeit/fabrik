@@ -28,6 +28,14 @@ ADR-039 said Deferred-Dispatch items are unaffected by excluding `WorkerLifecycl
 
 The wake alone therefore does not re-admit it. Skipping the stamp alone is not enough either: an item with no prior cooldown falls through `selectDeepFetchCandidates` to `continue` when it is not in `cycleSet`. Hence both the stamp skip and the re-queue.
 
+## Re-admission survives a failed deep-fetch
+
+The poll that re-admits a deferred item does so through `cycleSet` alone (no expired cooldown consumed), and the deferral skipped the `periodic-re-eval` stamp. If that poll's `FetchItemDetails` fails, or `itemMayNeedWork` refuses the item inside the deep-fetch failure backoff, the item used to be dropped with no cooldown and no `cycleSet` entry — stranded until an unrelated change. `selectDeepFetchCandidates` therefore re-arms `periodic-re-eval` at both drop sites for any `cycleSet`-admitted item (previously only when an expiry was consumed). The re-arm interval is the same `githubRecheckInterval` that governs the failure backoff, so a persistent failure stays one fetch per interval rather than one per poll.
+
+## Reinvokes can take a freed slot first
+
+A reinvoke goroutine blocked on `e.sem` takes a freed slot before the poll's non-blocking attempt. A deferred dispatch can be delayed by reinvokes, but is never stranded: its key stays queued and the next poll tries again.
+
 ## Alternatives rejected
 
 - **Skip the stamp only.** Starves a cycleSet-admitted item with no prior cooldown, as above.

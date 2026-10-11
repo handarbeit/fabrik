@@ -2341,7 +2341,7 @@ func (e *Engine) selectDeepFetchCandidates(board *gh.ProjectBoard, repoFilter st
 		recentBaseline := admitErr == nil &&
 			e.now().Sub(admitSnap.State().LastSeenSourceUpdatedAt) < 2*e.githubRecheckInterval()
 		if !e.itemMayNeedWork(board.Items[i]) {
-			if consumedExpired {
+			if consumedExpired || cycleSet[iKey] {
 				e.rearmPeriodicReEval(item)
 			}
 			continue
@@ -2415,13 +2415,18 @@ func (e *Engine) selectDeepFetchCandidates(board *gh.ProjectBoard, repoFilter st
 				Number: board.Items[i].Number,
 				At:     time.Now(),
 			})
-			if consumedExpired {
+			// Re-arm when the item was admitted by an expiry consumed above OR by
+			// cycleSet: a cycleSet entry is drained once per poll, and a slot-deferred
+			// item (#2114) reaches here with its periodic-re-eval stamp skipped, so
+			// without a cooldown nothing would ever re-admit it.
+			if consumedExpired || cycleSet[iKey] {
 				e.rearmPeriodicReEval(item)
 			}
 			// Skip appending to deepFetchCandidates.
 			// The deep-fetch is retried at the item's next admission: the re-armed
-			// periodic re-evaluation (githubRecheckInterval) when an expiry was
-			// consumed above, or any observer-driven change (cycleSet) sooner.
+			// periodic re-evaluation (githubRecheckInterval, which also bounds the
+			// failure backoff in itemMayNeedWork), or any observer-driven change
+			// (cycleSet) sooner.
 			continue
 		}
 		admitRepo := itemOwnerRepoString(board.Items[i], e.defaultRepo())

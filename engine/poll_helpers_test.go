@@ -10,6 +10,7 @@ import (
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/itemstate"
+	"github.com/handarbeit/fabrik/stages"
 )
 
 // Focused tests for the deep-fetch pre-filter loop and dispatch loop extracted
@@ -476,5 +477,45 @@ func TestRequeueDeferredDispatch_AddsKeysWithoutWake(t *testing.T) {
 	defer eng.mayNeedWorkMu.Unlock()
 	if !eng.mayNeedWork["o/r#7"] || !eng.mayNeedWork["o/r#8"] {
 		t.Errorf("mayNeedWork = %v, want both keys", eng.mayNeedWork)
+	}
+}
+
+// TestDispatchCandidates_WorkerExitFreesSlotThenWakesPoll is the #2114 R2
+// wake-level check: when a dispatched worker finishes, the slot is already free
+// and a wake token is on the channel the poll loop selects on, so a deferred
+// candidate is picked up by the very next poll rather than an interval later.
+func TestDispatchCandidates_WorkerExitFreesSlotThenWakesPoll(t *testing.T) {
+	withProcessListProbe(t, false, nil, nil)
+	release := make(chan struct{})
+	claude := &mockClaudeInvoker{invokeFn: func(*stages.Stage, gh.ProjectItem, []gh.Comment, bool, string, InvokeOptions) (string, bool, TokenUsage, error) {
+		<-release
+		return "", false, TokenUsage{}, nil
+	}}
+	eng := testEngine(t, &mockGitHubClient{}, claude)
+	eng.cfg.MaxConcurrent = 1
+	eng.sem = make(chan struct{}, 1)
+	wakeCh := make(chan struct{}, 4)
+	eng.store.Subscribe(newWakeChObserver(wakeCh))
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 41, Title: "Held", Status: "Research"}
+	if n, _ := eng.dispatchCandidates(context.Background(), board, []gh.ProjectItem{item}); n != 1 {
+		t.Fatalf("dispatched = %d, want 1", n)
+	}
+	// Drain the wakes from WorkerEntered and the stage's own writes.
+	for len(wakeCh) > 0 {
+		<-wakeCh
+	}
+
+	close(release)
+	eng.wg.Wait()
+
+	if len(eng.sem) != 0 {
+		t.Errorf("slot still held after the worker exited (len(sem)=%d)", len(eng.sem))
+	}
+	select {
+	case <-wakeCh:
+	default:
+		t.Error("no wake token after the worker exited; a deferred candidate would wait for the ticker")
 	}
 }
