@@ -188,12 +188,6 @@ func (s Snapshot) HasExpiredCooldown(now time.Time) bool {
 	return false
 }
 
-// PausedBackstopBaseline returns the baseline at which the paused-item
-// backstop last completed a live fetch, or zero if it never has.
-func (s Snapshot) PausedBackstopBaseline() time.Time {
-	return s.state.PausedBackstopBaseline
-}
-
 // LabelAppliedAt returns the time the engine itself most recently applied the
 // given label to this issue, or zero if no record-at-write has been made for
 // it (cold cache — the caller should fall back to a live fetch). See

@@ -1139,22 +1139,32 @@ func TestExpiredCooldownsConsumed_AdmitsOncePerExpiry(t *testing.T) {
 	}
 }
 
-// ---- PausedBackstopServed (#2096) ----
+// ---- LastSeenPRUpdatedAt (#2180) ----
 
-func TestApplyPausedBackstopServed(t *testing.T) {
+// TestPRLayerBaseline_NeverSelfWriteAnchored pins the #2180 rule: a deep fetch
+// records the linked PR's own updatedAt, a self-write moves only the issue-layer
+// baseline, and an invalidation zeroes both.
+func TestPRLayerBaseline_NeverSelfWriteAnchored(t *testing.T) {
 	s := newStoreWithItem(t, testRepo, 1)
-	if got := getItem(t, s, testRepo, 1).PausedBackstopBaseline; !got.IsZero() {
-		t.Fatalf("initial PausedBackstopBaseline = %v; want zero", got)
+	prAt := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+	applyExpect(t, s, ItemDeepFetched{Repo: testRepo, Number: 1, FreshState: gh.ProjectItem{
+		Repo: testRepo, Number: 1, UpdatedAt: prAt, LinkedPRUpdatedAt: prAt,
+	}}, DeepFetchChanged)
+	if got := getItem(t, s, testRepo, 1).LastSeenPRUpdatedAt; !got.Equal(prAt) {
+		t.Fatalf("LastSeenPRUpdatedAt = %v; want %v", got, prAt)
 	}
-	base := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
-	snap := applyExpect(t, s, PausedBackstopServed{Repo: testRepo, Number: 1, Baseline: base}, 0)
-	if !snap.PausedBackstopBaseline().Equal(base) {
-		t.Errorf("PausedBackstopBaseline = %v; want %v", snap.PausedBackstopBaseline(), base)
+	s.Apply(SelfWriteObserved{Repo: testRepo, Number: 1})
+	it := getItem(t, s, testRepo, 1)
+	if !it.LastSeenPRUpdatedAt.Equal(prAt) {
+		t.Errorf("SelfWriteObserved moved LastSeenPRUpdatedAt to %v; it must stay %v", it.LastSeenPRUpdatedAt, prAt)
 	}
-	// Idempotent.
-	snap = applyExpect(t, s, PausedBackstopServed{Repo: testRepo, Number: 1, Baseline: base}, 0)
-	if !snap.PausedBackstopBaseline().Equal(base) {
-		t.Errorf("after repeat, PausedBackstopBaseline = %v; want %v", snap.PausedBackstopBaseline(), base)
+	if !it.LastSeenSourceUpdatedAt.After(prAt) {
+		t.Errorf("SelfWriteObserved did not advance the issue-layer baseline: %v", it.LastSeenSourceUpdatedAt)
+	}
+	s.Apply(DeepFetchInvalidated{Repo: testRepo, Number: 1})
+	it = getItem(t, s, testRepo, 1)
+	if !it.LastSeenPRUpdatedAt.IsZero() || !it.LastSeenSourceUpdatedAt.IsZero() {
+		t.Errorf("DeepFetchInvalidated left baselines %v / %v; want both zero", it.LastSeenPRUpdatedAt, it.LastSeenSourceUpdatedAt)
 	}
 }
 

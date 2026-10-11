@@ -336,8 +336,8 @@ type BoardProbeItem struct {
 	IssueCommentTotalKnown bool
 	LinkedPRNumber         int
 	LinkedPRUpdatedAt      time.Time
-	LinkedPRHeadSHA    string // headRefOid from GraphQL probe query; empty if no linked PR
-	Status             string
+	LinkedPRHeadSHA        string // headRefOid from GraphQL probe query; empty if no linked PR
+	Status                 string
 }
 
 // HasReaction returns true if the comment has at least one reaction of the given type.

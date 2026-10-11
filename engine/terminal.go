@@ -265,7 +265,7 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 		}
 
 		// Deep-fetch when cache is stale relative to effectiveUpdatedAt.
-		if cacheImpl.IsItemCacheFresh(repo, pi.Number, pi.EffectiveUpdatedAt) {
+		if cacheImpl.IsItemCacheFresh(repo, pi.Number, boardcache.EvidenceFromProbe(pi)) {
 			continue
 		}
 		e.logf(pi.Number, "cache", "probe: stale — deep-fetching\n")
@@ -286,6 +286,13 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 			Status:    pi.Status,
 			Repo:      repo,
 			UpdatedAt: pi.EffectiveUpdatedAt,
+
+			// The layer evidence rides along so ItemDeepFetched anchors each
+			// baseline to GitHub's own values (#2180).
+			IssueLayerUpdatedAt:    pi.IssueLayerUpdatedAt,
+			LinkedPRUpdatedAt:      pi.LinkedPRUpdatedAt,
+			IssueCommentTotal:      pi.IssueCommentTotal,
+			IssueCommentTotalKnown: pi.IssueCommentTotalKnown,
 		}
 		if cur, curErr := e.store.Get(repo, pi.Number); curErr == nil {
 			minimal.Status = cur.State().Status

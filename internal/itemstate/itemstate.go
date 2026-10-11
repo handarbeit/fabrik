@@ -61,6 +61,17 @@ type ItemState struct {
 	// UpdatedAt is max(issue.updatedAt, projectItem.updatedAt, linkedPR.updatedAt).
 	UpdatedAt time.Time
 
+	// IssueLayerUpdatedAt, LinkedPRUpdatedAt and IssueCommentTotal(Known) are the
+	// layered board evidence the cache-serve decision compares (#2180): the same
+	// UpdatedAt split into its issue/project-item and linked-PR parts, plus
+	// GitHub's issue comment total. Written by the probe and board listings
+	// (and carried through a deep fetch); zero / unknown when the producer did
+	// not capture them. Mirrors of the last board read, not engine state.
+	IssueLayerUpdatedAt    time.Time
+	LinkedPRUpdatedAt      time.Time
+	IssueCommentTotal      int
+	IssueCommentTotalKnown bool
+
 	// BlockedBy holds issues that must be closed before this one can advance.
 	BlockedBy []gh.Dependency
 
@@ -92,11 +103,6 @@ type ItemState struct {
 	// entry deliberately kept past expiry is "archive-eligible-at", an absolute
 	// "eligible since" timestamp rather than a gate.
 	CooldownAt map[string]time.Time
-	// PausedBackstopBaseline is the LastSeenSourceUpdatedAt value at which the
-	// paused-item backstop (#1944) last completed a live fetch. The backstop
-	// fetches only while the current baseline differs from it (#2096). Zero
-	// means never served. In memory only, like the rest of the store.
-	PausedBackstopBaseline time.Time
 	// LabelAppliedAt maps label name → the time the engine itself most recently
 	// applied that label to this issue (record-at-write, #1314). Deliberately a
 	// separate map from CooldownAt, not a repurposing of it: CooldownAt's
@@ -143,10 +149,24 @@ type ItemState struct {
 	// advances it to time.Now() at each of Fabrik's own self-write call sites
 	// (label add/remove, comment post, issue body edit, board status move) so a
 	// self-caused GitHub updatedAt bump isn't mistaken for external staleness on
-	// the next probe cycle. Both writers share the same monotonic guard in
-	// applyToItem, and DeepFetchInvalidated's zero-reset always wins against a
-	// stale SelfWriteObserved racing behind it.
+	// the next probe cycle. Only SelfWriteObserved is monotonic: ItemDeepFetched
+	// assigns the fetched value unconditionally (it may lower a clock-anchored
+	// baseline, which is how a real refetch cures both masking and clock skew),
+	// and DeepFetchInvalidated's zero-reset always wins against a stale
+	// SelfWriteObserved racing behind it.
+	//
+	// This is the ISSUE-layer baseline (#2180): the engine writes the issue and
+	// project item, so only that layer is allowed to be self-write anchored. The
+	// linked PR's updatedAt is compared against LastSeenPRUpdatedAt instead.
 	LastSeenSourceUpdatedAt time.Time
+
+	// LastSeenPRUpdatedAt is the linked PR's own updatedAt observed at the last
+	// deep fetch (#2180). It is written only from GitHub values (ItemDeepFetched)
+	// and never by SelfWriteObserved, so an engine write on the issue layer
+	// cannot hide a later PR-side change (review, thread comment, PR comment).
+	// Zero means "not captured": the cache then falls back to the overall
+	// updatedAt compare against LastSeenSourceUpdatedAt.
+	LastSeenPRUpdatedAt time.Time
 
 	// LastDeepFetchFailureAt is the time the most recent deep fetch attempt failed.
 	// Replaces engine.deepFetchFailureTime[iKey].

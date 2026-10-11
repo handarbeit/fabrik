@@ -8,7 +8,6 @@ import (
 	"unicode/utf8"
 
 	gh "github.com/handarbeit/fabrik/github"
-	"github.com/handarbeit/fabrik/internal/itemstate"
 )
 
 // The status-line writer (#2048, ADR 2048): one general, engine-wide writer
@@ -284,11 +283,11 @@ func (e *Engine) writeDisplayField(spec displayFieldSpec, s *displayFieldState, 
 	s.last[key] = value
 	s.mu.Unlock()
 
-	// The write bumps the project item's updatedAt; advance the staleness
-	// baseline like every other self-write (#1090) so the probe does not
-	// re-fetch the item for our own display write.
-	owner, repo := itemOwnerRepo(item, e.defaultRepo())
-	e.store.Apply(itemstate.SelfWriteObserved{Repo: owner + "/" + repo, Number: item.Number})
+	// Deliberately no SelfWriteObserved here (#2180): the board and probe
+	// queries discount a project-item bump explained by a display field's own
+	// updatedAt (projectItemUpdatedAt, #2048/#2049), so this write moves no
+	// updatedAt the cache compares and there is nothing to suppress. Anchoring
+	// the baseline would only hide a concurrent external change.
 }
 
 // truncateStatusLine caps line at statusLineMaxLen characters, counting
