@@ -1429,8 +1429,14 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 	if hasLabel(item.Labels, "fabrik:api-key-helper-detected") {
 		e.removeLabel(item, "fabrik:api-key-helper-detected")
 	}
+	// This invocation only proved the stage's own `skill` resolves; the label is
+	// stage-wide and may stand for a bad comment_skill/ci_fix_skill/rebase_skill.
+	// Clear it only when every reference resolves (as the comment path does), or
+	// the comment-once gate would re-post the failure on each later comment cycle.
 	if hasLabel(item.Labels, skillUnresolvedLabel) {
-		e.removeLabel(item, skillUnresolvedLabel)
+		if _, _, allErr := e.resolveStageSkills(stage); allErr == nil {
+			e.removeLabel(item, skillUnresolvedLabel)
+		}
 	}
 	// fabrik:tools-denied is gated on !toolsDenied — unlike the two labels
 	// above, this invocation itself may BE the condition (toolsDenied does not

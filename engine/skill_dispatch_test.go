@@ -211,6 +211,37 @@ func TestSkillDispatch_RecoveryClearsLabelAndPanel(t *testing.T) {
 	}
 }
 
+// The label is stage-wide: a stage run that resolves only `skill` must not clear
+// it while comment_skill is still unresolved, or the comment-once gate would
+// re-post the failure on every later comment cycle.
+func TestSkillDispatch_StageRunKeepsLabelWhileCommentSkillUnresolved(t *testing.T) {
+	skipIfNoGit(t)
+	isolateWarningsFile(t)
+	repoDir := initBareRepo(t)
+	pdir := skillPlugin(t, t.TempDir(), "base", plugin.BasePluginName)
+	writeSkill(t, filepath.Join(pdir, "skills", "fabrik-research", "SKILL.md"))
+
+	claude := &mockClaudeInvoker{}
+	client := &mockGitHubClient{}
+	eng := NewWithDeps(Config{Owner: "owner", Repo: "repo", ProjectNum: 1, User: "u", Token: "t", MaxRetries: 2,
+		Stages: skillStages("fabrik-research", "myorg:nope")}, client, claude, NewWorktreeManager(repoDir))
+	eng.skillResolver = newSkillResolver([]string{pdir})
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 305, Title: "t", Status: "Research", ItemID: "PVTI_305", Labels: []string{skillUnresolvedLabel}}
+	if err := eng.processItem(context.Background(), board, item); err != nil {
+		t.Fatal(err)
+	}
+	if len(claude.calls) != 1 {
+		t.Fatalf("worker calls = %d, want 1 (skill resolves)", len(claude.calls))
+	}
+	for _, r := range client.removeLabelCalls {
+		if r.labelName == skillUnresolvedLabel {
+			t.Error("label removed while comment_skill is still unresolved")
+		}
+	}
+}
+
 // Comment review, CI-fix and rebase all reach InvokeForComments through
 // processCommentsClassified; an unresolved comment_skill is refused before any
 // worker, classified did-not-run so the reinvoke cycle is refunded, and no
