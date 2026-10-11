@@ -57,6 +57,7 @@ type ProjectConfig struct {
 	AutoMergeStrategy          string   `yaml:"auto_merge_strategy"`
 	SingletonCatchUp           string   `yaml:"singleton_catch_up"`
 	MergeTrainOverlapIgnore    []string `yaml:"merge_train_overlap_ignore"`
+	PluginDirs                 []string `yaml:"plugin_dirs"`
 	MaxBatchSize               *int     `yaml:"max_batch_size"`
 	MaxBisectValidations       *int     `yaml:"max_bisect_validations"`
 	MaxTrainRebaseCycles       *int     `yaml:"max_train_rebase_cycles"`

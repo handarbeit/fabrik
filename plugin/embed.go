@@ -8,7 +8,8 @@ import "embed"
 //
 // `fabrik init` extracts these files to .fabrik/plugin/ in the current project,
 // and `fabrik upgrade` overwrites that directory from the embedded copy. The
-// engine then passes `--plugin-dir .fabrik/plugin/` to every worker invocation.
+// engine then passes `--plugin-dir .fabrik/plugin/` (plus one `--plugin-dir` per
+// configured `plugin_dirs` entry, ADR 2136) to every worker invocation.
 // This is distinct from the user-facing `fabrik` plugin (plugin/fabrik/) which
 // is installed via Claude Code's plugin marketplace, not embedded.
 //
