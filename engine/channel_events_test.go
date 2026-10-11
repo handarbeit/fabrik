@@ -646,3 +646,24 @@ func TestChannelStreamerSubscribeBareNOnMultiRepoDaemon(t *testing.T) {
 		t.Fatalf("issues resolved to %+v", got)
 	}
 }
+
+// A catch-up snapshot is current state, never history: it must not replay
+// arrivals, column moves or closes (#2123, ADR 2123), whatever the store holds.
+func TestCatchUpNeverReplaysLifecycleEvents(t *testing.T) {
+	e, _ := channelEngine(t, 0, settledOnly())
+	e.seedAPIItem(t, 1, "Specify", "fabrik:cruise")
+	e.seedAPIItem(t, 2, "Implement", "fabrik:paused", "fabrik:awaiting-input")
+	e.store.Apply(itemstate.LocalStatusUpdated{Repo: e.cfg.Owner + "/" + e.cfg.Repo, Number: 1, NewStatus: "Research"})
+	e.store.Apply(itemstate.IssueClosed{Repo: e.cfg.Owner + "/" + e.cfg.Repo, Number: 1})
+
+	evs := e.catchUpEvents()
+	if len(evs) == 0 {
+		t.Fatal("the paused item should still be in the snapshot; the scan below would be vacuous")
+	}
+	for _, ev := range evs {
+		switch ev.Type {
+		case channelevents.ItemAdded, channelevents.ColumnChanged, channelevents.Closed:
+			t.Fatalf("catch-up replayed a lifecycle event: %+v", ev)
+		}
+	}
+}

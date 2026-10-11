@@ -3815,6 +3815,7 @@ Every action first resolves the issue to exactly one item the daemon manages (`o
 | `milestone` | a milestone title, or `#N` for a number. An item whose milestone the daemon has not captured yet never matches |
 | `labels` / `exclude_labels` | glob patterns for **label events only** (`*` matches any run of characters, so `fabrik:*`, `stage:*:complete`). By default `fabrik:locked:*`, `stage:*:in_progress`, `fabrik:spawned-child:*`, `fabrik:credited-pr:*` and `fabrik:editing` are excluded as churn; pass `exclude_labels: []` to receive every change |
 | `events` | which event types to receive (default: all) |
+| `progress_via_column` | `true` drops `label-applied` / `label-removed` for `stage:*:complete` and `stage:*:in_progress` when you also take `column-changed` (`events` empty, or naming it), so you follow progress as column moves instead of the stage-label stream. It wins over `labels` and `exclude_labels: []` for those two patterns; every other label event still arrives. Rejected if `events` is set without `column-changed`. Default off — the default label exclusions are unchanged |
 | `digest_seconds` | 30–3600: batch ordinary events into one `digest` message per interval. `validate-settled`, `escalated`, `paused`, `daemon-unreachable`, `pipeline-stalled` and `pipeline-resumed` are always delivered at once |
 | `subscriber` | override the launch name |
 
@@ -3838,6 +3839,9 @@ Scopes combine with AND; entries within one list with OR. Account-wide events (`
 |---|---|---|
 | `validate-settled` | Validate is gate-complete: `stage:Validate:complete` is applied (under `wait_for_ci`, deferred until CI passes), the review gate has cleared and nothing unprocessed is holding it. Once per settle episode — never at `FABRIK_STAGE_COMPLETE` while `fabrik:awaiting-ci` is present; `fabrik:revalidate` or a reopen starts a new episode | `next` (`waiting-for-human` for cruise or no autonomy, `auto-merge`, `merge-train`), `autonomy`, `ci` (from cached check runs; `unknown` when none are cached), `ci_gate` (`cleared`/`not-gated`), `reviews` (who reviewed, and how), `unresolved_threads`, `head_sha` |
 | `label-applied`, `label-removed` | any label change on a subscribed issue; one event per actual change | `label`, `actor` (`fabrik` for the engine's own writes; `overseer` for a change an overseer action made, with `via` the requesting subscriber's name; `human` or `bot` with `actor_login` the GitHub login, when a webhook named the sender; `unknown` when only a poll saw it — under PAT auth the operator's own login looks like Fabrik's and counts as `human`) |
+| `item-added` | a managed, open item appeared on the board **after** the daemon finished its first poll (items present at startup, closed items and PR cards never produce it). Sent once its labels and column are known, so it never reports an empty label set. A `labels` scope matches when any arrival label matches (the exclude list does not apply), so a watcher of `fabrik:cruise` learns an item arrived on cruise | `title`, `column`, `labels`, `autonomy` (`cruise`, `yolo`, `none`), `milestone`, `author`, `url` |
+| `column-changed` | the item's board column changed — one event per move, however many paths observe it | `from`, `to`, `actor` (`fabrik` for the engine's own advance; `overseer` with `via` the requesting subscriber for a `fabrik_promote`; `human` / `bot` with `actor_login` when a webhook named the sender; `unknown` when only a poll or sweep saw it, which is common), `status_at` (GitHub's time, when a webhook carried it) |
+| `closed` | an issue was closed — by hand, or as part of a landing | `column`, `actor` (`fabrik` for a landing close), `landing` (`true` when it belongs to a landing) |
 | `paused`, `awaiting-input`, `escalated` | the item became `needs-human` (with a question: `awaiting-input`) or `escalated` — the same classification `fabrik_board` shows | `code`, `reason` |
 | `awaiting-input-stale` | `fabrik:awaiting-input` is present but the latest run finished without `FABRIK_BLOCKED_ON_INPUT` | |
 | `stalled` | no progress past the same `--stall-threshold` the `attention` view uses (a long-running healthy worker and an expired cooldown are not stalls) | `code`, `reason`, `progress_age_seconds` |
@@ -3845,7 +3849,7 @@ Scopes combine with AND; entries within one list with OR. Account-wide events (`
 | `merge-train-ejected` | a member left the batch | `cause`, `reason`, `failing_checks`, `ejections`, `max_ejections`, `stays_queued` |
 | `merge-train-failed` | the train failed for a member (red singleton, landing failure, runaway guard). Cause `red-singleton-auto-repair` (with `auto_repair=true`, `attempt`, `cap`) means Fabrik has started repairing it and **no human action is needed**; cause `red-singleton` means the member was paused | `cause`, `reason`, `failing_checks` |
 | `ci-timeout`, `review-timeout` | the CI or review gate timed out and the item was paused | `timeout`, `ci` / `pending_reviewers`, `reviews_before_wait` (reviewers who had already reviewed before the gate began waiting; `unknown` after a daemon restart) |
-| `merged` | the PR landed (for a merge-train member, `pr` is the integration PR that merged) | |
+| `merged` | the PR landed (for a merge-train member, `pr` is the integration PR that merged). Sent at the merge, before `closed` and the close-tracking label events for the same landing, which carry `landing=true` | |
 | `blocker-cleared` | the last open blocker closed and work resumes | |
 | `children-spawned` | the item's scope grew: child issues were created | `children`, `count` |
 | `landing-verification-failed` | the credited PR did not merge; the issue was reopened | |
@@ -3855,10 +3859,12 @@ Scopes combine with AND; entries within one list with OR. Account-wide events (`
 | `events-dropped`, `digest` | bookkeeping: held events were lost to queue overflow or aged out; a batched delivery | `count`, `dropped_types` (e.g. `label-applied x4`), `expired` (how many aged out, when any did) |
 | `stream-superseded` | emitted by `fabrik mcp` itself: another session attached under the same subscriber name and took over this stream | `subscriber` |
 
-A pause is reported once, as the transition into the state — not once per poll — and a restart announces nothing about items already paused. The exact derivation of each event is in [`docs/state-machine.md` §7.14](state-machine.md#714-channel-events-proactive-push-to-fabrik-mcp-sessions-1968).
+A pause is reported once, as the transition into the state — not once per poll — and **a restart or self-upgrade is silent**: no label events and no re-announced pauses, through the first deep fetch and the first board reconcile, for open, Done, Backlog and closed items alike, until something actually changes. Use `catch_up` for the current picture. The exact derivation of each event is in [`docs/state-machine.md` §7.14](state-machine.md#714-channel-events-proactive-push-to-fabrik-mcp-sessions-1968).
 
 **Known limits.**
 
+- A catch-up snapshot never replays `item-added`, `column-changed` or `closed`: they are transitions, not state. A subscriber that missed an arrival, or that attaches later, can read the board with `fabrik_board`. Events that happen while the daemon is down are not captured, and items created between daemon start and the end of its first poll are not announced.
+- `column-changed` is attributed `human` only when a `projects_v2_item` webhook named the sender; Status changes often reach the daemon only through its periodic sweep, which names nobody, so expect `unknown`.
 - Delivery is at-most-once to the session: there is no acknowledgement, and a half-open connection can lose up to roughly one heartbeat window of events.
 - `fabrik_unsubscribe` cannot recall pushes the daemon had already written to your session (see above); during a large burst a few can still appear after it returns.
 - Label events can arrive reordered in a narrow race between two concurrent applies of the same label.
