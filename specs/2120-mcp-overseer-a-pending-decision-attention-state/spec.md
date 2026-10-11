@@ -59,6 +59,16 @@ Observed in an in-situ test (a Claude Code session using `fabrik mcp` against th
 - **R-unsettle-1 — Withdrawn settlement is announced.** When an item that published `validate-settled` (or a pending-decision event under this issue) stops meeting the settled predicate before a human acts, publish one event saying so, with the reason. The reason is one of: rebase needed, new feedback, CI red or pending on a new head, or worker dispatched. The ADR chooses between a `validate-unsettled` event and a `superseded=true` re-publication. The event is deduplicated per settle episode, like `validate-settled`.
 - **R-unsettle-2 — Label events are not a readiness signal.** The `fabrik_subscribe` description, and the event-catalogue docs, state that label events are not a readiness signal; only the settled and unsettled events are.
 - **R-unsettle-3 — Resettling.** After an unsettled event, a fresh `validate-settled` is published once the item resettles (a new settle episode).
+- **R-options-1 — Decision-bearing events say how to act.**
+  - **Scope:** every decision-bearing event (`validate-settled` under cruise, the pending-decision event, and the paused/`needs-human` family).
+  - **Field:** it carries an `options` list. Each option names the action and the MCP tool that performs it, when one exists. For example:
+    - merge PR #N (no tool: the human's merge);
+    - `fabrik_set_autonomy yolo`;
+    - `fabrik_advance` (shipped in #2126);
+    - `fabrik_promote`.
+- **R-options-2 — A paused event gives the engine's own resume method.**
+  - A paused event states the resume method that the engine's own pause comment gives. For example, a daemon-clean-stop pause says "remove `fabrik:paused`", while an awaiting-input pause says "a human comment".
+  - It never gives a generic method that contradicts the engine (A16 in the in-situ report).
 - **R7 — Docs.**
   - `docs/state-machine.md` §7.13 (attention) and §7.14 (events).
   - `docs/USER_GUIDE.md`'s MCP tool and event tables.
@@ -72,7 +82,8 @@ In scope:
 - its age anchoring, including the reset when eligibility to proceed changes;
 - next-action honesty for non-progressing states;
 - its push event;
-- the unsettled event (or superseded re-publication) for withdrawn settlements, and the `fabrik_subscribe` description wording.
+- the unsettled event (or superseded re-publication) for withdrawn settlements, the `fabrik_subscribe` description wording;
+- the `options` list on decision-bearing events and the engine-accurate resume method on paused events.
 
 Out of scope:
 - an action that advances an item (separate issue);
@@ -90,6 +101,7 @@ Each case below is a classifier unit test, shown non-vacuous by neutralisation:
 - **Paused item:** `next_at` is absent, not a cooldown expiry.
 - **Simulation (`tests/sim`):** after a simulated restart, the first board served lists the item, and exactly one pending-decision event is published per episode, not re-published on every poll.
 - **Unsettle (`tests/sim`):** settle an item under cruise, then make the base move so the item needs a rebase. Exactly one unsettled event is published, and a fresh `validate-settled` follows once the item resettles.
+- **Options (classifier or channel test per decision kind):** a test for each decision kind (`validate-settled` under cruise, pending decision, paused/`needs-human`) asserts the `options` list. A test for the clean-stop pause asserts its resume method matches the engine comment.
 - **Zero GitHub calls:** `TestLocalAPISourceDoesNotReachGitHub` and the channel scan stay green and are not weakened.
 - `go test -race ./...` is clean.
 
