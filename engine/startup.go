@@ -452,15 +452,17 @@ func (e *Engine) resolveRepoAccess(owner, repo string) gh.RepoAccess {
 	if !already {
 		warnKey := "repo_access:" + key
 		if !access.CanPush {
-			e.logf(0, "startup", "%s: no write access — skipping label seeding and allow_auto_merge check; items from this repo will not be processed\n", key)
-			_ = warnings.Record(warnings.Entry{
-				Key:    warnKey,
-				Type:   "repo_access",
-				Title:  fmt.Sprintf("%s: no write access — items from this repo will not be processed", key),
-				Detail: e.repoAccessWarningDetail(key),
-			})
-		} else {
-			_ = warnings.Clear(warnKey)
+			if err := warnings.Report(e.warnWriter("startup"), warnings.Condition{
+				Type:    "repo_access",
+				Subject: key,
+				Title:   fmt.Sprintf("%s: no write access — items from this repo will not be processed", key),
+				Detail:  e.repoAccessWarningDetail(key),
+				LogLine: fmt.Sprintf("%s: no write access — skipping label seeding and allow_auto_merge check; items from this repo will not be processed", key),
+			}); err != nil {
+				e.logf(0, "startup", "recording repo_access warning: %v\n", err)
+			}
+		} else if err := warnings.Resolve(warnKey); err != nil {
+			e.logf(0, "startup", "clearing %s: %v\n", warnKey, err)
 		}
 	}
 	return access
@@ -567,28 +569,33 @@ func (e *Engine) checkAllowAutoMerge(owner, repo string) {
 		return
 	}
 	if e.ghAppAuth != nil {
-		_ = warnings.Clear("allow_auto_merge:" + key)
+		if err := warnings.Resolve("allow_auto_merge:" + key); err != nil {
+			e.logf(0, "startup", "clearing allow_auto_merge:%s: %v\n", key, err)
+		}
 		return
 	}
 	access := e.resolveRepoAccess(owner, repo)
 	if !access.CanPush {
-		_ = warnings.Clear("allow_auto_merge:" + key)
+		if err := warnings.Resolve("allow_auto_merge:" + key); err != nil {
+			e.logf(0, "startup", "clearing allow_auto_merge:%s: %v\n", key, err)
+		}
 		return
 	}
 	if !access.AllowAutoMerge {
-		e.logf(0, "startup", "WARNING: %s has allow_auto_merge disabled.\n", key)
-		e.logf(0, "startup", "WARNING: yolo issues on this repo will reach Validate complete but their PRs will not merge.\n")
-		e.logf(0, "startup", "WARNING: Fix: gh api -X PATCH repos/%s -f allow_auto_merge=true\n", key)
-		_ = warnings.Record(warnings.Entry{
-			Key:       "allow_auto_merge:" + key,
+		fix := fmt.Sprintf("gh api -X PATCH repos/%s -f allow_auto_merge=true", key)
+		if err := warnings.Report(e.warnWriter("startup"), warnings.Condition{
 			Type:      "allow_auto_merge",
+			Subject:   key,
 			Title:     "allow_auto_merge disabled on " + key,
-			Detail:    fmt.Sprintf("yolo issues on this repo will reach Validate complete but their PRs will not merge.\n\nFix: gh api -X PATCH repos/%s -f allow_auto_merge=true", key),
+			Detail:    fmt.Sprintf("yolo issues on this repo will reach Validate complete but their PRs will not merge.\n\nFix: %s", fix),
 			FixAction: "shell_command",
-			FixParams: map[string]string{"cmd": fmt.Sprintf("gh api -X PATCH repos/%s -f allow_auto_merge=true", key)},
-		})
-	} else {
-		_ = warnings.Clear("allow_auto_merge:" + key)
+			FixParams: map[string]string{"cmd": fix},
+			LogLine:   fmt.Sprintf("%s has allow_auto_merge disabled. yolo issues on this repo will reach Validate complete but their PRs will not merge. Fix: %s", key, fix),
+		}); err != nil {
+			e.logf(0, "startup", "recording allow_auto_merge warning: %v\n", err)
+		}
+	} else if err := warnings.Resolve("allow_auto_merge:" + key); err != nil {
+		e.logf(0, "startup", "clearing allow_auto_merge:%s: %v\n", key, err)
 	}
 }
 

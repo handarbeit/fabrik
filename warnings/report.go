@@ -24,9 +24,13 @@ const (
 type Condition struct {
 	Type    string // e.g. "config_key"; Key is Type + ":" + Subject
 	Subject string
-	Level   Level
-	Title   string
-	Detail  string
+	// KeyOverride replaces Type + ":" + Subject for a legacy entry whose key
+	// does not have that shape. New conditions must not set it: ClearMissing
+	// (and so Reconcile) only works on keys of the "<type>:<subject>" shape.
+	KeyOverride string
+	Level       Level
+	Title       string
+	Detail      string
 	// FixAction is empty when there is no automatic fix; the panel then shows
 	// the title and detail only.
 	FixAction string
@@ -40,7 +44,12 @@ type Condition struct {
 }
 
 // Key returns the panel entry key.
-func (c Condition) Key() string { return c.Type + ":" + c.Subject }
+func (c Condition) Key() string {
+	if c.KeyOverride != "" {
+		return c.KeyOverride
+	}
+	return c.Type + ":" + c.Subject
+}
 
 // Report is the one way to surface an operator-level condition: it writes the
 // log line to w (nil = no log line) and records the panel entry in the same

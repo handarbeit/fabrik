@@ -107,20 +107,29 @@ func warnDriftFrom(userStages []*Stage, version string, w io.Writer, defaults fs
 		}
 		missing = FilterNoOpKeys(missing, defaultStage)
 		if len(missing) == 0 {
-			_ = warnings.Clear("stage_drift:" + name)
+			if err := warnings.Resolve("stage_drift:" + name); err != nil {
+				fmt.Fprintf(w, "[startup] warning: clearing stage_drift warning for %s failed: %v\n", name, err)
+			}
 			return nil
 		}
 
-		fmt.Fprintf(w, "[startup] warning: %s is missing fields present in %s defaults: %s. Run `fabrik refresh-stages --apply` to add the missing keys.\n",
-			userStage.FilePath, version, strings.Join(missing, ", "))
-		_ = warnings.Record(warnings.Entry{
-			Key:       "stage_drift:" + name,
-			Type:      "stage_drift",
-			Title:     driftTitle(userStage.FilePath, missing),
-			Detail:    fmt.Sprintf("%s is missing fields present in %s defaults: %s\n\nFix: fabrik refresh-stages --apply", userStage.FilePath, version, strings.Join(missing, ", ")),
-			FixAction: "fabrik_command",
-			FixParams: map[string]string{"args": "refresh-stages --apply"},
-		})
+		// Fingerprint: the sorted missing-key set, so a dismissed drift stays
+		// dismissed until the set of missing keys changes.
+		sorted := append([]string(nil), missing...)
+		sort.Strings(sorted)
+		if err := warnings.Report(w, warnings.Condition{
+			Type:        "stage_drift",
+			Subject:     name,
+			Title:       driftTitle(userStage.FilePath, missing),
+			Detail:      fmt.Sprintf("%s is missing fields present in %s defaults: %s\n\nFix: fabrik refresh-stages --apply", userStage.FilePath, version, strings.Join(missing, ", ")),
+			FixAction:   "fabrik_command",
+			FixParams:   map[string]string{"args": "refresh-stages --apply"},
+			Fingerprint: strings.Join(sorted, ","),
+			LogLine: fmt.Sprintf("%s is missing fields present in %s defaults: %s. Run `fabrik refresh-stages --apply` to add the missing keys.",
+				userStage.FilePath, version, strings.Join(missing, ", ")),
+		}); err != nil {
+			fmt.Fprintf(w, "[startup] warning: recording stage_drift warning for %s failed: %v\n", name, err)
+		}
 		return nil
 	})
 }
@@ -142,17 +151,17 @@ func WarnUndeclaredReviewers(userStages []*Stage, w io.Writer) {
 	for _, s := range userStages {
 		key := "undeclared_reviewers:" + s.Name
 		if s.WaitForReviews == nil || !*s.WaitForReviews || s.ExpectedReviewers != nil {
-			_ = warnings.Clear(key)
+			if err := warnings.Resolve(key); err != nil {
+				fmt.Fprintf(w, "[startup] warning: clearing %s failed: %v\n", key, err)
+			}
 			continue
 		}
 
-		fmt.Fprintf(w, "[startup] notice: stage %q has wait_for_reviews: true but no expected_reviewers declaration — "+
-			"self-submitting review bots (e.g. Pruefer, Gemini, CodeRabbit) never appear as a requested reviewer, so "+
-			"the bot re-prompt ladder cannot engage for them until declared. See docs/USER_GUIDE.md.\n", s.Name)
-		_ = warnings.Record(warnings.Entry{
-			Key:   key,
-			Type:  "undeclared_reviewers",
-			Title: fmt.Sprintf("%s has wait_for_reviews but no expected_reviewers declaration", s.Name),
+		if err := warnings.Report(w, warnings.Condition{
+			Type:    "undeclared_reviewers",
+			Subject: s.Name,
+			Level:   warnings.LevelNotice,
+			Title:   fmt.Sprintf("%s has wait_for_reviews but no expected_reviewers declaration", s.Name),
 			Detail: fmt.Sprintf(
 				"Stage %q sets wait_for_reviews: true but does not declare expected_reviewers. Self-submitting "+
 					"review bots (Pruefer, Gemini, CodeRabbit, ...) never appear in GitHub's requested-reviewer "+
@@ -161,7 +170,13 @@ func WarnUndeclaredReviewers(userStages []*Stage, w io.Writer) {
 					"Fix: add expected_reviewers to %s (see docs/USER_GUIDE.md).",
 				s.Name, s.FilePath,
 			),
-		})
+			Fingerprint: "undeclared",
+			LogLine: fmt.Sprintf("stage %q has wait_for_reviews: true but no expected_reviewers declaration — "+
+				"self-submitting review bots (e.g. Pruefer, Gemini, CodeRabbit) never appear as a requested reviewer, so "+
+				"the bot re-prompt ladder cannot engage for them until declared. See docs/USER_GUIDE.md.", s.Name),
+		}); err != nil {
+			fmt.Fprintf(w, "[startup] warning: recording %s failed: %v\n", key, err)
+		}
 	}
 }
 

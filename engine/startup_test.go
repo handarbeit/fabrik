@@ -1044,8 +1044,8 @@ func TestCheckAllowAutoMerge_NoWriteAccessSkipsWarning(t *testing.T) {
 		eng.checkAllowAutoMerge("owner", "repo")
 	})
 
-	if strings.Contains(out, "WARNING") {
-		t.Errorf("expected no WARNING for a repo with no write access, even with allow_auto_merge disabled; got: %q", out)
+	if strings.Contains(out, "has allow_auto_merge disabled") {
+		t.Errorf("expected no allow_auto_merge warning for a repo with no write access, even with allow_auto_merge disabled; got: %q", out)
 	}
 	if strings.Contains(out, "gh api -X PATCH") {
 		t.Errorf("expected no admin-only remediation for a repo with no write access; got: %q", out)
