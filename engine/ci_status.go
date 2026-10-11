@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -168,37 +167,12 @@ func (e *Engine) collectFailingChecks(item gh.ProjectItem, owner, repo string, r
 	}
 }
 
-// latestCheckRuns keeps the highest-ID run of each check name, so a re-run that
-// passed supersedes the earlier failure. Order is by name for stable output.
-func latestCheckRuns(runs []gh.CheckRun) []gh.CheckRun {
-	latest := make(map[string]gh.CheckRun, len(runs))
-	for _, cr := range runs {
-		if existing, ok := latest[cr.Name]; !ok || cr.ID > existing.ID {
-			latest[cr.Name] = cr
-		}
-	}
-	out := make([]gh.CheckRun, 0, len(latest))
-	for _, cr := range latest {
-		out = append(out, cr)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return out
-}
-
-// failingCheckRuns returns the latest completed runs whose conclusion
-// gh.ClassifyCheckRuns treats as failed (failure, timed_out, action_required).
+// failingCheckRuns returns the latest run of each check name that
+// gh.ClassifyCheckRuns reports as failed (failure, timed_out, action_required),
+// so this section and the verdict cannot disagree about what is failing.
 func failingCheckRuns(runs []gh.CheckRun) []gh.CheckRun {
-	var out []gh.CheckRun
-	for _, cr := range latestCheckRuns(runs) {
-		if cr.Status != "completed" {
-			continue
-		}
-		switch cr.Conclusion {
-		case "failure", "timed_out", "action_required":
-			out = append(out, cr)
-		}
-	}
-	return out
+	_, _, failed := gh.ClassifyCheckRuns(runs)
+	return failed
 }
 
 // ciStatusVerdictFor maps a head's check runs to a verdict using the landing
@@ -233,7 +207,7 @@ func (e *Engine) ciStatusVerdictFor(owner, repo, mergeableState, headSHA string,
 // skipped without having run the suite on this head, so it must never license a
 // local skip. Demoting it only ever removes a skip.
 func allCheckRunsPassed(runs []gh.CheckRun) bool {
-	for _, cr := range latestCheckRuns(runs) {
+	for _, cr := range gh.LatestCheckRuns(runs) {
 		if cr.Status != "completed" {
 			return false
 		}
