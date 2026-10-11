@@ -12,6 +12,14 @@ const (
 	// the name is defined in Go; the shipped stage defaults qualify their skills
 	// with it and the skill resolver prefers it for bare references.
 	BasePluginName = "fabrik"
+
+	// LocalWorkflowsName is the manifest name of the plugin `fabrik upgrade`
+	// moves an operator-customised workflow plugin into (#2139, ADR 2139).
+	LocalWorkflowsName = "local-workflows"
+
+	// LocalWorkflowsRelDir is where that plugin lives, relative to the Fabrik
+	// directory; the engine loads it automatically when it exists (FR-007).
+	LocalWorkflowsRelDir = ".fabrik/plugins/local-workflows"
 )
 
 // Qualify returns the fully-qualified "<plugin>:<skill>" name.
