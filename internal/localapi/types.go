@@ -423,11 +423,22 @@ type SubscribeParams struct {
 	DigestSeconds int       `json:"digest_seconds,omitempty"`
 }
 
+// EventMapping reports a requested event type the daemon rewrote to its current
+// name (a rename the caller's build predates).
+type EventMapping struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
 // SubscribeResult echoes the stored subscription and everything the subscriber
-// now has.
+// now has. Mapped and Rejected (#2168) are additive and omitted when empty: the
+// event types of the request that were renamed (and to what), and those the
+// daemon does not know and therefore did not subscribe to.
 type SubscribeResult struct {
 	Subscription  channelevents.Subscription   `json:"subscription"`
 	Subscriptions []channelevents.Subscription `json:"subscriptions"`
+	Mapped        []EventMapping               `json:"mapped,omitempty"`
+	Rejected      []string                     `json:"rejected,omitempty"`
 }
 
 // UnsubscribeParams removes one subscription by id, or all of a subscriber's
