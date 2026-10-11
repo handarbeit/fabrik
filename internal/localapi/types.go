@@ -303,6 +303,36 @@ type PollHealth struct {
 	LastSuccessAt       Known[time.Time] `json:"last_success_at"`
 	SinceAttemptSeconds Known[int64]     `json:"since_attempt_seconds"`
 	SinceSuccessSeconds Known[int64]     `json:"since_success_seconds"`
+
+	// Liveness (#2124, ADR 2124). All additive; the fields above keep their meaning.
+	//
+	// IntervalSeconds is the configured poll interval (unknown when unset).
+	IntervalSeconds Known[int64] `json:"interval_seconds"`
+	// InProgress is true while a poll is running. CurrentStartedAt and
+	// InProgressSeconds are "unknown" when none is.
+	InProgress        bool             `json:"in_progress"`
+	CurrentStartedAt  Known[time.Time] `json:"current_started_at"`
+	InProgressSeconds Known[int64]     `json:"in_progress_seconds"`
+	// LastCompletedAt is when the last poll returned, with or without error.
+	LastCompletedAt Known[time.Time] `json:"last_completed_at"`
+	// Step is what the in-progress poll is doing; unknown when no poll is
+	// running or the engine does not know.
+	Step Known[string] `json:"step"`
+	// NextDueAt is when the engine itself expects the next poll (it includes
+	// deliberate back-off). BackingOff/BackoffReason say when it is later than
+	// the configured interval: "idle", "graphql" or "rest".
+	NextDueAt     Known[time.Time] `json:"next_due_at"`
+	BackingOff    bool             `json:"backing_off"`
+	BackoffReason string           `json:"backoff_reason,omitempty"`
+	// Overdue is the verdict: true when a poll has been in progress for longer
+	// than OverdueAfterSeconds (K x interval) or none started within that long
+	// of NextDueAt. Unknown, never false, when the interval or baseline is unknown.
+	Overdue             Known[bool]  `json:"overdue"`
+	OverdueAfterSeconds Known[int64] `json:"overdue_after_seconds"`
+	// OverdueCause is "poll-in-progress" or "no-poll-started"; BlockedSeconds is
+	// how long the poll has been in progress or absent.
+	OverdueCause   string       `json:"overdue_cause,omitempty"`
+	BlockedSeconds Known[int64] `json:"blocked_seconds"`
 }
 
 // WebhookHealth describes webhook ingestion.
@@ -333,6 +363,11 @@ type BackoffHealth struct {
 	Low        Known[bool]    `json:"low"`
 	RestPaused Known[bool]    `json:"rest_paused"`
 	Ratio      Known[float64] `json:"ratio"`
+	// AsOf is when the poll last refreshed Remaining/Low/Ratio (#2124); unknown
+	// until the first refresh, never "now". RestPausedAsOf is the same for
+	// RestPaused. Neither moves with the passage of time alone.
+	AsOf           Known[time.Time] `json:"as_of"`
+	RestPausedAsOf Known[time.Time] `json:"rest_paused_as_of"`
 }
 
 // WorkerSlots is worker concurrency.
@@ -352,6 +387,21 @@ type TrainPartition struct {
 	Base           string   `json:"base"`
 	Members        []string `json:"members"`
 	WorkerInFlight bool     `json:"worker_in_flight"`
+
+	// Liveness (#2124). OldestQueuedSince is daemon-observed (it restarts with
+	// the daemon). RunActive is true while an open run or a worker exists;
+	// Phase is its durable phase ("trial-ci", "bisect", "one-at-a-time",
+	// "landing") or "none". IdleReason is set only for queued members with no
+	// active run: "poll-overdue", "infra-abandon-cooldown" or "unknown".
+	OldestQueuedSince   Known[time.Time] `json:"oldest_queued_since"`
+	OldestQueuedSeconds Known[int64]     `json:"oldest_queued_seconds"`
+	RunActive           bool             `json:"run_active"`
+	Phase               string           `json:"phase"`
+	PhaseSince          Known[time.Time] `json:"phase_since"`
+	IdleReason          string           `json:"idle_reason,omitempty"`
+	IdleDetail          string           `json:"idle_detail,omitempty"`
+	// Stalled is true while the partition meets the stall condition (the one that raises pipeline-stalled).
+	Stalled bool `json:"stalled"`
 }
 
 // ---- streaming (protocol v2, #1968) ----
