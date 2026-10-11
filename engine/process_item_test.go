@@ -79,6 +79,9 @@ func TestMain(m *testing.M) {
 		}
 	}
 	lockVerifyDelay = 0
+	// Don't spawn a real macOS `lsof` on every CleanupWorktree (#1805); the
+	// reaper's own tests re-enable the real path via useRealLsofReaper.
+	SetWorktreeReapLsofDisabledForTest(true)
 	// Hermetic against a worker's inherited environment (#2027): a stage
 	// worker runs this suite with the daemon's credentials, GH_TOKEN and
 	// ADR-1846 GIT_CONFIG_* helper entries in its env, none of which CI has.

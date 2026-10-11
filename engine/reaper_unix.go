@@ -3,6 +3,8 @@
 package engine
 
 import (
+	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,7 +12,17 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
+
+// worktreeReapLsofTimeout bounds the macOS reaper's `lsof` call (#1805, ADR
+// 1805). The call runs under the per-repo worktree mutex on three of its four
+// call sites, so an unbounded `lsof` stalls every EnsureWorktree, PushBranch
+// and cleanup for that repo. `lsof` measured ~0.3s idle and 2–4s on a loaded
+// host (#1798); 10s covers that range with margin, where the 3s
+// sentinelProbeTimeout would skip the reap in exactly the loaded case. A var,
+// not a const, so tests can shorten it.
+var worktreeReapLsofTimeout = 10 * time.Second
 
 // reapWorktreeProcesses enumerates every live process whose cwd is wtDir or a
 // subdirectory of it and sends SIGKILL to each. It runs immediately before a
@@ -23,6 +35,10 @@ import (
 // This is a package-level function, not a WorktreeManager method, so the
 // worktree janitor's os.RemoveAll fallback (which runs when no WorktreeManager
 // is available for the repo) can call it too.
+//
+// Linux (#1805 R3): the /proc walk makes no exec call and spawns no process,
+// so there is nothing to bound. macOS shells out to `lsof`, which is bounded by
+// worktreeReapLsofTimeout.
 //
 // Enumeration and kill failures are always non-fatal: they are logged via logf
 // as warnings, and the caller proceeds with its own removal (git worktree
@@ -149,10 +165,26 @@ func readComm(pid int) string {
 // macOS has no cheap per-pid re-check primitive equivalent to /proc, so unlike
 // the Linux path this does not re-verify cwd immediately before killing —
 // the small PID-reuse TOCTOU window here is accepted, not mitigated.
+//
+// The call is bounded by worktreeReapLsofTimeout (#1805). On timeout the
+// process is killed, any partial output is discarded, one warning naming the
+// worktree and the timeout is logged, and the reap is skipped; the caller's
+// worktree removal proceeds.
 func reapWorktreeProcessesDarwin(wtDir string, issueNumber int, logf func(int, string, string, ...any)) {
+	if worktreeReapLsofDisabled.Load() {
+		return
+	}
 	wtDir = filepath.Clean(wtDir)
-	cmd := exec.Command("lsof", "-a", "-d", "cwd", "-n", "-P", "-Fpcn")
+	ctx, cancel := context.WithTimeout(context.Background(), worktreeReapLsofTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "lsof", "-a", "-d", "cwd", "-n", "-P", "-Fpcn")
 	out, err := cmd.Output()
+	// CommandContext reports a deadline kill as a generic "signal: killed"
+	// exit error, so the timeout is detected from the context, not from err.
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		logf(issueNumber, "kill", "warn: worktree process reap: lsof timed out after %s for %s; skipping reap\n", worktreeReapLsofTimeout, wtDir)
+		return
+	}
 	if err != nil {
 		// lsof exits non-zero when it finds no matching processes at all, which
 		// is a normal empty result rather than a failure — only warn when there
