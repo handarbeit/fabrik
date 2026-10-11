@@ -15,7 +15,7 @@ import (
 // FetchLabelAppliedAt — a full issue-events REST page-through, not cheap — is
 // called at most once per item per engine lifetime (twice across a restart),
 // rather than once per poll for every item still waiting out its grace period.
-const archiveEligibleAtCooldownReason = "archive-eligible-at"
+const archiveEligibleAtCooldownReason = itemstate.ArchiveEligibleCooldown
 
 // maxArchiveLabelFetchesPerPoll bounds how many FetchLabelAppliedAt calls
 // (cache misses) settleArchiveDoneItems will issue within a single poll. Without
