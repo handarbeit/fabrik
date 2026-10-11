@@ -266,6 +266,9 @@ type Engine struct {
 	// afterwards is an arrival (item-added, #2123). Items created before it —
 	// the startup population, whichever path delivers it — are never announced.
 	boardPopulated atomic.Bool
+	// decisionAnchors is the poll-side recorder's retry memory (#2120,
+	// decision_anchor.go).
+	decisionAnchors decisionAnchorState
 	// logThrottle is the shared dedup state behind logfThrottled (R4,
 	// logthrottle.go) — collapses repeated identical log lines (e.g. the
 	// per-poll rate-limit stats lines) into one emission per throttle window

@@ -1943,6 +1943,12 @@ func (e *Engine) pollCycle(ctx context.Context) (pollResult, error) {
 	e.settleClaudeLimitClearRequests(board)
 	e.settleClaudeLimitLabelSweep(board)
 
+	// Pending-decision anchors (#2120): reads, once per item, the GitHub time of
+	// the label a suspended item's age is anchored on, so the cache-only
+	// attention classifier can report an honest age after a restart. Poll
+	// goroutine only; bounded per poll.
+	e.settleDecisionAnchors(board)
+
 	// Remove stale fabrik:locked labels from closed issues. This handles the case
 	// where an issue was closed while a stage was in-flight, leaving the lock label
 	// behind. We do this every poll so it also catches locks from prior Fabrik runs.
