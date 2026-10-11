@@ -1429,6 +1429,7 @@ The table above lists variables **you** set to configure the engine. Separately,
 | `FABRIK_WORKTREE` | Absolute path to the issue's worktree | Always |
 | `FABRIK_ROOT` | Absolute path to the directory containing `.fabrik/` (config, stages, plugin) | Always |
 | `FABRIK_PR` | The linked pull request number | Only once a PR exists — unset (never `0`) before then |
+| `FABRIK_WORKER_OWNER` | Path of this invocation's owner file under `.fabrik/state/worker-owners/`. An internal marker, not a value for your scripts: every process the worker starts inherits it, which is how Fabrik finds and cleans up leftover test processes (and lets a `tests/sim` binary exit when its worker dies) without ever guessing from process-tree shape | Always |
 
 **Not the same `FABRIK_REPO`.** The `FABRIK_REPO` in this table is a different variable from the `FABRIK_REPO` in the config table above, despite the identical name. The config-table `FABRIK_REPO` is something *you* set before starting Fabrik, to tell the engine which repo to manage. This worker-injected `FABRIK_REPO` is something *Fabrik* sets, per invocation, inside the Claude subprocess only — it names whichever repo the current issue actually belongs to (relevant in multi-repo mode, where the config-table `FABRIK_REPO` is typically omitted entirely). The worker-injected value always wins inside the subprocess regardless of what the launching shell exported, so there is no functional collision — only a naming one worth knowing about if you're scripting against both.
 
