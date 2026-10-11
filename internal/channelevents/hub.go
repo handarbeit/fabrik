@@ -49,6 +49,10 @@ type Options struct {
 	MinDigest time.Duration
 	Now       func() time.Time
 	Logf      func(format string, args ...any)
+
+	// beforeDeliver, when set (tests only), runs in the drain loop after a batch
+	// has been taken and before the epoch recheck that precedes Deliver.
+	beforeDeliver func()
 }
 
 type registryFile struct {
@@ -70,10 +74,14 @@ type subscriber struct {
 	name   string
 	path   string
 	sendMu sync.Mutex // serialises one peek→deliver→remove cycle across attachments
-	mu     sync.Mutex // guards q and att
+	mu     sync.Mutex // guards q, att and epoch
 	q      queueFile
 	att    *attachment
 	wake   chan struct{}
+	// epoch is bumped by every Unsubscribe that removed something. The drain loop
+	// records it with each batch and rechecks it immediately before each Deliver,
+	// so a batch taken before the unsubscribe is abandoned rather than written.
+	epoch uint64
 }
 
 // Hub routes published events to subscribers, holding them while a subscriber
@@ -379,8 +387,15 @@ func (h *Hub) CatchUp(name, subID string, evs []Event) int {
 }
 
 // Unsubscribe removes one subscription by id, or every subscription of the
-// subscriber when id is empty; dropping the last one also discards its held
-// queue. It returns how many subscriptions were removed.
+// subscriber when id is empty. It is a hard stop: queued entries that no
+// remaining subscription matches are discarded (all of them, and the drop
+// counters, when the last subscription goes), a batch the drain loop already
+// took is abandoned before it is written, and the call does not return until a
+// Deliver already in flight has finished, so no delivery for a removed
+// subscription completes after it returns. That wait is bounded by the sink's
+// own write deadline. The attachment itself stays bound (a re-subscribe under
+// the same name resumes delivery on it). It returns how many subscriptions were
+// removed.
 func (h *Hub) Unsubscribe(subscriberName, id string) int {
 	h.mu.Lock()
 	removed := 0
@@ -393,25 +408,45 @@ func (h *Hub) Unsubscribe(subscriberName, id string) int {
 		kept = append(kept, s)
 	}
 	h.subs = kept
-	var drop *subscriber
+	var sub *subscriber
+	var remaining []Subscription
 	if removed > 0 {
-		if !h.hasSubsLocked(subscriberName) {
-			drop = h.subscribers[subscriberName]
-		}
+		sub = h.subscribers[subscriberName]
+		remaining = h.subscriptionsLocked(subscriberName)
 		h.saveRegistryLocked()
 	}
 	h.mu.Unlock()
-	if drop != nil {
-		drop.mu.Lock()
-		drop.q.Entries, drop.q.Dropped, drop.q.DroppedTypes, drop.q.Expired = nil, 0, nil, 0
-		if drop.att == nil {
-			_ = os.Remove(drop.path)
-		} else {
-			h.saveQueue(drop)
-		}
-		drop.mu.Unlock()
+	if sub == nil {
+		return removed
 	}
+	sub.mu.Lock()
+	sub.epoch++
+	changed := sub.q.retainMatching(remaining)
+	switch {
+	case len(remaining) == 0 && sub.att == nil:
+		_ = os.Remove(sub.path)
+	case len(remaining) == 0 || changed:
+		h.saveQueue(sub)
+	}
+	sub.mu.Unlock()
+	// Fence: the drain loop holds sendMu across a whole peek→deliver→remove
+	// cycle, so once it is ours any Deliver that was in flight has finished and
+	// the next cycle starts from the purged queue and the current subscriptions.
+	// No other lock is held while waiting on it.
+	sub.sendMu.Lock()
+	sub.sendMu.Unlock() //nolint:staticcheck // SA2001: the empty critical section is the fence
 	return removed
+}
+
+// subscriptionsLocked lists a subscriber's subscriptions. h.mu held.
+func (h *Hub) subscriptionsLocked(name string) []Subscription {
+	var out []Subscription
+	for _, s := range h.subs {
+		if s.Subscriber == name {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func (h *Hub) hasSubsLocked(name string) bool {
@@ -638,12 +673,25 @@ func (h *Hub) drain(s *subscriber, a *attachment) {
 		var wait time.Duration
 		for {
 			s.sendMu.Lock()
+			// Current subscriptions, read under h.mu alone (never nested in s.mu).
+			// Taken while sendMu is held, so an Unsubscribe that returned before this
+			// cycle began is already reflected here.
+			h.mu.Lock()
+			subs := h.subscriptionsLocked(s.name)
+			h.mu.Unlock()
 			s.mu.Lock()
 			if s.att != a {
 				s.mu.Unlock()
 				s.sendMu.Unlock()
 				return
 			}
+			// Entries no subscription matches any more (a Publish or CatchUp that
+			// resolved its targets before an Unsubscribe and enqueued after it, or a
+			// partial removal) are never delivered.
+			if s.q.retainMatching(subs) {
+				h.saveQueue(s)
+			}
+			epoch := s.epoch
 			b, w, ok := s.q.next(h.opt.Now())
 			s.mu.Unlock()
 			if !ok {
@@ -651,12 +699,27 @@ func (h *Hub) drain(s *subscriber, a *attachment) {
 				wait = w
 				break
 			}
-			var failed bool
+			if h.opt.beforeDeliver != nil {
+				h.opt.beforeDeliver()
+			}
+			var failed, stale bool
 			for _, ev := range b.events {
+				s.mu.Lock()
+				stale = s.epoch != epoch || s.att != a
+				s.mu.Unlock()
+				if stale {
+					break
+				}
 				if err := a.sink.Deliver(ev); err != nil {
 					failed = true
 					break
 				}
+			}
+			if stale {
+				// An Unsubscribe (or detach) overtook this batch: write nothing, leave
+				// the queue as the unsubscribe left it, and start a fresh cycle.
+				s.sendMu.Unlock()
+				continue
 			}
 			if failed {
 				s.sendMu.Unlock()

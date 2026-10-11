@@ -428,8 +428,8 @@ func TestChannelStreamerSubscribeResolvesIssuesAndValidates(t *testing.T) {
 	if len(got) != 2 || got[0] != (channelevents.IssueRef{Repo: apiRepo, Number: 7}) || got[1].Number != 8 {
 		t.Fatalf("issues resolved to %+v", got)
 	}
-	if _, err := st.Subscribe(localapi.SubscribeParams{Subscriber: "S", Events: []string{"nope"}}); err == nil {
-		t.Fatal("unknown event type accepted")
+	if _, err := st.Subscribe(localapi.SubscribeParams{Subscriber: "S", Events: []string{"nope"}}); err == nil || !strings.Contains(err.Error(), `unknown event type nope`) {
+		t.Fatalf("an all-unknown event list must be refused and named, got %v", err)
 	}
 	if _, err := st.Subscribe(localapi.SubscribeParams{Subscriber: ""}); err == nil {
 		t.Fatal("empty subscriber accepted")
@@ -442,6 +442,58 @@ func TestChannelStreamerSubscribeResolvesIssuesAndValidates(t *testing.T) {
 	un, err := st.Unsubscribe(localapi.UnsubscribeParams{Subscriber: "S"})
 	if err != nil || un.Removed != 1 {
 		t.Fatalf("unsubscribe: %+v %v", un, err)
+	}
+}
+
+// A shim built before the #2129 rename still names claude-limit-suspended. The
+// daemon must map it, apply the rest, and say so — never fail the whole request
+// and never leave the session without a subscription (#2168).
+func TestChannelStreamerSubscribeToleratesVersionSkew(t *testing.T) {
+	e, _ := channelEngine(t, 0, nil)
+	ce := e.channelEvents()
+	st := e.channelStreamer()
+	sink := newChanSink()
+	ce.hub.Attach("S", sink)
+
+	res, err := st.Subscribe(localapi.SubscribeParams{Subscriber: "S", Events: []string{"claude-limit-suspended", "validate-settled", "from-the-future"}})
+	if err != nil {
+		t.Fatalf("a stale event name must not fail the subscribe: %v", err)
+	}
+	if got := res.Subscription.Events; len(got) != 2 || got[0] != channelevents.ClaudeUsageLimited || got[1] != channelevents.ValidateSettled {
+		t.Fatalf("stored events = %v", got)
+	}
+	if len(res.Mapped) != 1 || res.Mapped[0] != (localapi.EventMapping{From: "claude-limit-suspended", To: "claude-usage-limited"}) {
+		t.Fatalf("mapped = %+v", res.Mapped)
+	}
+	if len(res.Rejected) != 1 || res.Rejected[0] != "from-the-future" {
+		t.Fatalf("rejected = %+v", res.Rejected)
+	}
+	ce.hub.Publish(channelevents.Event{Type: channelevents.ValidateSettled, Repo: "owner/repo", Issue: 7, Content: "settled"})
+	if ev := sink.nextOfType(t, channelevents.ValidateSettled); ev.Issue != 7 {
+		t.Fatalf("validate-settled not delivered: %+v", ev)
+	}
+
+	// Re-subscribing with the old name is the same subscription, not a new one.
+	again, err := st.Subscribe(localapi.SubscribeParams{Subscriber: "S", Events: []string{"claude-limit-suspended", "claude-usage-limited", "validate-settled", "from-the-future"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Subscription.ID != res.Subscription.ID || len(again.Subscriptions) != 1 {
+		t.Fatalf("legacy and current spellings must collapse to one subscription: %+v vs %+v", again, res)
+	}
+
+	// Current names only: no report fields.
+	clean, err := st.Subscribe(localapi.SubscribeParams{Subscriber: "S", Events: []string{"merged"}})
+	if err != nil || len(clean.Mapped) != 0 || len(clean.Rejected) != 0 {
+		t.Fatalf("clean request reported mapping: %+v %v", clean, err)
+	}
+
+	// Nothing known left: refused, named, and the existing subscriptions survive.
+	if _, err := st.Subscribe(localapi.SubscribeParams{Subscriber: "S", Events: []string{"digest", "nope"}}); err == nil || !strings.Contains(err.Error(), "digest, nope") {
+		t.Fatalf("all-unknown request: %v", err)
+	}
+	if got := ce.hub.Subscriptions("S"); len(got) != 2 {
+		t.Fatalf("an all-unknown request disturbed the subscriptions: %+v", got)
 	}
 }
 

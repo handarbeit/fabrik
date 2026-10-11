@@ -52,6 +52,10 @@ type Server struct {
 	// switch in handle, so a server without one answers them unknown_method
 	// and the read path can never mutate.
 	Actor Actor
+	// Version is the daemon's build version, advertised in hello as
+	// daemon_version so a shim can tell when it is running against a different
+	// build (#2168). Empty omits the field.
+	Version string
 	// IdleTimeout and HeartbeatInterval default to the constants above; tests
 	// shorten them.
 	IdleTimeout       time.Duration
@@ -496,10 +500,14 @@ func (s *Server) handle(req Frame) (resp Frame) {
 		if s.Actor != nil {
 			methods = append(methods, ActionMethods()...)
 		}
-		result = map[string]any{
+		hello := map[string]any{
 			"protocol_version": ProtocolVersion,
 			"methods":          methods,
 		}
+		if s.Version != "" {
+			hello["daemon_version"] = s.Version
+		}
+		result = hello
 	case MethodSubscribe:
 		if s.Streamer == nil {
 			return Frame{ID: req.ID, Error: Errorf(CodeUnknownMethod, "unknown method %q", req.Method)}

@@ -65,6 +65,34 @@ func startServer(t *testing.T, be Backend) *Server {
 	return srv
 }
 
+// hello carries the daemon's build version when the server has one, so a shim
+// can detect version skew (#2168); with none the field is absent.
+func TestHelloAdvertisesDaemonVersion(t *testing.T) {
+	srv := startServer(t, echoBackend())
+	var hello map[string]any
+	if err := Call(context.Background(), srv.Path(), MethodHello, nil, &hello); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := hello["daemon_version"]; ok {
+		t.Errorf("daemon_version present with no Version set: %v", hello)
+	}
+
+	path := filepath.Join(shortDir(t), "v.sock")
+	versioned := NewServer(path, echoBackend(), nil)
+	versioned.Version = "dev(abc123)"
+	if err := versioned.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { versioned.Close() })
+	hello = nil
+	if err := Call(context.Background(), versioned.Path(), MethodHello, nil, &hello); err != nil {
+		t.Fatal(err)
+	}
+	if hello["daemon_version"] != "dev(abc123)" {
+		t.Errorf("daemon_version = %v", hello["daemon_version"])
+	}
+}
+
 func TestRoundTripAndErrors(t *testing.T) {
 	srv := startServer(t, echoBackend())
 	ctx := context.Background()

@@ -151,7 +151,9 @@ func toolDefs() []map[string]any {
 				"digest_seconds (30-3600) batches ordinary events into one message; validate-settled, escalated, paused and daemon-unreachable always arrive at once. " +
 				"Events are held (persisted, bounded) while no session with this subscriber name is attached and delivered in order on reconnect. " +
 				"Pushes only appear if the session was started with Channels enabled for this server (claude --dangerously-load-development-channels server:fabrik); the daemon cannot tell whether it was, so a successful subscribe does not prove delivery. " +
-				"Re-subscribing with the same filters is harmless.",
+				"Re-subscribing with the same filters is harmless. " +
+				"The daemon tolerates version skew: an event type it renamed since this server was built is mapped to its new name, and one it does not know is dropped; the response lists both under mapped and rejected, " +
+				"and a request that names only unknown types is refused without touching the existing subscription.",
 			"inputSchema": obj(map[string]any{
 				"issues":         map[string]any{"type": "array", "items": issueSchema(), "description": "issue references: " + issueRefHelp},
 				"repos":          map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "owner/repo"},
@@ -165,8 +167,9 @@ func toolDefs() []map[string]any {
 			"annotations": map[string]any{"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},
 		},
 		{
-			"name":        ToolUnsubscribe,
-			"description": "Remove one subscription by id (from fabrik_subscribe's response), or every subscription of the subscriber when id is omitted. Held events for a subscriber with no subscriptions left are discarded.",
+			"name": ToolUnsubscribe,
+			"description": "Remove one subscription by id (from fabrik_subscribe's response), or every subscription of the subscriber when id is omitted. Held events that no remaining subscription matches are discarded (all of them when none is left). " +
+				"A hard stop on the daemon's side: once this returns it delivers nothing more for the removed subscription, but events it had already written to this session before then may still surface. The push connection stays attached, so subscribing again resumes delivery.",
 			"inputSchema": obj(map[string]any{
 				"id":         map[string]any{"type": "string", "description": "subscription id; omit to remove them all"},
 				"subscriber": map[string]any{"type": "string", "description": "subscriber name; defaults to the name this server was launched with"},
