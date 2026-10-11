@@ -108,7 +108,7 @@ var ciGatedRuleAnchors = []struct {
 	{"R2 red verdict reads the failing checks", "`gh pr checks`"},
 	{"R2 red verdict reproduces only failing tests", "reproduce only the failing tests"},
 	{"R2 full-suite step stays when ci_gated is false", "does the full-suite step stay"},
-	{"R3 5m hard cap", "`-timeout` is 5m or less"},
+	{"R3 5m hard cap", "that timeout is 5m or less per test process"},
 	{"R3 never raise the timeout", "Never raise the timeout to fit a broader run — narrow the run instead"},
 	{"R3 never background a test command", "Never background a test command and then poll it"},
 	{"R4 diagnose before retrying", "Diagnose before retrying"},
@@ -117,7 +117,7 @@ var ciGatedRuleAnchors = []struct {
 	{"R4 host load is reported, not a failure", "report it as host load"},
 	{"R5 TARGETED report line", "`TARGETED — <packages>; full suite left to CI on <sha>`"},
 	{"R5 SKIPPED report line", "`SKIPPED — CI green on <sha>`"},
-	{"R5 PASSED report line", "`PASSED` (a full run, `ci_gated: false` only)"},
+	{"R5 PASSED report line", "`PASSED` (a full run, only when no CI gate stands behind the push)"},
 }
 
 // missingCIGatedRules returns the description of every required rule whose
