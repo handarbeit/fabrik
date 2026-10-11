@@ -2689,6 +2689,11 @@ func (e *Engine) preserveWorkOnMarkerFailure(item gh.ProjectItem, stage *stages.
 		return ""
 	}
 	e.commitWIP(workDir, item.Number, stage.Name)
+	if prInMergeQueue(item) {
+		// pushBranchOnCancel skips (returning nil) for a queued PR, so a nil
+		// return would not mean the work landed on the remote.
+		return "The stage's work was committed locally but not pushed: the PR is in the merge queue and a push would eject it.\n\n"
+	}
 	wm := e.worktreesFor(item.Repo)
 	if pushErr := e.pushBranchOnCancel(item, wm); pushErr != nil {
 		e.logf(item.Number, "warn", "could not push branch after marker parse failure: %v\n", pushErr)

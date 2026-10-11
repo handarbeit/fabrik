@@ -115,3 +115,15 @@ func TestFinalizeStageOutcome_MalformedPRCreate_PushFailureStillPauses(t *testin
 	// The comment must not claim a push that did not land.
 	assertMalformedPRCreatePaused(t, client, "could not be pushed")
 }
+
+// TestPreserveWorkOnMarkerFailure_MergeQueuedDoesNotClaimPush guards the note:
+// pushBranchOnCancel skips a merge-queued PR and returns nil, which must not be
+// reported as "committed and pushed".
+func TestPreserveWorkOnMarkerFailure_MergeQueuedDoesNotClaimPush(t *testing.T) {
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+	item := gh.ProjectItem{Number: 93, Repo: "owner/repo", LinkedPRIsInMergeQueue: true}
+	note := eng.preserveWorkOnMarkerFailure(item, &stages.Stage{Name: "Implement"}, t.TempDir(), true)
+	if strings.Contains(note, "committed and pushed") || !strings.Contains(note, "merge queue") {
+		t.Errorf("note = %q, want a merge-queue skip note and no push claim", note)
+	}
+}
