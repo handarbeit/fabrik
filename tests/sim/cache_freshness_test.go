@@ -69,11 +69,16 @@ func (p *commentProbe) saw(substr string) bool {
 // writes: the dispatcher still sees the comment within a bounded number of
 // polls, with no restart.
 //
-// The #1090 no-refetch-loop guarantee (FR-007) is pinned where the self-writes
-// can be driven directly: engine/cache_freshness_test.go
-// (TestCacheFreshness_SelfWritesAlone_NoRefetchLoop) and
-// boardcache/freshness_test.go. The sim's idle polls refetch on the periodic
-// re-evaluation for reasons that predate and are independent of #2180.
+// This is an end-to-end plumbing check, not the regression discriminator: it
+// drives the layered evidence (simgh listing -> probe -> store -> cache
+// predicate) through a whole stage run. It also passes on the pre-#2180 rule,
+// because the sim's own periodic re-evaluation refetches an item whose
+// FetchItemDetails updatedAt trails its listing and so heals the mask — a
+// fidelity gap that predates this change. The per-layer tests that fail without
+// the rule are engine/cache_freshness_test.go and boardcache/freshness_test.go.
+//
+// The #1090 no-refetch-loop guarantee (FR-007) is pinned there too
+// (TestCacheFreshness_SelfWritesAlone_NoRefetchLoop).
 func TestCacheFreshness_HumanCommentDuringStageRun_SeenWithoutRestart(t *testing.T) {
 	t.Parallel()
 	env := NewEnv(t, EnvOptions{
@@ -89,7 +94,9 @@ func TestCacheFreshness_HumanCommentDuringStageRun_SeenWithoutRestart(t *testing
 	var once sync.Once
 	var num int
 	env.Claude.ForStage("Specify", func(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, nc []gh.Comment, resume bool, workDir string, opts engine.InvokeOptions) (string, bool, engine.TokenUsage, error) {
-		once.Do(func() { env.Sim.Sim().SeedComment(env.OwnerRepo, issue.Number, "a-human-operator", cacheFreshnessHumanComment) })
+		once.Do(func() {
+			env.Sim.Sim().SeedComment(env.OwnerRepo, issue.Number, "a-human-operator", cacheFreshnessHumanComment)
+		})
 		return simclaude.DefaultScript(ctx, stage, issue, nc, resume, workDir, opts)
 	})
 
