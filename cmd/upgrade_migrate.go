@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -125,7 +126,11 @@ func planMigration(dir string, isDev bool, devOverride string) (*migrationPlan, 
 		// A mixture of shipped versions, no edit: not a customisation. Refresh.
 		p.RestoreBase = true
 	}
-	if lwExists {
+	// usableLocal is whether the local-workflows plugin on disk is (or will be,
+	// once this run normalises it) named local-workflows, so a stage reference
+	// qualified with that name will resolve.
+	usableLocal := p.MoveTree
+	if lwExists && !p.MoveTree {
 		// local-workflows from an earlier (possibly interrupted) run, or the
 		// operator's own: the edited skills are read from it.
 		lwCls, err := fabrikplugin.ClassifyDir(lwDir)
@@ -133,18 +138,30 @@ func planMigration(dir string, isDev bool, devOverride string) (*migrationPlan, 
 			return nil, fmt.Errorf("classifying %s: %w", lwDir, err)
 		}
 		cls = lwCls
-		if name, err := readManifestName(lwDir); err != nil || name != fabrikplugin.LocalWorkflowsName {
+		// Only a directory that is recognisably a moved copy of the base plugin
+		// is touched: its manifest still names the base plugin (the move
+		// happened, the rename did not) or it has no manifest at all. A
+		// directory whose manifest names anything else is the operator's own
+		// plugin; renaming it would break every reference to that name, so it
+		// is left exactly as it is.
+		name, nameErr := readManifestName(lwDir)
+		switch {
+		case nameErr == nil && name == fabrikplugin.LocalWorkflowsName:
+			usableLocal = true
+		case errors.Is(nameErr, fs.ErrNotExist) || (nameErr == nil && name == fabrikplugin.BasePluginName):
 			p.NormaliseLocal = true
-		}
-		if _, err := os.Stat(filepath.Join(lwDir, ".installed-version")); err == nil {
-			p.NormaliseLocal = true
+			usableLocal = true
+		case nameErr != nil:
+			p.Notes = append(p.Notes, fmt.Sprintf("%s has an unreadable manifest (%v); it was left alone and no stage was pointed at it", fabrikplugin.LocalWorkflowsRelDir, nameErr))
+		default:
+			p.Notes = append(p.Notes, fmt.Sprintf("%s is a plugin named %q, not %q; it was left alone and no stage was pointed at it", fabrikplugin.LocalWorkflowsRelDir, name, fabrikplugin.LocalWorkflowsName))
 		}
 		if len(baseCls.Files) == 0 {
 			p.RestoreBase = true
 		}
 	}
 
-	hasLocal := p.MoveTree || lwExists
+	hasLocal := usableLocal
 	if hasLocal {
 		p.Edited = cls.EditedSkills
 	}

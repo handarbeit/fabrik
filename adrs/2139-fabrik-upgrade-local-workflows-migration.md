@@ -52,7 +52,11 @@ So the migration cannot be tied to a version step.
   resume the edited skills are read from the existing `local-workflows`. Nothing is
   half-moved without being re-reported. A `local-workflows` that already exists while the
   base has edits blocks the move: it is never overwritten, nothing changes, the old
-  refusal follows.
+  refusal follows. An existing `local-workflows` is also only normalised (manifest `name`,
+  `.installed-version`) when it is recognisably a moved base copy — its manifest names the
+  base plugin or is absent. A manifest naming any other plugin is the operator's own: it is
+  left untouched, reported, and no stage is redirected to `local-workflows:` (the name would
+  not resolve).
 - **Stage files are edited surgically** (`stages.RewriteSkillRefs`): only column-0 skill
   keys, in place, so comments, quoting and CRLF survive and block-scalar text cannot
   match, and the original and result are both decoded to confirm only the intended values

@@ -535,3 +535,54 @@ func TestMigrate_UnresolvedBareNamesAreNotPending(t *testing.T) {
 		t.Errorf("pending=%v notes=%v", plan.Pending(), plan.Notes)
 	}
 }
+
+// An operator's own plugin that already lives at .fabrik/plugins/local-workflows
+// under another name is not a moved copy of the base: the migration must not
+// rename its manifest (that would break every reference to its name) nor point
+// any stage at it as "local-workflows:".
+func TestMigrate_OperatorOwnPluginInLocalWorkflowsIsLeftAlone(t *testing.T) {
+	dir := deployFixture(t, "v0.0.77")
+	lw := filepath.Join(dir, filepath.FromSlash(fabrikplugin.LocalWorkflowsRelDir))
+	skillDir := filepath.Join(lw, "skills", "acme-skill")
+	if err := os.MkdirAll(filepath.Join(lw, ".claude-plugin"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(skillDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := []byte("{\n  \"name\": \"acme\",\n  \"version\": \"1.0.0\"\n}\n")
+	if err := os.WriteFile(filepath.Join(lw, ".claude-plugin", "plugin.json"), manifest, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("acme\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// A stage using the operator's bare skill name must stay bare.
+	plan := filepath.Join(dir, ".fabrik", "stages", "plan.yaml")
+	data, err := os.ReadFile(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = append(data, []byte("comment_skill: acme-skill\n")...)
+	if err := os.WriteFile(plan, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	beforeLW := snapshot(t, lw)
+
+	if err := runUpgrade(nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := snapshot(t, lw); !reflect.DeepEqual(beforeLW, got) {
+		t.Errorf("the operator's own plugin was modified: before %v after %v", beforeLW, got)
+	}
+	refs := stageRefs(t, dir)
+	if got := refs["plan.yaml:comment_skill"]; got != "acme-skill" {
+		t.Errorf("comment_skill = %q, want the bare operator name left alone", got)
+	}
+	for k, v := range refs {
+		if strings.HasPrefix(v, fabrikplugin.LocalWorkflowsName+":") {
+			t.Errorf("%s points at %s although local-workflows is not that plugin", k, v)
+		}
+	}
+	assertBaseIsEmbedded(t, dir)
+}

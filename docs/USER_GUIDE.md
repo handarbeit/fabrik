@@ -3118,7 +3118,9 @@ Unedited skills that travel with a moved tree are simply left unreferenced.
   exists, right after the base plugin and before `plugin_dirs`; you do not list it. See
   [Plugin Development](#plugin-development).
 - `local-workflows` is **never overwritten**. If it already exists while `.fabrik/plugin/`
-  has edits, the migration refuses, tells you, and changes nothing.
+  has edits, the migration refuses, tells you, and changes nothing. A plugin you put there
+  yourself under another name (its manifest does not say `fabrik` or `local-workflows`) is
+  left exactly as it is, and no stage is pointed at it as `local-workflows:`.
 - A stage that already says `fabrik:fabrik-plan` is left alone even if you edited that
   skill: the report names the `local-workflows:` copy so you can point the stage at it.
 - A vendored plugin set (`FABRIK_PLUGIN_DIR` set, or `.fabrik/plugin` a symlink) is
