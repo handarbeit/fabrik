@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -63,6 +65,15 @@ type registryFile struct {
 type stateFile struct {
 	Seen     map[string]time.Time `json:"seen,omitempty"`
 	Counters map[string]int       `json:"counters,omitempty"`
+	// Reminders holds, per "<subscriber>|<episode key>", when a decision was
+	// last announced to that subscriber as a reminder (#2120 R6a).
+	Reminders map[string]Reminder `json:"reminders,omitempty"`
+}
+
+// Reminder is the persisted reminder memory for one (subscriber, episode).
+type Reminder struct {
+	At time.Time `json:"at"`
+	N  int       `json:"n"`
 }
 
 type attachment struct {
@@ -95,6 +106,7 @@ type Hub struct {
 	subscribers map[string]*subscriber
 	seen        map[string]time.Time
 	counters    map[string]int
+	reminders   map[string]Reminder
 	closed      bool
 
 	// Dedup keys and counters are persisted lazily: stateDirty marks unwritten
@@ -141,6 +153,7 @@ func Open(o Options) (*Hub, error) {
 		subscribers: map[string]*subscriber{},
 		seen:        map[string]time.Time{},
 		counters:    map[string]int{},
+		reminders:   map[string]Reminder{},
 	}
 	now := o.Now()
 
@@ -172,6 +185,9 @@ func Open(o Options) (*Hub, error) {
 		}
 		for k, v := range st.Counters {
 			h.counters[k] = v
+		}
+		for k, v := range st.Reminders {
+			h.reminders[k] = v
 		}
 	}
 
@@ -253,6 +269,12 @@ func (h *Hub) flushState() {
 	}
 	for k, v := range h.counters {
 		st.Counters[k] = v
+	}
+	if len(h.reminders) > 0 {
+		st.Reminders = make(map[string]Reminder, len(h.reminders))
+		for k, v := range h.reminders {
+			st.Reminders[k] = v
+		}
 	}
 	h.mu.Unlock()
 	h.stateWrites.Add(1)
@@ -493,6 +515,115 @@ func (h *Hub) BumpCounter(key string) int {
 	h.counters[key]++
 	h.saveStateLocked()
 	return h.counters[key]
+}
+
+// PublishReminders re-announces a still-pending decision as a reminder to every
+// attached subscriber with a matching subscription that asks for them
+// (RemindAfterSeconds > 0) and is due (#2120 R6a). ev is the current form of the
+// original event; dedupKey is that event's DedupKey, the episode identity.
+//
+// A subscriber is due once its interval has passed since the later of the
+// original announcement (the hub's persisted dedup time for dedupKey) and its
+// previous reminder (persisted per subscriber). Both anchors are persisted
+// times, so a restart neither fires nor postpones a reminder: it never runs off
+// daemon uptime. With no announcement time on record the first look only plants
+// the anchor. Only attached subscribers are reminded — a detached one is
+// caught up on attach — and a reminder is never held. It returns how many
+// subscribers were reminded.
+func (h *Hub) PublishReminders(ev Event, dedupKey string) int {
+	now := h.opt.Now()
+	h.mu.Lock()
+	if h.closed || dedupKey == "" {
+		h.mu.Unlock()
+		return 0
+	}
+	announced, haveAnnounced := h.seen[dedupKey]
+	type due struct {
+		s *subscriber
+		k string
+		r Reminder
+	}
+	var dues []due
+	var order []string
+	interval := map[string]time.Duration{}
+	for _, sub := range h.subs {
+		if sub.RemindAfterSeconds <= 0 || !sub.Matches(ev) {
+			continue
+		}
+		d := sub.Remind()
+		if cur, ok := interval[sub.Subscriber]; !ok {
+			order = append(order, sub.Subscriber)
+			interval[sub.Subscriber] = d
+		} else if d < cur {
+			interval[sub.Subscriber] = d
+		}
+	}
+	for _, name := range order {
+		s := h.subscribers[name]
+		if s == nil {
+			continue
+		}
+		s.mu.Lock()
+		attached := s.att != nil
+		s.mu.Unlock()
+		key := name + "|" + dedupKey
+		rem, have := h.reminders[key]
+		anchor := rem.At
+		if !have {
+			if !haveAnnounced {
+				// Nothing on record to measure from: plant the anchor and wait.
+				h.reminders[key] = Reminder{At: now}
+				h.saveStateLocked()
+				continue
+			}
+			anchor = announced
+		}
+		if now.Sub(anchor) < interval[name] || !attached {
+			continue
+		}
+		rem.At, rem.N = now, rem.N+1
+		h.reminders[key] = rem
+		dues = append(dues, due{s: s, k: key, r: rem})
+	}
+	if len(dues) > 0 {
+		h.saveStateLocked()
+	}
+	h.mu.Unlock()
+
+	for _, d := range dues {
+		out := ev
+		out.DedupKey = ""
+		out.At = now
+		out.Meta = make(map[string]string, len(ev.Meta)+2)
+		for k, v := range ev.Meta {
+			out.Meta[k] = v
+		}
+		out.Meta["reminder"] = "true"
+		out.Meta["reminder_count"] = strconv.Itoa(d.r.N)
+		out.Content = "(reminder) " + ev.Content
+		h.enqueue(d.s, out, 0, now)
+	}
+	return len(dues)
+}
+
+// ClearReminders forgets the reminder memory of an episode that ended.
+func (h *Hub) ClearReminders(dedupKey string) {
+	if dedupKey == "" {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	suffix := "|" + dedupKey
+	changed := false
+	for k := range h.reminders {
+		if strings.HasSuffix(k, suffix) {
+			delete(h.reminders, k)
+			changed = true
+		}
+	}
+	if changed {
+		h.saveStateLocked()
+	}
 }
 
 type target struct {
@@ -804,6 +935,11 @@ func (h *Hub) Prune(now time.Time) {
 	for k, t := range h.seen {
 		if now.Sub(t) > seenTTL {
 			delete(h.seen, k)
+		}
+	}
+	for k, r := range h.reminders {
+		if now.Sub(r.At) > MaxRemind+seenTTL {
+			delete(h.reminders, k)
 		}
 	}
 	h.saveRegistryLocked()

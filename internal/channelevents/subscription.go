@@ -13,6 +13,13 @@ const (
 	MaxDigest = time.Hour
 )
 
+// Reminder interval bounds (#2120 R6a). A reminder is opt-in, so there is no
+// default; the floor keeps a mistyped value from becoming a nag.
+const (
+	MinRemind = 10 * time.Minute
+	MaxRemind = 30 * 24 * time.Hour
+)
+
 // IssueRef scopes a subscription to one issue. Repo may be empty to mean "any
 // repo" when the subscriber gave a number the daemon could not resolve to one.
 type IssueRef struct {
@@ -43,6 +50,12 @@ type Subscription struct {
 	// overseer can follow progress and decisions without the stage-label stream
 	// (#2123). It wins over Labels and an empty ExcludeLabels. Default off.
 	ProgressViaColumn bool `json:"progress_via_column,omitempty"`
+	// RemindAfterSeconds re-announces a still-pending decision-pending episode
+	// to this subscription once per interval, marked as a reminder (#2120 R6a).
+	// 0 (the default) means never. The interval runs from the persisted time of
+	// the original announcement or the previous reminder, never from daemon
+	// uptime.
+	RemindAfterSeconds int `json:"remind_after_seconds,omitempty"`
 }
 
 // StageProgressLabels are the labels ProgressViaColumn suppresses.
@@ -60,6 +73,11 @@ func (s Subscription) EffectiveExclude() []string {
 		return DefaultExcludeLabels
 	}
 	return *s.ExcludeLabels
+}
+
+// Remind returns the reminder interval, zero when reminders are off.
+func (s Subscription) Remind() time.Duration {
+	return time.Duration(s.RemindAfterSeconds) * time.Second
 }
 
 // Digest returns the batching interval, zero when not in digest mode.
@@ -95,6 +113,11 @@ func (s Subscription) Validate(minDigest time.Duration) error {
 	}
 	if s.ProgressViaColumn && !s.TakesColumnChanged() {
 		return fmt.Errorf("progress_via_column needs column-changed in events (or an empty events list)")
+	}
+	if s.RemindAfterSeconds != 0 {
+		if d := s.Remind(); d < MinRemind || d > MaxRemind {
+			return fmt.Errorf("remind interval %s out of range [%s, %s]", d, MinRemind, MaxRemind)
+		}
 	}
 	if s.Milestone != "" && strings.TrimSpace(s.Milestone) == "" {
 		return fmt.Errorf("empty milestone")

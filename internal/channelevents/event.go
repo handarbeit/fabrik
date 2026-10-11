@@ -7,7 +7,15 @@ import "time"
 type EventType string
 
 const (
-	ValidateSettled           EventType = "validate-settled"
+	ValidateSettled EventType = "validate-settled"
+	// DecisionPending: an item became Suspended — a completed stage that does
+	// not auto-advance, or a dependency parked in an unmanaged column — and only
+	// a human moves it (#2120).
+	DecisionPending EventType = "decision-pending"
+	// SettlementWithdrawn: an item that announced validate-settled or
+	// decision-pending stopped meeting that predicate before a human acted
+	// (#2120 R-unsettle).
+	SettlementWithdrawn       EventType = "settlement-withdrawn"
 	LabelApplied              EventType = "label-applied"
 	LabelRemoved              EventType = "label-removed"
 	Paused                    EventType = "paused"
@@ -109,6 +117,8 @@ type Info struct {
 
 var catalog = map[EventType]Info{
 	ValidateSettled:           {Immediate: true},
+	DecisionPending:           {},
+	SettlementWithdrawn:       {Immediate: true},
 	LabelApplied:              {},
 	LabelRemoved:              {},
 	Paused:                    {Immediate: true},
@@ -159,7 +169,7 @@ func IsAccountWide(t EventType) bool { return catalog[t].AccountWide }
 // Subscribable lists every event type a subscription may name, in catalogue order.
 func Subscribable() []EventType {
 	order := []EventType{
-		ValidateSettled, LabelApplied, LabelRemoved, Paused, AwaitingInput, AwaitingInputStale,
+		ValidateSettled, DecisionPending, SettlementWithdrawn, LabelApplied, LabelRemoved, Paused, AwaitingInput, AwaitingInputStale,
 		Escalated, Stalled, CycleLimitNear, MergeTrainEjected, MergeTrainFailed, CITimeout,
 		ReviewTimeout, Merged, BlockerCleared, ChildrenSpawned, LandingVerificationFailed,
 		ClaudeUsageLimited, ClaudeUsageLimitLifted, DaemonUnreachable, DaemonReachable,
