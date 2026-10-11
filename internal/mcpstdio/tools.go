@@ -129,7 +129,7 @@ func toolDefs() []map[string]any {
 		},
 		{
 			"name": ToolPromote,
-			"description": "Move an item out of an unmanaged parking column (e.g. Backlog) into a pipeline column. The daemon writes the board Status itself, with the ids it already holds (one live read of the item's current column confirms the cache first); it refuses, with the current state and the valid targets, when the item is not in a parking column, `to` is not a pipeline stage (holding, cleanup and unmanaged columns are engine-managed), or the daemon cannot establish a fact. " +
+			"description": "Move an item out of an unmanaged parking column (e.g. Backlog) into a pipeline column. The daemon writes the board Status itself, with the ids it already holds (one live read of the item's current column confirms the cache first); it refuses, with the current state, when the item is not in a parking column, `to` is not a pipeline stage (holding, cleanup and unmanaged columns are engine-managed), or the daemon cannot establish a fact; the refusal lists the valid targets only when the item is in a parking column. A legacy Backlog column with no configured stage counts as a parking column. " +
 				"If the item carries fabrik:cruise or fabrik:yolo the result says it will auto-advance through the stages from `to`. Posts a short Fabrik audit comment on the issue naming the requesting subscriber. Requires the server to be launched with --subscriber.",
 			"inputSchema": obj(map[string]any{
 				"issue": map[string]any{"type": "string", "description": "owner/repo#N, or just N when the daemon manages exactly one repo"},

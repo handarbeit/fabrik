@@ -13,6 +13,7 @@ import (
 	"github.com/handarbeit/fabrik/internal/channelevents"
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/internal/localapi"
+	"github.com/handarbeit/fabrik/stages"
 )
 
 // The overseer actions (#1969, ADR-1966-c): the four mutating requests a
@@ -257,9 +258,15 @@ func (a *overseerActor) Promote(p localapi.PromoteParams) (*localapi.ActionResul
 		options = field.Options
 	}
 	targets := a.promotableTargets(options)
+	// withTargets is true only while the item is established as parked, so a
+	// refusal never offers targets for a move that cannot be made from the
+	// item's actual column.
+	withTargets := false
 	refuse := func(format string, args ...any) error {
 		rs := a.refusalState(&t.st)
-		rs.ValidTargets = targets
+		if withTargets {
+			rs.ValidTargets = targets
+		}
 		return localapi.Refused(rs, format, args...)
 	}
 
@@ -271,15 +278,17 @@ func (a *overseerActor) Promote(p localapi.PromoteParams) (*localapi.ActionResul
 		return nil, refuse("the board metadata (project and status field) is not loaded yet; try again after the next poll")
 	}
 
+	if why := a.parkingRefusal(t.st.Status); why != "" {
+		return nil, refuse("%s %s", t.ref, why)
+	}
+	withTargets = true
+
 	to := strings.TrimSpace(p.To)
 	if to == "" {
 		return nil, refuse("`to` is required; valid targets: %s", strings.Join(targets, ", "))
 	}
 	if !slices.Contains(targets, to) {
 		return nil, refuse("%q is not a valid promote target (valid: %s); holding, cleanup and unmanaged columns are engine-managed", to, strings.Join(targets, ", "))
-	}
-	if why := a.parkingRefusal(t.st.Status); why != "" {
-		return nil, refuse("%s %s", t.ref, why)
 	}
 
 	live, err := a.confirmLiveStatus(t)
@@ -291,6 +300,7 @@ func (a *overseerActor) Promote(p localapi.PromoteParams) (*localapi.ActionResul
 		t.st.Status = live
 	}
 	if why := a.parkingRefusal(live); why != "" {
+		withTargets = false
 		return nil, refuse("%s %s (confirmed live)", t.ref, why)
 	}
 
@@ -313,20 +323,20 @@ func (a *overseerActor) Promote(p localapi.PromoteParams) (*localapi.ActionResul
 	return a.finish(res, t, fmt.Sprintf("moved %s from %s to %s", t.ref, from, to), requester), nil
 }
 
-// parkingRefusal returns "" when status names an unmanaged parking column,
-// otherwise the reason a promote is refused.
+// parkingRefusal returns "" when status names an unmanaged parking column
+// (stages.IsParkingColumn: an unmanaged stage, or the legacy Backlog column of
+// an install with no Backlog stage), otherwise the reason a promote is refused.
 func (a *overseerActor) parkingRefusal(status string) string {
 	if status == "" {
 		return "has no known board column, so it is not established as parked"
 	}
-	s := a.e.stageByName(status)
-	switch {
-	case s == nil:
-		return fmt.Sprintf("is in column %q, which has no configured stage", status)
-	case !s.Unmanaged:
-		return fmt.Sprintf("is already in the pipeline column %q; promote only moves items out of an unmanaged parking column", status)
+	if stages.IsParkingColumn(a.e.cfg.Stages, status) {
+		return ""
 	}
-	return ""
+	if a.e.stageByName(status) == nil {
+		return fmt.Sprintf("is in column %q, which has no configured stage", status)
+	}
+	return fmt.Sprintf("is already in the pipeline column %q; promote only moves items out of an unmanaged parking column", status)
 }
 
 // SetAutonomy makes the item's autonomy exactly the requested mode. Writes run

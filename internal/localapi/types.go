@@ -464,7 +464,9 @@ type RefusalState struct {
 	Status string `json:"status,omitempty"`
 	// Labels are the item's fabrik-relevant labels.
 	Labels []string `json:"labels,omitempty"`
-	// ValidTargets lists the columns a promote could name.
+	// ValidTargets lists the columns a promote could name. It is set only when
+	// the item is in a parking column; a refusal because the item is not parked
+	// omits it, since no move is possible.
 	ValidTargets []string `json:"valid_targets,omitempty"`
 	Autonomy     string   `json:"autonomy,omitempty"`
 }
