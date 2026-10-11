@@ -2,7 +2,10 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"strings"
 
 	"github.com/handarbeit/fabrik/config"
 	gh "github.com/handarbeit/fabrik/github"
@@ -149,4 +152,182 @@ func appBoardClient(ctx context.Context, owner string, pc config.ProjectConfig, 
 		return nil, fmt.Errorf("GitHub App authentication: %w", err)
 	}
 	return res.Client, nil
+}
+
+// displayFieldSpec is one display-only ProjectV2 field a Fabrik board needs
+// (#2110): the status line (#2048), "Last activity" and "Last run" (#2049).
+type displayFieldSpec struct {
+	Key      string // the project_fields.* key, for messages
+	Name     string // resolved field name; never empty (disabled fields are dropped)
+	DataType string // gh.FieldTypeText or gh.FieldTypeDate
+}
+
+// requiredDisplayFields is the single definition of which display fields a
+// board needs, shared by `init --create-board` and `repair-board` so the two
+// cannot diverge (FR-012). Names and `off` handling come from the same
+// config resolvers the engine's startup uses (cmd/root.go), so a custom name
+// creates that name and a disabled field is simply absent from the result.
+func requiredDisplayFields(pf config.ProjectFieldsConfig) []displayFieldSpec {
+	var specs []displayFieldSpec
+	add := func(key, name, dataType string) {
+		if name != "" {
+			specs = append(specs, displayFieldSpec{Key: key, Name: name, DataType: dataType})
+		}
+	}
+	add("status_line", pf.ResolveStatusLineField(), gh.FieldTypeText)
+	add("last_activity", pf.ResolveLastActivityField(), gh.FieldTypeDate)
+	add("last_run", pf.ResolveLastRunField(), gh.FieldTypeText)
+	return specs
+}
+
+// displayFieldState is the per-field outcome shown to the operator.
+type displayFieldState string
+
+const (
+	displayFieldPresent   displayFieldState = "present"
+	displayFieldMissing   displayFieldState = "missing"
+	displayFieldMismatch  displayFieldState = "type-mismatch"
+	displayFieldCollision displayFieldState = "name-collision"
+	displayFieldCreated   displayFieldState = "created"
+	displayFieldFailed    displayFieldState = "failed"
+)
+
+// displayFieldStatus is a spec plus its classification. Found is the data
+// type of the existing same-named field (for a mismatch); Err is set only
+// when State is displayFieldFailed.
+type displayFieldStatus struct {
+	displayFieldSpec
+	State displayFieldState
+	Found string
+	Err   error
+}
+
+// displayFieldClient is the slice of *gh.Client the display-field helpers
+// use; a narrow interface so tests can record every create call.
+type displayFieldClient interface {
+	FetchProjectFields(projectID string) ([]gh.ProjectField, error)
+	CreateProjectV2Field(projectID, name, dataType string) (string, error)
+}
+
+// planDisplayFields classifies each spec against the board's actual fields.
+// Names are matched case-insensitively (GitHub's field-name uniqueness is
+// not case-sensitive). A same-named field of the right type is present; of
+// another type (including a built-in such as Labels) a type mismatch, left
+// untouched (R3); a spec whose name an earlier spec already claimed is a
+// name collision and is never created. Only `missing` is ever acted on.
+func planDisplayFields(specs []displayFieldSpec, fields []gh.ProjectField) []displayFieldStatus {
+	byName := make(map[string]gh.ProjectField, len(fields))
+	for _, f := range fields {
+		key := strings.ToLower(strings.TrimSpace(f.Name))
+		if _, dup := byName[key]; !dup {
+			byName[key] = f
+		}
+	}
+	claimed := make(map[string]bool, len(specs))
+	out := make([]displayFieldStatus, 0, len(specs))
+	for _, sp := range specs {
+		key := strings.ToLower(strings.TrimSpace(sp.Name))
+		st := displayFieldStatus{displayFieldSpec: sp}
+		switch f, exists := byName[key]; {
+		case claimed[key]:
+			st.State = displayFieldCollision
+		case !exists:
+			st.State = displayFieldMissing
+		case f.DataType == sp.DataType:
+			st.State = displayFieldPresent
+		default:
+			st.State = displayFieldMismatch
+			st.Found = f.DataType
+		}
+		claimed[key] = true
+		out = append(out, st)
+	}
+	return out
+}
+
+// applyDisplayFields creates every `missing` field, attempting all of them
+// even when one fails (FR-013). It updates the statuses in place and is never
+// called on a dry run. Nothing but a create call is issued: no field is
+// deleted, renamed, retyped or recreated (FR-007).
+func applyDisplayFields(client displayFieldClient, projectID string, plan []displayFieldStatus) {
+	for i := range plan {
+		if plan[i].State != displayFieldMissing {
+			continue
+		}
+		id, err := client.CreateProjectV2Field(projectID, plan[i].Name, plan[i].DataType)
+		if err == nil && id == "" {
+			err = errors.New("no field ID returned")
+		}
+		if err != nil {
+			plan[i].State = displayFieldFailed
+			plan[i].Err = fmt.Errorf("display field %q (%s): %w", plan[i].Name, plan[i].DataType, err)
+			continue
+		}
+		plan[i].State = displayFieldCreated
+	}
+}
+
+// displayFieldsErr joins the creation failures, each naming its field, or
+// returns nil. A type mismatch or collision is deliberately not an error: it
+// needs an operator decision and is shown in the report.
+func displayFieldsErr(plan []displayFieldStatus) error {
+	var errs []error
+	for _, st := range plan {
+		if st.State == displayFieldFailed {
+			errs = append(errs, st.Err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// displayFieldLine renders one report line.
+func displayFieldLine(st displayFieldStatus) string {
+	head := fmt.Sprintf("display field %q (%s)", st.Name, st.DataType)
+	switch st.State {
+	case displayFieldMismatch:
+		return fmt.Sprintf("%s: type mismatch — expected %s, found %s; left untouched", head, st.DataType, st.Found)
+	case displayFieldCollision:
+		return fmt.Sprintf("%s: name collision — another display field (project_fields.%s) is configured with the same name; not created", head, st.Key)
+	case displayFieldFailed:
+		return fmt.Sprintf("%s: FAILED — %v", head, st.Err)
+	default:
+		return fmt.Sprintf("%s: %s", head, st.State)
+	}
+}
+
+// planBoardDisplayFields lists the board's fields and classifies the
+// required display fields against them. A listing failure is returned and
+// the plan is nil: nothing is created blind.
+func planBoardDisplayFields(client displayFieldClient, projectID string, pf config.ProjectFieldsConfig) ([]displayFieldStatus, error) {
+	specs := requiredDisplayFields(pf)
+	if len(specs) == 0 {
+		return nil, nil
+	}
+	fields, err := client.FetchProjectFields(projectID)
+	if err != nil {
+		return nil, fmt.Errorf("reading display fields: %w", err)
+	}
+	return planDisplayFields(specs, fields), nil
+}
+
+// countDisplayFields returns how many plan entries are in state.
+func countDisplayFields(plan []displayFieldStatus, state displayFieldState) int {
+	n := 0
+	for _, st := range plan {
+		if st.State == state {
+			n++
+		}
+	}
+	return n
+}
+
+// printDisplayFields writes one line per plan entry, optionally skipping
+// those already present.
+func printDisplayFields(w io.Writer, prefix string, plan []displayFieldStatus, skipPresent bool) {
+	for _, st := range plan {
+		if skipPresent && st.State == displayFieldPresent {
+			continue
+		}
+		fmt.Fprintf(w, "%s: %s\n", prefix, displayFieldLine(st))
+	}
 }
