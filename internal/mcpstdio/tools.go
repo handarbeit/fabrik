@@ -32,11 +32,12 @@ const (
 	ToolSetAutonomy      = "fabrik_set_autonomy"
 	ToolRevalidate       = "fabrik_revalidate"
 	ToolClearClaudeLimit = "fabrik_clear_claude_limit"
+	ToolAdvance          = "fabrik_advance"
 )
 
 // ActionTools lists the tools that make the daemon write to GitHub.
 func ActionTools() []string {
-	return []string{ToolPromote, ToolSetAutonomy, ToolRevalidate, ToolClearClaudeLimit}
+	return []string{ToolPromote, ToolSetAutonomy, ToolRevalidate, ToolClearClaudeLimit, ToolAdvance}
 }
 
 // IsActionTool reports whether name is one of ActionTools.
@@ -172,7 +173,7 @@ func toolDefs() []map[string]any {
 		},
 		{
 			"name": ToolPromote,
-			"description": "Move an item out of an unmanaged parking column (e.g. Backlog) into a pipeline column. The daemon writes the board Status itself, with the ids it already holds (one live read of the item's current column confirms the cache first); it refuses, with the current state, when the item is not in a parking column, `to` is not a pipeline stage (holding, cleanup and unmanaged columns are engine-managed), or the daemon cannot establish a fact; the refusal lists the valid targets only when the item is in a parking column. A legacy Backlog column with no configured stage counts as a parking column. " +
+			"description": "Move an item out of an unmanaged parking column (e.g. Backlog) into a pipeline column. The daemon writes the board Status itself, with the ids it already holds (one live read of the item's current column confirms the cache first); it refuses, with the current state, when the item is not in a parking column, `to` is not a pipeline stage (holding, cleanup and unmanaged columns are engine-managed), or the daemon cannot establish a fact; the refusal lists the valid targets only when the item is in a parking column. An item already in a pipeline column is refused with a pointer to fabrik_advance, which moves a completed stage one column forward. A legacy Backlog column with no configured stage counts as a parking column. " +
 				"If the item carries fabrik:cruise or fabrik:yolo the result says it will auto-advance through the stages from `to`. Posts a short Fabrik audit comment on the issue naming the requesting subscriber. Requires the server to be launched with --subscriber.",
 			"inputSchema": obj(map[string]any{
 				"issue": issueSchema(),
@@ -195,6 +196,17 @@ func toolDefs() []map[string]any {
 			"name": ToolRevalidate,
 			"description": "Force a Validate re-run: applies fabrik:revalidate to an item sitting in the Validate column, and the engine clears the Validate completion and CI labels and re-dispatches on a following poll (deferred until an in-flight Validate worker exits). " +
 				"Refused, with the current state, when the item is not in Validate, already carries the label, or is paused or awaiting input: a pause is lifted only by a human comment on the issue, never by this tool. Posts a Fabrik audit comment naming the requesting subscriber. Requires --subscriber.",
+			"inputSchema": obj(map[string]any{
+				"issue": issueSchema(),
+			}, "issue"),
+			"annotations": action(false),
+		},
+		{
+			"name": ToolAdvance,
+			"description": "Move an item whose current stage is complete (stage:<X>:complete) exactly one configured stage forward, using the engine's own advance (the one auto-advance uses); the engine then dispatches the next stage on its next poll. " +
+				"Use it for the decision \"this finished stage should move on\" without changing the item's autonomy (cruise/yolo apply to every remaining stage). The daemon confirms the item's column and labels live and fails closed. " +
+				"Refused, with the current state and the specific reason, when a worker is running, the stage is not complete, the item is paused/awaiting input (a human comment resumes it; this tool never lifts a pause), blocked, or held by a CI wait, review wait, unresolved dependency or unprocessed feedback the engine would also apply. " +
+				"Validate -> Done and moves into a holding stage such as Queued are refused (use the PR merge); a parking column is refused (use fabrik_promote). Posts a Fabrik audit comment naming the requesting subscriber. Requires --subscriber.",
 			"inputSchema": obj(map[string]any{
 				"issue": issueSchema(),
 			}, "issue"),
@@ -353,6 +365,21 @@ func buildCall(name string, args json.RawMessage, defaultSubscriber string) (met
 			return "", nil, fmt.Errorf("issue is required")
 		}
 		return localapi.MethodRevalidate, localapi.RevalidateParams{Subscriber: who, Issue: string(a.Issue)}, nil
+	case ToolAdvance:
+		var a struct {
+			Issue issueArg `json:"issue"`
+		}
+		if err := decodeArgs(args, &a); err != nil {
+			return "", nil, err
+		}
+		who, err := requesterName(defaultSubscriber)
+		if err != nil {
+			return "", nil, err
+		}
+		if a.Issue == "" {
+			return "", nil, fmt.Errorf("issue is required")
+		}
+		return localapi.MethodAdvance, localapi.AdvanceParams{Subscriber: who, Issue: string(a.Issue)}, nil
 	case ToolClearClaudeLimit:
 		var a struct{}
 		if err := decodeArgs(args, &a); err != nil {

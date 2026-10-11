@@ -193,6 +193,7 @@ type Engine struct {
 	readClient            boardcache.ReadClient  // read-only GitHub calls; may be CacheImpl or GitHubAdapter
 	claude                ClaudeInvoker
 	statusField           *gh.StatusField
+	boardProjectID        string                      // the project id of the last polled board (guarded by mu); the overseer's advance uses it when no boardcache is wired
 	worktreeManagers      map[string]*WorktreeManager // key: "owner/repo"; one WM per discovered repo
 	fabrikDir             string                      // directory containing .fabrik/ (always os.Getwd() at startup)
 	mu                    sync.Mutex

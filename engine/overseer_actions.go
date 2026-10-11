@@ -16,9 +16,10 @@ import (
 	"github.com/handarbeit/fabrik/stages"
 )
 
-// The overseer actions (#1969, ADR-1966-c): the four mutating requests a
+// The overseer actions (#1969, ADR-1966-c): the mutating requests a
 // Claude Code session overseeing the pipeline can make over the local socket —
-// promote, set_autonomy, revalidate, clear_claude_limit. Each performs an
+// promote, set_autonomy, revalidate, clear_claude_limit and (#2126, ADR 2126,
+// in overseer_advance.go) advance. Each performs an
 // existing, documented transition through the engine's own client and
 // write-through helpers, then posts a 🏭 audit comment naming the requester.
 //
@@ -336,7 +337,7 @@ func (a *overseerActor) parkingRefusal(status string) string {
 	if a.e.stageByName(status) == nil {
 		return fmt.Sprintf("is in column %q, which has no configured stage", status)
 	}
-	return fmt.Sprintf("is already in the pipeline column %q; promote only moves items out of an unmanaged parking column", status)
+	return fmt.Sprintf("is already in the pipeline column %q; promote only moves items out of an unmanaged parking column; use fabrik_advance to move a completed stage one column forward", status)
 }
 
 // SetAutonomy makes the item's autonomy exactly the requested mode. Writes run

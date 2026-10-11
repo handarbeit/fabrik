@@ -777,10 +777,34 @@ func reviewGateAuthorityVerdict(reviewDecision string, reviews []gh.PRReview) (s
 // base:<branch> fallback. "No PR" and "could not read the PR" are deliberately
 // distinguished: only the former is a safe reason to let a landing through.
 func (e *Engine) reviewGateBlocksLanding(item gh.ProjectItem, stage *stages.Stage, owner, repo string) bool {
+	h := e.reviewGateHold(item, stage, owner, repo)
+	if !h.Blocked {
+		return false
+	}
+	return e.holdLandingForReview(item, "%s", h.Msg)
+}
+
+// reviewHold is reviewGateHold's verdict: Blocked says the landing/advance must be
+// held, Msg is the fully formatted (newline-terminated) log line explaining why.
+type reviewHold struct {
+	Blocked bool
+	Msg     string
+}
+
+func blockedHold(format string, args ...any) reviewHold {
+	return reviewHold{Blocked: true, Msg: fmt.Sprintf(format, args...)}
+}
+
+// reviewGateHold is the read-only core of reviewGateBlocksLanding: every read and
+// decision, no label write. reviewGateBlocksLanding wraps it with the hold side
+// effect (fabrik:awaiting-review); the overseer's advance (#2126) calls it
+// directly so a refused advance writes nothing, while still agreeing with the
+// engine on what "review satisfied" means.
+func (e *Engine) reviewGateHold(item gh.ProjectItem, stage *stages.Stage, owner, repo string) reviewHold {
 	// Gate is opt-in — only active when wait_for_reviews: true. Checked before any
 	// PR resolution so stages that don't use the gate pay zero extra API calls.
 	if stage == nil || stage.WaitForReviews == nil || !*stage.WaitForReviews {
-		return false
+		return reviewHold{}
 	}
 
 	prNumber := item.LinkedPRNumber
@@ -797,10 +821,10 @@ func (e *Engine) reviewGateBlocksLanding(item gh.ProjectItem, stage *stages.Stag
 			// handleBrokenReviewLinkage returning prNumber 0, leaving the item's
 			// structurally-empty review fields to fail the clearing condition).
 			e.logf(item.Number, "warn", "reviewGateBlocksLanding: FetchLinkedPR failed: %v\n", err)
-			return e.holdLandingForReview(item, "holding landing decision — linked PR unreadable, review state unknown\n")
+			return reviewHold{Blocked: true, Msg: "holding landing decision — linked PR unreadable, review state unknown\n"}
 		}
 		if pr == nil || pr.Number == 0 {
-			return false
+			return reviewHold{}
 		}
 		// FetchLinkedPR queries state=all, so a stale PR from a previous cycle on
 		// the same fabrik/issue-N branch (or one that already merged via a race
@@ -813,7 +837,7 @@ func (e *Engine) reviewGateBlocksLanding(item gh.ProjectItem, stage *stages.Stag
 		// This matters most on a base:<branch> repo, where LinkedPRNumber is always
 		// 0 and this fallback is the steady-state resolution route, not an edge case.
 		if pr.State != "open" || pr.Merged {
-			return false
+			return reviewHold{}
 		}
 		// FetchLinkedPR resolves by head-branch name (fabrik/issue-N) alone — it
 		// does not verify that the PR body actually closes this issue, unlike
@@ -862,7 +886,7 @@ func (e *Engine) reviewGateBlocksLanding(item gh.ProjectItem, stage *stages.Stag
 	// fail-open regression FR-6/FR-5 guard against.
 	if !fetchFailed && reviewGateFastAdvance(outstanding, hasReviews, e.effectiveExpectedReviewers(item, stage)) {
 		e.logf(item.Number, "awaiting-review", "landing decision on PR #%d — expected_reviewers declared none expected and nothing was requested — proceeding immediately\n", prNumber)
-		return false
+		return reviewHold{}
 	}
 
 	if len(outstanding) == 0 && hasReviews {
@@ -876,12 +900,10 @@ func (e *Engine) reviewGateBlocksLanding(item gh.ProjectItem, stage *stages.Stag
 			reviewDecision, decisionErr := e.readClient.FetchPRReviewDecision(owner, repo, prNumber)
 			if decisionErr != nil {
 				e.logf(item.Number, "warn", "reviewGateBlocksLanding: FetchPRReviewDecision failed: %v\n", decisionErr)
-				return e.holdLandingForReview(item,
-					"holding landing decision on PR #%d — review verdict unreadable (fetch failed), blocking conservatively\n", prNumber)
+				return blockedHold("holding landing decision on PR #%d — review verdict unreadable (fetch failed), blocking conservatively\n", prNumber)
 			}
 			if satisfied, reason := reviewGateAuthorityVerdict(reviewDecision, reviews); !satisfied {
-				return e.holdLandingForReview(item,
-					"holding landing decision on PR #%d — authoritative gate still blocking: %s\n", prNumber, reason)
+				return blockedHold("holding landing decision on PR #%d — authoritative gate still blocking: %s\n", prNumber, reason)
 			}
 		}
 		// Deliberately does NOT call removeAwaitingReviewLabel here, unlike
@@ -896,11 +918,11 @@ func (e *Engine) reviewGateBlocksLanding(item gh.ProjectItem, stage *stages.Stag
 		// attemptMergeOnValidate for an item that never re-enters catch-up Phase 1
 		// would strand a fabrik:awaiting-review applied here. Such a caller must
 		// either route through the catch-up loop or take over removal explicitly.
-		return false
+		return reviewHold{}
 	}
 
 	if len(outstanding) > 0 {
-		return e.holdLandingForReview(item, "holding landing decision on PR #%d — waiting for reviewers: %s\n",
+		return blockedHold("holding landing decision on PR #%d — waiting for reviewers: %s\n",
 			prNumber, strings.Join(outstanding, ", "))
 	}
 	if fetchFailed {
@@ -910,8 +932,7 @@ func (e *Engine) reviewGateBlocksLanding(item gh.ProjectItem, stage *stages.Stag
 		// operator watching a GitHub API outage sees "waiting for initial review
 		// submission" and has no signal that the gate is blocking on a fetch
 		// failure rather than on a genuinely unreviewed PR.
-		return e.holdLandingForReview(item,
-			"holding landing decision on PR #%d — review state unreadable (fetch failed), blocking conservatively\n", prNumber)
+		return blockedHold("holding landing decision on PR #%d — review state unreadable (fetch failed), blocking conservatively\n", prNumber)
 	}
 	// Reachable steady state: zero requested reviewers and no review submitted
 	// yet (e.g. just after MarkPRReady, before any human or bot has weighed in).
@@ -926,7 +947,7 @@ func (e *Engine) reviewGateBlocksLanding(item gh.ProjectItem, stage *stages.Stag
 	// fabrik:awaiting-review was applied — the label holdLandingForReview sets, read
 	// via FetchLabelAppliedAt. That path removes the label and pauses for a human,
 	// so this is a bounded hold, not a permanent block.
-	return e.holdLandingForReview(item, "holding landing decision on PR #%d — waiting for initial review submission\n", prNumber)
+	return blockedHold("holding landing decision on PR #%d — waiting for initial review submission\n", prNumber)
 }
 
 // holdLandingForReview is reviewGateBlocksLanding's single blocking exit: it logs
