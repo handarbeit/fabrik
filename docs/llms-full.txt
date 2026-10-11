@@ -167,7 +167,12 @@ created unlinked and the config is multi-repo.
 
 This requires a GitHub token (`--token`, `FABRIK_TOKEN`, or `GITHUB_TOKEN`) with `repo`
 and `project` scopes, same as the daemon itself. On success it writes the new project's
-number, owner, and owner type into `.fabrik/config.yaml` for you. `--title` sets the
+number, owner, and owner type into `.fabrik/config.yaml` for you. It also creates the
+display-only project fields — `Fabrik` (Text, the [status line](#project-board-status-line)),
+`Last activity` (Date) and `Last run` (Text) — under the names `project_fields.*` resolves
+to, skipping any set to `off`. If creating a field fails, the board is kept and recorded in
+the config, the failed field is named, and the command exits non-zero: run `fabrik
+repair-board --apply` to finish. `--title` sets the
 board's title (default: `"<repo> Fabrik Pipeline"`, or `"<owner> Fabrik Pipeline"` without `--repo`).
 
 If `.fabrik/config.yaml` already has an `owner`/`project` configured — this repo has
@@ -201,9 +206,19 @@ repair-board` adds the missing columns without disturbing anything already on th
 board:
 
 ```bash
-./fabrik repair-board          # dry run: prints which columns are missing, changes nothing
-./fabrik repair-board --apply   # adds the missing columns
+./fabrik repair-board          # dry run: prints which columns and display fields are missing, changes nothing
+./fabrik repair-board --apply   # adds the missing columns and display fields
 ```
+
+`repair-board` also checks the three display-only fields (`Fabrik`, `Last activity`,
+`Last run`, or the names set in `project_fields.*`; a field set to `off` is skipped), so a
+board that predates them gains them without a trip to Project settings. Field handling is
+create-only: a field that already exists with the right type is reported as present, and
+one that exists with the **wrong** type (say, a single-select named `Fabrik`) is reported
+as a type mismatch and left untouched — Fabrik never deletes, renames, retypes or
+recreates a field. A failure creating one field does not stop the others or the Status
+repair; the command exits non-zero and names the field that failed. A second `--apply`
+is a no-op that reports everything present.
 
 Repair never removes a column and never reorders existing ones. Most importantly, it
 never regenerates an existing column's underlying id — doing so would silently clear
@@ -1174,8 +1189,8 @@ user: your-github-username
 
 # Display-only "status line" project field (#2048). Fabrik writes one short line
 # saying what each item is doing or waiting on right now into a TEXT field on
-# your project board. The field must already exist on the board — Fabrik never
-# creates it. Default name "Fabrik"; "off" disables the feature. YAML only (no
+# your project board. `fabrik init --create-board` and `fabrik repair-board
+# --apply` create the field; the engine never creates it at runtime. Default name "Fabrik"; "off" disables the feature. YAML only (no
 # flag or environment variable). See "Project Board Status Line" in section 3.
 # project_fields:
 #   status_line: Fabrik
@@ -1835,7 +1850,7 @@ Two observable differences from the batch-landing path: nothing on `--max-batch-
 
 On the board, a card in `Queued` looks the same whether the train is waiting its turn, resolving a conflict, waiting on trial CI, bisecting or landing — and a paused, blocked or CI-waiting card looks like any other. To tell working from stuck you would otherwise read the daemon log or the TUI. Fabrik can instead write one short line, saying what the item is doing or waiting on **right now**, into a text field on the board.
 
-**Set it up.** Add a **Text** field to your GitHub Project (Project settings → New field → Text) named `Fabrik`, or any name you set with `project_fields.status_line` in `.fabrik/config.yaml`. That is all: Fabrik never creates the field itself. If the field is absent (or is not a Text field), Fabrik logs one `[startup] status-line field unavailable …` line and writes nothing, so the board behaves exactly as before. `project_fields.status_line: off` disables the feature and logs the same single line. Filter the board on the field (for example `Fabrik:landing`) to see what is in the train now. A field you add later, or rename, is picked up on the next restart. If the lookup itself fails (an API outage, a token without project read access), Fabrik warns once, writes nothing, and retries the lookup at most every five minutes instead of on every transition.
+**Set it up.** Add a **Text** field to your GitHub Project (Project settings → New field → Text) named `Fabrik`, or any name you set with `project_fields.status_line` in `.fabrik/config.yaml`. `fabrik init --create-board` and `fabrik repair-board --apply` create it for you (the engine itself never creates it at runtime). If the field is absent (or is not a Text field), Fabrik logs one `[startup] status-line field unavailable …` line and writes nothing, so the board behaves exactly as before. `project_fields.status_line: off` disables the feature and logs the same single line. Filter the board on the field (for example `Fabrik:landing`) to see what is in the train now. A field you add later, or rename, is picked up on the next restart. If the lookup itself fails (an API outage, a token without project read access), Fabrik warns once, writes nothing, and retries the lookup at most every five minutes instead of on every transition.
 
 ```yaml
 # .fabrik/config.yaml
@@ -1889,7 +1904,7 @@ From the board you cannot otherwise sort or group items by how recently Fabrik w
 
 `Last run` reads like `Validate · completed · 42/250 turns · 18m`, `Implement · turn-limited · 250/250 turns` or `Review · blocked on input`. The outcome is one of `completed`, `turn-limited`, `blocked on input`, `failed` (the process faulted without completing) or `incomplete` (a clean exit without the completion marker, for example a run that had tool calls denied). A comment-review pass reads `Validate · comment review · completed`. Turns are shown for `completed` and `turn-limited` runs (`42 turns` when the stage has no turn budget), the duration only for `completed`. Lines are capped at 60 characters, ending in `…`.
 
-**Set it up.** Add a **Date** field named `Last activity` and/or a **Text** field named `Last run` (or any names you set with `project_fields.last_activity` / `project_fields.last_run`). Fabrik never creates the fields. Both are on by default; a missing field, or one of the wrong type, makes Fabrik log one `[startup] last-activity field unavailable …` (or `last-run`) line and write nothing for it — the other field and the status line are unaffected. `off` (any case) disables a field. The keys are YAML-only; a field you add later, or rename, is picked up on the next restart.
+**Set it up.** Add a **Date** field named `Last activity` and/or a **Text** field named `Last run` (or any names you set with `project_fields.last_activity` / `project_fields.last_run`). `fabrik init --create-board` and `fabrik repair-board --apply` create them for you; the engine itself never creates them at runtime. Both are on by default; a missing field, or one of the wrong type, makes Fabrik log one `[startup] last-activity field unavailable …` (or `last-run`) line and write nothing for it — the other field and the status line are unaffected. `off` (any case) disables a field. The keys are YAML-only; a field you add later, or rename, is picked up on the next restart.
 
 ```yaml
 # .fabrik/config.yaml
@@ -9152,7 +9167,7 @@ The engine projects a one-line description of what an item is doing or waiting o
 - *Write-on-change.* An in-memory `issueKey → last line written` map (own mutex, per-item write lock) skips a write when the line equals the last one written; the record is updated only after a successful write, so a failed write is retried at the next transition. It is lost on restart: the first transition of an item afterwards may rewrite an identical line once, and a Done item with no record gets one blind clear.
 - *Never per turn or per poll.* Calls sit at the engine's existing transitions only (below).
 - *Truncation.* At most 60 characters (runes), ending in `…`.
-- *Missing / off.* The field is resolved once (startup `checkStageColumnAlignment`, or lazily from the poll loop) with a TEXT-only lookup. If it is absent, not a text field, or the feature is off, every call is a silent no-op and exactly one `[startup] status-line field unavailable …` line is logged. A field created later, or renamed, needs a restart.
+- *Missing / off.* The field is resolved once (startup `checkStageColumnAlignment`, or lazily from the poll loop) with a TEXT-only lookup. If it is absent, not a text field, or the feature is off, every call is a silent no-op and exactly one `[startup] status-line field unavailable …` line is logged. A field created later, or renamed, needs a restart. The engine never creates the field at runtime; `fabrik init --create-board` and `fabrik repair-board --apply` do (#2110, ADR 2110), create-only and report-only on a type mismatch.
 - *Failure.* A failed write is logged (`[#N status-line]`) and swallowed — it never alters, retries-in-a-blocking-way or pauses the transition that triggered it.
 - *Self-write.* A successful write applies `itemstate.SelfWriteObserved` (§7.9) like every other project-field write, so the probe does not re-fetch the item for the engine's own write.
 

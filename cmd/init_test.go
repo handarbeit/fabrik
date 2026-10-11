@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/handarbeit/fabrik/config"
 	gh "github.com/handarbeit/fabrik/github"
 	fabrikplugin "github.com/handarbeit/fabrik/plugin"
 	"github.com/handarbeit/fabrik/stages"
@@ -914,14 +915,27 @@ func TestRunInit_HaltsOnGitExcludeFailure(t *testing.T) {
 // creates a board (the orphan-resource review finding on PR #1718).
 func createBoardTestServer(t *testing.T, ownerTypename string, statusOptions []map[string]interface{}, createCalled *bool) *httptest.Server {
 	t.Helper()
+	return createBoardTestServerFields(t, ownerTypename, statusOptions, createCalled, newFakeFieldBoard())
+}
+
+// createBoardTestServerFields is createBoardTestServer with an explicit
+// display-field board (#2110): a new board starts with no display fields,
+// and ff records every createProjectV2Field call.
+func createBoardTestServerFields(t *testing.T, ownerTypename string, statusOptions []map[string]interface{}, createCalled *bool, ff *fakeFieldBoard) *httptest.Server {
+	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
-			Query string `json:"query"`
+			Query     string                 `json:"query"`
+			Variables map[string]interface{} `json:"variables"`
 		}
 		data, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(data, &body)
 
 		var resp map[string]interface{}
+		if fieldResp, ok := ff.handle(body.Query, body.Variables); ok {
+			json.NewEncoder(w).Encode(fieldResp)
+			return
+		}
 		switch {
 		case strings.Contains(body.Query, "repositoryOwner(login:"):
 			resp = map[string]interface{}{
@@ -1004,7 +1018,7 @@ func TestCreateBoardCore_Success(t *testing.T) {
 	writeMinimalStage(t, stagesDir, "Implement", 1)
 
 	client := gh.NewClientWithBaseURL("token", srv.URL)
-	project, ownerType, err := createBoardCore(client, "acme", "widgets", "", stagesDir)
+	project, ownerType, fieldsErr, err := createBoardCore(client, "acme", "widgets", "", stagesDir, config.ProjectFieldsConfig{})
 	if err != nil {
 		t.Fatalf("createBoardCore: %v", err)
 	}
@@ -1013,6 +1027,9 @@ func TestCreateBoardCore_Success(t *testing.T) {
 	}
 	if ownerType != "organization" {
 		t.Errorf("ownerType = %q, want organization", ownerType)
+	}
+	if fieldsErr != nil {
+		t.Errorf("fieldsErr = %v", fieldsErr)
 	}
 }
 
@@ -1048,7 +1065,7 @@ func TestCreateBoardCore_NoRepoCreatesUnlinkedBoard(t *testing.T) {
 	writeMinimalStage(t, stagesDir, "Implement", 1)
 
 	client := gh.NewClientWithBaseURL("token", srv.URL)
-	project, _, err := createBoardCore(client, "acme", "", "", stagesDir)
+	project, _, _, err := createBoardCore(client, "acme", "", "", stagesDir, config.ProjectFieldsConfig{})
 	if err != nil {
 		t.Fatalf("createBoardCore without a repo: %v", err)
 	}
@@ -1079,7 +1096,7 @@ func TestCreateBoardCore_RefusesUserOwned(t *testing.T) {
 	writeMinimalStage(t, stagesDir, "Specify", 0)
 
 	client := gh.NewClientWithBaseURL("token", srv.URL)
-	if _, _, err := createBoardCore(client, "someuser", "widgets", "", stagesDir); err == nil {
+	if _, _, _, err := createBoardCore(client, "someuser", "widgets", "", stagesDir, config.ProjectFieldsConfig{}); err == nil {
 		t.Fatal("expected refusal for user-owned target")
 	} else if !strings.Contains(err.Error(), "organization-only") {
 		t.Errorf("unexpected error: %v", err)
@@ -1103,7 +1120,7 @@ func TestCreateBoardCore_NoStageConfigs(t *testing.T) {
 	// No stage YAML files written — boardColumnNames returns empty.
 
 	client := gh.NewClientWithBaseURL("token", srv.URL)
-	if _, _, err := createBoardCore(client, "acme", "widgets", "", stagesDir); err == nil {
+	if _, _, _, err := createBoardCore(client, "acme", "widgets", "", stagesDir, config.ProjectFieldsConfig{}); err == nil {
 		t.Fatal("expected error when no stage configs are present")
 	}
 	if created {
@@ -1167,7 +1184,7 @@ func TestCreateBoardCore_PostCreateFailureNamesTheOrphanedBoard(t *testing.T) {
 	writeMinimalStage(t, stagesDir, "Specify", 0)
 
 	client := gh.NewClientWithBaseURL("token", srv.URL)
-	_, _, err := createBoardCore(client, "acme", "widgets", "", stagesDir)
+	_, _, _, err := createBoardCore(client, "acme", "widgets", "", stagesDir, config.ProjectFieldsConfig{})
 	if err == nil {
 		t.Fatal("expected error from FetchStatusField failure")
 	}
@@ -1252,11 +1269,139 @@ func TestCreateBoardCore_CreatesDoneColumnButNotBacklog(t *testing.T) {
 	}
 
 	client := gh.NewClientWithBaseURL("token", srv.URL)
-	if _, _, err := createBoardCore(client, "acme", "", "", stagesDir); err != nil {
+	if _, _, _, err := createBoardCore(client, "acme", "", "", stagesDir, config.ProjectFieldsConfig{}); err != nil {
 		t.Fatalf("createBoardCore: %v", err)
 	}
 	want := []string{"Specify", "Implement", "Done"}
 	if strings.Join(sent, ",") != strings.Join(want, ",") {
 		t.Fatalf("Status options sent = %v, want %v (Done included, Backlog excluded, stage order)", sent, want)
+	}
+}
+
+// createBoardFieldsFixture runs createBoardCore against a fake board whose
+// display-field state is ff, returning createBoardCore's results.
+func createBoardFieldsFixture(t *testing.T, ownerTypename string, ff *fakeFieldBoard, repo string, pf config.ProjectFieldsConfig) (project string, fieldsErr, err error, statusSet *[]string) {
+	t.Helper()
+	var sent []string
+	inner := createBoardTestServerFields(t, ownerTypename, []map[string]interface{}{
+		{"id": "OPT_1", "name": "Todo", "color": "GRAY", "description": ""},
+	}, nil, ff)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, _ := io.ReadAll(r.Body)
+		var body struct {
+			Query     string                 `json:"query"`
+			Variables map[string]interface{} `json:"variables"`
+		}
+		_ = json.Unmarshal(data, &body)
+		if strings.Contains(body.Query, "updateProjectV2Field(input:") {
+			sent = nil
+			for _, o := range body.Variables["options"].([]interface{}) {
+				sent = append(sent, o.(map[string]interface{})["name"].(string))
+			}
+		}
+		r.Body = io.NopCloser(bytes.NewReader(data))
+		inner.Config.Handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(func() { srv.Close(); inner.Close() })
+
+	stagesDir := t.TempDir()
+	writeMinimalStage(t, stagesDir, "Specify", 0)
+	writeMinimalStage(t, stagesDir, "Implement", 1)
+
+	client := gh.NewClientWithBaseURL("token", srv.URL)
+	project, _, fieldsErr, err = createBoardCore(client, "acme", repo, "", stagesDir, pf)
+	return project, fieldsErr, err, &sent
+}
+
+func TestCreateBoardCore_CreatesAllThreeDisplayFieldsWithCorrectTypes(t *testing.T) {
+	ff := newFakeFieldBoard()
+	_, fieldsErr, err, status := createBoardFieldsFixture(t, "Organization", ff, "widgets", config.ProjectFieldsConfig{})
+	if err != nil || fieldsErr != nil {
+		t.Fatalf("err=%v fieldsErr=%v", err, fieldsErr)
+	}
+	if got := strings.Join(ff.createdNames(), ","); got != "Fabrik:TEXT,Last activity:DATE,Last run:TEXT" {
+		t.Errorf("creates = %s", got)
+	}
+	if got := strings.Join(*status, ","); got != "Specify,Implement" {
+		t.Errorf("Status setup must still run, options = %s", got)
+	}
+}
+
+func TestCreateBoardCore_LastRunOffCreatesTwoFields(t *testing.T) {
+	ff := newFakeFieldBoard()
+	off := "off"
+	_, fieldsErr, err, _ := createBoardFieldsFixture(t, "Organization", ff, "widgets", config.ProjectFieldsConfig{LastRun: &off})
+	if err != nil || fieldsErr != nil {
+		t.Fatalf("err=%v fieldsErr=%v", err, fieldsErr)
+	}
+	if got := strings.Join(ff.createdNames(), ","); got != "Fabrik:TEXT,Last activity:DATE" {
+		t.Errorf("creates = %s", got)
+	}
+}
+
+func TestCreateBoardCore_CustomStatusLineNameCreatesThatName(t *testing.T) {
+	ff := newFakeFieldBoard()
+	name := "Status line"
+	_, _, err, _ := createBoardFieldsFixture(t, "Organization", ff, "widgets", config.ProjectFieldsConfig{StatusLine: &name})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(ff.createdNames(), ",")
+	if !strings.Contains(got, "Status line:TEXT") || strings.Contains(got, "Fabrik:") {
+		t.Errorf("creates = %s", got)
+	}
+}
+
+func TestCreateBoardCore_UnlinkedBoardAlsoGetsFields(t *testing.T) {
+	ff := newFakeFieldBoard()
+	_, _, err, _ := createBoardFieldsFixture(t, "Organization", ff, "", config.ProjectFieldsConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ff.createdNames()) != 3 {
+		t.Errorf("creates = %v", ff.createdNames())
+	}
+}
+
+func TestCreateBoardCore_UserOwnedRefusedBeforeAnyFieldMutation(t *testing.T) {
+	ff := newFakeFieldBoard()
+	_, _, err, _ := createBoardFieldsFixture(t, "User", ff, "widgets", config.ProjectFieldsConfig{})
+	if err == nil {
+		t.Fatal("expected refusal")
+	}
+	if len(ff.createdNames()) != 0 {
+		t.Errorf("creates = %v", ff.createdNames())
+	}
+}
+
+func TestCreateBoardCore_FieldFailureKeepsBoardAndAttemptsTheRest(t *testing.T) {
+	ff := newFakeFieldBoard()
+	ff.failName = "Last activity"
+	project, fieldsErr, err, _ := createBoardFieldsFixture(t, "Organization", ff, "widgets", config.ProjectFieldsConfig{})
+	if err != nil {
+		t.Fatalf("a field failure must not be a board failure: %v", err)
+	}
+	if project != "42" {
+		t.Errorf("the new board's number must survive a field failure, got %q", project)
+	}
+	if fieldsErr == nil || !strings.Contains(fieldsErr.Error(), "Last activity") {
+		t.Fatalf("fieldsErr = %v, want one naming Last activity", fieldsErr)
+	}
+	if got := strings.Join(ff.createdNames(), ","); got != "Fabrik:TEXT,Last activity:DATE,Last run:TEXT" {
+		t.Errorf("all fields must be attempted, creates = %s", got)
+	}
+}
+
+// A built-in field already holding the configured name is reported, not
+// replaced: the plan classifies it a type mismatch and nothing is created.
+func TestCreateBoardCore_BuiltInNameCollisionIsLeftUntouched(t *testing.T) {
+	ff := newFakeFieldBoard(fakeField("B1", "Labels", "LABELS"))
+	name := "Labels"
+	_, fieldsErr, err, _ := createBoardFieldsFixture(t, "Organization", ff, "widgets", config.ProjectFieldsConfig{StatusLine: &name})
+	if err != nil || fieldsErr != nil {
+		t.Fatalf("err=%v fieldsErr=%v", err, fieldsErr)
+	}
+	if got := strings.Join(ff.createdNames(), ","); got != "Last activity:DATE,Last run:TEXT" {
+		t.Errorf("creates = %s", got)
 	}
 }

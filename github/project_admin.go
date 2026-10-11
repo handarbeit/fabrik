@@ -243,3 +243,148 @@ func (c *Client) SetStatusFieldOptions(fieldID string, options []StatusOptionInp
 	}
 	return nil
 }
+
+// Display-field data types accepted by CreateProjectV2Field and reported by
+// FetchProjectFields. They are GitHub's ProjectV2CustomFieldType /
+// ProjectV2FieldType enum spellings.
+const (
+	FieldTypeText = "TEXT"
+	FieldTypeDate = "DATE"
+)
+
+// ProjectField is one field on a Projects v2 board as listed by
+// FetchProjectFields. DataType is GitHub's ProjectV2FieldType spelling
+// ("TEXT", "DATE", "SINGLE_SELECT", "ITERATION", "ASSIGNEES", ...), so a
+// caller can tell a present field of the wrong type from an absent one.
+type ProjectField struct {
+	ID       string
+	Name     string
+	DataType string
+}
+
+// fetchProjectFieldsQuery lists every field of a project with its real data
+// type. Unlike the engine's field(name:) lookup (fetchTextFieldQuery), which
+// collapses "absent" and "wrong type" into one empty result, this returns the
+// field whatever its type, which R3 of #2110 needs to report a type mismatch.
+const fetchProjectFieldsQuery = `
+query($projectId: ID!, $after: String) {
+  node(id: $projectId) {
+    ... on ProjectV2 {
+      fields(first: 100, after: $after) {
+        nodes {
+          ... on ProjectV2FieldCommon {
+            id
+            name
+            dataType
+          }
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
+    }
+  }
+}`
+
+// FetchProjectFields lists every field on the project (built-in and custom),
+// following pagination. Used by repair-board and init --create-board to
+// classify the display fields before creating any (#2110).
+func (c *Client) FetchProjectFields(projectID string) ([]ProjectField, error) {
+	var fields []ProjectField
+	after := ""
+	for {
+		vars := map[string]interface{}{"projectId": projectID}
+		if after != "" {
+			vars["after"] = after
+		}
+
+		var result struct {
+			Data struct {
+				Node *struct {
+					Fields *struct {
+						Nodes []struct {
+							ID       string `json:"id"`
+							Name     string `json:"name"`
+							DataType string `json:"dataType"`
+						} `json:"nodes"`
+						PageInfo struct {
+							HasNextPage bool   `json:"hasNextPage"`
+							EndCursor   string `json:"endCursor"`
+						} `json:"pageInfo"`
+					} `json:"fields"`
+				} `json:"node"`
+			} `json:"data"`
+		}
+
+		if err := c.graphqlRequest(fetchProjectFieldsQuery, vars, &result); err != nil {
+			return nil, fmt.Errorf("listing fields for project %s: %w", projectID, err)
+		}
+		if result.Data.Node == nil || result.Data.Node.Fields == nil {
+			return nil, fmt.Errorf("listing fields for project %s: project not found", projectID)
+		}
+		for _, n := range result.Data.Node.Fields.Nodes {
+			// A node matching no fragment decodes to all-empty; skip it.
+			if n.ID == "" && n.Name == "" {
+				continue
+			}
+			fields = append(fields, ProjectField{ID: n.ID, Name: n.Name, DataType: n.DataType})
+		}
+		pi := result.Data.Node.Fields.PageInfo
+		if !pi.HasNextPage || pi.EndCursor == "" {
+			return fields, nil
+		}
+		after = pi.EndCursor
+	}
+}
+
+// createProjectV2FieldMutation is the GraphQL mutation used by
+// CreateProjectV2Field. It is a *create* mutation, never
+// updateProjectV2Field, so the Status option-ID trap (ADR-1714 R4) cannot
+// arise: no existing field is replaced. The payload is a union, so the id is
+// selected through the ProjectV2FieldCommon interface fragment.
+const createProjectV2FieldMutation = `
+mutation($projectId: ID!, $name: String!, $dataType: ProjectV2CustomFieldType!) {
+  createProjectV2Field(input: {projectId: $projectId, name: $name, dataType: $dataType}) {
+    projectV2Field {
+      ... on ProjectV2FieldCommon {
+        id
+      }
+    }
+  }
+}`
+
+// CreateProjectV2Field creates a new field named name on the project and
+// returns its node ID. dataType must be FieldTypeText or FieldTypeDate — the
+// only types Fabrik's display-only fields use (#2110). An empty returned ID
+// is an error. Callers must have confirmed the field does not already exist;
+// this method never replaces, renames or retypes anything.
+func (c *Client) CreateProjectV2Field(projectID, name, dataType string) (string, error) {
+	if dataType != FieldTypeText && dataType != FieldTypeDate {
+		return "", fmt.Errorf("creating field %q: unsupported data type %q (want %s or %s)", name, dataType, FieldTypeText, FieldTypeDate)
+	}
+	vars := map[string]interface{}{
+		"projectId": projectID,
+		"name":      name,
+		"dataType":  dataType,
+	}
+
+	var result struct {
+		Data struct {
+			CreateProjectV2Field struct {
+				ProjectV2Field *struct {
+					ID string `json:"id"`
+				} `json:"projectV2Field"`
+			} `json:"createProjectV2Field"`
+		} `json:"data"`
+	}
+
+	if err := c.graphqlRequest(createProjectV2FieldMutation, vars, &result); err != nil {
+		return "", fmt.Errorf("creating %s field %q on project %s: %w", dataType, name, projectID, err)
+	}
+	f := result.Data.CreateProjectV2Field.ProjectV2Field
+	if f == nil || f.ID == "" {
+		return "", fmt.Errorf("creating %s field %q on project %s: no field ID returned", dataType, name, projectID)
+	}
+	return f.ID, nil
+}

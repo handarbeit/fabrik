@@ -129,3 +129,136 @@ func TestAppBoardClient_ConfigResolution(t *testing.T) {
 		t.Errorf("GHES + App: err = %v", err)
 	}
 }
+
+func strPtr(s string) *string { return &s }
+
+func specNames(specs []displayFieldSpec) []string {
+	var out []string
+	for _, s := range specs {
+		out = append(out, s.Name+":"+s.DataType)
+	}
+	return out
+}
+
+func TestRequiredDisplayFields_Defaults(t *testing.T) {
+	got := strings.Join(specNames(requiredDisplayFields(config.ProjectFieldsConfig{})), ",")
+	want := "Fabrik:TEXT,Last activity:DATE,Last run:TEXT"
+	if got != want {
+		t.Errorf("got %s, want %s", got, want)
+	}
+}
+
+func TestRequiredDisplayFields_CustomNameAndOff(t *testing.T) {
+	pf := config.ProjectFieldsConfig{StatusLine: strPtr("Status line"), LastActivity: strPtr("OFF"), LastRun: strPtr("  ")}
+	got := strings.Join(specNames(requiredDisplayFields(pf)), ",")
+	want := "Status line:TEXT,Last run:TEXT" // blank means default; off (any case) drops the field
+	if got != want {
+		t.Errorf("got %s, want %s", got, want)
+	}
+}
+
+func TestPlanDisplayFields_Classification(t *testing.T) {
+	specs := requiredDisplayFields(config.ProjectFieldsConfig{})
+	fields := []gh.ProjectField{
+		{ID: "1", Name: "Title", DataType: "TITLE"},
+		{ID: "2", Name: "fabrik", DataType: "SINGLE_SELECT"}, // case-insensitive, wrong type
+		{ID: "3", Name: "Last activity", DataType: "DATE"},
+	}
+	plan := planDisplayFields(specs, fields)
+	want := []displayFieldState{displayFieldMismatch, displayFieldPresent, displayFieldMissing}
+	for i, w := range want {
+		if plan[i].State != w {
+			t.Errorf("%s: state = %s, want %s", plan[i].Name, plan[i].State, w)
+		}
+	}
+	if plan[0].Found != "SINGLE_SELECT" {
+		t.Errorf("Found = %q", plan[0].Found)
+	}
+	if line := displayFieldLine(plan[0]); !strings.Contains(line, "expected TEXT, found SINGLE_SELECT") {
+		t.Errorf("mismatch line = %q", line)
+	}
+}
+
+func TestPlanDisplayFields_BuiltInNameIsMismatch(t *testing.T) {
+	pf := config.ProjectFieldsConfig{StatusLine: strPtr("Labels")}
+	plan := planDisplayFields(requiredDisplayFields(pf), []gh.ProjectField{{Name: "Labels", DataType: "LABELS"}})
+	if plan[0].State != displayFieldMismatch {
+		t.Errorf("state = %s, want mismatch", plan[0].State)
+	}
+}
+
+func TestPlanDisplayFields_DuplicateConfiguredName(t *testing.T) {
+	pf := config.ProjectFieldsConfig{StatusLine: strPtr("Shared"), LastRun: strPtr("shared")}
+	plan := planDisplayFields(requiredDisplayFields(pf), nil)
+	if plan[0].State != displayFieldMissing || plan[2].State != displayFieldCollision {
+		t.Errorf("states = %s, %s, %s", plan[0].State, plan[1].State, plan[2].State)
+	}
+	rec := &recordingFieldClient{}
+	applyDisplayFields(rec, "P", plan)
+	if len(rec.creates) != 2 { // Shared + Last activity; never the collision
+		t.Errorf("creates = %v", rec.creates)
+	}
+}
+
+type recordingFieldClient struct {
+	fields  []gh.ProjectField
+	creates []string
+	failOn  string
+	emptyID bool
+}
+
+func (r *recordingFieldClient) FetchProjectFields(string) ([]gh.ProjectField, error) {
+	return r.fields, nil
+}
+
+func (r *recordingFieldClient) CreateProjectV2Field(_, name, dataType string) (string, error) {
+	r.creates = append(r.creates, name+":"+dataType)
+	if name == r.failOn {
+		return "", errString("boom")
+	}
+	if r.emptyID {
+		return "", nil
+	}
+	return "F_" + name, nil
+}
+
+type errString string
+
+func (e errString) Error() string { return string(e) }
+
+func TestApplyDisplayFields_PartialFailureAttemptsAllAndNamesFailed(t *testing.T) {
+	plan := planDisplayFields(requiredDisplayFields(config.ProjectFieldsConfig{}), nil)
+	rec := &recordingFieldClient{failOn: "Last activity"}
+	applyDisplayFields(rec, "P", plan)
+	if len(rec.creates) != 3 {
+		t.Fatalf("all three must be attempted, got %v", rec.creates)
+	}
+	err := displayFieldsErr(plan)
+	if err == nil || !strings.Contains(err.Error(), "Last activity") || strings.Contains(err.Error(), `"Last run"`) {
+		t.Fatalf("err = %v", err)
+	}
+	if plan[0].State != displayFieldCreated || plan[1].State != displayFieldFailed || plan[2].State != displayFieldCreated {
+		t.Errorf("states = %s %s %s", plan[0].State, plan[1].State, plan[2].State)
+	}
+}
+
+func TestApplyDisplayFields_EmptyIDIsFailure(t *testing.T) {
+	plan := planDisplayFields(requiredDisplayFields(config.ProjectFieldsConfig{}), nil)
+	applyDisplayFields(&recordingFieldClient{emptyID: true}, "P", plan)
+	if countDisplayFields(plan, displayFieldFailed) != 3 {
+		t.Errorf("empty IDs must fail every field: %+v", plan)
+	}
+}
+
+func TestApplyDisplayFields_OnlyCreatesMissing(t *testing.T) {
+	fields := []gh.ProjectField{{Name: "Fabrik", DataType: "SINGLE_SELECT"}, {Name: "Last run", DataType: "TEXT"}}
+	plan := planDisplayFields(requiredDisplayFields(config.ProjectFieldsConfig{}), fields)
+	rec := &recordingFieldClient{}
+	applyDisplayFields(rec, "P", plan)
+	if len(rec.creates) != 1 || rec.creates[0] != "Last activity:DATE" {
+		t.Errorf("creates = %v", rec.creates)
+	}
+	if displayFieldsErr(plan) != nil {
+		t.Error("a mismatch must not be an error")
+	}
+}
