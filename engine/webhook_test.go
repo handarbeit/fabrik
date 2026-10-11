@@ -1440,3 +1440,85 @@ func TestCheckWebhookHookCoverage_SetsNoteOnMissing(t *testing.T) {
 		t.Errorf("hookNote = %q, want %q", note, want)
 	}
 }
+
+// TestEchoVia covers the overseer requester carried with a pending echo (#2125).
+func TestEchoVia(t *testing.T) {
+	newMgr := func(t *testing.T) *webhookManager {
+		t.Helper()
+		wm, _ := newTestWebhookManager(t)
+		wm.mu.Lock()
+		wm.state = WebhookStreamHealthy
+		wm.mu.Unlock()
+		return wm
+	}
+
+	t.Run("match returns the requester and deletes both entries", func(t *testing.T) {
+		wm := newMgr(t)
+		wm.RegisterEchoVia("issues", "labeled", "o/r#1+x", "overseer-a")
+		ok, via := wm.MatchEchoVia("issues", "labeled", "o/r#1+x")
+		if !ok || via != "overseer-a" {
+			t.Fatalf("MatchEchoVia = %v, %q", ok, via)
+		}
+		wm.mu.Lock()
+		defer wm.mu.Unlock()
+		if len(wm.pendingEchoes) != 0 || len(wm.echoVia) != 0 {
+			t.Fatalf("entries left: %v %v", wm.pendingEchoes, wm.echoVia)
+		}
+	})
+
+	t.Run("plain register has no requester, and MatchEchoReported consumes via", func(t *testing.T) {
+		wm := newMgr(t)
+		wm.RegisterEcho("issues", "labeled", "o/r#1+x")
+		if ok, via := wm.MatchEchoVia("issues", "labeled", "o/r#1+x"); !ok || via != "" {
+			t.Fatalf("MatchEchoVia = %v, %q", ok, via)
+		}
+		wm.RegisterEchoVia("issues", "labeled", "o/r#1+y", "overseer-a")
+		if !wm.MatchEchoReported("issues", "labeled", "o/r#1+y") {
+			t.Fatal("MatchEchoReported should match")
+		}
+		wm.mu.Lock()
+		defer wm.mu.Unlock()
+		if len(wm.echoVia) != 0 {
+			t.Fatalf("orphan echoVia: %v", wm.echoVia)
+		}
+	})
+
+	t.Run("re-registering without a requester clears a stale one", func(t *testing.T) {
+		wm := newMgr(t)
+		wm.RegisterEchoVia("issues", "labeled", "o/r#1+x", "overseer-a")
+		wm.RegisterEcho("issues", "labeled", "o/r#1+x")
+		wm.RegisterEchoVia("issues", "labeled", "o/r#1+x", "")
+		if ok, via := wm.MatchEchoVia("issues", "labeled", "o/r#1+x"); !ok || via != "" {
+			t.Fatalf("MatchEchoVia = %v, %q", ok, via)
+		}
+	})
+
+	t.Run("sweep leaves no orphan echoVia entries", func(t *testing.T) {
+		wm := newMgr(t)
+		wm.RegisterEchoVia("issues", "labeled", "o/r#1+x", "overseer-a")
+		wm.mu.Lock()
+		for k := range wm.pendingEchoes {
+			wm.pendingEchoes[k] = time.Now().Add(-(webhookEchoTimeout + time.Second))
+		}
+		wm.mu.Unlock()
+		wm.doEchoSweep()
+		wm.mu.Lock()
+		defer wm.mu.Unlock()
+		if len(wm.pendingEchoes) != 0 || len(wm.echoVia) != 0 {
+			t.Fatalf("entries left: %v %v", wm.pendingEchoes, wm.echoVia)
+		}
+	})
+
+	t.Run("not registered while starting up", func(t *testing.T) {
+		wm, _ := newTestWebhookManager(t)
+		wm.mu.Lock()
+		wm.state = WebhookStreamStartingUp
+		wm.mu.Unlock()
+		wm.RegisterEchoVia("issues", "labeled", "o/r#1+x", "overseer-a")
+		wm.mu.Lock()
+		defer wm.mu.Unlock()
+		if len(wm.pendingEchoes) != 0 || len(wm.echoVia) != 0 {
+			t.Fatalf("registered during startup: %v %v", wm.pendingEchoes, wm.echoVia)
+		}
+	})
+}
