@@ -277,8 +277,17 @@ func (ce *channelEvents) onChange(c itemstate.Change, snap itemstate.Snapshot) {
 		return
 	}
 	key := issueRef(c.Repo, c.Number)
+	// A reopened issue or a failed landing verification ends the announced
+	// landing, so a later close is attributed from its own change, not from a
+	// stale mark.
+	if c.Fields&itemstate.StateChanged != 0 && !st.IsClosed {
+		ce.clearLanding(key)
+	}
 	var evs []channelevents.Event
 	for _, d := range c.LabelDeltas {
+		if d.Added && d.Label == "fabrik:landing-verification-failed" {
+			ce.clearLanding(key)
+		}
 		le := ce.e.labelEvent(&st, c, d)
 		if closeTrackingLabel(d.Label) && ce.isLanding(key) {
 			le.Meta["landing"] = "true"

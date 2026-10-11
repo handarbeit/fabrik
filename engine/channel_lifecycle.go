@@ -49,6 +49,14 @@ func (ce *channelEvents) markLanding(key string) {
 	ce.landings[key] = time.Now()
 }
 
+// clearLanding forgets key's announced landing: the issue was reopened or its
+// landing verification failed, so a later close is not part of that landing.
+func (ce *channelEvents) clearLanding(key string) {
+	ce.mu.Lock()
+	defer ce.mu.Unlock()
+	delete(ce.landings, key)
+}
+
 // pruneLifecycle drops arrivals that never became announceable and landing marks
 // that are old enough to no longer matter.
 func (ce *channelEvents) pruneLifecycle() {

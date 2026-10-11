@@ -731,3 +731,42 @@ func TestChannelClosedAnnouncedLandingIsFabrik(t *testing.T) {
 		t.Fatalf("announced landing must be attributed to fabrik: %v", ev.Meta)
 	}
 }
+
+// A reopened issue ends the announced landing: a later manual close names its own
+// actor and is not tagged as part of the (reversed) landing.
+func TestChannelClosedAfterReopenIsNotAnnouncedLanding(t *testing.T) {
+	e, sink := channelEngine(t, 0, nil)
+	e.MarkBoardPopulatedForTest()
+	e.seedAPIItem(t, 1, "Done")
+	e.channelEvents().markLanding(issueRef("owner/repo", 1))
+	e.store.Apply(itemstate.IssueClosed{Repo: "owner/repo", Number: 1, Sender: "alice"})
+	first := sink.nextOfType(t, channelevents.Closed)
+	if first.Meta["actor"] != "fabrik" {
+		t.Fatalf("announced landing close must be fabrik: %v", first.Meta)
+	}
+
+	e.store.Apply(itemstate.IssueReopened{Repo: "owner/repo", Number: 1})
+	e.store.Apply(itemstate.IssueClosed{Repo: "owner/repo", Number: 1, Sender: "bob"})
+	ev := sink.nextOfType(t, channelevents.Closed)
+	if ev.Meta["actor"] == "fabrik" || ev.Meta["landing"] == "true" {
+		t.Fatalf("a close after a reopen must not inherit the reversed landing: %v", ev.Meta)
+	}
+}
+
+// A failed landing verification ends the announced landing too.
+func TestChannelLandingVerificationFailedClearsLanding(t *testing.T) {
+	e, _ := channelEngine(t, 0, nil)
+	e.MarkBoardPopulatedForTest()
+	e.seedAPIItem(t, 1, "Done")
+	ce := e.channelEvents()
+	key := issueRef("owner/repo", 1)
+	ce.markLanding(key)
+	e.store.Apply(itemstate.LocalLabelAdded{Repo: "owner/repo", Number: 1, Label: "fabrik:landing-verification-failed"})
+	deadline := time.Now().Add(2 * time.Second)
+	for ce.isLanding(key) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if ce.isLanding(key) {
+		t.Fatal("landing mark survived a failed landing verification")
+	}
+}
