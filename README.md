@@ -377,7 +377,8 @@ Fabrik can authenticate as a **GitHub App installation** instead of a personal a
 | `--archive-done` | Auto-archive Done items after `--archive-after` elapses: `on` or `off` (also `FABRIK_ARCHIVE_DONE`) | `""` (on) |
 | `--debug-output` | Save Claude stage output to `.fabrik/debug/` for debugging | `false` |
 | `--symlink-env` | Create a relative symlink at `<worktree>/.env` pointing to the fabrikDir `.env` at worktree setup time. Enables stage code to read project secrets without copying them. Also `FABRIK_SYMLINK_ENV`. | `false` |
-| `--plugin-dir` | Path to Fabrik plugin directory (overrides installed plugin) | `""` |
+| `--plugin-dir` | Path to Fabrik plugin directory (replaces the base plugin) | `""` |
+| `--plugin-dirs` | Comma-separated additional workflow plugin directories loaded after the base plugin | `""` |
 | `--webhooks` | Enable real-time webhook event delivery via `gh webhook forward` (requires `cli/gh-webhook` extension; also `FABRIK_WEBHOOKS`) | `false` |
 | `--github-app-id` | GitHub App ID for App-installation auth — set together with `--github-app-private-key-path` and `--github-app-installation-id`, or not at all (also `FABRIK_GITHUB_APP_ID`) | `0` |
 | `--github-app-private-key-path` | Path to the GitHub App's private key PEM (also `FABRIK_GITHUB_APP_PRIVATE_KEY_PATH`) | `""` |
