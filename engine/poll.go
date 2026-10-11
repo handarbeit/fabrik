@@ -876,11 +876,14 @@ func (e *Engine) cleanupLockedIssues() {
 	for _, snap := range locked {
 		owner, repo := parseOwnerRepo(snap.Repo())
 		num := snap.Number()
-		// A populated label set that lacks the lock label means it is already
-		// gone from GitHub (#2159): skip the call that would 404. An empty set
-		// is "not populated", so still attempt the removal (fail-open).
-		if labels := snap.Labels(); len(labels) > 0 && !hasLabel(labels, lockLabel) {
-			e.logf(num, "shutdown", "lock label already absent, nothing to remove\n")
+		// Skip the removal only when the engine itself recorded removing the lock
+		// label and the cache confirms it is gone (#2159): that call would 404.
+		// A cached label set that merely lacks the label is not proof — the board
+		// query truncates labels and a deep-fetch write-back can drop one — so
+		// without the engine's own record the removal is still attempted, and a
+		// 404 below is success.
+		if _, removed := snap.State().EngineWriteAt[itemstate.EngineWriteLabelKey(lockLabel)]; removed && !hasLabel(snap.Labels(), lockLabel) {
+			e.logf(num, "shutdown", "lock label already removed by the engine, nothing to remove\n")
 			e.store.Apply(itemstate.LocalLockReleased{Repo: snap.Repo(), Number: num})
 			continue
 		}

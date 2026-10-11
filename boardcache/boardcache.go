@@ -1330,6 +1330,16 @@ func (c *CacheImpl) LightReconcile(owner, repo string, projectNum int, ownerType
 	// Fetch fresh board from GitHub (no lock held). The fetch start is recorded
 	// on the board so Reconcile and the comparison below can tell which engine
 	// writes the listing cannot have seen (#2159).
+	//
+	// Keys cached before the fetch started are recorded first: an item that
+	// enters the cache while the fetch is in flight (a webhook IssueOpened, a
+	// newly added item) cannot be on the older listing, so its absence is not
+	// drift.
+	preFetch := c.store.All()
+	preFetchKeys := make(map[string]bool, len(preFetch))
+	for _, snap := range preFetch {
+		preFetchKeys[itemKey(snap.Repo(), snap.Number())] = true
+	}
 	fetchStart := time.Now()
 	freshBoard, err = c.fallback.FetchProjectBoard(owner, repo, projectNum, ownerType)
 	if err != nil {
@@ -1388,7 +1398,7 @@ func (c *CacheImpl) LightReconcile(owner, repo string, projectNum int, ownerType
 
 	// Items in the cache that are no longer on the fresh board are also drift.
 	for key := range cached {
-		if !freshKeys[key] {
+		if !freshKeys[key] && preFetchKeys[key] {
 			driftCount++
 			driftedKeys = append(driftedKeys, key)
 		}

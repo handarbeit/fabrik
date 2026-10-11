@@ -21,6 +21,11 @@ const (
 
 func engineWriteLabelKey(label string) string { return engineWriteLabelPfx + label }
 
+// EngineWriteLabelKey is the ItemState.EngineWriteAt key under which the engine's
+// write of label is recorded, for callers that need to ask "did the engine itself
+// write this label?" (shutdown lock cleanup, #2159).
+func EngineWriteLabelKey(label string) string { return engineWriteLabelKey(label) }
+
 // recordEngineWrite stamps key as written by the engine at now and prunes
 // entries that can no longer protect anything. Reports whether the map changed
 // (it always does for the stamp, so callers use it only for the flag).

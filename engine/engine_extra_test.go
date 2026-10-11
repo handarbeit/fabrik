@@ -85,23 +85,33 @@ func TestCleanupLockedIssues_RemovesLabels(t *testing.T) {
 
 // TestCleanupLockedIssues_SkipsLockLabelAlreadyAbsentFromCache is the #2159
 // shutdown symptom: the cache says the lock label is already gone, so no
-// removal call (which GitHub would 404) is made — but the lock is still
+// removal call (which GitHub would 404) is made — but only when the engine
+// itself recorded the removal — — but the lock is still
 // released in the store.
 func TestCleanupLockedIssues_SkipsLockLabelAlreadyAbsentFromCache(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng := testEngine(t, client, &mockClaudeInvoker{})
 
-	// #10: populated labels without the lock label. #11: populated, with it.
-	eng.store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{Repo: "owner/repo", Number: 10, Labels: []string{"stage:Plan:complete"}}})
+	// #10: the engine removed the lock label itself. #11: populated, with it.
+	// #12: populated without it but no engine removal on record (e.g. a truncated
+	// or stale label set): the removal is still attempted.
+	eng.store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{Repo: "owner/repo", Number: 10, Labels: []string{"stage:Plan:complete", "fabrik:locked:testuser"}}})
+	eng.store.Apply(itemstate.LocalLabelRemoved{Repo: "owner/repo", Number: 10, Label: "fabrik:locked:testuser"})
 	eng.store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{Repo: "owner/repo", Number: 11, Labels: []string{"fabrik:locked:testuser"}}})
+	eng.store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{Repo: "owner/repo", Number: 12, Labels: []string{"stage:Plan:complete"}}})
 	now := time.Now()
 	eng.store.Apply(itemstate.LocalLockAcquired{Repo: "owner/repo", Number: 10, User: "testuser", AcquiredAt: now})
 	eng.store.Apply(itemstate.LocalLockAcquired{Repo: "owner/repo", Number: 11, User: "testuser", AcquiredAt: now})
+	eng.store.Apply(itemstate.LocalLockAcquired{Repo: "owner/repo", Number: 12, User: "testuser", AcquiredAt: now})
 
 	eng.cleanupLockedIssues()
 
-	if len(client.removeLabelCalls) != 1 || client.removeLabelCalls[0].issueNumber != 11 {
-		t.Fatalf("removeLabelCalls = %+v, want a single call for #11", client.removeLabelCalls)
+	got := map[int]bool{}
+	for _, c := range client.removeLabelCalls {
+		got[c.issueNumber] = true
+	}
+	if len(client.removeLabelCalls) != 2 || got[10] || !got[11] || !got[12] {
+		t.Fatalf("removeLabelCalls = %+v, want calls for #11 and #12 only", client.removeLabelCalls)
 	}
 	for _, snap := range eng.store.All() {
 		if lock := snap.Lock(); lock != nil && lock.HeldByThis {

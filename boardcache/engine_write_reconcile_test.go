@@ -135,3 +135,22 @@ func TestApplyIssueClosed_SurvivesPreWriteListing(t *testing.T) {
 		t.Fatal("close reverted by pre-write listing")
 	}
 }
+
+// An item that enters the cache while the fetch is in flight cannot be on the
+// older listing, so its absence is not drift (the post-fetch snapshot must not
+// make it look like a vanished item).
+func TestLightReconcile_ItemAddedDuringFetchIsNotDrift(t *testing.T) {
+	c, mc, board := engineWriteCache(t)
+	mc.fetchProjectBoardHook = func() {
+		c.store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{ID: "I_2", Number: 2, Repo: "owner/repo", Status: "Research"}})
+	}
+	mc.projectBoardResult = board
+
+	drift, keys, _, err := c.LightReconcile("owner", "repo", 1, "organization")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if drift != 0 {
+		t.Fatalf("drift=%d keys=%v, want 0 for an item opened during the fetch", drift, keys)
+	}
+}
