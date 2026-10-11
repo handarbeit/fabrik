@@ -1446,7 +1446,10 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 	if stage.CreateDraftPR && output != "" {
 		prBlock, prBlockErr := ParsePRCreateBlock(output)
 		if prBlockErr != nil {
-			msg := fmt.Sprintf("🏭 **Fabrik — malformed FABRIK_PR_CREATE marker**\n\n%v\n\nRemove `fabrik:paused` after fixing the skill output to retry.", prBlockErr)
+			// #2091: the stage's work must reach the remote before the pause, so an
+			// un-pause resumes on pushed commits instead of redoing them.
+			workNote := e.preserveWorkOnMarkerFailure(item, stage, workDir, claudeRan)
+			msg := fmt.Sprintf("🏭 **Fabrik — malformed FABRIK_PR_CREATE marker**\n\n%v\n\n%sRemove `fabrik:paused` after fixing the skill output to retry.", prBlockErr, workNote)
 			e.postComment(item, msg, false, false) //nolint:errcheck // failure already logged by postComment
 			e.addPausedLabelToItem(owner, repo, item)
 			releaseLock()
@@ -1488,7 +1491,17 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 	// origin therefore always takes the fresh-CreateIssue path, unchanged
 	// from before ADR-1583.
 	if (stage.Name == "Review" || stage.Name == "Validate") && output != "" {
-		if blocks := ParseSpawnBlocks(output); len(blocks) > 0 {
+		blocks, blockErrs := ParseSpawnBlocksDetailed(output)
+		if len(blockErrs) > 0 {
+			// #2091: a malformed block is surfaced, not dropped. Hold the whole
+			// declaration (no spawn), keep the stage's work, then pause —
+			// mirroring the FABRIK_PR_CREATE failure branch above.
+			workNote := e.preserveWorkOnMarkerFailure(item, stage, workDir, claudeRan)
+			_ = e.pauseForMalformedSpawn(item, blockErrs, spawnOriginMidflight, workNote)
+			releaseLock()
+			return
+		}
+		if len(blocks) > 0 {
 			spawnedIDs, _, spawnErr := e.spawnChildren(p.ctx, p.board, item, owner, repo, blocks, false)
 			if spawnErr != nil {
 				// spawnChildren already paused the issue and posted its own
@@ -2655,6 +2668,38 @@ func (e *Engine) addFailedLabel(owner, repo string, issueNumber int, stageName s
 
 func (e *Engine) removeFailedLabel(owner, repo string, issueNumber int, stageName string) {
 	e.removeLabel(gh.ProjectItem{Number: issueNumber, Repo: owner + "/" + repo}, fmt.Sprintf("stage:%s:failed", stageName))
+}
+
+// preserveWorkOnMarkerFailure commits and pushes the stage's work before
+// finalizeStageOutcome pauses on a malformed FABRIK_PR_CREATE or
+// FABRIK_SPAWN_CHILD marker (#2091, ADR 2091), so un-pausing resumes on the
+// remote branch instead of redoing the stage's work. It mirrors the R8
+// cancellation path (#1393): commitWIP (a no-op on the clean tree a completed
+// Implement normally leaves) then pushBranchOnCancel, which never pauses — the
+// caller is about to post the parse-failure pause itself, and the zero-ahead
+// guard (#2089) must not add a second one. Failures, including a zero-ahead
+// refusal, are logged only: they never suppress the parse-error comment or the
+// pause. Read-only stages have nothing to commit.
+//
+// It returns a sentence for the pause comment describing what actually
+// happened ("" when there was nothing to preserve), so the comment never
+// claims a push that did not land.
+func (e *Engine) preserveWorkOnMarkerFailure(item gh.ProjectItem, stage *stages.Stage, workDir string, claudeRan bool) string {
+	if !claudeRan || stage.ReadOnly {
+		return ""
+	}
+	e.commitWIP(workDir, item.Number, stage.Name)
+	if prInMergeQueue(item) {
+		// pushBranchOnCancel skips (returning nil) for a queued PR, so a nil
+		// return would not mean the work landed on the remote.
+		return "The stage's work was committed locally but not pushed: the PR is in the merge queue and a push would eject it.\n\n"
+	}
+	wm := e.worktreesFor(item.Repo)
+	if pushErr := e.pushBranchOnCancel(item, wm); pushErr != nil {
+		e.logf(item.Number, "warn", "could not push branch after marker parse failure: %v\n", pushErr)
+		return "The stage's work could not be pushed (see the engine log); it remains in the local worktree.\n\n"
+	}
+	return "The stage's work was committed and pushed.\n\n"
 }
 
 // commitWIP commits any uncommitted changes in the worktree as a partial-progress

@@ -2336,6 +2336,12 @@ Once children are spawned, the parent is done for this dispatch — it does not 
 - As children complete, the dependency comment updates in-place (no duplicate comments).
 - When all children close: `fabrik:blocked` clears, and the parent's own Implement runs.
 
+#### Marker Header Tolerance and Malformed Blocks
+
+Header keys inside `FABRIK_SPAWN_CHILD` (and `FABRIK_PR_CREATE`) blocks are matched case-insensitively and tolerate surrounding whitespace, so `title:`, `Title:` and ` TITLE : ` all work, as does `depends_on:` (which must still sit on the line right after the title). Nothing else about the format changed.
+
+If a block still cannot be parsed — for example its first line is not a `TITLE:` header — Fabrik no longer skips it silently. It posts a `🏭 **Fabrik — malformed FABRIK_SPAWN_CHILD marker**` comment naming the block number and quoting the offending line, and pauses the item; **no sub-issues are created**, including well-formed blocks in the same declaration, so dependency indexes stay consistent. For a Plan-declared spawn the stored Plan comment is what gets re-read, so edit the Plan comment (or comment asking for a revised Plan) and then remove `fabrik:paused`. A malformed `FABRIK_PR_CREATE` block now quotes the line it found too, and the stage's work is committed and pushed before the pause so un-pausing does not redo it.
+
 #### Same-Repo and Cross-Repo
 
 Spawn blocks work identically whether the target is the parent's own repo or a different repo. Research is responsible for identifying which repos are in scope — it emits a `## Repositories` section listing all potentially-relevant repos. Plan is constrained to spawn only into repos Research named.

@@ -2208,7 +2208,22 @@ Your job is to:
 // own output. See the stage.Name == "Plan" gate at the call site in
 // finalizeStageOutcome (engine/item.go).
 func formatSpawnReceiptNote(output string) string {
-	n := len(ParseSpawnBlocks(output))
+	blocks, blockErrs := ParseSpawnBlocksDetailed(output)
+	n := len(blocks)
+	if len(blockErrs) > 0 {
+		// Early warning only (#2091): the pause itself happens at Implement
+		// dispatch (preImplement), so the human sees the problem the moment
+		// Plan posts. Quoted lines are already sanitised.
+		var parts []string
+		for _, be := range blockErrs {
+			if be.Found == "" {
+				parts = append(parts, fmt.Sprintf("block %d — %s", be.Index, be.Reason))
+			} else {
+				parts = append(parts, fmt.Sprintf("block %d — %s, found `%s`", be.Index, be.Reason, be.Found))
+			}
+		}
+		return fmt.Sprintf("\n\n---\n⚠️ %d spawn block(s) could not be parsed: %s. Implement will pause until the Plan is corrected, and no sub-issues will be created.", len(blockErrs), strings.Join(parts, "; "))
+	}
 	if n == 0 {
 		return ""
 	}

@@ -772,3 +772,82 @@ func TestAttemptLinkageHeal_KeywordAlreadyPresent_SkipsWrite(t *testing.T) {
 		t.Error("idempotency guard should not be recorded when no write occurred")
 	}
 }
+
+// ---- #2091: tolerant headers + diagnosable errors ----
+
+func TestParsePRCreateBlock_TitleCaseAndWhitespaceVariants(t *testing.T) {
+	for _, hdr := range []string{"TITLE: Add X", "title: Add X", "Title: Add X", " TITLE : Add X", "\ttitle\t:\tAdd X\r"} {
+		input := "FABRIK_PR_CREATE_BEGIN\n" + hdr + "\n\nBody text.\nFABRIK_PR_CREATE_END"
+		block, err := ParsePRCreateBlock(input)
+		if err != nil {
+			t.Fatalf("header %q: unexpected error: %v", hdr, err)
+		}
+		if block.Title != "Add X" || block.Body != "Body text." {
+			t.Errorf("header %q: got title=%q body=%q", hdr, block.Title, block.Body)
+		}
+	}
+}
+
+func TestParsePRCreateBlock_TitleWithColonInValue(t *testing.T) {
+	block, err := ParsePRCreateBlock("FABRIK_PR_CREATE_BEGIN\ntitle: fix: handle nil\n\nbody\nFABRIK_PR_CREATE_END")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if block.Title != "fix: handle nil" {
+		t.Errorf("Title: %q", block.Title)
+	}
+}
+
+func TestParsePRCreateBlock_SecondTitleIsBody(t *testing.T) {
+	block, err := ParsePRCreateBlock("FABRIK_PR_CREATE_BEGIN\nTITLE: one\nTITLE: two\nFABRIK_PR_CREATE_END")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if block.Title != "one" || block.Body != "TITLE: two" {
+		t.Errorf("got title=%q body=%q", block.Title, block.Body)
+	}
+}
+
+func TestParsePRCreateBlock_ErrorsQuoteFoundLine(t *testing.T) {
+	tests := []struct {
+		name, content string
+		wantAll       []string
+	}{
+		{"wrong first line", "\nSummary of changes\nmore\n", []string{"TITLE", "`Summary of changes`"}},
+		{"prose header key", "Summary: did things\nbody\n", []string{"TITLE", "`Summary: did things`"}},
+		{"empty title value", "TITLE:\nbody\n", []string{"TITLE", "no value", "`TITLE:`"}},
+		{"empty body", "title: Add X\n  \n", []string{"body", "`title: Add X`"}},
+		{"empty block", " \n\t\n", []string{"TITLE", "empty"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParsePRCreateBlock("FABRIK_PR_CREATE_BEGIN\n" + tc.content + "FABRIK_PR_CREATE_END")
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			for _, w := range tc.wantAll {
+				if !strings.Contains(err.Error(), w) {
+					t.Errorf("error %q missing %q", err.Error(), w)
+				}
+			}
+		})
+	}
+}
+
+func TestParsePRCreateBlock_ErrorSanitisesFoundLine(t *testing.T) {
+	line := "bad `code` @someone " + strings.Repeat("y", 1000)
+	_, err := ParsePRCreateBlock("FABRIK_PR_CREATE_BEGIN\n" + line + "\nFABRIK_PR_CREATE_END")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	msg := err.Error()
+	if strings.Count(msg, "`") != 4 { // two inline code spans' delimiters only: `TITLE: <title>` and `found`
+		t.Errorf("backticks from found line leaked: %q", msg)
+	}
+	if strings.Contains(msg, "@someone") {
+		t.Errorf("mention not defused: %q", msg)
+	}
+	if len(msg) > 600 {
+		t.Errorf("found line not truncated: len=%d", len(msg))
+	}
+}
