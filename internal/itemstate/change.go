@@ -1,6 +1,9 @@
 package itemstate
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // ChangeFlags is a bitmask describing which logical field groups of an ItemState
 // were altered by a mutation. Observers use this to cheaply filter whether a
@@ -218,4 +221,26 @@ func diffLabels(before, after []string) []LabelDelta {
 		}
 	}
 	return out
+}
+
+// eligibilityLabel reports whether adding or removing label changes whether the
+// engine will move the item on by itself or is blocked on a human (#2120 R3).
+func eligibilityLabel(label string) bool {
+	switch label {
+	case "fabrik:cruise", "fabrik:yolo", "fabrik:blocked", "fabrik:paused":
+		return true
+	}
+	return strings.HasPrefix(label, "stage:") && strings.HasSuffix(label, ":complete")
+}
+
+// stampEligibility records "now" in item.EligibilityChangedAt when the label
+// change from before to item.Labels touched an eligibility label. Called only
+// for an item the store already held, with s.mu held.
+func stampEligibility(item *ItemState, before []string) {
+	for _, d := range diffLabels(before, item.Labels) {
+		if eligibilityLabel(d.Label) {
+			item.EligibilityChangedAt = time.Now()
+			return
+		}
+	}
 }

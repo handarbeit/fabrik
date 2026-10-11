@@ -293,6 +293,9 @@ func (s *Store) applySingleItem(m Mutation) (Snapshot, []Change, error) {
 		m = fp.Inner
 	}
 	flags := s.applyToItem(item, m)
+	if existed {
+		stampEligibility(item, before.Labels)
+	}
 
 	// No-op detection: if nothing changed, skip observers. EngineWriteAt is
 	// bookkeeping for the reconcile protection (#2159): a redundant engine write
@@ -1027,6 +1030,9 @@ func (s *Store) applyBoardReconciled(v BoardReconciled) (Snapshot, []Change, err
 		item := s.getOrCreate(key)
 		before := newSnapshot(*item).state
 		flags := applyProjectItem(item, pi)
+		if existed {
+			stampEligibility(item, before.Labels)
+		}
 
 		if reflect.DeepEqual(before, *item) {
 			s.mu.Unlock()
