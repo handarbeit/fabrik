@@ -2,12 +2,20 @@ package sim
 
 import (
 	"os"
-	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/handarbeit/fabrik/internal/testlife"
 	"github.com/handarbeit/fabrik/tests/sim/simclaude"
 )
+
+// reExecTimeout bounds each re-exec'd helper (#2128). The inner halves finish in
+// seconds; a re-exec'd binary gets no -test.timeout from go test, so without this
+// a helper orphaned by its parent's death (a `go test -timeout` panic) ran on
+// unbounded. testlife.ReExecCommand also ties the helper to this process, so it
+// exits when the parent does.
+const reExecTimeout = 5 * time.Minute
 
 // advanceUntilHelperEnvVar selects the inner (deliberately-failing) half of
 // TestAdvanceUntil_ExhaustionDiagnostics when re-exec'd as a subprocess —
@@ -50,8 +58,9 @@ func TestAdvanceUntil_ExhaustionDiagnostics(t *testing.T) {
 	}
 
 	skipIfNoGit(t)
-	cmd := exec.Command(os.Args[0], "-test.run=^TestAdvanceUntil_ExhaustionDiagnostics$", "-test.v")
-	cmd.Env = append(os.Environ(), advanceUntilHelperEnvVar+"=1")
+	cmd, cancel := testlife.ReExecCommand(reExecTimeout, "-test.run=^TestAdvanceUntil_ExhaustionDiagnostics$", "-test.v")
+	defer cancel()
+	cmd.Env = append(cmd.Env, advanceUntilHelperEnvVar+"=1")
 	out, err := cmd.CombinedOutput()
 	output := string(out)
 
@@ -116,8 +125,9 @@ func TestAdvanceUntil_ClonePauseFailsFast(t *testing.T) {
 	}
 
 	skipIfNoGit(t)
-	cmd := exec.Command(os.Args[0], "-test.run=^TestAdvanceUntil_ClonePauseFailsFast$", "-test.v")
-	cmd.Env = append(os.Environ(), clonePauseHelperEnvVar+"=1")
+	cmd, cancel := testlife.ReExecCommand(reExecTimeout, "-test.run=^TestAdvanceUntil_ClonePauseFailsFast$", "-test.v")
+	defer cancel()
+	cmd.Env = append(cmd.Env, clonePauseHelperEnvVar+"=1")
 	out, err := cmd.CombinedOutput()
 	output := string(out)
 
