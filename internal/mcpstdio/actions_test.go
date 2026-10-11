@@ -193,3 +193,24 @@ func TestActionToolSchemas(t *testing.T) {
 		}
 	}
 }
+
+// #2112: a JSON number for issue reaches the daemon as the bare-N string.
+func TestActionToolsAcceptANumericIssue(t *testing.T) {
+	srv, act := startActionDaemon(t, true)
+	frames := sessionAs(t, srv.Path(), "my-topic",
+		callTool(1, ToolPromote, `{"issue":5,"to":"Specify"}`),
+		callTool(2, ToolSetAutonomy, `{"issue":5,"autonomy":"yolo"}`),
+		callTool(3, ToolRevalidate, `{"issue":5}`),
+	)
+	ids := byID(frames)
+	for _, id := range []string{"1", "2", "3"} {
+		if text, isErr := toolText(t, ids[id]); isErr {
+			t.Errorf("call %s failed: %s", id, text)
+		}
+	}
+	if !reflect.DeepEqual(act.promote, []localapi.PromoteParams{{Subscriber: "my-topic", Issue: "5", To: "Specify"}}) ||
+		!reflect.DeepEqual(act.autonomy, []localapi.SetAutonomyParams{{Subscriber: "my-topic", Issue: "5", Mode: "yolo"}}) ||
+		!reflect.DeepEqual(act.reval, []localapi.RevalidateParams{{Subscriber: "my-topic", Issue: "5"}}) {
+		t.Errorf("params = %+v %+v %+v", act.promote, act.autonomy, act.reval)
+	}
+}

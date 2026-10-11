@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/handarbeit/fabrik/internal/channelevents"
@@ -48,6 +49,48 @@ func IsActionTool(name string) bool {
 	return false
 }
 
+// issueRefHelp states which issue references the daemon accepts.
+const issueRefHelp = "owner/repo#N, or just N, #N or a number when every issue the daemon has cached is in one repo (with several repos a bare number is ambiguous)"
+
+// issueSchema is the input schema of an issue reference: a string
+// (owner/repo#N, N or #N) or a positive integer (the same as the bare N).
+func issueSchema() map[string]any {
+	return map[string]any{"type": []string{"string", "integer"}, "minimum": 1, "description": issueRefHelp}
+}
+
+// issueArg is an issue reference as decoded from tool arguments: a JSON string
+// is kept verbatim for the daemon's parser, and a JSON number must be a plain
+// positive integer and becomes its decimal string (the bare-N form). null is the
+// empty reference, which the callers reject as missing.
+type issueArg string
+
+func (a *issueArg) UnmarshalJSON(b []byte) error {
+	b = bytes.TrimSpace(b)
+	switch {
+	case string(b) == "null":
+		*a = ""
+		return nil
+	case len(b) > 0 && b[0] == '"':
+		var s string
+		if err := json.Unmarshal(b, &s); err != nil {
+			return err
+		}
+		*a = issueArg(s)
+		return nil
+	}
+	for _, c := range b {
+		if c < '0' || c > '9' {
+			return fmt.Errorf("issue number must be a positive integer (got %s)", b)
+		}
+	}
+	n, err := strconv.Atoi(string(b))
+	if len(b) == 0 || err != nil || n <= 0 {
+		return fmt.Errorf("issue number must be a positive integer (got %s)", b)
+	}
+	*a = issueArg(strconv.Itoa(n))
+	return nil
+}
+
 func obj(props map[string]any, required ...string) map[string]any {
 	s := map[string]any{"type": "object", "properties": props, "additionalProperties": false}
 	if len(required) > 0 {
@@ -66,7 +109,7 @@ func toolDefs() []map[string]any {
 				"'stuck, or waiting correctly?' (state, reason with a meaning per label, link to the latest Fabrik comment, and what the engine will do next and when). " +
 				"Anything the daemon cannot vouch for is the string \"unknown\".",
 			"inputSchema": obj(map[string]any{
-				"issue": map[string]any{"type": "string", "description": "owner/repo#N, or just N when the daemon manages exactly one repo"},
+				"issue": issueSchema(),
 			}, "issue"),
 			"annotations": readOnly,
 		},
@@ -107,7 +150,7 @@ func toolDefs() []map[string]any {
 				"Pushes only appear if the session was started with Channels enabled for this server (claude --dangerously-load-development-channels server:fabrik); the daemon cannot tell whether it was, so a successful subscribe does not prove delivery. " +
 				"Re-subscribing with the same filters is harmless.",
 			"inputSchema": obj(map[string]any{
-				"issues":         map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "owner/repo#N, or N when the daemon manages exactly one repo"},
+				"issues":         map[string]any{"type": "array", "items": issueSchema(), "description": "issue references: " + issueRefHelp},
 				"repos":          map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "owner/repo"},
 				"milestone":      map[string]any{"type": "string", "description": "milestone title, or #N for a milestone number; items whose milestone the daemon has not captured never match"},
 				"labels":         map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "include patterns for label events (default: every label)"},
@@ -132,7 +175,7 @@ func toolDefs() []map[string]any {
 			"description": "Move an item out of an unmanaged parking column (e.g. Backlog) into a pipeline column. The daemon writes the board Status itself, with the ids it already holds (one live read of the item's current column confirms the cache first); it refuses, with the current state and the valid targets, when the item is not in a parking column, `to` is not a pipeline stage (holding, cleanup and unmanaged columns are engine-managed), or the daemon cannot establish a fact. " +
 				"If the item carries fabrik:cruise or fabrik:yolo the result says it will auto-advance through the stages from `to`. Posts a short Fabrik audit comment on the issue naming the requesting subscriber. Requires the server to be launched with --subscriber.",
 			"inputSchema": obj(map[string]any{
-				"issue": map[string]any{"type": "string", "description": "owner/repo#N, or just N when the daemon manages exactly one repo"},
+				"issue": issueSchema(),
 				"to":    map[string]any{"type": "string", "description": "the pipeline column to move the item into, e.g. Specify"},
 			}, "issue", "to"),
 			"annotations": action(false),
@@ -143,7 +186,7 @@ func toolDefs() []map[string]any {
 				"Setting one mode removes the other label, so the outcome is exactly what was asked (cruise would otherwise silently beat yolo). Already in the requested mode: nothing is written and no comment is posted. " +
 				"yolo can cause a merge: prefer cruise unless the item should land unattended. Posts a Fabrik audit comment naming the requesting subscriber. Requires --subscriber.",
 			"inputSchema": obj(map[string]any{
-				"issue":    map[string]any{"type": "string", "description": "owner/repo#N, or just N when the daemon manages exactly one repo"},
+				"issue":    issueSchema(),
 				"autonomy": map[string]any{"type": "string", "enum": []string{"cruise", "yolo", "none"}, "description": "the autonomy the item should end up with"},
 			}, "issue", "autonomy"),
 			"annotations": action(true),
@@ -153,7 +196,7 @@ func toolDefs() []map[string]any {
 			"description": "Force a Validate re-run: applies fabrik:revalidate to an item sitting in the Validate column, and the engine clears the Validate completion and CI labels and re-dispatches on a following poll (deferred until an in-flight Validate worker exits). " +
 				"Refused, with the current state, when the item is not in Validate, already carries the label, or is paused or awaiting input: a pause is lifted only by a human comment on the issue, never by this tool. Posts a Fabrik audit comment naming the requesting subscriber. Requires --subscriber.",
 			"inputSchema": obj(map[string]any{
-				"issue": map[string]any{"type": "string", "description": "owner/repo#N, or just N when the daemon manages exactly one repo"},
+				"issue": issueSchema(),
 			}, "issue"),
 			"annotations": action(false),
 		},
@@ -189,15 +232,15 @@ func buildCall(name string, args json.RawMessage, defaultSubscriber string) (met
 	switch name {
 	case ToolStatus:
 		var a struct {
-			Issue string `json:"issue"`
+			Issue issueArg `json:"issue"`
 		}
 		if err := decodeArgs(args, &a); err != nil {
 			return "", nil, err
 		}
 		if a.Issue == "" {
-			return "", nil, fmt.Errorf("issue is required (owner/repo#N, or N when the daemon manages exactly one repo)")
+			return "", nil, fmt.Errorf("issue is required (%s)", issueRefHelp)
 		}
-		return localapi.MethodStatus, localapi.StatusParams{Issue: a.Issue}, nil
+		return localapi.MethodStatus, localapi.StatusParams{Issue: string(a.Issue)}, nil
 	case ToolBoard:
 		var a struct {
 			View    string                `json:"view"`
@@ -218,14 +261,14 @@ func buildCall(name string, args json.RawMessage, defaultSubscriber string) (met
 		return localapi.MethodHealth, nil, nil
 	case ToolSubscribe:
 		var a struct {
-			Issues        []string  `json:"issues"`
-			Repos         []string  `json:"repos"`
-			Milestone     string    `json:"milestone"`
-			Labels        []string  `json:"labels"`
-			ExcludeLabels *[]string `json:"exclude_labels"`
-			Events        []string  `json:"events"`
-			DigestSeconds int       `json:"digest_seconds"`
-			Subscriber    string    `json:"subscriber"`
+			Issues        []issueArg `json:"issues"`
+			Repos         []string   `json:"repos"`
+			Milestone     string     `json:"milestone"`
+			Labels        []string   `json:"labels"`
+			ExcludeLabels *[]string  `json:"exclude_labels"`
+			Events        []string   `json:"events"`
+			DigestSeconds int        `json:"digest_seconds"`
+			Subscriber    string     `json:"subscriber"`
 		}
 		if err := decodeArgs(args, &a); err != nil {
 			return "", nil, err
@@ -237,8 +280,12 @@ func buildCall(name string, args json.RawMessage, defaultSubscriber string) (met
 		if a.DigestSeconds < 0 {
 			return "", nil, fmt.Errorf("digest_seconds must be positive")
 		}
+		var issues []string
+		for _, i := range a.Issues {
+			issues = append(issues, string(i))
+		}
 		return localapi.MethodSubscribe, localapi.SubscribeParams{
-			Subscriber: who, Repos: a.Repos, Issues: a.Issues, Milestone: a.Milestone,
+			Subscriber: who, Repos: a.Repos, Issues: issues, Milestone: a.Milestone,
 			Labels: a.Labels, ExcludeLabels: a.ExcludeLabels, Events: a.Events, DigestSeconds: a.DigestSeconds,
 		}, nil
 	case ToolUnsubscribe:
@@ -256,8 +303,8 @@ func buildCall(name string, args json.RawMessage, defaultSubscriber string) (met
 		return localapi.MethodUnsubscribe, localapi.UnsubscribeParams{Subscriber: who, ID: a.ID}, nil
 	case ToolPromote:
 		var a struct {
-			Issue string `json:"issue"`
-			To    string `json:"to"`
+			Issue issueArg `json:"issue"`
+			To    string   `json:"to"`
 		}
 		if err := decodeArgs(args, &a); err != nil {
 			return "", nil, err
@@ -269,11 +316,11 @@ func buildCall(name string, args json.RawMessage, defaultSubscriber string) (met
 		if a.Issue == "" || a.To == "" {
 			return "", nil, fmt.Errorf("issue and to are required")
 		}
-		return localapi.MethodPromote, localapi.PromoteParams{Subscriber: who, Issue: a.Issue, To: a.To}, nil
+		return localapi.MethodPromote, localapi.PromoteParams{Subscriber: who, Issue: string(a.Issue), To: a.To}, nil
 	case ToolSetAutonomy:
 		var a struct {
-			Issue    string `json:"issue"`
-			Autonomy string `json:"autonomy"`
+			Issue    issueArg `json:"issue"`
+			Autonomy string   `json:"autonomy"`
 		}
 		if err := decodeArgs(args, &a); err != nil {
 			return "", nil, err
@@ -290,10 +337,10 @@ func buildCall(name string, args json.RawMessage, defaultSubscriber string) (met
 		default:
 			return "", nil, fmt.Errorf("autonomy must be one of cruise, yolo, none (got %q)", a.Autonomy)
 		}
-		return localapi.MethodSetAutonomy, localapi.SetAutonomyParams{Subscriber: who, Issue: a.Issue, Mode: a.Autonomy}, nil
+		return localapi.MethodSetAutonomy, localapi.SetAutonomyParams{Subscriber: who, Issue: string(a.Issue), Mode: a.Autonomy}, nil
 	case ToolRevalidate:
 		var a struct {
-			Issue string `json:"issue"`
+			Issue issueArg `json:"issue"`
 		}
 		if err := decodeArgs(args, &a); err != nil {
 			return "", nil, err
@@ -305,7 +352,7 @@ func buildCall(name string, args json.RawMessage, defaultSubscriber string) (met
 		if a.Issue == "" {
 			return "", nil, fmt.Errorf("issue is required")
 		}
-		return localapi.MethodRevalidate, localapi.RevalidateParams{Subscriber: who, Issue: a.Issue}, nil
+		return localapi.MethodRevalidate, localapi.RevalidateParams{Subscriber: who, Issue: string(a.Issue)}, nil
 	case ToolClearClaudeLimit:
 		var a struct{}
 		if err := decodeArgs(args, &a); err != nil {

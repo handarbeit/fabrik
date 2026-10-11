@@ -21,8 +21,8 @@ type Envelope struct {
 
 // ---- status ----
 
-// StatusParams selects one issue: "owner/repo#N", or "N" when the daemon
-// manages exactly one repo.
+// StatusParams selects one issue: "owner/repo#N", or "N" / "#N" when the
+// daemon's cached issues are all in exactly one repo.
 type StatusParams struct {
 	Issue string `json:"issue"`
 }
@@ -353,7 +353,8 @@ type TrainPartition struct {
 
 // SubscribeParams registers a subscription. Subscriber is the stable name the
 // held queue is keyed on. Issues are "owner/repo#N", or a bare "N" when the
-// daemon manages exactly one repo (the same resolver as status). ExcludeLabels
+// daemon's cached issues are all in exactly one repo (the same resolver as
+// status). ExcludeLabels
 // distinguishes absent (nil: the default churn exclusions) from an explicit
 // empty list (opt into every label).
 type SubscribeParams struct {
