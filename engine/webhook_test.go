@@ -1486,8 +1486,28 @@ func TestEchoVia(t *testing.T) {
 	t.Run("re-registering without a requester clears a stale one", func(t *testing.T) {
 		wm := newMgr(t)
 		wm.RegisterEchoVia("issues", "labeled", "o/r#1+x", "overseer-a")
-		wm.RegisterEcho("issues", "labeled", "o/r#1+x")
 		wm.RegisterEchoVia("issues", "labeled", "o/r#1+x", "")
+		if ok, via := wm.MatchEchoVia("issues", "labeled", "o/r#1+x"); !ok || via != "" {
+			t.Fatalf("MatchEchoVia = %v, %q", ok, via)
+		}
+	})
+
+	t.Run("plain RegisterEcho clears a stale requester", func(t *testing.T) {
+		wm := newMgr(t)
+		wm.RegisterEchoVia("issues", "labeled", "o/r#1+x", "overseer-a")
+		wm.RegisterEcho("issues", "labeled", "o/r#1+x")
+		if ok, via := wm.MatchEchoVia("issues", "labeled", "o/r#1+x"); !ok || via != "" {
+			t.Fatalf("MatchEchoVia = %v, %q; an autonomous write must not inherit the overseer", ok, via)
+		}
+	})
+
+	t.Run("RegisterEchoIfSubscribed clears a stale requester", func(t *testing.T) {
+		wm := newMgr(t)
+		wm.mu.Lock()
+		wm.events = append(wm.events, "issues")
+		wm.mu.Unlock()
+		wm.RegisterEchoVia("issues", "labeled", "o/r#1+x", "overseer-a")
+		wm.RegisterEchoIfSubscribed("issues", "labeled", "o/r#1+x")
 		if ok, via := wm.MatchEchoVia("issues", "labeled", "o/r#1+x"); !ok || via != "" {
 			t.Fatalf("MatchEchoVia = %v, %q", ok, via)
 		}

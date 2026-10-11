@@ -1072,7 +1072,11 @@ func (wm *webhookManager) RegisterEcho(eventType, action, key string) {
 	if wm.state == WebhookStreamStartingUp {
 		return
 	}
-	wm.pendingEchoes[echoKey(eventType, action, key)] = time.Now()
+	k := echoKey(eventType, action, key)
+	wm.pendingEchoes[k] = time.Now()
+	// An engine-autonomous registration supersedes any overseer requester still
+	// pending for the same key, so its echo is never attributed to the overseer.
+	delete(wm.echoVia, k)
 }
 
 // RegisterEchoVia is RegisterEcho that also records the overseer requester behind
@@ -1104,7 +1108,9 @@ func (wm *webhookManager) RegisterEchoIfSubscribed(eventType, action, key string
 	if !containsEvent(wm.events, eventType) {
 		return
 	}
-	wm.pendingEchoes[echoKey(eventType, action, key)] = time.Now()
+	k := echoKey(eventType, action, key)
+	wm.pendingEchoes[k] = time.Now()
+	delete(wm.echoVia, k)
 }
 
 // MatchEcho removes the pending echo entry for an inbound webhook that matched a mutation.
