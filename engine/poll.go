@@ -153,6 +153,32 @@ func logCIWaitTimeoutSemantics(w io.Writer) {
 		"FABRIK_CI_BACKSTOP_TIMEOUT for the new absolute per-poll-cost cap. See docs/USER_GUIDE.md and ADR-1410.\n")
 }
 
+// logFileConditions builds the "log_file" panel conditions (#2135) from the
+// outcome of startup's log rotation and log-file open: an empty result means
+// both worked, which Reconcile turns into clearing any earlier entry.
+func logFileConditions(logPath string, rotateWarnings []string, openErr error) []warnings.Condition {
+	var conds []warnings.Condition
+	if len(rotateWarnings) > 0 {
+		conds = append(conds, warnings.Condition{
+			Subject: "rotation",
+			Title:   "Log rotation failed",
+			Detail: "Fabrik could not rotate fabrik.log at startup:\n" + strings.Join(rotateWarnings, "\n") +
+				"\n\nFix: check permissions and free space in .fabrik/.",
+			LogLine: "log rotation: " + strings.Join(rotateWarnings, "; "),
+		})
+	}
+	if openErr != nil {
+		conds = append(conds, warnings.Condition{
+			Subject: "open",
+			Title:   "Could not open the Fabrik log file",
+			Detail: fmt.Sprintf("Could not open %s: %v\nThe persistent poll log will not be written this run.\n\n"+
+				"Fix: check permissions and free space in .fabrik/.", logPath, openErr),
+			LogLine: fmt.Sprintf("could not open log file %s: %v", logPath, openErr),
+		})
+	}
+	return conds
+}
+
 // warnCIBackstopTimeoutOrdering is the testable core of the ADR-1410/R5
 // startup check: CIBackstopTimeout (settleAwaitingCIScan's unconditional
 // backstop) is only "much larger than" the liveness dwell by convention — no
@@ -257,26 +283,9 @@ func (e *Engine) Run() error {
 	if truncateFallback {
 		openFlags |= os.O_TRUNC
 	}
-	var logConds []warnings.Condition
-	if len(rotateWarnings) > 0 {
-		logConds = append(logConds, warnings.Condition{
-			Subject: "rotation",
-			Title:   "Log rotation failed",
-			Detail: "Fabrik could not rotate fabrik.log at startup:\n" + strings.Join(rotateWarnings, "\n") +
-				"\n\nFix: check permissions and free space in .fabrik/.",
-			LogLine: "log rotation: " + strings.Join(rotateWarnings, "; "),
-		})
-	}
 	startupW := io.Writer(os.Stderr)
-	if lf, err := os.OpenFile(logPath, openFlags, 0600); err != nil {
-		logConds = append(logConds, warnings.Condition{
-			Subject: "open",
-			Title:   "Could not open the Fabrik log file",
-			Detail: fmt.Sprintf("Could not open %s: %v\nThe persistent poll log will not be written this run.\n\n"+
-				"Fix: check permissions and free space in .fabrik/.", logPath, err),
-			LogLine: fmt.Sprintf("could not open log file %s: %v", logPath, err),
-		})
-	} else {
+	lf, openErr := os.OpenFile(logPath, openFlags, 0600)
+	if openErr == nil {
 		e.logFile = lf
 		pollLogFile = lf
 		defer func() {
@@ -290,7 +299,7 @@ func (e *Engine) Run() error {
 	}
 	// Both log-file checks ran to completion, so Reconcile also clears an
 	// earlier run's entry once the problem is gone (#2135).
-	if err := warnings.Reconcile(startupW, "log_file", logConds); err != nil {
+	if err := warnings.Reconcile(startupW, "log_file", logFileConditions(logPath, rotateWarnings, openErr)); err != nil {
 		fmt.Fprintf(startupW, "[startup] warning: recording log_file warnings: %v\n", err)
 	}
 
