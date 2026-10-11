@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/handarbeit/fabrik/warnings"
 )
 
 // chdir changes to dir for the duration of the test, restoring the original on cleanup.
@@ -453,5 +455,33 @@ func TestProjectFields_LastActivityAndLastRun(t *testing.T) {
 				t.Errorf("ResolveLastRunField() = %q, want %q", got, tc.wantRun)
 			}
 		})
+	}
+}
+
+// A gitignored config.yaml reaches the warnings panel and the entry clears once
+// the file is no longer ignored (#2135).
+func TestWarnIfConfigIgnored_PanelRecordsAndClears(t *testing.T) {
+	warnings.WarningsPathOverride = filepath.Join(t.TempDir(), "warnings.json")
+	t.Cleanup(func() { warnings.WarningsPathOverride = "" })
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := os.Mkdir(".git", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(".gitignore", []byte(".fabrik/config.yaml\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	WarnIfConfigIgnored()
+	WarnIfConfigIgnored() // recurring: one entry
+	es, _ := warnings.Load()
+	if len(es) != 1 || es[0].Key != "config_ignored:config.yaml" {
+		t.Fatalf("entries = %+v", es)
+	}
+	if err := os.WriteFile(".gitignore", []byte("node_modules\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	WarnIfConfigIgnored()
+	if es, _ := warnings.Load(); len(es) != 0 {
+		t.Errorf("not cleared: %+v", es)
 	}
 }
