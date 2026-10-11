@@ -248,6 +248,20 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 // itemNeedsWork does full checks including comment inspection.
 // This runs AFTER FetchItemDetails has populated the item's Comments.
 func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
+	needs, _ := e.itemNeedsWorkRetryAt(item)
+	return needs
+}
+
+// itemNeedsWorkRetryAt is itemNeedsWork plus, when the ONLY reason the item is
+// refused is that LastAttemptAt is still inside stageRetryBackoff(), the
+// remaining wait (retryIn > 0). The backoff is the last gate, so a non-zero
+// retryIn means every other gate passed. The caller records a "retry-backoff"
+// cooldown for it so the expiry re-admits the item (#2096, ADR 2096): the backoff
+// records no cooldown of its own, and consumed expiries no longer re-admit.
+//
+// retryIn is measured on the real clock because LastAttemptAt is (ADR 1831);
+// the caller converts it onto the e.now() domain the cooldown map uses.
+func (e *Engine) itemNeedsWorkRetryAt(item gh.ProjectItem) (needs bool, retryIn time.Duration) {
 	stage := stages.FindStage(e.cfg.Stages, item.Status)
 
 	// Mirror of the itemMayNeedWork closed-issue gate (R1, ADR-1387): a closed
@@ -257,15 +271,15 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 	// settleClosedValidateAdvance settle scan, not this dispatch guard.
 	if item.IsClosed {
 		if stage == nil {
-			return false
+			return false, 0
 		}
 		if !stage.CleanupWorktree && !hasLabel(item.Labels, fmt.Sprintf("stage:%s:complete", stage.Name)) {
-			return false
+			return false, 0
 		}
 	}
 
 	if stage == nil {
-		return false
+		return false, 0
 	}
 
 	// A pending no-work-needed decision suppresses all further dispatch,
@@ -273,24 +287,24 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 	// settle scan in poll.go (not the normal dispatch path) is the only thing
 	// that may act on the item while this marker is present.
 	if !stage.CleanupWorktree && hasLabel(item.Labels, "fabrik:awaiting-done") {
-		return false
+		return false, 0
 	}
 
 	// Holding stages are batch-scoped; never dispatch individual items. Unmanaged
 	// stages (e.g. Backlog) are parking columns never dispatched at all.
 	if stage.HoldingStage || stage.Unmanaged {
-		return false
+		return false, 0
 	}
 
 	// Cleanup stages bypass comment processing and cooldown checks.
 	if stage.CleanupWorktree {
 		if hasLabel(item.Labels, "fabrik:paused") {
-			return false
+			return false, 0
 		}
 		if hasLabel(item.Labels, fmt.Sprintf("stage:%s:complete", stage.Name)) {
-			return false
+			return false, 0
 		}
-		return e.worktreeExistsForItem(item) || (item.IsClosed && !item.IsPR)
+		return e.worktreeExistsForItem(item) || (item.IsClosed && !item.IsPR), 0
 	}
 
 	// Awaiting-input items (paused + awaiting-input) bypass the paused guard but
@@ -304,14 +318,14 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 	otherLockPrefix := lockLabelPrefix
 	for _, label := range item.Labels {
 		if strings.HasPrefix(label, otherLockPrefix) && label != lockLabel {
-			return false
+			return false, 0
 		}
 	}
 
 	// Items being edited by a comment-processing worker must not receive a new
 	// stage dispatch — pre-dispatch gate symmetric with fabrik:locked:<other-user>.
 	if hasLabel(item.Labels, "fabrik:editing") {
-		return false
+		return false, 0
 	}
 
 	// Items with fabrik:blocked have an open dependency; suppress re-dispatch
@@ -326,7 +340,7 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 		repo := itemOwnerRepoString(item, e.defaultRepo())
 		if snap, err := e.store.Get(repo, item.Number); err == nil {
 			if cooldown := snap.CooldownAt("dep-blocked"); !cooldown.IsZero() && e.now().Before(cooldown) {
-				return false // cooldown active — #576 short-circuit still holds
+				return false, 0 // cooldown active — #576 short-circuit still holds
 			}
 			// Cooldown expired: fall through to admit for one re-check.
 		}
@@ -354,7 +368,7 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 	// (TestSettleClosedItemsToDone_IgnoresLabelState). Guarding once, ahead of
 	// all three, is what actually establishes the invariant.
 	if item.IsClosed && !stage.CleanupWorktree {
-		return false
+		return false, 0
 	}
 
 	// Awaiting-input items: new human comment = resume trigger; no human
@@ -366,7 +380,7 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 		} else if !ok && len(raw) > 0 {
 			e.logf(item.Number, "skip", "awaiting-input: %d new comment(s), none human-authored — still waiting\n", len(raw))
 		}
-		return ok
+		return ok, 0
 	}
 
 	// Paused items: a new human comment is an implicit "resume and handle
@@ -375,14 +389,14 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 	if isPaused {
 		ok, raw, refused := e.resumeAuthorised(item)
 		if ok {
-			return true // comment triggers unpause — processItem handles label removal
+			return true, 0 // comment triggers unpause — processItem handles label removal
 		}
 		if refused > 0 {
 			e.logf(item.Number, "skip", "paused: %d human comment(s) predate the pause — pause retained\n", refused)
 		} else if len(raw) > 0 {
 			e.logf(item.Number, "skip", "paused: %d new comment(s), none human-authored — pause retained\n", len(raw))
 		}
-		return false
+		return false, 0
 	}
 
 	// New comments are always worth processing (even on completed stages) —
@@ -394,7 +408,7 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 	if !item.IsClosed {
 		newComments := e.findNewComments(item)
 		if len(newComments) > 0 && !item.IsClosed {
-			return true
+			return true, 0
 		}
 	}
 
@@ -405,14 +419,14 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 
 	// PRs only support comment processing
 	if item.IsPR {
-		return false
+		return false, 0
 	}
 
 	// Already completed this stage
 	completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
 	for _, label := range item.Labels {
 		if label == completeLabel {
-			return false
+			return false, 0
 		}
 	}
 
@@ -421,7 +435,7 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 	// stages so a stale label on a non-CI-gated stage does not permanently
 	// suppress dispatch (e.g., if a user manually moves an item to a different stage).
 	if stage.WaitForCI != nil && *stage.WaitForCI && hasLabel(item.Labels, "fabrik:awaiting-ci") {
-		return false
+		return false, 0
 	}
 
 	// Check dispatch cooldown: suppress re-dispatch while LastAttemptAt is within the
@@ -433,13 +447,13 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 		lastAttempt := snap.LastAttemptAt(stage.Name)
 		if !lastAttempt.IsZero() {
 			cooldown := e.stageRetryBackoff()
-			if time.Since(lastAttempt) < cooldown {
-				return false
+			if elapsed := time.Since(lastAttempt); elapsed < cooldown {
+				return false, cooldown - elapsed
 			}
 		}
 	}
 
-	return true
+	return true, 0
 }
 
 func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem) error {

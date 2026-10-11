@@ -718,6 +718,39 @@ type CooldownRecorded struct {
 func (CooldownRecorded) isMutation()       {}
 func (m CooldownRecorded) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
+// ArchiveEligibleCooldown is the CooldownAt key that holds an absolute
+// "eligible since" timestamp rather than a gate expiry. ExpiredCooldownsConsumed
+// never deletes it: past its instant it means "eligible", not "expired".
+const ArchiveEligibleCooldown = "archive-eligible-at"
+
+// ExpiredCooldownsConsumed deletes every CooldownAt entry that is non-zero and
+// has expired relative to Now (!Now.Before(entry)), except ArchiveEligibleCooldown
+// (#2096, ADR 2096). Applied when poll admission acts on an item's expired
+// cooldown, so that expiry admits the item exactly once instead of for ever:
+// HasExpiredCooldown then reports only expiries not yet acted on. Reports
+// CooldownChanged only when it deleted something.
+type ExpiredCooldownsConsumed struct {
+	Repo   string
+	Number int
+	Now    time.Time
+}
+
+func (ExpiredCooldownsConsumed) isMutation()       {}
+func (m ExpiredCooldownsConsumed) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// PausedBackstopServed records the staleness baseline (LastSeenSourceUpdatedAt)
+// at which the paused-item backstop (#1944) last completed a live fetch, so the
+// backstop fetches at most once per baseline value (#2096). Idempotent; in memory
+// only; wakes nothing.
+type PausedBackstopServed struct {
+	Repo     string
+	Number   int
+	Baseline time.Time
+}
+
+func (PausedBackstopServed) isMutation()       {}
+func (m PausedBackstopServed) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
 // LabelAppliedAtRecorded records the time the engine itself applied Label to
 // this issue (record-at-write, #1314). Always overwrites any prior entry for
 // the same label — a genuine re-application (applied → removed → re-applied)
