@@ -377,7 +377,8 @@ Fabrik can authenticate as a **GitHub App installation** instead of a personal a
 | `--archive-done` | Auto-archive Done items after `--archive-after` elapses: `on` or `off` (also `FABRIK_ARCHIVE_DONE`) | `""` (on) |
 | `--debug-output` | Save Claude stage output to `.fabrik/debug/` for debugging | `false` |
 | `--symlink-env` | Create a relative symlink at `<worktree>/.env` pointing to the fabrikDir `.env` at worktree setup time. Enables stage code to read project secrets without copying them. Also `FABRIK_SYMLINK_ENV`. | `false` |
-| `--plugin-dir` | Path to Fabrik plugin directory (overrides installed plugin) | `""` |
+| `--plugin-dir` | Path to Fabrik plugin directory (replaces the base plugin) | `""` |
+| `--plugin-dirs` | Comma-separated additional workflow plugin directories loaded after the base plugin | `""` |
 | `--webhooks` | Enable real-time webhook event delivery via `gh webhook forward` (requires `cli/gh-webhook` extension; also `FABRIK_WEBHOOKS`) | `false` |
 | `--github-app-id` | GitHub App ID for App-installation auth — set together with `--github-app-private-key-path` and `--github-app-installation-id`, or not at all (also `FABRIK_GITHUB_APP_ID`) | `0` |
 | `--github-app-private-key-path` | Path to the GitHub App's private key PEM (also `FABRIK_GITHUB_APP_PRIVATE_KEY_PATH`) | `""` |
@@ -455,7 +456,7 @@ Fabrik uses labels to track state:
 | `fabrik:awaiting-advance` | Set when a terminal advance failed to move the board Status (e.g. a missing column); retried every poll. See [Labels Reference](docs/USER_GUIDE.md#fabrik-managed-labels) |
 | `fabrik:reworking:<Stage>` | Transient marker while a comment re-enters an already-completed stage; removed when the rework finishes. See [Labels Reference](docs/USER_GUIDE.md#fabrik-managed-labels) |
 | `fabrik:toolchain-stale` | Warn-only: the worktree declares a toolchain version the daemon's `PATH` does not satisfy; clears automatically. See [Labels Reference](docs/USER_GUIDE.md#fabrik-managed-labels) |
-| `fabrik:claude-limit` | Claude account usage limit hit; does not count against `max_retries`. See [Claude Usage-Limit Suspension](docs/USER_GUIDE.md#claude-usage-limit-suspension) |
+| `fabrik:claude-limit` | Claude account usage limit hit; does not count against `max_retries`. See [Claude Usage-Limit Hold](docs/USER_GUIDE.md#claude-usage-limit-hold) |
 | `fabrik:children-spawned` / `fabrik:spawned-child:<index>:<number>` / `fabrik:sub-issue` | Sub-issue spawn bookkeeping: batch-complete guard on the parent, resume markers for an interrupted spawn, and a filter label on each child. See [Labels Reference](docs/USER_GUIDE.md#fabrik-managed-labels) |
 | `stage:<name>:complete` | Stage has been completed |
 | `stage:<name>:in_progress` | Stage is actively running |

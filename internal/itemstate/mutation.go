@@ -81,6 +81,10 @@ type IssueLabeled struct {
 	// EchoOfEngine is true when the engine's echo registry matched this
 	// webhook, i.e. it is the echo of a label write Fabrik made itself.
 	EchoOfEngine bool
+	// Requester is the sanitised overseer subscriber behind the write (#2125);
+	// "" for an engine-autonomous write. A webhook mutation carries it only when
+	// the engine's echo registry matched and recorded one.
+	Requester string
 }
 
 func (IssueLabeled) isMutation()       {}
@@ -96,6 +100,10 @@ type IssueUnlabeled struct {
 	// EchoOfEngine is true when the engine's echo registry matched this
 	// webhook, i.e. it is the echo of a label write Fabrik made itself.
 	EchoOfEngine bool
+	// Requester is the sanitised overseer subscriber behind the write (#2125);
+	// "" for an engine-autonomous write. A webhook mutation carries it only when
+	// the engine's echo registry matched and recorded one.
+	Requester string
 }
 
 func (IssueUnlabeled) isMutation()       {}
@@ -253,6 +261,9 @@ type LocalLabelAdded struct {
 	Repo   string
 	Number int
 	Label  string
+	// Requester is the sanitised overseer subscriber that requested the write
+	// (#2125); "" for an engine-autonomous write.
+	Requester string
 }
 
 func (LocalLabelAdded) isMutation()       {}
@@ -263,6 +274,8 @@ type LocalLabelRemoved struct {
 	Repo   string
 	Number int
 	Label  string
+	// Requester: see LocalLabelAdded.
+	Requester string
 }
 
 func (LocalLabelRemoved) isMutation()       {}

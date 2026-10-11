@@ -53,11 +53,11 @@ type reinvokeOpts struct {
 type didNotRunKind string
 
 const (
-	didNotRunSuspended    didNotRunKind = "account-suspended"
-	didNotRunUsageLimit   didNotRunKind = "usage-limit"
-	didNotRunAPIError     didNotRunKind = "api-error"
-	didNotRunAPIKeyHelper didNotRunKind = "api-key-helper"
-	didNotRunPostMerge    didNotRunKind = "post-merge"
+	didNotRunAccountUsageLimited didNotRunKind = "account-usage-limited"
+	didNotRunUsageLimit          didNotRunKind = "usage-limit"
+	didNotRunAPIError            didNotRunKind = "api-error"
+	didNotRunAPIKeyHelper        didNotRunKind = "api-key-helper"
+	didNotRunPostMerge           didNotRunKind = "post-merge"
 )
 
 // classifyDidNotRun maps a processComments error to the did-not-run set the

@@ -699,10 +699,10 @@ never itself dispatches again) and
 `TestClaudeLimitExit_NeverAccumulatesTowardMaxRetries` (2 consecutive
 usage-limit hits with `MaxRetries=1` never escalate). Both use
 `fabrik:clear-claude-limit` rather than real time, since
-`activateClaudeSuspension`/`claudeSuspendedUntilTime` are anchored to real
+`activateClaudeUsageLimit`/`claudeUsageLimitedUntilTime` are anchored to real
 `time.Now()`, not this harness's injected `Clock` — see
 `claude_limit_sweep_test.go`'s own doc comment. `fabrik:clear-claude-limit`
-lifting a suspension end-to-end was already covered pre-#1451 by
+lifting a usage-limit hold end-to-end was already covered pre-#1451 by
 `failure_shapes_test.go`'s `TestFailureShape_UsageLimitExit`.
 
 ### R6 — concurrency under `-race`

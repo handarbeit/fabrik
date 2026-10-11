@@ -80,6 +80,7 @@ type Config struct {
 	SymlinkEnv                 bool
 	WorktreeBoundaryAudit      bool
 	PluginDir                  string
+	PluginDirs                 []string // additional workflow plugin directories, loaded after the base plugin (ADR 2136)
 	Stages                     []*stages.Stage
 	Webhooks                   bool
 	WebhookPort                int
@@ -192,6 +193,7 @@ type Engine struct {
 	readClient            boardcache.ReadClient  // read-only GitHub calls; may be CacheImpl or GitHubAdapter
 	claude                ClaudeInvoker
 	statusField           *gh.StatusField
+	boardProjectID        string                      // the project id of the last polled board (guarded by mu); the overseer's advance uses it when no boardcache is wired
 	worktreeManagers      map[string]*WorktreeManager // key: "owner/repo"; one WM per discovered repo
 	fabrikDir             string                      // directory containing .fabrik/ (always os.Getwd() at startup)
 	mu                    sync.Mutex
@@ -269,6 +271,7 @@ type Engine struct {
 	wakeCh               chan struct{}        // TUI sends on this to wake the poll loop immediately; nil if no TUI
 	stopCh               chan tui.StopRequest // TUI sends on this to stop a specific in-flight issue; nil if no TUI
 	sem                  chan struct{}        // semaphore bounding concurrent workers across poll cycles
+	trainSem             chan struct{}        // reserved merge-train worker slot (#2115, ADR 2115); nil when merge_train is off (and on NewWithDeps engines unless EnableTrainReservedSlotForTest); touched only by acquireTrainSlotEp
 	wg                   sync.WaitGroup       // tracks in-flight workers for graceful shutdown; also tracks the shutdown pause-write phase (runShutdownPause, shutdown.go) so one waitGroupTimeout call bounds both (ADR-1393)
 	cloneInFlight        sync.Map             // key: "owner/repo" string, value: *cloneCall; per-repo bare-clone coordination
 	// trainRuns is the table of persisted merge-train runs (#2051, ADR 2051). Non-nil only
@@ -290,6 +293,8 @@ type Engine struct {
 	mergeTrainInfraMu                     sync.Mutex                    // guards mergeTrainInfraCooldown (#2052)
 	mergeTrainInfraCooldown               map[string]time.Time          // key: trainKey; earliest time a train for that (repo,base) partition may be re-dispatched after a trial was abandoned for CI infrastructure (TrainCIInfra) — see ADR 2052
 	pushGuardDisabled                     atomic.Bool                   // test seam: SetPushZeroAheadGuardDisabledForTest (#2089)
+	restoreRebaseDisabledForTest          bool                          // test seam: SetCommentRebaseRestoreDisabledForTest (#2150); guarded by mu, applied to managers registered later too
+	pureRebaseDisabledForTest             bool                          // test seam: SetCatchUpPureRebaseDisabledForTest (#2150); guarded by mu, applied to managers registered later too
 	actionsDegradeLogged                  atomic.Bool                   // set once the notice that a workflow-run read or re-run was refused (`actions` revoked at runtime or never accepted) has been logged (#2052 R7)
 	ciInfraTiming                         ciInfraTiming                 // test-shrinkable CI-infrastructure dwells (#2052); zero = defaults
 	startupWatchMu                        sync.Mutex                    // guards startupWatches
@@ -320,8 +325,8 @@ type Engine struct {
 	ciBackstopLiveEvaluated               sync.Map                      // key: "owner/repo#N"; items settleAwaitingCIScan has run the live-data handler chain for since this process started (#2059 R2). Until set, the CIBackstopTimeout backstop may not escalate the item blind. In memory by design: a restart clears it, granting each awaiting-ci item one live evaluation per daemon start. Not deleted when the label clears — bounded by item count.
 	ciBackstopResumeSeen                  sync.Map                      // key: "owner/repo#N"; value: time.Time — the newest fabrik:paused removal time the CIBackstopTimeout backstop read live (#2059 R1). Shared by every effectiveAnchor caller since #2064 (each tests it against its own timeout window). Skip-only memo: a memoised resume still inside the caller's timeout lets it skip without re-paging the events log; escalation is never decided from it, always from a fresh live read.
 	mergeTrainBatchSnapshotSeen           sync.Map                      // key: trainKey ("owner/repo:baseBranch", mergeTrainKey — since #1648, was bare "owner/repo"), value: string signature (sorted item numbers) of the last-logged Queued batch snapshot
-	claudeSuspendMu                       sync.Mutex                    // guards claudeSuspendedUntil
-	claudeSuspendedUntil                  time.Time                     // zero = not suspended; account-wide Claude dispatch suspension deadline (see usage_limit_backoff.go)
+	claudeUsageLimitMu                    sync.Mutex                    // guards claudeUsageLimitedUntil
+	claudeUsageLimitedUntil               time.Time                     // zero = not usage limited; account-wide Claude dispatch usage-limit hold deadline (see usage_limit_backoff.go)
 	events                                chan tui.Event                // nil in tests / plain-text mode; TUI goroutine consumes
 	logFile                               *os.File                      // persistent log file at .fabrik/fabrik.log; nil if not opened
 	logMu                                 sync.Mutex                    // serializes concurrent writes to logFile
@@ -485,19 +490,12 @@ func New(cfg Config) (*Engine, error) {
 	// Default to .fabrik/plugin in the fabrik dir (created by fabrik init).
 	// --plugin-dir flag overrides this for development.
 	// Path must be absolute since Claude runs in the worktree, not the repo root.
-	pluginDir := cfg.PluginDir
-	if pluginDir == "" {
-		defaultPluginDir := filepath.Join(fabrikDir, ".fabrik", "plugin")
-		if fi, err := os.Stat(defaultPluginDir); err == nil && fi.IsDir() {
-			pluginDir = defaultPluginDir
-		}
+	// Configured extras (--plugin-dirs) load after the base; see ADR 2136.
+	pluginDirs, err := resolvePluginDirs(fabrikDir, cfg.PluginDir, cfg.PluginDirs)
+	if err != nil {
+		return nil, err
 	}
-	if pluginDir != "" {
-		if abs, err := filepath.Abs(pluginDir); err == nil {
-			pluginDir = abs
-		}
-		claudePluginDir = pluginDir
-	}
+	claudePluginDirs = pluginDirs
 	claudeWaitDelay = cfg.ClaudeWaitDelay
 	// KillGraceSigInt >= 0: 0 = skip SIGINT step, positive = use that duration.
 	// Execute() maps "" → 10s, so 0 only arrives when user explicitly passed 0s.
@@ -653,6 +651,7 @@ func New(cfg Config) (*Engine, error) {
 		checkedAutoMergeRepos:     make(map[string]bool),
 		repoAccess:                make(map[string]gh.RepoAccess),
 		sem:                       make(chan struct{}, cfg.MaxConcurrent),
+		trainSem:                  newTrainSlot(cfg),
 		mergeTrainEjectionCounts:  make(map[string]int),
 		mergeTrainCIDeferred:      make(map[string]string),
 		mergeTrainCloneSkipCounts: make(map[string]int),
@@ -821,6 +820,8 @@ func (e *Engine) RegisterWorktreeManagerForTest(nameWithOwner string, wm *Worktr
 	wm.logfFn = e.logf
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	wm.restoreRebaseDisabled.Store(e.restoreRebaseDisabledForTest)
+	wm.pureRebaseDisabled.Store(e.pureRebaseDisabledForTest)
 	e.worktreeManagers[nameWithOwner] = wm
 }
 
@@ -1006,6 +1007,8 @@ func (e *Engine) registerWorktrees(nameWithOwner, baseDir, worktreeRoot string) 
 	dirName := owner + "-" + rname
 	wm := NewWorktreeManagerForRepo(baseDir, worktreeRoot, dirName)
 	wm.logfFn = e.logf
+	wm.restoreRebaseDisabled.Store(e.restoreRebaseDisabledForTest)
+	wm.pureRebaseDisabled.Store(e.pureRebaseDisabledForTest)
 	e.worktreeManagers[nameWithOwner] = wm
 	return wm
 }
@@ -1364,4 +1367,62 @@ func (e *Engine) postSpawnCloneError(parentOwner, parentRepo string, parentItem 
 		awaitingInput: true,
 	})
 	e.logf(parentItem.Number, "error", "cannot clone spawn target %s/%s: %v — pausing parent\n", targetOwner, targetRepo, cloneErr)
+}
+
+// trainSlotCapacity is the size of the reserved merge-train worker slot (#2115,
+// ADR 2115): one when merge_train is on, none otherwise. It is a fixed count — there
+// is deliberately no configuration key for it.
+func trainSlotCapacity(cfg Config) int {
+	if cfg.MergeTrain == "on" {
+		return 1
+	}
+	return 0
+}
+
+// newTrainSlot builds the reserved-slot channel for cfg, or nil when merge_train is
+// off so "merge_train off changes nothing" holds structurally.
+func newTrainSlot(cfg Config) chan struct{} {
+	n := trainSlotCapacity(cfg)
+	if n == 0 {
+		return nil
+	}
+	return make(chan struct{}, n)
+}
+
+// EnableTrainReservedSlotForTest creates the reserved merge-train slot on an engine
+// built by NewWithDeps, which leaves it nil by default so the #2046 slot tests keep
+// observing a single pool. A no-op unless merge_train is on.
+func (e *Engine) EnableTrainReservedSlotForTest() {
+	e.trainSem = newTrainSlot(e.cfg)
+}
+
+// trainSlotUsage reports the reserved merge-train slot's occupancy: slots in use and
+// its capacity (0, 0 when no slot exists). Exact and safe to call concurrently.
+func (e *Engine) trainSlotUsage() (inUse, capacity int) {
+	return len(e.trainSem), cap(e.trainSem)
+}
+
+// HoldGeneralWorkerSlotsForTest occupies every general (max_concurrent) worker slot, as
+// a saturated pool of stage workers would, and returns the function that frees them.
+// Test seam only (#2115, tests/sim); never called in production.
+func (e *Engine) HoldGeneralWorkerSlotsForTest() (release func()) {
+	n := cap(e.sem)
+	for i := 0; i < n; i++ {
+		e.sem <- struct{}{}
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			for i := 0; i < n; i++ {
+				<-e.sem
+			}
+		})
+	}
+}
+
+// WorkerSlotUsageForTest reports general-pool and reserved-train-slot occupancy.
+// Test seam only (#2115, tests/sim).
+func (e *Engine) WorkerSlotUsageForTest() (general, train, trainMax int) {
+	train, trainMax = e.trainSlotUsage()
+	return len(e.sem), train, trainMax
 }

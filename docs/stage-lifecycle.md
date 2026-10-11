@@ -84,7 +84,18 @@ Before each Claude invocation, the engine writes context documents to `.fabrik-c
 | `.fabrik-context/codebase-changes.md` | Files changed on `origin/<baseBranch>` since the prior stage ran (omitted on first stage or when no changes) |
 | `.fabrik-context/ci-status.md` | PR number, live PR head SHA, CI verdict for that head (`green`, `red`, `pending`, `none`, `unknown`), `ci_gated` (the stage's `wait_for_ci`) and a timestamp; written for stage and comment invocations whenever the item has a linked open PR, removed otherwise |
 
-**`ci-status.md` and the redundant-suite skip** (#1997, ADR-1997): the verdict comes from live, uncached reads (`FindPRForIssue`, `FetchPRDetails`, `FetchCheckRuns`) fed through the landing paths' `classifyLandingCI` (and so `ciSuiteHold`) unmodified. Zero check runs is always `none` — never the ADR-933 `mergeable_state` green — a read error is `unknown`, and a classifier `green` is demoted to `pending` unless every latest check run is completed with `success` or `neutral` (`skipped` is not passing — a path-filtered test job reports it without running the suite). The test-running skills skip the local full-suite run only when `verdict` is `green`, `git rev-parse HEAD` equals `head_sha` and `git status --porcelain` is empty; after a code change or rebase in a `ci_gated` stage they run build plus targeted tests and rely on the `wait_for_ci` gate on the new head. The `-comment` variants never take that shortcut: comment processing does not complete the stage, so no gate runs on a comment-pushed head and they treat `ci_gated` as `false`. The file is a snapshot taken at invocation start: a mid-run push moves HEAD and makes it inert.
+**`ci-status.md` and the redundant-suite skip** (#1997, ADR-1997): the verdict comes from live, uncached reads (`FindPRForIssue`, `FetchPRDetails`, `FetchCheckRuns`) fed through the landing paths' `classifyLandingCI` (and so `ciSuiteHold`) unmodified. Zero check runs is always `none` — never the ADR-933 `mergeable_state` green — a read error is `unknown`, and a classifier `green` is demoted to `pending` unless every latest check run is completed with `success` or `neutral` (`skipped` is not passing — a path-filtered test job reports it without running the suite). The test-running skills (`fabrik-validate`, `fabrik-review`, `fabrik-implement` and their `-comment` variants) read it to decide what to run locally (#2130, ADR-2130, amending ADR-1997 Decisions 3 and 4):
+
+- `ci-status.md` absent, or `ci_gated: false`: the full-suite step, unchanged, reported as `PASSED`.
+- `ci_gated: true`, `verdict` `green`, `git rev-parse HEAD` equal to `head_sha` and `git status --porcelain` empty: skip the test invocation, reported as `SKIPPED — CI green on <sha>`.
+- `ci_gated: true`, `verdict` `red`: read the failing checks (`gh pr checks`, or the run log) and reproduce only the failing tests, never the whole suite.
+- `ci_gated: true`, `verdict` `pending`, `unknown` or `none`, or HEAD differs from `head_sha` (this run pushed or rebased, or a previous invocation pushed the head), or a dirty tree: the build plus the tests for the packages the diff touches, once.
+
+Both targeted cases are reported as `TARGETED — <packages>; full suite left to CI on <sha>`. On a CI-gated stage the full suite is never run locally; CI and the `wait_for_ci` gate on the pushed head decide it. The `-comment` variants follow the same table: a comment-pushed change is verified with the targeted run, and the stage-completion gate and the landing-time CI check cover the head.
+
+Every local test command also follows hard rules: a framework timeout (Go `-timeout` of 5m or less, never raised to fit a broader run, narrow the run instead), run synchronously in the foreground and never backgrounded and polled, and diagnose before retrying. A run that times out or panics on a timeout is answered by checking host load (`uptime`, or the failing test's own elapsed time) and rerunning only the failing test, once. A timeout that does not reproduce in isolation is reported as host load: it is not a fix trigger and not a failure of the change.
+
+The file is a snapshot taken at invocation start: a mid-run push moves HEAD and makes it inert.
 
 **Stage invocation**: Writes only stages *prior* to the current stage. Implement sees Specify, Research, Plan but not its own output.
 
@@ -295,6 +306,7 @@ Context files are available in .fabrik-context/
 
 ```
 --plugin-dir <absolute-path-to-.fabrik/plugin>
+--plugin-dir <absolute-path-of-each-configured-plugin_dirs-entry>  (zero or more, in configured order; ADR 2136)
 --output-format json
 --verbose
 --disallowedTools <tool> ...  (always: ScheduleWakeup, Workflow, Monitor, CronCreate — see below)
@@ -703,7 +715,7 @@ because the account's usage limit was hit, not because the stage genuinely faile
 result object only — never from anything the assistant wrote: `classifyUsageLimitExit` checks
 `resp.TerminalReason == "blocking_limit"` (the same `terminal_reason` field the turn-cap check
 consults) or `resp.TerminalReason == "api_error"` with `api_error_status == 429` (the CLI's other
-session-limit shape, #1811 / ADR-1811; other `api_error` statuses stay transient and never suspend),
+session-limit shape, #1811 / ADR-1811; other `api_error` statuses stay transient and never trigger it),
 and only when a result object actually parsed. The `result` text is never matched. When Claude exited non-zero without a
 `FABRIK_STAGE_COMPLETE` marker, no turn cap, and `TerminalReason` matches, it returns a
 `*claudeUsageLimitError` sentinel in place of the generic error; an unparseable-JSON invocation is
@@ -727,10 +739,10 @@ engine-shutdown guard — before the normal `claudeRan`/retry classification log
 `fabrik:claude-limit` clears per-issue on the next invocation that is not itself classified as a
 usage-limit exit (success, blocked-on-input, incomplete/genuine-failure, or PR-creation failure alike),
 and account-wide via `settleClaudeLimitLabelSweep`, a per-poll settle scan that removes it from every
-open item once the account-wide suspension has lifted — so an issue that is paused, blocked, or simply
-never redispatched no longer keeps the label indefinitely. An operator can also end an active suspension
+open item once the account-wide usage-limit hold has lifted — so an issue that is paused, blocked, or simply
+never redispatched no longer keeps the label indefinitely. An operator can also end an active usage-limit hold
 early, without restarting the engine, by applying `fabrik:clear-claude-limit` to any open board item;
-`settleClaudeLimitClearRequests` reads it each poll and clears the suspension. See
+`settleClaudeLimitClearRequests` reads it each poll and clears the usage-limit hold. See
 `docs/state-machine.md` §7.3, [ADR-1119](../adrs/1119-claude-usage-limit-detection.md), and
 [ADR-1183](../adrs/1183-structural-claude-usage-limit-detection.md) for the full rationale, including
 why this reuses the same `StageAttempted`-without-`StageRetryIncremented` split as the Post-Run Boundary
@@ -740,7 +752,7 @@ boundary violation is not).
 ### apiKeyHelper Detection Path (Worktree)
 
 A fifth outcome, checked in `runInvocationWithExtension` immediately alongside the account-wide
-usage-limit suspension gate above — before `InvokeOptions` is built or the stall hint consumed, and
+usage-limit hold gate above — before `InvokeOptions` is built or the stall hint consumed, and
 before Claude is ever invoked. `findAPIKeyHelper` (`engine/startup.go`, shared with the engine-startup
 preflight — see "Worker Environment: Anthropic Auth Namespace Scrub" above) checks the worktree's own
 `.claude/settings.json` and `.claude/settings.local.json` (mirroring the startup preflight's file

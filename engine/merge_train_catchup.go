@@ -112,7 +112,7 @@ const (
 	// catchUpPushed: the catch-up commit was created and pushed.
 	catchUpPushed catchUpGitKind = iota
 	// catchUpDefer: the member is not ours to touch right now (busy worktree, moved
-	// remote, a stage session, or the Claude usage-limit suspension). It stays Queued,
+	// remote, a stage session, or the Claude usage-limit hold). It stays Queued,
 	// nothing is charged and no trial is built this poll.
 	catchUpDefer
 	// catchUpFallback: the catch-up cannot be done safely or was refused (push rejected,
@@ -303,7 +303,7 @@ func (e *Engine) runCatchUpGit(ctx context.Context, p trialParams, m trainMember
 		resolved, diag, resolveErr := e.resolveTrainConflict(ctx, p.repoKey(), m.item, wtDir, p.holdingStg, p.baseSHA, m.headSHA, mergeOut, opts)
 		if resolveErr != nil {
 			// Resolution could not even be attempted (account-wide usage-limit
-			// suspension, ADR-1120): no verdict on the conflict, so no ejection.
+			// usage-limit hold, ADR-1120): no verdict on the conflict, so no ejection.
 			restore()
 			return catchUpGitOutcome{kind: catchUpDefer, reason: fmt.Sprintf("conflict resolution unavailable: %v", resolveErr)}
 		}

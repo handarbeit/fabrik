@@ -26,7 +26,7 @@ import (
 // TestLocalAPISourceDoesNotReachGitHub pins this statically.
 //
 // Concurrency: the API runs on socket goroutines. It reads the Store (RLock,
-// copies out), already-guarded engine state (claudeSuspendMu, sem, the
+// copies out), already-guarded engine state (claudeUsageLimitMu, sem, the
 // Store's repo-worker markers) and daemonHealth, a mutex-guarded mirror of the
 // poll loop's own single-goroutine fields. It never holds a lock across
 // socket I/O: each call snapshots, releases, then returns a plain value that
@@ -203,7 +203,7 @@ func counterStages(ss itemstate.StageState, kind string) []string {
 // attentionInput extracts the classifier input from one item's state. st may
 // point at live Store memory (inside Scan): everything is copied out, nothing
 // retained, nothing blocking.
-func (e *Engine) attentionInput(st *itemstate.ItemState, now time.Time, threshold time.Duration, suspendedUntil time.Time) attention.Input {
+func (e *Engine) attentionInput(st *itemstate.ItemState, now time.Time, threshold time.Duration, usageLimitedUntil time.Time) attention.Input {
 	in := attention.Input{
 		Now: now,
 		Cfg: attention.Config{
@@ -212,14 +212,14 @@ func (e *Engine) attentionInput(st *itemstate.ItemState, now time.Time, threshol
 			CIBackstopTimeout: e.ciBackstopTimeout(),
 			ReviewWaitTimeout: e.cfg.ReviewWaitTimeout,
 		},
-		Status:               st.Status,
-		StageKind:            e.attentionStageKind(st.Status),
-		Closed:               st.IsClosed,
-		Terminal:             st.Terminal,
-		Labels:               append([]string(nil), st.Labels...),
-		PausedByEngine:       st.StageState.PausedByEngine[st.Status],
-		StatusEnteredAt:      st.StatusEnteredAt,
-		ClaudeSuspendedUntil: suspendedUntil,
+		Status:                  st.Status,
+		StageKind:               e.attentionStageKind(st.Status),
+		Closed:                  st.IsClosed,
+		Terminal:                st.Terminal,
+		Labels:                  append([]string(nil), st.Labels...),
+		PausedByEngine:          st.StageState.PausedByEngine[st.Status],
+		StatusEnteredAt:         st.StatusEnteredAt,
+		ClaudeUsageLimitedUntil: usageLimitedUntil,
 	}
 	for _, kind := range counterKinds {
 		in.Counters = append(in.Counters, attention.Counter{
@@ -320,12 +320,12 @@ func issueRef(repo string, n int) string { return fmt.Sprintf("%s#%d", repo, n) 
 
 // ---- status ----
 
-// resolveIssue parses "owner/repo#N" or a bare "N" (valid only when the daemon
-// manages exactly one repo).
+// resolveIssue parses "owner/repo#N" or a bare "N" (valid only when the
+// daemon's cached issues are all in exactly one repo).
 func (b localAPIBackend) resolveIssue(ref string) (repo string, number int, err error) {
 	ref = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(ref), "#"))
 	if ref == "" {
-		return "", 0, localapi.Errorf(localapi.CodeBadRequest, "issue is required: owner/repo#N, or N when the daemon manages exactly one repo")
+		return "", 0, localapi.Errorf(localapi.CodeBadRequest, "issue is required: owner/repo#N, or N when the daemon's cached issues are all in one repo")
 	}
 	if i := strings.LastIndex(ref, "#"); i > 0 {
 		n, perr := strconv.Atoi(ref[i+1:])
@@ -345,21 +345,25 @@ func (b localAPIBackend) resolveIssue(ref string) (repo string, number int, err 
 	case 0:
 		return "", 0, localapi.Errorf(localapi.CodeNotFound, "the daemon has no cached items yet; use owner/repo#N")
 	default:
-		return "", 0, localapi.Errorf(localapi.CodeAmbiguous, "the daemon manages %d repos (%s); use owner/repo#N", len(repos), strings.Join(repos, ", "))
+		return "", 0, localapi.Errorf(localapi.CodeAmbiguous, "the daemon has issues in %d repos (%s); use owner/repo#N", len(repos), strings.Join(repos, ", "))
 	}
 }
 
-// managedRepos is the repo set this daemon serves: its configured repo plus
-// the distinct repos of the cached items. A daemon with a default repo can still
-// carry items from other repos on its board, so the default alone is not the
-// set.
+// managedRepos is the repo set this daemon serves: its configured repo (only
+// when one is configured) plus the distinct repos of the cached items. A daemon
+// with a configured repo can still carry items from other repos on its board,
+// so the configured repo alone is not the set. Only real owner/repo keys are
+// members: in multi-repo mode defaultRepo() is "owner/" (no repo), which must
+// never be counted or named.
 func (b localAPIBackend) managedRepos() []string {
 	seen := map[string]bool{}
-	if r := b.e.defaultRepo(); r != "" {
-		seen[r] = true
+	if b.e.cfg.Repo != "" {
+		if r := b.e.defaultRepo(); isRealRepoKey(r) {
+			seen[r] = true
+		}
 	}
 	b.e.store.Scan(func(it *itemstate.ItemState) {
-		if !it.IsPR && it.Repo != "" {
+		if !it.IsPR && isRealRepoKey(it.Repo) {
 			seen[it.Repo] = true
 		}
 	})
@@ -371,8 +375,15 @@ func (b localAPIBackend) managedRepos() []string {
 	return repos
 }
 
-func (b localAPIBackend) suspendedUntil(now time.Time) time.Time {
-	d, _ := b.e.claudeSuspendedUntilTime(now)
+// isRealRepoKey reports whether s is a well-formed "owner/repo" key: exactly
+// one slash with a non-empty owner and a non-empty repo.
+func isRealRepoKey(s string) bool {
+	owner, repo, ok := strings.Cut(s, "/")
+	return ok && owner != "" && repo != "" && !strings.Contains(repo, "/")
+}
+
+func (b localAPIBackend) usageLimitedUntil(now time.Time) time.Time {
+	d, _ := b.e.claudeUsageLimitedUntilTime(now)
 	return d
 }
 
@@ -388,7 +399,7 @@ func (b localAPIBackend) Status(p localapi.StatusParams) (*localapi.StatusResult
 	st := snap.State()
 	now := b.e.now()
 	threshold := b.stallThreshold(0)
-	res := attention.Classify(b.e.attentionInput(&st, now, threshold, b.suspendedUntil(now)))
+	res := attention.Classify(b.e.attentionInput(&st, now, threshold, b.usageLimitedUntil(now)))
 
 	out := &localapi.StatusResult{
 		Envelope:  b.envelope(now),
@@ -733,7 +744,7 @@ func (r boardRow) ref() string { return issueRef(r.repo, r.number) }
 func (b localAPIBackend) Board(p localapi.BoardParams) (*localapi.BoardResult, error) {
 	now := b.e.now()
 	threshold := b.stallThreshold(p.StallThresholdSeconds)
-	suspended := b.suspendedUntil(now)
+	usageLimited := b.usageLimitedUntil(now)
 	var filter localapi.BoardFilter
 	if p.Filter != nil {
 		filter = *p.Filter
@@ -752,7 +763,7 @@ func (b localAPIBackend) Board(p localapi.BoardParams) (*localapi.BoardResult, e
 			lastDeep:  it.LastDeepFetchAt,
 			entered:   it.StatusEnteredAt,
 			hasWorker: it.Worker != nil,
-			input:     b.e.attentionInput(it, now, threshold, suspended),
+			input:     b.e.attentionInput(it, now, threshold, usageLimited),
 		}
 		for _, d := range it.BlockedBy {
 			if strings.EqualFold(d.State, "OPEN") {
@@ -975,10 +986,10 @@ func (b localAPIBackend) Health(localapi.HealthParams) (*localapi.HealthResult, 
 		MergeTrain: []localapi.TrainPartition{},
 	}
 
-	if until, suspended := e.claudeSuspendedUntilTime(now); suspended {
-		res.Claude = localapi.ClaudeHealth{Suspended: true, SuspendedUntil: localapi.Some(until.UTC())}
+	if until, usageLimited := e.claudeUsageLimitedUntilTime(now); usageLimited {
+		res.Claude = localapi.ClaudeHealth{UsageLimited: true, UsageLimitedUntil: localapi.Some(until.UTC())}
 	} else {
-		res.Claude = localapi.ClaudeHealth{SuspendedUntil: localapi.Unknown[time.Time]()}
+		res.Claude = localapi.ClaudeHealth{UsageLimitedUntil: localapi.Unknown[time.Time]()}
 	}
 
 	bo := h.Backoff
@@ -1005,6 +1016,10 @@ func (b localAPIBackend) Health(localapi.HealthParams) (*localapi.HealthResult, 
 	if e.cfg.MaxConcurrent > 0 {
 		res.Workers.MaxConcurrent = localapi.Some(e.cfg.MaxConcurrent)
 	}
+
+	trainInUse, trainMax := b.e.trainSlotUsage()
+	res.Workers.TrainInUse = localapi.Some(trainInUse)
+	res.Workers.TrainMax = localapi.Some(trainMax)
 
 	res.MergeTrain = b.partitions()
 	return res, nil

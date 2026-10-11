@@ -1319,7 +1319,7 @@ func (e *Engine) assembleTrialBranch(ctx context.Context, p trialParams, members
 		}
 		if resolveErr != nil {
 			// Resolution could not even be attempted (account-wide Claude usage-limit
-			// suspension, ADR-1120) — this says nothing about whether #%d's conflict is
+			// usage-limit hold, ADR-1120) — this says nothing about whether #%d's conflict is
 			// resolvable, so ejecting the member here would be a correctness bug. Abort
 			// the in-progress merge and propagate as a fatal assembly error instead; the
 			// caller's fatal-error path cleans up trial artifacts and retries on the
@@ -2572,14 +2572,14 @@ type conflictEjectionDiagnostic struct {
 // on preMergeHEAD means the member's entire contribution — not just the conflicted
 // path(s) — was silently discarded by the abort.
 func (e *Engine) resolveConflictWithClaude(ctx context.Context, repoKey string, memberItem gh.ProjectItem, trainWorkDir string, holdingStg *stages.Stage, prSHA string, generatedPaths []string, preMergeHEAD string, originalNonGeneratedPaths []string, opts InvokeOptions) (bool, *conflictEjectionDiagnostic, error) {
-	suspended := func() error {
-		if _, s := e.claudeSuspendedUntilTime(time.Now()); s {
-			e.logf(memberItem.Number, "claude-limit", "Claude dispatch suspended account-wide; skipping conflict resolution for #%d\n", memberItem.Number)
-			return &claudeUsageLimitError{Message: "account usage-limit suspension active"}
+	usageLimited := func() error {
+		if _, s := e.claudeUsageLimitedUntilTime(time.Now()); s {
+			e.logf(memberItem.Number, "claude-limit", "Claude usage limited; dispatch held account-wide; skipping conflict resolution for #%d\n", memberItem.Number)
+			return &claudeUsageLimitError{Message: "account usage limit active"}
 		}
 		return nil
 	}
-	if err := suspended(); err != nil {
+	if err := usageLimited(); err != nil {
 		return false, nil, err
 	}
 
@@ -2599,8 +2599,8 @@ func (e *Engine) resolveConflictWithClaude(ctx context.Context, repoKey string, 
 		return false, nil, err
 	}
 	// The wait can be long on a saturated board, so the account may have been
-	// suspended meanwhile — don't spend the slot on a doomed invocation.
-	if serr := suspended(); serr != nil {
+	// usage limited meanwhile — don't spend the slot on a doomed invocation.
+	if serr := usageLimited(); serr != nil {
 		release()
 		return false, nil, serr
 	}
@@ -2608,7 +2608,7 @@ func (e *Engine) resolveConflictWithClaude(ctx context.Context, repoKey string, 
 	release()
 	var limitErr *claudeUsageLimitError
 	if errors.As(err, &limitErr) {
-		e.activateClaudeSuspension(memberItem.Number, limitErr, time.Now())
+		e.activateClaudeUsageLimit(memberItem.Number, limitErr, time.Now())
 		return false, nil, err
 	}
 	var turnLimitErr *claudeTurnLimitError
@@ -2616,7 +2616,7 @@ func (e *Engine) resolveConflictWithClaude(ctx context.Context, repoKey string, 
 		e.logf(memberItem.Number, "merge-train", "Claude conflict resolution hit its turn limit (num_turns=%d) — checking worktree before ejecting\n", turnLimitErr.NumTurns)
 		// A turn-cap exit still reached and ran Claude — the same "Claude is
 		// healthy" signal a clean success carries (ADR-1120's principle).
-		e.clearClaudeSuspension("merge-train conflict resolution reached Claude")
+		e.clearClaudeUsageLimit("merge-train conflict resolution reached Claude")
 		resolved, diag := e.finalizeConflictResolution(memberItem, trainWorkDir, generatedPaths, preMergeHEAD, originalNonGeneratedPaths)
 		if !resolved {
 			if diag == nil {
@@ -2629,7 +2629,7 @@ func (e *Engine) resolveConflictWithClaude(ctx context.Context, repoKey string, 
 	}
 	if err != nil {
 		// A generic, unrelated error proves nothing about account-wide usage-limit state
-		// and must not clear an active suspension (see the matching comment in item.go's
+		// and must not clear an active usage-limit hold (see the matching comment in item.go's
 		// runInvocationWithExtension) — only fall through to clear below on success.
 		e.logf(memberItem.Number, "merge-train", "Claude conflict resolution failed: %v\n", err)
 		if ctx.Err() != nil {
@@ -2639,13 +2639,13 @@ func (e *Engine) resolveConflictWithClaude(ctx context.Context, repoKey string, 
 		}
 		return false, nil, nil
 	}
-	e.clearClaudeSuspension("merge-train conflict resolution reached Claude")
+	e.clearClaudeUsageLimit("merge-train conflict resolution reached Claude")
 
 	resolved, diag := e.finalizeConflictResolution(memberItem, trainWorkDir, generatedPaths, preMergeHEAD, originalNonGeneratedPaths)
 	return resolved, diag, nil
 }
 
-// acquireTrainSlot takes one e.sem slot for a single merge-train Claude invocation
+// acquireTrainSlot takes one worker slot for a single merge-train Claude invocation
 // (#2046) and returns the function that gives it back. The train holds no slot for
 // its lifecycle — assembly git work, PR operations, the trial-CI wait, bisection and
 // landing all run without one — so this is the only place it ever takes one. A
@@ -2653,6 +2653,11 @@ func (e *Engine) resolveConflictWithClaude(ctx context.Context, repoKey string, 
 // nothing extra; only a real wait is announced, through logfRepo so the repo's job
 // row shows it (ADR-1661, #1661/PR #1663). While waiting the train holds no slot, so
 // stage workers always make progress and no slot-for-slot deadlock is possible.
+//
+// The slot is the engine's reserved train slot (#2115, ADR 2115) when it is free,
+// else a free general e.sem slot, else the call waits for either. Each acquire takes
+// exactly one slot from exactly one pool and release gives back that same pool's, so
+// the no-deadlock argument holds across both. Only this function touches e.trainSem.
 //
 // A cancellation while waiting returns an error wrapping ctx.Err(); callers treat it
 // as "could not attempt" (see trainCancelled), never as an unresolvable conflict.
@@ -2667,23 +2672,41 @@ func (e *Engine) acquireTrainSlot(ctx context.Context, repoKey string, memberIte
 // slot puts the phase that was current before back. No board line is involved in
 // either direction, so the board is untouched.
 func (e *Engine) acquireTrainSlotEp(ctx context.Context, ep *trainEpisode, repoKey string, memberItem gh.ProjectItem) (release func(), err error) {
+	// Reserved slot first (#2115): a deterministic non-blocking attempt, so a train
+	// never waits on (or takes from) the general pool while the reserved slot is
+	// free. e.trainSem is nil when merge_train is off; a nil channel is never ready
+	// in a select, so that case falls straight through to today's behaviour.
+	// Then a free general slot, so a second concurrent partition is never slower
+	// than before the reserved slot existed.
+	var held chan struct{}
 	select {
-	case e.sem <- struct{}{}:
+	case e.trainSem <- struct{}{}:
+		held = e.trainSem
 	default:
+		select {
+		case e.sem <- struct{}{}:
+			held = e.sem
+		default:
+		}
+	}
+	if held == nil {
 		e.logfRepo(repoKey, "merge-train", "waiting for a free worker slot for conflict resolution on #%d\n", memberItem.Number)
 		prev := ep.currentPhaseLabel()
 		e.noteTrainPhase(ep, repoKey, nil, phaseWaitingForSlot())
 		select {
+		case e.trainSem <- struct{}{}:
+			held = e.trainSem
 		case e.sem <- struct{}{}:
-			if prev != "" {
-				e.noteTrainPhase(ep, repoKey, nil, trainPhase{label: prev})
-			}
+			held = e.sem
 		case <-ctx.Done():
 			return nil, fmt.Errorf("waiting for a worker slot: %w", ctx.Err())
 		}
+		if prev != "" {
+			e.noteTrainPhase(ep, repoKey, nil, trainPhase{label: prev})
+		}
 	}
 	var once sync.Once
-	return func() { once.Do(func() { <-e.sem }) }, nil
+	return func() { once.Do(func() { <-held }) }, nil
 }
 
 // trainCancelled reports whether err (an assembly/resolution error) is a

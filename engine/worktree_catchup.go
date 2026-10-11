@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
 )
 
@@ -26,7 +27,11 @@ var (
 // branch must still be exactly expectedHead (the head the batch snapshot — and so the
 // pinned-base ancestry check — was taken against), and the local branch must be equal
 // to it or strictly behind it (fast-forwarded here). A local branch that is ahead or
-// diverged is refused with ErrCatchUpLocalDiverged.
+// diverged is refused with ErrCatchUpLocalDiverged — unless it is a pure rebase of the
+// remote (#2150, ADR-2150): the same patches on a newer base, carrying no local-only
+// patch and no local-only merge commit. That is the footprint of an engine pre-invocation
+// rebase that was never pushed; it holds no work the remote lacks, so it is reset to the
+// remote head (the head CI validated) and the local rebase is never pushed.
 //
 // The catch-up deliberately runs in the member's own worktree, not a disposable one:
 // a push from a detached worktree would leave the local fabrik/issue-N stale, and a
@@ -90,7 +95,56 @@ func (wm *WorktreeManager) PrepareCatchUp(issueNumber int, baseBranch, expectedH
 		}
 		return wtDir, nil
 	}
+	if !wm.pureRebaseDisabled.Load() {
+		pure, doubt := wm.localIsPureRebase(wtDir, branch, tracking, baseBranch)
+		if pure {
+			wm.logf(issueNumber, "worktree", "catch-up: local branch is a pure rebase of the remote — resetting to the remote head (local %s, remote %s)\n", local, expectedHead)
+			if out, err := gitOutputIn(wtDir, "reset", "--hard", expectedHead); err != nil {
+				return "", fmt.Errorf("resetting local %s to %s: %s: %w", branch, expectedHead, out, err)
+			}
+			return wtDir, nil
+		}
+		if doubt != "" {
+			wm.logf(issueNumber, "worktree", "catch-up: not treating local %s as a pure rebase: %s\n", branch, doubt)
+		}
+	}
 	return "", fmt.Errorf("%w: local %s, remote %s", ErrCatchUpLocalDiverged, local, expectedHead)
+}
+
+// localIsPureRebase reports whether the worktree's HEAD differs from remoteRef only by
+// being the same patches rebased onto a newer base (#2150): no local-only non-merge patch
+// (compared by patch-id) and no local-only merge commit. The second return is a reason
+// when the answer is "not pure" because of doubt rather than because of local-only work;
+// every error is doubt, so the caller falls back to the trial path, never loses a commit.
+//
+// Plain `git cherry` is not usable here: base commits that are new to the local branch
+// show as `+`, so every rebase onto an advanced base would read as impure. Excluding the
+// base's history (`^baseRef`) removes them. Merge commits are invisible to patch-ids, so
+// they are counted separately. Called with wm.mu held.
+func (wm *WorktreeManager) localIsPureRebase(wtDir, branch, remoteRef, baseBranch string) (bool, string) {
+	baseRef := "refs/remotes/origin/" + baseBranch
+	fetch := exec.Command("git", "fetch", "origin", "--", "+refs/heads/"+baseBranch+":"+baseRef)
+	fetch.Dir = wm.baseDir
+	fetch.Env = nonInteractiveGitEnv()
+	if out, err := fetch.CombinedOutput(); err != nil {
+		return false, fmt.Sprintf("could not fetch base %s: %s", baseBranch, strings.TrimSpace(string(out)))
+	}
+	localOnly, err := gitOutputIn(wtDir, "rev-list", "--right-only", "--cherry-pick", "--no-merges", "--count",
+		remoteRef+"...HEAD", "^"+baseRef)
+	if err != nil {
+		return false, fmt.Sprintf("patch-id comparison failed: %s", localOnly)
+	}
+	if n, convErr := strconv.Atoi(localOnly); convErr != nil || n != 0 {
+		return false, ""
+	}
+	merges, err := gitOutputIn(wtDir, "rev-list", "--merges", "--count", "HEAD", "^"+remoteRef, "^"+baseRef)
+	if err != nil {
+		return false, fmt.Sprintf("merge-commit count failed: %s", merges)
+	}
+	if n, convErr := strconv.Atoi(merges); convErr != nil || n != 0 {
+		return false, "local-only merge commit"
+	}
+	return true, ""
 }
 
 // CatchUpPushError is PushCatchUp's failure: git's combined output is kept raw so the

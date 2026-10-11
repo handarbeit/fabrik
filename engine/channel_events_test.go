@@ -155,11 +155,11 @@ func TestChannelLabelActorAttribution(t *testing.T) {
 	e.seedAPIItem(t, 1, "Implement")
 
 	e.store.Apply(itemstate.IssueLabeled{Repo: "owner/repo", Number: 1, Label: "human-label", Sender: "alice"})
-	if ev := sink.nextOfType(t, channelevents.LabelApplied); ev.Meta["actor"] != "human" {
+	if ev := sink.nextOfType(t, channelevents.LabelApplied); ev.Meta["actor"] != "human" || ev.Meta["actor_login"] != "alice" || ev.Meta["via"] != "" {
 		t.Fatalf("human label: %+v", ev)
 	}
 	e.store.Apply(itemstate.IssueLabeled{Repo: "owner/repo", Number: 1, Label: "bot-label", Sender: "dependabot[bot]"})
-	if ev := sink.nextOfType(t, channelevents.LabelApplied); ev.Meta["actor"] != "bot" {
+	if ev := sink.nextOfType(t, channelevents.LabelApplied); ev.Meta["actor"] != "bot" || ev.Meta["actor_login"] != "dependabot[bot]" {
 		t.Fatalf("bot label: %+v", ev)
 	}
 	e.store.Apply(itemstate.IssueUnlabeled{Repo: "owner/repo", Number: 1, Label: "human-label", Sender: "alice"})
@@ -172,6 +172,89 @@ func TestChannelLabelActorAttribution(t *testing.T) {
 	}})
 	if ev := sink.nextOfType(t, channelevents.LabelApplied); ev.Label != "seen-by-poll" || ev.Meta["actor"] != "unknown" {
 		t.Fatalf("reconcile label: %+v", ev)
+	} else if _, ok := ev.Meta["actor_login"]; ok {
+		t.Fatalf("unknown actor must carry no login: %+v", ev)
+	}
+}
+
+// An overseer-requested write is attributed to the overseer (#2125); the same
+// label written autonomously stays fabrik with no via.
+func TestChannelLabelOverseerAttribution(t *testing.T) {
+	e, sink := channelEngine(t, 0, nil)
+	e.seedAPIItem(t, 1, "Implement")
+
+	e.store.Apply(itemstate.LocalLabelAdded{Repo: "owner/repo", Number: 1, Label: "fabrik:cruise", Requester: "x"})
+	ev := sink.nextOfType(t, channelevents.LabelApplied)
+	if ev.Meta["actor"] != "overseer" || ev.Meta["via"] != "x" {
+		t.Fatalf("overseer write: %+v", ev)
+	}
+	if _, ok := ev.Meta["actor_login"]; ok {
+		t.Fatalf("overseer event carries a login: %+v", ev.Meta)
+	}
+	if !strings.Contains(ev.Content, "by overseer x") {
+		t.Fatalf("content = %q", ev.Content)
+	}
+
+	// Both halves of a yolo -> cruise style switch are attributed.
+	e.store.Apply(itemstate.LocalLabelAdded{Repo: "owner/repo", Number: 1, Label: "fabrik:yolo", Requester: "x"})
+	e.store.Apply(itemstate.LocalLabelRemoved{Repo: "owner/repo", Number: 1, Label: "fabrik:yolo", Requester: "x"})
+	if ev := sink.nextOfType(t, channelevents.LabelApplied); ev.Label != "fabrik:yolo" || ev.Meta["actor"] != "overseer" || ev.Meta["via"] != "x" {
+		t.Fatalf("second add: %+v", ev)
+	}
+	if ev := sink.nextOfType(t, channelevents.LabelRemoved); ev.Meta["actor"] != "overseer" || ev.Meta["via"] != "x" {
+		t.Fatalf("removal: %+v", ev)
+	}
+
+	// An engine-autonomous write of the same label: fabrik, no via.
+	e.store.Apply(itemstate.LocalLabelRemoved{Repo: "owner/repo", Number: 1, Label: "fabrik:cruise"})
+	if ev := sink.nextOfType(t, channelevents.LabelRemoved); ev.Meta["actor"] != "fabrik" || ev.Meta["via"] != "" {
+		t.Fatalf("autonomous write: %+v", ev)
+	}
+	e.store.Apply(itemstate.LocalLabelAdded{Repo: "owner/repo", Number: 1, Label: "fabrik:cruise"})
+	if ev := sink.nextOfType(t, channelevents.LabelApplied); ev.Meta["actor"] != "fabrik" || ev.Meta["via"] != "" {
+		t.Fatalf("autonomous re-add: %+v", ev)
+	}
+}
+
+// The webhook echo of an overseer write that the store did not yet hold is the
+// only observer-visible change, and carries the overseer (one event).
+func TestChannelLabelOverseerEchoFirstIsOneEvent(t *testing.T) {
+	e, sink := channelEngine(t, 0, nil)
+	e.seedAPIItem(t, 1, "Implement")
+
+	e.store.Apply(itemstate.IssueLabeled{Repo: "owner/repo", Number: 1, Label: "fabrik:cruise", Sender: "fabrik-app[bot]", EchoOfEngine: true, Requester: "x"})
+	e.store.Apply(itemstate.LocalLabelAdded{Repo: "owner/repo", Number: 1, Label: "fabrik:cruise", Requester: "x"})
+
+	ev := sink.nextOfType(t, channelevents.LabelApplied)
+	if ev.Meta["actor"] != "overseer" || ev.Meta["via"] != "x" {
+		t.Fatalf("echo-first: %+v", ev)
+	}
+	sink.quiet(t, 300*time.Millisecond)
+}
+
+// An unmatched webhook never claims a requester, and labelAttribute follows the
+// documented order (the overseer check precedes the sender checks).
+func TestLabelAttributeOrder(t *testing.T) {
+	e := &Engine{}
+	cases := []struct {
+		name string
+		c    itemstate.Change
+		want labelAttribution
+	}{
+		{"engine", itemstate.Change{Origin: itemstate.OriginEngine}, labelAttribution{Actor: "fabrik"}},
+		{"engine requester", itemstate.Change{Origin: itemstate.OriginEngine, Requester: "x"}, labelAttribution{Actor: "overseer", Via: "x"}},
+		{"echo", itemstate.Change{Origin: itemstate.OriginWebhook, EchoOfEngine: true, Sender: "app[bot]"}, labelAttribution{Actor: "fabrik"}},
+		{"echo requester beats sender", itemstate.Change{Origin: itemstate.OriginWebhook, EchoOfEngine: true, Sender: "app[bot]", Requester: "x"}, labelAttribution{Actor: "overseer", Via: "x"}},
+		{"unechoed requester ignored", itemstate.Change{Origin: itemstate.OriginWebhook, Sender: "alice", Requester: "x"}, labelAttribution{Actor: "human", Login: "alice"}},
+		{"bot", itemstate.Change{Origin: itemstate.OriginWebhook, Sender: "Dependabot[bot]"}, labelAttribution{Actor: "bot", Login: "Dependabot[bot]"}},
+		{"empty sender", itemstate.Change{Origin: itemstate.OriginWebhook}, labelAttribution{Actor: "unknown"}},
+		{"reconcile", itemstate.Change{Origin: itemstate.OriginOther}, labelAttribution{Actor: "unknown"}},
+		{"probe", itemstate.Change{Origin: itemstate.OriginProbe}, labelAttribution{Actor: "unknown"}},
+	}
+	for _, tc := range cases {
+		if got := e.labelAttribute(tc.c); got != tc.want {
+			t.Errorf("%s: got %+v, want %+v", tc.name, got, tc.want)
+		}
 	}
 }
 
@@ -491,5 +574,23 @@ func TestCatchUpDoesNotInterfereWithEpisodeDedup(t *testing.T) {
 	ev := live.next(t) // the live settle of the same item is still announced
 	if ev.Meta["catch_up"] == "true" || ev.DedupKey == "" {
 		t.Fatalf("expected the live episode event, got %+v", ev)
+	}
+}
+
+// #2112: on a multi-repo daemon (owner, no repo) a bare issue number in a
+// subscription resolves when the cached issues are all in one repo.
+func TestChannelStreamerSubscribeBareNOnMultiRepoDaemon(t *testing.T) {
+	oldD, oldT := channelDebounce, channelTick
+	channelDebounce, channelTick = 20*time.Millisecond, time.Hour
+	t.Cleanup(func() { channelDebounce, channelTick = oldD, oldT })
+	m := multiRepoAPIEngine()
+	seedRepoItem(m, "owner/repo", 7)
+	e, _ := channelEngineOn(t, m, 0, nil)
+	res, err := e.channelStreamer().Subscribe(localapi.SubscribeParams{Subscriber: "S", Issues: []string{"7"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := res.Subscription.Issues; len(got) != 1 || got[0] != (channelevents.IssueRef{Repo: "owner/repo", Number: 7}) {
+		t.Fatalf("issues resolved to %+v", got)
 	}
 }

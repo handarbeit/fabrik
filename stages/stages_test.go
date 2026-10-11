@@ -937,3 +937,34 @@ func TestLoadAll_PersistSpec(t *testing.T) {
 		t.Error("PersistSpec must default to false")
 	}
 }
+
+func TestIsParkingColumn(t *testing.T) {
+	unmanaged := &Stage{Name: "Icebox", Unmanaged: true}
+	managedBacklog := &Stage{Name: "Backlog"}
+	unmanagedBacklog := &Stage{Name: "Backlog", Unmanaged: true}
+	plain := &Stage{Name: "Specify"}
+
+	tests := []struct {
+		name   string
+		stages []*Stage
+		col    string
+		want   bool
+	}{
+		{"configured unmanaged stage", []*Stage{plain, unmanaged}, "Icebox", true},
+		{"configured unmanaged Backlog", []*Stage{plain, unmanagedBacklog}, "Backlog", true},
+		{"configured managed Backlog keeps its meaning", []*Stage{plain, managedBacklog}, "Backlog", false},
+		{"legacy Backlog with no stage", []*Stage{plain}, "Backlog", true},
+		{"legacy Backlog with nil stages", nil, "Backlog", true},
+		{"pipeline stage", []*Stage{plain}, "Specify", false},
+		{"unknown column", []*Stage{plain}, "Icebox", false},
+		{"case variant is not the compat net", []*Stage{plain}, "backlog", false},
+		{"empty name", []*Stage{plain}, "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsParkingColumn(tt.stages, tt.col); got != tt.want {
+				t.Errorf("IsParkingColumn(%q) = %v, want %v", tt.col, got, tt.want)
+			}
+		})
+	}
+}

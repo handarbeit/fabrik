@@ -441,9 +441,10 @@ const spawnRetryInstruction = "Remove `fabrik:paused`, then re-advance to retry 
 // column, or the first non-unmanaged, non-terminal column as a fallback. Returns
 // "" when no suitable option exists or sf is nil (caller skips the status-set).
 // stagesCfg is consulted to skip any column backed by an `unmanaged: true`
-// stage (e.g. a declared Backlog), generalizing beyond the literal name
-// "Backlog" — the literal check is kept alongside as the same compat net used
-// in checkStageColumnAlignment, for installs with no matching stage declared.
+// stage (e.g. a declared Backlog) or, for installs with no Backlog stage, the
+// legacy literal "Backlog" — both via stages.IsParkingColumn, the single
+// parking-column predicate. A configured Backlog stage that is not unmanaged
+// keeps its configured meaning and is therefore not skipped.
 func resolveSpecifyOptionID(sf *gh.StatusField, stagesCfg []*stages.Stage) string {
 	if sf == nil {
 		return ""
@@ -452,18 +453,15 @@ func resolveSpecifyOptionID(sf *gh.StatusField, stagesCfg []*stages.Stage) strin
 	if id, ok := sf.Options["Specify"]; ok {
 		return id
 	}
-	// Fallback: first option that is not "Backlog", not an unmanaged column,
-	// and not the last column.
+	// Fallback: first option that is not a parking column and not the last
+	// column.
 	names := sf.OrderedOptionNames
 	if len(names) < 2 {
 		return ""
 	}
 	last := names[len(names)-1]
 	for _, name := range names {
-		if name == "Backlog" || name == last {
-			continue
-		}
-		if st := stages.FindStage(stagesCfg, name); st != nil && st.Unmanaged {
+		if name == last || stages.IsParkingColumn(stagesCfg, name) {
 			continue
 		}
 		return sf.Options[name]
