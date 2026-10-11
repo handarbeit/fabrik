@@ -320,12 +320,12 @@ func issueRef(repo string, n int) string { return fmt.Sprintf("%s#%d", repo, n) 
 
 // ---- status ----
 
-// resolveIssue parses "owner/repo#N" or a bare "N" (valid only when the daemon
-// manages exactly one repo).
+// resolveIssue parses "owner/repo#N" or a bare "N" (valid only when the
+// daemon's cached issues are all in exactly one repo).
 func (b localAPIBackend) resolveIssue(ref string) (repo string, number int, err error) {
 	ref = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(ref), "#"))
 	if ref == "" {
-		return "", 0, localapi.Errorf(localapi.CodeBadRequest, "issue is required: owner/repo#N, or N when the daemon manages exactly one repo")
+		return "", 0, localapi.Errorf(localapi.CodeBadRequest, "issue is required: owner/repo#N, or N when the daemon's cached issues are all in one repo")
 	}
 	if i := strings.LastIndex(ref, "#"); i > 0 {
 		n, perr := strconv.Atoi(ref[i+1:])
@@ -345,21 +345,25 @@ func (b localAPIBackend) resolveIssue(ref string) (repo string, number int, err 
 	case 0:
 		return "", 0, localapi.Errorf(localapi.CodeNotFound, "the daemon has no cached items yet; use owner/repo#N")
 	default:
-		return "", 0, localapi.Errorf(localapi.CodeAmbiguous, "the daemon manages %d repos (%s); use owner/repo#N", len(repos), strings.Join(repos, ", "))
+		return "", 0, localapi.Errorf(localapi.CodeAmbiguous, "the daemon has issues in %d repos (%s); use owner/repo#N", len(repos), strings.Join(repos, ", "))
 	}
 }
 
-// managedRepos is the repo set this daemon serves: its configured repo plus
-// the distinct repos of the cached items. A daemon with a default repo can still
-// carry items from other repos on its board, so the default alone is not the
-// set.
+// managedRepos is the repo set this daemon serves: its configured repo (only
+// when one is configured) plus the distinct repos of the cached items. A daemon
+// with a configured repo can still carry items from other repos on its board,
+// so the configured repo alone is not the set. Only real owner/repo keys are
+// members: in multi-repo mode defaultRepo() is "owner/" (no repo), which must
+// never be counted or named.
 func (b localAPIBackend) managedRepos() []string {
 	seen := map[string]bool{}
-	if r := b.e.defaultRepo(); r != "" {
-		seen[r] = true
+	if b.e.cfg.Repo != "" {
+		if r := b.e.defaultRepo(); isRealRepoKey(r) {
+			seen[r] = true
+		}
 	}
 	b.e.store.Scan(func(it *itemstate.ItemState) {
-		if !it.IsPR && it.Repo != "" {
+		if !it.IsPR && isRealRepoKey(it.Repo) {
 			seen[it.Repo] = true
 		}
 	})
@@ -369,6 +373,13 @@ func (b localAPIBackend) managedRepos() []string {
 	}
 	sort.Strings(repos)
 	return repos
+}
+
+// isRealRepoKey reports whether s is a well-formed "owner/repo" key: exactly
+// one slash with a non-empty owner and a non-empty repo.
+func isRealRepoKey(s string) bool {
+	owner, repo, ok := strings.Cut(s, "/")
+	return ok && owner != "" && repo != "" && !strings.Contains(repo, "/")
 }
 
 func (b localAPIBackend) suspendedUntil(now time.Time) time.Time {
@@ -1005,6 +1016,10 @@ func (b localAPIBackend) Health(localapi.HealthParams) (*localapi.HealthResult, 
 	if e.cfg.MaxConcurrent > 0 {
 		res.Workers.MaxConcurrent = localapi.Some(e.cfg.MaxConcurrent)
 	}
+
+	trainInUse, trainMax := b.e.trainSlotUsage()
+	res.Workers.TrainInUse = localapi.Some(trainInUse)
+	res.Workers.TrainMax = localapi.Some(trainMax)
 
 	res.MergeTrain = b.partitions()
 	return res, nil

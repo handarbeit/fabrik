@@ -16,6 +16,7 @@ import (
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/internal/localapi"
+	"github.com/handarbeit/fabrik/stages"
 )
 
 const ovProjectID = "PVT_ov"
@@ -247,15 +248,136 @@ func TestOverseerPromote_Refusals(t *testing.T) {
 	}
 }
 
-func TestOverseerPromote_RefusalListsValidTargets(t *testing.T) {
+// A refusal because the source column is not a parking column must not offer
+// valid_targets: the move is impossible, so a target list would contradict the
+// refusal (#2113 R3). This replaces the old behaviour, where an item in
+// Implement was refused with ["Specify","Implement","Validate"].
+func TestOverseerPromote_NonParkingSourceRefusalOmitsTargets(t *testing.T) {
+	for _, to := range []string{"Specify", "Nowhere", ""} {
+		t.Run("to="+to, func(t *testing.T) {
+			client := &mockGitHubClient{}
+			liveStatus(client, "Implement")
+			_, _, act := overseerEngine(t, client, ovItem{number: 5, status: "Implement"})
+			_, err := act.Promote(localapi.PromoteParams{Subscriber: "s", Issue: "5", To: to})
+			pe, st := refusedErr(t, err)
+			if st.Status != "Implement" || len(st.ValidTargets) != 0 {
+				t.Errorf("state = %+v, want Status Implement and no valid targets", st)
+			}
+			if !strings.Contains(pe.Message, "already in the pipeline column") || strings.Contains(pe.Message, "valid:") {
+				t.Errorf("message = %q, want the source-column refusal without a target list", pe.Message)
+			}
+			wantNoWrites(t, client)
+		})
+	}
+}
+
+// A parked item with a missing or invalid `to` still gets the target list: it
+// is useful there.
+func TestOverseerPromote_ParkedBadToListsTargets(t *testing.T) {
+	for _, to := range []string{"", "Nowhere"} {
+		client := &mockGitHubClient{}
+		liveStatus(client, "Backlog")
+		_, _, act := overseerEngine(t, client, ovItem{number: 5, status: "Backlog"})
+		_, err := act.Promote(localapi.PromoteParams{Subscriber: "s", Issue: "5", To: to})
+		_, st := refusedErr(t, err)
+		if !reflect.DeepEqual(st.ValidTargets, []string{"Specify", "Implement", "Validate"}) {
+			t.Errorf("to=%q: ValidTargets = %v", to, st.ValidTargets)
+		}
+	}
+}
+
+// Cache says Backlog but the live column is a pipeline column: same
+// contradiction, so no targets.
+func TestOverseerPromote_StaleCacheLiveRefusalOmitsTargets(t *testing.T) {
 	client := &mockGitHubClient{}
 	liveStatus(client, "Implement")
-	_, _, act := overseerEngine(t, client, ovItem{number: 5, status: "Implement"})
-	_, err := act.Promote(localapi.PromoteParams{Subscriber: "s", Issue: "5", To: "Specify"})
-	_, st := refusedErr(t, err)
-	if st.Status != "Implement" || !reflect.DeepEqual(st.ValidTargets, []string{"Specify", "Implement", "Validate"}) {
-		t.Errorf("state = %+v", st)
+	_, _, act := overseerEngine(t, client, ovItem{number: 5, status: "Backlog"})
+	pe, st := func() (*localapi.Error, localapi.RefusalState) {
+		_, err := act.Promote(localapi.PromoteParams{Subscriber: "s", Issue: "5", To: "Specify"})
+		return refusedErr(t, err)
+	}()
+	if !strings.Contains(pe.Message, "(confirmed live)") || len(st.ValidTargets) != 0 {
+		t.Errorf("message %q state %+v", pe.Message, st)
 	}
+	wantNoWrites(t, client)
+}
+
+// legacyStages is apiStages() without a Backlog stage: an install that ran
+// `fabrik init` before backlog.yaml existed.
+func legacyStages() []*stages.Stage {
+	var out []*stages.Stage
+	for _, s := range apiStages() {
+		if s.Name != "Backlog" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// #2113 R2: on a legacy install the Backlog column (no configured stage) is a
+// parking column, and promote goes through the same write path and audit
+// comment as a declared-unmanaged Backlog. Against the old parkingRefusal this
+// fails with "which has no configured stage".
+func TestOverseerPromote_LegacyBacklogWithoutStage(t *testing.T) {
+	client := &mockGitHubClient{}
+	liveStatus(client, "Backlog")
+	forbidIDLookups(t, client)
+	eng, _, act := overseerEngine(t, client, ovItem{number: 5, status: "Backlog"})
+	eng.cfg.Stages = legacyStages()
+
+	res, err := act.Promote(localapi.PromoteParams{Subscriber: "my-session", Issue: "5", To: "Specify"})
+	if err != nil {
+		t.Fatalf("Promote: %v", err)
+	}
+	if !res.Changed || res.AuditComment != localapi.AuditPosted {
+		t.Errorf("result = %+v", res)
+	}
+	want := []updateStatusCall{{ovProjectID, "PVTI_5", "FIELD_1", "OPT_Specify"}}
+	if !reflect.DeepEqual(client.updateStatusCalls, want) {
+		t.Errorf("status writes = %v, want %v", client.updateStatusCalls, want)
+	}
+	bodies := commentBodies(client)
+	if len(bodies) != 1 || !strings.HasPrefix(bodies[0], "🏭 **Fabrik — overseer action: promote**") ||
+		!strings.Contains(bodies[0], "Backlog to Specify") {
+		t.Errorf("audit comment = %q", bodies)
+	}
+	if got := statusOf(t, eng, 5); got != "Specify" {
+		t.Errorf("cache status = %q, want Specify", got)
+	}
+}
+
+// A configured Backlog stage that is not unmanaged keeps its configured
+// meaning: it is a pipeline column, so promote refuses to move out of it.
+func TestOverseerPromote_ConfiguredManagedBacklogRefused(t *testing.T) {
+	client := &mockGitHubClient{}
+	liveStatus(client, "Backlog")
+	eng, _, act := overseerEngine(t, client, ovItem{number: 5, status: "Backlog"})
+	eng.cfg.Stages = apiStages()
+	for _, s := range eng.cfg.Stages {
+		if s.Name == "Backlog" {
+			s.Unmanaged = false
+		}
+	}
+	_, err := act.Promote(localapi.PromoteParams{Subscriber: "s", Issue: "5", To: "Specify"})
+	pe, st := refusedErr(t, err)
+	if !strings.Contains(pe.Message, "already in the pipeline column") || len(st.ValidTargets) != 0 {
+		t.Errorf("message %q state %+v", pe.Message, st)
+	}
+	wantNoWrites(t, client)
+}
+
+// On a legacy install a column with no stage that is not Backlog is still refused.
+func TestOverseerPromote_LegacyInstallUnknownColumnRefused(t *testing.T) {
+	client := &mockGitHubClient{}
+	liveStatus(client, "Icebox")
+	eng, _, act := overseerEngine(t, client, ovItem{number: 5, status: "Icebox"})
+	eng.cfg.Stages = legacyStages()
+	_, err := act.Promote(localapi.PromoteParams{Subscriber: "s", Issue: "5", To: "Specify"})
+	pe, st := refusedErr(t, err)
+	if !strings.Contains(pe.Message, "no configured stage") || len(st.ValidTargets) != 0 {
+		t.Errorf("message %q state %+v", pe.Message, st)
+	}
+	wantNoWrites(t, client)
 }
 
 func TestOverseerPromote_UnmanagedAndMissingIssue(t *testing.T) {
@@ -909,5 +1031,21 @@ func TestOverseerNoPauseLiftOrFreeFormCommentSurface(t *testing.T) {
 		if strings.Contains(code, banned) {
 			t.Errorf("overseer_actions.go must not call %s", banned)
 		}
+	}
+}
+
+// #2112: an action given a bare N resolves on a multi-repo daemon (owner, no
+// repo) whose cached issues are all in one repo.
+func TestOverseerPromote_BareNOnMultiRepoDaemon(t *testing.T) {
+	client := &mockGitHubClient{}
+	liveStatus(client, "Backlog")
+	eng, _, act := overseerEngine(t, client, ovItem{number: 5, status: "Backlog"})
+	eng.cfg.Owner, eng.cfg.Repo = "owner", ""
+	res, err := act.Promote(localapi.PromoteParams{Subscriber: "my-session", Issue: "5", To: "Specify"})
+	if err != nil {
+		t.Fatalf("Promote: %v", err)
+	}
+	if res.Issue != "owner/repo#5" {
+		t.Errorf("Issue = %q", res.Issue)
 	}
 }

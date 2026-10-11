@@ -493,3 +493,21 @@ func TestCatchUpDoesNotInterfereWithEpisodeDedup(t *testing.T) {
 		t.Fatalf("expected the live episode event, got %+v", ev)
 	}
 }
+
+// #2112: on a multi-repo daemon (owner, no repo) a bare issue number in a
+// subscription resolves when the cached issues are all in one repo.
+func TestChannelStreamerSubscribeBareNOnMultiRepoDaemon(t *testing.T) {
+	oldD, oldT := channelDebounce, channelTick
+	channelDebounce, channelTick = 20*time.Millisecond, time.Hour
+	t.Cleanup(func() { channelDebounce, channelTick = oldD, oldT })
+	m := multiRepoAPIEngine()
+	seedRepoItem(m, "owner/repo", 7)
+	e, _ := channelEngineOn(t, m, 0, nil)
+	res, err := e.channelStreamer().Subscribe(localapi.SubscribeParams{Subscriber: "S", Issues: []string{"7"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := res.Subscription.Issues; len(got) != 1 || got[0] != (channelevents.IssueRef{Repo: "owner/repo", Number: 7}) {
+		t.Fatalf("issues resolved to %+v", got)
+	}
+}

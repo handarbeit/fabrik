@@ -220,3 +220,23 @@ func TestTrainRow_ColourTerminalKeepsPhaseAndElapsed(t *testing.T) {
 		}
 	}
 }
+
+func TestWorkerSlotsEvent_TitleSegment(t *testing.T) {
+	a := newTrainActive()
+	if got := a.slotsSuffix(); got != "" {
+		t.Errorf("before the first event suffix = %q, want empty", got)
+	}
+	c, _ := a.Update(WorkerSlotsEvent{InUse: 5, Max: 5, TrainInUse: 1, TrainMax: 1})
+	a = c.(ActivePaneComponent)
+	if got := a.slotsSuffix(); got != " · slots 5/5 + train 1/1" {
+		t.Errorf("train on suffix = %q", got)
+	}
+	if v := ansi.Strip(a.View(80)); !strings.Contains(v, "In Progress (0) · slots 5/5 + train 1/1") {
+		t.Errorf("view missing slots segment:\n%s", v)
+	}
+	c, _ = a.Update(WorkerSlotsEvent{InUse: 2, Max: 5})
+	a = c.(ActivePaneComponent)
+	if got := a.slotsSuffix(); got != " · slots 2/5" {
+		t.Errorf("train off suffix = %q", got)
+	}
+}

@@ -435,6 +435,25 @@ func FindStage(stages []*Stage, name string) *Stage {
 	return nil
 }
 
+// legacyParkingColumn is the board column name treated as an unmanaged parking
+// column on installs that predate stages/examples/backlog.yaml and so have no
+// Backlog stage configured.
+const legacyParkingColumn = "Backlog"
+
+// IsParkingColumn reports whether the board column name is an unmanaged
+// parking column — one Fabrik runs no workflow for. It is the single predicate
+// behind every such decision: a configured stage decides by its own Unmanaged
+// flag (so a configured Backlog stage that is not unmanaged keeps its
+// configured meaning), and a column with no stage is a parking column only when
+// it is the literal "Backlog" (case-sensitive), the compat net for installs that
+// ran `fabrik init` before backlog.yaml existed.
+func IsParkingColumn(stages []*Stage, name string) bool {
+	if s := FindStage(stages, name); s != nil {
+		return s.Unmanaged
+	}
+	return name == legacyParkingColumn
+}
+
 // IsFirstStage reports whether stageName is the first stage in the pipeline
 // (i.e., stages[0].Name == stageName). Returns false for an empty slice.
 func IsFirstStage(stages []*Stage, stageName string) bool {
