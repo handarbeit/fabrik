@@ -83,6 +83,50 @@ func TestCleanupLockedIssues_RemovesLabels(t *testing.T) {
 	}
 }
 
+// TestCleanupLockedIssues_SkipsLockLabelAlreadyAbsentFromCache is the #2159
+// shutdown symptom: the cache says the lock label is already gone, so no
+// removal call (which GitHub would 404) is made — but the lock is still
+// released in the store.
+func TestCleanupLockedIssues_SkipsLockLabelAlreadyAbsentFromCache(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+
+	// #10: populated labels without the lock label. #11: populated, with it.
+	eng.store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{Repo: "owner/repo", Number: 10, Labels: []string{"stage:Plan:complete"}}})
+	eng.store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{Repo: "owner/repo", Number: 11, Labels: []string{"fabrik:locked:testuser"}}})
+	now := time.Now()
+	eng.store.Apply(itemstate.LocalLockAcquired{Repo: "owner/repo", Number: 10, User: "testuser", AcquiredAt: now})
+	eng.store.Apply(itemstate.LocalLockAcquired{Repo: "owner/repo", Number: 11, User: "testuser", AcquiredAt: now})
+
+	eng.cleanupLockedIssues()
+
+	if len(client.removeLabelCalls) != 1 || client.removeLabelCalls[0].issueNumber != 11 {
+		t.Fatalf("removeLabelCalls = %+v, want a single call for #11", client.removeLabelCalls)
+	}
+	for _, snap := range eng.store.All() {
+		if lock := snap.Lock(); lock != nil && lock.HeldByThis {
+			t.Errorf("lock still held for #%d", snap.Number())
+		}
+	}
+}
+
+// A 404 on shutdown removal means the label is already gone: success, quietly.
+func TestCleanupLockedIssues_NotFoundIsSuccess(t *testing.T) {
+	client := &mockGitHubClient{
+		removeLabelFromIssueFn: func(_, _ string, _ int, _ string) error { return gh.ErrNotFound },
+	}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	eng.store.Apply(itemstate.LocalLockAcquired{Repo: "owner/repo", Number: 10, User: "testuser", AcquiredAt: time.Now()})
+
+	eng.cleanupLockedIssues()
+
+	for _, snap := range eng.store.All() {
+		if lock := snap.Lock(); lock != nil && lock.HeldByThis {
+			t.Errorf("lock still held after a 404 removal")
+		}
+	}
+}
+
 func TestCleanupLockedIssues_Empty_NoOp(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng := testEngine(t, client, &mockClaudeInvoker{})

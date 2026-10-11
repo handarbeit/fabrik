@@ -876,8 +876,24 @@ func (e *Engine) cleanupLockedIssues() {
 	for _, snap := range locked {
 		owner, repo := parseOwnerRepo(snap.Repo())
 		num := snap.Number()
+		// A populated label set that lacks the lock label means it is already
+		// gone from GitHub (#2159): skip the call that would 404. An empty set
+		// is "not populated", so still attempt the removal (fail-open).
+		if labels := snap.Labels(); len(labels) > 0 && !hasLabel(labels, lockLabel) {
+			e.logf(num, "shutdown", "lock label already absent, nothing to remove\n")
+			e.store.Apply(itemstate.LocalLockReleased{Repo: snap.Repo(), Number: num})
+			continue
+		}
 		if err := e.client.RemoveLabelFromIssue(owner, repo, num, lockLabel); err != nil {
-			e.logf(num, "warn", "could not remove lock label during shutdown: %v\n", err)
+			if errors.Is(err, gh.ErrNotFound) {
+				// Already removed on GitHub: success, like applyLabelRemove.
+				e.logf(num, "shutdown", "lock label already absent on GitHub\n")
+				if c := e.cache(); c != nil {
+					c.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, num), lockLabel)
+				}
+			} else {
+				e.logf(num, "warn", "could not remove lock label during shutdown: %v\n", err)
+			}
 		} else {
 			e.logf(num, "shutdown", "removed lock label\n")
 			if c := e.cache(); c != nil {

@@ -9,6 +9,7 @@ import (
 
 	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/channelevents"
 	"github.com/handarbeit/fabrik/internal/events"
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/tui"
@@ -313,5 +314,121 @@ func TestReconcileTick_ZeroDriftCapturesMilestones(t *testing.T) {
 	s2, _ := eng.store.Peek("owner/repo", 2)
 	if st := s2.State(); !st.MilestoneKnown || st.Milestone != nil {
 		t.Fatalf("#2 after zero-drift tick: known=%v ms=%+v, want known-none", st.MilestoneKnown, st.Milestone)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// #2159 — a reconcile must not undo the engine's own recent writes
+// ---------------------------------------------------------------------------
+
+// engineWriteReconcileEngine builds an engine with the channel hub running and
+// a cache over its store holding owner/repo#1 at Review with labels. The labels
+// are seeded straight into the store (not through the cache write-through) so
+// they are not recorded as engine writes.
+func engineWriteReconcileEngine(t *testing.T, client *mockGitHubClient, labels ...string) (*Engine, *boardcache.CacheImpl, *chanSink, time.Time) {
+	t.Helper()
+	oldD, oldT := channelDebounce, channelTick
+	channelDebounce, channelTick = 20*time.Millisecond, time.Hour
+	t.Cleanup(func() { channelDebounce, channelTick = oldD, oldT })
+
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	eng, sink := channelEngineOn(t, eng, 0, nil)
+	t1 := time.Now().Add(-time.Hour).Truncate(time.Second)
+	eng.store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{
+		ID: "I_1", ItemID: "PVTI_1", Number: 1, Repo: "owner/repo", Status: "Review", Labels: labels, UpdatedAt: t1,
+	}})
+	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
+	eng.readClient = cache
+	// Let the seeding settle before asserting on events.
+	sink.quiet(t, 100*time.Millisecond)
+	return eng, cache, sink, t1
+}
+
+func labelsNow(t *testing.T, eng *Engine) []string {
+	t.Helper()
+	snap, err := eng.store.Get("owner/repo", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return snap.Labels()
+}
+
+// TestReconcileTick_DoesNotRevertEngineWrites reproduces the 2026-10-11 dev
+// daemon sequence: the engine writes labels, then a reconcile receives a board
+// listing that still shows the pre-write state. The cache keeps the written
+// values, no drift is reported, and no channel event is emitted.
+func TestReconcileTick_DoesNotRevertEngineWrites(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng, cache, sink, t1 := engineWriteReconcileEngine(t, client, "fabrik:awaiting-ci")
+	var fetches atomic.Int32
+	client.fetchProjectBoardFn = func(_, _ string, _ int, _ string) (*gh.ProjectBoard, error) {
+		fetches.Add(1)
+		return &gh.ProjectBoard{ProjectID: "PVT_1", Items: []gh.ProjectItem{
+			// Pre-write listing: still carries awaiting-ci, lacks the stage label.
+			{ID: "I_1", ItemID: "PVTI_1", Number: 1, Repo: "owner/repo", Status: "Review",
+				Labels: []string{"fabrik:awaiting-ci"}, UpdatedAt: t1},
+		}}, nil
+	}
+
+	key := boardcache.ItemKey("owner/repo", 1)
+	cache.ApplyLabelRemoved(key, "fabrik:awaiting-ci")
+	cache.ApplyLabelAdded(key, "stage:Review:complete")
+	// Drain the (legitimate) events for the engine's own two writes.
+	for want := 2; want > 0; want-- {
+		ev := sink.next(t)
+		if ev.Type != channelevents.LabelApplied && ev.Type != channelevents.LabelRemoved {
+			want++ // unrelated state-derived event
+		}
+	}
+
+	drift, keys, _, err := cache.LightReconcile("owner", "repo", 1, "organization")
+	if err != nil || drift != 0 {
+		t.Fatalf("LightReconcile drift=%d keys=%v err=%v, want 0 drift", drift, keys, err)
+	}
+	eng.reconcileTick(cache, nil)
+	// Force a full Reconcile as well: even a reconcile run for another reason
+	// must not revert the write.
+	b, _ := client.FetchProjectBoard("owner", "repo", 1, "organization")
+	b.FetchedAt = time.Now()
+	cache.Reconcile(b)
+
+	got := labelsNow(t, eng)
+	hasStage, hasCI := false, false
+	for _, l := range got {
+		hasStage = hasStage || l == "stage:Review:complete"
+		hasCI = hasCI || l == "fabrik:awaiting-ci"
+	}
+	if !hasStage || hasCI {
+		t.Fatalf("labels = %v, want stage:Review:complete present and awaiting-ci absent", got)
+	}
+	if fetches.Load() < 2 {
+		t.Fatalf("board fetched %d times, want the reconcile to have run", fetches.Load())
+	}
+	sink.quiet(t, 300*time.Millisecond) // no false label event (actor unknown)
+}
+
+// A change made outside the engine after an engine write is still reconciled.
+func TestReconcileTick_ExternalChangeAfterEngineWriteStillReconciles(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng, cache, sink, t1 := engineWriteReconcileEngine(t, client, "fabrik:paused")
+	eng.store.SetEngineWriteGraceForTest(time.Millisecond)
+
+	cache.ApplyLabelAdded(boardcache.ItemKey("owner/repo", 1), "stage:Review:complete")
+	sink.nextOfType(t, channelevents.LabelApplied)
+	time.Sleep(20 * time.Millisecond) // the listing below is fetched after write+grace
+
+	client.fetchProjectBoardFn = func(_, _ string, _ int, _ string) (*gh.ProjectBoard, error) {
+		// A human removed the stage label in the UI; updatedAt moved on.
+		return &gh.ProjectBoard{ProjectID: "PVT_1", Items: []gh.ProjectItem{
+			{ID: "I_1", ItemID: "PVTI_1", Number: 1, Repo: "owner/repo", Status: "Review",
+				Labels: []string{"fabrik:paused"}, UpdatedAt: t1.Add(time.Minute)},
+		}}, nil
+	}
+	eng.reconcileTick(cache, nil)
+
+	for _, l := range labelsNow(t, eng) {
+		if l == "stage:Review:complete" {
+			t.Fatalf("external removal not applied: %v", labelsNow(t, eng))
+		}
 	}
 }
