@@ -136,7 +136,9 @@ func (e *Engine) labelDerivedEvents(st *itemstate.ItemState, d itemstate.LabelDe
 	case d.Added && d.Label == "fabrik:awaiting-landing-verification":
 		// Applied immediately after a Done transition attributable to a merge, by
 		// every landing path. A merge-train member's own PR is closed, not merged;
-		// the credited integration PR is named by fabrik:credited-pr:<N>.
+		// the credited integration PR is named by fabrik:credited-pr:<N>. This is
+		// the fallback for emitLanded, which publishes the same event (same dedup
+		// key) earlier, from the landing path itself.
 		pr := 0
 		for _, l := range st.Labels {
 			if strings.HasPrefix(l, "fabrik:credited-pr:") {
@@ -145,13 +147,7 @@ func (e *Engine) labelDerivedEvents(st *itemstate.ItemState, d itemstate.LabelDe
 				}
 			}
 		}
-		ev := e.baseEvent(st, channelevents.Merged)
-		if pr != 0 {
-			ev.PR = pr
-		}
-		ev.DedupKey = fmt.Sprintf("merged:%s:%d", ref, ev.PR)
-		ev.Content = fmt.Sprintf("%s landed via PR #%d", ref, ev.PR)
-		return []channelevents.Event{ev}
+		return []channelevents.Event{e.landedEvent(st, pr)}
 	}
 	return nil
 }

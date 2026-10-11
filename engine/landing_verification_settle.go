@@ -102,6 +102,10 @@ func creditedPRFromLabel(item gh.ProjectItem) (int, bool) {
 // failed". Not verifying is a gap; falsely reversing a good landing is a
 // regression, and between the two the gap is strictly safer.
 func (e *Engine) markCreditedLanding(item gh.ProjectItem, creditedPR int) {
+	// #2123: announce the landing first — before the credited-PR label and every
+	// close-tracking event after it — so `merged` precedes them. The hub dedups it
+	// against the label-derived merged, and the restart replay of this call.
+	e.emitLanded(item, creditedPR)
 	label := fmt.Sprintf("%s%d", creditedPRLabelPrefix, creditedPR)
 	if err := e.addLabelChecked(item, label); err != nil {
 		e.logf(item.Number, "warn",

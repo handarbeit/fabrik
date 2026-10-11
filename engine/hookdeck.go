@@ -200,7 +200,9 @@ func (hm *hookdeckManager) ManagedRepos() []string {
 func (hm *hookdeckManager) RegisterEcho(eventType, action, key string)               {}
 func (hm *hookdeckManager) RegisterEchoIfSubscribed(eventType, action, key string)   {}
 func (hm *hookdeckManager) RegisterEchoVia(eventType, action, key, requester string) {}
-func (hm *hookdeckManager) MatchEcho(eventType, action, key string)                  {}
+func (hm *hookdeckManager) RegisterEchoIfSubscribedVia(eventType, action, key, requester string) {
+}
+func (hm *hookdeckManager) MatchEcho(eventType, action, key string) {}
 
 // Handle implements events.EventSink, feeding normalized events into the
 // exact same deltaFn closure the PAT-mode transport uses (poll.go).

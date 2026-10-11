@@ -33,3 +33,13 @@ func SetChannelTimingForTest(debounce, tick time.Duration) (restore func()) {
 	channelDebounce, channelTick = debounce, tick
 	return func() { channelDebounce, channelTick = oldD, oldT }
 }
+
+// MarkBoardPopulatedForTest opens the arrival gate before the first poll
+// completes, so items the first poll populates are announced as arrivals. It
+// exists to show that the "present at startup" tests are not vacuous.
+func (e *Engine) MarkBoardPopulatedForTest() { e.boardPopulated.Store(true) }
+
+// SetLegacyLabelBaselineForTest restores the pre-#2123 label baseline rule in the
+// engine's store (see itemstate.Store.SetLegacyLabelBaselineForTest), so a test
+// can show the restart flood the new rule removes.
+func (e *Engine) SetLegacyLabelBaselineForTest(on bool) { e.store.SetLegacyLabelBaselineForTest(on) }

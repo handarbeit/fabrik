@@ -258,6 +258,11 @@ type Engine struct {
 	// starts it (and when the hub failed to open). Guarded by channelMu.
 	channelMu sync.Mutex
 	channel   *channelEvents
+	// boardPopulated is set once the first poll has completed successfully: the
+	// board is then "initially populated" and an item the store learns about
+	// afterwards is an arrival (item-added, #2123). Items created before it —
+	// the startup population, whichever path delivers it — are never announced.
+	boardPopulated atomic.Bool
 	// logThrottle is the shared dedup state behind logfThrottled (R4,
 	// logthrottle.go) — collapses repeated identical log lines (e.g. the
 	// per-poll rate-limit stats lines) into one emission per throttle window

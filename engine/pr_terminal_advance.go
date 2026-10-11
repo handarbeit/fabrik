@@ -209,6 +209,9 @@ func (e *Engine) advanceValidateTerminalItem(board *gh.ProjectBoard, item gh.Pro
 		// advance's outcome above — see awaitingAdvanceLabel's doc comment
 		// (advance_settle.go) for why that's safe even when recordAdvanceOutcome
 		// just failed.
+		if aerr == nil {
+			e.emitLanded(item, pr.Number) // #2123: before any close tracking
+		}
 		e.closeIssueIfNonDefaultBase(item, pr.Number)
 		// #1616: mark for post-Done landing verification — but only once the
 		// item actually reached Done (aerr == nil). See the equivalent comment

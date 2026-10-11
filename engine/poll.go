@@ -1273,6 +1273,7 @@ func (e *Engine) PollWithBackoff(ctx context.Context, configuredInterval time.Du
 		return PollBackoffResult{}, err
 	}
 	e.health.notePollSuccess(e.now())
+	e.boardPopulated.Store(true)
 
 	// Update idle timer.
 	if result.Active {
@@ -1391,6 +1392,7 @@ func (e *Engine) PollOnce(ctx context.Context) error {
 	_, err := e.poll(ctx)
 	if err == nil {
 		e.health.notePollSuccess(e.now())
+		e.boardPopulated.Store(true)
 	}
 	return err
 }

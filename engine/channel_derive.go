@@ -83,6 +83,7 @@ func (ce *channelEvents) evaluateItem(key string, d *dirtyItem) {
 		return
 	}
 	st := snap.State()
+	ce.enqueueDerived(ce.announceArrival(key, &st))
 	ce.closeSettleEpisode(key, &st)
 	ce.enqueueDerived(ce.derive(key, &st, d))
 }
@@ -100,7 +101,10 @@ func (ce *channelEvents) enqueueDerived(evs []channelevents.Event) {
 // events for one item. Consumer goroutine only (it owns the memo).
 func (ce *channelEvents) derive(key string, st *itemstate.ItemState, d *dirtyItem) []channelevents.Event {
 	e := ce.e
-	if st.IsPR {
+	// A label-less record (probe-seeded) carries no usable classification: wait
+	// for the first label-bearing population, which then baselines silently
+	// (the restart-flood fix, #2123).
+	if st.IsPR || !st.LabelsKnown {
 		return nil
 	}
 	now := e.now()
@@ -225,7 +229,7 @@ func (ce *channelEvents) onTick() {
 	usageLimited := e.channelUsageLimitedUntil(now)
 	var out []channelevents.Event
 	e.store.Scan(func(st *itemstate.ItemState) {
-		if st.IsPR {
+		if st.IsPR || !st.LabelsKnown {
 			return
 		}
 		key := issueRef(st.Repo, st.Number)
