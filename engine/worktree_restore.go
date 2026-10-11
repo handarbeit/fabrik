@@ -91,3 +91,25 @@ func (wm *WorktreeManager) RestoreUnpushedRebase(issueNumber int, baseBranch, pr
 	}
 	return true, ""
 }
+
+// SetCommentRebaseRestoreDisabledForTest neutralises the post-invocation restore on
+// every registered worktree manager (the R1 non-vacuity seam, #2150).
+func (e *Engine) SetCommentRebaseRestoreDisabledForTest(disabled bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.restoreRebaseDisabledForTest = disabled
+	for _, wm := range e.worktreeManagers {
+		wm.restoreRebaseDisabled.Store(disabled)
+	}
+}
+
+// SetCatchUpPureRebaseDisabledForTest neutralises PrepareCatchUp's pure-rebase tolerance
+// on every registered worktree manager (the R2 non-vacuity seam, #2150).
+func (e *Engine) SetCatchUpPureRebaseDisabledForTest(disabled bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.pureRebaseDisabledForTest = disabled
+	for _, wm := range e.worktreeManagers {
+		wm.pureRebaseDisabled.Store(disabled)
+	}
+}
