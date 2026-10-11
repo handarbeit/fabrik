@@ -332,8 +332,16 @@ func runMarkedEscapeInvocation(t *testing.T) (helperPID int, ownerSeen string, f
 	infoCopy := filepath.Join(dir, "info.json")
 	script := "#!/bin/sh\ncat >/dev/null\n" +
 		"printf '%s' \"$" + workerenv.OwnerVar + "\" > '" + ownerFile + "'\n" +
+		// The engine writes the owner file just after Start(), so the script can
+		// get here first; wait for it rather than copying nothing.
+		"while [ ! -s \"$" + workerenv.OwnerVar + "\" ]; do sleep 0.02; done\n" +
 		"cp \"$" + workerenv.OwnerVar + "\" '" + infoCopy + "'\n" +
-		"FABRIK_TEST_SETSID_HELPER=1 '" + os.Args[0] + "' >/dev/null 2>&1 &\necho $! > '" + pidFile + "'\n" +
+		// Launched from a subshell that exits at once, so the helper is
+		// reparented to init before any sample: its PPID chain no longer leads to
+		// the worker, which is what a backgrounded command looks like once its
+		// shell is gone. Left as a plain child, the end-of-invocation sample would
+		// find its new session through the chain and reap it without the marker.
+		"( FABRIK_TEST_SETSID_HELPER=1 '" + os.Args[0] + "' >/dev/null 2>&1 & echo $! > '" + pidFile + "' )\n" +
 		"sleep 1\n" +
 		"printf '%s\\n' '" + fakeClaudeCompleteJSON + "'\n"
 	invokeFakeClaudeNoTick(t, script)
