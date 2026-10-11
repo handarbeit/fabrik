@@ -179,3 +179,103 @@ func TestOverseerRevalidateRefusesAPausedItem(t *testing.T) {
 		})
 	}
 }
+
+// TestOverseerAdvanceMovesACompletedStageAndTheEngineDispatchesTheNext (#2126):
+// with autonomy off, a completed Specify waits for a human. fabrik_advance moves
+// it exactly one stage through the engine's own advance, posts one audit comment,
+// and the very next polls dispatch Research — and only Research.
+func TestOverseerAdvanceMovesACompletedStageAndTheEngineDispatchesTheNext(t *testing.T) {
+	t.Parallel()
+	yolo := false
+	env := NewEnv(t, EnvOptions{Stages: smokeStages(), Yolo: &yolo})
+
+	num := FileIssue(t, env, "overseer advance", "body", "Specify", "stage:Specify:complete")
+	RunPolls(t, env, 4)
+	// Non-vacuity: without the action the item just sits in Specify.
+	if got := env.Claude.StageCallCount("Research"); got != 0 {
+		t.Fatalf("Research ran before the advance (%d calls); the scenario proves nothing", got)
+	}
+	if got := projectItem(t, env, num).Status; got != "Specify" {
+		t.Fatalf("status before the advance = %q, want Specify", got)
+	}
+
+	act := env.Engine.OverseerActorForTest()
+	res, err := act.Advance(localapi.AdvanceParams{Subscriber: "overseer-session", Issue: strconv.Itoa(num)})
+	if err != nil {
+		t.Fatalf("Advance: %v", err)
+	}
+	if !res.Changed || res.AuditComment != localapi.AuditPosted {
+		t.Errorf("result = %+v", res)
+	}
+	if got := projectItem(t, env, num).Status; got != "Research" {
+		t.Errorf("status after the advance = %q, want Research", got)
+	}
+
+	WaitForIssueLabel(t, env, num, "stage:Research:complete", 80)
+	if got := env.Claude.StageCallCount("Research"); got != 1 {
+		t.Errorf("Research dispatched %d times, want 1", got)
+	}
+	// Exactly one stage: Research completing does not advance by itself (no
+	// autonomy), so Plan never ran.
+	RunPolls(t, env, 4)
+	if got := env.Claude.StageCallCount("Plan"); got != 0 {
+		t.Errorf("Plan ran %d times; the advance must be one stage only", got)
+	}
+	if n := len(auditComments(t, env, num)); n != 1 {
+		t.Errorf("%d audit comments, want 1", n)
+	}
+}
+
+// TestOverseerAdvanceRefusesWhatTheEngineWouldNotAdvance: the refusals hold
+// against the real engine and write nothing.
+func TestOverseerAdvanceRefusesWhatTheEngineWouldNotAdvance(t *testing.T) {
+	t.Parallel()
+	yolo := false
+	env := NewEnv(t, EnvOptions{Stages: smokeStages(), Yolo: &yolo})
+	num := FileIssue(t, env, "overseer advance refusals", "body", "Specify", "stage:Specify:complete")
+	RunPolls(t, env, 2)
+
+	if err := env.Sim.Sim().AddLabelToIssue(env.Owner, env.Repo, num, "fabrik:paused"); err != nil {
+		t.Fatalf("AddLabelToIssue: %v", err)
+	}
+	act := env.Engine.OverseerActorForTest()
+	_, err := act.Advance(localapi.AdvanceParams{Subscriber: "overseer-session", Issue: strconv.Itoa(num)})
+	var pe *localapi.Error
+	if !errors.As(err, &pe) || pe.Code != localapi.CodeRefused || !strings.Contains(pe.Message, "a human comment resumes it") {
+		t.Fatalf("Advance = %v, want a pause refusal", err)
+	}
+	if got := projectItem(t, env, num).Status; got != "Specify" {
+		t.Errorf("a refused advance moved the item to %q", got)
+	}
+	if n := len(auditComments(t, env, num)); n != 0 {
+		t.Errorf("a refused advance posted %d audit comments", n)
+	}
+	if !hasLabel(IssueLabels(t, env, num), "fabrik:paused") {
+		t.Error("the pause was lifted")
+	}
+}
+
+// TestOverseerAdvanceAuditCommentStartsNoReviewCycle: after an advance, the audit
+// comment is inert under PAT auth — no comment-review invocation runs for it in
+// the stage the item left.
+func TestOverseerAdvanceAuditCommentStartsNoReviewCycle(t *testing.T) {
+	t.Parallel()
+	yolo := false
+	env := NewEnv(t, EnvOptions{Stages: smokeStages(), Yolo: &yolo})
+	env.Claude.ForStageComments("Specify", simclaude.CommentReviewCompleted())
+	env.Claude.ForStageComments("Research", simclaude.CommentReviewCompleted())
+
+	num := FileIssue(t, env, "overseer advance audit", "body", "Specify", "stage:Specify:complete")
+	RunPolls(t, env, 2)
+	act := env.Engine.OverseerActorForTest()
+	if _, err := act.Advance(localapi.AdvanceParams{Subscriber: "overseer-session", Issue: strconv.Itoa(num)}); err != nil {
+		t.Fatalf("Advance: %v", err)
+	}
+	WaitForIssueLabel(t, env, num, "stage:Research:complete", 80)
+	RunPolls(t, env, 6)
+	for _, stage := range []string{"Specify", "Research"} {
+		if got := env.Claude.CommentCallCount(stage); got != 0 {
+			t.Errorf("a %s comment-review cycle ran for the audit comment: %d calls", stage, got)
+		}
+	}
+}

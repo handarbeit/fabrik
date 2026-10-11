@@ -1433,6 +1433,9 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 
 	// Fetch status field metadata (for mutations) on first poll
 	e.mu.Lock()
+	if board.ProjectID != "" {
+		e.boardProjectID = board.ProjectID
+	}
 	if e.statusField == nil && board.ProjectID != "" {
 		sf, err := e.readClient.FetchStatusField(board.ProjectID)
 		if err != nil {
