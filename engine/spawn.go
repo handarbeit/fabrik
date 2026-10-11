@@ -121,18 +121,54 @@ func (e *Engine) logUnparsedSpawnMarkers(number int, planBody string) {
 		spawnBeginMarker, spawnBeginMarker+" owner/repo", spawnEndMarker)
 }
 
-// ParseSpawnBlocks scans body for all FABRIK_SPAWN_CHILD_BEGIN/END pairs and
-// returns the parsed spawn blocks in order. Malformed or incomplete pairs are
-// skipped.
+// SpawnBlockError describes a FABRIK_SPAWN_CHILD_BEGIN/END pair that could not
+// be parsed into a SpawnBlock (#2091). Index is the 1-based position among ALL
+// BEGIN/END pairs in the scanned text — what a human counts in the Plan — which
+// intentionally differs from the position in the well-formed list that
+// validateSpawnDependsOn and the fabrik:spawned-child:<index>:<n> markers use:
+// the two never coexist, because any SpawnBlockError holds the whole spawn.
+// Found is the first non-empty line inside the block, already sanitised for
+// inline rendering ("" when the block was empty).
+type SpawnBlockError struct {
+	Index  int
+	Repo   string
+	Found  string
+	Reason string
+}
+
+// String renders the error for a log line or a comment bullet.
+func (e SpawnBlockError) String() string {
+	if e.Found == "" {
+		return fmt.Sprintf("block %d (%s): %s", e.Index, e.Repo, e.Reason)
+	}
+	return fmt.Sprintf("block %d (%s): %s — found `%s`", e.Index, e.Repo, e.Reason, e.Found)
+}
+
+// ParseSpawnBlocks returns the well-formed spawn blocks in body, in order.
+// Malformed pairs are skipped; callers that must report them use
+// ParseSpawnBlocksDetailed. See that function for the scanning rules.
+func ParseSpawnBlocks(body string) []SpawnBlock {
+	blocks, _ := ParseSpawnBlocksDetailed(body)
+	return blocks
+}
+
+// ParseSpawnBlocksDetailed scans body for all FABRIK_SPAWN_CHILD_BEGIN/END
+// pairs and returns the parsed spawn blocks in order plus one SpawnBlockError
+// per pair that failed to parse (#2091), so a malformed block is never dropped
+// silently.
 //
 // Both markers must stand on their own line — the same convention
 // FABRIK_STAGE_COMPLETE follows (stageCompleteRE in engine/claude.go) and that
 // CLAUDE.md states for markers generally. The BEGIN line carries the target
 // repo: "FABRIK_SPAWN_CHILD_BEGIN owner/repo". The first non-empty line inside
-// the block is the TITLE: line; the body is everything after it.
-func ParseSpawnBlocks(body string) []SpawnBlock {
+// the block is the TITLE header (case- and whitespace-tolerant, matchHeader);
+// the body is everything after it. A BEGIN with no END ends the scan with no
+// error entry (unchanged; see logUnparsedSpawnMarkers).
+func ParseSpawnBlocksDetailed(body string) ([]SpawnBlock, []SpawnBlockError) {
 	var blocks []SpawnBlock
+	var errs []SpawnBlockError
 	lines := strings.Split(body, "\n")
+	pair := 0
 
 	for i := 0; i < len(lines); i++ {
 		repo := spawnBeginRepo(lines[i])
@@ -151,8 +187,10 @@ func ParseSpawnBlocks(body string) []SpawnBlock {
 			// No matching END — nothing further can be well-formed.
 			break
 		}
+		pair++
 
-		if title, dependsOnDeclared, dependsOnRaw, dependsOn, blockBody := parseTitleAndBody(strings.Join(lines[i+1:end], "\n")); title != "" {
+		content := strings.Join(lines[i+1:end], "\n")
+		if title, dependsOnDeclared, dependsOnRaw, dependsOn, blockBody := parseTitleAndBody(content); title != "" {
 			blocks = append(blocks, SpawnBlock{
 				Repo:              repo,
 				Title:             title,
@@ -161,13 +199,33 @@ func ParseSpawnBlocks(body string) []SpawnBlock {
 				DependsOnRaw:      dependsOnRaw,
 				DependsOn:         dependsOn,
 			})
+		} else {
+			errs = append(errs, spawnBlockFailure(pair, repo, content))
 		}
 
 		// Resume after this block's END whether or not it was well-formed, so a
 		// malformed block cannot re-open scanning inside its own content.
 		i = end
 	}
-	return blocks
+	return blocks, errs
+}
+
+// spawnBlockFailure classifies why content (the inside of a BEGIN/END pair)
+// yielded no title and quotes the line found.
+func spawnBlockFailure(index int, repo, content string) SpawnBlockError {
+	first, idx := firstNonEmptyLine(content)
+	e := SpawnBlockError{Index: index, Repo: repo, Found: quoteFoundLine(first)}
+	switch {
+	case idx == -1:
+		e.Reason = "block is empty (expected a TITLE: <title> line)"
+	default:
+		if _, ok := matchHeader(first, "TITLE"); ok {
+			e.Reason = "TITLE line has no value"
+		} else {
+			e.Reason = "missing TITLE line (expected `TITLE: <title>` as the first line)"
+		}
+	}
+	return e
 }
 
 // stripSpawnBlocks removes every well-formed FABRIK_SPAWN_CHILD_BEGIN/END
@@ -176,8 +234,9 @@ func ParseSpawnBlocks(body string) []SpawnBlock {
 // so it strips exactly the set of blocks ParseSpawnBlocks would parse and
 // spawnChildren would act on, no more and no less. A malformed block (one
 // ParseSpawnBlocks itself skips, e.g. a missing TITLE: line) is left
-// visible rather than silently discarded, matching ParseSpawnBlocks's own
-// judgment that it was never really a block.
+// visible rather than silently discarded. Since #2091 a malformed block in
+// Review/Validate output pauses the item before this function runs
+// (pauseForMalformedSpawn), so that branch is defensive only.
 //
 // Used by the Review/Validate mid-flight spawn hook (finalizeStageOutcome,
 // engine/item.go) so a successfully-processed declaration does not also leak
@@ -222,8 +281,8 @@ func stripSpawnBlocks(body string) string {
 	return strings.Join(out, "\n")
 }
 
-// parseTitleAndBody extracts the title (from the "TITLE: ..." line), the
-// optional DEPENDS_ON: header, and the remaining body content from the
+// parseTitleAndBody extracts the title (from the "TITLE: ..." line; key matched
+// case-insensitively, #2091), the optional DEPENDS_ON: header, and the remaining body content from the
 // inside of a FABRIK_SPAWN_CHILD_BEGIN/END block.
 //
 // DEPENDS_ON:, when present, must appear on the line immediately following
@@ -233,31 +292,21 @@ func stripSpawnBlocks(body string) string {
 // optional header.
 func parseTitleAndBody(content string) (title string, dependsOnDeclared bool, dependsOnRaw string, dependsOn int, body string) {
 	lines := strings.Split(content, "\n")
-	titleIdx := -1
-	for i, l := range lines {
-		l = strings.TrimRight(l, "\r")
-		trimmed := strings.TrimSpace(l)
-		if trimmed == "" {
-			continue
-		}
-		if strings.HasPrefix(trimmed, "TITLE:") {
-			title = strings.TrimSpace(strings.TrimPrefix(trimmed, "TITLE:"))
-			titleIdx = i
-			break
-		}
-		// First non-empty line that isn't a TITLE: prefix — malformed.
+	first, titleIdx := firstNonEmptyLine(content)
+	if titleIdx == -1 {
 		return "", false, "", 0, ""
 	}
-	if title == "" || titleIdx == -1 {
+	// First non-empty line that isn't a TITLE header — malformed.
+	title, ok := matchHeader(first, "TITLE")
+	if !ok || title == "" {
 		return "", false, "", 0, ""
 	}
 
 	bodyStart := titleIdx + 1
 	if bodyStart < len(lines) {
-		next := strings.TrimSpace(strings.TrimRight(lines[bodyStart], "\r"))
-		if strings.HasPrefix(next, "DEPENDS_ON:") {
+		if raw, ok := matchHeader(lines[bodyStart], "DEPENDS_ON"); ok {
 			dependsOnDeclared = true
-			dependsOnRaw = strings.TrimSpace(strings.TrimPrefix(next, "DEPENDS_ON:"))
+			dependsOnRaw = raw
 			if spawnDependsOnRE.MatchString(dependsOnRaw) {
 				if n, err := strconv.Atoi(dependsOnRaw); err == nil {
 					dependsOn = n
@@ -267,10 +316,43 @@ func parseTitleAndBody(content string) (title string, dependsOnDeclared bool, de
 		}
 	}
 
-	// Body is everything after the TITLE: (and optional DEPENDS_ON:) line, trimmed.
+	// Body is everything after the TITLE (and optional DEPENDS_ON) line, trimmed.
 	bodyLines := lines[bodyStart:]
 	body = strings.TrimSpace(strings.Join(bodyLines, "\n"))
 	return title, dependsOnDeclared, dependsOnRaw, dependsOn, body
+}
+
+// Spawn origins for pauseForMalformedSpawn's guidance text.
+const (
+	spawnOriginPlan      = "plan"      // blocks read from the stored Plan comment (preImplement / recovery)
+	spawnOriginMidflight = "midflight" // blocks parsed from a Review/Validate dispatch's own output
+)
+
+// pauseForMalformedSpawn surfaces FABRIK_SPAWN_CHILD blocks that failed to
+// parse (#2091, ADR 2091): one log line per block, then a self-authored
+// "🏭 **Fabrik — malformed FABRIK_SPAWN_CHILD marker**" comment naming each
+// block's 1-based index and the (sanitised) offending line, and a pause. The
+// whole declaration is held — no child is created — because dropping the bad
+// block and spawning its siblings would shift the DEPENDS_ON indexes and the
+// ADR-1583 fabrik:spawned-child:<index>:<n> markers, and would leave the
+// parent's blockedBy set half-populated. Returns the error preImplement hands
+// its caller (the "parent paused" contract).
+func (e *Engine) pauseForMalformedSpawn(item gh.ProjectItem, errs []SpawnBlockError, origin string) error {
+	var bullets []string
+	for _, be := range errs {
+		e.logf(item.Number, "spawn", "malformed FABRIK_SPAWN_CHILD %s\n", be.String())
+		bullets = append(bullets, "- "+be.String())
+	}
+	var guidance string
+	if origin == spawnOriginPlan {
+		guidance = "The Plan comment is stored as-is, so removing `fabrik:paused` alone will pause again until the Plan is corrected — edit the Plan comment, or comment asking for a revised Plan, then remove `fabrik:paused` to retry."
+	} else {
+		guidance = "Remove `fabrik:paused` to retry; the stage will be re-run and re-emit the declaration."
+	}
+	msg := fmt.Sprintf("🏭 **Fabrik — malformed FABRIK_SPAWN_CHILD marker**\n\n%d block(s) could not be parsed:\n\n%s\n\nNo sub-issues were created — the whole declaration is held so dependency indexes stay consistent. Expected `TITLE: <title>` as the first non-empty line inside each block.\n\n%s",
+		len(errs), strings.Join(bullets, "\n"), guidance)
+	e.pauseIssue(item, msg, pauseOpts{labelEcho: true})
+	return fmt.Errorf("spawn: %d malformed FABRIK_SPAWN_CHILD block(s)", len(errs))
 }
 
 // validateSpawnDependsOn performs the purely structural DEPENDS_ON validation
@@ -510,7 +592,10 @@ func (e *Engine) preImplement(ctx context.Context, board *gh.ProjectBoard, item 
 		return false, nil
 	}
 
-	blocks := ParseSpawnBlocks(planComment.Body)
+	blocks, blockErrs := ParseSpawnBlocksDetailed(planComment.Body)
+	if len(blockErrs) > 0 {
+		return false, e.pauseForMalformedSpawn(item, blockErrs, spawnOriginPlan)
+	}
 	if len(blocks) == 0 {
 		e.logUnparsedSpawnMarkers(item.Number, planComment.Body)
 		return false, nil
@@ -563,7 +648,10 @@ func (e *Engine) recoverMissingPlanComment(ctx context.Context, board *gh.Projec
 		return false, nil
 	}
 
-	blocks := ParseSpawnBlocks(planComment.Body)
+	blocks, blockErrs := ParseSpawnBlocksDetailed(planComment.Body)
+	if len(blockErrs) > 0 {
+		return false, e.pauseForMalformedSpawn(item, blockErrs, spawnOriginPlan)
+	}
 	if len(blocks) == 0 {
 		e.logf(item.Number, "spawn", "pre-Implement: live re-read recovered Plan comment with no spawn blocks — nothing to spawn\n")
 		e.logUnparsedSpawnMarkers(item.Number, planComment.Body)

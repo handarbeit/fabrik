@@ -82,6 +82,9 @@ func (e *Engine) pushBranchForNewPR(item gh.ProjectItem, wm *WorktreeManager) er
 // interruption that cancelled the worker (daemon shutdown or TUI stop) already
 // pauses the item under pauseIssueMu, and a second pause from here would race
 // it. A refusal returns ErrPushRefusedZeroAhead with only a log line.
+//
+// Also used by preserveWorkOnMarkerFailure (#2091) for the same reason: the
+// caller pauses the item itself right after, and must not be paused twice.
 func (e *Engine) pushBranchOnCancel(item gh.ProjectItem, wm *WorktreeManager) error {
 	if prInMergeQueue(item) {
 		e.logf(item.Number, "merge-queue", "PR in merge queue — skipping push (would eject from queue)\n")
