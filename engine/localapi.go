@@ -1006,6 +1006,10 @@ func (b localAPIBackend) Health(localapi.HealthParams) (*localapi.HealthResult, 
 		res.Workers.MaxConcurrent = localapi.Some(e.cfg.MaxConcurrent)
 	}
 
+	trainInUse, trainMax := b.e.trainSlotUsage()
+	res.Workers.TrainInUse = localapi.Some(trainInUse)
+	res.Workers.TrainMax = localapi.Some(trainMax)
+
 	res.MergeTrain = b.partitions()
 	return res, nil
 }

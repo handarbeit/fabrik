@@ -721,6 +721,11 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case WorkerSlotsEvent:
+		comp, _ := m.active.Update(msg)
+		m.active = comp.(ActivePaneComponent)
+		return m, nil
+
 	case TrainRowEvent:
 		comp, _ := m.active.Update(msg)
 		m.active = comp.(ActivePaneComponent)

@@ -645,6 +645,9 @@ func (e *Engine) Run() error {
 	if cacheImpl != nil {
 		go e.reconcileLoop(ctx, cacheImpl, e.webhookMgr)
 	}
+	if e.events != nil {
+		go e.runWorkerSlotsPublisher(ctx, workerSlotsSampleInterval) // #2115: display-only slot readout
+	}
 
 	// Local read API (#1967): bound after the instance lock is held (so a
 	// leftover socket is provably stale) and after e.webhookMgr is final, and
