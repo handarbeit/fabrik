@@ -15,6 +15,7 @@ type stubActor struct {
 	autonomy []localapi.SetAutonomyParams
 	reval    []localapi.RevalidateParams
 	clear    []localapi.ClearClaudeLimitParams
+	advance  []localapi.AdvanceParams
 }
 
 func (a *stubActor) Promote(p localapi.PromoteParams) (*localapi.ActionResult, error) {
@@ -35,6 +36,11 @@ func (a *stubActor) Revalidate(p localapi.RevalidateParams) (*localapi.ActionRes
 func (a *stubActor) ClearClaudeLimit(p localapi.ClearClaudeLimitParams) (*localapi.ActionResult, error) {
 	a.clear = append(a.clear, p)
 	return &localapi.ActionResult{Action: localapi.MethodClearClaudeLimit, Issue: "o/r#3"}, nil
+}
+
+func (a *stubActor) Advance(p localapi.AdvanceParams) (*localapi.ActionResult, error) {
+	a.advance = append(a.advance, p)
+	return &localapi.ActionResult{Action: localapi.MethodAdvance, Issue: p.Issue}, nil
 }
 
 func startActionDaemon(t *testing.T, withActor bool) (*localapi.Server, *stubActor) {
@@ -58,9 +64,10 @@ func TestActionToolsReachTheDaemonWithTheLaunchedSubscriber(t *testing.T) {
 		callTool(2, ToolSetAutonomy, `{"issue":"5","autonomy":"yolo"}`),
 		callTool(3, ToolRevalidate, `{"issue":"5"}`),
 		callTool(4, ToolClearClaudeLimit, `{}`),
+		callTool(5, ToolAdvance, `{"issue":"5"}`),
 	)
 	ids := byID(frames)
-	for _, id := range []string{"1", "2", "3", "4"} {
+	for _, id := range []string{"1", "2", "3", "4", "5"} {
 		if text, isErr := toolText(t, ids[id]); isErr {
 			t.Errorf("call %s failed: %s", id, text)
 		}
@@ -77,6 +84,9 @@ func TestActionToolsReachTheDaemonWithTheLaunchedSubscriber(t *testing.T) {
 	if !reflect.DeepEqual(act.clear, []localapi.ClearClaudeLimitParams{{Subscriber: "my-topic"}}) {
 		t.Errorf("clear_claude_limit = %+v", act.clear)
 	}
+	if !reflect.DeepEqual(act.advance, []localapi.AdvanceParams{{Subscriber: "my-topic", Issue: "5"}}) {
+		t.Errorf("advance = %+v", act.advance)
+	}
 }
 
 // Every action is attributable: with no --subscriber the shim refuses before
@@ -88,15 +98,16 @@ func TestActionToolsRefuseWithoutASubscriber(t *testing.T) {
 		callTool(2, ToolSetAutonomy, `{"issue":"5","autonomy":"cruise"}`),
 		callTool(3, ToolRevalidate, `{"issue":"5"}`),
 		callTool(4, ToolClearClaudeLimit, `{}`),
+		callTool(5, ToolAdvance, `{"issue":"5"}`),
 	)
 	ids := byID(frames)
-	for _, id := range []string{"1", "2", "3", "4"} {
+	for _, id := range []string{"1", "2", "3", "4", "5"} {
 		text, isErr := toolText(t, ids[id])
 		if !isErr || !strings.Contains(text, "--subscriber") {
 			t.Errorf("call %s: isErr=%v text=%q", id, isErr, text)
 		}
 	}
-	if len(act.promote)+len(act.autonomy)+len(act.reval)+len(act.clear) != 0 {
+	if len(act.promote)+len(act.autonomy)+len(act.reval)+len(act.clear)+len(act.advance) != 0 {
 		t.Errorf("the daemon was reached without a requester: %+v", act)
 	}
 }
@@ -110,15 +121,16 @@ func TestActionToolArgumentErrors(t *testing.T) {
 		callTool(4, ToolSetAutonomy, `{"issue":"5"}`),
 		callTool(5, ToolRevalidate, `{}`),
 		callTool(6, ToolClearClaudeLimit, `{"issue":"5"}`), // takes no arguments
+		callTool(7, ToolAdvance, `{}`),
 	)
 	ids := byID(frames)
-	for _, id := range []string{"1", "2", "3", "4", "5", "6"} {
+	for _, id := range []string{"1", "2", "3", "4", "5", "6", "7"} {
 		text, isErr := toolText(t, ids[id])
 		if !isErr || !strings.Contains(text, "invalid arguments") {
 			t.Errorf("call %s: isErr=%v text=%q", id, isErr, text)
 		}
 	}
-	if len(act.promote)+len(act.autonomy)+len(act.reval)+len(act.clear) != 0 {
+	if len(act.promote)+len(act.autonomy)+len(act.reval)+len(act.clear)+len(act.advance) != 0 {
 		t.Errorf("invalid calls reached the daemon: %+v", act)
 	}
 }
@@ -164,7 +176,7 @@ func TestNoPauseLiftOrCommentTool(t *testing.T) {
 			t.Errorf("unexpected state-changing tool %q", n)
 		}
 	}
-	if got, want := ActionTools(), []string{ToolPromote, ToolSetAutonomy, ToolRevalidate, ToolClearClaudeLimit}; !reflect.DeepEqual(got, want) {
+	if got, want := ActionTools(), []string{ToolPromote, ToolSetAutonomy, ToolRevalidate, ToolClearClaudeLimit, ToolAdvance}; !reflect.DeepEqual(got, want) {
 		t.Errorf("ActionTools = %v", got)
 	}
 }

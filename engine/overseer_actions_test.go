@@ -993,14 +993,14 @@ func TestOverseerAuditCommentAsPostedIsNotSteering(t *testing.T) {
 // ---- R2 and structure ----
 
 func TestOverseerNoPauseLiftOrFreeFormCommentSurface(t *testing.T) {
-	// The Actor method set is exactly the four actions.
+	// The Actor method set is exactly the five actions.
 	at := reflect.TypeOf((*localapi.Actor)(nil)).Elem()
 	var names []string
 	for i := 0; i < at.NumMethod(); i++ {
 		names = append(names, at.Method(i).Name)
 	}
 	slices.Sort(names)
-	if want := []string{"ClearClaudeLimit", "Promote", "Revalidate", "SetAutonomy"}; !reflect.DeepEqual(names, want) {
+	if want := []string{"Advance", "ClearClaudeLimit", "Promote", "Revalidate", "SetAutonomy"}; !reflect.DeepEqual(names, want) {
 		t.Errorf("Actor methods = %v, want %v", names, want)
 	}
 	for _, m := range localapi.ActionMethods() {
@@ -1009,27 +1009,40 @@ func TestOverseerNoPauseLiftOrFreeFormCommentSurface(t *testing.T) {
 		}
 	}
 
-	src, err := os.ReadFile("overseer_actions.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	code := string(src)
-	// The only label removals are the autonomy pair.
-	for _, m := range regexp.MustCompile(`removeLabel\w*\(([^)]*)\)`).FindAllStringSubmatch(code, -1) {
-		if !strings.Contains(m[1], "s.label") {
-			t.Errorf("unexpected label removal: %s", m[0])
+	// overseer_advance.go (#2126) is held to the same scan; it posts no comment of
+	// its own (it reaches the single postAudit through finish) and removes no label.
+	for _, file := range []struct {
+		name     string
+		comments int
+	}{{"overseer_actions.go", 1}, {"overseer_advance.go", 0}} {
+		src, err := os.ReadFile(file.name)
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-	if strings.Contains(code, "applyLabelRemove") || regexp.MustCompile(`remove\w*\([^)]*"fabrik:(paused|awaiting-input)"`).MatchString(code) {
-		t.Error("overseer actions must never remove fabrik:paused / fabrik:awaiting-input")
-	}
-	// Every comment is posted through the single postAudit helper.
-	if n := strings.Count(code, "postComment("); n != 1 {
-		t.Errorf("postComment appears %d times in overseer_actions.go, want 1 (the audit comment)", n)
-	}
-	for _, banned := range []string{"AddComment(", "postItemComment(", "pauseIssue("} {
-		if strings.Contains(code, banned) {
-			t.Errorf("overseer_actions.go must not call %s", banned)
+		code := string(src)
+		// The only label removals are the autonomy pair.
+		for _, m := range regexp.MustCompile(`removeLabel\w*\(([^)]*)\)`).FindAllStringSubmatch(code, -1) {
+			if !strings.Contains(m[1], "s.label") {
+				t.Errorf("%s: unexpected label removal: %s", file.name, m[0])
+			}
+		}
+		if strings.Contains(code, "applyLabelRemove") || regexp.MustCompile(`remove\w*\([^)]*"fabrik:(paused|awaiting-input)"`).MatchString(code) {
+			t.Errorf("%s: overseer actions must never remove fabrik:paused / fabrik:awaiting-input", file.name)
+		}
+		// Every comment is posted through the single postAudit helper.
+		if n := strings.Count(code, "postComment("); n != file.comments {
+			t.Errorf("postComment appears %d times in %s, want %d", n, file.name, file.comments)
+		}
+		banned := []string{"AddComment(", "postItemComment(", "pauseIssue("}
+		if file.name == "overseer_advance.go" {
+			// advance reuses the engine's gates only through their read-only cores;
+			// the writing wrappers would break "a refused advance writes nothing".
+			banned = append(banned, "addLabelChecked(", "applyLabelAdd(", "checkDependencies(", "checkReviewGate(", "reviewGateBlocksLanding(")
+		}
+		for _, b := range banned {
+			if strings.Contains(code, b) {
+				t.Errorf("%s must not call %s", file.name, b)
+			}
 		}
 	}
 }
