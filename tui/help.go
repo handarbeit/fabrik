@@ -34,7 +34,7 @@ KEYBOARD SHORTCUTS
     C          Clear all history (with confirmation)
 
   Warnings pane
-    F          Fix selected warning (runs fix command in foreground)
+    F          Fix selected warning (runs fix command in foreground; no-op when it has none)
     D          Dismiss / undismiss selected warning (sticky across restarts)
     S          Show / hide dismissed warnings
     enter      Toggle expanded detail for selected warning

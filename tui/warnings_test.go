@@ -1,7 +1,9 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -343,5 +345,40 @@ func TestWarningsView_WithDismissedEntries(t *testing.T) {
 				t.Errorf("SelectedEntry() = %+v, want key %q", selected, lastEntry.Key)
 			}
 		})
+	}
+}
+
+// An entry with no FixAction (#2135) is informational: the fix key is a no-op
+// that sets a status message instead of running the "unknown fix_action" path.
+func TestFixKey_NoFixAction_IsNoOp(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", nil, nil, 0, false)
+	m.width, m.height = 80, 24
+	m.warnings.entries = []warnings.Entry{{Key: "k1", Title: "info only"}}
+	m.focusPane = paneWarnings
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f")})
+	if cmd != nil {
+		t.Errorf("expected nil cmd for an entry without a fix, got non-nil")
+	}
+	_ = next
+}
+
+// The fix-failed re-Record carries the loaded entry's fingerprint and so keeps
+// a dismissed entry dismissed.
+func TestFixFailed_KeepsDismissal(t *testing.T) {
+	warnings.WarningsPathOverride = filepath.Join(t.TempDir(), "warnings.json")
+	t.Cleanup(func() { warnings.WarningsPathOverride = "" })
+	if err := warnings.Record(warnings.Entry{Key: "k:1", Type: "k", Title: "t", Detail: "d", FixAction: "shell_command", Fingerprint: "fp"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := warnings.Dismiss("k:1"); err != nil {
+		t.Fatal(err)
+	}
+	m := New(30, ProjectInfo{}, "", nil, nil, 0, false)
+	m.width, m.height = 80, 24
+	m.Update(warningsFixFinishedMsg{Key: "k:1", ExitErr: errors.New("boom")})
+	es, _ := warnings.Load()
+	if len(es) != 1 || !es[0].Dismissed || es[0].Fingerprint != "fp" {
+		t.Errorf("entry = %+v", es)
 	}
 }

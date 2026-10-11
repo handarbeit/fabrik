@@ -399,6 +399,12 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "f", "F":
 			if m.focusPane == paneWarnings {
 				if entry := m.warnings.SelectedEntry(); entry != nil {
+					if entry.FixAction == "" {
+						// No automatic fix (#2135): the entry is informational;
+						// its detail says what to do.
+						m.header.SetStatusMsg("no automatic fix for this warning — see its details")
+						return m, nil
+					}
 					return m, runWarningsFixCmd(*entry)
 				}
 			}
