@@ -30,5 +30,5 @@ The decision is made **inside the item store**, under the Store mutex, atomicall
 
 - A genuine external change that lands inside the grace window is corrected by the next tick, not the one that saw it.
 - A listing lagging by more than the grace still wins; the constant has a test setter and can be tuned.
-- Writes that bypass the cache write-through, and the deep-fetch label write-back, remain unprotected.
+- Writes that bypass the cache write-through, the deep-fetch label write-back, and the probe-loop apply (`applyProbeItem`, which overwrites `Status` and `State`/`IsClosed` from a board query that lags writes the same way and has no fetch time) remain unprotected. `Status` and closed-state protection holds against the reconcile listing only; routing the probe through `protectShallow` is a follow-up.
 - **Follow-up (not fixed here):** the shutdown 404s have a second cause independent of reconcile — `engine/reinvoke.go` marks `Lock.HeldByThis` without applying a lock label and nothing releases it, so every reinvoke leaves a held lock that cleanup then tries to remove. The shutdown-side changes above stop the 404s; releasing the lock when the reinvoke ends is a separate issue.
