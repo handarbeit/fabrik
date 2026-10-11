@@ -149,3 +149,28 @@ func containsDelta(ds []LabelDelta, d LabelDelta) bool {
 	}
 	return false
 }
+
+func TestLabelDelta_RequesterCarriedOnlyWhereTrusted(t *testing.T) {
+	s := NewStore(nil)
+	s.Apply(IssueOpened{Item: testProjectItem(testRepo, 1)})
+	seen := collectChanges(s)
+
+	s.Apply(LocalLabelAdded{Repo: testRepo, Number: 1, Label: "a", Requester: "x"})
+	s.Apply(LocalLabelAdded{Repo: testRepo, Number: 1, Label: "b"})
+	// An unechoed webhook never carries a requester, even if one is set.
+	s.Apply(IssueLabeled{Repo: testRepo, Number: 1, Label: "c", Sender: "alice", Requester: "y"})
+	// An echoed webhook (item write-through missed) keeps it.
+	s.Apply(IssueLabeled{Repo: testRepo, Number: 1, Label: "d", Sender: "bot[bot]", EchoOfEngine: true, Requester: "z"})
+	s.Apply(LocalLabelRemoved{Repo: testRepo, Number: 1, Label: "a", Requester: "x"})
+
+	got := seen()
+	want := []string{"x", "", "", "z", "x"}
+	if len(got) != len(want) {
+		t.Fatalf("observer saw %d changes, want %d: %+v", len(got), len(want), got)
+	}
+	for i, w := range want {
+		if got[i].Requester != w {
+			t.Errorf("change %d Requester = %q, want %q", i, got[i].Requester, w)
+		}
+	}
+}
