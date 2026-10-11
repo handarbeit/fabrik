@@ -18,6 +18,12 @@ scan stripped `stage:Validate:complete` from the closed, Done item and logged th
 re-dispatch (4 of 4 catch-up landings on the dev daemon, 2026-10-11). Cosmetic for a landed item, but the
 same mechanism would genuinely re-run Validate for an open item that is still settling.
 
+Correction to the original evidence: trial-PR landings are affected too. #2114 landed through a trial PR
+with a pure catch-up head on its member branch and was stripped the same way; #2096, #2097, #2115 and #2136
+escaped only because their branches were never caught up. Five strips on 2026-10-11 in total (#2110, #2113,
+#2112, #2130, #2114). The trigger is any catch-up commit on the member's branch after Validate completion,
+regardless of landing path; both exemptions below are path-agnostic.
+
 ## Decision
 
 1. **Landed or terminal items are exempt, from cached facts only.** `validateItemLanded` skips an item that

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/handarbeit/fabrik/engine"
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/tests/sim/simgh"
 )
@@ -147,4 +148,50 @@ func TestSHAInvalidation_OpenItem_ExternalPush_StillInvalidates(t *testing.T) {
 
 func formatMarker(head string) string {
 	return fmt.Sprintf("<!-- fabrik:train-catch-up head=%s base=%s pure=true -->", head, "bbbbbbb2222222")
+}
+
+// A caught-up member that lands through a trial PR (not the singleton fast path) is
+// affected too (#2158 correction: #2114 landed via trial PR with a pure catch-up head
+// on its branch). The landed exemption is path-agnostic; this pins it for the trial
+// path. No catch-up marker exists here on purpose, so only the landed exemption — not
+// the pure-catch-up one — can keep the label.
+func TestSHAInvalidation_TrialLanding_OfMovedHeadMember_KeepsValidateComplete(t *testing.T) {
+	t.Parallel()
+	opts := catchUpEnvOptions()
+	opts.ConfigureCfg = func(c *engine.Config) { c.User = "simgh-bot"; c.SingletonCatchUp = "off" }
+	env := mergeTrainEnv(t, opts)
+	num, prNum := QueueMember(t, env, "validate-sha-trial", map[string]string{"a.txt": "a\n"})
+	orig, _ := env.Sim.Sim().HeadSHA(env.OwnerRepo, memberBranch(num))
+	if err := env.Sim.AddLabelToIssue(env.Owner, env.Repo, num, validateCompleteLabel); err != nil {
+		t.Fatalf("labelling #%d: %v", num, err)
+	}
+	env.Engine.SeedValidateCompletedSHAForTest(env.OwnerRepo, num, orig)
+
+	// The member's branch moves past the Validate SHA (an earlier catch-up), and main
+	// moves on, so the member lands through a trial.
+	env.Sim.Sim().SeedCommitFrom(env.OwnerRepo, memberBranch(num), "main", map[string]string{"a.txt": "a\n", "base0.txt": "b\n"}, "earlier catch-up")
+	moved, _ := env.Sim.Sim().HeadSHA(env.OwnerRepo, memberBranch(num))
+	if moved == orig {
+		t.Fatal("member head did not move")
+	}
+	advanceMain(t, env, map[string]string{"base.txt": "base\n"})
+	startTrialVerdictSeeder(t, env, allGreenVerdict)
+
+	RunPoll(t, env)
+	WaitForProjectStatus(t, env, num, "Done", 20)
+	WaitForIssueClosed(t, env, num, 5)
+	if got := draftPRCount(env); got < 1 {
+		t.Fatalf("expected a trial (draft CI PR), got %d — the scenario is not a trial landing", got)
+	}
+
+	env.Engine.SeedLinkedPRHeadForTest(env.OwnerRepo, num, prNum, moved)
+	for i := 0; i < 5; i++ {
+		RunPoll(t, env)
+	}
+	if !hasLabel(IssueLabels(t, env, num), validateCompleteLabel) {
+		t.Errorf("trial-landed item lost %s; labels = %v\n\n%s", validateCompleteLabel, IssueLabels(t, env, num), diagnostics(env))
+	}
+	if got := env.Claude.StageCallCount("Validate"); got != 0 {
+		t.Errorf("Validate must not be dispatched for a landed item, got %d call(s)", got)
+	}
 }
