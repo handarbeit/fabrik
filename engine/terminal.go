@@ -250,7 +250,11 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 		// Seed Status/IsClosed from what the apply above left in the store, not from
 		// pi (#2178): ItemDeepFetched writes them back unprotected, so a stale pi would
 		// revert the engine's own write right after the apply kept it. With no engine
-		// write active the store equals pi, so nothing changes.
+		// write active the store equals pi, so nothing changes. The seed is effective
+		// for Status (FetchItemDetails never sets it) and for PR cards; for an issue
+		// card FetchItemDetails overwrites IsClosed from the live issue node, so the
+		// deep-fetch write-back of the closed state stays unprotected (ADR 2159's
+		// deep-fetch residual).
 		minimal := gh.ProjectItem{
 			ID:        pi.ContentID,
 			ItemID:    pi.ItemID,
