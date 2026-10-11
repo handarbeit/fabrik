@@ -43,7 +43,8 @@ more reconciliation and CI. Report #2037 proposed a dedicated train slot.
    per-member cap. If measurement later shows a stall, a narrow carve-out can be filed.
 5. **Visibility.** The local API's `workers` result gains additive `train_in_use` and
    `train_max` (known zero when `merge_train` is off; `in_use` stays item workers
-   only). The TUI In Progress title shows `slots 5/5 + train 1/1`, fed by a sampled
+   only, so it can read lower than the TUI's general-pool figure, which is `len(e.sem)` and
+   also counts reinvoke runs and a train that fell back to a general slot). The TUI In Progress title shows `slots 5/5 + train 1/1`, fed by a sampled
    publisher (`WorkerSlotsEvent`, once a second, on change) rather than hooks at
    acquire/release, which keeps the dispatch code untouched. Occupancy is `len`/`cap` of
    the channels.
