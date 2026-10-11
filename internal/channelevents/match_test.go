@@ -110,7 +110,7 @@ func TestSubscriptionValidate(t *testing.T) {
 }
 
 func TestCatalogImmediateSet(t *testing.T) {
-	for _, e := range []EventType{ValidateSettled, Escalated, Paused, DaemonUnreachable} {
+	for _, e := range []EventType{ValidateSettled, Escalated, Paused, DaemonUnreachable, PipelineStalled, PipelineResumed} {
 		if !IsImmediate(e) {
 			t.Errorf("%s must be immediate", e)
 		}
@@ -118,6 +118,28 @@ func TestCatalogImmediateSet(t *testing.T) {
 	for _, e := range []EventType{LabelApplied, Stalled, Merged} {
 		if IsImmediate(e) {
 			t.Errorf("%s must not be immediate", e)
+		}
+	}
+}
+
+func TestPipelineEventsAreAccountWideAndSubscribable(t *testing.T) {
+	narrow := Subscription{Subscriber: "x", Repos: []string{"o/x"}, Issues: []IssueRef{{Number: 1}}, Milestone: "v9"}
+	for _, e := range []EventType{PipelineStalled, PipelineResumed} {
+		if !IsAccountWide(e) {
+			t.Errorf("%s must be account-wide", e)
+		}
+		if !narrow.Matches(Event{Type: e, Repo: "o/other"}) {
+			t.Errorf("%s must reach a narrowly scoped subscriber", e)
+		}
+		found := false
+		for _, s := range Subscribable() {
+			found = found || s == e
+		}
+		if !found {
+			t.Errorf("%s must be subscribable", e)
+		}
+		if err := (Subscription{Subscriber: "x", Events: []EventType{e}}).Validate(MinDigest); err != nil {
+			t.Errorf("events filter rejects %s: %v", e, err)
 		}
 	}
 }
