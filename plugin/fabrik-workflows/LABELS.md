@@ -16,7 +16,7 @@ or the fabrik source itself — wins.
 
 ## Pause & Block
 
-Labels that suspend processing entirely.
+Labels that stop processing entirely.
 
 - **`fabrik:paused`** — Processing stopped on active stages. Applied after
   retry exhaustion, `FABRIK_BLOCKED_ON_INPUT`, a review/CI/rebase timeout or
@@ -38,7 +38,7 @@ Labels that suspend processing entirely.
   discovered on some later poll — so the parent picks up this label on its
   very next evaluation, not eventually. Cleared as soon as
   all blockers close — either immediately (a push-based observer) or within
-  one dependency re-check cycle. Suspends all stage dispatch while present.
+  one dependency re-check cycle. Blocks all stage dispatch while present.
 
 ## Gates
 
