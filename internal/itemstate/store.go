@@ -682,6 +682,24 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		item.CooldownAt[v.Reason] = v.Until
 		return CooldownChanged
 
+	case ExpiredCooldownsConsumed:
+		var deleted bool
+		for reason, t := range item.CooldownAt {
+			if reason == ArchiveEligibleCooldown || t.IsZero() || v.Now.Before(t) {
+				continue
+			}
+			delete(item.CooldownAt, reason)
+			deleted = true
+		}
+		if deleted {
+			return CooldownChanged
+		}
+		return 0
+
+	case PausedBackstopServed:
+		item.PausedBackstopBaseline = v.Baseline
+		return 0
+
 	case LabelAppliedAtRecorded:
 		if item.LabelAppliedAt == nil {
 			item.LabelAppliedAt = make(map[string]time.Time)
