@@ -18,6 +18,13 @@ import (
 	"strings"
 )
 
+// OwnerVar is the per-invocation worker owner marker (#2128, ADR-2128): a
+// random nonce the engine sets in every worker's environment. Every descendant
+// of the worker — go test, sim.test, its re-exec'd helpers — inherits it, which
+// is what lets the engine reap them by owner rather than by process-tree shape,
+// and lets a test binary find the owner file that says who its worker is.
+const OwnerVar = "FABRIK_WORKER_OWNER"
+
 // Group tags a scrubbed variable with why it is daemon-only.
 type Group string
 
@@ -117,6 +124,7 @@ var EngineSet = []Var{
 	{"FABRIK_WORKTREE", "", "invocation fact: the worker's worktree"},
 	{"FABRIK_ROOT", "", "invocation fact: the fabrik directory"},
 	{"FABRIK_PR", "", "invocation fact: linked PR number (omitted when none)"},
+	{OwnerVar, "", "invocation fact: per-invocation owner marker (#2128); inherited by every descendant so orphans are reaped by owner, never by process shape"},
 }
 
 // NotEnv lists FABRIK_* string literals that are output markers or prose, not

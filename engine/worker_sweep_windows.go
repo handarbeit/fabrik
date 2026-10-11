@@ -17,6 +17,10 @@ func beginWorkerRecord(pid, issueNumber int, repo, stage string) workerRecord {
 	return workerRecord{PID: pid}
 }
 
+func beginWorkerRecordWithOwner(pid, issueNumber int, repo, stage, owner string) workerRecord {
+	return workerRecord{PID: pid, Owner: owner}
+}
+
 func backfillWorkerFingerprint(ctx context.Context, id string, pid int) {}
 
 func sweepWorkerSessionAtInvocationEnd(rec workerRecord) (reaped int) { return 0 }
