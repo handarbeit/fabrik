@@ -69,7 +69,11 @@ func reportConfigFallbacks() {
 type pluginStateReport struct {
 	// EvalErr is a failed CheckPluginState; RefreshErr a failed auto-refresh.
 	EvalErr, RefreshErr error
-	Customized          bool
+	// RefreshSkipped means the auto-refresh was not attempted on this start
+	// (TUI mode, or customizations skip it), so RefreshErr says nothing about
+	// whether a previously recorded refresh failure still holds.
+	RefreshSkipped bool
+	Customized     bool
 	// CustomizedMsg is the operator-facing customization text (already built by
 	// pluginCustomizationWarning); empty when not Customized.
 	CustomizedMsg string
@@ -79,8 +83,10 @@ type pluginStateReport struct {
 // a failed state check, a failed auto-refresh, and local customizations that
 // skip auto-refresh — and clears the ones that no longer hold. w is nil under
 // the TUI (stderr output would corrupt the screen); the panel entry is written
-// either way. The evaluation always completed (a failure is itself a
-// condition), so the Reconcile sweep is safe.
+// either way. The state evaluation always completed (a failure is itself a
+// condition), so the sweep is safe for check_failed and customized; the
+// refresh_failed subject is swept only when the refresh was actually attempted
+// — otherwise a failure recorded by an earlier start is left in place.
 func reportPluginState(w io.Writer, r pluginStateReport) {
 	var conds []warnings.Condition
 	if r.EvalErr != nil {
@@ -106,7 +112,23 @@ func reportPluginState(w io.Writer, r pluginStateReport) {
 			LogLine: msg,
 		})
 	}
-	if err := warnings.Reconcile(w, "plugin_state", conds); err != nil {
+	var err error
+	if r.RefreshSkipped && r.RefreshErr == nil {
+		present := map[string]bool{"refresh_failed": true}
+		for i := range conds {
+			conds[i].Type = "plugin_state"
+			present[conds[i].Subject] = true
+			if rerr := warnings.Report(w, conds[i]); rerr != nil && err == nil {
+				err = rerr
+			}
+		}
+		if err == nil {
+			_, err = warnings.ClearMissing("plugin_state", present)
+		}
+	} else {
+		err = warnings.Reconcile(w, "plugin_state", conds)
+	}
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "[startup] warning: recording plugin_state warning: %v\n", err)
 	}
 }

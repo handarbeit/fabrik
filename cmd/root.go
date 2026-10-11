@@ -1067,8 +1067,18 @@ func Execute() error {
 	pluginState := pluginStateReport{EvalErr: pluginEvalErr, Customized: customWorkflow}
 	if customWorkflow {
 		pluginState.CustomizedMsg = pluginCustomizationWarning(".fabrik/plugin", skillsStaleCount)
-	} else if !useTUI && skillsStaleCount > 0 {
-		pluginState.RefreshErr = checkPluginSkillsWithReader(".fabrik/plugin", false, nil)
+		pluginState.RefreshSkipped = true
+	} else if skillsStaleCount > 0 {
+		if useTUI {
+			// The refresh is not attempted under the TUI; a failure recorded
+			// by an earlier plain-text start must survive this one.
+			pluginState.RefreshSkipped = true
+		} else {
+			pluginState.RefreshErr = checkPluginSkillsWithReader(".fabrik/plugin", false, nil)
+		}
+	} else if pluginEvalErr != nil {
+		// Staleness is unknown when the state check itself failed.
+		pluginState.RefreshSkipped = true
 	}
 	var pluginW io.Writer
 	if !useTUI {

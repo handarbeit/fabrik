@@ -101,6 +101,31 @@ func TestPluginState_PanelRecordsAndClears(t *testing.T) {
 	}
 }
 
+func TestPluginState_RefreshFailureSurvivesStartThatDidNotAttemptRefresh(t *testing.T) {
+	isolatePanel(t)
+	reportPluginState(nil, pluginStateReport{RefreshErr: errors.New("nope")})
+	if k := panelKeys(t); !k["plugin_state:refresh_failed"] {
+		t.Fatalf("keys = %v", k)
+	}
+	// A TUI-mode start with stale skills does not attempt the refresh: the
+	// earlier failure must not be swept by a check that never ran.
+	reportPluginState(nil, pluginStateReport{RefreshSkipped: true})
+	if k := panelKeys(t); !k["plugin_state:refresh_failed"] {
+		t.Errorf("refresh_failed swept by a start that did not attempt the refresh: %v", k)
+	}
+	// Other subjects are still swept on a skipped-refresh start.
+	reportPluginState(nil, pluginStateReport{RefreshSkipped: true, Customized: true})
+	reportPluginState(nil, pluginStateReport{RefreshSkipped: true})
+	if k := panelKeys(t); k["plugin_state:customized"] || !k["plugin_state:refresh_failed"] {
+		t.Errorf("keys = %v", k)
+	}
+	// A start that ran the refresh (or found nothing stale) clears it.
+	reportPluginState(nil, pluginStateReport{})
+	if k := panelKeys(t); len(k) != 0 {
+		t.Errorf("not cleared: %v", k)
+	}
+}
+
 func TestFineGrainedPAT_PanelRecordsAndClears(t *testing.T) {
 	isolatePanel(t)
 	reportTokenWarning("github_pat_abc")

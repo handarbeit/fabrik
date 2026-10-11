@@ -4325,7 +4325,7 @@ under 10 minutes old (SC-003); `Clear` of an absent key does not write; the temp
 | ~60 `[warn] … invalid; using default` lines (`cmd/root.go`) | **Panel, one aggregated entry**; per-setting log lines kept | `config_value:settings`; `Reconcile` each start |
 | fine-grained PAT (`github_pat_`) | **Panel** | `config_token:fine_grained_pat`; cleared when a classic token is used |
 | `.fabrik/config.yaml` gitignored | **Panel** | `config_ignored:config.yaml`; `Reconcile` each start |
-| plugin state check failed / skill refresh failed / customised plugin skips auto-refresh | **Panel** (also still in the header) | `plugin_state:{check_failed,refresh_failed,customized}`; `Reconcile` each start |
+| plugin state check failed / skill refresh failed / customised plugin skips auto-refresh | **Panel** (also still in the header) | `plugin_state:{check_failed,refresh_failed,customized}`; `Reconcile` each start, except `refresh_failed` is swept only on a start that attempted the refresh (plain-text mode with stale skills, or nothing stale) — a TUI-mode or customized start leaves an earlier failure in place |
 | no git credential helper (HTTPS) | **Panel** | `git_credentials:https`; `Resolve` when a helper exists or SSH/App auth applies |
 | Claude settings file unreadable/unparseable (`apiKeyHelper` refusal may be bypassed) | **Panel** | `api_key_helper_check:settings`; `Reconcile` each start |
 | `FABRIK_WORKER_ENV_PASSTHROUGH` entries ignored; Hookdeck env names not scrubbed | **Panel** | `worker_env:{ignored,hookdeck_dropped}`; `Reconcile` each start |
