@@ -133,6 +133,13 @@ func (e *Engine) settleSHAInvalidationScan(candidates []gh.ProjectItem) {
 			e.logf(item.Number, "validate-sha", "head differs from Validate completion SHA but item is landed/terminal (%s) — leaving completion labels\n", reason)
 			continue
 		}
+		// A catch-up pushes first and posts its marker after, so mid-catch-up the moved
+		// head has no marker yet. Defer until the marker is out; an external push in that
+		// window is detected one poll late.
+		if lpr.Number != 0 && e.catchUpPushInFlight(owner, repo, lpr.Number) {
+			e.logf(item.Number, "validate-sha", "merge-train catch-up of PR #%d in flight — deferring SHA invalidation to next poll\n", lpr.Number)
+			continue
+		}
 		// #2158 R2: the engine's own pure catch-up merge is not an external push.
 		// Re-record the head so a later real push still differs from the recorded SHA.
 		pure, merr := e.headIsPureCatchUp(owner, repo, lpr)

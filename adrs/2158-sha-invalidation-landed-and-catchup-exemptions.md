@@ -36,6 +36,12 @@ same mechanism would genuinely re-run Validate for an open item that is still se
 3. **A marker read error defers.** The scan skips the item for that poll and retries next poll, unlike
    `dropCatchUpFeedback`, which fails toward actionable. Here, acting on an unreadable fact is the
    defect being fixed; the cost of waiting one poll is a one-poll-late detection of a real external push.
+4. **Deferral while a catch-up push is in flight.** The catch-up pushes (moving the head) and posts its
+   marker afterwards, so a poll between the two sees a moved head with no marker. `beginCatchUpPush` /
+   `catchUpPushInFlight` (in memory, per PR) bracket that window in `trySingletonCatchUp` — from before
+   the git half until `postCatchUpMarker` returns, not across the CI wait — and the scan defers while it
+   is set. An external push inside that window is detected one poll late. A failed marker post leaves the
+   head unmarked, so it is invalidated on the next poll once the window closes (fail toward invalidating).
 
 ## Alternatives rejected
 

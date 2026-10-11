@@ -379,3 +379,45 @@ func TestSHAInvalidation_MarkerReadErrorDefers(t *testing.T) {
 		t.Errorf("completion SHA must be untouched on deferral, got %q", snap.ValidateCompletedSHA())
 	}
 }
+
+// A catch-up pushes before it posts its marker; while it is in flight the unmarked moved
+// head must not be read as external, and once the marker window closes the usual rules apply.
+func TestSHAInvalidation_DefersWhileCatchUpPushInFlight(t *testing.T) {
+	noMarker := func(o, r string, n int) ([]gh.Comment, error) { return nil, nil }
+	var end func()
+	eng, removed := shaGuardRun(t, gh.ProjectItem{}, shaCUHead, func(e *Engine) {
+		end = e.beginCatchUpPush("owner", "repo", 201)
+	}, noMarker)
+	if len(removed) != 0 {
+		t.Fatalf("catch-up in flight must defer invalidation, removed %v", removed)
+	}
+	snap, _ := eng.store.Get("owner/repo", 60)
+	if snap.ValidateCompletedSHA() != "sha-N" {
+		t.Errorf("completion SHA must be untouched while deferred, got %q", snap.ValidateCompletedSHA())
+	}
+
+	end()
+	end() // idempotent
+	if eng.catchUpPushInFlight("owner", "repo", 201) {
+		t.Fatal("in-flight mark must clear after end")
+	}
+	eng.settleSHAInvalidationScan([]gh.ProjectItem{{Number: 60, Repo: "owner/repo", Status: "Validate", Labels: []string{"stage:Validate:complete", "fabrik:auto-merge-enabled"}}})
+	snap, _ = eng.store.Get("owner/repo", 60)
+	if snap.ValidateCompletedSHA() != "" {
+		t.Errorf("without a marker the head is external once the catch-up is no longer in flight; completion SHA = %q", snap.ValidateCompletedSHA())
+	}
+}
+
+func TestCatchUpPushInFlight_CountsOverlap(t *testing.T) {
+	eng := testEngineWithStages(t, &mockGitHubClient{}, testStagesForSHAInvalidation())
+	a := eng.beginCatchUpPush("o", "r", 5)
+	b := eng.beginCatchUpPush("o", "r", 5)
+	a()
+	if !eng.catchUpPushInFlight("o", "r", 5) {
+		t.Error("second overlapping catch-up must keep the PR in flight")
+	}
+	b()
+	if eng.catchUpPushInFlight("o", "r", 5) {
+		t.Error("PR must not be in flight after both ended")
+	}
+}
