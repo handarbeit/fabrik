@@ -4417,3 +4417,74 @@ func TestPollWithBackoff_RecoverySelfWake_FloorBlockedCallSelfHealsQuickly(t *te
 			result.NextInterval, minPollInterval)
 	}
 }
+
+// TestPoll_SlotDeferredCandidate_NotStarvedAfterSlotFrees is the #2114 R1/R2
+// regression, driven through poll() so the periodic-re-eval stamp in poll()'s
+// defer and selectDeepFetchCandidates' cooldown gate are both involved. With
+// every worker slot held, poll() must return, record nothing against the
+// deferred item (no cooldown) and keep it eligible; once a slot is released the
+// next poll dispatches it without any unrelated change.
+func TestPoll_SlotDeferredCandidate_NotStarvedAfterSlotFrees(t *testing.T) {
+	withProcessListProbe(t, false, nil, nil)
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return &gh.ProjectBoard{
+				ProjectID: "PVT_1",
+				Items: []gh.ProjectItem{
+					{Number: 88, Repo: "owner/repo", Title: "T", Status: "Research", ItemID: "PVTI_88"},
+				},
+			}, nil
+		},
+		fetchStatusFieldFn: func(projectID string) (*gh.StatusField, error) {
+			return &gh.StatusField{FieldID: "F1", Options: map[string]string{}}, nil
+		},
+	}
+	eng := fullSemEngine(t, client, 1)
+
+	pollDone := make(chan error, 1)
+	var res pollResult
+	go func() {
+		var err error
+		res, err = eng.poll(context.Background())
+		pollDone <- err
+	}()
+	select {
+	case err := <-pollDone:
+		if err != nil {
+			t.Fatalf("poll: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("poll() blocked on a full worker semaphore")
+	}
+	if res.Dispatched != 0 {
+		t.Fatalf("first poll dispatched %d, want 0 (all slots busy)", res.Dispatched)
+	}
+
+	snap, err := eng.store.Get("owner/repo", 88)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if snap.Worker() != nil {
+		t.Error("deferred item must have no worker entry")
+	}
+	if !snap.CooldownAt("periodic-re-eval").IsZero() {
+		t.Error("deferred item must not get a periodic-re-eval cooldown stamped")
+	}
+	eng.mayNeedWorkMu.Lock()
+	queued := eng.mayNeedWork["owner/repo#88"]
+	eng.mayNeedWorkMu.Unlock()
+	if !queued {
+		t.Error("deferred item must be re-queued in mayNeedWork for the next poll")
+	}
+
+	// Free the slot; the next poll must dispatch the deferred item.
+	<-eng.sem
+	res, err = eng.poll(context.Background())
+	eng.wg.Wait()
+	if err != nil {
+		t.Fatalf("second poll: %v", err)
+	}
+	if res.Dispatched != 1 {
+		t.Errorf("second poll dispatched %d, want 1 (deferred candidate must be picked up once a slot frees)", res.Dispatched)
+	}
+}

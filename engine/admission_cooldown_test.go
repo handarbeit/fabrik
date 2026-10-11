@@ -328,7 +328,7 @@ func TestAdmission_RetryBackoffExpiryReadmitsOnce(t *testing.T) {
 
 	board := cooldownAdmissionBoard(item)
 	// The poll after the worker exits: admitted (label churn), refused by the backoff.
-	if n := eng.dispatchCandidates(context.Background(), board, []gh.ProjectItem{item}); n != 0 {
+	if n, _ := eng.dispatchCandidates(context.Background(), board, []gh.ProjectItem{item}); n != 0 {
 		t.Fatalf("dispatched %d item(s) inside the retry backoff, want 0", n)
 	}
 	snap, _ := eng.store.Get(cooldownTestRepo, 76)
@@ -389,12 +389,76 @@ func TestAdmission_SentinelLiveRefusalRecordsCooldown(t *testing.T) {
 		return []procArgvEntry{{PID: 4242, Argv: []string{"claude", sentinel}}}, nil
 	}
 
-	if n := eng.dispatchCandidates(context.Background(), cooldownAdmissionBoard(item), []gh.ProjectItem{item}); n != 0 {
+	if n, _ := eng.dispatchCandidates(context.Background(), cooldownAdmissionBoard(item), []gh.ProjectItem{item}); n != 0 {
 		t.Fatalf("dispatched %d item(s) with a live sentinel, want 0", n)
 	}
 	snap, _ := eng.store.Get(cooldownTestRepo, 78)
 	want := start.Add(eng.mergeGateRecheckInterval())
 	if got := snap.CooldownAt("sentinel-live"); !got.Equal(want) {
 		t.Errorf("sentinel-live cooldown = %v, want %v", got, want)
+	}
+}
+
+// #2114 review: a slot-deferred item is re-queued into mayNeedWork, so the next
+// poll admits it through cycleSet alone (no expired cooldown consumed, and the
+// deferral skipped its periodic-re-eval stamp). If that poll's deep-fetch fails
+// the item used to be dropped with no cooldown and no cycleSet entry — stranded
+// until an unrelated change. A cycleSet-admitted drop must leave a future
+// re-admission, and the failure backoff then governs how soon it comes back.
+func TestAdmission_CycleSetAdmittedFailedFetchIsRearmedAndRecovers(t *testing.T) {
+	var fetchErr = errors.New("boom")
+	client := &mockGitHubClient{}
+	client.fetchItemDetailsFn = func(*gh.ProjectItem) error { return fetchErr }
+	eng, start := cooldownAdmissionEngine(t, client)
+	item := gh.ProjectItem{Number: 76, Title: "Deferred", Status: "Research"}
+	key := issueKey(item, eng.defaultRepo())
+	interval := eng.githubRecheckInterval()
+	// Known to the store with no cooldown, as a slot-deferred item is.
+	eng.store.Apply(itemstate.SelfWriteObserved{Repo: cooldownTestRepo, Number: 76})
+
+	cands, _ := eng.selectDeepFetchCandidates(cooldownAdmissionBoard(item), "", map[string]bool{key: true}, map[string]bool{})
+	if len(cands) != 0 {
+		t.Fatalf("failed fetch returned %d candidate(s), want 0", len(cands))
+	}
+	snap, _ := eng.store.Get(cooldownTestRepo, 76)
+	if got, want := snap.CooldownAt("periodic-re-eval"), start.Add(interval); !got.Equal(want) {
+		t.Fatalf("periodic-re-eval after a cycleSet-admitted failed fetch = %v, want %v (item would be stranded)", got, want)
+	}
+
+	// Nothing re-admits it before the interval, with no cycleSet entry.
+	before := fetchCount(client)
+	eng.selectDeepFetchCandidates(cooldownAdmissionBoard(item), "", map[string]bool{}, map[string]bool{})
+	if fetchCount(client) != before {
+		t.Fatal("item re-admitted before its re-armed interval")
+	}
+
+	// Once the interval has passed (and the failure backoff with it) and GitHub
+	// recovers, the item is admitted again on an ordinary poll.
+	fetchErr = nil
+	eng.SetClock(stubClock{t: start.Add(interval + time.Second)})
+	eng.store.Apply(itemstate.DeepFetchFailed{Repo: cooldownTestRepo, Number: 76, At: time.Now().Add(-2 * interval)})
+	cands, _ = eng.selectDeepFetchCandidates(cooldownAdmissionBoard(item), "", map[string]bool{}, map[string]bool{})
+	if len(cands) != 1 {
+		t.Fatalf("after the interval the item produced %d candidate(s), want 1 (stranded)", len(cands))
+	}
+}
+
+// #2114 review: the other drop site. A cycleSet-admitted item refused by
+// itemMayNeedWork (here: inside the deep-fetch failure backoff) must also be
+// left with a future re-admission.
+func TestAdmission_CycleSetAdmittedBackoffDropIsRearmed(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng, start := cooldownAdmissionEngine(t, client)
+	item := gh.ProjectItem{Number: 77, Title: "Deferred", Status: "Research"}
+	key := issueKey(item, eng.defaultRepo())
+	eng.store.Apply(itemstate.DeepFetchFailed{Repo: cooldownTestRepo, Number: 77, At: time.Now()})
+
+	cands, _ := eng.selectDeepFetchCandidates(cooldownAdmissionBoard(item), "", map[string]bool{key: true}, map[string]bool{})
+	if len(cands) != 0 || fetchCount(client) != 0 {
+		t.Fatalf("item inside the failure backoff must not be fetched (candidates=%d fetches=%d)", len(cands), fetchCount(client))
+	}
+	snap, _ := eng.store.Get(cooldownTestRepo, 77)
+	if got, want := snap.CooldownAt("periodic-re-eval"), start.Add(eng.githubRecheckInterval()); !got.Equal(want) {
+		t.Errorf("periodic-re-eval after a cycleSet-admitted backoff drop = %v, want %v", got, want)
 	}
 }
