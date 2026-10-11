@@ -234,7 +234,7 @@ func (e *Engine) emitDispatchDeferred(issueKeys []string) {
 		return
 	}
 	defer e.anomalyHookRecover(0, "dispatch-deferred")
-	ce.recordDeferred(issueKeys)
+	ce.recordDeferred(issueKeys, e.now())
 }
 
 // noteGateHold records that a gate the engine applies is holding item's advance

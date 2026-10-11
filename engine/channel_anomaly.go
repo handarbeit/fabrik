@@ -94,11 +94,14 @@ type wedgeHold struct {
 	status        string
 	firstHeld     time.Time
 	lastConfirmed time.Time
-	deferred      bool
-	dispatched    bool
-	cleared       bool
-	announced     bool
-	seq           uint64
+	// deferredAt is when a dispatch of the item was last refused for lack of a
+	// worker slot. Every poll that still defers the item re-records it, so a
+	// deferral older than the lapse no longer says the item is queued.
+	deferredAt time.Time
+	dispatched bool
+	cleared    bool
+	announced  bool
+	seq        uint64
 }
 
 // ledgerEntry is one recent engine write the cache could revert.
@@ -196,7 +199,7 @@ func (ce *channelEvents) recordRetry(repo string, number int, stage, cause strin
 	a.retries[ref] = &retryFact{ref: ref, repo: repo, number: number, stage: stage, cause: cause, due: due}
 }
 
-func (ce *channelEvents) recordDeferred(refs []string) {
+func (ce *channelEvents) recordDeferred(refs []string, now time.Time) {
 	a := &ce.anom
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -205,7 +208,7 @@ func (ce *channelEvents) recordDeferred(refs []string) {
 			f.deferred = true
 		}
 		if h := a.holds[ref]; h != nil {
-			h.deferred = true
+			h.deferredAt = now
 		}
 	}
 }
@@ -380,7 +383,13 @@ func (ce *channelEvents) checkAnomalies() {
 	if !until.IsZero() {
 		a.limitedUntil = until
 	} else if !a.limitedUntil.IsZero() {
+		// The hold may have been cleared early (operator action), so the lift is
+		// the earlier of the scheduled end and now; a future lift would suppress a
+		// genuinely starved retry until then.
 		a.lastLift, a.limitedUntil = a.limitedUntil, time.Time{}
+		if a.lastLift.After(now) {
+			a.lastLift = now
+		}
 	}
 	if len(a.retries) == 0 && len(a.holds) == 0 {
 		// Nothing to judge: skip the config and health reads entirely, so an idle
@@ -566,7 +575,7 @@ func (ce *channelEvents) checkWedgesLocked(now time.Time, pollOverdue bool) []ch
 			end("lapsed")
 			continue
 		}
-		if h.announced || h.deferred || st.Worker != nil || itemBlockedFromRunning(&st) {
+		if h.announced || (!h.deferredAt.IsZero() && now.Sub(h.deferredAt) <= lapse) || st.Worker != nil || itemBlockedFromRunning(&st) {
 			continue
 		}
 		if now.Sub(h.firstHeld) < e.itemWedgedThreshold(h.gate) {

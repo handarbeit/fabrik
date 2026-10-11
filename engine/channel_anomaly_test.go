@@ -176,6 +176,28 @@ func TestRetryStarved_MeasuredFromUsageLimitLift(t *testing.T) {
 	}
 }
 
+// An operator clearing the hold early lifts it now, not at its scheduled end: a
+// future lift time would suppress a genuinely starved retry for the rest of the hour.
+func TestRetryStarved_EarlyClearedUsageLimitAnchorsAtNow(t *testing.T) {
+	e, sink, clk, ce := anomalyEngine(t)
+	e.seedAPIItem(t, 1, "Implement")
+	t0 := clk.Now()
+	e.emitRetryScheduled(anomalyItem(1), implementStage(), "claude-usage-limit", t0.Add(time.Minute))
+	e.activateClaudeUsageLimit(1, &claudeerr.UsageLimitError{Message: "blocking_limit", ResetAt: t0.Add(time.Hour)}, t0)
+
+	clk.set(t0.Add(10 * time.Minute))
+	if evs := checkAndDrain(ce, sink); len(ofType(evs, channelevents.RetryStarved)) != 0 {
+		t.Fatalf("starved while the usage-limit hold is active: %+v", evs)
+	}
+	e.clearClaudeUsageLimit("operator")
+	checkAndDrain(ce, sink)           // the lift is observed now (the clear nudges the channel)
+	clk.set(t0.Add(17 * time.Minute)) // cleared 7 minutes ago, scheduled end 43 minutes away
+	evs := ofType(checkAndDrain(ce, sink), channelevents.RetryStarved)
+	if len(evs) != 1 {
+		t.Fatalf("a retry starved for longer than the threshold after an early clear must be reported: %+v", evs)
+	}
+}
+
 func TestRetryStarved_ThresholdHasAPollIntervalFloor(t *testing.T) {
 	e := apiEngine(t, 0)
 	e.SetAnomalyThresholdsForTest(time.Minute, time.Minute, 0)
@@ -321,10 +343,25 @@ func TestItemWedged_NotRaisedWhileThePollIsOverdueOrTheItemPausedOrQueued(t *tes
 	t.Run("queued for a slot", func(t *testing.T) {
 		e, sink, clk, ce := wedgeEngine(t)
 		item := wedgedItem()
+		// Every poll that still cannot get a slot defers the item again.
+		var all []channelevents.Event
+		for i := 0; i < 14; i++ {
+			e.feedbackGateBlocks(item, true, "advance")
+			e.emitDispatchDeferred([]string{"owner/repo#1"})
+			all = append(all, checkAndDrain(ce, sink)...)
+			clk.set(clk.Now().Add(time.Minute))
+		}
+		if len(ofType(all, channelevents.ItemWedged)) != 0 {
+			t.Fatalf("an item waiting for a slot is queued, not wedged: %+v", all)
+		}
+	})
+	t.Run("a stale deferral does not mask a wedge", func(t *testing.T) {
+		e, sink, clk, ce := wedgeEngine(t)
+		item := wedgedItem()
 		e.feedbackGateBlocks(item, true, "advance")
 		e.emitDispatchDeferred([]string{"owner/repo#1"})
-		if evs := holdFor(t, e, clk, ce, sink, item, 14, time.Minute); len(ofType(evs, channelevents.ItemWedged)) != 0 {
-			t.Fatalf("an item waiting for a slot is queued, not wedged: %+v", evs)
+		if evs := holdFor(t, e, clk, ce, sink, item, 14, time.Minute); len(ofType(evs, channelevents.ItemWedged)) != 1 {
+			t.Fatalf("a deferral that stopped recurring must not hide the wedge: %+v", evs)
 		}
 	})
 }
