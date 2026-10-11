@@ -23,6 +23,10 @@ import (
 // Probe mutations must NOT touch the Labels field; use ProbeBoardItemUpdated,
 // not ShallowBoardItemUpdated, to preserve webhook-driven label state.
 func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
+	// Stamp the listing before the query is issued (#2178), so a slow response is
+	// never mistaken for a fresh one. Wall clock, not e.now(): the store stamps
+	// engine writes with time.Now() and SetClock only moves e.now().
+	fetchedAt := time.Now()
 	probeItems, _, err := e.client.ProbeProjectBoard(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum, e.cfg.OwnerType)
 	if err != nil {
 		_, graphqlStats := e.client.RateLimitStats()
@@ -118,6 +122,17 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 
 		// Detect linkage drift: probe found a different linked PR than the cache holds.
 		s := snap.State()
+		// The Status and closed state the probe apply below will leave the cache
+		// with (#2178): a listing that predates the engine's own write keeps the
+		// engine's value. Every pre-apply read of the listing uses it, so a stale
+		// listing cannot clear the terminal flag or reclassify the column while the
+		// apply keeps the cached value. epi equals pi when no engine write is active.
+		epi := pi
+		if effStatus, effClosed, ok := e.store.EffectiveProbe(repo, pi.Number, pi, fetchedAt); ok {
+			epi.Status, epi.IsClosed = effStatus, effClosed
+			matchedStage = stages.FindStage(e.cfg.Stages, epi.Status)
+			configuredStage = matchedStage != nil && !matchedStage.Unmanaged
+		}
 		cachedPRNum := 0
 		if s.LinkedPR != nil {
 			cachedPRNum = s.LinkedPR.Number
@@ -131,10 +146,10 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 		if e.probeTerminalDriftSkipDisabledForTest {
 			// neutralised (#2080 test seam): fall through to the drift check
 		} else if s.Terminal {
-			if pst := stages.FindStage(e.cfg.Stages, pi.Status); pst != nil && pst.CleanupWorktree && pi.Status == s.Status {
+			if pst := stages.FindStage(e.cfg.Stages, epi.Status); pst != nil && pst.CleanupWorktree && epi.Status == s.Status {
 				driftExempt = true
 			}
-		} else if e.probeOnlyTerminal(gh.ProjectItem{Number: pi.Number, IsClosed: pi.IsClosed, Status: pi.Status, Repo: repo}) {
+		} else if e.probeOnlyTerminal(gh.ProjectItem{Number: pi.Number, IsClosed: epi.IsClosed, Status: epi.Status, Repo: repo}) {
 			driftExempt = true
 		}
 		if driftExempt {
@@ -195,18 +210,18 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 		// pi.Status == s.Status guards against items that moved between two cleanup stages:
 		// in that case we must apply the probe update so the store reflects the new status.
 		if s.Terminal {
-			if pst := stages.FindStage(e.cfg.Stages, pi.Status); pst != nil && pst.CleanupWorktree && pi.Status == s.Status {
+			if pst := stages.FindStage(e.cfg.Stages, epi.Status); pst != nil && pst.CleanupWorktree && epi.Status == s.Status {
 				continue // still terminal in the same cleanup stage — no deep-fetch needed
 			}
 			// Status changed (left the cleanup stage or moved to a different one) — clear
 			// the flag and fall through to normal probe processing.
 			e.store.Apply(itemstate.FromProbe{Inner: itemstate.TerminalFlagSet{Repo: repo, Number: pi.Number, Terminal: false}})
-			e.logf(pi.Number, "poll", "terminal flag cleared (status drifted to %q)\n", pi.Status)
+			e.logf(pi.Number, "poll", "terminal flag cleared (status drifted to %q)\n", epi.Status)
 		}
 
 		// Apply probe state (updates IsClosed, State, IsPR, Status, UpdatedAt;
 		// intentionally skips Labels to preserve webhook-driven label state).
-		e.store.Apply(itemstate.FromProbe{Inner: itemstate.ProbeBoardItemUpdated{Repo: repo, Number: pi.Number, Item: pi}})
+		e.store.Apply(itemstate.FromProbe{Inner: itemstate.ProbeBoardItemUpdated{Repo: repo, Number: pi.Number, Item: pi, FetchedAt: fetchedAt}})
 
 		// Unconditionally write the probe's head SHA whenever present — the probe
 		// response is always authoritative, including for cache-fresh items that
@@ -232,6 +247,10 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 			continue
 		}
 		e.logf(pi.Number, "cache", "probe: stale — deep-fetching\n")
+		// Seed Status/IsClosed from what the apply above left in the store, not from
+		// pi (#2178): ItemDeepFetched writes them back unprotected, so a stale pi would
+		// revert the engine's own write right after the apply kept it. With no engine
+		// write active the store equals pi, so nothing changes.
 		minimal := gh.ProjectItem{
 			ID:        pi.ContentID,
 			ItemID:    pi.ItemID,
@@ -241,6 +260,10 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 			Status:    pi.Status,
 			Repo:      repo,
 			UpdatedAt: pi.EffectiveUpdatedAt,
+		}
+		if cur, curErr := e.store.Get(repo, pi.Number); curErr == nil {
+			minimal.Status = cur.State().Status
+			minimal.IsClosed = cur.State().IsClosed
 		}
 		if fetchErr := cacheImpl.FetchItemDetailsFromProbe(&minimal); fetchErr != nil {
 			e.logf(pi.Number, "warn", "probe: deep-fetch for stale item failed: %v\n", fetchErr)
