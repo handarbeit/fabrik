@@ -25,6 +25,6 @@ Research found that nothing in the reinvoke path uses `Lock`: in-process exclusi
 
 - After any reinvoke the store lock is unchanged (nil unless a real stage lock exists); shutdown attempts no lock-label removal for reinvoked items.
 - `LocalLockAcquired`/`LocalLockReleased` keep their semantics for stage dispatch and `cleanupStaleWorker`.
-- #2159's shutdown handling stays as defence in depth. ADR 2159's "Follow-up (not fixed here)" note is resolved by this ADR; that file lives on `fabrik/issue-2159` (PR #2167) and is not on this base, so the note must be updated when #2167 lands.
+- #2159's shutdown handling stays as defence in depth. ADR 2159's follow-up note is updated to say it is resolved by this ADR.
 
 See `docs/state-machine.md` §7 (worker lifecycle).
