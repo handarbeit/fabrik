@@ -33,7 +33,8 @@ type ActivePaneComponent struct {
 	spinnerFrames  []string
 	spinnerIdx     int
 	now            time.Time
-	defaultRepo    string // "owner/repo" fallback for single-repo projects where activeJob.Repo is empty
+	defaultRepo    string            // "owner/repo" fallback for single-repo projects where activeJob.Repo is empty
+	slots          *WorkerSlotsEvent // latest worker-slot reading (#2115); nil until the first event, so the title is unchanged until then
 }
 
 func (a ActivePaneComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
@@ -96,6 +97,10 @@ func (a ActivePaneComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
 		if a.activeIdx >= len(a.active) && a.activeIdx > 0 {
 			a.activeIdx = len(a.active) - 1
 		}
+
+	case WorkerSlotsEvent:
+		slots := ev
+		a.slots = &slots
 
 	case TrainRowEvent:
 		// Update-only: a late event for a row that has already been removed
@@ -176,7 +181,7 @@ func (a ActivePaneComponent) View(width int) string {
 	if a.focused {
 		focusIndicator = "▸"
 	}
-	title := activeStyle.Render(fmt.Sprintf("%s In Progress (%d)", focusIndicator, len(a.active)+len(a.blocked)))
+	title := activeStyle.Render(fmt.Sprintf("%s In Progress (%d)%s", focusIndicator, len(a.active)+len(a.blocked), a.slotsSuffix()))
 
 	maxWidth := max(width-6, 20)
 
@@ -406,4 +411,18 @@ func (a ActivePaneComponent) ActiveCount() int {
 // TotalCount returns len(active) + len(blocked).
 func (a ActivePaneComponent) TotalCount() int {
 	return len(a.active) + len(a.blocked)
+}
+
+// slotsSuffix renders the worker-slot segment of the title (#2115): "slots 5/5" and,
+// when the reserved merge-train slot exists, " + train 1/1". Empty until the first
+// WorkerSlotsEvent arrives.
+func (a ActivePaneComponent) slotsSuffix() string {
+	if a.slots == nil {
+		return ""
+	}
+	out := fmt.Sprintf(" · slots %d/%d", a.slots.InUse, a.slots.Max)
+	if a.slots.TrainMax > 0 {
+		out += fmt.Sprintf(" + train %d/%d", a.slots.TrainInUse, a.slots.TrainMax)
+	}
+	return out
 }

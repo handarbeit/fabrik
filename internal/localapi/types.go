@@ -339,6 +339,11 @@ type BackoffHealth struct {
 type WorkerSlots struct {
 	InUse         int        `json:"in_use"`
 	MaxConcurrent Known[int] `json:"max_concurrent"`
+	// TrainInUse / TrainMax describe the reserved merge-train slot (#2115, ADR 2115),
+	// which sits on top of MaxConcurrent and is not counted in InUse. Both are a
+	// known zero when merge_train is off.
+	TrainInUse Known[int] `json:"train_in_use"`
+	TrainMax   Known[int] `json:"train_max"`
 }
 
 // TrainPartition is one (repo, base) merge-train partition.
