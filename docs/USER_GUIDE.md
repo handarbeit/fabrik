@@ -3566,14 +3566,14 @@ counts. It renders with the same `↻` icon as a retry, since it is incomplete a
 resumable rather than a fault — `✗ (error)` is reserved for invocations that did not
 complete for some other reason.
 
-**Warnings panel**: Sits below History and surfaces actionable pre-flight issues that Fabrik detected at startup (e.g. `allow_auto_merge` disabled on a managed repo, stage-config drift). The panel header is colour-coded: dim grey for zero outstanding warnings, yellow for 1–2, red for 3+. The panel's appearance when there are no active warnings depends on whether there are dismissed warnings:
+**Warnings panel**: Sits below History and surfaces *operator-level* conditions — configuration, environment or engine faults that block or degrade work and need a person to act. Per-item states (paused, awaiting input, escalated) are not shown here; they live on the board and in item comments. Conditions shown include: `allow_auto_merge` disabled on a managed repo, no write access to a repo, stage-config drift, undeclared reviewers, a stale or skewed binary, an unrecognised `.fabrik/config.yaml` key, invalid settings that fell back to defaults (one aggregated entry), a gitignored `config.yaml`, a fine-grained PAT, local plugin customizations, a missing git credential helper, an unreadable Claude settings file, timeout settings in a bad order, a failed log rotation, and repos receiving no webhooks. Every entry names its fix where one exists, and clears itself once the condition is gone (on the next check or restart) — you never have to remove one by hand. The same message is also written to the log, and headless (`--notui`) runs record entries too. The panel header is colour-coded: dim grey for zero outstanding warnings, yellow for 1–2, red for 3+. The panel's appearance when there are no active warnings depends on whether there are dismissed warnings:
 
 - **No active and no dismissed warnings:** The panel renders nothing at all (zero height), so History retains maximum vertical space.
 - **No active warnings but dismissed entries exist:** The panel collapses to a single hint line: `Warnings: none (N dismissed, press tab + S to show)`.
 
 Tab into the Warnings panel to take action:
-- **F** — run the fix command in the foreground (tears down the TUI, executes, re-renders)
-- **D** — dismiss the selected entry (sticky: survives restarts; dismissed entries are hidden by default)
+- **F** — run the fix command in the foreground (tears down the TUI, executes, re-renders). Entries without an automatic fix (their detail says what to do) ignore it
+- **D** — dismiss the selected entry (survives restarts; dismissed entries are hidden by default). A dismissed entry stays dismissed while the condition is unchanged and reappears if the condition changes materially (for example a different set of missing stage fields)
 - **S** — show/hide dismissed entries
 - **Enter** — expand/collapse the full detail text for the selected entry
 

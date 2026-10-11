@@ -337,3 +337,133 @@ func TestConcurrentRecord(t *testing.T) {
 		t.Errorf("expected %d entries, got %d: %v", len(keys), len(entries), entries)
 	}
 }
+
+func TestRecord_DismissalFingerprint(t *testing.T) {
+	setOverride(t)
+	base := Entry{Key: "t:a", Type: "t", Title: "x", Detail: "d1", Fingerprint: "fp1"}
+	if err := Record(base); err != nil {
+		t.Fatal(err)
+	}
+	if err := Dismiss("t:a"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Same fingerprint, different detail: stays dismissed.
+	same := base
+	same.Detail = "d2"
+	if err := Record(same); err != nil {
+		t.Fatal(err)
+	}
+	if es, _ := Load(); !es[0].Dismissed || es[0].Detail != "d2" {
+		t.Errorf("same fingerprint: want dismissed with updated detail, got %+v", es[0])
+	}
+
+	// Empty fingerprint (e.g. the TUI fix-failed re-record) keeps dismissal and the stored fingerprint.
+	empty := base
+	empty.Fingerprint = ""
+	empty.Detail = "d2 [Fix failed]"
+	if err := Record(empty); err != nil {
+		t.Fatal(err)
+	}
+	if es, _ := Load(); !es[0].Dismissed || es[0].Fingerprint != "fp1" {
+		t.Errorf("empty fingerprint: want dismissed + fp1 kept, got %+v", es[0])
+	}
+
+	// Changed fingerprint: reappears.
+	changed := base
+	changed.Fingerprint = "fp2"
+	if err := Record(changed); err != nil {
+		t.Fatal(err)
+	}
+	if es, _ := Load(); es[0].Dismissed {
+		t.Errorf("changed fingerprint: want undismissed, got %+v", es[0])
+	}
+}
+
+func TestRecord_StickyWithoutFingerprint(t *testing.T) {
+	setOverride(t)
+	e := Entry{Key: "t:a", Type: "t", Title: "x", Detail: "d1"}
+	_ = Record(e)
+	_ = Dismiss("t:a")
+	e.Detail = "d2"
+	_ = Record(e)
+	if es, _ := Load(); !es[0].Dismissed {
+		t.Errorf("no fingerprint: dismissal must stay sticky")
+	}
+}
+
+func TestRecord_UnchangedRepeatSkipsWrite(t *testing.T) {
+	setOverride(t)
+	e := Entry{Key: "t:a", Type: "t", Title: "x", Detail: "d", FixParams: map[string]string{"a": "b"}}
+	if err := Record(e); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(Path(), old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := Record(e); err != nil {
+		t.Fatal(err)
+	}
+	fi, _ := os.Stat(Path())
+	if fi.ModTime().After(old.Add(time.Second)) {
+		t.Errorf("unchanged repeat rewrote the file (mtime %v)", fi.ModTime())
+	}
+
+	// A changed detail does write.
+	e.Detail = "d2"
+	if err := Record(e); err != nil {
+		t.Fatal(err)
+	}
+	fi, _ = os.Stat(Path())
+	if !fi.ModTime().After(old.Add(time.Second)) {
+		t.Errorf("changed detail should rewrite the file")
+	}
+}
+
+func TestRecord_RefreshesStaleLastSeen(t *testing.T) {
+	setOverride(t)
+	old := lastSeenRefresh
+	lastSeenRefresh = 0
+	t.Cleanup(func() { lastSeenRefresh = old })
+	e := Entry{Key: "t:a", Type: "t", Title: "x"}
+	_ = Record(e)
+	es, _ := Load()
+	first := es[0].LastSeen
+	time.Sleep(2 * time.Millisecond)
+	_ = Record(e)
+	es, _ = Load()
+	if !es[0].LastSeen.After(first) {
+		t.Errorf("LastSeen not refreshed")
+	}
+}
+
+func TestClear_AbsentKeyDoesNotWrite(t *testing.T) {
+	setOverride(t)
+	if err := Clear("t:none"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(Path()); err == nil {
+		t.Errorf("Clear of an absent key created the file")
+	}
+}
+
+func TestSave_ConcurrentNoTmpLeak(t *testing.T) {
+	setOverride(t)
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_ = Record(Entry{Key: "t:" + string(rune('a'+i)), Type: "t", Title: "x"})
+		}(i)
+	}
+	wg.Wait()
+	m, _ := filepath.Glob(Path() + "*.tmp")
+	if len(m) != 0 {
+		t.Errorf("leftover tmp files: %v", m)
+	}
+	if es, _ := Load(); len(es) != 8 {
+		t.Errorf("got %d entries, want 8", len(es))
+	}
+}

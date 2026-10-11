@@ -91,6 +91,8 @@ func TestMain(m *testing.M) {
 		os.Setenv("FABRIK_LOCK_DIR", dir)
 		lockDirCleanup = func() { os.RemoveAll(dir) }
 	}
+	// Keep operator-warnings recorders (#2135) out of the package directory.
+	cleanupWarnings := testenv.IsolateWarningsProcess()
 	// Keep spawn-time worker records (#1814) out of the package directory:
 	// most InvokeClaude tests run without t.Chdir.
 	if dir, err := os.MkdirTemp("", "fabrik-worker-records-*"); err == nil {
@@ -98,10 +100,12 @@ func TestMain(m *testing.M) {
 		code := m.Run()
 		os.RemoveAll(dir)
 		lockDirCleanup()
+		cleanupWarnings()
 		os.Exit(code)
 	}
 	code := m.Run()
 	lockDirCleanup()
+	cleanupWarnings()
 	os.Exit(code)
 }
 

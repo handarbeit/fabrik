@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/handarbeit/fabrik/internal/workerenv"
+	"github.com/handarbeit/fabrik/warnings"
 )
 
 // fixedNames are the non-FABRIK names a worker may inherit that tests must not
@@ -87,4 +88,19 @@ func ScrubProcess() {
 	for _, k := range Names(os.Environ()) {
 		_ = os.Unsetenv(k) // best-effort in TestMain; Unsetenv only fails on an invalid name
 	}
+}
+
+// IsolateWarningsProcess points the operator warnings panel file at a fresh
+// temp directory for the whole test process (#2135), so a recorder reachable
+// from any test in the package cannot write a real .fabrik/warnings.json into
+// the package directory. For TestMain; call the returned cleanup (or ignore it
+// before os.Exit, which skips defers) to remove the directory. Tests that
+// assert on the panel still set warnings.WarningsPathOverride themselves.
+func IsolateWarningsProcess() (cleanup func()) {
+	dir, err := os.MkdirTemp("", "fabrik-warnings-*")
+	if err != nil {
+		return func() {}
+	}
+	warnings.SetProcessDefaultPath(filepath.Join(dir, "warnings.json"))
+	return func() { os.RemoveAll(dir) }
 }
