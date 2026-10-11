@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -165,5 +166,53 @@ func TestInfraCooldownPeekDoesNotMutate(t *testing.T) {
 	}
 	if _, ok := e.infraCooldownRemaining("owner/repo"); ok {
 		t.Fatal("remaining must also read as not held")
+	}
+}
+
+// A poll that errors does not reset the Run() ticker, so the next poll comes
+// after the period the engine last chose — a deliberate back-off included. The
+// fallback next-due time must follow it, not the configured interval, or one
+// transient error in a deeply idle daemon reads as a missed poll (#2124).
+func TestErroredPollKeepsTheBackoffPeriodForNextDue(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return nil, errors.New("network error")
+		},
+	}
+	e := testEngine(t, client, &mockClaudeInvoker{})
+	e.cfg.PollSeconds = 30
+	t0 := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
+	e.SetClock(fixedClock{t0})
+	// The last successful poll chose a 60-minute idle back-off period.
+	e.health.setPollPeriod(time.Hour, backoffReasonIdle)
+
+	if err := e.PollOnce(t.Context()); err == nil {
+		t.Fatal("expected the poll to error")
+	}
+	s := e.health.snapshot()
+	if want := t0.Add(time.Hour); !s.NextPollDueAt.Equal(want) {
+		t.Fatalf("next due = %v, want %v (the back-off period, not the configured interval)", s.NextPollDueAt, want)
+	}
+	if s.BackoffReason != backoffReasonIdle {
+		t.Fatalf("backoff reason = %q, want %q", s.BackoffReason, backoffReasonIdle)
+	}
+	if v := e.pollVerdictFor(s, t0.Add(10*time.Minute)); !v.Known || v.Overdue {
+		t.Fatalf("an errored poll during idle back-off must not read as overdue: %+v", v)
+	}
+
+	// With no back-off recorded the configured interval is the fallback, and a
+	// genuinely missed poll still reads as overdue.
+	e2 := testEngine(t, client, &mockClaudeInvoker{})
+	e2.cfg.PollSeconds = 30
+	e2.SetClock(fixedClock{t0})
+	if err := e2.PollOnce(t.Context()); err == nil {
+		t.Fatal("expected the poll to error")
+	}
+	s2 := e2.health.snapshot()
+	if want := t0.Add(30 * time.Second); !s2.NextPollDueAt.Equal(want) {
+		t.Fatalf("next due = %v, want %v", s2.NextPollDueAt, want)
+	}
+	if v := e2.pollVerdictFor(s2, t0.Add(10*time.Minute)); !v.Overdue {
+		t.Fatalf("a missed poll with no back-off must read as overdue: %+v", v)
 	}
 }

@@ -34,6 +34,12 @@ type daemonHealth struct {
 	pollStep        string
 	nextPollDueAt   time.Time
 	backoffReason   string
+	// pollPeriod/periodReason are the period the Run() ticker was last reset to
+	// (the engine's own effective interval) and why it exceeds the configured one.
+	// An errored poll does not reset the ticker, so its next poll comes after
+	// this period, not after the configured interval (#2124).
+	pollPeriod   time.Duration
+	periodReason string
 	// stallEpoch counts ended overdue episodes; lastStallEndAt is when the
 	// latest one ended.
 	stallEpoch     uint64
@@ -156,7 +162,7 @@ func (h *daemonHealth) endPoll(at time.Time, v pollVerdict, fallbackNext time.Ti
 	h.pollCompletedAt = at
 	h.pollStep = ""
 	h.nextPollDueAt = fallbackNext
-	h.backoffReason = ""
+	h.backoffReason = h.periodReason
 }
 
 // setPollStep records what the in-progress poll is doing; "" when unknown.
@@ -175,6 +181,24 @@ func (h *daemonHealth) setNextPollDue(at time.Time, reason string) {
 	h.nextPollDueAt = at
 	h.backoffReason = reason
 	h.mu.Unlock()
+}
+
+// setPollPeriod records the period the poll ticker was reset to, and the
+// back-off reason when it is longer than the configured interval. endPoll's
+// fallback next-due time uses it, so a poll that errors during a deliberate
+// back-off is not mistaken for a missed poll.
+func (h *daemonHealth) setPollPeriod(d time.Duration, reason string) {
+	h.mu.Lock()
+	h.pollPeriod = d
+	h.periodReason = reason
+	h.mu.Unlock()
+}
+
+// pollPeriodSnapshot returns the last recorded ticker period (zero if none).
+func (h *daemonHealth) pollPeriodSnapshot() time.Duration {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.pollPeriod
 }
 
 func (h *daemonHealth) snapshot() healthSnapshot {

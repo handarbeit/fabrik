@@ -1236,6 +1236,7 @@ func (e *Engine) PollWithBackoff(ctx context.Context, configuredInterval time.Du
 		e.health.setRestPaused(true, e.now())
 		restWait := restStats.Reset.Sub(e.now()) + rateLimitResetBuffer
 		e.health.setNextPollDue(e.now().Add(restWait), backoffReasonREST)
+		e.health.setPollPeriod(restWait, backoffReasonREST)
 		return PollBackoffResult{NextInterval: restWait}, nil
 	}
 	if e.backoffRestPaused {
@@ -1341,6 +1342,7 @@ func (e *Engine) PollWithBackoff(ctx context.Context, configuredInterval time.Du
 		backoffReason = backoffReasonIdle
 	}
 	e.health.setNextPollDue(e.now().Add(effectiveInterval), backoffReason)
+	e.health.setPollPeriod(effectiveInterval, backoffReason)
 	return PollBackoffResult{NextInterval: effectiveInterval, Ran: true}, nil
 }
 
@@ -1408,7 +1410,14 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	defer func() {
 		end := e.now()
 		v := e.pollVerdictFor(e.health.snapshot(), end)
-		e.health.endPoll(end, v, end.Add(e.pollInterval()))
+		// An errored poll leaves the Run() ticker at its previous period, so the
+		// next poll is due after that period (a deliberate back-off included),
+		// not after the configured interval.
+		next := e.pollInterval()
+		if p := e.health.pollPeriodSnapshot(); p > next {
+			next = p
+		}
+		e.health.endPoll(end, v, end.Add(next))
 	}()
 	return e.pollCycle(ctx)
 }
