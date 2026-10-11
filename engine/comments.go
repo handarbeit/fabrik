@@ -249,6 +249,25 @@ func (e *Engine) processCommentsClassified(ctx context.Context, board *gh.Projec
 		return didNotRunAccountUsageLimited, nil
 	}
 
+	// ADR 2137: qualify the comment skill against the loaded plugins, or refuse
+	// before any side effect when it cannot resolve (the stage variants for
+	// ci_fix_skill and rebase_skill have already been swapped into
+	// CommentSkill). The comments stay "new" and are retried once the
+	// configuration or plugin is fixed; no breaker or reinvoke cycle is charged.
+	resolvedStage, resolvedRefs, resolveErr := e.resolveStageSkills(stage, skillKeyCommentSkill)
+	if resolveErr != nil {
+		var ue *skillUnresolvedError
+		if errors.As(resolveErr, &ue) {
+			e.handleSkillUnresolved(item, stage, itemOwnerRepoString(item, e.defaultRepo()), ue, false)
+			return didNotRunSkillUnresolved, nil
+		}
+		return "", resolveErr
+	}
+	stage = resolvedStage
+	for _, r := range resolvedRefs {
+		e.clearSkillUnresolved(stage.Name, r.Key)
+	}
+
 	// Merge any unresolved PR review thread comments into the working slice.
 	// This ensures that when a user nudge arrives (e.g. "please address Copilot
 	// feedback"), the review thread comments are processed alongside the

@@ -313,6 +313,7 @@ func (e *Engine) Run() error {
 	stages.WarnStageDrift(e.cfg.Stages, e.cfg.Version, startupW)
 	stages.WarnUndeclaredReviewers(e.cfg.Stages, startupW)
 	stages.SweepStaleWarnings(e.cfg.Stages, startupW)
+	e.reportStageSkills(e.cfg.Stages, startupW)
 	logClaudeConfigDir(configDir, startupW)
 	logAnthropicAPIKeyOptIn(claudeAnthropicAPIKey != "", startupW)
 	logAnthropicEnvPassthrough(claudeAnthropicEnvPassthrough, startupW)
@@ -930,6 +931,7 @@ var transientLifecycleLabels = []string{
 	"fabrik:claude-limit",
 	"fabrik:clear-claude-limit",
 	"fabrik:api-key-helper-detected",
+	"fabrik:skill-unresolved",
 	"fabrik:tools-denied",
 	"fabrik:toolchain-stale",
 }
