@@ -2262,6 +2262,7 @@ func (e *Engine) dispatchCandidates(ctx context.Context, board *gh.ProjectBoard,
 	}
 
 	if len(deferredKeys) > 0 {
+		e.emitDispatchDeferred(deferredKeys)
 		e.logf(0, "poll", "deferred dispatch of %d candidate(s) %s: all worker slots busy (%d/%d in use)\n",
 			len(deferredKeys), strings.Join(deferredNums, ", "), len(e.sem), cap(e.sem))
 	}

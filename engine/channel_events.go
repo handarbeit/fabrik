@@ -99,6 +99,10 @@ type channelEvents struct {
 	// episodeSeq numbers pipeline stall episodes for their dedup keys.
 	episodeSeq uint64
 
+	// anom is the retry/wedge episode memory and the divergence ledger
+	// (#2170); it has its own mutex because hooks and the observer write it.
+	anom anomalyState
+
 	wake  chan struct{}
 	stop  chan struct{}
 	wg    sync.WaitGroup
@@ -277,13 +281,21 @@ func (ce *channelEvents) onChange(c itemstate.Change, snap itemstate.Snapshot) {
 		return
 	}
 	key := issueRef(c.Repo, c.Number)
+	if c.Fields&itemstate.WorkerLifecycleChanged != 0 && st.Worker != nil {
+		ce.noteWorkerEntered(key)
+	}
 	// A reopened issue or a failed landing verification ends the announced
 	// landing, so a later close is attributed from its own change, not from a
 	// stale mark.
 	if c.Fields&itemstate.StateChanged != 0 && !st.IsClosed {
 		ce.clearLanding(key)
 	}
-	var evs []channelevents.Event
+	// A reconcile, deep fetch or probe that reverts a recent engine write is
+	// reported once, ahead of the label events it caused, and those are marked
+	// unverified (#2170): the cache and GitHub disagree, so the change may be a
+	// phantom.
+	evs := ce.noteChangeForDivergence(c, &st, ce.e.now())
+	unverified := len(evs) > 0
 	for _, d := range c.LabelDeltas {
 		if d.Added && d.Label == "fabrik:landing-verification-failed" {
 			ce.clearLanding(key)
@@ -291,6 +303,9 @@ func (ce *channelEvents) onChange(c itemstate.Change, snap itemstate.Snapshot) {
 		le := ce.e.labelEvent(&st, c, d)
 		if closeTrackingLabel(d.Label) && ce.isLanding(key) {
 			le.Meta["landing"] = "true"
+		}
+		if unverified {
+			le.Meta[channelevents.MetaUnverified] = "true"
 		}
 		evs = append(evs, le)
 		evs = append(evs, ce.e.labelDerivedEvents(&st, d)...)
@@ -421,6 +436,7 @@ func (ce *channelEvents) drain() {
 	if nudged {
 		ce.checkClaudeLimit()
 	}
+	ce.checkAnomalies()
 }
 
 // labelAttribution is who caused a label change, as pushed on a label event.

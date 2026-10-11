@@ -83,6 +83,7 @@ type claudeAPIErrorExit = claudeerr.APIErrorExit
 type claudeResumeFailureError = claudeerr.ResumeFailureError
 type claudeToolsDeniedError = claudeerr.ToolsDeniedError
 type claudeSkillLoadError = claudeerr.SkillLoadError
+type claudeKilledError = claudeerr.KilledError
 
 // apiErrorTerminalReason is the CLI's structural terminal_reason value for an
 // Anthropic-side API error — observed live on 2026-08-08 (#1458) as eight

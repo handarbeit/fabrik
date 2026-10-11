@@ -349,6 +349,7 @@ func (e *Engine) handleReviewGate(pctx *phase1Ctx) bool {
 		}
 	}
 	if blocked {
+		e.noteGateHold(pctx.item, gateReview, "waiting for reviewers to respond", nil)
 		// Record CooldownAt["review-blocked"] so itemMayNeedWork's expiry path
 		// re-evaluates this item every 10 × PollSeconds even when nothing bumps
 		// updatedAt. This lets Phase 1/Phase 2 review-reprompt timers fire on a
@@ -545,6 +546,7 @@ func (e *Engine) handleMergeAndCIGates(pctx *phase1Ctx) bool {
 		// every poll with zero trace in the logs. checkCIGate is never
 		// reached while this is true.
 		e.logf(pctx.item.Number, "ci-gate", "claiming item — merge gate blocked, checkCIGate not reached (%s)\n", settle.Reason)
+		e.noteGateHold(pctx.item, gateMerge, settle.Reason, nil)
 		// #2096: reached only for PRMergeUnsettled/PRMergeQueued (a conflict is the
 		// mergeConflict branch above). The claim sets no awaiting-ci label, and CI
 		// completion moves neither a label nor the issue's updatedAt, so without a
@@ -621,6 +623,7 @@ func (e *Engine) handleMergeAndCIGates(pctx *phase1Ctx) bool {
 		)
 	}
 	if ciBlocked {
+		e.noteGateHold(pctx.item, gateCI, "waiting for CI checks", nil)
 		return true // CI still pending; re-evaluate on next poll
 	}
 
