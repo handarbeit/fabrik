@@ -514,3 +514,304 @@ func TestSkillUnresolvedNeedsHuman(t *testing.T) {
 		t.Fatalf("got %s/%s rank %d (%s), want needs-human/skill-unresolved ranked", got.State, got.Code, got.Rank, got.Summary)
 	}
 }
+
+// ---- Suspended (#2120) ----
+
+func specifyComplete() Input {
+	in := baseInput()
+	in.Status = "Specify"
+	in.NextStage = "Research"
+	in.Labels = []string{"stage:Specify:complete"}
+	in.LabelAppliedAt = map[string]time.Time{"stage:Specify:complete": t0.Add(-68 * 24 * time.Hour)}
+	// A daemon that just started: first-seen is "now-ish".
+	in.StatusEnteredAt = t0.Add(-time.Minute)
+	return in
+}
+
+func TestSuspendedDecisionPendingAfterRestart(t *testing.T) {
+	got := Classify(specifyComplete())
+	if got.State != Suspended || got.Code != CodeDecisionPending || got.Rank != RankNeedsHuman {
+		t.Fatalf("got %s/%s rank %d (%s), want suspended/decision-pending ranked with needs-human", got.State, got.Code, got.Rank, got.Summary)
+	}
+	if got.Pending == nil || got.Pending.SinceBasis != SinceGitHub {
+		t.Fatalf("pending = %+v, want a GitHub-anchored since-time", got.Pending)
+	}
+	if got.ProgressAge < 67*24*time.Hour || got.ProgressAge > 69*24*time.Hour {
+		t.Errorf("age = %s, want about 68 days (anchored on the GitHub label time, not daemon first-seen)", got.ProgressAge)
+	}
+	for _, want := range []string{"advance to Research", "cruise"} {
+		if !strings.Contains(got.Next.Action, want) {
+			t.Errorf("next action %q must name %q", got.Next.Action, want)
+		}
+	}
+	if !got.Next.At.IsZero() || len(got.Next.Deadlines) != 0 {
+		t.Errorf("a suspended item schedules nothing: %+v", got.Next)
+	}
+	if strings.Contains(got.Summary, "stalled") {
+		t.Errorf("summary must not read as a stall: %q", got.Summary)
+	}
+}
+
+func TestSuspendedNeverStalled(t *testing.T) {
+	in := specifyComplete()
+	in.StatusEnteredAt = t0.Add(-100 * 24 * time.Hour)
+	in.LastAttemptAt = t0.Add(-99 * 24 * time.Hour)
+	if got := Classify(in); got.State != Suspended {
+		t.Fatalf("a long-waiting decision is %s, want suspended", got.State)
+	}
+	// Control: the same item behind an engine mask is the pre-existing stalled
+	// path, proving the stall branch is reachable here.
+	in.Labels = []string{"stage:Specify:complete", "fabrik:editing"}
+	if got := Classify(in); got.State == Suspended {
+		t.Fatalf("control: masked item must not be suspended")
+	}
+}
+
+func TestSuspendedUnknownTimeSaysAtLeast(t *testing.T) {
+	in := specifyComplete()
+	in.LabelAppliedAt = nil
+	got := Classify(in)
+	if got.State != Suspended {
+		t.Fatalf("got %s", got.State)
+	}
+	if got.Pending.SinceBasis != SinceFirstSeen || got.Pending.SinceExact() {
+		t.Fatalf("basis = %s, want the first-seen lower bound", got.Pending.SinceBasis)
+	}
+	if !got.ProgressAt.IsZero() {
+		t.Errorf("a daemon-observed age must not be presented as the wait: ProgressAt=%v", got.ProgressAt)
+	}
+	if !strings.Contains(got.Summary, "at least since") {
+		t.Errorf("summary %q must say \"at least since\"", got.Summary)
+	}
+	// Control: the stage comment time is a GitHub proxy and is exact.
+	in.StageCommentAt = t0.Add(-3 * time.Hour)
+	got = Classify(in)
+	if got.Pending.SinceBasis != SinceStageComment || got.ProgressAge != 3*time.Hour {
+		t.Errorf("stage-comment fallback = %s / %s", got.Pending.SinceBasis, got.ProgressAge)
+	}
+}
+
+func TestSuspendedAutonomyIsNotPending(t *testing.T) {
+	in := specifyComplete()
+	in.AutoAdvances = true
+	in.Labels = append(in.Labels, "fabrik:cruise")
+	if got := Classify(in); got.State == Suspended {
+		t.Fatalf("an auto-advancing item is %s, must not be suspended", got.State)
+	}
+	in.AutoAdvances = false
+	in.Labels = []string{"stage:Specify:complete"}
+	if got := Classify(in); got.State != Suspended {
+		t.Fatalf("control: got %s, want suspended", got.State)
+	}
+}
+
+func TestSuspendedExcludesValidate(t *testing.T) {
+	in := specifyComplete()
+	in.Status = "Validate"
+	in.NextStage = ""
+	in.Labels = []string{"stage:Validate:complete"}
+	in.StatusEnteredAt = t0.Add(-2 * time.Hour)
+	if got := Classify(in); got.State == Suspended {
+		t.Fatalf("Validate keeps its existing ranking, got suspended")
+	}
+}
+
+func TestSuspendedMasks(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mod  func(*Input)
+	}{
+		{"worker", func(in *Input) { in.HasWorker = true; in.WorkerStartedAt = t0 }},
+		{"awaiting-ci", func(in *Input) { in.Labels = append(in.Labels, "fabrik:awaiting-ci") }},
+		{"rebase-needed", func(in *Input) { in.Labels = append(in.Labels, "fabrik:rebase-needed") }},
+		{"editing", func(in *Input) { in.Labels = append(in.Labels, "fabrik:editing") }},
+		{"in-progress", func(in *Input) { in.Labels = append(in.Labels, "stage:Research:in_progress") }},
+		{"locked", func(in *Input) { in.Labels = append(in.Labels, "fabrik:locked:me") }},
+		{"pending feedback", func(in *Input) { in.FeedbackPending = true }},
+		{"blocked", func(in *Input) { in.Labels = append(in.Labels, "fabrik:blocked") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := specifyComplete()
+			tc.mod(&in)
+			if got := Classify(in); got.State == Suspended {
+				t.Fatalf("%s must mask the decision, got suspended", tc.name)
+			}
+		})
+	}
+	// Cooldowns never mask: a periodic re-evaluation cannot change anything.
+	in := specifyComplete()
+	in.Cooldowns = map[string]time.Time{"periodic-re-eval": t0.Add(10 * time.Minute), "dep-blocked": t0.Add(time.Minute)}
+	got := Classify(in)
+	if got.State != Suspended || !got.Next.At.IsZero() {
+		t.Fatalf("a cooldown must not mask or schedule a suspended item: %s next_at=%v", got.State, got.Next.At)
+	}
+}
+
+func parkedInput() Input {
+	in := baseInput()
+	in.Status = "Specify"
+	in.Labels = []string{"fabrik:blocked"}
+	in.LabelAppliedAt = map[string]time.Time{"fabrik:blocked": t0.Add(-5 * 24 * time.Hour)}
+	in.ParkedBlockers = []ParkedBlocker{{Ref: "o/r#1372", Column: "Backlog"}}
+	in.BlockedOnlyByParked = true
+	return in
+}
+
+func TestSuspendedParkedBlocker(t *testing.T) {
+	got := Classify(parkedInput())
+	if got.State != Suspended || got.Code != CodeParkedBlocker || got.Rank != RankNeedsHuman {
+		t.Fatalf("got %s/%s rank %d, want suspended/parked-blocker", got.State, got.Code, got.Rank)
+	}
+	if !strings.Contains(got.Next.Action, "#1372") || !strings.Contains(got.Next.Action, "fabrik_promote") {
+		t.Errorf("next action %q must name the blocker and the promote tool", got.Next.Action)
+	}
+	if got.ProgressAge < 4*24*time.Hour {
+		t.Errorf("age = %s, want anchored on fabrik:blocked", got.ProgressAge)
+	}
+	// Control: a blocker in an active pipeline column stays waiting.
+	in := parkedInput()
+	in.BlockedOnlyByParked = false
+	if got := Classify(in); got.State != Waiting || got.Code != "fabrik:blocked" {
+		t.Fatalf("active-column blocker = %s/%s, want waiting/fabrik:blocked", got.State, got.Code)
+	}
+	// Control: a parked blocker with a worker running is masked.
+	in = parkedInput()
+	in.HasWorker, in.WorkerStartedAt = true, t0
+	if got := Classify(in); got.State == Suspended {
+		t.Fatalf("a worker masks the parked-blocker state")
+	}
+}
+
+func TestEligibilityChangeResetsTheAnchor(t *testing.T) {
+	// Settled at Validate under cruise 40 minutes ago; the operator then set yolo.
+	in := baseInput()
+	in.Status = "Validate"
+	in.Labels = []string{"stage:Validate:complete", "fabrik:yolo"}
+	in.StatusEnteredAt = t0.Add(-40 * time.Minute)
+	in.LabelAppliedAt = map[string]time.Time{"stage:Validate:complete": t0.Add(-40 * time.Minute)}
+	in.EligibilityChangedAt = t0.Add(-10 * time.Second)
+	got := Classify(in)
+	if got.State == Stalled {
+		t.Fatalf("a decision made seconds ago read as a stall: %s", got.Summary)
+	}
+	if got.ProgressAge != 10*time.Second {
+		t.Errorf("age = %s, want it to start at the change (10s)", got.ProgressAge)
+	}
+	// Past one threshold after the change it is stalled.
+	in.Now = t0.Add(31 * time.Minute)
+	if got := Classify(in); got.State != Stalled {
+		t.Fatalf("after a threshold since the change: %s, want stalled", got.State)
+	}
+	// Control: without the stamp (unknown) the 40-minute age is what stalls it.
+	in = baseInput()
+	in.Status = "Validate"
+	in.Labels = []string{"stage:Validate:complete", "fabrik:yolo"}
+	in.StatusEnteredAt = t0.Add(-40 * time.Minute)
+	in.LabelAppliedAt = map[string]time.Time{"stage:Validate:complete": t0.Add(-40 * time.Minute)}
+	if got := Classify(in); got.State != Stalled {
+		t.Fatalf("control without a stamp = %s, want stalled", got.State)
+	}
+}
+
+func TestEligibilityChangeRestartsAPendingAge(t *testing.T) {
+	in := specifyComplete()
+	in.EligibilityChangedAt = t0.Add(-time.Hour)
+	got := Classify(in)
+	if got.Pending.SinceBasis != SinceEligibility || got.ProgressAge != time.Hour {
+		t.Fatalf("basis=%s age=%s, want the age to start at the change", got.Pending.SinceBasis, got.ProgressAge)
+	}
+}
+
+func TestNextAtIsNotACooldownForNonProgressingStates(t *testing.T) {
+	cd := map[string]time.Time{"retry": t0.Add(8 * time.Minute), "periodic-re-eval": t0.Add(12 * time.Minute)}
+	for _, tc := range []struct {
+		name   string
+		labels []string
+	}{
+		{"paused", []string{"fabrik:paused", "fabrik:awaiting-input"}},
+		{"blocked", []string{"fabrik:blocked"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := baseInput()
+			in.Labels = tc.labels
+			in.Cooldowns = cd
+			got := Classify(in)
+			if !got.Next.At.IsZero() {
+				t.Errorf("next_at = %v, want absent", got.Next.At)
+			}
+			if strings.Contains(got.Next.Action, "cooldown") {
+				t.Errorf("next action %q names a cooldown", got.Next.Action)
+			}
+		})
+	}
+	// Control: an awaiting-ci wait keeps its real deadline.
+	in := baseInput()
+	in.Labels = []string{"fabrik:awaiting-ci"}
+	in.LastCIProgressAt = t0
+	if got := Classify(in); got.Next.At.IsZero() {
+		t.Errorf("control: awaiting-ci lost its deadline")
+	}
+	// periodic-re-eval alone is no deadline anywhere.
+	in = baseInput()
+	in.Cooldowns = map[string]time.Time{"periodic-re-eval": t0.Add(time.Hour)}
+	got := Classify(in)
+	if !got.Next.At.IsZero() || strings.Contains(got.Next.Action, "re-dispatched") {
+		t.Errorf("periodic-re-eval presented as a next action: %+v", got.Next)
+	}
+}
+
+func TestResumeMethodFollowsTheEngineComment(t *testing.T) {
+	paused := func(r ResumeMethod, extra ...string) Result {
+		in := baseInput()
+		in.Labels = append([]string{"fabrik:paused"}, extra...)
+		in.Resume = r
+		return Classify(in)
+	}
+	got := paused(ResumeRemoveLabel, "fabrik:awaiting-input")
+	if !strings.Contains(got.Next.Action, "remove fabrik:paused") || strings.Contains(got.Next.Action, "human comment") {
+		t.Errorf("remove-label pause: %q", got.Next.Action)
+	}
+	if len(got.Options) != 1 || !strings.Contains(got.Options[0].Action, "remove the fabrik:paused label") {
+		t.Errorf("options = %+v", got.Options)
+	}
+	got = paused(ResumeComment, "fabrik:awaiting-input")
+	if !strings.Contains(got.Next.Action, "human comment") || !strings.Contains(got.Options[0].Action, "comment") {
+		t.Errorf("comment pause: %q / %+v", got.Next.Action, got.Options)
+	}
+	// Unknown claims neither contradicting method for a bare pause.
+	got = paused(ResumeUnknown)
+	if strings.Contains(got.Next.Action, "human comment") || strings.Contains(got.Next.Action, "remove fabrik:paused") ||
+		!strings.Contains(got.Next.Action, "pause comment") {
+		t.Errorf("unknown-method pause must point at the comment: %q", got.Next.Action)
+	}
+}
+
+func TestOptionsPerDecisionKind(t *testing.T) {
+	// Pending decision.
+	got := Classify(specifyComplete())
+	var tools []string
+	for _, o := range got.Options {
+		tools = append(tools, o.Tool)
+	}
+	if strings.Join(tools, ",") != "fabrik_advance,fabrik_set_autonomy cruise,fabrik_set_autonomy yolo" {
+		t.Errorf("decision options tools = %v", tools)
+	}
+	if got.Options[0].Action != "advance to Research" {
+		t.Errorf("first option = %+v", got.Options[0])
+	}
+	// Parked blocker.
+	got = Classify(parkedInput())
+	if len(got.Options) != 2 || got.Options[0].Tool != "fabrik_promote" || got.Options[1].Tool != "" {
+		t.Errorf("parked options = %+v", got.Options)
+	}
+	// Validate settled under cruise.
+	in := baseInput()
+	in.Status = "Validate"
+	in.Labels = []string{"stage:Validate:complete", "fabrik:cruise"}
+	in.HasOpenUnmergedPR, in.PRNumber = true, 77
+	got = Classify(in)
+	if len(got.Options) != 2 || got.Options[0].Action != "merge PR #77" || got.Options[0].Tool != "" ||
+		got.Options[1].Tool != "fabrik_set_autonomy yolo" {
+		t.Errorf("merge-decision options = %+v", got.Options)
+	}
+}
