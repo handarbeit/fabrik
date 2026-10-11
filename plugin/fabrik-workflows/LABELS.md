@@ -220,9 +220,9 @@ except where noted.
   Applied to a non-Validate issue: only the trigger label is removed, with
   a warning. Safe to apply mid-flight — held until the active worker exits.
 - **`fabrik:clear-claude-limit`** — One-shot operator command: clears an
-  active account-wide Claude usage-limit suspension without an engine
+  active account-wide Claude usage-limit hold without an engine
   restart. Consumed and removed from every carrying item in the same poll
-  pass. Not scoped to the issue it's applied to — the suspension it clears
+  pass. Not scoped to the issue it's applied to — the usage-limit hold it clears
   is account-wide.
 
 ## Engine-Internal & Informational
@@ -310,7 +310,7 @@ and should recognize.
   counts toward the normal dispatch cooldown, but not against
   `max_retries` — the stage never actually ran. Cleared on the issue's
   next invocation that isn't itself a usage-limit exit, or account-wide
-  once the suspension lifts. Distinct from GitHub's own API rate limiting.
+  once the usage-limit hold lifts. Distinct from GitHub's own API rate limiting.
 - **`fabrik:api-key-helper-detected`** — Set when a stage invocation is
   skipped because the worktree's own `.claude/settings.json` or
   `settings.local.json` sets `apiKeyHelper` — a repo-resident setting Fabrik cannot see until the

@@ -143,6 +143,12 @@ func Open(o Options) (*Hub, error) {
 		o.Logf("channel: corrupt subscriptions file quarantined to %s\n", q)
 	} else if ok {
 		h.subs = reg.Subscriptions
+		if migrateSubscriptions(h.subs) {
+			o.Logf("channel: migrated legacy event type names in persisted subscriptions\n")
+			if err := saveJSON(h.registryPath(), registryFile{Subscriptions: h.subs, LastAttach: reg.LastAttach}); err != nil {
+				o.Logf("channel: saving migrated subscriptions: %v\n", err)
+			}
+		}
 		for k, v := range reg.LastAttach {
 			h.lastAttach[k] = v
 		}
@@ -173,6 +179,11 @@ func Open(o Options) (*Hub, error) {
 			continue
 		}
 		if ok && q.Name != "" {
+			if migrateQueue(&q) {
+				if err := saveJSON(p, q); err != nil {
+					o.Logf("channel: saving migrated held queue: %v\n", err)
+				}
+			}
 			h.subscribers[q.Name] = newSubscriber(q.Name, p, q)
 		}
 	}

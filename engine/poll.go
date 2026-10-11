@@ -1865,10 +1865,10 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	// Claude usage-limit settle scans (#1183): the operator-triggered restart-free
 	// clear runs first so a clear request and the resulting account-wide label sweep
 	// can both land in the same poll cycle. Both run unconditionally every poll,
-	// independent of itemMayNeedWork/itemNeedsWork — the suspension they manage is
+	// independent of itemMayNeedWork/itemNeedsWork — the usage-limit hold they manage is
 	// account-wide, not scoped to any one item's stage or column. Neither uses the
 	// retry/escalate machinery: a clear request is a one-shot idempotent command, and
-	// the label sweep is purely cosmetic (dispatch is gated by claudeSuspendedUntil,
+	// the label sweep is purely cosmetic (dispatch is gated by claudeUsageLimitedUntil,
 	// not the label), so a failed removal simply self-heals on the next poll.
 	e.settleClaudeLimitClearRequests(board)
 	e.settleClaudeLimitLabelSweep(board)

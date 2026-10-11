@@ -149,11 +149,11 @@ func TestAPIErrorExit_ThreeConsecutiveThenSuccess_CompletesNormally(t *testing.T
 	}
 }
 
-// TestAPIErrorExit_DoesNotActivateAccountWideSuspension verifies #1458
+// TestAPIErrorExit_DoesNotActivateAccountWideUsageLimit verifies #1458
 // Acceptance 4: unlike claudeUsageLimitError, an api_error exit is
-// per-invocation/transient and must never touch claudeSuspendedUntilTime or
-// any account-wide suspension state.
-func TestAPIErrorExit_DoesNotActivateAccountWideSuspension(t *testing.T) {
+// per-invocation/transient and must never touch claudeUsageLimitedUntilTime or
+// any account-wide usage-limit hold state.
+func TestAPIErrorExit_DoesNotActivateAccountWideUsageLimit(t *testing.T) {
 	skipIfNoGit(t)
 	repoDir := initBareRepo(t)
 	wm := NewWorktreeManager(repoDir)
@@ -173,13 +173,13 @@ func TestAPIErrorExit_DoesNotActivateAccountWideSuspension(t *testing.T) {
 	)
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
-	item := gh.ProjectItem{Number: 302, Title: "No account-wide suspension", Status: "Research", ItemID: "PVTI_302"}
+	item := gh.ProjectItem{Number: 302, Title: "No account-wide usage-limit hold", Status: "Research", ItemID: "PVTI_302"}
 
 	if err := eng.processItem(context.Background(), board, item); err != nil {
 		t.Fatalf("processItem: %v", err)
 	}
 
-	if _, suspended := eng.claudeSuspendedUntilTime(time.Now()); suspended {
-		t.Error("api_error exit must NOT activate the account-wide Claude suspension")
+	if _, usageLimited := eng.claudeUsageLimitedUntilTime(time.Now()); usageLimited {
+		t.Error("api_error exit must NOT activate the account-wide Claude usage-limit hold")
 	}
 }

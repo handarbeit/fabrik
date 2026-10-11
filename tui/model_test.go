@@ -772,31 +772,31 @@ func TestUpdateLayout_AlertBannerHeightBudget(t *testing.T) {
 	}
 }
 
-// TestUpdate_ClaudeUsageLimitAlertEvent_Suspended verifies that after
-// receiving a ClaudeUsageLimitAlertEvent{Suspended: true}, the usage-limit
+// TestUpdate_ClaudeUsageLimitAlertEvent_UsageLimited verifies that after
+// receiving a ClaudeUsageLimitAlertEvent{UsageLimited: true}, the usage-limit
 // banner becomes active and visible — mirrors
 // TestUpdate_RateLimitAlertEvent_Exhausted, but for the distinct
-// account-wide Claude suspension condition (ADR-1120).
-func TestUpdate_ClaudeUsageLimitAlertEvent_Suspended(t *testing.T) {
+// account-wide Claude usage-limit hold condition (ADR-1120).
+func TestUpdate_ClaudeUsageLimitAlertEvent_UsageLimited(t *testing.T) {
 	m := New(30, ProjectInfo{}, "", nil, nil, 0, false)
 	reset := time.Now().Add(time.Hour)
 
-	next, _ := m.Update(ClaudeUsageLimitAlertEvent{Suspended: true, Reset: reset})
+	next, _ := m.Update(ClaudeUsageLimitAlertEvent{UsageLimited: true, Reset: reset})
 	m = next.(Model)
 
 	if !m.usageLimit.active {
-		t.Error("expected usageLimit.active=true after ClaudeUsageLimitAlertEvent{Suspended: true}")
+		t.Error("expected usageLimit.active=true after ClaudeUsageLimitAlertEvent{UsageLimited: true}")
 	}
 	if !m.usageLimit.reset.Equal(reset) {
 		t.Errorf("expected usageLimit.reset=%v, got %v", reset, m.usageLimit.reset)
 	}
 	if !m.usageLimit.isVisible() {
-		t.Error("expected usage-limit banner to be visible after Suspended=true event")
+		t.Error("expected usage-limit banner to be visible after UsageLimited=true event")
 	}
 }
 
 // TestUpdate_ClaudeUsageLimitAlertEvent_Cleared verifies that after receiving
-// a ClaudeUsageLimitAlertEvent{Suspended: false}, the banner's active flag is
+// a ClaudeUsageLimitAlertEvent{UsageLimited: false}, the banner's active flag is
 // cleared and it stops being visible — mirrors
 // TestUpdate_RateLimitAlertEvent_Recovered.
 func TestUpdate_ClaudeUsageLimitAlertEvent_Cleared(t *testing.T) {
@@ -804,27 +804,27 @@ func TestUpdate_ClaudeUsageLimitAlertEvent_Cleared(t *testing.T) {
 	m.usageLimit.active = true
 	m.usageLimit.reset = time.Now().Add(time.Hour)
 
-	next, _ := m.Update(ClaudeUsageLimitAlertEvent{Suspended: false})
+	next, _ := m.Update(ClaudeUsageLimitAlertEvent{UsageLimited: false})
 	m = next.(Model)
 
 	if m.usageLimit.active {
-		t.Error("expected usageLimit.active=false after ClaudeUsageLimitAlertEvent{Suspended: false}")
+		t.Error("expected usageLimit.active=false after ClaudeUsageLimitAlertEvent{UsageLimited: false}")
 	}
 	if m.usageLimit.isVisible() {
-		t.Error("expected usage-limit banner to be hidden after Suspended=false event")
+		t.Error("expected usage-limit banner to be hidden after UsageLimited=false event")
 	}
 }
 
 // TestClaudeUsageLimitBanner_SelfClearsOnTickPastReset verifies that the
 // banner stops rendering once a TickEvent's At time reaches or passes the
-// computed reset, even with no explicit Suspended=false event — the
+// computed reset, even with no explicit UsageLimited=false event — the
 // cosmetic self-clear behavior documented on
 // ClaudeUsageLimitBannerComponent.isVisible.
 func TestClaudeUsageLimitBanner_SelfClearsOnTickPastReset(t *testing.T) {
 	m := New(30, ProjectInfo{}, "", nil, nil, 0, false)
 	reset := time.Now().Add(time.Hour)
 
-	next, _ := m.Update(ClaudeUsageLimitAlertEvent{Suspended: true, Reset: reset})
+	next, _ := m.Update(ClaudeUsageLimitAlertEvent{UsageLimited: true, Reset: reset})
 	m = next.(Model)
 	if !m.usageLimit.isVisible() {
 		t.Fatal("precondition: banner should be visible right after activation")

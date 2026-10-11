@@ -30,7 +30,7 @@ const (
 	// mergeTrainRepairFile is the context file the repair's Validate dispatch reads.
 	mergeTrainRepairFile = "merge-train-repair.md"
 	// repairContextTTL bounds how long a pending repair context may wait for its Validate
-	// dispatch. A longer wait means the repair flow was left (paused, blocked, suspended) and
+	// dispatch. A longer wait means the repair flow was left (paused, blocked, usageLimited) and
 	// the facts in the context are no longer trustworthy, so it is discarded.
 	repairContextTTL = 2 * time.Hour
 	// repairHistoryMax bounds the per-member attempt history kept for the pause comment.

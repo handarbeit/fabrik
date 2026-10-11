@@ -18,8 +18,8 @@ func (e *Engine) channelStallThreshold() time.Duration {
 	return localAPIBackend{e: e}.stallThreshold(0)
 }
 
-func (e *Engine) channelSuspendedUntil(now time.Time) time.Time {
-	d, _ := e.claudeSuspendedUntilTime(now)
+func (e *Engine) channelUsageLimitedUntil(now time.Time) time.Time {
+	d, _ := e.claudeUsageLimitedUntilTime(now)
 	return d
 }
 
@@ -104,7 +104,7 @@ func (ce *channelEvents) derive(key string, st *itemstate.ItemState, d *dirtyIte
 		return nil
 	}
 	now := e.now()
-	res := attention.Classify(e.attentionInput(st, now, e.channelStallThreshold(), e.channelSuspendedUntil(now)))
+	res := attention.Classify(e.attentionInput(st, now, e.channelStallThreshold(), e.channelUsageLimitedUntil(now)))
 	m, known := ce.memo[key]
 	if !known {
 		// First sight of this item (a board population, or an item created
@@ -217,12 +217,12 @@ func (ce *channelEvents) armCounters(m *itemMemo, st *itemstate.ItemState, seed 
 }
 
 // onTick runs the time-driven checks: stalled (the same classifier as the read
-// API, over every cached item) and the lazily lifted Claude suspension.
+// API, over every cached item) and the lazily lifted Claude usage-limit hold.
 func (ce *channelEvents) onTick() {
 	e := ce.e
 	now := e.now()
 	threshold := e.channelStallThreshold()
-	suspended := e.channelSuspendedUntil(now)
+	usageLimited := e.channelUsageLimitedUntil(now)
 	var out []channelevents.Event
 	e.store.Scan(func(st *itemstate.ItemState) {
 		if st.IsPR {
@@ -235,12 +235,12 @@ func (ce *channelEvents) onTick() {
 			// Same baseline derive() records, so a later non-seed evaluation cannot
 			// read an item already at limit-1 as a fresh transition.
 			m = ce.memoFor(key)
-			m.pauseKey = pauseFamilyKey(attention.Classify(e.attentionInput(st, now, threshold, suspended)))
+			m.pauseKey = pauseFamilyKey(attention.Classify(e.attentionInput(st, now, threshold, usageLimited)))
 			m.staleDone = hasLabelStr(st.Labels, "fabrik:awaiting-input")
 			ce.cycleNearEvents(m, st, true)
 			return
 		}
-		res := attention.Classify(e.attentionInput(st, now, threshold, suspended))
+		res := attention.Classify(e.attentionInput(st, now, threshold, usageLimited))
 		if k := pauseFamilyKey(res); k != m.pauseKey {
 			m.pauseKey = k
 			if k != "" {
@@ -252,22 +252,22 @@ func (ce *channelEvents) onTick() {
 	ce.checkClaudeLimit()
 }
 
-// checkClaudeLimit emits claude-limit-suspended / -lifted on the edge of the
-// account-wide suspension, including a lift that happens only by the deadline
+// checkClaudeLimit emits claude-usage-limited / -lifted on the edge of the
+// account-wide usage-limit hold, including a lift that happens only by the deadline
 // passing (which has no transition call in the engine).
 func (ce *channelEvents) checkClaudeLimit() {
 	e := ce.e
 	now := e.now()
-	until := e.channelSuspendedUntil(now)
+	until := e.channelUsageLimitedUntil(now)
 	limited := !until.IsZero()
 	if limited == ce.claudeLimited {
 		return
 	}
 	ce.claudeLimited = limited
-	ev := channelevents.Event{Type: channelevents.ClaudeLimitLifted, At: now, Meta: map[string]string{}}
+	ev := channelevents.Event{Type: channelevents.ClaudeUsageLimitLifted, At: now, Meta: map[string]string{}}
 	if limited {
-		ev.Type = channelevents.ClaudeLimitSuspended
-		ev.Content = fmt.Sprintf("Claude usage limit hit: dispatch is suspended account-wide until %s", until.UTC().Format(time.RFC3339))
+		ev.Type = channelevents.ClaudeUsageLimited
+		ev.Content = fmt.Sprintf("Claude usage limit hit: dispatch held until %s", until.UTC().Format(time.RFC3339))
 		ev.Meta["until"] = until.UTC().Format(time.RFC3339)
 	} else {
 		ev.Content = "Claude usage limit lifted: dispatch resumes"

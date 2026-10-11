@@ -55,7 +55,7 @@ const apiErrorRateLimitStatus = 429
 // "429") erase every classification, blocking_limit included. Only a JSON
 // integer is accepted; absent, null, string, float, or anything else reads as
 // 0, i.e. "not a 429" (fail-safe: under-detecting costs retries,
-// over-detecting suspends a healthy account).
+// over-detecting holds a healthy account).
 type apiErrorStatus int
 
 // UnmarshalJSON implements json.Unmarshaler. It never returns an error.
@@ -88,7 +88,7 @@ type claudeToolsDeniedError = claudeerr.ToolsDeniedError
 // exits across two issues, each at 1 turn and $0.0000. For a non-429
 // api_error_status this is per-invocation and self-resolving: it says nothing
 // about the account as a whole, so it must never trigger
-// activateClaudeSuspension (see claudeAPIErrorExit's doc comment and #1458 R3).
+// activateClaudeUsageLimit (see claudeAPIErrorExit's doc comment and #1458 R3).
 // An api_error carrying api_error_status 429 is a session/usage limit, not a
 // transient blip (ADR-1811): classifyUsageLimitExit claims it first, so only
 // the remaining statuses reach classifyAPIErrorExit.
@@ -128,7 +128,7 @@ func classifyAPIErrorExit(resp claudeResponse, usage TokenUsage) (msg string, de
 //
 // That was not hypothetical in this repository: on 2026-07-27 issue #1178's
 // Implement stage, which was writing tests about usage-limit detection,
-// quoted #1084's example message and suspended Claude dispatch account-wide
+// quoted #1084's example message and held Claude dispatch account-wide
 // for ~11 hours after a plain turn-cap exit (51 turns, $2.28). See #1183.
 //
 // resp.TerminalReason == "blocking_limit" is the CLI's structural signal for
@@ -147,7 +147,7 @@ func classifyAPIErrorExit(resp claudeResponse, usage TokenUsage) (msg string, de
 // and falls through to classifyAPIErrorExit. The same exclusion gate applies
 // to both triggers, so a mid-session 429 after real work (turns and cost both
 // non-zero) is deliberately not detected. This function decides only *whether*
-// the exit is a usage limit; the suspension's end instant is supplied separately
+// the exit is a usage limit; the usage-limit hold's end instant is supplied separately
 // by extractUsageLimitReset from the CLI's structured rate_limit_event line
 // (ADR-1815) — never from the result text, which would let prose reach a
 // behavioural decision.

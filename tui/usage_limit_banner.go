@@ -8,7 +8,7 @@ import (
 )
 
 // ClaudeUsageLimitBannerComponent renders a single high-visibility row while
-// Claude dispatch is suspended account-wide after a usage-limit hit
+// Claude dispatch is usage limited account-wide after a usage-limit hit
 // (ADR-1120). It implements the Component interface and mirrors
 // AlertBannerComponent's shape, but is fully independent — the GitHub
 // rate-limit banner and this one track unrelated conditions and can both be
@@ -20,10 +20,10 @@ type ClaudeUsageLimitBannerComponent struct {
 	now    time.Time
 }
 
-// isVisible returns true when the banner should be shown: a suspension is
+// isVisible returns true when the banner should be shown: a usage-limit hold is
 // active and (when a reset time is known) now hasn't reached it yet. This
 // lets the banner self-clear off the per-second TickEvent fan-out even if no
-// explicit ClaudeUsageLimitAlertEvent{Suspended: false} ever arrives (e.g. no
+// explicit ClaudeUsageLimitAlertEvent{UsageLimited: false} ever arrives (e.g. no
 // item was up for dispatch during the window) — see ADR-1120 on why this is
 // a harmless cosmetic-only lag relative to the engine's own lazy check.
 func (c ClaudeUsageLimitBannerComponent) isVisible() bool {
@@ -40,7 +40,7 @@ func (c ClaudeUsageLimitBannerComponent) isVisible() bool {
 func (c ClaudeUsageLimitBannerComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
 	switch ev := msg.(type) {
 	case ClaudeUsageLimitAlertEvent:
-		if ev.Suspended {
+		if ev.UsageLimited {
 			c.active = true
 			c.reset = ev.Reset
 		} else {
@@ -66,7 +66,7 @@ func (c ClaudeUsageLimitBannerComponent) View(width int) string {
 	if !c.isVisible() {
 		return ""
 	}
-	text := "⚠ Claude usage limit hit — dispatch suspended."
+	text := "⚠ Claude usage limit hit — dispatch held."
 	countdown := fmtBannerCountdown(c.reset, c.now)
 	if countdown != "" {
 		text += " " + countdown

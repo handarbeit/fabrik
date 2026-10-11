@@ -1319,7 +1319,7 @@ func (e *Engine) assembleTrialBranch(ctx context.Context, p trialParams, members
 		}
 		if resolveErr != nil {
 			// Resolution could not even be attempted (account-wide Claude usage-limit
-			// suspension, ADR-1120) — this says nothing about whether #%d's conflict is
+			// usage-limit hold, ADR-1120) — this says nothing about whether #%d's conflict is
 			// resolvable, so ejecting the member here would be a correctness bug. Abort
 			// the in-progress merge and propagate as a fatal assembly error instead; the
 			// caller's fatal-error path cleans up trial artifacts and retries on the
@@ -2572,14 +2572,14 @@ type conflictEjectionDiagnostic struct {
 // on preMergeHEAD means the member's entire contribution — not just the conflicted
 // path(s) — was silently discarded by the abort.
 func (e *Engine) resolveConflictWithClaude(ctx context.Context, repoKey string, memberItem gh.ProjectItem, trainWorkDir string, holdingStg *stages.Stage, prSHA string, generatedPaths []string, preMergeHEAD string, originalNonGeneratedPaths []string, opts InvokeOptions) (bool, *conflictEjectionDiagnostic, error) {
-	suspended := func() error {
-		if _, s := e.claudeSuspendedUntilTime(time.Now()); s {
-			e.logf(memberItem.Number, "claude-limit", "Claude dispatch suspended account-wide; skipping conflict resolution for #%d\n", memberItem.Number)
-			return &claudeUsageLimitError{Message: "account usage-limit suspension active"}
+	usageLimited := func() error {
+		if _, s := e.claudeUsageLimitedUntilTime(time.Now()); s {
+			e.logf(memberItem.Number, "claude-limit", "Claude usage limited; dispatch held account-wide; skipping conflict resolution for #%d\n", memberItem.Number)
+			return &claudeUsageLimitError{Message: "account usage limit active"}
 		}
 		return nil
 	}
-	if err := suspended(); err != nil {
+	if err := usageLimited(); err != nil {
 		return false, nil, err
 	}
 
@@ -2599,8 +2599,8 @@ func (e *Engine) resolveConflictWithClaude(ctx context.Context, repoKey string, 
 		return false, nil, err
 	}
 	// The wait can be long on a saturated board, so the account may have been
-	// suspended meanwhile — don't spend the slot on a doomed invocation.
-	if serr := suspended(); serr != nil {
+	// usage limited meanwhile — don't spend the slot on a doomed invocation.
+	if serr := usageLimited(); serr != nil {
 		release()
 		return false, nil, serr
 	}
@@ -2608,7 +2608,7 @@ func (e *Engine) resolveConflictWithClaude(ctx context.Context, repoKey string, 
 	release()
 	var limitErr *claudeUsageLimitError
 	if errors.As(err, &limitErr) {
-		e.activateClaudeSuspension(memberItem.Number, limitErr, time.Now())
+		e.activateClaudeUsageLimit(memberItem.Number, limitErr, time.Now())
 		return false, nil, err
 	}
 	var turnLimitErr *claudeTurnLimitError
@@ -2616,7 +2616,7 @@ func (e *Engine) resolveConflictWithClaude(ctx context.Context, repoKey string, 
 		e.logf(memberItem.Number, "merge-train", "Claude conflict resolution hit its turn limit (num_turns=%d) — checking worktree before ejecting\n", turnLimitErr.NumTurns)
 		// A turn-cap exit still reached and ran Claude — the same "Claude is
 		// healthy" signal a clean success carries (ADR-1120's principle).
-		e.clearClaudeSuspension("merge-train conflict resolution reached Claude")
+		e.clearClaudeUsageLimit("merge-train conflict resolution reached Claude")
 		resolved, diag := e.finalizeConflictResolution(memberItem, trainWorkDir, generatedPaths, preMergeHEAD, originalNonGeneratedPaths)
 		if !resolved {
 			if diag == nil {
@@ -2629,7 +2629,7 @@ func (e *Engine) resolveConflictWithClaude(ctx context.Context, repoKey string, 
 	}
 	if err != nil {
 		// A generic, unrelated error proves nothing about account-wide usage-limit state
-		// and must not clear an active suspension (see the matching comment in item.go's
+		// and must not clear an active usage-limit hold (see the matching comment in item.go's
 		// runInvocationWithExtension) — only fall through to clear below on success.
 		e.logf(memberItem.Number, "merge-train", "Claude conflict resolution failed: %v\n", err)
 		if ctx.Err() != nil {
@@ -2639,7 +2639,7 @@ func (e *Engine) resolveConflictWithClaude(ctx context.Context, repoKey string, 
 		}
 		return false, nil, nil
 	}
-	e.clearClaudeSuspension("merge-train conflict resolution reached Claude")
+	e.clearClaudeUsageLimit("merge-train conflict resolution reached Claude")
 
 	resolved, diag := e.finalizeConflictResolution(memberItem, trainWorkDir, generatedPaths, preMergeHEAD, originalNonGeneratedPaths)
 	return resolved, diag, nil

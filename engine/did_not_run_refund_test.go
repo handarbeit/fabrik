@@ -14,7 +14,7 @@ import (
 )
 
 // Tests for #1812: a reinvoke whose Claude invocation provably never ran
-// (usage limit, api_error, apiKeyHelper, account suspension) must not be
+// (usage limit, api_error, apiKeyHelper, account usage-limit hold) must not be
 // charged a review/rebase/CI-fix cycle; every other error keeps today's
 // charge (R3/R4).
 
@@ -150,15 +150,15 @@ func TestReviewReinvoke_UsageLimitNilReturn_Refunded(t *testing.T) {
 	}
 }
 
-// Account-wide suspension gate (ADR-1120): processComments returns before any
+// Account-wide usage-limit hold gate (ADR-1120): processComments returns before any
 // side effect, so the skipped dispatch also never ran and is refunded.
-func TestReviewReinvoke_SuspensionGate_Refunded(t *testing.T) {
+func TestReviewReinvoke_UsageLimitGate_Refunded(t *testing.T) {
 	var calls int
 	eng, _, stgs := newDidNotRunReviewEngine(t, nil, &calls)
-	eng.activateClaudeSuspension(1, nil, time.Now())
+	eng.activateClaudeUsageLimit(1, nil, time.Now())
 	dispatchReviewRound(t, eng, stgs[0], 3150)
 	if calls != 0 {
-		t.Fatalf("Claude invoked %d times under suspension, want 0", calls)
+		t.Fatalf("Claude invoked %d times under usage-limit hold, want 0", calls)
 	}
 	snap, _ := eng.store.Get("owner/repo", 31)
 	if got := snap.ReviewCycles("Implement"); got != 0 {

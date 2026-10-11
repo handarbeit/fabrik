@@ -231,7 +231,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 // Claude invocation. The user-comment callers keep using processComments (whose
 // error contract is unchanged); dispatchReinvoke uses this variant to refund
 // the reinvoke cycle counter charged before dispatch. The kind is deliberately
-// NOT folded into the returned error: a usage-limit or suspension skip returns
+// NOT folded into the returned error: a usage-limit or usage-limit hold skip returns
 // a nil error today (excluded from the comment circuit breakers), and changing
 // that would alter what every caller and breaker sees.
 //
@@ -240,13 +240,13 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 func (e *Engine) processCommentsClassified(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, comments []gh.Comment, onPIDReady ...func(int)) (didNotRunKind, error) {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 
-	// Account-wide Claude usage-limit suspension gate (ADR-1120): checked before
-	// any side effect (reactions, labels, worktree setup) so a suspended cycle is
+	// Account-wide Claude usage-limit hold gate (ADR-1120): checked before
+	// any side effect (reactions, labels, worktree setup) so a usage limited cycle is
 	// a full no-op — the comment remains "new" and is retried on the next poll
 	// once dispatch resumes, rather than being consumed by a doomed invocation.
-	if _, suspended := e.claudeSuspendedUntilTime(time.Now()); suspended {
-		e.logf(item.Number, "claude-limit", "Claude dispatch suspended account-wide; skipping comment review\n")
-		return didNotRunSuspended, nil
+	if _, usageLimited := e.claudeUsageLimitedUntilTime(time.Now()); usageLimited {
+		e.logf(item.Number, "claude-limit", "Claude usage limited; dispatch held account-wide; skipping comment review\n")
+		return didNotRunAccountUsageLimited, nil
 	}
 
 	// Merge any unresolved PR review thread comments into the working slice.
@@ -287,7 +287,7 @@ func (e *Engine) processCommentsClassified(ctx context.Context, board *gh.Projec
 	// dispatchers' build() output are not otherwise filtered, and this is what
 	// closes that gap. If every candidate comment was a bot notice, return
 	// before any reaction/label/worktree/invocation side effect, mirroring the
-	// claudeSuspendedUntilTime early-return above.
+	// claudeUsageLimitedUntilTime early-return above.
 	comments = filterBotServiceNotices(comments)
 	if len(comments) == 0 {
 		e.logf(item.Number, "comments", "all candidate comments were bot service notices; skipping\n")
@@ -521,7 +521,7 @@ func (e *Engine) processCommentsClassified(ctx context.Context, board *gh.Projec
 		}
 		// A Claude usage-limit hit is not "no forward progress" — it's an
 		// account-wide condition unrelated to this issue's comment thread, already
-		// handled by activateClaudeSuspension above. Counting it toward the
+		// handled by activateClaudeUsageLimit above. Counting it toward the
 		// circuit breaker would risk tripping the breaker purely because the
 		// account ran dry, not because this issue is stuck.
 		var limitErr *claudeUsageLimitError
@@ -843,12 +843,12 @@ func (e *Engine) runCommentExtensionLoop(ctx context.Context, stage *stages.Stag
 
 		var limitErr *claudeUsageLimitError
 		if errors.As(err, &limitErr) {
-			e.activateClaudeSuspension(item.Number, limitErr, time.Now())
+			e.activateClaudeUsageLimit(item.Number, limitErr, time.Now())
 		} else if err == nil {
 			// Only a successful invocation is evidence the limit has cleared — a generic,
 			// unrelated error proves nothing about account-wide usage-limit state and must
 			// not clear it (see the matching comment in item.go's runInvocationWithExtension).
-			e.clearClaudeSuspension("comment review invocation reached Claude")
+			e.clearClaudeUsageLimit("comment review invocation reached Claude")
 		}
 
 		// hitLimit uses currentBudget > 0 (not base > 0) so that extension only fires

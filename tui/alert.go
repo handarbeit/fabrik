@@ -116,12 +116,12 @@ func (a AlertBannerComponent) View(width int) string {
 	var text string
 	switch {
 	case restVisible && graphqlVisible:
-		text = "⚠ REST and GraphQL rate limits exhausted — polling suspended."
+		text = "⚠ REST and GraphQL rate limits exhausted — polling paused for the rate limit."
 		if countdown := fmtBannerCountdown(soonerReset(a.rest.reset, a.graphql.reset), a.now); countdown != "" {
 			text += " " + countdown
 		}
 	case restVisible:
-		text = "⚠ REST rate limit exhausted — polling suspended."
+		text = "⚠ REST rate limit exhausted — polling paused for the rate limit."
 		if countdown := fmtBannerCountdown(a.rest.reset, a.now); countdown != "" {
 			text += " " + countdown
 		}
@@ -129,7 +129,7 @@ func (a AlertBannerComponent) View(width int) string {
 		// #1716 (R2): unlike REST exhaustion, which genuinely hard-pauses all
 		// poll work (see the restVisible case above), GraphQL exhaustion is
 		// governed by the poll loop's own backoff — it slows and gates polls,
-		// it does not stop them. "Polling suspended" here would claim a
+		// it does not stop them. A "paused for the rate limit" banner here would claim a
 		// stand-down that is not happening.
 		text = "⚠ GraphQL rate limit exhausted — polling backed off."
 		if countdown := fmtBannerCountdown(a.graphql.reset, a.now); countdown != "" {

@@ -456,7 +456,7 @@ Fabrik uses labels to track state:
 | `fabrik:awaiting-advance` | Set when a terminal advance failed to move the board Status (e.g. a missing column); retried every poll. See [Labels Reference](docs/USER_GUIDE.md#fabrik-managed-labels) |
 | `fabrik:reworking:<Stage>` | Transient marker while a comment re-enters an already-completed stage; removed when the rework finishes. See [Labels Reference](docs/USER_GUIDE.md#fabrik-managed-labels) |
 | `fabrik:toolchain-stale` | Warn-only: the worktree declares a toolchain version the daemon's `PATH` does not satisfy; clears automatically. See [Labels Reference](docs/USER_GUIDE.md#fabrik-managed-labels) |
-| `fabrik:claude-limit` | Claude account usage limit hit; does not count against `max_retries`. See [Claude Usage-Limit Suspension](docs/USER_GUIDE.md#claude-usage-limit-suspension) |
+| `fabrik:claude-limit` | Claude account usage limit hit; does not count against `max_retries`. See [Claude Usage-Limit Hold](docs/USER_GUIDE.md#claude-usage-limit-hold) |
 | `fabrik:children-spawned` / `fabrik:spawned-child:<index>:<number>` / `fabrik:sub-issue` | Sub-issue spawn bookkeeping: batch-complete guard on the parent, resume markers for an interrupted spawn, and a filter label on each child. See [Labels Reference](docs/USER_GUIDE.md#fabrik-managed-labels) |
 | `stage:<name>:complete` | Stage has been completed |
 | `stage:<name>:in_progress` | Stage is actively running |
