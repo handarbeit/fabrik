@@ -132,6 +132,9 @@ const (
 // partitionLivenessInput is everything computePartitionLiveness needs.
 type partitionLivenessInput struct {
 	Now time.Time
+	// TrainOn is false when merge_train is off: nothing starts a run for the
+	// partition, so no idle reason or stall applies.
+	TrainOn bool
 	// Threshold is K × the configured interval; zero disables stall detection.
 	Threshold    time.Duration
 	Members      int
@@ -161,7 +164,7 @@ type partitionLiveness struct {
 // both call it so they cannot disagree.
 func computePartitionLiveness(in partitionLivenessInput) partitionLiveness {
 	var out partitionLiveness
-	if in.Members == 0 || in.RunActive {
+	if !in.TrainOn || in.Members == 0 || in.RunActive {
 		return out
 	}
 	switch {
@@ -243,6 +246,7 @@ func (e *Engine) partitionStates(now time.Time, h healthSnapshot) []partitionSta
 		remaining, held := e.infraCooldownPeek(st.Key)
 		st.Live = computePartitionLiveness(partitionLivenessInput{
 			Now:                     now,
+			TrainOn:                 e.cfg.MergeTrain == "on",
 			Threshold:               threshold,
 			Members:                 len(st.Members),
 			OldestQueued:            st.OldestQueued,

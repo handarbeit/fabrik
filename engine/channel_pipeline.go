@@ -31,10 +31,15 @@ type stallEpisode struct {
 	epoch uint64
 	// repo and partition identify a merge-train partition episode.
 	repo, partition string
+	// seq makes the dedup key unique per episode within a process even when
+	// two episodes share an anchor (a partition whose run died and whose
+	// members were never dequeued). A restart resets it, but the anchors
+	// (daemon-observed times) differ across restarts.
+	seq uint64
 }
 
 func (ep *stallEpisode) key(scope string) string {
-	return scope + ":" + ep.anchor.UTC().Format(time.RFC3339Nano)
+	return scope + ":" + ep.anchor.UTC().Format(time.RFC3339Nano) + ":" + strconv.FormatUint(ep.seq, 10)
 }
 
 // checkPipeline evaluates the poll-level and partition-level stall episodes.
@@ -66,7 +71,8 @@ func (ce *channelEvents) checkPollStall(now time.Time, h healthSnapshot) []chann
 		case anchor.IsZero():
 			anchor = h.StartedAt
 		}
-		*ep = stallEpisode{active: true, anchor: anchor, epoch: h.StallEpoch}
+		ce.episodeSeq++
+		*ep = stallEpisode{active: true, anchor: anchor, epoch: h.StallEpoch, seq: ce.episodeSeq}
 		out = append(out, ce.pollStalledEvent(ep, v, h, now))
 	}
 	return out
@@ -122,7 +128,8 @@ func (ce *channelEvents) checkPartitionStalls(now time.Time, h healthSnapshot) [
 			ep.active = false
 		}
 		if st.Live.Stalled && (ep == nil || !ep.active) {
-			ep = &stallEpisode{active: true, anchor: st.OldestQueued, epoch: h.StallEpoch, repo: st.Repo, partition: st.Key}
+			ce.episodeSeq++
+			ep = &stallEpisode{active: true, anchor: st.OldestQueued, epoch: h.StallEpoch, repo: st.Repo, partition: st.Key, seq: ce.episodeSeq}
 			ce.partEp[st.Key] = ep
 			out = append(out, ce.partitionStalledEvent(st, ep, now))
 		}

@@ -89,6 +89,8 @@ type channelEvents struct {
 	// only, so a still-stalled daemon re-raises after a restart.
 	pollEp stallEpisode
 	partEp map[string]*stallEpisode
+	// episodeSeq numbers pipeline stall episodes for their dedup keys.
+	episodeSeq uint64
 
 	wake  chan struct{}
 	stop  chan struct{}
