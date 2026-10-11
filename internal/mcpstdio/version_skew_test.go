@@ -128,14 +128,18 @@ func TestSkewNoteShownOnceWhenVersionsDiffer(t *testing.T) {
 
 func TestNoSkewNoteWhenVersionsMatchOrUnknown(t *testing.T) {
 	for name, tc := range map[string]struct {
-		shim   string
-		calls  *skewCalls
-		hellos int // expected: the check is retried while nothing was shown
+		shim  string
+		calls *skewCalls
+		// Calls are served concurrently, so the first few can overlap and each ask
+		// once; a conclusive no-skew check is then trusted for skewRecheckInterval
+		// (TestSkewCheckTrustedForRecheckInterval pins the sequential case), while a
+		// failed hello is retried by every call.
+		minHellos, maxHellos int
 	}{
-		"equal":             {"dev(a)", &skewCalls{daemonVersion: "dev(a)"}, 3},
-		"old daemon":        {"dev(a)", &skewCalls{}, 3},
-		"hello fails":       {"dev(a)", &skewCalls{helloErr: errors.New("boom")}, 3},
-		"shim has no build": {"", &skewCalls{daemonVersion: "dev(a)"}, 0},
+		"equal":             {"dev(a)", &skewCalls{daemonVersion: "dev(a)"}, 1, 3},
+		"old daemon":        {"dev(a)", &skewCalls{}, 1, 3},
+		"hello fails":       {"dev(a)", &skewCalls{helloErr: errors.New("boom")}, 3, 3},
+		"shim has no build": {"", &skewCalls{daemonVersion: "dev(a)"}, 0, 0},
 	} {
 		t.Run(name, func(t *testing.T) {
 			res := skewSession(t, tc.shim, tc.calls, ToolStatus, ToolBoard, ToolStatus)
@@ -147,10 +151,48 @@ func TestNoSkewNoteWhenVersionsMatchOrUnknown(t *testing.T) {
 					t.Errorf("call %d: want exactly the tool result, got %v", i+1, r)
 				}
 			}
-			if tc.calls.hellos != tc.hellos {
-				t.Errorf("hello calls = %d, want %d", tc.calls.hellos, tc.hellos)
+			if h := tc.calls.hellos; h < tc.minHellos || h > tc.maxHellos {
+				t.Errorf("hello calls = %d, want %d..%d", h, tc.minHellos, tc.maxHellos)
 			}
 		})
+	}
+}
+
+// With matching builds, sequential tool calls cost one hello within the
+// recheck interval, and one more once it has elapsed.
+func TestSkewCheckTrustedForRecheckInterval(t *testing.T) {
+	c := &skewCalls{daemonVersion: "dev(a)"}
+	pr, pw := io.Pipe()
+	out := &syncBuffer{}
+	var clockMu sync.Mutex
+	clock := time.Unix(1_000_000, 0)
+	srv := &Server{SocketPath: "unused", Version: "dev(a)", Call: c.call, CallTimeout: time.Second, In: pr, Out: out, Err: &bytes.Buffer{},
+		skewNow: func() time.Time { clockMu.Lock(); defer clockMu.Unlock(); return clock }}
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve(context.Background()) }()
+	hellos := func() int { c.mu.Lock(); defer c.mu.Unlock(); return c.hellos }
+	for i := 1; i <= 3; i++ {
+		if _, err := io.WriteString(pw, callTool(i, ToolStatus, args(ToolStatus))+"\n"); err != nil {
+			t.Fatal(err)
+		}
+		out.waitLines(t, i)
+	}
+	if h := hellos(); h != 1 {
+		t.Fatalf("hello calls across 3 sequential calls = %d, want 1", h)
+	}
+	clockMu.Lock()
+	clock = clock.Add(skewRecheckInterval + time.Second)
+	clockMu.Unlock()
+	if _, err := io.WriteString(pw, callTool(4, ToolStatus, args(ToolStatus))+"\n"); err != nil {
+		t.Fatal(err)
+	}
+	out.waitLines(t, 4)
+	if h := hellos(); h != 2 {
+		t.Fatalf("hello calls after the interval = %d, want 2", h)
+	}
+	pw.Close()
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -164,7 +206,10 @@ func TestSkewNoticedWhenDaemonUpgradesMidSession(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	srv := &Server{SocketPath: "unused", Version: "dev(a)", Call: c.call, CallTimeout: time.Second, In: pr, Out: out, Err: &bytes.Buffer{}}
+	var clockMu sync.Mutex
+	clock := time.Unix(1_000_000, 0)
+	srv := &Server{SocketPath: "unused", Version: "dev(a)", Call: c.call, CallTimeout: time.Second, In: pr, Out: out, Err: &bytes.Buffer{},
+		skewNow: func() time.Time { clockMu.Lock(); defer clockMu.Unlock(); return clock }}
 	done := make(chan error, 1)
 	go func() { done <- srv.Serve(context.Background()) }()
 	send(callTool(1, ToolStatus, args(ToolStatus)))
@@ -172,9 +217,22 @@ func TestSkewNoticedWhenDaemonUpgradesMidSession(t *testing.T) {
 	c.mu.Lock()
 	c.daemonVersion = "dev(b)"
 	c.mu.Unlock()
+	// Within the recheck interval the earlier "no skew" result is trusted, so
+	// the upgrade is not seen yet and no hello is spent.
 	send(callTool(2, ToolStatus, args(ToolStatus)))
+	out.waitLines(t, 2)
+	c.mu.Lock()
+	hellos := c.hellos
+	c.mu.Unlock()
+	if hellos != 1 {
+		t.Fatalf("hello calls inside the recheck interval = %d, want 1", hellos)
+	}
+	clockMu.Lock()
+	clock = clock.Add(skewRecheckInterval + time.Second)
+	clockMu.Unlock()
 	send(callTool(3, ToolStatus, args(ToolStatus)))
-	out.waitLines(t, 3)
+	send(callTool(4, ToolStatus, args(ToolStatus)))
+	out.waitLines(t, 4)
 	pw.Close()
 	if err := <-done; err != nil {
 		t.Fatal(err)
@@ -186,9 +244,9 @@ func TestSkewNoticedWhenDaemonUpgradesMidSession(t *testing.T) {
 			notes = append(notes, i)
 		}
 	}
-	// The first call ran before the upgrade; of the two after it (served
-	// concurrently, so in either order) exactly one carries the note.
-	if len(notes) != 1 || notes[0] == 0 {
+	// The first two calls ran before the interval elapsed; of the two after it
+	// (served concurrently, so in either order) exactly one carries the note.
+	if len(notes) != 1 || notes[0] < 2 {
 		t.Fatalf("want exactly one note, not on the pre-upgrade result; got lines %v of\n%s", notes, out.String())
 	}
 }

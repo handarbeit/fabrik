@@ -64,8 +64,10 @@ type Server struct {
 	// UnreachableGrace overrides DefaultUnreachableGrace.
 	UnreachableGrace time.Duration
 
-	skewMu   sync.Mutex
-	skewDone bool // the skew note has been shown; never repeated
+	skewMu      sync.Mutex
+	skewDone    bool      // the skew note has been shown; never repeated
+	skewChecked time.Time // when a check last found no skew; zero = never
+	skewNow     func() time.Time
 
 	wmu        sync.Mutex
 	streamOnce sync.Once
@@ -334,23 +336,36 @@ func versionsLine(daemon, shim string) string {
 	return fmt.Sprintf("Versions — daemon: %s, MCP server: %s", daemon, shim)
 }
 
+// skewRecheckInterval is how long a check that found no skew is trusted before
+// the next tool call asks the daemon again. A daemon that upgrades mid-session
+// is therefore noticed within this long, while a session whose builds match
+// does not pay a hello round trip on every call.
+const skewRecheckInterval = 5 * time.Minute
+
 // skewNote returns the version-skew notice the first time this server sees a
 // daemon build different from its own, and "" every other time (#2168). The
 // daemon self-upgrades while this server lives as long as its Claude session,
 // so skew is the normal case; the notice says what to do about it. daemonVersion
 // is the daemon's version when the calling tool already returned it, otherwise
-// one hello asks. Until the notice is shown each successful tool call checks
-// again — a daemon that upgrades mid-session is noticed — and a failed or
-// version-less hello is simply "unknown": no note, no error, retried next call.
-// Versions are compared as opaque strings. A server with no version of its own
-// has nothing to compare.
+// one hello asks. Until the notice is shown a check that finds no skew (equal
+// builds, or a daemon that reports no version) is trusted for
+// skewRecheckInterval and then repeated, so a mid-session upgrade is noticed
+// without a hello per call; a failed hello is simply "unknown": no note, no
+// error, retried on the next call. The hello runs outside skewMu so concurrent
+// tool calls never queue behind it. Versions are compared as opaque strings. A
+// server with no version of its own has nothing to compare.
 func (s *Server) skewNote(ctx context.Context, daemonVersion string) string {
 	if s.Version == "" {
 		return ""
 	}
+	now := time.Now
+	if s.skewNow != nil {
+		now = s.skewNow
+	}
 	s.skewMu.Lock()
-	defer s.skewMu.Unlock()
-	if s.skewDone {
+	skip := s.skewDone || (daemonVersion == "" && !s.skewChecked.IsZero() && now().Sub(s.skewChecked) < skewRecheckInterval)
+	s.skewMu.Unlock()
+	if skip {
 		return ""
 	}
 	if daemonVersion == "" {
@@ -364,7 +379,13 @@ func (s *Server) skewNote(ctx context.Context, daemonVersion string) string {
 		}
 		daemonVersion = hello.DaemonVersion
 	}
+	s.skewMu.Lock()
+	defer s.skewMu.Unlock()
+	if s.skewDone {
+		return "" // a concurrent call showed it first
+	}
 	if daemonVersion == "" || daemonVersion == s.Version {
+		s.skewChecked = now()
 		return ""
 	}
 	s.skewDone = true
