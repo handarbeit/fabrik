@@ -585,6 +585,29 @@ func TestLocalAPIHealth(t *testing.T) {
 	if !h.Claude.UsageLimited || !h.Claude.UsageLimitedUntil.Valid || !h.Claude.UsageLimitedUntil.V.Equal(now.Add(3*time.Hour).UTC()) {
 		t.Errorf("claude = %+v", h.Claude)
 	}
+	// The wire contract (#2129): the hold is reported as usage_limited /
+	// usage_limited_until under claude_usage_limit, with no suspended keys.
+	raw, err := json.Marshal(h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatal(err)
+	}
+	var claude map[string]any
+	if err := json.Unmarshal(wire["claude_usage_limit"], &claude); err != nil {
+		t.Fatalf("claude_usage_limit: %v (wire %s)", err, raw)
+	}
+	if claude["usage_limited"] != true || claude["usage_limited_until"] == nil {
+		t.Errorf("claude_usage_limit wire = %v, want usage_limited/usage_limited_until", claude)
+	}
+	if _, ok := claude["suspended"]; ok {
+		t.Errorf("claude_usage_limit still carries a suspended key: %v", claude)
+	}
+	if _, ok := claude["suspended_until"]; ok {
+		t.Errorf("claude_usage_limit still carries a suspended_until key: %v", claude)
+	}
 	if b := h.Backoff; !b.Observed || !b.Low.V || b.Remaining.V != 750 || b.RestPaused.V {
 		t.Errorf("backoff = %+v", b)
 	}

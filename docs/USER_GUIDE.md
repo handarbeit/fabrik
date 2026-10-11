@@ -1891,7 +1891,7 @@ project_fields:
 | `Validate · comment review` | A comment-review pass is running; the previous line is restored afterwards. |
 | `blocked by #1568` | Waiting on a `blockedBy` dependency. |
 | `paused: CI timeout` | The item was paused; the reason is the first line of the pause comment. |
-| `claude-limit until 18:05` | This item's invocation hit the Claude usage limit; the time is the end of the account-wide suspension in the **daemon's local time**. Only the item that hit the limit is written. |
+| `claude-limit until 18:05` | This item's invocation hit the Claude usage limit; the time is the end of the account-wide usage-limit hold in the **daemon's local time**. Only the item that hit the limit is written. |
 | `awaiting CI on PR #1615` | The stage finished and is waiting for CI. |
 | `awaiting review` | The stage finished and is waiting for PR reviewers (`fabrik:awaiting-review` was first applied). |
 
@@ -2032,23 +2032,23 @@ When a stage doesn't complete (Claude doesn't output `FABRIK_STAGE_COMPLETE`):
 > separate, unrelated mechanism; see *Rate Limit Monitoring* below). Fabrik detects this
 > **structurally**, from the CLI's own result object (`terminal_reason == "blocking_limit"`,
 > or `terminal_reason == "api_error"` with `api_error_status == 429`, the other shape the CLI
-> uses to report a session limit; other `api_error` statuses stay transient and never suspend)
+> uses to report a session limit; other `api_error` statuses stay transient and never trigger it)
 > — never from anything a stage's output happened to say, so a stage whose output merely
 > discusses usage limits cannot trigger this. It does **not** count this attempt against
 > `--max-retries`: no `stage:<name>:failed`, no `fabrik:paused`, no escalation comment. As
-> soon as one worker observes the limit, Fabrik suspends *all* new Claude dispatch
+> soon as one worker observes the limit, Fabrik holds *all* new Claude dispatch
 > account-wide — not just for this issue — until the reset instant the CLI itself reports
 > (the latest `resetsAt` among the exhausted usage windows, read from a structured field,
 > never from the message text; a fixed one-hour backoff applies only when none is usable),
 > so a usage-limit window costs one detection and one automatic resume rather than every
 > concurrent item independently rediscovering and waiting out the same limit. The
-> suspension and its expected end are visible in the log (tag `claude-limit`) and, in the
+> usage-limit hold and its expected end are visible in the log (tag `claude-limit`) and, in the
 > TUI, as a dedicated banner distinct from the GitHub rate-limit banner (see *Claude
-> Usage-Limit Suspension* below). It clears automatically — either at the reset
+> Usage-Limit Hold* below). It clears automatically — either at the reset
 > deadline or as soon as any invocation succeeds, whichever comes first — or you can clear
 > it immediately without restarting the engine by applying `fabrik:clear-claude-limit` to
-> any open board item (see *Claude Usage-Limit Suspension* below). Once the account-wide
-> suspension lifts, `fabrik:claude-limit` clears on every open issue that carries it, not
+> any open board item (see *Claude Usage-Limit Hold* below). Once the account-wide
+> usage-limit hold lifts, `fabrik:claude-limit` clears on every open issue that carries it, not
 > only on this one's next invocation.
 4. **Max retries**: After `--max-retries` failures (default 3):
    - `fabrik:paused` and `stage:<name>:failed` labels are added
@@ -2464,7 +2464,7 @@ fabrik --max-review-cycles=3
 
 The cycle count resets on engine restart.
 
-A re-invocation that provably never ran — the account was usage-limited or suspended, the API returned an `api_error` before any work was done, or an `apiKeyHelper` was detected — is refunded: it does not spend the cycle budget, so a cycle-limit pause is never caused by Claude being unavailable. A run that did execute and made no progress is still charged. See [state-machine §6.2](state-machine.md#62-review-reinvoke-mechanics).
+A re-invocation that provably never ran — the account was usage-limited, the API returned an `api_error` before any work was done, or an `apiKeyHelper` was detected — is refunded: it does not spend the cycle budget, so a cycle-limit pause is never caused by Claude being unavailable. A run that did execute and made no progress is still charged. See [state-machine §6.2](state-machine.md#62-review-reinvoke-mechanics).
 
 #### Timeout Configuration
 
@@ -3330,7 +3330,7 @@ added after it:
 | `fabrik:awaiting-advance` | Set when a terminal advance (after a merged Validate PR) fails to move the project-board Status forward — most commonly because the target Status column is missing from the board. Fabrik posts a one-time comment naming the failing stage and the error, then retries every poll; adding the missing column is enough, with no restart. Cleared once the advance succeeds; escalates to `fabrik:paused` after `--max-retries` failed attempts. See [§6.17](state-machine.md#617-terminal-advance-escalation-and-settle-scan-adr-1422) (ADR-1422). |
 | `fabrik:reworking:<Stage>` | Transient marker set while a comment re-enters a stage that was already marked `stage:<Stage>:complete`: the engine adds it, then temporarily removes the stale completion label so the board never claims a completion that is being reworked. Removed when the rework finishes; if the engine crashes mid-rework, startup restores the completion label for the named stage. Changes no dispatch gate. See [§1.4](state-machine.md#14-label-semantics-reference) and [§4.2](state-machine.md#42-the-11-step-flow) (ADR-1802). |
 | `fabrik:toolchain-stale` | Set (with a one-time explanatory comment) when a worktree declares a toolchain version (`.nvmrc`, `package.json` `engines.node`, `go.mod`, or `.tool-versions`) that the version on the daemon's own `PATH` does not satisfy — typically because the shell that launched `fabrik` predates a toolchain upgrade. **Warn-only**: the invocation still runs and nothing counts against `max_retries`. Clears automatically once a later invocation sees no mismatch; restart `fabrik` from a shell with the corrected `PATH`. See [§7.3e](state-machine.md#73e-toolchain-declaration-drift-detection) (ADR-1786). |
-| `fabrik:claude-limit` | Set when a Claude invocation exits because the account's usage limit was hit. The stage never ran, so it does not count against `max_retries` and neither `stage:<name>:failed` nor `fabrik:paused` is applied. Cleared on the issue's next invocation that is not a usage-limit exit, and account-wide once the suspension lifts. See [Claude Usage-Limit Suspension](#claude-usage-limit-suspension) (ADR-1119, ADR-1183). |
+| `fabrik:claude-limit` | Set when a Claude invocation exits because the account's usage limit was hit. The stage never ran, so it does not count against `max_retries` and neither `stage:<name>:failed` nor `fabrik:paused` is applied. Cleared on the issue's next invocation that is not a usage-limit exit, and account-wide once the usage-limit hold lifts. See [Claude Usage-Limit Hold](#claude-usage-limit-hold) (ADR-1119, ADR-1183). |
 | `fabrik:children-spawned` | Set on a parent after all `FABRIK_SPAWN_CHILD_*` children in a batch have been created, added to the board and linked as blockers. For Plan-declared spawns it also guards against re-spawning the same batch; remove it manually (and close the children) to force a fresh spawn. See [§6.7](state-machine.md#67-pre-implement-spawn-path) (ADR-1419). |
 | `fabrik:spawned-child:<index>:<number>` | Transient marker on the **parent**, written as each Plan-declared spawn block's child issue is created, recording that block's child by 1-based block index and issue number. It lets a retried spawn (after an un-pause or restart) resume an already-created child instead of duplicating it. Removed once the whole batch succeeds; remove one manually to force that block's child to be re-created. See [§6.7](state-machine.md#67-pre-implement-spawn-path) (ADR-1583). |
 | `fabrik:sub-issue` | Applied to each spawned child issue for human-visible filtering. Informational only — no engine gate semantics. See [§6.7](state-machine.md#67-pre-implement-spawn-path). |
@@ -3359,7 +3359,7 @@ added after it:
 | `review-authority:authoritative` | Override the stage's configured `review_authority` to `authoritative` for this issue only. Only meaningful alongside `wait_for_reviews: true`. See [Authoritative Mode](#authoritative-mode). |
 | `expected-reviewers:none` | Override the stage's configured `expected_reviewers` to none for this issue only. Only meaningful alongside `wait_for_reviews: true`. See [Declaring Expected Reviewers](#declaring-expected-reviewers). |
 | `expected-reviewers:declared` | Override `expected_reviewers` to a fixed synthetic reviewer for this issue only; testing/e2e use — never posts a real review. Only meaningful alongside `wait_for_reviews: true`. See [Declaring Expected Reviewers](#declaring-expected-reviewers). |
-| `fabrik:clear-claude-limit` | Clear an active account-wide Claude usage-limit suspension without restarting the engine. Apply to *any* open board item — it does not need to be one already carrying `fabrik:claude-limit`, since the suspension is account-wide, not per-issue. Read and consumed on the next poll: clears the suspension immediately and removes itself. See [Claude Usage-Limit Suspension](#claude-usage-limit-suspension). |
+| `fabrik:clear-claude-limit` | Clear an active account-wide Claude usage-limit hold without restarting the engine. Apply to *any* open board item — it does not need to be one already carrying `fabrik:claude-limit`, since the usage-limit hold is account-wide, not per-issue. Read and consumed on the next poll: clears the usage-limit hold immediately and removes itself. See [Claude Usage-Limit Hold](#claude-usage-limit-hold). |
 
 Model label precedence: `model:<name>` label > stage YAML `model` field > default.
 
@@ -3649,7 +3649,7 @@ claude mcp add --scope user fabrik -- fabrik mcp --dir /path/to/your/fabrik-dir
 The daemon serves a small newline-delimited-JSON API on a Unix socket, `.fabrik/state/fabrik.sock` under its Fabrik directory:
 
 - **Per daemon.** The socket lives in the daemon's own directory, so several instances on one machine never collide, and each only ever serves the repos and projects *it* manages.
-- **Private.** Mode `0600`, a Unix socket (not reachable over TCP). There is no authentication beyond filesystem permissions: any process of your own user can read the daemon's operational state (issue titles, labels, counters), attach under any subscriber name and receive that name's events, and — since the action tools — ask the daemon to promote an item, change its autonomy, force a Validate re-run or clear a Claude usage-limit suspension, under the daemon's own GitHub identity. The subscriber name in an audit comment is self-asserted, so it is an attribution aid, not an access control.
+- **Private.** Mode `0600`, a Unix socket (not reachable over TCP). There is no authentication beyond filesystem permissions: any process of your own user can read the daemon's operational state (issue titles, labels, counters), attach under any subscriber name and receive that name's events, and — since the action tools — ask the daemon to promote an item, change its autonomy, force a Validate re-run or clear a Claude usage-limit hold, under the daemon's own GitHub identity. The subscriber name in an audit comment is self-asserted, so it is an attribution aid, not an access control.
 - **Long-lived push connection.** A session that subscribes to pushes holds one connection open and mostly *receives*. The daemon sends a heartbeat every 30 s, which also keeps the connection from hitting the 10-minute idle limit that applies to a connection that sends nothing; a dead peer is detected at the next heartbeat. At most 32 connections are served at once (each attached session holds one).
 - **Long paths.** A Unix socket path is limited to about 104 bytes. If `<fabrik-dir>/.fabrik/state/fabrik.sock` would be longer, both the daemon and `fabrik mcp` use `/tmp/fabrik-<uid>/<hash>.sock` instead (a private directory; the hash is of the symlink-resolved Fabrik directory, and the location is a fixed `/tmp`, not `$TMPDIR`, so a daemon and a Claude-launched `fabrik mcp` with different environments still agree) — you never need to know which.
 - **Lifecycle.** Bound after the [instance lock](#instance-lock) is held; a stale socket from a crash or re-exec is replaced at startup; removed on clean shutdown. If it cannot be bound, the daemon logs it and carries on without the API.
@@ -3676,7 +3676,7 @@ One issue, given as `owner/repo#N`, or as a bare `N`, `#N` or JSON number `N` wh
 - **Last invocation:** completed, blocked, errored, turn-limited or incomplete; its duration and tokens.
 - **PR:** the linked PR, mergeability and CI verdict *as the cache holds them*, and, for an item in the holding stage, its place in its (repo, base) merge-train partition (derived from the cached `base:` label).
 - **Blockers:** each blocking issue with its open/closed state.
-- **`attention`** — for *every* item, not just paused ones — which answers *"stuck, or waiting correctly?"*: a state, the reason (each relevant `fabrik:*` label with a one-line meaning), a link to the most recent 🏭 Fabrik comment when the daemon has comments cached, and **what the engine will do next, and when** (the cooldown expiry, the CI or review-wait deadline, the bot re-prompt time, the end of a Claude usage-limit suspension).
+- **`attention`** — for *every* item, not just paused ones — which answers *"stuck, or waiting correctly?"*: a state, the reason (each relevant `fabrik:*` label with a one-line meaning), a link to the most recent 🏭 Fabrik comment when the daemon has comments cached, and **what the engine will do next, and when** (the cooldown expiry, the CI or review-wait deadline, the bot re-prompt time, the end of a Claude usage-limit hold).
 
 #### `fabrik_board(view, filter?)`
 
@@ -3687,7 +3687,7 @@ Filters (all optional, combinable): `milestone` (a title, or `none`), `label`, `
 
 #### `fabrik_health()`
 
-Daemon version and uptime; time since the last poll attempt and the last success; webhook mode and last-event time; time since the last successful reconcile; the account-wide Claude usage-limit suspension deadline, if any; the GraphQL backoff state; worker slots in use against `max_concurrent` (`in_use` counts item workers only, so it can read lower than the TUI's general-pool figure, which counts every held slot, including reinvoke runs and a merge train running on a general slot), and (`train_in_use`/`train_max`) the reserved merge-train slot, which is separate from and not counted in the general figure (both zero with `merge_train` off); and, per (repo, base) merge-train partition, its members and whether a train worker is in flight.
+Daemon version and uptime; time since the last poll attempt and the last success; webhook mode and last-event time; time since the last successful reconcile; the account-wide Claude usage-limit hold deadline, if any; the GraphQL backoff state; worker slots in use against `max_concurrent` (`in_use` counts item workers only, so it can read lower than the TUI's general-pool figure, which counts every held slot, including reinvoke runs and a merge train running on a general slot), and (`train_in_use`/`train_max`) the reserved merge-train slot, which is separate from and not counted in the general figure (both zero with `merge_train` off); and, per (repo, base) merge-train partition, its members and whether a train worker is in flight.
 
 #### Attention states
 
@@ -3695,7 +3695,7 @@ Daemon version and uptime; time since the last poll attempt and the last success
 |---|---|
 | `needs-human` | The engine is paused and only a human comment resumes it (a question, or `fabrik:paused`). Also: settled at Validate under cruise, waiting for you to merge. |
 | `escalated` | The engine stopped on its own account: paused by the engine after exhausting retries, a cycle counter at its limit, a merge-train runaway pause, or a failed landing verification. A human must intervene. |
-| `waiting` | The engine is correctly waiting: CI, reviewers, dependencies, a retry cooldown, the merge train, a Claude usage-limit suspension, or a `fabrik:awaiting-*` settle retry. |
+| `waiting` | The engine is correctly waiting: CI, reviewers, dependencies, a retry cooldown, the merge train, a Claude usage-limit hold, or a `fabrik:awaiting-*` settle retry. |
 | `working` | A worker is in flight and something observable changed recently. |
 | `stalled` | Nothing is correctly waited on and nothing observable changed for longer than the stall threshold (default 30 min, `--stall-threshold`); an engine-owned wait whose deadline passed more than a threshold ago (`overdue`); or an engine-retried wait with no known deadline and no observable change for longer than the threshold (`blocked`, `claude-limit`, cooldowns and the merge train are exempt: they can legitimately wait that long). |
 | `idle` | Nothing to do, or nothing wrong: closed, done, a parking column, or recently active. |
@@ -3704,7 +3704,7 @@ Daemon version and uptime; time since the last poll attempt and the last success
 
 #### Acting on what you see: `fabrik_promote`, `fabrik_advance`, `fabrik_set_autonomy`, `fabrik_revalidate`, `fabrik_clear_claude_limit`
 
-**The problem.** The decisions an overseer takes after seeing that an item needs one are a small, recurring set: promote an item out of Backlog, move a finished stage on to the next one, set or clear its autonomy, force a Validate re-run, clear a Claude usage-limit suspension. Doing them through `gh` spends the GitHub budget the daemon shares, needs board and field node IDs, and bypasses what the daemon knows about the item.
+**The problem.** The decisions an overseer takes after seeing that an item needs one are a small, recurring set: promote an item out of Backlog, move a finished stage on to the next one, set or clear its autonomy, force a Validate re-run, clear a Claude usage-limit hold. Doing them through `gh` spends the GitHub budget the daemon shares, needs board and field node IDs, and bypasses what the daemon knows about the item.
 
 **What Fabrik gives you.** Five tools, each performed by the daemon through its own client with the IDs and state it already holds, and each only for a transition the engine already documents. They need the server to be launched with `--subscriber` (or `FABRIK_SUBSCRIBER`): every action leaves a short `🏭 Fabrik — overseer action: <action>` comment on the issue naming that subscriber, so each change is attributable, and without a name the tool refuses before contacting the daemon. There is no per-call override of the name.
 
@@ -3716,7 +3716,7 @@ Every action first resolves the issue to exactly one item the daemon manages (`o
 | `fabrik_advance(issue)` | Moves an item whose current stage is complete (`stage:<X>:complete`) exactly **one** configured stage forward, for example Specify → Research when the spec is approved but the stage does not auto-advance. It uses the engine's own advance (the one auto-advance uses) and the engine dispatches the next stage on its next poll. It does not change the item's autonomy, so it is the right tool for "this one stage should move on" where cruise would change every remaining stage. The column and labels are confirmed live (a failed read refuses), and the same gates the engine applies to its own advance are evaluated read-only: unresolved dependencies, unprocessed comments or review feedback, and a standing review wait. If the item carries `fabrik:cruise` or `fabrik:yolo` the result notes it and the label is left alone. | a worker is in flight or the stage is not complete (the reason says which), the item is **paused or awaiting input** (a human comment resumes it; this tool never lifts a pause), blocked, or held by a CI wait, review wait, `fabrik:rebase-needed` or auto-merge; the item is in **Validate** (Validate → Done is the engine's landing and your merge decision: use the PR merge), the next column is a holding stage such as `Queued`, the item is in a parking column (use `fabrik_promote`) or the cleanup column, or the next stage has no board column. A refusal carries the current state and writes nothing. |
 | `fabrik_set_autonomy(issue, autonomy)` | Makes the item's autonomy exactly `cruise`, `yolo` or `none`: setting one removes the other label (otherwise cruise would silently win). Decided from a live label read (a failed read refuses). Already in the requested state: reported, nothing written, no comment. | the issue is not managed or is closed. **`yolo` auto-merges the PR when Validate completes** and the result says so; `cruise` never merges. Labels are added before the other is removed, so a partial failure leaves the more conservative mode, and a partial failure is still audited (the comment says the autonomy change was only partially applied). |
 | `fabrik_revalidate(issue)` | Applies `fabrik:revalidate`: the engine clears the Validate completion and CI labels and re-dispatches Validate on a following poll (deferred until an in-flight Validate worker exits; the result says so). | the item is not in the `Validate` column (live-confirmed), already carries `fabrik:revalidate`, or is **paused or awaiting input** (labels are re-read live, so a pause the daemon has not seen yet still refuses). |
-| `fabrik_clear_claude_limit()` | Applies `fabrik:clear-claude-limit` to one managed open issue, and the engine clears the **account-wide** suspension on its next poll. The daemon picks the issue — one already carrying `fabrik:claude-limit` first, else the lowest-numbered — and names it in the result and in the audit comment. | no suspension is active, or there is no managed open issue to carry the label. A clear request already pending is reported, not repeated. |
+| `fabrik_clear_claude_limit()` | Applies `fabrik:clear-claude-limit` to one managed open issue, and the engine clears the **account-wide** usage-limit hold on its next poll. The daemon picks the issue — one already carrying `fabrik:claude-limit` first, else the lowest-numbered — and names it in the result and in the audit comment. | no usage-limit hold is active, or there is no managed open issue to carry the label. A clear request already pending is reported, not repeated. |
 
 **What is deliberately not offered.** There is no tool that removes `fabrik:paused` / `fabrik:awaiting-input`, none that posts a free-form comment, none that moves an item backwards or more than one stage, and none that moves an item into a holding or cleanup column (Validate → Done is the PR merge). A pause is lifted only by a **human comment made after the pause**; steering and answers to a pause stay as ordinary comments on the issue, which keeps them on the audit trail. That is also why `fabrik_revalidate` refuses a paused item — re-entering Validate would clear the pause as a side effect — and why a stale `fabrik:awaiting-input` is a bug to fix in the engine, not to work around with a tool. A paused Validate item is answered with a comment.
 
@@ -3773,7 +3773,7 @@ Scopes combine with AND; entries within one list with OR. Account-wide events (`
 | `blocker-cleared` | the last open blocker closed and work resumes | |
 | `children-spawned` | the item's scope grew: child issues were created | `children`, `count` |
 | `landing-verification-failed` | the credited PR did not merge; the issue was reopened | |
-| `claude-limit-suspended`, `claude-limit-lifted` | the account-wide Claude usage-limit suspension began or ended | `until` |
+| `claude-usage-limited`, `claude-usage-limit-lifted` | the account-wide Claude usage-limit hold began or ended | `until` |
 | `daemon-unreachable`, `daemon-reachable` | emitted by `fabrik mcp` itself when the daemon connection stays down more than 10 s and when it recovers | `error` / `down_for_seconds` |
 | `events-dropped`, `digest` | bookkeeping: held events were lost to queue overflow or aged out; a batched delivery | `count`, `dropped_types` (e.g. `label-applied x4`), `expired` (how many aged out, when any did) |
 | `stream-superseded` | emitted by `fabrik mcp` itself: another session attached under the same subscriber name and took over this stream | `subscriber` |
@@ -4148,22 +4148,22 @@ operator beyond the faster startup time.
 GitHub tracks two separate API budgets — REST/core and GraphQL — and Fabrik reports
 exhaustion of either one distinctly, naming the bucket that actually ran out. When the
 GraphQL budget drops below 20% and probe failures begin, or when the REST budget hits
-a hard near-zero threshold, Fabrik suspends polling and displays a red alert banner
+a hard near-zero threshold, Fabrik pauses polling and displays a red alert banner
 immediately below the TUI header:
 
 ```
-⚠ GraphQL rate limit exhausted — polling suspended. Resumes in 12m (14:30 local time).
+⚠ GraphQL rate limit exhausted — polling backed off. Resumes in 12m (14:30 local time).
 ```
 
 ```
-⚠ REST rate limit exhausted — polling suspended. Resumes in 18m (21:38 local time).
+⚠ REST rate limit exhausted — polling paused for the rate limit. Resumes in 18m (21:38 local time).
 ```
 
 If both buckets are exhausted at the same time, the banner names both in a single
 combined line and quotes whichever bucket's reset comes sooner:
 
 ```
-⚠ REST and GraphQL rate limits exhausted — polling suspended. Resumes in 5m (21:25 local time).
+⚠ REST and GraphQL rate limits exhausted — polling paused for the rate limit. Resumes in 5m (21:25 local time).
 ```
 
 The countdown ticks every second and shows the local time when the named bucket's
@@ -4176,7 +4176,7 @@ so processing resumes as soon as the budget is restored. The footer's GraphQL
 remaining/limit readout always reflects the same underlying stats the banner uses for
 GraphQL, so the two can never disagree about GraphQL's state.
 
-### Claude Usage-Limit Suspension
+### Claude Usage-Limit Hold
 
 This is a separate mechanism from GitHub rate-limit monitoring above — it tracks the
 Claude account's own usage limit (session or weekly), not GitHub's API budget. Board
@@ -4186,40 +4186,40 @@ Claude invocations is gated.
 When any worker's Claude invocation exits because the account's usage limit was hit —
 detected structurally from the CLI's own result object (`terminal_reason ==
 "blocking_limit"`, or `terminal_reason == "api_error"` with `api_error_status == 429`),
-never from output text a stage happened to write — Fabrik suspends the start of every new Claude invocation across all
+never from output text a stage happened to write — Fabrik holds the start of every new Claude invocation across all
 issues, not just the one that hit the limit, and displays a banner distinct from the
 GraphQL one:
 
 ```
-⚠ Claude usage limit hit — dispatch suspended. Resumes in 1h (22:20 local time).
+⚠ Claude usage limit hit — dispatch held. Resumes in 1h (22:20 local time).
 ```
 
-The suspension runs until the reset instant the CLI reports in its structured
+The usage-limit hold runs until the reset instant the CLI reports in its structured
 `rate_limit_event` stream line (`unifiedWindows.<window>.resetsAt`, a Unix timestamp): the
 latest reset among the windows that are actually exhausted (`utilization` of 1 or more).
 Windows below 1 are ignored, since a weekly window that is only 65% used resets days after
 the five-hour one that is blocking you. The message text ("resets 3:30am …") is never
 read. Any value that is not a sane future instant — absent, zero, malformed, already
-past, or no exhausted window — falls back to a fixed one-hour suspension (a full order of
+past, or no exhausted window — falls back to a fixed one-hour usage-limit hold (a full order of
 magnitude longer than the normal 5-minute dispatch cooldown) and the log line names which
 condition applied, e.g. `no usable structured reset (reason=absent)`. A reset more than 8
 days away is clamped to 8 days and logged. The comment and log show the real time —
 `(resets 2026-09-18 03:30 EDT)`, in the engine's local zone — only when it came from the
-structured field. The suspension clears in any of three ways:
+structured field. The usage-limit hold clears in any of three ways:
 
 1. **Automatically**, once the reset deadline passes or as soon as any invocation
    succeeds, whichever comes first — no operator action required.
 2. **On operator request**, by applying `fabrik:clear-claude-limit` to *any* open board
    item (it does not need to be one already carrying `fabrik:claude-limit` — the
-   suspension is account-wide, not per-issue). Fabrik reads the label on the next poll,
-   clears the suspension immediately, and removes the label. This is the lightest-weight
+   usage-limit hold is account-wide, not per-issue). Fabrik reads the label on the next poll,
+   clears the usage-limit hold immediately, and removes the label. This is the lightest-weight
    recovery from a suspected false positive — no engine restart required.
 3. **Via a full restart** (`ctrl+r`/SIGHUP) — see [Recovering from Wedged
-   State](#recovering-from-wedged-state) — which also drops the suspension, but along
+   State](#recovering-from-wedged-state) — which also drops the usage-limit hold, but along
    with all other in-memory state. Prefer option 2 unless something else is also wedged.
 
-Already-running Claude invocations are never interrupted by this; the suspension only
-prevents new ones from starting. Once the account-wide suspension lifts (by any of the
+Already-running Claude invocations are never interrupted by this; the usage-limit hold only
+prevents new ones from starting. Once the account-wide usage-limit hold lifts (by any of the
 three paths above), a per-poll settle scan removes `fabrik:claude-limit` from every open
 issue that still carries it — not only from the issue that happens to be dispatched next.
 See the `fabrik:claude-limit` troubleshooting note above for the per-issue label/comment
@@ -4657,7 +4657,7 @@ If Claude doesn't seem to follow the skill instructions:
 
 Cache-stale bugs can occasionally leave Fabrik's in-memory state stuck — an issue that should advance doesn't, or a label that should clear doesn't. The safest escape hatch is a SIGHUP restart, which drops all in-memory state and re-execs the same binary in place, without tearing down the terminal session or TUI.
 
-**If the only symptom is a suspected false-positive Claude usage-limit suspension**, prefer applying `fabrik:clear-claude-limit` to any open board item instead — see [Claude Usage-Limit Suspension](#claude-usage-limit-suspension). It clears just that one piece of state without dropping the board cache, observers, or `mayNeedWork` map a full SIGHUP restart discards. Reach for SIGHUP when something else is also wedged, or the lighter clear doesn't help.
+**If the only symptom is a suspected false-positive Claude usage-limit hold**, prefer applying `fabrik:clear-claude-limit` to any open board item instead — see [Claude Usage-Limit Hold](#claude-usage-limit-hold). It clears just that one piece of state without dropping the board cache, observers, or `mayNeedWork` map a full SIGHUP restart discards. Reach for SIGHUP when something else is also wedged, or the lighter clear doesn't help.
 
 **How to trigger:**
 

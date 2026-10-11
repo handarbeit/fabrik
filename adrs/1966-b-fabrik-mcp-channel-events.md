@@ -84,3 +84,16 @@ These are accepted, not defects:
 - A same-user process can drain another subscriber's held queue — unchanged in kind from ADR-1966-a's trust note, widened in effect.
 - A restart loses the deriver's per-item memory by design (re-seeded silently); `awaiting-input-stale` cannot fire for an episode that began before the restart.
 - The notification contract is a research preview and may change.
+
+## Note (2026-10-11, #2129): "suspension" renamed to "usage limited"
+
+Before these surfaces first shipped (0.0.84), the account-wide Claude usage-limit hold was renamed, so the word "suspended" stays free for the item state proposed in #2120. Names and wording only; detection, reset time, dispatch hold, labels and clear paths are unchanged.
+
+| Old | New |
+|---|---|
+| event `claude-limit-suspended` | `claude-usage-limited` |
+| event `claude-limit-lifted` | `claude-usage-limit-lifted` |
+| `fabrik_health.claude_usage_limit.suspended` / `suspended_until` | `usage_limited` / `usage_limited_until` |
+| attention deadline kind `claude-suspension-end` | `claude-usage-limit-end` |
+
+`fabrik:claude-limit`, `fabrik:clear-claude-limit` and the `fabrik_clear_claude_limit` tool keep their names. No alias is accepted by `subscribe`: a subscriber that names an old event type must re-subscribe with the new one. As a courtesy to development machines, `channelevents.Open` rewrites the two old type strings in persisted subscriptions and held queues to the new names on load (`internal/channelevents/legacy.go`), so existing state does not go silently unmatched.

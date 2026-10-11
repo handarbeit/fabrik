@@ -362,12 +362,15 @@ func TestChannelClaudeUsageLimitedAndLifted(t *testing.T) {
 	if ev.Type != channelevents.ClaudeUsageLimited || ev.Meta["until"] == "" || ev.Issue != 0 {
 		t.Fatalf("%+v", ev)
 	}
+	if string(ev.Type) != "claude-usage-limited" || strings.Contains(ev.Content, "suspend") {
+		t.Errorf("wire type/content = %q / %q", ev.Type, ev.Content)
+	}
 	// Extending the same usage-limit hold is not a new transition.
 	e.activateClaudeUsageLimit(0, nil, e.now().Add(time.Minute))
 	sink.quiet(t, 200*time.Millisecond)
 
 	e.clearClaudeUsageLimit("test")
-	if lifted := sink.next(t); lifted.Type != channelevents.ClaudeUsageLimitLifted {
+	if lifted := sink.next(t); lifted.Type != channelevents.ClaudeUsageLimitLifted || string(lifted.Type) != "claude-usage-limit-lifted" {
 		t.Fatalf("%+v", lifted)
 	}
 	sink.quiet(t, 150*time.Millisecond)

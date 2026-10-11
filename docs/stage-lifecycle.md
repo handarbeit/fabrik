@@ -714,7 +714,7 @@ because the account's usage limit was hit, not because the stage genuinely faile
 result object only — never from anything the assistant wrote: `classifyUsageLimitExit` checks
 `resp.TerminalReason == "blocking_limit"` (the same `terminal_reason` field the turn-cap check
 consults) or `resp.TerminalReason == "api_error"` with `api_error_status == 429` (the CLI's other
-session-limit shape, #1811 / ADR-1811; other `api_error` statuses stay transient and never suspend),
+session-limit shape, #1811 / ADR-1811; other `api_error` statuses stay transient and never trigger it),
 and only when a result object actually parsed. The `result` text is never matched. When Claude exited non-zero without a
 `FABRIK_STAGE_COMPLETE` marker, no turn cap, and `TerminalReason` matches, it returns a
 `*claudeUsageLimitError` sentinel in place of the generic error; an unparseable-JSON invocation is
@@ -738,10 +738,10 @@ engine-shutdown guard — before the normal `claudeRan`/retry classification log
 `fabrik:claude-limit` clears per-issue on the next invocation that is not itself classified as a
 usage-limit exit (success, blocked-on-input, incomplete/genuine-failure, or PR-creation failure alike),
 and account-wide via `settleClaudeLimitLabelSweep`, a per-poll settle scan that removes it from every
-open item once the account-wide suspension has lifted — so an issue that is paused, blocked, or simply
-never redispatched no longer keeps the label indefinitely. An operator can also end an active suspension
+open item once the account-wide usage-limit hold has lifted — so an issue that is paused, blocked, or simply
+never redispatched no longer keeps the label indefinitely. An operator can also end an active usage-limit hold
 early, without restarting the engine, by applying `fabrik:clear-claude-limit` to any open board item;
-`settleClaudeLimitClearRequests` reads it each poll and clears the suspension. See
+`settleClaudeLimitClearRequests` reads it each poll and clears the usage-limit hold. See
 `docs/state-machine.md` §7.3, [ADR-1119](../adrs/1119-claude-usage-limit-detection.md), and
 [ADR-1183](../adrs/1183-structural-claude-usage-limit-detection.md) for the full rationale, including
 why this reuses the same `StageAttempted`-without-`StageRetryIncremented` split as the Post-Run Boundary
@@ -751,7 +751,7 @@ boundary violation is not).
 ### apiKeyHelper Detection Path (Worktree)
 
 A fifth outcome, checked in `runInvocationWithExtension` immediately alongside the account-wide
-usage-limit suspension gate above — before `InvokeOptions` is built or the stall hint consumed, and
+usage-limit hold gate above — before `InvokeOptions` is built or the stall hint consumed, and
 before Claude is ever invoked. `findAPIKeyHelper` (`engine/startup.go`, shared with the engine-startup
 preflight — see "Worker Environment: Anthropic Auth Namespace Scrub" above) checks the worktree's own
 `.claude/settings.json` and `.claude/settings.local.json` (mirroring the startup preflight's file

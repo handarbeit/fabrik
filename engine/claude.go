@@ -128,7 +128,7 @@ func classifyAPIErrorExit(resp claudeResponse, usage TokenUsage) (msg string, de
 //
 // That was not hypothetical in this repository: on 2026-07-27 issue #1178's
 // Implement stage, which was writing tests about usage-limit detection,
-// quoted #1084's example message and usage limited Claude dispatch account-wide
+// quoted #1084's example message and held Claude dispatch account-wide
 // for ~11 hours after a plain turn-cap exit (51 turns, $2.28). See #1183.
 //
 // resp.TerminalReason == "blocking_limit" is the CLI's structural signal for
