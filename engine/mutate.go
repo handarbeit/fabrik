@@ -16,7 +16,11 @@ import (
 // wire a cache). Centralizes the cast-or-nil check that was previously
 // re-typed at every call site as `if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok`.
 func (e *Engine) cache() *boardcache.CacheImpl {
-	c, ok := e.readClient.(*boardcache.CacheImpl)
+	rc := e.readClient
+	if m, ok := rc.(*maskedReviewReadClient); ok {
+		rc = m.ReadClient // the #2160 test seam wraps the cache; it is still the cache
+	}
+	c, ok := rc.(*boardcache.CacheImpl)
 	if !ok {
 		return nil
 	}

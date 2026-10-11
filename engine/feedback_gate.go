@@ -24,6 +24,10 @@ type pendingFeedback struct {
 	// Live is false when any read backing the answer failed, so "nothing found"
 	// cannot be trusted.
 	Live bool
+	// DispatcherGap is the subset of Threads and Bodies the dispatcher's own
+	// cache-sourced view of the item lacks (#2160). Non-empty means the board
+	// cache is lagging GitHub and Phase 1 cannot dispatch what the gate holds on.
+	DispatcherGap []gh.Comment
 }
 
 func (p pendingFeedback) empty() bool {
@@ -43,6 +47,7 @@ func (p pendingFeedback) empty() bool {
 // empty). Any read error yields Live=false.
 func (e *Engine) unprocessedFeedback(item gh.ProjectItem, alreadyLive bool) pendingFeedback {
 	pf := pendingFeedback{Live: true}
+	orig := item
 	if !alreadyLive {
 		fresh := item
 		if err := e.client.FetchItemDetails(&fresh); err != nil {
@@ -65,6 +70,7 @@ func (e *Engine) unprocessedFeedback(item gh.ProjectItem, alreadyLive bool) pend
 	threads, reviews := e.dropCatchUpFeedback(item, e.currentHeadReviewThreadComments(item), reviews)
 	pf.Threads = threads
 	pf.Bodies = e.buildReviewBodyCommentsFromReviews(item, reviews)
+	pf.DispatcherGap = e.dispatcherGap(orig, pf)
 	return pf
 }
 
@@ -80,6 +86,11 @@ func (e *Engine) unprocessedFeedback(item gh.ProjectItem, alreadyLive bool) pend
 // bounds: the held feedback is dispatched through the ordinary paths, under
 // MaxReviewCycles, the no-op and frequency comment breakers and the #1555
 // marker, so feedback that can never be satisfied ends in a pause, not a loop.
+// That promise only holds if the dispatcher can see what the gate sees: the gate
+// reads live while Phase 1 reads the board cache, which an engine self-write can
+// mask (#2160, ADR 2160). When the gate holds on review feedback the dispatcher's
+// view lacks, repairDispatcherBlindness invalidates the cache and forces the next
+// admission — bounded, and the gate keeps holding either way.
 //
 // On a hold it records a "feedback-pending" cooldown, mirroring handleReviewGate's
 // "review-blocked", so itemMayNeedWork's expiry path re-evaluates the item every
@@ -100,6 +111,9 @@ func (e *Engine) feedbackGateBlocks(item gh.ProjectItem, alreadyLive bool, where
 		Reason: "feedback-pending",
 		Until:  e.now().Add(e.githubRecheckInterval()),
 	})
+	if len(pf.DispatcherGap) > 0 {
+		e.repairDispatcherBlindness(item, pf.DispatcherGap)
+	}
 	return true
 }
 
