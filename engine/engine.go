@@ -1394,3 +1394,28 @@ func (e *Engine) EnableTrainReservedSlotForTest() {
 func (e *Engine) trainSlotUsage() (inUse, capacity int) {
 	return len(e.trainSem), cap(e.trainSem)
 }
+
+// HoldGeneralWorkerSlotsForTest occupies every general (max_concurrent) worker slot, as
+// a saturated pool of stage workers would, and returns the function that frees them.
+// Test seam only (#2115, tests/sim); never called in production.
+func (e *Engine) HoldGeneralWorkerSlotsForTest() (release func()) {
+	n := cap(e.sem)
+	for i := 0; i < n; i++ {
+		e.sem <- struct{}{}
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			for i := 0; i < n; i++ {
+				<-e.sem
+			}
+		})
+	}
+}
+
+// WorkerSlotUsageForTest reports general-pool and reserved-train-slot occupancy.
+// Test seam only (#2115, tests/sim).
+func (e *Engine) WorkerSlotUsageForTest() (general, train, trainMax int) {
+	train, trainMax = e.trainSlotUsage()
+	return len(e.sem), train, trainMax
+}
