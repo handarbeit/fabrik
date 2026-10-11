@@ -24,6 +24,12 @@ type Entry struct {
 	Detail    string            `json:"detail"`
 	FixAction string            `json:"fix_action"`
 	FixParams map[string]string `json:"fix_params,omitempty"`
+	// Fingerprint is the stable identity of the condition for dismissal: a
+	// dismissed entry stays dismissed while its fingerprint is unchanged and
+	// reappears when it changes. Empty means "sticky" — Record keeps whatever
+	// fingerprint the stored entry already has, so a caller that does not know
+	// one (e.g. the TUI's fix-failed re-record) never un-dismisses an entry.
+	Fingerprint string    `json:"fingerprint,omitempty"`
 	FirstSeen time.Time         `json:"first_seen"`
 	LastSeen  time.Time         `json:"last_seen"`
 	Dismissed bool              `json:"dismissed"`
@@ -35,6 +41,12 @@ type warningsFile struct {
 }
 
 const currentVersion = 1
+
+// lastSeenRefresh is how stale an unchanged entry's LastSeen may get before
+// Record rewrites the file just to refresh it. A condition re-recorded every
+// poll therefore costs no file write (and no TUI reload) while nothing changes.
+// A var so tests can shorten it.
+var lastSeenRefresh = 10 * time.Minute
 
 func warningsPath() string {
 	if WarningsPathOverride != "" {
@@ -79,11 +91,28 @@ func save(wf warningsFile) error {
 	if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
 		return fmt.Errorf("creating warnings dir: %w", err)
 	}
-	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
+	// A unique temp name keeps concurrent processes (the daemon, the TUI's fix
+	// action, fabrik upgrade) from clobbering each other's half-written file.
+	f, err := os.CreateTemp(filepath.Dir(p), filepath.Base(p)+".*.tmp")
+	if err != nil {
+		return fmt.Errorf("creating warnings tmp: %w", err)
+	}
+	tmp := f.Name()
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(tmp)
 		return fmt.Errorf("writing warnings tmp: %w", err)
 	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("closing warnings tmp: %w", err)
+	}
+	if err := os.Chmod(tmp, 0600); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("chmod warnings tmp: %w", err)
+	}
 	if err := os.Rename(tmp, p); err != nil {
+		os.Remove(tmp)
 		return fmt.Errorf("renaming warnings tmp: %w", err)
 	}
 	return nil
@@ -107,8 +136,12 @@ func Load() ([]Entry, error) {
 }
 
 // Record upserts an entry. For new keys: sets first_seen=now, last_seen=now,
-// dismissed=false. For existing keys: preserves first_seen and dismissed;
-// updates detail and last_seen.
+// dismissed=false. For existing keys: preserves first_seen; updates the
+// content and last_seen. Dismissed is preserved unless the entry's Fingerprint
+// changed (both old and new non-empty and different) — then the condition is
+// materially different and the entry reappears. An empty new Fingerprint keeps
+// the stored one. When nothing material changed and LastSeen is younger than
+// lastSeenRefresh, the file is not rewritten.
 func Record(entry Entry) error {
 	mu.Lock()
 	defer mu.Unlock()
@@ -123,6 +156,14 @@ func Record(entry Entry) error {
 		if e.Key == entry.Key {
 			entry.FirstSeen = e.FirstSeen
 			entry.Dismissed = e.Dismissed
+			if entry.Fingerprint == "" {
+				entry.Fingerprint = e.Fingerprint
+			} else if e.Fingerprint != "" && e.Fingerprint != entry.Fingerprint {
+				entry.Dismissed = false
+			}
+			if sameContent(e, entry) && e.Dismissed == entry.Dismissed && now.Sub(e.LastSeen) < lastSeenRefresh {
+				return nil
+			}
 			entry.LastSeen = now
 			wf.Entries[i] = entry
 			found = true
@@ -138,7 +179,22 @@ func Record(entry Entry) error {
 	return save(wf)
 }
 
-// Clear removes an entry by key regardless of its dismissed state.
+func sameContent(a, b Entry) bool {
+	if a.Type != b.Type || a.Title != b.Title || a.Detail != b.Detail ||
+		a.FixAction != b.FixAction || a.Fingerprint != b.Fingerprint ||
+		len(a.FixParams) != len(b.FixParams) {
+		return false
+	}
+	for k, v := range a.FixParams {
+		if bv, ok := b.FixParams[k]; !ok || bv != v {
+			return false
+		}
+	}
+	return true
+}
+
+// Clear removes an entry by key regardless of its dismissed state. It does not
+// write the file when the key is absent.
 func Clear(key string) error {
 	mu.Lock()
 	defer mu.Unlock()
@@ -151,6 +207,9 @@ func Clear(key string) error {
 		if e.Key != key {
 			filtered = append(filtered, e)
 		}
+	}
+	if len(filtered) == len(wf.Entries) {
+		return nil
 	}
 	wf.Entries = filtered
 	return save(wf)
