@@ -315,7 +315,18 @@ type Result struct {
 	// Options lists how a human can act, for decision-bearing results
 	// (Suspended, awaiting-merge-decision, paused/needs-human, escalated).
 	Options []Option
+	// ResumeVia says how a paused or escalated item is resumed, in the words of
+	// the engine's own pause comment: ResumeViaLabel, ResumeViaComment or
+	// ResumeViaPauseComment (the cache cannot say). Empty for other results.
+	ResumeVia string
 }
+
+// Values of Result.ResumeVia.
+const (
+	ResumeViaLabel        = "remove-label"
+	ResumeViaComment      = "human-comment"
+	ResumeViaPauseComment = "see-pause-comment"
+)
 
 type labelInfo struct {
 	meaning string
@@ -444,9 +455,10 @@ func classify(in Input) Result {
 	// 2. Escalated: the engine has stopped on its own account.
 	if (paused && escalationSignal(in)) || failedLanding {
 		code, summary := escalationCode(in, failedLanding)
+		res.ResumeVia = resumeVia(in, true)
 		return finishNoSchedule(Escalated, code, summary,
 			"nothing automatic: the engine has stopped; a human must intervene ("+resumeAdvice(in, true)+")", RankEscalated,
-			resumeOptions(in))
+			resumeOptions(in, true))
 	}
 
 	// 3. Needs-human: paused with a question or without an escalation signal.
@@ -458,8 +470,9 @@ func classify(in Input) Result {
 				summary = "the engine paused and is waiting on a human; " + resumeAdvice(in, false)
 			}
 		}
+		res.ResumeVia = resumeVia(in, false)
 		return finishNoSchedule(NeedsHuman, code, summary,
-			"nothing automatic: "+resumeAdvice(in, false), RankNeedsHuman, resumeOptions(in))
+			"nothing automatic: "+resumeAdvice(in, false), RankNeedsHuman, resumeOptions(in, false))
 	}
 
 	// 4. Settled at Validate under cruise: only a human merge is left.
@@ -555,25 +568,37 @@ func classify(in Input) Result {
 // otherwise (R-options-2): a generic method that contradicts the engine's
 // comment is worse than none.
 func resumeAdvice(in Input, escalated bool) string {
-	switch in.Resume {
-	case ResumeRemoveLabel:
+	switch resumeVia(in, escalated) {
+	case ResumeViaLabel:
 		return "remove fabrik:paused to resume it"
-	case ResumeComment:
-		return "a human comment created after the pause resumes this item"
-	}
-	if hasLabel(in.Labels, "fabrik:awaiting-input") && !escalated {
+	case ResumeViaComment:
 		return "a human comment created after the pause resumes this item"
 	}
 	return "see the engine's pause comment on the issue for how to resume it"
 }
 
-// resumeOptions are the options of a paused item: the single resume method the
-// engine's own comment gives, or a pointer to that comment when unknown.
-func resumeOptions(in Input) []Option {
+// resumeVia resolves the resume method: the engine's own comment when the cache
+// has it, a human comment for a plain awaiting-input question, otherwise
+// unknown.
+func resumeVia(in Input, escalated bool) string {
 	switch {
 	case in.Resume == ResumeRemoveLabel:
+		return ResumeViaLabel
+	case in.Resume == ResumeComment:
+		return ResumeViaComment
+	case hasLabel(in.Labels, "fabrik:awaiting-input") && !escalated:
+		return ResumeViaComment
+	}
+	return ResumeViaPauseComment
+}
+
+// resumeOptions are the options of a paused item: the single resume method the
+// engine's own comment gives, or a pointer to that comment when unknown.
+func resumeOptions(in Input, escalated bool) []Option {
+	switch resumeVia(in, escalated) {
+	case ResumeViaLabel:
 		return []Option{{Action: "remove the fabrik:paused label (as the engine's pause comment says)"}}
-	case in.Resume == ResumeComment, hasLabel(in.Labels, "fabrik:awaiting-input") && in.Resume == ResumeUnknown:
+	case ResumeViaComment:
 		return []Option{{Action: "comment on the issue with your answer or instruction (a human comment created after the pause resumes it)"}}
 	}
 	return []Option{{Action: "read the engine's pause comment on the issue and follow its instructions"}}
@@ -588,7 +613,7 @@ func MergeDecisionOptions(pr int) []Option {
 	}
 	return []Option{
 		{Action: merge},
-		{Action: "set yolo so the engine merges it (replaces cruise)", Tool: "fabrik_set_autonomy yolo"},
+		{Action: "set yolo so the engine merges it", Tool: "fabrik_set_autonomy yolo"},
 	}
 }
 

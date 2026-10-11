@@ -118,7 +118,9 @@ func (ce *channelEvents) derive(key string, st *itemstate.ItemState, d *dirtyIte
 		m.pauseKey = pauseFamilyKey(res)
 		m.staleDone = hasLabelStr(st.Labels, "fabrik:awaiting-input")
 		ce.cycleNearEvents(m, st, true)
-		return nil
+		// Unlike the pause family, a pending decision is announced at first sight
+		// (once per episode): that is what makes it visible after a restart.
+		return ce.decisionStep(key, m, st, res)
 	}
 	var out []channelevents.Event
 
@@ -145,6 +147,7 @@ func (ce *channelEvents) derive(key string, st *itemstate.ItemState, d *dirtyIte
 	}
 
 	out = append(out, ce.cycleNearEvents(m, st, false)...)
+	out = append(out, ce.decisionStep(key, m, st, res)...)
 	return out
 }
 
@@ -171,6 +174,15 @@ func (e *Engine) pauseEventFor(st *itemstate.ItemState, key string, res attentio
 	ev.Content = fmt.Sprintf("%s %s: %s", issueRef(st.Repo, st.Number), lead, res.Summary)
 	ev.Meta["code"] = res.Code
 	ev.Meta["reason"] = res.Summary
+	// A pause-family event that waits on a human says how to act, in the words
+	// of the engine's own pause comment (R-options-1/2): never a generic resume
+	// method that contradicts it.
+	if o := optionsJSON(res.Options); o != "" {
+		ev.Meta["options"] = o
+	}
+	if res.ResumeVia != "" {
+		ev.Meta["resume"] = res.ResumeVia
+	}
 	if !res.ProgressAt.IsZero() {
 		ev.Meta["progress_age_seconds"] = strconv.FormatInt(secs(now.Sub(res.ProgressAt)), 10)
 	}
@@ -240,9 +252,11 @@ func (ce *channelEvents) onTick() {
 			// Same baseline derive() records, so a later non-seed evaluation cannot
 			// read an item already at limit-1 as a fresh transition.
 			m = ce.memoFor(key)
-			m.pauseKey = pauseFamilyKey(attention.Classify(e.attentionInput(st, now, threshold, usageLimited, look)))
+			res := attention.Classify(e.attentionInput(st, now, threshold, usageLimited, look))
+			m.pauseKey = pauseFamilyKey(res)
 			m.staleDone = hasLabelStr(st.Labels, "fabrik:awaiting-input")
 			ce.cycleNearEvents(m, st, true)
+			out = append(out, ce.decisionStep(key, m, st, res)...)
 			return
 		}
 		res := attention.Classify(e.attentionInput(st, now, threshold, usageLimited, look))
@@ -252,8 +266,12 @@ func (ce *channelEvents) onTick() {
 				out = append(out, ce.pauseEvent(m, st, k, res, now))
 			}
 		}
+		// The tick also drives the one time-based part of the decision step: the
+		// grace before a lower-bound announcement.
+		out = append(out, ce.decisionStep(key, m, st, res)...)
 	})
 	ce.enqueueDerived(out)
+	ce.remindDecisions()
 	ce.checkClaudeLimit()
 	ce.checkPipeline()
 	ce.checkAnomalies()

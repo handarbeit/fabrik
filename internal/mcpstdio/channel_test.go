@@ -353,3 +353,55 @@ func TestSubscribeToolPassesProgressViaColumn(t *testing.T) {
 		}
 	}
 }
+
+func TestSubscribeToolPassesRemindAfterAndRejectsNegative(t *testing.T) {
+	_, p, err := buildCall(ToolSubscribe, json.RawMessage(`{"issues":["7"],"remind_after":3600}`), "topic-x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sp := p.(localapi.SubscribeParams); sp.RemindAfterSeconds != 3600 {
+		t.Fatalf("remind_after not passed through: %+v", sp)
+	}
+	_, p, err = buildCall(ToolSubscribe, json.RawMessage(`{"issues":["7"]}`), "topic-x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sp := p.(localapi.SubscribeParams); sp.RemindAfterSeconds != 0 {
+		t.Fatalf("reminders must be off by default: %+v", sp)
+	}
+	if _, _, err := buildCall(ToolSubscribe, json.RawMessage(`{"remind_after":-5}`), "topic-x"); err == nil {
+		t.Fatal("a negative remind_after must be rejected")
+	}
+}
+
+func TestSubscribeToolDescribesReadinessAndNewEvents(t *testing.T) {
+	var sub map[string]any
+	for _, d := range toolDefs() {
+		if d["name"] == ToolSubscribe {
+			sub = d
+		}
+	}
+	if sub == nil {
+		t.Fatal("no subscribe tool")
+	}
+	desc := sub["description"].(string)
+	for _, want := range []string{"not a readiness signal", "validate-settled", "settlement-withdrawn", "decision-pending", "remind_after", "options"} {
+		if !strings.Contains(desc, want) {
+			t.Errorf("fabrik_subscribe description lacks %q", want)
+		}
+	}
+	props := sub["inputSchema"].(map[string]any)["properties"].(map[string]any)
+	if _, ok := props["remind_after"]; !ok {
+		t.Error("remind_after missing from the input schema")
+	}
+	enum := props["events"].(map[string]any)["items"].(map[string]any)["enum"].([]string)
+	got := strings.Join(enum, ",")
+	for _, ev := range []string{"decision-pending", "settlement-withdrawn"} {
+		if !strings.Contains(got, ev) {
+			t.Errorf("events enum lacks %s", ev)
+		}
+	}
+	if !strings.Contains(channelInstructions, "not a readiness signal") {
+		t.Error("channel instructions must repeat that label events are not a readiness signal")
+	}
+}

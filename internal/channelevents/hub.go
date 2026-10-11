@@ -606,6 +606,19 @@ func (h *Hub) PublishReminders(ev Event, dedupKey string) int {
 	return len(dues)
 }
 
+// RemindersEnabled reports whether any subscription asks for reminders, so the
+// caller can skip building them.
+func (h *Hub) RemindersEnabled() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, s := range h.subs {
+		if s.RemindAfterSeconds > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // ClearReminders forgets the reminder memory of an episode that ended.
 func (h *Hub) ClearReminders(dedupKey string) {
 	if dedupKey == "" {

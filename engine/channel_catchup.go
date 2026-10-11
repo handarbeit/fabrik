@@ -22,8 +22,9 @@ import (
 // dedup. Observation only (R10).
 
 // catchUpEvents lists, for every cached item, one event when it is settled at
-// Validate and waiting on a human, or currently needs-human or escalated (the
-// pause family minus stalled, which is a time-driven live signal).
+// Validate and waiting on a human, currently suspended (a pending decision), or
+// currently needs-human or escalated (the pause family minus stalled, which is a
+// time-driven live signal).
 func (e *Engine) catchUpEvents() []channelevents.Event {
 	type ref struct {
 		repo string
@@ -69,6 +70,13 @@ func (e *Engine) catchUpEvents() []channelevents.Event {
 			ev.Content = "(catch-up) " + ev.Content
 		default:
 			res := attention.Classify(e.attentionInput(&st, now, threshold, usageLimited, look))
+			if res.State == attention.Suspended && res.Pending != nil {
+				// A pending decision is current state a late subscriber must learn
+				// (#2120 R6): same event as the live one, tagged catch_up.
+				ev = e.decisionEvent(&st, res)
+				ev.Content = "(catch-up) " + ev.Content
+				break
+			}
 			key := pauseFamilyKey(res)
 			if key == "" || key == "stalled" {
 				continue

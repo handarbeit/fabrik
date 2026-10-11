@@ -467,6 +467,9 @@ type SubscribeParams struct {
 	// ProgressViaColumn drops stage:*:complete / stage:*:in_progress label
 	// events when column-changed is also taken (#2123).
 	ProgressViaColumn bool `json:"progress_via_column,omitempty"`
+	// RemindAfterSeconds opts into reminders for a still-pending
+	// decision-pending episode (#2120 R6a); 0 = never.
+	RemindAfterSeconds int `json:"remind_after_seconds,omitempty"`
 }
 
 // EventMapping reports a requested event type the daemon rewrote to its current

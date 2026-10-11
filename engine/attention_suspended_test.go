@@ -204,7 +204,7 @@ func TestResumeMethodOf(t *testing.T) {
 // pause is the one the comment the engine posts actually says.
 func TestCleanStopPauseResumeMatchesEngineComment(t *testing.T) {
 	e := apiEngine(t, 0)
-	body := cleanStopPauseComment("Plan")
+	body := cleanStopPauseComment(t)
 	e.seedAPIItem(t, 1, "Specify", "fabrik:paused", "fabrik:awaiting-input")
 	e.store.Apply(itemstate.ItemDeepFetched{Repo: "owner/repo", Number: 1, FreshState: gh.ProjectItem{
 		ID: "I_B", Number: 1, Repo: "owner/repo", Status: "Specify", Labels: []string{"fabrik:paused", "fabrik:awaiting-input"},
@@ -227,4 +227,26 @@ func TestCleanStopPauseResumeMatchesEngineComment(t *testing.T) {
 	if !strings.Contains(res.Next.Action, "human comment") {
 		t.Fatalf("awaiting-input pause: %q", res.Next.Action)
 	}
+}
+
+// cleanStopPauseComment returns the comment the engine itself posts when a
+// daemon clean stop pauses an in-flight item, captured by running the real
+// shutdown path against a mock client (R-options-2 pins the classifier's resume
+// method against this text, not against a copy of it).
+func cleanStopPauseComment(t *testing.T) string {
+	t.Helper()
+	client := &mockGitHubClient{}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	seedInFlightIssue(eng, "owner/repo", 30, "Validate")
+	eng.wg.Add(1)
+	eng.runShutdownPause(eng.inFlightSnapshot())
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	for _, c := range client.addCommentCalls {
+		if c.issueNumber == 30 && strings.Contains(c.body, "daemon clean stop") {
+			return c.body
+		}
+	}
+	t.Fatal("the shutdown path posted no clean-stop comment")
+	return ""
 }

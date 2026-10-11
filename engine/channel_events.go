@@ -57,6 +57,11 @@ type itemMemo struct {
 	near map[string]bool
 	// lastComment is the comment link the previous event for this item carried.
 	lastComment string
+	// dp is the open decision-pending episode, if any (channel_decision.go);
+	// dpSeen is when the item was first seen suspended without an exact GitHub
+	// time (real time), for decisionAnchorGrace.
+	dp     *decisionEpisode
+	dpSeen time.Time
 }
 
 // dirtyItem is a pending debounced re-evaluation.
@@ -241,6 +246,7 @@ func (ce *channelEvents) seed() {
 	usageLimited := e.channelUsageLimitedUntil(now)
 	ce.claudeLimited = !usageLimited.IsZero()
 	look := e.scanBlockerIndex()
+	var pending []string
 	e.store.Scan(func(st *itemstate.ItemState) {
 		// An item whose labels are not known yet (probe-seeded) has no meaningful
 		// classification; its first label-bearing evaluation is the baseline (#2123).
@@ -253,7 +259,25 @@ func (ce *channelEvents) seed() {
 		m.pauseKey = pauseFamilyKey(res)
 		ce.armCounters(m, st, true)
 		m.staleDone = hasLabelStr(st.Labels, "fabrik:awaiting-input")
+		if res.State == attention.Suspended {
+			pending = append(pending, st.Repo+"#"+strconv.Itoa(st.Number))
+		}
 	})
+	// A suspended item with no open persisted episode is announced once; the
+	// scan's read lock is released first, because the step reads the store again.
+	for _, key := range pending {
+		repo, n, ok := parseIssueRef(key)
+		if !ok {
+			continue
+		}
+		snap, ok := e.store.Peek(repo, n)
+		if !ok {
+			continue
+		}
+		st := snap.State()
+		res := attention.Classify(e.attentionInput(&st, now, threshold, usageLimited, e.peekBlockerLookup()))
+		ce.enqueueDerived(ce.decisionStep(key, ce.memoFor(key), &st, res))
+	}
 }
 
 func (ce *channelEvents) memoFor(key string) *itemMemo {
