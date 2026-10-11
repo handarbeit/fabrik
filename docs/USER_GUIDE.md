@@ -3689,7 +3689,7 @@ Every action first resolves the issue to exactly one item the daemon manages (`o
 
 **The audit comment is inert.** Its body begins with the exact `🏭 **Fabrik` prefix the engine uses to recognise its own output, so it is never treated as steering: it does not resume a paused item, start a comment-review cycle or hold an advance or landing. Under personal-access-token auth the comment is authored by your own account, where that prefix is the only protection. The requester name is reduced to `[A-Za-z0-9._:/-]` (anything else becomes `_`) and truncated to 64 characters, so it cannot ping anyone or inject markdown.
 
-**Ordering and failure.** The write happens first, then the comment. If the write fails the tool reports the error and posts no comment. If only the comment fails the action stands and the result says `audit_comment: failed` (and the daemon logs it): reverting would itself be a second unaudited write. Each result lists the writes performed. The daemon's writes use the same cache write-through and webhook-echo bookkeeping as its own, so your session's own `label-applied` push (actor `fabrik`) may follow an action if you subscribe to label events.
+**Ordering and failure.** The write happens first, then the comment. If the write fails the tool reports the error and posts no comment. If only the comment fails the action stands and the result says `audit_comment: failed` (and the daemon logs it): reverting would itself be a second unaudited write. Each result lists the writes performed. The daemon's writes use the same cache write-through and webhook-echo bookkeeping as its own, so your session's own `label-applied` push (actor `overseer`, `via` set to your subscriber name) may follow an action if you subscribe to label events.
 
 **Compatibility.** The action methods are a separate method set on the socket, advertised by `hello` only when the daemon implements them; a daemon without it answers them `unknown_method` and the tools report "this Fabrik daemon does not support overseer actions". The read-only methods can never reach them.
 
@@ -3728,7 +3728,7 @@ Scopes combine with AND; entries within one list with OR. Account-wide events (`
 | Event | When | Extra `meta` |
 |---|---|---|
 | `validate-settled` | Validate is gate-complete: `stage:Validate:complete` is applied (under `wait_for_ci`, deferred until CI passes), the review gate has cleared and nothing unprocessed is holding it. Once per settle episode — never at `FABRIK_STAGE_COMPLETE` while `fabrik:awaiting-ci` is present; `fabrik:revalidate` or a reopen starts a new episode | `next` (`waiting-for-human` for cruise or no autonomy, `auto-merge`, `merge-train`), `autonomy`, `ci` (from cached check runs; `unknown` when none are cached), `ci_gate` (`cleared`/`not-gated`), `reviews` (who reviewed, and how), `unresolved_threads`, `head_sha` |
-| `label-applied`, `label-removed` | any label change on a subscribed issue; one event per actual change | `label`, `actor` (`fabrik`, `human`, `bot`, or `unknown` when a poll saw it first — under PAT auth the operator's own login looks like Fabrik's and counts as `human`) |
+| `label-applied`, `label-removed` | any label change on a subscribed issue; one event per actual change | `label`, `actor` (`fabrik` for the engine's own writes; `overseer` for a change an overseer action made, with `via` the requesting subscriber's name; `human` or `bot` with `actor_login` the GitHub login, when a webhook named the sender; `unknown` when only a poll saw it — under PAT auth the operator's own login looks like Fabrik's and counts as `human`) |
 | `paused`, `awaiting-input`, `escalated` | the item became `needs-human` (with a question: `awaiting-input`) or `escalated` — the same classification `fabrik_board` shows | `code`, `reason` |
 | `awaiting-input-stale` | `fabrik:awaiting-input` is present but the latest run finished without `FABRIK_BLOCKED_ON_INPUT` | |
 | `stalled` | no progress past the same `--stall-threshold` the `attention` view uses (a long-running healthy worker and an expired cooldown are not stalls) | `code`, `reason`, `progress_age_seconds` |
@@ -3751,7 +3751,7 @@ A pause is reported once, as the transition into the state — not once per poll
 
 - Delivery is at-most-once to the session: there is no acknowledgement, and a half-open connection can lose up to roughly one heartbeat window of events.
 - Label events can arrive reordered in a narrow race between two concurrent applies of the same label.
-- The `actor` is `unknown` for label changes only a poll saw. Under PAT auth, a worker's own `gh` label write whose echo was missed reads as `human`.
+- The `actor` is `unknown` for label changes only a poll saw (for example a human applying a label while webhooks are unavailable); the daemon makes no extra GitHub call to find out. `via` is the self-asserted, advisory subscriber name. Under PAT auth, a worker's own `gh` label write whose echo was missed reads as `human`.
 - One incident can produce several related pushes, e.g. `paused` + `ci-timeout` + `label-applied`.
 - For a `fabrik:yolo` item, `validate-settled` is sent only once the merge (or queue move) went through; a landing that fails sends nothing, and the settle after the rebase is announced afresh.
 
