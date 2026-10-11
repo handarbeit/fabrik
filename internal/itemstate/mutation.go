@@ -113,6 +113,16 @@ func (m IssueUnlabeled) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 type IssueClosed struct {
 	Repo   string
 	Number int
+	// Sender is the GitHub login that closed the issue, from the webhook
+	// payload; empty when unknown (#2123).
+	Sender string
+	// EchoOfEngine is true when the webhook matched the engine's own echo
+	// registry, i.e. Fabrik made this close (#2123).
+	EchoOfEngine bool
+	// Local is true for the engine's own write-through after it closed the
+	// issue (CacheImpl.ApplyIssueClosed); the Change then has OriginEngine
+	// instead of OriginWebhook (#2123).
+	Local bool
 }
 
 func (IssueClosed) isMutation()       {}
@@ -185,6 +195,16 @@ type ProjectV2ItemEdited struct {
 	// ItemID is the GitHub Project item node ID (matches ItemState.ItemID).
 	ItemID    string
 	NewStatus string
+	// Sender is the GitHub login behind a webhook-delivered move; empty for a
+	// sweep- or poll-delivered one (#2123).
+	Sender string
+	// EchoOfEngine is true when the webhook matched the engine's own echo
+	// registry for this write (#2123).
+	EchoOfEngine bool
+	// Requester is the overseer subscriber recorded with the engine echo.
+	Requester string
+	// At is the GitHub time of the move when known; zero otherwise.
+	At time.Time
 }
 
 func (ProjectV2ItemEdited) isMutation() {}
@@ -251,6 +271,9 @@ type LocalStatusUpdated struct {
 	Repo      string
 	Number    int
 	NewStatus string
+	// Requester is the sanitised overseer subscriber that requested the move
+	// (#2123); empty for an engine-autonomous advance.
+	Requester string
 }
 
 func (LocalStatusUpdated) isMutation()       {}

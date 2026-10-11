@@ -96,6 +96,9 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 				Repo:           repo,
 				UpdatedAt:      pi.EffectiveUpdatedAt,
 				LinkedPRNumber: pi.LinkedPRNumber,
+				// No labels observed yet; the deep fetch below (or a later
+				// reconcile) is the baseline, not a flood of label deltas (#2123).
+				LabelsAbsent: true,
 			}
 			e.store.Apply(itemstate.IssueOpened{Item: minimal})
 			// Probe-only terminal short-circuit: closed items in a cleanup stage whose

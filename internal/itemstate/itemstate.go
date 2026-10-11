@@ -39,6 +39,11 @@ type ItemState struct {
 	IsClosed bool
 	IsPR     bool
 	Labels   []string
+	// LabelsKnown is true once a producer that actually observed labels has
+	// populated the record (#2123). A label-less record (probe bootstrap, a
+	// minimal opened item) is not baselined, so the first label-bearing
+	// population is silent instead of emitting every label as a delta.
+	LabelsKnown bool
 	// Status is the project board column ("Specify", "Implement", etc.).
 	Status string
 	// StatusEnteredAt is the time this item's Status was last observed to change
