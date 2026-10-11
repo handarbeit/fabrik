@@ -1496,6 +1496,10 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	// e.store inside the classifier would yield the already-overwritten current
 	// value, silently losing the edge. Keyed by issueKey, mirroring advancedItems.
 	priorInQueue := make(map[string]bool)
+	// Items dispatchCandidates deferred because every worker slot was busy (#2114).
+	// Nothing is recorded against them, so the defer below skips their
+	// periodic-re-eval stamp.
+	slotDeferred := make(map[string]bool)
 	defer func() {
 		// Refresh CooldownAt["periodic-re-eval"] for all non-advanced, non-cleanup
 		// deepFetchCandidates after each full poll cycle. This preserves the #488 fix:
@@ -1506,7 +1510,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		cooldown := e.githubRecheckInterval()
 		for _, item := range deepFetchCandidates {
 			iKey := issueKey(item, e.defaultRepo())
-			if advancedItems[iKey] {
+			if advancedItems[iKey] || slotDeferred[iKey] {
 				continue
 			}
 			if stage := stages.FindStage(e.cfg.Stages, item.Status); stage != nil && !stage.CleanupWorktree {
@@ -1742,7 +1746,11 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	// incorrectly pass shallow-label items (labels(first:5) only) to itemNeedsWork,
 	// which could miss stage-complete labels beyond position 5 and re-dispatch
 	// already-completed items on every poll after their updatedAt settles.
-	dispatched := e.dispatchCandidates(ctx, board, deepFetchCandidates)
+	dispatched, slotDeferredKeys := e.dispatchCandidates(ctx, board, deepFetchCandidates)
+	for _, k := range slotDeferredKeys {
+		slotDeferred[k] = true
+	}
+	e.requeueDeferredDispatch(slotDeferredKeys)
 
 	// Merge-train batch snapshot: log all items currently in the Queued column.
 	// Runs every poll cycle when merge_train: on. No dispatch, no mutation — D1 skeleton only.
@@ -1992,11 +2000,18 @@ func (e *Engine) runCatchUpPhase2(ctx context.Context, board *gh.ProjectBoard, i
 
 // dispatchCandidates checks each deep-fetch candidate against itemNeedsWork and
 // the in-flight worker guard, then dispatches a goroutine per admitted item,
-// gated on an available e.sem slot. It aborts early (without blocking further)
-// if ctx is cancelled while waiting for a slot. Returns the number of items
-// dispatched this cycle.
-func (e *Engine) dispatchCandidates(ctx context.Context, board *gh.ProjectBoard, deepFetchCandidates []gh.ProjectItem) int {
+// gated on an available e.sem slot. The slot acquire is non-blocking (#2114): the
+// poll goroutine must never wait on a worker, because everything poll() runs
+// after dispatch (train evaluation, settle scans) and the next poll would wait
+// with it. A candidate that finds every slot busy is deferred — nothing is
+// recorded against it (no WorkerEntered, cooldown, retry count or label) — and
+// its issueKey is returned so poll() can keep it eligible for the next poll. It
+// aborts early if ctx is cancelled. Returns the number of items dispatched this
+// cycle and the issueKeys deferred for lack of a slot.
+func (e *Engine) dispatchCandidates(ctx context.Context, board *gh.ProjectBoard, deepFetchCandidates []gh.ProjectItem) (int, []string) {
 	var dispatched int
+	var deferredKeys []string
+	var deferredNums []string
 
 	// R5's sentinel check (below) fetches the live process table at most once
 	// per call to dispatchCandidates, lazily on first need, and reuses it for
@@ -2012,6 +2027,9 @@ func (e *Engine) dispatchCandidates(ctx context.Context, board *gh.ProjectBoard,
 	)
 
 	for _, item := range deepFetchCandidates {
+		if ctx.Err() != nil {
+			return dispatched, deferredKeys
+		}
 		item := item
 		iKey := issueKey(item, e.defaultRepo())
 		itemRepo := itemOwnerRepoString(item, e.defaultRepo())
@@ -2070,12 +2088,15 @@ func (e *Engine) dispatchCandidates(ctx context.Context, board *gh.ProjectBoard,
 				continue
 			}
 		}
-		// Acquire semaphore slot, but abort if the context is cancelled so we
-		// don't block indefinitely when all slots are taken at shutdown time.
+		// Acquire a semaphore slot without blocking (#2114). With every slot busy
+		// the candidate is deferred and the loop carries on; ctx cancellation is
+		// checked at the top of each iteration.
 		select {
 		case e.sem <- struct{}{}:
-		case <-ctx.Done():
-			return dispatched
+		default:
+			deferredKeys = append(deferredKeys, iKey)
+			deferredNums = append(deferredNums, fmt.Sprintf("#%d", item.Number))
+			continue
 		}
 		startTime := time.Now()
 		// Apply WorkerEntered synchronously before the goroutine starts so that
@@ -2131,7 +2152,29 @@ func (e *Engine) dispatchCandidates(ctx context.Context, board *gh.ProjectBoard,
 		}(issueCtx, issueCancel, iKey, issueHolder)
 	}
 
-	return dispatched
+	if len(deferredKeys) > 0 {
+		e.logf(0, "poll", "deferred dispatch of %d candidate(s) %s: all worker slots busy (%d/%d in use)\n",
+			len(deferredKeys), strings.Join(deferredNums, ", "), len(e.sem), cap(e.sem))
+	}
+	return dispatched, deferredKeys
+}
+
+// requeueDeferredDispatch re-adds issueKeys to e.mayNeedWork so the next poll
+// admits them through cycleSet, bypassing any cooldown. It writes the set
+// directly rather than through store.Apply so it triggers no wake (a self-induced
+// wake loop). Used for candidates deferred because every worker slot was busy
+// (#2114): the WorkerExited wake that follows a slot release carries only
+// WorkerLifecycleChanged, which cycleSetFlags excludes (ADR-039), so without this
+// the deferred item would sit behind its cooldown until an unrelated change.
+func (e *Engine) requeueDeferredDispatch(keys []string) {
+	if len(keys) == 0 {
+		return
+	}
+	e.mayNeedWorkMu.Lock()
+	defer e.mayNeedWorkMu.Unlock()
+	for _, k := range keys {
+		e.mayNeedWork[k] = true
+	}
 }
 
 // consumeExpiredCooldowns deletes the item's expired cooldown entries once poll

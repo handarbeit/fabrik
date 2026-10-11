@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -130,7 +131,7 @@ func TestDispatchCandidates_DispatchesEligibleItem(t *testing.T) {
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{Number: 3, Title: "Test", Status: "Research"}
 
-	dispatched := eng.dispatchCandidates(context.Background(), board, []gh.ProjectItem{item})
+	dispatched, _ := eng.dispatchCandidates(context.Background(), board, []gh.ProjectItem{item})
 	eng.wg.Wait()
 
 	if dispatched != 1 {
@@ -153,7 +154,7 @@ func TestDispatchCandidates_SkipsInFlightWorker(t *testing.T) {
 		StartedAt: time.Now(),
 	})
 
-	dispatched := eng.dispatchCandidates(context.Background(), board, []gh.ProjectItem{item})
+	dispatched, _ := eng.dispatchCandidates(context.Background(), board, []gh.ProjectItem{item})
 
 	if dispatched != 0 {
 		t.Errorf("dispatched = %d, want 0 (item already has an in-flight worker)", dispatched)
@@ -186,7 +187,7 @@ func TestDispatchCandidates_RefusesLiveSentinelAfterClear(t *testing.T) {
 	wantSentinel := sessionNameSentinel(itemOwnerRepoString(item, eng.defaultRepo()), item.Number, "Research")
 	withProcessListProbe(t, true, []procArgvEntry{{PID: 55555, Argv: []string{"--name", wantSentinel}}}, nil)
 
-	dispatched := eng.dispatchCandidates(context.Background(), board, []gh.ProjectItem{item})
+	dispatched, _ := eng.dispatchCandidates(context.Background(), board, []gh.ProjectItem{item})
 	eng.wg.Wait()
 
 	if dispatched != 0 {
@@ -211,7 +212,7 @@ func TestDispatchCandidates_DispatchesWhenSentinelNotFound(t *testing.T) {
 
 	withProcessListProbe(t, true, nil, nil)
 
-	dispatched := eng.dispatchCandidates(context.Background(), board, []gh.ProjectItem{item})
+	dispatched, _ := eng.dispatchCandidates(context.Background(), board, []gh.ProjectItem{item})
 	eng.wg.Wait()
 
 	if dispatched != 1 {
@@ -234,7 +235,7 @@ func TestDispatchCandidates_DispatchesOnProbeError(t *testing.T) {
 
 	withProcessListProbe(t, true, nil, errSentinelProbeUnsupported)
 
-	dispatched := eng.dispatchCandidates(context.Background(), board, []gh.ProjectItem{item})
+	dispatched, _ := eng.dispatchCandidates(context.Background(), board, []gh.ProjectItem{item})
 	eng.wg.Wait()
 
 	if dispatched != 1 {
@@ -275,7 +276,7 @@ func TestDispatchCandidates_BatchesProcessListFetchAcrossCandidates(t *testing.T
 		listProcessArgvFn = origFn
 	})
 
-	dispatched := eng.dispatchCandidates(context.Background(), board, items)
+	dispatched, _ := eng.dispatchCandidates(context.Background(), board, items)
 	eng.wg.Wait()
 
 	if dispatched != 3 {
@@ -319,7 +320,7 @@ func TestDispatchCandidates_SkipsProcessListFetchWhenNoCandidatesNeedIt(t *testi
 		listProcessArgvFn = origFn
 	})
 
-	dispatched := eng.dispatchCandidates(context.Background(), board, []gh.ProjectItem{item})
+	dispatched, _ := eng.dispatchCandidates(context.Background(), board, []gh.ProjectItem{item})
 	eng.wg.Wait()
 
 	if dispatched != 0 {
@@ -327,5 +328,153 @@ func TestDispatchCandidates_SkipsProcessListFetchWhenNoCandidatesNeedIt(t *testi
 	}
 	if fetchCount != 0 {
 		t.Errorf("listProcessArgvFn called %d time(s), want 0 (no candidate reached the R5 check)", fetchCount)
+	}
+}
+
+// fullSemEngine returns a test engine whose worker semaphore has every slot held.
+func fullSemEngine(t *testing.T, client *mockGitHubClient, slots int) *Engine {
+	t.Helper()
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	eng.cfg.MaxConcurrent = slots
+	eng.sem = make(chan struct{}, slots)
+	for i := 0; i < slots; i++ {
+		eng.sem <- struct{}{}
+	}
+	return eng
+}
+
+// TestDispatchCandidates_FullSemaphore_DefersWithoutBlocking is the #2114 R1
+// regression: with every slot held, dispatchCandidates must return promptly
+// (the old blocking acquire never returned), dispatch nothing, and report the
+// deferred keys. It fails (times out) against the blocking acquire.
+func TestDispatchCandidates_FullSemaphore_DefersWithoutBlocking(t *testing.T) {
+	withProcessListProbe(t, false, nil, nil)
+	client := &mockGitHubClient{}
+	eng := fullSemEngine(t, client, 2)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	items := []gh.ProjectItem{
+		{Number: 31, Title: "A", Status: "Research"},
+		{Number: 32, Title: "B", Status: "Research"},
+	}
+
+	type result struct {
+		dispatched int
+		deferred   []string
+	}
+	var res result
+	var timedOut bool
+	out := captureStdout(func() {
+		done := make(chan result, 1)
+		go func() {
+			d, def := eng.dispatchCandidates(context.Background(), board, items)
+			done <- result{d, def}
+		}()
+		select {
+		case res = <-done:
+		case <-time.After(5 * time.Second):
+			timedOut = true
+		}
+	})
+	if timedOut {
+		t.Fatal("dispatchCandidates blocked on a full worker semaphore")
+	}
+
+	if res.dispatched != 0 {
+		t.Errorf("dispatched = %d, want 0", res.dispatched)
+	}
+	want := []string{issueKey(items[0], eng.defaultRepo()), issueKey(items[1], eng.defaultRepo())}
+	if len(res.deferred) != 2 || res.deferred[0] != want[0] || res.deferred[1] != want[1] {
+		t.Errorf("deferred = %v, want %v", res.deferred, want)
+	}
+	if n := strings.Count(out, "deferred dispatch"); n != 1 {
+		t.Errorf("deferral log line appeared %d times, want exactly 1; output:\n%s", n, out)
+	}
+	if !strings.Contains(out, "#31, #32") || !strings.Contains(out, "(2/2 in use)") {
+		t.Errorf("deferral log line should name the issues and in_use/max; got:\n%s", out)
+	}
+
+	// No side effects against the deferred items.
+	for _, it := range items {
+		snap, err := eng.store.Get(itemOwnerRepoString(it, eng.defaultRepo()), it.Number)
+		if err != nil {
+			continue
+		}
+		if snap.Worker() != nil {
+			t.Errorf("#%d: deferred item must not have a worker entry", it.Number)
+		}
+		if !snap.LastAttemptAt("Research").IsZero() {
+			t.Errorf("#%d: deferred item must have no LastAttemptAt", it.Number)
+		}
+		if snap.HasActiveCooldown(eng.now()) {
+			t.Errorf("#%d: deferred item must have no cooldown", it.Number)
+		}
+	}
+	client.mu.Lock()
+	labelCalls := len(client.addLabelCalls)
+	client.mu.Unlock()
+	if labelCalls != 0 {
+		t.Errorf("AddLabelToIssue called %d times for deferred items, want 0", labelCalls)
+	}
+	if len(eng.sem) != 2 {
+		t.Errorf("sem occupancy = %d, want 2 (deferral must not take a slot)", len(eng.sem))
+	}
+}
+
+// TestDispatchCandidates_PartialSemaphore_DefersOverflow: with one free slot the
+// first candidate dispatches and the rest are deferred; guard-skipped candidates
+// in between cost nothing extra.
+func TestDispatchCandidates_PartialSemaphore_DefersOverflow(t *testing.T) {
+	withProcessListProbe(t, false, nil, nil)
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+	eng.cfg.MaxConcurrent = 2
+	eng.sem = make(chan struct{}, 2)
+	eng.sem <- struct{}{} // one slot busy
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	items := []gh.ProjectItem{
+		{Number: 41, Title: "A", Status: "Research"},
+		{Number: 42, Title: "B", Status: "Research"},
+		{Number: 43, Title: "C", Status: "Research"},
+	}
+	dispatched, deferred := eng.dispatchCandidates(context.Background(), board, items)
+	eng.wg.Wait()
+
+	if dispatched != 1 {
+		t.Errorf("dispatched = %d, want 1", dispatched)
+	}
+	if len(deferred) != 2 {
+		t.Errorf("deferred = %v, want 2 keys", deferred)
+	}
+}
+
+// TestDispatchCandidates_CancelledContextReturnsEarly: with the blocking select
+// gone, ctx cancellation must still abort the loop.
+func TestDispatchCandidates_CancelledContextReturnsEarly(t *testing.T) {
+	withProcessListProbe(t, false, nil, nil)
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+	eng.cfg.MaxConcurrent = 2
+	eng.sem = make(chan struct{}, 2)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	dispatched, deferred := eng.dispatchCandidates(ctx, board, []gh.ProjectItem{{Number: 51, Title: "A", Status: "Research"}})
+	eng.wg.Wait()
+
+	if dispatched != 0 || len(deferred) != 0 {
+		t.Errorf("cancelled ctx: dispatched=%d deferred=%v, want 0 and none", dispatched, deferred)
+	}
+}
+
+func TestRequeueDeferredDispatch_AddsKeysWithoutWake(t *testing.T) {
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+	eng.requeueDeferredDispatch(nil)
+	eng.requeueDeferredDispatch([]string{"o/r#7", "o/r#8"})
+
+	eng.mayNeedWorkMu.Lock()
+	defer eng.mayNeedWorkMu.Unlock()
+	if !eng.mayNeedWork["o/r#7"] || !eng.mayNeedWork["o/r#8"] {
+		t.Errorf("mayNeedWork = %v, want both keys", eng.mayNeedWork)
 	}
 }
