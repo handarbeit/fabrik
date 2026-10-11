@@ -221,8 +221,9 @@ func TestAdmission_PausedBackstopFetchesOncePerBaseline(t *testing.T) {
 		t.Fatalf("20 polls after a fresh self-write: %d backstop fetches, want 1", got)
 	}
 	// A failed fetch must not be recorded as served for the new baseline. (The
-	// retry itself is then paced by the engine's own deep-fetch failure back-off in
-	// itemMayNeedWork, which is unchanged.)
+	// retry is not the next poll: admission consumed the expiry and re-armed
+	// periodic-re-eval, so it comes at the next periodic admission, about
+	// githubRecheckInterval later, or sooner on an observer-driven change.)
 	eng.store.Apply(itemstate.SelfWriteObserved{Repo: cooldownTestRepo, Number: 75})
 	snap, _ := eng.store.Get(cooldownTestRepo, 75)
 	newBaseline := snap.State().LastSeenSourceUpdatedAt
@@ -307,5 +308,93 @@ func TestRunCatchUpPhase2_FailedAdvanceIsNotMarkedAdvanced(t *testing.T) {
 	}
 	if advanced["owner/repo#1"] {
 		t.Error("a failed advance was marked advanced, so the poll defer would skip the periodic re-arm and nothing would retry it")
+	}
+}
+
+// Review follow-up (#2096): a stage that exits incomplete leaves LastAttemptAt
+// inside stageRetryBackoff, which records no cooldown of its own. dispatchCandidates
+// records "retry-backoff" for the remaining wait, so the expiry re-admits the item
+// once, rather than leaving it to the periodic re-evaluation (10 x PollSeconds).
+func TestAdmission_RetryBackoffExpiryReadmitsOnce(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng, start := cooldownAdmissionEngine(t, client)
+	eng.cfg.PollSeconds = 180
+	eng.cfg.RetryBackoff = 60 * time.Second
+	item := gh.ProjectItem{Number: 76, Title: "Item", Status: "Research"}
+	// An incomplete attempt 50s ago (LastAttemptAt is wall-clock): ~10s of backoff left.
+	eng.store.Apply(itemstate.StageAttempted{Repo: cooldownTestRepo, Number: 76, StageName: "Research", At: time.Now().Add(-50 * time.Second)})
+	// The poll's own re-arm, as the defer would stamp it after the dispatch poll.
+	eng.store.Apply(itemstate.CooldownRecorded{Repo: cooldownTestRepo, Number: 76, Reason: "periodic-re-eval", Until: start.Add(eng.githubRecheckInterval())})
+
+	board := cooldownAdmissionBoard(item)
+	// The poll after the worker exits: admitted (label churn), refused by the backoff.
+	if n := eng.dispatchCandidates(context.Background(), board, []gh.ProjectItem{item}); n != 0 {
+		t.Fatalf("dispatched %d item(s) inside the retry backoff, want 0", n)
+	}
+	snap, _ := eng.store.Get(cooldownTestRepo, 76)
+	until := snap.CooldownAt("retry-backoff")
+	if remaining := until.Sub(start); remaining <= 0 || remaining > 11*time.Second {
+		t.Fatalf("retry-backoff cooldown = start+%v, want the ~10s left of the backoff", remaining)
+	}
+
+	poll := func() int {
+		before := fetchCount(client)
+		eng.selectDeepFetchCandidates(board, "", map[string]bool{}, map[string]bool{})
+		return fetchCount(client) - before
+	}
+	eng.SetClock(stubClock{t: until.Add(-time.Second)})
+	if got := poll(); got != 0 {
+		t.Fatalf("before the backoff ends: %d fetch(es), want 0", got)
+	}
+	// First poll after LastAttemptAt + backoff: re-admitted, far inside the periodic interval.
+	eng.SetClock(stubClock{t: until})
+	if got := poll(); got != 1 {
+		t.Fatalf("first poll after the backoff: %d fetch(es), want 1", got)
+	}
+	if until.Sub(start) >= eng.githubRecheckInterval() {
+		t.Fatal("test setup: backoff must be shorter than the periodic interval")
+	}
+	eng.SetClock(stubClock{t: until.Add(time.Minute)})
+	if got := poll(); got != 0 {
+		t.Fatalf("after the expiry was used: %d fetch(es), want 0 (consumed once)", got)
+	}
+}
+
+// A refusal for any other reason records no retry-backoff cooldown.
+func TestAdmission_NoRetryBackoffCooldownWithoutAttempt(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng, _ := cooldownAdmissionEngine(t, client)
+	eng.cfg.RetryBackoff = 60 * time.Second
+	item := gh.ProjectItem{Number: 77, Title: "Item", Status: "Research", Labels: []string{"stage:Research:complete"}}
+	eng.store.Apply(itemstate.ItemDeepFetched{Repo: cooldownTestRepo, Number: 77, FreshState: item})
+	eng.dispatchCandidates(context.Background(), cooldownAdmissionBoard(item), []gh.ProjectItem{item})
+	snap, _ := eng.store.Get(cooldownTestRepo, 77)
+	if got := snap.CooldownAt("retry-backoff"); !got.IsZero() {
+		t.Errorf("retry-backoff recorded for an item not in backoff: %v", got)
+	}
+}
+
+// Review follow-up (#2096): dispatch refused because a cleared worker's process is
+// still alive records a one-poll cooldown, so it is re-checked next poll.
+func TestAdmission_SentinelLiveRefusalRecordsCooldown(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng, start := cooldownAdmissionEngine(t, client)
+	item := gh.ProjectItem{Number: 78, Title: "Item", Status: "Research"}
+
+	origSupported, origList := claudeNameFlagSupported, listProcessArgvFn
+	t.Cleanup(func() { claudeNameFlagSupported, listProcessArgvFn = origSupported, origList })
+	claudeNameFlagSupported = true
+	sentinel := sessionNameSentinel(cooldownTestRepo, 78, "Research")
+	listProcessArgvFn = func() ([]procArgvEntry, error) {
+		return []procArgvEntry{{PID: 4242, Argv: []string{"claude", sentinel}}}, nil
+	}
+
+	if n := eng.dispatchCandidates(context.Background(), cooldownAdmissionBoard(item), []gh.ProjectItem{item}); n != 0 {
+		t.Fatalf("dispatched %d item(s) with a live sentinel, want 0", n)
+	}
+	snap, _ := eng.store.Get(cooldownTestRepo, 78)
+	want := start.Add(eng.mergeGateRecheckInterval())
+	if got := snap.CooldownAt("sentinel-live"); !got.Equal(want) {
+		t.Errorf("sentinel-live cooldown = %v, want %v", got, want)
 	}
 }

@@ -2001,7 +2001,9 @@ func (e *Engine) dispatchCandidates(ctx context.Context, board *gh.ProjectBoard,
 		iKey := issueKey(item, e.defaultRepo())
 		itemRepo := itemOwnerRepoString(item, e.defaultRepo())
 		// Full check including comments (populated by deep fetch above).
-		if !e.itemNeedsWork(item) {
+		needs, retryIn := e.itemNeedsWorkRetryAt(item)
+		if !needs {
+			e.recordRetryBackoffCooldown(item, retryIn)
 			continue
 		}
 		// Capture stage name up front — both the Worker() != nil guard below (R5)
@@ -2049,6 +2051,7 @@ func (e *Engine) dispatchCandidates(ctx context.Context, board *gh.ProjectBoard,
 			}
 			if result.Err == nil && result.Live {
 				e.logf(item.Number, "worker-liveness", "refusing dispatch: sentinel %q still live for a cleared worker\n", sentinel)
+				e.recordSentinelLiveCooldown(item)
 				continue
 			}
 		}
@@ -2134,6 +2137,42 @@ func (e *Engine) consumeExpiredCooldowns(repo string, item gh.ProjectItem, snap 
 	}
 	e.store.Apply(itemstate.ExpiredCooldownsConsumed{Repo: repo, Number: item.Number, Now: now})
 	return true
+}
+
+// recordRetryBackoffCooldown makes the expiry of a stage retry backoff (ADR 1831)
+// re-admit the item (#2096, ADR 2096). retryIn is the remaining wait reported by
+// itemNeedsWorkRetryAt; zero means the item was refused for some other reason and
+// nothing is recorded. The backoff itself records no cooldown, and consumed
+// expiries no longer re-admit an item by accident, so without this a stage that
+// exits incomplete inside the backoff window waits out the periodic re-evaluation
+// (10 x PollSeconds) instead of retrying at the next poll after the backoff.
+//
+// LastAttemptAt is wall-clock (time.Now), the cooldown map is on e.now(); the
+// remaining duration, not an absolute instant, is carried across the two domains.
+func (e *Engine) recordRetryBackoffCooldown(item gh.ProjectItem, retryIn time.Duration) {
+	if retryIn <= 0 {
+		return
+	}
+	e.store.Apply(itemstate.CooldownRecorded{
+		Repo:   itemOwnerRepoString(item, e.defaultRepo()),
+		Number: item.Number,
+		Reason: "retry-backoff",
+		Until:  e.now().Add(retryIn),
+	})
+}
+
+// recordSentinelLiveCooldown re-checks, on the next poll, an item whose dispatch
+// was refused because a cleared worker's process is still alive (R5, #1779). The
+// refusal has no deadline to anchor on, so the cooldown is one poll interval
+// (mergeGateRecheckInterval); the entry is consumed on that admission, so it
+// repeats once per poll only while the process is alive.
+func (e *Engine) recordSentinelLiveCooldown(item gh.ProjectItem) {
+	e.store.Apply(itemstate.CooldownRecorded{
+		Repo:   itemOwnerRepoString(item, e.defaultRepo()),
+		Number: item.Number,
+		Reason: "sentinel-live",
+		Until:  e.now().Add(e.mergeGateRecheckInterval()),
+	})
 }
 
 // rearmPeriodicReEval re-stamps the periodic re-evaluation cooldown for an item
