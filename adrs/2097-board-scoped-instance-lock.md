@@ -16,6 +16,7 @@ Report #1980: two engines processed one board for about 56 hours despite the flo
 4. **R2.** Refuse when `fabrikDir` (symlinks resolved) has a `.fabrik`/`worktrees` component pair.
 5. **R3.** `doPollCycle` verifies both locks (fstat vs stat dev+inode, recorded pid == own pid) before each poll, silently on success. On loss it stops, logs loudly, and `Run()` returns an error. `drainAndExit` skips `cleanupLockedIssues` because in PAT mode the other engine may legitimately hold `fabrik:locked:<user>`. It is not in `poll()`/`PollOnce` (ADR-1449).
 6. **Re-exec.** Same as the directory lock: SIGHUP releases explicitly before exec, self-upgrade relies on close-on-exec, `Run()` re-acquires. No retry window: whoever wins the flock after the gap keeps it and the loser exits. The pid is stable across exec.
+6a. **Inconclusive verification.** `heldLock.verify` separates a definitive loss (path `ENOENT`, dev/inode mismatch, foreign pid, empty or unparseable record: fatal at once) from an inconclusive check (any other `fstat`/`stat`/read error, e.g. transient `EIO`/`ESTALE` on a network or flaky mount: warned and tolerated). `maxInconclusiveVerifies` (3) consecutive inconclusive results of one lock are a loss; a clean verify resets the count. `acquireDirLock` returns a failed pid write at acquire time so startup fails with the real cause.
 7. **R4.** The harness comments no longer claim an unlink and the stale-lock skip text tells the operator to check the pid first.
 
 ## Consequences

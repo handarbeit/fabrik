@@ -221,6 +221,8 @@ func (e *Engine) Run() error {
 		return err
 	}
 	defer locks.Release()
+	// Tolerated (inconclusive) verification failures go to the engine log.
+	locks.warnf = func(format string, args ...any) { e.logf(0, "warn", format+"\n", args...) }
 
 	// Open the persistent poll log file (#2094). The previous run's log is
 	// rotated to fabrik.log.1 … fabrik.log.N first, so the file always holds

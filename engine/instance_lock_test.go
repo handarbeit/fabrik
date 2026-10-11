@@ -1,10 +1,13 @@
 package engine
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -253,9 +256,28 @@ func TestRun_LostLockStopsEngine(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- eng.Run() }()
 
-	// Wait for the first poll to have happened, then swap the directory lock.
+	// Wait, against a bounded deadline, until Run() owns fabrik.lock (the file
+	// exists and records this process's pid) and has completed a poll. Swapping
+	// earlier would either fail to remove a file Run() has not created yet, or let
+	// Run() open and lock the test's replacement, in which case nothing is lost.
 	lockPath := filepath.Join(dirA, ".fabrik", "fabrik.lock")
-	time.Sleep(300 * time.Millisecond)
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		b, err := os.ReadFile(lockPath)
+		owned := err == nil && strings.TrimSpace(string(b)) == strconv.Itoa(os.Getpid())
+		if owned && !eng.health.snapshot().PollSuccessAt.IsZero() {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("Run() returned before the lock was swapped: %v", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("engine never took its lock and completed a poll")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	if err := os.Remove(lockPath); err != nil {
 		t.Fatalf("remove lock: %v", err)
 	}
@@ -289,4 +311,156 @@ func TestVerify_LongDirRecordIsNotTruncated(t *testing.T) {
 	if err := (&instanceLocks{board: l}).Verify(); err != nil {
 		t.Errorf("long-dir board record must verify, got %v", err)
 	}
+}
+
+// verifyHarness acquires real locks and returns them with the board lock's
+// verify seams ready to override and a collector for tolerated-failure warnings.
+func verifyHarness(t *testing.T) (*instanceLocks, *[]string) {
+	t.Helper()
+	dirA, _ := lockTestDirs(t)
+	l, err := acquireInstanceLocks(boardCfg("acme", 7), dirA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(l.Release)
+	var warnings []string
+	l.warnf = func(format string, args ...any) { warnings = append(warnings, fmt.Sprintf(format, args...)) }
+	return l, &warnings
+}
+
+// Definitive losses are fatal on the first verification, whatever the count.
+func TestVerify_DefinitiveLossesAreFatalImmediately(t *testing.T) {
+	cases := map[string]func(h *heldLock){
+		"path ENOENT": func(h *heldLock) {
+			h.statFn = func(string) (lockFileID, error) {
+				return lockFileID{}, &os.PathError{Op: "stat", Path: h.path, Err: syscall.ENOENT}
+			}
+		},
+		"inode mismatch": func(h *heldLock) {
+			h.statFn = func(string) (lockFileID, error) { return lockFileID{dev: 1, ino: 2}, nil }
+			h.fstatFn = func(*os.File) (lockFileID, error) { return lockFileID{dev: 1, ino: 3}, nil }
+		},
+		"foreign pid": func(h *heldLock) {
+			h.readFn = func(*os.File) ([]byte, error) { return []byte("1234567\n"), nil }
+		},
+		"empty record": func(h *heldLock) {
+			h.readFn = func(*os.File) ([]byte, error) { return nil, nil }
+		},
+		"unparseable record": func(h *heldLock) {
+			h.readFn = func(*os.File) ([]byte, error) { return []byte("{not json"), nil }
+		},
+	}
+	for name, inject := range cases {
+		t.Run(name, func(t *testing.T) {
+			l, warnings := verifyHarness(t)
+			inject(l.board)
+			err := l.Verify()
+			if err == nil {
+				t.Fatal("a definitive loss must be fatal on the first verification")
+			}
+			var inc *inconclusiveVerifyError
+			if errors.As(err, &inc) {
+				t.Errorf("definitive loss was classified inconclusive: %v", err)
+			}
+			if len(*warnings) != 0 {
+				t.Errorf("a definitive loss must not be downgraded to a warning: %v", *warnings)
+			}
+		})
+	}
+}
+
+// Every other stat/read error is inconclusive: tolerated with a warning until
+// maxInconclusiveVerifies consecutive ones, then a loss.
+func TestVerify_InconclusiveErrorsAreTolerated(t *testing.T) {
+	cases := map[string]func(h *heldLock, err error){
+		"fstat": func(h *heldLock, err error) {
+			h.fstatFn = func(*os.File) (lockFileID, error) { return lockFileID{}, err }
+		},
+		"stat": func(h *heldLock, err error) {
+			h.statFn = func(string) (lockFileID, error) { return lockFileID{}, err }
+		},
+		"read": func(h *heldLock, err error) {
+			h.readFn = func(*os.File) ([]byte, error) { return nil, err }
+		},
+	}
+	errnos := []syscall.Errno{syscall.EIO, syscall.ESTALE, syscall.EACCES, syscall.EINTR}
+	for name, inject := range cases {
+		for _, errno := range errnos {
+			t.Run(name+"/"+errno.Error(), func(t *testing.T) {
+				l, warnings := verifyHarness(t)
+				inject(l.board, errno)
+				for i := 1; i < maxInconclusiveVerifies; i++ {
+					if err := l.Verify(); err != nil {
+						t.Fatalf("inconclusive verification %d must be tolerated, got %v", i, err)
+					}
+				}
+				if got := len(*warnings); got != maxInconclusiveVerifies-1 {
+					t.Errorf("want %d warnings, got %d: %v", maxInconclusiveVerifies-1, got, *warnings)
+				}
+				err := l.Verify()
+				if err == nil {
+					t.Fatalf("%d consecutive inconclusive verifications must be a loss", maxInconclusiveVerifies)
+				}
+				if !errors.Is(err, errno) {
+					t.Errorf("the loss must carry the underlying error, got %v", err)
+				}
+			})
+		}
+	}
+}
+
+// A clean verification resets the consecutive count.
+func TestVerify_CleanVerifyResetsInconclusiveCount(t *testing.T) {
+	l, _ := verifyHarness(t)
+	fail := true
+	l.board.statFn = func(path string) (lockFileID, error) {
+		if fail {
+			return lockFileID{}, syscall.EIO
+		}
+		var st syscall.Stat_t
+		if err := syscall.Stat(path, &st); err != nil {
+			return lockFileID{}, err
+		}
+		return lockFileID{dev: uint64(st.Dev), ino: uint64(st.Ino)}, nil //nolint:unconvert // platform widths
+	}
+	for round := 0; round < 3; round++ {
+		fail = true
+		for i := 1; i < maxInconclusiveVerifies; i++ {
+			if err := l.Verify(); err != nil {
+				t.Fatalf("round %d: tolerated failure %d returned %v", round, i, err)
+			}
+		}
+		fail = false
+		if err := l.Verify(); err != nil {
+			t.Fatalf("round %d: clean verify returned %v", round, err)
+		}
+		if l.board.inconclusive != 0 {
+			t.Fatalf("round %d: count not reset (%d)", round, l.board.inconclusive)
+		}
+	}
+}
+
+// A failed pid write must fail startup with the real cause, not surface at the
+// first poll as a lost lock.
+func TestAcquireDirLock_WriteFailureIsReturned(t *testing.T) {
+	dirA, _ := lockTestDirs(t)
+	orig := writeDirLockRecord
+	writeDirLockRecord = func(*os.File) error { return syscall.ENOSPC }
+	t.Cleanup(func() { writeDirLockRecord = orig })
+
+	h, err := acquireDirLock(dirA)
+	if err == nil {
+		(&instanceLocks{dir: h}).Release()
+		t.Fatal("a failed pid write must be an acquire error")
+	}
+	if !errors.Is(err, syscall.ENOSPC) {
+		t.Errorf("error must carry the real cause, got %v", err)
+	}
+	// The flock must not be left held by the failed acquire.
+	writeDirLockRecord = orig
+	again, err := acquireDirLock(dirA)
+	if err != nil {
+		t.Fatalf("failed acquire left the directory lock held: %v", err)
+	}
+	(&instanceLocks{dir: again}).Release()
 }

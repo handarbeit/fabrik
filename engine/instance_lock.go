@@ -56,17 +56,54 @@ type boardRecord struct {
 	Started string `json:"started,omitempty"`
 }
 
+// maxInconclusiveVerifies is how many consecutive inconclusive verifications
+// (a stat/read error that does not prove the lock was lost, e.g. a momentary
+// EIO/ESTALE on a network or flaky mount) are tolerated before the lock is
+// treated as lost. A clean verification resets the count.
+const maxInconclusiveVerifies = 3
+
+// lockFileID identifies a file by device and inode.
+type lockFileID struct{ dev, ino uint64 }
+
+// inconclusiveVerifyError marks a verification failure that does not prove the
+// lock was lost: the stat or read itself failed for a reason other than "the
+// path is gone". Every other verify error is a definitive loss.
+type inconclusiveVerifyError struct{ err error }
+
+func (e *inconclusiveVerifyError) Error() string { return e.err.Error() }
+func (e *inconclusiveVerifyError) Unwrap() error { return e.err }
+
 // heldLock is one flock held for the lifetime of Run().
 type heldLock struct {
 	name string // "directory lock" / "board lock", for messages
 	path string
 	f    *os.File
+
+	// inconclusive counts consecutive inconclusive verifications.
+	inconclusive int
+
+	// Test seams for verify; nil means the real syscall / read.
+	fstatFn func(f *os.File) (lockFileID, error)
+	statFn  func(path string) (lockFileID, error)
+	readFn  func(f *os.File) ([]byte, error)
 }
 
 // instanceLocks is the pair of locks an engine holds.
 type instanceLocks struct {
 	dir   *heldLock
 	board *heldLock
+
+	// warnf reports a tolerated (inconclusive) verification failure. Nil writes
+	// to stderr.
+	warnf func(format string, args ...any)
+}
+
+func (l *instanceLocks) warn(format string, args ...any) {
+	if l.warnf != nil {
+		l.warnf(format, args...)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "warning: "+format+"\n", args...)
 }
 
 // Release unlocks and closes both locks. Idempotent and nil-safe.
@@ -87,8 +124,15 @@ func (l *instanceLocks) Release() {
 
 // Verify checks, for each held lock, that the file at its path is still the one
 // we hold locked (device+inode of the fd against the path) and that the recorded
-// pid is still our own. It logs nothing; the caller reports a failure. Cost is
-// two stats and one small read per lock.
+// pid is still our own. Cost is two stats and one small read per lock. It logs
+// nothing on success; the caller reports a failure.
+//
+// Failures are classified. A definitive loss (the path is gone, the inode
+// differs, the record names another pid or is empty/unparseable) is returned at
+// once. Any other stat/read error is inconclusive: it is warned about and the
+// lock is treated as still held, and only maxInconclusiveVerifies consecutive
+// inconclusive results are returned as a loss. A clean verification resets the
+// count.
 func (l *instanceLocks) Verify() error {
 	if l == nil {
 		return nil
@@ -97,32 +141,80 @@ func (l *instanceLocks) Verify() error {
 		if h == nil {
 			continue
 		}
-		if err := h.verify(); err != nil {
+		err := h.verify()
+		if err == nil {
+			h.inconclusive = 0
+			continue
+		}
+		var inc *inconclusiveVerifyError
+		if !errors.As(err, &inc) {
 			return fmt.Errorf("%s (%s): %w", h.name, h.path, err)
 		}
+		h.inconclusive++
+		if h.inconclusive >= maxInconclusiveVerifies {
+			return fmt.Errorf("%s (%s): %d consecutive inconclusive verifications, last: %w",
+				h.name, h.path, h.inconclusive, err)
+		}
+		l.warn("%s (%s): could not verify (%d/%d tolerated): %v",
+			h.name, h.path, h.inconclusive, maxInconclusiveVerifies-1, err)
 	}
 	return nil
 }
 
+func (h *heldLock) fileID() (lockFileID, error) {
+	if h.fstatFn != nil {
+		return h.fstatFn(h.f)
+	}
+	var st syscall.Stat_t
+	if err := syscall.Fstat(int(h.f.Fd()), &st); err != nil {
+		return lockFileID{}, err
+	}
+	return lockFileID{dev: uint64(st.Dev), ino: uint64(st.Ino)}, nil //nolint:unconvert // Dev/Ino widths differ by platform
+}
+
+func (h *heldLock) pathID() (lockFileID, error) {
+	if h.statFn != nil {
+		return h.statFn(h.path)
+	}
+	var st syscall.Stat_t
+	if err := syscall.Stat(h.path, &st); err != nil {
+		return lockFileID{}, err
+	}
+	return lockFileID{dev: uint64(st.Dev), ino: uint64(st.Ino)}, nil //nolint:unconvert // Dev/Ino widths differ by platform
+}
+
+func (h *heldLock) readRecord() ([]byte, error) {
+	if h.readFn != nil {
+		return h.readFn(h.f)
+	}
+	// Read the whole record (bounded): the board record embeds the directory path
+	// and its JSON escaping, and a truncated record would read as a false lost lock.
+	return io.ReadAll(io.NewSectionReader(h.f, 0, maxLockRecordBytes))
+}
+
+// verify returns nil, an *inconclusiveVerifyError (the check itself failed and
+// proves nothing), or any other error (a definitive loss).
 func (h *heldLock) verify() error {
 	if h.f == nil {
 		return errors.New("lock is no longer held")
 	}
-	var fdSt, pathSt syscall.Stat_t
-	if err := syscall.Fstat(int(h.f.Fd()), &fdSt); err != nil {
-		return fmt.Errorf("fstat: %w", err)
+	fdID, err := h.fileID()
+	if err != nil {
+		return &inconclusiveVerifyError{fmt.Errorf("fstat: %w", err)}
 	}
-	if err := syscall.Stat(h.path, &pathSt); err != nil {
-		return fmt.Errorf("lock file is gone or unreadable: %w", err)
+	pathID, err := h.pathID()
+	if err != nil {
+		if errors.Is(err, syscall.ENOENT) {
+			return fmt.Errorf("lock file is gone: %w", err)
+		}
+		return &inconclusiveVerifyError{fmt.Errorf("stat: %w", err)}
 	}
-	if uint64(fdSt.Dev) != uint64(pathSt.Dev) || uint64(fdSt.Ino) != uint64(pathSt.Ino) { //nolint:unconvert // Dev/Ino widths differ by platform
+	if fdID != pathID {
 		return errors.New("lock file was replaced by a different file")
 	}
-	// Read the whole record (bounded): the board record embeds the directory path
-	// and its JSON escaping, and a truncated record would read as a false lost lock.
-	rec, err := io.ReadAll(io.NewSectionReader(h.f, 0, maxLockRecordBytes))
+	rec, err := h.readRecord()
 	if err != nil {
-		return fmt.Errorf("could not read lock record: %w", err)
+		return &inconclusiveVerifyError{fmt.Errorf("could not read lock record: %w", err)}
 	}
 	pid, perr := parseLockPID(rec)
 	if perr != nil {
@@ -186,11 +278,24 @@ func acquireDirLock(fabrikDir string) (*heldLock, error) {
 		f.Close()
 		return nil, fmt.Errorf("another Fabrik instance is already running for this project (lock file: %s)", lockPath)
 	}
-	// Write our PID for diagnostics and per-poll verification.
-	if err := f.Truncate(0); err == nil {
-		f.WriteAt([]byte(fmt.Sprintf("%d\n", os.Getpid())), 0) //nolint:errcheck // diagnostic; verify() reports a missing record
+	// Write our PID for per-poll verification. A failure here (e.g. disk full)
+	// must fail startup with its real cause rather than surface at the first poll
+	// as a misleading lost lock.
+	if err := writeDirLockRecord(f); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("could not write the pid to lock file %s: %w", lockPath, err)
 	}
 	return &heldLock{name: "directory lock", path: lockPath, f: f}, nil
+}
+
+// writeDirLockRecord writes the legacy "<pid>\n" record. A variable so a test can
+// inject a write failure.
+var writeDirLockRecord = func(f *os.File) error {
+	if err := f.Truncate(0); err != nil {
+		return err
+	}
+	_, err := f.WriteAt([]byte(fmt.Sprintf("%d\n", os.Getpid())), 0)
+	return err
 }
 
 // boardIdentity is host/owner/projectNumber, lower-cased; an empty host is
