@@ -134,24 +134,33 @@ Tests are not optional and not deferred. When implementing a function, write its
 - Use the same test framework the project uses
 - Follow naming conventions from existing tests
 - Test both success and error paths
-- Run the full test suite before marking a task complete — except where the CI-green skip rule under "Skipping a redundant full-suite run" below applies
+- Run the tests the table under "Which tests to run locally" below selects before marking a task complete — the full suite when `ci_gated` is `false` or there is no `ci-status.md`, the targeted run on a CI-gated stage, and nothing when CI is green on this head
 - **Always run tests with a per-test timeout** appropriate to the project's test framework (e.g., `pytest --timeout=60`, `go test -timeout 5m`, `jest --testTimeout=30000`). Never run a test suite without a timeout — a single hanging test blocks the entire stage indefinitely and wastes CI budget.
 
-### Skipping a redundant full-suite run — `.fabrik-context/ci-status.md`
+### Which tests to run locally — `.fabrik-context/ci-status.md`
 
-When the item has a linked PR, the engine writes `.fabrik-context/ci-status.md` before this invocation: the PR number, `head_sha` (the PR head), `verdict` (`green`, `red`, `pending`, `none` or `unknown`), `ci_gated` (`true` when this stage waits for CI) and `written_at`. CI has already run the whole suite on `head_sha` when the verdict is `green`, so rerunning it locally on the same commit repeats work CI did.
+When the item has a linked PR, the engine writes `.fabrik-context/ci-status.md` before this invocation: the PR number, `head_sha` (the PR head), `verdict` (`green`, `red`, `pending`, `none` or `unknown`), `ci_gated` (`true` when this stage waits for CI via `wait_for_ci`) and `written_at`. Read it first and find the row below that matches; it decides what you run locally. Check the rows top to bottom and use the first that matches.
 
-**Skip the full-suite run only when ALL three of these hold** — a partial match is not a match:
+| Condition | Run locally | Test Suite line |
+|---|---|---|
+| `ci-status.md` is absent, or `ci_gated: false` | The full-suite step as written below, unchanged — nothing else will run it. | `PASSED` |
+| `ci_gated: true`, `verdict: green`, `git rev-parse HEAD` (its own command) prints `head_sha`, and `git status --porcelain` (its own command) prints nothing | Nothing — skip the test invocation, and name the SHA and the file's `written_at` in your output. | `SKIPPED — CI green on <sha>` |
+| `ci_gated: true`, `verdict: red` | Read the failing checks first (`gh pr checks`, or the run log) and reproduce only the failing tests, once. Never rerun the whole suite to find them. | `TARGETED — <packages>; full suite left to CI on <sha>` |
+| `ci_gated: true`, `verdict` is `pending`, `unknown` or `none`, **or** HEAD differs from `head_sha` (this run pushed or rebased, or a previous invocation pushed the head), **or** the tree is dirty | The build plus the tests for the packages the diff touches (including any package whose tests read the changed content, such as embedded skills or docs), once. | `TARGETED — <packages>; full suite left to CI on <sha>` |
 
-1. `verdict` in `.fabrik-context/ci-status.md` is exactly `green`.
-2. `git rev-parse HEAD` (run it as its own command) prints the same SHA as `head_sha`.
-3. `git status --porcelain` (run it as its own command) prints nothing.
+**On a CI-gated stage (`ci_gated: true`) you never run the full suite locally** — not the whole-module test command, and not an equivalent such as a list of every package. The full-suite verdict is CI's, and the engine's `wait_for_ci` gate on the pushed head is the backstop; a `pending` verdict is not a reason to run the suite yourself. Only when `ci_gated` is `false` (or there is no `ci-status.md`) does the full-suite step stay.
 
-When all three hold, skip the test invocation and say so in your output, naming the SHA and the file's `written_at` (for example: `Full suite skipped — CI green on <sha> (ci-status.md written <timestamp>)`). In every other case — the file is absent, the verdict is anything other than `green`, HEAD differs from `head_sha`, or the tree is dirty — run the step exactly as written below.
+**Test command rules (hard).** These apply to every local test command, whatever the verdict:
 
-**After you change code** (including a rebase that moves HEAD, such as the pre-completion rebase): HEAD no longer matches `head_sha`, so condition 2 fails. If `ci_gated` is `true`, run the build plus the tests for the packages or modules you touched, then push — the full suite is CI's job, and the engine's `wait_for_ci` gate on the new head is the backstop. If `ci_gated` is `false`, no CI gate backstops this stage, so run the full suite as written below.
+- Every test command carries the framework's own timeout, and for Go `-timeout` is 5m or less (for example `go test -race -timeout 5m ./engine`). The whole command must finish inside the Bash tool's limit (590 s). The Go timeout is per test binary, so a full-module run on the `ci_gated: false` path that cannot fit is split into several foreground commands by package group, each with `-timeout 5m`.
+- Never raise the timeout to fit a broader run — narrow the run instead.
+- Never background a test command and then poll it. Run it synchronously in the foreground.
+- Diagnose before retrying. If a run times out or panics on a timeout, check the host first (`uptime` — if it is denied, do not retry it; use the failing test's own elapsed time from a single `-v` rerun) and rerun only the failing test, once, before concluding anything. Never retry with a broader set of tests or a longer timeout.
+- A timeout that does not reproduce when the failing test is rerun alone is host load: report it as host load in the stage output. It is not a fix trigger and does not count as a failure of the change. A timeout that does reproduce in isolation is an ordinary test failure.
 
-**Everything else in this stage stays.** Skipping the suite skips only the test invocation. Writing code, tests, commits, pushes and plan-checklist updates all still happen as written.
+**Report what ran.** The Test Suite line of your stage output, the PR description audit and the final summary all use exactly one of these: `TARGETED — <packages>; full suite left to CI on <sha>`, `SKIPPED — CI green on <sha>`, or `PASSED` (a full run, `ci_gated: false` only).
+
+**Everything else in this stage stays.** Skipping or narrowing the suite skips only the full test invocation. Writing code, tests, commits, pushes and plan-checklist updates all still happen as written.
 
 ### Update documentation
 
@@ -171,7 +180,7 @@ Before checking off a task:
 - No obvious regressions
 
 Before signaling completion:
-- Full test suite passes (or was skipped under the CI-green rule, and you said so in your output)
+- The tests the table under "Which tests to run locally" selects pass (the full suite only when `ci_gated` is `false`; otherwise the targeted run, or the CI-green skip), and your output states the Test Suite line
 - `go vet` (or equivalent linter) is clean
 - All changes committed and pushed
 
