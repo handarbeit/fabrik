@@ -401,7 +401,7 @@ Fabrik can authenticate as a **GitHub App installation** instead of a personal a
 | `fabrik init` | Initialize `.fabrik/stages/`, `.fabrik/plugin/`, and `.fabrik/config.yaml` in the current repo |
 | `fabrik init --github-app --owner <org>` | Guided GitHub App setup: register a new App (or adopt one with `--github-app-id`/`--github-app-private-key-path`), verify its permissions and write `github_app_*` into `.fabrik/config.yaml`. Organization-owned targets only |
 | `fabrik init --create-board --owner <org> [--repo <repo>] [--title <title>]` | Create a fully-configured GitHub Projects v2 board from your stage configs (Status columns in stage order, linked to the repo) and write it into `.fabrik/config.yaml`. Organization-owned targets only |
-| `fabrik repair-board [--apply]` | Diagnose an already-configured board for missing Status columns; with `--apply`, add them (never removes or reorders existing columns) |
+| `fabrik repair-board [--apply]` | Diagnose an already-configured board for missing Status columns and display-only fields (`Fabrik`, `Last activity`, `Last run`); with `--apply`, add them (never removes or reorders existing columns, never touches an existing field) |
 | `fabrik watch <issue-number>` | Open a real-time TUI for a single issue — live Claude output, stage history, PR/CI status |
 | `fabrik stream-filter` | Read NDJSON Claude output from stdin and render it as human-readable text |
 | `fabrik resume <issue-number>` | Resume an interrupted Claude session for an issue |

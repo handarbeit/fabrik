@@ -346,7 +346,7 @@ func runInit(args []string) error {
 	force := fset.Bool("force", false, "Overwrite existing files")
 	userFlag := fset.String("user", "", "Your GitHub username (PAT mode; not needed with --github-app)")
 	ghesHostFlag := fset.String("ghes-host", "", "GitHub Enterprise Server hostname, e.g. github.example.com (also FABRIK_GHES_HOST)")
-	createBoard := fset.Bool("create-board", false, "Create a new GitHub Project (v2) board from the just-extracted stage configs, linked to --owner/--repo. Organization-owned repos only (see #770). Mutually exclusive with the positional <project-url> argument.")
+	createBoard := fset.Bool("create-board", false, "Create a new GitHub Project (v2) board from the just-extracted stage configs, linked to --owner/--repo, with its Status columns and the enabled display-only fields (Fabrik, Last activity, Last run). Organization-owned repos only (see #770). Mutually exclusive with the positional <project-url> argument.")
 	ownerFlag := fset.String("owner", "", "GitHub org (owner) to create the board under; required with --create-board and --github-app")
 	repoFlag := fset.String("repo", "", "Optional with --create-board: link the new board to this repository and scope .fabrik/config.yaml to it (repo:). Omit for an unlinked org board; Fabrik discovers repos from the board's items")
 	titleFlag := fset.String("title", "", "Project board title for --create-board (default: \"<repo> Fabrik Pipeline\")")
