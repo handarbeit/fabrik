@@ -219,13 +219,18 @@ When the item has a linked PR, the engine writes `.fabrik-context/ci-status.md` 
 
 After all fixes, run the build and the tests the table under "Which tests to run locally" selects. **Always include a per-test timeout** appropriate to the framework (e.g., `pytest --timeout=60`, `go test -timeout 5m`, `jest --testTimeout=30000`), and obey the "Test command rules (hard)" above. Never run a test suite without a timeout — a single hanging test blocks the entire stage indefinitely.
 
-Only when `ci_gated: false` (or there is no `ci-status.md`) is the full suite part of this step:
+Always run the build and the linter, then push — on every row of the table:
 
 ```bash
 go build ./...        # or equivalent
-go test -race -timeout 5m ./...   # full test suite — always with timeout
 go vet ./...          # linter
 git push
+```
+
+On a CI-gated stage, add the targeted tests the table selects (for example `go test -race -timeout 5m ./plugin/`) before the push. Only when `ci_gated: false` (or there is no `ci-status.md`) is the full suite part of this step:
+
+```bash
+go test -race -timeout 5m ./...   # full test suite — always with timeout
 ```
 
 ### Verifying with a live server or a long-running command
