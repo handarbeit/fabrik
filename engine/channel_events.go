@@ -82,8 +82,10 @@ type channelEvents struct {
 	// usage-limit hold) without waiting for the next tick.
 	nudge bool
 	// arrivals are items created after the board was populated that have not been
-	// announced yet (key → when noted); landings are items whose landing was
-	// announced by emitLanded (#2123). Both guarded by mu; see channel_lifecycle.go.
+	// announced yet (key → when noted); each is held until the item's labels are
+	// known and it carries a board Status, so item-added never reports an empty
+	// label set (FR-005). landings are items whose landing was announced by
+	// emitLanded (#2123). Both guarded by mu; see channel_lifecycle.go.
 	arrivals map[string]time.Time
 	landings map[string]time.Time
 

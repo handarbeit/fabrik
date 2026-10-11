@@ -648,22 +648,86 @@ func TestChannelStreamerSubscribeBareNOnMultiRepoDaemon(t *testing.T) {
 }
 
 // A catch-up snapshot is current state, never history: it must not replay
-// arrivals, column moves or closes (#2123, ADR 2123), whatever the store holds.
+// arrivals, column moves or closes (#2123, ADR 2123). The same items produce
+// column-changed and closed live, so a catch-up that stayed silent only because
+// the items had no lifecycle history would not show it.
 func TestCatchUpNeverReplaysLifecycleEvents(t *testing.T) {
-	e, _ := channelEngine(t, 0, settledOnly())
+	e, live := channelEngine(t, 0, nil)
+	e.MarkBoardPopulatedForTest()
 	e.seedAPIItem(t, 1, "Specify", "fabrik:cruise")
 	e.seedAPIItem(t, 2, "Implement", "fabrik:paused", "fabrik:awaiting-input")
-	e.store.Apply(itemstate.LocalStatusUpdated{Repo: e.cfg.Owner + "/" + e.cfg.Repo, Number: 1, NewStatus: "Research"})
-	e.store.Apply(itemstate.IssueClosed{Repo: e.cfg.Owner + "/" + e.cfg.Repo, Number: 1})
+	e.store.Apply(itemstate.LocalStatusUpdated{Repo: "owner/repo", Number: 1, NewStatus: "Research"})
+	e.store.Apply(itemstate.IssueClosed{Repo: "owner/repo", Number: 1})
 
-	evs := e.catchUpEvents()
-	if len(evs) == 0 {
-		t.Fatal("the paused item should still be in the snapshot; the scan below would be vacuous")
+	// The lifecycle events do exist live for these very items, and have all been
+	// published before the late subscriber exists.
+	seen := map[channelevents.EventType]bool{}
+	for !(seen[channelevents.ItemAdded] && seen[channelevents.ColumnChanged] && seen[channelevents.Closed]) {
+		seen[live.next(t).Type] = true
 	}
-	for _, ev := range evs {
+
+	st := e.channelStreamer()
+	if _, err := st.Subscribe(localapi.SubscribeParams{Subscriber: "late"}); err != nil {
+		t.Fatal(err)
+	}
+	sink := newChanSink()
+	detach, err := st.Attach(localapi.AttachParams{Subscriber: "late", CatchUp: true}, sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer detach()
+
+	var caughtUp []channelevents.Event
+	timeout := time.After(400 * time.Millisecond)
+collect:
+	for {
+		select {
+		case ev := <-sink.ch:
+			caughtUp = append(caughtUp, ev)
+		case <-timeout:
+			break collect
+		}
+	}
+	sawPaused := false
+	for _, ev := range caughtUp {
 		switch ev.Type {
 		case channelevents.ItemAdded, channelevents.ColumnChanged, channelevents.Closed:
 			t.Fatalf("catch-up replayed a lifecycle event: %+v", ev)
+		case channelevents.AwaitingInput:
+			sawPaused = sawPaused || ev.Issue == 2
 		}
+	}
+	if !sawPaused {
+		t.Fatalf("the paused item should still be in the snapshot; the scan above would be vacuous: %+v", caughtUp)
+	}
+}
+
+// A close the snapshot merely suggests is a landing (a close-tracking label, a
+// merged PR) keeps the webhook-derived actor: only an engine-announced landing
+// is attributed to fabrik, so a human's merge or manual close is not read as the
+// engine's own (#2123).
+func TestChannelClosedSnapshotLandingKeepsWebhookActor(t *testing.T) {
+	e, sink := channelEngine(t, 0, nil)
+	e.MarkBoardPopulatedForTest()
+	e.seedAPIItem(t, 1, "Done", "fabrik:awaiting-close")
+	e.store.Apply(itemstate.IssueClosed{Repo: "owner/repo", Number: 1, Sender: "alice"})
+
+	ev := sink.nextOfType(t, channelevents.Closed)
+	if ev.Meta["landing"] != "true" || ev.Meta["actor"] != "human" || ev.Meta["actor_login"] != "alice" {
+		t.Fatalf("snapshot-inferred landing must keep the human actor: %v", ev.Meta)
+	}
+}
+
+// An engine-announced landing is attributed to fabrik whatever the webhook sender.
+func TestChannelClosedAnnouncedLandingIsFabrik(t *testing.T) {
+	e, sink := channelEngine(t, 0, nil)
+	e.MarkBoardPopulatedForTest()
+	e.seedAPIItem(t, 1, "Done")
+	e.channelEvents().markLanding(issueRef("owner/repo", 1))
+	e.store.Apply(itemstate.IssueClosed{Repo: "owner/repo", Number: 1, Sender: "alice"})
+
+	ev := sink.nextOfType(t, channelevents.Closed)
+	if ev.Meta["landing"] != "true" || ev.Meta["actor"] != "fabrik" {
+		t.Fatalf("announced landing must be attributed to fabrik: %v", ev.Meta)
 	}
 }

@@ -116,9 +116,9 @@ type IssueClosed struct {
 	// Sender is the GitHub login that closed the issue, from the webhook
 	// payload; empty when unknown (#2123).
 	Sender string
-	// EchoOfEngine is true when the webhook matched the engine's own echo
-	// registry, i.e. Fabrik made this close (#2123).
-	EchoOfEngine bool
+	// There is no echo flag: the engine registers no issues/closed echo, so a
+	// close Fabrik made is attributable only through its LocalIssueClosed
+	// write-through (OriginEngine), never through this webhook mutation.
 }
 
 func (IssueClosed) isMutation()       {}

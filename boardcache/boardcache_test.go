@@ -2955,8 +2955,8 @@ func TestBootstrapFromProbe_LabelsNotKnown(t *testing.T) {
 	}
 }
 
-// TestDeltaIssueClosedCarriesSenderAndEcho covers the close attribution plumbing.
-func TestDeltaIssueClosedCarriesSenderAndEcho(t *testing.T) {
+// TestDeltaIssueClosedCarriesSenderButNoEcho covers the close attribution plumbing.
+func TestDeltaIssueClosedCarriesSenderButNoEcho(t *testing.T) {
 	store := itemstate.NewStore(nil)
 	c := NewCacheImpl(&mockClient{}, store, nopLog)
 	c.BootstrapFromProbe([]gh.BoardProbeItem{{ContentID: "I_1", Number: 1, Repo: "owner/repo", Status: "Research"}}, "PID")
@@ -2966,9 +2966,12 @@ func TestDeltaIssueClosedCarriesSenderAndEcho(t *testing.T) {
 			got = ch
 		}
 	}))
+	// Even a matcher that claims every close is ours must not mark the change as
+	// an engine echo: the engine registers no issues/closed echo, so IssueClosed
+	// carries the sender only.
 	c.SetMatchEchoViaFn(func(typ, action, key string) (bool, string) { return typ == "issues" && action == "closed", "" })
 	c.applyIssuesDelta([]byte(`{"action":"closed","sender":{"login":"alice"},"issue":{"number":1},"repository":{"full_name":"owner/repo"}}`))
-	if !got.Closed || got.Sender != "alice" || !got.EchoOfEngine {
+	if !got.Closed || got.Sender != "alice" || got.EchoOfEngine {
 		t.Fatalf("closed change = %+v", got)
 	}
 }

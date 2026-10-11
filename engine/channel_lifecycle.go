@@ -20,14 +20,6 @@ import (
 // or from a Store.Peek inside a hook; nothing reaches GitHub, and no function here
 // can change an engine decision.
 
-// arrivalMemo is the consumer-visible record that an item was created after the
-// board was populated and has not been announced yet. It is held until the
-// item's labels are known and it carries a board Status, so item-added never
-// reports an empty label set because labels had not loaded (FR-005).
-//
-// Guarded by channelEvents.mu (the observer writes it on the Apply caller's
-// goroutine, the consumer reads and clears it).
-
 // noteArrival records a pending arrival for key.
 func (ce *channelEvents) noteArrival(key string) {
 	if ce.arrivals == nil {
@@ -189,15 +181,19 @@ func snapshotShowsLanding(st *itemstate.ItemState) bool {
 }
 
 // closedEvent builds the closed event. A close that belongs to a landing says so
-// (landing=true) and is attributed to fabrik; any other close names the actor
-// the change carries (human, bot or unknown) and the board column.
+// (landing=true). It is attributed to fabrik only when the engine itself
+// announced the landing (emitLanded); a landing inferred from the snapshot alone
+// (a merged PR, a credited-PR or close-tracking label) cannot tell a Fabrik
+// landing from a human merge or a later manual close, so it keeps the actor the
+// change carries (human, bot or unknown). Every close carries the board column.
 func (ce *channelEvents) closedEvent(key string, st *itemstate.ItemState, c itemstate.Change) channelevents.Event {
 	e := ce.e
 	ref := issueRef(st.Repo, st.Number)
 	ev := e.baseEvent(st, channelevents.Closed)
-	landing := ce.isLanding(key) || snapshotShowsLanding(st)
+	announced := ce.isLanding(key)
+	landing := announced || snapshotShowsLanding(st)
 	attr := e.labelAttribute(c)
-	if landing {
+	if announced {
 		attr = labelAttribution{Actor: "fabrik"}
 	}
 	by := attributionMeta(&ev, attr)

@@ -439,8 +439,7 @@ func (c *CacheImpl) applyIssuesDelta(payload []byte) {
 			c.logFn("[cache] applyIssuesDelta(closed): ensure #%d: %v\n", issNum, err)
 			return
 		}
-		echoed, _ := c.matchEcho("issues", "closed", key)
-		_, changes, _ := c.store.Apply(itemstate.IssueClosed{Repo: fullRepo, Number: issNum, Sender: p.Sender.Login, EchoOfEngine: echoed})
+		_, changes, _ := c.store.Apply(itemstate.IssueClosed{Repo: fullRepo, Number: issNum, Sender: p.Sender.Login})
 		if len(changes) == 0 {
 			return
 		}
