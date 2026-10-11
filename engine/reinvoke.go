@@ -61,6 +61,9 @@ const (
 	// didNotRunSkillUnresolved: the stage's skill reference resolved to no
 	// loaded plugin (ADR 2137), so no worker was spawned.
 	didNotRunSkillUnresolved didNotRunKind = "skill-unresolved"
+	// didNotRunSkillLoadFailed: the stage's skill failed to load in the worker
+	// (#2138, ADR-2138), so the run did none of the requested work.
+	didNotRunSkillLoadFailed didNotRunKind = "skill-load-failed"
 )
 
 // classifyDidNotRun maps a processComments error to the did-not-run set the
@@ -90,6 +93,10 @@ func classifyDidNotRun(err error) didNotRunKind {
 	var skillErr *skillUnresolvedError
 	if errors.As(err, &skillErr) {
 		return didNotRunSkillUnresolved
+	}
+	var skillLoadErr *claudeSkillLoadError
+	if errors.As(err, &skillLoadErr) {
+		return didNotRunSkillLoadFailed
 	}
 	return ""
 }

@@ -577,6 +577,16 @@ func (e *Engine) processCommentsClassified(ctx context.Context, board *gh.Projec
 			}
 			return "", err
 		}
+		// The comment skill (also the stage variant's ci_fix_skill / rebase_skill)
+		// failed to load in the worker (#2138, ADR-2138): the run did none of the
+		// requested work. Pause for a human (the condition cannot self-heal) and
+		// bypass both comment breakers like the usage-limit arm; the kind lets
+		// dispatchReinvoke refund the pre-charged cycle (#1812).
+		var skillLoadErr *claudeSkillLoadError
+		if errors.As(err, &skillLoadErr) {
+			e.handleSkillLoadFailed(item, stage, skillKeyCommentSkill, skillLoadErr)
+			return didNotRunSkillLoadFailed, nil
+		}
 		// Deliberately NO exclusion for *claudeResumeFailureError here (#1414),
 		// unlike the usage-limit exclusion immediately above: a resume failure
 		// is specific to this issue's own session, not an account-wide
@@ -602,6 +612,11 @@ func (e *Engine) processCommentsClassified(ctx context.Context, board *gh.Projec
 	}
 	if err != nil {
 		e.logf(item.Number, "warn", "claude comment review exited with error but stage completed (marker found) — proceeding: %v\n", err)
+	}
+	// The comment skill loaded (a failure returned above): drop a stale
+	// warnings-panel entry (#2138).
+	if stage.CommentSkill != "" {
+		e.clearSkillLoadFailed(stage.Name, skillKeyCommentSkill)
 	}
 
 	summary := e.publishCommentOutput(owner, repo, item, stage, comments, output, workDir, baseBranch)
