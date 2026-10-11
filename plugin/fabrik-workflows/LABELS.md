@@ -318,6 +318,12 @@ and should recognize.
   against `max_retries`, no `fabrik:paused`/`stage:<name>:failed`. Clears
   automatically once `apiKeyHelper` is removed and a later invocation
   reaches Claude successfully — no manual removal needed.
+- **`fabrik:skill-unresolved`** — Set when a stage's skill reference
+  (`skill`, `comment_skill`, `ci_fix_skill` or `rebase_skill`, written
+  `<plugin>:<skill>`) matches no plugin loaded for the worker, so the stage
+  is not run and no worker is spawned. Does not count against `max_retries`;
+  no `fabrik:paused`/`stage:<name>:failed`. Clears automatically on the next
+  invocation that resolves — fix the stage YAML or load the plugin.
 - **`fabrik:tools-denied`** — Set when a Claude invocation's tool call(s)
   were denied by the CLI's own permission layer (detected structurally
   from the CLI's `permission_denials` result field, never from output

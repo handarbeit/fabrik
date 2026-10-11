@@ -190,6 +190,7 @@ type Engine struct {
 	hostClient            *gh.Client             // same host as client, concretely typed; used by the GHES-only startup version-floor preflight (checkGHESVersionFloor), which needs FetchInstalledVersion and isn't worth adding to the GitHubClient interface for one startup-only call, and by checkHookdeckInstallationCoverage (#1142), which needs a live installation token via Token() for the R5 App-mode coverage check. nil outside New() (e.g. NewWithDeps-constructed test engines); checkGHESVersionFloor is a standalone function tested directly against a *gh.Client, not through the Engine.
 	appIdent              *appIdentity           // App-mode identity (bot login, bot user ID, lock ID) resolved once in New() (#1893); nil in PAT mode. Read via appID() — never assign after Run() starts.
 	ghAppAuth             *githubauth.Reconciler // non-nil only when Config.GitHubApp* fields configure App-auth (#1713); nil in PAT mode (the default). Run() starts and, on shutdown, joins its refresh-loop goroutines when non-nil — see poll.go's Run().
+	skillResolver         *skillResolver         // resolves stage skill references against the loaded plugin dirs (ADR 2137); nil on NewWithDeps engines, where references pass through unchanged.
 	readClient            boardcache.ReadClient  // read-only GitHub calls; may be CacheImpl or GitHubAdapter
 	claude                ClaudeInvoker
 	statusField           *gh.StatusField
@@ -310,6 +311,8 @@ type Engine struct {
 	layer1OffBoard                        map[string]time.Time          // key: "<projectID>|<repo>#<n>" → expiry; Layer 1's negative cache of "not on the board" lookups (#2093) — in memory only
 	flakeReruns                           map[string]*prFlakeState      // key: "owner/repo#PR"; the stage wait_for_ci gate's flake re-run budget (#2072), reset when the PR's head SHA moves — in memory only, so a restart may grant one extra re-run
 	flakeRerunDisabled                    bool                          // test-only neutralisation seam (SetCIFlakeRerunDisabledForTest)
+	feedbackGapMu                         sync.Mutex                    // guards feedbackGaps
+	feedbackGaps                          map[string]int                // key: "owner/repo#N:<sorted held feedback IDs>"; value: how many times the feedback gate repaired the dispatcher's input for exactly that gap (#2160, ADR 2160) — in memory only, so a restart may grant a fresh budget
 	mergeTrainRunawayMu                   sync.Mutex                    // guards mergeTrainRunawayAlerted AND serializes fireRunawayGuard's pause+alert critical section across all three call sites (Hook 1 x2, Hook 2) — see fireRunawayGuard (#1533). Still a single engine-wide mutex, not sharded per (repo,base) — #1648 widens its blast radius to also serialize concurrent per-base workers within the same repo, not just across repos, but the trade-off (rare/exceptional event) is unchanged.
 	mergeTrainRunawayAlerted              map[string]int                // key: "trainKey#N" (trainKey a mergeTrainKey "owner/repo:baseBranch" since #1648, was bare "owner/repo#N"); value: the trial count in effect when this member was last alerted. A later call is treated as already-alerted only while its own count is <= the recorded value — trials cannot increase while the guard keeps the queue paused, so an increase can only mean an operator manually resumed the member (removing fabrik:paused) and it genuinely tripped again, which must produce a fresh alert (#1533 review, finding 2). Also cleared wholesale per-trainKey by resetTrialCounter (the guard's own "episode ends" signal — a successful land) (#1533)
 	queuedReviewEjectsMu                  sync.Mutex                    // guards queuedReviewEjects
@@ -642,6 +645,7 @@ func New(cfg Config) (*Engine, error) {
 		hostClient:                ghClient,
 		ghAppAuth:                 ghAppReconciler,
 		appIdent:                  appIdent,
+		skillResolver:             newSkillResolver(pluginDirs),
 		claude:                    &RealClaudeInvoker{DebugOutput: cfg.DebugOutput},
 		worktreeManagers:          make(map[string]*WorktreeManager),
 		fabrikDir:                 fabrikDir,

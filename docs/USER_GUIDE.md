@@ -1445,10 +1445,12 @@ Each stage is a YAML file in your stages directory. The filename is arbitrary; t
 ```yaml
 name: Research            # Required. Must match a Project board column exactly.
 order: 2                  # Required. Lower values processed earlier in the pipeline.
-skill: fabrik-research    # Plugin skill to use (recommended; alternative to inline prompt).
-                          #   When set, Fabrik sends a minimal directive and Claude loads
-                          #   the skill methodology via the plugin system.
-comment_skill: fabrik-research-comment  # Plugin skill for comment review (overrides comment_prompt).
+skill: fabrik:fabrik-research  # Plugin skill to use, as <plugin>:<skill> (recommended; alternative
+                          #   to inline prompt). When set, Fabrik sends a minimal directive
+                          #   naming the skill exactly as Claude Code registers it. A bare
+                          #   name (fabrik-research) is deprecated but still resolved.
+                          #   See "Skill references" below.
+comment_skill: fabrik:fabrik-research-comment  # Plugin skill for comment review (overrides comment_prompt).
 prompt: |                 # Inline prompt (used when skill is not set; legacy but still supported).
   You are a research agent...
 comment_prompt: |         # Inline comment-review prompt (used when comment_skill is not set).
@@ -1562,8 +1564,8 @@ wait_for_ci: false        # Optional. When true, Fabrik gates auto-advance (and 
                           #   times. On CI timeout or cycle limit, Fabrik pauses with
                           #   fabrik:awaiting-input. Enabled by default on the Validate stage.
                           #   See §3 CI Gate and CI-Fix Workflow for full details.
-ci_fix_skill:             # Optional. Plugin skill name for CI-fix re-invocations (the synthetic
-                          #   CI failure report comment). Defaults to comment_skill if unset.
+ci_fix_skill:             # Optional. Plugin skill (<plugin>:<skill>) for CI-fix re-invocations (the
+                          #   synthetic CI failure report comment). Defaults to comment_skill if unset.
 allowed_tools:            # Optional. REPLACES the default tool set — not additive. When set,
   - Read                  #   only these tools are allowed; the default list is not added.
   - Grep                  #   When omitted, Fabrik uses a comprehensive default covering common
@@ -2697,8 +2699,8 @@ By default, CI-fix re-invocations use the stage's `comment_skill`. To use a dedi
 name: Validate
 order: 5
 wait_for_ci: true
-ci_fix_skill: fabrik-validate-ci-fix   # Custom skill for CI-fix re-invocations
-comment_skill: fabrik-validate-comment  # Used for regular comment processing
+ci_fix_skill: myorg:validate-ci-fix   # Custom skill for CI-fix re-invocations
+comment_skill: fabrik:fabrik-validate-comment  # Used for regular comment processing
 ...
 ```
 
@@ -3008,10 +3010,49 @@ Before that mergeability check, the skill's Pre-Completion Gate also decides whe
 Skills live in `.fabrik/plugin/skills/<skill-name>/SKILL.md`. Edit them to change
 how Claude approaches each stage. Changes take effect on the next Claude invocation.
 
-The stage YAML references the skill by name:
+The stage YAML references the skill by its fully-qualified name, `<plugin>:<skill>`:
 ```yaml
-skill: fabrik-research    # loads .fabrik/plugin/skills/fabrik-research/SKILL.md
+skill: fabrik:fabrik-research    # loads .fabrik/plugin/skills/fabrik-research/SKILL.md
 ```
+See [Skill references](#skill-references) for the qualified form, the deprecated bare
+form and how to point a stage at your own plugin.
+
+#### Skill references
+
+Every skill-valued stage key — `skill`, `comment_skill`, `ci_fix_skill` and `rebase_skill` —
+names a skill as `<plugin>:<skill>`, exactly as Claude Code registers plugin skills: the
+plugin's manifest `name`, a colon, then the skill's directory name. The prompt Fabrik sends
+carries that exact name, so no model has to guess which plugin a bare name belongs to (some
+non-Claude models behind a gateway do not, and fail with "Unknown skill").
+
+```yaml
+skill: fabrik:fabrik-review        # the base plugin's skill
+comment_skill: myorg:review-comment  # a skill from your own plugin
+```
+
+- **References are resolved against the plugins actually loaded for the worker** — the base
+  plugin (`.fabrik/plugin/`, or the `--plugin-dir` override) plus every `plugin_dirs` entry —
+  read from disk, not against what the Fabrik binary ships. A customised base plugin is
+  therefore honoured as it is. Only `--plugin-dir`/`plugin_dirs` plugins are visible to
+  resolution: with no plugin directory loaded at all (Claude Code supplies the plugin
+  itself) the name is passed through unchanged and not checked.
+- **Bare names are deprecated, not removed.** `skill: fabrik-review` still works: it is
+  resolved to the loaded plugin that provides it (the base plugin if several do, with the
+  others named in the notice) and the prompt carries the qualified name. At startup Fabrik
+  logs one notice and records one warnings-panel entry listing every bare reference;
+  `fabrik upgrade` migrates them. Fresh `fabrik init` stage files are written qualified.
+- **A reference that does not resolve never reaches a worker.** If the plugin is not
+  loaded, or lacks the skill, or no loaded plugin provides a bare name, the stage does not
+  run: Fabrik posts one comment on the issue naming the reference, the plugins searched and
+  their paths, applies `fabrik:skill-unresolved`, and shows a warnings-panel entry. This
+  is not a stage failure — it does not count against `max_retries`, and the item is not
+  paused. Fix the YAML or load the plugin and the next dispatch resolves it; the label
+  and the panel entry clear on their own.
+- **Pointing a stage at your own plugin.** Add the plugin to `plugin_dirs` (see
+  [Plugin Development](#plugin-development)), give its manifest a unique `name`, put each
+  skill at `skills/<name>/SKILL.md`, and name it `<manifest name>:<name>` in the stage.
+  Skills are found the way Claude Code finds them: `skills/<name>/SKILL.md`, directories
+  added by the manifest's `skills` key, or a root `SKILL.md` as a single skill.
 
 #### Upgrade protection for customized skills
 
@@ -3290,6 +3331,8 @@ plugin_dirs:
 - Two loaded plugins must not declare the same manifest `name`; startup fails naming
   both paths. In particular, a project plugin cannot call itself `fabrik` while the
   default base plugin is loaded.
+- Point a stage at a skill in an additional plugin with `<manifest name>:<skill>` (see
+  [Skill references](#skill-references)).
 - Additional plugins are yours: `fabrik upgrade`, staleness checks
   and customization detection apply to `.fabrik/plugin/` only.
 - Interactive `resume` / `watch` sessions pass only the base plugin override, not the
@@ -3326,6 +3369,7 @@ added after it:
 | `fabrik:awaiting-member-close` | Set by the merge-train singleton-landing path (`landSingleton`) when a member issue's `CloseIssue` call fails after its PR has already merged and the board moved to Done — most likely on a non-default base branch, where GitHub's `Closes #N` never auto-fires. Retried every poll. Cleared once the issue is confirmed closed (by Fabrik or by GitHub's own auto-close). Escalates to `fabrik:paused` after `--max-retries` failed attempts, with an explanatory comment posted on the issue (ADR-061). |
 | `fabrik:nondefault-base-pr-noted` | Set once, best-effort, on a `base:<branch>` item after Fabrik posts a one-time comment naming its discovered PR — because GitHub creates no Development-panel issue↔PR link at all for a PR targeting a non-default base branch (distinct from the auto-close gap `fabrik:awaiting-close` covers). Applied unconditionally right after the post attempt, whether or not the comment actually succeeded — **informational only, no retry, no escalation**. Never applied to a default-base item. See [§6.21 Non-Default-Base Linkage Notice](state-machine.md#621-non-default-base-linkage-notice-1649) (ADR-1649). |
 | `fabrik:api-key-helper-detected` | Set when a stage invocation is skipped because the worktree's own `.claude/settings.json` sets `apiKeyHelper` — a repo-resident setting Fabrik cannot see until the worktree exists. Does not count against `max_retries`; no `fabrik:paused` or `stage:<name>:failed` applied. Clears automatically once `apiKeyHelper` is removed from the file and a later invocation reaches Claude successfully — no manual removal needed. See [Anthropic Auth Namespace Scrub & `apiKeyHelper` Refusal](#anthropic-auth-namespace-scrub--apikeyhelper-refusal). |
+| `fabrik:skill-unresolved` | Set when a stage's skill reference (`skill`, `comment_skill`, `ci_fix_skill` or `rebase_skill`) matches no loaded plugin, so the stage is not run and no worker is spawned. Does not count against `max_retries`; no `fabrik:paused` or `stage:<name>:failed` applied. Clears automatically on the next invocation that resolves — fix the stage YAML or load the plugin. See [Skill references](#skill-references). |
 | `fabrik:tools-denied` | Set when Claude's own permission layer denies one or more mutating tool calls during an invocation, detected structurally from the CLI's `permission_denials` result field — applies uniformly whether the denial was detected on the ordinary stage dispatch, `ci-fix-reinvoke`, review-reinvoke, or comment review, all of which accumulate against the same per-stage counter (#1704). Each denial is scoped to the specific command denied, not the tool for the rest of the session (ADR-1775); the explanatory comment names it when decodable. Does not count against `max_retries`; bounded instead by its own `--max-tools-denied-retries` counter (default 3), at which point `fabrik:paused` + `fabrik:awaiting-input` are applied — never `stage:<name>:failed`. Clears automatically on the next invocation that isn't itself classified as tools-denied. See the "Troubleshooting: an issue carries `fabrik:tools-denied`" note under [Retry and Escalation](#retry-and-escalation). |
 | `fabrik:awaiting-runaway-alert` | Set when the merge-train runaway guard (ADR-059 D8) pauses a `Queued` member (`fabrik:paused` + `fabrik:awaiting-input` applied unconditionally) but its `AddComment` alert call fails. Retried every poll by a settle scan, independent of `fabrik:paused`'s presence, until the alert succeeds or a fallback comment lands. Cleared only once some explanation is confirmed delivered — a persistent comment-post outage leaves the marker in place indefinitely rather than erasing the last diagnostic signal. See [§6.18 Runaway Guard Alert Retry](state-machine.md#618-runaway-guard-alert-retry-adr-1533) (ADR-1533). |
 | `fabrik:awaiting-landing-verification` | Set immediately after a Done transition attributable to a merge (merge-train batch/singleton landing, or the ordinary auto-merge path) succeeds. The post-Done settle scan confirms the credited PR actually reached `MERGED`. Clears automatically once confirmed. See [§6.19 Post-Done Landing Verification](state-machine.md#619-post-done-landing-verification-adr-1616) (ADR-1616). |

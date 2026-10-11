@@ -80,6 +80,46 @@ type catchUpState struct {
 	// repo policy, so singletons there skip the catch-up until the memo expires (#2065,
 	// ADR-2065). In-memory only: a restart re-probes.
 	policy map[string]catchUpPolicyMemo
+	// pushing counts catch-ups between "about to push" and "marker posted", per PR
+	// (catchUpPRKey). The head moves at the push and the marker follows it, so in that
+	// window a live head has no marker yet; the SHA-invalidation scan (#2158) defers on
+	// it rather than reading the unmarked head as external. In-memory only.
+	pushing map[string]int
+}
+
+func catchUpPRKey(owner, repo string, pr int) string { return fmt.Sprintf("%s/%s#%d", owner, repo, pr) }
+
+// beginCatchUpPush marks a catch-up of the PR as in flight and returns the idempotent
+// function that clears it. The caller must clear it once the marker is posted (or the
+// attempt is abandoned), never while waiting on CI.
+func (e *Engine) beginCatchUpPush(owner, repo string, pr int) (end func()) {
+	key := catchUpPRKey(owner, repo, pr)
+	e.trainCatchUp.mu.Lock()
+	if e.trainCatchUp.pushing == nil {
+		e.trainCatchUp.pushing = make(map[string]int)
+	}
+	e.trainCatchUp.pushing[key]++
+	e.trainCatchUp.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			e.trainCatchUp.mu.Lock()
+			defer e.trainCatchUp.mu.Unlock()
+			if e.trainCatchUp.pushing[key] <= 1 {
+				delete(e.trainCatchUp.pushing, key)
+			} else {
+				e.trainCatchUp.pushing[key]--
+			}
+		})
+	}
+}
+
+// catchUpPushInFlight reports whether a catch-up of the PR is between its push and its
+// marker post.
+func (e *Engine) catchUpPushInFlight(owner, repo string, pr int) bool {
+	e.trainCatchUp.mu.Lock()
+	defer e.trainCatchUp.mu.Unlock()
+	return e.trainCatchUp.pushing[catchUpPRKey(owner, repo, pr)] > 0
 }
 
 func catchUpKey(trainKey string, issue int) string { return fmt.Sprintf("%s#%d", trainKey, issue) }
@@ -201,6 +241,10 @@ func (e *Engine) trySingletonCatchUp(ctx context.Context, state *mergeTrainWorke
 	}
 
 	e.logf(m.item.Number, "merge-train", "singleton catch-up: #%d is %d commit(s) behind pinned base %s — merging the base into its own branch\n", m.item.Number, behind, p.baseSHA)
+	// In flight from before the push until the marker is posted: the head moves at the
+	// push, and the SHA-invalidation scan must not read it as external in between (#2158).
+	endPush := e.beginCatchUpPush(p.owner, p.repo, m.prNum)
+	defer endPush()
 	var out catchUpGitOutcome
 	if e.trainCatchUpGitFn != nil {
 		out = e.trainCatchUpGitFn(ctx, p, m)
@@ -232,6 +276,7 @@ func (e *Engine) trySingletonCatchUp(ctx context.Context, state *mergeTrainWorke
 	caughtUp.headSHA = out.newHead
 	caughtUp.caughtUpFrom = p.baseSHA
 	e.postCatchUpMarker(p, caughtUp, m.headSHA, out.pure)
+	endPush()
 
 	// The CI being waited on is the member's own PR's (not a trial PR), so the line
 	// names that PR.

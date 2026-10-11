@@ -1093,6 +1093,20 @@ func (e *Engine) runInvocationWithExtension(ctx context.Context, item gh.Project
 		}
 	}
 
+	// ADR 2137: qualify the stage's skill reference against the plugins loaded
+	// for the worker, so the prompt names exactly what Claude Code registered.
+	// An unresolved reference means this dispatch can never succeed: refuse it
+	// before the worker is spawned (did-not-run, like the gates above).
+	resolvedStage, resolvedRefs, resolveErr := e.resolveStageSkills(stage, skillKeySkill)
+	if resolveErr != nil {
+		err = resolveErr
+		return output, completed, usage, totalMultiple, err
+	}
+	stage = resolvedStage
+	for _, r := range resolvedRefs {
+		e.clearSkillUnresolved(stage.Name, r.Key)
+	}
+
 	// #1786: detect declared-vs-resolved toolchain drift (.nvmrc, package.json
 	// engines, go.mod toolchain/go directive, .tool-versions) before invoking
 	// Claude. Unlike the two checks above, this never skips the invocation —
@@ -1341,6 +1355,15 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 			return
 		}
 
+		// A stage skill reference no loaded plugin provides (ADR 2137) is
+		// likewise a did-not-run: no retry consumed, no failed/paused label.
+		var skillErr *skillUnresolvedError
+		if errors.As(err, &skillErr) {
+			e.handleSkillUnresolved(item, stage, repoStr, skillErr, true)
+			p.release()
+			return
+		}
+
 		// A transient Anthropic-side api_error exit is likewise not a stage
 		// failure — the stage never ran. See claudeAPIErrorExit in claude.go
 		// and #1458.
@@ -1405,6 +1428,15 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 	}
 	if hasLabel(item.Labels, "fabrik:api-key-helper-detected") {
 		e.removeLabel(item, "fabrik:api-key-helper-detected")
+	}
+	// This invocation only proved the stage's own `skill` resolves; the label is
+	// stage-wide and may stand for a bad comment_skill/ci_fix_skill/rebase_skill.
+	// Clear it only when every reference resolves (as the comment path does), or
+	// the comment-once gate would re-post the failure on each later comment cycle.
+	if hasLabel(item.Labels, skillUnresolvedLabel) {
+		if _, _, allErr := e.resolveStageSkills(stage); allErr == nil {
+			e.removeLabel(item, skillUnresolvedLabel)
+		}
 	}
 	// fabrik:tools-denied is gated on !toolsDenied — unlike the two labels
 	// above, this invocation itself may BE the condition (toolsDenied does not
