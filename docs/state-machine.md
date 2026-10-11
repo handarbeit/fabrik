@@ -4281,9 +4281,75 @@ is reachable on every single evaluation the same way `checkVersionSkew`'s is —
 cannot outlive the condition that produced it, and there is no "subject went away" case to sweep
 for.
 
-**Non-goals.** No change to which conditions *produce* a warning, no TUI rendering change, and this is
+**What belongs in the panel (#2135, ADR-2135, FR-001).** An *operator-level* condition: a
+configuration, environment or engine fault that blocks or degrades work and needs a person to act.
+Per-item states (paused, awaiting input, escalated), transient runtime states (poll errors and rate limits
+— the header's backoff status shows them) and the output of interactive one-shot subcommands do not
+belong. Borderline lines are dispositioned individually, with a reason, in the audit table below.
+
+**The shared path (FR-005).** `warnings/report.go`:
+
+| Call | Use |
+|---|---|
+| `warnings.Report(w, Condition{Type, Subject, Title, Detail, FixAction?, FixParams?, Fingerprint?, LogLine?, Level?})` | log line to `w` (nil = none) **and** record the entry, in one call. Safe every poll. |
+| `warnings.Resolve(key)` | clear one entry when its re-checked condition no longer holds. |
+| `warnings.Reconcile(w, type, []Condition)` | report a complete set, then `ClearMissing(type, present)`. **Only when the check ran to completion**: an empty set clears the whole type, so a check that errored or returned early must not call it. |
+
+Rules: a new operator-level warning is a `Report`/`Reconcile` call, never a bare log line followed (or not)
+by `Record`; the writer is a parameter so the log-file-open and log-file-failed branches of `Run()` share
+one `startupW`; `FixAction == ""` is valid (the panel shows title and detail; the TUI fix key is then a
+no-op); keys are `<type>:<subject>` (the `ClearMissing` shape — `Condition.KeyOverride` exists only for the
+legacy `source_staleness` key). `warnings/scan_test.go` fails on any `[startup] warn…`, `[warn]`,
+`[upgrade] warning` or `WARNING:` literal in `engine/`, `cmd/`, `config/`, `stages/` that is not on its
+audited exception list (each entry carries a reason). **How a sibling adds a condition** (skill resolution,
+plugin loading, bare-name deprecation, `fabrik upgrade` migration — #2137/#2139/#2140): build a
+`warnings.Condition` with a stable `Type`, a `Subject`, a Title, a Detail ending in `Fix: …`, and call
+`Report` where the condition is detected and `Resolve`/`Reconcile` where the check passes (including every
+early-return branch that means "checked, nothing wrong"); add one test that records, repeats (one entry) and
+clears.
+
+**Dismissal and re-appearance.** `Entry.Fingerprint` is the stable identity of the condition. A dismissed
+entry stays dismissed while its fingerprint is unchanged and reappears when it changes; an empty new
+fingerprint keeps the stored one (so the TUI's `[Fix failed]` re-record never un-dismisses). `Report`
+defaults it to `Detail`. Volatile recorders pin an explicit one: `source_staleness` constant (commit
+counts), `version_skew` the version pair (PID), `stage_drift` the sorted missing-key set,
+`undeclared_reviewers` constant. `Record` skips the write when nothing material changed and `LastSeen` is
+under 10 minutes old (SC-003); `Clear` of an absent key does not write; the temp file is unique per write.
+
+**Audit (FR-004 / SC-002).** Every operator-level warning in the daemon's source, with its disposition:
+
+| Source | Disposition | Type / clear rule |
+|---|---|---|
+| source staleness, repo access, `allow_auto_merge`, version skew, stage drift, undeclared reviewers | **Panel** (migrated onto the shared path) | unchanged keys; `Resolve`/`ClearMissing` as before |
+| unrecognised `.fabrik/config.yaml` key | **Panel** (supersedes ADR-1544's stderr-only scope) | `config_key:<key>`; `Reconcile` each start |
+| ~60 `[warn] … invalid; using default` lines (`cmd/root.go`) | **Panel, one aggregated entry**; per-setting log lines kept | `config_value:settings`; `Reconcile` each start |
+| fine-grained PAT (`github_pat_`) | **Panel** | `config_token:fine_grained_pat`; cleared when a classic token is used |
+| `.fabrik/config.yaml` gitignored | **Panel** | `config_ignored:config.yaml`; `Reconcile` each start |
+| plugin state check failed / skill refresh failed / customised plugin skips auto-refresh | **Panel** (also still in the header) | `plugin_state:{check_failed,refresh_failed,customized}`; `Reconcile` each start |
+| no git credential helper (HTTPS) | **Panel** | `git_credentials:https`; `Resolve` when a helper exists or SSH/App auth applies |
+| Claude settings file unreadable/unparseable (`apiKeyHelper` refusal may be bypassed) | **Panel** | `api_key_helper_check:settings`; `Reconcile` each start |
+| `FABRIK_WORKER_ENV_PASSTHROUGH` entries ignored; Hookdeck env names not scrubbed | **Panel** | `worker_env:{ignored,hookdeck_dropped}`; `Reconcile` each start |
+| `CIBackstopTimeout` / `DrainDeadline` ordering | **Panel** | `timeout_ordering:{ci_backstop,drain_deadline}`; `Resolve` when valid |
+| log rotation failed / log file unopenable | **Panel** | `log_file:{rotation,open}`; `Reconcile` each start |
+| App installation does not cover N managed repos | **Panel** (aggregated) | `hookdeck_coverage:repos`; `Reconcile` each check |
+| repos with no forwarding hook (poll-only) | **Panel** (aggregated) | `webhook_coverage:repos`; `Reconcile` each check |
+| board / status-field fetch failed at startup; GHES `/meta` fetch or parse failed | Log only: transient, retried at the next start; the floor check is advisory | – |
+| board columns with no matching stage; holding stage without a column while `merge_train` is off | Log only: neither blocks nor degrades work | – |
+| board drift on a terminal item | Log only: per-item (FR-001) | – |
+| could not determine repo access / list the installation's repos | Log only: fail-open guess; the confirmed result is the `repo_access` entry | – |
+| could not resolve the bot user ID | Log only: cosmetic, fail-soft | – |
+| display-field (`Fabrik`, `Last activity`, `Last run`) lookup/write failed | Log only: optional field (`off` is valid), per-item writes | – |
+| webhook runtime failures (subprocess crash, 422s, unsupported event, orphan cleanup) | Log only: runtime health is the header's webhook ingestion status | – |
+| hookdeck coverage read failed | Log only: transient; the prior entry is deliberately left | – |
+| the check for unrecognised keys itself failed | Log only: nothing is known, so reconciling would wrongly clear entries | – |
+| re-exec path plugin messages | Log only: `Execute` re-evaluates and reports `plugin_state` right after | – |
+| the panel store itself failing (record/clear/sweep errors) | Log only | – |
+| `fabrik init` / `upgrade` / `watch` / `repair-board` output | Out of scope: interactive one-shot subcommands | – |
+| per-item `logf(item, "warn", …)` lines; poll errors and rate limits | Out of scope: per-item or transient runtime (FR-001) | – |
+
+**Non-goals.** No TUI layout change (the panel stays flat — no severity), and this is
 not a general warning-expiry/TTL mechanism — only subjects that have provably gone away (absent from a
-known-good set already computed elsewhere) are ever cleared. See ADR-1348.
+known-good set already computed elsewhere) are ever cleared. See ADR-1348, ADR-2135.
 
 ### 7.12 Slice Budget / Turn-Cap Preemption Limit
 
