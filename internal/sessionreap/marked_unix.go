@@ -10,7 +10,7 @@ import (
 
 // Owner-marker reap (#2128, ADR-2128).
 //
-// A worker's environment carries FABRIK_WORKER_OWNER=<nonce>; every descendant —
+// A worker's environment carries FABRIK_WORKER_OWNER=<owner file path>; every descendant —
 // go test, sim.test, its re-exec'd helpers — inherits it, whatever session,
 // process group, parent or cwd it ends up with. That makes the marker positive
 // evidence of ownership where process-tree shape never is: a backgrounded Bash

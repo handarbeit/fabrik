@@ -18,11 +18,13 @@ import (
 	"strings"
 )
 
-// OwnerVar is the per-invocation worker owner marker (#2128, ADR-2128): a
-// random nonce the engine sets in every worker's environment. Every descendant
-// of the worker — go test, sim.test, its re-exec'd helpers — inherits it, which
-// is what lets the engine reap them by owner rather than by process-tree shape,
-// and lets a test binary find the owner file that says who its worker is.
+// OwnerVar is the per-invocation worker owner marker (#2128, ADR-2128): the
+// path of the invocation's owner file (.fabrik/state/worker-owners/<nonce>.json,
+// holding the worker's PID and start token), which the engine sets in every
+// worker's environment. Every descendant of the worker — go test, sim.test, its
+// re-exec'd helpers — inherits it, which is what lets the engine reap them by
+// owner rather than by process-tree shape, and lets a test binary find the
+// owner file that says who its worker is.
 const OwnerVar = "FABRIK_WORKER_OWNER"
 
 // Group tags a scrubbed variable with why it is daemon-only.

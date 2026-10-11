@@ -80,9 +80,7 @@ func fastMarkedReap(t *testing.T) {
 	t.Cleanup(func() { markedReapGrace = prev })
 }
 
-// waitForMarker blocks until the helper's exec-time environment is readable
-// with the marker — the helper is exec'd by the time Start returns, but the
-// kernel table can lag a moment.
+// ownerPathIn returns the owner-file path for name under the owners directory.
 func ownerPathIn(t *testing.T, name string) string {
 	t.Helper()
 	return filepath.Join(workerOwnersDir(), name+".json")
