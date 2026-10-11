@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -555,5 +556,221 @@ func TestHubPruneKeepsLongAttachedSubscriber(t *testing.T) {
 	h2.Prune(clock)
 	if n := len(h2.Subscriptions("X")); n != 0 {
 		t.Fatalf("abandoned subscriber kept: %d subscriptions", n)
+	}
+}
+
+// blockingSink blocks inside Deliver until released, so a test can hold the
+// drain loop mid-delivery. completed counts Deliver calls that finished.
+type blockingSink struct {
+	entered   chan struct{} // receives once per Deliver call that begins
+	release   chan struct{} // closed (via unblock) to let every blocked Deliver finish
+	once      sync.Once
+	completed atomic.Int64
+	events    chan Event
+}
+
+func newBlockingSink() *blockingSink {
+	return &blockingSink{
+		entered: make(chan struct{}, 1000),
+		release: make(chan struct{}),
+		events:  make(chan Event, 1000),
+	}
+}
+
+func (b *blockingSink) Deliver(ev Event) error {
+	b.entered <- struct{}{}
+	<-b.release
+	b.completed.Add(1)
+	b.events <- ev
+	return nil
+}
+func (b *blockingSink) Superseded() {}
+func (b *blockingSink) unblock()    { b.once.Do(func() { close(b.release) }) }
+
+func runUnsubscribe(h *Hub, name, id string) (done chan int) {
+	done = make(chan int, 1)
+	go func() { done <- h.Unsubscribe(name, id) }()
+	return done
+}
+
+// TestHubUnsubscribeWaitsForInFlightDeliveryAndStopsTheRest is the #2168 R3
+// regression: with the drain loop blocked inside Deliver and N more events
+// queued, no delivery may complete once Unsubscribe has returned.
+func TestHubUnsubscribeWaitsForInFlightDeliveryAndStopsTheRest(t *testing.T) {
+	h := openHub(t, t.TempDir(), nil)
+	if _, err := h.Subscribe(Subscription{Subscriber: "X"}); err != nil {
+		t.Fatal(err)
+	}
+	sink := newBlockingSink()
+	t.Cleanup(sink.unblock) // runs before h.Close, which waits for the drain loop
+	h.Attach("X", sink)
+	const n = 20
+	for i := 1; i <= n; i++ {
+		h.Publish(ev(i, Merged))
+	}
+	select {
+	case <-sink.entered: // the drain loop is now inside Deliver for event 1
+	case <-time.After(3 * time.Second):
+		t.Fatal("drain loop never started delivering")
+	}
+
+	done := runUnsubscribe(h, "X", "")
+	waitFor(t, func() bool { return len(h.Subscriptions("X")) == 0 })
+	select {
+	case <-done:
+		t.Fatal("Unsubscribe returned while a Deliver was still in flight")
+	case <-time.After(100 * time.Millisecond):
+	}
+	sink.unblock()
+	select {
+	case removed := <-done:
+		if removed != 1 {
+			t.Fatalf("removed = %d, want 1", removed)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Unsubscribe never returned")
+	}
+	atReturn := sink.completed.Load()
+	time.Sleep(200 * time.Millisecond)
+	if got := sink.completed.Load(); got != atReturn {
+		t.Fatalf("%d event(s) delivered after Unsubscribe returned", got-atReturn)
+	}
+	if atReturn > 1 {
+		t.Fatalf("%d events delivered, only the in-flight one may complete", atReturn)
+	}
+	if q := h.Queued("X"); q != 0 {
+		t.Fatalf("queue not cleared by the last unsubscribe, Queued=%d", q)
+	}
+}
+
+// TestHubUnsubscribeAbandonsBatchTakenButNotWritten: the drain loop has taken a
+// batch and is about to write it when the subscription is removed; the batch
+// must be dropped, not written.
+func TestHubUnsubscribeAbandonsBatchTakenButNotWritten(t *testing.T) {
+	taken := make(chan struct{}, 10)
+	proceed := make(chan struct{})
+	var once sync.Once
+	open := func() { once.Do(func() { close(proceed) }) }
+	h := openHub(t, t.TempDir(), func(o *Options) {
+		o.beforeDeliver = func() {
+			taken <- struct{}{}
+			<-proceed
+		}
+	})
+	t.Cleanup(open)
+	if _, err := h.Subscribe(Subscription{Subscriber: "X"}); err != nil {
+		t.Fatal(err)
+	}
+	sink := newSink()
+	h.Attach("X", sink)
+	for i := 1; i <= 5; i++ {
+		h.Publish(ev(i, Merged))
+	}
+	select {
+	case <-taken:
+	case <-time.After(3 * time.Second):
+		t.Fatal("drain loop never took a batch")
+	}
+	done := runUnsubscribe(h, "X", "")
+	waitFor(t, func() bool { return len(h.Subscriptions("X")) == 0 && h.Queued("X") == 0 })
+	open()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Unsubscribe never returned")
+	}
+	sink.none(t)
+}
+
+// TestHubUnsubscribeDropsEnqueueThatRacedIt: a Publish that matched before the
+// unsubscribe may enqueue after it. Simulated deterministically by enqueueing
+// directly once Unsubscribe has returned.
+func TestHubUnsubscribeDropsEnqueueThatRacedIt(t *testing.T) {
+	h := openHub(t, t.TempDir(), nil)
+	if _, err := h.Subscribe(Subscription{Subscriber: "X"}); err != nil {
+		t.Fatal(err)
+	}
+	sink := newSink()
+	h.Attach("X", sink)
+	h.Publish(ev(1, Merged))
+	sink.wait(t)
+	if got := h.Unsubscribe("X", ""); got != 1 {
+		t.Fatalf("removed = %d", got)
+	}
+	h.mu.Lock()
+	s := h.subscribers["X"]
+	h.mu.Unlock()
+	h.enqueue(s, ev(2, Merged), 0, time.Now()) // the late enqueue of a stale Publish
+	sink.none(t)
+	waitFor(t, func() bool { return h.Queued("X") == 0 })
+}
+
+// TestHubPartialUnsubscribeKeepsOnlyRemainingMatches: removing one of several
+// subscriptions discards entries only it matched; the other still delivers.
+func TestHubPartialUnsubscribeKeepsOnlyRemainingMatches(t *testing.T) {
+	h := openHub(t, t.TempDir(), nil)
+	subA, err := h.Subscribe(Subscription{Subscriber: "X", Events: []EventType{Merged}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.Subscribe(Subscription{Subscriber: "X", Events: []EventType{Paused}}); err != nil {
+		t.Fatal(err)
+	}
+	h.Publish(ev(1, Merged)) // held: no session attached
+	h.Publish(ev(2, Paused))
+	if h.Queued("X") != 2 {
+		t.Fatalf("Queued = %d, want 2", h.Queued("X"))
+	}
+	if got := h.Unsubscribe("X", subA.ID); got != 1 {
+		t.Fatalf("removed = %d", got)
+	}
+	if h.Queued("X") != 1 {
+		t.Fatalf("Queued = %d after partial unsubscribe, want 1", h.Queued("X"))
+	}
+	sink := newSink()
+	h.Attach("X", sink)
+	if got := sink.wait(t); got.Type != Paused {
+		t.Fatalf("delivered %s, want paused", got.Type)
+	}
+	sink.none(t)
+	h.Publish(ev(3, Merged)) // no longer subscribed
+	h.Publish(ev(4, Paused))
+	if got := sink.wait(t); got.Issue != 4 {
+		t.Fatalf("delivered issue %d, want 4", got.Issue)
+	}
+	sink.none(t)
+}
+
+// TestHubResubscribeAfterLastUnsubscribeResumesDelivery: the attachment stays
+// bound after the last removal, and a later subscribe delivers on it again.
+func TestHubResubscribeAfterLastUnsubscribeResumesDelivery(t *testing.T) {
+	h := openHub(t, t.TempDir(), nil)
+	h.Subscribe(Subscription{Subscriber: "X"})
+	sink := newSink()
+	h.Attach("X", sink)
+	h.Unsubscribe("X", "")
+	h.Publish(ev(1, Merged))
+	sink.none(t)
+	if _, err := h.Subscribe(Subscription{Subscriber: "X"}); err != nil {
+		t.Fatal(err)
+	}
+	h.Publish(ev(2, Merged))
+	if got := sink.wait(t); got.Issue != 2 {
+		t.Fatalf("delivered issue %d, want 2", got.Issue)
+	}
+	sink.none(t)
+}
+
+func TestHubUnsubscribeUnknownIsHarmless(t *testing.T) {
+	h := openHub(t, t.TempDir(), nil)
+	if got := h.Unsubscribe("nobody", ""); got != 0 {
+		t.Fatalf("removed = %d, want 0", got)
+	}
+	h.Subscribe(Subscription{Subscriber: "X"})
+	if got := h.Unsubscribe("X", "sub-nope"); got != 0 {
+		t.Fatalf("removed = %d, want 0", got)
+	}
+	if len(h.Subscriptions("X")) != 1 {
+		t.Fatal("subscription must survive a no-op unsubscribe")
 	}
 }

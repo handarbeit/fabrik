@@ -40,7 +40,7 @@ func TestSubscribeRejectsLegacyEventTypes(t *testing.T) {
 // a pre-rename build still match / deliver under the new names after reload.
 func TestOpenMigratesLegacyEventTypes(t *testing.T) {
 	dir := t.TempDir()
-	reg := `{"subscriptions":[{"id":"s1","subscriber":"X","events":["claude-limit-suspended","merged"]}]}`
+	reg := `{"subscriptions":[{"id":"s1","subscriber":"X","events":["claude-limit-suspended","claude-limit-lifted","merged"]}]}`
 	if err := os.WriteFile(filepath.Join(dir, "subscriptions.json"), []byte(reg), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +54,7 @@ func TestOpenMigratesLegacyEventTypes(t *testing.T) {
 
 	h := openHub(t, dir, func(o *Options) { o.Now = func() time.Time { return time.Now() } })
 	subs := h.Subscriptions("X")
-	if len(subs) != 1 || subs[0].Events[0] != ClaudeUsageLimited || subs[0].Events[1] != Merged {
+	if len(subs) != 1 || subs[0].Events[0] != ClaudeUsageLimited || subs[0].Events[1] != ClaudeUsageLimitLifted || subs[0].Events[2] != Merged {
 		t.Fatalf("subscription not migrated: %+v", subs)
 	}
 	if !subs[0].Matches(Event{Type: ClaudeUsageLimited}) {
