@@ -93,6 +93,18 @@ type TrainRowEvent struct {
 
 func (TrainRowEvent) tuiEvent() {}
 
+// WorkerSlotsEvent reports worker-slot occupancy for the In Progress title (#2115,
+// ADR 2115): the general max_concurrent pool and the reserved merge-train slot,
+// shown separately (e.g. "slots 5/5 + train 1/1"). TrainMax is 0 when merge_train is
+// off, in which case no train segment is rendered. Delivered structurally so the
+// latest value is never dropped.
+type WorkerSlotsEvent struct {
+	InUse, Max           int
+	TrainInUse, TrainMax int
+}
+
+func (WorkerSlotsEvent) tuiEvent() {}
+
 // IssueBlockedEvent is emitted when an issue is held at the dependency gate.
 // It is emitted each time checkDependencies fires for a blocked issue.
 type IssueBlockedEvent struct {

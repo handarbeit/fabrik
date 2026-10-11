@@ -889,7 +889,11 @@ func Execute() error {
 		fmt.Printf("  yolo:    %v\n", cfg.Yolo)
 		fmt.Printf("  auto-upgrade: %v\n", cfg.AutoUpgrade)
 		fmt.Printf("  poll:    %ds\n", cfg.PollSeconds)
-		fmt.Printf("  workers: %d\n", cfg.MaxConcurrent)
+		if cfg.MergeTrain == "on" {
+			fmt.Printf("  workers: %d (+1 reserved merge-train slot)\n", cfg.MaxConcurrent)
+		} else {
+			fmt.Printf("  workers: %d\n", cfg.MaxConcurrent)
+		}
 		if cfg.MaxRetries == 0 {
 			fmt.Printf("  max-retries: unlimited\n")
 		} else {

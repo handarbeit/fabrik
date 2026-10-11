@@ -269,6 +269,7 @@ type Engine struct {
 	wakeCh               chan struct{}        // TUI sends on this to wake the poll loop immediately; nil if no TUI
 	stopCh               chan tui.StopRequest // TUI sends on this to stop a specific in-flight issue; nil if no TUI
 	sem                  chan struct{}        // semaphore bounding concurrent workers across poll cycles
+	trainSem             chan struct{}        // reserved merge-train worker slot (#2115, ADR 2115); nil when merge_train is off (and on NewWithDeps engines unless EnableTrainReservedSlotForTest); touched only by acquireTrainSlotEp
 	wg                   sync.WaitGroup       // tracks in-flight workers for graceful shutdown; also tracks the shutdown pause-write phase (runShutdownPause, shutdown.go) so one waitGroupTimeout call bounds both (ADR-1393)
 	cloneInFlight        sync.Map             // key: "owner/repo" string, value: *cloneCall; per-repo bare-clone coordination
 	// trainRuns is the table of persisted merge-train runs (#2051, ADR 2051). Non-nil only
@@ -653,6 +654,7 @@ func New(cfg Config) (*Engine, error) {
 		checkedAutoMergeRepos:     make(map[string]bool),
 		repoAccess:                make(map[string]gh.RepoAccess),
 		sem:                       make(chan struct{}, cfg.MaxConcurrent),
+		trainSem:                  newTrainSlot(cfg),
 		mergeTrainEjectionCounts:  make(map[string]int),
 		mergeTrainCIDeferred:      make(map[string]string),
 		mergeTrainCloneSkipCounts: make(map[string]int),
@@ -1364,4 +1366,62 @@ func (e *Engine) postSpawnCloneError(parentOwner, parentRepo string, parentItem 
 		awaitingInput: true,
 	})
 	e.logf(parentItem.Number, "error", "cannot clone spawn target %s/%s: %v — pausing parent\n", targetOwner, targetRepo, cloneErr)
+}
+
+// trainSlotCapacity is the size of the reserved merge-train worker slot (#2115,
+// ADR 2115): one when merge_train is on, none otherwise. It is a fixed count — there
+// is deliberately no configuration key for it.
+func trainSlotCapacity(cfg Config) int {
+	if cfg.MergeTrain == "on" {
+		return 1
+	}
+	return 0
+}
+
+// newTrainSlot builds the reserved-slot channel for cfg, or nil when merge_train is
+// off so "merge_train off changes nothing" holds structurally.
+func newTrainSlot(cfg Config) chan struct{} {
+	n := trainSlotCapacity(cfg)
+	if n == 0 {
+		return nil
+	}
+	return make(chan struct{}, n)
+}
+
+// EnableTrainReservedSlotForTest creates the reserved merge-train slot on an engine
+// built by NewWithDeps, which leaves it nil by default so the #2046 slot tests keep
+// observing a single pool. A no-op unless merge_train is on.
+func (e *Engine) EnableTrainReservedSlotForTest() {
+	e.trainSem = newTrainSlot(e.cfg)
+}
+
+// trainSlotUsage reports the reserved merge-train slot's occupancy: slots in use and
+// its capacity (0, 0 when no slot exists). Exact and safe to call concurrently.
+func (e *Engine) trainSlotUsage() (inUse, capacity int) {
+	return len(e.trainSem), cap(e.trainSem)
+}
+
+// HoldGeneralWorkerSlotsForTest occupies every general (max_concurrent) worker slot, as
+// a saturated pool of stage workers would, and returns the function that frees them.
+// Test seam only (#2115, tests/sim); never called in production.
+func (e *Engine) HoldGeneralWorkerSlotsForTest() (release func()) {
+	n := cap(e.sem)
+	for i := 0; i < n; i++ {
+		e.sem <- struct{}{}
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			for i := 0; i < n; i++ {
+				<-e.sem
+			}
+		})
+	}
+}
+
+// WorkerSlotUsageForTest reports general-pool and reserved-train-slot occupancy.
+// Test seam only (#2115, tests/sim).
+func (e *Engine) WorkerSlotUsageForTest() (general, train, trainMax int) {
+	train, trainMax = e.trainSlotUsage()
+	return len(e.sem), train, trainMax
 }

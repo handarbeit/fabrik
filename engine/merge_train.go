@@ -2645,7 +2645,7 @@ func (e *Engine) resolveConflictWithClaude(ctx context.Context, repoKey string, 
 	return resolved, diag, nil
 }
 
-// acquireTrainSlot takes one e.sem slot for a single merge-train Claude invocation
+// acquireTrainSlot takes one worker slot for a single merge-train Claude invocation
 // (#2046) and returns the function that gives it back. The train holds no slot for
 // its lifecycle — assembly git work, PR operations, the trial-CI wait, bisection and
 // landing all run without one — so this is the only place it ever takes one. A
@@ -2653,6 +2653,11 @@ func (e *Engine) resolveConflictWithClaude(ctx context.Context, repoKey string, 
 // nothing extra; only a real wait is announced, through logfRepo so the repo's job
 // row shows it (ADR-1661, #1661/PR #1663). While waiting the train holds no slot, so
 // stage workers always make progress and no slot-for-slot deadlock is possible.
+//
+// The slot is the engine's reserved train slot (#2115, ADR 2115) when it is free,
+// else a free general e.sem slot, else the call waits for either. Each acquire takes
+// exactly one slot from exactly one pool and release gives back that same pool's, so
+// the no-deadlock argument holds across both. Only this function touches e.trainSem.
 //
 // A cancellation while waiting returns an error wrapping ctx.Err(); callers treat it
 // as "could not attempt" (see trainCancelled), never as an unresolvable conflict.
@@ -2667,23 +2672,41 @@ func (e *Engine) acquireTrainSlot(ctx context.Context, repoKey string, memberIte
 // slot puts the phase that was current before back. No board line is involved in
 // either direction, so the board is untouched.
 func (e *Engine) acquireTrainSlotEp(ctx context.Context, ep *trainEpisode, repoKey string, memberItem gh.ProjectItem) (release func(), err error) {
+	// Reserved slot first (#2115): a deterministic non-blocking attempt, so a train
+	// never waits on (or takes from) the general pool while the reserved slot is
+	// free. e.trainSem is nil when merge_train is off; a nil channel is never ready
+	// in a select, so that case falls straight through to today's behaviour.
+	// Then a free general slot, so a second concurrent partition is never slower
+	// than before the reserved slot existed.
+	var held chan struct{}
 	select {
-	case e.sem <- struct{}{}:
+	case e.trainSem <- struct{}{}:
+		held = e.trainSem
 	default:
+		select {
+		case e.sem <- struct{}{}:
+			held = e.sem
+		default:
+		}
+	}
+	if held == nil {
 		e.logfRepo(repoKey, "merge-train", "waiting for a free worker slot for conflict resolution on #%d\n", memberItem.Number)
 		prev := ep.currentPhaseLabel()
 		e.noteTrainPhase(ep, repoKey, nil, phaseWaitingForSlot())
 		select {
+		case e.trainSem <- struct{}{}:
+			held = e.trainSem
 		case e.sem <- struct{}{}:
-			if prev != "" {
-				e.noteTrainPhase(ep, repoKey, nil, trainPhase{label: prev})
-			}
+			held = e.sem
 		case <-ctx.Done():
 			return nil, fmt.Errorf("waiting for a worker slot: %w", ctx.Err())
 		}
+		if prev != "" {
+			e.noteTrainPhase(ep, repoKey, nil, trainPhase{label: prev})
+		}
 	}
 	var once sync.Once
-	return func() { once.Do(func() { <-e.sem }) }, nil
+	return func() { once.Do(func() { <-held }) }, nil
 }
 
 // trainCancelled reports whether err (an assembly/resolution error) is a

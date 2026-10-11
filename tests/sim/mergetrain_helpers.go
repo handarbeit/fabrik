@@ -212,6 +212,9 @@ func mergeTrainEnv(t *testing.T, opts mergeTrainEnvOptions) *Env {
 		env.TrainStateDir = t.TempDir()
 		env.Engine.EnableTrainRunsForTest(env.TrainStateDir)
 	}
+	// Production (New) creates the reserved merge-train worker slot whenever
+	// merge_train is on (#2115); NewWithDeps does not by default, so enable it to match.
+	env.Engine.EnableTrainReservedSlotForTest()
 	env.Engine.SetTrainCIPollIntervalForTest(15 * time.Millisecond)
 	env.Engine.SetMergeTrainOverlapDisabledForTest(!opts.OverlapAware)
 	env.Engine.SetMergeTrainInvalidationDisabledForTest(!opts.OverlapAware)
@@ -232,6 +235,7 @@ func restartMergeTrainEnv(t *testing.T, env *Env) *Env {
 	t.Helper()
 	restarted := RestartEnv(t, env)
 	restarted.Engine.SetTrainCIPollIntervalForTest(15 * time.Millisecond)
+	restarted.Engine.EnableTrainReservedSlotForTest()
 	// As mergeTrainEnv: the restart scenarios predate #2047 and do not opt in.
 	restarted.Engine.SetMergeTrainOverlapDisabledForTest(true)
 	restarted.Engine.SetMergeTrainInvalidationDisabledForTest(true)
