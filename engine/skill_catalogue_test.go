@@ -99,3 +99,14 @@ func TestDiscoverPlugin_CommandsAreNotSkills(t *testing.T) {
 		t.Errorf("skills = %v, want none", p.skillNames())
 	}
 }
+
+// A sibling directory sharing the plugin directory's name as a string prefix
+// (plug vs plug-evil) is outside the plugin root and must be ignored.
+func TestDiscoverPlugin_ManifestSkillsSiblingPrefixIgnored(t *testing.T) {
+	outer := t.TempDir()
+	writeSkill(t, filepath.Join(outer, "plug-evil", "skills", "x", "SKILL.md"))
+	dir := writePlugin(t, filepath.Join(outer, "plug"), `{"name":"m","skills":"../plug-evil/skills"}`)
+	if p := discoverPlugin(dir); len(p.Skills) != 0 {
+		t.Errorf("skills = %v, want none", p.skillNames())
+	}
+}

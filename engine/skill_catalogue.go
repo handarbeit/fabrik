@@ -82,7 +82,7 @@ func discoverPlugin(dir string) loadedPlugin {
 		}
 		for _, rel := range paths {
 			target := filepath.Join(dir, filepath.FromSlash(strings.TrimPrefix(rel, "./")))
-			if !strings.HasPrefix(filepath.Clean(target), filepath.Clean(dir)) {
+			if rel, err := filepath.Rel(dir, target); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
 				continue // outside the plugin root
 			}
 			if fi, err := os.Stat(filepath.Join(target, "SKILL.md")); err == nil && !fi.IsDir() {

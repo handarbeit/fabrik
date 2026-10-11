@@ -270,3 +270,35 @@ func TestSkillDispatch_CommentPathQualifiesVariantSkill(t *testing.T) {
 		t.Errorf("invoker saw CommentSkill %q, want %q", seen, want)
 	}
 }
+
+// The comment path never reaches finalizeStageOutcome, so a resolving comment
+// pass removes fabrik:skill-unresolved itself once every reference resolves.
+func TestSkillDispatch_CommentPathRecoveryRemovesLabel(t *testing.T) {
+	skipIfNoGit(t)
+	isolateWarningsFile(t)
+	pdir := skillPlugin(t, t.TempDir(), "base", plugin.BasePluginName, "fix-ci")
+	claude := &mockClaudeInvoker{
+		invokeForCommentsFn: func(*stages.Stage, gh.ProjectItem, []gh.Comment, string, InvokeOptions) (string, bool, TokenUsage, error) {
+			return "ok", false, TokenUsage{}, nil
+		},
+	}
+	client := &mockGitHubClient{}
+	eng := testEngineWithRepo(t, client, claude)
+	eng.skillResolver = newSkillResolver([]string{pdir})
+
+	stage := &stages.Stage{Name: "Review", Order: 1, CommentSkill: "fix-ci", Completion: stages.CompletionCriteria{Type: "claude"}}
+	item := gh.ProjectItem{Number: 306, Body: "spec", Labels: []string{skillUnresolvedLabel}}
+	comments := []gh.Comment{{ID: "C_1", DatabaseID: 1, Author: "human", Body: "go"}}
+	if _, err := eng.processCommentsClassified(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, item, stage, comments); err != nil {
+		t.Fatal(err)
+	}
+	removed := false
+	for _, r := range client.removeLabelCalls {
+		if r.labelName == skillUnresolvedLabel {
+			removed = true
+		}
+	}
+	if !removed {
+		t.Error("fabrik:skill-unresolved not removed after the comment path resolved")
+	}
+}

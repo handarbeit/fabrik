@@ -263,10 +263,18 @@ func (e *Engine) processCommentsClassified(ctx context.Context, board *gh.Projec
 		}
 		return "", resolveErr
 	}
-	stage = resolvedStage
 	for _, r := range resolvedRefs {
 		e.clearSkillUnresolved(stage.Name, r.Key)
 	}
+	// The comment path never reaches finalizeStageOutcome, which is where the
+	// label is otherwise cleared. Clear it here once every skill reference of
+	// the stage resolves, so a fixed configuration does not leave it behind.
+	if len(resolvedRefs) > 0 && hasLabel(item.Labels, skillUnresolvedLabel) {
+		if _, _, allErr := e.resolveStageSkills(stage); allErr == nil {
+			e.removeLabel(item, skillUnresolvedLabel)
+		}
+	}
+	stage = resolvedStage
 
 	// Merge any unresolved PR review thread comments into the working slice.
 	// This ensures that when a user nudge arrives (e.g. "please address Copilot
