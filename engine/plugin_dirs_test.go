@@ -259,3 +259,67 @@ func TestNew_PluginDirsRefusedOnDuplicateName(t *testing.T) {
 		t.Fatalf("global modified by refused New: %v", claudePluginDirs)
 	}
 }
+
+func localWorkflowsDir(fabrikDir string) string {
+	return filepath.Join(fabrikDir, ".fabrik", "plugins", "local-workflows")
+}
+
+// FR-007: local-workflows loads automatically, right after the base and
+// before the configured extras.
+func TestResolvePluginDirs_AutoLoadsLocalWorkflows(t *testing.T) {
+	fabrikDir := t.TempDir()
+	base := namedPlugin(t, filepath.Join(fabrikDir, ".fabrik", "plugin"), "fabrik")
+	lw := namedPlugin(t, localWorkflowsDir(fabrikDir), "local-workflows")
+	extra := namedPlugin(t, filepath.Join(fabrikDir, "extra"), "extra")
+
+	got, err := resolvePluginDirs(fabrikDir, "", []string{extra})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{base, lw, extra}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+func TestResolvePluginDirs_LocalWorkflowsAbsentIsNoChange(t *testing.T) {
+	fabrikDir := t.TempDir()
+	base := namedPlugin(t, filepath.Join(fabrikDir, ".fabrik", "plugin"), "fabrik")
+	got, err := resolvePluginDirs(fabrikDir, "", nil)
+	if err != nil || !reflect.DeepEqual(got, []string{base}) {
+		t.Fatalf("got %v err %v", got, err)
+	}
+}
+
+// An operator who also lists the directory in plugin_dirs is not refused.
+func TestResolvePluginDirs_LocalWorkflowsAlsoListedIsDeduplicated(t *testing.T) {
+	fabrikDir := t.TempDir()
+	base := namedPlugin(t, filepath.Join(fabrikDir, ".fabrik", "plugin"), "fabrik")
+	lw := namedPlugin(t, localWorkflowsDir(fabrikDir), "local-workflows")
+	got, err := resolvePluginDirs(fabrikDir, "", []string{".fabrik/plugins/local-workflows"})
+	if err != nil || !reflect.DeepEqual(got, []string{base, lw}) {
+		t.Fatalf("got %v err %v", got, err)
+	}
+}
+
+// A copy that still declares the base name (a half-done move) is refused
+// loudly rather than loaded beside the base.
+func TestResolvePluginDirs_LocalWorkflowsNameClashIsRefused(t *testing.T) {
+	fabrikDir := t.TempDir()
+	namedPlugin(t, filepath.Join(fabrikDir, ".fabrik", "plugin"), "fabrik")
+	namedPlugin(t, localWorkflowsDir(fabrikDir), "fabrik")
+	_, err := resolvePluginDirs(fabrikDir, "", nil)
+	if err == nil || !strings.Contains(err.Error(), "must be unique") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestResolvePluginDirs_LocalWorkflowsLoadsBesideDevOverride(t *testing.T) {
+	fabrikDir := t.TempDir()
+	override := namedPlugin(t, filepath.Join(t.TempDir(), "vendored"), "fabrik")
+	lw := namedPlugin(t, localWorkflowsDir(fabrikDir), "local-workflows")
+	got, err := resolvePluginDirs(fabrikDir, override, nil)
+	if err != nil || !reflect.DeepEqual(got, []string{override, lw}) {
+		t.Fatalf("got %v err %v", got, err)
+	}
+}

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/handarbeit/fabrik/plugin"
 )
 
 // pluginManifestRel is the manifest path inside a Claude Code plugin directory.
@@ -13,7 +15,9 @@ const pluginManifestRel = ".claude-plugin/plugin.json"
 // resolvePluginDirs builds the ordered list of plugin directories handed to
 // every worker (ADR 2136). Index 0 is the base plugin when one exists: the
 // override (--plugin-dir) if set, otherwise <fabrikDir>/.fabrik/plugin if it
-// exists. The configured extras follow in order.
+// exists. <fabrikDir>/.fabrik/plugins/local-workflows follows it automatically
+// when it exists (#2139, FR-007 — where `fabrik upgrade` moves a customised
+// plugin), then the configured extras in order.
 //
 // Extras are resolved against fabrikDir when relative, cleaned, and
 // de-duplicated by path (a repeat, or an extra equal to the base, is dropped
@@ -45,7 +49,14 @@ func resolvePluginDirs(fabrikDir, override string, extras []string) ([]string, e
 		}
 	}
 
-	for _, extra := range extras {
+	// local-workflows is loaded like a configured extra, ahead of them, so the
+	// same validation (readable manifest, unique name, de-duplication by path)
+	// applies. An unreadable manifest is an error, not a silent skip.
+	all := extras
+	if lw := filepath.Join(fabrikDir, filepath.FromSlash(plugin.LocalWorkflowsRelDir)); isDir(lw) {
+		all = append([]string{lw}, extras...)
+	}
+	for _, extra := range all {
 		if extra == "" {
 			continue
 		}
@@ -96,4 +107,9 @@ func readPluginManifestName(dir string) (string, error) {
 		return "", fmt.Errorf("plugin manifest %s has no name", path)
 	}
 	return m.Name, nil
+}
+
+func isDir(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && fi.IsDir()
 }
