@@ -2438,26 +2438,40 @@ func itemHasBaseLabel(item gh.ProjectItem) bool {
 	return false
 }
 
+// baseLabelFor selects the "base:<branch>" label an item resolves to: the first
+// non-empty one in label order. It returns that label's branch value ("" when
+// there is none) and the branch values of any further base: labels it ignored.
+// It is the single selection rule shared by baseBranchForItem and the spawn
+// step that copies a parent's base to its same-repo children (#2090), so a
+// parent and the children inheriting from it can never pick different labels.
+func baseLabelFor(labels []string) (branch string, extras []string) {
+	const prefix = "base:"
+	for _, label := range labels {
+		if !strings.HasPrefix(label, prefix) {
+			continue
+		}
+		b := strings.TrimPrefix(label, prefix)
+		if b == "" {
+			continue
+		}
+		if branch == "" {
+			branch = b
+		} else {
+			extras = append(extras, b)
+		}
+	}
+	return branch, extras
+}
+
 // baseBranchForItem scans item labels for a "base:<branch>" label and returns the
 // named branch if it exists on the remote. If multiple base: labels are present, it
 // uses the first and logs a warning. If the named branch does not exist on the remote,
 // it logs a warning, posts an issue comment, and falls back to DefaultBaseBranch.
 // Returns an error only when DefaultBaseBranch itself fails.
 func (e *Engine) baseBranchForItem(item gh.ProjectItem, wm *WorktreeManager) (string, error) {
-	const prefix = "base:"
-	var candidate string
-	for _, label := range item.Labels {
-		if strings.HasPrefix(label, prefix) {
-			branch := strings.TrimPrefix(label, prefix)
-			if branch == "" {
-				continue
-			}
-			if candidate == "" {
-				candidate = branch
-			} else {
-				e.logf(item.Number, "warn", "multiple base: labels found, using %q (ignoring %q)\n", candidate, branch)
-			}
-		}
+	candidate, extras := baseLabelFor(item.Labels)
+	for _, branch := range extras {
+		e.logf(item.Number, "warn", "multiple base: labels found, using %q (ignoring %q)\n", candidate, branch)
 	}
 
 	if candidate == "" {
