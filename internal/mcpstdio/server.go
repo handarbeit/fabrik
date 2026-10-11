@@ -64,6 +64,9 @@ type Server struct {
 	// UnreachableGrace overrides DefaultUnreachableGrace.
 	UnreachableGrace time.Duration
 
+	skewMu   sync.Mutex
+	skewDone bool // the skew note has been shown; never repeated
+
 	wmu        sync.Mutex
 	streamOnce sync.Once
 	streamWG   sync.WaitGroup
@@ -299,12 +302,75 @@ func (s *Server) toolsCall(ctx context.Context, req request) {
 		pretty.Write(result)
 	}
 	res := textResult(pretty.String(), false)
+	daemonVersion := ""
+	if p.Name == ToolHealth {
+		var h struct {
+			Version string `json:"version"`
+		}
+		if json.Unmarshal(result, &h) == nil {
+			daemonVersion = h.Version
+			res.Content = append(res.Content, toolContent{Type: "text", Text: versionsLine(h.Version, s.Version)})
+		}
+	}
+	if note := s.skewNote(ctx, daemonVersion); note != "" {
+		res.Content = append(res.Content, toolContent{Type: "text", Text: note})
+	}
 	if p.Name == ToolSubscribe {
 		// The daemon cannot know whether this session loaded the shim as a channel;
 		// say so rather than let a successful subscribe imply delivery.
 		res.Content = append(res.Content, toolContent{Type: "text", Text: subscribeNote(s.Subscriber)})
 	}
 	s.reply(req.ID, res)
+}
+
+// versionsLine is the fabrik_health line naming both builds.
+func versionsLine(daemon, shim string) string {
+	if daemon == "" {
+		daemon = "unknown"
+	}
+	if shim == "" {
+		shim = "unknown"
+	}
+	return fmt.Sprintf("Versions — daemon: %s, MCP server: %s", daemon, shim)
+}
+
+// skewNote returns the version-skew notice the first time this server sees a
+// daemon build different from its own, and "" every other time (#2168). The
+// daemon self-upgrades while this server lives as long as its Claude session,
+// so skew is the normal case; the notice says what to do about it. daemonVersion
+// is the daemon's version when the calling tool already returned it, otherwise
+// one hello asks. Until the notice is shown each successful tool call checks
+// again — a daemon that upgrades mid-session is noticed — and a failed or
+// version-less hello is simply "unknown": no note, no error, retried next call.
+// Versions are compared as opaque strings. A server with no version of its own
+// has nothing to compare.
+func (s *Server) skewNote(ctx context.Context, daemonVersion string) string {
+	if s.Version == "" {
+		return ""
+	}
+	s.skewMu.Lock()
+	defer s.skewMu.Unlock()
+	if s.skewDone {
+		return ""
+	}
+	if daemonVersion == "" {
+		cctx, cancel := context.WithTimeout(ctx, s.CallTimeout)
+		defer cancel()
+		var hello struct {
+			DaemonVersion string `json:"daemon_version"`
+		}
+		if err := s.Call(cctx, s.SocketPath, localapi.MethodHello, nil, &hello); err != nil {
+			return ""
+		}
+		daemonVersion = hello.DaemonVersion
+	}
+	if daemonVersion == "" || daemonVersion == s.Version {
+		return ""
+	}
+	s.skewDone = true
+	return fmt.Sprintf("Note: the Fabrik daemon is %s but this MCP server is %s. The daemon has been upgraded or rebuilt since this session started; "+
+		"restart the Claude session to pick up the new server. Until then a tool or event name the daemon changed may be rejected or mapped (the response says which).",
+		daemonVersion, s.Version)
 }
 
 func subscribeNote(attached string) string {

@@ -206,9 +206,21 @@ func TestInitializeToolsListAndOneCallEach(t *testing.T) {
 		t.Errorf("daemon saw %+v (filter %+v)", be.lastBoard, be.lastBoard.Filter)
 	}
 
-	text, isErr = toolText(t, ids["6"])
-	if isErr || !strings.Contains(text, "stub-v") {
-		t.Errorf("health call: err=%v text=%s", isErr, text)
+	// Health carries the daemon's JSON, a line naming both builds, and — because
+	// the stub's "stub-v" differs from the server's "v-test" — the skew note.
+	blocks := ids["6"]["result"].(map[string]any)["content"].([]any)
+	if len(blocks) != 3 {
+		t.Fatalf("health call: want 3 content blocks, got %v", blocks)
+	}
+	text = blocks[0].(map[string]any)["text"].(string)
+	if !strings.Contains(text, "stub-v") {
+		t.Errorf("health call text=%s", text)
+	}
+	if got := blocks[1].(map[string]any)["text"].(string); got != "Versions — daemon: stub-v, MCP server: v-test" {
+		t.Errorf("versions line = %q", got)
+	}
+	if got := blocks[2].(map[string]any)["text"].(string); !strings.Contains(got, "restart the Claude session") {
+		t.Errorf("skew note = %q", got)
 	}
 }
 
