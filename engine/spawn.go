@@ -596,6 +596,49 @@ func (e *Engine) spawnTargetServedByThisInstance(childOwner, childRepo string) b
 	return childOwner == e.cfg.Owner && childRepo == e.cfg.Repo
 }
 
+// inheritChildLabels copies the parent's inheritable labels onto a spawned
+// child (#2090, ADR 2090): the label baseLabelFor selects from the parent
+// ("base:<branch>", same owner/repo only — the branch may not exist elsewhere),
+// then fabrik:yolo and fabrik:cruise (any repo).
+//
+// The base: write is fail-closed: if it fails, inheritChildLabels returns the
+// error immediately (before the autonomy labels) and the caller aborts the
+// spawn ahead of the child's Status placement — a child placed without its
+// base: would fork from and target the default branch, and under yolo land on
+// it. fabrik:yolo/fabrik:cruise stay best-effort: a failure is logged at warn
+// and only reduces automation.
+//
+// When resuming, childLabels is the child's live label set from
+// FetchProjectItem and labels it already carries are not written again, so a
+// second retry makes no label writes (and a retry after a failed base: write
+// writes exactly the missing label). A fresh child passes resuming=false and
+// always gets the adds. It never touches the child's board Status.
+func (e *Engine) inheritChildLabels(parent gh.ProjectItem, parentOwner, parentRepo, blockRepo, childOwner, childRepo string, childNumber int, resuming bool, childLabels []string) error {
+	var baseWant string
+	if strings.EqualFold(blockRepo, parentOwner+"/"+parentRepo) {
+		if branch, _ := baseLabelFor(parent.Labels); branch != "" {
+			baseWant = "base:" + branch
+		}
+	}
+	if baseWant != "" && !(resuming && hasLabel(childLabels, baseWant)) {
+		if err := e.client.AddLabelToIssue(childOwner, childRepo, childNumber, baseWant); err != nil {
+			return fmt.Errorf("adding %s to %s#%d: %w", baseWant, blockRepo, childNumber, err)
+		}
+	}
+	for _, l := range []string{"fabrik:yolo", "fabrik:cruise"} {
+		if !hasLabel(parent.Labels, l) {
+			continue
+		}
+		if resuming && hasLabel(childLabels, l) {
+			continue
+		}
+		if err := e.client.AddLabelToIssue(childOwner, childRepo, childNumber, l); err != nil {
+			e.logf(parent.Number, "warn", "could not add %s to %s#%d: %v\n", l, blockRepo, childNumber, err)
+		}
+	}
+	return nil
+}
+
 // spawnChildren creates the child issues described by blocks, adds them to the
 // project board, assigns them (cfg.User in PAT mode, the parent's human assignees under App auth), links them as blockedBy
 // dependencies of the parent, and marks the parent with fabrik:children-spawned.
@@ -745,6 +788,7 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 		resuming := false
 		var childNumber int
 		var childNodeID string
+		var resumedLabels []string
 		if n, ok := alreadyCreated[blockIndex]; ok {
 			// This block's child was already created by a previous attempt —
 			// resolve its node ID instead of creating a duplicate.
@@ -760,6 +804,7 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 				return spawned, false, fmt.Errorf("spawn: resuming block %d (child %s#%d): %w", blockIndex, block.Repo, childNumber, err)
 			}
 			childNodeID = pi.ID
+			resumedLabels = pi.Labels
 			e.logf(item.Number, "spawn", "resuming block %d: child %s/%s#%d already created\n", blockIndex, childOwner, childRepo, childNumber)
 		} else {
 			// PAT mode: every spawned child is assigned to cfg.User — the user
@@ -877,6 +922,26 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 			e.logf(item.Number, "warn", "could not add fabrik:sub-issue to %s#%d: %v\n", block.Repo, childNumber, err)
 		}
 
+		// Inherit the parent's base: (same repo only), fabrik:yolo and fabrik:cruise
+		// BEFORE the Status placement below (#2090, ADR 2090): placement is what
+		// makes the child dispatchable, and the first dispatch's EnsureWorktree
+		// reads base:, so a label added afterwards could lose that race. On resume
+		// only the labels the child lacks are written; this runs even when the
+		// child already has a Status (placement is then skipped, the labels are not).
+		//
+		// A failed base: write is fail-closed: abort before placement. The child
+		// has no Status yet, so it is not dispatchable; on a resumable origin its
+		// fabrik:spawned-child marker is already written, so the retry resumes it
+		// and the resume path's missing-label check writes base: then.
+		if err := e.inheritChildLabels(item, owner, repo, block.Repo, childOwner, childRepo, childNumber, resuming, resumedLabels); err != nil {
+			msg := fmt.Sprintf("🏭 **Fabrik — spawn failed**\n\nCould not apply the inherited base branch label to child `%s#%d` (spawn block #%d): `%v`. The child was not placed on the board column, so it cannot be dispatched against the wrong base branch.\n\nCreated so far: %s\n\n%s",
+				block.Repo, childNumber, blockIndex, err, formatSpawnedList(spawned), spawnRetryInstruction)
+			e.pauseIssue(item, msg, pauseOpts{
+				labelEcho: true,
+			})
+			return spawned, false, fmt.Errorf("spawn: inheriting base label for child %s#%d: %w", block.Repo, childNumber, err)
+		}
+
 		// Set child's project Status to Specify (or first processing stage) when statusField is available.
 		// Any failure here is non-fatal to spawning (the child issue, board item, and
 		// blockedBy link already exist) but leaves the child stranded in whatever column
@@ -903,18 +968,6 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 		} else {
 			e.logf(item.Number, "warn", "no Specify/processing status option found for %s#%d; child lands in Backlog\n", block.Repo, childNumber)
 			e.recordChildPlacementFailure(childOwner, childRepo, childNumber)
-		}
-
-		// Inherit fabrik:yolo and fabrik:cruise from parent (idempotent add; enables autonomous child pipeline).
-		if hasLabel(item.Labels, "fabrik:yolo") {
-			if err := e.client.AddLabelToIssue(childOwner, childRepo, childNumber, "fabrik:yolo"); err != nil {
-				e.logf(item.Number, "warn", "could not add fabrik:yolo to %s#%d: %v\n", block.Repo, childNumber, err)
-			}
-		}
-		if hasLabel(item.Labels, "fabrik:cruise") {
-			if err := e.client.AddLabelToIssue(childOwner, childRepo, childNumber, "fabrik:cruise"); err != nil {
-				e.logf(item.Number, "warn", "could not add fabrik:cruise to %s#%d: %v\n", block.Repo, childNumber, err)
-			}
 		}
 	}
 
