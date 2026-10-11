@@ -178,6 +178,9 @@ func reapWorktreeProcessesDarwin(wtDir string, issueNumber int, logf func(int, s
 	ctx, cancel := context.WithTimeout(context.Background(), worktreeReapLsofTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "lsof", "-a", "-d", "cwd", "-n", "-P", "-Fpcn")
+	// Output() waits for the stdout pipe to close after the kill; a stray
+	// grandchild holding it open would otherwise defeat the timeout.
+	cmd.WaitDelay = time.Second
 	out, err := cmd.Output()
 	// CommandContext reports a deadline kill as a generic "signal: killed"
 	// exit error, so the timeout is detected from the context, not from err.
