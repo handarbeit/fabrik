@@ -57,7 +57,7 @@ Read these files before starting validation. The spec in `.fabrik-context/issue.
 If the rebase produces conflicts, resolve them conservatively:
 
 - **Never drop code from the base branch.** Code on the base was merged from other PRs and must be preserved. Your branch adds to the base, it doesn't replace it.
-- **After resolving conflicts, run `go build ./...` immediately, then the tests for the packages the conflicts touched.** A rebase moves HEAD, so the CI-green skip rule under "Skipping a redundant full-suite run" (above "Test suite") no longer applies to the rebased head; in a CI-gated stage (`ci_gated: true` in `.fabrik-context/ci-status.md`) the engine's CI gate covers the full suite on the pushed head, otherwise run `go test ./...` in full. If anything fails, the resolution was wrong — fix it before proceeding with validation.
+- **After resolving conflicts, run the project's build immediately, then the tests covering the files the conflicts touched.** A rebase moves HEAD, so the CI-green skip no longer applies to the rebased head; follow the table under "Which tests to run locally" (above "Test suite"): where a CI gate stands behind the push (`ci_gated` or `ci_gate_ahead` is `true` in `.fabrik-context/ci-status.md`) the targeted run is all you run locally and the engine's CI gate covers the full suite on the pushed head, and only when both are `false` do you run the full suite. If anything fails, the resolution was wrong — fix it before proceeding with validation.
 - **Check for missing files.** Run `git diff origin/<base-branch>..HEAD --name-only` and verify no files from the base were accidentally deleted. New files added to the base (source, tests, subcommands) should all be present.
 - **If unsure about a conflict, abort the rebase** (`git rebase --abort`) and do NOT signal completion. Describe the conflict and let the human resolve it.
 
@@ -120,42 +120,67 @@ In preference order:
    ```bash
    timeout --signal=KILL <N> npm run dev …
    ```
-4. **The same discipline applies to test suites, benchmarks, and CI waits.** Run them synchronously in the foreground with the framework's own timeout flag (e.g. `go test -timeout`, `pytest --timeout`, `jest --testTimeout`) so the outcome is known before the turn ends. Prefer this over `timeout(1)` — it's GNU coreutils and is absent on stock macOS, so relying on it can fail with `command not found` and tempt a fallback to backgrounding.
+4. **The same discipline applies to test suites, benchmarks, and CI waits.** Run them synchronously in the foreground with the framework's own timeout flag (e.g. `pytest --timeout`, `jest --testTimeout`) so the outcome is known before the turn ends. Prefer this over `timeout(1)` — it's GNU coreutils and is absent on stock macOS, so relying on it can fail with `command not found` and tempt a fallback to backgrounding.
 5. **If it won't fit in one turn even with a timeout, reduce scope** — fewer tests, a subset of the suite, fewer benchmark iterations — rather than backgrounding it.
 6. **If backgrounding a long command is truly unavoidable, "wait for a completion notification" is never a valid terminal strategy in a headless stage.** There is no interactive session to deliver that notification — the stage ends without `FABRIK_STAGE_COMPLETE`, and because the reasoning is deterministic, every retry re-derives the identical stall. Instead, poll a concrete completion marker (an exit-code file, a `.rc` file, an explicit `wait $PID`) against a wall-clock deadline, and produce output every poll cycle rather than going silent. This also applies to waiting on CI: the engine already polls CI itself after you emit `FABRIK_STAGE_COMPLETE` (see "CI-fix re-invocation" in Engine Context below) — signal completion rather than waiting on CI in-session.
 
 **Never end a turn waiting on a background task or a CI run.** Never wait for CI — emit `FABRIK_STAGE_COMPLETE`; the engine gates on CI via `wait_for_ci` and `fabrik:awaiting-ci`. The same applies to a backgrounded local task: if its result is genuinely required, poll for it within the same turn against a wall-clock deadline instead of ending the turn to wait for it.
 
-### Skipping a redundant full-suite run — `.fabrik-context/ci-status.md`
+### Which tests to run locally — `.fabrik-context/ci-status.md`
 
-When the item has a linked PR, the engine writes `.fabrik-context/ci-status.md` before this invocation: the PR number, `head_sha` (the PR head), `verdict` (`green`, `red`, `pending`, `none` or `unknown`), `ci_gated` (`true` when this stage waits for CI) and `written_at`. CI has already run the whole suite on `head_sha` when the verdict is `green`, so rerunning it locally on the same commit repeats work CI did.
+When the item has a linked PR, the engine writes `.fabrik-context/ci-status.md` before this invocation: the PR number, `head_sha` (the PR head), `verdict` (`green`, `red`, `pending`, `none` or `unknown`), `ci_gated` (`true` when this stage waits for CI via `wait_for_ci`), `ci_gate_ahead` (`true` when a later stage waits for CI), `written_at` and, when the verdict is `red`, a `## Failing checks` section naming each failing check with its conclusion, details URL and whatever output the check produced (title, summary, annotations — often the names of the failing tests). **A CI gate stands behind your push** when `ci_gated` or `ci_gate_ahead` is `true`; the per-path list below says what that means for each way you can be invoked. Read the file first and find the row below that matches; it decides what you run locally. Check the rows top to bottom and use the first that matches.
 
-**Skip the full-suite run only when ALL three of these hold** — a partial match is not a match:
+| Condition | Run locally | Test Suite line |
+|---|---|---|
+| `ci-status.md` is absent, or no CI gate stands behind the push (`ci_gated` and `ci_gate_ahead` both `false`) | The full-suite step as written below, unchanged — nothing else will run it. (For a `red` verdict, reproduce the failing checks first, as the red rule below says; the full suite comes only after the fix, as the stand-in for the missing gate.) | `PASSED` |
+| A CI gate stands behind the push, `verdict: green`, `git rev-parse HEAD` (its own command) prints `head_sha`, and `git status --porcelain` (its own command) prints nothing | Nothing — skip the test invocation, and name the SHA and the file's `written_at` in your output. | `SKIPPED — CI green on <sha>` |
+| A CI gate stands behind the push, `verdict: red` | Read the `## Failing checks` section first (then `gh pr checks`, or the run log, if it is thin) and reproduce only the failing tests, once, following the red rule below. Never rerun the whole suite to find them. | `TARGETED — <packages>; full suite left to CI on <sha>` |
+| A CI gate stands behind the push, `verdict` is `pending`, `unknown` or `none`, **or** HEAD differs from `head_sha` (this run pushed or rebased, or a previous invocation pushed the head), **or** the tree is dirty | The build plus the tests for the packages the diff touches (including any package whose tests read the changed content, such as embedded skills or docs), once. | `TARGETED — <packages>; full suite left to CI on <sha>` |
 
-1. `verdict` in `.fabrik-context/ci-status.md` is exactly `green`.
-2. `git rev-parse HEAD` (run it as its own command) prints the same SHA as `head_sha`.
-3. `git status --porcelain` (run it as its own command) prints nothing.
+**Where a CI gate stands behind your push (`ci_gated: true`, or `ci_gate_ahead: true`) you never run the full suite locally** — not the whole-module test command, and not an equivalent such as a list of every package. The full-suite verdict is CI's, and the engine's `wait_for_ci` gate on the pushed head (for `ci_gate_ahead`, the later stage's gate) is the backstop; a `pending` verdict is not a reason to run the suite yourself. Only when no CI gate stands behind the push (`ci_gated` and `ci_gate_ahead` both `false`, or there is no `ci-status.md`) does the full-suite step stay.
 
-When all three hold, skip the test invocation and say so in your output, naming the SHA and the file's `written_at` (for example: `Full suite skipped — CI green on <sha> (ci-status.md written <timestamp>)`). In every other case — the file is absent, the verdict is anything other than `green`, HEAD differs from `head_sha`, or the tree is dirty — run the step exactly as written below.
+**When `verdict` is `red`, reproduce only what CI says failed — never the full suite as a first step.** CI has usually already executed the entire suite and often only one check failed, so a local full-suite run repeats CI's work and loads the host. Read the `## Failing checks` section of `.fabrik-context/ci-status.md`, then:
 
-**After you change code** (including a rebase that moves HEAD, such as the pre-completion rebase): HEAD no longer matches `head_sha`, so condition 2 fails. If `ci_gated` is `true`, run the build plus the tests for the packages or modules you touched, then push — the full suite is CI's job, and the engine's `wait_for_ci` gate on the new head is the backstop. If `ci_gated` is `false`, no CI gate backstops this stage, so run the full suite as written below.
+- For a check that runs tests, reproduce only the failing tests it names, or the smallest unit that contains them (a single test, file, module or package — whatever the project's test runner supports). If the check names no tests, narrow from its title, summary, annotations and details URL.
+- For a check that is not a test run (lint, build, format, type-check), run that check's own command, or the smallest unit it covers — not the test suite.
+- After a fix, re-run those failing tests plus the tests that cover the code you changed. Leave the full-suite verdict to CI wherever a CI gate stands behind your push (see the per-path list below).
+- If the failure does not reproduce (the head may have changed, or the check may have been flaky), say so; do not go looking for it with the full suite.
 
-**Everything else in this stage stays.** Skipping the suite skips only the test invocation. Requirements verification, the regression check, the PR description audit, the rebase and its Pre-Completion Gate all still run. Report the suite as `Test Suite: SKIPPED — CI green on <sha>` instead of `PASSED`.
+**Which pushes a CI gate stands behind.** Whether CI re-gates the head you push depends on the invocation path. Trust `ci_gated` and `ci_gate_ahead` in the file rather than guessing from the path name, because stage configuration is user-editable:
+
+- Stage dispatch, comment review or a review reinvoke in a stage that waits for CI (`ci_gated: true`): the engine re-reads CI on the new head before the item can advance or land.
+- CI-fix reinvoke and rebase reinvoke: both are dispatched from the CI and mergeability gate of a stage that waits for CI, so `ci_gated` is `true` and the gate re-evaluates the new head.
+- Merge-train auto-repair: an ordinary Validate dispatch (a stage that waits for CI), and the merge train's own CI follows before anything lands.
+- Stage dispatch, comment review or a review reinvoke in a stage that does not wait for CI (`ci_gated: false`): this stage does not gate the push, but a later stage does when `ci_gate_ahead` is `true`.
+
+If `ci_gated` or `ci_gate_ahead` is `true`, run the build plus the tests covering the code you touched, then push — the full suite is CI's job. If both are `false`, no CI gate stands behind this push, so run a local run broad enough to stand in for the missing gate: the full suite.
+
+**Load and non-reproducing failures.** Before any local run broader than the failing tests (the full suite, or several packages or modules), check host load: compare `uptime` with the CPU count (`nproc`, `sysctl -n hw.ncpu`, or the platform equivalent). Other workers share this host; if load is already at or above the core count, narrow the run, or leave the broad part to CI where a gate follows. A local failure that does not reproduce when run in isolation and that passes in CI on the same `head_sha` is load-induced: report it as load-induced, naming that evidence (the isolated re-run and the CI check), and do not treat it as a defect to fix. Never wait on a local suite run in a `sleep` loop for longer than the test timeout you gave it.
+
+**Test command rules (hard).** These apply to every local test command, whatever the verdict:
+
+- Every test command carries the framework's own timeout (for example `pytest --timeout`, `jest --testTimeout`, or the runner's equivalent option), and that timeout is 5m or less per test process. The whole command must finish inside the Bash tool's limit (590 s). A full-suite run on the no-gate path that cannot fit is split into several foreground commands by module or package group, each with its own timeout of 5m or less.
+- Never raise the timeout to fit a broader run — narrow the run instead.
+- Never background a test command and then poll it. Run it synchronously in the foreground.
+- Diagnose before retrying. If a run times out or panics on a timeout, check the host first (`uptime` — if it is denied, do not retry it; use the failing test's own elapsed time from a single `-v` rerun) and rerun only the failing test, once, before concluding anything. Never retry with a broader set of tests or a longer timeout.
+- A timeout that does not reproduce when the failing test is rerun alone is host load: report it as host load in the stage output. It is not a fix trigger and does not count as a failure of the change. A timeout that does reproduce in isolation is an ordinary test failure.
+
+**Report what ran.** The Test Suite line of your stage output, the PR description audit and the final summary all use exactly one of these: `TARGETED — <packages>; full suite left to CI on <sha>`, `SKIPPED — CI green on <sha>`, or `PASSED` (a full run, only when no CI gate stands behind the push).
+
+**Everything else in this stage stays.** Skipping or narrowing the suite skips only the full test invocation. Requirements verification, the regression check, the PR description audit, the rebase and its Pre-Completion Gate all still run.
 
 ### Test suite
 
-Run the full test suite (unless the skip rule above applies). **Always include a per-test timeout** appropriate to the project's test framework (e.g., `pytest --timeout=60`, `go test -timeout 5m`, `jest --testTimeout=30000`). Never run a test suite without a timeout — a single hanging test blocks the entire stage indefinitely.
+Run what the table under "Which tests to run locally" selects. Where a CI gate stands behind the push that is the build plus the targeted tests, or nothing when CI is green on this head — never the full suite. **Always include a per-test timeout** appropriate to the project's test framework (e.g., `pytest --timeout=60`, `jest --testTimeout=30000`, or the runner's own timeout option), and obey the "Test command rules (hard)" above. Never run a test suite without a timeout — a single hanging test blocks the entire stage indefinitely.
 
-```bash
-go test -race -timeout 5m ./...    # or project-equivalent — always with timeout
-go vet ./...
-go build ./...
-```
+Targeted run (the failing tests, or the tests covering the modules or packages the diff touches): the project's build, its linter / static checks, and its test runner limited to those tests, each with a timeout.
+
+Only when no CI gate stands behind the push (`ci_gated` and `ci_gate_ahead` both `false`, or there is no `ci-status.md`): run the project's full test suite, split into foreground groups if it cannot fit in one command, always with a timeout.
 
 Report results:
-- Number of tests, packages
+- Number of tests, and how many modules or suites
 - Any failures (with details)
-- Race detector results
+- Race / thread-safety checker results (if the project has one)
 
 ### Regression check
 
@@ -189,9 +214,9 @@ Structure your output clearly:
 - [x] Requirement 1: How verified
 - [x] Requirement 2: How verified
 
-### Test Suite: PASSED | SKIPPED — CI green on <sha>
-- N tests across M packages (or, when skipped, the SHA and `written_at` from ci-status.md; when only targeted tests ran after a rebase, which packages)
-- Race detector: clean
+### Test Suite: TARGETED — <packages>; full suite left to CI on <sha> | SKIPPED — CI green on <sha> | PASSED
+- N tests across M packages (or, when skipped, the SHA and `written_at` from ci-status.md; when targeted, which packages ran and the SHA CI is judging). `PASSED` (a full run) is only for when no CI gate stands behind the push. A timeout that did not reproduce in isolation is reported here as host load
+- Race / thread-safety checker (if the project has one): clean
 - Build: clean
 - Vet: clean
 
@@ -207,7 +232,7 @@ Structure your output clearly:
 
 **You MUST signal completion when** all of these hold:
 - All requirements verified
-- Full test suite passes, or was skipped under the CI-green rule above (`ci-status.md` verdict `green`, HEAD equal to `head_sha`, clean tree)
+- The tests the table under "Which tests to run locally" selects pass: the targeted run on a CI-gated stage (the full-suite verdict is CI's), the skip when `ci-status.md` has verdict `green` with HEAD equal to `head_sha` and a clean tree, or the full suite when `ci_gated` is `false`
 - No regressions detected
 - Branch is clean and pushed
 
@@ -465,7 +490,7 @@ When writing the `FABRIK_SUMMARY_BEGIN`/`FABRIK_SUMMARY_END` block, always inclu
 
 ```
 FABRIK_SUMMARY_BEGIN
-Rebase: skipped-up-to-date. PR mergeable: MERGEABLE, mergeStateStatus: CLEAN. Required checks: Analyze (go): pass, Verify llms-full.txt is up to date: pass. Requirements: N/N verified against issue spec. Local test suite: N tests across M packages, all passed (or: skipped — CI green on <sha>).
+Rebase: skipped-up-to-date. PR mergeable: MERGEABLE, mergeStateStatus: CLEAN. Required checks: Analyze (go): pass, Verify llms-full.txt is up to date: pass. Requirements: N/N verified against issue spec. Local test suite: N tests across M modules or suites, all passed (or: skipped — CI green on <sha>).
 FABRIK_SUMMARY_END
 ```
 
@@ -473,7 +498,7 @@ FABRIK_SUMMARY_END
 
 ```
 FABRIK_SUMMARY_BEGIN
-Rebase: rebased. PR mergeable: MERGEABLE, mergeStateStatus: CLEAN. Required checks: Analyze (go): pass, Verify llms-full.txt is up to date: pending. Verify llms-full.txt is up to date has not yet reported a conclusion; the engine's CI gate will decide whether this PR advances. Requirements: N/N verified against issue spec. Local test suite: N tests across M packages, all passed (or: skipped — CI green on <sha>).
+Rebase: rebased. PR mergeable: MERGEABLE, mergeStateStatus: CLEAN. Required checks: Analyze (go): pass, Verify llms-full.txt is up to date: pending. Verify llms-full.txt is up to date has not yet reported a conclusion; the engine's CI gate will decide whether this PR advances. Requirements: N/N verified against issue spec. Local test suite: N tests across M modules or suites, all passed (or: skipped — CI green on <sha>).
 FABRIK_SUMMARY_END
 ```
 

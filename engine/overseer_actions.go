@@ -13,11 +13,13 @@ import (
 	"github.com/handarbeit/fabrik/internal/channelevents"
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/internal/localapi"
+	"github.com/handarbeit/fabrik/stages"
 )
 
-// The overseer actions (#1969, ADR-1966-c): the four mutating requests a
+// The overseer actions (#1969, ADR-1966-c): the mutating requests a
 // Claude Code session overseeing the pipeline can make over the local socket —
-// promote, set_autonomy, revalidate, clear_claude_limit. Each performs an
+// promote, set_autonomy, revalidate, clear_claude_limit and (#2126, ADR 2126,
+// in overseer_advance.go) advance. Each performs an
 // existing, documented transition through the engine's own client and
 // write-through helpers, then posts a 🏭 audit comment naming the requester.
 //
@@ -257,9 +259,15 @@ func (a *overseerActor) Promote(p localapi.PromoteParams) (*localapi.ActionResul
 		options = field.Options
 	}
 	targets := a.promotableTargets(options)
+	// withTargets is true only while the item is established as parked, so a
+	// refusal never offers targets for a move that cannot be made from the
+	// item's actual column.
+	withTargets := false
 	refuse := func(format string, args ...any) error {
 		rs := a.refusalState(&t.st)
-		rs.ValidTargets = targets
+		if withTargets {
+			rs.ValidTargets = targets
+		}
 		return localapi.Refused(rs, format, args...)
 	}
 
@@ -271,15 +279,17 @@ func (a *overseerActor) Promote(p localapi.PromoteParams) (*localapi.ActionResul
 		return nil, refuse("the board metadata (project and status field) is not loaded yet; try again after the next poll")
 	}
 
+	if why := a.parkingRefusal(t.st.Status); why != "" {
+		return nil, refuse("%s %s", t.ref, why)
+	}
+	withTargets = true
+
 	to := strings.TrimSpace(p.To)
 	if to == "" {
 		return nil, refuse("`to` is required; valid targets: %s", strings.Join(targets, ", "))
 	}
 	if !slices.Contains(targets, to) {
 		return nil, refuse("%q is not a valid promote target (valid: %s); holding, cleanup and unmanaged columns are engine-managed", to, strings.Join(targets, ", "))
-	}
-	if why := a.parkingRefusal(t.st.Status); why != "" {
-		return nil, refuse("%s %s", t.ref, why)
 	}
 
 	live, err := a.confirmLiveStatus(t)
@@ -291,6 +301,7 @@ func (a *overseerActor) Promote(p localapi.PromoteParams) (*localapi.ActionResul
 		t.st.Status = live
 	}
 	if why := a.parkingRefusal(live); why != "" {
+		withTargets = false
 		return nil, refuse("%s %s (confirmed live)", t.ref, why)
 	}
 
@@ -313,20 +324,20 @@ func (a *overseerActor) Promote(p localapi.PromoteParams) (*localapi.ActionResul
 	return a.finish(res, t, fmt.Sprintf("moved %s from %s to %s", t.ref, from, to), requester), nil
 }
 
-// parkingRefusal returns "" when status names an unmanaged parking column,
-// otherwise the reason a promote is refused.
+// parkingRefusal returns "" when status names an unmanaged parking column
+// (stages.IsParkingColumn: an unmanaged stage, or the legacy Backlog column of
+// an install with no Backlog stage), otherwise the reason a promote is refused.
 func (a *overseerActor) parkingRefusal(status string) string {
 	if status == "" {
 		return "has no known board column, so it is not established as parked"
 	}
-	s := a.e.stageByName(status)
-	switch {
-	case s == nil:
-		return fmt.Sprintf("is in column %q, which has no configured stage", status)
-	case !s.Unmanaged:
-		return fmt.Sprintf("is already in the pipeline column %q; promote only moves items out of an unmanaged parking column", status)
+	if stages.IsParkingColumn(a.e.cfg.Stages, status) {
+		return ""
 	}
-	return ""
+	if a.e.stageByName(status) == nil {
+		return fmt.Sprintf("is in column %q, which has no configured stage", status)
+	}
+	return fmt.Sprintf("is already in the pipeline column %q; promote only moves items out of an unmanaged parking column; use fabrik_advance to move a completed stage one column forward", status)
 }
 
 // SetAutonomy makes the item's autonomy exactly the requested mode. Writes run
@@ -407,9 +418,11 @@ func (a *overseerActor) SetAutonomy(p localapi.SetAutonomyParams) (*localapi.Act
 		verb, doing := "removed", "remove"
 		if s.add {
 			verb, doing = "added", "add"
-			werr = e.addLabelChecked(t.item, s.label)
+			// The requester rides the write so the channel event reads
+			// actor=overseer via=<requester>, not fabrik (#2125, ADR 2125).
+			werr = e.addLabelCheckedBy(t.item, s.label, requester)
 		} else {
-			werr = e.removeLabelChecked(t.item, s.label)
+			werr = e.removeLabelCheckedBy(t.item, s.label, requester)
 		}
 		if werr != nil {
 			if len(res.Writes) == 0 {
@@ -500,7 +513,7 @@ func (a *overseerActor) Revalidate(p localapi.RevalidateParams) (*localapi.Actio
 		return nil, refuse("%s already carries %s on GitHub; the engine consumes it on a later poll", t.ref, labelRevalidate)
 	}
 
-	if err := e.addLabelChecked(t.item, labelRevalidate); err != nil {
+	if err := e.addLabelCheckedBy(t.item, labelRevalidate, requester); err != nil {
 		return nil, fmt.Errorf("adding %s to %s: %w", labelRevalidate, t.ref, err)
 	}
 	e.logf(t.st.Number, "overseer", "revalidate requested for %s (requested by %s)\n", t.ref, requester)
@@ -518,7 +531,7 @@ func (a *overseerActor) Revalidate(p localapi.RevalidateParams) (*localapi.Actio
 }
 
 // ClearClaudeLimit applies fabrik:clear-claude-limit to one managed open item.
-// The suspension the engine's settle scan then clears is account-wide, but the
+// The usage-limit hold the engine's settle scan then clears is account-wide, but the
 // label has to sit on some item, so the daemon picks one deterministically —
 // one already carrying fabrik:claude-limit first, else the lowest-numbered —
 // and names it in the result and the audit comment.
@@ -531,8 +544,8 @@ func (a *overseerActor) ClearClaudeLimit(p localapi.ClearClaudeLimitParams) (*lo
 	defer a.mu.Unlock()
 	e := a.e
 
-	if _, ok := e.claudeSuspendedUntilTime(e.now()); !ok {
-		return nil, localapi.Refused(localapi.RefusalState{}, "no Claude usage-limit suspension is active in the daemon, so there is nothing to clear")
+	if _, ok := e.claudeUsageLimitedUntilTime(e.now()); !ok {
+		return nil, localapi.Refused(localapi.RefusalState{}, "no Claude usage limit is active in the daemon, so there is nothing to clear")
 	}
 
 	var pick *itemstate.ItemState
@@ -573,7 +586,7 @@ func (a *overseerActor) ClearClaudeLimit(p localapi.ClearClaudeLimitParams) (*lo
 
 	t := &overseerTarget{st: *pick, ref: issueRef(pick.Repo, pick.Number)}
 	t.item = gh.ProjectItem{ID: pick.ID, ItemID: pick.ItemID, Number: pick.Number, Repo: pick.Repo, Status: pick.Status, Labels: pick.Labels}
-	if err := e.addLabelChecked(t.item, labelClearLimit); err != nil {
+	if err := e.addLabelCheckedBy(t.item, labelClearLimit, requester); err != nil {
 		return nil, fmt.Errorf("adding %s to %s: %w", labelClearLimit, t.ref, err)
 	}
 	e.logf(t.st.Number, "overseer", "clear-claude-limit requested via %s (requested by %s)\n", t.ref, requester)
@@ -581,9 +594,9 @@ func (a *overseerActor) ClearClaudeLimit(p localapi.ClearClaudeLimitParams) (*lo
 		Action:  localapi.MethodClearClaudeLimit,
 		Issue:   t.ref,
 		Changed: true,
-		Summary: fmt.Sprintf("applied %s to %s; the engine clears the account-wide suspension on its next poll", labelClearLimit, t.ref),
+		Summary: fmt.Sprintf("applied %s to %s; the engine clears the account-wide usage-limit hold on its next poll", labelClearLimit, t.ref),
 		Writes:  []string{"added " + labelClearLimit},
-		Notes:   []string{fmt.Sprintf("the label was placed on %s, chosen by the daemon; the suspension it clears is account-wide, not specific to that issue", t.ref)},
+		Notes:   []string{fmt.Sprintf("the label was placed on %s, chosen by the daemon; the usage-limit hold it clears is account-wide, not specific to that issue", t.ref)},
 	}
-	return a.finish(res, t, fmt.Sprintf("requested clearing the account-wide Claude usage-limit suspension (applied `%s` to %s, an item the daemon chose; the suspension is not specific to this issue)", labelClearLimit, t.ref), requester), nil
+	return a.finish(res, t, fmt.Sprintf("requested clearing the account-wide Claude usage limit (applied `%s` to %s, an item the daemon chose; the hold is not specific to this issue)", labelClearLimit, t.ref), requester), nil
 }

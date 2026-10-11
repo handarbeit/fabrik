@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -556,9 +557,9 @@ func TestLocalAPIHealth(t *testing.T) {
 	e.health.noteReconcileOK(now.Add(-2 * time.Minute))
 	e.health.noteWebhookEvent(now.Add(-10 * time.Second))
 	e.health.setGraphQLBackoff(true, 0.15, 750)
-	e.claudeSuspendMu.Lock()
-	e.claudeSuspendedUntil = now.Add(3 * time.Hour)
-	e.claudeSuspendMu.Unlock()
+	e.claudeUsageLimitMu.Lock()
+	e.claudeUsageLimitedUntil = now.Add(3 * time.Hour)
+	e.claudeUsageLimitMu.Unlock()
 	e.seedAPIItem(t, 1, "Queued")
 	e.deepFetched(1)
 	e.store.Apply(itemstate.ItemDeepFetched{Repo: "owner/repo", Number: 1, FreshState: gh.ProjectItem{ID: "I_B", Number: 1, Repo: "owner/repo", Status: "Queued"}})
@@ -581,8 +582,31 @@ func TestLocalAPIHealth(t *testing.T) {
 	if h.Reconcile.SinceSuccessSeconds.V != 120 || h.Webhook.SinceEventSeconds.V != 10 || h.Webhook.Mode != "off" {
 		t.Errorf("reconcile/webhook = %+v / %+v", h.Reconcile, h.Webhook)
 	}
-	if !h.Claude.Suspended || !h.Claude.SuspendedUntil.Valid || !h.Claude.SuspendedUntil.V.Equal(now.Add(3*time.Hour).UTC()) {
+	if !h.Claude.UsageLimited || !h.Claude.UsageLimitedUntil.Valid || !h.Claude.UsageLimitedUntil.V.Equal(now.Add(3*time.Hour).UTC()) {
 		t.Errorf("claude = %+v", h.Claude)
+	}
+	// The wire contract (#2129): the hold is reported as usage_limited /
+	// usage_limited_until under claude_usage_limit, with no suspended keys.
+	raw, err := json.Marshal(h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatal(err)
+	}
+	var claude map[string]any
+	if err := json.Unmarshal(wire["claude_usage_limit"], &claude); err != nil {
+		t.Fatalf("claude_usage_limit: %v (wire %s)", err, raw)
+	}
+	if claude["usage_limited"] != true || claude["usage_limited_until"] == nil {
+		t.Errorf("claude_usage_limit wire = %v, want usage_limited/usage_limited_until", claude)
+	}
+	if _, ok := claude["suspended"]; ok {
+		t.Errorf("claude_usage_limit still carries a suspended key: %v", claude)
+	}
+	if _, ok := claude["suspended_until"]; ok {
+		t.Errorf("claude_usage_limit still carries a suspended_until key: %v", claude)
 	}
 	if b := h.Backoff; !b.Observed || !b.Low.V || b.Remaining.V != 750 || b.RestPaused.V {
 		t.Errorf("backoff = %+v", b)
@@ -762,4 +786,72 @@ func TestLocalAPIConcurrentWithPollSideWrites(t *testing.T) {
 		close(stop)
 	}()
 	wg.Wait()
+}
+
+// multiRepoAPIEngine is a multi-repo daemon: the board owner is configured but
+// no repo, so defaultRepo() is the owner-only "owner/".
+func multiRepoAPIEngine() *Engine {
+	return NewWithDeps(Config{Owner: "owner", Stages: apiStages(), StallThreshold: time.Minute},
+		&noGitHubClient{}, &mockClaudeInvoker{}, nil)
+}
+
+func seedRepoItem(e *Engine, repo string, number int) {
+	e.store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{
+		ID: fmt.Sprintf("%s#%d", repo, number), Number: number, Repo: repo, Status: "Implement",
+	}})
+}
+
+// #2112: a multi-repo daemon whose cached issues are all in one repo resolves a
+// bare N and #N. Restoring the owner-only defaultRepo() seed in managedRepos
+// makes this fail with an ambiguous error naming "owner/".
+func TestLocalAPIBareNResolvesOnMultiRepoDaemonWithOneRepo(t *testing.T) {
+	e := multiRepoAPIEngine()
+	if got := e.defaultRepo(); got != "owner/" {
+		t.Fatalf("precondition: defaultRepo() = %q, want the owner-only key", got)
+	}
+	seedRepoItem(e, "owner/fabrik", 2050)
+	b := e.LocalAPIBackend()
+	for _, ref := range []string{"2050", "#2050", " #2050 ", "owner/fabrik#2050"} {
+		res, err := b.Status(localapi.StatusParams{Issue: ref})
+		if err != nil {
+			t.Errorf("Status(%q): %v", ref, err)
+			continue
+		}
+		if res.Issue != "owner/fabrik#2050" {
+			t.Errorf("Status(%q).Issue = %q", ref, res.Issue)
+		}
+	}
+}
+
+func TestLocalAPIAmbiguityListsOnlyRealReposOnMultiRepoDaemon(t *testing.T) {
+	e := multiRepoAPIEngine()
+	seedRepoItem(e, "owner/a", 1)
+	seedRepoItem(e, "owner/b", 1)
+	_, err := e.LocalAPIBackend().Status(localapi.StatusParams{Issue: "1"})
+	pe, ok := err.(*localapi.Error)
+	if !ok || pe.Code != localapi.CodeAmbiguous {
+		t.Fatalf("err = %v, want %s", err, localapi.CodeAmbiguous)
+	}
+	if !strings.Contains(pe.Message, "2 repos (owner/a, owner/b)") || strings.Contains(pe.Message, "owner/,") || strings.Contains(pe.Message, "owner/)") {
+		t.Errorf("message = %q, want exactly the two real repos", pe.Message)
+	}
+}
+
+func TestLocalAPIBareNOnMultiRepoDaemonWithNoItemsIsNotFound(t *testing.T) {
+	_, err := multiRepoAPIEngine().LocalAPIBackend().Status(localapi.StatusParams{Issue: "5"})
+	if pe, ok := err.(*localapi.Error); !ok || pe.Code != localapi.CodeNotFound {
+		t.Fatalf("err = %v, want %s", err, localapi.CodeNotFound)
+	}
+}
+
+func TestManagedReposIgnoresMalformedRepoKeys(t *testing.T) {
+	e := multiRepoAPIEngine()
+	seedRepoItem(e, "owner/", 1)
+	seedRepoItem(e, "/repo", 2)
+	seedRepoItem(e, "noslash", 3)
+	seedRepoItem(e, "owner/real", 4)
+	got := localAPIBackend{e: e}.managedRepos()
+	if len(got) != 1 || got[0] != "owner/real" {
+		t.Fatalf("managedRepos() = %v, want [owner/real]", got)
+	}
 }

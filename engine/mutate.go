@@ -30,9 +30,17 @@ func (e *Engine) cache() *boardcache.CacheImpl {
 // effects on success) can still share the write-through + echo tail instead
 // of re-typing it.
 func (e *Engine) syncLabelAdd(item gh.ProjectItem, label string, echo bool) {
+	e.syncLabelAddBy(item, label, echo, "")
+}
+
+// syncLabelAddBy is syncLabelAdd for a write requested by an overseer session:
+// requester (the sanitised subscriber name) rides the write-through mutation and
+// the echo entry so the resulting channel event is attributed to the overseer
+// rather than the engine (#2125, ADR 2125). "" is an engine-autonomous write.
+func (e *Engine) syncLabelAddBy(item gh.ProjectItem, label string, echo bool, requester string) {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	if c := e.cache(); c != nil {
-		c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), label)
+		c.ApplyLabelAddedBy(boardcache.ItemKey(owner+"/"+repo, item.Number), label, requester)
 	}
 	// Reaching this point means the caller's GitHub label-add mutation already
 	// succeeded — this is the only real "did GitHub's own updatedAt just bump"
@@ -40,7 +48,7 @@ func (e *Engine) syncLabelAdd(item gh.ProjectItem, label string, echo bool) {
 	// unconditionally (#1090).
 	e.store.Apply(itemstate.SelfWriteObserved{Repo: owner + "/" + repo, Number: item.Number})
 	if echo && e.webhookMgr != nil {
-		e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+label)
+		e.webhookMgr.RegisterEchoVia("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+label, requester)
 	}
 }
 
@@ -168,11 +176,18 @@ func (e *Engine) addLabel(item gh.ProjectItem, label string) {
 // fabrik:reworking/stage:<Stage>:complete mutation would break the
 // mark-first-then-clear crash-safety invariant those functions depend on.
 func (e *Engine) addLabelChecked(item gh.ProjectItem, label string) error {
+	return e.addLabelCheckedBy(item, label, "")
+}
+
+// addLabelCheckedBy is addLabelChecked for an overseer-requested write (#2125):
+// requester is attached to the write-through mutation and the echo entry. A
+// failed GitHub call returns before either, so nothing is left pending.
+func (e *Engine) addLabelCheckedBy(item gh.ProjectItem, label, requester string) error {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	if err := e.client.AddLabelToIssue(owner, repo, item.Number, label); err != nil {
 		return err
 	}
-	e.syncLabelAdd(item, label, true)
+	e.syncLabelAddBy(item, label, true, requester)
 	e.recordLabelAppliedAtNow(item, label)
 	return nil
 }
@@ -183,9 +198,15 @@ func (e *Engine) addLabelChecked(item gh.ProjectItem, label string) error {
 // removeEditingLabel's retry-with-backoff loop) can still share the
 // write-through + echo tail instead of re-typing it.
 func (e *Engine) syncLabelRemoval(item gh.ProjectItem, label string, echo bool) {
+	e.syncLabelRemovalBy(item, label, echo, "")
+}
+
+// syncLabelRemovalBy is syncLabelRemoval for an overseer-requested write; see
+// syncLabelAddBy (#2125).
+func (e *Engine) syncLabelRemovalBy(item gh.ProjectItem, label string, echo bool, requester string) {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	if c := e.cache(); c != nil {
-		c.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, item.Number), label)
+		c.ApplyLabelRemovedBy(boardcache.ItemKey(owner+"/"+repo, item.Number), label, requester)
 	}
 	e.clearLabelAppliedAtNow(item, label)
 	// echo is only true when the underlying RemoveLabelFromIssue call actually
@@ -196,7 +217,7 @@ func (e *Engine) syncLabelRemoval(item gh.ProjectItem, label string, echo bool) 
 		e.store.Apply(itemstate.SelfWriteObserved{Repo: owner + "/" + repo, Number: item.Number})
 	}
 	if echo && e.webhookMgr != nil {
-		e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+label)
+		e.webhookMgr.RegisterEchoVia("issues", "unlabeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+label, requester)
 	}
 }
 
@@ -222,12 +243,18 @@ func (e *Engine) applyLabelRemove(item gh.ProjectItem, label string, echo bool) 
 // is success (the label is already absent), synced to the cache without an echo,
 // exactly as applyLabelRemove does.
 func (e *Engine) removeLabelChecked(item gh.ProjectItem, label string) error {
+	return e.removeLabelCheckedBy(item, label, "")
+}
+
+// removeLabelCheckedBy is removeLabelChecked for an overseer-requested write
+// (#2125); see addLabelCheckedBy.
+func (e *Engine) removeLabelCheckedBy(item gh.ProjectItem, label, requester string) error {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, label)
 	if err != nil && !errors.Is(err, gh.ErrNotFound) {
 		return err
 	}
-	e.syncLabelRemoval(item, label, err == nil)
+	e.syncLabelRemovalBy(item, label, err == nil, requester)
 	return nil
 }
 

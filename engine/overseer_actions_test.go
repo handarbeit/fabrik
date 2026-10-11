@@ -16,6 +16,7 @@ import (
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/internal/localapi"
+	"github.com/handarbeit/fabrik/stages"
 )
 
 const ovProjectID = "PVT_ov"
@@ -247,15 +248,136 @@ func TestOverseerPromote_Refusals(t *testing.T) {
 	}
 }
 
-func TestOverseerPromote_RefusalListsValidTargets(t *testing.T) {
+// A refusal because the source column is not a parking column must not offer
+// valid_targets: the move is impossible, so a target list would contradict the
+// refusal (#2113 R3). This replaces the old behaviour, where an item in
+// Implement was refused with ["Specify","Implement","Validate"].
+func TestOverseerPromote_NonParkingSourceRefusalOmitsTargets(t *testing.T) {
+	for _, to := range []string{"Specify", "Nowhere", ""} {
+		t.Run("to="+to, func(t *testing.T) {
+			client := &mockGitHubClient{}
+			liveStatus(client, "Implement")
+			_, _, act := overseerEngine(t, client, ovItem{number: 5, status: "Implement"})
+			_, err := act.Promote(localapi.PromoteParams{Subscriber: "s", Issue: "5", To: to})
+			pe, st := refusedErr(t, err)
+			if st.Status != "Implement" || len(st.ValidTargets) != 0 {
+				t.Errorf("state = %+v, want Status Implement and no valid targets", st)
+			}
+			if !strings.Contains(pe.Message, "already in the pipeline column") || strings.Contains(pe.Message, "valid:") {
+				t.Errorf("message = %q, want the source-column refusal without a target list", pe.Message)
+			}
+			wantNoWrites(t, client)
+		})
+	}
+}
+
+// A parked item with a missing or invalid `to` still gets the target list: it
+// is useful there.
+func TestOverseerPromote_ParkedBadToListsTargets(t *testing.T) {
+	for _, to := range []string{"", "Nowhere"} {
+		client := &mockGitHubClient{}
+		liveStatus(client, "Backlog")
+		_, _, act := overseerEngine(t, client, ovItem{number: 5, status: "Backlog"})
+		_, err := act.Promote(localapi.PromoteParams{Subscriber: "s", Issue: "5", To: to})
+		_, st := refusedErr(t, err)
+		if !reflect.DeepEqual(st.ValidTargets, []string{"Specify", "Implement", "Validate"}) {
+			t.Errorf("to=%q: ValidTargets = %v", to, st.ValidTargets)
+		}
+	}
+}
+
+// Cache says Backlog but the live column is a pipeline column: same
+// contradiction, so no targets.
+func TestOverseerPromote_StaleCacheLiveRefusalOmitsTargets(t *testing.T) {
 	client := &mockGitHubClient{}
 	liveStatus(client, "Implement")
-	_, _, act := overseerEngine(t, client, ovItem{number: 5, status: "Implement"})
-	_, err := act.Promote(localapi.PromoteParams{Subscriber: "s", Issue: "5", To: "Specify"})
-	_, st := refusedErr(t, err)
-	if st.Status != "Implement" || !reflect.DeepEqual(st.ValidTargets, []string{"Specify", "Implement", "Validate"}) {
-		t.Errorf("state = %+v", st)
+	_, _, act := overseerEngine(t, client, ovItem{number: 5, status: "Backlog"})
+	pe, st := func() (*localapi.Error, localapi.RefusalState) {
+		_, err := act.Promote(localapi.PromoteParams{Subscriber: "s", Issue: "5", To: "Specify"})
+		return refusedErr(t, err)
+	}()
+	if !strings.Contains(pe.Message, "(confirmed live)") || len(st.ValidTargets) != 0 {
+		t.Errorf("message %q state %+v", pe.Message, st)
 	}
+	wantNoWrites(t, client)
+}
+
+// legacyStages is apiStages() without a Backlog stage: an install that ran
+// `fabrik init` before backlog.yaml existed.
+func legacyStages() []*stages.Stage {
+	var out []*stages.Stage
+	for _, s := range apiStages() {
+		if s.Name != "Backlog" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// #2113 R2: on a legacy install the Backlog column (no configured stage) is a
+// parking column, and promote goes through the same write path and audit
+// comment as a declared-unmanaged Backlog. Against the old parkingRefusal this
+// fails with "which has no configured stage".
+func TestOverseerPromote_LegacyBacklogWithoutStage(t *testing.T) {
+	client := &mockGitHubClient{}
+	liveStatus(client, "Backlog")
+	forbidIDLookups(t, client)
+	eng, _, act := overseerEngine(t, client, ovItem{number: 5, status: "Backlog"})
+	eng.cfg.Stages = legacyStages()
+
+	res, err := act.Promote(localapi.PromoteParams{Subscriber: "my-session", Issue: "5", To: "Specify"})
+	if err != nil {
+		t.Fatalf("Promote: %v", err)
+	}
+	if !res.Changed || res.AuditComment != localapi.AuditPosted {
+		t.Errorf("result = %+v", res)
+	}
+	want := []updateStatusCall{{ovProjectID, "PVTI_5", "FIELD_1", "OPT_Specify"}}
+	if !reflect.DeepEqual(client.updateStatusCalls, want) {
+		t.Errorf("status writes = %v, want %v", client.updateStatusCalls, want)
+	}
+	bodies := commentBodies(client)
+	if len(bodies) != 1 || !strings.HasPrefix(bodies[0], "🏭 **Fabrik — overseer action: promote**") ||
+		!strings.Contains(bodies[0], "Backlog to Specify") {
+		t.Errorf("audit comment = %q", bodies)
+	}
+	if got := statusOf(t, eng, 5); got != "Specify" {
+		t.Errorf("cache status = %q, want Specify", got)
+	}
+}
+
+// A configured Backlog stage that is not unmanaged keeps its configured
+// meaning: it is a pipeline column, so promote refuses to move out of it.
+func TestOverseerPromote_ConfiguredManagedBacklogRefused(t *testing.T) {
+	client := &mockGitHubClient{}
+	liveStatus(client, "Backlog")
+	eng, _, act := overseerEngine(t, client, ovItem{number: 5, status: "Backlog"})
+	eng.cfg.Stages = apiStages()
+	for _, s := range eng.cfg.Stages {
+		if s.Name == "Backlog" {
+			s.Unmanaged = false
+		}
+	}
+	_, err := act.Promote(localapi.PromoteParams{Subscriber: "s", Issue: "5", To: "Specify"})
+	pe, st := refusedErr(t, err)
+	if !strings.Contains(pe.Message, "already in the pipeline column") || len(st.ValidTargets) != 0 {
+		t.Errorf("message %q state %+v", pe.Message, st)
+	}
+	wantNoWrites(t, client)
+}
+
+// On a legacy install a column with no stage that is not Backlog is still refused.
+func TestOverseerPromote_LegacyInstallUnknownColumnRefused(t *testing.T) {
+	client := &mockGitHubClient{}
+	liveStatus(client, "Icebox")
+	eng, _, act := overseerEngine(t, client, ovItem{number: 5, status: "Icebox"})
+	eng.cfg.Stages = legacyStages()
+	_, err := act.Promote(localapi.PromoteParams{Subscriber: "s", Issue: "5", To: "Specify"})
+	pe, st := refusedErr(t, err)
+	if !strings.Contains(pe.Message, "no configured stage") || len(st.ValidTargets) != 0 {
+		t.Errorf("message %q state %+v", pe.Message, st)
+	}
+	wantNoWrites(t, client)
 }
 
 func TestOverseerPromote_UnmanagedAndMissingIssue(t *testing.T) {
@@ -664,18 +786,18 @@ func TestOverseerRevalidate_WorkerInFlightIsDeferredNotRefused(t *testing.T) {
 
 // ---- clear_claude_limit ----
 
-func suspendClaude(eng *Engine) {
-	eng.claudeSuspendMu.Lock()
-	eng.claudeSuspendedUntil = time.Now().Add(time.Hour)
-	eng.claudeSuspendMu.Unlock()
+func holdClaudeDispatch(eng *Engine) {
+	eng.claudeUsageLimitMu.Lock()
+	eng.claudeUsageLimitedUntil = time.Now().Add(time.Hour)
+	eng.claudeUsageLimitMu.Unlock()
 }
 
-func TestOverseerClearClaudeLimit_RefusesWithoutSuspension(t *testing.T) {
+func TestOverseerClearClaudeLimit_RefusesWithoutUsageLimit(t *testing.T) {
 	client := &mockGitHubClient{}
 	_, _, act := overseerEngine(t, client, ovItem{number: 5, status: "Implement"})
 	_, err := act.ClearClaudeLimit(localapi.ClearClaudeLimitParams{Subscriber: "s"})
 	pe, _ := refusedErr(t, err)
-	if !strings.Contains(pe.Message, "no Claude usage-limit suspension is active") {
+	if !strings.Contains(pe.Message, "no Claude usage limit is active") {
 		t.Errorf("message = %q", pe.Message)
 	}
 	wantNoWrites(t, client)
@@ -700,7 +822,7 @@ func TestOverseerClearClaudeLimit_PickOrder(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			client := &mockGitHubClient{}
 			eng, _, act := overseerEngine(t, client, tc.items...)
-			suspendClaude(eng)
+			holdClaudeDispatch(eng)
 			res, err := act.ClearClaudeLimit(localapi.ClearClaudeLimitParams{Subscriber: "ovr"})
 			if err != nil {
 				t.Fatalf("ClearClaudeLimit: %v", err)
@@ -730,7 +852,7 @@ func TestOverseerClearClaudeLimit_PickOrder(t *testing.T) {
 func TestOverseerClearClaudeLimit_NoEligibleItemAndPending(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng, _, act := overseerEngine(t, client, ovItem{number: 1, status: "Implement", pr: true}, ovItem{number: 2, status: "Done", closed: true})
-	suspendClaude(eng)
+	holdClaudeDispatch(eng)
 	_, err := act.ClearClaudeLimit(localapi.ClearClaudeLimitParams{Subscriber: "s"})
 	refusedErr(t, err)
 	wantNoWrites(t, client)
@@ -738,7 +860,7 @@ func TestOverseerClearClaudeLimit_NoEligibleItemAndPending(t *testing.T) {
 	// A clear request already outstanding is reported, not stacked.
 	client2 := &mockGitHubClient{}
 	eng2, _, act2 := overseerEngine(t, client2, ovItem{number: 4, status: "Implement", labels: []string{labelClearLimit}}, ovItem{number: 2, status: "Specify"})
-	suspendClaude(eng2)
+	holdClaudeDispatch(eng2)
 	res, err := act2.ClearClaudeLimit(localapi.ClearClaudeLimitParams{Subscriber: "s"})
 	if err != nil || res.Changed || res.Issue != "owner/repo#4" || res.AuditComment != localapi.AuditNone {
 		t.Fatalf("pending: %+v %v", res, err)
@@ -749,7 +871,7 @@ func TestOverseerClearClaudeLimit_NoEligibleItemAndPending(t *testing.T) {
 func TestOverseerClearClaudeLimit_WriteFailurePostsNoComment(t *testing.T) {
 	client := &mockGitHubClient{addLabelToIssueFn: func(_, _ string, _ int, _ string) error { return errors.New("403") }}
 	eng, _, act := overseerEngine(t, client, ovItem{number: 4, status: "Implement"})
-	suspendClaude(eng)
+	holdClaudeDispatch(eng)
 	_, err := act.ClearClaudeLimit(localapi.ClearClaudeLimitParams{Subscriber: "s"})
 	if err == nil || !strings.Contains(err.Error(), "403") {
 		t.Fatalf("err = %v", err)
@@ -871,14 +993,14 @@ func TestOverseerAuditCommentAsPostedIsNotSteering(t *testing.T) {
 // ---- R2 and structure ----
 
 func TestOverseerNoPauseLiftOrFreeFormCommentSurface(t *testing.T) {
-	// The Actor method set is exactly the four actions.
+	// The Actor method set is exactly the five actions.
 	at := reflect.TypeOf((*localapi.Actor)(nil)).Elem()
 	var names []string
 	for i := 0; i < at.NumMethod(); i++ {
 		names = append(names, at.Method(i).Name)
 	}
 	slices.Sort(names)
-	if want := []string{"ClearClaudeLimit", "Promote", "Revalidate", "SetAutonomy"}; !reflect.DeepEqual(names, want) {
+	if want := []string{"Advance", "ClearClaudeLimit", "Promote", "Revalidate", "SetAutonomy"}; !reflect.DeepEqual(names, want) {
 		t.Errorf("Actor methods = %v, want %v", names, want)
 	}
 	for _, m := range localapi.ActionMethods() {
@@ -887,27 +1009,56 @@ func TestOverseerNoPauseLiftOrFreeFormCommentSurface(t *testing.T) {
 		}
 	}
 
-	src, err := os.ReadFile("overseer_actions.go")
+	// overseer_advance.go (#2126) is held to the same scan; it posts no comment of
+	// its own (it reaches the single postAudit through finish) and removes no label.
+	for _, file := range []struct {
+		name     string
+		comments int
+	}{{"overseer_actions.go", 1}, {"overseer_advance.go", 0}} {
+		src, err := os.ReadFile(file.name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		code := string(src)
+		// The only label removals are the autonomy pair.
+		for _, m := range regexp.MustCompile(`removeLabel\w*\(([^)]*)\)`).FindAllStringSubmatch(code, -1) {
+			if !strings.Contains(m[1], "s.label") {
+				t.Errorf("%s: unexpected label removal: %s", file.name, m[0])
+			}
+		}
+		if strings.Contains(code, "applyLabelRemove") || regexp.MustCompile(`remove\w*\([^)]*"fabrik:(paused|awaiting-input)"`).MatchString(code) {
+			t.Errorf("%s: overseer actions must never remove fabrik:paused / fabrik:awaiting-input", file.name)
+		}
+		// Every comment is posted through the single postAudit helper.
+		if n := strings.Count(code, "postComment("); n != file.comments {
+			t.Errorf("postComment appears %d times in %s, want %d", n, file.name, file.comments)
+		}
+		banned := []string{"AddComment(", "postItemComment(", "pauseIssue("}
+		if file.name == "overseer_advance.go" {
+			// advance reuses the engine's gates only through their read-only cores;
+			// the writing wrappers would break "a refused advance writes nothing".
+			banned = append(banned, "addLabelChecked(", "applyLabelAdd(", "checkDependencies(", "checkReviewGate(", "reviewGateBlocksLanding(")
+		}
+		for _, b := range banned {
+			if strings.Contains(code, b) {
+				t.Errorf("%s must not call %s", file.name, b)
+			}
+		}
+	}
+}
+
+// #2112: an action given a bare N resolves on a multi-repo daemon (owner, no
+// repo) whose cached issues are all in one repo.
+func TestOverseerPromote_BareNOnMultiRepoDaemon(t *testing.T) {
+	client := &mockGitHubClient{}
+	liveStatus(client, "Backlog")
+	eng, _, act := overseerEngine(t, client, ovItem{number: 5, status: "Backlog"})
+	eng.cfg.Owner, eng.cfg.Repo = "owner", ""
+	res, err := act.Promote(localapi.PromoteParams{Subscriber: "my-session", Issue: "5", To: "Specify"})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("Promote: %v", err)
 	}
-	code := string(src)
-	// The only label removals are the autonomy pair.
-	for _, m := range regexp.MustCompile(`removeLabel\w*\(([^)]*)\)`).FindAllStringSubmatch(code, -1) {
-		if !strings.Contains(m[1], "s.label") {
-			t.Errorf("unexpected label removal: %s", m[0])
-		}
-	}
-	if strings.Contains(code, "applyLabelRemove") || regexp.MustCompile(`remove\w*\([^)]*"fabrik:(paused|awaiting-input)"`).MatchString(code) {
-		t.Error("overseer actions must never remove fabrik:paused / fabrik:awaiting-input")
-	}
-	// Every comment is posted through the single postAudit helper.
-	if n := strings.Count(code, "postComment("); n != 1 {
-		t.Errorf("postComment appears %d times in overseer_actions.go, want 1 (the audit comment)", n)
-	}
-	for _, banned := range []string{"AddComment(", "postItemComment(", "pauseIssue("} {
-		if strings.Contains(code, banned) {
-			t.Errorf("overseer_actions.go must not call %s", banned)
-		}
+	if res.Issue != "owner/repo#5" {
+		t.Errorf("Issue = %q", res.Issue)
 	}
 }

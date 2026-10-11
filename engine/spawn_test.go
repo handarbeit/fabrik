@@ -2960,3 +2960,30 @@ func TestParseSpawnBlocks_MarkerRequiresWordBoundary(t *testing.T) {
 		t.Errorf("repo: got %q, want %q", blocks[0].Repo, "owner/repo")
 	}
 }
+
+// TestResolveSpecifyOptionID_LegacyBacklogSkippedWithoutStage: an install with
+// no Backlog stage (predates backlog.yaml) still skips the literal Backlog.
+func TestResolveSpecifyOptionID_LegacyBacklogSkippedWithoutStage(t *testing.T) {
+	sf := &gh.StatusField{
+		Options:            map[string]string{"Backlog": "OPT_0", "Research": "OPT_1", "Done": "OPT_3"},
+		OrderedOptionNames: []string{"Backlog", "Research", "Done"},
+	}
+	stagesCfg := []*stages.Stage{{Name: "Research"}, {Name: "Done", CleanupWorktree: true}}
+	if got := resolveSpecifyOptionID(sf, stagesCfg); got != "OPT_1" {
+		t.Errorf("got %q, want OPT_1 — legacy Backlog must be skipped", got)
+	}
+}
+
+// TestResolveSpecifyOptionID_ManagedBacklogKeepsConfiguredMeaning: a configured
+// Backlog stage that is not unmanaged is a pipeline column (stages.IsParkingColumn),
+// so the fallback no longer skips it by name.
+func TestResolveSpecifyOptionID_ManagedBacklogKeepsConfiguredMeaning(t *testing.T) {
+	sf := &gh.StatusField{
+		Options:            map[string]string{"Backlog": "OPT_0", "Research": "OPT_1", "Done": "OPT_3"},
+		OrderedOptionNames: []string{"Backlog", "Research", "Done"},
+	}
+	stagesCfg := []*stages.Stage{{Name: "Backlog"}, {Name: "Research"}, {Name: "Done", CleanupWorktree: true}}
+	if got := resolveSpecifyOptionID(sf, stagesCfg); got != "OPT_0" {
+		t.Errorf("got %q, want OPT_0 — a configured, non-unmanaged Backlog keeps its configured meaning", got)
+	}
+}

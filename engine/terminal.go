@@ -28,11 +28,11 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 		_, graphqlStats := e.client.RateLimitStats()
 		if graphqlStats.Limit > 0 && (graphqlStats.Remaining == 0 || float64(graphqlStats.Remaining)/float64(graphqlStats.Limit) < rateLimitBackoffThreshold) {
 			// R2 (#1716): this probe attempt was rejected for rate limit, but
-			// this function has no suspension mechanism of its own and cannot
+			// this function has no stand-down mechanism of its own and cannot
 			// see whether the poll loop's actual backoff (PollWithBackoff's
 			// GraphQL hysteresis, computed AFTER this call returns for this
 			// cycle, and R1's wake-path gate one layer up in Run()) is active.
-			// The old wording ("polling suspended") claimed a stand-down this
+			// The old banner wording claimed a stand-down this
 			// call site does not control — worse than silence, since it
 			// directs an operator away from the actual running fault. State
 			// only what happened here: this one probe attempt was rejected;

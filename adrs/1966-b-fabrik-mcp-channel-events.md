@@ -73,7 +73,7 @@ These are accepted, not defects:
 
 - **Delivery is at-most-once to the session.** There is no application-level acknowledgement (Claude Code never acknowledges a notification), and a half-open connection can lose up to roughly one heartbeat window of events before the daemon's write deadline or the client's watchdog notices.
 - **Label events can be reordered** in a narrow race between two concurrent applies of the same label (observers run on whichever goroutine called `Apply`; ordering across goroutines is undefined).
-- **The actor is `unknown`** for label changes seen only by polling (reconcile or deep fetch carry no sender). In PAT mode the operator's login is also Fabrik's, so a worker's `gh` label write whose echo was missed reads as `human`.
+- **The actor is `unknown`** for label changes seen only by polling (reconcile or deep fetch carry no sender). *Narrowed by ADR 2125: overseer actions are now `overseer` with `via`, and a webhook sender's login is carried as `actor_login`; the polling-only case stays `unknown`, as no read the engine already makes names the actor.* In PAT mode the operator's login is also Fabrik's, so a worker's `gh` label write whose echo was missed reads as `human`.
 - **One incident can produce several related pushes**, e.g. `paused` + `ci-timeout` + `label-applied` for one pause.
 
 ## Consequences
@@ -84,3 +84,16 @@ These are accepted, not defects:
 - A same-user process can drain another subscriber's held queue — unchanged in kind from ADR-1966-a's trust note, widened in effect.
 - A restart loses the deriver's per-item memory by design (re-seeded silently); `awaiting-input-stale` cannot fire for an episode that began before the restart.
 - The notification contract is a research preview and may change.
+
+## Note (2026-10-11, #2129): "suspension" renamed to "usage limited"
+
+Before these surfaces first shipped (0.0.84), the account-wide Claude usage-limit hold was renamed, so the word "suspended" stays free for the item state proposed in #2120. Names and wording only; detection, reset time, dispatch hold, labels and clear paths are unchanged.
+
+| Old | New |
+|---|---|
+| event `claude-limit-suspended` | `claude-usage-limited` |
+| event `claude-limit-lifted` | `claude-usage-limit-lifted` |
+| `fabrik_health.claude_usage_limit.suspended` / `suspended_until` | `usage_limited` / `usage_limited_until` |
+| attention deadline kind `claude-suspension-end` | `claude-usage-limit-end` |
+
+`fabrik:claude-limit`, `fabrik:clear-claude-limit` and the `fabrik_clear_claude_limit` tool keep their names. No alias is accepted by `subscribe`: a subscriber that names an old event type must re-subscribe with the new one. As a courtesy to development machines, `channelevents.Open` rewrites the two old type strings in persisted subscriptions and held queues to the new names on load (`internal/channelevents/legacy.go`), so existing state does not go silently unmatched.

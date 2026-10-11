@@ -508,6 +508,9 @@ func TestFetchCheckRuns_Success(t *testing.T) {
 			Name       string `json:"name"`
 			Status     string `json:"status"`
 			Conclusion string `json:"conclusion"`
+			Output     struct {
+				Title string `json:"title"`
+			} `json:"output"`
 		} `json:"check_runs"`
 	}
 	if err := json.Unmarshal(raw, &recorded); err != nil {
@@ -537,6 +540,9 @@ func TestFetchCheckRuns_Success(t *testing.T) {
 	for i, want := range recorded.CheckRuns {
 		if runs[i].Name != want.Name || runs[i].Status != want.Status || runs[i].Conclusion != want.Conclusion {
 			t.Errorf("runs[%d] = %+v, want name=%q status=%q conclusion=%q", i, runs[i], want.Name, want.Status, want.Conclusion)
+		}
+		if runs[i].OutputTitle != want.Output.Title {
+			t.Errorf("runs[%d].OutputTitle = %q, want %q", i, runs[i].OutputTitle, want.Output.Title)
 		}
 	}
 }

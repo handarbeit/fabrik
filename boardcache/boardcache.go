@@ -320,6 +320,17 @@ type CacheImpl struct {
 	// matchEchoReportedFn is matchEchoFn that reports whether an echo entry
 	// matched. Optional; used only to attribute label webhooks to Fabrik (#1968).
 	matchEchoReportedFn func(eventType, action, key string) bool
+	// matchEchoViaFn is matchEchoReportedFn that also returns the overseer
+	// requester recorded with the echo ("" when none). Preferred over
+	// matchEchoReportedFn for label deltas when set (#2125).
+	matchEchoViaFn func(eventType, action, key string) (bool, string)
+}
+
+// SetMatchEchoViaFn injects the echo matcher that reports whether the inbound
+// webhook matched a pending echo entry and which overseer requester (if any)
+// registered it (#2125). Preferred over SetMatchEchoReportedFn for label deltas.
+func (c *CacheImpl) SetMatchEchoViaFn(fn func(eventType, action, key string) (bool, string)) {
+	c.matchEchoViaFn = fn
 }
 
 // SetMatchEchoReportedFn injects the echo matcher that reports whether the
@@ -1149,8 +1160,16 @@ func (c *CacheImpl) UpdateItemStatus(key, newStatus string) {
 // appending label if not already present. No-op when the key is not in the cache.
 // Safe for concurrent use.
 func (c *CacheImpl) ApplyLabelAdded(key, label string) {
+	c.ApplyLabelAddedBy(key, label, "")
+}
+
+// ApplyLabelAddedBy is ApplyLabelAdded for a write requested by an overseer
+// session: requester (the sanitised subscriber name) rides the mutation onto the
+// resulting Change so channel events attribute it (#2125). "" is an
+// engine-autonomous write.
+func (c *CacheImpl) ApplyLabelAddedBy(key, label, requester string) {
 	c.applyKeyedMutation(key, "ApplyLabelAdded", func(repo string, number int) itemstate.Mutation {
-		return itemstate.LocalLabelAdded{Repo: repo, Number: number, Label: label}
+		return itemstate.LocalLabelAdded{Repo: repo, Number: number, Label: label, Requester: requester}
 	})
 }
 
@@ -1158,8 +1177,14 @@ func (c *CacheImpl) ApplyLabelAdded(key, label string) {
 // removing label if present. No-op when the key is not in the cache or label is absent.
 // Safe for concurrent use.
 func (c *CacheImpl) ApplyLabelRemoved(key, label string) {
+	c.ApplyLabelRemovedBy(key, label, "")
+}
+
+// ApplyLabelRemovedBy is ApplyLabelRemoved for an overseer-requested write; see
+// ApplyLabelAddedBy.
+func (c *CacheImpl) ApplyLabelRemovedBy(key, label, requester string) {
 	c.applyKeyedMutation(key, "ApplyLabelRemoved", func(repo string, number int) itemstate.Mutation {
-		return itemstate.LocalLabelRemoved{Repo: repo, Number: number, Label: label}
+		return itemstate.LocalLabelRemoved{Repo: repo, Number: number, Label: label, Requester: requester}
 	})
 }
 

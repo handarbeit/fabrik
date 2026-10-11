@@ -106,20 +106,27 @@ func (e *Engine) checkSourceStaleness() {
 	}
 
 	if !status.NeedsRebuild {
-		_ = warnings.Clear(sourceStalenessWarningKey)
+		if err := warnings.Resolve(sourceStalenessWarningKey); err != nil {
+			logf("clearing staleness warning: %v\n", err)
+		}
 		return
 	}
 
 	title, detail, fixAction, fixParams := stalenessWarningContent(status, e.cfg.AutoUpgrade)
-	logf("WARNING: %s\n", title)
-	_ = warnings.Record(warnings.Entry{
-		Key:       sourceStalenessWarningKey,
-		Type:      "source_staleness",
-		Title:     title,
-		Detail:    detail,
-		FixAction: fixAction,
-		FixParams: fixParams,
-	})
+	// The detail carries commit counts, so the dismissal fingerprint is
+	// constant: dismissing the staleness warning sticks until it clears.
+	if err := warnings.Report(e.warnWriter("upgrade"), warnings.Condition{
+		Type:        "source_staleness",
+		KeyOverride: sourceStalenessWarningKey,
+		Title:       title,
+		Detail:      detail,
+		FixAction:   fixAction,
+		FixParams:   fixParams,
+		Fingerprint: "source_staleness",
+		LogLine:     title,
+	}); err != nil {
+		logf("recording staleness warning: %v\n", err)
+	}
 }
 
 // stalenessWarningContent builds the Title/Detail/FixAction/FixParams for a

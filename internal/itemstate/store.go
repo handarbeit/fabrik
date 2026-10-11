@@ -315,12 +315,20 @@ func (s *Store) applySingleItem(m Mutation) (Snapshot, []Change, error) {
 // any other first population is a baseline and emits none (#1968 R3).
 func annotateLabelChange(change *Change, m Mutation, before, after []string, existed bool) {
 	switch v := m.(type) {
-	case LocalLabelAdded, LocalLabelRemoved:
-		change.Origin = OriginEngine
+	case LocalLabelAdded:
+		change.Origin, change.Requester = OriginEngine, v.Requester
+	case LocalLabelRemoved:
+		change.Origin, change.Requester = OriginEngine, v.Requester
 	case IssueLabeled:
 		change.Origin, change.Sender, change.EchoOfEngine = OriginWebhook, v.Sender, v.EchoOfEngine
+		if v.EchoOfEngine {
+			change.Requester = v.Requester
+		}
 	case IssueUnlabeled:
 		change.Origin, change.Sender, change.EchoOfEngine = OriginWebhook, v.Sender, v.EchoOfEngine
+		if v.EchoOfEngine {
+			change.Requester = v.Requester
+		}
 	default:
 		if !existed {
 			return

@@ -430,14 +430,10 @@ func TestDrainAndExit_BoundedByDrainDeadline_AC3(t *testing.T) {
 	eng.wg.Add(1) // never Done() — deliberately unresponsive worker
 
 	restartDone := make(chan struct{})
-	lockFile, err := os.CreateTemp(t.TempDir(), "fabrik-lock")
-	if err != nil {
-		t.Fatalf("CreateTemp: %v", err)
-	}
-	defer lockFile.Close()
+	locks := &instanceLocks{}
 
 	start := time.Now()
-	if err := eng.drainAndExit(lockFile, restartDone); err != nil {
+	if err := eng.drainAndExit(locks, restartDone); err != nil {
 		t.Fatalf("drainAndExit: %v", err)
 	}
 	elapsed := time.Since(start)

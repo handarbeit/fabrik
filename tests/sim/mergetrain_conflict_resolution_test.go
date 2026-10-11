@@ -94,10 +94,10 @@ func TestMergeTrainConflict_UsageLimitDoesNotEject(t *testing.T) {
 	// Retried whole on the next poll, not silently dropped: the batch
 	// re-forms and re-attempts assembly from scratch. The very first
 	// invocation's usage-limit error also activates the account-wide Claude
-	// suspension gate (ADR-1119/ADR-1183 — the same mechanism
+	// usage-limit hold gate (ADR-1119/ADR-1183 — the same mechanism
 	// fabrik:claude-limit governs), so the second poll's own conflict
 	// resolution never reaches a fresh Claude call at all
-	// (resolveConflictWithClaude's own suspension check short-circuits
+	// (resolveConflictWithClaude's own usage-limit hold check short-circuits
 	// first, confirmed directly in this run's log) — CommentCallCount
 	// staying at 1 is therefore the *correct* observation, not evidence of
 	// stalling. What "retried whole" means here is that the batch is

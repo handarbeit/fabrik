@@ -82,9 +82,24 @@ Before each Claude invocation, the engine writes context documents to `.fabrik-c
 | `.fabrik-context/stage-Review.md` | Review stage comment output |
 | `.fabrik-context/pr-description.md` | Linked PR description (for `post_to_pr` stages) |
 | `.fabrik-context/codebase-changes.md` | Files changed on `origin/<baseBranch>` since the prior stage ran (omitted on first stage or when no changes) |
-| `.fabrik-context/ci-status.md` | PR number, live PR head SHA, CI verdict for that head (`green`, `red`, `pending`, `none`, `unknown`), `ci_gated` (the stage's `wait_for_ci`) and a timestamp; written for stage and comment invocations whenever the item has a linked open PR, removed otherwise |
+| `.fabrik-context/ci-status.md` | PR number, live PR head SHA, CI verdict for that head (`green`, `red`, `pending`, `none`, `unknown`), `ci_gated` (the stage's `wait_for_ci`), `ci_gate_ahead` (a later stage has `wait_for_ci`), a timestamp and, for a `red` verdict, a `## Failing checks` section; written for stage and comment invocations whenever the item has a linked open PR, removed otherwise |
 
-**`ci-status.md` and the redundant-suite skip** (#1997, ADR-1997): the verdict comes from live, uncached reads (`FindPRForIssue`, `FetchPRDetails`, `FetchCheckRuns`) fed through the landing paths' `classifyLandingCI` (and so `ciSuiteHold`) unmodified. Zero check runs is always `none` — never the ADR-933 `mergeable_state` green — a read error is `unknown`, and a classifier `green` is demoted to `pending` unless every latest check run is completed with `success` or `neutral` (`skipped` is not passing — a path-filtered test job reports it without running the suite). The test-running skills skip the local full-suite run only when `verdict` is `green`, `git rev-parse HEAD` equals `head_sha` and `git status --porcelain` is empty; after a code change or rebase in a `ci_gated` stage they run build plus targeted tests and rely on the `wait_for_ci` gate on the new head. The `-comment` variants never take that shortcut: comment processing does not complete the stage, so no gate runs on a comment-pushed head and they treat `ci_gated` as `false`. The file is a snapshot taken at invocation start: a mid-run push moves HEAD and makes it inert.
+**`ci-status.md` and what to run locally** (#1997, ADR-1997; #2130, ADR-2130; #2116, ADR-2116): the verdict comes from live, uncached reads (`FindPRForIssue`, `FetchPRDetails`, `FetchCheckRuns`) fed through the landing paths' `classifyLandingCI` (and so `ciSuiteHold`) unmodified. Zero check runs is always `none` — never the ADR-933 `mergeable_state` green — a read error is `unknown`, and a classifier `green` is demoted to `pending` unless every latest check run is completed with `success` or `neutral` (`skipped` is not passing — a path-filtered test job reports it without running the suite). A CI gate *stands behind* a push when `ci_gated` (the current stage's `wait_for_ci`) or `ci_gate_ahead` (any later managed stage has it, computed from stage config) is `true`. The test-running skills (`fabrik-validate`, `fabrik-review`, `fabrik-implement` and their `-comment` variants) read the file to decide what to run locally:
+
+- `ci-status.md` absent, or no gate stands behind the push (`ci_gated` and `ci_gate_ahead` both `false`): the full-suite step, unchanged, reported as `PASSED`. For a `red` verdict the reproduction is still targeted first; the full suite comes only after the fix, as the stand-in for the missing gate.
+- A gate stands behind the push, `verdict` `green`, `git rev-parse HEAD` equal to `head_sha` and `git status --porcelain` empty: skip the test invocation, reported as `SKIPPED — CI green on <sha>`.
+- A gate stands behind the push, `verdict` `red`: read the `## Failing checks` section (then `gh pr checks`, or the run log, if it is thin) and reproduce only what it names — never the full suite as a first step. A test check is narrowed to the failing tests or the smallest unit containing them; a lint, build or format check runs its own command. After a fix the skill re-runs those tests plus the tests covering the changed code and leaves the full-suite verdict to CI.
+- A gate stands behind the push, `verdict` `pending`, `unknown` or `none`, or HEAD differs from `head_sha` (this run pushed or rebased, or a previous invocation pushed the head), or a dirty tree: the build plus the tests covering the changed files, once.
+
+Both targeted cases are reported as `TARGETED — <packages>; full suite left to CI on <sha>`. Where a gate stands behind the push the full suite is never run locally; CI and the `wait_for_ci` gate on the pushed head decide it.
+
+**Red verdict — `## Failing checks`** (#2116): for a red head the engine adds the latest run of each check name that is `failure`, `timed_out` or `action_required` (the `gh.ClassifyCheckRuns` predicate itself, so the section and the verdict cannot disagree and a re-run that passed supersedes its earlier failure), with name, conclusion, details URL and the CI-fix prompt's rendering of `output.title`, `output.summary`/`output.text` and annotations (`checkRunFailureDetail`, ADR-1991's bounds). At most 10 failing checks are listed ("N more omitted" beyond that) and annotations — one REST call each, `checks:read` only — are read for the first 5; a failed or unavailable annotation read is logged and the section keeps the check-level fields. Test names are not parsed out of annotations or job logs (no language-specific parsing, no `actions` permission). A red verdict with no failing run (a required status failed) says so. Other verdicts add no section and make no extra reads.
+
+**Which pushes are re-gated** (#2116): a stage dispatch, comment review or review reinvoke in a `wait_for_ci` stage is re-gated by `checkCIGate` on the new head; the CI-fix and rebase reinvokes are dispatched from the gate of such a stage; merge-train auto-repair is an ordinary Validate dispatch followed by the train's own CI. In a stage that does not wait for CI the push is not gated in-stage, but a later gated stage re-gates it when `ci_gate_ahead` is `true`. The `-comment` variants follow the same table: a comment-pushed change is verified with the targeted run where a gate stands behind it.
+
+**Load and hard rules** (#2116, #2130): every local test command carries a framework timeout of 5m or less per test process (never raised to fit a broader run — narrow the run instead), runs synchronously in the foreground and is never backgrounded and polled, and a worker never waits on a suite in a `sleep` loop past that timeout. Before any local run broader than the failing tests the skills check `uptime` against the CPU count. A run that times out or fails is answered by checking host load and rerunning only the failing test, once; a failure that does not reproduce in isolation and passes in CI on the same head is reported as load-induced / host load — not a fix trigger and not a failure of the change. The shipped skills name no single toolchain's commands.
+
+The file is a snapshot taken at invocation start: a mid-run push moves HEAD and makes it inert.
 
 **Stage invocation**: Writes only stages *prior* to the current stage. Implement sees Specify, Research, Plan but not its own output.
 
@@ -295,6 +310,7 @@ Context files are available in .fabrik-context/
 
 ```
 --plugin-dir <absolute-path-to-.fabrik/plugin>
+--plugin-dir <absolute-path-of-each-configured-plugin_dirs-entry>  (zero or more, in configured order; ADR 2136)
 --output-format json
 --verbose
 --disallowedTools <tool> ...  (always: ScheduleWakeup, Workflow, Monitor, CronCreate — see below)
@@ -490,8 +506,8 @@ The process-group `SIGKILL` above is **PGID-scoped**: it can only reach descenda
 `reapWorktreeProcesses` (`engine/reaper_unix.go`) closes this gap with a **cwd-rooted** reaper, run immediately before every worktree directory removal: it enumerates live processes whose current working directory is the worktree path or a subdirectory of it — regardless of process-group membership — and sends SIGKILL to each. It is a package-level function (not a `WorktreeManager` method), so it can be called from contexts with no `WorktreeManager` instance available.
 
 **Platform implementations:**
-- **Linux**: scans `/proc/*/cwd` symlinks and prefix-matches each against the worktree directory. Immediately before killing a match, it re-reads `/proc/<pid>/cwd` to close the TOCTOU window in which the pid could have been recycled for an unrelated process between enumeration and kill.
-- **macOS**: runs `lsof -a -d cwd -n -P -Fpcn`, which inspects only each process's cwd file descriptor (not every open fd, unlike `lsof +D`) — kept fast and non-hanging on the synchronous teardown path even for a `node_modules`-heavy worktree. macOS has no `/proc`-equivalent cheap re-check primitive, so the same TOCTOU window is accepted rather than mitigated here.
+- **Linux**: scans `/proc/*/cwd` symlinks and prefix-matches each against the worktree directory. It makes no external call and spawns no process, so there is nothing to bound. Immediately before killing a match, it re-reads `/proc/<pid>/cwd` to close the TOCTOU window in which the pid could have been recycled for an unrelated process between enumeration and kill.
+- **macOS**: runs `lsof -a -d cwd -n -P -Fpcn`, which inspects only each process's cwd file descriptor (not every open fd, unlike `lsof +D`) — kept fast on the synchronous teardown path even for a `node_modules`-heavy worktree. The call is **bounded**: it runs under a 10-second timeout (`worktreeReapLsofTimeout`, ADR 1805), because it is made under the per-repo worktree mutex and an unbounded `lsof` would stall every worktree operation for that repo. On timeout `lsof` is killed, its partial output is discarded, one `[#N kill] warn: worktree process reap: lsof timed out after 10s for <worktree>; skipping reap` line is logged, and the reap is skipped — worktree removal proceeds. macOS has no `/proc`-equivalent cheap re-check primitive, so the same TOCTOU window is accepted rather than mitigated here.
 - **Windows**: no-op (`engine/reaper_windows.go`), matching `killProcGroup`'s existing Windows precedent.
 
 Both platform paths resolve symlinks in the worktree directory before matching (`filepath.EvalSymlinks`), since `/proc/*/cwd` and `lsof`'s reported path are both fully-resolved real paths (e.g. macOS resolves `/tmp` → `/private/tmp`), which would otherwise defeat a literal prefix match.
@@ -506,6 +522,7 @@ Each kill is logged via the existing `[#N kill] ...` convention: `[#N kill] send
 
 **Documented residual risks** (see ADR 063):
 - **PID-reuse TOCTOU on macOS**: unlike Linux, there is no cheap re-check between enumeration and kill, so a small window exists where a recycled pid could receive an unintended SIGKILL.
+- **A timed-out reap leaves orphans on macOS**: on a very loaded host `lsof` can exceed its 10-second bound; the reap is then skipped (with the warning above) and a `setsid`'d descendant rooted in the worktree is not killed by this path (ADR 1805).
 - **`chdir`'d descendants are not caught**: this reaper is cwd-based by design (matching the issue's reported failure mode); a process that opened a file in the worktree and then `chdir`'d elsewhere is out of scope and will still leak.
 
 ### Progress Baseline Snapshot
@@ -702,7 +719,7 @@ because the account's usage limit was hit, not because the stage genuinely faile
 result object only — never from anything the assistant wrote: `classifyUsageLimitExit` checks
 `resp.TerminalReason == "blocking_limit"` (the same `terminal_reason` field the turn-cap check
 consults) or `resp.TerminalReason == "api_error"` with `api_error_status == 429` (the CLI's other
-session-limit shape, #1811 / ADR-1811; other `api_error` statuses stay transient and never suspend),
+session-limit shape, #1811 / ADR-1811; other `api_error` statuses stay transient and never trigger it),
 and only when a result object actually parsed. The `result` text is never matched. When Claude exited non-zero without a
 `FABRIK_STAGE_COMPLETE` marker, no turn cap, and `TerminalReason` matches, it returns a
 `*claudeUsageLimitError` sentinel in place of the generic error; an unparseable-JSON invocation is
@@ -726,10 +743,10 @@ engine-shutdown guard — before the normal `claudeRan`/retry classification log
 `fabrik:claude-limit` clears per-issue on the next invocation that is not itself classified as a
 usage-limit exit (success, blocked-on-input, incomplete/genuine-failure, or PR-creation failure alike),
 and account-wide via `settleClaudeLimitLabelSweep`, a per-poll settle scan that removes it from every
-open item once the account-wide suspension has lifted — so an issue that is paused, blocked, or simply
-never redispatched no longer keeps the label indefinitely. An operator can also end an active suspension
+open item once the account-wide usage-limit hold has lifted — so an issue that is paused, blocked, or simply
+never redispatched no longer keeps the label indefinitely. An operator can also end an active usage-limit hold
 early, without restarting the engine, by applying `fabrik:clear-claude-limit` to any open board item;
-`settleClaudeLimitClearRequests` reads it each poll and clears the suspension. See
+`settleClaudeLimitClearRequests` reads it each poll and clears the usage-limit hold. See
 `docs/state-machine.md` §7.3, [ADR-1119](../adrs/1119-claude-usage-limit-detection.md), and
 [ADR-1183](../adrs/1183-structural-claude-usage-limit-detection.md) for the full rationale, including
 why this reuses the same `StageAttempted`-without-`StageRetryIncremented` split as the Post-Run Boundary
@@ -739,7 +756,7 @@ boundary violation is not).
 ### apiKeyHelper Detection Path (Worktree)
 
 A fifth outcome, checked in `runInvocationWithExtension` immediately alongside the account-wide
-usage-limit suspension gate above — before `InvokeOptions` is built or the stall hint consumed, and
+usage-limit hold gate above — before `InvokeOptions` is built or the stall hint consumed, and
 before Claude is ever invoked. `findAPIKeyHelper` (`engine/startup.go`, shared with the engine-startup
 preflight — see "Worker Environment: Anthropic Auth Namespace Scrub" above) checks the worktree's own
 `.claude/settings.json` and `.claude/settings.local.json` (mirroring the startup preflight's file

@@ -319,3 +319,17 @@ func TestShimTellsItsSessionWhenAnotherSessionTakesTheName(t *testing.T) {
 		t.Fatalf("the notice must explain what happened: %q", c)
 	}
 }
+
+// The label-event attribution keys (#2125) are identifier keys and survive the filter.
+func TestChannelNotificationKeepsAttributionKeys(t *testing.T) {
+	ev := channelevents.Event{
+		Type: channelevents.LabelApplied, Repo: "o/r", Issue: 3, Label: "fabrik:cruise",
+		Meta: map[string]string{"actor": "overseer", "via": "x", "actor_login": "alice"},
+	}
+	meta := channelNotification(ev)["meta"].(map[string]string)
+	for k, v := range map[string]string{"actor": "overseer", "via": "x", "actor_login": "alice"} {
+		if meta[k] != v {
+			t.Errorf("meta[%q] = %q, want %q", k, meta[k], v)
+		}
+	}
+}

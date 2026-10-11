@@ -10,16 +10,16 @@ import (
 
 // TestSettleClaudeLimitClearRequests_TriggersClear verifies that an operator
 // applying fabrik:clear-claude-limit to any open item clears an active
-// account-wide suspension and removes the trigger label — the restart-free
+// account-wide usage-limit hold and removes the trigger label — the restart-free
 // clear mechanism required by #1183.
 func TestSettleClaudeLimitClearRequests_TriggersClear(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	now := time.Date(2026, 7, 27, 20, 0, 0, 0, time.UTC)
-	eng.activateClaudeSuspension(1, nil, now)
-	if _, ok := eng.claudeSuspendedUntilTime(now); !ok {
-		t.Fatal("expected suspension to be active before the clear request")
+	eng.activateClaudeUsageLimit(1, nil, now)
+	if _, ok := eng.claudeUsageLimitedUntilTime(now); !ok {
+		t.Fatal("expected usage-limit hold to be active before the clear request")
 	}
 
 	board := &gh.ProjectBoard{
@@ -30,8 +30,8 @@ func TestSettleClaudeLimitClearRequests_TriggersClear(t *testing.T) {
 
 	eng.settleClaudeLimitClearRequests(board)
 
-	if _, ok := eng.claudeSuspendedUntilTime(now); ok {
-		t.Error("expected suspension to be cleared")
+	if _, ok := eng.claudeUsageLimitedUntilTime(now); ok {
+		t.Error("expected usage-limit hold to be cleared")
 	}
 
 	client.mu.Lock()
@@ -48,14 +48,14 @@ func TestSettleClaudeLimitClearRequests_TriggersClear(t *testing.T) {
 }
 
 // TestSettleClaudeLimitClearRequests_NoOpWithoutLabel verifies the scan does
-// nothing when no item carries the trigger label — an active suspension must
+// nothing when no item carries the trigger label — an active usage-limit hold must
 // survive untouched.
 func TestSettleClaudeLimitClearRequests_NoOpWithoutLabel(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	now := time.Date(2026, 7, 27, 20, 0, 0, 0, time.UTC)
-	eng.activateClaudeSuspension(1, nil, now)
+	eng.activateClaudeUsageLimit(1, nil, now)
 
 	board := &gh.ProjectBoard{
 		Items: []gh.ProjectItem{
@@ -65,8 +65,8 @@ func TestSettleClaudeLimitClearRequests_NoOpWithoutLabel(t *testing.T) {
 
 	eng.settleClaudeLimitClearRequests(board)
 
-	if _, ok := eng.claudeSuspendedUntilTime(now); !ok {
-		t.Error("expected suspension to remain active when no item carries the trigger label")
+	if _, ok := eng.claudeUsageLimitedUntilTime(now); !ok {
+		t.Error("expected usage-limit hold to remain active when no item carries the trigger label")
 	}
 	client.mu.Lock()
 	defer client.mu.Unlock()
@@ -82,7 +82,7 @@ func TestSettleClaudeLimitClearRequests_SkipsClosedItems(t *testing.T) {
 	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	now := time.Date(2026, 7, 27, 20, 0, 0, 0, time.UTC)
-	eng.activateClaudeSuspension(1, nil, now)
+	eng.activateClaudeUsageLimit(1, nil, now)
 
 	board := &gh.ProjectBoard{
 		Items: []gh.ProjectItem{
@@ -92,17 +92,17 @@ func TestSettleClaudeLimitClearRequests_SkipsClosedItems(t *testing.T) {
 
 	eng.settleClaudeLimitClearRequests(board)
 
-	if _, ok := eng.claudeSuspendedUntilTime(now); !ok {
-		t.Error("expected suspension to remain active — a closed item must not trigger the clear")
+	if _, ok := eng.claudeUsageLimitedUntilTime(now); !ok {
+		t.Error("expected usage-limit hold to remain active — a closed item must not trigger the clear")
 	}
 }
 
-// TestSettleClaudeLimitLabelSweep_RemovesWhenNotSuspended verifies the
+// TestSettleClaudeLimitLabelSweep_RemovesWhenNotUsageLimited verifies the
 // account-wide sweep clears the informational fabrik:claude-limit label from
-// every open item once the underlying suspension has lifted — the
+// every open item once the underlying usage-limit hold has lifted — the
 // requirement that the label clear account-wide, not only on a labelled
 // issue's next dispatched invocation.
-func TestSettleClaudeLimitLabelSweep_RemovesWhenNotSuspended(t *testing.T) {
+func TestSettleClaudeLimitLabelSweep_RemovesWhenNotUsageLimited(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng := testEngine(t, client, &mockClaudeInvoker{})
 
@@ -128,13 +128,13 @@ func TestSettleClaudeLimitLabelSweep_RemovesWhenNotSuspended(t *testing.T) {
 	}
 }
 
-// TestSettleClaudeLimitLabelSweep_LeavesLabelWhileSuspended verifies the
-// sweep is a no-op while the account-wide suspension is still active — the
+// TestSettleClaudeLimitLabelSweep_LeavesLabelWhileUsageLimited verifies the
+// sweep is a no-op while the account-wide usage-limit hold is still active — the
 // label is accurate in that state and must not be removed prematurely.
-func TestSettleClaudeLimitLabelSweep_LeavesLabelWhileSuspended(t *testing.T) {
+func TestSettleClaudeLimitLabelSweep_LeavesLabelWhileUsageLimited(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng := testEngine(t, client, &mockClaudeInvoker{})
-	eng.activateClaudeSuspension(1, nil, time.Now())
+	eng.activateClaudeUsageLimit(1, nil, time.Now())
 
 	board := &gh.ProjectBoard{
 		Items: []gh.ProjectItem{
@@ -147,7 +147,7 @@ func TestSettleClaudeLimitLabelSweep_LeavesLabelWhileSuspended(t *testing.T) {
 	client.mu.Lock()
 	defer client.mu.Unlock()
 	if len(client.removeLabelCalls) != 0 {
-		t.Errorf("expected no label removals while suspended, got %v", client.removeLabelCalls)
+		t.Errorf("expected no label removals while usage limited, got %v", client.removeLabelCalls)
 	}
 }
 
@@ -195,8 +195,8 @@ func TestSettleClaudeLimitLabelSweep_SkipsItemsWithoutLabel(t *testing.T) {
 
 // TestSettleClaudeLimitLabelSweep_ConcurrentWithActivate drives the sweep
 // concurrently with a fresh activation racing on the same
-// claudeSuspendedUntil field — go test -race must be clean, validating
-// claudeSuspendMu actually guards the shared state the sweep and a real hit
+// claudeUsageLimitedUntil field — go test -race must be clean, validating
+// claudeUsageLimitMu actually guards the shared state the sweep and a real hit
 // both read/act on (the sweep/activate race flagged during Plan).
 func TestSettleClaudeLimitLabelSweep_ConcurrentWithActivate(t *testing.T) {
 	client := &mockGitHubClient{}
@@ -216,7 +216,7 @@ func TestSettleClaudeLimitLabelSweep_ConcurrentWithActivate(t *testing.T) {
 	}()
 	go func() {
 		defer wg.Done()
-		eng.activateClaudeSuspension(55, nil, time.Now())
+		eng.activateClaudeUsageLimit(55, nil, time.Now())
 	}()
 	wg.Wait()
 }

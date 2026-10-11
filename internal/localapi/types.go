@@ -21,8 +21,8 @@ type Envelope struct {
 
 // ---- status ----
 
-// StatusParams selects one issue: "owner/repo#N", or "N" when the daemon
-// manages exactly one repo.
+// StatusParams selects one issue: "owner/repo#N", or "N" / "#N" when the
+// daemon's cached issues are all in exactly one repo.
 type StatusParams struct {
 	Issue string `json:"issue"`
 }
@@ -319,10 +319,10 @@ type ReconcileHealth struct {
 	SinceSuccessSeconds Known[int64]     `json:"since_success_seconds"`
 }
 
-// ClaudeHealth is the account-wide usage-limit suspension.
+// ClaudeHealth is the account-wide usage-limit hold.
 type ClaudeHealth struct {
-	Suspended      bool             `json:"suspended"`
-	SuspendedUntil Known[time.Time] `json:"suspended_until"`
+	UsageLimited      bool             `json:"usage_limited"`
+	UsageLimitedUntil Known[time.Time] `json:"usage_limited_until"`
 }
 
 // BackoffHealth mirrors the GraphQL rate-limit backoff state.
@@ -339,6 +339,11 @@ type BackoffHealth struct {
 type WorkerSlots struct {
 	InUse         int        `json:"in_use"`
 	MaxConcurrent Known[int] `json:"max_concurrent"`
+	// TrainInUse / TrainMax describe the reserved merge-train slot (#2115, ADR 2115),
+	// which sits on top of MaxConcurrent and is not counted in InUse. Both are a
+	// known zero when merge_train is off.
+	TrainInUse Known[int] `json:"train_in_use"`
+	TrainMax   Known[int] `json:"train_max"`
 }
 
 // TrainPartition is one (repo, base) merge-train partition.
@@ -353,7 +358,8 @@ type TrainPartition struct {
 
 // SubscribeParams registers a subscription. Subscriber is the stable name the
 // held queue is keyed on. Issues are "owner/repo#N", or a bare "N" when the
-// daemon manages exactly one repo (the same resolver as status). ExcludeLabels
+// daemon's cached issues are all in exactly one repo (the same resolver as
+// status). ExcludeLabels
 // distinguishes absent (nil: the default churn exclusions) from an explicit
 // empty list (opt into every label).
 type SubscribeParams struct {
@@ -428,6 +434,14 @@ type RevalidateParams struct {
 	Issue      string `json:"issue"`
 }
 
+// AdvanceParams moves an item whose current stage is complete exactly one
+// configured stage forward (#2126). There is no target: the engine's own
+// advance decides the next stage.
+type AdvanceParams struct {
+	Subscriber string `json:"subscriber"`
+	Issue      string `json:"issue"`
+}
+
 // ClearClaudeLimitParams has no issue: the daemon picks the carrier item.
 type ClearClaudeLimitParams struct {
 	Subscriber string `json:"subscriber"`
@@ -464,7 +478,9 @@ type RefusalState struct {
 	Status string `json:"status,omitempty"`
 	// Labels are the item's fabrik-relevant labels.
 	Labels []string `json:"labels,omitempty"`
-	// ValidTargets lists the columns a promote could name.
+	// ValidTargets lists the columns a promote could name. It is set only when
+	// the item is in a parking column; a refusal because the item is not parked
+	// omits it, since no move is possible.
 	ValidTargets []string `json:"valid_targets,omitempty"`
 	Autonomy     string   `json:"autonomy,omitempty"`
 }

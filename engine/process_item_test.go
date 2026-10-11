@@ -46,6 +46,9 @@ import (
 // worker's process group (so killProcGroup's PGID-scoped kill cannot reach
 // it) while remaining in the worker's session (so the new session-scoped
 // reaper still can).
+// lockDirCleanup removes the per-process FABRIK_LOCK_DIR TestMain creates (#2097).
+var lockDirCleanup = func() {}
+
 func TestMain(m *testing.M) {
 	if sentinel := os.Getenv("FABRIK_TEST_SIGINT_SENTINEL"); sentinel != "" {
 		go io.Copy(io.Discard, os.Stdin)
@@ -76,20 +79,37 @@ func TestMain(m *testing.M) {
 		}
 	}
 	lockVerifyDelay = 0
+	// Don't spawn a real macOS `lsof` on every CleanupWorktree (#1805); the
+	// reaper's own tests re-enable the real path via useRealLsofReaper.
+	SetWorktreeReapLsofDisabledForTest(true)
 	// Hermetic against a worker's inherited environment (#2027): a stage
 	// worker runs this suite with the daemon's credentials, GH_TOKEN and
 	// ADR-1846 GIT_CONFIG_* helper entries in its env, none of which CI has.
 	// Tests that need one set it explicitly with t.Setenv.
 	testenv.ScrubProcess()
+	// Keep the board-scoped host lock (#2097) out of the developer's real cache
+	// dir and out of contention with other processes running this suite: many
+	// tests share one board identity. Subprocess helpers inherit it.
+	if dir, err := os.MkdirTemp("", "fabrik-lock-dir-*"); err == nil {
+		os.Setenv("FABRIK_LOCK_DIR", dir)
+		lockDirCleanup = func() { os.RemoveAll(dir) }
+	}
+	// Keep operator-warnings recorders (#2135) out of the package directory.
+	cleanupWarnings := testenv.IsolateWarningsProcess()
 	// Keep spawn-time worker records (#1814) out of the package directory:
 	// most InvokeClaude tests run without t.Chdir.
 	if dir, err := os.MkdirTemp("", "fabrik-worker-records-*"); err == nil {
 		workerRecordsPathOverride = filepath.Join(dir, "workers.json")
 		code := m.Run()
 		os.RemoveAll(dir)
+		lockDirCleanup()
+		cleanupWarnings()
 		os.Exit(code)
 	}
-	os.Exit(m.Run())
+	code := m.Run()
+	lockDirCleanup()
+	cleanupWarnings()
+	os.Exit(code)
 }
 
 func TestProcessItem_SkipsUnknownStage(t *testing.T) {
@@ -2045,16 +2065,16 @@ func TestProcessItem_StallDetection_ClearedOnStageSuccess(t *testing.T) {
 	}
 }
 
-// TestProcessItem_StallDetection_HintSurvivesUsageLimitSuspension is a regression
+// TestProcessItem_StallDetection_HintSurvivesUsageLimit is a regression
 // guard for an interaction bug found in review: runInvocationWithExtension used to
 // build InvokeOptions (consuming any armed stall hint via consumeStallHint) BEFORE
-// checking the account-wide Claude usage-limit suspension gate. If the very next
-// dispatch after a stall was detected happened to land while dispatch was suspended,
+// checking the account-wide Claude usage-limit hold gate. If the very next
+// dispatch after a stall was detected happened to land while dispatch was usage limited,
 // the armed hint was destructively consumed and thrown away without ever reaching a
 // real Claude invocation — silently defeating the one-shot corrective re-invocation
-// for that stall episode. The suspension check must run first, so a gated dispatch
+// for that stall episode. The usage-limit hold check must run first, so a gated dispatch
 // leaves the hint pending for the next dispatch that actually reaches Claude.
-func TestProcessItem_StallDetection_HintSurvivesUsageLimitSuspension(t *testing.T) {
+func TestProcessItem_StallDetection_HintSurvivesUsageLimit(t *testing.T) {
 	skipIfNoGit(t)
 	repoDir := initBareRepo(t)
 	wm := NewWorktreeManager(repoDir)
@@ -2086,7 +2106,7 @@ func TestProcessItem_StallDetection_HintSurvivesUsageLimitSuspension(t *testing.
 	)
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
-	item := gh.ProjectItem{Number: 23, Title: "Hint survives suspension test", Status: "Research", ItemID: "PVTI_23"}
+	item := gh.ProjectItem{Number: 23, Title: "Hint survives usage-limit hold test", Status: "Research", ItemID: "PVTI_23"}
 
 	// Calls 1-2: capped then declining — arms the hint for the stage's next invocation.
 	for i := 0; i < 2; i++ {
@@ -2102,34 +2122,34 @@ func TestProcessItem_StallDetection_HintSurvivesUsageLimitSuspension(t *testing.
 		t.Fatal("precondition failed: expected StallHintPending after capped-then-declining sequence")
 	}
 
-	// Activate the account-wide suspension before the 3rd dispatch — this dispatch
+	// Activate the account-wide usage-limit hold before the 3rd dispatch — this dispatch
 	// must be gated before ever reaching Claude, and must NOT consume the hint.
-	eng.activateClaudeSuspension(0, nil, time.Now())
+	eng.activateClaudeUsageLimit(0, nil, time.Now())
 	if err := eng.processItem(context.Background(), board, item); err != nil {
-		t.Fatalf("processItem (suspended call): %v", err)
+		t.Fatalf("processItem (usage-limited call): %v", err)
 	}
 	if len(claude.calls) != 2 {
-		t.Fatalf("expected the suspended dispatch to skip invoking Claude entirely, got %d total calls", len(claude.calls))
+		t.Fatalf("expected the usage-limited dispatch to skip invoking Claude entirely, got %d total calls", len(claude.calls))
 	}
 	snap, err = eng.store.Get("owner/repo", 23)
 	if err != nil {
 		t.Fatalf("store.Get: %v", err)
 	}
 	if !snap.StallHintPending("Research") {
-		t.Error("StallHintPending(Research) should survive a dispatch gated by the usage-limit suspension")
+		t.Error("StallHintPending(Research) should survive a dispatch gated by the usage-limit hold")
 	}
 
-	// Clear the suspension and dispatch again — this is the first invocation that
+	// Clear the usage-limit hold and dispatch again — this is the first invocation that
 	// actually reaches Claude since the hint was armed, so it must carry the hint.
-	eng.clearClaudeSuspension("test")
+	eng.clearClaudeUsageLimit("test")
 	if err := eng.processItem(context.Background(), board, item); err != nil {
-		t.Fatalf("processItem (post-suspension call): %v", err)
+		t.Fatalf("processItem (post-usage-limit call): %v", err)
 	}
 	if len(claude.calls) != 3 {
-		t.Fatalf("expected exactly 1 additional Claude invocation after clearing suspension, got %d total calls", len(claude.calls))
+		t.Fatalf("expected exactly 1 additional Claude invocation after clearing usage-limit hold, got %d total calls", len(claude.calls))
 	}
 	if got := claude.calls[2].opts.CorrectiveHint; got == "" {
-		t.Error("expected the corrective hint to survive the suspended dispatch and reach the first real invocation afterward")
+		t.Error("expected the corrective hint to survive the usage-limited dispatch and reach the first real invocation afterward")
 	}
 }
 

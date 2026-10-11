@@ -153,7 +153,7 @@ func isJSONNullOrEmpty(raw json.RawMessage) bool {
 	return len(t) == 0 || bytes.Equal(t, []byte("null"))
 }
 
-// resolveUsageLimitDeadline computes the deadline a usage-limit suspension
+// resolveUsageLimitDeadline computes the deadline a usage-limit hold
 // should run until. It is the single place R3 (absent/zero/malformed/past/no
 // exhausted window degrade to claudeUsageLimitFallbackBackoff) and R4 (clamp to
 // usageLimitMaxResetHorizon) are applied. limitErr may be nil (no structured
@@ -176,7 +176,7 @@ func resolveUsageLimitDeadline(limitErr *claudeUsageLimitError, now time.Time) (
 	return limitErr.ResetAt, usageLimitSourceExact, ""
 }
 
-// formatUsageLimitReset renders a resolved suspension deadline for the
+// formatUsageLimitReset renders a resolved usage-limit hold deadline for the
 // operator-facing log line and comment (R6). It is formatted from the
 // structured instant in engine-local time — never copied from result prose.
 func formatUsageLimitReset(deadline time.Time) string {

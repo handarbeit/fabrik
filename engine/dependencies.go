@@ -87,6 +87,34 @@ func detectCycle(store *itemstate.Store, itemRepo string, itemNumber int, openDe
 	return false
 }
 
+// openDependencies returns the blockers in deps that are still open, preferring
+// the Store's view of each blocker's IsClosed over dep.State (see the comment in
+// checkDependencies). It is a pure read: no label, comment or Store write, so the
+// overseer's advance (#2126) can evaluate "unresolved dependencies" without
+// calling checkDependencies, which writes.
+func (e *Engine) openDependencies(itemRepo string, deps []gh.Dependency) []gh.Dependency {
+	var openDeps []gh.Dependency
+	for _, dep := range deps {
+		depRepo := dep.Repo
+		if depRepo == "" {
+			depRepo = itemRepo
+		}
+		// Store-preferred path: cache is authoritative for blocker IsClosed.
+		if depSnap, snapErr := e.store.Get(depRepo, dep.Number); snapErr == nil {
+			if depSnap.IsClosed() {
+				continue // resolved per Store
+			}
+			openDeps = append(openDeps, dep)
+			continue
+		}
+		// Fallback: no Store entry for this blocker — fall back to dep.State.
+		if dep.State != "CLOSED" {
+			openDeps = append(openDeps, dep)
+		}
+	}
+	return openDeps
+}
+
 // checkDependencies inspects item.BlockedBy and determines whether the issue
 // is gated by unresolved dependencies.
 //
@@ -187,25 +215,7 @@ func (e *Engine) checkDependencies(board *gh.ProjectBoard, item gh.ProjectItem, 
 	// Store as the source of truth here matches PushUnblockObserver.allBlockersClosed
 	// and prevents the pull-path from re-blocking an issue that the push-path
 	// has already correctly unblocked, just because the dep edge state is stale.
-	var openDeps []gh.Dependency
-	for _, dep := range blockedByList {
-		depRepo := dep.Repo
-		if depRepo == "" {
-			depRepo = itemRepo
-		}
-		// Store-preferred path: cache is authoritative for blocker IsClosed.
-		if depSnap, snapErr := e.store.Get(depRepo, dep.Number); snapErr == nil {
-			if depSnap.IsClosed() {
-				continue // resolved per Store
-			}
-			openDeps = append(openDeps, dep)
-			continue
-		}
-		// Fallback: no Store entry for this blocker — fall back to dep.State.
-		if dep.State != "CLOSED" {
-			openDeps = append(openDeps, dep)
-		}
-	}
+	openDeps := e.openDependencies(itemRepo, blockedByList)
 
 	if len(openDeps) == 0 {
 		// All dependencies resolved (or none exist) — remove fabrik:blocked if present.

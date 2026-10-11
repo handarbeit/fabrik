@@ -246,7 +246,7 @@ func TestHubScopeRouting(t *testing.T) {
 	a.wait(t)
 	b.none(t)
 	// Account-wide event reaches everyone whose filter admits it.
-	h.Publish(Event{Type: ClaudeLimitSuspended, Content: "limit"})
+	h.Publish(Event{Type: ClaudeUsageLimited, Content: "limit"})
 	a.wait(t)
 	b.wait(t)
 	if h.Queued("C") != 1 {

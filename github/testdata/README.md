@@ -169,6 +169,9 @@ set was migrated):
 - `fetchNodeCommentsQuery`, `fetchNodeLabelsQuery` (pagination continuations)
 - `fetchProjectUpdatedAtQuery`, `fetchProjectItemStatusQuery`, `fetchProjectItemStatusBatchQuery`
 - `lookupIssueProjectItemQuery`, `addProjectV2ItemByIdMutation`
+- `fetchProjectFieldsQuery`, `createProjectV2FieldMutation` (#2110 — the display-field
+  listing and creation used by `init --create-board` / `repair-board`; hand-authored
+  `httptest` payload tests in `project_admin_test.go`, no recording)
 - `fetchPRReviewDecisionQuery`, `fetchPRReviewThreadsQuery` (the latter added
   2026-08-09 for Pruefer's prior-thread context, after this issue's Specify —
   in scope for R1 by "every query string," out of scope for R2's named

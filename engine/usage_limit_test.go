@@ -277,14 +277,14 @@ func TestUsageLimitThenGenuineFailure_LeavesFullRetryBudget(t *testing.T) {
 	if err := eng.processItem(context.Background(), board, item); err != nil {
 		t.Fatalf("processItem (first call): %v", err)
 	}
-	// The first hit activated the account-wide Claude suspension (ADR-1120,
-	// exercised separately by TestUsageLimitSuspension_ConcurrentDispatchShortCircuitsAfterDetection).
-	// This test is about per-issue retry-budget semantics, not the suspension
+	// The first hit activated the account-wide Claude usage-limit hold (ADR-1120,
+	// exercised separately by TestUsageLimit_ConcurrentDispatchShortCircuitsAfterDetection).
+	// This test is about per-issue retry-budget semantics, not the usage-limit hold
 	// window, so clear it here to simulate the second poll happening after the
-	// suspension has lifted — otherwise the second call would be gated before
+	// usage-limit hold has lifted — otherwise the second call would be gated before
 	// ever reaching Claude and callCount would never advance to the genuine
 	// failure branch.
-	eng.clearClaudeSuspension("test: simulate suspension window elapsed before second poll")
+	eng.clearClaudeUsageLimit("test: simulate usage-limit hold window elapsed before second poll")
 	// Second poll: item now carries fabrik:claude-limit, as it would after a
 	// real board re-fetch following the first call's label add.
 	item.Labels = []string{"fabrik:claude-limit"}
@@ -357,14 +357,14 @@ func TestUsageLimitExit_SecondConsecutiveHit_DoesNotRepostComment(t *testing.T) 
 	}
 }
 
-// TestUsageLimitSuspension_ConcurrentDispatchShortCircuitsAfterDetection is the
-// account-wide suspension acceptance-criteria test (ADR-1120): once one worker
-// has detected the usage limit and activated the suspension, every other
+// TestUsageLimit_ConcurrentDispatchShortCircuitsAfterDetection is the
+// account-wide usage-limit hold acceptance-criteria test (ADR-1120): once one worker
+// has detected the usage limit and activated the usage-limit hold, every other
 // concurrently-dispatched item must short-circuit via the gate in
 // runInvocationWithExtension without reaching e.claude.Invoke — "a single
-// detection suspends all workers; subsequent items do not each invoke and
+// detection holds all workers; subsequent items do not each invoke and
 // fail."
-func TestUsageLimitSuspension_ConcurrentDispatchShortCircuitsAfterDetection(t *testing.T) {
+func TestUsageLimit_ConcurrentDispatchShortCircuitsAfterDetection(t *testing.T) {
 	skipIfNoGit(t)
 	repoDir := initBareRepo(t)
 	wm := NewWorktreeManager(repoDir)
@@ -383,8 +383,8 @@ func TestUsageLimitSuspension_ConcurrentDispatchShortCircuitsAfterDetection(t *t
 	)
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 
-	// First dispatch: no suspension active yet, so this one actually reaches
-	// Claude, detects the limit, and activates the account-wide suspension.
+	// First dispatch: no usage-limit hold active yet, so this one actually reaches
+	// Claude, detects the limit, and activates the account-wide usage-limit hold.
 	detector := gh.ProjectItem{Number: 200, Title: "Detector", Status: "Research", ItemID: "PVTI_200"}
 	if err := eng.processItem(context.Background(), board, detector); err != nil {
 		t.Fatalf("processItem (detector): %v", err)
@@ -395,11 +395,11 @@ func TestUsageLimitSuspension_ConcurrentDispatchShortCircuitsAfterDetection(t *t
 	if callsAfterDetection != 1 {
 		t.Fatalf("expected exactly 1 Claude invocation from the detecting call, got %d", callsAfterDetection)
 	}
-	if _, suspended := eng.claudeSuspendedUntilTime(time.Now()); !suspended {
-		t.Fatal("expected account-wide Claude suspension to be active after detection")
+	if _, usageLimited := eng.claudeUsageLimitedUntilTime(time.Now()); !usageLimited {
+		t.Fatal("expected account-wide Claude usage-limit hold to be active after detection")
 	}
 
-	// N concurrent dispatches for other items — the suspension is already
+	// N concurrent dispatches for other items — the usage-limit hold is already
 	// active, so every one of them must be gated in runInvocationWithExtension
 	// before e.claude.Invoke is ever called.
 	const n = 10
@@ -421,20 +421,20 @@ func TestUsageLimitSuspension_ConcurrentDispatchShortCircuitsAfterDetection(t *t
 	finalCalls := len(claude.calls)
 	claude.mu.Unlock()
 	if finalCalls != callsAfterDetection {
-		t.Errorf("expected Claude invocation count to stay at %d while suspended, got %d — concurrent dispatch bypassed the gate", callsAfterDetection, finalCalls)
+		t.Errorf("expected Claude invocation count to stay at %d while usage limited, got %d — concurrent dispatch bypassed the gate", callsAfterDetection, finalCalls)
 	}
 }
 
-// TestUsageLimitSuspension_UnrelatedErrorDoesNotClearConcurrentlyActivatedSuspension
+// TestUsageLimit_UnrelatedErrorDoesNotClearConcurrentlyActivatedHold
 // is a regression guard for a race in the "clear on non-limit error" path: an
-// invocation that started before any suspension was active can still be
+// invocation that started before any usage-limit hold was active can still be
 // in-flight when another worker detects the limit and activates the
-// suspension. If the in-flight invocation then returns a generic, unrelated
+// usage-limit hold. If the in-flight invocation then returns a generic, unrelated
 // error (not a claudeUsageLimitError, and not a success), that must NOT clear
-// the suspension the other worker just activated — a generic error is not
+// the usage-limit hold the other worker just activated — a generic error is not
 // evidence the account-wide limit has cleared. Only a successful invocation
 // (err == nil) may clear it (ADR-1120's "early clear on success").
-func TestUsageLimitSuspension_UnrelatedErrorDoesNotClearConcurrentlyActivatedSuspension(t *testing.T) {
+func TestUsageLimit_UnrelatedErrorDoesNotClearConcurrentlyActivatedHold(t *testing.T) {
 	skipIfNoGit(t)
 	repoDir := initBareRepo(t)
 	wm := NewWorktreeManager(repoDir)
@@ -444,8 +444,8 @@ func TestUsageLimitSuspension_UnrelatedErrorDoesNotClearConcurrentlyActivatedSus
 	claude := &mockClaudeInvoker{
 		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
 			// Simulate a concurrent worker detecting the limit and activating the
-			// account-wide suspension while THIS invocation is still in flight.
-			eng.activateClaudeSuspension(999, nil, time.Now())
+			// account-wide usage-limit hold while THIS invocation is still in flight.
+			eng.activateClaudeUsageLimit(999, nil, time.Now())
 			// This invocation's own outcome is unrelated to the usage limit.
 			return "partial output", false, TokenUsage{}, errors.New("some genuine transient failure")
 		},
@@ -464,24 +464,24 @@ func TestUsageLimitSuspension_UnrelatedErrorDoesNotClearConcurrentlyActivatedSus
 		t.Fatalf("processItem: %v", err)
 	}
 
-	if _, suspended := eng.claudeSuspendedUntilTime(time.Now()); !suspended {
-		t.Error("expected the concurrently-activated suspension to survive this invocation's unrelated error, but it was cleared")
+	if _, usageLimited := eng.claudeUsageLimitedUntilTime(time.Now()); !usageLimited {
+		t.Error("expected the concurrently-activated usage-limit hold to survive this invocation's unrelated error, but it was cleared")
 	}
 }
 
-// TestProcessComments_SuspendedGate_IsFullNoOp verifies the ADR-1120 claim in
-// processComments' own gate comment: while the account-wide Claude suspension
+// TestProcessComments_UsageLimitedGate_IsFullNoOp verifies the ADR-1120 claim in
+// processComments' own gate comment: while the account-wide Claude usage-limit hold
 // is active, the function must return immediately with zero side effects — no
 // 👀 reaction, no fabrik:editing label, no Claude invocation — so the comment
 // remains "new" and is retried on a later poll once dispatch resumes, rather
 // than being partially consumed by a doomed cycle.
-func TestProcessComments_SuspendedGate_IsFullNoOp(t *testing.T) {
+func TestProcessComments_UsageLimitedGate_IsFullNoOp(t *testing.T) {
 	skipIfNoGit(t)
 
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{}
 	eng := testEngineWithRepo(t, client, claude)
-	eng.activateClaudeSuspension(0, nil, time.Now())
+	eng.activateClaudeUsageLimit(0, nil, time.Now())
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	stage := &stages.Stage{Name: "Research", Order: 1, Completion: stages.CompletionCriteria{Type: "claude"}}
@@ -491,21 +491,21 @@ func TestProcessComments_SuspendedGate_IsFullNoOp(t *testing.T) {
 	}
 
 	if err := eng.processComments(context.Background(), board, item, stage, userComments); err != nil {
-		t.Fatalf("processComments returned error while suspended: %v", err)
+		t.Fatalf("processComments returned error while usage limited: %v", err)
 	}
 
 	if len(claude.forCommentsCalls) != 0 {
-		t.Errorf("expected 0 Claude invocations while suspended, got %d", len(claude.forCommentsCalls))
+		t.Errorf("expected 0 Claude invocations while usage limited, got %d", len(claude.forCommentsCalls))
 	}
 	if len(client.addCommentReactionCalls) != 0 {
-		t.Errorf("expected 0 👀 reactions while suspended, got %d: %v", len(client.addCommentReactionCalls), client.addCommentReactionCalls)
+		t.Errorf("expected 0 👀 reactions while usage limited, got %d: %v", len(client.addCommentReactionCalls), client.addCommentReactionCalls)
 	}
 	for _, c := range client.addLabelCalls {
 		if c.labelName == "fabrik:editing" {
-			t.Error("expected fabrik:editing to NOT be added while suspended (gate must fire before any side effect)")
+			t.Error("expected fabrik:editing to NOT be added while usage limited (gate must fire before any side effect)")
 		}
 	}
 	if len(client.addLabelCalls) != 0 {
-		t.Errorf("expected 0 label mutations while suspended, got %d: %v", len(client.addLabelCalls), client.addLabelCalls)
+		t.Errorf("expected 0 label mutations while usage limited, got %d: %v", len(client.addLabelCalls), client.addLabelCalls)
 	}
 }

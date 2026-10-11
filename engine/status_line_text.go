@@ -66,7 +66,7 @@ func statusLinePaused(reason string) string {
 	return "paused: " + reason
 }
 
-// statusLineClaudeLimit: the account-wide suspension ends at until, in the
+// statusLineClaudeLimit: the account-wide usage-limit hold ends at until, in the
 // daemon's local time.
 func statusLineClaudeLimit(until time.Time) string {
 	return "claude-limit until " + until.Local().Format("15:04")

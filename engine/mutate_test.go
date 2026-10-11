@@ -7,6 +7,7 @@ import (
 
 	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
 )
 
 // lastSeenSourceUpdatedAt returns the current probe staleness baseline for
@@ -689,5 +690,86 @@ func TestRemoveLabelChecked(t *testing.T) {
 				t.Errorf("label present=%v after call, wantRemoved=%v", has, tc.wantRemoved)
 			}
 		})
+	}
+}
+
+// ── requester attribution (#2125) ────────────────────────────────────────
+
+func TestLabelCheckedBy_CarriesRequesterOnlyOnSuccess(t *testing.T) {
+	var addErr error
+	client := &mockGitHubClient{
+		addLabelToIssueFn: func(owner, repo string, issueNumber int, labelName string) error { return addErr },
+	}
+	eng, _ := testEngineWithCache(t, client, &mockClaudeInvoker{})
+	var got []itemstate.Change
+	eng.store.Subscribe(itemstate.ObserverFunc(func(c itemstate.Change, _ itemstate.Snapshot) { got = append(got, c) }))
+	item := gh.ProjectItem{Number: 1, Repo: "owner/repo"}
+
+	// A failed write applies no mutation, so nothing is left to mislabel a later write.
+	addErr = errors.New("network error")
+	if err := eng.addLabelCheckedBy(item, "fabrik:cruise", "x"); err == nil {
+		t.Fatal("expected error")
+	}
+	if len(got) != 0 {
+		t.Fatalf("failed write produced changes: %+v", got)
+	}
+
+	addErr = nil
+	if err := eng.addLabelCheckedBy(item, "fabrik:cruise", "x"); err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.removeLabelCheckedBy(item, "fabrik:cruise", "x"); err != nil {
+		t.Fatal(err)
+	}
+	// The same label written by the engine itself afterwards is not attributed.
+	if err := eng.addLabelChecked(item, "fabrik:cruise"); err != nil {
+		t.Fatal(err)
+	}
+	var reqs []string
+	for _, c := range got {
+		if len(c.LabelDeltas) == 1 {
+			reqs = append(reqs, c.Requester)
+		}
+	}
+	if len(reqs) != 3 || reqs[0] != "x" || reqs[1] != "x" || reqs[2] != "" {
+		t.Fatalf("requesters = %q (changes %+v)", reqs, got)
+	}
+}
+
+func TestRemoveLabelCheckedBy_NotFoundRegistersNoEcho(t *testing.T) {
+	client := &mockGitHubClient{
+		removeLabelFromIssueFn: func(owner, repo string, issueNumber int, labelName string) error { return gh.ErrNotFound },
+	}
+	eng, _ := testEngineWithCache(t, client, &mockClaudeInvoker{})
+	wm, _ := newTestWebhookManager(t)
+	wm.mu.Lock()
+	wm.state = WebhookStreamHealthy
+	wm.mu.Unlock()
+	eng.webhookMgr = wm
+
+	if err := eng.removeLabelCheckedBy(gh.ProjectItem{Number: 1, Repo: "owner/repo"}, "fabrik:yolo", "x"); err != nil {
+		t.Fatal(err)
+	}
+	wm.mu.Lock()
+	defer wm.mu.Unlock()
+	if len(wm.pendingEchoes) != 0 || len(wm.echoVia) != 0 {
+		t.Fatalf("echo registered for an already-absent label: %v %v", wm.pendingEchoes, wm.echoVia)
+	}
+}
+
+func TestAddLabelCheckedBy_RegistersEchoWithRequester(t *testing.T) {
+	eng, _ := testEngineWithCache(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+	wm, _ := newTestWebhookManager(t)
+	wm.mu.Lock()
+	wm.state = WebhookStreamHealthy
+	wm.mu.Unlock()
+	eng.webhookMgr = wm
+
+	if err := eng.addLabelCheckedBy(gh.ProjectItem{Number: 1, Repo: "owner/repo"}, "fabrik:cruise", "x"); err != nil {
+		t.Fatal(err)
+	}
+	ok, via := wm.MatchEchoVia("issues", "labeled", "owner/repo#1+fabrik:cruise")
+	if !ok || via != "x" {
+		t.Fatalf("MatchEchoVia = %v, %q", ok, via)
 	}
 }

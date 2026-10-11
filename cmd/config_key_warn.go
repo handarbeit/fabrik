@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"strings"
+
+	"github.com/handarbeit/fabrik/warnings"
 )
 
 // warnUnrecognizedConfigKeys prints one [startup] warning line per key in
@@ -24,14 +26,30 @@ import (
 // keys is expected to already be sorted (UnrecognizedTopLevelKeys returns a
 // sorted slice); this function reports them in the order given.
 func warnUnrecognizedConfigKeys(keys []string, w io.Writer) {
+	conds := make([]warnings.Condition, 0, len(keys))
 	for _, key := range keys {
-		fmt.Fprintf(w, "[startup] warning: .fabrik/config.yaml: unrecognised key %q\n", key)
+		detail := fmt.Sprintf("%q in .fabrik/config.yaml is not a recognised key and is silently ignored.", key)
+		logLine := fmt.Sprintf(".fabrik/config.yaml: unrecognised key %q", key)
 
 		flagName := strings.ReplaceAll(key, "_", "-")
-		if flag.CommandLine.Lookup(flagName) == nil {
-			continue
+		if flag.CommandLine.Lookup(flagName) != nil {
+			envName := "FABRIK_" + strings.ToUpper(key)
+			hint := fmt.Sprintf("this knob is CLI/env-only — set %s or -%s", envName, flagName)
+			detail += "\n\nFix: " + hint + "."
+			logLine += fmt.Sprintf("\n          (%s)", hint)
+		} else {
+			detail += "\n\nFix: remove the key or correct its spelling."
 		}
-		envName := "FABRIK_" + strings.ToUpper(key)
-		fmt.Fprintf(w, "          (this knob is CLI/env-only — set %s or -%s)\n", envName, flagName)
+		conds = append(conds, warnings.Condition{
+			Subject: key,
+			Title:   fmt.Sprintf("Unrecognised key %q in .fabrik/config.yaml", key),
+			Detail:  detail,
+			LogLine: logLine,
+		})
+	}
+	// keys is the complete result of a check that ran, so Reconcile also clears
+	// the entry for a key the operator has since fixed — across a restart.
+	if err := warnings.Reconcile(w, "config_key", conds); err != nil {
+		fmt.Fprintf(w, "[startup] warning: recording config_key warnings: %v\n", err)
 	}
 }

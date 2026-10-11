@@ -346,7 +346,7 @@ func runInit(args []string) error {
 	force := fset.Bool("force", false, "Overwrite existing files")
 	userFlag := fset.String("user", "", "Your GitHub username (PAT mode; not needed with --github-app)")
 	ghesHostFlag := fset.String("ghes-host", "", "GitHub Enterprise Server hostname, e.g. github.example.com (also FABRIK_GHES_HOST)")
-	createBoard := fset.Bool("create-board", false, "Create a new GitHub Project (v2) board from the just-extracted stage configs, linked to --owner/--repo. Organization-owned repos only (see #770). Mutually exclusive with the positional <project-url> argument.")
+	createBoard := fset.Bool("create-board", false, "Create a new GitHub Project (v2) board from the just-extracted stage configs, linked to --owner/--repo, with its Status columns and the enabled display-only fields (Fabrik, Last activity, Last run). Organization-owned repos only (see #770). Mutually exclusive with the positional <project-url> argument.")
 	ownerFlag := fset.String("owner", "", "GitHub org (owner) to create the board under; required with --create-board and --github-app")
 	repoFlag := fset.String("repo", "", "Optional with --create-board: link the new board to this repository and scope .fabrik/config.yaml to it (repo:). Omit for an unlinked org board; Fabrik discovers repos from the board's items")
 	titleFlag := fset.String("title", "", "Project board title for --create-board (default: \"<repo> Fabrik Pipeline\")")
@@ -660,9 +660,19 @@ func runInit(args []string) error {
 	// written above, before .fabrik/config.yaml is generated so its
 	// owner/project/owner_type can be pre-filled from the result — the same
 	// role the URL-provided flow's owner/project/ownerType play below.
+	var fieldsErr error // display-field failure on the new board: board kept, reported after the config is written (#2110)
 	if *createBoard {
 		var number, resolvedOwnerType string
 		var err error
+		// The display fields are named by project_fields.* in an existing
+		// config; with --force (or no config) the defaults apply. A load
+		// error is only fatal without --force, which already refused above.
+		var boardFields config.ProjectFieldsConfig
+		if loaded, loadErr := config.LoadProjectConfig(); loadErr == nil {
+			boardFields = loaded.ProjectFields
+		} else if !*force {
+			return loadErr
+		}
 		if appSetup != nil {
 			// A repo outside the installation's grant is invisible to the
 			// App and would surface only as GitHub's bare "Could not resolve
@@ -676,9 +686,9 @@ func runInit(args []string) error {
 					return fmt.Errorf("--create-board: %w", err)
 				}
 			}
-			number, resolvedOwnerType, err = createBoardCore(appSetup.Client, *ownerFlag, *repoFlag, *titleFlag, stagesDir)
+			number, resolvedOwnerType, fieldsErr, err = createBoardCore(appSetup.Client, *ownerFlag, *repoFlag, *titleFlag, stagesDir, boardFields)
 		} else {
-			number, resolvedOwnerType, err = runCreateBoard(*ownerFlag, *repoFlag, *titleFlag, ghesHost, *tokenFlag, stagesDir)
+			number, resolvedOwnerType, fieldsErr, err = runCreateBoard(*ownerFlag, *repoFlag, *titleFlag, ghesHost, *tokenFlag, stagesDir, boardFields)
 		}
 		if err != nil {
 			return fmt.Errorf("--create-board: %w", err)
@@ -707,6 +717,13 @@ func runInit(args []string) error {
 		return err
 	}
 
+	// A display-field failure never discards the new board: it exists and
+	// .fabrik/config.yaml now points at it, so repair-board finishes the job.
+	if fieldsErr != nil {
+		return fmt.Errorf("--create-board: board #%s was created and .fabrik/config.yaml written, but not every display field could be created: %w — "+
+			"run `fabrik repair-board --apply` to create the missing field(s)", project, fieldsErr)
+	}
+
 	fmt.Println("\nFabrik is ready. Stage configs and plugin skills are in .fabrik/")
 	fmt.Println("Edit .fabrik/config.yaml with your project settings, then run fabrik.")
 	return nil
@@ -733,25 +750,25 @@ func runInit(args []string) error {
 // Returns the new project's number (as a string, for direct use in
 // .fabrik/config.yaml's project: key) and the resolved owner type
 // ("organization" — refuseIfUserOwnedBoard already rejected "user").
-func runCreateBoard(owner, repo, title, ghesHost, tokenFlag, stagesDir string) (project, ownerType string, err error) {
+func runCreateBoard(owner, repo, title, ghesHost, tokenFlag, stagesDir string, pf config.ProjectFieldsConfig) (project, ownerType string, fieldsErr, err error) {
 	token, err := loadGitHubToken(tokenFlag)
 	if err != nil {
-		return "", "", err
+		return "", "", nil, err
 	}
 	client := newBoardGHClient(token, ghesHost)
-	return createBoardCore(client, owner, repo, title, stagesDir)
+	return createBoardCore(client, owner, repo, title, stagesDir, pf)
 }
 
 // createBoardCore is the testable core of runCreateBoard, taking an
 // already-constructed *gh.Client so tests can supply an httptest-backed one
 // (mirroring refreshStagesWithReader's CLI-wrapper/testable-core split).
-func createBoardCore(client *gh.Client, owner, repo, title, stagesDir string) (project, ownerType string, err error) {
+func createBoardCore(client *gh.Client, owner, repo, title, stagesDir string, pf config.ProjectFieldsConfig) (project, ownerType string, fieldsErr, err error) {
 	ownerID, ownerType, err := client.ResolveOwner(owner)
 	if err != nil {
-		return "", "", fmt.Errorf("resolving owner %q: %w", owner, err)
+		return "", "", nil, fmt.Errorf("resolving owner %q: %w", owner, err)
 	}
 	if err := refuseIfUserOwnedBoard(ownerType); err != nil {
-		return "", "", err
+		return "", "", nil, err
 	}
 
 	// --repo is optional (the engine discovers repos from the board's items):
@@ -760,7 +777,7 @@ func createBoardCore(client *gh.Client, owner, repo, title, stagesDir string) (p
 	if repo != "" {
 		repoID, err = client.FetchRepositoryID(owner, repo)
 		if err != nil {
-			return "", "", fmt.Errorf("resolving repository %s/%s: %w", owner, repo, err)
+			return "", "", nil, fmt.Errorf("resolving repository %s/%s: %w", owner, repo, err)
 		}
 	}
 
@@ -774,11 +791,11 @@ func createBoardCore(client *gh.Client, owner, repo, title, stagesDir string) (p
 	// project (review finding on PR #1718).
 	allStages, err := stages.LoadAll(stagesDir)
 	if err != nil {
-		return "", "", fmt.Errorf("loading stage configs from %s: %w", stagesDir, err)
+		return "", "", nil, fmt.Errorf("loading stage configs from %s: %w", stagesDir, err)
 	}
 	names := boardColumnNames(allStages)
 	if len(names) == 0 {
-		return "", "", fmt.Errorf("no stage configs with board columns found in %s — nothing to create Status columns for", stagesDir)
+		return "", "", nil, fmt.Errorf("no stage configs with board columns found in %s — nothing to create Status columns for", stagesDir)
 	}
 
 	if title == "" {
@@ -791,7 +808,7 @@ func createBoardCore(client *gh.Client, owner, repo, title, stagesDir string) (p
 
 	projectID, number, err := client.CreateProjectV2(ownerID, title, repoID)
 	if err != nil {
-		return "", "", fmt.Errorf("creating project board: %w", err)
+		return "", "", nil, fmt.Errorf("creating project board: %w", err)
 	}
 	// refuseIfUserOwnedBoard above already rejected "user", so ownerType is
 	// always "organization" here — the /orgs/ URL form is always correct.
@@ -823,7 +840,7 @@ func createBoardCore(client *gh.Client, owner, repo, title, stagesDir string) (p
 
 	sf, err := client.FetchStatusField(projectID)
 	if err != nil {
-		return "", "", wrapPostCreateErr("fetching Status field of newly created board", err)
+		return "", "", nil, wrapPostCreateErr("fetching Status field of newly created board", err)
 	}
 
 	options := make([]gh.StatusOptionInput, 0, len(names))
@@ -831,11 +848,33 @@ func createBoardCore(client *gh.Client, owner, repo, title, stagesDir string) (p
 		options = append(options, gh.StatusOptionInput{Name: name, Color: "GRAY", Description: ""})
 	}
 	if err := client.SetStatusFieldOptions(sf.FieldID, options); err != nil {
-		return "", "", wrapPostCreateErr("setting Status columns on newly created board", err)
+		return "", "", nil, wrapPostCreateErr("setting Status columns on newly created board", err)
 	}
 	fmt.Printf("  board: Status columns set: %s\n", strings.Join(names, ", "))
 
-	return strconv.Itoa(number), ownerType, nil
+	// Display-only fields (#2110). The board and its Status columns now exist,
+	// so a failure here is reported through fieldsErr (the caller still
+	// records the board in .fabrik/config.yaml) rather than returned as err,
+	// and never rolls anything back. A brand-new board has no field of the
+	// configured name unless it collides with a built-in, which the plan
+	// reports as a type mismatch and leaves alone.
+	fieldsErr = createBoardDisplayFields(client, projectID, pf)
+
+	return strconv.Itoa(number), ownerType, fieldsErr, nil
+}
+
+// createBoardDisplayFields creates every enabled display field on a newly
+// created board through the shared plan/apply helpers (the same ones
+// repair-board uses), attempting all of them, printing one line each and
+// returning the joined failures naming each failed field.
+func createBoardDisplayFields(client displayFieldClient, projectID string, pf config.ProjectFieldsConfig) error {
+	plan, err := planBoardDisplayFields(client, projectID, pf)
+	if err != nil {
+		return err
+	}
+	applyDisplayFields(client, projectID, plan)
+	printDisplayFields(os.Stdout, "  board", plan, false)
+	return displayFieldsErr(plan)
 }
 
 // writeGitExclude adds Fabrik working directories to .git/info/exclude
