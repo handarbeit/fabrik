@@ -373,8 +373,6 @@ func mergeMeta(dst, src map[string]string) map[string]string {
 func (ce *channelEvents) checkAnomalies() {
 	e := ce.e
 	now := e.now()
-	h := e.health.snapshot()
-	pollOverdue := e.pollVerdictFor(h, now).Overdue
 	until := e.channelUsageLimitedUntil(now)
 
 	a := &ce.anom
@@ -384,6 +382,13 @@ func (ce *channelEvents) checkAnomalies() {
 	} else if !a.limitedUntil.IsZero() {
 		a.lastLift, a.limitedUntil = a.limitedUntil, time.Time{}
 	}
+	if len(a.retries) == 0 && len(a.holds) == 0 {
+		// Nothing to judge: skip the config and health reads entirely, so an idle
+		// engine pays nothing for the detectors on every drain.
+		a.mu.Unlock()
+		return
+	}
+	pollOverdue := e.pollVerdictFor(e.health.snapshot(), now).Overdue
 	var out []channelevents.Event
 	if !anomalyDisabled.retry.Load() {
 		out = append(out, ce.checkRetriesLocked(now, pollOverdue, !until.IsZero())...)
@@ -410,6 +415,9 @@ func itemBlockedFromRunning(st *itemstate.ItemState) bool {
 func (ce *channelEvents) checkRetriesLocked(now time.Time, pollOverdue, usageLimited bool) []channelevents.Event {
 	e := ce.e
 	a := &ce.anom
+	if len(a.retries) == 0 {
+		return nil
+	}
 	threshold := e.retryStarvedThreshold()
 	var out []channelevents.Event
 	keys := make([]string, 0, len(a.retries))
@@ -512,6 +520,9 @@ func (ce *channelEvents) retryResumedEvent(f *retryFact, now time.Time) channele
 func (ce *channelEvents) checkWedgesLocked(now time.Time, pollOverdue bool) []channelevents.Event {
 	e := ce.e
 	a := &ce.anom
+	if len(a.holds) == 0 {
+		return nil
+	}
 	lapse := e.wedgeLapse()
 	var out []channelevents.Event
 	keys := make([]string, 0, len(a.holds))
