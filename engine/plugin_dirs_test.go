@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/handarbeit/fabrik/plugin"
 	"github.com/handarbeit/fabrik/stages"
 )
 
@@ -321,5 +322,37 @@ func TestResolvePluginDirs_LocalWorkflowsLoadsBesideDevOverride(t *testing.T) {
 	got, err := resolvePluginDirs(fabrikDir, override, nil)
 	if err != nil || !reflect.DeepEqual(got, []string{override, lw}) {
 		t.Fatalf("got %v err %v", got, err)
+	}
+}
+
+// The migrated layout end to end at the loader: the dirs resolvePluginDirs
+// returns feed the skill catalogue, so a stage pointing at
+// local-workflows:<skill> resolves, and the base's copy stays reachable by its
+// own qualified name. (The sim bed builds engines with NewWithDeps, which load
+// no plugins, so this is the twin-level coverage; see ADR 2139.)
+func TestResolvePluginDirs_LocalWorkflowsSkillsResolveQualified(t *testing.T) {
+	fabrikDir := t.TempDir()
+	skillPlugin(t, fabrikDir, filepath.Join(".fabrik", "plugin"), plugin.BasePluginName, "fabrik-plan", "fabrik-research")
+	skillPlugin(t, fabrikDir, filepath.Join(".fabrik", "plugins", "local-workflows"), plugin.LocalWorkflowsName, "fabrik-plan")
+
+	dirs, err := resolvePluginDirs(fabrikDir, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cat := buildSkillCatalogue(dirs)
+	for ref, want := range map[string]string{
+		"local-workflows:fabrik-plan": "local-workflows:fabrik-plan",
+		"fabrik:fabrik-plan":          "fabrik:fabrik-plan",
+		"fabrik:fabrik-research":      "fabrik:fabrik-research",
+		"fabrik-plan":                 "fabrik:fabrik-plan", // bare still resolves base-first
+	} {
+		res, why, ok := cat.resolve(ref)
+		if !ok {
+			t.Errorf("%s did not resolve: %s", ref, why)
+			continue
+		}
+		if res.Name != want {
+			t.Errorf("%s resolved to %q, want %q", ref, res.Name, want)
+		}
 	}
 }
