@@ -8,12 +8,17 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/handarbeit/fabrik/internal/testenv"
 )
 
 func TestMain(m *testing.M) {
 	// Redirect history to a temp location so tests don't clobber real history.
 	// This runs before all tests in the package.
-	m.Run()
+	cleanupWarnings := testenv.IsolateWarningsProcess()
+	code := m.Run()
+	cleanupWarnings()
+	os.Exit(code)
 }
 
 func redirectHistory(t *testing.T) {

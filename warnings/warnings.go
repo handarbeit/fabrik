@@ -14,7 +14,18 @@ import (
 // WarningsPathOverride can be set by tests to redirect I/O to a temp file.
 var WarningsPathOverride string
 
+// processDefaultPath, when set, replaces the working-directory default for the
+// whole process (see SetProcessDefaultPath); WarningsPathOverride still wins.
+var processDefaultPath string
+
 var mu sync.Mutex
+
+// SetProcessDefaultPath redirects the default warnings file for the life of the
+// process. It exists for a test package's TestMain (via internal/testenv), so a
+// recorder that becomes reachable from an existing test never writes a real
+// .fabrik/warnings.json into the package directory, even after a test that set
+// and then cleared WarningsPathOverride. Never call it from production code.
+func SetProcessDefaultPath(p string) { processDefaultPath = p }
 
 // Entry is a single actionable warning surfaced in the TUI Warnings panel.
 type Entry struct {
@@ -51,6 +62,9 @@ var lastSeenRefresh = 10 * time.Minute
 func warningsPath() string {
 	if WarningsPathOverride != "" {
 		return WarningsPathOverride
+	}
+	if processDefaultPath != "" {
+		return processDefaultPath
 	}
 	return filepath.Join(".fabrik", "warnings.json")
 }
