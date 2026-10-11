@@ -73,7 +73,7 @@ These are accepted, not defects:
 
 - **Delivery is at-most-once to the session.** There is no application-level acknowledgement (Claude Code never acknowledges a notification), and a half-open connection can lose up to roughly one heartbeat window of events before the daemon's write deadline or the client's watchdog notices.
 - **Label events can be reordered** in a narrow race between two concurrent applies of the same label (observers run on whichever goroutine called `Apply`; ordering across goroutines is undefined).
-- **The actor is `unknown`** for label changes seen only by polling (reconcile or deep fetch carry no sender). In PAT mode the operator's login is also Fabrik's, so a worker's `gh` label write whose echo was missed reads as `human`.
+- **The actor is `unknown`** for label changes seen only by polling (reconcile or deep fetch carry no sender). *Narrowed by ADR 2125: overseer actions are now `overseer` with `via`, and a webhook sender's login is carried as `actor_login`; the polling-only case stays `unknown`, as no read the engine already makes names the actor.* In PAT mode the operator's login is also Fabrik's, so a worker's `gh` label write whose echo was missed reads as `human`.
 - **One incident can produce several related pushes**, e.g. `paused` + `ci-timeout` + `label-applied` for one pause.
 
 ## Consequences

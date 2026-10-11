@@ -371,6 +371,10 @@ func (e *Engine) processCommentsClassified(ctx context.Context, board *gh.Projec
 	// in the queue (FR-1) or the repo is queue-enabled (FR-2). Both ProjectItem-sourced
 	// signals are false-by-default, preserving legacy behavior on non-queue repos (FR-3).
 	skipUpdate := prInMergeQueue(item) || e.suppressPreemptiveRebase(item)
+	// #2150: the head before EnsureWorktree's rebase, so a pass that commits nothing
+	// can put the branch back instead of leaving an unpushed rebase behind. Empty when
+	// the worktree does not exist yet (nothing to restore to).
+	preRebaseSHA, _ := gitHeadSHA(wm.worktreeDir(item.Number))
 	workDir, err := wm.EnsureWorktree(item.Number, baseBranch, skipUpdate)
 	if err != nil {
 		e.endStageRework(item, stage, wasReworking, false)
@@ -444,6 +448,19 @@ func (e *Engine) processCommentsClassified(ctx context.Context, board *gh.Projec
 	if postInvokeSHA, shaErr := gitHeadSHA(workDir); shaErr == nil && postInvokeSHA != preInvokeSHA {
 		headChanged = true
 		e.resetCommentBreaker(item)
+	}
+	// #2150: nothing was committed, so nothing will be pushed — undo the engine's own
+	// pre-invocation rebase rather than leave the branch diverged from its remote.
+	// Placed before either editing-label removal and before finalizeComments' possible
+	// markPRReady push, so every exit is covered and the pushed head is the one CI saw.
+	if !headChanged && preRebaseSHA != "" && preRebaseSHA != preInvokeSHA {
+		restored, reason := wm.RestoreUnpushedRebase(item.Number, baseBranch, preRebaseSHA, preInvokeSHA)
+		switch {
+		case restored:
+			e.logf(item.Number, "worktree", "no commit this pass — restored the branch to its pre-rebase head %s\n", preRebaseSHA)
+		case reason != "":
+			e.logf(item.Number, "worktree", "no commit this pass, but the engine rebase was left in place: %s\n", reason)
+		}
 	}
 
 	if line := formatStatsLogLine(usage); line != "" {

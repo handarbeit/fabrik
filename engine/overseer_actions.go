@@ -417,9 +417,11 @@ func (a *overseerActor) SetAutonomy(p localapi.SetAutonomyParams) (*localapi.Act
 		verb, doing := "removed", "remove"
 		if s.add {
 			verb, doing = "added", "add"
-			werr = e.addLabelChecked(t.item, s.label)
+			// The requester rides the write so the channel event reads
+			// actor=overseer via=<requester>, not fabrik (#2125, ADR 2125).
+			werr = e.addLabelCheckedBy(t.item, s.label, requester)
 		} else {
-			werr = e.removeLabelChecked(t.item, s.label)
+			werr = e.removeLabelCheckedBy(t.item, s.label, requester)
 		}
 		if werr != nil {
 			if len(res.Writes) == 0 {
@@ -510,7 +512,7 @@ func (a *overseerActor) Revalidate(p localapi.RevalidateParams) (*localapi.Actio
 		return nil, refuse("%s already carries %s on GitHub; the engine consumes it on a later poll", t.ref, labelRevalidate)
 	}
 
-	if err := e.addLabelChecked(t.item, labelRevalidate); err != nil {
+	if err := e.addLabelCheckedBy(t.item, labelRevalidate, requester); err != nil {
 		return nil, fmt.Errorf("adding %s to %s: %w", labelRevalidate, t.ref, err)
 	}
 	e.logf(t.st.Number, "overseer", "revalidate requested for %s (requested by %s)\n", t.ref, requester)
@@ -583,7 +585,7 @@ func (a *overseerActor) ClearClaudeLimit(p localapi.ClearClaudeLimitParams) (*lo
 
 	t := &overseerTarget{st: *pick, ref: issueRef(pick.Repo, pick.Number)}
 	t.item = gh.ProjectItem{ID: pick.ID, ItemID: pick.ItemID, Number: pick.Number, Repo: pick.Repo, Status: pick.Status, Labels: pick.Labels}
-	if err := e.addLabelChecked(t.item, labelClearLimit); err != nil {
+	if err := e.addLabelCheckedBy(t.item, labelClearLimit, requester); err != nil {
 		return nil, fmt.Errorf("adding %s to %s: %w", labelClearLimit, t.ref, err)
 	}
 	e.logf(t.st.Number, "overseer", "clear-claude-limit requested via %s (requested by %s)\n", t.ref, requester)

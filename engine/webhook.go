@@ -138,7 +138,11 @@ type webhookManager struct {
 	// pendingEchoes maps composite-key → registration timestamp.
 	// missHistory records timestamps of echo misses for rolling-window detection.
 	pendingEchoes map[string]time.Time
-	missHistory   []time.Time
+	// echoVia maps a pendingEchoes key to the overseer requester that
+	// registered it (#2125). Always a subset of pendingEchoes' keys: every
+	// delete of a pendingEchoes entry also deletes its echoVia entry.
+	echoVia     map[string]string
+	missHistory []time.Time
 
 	// R5 coverage notes (#1142), protected by mu — distinct from wm.state
 	// (subprocess connectivity): a stream can be perfectly "healthy" while
@@ -181,6 +185,7 @@ func newWebhookManager(
 		stopCh:              make(chan struct{}),
 		repoReadyCh:         make(chan struct{}),
 		pendingEchoes:       make(map[string]time.Time),
+		echoVia:             make(map[string]string),
 		killFn: func(cmd *exec.Cmd) {
 			if cmd != nil && cmd.Process != nil {
 				killProcGroup(cmd, 0, "webhook")
@@ -1110,7 +1115,29 @@ func (wm *webhookManager) RegisterEcho(eventType, action, key string) {
 	if wm.state == WebhookStreamStartingUp {
 		return
 	}
-	wm.pendingEchoes[echoKey(eventType, action, key)] = time.Now()
+	k := echoKey(eventType, action, key)
+	wm.pendingEchoes[k] = time.Now()
+	// An engine-autonomous registration supersedes any overseer requester still
+	// pending for the same key, so its echo is never attributed to the overseer.
+	delete(wm.echoVia, k)
+}
+
+// RegisterEchoVia is RegisterEcho that also records the overseer requester behind
+// the write, so the matching webhook can be attributed to it (#2125). An empty
+// requester is exactly RegisterEcho.
+func (wm *webhookManager) RegisterEchoVia(eventType, action, key, requester string) {
+	wm.mu.Lock()
+	defer wm.mu.Unlock()
+	if wm.state == WebhookStreamStartingUp {
+		return
+	}
+	k := echoKey(eventType, action, key)
+	wm.pendingEchoes[k] = time.Now()
+	if requester != "" {
+		wm.echoVia[k] = requester
+	} else {
+		delete(wm.echoVia, k)
+	}
 }
 
 // RegisterEchoIfSubscribed registers an echo entry only when eventType is in wm.events.
@@ -1124,7 +1151,9 @@ func (wm *webhookManager) RegisterEchoIfSubscribed(eventType, action, key string
 	if !containsEvent(wm.events, eventType) {
 		return
 	}
-	wm.pendingEchoes[echoKey(eventType, action, key)] = time.Now()
+	k := echoKey(eventType, action, key)
+	wm.pendingEchoes[k] = time.Now()
+	delete(wm.echoVia, k)
 }
 
 // MatchEcho removes the pending echo entry for an inbound webhook that matched a mutation.
@@ -1137,12 +1166,21 @@ func (wm *webhookManager) MatchEcho(eventType, action, key string) {
 // existed — i.e. whether the inbound webhook is the echo of a write Fabrik made.
 // Channel-event actor attribution (#1968 R3) is its only consumer.
 func (wm *webhookManager) MatchEchoReported(eventType, action, key string) bool {
+	ok, _ := wm.MatchEchoVia(eventType, action, key)
+	return ok
+}
+
+// MatchEchoVia is MatchEchoReported that also returns the overseer requester
+// recorded by RegisterEchoVia ("" when none), consuming both entries (#2125).
+func (wm *webhookManager) MatchEchoVia(eventType, action, key string) (bool, string) {
 	k := echoKey(eventType, action, key)
 	wm.mu.Lock()
 	_, ok := wm.pendingEchoes[k]
+	via := wm.echoVia[k]
 	delete(wm.pendingEchoes, k)
+	delete(wm.echoVia, k)
 	wm.mu.Unlock()
-	return ok
+	return ok, via
 }
 
 // doEchoSweep scans pendingEchoes for stale entries, records misses, and
@@ -1161,6 +1199,7 @@ func (wm *webhookManager) doEchoSweep() {
 	for k, registeredAt := range wm.pendingEchoes {
 		if now.Sub(registeredAt) >= webhookEchoTimeout {
 			delete(wm.pendingEchoes, k)
+			delete(wm.echoVia, k)
 			wm.missHistory = append(wm.missHistory, registeredAt)
 			newMisses++
 		}

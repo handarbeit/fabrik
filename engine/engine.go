@@ -292,6 +292,8 @@ type Engine struct {
 	mergeTrainInfraMu                     sync.Mutex                    // guards mergeTrainInfraCooldown (#2052)
 	mergeTrainInfraCooldown               map[string]time.Time          // key: trainKey; earliest time a train for that (repo,base) partition may be re-dispatched after a trial was abandoned for CI infrastructure (TrainCIInfra) — see ADR 2052
 	pushGuardDisabled                     atomic.Bool                   // test seam: SetPushZeroAheadGuardDisabledForTest (#2089)
+	restoreRebaseDisabledForTest          bool                          // test seam: SetCommentRebaseRestoreDisabledForTest (#2150); guarded by mu, applied to managers registered later too
+	pureRebaseDisabledForTest             bool                          // test seam: SetCatchUpPureRebaseDisabledForTest (#2150); guarded by mu, applied to managers registered later too
 	actionsDegradeLogged                  atomic.Bool                   // set once the notice that a workflow-run read or re-run was refused (`actions` revoked at runtime or never accepted) has been logged (#2052 R7)
 	ciInfraTiming                         ciInfraTiming                 // test-shrinkable CI-infrastructure dwells (#2052); zero = defaults
 	startupWatchMu                        sync.Mutex                    // guards startupWatches
@@ -817,6 +819,8 @@ func (e *Engine) RegisterWorktreeManagerForTest(nameWithOwner string, wm *Worktr
 	wm.logfFn = e.logf
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	wm.restoreRebaseDisabled.Store(e.restoreRebaseDisabledForTest)
+	wm.pureRebaseDisabled.Store(e.pureRebaseDisabledForTest)
 	e.worktreeManagers[nameWithOwner] = wm
 }
 
@@ -1002,6 +1006,8 @@ func (e *Engine) registerWorktrees(nameWithOwner, baseDir, worktreeRoot string) 
 	dirName := owner + "-" + rname
 	wm := NewWorktreeManagerForRepo(baseDir, worktreeRoot, dirName)
 	wm.logfFn = e.logf
+	wm.restoreRebaseDisabled.Store(e.restoreRebaseDisabledForTest)
+	wm.pureRebaseDisabled.Store(e.pureRebaseDisabledForTest)
 	e.worktreeManagers[nameWithOwner] = wm
 	return wm
 }
