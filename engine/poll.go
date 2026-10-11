@@ -2033,6 +2033,23 @@ func (e *Engine) pollCycle(ctx context.Context) (pollResult, error) {
 	}, nil
 }
 
+// stageAutoAdvances reports whether the engine advances an item by itself once
+// stage completes: a yolo or cruise label, the global yolo, or the stage's own
+// auto_advance:true. The cruise and yolo labels override auto_advance:false on
+// an individual stage; the global yolo alone does not (it respects a per-stage
+// opt-out). It is runCatchUpPhase2's autonomy gate, extracted so the attention
+// classifier (#2120) asks the engine's own question rather than a copy of it.
+func stageAutoAdvances(cfgYolo bool, labels []string, stage *stages.Stage) bool {
+	isAutoAdvance := hasLabel(labels, "fabrik:yolo") || hasLabel(labels, "fabrik:cruise")
+	if !cfgYolo && !isAutoAdvance && !(stage.AutoAdvance != nil && *stage.AutoAdvance) {
+		return false
+	}
+	if !isAutoAdvance && stage.AutoAdvance != nil && !*stage.AutoAdvance {
+		return false
+	}
+	return true
+}
+
 // runCatchUpPhase2 performs the gated stage-advancement step for an item that
 // passed Phase 1 unclaimed: yolo/cruise/auto_advance-gated advancement to the
 // next stage, or (at Validate) yolo-gated auto-merge enablement via
@@ -2057,13 +2074,7 @@ func (e *Engine) runCatchUpPhase2(ctx context.Context, board *gh.ProjectBoard, i
 	e.refreshAutonomyLabels(&item)
 
 	// Gate: yolo (cfg or label), cruise label, or stage-level auto_advance:true.
-	isAutoAdvance := hasYoloLabel(item) || hasCruiseLabel(item)
-	if !e.cfg.Yolo && !isAutoAdvance && !(stage.AutoAdvance != nil && *stage.AutoAdvance) {
-		return
-	}
-	// cruise and yolo labels override auto_advance:false on individual stages;
-	// cfg.Yolo alone does not (allows per-stage opt-out to be respected).
-	if !isAutoAdvance && stage.AutoAdvance != nil && !*stage.AutoAdvance {
+	if !stageAutoAdvances(e.cfg.Yolo, item.Labels, stage) {
 		return
 	}
 
