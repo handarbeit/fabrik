@@ -1,6 +1,6 @@
 # ADR 1966-c: Fabrik MCP overseer actions
 
-Status: accepted (issue #1969; builds on [ADR-1966-a](1966-a-fabrik-mcp-read-api.md) and [ADR-1966-b](1966-b-fabrik-mcp-channel-events.md); proposed in #1966)
+Status: accepted (issue #1969; **amended 2026-10-11: a fifth action, `advance`, was added by [ADR 2126](2126-overseer-advance.md) — read "four" below as "five" under the same rules**; builds on [ADR-1966-a](1966-a-fabrik-mcp-read-api.md) and [ADR-1966-b](1966-b-fabrik-mcp-channel-events.md); proposed in #1966)
 
 ## Context
 
