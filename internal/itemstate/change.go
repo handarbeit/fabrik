@@ -137,6 +137,45 @@ type Change struct {
 	// Closed is true when the mutation moved an already-held item from open to
 	// closed (#2123).
 	Closed bool
+	// Path names the cache-refresh path that produced the change when it came
+	// from a reconcile, a deep fetch or the probe loop (#2170); PathNone for every
+	// other mutation. Origin cannot tell these apart (all are OriginOther, or
+	// OriginProbe for the probe), and the cache-divergence detector needs the name.
+	Path ChangePath
+	// StatusFrom/StatusTo are the board column before and after, set whenever
+	// StatusChanged is in Fields and the item existed before (#2170).
+	StatusFrom, StatusTo string
+	// EngineStatusWrite is true for a LocalStatusUpdated write-through: Fabrik
+	// moved the item itself.
+	EngineStatusWrite bool
+}
+
+// ChangePath names the refresh path behind a Change (#2170).
+type ChangePath uint8
+
+const (
+	// PathNone is every mutation that is not a refresh from GitHub.
+	PathNone ChangePath = iota
+	// PathReconcile is a board reconcile: ShallowBoardItemUpdated or a
+	// BoardReconciled item.
+	PathReconcile
+	// PathDeepFetch is ItemDeepFetched.
+	PathDeepFetch
+	// PathProbe is a mutation applied by the probe loop (FromProbe).
+	PathProbe
+)
+
+// String is the wire name used in cache-divergence events.
+func (p ChangePath) String() string {
+	switch p {
+	case PathReconcile:
+		return "reconcile"
+	case PathDeepFetch:
+		return "deep-fetch"
+	case PathProbe:
+		return "probe"
+	}
+	return ""
 }
 
 // LabelDelta is one label added to or removed from an item.
