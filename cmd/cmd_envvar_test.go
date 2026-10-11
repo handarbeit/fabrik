@@ -1118,3 +1118,85 @@ func TestExecute_MergeTrainOverlapIgnoreResolution(t *testing.T) {
 		})
 	}
 }
+
+// TestExecute_PluginDirsResolution pins the flag > env > config.yaml order
+// for the additive plugin_dirs setting (ADR 2136) and, by loading a real
+// config.yaml, that the documented key is actually read.
+func TestExecute_PluginDirsResolution(t *testing.T) {
+	base := func(stagesDir string, extra ...string) []string {
+		return append([]string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}, extra...)
+	}
+	cases := []struct {
+		name   string
+		config string
+		env    string
+		flag   string
+		want   string
+	}{
+		{"default", "", "", "", ""},
+		{"config list", "plugin_dirs:\n  - .fabrik/plugins/a\n  - /abs/b\n", "", "", ".fabrik/plugins/a,/abs/b"},
+		{"env beats config", "plugin_dirs: ['from-config']\n", "from-env", "", "from-env"},
+		{"flag beats env and config", "plugin_dirs: ['from-config']\n", "from-env", "from-flag", "from-flag"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir, stagesDir := setupValidStages(t)
+			chdirTest(t, dir)
+			if c.config != "" {
+				os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755)
+				os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte(c.config), 0644)
+			}
+			resetFlags()
+			t.Setenv("GITHUB_TOKEN", "tok")
+			t.Setenv("FABRIK_PLUGIN_DIRS", c.env)
+			args := base(stagesDir)
+			if c.flag != "" {
+				args = base(stagesDir, "--plugin-dirs", c.flag)
+			}
+			os.Args = args
+
+			cfg := executeWithConfigHook(t)
+			if cfg.PluginDirs != c.want {
+				t.Errorf("resolved plugin dirs = %q, want %q", cfg.PluginDirs, c.want)
+			}
+		})
+	}
+}
+
+// TestExecute_PluginDirsMissingDirRefusedAtStartup: an extra that does not
+// exist fails startup naming the path (FR-007).
+func TestExecute_PluginDirsMissingDirRefusedAtStartup(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755)
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	t.Setenv("FABRIK_PLUGIN_DIRS", "no-such-plugin")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}
+	err := Execute()
+	if err == nil || !strings.Contains(err.Error(), filepath.Join(dir, "no-such-plugin")) {
+		t.Fatalf("expected an error naming the missing plugin directory, got %v", err)
+	}
+}
+
+// TestExecute_PluginDirsStartsWithValidExtra shows a valid extra plugin passes
+// startup validation.
+func TestExecute_PluginDirsStartsWithValidExtra(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755)
+	extra := filepath.Join(dir, "myplugin", ".claude-plugin")
+	if err := os.MkdirAll(extra, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(extra, "plugin.json"), []byte(`{"name":"mine"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	t.Setenv("FABRIK_PLUGIN_DIRS", "myplugin")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}
+	if err := executeAndStop(t); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+}
