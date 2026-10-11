@@ -515,6 +515,7 @@ func (e *Engine) Run() error {
 		if cacheImpl != nil {
 			cacheImpl.SetMatchEchoFn(wm.MatchEcho)
 			cacheImpl.SetMatchEchoReportedFn(wm.MatchEchoReported)
+			cacheImpl.SetMatchEchoViaFn(wm.MatchEchoVia)
 		}
 		// Bootstrap the cache before accepting webhook events so no delta is
 		// dropped into an empty cache during the startup window.

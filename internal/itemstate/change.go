@@ -112,6 +112,10 @@ type Change struct {
 	// EchoOfEngine is true when a webhook label mutation matched the engine's
 	// own echo registry, i.e. it is the echo of a write Fabrik made.
 	EchoOfEngine bool
+	// Requester is the sanitised overseer subscriber that requested the label
+	// write behind this change (#2125); empty for an engine-autonomous write, an
+	// unechoed webhook or a non-label change.
+	Requester string
 }
 
 // LabelDelta is one label added to or removed from an item.
