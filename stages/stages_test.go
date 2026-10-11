@@ -4,6 +4,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -966,5 +967,52 @@ func TestIsParkingColumn(t *testing.T) {
 				t.Errorf("IsParkingColumn(%q) = %v, want %v", tt.col, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestLoadAll_SkillReferenceFormat(t *testing.T) {
+	tests := []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{"bare", "skill: fabrik-review", ""},
+		{"qualified", "skill: myorg:review", ""},
+		{"qualified comment skill", "skill: a:b\ncomment_skill: a:b-comment\nci_fix_skill: a:fix\nrebase_skill: a:rb", ""},
+		{"empty plugin", "skill: ':x'", "invalid skill"},
+		{"empty skill", "skill: 'x:'", "invalid skill"},
+		{"whitespace after colon", "skill: 'a: b'", "whitespace"},
+		{"bad comment skill", "skill: a:b\ncomment_skill: ':x'", "comment_skill"},
+		{"bad ci fix skill", "skill: a:b\nci_fix_skill: 'x:'", "ci_fix_skill"},
+		{"bad rebase skill", "skill: a:b\nrebase_skill: ':'", "rebase_skill"},
+		{"embedded space", "skill: 'two words'", "whitespace"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeStageFile(t, dir, "s.yaml", "name: S\norder: 1\n"+tt.yaml+"\n")
+			_, err := LoadAll(dir)
+			switch {
+			case tt.wantErr == "" && err != nil:
+				t.Fatalf("unexpected error: %v", err)
+			case tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)):
+				t.Fatalf("err = %v, want containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// Bare vs qualified skill references that resolve to the same skill must not
+// be reported as drift: drift compares key presence only (ADR 2137).
+func TestWarnStageDrift_BareVsQualifiedSkillIsNotDrift(t *testing.T) {
+	setWarningsOverride(t)
+	dir := t.TempDir()
+	userStage := makeUserStage(t, dir, "review.yaml", "name: Review\nskill: fabrik-review\n")
+	defaults := syntheticFSRaw("Review", "name: Review\nskill: fabrik:fabrik-review\n")
+
+	var out strings.Builder
+	warnDriftFrom([]*Stage{userStage}, "v0.0.99", &out, defaults)
+	if got := out.String(); got != "" {
+		t.Errorf("bare-vs-qualified skill reported as drift: %q", got)
 	}
 }

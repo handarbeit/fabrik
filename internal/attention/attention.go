@@ -241,6 +241,7 @@ var labelTable = map[string]labelInfo{
 	"fabrik:claude-limit":                  {"the Claude account usage limit was hit; the engine retries once the usage-limit hold lifts", true},
 	"fabrik:tools-denied":                  {"a tool call was denied by the permission layer; the engine retries, bounded by its own counter", true},
 	"fabrik:api-key-helper-detected":       {"the worktree sets apiKeyHelper, which Fabrik refuses; remove it from the worktree settings", false},
+	"fabrik:skill-unresolved":              {"a stage skill reference matches no loaded plugin; fix the stage YAML or load the plugin", false},
 	"fabrik:toolchain-stale":               {"the daemon's PATH toolchain does not satisfy the repo's declared version (warn-only)", false},
 	"fabrik:landing-verification-failed":   {"the credited PR did not merge; the issue was reopened and needs a human", false},
 	"fabrik:nondefault-base-pr-noted":      {"informational: PR targets a non-default base branch", false},
@@ -358,6 +359,11 @@ func classify(in Input) Result {
 		return finish(NeedsHuman, "fabrik:api-key-helper-detected",
 			labelTable["fabrik:api-key-helper-detected"].meaning,
 			"nothing automatic: the engine skips this item until apiKeyHelper is removed from the worktree settings", RankNeedsHuman)
+	}
+	if hasLabel(in.Labels, "fabrik:skill-unresolved") {
+		return finish(NeedsHuman, "fabrik:skill-unresolved",
+			labelTable["fabrik:skill-unresolved"].meaning,
+			"nothing automatic: the engine re-resolves each dispatch and runs the stage once the reference resolves", RankNeedsHuman)
 	}
 
 	// 5. Waiting on something the engine owns.

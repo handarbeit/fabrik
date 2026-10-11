@@ -504,3 +504,13 @@ func TestPollRecoveryFloorsProgressAnchor(t *testing.T) {
 		t.Fatalf("stall after an old recovery: got %s", got.State)
 	}
 }
+
+func TestSkillUnresolvedNeedsHuman(t *testing.T) {
+	in := baseInput()
+	in.Labels = []string{"fabrik:skill-unresolved"}
+	in.StatusEnteredAt = t0.Add(-time.Minute)
+	got := Classify(in)
+	if got.State != NeedsHuman || got.Code != "fabrik:skill-unresolved" || got.Rank != RankNeedsHuman {
+		t.Fatalf("got %s/%s rank %d (%s), want needs-human/skill-unresolved ranked", got.State, got.Code, got.Rank, got.Summary)
+	}
+}

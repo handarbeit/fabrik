@@ -1,7 +1,7 @@
 name: Validate
 order: 5
-skill: fabrik-validate
-comment_skill: fabrik-validate-comment
+skill: fabrik:fabrik-validate
+comment_skill: fabrik:fabrik-validate-comment
 model: sonnet
 max_turns: 100
 comment_max_turns: 50
