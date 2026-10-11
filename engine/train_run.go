@@ -397,6 +397,7 @@ func compactDiag(d *trainCIDiagnostic) *trainCIDiagnostic {
 	cp := *d
 	cp.FailedChecks = make([]gh.CheckRun, len(d.FailedChecks))
 	for i, c := range d.FailedChecks {
+		c.OutputTitle = truncateMiddle(c.OutputTitle, 500, 350, 120)
 		c.OutputText = truncateMiddle(c.OutputText, maxOut, maxOut*2/3, maxOut/4)
 		c.OutputSummary = truncateMiddle(c.OutputSummary, maxOut, maxOut*2/3, maxOut/4)
 		cp.FailedChecks[i] = c

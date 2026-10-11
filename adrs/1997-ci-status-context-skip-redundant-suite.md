@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted. Decision 4's `-comment` rule and the full-suite fallback for `red` are amended by ADR 2116.
 
 ## Context
 
