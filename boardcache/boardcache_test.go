@@ -29,6 +29,10 @@ type mockClient struct {
 	fetchPRsForSHACount        int
 	fetchProjectItemCount      int
 
+	// fetchProjectBoardHook, when set, runs inside FetchProjectBoard (after the
+	// call is accepted, before it returns) to simulate a write during the fetch.
+	fetchProjectBoardHook func()
+
 	itemDetailsResult  *gh.ProjectItem
 	checkRunsResult    []gh.CheckRun
 	checkRunsErr       error // returned by FetchCheckRuns when non-nil
@@ -47,6 +51,9 @@ type mockClient struct {
 }
 
 func (m *mockClient) FetchProjectBoard(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+	if m.fetchProjectBoardHook != nil {
+		m.fetchProjectBoardHook()
+	}
 	if m.projectBoardErr != nil {
 		return nil, m.projectBoardErr
 	}

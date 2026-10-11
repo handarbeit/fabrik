@@ -83,6 +83,11 @@ const (
 	// Informational only, intentionally excluded from wakeChFlags/cycleSetFlags
 	// so a milestone change never wakes the poll loop.
 	MilestoneChanged
+	// EngineWriteRecordedChanged indicates ItemState.EngineWriteAt gained or
+	// lost an entry (#2159). Informational bookkeeping for the reconcile
+	// protection, intentionally excluded from wakeChFlags/cycleSetFlags so it
+	// never wakes the poll loop.
+	EngineWriteRecordedChanged
 )
 
 // Change describes what fields a mutation altered. Delivered to every Observer

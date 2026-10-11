@@ -877,8 +877,27 @@ func (e *Engine) cleanupLockedIssues() {
 	for _, snap := range locked {
 		owner, repo := parseOwnerRepo(snap.Repo())
 		num := snap.Number()
+		// Skip the removal only when the engine itself recorded removing the lock
+		// label and the cache confirms it is gone (#2159): that call would 404.
+		// A cached label set that merely lacks the label is not proof — the board
+		// query truncates labels and a deep-fetch write-back can drop one — so
+		// without the engine's own record the removal is still attempted, and a
+		// 404 below is success.
+		if _, removed := snap.State().EngineWriteAt[itemstate.EngineWriteLabelKey(lockLabel)]; removed && !hasLabel(snap.Labels(), lockLabel) {
+			e.logf(num, "shutdown", "lock label already removed by the engine, nothing to remove\n")
+			e.store.Apply(itemstate.LocalLockReleased{Repo: snap.Repo(), Number: num})
+			continue
+		}
 		if err := e.client.RemoveLabelFromIssue(owner, repo, num, lockLabel); err != nil {
-			e.logf(num, "warn", "could not remove lock label during shutdown: %v\n", err)
+			if errors.Is(err, gh.ErrNotFound) {
+				// Already removed on GitHub: success, like applyLabelRemove.
+				e.logf(num, "shutdown", "lock label already absent on GitHub\n")
+				if c := e.cache(); c != nil {
+					c.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, num), lockLabel)
+				}
+			} else {
+				e.logf(num, "warn", "could not remove lock label during shutdown: %v\n", err)
+			}
 		} else {
 			e.logf(num, "shutdown", "removed lock label\n")
 			if c := e.cache(); c != nil {
