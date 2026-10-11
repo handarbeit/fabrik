@@ -20,6 +20,13 @@ import (
 // unprocessedFeedback via feedbackGateBlocks, reviewGateHold). The one side
 // effect of the refusal path is feedbackGateBlocks' in-memory feedback-pending
 // cooldown, which is what the engine's own held advance records too.
+//
+// The review wait uses reviewGateHold, which shares the engine's pure verdict
+// functions (reviewGateOutstanding, reviewGateFastAdvance, reviewGateAuthorityVerdict,
+// effectiveExpectedReviewers/effectiveReviewAuthority) with checkReviewGate but is
+// not checkReviewGate: it has no timeout, bot re-prompt ladder or pause. Those stay
+// with the engine's own catch-up gate, which keeps evaluating the item while
+// stage:<X>:complete stands; this action only ever fails closed on a hold.
 
 // engineWaitLabels are labels the engine's own phase-1 handlers own: while one is
 // present the engine itself would hold the item, so an overseer advance must not
@@ -217,7 +224,7 @@ func (a *overseerActor) Advance(p localapi.AdvanceParams) (*localapi.ActionResul
 		return nil, refuse("%s has unprocessed comments or review feedback (or the feedback read failed); the engine addresses them before advancing", t.ref)
 	}
 	if h := e.reviewGateHold(gateItem, cur, owner, repo); h.Blocked {
-		return nil, refuse("a review wait stands between %s and the next stage: %s", t.ref, strings.TrimSpace(h.Msg))
+		return nil, refuse("a review wait stands between %s and the next stage: %s; the engine's review gate owns this wait and its timeout (which pauses the item for a human), and this tool never skips it", t.ref, strings.TrimSpace(h.Msg))
 	}
 
 	// 5. The move: the engine's own advance. advanceToNextStage returns nil when

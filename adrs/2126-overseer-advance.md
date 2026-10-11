@@ -29,7 +29,7 @@ The engine holds its own advance on unresolved dependencies, unprocessed feedbac
 
 - `openDependencies`, extracted from `checkDependencies` (which now calls it), fed by a live `FetchItemDetails` copy;
 - `feedbackGateBlocks` as is — its only side effect is an in-memory `feedback-pending` cooldown, which is what the engine's own held advance records too, so it is the one side effect of the refusal path;
-- `reviewGateHold`, extracted from `reviewGateBlocksLanding` (which now wraps it and applies the label), so advance and landing cannot disagree on "review satisfied".
+- `reviewGateHold`, extracted from `reviewGateBlocksLanding` (which now wraps it and applies the label), so advance and the landing gate share one definition of "review satisfied". It is not `checkReviewGate`: it shares that function's pure verdict helpers (`reviewGateOutstanding`, `reviewGateFastAdvance`, `reviewGateAuthorityVerdict`) but has no timeout, bot re-prompt ladder or pause. Those stay with the engine's own catch-up gate, which keeps evaluating the item while `stage:<X>:complete` stands (it applies `fabrik:awaiting-review`, so a stuck wait ends in a pause for a human); the overseer's advance only fails closed on a hold. Where the two differ the difference is a refusal, never an advance the engine would have held.
 
 `stage:<X>:complete` is not enough on its own: for a `wait_for_reviews` stage it is added before the reviewers are recorded as outstanding, so a label-only check would leave a window. Both extractions are behaviour-preserving, and the existing tests run unchanged.
 
