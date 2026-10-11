@@ -818,8 +818,18 @@ func TestRunProbeAndDeepFetch_UnmanagedStage_ColdCache_SkipsDeepFetch(t *testing
 		t.Errorf("expected exactly 1 FetchItemDetails call (for Research item); got %d", deepFetchCalls)
 	}
 
-	if _, err := eng.store.Get("owner/repo", 2); err == nil {
-		t.Error("Backlog item should not be seeded into the store (unmanaged guard must fire before IssueOpened)")
+	// #2123: a parking-column card is seeded (identity + column only) so a later
+	// hand move out of it is a real column change, but it is never deep-fetched
+	// and carries no labels (the first label-bearing population is the baseline).
+	snap, ok := eng.store.Peek("owner/repo", 2)
+	if !ok {
+		t.Fatal("Backlog item should be seeded with its identity and column (#2123)")
+	}
+	if snap.Status() != "Backlog" {
+		t.Errorf("seeded Backlog item Status = %q, want Backlog", snap.Status())
+	}
+	if len(snap.Labels()) != 0 {
+		t.Errorf("seeded Backlog item must carry no labels, got %v", snap.Labels())
 	}
 }
 
