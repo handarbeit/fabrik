@@ -119,10 +119,6 @@ type IssueClosed struct {
 	// EchoOfEngine is true when the webhook matched the engine's own echo
 	// registry, i.e. Fabrik made this close (#2123).
 	EchoOfEngine bool
-	// Local is true for the engine's own write-through after it closed the
-	// issue (CacheImpl.ApplyIssueClosed); the Change then has OriginEngine
-	// instead of OriginWebhook (#2123).
-	Local bool
 }
 
 func (IssueClosed) isMutation()       {}
@@ -281,7 +277,8 @@ func (m LocalStatusUpdated) itemKey() string { return itemKeyFor(m.Repo, m.Numbe
 
 // LocalIssueClosed is applied after fabrik closes an issue. Unlike the webhook
 // IssueClosed it records an engine write so a reconcile listing fetched before
-// the close cannot reopen the cached item (#2159).
+// the close cannot reopen the cached item (#2159). Its Change has OriginEngine
+// (#2123).
 type LocalIssueClosed struct {
 	Repo   string
 	Number int

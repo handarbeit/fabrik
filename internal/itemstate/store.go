@@ -373,11 +373,9 @@ func annotateLifecycleChange(change *Change, m Mutation, before, after ItemState
 	case LocalStatusUpdated:
 		change.Origin, change.Requester = OriginEngine, v.Requester
 	case IssueClosed:
-		if v.Local {
-			change.Origin = OriginEngine
-			break
-		}
 		change.Origin, change.Sender, change.EchoOfEngine = OriginWebhook, v.Sender, v.EchoOfEngine
+	case LocalIssueClosed:
+		change.Origin = OriginEngine
 	}
 }
 
