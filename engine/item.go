@@ -1058,14 +1058,14 @@ func (e *Engine) acquireLockAndVerify(ctx context.Context, item gh.ProjectItem, 
 // reports how many budget multiples were ultimately used, so the caller can
 // compute a cumulative-budget stats footer.
 func (e *Engine) runInvocationWithExtension(ctx context.Context, item gh.ProjectItem, stage *stages.Stage, baseBranch, workDir string, resume bool) (output string, completed bool, usage TokenUsage, totalMultiple int, err error) {
-	// Check the account-wide usage-limit suspension gate before building InvokeOptions
+	// Check the account-wide usage-limit hold gate before building InvokeOptions
 	// or consuming any armed stall hint (#1146) — consumeStallHint destructively clears
 	// StallHintPending, so it must not run on a dispatch that will never actually invoke
 	// Claude. Otherwise a detected stall's one-shot corrective hint would be silently
 	// discarded here and never reach any invocation at all.
-	if _, suspended := e.claudeSuspendedUntilTime(time.Now()); suspended {
-		e.logf(item.Number, "claude-limit", "Claude dispatch suspended account-wide; skipping invocation")
-		err = &claudeUsageLimitError{Message: "account usage-limit suspension active"}
+	if _, usageLimited := e.claudeUsageLimitedUntilTime(time.Now()); usageLimited {
+		e.logf(item.Number, "claude-limit", "Claude usage limited; dispatch held account-wide; skipping invocation")
+		err = &claudeUsageLimitError{Message: "account usage limit active"}
 		return output, completed, usage, totalMultiple, err
 	}
 
@@ -1075,7 +1075,7 @@ func (e *Engine) runInvocationWithExtension(ctx context.Context, item gh.Project
 	// repo-resident content Fabrik cannot see at engine startup
 	// (checkAPIKeyHelper only covers the managed-policy/user/fabrikDir-project
 	// layers). Check it here, before building InvokeOptions or consuming the
-	// stall hint, for the same reason as the suspension gate above — this
+	// stall hint, for the same reason as the usage-limit hold gate above — this
 	// dispatch will never actually invoke Claude if apiKeyHelper is set.
 	// Detection here fails only this invocation (via apiKeyHelperDetectedError,
 	// mirroring claudeUsageLimitError's shape); it is deliberately not a stage
@@ -1168,14 +1168,14 @@ func (e *Engine) runInvocationWithExtension(ctx context.Context, item gh.Project
 
 		var limitErr *claudeUsageLimitError
 		if errors.As(err, &limitErr) {
-			e.activateClaudeSuspension(item.Number, limitErr, time.Now())
+			e.activateClaudeUsageLimit(item.Number, limitErr, time.Now())
 		} else if err == nil {
 			// Only a successful invocation is evidence the limit has cleared (ADR-1120's
 			// "early clear on success"). A generic, unrelated error proves nothing about
 			// account-wide usage-limit state and must not clear it — doing so unconditionally
 			// would race with a concurrently-running worker that just activated the
-			// suspension, undoing it moments after detection.
-			e.clearClaudeSuspension("stage invocation reached Claude")
+			// usage-limit hold, undoing it moments after detection.
+			e.clearClaudeUsageLimit("stage invocation reached Claude")
 		}
 
 		hitLimit := !completed && err == nil && stage.MaxTurns > 0 && invUsage.TurnsUsed >= currentBudget
@@ -2969,8 +2969,8 @@ func (e *apiKeyHelperDetectedError) Error() string {
 // genuine failed run happens — no commitWIP/push (nothing was produced), no
 // markCommentsSeenByStage, no StageRetryIncremented, no stage:<name>:failed,
 // no fabrik:paused. The actual hammering prevention is the account-wide
-// Claude dispatch suspension activated by runInvocationWithExtension (see
-// activateClaudeSuspension in usage_limit_backoff.go, ADR-1120) before this
+// Claude dispatch usage-limit hold activated by runInvocationWithExtension (see
+// activateClaudeUsageLimit in usage_limit_backoff.go, ADR-1120) before this
 // is even called — the per-issue cooldown here is a secondary guard. The
 // explanatory comment and fabrik:claude-limit label are applied only on the
 // transition into the condition (label absent -> applied); while the label
@@ -2997,15 +2997,15 @@ func (e *Engine) handleUsageLimitExit(p stageOutcomeParams, limitErr *claudeUsag
 
 	if !hasLabel(item.Labels, "fabrik:claude-limit") {
 		comment := fmt.Sprintf(
-			"🏭 **Fabrik — Claude usage limit hit**\n\nStage **%s** did not run because the Claude account usage limit was reached%s. This is not a stage failure — it does not count against `max_retries`. Fabrik has suspended Claude dispatch account-wide (not just for this issue) and will resume automatically once the backoff passes, or as soon as any invocation succeeds — no operator action is required. If this looks like a false positive, apply `fabrik:clear-claude-limit` to any open board item to end the suspension immediately, with no engine restart needed. The `fabrik:claude-limit` label clears once the suspension lifts, both on this issue (next non-limit invocation) and account-wide (every open issue still carrying it).",
+			"🏭 **Fabrik — Claude usage limit hit**\n\nStage **%s** did not run because the Claude account usage limit was reached%s. This is not a stage failure — it does not count against `max_retries`. Fabrik has held Claude dispatch account-wide (not just for this issue) and will resume automatically once the backoff passes, or as soon as any invocation succeeds — no operator action is required. If this looks like a false positive, apply `fabrik:clear-claude-limit` to any open board item to end the usage-limit hold immediately, with no engine restart needed. The `fabrik:claude-limit` label clears once the usage-limit hold lifts, both on this issue (next non-limit invocation) and account-wide (every open issue still carrying it).",
 			stage.Name, resetSuffix,
 		)
 		e.postItemComment(item, comment, false)
 		e.addLabel(item, "fabrik:claude-limit")
 		// Only the item whose invocation hit the limit is written (#2048): the
-		// suspension is account-wide, but one write per detection keeps volume low
+		// usage-limit hold is account-wide, but one write per detection keeps volume low
 		// and the per-item label sweep already clears the label.
-		if until, ok := e.claudeSuspendedUntilTime(time.Now()); ok {
+		if until, ok := e.claudeUsageLimitedUntilTime(time.Now()); ok {
 			e.setStatusLine(item, statusLineClaudeLimit(until))
 		}
 	}

@@ -786,18 +786,18 @@ func TestOverseerRevalidate_WorkerInFlightIsDeferredNotRefused(t *testing.T) {
 
 // ---- clear_claude_limit ----
 
-func suspendClaude(eng *Engine) {
-	eng.claudeSuspendMu.Lock()
-	eng.claudeSuspendedUntil = time.Now().Add(time.Hour)
-	eng.claudeSuspendMu.Unlock()
+func holdClaudeDispatch(eng *Engine) {
+	eng.claudeUsageLimitMu.Lock()
+	eng.claudeUsageLimitedUntil = time.Now().Add(time.Hour)
+	eng.claudeUsageLimitMu.Unlock()
 }
 
-func TestOverseerClearClaudeLimit_RefusesWithoutSuspension(t *testing.T) {
+func TestOverseerClearClaudeLimit_RefusesWithoutUsageLimit(t *testing.T) {
 	client := &mockGitHubClient{}
 	_, _, act := overseerEngine(t, client, ovItem{number: 5, status: "Implement"})
 	_, err := act.ClearClaudeLimit(localapi.ClearClaudeLimitParams{Subscriber: "s"})
 	pe, _ := refusedErr(t, err)
-	if !strings.Contains(pe.Message, "no Claude usage-limit suspension is active") {
+	if !strings.Contains(pe.Message, "no Claude usage limit is active") {
 		t.Errorf("message = %q", pe.Message)
 	}
 	wantNoWrites(t, client)
@@ -822,7 +822,7 @@ func TestOverseerClearClaudeLimit_PickOrder(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			client := &mockGitHubClient{}
 			eng, _, act := overseerEngine(t, client, tc.items...)
-			suspendClaude(eng)
+			holdClaudeDispatch(eng)
 			res, err := act.ClearClaudeLimit(localapi.ClearClaudeLimitParams{Subscriber: "ovr"})
 			if err != nil {
 				t.Fatalf("ClearClaudeLimit: %v", err)
@@ -852,7 +852,7 @@ func TestOverseerClearClaudeLimit_PickOrder(t *testing.T) {
 func TestOverseerClearClaudeLimit_NoEligibleItemAndPending(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng, _, act := overseerEngine(t, client, ovItem{number: 1, status: "Implement", pr: true}, ovItem{number: 2, status: "Done", closed: true})
-	suspendClaude(eng)
+	holdClaudeDispatch(eng)
 	_, err := act.ClearClaudeLimit(localapi.ClearClaudeLimitParams{Subscriber: "s"})
 	refusedErr(t, err)
 	wantNoWrites(t, client)
@@ -860,7 +860,7 @@ func TestOverseerClearClaudeLimit_NoEligibleItemAndPending(t *testing.T) {
 	// A clear request already outstanding is reported, not stacked.
 	client2 := &mockGitHubClient{}
 	eng2, _, act2 := overseerEngine(t, client2, ovItem{number: 4, status: "Implement", labels: []string{labelClearLimit}}, ovItem{number: 2, status: "Specify"})
-	suspendClaude(eng2)
+	holdClaudeDispatch(eng2)
 	res, err := act2.ClearClaudeLimit(localapi.ClearClaudeLimitParams{Subscriber: "s"})
 	if err != nil || res.Changed || res.Issue != "owner/repo#4" || res.AuditComment != localapi.AuditNone {
 		t.Fatalf("pending: %+v %v", res, err)
@@ -871,7 +871,7 @@ func TestOverseerClearClaudeLimit_NoEligibleItemAndPending(t *testing.T) {
 func TestOverseerClearClaudeLimit_WriteFailurePostsNoComment(t *testing.T) {
 	client := &mockGitHubClient{addLabelToIssueFn: func(_, _ string, _ int, _ string) error { return errors.New("403") }}
 	eng, _, act := overseerEngine(t, client, ovItem{number: 4, status: "Implement"})
-	suspendClaude(eng)
+	holdClaudeDispatch(eng)
 	_, err := act.ClearClaudeLimit(localapi.ClearClaudeLimitParams{Subscriber: "s"})
 	if err == nil || !strings.Contains(err.Error(), "403") {
 		t.Fatalf("err = %v", err)

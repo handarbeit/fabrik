@@ -355,36 +355,36 @@ func TestChannelExpiredCooldownAloneIsNotAStall(t *testing.T) {
 
 // ---- claude-limit (account-wide) ----
 
-func TestChannelClaudeLimitSuspendedAndLifted(t *testing.T) {
-	e, sink := channelEngineTick(t, 0, onlyTypes(channelevents.ClaudeLimitSuspended, channelevents.ClaudeLimitLifted), time.Hour)
-	e.activateClaudeSuspension(0, nil, e.now())
+func TestChannelClaudeUsageLimitedAndLifted(t *testing.T) {
+	e, sink := channelEngineTick(t, 0, onlyTypes(channelevents.ClaudeUsageLimited, channelevents.ClaudeUsageLimitLifted), time.Hour)
+	e.activateClaudeUsageLimit(0, nil, e.now())
 	ev := sink.next(t)
-	if ev.Type != channelevents.ClaudeLimitSuspended || ev.Meta["until"] == "" || ev.Issue != 0 {
+	if ev.Type != channelevents.ClaudeUsageLimited || ev.Meta["until"] == "" || ev.Issue != 0 {
 		t.Fatalf("%+v", ev)
 	}
-	// Extending the same suspension is not a new transition.
-	e.activateClaudeSuspension(0, nil, e.now().Add(time.Minute))
+	// Extending the same usage-limit hold is not a new transition.
+	e.activateClaudeUsageLimit(0, nil, e.now().Add(time.Minute))
 	sink.quiet(t, 200*time.Millisecond)
 
-	e.clearClaudeSuspension("test")
-	if lifted := sink.next(t); lifted.Type != channelevents.ClaudeLimitLifted {
+	e.clearClaudeUsageLimit("test")
+	if lifted := sink.next(t); lifted.Type != channelevents.ClaudeUsageLimitLifted {
 		t.Fatalf("%+v", lifted)
 	}
 	sink.quiet(t, 150*time.Millisecond)
 }
 
 func TestChannelClaudeLimitLazyLiftByDeadline(t *testing.T) {
-	e, sink := channelEngineTick(t, 0, onlyTypes(channelevents.ClaudeLimitSuspended, channelevents.ClaudeLimitLifted), 40*time.Millisecond)
-	e.claudeSuspendMu.Lock()
-	e.claudeSuspendedUntil = e.now().Add(time.Hour)
-	e.claudeSuspendMu.Unlock()
+	e, sink := channelEngineTick(t, 0, onlyTypes(channelevents.ClaudeUsageLimited, channelevents.ClaudeUsageLimitLifted), 40*time.Millisecond)
+	e.claudeUsageLimitMu.Lock()
+	e.claudeUsageLimitedUntil = e.now().Add(time.Hour)
+	e.claudeUsageLimitMu.Unlock()
 	e.channelNudge()
-	if ev := sink.next(t); ev.Type != channelevents.ClaudeLimitSuspended {
+	if ev := sink.next(t); ev.Type != channelevents.ClaudeUsageLimited {
 		t.Fatalf("%+v", ev)
 	}
 	// The deadline passes with no clear call: the ticker notices.
 	e.clock.(*adjClock).set(time.Now().Add(2 * time.Hour))
-	if ev := sink.next(t); ev.Type != channelevents.ClaudeLimitLifted {
+	if ev := sink.next(t); ev.Type != channelevents.ClaudeUsageLimitLifted {
 		t.Fatalf("lazy lift not reported: %+v", ev)
 	}
 }
@@ -393,8 +393,8 @@ func TestChannelClaudeLimitLazyLiftByDeadline(t *testing.T) {
 func TestChannelAccountWideEventIgnoresIssueScope(t *testing.T) {
 	sub := &channelevents.Subscription{Issues: []channelevents.IssueRef{{Repo: apiRepo, Number: 99}}}
 	e, sink := channelEngine(t, 0, sub)
-	e.activateClaudeSuspension(0, nil, e.now())
-	if ev := sink.next(t); ev.Type != channelevents.ClaudeLimitSuspended {
+	e.activateClaudeUsageLimit(0, nil, e.now())
+	if ev := sink.next(t); ev.Type != channelevents.ClaudeUsageLimited {
 		t.Fatalf("%+v", ev)
 	}
 }

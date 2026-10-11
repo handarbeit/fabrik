@@ -557,9 +557,9 @@ func TestLocalAPIHealth(t *testing.T) {
 	e.health.noteReconcileOK(now.Add(-2 * time.Minute))
 	e.health.noteWebhookEvent(now.Add(-10 * time.Second))
 	e.health.setGraphQLBackoff(true, 0.15, 750)
-	e.claudeSuspendMu.Lock()
-	e.claudeSuspendedUntil = now.Add(3 * time.Hour)
-	e.claudeSuspendMu.Unlock()
+	e.claudeUsageLimitMu.Lock()
+	e.claudeUsageLimitedUntil = now.Add(3 * time.Hour)
+	e.claudeUsageLimitMu.Unlock()
 	e.seedAPIItem(t, 1, "Queued")
 	e.deepFetched(1)
 	e.store.Apply(itemstate.ItemDeepFetched{Repo: "owner/repo", Number: 1, FreshState: gh.ProjectItem{ID: "I_B", Number: 1, Repo: "owner/repo", Status: "Queued"}})
@@ -582,7 +582,7 @@ func TestLocalAPIHealth(t *testing.T) {
 	if h.Reconcile.SinceSuccessSeconds.V != 120 || h.Webhook.SinceEventSeconds.V != 10 || h.Webhook.Mode != "off" {
 		t.Errorf("reconcile/webhook = %+v / %+v", h.Reconcile, h.Webhook)
 	}
-	if !h.Claude.Suspended || !h.Claude.SuspendedUntil.Valid || !h.Claude.SuspendedUntil.V.Equal(now.Add(3*time.Hour).UTC()) {
+	if !h.Claude.UsageLimited || !h.Claude.UsageLimitedUntil.Valid || !h.Claude.UsageLimitedUntil.V.Equal(now.Add(3*time.Hour).UTC()) {
 		t.Errorf("claude = %+v", h.Claude)
 	}
 	if b := h.Backoff; !b.Observed || !b.Low.V || b.Remaining.V != 750 || b.RestPaused.V {

@@ -38,7 +38,7 @@ func TestExtractUsageLimitReset(t *testing.T) {
 		wantReason string
 	}{
 		{
-			// The over-suspension guard: seven_day is below 1 and resets days
+			// The over-usage-limit hold guard: seven_day is below 1 and resets days
 			// later, so it must never win (R1a).
 			name:   "real 429 shape: exhausted five_hour wins over later non-exhausted seven_day",
 			stream: rateLimitEventLine(`{"five_hour":` + window("1", testFiveHourReset) + `,"seven_day":` + window("0.65", testSevenDayReset) + `}`),

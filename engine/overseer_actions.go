@@ -531,7 +531,7 @@ func (a *overseerActor) Revalidate(p localapi.RevalidateParams) (*localapi.Actio
 }
 
 // ClearClaudeLimit applies fabrik:clear-claude-limit to one managed open item.
-// The suspension the engine's settle scan then clears is account-wide, but the
+// The usage-limit hold the engine's settle scan then clears is account-wide, but the
 // label has to sit on some item, so the daemon picks one deterministically —
 // one already carrying fabrik:claude-limit first, else the lowest-numbered —
 // and names it in the result and the audit comment.
@@ -544,8 +544,8 @@ func (a *overseerActor) ClearClaudeLimit(p localapi.ClearClaudeLimitParams) (*lo
 	defer a.mu.Unlock()
 	e := a.e
 
-	if _, ok := e.claudeSuspendedUntilTime(e.now()); !ok {
-		return nil, localapi.Refused(localapi.RefusalState{}, "no Claude usage-limit suspension is active in the daemon, so there is nothing to clear")
+	if _, ok := e.claudeUsageLimitedUntilTime(e.now()); !ok {
+		return nil, localapi.Refused(localapi.RefusalState{}, "no Claude usage limit is active in the daemon, so there is nothing to clear")
 	}
 
 	var pick *itemstate.ItemState
@@ -594,9 +594,9 @@ func (a *overseerActor) ClearClaudeLimit(p localapi.ClearClaudeLimitParams) (*lo
 		Action:  localapi.MethodClearClaudeLimit,
 		Issue:   t.ref,
 		Changed: true,
-		Summary: fmt.Sprintf("applied %s to %s; the engine clears the account-wide suspension on its next poll", labelClearLimit, t.ref),
+		Summary: fmt.Sprintf("applied %s to %s; the engine clears the account-wide usage-limit hold on its next poll", labelClearLimit, t.ref),
 		Writes:  []string{"added " + labelClearLimit},
-		Notes:   []string{fmt.Sprintf("the label was placed on %s, chosen by the daemon; the suspension it clears is account-wide, not specific to that issue", t.ref)},
+		Notes:   []string{fmt.Sprintf("the label was placed on %s, chosen by the daemon; the usage-limit hold it clears is account-wide, not specific to that issue", t.ref)},
 	}
-	return a.finish(res, t, fmt.Sprintf("requested clearing the account-wide Claude usage-limit suspension (applied `%s` to %s, an item the daemon chose; the suspension is not specific to this issue)", labelClearLimit, t.ref), requester), nil
+	return a.finish(res, t, fmt.Sprintf("requested clearing the account-wide Claude usage limit (applied `%s` to %s, an item the daemon chose; the hold is not specific to this issue)", labelClearLimit, t.ref), requester), nil
 }

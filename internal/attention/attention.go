@@ -144,8 +144,8 @@ type Input struct {
 
 	HasOpenUnmergedPR bool
 
-	// ClaudeSuspendedUntil is the account-wide usage-limit suspension end; zero if none.
-	ClaudeSuspendedUntil time.Time
+	// ClaudeUsageLimitedUntil is the account-wide usage-limit hold end; zero if none.
+	ClaudeUsageLimitedUntil time.Time
 }
 
 // Reason is one label (or condition) contributing to the classification.
@@ -216,7 +216,7 @@ var labelTable = map[string]labelInfo{
 	"fabrik:rebase-needed":                 {"the linked PR no longer merges cleanly; the engine is dispatching a rebase", true},
 	"fabrik:bot-reprompted":                {"a bot reviewer was re-prompted; the engine pauses if it still has not responded", true},
 	"fabrik:children-spawned":              {"child issues were spawned and block this one", false},
-	"fabrik:claude-limit":                  {"the Claude account usage limit was hit; the engine retries once the suspension lifts", true},
+	"fabrik:claude-limit":                  {"the Claude account usage limit was hit; the engine retries once the usage-limit hold lifts", true},
 	"fabrik:tools-denied":                  {"a tool call was denied by the permission layer; the engine retries, bounded by its own counter", true},
 	"fabrik:api-key-helper-detected":       {"the worktree sets apiKeyHelper, which Fabrik refuses; remove it from the worktree settings", false},
 	"fabrik:toolchain-stale":               {"the daemon's PATH toolchain does not satisfy the repo's declared version (warn-only)", false},
@@ -544,8 +544,8 @@ func describeKind(kind string) string {
 		return "the review wait times out (bot re-prompt, else pause)"
 	case kind == "bot-reprompt-escalation":
 		return "the bot re-prompt window ends and the engine pauses"
-	case kind == "claude-suspension-end":
-		return "the Claude usage-limit suspension lifts"
+	case kind == "claude-usage-limit-end":
+		return "the Claude usage-limit hold lifts"
 	}
 	return kind
 }
@@ -627,8 +627,8 @@ func deadlinesFor(in Input) []Deadline {
 	if hasLabel(in.Labels, "fabrik:bot-reprompted") {
 		anchored("bot-reprompt-escalation", "fabrik:bot-reprompted", in.Cfg.ReviewWaitTimeout, "bot-reprompted applied + review wait timeout")
 	}
-	if hasLabel(in.Labels, "fabrik:claude-limit") && in.ClaudeSuspendedUntil.After(in.Now) {
-		ds = append(ds, Deadline{Kind: "claude-suspension-end", At: in.ClaudeSuspendedUntil, Basis: "account-wide usage-limit reset"})
+	if hasLabel(in.Labels, "fabrik:claude-limit") && in.ClaudeUsageLimitedUntil.After(in.Now) {
+		ds = append(ds, Deadline{Kind: "claude-usage-limit-end", At: in.ClaudeUsageLimitedUntil, Basis: "account-wide usage-limit reset"})
 	}
 	return ds
 }

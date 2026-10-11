@@ -23,7 +23,7 @@ import (
 //   - explicit, nil-safe emitEvent calls at engine transition points that have
 //     no store signal of their own;
 //   - a ticker for the time-driven events (stalled, a lazily lifted Claude
-//     suspension).
+//     usage-limit hold).
 //
 // Zero-GitHub-cost rule (R9) and observation-only rule (R10): nothing here
 // reaches GitHub — no e.client/e.readClient, no Store.Get (it has a GitHub
@@ -79,7 +79,7 @@ type channelEvents struct {
 	// "gates clear" point (runCatchUpPhase2) since the last drain.
 	settleCand map[string]settleCandidate
 	// nudge asks the consumer to re-check account-wide state (the Claude
-	// usage-limit suspension) without waiting for the next tick.
+	// usage-limit hold) without waiting for the next tick.
 	nudge bool
 
 	// consumer-owned (no lock): only run() touches these.
@@ -194,7 +194,7 @@ func (ce *channelEvents) enqueue(evs ...channelevents.Event) {
 }
 
 // channelNudge asks the deriver to re-check account-wide state. Called from the
-// Claude suspension transition points; a void, non-blocking observation call.
+// Claude usage-limit hold transition points; a void, non-blocking observation call.
 func (e *Engine) channelNudge() {
 	ce := e.channelEvents()
 	if ce == nil {
@@ -219,15 +219,15 @@ func (ce *channelEvents) seed() {
 	e := ce.e
 	now := e.now()
 	threshold := e.channelStallThreshold()
-	suspended := e.channelSuspendedUntil(now)
-	ce.claudeLimited = !suspended.IsZero()
+	usageLimited := e.channelUsageLimitedUntil(now)
+	ce.claudeLimited = !usageLimited.IsZero()
 	e.store.Scan(func(st *itemstate.ItemState) {
 		if st.IsPR {
 			return
 		}
 		key := issueRef(st.Repo, st.Number)
 		m := ce.memoFor(key)
-		res := attention.Classify(e.attentionInput(st, now, threshold, suspended))
+		res := attention.Classify(e.attentionInput(st, now, threshold, usageLimited))
 		m.pauseKey = pauseFamilyKey(res)
 		ce.armCounters(m, st, true)
 		m.staleDone = hasLabelStr(st.Labels, "fabrik:awaiting-input")

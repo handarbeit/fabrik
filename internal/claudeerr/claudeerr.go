@@ -54,7 +54,7 @@ type UsageLimitError struct {
 }
 
 // Reasons a UsageLimitError carries no structured reset instant. The engine
-// logs the applicable one whenever it falls back to a fixed suspension.
+// logs the applicable one whenever it falls back to a fixed usage-limit hold.
 const (
 	// ResetReasonAbsent: no rate_limit_event, or none carried unifiedWindows.
 	ResetReasonAbsent = "absent"
@@ -107,7 +107,7 @@ func (e *TurnLimitError) Error() string {
 // Deliberately a distinct type from UsageLimitError, not a second value
 // recognized by classifyUsageLimitExit itself: UsageLimitError is also the
 // trigger, by Go type, for two behaviors that must NOT apply here —
-// activateClaudeSuspension (engine/item.go, engine/comments.go, forbidden by
+// activateClaudeUsageLimit (engine/item.go, engine/comments.go, forbidden by
 // R3 of #1458, since an api_error is per-invocation, not account-wide) and
 // the comment-processing circuit breaker bypass (engine/comments.go,
 // forbidden by R6's spirit, since exempting api_error from the breaker would

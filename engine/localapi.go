@@ -26,7 +26,7 @@ import (
 // TestLocalAPISourceDoesNotReachGitHub pins this statically.
 //
 // Concurrency: the API runs on socket goroutines. It reads the Store (RLock,
-// copies out), already-guarded engine state (claudeSuspendMu, sem, the
+// copies out), already-guarded engine state (claudeUsageLimitMu, sem, the
 // Store's repo-worker markers) and daemonHealth, a mutex-guarded mirror of the
 // poll loop's own single-goroutine fields. It never holds a lock across
 // socket I/O: each call snapshots, releases, then returns a plain value that
@@ -203,7 +203,7 @@ func counterStages(ss itemstate.StageState, kind string) []string {
 // attentionInput extracts the classifier input from one item's state. st may
 // point at live Store memory (inside Scan): everything is copied out, nothing
 // retained, nothing blocking.
-func (e *Engine) attentionInput(st *itemstate.ItemState, now time.Time, threshold time.Duration, suspendedUntil time.Time) attention.Input {
+func (e *Engine) attentionInput(st *itemstate.ItemState, now time.Time, threshold time.Duration, usageLimitedUntil time.Time) attention.Input {
 	in := attention.Input{
 		Now: now,
 		Cfg: attention.Config{
@@ -212,14 +212,14 @@ func (e *Engine) attentionInput(st *itemstate.ItemState, now time.Time, threshol
 			CIBackstopTimeout: e.ciBackstopTimeout(),
 			ReviewWaitTimeout: e.cfg.ReviewWaitTimeout,
 		},
-		Status:               st.Status,
-		StageKind:            e.attentionStageKind(st.Status),
-		Closed:               st.IsClosed,
-		Terminal:             st.Terminal,
-		Labels:               append([]string(nil), st.Labels...),
-		PausedByEngine:       st.StageState.PausedByEngine[st.Status],
-		StatusEnteredAt:      st.StatusEnteredAt,
-		ClaudeSuspendedUntil: suspendedUntil,
+		Status:                  st.Status,
+		StageKind:               e.attentionStageKind(st.Status),
+		Closed:                  st.IsClosed,
+		Terminal:                st.Terminal,
+		Labels:                  append([]string(nil), st.Labels...),
+		PausedByEngine:          st.StageState.PausedByEngine[st.Status],
+		StatusEnteredAt:         st.StatusEnteredAt,
+		ClaudeUsageLimitedUntil: usageLimitedUntil,
 	}
 	for _, kind := range counterKinds {
 		in.Counters = append(in.Counters, attention.Counter{
@@ -382,8 +382,8 @@ func isRealRepoKey(s string) bool {
 	return ok && owner != "" && repo != "" && !strings.Contains(repo, "/")
 }
 
-func (b localAPIBackend) suspendedUntil(now time.Time) time.Time {
-	d, _ := b.e.claudeSuspendedUntilTime(now)
+func (b localAPIBackend) usageLimitedUntil(now time.Time) time.Time {
+	d, _ := b.e.claudeUsageLimitedUntilTime(now)
 	return d
 }
 
@@ -399,7 +399,7 @@ func (b localAPIBackend) Status(p localapi.StatusParams) (*localapi.StatusResult
 	st := snap.State()
 	now := b.e.now()
 	threshold := b.stallThreshold(0)
-	res := attention.Classify(b.e.attentionInput(&st, now, threshold, b.suspendedUntil(now)))
+	res := attention.Classify(b.e.attentionInput(&st, now, threshold, b.usageLimitedUntil(now)))
 
 	out := &localapi.StatusResult{
 		Envelope:  b.envelope(now),
@@ -744,7 +744,7 @@ func (r boardRow) ref() string { return issueRef(r.repo, r.number) }
 func (b localAPIBackend) Board(p localapi.BoardParams) (*localapi.BoardResult, error) {
 	now := b.e.now()
 	threshold := b.stallThreshold(p.StallThresholdSeconds)
-	suspended := b.suspendedUntil(now)
+	usageLimited := b.usageLimitedUntil(now)
 	var filter localapi.BoardFilter
 	if p.Filter != nil {
 		filter = *p.Filter
@@ -763,7 +763,7 @@ func (b localAPIBackend) Board(p localapi.BoardParams) (*localapi.BoardResult, e
 			lastDeep:  it.LastDeepFetchAt,
 			entered:   it.StatusEnteredAt,
 			hasWorker: it.Worker != nil,
-			input:     b.e.attentionInput(it, now, threshold, suspended),
+			input:     b.e.attentionInput(it, now, threshold, usageLimited),
 		}
 		for _, d := range it.BlockedBy {
 			if strings.EqualFold(d.State, "OPEN") {
@@ -986,10 +986,10 @@ func (b localAPIBackend) Health(localapi.HealthParams) (*localapi.HealthResult, 
 		MergeTrain: []localapi.TrainPartition{},
 	}
 
-	if until, suspended := e.claudeSuspendedUntilTime(now); suspended {
-		res.Claude = localapi.ClaudeHealth{Suspended: true, SuspendedUntil: localapi.Some(until.UTC())}
+	if until, usageLimited := e.claudeUsageLimitedUntilTime(now); usageLimited {
+		res.Claude = localapi.ClaudeHealth{UsageLimited: true, UsageLimitedUntil: localapi.Some(until.UTC())}
 	} else {
-		res.Claude = localapi.ClaudeHealth{SuspendedUntil: localapi.Unknown[time.Time]()}
+		res.Claude = localapi.ClaudeHealth{UsageLimitedUntil: localapi.Unknown[time.Time]()}
 	}
 
 	bo := h.Backoff

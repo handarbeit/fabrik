@@ -237,23 +237,23 @@ func TestReviewAndBotDeadlines(t *testing.T) {
 	}
 }
 
-func TestCooldownAndClaudeSuspensionDeadlines(t *testing.T) {
+func TestCooldownAndClaudeUsageLimitDeadlines(t *testing.T) {
 	in := baseInput()
 	in.Labels = []string{"fabrik:claude-limit"}
-	in.ClaudeSuspendedUntil = t0.Add(3 * time.Hour)
+	in.ClaudeUsageLimitedUntil = t0.Add(3 * time.Hour)
 	in.Cooldowns = map[string]time.Time{"retry": t0.Add(10 * time.Minute)}
 	got := Classify(in)
 	if !got.Next.At.Equal(t0.Add(10 * time.Minute)) {
 		t.Errorf("Next.At = %v, want the cooldown expiry", got.Next.At)
 	}
-	var sawSuspension bool
+	var sawUsageLimit bool
 	for _, d := range got.Next.Deadlines {
-		if d.Kind == "claude-suspension-end" && d.At.Equal(t0.Add(3*time.Hour)) {
-			sawSuspension = true
+		if d.Kind == "claude-usage-limit-end" && d.At.Equal(t0.Add(3*time.Hour)) {
+			sawUsageLimit = true
 		}
 	}
-	if !sawSuspension {
-		t.Errorf("claude suspension deadline missing: %+v", got.Next.Deadlines)
+	if !sawUsageLimit {
+		t.Errorf("claude usage-limit hold deadline missing: %+v", got.Next.Deadlines)
 	}
 }
 

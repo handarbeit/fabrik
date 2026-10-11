@@ -136,7 +136,7 @@ func toolDefs() []map[string]any {
 		{
 			"name": ToolHealth,
 			"description": "Pipeline health from the daemon's own state (no GitHub call): version and uptime, time since the last poll attempt and success, webhook and reconcile freshness, " +
-				"the account-wide Claude usage-limit suspension, GraphQL backoff, worker slots in use (plus the reserved merge-train slot, train_in_use/train_max, when merge_train is on), and per (repo, base) merge-train partition members.",
+				"the account-wide Claude usage-limit hold, GraphQL backoff, worker slots in use (plus the reserved merge-train slot, train_in_use/train_max, when merge_train is on), and per (repo, base) merge-train partition members.",
 			"inputSchema": obj(map[string]any{}),
 			"annotations": readOnly,
 		},
@@ -214,8 +214,8 @@ func toolDefs() []map[string]any {
 		},
 		{
 			"name": ToolClearClaudeLimit,
-			"description": "Clear an active account-wide Claude usage-limit suspension without restarting the daemon, by applying fabrik:clear-claude-limit to one managed open issue (the daemon picks it: one already carrying fabrik:claude-limit first, else the lowest-numbered, and names it in the result and its audit comment). " +
-				"Refused when no suspension is active. The suspension is account-wide, so the chosen issue is only the carrier of the label. Posts a Fabrik audit comment on that issue naming the requesting subscriber. Requires --subscriber.",
+			"description": "Clear an active account-wide Claude usage-limit hold without restarting the daemon, by applying fabrik:clear-claude-limit to one managed open issue (the daemon picks it: one already carrying fabrik:claude-limit first, else the lowest-numbered, and names it in the result and its audit comment). " +
+				"Refused when no usage limit is active. The hold is account-wide, so the chosen issue is only the carrier of the label. Posts a Fabrik audit comment on that issue naming the requesting subscriber. Requires --subscriber.",
 			"inputSchema": obj(map[string]any{}),
 			"annotations": action(true),
 		},
