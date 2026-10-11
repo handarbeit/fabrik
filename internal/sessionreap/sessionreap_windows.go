@@ -70,3 +70,9 @@ func ForgetStart(int) {}
 
 // OwnerOf returns an Owner with no token.
 func OwnerOf(pid int) Owner { return Owner{PID: pid} }
+
+// StartToken returns "" on Windows.
+func StartToken(int) string { return "" }
+
+// Environ has no reader on Windows.
+func Environ(int) ([]string, error) { return nil, ErrEnvUnreadable }
