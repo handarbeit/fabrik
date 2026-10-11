@@ -11044,8 +11044,8 @@ The process-group `SIGKILL` above is **PGID-scoped**: it can only reach descenda
 `reapWorktreeProcesses` (`engine/reaper_unix.go`) closes this gap with a **cwd-rooted** reaper, run immediately before every worktree directory removal: it enumerates live processes whose current working directory is the worktree path or a subdirectory of it — regardless of process-group membership — and sends SIGKILL to each. It is a package-level function (not a `WorktreeManager` method), so it can be called from contexts with no `WorktreeManager` instance available.
 
 **Platform implementations:**
-- **Linux**: scans `/proc/*/cwd` symlinks and prefix-matches each against the worktree directory. Immediately before killing a match, it re-reads `/proc/<pid>/cwd` to close the TOCTOU window in which the pid could have been recycled for an unrelated process between enumeration and kill.
-- **macOS**: runs `lsof -a -d cwd -n -P -Fpcn`, which inspects only each process's cwd file descriptor (not every open fd, unlike `lsof +D`) — kept fast and non-hanging on the synchronous teardown path even for a `node_modules`-heavy worktree. macOS has no `/proc`-equivalent cheap re-check primitive, so the same TOCTOU window is accepted rather than mitigated here.
+- **Linux**: scans `/proc/*/cwd` symlinks and prefix-matches each against the worktree directory. It makes no external call and spawns no process, so there is nothing to bound. Immediately before killing a match, it re-reads `/proc/<pid>/cwd` to close the TOCTOU window in which the pid could have been recycled for an unrelated process between enumeration and kill.
+- **macOS**: runs `lsof -a -d cwd -n -P -Fpcn`, which inspects only each process's cwd file descriptor (not every open fd, unlike `lsof +D`) — kept fast on the synchronous teardown path even for a `node_modules`-heavy worktree. The call is **bounded**: it runs under a 10-second timeout (`worktreeReapLsofTimeout`, ADR 1805), because it is made under the per-repo worktree mutex and an unbounded `lsof` would stall every worktree operation for that repo. On timeout `lsof` is killed, its partial output is discarded, one `[#N kill] warn: worktree process reap: lsof timed out after 10s for <worktree>; skipping reap` line is logged, and the reap is skipped — worktree removal proceeds. macOS has no `/proc`-equivalent cheap re-check primitive, so the same TOCTOU window is accepted rather than mitigated here.
 - **Windows**: no-op (`engine/reaper_windows.go`), matching `killProcGroup`'s existing Windows precedent.
 
 Both platform paths resolve symlinks in the worktree directory before matching (`filepath.EvalSymlinks`), since `/proc/*/cwd` and `lsof`'s reported path are both fully-resolved real paths (e.g. macOS resolves `/tmp` → `/private/tmp`), which would otherwise defeat a literal prefix match.
@@ -11060,6 +11060,7 @@ Each kill is logged via the existing `[#N kill] ...` convention: `[#N kill] send
 
 **Documented residual risks** (see ADR 063):
 - **PID-reuse TOCTOU on macOS**: unlike Linux, there is no cheap re-check between enumeration and kill, so a small window exists where a recycled pid could receive an unintended SIGKILL.
+- **A timed-out reap leaves orphans on macOS**: on a very loaded host `lsof` can exceed its 10-second bound; the reap is then skipped (with the warning above) and a `setsid`'d descendant rooted in the worktree is not killed by this path (ADR 1805).
 - **`chdir`'d descendants are not caught**: this reaper is cwd-based by design (matching the issue's reported failure mode); a process that opened a file in the worktree and then `chdir`'d elsewhere is out of scope and will still leak.
 
 ### Progress Baseline Snapshot
