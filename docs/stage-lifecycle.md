@@ -194,7 +194,7 @@ Before the Claude invocation on every Implement dispatch, the engine calls `preI
   <scoped spec body>
   FABRIK_SPAWN_CHILD_END
   ```
-  Parsed by `ParseSpawnBlocks()`. If no blocks are found, `preImplement` returns immediately. `DEPENDS_ON:`, when present, must immediately follow `TITLE:` (no blank line between) — see [State Machine §6.7](state-machine.md#67-pre-implement-spawn-path) for the full grammar and validation rules (ADR-1337).
+  Parsed by `ParseSpawnBlocksDetailed()` (header keys are case- and whitespace-tolerant, #2091). If no blocks are found, `preImplement` returns immediately. If any block is malformed, `preImplement` creates nothing and pauses via `pauseForMalformedSpawn` with a comment naming each bad block's index and quoted line; the same failure in Review/Validate output commits and pushes the stage's work first (`preserveWorkOnMarkerFailure`), as does a malformed `FABRIK_PR_CREATE` in Implement. `DEPENDS_ON:`, when present, must immediately follow `TITLE:` (no blank line between) — see [State Machine §6.7](state-machine.md#67-pre-implement-spawn-path) for the full grammar and validation rules (ADR-1337).
 - **`fabrik:children-spawned` label** — idempotency guard. If present on the parent issue, `preImplement` returns immediately without making any mutations.
 
 ### Flow (when spawn blocks are present and guard label is absent)
