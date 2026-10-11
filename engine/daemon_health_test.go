@@ -23,8 +23,8 @@ func TestDaemonHealthPublishes(t *testing.T) {
 	h.notePollSuccess(at.Add(2 * time.Minute))
 	h.noteReconcileOK(at.Add(3 * time.Minute))
 	h.noteWebhookEvent(at.Add(4 * time.Minute))
-	h.setRestPaused(true)
-	h.setGraphQLBackoff(true, 0.15, 750)
+	h.setRestPaused(true, at)
+	h.setGraphQLBackoff(true, 0.15, 750, at)
 	s := h.snapshot()
 	if !s.StartedAt.Equal(at) || !s.PollAttemptAt.Equal(at.Add(time.Minute)) || !s.PollSuccessAt.Equal(at.Add(2*time.Minute)) ||
 		!s.ReconcileOKAt.Equal(at.Add(3*time.Minute)) || !s.WebhookEventAt.Equal(at.Add(4*time.Minute)) {
@@ -45,8 +45,8 @@ func TestDaemonHealthConcurrentReadWrite(t *testing.T) {
 		defer wg.Done()
 		for i := 0; i < 1000; i++ {
 			h.notePollAttempt(time.Now())
-			h.setGraphQLBackoff(i%2 == 0, float64(i)/1000, i)
-			h.setRestPaused(i%3 == 0)
+			h.setGraphQLBackoff(i%2 == 0, float64(i)/1000, i, time.Now())
+			h.setRestPaused(i%3 == 0, time.Now())
 		}
 	}()
 	go func() {
@@ -66,5 +66,64 @@ func TestPollOncePublishesHealth(t *testing.T) {
 	s := e.health.snapshot()
 	if s.PollAttemptAt.IsZero() || s.PollSuccessAt.IsZero() {
 		t.Fatalf("PollOnce must publish attempt and success: %+v", s)
+	}
+}
+
+func TestDaemonHealthPollLifecycle(t *testing.T) {
+	var h daemonHealth
+	t0 := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
+	interval := 30 * time.Second
+
+	h.beginPoll(t0, pollVerdict{})
+	h.setPollStep("fetching the project board")
+	s := h.snapshot()
+	if !s.PollInProgress || !s.PollStartedAt.Equal(t0) || s.PollStep != "fetching the project board" {
+		t.Fatalf("in-progress poll not published: %+v", s)
+	}
+
+	// A step set outside a poll is dropped, never invented.
+	h.endPoll(t0.Add(time.Second), pollVerdict{}, t0.Add(time.Second).Add(interval))
+	h.setPollStep("stale")
+	s = h.snapshot()
+	if s.PollInProgress || s.PollStep != "" || !s.PollCompletedAt.Equal(t0.Add(time.Second)) {
+		t.Fatalf("completed poll not published: %+v", s)
+	}
+	if !s.NextPollDueAt.Equal(t0.Add(time.Second + interval)) {
+		t.Fatalf("fallback next-due not published: %v", s.NextPollDueAt)
+	}
+	if s.StallEpoch != 0 || !s.LastStallEndAt.IsZero() {
+		t.Fatalf("a healthy poll must not end a stall episode: %+v", s)
+	}
+
+	// Ending an overdue poll closes the episode.
+	h.beginPoll(t0.Add(time.Minute), pollVerdict{})
+	h.endPoll(t0.Add(10*time.Minute), pollVerdict{Known: true, Overdue: true}, t0.Add(11*time.Minute))
+	s = h.snapshot()
+	if s.StallEpoch != 1 || !s.LastStallEndAt.Equal(t0.Add(10*time.Minute)) {
+		t.Fatalf("overdue completion must bump the epoch and stamp recovery: %+v", s)
+	}
+
+	// Beginning a poll after a no-poll overdue episode closes it too.
+	h.beginPoll(t0.Add(time.Hour), pollVerdict{Known: true, Overdue: true})
+	if s = h.snapshot(); s.StallEpoch != 2 {
+		t.Fatalf("overdue begin must bump the epoch: %+v", s)
+	}
+}
+
+func TestDaemonHealthGaugeAsOfMovesOnlyOnRefresh(t *testing.T) {
+	var h daemonHealth
+	at := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
+	if s := h.snapshot(); !s.BackoffAsOf.IsZero() || !s.RestPausedAsOf.IsZero() {
+		t.Fatalf("never-refreshed gauges must be unknown: %+v", s)
+	}
+	h.setGraphQLBackoff(false, 1, 4673, at)
+	h.notePollAttempt(at.Add(time.Hour))
+	h.noteReconcileOK(at.Add(2 * time.Hour))
+	if s := h.snapshot(); !s.BackoffAsOf.Equal(at) {
+		t.Fatalf("as-of must not move without a refresh: %v", s.BackoffAsOf)
+	}
+	h.setGraphQLBackoff(false, 1, 4000, at.Add(3*time.Hour))
+	if s := h.snapshot(); !s.BackoffAsOf.Equal(at.Add(3 * time.Hour)) {
+		t.Fatalf("as-of must move on refresh: %v", s.BackoffAsOf)
 	}
 }
