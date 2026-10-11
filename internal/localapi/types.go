@@ -434,6 +434,14 @@ type RevalidateParams struct {
 	Issue      string `json:"issue"`
 }
 
+// AdvanceParams moves an item whose current stage is complete exactly one
+// configured stage forward (#2126). There is no target: the engine's own
+// advance decides the next stage.
+type AdvanceParams struct {
+	Subscriber string `json:"subscriber"`
+	Issue      string `json:"issue"`
+}
+
 // ClearClaudeLimitParams has no issue: the daemon picks the carrier item.
 type ClearClaudeLimitParams struct {
 	Subscriber string `json:"subscriber"`
