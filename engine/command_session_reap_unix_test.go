@@ -71,7 +71,14 @@ func fastCommandSessionSampling(t *testing.T) {
 func workerSIDOnly(t *testing.T) {
 	t.Helper()
 	sessionReapWorkerSIDOnly = true
-	t.Cleanup(func() { sessionReapWorkerSIDOnly = false })
+	// The fixture commands inherit the worker's FABRIK_WORKER_OWNER marker, so
+	// the marker reap (#2128) would otherwise find them once the worker is gone.
+	// These twins model the behaviour before any session or marker discovery.
+	sessionReapIgnoreMarkers = true
+	t.Cleanup(func() {
+		sessionReapWorkerSIDOnly = false
+		sessionReapIgnoreMarkers = false
+	})
 }
 
 func cleanupCommandPIDs(t *testing.T, dir string) (shell, child int) {

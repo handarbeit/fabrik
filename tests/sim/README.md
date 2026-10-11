@@ -1160,3 +1160,12 @@ the repo-wide `skipIfNoGit` convention.
 ## Channel events (`channel_events_test.go`, #1968)
 
 Scenarios that drive the real engine through `PollOnce` with the channel hub started through the engine's `StartChannelEventsForTest` seam (and `SetChannelTimingForTest` to shorten the deriver's debounce), so the validate-settled anchor is exercised against the real gate chain: not emitted at `FABRIK_STAGE_COMPLETE` while `fabrik:awaiting-ci` holds nor while the review gate holds; emitted exactly once when both clear (cruise: `next=waiting-for-human`; yolo: captured before the same-pass merge, `next=auto-merge`); emitted again after `fabrik:revalidate`; and `TestChannelEventsAreObservationOnly` (R10), which runs one scenario with and without a hub and subscriber and requires the same ordered GitHub mutations and the same final labels. These tests are not `t.Parallel`: the deriver's timing is package-level and serial tests finish before any parallel test resumes. The sim delivers no `check_run` webhooks, so a settled event's `ci` is `unknown` here by design.
+
+
+## Test-binary lifetime (#2128)
+
+`tests/sim/main_test.go` installs `internal/testlife.Guard`, so a `sim.test` cannot outlive the run that started it:
+
+- **Hard ceiling.** The binary exits with status 2 and a message naming the ceiling after `SIM_TEST_CEILING` (a Go duration; default `30m`), regardless of `-test.timeout` (0 or huge included). The default is clear of the slowest legitimate full run (~11 min at `-parallel 4` on the 28-core host, CI ~7–8 min, `SIM_TIMEOUT` 20m, so an ordinary `-test.timeout` panic fires first and keeps its goroutine dump); raise it for a deliberately long run or an unusually slow host, never to 0.
+- **Owner watch.** Under a Claude worker, `FABRIK_WORKER_OWNER` names the worker's owner file; the binary exits within about 5 s once that worker is gone (PID absent or recycled). A live worker with a background run whose launching shell has exited is left alone, and an unresolved or unreadable owner never causes an exit.
+- **Re-exec'd helpers.** Tests that re-exec the test binary (`os.Args[0]`) must use `testlife.ReExecCommand(timeout, args...)`, not a bare `exec.Command`: it adds an explicit `-test.timeout`, a context deadline and a parent-liveness check so the helper dies with its parent.

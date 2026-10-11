@@ -99,3 +99,6 @@ func startToken(pid int) string {
 	}
 	return f[19]
 }
+
+// StartToken returns pid's start-time token ("" when unreadable); see list_darwin.go.
+func StartToken(pid int) string { return startToken(pid) }

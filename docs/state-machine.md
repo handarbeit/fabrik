@@ -5521,6 +5521,8 @@ when the worker is dead, a successful scan found zero live members and nothing w
 consecutive scans (`EmptyScans >= 2`, persisted across janitor passes); a scan error or any skip
 resets the count and keeps the record. A scan error changes nothing.
 
+**Owner-marker reap (#2128, ADR-2128).** A worker record also carries `Owner`: the path of the owner file named by the `FABRIK_WORKER_OWNER` the worker was started with (`.fabrik/state/worker-owners/<nonce>.json`, holding the worker's PID and start token, written right after `cmd.Start()`). For a record classified **dead or recycled** — never live or inconclusive (R4) — both sweeps call `sessionreap.ReapMarked` before the session pass: every live process whose initial environment carries exactly that marker gets SIGTERM then SIGKILL, per exact PID, after re-checking its start token and marker and the `CheckSID`/`CheckPGID` refusals. A process with no marker is never signalled on shape (ppid 1, empty group) alone. The prune rule additionally requires the marked set to be empty (two consecutive scans), and pruning removes the owner file; the janitor also deletes owner files that no record references and that are older than 24h. The unreadable-environment cases (SIP-protected macOS binaries, other users, `hidepid` mounts) read as unmarked.
+
 **Summary log** (a second line; the line above is unchanged):
 
 ```

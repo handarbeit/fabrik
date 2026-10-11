@@ -384,6 +384,13 @@ func (e *Engine) runProcessSweepJanitor(ctx context.Context) {
 	// its format are unchanged.
 	records, sessReaped, sessSkipped, pruned := sweepOrphanedWorkerSessions()
 	e.logf(0, "proc-janitor", "session sweep complete: worker records %d, session members reaped %d, skipped %d, records pruned %d\n", records, sessReaped, sessSkipped, pruned)
+	// #2128: owner files no record references (a crash between the file write and
+	// the record append) are debris once old enough.
+	if recs, rerr := allWorkerRecords(); rerr == nil {
+		if n := sweepStaleWorkerOwnerFiles(recs, e.now()); n > 0 {
+			e.logf(0, "proc-janitor", "removed %d stale worker owner file(s)\n", n)
+		}
+	}
 }
 
 // pruneSessions walks root (.fabrik/sessions/) and removes ".session" files

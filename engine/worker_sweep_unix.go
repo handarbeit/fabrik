@@ -43,6 +43,13 @@ func parseLStart(s string) (time.Time, bool) {
 // still drives the invocation-end sweep, so correctness there does not depend
 // on the write.
 func beginWorkerRecord(pid, issueNumber int, repo, stage string) workerRecord {
+	return beginWorkerRecordWithOwner(pid, issueNumber, repo, stage, "")
+}
+
+// beginWorkerRecordWithOwner is beginWorkerRecord for a worker started with an
+// owner marker (#2128); owner is the FABRIK_WORKER_OWNER value (the owner-file
+// path), "" for an unmarked worker.
+func beginWorkerRecordWithOwner(pid, issueNumber int, repo, stage, owner string) workerRecord {
 	now := time.Now()
 	rec := workerRecord{
 		ID:          fmt.Sprintf("%d-%d", pid, now.UnixNano()),
@@ -51,6 +58,7 @@ func beginWorkerRecord(pid, issueNumber int, repo, stage string) workerRecord {
 		Repo:        repo,
 		Stage:       stage,
 		SpawnedAt:   now,
+		Owner:       owner,
 	}
 	if comm, lstart, err := pidFingerprintFn(pid); err == nil {
 		rec.Comm, rec.LStart = comm, lstart
@@ -224,7 +232,17 @@ func sweepWorkerSessionAtInvocationEnd(rec workerRecord) (reaped int) {
 	signalled := make(map[int]bool)
 	deadline := time.Now().Add(invocationEndSweepBudget)
 	cleanScans := 0
+	owners := ownerSet([]workerRecord{rec})
 	for {
+		// #2128: the worker is confirmed dead or recycled (above), so whatever
+		// still carries its owner marker is an orphan — whatever its session,
+		// parent or cwd. Never reached for a live or inconclusive worker.
+		markedLeft := 0
+		if len(owners) > 0 {
+			n, remaining := reapMarkedOrphans(owners, "session_sweep_invocation_end", rec.IssueNumber)
+			reaped += n
+			markedLeft = remaining[rec.Owner]
+		}
 		procs, err := listProcessArgvFn()
 		if err != nil {
 			return reaped // fail open, keep the record
@@ -232,7 +250,7 @@ func sweepWorkerSessionAtInvocationEnd(rec workerRecord) (reaped int) {
 		members := collectSessionMembers(procs, map[int]bool{rec.PID: true})[rec.PID]
 		t := reapWorkerSessionMembers(rec, members, holder, signalled, "session_sweep_invocation_end")
 		reaped += t.reaped
-		if t.members == 0 && t.skipped == 0 {
+		if t.members == 0 && t.skipped == 0 && markedLeft == 0 {
 			cleanScans++
 			if cleanScans >= 2 {
 				_ = removeWorkerRecords([]string{rec.ID})
@@ -300,6 +318,17 @@ func sweepOrphanedWorkerSessions() (records, reaped, skipped, pruned int) {
 	// worker half (fail open); the command-session half does not depend on it.
 	if procs, serr := sharedProcessTableScan(); serr == nil && len(want) > 0 {
 		bySID := collectSessionMembers(procs, want)
+		// #2128: one marker scan serves every dead or recycled worker that
+		// carries an owner marker. Live and inconclusive workers are excluded
+		// here, so nothing marked by them is ever reached (R4).
+		var gone []workerRecord
+		for i, r := range workers {
+			if v := verdicts[i]; v.state == workerDead || v.state == workerRecycled {
+				gone = append(gone, r)
+			}
+		}
+		markedN, markedLeft := reapMarkedOrphans(ownerSet(gone), "session_sweep_periodic", 0)
+		reaped += markedN
 		for i, r := range workers {
 			v := verdicts[i]
 			if v.state != workerDead && v.state != workerRecycled {
@@ -308,7 +337,7 @@ func sweepOrphanedWorkerSessions() (records, reaped, skipped, pruned int) {
 			t := reapWorkerSessionMembers(r, bySID[r.PID], v.holder, make(map[int]bool), "session_sweep_periodic")
 			reaped += t.reaped
 			skipped += t.skipped
-			if t.members == 0 && t.skipped == 0 {
+			if t.members == 0 && t.skipped == 0 && (r.Owner == "" || markedLeft[r.Owner] == 0) {
 				if r.EmptyScans+1 >= 2 {
 					prune[r.ID] = true
 				} else {
@@ -343,6 +372,7 @@ func sweepOrphanedWorkerSessions() (records, reaped, skipped, pruned int) {
 			kept := cur[:0]
 			for _, r := range cur {
 				if prune[r.ID] {
+					removeWorkerOwnerFile(r.Owner)
 					continue
 				}
 				if n, ok := emptyScans[r.ID]; ok {

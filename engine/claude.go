@@ -1026,6 +1026,10 @@ func buildClaudeEnv(stage *stages.Stage, issue gh.ProjectItem, workDir string, o
 	} else {
 		env = append(env, "FABRIK_PR")
 	}
+	// The owner marker is per-invocation and set by runClaude after Start's
+	// owner path is allocated; strip any ambient copy (an engine run from inside
+	// a worker) so a worker can never inherit its parent's marker (#2128).
+	env = append(env, workerenv.OwnerVar)
 
 	passthrough := passthroughSet(claudeAnthropicEnvPassthrough)
 	env = append(env, scrubAnthropicAuthEnv(baseEnv, passthrough)...)
@@ -1451,6 +1455,14 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 
 	cmd := exec.CommandContext(stageCtx, "claude", args...)
 	cmd.Dir = workDir
+	// Owner marker (#2128): FABRIK_WORKER_OWNER names an owner file whose
+	// {pid, start token} is written right after Start (the PID does not exist
+	// yet). Every descendant inherits it. A path that cannot be allocated leaves
+	// the worker unmarked, exactly as before.
+	ownerPath := newWorkerOwnerPath()
+	if ownerPath != "" {
+		extraEnv = append(append([]string(nil), extraEnv...), workerenv.OwnerVar+"="+ownerPath)
+	}
 	cmd.Env = mergeEnv(os.Environ(), extraEnv)
 	cmd.Stdin = strings.NewReader(prompt)
 	cmd.Stderr = stderrWriter
@@ -1503,6 +1515,11 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 	// cmd.Process is written once by cmd.Start and never modified again.
 	// Capture it here (same goroutine, post-Start) for the watchdog.
 	pid := cmd.Process.Pid
+	if ownerPath != "" {
+		if err := writeWorkerOwnerFile(ownerPath, pid); err != nil {
+			claudeLog(issueNumber, "warn", "could not write worker owner file for PID %d: %v\n", pid, err)
+		}
+	}
 	if onPIDReady != nil {
 		onPIDReady(pid)
 	}
@@ -1548,7 +1565,7 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 	// trackWorkerDescendants's tick never recorded. If the fingerprint capture
 	// failed, retry it in the background so the record's live-worker phase stays
 	// identifiable.
-	workerRec := beginWorkerRecord(pid, issueNumber, repo, label)
+	workerRec := beginWorkerRecordWithOwner(pid, issueNumber, repo, label, ownerPath)
 	// #1989: the sessions Claude's Bash-tool commands create for themselves
 	// (setsid) are invisible to a SID == worker-PID filter. Sample them while the
 	// parent chain still exists; Escalate and the post-exit sweep consult the

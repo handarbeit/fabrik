@@ -58,3 +58,6 @@ func listProcs() ([]Proc, error) {
 // startToken is unavailable without a platform API; an empty token means a
 // live leader is never trusted as a previously sampled one (fail closed).
 func startToken(int) string { return "" }
+
+// StartToken returns "" on this platform.
+func StartToken(pid int) string { return startToken(pid) }

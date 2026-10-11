@@ -43,6 +43,13 @@ type workerRecord struct {
 	// the worker deliberately left running is its own business until it exits.
 	ParentID   string `json:"parent_id,omitempty"`
 	StartToken string `json:"start_token,omitempty"`
+	// Owner is the worker's owner marker (#2128): the owner-file path set as
+	// FABRIK_WORKER_OWNER in its environment. Every descendant inherits it, so
+	// once the worker is confirmed dead or recycled the sweeps reap whatever
+	// still carries it — never by process-tree shape, and never while the worker
+	// is live or inconclusive. Empty on a command-session record and on a worker
+	// that ran unmarked.
+	Owner string `json:"owner,omitempty"`
 	// EmptyScans counts consecutive successful periodic scans that found no
 	// live member of this dead worker's session. A record is pruned only at
 	// >= 2, guarding against a truncated process table (R9).
@@ -148,6 +155,8 @@ func removeWorkerRecords(ids []string) error {
 		for _, r := range recs {
 			if !drop[r.ID] {
 				kept = append(kept, r)
+			} else {
+				removeWorkerOwnerFile(r.Owner)
 			}
 		}
 		return kept

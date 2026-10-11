@@ -72,6 +72,14 @@ func TestMain(m *testing.M) {
 			time.Sleep(time.Hour)
 		}
 	}
+	if os.Getenv("FABRIK_TEST_SETSID_HELPER") == "1" {
+		// Leaves the worker's session entirely (#2128): neither the worker's SID
+		// nor the process group reaches it, only the inherited owner marker does.
+		setsidHelper()
+		for {
+			time.Sleep(time.Hour)
+		}
+	}
 	if os.Getenv("FABRIK_TEST_DETACH_HELPER") == "1" {
 		detachHelperSetpgid() // moves self into a brand-new process group
 		for {
