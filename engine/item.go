@@ -1448,8 +1448,8 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 		if prBlockErr != nil {
 			// #2091: the stage's work must reach the remote before the pause, so an
 			// un-pause resumes on pushed commits instead of redoing them.
-			e.preserveWorkOnMarkerFailure(item, stage, workDir, claudeRan)
-			msg := fmt.Sprintf("🏭 **Fabrik — malformed FABRIK_PR_CREATE marker**\n\n%v\n\nThe stage's work was committed and pushed. Remove `fabrik:paused` after fixing the skill output to retry.", prBlockErr)
+			workNote := e.preserveWorkOnMarkerFailure(item, stage, workDir, claudeRan)
+			msg := fmt.Sprintf("🏭 **Fabrik — malformed FABRIK_PR_CREATE marker**\n\n%v\n\n%sRemove `fabrik:paused` after fixing the skill output to retry.", prBlockErr, workNote)
 			e.postComment(item, msg, false, false) //nolint:errcheck // failure already logged by postComment
 			e.addPausedLabelToItem(owner, repo, item)
 			releaseLock()
@@ -1496,8 +1496,8 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 			// #2091: a malformed block is surfaced, not dropped. Hold the whole
 			// declaration (no spawn), keep the stage's work, then pause —
 			// mirroring the FABRIK_PR_CREATE failure branch above.
-			e.preserveWorkOnMarkerFailure(item, stage, workDir, claudeRan)
-			_ = e.pauseForMalformedSpawn(item, blockErrs, spawnOriginMidflight)
+			workNote := e.preserveWorkOnMarkerFailure(item, stage, workDir, claudeRan)
+			_ = e.pauseForMalformedSpawn(item, blockErrs, spawnOriginMidflight, workNote)
 			releaseLock()
 			return
 		}
@@ -2680,15 +2680,21 @@ func (e *Engine) removeFailedLabel(owner, repo string, issueNumber int, stageNam
 // guard (#2089) must not add a second one. Failures, including a zero-ahead
 // refusal, are logged only: they never suppress the parse-error comment or the
 // pause. Read-only stages have nothing to commit.
-func (e *Engine) preserveWorkOnMarkerFailure(item gh.ProjectItem, stage *stages.Stage, workDir string, claudeRan bool) {
+//
+// It returns a sentence for the pause comment describing what actually
+// happened ("" when there was nothing to preserve), so the comment never
+// claims a push that did not land.
+func (e *Engine) preserveWorkOnMarkerFailure(item gh.ProjectItem, stage *stages.Stage, workDir string, claudeRan bool) string {
 	if !claudeRan || stage.ReadOnly {
-		return
+		return ""
 	}
 	e.commitWIP(workDir, item.Number, stage.Name)
 	wm := e.worktreesFor(item.Repo)
 	if pushErr := e.pushBranchOnCancel(item, wm); pushErr != nil {
 		e.logf(item.Number, "warn", "could not push branch after marker parse failure: %v\n", pushErr)
+		return "The stage's work could not be pushed (see the engine log); it remains in the local worktree.\n\n"
 	}
+	return "The stage's work was committed and pushed.\n\n"
 }
 
 // commitWIP commits any uncommitted changes in the worktree as a partial-progress

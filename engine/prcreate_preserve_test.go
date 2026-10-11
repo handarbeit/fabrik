@@ -57,7 +57,7 @@ func runMalformedPRCreateImplement(t *testing.T, issue int, breakRemote bool) (c
 	return client, repoDir
 }
 
-func assertMalformedPRCreatePaused(t *testing.T, client *mockGitHubClient) {
+func assertMalformedPRCreatePaused(t *testing.T, client *mockGitHubClient, wantWorkNote string) {
 	t.Helper()
 	var paused, complete bool
 	for _, c := range client.addLabelCalls {
@@ -73,7 +73,7 @@ func assertMalformedPRCreatePaused(t *testing.T, client *mockGitHubClient) {
 	}
 	var found bool
 	for _, c := range client.addCommentCalls {
-		if strings.Contains(c.body, "malformed FABRIK_PR_CREATE marker") && strings.Contains(c.body, "`Summary of the change`") {
+		if strings.Contains(c.body, "malformed FABRIK_PR_CREATE marker") && strings.Contains(c.body, "`Summary of the change`") && strings.Contains(c.body, wantWorkNote) {
 			found = true
 		}
 	}
@@ -90,7 +90,7 @@ func assertMalformedPRCreatePaused(t *testing.T, client *mockGitHubClient) {
 // locally — it is committed (including leftovers) and pushed before the pause.
 func TestFinalizeStageOutcome_MalformedPRCreate_CommitsAndPushesWork(t *testing.T) {
 	client, repoDir := runMalformedPRCreateImplement(t, 91, false)
-	assertMalformedPRCreatePaused(t, client)
+	assertMalformedPRCreatePaused(t, client, "committed and pushed")
 
 	out, err := exec.Command("git", "-C", repoDir, "ls-remote", "origin", "refs/heads/fabrik/issue-91").CombinedOutput()
 	if err != nil || strings.TrimSpace(string(out)) == "" {
@@ -112,5 +112,6 @@ func TestFinalizeStageOutcome_MalformedPRCreate_CommitsAndPushesWork(t *testing.
 // FR-010: a failing push must not suppress the parse-error comment or pause.
 func TestFinalizeStageOutcome_MalformedPRCreate_PushFailureStillPauses(t *testing.T) {
 	client, _ := runMalformedPRCreateImplement(t, 92, true)
-	assertMalformedPRCreatePaused(t, client)
+	// The comment must not claim a push that did not land.
+	assertMalformedPRCreatePaused(t, client, "could not be pushed")
 }

@@ -335,9 +335,10 @@ const (
 // whole declaration is held — no child is created — because dropping the bad
 // block and spawning its siblings would shift the DEPENDS_ON indexes and the
 // ADR-1583 fabrik:spawned-child:<index>:<n> markers, and would leave the
-// parent's blockedBy set half-populated. Returns the error preImplement hands
-// its caller (the "parent paused" contract).
-func (e *Engine) pauseForMalformedSpawn(item gh.ProjectItem, errs []SpawnBlockError, origin string) error {
+// parent's blockedBy set half-populated. workNote, when non-empty, is a
+// sentence (ending in a blank line) stating what happened to the stage's work.
+// Returns the error preImplement hands its caller (the "parent paused" contract).
+func (e *Engine) pauseForMalformedSpawn(item gh.ProjectItem, errs []SpawnBlockError, origin, workNote string) error {
 	var bullets []string
 	for _, be := range errs {
 		e.logf(item.Number, "spawn", "malformed FABRIK_SPAWN_CHILD %s\n", be.String())
@@ -349,8 +350,8 @@ func (e *Engine) pauseForMalformedSpawn(item gh.ProjectItem, errs []SpawnBlockEr
 	} else {
 		guidance = "Remove `fabrik:paused` to retry; the stage will be re-run and re-emit the declaration."
 	}
-	msg := fmt.Sprintf("🏭 **Fabrik — malformed FABRIK_SPAWN_CHILD marker**\n\n%d block(s) could not be parsed:\n\n%s\n\nNo sub-issues were created — the whole declaration is held so dependency indexes stay consistent. Expected `TITLE: <title>` as the first non-empty line inside each block.\n\n%s",
-		len(errs), strings.Join(bullets, "\n"), guidance)
+	msg := fmt.Sprintf("🏭 **Fabrik — malformed FABRIK_SPAWN_CHILD marker**\n\n%d block(s) could not be parsed:\n\n%s\n\nNo sub-issues were created — the whole declaration is held so dependency indexes stay consistent. Expected `TITLE: <title>` as the first non-empty line inside each block.\n\n%s%s",
+		len(errs), strings.Join(bullets, "\n"), workNote, guidance)
 	e.pauseIssue(item, msg, pauseOpts{labelEcho: true})
 	return fmt.Errorf("spawn: %d malformed FABRIK_SPAWN_CHILD block(s)", len(errs))
 }
@@ -594,7 +595,7 @@ func (e *Engine) preImplement(ctx context.Context, board *gh.ProjectBoard, item 
 
 	blocks, blockErrs := ParseSpawnBlocksDetailed(planComment.Body)
 	if len(blockErrs) > 0 {
-		return false, e.pauseForMalformedSpawn(item, blockErrs, spawnOriginPlan)
+		return false, e.pauseForMalformedSpawn(item, blockErrs, spawnOriginPlan, "")
 	}
 	if len(blocks) == 0 {
 		e.logUnparsedSpawnMarkers(item.Number, planComment.Body)
@@ -650,7 +651,7 @@ func (e *Engine) recoverMissingPlanComment(ctx context.Context, board *gh.Projec
 
 	blocks, blockErrs := ParseSpawnBlocksDetailed(planComment.Body)
 	if len(blockErrs) > 0 {
-		return false, e.pauseForMalformedSpawn(item, blockErrs, spawnOriginPlan)
+		return false, e.pauseForMalformedSpawn(item, blockErrs, spawnOriginPlan, "")
 	}
 	if len(blocks) == 0 {
 		e.logf(item.Number, "spawn", "pre-Implement: live re-read recovered Plan comment with no spawn blocks — nothing to spawn\n")
