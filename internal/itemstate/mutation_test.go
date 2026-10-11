@@ -1256,6 +1256,37 @@ func TestWorkerEnteredOverwrittenByLocalLockAcquired(t *testing.T) {
 	}
 }
 
+// WorkerRefreshed (#2179) re-stamps the Worker without claiming or touching Lock.
+func TestWorkerRefreshedSetsWorkerWithoutLock(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	now := time.Now()
+	s.Apply(WorkerEntered{Repo: testRepo, Number: 1, StageName: "Plan", StartedAt: now})
+	later := now.Add(time.Minute)
+	applyExpect(t, s, WorkerRefreshed{Repo: testRepo, Number: 1, StageName: "Plan", StartedAt: later}, WorkerChanged)
+	st := getItem(t, s, testRepo, 1)
+	if st.Worker == nil || !st.Worker.StartedAt.Equal(later) || !st.Worker.LastSignAt.Equal(later) {
+		t.Errorf("Worker = %+v, want StartedAt/LastSignAt == %v", st.Worker, later)
+	}
+	if st.Lock != nil {
+		t.Errorf("Lock = %+v, WorkerRefreshed must not claim a lock", st.Lock)
+	}
+}
+
+func TestWorkerRefreshedLeavesExistingLockUntouched(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	now := time.Now()
+	s.Apply(LocalLockAcquired{Repo: testRepo, Number: 1, User: "bot", AcquiredAt: now})
+	s.Apply(WorkerRefreshed{Repo: testRepo, Number: 1, StageName: "Plan", StartedAt: now})
+	st := getItem(t, s, testRepo, 1)
+	if st.Lock == nil || !st.Lock.HeldByThis || st.Lock.HolderUser != "bot" {
+		t.Errorf("Lock = %+v, want the pre-existing real lock unchanged", st.Lock)
+	}
+	s.Apply(WorkerExited{Repo: testRepo, Number: 1})
+	if st := getItem(t, s, testRepo, 1); st.Lock == nil {
+		t.Error("WorkerExited cleared a real lock")
+	}
+}
+
 func TestWorkerEnteredThenExited(t *testing.T) {
 	s := newStoreWithItem(t, testRepo, 1)
 	now := time.Now()

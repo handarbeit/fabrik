@@ -831,6 +831,22 @@ type WorkerEntered struct {
 func (WorkerEntered) isMutation()       {}
 func (m WorkerEntered) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
+// WorkerRefreshed replaces the Worker handle with a fresh one (StartedAt and
+// LastSignAt reset to StartedAt) without touching Lock. A reinvoke applies it
+// once it holds a semaphore slot and a ready repo, so the PID<=0 stale-worker
+// detector (#1303/#1779) measures from then rather than from dispatch. Unlike
+// LocalLockAcquired it claims no lock: Lock mirrors the fabrik:locked:<id> label,
+// which only stage dispatch applies (#2179, ADR 2179).
+type WorkerRefreshed struct {
+	Repo      string
+	Number    int
+	StageName string
+	StartedAt time.Time
+}
+
+func (WorkerRefreshed) isMutation()       {}
+func (m WorkerRefreshed) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
 // WorkerExited clears the Worker handle when a Claude invocation finishes.
 type WorkerExited struct {
 	Repo   string
