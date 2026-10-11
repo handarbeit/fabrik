@@ -169,7 +169,12 @@ created unlinked and the config is multi-repo.
 
 This requires a GitHub token (`--token`, `FABRIK_TOKEN`, or `GITHUB_TOKEN`) with `repo`
 and `project` scopes, same as the daemon itself. On success it writes the new project's
-number, owner, and owner type into `.fabrik/config.yaml` for you. `--title` sets the
+number, owner, and owner type into `.fabrik/config.yaml` for you. It also creates the
+display-only project fields — `Fabrik` (Text, the [status line](#project-board-status-line)),
+`Last activity` (Date) and `Last run` (Text) — under the names `project_fields.*` resolves
+to, skipping any set to `off`. If creating a field fails, the board is kept and recorded in
+the config, the failed field is named, and the command exits non-zero: run `fabrik
+repair-board --apply` to finish. `--title` sets the
 board's title (default: `"<repo> Fabrik Pipeline"`, or `"<owner> Fabrik Pipeline"` without `--repo`).
 
 If `.fabrik/config.yaml` already has an `owner`/`project` configured — this repo has
@@ -203,9 +208,19 @@ repair-board` adds the missing columns without disturbing anything already on th
 board:
 
 ```bash
-./fabrik repair-board          # dry run: prints which columns are missing, changes nothing
-./fabrik repair-board --apply   # adds the missing columns
+./fabrik repair-board          # dry run: prints which columns and display fields are missing, changes nothing
+./fabrik repair-board --apply   # adds the missing columns and display fields
 ```
+
+`repair-board` also checks the three display-only fields (`Fabrik`, `Last activity`,
+`Last run`, or the names set in `project_fields.*`; a field set to `off` is skipped), so a
+board that predates them gains them without a trip to Project settings. Field handling is
+create-only: a field that already exists with the right type is reported as present, and
+one that exists with the **wrong** type (say, a single-select named `Fabrik`) is reported
+as a type mismatch and left untouched — Fabrik never deletes, renames, retypes or
+recreates a field. A failure creating one field does not stop the others or the Status
+repair; the command exits non-zero and names the field that failed. A second `--apply`
+is a no-op that reports everything present.
 
 Repair never removes a column and never reorders existing ones. Most importantly, it
 never regenerates an existing column's underlying id — doing so would silently clear
@@ -839,7 +854,18 @@ Custom stages (names not present in any embedded default) are silently skipped �
 
 ### Instance Lock
 
-> **Note:** When Fabrik starts, it creates a PID lock file at `.fabrik/fabrik.lock`. If a second instance attempts to start in the same directory, it reads the lock file, logs an error identifying the running process, and exits immediately. The lock is automatically released when the process exits — including on crash or SIGKILL — so there is no need to manually delete the file after an unclean shutdown.
+> **Note:** Fabrik holds two exclusive file locks for as long as it runs:
+>
+> - **Directory lock** — `.fabrik/fabrik.lock` in the directory Fabrik was started from. It holds the PID and stops a second instance in the *same directory*.
+> - **Board lock** — one file per project board in a per-user directory outside any repository (`os.UserCacheDir()/fabrik/locks/`, i.e. `~/Library/Caches/fabrik/locks/` on macOS and `$XDG_CACHE_HOME` or `~/.cache/fabrik/locks/` on Linux; override with `FABRIK_LOCK_DIR`). The board is identified by GitHub host + project owner + project number, so a second Fabrik for the *same board on the same host* is refused **from any directory** — another clone, a sibling directory, a different worktree. The file records the holder's PID and directory, and the refusal names them: `another Fabrik instance (pid 4242, dir /home/me/work/proj) already holds the lock for board github.com/acme/7 (lock file: …)`. Boards with different numbers, owners or hosts never contend. If the lock directory cannot be determined or created, Fabrik fails at startup rather than running without the board lock.
+>
+> Both locks are released by the operating system when the process ends — including on crash or SIGKILL — so a leftover lock file is harmless and there is no need to delete it after an unclean shutdown. Fabrik never unlinks them. If you suspect a stale lock, check the recorded PID first (`ps -p <pid>`) and confirm no other Fabrik serves the board before touching the file; deleting the file of a *live* instance is exactly what lets a second one start unprotected.
+>
+> **Worktree refusal.** Every issue worktree (`.fabrik/worktrees/<owner>-<repo>/issue-N/`) contains a full copy of the board configuration, so Fabrik refuses to start when its working directory is inside any `.fabrik/worktrees/` directory. Start it from the project directory.
+>
+> **Per-poll verification.** Every poll cycle, Fabrik checks that both lock files on disk are still the files it holds locked (same device and inode) and that the recorded PID is its own. If either has been deleted or replaced by something outside Fabrik, it stops dispatching work, prints `lost the instance lock; another Fabrik may own this board`, and exits non-zero. It does not remove `fabrik:locked:<user>` labels on that exit, since another instance may legitimately hold them. The check is silent when it passes. A momentary I/O error while checking (for example `EIO` or `ESTALE` on a network home or a flaky mount) is not treated as a lost lock: Fabrik logs a warning and keeps going, and only exits after 3 consecutive failed checks of the same lock.
+>
+> The locks are held across a SIGHUP restart and a self-upgrade re-exec: released just before the process image is replaced and re-acquired by the new one. An instance started during that gap keeps the lock, and the re-exec'd one exits. Older Fabrik versions do not know the board lock, and two *hosts* serving one board are not detected.
 >
 > See [§11 Troubleshooting → Multiple Fabrik Instances](#11-troubleshooting) if you encounter a stale lock or need to run multiple instances against different projects.
 >
@@ -1176,8 +1202,8 @@ user: your-github-username
 
 # Display-only "status line" project field (#2048). Fabrik writes one short line
 # saying what each item is doing or waiting on right now into a TEXT field on
-# your project board. The field must already exist on the board — Fabrik never
-# creates it. Default name "Fabrik"; "off" disables the feature. YAML only (no
+# your project board. `fabrik init --create-board` and `fabrik repair-board
+# --apply` create the field; the engine never creates it at runtime. Default name "Fabrik"; "off" disables the feature. YAML only (no
 # flag or environment variable). See "Project Board Status Line" in section 3.
 # project_fields:
 #   status_line: Fabrik
@@ -1837,7 +1863,7 @@ Two observable differences from the batch-landing path: nothing on `--max-batch-
 
 On the board, a card in `Queued` looks the same whether the train is waiting its turn, resolving a conflict, waiting on trial CI, bisecting or landing — and a paused, blocked or CI-waiting card looks like any other. To tell working from stuck you would otherwise read the daemon log or the TUI. Fabrik can instead write one short line, saying what the item is doing or waiting on **right now**, into a text field on the board.
 
-**Set it up.** Add a **Text** field to your GitHub Project (Project settings → New field → Text) named `Fabrik`, or any name you set with `project_fields.status_line` in `.fabrik/config.yaml`. That is all: Fabrik never creates the field itself. If the field is absent (or is not a Text field), Fabrik logs one `[startup] status-line field unavailable …` line and writes nothing, so the board behaves exactly as before. `project_fields.status_line: off` disables the feature and logs the same single line. Filter the board on the field (for example `Fabrik:landing`) to see what is in the train now. A field you add later, or rename, is picked up on the next restart. If the lookup itself fails (an API outage, a token without project read access), Fabrik warns once, writes nothing, and retries the lookup at most every five minutes instead of on every transition.
+**Set it up.** Add a **Text** field to your GitHub Project (Project settings → New field → Text) named `Fabrik`, or any name you set with `project_fields.status_line` in `.fabrik/config.yaml`. `fabrik init --create-board` and `fabrik repair-board --apply` create it for you (the engine itself never creates it at runtime). If the field is absent (or is not a Text field), Fabrik logs one `[startup] status-line field unavailable …` line and writes nothing, so the board behaves exactly as before. `project_fields.status_line: off` disables the feature and logs the same single line. Filter the board on the field (for example `Fabrik:landing`) to see what is in the train now. A field you add later, or rename, is picked up on the next restart. If the lookup itself fails (an API outage, a token without project read access), Fabrik warns once, writes nothing, and retries the lookup at most every five minutes instead of on every transition.
 
 ```yaml
 # .fabrik/config.yaml
@@ -1891,7 +1917,7 @@ From the board you cannot otherwise sort or group items by how recently Fabrik w
 
 `Last run` reads like `Validate · completed · 42/250 turns · 18m`, `Implement · turn-limited · 250/250 turns` or `Review · blocked on input`. The outcome is one of `completed`, `turn-limited`, `blocked on input`, `failed` (the process faulted without completing) or `incomplete` (a clean exit without the completion marker, for example a run that had tool calls denied). A comment-review pass reads `Validate · comment review · completed`. Turns are shown for `completed` and `turn-limited` runs (`42 turns` when the stage has no turn budget), the duration only for `completed`. Lines are capped at 60 characters, ending in `…`.
 
-**Set it up.** Add a **Date** field named `Last activity` and/or a **Text** field named `Last run` (or any names you set with `project_fields.last_activity` / `project_fields.last_run`). Fabrik never creates the fields. Both are on by default; a missing field, or one of the wrong type, makes Fabrik log one `[startup] last-activity field unavailable …` (or `last-run`) line and write nothing for it — the other field and the status line are unaffected. `off` (any case) disables a field. The keys are YAML-only; a field you add later, or rename, is picked up on the next restart.
+**Set it up.** Add a **Date** field named `Last activity` and/or a **Text** field named `Last run` (or any names you set with `project_fields.last_activity` / `project_fields.last_run`). `fabrik init --create-board` and `fabrik repair-board --apply` create them for you; the engine itself never creates them at runtime. Both are on by default; a missing field, or one of the wrong type, makes Fabrik log one `[startup] last-activity field unavailable …` (or `last-run`) line and write nothing for it — the other field and the status line are unaffected. `off` (any case) disables a field. The keys are YAML-only; a field you add later, or rename, is picked up on the next restart.
 
 ```yaml
 # .fabrik/config.yaml
@@ -3652,7 +3678,7 @@ Every action first resolves the issue to exactly one item the daemon manages (`o
 
 | Tool | Does | Refuses when |
 |---|---|---|
-| `fabrik_promote(issue, to)` | Moves the item from an unmanaged parking column (Backlog) into the pipeline column `to`. The daemon writes the board Status with the project, field and option IDs it already holds — no per-call ID lookup — after one live read of the item's current column, so a stale cache can never move an item backwards. If the item carries `fabrik:cruise` or `fabrik:yolo` the result says it will auto-advance from `to`. | the item is already in a pipeline column, its column is unknown or has no configured stage, `to` is unknown or names a holding (`Queued`), unmanaged or cleanup (`Done`) column (those moves are the engine's), the board metadata is not loaded yet, or the live read fails. The refusal lists the current column and the valid targets. |
+| `fabrik_promote(issue, to)` | Moves the item from an unmanaged parking column into the pipeline column `to`. A parking column is a stage declared `unmanaged: true`, or the column named exactly `Backlog` when no `Backlog` stage is configured (installs that ran `fabrik init` before `backlog.yaml` existed keep working unchanged); a configured `Backlog` stage that is not unmanaged is a pipeline column. The daemon writes the board Status with the project, field and option IDs it already holds — no per-call ID lookup — after one live read of the item's current column, so a stale cache can never move an item backwards. If the item carries `fabrik:cruise` or `fabrik:yolo` the result says it will auto-advance from `to`. | the item is already in a pipeline column, its column is unknown or is neither an unmanaged stage nor the legacy `Backlog`, `to` is unknown or names a holding (`Queued`), unmanaged or cleanup (`Done`) column (those moves are the engine's), the board metadata is not loaded yet, or the live read fails. The refusal carries the current column; it lists the valid targets only when the item is in a parking column (a refusal because the item is not parked offers none, since no move is possible). |
 | `fabrik_set_autonomy(issue, autonomy)` | Makes the item's autonomy exactly `cruise`, `yolo` or `none`: setting one removes the other label (otherwise cruise would silently win). Decided from a live label read (a failed read refuses). Already in the requested state: reported, nothing written, no comment. | the issue is not managed or is closed. **`yolo` auto-merges the PR when Validate completes** and the result says so; `cruise` never merges. Labels are added before the other is removed, so a partial failure leaves the more conservative mode, and a partial failure is still audited (the comment says the autonomy change was only partially applied). |
 | `fabrik_revalidate(issue)` | Applies `fabrik:revalidate`: the engine clears the Validate completion and CI labels and re-dispatches Validate on a following poll (deferred until an in-flight Validate worker exits; the result says so). | the item is not in the `Validate` column (live-confirmed), already carries `fabrik:revalidate`, or is **paused or awaiting input** (labels are re-read live, so a pause the daemon has not seen yet still refuses). |
 | `fabrik_clear_claude_limit()` | Applies `fabrik:clear-claude-limit` to one managed open issue, and the engine clears the **account-wide** suspension on its next poll. The daemon picks the issue — one already carrying `fabrik:claude-limit` first, else the lowest-numbered — and names it in the result and in the audit comment. | no suspension is active, or there is no managed open issue to carry the label. A clear request already pending is reported, not repeated. |
@@ -4537,14 +4563,11 @@ Running two Fabrik processes against the same project board causes duplicate
 dispatches, wasted API credits, and conflicting comments. Each instance has its
 own in-memory deduplication, so they can't detect each other.
 
-Starting with v0.0.30, Fabrik acquires an exclusive file lock on
-`.fabrik/fabrik.lock` at startup. If another instance is already running for
-the same project, it exits with a clear error. The lock is automatically
-released if the process crashes.
+Fabrik acquires an exclusive file lock on `.fabrik/fabrik.lock` at startup, and a second, board-scoped lock in a per-user directory (see [Instance Lock](#instance-lock)). If another instance is already running in the same directory, or for the same board on the same host from any directory, it exits with a clear error naming the holder's PID and directory. The locks are automatically released if the process crashes.
 
-To check for stale instances: `pgrep -la fabrik`
+To check for stale instances: `pgrep -la fabrik`. A leftover lock file naming a dead PID needs no cleanup; before ever deleting one, confirm with `ps -p <pid>` that the PID is dead and that no other Fabrik is serving the board.
 
-Instances in *different* directories (or on different hosts) against the same board are a separate case the file lock cannot see. In PAT mode they must run as different GitHub users, since the `fabrik:locked:<user>` label is what tells them apart; under [GitHub App authentication](#github-app-authentication) each derives its own lock label from the App slug plus a hash of hostname and directory, so they stay distinguishable without separate users.
+Instances on *different hosts* against the same board are a case neither lock can see, and neither can an older Fabrik without the board lock. In PAT mode such instances must run as different GitHub users, since the `fabrik:locked:<user>` label is what tells them apart; under [GitHub App authentication](#github-app-authentication) each derives its own lock label from the App slug plus a hash of hostname and directory, so they stay distinguishable without separate users.
 
 ### `unknown command "webhook" for "gh"` in Webhook Mode
 
@@ -4620,7 +4643,7 @@ pkill -HUP fabrik
 1. Fabrik logs `[signal] received SIGHUP — restarting in place to clear in-memory state` to `fabrik.log`.
 2. In-flight Claude workers are cancelled (same drain as Ctrl-C).
 3. `fabrik:locked:<user>` labels are removed from any issues that were mid-run.
-4. The lockfile (`.fabrik/fabrik.lock`) is released.
+4. The directory lock (`.fabrik/fabrik.lock`) and the board lock are released.
 5. `syscall.Exec` replaces the process image in place — the PID stays the same, the parent shell and TUI remain attached, and a brief TUI redraw may occur.
 6. The new process starts with a clean in-memory cache, Store, observers, and `mayNeedWork` set.
 

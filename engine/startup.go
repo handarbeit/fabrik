@@ -16,6 +16,7 @@ import (
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/workerenv"
+	"github.com/handarbeit/fabrik/stages"
 	"github.com/handarbeit/fabrik/tui"
 	"github.com/handarbeit/fabrik/warnings"
 )
@@ -133,18 +134,21 @@ func (e *Engine) checkStageColumnAlignment(ctx context.Context) error {
 	// (e.g. Done), holding stages (e.g. Queued), and unmanaged stages (e.g.
 	// Backlog, via stages/examples/backlog.yaml) — because those columns are
 	// legitimately backed by a stage even though they don't require one. The
-	// hardcoded "Backlog" fallback below remains as a compat net for installs
-	// that predate backlog.yaml and have no local copy of it: without a
-	// configured Backlog stage, the loop above never adds "Backlog" to
-	// `recognized`, so the hardcode is what keeps those installs silent. Once a
-	// stage named Backlog is configured (unmanaged or not), the hardcode is a
-	// harmless no-op (the map entry is already true). A genuine typo'd column
-	// matches neither and is still surfaced.
+	// legacy "Backlog" compat net (stages.IsParkingColumn, the single
+	// parking-column predicate also used by promote and the spawn fallback)
+	// remains for installs that predate backlog.yaml and have no local copy of
+	// it: without a configured Backlog stage, the loop above never adds
+	// "Backlog" to `recognized`, so the predicate is what keeps those installs
+	// silent. Once a stage named Backlog is configured (unmanaged or not), the
+	// map entry is already true. A genuine typo'd column matches neither and is
+	// still surfaced.
 	recognized := make(map[string]bool, len(e.cfg.Stages)+1)
 	for _, s := range e.cfg.Stages {
 		recognized[s.Name] = true
 	}
-	recognized["Backlog"] = true
+	if stages.IsParkingColumn(e.cfg.Stages, "Backlog") {
+		recognized["Backlog"] = true
+	}
 	var extra []string
 	for colName := range sf.Options {
 		if !recognized[colName] {

@@ -42,3 +42,18 @@ func (e *Engine) stageRetryBackoff() time.Duration {
 func (e *Engine) githubRecheckInterval() time.Duration {
 	return time.Duration(e.cfg.PollSeconds*10) * time.Second
 }
+
+// mergeGateRecheckInterval is the cooldown a merge-gate claim records
+// ("merge-unsettled", #2096): half a poll interval, floored at one second. The
+// entry is stamped mid-poll, so a full PollSeconds would land after the next
+// poll tick and cost the item one extra poll; half an interval is reliably
+// expired by then while still sitting out any early wake-ups. Deliberately not
+// githubRecheckInterval: that is the API-cost knob (ADR-1831), and a claim on
+// transient merge state must be re-checked on the very next poll.
+func (e *Engine) mergeGateRecheckInterval() time.Duration {
+	d := time.Duration(e.cfg.PollSeconds) * time.Second / 2
+	if d < time.Second {
+		d = time.Second
+	}
+	return d
+}

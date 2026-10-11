@@ -481,6 +481,10 @@ func (e *Engine) handleAutoMergeConvergence(pctx *phase1Ctx) bool {
 	return true
 }
 
+// mergeUnsettledCooldownReason is the CooldownAt key recorded when the merge
+// gate claims an item on transient merge state (#2096).
+const mergeUnsettledCooldownReason = "merge-unsettled"
+
 // handleMergeAndCIGates runs the merge-conflict gate followed by the CI gate,
 // sharing a single settlePRMergeState call. Merge runs before CI per ADR-028:
 // a PR made unmergeable by a base-branch advance must be rebased before the
@@ -541,6 +545,18 @@ func (e *Engine) handleMergeAndCIGates(pctx *phase1Ctx) bool {
 		// every poll with zero trace in the logs. checkCIGate is never
 		// reached while this is true.
 		e.logf(pctx.item.Number, "ci-gate", "claiming item — merge gate blocked, checkCIGate not reached (%s)\n", settle.Reason)
+		// #2096: reached only for PRMergeUnsettled/PRMergeQueued (a conflict is the
+		// mergeConflict branch above). The claim sets no awaiting-ci label, and CI
+		// completion moves neither a label nor the issue's updatedAt, so without a
+		// short cooldown the only thing that re-admits the item is the periodic
+		// re-evaluation, 10 × PollSeconds away (#1943). Expiry admits the item once
+		// on the next poll and is then consumed (ExpiredCooldownsConsumed).
+		e.store.Apply(itemstate.CooldownRecorded{
+			Repo:   itemOwnerRepoString(pctx.item, e.defaultRepo()),
+			Number: pctx.item.Number,
+			Reason: mergeUnsettledCooldownReason,
+			Until:  e.now().Add(e.mergeGateRecheckInterval()),
+		})
 		return true // mergeability not yet computed; re-evaluate on next poll
 	}
 

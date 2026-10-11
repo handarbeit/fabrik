@@ -123,7 +123,7 @@ Otherwise, the Project board needs a status column for each stage. `fabrik init`
 
 `Queued` is easy to miss by eye since it's a holding column, not a pipeline stage — it's only used when the merge-train feature (`merge_train: on`) is enabled, but `fabrik init` extracts its stage YAML unconditionally, so a board built without it produces a startup warning immediately, and outright fails startup if `merge_train` is later turned on without the column existing. See the User Guide's merge-train section for what it's for.
 
-Column names must match `name:` in the stage YAML files **exactly** (case-sensitive). On startup, Fabrik validates this and refuses to start if any non-cleanup stage is missing from the board — so it's worth getting right before the first run. If the board already exists and is missing columns (e.g. it predates `Queued`), run `fabrik repair-board --apply` to add them without disturbing any item's current status, instead of editing the board by hand.
+Column names must match `name:` in the stage YAML files **exactly** (case-sensitive). On startup, Fabrik validates this and refuses to start if any non-cleanup stage is missing from the board — so it's worth getting right before the first run. If the board already exists and is missing columns (e.g. it predates `Queued`), run `fabrik repair-board --apply` to add them without disturbing any item's current status, instead of editing the board by hand. `repair-board --apply` also creates the display-only project fields (`Fabrik`, `Last activity`, `Last run`) when they are missing.
 
 If the user wants a custom pipeline they should edit `.fabrik/stages/*.yaml` and rename columns to match. This is a deeper customization — point them at the User Guide before going down that road.
 
