@@ -1540,9 +1540,11 @@ When the linked PR's repository has GitHub's **merge queue** enabled, Fabrik's p
 | Site | Mutation | Guard | FR |
 |------|----------|-------|----|
 | `engine/worktree.go` `updateWorktreeFromMain` (via `EnsureWorktree` `skipUpdate`) | per-stage `git rebase origin/<base>` | `item.go` / `comments.go` OR `prInMergeQueue \|\| suppressPreemptiveRebase` into `skipUpdate` | FR-1, FR-2 |
-| `engine/pr.go` `ensureDraftPR`; `markPRReady` | `git push --force-with-lease` | `pushBranchUnlessQueued` | FR-1 |
-| `engine/prcreate.go` `processPRCreateMarker` | `git push --force-with-lease` | `pushBranchUnlessQueued` | FR-1 |
-| `engine/item.go` post-stage WIP push | `git push --force-with-lease` | `pushBranchUnlessQueued` | FR-1 |
+| `engine/pr.go` `ensureDraftPR` | `git push --force-with-lease` | `pushBranchForNewPR` (in-queue skip only; no zero-ahead guard — no PR exists yet) | FR-1 |
+| `engine/pr.go` `markPRReady` | `git push --force-with-lease` | `pushBranchUnlessQueued` (in-queue skip, then the zero-ahead guard, #2089) | FR-1 |
+| `engine/prcreate.go` `processPRCreateMarker` | `git push --force-with-lease` | `pushBranchForNewPR` (in-queue skip only; runs after the existing-open-PR early return) | FR-1 |
+| `engine/item.go` post-stage push; `engine/comments.go` spec push (#2034) | `git push --force-with-lease` | `pushBranchUnlessQueued` (in-queue skip, then the zero-ahead guard, #2089) | FR-1 |
+| `engine/item.go` cancellation WIP push (R8, #1393) | `git push --force-with-lease` | `pushBranchOnCancel` (in-queue skip, then the zero-ahead refusal **without** the pause, #2089) | FR-1 |
 | `engine/pr.go` `syncPRBase` | `UpdatePRBase` (PR base change) | early-return `if prInMergeQueue(item)` | FR-1 |
 | `engine/catch_up_handlers.go` `handleMergeAndCIGates` | `dispatchRebaseReinvoke` (synthetic rebase + force-push) | for an in-queue PR `settlePRMergeState` returns `PRMergeQueued`, so `checkMergeabilityGate` clears `mergeConflict` and the rebase dispatch is never reached; the inline `prInMergeQueue \|\| settle.PR.IsInMergeQueue` guard at the dispatch site remains as a defensive backstop | FR-1 |
 | `engine/merge_gate.go` `checkAutoMergeConvergence` | `dispatchRebaseReinvoke` (synthetic rebase + force-push) | **D4 (landed):** the in-queue PR is intercepted by the `PRMergeQueued` hand-off (step ②) before the conflict branch — a `PRMergeConflicting` settle is therefore guaranteed not-in-queue, so the former inline conflict-branch guard is removed (dead). After the PR leaves the queue, the conflict branch dispatches the rebase (the ejection→resolve composition); see §5.5 | FR-1 |
@@ -1557,6 +1559,35 @@ When the linked PR's repository has GitHub's **merge queue** enabled, Fabrik's p
 **WIP-preservation trade-off.** Skipping the post-stage push (`item.go`) when the PR is in the queue means in-flight WIP is not pushed for that cycle. This is acceptable: queue entry happens at Validate completion, so a stage rarely runs while the PR is queued.
 
 **Backward-compat (FR-3).** Both signal fields are false-by-default, so on a non-queue repo (`LinkedPRIsMergeQueueEnabled == false`, `LinkedPRIsInMergeQueue == false`) every guard is a no-op and all rebase/mutation behavior is byte-for-byte unchanged (the ADR-058 D1 guarantee).
+
+### Zero-ahead push guard (#2089, ADR 2089)
+
+An existing worktree's local `fabrik/issue-N` branch is never synced from `origin/fabrik/issue-N`: `updateWorktreeFromMain` fetches and rebases onto the base branch only. If someone pushes to the issue branch out of band, the next engine push uses a bare `--force-with-lease`, which compares against the shared bare clone's `refs/remotes/origin/fabrik/issue-N` — a ref many other paths refresh — so the lease no longer protects the remote. When the stale local branch carries no commits of its own, its head is the base tip, and the push makes the remote issue branch identical to base; GitHub then closes the PR as having no diff (report #2058).
+
+`pushBranchUnlessQueued` (`engine/merge_queue.go`) therefore applies a second guard after the in-queue skip, `zeroAheadPushRefused` (`engine/push_guard.go`). It is a safety net, not a resync: it never fetches the issue branch, fast-forwards or resets the local branch, or sets an explicit lease SHA.
+
+**Trigger.** The push is refused only when all of these hold, checked cheapest first:
+1. the base branch resolves (`baseBranchForItem`, so a `base:<branch>` label is honoured);
+2. the worktree's HEAD is **literally** zero commits ahead of `origin/<base>` (`WorktreeManager.CommitsAheadOfRef`, `git rev-list --count`, under `wm.mu`). This is not `commitsAheadOfBase`: spec-only commits (#921) count as ahead here, because a refusal must be conservative; and
+3. a live `FetchLinkedPR` read (only when the count is zero) reports an open, unmerged PR.
+
+**Fail-open.** An unresolvable base, a git error, or a PR read error all let the push proceed (logged as `[#N push-guard] warn: …`), as do no PR and a closed or merged PR. A branch that is only *behind* base but carries its own commits is not zero-ahead and pushes.
+
+**Refusal.** The guard logs `[#N push-guard] REFUSING to push …`, leaves the remote ref untouched, pauses the item with `fabrik:paused` + `fabrik:awaiting-input` through `pauseIssue`, and posts one `🏭 **Fabrik — push refused: local branch has no commits**` comment saying the local branch carries no commits ahead of `origin/<base>`, that the remote was left untouched, and naming the PR. It does not assert a cause (a rebase that dropped already-absorbed commits also yields zero ahead). Comment dedup follows #1408: if the item already carries that comment (`hasPauseComment`) the labels are re-applied (`reapplyPauseLabels`) without a second comment. `pushBranchUnlessQueued` returns `ErrPushRefusedZeroAhead`. A human comment after the pause resumes the item (ADR-1813); if the branch is unchanged the guard fires again.
+
+**Callers.**
+
+| Caller | Treatment |
+|---|---|
+| `item.go` post-stage push (every stage that ran Claude) | Guarded. On refusal `processItem` releases the lock and returns before the completion/blocked/retry chain, so `handleStageComplete` cannot strip `fabrik:awaiting-input` or advance/auto-merge a paused item; the stage stays incomplete. |
+| `item.go` cancellation WIP push | Guarded through `pushBranchOnCancel`: the push is refused (remote untouched) and logged, but the item is **not** paused or commented from here — the daemon-stop / TUI-stop interruption that cancelled the worker already pauses it under `pauseIssueMu`, and a second pause would race it. The lock is released as before. |
+| `comments.go` `publishCommentOutput` spec push (#2034) | Guarded; a refusal is logged. |
+| `pr.go` `markPRReady` | Guarded; on refusal it returns before `MarkPRReady` (a stale PR is not flipped to ready-for-review) and returns `true` so its callers can act on it. All three callers (`item.go` post-stage completion, `item.go` R5 PR-creation retry, `comments.go` comment-path completion) skip `handleStageComplete` on `true`, so the paused item is neither advanced nor auto-merged; the comment path also restores the rework marker state via `endStageRework(…, false)`. `TestPushGuard_MarkPRReadyCallersActOnRefusal` pins that every call site uses the result. |
+| `pr.go` `ensureDraftPR`, `prcreate.go` `processPRCreateMarker` | **Exempt** (`pushBranchForNewPR`, in-queue skip only). They push because no open PR exists yet, so a zero-ahead push (for example a coordinator parent) is legitimate and there is no PR for the overwrite to close. |
+
+**Known gap.** The guard catches only the zero-ahead shape. A stale local branch that carries commits of its own can still overwrite out-of-band work. Syncing the issue branch from origin before work and pushing with an explicit lease on the synced SHA (the logic `PrepareCatchUp` already has for the train path) is the follow-up, and is expected to subsume this guard.
+
+**Test seam.** `SetPushZeroAheadGuardDisabledForTest` neutralises the guard so the refusal tests can show they bite (`engine/push_guard_test.go`, `tests/sim/push_guard_test.go`).
 
 ---
 
@@ -2935,7 +2966,7 @@ Unlike the other two paths, this one is **guarded**, rather than posted uncondit
 
 **Key difference from §6.13's `fabrik:awaiting-close`:** structurally the same single-at-risk-call shape, but this marker is **not terminal-only**. `mark_pr_ready_on_complete: true` can be configured on a non-terminal stage (e.g. Implement, with Review and Validate still ahead), so the marker can be written while the item is still mid-pipeline — and it is deliberately left free to keep advancing through subsequent stages while the marker is outstanding, since nothing about a later stage's dispatch depends on the PR being ready.
 
-**Durable marker (`fabrik:awaiting-pr-ready`), written only on failure, inline inside `markPRReady`.** `markPRReadyOutstanding` adds the label (idempotently — a no-op if already present) in exactly the two places `markPRReady` previously just logged and returned: the non-transient-error branch, and the retry-exhausted fallthrough at the end of its loop. No signature change and no call-site changes were needed at any of `markPRReady`'s three callers (`engine/item.go` ×2, `engine/comments.go`) — every value the marker write needs (`item`, `owner`, `repo`, the resolved `prNumber`) was already in scope at both failure points. `markPRReady`'s success path also calls `clearPRReadyMarker` when the marker happens to already be present, so an issue previously escalated and un-paused self-heals the moment its own next `markPRReady` call succeeds directly, without waiting for the settle scan below to notice.
+**Durable marker (`fabrik:awaiting-pr-ready`), written only on failure, inline inside `markPRReady`.** `markPRReadyOutstanding` adds the label (idempotently — a no-op if already present) in exactly the two places `markPRReady` previously just logged and returned: the non-transient-error branch, and the retry-exhausted fallthrough at the end of its loop. No call-site changes were needed at any of `markPRReady`'s three callers for this marker (the later `bool` return, #2089, is unrelated to it — see §"Zero-ahead push guard") (`engine/item.go` ×2, `engine/comments.go`) — every value the marker write needs (`item`, `owner`, `repo`, the resolved `prNumber`) was already in scope at both failure points. `markPRReady`'s success path also calls `clearPRReadyMarker` when the marker happens to already be present, so an issue previously escalated and un-paused self-heals the moment its own next `markPRReady` call succeeds directly, without waiting for the settle scan below to notice.
 
 **No dispatch-suppression wiring — deliberately, and unlike most of this family.** This marker is **not** checked by `itemMayNeedWork`/`itemNeedsWork`, and is **not** added to `transientLifecycleLabels`. Unlike `fabrik:awaiting-close` (§6.13) or `fabrik:awaiting-member-close` (§6.10), which only ever exist after the item has already reached Done, this marker can be present on an item still actively progressing through later stages — gating stage completion on `MarkPRReady` succeeding was explicitly out of scope for #1582 (a bigger change to the conjunctive-gate model than the bug called for).
 

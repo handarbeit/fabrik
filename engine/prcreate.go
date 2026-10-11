@@ -154,7 +154,7 @@ func (e *Engine) processPRCreateMarker(ctx context.Context, item gh.ProjectItem,
 
 	// Push the branch before creating the PR (non-fatal: mirrors ensureDraftPR behavior).
 	// Merge-queue awareness (ADR-058 D3 FR-1): skip the push when queued (ejects it).
-	if err := e.pushBranchUnlessQueued(item, wm); err != nil {
+	if err := e.pushBranchForNewPR(item, wm); err != nil {
 		e.logf(item.Number, "warn", "could not push branch: pushing branch fabrik/issue-%d: %v\n", item.Number, err)
 	}
 

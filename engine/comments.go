@@ -1035,8 +1035,13 @@ func (e *Engine) finalizeComments(ctx context.Context, board *gh.ProjectBoard, i
 			prNumber, _ = e.ensureDraftPR(item, baseBranch)
 			e.updatePRVerification(item, prNumber, summary)
 		}
-		if stage.MarkPRReadyOnComplete {
-			e.markPRReady(item, prNumber)
+		if stage.MarkPRReadyOnComplete && e.markPRReady(item, prNumber) {
+			// Zero-ahead push guard (#2089) paused the item: do not run
+			// completion handling (it would advance or auto-merge a paused
+			// item). Restore the pre-rework state exactly as the
+			// non-completing branch does.
+			e.endStageRework(item, stage, wasReworking, false)
+			return
 		}
 		e.handleStageComplete(ctx, board, item, stage)
 		// Only now — after handleStageComplete has durably written
