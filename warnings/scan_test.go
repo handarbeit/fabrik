@@ -86,7 +86,7 @@ var logOnlyExceptions = []logOnly{
 	{"engine/startup.go", `board drift detected`, "per-item state (FR-001), not operator-level"},
 	{"engine/startup.go", `has no matching board column`, "holding stage with merge_train off: nothing is queued there, so no work is blocked or degraded"},
 	{"engine/status_line.go", `could not look up the`, "optional display field (`off` is valid); retried every poll and the daemon works without it"},
-	{"engine/webhook.go", `hook-coverage check failed for`, "folded into the webhook_coverage entry (treated as missing)"},
+	{"engine/webhook.go", `hook-coverage check failed for`, "transient lookup error: logged only and deliberately kept out of webhook_coverage (an unknown repo is not a missing one; a prior entry is left untouched)"},
 	{"engine/webhook.go", `orphan webhook cleanup failed`, "transient cleanup; proceeding is safe"},
 	{"engine/webhook.go", `projects_v2_item may have caused subprocess crash`, "runtime webhook-subprocess health is surfaced by the webhook ingestion status in the header"},
 	{"engine/webhook.go", `webhook subscription permanently failed`, "runtime webhook-subprocess health is surfaced by the webhook ingestion status in the header"},

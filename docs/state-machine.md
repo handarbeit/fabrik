@@ -4341,6 +4341,7 @@ under 10 minutes old (SC-003); `Clear` of an absent key does not write; the temp
 | display-field (`Fabrik`, `Last activity`, `Last run`) lookup/write failed | Log only: optional field (`off` is valid), per-item writes | – |
 | webhook runtime failures (subprocess crash, 422s, unsupported event, orphan cleanup) | Log only: runtime health is the header's webhook ingestion status | – |
 | hookdeck coverage read failed | Log only: transient; the prior entry is deliberately left | – |
+| webhook hook lookup errored for a repo (`hook-coverage check failed`) | Log only: transient; the repo is unknown, not missing, so it stays out of `webhook_coverage:repos` and, when nothing else is confirmed missing, the prior entry is deliberately left | – |
 | the check for unrecognised keys itself failed | Log only: nothing is known, so reconciling would wrongly clear entries | – |
 | re-exec path plugin messages | Log only: `Execute` re-evaluates and reports `plugin_state` right after | – |
 | the panel store itself failing (record/clear/sweep errors) | Log only | – |
