@@ -419,8 +419,8 @@ or a completed run with `JobCount` 0) sits here while `checkRuns` stays empty.
   `DetailsURL` from a workflow run, so a scenario that expects the engine to
   find the run to re-run must seed `DetailsURL` of the form
   `…/actions/runs/<id>/job/<n>` on the failing check run itself.
-- **Permissions are not modelled.** The optional `actions` permission is
-  emulated by faulting `FetchWorkflowRuns` / `RerunFailedJobs` with an error
+- **Permissions are not modelled.** A runtime revocation of the `actions` permission
+  (required at startup since #2105) is emulated by faulting `FetchWorkflowRuns` / `RerunFailedJobs` with an error
   wrapping `gh.ErrForbidden`.
 - **Live coverage gap.** A `startup_failure` cannot be induced on demand against
   the e2e bed, so there is no live twin; the sim and unit tests carry the proof

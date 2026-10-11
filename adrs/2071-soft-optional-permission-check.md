@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted. The optional-permission mechanism this ADR describes was deleted by [ADR 2105](2105-actions-write-required-app-permission.md), which made `actions: write` required; the "separate and soft" argument below still applies if an optional permission is ever reintroduced.
 
 ## Context
 

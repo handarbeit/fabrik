@@ -15,10 +15,11 @@ const backoffMarker = "activating rate-limit backoff"
 //
 // It scans the WHOLE current file, not from a captured byte offset: each leg's
 // bed restart launches a brand-new engine process, and engine/poll.go's Run()
-// opens fabrik.log with O_TRUNC on every startup, so by the time the restart
-// completes the file holds only this leg's own content. (An earlier bash
-// version tracked a pre-restart offset that almost always exceeded the
-// truncated file's size and silently detected nothing — #1547.)
+// rotates the previous run's log to fabrik.log.1 on every startup and opens a
+// fresh fabrik.log (#2094), so by the time the restart completes the file holds
+// only this leg's own content; the rotated .N backups are never read. (An
+// earlier bash version tracked a pre-restart offset that almost always exceeded
+// the new file's size and silently detected nothing — #1547.)
 //
 // It matches the literal one-shot activation line — NOT the companion per-poll
 // "...is low (...) consider reducing poll frequency" line, which fires on every

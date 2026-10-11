@@ -29,6 +29,7 @@ type Config struct {
 	User                       string
 	Token                      string
 	Version                    string
+	StartReason                string // why this process started ("fresh start", "SIGHUP restart", …), shown in the fabrik.log banner (#2094); empty renders as unknown
 	Yolo                       bool
 	AutoUpgrade                bool
 	GitSSH                     bool
@@ -262,14 +263,19 @@ type Engine struct {
 	// stalenessCompareFn overrides selfupgrade.CompareDevBuild when non-nil.
 	// Used by tests to inject a synthetic DevBuildStatus without real git
 	// subprocesses. Production leaves this nil.
-	stalenessCompareFn                    func(selfupgrade.DevBuildConfig) (selfupgrade.DevBuildStatus, error)
-	lastProjectUpdatedAt                  time.Time                     // last seen project.updatedAt from FetchProjectUpdatedAt gate; zero = not yet checked
-	pollSeam                              *pollSeam                     // TEST-ONLY (#1978): bed poll hold/trigger seam; nil unless Config.PollControlFile is set; built in Run()
-	wakeCh                                chan struct{}                 // TUI sends on this to wake the poll loop immediately; nil if no TUI
-	stopCh                                chan tui.StopRequest          // TUI sends on this to stop a specific in-flight issue; nil if no TUI
-	sem                                   chan struct{}                 // semaphore bounding concurrent workers across poll cycles
-	wg                                    sync.WaitGroup                // tracks in-flight workers for graceful shutdown; also tracks the shutdown pause-write phase (runShutdownPause, shutdown.go) so one waitGroupTimeout call bounds both (ADR-1393)
-	cloneInFlight                         sync.Map                      // key: "owner/repo" string, value: *cloneCall; per-repo bare-clone coordination
+	stalenessCompareFn   func(selfupgrade.DevBuildConfig) (selfupgrade.DevBuildStatus, error)
+	lastProjectUpdatedAt time.Time            // last seen project.updatedAt from FetchProjectUpdatedAt gate; zero = not yet checked
+	pollSeam             *pollSeam            // TEST-ONLY (#1978): bed poll hold/trigger seam; nil unless Config.PollControlFile is set; built in Run()
+	wakeCh               chan struct{}        // TUI sends on this to wake the poll loop immediately; nil if no TUI
+	stopCh               chan tui.StopRequest // TUI sends on this to stop a specific in-flight issue; nil if no TUI
+	sem                  chan struct{}        // semaphore bounding concurrent workers across poll cycles
+	wg                   sync.WaitGroup       // tracks in-flight workers for graceful shutdown; also tracks the shutdown pause-write phase (runShutdownPause, shutdown.go) so one waitGroupTimeout call bounds both (ADR-1393)
+	cloneInFlight        sync.Map             // key: "owner/repo" string, value: *cloneCall; per-repo bare-clone coordination
+	// trainRuns is the table of persisted merge-train runs (#2051, ADR 2051). Non-nil only
+	// on engines that run the asynchronous driver (New()); nil — the synchronous driver —
+	// everywhere else, so every NewWithDeps engine and its tests are unchanged.
+	trainRuns                             *trainRunStore
+	trainRunsLoadOnce                     sync.Once                     // loads persisted run records on the first settleTrainRuns
 	mergeTrainInFlight                    sync.Map                      // key: trainKey ("owner/repo:baseBranch", mergeTrainKey — since #1648, was bare "owner/repo"), value: *mergeTrainWorkerState; per-(repo,base) train dispatch guard, so one base's train cannot block or be mistaken for another base's train in the same repo
 	mergeTrainEjectionsMu                 sync.Mutex                    // guards mergeTrainEjectionCounts
 	mergeTrainEjectionCounts              map[string]int                // key: "owner/repo#N", ejection count per member — deliberately stays issue-scoped, not re-keyed by base (#1648): an issue belongs to exactly one partition at a time
@@ -283,7 +289,7 @@ type Engine struct {
 	mergeTrainTrials                      map[string][]time.Time        // key: trainKey ("owner/repo:baseBranch", mergeTrainKey — since #1648, was bare "owner/repo"), trial timestamps for runaway guard (ADR-059 D8); one base's trials never count toward a sibling base's threshold in the same repo
 	mergeTrainInfraMu                     sync.Mutex                    // guards mergeTrainInfraCooldown (#2052)
 	mergeTrainInfraCooldown               map[string]time.Time          // key: trainKey; earliest time a train for that (repo,base) partition may be re-dispatched after a trial was abandoned for CI infrastructure (TrainCIInfra) — see ADR 2052
-	actionsDegradeLogged                  atomic.Bool                   // set once the optional-`actions`-permission-missing notice has been logged (#2052 R7)
+	actionsDegradeLogged                  atomic.Bool                   // set once the notice that a workflow-run read or re-run was refused (`actions` revoked at runtime or never accepted) has been logged (#2052 R7)
 	ciInfraTiming                         ciInfraTiming                 // test-shrinkable CI-infrastructure dwells (#2052); zero = defaults
 	startupWatchMu                        sync.Mutex                    // guards startupWatches
 	startupWatches                        map[string]*prStartupState    // key: "owner/repo#PR"; the stage wait_for_ci gate's retrigger state, reset when the PR's head SHA moves (#2052 R6) — in memory only, so a restart may grant one extra retrigger
@@ -332,6 +338,11 @@ type Engine struct {
 	// (#1420 R1) so seam-based tests can exercise the ejection-comment diagnostic content,
 	// not only ejection sequencing. Production leaves this nil. See assembleAndValidate.
 	trainValidateFn func(ctx context.Context, members []trainMember) (TrainCIResult, *trainCIDiagnostic)
+	// trainValidateHoldForTest, when it returns true, makes the per-poll evaluator
+	// (settleTrainRuns) treat an open trial as "no verdict yet" under the trainValidateFn
+	// seam — the seam otherwise answers at once, which would leave nothing for a restart or
+	// a deadline to interrupt (#2051). Test-only; nil in production.
+	trainValidateHoldForTest func() bool
 	// trainLiveBaseFn replaces the live origin/<base> read used by the red-singleton R3
 	// "already fixed" check (#2045) when non-nil, for tests that run no real git.
 	trainLiveBaseFn func(p trialParams) (string, error)
@@ -648,6 +659,9 @@ func New(cfg Config) (*Engine, error) {
 		backoffRateLimitRatio:     1.0,
 	}
 	eng.health.markStarted(time.Now())
+	// #2051: the production engine runs the asynchronous merge-train driver — trial state
+	// is persisted under .fabrik/state/merge-train/ and evaluated per poll.
+	eng.trainRuns = newTrainRunStore(trainRunStateDir(fabrikDir))
 
 	// App-auth's per-repo access signal (#1750 R1): fetched once, eagerly,
 	// here — rather than lazily inside resolveRepoAccess — so this single API

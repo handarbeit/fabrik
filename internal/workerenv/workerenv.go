@@ -104,6 +104,7 @@ var Scrubbed = []Var{
 
 	{"FABRIK_SIGHUP_RESTART", GroupReexec, "re-exec marker, consumed at startup (defensive)"},
 	{"FABRIK_AUTO_UPGRADED", GroupReexec, "re-exec marker, consumed at startup (defensive)"},
+	{"FABRIK_DEV_REEXEC", GroupReexec, "dev-build self-upgrade re-exec marker, consumed at startup (defensive)"},
 }
 
 // EngineSet is the forwarded class: variables the engine itself sets for

@@ -368,6 +368,65 @@ func TestLogArchiverKeepsEverySegmentAcrossEngineRestarts(t *testing.T) {
 	}
 }
 
+// The engine rotates the previous run to fabrik.log.1 on start (#2094), so what
+// it wrote after the archiver's last sample is recovered from there.
+func TestLogArchiverRecoversTheTailFromTheRotatedBackup(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(t.TempDir(), "fabrik.log")
+	mustWrite(t, src, "previous leg's tail\n")
+	a := newLogArchiver(src, dir, 0)
+	a.Start()
+
+	mustWrite(t, src, "run1 banner\nrun1 sampled\n")
+	a.Sample()
+	// run1 writes more, then the engine restarts: run1 -> .1, a fresh log.
+	mustWrite(t, src, "run1 banner\nrun1 sampled\nrun1 unsampled tail\n")
+	if err := os.Rename(src, src+".1"); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, src, "run2 banner\n")
+	a.Sample()
+	if err := a.Stop(); err != nil {
+		t.Fatal(err)
+	}
+
+	seg := func(n string) string { b, _ := os.ReadFile(filepath.Join(dir, n)); return string(b) }
+	if got := seg("fabrik.log.1"); got != "run1 banner\nrun1 sampled\nrun1 unsampled tail\n" {
+		t.Errorf("segment 1 = %q, want the whole run1 including the recovered tail", got)
+	}
+	if got := seg("fabrik.log.2"); got != "run2 banner\n" {
+		t.Errorf("segment 2 = %q", got)
+	}
+}
+
+// A .1 that is not the run being copied (two restarts between samples) is never
+// copied from.
+func TestLogArchiverDoesNotRecoverFromAnUnrelatedBackup(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(t.TempDir(), "fabrik.log")
+	mustWrite(t, src, "previous leg's tail\n")
+	a := newLogArchiver(src, dir, 0)
+	a.Start()
+
+	mustWrite(t, src, "run1 banner\nrun1 sampled\n")
+	a.Sample()
+	// Two restarts before the next sample: .1 now holds run2, not run1.
+	mustWrite(t, src+".1", "run2 banner that differs from run1, with a longer body than run1 had\nrun2 body\n")
+	mustWrite(t, src, "run3 banner\n")
+	a.Sample()
+	if err := a.Stop(); err != nil {
+		t.Fatal(err)
+	}
+
+	seg := func(n string) string { b, _ := os.ReadFile(filepath.Join(dir, n)); return string(b) }
+	if got := seg("fabrik.log.1"); got != "run1 banner\nrun1 sampled\n" {
+		t.Errorf("segment 1 = %q, nothing may be copied from an unrelated backup", got)
+	}
+	if got := seg("fabrik.log.2"); got != "run3 banner\n" {
+		t.Errorf("segment 2 = %q", got)
+	}
+}
+
 func TestPruneArchivesRetention(t *testing.T) {
 	root := t.TempDir()
 	mk := func(sha string, used time.Time) *Ledger {

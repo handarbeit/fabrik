@@ -81,6 +81,12 @@ type Env struct {
 	// queries — see ADR-1449 and the #1449 Validate review thread.
 	ProjectNum int
 
+	// TrainStateDir, when non-empty, switches Engine to the asynchronous merge-train driver
+	// (#2051, ADR 2051) with run records persisted there; RestartEnv hands the same
+	// directory to the rebuilt Engine so a restart resumes the persisted trial or
+	// bisection. Empty = the synchronous driver. Set by mergeTrainEnv.
+	TrainStateDir string
+
 	// PollInterval is how far RunPoll advances Clock before each poll cycle
 	// — the engine-local mirror of R3's GitHub-anchored gates: dispatch
 	// cooldowns (itemstate.CooldownAt) are stamped as e.now()+duration, so a
