@@ -7,8 +7,11 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/handarbeit/fabrik/plugin"
 )
 
 // Stage defines a single workflow stage and its Claude Code configuration.
@@ -23,10 +26,11 @@ type Stage struct {
 	// Optional when Skill is set — the skill provides the instructions.
 	Prompt string `yaml:"prompt,omitempty"`
 
-	// Skill names a Fabrik plugin skill (e.g., "fabrik-research") that Claude
-	// should follow for this stage. When set, the engine sends a directive
-	// prompt instead of the Prompt field. The skill must be installed in the
-	// user's Claude Code plugin configuration.
+	// Skill names the plugin skill Claude should follow for this stage, as
+	// "<plugin>:<skill>" (e.g., "fabrik:fabrik-research", or a project plugin's
+	// "myorg:review"). A bare name ("fabrik-research") is deprecated: the engine
+	// qualifies it against the plugins loaded for the worker (ADR 2137). When
+	// set, the engine sends a directive prompt instead of the Prompt field.
 	Skill string `yaml:"skill,omitempty"`
 
 	// Model to use (e.g., "opus", "sonnet"). Optional.
@@ -306,6 +310,23 @@ func expectedReviewerNormalize(name string) string {
 // preserves it, so Phase 1 re-prompts the same bot twice in one cycle and the
 // timeout message lists it twice — a duplicate is malformed in the same way
 // as the other rejected forms.
+// validateSkillRef checks the shape of a skill reference: either a bare skill
+// name or "<plugin>:<skill>" (ADR 2137). Only the format is checked here;
+// whether the plugin is loaded is decided by the engine at startup and dispatch.
+func validateSkillRef(ref string) error {
+	if ref == "" {
+		return nil
+	}
+	if strings.IndexFunc(ref, unicode.IsSpace) >= 0 {
+		return fmt.Errorf("must not contain whitespace")
+	}
+	pn, skill, qualified := plugin.Split(ref)
+	if qualified && (pn == "" || skill == "") {
+		return fmt.Errorf("expected <plugin>%s<skill> with both parts non-empty", plugin.NamespaceSep)
+	}
+	return nil
+}
+
 func validateExpectedReviewers(stageName string, names []string) ([]string, error) {
 	out := make([]string, 0, len(names))
 	seen := make(map[string]string, len(names))
@@ -354,6 +375,12 @@ func loadOne(path string) (*Stage, error) {
 			s.Completion.Type = "claude"
 		} else if s.Completion.Type != "claude" {
 			return nil, fmt.Errorf("stage %q: unsupported completion type %q (only \"claude\" is supported)", s.Name, s.Completion.Type)
+		}
+	}
+
+	for _, kv := range [][2]string{{"skill", s.Skill}, {"comment_skill", s.CommentSkill}, {"ci_fix_skill", s.CIFixSkill}, {"rebase_skill", s.RebaseSkill}} {
+		if err := validateSkillRef(kv[1]); err != nil {
+			return nil, fmt.Errorf("stage %q: invalid %s %q: %w", s.Name, kv[0], kv[1], err)
 		}
 	}
 
