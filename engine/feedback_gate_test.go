@@ -254,6 +254,13 @@ func (l *laggingReadClient) FetchItemDetails(*gh.ProjectItem) error {
 	return nil
 }
 
+// gapItem is the item a gap scenario passes: it has a linked PR (the cached copy a
+// stale board cache serves does too — an unlinked item with no review data is
+// re-read over REST on both sides, #1962), and no reviews of its own.
+func gapItem() gh.ProjectItem {
+	return feedbackItem(func(i *gh.ProjectItem) { i.LinkedPRNumber = 10 })
+}
+
 // gapEngine builds an engine whose live client sees bodyOnlyReview while its
 // readClient (the dispatcher's source) does not, with the item seeded in the
 // store as deep-fetched.
@@ -267,7 +274,7 @@ func gapEngine(t *testing.T) (*Engine, *laggingReadClient) {
 	eng := testEngineForMerge(t, client)
 	lag := &laggingReadClient{ReadClient: eng.readClient}
 	eng.readClient = lag
-	eng.store.Apply(itemstate.ItemDeepFetched{Repo: "owner/repo", Number: 1, FreshState: feedbackItem()})
+	eng.store.Apply(itemstate.ItemDeepFetched{Repo: "owner/repo", Number: 1, FreshState: gapItem()})
 	return eng, lag
 }
 
@@ -279,7 +286,7 @@ func TestFeedbackGate_DispatcherGapRepairsInput(t *testing.T) {
 	if snap, _ := eng.store.Get("owner/repo", 1); snap.State().LastDeepFetchAt.IsZero() {
 		t.Fatal("setup: item should be seeded as deep-fetched")
 	}
-	if !eng.feedbackGateBlocks(feedbackItem(), false, "advance") {
+	if !eng.feedbackGateBlocks(gapItem(), false, "advance") {
 		t.Fatal("the gate must keep holding on a live-visible review body")
 	}
 	if lag.fetches == 0 {
@@ -307,8 +314,8 @@ func TestFeedbackGate_AgreeingViewDoesNotRepair(t *testing.T) {
 		return nil
 	}
 	eng := testEngineForMerge(t, client) // readClient is the pass-through adapter: same facts
-	eng.store.Apply(itemstate.ItemDeepFetched{Repo: "owner/repo", Number: 1, FreshState: feedbackItem()})
-	if !eng.feedbackGateBlocks(feedbackItem(), false, "advance") {
+	eng.store.Apply(itemstate.ItemDeepFetched{Repo: "owner/repo", Number: 1, FreshState: gapItem()})
+	if !eng.feedbackGateBlocks(gapItem(), false, "advance") {
 		t.Fatal("the gate must hold on the review body")
 	}
 	snap, _ := eng.store.Get("owner/repo", 1)
@@ -325,8 +332,8 @@ func TestFeedbackGate_AgreeingViewDoesNotRepair(t *testing.T) {
 func TestFeedbackGate_DispatcherGapRepairIsBounded(t *testing.T) {
 	eng, _ := gapEngine(t)
 	for i := 1; i <= feedbackGapRepairBudget+2; i++ {
-		eng.store.Apply(itemstate.ItemDeepFetched{Repo: "owner/repo", Number: 1, FreshState: feedbackItem()})
-		if !eng.feedbackGateBlocks(feedbackItem(), false, "advance") {
+		eng.store.Apply(itemstate.ItemDeepFetched{Repo: "owner/repo", Number: 1, FreshState: gapItem()})
+		if !eng.feedbackGateBlocks(gapItem(), false, "advance") {
 			t.Fatalf("round %d: gate must keep holding", i)
 		}
 		snap, _ := eng.store.Get("owner/repo", 1)
@@ -341,7 +348,7 @@ func TestFeedbackGate_DispatcherGapRepairIsBounded(t *testing.T) {
 func TestFeedbackGate_DispatcherViewReadErrorFailsSoft(t *testing.T) {
 	eng, _ := gapEngine(t)
 	eng.readClient = errReadClient{eng.readClient}
-	if !eng.feedbackGateBlocks(feedbackItem(), false, "advance") {
+	if !eng.feedbackGateBlocks(gapItem(), false, "advance") {
 		t.Fatal("the gate must keep holding")
 	}
 	snap, _ := eng.store.Get("owner/repo", 1)
@@ -361,7 +368,7 @@ func TestFeedbackGate_DispatcherAndGateAgreeOnSameFacts(t *testing.T) {
 	other.DatabaseID, other.NodeID, other.Author = 777, "PRR_other", "someone-else"
 	item := feedbackItem(func(i *gh.ProjectItem) { i.LinkedPRReviews = []gh.PRReview{bodyOnlyReview, other} })
 	pf := eng.unprocessedFeedback(item, true)
-	view := eng.dispatcherReviewFeedback(item)
+	view := eng.buildReviewFeedbackCommentsFromReviews(item, eng.resolveReviewsForFeedback(item))
 	if len(pf.Bodies) != 2 {
 		t.Fatalf("gate bodies = %d, want 2", len(pf.Bodies))
 	}
@@ -374,7 +381,7 @@ func TestFeedbackGate_DispatcherAndGateAgreeOnSameFacts(t *testing.T) {
 	// Once the first body is recorded processed, both drop it together.
 	eng.store.Apply(itemstate.CommentProcessed{Repo: "owner/repo", Number: 1, CommentID: reviewBodyIDPrefix + "5356334497", At: time.Now()})
 	pf = eng.unprocessedFeedback(item, true)
-	view = eng.dispatcherReviewFeedback(item)
+	view = eng.buildReviewFeedbackCommentsFromReviews(item, eng.resolveReviewsForFeedback(item))
 	if len(pf.Bodies) != 1 || len(feedbackGap(pf.Bodies, view)) != 0 {
 		t.Errorf("after marking one processed: gate bodies %d, gap %v", len(pf.Bodies), feedbackGap(pf.Bodies, view))
 	}
@@ -408,7 +415,7 @@ func TestFeedbackGap_Pure(t *testing.T) {
 // addressed the first.
 func TestMarkCommentsProcessed_OnlyGivenBatch(t *testing.T) {
 	eng := testEngineForMerge(t, landingClient())
-	item := feedbackItem()
+	item := gapItem()
 	first := gh.Comment{ID: reviewBodyIDPrefix + "5483754852"}
 	eng.markCommentsProcessed(item, []gh.Comment{first})
 	snap, _ := eng.store.Get("owner/repo", 1)

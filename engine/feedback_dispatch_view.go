@@ -25,11 +25,20 @@ func feedbackKey(c gh.Comment) string {
 	return fmt.Sprintf("%d", c.DatabaseID)
 }
 
-// dispatcherReviewFeedback is what Phase 1's handleReviewGate would dispatch on
-// for item — the actionable review feedback derived from item's own (board
-// cache sourced) review data, through the same builders the reinvoke path uses.
-func (e *Engine) dispatcherReviewFeedback(item gh.ProjectItem) []gh.Comment {
-	return e.buildReviewFeedbackCommentsFromReviews(item, e.resolveReviewsForFeedback(item))
+// dispatcherVisibleIDs lists the review bodies and thread comments item's own
+// (board cache sourced) review data offers Phase 1's handleReviewGate before the
+// processed / durably-addressed filters — the same eligibility
+// (reviewBodyCandidates) the dispatcher's builders start from. The filters are
+// not repeated: they read the same store watermark and the same durable marker
+// the gate already applied, so an ID the gate holds on passes them on the
+// dispatcher's side too, and re-running them would cost another comment read per
+// hold (durablyAddressedReviewIDs).
+func dispatcherVisibleIDs(item gh.ProjectItem) []gh.Comment {
+	var out []gh.Comment
+	for _, c := range reviewBodyCandidates(item.LinkedPRReviews, func(string) bool { return false }) {
+		out = append(out, gh.Comment{ID: c.id})
+	}
+	return append(out, item.LinkedPRReviewThreadComments...)
 }
 
 // feedbackGap returns the review bodies and threads in held that view lacks,
@@ -53,19 +62,27 @@ func feedbackGap(held, view []gh.Comment) []gh.Comment {
 // is read through e.readClient on a copy of the caller's original item — exactly
 // the source the next admission reads — so a stale board cache shows up as a gap
 // and a fresh one does not. Only review bodies and threads are compared: they
-// are what handleReviewGate derives from cached review data. A read error leaves
-// the gap empty; it never loosens the hold.
+// are what handleReviewGate derives from cached review data. A base:<branch> or
+// missing-link item resolves its reviews over REST on both sides, so the two
+// cannot disagree and nothing is read. A read error leaves the gap empty; it
+// never loosens the hold.
 func (e *Engine) dispatcherGap(orig gh.ProjectItem, pf pendingFeedback) []gh.Comment {
 	held := append(append([]gh.Comment{}, pf.Threads...), pf.Bodies...)
 	if len(held) == 0 {
 		return nil
 	}
 	view := orig
+	if itemHasBaseLabel(orig) {
+		return nil
+	}
 	if err := e.readClient.FetchItemDetails(&view); err != nil {
 		e.logf(orig.Number, "warn", "feedback-gate: dispatcher-view read failed (%v) — skipping gap check\n", err)
 		return nil
 	}
-	return feedbackGap(held, e.dispatcherReviewFeedback(view))
+	if reviewDataRidesMissingLink(view) {
+		return nil
+	}
+	return feedbackGap(held, dispatcherVisibleIDs(view))
 }
 
 // repairDispatcherBlindness handles a gate hold on feedback the dispatcher does
