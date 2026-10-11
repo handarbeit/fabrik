@@ -168,7 +168,7 @@ The tool descriptions tell a model exactly which reference forms work and when t
 - A bare `N` when the cached board has no issues at all: behaves as today for "not found"/unresolvable, not as a phantom-repo match.
 - `repo:` configured but the cache also holds issues from another repo: the configured repo is included in the set along with real cached repos, as today.
 - `"#N"` with surrounding whitespace, or a numeric string with a leading `+`/zeros: treated per the existing string parser; the numeric path accepts only positive integers.
-- A JSON number with a fractional part that is integral (e.g. `2050.0`): accepted if it is exactly an integer value; `2050.5` is rejected.
+- A JSON number written with a fractional part or exponent, even an integral one (e.g. `2050.0`, `2050.5`, `1e3`): rejected as `invalid arguments`. Only a plain positive-integer literal is accepted (decided in Plan: the strict literal rule avoids float rounding).
 - A number too large to be a valid issue number: rejected as `invalid arguments` rather than overflowing.
 - Items in the cache whose repo cannot be determined must not contribute an owner-only key to the set.
 
