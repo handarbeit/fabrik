@@ -737,11 +737,11 @@ func suspendedResult(res Result, in Input, p Pending) Result {
 			refs = append(refs, fmt.Sprintf("%s (in %s)", b.Ref, b.Column))
 		}
 		res.Summary = fmt.Sprintf("blocked only by work parked in an unmanaged column: %s; %s", strings.Join(refs, ", "), waited)
-		res.Next.Action = "nothing automatic: " + optionsText(p.Options) + " — a human decides"
+		res.Next.Action = "nothing automatic: " + OptionsText(p.Options) + " — a human decides"
 	default:
 		res.Code = CodeDecisionPending
 		res.Summary = fmt.Sprintf("stage %s is complete and does not advance by itself; a human decides the next step; %s", p.CompletedStage, waited)
-		res.Next.Action = "nothing automatic: " + optionsText(p.Options)
+		res.Next.Action = "nothing automatic: " + OptionsText(p.Options)
 	}
 	return res
 }
@@ -771,8 +771,9 @@ func HumanAge(d time.Duration) string {
 	return d.Round(time.Second).String()
 }
 
-// optionsText renders options as "a (tool), or b".
-func optionsText(opts []Option) string {
+// OptionsText renders options as "a (tool); or b". The engine reuses it for
+// event content so the classifier summary and the events read alike.
+func OptionsText(opts []Option) string {
 	parts := make([]string, 0, len(opts))
 	for _, o := range opts {
 		if o.Tool != "" {

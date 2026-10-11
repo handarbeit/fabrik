@@ -316,3 +316,62 @@ func TestValidateSettledWithdrawalNeutralised(t *testing.T) {
 	e.store.Apply(itemstate.LocalLabelAdded{Repo: "owner/repo", Number: 1, Label: "fabrik:rebase-needed"})
 	sink.quiet(t, 400*time.Millisecond)
 }
+
+// A column change that the debounce coalesces (advanced, then complete again
+// while still suspended) is a new decision: the old episode ends silently and
+// the new one is announced with its own column.
+func TestDecisionPending_StaleEpisodeIsReplacedWhenTheColumnChanges(t *testing.T) {
+	e, sink := decisionChannel(t)
+	e.seedSpecifyComplete(t, 1, time.Hour)
+	first := sink.nextOfType(t, channelevents.DecisionPending)
+
+	e.store.Apply(itemstate.LocalLabelRemoved{Repo: "owner/repo", Number: 1, Label: "stage:Specify:complete"})
+	e.store.Apply(itemstate.LocalStatusUpdated{Repo: "owner/repo", Number: 1, NewStatus: "Implement"})
+	e.store.Apply(itemstate.LocalLabelAdded{Repo: "owner/repo", Number: 1, Label: "stage:Implement:complete"})
+	e.store.Apply(itemstate.LabelAppliedAtRecorded{Repo: "owner/repo", Number: 1, Label: "stage:Implement:complete", At: e.now().Add(-time.Minute)})
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && len(sink.snapshotOfType(channelevents.DecisionPending)) < 2 {
+		time.Sleep(20 * time.Millisecond)
+	}
+	got := sink.snapshotOfType(channelevents.DecisionPending)
+	if len(got) != 2 {
+		t.Fatalf("decision-pending published %d times, want 2 (one per decision)", len(got))
+	}
+	if got[1].Meta["column"] != "Implement" || got[1].DedupKey == first.DedupKey {
+		t.Errorf("second event = %+v, want a new episode in Implement", got[1])
+	}
+	if n := len(sink.snapshotOfType(channelevents.SettlementWithdrawn)); n != 0 {
+		t.Errorf("a replaced episode is not a withdrawal (%d events)", n)
+	}
+}
+
+// After a restart a parked-blocker item is un-suspended until its first deep
+// fetch brings BlockedBy. The persisted episode must stay open through that
+// gap: not closed, and not re-announced once the fetch lands.
+func TestDecisionPending_PersistedEpisodeSurvivesAnUnhydratedItem(t *testing.T) {
+	e, sink := decisionChannel(t)
+	ce := e.channelEvents()
+	started, closed := dpKeys("owner/repo#1")
+	ce.hub.SetCounter(started, 1)
+
+	e.seedAPIItem(t, 2, "Backlog")
+	e.seedAPIItem(t, 1, "Specify", "fabrik:blocked")
+	time.Sleep(400 * time.Millisecond)
+	if c := ce.hub.Counter(closed); c != 0 {
+		t.Fatalf("the persisted episode was closed on missing data (closed=%d)", c)
+	}
+
+	e.store.Apply(itemstate.LabelAppliedAtRecorded{Repo: "owner/repo", Number: 1, Label: "fabrik:blocked", At: e.now().Add(-24 * time.Hour)})
+	e.store.Apply(itemstate.ItemDeepFetched{Repo: "owner/repo", Number: 1, FreshState: gh.ProjectItem{
+		ID: "I_B", Number: 1, Repo: "owner/repo", Status: "Specify", Labels: []string{"fabrik:blocked"},
+		BlockedBy: []gh.Dependency{{Number: 2, State: "OPEN"}},
+	}})
+	time.Sleep(400 * time.Millisecond)
+	if n := len(sink.snapshotOfType(channelevents.DecisionPending)); n != 0 {
+		t.Errorf("an already-announced episode was announced again (%d events)", n)
+	}
+	if ce.hub.Counter(started) != 1 || ce.hub.Counter(closed) != 0 {
+		t.Errorf("counters = %d/%d, want 1/0", ce.hub.Counter(started), ce.hub.Counter(closed))
+	}
+}

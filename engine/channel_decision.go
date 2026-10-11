@@ -99,20 +99,8 @@ func (e *Engine) decisionEvent(st *itemstate.ItemState, res attention.Result) ch
 		ev.Meta["next_stage"] = p.NextStage
 	}
 	ev.Content = fmt.Sprintf("%s needs a decision: %s. Options: %s",
-		issueRef(st.Repo, st.Number), res.Summary, optionsText(p.Options))
+		issueRef(st.Repo, st.Number), res.Summary, attention.OptionsText(p.Options))
 	return ev
-}
-
-func optionsText(opts []attention.Option) string {
-	parts := make([]string, 0, len(opts))
-	for _, o := range opts {
-		if o.Tool != "" {
-			parts = append(parts, fmt.Sprintf("%s (%s)", o.Action, o.Tool))
-		} else {
-			parts = append(parts, o.Action)
-		}
-	}
-	return strings.Join(parts, "; ")
 }
 
 // decisionStep advances the item's decision-pending episode and returns the
@@ -129,6 +117,16 @@ func (ce *channelEvents) decisionStep(ref string, m *itemMemo, st *itemstate.Ite
 	key := started + ":" + strconv.Itoa(n)
 
 	if res.State == attention.Suspended && res.Pending != nil {
+		if open && m.dp != nil && (m.dp.status != st.Status || m.dp.kind != res.Pending.Kind) {
+			// The debounce swallowed the non-suspended snapshot between two
+			// decisions (advanced and completed again, or a pending decision
+			// that became a parked blocker): the announced episode no longer
+			// describes this wait. End it silently and announce a new one.
+			ce.hub.SetCounter(closed, n)
+			ce.hub.ClearReminders(key)
+			m.dp = nil
+			open = false
+		}
 		if open {
 			if m.dp == nil {
 				// An episode announced before a restart: adopt it without a
@@ -170,6 +168,13 @@ func (ce *channelEvents) decisionStep(ref string, m *itemMemo, st *itemstate.Ite
 		m.dp = nil
 		return nil
 	}
+	if e.episodeUnhydrated(st, m.dp) && engineTookBack(e, st, m.rebaseSeen) == "" {
+		// After a restart a deep field (BlockedBy, comments) is absent until
+		// the item's first deep fetch, which makes the item look un-suspended
+		// for a moment. That is missing data, not a decision: keep the
+		// persisted episode open so it is neither closed nor re-announced.
+		return nil
+	}
 	// The episode ended. A withdrawal is announced only when the engine took the
 	// item back; a human acting (or the item moving on) is silent.
 	var out []channelevents.Event
@@ -182,6 +187,28 @@ func (ce *channelEvents) decisionStep(ref string, m *itemMemo, st *itemstate.Ite
 	ce.hub.ClearReminders(key)
 	m.dp = nil
 	return out
+}
+
+// episodeUnhydrated reports whether an open episode's item merely lacks deep
+// data: it was never deep-fetched this run, and every shallow signal still says
+// it is waiting for the same human decision (open, unpaused, same column, no
+// autonomy, and either the stage-complete label or fabrik:blocked). The caller
+// still ends the episode when the engine took the item back.
+func (e *Engine) episodeUnhydrated(st *itemstate.ItemState, dp *decisionEpisode) bool {
+	if !st.LastDeepFetchAt.IsZero() || st.IsClosed || st.IsPR {
+		return false
+	}
+	if dp != nil && dp.status != st.Status {
+		return false
+	}
+	if hasLabelStr(st.Labels, "fabrik:paused") {
+		return false
+	}
+	stage := e.stageByName(st.Status)
+	if stage == nil || stageAutoAdvances(e.cfg.Yolo, st.Labels, stage) {
+		return false
+	}
+	return hasLabelStr(st.Labels, "fabrik:blocked") || hasLabelStr(st.Labels, "stage:"+st.Status+":complete")
 }
 
 // decisionWithdrawalReason says why the engine took a pending decision back, or
