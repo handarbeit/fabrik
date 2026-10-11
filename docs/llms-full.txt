@@ -3606,7 +3606,7 @@ Every response carries `as_of` (when the daemon took the snapshot), the time sin
 
 #### `fabrik_status(issue)`
 
-One issue, given as `owner/repo#N`, or just `N` when the daemon manages exactly one repo. An issue the daemon has not cached is `not_found` — it does not fetch. Returns:
+One issue, given as `owner/repo#N`, or as a bare `N`, `#N` or JSON number `N` when every issue the daemon has cached is in one repo (with or without `repo:` configured; with issues in several repos a bare number is `ambiguous`, and the error lists only the real `owner/repo` values). An issue the daemon has not cached is `not_found` — it does not fetch. Returns:
 
 - **Identity and place:** title, URL, milestone, board Status and time in it, `stage:*` labels, every `fabrik:*` label, and the autonomy mode (`cruise`, `yolo` or `none`; cruise wins).
 - **Limits:** each cycle counter that is nonzero or has a configured limit, as `n` of `max` — attempts, review / CI-fix / rebase / enqueue cycles, tools-denied and slice retries (per stage).
@@ -3646,7 +3646,7 @@ Daemon version and uptime; time since the last poll attempt and the last success
 
 **What Fabrik gives you.** Four tools, each performed by the daemon through its own client with the IDs and state it already holds, and each only for a transition the engine already documents. They need the server to be launched with `--subscriber` (or `FABRIK_SUBSCRIBER`): every action leaves a short `🏭 Fabrik — overseer action: <action>` comment on the issue naming that subscriber, so each change is attributable, and without a name the tool refuses before contacting the daemon. There is no per-call override of the name.
 
-Every action first resolves the issue to exactly one item the daemon manages (`owner/repo#N`, or a bare `N` when it manages one repo), requires it to be open, and treats a fact the daemon cannot vouch for as "not established": it **refuses, returning the item's current state, instead of writing blindly**.
+Every action first resolves the issue to exactly one item the daemon manages (`owner/repo#N`, or a bare `N`, `#N` or number when the daemon's cached issues are all in one repo), requires it to be open, and treats a fact the daemon cannot vouch for as "not established": it **refuses, returning the item's current state, instead of writing blindly**.
 
 | Tool | Does | Refuses when |
 |---|---|---|
@@ -3679,7 +3679,7 @@ Every action first resolves the issue to exactly one item the daemon manages (`o
 
 | Argument | Meaning |
 |---|---|
-| `issues` | `owner/repo#N`, or `N` when the daemon manages exactly one repo (same rules as `fabrik_status`) |
+| `issues` | `owner/repo#N`, or `N` (string or number) when the daemon's cached issues are all in one repo (same rules as `fabrik_status`) |
 | `repos` | `owner/repo` |
 | `milestone` | a milestone title, or `#N` for a number. An item whose milestone the daemon has not captured yet never matches |
 | `labels` / `exclude_labels` | glob patterns for **label events only** (`*` matches any run of characters, so `fabrik:*`, `stage:*:complete`). By default `fabrik:locked:*`, `stage:*:in_progress`, `fabrik:spawned-child:*`, `fabrik:credited-pr:*` and `fabrik:editing` are excluded as churn; pass `exclude_labels: []` to receive every change |
