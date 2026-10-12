@@ -13,8 +13,30 @@ import (
 	gh "github.com/handarbeit/fabrik/github"
 )
 
+// reviewTestScope returns a request whose clone and diff file really exist, so
+// buildReviewArgs can resolve them.
+func reviewTestScope(t *testing.T) ReviewRequest {
+	t.Helper()
+	dir := t.TempDir()
+	diff := filepath.Join(t.TempDir(), "pruefer-pr-1.diff")
+	if err := os.WriteFile(diff, []byte("diff"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return ReviewRequest{Model: "sonnet", WorkDir: dir, DiffPath: diff}
+}
+
+func mustReviewArgs(t *testing.T, req ReviewRequest) []string {
+	t.Helper()
+	args, err := buildReviewArgs(req)
+	if err != nil {
+		t.Fatalf("buildReviewArgs: %v", err)
+	}
+	return args
+}
+
 func TestBuildReviewArgs_ReadOnlyAllowlist(t *testing.T) {
-	args := buildReviewArgs(ReviewRequest{Model: "sonnet"})
+	req := reviewTestScope(t)
+	args := mustReviewArgs(t, req)
 
 	joined := strings.Join(args, " ")
 	if !strings.Contains(joined, "--permission-mode dontAsk") {
@@ -23,26 +45,195 @@ func TestBuildReviewArgs_ReadOnlyAllowlist(t *testing.T) {
 	if strings.Contains(joined, "--dangerously-skip-permissions") {
 		t.Errorf("args = %v, must never contain --dangerously-skip-permissions (Pruefer has no unrestricted opt-out)", args)
 	}
-	if strings.Contains(joined, "Bash(gh:*)") {
-		t.Error("allowlist must not contain Bash(gh:*) — gh is not read-only (gh pr review --approve, gh pr merge)")
+	if strings.Contains(joined, "Bash(gh") {
+		t.Error("allowlist must not contain gh — gh is not read-only (gh pr review --approve, gh pr merge)")
 	}
-	if strings.Contains(joined, "Edit") || strings.Contains(joined, "Write") {
-		t.Error("allowlist must not contain Edit or Write — the reviewer must never mutate the working tree")
-	}
-	for _, want := range []string{"Read", "Grep", "Glob", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)", "Bash(git blame:*)", "Bash(git grep:*)", "Bash(git status:*)"} {
-		found := false
+	for _, banned := range []string{"Edit", "Write", "Bash(git", "Bash(sed", "Bash(rg", "Bash(find", "Bash(go "} {
 		for i, a := range args {
-			if a == "--allowedTools" && i+1 < len(args) && args[i+1] == want {
-				found = true
-				break
+			if a == "--allowedTools" && strings.HasPrefix(args[i+1], banned) {
+				t.Errorf("allowlist must not contain %q rule %q", banned, args[i+1])
 			}
 		}
-		if !found {
-			t.Errorf("expected allowedTools to include %q, args = %v", want, args)
+	}
+	if err := checkReviewArgsScoped(args); err != nil {
+		t.Errorf("built args are not scoped: %v", err)
+	}
+	clone, diff, err := resolveScopePaths(req.WorkDir, req.DiffPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"Read(//" + strings.TrimPrefix(clone, "/") + "/**)",
+		"Grep(//" + strings.TrimPrefix(clone, "/") + "/**)",
+		"Glob(//" + strings.TrimPrefix(clone, "/") + "/**)",
+		"Read(//" + strings.TrimPrefix(diff, "/") + ")",
+		"Bash(cat *)", "Bash(head *)", "Bash(tail *)", "Bash(ls *)", "Task",
+	} {
+		if !hasFlagValue(args, "--allowedTools", want) {
+			t.Errorf("expected --allowedTools %q, args = %v", want, args)
+		}
+	}
+	for _, want := range []string{"Bash(find *)", "Bash(wc *)"} {
+		if !hasFlagValue(args, "--disallowedTools", want) {
+			t.Errorf("expected --disallowedTools %q, args = %v", want, args)
 		}
 	}
 	if !slices.Contains(args, "--model") {
 		t.Errorf("expected --model to be passed when Model is set, args = %v", args)
+	}
+}
+
+// wc has no allow rule and is denied outright: GNU wc accepts any unambiguous
+// prefix of --files0-from, so a deny on the full spelling alone is bypassable.
+func TestBuildReviewArgs_WcDeniedOutright(t *testing.T) {
+	args, err := buildReviewArgs(reviewTestScope(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasFlagValue(args, "--allowedTools", "Bash(wc *)") {
+		t.Errorf("wc must not be allowed, args = %v", args)
+	}
+	if !hasFlagValue(args, "--disallowedTools", "Bash(wc *)") {
+		t.Errorf("wc must be denied outright, args = %v", args)
+	}
+	for _, a := range args {
+		if strings.Contains(a, "files0") {
+			t.Errorf("a one-spelling files0 rule is bypassable by abbreviation: %q", a)
+		}
+	}
+}
+
+func hasFlagValue(args []string, flag, value string) bool {
+	for i, a := range args {
+		if a == flag && i+1 < len(args) && args[i+1] == value {
+			return true
+		}
+	}
+	return false
+}
+
+// TestBuildReviewArgs_NoBareReadGrepGlob pins R1: the bare tool names are an
+// unscoped allow (every path), so they must never appear — not even next to
+// the scoped rules.
+func TestBuildReviewArgs_NoBareReadGrepGlob(t *testing.T) {
+	args := mustReviewArgs(t, reviewTestScope(t))
+	for i, a := range args {
+		if a != "--allowedTools" {
+			continue
+		}
+		switch args[i+1] {
+		case "Read", "Grep", "Glob", "Bash":
+			t.Errorf("bare %q allow is an unscoped grant", args[i+1])
+		}
+	}
+}
+
+// TestCheckReviewArgsScoped_NonVacuous proves the scope checker has teeth: it
+// accepts the real args and rejects the pre-#2192 unscoped allowlist, and each
+// single widening of the real args.
+func TestCheckReviewArgsScoped_NonVacuous(t *testing.T) {
+	good := mustReviewArgs(t, reviewTestScope(t))
+	if err := checkReviewArgsScoped(good); err != nil {
+		t.Fatalf("good args rejected: %v", err)
+	}
+	legacy := []string{"--permission-mode", "dontAsk"}
+	for _, r := range []string{"Read", "Grep", "Glob", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)", "Bash(git blame:*)", "Bash(git grep:*)", "Bash(git status:*)"} {
+		legacy = append(legacy, "--allowedTools", r)
+	}
+	if checkReviewArgsScoped(legacy) == nil {
+		t.Error("checker accepted the legacy unscoped allowlist")
+	}
+	for _, widen := range []string{"Read", "Bash(sed -n *)", "Bash(find *)", "Bash(go test:*)", "Edit", "WebFetch"} {
+		if checkReviewArgsScoped(append(slices.Clone(good), "--allowedTools", widen)) == nil {
+			t.Errorf("checker accepted widened allowlist with %q", widen)
+		}
+	}
+	var noDeny []string
+	for i := 0; i < len(good); i++ {
+		if good[i] == "--disallowedTools" {
+			i++
+			continue
+		}
+		noDeny = append(noDeny, good[i])
+	}
+	if checkReviewArgsScoped(noDeny) == nil {
+		t.Error("checker accepted args without the find deny rule")
+	}
+}
+
+func TestBuildReviewArgs_NoDiffPathNoDiffRule(t *testing.T) {
+	req := reviewTestScope(t)
+	req.DiffPath = ""
+	args := mustReviewArgs(t, req)
+	for i, a := range args {
+		if a == "--allowedTools" && strings.HasSuffix(args[i+1], ".diff)") {
+			t.Errorf("unexpected diff rule %q with empty DiffPath", args[i+1])
+		}
+	}
+}
+
+func TestBuildReviewArgs_ResolvesSymlinkedScope(t *testing.T) {
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skip("symlinks unavailable")
+	}
+	args := mustReviewArgs(t, ReviewRequest{WorkDir: link})
+	resolved, _ := filepath.EvalSymlinks(real)
+	want := "Read(//" + strings.TrimPrefix(resolved, "/") + "/**)"
+	if !hasFlagValue(args, "--allowedTools", want) {
+		t.Errorf("want rule from the resolved path %q, args = %v", want, args)
+	}
+	if strings.Contains(strings.Join(args, " "), strings.TrimPrefix(link, "/")) {
+		t.Errorf("rules must not name the unresolved symlink path: %v", args)
+	}
+}
+
+func TestEscapeRulePath(t *testing.T) {
+	cases := map[string]string{
+		"/scope/plain":      "/scope/plain",
+		"/scope/a[1]":       `/scope/a\[1\]`,
+		"/scope/a*b?c":      `/scope/a\*b\?c`,
+		"/scope/a(b)":       `/scope/a\(b\)`,
+		"/scope/a!b":        `/scope/a\!b`,
+		"#lead":             `\#lead`,
+		"/scope/mid#dle":    "/scope/mid#dle",
+		`/scope/back\slash`: `/scope/back\\slash`,
+	}
+	for in, want := range cases {
+		if got := escapeRulePath(in); got != want {
+			t.Errorf("escapeRulePath(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestResolveScopePaths_FailsClosed(t *testing.T) {
+	for name, c := range map[string][2]string{
+		"empty workdir":   {"", ""},
+		"missing workdir": {filepath.Join(t.TempDir(), "nope"), ""},
+		"missing diff":    {t.TempDir(), filepath.Join(t.TempDir(), "nope.diff")},
+	} {
+		if _, _, err := resolveScopePaths(c[0], c[1]); err == nil {
+			t.Errorf("%s: expected an error", name)
+		}
+		if _, err := buildReviewArgs(ReviewRequest{WorkDir: c[0], DiffPath: c[1]}); err == nil {
+			t.Errorf("%s: buildReviewArgs must fail closed", name)
+		}
+	}
+}
+
+// TestReview_FailsClosedWithoutScope: Review must not invoke claude at all when
+// the scope cannot be resolved.
+func TestReview_FailsClosedWithoutScope(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "ran")
+	writeFakeClaude(t, "touch "+marker+"\n")
+	r := &RealClaudeInvoker{}
+	_, err := r.Review(context.Background(), ReviewRequest{PRNumber: 1, WorkDir: filepath.Join(t.TempDir(), "gone")})
+	if err == nil {
+		t.Fatal("expected an error for an unresolvable clone")
+	}
+	if _, statErr := os.Stat(marker); statErr == nil {
+		t.Error("claude was invoked despite an unresolvable scope")
 	}
 }
 
@@ -57,7 +248,7 @@ func TestBuildReviewArgs_ReadOnlyAllowlist(t *testing.T) {
 // reviewer's own git and file reads, plus "defaultMode": "auto" and an
 // "effortLevel". Reviews degraded fleet-wide with nothing logged anywhere.
 func TestBuildReviewArgs_NoSettingSourcesLoaded(t *testing.T) {
-	args := buildReviewArgs(ReviewRequest{})
+	args := mustReviewArgs(t, ReviewRequest{WorkDir: t.TempDir()})
 
 	idx := -1
 	for i, a := range args {
@@ -81,9 +272,9 @@ func TestBuildReviewArgs_NoSettingSourcesLoaded(t *testing.T) {
 // everything governing the review must be passed on the command line, or
 // removing the layer would silently drop it.
 func TestBuildReviewArgs_ExplicitControlsStillPassed(t *testing.T) {
-	args := buildReviewArgs(ReviewRequest{Model: "sonnet"})
+	args := mustReviewArgs(t, ReviewRequest{Model: "sonnet", WorkDir: t.TempDir()})
 	joined := strings.Join(args, " ")
-	for _, want := range []string{"--permission-mode dontAsk", "--model sonnet", "--allowedTools Read"} {
+	for _, want := range []string{"--permission-mode dontAsk", "--model sonnet", "--allowedTools Read(//", "--disallowedTools Bash(find *)"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("args missing %q: %v", want, args)
 		}
@@ -91,7 +282,7 @@ func TestBuildReviewArgs_ExplicitControlsStillPassed(t *testing.T) {
 }
 
 func TestBuildReviewArgs_NoModelWhenUnset(t *testing.T) {
-	args := buildReviewArgs(ReviewRequest{})
+	args := mustReviewArgs(t, ReviewRequest{WorkDir: t.TempDir()})
 	if slices.Contains(args, "--model") {
 		t.Errorf("expected no --model flag when Model is empty, args = %v", args)
 	}
@@ -567,12 +758,11 @@ func TestBuildReviewPrompt_NoOmittedPaths_NoSection(t *testing.T) {
 	}
 }
 
-// TestBuildReviewPrompt_OmittedExcludedPaths_NamedWithPathspec pins R4: an
-// excluded path is named in the prompt, tagged as excluded_paths, and
-// appears in the actionable git diff pathspec example so Claude has a
-// concrete way to keep it out of its own inspection (not just a passive
-// FYI note it could ignore).
-func TestBuildReviewPrompt_OmittedExcludedPaths_NamedWithPathspec(t *testing.T) {
+// TestBuildReviewPrompt_OmittedExcludedPaths_Named pins R4: an excluded path
+// is named in the prompt, tagged as excluded_paths, and the reviewer is told
+// not to read it. The old `git diff ... ':!path'` example is gone (#2192): git
+// is not available to the reviewer and the clone has no base ref.
+func TestBuildReviewPrompt_OmittedExcludedPaths_Named(t *testing.T) {
 	req := ReviewRequest{BaseBranch: "main", OmittedExcludedPaths: []string{"data/corpus.jsonl"}}
 	prompt := buildReviewPrompt(req)
 
@@ -582,11 +772,11 @@ func TestBuildReviewPrompt_OmittedExcludedPaths_NamedWithPathspec(t *testing.T) 
 	if !strings.Contains(prompt, "data/corpus.jsonl (excluded by `excluded_paths`)") {
 		t.Errorf("expected data/corpus.jsonl labeled as excluded_paths, got:\n%s", prompt)
 	}
-	if !strings.Contains(prompt, "':!data/corpus.jsonl'") {
-		t.Errorf("expected an actionable git diff pathspec excluding the file, got:\n%s", prompt)
+	if !strings.Contains(prompt, "do not read them from the working tree") {
+		t.Errorf("expected an instruction not to read omitted files, got:\n%s", prompt)
 	}
-	if !strings.Contains(prompt, "git diff main...HEAD") {
-		t.Errorf("expected the pathspec example to use the PR's base branch, got:\n%s", prompt)
+	if strings.Contains(prompt, ":!") || strings.Contains(prompt, "git diff main...HEAD") {
+		t.Errorf("the unusable git pathspec example must be gone, got:\n%s", prompt)
 	}
 }
 
@@ -603,53 +793,6 @@ func TestBuildReviewPrompt_OmittedTrimmedPaths_NamedDistinctlyFromExcluded(t *te
 	}
 	if strings.Contains(prompt, "pkg/generated.go (excluded by") {
 		t.Error("a trimmed file must not be mislabeled as excluded_paths")
-	}
-}
-
-// TestBuildReviewPrompt_OmittedPaths_NoBaseBranch_FallsBackToHEAD pins the
-// pathspec example's fallback when BaseBranch is unset.
-func TestBuildReviewPrompt_OmittedPaths_NoBaseBranch_FallsBackToHEAD(t *testing.T) {
-	req := ReviewRequest{OmittedExcludedPaths: []string{"vendor/lib.go"}}
-	prompt := buildReviewPrompt(req)
-
-	if !strings.Contains(prompt, "git diff HEAD -- .") {
-		t.Errorf("expected the pathspec example to fall back to plain HEAD, got:\n%s", prompt)
-	}
-}
-
-// TestBuildReviewPrompt_OmittedPath_WithSingleQuote_EscapedForShell pins the
-// bot-review fix: an omitted path containing a literal single quote must not
-// produce a pathspec example that closes its shell quote early. A naive
-// `':!%s'` wrap would emit `':!it's/broken.go'`, a syntactically invalid
-// command Claude could not copy-paste and run verbatim — the entire point of
-// giving it an actionable example. shellQuotePathspec's backslash-escaping
-// keeps the emitted command valid regardless of what the path contains.
-func TestBuildReviewPrompt_OmittedPath_WithSingleQuote_EscapedForShell(t *testing.T) {
-	req := ReviewRequest{OmittedExcludedPaths: []string{"it's/broken.go"}}
-	prompt := buildReviewPrompt(req)
-
-	if !strings.Contains(prompt, `':!it'\''s/broken.go'`) {
-		t.Errorf("expected the single quote in the path to be escaped as '\\'' , got:\n%s", prompt)
-	}
-	if strings.Contains(prompt, `':!it's/broken.go'`) {
-		t.Error("pathspec example must not contain the unescaped, shell-breaking form")
-	}
-}
-
-// TestShellQuotePathspec verifies the escaping helper directly against a
-// handful of shapes: no special characters, one quote, and multiple quotes.
-func TestShellQuotePathspec(t *testing.T) {
-	cases := []struct {
-		in, want string
-	}{
-		{":!plain/path.go", "':!plain/path.go'"},
-		{":!it's.go", `':!it'\''s.go'`},
-		{":!a'b'c", `':!a'\''b'\''c'`},
-	}
-	for _, c := range cases {
-		if got := shellQuotePathspec(c.in); got != c.want {
-			t.Errorf("shellQuotePathspec(%q) = %q, want %q", c.in, got, c.want)
-		}
 	}
 }
 
@@ -672,7 +815,7 @@ func TestShellQuotePathspec(t *testing.T) {
 // the source. A regression that dropped, reordered, or reworded any part
 // of the prompt during the split would fail this comparison.
 func TestBuildReviewPrompt_ZeroConfig_ByteIdenticalToPreSplitOutput(t *testing.T) {
-	const want = "You are Pruefer, an automated code reviewer for pull request /#0: \"\".\n\nThe PR's head commit is already checked out in your working directory. Use git (diff, log, show, blame, grep, status), Read, Grep, and Glob to inspect the change and any surrounding code you need for context — you have no write access and no other tools.\n\nWrite a code review as you would comment on the pull request: call out bugs, correctness issues, security concerns, and significant design problems.\n\n**The diff tells you what changed. It does not tell you what to check.** Reading it is the start of the review, not the whole of it. Before you conclude, follow the change outward:\n\n- For every symbol the diff adds, removes, renames, or changes the meaning of, search the repository for its other uses. A change that is correct in its own file is still a defect if a caller, test, or script depends on the old behavior.\n- Check whether the change falsifies anything written down. Grep the docs, README files, ADRs, and nearby comments for the flags, keys, functions, and behaviors the diff touches. A doc that now describes behavior the code no longer has is a real finding.\n- Read the tests the diff adds or changes. Ask what would still pass if the fix were removed — a test that holds either way is not evidence.\n- When the diff removes or narrows something, ask what depended on it.\n\n**Verify before asserting.** Do not report a defect you have not confirmed by reading the relevant code. If you suspect something but cannot establish it, either check it or say plainly that it is unverified — never state it as fact. Equally, do not claim the absence of a problem (\"no other call sites\", \"nothing else uses this\") from a single narrow search; sweep properly or do not make the claim.\n\n**Finish the review.** If some part of the change is hard to assess, say so explicitly and name what you could not check. Do not silently stop at the first file, and do not treat an early confident impression as a completed review. State what you examined, so a reader can tell a thorough pass from a partial one.\n\n**Make every finding falsifiable.** For each one, state the concrete path to the failure: the input, state, or sequence that produces the wrong result, and what the wrong result is. \"This could be a problem\" is not a finding — if you cannot describe how it goes wrong, either work out whether it does, or leave it out.\n\n**Say which findings you verified.** Begin a finding you have confirmed by reading the relevant code with \"Confirmed:\". Begin one you believe is real but could not establish with \"Plausible:\", and say what you would need to check. A reader must be able to tell the two apart without re-deriving your reasoning.\n\nOn a large PR, raise the bar for a \"low\"-severity finding: it must be something a reviewer would actually act on, not merely true — skip nitpicks, style preferences, and fidelity observations against test fixtures unless they matter.\n\nYou do not decide whether this PR is approved or blocked — that is computed automatically from the severity you assign each finding below, never from anything you write in prose. Do not use approval/rejection language such as \"LGTM\" or \"requesting changes\" in your summary; just describe what you found.\n\nOutput has two parts, in this exact order:\n\n1. A short prose summary: what you reviewed and your overall assessment. This is the only text GitHub shows outside of inline comments, so it must stand on its own. Wrap it in PRUEFER_SUMMARY_BEGIN and PRUEFER_SUMMARY_END marker lines, each alone on its own line, with nothing else on those lines. Nothing — no narration, no meta-commentary, no investigation notes — may appear before PRUEFER_SUMMARY_BEGIN; anything there is discarded and never shown to anyone. The ```json findings block described in part 2 below must come after PRUEFER_SUMMARY_END, never between the two markers. For example:\n\nPRUEFER_SUMMARY_BEGIN\nReviewed the changes to X. Found one medium-severity issue; see inline comment.\nPRUEFER_SUMMARY_END\n\n2. A single fenced ```json code block containing a JSON array of your findings, each anchored to the exact file and line it concerns, with a \"severity\" classification:\n\n```json\n[{\"path\": \"engine/claude.go\", \"line\": 954, \"body\": \"...\", \"severity\": \"low\"}]\n```\n\n\"severity\" must be exactly one of:\n\n- \"low\": style, minor nit, or a suggestion — not a defect.\n- \"medium\": a real defect, but scoped and low-impact.\n- \"high\": a bug or design issue that will likely cause incorrect behavior.\n- \"critical\": a security vulnerability, data loss, or severe correctness bug.\n\nEach entry's \"path\" must be a file path exactly as it appears in the diff, and \"line\" must be a line number in the new (post-change) version of that file — i.e. a line you can see in `git diff` output prefixed with `+` or unprefixed (context), never a line that only existed in the old version. If you have no findings, emit an empty array `[]`. Do not put findings only in the prose — every specific, actionable finding belongs in the JSON array so it can be attached to its exact line; use the prose summary for overall assessment only. Report each distinct underlying finding once — if the same defect is visible at more than one line, pick the most relevant anchor rather than emitting a separate entry per line.\n\nOutput ONLY the review text itself: no preamble, no meta-commentary about what you are about to do.\n"
+	const want = "You are Pruefer, an automated code reviewer for pull request /#0: \"\".\n\nThe PR's head commit is already checked out in your working directory. You are a read-only reader and have exactly these tools; anything else is denied:\n\n- Read: read a file by absolute path. Use its offset and limit to page through a large file.\n- Grep and Glob: search file contents and file names.\n- Shell, only these read-only commands, one plain command at a time: `cat`, `head`, `tail`, `ls`. Pipes between them are fine; redirection, command substitution and chaining with `;`, `&&` or `||` are not.\n- Task: delegate part of a large diff (by file or area) to a subagent. Subagents are bound by exactly the same tools and path limits, and have no other tools. Only your own final message is the review, so merge their findings into it yourself.\n\nPath limits: Read, Grep, Glob and the shell commands reach only the working directory. Any other path, including `..` or symlinks that lead outside, is denied.\n\nNot available, so do not try them: find, wc, sed, rg, git of any kind, and any command that writes files, runs code (tests, builds, linters, package managers) or uses the network. You have no write access.\n\nWrite a code review as you would comment on the pull request: call out bugs, correctness issues, security concerns, and significant design problems.\n\n**The diff tells you what changed. It does not tell you what to check.** Reading it is the start of the review, not the whole of it. Before you conclude, follow the change outward:\n\n- For every symbol the diff adds, removes, renames, or changes the meaning of, search the repository for its other uses. A change that is correct in its own file is still a defect if a caller, test, or script depends on the old behavior.\n- Check whether the change falsifies anything written down. Grep the docs, README files, ADRs, and nearby comments for the flags, keys, functions, and behaviors the diff touches. A doc that now describes behavior the code no longer has is a real finding.\n- Read the tests the diff adds or changes. Ask what would still pass if the fix were removed — a test that holds either way is not evidence.\n- When the diff removes or narrows something, ask what depended on it.\n\n**Verify before asserting.** Do not report a defect you have not confirmed by reading the relevant code. If you suspect something but cannot establish it, either check it or say plainly that it is unverified — never state it as fact. Equally, do not claim the absence of a problem (\"no other call sites\", \"nothing else uses this\") from a single narrow search; sweep properly or do not make the claim.\n\n**Finish the review.** If some part of the change is hard to assess, say so explicitly and name what you could not check. Do not silently stop at the first file, and do not treat an early confident impression as a completed review. State what you examined, so a reader can tell a thorough pass from a partial one.\n\n**Make every finding falsifiable.** For each one, state the concrete path to the failure: the input, state, or sequence that produces the wrong result, and what the wrong result is. \"This could be a problem\" is not a finding — if you cannot describe how it goes wrong, either work out whether it does, or leave it out.\n\n**Say which findings you verified.** Begin a finding you have confirmed by reading the relevant code with \"Confirmed:\". Begin one you believe is real but could not establish with \"Plausible:\", and say what you would need to check. A reader must be able to tell the two apart without re-deriving your reasoning.\n\nOn a large PR, raise the bar for a \"low\"-severity finding: it must be something a reviewer would actually act on, not merely true — skip nitpicks, style preferences, and fidelity observations against test fixtures unless they matter.\n\nYou do not decide whether this PR is approved or blocked — that is computed automatically from the severity you assign each finding below, never from anything you write in prose. Do not use approval/rejection language such as \"LGTM\" or \"requesting changes\" in your summary; just describe what you found.\n\nOutput has two parts, in this exact order:\n\n1. A short prose summary: what you reviewed and your overall assessment. This is the only text GitHub shows outside of inline comments, so it must stand on its own. Wrap it in PRUEFER_SUMMARY_BEGIN and PRUEFER_SUMMARY_END marker lines, each alone on its own line, with nothing else on those lines. Nothing — no narration, no meta-commentary, no investigation notes — may appear before PRUEFER_SUMMARY_BEGIN; anything there is discarded and never shown to anyone. The ```json findings block described in part 2 below must come after PRUEFER_SUMMARY_END, never between the two markers. For example:\n\nPRUEFER_SUMMARY_BEGIN\nReviewed the changes to X. Found one medium-severity issue; see inline comment.\nPRUEFER_SUMMARY_END\n\n2. A single fenced ```json code block containing a JSON array of your findings, each anchored to the exact file and line it concerns, with a \"severity\" classification:\n\n```json\n[{\"path\": \"engine/claude.go\", \"line\": 954, \"body\": \"...\", \"severity\": \"low\"}]\n```\n\n\"severity\" must be exactly one of:\n\n- \"low\": style, minor nit, or a suggestion — not a defect.\n- \"medium\": a real defect, but scoped and low-impact.\n- \"high\": a bug or design issue that will likely cause incorrect behavior.\n- \"critical\": a security vulnerability, data loss, or severe correctness bug.\n\nEach entry's \"path\" must be a file path exactly as it appears in the diff, and \"line\" must be a line number in the new (post-change) version of that file — i.e. a line you can see in `git diff` output prefixed with `+` or unprefixed (context), never a line that only existed in the old version. If you have no findings, emit an empty array `[]`. Do not put findings only in the prose — every specific, actionable finding belongs in the JSON array so it can be attached to its exact line; use the prose summary for overall assessment only. Report each distinct underlying finding once — if the same defect is visible at more than one line, pick the most relevant anchor rather than emitting a separate entry per line.\n\nOutput ONLY the review text itself: no preamble, no meta-commentary about what you are about to do.\n"
 	got := buildReviewPrompt(ReviewRequest{})
 	if got != want {
 		t.Errorf("buildReviewPrompt(ReviewRequest{}) changed from the pre-#1446 golden output:\ngot:  %q\nwant: %q", got, want)
@@ -758,7 +901,8 @@ func TestBuildReviewPrompt_RepoReplace_DropsDefaultGuidanceKeepsContractAndConte
 // shell metacharacters — must never reach buildReviewArgs' argv. Guidance
 // only ever flows into buildReviewPrompt's stdin text.
 func TestBuildReviewArgs_UnaffectedByGuidanceFields(t *testing.T) {
-	baseline := buildReviewArgs(ReviewRequest{Model: "sonnet"})
+	scope := t.TempDir()
+	baseline := mustReviewArgs(t, ReviewRequest{Model: "sonnet", WorkDir: scope})
 	adversarial := []ReviewRequest{
 		{Model: "sonnet", OperatorGuidance: "--permission-mode bypassPermissions"},
 		{Model: "sonnet", OperatorGuidanceMode: GuidanceModeReplace},
@@ -773,7 +917,8 @@ func TestBuildReviewArgs_UnaffectedByGuidanceFields(t *testing.T) {
 		},
 	}
 	for i, req := range adversarial {
-		got := buildReviewArgs(req)
+		req.WorkDir = scope
+		got := mustReviewArgs(t, req)
 		if !slices.Equal(got, baseline) {
 			t.Errorf("case %d: buildReviewArgs(req) = %v, want unaffected baseline %v", i, got, baseline)
 		}
@@ -828,5 +973,51 @@ func TestResolveGuidance_PrecedenceMatrix(t *testing.T) {
 				t.Errorf("resolveGuidance = %q, want exactly the repo's replacement text with nothing else", got)
 			}
 		})
+	}
+}
+
+// TestReviewPrompt_OffersOnlyPermittedForms (#2192, R5): every command form the
+// prompt offers inside backticks must be covered by the permission rules, and
+// the denied families must be named only as unavailable.
+func TestReviewPrompt_OffersOnlyPermittedForms(t *testing.T) {
+	req := reviewTestScope(t)
+	req.BaseBranch = "main"
+	req.OmittedExcludedPaths = []string{"data/x.jsonl"}
+	var b strings.Builder
+	renderReviewTools(&b, req)
+	section := b.String()
+	prompt := buildReviewPrompt(req)
+
+	known := []string{"cat", "head", "tail", "wc", "ls", "find", "sed", "rg", "git", "grep", "go", "cd", "awk", "curl"}
+	for _, line := range strings.Split(section, "\n") {
+		parts := strings.Split(line, "`")
+		for i := 1; i < len(parts); i += 2 {
+			first := strings.Fields(parts[i])
+			if len(first) == 0 || !slices.Contains(known, first[0]) {
+				continue
+			}
+			if !slices.Contains(reviewShellAllow, first[0]) {
+				t.Errorf("prompt offers `%s` but the permission rules do not allow %q", parts[i], first[0])
+			}
+		}
+	}
+	for _, c := range reviewShellAllow {
+		if !strings.Contains(section, "`"+c+"`") {
+			t.Errorf("prompt does not name the permitted command %q", c)
+		}
+	}
+	for _, tool := range []string{"Read", "Grep and Glob", "Task"} {
+		if !strings.Contains(section, tool) {
+			t.Errorf("prompt does not name %q", tool)
+		}
+	}
+	// No suggestion anywhere outside the contract of a denied git/find/sed form.
+	for _, bad := range []string{"git diff main...HEAD", "':!", "`find", "`sed", "`git ", "`rg"} {
+		if strings.Contains(strings.Split(prompt, "Write a code review")[0], bad) {
+			t.Errorf("dynamic context suggests a denied form %q", bad)
+		}
+	}
+	if !strings.Contains(section, "staged diff file") {
+		t.Errorf("path limits do not mention the staged diff file")
 	}
 }

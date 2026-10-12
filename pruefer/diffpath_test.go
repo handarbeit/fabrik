@@ -31,7 +31,7 @@ func TestBuildReviewPrompt_DiffPathReplacesImpossibleGitDiff(t *testing.T) {
 		t.Errorf("prompt still instructs the diff that cannot resolve:\n%s", got)
 	}
 	// And the model must be told *why*, so it doesn't burn turns discovering it.
-	if !strings.Contains(got, "not a ref here") {
+	if !strings.Contains(got, "no git history or base ref") {
 		t.Errorf("prompt does not warn that the base ref is absent:\n%s", got)
 	}
 }
@@ -42,7 +42,7 @@ func TestBuildReviewPrompt_NoDiffPathDegrades(t *testing.T) {
 	got := buildReviewPrompt(ReviewRequest{
 		Owner: "o", Repo: "r", PRNumber: 1, BaseBranch: "main",
 	})
-	if !strings.Contains(got, "The PR's base branch is \"main\"") {
+	if !strings.Contains(got, "The PR targets \"main\"") {
 		t.Errorf("degraded prompt lost its base-branch context:\n%s", got)
 	}
 	if strings.Contains(got, ".diff") {
@@ -92,7 +92,7 @@ func TestReviewPR_EmptyDiffWritesNoFile(t *testing.T) {
 	if strings.Contains(got, "authoritative statement of what changed") {
 		t.Errorf("prompt claims an authoritative diff file with no DiffPath set:\n%s", got)
 	}
-	if !strings.Contains(got, "compare against it") {
+	if !strings.Contains(got, "no diff file is available") {
 		t.Errorf("prompt did not degrade to the base-branch wording:\n%s", got)
 	}
 }
