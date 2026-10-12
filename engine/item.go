@@ -1143,6 +1143,7 @@ func (e *Engine) runInvocationWithExtension(ctx context.Context, item gh.Project
 		SigIntGrace:       sigIntGrace,
 		SigTermGrace:      sigTermGrace,
 		OnPIDReady:        func(pid int) { e.store.Apply(itemstate.WorkerPIDSet{Repo: repoStr, Number: item.Number, PID: pid}) },
+		OnTurn:            e.liveTurnRecorder(repoStr, item.Number),
 		CorrectiveHint:    e.consumeStallHint(repoStr, item.Number, stage.Name),
 		FabrikRepo:        e.defaultRepo(),
 		MaxResumeFailures: e.cfg.MaxResumeFailures,

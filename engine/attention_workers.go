@@ -125,3 +125,17 @@ func (e *Engine) dispatchable(st *itemstate.ItemState, in *attention.Input, usag
 	}
 	return true
 }
+
+// liveTurnRecorder returns the OnTurn hook for one item's invocation (#2121): it
+// records the running turn count on the live worker so status can report it. The
+// store write is throttled (the first turn, then every third) so a long run does not
+// produce a store mutation per turn; a count of zero is never recorded, so a worker
+// whose turns are not yet known stays "unknown".
+func (e *Engine) liveTurnRecorder(repo string, number int) func(int) {
+	return func(turns int) {
+		if turns < 1 || (turns != 1 && turns%3 != 0) {
+			return
+		}
+		e.store.Apply(itemstate.WorkerTurnsRecorded{Repo: repo, Number: number, Turns: turns})
+	}
+}

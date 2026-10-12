@@ -460,6 +460,7 @@ func (e *Engine) processCommentsClassified(ctx context.Context, board *gh.Projec
 		PRNumber:          prNumber,
 		FabrikRepo:        e.defaultRepo(),
 		MaxResumeFailures: e.cfg.MaxResumeFailures,
+		OnTurn:            e.liveTurnRecorder(itemOwnerRepoString(item, e.defaultRepo()), item.Number),
 	}
 	if len(onPIDReady) > 0 && onPIDReady[0] != nil {
 		invokeOpts.OnPIDReady = onPIDReady[0]

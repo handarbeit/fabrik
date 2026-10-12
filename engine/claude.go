@@ -538,6 +538,7 @@ type turnCountingWriter struct {
 	inner       io.Writer
 	issueNumber int
 	maxTurns    int
+	onTurn      func(int) // optional per-invocation hook (#2121)
 	buf         []byte
 	count       int
 }
@@ -555,6 +556,9 @@ func (w *turnCountingWriter) Write(p []byte) (int, error) {
 			w.count++
 			if claudeTurnProgress != nil {
 				claudeTurnProgress(w.issueNumber, w.count, w.maxTurns)
+			}
+			if w.onTurn != nil {
+				w.onTurn(w.count)
 			}
 		}
 	}
@@ -816,7 +820,7 @@ func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem
 	extraEnv := buildClaudeEnv(stage, issue, workDir, opts, os.Environ())
 	sigIntGrace, sigTermGrace := effectiveKillGrace(opts.SigIntGrace, opts.SigTermGrace)
 	wallTime := scaledWallTime(stage.MaxWallTime, effectiveBudget, stage.MaxTurns)
-	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name, issue.Repo, sessFilePath, ld, extraEnv, wallTime, effectiveBudget, opts.OnPIDReady, sigIntGrace, sigTermGrace, resumeSessionID, opts.MaxResumeFailures, stage.Skill)
+	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name, issue.Repo, sessFilePath, ld, extraEnv, wallTime, effectiveBudget, opts.OnPIDReady, opts.OnTurn, sigIntGrace, sigTermGrace, resumeSessionID, opts.MaxResumeFailures, stage.Skill)
 	usage.MaxTurns = effectiveBudget
 	if err != nil {
 		return output, completed, usage, err
@@ -862,7 +866,7 @@ func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.
 	extraEnv := buildClaudeEnv(stage, issue, workDir, opts, os.Environ())
 	sigIntGrace, sigTermGrace := effectiveKillGrace(opts.SigIntGrace, opts.SigTermGrace)
 	wallTime := scaledWallTime(stage.MaxWallTime, limit, base)
-	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name+"-comment-review", issue.Repo, sessFilePath, ld, extraEnv, wallTime, limit, opts.OnPIDReady, sigIntGrace, sigTermGrace, resumeSessionID, opts.MaxResumeFailures, stage.CommentSkill)
+	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name+"-comment-review", issue.Repo, sessFilePath, ld, extraEnv, wallTime, limit, opts.OnPIDReady, opts.OnTurn, sigIntGrace, sigTermGrace, resumeSessionID, opts.MaxResumeFailures, stage.CommentSkill)
 	usage.MaxTurns = limit
 	return output, completed, usage, err
 }
@@ -1406,7 +1410,7 @@ type claudeResponse struct {
 	} `json:"usage"`
 }
 
-func runClaude(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string, repo string, sessFilePath string, logDir string, extraEnv []string, maxWallTime time.Duration, maxTurns int, onPIDReady func(int), sigIntGrace, sigTermGrace time.Duration, resumeSessionID string, maxResumeFailures int, expectedSkill string) (string, bool, TokenUsage, error) {
+func runClaude(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string, repo string, sessFilePath string, logDir string, extraEnv []string, maxWallTime time.Duration, maxTurns int, onPIDReady func(int), onTurn func(int), sigIntGrace, sigTermGrace time.Duration, resumeSessionID string, maxResumeFailures int, expectedSkill string) (string, bool, TokenUsage, error) {
 	claudeLog(issueNumber, "claude", "invoking (%s) in %s\n", label, workDir)
 
 	// Best-effort HEAD capture, before/after the invocation, so a tools-denied
@@ -1452,7 +1456,7 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 	lastActivity.Store(time.Now().UnixNano())
 	// Wrap stdoutWriter with a turn-counting writer that fires claudeTurnProgress on
 	// each user event (logical turn start), then with the activity writer for inactivity tracking.
-	tcw := &turnCountingWriter{inner: stdoutWriter, issueNumber: issueNumber, maxTurns: maxTurns}
+	tcw := &turnCountingWriter{inner: stdoutWriter, issueNumber: issueNumber, maxTurns: maxTurns, onTurn: onTurn}
 	stdoutWriter = &activityWriter{inner: tcw, lastActivity: &lastActivity}
 
 	cmd := exec.CommandContext(stageCtx, "claude", args...)

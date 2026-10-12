@@ -325,3 +325,34 @@ func TestStatusDaemonStopCauseNeedsTheMarker(t *testing.T) {
 		t.Errorf("a later pause comment must supersede the stop marker, cause %q", c)
 	}
 }
+
+// R6: a live worker's turns reach status through the invocation's OnTurn hook
+// (turnCountingWriter → liveTurnRecorder → WorkerTurnsRecorded), throttled, and
+// stay unknown until the first turn.
+func TestLiveTurnsReachStatusThroughOnTurn(t *testing.T) {
+	e := workerEngine(t)
+	e.seedAPIItem(t, 9, "Implement")
+	e.store.Apply(itemstate.WorkerEntered{Repo: "owner/repo", Number: 9, StageName: "Implement", StartedAt: time.Now(),
+		Kind: itemstate.WorkerKindStageRun})
+	if st := status(t, e, "9"); st.Worker.TurnsUsed.Valid {
+		t.Fatalf("turns_used = %+v before any turn, want unknown", st.Worker.TurnsUsed)
+	}
+
+	var sink strings.Builder
+	w := &turnCountingWriter{inner: &sink, issueNumber: 9, maxTurns: 50, onTurn: e.liveTurnRecorder("owner/repo", 9)}
+	line := "{\"type\":\"user\"}\n"
+	for i := 0; i < 2; i++ { // turn 1 recorded, turn 2 throttled
+		if _, err := w.Write([]byte(line)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if st := status(t, e, "9"); !st.Worker.TurnsUsed.Valid || st.Worker.TurnsUsed.V != 1 {
+		t.Errorf("after 2 turns turns_used = %+v, want the throttled 1", st.Worker.TurnsUsed)
+	}
+	if _, err := w.Write([]byte(line)); err != nil { // turn 3 recorded
+		t.Fatal(err)
+	}
+	if st := status(t, e, "9"); !st.Worker.TurnsUsed.Valid || st.Worker.TurnsUsed.V != 3 {
+		t.Errorf("after 3 turns turns_used = %+v, want 3", st.Worker.TurnsUsed)
+	}
+}
