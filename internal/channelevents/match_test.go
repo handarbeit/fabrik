@@ -243,3 +243,13 @@ func TestAnomalyEventsAreItemScopedAndSubscribable(t *testing.T) {
 		}
 	}
 }
+
+func TestSubscribableHasNoDuplicates(t *testing.T) {
+	seen := map[EventType]bool{}
+	for _, e := range Subscribable() {
+		if seen[e] {
+			t.Errorf("%s is listed twice in Subscribable()", e)
+		}
+		seen[e] = true
+	}
+}

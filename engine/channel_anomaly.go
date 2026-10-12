@@ -176,7 +176,7 @@ func (e *Engine) wedgeLapse() time.Duration {
 }
 
 // wedgeLapseFor is how long a hold of the given gate may go unconfirmed before
-// it is treated as gone. The review and CI gates stamp a recheck cooldown of
+// it is treated as gone. The feedback, review and CI gates stamp a recheck cooldown of
 // githubRecheckInterval() (10 polls) between evaluations once nothing bumps the
 // item, so their hold is re-confirmed that rarely; a lapse shorter than the
 // cadence would end the episode between confirmations and restart firstHeld,
@@ -184,7 +184,7 @@ func (e *Engine) wedgeLapse() time.Duration {
 func (e *Engine) wedgeLapseFor(gate string) time.Duration {
 	lapse := e.wedgeLapse()
 	switch gate {
-	case gateReview, gateCI:
+	case gateFeedback, gateReview, gateCI:
 		lapse += e.githubRecheckInterval()
 	}
 	return lapse

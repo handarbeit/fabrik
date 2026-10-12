@@ -419,6 +419,41 @@ func TestItemWedged_ReviewHoldSurvivesItsRecheckCadence(t *testing.T) {
 	}
 }
 
+// A quiet item's feedback hold is re-confirmed only every githubRecheckInterval
+// (the feedback-pending cooldown), not every poll. The hold must survive that
+// cadence, or each re-confirmation restarts firstHeld and it never ages.
+func TestItemWedged_FeedbackHoldSurvivesQuietItemCadence(t *testing.T) {
+	e, sink, clk, ce := wedgeEngineWithPoll(t, 30)
+	item := wedgedItem()
+	recheck := e.githubRecheckInterval()
+	threshold := e.itemWedgedThreshold(gateFeedback)
+	if recheck <= e.wedgeLapse() {
+		t.Fatalf("setup: recheck %v must exceed the base lapse %v", recheck, e.wedgeLapse())
+	}
+	var evs []channelevents.Event
+	start := clk.Now()
+	next := start
+	for clk.Now().Sub(start) <= threshold+2*recheck {
+		if !clk.Now().Before(next) {
+			if !e.feedbackGateBlocks(item, true, "advance") {
+				t.Fatal("the gate must hold")
+			}
+			next = clk.Now().Add(recheck)
+		}
+		e.health.beginPoll(clk.Now(), pollVerdict{})
+		e.health.endPoll(clk.Now(), pollVerdict{}, clk.Now().Add(30*time.Second))
+		evs = append(evs, checkAndDrain(ce, sink)...)
+		clk.set(clk.Now().Add(30 * time.Second))
+	}
+	w := ofType(evs, channelevents.ItemWedged)
+	if len(w) != 1 || w[0].Meta["gate"] != "feedback" {
+		t.Fatalf("a feedback hold re-confirmed every %v must still be reported once past %v: %+v", recheck, threshold, evs)
+	}
+	if len(ofType(evs, channelevents.ItemUnwedged)) != 0 {
+		t.Fatalf("the hold lapsed between confirmations: %+v", evs)
+	}
+}
+
 func TestItemWedged_EpisodeEndsOnDispatchClearAdvanceAndLapse(t *testing.T) {
 	for _, how := range []string{"dispatched", "cleared", "advanced", "lapsed"} {
 		t.Run(how, func(t *testing.T) {
@@ -572,6 +607,33 @@ func TestCacheDivergence_ProbeAndDeepFetchAreNamedAndColumnReverts(t *testing.T)
 	div = ofType(drain(sink, 300*time.Millisecond), channelevents.CacheDivergence)
 	if len(div) != 1 || div[0].Meta["path"] != "deep-fetch" || div[0].Issue != 2 {
 		t.Fatalf("label revert by deep fetch: %+v", div)
+	}
+}
+
+// R3: every event built from the suspect change is unverified, not only the raw
+// label event: the label-derived blocker-cleared and a column-changed too.
+func TestCacheDivergence_MarksDerivedAndColumnEvents(t *testing.T) {
+	e, sink, clk, _ := anomalyEngine(t)
+	e.seedAPIItem(t, 1, "Implement")
+	e.store.Apply(itemstate.LocalLabelAdded{Repo: "owner/repo", Number: 1, Label: "fabrik:blocked"})
+	e.store.Apply(itemstate.LocalStatusUpdated{Repo: "owner/repo", Number: 1, NewStatus: "Review"})
+	drain(sink, 300*time.Millisecond) // the engine's own writes
+	clk.set(clk.Now().Add(time.Minute))
+	e.store.Apply(itemstate.ShallowBoardItemUpdated{Repo: "owner/repo", Number: 1, Item: gh.ProjectItem{
+		Number: 1, Repo: "owner/repo", Status: "Implement", Labels: nil,
+	}})
+	evs := drain(sink, 300*time.Millisecond)
+	if len(ofType(evs, channelevents.CacheDivergence)) == 0 {
+		t.Fatalf("setup: no cache-divergence: %+v", evs)
+	}
+	for _, typ := range []channelevents.EventType{channelevents.LabelRemoved, channelevents.BlockerCleared, channelevents.ColumnChanged} {
+		got := ofType(evs, typ)
+		if len(got) != 1 {
+			t.Fatalf("%s events = %d, want 1: %+v", typ, len(got), evs)
+		}
+		if got[0].Meta[channelevents.MetaUnverified] != "true" {
+			t.Errorf("%s built from a diverged change must be unverified: %+v", typ, got[0])
+		}
 	}
 }
 

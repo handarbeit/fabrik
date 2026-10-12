@@ -295,7 +295,7 @@ func (ce *channelEvents) onChange(c itemstate.Change, snap itemstate.Snapshot) {
 	// unverified (#2170): the cache and GitHub disagree, so the change may be a
 	// phantom.
 	evs := ce.noteChangeForDivergence(c, &st, ce.e.now())
-	unverified := len(evs) > 0
+	diverged := len(evs) // events from here on are built from the suspect change
 	for _, d := range c.LabelDeltas {
 		if d.Added && d.Label == "fabrik:landing-verification-failed" {
 			ce.clearLanding(key)
@@ -303,9 +303,6 @@ func (ce *channelEvents) onChange(c itemstate.Change, snap itemstate.Snapshot) {
 		le := ce.e.labelEvent(&st, c, d)
 		if closeTrackingLabel(d.Label) && ce.isLanding(key) {
 			le.Meta["landing"] = "true"
-		}
-		if unverified {
-			le.Meta[channelevents.MetaUnverified] = "true"
 		}
 		evs = append(evs, le)
 		evs = append(evs, ce.e.labelDerivedEvents(&st, d)...)
@@ -315,6 +312,17 @@ func (ce *channelEvents) onChange(c itemstate.Change, snap itemstate.Snapshot) {
 	}
 	if c.Closed {
 		evs = append(evs, ce.closedEvent(key, &st, c))
+	}
+	if diverged > 0 {
+		// Every event built from a change a cache-divergence was raised for (label
+		// events, the label-derived merged / blocker-cleared / landing-verification-
+		// failed, column-changed, closed) may be a phantom (#2170 R3).
+		for i := diverged; i < len(evs); i++ {
+			if evs[i].Meta == nil {
+				evs[i].Meta = map[string]string{}
+			}
+			evs[i].Meta[channelevents.MetaUnverified] = "true"
+		}
 	}
 	staleCand := c.Fields&itemstate.InvocationChanged != 0 && hasLabelStr(st.Labels, "fabrik:awaiting-input")
 	const interesting = itemstate.LabelsChanged | itemstate.StageStateChanged | itemstate.StatusChanged |

@@ -165,7 +165,7 @@ func Subscribable() []EventType {
 		ClaudeUsageLimited, ClaudeUsageLimitLifted, DaemonUnreachable, DaemonReachable,
 		PipelineStalled, PipelineResumed,
 		ItemAdded, ColumnChanged, Closed,
-		PipelineStalled, PipelineResumed, RetryStarved, RetryResumed, ItemWedged, ItemUnwedged,
+		RetryStarved, RetryResumed, ItemWedged, ItemUnwedged,
 		CacheDivergence,
 	}
 	return order
