@@ -110,6 +110,12 @@ func (e *Engine) catchUp(subscriber, subID string) int {
 	if ce == nil {
 		return 0
 	}
+	// Until the readiness pass has run, the store cannot answer (labels are still
+	// being populated after a restart); that pass queues the catch-up to every
+	// subscriber, this one included (#2169).
+	if !ce.ready.Load() {
+		return 0
+	}
 	defer func() {
 		if r := recover(); r != nil {
 			e.logf(0, "channel", "catch-up panic recovered: %v\n", r)

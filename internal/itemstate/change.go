@@ -130,6 +130,12 @@ type Change struct {
 	// held the item). Never set by Reset or for a mid-run reset of known items
 	// (#2123): only an item the running store learns about is an arrival.
 	Created bool
+	// LabelsBaselined is true when this mutation was the item's first
+	// label-bearing population (ItemState.LabelsKnown flipped to true). It is the
+	// moment a restart's first full observation of the item's labels exists, so
+	// the channel ledger diffs it against the previous run's record (#2169 R2).
+	// It is set even when the label set is empty, and carries no label deltas.
+	LabelsBaselined bool
 	// PrevStatus is the item's board Status before a StatusChanged mutation. It
 	// is empty when the previous Status was unknown, which makes the move a
 	// baseline rather than a column change (#2123).

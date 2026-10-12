@@ -15,11 +15,39 @@ import (
 // returns it (nil when it failed to open), so a test can subscribe and attach a
 // sink. Pair with StopChannelEventsForTest.
 func (e *Engine) StartChannelEventsForTest(dir string) *channelevents.Hub {
-	e.startChannelEventsIn(dir)
+	e.startChannelEventsIn(dir, false)
 	if ce := e.channelEvents(); ce != nil {
 		return ce.hub
 	}
 	return nil
+}
+
+// StartChannelEventsWarmingForTest is StartChannelEventsForTest with the
+// production start-up path (#2169): the daemon is warming until the readiness
+// pass has queued the restart catch-up to every subscriber and published the
+// downtime deltas. Use it to model a daemon restart.
+func (e *Engine) StartChannelEventsWarmingForTest(dir string) *channelevents.Hub {
+	e.startChannelEventsIn(dir, true)
+	if ce := e.channelEvents(); ce != nil {
+		return ce.hub
+	}
+	return nil
+}
+
+// SetChannelReadyTimeoutForTest changes how long a warming daemon waits for the
+// store before running the readiness pass anyway, returning the restore function.
+func SetChannelReadyTimeoutForTest(d time.Duration) (restore func()) {
+	old := channelReadyTimeout
+	channelReadyTimeout = d
+	return func() { channelReadyTimeout = old }
+}
+
+// SetDowntimeDeltasDisabledForTest turns the downtime diff off (every first
+// observation is a silent baseline, as before #2169) and returns the restore
+// function. It is how the restart tests show they are not vacuous.
+func SetDowntimeDeltasDisabledForTest() (restore func()) {
+	downtimeDisabled.Store(true)
+	return func() { downtimeDisabled.Store(false) }
 }
 
 // StopChannelEventsForTest stops the deriver and closes the hub. Idempotent.

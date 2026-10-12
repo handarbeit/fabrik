@@ -391,6 +391,7 @@ func annotateLabelChange(change *Change, m Mutation, before, after []string, lab
 // item the store already held.
 func annotateLifecycleChange(change *Change, m Mutation, before, after ItemState, existed bool) {
 	change.Created = !existed
+	change.LabelsBaselined = !before.LabelsKnown && after.LabelsKnown
 	if existed && change.Fields&StatusChanged != 0 && before.Status != "" && before.Status != after.Status {
 		change.PrevStatus = before.Status
 	}

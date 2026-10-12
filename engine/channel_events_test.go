@@ -98,7 +98,7 @@ func channelEngineOn(t *testing.T, e *Engine, ahead time.Duration, sub *channele
 	// move time (a deadline passing) without racing the deriver.
 	e.SetClock(&adjClock{t: time.Now().Add(ahead)})
 	e.fabrikDir = t.TempDir()
-	e.startChannelEvents()
+	e.startChannelEventsIn(channelStateDir(e.fabrikDir), false)
 	t.Cleanup(e.closeChannelEvents)
 	ce := e.channelEvents()
 	if ce == nil {
@@ -347,7 +347,7 @@ func TestChannelStateSurvivesDaemonRestart(t *testing.T) {
 	start := func() *Engine {
 		e := apiEngine(t, 0)
 		e.fabrikDir = t.TempDir()
-		e.startChannelEventsIn(dir)
+		e.startChannelEventsIn(dir, false)
 		t.Cleanup(e.closeChannelEvents)
 		return e
 	}
