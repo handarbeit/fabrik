@@ -191,3 +191,26 @@ func TestExecute_MCPNoDaemonStartupIsQuietOnStderr(t *testing.T) {
 		t.Errorf("fabrik mcp wrote to stderr at startup: %q", b)
 	}
 }
+
+// If Claude Code leaves an unfilled plugin setting as its literal ${user_config.X}
+// text instead of an empty string, it must read as unset, not as a subscriber
+// name or a directory (#2141).
+func TestUnexpandedPluginPlaceholdersCountAsUnset(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FABRIK_SUBSCRIBER", "${user_config.subscriber}")
+	if got := subscriberName(""); got != "" {
+		t.Errorf("placeholder subscriber must read as unset, got %q", got)
+	}
+	t.Setenv("FABRIK_MCP_DIR", "${user_config.fabrik_dir}")
+	t.Setenv("CLAUDE_PROJECT_DIR", "/from/project")
+	if got, _ := resolveMCPDir(""); got != "/from/project" {
+		t.Errorf("placeholder FABRIK_MCP_DIR must fall through to CLAUDE_PROJECT_DIR, got %q", got)
+	}
+	t.Setenv("CLAUDE_PROJECT_DIR", "${CLAUDE_PROJECT_DIR}")
+	if got, _ := resolveMCPDir(""); got != wd {
+		t.Errorf("all placeholders must fall through to cwd: got %q want %q", got, wd)
+	}
+}

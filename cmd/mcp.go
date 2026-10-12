@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/handarbeit/fabrik/internal/localapi"
@@ -77,10 +78,22 @@ func runMCP(args []string) error {
 // is deliberately no generated default — the name keys the daemon's held queue,
 // so it must be stable across sessions (#1968).
 func subscriberName(flagValue string) string {
-	if flagValue != "" {
-		return flagValue
+	if v := settingValue(flagValue); v != "" {
+		return v
 	}
-	return os.Getenv("FABRIK_SUBSCRIBER")
+	return settingValue(os.Getenv("FABRIK_SUBSCRIBER"))
+}
+
+// settingValue returns v, or "" when v is an unexpanded "${...}" placeholder.
+// The fabrik plugin's .mcp.json passes optional user settings through the
+// environment; if Claude Code leaves the literal ${user_config.X} text in place
+// for a setting the user never filled in, that text must read as "not set", not
+// as a subscriber name or a directory (#2141).
+func settingValue(v string) string {
+	if strings.Contains(v, "${") {
+		return ""
+	}
+	return v
 }
 
 // resolveMCPDir resolves the Fabrik directory: --dir, else $FABRIK_MCP_DIR (the
@@ -91,7 +104,7 @@ func subscriberName(flagValue string) string {
 // current directory (#2141).
 func resolveMCPDir(flagValue string) (string, error) {
 	for _, v := range []string{flagValue, os.Getenv("FABRIK_MCP_DIR"), os.Getenv("CLAUDE_PROJECT_DIR")} {
-		if v != "" {
+		if v = settingValue(v); v != "" {
 			return v, nil
 		}
 	}
