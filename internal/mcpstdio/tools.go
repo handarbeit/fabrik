@@ -147,7 +147,7 @@ func toolDefs() []map[string]any {
 			"description": "Choose which Fabrik events are pushed into this session (Claude Code Channels, research preview) instead of polling. Costs no GitHub call. " +
 				"Scopes combine with AND (entries inside one list with OR): issues, repos, a milestone, and label patterns (* matches any run of characters, e.g. fabrik:* or stage:*:complete; " +
 				"patterns only affect label-applied/label-removed events). By default label events skip high-churn labels (fabrik:locked:*, stage:*:in_progress, fabrik:spawned-child:*, fabrik:credited-pr:*, fabrik:editing); " +
-				"pass exclude_labels: [] to receive every label change. events filters by type: " + eventList() + ". " +
+				"pass exclude_labels: [] to receive every label change. item-added (a new item arrived), column-changed (a board column move) and closed are lifecycle events; progress_via_column replaces the stage-label stream with column moves. events filters by type: " + eventList() + ". " +
 				"digest_seconds (30-3600) batches ordinary events into one message; validate-settled, escalated, paused and daemon-unreachable always arrive at once. " +
 				"Events are held (persisted, bounded) while no session with this subscriber name is attached and delivered in order on reconnect. " +
 				"Pushes only appear if the session was started with Channels enabled for this server (claude --dangerously-load-development-channels server:fabrik); the daemon cannot tell whether it was, so a successful subscribe does not prove delivery. " +
@@ -155,14 +155,15 @@ func toolDefs() []map[string]any {
 				"The daemon tolerates version skew: an event type it renamed since this server was built is mapped to its new name, and one it does not know is dropped; the response lists both under mapped and rejected, " +
 				"and a request that names only unknown types is refused without touching the existing subscription.",
 			"inputSchema": obj(map[string]any{
-				"issues":         map[string]any{"type": "array", "items": issueSchema(), "description": "issue references: " + issueRefHelp},
-				"repos":          map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "owner/repo"},
-				"milestone":      map[string]any{"type": "string", "description": "milestone title, or #N for a milestone number; items whose milestone the daemon has not captured never match"},
-				"labels":         map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "include patterns for label events (default: every label)"},
-				"exclude_labels": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "exclude patterns for label events; omit for the default churn exclusions, [] for none"},
-				"events":         map[string]any{"type": "array", "items": map[string]any{"type": "string", "enum": eventNames()}, "description": "event types to receive (default: all)"},
-				"digest_seconds": map[string]any{"type": "integer", "minimum": 30, "maximum": 3600, "description": "batch ordinary events into one message per interval"},
-				"subscriber":     map[string]any{"type": "string", "description": "subscriber name; defaults to the name this server was launched with (--subscriber / FABRIK_SUBSCRIBER)"},
+				"issues":              map[string]any{"type": "array", "items": issueSchema(), "description": "issue references: " + issueRefHelp},
+				"repos":               map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "owner/repo"},
+				"milestone":           map[string]any{"type": "string", "description": "milestone title, or #N for a milestone number; items whose milestone the daemon has not captured never match"},
+				"labels":              map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "include patterns for label events (default: every label)"},
+				"exclude_labels":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "exclude patterns for label events; omit for the default churn exclusions, [] for none"},
+				"events":              map[string]any{"type": "array", "items": map[string]any{"type": "string", "enum": eventNames()}, "description": "event types to receive (default: all)"},
+				"digest_seconds":      map[string]any{"type": "integer", "minimum": 30, "maximum": 3600, "description": "batch ordinary events into one message per interval"},
+				"progress_via_column": map[string]any{"type": "boolean", "description": "drop label-applied/label-removed for stage:*:complete and stage:*:in_progress when column-changed is also taken, so progress arrives as column moves instead of the stage-label stream; overrides labels and exclude_labels for those two patterns; requires column-changed in events when events is set"},
+				"subscriber":          map[string]any{"type": "string", "description": "subscriber name; defaults to the name this server was launched with (--subscriber / FABRIK_SUBSCRIBER)"},
 			}),
 			"annotations": map[string]any{"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},
 		},
@@ -286,6 +287,8 @@ func buildCall(name string, args json.RawMessage, defaultSubscriber string) (met
 			Events        []string   `json:"events"`
 			DigestSeconds int        `json:"digest_seconds"`
 			Subscriber    string     `json:"subscriber"`
+
+			ProgressViaColumn bool `json:"progress_via_column"`
 		}
 		if err := decodeArgs(args, &a); err != nil {
 			return "", nil, err
@@ -304,6 +307,7 @@ func buildCall(name string, args json.RawMessage, defaultSubscriber string) (met
 		return localapi.MethodSubscribe, localapi.SubscribeParams{
 			Subscriber: who, Repos: a.Repos, Issues: issues, Milestone: a.Milestone,
 			Labels: a.Labels, ExcludeLabels: a.ExcludeLabels, Events: a.Events, DigestSeconds: a.DigestSeconds,
+			ProgressViaColumn: a.ProgressViaColumn,
 		}, nil
 	case ToolUnsubscribe:
 		var a struct {

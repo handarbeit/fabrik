@@ -421,6 +421,9 @@ type SubscribeParams struct {
 	ExcludeLabels *[]string `json:"exclude_labels,omitempty"`
 	Events        []string  `json:"events,omitempty"`
 	DigestSeconds int       `json:"digest_seconds,omitempty"`
+	// ProgressViaColumn drops stage:*:complete / stage:*:in_progress label
+	// events when column-changed is also taken (#2123).
+	ProgressViaColumn bool `json:"progress_via_column,omitempty"`
 }
 
 // EventMapping reports a requested event type the daemon rewrote to its current

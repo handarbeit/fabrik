@@ -392,6 +392,9 @@ func (c *CacheImpl) BootstrapFromProbe(items []gh.BoardProbeItem, projectID stri
 			Repo:           pi.Repo,
 			UpdatedAt:      pi.EffectiveUpdatedAt,
 			LinkedPRNumber: pi.LinkedPRNumber,
+			// The probe carries no labels: the first label-bearing population
+			// (deep fetch or reconcile) is then a silent baseline (#2123).
+			LabelsAbsent: true,
 		})
 	}
 
@@ -1154,8 +1157,16 @@ func (c *CacheImpl) applyKeyedMutation(key, opName string, build func(repo strin
 // UpdateItemStatus updates the Status field for the item identified by key.
 // No-op when the key is not in the cache. Safe for concurrent use.
 func (c *CacheImpl) UpdateItemStatus(key, newStatus string) {
+	c.UpdateItemStatusBy(key, newStatus, "")
+}
+
+// UpdateItemStatusBy is UpdateItemStatus for a move requested by an overseer
+// session: requester (the sanitised subscriber name) rides the mutation onto the
+// resulting Change so the column-changed event attributes it (#2123). "" is an
+// engine-autonomous advance.
+func (c *CacheImpl) UpdateItemStatusBy(key, newStatus, requester string) {
 	c.applyKeyedMutation(key, "UpdateItemStatus", func(repo string, number int) itemstate.Mutation {
-		return itemstate.LocalStatusUpdated{Repo: repo, Number: number, NewStatus: newStatus}
+		return itemstate.LocalStatusUpdated{Repo: repo, Number: number, NewStatus: newStatus, Requester: requester}
 	})
 }
 

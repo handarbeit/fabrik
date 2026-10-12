@@ -1,5 +1,7 @@
 package itemstate
 
+import "time"
+
 // ChangeFlags is a bitmask describing which logical field groups of an ItemState
 // were altered by a mutation. Observers use this to cheaply filter whether a
 // Change is relevant to them without inspecting the full Snapshot.
@@ -121,6 +123,20 @@ type Change struct {
 	// write behind this change (#2125); empty for an engine-autonomous write, an
 	// unechoed webhook or a non-label change.
 	Requester string
+	// Created is true when the mutation created the record (the store had not
+	// held the item). Never set by Reset or for a mid-run reset of known items
+	// (#2123): only an item the running store learns about is an arrival.
+	Created bool
+	// PrevStatus is the item's board Status before a StatusChanged mutation. It
+	// is empty when the previous Status was unknown, which makes the move a
+	// baseline rather than a column change (#2123).
+	PrevStatus string
+	// StatusAt is the GitHub time of a webhook-delivered Status move; zero when
+	// unknown — never "now" (#2123).
+	StatusAt time.Time
+	// Closed is true when the mutation moved an already-held item from open to
+	// closed (#2123).
+	Closed bool
 }
 
 // LabelDelta is one label added to or removed from an item.

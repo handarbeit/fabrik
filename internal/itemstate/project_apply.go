@@ -38,9 +38,12 @@ func applyProjectItem(item *ItemState, pi gh.ProjectItem) ChangeFlags {
 		flags |= StateChanged
 	}
 
-	if !reflect.DeepEqual(item.Labels, pi.Labels) {
-		item.Labels = copyStrings(pi.Labels)
-		flags |= LabelsChanged
+	if !pi.LabelsAbsent {
+		if !reflect.DeepEqual(item.Labels, pi.Labels) {
+			item.Labels = copyStrings(pi.Labels)
+			flags |= LabelsChanged
+		}
+		item.LabelsKnown = true
 	}
 
 	if item.Status != pi.Status {
@@ -179,15 +182,18 @@ func applyShallowItem(item *ItemState, pi gh.ProjectItem, fetchedAt time.Time, g
 		flags |= StateChanged
 	}
 
-	labels := pi.Labels
-	if view.Labels != nil {
-		labels = view.Labels
-	}
-	if view.Labels != nil && sameStringSet(item.Labels, labels) {
-		// Only the order differs from the kept local set: leave it untouched.
-	} else if !reflect.DeepEqual(item.Labels, labels) {
-		item.Labels = copyStrings(labels)
-		flags |= LabelsChanged
+	if !pi.LabelsAbsent {
+		labels := pi.Labels
+		if view.Labels != nil {
+			labels = view.Labels
+		}
+		if view.Labels != nil && sameStringSet(item.Labels, labels) {
+			// Only the order differs from the kept local set: leave it untouched.
+		} else if !reflect.DeepEqual(item.Labels, labels) {
+			item.Labels = copyStrings(labels)
+			flags |= LabelsChanged
+		}
+		item.LabelsKnown = true
 	}
 
 	if item.Status != view.Status {

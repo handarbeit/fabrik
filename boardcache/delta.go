@@ -226,10 +226,14 @@ type projectsV2ItemPayload struct {
 			To json.RawMessage `json:"to"`
 		} `json:"field_value"`
 	} `json:"changes"`
+	Sender struct {
+		Login string `json:"login"`
+	} `json:"sender"`
 	ProjectsV2Item struct {
 		ID            string `json:"id"`
 		ContentNodeID string `json:"content_node_id"`
 		ContentType   string `json:"content_type"`
+		UpdatedAt     string `json:"updated_at"`
 	} `json:"projects_v2_item"`
 }
 
@@ -435,7 +439,7 @@ func (c *CacheImpl) applyIssuesDelta(payload []byte) {
 			c.logFn("[cache] applyIssuesDelta(closed): ensure #%d: %v\n", issNum, err)
 			return
 		}
-		_, changes, _ := c.store.Apply(itemstate.IssueClosed{Repo: fullRepo, Number: issNum})
+		_, changes, _ := c.store.Apply(itemstate.IssueClosed{Repo: fullRepo, Number: issNum, Sender: p.Sender.Login})
 		if len(changes) == 0 {
 			return
 		}
@@ -531,6 +535,21 @@ func (c *CacheImpl) applyIssuesDelta(payload []byte) {
 		// locked, unlocked, pinned, unpinned: no state in the engine's
 		// pipeline depends on these fields.
 	}
+}
+
+// matchEcho runs the best available echo matcher for an inbound webhook and
+// reports whether it matched one of the engine's own writes and which overseer
+// requester (if any) registered it. With no matcher injected it reports no match.
+func (c *CacheImpl) matchEcho(eventType, action, key string) (bool, string) {
+	switch {
+	case c.matchEchoViaFn != nil:
+		return c.matchEchoViaFn(eventType, action, key)
+	case c.matchEchoReportedFn != nil:
+		return c.matchEchoReportedFn(eventType, action, key), ""
+	case c.matchEchoFn != nil:
+		c.matchEchoFn(eventType, action, key)
+	}
+	return false, ""
 }
 
 // applyIssueLabelMutationDelta is the shared body for the "labeled"/"unlabeled"
@@ -1128,9 +1147,7 @@ func (c *CacheImpl) applyProjectsV2ItemDelta(payload []byte) {
 		c.bumpLocalDeltaAt(itemKey(pi.Repo, pi.Number))
 
 	case "edited":
-		if c.matchEchoFn != nil {
-			c.matchEchoFn("projects_v2_item", "edited", p.ProjectsV2Item.ID)
-		}
+		echoed, via := c.matchEcho("projects_v2_item", "edited", p.ProjectsV2Item.ID)
 		// Only a Status (single_select) edit changes anything the cache holds.
 		// A text-field edit — in particular the engine's own display-only
 		// status-line write echoing back (#2048), or a human editing it — is a
@@ -1154,10 +1171,19 @@ func (c *CacheImpl) applyProjectsV2ItemDelta(payload []byte) {
 		if newStatus == "" {
 			return
 		}
-		snap, changes, _ := c.store.Apply(itemstate.ProjectV2ItemEdited{
-			ItemID:    p.ProjectsV2Item.ID,
-			NewStatus: newStatus,
-		})
+		edit := itemstate.ProjectV2ItemEdited{
+			ItemID:       p.ProjectsV2Item.ID,
+			NewStatus:    newStatus,
+			Sender:       p.Sender.Login,
+			EchoOfEngine: echoed,
+		}
+		if echoed {
+			edit.Requester = via
+		}
+		if t, err := time.Parse(time.RFC3339, p.ProjectsV2Item.UpdatedAt); err == nil {
+			edit.At = t
+		}
+		snap, changes, _ := c.store.Apply(edit)
 		if len(changes) == 0 {
 			return
 		}
