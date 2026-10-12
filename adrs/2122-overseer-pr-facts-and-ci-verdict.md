@@ -30,3 +30,7 @@ GraphQL: the probe query's cost, measured with `rateLimit(dryRun: true)` against
 - Webhooks do not write the verdict; with webhooks the check-run cache is warmer (so more heads take the free restamp path), but the verdict is recomputed on the next poll, so freshness is bounded by the poll interval either way.
 - Red on a draft PR is common while a stage is still pushing; the overlay reports it but does not rank it.
 - Rejected: `statusCheckRollup` on the probe (two more connections per PR node, mixes commit statuses with check runs, and carries no check-run id, so it cannot feed the gates' latest-per-name classifier); populating the gate-read `Mergeable`/`MergeableState`; a new ranked attention state.
+
+## Addendum: the refresher never moves a known head SHA
+
+The REST facts fallback for items the probe cannot see (a `base:<branch>` PR) reads the PR's head SHA and writes it to `LinkedPRState.HeadSHA` only when the store holds none. That field feeds the gates' Validate SHA-invalidation scan, so moving it from an overseer-only refresher changed when a settled Validate was invalidated (observed in `TestSimSettlementWithdrawnWhenTheBaseMoves`). A head the engine already holds is never moved; `Facts.HeadSHA` records what the refresher read, and the verdict is computed for the store's head.

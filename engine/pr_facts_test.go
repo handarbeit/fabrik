@@ -203,6 +203,9 @@ func TestSettlePRFacts_RESTFallbackFillsFactsTheProbeCannotSee(t *testing.T) {
 	env := newPRFactsEnv(t)
 	env.e.seedAPIItem(t, 7, "Implement", "base:release")
 	env.e.store.Apply(itemstate.PRDetailsUpdated{Repo: "owner/repo", Number: 7, PRNumber: 57, State: "open"})
+	// The refresher never moves a known head SHA (it feeds the gates' SHA
+	// invalidation); the engine's own paths have already learned it.
+	env.e.store.Apply(itemstate.PRHeadSHAUpdated{Repo: "owner/repo", Number: 7, LinkedPRNum: 57, SHA: prFactsSHA})
 	env.client.fetchPRDetailsFn = func(owner, repo string, n int) (*gh.PRDetails, error) {
 		return &gh.PRDetails{Number: n, State: "open", Draft: true, HeadSHA: prFactsSHA, MergeableState: "UNKNOWN"}, nil
 	}
