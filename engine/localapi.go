@@ -259,6 +259,7 @@ func (e *Engine) attentionInput(st *itemstate.ItemState, now time.Time, threshol
 		}
 	}
 	in.PollStall, in.PollRecoveredAt = e.attentionPollStall(now)
+	e.fillWorkerInputs(&in, st, now, usageLimitedUntil)
 	for _, t := range st.StageState.LastAttemptAt {
 		if t.After(in.LastAttemptAt) {
 			in.LastAttemptAt = t
@@ -296,6 +297,7 @@ func attentionInfo(res attention.Result, now time.Time, threshold time.Duration,
 			Deadlines: []localapi.DeadlineInfo{},
 		},
 		Progress: localapi.ProgressInfo{At: localapi.KnownTime(res.ProgressAt)},
+		Cause:    res.Cause,
 	}
 	if !res.ProgressAt.IsZero() {
 		info.Progress.AgeSeconds = localapi.Some(secs(res.ProgressAge))
@@ -543,20 +545,49 @@ func (b localAPIBackend) worker(st *itemstate.ItemState) localapi.WorkerInfo {
 	w := localapi.WorkerInfo{
 		StartedAt:     localapi.Unknown[time.Time](),
 		LastSignAt:    localapi.Unknown[time.Time](),
-		TurnsUsed:     localapi.Unknown[int](), // never tracked live for an in-flight worker
+		TurnsUsed:     localapi.Unknown[int](), // unknown unless the engine has the live count
 		MaxTurns:      localapi.Unknown[int](),
 		LastTurnsUsed: localapi.Unknown[int](),
 	}
 	stage := st.Status
-	if st.Worker != nil {
-		w.InFlight = true
-		w.Stage = st.Worker.StageName
-		w.StartedAt = localapi.KnownTime(st.Worker.StartedAt)
-		w.LastSignAt = localapi.KnownTime(st.Worker.LastSignAt)
-		stage = st.Worker.StageName
+	switch {
+	case st.Worker != nil:
+		h := st.Worker
+		w.Stage = h.StageName
+		w.Kind, w.Trigger = h.Kind, h.Trigger
+		stage = h.StageName
+		if h.Queued {
+			// Dispatched but holding no worker slot (#2121): not in flight, and it
+			// has no start time yet — started_at is the slot-acquired time.
+			w.Queued = true
+			since := localapi.KnownTime(h.QueuedSince)
+			w.QueuedSince = &since
+		} else {
+			w.InFlight = true
+			w.StartedAt = localapi.KnownTime(h.StartedAt)
+			w.LastSignAt = localapi.KnownTime(h.LastSignAt)
+			if h.TurnsKnown {
+				w.TurnsUsed = localapi.Some(h.TurnsUsed)
+			}
+		}
+	case st.ConflictResolution != nil:
+		// A merge-train conflict resolution is a worker kind of its own, recorded
+		// on the member rather than as a Worker handle (#2121).
+		c := st.ConflictResolution
+		w.Kind = itemstate.WorkerKindTrainConflict
+		if c.Queued {
+			w.Queued = true
+			since := localapi.KnownTime(c.Since)
+			w.QueuedSince = &since
+		} else {
+			w.InFlight = true
+			w.StartedAt = localapi.KnownTime(c.Since)
+		}
 	}
-	if s := b.e.stageByName(stage); s != nil && s.MaxTurns > 0 && w.InFlight {
-		w.MaxTurns = localapi.Some(s.MaxTurns)
+	if w.InFlight && st.Worker != nil && st.Worker.TurnsMax > 0 {
+		// The running invocation's effective budget (it differs from the stage's
+		// max_turns for a comment review or an extended budget).
+		w.MaxTurns = localapi.Some(st.Worker.TurnsMax)
 	}
 	if n, ok := st.StageState.LastTurnsUsed[stage]; ok {
 		w.LastTurnsUsed = localapi.Some(n)
@@ -1072,13 +1103,30 @@ func (b localAPIBackend) Health(localapi.HealthParams) (*localapi.HealthResult, 
 		res.Backoff.Ratio = localapi.Some(bo.Ratio)
 	}
 
-	inUse := 0
+	// in_use counts item workers that HOLD a slot; a dispatched worker still
+	// waiting for one is counted in queued instead (#2121). The two are read from
+	// one Scan so they describe the same instant, and in_use is clamped to the
+	// maximum: a worker that has just exited and one that has just entered can
+	// both be visible to a reader that does not hold the pool still.
+	inUse, queued := 0, 0
 	e.store.Scan(func(it *itemstate.ItemState) {
-		if it.Worker != nil {
+		switch {
+		case it.Worker != nil && it.Worker.Queued:
+			queued++
+		case it.Worker != nil:
+			inUse++
+		case it.ConflictResolution != nil && it.ConflictResolution.Queued:
+			queued++
+		case it.ConflictResolution != nil && it.ConflictResolution.GeneralSlot:
+			// A merge-train conflict resolution on a general-pool slot holds one
+			// like any worker; one on the reserved train slot is train_in_use.
 			inUse++
 		}
 	})
-	res.Workers = localapi.WorkerSlots{InUse: inUse, MaxConcurrent: localapi.Unknown[int]()}
+	if e.cfg.MaxConcurrent > 0 && inUse > e.cfg.MaxConcurrent {
+		inUse = e.cfg.MaxConcurrent
+	}
+	res.Workers = localapi.WorkerSlots{InUse: inUse, Queued: queued, MaxConcurrent: localapi.Unknown[int]()}
 	if e.cfg.MaxConcurrent > 0 {
 		res.Workers.MaxConcurrent = localapi.Some(e.cfg.MaxConcurrent)
 	}

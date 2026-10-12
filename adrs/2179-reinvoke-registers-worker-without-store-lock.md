@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted. The `WorkerRefreshed` mutation described below was later replaced by `WorkerSlotAcquired` (see ADR 2121).
 
 ## Context
 

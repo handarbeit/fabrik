@@ -2232,6 +2232,7 @@ func (e *Engine) dispatchCandidates(ctx context.Context, board *gh.ProjectBoard,
 			Number:    item.Number,
 			StageName: stageName,
 			StartedAt: startTime,
+			Kind:      itemstate.WorkerKindStageRun,
 		})
 		// Create a per-issue context so kill-reason annotation can propagate from
 		// the cancellation path (daemon shutdown, supplant) to the kill log.

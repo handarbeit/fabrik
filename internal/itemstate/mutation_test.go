@@ -1266,34 +1266,184 @@ func TestWorkerEnteredOverwrittenByLocalLockAcquired(t *testing.T) {
 	}
 }
 
-// WorkerRefreshed (#2179) re-stamps the Worker without claiming or touching Lock.
-func TestWorkerRefreshedSetsWorkerWithoutLock(t *testing.T) {
+// WorkerSlotAcquired (#2121, replacing #2179's WorkerRefreshed) re-stamps a queued
+// Worker without claiming or touching Lock.
+func TestWorkerSlotAcquiredClearsQueuedWithoutLock(t *testing.T) {
 	s := newStoreWithItem(t, testRepo, 1)
 	now := time.Now()
-	s.Apply(WorkerEntered{Repo: testRepo, Number: 1, StageName: "Plan", StartedAt: now})
+	s.Apply(WorkerEntered{Repo: testRepo, Number: 1, StageName: "Plan", StartedAt: now,
+		Kind: WorkerKindReviewReinvoke, Queued: true, QueuedSince: now})
+	if st := getItem(t, s, testRepo, 1); st.Worker == nil || !st.Worker.Queued || !st.Worker.QueuedSince.Equal(now) {
+		t.Fatalf("Worker = %+v, want queued since %v", st.Worker, now)
+	}
 	later := now.Add(time.Minute)
-	applyExpect(t, s, WorkerRefreshed{Repo: testRepo, Number: 1, StageName: "Plan", StartedAt: later}, WorkerChanged)
+	applyExpect(t, s, WorkerSlotAcquired{Repo: testRepo, Number: 1, At: later}, WorkerChanged)
 	st := getItem(t, s, testRepo, 1)
-	if st.Worker == nil || !st.Worker.StartedAt.Equal(later) || !st.Worker.LastSignAt.Equal(later) {
-		t.Errorf("Worker = %+v, want StartedAt/LastSignAt == %v", st.Worker, later)
+	if st.Worker == nil || st.Worker.Queued || !st.Worker.QueuedSince.IsZero() ||
+		!st.Worker.StartedAt.Equal(later) || !st.Worker.LastSignAt.Equal(later) {
+		t.Errorf("Worker = %+v, want held, StartedAt/LastSignAt == %v", st.Worker, later)
+	}
+	if st.Worker.Kind != WorkerKindReviewReinvoke {
+		t.Errorf("Kind = %q, slot acquire must keep the kind", st.Worker.Kind)
 	}
 	if st.Lock != nil {
-		t.Errorf("Lock = %+v, WorkerRefreshed must not claim a lock", st.Lock)
+		t.Errorf("Lock = %+v, WorkerSlotAcquired must not claim a lock", st.Lock)
 	}
 }
 
-func TestWorkerRefreshedLeavesExistingLockUntouched(t *testing.T) {
+func TestWorkerSlotAcquiredNeverWakesThePoll(t *testing.T) {
 	s := newStoreWithItem(t, testRepo, 1)
 	now := time.Now()
-	s.Apply(LocalLockAcquired{Repo: testRepo, Number: 1, User: "bot", AcquiredAt: now})
-	s.Apply(WorkerRefreshed{Repo: testRepo, Number: 1, StageName: "Plan", StartedAt: now})
+	s.Apply(WorkerEntered{Repo: testRepo, Number: 1, StageName: "Plan", StartedAt: now, Queued: true})
+	for _, m := range []Mutation{
+		WorkerSlotAcquired{Repo: testRepo, Number: 1, At: now},
+		WorkerKindSet{Repo: testRepo, Number: 1, Kind: WorkerKindCommentReview, Trigger: "c1"},
+		WorkerTriggerSet{Repo: testRepo, Number: 1, Trigger: "c2"},
+		WorkerTurnsRecorded{Repo: testRepo, Number: 1, Turns: 3},
+	} {
+		_, chs, err := s.Apply(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(chs) == 0 || chs[0].Fields&WorkerChanged == 0 || chs[0].Fields&WorkerLifecycleChanged != 0 {
+			t.Errorf("%T: changes %+v must be WorkerChanged only", m, chs)
+		}
+	}
+}
+
+func TestWorkerSlotAcquiredNoopWithoutWorker(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	s.Apply(WorkerEntered{Repo: testRepo, Number: 1, StageName: "Plan", Queued: true})
+	s.Apply(WorkerExited{Repo: testRepo, Number: 1})
+	applyExpect(t, s, WorkerSlotAcquired{Repo: testRepo, Number: 1, At: time.Now()}, 0)
+	if st := getItem(t, s, testRepo, 1); st.Worker != nil {
+		t.Errorf("Worker = %+v, a late slot acquire must not resurrect a worker", st.Worker)
+	}
+}
+
+func TestWorkerKindSetNeverOverridesAReinvokeKind(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	s.Apply(WorkerEntered{Repo: testRepo, Number: 1, StageName: "Review", Kind: WorkerKindCIFixReinvoke})
+	applyExpect(t, s, WorkerKindSet{Repo: testRepo, Number: 1, Kind: WorkerKindCommentReview, Trigger: "c1"}, 0)
+	if st := getItem(t, s, testRepo, 1); st.Worker.Kind != WorkerKindCIFixReinvoke || st.Worker.Trigger != "" {
+		t.Errorf("Worker = %+v, the reinvoke kind must stand", st.Worker)
+	}
+}
+
+func TestWorkerKindSetOnAStagePlaceholderAndRestore(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	s.Apply(WorkerEntered{Repo: testRepo, Number: 1, StageName: "Validate", Kind: WorkerKindStageRun})
+	applyExpect(t, s, WorkerKindSet{Repo: testRepo, Number: 1, Kind: WorkerKindCommentReview, Trigger: "c1,c2"}, WorkerChanged)
+	if st := getItem(t, s, testRepo, 1); st.Worker.Kind != WorkerKindCommentReview || st.Worker.Trigger != "c1,c2" {
+		t.Errorf("Worker = %+v", st.Worker)
+	}
+	applyExpect(t, s, WorkerKindSet{Repo: testRepo, Number: 1, Kind: WorkerKindStageRun}, WorkerChanged)
+	if st := getItem(t, s, testRepo, 1); st.Worker.Kind != WorkerKindStageRun || st.Worker.Trigger != "" {
+		t.Errorf("Worker = %+v, want restored stage-run", st.Worker)
+	}
+}
+
+func TestLocalLockAcquiredKeepsPlaceholderKind(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	now := time.Now()
+	s.Apply(WorkerEntered{Repo: testRepo, Number: 1, StageName: "Plan", StartedAt: now, Kind: WorkerKindStageRun})
+	s.Apply(LocalLockAcquired{Repo: testRepo, Number: 1, User: "bot", AcquiredAt: now,
+		Worker: &WorkerHandle{StageName: "Plan", StartedAt: now, LastSignAt: now}})
+	if st := getItem(t, s, testRepo, 1); st.Worker == nil || st.Worker.Kind != WorkerKindStageRun {
+		t.Errorf("Worker = %+v, LocalLockAcquired must keep the placeholder kind", st.Worker)
+	}
+}
+
+func TestWorkerTurnsRecorded(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	s.Apply(WorkerEntered{Repo: testRepo, Number: 1, StageName: "Plan"})
+	if st := getItem(t, s, testRepo, 1); st.Worker.TurnsKnown {
+		t.Error("turns must start unknown")
+	}
+	applyExpect(t, s, WorkerTurnsRecorded{Repo: testRepo, Number: 1, Turns: 4, Max: 50}, WorkerChanged)
+	applyExpect(t, s, WorkerTurnsRecorded{Repo: testRepo, Number: 1, Turns: 4, Max: 50}, 0)
+	if st := getItem(t, s, testRepo, 1); !st.Worker.TurnsKnown || st.Worker.TurnsUsed != 4 || st.Worker.TurnsMax != 50 {
+		t.Errorf("Worker = %+v", st.Worker)
+	}
+	// Zero turns marks the next invocation's start: the count is forgotten, the new
+	// budget kept.
+	applyExpect(t, s, WorkerTurnsRecorded{Repo: testRepo, Number: 1, Turns: 0, Max: 100}, WorkerChanged)
+	if st := getItem(t, s, testRepo, 1); st.Worker.TurnsKnown || st.Worker.TurnsUsed != 0 || st.Worker.TurnsMax != 100 {
+		t.Errorf("after an invocation start Worker = %+v", st.Worker)
+	}
+}
+
+func TestStatusFactsAreRecordedAndInformationalOnly(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	due := time.Now().Add(time.Minute)
+	applyExpect(t, s, RetryScheduled{Repo: testRepo, Number: 1, Retry: PendingRetry{Stage: "Plan", Cause: "wall-time-kill", Due: due}}, StatusFactsChanged)
+	applyExpect(t, s, GateHoldRecorded{Repo: testRepo, Number: 1, Hold: GateHold{Gate: "feedback", IDs: []string{"review-body:7"}, Since: due}}, StatusFactsChanged)
+	applyExpect(t, s, ConflictResolutionSet{Repo: testRepo, Number: 1, Active: true, Queued: true, Since: due}, StatusFactsChanged)
 	st := getItem(t, s, testRepo, 1)
-	if st.Lock == nil || !st.Lock.HeldByThis || st.Lock.HolderUser != "bot" {
-		t.Errorf("Lock = %+v, want the pre-existing real lock unchanged", st.Lock)
+	if st.PendingRetry == nil || st.PendingRetry.Cause != "wall-time-kill" || st.GateHold == nil || st.GateHold.IDs[0] != "review-body:7" ||
+		st.ConflictResolution == nil || !st.ConflictResolution.Queued {
+		t.Fatalf("state = %+v", st)
+	}
+	// A repeat of the same gate keeps the original Since.
+	s.Apply(GateHoldRecorded{Repo: testRepo, Number: 1, Hold: GateHold{Gate: "feedback", Since: due.Add(time.Hour)}})
+	if st := getItem(t, s, testRepo, 1); !st.GateHold.Since.Equal(due) {
+		t.Errorf("GateHold.Since = %v, want the original %v", st.GateHold.Since, due)
+	}
+	// Clearing a different gate leaves it.
+	applyExpect(t, s, GateHoldCleared{Repo: testRepo, Number: 1, Gate: "ci"}, 0)
+	applyExpect(t, s, GateHoldCleared{Repo: testRepo, Number: 1, Gate: "feedback"}, StatusFactsChanged)
+	applyExpect(t, s, ConflictResolutionSet{Repo: testRepo, Number: 1}, StatusFactsChanged)
+	if wakeLike := StatusFactsChanged & (WorkerLifecycleChanged | StatusChanged | LabelsChanged); wakeLike != 0 {
+		t.Error("StatusFactsChanged must not alias a wake flag")
+	}
+}
+
+func TestStatusFactsClearWhenTheirCauseEnds(t *testing.T) {
+	setup := func() *Store {
+		s := newStoreWithItem(t, testRepo, 1)
+		s.Apply(RetryScheduled{Repo: testRepo, Number: 1, Retry: PendingRetry{Stage: "Plan", Cause: "max-turns"}})
+		s.Apply(GateHoldRecorded{Repo: testRepo, Number: 1, Hold: GateHold{Gate: "ci"}})
+		return s
+	}
+	for name, m := range map[string]Mutation{
+		"paused":         LocalLabelAdded{Repo: testRepo, Number: 1, Label: "fabrik:paused"},
+		"stage complete": LocalLabelAdded{Repo: testRepo, Number: 1, Label: "stage:Plan:complete"},
+		"closed":         LocalIssueClosed{Repo: testRepo, Number: 1},
+		"column move":    LocalStatusUpdated{Repo: testRepo, Number: 1, NewStatus: "Implement"},
+	} {
+		s := setup()
+		s.Apply(LocalStatusUpdated{Repo: testRepo, Number: 1, NewStatus: "Plan"})
+		s.Apply(RetryScheduled{Repo: testRepo, Number: 1, Retry: PendingRetry{Stage: "Plan", Cause: "max-turns"}})
+		s.Apply(GateHoldRecorded{Repo: testRepo, Number: 1, Hold: GateHold{Gate: "ci"}})
+		s.Apply(m)
+		st := getItem(t, s, testRepo, 1)
+		if st.PendingRetry != nil || st.GateHold != nil {
+			t.Errorf("%s: PendingRetry=%v GateHold=%v, want both cleared", name, st.PendingRetry, st.GateHold)
+		}
+	}
+	// A stage-run dispatch clears the retry it was waiting on; a reinvoke does not.
+	s := setup()
+	s.Apply(WorkerEntered{Repo: testRepo, Number: 1, StageName: "Plan", Kind: WorkerKindReviewReinvoke})
+	if getItem(t, s, testRepo, 1).PendingRetry == nil {
+		t.Error("a reinvoke dispatch must not clear the pending retry")
 	}
 	s.Apply(WorkerExited{Repo: testRepo, Number: 1})
-	if st := getItem(t, s, testRepo, 1); st.Lock == nil {
-		t.Error("WorkerExited cleared a real lock")
+	s.Apply(WorkerEntered{Repo: testRepo, Number: 1, StageName: "Plan", Kind: WorkerKindStageRun})
+	if getItem(t, s, testRepo, 1).PendingRetry != nil {
+		t.Error("a stage-run dispatch must clear the pending retry")
+	}
+}
+
+func TestRebaseCauseEndsWithItsLabel(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	s.Apply(LocalLabelAdded{Repo: testRepo, Number: 1, Label: "fabrik:rebase-needed"})
+	applyExpect(t, s, RebaseCauseSet{Repo: testRepo, Number: 1, Cause: "after-landing"}, StatusFactsChanged)
+	if getItem(t, s, testRepo, 1).RebaseCause != "after-landing" {
+		t.Fatal("cause not recorded")
+	}
+	s.Apply(LocalLabelRemoved{Repo: testRepo, Number: 1, Label: "fabrik:rebase-needed"})
+	if got := getItem(t, s, testRepo, 1).RebaseCause; got != "" {
+		t.Errorf("RebaseCause = %q after the label was removed", got)
 	}
 }
 

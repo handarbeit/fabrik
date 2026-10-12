@@ -93,6 +93,11 @@ const (
 	// protection, intentionally excluded from wakeChFlags/cycleSetFlags so it
 	// never wakes the poll loop.
 	EngineWriteRecordedChanged
+	// StatusFactsChanged indicates PendingRetry, GateHold, ConflictResolution or
+	// RebaseCause changed (#2121). Facts the attention classifier reads; like
+	// EngineWriteRecordedChanged they are intentionally excluded from
+	// wakeChFlags/cycleSetFlags so recording one never wakes the poll loop.
+	StatusFactsChanged
 )
 
 // Change describes what fields a mutation altered. Delivered to every Observer
@@ -268,4 +273,47 @@ func (s *Store) nowLocked() time.Time {
 		return s.clock()
 	}
 	return time.Now()
+}
+
+// clearStatusFacts drops the in-memory attention facts a mutation has made stale
+// (#2121): a pending retry and a gate hold end when the item is paused, closed,
+// moves column or completes a stage; a conflict resolution ends when the item
+// closes; the rebase cause ends with its fabrik:rebase-needed label. Returns
+// StatusFactsChanged when anything was cleared. Called with the store lock held,
+// for an item the store already held.
+func clearStatusFacts(item *ItemState, before ItemState) ChangeFlags {
+	var ended bool
+	for _, d := range diffLabels(before.Labels, item.Labels) {
+		if d.Added && (d.Label == "fabrik:paused" || (strings.HasPrefix(d.Label, "stage:") && strings.HasSuffix(d.Label, ":complete"))) {
+			ended = true
+		}
+	}
+	if item.IsClosed && !before.IsClosed {
+		ended = true
+		if item.ConflictResolution != nil {
+			item.ConflictResolution = nil
+		}
+	}
+	if before.Status != "" && item.Status != before.Status {
+		ended = true
+	}
+	var changed bool
+	if ended {
+		if item.PendingRetry != nil {
+			item.PendingRetry = nil
+			changed = true
+		}
+		if item.GateHold != nil {
+			item.GateHold = nil
+			changed = true
+		}
+	}
+	if item.RebaseCause != "" && !containsString(item.Labels, "fabrik:rebase-needed") {
+		item.RebaseCause = ""
+		changed = true
+	}
+	if changed || (item.IsClosed && !before.IsClosed && before.ConflictResolution != nil) {
+		return StatusFactsChanged
+	}
+	return 0
 }

@@ -82,6 +82,19 @@ func newSnapshot(s ItemState) Snapshot {
 		w := *s.Worker
 		c.Worker = &w
 	}
+	if s.PendingRetry != nil {
+		pr := *s.PendingRetry
+		c.PendingRetry = &pr
+	}
+	if s.GateHold != nil {
+		gh := *s.GateHold
+		gh.IDs = copyStrings(s.GateHold.IDs)
+		c.GateHold = &gh
+	}
+	if s.ConflictResolution != nil {
+		cr := *s.ConflictResolution
+		c.ConflictResolution = &cr
+	}
 
 	return Snapshot{state: c}
 }
