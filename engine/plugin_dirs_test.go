@@ -349,7 +349,8 @@ func TestResolvePluginDirs_LocalWorkflowsLoadsBesideDevOverride(t *testing.T) {
 // no plugins, so this is the twin-level coverage; see ADR 2139.)
 func TestResolvePluginDirs_LocalWorkflowsSkillsResolveQualified(t *testing.T) {
 	fabrikDir := t.TempDir()
-	skillPlugin(t, fabrikDir, filepath.Join(".fabrik", "plugin"), plugin.BasePluginName, "fabrik-plan", "fabrik-research")
+	skillPlugin(t, fabrikDir, filepath.Join(".fabrik", "plugin"), plugin.BasePluginName, "plan", "research")
+	// A moved copy keeps its pre-rename skill names (ADR 2140).
 	skillPlugin(t, fabrikDir, filepath.Join(".fabrik", "plugins", "local-workflows"), plugin.LocalWorkflowsName, "fabrik-plan")
 
 	dirs, err := resolvePluginDirs(fabrikDir, "", nil)
@@ -359,9 +360,13 @@ func TestResolvePluginDirs_LocalWorkflowsSkillsResolveQualified(t *testing.T) {
 	cat := buildSkillCatalogue(dirs)
 	for ref, want := range map[string]string{
 		"local-workflows:fabrik-plan": "local-workflows:fabrik-plan",
-		"fabrik:fabrik-plan":          "fabrik:fabrik-plan",
-		"fabrik:fabrik-research":      "fabrik:fabrik-research",
-		"fabrik-plan":                 "fabrik:fabrik-plan", // bare still resolves base-first
+		"fabrik-stages:plan":          "fabrik-stages:plan",
+		"fabrik-stages:research":      "fabrik-stages:research",
+		"plan":                        "fabrik-stages:plan", // bare still resolves base-first
+		// Pre-rename references land on the renamed skills (FR-004), but
+		// local-workflows:* references are never remapped.
+		"fabrik:fabrik-research": "fabrik-stages:research",
+		"fabrik:fabrik-plan":     "fabrik-stages:plan",
 	} {
 		res, why, ok := cat.resolve(ref)
 		if !ok {

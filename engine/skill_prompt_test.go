@@ -79,7 +79,7 @@ func TestSkillPrompt_DefaultStagesNameRegisteredSkill(t *testing.T) {
 		if s.Skill == "" {
 			continue
 		}
-		dir := "fabrik-" + strings.ToLower(s.Name)
+		dir := strings.ToLower(s.Name)
 		if _, err := os.Stat(filepath.Join(pdir, "skills", dir, "SKILL.md")); err != nil {
 			t.Fatalf("stage %s: no embedded skill dir %s", s.Name, dir)
 		}
