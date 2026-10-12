@@ -311,3 +311,47 @@ func TestProjectPlugin_PendingUntilUpgraded(t *testing.T) {
 		t.Error("still pending after the upgrade")
 	}
 }
+
+// runUpgrade loads .env like the daemon, so a FABRIK_PLUGIN_DIRS that lives only
+// there is part of the plugin set the migration sees (otherwise a bare skill an
+// extra provides would be rewritten to the base plugin).
+func TestRunUpgrade_DotenvPluginDirsKeepTheProjectSkill(t *testing.T) {
+	dir := projectFixture(t, "name: Review\nskill: fabrik-review\n")
+	addProjectPlugin(t, dir, ".fabrik/plugins/team", "team", "fabrik-review")
+	writeTestFile(t, filepath.Join(dir, ".env"), "FABRIK_PLUGIN_DIRS=.fabrik/plugins/team\n")
+	// godotenv leaves a variable that is already in the environment alone, so the
+	// fixture's empty value must be unset; t.Setenv registers the restore.
+	t.Setenv("FABRIK_PLUGIN_DIRS", "x")
+	if err := os.Unsetenv("FABRIK_PLUGIN_DIRS"); err != nil {
+		t.Fatal(err)
+	}
+	orig := Version
+	Version = "dev(test)"
+	t.Cleanup(func() { Version = orig })
+
+	if err := runUpgrade(nil); err != nil {
+		t.Fatalf("runUpgrade: %v", err)
+	}
+	if got := stageRefs(t, dir)["review.yaml:skill"]; got != "team:fabrik-review" {
+		t.Errorf("skill = %q, want team:fabrik-review (the .env-only plugin dir was not consulted)", got)
+	}
+}
+
+// An already-set environment variable wins over .env, as in the daemon.
+func TestRunUpgrade_EnvironmentWinsOverDotenv(t *testing.T) {
+	dir := projectFixture(t, "name: Review\nskill: fabrik-review\n")
+	addProjectPlugin(t, dir, ".fabrik/plugins/envp", "envp", "fabrik-review")
+	addProjectPlugin(t, dir, ".fabrik/plugins/dotp", "dotp", "fabrik-review")
+	writeTestFile(t, filepath.Join(dir, ".env"), "FABRIK_PLUGIN_DIRS=.fabrik/plugins/dotp\n")
+	t.Setenv("FABRIK_PLUGIN_DIRS", ".fabrik/plugins/envp")
+	orig := Version
+	Version = "dev(test)"
+	t.Cleanup(func() { Version = orig })
+
+	if err := runUpgrade(nil); err != nil {
+		t.Fatalf("runUpgrade: %v", err)
+	}
+	if got := stageRefs(t, dir)["review.yaml:skill"]; got != "envp:fabrik-review" {
+		t.Errorf("skill = %q, want envp:fabrik-review", got)
+	}
+}

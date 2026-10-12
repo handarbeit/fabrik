@@ -73,7 +73,8 @@ func (s *projectPlugins) qualify(rel, key, skill string) (newRef, note string, o
 // projectPluginDirs lists the configured extra plugin directories the way the
 // daemon does minus the --plugin-dirs flag, which `fabrik upgrade` does not have:
 // FABRIK_PLUGIN_DIRS (comma-separated) wins over plugin_dirs in
-// <dir>/.fabrik/config.yaml. A .env-only value is invisible here.
+// <dir>/.fabrik/config.yaml. runUpgrade loads .env first (loadUpgradeDotenv), so a
+// .env-only value is visible here.
 func projectPluginDirs(dir string) (dirs []string, notes []string) {
 	if v := os.Getenv("FABRIK_PLUGIN_DIRS"); v != "" {
 		return splitGlobList(v), nil

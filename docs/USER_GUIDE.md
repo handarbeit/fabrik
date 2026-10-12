@@ -3126,9 +3126,10 @@ that upgraded through each:
    `fabrik` that ships an unedited `fabrik-review` beats an extra at runtime today, so the
    stage moves to the extra once the base is refreshed. The report names each such
    reference, its stage file and key, and the plugin. The extras are read from
-   `plugin_dirs` in `.fabrik/config.yaml`, or `FABRIK_PLUGIN_DIRS` when set; the
-   `--plugin-dirs` flag and a value that lives only in `.env` are not visible to
-   `fabrik upgrade`. An extra that cannot be read is skipped with a report note and the
+   `plugin_dirs` in `.fabrik/config.yaml`, or `FABRIK_PLUGIN_DIRS` when set (in the
+   environment or in `.env`, which `fabrik upgrade` loads the way the daemon does; a variable already in
+   the environment wins). The `--plugin-dirs` flag is a daemon flag with no `fabrik upgrade`
+   equivalent, so a value given only there is not visible to the upgrade. An extra that cannot be read is skipped with a report note and the
    references it might provide fall back to the base plugin. A reference to any other
    plugin is left alone, and a bare name that no plugin Fabrik can see provides is left
    bare and reported.
