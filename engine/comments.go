@@ -328,6 +328,15 @@ func (e *Engine) processCommentsClassified(ctx context.Context, board *gh.Projec
 		return didNotRunPostMerge, nil
 	}
 
+	// Name what this worker is (#2121): a comment review runs inside the stage
+	// worker goroutine under the stage placeholder handle, which would otherwise
+	// read as a plain stage run. WorkerKindSet never overrides a reinvoke kind
+	// (this function also serves the three reinvokes), and the prior kind is
+	// restored when the review ends.
+	if restore := e.markCommentReviewWorker(itemOwnerRepoString(item, e.defaultRepo()), item.Number, comments); restore != nil {
+		defer restore()
+	}
+
 	e.logf(item.Number, "comments", "processing %d new comment(s) — stage: %s\n",
 		len(comments), stage.Name)
 
@@ -1174,5 +1183,34 @@ func (e *Engine) markCommentsProcessed(item gh.ProjectItem, comments []gh.Commen
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
 	for _, c := range comments {
 		e.store.Apply(itemstate.CommentProcessed{Repo: repoStr, Number: item.Number, CommentID: c.ID, At: time.Now()})
+	}
+}
+
+// markCommentReviewWorker labels the item's live Worker handle as a comment
+// review addressing comments, and returns a func restoring the previous kind and
+// trigger. It returns nil when there is no worker handle or it already carries a
+// reinvoke kind, in which case nothing was changed (#2121).
+func (e *Engine) markCommentReviewWorker(repoStr string, number int, comments []gh.Comment) func() {
+	snap, ok := e.store.Peek(repoStr, number)
+	if !ok {
+		return nil
+	}
+	w := snap.Worker()
+	if w == nil {
+		return nil
+	}
+	switch w.Kind {
+	case "", itemstate.WorkerKindStageRun, itemstate.WorkerKindCommentReview:
+	default:
+		return nil
+	}
+	prevKind, prevTrigger := w.Kind, w.Trigger
+	if prevKind == "" {
+		prevKind = itemstate.WorkerKindStageRun
+	}
+	e.store.Apply(itemstate.WorkerKindSet{Repo: repoStr, Number: number,
+		Kind: itemstate.WorkerKindCommentReview, Trigger: commentIDsTrigger(comments)})
+	return func() {
+		e.store.Apply(itemstate.WorkerKindSet{Repo: repoStr, Number: number, Kind: prevKind, Trigger: prevTrigger})
 	}
 }
