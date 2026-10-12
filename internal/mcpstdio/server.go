@@ -247,9 +247,9 @@ func (s *Server) initialize(params json.RawMessage) map[string]any {
 			"experimental": map[string]any{"claude/channel": map[string]any{}},
 		},
 		"serverInfo": map[string]any{"name": "fabrik", "version": s.Version},
-		"instructions": "View of a running Fabrik daemon's in-memory state, served from the daemon's cache at no GitHub cost (fabrik_status, fabrik_board, fabrik_health). " +
+		"instructions": "View of a running Fabrik daemon's in-memory state, served from the daemon's cache at no GitHub cost (fabrik_status, fabrik_board, fabrik_health, fabrik_situation). " +
 			"Every response states how fresh it is (as_of); a value the daemon cannot vouch for is the string \"unknown\", never a default. " +
-			"Start with fabrik_board (attention) to see what needs looking at, then fabrik_status for one issue. " +
+			"Start with fabrik_situation for the one rolled-up answer to what needs you (merge decisions, gated items, items waiting for input, pending decisions, merge-train and poll health, anomalies), or fabrik_board (attention) to see what needs looking at, then fabrik_status for one issue. " +
 			"When the poll loop itself is stalled, fabrik_health.poll.overdue says so, items that only need the poll read as waiting-for-poll rather than stalled, and a pipeline-stalled event is pushed. " +
 			"Six action tools (fabrik_promote, fabrik_set_autonomy, fabrik_revalidate, fabrik_advance, fabrik_move_parked, fabrik_clear_claude_limit) make the daemon write to GitHub and leave a Fabrik audit comment naming this session's --subscriber name; they refuse, with the current state, when a precondition does not hold. " +
 			"There is no tool to lift a pause or to comment: answer a paused item with a comment on the issue itself." + channelInstructions,
@@ -408,6 +408,9 @@ func subscribeNote(attached string) string {
 // "does not support actions" rather than an opaque protocol code.
 func describeToolError(tool string, err error) string {
 	var pe *localapi.Error
+	if tool == ToolSituation && errors.As(err, &pe) && pe.Code == localapi.CodeUnknownMethod {
+		return "this Fabrik daemon predates fabrik_situation; upgrade and restart it (fabrik_board with view=attention and fabrik_health give the pieces meanwhile)"
+	}
 	if IsActionTool(tool) && errors.As(err, &pe) && pe.Code == localapi.CodeUnknownMethod {
 		return "this Fabrik daemon does not support overseer actions (it predates them or has them disabled); upgrade and restart it, or make the change as a human on GitHub"
 	}

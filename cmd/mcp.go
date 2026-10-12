@@ -15,8 +15,8 @@ import (
 
 // runMCP implements `fabrik mcp`: a stdio MCP server (launched per session by
 // Claude Code — `claude mcp add fabrik -- fabrik mcp`) that proxies the
-// read-only fabrik_status / fabrik_board / fabrik_health tools, and the four
-// overseer action tools (#1969, ADR-1966-c), to the running daemon's local
+// read-only fabrik_status / fabrik_board / fabrik_health / fabrik_situation tools,
+// and the six overseer action tools (#1969, ADR-1966-c), to the running daemon's local
 // socket (#1967, ADR-1966-a).
 //
 // stdout is the protocol channel and carries JSON-RPC frames only. This command
