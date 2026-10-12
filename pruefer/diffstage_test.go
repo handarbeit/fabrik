@@ -263,3 +263,33 @@ func TestStageDiff_PreambleIsItsOwnEntry(t *testing.T) {
 		t.Errorf("entries = %+v, want the preamble first", s.Entries)
 	}
 }
+
+// TestStageDiff_WideLinesAreFlaggedForCat: Read cuts a line of about 2000
+// characters mid-line and reports success, so an entry holding one is flagged in
+// the index and marked Wide, which deriveOpened never credits to Read.
+func TestStageDiff_WideLinesAreFlaggedForCat(t *testing.T) {
+	wide := diffFileBlock{Path: "bundle.min.js", Raw: "diff --git a/b b/b\n+++ b/b\n@@ -0,0 +1 @@\n+" + strings.Repeat("w", stagedWideLineBytes+1) + "\n"}
+	narrow := diffFileBlock{Path: "ok.go", Raw: "diff --git a/o b/o\n+++ b/o\n@@ -0,0 +1 @@\n+" + strings.Repeat("n", 100) + "\n"}
+	s, cleanup, err := stageDiff([]diffFileBlock{wide, narrow}, "", 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if !s.Entries[0].Wide || s.Entries[1].Wide {
+		t.Errorf("Wide = %v/%v, want true/false", s.Entries[0].Wide, s.Entries[1].Wide)
+	}
+	index, _ := os.ReadFile(s.IndexPath)
+	rows := strings.Split(strings.TrimSpace(string(index)), "\n")
+	if !strings.Contains(rows[2], "wide-line") || strings.Contains(rows[3], "wide-line") {
+		t.Errorf("index rows do not flag exactly the wide entry:\n%s", index)
+	}
+}
+
+// TestSyntheticDiff_ChunksFitTheMeasuredReadLimit pins the live-probe finding
+// that a single Read of a 32 KiB chunk was silently cut at ~22 KB: no ordinary
+// entry may exceed the 16 KiB bound.
+func TestSyntheticDiff_ChunksFitTheMeasuredReadLimit(t *testing.T) {
+	if stagedChunkMaxBytes > 16*1024 {
+		t.Errorf("stagedChunkMaxBytes = %d, over the 16 KiB bound the live probe supports", stagedChunkMaxBytes)
+	}
+}

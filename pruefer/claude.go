@@ -273,6 +273,10 @@ type ReviewResult struct {
 	// on the model's own report.
 	Opened              map[string]bool
 	OpenedAuthoritative bool
+	// UnobservedSubagents is set when a Task/Agent call's traffic was not
+	// visible in the transcript (see deriveOpened): coverage then refuses to
+	// credit what only an invisible subagent could have read.
+	UnobservedSubagents bool
 }
 
 // RealClaudeInvoker invokes the real claude CLI via exec.CommandContext,
@@ -530,7 +534,8 @@ func renderDynamicContext(b *strings.Builder, req ReviewRequest) {
 		// the diff Pruefer already has instead of naming a command that
 		// will fail.
 		fmt.Fprintf(b, "This PR's complete unified diff — exactly the change under review, already filtered to what you should review — is staged as %d entries in %s. Read %s first: it lists every entry with its ID, file, original path, chunk and size. Each entry is one small file holding one changed path's diff (a large path is cut into numbered chunks that each repeat the file header, and hunk headers carry the true line numbers). Together they are the authoritative statement of what changed. The working directory holds the PR's head commit, so use Grep, Glob and Read on it for surrounding context the diff alone doesn't give you.\n\n", len(req.Staged.Entries), req.Staged.Dir, req.Staged.IndexPath)
-		b.WriteString("Open every entry in full: use Read with no offset or limit (every entry is small enough for one call) or `cat`. If you split the diff across subagents, every index entry must be opened by some reader. Do not stop after the first entries — tests and later files are listed last, and an unread entry is reported to the PR as unread.\n\n")
+		fmt.Fprintf(b, "Entry files are named <ID>.diff, IDs 0001 through %04d, so if INDEX.txt itself is cut off you can still open the rest by name.\n\n", len(req.Staged.Entries))
+		b.WriteString("Open every entry in full: use Read, or `cat`. Read can silently stop before the end of a file, so check that its last numbered line matches the entry's line count in the index and, if it stops early, Read again from the next line with offset. An entry flagged wide-line holds lines Read cuts mid-line: open those with `cat` only. If you split the diff across subagents, every index entry must be opened by some reader. Do not stop after the first entries — tests and later files are listed last, and an unread entry is reported to the PR as unread.\n\n")
 		if req.BaseBranch != "" {
 			fmt.Fprintf(b, "The PR targets %q. The checkout is a shallow, single-commit fetch of the PR head with no git history or base ref, so rely on the staged diff above rather than trying to reconstruct the change.\n\n", req.BaseBranch)
 		}
@@ -882,5 +887,6 @@ func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (Revi
 		return ReviewResult{}, fmt.Errorf("claude produced an empty review")
 	}
 	opened, authoritative := deriveOpened(stdout.Bytes(), req.Staged)
-	return ReviewResult{Text: resp.Result, NumTurns: resp.NumTurns, CostUSD: resp.CostUSD, Opened: opened, OpenedAuthoritative: authoritative}, nil
+	return ReviewResult{Text: resp.Result, NumTurns: resp.NumTurns, CostUSD: resp.CostUSD, Opened: opened, OpenedAuthoritative: authoritative,
+		UnobservedSubagents: req.Staged != nil && !authoritative}, nil
 }

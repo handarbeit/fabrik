@@ -33,12 +33,24 @@ func coverageReportAll(req ReviewRequest) string {
 	return coverageReport(ids...)
 }
 
+// fixtureContent is the text of a staged test entry, for cat verification.
+func fixtureContent(id string) string { return "content of " + id + "\nsecond line\n" }
+
+// numbered renders what Read returns for lines from..to: "<n><tab><text>".
+func numbered(from, to int) string {
+	var b strings.Builder
+	for n := from; n <= to; n++ {
+		fmt.Fprintf(&b, "%d\tline %d\n", n, n)
+	}
+	return b.String()
+}
+
 // testStaged builds a StagedDiff with one entry per path (no files on disk).
 func testStaged(paths ...string) *StagedDiff {
 	s := &StagedDiff{Dir: "/stage"}
 	for i, p := range paths {
 		id := fmt.Sprintf("%04d", i+1)
-		s.Entries = append(s.Entries, StagedEntry{ID: id, File: id + ".diff", Path: p, Chunk: 1, Chunks: 1, Lines: 10})
+		s.Entries = append(s.Entries, StagedEntry{ID: id, File: id + ".diff", Path: p, Chunk: 1, Chunks: 1, Lines: 10, content: fixtureContent(id)})
 	}
 	return s
 }
@@ -198,47 +210,65 @@ func (s *tl) toolUse(parent, id, name, input string) {
 	s.lines = append(s.lines, fmt.Sprintf(`{"type":"assistant","parent_tool_use_id":%s,"message":{"content":[{"type":"tool_use","id":%q,"name":%q,"input":%s}]}}`, p, id, name, input))
 }
 
-func (s *tl) result(parent, id string, isErr bool) {
+func (s *tl) result(parent, id string, isErr bool, text string) {
 	p := "null"
 	if parent != "" {
 		p = fmt.Sprintf("%q", parent)
 	}
-	s.lines = append(s.lines, fmt.Sprintf(`{"type":"user","parent_tool_use_id":%s,"message":{"content":[{"type":"tool_result","tool_use_id":%q,"is_error":%t}]}}`, p, id, isErr))
+	s.lines = append(s.lines, fmt.Sprintf(`{"type":"user","parent_tool_use_id":%s,"message":{"content":[{"type":"tool_result","tool_use_id":%q,"is_error":%t,"content":%q}]}}`, p, id, isErr, text))
 }
 
-func (s *tl) read(parent, id, path string, extra string) {
+// read records a successful Read whose result shows lines from..to.
+func (s *tl) read(parent, id, path, extra string, from, to int) {
 	s.toolUse(parent, id, "Read", fmt.Sprintf(`{"file_path":%q%s}`, path, extra))
-	s.result(parent, id, false)
+	s.result(parent, id, false, numbered(from, to))
 }
 
 func (s *tl) bytes() []byte { return []byte(strings.Join(s.lines, "\n") + "\n") }
 
 func TestDeriveOpened(t *testing.T) {
-	s := testStaged("a.go", "b.go", "c.go", "d.go")
+	s := testStaged("a.go", "b.go", "c.go", "d.go", "e.go", "f.go")
 	for i := range s.Entries {
 		s.Entries[i].Lines = 100
 	}
+	s.Entries[5].Wide = true
 	var tr tl
-	tr.read("", "r1", "/stage/0001.diff", "")                         // whole file
-	tr.read("", "r2", "/stage/0002.diff", `,"offset":1,"limit":2000`) // explicit full window
-	tr.read("", "r3", "/stage/0003.diff", `,"offset":50`)             // starts mid-file: not opened
-	tr.toolUse("", "r4", "Read", `{"file_path":"/stage/0004.diff"}`)  // denied
-	tr.result("", "r4", true)
+	tr.read("", "r1", "/stage/0001.diff", "", 1, 100)                         // whole file
+	tr.read("", "r2", "/stage/0002.diff", `,"offset":1,"limit":2000`, 1, 100) // explicit full window
+	tr.read("", "r3", "/stage/0003.diff", `,"offset":50`, 50, 100)            // starts mid-file: not opened
+	tr.toolUse("", "r4", "Read", `{"file_path":"/stage/0004.diff"}`)          // denied
+	tr.result("", "r4", true, "denied")
+	// The live-probe case: Read succeeds but silently stops early. A second
+	// Read from the next line completes the entry.
+	tr.read("", "r5a", "/stage/0005.diff", "", 1, 60)
+	tr.read("", "r5b", "/stage/0005.diff", `,"offset":51`, 51, 100)
+	tr.read("", "r6", "/stage/0006.diff", "", 1, 100) // wide-line entry: Read cuts lines, never credited
 	got, auth := deriveOpened(tr.bytes(), s)
-	if !got["0001"] || !got["0002"] || got["0003"] || got["0004"] || !auth {
-		t.Errorf("opened = %v authoritative=%v, want only 0001 and 0002", got, auth)
+	if !got["0001"] || !got["0002"] || got["0003"] || got["0004"] || !got["0005"] || got["0006"] || !auth {
+		t.Errorf("opened = %v authoritative=%v, want only 0001, 0002 and 0005", got, auth)
+	}
+
+	// A single Read cut short, with no error and no notice, is not an open.
+	var cut tl
+	cut.read("", "r1", "/stage/0001.diff", "", 1, 60)
+	if got, _ := deriveOpened(cut.bytes(), s); got["0001"] {
+		t.Errorf("a Read that stopped at line 60 of 100 was credited: %v", got)
 	}
 
 	var cat tl
 	cat.toolUse("", "c1", "Bash", `{"command":"cat /stage/0001.diff /stage/0002.diff"}`)
-	cat.result("", "c1", false)
+	cat.result("", "c1", false, fixtureContent("0001")+fixtureContent("0002"))
 	cat.toolUse("", "c2", "Bash", `{"command":"cat /stage/0003.diff | head -5"}`) // truncated by a pipe
-	cat.result("", "c2", false)
+	cat.result("", "c2", false, fixtureContent("0003"))
 	cat.toolUse("", "c3", "Bash", `{"command":"head -n 5 /stage/0004.diff"}`)
-	cat.result("", "c3", false)
+	cat.result("", "c3", false, fixtureContent("0004"))
+	cat.toolUse("", "c4", "Bash", `{"command":"cat /stage/0005.diff"}`) // output cut short
+	cat.result("", "c4", false, "content of 0005\n")
+	cat.toolUse("", "c5", "Bash", `{"command":"cat /stage/0006.diff"}`) // the way to open a wide-line entry
+	cat.result("", "c5", false, fixtureContent("0006"))
 	got, _ = deriveOpened(cat.bytes(), s)
-	if !got["0001"] || !got["0002"] || got["0003"] || got["0004"] {
-		t.Errorf("cat opened = %v, want only 0001 and 0002", got)
+	if !got["0001"] || !got["0002"] || got["0003"] || got["0004"] || got["0005"] || !got["0006"] {
+		t.Errorf("cat opened = %v, want only 0001, 0002 and 0006", got)
 	}
 }
 
@@ -247,11 +277,11 @@ func TestDeriveOpened(t *testing.T) {
 func subagentTranscript(readByB []string) []byte {
 	var tr tl
 	tr.toolUse("", "taskA", "Task", `{"prompt":"open 0001 0002"}`)
-	tr.read("taskA", "a1", "/stage/0001.diff", "")
-	tr.read("taskA", "a2", "/stage/0002.diff", "")
+	tr.read("taskA", "a1", "/stage/0001.diff", "", 1, 100)
+	tr.read("taskA", "a2", "/stage/0002.diff", "", 1, 100)
 	tr.toolUse("", "taskB", "Task", `{"prompt":"open 0003 0004"}`)
 	for i, p := range readByB {
-		tr.read("taskB", fmt.Sprintf("b%d", i), p, "")
+		tr.read("taskB", fmt.Sprintf("b%d", i), p, "", 1, 100)
 	}
 	return tr.bytes()
 }
@@ -289,6 +319,27 @@ func TestCoverage_DiffSplitAcrossSubagents(t *testing.T) {
 	t.Run("ignoring the transcript wrongly reads complete", func(t *testing.T) {
 		opened, _ := deriveOpened(partial, s)
 		cov := computeCoverage(coverageInput{Staged: s, Reported: reportAll, ReportOK: true, Transcript: opened, TranscriptAuthoritative: false})
+		if !cov.Complete {
+			t.Errorf("neutralised variant should read complete, got %+v", cov)
+		}
+	})
+
+	// A subagent whose reads are not visible cannot be verified: the model's
+	// report of entries only that subagent could have read must not be credited.
+	t.Run("unobserved subagents are not trusted on their report", func(t *testing.T) {
+		var tr tl
+		tr.toolUse("", "taskA", "Task", `{"prompt":"open everything"}`) // no tagged events follow
+		tr.read("", "own", "/stage/0001.diff", "", 1, 100)              // the parent's own read is visible
+		opened, auth := deriveOpened(tr.bytes(), s)
+		cov := computeCoverage(coverageInput{Staged: s, Reported: reportAll, ReportOK: true, Transcript: opened, TranscriptAuthoritative: auth, UnobservedSubagents: !auth})
+		if cov.Complete || strings.Join(cov.Unread, ",") != "b.go,c.go,d.go" {
+			t.Errorf("cov = %+v, want partial naming b.go, c.go, d.go", cov)
+		}
+		if !strings.Contains(cov.Reason, "subagent reads are not visible") {
+			t.Errorf("reason does not say why: %q", cov.Reason)
+		}
+		// Non-vacuity: trusting the report (the previous behaviour) reads complete.
+		cov = computeCoverage(coverageInput{Staged: s, Reported: reportAll, ReportOK: true, Transcript: opened, TranscriptAuthoritative: false})
 		if !cov.Complete {
 			t.Errorf("neutralised variant should read complete, got %+v", cov)
 		}

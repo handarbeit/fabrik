@@ -443,6 +443,7 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 		Staged: staged, ChangedPaths: changedPaths, TrimmedPaths: omittedTrimmedPaths,
 		Reported: reported, ReportOK: reportOK,
 		Transcript: result.Opened, TranscriptAuthoritative: result.OpenedAuthoritative,
+		UnobservedSubagents: result.UnobservedSubagents,
 	})
 	logCoverage(pr.Number, cov, result.OpenedAuthoritative)
 

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -79,6 +80,11 @@ type coverageInput struct {
 	// visible there. When it is not, the transcript is not used to downgrade.
 	Transcript              map[string]bool
 	TranscriptAuthoritative bool
+	// UnobservedSubagents says a Task/Agent call ran whose traffic the transcript
+	// does not show. Their reads cannot be verified, so the model's report is
+	// then intersected with the transcript anyway: entries only an invisible
+	// subagent could have read count as unread.
+	UnobservedSubagents bool
 }
 
 func sortedUnique(in []string) []string {
@@ -112,7 +118,7 @@ func computeCoverage(in coverageInput) Coverage {
 	case in.ReportOK:
 		for _, id := range in.Reported {
 			id = strings.TrimSuffix(strings.TrimSpace(id), ".diff")
-			if known[id] && (!in.TranscriptAuthoritative || in.Transcript[id]) {
+			if known[id] && (!(in.TranscriptAuthoritative || in.UnobservedSubagents) || in.Transcript[id]) {
 				opened[id] = true
 			}
 		}
@@ -137,6 +143,9 @@ func computeCoverage(in coverageInput) Coverage {
 		cov.Reason = "reviewer did not report coverage"
 	case cov.UnreadCount > 0:
 		cov.Reason = fmt.Sprintf("%d of %d diff entries not opened", cov.UnreadCount, cov.TotalEntries)
+		if in.UnobservedSubagents {
+			cov.Reason += " (subagent reads are not visible in the transcript and are not counted)"
+		}
 	case len(in.TrimmedPaths) > 0:
 		cov.Reason = fmt.Sprintf("%d file(s) dropped to fit max_diff_bytes were never reviewed", len(in.TrimmedPaths))
 	}
@@ -188,11 +197,12 @@ type streamEvent struct {
 	ParentToolUseID *string `json:"parent_tool_use_id"`
 	Message         struct {
 		Content []struct {
-			Type      string `json:"type"`
-			ID        string `json:"id"`
-			Name      string `json:"name"`
-			ToolUseID string `json:"tool_use_id"`
-			IsError   bool   `json:"is_error"`
+			Type      string          `json:"type"`
+			ID        string          `json:"id"`
+			Name      string          `json:"name"`
+			ToolUseID string          `json:"tool_use_id"`
+			IsError   bool            `json:"is_error"`
+			Content   json.RawMessage `json:"content"`
 			Input     struct {
 				FilePath string `json:"file_path"`
 				Offset   int    `json:"offset"`
@@ -203,21 +213,47 @@ type streamEvent struct {
 	} `json:"message"`
 }
 
+// toolResultText flattens a tool_result's content (a string, or an array of
+// text blocks) to plain text.
+func toolResultText(raw json.RawMessage) string {
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	var blocks []struct {
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(raw, &blocks) != nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, bl := range blocks {
+		b.WriteString(bl.Text)
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+// readLineRE matches the "<line number><tab>" prefix Read puts on every line.
+var readLineRE = regexp.MustCompile(`^\s*(\d+)\t`)
+
 // shellMeta marks a command whose cat output may be truncated, redirected or
 // combined, so it is not counted as opening a file.
 const shellMeta = "|;&<>$`\"'\\(){}*?!#~\n"
 
 // deriveOpened reads the stream-json transcript and returns the staged entry
-// IDs a successful, untruncated read proves were opened, plus whether the
-// transcript is authoritative. A Read counts when it starts at the top of the
-// file and has no limit or one covering the whole entry; so does `cat <file>`
-// with only plain staged paths. Every successful read anywhere in the
-// transcript counts, subagents' included.
+// IDs the transcript proves were read in full, plus whether it is
+// authoritative. Read truncates its result silently (a 32 KiB chunk came back
+// cut at ~22 KB with no notice and no error in the live probe), so a successful
+// Read is not proof: an entry counts only when the numbered lines Read returned
+// cover 1..Lines, across however many Read calls (subagents' included) it took.
+// An entry with a line over the Read line-width limit (wide) is never credited
+// to Read, which cuts such lines mid-line; `cat` credits an entry only when its
+// output contains the entry's whole text.
 //
 // The transcript is authoritative only when it shows all subagent traffic: no
-// Task call at all, or every Task call has events tagged with its
-// parent_tool_use_id. Otherwise a subagent could have read files Go cannot see,
-// and the model's own report must stand.
+// Task/Agent call at all, or every such call has events tagged with its
+// parent_tool_use_id. Otherwise a subagent could have read files Go cannot see.
 func deriveOpened(stream []byte, s *StagedDiff) (opened map[string]bool, authoritative bool) {
 	opened = map[string]bool{}
 	if s == nil {
@@ -227,8 +263,12 @@ func deriveOpened(stream []byte, s *StagedDiff) (opened map[string]bool, authori
 	for _, e := range s.Entries {
 		byPath[filepath.Clean(s.EntryPath(e))] = e
 	}
-	type pending struct{ ids []string }
+	type pending struct {
+		read bool // a Read of ids[0]; otherwise a cat of ids
+		ids  []string
+	}
 	calls := map[string]pending{}
+	lineSeen := map[string]map[int]bool{}
 	taskIDs := map[string]bool{}
 	taggedParents := map[string]bool{}
 
@@ -251,9 +291,8 @@ func deriveOpened(stream []byte, s *StagedDiff) (opened map[string]bool, authori
 				case "Task", "Agent":
 					taskIDs[c.ID] = true
 				case "Read":
-					if e, ok := byPath[filepath.Clean(c.Input.FilePath)]; ok &&
-						c.Input.Offset <= 1 && (c.Input.Limit == 0 || c.Input.Limit >= e.Lines) {
-						calls[c.ID] = pending{ids: []string{e.ID}}
+					if e, ok := byPath[filepath.Clean(c.Input.FilePath)]; ok && !e.Wide {
+						calls[c.ID] = pending{read: true, ids: []string{e.ID}}
 					}
 				case "Bash":
 					if ids := catEntryIDs(c.Input.Command, byPath); len(ids) > 0 {
@@ -261,12 +300,48 @@ func deriveOpened(stream []byte, s *StagedDiff) (opened map[string]bool, authori
 					}
 				}
 			case ev.Type == "user" && c.Type == "tool_result":
-				if p, ok := calls[c.ToolUseID]; ok && !c.IsError {
-					for _, id := range p.ids {
-						opened[id] = true
+				p, ok := calls[c.ToolUseID]
+				if !ok || c.IsError {
+					continue
+				}
+				text := toolResultText(c.Content)
+				if p.read {
+					id := p.ids[0]
+					if lineSeen[id] == nil {
+						lineSeen[id] = map[int]bool{}
+					}
+					for _, l := range strings.Split(text, "\n") {
+						if m := readLineRE.FindStringSubmatch(l); m != nil {
+							n, _ := strconv.Atoi(m[1])
+							lineSeen[id][n] = true
+						}
+					}
+					continue
+				}
+				for _, id := range p.ids {
+					for _, e := range s.Entries {
+						if e.ID == id && e.content != "" && strings.Contains(text, strings.TrimRight(e.content, "\n")) {
+							opened[id] = true
+						}
 					}
 				}
 			}
+		}
+	}
+	for _, e := range s.Entries {
+		seen := lineSeen[e.ID]
+		if len(seen) == 0 || e.Lines == 0 {
+			continue
+		}
+		whole := true
+		for n := 1; n <= e.Lines; n++ {
+			if !seen[n] {
+				whole = false
+				break
+			}
+		}
+		if whole {
+			opened[e.ID] = true
 		}
 	}
 	authoritative = true

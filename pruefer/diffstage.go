@@ -21,11 +21,15 @@ const (
 	// lines: a long-line diff hits Read's token cap long before 2000 lines, so
 	// line count is not the binding limit. Conservative against the cap; the
 	// liveprobe test measures it against the real CLI.
-	stagedChunkMaxBytes = 32 * 1024
+	stagedChunkMaxBytes = 16 * 1024
 	// stagedChunkMaxLines bounds one staged entry file by line count.
 	stagedChunkMaxLines = 600
 	// stagedIndexName is the index file inside the staging directory.
 	stagedIndexName = "INDEX.txt"
+	// stagedWideLineBytes is the line width above which Read cuts a line
+	// mid-line (it truncates lines of about 2000 characters). An entry holding
+	// such a line is flagged wide-line and must be opened with cat.
+	stagedWideLineBytes = 2000
 	// stagedPreamblePath is the display path of the diff text that precedes the
 	// first "diff --git" header, when there is any.
 	stagedPreamblePath = "(diff preamble)"
@@ -42,6 +46,9 @@ type StagedEntry struct {
 	Lines  int
 	Bytes  int
 	Long   bool // a single line (or header) larger than the byte cap: cannot be split further
+	Wide   bool // holds a line over stagedWideLineBytes: Read would cut it, so only cat opens it
+
+	content string // the entry file's text, for verifying a cat against it
 }
 
 // StagedDiff describes a staging directory written by stageDiff.
@@ -270,9 +277,15 @@ func buildStagedEntries(blocks []diffFileBlock, preamble string) (entries []Stag
 			e := StagedEntry{
 				ID: id, File: id + ".diff", Path: path,
 				Chunk: i + 1, Chunks: len(chunks),
-				Lines: lines, Bytes: len(c),
+				Lines: lines, Bytes: len(c), content: c,
 			}
 			e.Long = len(c) > stagedChunkMaxBytes
+			for _, l := range strings.Split(c, "\n") {
+				if len(l) > stagedWideLineBytes {
+					e.Wide = true
+					break
+				}
+			}
 			entries = append(entries, e)
 			contents = append(contents, c)
 		}
@@ -299,10 +312,14 @@ func renderIndex(dir string, entries []StagedEntry) string {
 	b.WriteString(". Open every entry.\n")
 	b.WriteString("id\tfile\tpath\tchunk\tlines\tbytes\tflags\n")
 	for _, e := range entries {
-		flags := ""
+		var flagList []string
 		if e.Long {
-			flags = "long-line"
+			flagList = append(flagList, "long-line")
 		}
+		if e.Wide {
+			flagList = append(flagList, "wide-line:open-with-cat")
+		}
+		flags := strings.Join(flagList, ",")
 		fmt.Fprintf(&b, "%s\t%s\t%s\t%d/%d\t%d\t%d\t%s\n",
 			e.ID, filepath.Join(dir, e.File), sanitizeIndexText(e.Path), e.Chunk, e.Chunks, e.Lines, e.Bytes, flags)
 	}

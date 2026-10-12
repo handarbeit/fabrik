@@ -58,6 +58,9 @@ func TestBuildReviewPrompt_StagedRequiresOpeningEveryEntry(t *testing.T) {
 		"PRUEFER_COVERAGE_END",
 		"Output has three parts",
 		"report back the IDs it opened in full",
+		"Read can silently stop before the end of a file",
+		"open those with `cat` only",
+		"if INDEX.txt itself is cut off",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("prompt missing %q:\n%s", want, got)
