@@ -607,6 +607,25 @@ func (e *Engine) labelAttribute(c itemstate.Change) labelAttribution {
 	return labelAttribution{Actor: "unknown"}
 }
 
+// maxPushTitleRunes caps the title a push carries.
+const maxPushTitleRunes = 200
+
+// pushTitle renders an issue title for a push: line breaks and backticks become
+// spaces (the value is shown inline), runs of whitespace collapse, and a long
+// title is cut at maxPushTitleRunes with an ellipsis.
+func pushTitle(title string) string {
+	t := strings.Join(strings.Fields(strings.Map(func(r rune) rune {
+		if r == '`' || r == '\n' || r == '\r' {
+			return ' '
+		}
+		return r
+	}, title)), " ")
+	if r := []rune(t); len(r) > maxPushTitleRunes {
+		t = string(r[:maxPushTitleRunes-1]) + "…"
+	}
+	return t
+}
+
 // baseEvent fills the routing and identity fields shared by every event.
 func (e *Engine) baseEvent(st *itemstate.ItemState, typ channelevents.EventType) channelevents.Event {
 	ev := channelevents.Event{
@@ -619,6 +638,11 @@ func (e *Engine) baseEvent(st *itemstate.ItemState, typ channelevents.EventType)
 	}
 	if lpr := st.LinkedPR; lpr != nil && lpr.Number != 0 {
 		ev.PR = lpr.Number
+	}
+	// Every item-scoped push says what the item is, so a reacting session does
+	// not need a fabrik_status round trip (#2127 R8).
+	if t := pushTitle(st.Title); t != "" && !readPolishDisabled(8) {
+		ev.Meta["title"] = t
 	}
 	if st.MilestoneKnown {
 		ev.MilestoneKnown = true

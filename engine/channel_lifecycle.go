@@ -134,7 +134,6 @@ func (e *Engine) itemAddedEvent(st *itemstate.ItemState) channelevents.Event {
 	ev := e.baseEvent(st, channelevents.ItemAdded)
 	ev.Labels = append([]string(nil), st.Labels...)
 	ev.DedupKey = "item-added:" + ref
-	ev.Meta["title"] = st.Title
 	ev.Meta["column"] = st.Status
 	ev.Meta["labels"] = strings.Join(st.Labels, ",")
 	ev.Meta["autonomy"] = autonomyOf(st.Labels)

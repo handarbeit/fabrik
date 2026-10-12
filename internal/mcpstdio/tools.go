@@ -108,8 +108,9 @@ func toolDefs() []map[string]any {
 	return []map[string]any{
 		{
 			"name": ToolStatus,
-			"description": "Everything the Fabrik daemon knows about one issue, from its in-memory cache (no GitHub call): place on the board and time in column, labels, milestone, " +
-				"cycle counters as 'n of max', worker, last invocation, linked PR / CI / merge-train position, blockers, and an `attention` block that answers " +
+			"description": "Everything the Fabrik daemon knows about one issue, from its in-memory cache (no GitHub call): place on the board and time in column, every label (stage and fabrik groupings plus other_labels), milestone, " +
+				"cycle counters as 'n of max' (none for a parking or holding column), worker, last invocation (figure_basis says which figures are per-invocation and which are session-cumulative, as the Claude CLI reports them), " +
+				"linked PR / CI / merge-train position with a per-reviewer verdict at the PR head (at_head, inline_at_head, outstanding, clean_pass, unaddressed), blockers, and an `attention` block that answers " +
 				"'stuck, or waiting correctly?' (state, reason with a meaning per label, link to the latest Fabrik comment, and what the engine will do next and when; a suspended item names the decision and its options instead, and no next time). " +
 				"Anything the daemon cannot vouch for is the string \"unknown\".",
 			"inputSchema": obj(map[string]any{
@@ -121,7 +122,8 @@ func toolDefs() []map[string]any {
 			"name": ToolBoard,
 			"description": "Overseer view of the whole board from the daemon's cache (no GitHub call). view=attention lists only items that need looking at, ranked " +
 				"needs-human and suspended (a completed stage or parked blocker waiting on a human decision, with the options to act and a GitHub-anchored age), escalated, stalled, then settled-at-Validate awaiting a human merge decision (cruise), each with a one-line reason. " +
-				"view=flow gives per column the count, the oldest time-in-column and the in-flight workers. Time-in-column is daemon-observed (resets on restart). " +
+				"view=flow gives per column the count, the oldest time-in-column and the in-flight workers; closed (Done) items are not listed but counted in excluded.closed, so the columns plus excluded.closed equal matched. " +
+				"Every result carries matched, the number of items that passed the filter; an attention view always carries `attention` (an empty list when none of the matched items needs looking at). Time-in-column is daemon-observed (resets on restart). " +
 				"Items the cache cannot evaluate for a filter (e.g. milestone not yet captured) are excluded and counted, never guessed.",
 			"inputSchema": obj(map[string]any{
 				"view": map[string]any{"type": "string", "enum": []string{localapi.ViewAttention, localapi.ViewFlow}, "description": "attention (default) or flow"},

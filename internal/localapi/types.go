@@ -1,6 +1,8 @@
 package localapi
 
 import (
+	"encoding/json"
+	"sync/atomic"
 	"time"
 
 	"github.com/handarbeit/fabrik/internal/channelevents"
@@ -62,6 +64,9 @@ type Place struct {
 	StatusEnteredBasis string   `json:"status_entered_basis"`
 	StageLabels        []string `json:"stage_labels"`
 	FabrikLabels       []string `json:"fabrik_labels"`
+	// OtherLabels is every label that is neither a stage: nor a fabrik: label
+	// (bug, model:opus, base:x, ...), so status shows every label the item has (#2127).
+	OtherLabels []string `json:"other_labels"`
 	// Autonomy is "cruise", "yolo" or "none" (cruise wins when both are set).
 	Autonomy string `json:"autonomy"`
 }
@@ -109,7 +114,29 @@ type InvocationInfo struct {
 	IsComment       bool           `json:"is_comment"`
 	DurationSeconds Known[float64] `json:"duration_seconds"`
 	Tokens          Known[Tokens]  `json:"tokens"`
+	// FigureBasis labels what each figure above measures (#2127): the engine
+	// records duration as wall-clock time of this invocation, while tokens, cost
+	// and turns are the totals the Claude CLI reports for the session it ran.
+	// The labels describe the field, not whether the numbers differ: on a first,
+	// non-resumed invocation the two coincide.
+	FigureBasis FigureBasis `json:"figure_basis"`
 }
+
+// FigureBasis names, per figure of an InvocationInfo, what it measures.
+type FigureBasis struct {
+	DurationSeconds string `json:"duration_seconds"`
+	Tokens          string `json:"tokens"`
+	CostUSD         string `json:"cost_usd"`
+	TurnsUsed       string `json:"turns_used"`
+	// Note is the caveat: the bases are as reported by the CLI.
+	Note string `json:"note"`
+}
+
+// Figure bases (InvocationInfo.FigureBasis).
+const (
+	BasisPerInvocation     = "per-invocation"
+	BasisSessionCumulative = "session-cumulative"
+)
 
 // Tokens is token consumption for one invocation.
 type Tokens struct {
@@ -152,11 +179,44 @@ type PRInfo struct {
 	FactsStale Known[bool]      `json:"facts_stale"`
 	// CIAsOf, CIStale and CIHeadSHA are the same for the CI verdict and name the
 	// head it was computed for. CIFailing lists the failing checks when red.
-	CIAsOf     Known[time.Time] `json:"ci_as_of"`
-	CIStale    Known[bool]      `json:"ci_stale"`
-	CIHeadSHA  Known[string]    `json:"ci_head_sha"`
-	CIFailing  []string         `json:"ci_failing"`
-	MergeTrain *TrainPosition   `json:"merge_train,omitempty"`
+	CIAsOf    Known[time.Time] `json:"ci_as_of"`
+	CIStale   Known[bool]      `json:"ci_stale"`
+	CIHeadSHA Known[string]    `json:"ci_head_sha"`
+	CIFailing []string         `json:"ci_failing"`
+	// URL is the PR's web address, derived from the repo and number.
+	URL Known[string] `json:"url"`
+	// Reviewers is one verdict per reviewer, evaluated at the PR head (#2127).
+	Reviewers  []ReviewerVerdict `json:"reviewers"`
+	MergeTrain *TrainPosition    `json:"merge_train,omitempty"`
+}
+
+// ReviewerVerdict is what one reviewer's latest review says, evaluated at the
+// PR head (#2127). A COMMENTED review is the same state for a clean pass and for
+// findings (a bot reviewer always submits COMMENTED), so the state alone cannot
+// tell them apart; these fields can. Every field the cache cannot establish is
+// unknown, and CleanPass is true only when it is established.
+type ReviewerVerdict struct {
+	Reviewer string `json:"reviewer"`
+	// State is the reviewer's latest non-dismissed, non-pending review state.
+	State string `json:"state"`
+	// AtHead is whether that review is at the PR's current head SHA.
+	AtHead Known[bool] `json:"at_head"`
+	// InlineAtHead is how many unresolved inline comments the reviewer has at the
+	// head. A thread comment carries no review id, so the link is author plus
+	// commit.
+	InlineAtHead Known[int] `json:"inline_at_head"`
+	// Outstanding is the findings still open from this reviewer: unresolved,
+	// non-outdated review threads plus the reviewer's review body when it is
+	// actionable and not durably addressed. It counts a thread whether or not the
+	// engine has already processed it.
+	Outstanding Known[int] `json:"outstanding"`
+	// CleanPass is true only when the latest review is at the head and nothing is
+	// outstanding. A pass on an older head is false.
+	CleanPass Known[bool] `json:"clean_pass"`
+	// Unaddressed is whether the feedback gate would hold on this reviewer's
+	// findings (the same predicate as the gate, so it differs from Outstanding).
+	Unaddressed bool   `json:"unaddressed"`
+	PRURL       string `json:"pr_url"`
 }
 
 // TrainPosition is the item's place in its (repo, base) merge-train partition.
@@ -310,6 +370,9 @@ type BoardResult struct {
 	StallThresholdSeconds int64       `json:"stall_threshold_seconds"`
 	// ItemsScanned is how many cached items were considered before filtering.
 	ItemsScanned int `json:"items_scanned"`
+	// Matched is how many of those passed the filter, before closed items are
+	// left out of the flow: sum(flow.count) + excluded.closed == matched (#2127).
+	Matched int `json:"matched"`
 	// Excluded counts items a filter could not evaluate because the cache lacks
 	// the field (never silently treated as a non-match or a match).
 	Excluded ExcludedCounts `json:"excluded"`
@@ -324,6 +387,9 @@ type BoardResult struct {
 type ExcludedCounts struct {
 	UnknownMilestone int `json:"unknown_milestone"`
 	NotDeepFetched   int `json:"not_deep_fetched"`
+	// Closed counts matched items left out of the flow because their issue is
+	// closed (the Done column), so the columns reconcile with Matched (#2127).
+	Closed int `json:"closed"`
 }
 
 // AttentionEntry is one item in the attention view.
@@ -656,4 +722,33 @@ type RefusalState struct {
 	// omits it, since no move is possible.
 	ValidTargets []string `json:"valid_targets,omitempty"`
 	Autonomy     string   `json:"autonomy,omitempty"`
+}
+
+// legacyAttentionKey restores the pre-#2127 behaviour (an empty attention list
+// is left out) so a test can show the always-present key is not vacuous.
+var legacyAttentionKey atomic.Bool
+
+// SetLegacyAttentionKeyForTest drops an empty attention list from the wire
+// again and returns the function that restores the key. Tests only.
+func SetLegacyAttentionKeyForTest() (restore func()) {
+	legacyAttentionKey.Store(true)
+	return func() { legacyAttentionKey.Store(false) }
+}
+
+// MarshalJSON makes an attention view always carry an attention list, empty
+// when nothing matched, so "no attention-worthy items" is distinguishable from
+// "no such field" (#2127). The flow view keeps no attention key.
+func (r BoardResult) MarshalJSON() ([]byte, error) {
+	type plain BoardResult
+	if r.View == ViewFlow || legacyAttentionKey.Load() {
+		return json.Marshal(plain(r))
+	}
+	list := r.Attention
+	if list == nil {
+		list = []AttentionEntry{}
+	}
+	return json.Marshal(struct {
+		plain
+		Attention []AttentionEntry `json:"attention"`
+	}{plain(r), list})
 }

@@ -466,6 +466,17 @@ func (e *Engine) validateSettledEvent(snap itemstate.Snapshot, st *itemstate.Ite
 		ev.Meta["ci_gate"] = "not-gated"
 	}
 	ev.Meta["reviews"] = reviews
+	// Per-reviewer verdicts at the PR head (#2127 R5): a COMMENTED review reads the
+	// same for a clean pass and for findings, these fields tell them apart.
+	if j := reviewersJSON(e.reviewerVerdicts(st)); j != "" {
+		ev.Meta["reviewers"] = j
+	}
+	// A green that follows a flake re-run on this head says so (#2127 R7).
+	if lpr != nil && ci == "green" {
+		if names := e.flakeRerunChecks(st.Repo, lpr.Number, lpr.HeadSHA); len(names) > 0 {
+			ev.Meta["ci_rerun"] = strings.Join(names, ", ")
+		}
+	}
 	ev.Meta["unresolved_threads"] = strconv.Itoa(unresolved)
 	ev.Meta["autonomy"] = e.autonomyMode(st)
 	if lpr != nil && lpr.HeadSHA != "" {
