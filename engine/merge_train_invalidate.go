@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
 )
 
 // Post-landing invalidation of conflicting Queued members (#2047, ADR-2047,
@@ -283,6 +284,11 @@ func (e *Engine) invalidateConflictingQueued(g queuedRepoGroup, projectID string
 	return remaining
 }
 
+// rebaseCauseAfterLanding is the ItemState.RebaseCause set by the post-landing
+// merge-tree invalidation (#2047); it yields the `rebase-conflict-after-landing`
+// attention cause (#2121).
+const rebaseCauseAfterLanding = "after-landing"
+
 // rerouteInvalidatedMember moves a member whose merge with the new base conflicts off
 // Queued (FR-007, ADR-1208 reroute-before-side-effects): the reroute first, and only on
 // success the label, the comment and the log line. It never calls ejectMember, never
@@ -314,6 +320,13 @@ func (e *Engine) rerouteInvalidatedMember(projectID, owner, repo string, item gh
 			e.logf(n, "merge-train", "warn: could not apply fabrik:rebase-needed to #%d: %v — %s's mergeability gate will derive it\n", n, err, targetName)
 		}
 	}
+
+	// #2121: the label is the engine's own doing here (main moved after a sibling
+	// landed), so record that as the cause — only the post-landing merge-tree path
+	// does, so the other fabrik:rebase-needed writers leave the cause unknown.
+	// Recorded after the label write-through: the store drops a cause whose
+	// label is absent.
+	e.store.Apply(itemstate.RebaseCauseSet{Repo: owner + "/" + repo, Number: n, Cause: rebaseCauseAfterLanding})
 
 	e.logf(n, "merge-train", "invalidated #%d: conflicts with landed %s (merge-tree)\n", n, joinIssueRefs(causes))
 

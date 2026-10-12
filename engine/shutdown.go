@@ -148,6 +148,13 @@ func (e *Engine) runShutdownPause(inFlight []itemstate.Snapshot) {
 	wg.Wait()
 }
 
+// pauseCauseDaemonStopMarker is the stable HTML-comment marker the daemon clean
+// stop pause comment carries (#2121). It is the only evidence the `daemon-stop`
+// attention cause accepts: it survives a restart because it is on GitHub, and a
+// pause with no marker (a crash, a stale in_progress label) leaves the cause
+// absent rather than guessed.
+const pauseCauseDaemonStopMarker = "<!-- fabrik:pause-cause=daemon-stop -->"
+
 // pauseIssueForDaemonShutdown performs the R1/R2 per-issue work for one
 // in-flight issue found by runShutdownPause: clear stage:<Name>:in_progress
 // directly (R2 — not delegated to the cancelled worker goroutine's own
@@ -185,8 +192,8 @@ func (e *Engine) pauseIssueForDaemonShutdown(snap itemstate.Snapshot) {
 	comment := fmt.Sprintf(
 		"🏭 **Fabrik — paused by a daemon clean stop**\n\nStage **%s** was interrupted by a daemon clean stop (SIGINT/SIGTERM). "+
 			"Fabrik attempts to commit and push any in-progress worktree changes automatically as part of the stop — check the branch "+
-			"(and the engine log, if the push did not land) before assuming it succeeded. Remove `fabrik:paused` to resume.",
-		stageName,
+			"(and the engine log, if the push did not land) before assuming it succeeded. Remove `fabrik:paused` to resume.\n\n%s",
+		stageName, pauseCauseDaemonStopMarker,
 	)
 	e.pauseInterruptedIssue(item, comment)
 }
