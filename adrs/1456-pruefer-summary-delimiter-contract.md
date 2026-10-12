@@ -3,6 +3,7 @@
 **Status:** Accepted
 **Date:** 2026-08-09
 **Issue:** [#1456](https://github.com/handarbeit/fabrik/issues/1456)
+**Amended by:** ADR 2190 (the coverage marker block fails closed to `partial`, reversing this ADR's fail-open stance for that value only)
 
 ## Context
 
