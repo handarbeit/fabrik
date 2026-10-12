@@ -155,9 +155,8 @@ func toolDefs() []map[string]any {
 				"The same view is what a `situation` event carries and what the catch-up on attach delivers. With push: true the view is also queued to this session's channel as a `situation` event, " +
 				"unless it equals the last one sent to this subscriber (force: true sends it anyway); that writes nothing to GitHub or the board and needs this server to have been launched with --subscriber.",
 			"inputSchema": obj(map[string]any{
-				"push":       map[string]any{"type": "boolean", "description": "also queue this view to this session as a situation event (deduplicated unless force)"},
-				"force":      map[string]any{"type": "boolean", "description": "with push, send even when the view equals the last digest sent to this subscriber"},
-				"subscriber": map[string]any{"type": "string", "description": "with push: subscriber name; defaults to the name this server was launched with"},
+				"push":  map[string]any{"type": "boolean", "description": "also queue this view to this session as a situation event (deduplicated unless force)"},
+				"force": map[string]any{"type": "boolean", "description": "with push, send even when the view equals the last digest sent to this subscriber"},
 			}),
 			"annotations": readOnly,
 		},
@@ -318,20 +317,20 @@ func buildCall(name string, args json.RawMessage, defaultSubscriber string) (met
 		return localapi.MethodHealth, nil, nil
 	case ToolSituation:
 		var a struct {
-			Push       bool   `json:"push"`
-			Force      bool   `json:"force"`
-			Subscriber string `json:"subscriber"`
+			Push  bool `json:"push"`
+			Force bool `json:"force"`
 		}
 		if err := decodeArgs(args, &a); err != nil {
 			return "", nil, err
 		}
 		p := localapi.SituationParams{Push: a.Push, Force: a.Force}
 		if a.Push {
-			// The name is only needed to say who to push to; without one the
-			// daemon still answers and says nothing was pushed.
-			if who, err := subscriberName(a.Subscriber, defaultSubscriber); err == nil {
-				p.Subscriber = who
-			}
+			// A push goes to this session's own channel only: the launched
+			// --subscriber name, with no per-call override (as for the action
+			// tools), so a call cannot queue a digest into, or overwrite the dedup
+			// memory of, another subscriber. Without a name the daemon still
+			// answers and says nothing was pushed.
+			p.Subscriber = defaultSubscriber
 		}
 		return localapi.MethodSituation, p, nil
 	case ToolSubscribe:

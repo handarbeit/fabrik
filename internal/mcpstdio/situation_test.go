@@ -30,9 +30,10 @@ func TestSituationToolBuildsTheMethodCall(t *testing.T) {
 	if got := p.(localapi.SituationParams); got != (localapi.SituationParams{Subscriber: "topic-x", Push: true, Force: true}) {
 		t.Errorf("push params = %+v (the launched --subscriber name is the target)", got)
 	}
-	_, p, _ = buildCall(ToolSituation, json.RawMessage(`{"push":true,"subscriber":"other"}`), "topic-x")
-	if got := p.(localapi.SituationParams); got.Subscriber != "other" {
-		t.Errorf("explicit subscriber = %+v", got)
+	// A push targets this session's own channel only: there is no per-call
+	// subscriber override, so another subscriber's queue cannot be named.
+	if _, _, err := buildCall(ToolSituation, json.RawMessage(`{"push":true,"subscriber":"other"}`), "topic-x"); err == nil {
+		t.Error("a per-call subscriber must be refused")
 	}
 	// Without any name a push is still sent: the daemon answers and says why
 	// nothing was pushed, so the model still gets the view.
