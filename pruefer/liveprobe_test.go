@@ -103,16 +103,20 @@ func TestLiveProbe(t *testing.T) {
 	write(key, "TOPSECRET-PRIVATE-KEY\n")
 	write(filepath.Join(secretDir, "notes.txt"), "TOPSECRET-NOTES\n")
 	write(filepath.Join(clone, "main.go"), "package main // CLONE_MARKER\n")
-	diff := filepath.Join(root, "pr.diff")
-	write(diff, "--- a/main.go\n+++ b/main.go\n@@ -1 +1 @@\n+package main // DIFF_MARKER\n")
-	if err := os.Symlink(key, filepath.Join(clone, "link.pem")); err != nil {
-		t.Fatal(err)
-	}
-	req := ReviewRequest{Model: "haiku", Effort: "low", PRNumber: 1, WorkDir: clone, DiffPath: diff}
-	cloneR, diffR, err := resolveScopePaths(clone, diff)
+	staged, cleanupStaged, err := stageDiff([]diffFileBlock{{Path: "main.go", Raw: "diff --git a/main.go b/main.go\n--- a/main.go\n+++ b/main.go\n@@ -1 +1 @@\n+package main // DIFF_MARKER\n"}}, "", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer cleanupStaged()
+	if err := os.Symlink(key, filepath.Join(clone, "link.pem")); err != nil {
+		t.Fatal(err)
+	}
+	req := ReviewRequest{Model: "haiku", Effort: "low", PRNumber: 1, WorkDir: clone, Staged: staged}
+	cloneR, stagedR, err := resolveScopePaths(clone, staged.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	diffR := filepath.Join(stagedR, staged.Entries[0].File)
 	keyR, _ := filepath.EvalSymlinks(key)
 	secretR, _ := filepath.EvalSymlinks(secretDir)
 	t.Logf("claude args: %v", mustArgs(t, req))
@@ -203,4 +207,57 @@ func mustArgs(t *testing.T, req ReviewRequest) []string {
 		t.Fatal(err)
 	}
 	return a
+}
+
+// TestLiveProbeStagedCoverage (#2190) measures two things the coverage design
+// rests on, against the installed claude: (a) a long-line staged chunk of
+// stagedChunkMaxBytes is readable in ONE Read call without truncation, and
+// (b) whether a subagent's tool calls appear in the parent's stream-json tagged
+// with parent_tool_use_id, which decides whether deriveOpened may treat the
+// transcript as authoritative. Record the observed values in adrs/2190.
+func TestLiveProbeStagedCoverage(t *testing.T) {
+	if os.Getenv("PRUEFER_LIVE_PROBE") != "1" {
+		t.Skip("set PRUEFER_LIVE_PROBE=1 to run the live probe")
+	}
+	clone := t.TempDir()
+	// One hunk of long lines filling a whole chunk: the shape that hits Read's
+	// token cap before 2000 lines.
+	var raw strings.Builder
+	raw.WriteString("diff --git a/data.json b/data.json\n--- a/data.json\n+++ b/data.json\n@@ -0,0 +1,200 @@\n")
+	for i := 0; i < 200; i++ {
+		fmt.Fprintf(&raw, "+LINE%03d %s\n", i, strings.Repeat("z", 150))
+	}
+	last := "LINE199"
+	staged, cleanup, err := stageDiff([]diffFileBlock{{Path: "data.json", Raw: raw.String()}}, "", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	for _, e := range staged.Entries {
+		t.Logf("entry %s: %d lines, %d bytes (cap %d)", e.ID, e.Lines, e.Bytes, stagedChunkMaxBytes)
+	}
+	req := ReviewRequest{Model: "haiku", Effort: "low", PRNumber: 1, WorkDir: clone, Staged: staged}
+
+	t.Run("one Read reaches the end of a full-size chunk", func(t *testing.T) {
+		e := staged.Entries[len(staged.Entries)-1]
+		po := runProbe(t, req, "Make exactly one Read tool call on file_path="+staged.EntryPath(e)+" with no offset or limit, then reply with only the last LINE### token you saw in the result.")
+		t.Logf("result=%q", po.Result)
+		if !strings.Contains(po.Result, last) && !strings.Contains(po.Raw, last) {
+			t.Errorf("last line %s not seen: a chunk of %d bytes is too large for one Read; lower stagedChunkMaxBytes", last, e.Bytes)
+		}
+		// The transcript parser must credit that Read: this is what fails closed
+		// (every review `partial`) if the CLI's Read result format ever changes.
+		if opened, _ := deriveOpened([]byte(po.Raw), staged); !opened[e.ID] {
+			t.Errorf("deriveOpened did not credit a full Read of entry %s (%d lines): Read result format changed?", e.ID, e.Lines)
+		}
+	})
+
+	t.Run("subagent traffic visibility", func(t *testing.T) {
+		po := runProbe(t, req, "Use the Task tool exactly once, with a general-purpose subagent, instructing it to Read file_path="+staged.EntryPath(staged.Entries[0])+" and report the first line. Then reply with only the word DONE.")
+		opened, authoritative := deriveOpened([]byte(po.Raw), staged)
+		t.Logf("calls=%v opened=%v transcript-authoritative=%t", po.Calls, opened, authoritative)
+		if !authoritative {
+			t.Logf("subagent events are NOT tagged with parent_tool_use_id: coverage rests on the model's report for delegated reviews")
+		}
+	})
 }

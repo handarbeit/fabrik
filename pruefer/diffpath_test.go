@@ -2,12 +2,22 @@ package pruefer
 
 import (
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
 
-// TestBuildReviewPrompt_DiffPathReplacesImpossibleGitDiff is the regression
+// stagedForPrompt stages a one-entry diff for prompt tests.
+func stagedForPrompt(t *testing.T) *StagedDiff {
+	t.Helper()
+	s, cleanup, err := stageDiff([]diffFileBlock{{Path: "main.go", Raw: "diff --git a/main.go b/main.go\n+++ b/main.go\n@@ -1 +1 @@\n+x\n"}}, "", 958)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(cleanup)
+	return s
+}
+
+// TestBuildReviewPrompt_StagedDiffReplacesImpossibleGitDiff is the regression
 // test for the review hole: CloneForReview fetches only
 // refs/pull/<N>/head at depth 1, so the base branch is never a ref in the
 // review clone and `git diff <base>...HEAD` cannot resolve. The prompt used
@@ -16,15 +26,15 @@ import (
 // reviewed one file and said so: "I could not run `git diff main...HEAD`
 // because `main` doesn't resolve in this checkout, so I did not read the
 // rest of the diff."
-func TestBuildReviewPrompt_DiffPathReplacesImpossibleGitDiff(t *testing.T) {
-	diffPath := filepath.Join(t.TempDir(), "pruefer-pr-958.diff")
+func TestBuildReviewPrompt_StagedDiffReplacesImpossibleGitDiff(t *testing.T) {
+	staged := stagedForPrompt(t)
 	got := buildReviewPrompt(ReviewRequest{
 		Owner: "verveguy", Repo: "concept-maps", PRNumber: 958,
-		BaseBranch: "main", DiffPath: diffPath,
+		BaseBranch: "main", Staged: staged,
 	})
 
-	if !strings.Contains(got, diffPath) {
-		t.Errorf("prompt does not name the diff file:\n%s", got)
+	if !strings.Contains(got, staged.Dir) || !strings.Contains(got, staged.IndexPath) {
+		t.Errorf("prompt does not name the staging dir and index:\n%s", got)
 	}
 	// The impossible command must not be presented as something to run.
 	if strings.Contains(got, "compare against it (e.g. `git diff main...HEAD`)") {
@@ -36,82 +46,94 @@ func TestBuildReviewPrompt_DiffPathReplacesImpossibleGitDiff(t *testing.T) {
 	}
 }
 
-// TestBuildReviewPrompt_NoDiffPathDegrades: if the diff file could not be
-// written, the review still runs on the older wording rather than failing.
-func TestBuildReviewPrompt_NoDiffPathDegrades(t *testing.T) {
+// TestBuildReviewPrompt_StagedRequiresOpeningEveryEntry pins #2190 R1/R2 in
+// the Go-owned halves: open every entry (including under subagents) and report
+// coverage in the marker block.
+func TestBuildReviewPrompt_StagedRequiresOpeningEveryEntry(t *testing.T) {
+	got := buildReviewPrompt(ReviewRequest{Owner: "o", Repo: "r", PRNumber: 1, Staged: stagedForPrompt(t)})
+	for _, want := range []string{
+		"Open every entry in full",
+		"every index entry must be opened by some reader",
+		"PRUEFER_COVERAGE_BEGIN",
+		"PRUEFER_COVERAGE_END",
+		"Output has three parts",
+		"report back the IDs it opened in full",
+		"Read can silently stop before the end of a file",
+		"open those with `cat` only",
+		"if INDEX.txt itself is cut off",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("prompt missing %q:\n%s", want, got)
+		}
+	}
+}
+
+// TestBuildReviewPrompt_NoStagedDegrades: if nothing could be staged, the
+// review still runs on the older wording rather than failing, and the prompt
+// asks for no coverage block it has no entries for.
+func TestBuildReviewPrompt_NoStagedDegrades(t *testing.T) {
 	got := buildReviewPrompt(ReviewRequest{
 		Owner: "o", Repo: "r", PRNumber: 1, BaseBranch: "main",
 	})
 	if !strings.Contains(got, "The PR targets \"main\"") {
 		t.Errorf("degraded prompt lost its base-branch context:\n%s", got)
 	}
-	if strings.Contains(got, ".diff") {
-		t.Errorf("degraded prompt names a diff file it does not have:\n%s", got)
+	if strings.Contains(got, ".diff") || strings.Contains(got, "PRUEFER_COVERAGE_BEGIN") {
+		t.Errorf("degraded prompt names staged entries or a coverage block it does not have:\n%s", got)
+	}
+	if !strings.Contains(got, "Output has two parts") {
+		t.Errorf("degraded prompt should keep the two-part contract:\n%s", got)
 	}
 }
 
-// TestWriteDiffFile_OutsideCloneAndCleanedUp: the diff must not land inside
-// the reviewed tree, where it would appear in git status and in any
-// Grep/Glob sweep of the repo.
-func TestWriteDiffFile_OutsideCloneAndCleanedUp(t *testing.T) {
-	const body = "diff --git a/x b/x\n+one\n"
-	path, cleanup, err := writeDiffFile(body, 42)
+// TestStageDiff_OutsideCloneAndCleanedUp: the staged diff must not land inside
+// the reviewed tree, where it would appear in git status and in any Grep/Glob
+// sweep of the repo, and cleanup removes it (twice is fine).
+func TestStageDiff_OutsideCloneAndCleanedUp(t *testing.T) {
+	const raw = "diff --git a/x b/x\n+++ b/x\n@@ -0,0 +1 @@\n+one\n"
+	s, cleanup, err := stageDiff([]diffFileBlock{{Path: "x", Raw: raw}}, "", 42)
 	if err != nil {
-		t.Fatalf("writeDiffFile: %v", err)
+		t.Fatalf("stageDiff: %v", err)
 	}
-	got, err := os.ReadFile(path)
+	got, err := os.ReadFile(s.EntryPath(s.Entries[0]))
 	if err != nil {
 		t.Fatalf("reading back: %v", err)
 	}
-	if string(got) != body {
-		t.Errorf("diff file content = %q, want %q", got, body)
+	if string(got) != raw {
+		t.Errorf("entry content = %q, want %q", got, raw)
 	}
-	if !strings.HasSuffix(path, ".diff") {
-		t.Errorf("diff file %q lacks a .diff suffix", path)
+	if _, err := os.Stat(s.IndexPath); err != nil {
+		t.Errorf("index missing: %v", err)
 	}
 
 	cleanup()
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Errorf("diff file still present after cleanup: %v", err)
+	if _, err := os.Stat(s.Dir); !os.IsNotExist(err) {
+		t.Errorf("staging dir still present after cleanup: %v", err)
 	}
 	cleanup() // must be safe to call twice
 }
 
-// TestReviewPR_EmptyDiffWritesNoFile is the regression test for the defect
-// Pruefer found reviewing this change: when FetchPRDiff returns 406
-// too_large, review.go's files-API fallback leaves diff == "". Writing that
-// would create an empty file the prompt then calls "the authoritative
-// statement of what changed" while telling the reviewer not to fall back to
-// git — strictly worse than no file, and it hits exactly the largest PRs.
-func TestReviewPR_EmptyDiffWritesNoFile(t *testing.T) {
-	// The prompt must never name a diff file when there is no diff to put
-	// in one.
+// TestReviewPR_EmptyDiffStagesNothing is the regression test for the defect
+// Pruefer found reviewing the original diff-file change: when FetchPRDiff
+// returns 406 too_large, review.go's files-API fallback leaves diff == "".
+// Staging that would give the prompt an empty index it calls "the
+// authoritative statement of what changed" while telling the reviewer not to
+// fall back to git — strictly worse than nothing, and it hits exactly the
+// largest PRs.
+func TestReviewPR_EmptyDiffStagesNothing(t *testing.T) {
 	got := buildReviewPrompt(ReviewRequest{
-		Owner: "o", Repo: "r", PRNumber: 1, BaseBranch: "main", DiffPath: "",
+		Owner: "o", Repo: "r", PRNumber: 1, BaseBranch: "main",
 	})
 	if strings.Contains(got, "authoritative statement of what changed") {
-		t.Errorf("prompt claims an authoritative diff file with no DiffPath set:\n%s", got)
+		t.Errorf("prompt claims an authoritative diff with nothing staged:\n%s", got)
 	}
-	if !strings.Contains(got, "no diff file is available") {
+	if !strings.Contains(got, "no staged diff is available") {
 		t.Errorf("prompt did not degrade to the base-branch wording:\n%s", got)
 	}
 }
 
-// TestWriteDiffFile_EmptyContentStillGuardedByCaller documents the division
-// of responsibility: writeDiffFile itself is content-agnostic (it would
-// happily write zero bytes), so the empty check belongs at the call site in
-// ReviewPR, which is where the 406 fallback's empty diff originates.
-func TestWriteDiffFile_EmptyContentStillGuardedByCaller(t *testing.T) {
-	path, cleanup, err := writeDiffFile("", 1)
-	if err != nil {
-		t.Fatalf("writeDiffFile: %v", err)
-	}
-	defer cleanup()
-	b, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("reading back: %v", err)
-	}
-	if len(b) != 0 {
-		t.Errorf("expected an empty file, got %d bytes", len(b))
+func TestStageDiff_RejectsNothingToStage(t *testing.T) {
+	if _, _, err := stageDiff(nil, "", 1); err == nil {
+		t.Error("expected an error staging an empty diff")
 	}
 }

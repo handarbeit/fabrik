@@ -13,16 +13,17 @@ import (
 	gh "github.com/handarbeit/fabrik/github"
 )
 
-// reviewTestScope returns a request whose clone and diff file really exist, so
-// buildReviewArgs can resolve them.
+// reviewTestScope returns a request whose clone and staged diff directory
+// really exist, so buildReviewArgs can resolve them.
 func reviewTestScope(t *testing.T) ReviewRequest {
 	t.Helper()
 	dir := t.TempDir()
-	diff := filepath.Join(t.TempDir(), "pruefer-pr-1.diff")
-	if err := os.WriteFile(diff, []byte("diff"), 0o600); err != nil {
+	staged, cleanup, err := stageDiff([]diffFileBlock{{Path: "a.go", Raw: "diff --git a/a.go b/a.go\n"}}, "", 1)
+	if err != nil {
 		t.Fatal(err)
 	}
-	return ReviewRequest{Model: "sonnet", WorkDir: dir, DiffPath: diff}
+	t.Cleanup(cleanup)
+	return ReviewRequest{Model: "sonnet", WorkDir: dir, Staged: staged}
 }
 
 func mustReviewArgs(t *testing.T, req ReviewRequest) []string {
@@ -58,7 +59,7 @@ func TestBuildReviewArgs_ReadOnlyAllowlist(t *testing.T) {
 	if err := checkReviewArgsScoped(args); err != nil {
 		t.Errorf("built args are not scoped: %v", err)
 	}
-	clone, diff, err := resolveScopePaths(req.WorkDir, req.DiffPath)
+	clone, diff, err := resolveScopePaths(req.WorkDir, req.Staged.Dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +67,9 @@ func TestBuildReviewArgs_ReadOnlyAllowlist(t *testing.T) {
 		"Read(//" + strings.TrimPrefix(clone, "/") + "/**)",
 		"Grep(//" + strings.TrimPrefix(clone, "/") + "/**)",
 		"Glob(//" + strings.TrimPrefix(clone, "/") + "/**)",
-		"Read(//" + strings.TrimPrefix(diff, "/") + ")",
+		"Read(//" + strings.TrimPrefix(diff, "/") + "/**)",
+		"Grep(//" + strings.TrimPrefix(diff, "/") + "/**)",
+		"Glob(//" + strings.TrimPrefix(diff, "/") + "/**)",
 		"Bash(cat *)", "Bash(head *)", "Bash(tail *)", "Bash(ls *)", "Task",
 	} {
 		if !hasFlagValue(args, "--allowedTools", want) {
@@ -161,13 +164,35 @@ func TestCheckReviewArgsScoped_NonVacuous(t *testing.T) {
 	}
 }
 
-func TestBuildReviewArgs_NoDiffPathNoDiffRule(t *testing.T) {
+func TestBuildReviewArgs_NoStagedNoStagedRule(t *testing.T) {
 	req := reviewTestScope(t)
-	req.DiffPath = ""
+	staged := req.Staged.Dir
+	req.Staged = nil
 	args := mustReviewArgs(t, req)
 	for i, a := range args {
+		if a == "--allowedTools" && strings.Contains(args[i+1], strings.TrimPrefix(staged, "/")) {
+			t.Errorf("unexpected staged-dir rule %q with no Staged", args[i+1])
+		}
+	}
+}
+
+// TestBuildReviewArgs_StagedDirRulesNotSingleFile pins #2190: the diff is a
+// directory scoped for Read, Grep and Glob, never the old single-file rule.
+func TestBuildReviewArgs_StagedDirRulesNotSingleFile(t *testing.T) {
+	req := reviewTestScope(t)
+	args := mustReviewArgs(t, req)
+	_, staged, err := resolveScopePaths(req.WorkDir, req.Staged.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range []string{"Read", "Grep", "Glob"} {
+		if !hasFlagValue(args, "--allowedTools", tool+"(//"+strings.TrimPrefix(staged, "/")+"/**)") {
+			t.Errorf("missing %s rule for the staged directory, args = %v", tool, args)
+		}
+	}
+	for i, a := range args {
 		if a == "--allowedTools" && strings.HasSuffix(args[i+1], ".diff)") {
-			t.Errorf("unexpected diff rule %q with empty DiffPath", args[i+1])
+			t.Errorf("single-file diff rule %q must be gone", args[i+1])
 		}
 	}
 }
@@ -211,12 +236,12 @@ func TestResolveScopePaths_FailsClosed(t *testing.T) {
 	for name, c := range map[string][2]string{
 		"empty workdir":   {"", ""},
 		"missing workdir": {filepath.Join(t.TempDir(), "nope"), ""},
-		"missing diff":    {t.TempDir(), filepath.Join(t.TempDir(), "nope.diff")},
+		"missing staged":  {t.TempDir(), filepath.Join(t.TempDir(), "nope")},
 	} {
 		if _, _, err := resolveScopePaths(c[0], c[1]); err == nil {
 			t.Errorf("%s: expected an error", name)
 		}
-		if _, err := buildReviewArgs(ReviewRequest{WorkDir: c[0], DiffPath: c[1]}); err == nil {
+		if _, err := buildReviewArgs(ReviewRequest{WorkDir: c[0], Staged: stagedAt(c[1])}); err == nil {
 			t.Errorf("%s: buildReviewArgs must fail closed", name)
 		}
 	}
@@ -1017,7 +1042,15 @@ func TestReviewPrompt_OffersOnlyPermittedForms(t *testing.T) {
 			t.Errorf("dynamic context suggests a denied form %q", bad)
 		}
 	}
-	if !strings.Contains(section, "staged diff file") {
-		t.Errorf("path limits do not mention the staged diff file")
+	if !strings.Contains(section, "staged diff directory") {
+		t.Errorf("path limits do not mention the staged diff directory")
 	}
+}
+
+// stagedAt returns a StagedDiff naming dir, or nil for the empty string.
+func stagedAt(dir string) *StagedDiff {
+	if dir == "" {
+		return nil
+	}
+	return &StagedDiff{Dir: dir}
 }

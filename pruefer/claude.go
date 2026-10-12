@@ -67,12 +67,12 @@ func escapeRulePath(p string) string {
 }
 
 // resolveScopePaths returns the symlink-resolved absolute clone directory and
-// (when non-empty) staged diff file. The CLI applies an allow rule only when
-// both the requested path and its resolved target match, and on macOS the
+// (when non-empty) staged diff directory. The CLI applies an allow rule only
+// when both the requested path and its resolved target match, and on macOS the
 // temp dir is a symlink (/var -> /private/var), so unresolved paths would
 // match nothing and every read would fail. Any failure is returned: Review
 // fails closed rather than running without a scope.
-func resolveScopePaths(workDir, diffPath string) (clone, diff string, err error) {
+func resolveScopePaths(workDir, stagedDir string) (clone, staged string, err error) {
 	if workDir == "" {
 		return "", "", errors.New("review scope: empty work dir")
 	}
@@ -80,18 +80,18 @@ func resolveScopePaths(workDir, diffPath string) (clone, diff string, err error)
 	if err != nil {
 		return "", "", fmt.Errorf("review scope: resolving clone %q: %w", workDir, err)
 	}
-	if diffPath != "" {
-		diff, err = resolveAbs(diffPath)
+	if stagedDir != "" {
+		staged, err = resolveAbs(stagedDir)
 		if err != nil {
-			return "", "", fmt.Errorf("review scope: resolving diff file %q: %w", diffPath, err)
+			return "", "", fmt.Errorf("review scope: resolving staged diff dir %q: %w", stagedDir, err)
 		}
 	}
-	for _, p := range []string{clone, diff} {
+	for _, p := range []string{clone, staged} {
 		if strings.ContainsAny(p, "\n\r\x00") {
 			return "", "", fmt.Errorf("review scope: path %q contains a control character", p)
 		}
 	}
-	return clone, diff, nil
+	return clone, staged, nil
 }
 
 func resolveAbs(p string) (string, error) {
@@ -103,18 +103,19 @@ func resolveAbs(p string) (string, error) {
 }
 
 // buildReviewToolRules builds the permission rules for a review from the
-// already-resolved clone and diff paths (#2192, R1-R3). Scope is expressed as
+// already-resolved clone and staged-diff-directory paths (#2192, R1-R3; the
+// diff is a directory of entries since #2190). Scope is expressed as
 // path-scoped ALLOWS only — Claude Code's deny rules beat allows, so "deny
 // everything, allow the clone" cannot be written. There is deliberately no
 // bare Read, Grep or Glob entry: an unscoped allow admits every path, and
 // probing showed Read(...) rules do not scope the Grep/Glob tools, so each
 // gets its own path rule. Task (subagents) inherits these rules.
-func buildReviewToolRules(clone, diff string) (allow, deny []string) {
+func buildReviewToolRules(clone, stagedDir string) (allow, deny []string) {
 	root := "//" + strings.TrimPrefix(escapeRulePath(clone), "/") + "/**"
 	allow = append(allow, "Read("+root+")", "Grep("+root+")", "Glob("+root+")")
-	if diff != "" {
-		file := "//" + strings.TrimPrefix(escapeRulePath(diff), "/")
-		allow = append(allow, "Read("+file+")", "Grep("+file+")")
+	if stagedDir != "" {
+		staged := "//" + strings.TrimPrefix(escapeRulePath(stagedDir), "/") + "/**"
+		allow = append(allow, "Read("+staged+")", "Grep("+staged+")", "Glob("+staged+")")
 	}
 	for _, c := range reviewShellAllow {
 		allow = append(allow, "Bash("+c+" *)")
@@ -233,20 +234,20 @@ type ReviewRequest struct {
 	// most repos have no skill file at all.
 	RepoGuidance     string
 	RepoGuidanceMode string
-	// DiffPath is the absolute path to a file holding the PR's unified diff
-	// — the same bytes review.go already fetched for the size guard, after
-	// exclusion and trimming, so it is exactly the change the model is
-	// being asked to review and nothing more.
+	// Staged describes the directory the PR's diff is staged in — the same
+	// bytes review.go already fetched for the size guard, after exclusion and
+	// trimming, so it is exactly the change the model is being asked to review
+	// and nothing more. One entry file per changed path (or bounded chunk of a
+	// large one) plus an index, so no part of the diff sits behind a single
+	// Read call's limit (#2190, see diffstage.go).
 	//
 	// It exists because the review clone structurally cannot produce that
 	// diff itself: CloneForReview does a depth-1 fetch of
 	// refs/pull/<N>/head and nothing else, so the base branch is not a ref
-	// in that repository and `git diff <base>...HEAD` cannot resolve. The
-	// prompt used to instruct exactly that command; it failed on every
-	// review, and the model was left to infer the change by reading whole
-	// files. Empty (the degraded case) falls back to that older wording so
-	// a review still runs.
-	DiffPath string
+	// in that repository and `git diff <base>...HEAD` cannot resolve. nil (the
+	// degraded case: no diff text, or staging failed) falls back to the older
+	// wording so a review still runs, and its coverage is `partial`.
+	Staged *StagedDiff
 }
 
 // ClaudeInvoker defines the interface for invoking Claude Code to produce
@@ -265,6 +266,17 @@ type ReviewResult struct {
 	Text     string
 	NumTurns int
 	CostUSD  float64
+	// Opened is the set of staged entry IDs the invocation's transcript proves
+	// were read in full, and OpenedAuthoritative whether that transcript shows
+	// every subagent's traffic (see deriveOpened). Both are zero for an
+	// invoker that cannot observe a transcript, which leaves coverage resting
+	// on the model's own report.
+	Opened              map[string]bool
+	OpenedAuthoritative bool
+	// UnobservedSubagents is set when a Task/Agent call's traffic was not
+	// visible in the transcript (see deriveOpened): coverage then refuses to
+	// credit what only an invisible subagent could have read.
+	UnobservedSubagents bool
 }
 
 // RealClaudeInvoker invokes the real claude CLI via exec.CommandContext,
@@ -391,7 +403,7 @@ func renderReviewThreads(b *strings.Builder, threads []gh.PRReviewThread, thread
 // review.go's diff-size guard omitted from what it measured and from
 // inline-comment anchoring (R4). This is load-bearing, not cosmetic: unlike
 // the diff text itself, Claude never receives it as prompt content — it reads
-// the clone and the staged diff file with its own tools, so a passive "FYI,
+// the clone and the staged diff with its own tools, so a passive "FYI,
 // these were excluded" note is what stops it from reading an omitted file
 // directly, which in the motivating scenario (a 17 MB JSONL corpus) could blow
 // its own context. It is backstopped by validRightAnchors demoting any finding
@@ -403,7 +415,7 @@ func renderOmittedPaths(b *strings.Builder, excluded, trimmed []string) {
 		return
 	}
 	b.WriteString("## Files omitted from this review\n\n")
-	b.WriteString("Pruefer's size guard omitted the following files from what it measured against max_diff_bytes and from inline-comment anchoring. They are not in the staged diff file. Do not review them, and do not read them from the working tree:\n\n")
+	b.WriteString("Pruefer's size guard omitted the following files from what it measured against max_diff_bytes and from inline-comment anchoring. They are not in the staged diff. Do not review them, and do not read them from the working tree:\n\n")
 	for _, p := range excluded {
 		fmt.Fprintf(b, "- %s (excluded by `excluded_paths`)\n", p)
 	}
@@ -498,8 +510,8 @@ func renderReviewTools(b *strings.Builder, req ReviewRequest) {
 	b.WriteString(". Pipes between them are fine; redirection, command substitution and chaining with `;`, `&&` or `||` are not.\n")
 	b.WriteString("- Task: delegate part of a large diff (by file or area) to a subagent. Subagents are bound by exactly the same tools and path limits, and have no other tools. Only your own final message is the review, so merge their findings into it yourself.\n\n")
 	b.WriteString("Path limits: Read, Grep, Glob and the shell commands reach only the working directory")
-	if req.DiffPath != "" {
-		b.WriteString(" and the staged diff file named below")
+	if req.Staged != nil {
+		b.WriteString(" and the staged diff directory named below")
 	}
 	b.WriteString(". Any other path, including `..` or symlinks that lead outside, is denied.\n\n")
 	b.WriteString("Not available, so do not try them: find, wc, sed, rg, git of any kind, and any command that writes files, runs code (tests, builds, linters, package managers) or uses the network. You have no write access.\n\n")
@@ -516,17 +528,19 @@ func renderReviewTools(b *strings.Builder, req ReviewRequest) {
 func renderDynamicContext(b *strings.Builder, req ReviewRequest) {
 	fmt.Fprintf(b, "You are Pruefer, an automated code reviewer for pull request %s/%s#%d: %q.\n\n", req.Owner, req.Repo, req.PRNumber, req.Title)
 	renderReviewTools(b, req)
-	if req.DiffPath != "" {
+	if req.Staged != nil {
 		// The clone has no base ref (depth-1 head-only fetch), so a
 		// three-dot diff against the base cannot resolve here. Hand over
 		// the diff Pruefer already has instead of naming a command that
 		// will fail.
-		fmt.Fprintf(b, "This PR's complete unified diff — exactly the change under review, already filtered to what you should review — is written to %s. Read that file first: it is the authoritative statement of what changed. The working directory holds the PR's head commit, so use Grep, Glob and Read on it for surrounding context the diff alone doesn't give you.\n\n", req.DiffPath)
+		fmt.Fprintf(b, "This PR's complete unified diff — exactly the change under review, already filtered to what you should review — is staged as %d entries in %s. Read %s first: it lists every entry with its ID, file, original path, chunk and size. Each entry is one small file holding one changed path's diff (a large path is cut into numbered chunks that each repeat the file header, and hunk headers carry the true line numbers). Together they are the authoritative statement of what changed. The working directory holds the PR's head commit, so use Grep, Glob and Read on it for surrounding context the diff alone doesn't give you.\n\n", len(req.Staged.Entries), req.Staged.Dir, req.Staged.IndexPath)
+		fmt.Fprintf(b, "Entry files are named <ID>.diff, IDs 0001 through %04d, so if INDEX.txt itself is cut off you can still open the rest by name.\n\n", len(req.Staged.Entries))
+		b.WriteString("Open every entry in full: use Read, or `cat`. Read can silently stop before the end of a file, so check that its last numbered line matches the entry's line count in the index and, if it stops early, Read again from the next line with offset. An entry flagged wide-line holds lines Read cuts mid-line: open those with `cat` only. If you split the diff across subagents, every index entry must be opened by some reader. Do not stop after the first entries — tests and later files are listed last, and an unread entry is reported to the PR as unread.\n\n")
 		if req.BaseBranch != "" {
-			fmt.Fprintf(b, "The PR targets %q. The checkout is a shallow, single-commit fetch of the PR head with no git history or base ref, so rely on the diff file above rather than trying to reconstruct the change.\n\n", req.BaseBranch)
+			fmt.Fprintf(b, "The PR targets %q. The checkout is a shallow, single-commit fetch of the PR head with no git history or base ref, so rely on the staged diff above rather than trying to reconstruct the change.\n\n", req.BaseBranch)
 		}
 	} else if req.BaseBranch != "" {
-		fmt.Fprintf(b, "The PR targets %q. The checkout is a shallow, single-commit fetch of the PR head with no git history or base ref, and no diff file is available: read the changed files in the working tree directly.\n\n", req.BaseBranch)
+		fmt.Fprintf(b, "The PR targets %q. The checkout is a shallow, single-commit fetch of the PR head with no git history or base ref, and no staged diff is available: read the changed files in the working tree directly.\n\n", req.BaseBranch)
 	}
 	renderOmittedPaths(b, req.OmittedExcludedPaths, req.OmittedTrimmedPaths)
 	if req.Body != "" {
@@ -545,9 +559,13 @@ func renderDynamicContext(b *strings.Builder, req ReviewRequest) {
 // either append or replace mode — can reach this function's output;
 // buildReviewPrompt calls it unconditionally, after resolveGuidance. Moved
 // verbatim from the pre-#1446 buildReviewPrompt, no behavior change.
-func renderContract(b *strings.Builder) {
+func renderContract(b *strings.Builder, withCoverage bool) {
 	b.WriteString("You do not decide whether this PR is approved or blocked — that is computed automatically from the severity you assign each finding below, never from anything you write in prose. Do not use approval/rejection language such as \"LGTM\" or \"requesting changes\" in your summary; just describe what you found.\n\n")
-	b.WriteString("Output has two parts, in this exact order:\n\n")
+	if withCoverage {
+		b.WriteString("Output has three parts, in this exact order:\n\n")
+	} else {
+		b.WriteString("Output has two parts, in this exact order:\n\n")
+	}
 	b.WriteString("1. A short prose summary: what you reviewed and your overall assessment. This is the only text GitHub shows outside of inline comments, so it must stand on its own. Wrap it in PRUEFER_SUMMARY_BEGIN and PRUEFER_SUMMARY_END marker lines, each alone on its own line, with nothing else on those lines. Nothing — no narration, no meta-commentary, no investigation notes — may appear before PRUEFER_SUMMARY_BEGIN; anything there is discarded and never shown to anyone. The ```json findings block described in part 2 below must come after PRUEFER_SUMMARY_END, never between the two markers. For example:\n\n")
 	b.WriteString("PRUEFER_SUMMARY_BEGIN\nReviewed the changes to X. Found one medium-severity issue; see inline comment.\nPRUEFER_SUMMARY_END\n\n")
 	b.WriteString("2. A single fenced ```json code block containing a JSON array of your findings, each anchored to the exact file and line it concerns, with a \"severity\" classification:\n\n")
@@ -558,6 +576,11 @@ func renderContract(b *strings.Builder) {
 	b.WriteString("- \"high\": a bug or design issue that will likely cause incorrect behavior.\n")
 	b.WriteString("- \"critical\": a security vulnerability, data loss, or severe correctness bug.\n\n")
 	b.WriteString("Each entry's \"path\" must be a file path exactly as it appears in the diff, and \"line\" must be a line number in the new (post-change) version of that file — i.e. a line you can see in `git diff` output prefixed with `+` or unprefixed (context), never a line that only existed in the old version. If you have no findings, emit an empty array `[]`. Do not put findings only in the prose — every specific, actionable finding belongs in the JSON array so it can be attached to its exact line; use the prose summary for overall assessment only. Report each distinct underlying finding once — if the same defect is visible at more than one line, pick the most relevant anchor rather than emitting a separate entry per line.\n\n")
+	if withCoverage {
+		b.WriteString("3. After the findings block, a coverage block listing the ID of every staged diff entry that was opened and read in full, by you or by a subagent you delegated it to. Put each marker alone on its own line, with a JSON object between them:\n\n")
+		b.WriteString("PRUEFER_COVERAGE_BEGIN\n{\"opened\": [\"0001\", \"0002\"]}\nPRUEFER_COVERAGE_END\n\n")
+		b.WriteString("List only entries you actually read in full; an entry you do not list is reported to the PR as unread, and listing one you did not read defeats the review. If you delegate entries to subagents, give each the entry IDs it must open and tell it to report back the IDs it opened in full, and include in your list exactly the IDs the subagents report. If you opened nothing, report an empty list.\n\n")
+	}
 	b.WriteString("Output ONLY the review text itself: no preamble, no meta-commentary about what you are about to do.\n")
 }
 
@@ -571,7 +594,7 @@ func buildReviewPrompt(req ReviewRequest) string {
 	renderDynamicContext(&b, req)
 	b.WriteString(resolveGuidance(req))
 	b.WriteString("\n\n")
-	renderContract(&b)
+	renderContract(&b, req.Staged != nil)
 	return b.String()
 }
 
@@ -610,11 +633,15 @@ func buildReviewPrompt(req ReviewRequest) string {
 // and Pruefer's own config alone. Authentication is unaffected: it comes
 // from the config directory, not from any settings layer.
 func buildReviewArgs(req ReviewRequest) ([]string, error) {
-	clone, diff, err := resolveScopePaths(req.WorkDir, req.DiffPath)
+	stagedDir := ""
+	if req.Staged != nil {
+		stagedDir = req.Staged.Dir
+	}
+	clone, staged, err := resolveScopePaths(req.WorkDir, stagedDir)
 	if err != nil {
 		return nil, err
 	}
-	allow, deny := buildReviewToolRules(clone, diff)
+	allow, deny := buildReviewToolRules(clone, staged)
 	args := []string{
 		"--output-format", "stream-json",
 		"--verbose",
@@ -750,11 +777,21 @@ func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (Revi
 	// Fail closed: never run a review without its path scope. The resolved
 	// paths replace the request's so the prompt, the cwd and the rules all
 	// name the same symlink-free paths (macOS /var -> /private/var).
-	clone, diff, err := resolveScopePaths(req.WorkDir, req.DiffPath)
+	stagedDir := ""
+	if req.Staged != nil {
+		stagedDir = req.Staged.Dir
+	}
+	clone, staged, err := resolveScopePaths(req.WorkDir, stagedDir)
 	if err != nil {
 		return ReviewResult{}, fmt.Errorf("building review arguments: %w", err)
 	}
-	req.WorkDir, req.DiffPath = clone, diff
+	req.WorkDir = clone
+	if req.Staged != nil {
+		resolvedStaged := *req.Staged
+		resolvedStaged.Dir = staged
+		resolvedStaged.IndexPath = filepath.Join(staged, stagedIndexName)
+		req.Staged = &resolvedStaged
+	}
 	args, err := buildReviewArgs(req)
 	if err != nil {
 		return ReviewResult{}, fmt.Errorf("building review arguments: %w", err)
@@ -849,5 +886,7 @@ func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (Revi
 	if strings.TrimSpace(resp.Result) == "" {
 		return ReviewResult{}, fmt.Errorf("claude produced an empty review")
 	}
-	return ReviewResult{Text: resp.Result, NumTurns: resp.NumTurns, CostUSD: resp.CostUSD}, nil
+	opened, authoritative := deriveOpened(stdout.Bytes(), req.Staged)
+	return ReviewResult{Text: resp.Result, NumTurns: resp.NumTurns, CostUSD: resp.CostUSD, Opened: opened, OpenedAuthoritative: authoritative,
+		UnobservedSubagents: req.Staged != nil && !authoritative}, nil
 }
