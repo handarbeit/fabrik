@@ -62,20 +62,53 @@ func snapshot(t *testing.T, dir string) map[string]string {
 // the release binary of that era would have written it.
 func deployFixture(t *testing.T, tag string) string {
 	t.Helper()
+	return deployFixtureOpts(t, tag, true)
+}
+
+// deployFixtureNoVersion is deployFixture without .installed-version. With the
+// pristine old disk differing from the current embed, CheckPluginState then
+// reports local changes, so the per-file shipped table is what decides whether
+// the tree is really customised.
+func deployFixtureNoVersion(t *testing.T, tag string) string {
+	t.Helper()
+	return deployFixtureOpts(t, tag, false)
+}
+
+func deployFixtureOpts(t *testing.T, tag string, seedVersion bool) string {
+	t.Helper()
 	dir := t.TempDir()
 	root := filepath.Join(migrationFixtureRoot, tag)
 	copyDirTree(t, filepath.Join(root, "plugin"), filepath.Join(dir, ".fabrik", "plugin"))
 	copyDirTree(t, filepath.Join(root, "stages"), filepath.Join(dir, ".fabrik", "stages"))
 	pluginDir := filepath.Join(dir, ".fabrik", "plugin")
-	h, err := fabrikplugin.ComputeDiskVersion(pluginDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := fabrikplugin.WriteVersionHash(pluginDir, h); err != nil {
-		t.Fatal(err)
+	if seedVersion {
+		h, err := fabrikplugin.ComputeDiskVersion(pluginDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := fabrikplugin.WriteVersionHash(pluginDir, h); err != nil {
+			t.Fatal(err)
+		}
 	}
 	chdirTest(t, dir)
 	return dir
+}
+
+// requireCustom fails unless CheckPluginState already reports local changes, so
+// the test cannot silently stop consulting the per-file table.
+func requireCustom(t *testing.T, dir string) {
+	t.Helper()
+	pluginDir := filepath.Join(dir, ".fabrik", "plugin")
+	if _, err := os.Stat(filepath.Join(pluginDir, ".installed-version")); !os.IsNotExist(err) {
+		t.Fatalf(".installed-version must be absent: %v", err)
+	}
+	custom, _, _, err := fabrikplugin.CheckPluginState(pluginDir, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !custom {
+		t.Fatal("CheckPluginState must report local changes, else the per-file table is never consulted")
+	}
 }
 
 func editSkill(t *testing.T, dir, skill string) {
@@ -145,6 +178,80 @@ func TestMigrate_UncustomisedFromEarlierReleases(t *testing.T) {
 			}
 			if !reflect.DeepEqual(first, snapshot(t, filepath.Join(dir, ".fabrik"))) {
 				t.Error("second run changed files")
+			}
+		})
+	}
+}
+
+// An uncustomised old deployment whose .installed-version is missing is judged
+// by the per-file shipped table alone: nothing moves, the base is restored and
+// every reference is qualified to the base plugin.
+func TestMigrate_UncustomisedWithoutInstalledVersion(t *testing.T) {
+	for _, tag := range migrationTags {
+		t.Run(tag, func(t *testing.T) {
+			dir := deployFixtureNoVersion(t, tag)
+			requireCustom(t, dir)
+			if err := runUpgrade(nil); err != nil {
+				t.Fatalf("runUpgrade: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(dir, filepath.FromSlash(fabrikplugin.LocalWorkflowsRelDir))); !os.IsNotExist(err) {
+				t.Error("nothing may be moved to local-workflows for an uncustomised deployment")
+			}
+			for k, v := range stageRefs(t, dir) {
+				if !strings.HasPrefix(v, fabrikplugin.BasePluginName+":") {
+					t.Errorf("%s = %q, want a %s-qualified reference", k, v, fabrikplugin.BasePluginName)
+				}
+			}
+			assertBaseIsEmbedded(t, dir)
+
+			first := snapshot(t, filepath.Join(dir, ".fabrik"))
+			if err := runUpgrade(nil); err != nil {
+				t.Fatalf("second runUpgrade: %v", err)
+			}
+			if !reflect.DeepEqual(first, snapshot(t, filepath.Join(dir, ".fabrik"))) {
+				t.Error("second run changed files")
+			}
+		})
+	}
+}
+
+// With .installed-version missing and exactly one skill hand-edited, the tree
+// moves and only references to that skill are redirected to local-workflows.
+func TestMigrate_EditedWithoutInstalledVersionScopesToEditedSkill(t *testing.T) {
+	for _, tag := range migrationTags {
+		t.Run(tag, func(t *testing.T) {
+			dir := deployFixtureNoVersion(t, tag)
+			editSkill(t, dir, "fabrik-plan")
+			requireCustom(t, dir)
+			edited, err := os.ReadFile(filepath.Join(dir, ".fabrik", "plugin", "skills", "fabrik-plan", "SKILL.md"))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if err := runUpgrade(nil); err != nil {
+				t.Fatalf("runUpgrade: %v", err)
+			}
+			lw := filepath.Join(dir, filepath.FromSlash(fabrikplugin.LocalWorkflowsRelDir))
+			moved, err := os.ReadFile(filepath.Join(lw, "skills", "fabrik-plan", "SKILL.md"))
+			if err != nil {
+				t.Fatalf("edited skill not moved to local-workflows: %v", err)
+			}
+			if !bytes.Equal(moved, edited) {
+				t.Error("edited skill not byte-identical after the move")
+			}
+			assertBaseIsEmbedded(t, dir)
+
+			refs := stageRefs(t, dir)
+			if refs["plan.yaml:skill"] != "local-workflows:fabrik-plan" {
+				t.Errorf("plan.yaml:skill = %q, want local-workflows:fabrik-plan", refs["plan.yaml:skill"])
+			}
+			for k, v := range refs {
+				if k == "plan.yaml:skill" {
+					continue
+				}
+				if !strings.HasPrefix(v, fabrikplugin.BasePluginName+":") {
+					t.Errorf("%s = %q, want a %s-qualified reference (only the edited skill is redirected)", k, v, fabrikplugin.BasePluginName)
+				}
 			}
 		})
 	}
