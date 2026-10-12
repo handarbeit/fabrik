@@ -1,7 +1,7 @@
 name: Implement
 order: 3
-skill: fabrik:fabrik-implement
-comment_skill: fabrik:fabrik-implement-comment
+skill: fabrik-stages:implement
+comment_skill: fabrik-stages:implement-comment
 model: sonnet
 max_turns: 100
 comment_max_turns: 50

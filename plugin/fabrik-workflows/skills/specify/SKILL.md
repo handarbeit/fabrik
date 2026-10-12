@@ -52,7 +52,7 @@ Update the issue body (via FABRIK_ISSUE_UPDATE markers) with a structured spec. 
 
 ## Spec template
 
-The body follows the Spec Kit spec template — the format downstream projects already produce. Only its content structure (section names, `FR-NNN`/`SC-NNN` numbering) is used; no Spec Kit tooling, scaffolding or scripts is involved, and nothing in the repository needs to exist for this to work. This section is the single canonical copy; `fabrik-specify-comment` refers to it rather than restating it.
+The body follows the Spec Kit spec template — the format downstream projects already produce. Only its content structure (section names, `FR-NNN`/`SC-NNN` numbering) is used; no Spec Kit tooling, scaffolding or scripts is involved, and nothing in the repository needs to exist for this to work. This section is the single canonical copy; `fabrik-stages:specify-comment` refers to it rather than restating it.
 
 ```
 # Feature Specification: [Feature Title]

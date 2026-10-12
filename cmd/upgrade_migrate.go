@@ -152,7 +152,7 @@ func planMigration(dir string, isDev bool, devOverride string) (*migrationPlan, 
 		switch {
 		case nameErr == nil && name == fabrikplugin.LocalWorkflowsName:
 			usableLocal = true
-		case errors.Is(nameErr, fs.ErrNotExist) || (nameErr == nil && name == fabrikplugin.BasePluginName):
+		case errors.Is(nameErr, fs.ErrNotExist) || (nameErr == nil && isBasePluginName(name)):
 			if err := checkManifestRenamable(lwDir, fabrikplugin.LocalWorkflowsName); err != nil {
 				p.Blocked = fmt.Sprintf("the manifest in %s cannot be renamed safely, so nothing was changed (%v). Make \"name\" a plain top-level string in %s, then run 'fabrik upgrade' again", fabrikplugin.LocalWorkflowsRelDir, err, pluginManifestRel)
 				return p, nil
@@ -199,10 +199,46 @@ func planMigration(dir string, isDev bool, devOverride string) (*migrationPlan, 
 			return nil, fmt.Errorf("reading %s: %w", path, err)
 		}
 		out, changes, err := stages.RewriteSkillRefs(src, func(key, ref string) (string, bool) {
+			// A pre-#2140 reference to a base skill (the old qualified form or
+			// the bare fabrik-<stage> name; ADR 2140). The same table the runtime
+			// resolver falls back on decides what it maps to. If the operator
+			// edited that skill, the edit lives in local-workflows, so the
+			// reference points there and the edit survives. edited is keyed by
+			// the skill name on disk: the old name (fabrik-<stage>) for a tree
+			// edited before the rename, the new name (<stage>) for a tree the
+			// binary had already refreshed to the renamed plugin before the
+			// operator edited it — the legacy mapping resolves this reference to
+			// that edited copy at runtime, so both are checked.
+			if newRef, legacy := fabrikplugin.LegacyRef(ref); legacy {
+				_, oldSkill, _ := fabrikplugin.Split(ref)
+				if hasLocal {
+					if edited[oldSkill] {
+						return fabrikplugin.Qualify(fabrikplugin.LocalWorkflowsName, oldSkill), true
+					}
+					if _, newSkill, _ := fabrikplugin.Split(newRef); edited[newSkill] {
+						return fabrikplugin.Qualify(fabrikplugin.LocalWorkflowsName, newSkill), true
+					}
+				}
+				return newRef, true
+			}
 			pn, skill, qualified := fabrikplugin.Split(ref)
 			if qualified {
-				if pn == fabrikplugin.BasePluginName && edited[skill] {
-					p.Notes = append(p.Notes, fmt.Sprintf("%s: %s is %q, already qualified and left alone — your edited copy of that skill is %s", rel, key, ref, fabrikplugin.Qualify(fabrikplugin.LocalWorkflowsName, skill)))
+				if pn == fabrikplugin.BasePluginName {
+					// edited is keyed by the skill name on disk: the new name for a
+					// customised copy of the renamed plugin, the pre-rename name
+					// (fabrik-<stage>) for a tree edited before the rename. A
+					// reference to the base plugin carries the new name, so check both.
+					editedAs := ""
+					if edited[skill] {
+						editedAs = skill
+					} else if old := "fabrik-" + skill; edited[old] {
+						if _, ok := fabrikplugin.LegacySkillTarget(old); ok {
+							editedAs = old
+						}
+					}
+					if editedAs != "" {
+						p.Notes = append(p.Notes, fmt.Sprintf("%s: %s is %q, already qualified and left alone — your edited copy of that skill is %s", rel, key, ref, fabrikplugin.Qualify(fabrikplugin.LocalWorkflowsName, editedAs)))
+					}
 				}
 				return "", false
 			}
@@ -225,6 +261,13 @@ func planMigration(dir string, isDev bool, devOverride string) (*migrationPlan, 
 	}
 	sort.Slice(p.StageEdits, func(i, j int) bool { return p.StageEdits[i].rel < p.StageEdits[j].rel })
 	return p, nil
+}
+
+// isBasePluginName reports whether name is the base plugin's current name or
+// the one it carried before #2140. A copy of the base plugin that an earlier
+// `fabrik upgrade` moved into local-workflows still declares the old name.
+func isBasePluginName(name string) bool {
+	return name == fabrikplugin.BasePluginName || name == fabrikplugin.LegacyBasePluginName
 }
 
 func readManifestName(dir string) (string, error) {
@@ -465,7 +508,7 @@ func printMigrationReport(p *migrationPlan, moved []string, out io.Writer) {
 	}
 	fmt.Fprintln(out, "  Review the result and commit it yourself (fabrik never commits to your repository):")
 	fmt.Fprintf(out, "    git add .fabrik/plugin %s .fabrik/stages\n", fabrikplugin.LocalWorkflowsRelDir)
-	fmt.Fprintf(out, "  To undo: restore those paths with git, or move %s back to .fabrik/plugin and set its manifest name back to %q.\n", fabrikplugin.LocalWorkflowsRelDir, fabrikplugin.BasePluginName)
+	fmt.Fprintf(out, "  To undo: restore those paths with git, or move %s back to .fabrik/plugin and set its manifest name back to the base plugin's (%q, or %q before the stage plugin was renamed).\n", fabrikplugin.LocalWorkflowsRelDir, fabrikplugin.BasePluginName, fabrikplugin.LegacyBasePluginName)
 }
 
 // printMigrationNotice reports a skipped or blocked migration.

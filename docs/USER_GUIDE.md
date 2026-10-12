@@ -412,7 +412,7 @@ Once configured, the GHES host governs:
 - **REST and GraphQL API endpoints** — REST resolves to `https://<host>/api/v3/...`, GraphQL to `https://<host>/api/graphql`. These are independently derived, not one path-suffixed from the other — GHES puts them at different paths (`/api/v3/graphql` is a 404 on GHES; `/api/graphql` is the correct endpoint).
 - **Bare-clone URLs** — both the HTTPS and SSH forms (`--ssh` / `git_ssh: true` still selects which protocol is used; see [Git Clone Protocol](#git-clone-protocol-https-vs-ssh) above).
 - **Commit author noreply email** — Fabrik-authored commits use `<user>@users.noreply.<host>` instead of `<user>@users.noreply.github.com`. **Note:** this mirrors github.com's own noreply-email convention with the configured host substituted, but has not been verified against a live GHES instance's actual private-commit-email behavior — GitHub's published GHES admin documentation does not explicitly confirm this format. If your GHES instance uses a different convention, please file an issue.
-- **`GH_HOST` in stage-worker subprocess environments** — every Claude-invoked stage worker's `gh` CLI calls (e.g. `fabrik-validate`'s Pre-Completion Gate, which runs `gh pr view` on every invocation) are pointed at the same GHES instance as the engine, via the `gh` CLI's own `GH_HOST` convention. See [Subprocess Environment](#subprocess-environment).
+- **`GH_HOST` in stage-worker subprocess environments** — every Claude-invoked stage worker's `gh` CLI calls (e.g. the `validate` skill's Pre-Completion Gate, which runs `gh pr view` on every invocation) are pointed at the same GHES instance as the engine, via the `gh` CLI's own `GH_HOST` convention. See [Subprocess Environment](#subprocess-environment).
 - **`fabrik init`'s project-URL parsing** — a GHES project URL is accepted alongside github.com URLs when `--ghes-host`/`FABRIK_GHES_HOST` is supplied to `init`. See the `fabrik init` walkthrough near the top of this guide.
 
 **Self-upgrade (`--auto-upgrade`) stays on github.com, unauthenticated, when a GHES host is configured.** Fabrik's own releases always live at `github.com/handarbeit/fabrik`, never on your GHES instance. Your configured token authenticates your GHES host, not github.com, so it is never sent with the release-check/download request — sending it would fail outright with "Bad credentials" rather than falling back to unauthenticated. Since `handarbeit/fabrik`'s releases are public, self-upgrade still works unauthenticated; it's just subject to github.com's lower unauthenticated rate limit. See [Auto-upgrade](#auto-upgrade) below.
@@ -645,9 +645,9 @@ Fix by adding the repo to the installation's "Only select repositories" list at 
 
 #### Worker `gh` CLI authentication
 
-Built-in stage skills (e.g. `fabrik-validate`'s Pre-Completion Gate) shell out to the `gh` CLI directly. Under App auth, each Claude worker invocation is given a live, freshly-refreshed installation token as `GH_TOKEN`/`GITHUB_TOKEN` — read directly off the same client the engine's own API calls use, riding its background refresh loop — rather than a token copied once at startup. **Known limitation:** a single stage invocation whose wall time exceeds the installation token's ~1-hour lifetime can still see a now-expired value for the remainder of that one invocation, since a running child process's environment cannot be updated after it starts. This is a narrow edge case (`max_wall_time` at or beyond roughly an hour) and is not fully solved here — see [ADR-1713](../adrs/1713-engine-github-app-auth.md).
+Built-in stage skills (e.g. the `validate` skill's Pre-Completion Gate) shell out to the `gh` CLI directly. Under App auth, each Claude worker invocation is given a live, freshly-refreshed installation token as `GH_TOKEN`/`GITHUB_TOKEN` — read directly off the same client the engine's own API calls use, riding its background refresh loop — rather than a token copied once at startup. **Known limitation:** a single stage invocation whose wall time exceeds the installation token's ~1-hour lifetime can still see a now-expired value for the remainder of that one invocation, since a running child process's environment cannot be updated after it starts. This is a narrow edge case (`max_wall_time` at or beyond roughly an hour) and is not fully solved here — see [ADR-1713](../adrs/1713-engine-github-app-auth.md).
 
-The installation token carries the `actions:write` permission the engine requires at startup, so `gh run view --log-failed` and `gh run rerun` work for a worker's repo. The built-in CI-fix instructions (`fabrik-review`/`fabrik-validate`) still use the Checks API (`gh api repos/{owner}/{repo}/commits/<sha>/check-runs` + `.../check-runs/<id>/annotations`), which runs on the `checks:read` scope — see [ADR-1756](../adrs/1756-worker-git-gh-surface-under-github-app-auth.md).
+The installation token carries the `actions:write` permission the engine requires at startup, so `gh run view --log-failed` and `gh run rerun` work for a worker's repo. The built-in CI-fix instructions (the `review` and `validate` skills) still use the Checks API (`gh api repos/{owner}/{repo}/commits/<sha>/check-runs` + `.../check-runs/<id>/annotations`), which runs on the `checks:read` scope — see [ADR-1756](../adrs/1756-worker-git-gh-surface-under-github-app-auth.md).
 
 #### Git under App auth
 
@@ -1454,12 +1454,13 @@ Each stage is a YAML file in your stages directory. The filename is arbitrary; t
 ```yaml
 name: Research            # Required. Must match a Project board column exactly.
 order: 2                  # Required. Lower values processed earlier in the pipeline.
-skill: fabrik:fabrik-research  # Plugin skill to use, as <plugin>:<skill> (recommended; alternative
+skill: fabrik-stages:research  # Plugin skill to use, as <plugin>:<skill> (recommended; alternative
                           #   to inline prompt). When set, Fabrik sends a minimal directive
                           #   naming the skill exactly as Claude Code registers it. A bare
-                          #   name (fabrik-research) is deprecated but still resolved.
+                          #   name or the pre-rename form (fabrik-research, fabrik:fabrik-research) is deprecated
+                          #   but still resolved.
                           #   See "Skill references" below.
-comment_skill: fabrik:fabrik-research-comment  # Plugin skill for comment review (overrides comment_prompt).
+comment_skill: fabrik-stages:research-comment  # Plugin skill for comment review (overrides comment_prompt).
 prompt: |                 # Inline prompt (used when skill is not set; legacy but still supported).
   You are a research agent...
 comment_prompt: |         # Inline comment-review prompt (used when comment_skill is not set).
@@ -1650,7 +1651,7 @@ refines it into a clear, unambiguous spec:
 - Surfaces missing requirements, ambiguities, and edge cases as questions
 - Checks consistency with existing project features and documentation
 - Researches prior art and established patterns on the web
-- Rewrites the issue body as a [Spec Kit](https://github.com/github/spec-kit)-style feature specification: a `# Feature Specification:` title with `Feature Branch`, `Created`, `Status` and `Input` (the original request, verbatim) fields; `## Background` (the original motivation); `## User Scenarios & Testing` with prioritized user stories (each with *Why this priority*, an *Independent Test* and *Acceptance Scenarios*) and `### Edge Cases`; `## Requirements` with `FR-NNN` functional requirements and optional `Key Entities`; `## Success Criteria` with `SC-NNN` measurable outcomes; `## Assumptions`; and optional `## Out of Scope` and `## Source References`. `**Status**` is `Draft` while open questions remain and `Specified` once none do, and `## Open Questions` exists only while questions remain. The template is built into the `fabrik-specify` skill; only the structure is adopted — nothing in your repo needs Spec Kit, `.specify/` scaffolding or `uv`.
+- Rewrites the issue body as a [Spec Kit](https://github.com/github/spec-kit)-style feature specification: a `# Feature Specification:` title with `Feature Branch`, `Created`, `Status` and `Input` (the original request, verbatim) fields; `## Background` (the original motivation); `## User Scenarios & Testing` with prioritized user stories (each with *Why this priority*, an *Independent Test* and *Acceptance Scenarios*) and `### Edge Cases`; `## Requirements` with `FR-NNN` functional requirements and optional `Key Entities`; `## Success Criteria` with `SC-NNN` measurable outcomes; `## Assumptions`; and optional `## Out of Scope` and `## Source References`. `**Status**` is `Draft` while open questions remain and `Specified` once none do, and `## Open Questions` exists only while questions remain. The template is built into the `specify` skill; only the structure is adopted — nothing in your repo needs Spec Kit, `.specify/` scaffolding or `uv`.
 
 The user answers questions via comments. Claude incorporates the answers and updates
 the issue body. Once all questions are resolved, the stage completes and the issue is
@@ -1670,7 +1671,7 @@ The issue body stays the canonical spec while you clarify it, but a spec that li
 
 Issues already past Specify when this shipped are not backfilled.
 
-**Upgrading an existing `specify.yaml`.** `persist_spec` is opt-in per stage YAML, so a `.fabrik/stages/specify.yaml` created before it existed keeps working but writes no spec file. The [stage drift warning](#stage-yaml-drift-warning) reports the missing key at startup; run `fabrik refresh-stages --apply` to add it. If you have replaced the `fabrik-specify` skill with your own copy, `fabrik upgrade` reports a customization until you reconcile or run `fabrik upgrade --force`.
+**Upgrading an existing `specify.yaml`.** `persist_spec` is opt-in per stage YAML, so a `.fabrik/stages/specify.yaml` created before it existed keeps working but writes no spec file. The [stage drift warning](#stage-yaml-drift-warning) reports the missing key at startup; run `fabrik refresh-stages --apply` to add it. If you have replaced the `specify` skill with your own copy, `fabrik upgrade` reports a customization until you reconcile or run `fabrik upgrade --force`.
 
 ### Steering with Comments
 
@@ -2709,7 +2710,7 @@ name: Validate
 order: 5
 wait_for_ci: true
 ci_fix_skill: myorg:validate-ci-fix   # Custom skill for CI-fix re-invocations
-comment_skill: fabrik:fabrik-validate-comment  # Used for regular comment processing
+comment_skill: fabrik-stages:validate-comment  # Used for regular comment processing
 ...
 ```
 
@@ -2898,7 +2899,7 @@ When an issue reaches Done, Fabrik:
 
 # Edit stage configs and skills
 vim .fabrik/stages/research.yaml
-vim .fabrik/plugin/skills/fabrik-research/SKILL.md
+vim .fabrik/plugin/skills/research/SKILL.md
 
 # Or point to a custom stages directory
 ./fabrik --stages ./my-custom-stages ...
@@ -2997,20 +2998,20 @@ The default skills are:
 
 | Skill | Purpose |
 |-------|---------|
-| `fabrik-specify` | Requirements clarification, consistency checks, prior art research; preserves the original request verbatim in `Input` and the original motivation in `Background` (never compressed), and writes the spec in the Spec Kit feature-specification template |
-| `fabrik-research` | Codebase exploration, technical analysis, constraint discovery; includes a Documentation Impact section for user-facing features |
-| `fabrik-plan` | Implementation design, task checklist, decision documentation; includes explicit doc update tasks in the checklist for user-facing features |
-| `fabrik-implement` | Code writing, testing, committing, pushing; updates `USER_GUIDE.md` and/or `README.md` in the same PR for user-facing features — never defers documentation to a follow-up issue |
-| `fabrik-review` | Code review, fix issues, rebase, prepare PR |
-| `fabrik-validate` | Final verification, test suite, requirements check |
+| `fabrik-stages:specify` | Requirements clarification, consistency checks, prior art research; preserves the original request verbatim in `Input` and the original motivation in `Background` (never compressed), and writes the spec in the Spec Kit feature-specification template |
+| `fabrik-stages:research` | Codebase exploration, technical analysis, constraint discovery; includes a Documentation Impact section for user-facing features |
+| `fabrik-stages:plan` | Implementation design, task checklist, decision documentation; includes explicit doc update tasks in the checklist for user-facing features |
+| `fabrik-stages:implement` | Code writing, testing, committing, pushing; updates `USER_GUIDE.md` and/or `README.md` in the same PR for user-facing features — never defers documentation to a follow-up issue |
+| `fabrik-stages:review` | Code review, fix issues, rebase, prepare PR |
+| `fabrik-stages:validate` | Final verification, test suite, requirements check |
 
 #### Review and Validate: post-rebase dependency install
 
-After each rebase onto the base branch, both the `fabrik-review` and `fabrik-validate` skills read the project's `CLAUDE.md` for a dependency-install command (e.g. `pnpm install`, `cargo build`, `go mod download`) and run it before executing the test suite. On failure, the skill emits `FABRIK_BLOCKED_ON_INPUT` and the issue pauses — a dependency-install failure requires human attention before the stage can complete. If no install command is found in `CLAUDE.md`, the step is silently skipped. This closes a class of stale-dependencies test failures that occurred when `main` advanced past a dependency bump between the time the branch was created and the time Review or Validate ran.
+After each rebase onto the base branch, both the `review` and `validate` skills read the project's `CLAUDE.md` for a dependency-install command (e.g. `pnpm install`, `cargo build`, `go mod download`) and run it before executing the test suite. On failure, the skill emits `FABRIK_BLOCKED_ON_INPUT` and the issue pauses — a dependency-install failure requires human attention before the stage can complete. If no install command is found in `CLAUDE.md`, the step is silently skipped. This closes a class of stale-dependencies test failures that occurred when `main` advanced past a dependency bump between the time the branch was created and the time Review or Validate ran.
 
 #### Validate: pre-completion mergeability gate
 
-Before emitting `FABRIK_STAGE_COMPLETE`, the `fabrik-validate` skill checks the linked PR's mergeability via `gh pr view --json mergeable,mergeStateStatus`. When the `mergeable` value is `CONFLICTING` or `mergeStateStatus` is `DIRTY` — indicating a merge conflict or a rebased-away branch — the skill emits `FABRIK_BLOCKED_ON_INPUT` instead of `FABRIK_STAGE_COMPLETE`. The issue pauses with `fabrik:awaiting-input` rather than marking Validate complete on a non-mergeable PR. To resume: resolve the conflict, push the fixed branch, then remove `fabrik:paused` and `fabrik:awaiting-input`.
+Before emitting `FABRIK_STAGE_COMPLETE`, the `validate` skill checks the linked PR's mergeability via `gh pr view --json mergeable,mergeStateStatus`. When the `mergeable` value is `CONFLICTING` or `mergeStateStatus` is `DIRTY` — indicating a merge conflict or a rebased-away branch — the skill emits `FABRIK_BLOCKED_ON_INPUT` instead of `FABRIK_STAGE_COMPLETE`. The issue pauses with `fabrik:awaiting-input` rather than marking Validate complete on a non-mergeable PR. To resume: resolve the conflict, push the fixed branch, then remove `fabrik:paused` and `fabrik:awaiting-input`.
 
 Before that mergeability check, the skill's Pre-Completion Gate also decides whether to rebase the branch onto its base at all. Rebasing pushes, and a push restarts CI, so an unconditional rebase on every Validate invocation can livelock a repo whose required-check duration exceeds its merge interarrival time, or eject a PR already sitting in a merge queue. The skill skips the rebase when the branch is already up to date with its base (nothing to gain), when the linked PR is in a merge queue or the check can't confirm it isn't (pushing there would eject the PR), or when every one of the PR's required checks has already succeeded against the current base branch tip — measured by comparing the base branch's own commit time against the *earliest* start time among those required checks (not completion time — a long-running check can finish after the base has moved again, so only the start time proves the check began against a tree at least as new as the current base; and the earliest, not the most recent, since one fresh required check says nothing about a sibling required check that hasn't rerun), not by reading branch-protection config, since a repo can allow merging on a stale check regardless of how up-to-date-ness is enforced. It still rebases in the one case that needs it: behind its base, not queued, with no fresh-enough successful check run to fall back on. Either way, the stage summary states which outcome applied (`rebased`, `skipped-in-queue`, `skipped-detection-failed`, `skipped-up-to-date`, or `skipped-ci-fresh`), so a skipped rebase reads as a deliberate decision, not an omission. See ADR-1364.
 
@@ -3021,7 +3022,7 @@ how Claude approaches each stage. Changes take effect on the next Claude invocat
 
 The stage YAML references the skill by its fully-qualified name, `<plugin>:<skill>`:
 ```yaml
-skill: fabrik:fabrik-research    # loads .fabrik/plugin/skills/fabrik-research/SKILL.md
+skill: fabrik-stages:research    # loads .fabrik/plugin/skills/research/SKILL.md
 ```
 See [Skill references](#skill-references) for the qualified form, the deprecated bare
 form and how to point a stage at your own plugin.
@@ -3035,7 +3036,7 @@ carries that exact name, so no model has to guess which plugin a bare name belon
 non-Claude models behind a gateway do not, and fail with "Unknown skill").
 
 ```yaml
-skill: fabrik:fabrik-review        # the base plugin's skill
+skill: fabrik-stages:review        # the base plugin's skill
 comment_skill: myorg:review-comment  # a skill from your own plugin
 ```
 
@@ -3045,11 +3046,18 @@ comment_skill: myorg:review-comment  # a skill from your own plugin
   therefore honoured as it is. Only `--plugin-dir`, `.fabrik/plugins/local-workflows` and
   `plugin_dirs` plugins are visible to resolution: with no plugin directory loaded at all (Claude Code supplies the plugin
   itself) the name is passed through unchanged and not checked.
-- **Bare names are deprecated, not removed.** `skill: fabrik-review` still works: it is
-  resolved to the loaded plugin that provides it (the base plugin if several do, with the
-  others named in the notice) and the prompt carries the qualified name. At startup Fabrik
-  logs one notice and records one warnings-panel entry listing every bare reference;
-  `fabrik upgrade` migrates them (see [Workflow migration](#workflow-migration-fabrik-upgrade)). Fresh `fabrik init` stage files are written qualified.
+- **Bare names and the pre-rename form are deprecated, not removed.** The base plugin is
+  named `fabrik-stages` and its skills have no `fabrik-` prefix (`fabrik-stages:review`).
+  Before that rename it was `fabrik` with `fabrik-review`, and stage files written then
+  still work: a reference is first looked up as written (so a customised, not yet migrated
+  `.fabrik/plugin/` keeps its own skills) and, only if that finds nothing, `fabrik:fabrik-review`
+  and bare `fabrik-review` resolve to `fabrik-stages:review`. A bare name that a loaded
+  plugin provides under that name is resolved to it (the base plugin if several do, with
+  the others named in the notice) and the prompt carries the qualified name. At startup
+  Fabrik logs one notice and records one warnings-panel entry listing every bare or
+  pre-rename reference; `fabrik upgrade` migrates them (see
+  [Workflow migration](#workflow-migration-fabrik-upgrade)). Fresh `fabrik init` stage files
+  are written qualified.
 - **A reference that does not resolve never reaches a worker.** If the plugin is not
   loaded, or lacks the skill, or no loaded plugin provides a bare name, the stage does not
   run: Fabrik posts one comment on the issue naming the reference, the plugins searched and
@@ -3084,7 +3092,7 @@ Editing the deployed plugin in `.fabrik/plugin/` used to be the only way to cust
 stage, and it stranded you: Fabrik protected your edits, so `fabrik upgrade` refused to
 touch the plugin and you never received skill updates again. `fabrik upgrade` now
 separates your customizations from Fabrik's own plugin, and rewrites your stage files to
-name each skill's plugin explicitly (`fabrik:fabrik-plan`, `local-workflows:fabrik-plan`).
+name each skill's plugin explicitly (`fabrik-stages:plan`, `local-workflows:fabrik-plan`).
 
 **What a run does**, in order, deciding only from what is on disk (never from version
 numbers), so a deployment that skipped several releases reaches the same result as one
@@ -3102,8 +3110,11 @@ that upgraded through each:
 4. **Rewrites the skill references** (`skill`, `comment_skill`, `ci_fix_skill`,
    `rebase_skill`) in `.fabrik/stages/*.yaml`, changing nothing else in those files
    (comments, quoting and line endings are preserved). A stage whose skill you edited
-   points at `local-workflows:<skill>`; every other stage points at `fabrik:<skill>`.
-   A reference that is already qualified is left alone, and a bare name that no plugin
+   points at `local-workflows:<its old skill name>` (so the edit is kept); every other
+   stage points at `fabrik-stages:<skill>`. This includes the pre-rename forms
+   `fabrik:fabrik-review` and bare `fabrik-review`, which become `fabrik-stages:review`
+   (or `local-workflows:fabrik-review` when you edited that skill). A reference to any other
+   plugin is left alone, and a bare name that no plugin
    Fabrik can see provides (for example a skill in a `plugin_dirs` plugin) is left bare
    and reported.
 5. **Prints what moved and what was rewritten** and tells you to review and commit it.
@@ -3136,8 +3147,16 @@ Unedited skills that travel with a moved tree are simply left unreferenced.
      after the edit is saved in `local-workflows`.
   2. **Discard the edit:** run `fabrik upgrade --force`, which overwrites `.fabrik/plugin/`
      with the binary's copy ("customizations discarded").
-- A stage that already says `fabrik:fabrik-plan` is left alone even if you edited that
+- A stage that already says `fabrik-stages:plan` is left alone even if you edited that
   skill: the report names the `local-workflows:` copy so you can point the stage at it.
+- **Plugin rename.** The base stage plugin was renamed from `fabrik` to `fabrik-stages`
+  (skills `specify` … `validate`, `*-comment`), freeing the `fabrik` name for the
+  human-facing `fabrik@fabrik` plugin. After upgrading the binary but before running
+  `fabrik upgrade`, every old-form reference still resolves (with the deprecation notice),
+  so no stage fails. Copies moved into `local-workflows` keep their old skill names. When
+  Fabrik refreshes `.fabrik/plugin/`, it also removes files that are byte-identical to a
+  version it once shipped but that the current plugin no longer carries (the old
+  `skills/fabrik-*` directories); an edited file is never removed.
 - A vendored plugin set (`FABRIK_PLUGIN_DIR` set, or `.fabrik/plugin` a symlink) is
   reported with instructions and not moved.
 - An interrupted run is safe to repeat; it completes from what it finds.
@@ -3204,7 +3223,7 @@ interactively; the status line additionally names the stale count when present.
 When `skill` is set, Fabrik sends a minimal directive:
 ```
 You are operating as the Fabrik Research agent for issue #42.
-Follow the instructions in the fabrik-research skill exactly.
+Follow the instructions in the research skill exactly.
 ```
 
 The skill is auto-loaded by Claude Code via the plugin system.
@@ -3444,6 +3463,12 @@ plugin_dirs:
   creates `local-workflows` once and never touches it again).
 - Interactive `resume` / `watch` sessions pass only the base plugin override, not the
   additional plugins or `local-workflows`.
+- **The human-facing `fabrik@fabrik` plugin never loads in a worker.** The base stage
+  plugin is named `fabrik-stages`, so the name `fabrik` belongs to the project-management
+  plugin you install with `/plugin install fabrik@fabrik`. Every worker invocation is given
+  `--settings '{"enabledPlugins":{"fabrik@fabrik":false}}'` (nothing else), which keeps that
+  plugin's skills and any MCP server it bundles out of the worker while the `--plugin-dir`
+  stage plugins (`fabrik-stages`, `local-workflows`) still load.
 
 **Developing the base plugin.** `--plugin-dir` (or `FABRIK_PLUGIN_DIR`) *replaces* the
 base plugin, so the deployed copy does not also load. Configured `plugin_dirs` are still

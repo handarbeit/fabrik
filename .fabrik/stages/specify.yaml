@@ -1,7 +1,7 @@
 name: Specify
 order: 0
-skill: fabrik:fabrik-specify
-comment_skill: fabrik:fabrik-specify-comment
+skill: fabrik-stages:specify
+comment_skill: fabrik-stages:specify-comment
 auto_advance: false
 model: sonnet
 max_turns: 100

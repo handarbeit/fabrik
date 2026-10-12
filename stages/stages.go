@@ -27,8 +27,8 @@ type Stage struct {
 	Prompt string `yaml:"prompt,omitempty"`
 
 	// Skill names the plugin skill Claude should follow for this stage, as
-	// "<plugin>:<skill>" (e.g., "fabrik:fabrik-research", or a project plugin's
-	// "myorg:review"). A bare name ("fabrik-research") is deprecated: the engine
+	// "<plugin>:<skill>" (e.g., "fabrik-stages:research", or a project plugin's
+	// "myorg:review"). A bare name ("research") is deprecated: the engine
 	// qualifies it against the plugins loaded for the worker (ADR 2137). When
 	// set, the engine sends a directive prompt instead of the Prompt field.
 	Skill string `yaml:"skill,omitempty"`

@@ -1,0 +1,38 @@
+# ADR 2140: Rename the base stage plugin to `fabrik-stages` and exclude the PM plugin from workers
+
+## Status
+
+Accepted. Amends ADR 2137 (shipped defaults are now written `fabrik-stages:<stage>`, not `fabrik:fabrik-<stage>`) and extends ADR 2139 (the workflow migration).
+
+## Context
+
+Fabrik shipped two plugins that both declared the name `fabrik`: the stage plugin the engine deploys to workers, and the human-facing PM plugin published as `fabrik@fabrik`. Claude Code namespaces skills by plugin name, and a `--plugin-dir` plugin silently replaces an installed marketplace plugin of the same name, so in workers the stage plugin always won and the PM plugin was hidden by accident. The `fabrik` name is wanted for the PM plugin. Renaming the stage plugin un-hides the PM plugin (and any MCP server it bundles) in every worker unless the engine excludes it.
+
+## Decision
+
+1. **Rename.** `plugin.BasePluginName` is `fabrik-stages`; the manifest `name` follows. The twelve skill directories drop the `fabrik-` prefix (`specify` … `validate`, `*-comment`); the skill identity is the directory name. The embedded directory stays `plugin/fabrik-workflows` — renaming it would touch the embed, refresh, init, upgrade, `tools/gen-shipped-files` and the release scripts for no benefit the issue asks for. The manifest version is bumped by hand (0.2.0): the stage plugin is not in the marketplace and is not auto-bumped.
+2. **One legacy table.** `plugin/names.go` holds `LegacyBasePluginName` (`fabrik`), the twelve legacy skill names and `LegacyRef`, which maps `fabrik:fabrik-X` and bare `fabrik-X` to `fabrik-stages:X` and nothing else (`local-workflows:*`, other plugins and unknown names map to nothing). It lives in the leaf package `plugin` because both `engine` and `cmd` import it. The resolver and `fabrik upgrade` use the same table so they cannot disagree.
+3. **Resolver: as-is first.** `skillCatalogue.resolve` looks the reference up exactly as written; only on a miss does it try `LegacyRef`, and a legacy hit is flagged deprecated. A customised, not-yet-migrated `.fabrik/plugin` that is still named `fabrik` and still has `fabrik-review` therefore keeps its own skills. A binary upgraded without `fabrik upgrade` resolves every old-form reference (SC-003). The deprecation notice now covers pre-rename qualified references as well as bare ones (panel type `skill_reference_deprecated`, subject `deprecated`).
+4. **Migration.** `fabrik upgrade` rewrites a legacy reference by whether the operator edited that skill: unedited → `fabrik-stages:X`; edited → `local-workflows:fabrik-X` when a usable local copy exists (the moved copy keeps its old skill names and name `local-workflows`), otherwise left alone with a note. Rewriting an edited skill to `fabrik-stages:X` was rejected: it would silently discard the customisation. Manifest-name checks for "is this a moved base copy" accept both `LegacyBasePluginName` and `BasePluginName`. ADR 2139's ordering, idempotency and skip-safety are unchanged. A bare `fabrik-X` is rewritten to the base plugin even if a project plugin also provides a skill of that name: before the rename the resolver already preferred the base plugin for any bare name it provided (ADR 2137), so the rewrite preserves the reference's pre-rename meaning; only an unmigrated reference resolved at runtime after the rename would see the project plugin first (the as-is lookup), and a project plugin that wants that name should be referenced qualified.
+5. **Pruning refresh.** `RefreshPluginTo` previously only overwrote, so refreshing an existing tree after a rename would leave 24 skills. It now also deletes files that are byte-identical to some shipped version (`IsShippedFile`) and absent from the current embed, then empty directories. Edited files and `.installed-version` are never removed. One code path covers the base restore, the re-exec auto-refresh and `fabrik init`, and survives future renames.
+6. **PM plugin exclusion.** `buildClaudeArgs` — the single builder for stage dispatch and for comment, CI-fix, rebase and merge-train conflict invocations — appends `--settings <json>` where the JSON is `json.Marshal` of `{"enabledPlugins":{"fabrik@fabrik":false}}` and nothing else (`plugin.PMPluginID`). Per-invocation `--settings` outranks user settings; the stage plugins are `--plugin-dir` entries (`<name>@inline`) and are a different identity from the marketplace plugin. The inline JSON carries no `apiKeyHelper`, and the file-scanning `apiKeyHelper` preflight is unaffected. Pruefer is out of scope ("every worker invocation" means engine workers).
+7. **Collision guard (FR-006).** `plugin/names_collision_test.go` reads the embedded stage manifest, the PM `plugin.json` and `marketplace.json` and fails if the stage name equals the PM name, differs from `BasePluginName`, or `PMPluginID` is not `<pm name>@<marketplace name>`.
+
+## Verification of the live assumption
+
+`engine/worker_settings_live_test.go` (opt-in, `FABRIK_LIVE_PLUGIN_CHECK=1`, one model turn, never in CI) launches a real `claude` with the exact `buildClaudeArgs` output and reads the init event, asserting the stage plugins and every stage skill are present and the PM plugin absent. It passed on the implementing host (claude 2.1.x): `--settings` was accepted and `fabrik-stages` and its skills loaded. **That host did not have `fabrik@fabrik` installed**, so the absent-PM half was not demonstrated in the combined environment SC-001 asks for. Anyone with `fabrik@fabrik` installed and enabled should run the test once before release; if the PM plugin appears in the init event, or a `--plugin-dir` plugin disappears, the mechanism must be redesigned (`--setting-sources` and `--bare` have wider effects).
+
+## Release notes (FR-007)
+
+The release notes are authored at release time (`release-notes/<version>.md`, written by the cut-release skill), not generated from a source in the tree. They must state:
+
+- The base stage plugin was renamed from `fabrik` to `fabrik-stages`; its skills are now `fabrik-stages:specify` … `fabrik-stages:validate` (and `*-comment`), and default stage files reference them.
+- **Run `fabrik upgrade`.** It rewrites `fabrik:fabrik-X` and bare `fabrik-X` stage references to `fabrik-stages:X`; a skill you edited is moved to `.fabrik/plugins/local-workflows` and its reference points there; references to other plugins are untouched; a second run changes nothing.
+- Until you run it, old-form references keep working (with a deprecation notice in the warnings panel), so no stage fails.
+- Workers now explicitly disable the `fabrik@fabrik` marketplace plugin, so installing the PM plugin does not affect stage runs.
+
+## Consequences
+
+- Old-form references remain resolvable until a later decision removes them; the legacy table is the single place to change.
+- A development daemon running a pre-rename binary must not share a `.fabrik/plugin` (or the stage YAML of this repo) with a post-rename one: the older resolver has no legacy mapping.
+- New skill paths enter the shipped-files table at release time (`gen-shipped-files -add-current`); until then the current embed is accepted as shipped at runtime, as ADR 2139 decided.

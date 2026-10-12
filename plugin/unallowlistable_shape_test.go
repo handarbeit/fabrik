@@ -116,7 +116,7 @@ func TestUnallowlistableShapeDetectorCatchesEachShape(t *testing.T) {
 }
 
 // preCompletionGateInvariantRes are the substrings that must survive the
-// #1777 rewrite of fabrik-validate's Pre-Completion Gate unchanged: the
+// #1777 rewrite of validate's Pre-Completion Gate unchanged: the
 // four distinct skip-reason tags (ADR-1364) and the Check A/B
 // fail-toward-skip vs. Check C fail-toward-rebase asymmetry language. A
 // rewrite that blurred any of these while converting shell `if` to prose
@@ -136,17 +136,17 @@ var preCompletionGateInvariantRes = []struct {
 }
 
 // TestPreCompletionGatePreservesSkipReasonsAndDefaults guards AC4:
-// fabrik-validate's Pre-Completion Gate section must still contain all
+// validate's Pre-Completion Gate section must still contain all
 // four skip-reason tags and both the fail-toward-skip (Checks A/B) and
 // fail-toward-rebase (Check C) default language after the R1/R2 rewrite.
 func TestPreCompletionGatePreservesSkipReasonsAndDefaults(t *testing.T) {
-	content, err := FabrikPlugin.ReadFile("fabrik-workflows/skills/fabrik-validate/SKILL.md")
+	content, err := FabrikPlugin.ReadFile("fabrik-workflows/skills/validate/SKILL.md")
 	if err != nil {
-		t.Fatalf("reading fabrik-validate/SKILL.md from embed: %v", err)
+		t.Fatalf("reading validate/SKILL.md from embed: %v", err)
 	}
 	section := extractTopLevelSection(string(content), "## Pre-Completion Gate — MANDATORY before emitting FABRIK_STAGE_COMPLETE")
 	if section == "" {
-		t.Fatal("fabrik-validate/SKILL.md has no '## Pre-Completion Gate — MANDATORY before emitting FABRIK_STAGE_COMPLETE' section — did the heading change?")
+		t.Fatal("validate/SKILL.md has no '## Pre-Completion Gate — MANDATORY before emitting FABRIK_STAGE_COMPLETE' section — did the heading change?")
 	}
 
 	for _, inv := range preCompletionGateInvariantRes {

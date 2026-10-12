@@ -313,7 +313,7 @@ func TestMigrate_CustomisedDeploymentKeepsEditsInLocalWorkflows(t *testing.T) {
 				}
 			}
 			refs := stageRefs(t, dir)
-			if refs["plan.yaml:skill"] != "local-workflows:fabrik-plan" || refs["research.yaml:skill"] != "fabrik:fabrik-research" {
+			if refs["plan.yaml:skill"] != "local-workflows:fabrik-plan" || refs["research.yaml:skill"] != "fabrik-stages:research" {
 				t.Errorf("refs = %v", refs)
 			}
 
@@ -516,7 +516,7 @@ func TestMigrate_SharedFileOnlyEditMovesTreeButRedirectsNoStage(t *testing.T) {
 		t.Errorf("tree not moved: %v", err)
 	}
 	for k, v := range stageRefs(t, dir) {
-		if !strings.HasPrefix(v, "fabrik:") {
+		if !strings.HasPrefix(v, fabrikplugin.BasePluginName+":") {
 			t.Errorf("%s = %q", k, v)
 		}
 	}
@@ -563,7 +563,7 @@ func TestMigrate_ExtraFilesAndCustomSkillsTravelWithTheTree(t *testing.T) {
 	}
 }
 
-func TestMigrate_AlreadyQualifiedReferencesAreLeftAloneAndReported(t *testing.T) {
+func TestMigrate_PreRenameQualifiedReferenceToEditedSkillIsRedirected(t *testing.T) {
 	dir := deployFixture(t, "v0.0.77")
 	editSkill(t, dir, "fabrik-plan")
 	stage := filepath.Join(dir, ".fabrik", "stages", "plan.yaml")
@@ -580,14 +580,90 @@ func TestMigrate_AlreadyQualifiedReferencesAreLeftAloneAndReported(t *testing.T)
 	if err := applyMigration(plan, &buf); err != nil {
 		t.Fatal(err)
 	}
-	if refs := stageRefs(t, dir); refs["plan.yaml:skill"] != "fabrik:fabrik-plan" {
-		t.Errorf("qualified reference rewritten: %v", refs)
+	// A pre-rename qualified reference to an edited skill is redirected to the
+	// moved copy, so the edit survives the rename (ADR 2140).
+	if refs := stageRefs(t, dir); refs["plan.yaml:skill"] != "local-workflows:fabrik-plan" {
+		t.Errorf("edited skill not redirected to local-workflows: %v", refs)
 	}
-	if !strings.Contains(buf.String(), "local-workflows:fabrik-plan") {
-		t.Errorf("report does not point at the edited copy:\n%s", buf.String())
+	if !strings.Contains(buf.String(), "fabrik:fabrik-plan -> local-workflows:fabrik-plan") {
+		t.Errorf("report does not show the redirect:\n%s", buf.String())
 	}
 	if !strings.Contains(buf.String(), "git add") {
 		t.Errorf("report does not tell the operator to review and commit:\n%s", buf.String())
+	}
+}
+
+// A stage file already on the new name, over a plugin tree whose fabrik-plan was
+// edited before the rename: the reference is left alone, and the note names the
+// operator's edited copy under its on-disk (pre-rename) name.
+func TestMigrate_NewNameReferenceOverPreRenameEditedSkillIsReported(t *testing.T) {
+	dir := deployFixture(t, "v0.0.77")
+	editSkill(t, dir, "fabrik-plan")
+	stage := filepath.Join(dir, ".fabrik", "stages", "plan.yaml")
+	data, _ := os.ReadFile(stage)
+	data = bytes.Replace(data, []byte("skill: fabrik-plan\n"), []byte("skill: fabrik-stages:plan\n"), 1)
+	if err := os.WriteFile(stage, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := planMigration(".", true, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, n := range plan.Notes {
+		if strings.Contains(n, "fabrik-stages:plan") && strings.Contains(n, "local-workflows:fabrik-plan") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no note pointing at the edited copy; notes = %v", plan.Notes)
+	}
+	if refs := stageRefs(t, dir); refs["plan.yaml:skill"] != "fabrik-stages:plan" {
+		t.Errorf("reference was rewritten: %v", refs)
+	}
+}
+
+// An old-form reference over a plugin tree the binary already refreshed to the
+// renamed plugin, whose skills/plan the operator then edited: at runtime the
+// legacy mapping sends the reference to that edited copy, so the migration must
+// point it at the moved copy under its new name rather than at the restored
+// stock skill.
+func TestMigrate_OldFormReferenceOverNewNameEditIsRedirected(t *testing.T) {
+	dir := t.TempDir()
+	pluginDir := filepath.Join(dir, ".fabrik", "plugin")
+	if _, err := fabrikplugin.RefreshPluginTo(pluginDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := fabrikplugin.WriteInstalledVersion(pluginDir); err != nil {
+		t.Fatal(err)
+	}
+	skill := filepath.Join(pluginDir, "skills", "plan", "SKILL.md")
+	data, _ := os.ReadFile(skill)
+	if err := os.WriteFile(skill, append(data, []byte("\nLocal rule.\n")...), 0644); err != nil {
+		t.Fatal(err)
+	}
+	stagesDir := filepath.Join(dir, ".fabrik", "stages")
+	if err := os.MkdirAll(stagesDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stagesDir, "plan.yaml"), []byte("name: Plan\nskill: fabrik:fabrik-plan\ncomment_skill: fabrik-plan-comment\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	chdirTest(t, dir)
+	plan, err := planMigration(".", true, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := applyMigration(plan, &buf); err != nil {
+		t.Fatal(err)
+	}
+	refs := stageRefs(t, dir)
+	if refs["plan.yaml:skill"] != "local-workflows:plan" {
+		t.Errorf("edited skill not redirected to the moved copy: %v", refs)
+	}
+	if refs["plan.yaml:comment_skill"] != "fabrik-stages:plan-comment" {
+		t.Errorf("unedited skill not moved to the base plugin: %v", refs)
 	}
 }
 
@@ -641,8 +717,9 @@ func TestMigrate_UnresolvedBareNamesAreNotPending(t *testing.T) {
 	for _, f := range files {
 		data, _ := os.ReadFile(f)
 		out := string(data)
-		for _, s := range fabrikplugin.ShippedSkillNames() {
-			out = strings.ReplaceAll(out, ": "+s+"\n", ": fabrik:"+s+"\n")
+		for _, old := range fabrikplugin.LegacySkillNames() {
+			newRef, _ := fabrikplugin.LegacyRef(old)
+			out = strings.ReplaceAll(out, ": "+old+"\n", ": "+newRef+"\n")
 		}
 		if err := os.WriteFile(f, []byte(out), 0644); err != nil {
 			t.Fatal(err)
@@ -759,5 +836,217 @@ func TestMigrate_UnrenamableManifestRefusesBeforeMovingAnything(t *testing.T) {
 	}
 	if got := snapshot(t, filepath.Join(dir, ".fabrik")); !reflect.DeepEqual(before, got) {
 		t.Errorf("a refused migration changed the deployment")
+	}
+}
+
+// A reference qualified with the current base name to a skill the operator
+// edited (a customised copy of the renamed plugin) is left alone and reported:
+// the edit lives in local-workflows under the same skill name.
+func TestMigrate_CurrentQualifiedReferenceToEditedSkillIsLeftAloneAndReported(t *testing.T) {
+	dir := t.TempDir()
+	pluginDir := filepath.Join(dir, ".fabrik", "plugin")
+	if _, err := fabrikplugin.RefreshPluginTo(pluginDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := fabrikplugin.WriteInstalledVersion(pluginDir); err != nil {
+		t.Fatal(err)
+	}
+	skill := filepath.Join(pluginDir, "skills", "plan", "SKILL.md")
+	data, _ := os.ReadFile(skill)
+	if err := os.WriteFile(skill, append(data, []byte("\nLocal rule.\n")...), 0644); err != nil {
+		t.Fatal(err)
+	}
+	stagesDir := filepath.Join(dir, ".fabrik", "stages")
+	if err := os.MkdirAll(stagesDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stagesDir, "plan.yaml"), []byte("name: Plan\nskill: fabrik-stages:plan\ncomment_skill: plan-comment\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	chdirTest(t, dir)
+	plan, err := planMigration(".", true, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := applyMigration(plan, &buf); err != nil {
+		t.Fatal(err)
+	}
+	refs := stageRefs(t, dir)
+	if refs["plan.yaml:skill"] != "fabrik-stages:plan" || refs["plan.yaml:comment_skill"] != "fabrik-stages:plan-comment" {
+		t.Errorf("refs = %v", refs)
+	}
+	if !strings.Contains(buf.String(), "local-workflows:plan") {
+		t.Errorf("report does not point at the edited copy:\n%s", buf.String())
+	}
+}
+
+// qualifyLegacyBare rewrites every bare fabrik-<stage> skill value in the
+// deployment's stage files to the qualified fabrik:fabrik-<stage> form that
+// #2137/#2139 wrote, i.e. the layout a deployment has between that release and
+// the #2140 rename. Other values are untouched.
+func qualifyLegacyBare(t *testing.T, dir string) {
+	t.Helper()
+	files, _ := filepath.Glob(filepath.Join(dir, ".fabrik", "stages", "*.yaml"))
+	for _, f := range files {
+		data, _ := os.ReadFile(f)
+		out := string(data)
+		for _, old := range fabrikplugin.LegacySkillNames() {
+			out = strings.ReplaceAll(out, ": "+old+"\n", ": fabrik:"+old+"\n")
+		}
+		if err := os.WriteFile(f, []byte(out), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func assertNoLegacySkillDirs(t *testing.T, dir string) {
+	t.Helper()
+	for _, old := range fabrikplugin.LegacySkillNames() {
+		if _, err := os.Stat(filepath.Join(dir, ".fabrik", "plugin", "skills", old)); !os.IsNotExist(err) {
+			t.Errorf("leftover pre-rename skills/%s in the base plugin (err=%v)", old, err)
+		}
+	}
+}
+
+func assertStageRefsAreCurrent(t *testing.T, dir string, local map[string]bool) {
+	t.Helper()
+	for k, v := range stageRefs(t, dir) {
+		pn, skill, q := fabrikplugin.Split(v)
+		switch {
+		case !q:
+			t.Errorf("%s = %q is still bare", k, v)
+		case local[skill] && pn == fabrikplugin.LocalWorkflowsName:
+		case pn == fabrikplugin.BasePluginName && !strings.HasPrefix(skill, "fabrik-"):
+		default:
+			t.Errorf("%s = %q, want a %s:<skill> reference (or local-workflows for edited %v)", k, v, fabrikplugin.BasePluginName, local)
+		}
+	}
+}
+
+// SC-002 (#2140): deployments from three earlier releases, in the qualified
+// form #2137/#2139 produced, reach the renamed plugin in one `fabrik upgrade`,
+// with no pre-rename skill left behind and a second run changing nothing.
+func TestMigrate_Rename_QualifiedFormFromEarlierReleases(t *testing.T) {
+	for _, tag := range migrationTags {
+		t.Run(tag, func(t *testing.T) {
+			dir := deployFixture(t, tag)
+			qualifyLegacyBare(t, dir)
+			for k, v := range stageRefs(t, dir) {
+				if !strings.HasPrefix(v, "fabrik:fabrik-") {
+					t.Fatalf("fixture precondition: %s = %q", k, v)
+				}
+			}
+			if err := runUpgrade(nil); err != nil {
+				t.Fatalf("runUpgrade: %v", err)
+			}
+			assertStageRefsAreCurrent(t, dir, nil)
+			assertNoLegacySkillDirs(t, dir)
+			assertBaseIsEmbedded(t, dir)
+			if _, err := os.Stat(filepath.Join(dir, filepath.FromSlash(fabrikplugin.LocalWorkflowsRelDir))); !os.IsNotExist(err) {
+				t.Error("local-workflows must not be created for an uncustomised deployment")
+			}
+			first := snapshot(t, filepath.Join(dir, ".fabrik"))
+			if err := runUpgrade(nil); err != nil {
+				t.Fatalf("second runUpgrade: %v", err)
+			}
+			if !reflect.DeepEqual(first, snapshot(t, filepath.Join(dir, ".fabrik"))) {
+				t.Error("second run changed files")
+			}
+		})
+	}
+}
+
+// The customised variant, qualified form: the edited skills end up referenced
+// as local-workflows:fabrik-<x> (the moved copy keeps its names), everything
+// else as fabrik-stages:<x>, and the moved plugin is named local-workflows.
+func TestMigrate_Rename_CustomisedQualifiedFormKeepsEdits(t *testing.T) {
+	for _, tag := range migrationTags {
+		t.Run(tag, func(t *testing.T) {
+			dir := deployFixture(t, tag)
+			editSkill(t, dir, "fabrik-plan")
+			editSkill(t, dir, "fabrik-review")
+			qualifyLegacyBare(t, dir)
+			if err := runUpgrade(nil); err != nil {
+				t.Fatalf("runUpgrade: %v", err)
+			}
+			refs := stageRefs(t, dir)
+			if refs["plan.yaml:skill"] != "local-workflows:fabrik-plan" || refs["review.yaml:comment_skill"] != "fabrik-stages:review-comment" || refs["review.yaml:skill"] != "local-workflows:fabrik-review" || refs["research.yaml:skill"] != "fabrik-stages:research" {
+				t.Errorf("refs = %v", refs)
+			}
+			lw := filepath.Join(dir, filepath.FromSlash(fabrikplugin.LocalWorkflowsRelDir))
+			if name, err := readManifestName(lw); err != nil || name != fabrikplugin.LocalWorkflowsName {
+				t.Errorf("moved plugin name = %q err=%v", name, err)
+			}
+			if _, err := os.Stat(filepath.Join(lw, "skills", "fabrik-review", "SKILL.md")); err != nil {
+				t.Errorf("edited skill lost: %v", err)
+			}
+			assertNoLegacySkillDirs(t, dir)
+			assertBaseIsEmbedded(t, dir)
+			first := snapshot(t, filepath.Join(dir, ".fabrik"))
+			if err := runUpgrade(nil); err != nil {
+				t.Fatalf("second runUpgrade: %v", err)
+			}
+			if !reflect.DeepEqual(first, snapshot(t, filepath.Join(dir, ".fabrik"))) {
+				t.Error("second run changed files")
+			}
+		})
+	}
+}
+
+// A deployment already migrated by #2139 (an existing local-workflows copy that
+// keeps the pre-rename names, stage files in the qualified form) reaches the
+// same end state, and references to other plugins are byte-unchanged.
+func TestMigrate_Rename_AlreadyMigratedDeployment(t *testing.T) {
+	dir := deployFixture(t, "v0.0.77")
+	editSkill(t, dir, "fabrik-plan")
+	// Run the pre-rename migration shape by hand: move the edited tree aside as
+	// #2139 did, leaving the manifest named local-workflows and a pristine base
+	// from an earlier release.
+	pluginDir := filepath.Join(dir, ".fabrik", "plugin")
+	lw := filepath.Join(dir, filepath.FromSlash(fabrikplugin.LocalWorkflowsRelDir))
+	if err := os.MkdirAll(filepath.Dir(lw), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(pluginDir, lw); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := renameManifest(lw, fabrikplugin.LocalWorkflowsName); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Remove(filepath.Join(lw, ".installed-version"))
+	copyDirTree(t, filepath.Join(migrationFixtureRoot, "v0.0.77", "plugin"), pluginDir)
+	h, _ := fabrikplugin.ComputeDiskVersion(pluginDir)
+	if err := fabrikplugin.WriteVersionHash(pluginDir, h); err != nil {
+		t.Fatal(err)
+	}
+	qualifyLegacyBare(t, dir)
+	other := filepath.Join(dir, ".fabrik", "stages", "plan.yaml")
+	data, _ := os.ReadFile(other)
+	data = bytes.Replace(data, []byte("skill: fabrik:fabrik-plan\n"), []byte("skill: local-workflows:fabrik-plan\n"), 1)
+	data = append(data, []byte("rebase_skill: myorg:rebase\n")...)
+	if err := os.WriteFile(other, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	lwBefore := snapshot(t, lw)
+
+	if err := runUpgrade(nil); err != nil {
+		t.Fatalf("runUpgrade: %v", err)
+	}
+	refs := stageRefs(t, dir)
+	if refs["plan.yaml:skill"] != "local-workflows:fabrik-plan" || refs["plan.yaml:rebase_skill"] != "myorg:rebase" || refs["research.yaml:skill"] != "fabrik-stages:research" {
+		t.Errorf("refs = %v", refs)
+	}
+	if !reflect.DeepEqual(lwBefore, snapshot(t, lw)) {
+		t.Error("local-workflows was modified")
+	}
+	assertNoLegacySkillDirs(t, dir)
+	assertBaseIsEmbedded(t, dir)
+	first := snapshot(t, filepath.Join(dir, ".fabrik"))
+	if err := runUpgrade(nil); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(first, snapshot(t, filepath.Join(dir, ".fabrik"))) {
+		t.Error("second run changed files")
 	}
 }

@@ -15,12 +15,12 @@ import (
 // separately and have no include mechanism — this test is what keeps the six
 // copies from drifting.
 var ciGatedRuleSkills = []string{
-	"fabrik-validate",
-	"fabrik-validate-comment",
-	"fabrik-review",
-	"fabrik-review-comment",
-	"fabrik-implement",
-	"fabrik-implement-comment",
+	"validate",
+	"validate-comment",
+	"review",
+	"review-comment",
+	"implement",
+	"implement-comment",
 }
 
 // maxLocalTestTimeout is the R3 hard cap on a local test command.

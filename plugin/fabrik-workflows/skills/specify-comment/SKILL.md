@@ -31,7 +31,7 @@ If an answer raises new ambiguities or reveals additional gaps:
 
 ### Maintain spec structure
 
-The issue body follows the **Spec template** defined in the `fabrik-specify` skill (its "Spec template" section — the single canonical copy; it is deliberately not restated here so the two cannot drift). The current body already has that shape, so edit it in place: keep every *template* heading, header field and the order exactly as they are. If you need the exact template text, for example because the body was written before this format existed and has to be restructured, load the `fabrik-specify` skill with the Skill tool and follow its Spec template section and rules.
+The issue body follows the **Spec template** defined in the `fabrik-stages:specify` skill (its "Spec template" section — the single canonical copy; it is deliberately not restated here so the two cannot drift). The current body already has that shape, so edit it in place: keep every *template* heading, header field and the order exactly as they are. If you need the exact template text, for example because the body was written before this format existed and has to be restructured, load the `fabrik-stages:specify` skill with the Skill tool and follow its Spec template section and rules.
 
 When folding in an answer, put it where it belongs structurally:
 - a new behavior becomes an `FR-NNN` requirement under `### Functional Requirements`, appended with the next free number — **never renumber existing FR/SC identifiers**;

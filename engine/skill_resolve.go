@@ -22,7 +22,7 @@ const (
 // resolvedSkill is the outcome of resolving one reference.
 type resolvedSkill struct {
 	Name       string   // fully-qualified name the prompt carries
-	Deprecated bool     // the reference was bare and was qualified by lookup
+	Deprecated bool     // the reference was bare, or the pre-#2140 base-plugin form, and was resolved by lookup
 	Others     []string // other qualified providers of an ambiguous bare name
 }
 
@@ -57,7 +57,29 @@ func (c *skillCatalogue) describe() string {
 // explains it. An empty catalogue (no plugin directories) passes the reference
 // through unchanged: the plugin then comes from Claude Code's own install,
 // which the engine cannot see (ADR 2137).
+//
+// The as-is lookup always runs first, so an operator-customised copy of the
+// pre-#2140 base plugin (still named "fabrik", still carrying fabrik-review)
+// keeps winning. Only on a miss does the legacy mapping (plugin.LegacyRef, the
+// same table `fabrik upgrade` rewrites with) turn a pre-rename reference —
+// "fabrik:fabrik-review" or bare "fabrik-review" — into the renamed skill
+// "fabrik-stages:review", flagged Deprecated (#2140, FR-004).
 func (c *skillCatalogue) resolve(ref string) (res resolvedSkill, why string, ok bool) {
+	res, why, ok = c.resolveAsIs(ref)
+	if ok || c.empty() {
+		return res, why, ok
+	}
+	if mapped, legacy := plugin.LegacyRef(ref); legacy {
+		if mres, _, mok := c.resolveAsIs(mapped); mok {
+			mres.Deprecated = true
+			return mres, "", true
+		}
+	}
+	return res, why, ok
+}
+
+// resolveAsIs is resolve without the legacy mapping.
+func (c *skillCatalogue) resolveAsIs(ref string) (res resolvedSkill, why string, ok bool) {
 	if c.empty() {
 		return resolvedSkill{Name: ref}, "", true
 	}
@@ -83,9 +105,15 @@ func (c *skillCatalogue) resolve(ref string) (res resolvedSkill, why string, ok 
 		return resolvedSkill{}, fmt.Sprintf("no loaded plugin provides a skill named %q", ref), false
 	}
 	chosen := providers[0]
-	for _, p := range providers {
-		if p.Name == plugin.BasePluginName {
-			chosen = p
+	for _, name := range []string{plugin.BasePluginName, plugin.LegacyBasePluginName} {
+		found := false
+		for _, p := range providers {
+			if p.Name == name {
+				chosen, found = p, true
+				break
+			}
+		}
+		if found {
 			break
 		}
 	}

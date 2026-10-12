@@ -1080,7 +1080,7 @@ noticed, and none would have been caught by reading the tests — every suite lo
 thorough until someone actually ran the mutation.
 
 The convention below (R1–R3; R4 is a review-time obligation and lives in the
-`fabrik-review` skill instead) applies identically whether the guard is a Go function
+`review` skill instead) applies identically whether the guard is a Go function
 returning `(bool, string)` or a bash function with an exit code and stdout — it is not
 specific to this package's own Go-and-`simgh` regime.
 
@@ -1138,7 +1138,7 @@ applies the identical discipline at package scale (neutralize each modeled `simg
 behavior in turn, fail loudly if any leaves the suite green); treat a new guard test the
 same way before trusting it. The review-time version of this obligation (R4 — state which
 mutation a new guard's test catches, and show it turning the test red) is a
-`fabrik-review` skill checklist item, not a sim-bed one, since it's an author obligation
+`review` skill checklist item, not a sim-bed one, since it's an author obligation
 applied during review, not a testing-layer property.
 
 ## Running it

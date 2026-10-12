@@ -541,3 +541,74 @@ func populatePluginDir(pluginDir string) error {
 		return os.WriteFile(dest, data, 0644)
 	})
 }
+
+// TestRefreshPluginTo_PrunesSkillsRenamedByEarlierReleases pins #2140: the
+// skills lost their fabrik- prefix, and a refresh over a tree from any earlier
+// release must end up with exactly the embed, not both skill sets.
+func TestRefreshPluginTo_PrunesSkillsRenamedByEarlierReleases(t *testing.T) {
+	for _, tag := range []string{"v0.0.64", "v0.0.70", "v0.0.77"} {
+		t.Run(tag, func(t *testing.T) {
+			dir := t.TempDir()
+			copyTree(t, filepath.Join("testdata", "migration", tag, "plugin"), dir)
+			if _, err := os.Stat(filepath.Join(dir, "skills", "fabrik-review", "SKILL.md")); err != nil {
+				t.Fatalf("fixture precondition: %v", err)
+			}
+			if _, err := RefreshPluginTo(dir); err != nil {
+				t.Fatalf("RefreshPluginTo: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(dir, "skills", "fabrik-review")); !os.IsNotExist(err) {
+				t.Errorf("old skills/fabrik-review survived the refresh (err=%v)", err)
+			}
+			diskVer, err := ComputeDiskVersion(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if diskVer != ComputeEmbeddedVersion() {
+				t.Errorf("tree after refresh differs from the embed")
+			}
+			// Second refresh is a no-op.
+			if _, err := RefreshPluginTo(dir); err != nil {
+				t.Fatal(err)
+			}
+			again, _ := ComputeDiskVersion(dir)
+			if again != diskVer {
+				t.Errorf("second refresh changed the tree")
+			}
+		})
+	}
+}
+
+func TestRefreshPluginTo_KeepsEditedAndOperatorFiles(t *testing.T) {
+	dir := t.TempDir()
+	copyTree(t, filepath.Join("testdata", "migration", "v0.0.77", "plugin"), dir)
+	edited := filepath.Join(dir, "skills", "fabrik-review", "SKILL.md")
+	if err := os.WriteFile(edited, []byte("my own review rules\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	own := filepath.Join(dir, "skills", "my-skill", "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(own), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(own, []byte("mine\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RefreshPluginTo(dir); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{edited, own} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("operator file %s was removed: %v", p, err)
+		}
+	}
+	// The unedited old skills are gone, and the tree is still customised.
+	if _, err := os.Stat(filepath.Join(dir, "skills", "fabrik-plan")); !os.IsNotExist(err) {
+		t.Errorf("unedited skills/fabrik-plan survived (err=%v)", err)
+	}
+	c, err := ClassifyDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.Customised() {
+		t.Errorf("tree with kept operator files must stay customised")
+	}
+}

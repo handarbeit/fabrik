@@ -275,10 +275,10 @@ Each stage is a YAML file in your stages directory:
 ```yaml
 name: Research            # Must match a Project board column name
 order: 1                  # Processing order (lower = earlier)
-skill: fabrik-research    # Plugin skill (recommended; alternative to inline prompt)
+skill: fabrik-stages:research    # Plugin skill (recommended; alternative to inline prompt)
 prompt: |                 # Inline prompt (used when skill is not set)
   You are a research agent...
-comment_skill: fabrik-research-comment  # Skill for comment review (overrides comment_prompt)
+comment_skill: fabrik-stages:research-comment  # Skill for comment review (overrides comment_prompt)
 comment_prompt: |         # Inline comment-review prompt (used when comment_skill is not set)
   You are reviewing user comments...
 model: sonnet             # Optional: claude model to use
