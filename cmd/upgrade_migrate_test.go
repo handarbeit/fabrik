@@ -593,6 +593,36 @@ func TestMigrate_PreRenameQualifiedReferenceToEditedSkillIsRedirected(t *testing
 	}
 }
 
+// A stage file already on the new name, over a plugin tree whose fabrik-plan was
+// edited before the rename: the reference is left alone, and the note names the
+// operator's edited copy under its on-disk (pre-rename) name.
+func TestMigrate_NewNameReferenceOverPreRenameEditedSkillIsReported(t *testing.T) {
+	dir := deployFixture(t, "v0.0.77")
+	editSkill(t, dir, "fabrik-plan")
+	stage := filepath.Join(dir, ".fabrik", "stages", "plan.yaml")
+	data, _ := os.ReadFile(stage)
+	data = bytes.Replace(data, []byte("skill: fabrik-plan\n"), []byte("skill: fabrik-stages:plan\n"), 1)
+	if err := os.WriteFile(stage, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := planMigration(".", true, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, n := range plan.Notes {
+		if strings.Contains(n, "fabrik-stages:plan") && strings.Contains(n, "local-workflows:fabrik-plan") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no note pointing at the edited copy; notes = %v", plan.Notes)
+	}
+	if refs := stageRefs(t, dir); refs["plan.yaml:skill"] != "fabrik-stages:plan" {
+		t.Errorf("reference was rewritten: %v", refs)
+	}
+}
+
 func TestMigrate_PendingIsFalseForMigratedDeployment(t *testing.T) {
 	dir := deployFixture(t, "v0.0.77")
 	editSkill(t, dir, "fabrik-plan")

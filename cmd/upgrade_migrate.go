@@ -213,8 +213,22 @@ func planMigration(dir string, isDev bool, devOverride string) (*migrationPlan, 
 			}
 			pn, skill, qualified := fabrikplugin.Split(ref)
 			if qualified {
-				if pn == fabrikplugin.BasePluginName && edited[skill] {
-					p.Notes = append(p.Notes, fmt.Sprintf("%s: %s is %q, already qualified and left alone — your edited copy of that skill is %s", rel, key, ref, fabrikplugin.Qualify(fabrikplugin.LocalWorkflowsName, skill)))
+				if pn == fabrikplugin.BasePluginName {
+					// edited is keyed by the skill name on disk: the new name for a
+					// customised copy of the renamed plugin, the pre-rename name
+					// (fabrik-<stage>) for a tree edited before the rename. A
+					// reference to the base plugin carries the new name, so check both.
+					editedAs := ""
+					if edited[skill] {
+						editedAs = skill
+					} else if old := "fabrik-" + skill; edited[old] {
+						if _, ok := fabrikplugin.LegacySkillTarget(old); ok {
+							editedAs = old
+						}
+					}
+					if editedAs != "" {
+						p.Notes = append(p.Notes, fmt.Sprintf("%s: %s is %q, already qualified and left alone — your edited copy of that skill is %s", rel, key, ref, fabrikplugin.Qualify(fabrikplugin.LocalWorkflowsName, editedAs)))
+					}
 				}
 				return "", false
 			}
