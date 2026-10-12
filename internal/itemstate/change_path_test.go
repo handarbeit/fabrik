@@ -48,7 +48,7 @@ func TestChangePath_EngineStatusWriteAndWebhookMove(t *testing.T) {
 	seen := collectChanges(s)
 
 	s.Apply(LocalStatusUpdated{Repo: testRepo, Number: 1, NewStatus: "Implement"})
-	s.Apply(ProjectV2ItemEdited{ItemID: "PVTI_1", NewStatus: "Review"})
+	s.Apply(ProjectV2ItemEdited{ItemID: "PVTI_1", NewStatus: "Review", Sender: "someone"})
 
 	got := seen()
 	if len(got) != 2 {
