@@ -50,11 +50,14 @@ const (
 	MethodRevalidate       = "revalidate"
 	MethodClearClaudeLimit = "clear_claude_limit"
 	MethodAdvance          = "advance"
+	// MethodMoveParked (#2188, ADR 2188) moves an item between two parking
+	// columns. It starts no work, which is why it is not a widened promote.
+	MethodMoveParked = "move_parked"
 )
 
 // ActionMethods lists the mutating methods, in hello order.
 func ActionMethods() []string {
-	return []string{MethodPromote, MethodSetAutonomy, MethodRevalidate, MethodClearClaudeLimit, MethodAdvance}
+	return []string{MethodPromote, MethodSetAutonomy, MethodRevalidate, MethodClearClaudeLimit, MethodAdvance, MethodMoveParked}
 }
 
 // IsActionMethod reports whether m is a mutating method.
@@ -162,7 +165,7 @@ type Backend interface {
 }
 
 // Actor is the optional mutating half of the daemon API (#1969, ADR-1966-c). A
-// server with an Actor serves promote/set_autonomy/revalidate/clear_claude_limit/advance
+// server with an Actor serves promote/set_autonomy/revalidate/clear_claude_limit/advance/move_parked
 // through Server.handleAction; the three-method read Backend is unchanged and
 // can never reach these. Each method performs a GitHub write through the
 // daemon's own client, so unlike Backend it is not read-only. A refusal is a
@@ -173,4 +176,5 @@ type Actor interface {
 	Revalidate(RevalidateParams) (*ActionResult, error)
 	ClearClaudeLimit(ClearClaudeLimitParams) (*ActionResult, error)
 	Advance(AdvanceParams) (*ActionResult, error)
+	MoveParked(MoveParkedParams) (*ActionResult, error)
 }

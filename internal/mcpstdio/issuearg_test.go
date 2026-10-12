@@ -57,6 +57,7 @@ func TestBuildCallNumericIssueEqualsBareString(t *testing.T) {
 		{ToolSetAutonomy, `,"autonomy":"cruise"`},
 		{ToolRevalidate, ``},
 		{ToolAdvance, ``},
+		{ToolMoveParked, `,"to":"Backlog"`},
 	} {
 		_, numeric, err := buildCall(tc.tool, json.RawMessage(`{"issue":2050`+tc.extra+`}`), "me")
 		if err != nil {

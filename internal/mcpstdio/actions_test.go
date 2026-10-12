@@ -16,6 +16,7 @@ type stubActor struct {
 	reval    []localapi.RevalidateParams
 	clear    []localapi.ClearClaudeLimitParams
 	advance  []localapi.AdvanceParams
+	park     []localapi.MoveParkedParams
 }
 
 func (a *stubActor) Promote(p localapi.PromoteParams) (*localapi.ActionResult, error) {
@@ -43,6 +44,11 @@ func (a *stubActor) Advance(p localapi.AdvanceParams) (*localapi.ActionResult, e
 	return &localapi.ActionResult{Action: localapi.MethodAdvance, Issue: p.Issue}, nil
 }
 
+func (a *stubActor) MoveParked(p localapi.MoveParkedParams) (*localapi.ActionResult, error) {
+	a.park = append(a.park, p)
+	return &localapi.ActionResult{Action: localapi.MethodMoveParked, Issue: p.Issue}, nil
+}
+
 func startActionDaemon(t *testing.T, withActor bool) (*localapi.Server, *stubActor) {
 	t.Helper()
 	srv := localapi.NewServer(filepath.Join(shortDir(t), "s.sock"), &stubBackend{}, nil)
@@ -65,9 +71,10 @@ func TestActionToolsReachTheDaemonWithTheLaunchedSubscriber(t *testing.T) {
 		callTool(3, ToolRevalidate, `{"issue":"5"}`),
 		callTool(4, ToolClearClaudeLimit, `{}`),
 		callTool(5, ToolAdvance, `{"issue":"5"}`),
+		callTool(6, ToolMoveParked, `{"issue":"5","to":"Backlog"}`),
 	)
 	ids := byID(frames)
-	for _, id := range []string{"1", "2", "3", "4", "5"} {
+	for _, id := range []string{"1", "2", "3", "4", "5", "6"} {
 		if text, isErr := toolText(t, ids[id]); isErr {
 			t.Errorf("call %s failed: %s", id, text)
 		}
@@ -87,6 +94,9 @@ func TestActionToolsReachTheDaemonWithTheLaunchedSubscriber(t *testing.T) {
 	if !reflect.DeepEqual(act.advance, []localapi.AdvanceParams{{Subscriber: "my-topic", Issue: "5"}}) {
 		t.Errorf("advance = %+v", act.advance)
 	}
+	if !reflect.DeepEqual(act.park, []localapi.MoveParkedParams{{Subscriber: "my-topic", Issue: "5", To: "Backlog"}}) {
+		t.Errorf("move_parked = %+v", act.park)
+	}
 }
 
 // Every action is attributable: with no --subscriber the shim refuses before
@@ -99,15 +109,16 @@ func TestActionToolsRefuseWithoutASubscriber(t *testing.T) {
 		callTool(3, ToolRevalidate, `{"issue":"5"}`),
 		callTool(4, ToolClearClaudeLimit, `{}`),
 		callTool(5, ToolAdvance, `{"issue":"5"}`),
+		callTool(6, ToolMoveParked, `{"issue":"5","to":"Backlog"}`),
 	)
 	ids := byID(frames)
-	for _, id := range []string{"1", "2", "3", "4", "5"} {
+	for _, id := range []string{"1", "2", "3", "4", "5", "6"} {
 		text, isErr := toolText(t, ids[id])
 		if !isErr || !strings.Contains(text, "--subscriber") {
 			t.Errorf("call %s: isErr=%v text=%q", id, isErr, text)
 		}
 	}
-	if len(act.promote)+len(act.autonomy)+len(act.reval)+len(act.clear)+len(act.advance) != 0 {
+	if len(act.promote)+len(act.autonomy)+len(act.reval)+len(act.clear)+len(act.advance)+len(act.park) != 0 {
 		t.Errorf("the daemon was reached without a requester: %+v", act)
 	}
 }
@@ -122,15 +133,16 @@ func TestActionToolArgumentErrors(t *testing.T) {
 		callTool(5, ToolRevalidate, `{}`),
 		callTool(6, ToolClearClaudeLimit, `{"issue":"5"}`), // takes no arguments
 		callTool(7, ToolAdvance, `{}`),
+		callTool(8, ToolMoveParked, `{"issue":"5"}`), // missing to
 	)
 	ids := byID(frames)
-	for _, id := range []string{"1", "2", "3", "4", "5", "6", "7"} {
+	for _, id := range []string{"1", "2", "3", "4", "5", "6", "7", "8"} {
 		text, isErr := toolText(t, ids[id])
 		if !isErr || !strings.Contains(text, "invalid arguments") {
 			t.Errorf("call %s: isErr=%v text=%q", id, isErr, text)
 		}
 	}
-	if len(act.promote)+len(act.autonomy)+len(act.reval)+len(act.clear)+len(act.advance) != 0 {
+	if len(act.promote)+len(act.autonomy)+len(act.reval)+len(act.clear)+len(act.advance)+len(act.park) != 0 {
 		t.Errorf("invalid calls reached the daemon: %+v", act)
 	}
 }
@@ -176,7 +188,7 @@ func TestNoPauseLiftOrCommentTool(t *testing.T) {
 			t.Errorf("unexpected state-changing tool %q", n)
 		}
 	}
-	if got, want := ActionTools(), []string{ToolPromote, ToolSetAutonomy, ToolRevalidate, ToolClearClaudeLimit, ToolAdvance}; !reflect.DeepEqual(got, want) {
+	if got, want := ActionTools(), []string{ToolPromote, ToolSetAutonomy, ToolRevalidate, ToolClearClaudeLimit, ToolAdvance, ToolMoveParked}; !reflect.DeepEqual(got, want) {
 		t.Errorf("ActionTools = %v", got)
 	}
 }
