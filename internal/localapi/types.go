@@ -488,6 +488,9 @@ type SubscribeResult struct {
 	Subscriptions []channelevents.Subscription `json:"subscriptions"`
 	Mapped        []EventMapping               `json:"mapped,omitempty"`
 	Rejected      []string                     `json:"rejected,omitempty"`
+	// Notes are advisories about the request, e.g. label filters given without
+	// label events being in effect (#2169).
+	Notes []string `json:"notes,omitempty"`
 }
 
 // UnsubscribeParams removes one subscription by id, or all of a subscriber's
@@ -509,6 +512,8 @@ type AttachParams struct {
 	// CatchUp asks for a snapshot of what is waiting on a human right now (items
 	// settled at Validate, needs-human, escalated), tagged catch_up=true. The
 	// client sets it on the first attach of a session only, never on a reconnect.
+	// After a daemon restart the daemon queues one to every subscriber itself
+	// once its state is ready (#2169), whatever this says.
 	CatchUp bool `json:"catch_up,omitempty"`
 }
 

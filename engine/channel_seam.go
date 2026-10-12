@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/handarbeit/fabrik/internal/channelevents"
+	"github.com/handarbeit/fabrik/internal/itemstate"
 )
 
 // Test seams for the channel-event hub (#1968), for tests/sim, which drives the
@@ -126,4 +127,24 @@ func SetDecisionAnchorGraceForTest(d time.Duration) (restore func()) {
 	old := decisionAnchorGrace
 	decisionAnchorGrace = d
 	return func() { decisionAnchorGrace = old }
+}
+
+// SetSettleCauseDisabledForTest turns the re-settle cause off (no cause, no
+// actor, and an autonomy change no longer re-settles) and returns the restore
+// function: how the cause tests show they are not vacuous.
+func SetSettleCauseDisabledForTest() (restore func()) {
+	settleCauseDisabled.Store(true)
+	return func() { settleCauseDisabled.Store(false) }
+}
+
+// ApplyLabelWebhookForTest applies a label change to the engine's store as the
+// `issues` labeled / unlabeled webhook would, naming sender (the tests/sim
+// scenarios otherwise only see label changes through polling, whose actor is
+// unknown by design, ADR 2125). Test seam only.
+func (e *Engine) ApplyLabelWebhookForTest(repo string, number int, label string, added bool, sender string) {
+	if added {
+		e.store.Apply(itemstate.IssueLabeled{Repo: repo, Number: number, Label: label, Sender: sender})
+		return
+	}
+	e.store.Apply(itemstate.IssueUnlabeled{Repo: repo, Number: number, Label: label, Sender: sender})
 }

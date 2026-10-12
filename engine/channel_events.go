@@ -129,6 +129,9 @@ type channelEvents struct {
 	looked  map[string]bool
 	pend    map[string]*priorEntry
 	warmBuf []channelevents.Event
+	// autonomy is who last wrote each item's fabrik:cruise / fabrik:yolo label,
+	// for the cause of a re-settle (also under dmu).
+	autonomy map[string]autonomyActor
 
 	wake  chan struct{}
 	stop  chan struct{}
@@ -384,6 +387,11 @@ func (ce *channelEvents) onChange(c itemstate.Change, snap itemstate.Snapshot) {
 		if d.Added && d.Label == "fabrik:rebase-needed" {
 			rebaseApplied = true
 		}
+		if d.Added && d.Label == "fabrik:revalidate" && ce.ledger != nil {
+			// Sent back through Validate on purpose: the next settle says so.
+			ce.ledger.MarkRevalidated(key)
+		}
+		ce.noteAutonomyWrite(key, d, ce.e.labelAttribute(c))
 		le := ce.e.labelEvent(&st, c, d)
 		if closeTrackingLabel(d.Label) && ce.isLanding(key) {
 			le.Meta["landing"] = "true"

@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/attention"
@@ -308,6 +309,14 @@ func (ce *channelEvents) closeSettleEpisode(ref string, st *itemstate.ItemState)
 	if !ended && !relaxed && (reason == reasonWorkerDispatched || reason == reasonNewFeedback) {
 		ended = true
 	}
+	// A change of autonomy while the item stays settled (cruise to yolo, a label
+	// removed) is a decision about the merge, not a withdrawal: it ends the
+	// episode so the next settle point announces the item again with its cause
+	// (#2169 R3a). No settlement-withdrawn follows, because the item is still
+	// settled.
+	if !ended && !relaxed && ce.autonomyChangedSinceSettle(ref, n, st) {
+		ended = true
+	}
 	if !ended {
 		return
 	}
@@ -344,6 +353,7 @@ func (ce *channelEvents) settleCandidate(ref string, cand settleCandidate) {
 		ce.hub.SetCounter(vsRelaxedKey(ref), ep)
 	}
 	ev.DedupKey = started + ":" + strconv.Itoa(ep)
+	ce.stampSettleCause(ref, &ev, ep)
 	m := ce.memoFor(ref)
 	var st itemstate.ItemState
 	if snap, ok := ce.e.store.Peek(repo, n); ok {
@@ -469,4 +479,98 @@ func (e *Engine) validateSettledEvent(snap itemstate.Snapshot, st *itemstate.Ite
 	ev.Content = fmt.Sprintf("%s settled at Validate: PR #%d CI %s, reviews %s; %s",
 		issueRef(st.Repo, st.Number), ev.PR, ci, reviews, action)
 	return ev
+}
+
+// settleCauseDisabled neutralises the re-settle cause (tests only): no cause,
+// no actor, and an autonomy change no longer ends the episode, which is how an
+// item behaved before #2169.
+var settleCauseDisabled atomic.Bool
+
+// autonomyActor is who last wrote the item's autonomy label, as attributed by
+// the observer; added says whether that write was an addition.
+type autonomyActor struct {
+	attr  labelAttribution
+	added bool
+}
+
+// noteAutonomyWrite remembers the attribution of a fabrik:cruise / fabrik:yolo
+// delta (observer goroutine). An added label wins over a removed one: a cruise to
+// yolo swap is two deltas and the actor of the new mode is the decision.
+func (ce *channelEvents) noteAutonomyWrite(key string, d itemstate.LabelDelta, attr labelAttribution) {
+	if d.Label != "fabrik:cruise" && d.Label != "fabrik:yolo" {
+		return
+	}
+	ce.dmu.Lock()
+	defer ce.dmu.Unlock()
+	if ce.autonomy == nil {
+		ce.autonomy = map[string]autonomyActor{}
+	}
+	if prev, ok := ce.autonomy[key]; ok && prev.added && !d.Added {
+		return
+	}
+	ce.autonomy[key] = autonomyActor{attr: attr, added: d.Added}
+}
+
+// takeAutonomyWrite returns and forgets the remembered autonomy actor.
+func (ce *channelEvents) takeAutonomyWrite(key string) (autonomyActor, bool) {
+	ce.dmu.Lock()
+	defer ce.dmu.Unlock()
+	a, ok := ce.autonomy[key]
+	delete(ce.autonomy, key)
+	return a, ok
+}
+
+// autonomyChangedSinceSettle reports whether the open episode n was announced
+// under a different autonomy than the item has now, while it is otherwise still
+// settled.
+func (ce *channelEvents) autonomyChangedSinceSettle(ref string, n int, st *itemstate.ItemState) bool {
+	if settleCauseDisabled.Load() || ce.ledger == nil {
+		return false
+	}
+	rec, ok := ce.ledger.Settle(ref)
+	if !ok || rec.Episode != n || rec.Autonomy == "" {
+		return false
+	}
+	if st.IsClosed || st.Status != "Validate" || !hasLabelStr(st.Labels, "stage:Validate:complete") {
+		return false
+	}
+	return rec.Autonomy != ce.e.autonomyMode(st)
+}
+
+// stampSettleCause records the announced settle in the ledger and, when this is
+// not the first one, says why the item settled again: revalidated, new-head,
+// autonomy-changed (with the autonomy writer's attribution) or other, in that
+// precedence. The first settle carries no cause: after a lost ledger the daemon
+// cannot honestly claim "initial" (ADR 2169).
+func (ce *channelEvents) stampSettleCause(ref string, ev *channelevents.Event, episode int) {
+	if ce.ledger == nil {
+		return
+	}
+	prev, havePrev := ce.ledger.Settle(ref)
+	actor, haveActor := ce.takeAutonomyWrite(ref)
+	head, autonomy := ev.Meta["head_sha"], ev.Meta["autonomy"]
+	ce.ledger.SetSettle(ref, channelevents.SettleRecord{Episode: episode, HeadSHA: head, Autonomy: autonomy})
+	if !havePrev || settleCauseDisabled.Load() {
+		return
+	}
+	cause := channelevents.CauseOther
+	switch {
+	case prev.Revalidated:
+		cause = channelevents.CauseRevalidated
+	case prev.HeadSHA != "" && head != "" && prev.HeadSHA != head:
+		cause = channelevents.CauseNewHead
+	case prev.Autonomy != "" && prev.Autonomy != autonomy:
+		cause = channelevents.CauseAutonomyChanged
+	}
+	ev.Meta[channelevents.MetaCause] = cause
+	if cause == channelevents.CauseAutonomyChanged {
+		attr := labelAttribution{Actor: "unknown"}
+		if haveActor {
+			attr = actor.attr
+		}
+		by := attributionMeta(ev, attr)
+		ev.Content += fmt.Sprintf(" (settled again: autonomy changed from %s to %s by %s)", prev.Autonomy, autonomy, by)
+		return
+	}
+	ev.Content += fmt.Sprintf(" (settled again: %s)", cause)
 }
