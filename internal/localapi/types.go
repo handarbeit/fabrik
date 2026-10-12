@@ -552,6 +552,14 @@ type AdvanceParams struct {
 	Issue      string `json:"issue"`
 }
 
+// MoveParkedParams moves an item from one unmanaged parking column to another
+// (#2188). It starts no work and never touches a pipeline column.
+type MoveParkedParams struct {
+	Subscriber string `json:"subscriber"`
+	Issue      string `json:"issue"`
+	To         string `json:"to"`
+}
+
 // ClearClaudeLimitParams has no issue: the daemon picks the carrier item.
 type ClearClaudeLimitParams struct {
 	Subscriber string `json:"subscriber"`
@@ -588,7 +596,8 @@ type RefusalState struct {
 	Status string `json:"status,omitempty"`
 	// Labels are the item's fabrik-relevant labels.
 	Labels []string `json:"labels,omitempty"`
-	// ValidTargets lists the columns a promote could name. It is set only when
+	// ValidTargets lists the columns the requested action could name (promote:
+	// pipeline columns; move_parked: other parking columns). It is set only when
 	// the item is in a parking column; a refusal because the item is not parked
 	// omits it, since no move is possible.
 	ValidTargets []string `json:"valid_targets,omitempty"`

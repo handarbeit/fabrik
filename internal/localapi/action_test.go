@@ -16,6 +16,7 @@ type fakeActor struct {
 	reval    RevalidateParams
 	clear    ClearClaudeLimitParams
 	advance  AdvanceParams
+	park     MoveParkedParams
 	calls    int
 }
 
@@ -55,6 +56,12 @@ func (f *fakeActor) Advance(p AdvanceParams) (*ActionResult, error) {
 	return &ActionResult{Action: MethodAdvance, Issue: p.Issue, Changed: true}, nil
 }
 
+func (f *fakeActor) MoveParked(p MoveParkedParams) (*ActionResult, error) {
+	f.calls++
+	f.park = p
+	return &ActionResult{Action: MethodMoveParked, Issue: p.Issue, Changed: true}, nil
+}
+
 func startActionServer(t *testing.T, a Actor) *Server {
 	t.Helper()
 	path := filepath.Join(shortDir(t), "s.sock")
@@ -85,6 +92,7 @@ func actionCalls(srv *Server) map[string]any {
 		MethodRevalidate:       RevalidateParams{Subscriber: "s", Issue: "o/r#1"},
 		MethodClearClaudeLimit: ClearClaudeLimitParams{Subscriber: "s"},
 		MethodAdvance:          AdvanceParams{Subscriber: "s", Issue: "o/r#1"},
+		MethodMoveParked:       MoveParkedParams{Subscriber: "s", Issue: "o/r#1", To: "Backlog"},
 	}
 }
 
@@ -140,6 +148,9 @@ func TestActorDispatchAndHello(t *testing.T) {
 	}
 	if err := Call(ctx, srv.Path(), MethodAdvance, AdvanceParams{Subscriber: "s", Issue: "o/r#7"}, &res); err != nil || fa.advance != (AdvanceParams{Subscriber: "s", Issue: "o/r#7"}) || res.Action != MethodAdvance {
 		t.Fatalf("advance: %v %+v %+v", err, fa.advance, res)
+	}
+	if err := Call(ctx, srv.Path(), MethodMoveParked, MoveParkedParams{Subscriber: "s", Issue: "o/r#7", To: "Backlog"}, &res); err != nil || fa.park != (MoveParkedParams{Subscriber: "s", Issue: "o/r#7", To: "Backlog"}) || res.Action != MethodMoveParked {
+		t.Fatalf("move_parked: %v %+v %+v", err, fa.park, res)
 	}
 }
 

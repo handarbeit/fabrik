@@ -33,11 +33,12 @@ const (
 	ToolRevalidate       = "fabrik_revalidate"
 	ToolClearClaudeLimit = "fabrik_clear_claude_limit"
 	ToolAdvance          = "fabrik_advance"
+	ToolMoveParked       = "fabrik_move_parked"
 )
 
 // ActionTools lists the tools that make the daemon write to GitHub.
 func ActionTools() []string {
-	return []string{ToolPromote, ToolSetAutonomy, ToolRevalidate, ToolClearClaudeLimit, ToolAdvance}
+	return []string{ToolPromote, ToolSetAutonomy, ToolRevalidate, ToolClearClaudeLimit, ToolAdvance, ToolMoveParked}
 }
 
 // IsActionTool reports whether name is one of ActionTools.
@@ -223,6 +224,18 @@ func toolDefs() []map[string]any {
 			"annotations": action(false),
 		},
 		{
+			"name": ToolMoveParked,
+			"description": "Move an item from one unmanaged parking column (e.g. Triage) to another (e.g. Backlog). This starts no work: the engine never dispatches for a parking column, so it is the \"accepted, not yet\" decision, not a promotion; use fabrik_promote to move an item into the pipeline. " +
+				"It only moves BETWEEN parking columns and never pulls work out of the pipeline. The daemon confirms the item's current column live and fails closed. " +
+				"Refused, with the current state and writing nothing, when the item is not in a parking column, `to` is not another parking column that exists on the board (holding, cleanup and pipeline columns are refused; the refusal lists the valid parking destinations), or `to` is the item's current column. " +
+				"A legacy Backlog column with no configured stage counts as a parking column. Changes no labels and lifts no pause. Posts a Fabrik audit comment naming the requesting subscriber. Requires --subscriber.",
+			"inputSchema": obj(map[string]any{
+				"issue": issueSchema(),
+				"to":    map[string]any{"type": "string", "description": "the parking column to move the item into, e.g. Backlog"},
+			}, "issue", "to"),
+			"annotations": action(false),
+		},
+		{
 			"name": ToolClearClaudeLimit,
 			"description": "Clear an active account-wide Claude usage-limit hold without restarting the daemon, by applying fabrik:clear-claude-limit to one managed open issue (the daemon picks it: one already carrying fabrik:claude-limit first, else the lowest-numbered, and names it in the result and its audit comment). " +
 				"Refused when no usage limit is active. The hold is account-wide, so the chosen issue is only the carrier of the label. Posts a Fabrik audit comment on that issue naming the requesting subscriber. Requires --subscriber.",
@@ -383,6 +396,22 @@ func buildCall(name string, args json.RawMessage, defaultSubscriber string) (met
 			return "", nil, fmt.Errorf("issue is required")
 		}
 		return localapi.MethodRevalidate, localapi.RevalidateParams{Subscriber: who, Issue: string(a.Issue)}, nil
+	case ToolMoveParked:
+		var a struct {
+			Issue issueArg `json:"issue"`
+			To    string   `json:"to"`
+		}
+		if err := decodeArgs(args, &a); err != nil {
+			return "", nil, err
+		}
+		who, err := requesterName(defaultSubscriber)
+		if err != nil {
+			return "", nil, err
+		}
+		if a.Issue == "" || a.To == "" {
+			return "", nil, fmt.Errorf("issue and to are required")
+		}
+		return localapi.MethodMoveParked, localapi.MoveParkedParams{Subscriber: who, Issue: string(a.Issue), To: a.To}, nil
 	case ToolAdvance:
 		var a struct {
 			Issue issueArg `json:"issue"`
