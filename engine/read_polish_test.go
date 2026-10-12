@@ -329,6 +329,26 @@ func TestReadPolishR5_PassOnOlderHeadIsNeverClean(t *testing.T) {
 	}
 }
 
+func TestReadPolishR5_ChangesRequestedIsNeverClean(t *testing.T) {
+	e := apiEngine(t, 0)
+	// An empty-body CHANGES_REQUESTED review at the head with no unresolved threads:
+	// nothing is outstanding, but the review is still a request for changes.
+	seedReviewed(t, e, gh.PRReview{Author: "human-reviewer", State: "CHANGES_REQUESTED", DatabaseID: 9, CommitID: headSHA})
+	v := verdictFor(t, e, "human-reviewer")
+	if v.Outstanding.V != 0 || !v.AtHead.V {
+		t.Fatalf("setup: %+v", v)
+	}
+	if !v.CleanPass.Valid || v.CleanPass.V {
+		t.Errorf("a CHANGES_REQUESTED review must not be a clean pass: %+v", v)
+	}
+	// Also with no commit id (head unknown): still not clean, never unknown-then-true.
+	e2 := apiEngine(t, 0)
+	seedReviewed(t, e2, gh.PRReview{Author: "human-reviewer", State: "CHANGES_REQUESTED", DatabaseID: 9})
+	if v := verdictFor(t, e2, "human-reviewer"); v.CleanPass.Valid && v.CleanPass.V {
+		t.Errorf("head unknown: clean_pass = %+v", v.CleanPass)
+	}
+}
+
 func TestReadPolishR5_MissingInputsAreUnknownNeverClean(t *testing.T) {
 	e := apiEngine(t, 0)
 	// A review with no commit id (a webhook that predates the field, say).

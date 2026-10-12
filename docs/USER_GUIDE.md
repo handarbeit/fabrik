@@ -3917,7 +3917,7 @@ A `COMMENTED` review is the same state for a clean pass and for a review with fi
 - **`at_head`** — whether that review is at the PR head SHA. `unknown` when the review's commit is not cached or the daemon has no agreed head.
 - **`inline_at_head`** — unresolved inline comments by that reviewer at the head. A review-thread comment carries no review id, so the link is the reviewer plus the commit.
 - **`outstanding`** — findings still open from that reviewer: unresolved, non-outdated review threads plus the reviewer's review body when it is actionable and not already addressed. It counts a thread whether or not Fabrik has already processed it.
-- **`clean_pass`** — `true` only when the latest review is at the head **and** nothing is outstanding. A pass on an older head is `false`, never clean; an input the cache lacks makes it `unknown`, never `true`.
+- **`clean_pass`** — `true` only when the latest review is at the head **and** nothing is outstanding. A pass on an older head is `false`, never clean, and so is a `CHANGES_REQUESTED` review (it is not a pass, whatever its threads say); an input the cache lacks makes it `unknown`, never `true`.
 - **`unaddressed`** — whether the feedback gate would hold on this reviewer's findings (the same predicate the engine uses). It differs from `outstanding`: a `validate-settled` push is only sent when nothing is unaddressed, so `outstanding` is what separates a clean pass from a review whose findings the engine already worked through but that were never resolved.
 - **`pr_url`**.
 

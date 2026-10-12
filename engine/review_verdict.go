@@ -123,6 +123,10 @@ func (e *Engine) reviewerVerdicts(st *itemstate.ItemState) []localapi.ReviewerVe
 		v.Outstanding = localapi.Some(out2)
 
 		switch {
+		case rev.State == "CHANGES_REQUESTED":
+			// A review that requests changes is not a pass, whatever the threads
+			// say: resolving its threads does not withdraw it.
+			v.CleanPass = localapi.Some(false)
 		case v.AtHead.Valid && !v.AtHead.V:
 			v.CleanPass = localapi.Some(false) // a pass on an older head is never clean
 		case v.AtHead.Valid && v.AtHead.V:
