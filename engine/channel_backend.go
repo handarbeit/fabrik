@@ -27,12 +27,13 @@ func (e *Engine) channelStreamer() localapi.Streamer {
 
 func (s channelStreamer) Subscribe(p localapi.SubscribeParams) (*localapi.SubscribeResult, error) {
 	sub := channelevents.Subscription{
-		Subscriber:    p.Subscriber,
-		Repos:         p.Repos,
-		Milestone:     p.Milestone,
-		Labels:        p.Labels,
-		ExcludeLabels: p.ExcludeLabels,
-		DigestSeconds: p.DigestSeconds,
+		Subscriber:        p.Subscriber,
+		Repos:             p.Repos,
+		Milestone:         p.Milestone,
+		Labels:            p.Labels,
+		ExcludeLabels:     p.ExcludeLabels,
+		DigestSeconds:     p.DigestSeconds,
+		ProgressViaColumn: p.ProgressViaColumn,
 	}
 	// Version skew is the normal case (the daemon self-upgrades, a shim lives as
 	// long as its Claude session), so a request naming an event type this daemon

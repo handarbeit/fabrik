@@ -31,6 +31,11 @@ type FallbackFetcher interface {
 //   - Apply holds mu for the write, captures the observer slice under observerMu,
 //     then calls observers after releasing both locks.
 type Store struct {
+	// legacyLabelBaseline restores the pre-#2123 baseline rule ("an item the store
+	// already held has known labels") so a test can show the restart flood it
+	// caused. Test seam only (SetLegacyLabelBaselineForTest).
+	legacyLabelBaseline atomic.Bool
+
 	mu    sync.RWMutex
 	items map[string]*ItemState // key: "owner/repo#N"
 
@@ -308,7 +313,8 @@ func (s *Store) applySingleItem(m Mutation) (Snapshot, []Change, error) {
 	s.mu.Unlock()
 
 	change := Change{Repo: repo, Number: number, Fields: flags}
-	annotateLabelChange(&change, m, before.Labels, snap.state.Labels, existed)
+	annotateLabelChange(&change, m, before.Labels, snap.state.Labels, before.LabelsKnown || (existed && s.legacyLabelBaseline.Load()))
+	annotateLifecycleChange(&change, m, before, snap.state, existed)
 	if fromProbe {
 		change.Origin = OriginProbe
 	}
@@ -319,10 +325,14 @@ func (s *Store) applySingleItem(m Mutation) (Snapshot, []Change, error) {
 }
 
 // annotateLabelChange fills the label-delta fields of change from a before/after
-// label diff. A mutation that creates the item contributes deltas only when it
-// is itself a label write (a webhook label event for an item not yet cached);
-// any other first population is a baseline and emits none (#1968 R3).
-func annotateLabelChange(change *Change, m Mutation, before, after []string, existed bool) {
+// label diff. A mutation contributes deltas when it is itself a label write (a
+// webhook label event, even for an item not yet cached) or when the item's
+// labels were already known before it (labelsKnown). The first label-bearing
+// population of an item — whichever fetch carries it — is a baseline and emits
+// none (#1968 R3, amended by #2123: "first creation" became "first population
+// that carries labels", so a label-less record followed by a deep fetch or
+// reconcile is silent).
+func annotateLabelChange(change *Change, m Mutation, before, after []string, labelsKnown bool) {
 	switch v := m.(type) {
 	case LocalLabelAdded:
 		change.Origin, change.Requester = OriginEngine, v.Requester
@@ -339,11 +349,34 @@ func annotateLabelChange(change *Change, m Mutation, before, after []string, exi
 			change.Requester = v.Requester
 		}
 	default:
-		if !existed {
+		if !labelsKnown {
 			return
 		}
 	}
 	change.LabelDeltas = diffLabels(before, after)
+}
+
+// annotateLifecycleChange fills the arrival, column-move and close fields of
+// change (#2123). Created marks a mutation that created the record; PrevStatus
+// is set only for a Status change on an item whose previous Status was known
+// (anything else is a baseline); Closed marks an open→closed transition on an
+// item the store already held.
+func annotateLifecycleChange(change *Change, m Mutation, before, after ItemState, existed bool) {
+	change.Created = !existed
+	if existed && change.Fields&StatusChanged != 0 && before.Status != "" && before.Status != after.Status {
+		change.PrevStatus = before.Status
+	}
+	if existed && !before.IsClosed && after.IsClosed {
+		change.Closed = true
+	}
+	switch v := m.(type) {
+	case LocalStatusUpdated:
+		change.Origin, change.Requester = OriginEngine, v.Requester
+	case IssueClosed:
+		change.Origin, change.Sender = OriginWebhook, v.Sender
+	case LocalIssueClosed:
+		change.Origin = OriginEngine
+	}
 }
 
 // getOrCreate returns the existing *ItemState for key, or creates a new zero-value one.
@@ -504,7 +537,12 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		return LockChanged
 
 	case ItemDeepFetched:
-		flags := applyProjectItem(item, v.FreshState)
+		// A deep fetch always carries labels. The in-place FetchItemDetails fill
+		// of a probe-seeded minimal item leaves its LabelsAbsent marker set, so
+		// it is cleared here rather than relying on every caller to (#2123).
+		fresh := v.FreshState
+		fresh.LabelsAbsent = false
+		flags := applyProjectItem(item, fresh)
 		item.LastDeepFetchAt = time.Now()
 		item.LastSeenSourceUpdatedAt = v.FreshState.UpdatedAt
 		item.LastDeepFetchFailureAt = time.Time{} // clear failure on success
@@ -948,7 +986,7 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		return applyShallowItem(item, v.Item, v.FetchedAt, s.graceLocked(), time.Now())
 
 	case ProbeBoardItemUpdated:
-		return applyProbeItem(item, v.Item)
+		return applyProbeItem(item, v.Item, v.FetchedAt, s.graceLocked(), time.Now())
 	}
 
 	return 0
@@ -982,9 +1020,10 @@ func (s *Store) applyBoardReconciled(v BoardReconciled) (Snapshot, []Change, err
 		s.mu.Unlock()
 
 		change := Change{Repo: repo, Number: number, Fields: flags}
-		if existed {
+		if before.LabelsKnown || (existed && s.legacyLabelBaseline.Load()) {
 			change.LabelDeltas = diffLabels(before.Labels, snap.state.Labels)
 		}
+		annotateLifecycleChange(&change, nil, before, snap.state, existed)
 		s.notify(obs, change, snap)
 		changes = append(changes, change)
 	}
@@ -1018,6 +1057,16 @@ func (s *Store) applyProjectV2ItemEdited(v ProjectV2ItemEdited) (Snapshot, []Cha
 	s.mu.Unlock()
 
 	change := Change{Repo: repo, Number: number, Fields: StatusChanged}
+	if before.Status != "" && before.Status != snap.state.Status {
+		change.PrevStatus = before.Status
+	}
+	if v.Sender != "" || v.EchoOfEngine {
+		change.Origin, change.Sender, change.EchoOfEngine = OriginWebhook, v.Sender, v.EchoOfEngine
+		if v.EchoOfEngine {
+			change.Requester = v.Requester
+		}
+	}
+	change.StatusAt = v.At
 	obs := s.captureObservers()
 	s.notify(obs, change, snap)
 	return snap, []Change{change}, nil
@@ -1482,4 +1531,13 @@ func ensureStageStateMaps(item *ItemState) {
 	if ss.StallEpisodeArmed == nil {
 		ss.StallEpisodeArmed = make(map[string]bool)
 	}
+}
+
+// SetLegacyLabelBaselineForTest restores the pre-#2123 label baseline rule: an
+// item the store already held counts as label-known, so a label-less record
+// followed by a label-bearing population emits every label as a delta. Test seam
+// only, used to show the restart-flood tests are not vacuous; production never
+// calls this.
+func (s *Store) SetLegacyLabelBaselineForTest(on bool) {
+	s.legacyLabelBaseline.Store(on)
 }

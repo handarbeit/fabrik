@@ -38,9 +38,12 @@ func applyProjectItem(item *ItemState, pi gh.ProjectItem) ChangeFlags {
 		flags |= StateChanged
 	}
 
-	if !reflect.DeepEqual(item.Labels, pi.Labels) {
-		item.Labels = copyStrings(pi.Labels)
-		flags |= LabelsChanged
+	if !pi.LabelsAbsent {
+		if !reflect.DeepEqual(item.Labels, pi.Labels) {
+			item.Labels = copyStrings(pi.Labels)
+			flags |= LabelsChanged
+		}
+		item.LabelsKnown = true
 	}
 
 	if item.Status != pi.Status {
@@ -179,15 +182,18 @@ func applyShallowItem(item *ItemState, pi gh.ProjectItem, fetchedAt time.Time, g
 		flags |= StateChanged
 	}
 
-	labels := pi.Labels
-	if view.Labels != nil {
-		labels = view.Labels
-	}
-	if view.Labels != nil && sameStringSet(item.Labels, labels) {
-		// Only the order differs from the kept local set: leave it untouched.
-	} else if !reflect.DeepEqual(item.Labels, labels) {
-		item.Labels = copyStrings(labels)
-		flags |= LabelsChanged
+	if !pi.LabelsAbsent {
+		labels := pi.Labels
+		if view.Labels != nil {
+			labels = view.Labels
+		}
+		if view.Labels != nil && sameStringSet(item.Labels, labels) {
+			// Only the order differs from the kept local set: leave it untouched.
+		} else if !reflect.DeepEqual(item.Labels, labels) {
+			item.Labels = copyStrings(labels)
+			flags |= LabelsChanged
+		}
+		item.LabelsKnown = true
 	}
 
 	if item.Status != view.Status {
@@ -235,8 +241,19 @@ func applyMilestone(item *ItemState, m *gh.Milestone, known bool) ChangeFlags {
 // applyProbeItem updates only the probe-visible fields of item from pi.
 // Labels are explicitly NOT updated — the probe query fetches no label data.
 // Wiping Labels here would silently discard the cached label set.
-func applyProbeItem(item *ItemState, pi gh.BoardProbeItem) ChangeFlags {
+//
+// Status and closed state honour the engine's recent writes exactly as
+// applyShallowItem does (#2178), through the same protectStatusClosed rule: a
+// listing fetched before the engine's write plus grace keeps the local value,
+// raises no flag and does not reset StatusEnteredAt. Label records are never
+// touched, since a probe listing cannot confirm them.
+func applyProbeItem(item *ItemState, pi gh.BoardProbeItem, fetchedAt time.Time, grace time.Duration, now time.Time) ChangeFlags {
 	var flags ChangeFlags
+
+	view := protectStatusClosed(item, pi.Status, pi.IsClosed, fetchedAt, grace, now)
+	if dropEngineWrites(item, view.Drop) {
+		flags |= EngineWriteRecordedChanged
+	}
 
 	if item.ID != pi.ContentID && pi.ContentID != "" {
 		item.ID = pi.ContentID
@@ -245,24 +262,30 @@ func applyProbeItem(item *ItemState, pi gh.BoardProbeItem) ChangeFlags {
 		item.ItemID = pi.ItemID
 	}
 
+	isClosed := pi.IsClosed
+	if view.KeepClosed {
+		isClosed = item.IsClosed
+	}
 	probeState := "open"
-	if pi.IsClosed {
+	if isClosed {
 		probeState = "closed"
 	}
-	if item.State != probeState || item.IsClosed != pi.IsClosed || item.IsPR != pi.IsPR {
+	if item.State != probeState || item.IsClosed != isClosed || item.IsPR != pi.IsPR {
 		item.State = probeState
-		item.IsClosed = pi.IsClosed
+		item.IsClosed = isClosed
 		item.IsPR = pi.IsPR
 		flags |= StateChanged
 	}
 
-	if item.Status != pi.Status {
-		item.Status = pi.Status
+	if item.Status != view.Status {
+		item.Status = view.Status
 		item.Terminal = false
 		item.StatusEnteredAt = time.Now()
 		flags |= StatusChanged
 	}
 
+	// UpdatedAt is assigned unconditionally, as before: a lagging listing can
+	// move it backwards, which only makes the item look no fresher than it was.
 	if !item.UpdatedAt.Equal(pi.EffectiveUpdatedAt) {
 		item.UpdatedAt = pi.EffectiveUpdatedAt
 	}

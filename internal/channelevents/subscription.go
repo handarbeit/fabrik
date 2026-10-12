@@ -38,6 +38,20 @@ type Subscription struct {
 	// 0 delivers each at once. validate-settled, escalated, paused and
 	// daemon-unreachable are always immediate.
 	DigestSeconds int `json:"digest_seconds,omitempty"`
+	// ProgressViaColumn drops label-applied/-removed for stage:*:complete and
+	// stage:*:in_progress when the subscription also takes column-changed, so an
+	// overseer can follow progress and decisions without the stage-label stream
+	// (#2123). It wins over Labels and an empty ExcludeLabels. Default off.
+	ProgressViaColumn bool `json:"progress_via_column,omitempty"`
+}
+
+// StageProgressLabels are the labels ProgressViaColumn suppresses.
+var StageProgressLabels = []string{"stage:*:complete", "stage:*:in_progress"}
+
+// TakesColumnChanged reports whether the subscription's event filter admits
+// column-changed (an empty filter means every type).
+func (s Subscription) TakesColumnChanged() bool {
+	return len(s.Events) == 0 || containsType(s.Events, ColumnChanged)
 }
 
 // EffectiveExclude is the exclude list in force.
@@ -78,6 +92,9 @@ func (s Subscription) Validate(minDigest time.Duration) error {
 		if d < minDigest || d > MaxDigest {
 			return fmt.Errorf("digest interval %s out of range [%s, %s]", d, minDigest, MaxDigest)
 		}
+	}
+	if s.ProgressViaColumn && !s.TakesColumnChanged() {
+		return fmt.Errorf("progress_via_column needs column-changed in events (or an empty events list)")
 	}
 	if s.Milestone != "" && strings.TrimSpace(s.Milestone) == "" {
 		return fmt.Errorf("empty milestone")

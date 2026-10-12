@@ -2932,3 +2932,46 @@ func TestFetchLinkedPR_StaleRecordForcesRefetch(t *testing.T) {
 		t.Fatalf("want fresh HeadSHA=rebased_sha after TTL expiry, got %v", pr2)
 	}
 }
+
+// TestBootstrapFromProbe_LabelsNotKnown is the producer drift guard for #2123:
+// the probe carries no labels, so the bootstrap must leave them unknown. If it
+// stopped marking its items LabelsAbsent, the first deep fetch or reconcile would
+// diff against an empty label list and flood subscribers with false label events.
+func TestBootstrapFromProbe_LabelsNotKnown(t *testing.T) {
+	store := itemstate.NewStore(nil)
+	c := NewCacheImpl(&mockClient{}, store, nopLog)
+	c.BootstrapFromProbe([]gh.BoardProbeItem{{ContentID: "I_1", Number: 1, Repo: "owner/repo", Status: "Research"}}, "PID")
+	if s := testGetState(t, c, "owner/repo", 1); s.LabelsKnown {
+		t.Fatal("probe-bootstrapped item must not have known labels")
+	}
+	var deltas int
+	store.Subscribe(itemstate.ObserverFunc(func(ch itemstate.Change, _ itemstate.Snapshot) { deltas += len(ch.LabelDeltas) }))
+	c.Reconcile(&gh.ProjectBoard{Items: []gh.ProjectItem{{ID: "I_1", Number: 1, Repo: "owner/repo", Status: "Research", Labels: []string{"stage:Specify:complete", "fabrik:cruise"}}}})
+	if deltas != 0 {
+		t.Fatalf("first reconcile of a probe-seeded item emitted %d label deltas, want 0", deltas)
+	}
+	if s := testGetState(t, c, "owner/repo", 1); !s.LabelsKnown || len(s.Labels) != 2 {
+		t.Fatalf("reconcile did not populate labels: %+v", s.Labels)
+	}
+}
+
+// TestDeltaIssueClosedCarriesSenderButNoEcho covers the close attribution plumbing.
+func TestDeltaIssueClosedCarriesSenderButNoEcho(t *testing.T) {
+	store := itemstate.NewStore(nil)
+	c := NewCacheImpl(&mockClient{}, store, nopLog)
+	c.BootstrapFromProbe([]gh.BoardProbeItem{{ContentID: "I_1", Number: 1, Repo: "owner/repo", Status: "Research"}}, "PID")
+	var got itemstate.Change
+	store.Subscribe(itemstate.ObserverFunc(func(ch itemstate.Change, _ itemstate.Snapshot) {
+		if ch.Closed {
+			got = ch
+		}
+	}))
+	// Even a matcher that claims every close is ours must not mark the change as
+	// an engine echo: the engine registers no issues/closed echo, so IssueClosed
+	// carries the sender only.
+	c.SetMatchEchoViaFn(func(typ, action, key string) (bool, string) { return typ == "issues" && action == "closed", "" })
+	c.applyIssuesDelta([]byte(`{"action":"closed","sender":{"login":"alice"},"issue":{"number":1},"repository":{"full_name":"owner/repo"}}`))
+	if !got.Closed || got.Sender != "alice" || got.EchoOfEngine {
+		t.Fatalf("closed change = %+v", got)
+	}
+}

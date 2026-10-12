@@ -1143,6 +1143,13 @@ func (wm *webhookManager) RegisterEchoVia(eventType, action, key, requester stri
 // RegisterEchoIfSubscribed registers an echo entry only when eventType is in wm.events.
 // Used for projects_v2_item (R7) where the event may have been dynamically removed.
 func (wm *webhookManager) RegisterEchoIfSubscribed(eventType, action, key string) {
+	wm.RegisterEchoIfSubscribedVia(eventType, action, key, "")
+}
+
+// RegisterEchoIfSubscribedVia is RegisterEchoIfSubscribed that also records the
+// overseer requester behind the write (#2123), so the matching projects_v2_item
+// webhook is attributed to it. An empty requester is exactly RegisterEchoIfSubscribed.
+func (wm *webhookManager) RegisterEchoIfSubscribedVia(eventType, action, key, requester string) {
 	wm.mu.Lock()
 	defer wm.mu.Unlock()
 	if wm.state == WebhookStreamStartingUp {
@@ -1153,7 +1160,11 @@ func (wm *webhookManager) RegisterEchoIfSubscribed(eventType, action, key string
 	}
 	k := echoKey(eventType, action, key)
 	wm.pendingEchoes[k] = time.Now()
-	delete(wm.echoVia, k)
+	if requester != "" {
+		wm.echoVia[k] = requester
+	} else {
+		delete(wm.echoVia, k)
+	}
 }
 
 // MatchEcho removes the pending echo entry for an inbound webhook that matched a mutation.

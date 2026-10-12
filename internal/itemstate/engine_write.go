@@ -71,10 +71,28 @@ type shallowView struct {
 	Drop []string
 }
 
-// protectShallow decides, per field, whether the engine's own recent write wins
-// over the listing pi (fetched at fetchedAt). It is the single rule shared by
-// the apply step (applyShallowItem) and drift detection (Store.EffectiveShallow)
-// so the two can never disagree.
+// engineWriteProtected reports whether key's record at W shields a listing
+// fetched at fetchedAt: fetchedAt < W+grace.
+func engineWriteProtected(item *ItemState, key string, fetchedAt time.Time, grace time.Duration) bool {
+	w, ok := item.EngineWriteAt[key]
+	return ok && fetchedAt.Before(w.Add(grace))
+}
+
+// engineWriteConfirm marks key for dropping once a listing fetched at or after
+// its write time W is seen to agree with the local value.
+func engineWriteConfirm(item *ItemState, v *shallowView, key string, fetchedAt time.Time) {
+	if w, ok := item.EngineWriteAt[key]; ok && !fetchedAt.Before(w) {
+		v.Drop = append(v.Drop, key)
+	}
+}
+
+// protectStatusClosed decides whether the engine's own recent write of Status or
+// closed state wins over a listing's (status, isClosed), fetched at fetchedAt. It
+// is the single rule shared by every listing apply path: the reconcile apply
+// (through protectShallow), drift detection (Store.EffectiveShallow) and the
+// probe apply (applyProbeItem, #2178), so they can never disagree. It never looks
+// at labels, so a listing that carries none (the probe) cannot confirm and drop a
+// label record.
 //
 // A field is protected when its record at W satisfies fetchedAt < W+grace: the
 // listing may predate the write (in flight during it, or lagging behind it). The
@@ -83,8 +101,8 @@ type shallowView struct {
 // W+grace is trusted and wins, as does any field with no record or any listing
 // with a zero fetchedAt. A record is confirmed (dropped) once a listing fetched
 // at or after W agrees with the local value.
-func protectShallow(item *ItemState, pi gh.ProjectItem, fetchedAt time.Time, grace time.Duration, now time.Time) shallowView {
-	v := shallowView{Status: pi.Status}
+func protectStatusClosed(item *ItemState, status string, isClosed bool, fetchedAt time.Time, grace time.Duration, now time.Time) shallowView {
+	v := shallowView{Status: status}
 	for k, w := range item.EngineWriteAt {
 		if !now.Before(w.Add(grace)) {
 			v.Drop = append(v.Drop, k)
@@ -93,15 +111,6 @@ func protectShallow(item *ItemState, pi gh.ProjectItem, fetchedAt time.Time, gra
 	if fetchedAt.IsZero() || len(item.EngineWriteAt) == 0 {
 		return v
 	}
-	protected := func(key string) bool {
-		w, ok := item.EngineWriteAt[key]
-		return ok && fetchedAt.Before(w.Add(grace))
-	}
-	confirmed := func(key string) {
-		if w, ok := item.EngineWriteAt[key]; ok && !fetchedAt.Before(w) {
-			v.Drop = append(v.Drop, key)
-		}
-	}
 	for _, w := range item.EngineWriteAt {
 		if fetchedAt.Before(w.Add(grace)) {
 			v.Active = true
@@ -109,7 +118,26 @@ func protectShallow(item *ItemState, pi gh.ProjectItem, fetchedAt time.Time, gra
 		}
 	}
 
-	// Labels: merge per label, local presence wins where protected.
+	if engineWriteProtected(item, engineWriteStatusKey, fetchedAt, grace) && status != item.Status {
+		v.Status = item.Status
+	} else if status == item.Status {
+		engineWriteConfirm(item, &v, engineWriteStatusKey, fetchedAt)
+	}
+
+	// Closed state only ever moves one way through the engine (LocalIssueClosed),
+	// so only a locally-closed item shielded against an open listing is kept.
+	if engineWriteProtected(item, engineWriteClosedKey, fetchedAt, grace) && item.IsClosed && !isClosed {
+		v.KeepClosed = true
+	} else if item.IsClosed == isClosed {
+		engineWriteConfirm(item, &v, engineWriteClosedKey, fetchedAt)
+	}
+	return v
+}
+
+// protectLabels merges pi's labels with the engine's recent label writes into v
+// (Labels, plus Drop for confirmed records), per label: local presence wins where
+// protected. Only listings that carry label data may call it.
+func protectLabels(item *ItemState, pi gh.ProjectItem, fetchedAt time.Time, grace time.Duration, v *shallowView) {
 	inListing := make(map[string]bool, len(pi.Labels))
 	for _, l := range pi.Labels {
 		inListing[l] = true
@@ -121,14 +149,14 @@ func protectShallow(item *ItemState, pi gh.ProjectItem, fetchedAt time.Time, gra
 	kept := false
 	merged := make([]string, 0, len(pi.Labels)+len(item.Labels))
 	for _, l := range pi.Labels {
-		if !inLocal[l] && protected(engineWriteLabelKey(l)) {
+		if !inLocal[l] && engineWriteProtected(item, engineWriteLabelKey(l), fetchedAt, grace) {
 			kept = true // engine removed it; the listing predates the removal
 			continue
 		}
 		merged = append(merged, l)
 	}
 	for _, l := range item.Labels {
-		if !inListing[l] && protected(engineWriteLabelKey(l)) {
+		if !inListing[l] && engineWriteProtected(item, engineWriteLabelKey(l), fetchedAt, grace) {
 			kept = true // engine added it; the listing predates the add
 			merged = append(merged, l)
 		}
@@ -140,24 +168,23 @@ func protectShallow(item *ItemState, pi gh.ProjectItem, fetchedAt time.Time, gra
 		if len(k) > len(engineWriteLabelPfx) && k[:len(engineWriteLabelPfx)] == engineWriteLabelPfx {
 			l := k[len(engineWriteLabelPfx):]
 			if inListing[l] == inLocal[l] {
-				confirmed(k)
+				engineWriteConfirm(item, v, k, fetchedAt)
 			}
 		}
 	}
+}
 
-	if protected(engineWriteStatusKey) && pi.Status != item.Status {
-		v.Status = item.Status
-	} else if pi.Status == item.Status {
-		confirmed(engineWriteStatusKey)
+// protectShallow decides, per field, whether the engine's own recent write wins
+// over the full listing pi (fetched at fetchedAt): Status and closed state via
+// protectStatusClosed, labels via protectLabels. It is the rule shared by the
+// apply step (applyShallowItem) and drift detection (Store.EffectiveShallow) so
+// the two can never disagree.
+func protectShallow(item *ItemState, pi gh.ProjectItem, fetchedAt time.Time, grace time.Duration, now time.Time) shallowView {
+	v := protectStatusClosed(item, pi.Status, pi.IsClosed, fetchedAt, grace, now)
+	if fetchedAt.IsZero() || len(item.EngineWriteAt) == 0 {
+		return v
 	}
-
-	// Closed state only ever moves one way through the engine (LocalIssueClosed),
-	// so only a locally-closed item shielded against an open listing is kept.
-	if protected(engineWriteClosedKey) && item.IsClosed && !pi.IsClosed {
-		v.KeepClosed = true
-	} else if item.IsClosed == pi.IsClosed {
-		confirmed(engineWriteClosedKey)
-	}
+	protectLabels(item, pi, fetchedAt, grace, &v)
 	return v
 }
 
@@ -216,4 +243,23 @@ func (s *Store) EffectiveShallow(pi gh.ProjectItem, fetchedAt time.Time) (eff gh
 		eff.IsClosed = item.IsClosed
 	}
 	return eff, v.Active, true
+}
+
+// EffectiveProbe returns the Status and closed state a probe listing item (fetched
+// at fetchedAt) would leave the cached item with, for the probe loop's pre-apply
+// reads (#2178): exactly what applyProbeItem will keep or overwrite. ok is false
+// when the item is not cached. Read-only.
+func (s *Store) EffectiveProbe(repo string, number int, pi gh.BoardProbeItem, fetchedAt time.Time) (status string, isClosed, ok bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	item, found := s.items[itemKeyFor(repo, number)]
+	if !found {
+		return pi.Status, pi.IsClosed, false
+	}
+	v := protectStatusClosed(item, pi.Status, pi.IsClosed, fetchedAt, s.graceLocked(), time.Now())
+	isClosed = pi.IsClosed
+	if v.KeepClosed {
+		isClosed = item.IsClosed
+	}
+	return v.Status, isClosed, true
 }

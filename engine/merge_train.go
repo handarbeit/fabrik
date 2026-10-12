@@ -1888,6 +1888,7 @@ func (e *Engine) landSingleton(ctx context.Context, state *mergeTrainWorkerState
 		}
 		e.logf(m.item.Number, "merge-train", "merged singleton landing PR #%d for #%d\n", prNum, m.item.Number)
 	}
+	e.emitLanded(m.item, prNum) // #2123: at the merge (or its restart replay), before close tracking
 	p.episode.noteLanded(m.item.Number, prNum)
 
 	// Advance Queued → Done (unless already Done from a prior partial run).
@@ -2085,6 +2086,9 @@ func (e *Engine) finishSingletonFastPathLanding(state *mergeTrainWorkerState, p 
 		// (advanceConvergedPRToDone's pattern), regardless of the advance's own
 		// outcome above — see awaitingAdvanceLabel's doc comment for why that's
 		// safe even when recordAdvanceOutcome just failed.
+		if advErr == nil {
+			e.emitLanded(m.item, m.prNum) // #2123: before any close tracking
+		}
 		e.closeIssueIfNonDefaultBase(m.item, m.prNum)
 		if advErr == nil {
 			e.addLabel(m.item, awaitingLandingVerificationLabel)
@@ -2095,6 +2099,7 @@ func (e *Engine) finishSingletonFastPathLanding(state *mergeTrainWorkerState, p 
 		// between MergePR and the advance). Both calls are idempotent, so
 		// re-applying them here costs at most a redundant API call — mirrors
 		// landMergeTrainBatch's identical "already Done" restart branch.
+		e.emitLanded(m.item, m.prNum) // #2123: deduplicated if it already announced
 		e.closeIssueIfNonDefaultBase(m.item, m.prNum)
 		e.addLabel(m.item, awaitingLandingVerificationLabel)
 		landed = true
@@ -2284,6 +2289,7 @@ func (e *Engine) trySingletonFastPath(ctx context.Context, state *mergeTrainWork
 		return true
 	}
 	e.logf(m.item.Number, "merge-train", "singleton fast path: merged PR #%d for #%d\n", m.prNum, m.item.Number)
+	e.emitLanded(m.item, m.prNum) // #2123
 	e.finishSingletonFastPathLanding(state, p, m)
 	return true
 }
@@ -4643,6 +4649,7 @@ func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorke
 		// not the Done advance below succeeds (that is retried by its own settle
 		// scans). A member the PR body does not claim never reaches here (#2050).
 		ep.noteLanded(m.item.Number, integrationPRNum)
+		e.emitLanded(m.item, integrationPRNum) // #2123: before the Done move and every close
 
 		// Advance Queued → Done.
 		if e.statusField == nil {
