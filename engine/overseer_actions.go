@@ -206,8 +206,9 @@ func (a *overseerActor) promotableTargets(statusOptions map[string]string) []str
 // staleness-baseline advance and webhook echo. It is the generic helper the
 // four hand-copied moves (advanceToNextStage, advanceToQueued,
 // rerouteQueuedMemberOffHolding, moveItemToValidate) never got; only new code
-// uses it so those merge-train paths stay untouched.
-func (e *Engine) moveItemToStatus(projectID string, item gh.ProjectItem, field *gh.StatusField, targetName string) error {
+// uses it so those merge-train paths stay untouched. requester (#2123) is the
+// sanitised overseer subscriber, carried onto the column-changed event.
+func (e *Engine) moveItemToStatus(projectID string, item gh.ProjectItem, field *gh.StatusField, targetName, requester string) error {
 	if field == nil {
 		return errors.New("status field metadata not available")
 	}
@@ -223,11 +224,11 @@ func (e *Engine) moveItemToStatus(projectID string, item gh.ProjectItem, field *
 		return err
 	}
 	if c := e.cache(); c != nil {
-		c.UpdateItemStatus(boardcache.ItemKey(owner+"/"+repo, item.Number), targetName)
+		c.UpdateItemStatusBy(boardcache.ItemKey(owner+"/"+repo, item.Number), targetName, requester)
 	}
 	e.store.Apply(itemstate.SelfWriteObserved{Repo: owner + "/" + repo, Number: item.Number})
 	if e.webhookMgr != nil {
-		e.webhookMgr.RegisterEchoIfSubscribed("projects_v2_item", "edited", item.ItemID)
+		e.webhookMgr.RegisterEchoIfSubscribedVia("projects_v2_item", "edited", item.ItemID, requester)
 	}
 	return nil
 }
@@ -305,7 +306,7 @@ func (a *overseerActor) Promote(p localapi.PromoteParams) (*localapi.ActionResul
 		return nil, refuse("%s %s (confirmed live)", t.ref, why)
 	}
 
-	if err := e.moveItemToStatus(projectID, t.item, field, to); err != nil {
+	if err := e.moveItemToStatus(projectID, t.item, field, to, requester); err != nil {
 		return nil, fmt.Errorf("moving %s to %s: %w", t.ref, to, err)
 	}
 	from := t.st.Status

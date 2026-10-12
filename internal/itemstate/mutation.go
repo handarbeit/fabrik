@@ -113,6 +113,12 @@ func (m IssueUnlabeled) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 type IssueClosed struct {
 	Repo   string
 	Number int
+	// Sender is the GitHub login that closed the issue, from the webhook
+	// payload; empty when unknown (#2123).
+	Sender string
+	// There is no echo flag: the engine registers no issues/closed echo, so a
+	// close Fabrik made is attributable only through its LocalIssueClosed
+	// write-through (OriginEngine), never through this webhook mutation.
 }
 
 func (IssueClosed) isMutation()       {}
@@ -185,6 +191,16 @@ type ProjectV2ItemEdited struct {
 	// ItemID is the GitHub Project item node ID (matches ItemState.ItemID).
 	ItemID    string
 	NewStatus string
+	// Sender is the GitHub login behind a webhook-delivered move; empty for a
+	// sweep- or poll-delivered one (#2123).
+	Sender string
+	// EchoOfEngine is true when the webhook matched the engine's own echo
+	// registry for this write (#2123).
+	EchoOfEngine bool
+	// Requester is the overseer subscriber recorded with the engine echo.
+	Requester string
+	// At is the GitHub time of the move when known; zero otherwise.
+	At time.Time
 }
 
 func (ProjectV2ItemEdited) isMutation() {}
@@ -251,6 +267,9 @@ type LocalStatusUpdated struct {
 	Repo      string
 	Number    int
 	NewStatus string
+	// Requester is the sanitised overseer subscriber that requested the move
+	// (#2123); empty for an engine-autonomous advance.
+	Requester string
 }
 
 func (LocalStatusUpdated) isMutation()       {}
@@ -258,7 +277,8 @@ func (m LocalStatusUpdated) itemKey() string { return itemKeyFor(m.Repo, m.Numbe
 
 // LocalIssueClosed is applied after fabrik closes an issue. Unlike the webhook
 // IssueClosed it records an engine write so a reconcile listing fetched before
-// the close cannot reopen the cached item (#2159).
+// the close cannot reopen the cached item (#2159). Its Change has OriginEngine
+// (#2123).
 type LocalIssueClosed struct {
 	Repo   string
 	Number int

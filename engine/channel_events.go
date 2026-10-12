@@ -81,6 +81,13 @@ type channelEvents struct {
 	// nudge asks the consumer to re-check account-wide state (the Claude
 	// usage-limit hold) without waiting for the next tick.
 	nudge bool
+	// arrivals are items created after the board was populated that have not been
+	// announced yet (key → when noted); each is held until the item's labels are
+	// known and it carries a board Status, so item-added never reports an empty
+	// label set (FR-005). landings are items whose landing was announced by
+	// emitLanded (#2123). Both guarded by mu; see channel_lifecycle.go.
+	arrivals map[string]time.Time
+	landings map[string]time.Time
 
 	// consumer-owned (no lock): only run() touches these.
 	memo          map[string]*itemMemo
@@ -126,12 +133,14 @@ func (e *Engine) startChannelEventsIn(dir string) {
 		return
 	}
 	ce := &channelEvents{
-		e:     e,
-		hub:   hub,
-		dirty: map[string]*dirtyItem{},
-		memo:  map[string]*itemMemo{},
-		wake:  make(chan struct{}, 1),
-		stop:  make(chan struct{}),
+		e:        e,
+		hub:      hub,
+		arrivals: map[string]time.Time{},
+		landings: map[string]time.Time{},
+		dirty:    map[string]*dirtyItem{},
+		memo:     map[string]*itemMemo{},
+		wake:     make(chan struct{}, 1),
+		stop:     make(chan struct{}),
 	}
 	ce.seed()
 	ce.unsub = e.store.Subscribe(itemstate.ObserverFunc(ce.onChange))
@@ -228,7 +237,9 @@ func (ce *channelEvents) seed() {
 	usageLimited := e.channelUsageLimitedUntil(now)
 	ce.claudeLimited = !usageLimited.IsZero()
 	e.store.Scan(func(st *itemstate.ItemState) {
-		if st.IsPR {
+		// An item whose labels are not known yet (probe-seeded) has no meaningful
+		// classification; its first label-bearing evaluation is the baseline (#2123).
+		if st.IsPR || !st.LabelsKnown {
 			return
 		}
 		key := issueRef(st.Repo, st.Number)
@@ -265,19 +276,45 @@ func (ce *channelEvents) onChange(c itemstate.Change, snap itemstate.Snapshot) {
 	if st.IsPR {
 		return
 	}
+	key := issueRef(c.Repo, c.Number)
+	// A reopened issue or a failed landing verification ends the announced
+	// landing, so a later close is attributed from its own change, not from a
+	// stale mark.
+	if c.Fields&itemstate.StateChanged != 0 && !st.IsClosed {
+		ce.clearLanding(key)
+	}
 	var evs []channelevents.Event
 	for _, d := range c.LabelDeltas {
-		evs = append(evs, ce.e.labelEvent(&st, c, d))
+		if d.Added && d.Label == "fabrik:landing-verification-failed" {
+			ce.clearLanding(key)
+		}
+		le := ce.e.labelEvent(&st, c, d)
+		if closeTrackingLabel(d.Label) && ce.isLanding(key) {
+			le.Meta["landing"] = "true"
+		}
+		evs = append(evs, le)
 		evs = append(evs, ce.e.labelDerivedEvents(&st, d)...)
+	}
+	if c.Fields&itemstate.StatusChanged != 0 && !c.Created && c.PrevStatus != "" && st.Status != "" && st.Status != c.PrevStatus {
+		evs = append(evs, ce.e.columnEvent(&st, c))
+	}
+	if c.Closed {
+		evs = append(evs, ce.closedEvent(key, &st, c))
 	}
 	staleCand := c.Fields&itemstate.InvocationChanged != 0 && hasLabelStr(st.Labels, "fabrik:awaiting-input")
 	const interesting = itemstate.LabelsChanged | itemstate.StageStateChanged | itemstate.StatusChanged |
 		itemstate.StateChanged | itemstate.InvocationChanged | itemstate.BlockedByChanged |
 		itemstate.LinkedPRChanged | itemstate.WorkerLifecycleChanged
-	key := issueRef(c.Repo, c.Number)
 	ce.mu.Lock()
 	ce.queue = append(ce.queue, evs...)
-	if c.Fields&interesting != 0 {
+	// An item the running store learns about after the board was populated is an
+	// arrival; it is announced once its labels and column are known (see
+	// announceArrival), so every later change to it re-evaluates it.
+	if c.Created && ce.e.boardPopulated.Load() {
+		ce.noteArrival(key)
+	}
+	_, arrivalPending := ce.arrivals[key]
+	if c.Fields&interesting != 0 || arrivalPending {
 		d := ce.dirty[key]
 		if d == nil {
 			d = &dirtyItem{due: time.Now().Add(channelDebounce)}
@@ -318,6 +355,7 @@ func (ce *channelEvents) run() {
 			ce.safely("tick", ce.onTick)
 		case <-prune.C:
 			ce.hub.Prune(ce.e.now())
+			ce.pruneLifecycle()
 		}
 	}
 }

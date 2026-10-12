@@ -180,6 +180,12 @@ type ProjectItem struct {
 	// milestone (set or explicitly null). Store write paths copy Milestone only
 	// when this is true, so paths that do not carry it can never wipe it.
 	MilestoneKnown bool
+	// LabelsAbsent is true when the producer did not observe labels at all (the
+	// board probe bootstrap and the minimal opened item built from a probe).
+	// The store then leaves Labels untouched and does not treat the labels as
+	// known, so the first label-bearing population is a silent baseline (#2123).
+	// Negative on purpose: a producer that forgets it fails noisy, never silent.
+	LabelsAbsent bool
 }
 
 // Milestone is the minimal milestone identity Fabrik caches per item.

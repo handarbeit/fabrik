@@ -538,6 +538,9 @@ func (e *Engine) landValidated(ctx context.Context, board *gh.ProjectBoard, item
 		if mergeErr := e.client.MergePR(owner, repo, pr.Number); mergeErr != nil {
 			return false, false, fmt.Errorf("direct merge fallback on PR #%d: %w", pr.Number, mergeErr)
 		}
+		// #2123: announce the landing at the merge itself, before GitHub's close
+		// of the linked issue reaches the store and before any close tracking.
+		e.emitLanded(item, pr.Number)
 		// Apply idempotency guard and convergence anchor after successful direct merge.
 		if lerr := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:auto-merge-enabled"); lerr != nil {
 			e.logf(item.Number, "warn", "could not add fabrik:auto-merge-enabled label: %v\n", lerr)

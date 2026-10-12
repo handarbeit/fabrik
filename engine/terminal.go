@@ -83,6 +83,25 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 		if snapErr != nil {
 			// New item on board — skip entirely if not in a configured stage.
 			if !configuredStage {
+				// A parking column (Backlog) is still on the board: seed the card's
+				// identity and column so a later hand move out of it is a real
+				// column change (#2123) rather than a first sight. No deep fetch
+				// (#778) and no labels (LabelsAbsent): the first label-bearing
+				// population is the baseline.
+				if matchedStage != nil && matchedStage.Unmanaged {
+					e.store.Apply(itemstate.FromProbe{Inner: itemstate.IssueOpened{Item: gh.ProjectItem{
+						ID:             pi.ContentID,
+						ItemID:         pi.ItemID,
+						Number:         pi.Number,
+						IsPR:           pi.IsPR,
+						IsClosed:       pi.IsClosed,
+						Status:         pi.Status,
+						Repo:           repo,
+						UpdatedAt:      pi.EffectiveUpdatedAt,
+						LinkedPRNumber: pi.LinkedPRNumber,
+						LabelsAbsent:   true,
+					}}})
+				}
 				continue
 			}
 			// Seed minimal state into the store.
@@ -96,6 +115,9 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 				Repo:           repo,
 				UpdatedAt:      pi.EffectiveUpdatedAt,
 				LinkedPRNumber: pi.LinkedPRNumber,
+				// No labels observed yet; the deep fetch below (or a later
+				// reconcile) is the baseline, not a flood of label deltas (#2123).
+				LabelsAbsent: true,
 			}
 			e.store.Apply(itemstate.IssueOpened{Item: minimal})
 			// Probe-only terminal short-circuit: closed items in a cleanup stage whose

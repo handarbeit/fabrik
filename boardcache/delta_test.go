@@ -1210,3 +1210,31 @@ func containsStr(ss []string, s string) bool {
 	}
 	return false
 }
+
+// A webhook-delivered column move carries its sender, GitHub time and echo match
+// onto the Change (#2123), so column-changed can name who moved the item.
+func TestStatusEditWebhookCarriesSenderTimeAndEcho(t *testing.T) {
+	c := seedCache(t)
+	var got itemstate.Change
+	c.store.Subscribe(itemstate.ObserverFunc(func(ch itemstate.Change, _ itemstate.Snapshot) {
+		if ch.Fields&itemstate.StatusChanged != 0 {
+			got = ch
+		}
+	}))
+	p := projectsV2ItemPayload{Action: "edited"}
+	p.Sender.Login = "alice"
+	p.ProjectsV2Item.ID = "PVTI_001"
+	p.ProjectsV2Item.UpdatedAt = "2026-10-11T12:00:00Z"
+	p.Changes.FieldValue.FieldType = "single_select"
+	p.Changes.FieldValue.To, _ = json.Marshal(map[string]string{"name": "Plan"})
+	b, _ := json.Marshal(p)
+
+	c.SetMatchEchoViaFn(func(typ, action, key string) (bool, string) { return false, "" })
+	c.ApplyDelta("projects_v2_item", b)
+	if got.PrevStatus != "Research" || got.Sender != "alice" || got.EchoOfEngine || got.Origin != itemstate.OriginWebhook {
+		t.Fatalf("change = %+v", got)
+	}
+	if got.StatusAt.IsZero() || got.StatusAt.UTC().Format("2006-01-02T15:04:05Z") != "2026-10-11T12:00:00Z" {
+		t.Fatalf("StatusAt = %v", got.StatusAt)
+	}
+}
