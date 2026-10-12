@@ -29,16 +29,22 @@ import (
 //   - rg: `--pre <cmd>` executes a program.
 //   - find: `-exec`/`-delete`; Glob covers it. (The CLI's built-in read-only
 //     set would otherwise allow it in the clone, hence reviewShellDeny.)
+//   - wc: `--files0-from=<file>` reads a NUL-separated file list from an
+//     arbitrary path, and GNU getopt_long accepts any unambiguous prefix of the
+//     option (`--files0=`, `--files0-f=`), so no deny on one spelling can close
+//     it. Read offset/limit, head and tail cover paging; wc is denied outright
+//     (reviewShellDeny) because the CLI's built-in read-only set would
+//     otherwise still admit it.
 //   - git: diff/grep `--no-index` and `blame --contents` read outside the
 //     scope, `--output=`/`-O<cmd>` write or execute, and the depth-1 clone has
 //     no history for log/blame/diff to report.
-var reviewShellAllow = []string{"cat", "head", "tail", "wc", "ls"}
+var reviewShellAllow = []string{"cat", "head", "tail", "ls"}
 
 // reviewShellDeny are deny rules passed via --disallowedTools. Deny beats
 // allow, so these only remove capability the CLI would otherwise grant.
 var reviewShellDeny = []string{
 	"Bash(find *)",
-	"Bash(wc *--files0-from*)", // reads a file list from an arbitrary path
+	"Bash(wc *)", // --files0-from (and its abbreviations) reads a file list from any path
 }
 
 // escapeRulePath escapes a resolved absolute path for use inside a Claude Code
@@ -496,7 +502,7 @@ func renderReviewTools(b *strings.Builder, req ReviewRequest) {
 		b.WriteString(" and the staged diff file named below")
 	}
 	b.WriteString(". Any other path, including `..` or symlinks that lead outside, is denied.\n\n")
-	b.WriteString("Not available, so do not try them: find, sed, rg, git of any kind, and any command that writes files, runs code (tests, builds, linters, package managers) or uses the network. You have no write access.\n\n")
+	b.WriteString("Not available, so do not try them: find, wc, sed, rg, git of any kind, and any command that writes files, runs code (tests, builds, linters, package managers) or uses the network. You have no write access.\n\n")
 }
 
 // renderDynamicContext writes buildReviewPrompt's Go-supplied dynamic
