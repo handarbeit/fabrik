@@ -225,6 +225,11 @@ type Input struct {
 	// active-column blocker leaves it false.
 	ParkedBlockers      []ParkedBlocker
 	BlockedOnlyByParked bool
+	// ParkedBlockersUnknown is true when BlockedOnlyByParked is false only
+	// because the cache lacked data (a blocker it does not hold, or one not yet
+	// deep-fetched), not because a blocker is definitely not parked. It is
+	// echoed to Result.ParkedDataMissing and changes no classification.
+	ParkedBlockersUnknown bool
 
 	// Resume says how the item's pause is lifted according to the engine's own
 	// pause comment; ResumeUnknown when the cache cannot say.
@@ -342,6 +347,10 @@ type Result struct {
 	// the engine's own pause comment: ResumeViaLabel, ResumeViaComment or
 	// ResumeViaPauseComment (the cache cannot say). Empty for other results.
 	ResumeVia string
+	// ParkedDataMissing echoes Input.ParkedBlockersUnknown: the item is not
+	// Suspended as a parked blocker only because blocker data is missing, so a
+	// caller tracking a persisted episode must not read it as "decision made".
+	ParkedDataMissing bool
 }
 
 // Values of Result.ResumeVia.
@@ -400,7 +409,9 @@ func hasLabel(labels []string, l string) bool {
 // Classify computes the attention Result for one item. It is a pure function
 // of in.
 func Classify(in Input) Result {
-	return attributePollStall(in, classify(in))
+	res := attributePollStall(in, classify(in))
+	res.ParkedDataMissing = in.ParkedBlockersUnknown
+	return res
 }
 
 // attributePollStall blames the engine, not the item, when the poll loop is

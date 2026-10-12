@@ -88,16 +88,35 @@ const maxBlockerDepth = 8
 // cycle, or a chain deeper than maxBlockerDepth — fails closed (only == false),
 // so the item stays `waiting`.
 func (e *Engine) resolveParkedBlockers(st *itemstate.ItemState, look blockerLookup) (parked []attention.ParkedBlocker, only bool) {
+	parked, only, _ = e.resolveParkedBlockersState(st, look)
+	return parked, only
+}
+
+// resolveParkedBlockersState is resolveParkedBlockers plus missingData: true
+// when only is false solely because the cache lacks data (a blocker it does not
+// hold, or one not yet deep-fetched) and no open blocker is definitely not
+// parked. A restart or a partial store load shows this transiently; it is not a
+// decision having been made.
+func (e *Engine) resolveParkedBlockersState(st *itemstate.ItemState, look blockerLookup) (parked []attention.ParkedBlocker, only, missingData bool) {
 	if look == nil || st.LastDeepFetchAt.IsZero() {
-		return nil, false
+		return nil, false, false
 	}
 	seen := map[string]bool{}
 	var leaves []attention.ParkedBlocker
+	// definite is set when a blocker is known not to be stuck; unknown when the
+	// cache could not say. stuck keeps walking after an unknown so a definite
+	// "no" elsewhere in the tree still wins.
+	definite, unknown := false, false
 	var stuck func(repo string, n, depth int, visited map[string]bool) bool
 	stuck = func(repo string, n, depth int, visited map[string]bool) bool {
 		ref := issueRef(repo, n)
 		node, ok := look(repo, n)
-		if !ok || depth > maxBlockerDepth || visited[ref] {
+		if !ok {
+			unknown = true
+			return false
+		}
+		if depth > maxBlockerDepth || visited[ref] {
+			definite = true
 			return false
 		}
 		if node.closed {
@@ -114,11 +133,13 @@ func (e *Engine) resolveParkedBlockers(st *itemstate.ItemState, look blockerLook
 			return true
 		}
 		if !node.hydrated {
+			unknown = true
 			return false
 		}
 		visited[ref] = true
 		defer delete(visited, ref)
 		open := 0
+		all := true
 		for _, d := range node.blockedBy {
 			if !strings.EqualFold(d.State, "OPEN") {
 				continue
@@ -129,12 +150,17 @@ func (e *Engine) resolveParkedBlockers(st *itemstate.ItemState, look blockerLook
 				dr = repo
 			}
 			if !stuck(dr, d.Number, depth+1, visited) {
-				return false
+				all = false
 			}
 		}
-		return open > 0
+		if open == 0 {
+			definite = true // an active-column item with nothing blocking it
+			return false
+		}
+		return all
 	}
 	open := 0
+	allStuck := true
 	for _, d := range st.BlockedBy {
 		if !strings.EqualFold(d.State, "OPEN") {
 			continue
@@ -145,13 +171,16 @@ func (e *Engine) resolveParkedBlockers(st *itemstate.ItemState, look blockerLook
 			dr = st.Repo
 		}
 		if !stuck(dr, d.Number, 1, map[string]bool{issueRef(st.Repo, st.Number): true}) {
-			return nil, false
+			allStuck = false
 		}
 	}
-	if open == 0 || len(leaves) == 0 {
-		return nil, false
+	if !allStuck {
+		return nil, false, unknown && !definite
 	}
-	return leaves, true
+	if open == 0 || len(leaves) == 0 {
+		return nil, false, false
+	}
+	return leaves, true, false
 }
 
 // decisionNextStage is the stage a human advance would move the item to: the

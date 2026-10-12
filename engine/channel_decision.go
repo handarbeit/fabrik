@@ -168,7 +168,7 @@ func (ce *channelEvents) decisionStep(ref string, m *itemMemo, st *itemstate.Ite
 		m.dp = nil
 		return nil
 	}
-	if e.episodeUnhydrated(st, m.dp) && engineTookBack(e, st, m.rebaseSeen) == "" {
+	if e.episodeUnhydrated(st, m.dp, res.ParkedDataMissing) && engineTookBack(e, st, m.rebaseSeen) == "" {
 		// After a restart a deep field (BlockedBy, comments) is absent until
 		// the item's first deep fetch, which makes the item look un-suspended
 		// for a moment. That is missing data, not a decision: keep the
@@ -194,9 +194,22 @@ func (ce *channelEvents) decisionStep(ref string, m *itemMemo, st *itemstate.Ite
 // it is waiting for the same human decision (open, unpaused, same column, no
 // autonomy, and either the stage-complete label or fabrik:blocked). The caller
 // still ends the episode when the engine took the item back.
-func (e *Engine) episodeUnhydrated(st *itemstate.ItemState, dp *decisionEpisode) bool {
-	if !st.LastDeepFetchAt.IsZero() || st.IsClosed || st.IsPR {
+//
+// blockerDataMissing extends "lacks deep data" past the item's own first deep
+// fetch: a parked-blocker wait can fail closed because a blocker is not in the
+// cache or a transitive blocker is not yet deep-fetched (the classifier's
+// ParkedDataMissing). That is equally missing data, so the episode stays open
+// for an item still carrying fabrik:blocked; once the data arrives the item is
+// suspended again under the same episode, with no second announcement.
+func (e *Engine) episodeUnhydrated(st *itemstate.ItemState, dp *decisionEpisode, blockerDataMissing bool) bool {
+	if st.IsClosed || st.IsPR {
 		return false
+	}
+	if !st.LastDeepFetchAt.IsZero() {
+		if !blockerDataMissing || !hasLabelStr(st.Labels, "fabrik:blocked") ||
+			(dp != nil && dp.kind != attention.PendingParkedBlocker) {
+			return false
+		}
 	}
 	if dp != nil && dp.status != st.Status {
 		return false

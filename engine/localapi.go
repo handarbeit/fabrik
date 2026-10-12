@@ -233,7 +233,7 @@ func (e *Engine) attentionInput(st *itemstate.ItemState, now time.Time, threshol
 		// not free, so it is skipped for everything else.
 		in.FeedbackPending = e.cachedPendingFeedbackOf(st).any()
 	}
-	in.ParkedBlockers, in.BlockedOnlyByParked = e.resolveParkedBlockers(st, look)
+	in.ParkedBlockers, in.BlockedOnlyByParked, in.ParkedBlockersUnknown = e.resolveParkedBlockersState(st, look)
 	for _, kind := range counterKinds {
 		in.Counters = append(in.Counters, attention.Counter{
 			Name: kind,

@@ -179,6 +179,46 @@ func TestResolveParkedBlockers_FailsClosed(t *testing.T) {
 	}
 }
 
+// TestResolveParkedBlockersState_SeparatesMissingDataFromADecision pins the
+// third verdict: only=false because the cache lacks a blocker (or has not
+// deep-fetched a transitive one) is missing data, while a blocker known to be
+// active, a cycle, or a mix containing a definite "no" is not.
+func TestResolveParkedBlockersState_SeparatesMissingDataFromADecision(t *testing.T) {
+	e := apiEngine(t, 0)
+	e.seedAPIItem(t, 1, "Specify", "fabrik:blocked") // -> #2 (active, not deep-fetched)
+	e.seedAPIItem(t, 2, "Implement")
+	e.seedAPIItem(t, 3, "Specify", "fabrik:blocked") // -> cross-repo blocker not in the store
+	e.seedAPIItem(t, 4, "Specify", "fabrik:blocked") // -> #5 (active, hydrated, nothing blocks it)
+	e.seedAPIItem(t, 5, "Implement")
+	e.seedAPIItem(t, 6, "Specify", "fabrik:blocked") // -> missing + definite "no"
+	e.seedAPIItem(t, 7, "Backlog")
+	e.deepWithBlockers(1, open(2))
+	e.deepWithBlockers(3, gh.Dependency{Number: 99, State: "OPEN", Repo: "other/repo"})
+	e.deepWithBlockers(4, open(5))
+	e.deepWithBlockers(5)
+	e.deepWithBlockers(6, gh.Dependency{Number: 99, State: "OPEN", Repo: "other/repo"}, open(5))
+	e.seedAPIItem(t, 8, "Specify", "fabrik:blocked") // never deep-fetched itself
+
+	for _, tc := range []struct {
+		n       int
+		missing bool
+	}{{1, true}, {3, true}, {4, false}, {6, false}, {8, false}} {
+		snap, _ := e.store.Peek("owner/repo", tc.n)
+		st := snap.State()
+		_, only, missing := e.resolveParkedBlockersState(&st, e.peekBlockerLookup())
+		if only || missing != tc.missing {
+			t.Errorf("#%d: only=%v missing=%v, want only=false missing=%v", tc.n, only, missing, tc.missing)
+		}
+	}
+	// The classifier echoes the signal without changing the state.
+	if res := e.classifyItem(t, 1); res.State == attention.Suspended || !res.ParkedDataMissing {
+		t.Errorf("#1 = %s missing=%v, want a non-suspended result flagged ParkedDataMissing", res.State, res.ParkedDataMissing)
+	}
+	if res := e.classifyItem(t, 4); res.ParkedDataMissing {
+		t.Errorf("#4 has a definite active blocker; ParkedDataMissing must be false")
+	}
+}
+
 // TestParkedBlockerAgeStartsWhenTheBlockerIsParked is the review scenario for R3
 // case (b) end to end, on a sim clock set well before real time: an item blocked
 // for 30 days by an active-column issue, whose blocker is moved to Backlog now.

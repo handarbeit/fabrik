@@ -406,3 +406,40 @@ func TestDecisionPending_PersistedEpisodeSurvivesAnUnhydratedItem(t *testing.T) 
 		t.Errorf("counters = %d/%d, want 1/0", ce.hub.Counter(started), ce.hub.Counter(closed))
 	}
 }
+
+// TestDecisionPending_PersistedEpisodeSurvivesAMissingTransitiveBlocker covers
+// the gap after the item's own first deep fetch: its direct blocker is in the
+// cache but not yet deep-fetched, so the wait cannot be vouched for. That is
+// missing data, not a decision; the persisted episode must stay open and the
+// wait must not be announced a second time when the blocker hydrates.
+func TestDecisionPending_PersistedEpisodeSurvivesAMissingTransitiveBlocker(t *testing.T) {
+	e, sink := decisionChannel(t)
+	ce := e.channelEvents()
+	started, closed := dpKeys("owner/repo#1")
+	ce.hub.SetCounter(started, 1)
+
+	e.seedAPIItem(t, 3, "Backlog")
+	e.seedAPIItem(t, 2, "Implement") // active column, not yet deep-fetched
+	e.seedAPIItem(t, 1, "Specify", "fabrik:blocked")
+	e.store.Apply(itemstate.LabelAppliedAtRecorded{Repo: "owner/repo", Number: 1, Label: "fabrik:blocked", At: e.now().Add(-24 * time.Hour)})
+	e.store.Apply(itemstate.ItemDeepFetched{Repo: "owner/repo", Number: 1, FreshState: gh.ProjectItem{
+		ID: "I_B", Number: 1, Repo: "owner/repo", Status: "Specify", Labels: []string{"fabrik:blocked"},
+		BlockedBy: []gh.Dependency{{Number: 2, State: "OPEN"}},
+	}})
+	time.Sleep(400 * time.Millisecond)
+	if c := ce.hub.Counter(closed); c != 0 {
+		t.Fatalf("the persisted episode was closed while a transitive blocker was unhydrated (closed=%d)", c)
+	}
+
+	e.store.Apply(itemstate.ItemDeepFetched{Repo: "owner/repo", Number: 2, FreshState: gh.ProjectItem{
+		ID: "I_C", Number: 2, Repo: "owner/repo", Status: "Implement",
+		BlockedBy: []gh.Dependency{{Number: 3, State: "OPEN"}},
+	}})
+	time.Sleep(400 * time.Millisecond)
+	if n := len(sink.snapshotOfType(channelevents.DecisionPending)); n != 0 {
+		t.Errorf("the same wait was announced again (%d events)", n)
+	}
+	if ce.hub.Counter(started) != 1 || ce.hub.Counter(closed) != 0 {
+		t.Errorf("counters = %d/%d, want 1/0", ce.hub.Counter(started), ce.hub.Counter(closed))
+	}
+}
