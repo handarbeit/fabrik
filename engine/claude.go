@@ -82,6 +82,7 @@ type claudeTurnLimitError = claudeerr.TurnLimitError
 type claudeAPIErrorExit = claudeerr.APIErrorExit
 type claudeResumeFailureError = claudeerr.ResumeFailureError
 type claudeToolsDeniedError = claudeerr.ToolsDeniedError
+type claudeSkillLoadError = claudeerr.SkillLoadError
 
 // apiErrorTerminalReason is the CLI's structural terminal_reason value for an
 // Anthropic-side API error — observed live on 2026-08-08 (#1458) as eight
@@ -814,7 +815,7 @@ func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem
 	extraEnv := buildClaudeEnv(stage, issue, workDir, opts, os.Environ())
 	sigIntGrace, sigTermGrace := effectiveKillGrace(opts.SigIntGrace, opts.SigTermGrace)
 	wallTime := scaledWallTime(stage.MaxWallTime, effectiveBudget, stage.MaxTurns)
-	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name, issue.Repo, sessFilePath, ld, extraEnv, wallTime, effectiveBudget, opts.OnPIDReady, sigIntGrace, sigTermGrace, resumeSessionID, opts.MaxResumeFailures)
+	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name, issue.Repo, sessFilePath, ld, extraEnv, wallTime, effectiveBudget, opts.OnPIDReady, sigIntGrace, sigTermGrace, resumeSessionID, opts.MaxResumeFailures, stage.Skill)
 	usage.MaxTurns = effectiveBudget
 	if err != nil {
 		return output, completed, usage, err
@@ -860,7 +861,7 @@ func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.
 	extraEnv := buildClaudeEnv(stage, issue, workDir, opts, os.Environ())
 	sigIntGrace, sigTermGrace := effectiveKillGrace(opts.SigIntGrace, opts.SigTermGrace)
 	wallTime := scaledWallTime(stage.MaxWallTime, limit, base)
-	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name+"-comment-review", issue.Repo, sessFilePath, ld, extraEnv, wallTime, limit, opts.OnPIDReady, sigIntGrace, sigTermGrace, resumeSessionID, opts.MaxResumeFailures)
+	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name+"-comment-review", issue.Repo, sessFilePath, ld, extraEnv, wallTime, limit, opts.OnPIDReady, sigIntGrace, sigTermGrace, resumeSessionID, opts.MaxResumeFailures, stage.CommentSkill)
 	usage.MaxTurns = limit
 	return output, completed, usage, err
 }
@@ -1404,7 +1405,7 @@ type claudeResponse struct {
 	} `json:"usage"`
 }
 
-func runClaude(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string, repo string, sessFilePath string, logDir string, extraEnv []string, maxWallTime time.Duration, maxTurns int, onPIDReady func(int), sigIntGrace, sigTermGrace time.Duration, resumeSessionID string, maxResumeFailures int) (string, bool, TokenUsage, error) {
+func runClaude(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string, repo string, sessFilePath string, logDir string, extraEnv []string, maxWallTime time.Duration, maxTurns int, onPIDReady func(int), sigIntGrace, sigTermGrace time.Duration, resumeSessionID string, maxResumeFailures int, expectedSkill string) (string, bool, TokenUsage, error) {
 	claudeLog(issueNumber, "claude", "invoking (%s) in %s\n", label, workDir)
 
 	// Best-effort HEAD capture, before/after the invocation, so a tools-denied
@@ -1659,7 +1660,28 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 		}
 	}
 
-	return interpretClaudeResult(ctx, issueNumber, rawOutput, runErr, wasTimedOut, sessFilePath, logDir, resumeSessionID, maxResumeFailures, commitsPushed)
+	text, completed, usage, err := interpretClaudeResult(ctx, issueNumber, rawOutput, runErr, wasTimedOut, sessFilePath, logDir, resumeSessionID, maxResumeFailures, commitsPushed)
+	if sle := skillLoadOverride(ctx, rawOutput, expectedSkill, wasTimedOut, completed, err); sle != nil {
+		claudeLog(issueNumber, "claude", "skill %q failed to load (tool_use_id=%s) — stage did not run; not charged against max_retries\n", sle.Skill, sle.ToolUseID)
+		return text, false, usage, sle
+	}
+	return text, completed, usage, err
+}
+
+// skillLoadOverride decides whether interpretClaudeResult's outcome must be
+// replaced by a *claudeSkillLoadError (#2138, ADR-2138): a skill-configured
+// stage whose own skill demonstrably failed to load did none of the stage's
+// work, whatever marker it printed. It overrides only an unclassified outcome
+// (err == nil) and the marker-wins non-zero exit (completed with a generic
+// error); usage-limit, api-error, tools-denied, turn-limit and resume-failure
+// classifications keep precedence (they all return completed=false with an
+// error). It is skipped when the engine itself is shutting down (ctx cancelled
+// and not our own timeout), where the output is partial for a different reason.
+func skillLoadOverride(ctx context.Context, rawOutput []byte, expectedSkill string, wasTimedOut, completed bool, err error) *claudeSkillLoadError {
+	if expectedSkill == "" || (err != nil && !completed) || (ctx.Err() != nil && !wasTimedOut) {
+		return nil
+	}
+	return detectSkillLoadFailure(rawOutput, expectedSkill)
 }
 
 // openStageLog opens (creating logDir if necessary) a new timestamped .log

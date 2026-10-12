@@ -220,3 +220,36 @@ type ToolDenial struct {
 func (e *ToolsDeniedError) Error() string {
 	return fmt.Sprintf("claude tool call(s) denied by permission configuration: %s", strings.Join(e.ToolNames, ", "))
 }
+
+// SkillLoadError signals that the Claude invocation's own configured skill
+// demonstrably failed to load at runtime: the stream holds a failed Skill
+// tool call for it (tool_result.is_error) and no successful one. For a
+// skill-configured stage the skill is the stage's instructions, so a worker
+// that never loaded it did none of the stage's work whatever markers it
+// printed (#2138, ADR-2138).
+//
+// Detected structurally from the worker's own tool-call record, never from
+// output prose. Unlike the pre-flight skillUnresolvedError (ADR 2137) the
+// condition cannot self-heal — resolution already passed — so the engine
+// pauses the item for a human instead of retrying. It short-circuits like the
+// did-not-run family (the run did none of the stage's work) and is exempt from
+// StageRetryIncremented.
+type SkillLoadError struct {
+	// Skill is the invocation's configured (resolved) skill name.
+	Skill string
+	// Called is the name the worker passed to the Skill tool, when it differs
+	// from Skill (for example the bare name of a qualified configuration).
+	Called string
+	// ToolUseID is the failed call's tool_use id, for logging.
+	ToolUseID string
+	// Detail is the failed tool_result's content, collapsed to one line and
+	// truncated. It is untrusted model-side text.
+	Detail string
+}
+
+func (e *SkillLoadError) Error() string {
+	if e.Detail != "" {
+		return fmt.Sprintf("skill %q failed to load: %s", e.Skill, e.Detail)
+	}
+	return fmt.Sprintf("skill %q failed to load", e.Skill)
+}

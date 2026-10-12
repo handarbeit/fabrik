@@ -1364,6 +1364,19 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 			return
 		}
 
+		// The stage's own skill ran but failed to load in the worker (#2138,
+		// ADR-2138): the worker had no instructions, so whatever marker it printed
+		// is not a completion. Did-not-run shape — no retry consumed, no
+		// stage:<name>:failed, no commitWIP/push — but, unlike the pre-flight case
+		// above, it cannot self-heal, so the item is paused for a human. The
+		// read-only stash restore already ran above this switch.
+		var skillLoadErr *claudeSkillLoadError
+		if errors.As(err, &skillLoadErr) {
+			e.handleSkillLoadFailed(item, stage, skillKeySkill, skillLoadErr)
+			p.release()
+			return
+		}
+
 		// A transient Anthropic-side api_error exit is likewise not a stage
 		// failure — the stage never ran. See claudeAPIErrorExit in claude.go
 		// and #1458.
@@ -1437,6 +1450,11 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 		if _, _, allErr := e.resolveStageSkills(stage); allErr == nil {
 			e.removeLabel(item, skillUnresolvedLabel)
 		}
+	}
+	// A skill-load failure short-circuited above, so this invocation's skill
+	// loaded (or none was configured): drop a stale warnings-panel entry (#2138).
+	if stage.Skill != "" {
+		e.clearSkillLoadFailed(stage.Name, skillKeySkill)
 	}
 	// fabrik:tools-denied is gated on !toolsDenied — unlike the two labels
 	// above, this invocation itself may BE the condition (toolsDenied does not

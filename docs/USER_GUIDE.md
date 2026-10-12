@@ -3048,6 +3048,21 @@ comment_skill: myorg:review-comment  # a skill from your own plugin
   is not a stage failure — it does not count against `max_retries`, and the item is not
   paused. Fix the YAML or load the plugin and the next dispatch resolves it; the label
   and the panel entry clear on their own.
+- **A skill that fails to load in the worker never completes the stage.** A skill-configured
+  stage has no instructions except its skill. If a skill Fabrik found on disk is still
+  not registered by Claude Code, the worker's own `Skill` tool call fails — and the model
+  may print `FABRIK_STAGE_COMPLETE` anyway. Fabrik reads that failure from the worker's
+  structured tool-call record (never from what the worker wrote), ignores the completion
+  marker, and **pauses the item** (`fabrik:paused` + `fabrik:awaiting-input`) with one
+  comment naming the stage, the skill, the plugins loaded and the error, plus a
+  warnings-panel entry (`skill_load`). It does not count against `max_retries` and applies
+  no `stage:<name>:failed`; the same applies to the comment-review, CI-fix and rebase
+  runs for their own skill. A different skill failing, or "unknown skill" appearing in
+  the worker's prose, never triggers this. Unlike an unresolved reference this does not
+  clear itself, because nothing you can change between dispatches fixes it: check that
+  the plugin is registered with Claude Code (`plugin_dirs`, the plugin manifest, the
+  skill's `SKILL.md`), then remove `fabrik:paused` and `fabrik:awaiting-input` to resume.
+  The panel entry clears on the next run of that stage that loads its skill.
 - **Pointing a stage at your own plugin.** Add the plugin to `plugin_dirs` (see
   [Plugin Development](#plugin-development)), give its manifest a unique `name`, put each
   skill at `skills/<name>/SKILL.md`, and name it `<manifest name>:<name>` in the stage.
