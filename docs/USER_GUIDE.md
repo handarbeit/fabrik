@@ -3121,6 +3121,21 @@ Unedited skills that travel with a moved tree are simply left unreferenced.
   has edits, the migration refuses, tells you, and changes nothing. A plugin you put there
   yourself under another name (its manifest does not say `fabrik` or `local-workflows`) is
   left exactly as it is, and no stage is pointed at it as `local-workflows:`.
+- **Editing after a migration.** Once migrated, make your customizations in
+  `.fabrik/plugins/local-workflows/` (a skill there is referenced as
+  `local-workflows:<skill>`) and leave `.fabrik/plugin/` alone; it is Fabrik's own base
+  plugin and plain `fabrik upgrade` keeps it current. If you edit `.fabrik/plugin/`
+  instead, the next `fabrik upgrade` is **blocked**: it prints *workflow migration refused*
+  (because `local-workflows` already exists and is never overwritten), then the usual
+  *local customizations detected in .fabrik/plugin/ — refusing to overwrite* message, and
+  changes nothing. Either of these resolves it:
+  1. **Keep the edit:** copy the changed skill files into the same paths under
+     `.fabrik/plugins/local-workflows/` (merging with what is already there), point the
+     stage's skill key at `local-workflows:<skill>`, then run `fabrik upgrade --force` to
+     restore a clean base. `--force` discards what is in `.fabrik/plugin/`, so do this only
+     after the edit is saved in `local-workflows`.
+  2. **Discard the edit:** run `fabrik upgrade --force`, which overwrites `.fabrik/plugin/`
+     with the binary's copy ("customizations discarded").
 - A stage that already says `fabrik:fabrik-plan` is left alone even if you edited that
   skill: the report names the `local-workflows:` copy so you can point the stage at it.
 - A vendored plugin set (`FABRIK_PLUGIN_DIR` set, or `.fabrik/plugin` a symlink) is
