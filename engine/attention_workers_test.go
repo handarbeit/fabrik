@@ -399,3 +399,41 @@ func TestLiveTurnsReachStatusThroughOnTurn(t *testing.T) {
 		t.Errorf("after a new invocation starts: turns %+v max %+v, want unknown turns and budget 15", st.Worker.TurnsUsed, st.Worker.MaxTurns)
 	}
 }
+
+// A gate hold the gate stops confirming is ended by the gate itself, not left to
+// the lapse: once mergeability settles, status must stop naming the merge hold
+// (#2121, "absent rather than guessed").
+func TestMergeGateClearsItsHoldWhenMergeabilitySettles(t *testing.T) {
+	unsettled := true
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, n int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 42, HeadSHA: "deadbeef", State: "open"}, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, n int) (*bool, string, error) {
+			if unsettled {
+				return nil, "unknown", nil
+			}
+			ok := true
+			return &ok, "clean", nil
+		},
+	}
+	stgs := []*stages.Stage{{Name: "Implement", Order: 1, Prompt: "implement"}, {Name: "Review", Order: 2, Prompt: "review"}}
+	eng := testEngineWithStages(t, client, stgs)
+	eng.cfg.PollSeconds = 60
+
+	pctx := makeMergeGatePctx(&gh.ProjectBoard{ProjectID: "PVT_1"}, map[string]bool{})
+	if !eng.handleMergeAndCIGates(pctx) {
+		t.Fatal("unsettled merge state must claim the item")
+	}
+	snap, _ := eng.store.Get(cooldownTestRepo, 20)
+	if h := snap.State().GateHold; h == nil || h.Gate != gateMerge {
+		t.Fatalf("control: GateHold = %+v, want a merge hold", h)
+	}
+
+	unsettled = false
+	eng.handleMergeAndCIGates(pctx)
+	snap, _ = eng.store.Get(cooldownTestRepo, 20)
+	if h := snap.State().GateHold; h != nil && h.Gate == gateMerge {
+		t.Errorf("the merge hold must end once mergeability settles, still %+v", h)
+	}
+}
