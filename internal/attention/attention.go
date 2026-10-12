@@ -176,11 +176,45 @@ type Input struct {
 
 	HasWorker       bool
 	WorkerStartedAt time.Time
+	// WorkerKind and WorkerTrigger name what the worker is (WorkerKind*) and what
+	// it is addressing (comma-separated comment or review-body ids); empty when
+	// unknown (#2121). WorkerQueued is true while the worker holds no worker slot
+	// (WorkerQueuedSince: since when); WorkerStartedAt is then the dispatch time.
+	WorkerKind        string
+	WorkerTrigger     string
+	WorkerQueued      bool
+	WorkerQueuedSince time.Time
+	// WorkerTurnsKnown / WorkerTurnsUsed are the live worker's turns so far;
+	// WorkerMaxTurns is the stage's turn budget (0 = unknown or unlimited).
+	WorkerTurnsKnown bool
+	WorkerTurnsUsed  int
+	WorkerMaxTurns   int
+	// Conflict is set while a merge-train conflict resolution for this member is
+	// queued for, or holding, a worker slot. It is treated like a worker (#2121).
+	Conflict *ConflictFact
 	// WorkerBudget is the wall-clock budget of the in-flight worker's stage:
 	// its max_wall_time, or the Claude inactivity timeout when the stage sets
 	// none. Zero means unknown. A worker is not classified stalled before
 	// WorkerBudget + WorkerStallMargin has elapsed, however low StallThreshold is.
 	WorkerBudget time.Duration
+
+	// Dispatchable is true when the item has work the engine will dispatch (its
+	// stage is incomplete and nothing gates it) but has no worker (#2121 R3).
+	// SlotsBusy/SlotsMax are a snapshot of the worker pool; SlotsMax 0 = unknown.
+	Dispatchable bool
+	SlotsBusy    int
+	SlotsMax     int
+	// Retry is the retry the engine has scheduled after a failed invocation, and
+	// Gate the gate holding the item's advance; nil = none known (#2121). The
+	// caller drops a gate hold the gate stopped confirming.
+	Retry *RetryFact
+	Gate  *GateFact
+	// RebaseAfterLanding is true when fabrik:rebase-needed was applied because main
+	// moved after a sibling landed (the engine recorded it); DaemonStop is true
+	// when the item is paused by the daemon's own clean stop (the pause comment's
+	// marker). Both are explicit recorded facts, never inferred (#2121 causes).
+	RebaseAfterLanding bool
+	DaemonStop         bool
 
 	// Cooldowns maps cooldown reason to expiry.
 	Cooldowns map[string]time.Time
@@ -347,6 +381,9 @@ type Result struct {
 	// the engine's own pause comment: ResumeViaLabel, ResumeViaComment or
 	// ResumeViaPauseComment (the cache cannot say). Empty for other results.
 	ResumeVia string
+	// Cause says why the item is in this state, from the fixed vocabulary (Cause*),
+	// when the engine knows; empty when it does not — never guessed (#2121).
+	Cause string
 	// ParkedDataMissing echoes Input.ParkedBlockersUnknown: the item is not
 	// Suspended as a parked blocker only because blocker data is missing, so a
 	// caller tracking a persisted episode must not read it as "decision made".
@@ -392,10 +429,43 @@ var labelTable = map[string]labelInfo{
 	"fabrik:toolchain-stale":               {"the daemon's PATH toolchain does not satisfy the repo's declared version (warn-only)", false},
 	"fabrik:landing-verification-failed":   {"the credited PR did not merge; the issue was reopened and needs a human", false},
 	"fabrik:nondefault-base-pr-noted":      {"informational: PR targets a non-default base branch", false},
+	"fabrik:editing":                       {"a comment-review or reinvoke worker is editing this item's branch", false},
+	"fabrik:auto-merge-enabled":            {"auto-merge is enabled on the linked PR; GitHub merges it when its requirements are met", false},
+	"fabrik:revalidate":                    {"operator command: the engine re-enters Validate for this item and removes the label", false},
+	"fabrik:clear-claude-limit":            {"operator command: the engine clears the account-wide Claude usage-limit hold and removes the label", false},
+	"fabrik:cruise":                        {"autonomy: advances through every stage by itself but never merges; a human merges", false},
+	"fabrik:yolo":                          {"autonomy: advances through every stage and merges by itself", false},
+	"fabrik:extend-turns":                  {"operator override: every invocation gets twice the stage's turn budget", false},
+	"fabrik:unrestricted":                  {"operator override: workers run without the tool allowlist (all tool restrictions removed)", false},
+	"fabrik:sub-issue":                     {"informational: this issue was spawned as a child of another", false},
 }
 
-// MeaningOf returns the one-line meaning of a state-bearing label, or "".
-func MeaningOf(label string) string { return labelTable[label].meaning }
+// labelPrefixes are the state-bearing label families whose names carry a
+// variable part (#2121): a stage, a lock holder, a PR or child number.
+var labelPrefixes = []struct {
+	prefix  string
+	meaning string
+}{
+	{"fabrik:reworking:", "the engine is reworking this stage after a comment or review (a rework worker runs, or a killed one left the label behind)"},
+	{"fabrik:locked:", "the engine holds this item's dispatch lock for a worker (a leftover after a kill until the retry runs)"},
+	{"fabrik:credited-pr:", "the merge-train landing credited this PR for the Done transition; the engine verifies it merged"},
+	{"fabrik:spawned-child:", "records a child issue the engine already spawned for this item, so a retried spawn does not duplicate it"},
+}
+
+// MeaningOf returns the one-line meaning of a state-bearing label, or "". Labels
+// with a variable part (fabrik:reworking:<Stage>, fabrik:locked:<id>,
+// fabrik:credited-pr:<N>, fabrik:spawned-child:<i>:<n>) resolve by prefix.
+func MeaningOf(label string) string {
+	if info, ok := labelTable[label]; ok {
+		return info.meaning
+	}
+	for _, p := range labelPrefixes {
+		if strings.HasPrefix(label, p.prefix) {
+			return p.meaning
+		}
+	}
+	return ""
+}
 
 func hasLabel(labels []string, l string) bool {
 	for _, x := range labels {
@@ -490,6 +560,9 @@ func classify(in Input) Result {
 	if (paused && escalationSignal(in)) || failedLanding {
 		code, summary := escalationCode(in, failedLanding)
 		res.ResumeVia = resumeVia(in, true)
+		if paused && in.DaemonStop {
+			res.Cause = CauseDaemonStop
+		}
 		return finishNoSchedule(Escalated, code, summary,
 			"nothing automatic: the engine has stopped; a human must intervene ("+resumeAdvice(in, true)+")", RankEscalated,
 			resumeOptions(in, true))
@@ -505,6 +578,9 @@ func classify(in Input) Result {
 			}
 		}
 		res.ResumeVia = resumeVia(in, false)
+		if in.DaemonStop {
+			res.Cause = CauseDaemonStop
+		}
 		return finishNoSchedule(NeedsHuman, code, summary,
 			"nothing automatic: "+resumeAdvice(in, false), RankNeedsHuman, resumeOptions(in, false))
 	}
@@ -537,8 +613,20 @@ func classify(in Input) Result {
 			"nothing automatic: the engine re-resolves each dispatch and runs the stage once the reference resolves", RankNeedsHuman)
 	}
 
-	// 5. Waiting on something the engine owns.
-	if code, summary, ok := waitingCause(in); ok {
+	stalledAge := stallExceeded(res, in)
+
+	// 5a. A worker is in flight or queued for a slot (#2121). It outranks every
+	// wait label and cooldown: the worker is what the item is doing. The
+	// heartbeat is not progress (a hung process keeps beating), but a healthy long
+	// run is: the worker is only stalled once it has outlived its own stage's
+	// wall-clock budget plus a margin.
+	if wr, ok := workerRow(res, in); ok {
+		return wr
+	}
+
+	// waitOutcome turns a wait (a label, a cooldown, the holding stage) into the
+	// item's result, or Stalled when the engine should have acted and has not.
+	waitOutcome := func(code, summary string) Result {
 		if code == "fabrik:blocked" {
 			// An open-ended dependency wait: a dispatch cooldown's expiry is not
 			// what ends it (R5).
@@ -562,26 +650,34 @@ func classify(in Input) Result {
 				fmt.Sprintf("%s, with no known deadline and no observable change for %s", summary, res.ProgressAge.Round(time.Second)),
 				"nothing scheduled that the cache can see; the next poll re-evaluates the item", RankStalled)
 		}
+		if code == "fabrik:rebase-needed" && in.RebaseAfterLanding {
+			res.Cause = CauseRebaseConflictAfterLanding
+		}
 		return finish(Waiting, code, summary, actionFor(res.Next.Deadlines, waitAction(code)), NotRanked)
 	}
 
-	stalledAge := stallExceeded(res, in)
+	// 5. Waiting on a state-bearing label the engine owns.
+	if code, summary, ok := labelWait(in); ok {
+		return waitOutcome(code, summary)
+	}
 
-	// 6. A worker is in flight. The heartbeat is not progress (a hung process
-	// keeps beating), but a healthy long run is: the worker is only stalled once
-	// it has outlived its own stage's wall-clock budget plus a margin.
-	if in.HasWorker {
-		if workerOverdue(res, in) {
-			return finish(Stalled, CodeWorkerNoProgress,
-				fmt.Sprintf("a worker is in flight but nothing observable changed for %s", res.ProgressAge.Round(time.Second)),
-				"the worker's own inactivity/wall-time limits will end it; the engine then reads its result", RankStalled)
-		}
-		summary := "a worker is running"
-		if in.Cfg.StallThreshold > 0 && res.ProgressAge > in.Cfg.StallThreshold {
-			summary = fmt.Sprintf("a worker is running (long-running: %s, within its stage's wall-clock budget)", res.ProgressAge.Round(time.Second))
-		}
-		return finish(Working, "worker-in-flight", summary,
-			"the engine reads the invocation result when the worker exits", NotRanked)
+	// 5b. Gaps the engine can explain (#2121): a scheduled retry, a gate holding
+	// the advance. Neither is a stall.
+	if rr, ok := retryRow(res, in); ok {
+		return rr
+	}
+	if gr, ok := gateHoldRow(res, in); ok {
+		return gr
+	}
+
+	// 6. Work to do and no worker: waiting for dispatch, never idle (#2121 R3).
+	if dr, ok := dispatchRow(res, in, stalledAge); ok {
+		return dr
+	}
+
+	// 5c. A dispatch cooldown, or the merge-train holding stage.
+	if code, summary, ok := cooldownOrHoldingWait(in); ok {
+		return waitOutcome(code, summary)
 	}
 
 	// 7. Nothing running and nothing waited on.
@@ -681,7 +777,7 @@ func inFlightMarker(l string) bool {
 // only mean "re-check later". exceptBlocked lets case (b) ignore fabrik:blocked,
 // which is what parks the item in the first place.
 func suspendedMasked(in Input, exceptBlocked bool) bool {
-	if in.HasWorker || paused(in) {
+	if hasWorkerLike(in) || paused(in) {
 		return true
 	}
 	for _, l := range in.Labels {
@@ -897,8 +993,8 @@ func escalationCode(in Input, failedLanding bool) (string, string) {
 	return "paused-by-engine", "the engine paused this item after exhausting its retries"
 }
 
-// waitingCause finds why the engine is correctly waiting, if it is.
-func waitingCause(in Input) (code, summary string, ok bool) {
+// labelWait finds a state-bearing wait label, if the item carries one.
+func labelWait(in Input) (code, summary string, ok bool) {
 	// Deterministic: sorted label order, first state-bearing wait wins.
 	var waits []string
 	for _, l := range in.Labels {
@@ -910,6 +1006,12 @@ func waitingCause(in Input) (code, summary string, ok bool) {
 	if len(waits) > 0 {
 		return waits[0], labelTable[waits[0]].meaning, true
 	}
+	return "", "", false
+}
+
+// cooldownOrHoldingWait finds an active dispatch cooldown or the holding-stage
+// wait, the engine-owned waits that carry no label.
+func cooldownOrHoldingWait(in Input) (code, summary string, ok bool) {
 	if reason, until, found := activeCooldown(in); found {
 		return "cooldown:" + reason, fmt.Sprintf("cooldown %q active until %s", reason, until.UTC().Format(time.RFC3339)), true
 	}
@@ -1073,9 +1175,9 @@ func reasonsFor(in Input) []Reason {
 	labels := append([]string(nil), in.Labels...)
 	sort.Strings(labels)
 	for _, l := range labels {
-		if info, ok := labelTable[l]; ok && !seen[l] {
+		if m := MeaningOf(l); m != "" && !seen[l] {
 			seen[l] = true
-			out = append(out, Reason{Code: l, Meaning: info.meaning})
+			out = append(out, Reason{Code: l, Meaning: m})
 		}
 	}
 	var cds []string
