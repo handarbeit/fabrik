@@ -2599,11 +2599,20 @@ func (e *Engine) resolveConflictWithClaude(ctx context.Context, repoKey string, 
 	// inspection below. A cancellation while waiting is "could not attempt", the
 	// same non-nil-error shape as the usage-limit case (ADR-1120): the callers
 	// eject nobody and charge nothing.
+	//
+	// #2121: the member is marked as having a conflict resolution — queued while
+	// the slot is awaited, running once it is held — on a field of its own, never
+	// a Worker handle (the stale-worker detector, shutdown, janitor and overseer
+	// refusals all treat a Worker as a stage worker). Cleared on every exit.
+	memberRepo := itemOwnerRepoString(memberItem, e.defaultRepo())
+	e.store.Apply(itemstate.ConflictResolutionSet{Repo: memberRepo, Number: memberItem.Number, Active: true, Queued: true, Since: e.now()})
+	defer e.store.Apply(itemstate.ConflictResolutionSet{Repo: memberRepo, Number: memberItem.Number})
 	release, err := e.acquireTrainSlotEp(ctx, opts.trainEpisode, repoKey, memberItem)
 	if err != nil {
 		e.logf(memberItem.Number, "merge-train", "conflict resolution not attempted for #%d: %v\n", memberItem.Number, err)
 		return false, nil, err
 	}
+	e.store.Apply(itemstate.ConflictResolutionSet{Repo: memberRepo, Number: memberItem.Number, Active: true, Since: e.now()})
 	// The wait can be long on a saturated board, so the account may have been
 	// usage limited meanwhile — don't spend the slot on a doomed invocation.
 	if serr := usageLimited(); serr != nil {
