@@ -167,15 +167,21 @@ func (e *Engine) refreshPRFacts(c prFactsCandidate, pollStart, now time.Time, ch
 	head := lpr.ObservedHead()
 	rec := lpr.CIVerdict
 
-	// A READY cached set whose latest runs are unchanged since a green verdict
-	// is restamped for free: it is exactly the set FetchCheckRuns would serve on
-	// trust (ADR 2180), and the verdict for it was computed with the live suite
-	// and required-context reads. Only while the runs were read live recently
-	// (prFactsGreenRecheck): the cache is never refreshed on a poll-only
-	// deployment, so a restamp alone would keep a green fresh for ever.
-	if rec.Verdict == string(ciVerdictGreen) && rec.HeadSHA == head && len(lpr.CheckRuns) > 0 &&
+	// A green verdict whose runs were read live within prFactsGreenRecheck is
+	// restamped for free, so a green PR costs one live read per window rather
+	// than one per poll. The cache is never refreshed on a poll-only deployment
+	// (it stays empty there), so the window, not the cache, bounds how long an
+	// unverified green is carried; when the cache does hold runs (a webhook or a
+	// gate filled it) they must still be a READY set matching the verdict's
+	// fingerprint, so a failing check_run delivered since surfaces at once.
+	if rec.Verdict == string(ciVerdictGreen) && rec.HeadSHA == head &&
 		!rec.LiveReadAt.IsZero() && now.Sub(rec.LiveReadAt) < prFactsGreenRecheck {
-		if status, _, _ := gh.ClassifyCheckRuns(lpr.CheckRuns); status == gh.CheckRunsReady && fingerprintCheckRuns(lpr.CheckRuns) == rec.RunsFingerprint {
+		unchanged := len(lpr.CheckRuns) == 0
+		if !unchanged {
+			status, _, _ := gh.ClassifyCheckRuns(lpr.CheckRuns)
+			unchanged = status == gh.CheckRunsReady && fingerprintCheckRuns(lpr.CheckRuns) == rec.RunsFingerprint
+		}
+		if unchanged {
 			rec.ObservedAt = now
 			e.store.Apply(itemstate.CIVerdictObserved{Repo: c.repo, Number: c.item.Number, Verdict: rec})
 			return

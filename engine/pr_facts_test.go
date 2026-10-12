@@ -248,6 +248,35 @@ func TestSettlePRFacts_GreenIsReReadLiveAfterTheRecheckWindow(t *testing.T) {
 	}
 }
 
+// On a poll-only deployment nothing fills the Store's cached runs, so the free
+// restamp must not depend on them: a green PR costs one live read per recheck
+// window, not one per poll.
+func TestSettlePRFacts_PollOnlyGreenIsNotReReadEveryPoll(t *testing.T) {
+	env := newPRFactsEnv(t)
+	board := env.seedPR(t, 7, false)
+	env.runs = []gh.CheckRun{passRun("Test and vet", 1)}
+	env.e.settlePRFacts(board)
+	if got := status(t, env.e, "7"); got.PR.CI.V != "green" {
+		t.Fatalf("precondition: ci = %+v, want green", got.PR.CI)
+	}
+	if snap, _ := env.e.store.Peek("owner/repo", 7); len(snap.State().LinkedPR.CheckRuns) != 0 {
+		t.Fatalf("precondition: the Store must hold no cached runs (poll-only)")
+	}
+	reads := env.reads.Load()
+	for i := 0; i < 4; i++ {
+		env.clock.t = env.clock.t.Add(30 * time.Second)
+		env.e.settlePRFacts(board)
+	}
+	if env.reads.Load() != reads {
+		t.Errorf("poll-only green re-read %d times inside the recheck window, want 0", env.reads.Load()-reads)
+	}
+	env.clock.t = env.clock.t.Add(prFactsGreenRecheck)
+	env.e.settlePRFacts(board)
+	if env.reads.Load() != reads+1 {
+		t.Errorf("reads after the window = %d, want %d", env.reads.Load(), reads+1)
+	}
+}
+
 // cacheReadGuard is a ReadClient whose check-run read must never be used by
 // the refresher: CacheImpl.FetchCheckRuns applies CheckRunCompleted, which
 // stamps LastCIProgressAt (ADR-1410) and so would change what a CI gate that
