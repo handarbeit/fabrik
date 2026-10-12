@@ -34,6 +34,8 @@ The spec's second open question — retention window for "recently completed rev
 
 ### 6. Session-total cost/turns: in-memory, reset on restart, accumulated in the footer
 
+> **Superseded (2026-10-12).** The footer no longer shows session totals. It now matches Fabrik's footer: working directory and review identity on the left, the Claude account in the centre, and the rate-limit gauge and banners on the right. Cost is notional on a subscription, and the Completed Reviews pane already shows the count. Per-review turns and cost stay on each history row. The original decision is kept below for the record.
+
 The spec's third open question — whether the session aggregate persists across restarts — is resolved as in-memory-only, reset on every daemon restart, matching Fabrik's own session-scoped TUI state. Fabrik's TUI has no existing footer/header precedent for this (confirmed in Research: only a per-entry `HistoryEntry.CostUSD`, summed ad hoc in one test), so `pruefer/tui/footer.go`'s running total was designed fresh — accumulated from each `ReviewCompletedEvent` and displayed alongside the rate-limit gauge, consistent with where Fabrik places session-adjacent gauges without copying a component that doesn't exist.
 
 ### 7. Rate-limit surfacing via an optional interface, not a required one
