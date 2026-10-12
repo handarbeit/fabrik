@@ -44,6 +44,9 @@ type Config struct {
 	ReconcileInterval          time.Duration       // Reconcile ticker cadence (0 = use lightReconcileInterval default of 3m)
 	MaxReviewCycles            int                 // Max review re-invocation cycles per issue before pausing (default 5)
 	ChannelHeldMax             int                 // per-subscriber bound on events held for the MCP channel push while no session is attached (default 200; oldest dropped with a notice; #1968)
+	RetryStarvedThreshold      time.Duration       // how long a due stage retry may go undispatched before a retry-starved channel event (default 5m; #2170, docs/state-machine.md §7.14). Never below 2 × the poll interval.
+	ItemWedgedThreshold        time.Duration       // how long a gate may hold an item with no worker dispatched or queued before an item-wedged channel event (default 10m; #2170). Never below 2 × the poll interval.
+	CacheDivergenceWindow      time.Duration       // how recent an engine label/column write must be for a reverting reconcile, deep fetch or probe to be reported as cache-divergence (default 5m; #2170)
 	StallThreshold             time.Duration       // how long an item may show no observable progress (no worker activity, no status or label change) before the local read API classifies it stalled (default 30m; #1967, docs/state-machine.md §7.9). Zero disables stall classification.
 	CIWaitTimeout              time.Duration       // CI-gate liveness-stall dwell: how long CI may show no observable progress before pausing (default 30m; ADR-1410 — no longer a total-wait bound, see CIBackstopTimeout)
 	CIBackstopTimeout          time.Duration       // Absolute cap on how long an item may sit in fabrik:awaiting-ci under any classification, bounding per-poll cost independent of CI duration (default 4h; ADR-1410, R5)

@@ -84,6 +84,8 @@ func (e *Engine) catchUpEvents() []channelevents.Event {
 	// A pipeline stall is current account state, unlike an item's time-driven
 	// stalled, so an open one is part of the snapshot (#2124).
 	out = append(out, e.pipelineCatchUpEvents(now)...)
+	// Open retry-starved and item-wedged episodes are current state too (#2170).
+	out = append(out, e.anomalyCatchUpEvents(now)...)
 	return out
 }
 

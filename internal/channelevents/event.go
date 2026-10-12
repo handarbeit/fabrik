@@ -33,9 +33,14 @@ const (
 	// ItemAdded, ColumnChanged and Closed are the lifecycle events (#2123): a new
 	// managed open item arrived on the board after startup; an item's board
 	// Status changed; an issue was closed.
-	ItemAdded     EventType = "item-added"
-	ColumnChanged EventType = "column-changed"
-	Closed        EventType = "closed"
+	ItemAdded       EventType = "item-added"
+	ColumnChanged   EventType = "column-changed"
+	Closed          EventType = "closed"
+	RetryStarved    EventType = "retry-starved"
+	RetryResumed    EventType = "retry-resumed"
+	ItemWedged      EventType = "item-wedged"
+	ItemUnwedged    EventType = "item-unwedged"
+	CacheDivergence EventType = "cache-divergence"
 
 	// EventsDropped is synthetic: the hub inserts it at the head of a
 	// subscriber's queue when overflow discarded the oldest events.
@@ -46,6 +51,12 @@ const (
 	// under the same subscriber name, so this session's push has stopped.
 	StreamSuperseded EventType = "stream-superseded"
 )
+
+// MetaUnverified is the meta key marking an event derived from a cache change
+// that reverted a recent engine write (#2170): the label change it reports may
+// be a phantom and is expected to be reverted. The value is "true"; absent means
+// nothing is known against it. Defined here once so every producer shares it.
+const MetaUnverified = "unverified"
 
 // Event is one thing that happened, ready to route and deliver.
 //
@@ -123,6 +134,11 @@ var catalog = map[EventType]Info{
 	ItemAdded:                 {},
 	ColumnChanged:             {},
 	Closed:                    {},
+	RetryStarved:              {Immediate: true},
+	RetryResumed:              {Immediate: true},
+	ItemWedged:                {Immediate: true},
+	ItemUnwedged:              {Immediate: true},
+	CacheDivergence:           {},
 	EventsDropped:             {Immediate: true, AccountWide: true, Synthetic: true},
 	Digest:                    {Immediate: true, AccountWide: true, Synthetic: true},
 	StreamSuperseded:          {Immediate: true, AccountWide: true, ShimGenerated: true, Synthetic: true},
@@ -149,6 +165,8 @@ func Subscribable() []EventType {
 		ClaudeUsageLimited, ClaudeUsageLimitLifted, DaemonUnreachable, DaemonReachable,
 		PipelineStalled, PipelineResumed,
 		ItemAdded, ColumnChanged, Closed,
+		RetryStarved, RetryResumed, ItemWedged, ItemUnwedged,
+		CacheDivergence,
 	}
 	return order
 }

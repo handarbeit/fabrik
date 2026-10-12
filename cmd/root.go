@@ -54,6 +54,9 @@ type Config struct {
 	MaxReviewCycles            int    // 0 means use default (5)
 	CIWaitTimeout              int    // minutes; CI-gate liveness-stall dwell; 0 means use default (30) (ADR-1410)
 	ChannelHeldMax             int    // events held per MCP channel subscriber while no session is attached; 0 means use default (200); oldest are dropped with a notice (#1968)
+	RetryStarvedThreshold      int    // minutes a due stage retry may go undispatched before a retry-starved channel event; 0 means use default (5) (#2170)
+	ItemWedgedThreshold        int    // minutes a gate may hold an item with no worker dispatched or queued before an item-wedged channel event; 0 means use default (10) (#2170)
+	CacheDivergenceWindow      int    // minutes within which a reconcile/deep-fetch/probe reverting an engine write is reported as cache-divergence; 0 means use default (5) (#2170)
 	StallThreshold             int    // minutes; how long an item may show no observable progress before the local read API (fabrik mcp) classifies it stalled; 0 means use default (30) (#1967)
 	CIBackstopTimeout          int    // minutes; absolute fabrik:awaiting-ci cap independent of CI duration; 0 means use default (240 = 4h) (ADR-1410, R5)
 	WorkerStaleMins            int    // minutes; 0 means use default (5)
@@ -204,6 +207,9 @@ func Execute() error {
 	flag.IntVar(&cfg.MaxReviewCycles, "max-review-cycles", 0, "Maximum number of review-and-fix cycles per issue (0 = use default of 5; also FABRIK_MAX_REVIEW_CYCLES)")
 	flag.IntVar(&cfg.CIWaitTimeout, "ci-wait-timeout", 0, "CI-gate liveness-stall dwell in minutes: how long CI may show no observable progress before pausing (0 = use default of 30; also FABRIK_CI_WAIT_TIMEOUT). Does NOT bound total CI duration — a suite that is alive and progressing waits indefinitely; see --ci-backstop-timeout for the absolute cap (ADR-1410)")
 	flag.IntVar(&cfg.ChannelHeldMax, "channel-held-max", 0, "Events held per fabrik mcp channel subscriber while no session with that name is attached; beyond it the oldest are dropped with a notice (0 = use default of 200; also FABRIK_CHANNEL_HELD_MAX)")
+	flag.IntVar(&cfg.RetryStarvedThreshold, "retry-starved-threshold", 0, "Minutes a due stage retry may go undispatched before a retry-starved channel event is published (0 = use default of 5; also FABRIK_RETRY_STARVED_THRESHOLD)")
+	flag.IntVar(&cfg.ItemWedgedThreshold, "item-wedged-threshold", 0, "Minutes a gate may hold an item with no worker dispatched or queued before an item-wedged channel event is published (0 = use default of 10; also FABRIK_ITEM_WEDGED_THRESHOLD)")
+	flag.IntVar(&cfg.CacheDivergenceWindow, "cache-divergence-window", 0, "Minutes within which a reconcile, deep fetch or probe that reverts an engine write is reported as cache-divergence (0 = use default of 5; also FABRIK_CACHE_DIVERGENCE_WINDOW)")
 	flag.IntVar(&cfg.StallThreshold, "stall-threshold", 0, "Minutes an item may show no observable progress (no worker activity, no status or label change) before the fabrik mcp overseer tools classify it stalled (0 = use default of 30; also FABRIK_STALL_THRESHOLD)")
 	flag.IntVar(&cfg.CIBackstopTimeout, "ci-backstop-timeout", 0, "Absolute cap in minutes on how long an item may sit in fabrik:awaiting-ci under any classification, bounding per-poll cost independent of CI duration (0 = use default of 240 = 4h; also FABRIK_CI_BACKSTOP_TIMEOUT; ADR-1410)")
 	flag.IntVar(&cfg.WorkerStaleMins, "worker-stale-timeout", 0, "Minutes before a stale worker heartbeat triggers PID-liveness check (0 = use default of 5; also FABRIK_WORKER_STALE_TIMEOUT)")
@@ -441,6 +447,15 @@ func Execute() error {
 	}
 	if !explicitFlags["channel-held-max"] {
 		cfg.ChannelHeldMax = resolveInt(cfg.ChannelHeldMax, "FABRIK_CHANNEL_HELD_MAX", "", 200)
+	}
+	if !explicitFlags["retry-starved-threshold"] {
+		cfg.RetryStarvedThreshold = resolveInt(cfg.RetryStarvedThreshold, "FABRIK_RETRY_STARVED_THRESHOLD", "of minutes", 5)
+	}
+	if !explicitFlags["item-wedged-threshold"] {
+		cfg.ItemWedgedThreshold = resolveInt(cfg.ItemWedgedThreshold, "FABRIK_ITEM_WEDGED_THRESHOLD", "of minutes", 10)
+	}
+	if !explicitFlags["cache-divergence-window"] {
+		cfg.CacheDivergenceWindow = resolveInt(cfg.CacheDivergenceWindow, "FABRIK_CACHE_DIVERGENCE_WINDOW", "of minutes", 5)
 	}
 	if !explicitFlags["stall-threshold"] {
 		cfg.StallThreshold = resolveInt(cfg.StallThreshold, "FABRIK_STALL_THRESHOLD", "of minutes", 30)
@@ -978,6 +993,9 @@ func Execute() error {
 		CIWaitTimeout:              ciWaitTimeout(cfg.CIWaitTimeout),
 		CIBackstopTimeout:          ciBackstopTimeout(cfg.CIBackstopTimeout),
 		StallThreshold:             stallThreshold(cfg.StallThreshold),
+		RetryStarvedThreshold:      minutesOrDefault(cfg.RetryStarvedThreshold, 5),
+		ItemWedgedThreshold:        minutesOrDefault(cfg.ItemWedgedThreshold, 10),
+		CacheDivergenceWindow:      minutesOrDefault(cfg.CacheDivergenceWindow, 5),
 		ChannelHeldMax:             cfg.ChannelHeldMax,
 		RequiredStatusContexts:     pc.RequiredStatusContexts, // keyed by "owner/repo"; nil = no behavior change (ADR-933)
 		PostPushDwell:              postPushDwell(cfg.PostPushDwell),
@@ -1349,6 +1367,16 @@ func ciWaitTimeout(minutes int) time.Duration {
 func stallThreshold(minutes int) time.Duration {
 	if minutes <= 0 {
 		return 30 * time.Minute
+	}
+	return time.Duration(minutes) * time.Minute
+}
+
+// minutesOrDefault converts a minutes config value to a time.Duration, using
+// def minutes when the value is unset (zero or negative). Used by the channel
+// anomaly thresholds (#2170), which are read once at startup.
+func minutesOrDefault(minutes, def int) time.Duration {
+	if minutes <= 0 {
+		minutes = def
 	}
 	return time.Duration(minutes) * time.Minute
 }

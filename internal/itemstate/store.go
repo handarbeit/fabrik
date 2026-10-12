@@ -315,13 +315,34 @@ func (s *Store) applySingleItem(m Mutation) (Snapshot, []Change, error) {
 	change := Change{Repo: repo, Number: number, Fields: flags}
 	annotateLabelChange(&change, m, before.Labels, snap.state.Labels, before.LabelsKnown || (existed && s.legacyLabelBaseline.Load()))
 	annotateLifecycleChange(&change, m, before, snap.state, existed)
+	annotateStatusChange(&change, m, before.Status, snap.state.Status, existed)
+	switch m.(type) {
+	case ShallowBoardItemUpdated:
+		change.Path = PathReconcile
+	case ItemDeepFetched:
+		change.Path = PathDeepFetch
+	case ProbeBoardItemUpdated:
+		change.Path = PathProbe
+	}
 	if fromProbe {
 		change.Origin = OriginProbe
+		change.Path = PathProbe
 	}
 	obs := s.captureObservers()
 	s.notify(obs, change, snap)
 
 	return snap, []Change{change}, nil
+}
+
+// annotateStatusChange records the column before and after for an item that
+// already existed, and marks an engine-made move (#2170).
+func annotateStatusChange(change *Change, m Mutation, before, after string, existed bool) {
+	if _, ok := m.(LocalStatusUpdated); ok {
+		change.EngineStatusWrite = true
+	}
+	if existed && before != after {
+		change.StatusFrom, change.StatusTo = before, after
+	}
 }
 
 // annotateLabelChange fills the label-delta fields of change from a before/after
@@ -1017,11 +1038,12 @@ func (s *Store) applyBoardReconciled(v BoardReconciled) (Snapshot, []Change, err
 		repo, number := item.Repo, item.Number
 		s.mu.Unlock()
 
-		change := Change{Repo: repo, Number: number, Fields: flags}
+		change := Change{Repo: repo, Number: number, Fields: flags, Path: PathReconcile}
 		if before.LabelsKnown || (existed && s.legacyLabelBaseline.Load()) {
 			change.LabelDeltas = diffLabels(before.Labels, snap.state.Labels)
 		}
 		annotateLifecycleChange(&change, nil, before, snap.state, existed)
+		annotateStatusChange(&change, nil, before.Status, snap.state.Status, existed)
 		s.notify(obs, change, snap)
 		changes = append(changes, change)
 	}
@@ -1065,6 +1087,7 @@ func (s *Store) applyProjectV2ItemEdited(v ProjectV2ItemEdited) (Snapshot, []Cha
 		}
 	}
 	change.StatusAt = v.At
+	annotateStatusChange(&change, nil, before.Status, snap.state.Status, true)
 	obs := s.captureObservers()
 	s.notify(obs, change, snap)
 	return snap, []Change{change}, nil

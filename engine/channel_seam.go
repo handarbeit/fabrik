@@ -43,3 +43,28 @@ func (e *Engine) MarkBoardPopulatedForTest() { e.boardPopulated.Store(true) }
 // engine's store (see itemstate.Store.SetLegacyLabelBaselineForTest), so a test
 // can show the restart flood the new rule removes.
 func (e *Engine) SetLegacyLabelBaselineForTest(on bool) { e.store.SetLegacyLabelBaselineForTest(on) }
+
+// SetAnomalyDetectorsDisabledForTest neutralises the retry-starved, item-wedged
+// and cache-divergence detectors (#2170), returning the function that restores
+// them. It is how the acceptance tests show they are not vacuous (FR-014).
+func SetAnomalyDetectorsDisabledForTest(retry, wedge, divergence bool) (restore func()) {
+	o := [3]bool{anomalyDisabled.retry.Load(), anomalyDisabled.wedge.Load(), anomalyDisabled.divergence.Load()}
+	anomalyDisabled.retry.Store(retry)
+	anomalyDisabled.wedge.Store(wedge)
+	anomalyDisabled.divergence.Store(divergence)
+	return func() {
+		anomalyDisabled.retry.Store(o[0])
+		anomalyDisabled.wedge.Store(o[1])
+		anomalyDisabled.divergence.Store(o[2])
+	}
+}
+
+// SetAnomalyThresholdsForTest overrides the retry-starved and item-wedged
+// thresholds and the cache-divergence window (a zero value keeps the default).
+// Call it before the channel events start; the engine reads them without a lock.
+// The 2 × poll-interval floor still applies.
+func (e *Engine) SetAnomalyThresholdsForTest(retryStarved, itemWedged, divergenceWindow time.Duration) {
+	e.cfg.RetryStarvedThreshold = retryStarved
+	e.cfg.ItemWedgedThreshold = itemWedged
+	e.cfg.CacheDivergenceWindow = divergenceWindow
+}

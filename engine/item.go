@@ -1940,8 +1940,31 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 		} else if willEscalateToolsDenied {
 			e.pauseForToolsDeniedLimit(item, stage, toolsDeniedCount, e.cfg.MaxToolsDeniedRetries, toolsDeniedErr.ToolNames, toolsDeniedErr.Denials)
 			releaseLock() // permanently giving up — release the lock
+		} else {
+			// The retry will happen: tell the channel deriver why and when it is due
+			// (#2170), so a retry that then waits for a slot can be reported.
+			e.emitRetryScheduled(item, stage, retryCause(err, turnLimited, resumeFailed, toolsDenied), e.now().Add(cooldown))
 		}
 	}
+}
+
+// retryCause names why a stage run ended without completing, for the
+// retry-starved event (#2170). It only labels the outcome; no decision reads it.
+func retryCause(err error, turnLimited, resumeFailed, toolsDenied bool) string {
+	var killed *claudeKilledError
+	switch {
+	case errors.As(err, &killed):
+		return killed.Cause
+	case turnLimited:
+		return "max-turns"
+	case resumeFailed:
+		return "resume-failure"
+	case toolsDenied:
+		return "tools-denied"
+	case err != nil:
+		return "error"
+	}
+	return "incomplete"
 }
 
 // detectAndArmStallHint compares this incomplete invocation's turn usage against
@@ -3089,6 +3112,9 @@ func (e *Engine) handleUsageLimitExit(p stageOutcomeParams, limitErr *claudeUsag
 		StageName: stage.Name,
 		At:        time.Now(),
 	})
+	// The retry waits out the dispatch cooldown and, on top of it, the account-wide
+	// usage-limit hold; the deriver measures starvation from the hold's lift (#2170).
+	e.emitRetryScheduled(item, stage, "claude-usage-limit", e.now().Add(e.stageRetryBackoff()))
 
 	if !hasLabel(item.Labels, "fabrik:claude-limit") {
 		comment := fmt.Sprintf(
@@ -3177,6 +3203,7 @@ func (e *Engine) handleAPIErrorExit(p stageOutcomeParams, apiErr *claudeAPIError
 		StageName: stage.Name,
 		At:        time.Now(),
 	})
+	e.emitRetryScheduled(item, stage, "api-error", e.now().Add(e.stageRetryBackoff()))
 
 	p.release()
 }

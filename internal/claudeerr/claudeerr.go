@@ -253,3 +253,28 @@ func (e *SkillLoadError) Error() string {
 	}
 	return fmt.Sprintf("skill %q failed to load", e.Skill)
 }
+
+// Kill causes carried by KilledError.
+const (
+	// KillWallTime is a stage killed because its max_wall_time deadline passed.
+	KillWallTime = "wall-time-kill"
+	// KillInactivity is a stage killed by the inactivity watchdog (no output).
+	KillInactivity = "inactivity-kill"
+)
+
+// KilledError wraps the error of an invocation the engine itself killed on a
+// timeout (#2170): the wall-time deadline or the inactivity watchdog. Both
+// otherwise surface as a generic "claude exited with error", so nothing
+// downstream could say why the stage did not complete. It is a pure wrapper —
+// Unwrap exposes Err, so every errors.As/errors.Is classification of the wrapped
+// error, and the retry accounting built on it, is unchanged.
+type KilledError struct {
+	// Cause is KillWallTime or KillInactivity.
+	Cause string
+	// Err is the error the invocation would have returned unwrapped.
+	Err error
+}
+
+func (e *KilledError) Error() string { return e.Err.Error() }
+
+func (e *KilledError) Unwrap() error { return e.Err }

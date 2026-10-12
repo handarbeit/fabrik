@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/channelevents"
@@ -206,4 +207,68 @@ func diagFailingChecks(diag *trainCIDiagnostic) []string {
 	names = append(names, diag.FailedContexts...)
 	sort.Strings(names)
 	return names
+}
+
+// emitRetryScheduled records that a stage retry is now waiting to be dispatched
+// (#2170): item's stage did not complete and will be retried after the backoff.
+// due is the first instant the retry may run, on the engine clock (e.now() +
+// the backoff): the item's LastAttemptAt is wall-clock and its retry-backoff
+// cooldown is consumed on admission (ADR 2096), so neither can supply it later.
+// cause is one of wall-time-kill, inactivity-kill, max-turns, api-error,
+// resume-failure, tools-denied, claude-usage-limit, incomplete, error.
+func (e *Engine) emitRetryScheduled(item gh.ProjectItem, stage *stages.Stage, cause string, due time.Time) {
+	ce := e.channelEvents()
+	if ce == nil || stage == nil {
+		return
+	}
+	defer e.anomalyHookRecover(item.Number, "retry-scheduled")
+	ce.recordRetry(itemOwnerRepoString(item, e.defaultRepo()), item.Number, stage.Name, cause, due)
+}
+
+// emitDispatchDeferred records that dispatch of the given issue keys was refused
+// for lack of a worker slot (ADR 2114): it is both the "no worker slot" reason for
+// a due retry and the "queued" exclusion for a gate hold.
+func (e *Engine) emitDispatchDeferred(issueKeys []string) {
+	ce := e.channelEvents()
+	if ce == nil || len(issueKeys) == 0 {
+		return
+	}
+	defer e.anomalyHookRecover(0, "dispatch-deferred")
+	ce.recordDeferred(issueKeys, e.now())
+}
+
+// noteGateHold records that a gate the engine applies is holding item's advance
+// or landing, with the holding reason as the engine logs it and, for the
+// feedback gate, the pending feedback IDs. Called on every evaluation that holds;
+// the first call starts the hold and later calls re-confirm it.
+func (e *Engine) noteGateHold(item gh.ProjectItem, gate, reason string, ids []string) {
+	ce := e.channelEvents()
+	if ce == nil {
+		return
+	}
+	defer e.anomalyHookRecover(item.Number, "gate-hold")
+	repo := itemOwnerRepoString(item, e.defaultRepo())
+	status := item.Status
+	if status == "" {
+		if snap, ok := e.store.Peek(repo, item.Number); ok {
+			status = snap.State().Status
+		}
+	}
+	ce.recordGateHold(repo, item.Number, status, gate, reason, ids, e.now())
+}
+
+// noteGateClear records that gate is no longer holding item.
+func (e *Engine) noteGateClear(item gh.ProjectItem, gate string) {
+	ce := e.channelEvents()
+	if ce == nil {
+		return
+	}
+	defer e.anomalyHookRecover(item.Number, "gate-clear")
+	ce.recordGateClear(itemOwnerRepoString(item, e.defaultRepo()), item.Number, gate)
+}
+
+func (e *Engine) anomalyHookRecover(issue int, what string) {
+	if r := recover(); r != nil {
+		e.logf(issue, "channel", "%s hook panic recovered: %v\n", what, r)
+	}
 }

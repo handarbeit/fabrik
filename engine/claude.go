@@ -83,6 +83,7 @@ type claudeAPIErrorExit = claudeerr.APIErrorExit
 type claudeResumeFailureError = claudeerr.ResumeFailureError
 type claudeToolsDeniedError = claudeerr.ToolsDeniedError
 type claudeSkillLoadError = claudeerr.SkillLoadError
+type claudeKilledError = claudeerr.KilledError
 
 // apiErrorTerminalReason is the CLI's structural terminal_reason value for an
 // Anthropic-side API error — observed live on 2026-08-08 (#1458) as eight
@@ -1665,7 +1666,7 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 		claudeLog(issueNumber, "claude", "skill %q failed to load (tool_use_id=%s) — stage did not run; not charged against max_retries\n", sle.Skill, sle.ToolUseID)
 		return text, false, usage, sle
 	}
-	return text, completed, usage, err
+	return text, completed, usage, wrapKilledError(err, completed, wasTimedOut, inactivityFired.Load())
 }
 
 // skillLoadOverride decides whether interpretClaudeResult's outcome must be
@@ -1682,6 +1683,23 @@ func skillLoadOverride(ctx context.Context, rawOutput []byte, expectedSkill stri
 		return nil
 	}
 	return detectSkillLoadFailure(rawOutput, expectedSkill)
+}
+
+// wrapKilledError records why the engine killed an invocation (#2170): a
+// timed-out run that did not complete returns its error wrapped in a
+// claudeerr.KilledError naming the wall-time deadline or the inactivity
+// watchdog. The wrapper is transparent (Unwrap), so every errors.As
+// classification and the retry accounting built on it see the original error.
+// A run that completed (the marker was emitted before the kill) is left alone.
+func wrapKilledError(err error, completed, wasTimedOut, inactivity bool) error {
+	if err == nil || completed || !wasTimedOut {
+		return err
+	}
+	cause := claudeerr.KillWallTime
+	if inactivity {
+		cause = claudeerr.KillInactivity
+	}
+	return &claudeerr.KilledError{Cause: cause, Err: err}
 }
 
 // openStageLog opens (creating logDir if necessary) a new timestamped .log

@@ -99,6 +99,10 @@ type channelEvents struct {
 	// episodeSeq numbers pipeline stall episodes for their dedup keys.
 	episodeSeq uint64
 
+	// anom is the retry/wedge episode memory and the divergence ledger
+	// (#2170); it has its own mutex because hooks and the observer write it.
+	anom anomalyState
+
 	wake  chan struct{}
 	stop  chan struct{}
 	wg    sync.WaitGroup
@@ -277,13 +281,21 @@ func (ce *channelEvents) onChange(c itemstate.Change, snap itemstate.Snapshot) {
 		return
 	}
 	key := issueRef(c.Repo, c.Number)
+	if c.Fields&itemstate.WorkerLifecycleChanged != 0 && st.Worker != nil {
+		ce.noteWorkerEntered(key)
+	}
 	// A reopened issue or a failed landing verification ends the announced
 	// landing, so a later close is attributed from its own change, not from a
 	// stale mark.
 	if c.Fields&itemstate.StateChanged != 0 && !st.IsClosed {
 		ce.clearLanding(key)
 	}
-	var evs []channelevents.Event
+	// A reconcile, deep fetch or probe that reverts a recent engine write is
+	// reported once, ahead of the label events it caused, and those are marked
+	// unverified (#2170): the cache and GitHub disagree, so the change may be a
+	// phantom.
+	evs := ce.noteChangeForDivergence(c, &st, ce.e.now())
+	diverged := len(evs) // events from here on are built from the suspect change
 	for _, d := range c.LabelDeltas {
 		if d.Added && d.Label == "fabrik:landing-verification-failed" {
 			ce.clearLanding(key)
@@ -300,6 +312,17 @@ func (ce *channelEvents) onChange(c itemstate.Change, snap itemstate.Snapshot) {
 	}
 	if c.Closed {
 		evs = append(evs, ce.closedEvent(key, &st, c))
+	}
+	if diverged > 0 {
+		// Every event built from a change a cache-divergence was raised for (label
+		// events, the label-derived merged / blocker-cleared / landing-verification-
+		// failed, column-changed, closed) may be a phantom (#2170 R3).
+		for i := diverged; i < len(evs); i++ {
+			if evs[i].Meta == nil {
+				evs[i].Meta = map[string]string{}
+			}
+			evs[i].Meta[channelevents.MetaUnverified] = "true"
+		}
 	}
 	staleCand := c.Fields&itemstate.InvocationChanged != 0 && hasLabelStr(st.Labels, "fabrik:awaiting-input")
 	const interesting = itemstate.LabelsChanged | itemstate.StageStateChanged | itemstate.StatusChanged |
@@ -421,6 +444,7 @@ func (ce *channelEvents) drain() {
 	if nudged {
 		ce.checkClaudeLimit()
 	}
+	ce.checkAnomalies()
 }
 
 // labelAttribution is who caused a label change, as pushed on a label event.
