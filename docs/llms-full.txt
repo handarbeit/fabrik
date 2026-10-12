@@ -2913,41 +2913,61 @@ the sequence.
 
 ### Install the Fabrik PM Plugin
 
-The **Fabrik PM plugin** is a Claude Code plugin for your interactive session — not for the workers. It gives Claude ambient awareness of your Fabrik-managed project so you can ask questions like "what's on the board?", "why is #42 stuck?", or "what's in progress?" without leaving Claude Code.
+The **Fabrik PM plugin** is a Claude Code plugin for your interactive session — not for the workers. It makes Claude a product-management buddy and supervisor for your Fabrik project: ask "what's the status of #42?", "what needs me?" or "is the pipeline healthy?" and the answer comes from the running daemon (column, time in column, worker, PR and CI, blockers, attention state, what the engine will do next), not from scraping GitHub.
 
-> **Distinct from the worker plugin**: `fabrik-workflows` is embedded in the Fabrik binary and deployed automatically to `.fabrik/plugin/` by `fabrik init` and `fabrik upgrade`. You do **not** install `fabrik-workflows` manually.
+> **Distinct from the worker plugin**: the stage plugin (`fabrik-stages`) is embedded in the Fabrik binary and deployed automatically to `.fabrik/plugin/` by `fabrik init` and `fabrik upgrade`. You do **not** install it manually. Fabrik also passes `enabledPlugins` for `fabrik@fabrik` as `false` to every worker, so the PM plugin and its tools never reach one.
 
 #### Install
 
-Run these three commands in your Claude Code interactive session:
+`fabrik init` prints these commands when it finishes. Run them in your Claude Code interactive session; the `fabrik` binary must be on your `PATH`, because the plugin starts `fabrik mcp`:
 
 ```
 /plugin marketplace add handarbeit/fabrik
 /plugin install fabrik@fabrik
-/reload-plugins
 ```
+
+(A project-scoped entry in `.claude/settings.json` is not used: Claude Code does not download project-scoped plugins onto a machine that lacks them, and it puts their MCP servers behind per-server approval.)
+
+If you previously registered the server by hand (`claude mcp add fabrik -- fabrik mcp`), remove that registration with `claude mcp remove fabrik`; the plugin provides the same server, and keeping both gives you two.
+
+#### Settings
+
+Claude Code asks for these when you enable the plugin. Both are optional.
+
+| Setting | Meaning |
+|---------|---------|
+| Subscriber name | A stable name for this session — your topic or session name, never a PID. The overseer actions sign their audit comment with it and refuse without one; pushed events are delivered under it. Leave empty for read-only use. Passed to `fabrik mcp` as `FABRIK_SUBSCRIBER`. |
+| Fabrik directory | The directory of the daemon to talk to. By default the session addresses the daemon of its own working directory. Set it if you run Claude Code somewhere other than your Fabrik project. Passed as `FABRIK_MCP_DIR`. A session addresses one daemon. |
+
+`fabrik mcp` resolves the directory as `--dir`, then `FABRIK_MCP_DIR`, then `CLAUDE_PROJECT_DIR` (the session's project, which the plugin passes through), then its working directory.
+
+In a project that is not a Fabrik project the server starts quietly and each tool answers that no daemon is running; it prints nothing else.
 
 #### What you get
 
-After installing, your interactive Claude Code session gains:
-
 | Component | Description |
 |-----------|-------------|
-| `fabrik` skill (qualified: `fabrik:fabrik`) | Auto-activates when `.fabrik/` is detected or Fabrik is mentioned. Provides ambient PM awareness — ask about board state, issue status, stuck items, etc. |
+| MCP tools | `fabrik_status` (one issue), `fabrik_board` (attention or flow view) and `fabrik_health` — see [Overseer Tools: `fabrik mcp`](#overseer-tools-fabrik-mcp). Plus the audited actions `fabrik_promote`, `fabrik_move_parked`, `fabrik_advance`, `fabrik_set_autonomy`, `fabrik_revalidate`, `fabrik_clear_claude_limit`. No action lifts a pause or posts a free-form comment: a paused item resumes when a human comments on it. |
+| `fabrik` skill (qualified: `fabrik:fabrik`) | Auto-activates when `.fabrik/` is detected or Fabrik is mentioned. The PM mental model, the attention states, the steering labels a human applies, and how to use the actions and their limits. |
 | `fabrik-setup` skill (qualified: `fabrik:fabrik-setup`) | One-time onboarding walkthrough for setting up Fabrik from scratch in a new project. |
-| `/fabrik:status` command | Board snapshot: shows what's in each pipeline stage, which workers are running, and which worktrees have uncommitted changes. |
+| `/fabrik:status` command | The board's attention view and daemon health, from the daemon. |
+| Session-start notice | One line if the plugin and the `fabrik` binary versions differ (below). |
+
+When no daemon is reachable, Claude says so and tells you to start `fabrik` in your project directory; it does not fall back to reading GitHub.
+
+#### Plugin and binary versions
+
+Each release sets the plugin's version to the binary's and pins the marketplace entry to the release tag (see [Plugin release pinning](#plugin-release-pinning)), so the plugin you install is the one that shipped with a release. At session start a hook compares the plugin's version with `fabrik --version` and shows a one-line notice if they differ. It never blocks the session, and says nothing when `fabrik` is not on `PATH` or a version cannot be read. A development build never equals a released version, so the notice then says it cannot compare rather than suggesting a downgrade. Set `FABRIK_PLUGIN_VERSION_CHECK=off` in your environment to silence it.
 
 #### Keeping the plugin up to date
 
-When the Fabrik repo ships a newer version of the plugin, refresh your local install:
+Auto-update is off by default for third-party marketplaces, and Fabrik does not change your settings. To turn it on: `/plugin` → Marketplaces tab → select `fabrik` → Enable auto-update. Or update by hand after you upgrade the binary:
 
 ```
 /plugin marketplace update fabrik
 /plugin install fabrik@fabrik
 /reload-plugins
 ```
-
-Alternatively, enable auto-update via the plugin UI: `/plugin` → Marketplaces tab → select `fabrik` → Enable auto-update. When enabled, Claude Code updates the marketplace and reinstalls the plugin automatically at startup.
 
 ---
 
@@ -3336,26 +3356,21 @@ After a successful push, `/cut-release` automatically files a GitHub issue:
 
 The `fabrik:yolo` label means Fabrik will pick it up automatically and run it through the pipeline. You don't need to do anything else for documentation updates after cutting a release.
 
-#### Plugin version auto-bump
+#### Plugin release pinning
 
-Claude Code's `/plugin update` detects a new plugin release by comparing the cached `plugin.json` `version` field against the version at `ref: main` in `marketplace.json` — same version number means no refresh fires, even if the plugin's source changed. To prevent users from getting stuck on stale cached content, `cut-release.sh` may commit a version bump to `plugin/fabrik/.claude-plugin/plugin.json` before it tags the release:
+Claude Code detects a new plugin release by comparing the cached `plugin.json` `version` against what the marketplace entry resolves to — same version number means no refresh fires, even if the source changed — and a marketplace entry that tracks `main` would hand users unreleased commits. `cut-release.sh` therefore pins what a release ships (step 6b), and publishes it atomically (step 7):
 
-- **When it fires**: after the release-notes commit is pushed and before the tag is created, the script diffs each plugin listed in `marketplace.json` (excluding its own manifest) against the previous release tag. For each one that changed, it patch-bumps that `plugin.json`'s `version` field (e.g. `0.2.0` → `0.2.1`) and commits it as `@arbeithand`, in a separate commit alongside an appended changelog line in that release's `release-notes/<version>.md`, e.g.:
-
-  ```
-  - Auto-bumped fabrik plugin to 0.2.1 (source changed since v0.0.75)
-  ```
-
-- **When it doesn't fire**: if `plugin/fabrik`'s source is unchanged since the previous tag, or there is no previous tag (first-ever release), no extra commit is made and nothing is appended to the release notes.
-- **Scope**: every plugin listed in `marketplace.json` with a `git-subdir` source is bumped — the list is derived from that file rather than hardcoded, so listing a plugin is all that is needed to include it. All bumped manifests land in one commit, each with its own changelog line. `plugin/fabrik-workflows` is out of scope: it is embedded directly into the Fabrik binary and distributed via `fabrik init`/`fabrik upgrade`, uses independent content-hash-based change detection, and is not affected by the `/plugin update` staleness issue this bump exists to fix.
-- **Bump type**: patch-only. Minor/major version bumps for `plugin/fabrik` remain a manual responsibility.
-- **Escape hatch**: pass `--no-plugin-bump` to skip this step entirely, e.g. for a hotfix release where you don't want the extra commit:
+- **The binary-paired plugin (`plugin/fabrik`)** gets its `plugin.json` `version` set to the release version (the tag without the `v`, exactly what `fabrik --version` prints) on **every** release, whether or not its files changed. The plugin and the binary are one product, their versions are compared by the plugin's session-start hook, and a changed version string is what makes Claude Code see an update. A release with no plugin change still ships a new plugin version; that is intended.
+- **Every other plugin listed in `marketplace.json` with a `git-subdir` source** (currently `entwurf`) keeps the older rule: its manifest is patch-bumped (e.g. `0.2.0` → `0.2.1`) only if its source changed since the previous tag, with a changelog line in `release-notes/<version>.md`. Skipped on a first release (no previous tag).
+- **Every `git-subdir` entry's `ref` is pinned to the release tag** (`"ref": "v0.0.91"`), so users receive exactly that tag's plugin and never a later commit to `main`. The list of plugins is derived from `marketplace.json`, not hardcoded. A `sha` pin cannot work: the commit that contains it cannot know its own SHA. Between releases the checked-in `ref` names the previous release's tag.
+- **One commit, published with the tag.** The manifests, `marketplace.json` and the release-notes lines land in a single `@arbeithand` commit, made locally. Step 7 then tags it and pushes `main` and the tag in **one atomic push** (`git push --atomic`), so `main` never names a tag that does not exist and a rejected push publishes neither. If it fails, nothing was published: retry the same push, or discard the local tag and commit (the script prints the exact commands).
+- **Escape hatch**: `--no-plugin-bump` skips the whole step (versions and ref pins); the marketplace then keeps pointing at the previous release's tag.
 
   ```
   scripts/cut-release.sh v0.0.68 --no-plugin-bump
   ```
 
-Don't be surprised to see a second `@arbeithand` commit on `main` after a release that touched plugin source — this is expected, not a sign something went wrong.
+Don't be surprised to see a second `@arbeithand` commit on `main` after every release — this is expected, not a sign something went wrong. The tools behind it are `tools/pin-plugin-release` (set a manifest's version, pin the refs) and, for the other plugins, `tools/bump-plugin-version`. See ADR 2141 (which supersedes ADR 816 for `plugin/fabrik`).
 
 **`plugin/fabrik-workflows`'s `plugin.json` `version` field is not a staleness
 signal — don't read it as one.** Unlike `plugin/fabrik` above, nothing in Fabrik ever
@@ -3835,13 +3850,13 @@ The session ID for the active Claude session is shown in the header when availab
 
 **What Fabrik gives you.** `fabrik mcp` is a stdio [MCP](https://modelcontextprotocol.io) server that exposes four **read-only** tools (`fabrik_status`, `fabrik_board`, `fabrik_health` and the rolled-up `fabrik_situation`) backed by the running daemon's in-memory state. They make **no GitHub API call** — everything is served from what the daemon already holds — and every response says how fresh it is. Six narrowly scoped **action** tools let the session act on what it sees — see [Acting on what you see](#acting-on-what-you-see-fabrik_promote-fabrik_advance-fabrik_move_parked-fabrik_set_autonomy-fabrik_revalidate-fabrik_clear_claude_limit). It can also **push** events into the session so you do not have to poll or know to ask — see [Proactive push](#proactive-push-claude-code-channels-research-preview).
 
-Register it once from your Fabrik directory (Claude Code launches it per session):
+**The easy route is the [Fabrik PM plugin](#install-the-fabrik-pm-plugin):** installing it (`/plugin install fabrik@fabrik`) registers this server for you, with the subscriber name and Fabrik directory as plugin settings, and adds the skills and `/fabrik:status`. Register it by hand only if you do not use the plugin — and not both, or you get two servers. Claude Code launches it per session:
 
 ```bash
 claude mcp add fabrik -- fabrik mcp
 ```
 
-Claude Code starts the server in *its own* working directory, which is not necessarily your Fabrik directory (the one that contains `.fabrik/`). Point it at the right one with `--dir`:
+Claude Code starts the server in *its own* working directory, which is not necessarily your Fabrik directory (the one that contains `.fabrik/`). Point it at the right one with `--dir` (or the `FABRIK_MCP_DIR` environment variable, which is what the plugin's "Fabrik directory" setting sets; with neither, `fabrik mcp` uses `CLAUDE_PROJECT_DIR`, then its working directory):
 
 ```bash
 claude mcp add --scope user fabrik -- fabrik mcp --dir /path/to/your/fabrik-dir
@@ -3991,7 +4006,7 @@ Every action first resolves the issue to exactly one item the daemon manages (`o
 **Requirements — this is a research preview.** Channels is an experimental Claude Code feature; the notification contract, the flags below and org policy may change.
 
 - Launch the server with a stable name — your topic or session name, **never a PID** — so held events and subscriptions find you again after a restart: `claude mcp add --scope user fabrik -- fabrik mcp --dir /path/to/fabrik-dir --subscriber my-topic` (or set `FABRIK_SUBSCRIBER`). Without a name the read tools work as before and no push connection is made.
-- Start Claude Code with the channel enabled for this server. Fabrik is not on the approved channel allowlist, so during the research preview that is `claude --dangerously-load-development-channels server:fabrik` (a full-screen warning dialog); `--channels` is for allowlisted servers only. On Team and Enterprise plans an admin must also allow channels (`channelsEnabled`), and that policy still applies to the development flag.
+- Start Claude Code with the channel enabled for this server. Fabrik is not on the approved channel allowlist, so during the research preview that is `claude --dangerously-load-development-channels server:fabrik` (a full-screen warning dialog; when the server comes from the PM plugin it is `claude --dangerously-load-development-channels plugin:fabrik@fabrik`, with the plugin's "Subscriber name" setting filled in — interactive sessions only, and channels need a claude.ai or Console login); `--channels` is for allowlisted servers only. On Team and Enterprise plans an admin must also allow channels (`channelsEnabled`), and that policy still applies to the development flag.
 - **If the session did not enable the channel, Claude Code drops the events silently** — it never acknowledges a notification and the daemon cannot tell. "Delivered" therefore means "written to `fabrik mcp`". The server's instructions and the `fabrik_subscribe` description say this too.
 
 **Choosing what you hear about: `fabrik_subscribe` / `fabrik_unsubscribe`.** A subscription belongs to the subscriber name and is stored under `.fabrik/state/channel/`, so it survives daemon restarts; re-subscribing with identical filters changes nothing.

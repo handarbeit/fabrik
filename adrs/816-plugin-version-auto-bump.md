@@ -1,7 +1,7 @@
 # ADR 816: Auto-Bump `plugin/fabrik` Version on Source Change in `cut-release.sh`
 
 **Date**: 2026-07-27
-**Status**: Accepted
+**Status**: Accepted. Superseded for `plugin/fabrik` by ADR 2141 (version set to the binary's on every release, marketplace refs pinned to the release tag); this rule still governs every other marketplace plugin.
 **Issue**: #816 — feat(release): auto-bump plugin versions on cut-release when source changed
 
 ## Context
