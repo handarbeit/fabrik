@@ -3,11 +3,11 @@
 # different versions (#2141). Never blocks: it always exits 0, prints nothing
 # when there is nothing to say, and otherwise prints exactly one JSON object.
 #
-# Silent when: FABRIK_PLUGIN_VERSION_CHECK=off, `fabrik` is not on PATH, or
-# either version cannot be read. POSIX sh, no jq.
+# Silent when: FABRIK_PLUGIN_VERSION_CHECK=off, or either version cannot be read
+# (a `fabrik` that is not on PATH yields an empty binary version, so it is the
+# same silent path). POSIX sh, no jq.
 
 [ "${FABRIK_PLUGIN_VERSION_CHECK:-}" = "off" ] && exit 0
-command -v fabrik >/dev/null 2>&1 || exit 0
 
 root="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)}"
 manifest="$root/.claude-plugin/plugin.json"
