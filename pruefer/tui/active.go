@@ -119,9 +119,7 @@ func (a ActivePaneComponent) View(width int) string {
 			titleStr = " " + dimStyle.Render(job.Title)
 		}
 		line := fmt.Sprintf("%s %-30s %s%s", spinner, key, elapsed, titleStr)
-		if runes := []rune(line); len(runes) > maxWidth {
-			line = string(runes[:maxWidth-1]) + "…"
-		}
+		line = truncateLine(line, maxWidth)
 		if a.focused && idx == a.idx {
 			line = selectedStyle.Render(line)
 		}

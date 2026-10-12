@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // Styles duplicated from Fabrik's tui/styles.go — unexported there, so
@@ -27,6 +28,15 @@ var (
 )
 
 // fmtDuration formats a duration as MM:SS, mirroring tui/commands.go.
+// truncateLine shortens a possibly-styled line to maxWidth display cells,
+// ending in "…". Width is measured in cells with ANSI escapes excluded:
+// counting runes of the rendered string charged every style's escape bytes
+// against the budget, cutting rows far short of the pane edge (and sometimes
+// mid-escape), so a row's title never showed.
+func truncateLine(line string, maxWidth int) string {
+	return ansi.Truncate(line, maxWidth, "…")
+}
+
 func fmtDuration(d time.Duration) string {
 	if d < 0 {
 		d = 0
