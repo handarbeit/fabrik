@@ -48,7 +48,6 @@ func TestOverlayCI_RedWithoutANamedCheck(t *testing.T) {
 }
 
 func TestOverlayCI_NothingAddedForOtherVerdictsOrConditions(t *testing.T) {
-	plain := Classify(baseInput())
 	cases := map[string]func(*Input){
 		"green":       func(in *Input) { in.CI = &CIFact{Verdict: "green", PROpen: true} },
 		"pending":     func(in *Input) { in.CI = &CIFact{Verdict: "pending", PROpen: true} },
@@ -75,7 +74,6 @@ func TestOverlayCI_NothingAddedForOtherVerdictsOrConditions(t *testing.T) {
 			}
 		})
 	}
-	_ = plain
 }
 
 func TestOverlayCI_KeepsDecisionBearingStates(t *testing.T) {
@@ -134,7 +132,10 @@ func TestOverlayCI_DoesNotOutrankAMoreUrgentState(t *testing.T) {
 	in.CI = redCI("x")
 	in.StatusEnteredAt = t0.Add(-3 * time.Hour) // long past the stall threshold
 	r := Classify(in)
-	if r.State == Stalled && r.Rank != RankStalled {
-		t.Errorf("stalled item rank = %d, want %d", r.Rank, RankStalled)
+	if r.State != Stalled {
+		t.Fatalf("precondition: the item must classify as stalled, got %s/%s", r.State, r.Code)
+	}
+	if r.Rank != RankStalled {
+		t.Errorf("stalled item rank = %d, want %d (the red CI overlay must not outrank it)", r.Rank, RankStalled)
 	}
 }

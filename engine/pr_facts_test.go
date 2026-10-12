@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/attention"
 	"github.com/handarbeit/fabrik/internal/itemstate"
@@ -244,6 +245,40 @@ func TestSettlePRFacts_GreenIsReReadLiveAfterTheRecheckWindow(t *testing.T) {
 	got := status(t, env.e, "7")
 	if got.PR.CI.V != "red" || len(got.PR.CIFailing) != 1 || got.PR.CIFailing[0] != "Test and vet" {
 		t.Errorf("a same-head rerun failure stayed hidden: ci=%+v failing=%v", got.PR.CI, got.PR.CIFailing)
+	}
+}
+
+// cacheReadGuard is a ReadClient whose check-run read must never be used by
+// the refresher: CacheImpl.FetchCheckRuns applies CheckRunCompleted, which
+// stamps LastCIProgressAt (ADR-1410) and so would change what a CI gate that
+// later takes the item sees.
+type cacheReadGuard struct {
+	boardcache.ReadClient
+	t *testing.T
+}
+
+func (g cacheReadGuard) FetchCheckRuns(owner, repo, sha string) ([]gh.CheckRun, error) {
+	g.t.Errorf("settlePRFacts read check runs through the cache-backed client")
+	return nil, errors.New("must not be called")
+}
+
+func TestSettlePRFacts_NeverTouchesLastCIProgressAtOrCheckRuns(t *testing.T) {
+	env := newPRFactsEnv(t)
+	board := env.seedPR(t, 7, false)
+	env.e.readClient = cacheReadGuard{ReadClient: env.e.readClient, t: t}
+	env.runs = []gh.CheckRun{failedRun("Test and vet", 1)}
+	env.e.settlePRFacts(board)
+
+	if got := status(t, env.e, "7"); got.PR.CI.V != "red" {
+		t.Fatalf("precondition: ci = %+v, want red", got.PR.CI)
+	}
+	snap, _ := env.e.store.Peek("owner/repo", 7)
+	lpr := snap.State().LinkedPR
+	if !lpr.LastCIProgressAt.IsZero() {
+		t.Errorf("LastCIProgressAt = %v, want zero (never observed): a poll-side read must not stamp it", lpr.LastCIProgressAt)
+	}
+	if len(lpr.CheckRuns) != 0 {
+		t.Errorf("the refresher wrote %d check runs into the Store the gates read", len(lpr.CheckRuns))
 	}
 }
 
