@@ -62,8 +62,8 @@ func TestSituation_EachCategoryLandsInItsSectionInRankOrder(t *testing.T) {
 	e.seedAPIItem(t, 1, "Implement", "fabrik:paused", "fabrik:awaiting-input") // needs-human
 	e.seedAPIItem(t, 2, "Implement", "fabrik:paused", "fabrik:awaiting-input")
 	e.store.Apply(itemstate.EnginePaused{Repo: "owner/repo", Number: 2, StageName: "Implement"}) // escalated
-	e.seedSettled(t, 3)                                                                           // awaiting a merge decision
-	e.seedAPIItem(t, 4, "Implement", "fabrik:awaiting-ci")                                        // CI gate, by label
+	e.seedSettled(t, 3)                                                                          // awaiting a merge decision
+	e.seedAPIItem(t, 4, "Implement", "fabrik:awaiting-ci")                                       // CI gate, by label
 	e.store.Apply(itemstate.LabelAppliedAtRecorded{Repo: "owner/repo", Number: 4, Label: "fabrik:awaiting-ci", At: t0.Add(-5 * time.Minute)})
 	e.seedAPIItem(t, 5, "Implement") // review gate, by a recorded hold
 	recent(5)
