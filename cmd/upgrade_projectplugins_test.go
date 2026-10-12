@@ -215,6 +215,25 @@ func TestProjectPlugin_MovedCopyIsNotAProjectPlugin(t *testing.T) {
 	}
 }
 
+// An operator's edit of a base skill outranks a project plugin that provides the
+// same bare name: the edit lives in the moved copy, which the runtime loaded
+// ahead of the extras, so the edited skill is what the stage ran (FR-005).
+func TestProjectPlugin_EditedBaseSkillOutranksExtra(t *testing.T) {
+	dir := deployFixture(t, "v0.0.77")
+	editSkill(t, dir, "fabrik-plan")
+	addProjectPlugin(t, dir, ".fabrik/plugins/team", "team", "fabrik-plan")
+	writePluginDirsConfig(t, dir, ".fabrik/plugins/team")
+	t.Setenv("FABRIK_PLUGIN_DIRS", "")
+	writeTestFile(t, filepath.Join(dir, ".fabrik", "stages", "mix.yaml"),
+		"name: Mix\nskill: fabrik-plan\n")
+
+	runMigration(t, true)
+	got := stageRefs(t, dir)["mix.yaml:skill"]
+	if got != "local-workflows:fabrik-plan" && got != "local-workflows:plan" {
+		t.Errorf("edited base skill should stay in local-workflows, not the extra: %q", got)
+	}
+}
+
 // An operator's own local-workflows (a differently named plugin) is a project plugin.
 func TestProjectPlugin_OperatorOwnLocalWorkflowsCounts(t *testing.T) {
 	dir := projectFixture(t, "name: Review\nskill: fabrik-review\n")
