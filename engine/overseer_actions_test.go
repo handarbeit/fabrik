@@ -993,14 +993,14 @@ func TestOverseerAuditCommentAsPostedIsNotSteering(t *testing.T) {
 // ---- R2 and structure ----
 
 func TestOverseerNoPauseLiftOrFreeFormCommentSurface(t *testing.T) {
-	// The Actor method set is exactly the five actions.
+	// The Actor method set is exactly the six actions.
 	at := reflect.TypeOf((*localapi.Actor)(nil)).Elem()
 	var names []string
 	for i := 0; i < at.NumMethod(); i++ {
 		names = append(names, at.Method(i).Name)
 	}
 	slices.Sort(names)
-	if want := []string{"Advance", "ClearClaudeLimit", "Promote", "Revalidate", "SetAutonomy"}; !reflect.DeepEqual(names, want) {
+	if want := []string{"Advance", "ClearClaudeLimit", "MoveParked", "Promote", "Revalidate", "SetAutonomy"}; !reflect.DeepEqual(names, want) {
 		t.Errorf("Actor methods = %v, want %v", names, want)
 	}
 	for _, m := range localapi.ActionMethods() {
@@ -1014,7 +1014,7 @@ func TestOverseerNoPauseLiftOrFreeFormCommentSurface(t *testing.T) {
 	for _, file := range []struct {
 		name     string
 		comments int
-	}{{"overseer_actions.go", 1}, {"overseer_advance.go", 0}} {
+	}{{"overseer_actions.go", 1}, {"overseer_advance.go", 0}, {"overseer_park.go", 0}} {
 		src, err := os.ReadFile(file.name)
 		if err != nil {
 			t.Fatal(err)
@@ -1034,6 +1034,11 @@ func TestOverseerNoPauseLiftOrFreeFormCommentSurface(t *testing.T) {
 			t.Errorf("postComment appears %d times in %s, want %d", n, file.name, file.comments)
 		}
 		banned := []string{"AddComment(", "postItemComment(", "pauseIssue("}
+		if file.name == "overseer_park.go" {
+			// move_parked writes the board Status and the audit comment only: no
+			// label write of any kind (#2188).
+			banned = append(banned, "addLabelChecked(", "applyLabelAdd(", "removeLabelChecked(", "applyLabelRemove(")
+		}
 		if file.name == "overseer_advance.go" {
 			// advance reuses the engine's gates only through their read-only cores;
 			// the writing wrappers would break "a refused advance writes nothing".
