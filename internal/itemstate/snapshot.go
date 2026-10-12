@@ -46,6 +46,8 @@ type Snapshot struct {
 //   - LinkedPRState.ReviewRequests
 //   - LinkedPRState.ThreadComments
 //   - LinkedPRState.CheckRuns
+//   - LinkedPRState.Facts.Mergeable
+//   - LinkedPRState.CIVerdict.Failing
 func newSnapshot(s ItemState) Snapshot {
 	c := s
 
@@ -70,6 +72,7 @@ func newSnapshot(s ItemState) Snapshot {
 		lpr.ReviewRequests = copyReviewRequests(s.LinkedPR.ReviewRequests)
 		lpr.ThreadComments = copyComments(s.LinkedPR.ThreadComments)
 		lpr.CheckRuns = copyCheckRuns(s.LinkedPR.CheckRuns)
+		lpr.Facts, lpr.CIVerdict = copyPRFacts(s.LinkedPR.Facts, s.LinkedPR.CIVerdict)
 		c.LinkedPR = &lpr
 	}
 
@@ -153,6 +156,7 @@ func (s Snapshot) LinkedPR() *LinkedPRState {
 	lpr.ReviewRequests = copyReviewRequests(s.state.LinkedPR.ReviewRequests)
 	lpr.ThreadComments = copyComments(s.state.LinkedPR.ThreadComments)
 	lpr.CheckRuns = copyCheckRuns(s.state.LinkedPR.CheckRuns)
+	lpr.Facts, lpr.CIVerdict = copyPRFacts(s.state.LinkedPR.Facts, s.state.LinkedPR.CIVerdict)
 	return &lpr
 }
 
@@ -471,4 +475,15 @@ func copyStageState(s StageState) StageState {
 		StallHintPending:     copyMap(s.StallHintPending),
 		StallEpisodeArmed:    copyMap(s.StallEpisodeArmed),
 	}
+}
+
+// copyPRFacts deep-copies the pointer and slice members of the overseer PR
+// facts (#2122).
+func copyPRFacts(f PRFacts, v CIVerdictRecord) (PRFacts, CIVerdictRecord) {
+	if f.Mergeable != nil {
+		m := *f.Mergeable
+		f.Mergeable = &m
+	}
+	v.Failing = copyStrings(v.Failing)
+	return f, v
 }

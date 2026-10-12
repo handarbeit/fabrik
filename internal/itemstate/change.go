@@ -98,6 +98,10 @@ const (
 	// EngineWriteRecordedChanged they are intentionally excluded from
 	// wakeChFlags/cycleSetFlags so recording one never wakes the poll loop.
 	StatusFactsChanged
+	// PRFactsChanged indicates LinkedPR.Facts or LinkedPR.CIVerdict changed
+	// (#2122). Display facts for the overseer API; intentionally excluded from
+	// wakeChFlags/cycleSetFlags so a poll-side write never wakes the poll.
+	PRFactsChanged
 )
 
 // Change describes what fields a mutation altered. Delivered to every Observer
