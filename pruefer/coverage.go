@@ -255,8 +255,11 @@ func toolResultText(raw json.RawMessage) string {
 	return b.String()
 }
 
-// readLineRE matches the "<line number><tab>" prefix Read puts on every line.
-var readLineRE = regexp.MustCompile(`^\s*(\d+)\t`)
+// readLineRE matches the "<line number><tab>" prefix Read puts on every line
+// (pinned by testdata/read_result_real.jsonl, captured from the installed CLI).
+// The arrow form of `cat -n`-style renderers is accepted too, so a change of
+// separator cannot silently turn every Read into "unread".
+var readLineRE = regexp.MustCompile(`^\s*(\d+)(?:\t|→)`)
 
 // shellMeta marks a command whose cat output may be truncated, redirected or
 // combined, so it is not counted as opening a file.

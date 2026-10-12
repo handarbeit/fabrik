@@ -245,6 +245,11 @@ func TestLiveProbeStagedCoverage(t *testing.T) {
 		if !strings.Contains(po.Result, last) && !strings.Contains(po.Raw, last) {
 			t.Errorf("last line %s not seen: a chunk of %d bytes is too large for one Read; lower stagedChunkMaxBytes", last, e.Bytes)
 		}
+		// The transcript parser must credit that Read: this is what fails closed
+		// (every review `partial`) if the CLI's Read result format ever changes.
+		if opened, _ := deriveOpened([]byte(po.Raw), staged); !opened[e.ID] {
+			t.Errorf("deriveOpened did not credit a full Read of entry %s (%d lines): Read result format changed?", e.ID, e.Lines)
+		}
 	})
 
 	t.Run("subagent traffic visibility", func(t *testing.T) {

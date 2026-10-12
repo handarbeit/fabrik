@@ -528,3 +528,36 @@ func TestReviewPR_TranscriptDowngradesForgedClaim(t *testing.T) {
 		t.Errorf("forged claim not downgraded:\n%s", body)
 	}
 }
+
+// TestDeriveOpened_RealReadResultFormat pins the Read result format against a
+// transcript captured from the installed claude (testdata/read_result_real.jsonl:
+// a subagent's Read of line 1, paths rewritten to /stage). A fixture built by the
+// same assumption as the parser cannot catch a format change; this one can.
+func TestDeriveOpened_RealReadResultFormat(t *testing.T) {
+	raw, err := os.ReadFile("testdata/read_result_real.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := testStaged("a.go")
+	s.Entries[0].Lines = 1
+	got, _ := deriveOpened(raw, s)
+	if !got["0001"] {
+		t.Errorf("a real one-line Read result was not parsed as covering the entry: %v", got)
+	}
+	// The same result must not credit an entry of two lines.
+	s.Entries[0].Lines = 2
+	if got, _ := deriveOpened(raw, s); got["0001"] {
+		t.Errorf("a one-line Read credited a two-line entry: %v", got)
+	}
+}
+
+func TestReadLineRE_AcceptsArrowSeparator(t *testing.T) {
+	for _, l := range []string{"     7→text", "7\ttext", "12\t"} {
+		if !readLineRE.MatchString(l) {
+			t.Errorf("%q not recognised as a numbered Read line", l)
+		}
+	}
+	if readLineRE.MatchString("no number here") {
+		t.Error("matched a line with no number")
+	}
+}
