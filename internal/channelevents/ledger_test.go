@@ -54,10 +54,10 @@ func TestLedgerCarriesForwardUnobservedAndCapsAge(t *testing.T) {
 	l2.Observe("r#keep", Observation{Status: "Review"})
 	l2.Close()
 	l3 := OpenLedger(dir, clock, nil)
-	if r, ok := l3.PeekPrior("r#old"); !ok || r.Status != "Plan" {
+	if r, ok := l3.TakePrior("r#old"); !ok || r.Status != "Plan" {
 		t.Fatalf("unobserved record was not carried forward: %+v ok=%v", r, ok)
 	}
-	if r, _ := l3.PeekPrior("r#keep"); r.Status != "Review" {
+	if r, _ := l3.TakePrior("r#keep"); r.Status != "Review" {
 		t.Fatalf("observed record not updated: %+v", r)
 	}
 	l3.Close()
@@ -65,7 +65,7 @@ func TestLedgerCarriesForwardUnobservedAndCapsAge(t *testing.T) {
 	// Past the age cap an unobserved record is dropped.
 	cur = now.Add(ledgerMaxAge + time.Hour)
 	l4 := OpenLedger(dir, clock, nil)
-	if _, ok := l4.PeekPrior("r#old"); ok {
+	if _, ok := l4.TakePrior("r#old"); ok {
 		t.Fatal("record older than the age cap must be dropped")
 	}
 }
@@ -119,12 +119,12 @@ func TestLedgerCoalescesAndFlushesOnClose(t *testing.T) {
 	l.Observe("r#1", Observation{Status: "Review"})
 	l.Close()
 	l2 := OpenLedger(dir, nil, nil)
-	if r, _ := l2.PeekPrior("r#1"); r.Status != "Review" {
+	if r, _ := l2.TakePrior("r#1"); r.Status != "Review" {
 		t.Fatalf("Close must flush: %+v", r)
 	}
 }
 
-func TestLedgerMarkRevalidatedAndSetPriorStatus(t *testing.T) {
+func TestLedgerMarkRevalidated(t *testing.T) {
 	dir := t.TempDir()
 	l := OpenLedger(dir, nil, nil)
 	l.SetSettle("r#1", SettleRecord{Episode: 1, HeadSHA: "a"})
@@ -133,11 +133,9 @@ func TestLedgerMarkRevalidatedAndSetPriorStatus(t *testing.T) {
 	if s, ok := l.Settle("r#1"); !ok || !s.Revalidated {
 		t.Fatalf("settle = %+v", s)
 	}
-	l.Observe("r#1", Observation{Status: "Plan"})
 	l.Close()
 	l2 := OpenLedger(dir, nil, nil)
-	l2.SetPriorStatus("r#1", "Done")
-	if r, _ := l2.TakePrior("r#1"); r.Status != "Done" {
-		t.Fatalf("SetPriorStatus: %+v", r)
+	if s, ok := l2.Settle("r#1"); !ok || !s.Revalidated {
+		t.Fatalf("revalidated mark must persist: %+v ok=%v", s, ok)
 	}
 }

@@ -16,6 +16,19 @@ import (
 // A Channels notification is an MCP notification, method
 // "notifications/claude/channel", with params {content, meta}. The contract is
 // a research preview, so everything that depends on it lives in this file:
+// channelNotification builds the params, and ChannelMethod / the capability in
+// initialize name it. Claude Code never acknowledges a notification; a session
+// not launched with the channel flag (or blocked by org policy) drops them
+// silently, so "delivered" here only ever means "written to stdout".
+
+// ChannelMethod is the MCP notification method Claude Code listens on.
+const ChannelMethod = "notifications/claude/channel"
+
+// DefaultUnreachableGrace is how long the held stream must stay down before the
+// shim reports daemon-unreachable: a SIGHUP re-exec normally re-binds the
+// socket well inside it, and a crash loop must not spam the session.
+const DefaultUnreachableGrace = 10 * time.Second
+
 // MetaOrigin is the wire name of the provenance key (channelevents.MetaSource).
 // Claude Code sets the <channel> tag's own `source` attribute from the server's
 // configured name, so a meta key called `source` would clash with it; the hub and
@@ -31,19 +44,6 @@ func wireMetaKey(k string) string {
 	}
 	return k
 }
-
-// channelNotification builds the params, and ChannelMethod / the capability in
-// initialize name it. Claude Code never acknowledges a notification; a session
-// not launched with the channel flag (or blocked by org policy) drops them
-// silently, so "delivered" here only ever means "written to stdout".
-
-// ChannelMethod is the MCP notification method Claude Code listens on.
-const ChannelMethod = "notifications/claude/channel"
-
-// DefaultUnreachableGrace is how long the held stream must stay down before the
-// shim reports daemon-unreachable: a SIGHUP re-exec normally re-binds the
-// socket well inside it, and a crash loop must not spam the session.
-const DefaultUnreachableGrace = 10 * time.Second
 
 // StreamFunc runs the held connection. localapi.RunStream is the production value.
 type StreamFunc func(ctx context.Context, opts localapi.StreamOptions) error

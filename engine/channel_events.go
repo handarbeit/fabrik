@@ -296,7 +296,7 @@ func (ce *channelEvents) seed() {
 		// observation (column and closed state now, labels once they are known)
 		// and the ledger starts following the item (#2169).
 		ref := issueRef(st.Repo, st.Number)
-		if evs, _ := ce.downtimeCheck(ref, st); len(evs) > 0 {
+		if evs, _, _ := ce.downtimeCheck(ref, st); len(evs) > 0 {
 			ce.enqueue(evs...)
 		}
 		ce.observeLedger(ref, st)
@@ -373,9 +373,9 @@ func (ce *channelEvents) onChange(c itemstate.Change, snap itemstate.Snapshot) {
 	// phantom.
 	// The first observation after a restart is diffed against the previous run's
 	// persisted state; what differs is a change made while the daemon was down
-	// (#2169). Its column delta replaces the live column-changed for this change,
-	// which would otherwise report the same move again.
-	dtEvs, dtColumn := ce.downtimeCheck(key, &st)
+	// (#2169). Its column and closed deltas replace the live column-changed and
+	// closed for this change, which would otherwise report the same move again.
+	dtEvs, dtColumn, dtClosed := ce.downtimeCheck(key, &st)
 	ce.observeLedger(key, &st)
 	evs := append(dtEvs, ce.noteChangeForDivergence(c, &st, ce.e.now())...)
 	diverged := len(evs) // events from here on are built from the suspect change
@@ -402,7 +402,7 @@ func (ce *channelEvents) onChange(c itemstate.Change, snap itemstate.Snapshot) {
 	if c.Fields&itemstate.StatusChanged != 0 && !c.Created && c.PrevStatus != "" && st.Status != "" && st.Status != c.PrevStatus && !dtColumn {
 		evs = append(evs, ce.e.columnEvent(&st, c))
 	}
-	if c.Closed {
+	if c.Closed && !dtClosed {
 		evs = append(evs, ce.closedEvent(key, &st, c))
 	}
 	if diverged > len(dtEvs) || unattributed(c.Origin) {

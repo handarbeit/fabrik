@@ -145,25 +145,6 @@ func (l *Ledger) TakePrior(key string) (ItemRecord, bool) {
 	return r, ok
 }
 
-// PeekPrior returns the not-yet-taken prior record for key without consuming it.
-func (l *Ledger) PeekPrior(key string) (ItemRecord, bool) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	r, ok := l.prior[key]
-	return r, ok
-}
-
-// SetPriorStatus rewrites the column of a not-yet-taken prior record, so a move
-// the live path already reported is not reported again as a downtime delta.
-func (l *Ledger) SetPriorStatus(key, status string) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if r, ok := l.prior[key]; ok {
-		r.Status = status
-		l.prior[key] = r
-	}
-}
-
 // Observe records the item's state as just observed. Unknown parts (labels not
 // yet populated, an empty column) leave the carried-forward value alone. It does
 // no I/O.

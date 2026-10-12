@@ -201,3 +201,32 @@ func TestFinishEventStampsSourceAndUnverifiedByOrigin(t *testing.T) {
 		t.Errorf("an explicit source must be kept: %q", got.Meta["source"])
 	}
 }
+
+// A close that the first full observation reports as a downtime delta is not
+// reported a second time by the live path when the same mutation also closes the
+// item (the prior record was still pending because the column was unknown).
+func TestDowntimeClosedIsNotReportedTwice(t *testing.T) {
+	dir := t.TempDir()
+	writeLedger(t, dir, map[string]channelevents.Observation{
+		"owner/repo#7": {Labels: []string{"x"}, LabelsKnown: true, Status: "Implement"},
+	})
+	e, sink := downtimeEngine(t, dir, false)
+	// Known open item with no column yet: the prior record stays pending.
+	e.store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{
+		ID: "I_7", Number: 7, Repo: "owner/repo", Labels: []string{"x"},
+	}})
+	drainFor(sink, 200*time.Millisecond)
+	// One mutation gives it a column and closes it.
+	e.store.Apply(itemstate.ItemDeepFetched{Repo: "owner/repo", Number: 7, FreshState: gh.ProjectItem{
+		ID: "I_7", Number: 7, Repo: "owner/repo", Status: "Implement", Labels: []string{"x"}, IsClosed: true,
+	}})
+	closed := 0
+	for _, ev := range drainFor(sink, 400*time.Millisecond) {
+		if ev.Type == channelevents.Closed {
+			closed++
+		}
+	}
+	if closed != 1 {
+		t.Fatalf("one closed event expected, got %d", closed)
+	}
+}

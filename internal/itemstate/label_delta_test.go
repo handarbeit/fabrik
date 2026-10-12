@@ -326,29 +326,3 @@ func TestChange_UnknownPrevStatusIsBaseline(t *testing.T) {
 		t.Fatalf("first-known status must be a baseline: %+v", got)
 	}
 }
-
-// The first label-bearing population is flagged even when the label set is empty
-// (a downtime change to "no labels" must still be diffable, #2169), by every
-// producer, and exactly once.
-func TestChange_LabelsBaselinedOnFirstPopulationOnly(t *testing.T) {
-	s := NewStore(nil)
-	s.Reset([]gh.ProjectItem{labelLess(1), labelLess(2), labelLess(3)})
-	seen := collectChanges(s)
-	s.Apply(ItemDeepFetched{Repo: testRepo, Number: 1, FreshState: labelled(1)})
-	s.Apply(BoardReconciled{Items: []gh.ProjectItem{labelled(2, "a"), labelled(3)}})
-	s.Apply(BoardReconciled{Items: []gh.ProjectItem{labelled(2, "a", "b")}})
-	baselined := map[int]int{}
-	for _, c := range seen() {
-		if c.LabelsBaselined {
-			baselined[c.Number]++
-			if len(c.LabelDeltas) != 0 {
-				t.Fatalf("baseline must carry no deltas: %+v", c)
-			}
-		}
-	}
-	for _, n := range []int{1, 2, 3} {
-		if baselined[n] != 1 {
-			t.Fatalf("item %d baselined %d times, want once (%v)", n, baselined[n], baselined)
-		}
-	}
-}

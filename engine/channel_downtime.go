@@ -71,23 +71,24 @@ func (ce *channelEvents) observeLedger(key string, st *itemstate.ItemState) {
 // record, once per part: the column and closed state at the first observation
 // that has a column, the labels at the first one that has labels. It returns the
 // resulting events (marked source=downtime-delta and unverified, actor unknown:
-// a diff names no writer) and whether one of them is a column change. An item
+// a diff names no writer) and whether one of them is a column change or a close,
+// so the live path does not report the same move or close again. An item
 // with no record is a baseline and yields nothing.
-func (ce *channelEvents) downtimeCheck(key string, st *itemstate.ItemState) (evs []channelevents.Event, column bool) {
+func (ce *channelEvents) downtimeCheck(key string, st *itemstate.ItemState) (evs []channelevents.Event, column, closed bool) {
 	if ce.ledger == nil || downtimeDisabled.Load() {
-		return nil, false
+		return nil, false, false
 	}
 	ce.dmu.Lock()
 	defer ce.dmu.Unlock()
 	p := ce.pend[key]
 	if p == nil {
 		if ce.looked[key] {
-			return nil, false
+			return nil, false, false
 		}
 		ce.looked[key] = true
 		rec, ok := ce.ledger.TakePrior(key)
 		if !ok {
-			return nil, false
+			return nil, false, false
 		}
 		p = &priorEntry{rec: rec, labelsDone: !rec.LabelsKnown}
 		ce.pend[key] = p
@@ -104,6 +105,7 @@ func (ce *channelEvents) downtimeCheck(key string, st *itemstate.ItemState) (evs
 		}
 		if st.IsClosed && !p.rec.Closed {
 			evs = append(evs, ce.closedEvent(key, st, zero))
+			closed = true
 		}
 	}
 	if !p.labelsDone && st.LabelsKnown {
@@ -125,7 +127,7 @@ func (ce *channelEvents) downtimeCheck(key string, st *itemstate.ItemState) (evs
 		evs[i].Meta[channelevents.MetaUnverified] = "true"
 		evs[i].Content += " (changed while the daemon was down)"
 	}
-	return evs, column
+	return evs, column, closed
 }
 
 // diffLabelSets lists the labels added to and removed from before to reach after
