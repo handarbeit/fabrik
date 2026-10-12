@@ -492,6 +492,10 @@ type SubscribeParams struct {
 	// RemindAfterSeconds opts into reminders for a still-pending
 	// decision-pending episode (#2120 R6a); 0 = never.
 	RemindAfterSeconds int `json:"remind_after_seconds,omitempty"`
+	// SituationSeconds opts into the situation digest on a cadence (#2171);
+	// 0 = off. The digest is sent only when the view changed since the last
+	// one this subscriber received.
+	SituationSeconds int `json:"situation_seconds,omitempty"`
 }
 
 // EventMapping reports a requested event type the daemon rewrote to its current

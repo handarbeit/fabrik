@@ -52,6 +52,10 @@ type Server struct {
 	// switch in handle, so a server without one answers them unknown_method
 	// and the read path can never mutate.
 	Actor Actor
+	// Situation, when set before Start, enables the situation method (#2171).
+	// Like Streamer it is optional: a server without it answers unknown_method
+	// and hello does not advertise it.
+	Situation SituationBackend
 	// Version is the daemon's build version, advertised in hello as
 	// daemon_version so a shim can tell when it is running against a different
 	// build (#2168). Empty omits the field.
@@ -497,6 +501,9 @@ func (s *Server) handle(req Frame) (resp Frame) {
 		if s.Streamer != nil {
 			methods = append(methods, MethodSubscribe, MethodUnsubscribe, MethodAttach)
 		}
+		if s.Situation != nil {
+			methods = append(methods, MethodSituation)
+		}
 		if s.Actor != nil {
 			methods = append(methods, ActionMethods()...)
 		}
@@ -546,6 +553,15 @@ func (s *Server) handle(req Frame) (resp Frame) {
 		result, err = s.be.Board(p)
 	case MethodHealth:
 		result, err = s.be.Health(HealthParams{})
+	case MethodSituation:
+		if s.Situation == nil {
+			return Frame{ID: req.ID, Error: Errorf(CodeUnknownMethod, "unknown method %q", req.Method)}
+		}
+		var p SituationParams
+		if e := decodeParams(req.Params, &p); e != nil {
+			return Frame{ID: req.ID, Error: e}
+		}
+		result, err = s.Situation.Situation(p)
 	default:
 		return Frame{ID: req.ID, Error: Errorf(CodeUnknownMethod, "unknown method %q", req.Method)}
 	}

@@ -185,7 +185,7 @@ func TestInitializeToolsListAndOneCallEach(t *testing.T) {
 			}
 		}
 	}
-	if strings.Join(names, ",") != "fabrik_status,fabrik_board,fabrik_health,fabrik_subscribe,fabrik_unsubscribe,fabrik_promote,fabrik_set_autonomy,fabrik_revalidate,fabrik_advance,fabrik_move_parked,fabrik_clear_claude_limit" {
+	if strings.Join(names, ",") != "fabrik_status,fabrik_board,fabrik_health,fabrik_situation,fabrik_subscribe,fabrik_unsubscribe,fabrik_promote,fabrik_set_autonomy,fabrik_revalidate,fabrik_advance,fabrik_move_parked,fabrik_clear_claude_limit" {
 		t.Errorf("tools = %v", names)
 	}
 

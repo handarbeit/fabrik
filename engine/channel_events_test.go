@@ -553,6 +553,10 @@ func TestSelfUpgradeConfigsFlushChannelStateBeforeExec(t *testing.T) {
 // A subscriber that arrives after items already settled or paused still learns
 // about them: a new subscription and a fresh session each get one catch-up
 // snapshot of current state, tagged catch_up=true, while a reconnect does not.
+//
+// The subscriber names its events, so it is not on the semantic default and
+// keeps the per-item snapshot; a default subscription is caught up with the
+// situation digest instead (channel_situation_test.go, #2171).
 func TestCatchUpDeliversWaitingItemsToLateSubscriber(t *testing.T) {
 	e, live := channelEngine(t, 0, settledOnly())
 	seedValidate(t, e, 1, "fabrik:cruise", "stage:Validate:complete")
@@ -563,11 +567,12 @@ func TestCatchUpDeliversWaitingItemsToLateSubscriber(t *testing.T) {
 	e.seedAPIItem(t, 3, "Implement") // nothing waiting on anyone
 
 	st := e.channelStreamer()
-	if _, err := st.Subscribe(localapi.SubscribeParams{Subscriber: "late"}); err != nil {
+	perItem := localapi.SubscribeParams{Subscriber: "late", Events: []string{"validate-settled", "awaiting-input"}}
+	if _, err := st.Subscribe(perItem); err != nil {
 		t.Fatal(err)
 	}
 	// The same subscription again is not a new subscription: no second catch-up.
-	if _, err := st.Subscribe(localapi.SubscribeParams{Subscriber: "late"}); err != nil {
+	if _, err := st.Subscribe(perItem); err != nil {
 		t.Fatal(err)
 	}
 

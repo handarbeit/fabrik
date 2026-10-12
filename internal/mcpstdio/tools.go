@@ -20,6 +20,8 @@ const (
 	ToolStatus = "fabrik_status"
 	ToolBoard  = "fabrik_board"
 	ToolHealth = "fabrik_health"
+	// ToolSituation (#2171, ADR 2171) is the rolled-up "what needs you" view.
+	ToolSituation = "fabrik_situation"
 
 	ToolSubscribe   = "fabrik_subscribe"
 	ToolUnsubscribe = "fabrik_unsubscribe"
@@ -144,15 +146,31 @@ func toolDefs() []map[string]any {
 			"annotations": readOnly,
 		},
 		{
+			"name": ToolSituation,
+			"description": "The one answer to 'what needs me?', from the daemon's in-memory state (no GitHub call): PRs settled at Validate under cruise awaiting a merge decision (with the review and CI verdicts as cached), " +
+				"items held at the feedback / review / CI / merge gate (the gate and how long it has held), items waiting for human input (with how to resume them), pending decisions, stalled items, " +
+				"merge-train state per (repo, base) partition, poll and worker health (in progress or overdue, slots in use, train members queued), and active anomalies (pipeline-stalled, retry-starved, item-wedged, cache-divergence). " +
+				"Every item entry carries its title, link and the options to act, each with the MCP tool that performs it when one exists. Each section is ordered by attention rank and bounded: `omitted` counts the entries cut, and an item appears in one section only (an item already reported as item-wedged is under anomalies, not gates). " +
+				"A fact the daemon cannot vouch for (a hold that began before the daemon started, labels it has not read yet) is \"unknown\", never a default; `nothing_needs_you` is true only when there is nothing to report and every open item could be classified. " +
+				"The same view is what a `situation` event carries and what the catch-up on attach delivers. With push: true the view is also queued to this session's channel as a `situation` event, " +
+				"unless it equals the last one sent to this subscriber (force: true sends it anyway); that writes nothing to GitHub or the board and needs this server to have been launched with --subscriber.",
+			"inputSchema": obj(map[string]any{
+				"push":  map[string]any{"type": "boolean", "description": "also queue this view to this session as a situation event (deduplicated unless force)"},
+				"force": map[string]any{"type": "boolean", "description": "with push, send even when the view equals the last digest sent to this subscriber"},
+			}),
+			"annotations": readOnly,
+		},
+		{
 			"name": ToolSubscribe,
 			"description": "Choose which Fabrik events are pushed into this session (Claude Code Channels, research preview) instead of polling. Costs no GitHub call. " +
 				"Scopes combine with AND (entries inside one list with OR): issues, repos, a milestone, and label patterns (* matches any run of characters, e.g. fabrik:* or stage:*:complete; " +
 				"patterns only affect label-applied/label-removed events). By default label events skip high-churn labels (fabrik:locked:*, stage:*:in_progress, fabrik:spawned-child:*, fabrik:credited-pr:*, fabrik:editing); " +
 				"pass exclude_labels: [] to receive every label change. item-added (a new item arrived), column-changed (a board column move) and closed are lifecycle events; progress_via_column replaces the stage-label stream with column moves. events filters by type: " + eventList() + ". " +
 				"digest_seconds (30-3600) batches ordinary events into one message; validate-settled, settlement-withdrawn, escalated, paused and daemon-unreachable always arrive at once. " +
+				"situation_seconds (60 to 86400; default off) pushes the situation digest - the same rolled-up view fabrik_situation returns - at most that often, and only when it changed since the last one sent to this session; it needs situation in events (or no events list). " +
 				"remind_after (seconds, 600 to 2592000; default off) re-sends a still-pending decision-pending event to this session once per interval, marked reminder=true and carrying the original's attributes; it is never sent from daemon uptime and never as `stalled`. " +
 				"Without an events list you receive the semantic event family: every type below except the raw label-applied / label-removed events. Label events are opt-in - name label-applied and/or label-removed in events to receive them (labels, exclude_labels and progress_via_column only shape label events, so they do nothing unless you do; the response notes it). " +
-				"After a daemon restart you receive daemon-reachable, one catch_up snapshot of what needs you, then the changes made while it was down (origin=downtime-delta) - never a replay of unchanged state. " +
+				"On subscribing, on a fresh attach and after a daemon restart you receive one catch_up snapshot of what needs you: the situation digest if this subscription takes situation (the default family does), otherwise the per-item events it matches. After a restart you also receive daemon-reachable first and then the changes made while it was down (origin=downtime-delta) - never a replay of unchanged state. " +
 				"Label events are not a readiness signal: a label such as stage:Validate:complete can appear and be removed again while the PR still needs a rebase, CI or a fix. " +
 				"Only validate-settled (the item is ready for your decision) and settlement-withdrawn (it stopped being ready before you acted) say whether an item is ready; act on decision-pending/validate-settled events using their `options` and do not act on a settled event that a settlement-withdrawn event has since withdrawn. " +
 				"Events are held (persisted, bounded) while no session with this subscriber name is attached and delivered in order on reconnect. " +
@@ -171,6 +189,7 @@ func toolDefs() []map[string]any {
 				"progress_via_column": map[string]any{"type": "boolean", "description": "drop label-applied/label-removed for stage:*:complete and stage:*:in_progress when column-changed is also taken, so progress arrives as column moves instead of the stage-label stream; overrides labels and exclude_labels for those two patterns; requires column-changed in events when events is set"},
 				"subscriber":          map[string]any{"type": "string", "description": "subscriber name; defaults to the name this server was launched with (--subscriber / FABRIK_SUBSCRIBER)"},
 				"remind_after":        map[string]any{"type": "integer", "minimum": 600, "maximum": 2592000, "description": "seconds between reminders for a still-pending decision-pending episode; omit for none"},
+				"situation_seconds":   map[string]any{"type": "integer", "minimum": 60, "maximum": 86400, "description": "push the situation digest at most this often, only when it changed since the last one sent; omit for none (the catch-up and fabrik_situation push still deliver one)"},
 			}),
 			"annotations": map[string]any{"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},
 		},
@@ -296,6 +315,24 @@ func buildCall(name string, args json.RawMessage, defaultSubscriber string) (met
 		return localapi.MethodBoard, localapi.BoardParams{View: a.View, Filter: a.Filter, StallThresholdSeconds: a.StallMi * 60}, nil
 	case ToolHealth:
 		return localapi.MethodHealth, nil, nil
+	case ToolSituation:
+		var a struct {
+			Push  bool `json:"push"`
+			Force bool `json:"force"`
+		}
+		if err := decodeArgs(args, &a); err != nil {
+			return "", nil, err
+		}
+		p := localapi.SituationParams{Push: a.Push, Force: a.Force}
+		if a.Push {
+			// A push goes to this session's own channel only: the launched
+			// --subscriber name, with no per-call override (as for the action
+			// tools), so a call cannot queue a digest into, or overwrite the dedup
+			// memory of, another subscriber. Without a name the daemon still
+			// answers and says nothing was pushed.
+			p.Subscriber = defaultSubscriber
+		}
+		return localapi.MethodSituation, p, nil
 	case ToolSubscribe:
 		var a struct {
 			Issues        []issueArg `json:"issues"`
@@ -306,6 +343,7 @@ func buildCall(name string, args json.RawMessage, defaultSubscriber string) (met
 			Events        []string   `json:"events"`
 			DigestSeconds int        `json:"digest_seconds"`
 			RemindAfter   int        `json:"remind_after"`
+			Situation     int        `json:"situation_seconds"`
 			Subscriber    string     `json:"subscriber"`
 
 			ProgressViaColumn bool `json:"progress_via_column"`
@@ -323,6 +361,9 @@ func buildCall(name string, args json.RawMessage, defaultSubscriber string) (met
 		if a.RemindAfter < 0 {
 			return "", nil, fmt.Errorf("remind_after must be positive")
 		}
+		if a.Situation < 0 {
+			return "", nil, fmt.Errorf("situation_seconds must be positive")
+		}
 		var issues []string
 		for _, i := range a.Issues {
 			issues = append(issues, string(i))
@@ -332,6 +373,7 @@ func buildCall(name string, args json.RawMessage, defaultSubscriber string) (met
 			Labels: a.Labels, ExcludeLabels: a.ExcludeLabels, Events: a.Events, DigestSeconds: a.DigestSeconds,
 			ProgressViaColumn:  a.ProgressViaColumn,
 			RemindAfterSeconds: a.RemindAfter,
+			SituationSeconds:   a.Situation,
 		}, nil
 	case ToolUnsubscribe:
 		var a struct {

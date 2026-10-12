@@ -286,6 +286,7 @@ func (ce *channelEvents) onTick() {
 	ce.checkClaudeLimit()
 	ce.checkPipeline()
 	ce.checkAnomalies()
+	ce.publishSituations()
 }
 
 // checkClaudeLimit emits claude-usage-limited / -lifted on the edge of the

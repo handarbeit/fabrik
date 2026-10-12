@@ -133,7 +133,26 @@ type anomalyState struct {
 	// measured from the later of its due time and the lift.
 	limitedUntil time.Time
 	lastLift     time.Time
+	// recent holds the cache divergences seen within cacheDivergenceWindow, so
+	// the situation view can say one is active (#2171). cache-divergence is a
+	// point event; this is a bounded memory of it, not a new signal.
+	recent []divergenceNote
 }
+
+// divergenceNote is one cache divergence remembered for the situation view.
+type divergenceNote struct {
+	ref      string
+	repo     string
+	number   int
+	what     string
+	written  string
+	observed string
+	path     string
+	at       time.Time
+}
+
+// maxRecentDivergences bounds anomalyState.recent.
+const maxRecentDivergences = 50
 
 // ---- thresholds ----
 
@@ -349,11 +368,13 @@ func (ce *channelEvents) noteChangeForDivergence(c itemstate.Change, st *itemsta
 		if en.added {
 			written, observed = "added", "removed"
 		}
+		a.noteDivergenceLocked(divergenceNote{ref: ref, repo: c.Repo, number: c.Number, what: what, written: written, observed: observed, path: c.Path.String(), at: now}, window)
 		out = append(out, ce.divergenceEvent(c, st, what, written, observed, en.at, now, a.nextSeq()))
 	}
 	if c.StatusTo != "" {
 		if en, ok := a.ledger[lkey("column")]; ok && en.written != c.StatusTo {
 			delete(a.ledger, lkey("column"))
+			a.noteDivergenceLocked(divergenceNote{ref: ref, repo: c.Repo, number: c.Number, what: "column", written: en.written, observed: c.StatusTo, path: c.Path.String(), at: now}, window)
 			out = append(out, ce.divergenceEvent(c, st, "column", en.written, c.StatusTo, en.at, now, a.nextSeq()))
 		}
 	}
@@ -379,6 +400,81 @@ func (ce *channelEvents) divergenceEvent(c itemstate.Change, st *itemstate.ItemS
 	ev.Meta["path"] = path
 	ev.Meta["age_seconds"] = strconv.FormatInt(int64(age.Seconds()), 10)
 	return ev
+}
+
+// noteDivergenceLocked remembers a divergence for the situation view, dropping
+// those older than window and the oldest beyond the bound. a.mu held.
+func (a *anomalyState) noteDivergenceLocked(n divergenceNote, window time.Duration) {
+	kept := a.recent[:0:0]
+	for _, r := range a.recent {
+		if n.at.Sub(r.at) <= window {
+			kept = append(kept, r)
+		}
+	}
+	kept = append(kept, n)
+	if len(kept) > maxRecentDivergences {
+		kept = kept[len(kept)-maxRecentDivergences:]
+	}
+	a.recent = kept
+}
+
+// openAnomalyFacts is the open episodes the situation view and the catch-up
+// both report, copied out under the lock: announced, undispatched retries and
+// announced, uncleared item-wedged holds (sorted by ref), and the cache
+// divergences still inside the window (oldest first). Safe from any goroutine.
+func (e *Engine) openAnomalyFacts(now time.Time) (retries []retryFact, holds []wedgeHold, divergences []divergenceNote) {
+	ce := e.channelEvents()
+	if ce == nil {
+		return nil, nil, nil
+	}
+	a := &ce.anom
+	window := e.cacheDivergenceWindow()
+	a.mu.Lock()
+	for _, f := range a.retries {
+		if f.announced && !f.dispatched {
+			retries = append(retries, *f)
+		}
+	}
+	for _, h := range a.holds {
+		if h.announced && !h.dispatched && !h.cleared {
+			holds = append(holds, *h)
+		}
+	}
+	for _, r := range a.recent {
+		if now.Sub(r.at) <= window {
+			divergences = append(divergences, r)
+		}
+	}
+	a.mu.Unlock()
+	sort.Slice(retries, func(i, j int) bool { return retries[i].ref < retries[j].ref })
+	sort.Slice(holds, func(i, j int) bool { return holds[i].ref < holds[j].ref })
+	return retries, holds, divergences
+}
+
+// gateHolds copies every gate hold the engine has recorded and not cleared,
+// announced as item-wedged or not, sorted by ref then gate. Safe from any
+// goroutine.
+func (e *Engine) gateHolds() []wedgeHold {
+	ce := e.channelEvents()
+	if ce == nil {
+		return nil
+	}
+	a := &ce.anom
+	a.mu.Lock()
+	var out []wedgeHold
+	for _, h := range a.holds {
+		if !h.dispatched && !h.cleared {
+			out = append(out, *h)
+		}
+	}
+	a.mu.Unlock()
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ref != out[j].ref {
+			return out[i].ref < out[j].ref
+		}
+		return out[i].gate < out[j].gate
+	})
+	return out
 }
 
 func mergeMeta(dst, src map[string]string) map[string]string {
@@ -685,23 +781,7 @@ func (e *Engine) anomalyCatchUpEvents(now time.Time) []channelevents.Event {
 	if ce == nil {
 		return nil
 	}
-	a := &ce.anom
-	a.mu.Lock()
-	var retries []retryFact
-	for _, f := range a.retries {
-		if f.announced && !f.dispatched {
-			retries = append(retries, *f)
-		}
-	}
-	var holds []wedgeHold
-	for _, h := range a.holds {
-		if h.announced && !h.dispatched && !h.cleared {
-			holds = append(holds, *h)
-		}
-	}
-	a.mu.Unlock()
-	sort.Slice(retries, func(i, j int) bool { return retries[i].ref < retries[j].ref })
-	sort.Slice(holds, func(i, j int) bool { return holds[i].ref < holds[j].ref })
+	retries, holds, _ := e.openAnomalyFacts(now)
 
 	var out []channelevents.Event
 	for i := range retries {

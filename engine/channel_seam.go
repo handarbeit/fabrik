@@ -154,3 +154,24 @@ func (e *Engine) ApplyLabelWebhookForTest(repo string, number int, label string,
 // socket server (nil when the hub is not running), so a scenario can subscribe
 // and attach through the same code the MCP shim reaches.
 func (e *Engine) ChannelStreamerForTest() localapi.Streamer { return e.channelStreamer() }
+
+// situationMinOverride shortens the situation cadence floor the hub validates
+// against (nanoseconds; 0 keeps the production MinSituation).
+var situationMinOverride atomic.Int64
+
+// SetSituationMinForTest shortens the lowest situation_seconds the next-started
+// hub accepts, returning the restore function. Call it before the channel events
+// start.
+func SetSituationMinForTest(d time.Duration) (restore func()) {
+	old := situationMinOverride.Swap(int64(d))
+	return func() { situationMinOverride.Store(old) }
+}
+
+// SetSituationDedupDisabledForTest sends every situation digest regardless of
+// whether the view changed, returning the restore function. It is how the
+// dedup tests show they are not vacuous: against this builder the "two quiet
+// ticks publish one digest" assertion must fail.
+func SetSituationDedupDisabledForTest() (restore func()) {
+	situationDedupDisabled.Store(true)
+	return func() { situationDedupDisabled.Store(false) }
+}
