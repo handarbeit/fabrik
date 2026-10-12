@@ -310,6 +310,7 @@ Context files are available in .fabrik-context/
 
 ```
 --plugin-dir <absolute-path-to-.fabrik/plugin>
+--plugin-dir <absolute-path-to-.fabrik/plugins/local-workflows>  (only when that directory exists; #2139, state-machine §7.19)
 --plugin-dir <absolute-path-of-each-configured-plugin_dirs-entry>  (zero or more, in configured order; ADR 2136)
 --output-format json
 --verbose

@@ -138,3 +138,17 @@ func TestFineGrainedPAT_PanelRecordsAndClears(t *testing.T) {
 		t.Errorf("not cleared: %v", k)
 	}
 }
+
+func TestPluginState_MigrationPendingRecordsAndClears(t *testing.T) {
+	isolatePanel(t)
+	var buf bytes.Buffer
+	reportPluginState(&buf, pluginStateReport{MigrationPending: true, MigrationDetail: "A workflow migration is pending: x."})
+	if k := panelKeys(t); len(k) != 1 || !k["plugin_state:migration_pending"] {
+		t.Fatalf("keys = %v", k)
+	}
+	// A TUI-mode start that skipped the refresh still sweeps it once migrated.
+	reportPluginState(nil, pluginStateReport{RefreshSkipped: true})
+	if k := panelKeys(t); len(k) != 0 {
+		t.Errorf("not cleared: %v", k)
+	}
+}

@@ -600,7 +600,8 @@ func TestRunUpgrade_CustomWorkflowError(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	callErr := runUpgrade([]string{})
+	// --no-migrate keeps the pre-#2139 refusal (the default path now migrates).
+	callErr := runUpgrade([]string{"--no-migrate"})
 	if callErr == nil {
 		t.Fatal("expected error for custom-workflow state, got nil")
 	}
@@ -630,7 +631,8 @@ func TestRunUpgrade_CustomWorkflowAndStaleError(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	callErr := runUpgrade([]string{})
+	// --no-migrate keeps the pre-#2139 refusal (the default path now migrates).
+	callErr := runUpgrade([]string{"--no-migrate"})
 	if callErr == nil {
 		t.Fatal("expected error for custom-workflow-and-stale state, got nil")
 	}

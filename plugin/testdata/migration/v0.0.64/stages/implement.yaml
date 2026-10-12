@@ -1,0 +1,11 @@
+name: Implement
+order: 3
+skill: fabrik-implement
+comment_skill: fabrik-implement-comment
+model: sonnet
+max_turns: 50
+create_draft_pr: true
+mark_pr_ready_on_complete: true
+post_to_pr: true
+completion:
+  type: claude

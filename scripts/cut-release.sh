@@ -157,7 +157,7 @@ insert_notes_line() {
 # preserves).
 allowed_dirty_regex() {
   local version="$1"
-  printf '%s' "^\\?\\? release-notes/${version}\\.md\$| M release-notes/${version}\\.md\$|^M  release-notes/${version}\\.md\$| M plugin/known_embedded_versions\\.go\$|^M  plugin/known_embedded_versions\\.go\$| M plugin/[^/]+/\\.claude-plugin/plugin\\.json\$|^M  plugin/[^/]+/\\.claude-plugin/plugin\\.json\$"
+  printf '%s' "^\\?\\? release-notes/${version}\\.md\$| M release-notes/${version}\\.md\$|^M  release-notes/${version}\\.md\$| M plugin/known_embedded_versions\\.go\$|^M  plugin/known_embedded_versions\\.go\$| M plugin/shipped_files\\.json\$|^M  plugin/shipped_files\\.json\$| M plugin/[^/]+/\\.claude-plugin/plugin\\.json\$|^M  plugin/[^/]+/\\.claude-plugin/plugin\\.json\$"
 }
 
 # export_pregate_verified_sha exports FABRIK_PREGATE_VERIFIED_SHA (and
@@ -431,6 +431,17 @@ else
   ok "appended $PLUGIN_HASH to $KNOWN_VERSIONS_FILE"
 fi
 
+# The per-file companion to KnownEmbeddedVersions (#2139): `fabrik upgrade`
+# tells an operator's edit from an older shipped file by this table, so every
+# released file version must be in it before the tag exists. -add-current is a
+# no-op when the embed is unchanged; -check fails the release if any tag's file
+# or the current embed is missing.
+step "Record shipped plugin file versions for $VERSION"
+SHIPPED_FILES_FILE="plugin/shipped_files.json"
+go run ./tools/gen-shipped-files -add-current || die "gen-shipped-files -add-current failed"
+go run ./tools/gen-shipped-files -check || die "$SHIPPED_FILES_FILE does not cover every release and the current embed"
+ok "$SHIPPED_FILES_FILE covers every release and the current embed"
+
 if [ "$SKIP_TESTS" -eq 1 ]; then
   warn "--skip-tests was passed; go test -race ./... was NOT run (the sim + wire-contract pre-gate above still ran unconditionally)"
 else
@@ -543,6 +554,7 @@ step "Commit release notes"
 # The workflow reads release-notes/<version>.md directly — no copy step needed.
 git add "$NOTES_FILE"
 git add "$KNOWN_VERSIONS_FILE"
+git add "$SHIPPED_FILES_FILE"
 if git diff --cached --quiet; then
   warn "no release-notes changes to commit — skipping commit step"
 else

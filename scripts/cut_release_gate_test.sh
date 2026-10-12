@@ -228,6 +228,8 @@ assert_eq "allowed_dirty_regex: modified release-notes/<version>.md is filtered 
   "filtered" "$(allowed_line_survives " M release-notes/${SAMPLE_VERSION}.md")"
 assert_eq "allowed_dirty_regex: modified plugin/known_embedded_versions.go is filtered (allowed)" \
   "filtered" "$(allowed_line_survives " M plugin/known_embedded_versions.go")"
+assert_eq "allowed_dirty_regex: modified plugin/shipped_files.json is filtered (allowed)" \
+  "filtered" "$(allowed_line_survives " M plugin/shipped_files.json")"
 assert_eq "allowed_dirty_regex: modified plugin/*/.claude-plugin/plugin.json is filtered (allowed)" \
   "filtered" "$(allowed_line_survives " M plugin/entwurf/.claude-plugin/plugin.json")"
 assert_eq "allowed_dirty_regex: an unrelated dirty file is NOT filtered (still counts as dirty)" \

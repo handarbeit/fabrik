@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/handarbeit/fabrik/plugin"
 	"github.com/handarbeit/fabrik/stages"
 )
 
@@ -257,5 +258,118 @@ func TestNew_PluginDirsRefusedOnDuplicateName(t *testing.T) {
 	}
 	if !reflect.DeepEqual(claudePluginDirs, []string{"sentinel"}) {
 		t.Fatalf("global modified by refused New: %v", claudePluginDirs)
+	}
+}
+
+func localWorkflowsDir(fabrikDir string) string {
+	return filepath.Join(fabrikDir, ".fabrik", "plugins", "local-workflows")
+}
+
+// FR-007: local-workflows loads automatically, right after the base and
+// before the configured extras.
+func TestResolvePluginDirs_AutoLoadsLocalWorkflows(t *testing.T) {
+	fabrikDir := t.TempDir()
+	base := namedPlugin(t, filepath.Join(fabrikDir, ".fabrik", "plugin"), "fabrik")
+	lw := namedPlugin(t, localWorkflowsDir(fabrikDir), "local-workflows")
+	extra := namedPlugin(t, filepath.Join(fabrikDir, "extra"), "extra")
+
+	got, err := resolvePluginDirs(fabrikDir, "", []string{extra})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{base, lw, extra}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+func TestResolvePluginDirs_LocalWorkflowsAbsentIsNoChange(t *testing.T) {
+	fabrikDir := t.TempDir()
+	base := namedPlugin(t, filepath.Join(fabrikDir, ".fabrik", "plugin"), "fabrik")
+	got, err := resolvePluginDirs(fabrikDir, "", nil)
+	if err != nil || !reflect.DeepEqual(got, []string{base}) {
+		t.Fatalf("got %v err %v", got, err)
+	}
+}
+
+// An operator who also lists the directory in plugin_dirs is not refused.
+func TestResolvePluginDirs_LocalWorkflowsAlsoListedIsDeduplicated(t *testing.T) {
+	fabrikDir := t.TempDir()
+	base := namedPlugin(t, filepath.Join(fabrikDir, ".fabrik", "plugin"), "fabrik")
+	lw := namedPlugin(t, localWorkflowsDir(fabrikDir), "local-workflows")
+	got, err := resolvePluginDirs(fabrikDir, "", []string{".fabrik/plugins/local-workflows"})
+	if err != nil || !reflect.DeepEqual(got, []string{base, lw}) {
+		t.Fatalf("got %v err %v", got, err)
+	}
+}
+
+// A copy that still declares the base name (a half-done move) is refused
+// loudly rather than loaded beside the base.
+func TestResolvePluginDirs_LocalWorkflowsNameClashIsRefused(t *testing.T) {
+	fabrikDir := t.TempDir()
+	namedPlugin(t, filepath.Join(fabrikDir, ".fabrik", "plugin"), "fabrik")
+	namedPlugin(t, localWorkflowsDir(fabrikDir), "fabrik")
+	_, err := resolvePluginDirs(fabrikDir, "", nil)
+	if err == nil || !strings.Contains(err.Error(), "must be unique") {
+		t.Fatalf("err = %v", err)
+	}
+	// The refusal names the remedy for this state: 'fabrik upgrade' finishes
+	// the interrupted migration (cmd's resume tests cover that it does).
+	if !strings.Contains(err.Error(), "fabrik upgrade") {
+		t.Fatalf("err = %v, want it to point at 'fabrik upgrade'", err)
+	}
+}
+
+// The hint is specific to the auto-loaded directory: a clash between
+// configured extras keeps the plain message.
+func TestResolvePluginDirs_ExtraNameClashHasNoMigrationHint(t *testing.T) {
+	root := t.TempDir()
+	a := namedPlugin(t, filepath.Join(root, "a"), "same")
+	b := namedPlugin(t, filepath.Join(root, "b"), "same")
+	_, err := resolvePluginDirs(root, "", []string{a, b})
+	if err == nil || strings.Contains(err.Error(), "fabrik upgrade") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestResolvePluginDirs_LocalWorkflowsLoadsBesideDevOverride(t *testing.T) {
+	fabrikDir := t.TempDir()
+	override := namedPlugin(t, filepath.Join(t.TempDir(), "vendored"), "fabrik")
+	lw := namedPlugin(t, localWorkflowsDir(fabrikDir), "local-workflows")
+	got, err := resolvePluginDirs(fabrikDir, override, nil)
+	if err != nil || !reflect.DeepEqual(got, []string{override, lw}) {
+		t.Fatalf("got %v err %v", got, err)
+	}
+}
+
+// The migrated layout end to end at the loader: the dirs resolvePluginDirs
+// returns feed the skill catalogue, so a stage pointing at
+// local-workflows:<skill> resolves, and the base's copy stays reachable by its
+// own qualified name. (The sim bed builds engines with NewWithDeps, which load
+// no plugins, so this is the twin-level coverage; see ADR 2139.)
+func TestResolvePluginDirs_LocalWorkflowsSkillsResolveQualified(t *testing.T) {
+	fabrikDir := t.TempDir()
+	skillPlugin(t, fabrikDir, filepath.Join(".fabrik", "plugin"), plugin.BasePluginName, "fabrik-plan", "fabrik-research")
+	skillPlugin(t, fabrikDir, filepath.Join(".fabrik", "plugins", "local-workflows"), plugin.LocalWorkflowsName, "fabrik-plan")
+
+	dirs, err := resolvePluginDirs(fabrikDir, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cat := buildSkillCatalogue(dirs)
+	for ref, want := range map[string]string{
+		"local-workflows:fabrik-plan": "local-workflows:fabrik-plan",
+		"fabrik:fabrik-plan":          "fabrik:fabrik-plan",
+		"fabrik:fabrik-research":      "fabrik:fabrik-research",
+		"fabrik-plan":                 "fabrik:fabrik-plan", // bare still resolves base-first
+	} {
+		res, why, ok := cat.resolve(ref)
+		if !ok {
+			t.Errorf("%s did not resolve: %s", ref, why)
+			continue
+		}
+		if res.Name != want {
+			t.Errorf("%s resolved to %q, want %q", ref, res.Name, want)
+		}
 	}
 }

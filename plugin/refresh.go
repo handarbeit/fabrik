@@ -257,7 +257,12 @@ func isKnownEmbedded(hash string, knownVersions []string) bool {
 // RefreshPlugin overwrites .fabrik/plugin/ with the embedded plugin files.
 // Returns the number of files written.
 func RefreshPlugin() (int, error) {
-	pluginDir := ".fabrik/plugin"
+	return RefreshPluginTo(".fabrik/plugin")
+}
+
+// RefreshPluginTo writes the embedded plugin files into pluginDir, overwriting
+// files of the same name, and returns the number of files written.
+func RefreshPluginTo(pluginDir string) (int, error) {
 	wrote := 0
 	err := fs.WalkDir(FabrikPlugin, "fabrik-workflows", func(p string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {

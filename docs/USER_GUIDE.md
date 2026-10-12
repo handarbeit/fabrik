@@ -117,11 +117,13 @@ To refresh plugin skills without touching stages or config (e.g., after upgradin
 ./fabrik upgrade
 ```
 
-> **Note:** Plain `fabrik upgrade` errors when local customizations are detected (i.e.,
-> you have edited files under `.fabrik/plugin/`). Use `--force` to overwrite them
-> unconditionally, or `--reconcile` to get a guided merge prompt. See
-> [Upgrade protection for customized skills](#upgrade-protection-for-customized-skills)
-> for details.
+> **Note:** `fabrik upgrade` also migrates your workflow configuration: it qualifies the
+> skill references in `.fabrik/stages/*.yaml` and, if you have edited files under
+> `.fabrik/plugin/`, moves those edits into `.fabrik/plugins/local-workflows/`. It never
+> commits; review and commit the result. See
+> [Workflow migration](#workflow-migration-fabrik-upgrade). `--force` overwrites local
+> edits unconditionally and `--reconcile` prints a guided merge prompt; see
+> [Upgrade protection for customized skills](#upgrade-protection-for-customized-skills).
 
 Edit `.fabrik/config.yaml` with your project settings and commit it to git. Add your
 GitHub token to a gitignored `.env` file:
@@ -744,8 +746,9 @@ local `HEAD`:
 - **Remote `origin/main` ahead of HEAD**: run `git pull --ff-only` to update, then
   rebuild.
 
-After rebuilding, Fabrik runs `fabrik upgrade` (non-interactive, silent — see below)
-and re-execs the new binary. This keeps dev builds current with the same hands-off
+After rebuilding, Fabrik runs `fabrik upgrade --no-migrate` (non-interactive, silent — see
+below; it never runs the [workflow migration](#workflow-migration-fabrik-upgrade)
+unattended) and re-execs the new binary. This keeps dev builds current with the same hands-off
 experience as release binaries.
 
 **Staleness reporting on a busy board:** the two upgrade-check points above both
@@ -780,14 +783,17 @@ fetch`.
 >
 > **Standalone `fabrik upgrade` subcommand**: Not TTY-sensitive — the command never prompts
 > interactively. When no local customizations are detected, skills are refreshed
-> unconditionally. When customizations are detected, the command exits with an error
-> directing you to `--force` (destructive overwrite) or `--reconcile` (guided merge
-> prompt). See [Upgrade protection for customized skills](#upgrade-protection-for-customized-skills)
+> unconditionally. When customizations are detected, the command migrates them into
+> `.fabrik/plugins/local-workflows/` (see [Workflow migration](#workflow-migration-fabrik-upgrade));
+> with `--no-migrate` it instead exits with an error directing you to `--force`
+> (destructive overwrite) or `--reconcile` (guided merge prompt). See
+> [Upgrade protection for customized skills](#upgrade-protection-for-customized-skills)
 > for details.
 >
 > In both contexts, when customizations are present and the refresh is skipped, the
 > `[u] custom workflow` badge appears on next TUI startup (shown as `[u] custom workflow (N stale)` when
-> the embedded skills have also moved on — run `fabrik upgrade --reconcile` to resolve).
+> the embedded skills have also moved on — run `fabrik upgrade` to move your edits into
+> `local-workflows`, which also resolves the staleness). The badge goes away once migrated.
 
 ```bash
 ./fabrik --auto-upgrade --owner your-org --repo your-repo --project 1 --user you
@@ -3036,14 +3042,14 @@ comment_skill: myorg:review-comment  # a skill from your own plugin
 - **References are resolved against the plugins actually loaded for the worker** — the base
   plugin (`.fabrik/plugin/`, or the `--plugin-dir` override) plus every `plugin_dirs` entry —
   read from disk, not against what the Fabrik binary ships. A customised base plugin is
-  therefore honoured as it is. Only `--plugin-dir`/`plugin_dirs` plugins are visible to
-  resolution: with no plugin directory loaded at all (Claude Code supplies the plugin
+  therefore honoured as it is. Only `--plugin-dir`, `.fabrik/plugins/local-workflows` and
+  `plugin_dirs` plugins are visible to resolution: with no plugin directory loaded at all (Claude Code supplies the plugin
   itself) the name is passed through unchanged and not checked.
 - **Bare names are deprecated, not removed.** `skill: fabrik-review` still works: it is
   resolved to the loaded plugin that provides it (the base plugin if several do, with the
   others named in the notice) and the prompt carries the qualified name. At startup Fabrik
   logs one notice and records one warnings-panel entry listing every bare reference;
-  `fabrik upgrade` migrates them. Fresh `fabrik init` stage files are written qualified.
+  `fabrik upgrade` migrates them (see [Workflow migration](#workflow-migration-fabrik-upgrade)). Fresh `fabrik init` stage files are written qualified.
 - **A reference that does not resolve never reaches a worker.** If the plugin is not
   loaded, or lacks the skill, or no loaded plugin provides a bare name, the stage does not
   run: Fabrik posts one comment on the issue naming the reference, the plugins searched and
@@ -3072,6 +3078,66 @@ comment_skill: myorg:review-comment  # a skill from your own plugin
   Skills are found the way Claude Code finds them: `skills/<name>/SKILL.md`, directories
   added by the manifest's `skills` key, or a root `SKILL.md` as a single skill.
 
+#### Workflow migration (`fabrik upgrade`)
+
+Editing the deployed plugin in `.fabrik/plugin/` used to be the only way to customize a
+stage, and it stranded you: Fabrik protected your edits, so `fabrik upgrade` refused to
+touch the plugin and you never received skill updates again. `fabrik upgrade` now
+separates your customizations from Fabrik's own plugin, and rewrites your stage files to
+name each skill's plugin explicitly (`fabrik:fabrik-plan`, `local-workflows:fabrik-plan`).
+
+**What a run does**, in order, deciding only from what is on disk (never from version
+numbers), so a deployment that skipped several releases reaches the same result as one
+that upgraded through each:
+
+1. **Detects customization** by comparing every file under `.fabrik/plugin/` with every
+   version Fabrik has ever shipped (not just the current one). A copy that matches *some*
+   older release is not a customization and is simply refreshed.
+2. **Moves a customized tree** to `.fabrik/plugins/local-workflows/` and renames the
+   plugin in its `.claude-plugin/plugin.json` to `local-workflows`, the one change to the
+   moved files; skills and other files are moved byte for byte, extra files and skills of
+   your own included. Its `.installed-version` is dropped, since it described the base.
+3. **Restores a clean base plugin** in `.fabrik/plugin/` from the binary. From here on
+   plain `fabrik upgrade` refreshes it like any uncustomized install.
+4. **Rewrites the skill references** (`skill`, `comment_skill`, `ci_fix_skill`,
+   `rebase_skill`) in `.fabrik/stages/*.yaml`, changing nothing else in those files
+   (comments, quoting and line endings are preserved). A stage whose skill you edited
+   points at `local-workflows:<skill>`; every other stage points at `fabrik:<skill>`.
+   A reference that is already qualified is left alone, and a bare name that no plugin
+   Fabrik can see provides (for example a skill in a `plugin_dirs` plugin) is left bare
+   and reported.
+5. **Prints what moved and what was rewritten** and tells you to review and commit it.
+   Fabrik never commits to your repository.
+
+An uncustomized deployment only gets step 4; running the command again changes nothing.
+Unedited skills that travel with a moved tree are simply left unreferenced.
+
+**Details worth knowing**
+
+- `local-workflows` is **loaded automatically** whenever `.fabrik/plugins/local-workflows/`
+  exists, right after the base plugin and before `plugin_dirs`; you do not list it. See
+  [Plugin Development](#plugin-development).
+- `local-workflows` is **never overwritten**. If it already exists while `.fabrik/plugin/`
+  has edits, the migration refuses, tells you, and changes nothing. A plugin you put there
+  yourself under another name (its manifest does not say `fabrik` or `local-workflows`) is
+  left exactly as it is, and no stage is pointed at it as `local-workflows:`.
+- A stage that already says `fabrik:fabrik-plan` is left alone even if you edited that
+  skill: the report names the `local-workflows:` copy so you can point the stage at it.
+- A vendored plugin set (`FABRIK_PLUGIN_DIR` set, or `.fabrik/plugin` a symlink) is
+  reported with instructions and not moved.
+- An interrupted run is safe to repeat; it completes from what it finds.
+- `fabrik upgrade --no-migrate` skips all of this and keeps the old behavior, including
+  the refusal on customized plugins. The dev-build auto-upgrade uses it, so nothing moves
+  files or edits tracked YAML unattended.
+- The daemon never runs the migration. Until you do, startup records a *Workflow migration
+  pending* entry in the warnings panel and keeps working on the old layout.
+- Interactive `fabrik resume` / `watch` sessions pass only the base plugin, so they do not
+  load `local-workflows`.
+- **To undo** (before or after committing): restore the affected paths with git
+  (`.fabrik/plugin`, `.fabrik/plugins/local-workflows`, `.fabrik/stages`), or move
+  `.fabrik/plugins/local-workflows` back to `.fabrik/plugin` and set its manifest
+  `name` back to `fabrik`. `fabrik upgrade --no-migrate` then behaves as before.
+
 #### Upgrade protection for customized skills
 
 Fabrik tracks what it last installed using a `.fabrik/plugin/.installed-version`
@@ -3093,10 +3159,13 @@ rather than letting the customization warning silently suppress the staleness si
 This combined state is common: a downstream project that customized `.fabrik/plugin/`
 once and then upgraded Fabrik several times without reconciling will show both.
 
-When customizations are detected, Fabrik refuses to overwrite them silently.
+When customizations are detected, Fabrik never overwrites them silently. Plain
+`fabrik upgrade` moves them into `local-workflows` ([Workflow migration](#workflow-migration-fabrik-upgrade));
+the table above is what the daemon's startup check and `fabrik upgrade --no-migrate` see.
 Use one of:
 
 ```bash
+fabrik upgrade              # Move customizations to local-workflows, restore the base
 fabrik upgrade --force      # Overwrite all customizations (destructive)
 fabrik upgrade --reconcile  # Print a Claude Code prompt for guided reconciliation
 ```
@@ -3336,11 +3405,14 @@ can only be given in `config.yaml`). Flag beats environment beats config file.
 
 ```yaml
 plugin_dirs:
-  - .fabrik/plugins/local-workflows
+  - .fabrik/plugins/team-workflows
 ```
 
 - The base plugin is never removed by adding plugins; with no extras configured the
   worker arguments are exactly as before.
+- `.fabrik/plugins/local-workflows/`, where `fabrik upgrade` moves customizations, is
+  loaded automatically when it exists (right after the base, before `plugin_dirs`);
+  listing it in `plugin_dirs` as well is harmless.
 - Relative paths resolve against the Fabrik directory (the directory containing
   `.fabrik/`); `~` is not expanded. A repeated path, or one equal to the base, is
   ignored.
@@ -3348,13 +3420,15 @@ plugin_dirs:
   `name`; otherwise startup fails naming the path.
 - Two loaded plugins must not declare the same manifest `name`; startup fails naming
   both paths. In particular, a project plugin cannot call itself `fabrik` while the
-  default base plugin is loaded.
+  default base plugin is loaded, and a `local-workflows` whose manifest still says
+  `fabrik` (a half-finished move) is refused until `fabrik upgrade` completes it.
 - Point a stage at a skill in an additional plugin with `<manifest name>:<skill>` (see
   [Skill references](#skill-references)).
 - Additional plugins are yours: `fabrik upgrade`, staleness checks
-  and customization detection apply to `.fabrik/plugin/` only.
+  and customization detection apply to `.fabrik/plugin/` only (the workflow migration
+  creates `local-workflows` once and never touches it again).
 - Interactive `resume` / `watch` sessions pass only the base plugin override, not the
-  additional plugins.
+  additional plugins or `local-workflows`.
 
 **Developing the base plugin.** `--plugin-dir` (or `FABRIK_PLUGIN_DIR`) *replaces* the
 base plugin, so the deployed copy does not also load. Configured `plugin_dirs` are still
@@ -3536,6 +3610,9 @@ operator to press `u` to upgrade. When Fabrik detects that the on-disk skills
 differ from the last installed version (indicating operator customizations), the
 badge changes to `[u] custom workflow` and pressing `u` opens a three-option
 dialog instead of a simple y/N prompt (see [Customizing Skills](#customizing-skills)).
+To keep the edits *and* receive skill updates again, quit and run `fabrik upgrade`, which
+moves them into `.fabrik/plugins/local-workflows/`
+([Workflow migration](#workflow-migration-fabrik-upgrade)); the badge disappears afterwards.
 Customization and staleness are independent facts and can both be true at once — in
 that case the badge combines into `[u] custom workflow (N stale)`, and the
 three-option dialog's status line also names the stale count, rather than one signal
@@ -4806,7 +4883,8 @@ so the restart never hangs waiting for user confirmation. When local customizati
 present, the refresh is skipped entirely to preserve your edits; the `[u] custom workflow`
 badge (or combined `[u] custom workflow (N stale)` badge, when the install is also behind
 the newly-started binary's embedded skills) appears on next TUI startup instead of
-silently overwriting your changes.
+silently overwriting your changes. Run `fabrik upgrade` to move them into
+`local-workflows` ([Workflow migration](#workflow-migration-fabrik-upgrade)).
 
 **What is cleared:**
 
