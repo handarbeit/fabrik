@@ -70,6 +70,9 @@ func (s Subscription) Matches(ev Event) bool {
 	if len(s.Events) > 0 && !containsType(s.Events, ev.Type) {
 		return false
 	}
+	if len(s.Events) == 0 && s.EventsDefault && IsLabelEvent(ev.Type) {
+		return false
+	}
 	if IsAccountWide(ev.Type) {
 		return true
 	}

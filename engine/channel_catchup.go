@@ -99,6 +99,13 @@ func (e *Engine) catchUpEvents() []channelevents.Event {
 	out = append(out, e.pipelineCatchUpEvents(now)...)
 	// Open retry-starved and item-wedged episodes are current state too (#2170).
 	out = append(out, e.anomalyCatchUpEvents(now)...)
+	// Whatever a builder stamped before it was tagged (the stall builders finish
+	// their event as live), every event of the snapshot is a catch_up (#2169 R3a).
+	for i := range out {
+		if out[i].Meta["catch_up"] == "true" {
+			out[i].Meta[channelevents.MetaSource] = channelevents.SourceCatchUp
+		}
+	}
 	return out
 }
 
@@ -108,6 +115,12 @@ func (e *Engine) catchUpEvents() []channelevents.Event {
 func (e *Engine) catchUp(subscriber, subID string) int {
 	ce := e.channelEvents()
 	if ce == nil {
+		return 0
+	}
+	// Until the readiness pass has run, the store cannot answer (labels are still
+	// being populated after a restart); that pass queues the catch-up to every
+	// subscriber, this one included (#2169).
+	if !ce.ready.Load() {
 		return 0
 	}
 	defer func() {

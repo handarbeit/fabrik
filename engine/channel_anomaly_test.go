@@ -670,9 +670,11 @@ func TestCacheDivergence_NotRaised(t *testing.T) {
 		if len(ofType(evs, channelevents.CacheDivergence)) != 0 {
 			t.Fatalf("reported: %+v", evs)
 		}
-		for _, ev := range evs {
-			if ev.Meta[channelevents.MetaUnverified] != "" {
-				t.Fatalf("an unrelated reconcile change must not be unverified: %+v", ev)
+		// Since #2169 a label change only a reconcile saw (no webhook or engine
+		// write behind it) is unverified, but it is not a cache divergence.
+		for _, ev := range ofType(evs, channelevents.LabelRemoved) {
+			if ev.Meta[channelevents.MetaUnverified] != "true" {
+				t.Fatalf("an unattributable reconcile change must be unverified: %+v", ev)
 			}
 		}
 	})
@@ -730,10 +732,12 @@ func TestAnomalyDetectors_NonVacuous(t *testing.T) {
 		if len(ofType(evs, channelevents.CacheDivergence)) != 0 {
 			t.Fatalf("disabled detector still published: %+v", evs)
 		}
-		for _, ev := range evs {
-			if ev.Meta[channelevents.MetaUnverified] != "" {
-				t.Fatalf("disabled detector still marked unverified: %+v", ev)
-			}
+		// The reconcile-seen revert of the engine's label is still marked
+		// unverified, but by its origin (#2169 R3a: no known write or webhook backs
+		// it), not by the divergence detector, which is off and raised nothing.
+		removed := ofType(evs, channelevents.LabelRemoved)
+		if len(removed) != 1 || removed[0].Meta[channelevents.MetaUnverified] != "true" {
+			t.Fatalf("the reconcile-seen label removal must be unverified by origin: %+v", evs)
 		}
 	})
 }

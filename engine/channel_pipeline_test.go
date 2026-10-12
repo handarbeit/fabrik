@@ -248,3 +248,24 @@ func TestPipelineCatchUpIncludesOpenStall(t *testing.T) {
 		t.Fatalf("catch-up = %+v", got)
 	}
 }
+
+// Every event of the catch-up snapshot carries source=catch_up, including the
+// pipeline stall whose builder finishes it as live before it is tagged (#2169).
+func TestPipelineCatchUpSnapshotIsSourceCatchUp(t *testing.T) {
+	e, _, clk, _ := pipelineEngine(t, nil)
+	t0 := clk.Now()
+	e.health.beginPoll(t0, pollVerdict{})
+	clk.set(t0.Add(5 * time.Minute))
+	var stall []channelevents.Event
+	for _, ev := range e.catchUpEvents() {
+		if ev.Type == channelevents.PipelineStalled {
+			stall = append(stall, ev)
+		}
+	}
+	if len(stall) != 1 {
+		t.Fatalf("one pipeline-stalled catch-up expected, got %+v", stall)
+	}
+	if got := stall[0].Meta[channelevents.MetaSource]; got != channelevents.SourceCatchUp {
+		t.Fatalf("source = %q, want %q", got, channelevents.SourceCatchUp)
+	}
+}

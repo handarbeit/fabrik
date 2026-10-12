@@ -29,6 +29,22 @@ const ChannelMethod = "notifications/claude/channel"
 // socket well inside it, and a crash loop must not spam the session.
 const DefaultUnreachableGrace = 10 * time.Second
 
+// MetaOrigin is the wire name of the provenance key (channelevents.MetaSource).
+// Claude Code sets the <channel> tag's own `source` attribute from the server's
+// configured name, so a meta key called `source` would clash with it; the hub and
+// the daemon keep `source` (the name the issue and the event stream use) and the
+// shim renames it here, in the one place that depends on the Channels contract
+// (#2169, ADR 2169).
+const MetaOrigin = "origin"
+
+// wireMetaKey maps an event meta key to the attribute name sent to the session.
+func wireMetaKey(k string) string {
+	if k == channelevents.MetaSource {
+		return MetaOrigin
+	}
+	return k
+}
+
 // StreamFunc runs the held connection. localapi.RunStream is the production value.
 type StreamFunc func(ctx context.Context, opts localapi.StreamOptions) error
 
@@ -57,8 +73,14 @@ func channelNotification(ev channelevents.Event) map[string]any {
 	meta := map[string]string{}
 	for k, v := range ev.Meta {
 		if metaKey(k) {
-			meta[k] = v
+			meta[wireMetaKey(k)] = v
 		}
+	}
+	// Every pushed event says where it came from. The daemon stamps its own; the
+	// events the shim builds (daemon-reachable, daemon-unreachable,
+	// stream-superseded) are live by definition.
+	if meta[MetaOrigin] == "" {
+		meta[MetaOrigin] = channelevents.SourceLive
 	}
 	if meta["event"] == "" {
 		meta["event"] = string(ev.Type)
@@ -218,7 +240,10 @@ func (r *reachability) stop() {
 // in the session and what is required for them to appear at all.
 const channelInstructions = " Fabrik also pushes events into this session as <channel source=\"fabrik\" event=... repo=... issue=...> messages when something needs attention " +
 	"(validate-settled, decision-pending, settlement-withdrawn, paused, escalated, label changes, and more); the tag attributes say which issue and event, and the body is a one-line summary. " +
-	"Label-change events are not a readiness signal; only validate-settled and decision-pending say an item awaits you, and settlement-withdrawn says that stopped being true. " +
+	"Label-change events are opt-in (name label-applied / label-removed in fabrik_subscribe's events) and are not a readiness signal; only validate-settled and decision-pending say an item awaits you, and settlement-withdrawn says that stopped being true. " +
+	"Every event carries an `origin` attribute: live (as it happened), catch_up (a snapshot of what needs you now, not a transition) or downtime-delta (a change made while the daemon was down; its actor is unknown and it is marked unverified). " +
+	"After a daemon restart you get daemon-reachable, then one catch_up snapshot, then the downtime-delta events - never a replay of unchanged state. " +
+	"A validate-settled with a `cause` attribute (autonomy-changed, revalidated, new-head, other) is a re-settle: the item settled again for that reason, and for autonomy-changed the `actor` attribute says who changed it. " +
 	"A decision-bearing event carries an `options` attribute (a JSON list of {action, tool}); an event with reminder=\"true\" repeats a decision that is still pending. " +
 	"Use fabrik_subscribe to choose what you hear about and fabrik_unsubscribe to stop. Pushes need this session to have been started with Channels enabled for this server " +
 	"(during the research preview: claude --dangerously-load-development-channels server:fabrik); otherwise Claude Code drops them silently and only the read tools work."

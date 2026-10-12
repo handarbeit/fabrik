@@ -405,3 +405,45 @@ func TestSubscribeToolDescribesReadinessAndNewEvents(t *testing.T) {
 		t.Error("channel instructions must repeat that label events are not a readiness signal")
 	}
 }
+
+// #2169: the provenance key is `source` on the hub but `origin` on the wire,
+// because Claude Code sets the <channel> tag's own `source` from the server name.
+func TestChannelNotificationRenamesSourceToOriginAndDefaultsLive(t *testing.T) {
+	ev := channelevents.Event{Type: channelevents.ColumnChanged, Meta: map[string]string{channelevents.MetaSource: channelevents.SourceDowntimeDelta, "unverified": "true"}}
+	meta := channelNotification(ev)["meta"].(map[string]string)
+	if _, clash := meta["source"]; clash {
+		t.Fatalf("`source` must not reach the wire (it clashes with the channel tag's own attribute): %+v", meta)
+	}
+	if meta["origin"] != "downtime-delta" || meta["unverified"] != "true" {
+		t.Fatalf("meta = %+v", meta)
+	}
+	// Shim-built events carry no source of their own: they are live.
+	bare := channelNotification(channelevents.Event{Type: channelevents.DaemonReachable})["meta"].(map[string]string)
+	if bare["origin"] != "live" {
+		t.Fatalf("a shim-generated event must be origin=live: %+v", bare)
+	}
+}
+
+func TestSubscribeToolSaysLabelEventsAreOptIn(t *testing.T) {
+	var desc, evDesc string
+	for _, d := range toolDefs() {
+		if d["name"] == ToolSubscribe {
+			desc = d["description"].(string)
+			props := d["inputSchema"].(map[string]any)["properties"].(map[string]any)
+			evDesc = props["events"].(map[string]any)["description"].(string)
+		}
+	}
+	for _, want := range []string{"semantic event family", "opt-in", "not a readiness signal", "downtime-delta"} {
+		if !strings.Contains(desc, want) {
+			t.Errorf("fabrik_subscribe description lacks %q", want)
+		}
+	}
+	if strings.Contains(evDesc, "default: all") || !strings.Contains(evDesc, "semantic") {
+		t.Errorf("events schema must describe the semantic default: %q", evDesc)
+	}
+	for _, want := range []string{"opt-in", "origin", "cause", "downtime-delta"} {
+		if !strings.Contains(channelInstructions, want) {
+			t.Errorf("channel instructions lack %q", want)
+		}
+	}
+}

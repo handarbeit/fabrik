@@ -417,6 +417,24 @@ func (h *Hub) CatchUp(name, subID string, evs []Event) int {
 	return queued
 }
 
+// SubscriberNames lists, sorted, every subscriber that holds at least one
+// subscription — attached or not. The restart readiness pass queues its catch-up
+// to each of them (#2169).
+func (h *Hub) SubscriberNames() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	seen := map[string]bool{}
+	var out []string
+	for _, sub := range h.subs {
+		if !seen[sub.Subscriber] {
+			seen[sub.Subscriber] = true
+			out = append(out, sub.Subscriber)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // restartReminderClock sets the reminder anchor of (name, episode key) to now,
 // keeping its count, when one of the subscriber's subscriptions matching ev asks
 // for reminders. Nothing is recorded for a subscriber that does not.

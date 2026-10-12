@@ -253,3 +253,51 @@ func TestSubscribableHasNoDuplicates(t *testing.T) {
 		seen[e] = true
 	}
 }
+
+func TestSemanticDefaultFamily(t *testing.T) {
+	semantic := Subscription{Subscriber: "S", EventsDefault: true}
+	legacy := Subscription{Subscriber: "S"}
+	named := Subscription{Subscriber: "S", Events: []EventType{LabelApplied}, EventsDefault: true}
+	label := Event{Type: LabelApplied, Label: "x"}
+	unlabel := Event{Type: LabelRemoved, Label: "x"}
+	settled := Event{Type: ValidateSettled}
+	if semantic.Matches(label) || semantic.Matches(unlabel) {
+		t.Error("a semantic-default subscription must not receive raw label events")
+	}
+	if !semantic.Matches(settled) || !semantic.Matches(Event{Type: ColumnChanged}) || !semantic.Matches(Event{Type: DaemonReachable}) {
+		t.Error("a semantic-default subscription must receive every other type")
+	}
+	if !legacy.Matches(label) || !legacy.Matches(unlabel) {
+		t.Error("a grandfathered subscription (no marker) keeps receiving every type")
+	}
+	if !named.Matches(label) || named.Matches(unlabel) {
+		t.Error("naming label-applied delivers exactly it")
+	}
+	if semantic.TakesLabelEvents() || !legacy.TakesLabelEvents() || !named.TakesLabelEvents() {
+		t.Error("TakesLabelEvents disagrees with Matches")
+	}
+	if !semantic.TakesColumnChanged() {
+		t.Error("the default family includes column-changed")
+	}
+}
+
+func TestEventsDefaultIsNotPartOfIdentityAndRoundTrips(t *testing.T) {
+	a := Subscription{ID: "1", Subscriber: "S", EventsDefault: true}
+	b := Subscription{ID: "2", Subscriber: "S"}
+	if a.canonical() != b.canonical() {
+		t.Fatal("EventsDefault must not change the canonical key (re-subscribe must stay idempotent)")
+	}
+	// A subscription persisted before the field existed has no marker.
+	var old Subscription
+	if err := json.Unmarshal([]byte(`{"id":"1","subscriber":"S"}`), &old); err != nil || old.EventsDefault {
+		t.Fatalf("legacy JSON: %+v %v", old, err)
+	}
+	data, _ := json.Marshal(a)
+	var back Subscription
+	if err := json.Unmarshal(data, &back); err != nil || !back.EventsDefault {
+		t.Fatalf("round trip: %s %+v %v", data, back, err)
+	}
+	if data, _ := json.Marshal(b); json.Valid(data) && string(data) != `{"id":"2","subscriber":"S"}` {
+		t.Fatalf("an unmarked subscription must serialise as before: %s", data)
+	}
+}

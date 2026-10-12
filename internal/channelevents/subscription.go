@@ -41,6 +41,14 @@ type Subscription struct {
 	// DefaultExcludeLabels; a non-nil empty slice opts into everything.
 	ExcludeLabels *[]string   `json:"exclude_labels,omitempty"`
 	Events        []EventType `json:"events,omitempty"`
+	// EventsDefault marks a subscription created without an events list on a
+	// daemon that has the semantic default (#2169): an empty Events then means
+	// "every type except the raw label events". Absent (a subscription
+	// persisted before that) keeps the old meaning, every type — grandfathered
+	// so a running overseer never silently loses events. It is not part of the
+	// subscription's identity (canonical), so re-subscribing with the same
+	// filters stays idempotent.
+	EventsDefault bool `json:"events_default,omitempty"`
 	// DigestSeconds batches ordinary events into one message per interval;
 	// 0 delivers each at once. validate-settled, escalated, paused and
 	// daemon-unreachable are always immediate.
@@ -60,6 +68,17 @@ type Subscription struct {
 
 // StageProgressLabels are the labels ProgressViaColumn suppresses.
 var StageProgressLabels = []string{"stage:*:complete", "stage:*:in_progress"}
+
+// TakesLabelEvents reports whether the subscription's event filter admits the
+// raw label-applied / -removed events: named explicitly, or an empty filter on a
+// grandfathered subscription. An empty filter on a semantic-default
+// subscription does not (#2169 R3).
+func (s Subscription) TakesLabelEvents() bool {
+	if len(s.Events) == 0 {
+		return !s.EventsDefault
+	}
+	return containsType(s.Events, LabelApplied) || containsType(s.Events, LabelRemoved)
+}
 
 // TakesColumnChanged reports whether the subscription's event filter admits
 // column-changed (an empty filter means every type).
@@ -145,6 +164,7 @@ func ValidateSubscriberName(name string) error {
 // idempotent re-subscription.
 func (s Subscription) canonical() string {
 	s.ID = ""
+	s.EventsDefault = false
 	b, _ := json.Marshal(s)
 	return string(b)
 }
