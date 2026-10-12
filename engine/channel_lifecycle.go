@@ -9,6 +9,7 @@ import (
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/channelevents"
 	"github.com/handarbeit/fabrik/internal/itemstate"
+	"github.com/handarbeit/fabrik/stages"
 )
 
 // Lifecycle events (#2123, ADR 2123): item-added, column-changed and closed, plus
@@ -85,8 +86,13 @@ func (ce *channelEvents) pendingArrival(key string) bool {
 }
 
 // announceArrival returns the item-added event for key once the item is
-// announceable: labels known, on the board (has a Status), open, not a PR. A PR
-// card or an already-closed item is dropped without an event. Consumer goroutine.
+// announceable: labels known, on the board (has a Status), open, not a PR, in a
+// column Fabrik knows. A PR card, an already-closed item or an item in a column
+// with no configured stage (parking columns count as configured, keyed on the
+// stage's unmanaged flag, with the legacy Backlog literal as stages.IsParkingColumn
+// defines it) is dropped without an event, for good: moving it into a configured
+// column later is a column-changed, not an arrival (#2187, ADR 2123).
+// Consumer goroutine.
 func (ce *channelEvents) announceArrival(key string, st *itemstate.ItemState) []channelevents.Event {
 	if !ce.pendingArrival(key) {
 		return nil
@@ -95,11 +101,25 @@ func (ce *channelEvents) announceArrival(key string, st *itemstate.ItemState) []
 		ce.clearArrival(key)
 		return nil
 	}
-	if !st.LabelsKnown || st.Status == "" {
+	if st.Status == "" {
+		return nil
+	}
+	if !ce.e.knownArrivalColumn(st.Status) {
+		ce.clearArrival(key)
+		return nil
+	}
+	if !st.LabelsKnown {
 		return nil
 	}
 	ce.clearArrival(key)
 	return []channelevents.Event{ce.e.itemAddedEvent(st)}
+}
+
+// knownArrivalColumn reports whether an arrival in the named column is
+// announceable: a configured stage of any kind, or the legacy Backlog parking
+// column (installs that predate backlog.yaml). Config only; no GitHub read.
+func (e *Engine) knownArrivalColumn(column string) bool {
+	return stages.FindStage(e.cfg.Stages, column) != nil || stages.IsParkingColumn(e.cfg.Stages, column)
 }
 
 func (ce *channelEvents) clearArrival(key string) {
