@@ -263,3 +263,98 @@ func TestWarmingKeepsLedgerAtPriorStateUntilDeltaPublished(t *testing.T) {
 		t.Fatalf("after the delta is published the ledger must record the current state: %+v", r1)
 	}
 }
+
+// An item that closed while the daemon was down and is no longer on the board
+// (no column) is still reported: the close is decided at the first observation.
+func TestDowntimeClosedWithoutColumnIsReported(t *testing.T) {
+	dir := t.TempDir()
+	writeLedger(t, dir, map[string]channelevents.Observation{
+		"owner/repo#5": {Labels: []string{"x"}, LabelsKnown: true, Status: "Implement"},
+	})
+	e, sink := downtimeEngine(t, dir, false)
+	e.store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{
+		ID: "I_5", Number: 5, Repo: "owner/repo", Labels: []string{"x"}, IsClosed: true,
+	}})
+	closed := 0
+	for _, ev := range drainFor(sink, 500*time.Millisecond) {
+		if ev.Type == channelevents.Closed {
+			closed++
+			if ev.Meta[channelevents.MetaSource] != channelevents.SourceDowntimeDelta {
+				t.Errorf("close must be a downtime delta: %+v", ev)
+			}
+		}
+	}
+	if closed != 1 {
+		t.Fatalf("one downtime closed event expected, got %d", closed)
+	}
+}
+
+// A subscription made while the restart snapshot was being built was refused its
+// own catch-up (not ready yet) and is not in the covered set: catchUpLate queues
+// it, and only it.
+func TestRestartCatchUpLateReachesSubscriptionsMissedByTheSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	e, sinkT := downtimeEngine(t, dir, true)
+	e.seedAPIItem(t, 2, "Implement", "fabrik:paused", "fabrik:awaiting-input")
+	ce := e.channelEvents()
+	drainFor(sinkT, 300*time.Millisecond) // the item's own arrival/label noise, if any
+
+	evs, covered := e.catchUpAll() // snapshot taken: only T exists
+	if len(covered) != 1 {
+		t.Fatalf("covered = %v", covered)
+	}
+	if _, err := ce.hub.Subscribe(channelevents.Subscription{Subscriber: "U"}); err != nil {
+		t.Fatal(err)
+	}
+	sinkU := newChanSink()
+	ce.hub.Attach("U", sinkU)
+	if got := drainFor(sinkU, 200*time.Millisecond); len(got) != 0 {
+		t.Fatalf("U must have nothing before the late pass: %+v", got)
+	}
+	before := len(drainFor(sinkT, 200*time.Millisecond))
+	e.catchUpLate(evs, covered)
+	got := drainFor(sinkU, 300*time.Millisecond)
+	if len(got) == 0 {
+		t.Fatal("the late subscription must receive the restart catch-up")
+	}
+	for _, ev := range got {
+		if ev.Meta[channelevents.MetaSource] != channelevents.SourceCatchUp {
+			t.Errorf("late catch-up event must be source=catch_up: %+v", ev)
+		}
+	}
+	if extra := drainFor(sinkT, 200*time.Millisecond); len(extra) != 0 {
+		t.Fatalf("T was covered and must not get a second snapshot (had %d): %+v", before, extra)
+	}
+}
+
+// While warming, a live change to an item with a held downtime delta is held
+// behind it, so the subscriber sees the item's changes in the order they happened.
+func TestWarmingKeepsLiveChangesBehindTheHeldDelta(t *testing.T) {
+	dir := t.TempDir()
+	writeLedger(t, dir, map[string]channelevents.Observation{
+		"owner/repo#1": {Labels: []string{"a"}, LabelsKnown: true, Status: "Implement"},
+	})
+	e, sink := downtimeEngine(t, dir, true)
+	e.seedAPIItem(t, 1, "Review", "a") // moved while down: a held delta
+	sink.quiet(t, 300*time.Millisecond)
+	e.store.Apply(itemstate.LocalStatusUpdated{Repo: "owner/repo", Number: 1, NewStatus: "Done"})
+	sink.quiet(t, 300*time.Millisecond) // the live move is held behind the delta
+
+	e.boardPopulated.Store(true)
+	e.channelEvents().signal()
+	var cols []channelevents.Event
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && len(cols) < 2 {
+		for _, ev := range drainFor(sink, 100*time.Millisecond) {
+			if ev.Type == channelevents.ColumnChanged {
+				cols = append(cols, ev)
+			}
+		}
+	}
+	if len(cols) != 2 {
+		t.Fatalf("want the delta then the live move, got %+v", cols)
+	}
+	if cols[0].Meta[channelevents.MetaSource] != channelevents.SourceDowntimeDelta || cols[1].Meta[channelevents.MetaSource] == channelevents.SourceDowntimeDelta {
+		t.Errorf("order must be delta then live: %+v", cols)
+	}
+}

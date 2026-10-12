@@ -46,6 +46,7 @@ type priorEntry struct {
 	rec        channelevents.ItemRecord
 	statusDone bool
 	labelsDone bool
+	closedDone bool
 }
 
 // unattributed reports whether a change of this origin was seen only by polling
@@ -79,8 +80,8 @@ func (ce *channelEvents) observeLedger(key string, st *itemstate.ItemState) {
 }
 
 // downtimeCheck diffs the item's current state against the previous run's
-// record, once per part: the column and closed state at the first observation
-// that has a column, the labels at the first one that has labels. It returns the
+// record, once per part: the column at the first observation that has one, the
+// closed state at the first observation, the labels at the first one that has labels. It returns the
 // resulting events (marked source=downtime-delta and unverified, actor unknown:
 // a diff names no writer) and whether one of them is a column change or a close,
 // so the live path does not report the same move or close again. An item
@@ -114,6 +115,12 @@ func (ce *channelEvents) downtimeCheck(key string, st *itemstate.ItemState) (evs
 			evs = append(evs, e.columnEvent(st, c))
 			column = true
 		}
+	}
+	// The close is decided at the first observation, whether or not the item has
+	// a column: an item that closed while the daemon was down may no longer be
+	// on the board (no Status), and nothing else would report the close.
+	if !p.closedDone {
+		p.closedDone = true
 		if st.IsClosed && !p.rec.Closed {
 			evs = append(evs, ce.closedEvent(key, st, zero))
 			closed = true
@@ -165,12 +172,19 @@ func diffLabelSets(before, after []string) []itemstate.LabelDelta {
 	return out
 }
 
-// holdWarm keeps a downtime delta back while the daemon is warming and reports
-// whether it did. Past readiness the caller publishes it directly.
+// holdWarm keeps an event back while the daemon is warming and reports whether
+// it did: a downtime delta, and any later change queued for an item that has a
+// delta held, so the subscriber sees an item's changes in the order they
+// happened (a stale "moved to Review" must not follow a live "moved to Done").
+// Past readiness the caller publishes directly.
 func (ce *channelEvents) holdWarm(ev channelevents.Event) bool {
 	ce.dmu.Lock()
 	defer ce.dmu.Unlock()
 	if ce.ready.Load() {
+		return false
+	}
+	if ev.Meta[channelevents.MetaSource] != channelevents.SourceDowntimeDelta &&
+		!(ev.Issue != 0 && ce.unpub[issueRef(ev.Repo, ev.Issue)]) {
 		return false
 	}
 	ce.warmBuf = append(ce.warmBuf, ev)
@@ -244,12 +258,17 @@ func (ce *channelEvents) checkReady() {
 	if time.Now().Before(ce.readyBy) && !ce.readyToCatchUp() {
 		return
 	}
-	ce.e.catchUpAll()
+	evs, covered := ce.e.catchUpAll()
 	ce.dmu.Lock()
 	buf := ce.warmBuf
 	ce.warmBuf = nil
 	ce.ready.Store(true)
 	ce.dmu.Unlock()
+	// A subscription made or attached while the snapshot was being built was
+	// refused its own catch-up (not ready yet) and is not in the covered set:
+	// queue it now that the flag is up. Anything subscribing from here on
+	// catches up by itself.
+	ce.e.catchUpLate(evs, covered)
 	for _, ev := range buf {
 		ce.hub.Publish(finishEvent(ev))
 	}
@@ -259,22 +278,57 @@ func (ce *channelEvents) checkReady() {
 	}
 }
 
-// catchUpAll queues one current-state snapshot to every subscriber that holds a
-// subscription, attached or not. The snapshot is built once.
-func (e *Engine) catchUpAll() {
+// catchUpAll queues one current-state snapshot to every subscription that
+// exists when it starts, attached or not. The snapshot is built once. It returns
+// the snapshot and the set of subscriptions it covered ("name/id"), so a
+// subscription created while the snapshot was being built can be caught up
+// afterwards (catchUpLate).
+func (e *Engine) catchUpAll() ([]channelevents.Event, map[string]bool) {
 	ce := e.channelEvents()
 	if ce == nil {
-		return
+		return nil, nil
 	}
 	defer func() {
 		if r := recover(); r != nil {
 			e.logf(0, "channel", "restart catch-up panic recovered: %v\n", r)
 		}
 	}()
+	covered := map[string]bool{}
+	names := map[string]bool{}
+	for _, sub := range ce.hub.Subscriptions("") {
+		covered[sub.Subscriber+"/"+sub.ID] = true
+		names[sub.Subscriber] = true
+	}
 	evs := e.catchUpEvents()
 	for _, name := range ce.hub.SubscriberNames() {
+		if !names[name] {
+			continue
+		}
 		if n := ce.hub.CatchUp(name, "", evs); n > 0 {
 			e.logf(0, "channel", "restart catch-up for %q: %d event(s)\n", name, n)
+		}
+	}
+	return evs, covered
+}
+
+// catchUpLate queues the restart snapshot to the subscriptions catchUpAll did
+// not cover. Called after the ready flag is up, on the consumer goroutine.
+func (e *Engine) catchUpLate(evs []channelevents.Event, covered map[string]bool) {
+	ce := e.channelEvents()
+	if ce == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			e.logf(0, "channel", "late restart catch-up panic recovered: %v\n", r)
+		}
+	}()
+	for _, sub := range ce.hub.Subscriptions("") {
+		if covered[sub.Subscriber+"/"+sub.ID] {
+			continue
+		}
+		if n := ce.hub.CatchUp(sub.Subscriber, sub.ID, evs); n > 0 {
+			e.logf(0, "channel", "late restart catch-up for %q: %d event(s)\n", sub.Subscriber, n)
 		}
 	}
 }

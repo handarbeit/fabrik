@@ -537,7 +537,7 @@ func (ce *channelEvents) drain() {
 	}
 	ce.mu.Unlock()
 	for _, ev := range q {
-		if ev.Meta[channelevents.MetaSource] == channelevents.SourceDowntimeDelta && ce.holdWarm(ev) {
+		if ce.holdWarm(ev) {
 			continue
 		}
 		ce.hub.Publish(finishEvent(ev))
