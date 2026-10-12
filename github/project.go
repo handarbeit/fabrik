@@ -533,6 +533,12 @@ type probeItemNode struct {
 				Number     int    `json:"number"`
 				UpdatedAt  string `json:"updatedAt"`
 				HeadRefOid string `json:"headRefOid"`
+				// Scalars for the overseer PR facts (#2122); no connection added.
+				State            string `json:"state"`
+				IsDraft          bool   `json:"isDraft"`
+				Merged           bool   `json:"merged"`
+				Mergeable        string `json:"mergeable"`
+				MergeStateStatus string `json:"mergeStateStatus"`
 			} `json:"nodes"`
 		} `json:"closedByPullRequestsReferences"`
 	} `json:"content"`
@@ -631,6 +637,11 @@ query($owner: String!, $projectNum: Int!, $cursor: String, $statusLine: String!,
                   number
                   updatedAt
                   headRefOid
+                  state
+                  isDraft
+                  merged
+                  mergeable
+                  mergeStateStatus
                   isMergeQueueEnabled
                   isInMergeQueue
                   mergeQueueEntry {
@@ -742,6 +753,7 @@ func (c *Client) probeProjectBoardOnce(owner, repo string, projectNum int, owner
 			pr := node.Content.LinkedPRs.Nodes[0]
 			item.LinkedPRNumber = pr.Number
 			item.LinkedPRHeadSHA = pr.HeadRefOid
+			item.LinkedPRFacts = probePRFacts(pr.State, pr.IsDraft, pr.Merged, pr.Mergeable, pr.MergeStateStatus)
 			if t, err := parseTime(pr.UpdatedAt); err == nil {
 				item.LinkedPRUpdatedAt = t
 				if t.After(item.EffectiveUpdatedAt) {
@@ -1836,4 +1848,39 @@ func (c *Client) AddBlockedByIssue(issueNodeID, blockerNodeID string) error {
 		return fmt.Errorf("adding blocked-by edge %s -> %s: %w", issueNodeID, blockerNodeID, err)
 	}
 	return nil
+}
+
+// probePRFacts maps the probe's linked-PR scalars onto the REST vocabulary the
+// engine uses elsewhere (#2122): state OPEN/CLOSED/MERGED becomes "open"/
+// "closed" plus Merged, mergeable MERGEABLE/CONFLICTING becomes true/false
+// (UNKNOWN is nil, never "conflicting"), and mergeStateStatus is lower-cased
+// (UNKNOWN becomes empty). An empty state means the probe did not carry the
+// scalars, which yields Known=false.
+func probePRFacts(state string, isDraft, merged bool, mergeable, mergeStateStatus string) ProbePRFacts {
+	f := ProbePRFacts{Draft: isDraft}
+	switch strings.ToUpper(state) {
+	case "OPEN":
+		f.State, f.Known = "open", true
+	case "CLOSED":
+		f.State, f.Known = "closed", true
+	case "MERGED":
+		f.State, f.Merged, f.Known = "closed", true, true
+	default:
+		return ProbePRFacts{}
+	}
+	if merged {
+		f.Merged = true
+	}
+	switch strings.ToUpper(mergeable) {
+	case "MERGEABLE":
+		t := true
+		f.Mergeable = &t
+	case "CONFLICTING":
+		t := false
+		f.Mergeable = &t
+	}
+	if ms := strings.ToLower(mergeStateStatus); ms != "" && ms != "unknown" {
+		f.MergeableState = ms
+	}
+	return f
 }
