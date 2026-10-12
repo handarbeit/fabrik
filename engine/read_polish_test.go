@@ -2,6 +2,7 @@ package engine
 
 import (
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -572,5 +573,20 @@ func TestReadPolishR8_Neutralised(t *testing.T) {
 	st := snap.State()
 	if _, has := e.baseEvent(&st, channelevents.Merged).Meta["title"]; has {
 		t.Fatal("neutralised: title still present, so the R8 test is vacuous")
+	}
+}
+
+// The verdict builder is called from the channel and local-API paths, whose
+// scans forbid any GitHub read; it must stay a function of the Store alone.
+func TestReadPolishVerdictBuilderReachesNoGitHub(t *testing.T) {
+	src, err := os.ReadFile("review_verdict.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, banned := range []string{"e.client", "e.readClient", "store.Get(", "labelAppliedAt(", "FetchProjectItem",
+		"FetchPRReviews", "feedbackGateBlocks", "unprocessedFeedback("} {
+		if strings.Contains(string(src), banned) {
+			t.Errorf("review_verdict.go mentions %q: the verdicts must be built from cached state only", banned)
+		}
 	}
 }

@@ -157,6 +157,14 @@ func TestChannelValidateSettledCruiseWaitsForEveryGate(t *testing.T) {
 	if ev.Meta["reviews"] == "" || ev.Meta["reviews"] == "none" {
 		t.Errorf("reviews summary missing the approval: %q", ev.Meta["reviews"])
 	}
+	// The push stands on its own (#2127): it names the item and the verdict of
+	// each reviewer.
+	if ev.Meta["title"] != "channel validate-settled (cruise)" {
+		t.Errorf("meta.title = %q, want the issue title", ev.Meta["title"])
+	}
+	if !strings.Contains(ev.Meta["reviewers"], `"reviewer":"reviewer-human"`) {
+		t.Errorf("meta.reviewers = %q, want a verdict for reviewer-human", ev.Meta["reviewers"])
+	}
 	if projectItem(t, env, num).IsClosed {
 		t.Fatal("cruise must not land the PR")
 	}
