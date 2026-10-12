@@ -175,6 +175,21 @@ func (e *Engine) wedgeLapse() time.Duration {
 	return maxDur(3*e.pollInterval(), wedgeLapseFloor)
 }
 
+// wedgeLapseFor is how long a hold of the given gate may go unconfirmed before
+// it is treated as gone. The review and CI gates stamp a recheck cooldown of
+// githubRecheckInterval() (10 polls) between evaluations once nothing bumps the
+// item, so their hold is re-confirmed that rarely; a lapse shorter than the
+// cadence would end the episode between confirmations and restart firstHeld,
+// and the hold could never age to its threshold.
+func (e *Engine) wedgeLapseFor(gate string) time.Duration {
+	lapse := e.wedgeLapse()
+	switch gate {
+	case gateReview, gateCI:
+		lapse += e.githubRecheckInterval()
+	}
+	return lapse
+}
+
 func (e *Engine) cacheDivergenceWindow() time.Duration {
 	return positiveOr(e.cfg.CacheDivergenceWindow, defaultCacheDivergenceWindow)
 }
@@ -599,7 +614,7 @@ func (ce *channelEvents) checkWedgesLocked(now time.Time, pollOverdue bool) []ch
 			h.lastConfirmed = now
 			continue
 		}
-		if now.Sub(h.lastConfirmed) > lapse {
+		if now.Sub(h.lastConfirmed) > e.wedgeLapseFor(h.gate) {
 			end("lapsed")
 			continue
 		}

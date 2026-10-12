@@ -382,6 +382,43 @@ func TestItemWedged_NotRaisedWhenAWorkerIsDispatchedInTime(t *testing.T) {
 	}
 }
 
+// The review and CI gates are re-evaluated only every githubRecheckInterval (10
+// polls) once nothing bumps the item. A lapse shorter than that cadence would end
+// the hold between confirmations and restart firstHeld, so the hold could never
+// age to its threshold.
+func TestItemWedged_ReviewHoldSurvivesItsRecheckCadence(t *testing.T) {
+	e, sink, clk, ce := wedgeEngineWithPoll(t, 30)
+	e.cfg.ReviewWaitTimeout = time.Minute
+	item := wedgedItem()
+	recheck := e.githubRecheckInterval()
+	threshold := e.itemWedgedThreshold(gateReview)
+	if recheck <= e.wedgeLapse() {
+		t.Fatalf("setup: recheck %v must exceed the base lapse %v", recheck, e.wedgeLapse())
+	}
+	var evs []channelevents.Event
+	start := clk.Now()
+	next := start
+	for clk.Now().Sub(start) <= threshold+2*recheck {
+		if !clk.Now().Before(next) {
+			e.noteGateHold(item, gateReview, "waiting for reviewers to respond", nil)
+			next = clk.Now().Add(recheck)
+		}
+		// A healthy poll loop: one poll every interval, so the overdue verdict
+		// (which would suppress the detector) stays false.
+		e.health.beginPoll(clk.Now(), pollVerdict{})
+		e.health.endPoll(clk.Now(), pollVerdict{}, clk.Now().Add(30*time.Second))
+		evs = append(evs, checkAndDrain(ce, sink)...)
+		clk.set(clk.Now().Add(30 * time.Second))
+	}
+	w := ofType(evs, channelevents.ItemWedged)
+	if len(w) != 1 || w[0].Meta["gate"] != "review" {
+		t.Fatalf("a review hold re-confirmed every %v must still be reported once past %v: %+v", recheck, threshold, evs)
+	}
+	if len(ofType(evs, channelevents.ItemUnwedged)) != 0 {
+		t.Fatalf("the hold lapsed between confirmations: %+v", evs)
+	}
+}
+
 func TestItemWedged_EpisodeEndsOnDispatchClearAdvanceAndLapse(t *testing.T) {
 	for _, how := range []string{"dispatched", "cleared", "advanced", "lapsed"} {
 		t.Run(how, func(t *testing.T) {
