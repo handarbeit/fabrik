@@ -44,7 +44,7 @@ func ndjsonResult(result string) string {
 func stream(lines ...string) []byte { return []byte(strings.Join(lines, "\n") + "\n") }
 
 func TestDetectSkillLoadFailure(t *testing.T) {
-	const own = "fabrik:fabrik-research"
+	const own = "fabrik-stages:research"
 	tests := []struct {
 		name     string
 		raw      []byte
@@ -60,26 +60,26 @@ func TestDetectSkillLoadFailure(t *testing.T) {
 		},
 		{
 			name:     "bare-name call against a qualified configuration",
-			raw:      stream(ndjsonSkillUse("t1", "fabrik-research"), ndjsonToolResult("t1", "Unknown skill", true)),
+			raw:      stream(ndjsonSkillUse("t1", "research"), ndjsonToolResult("t1", "Unknown skill", true)),
 			expected: own,
 			want:     true,
-			called:   "fabrik-research",
+			called:   "research",
 		},
 		{
 			name:     "qualified call against a bare configuration (empty catalogue passthrough)",
 			raw:      stream(ndjsonSkillUse("t1", own), ndjsonToolResult("t1", "boom", true)),
-			expected: "fabrik-research",
+			expected: "research",
 			want:     true,
 			called:   own,
 		},
 		{
 			name:     "same-named skill in a different plugin is not the own skill",
-			raw:      stream(ndjsonSkillUse("t1", "other:fabrik-research"), ndjsonToolResult("t1", "boom", true)),
+			raw:      stream(ndjsonSkillUse("t1", "other:research"), ndjsonToolResult("t1", "boom", true)),
 			expected: own,
 		},
 		{
 			name:     "unrelated failing Skill call",
-			raw:      stream(ndjsonSkillUse("t1", "fabrik:fabrik-plan"), ndjsonToolResult("t1", "Unknown skill", true)),
+			raw:      stream(ndjsonSkillUse("t1", "fabrik-stages:plan"), ndjsonToolResult("t1", "Unknown skill", true)),
 			expected: own,
 		},
 		{
@@ -94,7 +94,7 @@ func TestDetectSkillLoadFailure(t *testing.T) {
 		},
 		{
 			name:     "failed then succeeded is not a failure",
-			raw:      stream(ndjsonSkillUse("t1", "fabrik-research"), ndjsonToolResult("t1", "Unknown skill", true), ndjsonSkillUse("t2", own), ndjsonToolResult("t2", "Launching skill", false)),
+			raw:      stream(ndjsonSkillUse("t1", "research"), ndjsonToolResult("t1", "Unknown skill", true), ndjsonSkillUse("t2", own), ndjsonToolResult("t2", "Launching skill", false)),
 			expected: own,
 		},
 		{
@@ -232,7 +232,7 @@ func failedSkillStreamWithMarker(skill string) []byte {
 // IS reported as a completed stage. This is the defect; the override in
 // runClaude (TestRunClaude_FailedSkillOverridesMarker) is what removes it.
 func TestInterpretWouldCompleteWithoutDetector(t *testing.T) {
-	raw := failedSkillStreamWithMarker("fabrik:fabrik-research")
+	raw := failedSkillStreamWithMarker("fabrik-stages:research")
 	_, completed, _, err := interpretClaudeResult(context.Background(), 1, raw, nil, false, filepath.Join(t.TempDir(), "s.session"), t.TempDir(), "", 3, -1)
 	if err != nil || !completed {
 		t.Fatalf("premise changed: completed=%v err=%v", completed, err)
@@ -240,7 +240,7 @@ func TestInterpretWouldCompleteWithoutDetector(t *testing.T) {
 }
 
 func TestSkillLoadOverride_BeatsTheCompletionMarker(t *testing.T) {
-	const own = "fabrik:fabrik-research"
+	const own = "fabrik-stages:research"
 	raw := failedSkillStreamWithMarker(own)
 	sess := filepath.Join(t.TempDir(), "s.session")
 
@@ -272,7 +272,7 @@ func TestSkillLoadOverride_BeatsTheCompletionMarker(t *testing.T) {
 }
 
 func TestSkillLoadOverride_Inert(t *testing.T) {
-	const own = "fabrik:fabrik-research"
+	const own = "fabrik-stages:research"
 	raw := failedSkillStreamWithMarker(own)
 
 	if skillLoadOverride(context.Background(), raw, "", false, true, nil) != nil {
@@ -296,7 +296,7 @@ func TestSkillLoadOverride_Inert(t *testing.T) {
 }
 
 func TestSkillLoadOverride_HealthyAndProseRunsComplete(t *testing.T) {
-	const own = "fabrik:fabrik-research"
+	const own = "fabrik-stages:research"
 	healthy := stream(
 		ndjsonSkillUse("t1", own), ndjsonToolResult("t1", "Launching skill: "+own, false),
 		ndjsonSkillUse("t2", "fabrik:other"), ndjsonToolResult("t2", "Unknown skill", true), // unrelated failing call

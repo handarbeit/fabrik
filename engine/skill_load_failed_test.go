@@ -27,12 +27,12 @@ func TestSkillLoadFailed_StageDispatchPauses(t *testing.T) {
 
 	claude := &mockClaudeInvoker{
 		invokeFn: func(stage *stages.Stage, _ gh.ProjectItem, _ []gh.Comment, _ bool, _ string, _ InvokeOptions) (string, bool, TokenUsage, error) {
-			return "FABRIK_STAGE_COMPLETE", false, TokenUsage{}, skillLoadErrFor("fabrik:fabrik-research")
+			return "FABRIK_STAGE_COMPLETE", false, TokenUsage{}, skillLoadErrFor("fabrik-stages:research")
 		},
 	}
 	client := &mockGitHubClient{}
 	eng := NewWithDeps(Config{Owner: "owner", Repo: "repo", ProjectNum: 1, User: "u", Token: "t", MaxRetries: 2,
-		Stages: skillStages("fabrik:fabrik-research", "")}, client, claude, NewWorktreeManager(repoDir))
+		Stages: skillStages("fabrik-stages:research", "")}, client, claude, NewWorktreeManager(repoDir))
 
 	item := gh.ProjectItem{Number: 400, Title: "t", Status: "Research", ItemID: "PVTI_400"}
 	if err := eng.processItem(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, item); err != nil {
@@ -60,7 +60,7 @@ func TestSkillLoadFailed_StageDispatchPauses(t *testing.T) {
 	if !strings.HasPrefix(body, "🏭 **Fabrik") {
 		t.Errorf("comment must carry the Fabrik prefix (not steering): %q", body)
 	}
-	for _, want := range []string{"fabrik:fabrik-research", "bare", "Plugins loaded", "Unknown skill", "max_retries", "fabrik:paused"} {
+	for _, want := range []string{"fabrik-stages:research", "bare", "Plugins loaded", "Unknown skill", "max_retries", "fabrik:paused"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("comment lacks %q:\n%s", want, body)
 		}
@@ -84,13 +84,13 @@ func TestSkillLoadFailed_HealthyRunClearsPanelEntry(t *testing.T) {
 	claude := &mockClaudeInvoker{
 		invokeFn: func(stage *stages.Stage, _ gh.ProjectItem, _ []gh.Comment, _ bool, _ string, _ InvokeOptions) (string, bool, TokenUsage, error) {
 			if fail {
-				return "", false, TokenUsage{}, skillLoadErrFor("fabrik:fabrik-research")
+				return "", false, TokenUsage{}, skillLoadErrFor("fabrik-stages:research")
 			}
 			return "ok", false, TokenUsage{}, nil
 		},
 	}
 	eng := NewWithDeps(Config{Owner: "owner", Repo: "repo", ProjectNum: 1, User: "u", Token: "t", MaxRetries: 2,
-		Stages: skillStages("fabrik:fabrik-research", "")}, &mockGitHubClient{}, claude, NewWorktreeManager(repoDir))
+		Stages: skillStages("fabrik-stages:research", "")}, &mockGitHubClient{}, claude, NewWorktreeManager(repoDir))
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{Number: 401, Title: "t", Status: "Research", ItemID: "PVTI_401"}

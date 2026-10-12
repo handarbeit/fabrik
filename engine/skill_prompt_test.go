@@ -170,7 +170,7 @@ func TestSkillPrompt_PreviousReleaseBareConfigRunsUnchanged(t *testing.T) {
 // engine, passing the bare name through, did not do.
 func TestSkillPrompt_SeparatePlugin(t *testing.T) {
 	root := t.TempDir()
-	base := skillPlugin(t, root, "base", plugin.BasePluginName, "fabrik-review")
+	base := skillPlugin(t, root, "base", plugin.BasePluginName, "plan")
 	org := skillPlugin(t, root, "org", "myorg", "review")
 	e := &Engine{skillResolver: newSkillResolver([]string{base, org})}
 	item := gh.ProjectItem{Number: 1, Title: "t"}

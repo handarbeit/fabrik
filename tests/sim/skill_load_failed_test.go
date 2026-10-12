@@ -13,7 +13,7 @@ import (
 
 func skillLoadStages() []*stages.Stage {
 	return []*stages.Stage{
-		{Name: "Specify", Order: 1, Skill: "fabrik:fabrik-specify", CommentSkill: "fabrik:fabrik-specify-comment"},
+		{Name: "Specify", Order: 1, Skill: "fabrik-stages:specify", CommentSkill: "fabrik-stages:specify-comment"},
 		{Name: "Done", Order: 2, CleanupWorktree: true},
 	}
 }
@@ -25,7 +25,7 @@ func skillLoadStages() []*stages.Stage {
 func TestSkillLoadFailed_StagePausesForAHuman(t *testing.T) {
 	t.Parallel()
 	env := NewEnv(t, EnvOptions{Stages: skillLoadStages()})
-	env.Claude.ForStage("Specify", simclaude.SkillLoadFailed("fabrik:fabrik-specify"), simclaude.DefaultScript)
+	env.Claude.ForStage("Specify", simclaude.SkillLoadFailed("fabrik-stages:specify"), simclaude.DefaultScript)
 
 	num := FileIssue(t, env, "Skill load failure", "body", "Specify")
 
@@ -43,7 +43,7 @@ func TestSkillLoadFailed_StagePausesForAHuman(t *testing.T) {
 	}
 	for _, c := range commentsOn(t, env, num) {
 		if strings.Contains(c.Body, "skill failed to load") {
-			if !strings.Contains(c.Body, "fabrik:fabrik-specify") || !strings.Contains(c.Body, "Plugins loaded") || !strings.Contains(c.Body, "Unknown skill") {
+			if !strings.Contains(c.Body, "fabrik-stages:specify") || !strings.Contains(c.Body, "Plugins loaded") || !strings.Contains(c.Body, "Unknown skill") {
 				t.Errorf("comment must name the skill, the plugins loaded and the error, got:\n%s", c.Body)
 			}
 		}
@@ -72,7 +72,7 @@ func TestSkillLoadFailed_CommentPathPausesWithoutBreaker(t *testing.T) {
 	env.Claude.ForStage("Specify", func(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts engine.InvokeOptions) (string, bool, engine.TokenUsage, error) {
 		return "FABRIK_BLOCKED_ON_INPUT\n", false, engine.TokenUsage{}, nil
 	})
-	env.Claude.ForStageComments("Specify", simclaude.SkillLoadFailedComment("fabrik:fabrik-specify-comment"))
+	env.Claude.ForStageComments("Specify", simclaude.SkillLoadFailedComment("fabrik-stages:specify-comment"))
 
 	num := FileIssue(t, env, "Skill load failure on comment", "body", "Specify")
 	WaitForIssueLabel(t, env, num, "fabrik:awaiting-input", 80)
