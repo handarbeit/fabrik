@@ -277,6 +277,60 @@ func TestSettlePRFacts_PollOnlyGreenIsNotReReadEveryPoll(t *testing.T) {
 	}
 }
 
+// Items whose facts the probe cannot stamp are re-read by REST each poll; five
+// of them that are merged (or whose read fails) must not hold the front of the
+// order and starve an open PR behind them.
+func TestSettlePRFacts_ClosedOrFailingItemsDoNotStarveAnOpenOne(t *testing.T) {
+	env := newPRFactsEnv(t)
+	merged := map[int]bool{}
+	env.client.fetchPRDetailsFn = func(owner, repo string, n int) (*gh.PRDetails, error) {
+		if merged[n-50] {
+			return nil, errors.New("boom")
+		}
+		return &gh.PRDetails{Number: n, State: "open", HeadSHA: prFactsSHA, MergeableState: "clean"}, nil
+	}
+	var numbers []int
+	for n := 1; n <= 6; n++ {
+		numbers = append(numbers, n)
+		env.e.seedAPIItem(t, n, "Implement")
+		env.e.store.Apply(itemstate.PRHeadSHAUpdated{Repo: "owner/repo", Number: n, LinkedPRNum: 50 + n, SHA: prFactsSHA})
+		if n <= 5 {
+			merged[n] = true // items 1-5: the read keeps failing, nothing is stamped
+		}
+	}
+	board := env.board(numbers...)
+	env.runs = []gh.CheckRun{failedRun("Test and vet", 1)}
+	for poll := 0; poll < 3; poll++ {
+		env.clock.t = env.clock.t.Add(30 * time.Second)
+		env.e.settlePRFacts(board)
+	}
+	if got := status(t, env.e, "6"); got.PR.CI.V != "red" {
+		t.Errorf("the open item behind five failing ones was never refreshed: ci=%+v", got.PR.CI)
+	}
+}
+
+// The rotation attention tolerates counts only candidates that can spend check
+// budget: green verdicts restamped for free must not stretch it.
+func TestSettlePRFacts_RotationCountsOnlyBudgetSpenders(t *testing.T) {
+	env := newPRFactsEnv(t)
+	var numbers []int
+	for n := 1; n <= 20; n++ {
+		numbers = append(numbers, n)
+		env.seedPR(t, n, false)
+	}
+	board := env.board(numbers...)
+	env.runs = []gh.CheckRun{passRun("Test and vet", 1)}
+	// Two passes finish a full rotation at the budget of 8 per poll.
+	for i := 0; i < 3; i++ {
+		env.e.settlePRFacts(board)
+	}
+	// Every PR is now green and recently live-read: nothing can spend budget.
+	env.e.settlePRFacts(board)
+	if got := env.e.prFactsRotation.Load(); got != 1 {
+		t.Errorf("rotation = %d with 20 free-restamped green PRs, want 1", got)
+	}
+}
+
 // cacheReadGuard is a ReadClient whose check-run read must never be used by
 // the refresher: CacheImpl.FetchCheckRuns applies CheckRunCompleted, which
 // stamps LastCIProgressAt (ADR-1410) and so would change what a CI gate that

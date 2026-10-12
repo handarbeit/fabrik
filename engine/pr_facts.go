@@ -56,7 +56,8 @@ func (e *Engine) SetPRFactsRefreshDisabledForTest(disabled bool) {
 type prFactsCandidate struct {
 	item  gh.ProjectItem
 	repo  string
-	order int64 // the verdict's ObservedAt in unix nanos; zero (never) sorts first
+	key   string
+	order int64 // unix nanos of the last poll this item spent budget; zero (never) sorts first
 }
 
 // settlePRFacts refreshes, for every managed open item with a linked PR, the PR
@@ -73,6 +74,10 @@ func (e *Engine) settlePRFacts(board *gh.ProjectBoard) {
 	}
 
 	var cands []prFactsCandidate
+	spenders := 0
+	if e.prFactsAttemptAt == nil {
+		e.prFactsAttemptAt = map[string]time.Time{}
+	}
 	for _, item := range board.Items {
 		if item.IsClosed || item.IsPR || item.Status == "" {
 			continue
@@ -89,20 +94,39 @@ func (e *Engine) settlePRFacts(board *gh.ProjectBoard) {
 		if state.Terminal || state.LinkedPR == nil || state.LinkedPR.Number == 0 {
 			continue
 		}
+		key := fmt.Sprintf("%s#%d", repo, item.Number)
 		var order int64
-		if at := state.LinkedPR.CIVerdict.ObservedAt; !at.IsZero() {
+		if at := e.prFactsAttemptAt[key]; !at.IsZero() {
 			order = at.UnixNano()
 		}
-		cands = append(cands, prFactsCandidate{item: item, repo: repo, order: order})
+		cands = append(cands, prFactsCandidate{item: item, repo: repo, key: key, order: order})
+		if canSpendPRFactsBudget(state.LinkedPR, now) {
+			spenders++
+		}
 	}
-	// Oldest verdict first, so a budget shortfall rotates through the items.
+	// Least recently attempted first, so a budget shortfall rotates through the
+	// items whatever the outcome of an attempt (a failed read or a merged PR
+	// stamps nothing on the PR, but still moves to the back).
 	sort.SliceStable(cands, func(i, j int) bool { return cands[i].order < cands[j].order })
-	e.prFactsRotation.Store(int64(max(1, (len(cands)+prFactsCheckBudgetPerPoll-1)/prFactsCheckBudgetPerPoll)))
+	e.prFactsRotation.Store(int64(max(1, (spenders+prFactsCheckBudgetPerPoll-1)/prFactsCheckBudgetPerPoll)))
 
 	checkBudget, restBudget := prFactsCheckBudgetPerPoll, prFactsRESTPerPoll
 	for _, c := range cands {
 		e.refreshPRFacts(c, pollStart, now, &checkBudget, &restBudget)
 	}
+}
+
+// canSpendPRFactsBudget reports whether refreshing this PR can cost a GitHub
+// read this poll. A PR whose facts say it is merged or closed gets no verdict,
+// and a green verdict read live within prFactsGreenRecheck is restamped for
+// free; neither occupies a place in the rotation that attention tolerates.
+func canSpendPRFactsBudget(lpr *itemstate.LinkedPRState, now time.Time) bool {
+	if lpr.Facts.State != "" && (lpr.Facts.State != "open" || lpr.Facts.Merged) {
+		return false
+	}
+	rec := lpr.CIVerdict
+	return !(rec.Verdict == string(ciVerdictGreen) && rec.HeadSHA == lpr.ObservedHead() &&
+		!rec.LiveReadAt.IsZero() && now.Sub(rec.LiveReadAt) < prFactsGreenRecheck)
 }
 
 // refreshPRFacts is settlePRFacts for one item: the REST facts fallback when
@@ -123,8 +147,10 @@ func (e *Engine) refreshPRFacts(c prFactsCandidate, pollStart, now time.Time, ch
 	// Facts the probe did not stamp this poll (a base:<branch> PR, which
 	// closedByPullRequestsReferences omits, or a probe without the scalars)
 	// come from one bounded REST read of the PR.
-	if lpr.Facts.ObservedAt.Before(pollStart) && *restBudget > 0 {
+	knownClosed := lpr.Facts.State != "" && (lpr.Facts.State != "open" || lpr.Facts.Merged) && now.Sub(lpr.Facts.ObservedAt) < prFactsGreenRecheck
+	if lpr.Facts.ObservedAt.Before(pollStart) && *restBudget > 0 && !knownClosed {
 		*restBudget--
+		e.prFactsAttemptAt[c.key] = now
 		d, err := e.client.FetchPRDetails(owner, name, lpr.Number)
 		if err != nil || d == nil {
 			if err != nil {
@@ -192,6 +218,7 @@ func (e *Engine) refreshPRFacts(c prFactsCandidate, pollStart, now time.Time, ch
 		return
 	}
 	*checkBudget--
+	e.prFactsAttemptAt[c.key] = now
 	// Read live, not through the cache: a cached READY set is served on trust
 	// and would hide a rerun that failed on this head. Nothing is written to the
 	// Store from this read, so what the gates see is unchanged.
