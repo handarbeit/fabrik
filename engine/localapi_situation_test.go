@@ -162,6 +162,57 @@ func TestSituation_BoundedWithExactOmittedCounts(t *testing.T) {
 	}
 }
 
+// seedEscalated places issue n paused by the engine (escalated, rank 1); a plain
+// paused item is needs-human (rank 0).
+func (e *Engine) seedEscalated(t *testing.T, n int) {
+	t.Helper()
+	e.seedAPIItem(t, n, "Implement", "fabrik:paused", "fabrik:awaiting-input")
+	e.store.Apply(itemstate.EnginePaused{Repo: "owner/repo", Number: n, StageName: "Implement"})
+}
+
+// The two tests below seed rank and issue-number order in disagreement, so they
+// fail if the section sort ignores attention rank (the other tests seed items
+// whose number order happens to equal their rank order).
+func TestSituation_RankBeatsIssueNumber(t *testing.T) {
+	e, _, _, _, _ := situationEngine(t, 0)
+	e.seedEscalated(t, 1)
+	e.seedAPIItem(t, 2, "Implement", "fabrik:paused", "fabrik:awaiting-input") // needs-human
+	v := e.buildSituation(nil)
+	if got := issuesOf(v.HumanInput); strings.Join(got, ",") != "owner/repo#2,owner/repo#1" {
+		t.Fatalf("human_input = %v; needs-human (#2, rank 0) must come before escalated (#1, rank 1)", got)
+	}
+	if r0, r1 := v.HumanInput.Entries[0].Rank, v.HumanInput.Entries[1].Rank; r0 >= r1 {
+		t.Errorf("ranks = %d, %d; the first entry must be the more urgent", r0, r1)
+	}
+}
+
+func TestSituation_BoundKeepsTheMostUrgentNotTheLowestNumbers(t *testing.T) {
+	e, _, _, _, _ := situationEngine(t, 0)
+	// Ten escalated items on the low numbers, three more urgent needs-human items
+	// on the high ones: by number the cut would drop the urgent ones.
+	for n := 1; n <= situationSectionMax; n++ {
+		e.seedEscalated(t, n)
+	}
+	urgent := []int{situationSectionMax + 1, situationSectionMax + 2, situationSectionMax + 3}
+	for _, n := range urgent {
+		e.seedAPIItem(t, n, "Implement", "fabrik:paused", "fabrik:awaiting-input")
+	}
+	v := e.buildSituation(nil)
+	if len(v.HumanInput.Entries) != situationSectionMax || v.HumanInput.Omitted != 3 {
+		t.Fatalf("human_input = %d entries, %d omitted; want %d and 3", len(v.HumanInput.Entries), v.HumanInput.Omitted, situationSectionMax)
+	}
+	want := []string{}
+	for _, n := range urgent {
+		want = append(want, fmt.Sprintf("owner/repo#%d", n))
+	}
+	for n := 1; n <= situationSectionMax-len(urgent); n++ {
+		want = append(want, fmt.Sprintf("owner/repo#%d", n))
+	}
+	if got := issuesOf(v.HumanInput); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("kept = %v\nwant  %v (all needs-human first, then the lowest-numbered escalated)", got, want)
+	}
+}
+
 func TestSituation_EmptySystemIsAnExplicitNothingNeedsYou(t *testing.T) {
 	e, _, _, _, _ := situationEngine(t, 0)
 	e.seedAPIItem(t, 1, "Implement") // fine and recently entered
