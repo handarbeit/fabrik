@@ -22,6 +22,9 @@ type probeDriftHarness struct {
 	deepFetchs atomic.Int64
 	status     string
 	closed     bool
+	// updatedBump moves the probe's EffectiveUpdatedAt past the cached value,
+	// making the item stale so the poll deep-fetches it.
+	updatedBump time.Duration
 }
 
 // newProbeDriftHarness seeds a warm (already deep-fetched) item #1 at status
@@ -38,7 +41,7 @@ func newProbeDriftHarness(t *testing.T, status string, closed bool, cachedPR, pr
 		probeProjectBoardFn: func(string, string, int, string) ([]gh.BoardProbeItem, string, error) {
 			return []gh.BoardProbeItem{{
 				ItemID: "PVTI_001", ContentID: "I_001", Number: 1, Repo: "owner/repo",
-				Status: h.status, IsClosed: h.closed, EffectiveUpdatedAt: warm,
+				Status: h.status, IsClosed: h.closed, EffectiveUpdatedAt: warm.Add(h.updatedBump),
 				LinkedPRNumber: int(h.probePR.Load()),
 			}}, "PVT_1", nil
 		},
@@ -359,5 +362,50 @@ func TestProbeDrift_Neutralised_TerminalSkipRestoresInvalidation(t *testing.T) {
 	h.poll(1)
 	if after := getLastDeepFetch(t, h); after.Equal(before) {
 		t.Error("with the terminal skip neutralised the terminal item should have been invalidated by drift (pre-fix behavior)")
+	}
+}
+
+// TestProbeLoop_StaleListingDoesNotRevertEngineStatusWrite pins #2178 end to end
+// through runProbeAndDeepFetch: after the engine moves an item's Status, a probe
+// listing that still carries the old Status (GitHub's board query lags writes)
+// must neither revert the cache nor, via the deep fetch it triggers because
+// EffectiveUpdatedAt moved, write the stale Status back. The sim builds probe
+// items fresh from its model and has no listing lag, so it cannot cover this.
+func TestProbeLoop_StaleListingDoesNotRevertEngineStatusWrite(t *testing.T) {
+	h := newProbeDriftHarness(t, "Research", false, 0, 0, 0)
+	h.eng.store.SetEngineWriteGraceForTest(time.Hour)
+	h.updatedBump = time.Minute // stale per EffectiveUpdatedAt: the poll deep-fetches
+
+	h.eng.store.Apply(itemstate.LocalStatusUpdated{Repo: "owner/repo", Number: 1, NewStatus: "Plan"})
+	before, _ := h.eng.store.Get("owner/repo", 1)
+
+	// The probe reports the old Status with a newer EffectiveUpdatedAt, so the item
+	// is deep-fetched; fetchItemDetailsFn leaves minimal.Status as seeded.
+	out := captureStdout(func() { h.poll(3) })
+
+	after, err := h.eng.store.Get("owner/repo", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := after.State().Status; got != "Plan" {
+		t.Fatalf("cached Status = %q, want the engine's %q\n%s", got, "Plan", out)
+	}
+	if !after.State().StatusEnteredAt.Equal(before.State().StatusEnteredAt) {
+		t.Errorf("StatusEnteredAt reset by a stale listing")
+	}
+	if strings.Contains(out, "terminal flag cleared") {
+		t.Errorf("stale listing cleared the terminal flag:\n%s", out)
+	}
+}
+
+// TestProbeLoop_ListingMatchingNoEngineWriteStillApplies is the control: with no
+// engine write on record the probe moves the Status exactly as before.
+func TestProbeLoop_ListingMatchingNoEngineWriteStillApplies(t *testing.T) {
+	h := newProbeDriftHarness(t, "Research", false, 0, 0, 0)
+	h.status = "Plan"
+	h.poll(1)
+	snap, _ := h.eng.store.Get("owner/repo", 1)
+	if got := snap.State().Status; got != "Plan" {
+		t.Fatalf("cached Status = %q, want %q (external move applied)", got, "Plan")
 	}
 }
