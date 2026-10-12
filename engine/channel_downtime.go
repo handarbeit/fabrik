@@ -299,12 +299,20 @@ func (e *Engine) catchUpAll() ([]channelevents.Event, map[string]bool) {
 		covered[sub.Subscriber+"/"+sub.ID] = true
 		names[sub.Subscriber] = true
 	}
-	evs := e.catchUpEvents()
+	var evs []channelevents.Event
+	built := false
 	for _, name := range ce.hub.SubscriberNames() {
 		if !names[name] {
 			continue
 		}
-		if n := ce.hub.CatchUp(name, "", evs); n > 0 {
+		n := e.catchUpSituation(name, "")
+		if e.perItemCatchUpWanted(name, "") {
+			if !built {
+				evs, built = e.catchUpEvents(), true
+			}
+			n += ce.hub.CatchUpWhere(name, "", evs, notTakingSituation)
+		}
+		if n > 0 {
 			e.logf(0, "channel", "restart catch-up for %q: %d event(s)\n", name, n)
 		}
 	}
@@ -327,7 +335,14 @@ func (e *Engine) catchUpLate(evs []channelevents.Event, covered map[string]bool)
 		if covered[sub.Subscriber+"/"+sub.ID] {
 			continue
 		}
-		if n := ce.hub.CatchUp(sub.Subscriber, sub.ID, evs); n > 0 {
+		n := e.catchUpSituation(sub.Subscriber, sub.ID)
+		if !sub.TakesSituation() {
+			if evs == nil {
+				evs = e.catchUpEvents()
+			}
+			n += ce.hub.CatchUpWhere(sub.Subscriber, sub.ID, evs, notTakingSituation)
+		}
+		if n > 0 {
 			e.logf(0, "channel", "late restart catch-up for %q: %d event(s)\n", sub.Subscriber, n)
 		}
 	}

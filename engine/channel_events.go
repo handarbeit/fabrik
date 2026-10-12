@@ -112,6 +112,10 @@ type channelEvents struct {
 	// episodeSeq numbers pipeline stall episodes for their dedup keys.
 	episodeSeq uint64
 
+	// sitEval is when each subscriber's situation cadence last evaluated
+	// (#2171); consumer-owned.
+	sitEval map[string]time.Time
+
 	// anom is the retry/wedge episode memory and the divergence ledger
 	// (#2170); it has its own mutex because hooks and the observer write it.
 	anom anomalyState
@@ -166,7 +170,9 @@ func (e *Engine) startChannelEventsIn(dir string, warming bool) {
 	hub, err := channelevents.Open(channelevents.Options{
 		Dir:     dir,
 		HeldMax: e.cfg.ChannelHeldMax,
-		Now:     e.now,
+		// Zero keeps the production floor; the test seam shortens it.
+		MinSituation: time.Duration(situationMinOverride.Load()),
+		Now:          e.now,
 		Logf: func(format string, args ...any) {
 			e.logf(0, "channel", format, args...)
 		},

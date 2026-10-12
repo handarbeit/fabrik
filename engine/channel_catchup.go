@@ -112,6 +112,12 @@ func (e *Engine) catchUpEvents() []channelevents.Event {
 // catchUp queues the current-state snapshot for one subscriber (only the
 // subscription subID when non-empty) and reports how many events it queued. A
 // void call with no hub running.
+//
+// A subscription that takes the situation digest (#2171) is caught up with the
+// digest itself — one forced `situation` event, built by the same builder as the
+// fabrik_situation tool, so what a session sees on arrival is exactly what the
+// tool would say. A subscription that does not (one persisted before the digest
+// existed, or an explicit list without it) keeps the per-item snapshot.
 func (e *Engine) catchUp(subscriber, subID string) int {
 	ce := e.channelEvents()
 	if ce == nil {
@@ -128,9 +134,70 @@ func (e *Engine) catchUp(subscriber, subID string) int {
 			e.logf(0, "channel", "catch-up panic recovered: %v\n", r)
 		}
 	}()
-	n := ce.hub.CatchUp(subscriber, subID, e.catchUpEvents())
+	n := e.catchUpSituation(subscriber, subID)
+	if perItem := e.perItemCatchUpWanted(subscriber, subID); perItem {
+		n += ce.hub.CatchUpWhere(subscriber, subID, e.catchUpEvents(), notTakingSituation)
+	}
 	if n > 0 {
 		e.logf(0, "channel", "catch-up for %q: %d event(s)\n", subscriber, n)
+	}
+	return n
+}
+
+func notTakingSituation(s channelevents.Subscription) bool { return !s.TakesSituation() }
+
+// subscriptionsOf lists a subscriber's subscriptions, only subID's when non-empty.
+func (ce *channelEvents) subscriptionsOf(subscriber, subID string) []channelevents.Subscription {
+	var out []channelevents.Subscription
+	for _, sub := range ce.hub.Subscriptions(subscriber) {
+		if subID == "" || sub.ID == subID {
+			out = append(out, sub)
+		}
+	}
+	return out
+}
+
+// perItemCatchUpWanted reports whether any of the selected subscriptions is
+// caught up with per-item events rather than the digest.
+func (e *Engine) perItemCatchUpWanted(subscriber, subID string) bool {
+	ce := e.channelEvents()
+	if ce == nil {
+		return false
+	}
+	for _, sub := range ce.subscriptionsOf(subscriber, subID) {
+		if !sub.TakesSituation() {
+			return true
+		}
+	}
+	return false
+}
+
+// catchUpSituation queues the forced catch-up digest when any selected
+// subscription takes situation, and returns how many digests it queued (0 or 1).
+// Recording its fingerprint is what stops the first scheduled digest repeating it.
+func (e *Engine) catchUpSituation(subscriber, subID string) int {
+	ce := e.channelEvents()
+	if ce == nil {
+		return 0
+	}
+	takes, reminds := false, false
+	for _, sub := range ce.subscriptionsOf(subscriber, subID) {
+		if sub.TakesSituation() {
+			takes = true
+			reminds = reminds || sub.RemindAfterSeconds > 0
+		}
+	}
+	if !takes {
+		return 0
+	}
+	n := 0
+	if e.pushSituation(subscriber, channelevents.TriggerCatchUp, true) {
+		n = 1
+	}
+	if reminds {
+		// The decisions are announced inside the digest now; keep the reminder
+		// clock behind it as the per-item catch-up did.
+		ce.hub.RestartReminders(subscriber, e.catchUpEvents())
 	}
 	return n
 }

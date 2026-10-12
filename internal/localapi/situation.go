@@ -52,8 +52,13 @@ type SituationSection[T any] struct {
 // item sections (MergeDecisions, Gates, HumanInput, Decisions, Stalled); the
 // account sections (MergeTrain, Health, Anomalies) are always whole-account.
 type SituationView struct {
-	// NothingNeedsYou is true when no item section and no anomaly has an entry.
+	// NothingNeedsYou is true when no item section and no anomaly has an entry
+	// and every open managed item could be classified.
 	NothingNeedsYou bool `json:"nothing_needs_you"`
+	// UnclassifiedItems counts open managed items whose labels the daemon has
+	// not read yet (just after a restart): they cannot be placed in a section,
+	// and are reported rather than assumed healthy.
+	UnclassifiedItems int `json:"unclassified_items"`
 
 	// MergeDecisions: PRs settled at Validate under cruise, awaiting a human merge.
 	MergeDecisions SituationSection[SituationEntry] `json:"merge_decisions"`

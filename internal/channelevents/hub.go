@@ -445,6 +445,20 @@ func (h *Hub) CatchUpWhere(name, subID string, evs []Event, take func(Subscripti
 	return queued
 }
 
+// RestartReminders restarts name's reminder clock for every DecisionPending event
+// in evs that carries its episode's DedupKey, as CatchUp does for the events it
+// queues. The situation catch-up announces those decisions inside the digest
+// instead of as events, and a reminder due "since the original announcement"
+// must not fire right behind it (#2171).
+func (h *Hub) RestartReminders(name string, evs []Event) {
+	now := h.opt.Now()
+	for _, ev := range evs {
+		if ev.Type == DecisionPending && ev.DedupKey != "" {
+			h.restartReminderClock(name, ev, ev.DedupKey, now)
+		}
+	}
+}
+
 // SubscriberNames lists, sorted, every subscriber that holds at least one
 // subscription — attached or not. The restart readiness pass queues its catch-up
 // to each of them (#2169).
