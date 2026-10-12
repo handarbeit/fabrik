@@ -419,3 +419,28 @@ func TestMeaningOfResolvesVariableLabels(t *testing.T) {
 		t.Error("fabrik:reworking:<Stage> must appear in reasons (F15)")
 	}
 }
+
+// A queued worker is already blocked on the slot semaphore, so an overdue poll
+// is not what it waits for: poll-stall attribution leaves it alone (#2121).
+func TestPollStallDoesNotBlameThePollForAQueuedWorker(t *testing.T) {
+	in := baseInput()
+	in.HasWorker, in.WorkerQueued, in.WorkerQueuedSince = true, true, t0.Add(-time.Minute)
+	in.WorkerKind = WorkerKindReviewReinvoke
+	in.SlotsBusy, in.SlotsMax = 5, 5
+	in.PollStall = PollStall{Active: true, Blocked: 923 * time.Second, Step: "dispatch"}
+	got := Classify(in)
+	if got.Code != CodeQueuedForSlot || got.State != Waiting {
+		t.Fatalf("got %s/%s, want waiting/%s", got.State, got.Code, CodeQueuedForSlot)
+	}
+	if strings.Contains(got.Summary, "waiting for the poll") || strings.Contains(got.Next.Action, "waiting for the poll") {
+		t.Errorf("a slot wait must not be attributed to the poll: summary %q action %q", got.Summary, got.Next.Action)
+	}
+	// Control: the same stall still attributes a plain wait, so the exemption is
+	// the only reason the queued worker is untouched.
+	ctl := baseInput()
+	ctl.Labels = []string{"fabrik:awaiting-ci"}
+	ctl.PollStall = in.PollStall
+	if got := Classify(ctl); !strings.HasPrefix(got.Summary, "waiting for the poll") {
+		t.Errorf("control wait not attributed to the poll: %q", got.Summary)
+	}
+}

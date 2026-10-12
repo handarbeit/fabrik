@@ -500,6 +500,9 @@ func attributePollStall(in Input, res Result) Result {
 		res.State, res.Code, res.Rank = Waiting, CodeWaitingForPoll, NotRanked
 		res.Summary = text
 		res.Next.Action = text
+	case res.Code == CodeQueuedForSlot:
+		// A queued worker's goroutine is already blocked on the slot semaphore
+		// (#2121): it does not wait for the poll, so the poll is not blamed.
 	case res.State == Waiting, res.State == Idle && res.Code == "idle":
 		res.Summary = text + "; " + res.Summary
 		res.Next.Action = text + "; " + res.Next.Action
