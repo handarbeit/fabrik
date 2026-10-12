@@ -134,6 +134,9 @@ func planMigration(dir string, isDev bool, devOverride string) (*migrationPlan, 
 	// once this run normalises it) named local-workflows, so a stage reference
 	// qualified with that name will resolve.
 	usableLocal := p.MoveTree
+	// ownLocal is whether local-workflows is the operator's own plugin rather
+	// than a moved copy of the base plugin (#2203).
+	ownLocal := false
 	if lwExists && !p.MoveTree {
 		// local-workflows from an earlier (possibly interrupted) run, or the
 		// operator's own: the edited skills are read from it.
@@ -162,6 +165,7 @@ func planMigration(dir string, isDev bool, devOverride string) (*migrationPlan, 
 		case nameErr != nil:
 			p.Notes = append(p.Notes, fmt.Sprintf("%s has an unreadable manifest (%v); it was left alone and no stage was pointed at it", fabrikplugin.LocalWorkflowsRelDir, nameErr))
 		default:
+			ownLocal = true
 			p.Notes = append(p.Notes, fmt.Sprintf("%s is a plugin named %q, not %q; it was left alone and no stage was pointed at it", fabrikplugin.LocalWorkflowsRelDir, name, fabrikplugin.LocalWorkflowsName))
 		}
 		if len(baseCls.Files) == 0 {
@@ -181,6 +185,12 @@ func planMigration(dir string, isDev bool, devOverride string) (*migrationPlan, 
 	for _, s := range p.Edited {
 		edited[s] = true
 	}
+
+	// The plugins beyond the base the daemon would load: a bare reference one of
+	// them provides is qualified to it, as the runtime resolver would pick it,
+	// rather than to the base plugin (#2203).
+	project, projectNotes := loadProjectPlugins(dir, ownLocal)
+	p.Notes = append(p.Notes, projectNotes...)
 
 	stagesDir := filepath.Join(dir, filepath.FromSlash(stagesRelDir))
 	entries, err := os.ReadDir(stagesDir)
@@ -219,6 +229,15 @@ func planMigration(dir string, isDev bool, devOverride string) (*migrationPlan, 
 						return fabrikplugin.Qualify(fabrikplugin.LocalWorkflowsName, newSkill), true
 					}
 				}
+				// A bare reference a project plugin also provides keeps resolving
+				// there, as the runtime resolver (as-is lookup first) does; the
+				// qualified pre-rename form is explicit and is not second-guessed.
+				if _, _, isQualified := fabrikplugin.Split(ref); !isQualified {
+					if projRef, note, ok := project.qualify(rel, key, ref); ok {
+						p.Notes = append(p.Notes, note)
+						return projRef, true
+					}
+				}
 				return newRef, true
 			}
 			pn, skill, qualified := fabrikplugin.Split(ref)
@@ -247,6 +266,10 @@ func planMigration(dir string, isDev bool, devOverride string) (*migrationPlan, 
 				return fabrikplugin.Qualify(fabrikplugin.LocalWorkflowsName, ref), true
 			case shipped[ref]:
 				return fabrikplugin.Qualify(fabrikplugin.BasePluginName, ref), true
+			}
+			if projRef, note, ok := project.qualify(rel, key, ref); ok {
+				p.Notes = append(p.Notes, note)
+				return projRef, true
 			}
 			p.Notes = append(p.Notes, fmt.Sprintf("%s: %s %q names no shipped skill and was left bare; qualify it with its plugin name by hand", rel, key, ref))
 			return "", false

@@ -34,6 +34,18 @@ var upgradeGitHubClient selfupgrade.ReleaseFetcher
 // upgradeReconcilePrompt is the text printed by --reconcile or the TUI [1] option.
 const upgradeReconcilePrompt = "In .fabrik/plugin/, compare the on-disk plugin files against the embedded source at plugin/fabrik-workflows/ in the fabrik repo. Help me reconcile my local customizations with the new embedded version. Preserve my customizations where they don't conflict with the new behavior; flag conflicts for review."
 
+// loadUpgradeDotenv loads .env the way the daemon does (same file, same
+// precedence: a variable already in the environment wins) so the migration sees a
+// FABRIK_PLUGIN_DIRS that lives only there and agrees with the plugin set the
+// daemon would load. Unlike the daemon, a .env that is not gitignored does not stop
+// the upgrade: it is left unloaded and the report says so, since the upgrade is
+// how such a deployment gets repaired.
+func loadUpgradeDotenv(w io.Writer) {
+	if err := config.LoadDotenv(); err != nil {
+		fmt.Fprintf(w, "fabrik upgrade: .env was not loaded (%v); FABRIK_PLUGIN_DIRS set only there was not consulted, so references its plugins provide fall back to the base plugin\n", err)
+	}
+}
+
 // runUpgrade implements the `fabrik upgrade` subcommand.
 // For release builds it first checks for a newer binary, downloads and
 // atomically replaces it if found, then re-execs so the new binary's embedded
@@ -111,6 +123,7 @@ func runUpgrade(args []string) error {
 	// auto-upgrade hook, which must never move files or edit tracked YAML
 	// unattended) keeps the refusal below exactly as it was.
 	if !noMigrate {
+		loadUpgradeDotenv(os.Stderr)
 		plan, err := planMigration(".", strings.HasPrefix(Version, "dev"), os.Getenv("FABRIK_PLUGIN_DIR"))
 		if err != nil {
 			return fmt.Errorf("planning workflow migration: %w", err)

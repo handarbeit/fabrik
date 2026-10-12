@@ -3113,10 +3113,26 @@ that upgraded through each:
    points at `local-workflows:<its old skill name>` (so the edit is kept); every other
    stage points at `fabrik-stages:<skill>`. This includes the pre-rename forms
    `fabrik:fabrik-review` and bare `fabrik-review`, which become `fabrik-stages:review`
-   (or `local-workflows:fabrik-review` when you edited that skill). A reference to any other
-   plugin is left alone, and a bare name that no plugin
-   Fabrik can see provides (for example a skill in a `plugin_dirs` plugin) is left bare
-   and reported.
+   (or `local-workflows:fabrik-review` when you edited that skill). A bare name that a
+   project plugin provides keeps resolving to it: if a plugin the daemon loads besides the
+   base plugin (a `plugin_dirs` extra, or a `local-workflows` of your own) provides
+   `fabrik-review`, the reference becomes `<that-plugin>:fabrik-review`, the same plugin the
+   runtime would have picked once the base plugin is refreshed (the first in load order
+   when several provide it), so for a plugin set `fabrik upgrade` can see, the upgrade does
+   not switch a stage to the base skill. Two cases differ. A base skill you
+   edited: your edit lives in the moved `local-workflows` copy, which the daemon loads
+   before `plugin_dirs`, so that reference keeps pointing at `local-workflows` even when an
+   extra also provides the name. And a customised, not-yet-refreshed base still named
+   `fabrik` that ships an unedited `fabrik-review` beats an extra at runtime today, so the
+   stage moves to the extra once the base is refreshed. The report names each such
+   reference, its stage file and key, and the plugin. The extras are read from
+   `plugin_dirs` in `.fabrik/config.yaml`, or `FABRIK_PLUGIN_DIRS` when set (in the
+   environment or in `.env`, which `fabrik upgrade` loads the way the daemon does; a variable already in
+   the environment wins). The `--plugin-dirs` flag is a daemon flag with no `fabrik upgrade`
+   equivalent, so a value given only there is not visible to the upgrade. An extra that cannot be read is skipped with a report note and the
+   references it might provide fall back to the base plugin. A reference to any other
+   plugin is left alone, and a bare name that no plugin Fabrik can see provides is left
+   bare and reported.
 5. **Prints what moved and what was rewritten** and tells you to review and commit it.
    Fabrik never commits to your repository.
 
@@ -3463,6 +3479,11 @@ plugin_dirs:
   creates `local-workflows` once and never touches it again).
 - Interactive `resume` / `watch` sessions pass only the base plugin override, not the
   additional plugins or `local-workflows`.
+- **Which sessions load the `fabrik@fabrik` PM plugin.** Stage workers never do (next
+  bullet). Interactive sessions do when you have it installed: `fabrik resume`, TUI launches
+  and `fabrik watch` pass no `--settings` override, so Claude Code loads the plugin from your
+  own install beside whatever `--plugin-dir` you gave. Without `--plugin-dir` they load no
+  stage plugin at all.
 - **The human-facing `fabrik@fabrik` plugin never loads in a worker.** The base stage
   plugin is named `fabrik-stages`, so the name `fabrik` belongs to the project-management
   plugin you install with `/plugin install fabrik@fabrik`. Every worker invocation is given
