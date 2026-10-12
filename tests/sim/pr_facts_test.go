@@ -246,7 +246,12 @@ func TestSimRedCIWithAWorkerInFlightSaysSo(t *testing.T) {
 	case <-time.After(30 * time.Second):
 		t.Fatal("the Implement worker never started")
 	}
-	defer close(release)
+	defer func() {
+		// Let the worker finish before the test returns: it writes into its
+		// worktree, which the TempDir cleanup would otherwise race.
+		close(release)
+		waitForWorkerQuiescence(t, env)
+	}()
 	st := prFactsStatus(t, env, num)
 	if !strings.Contains(st.Attention.Summary, "CI is red on "+prFactsFailingCheck+"; a worker is running") {
 		t.Errorf("summary with a worker in flight = %q", st.Attention.Summary)
