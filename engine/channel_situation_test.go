@@ -58,6 +58,7 @@ func TestSituationFingerprint_IgnoresWhatMovesWithTheClock(t *testing.T) {
 			v.MergeTrain.Entries[0].OldestQueuedSeconds = localapi.Some[int64](9999)
 		},
 		"poll in-progress time": func(v *localapi.SituationView) { v.Health.Poll.InProgressSeconds = localapi.Some[int64](500) },
+		"poll running now":      func(v *localapi.SituationView) { v.Health.Poll.InProgress = true },
 		"poll last attempt":     func(v *localapi.SituationView) { v.Health.Poll.LastAttemptAt = localapi.KnownTime(time.Now()) },
 		"entry reason prose":    func(v *localapi.SituationView) { v.HumanInput.Entries[0].Reason = "paused 5m ago" },
 		"entry order":           func(v *localapi.SituationView) {},

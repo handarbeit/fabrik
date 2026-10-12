@@ -331,8 +331,9 @@ func pollText(p localapi.PollHealth) string {
 // gate name, verdicts, partition phase and idle reason, slots, queued counts,
 // truncation counts and the stable timestamps. It is an explicit allowlist, so
 // a field added to the view later cannot leak into dedup by accident. It leaves
-// out everything that moves with the clock alone — the freshness envelope, every
-// age or *_seconds figure, in-progress durations and the poll step — so an
+// out everything that moves with the clock or the poll cycle alone — the
+// freshness envelope, every age or *_seconds figure, whether a poll happens to be
+// running right now and its step — so an
 // unchanged view does not re-send merely because time passed.
 func situationFingerprint(v localapi.SituationView) string {
 	var b strings.Builder
@@ -390,7 +391,7 @@ func situationFingerprint(v localapi.SituationView) string {
 	}
 
 	h := v.Health
-	w("health", strconv.FormatBool(h.Poll.InProgress), knownText(h.Poll.Overdue), h.Poll.OverdueCause, h.Poll.BackoffReason,
+	w("health", knownText(h.Poll.Overdue), h.Poll.OverdueCause, h.Poll.BackoffReason,
 		strconv.Itoa(h.Workers.InUse), knownText(h.Workers.MaxConcurrent), knownText(h.Workers.TrainInUse), knownText(h.Workers.TrainMax),
 		strconv.FormatBool(h.Claude.UsageLimited), strconv.Itoa(h.TrainQueued))
 
