@@ -20,7 +20,7 @@ func TestRewriteSkillRefs_AllFourKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "name: Plan\nskill: fabrik:fabrik-plan\ncomment_skill: fabrik:fabrik-plan-comment\nci_fix_skill: fabrik:ci\nrebase_skill: fabrik:rb\nmodel: sonnet\n"
+	want := "name: Plan\nskill: fabrik-stages:fabrik-plan\ncomment_skill: fabrik-stages:fabrik-plan-comment\nci_fix_skill: fabrik-stages:ci\nrebase_skill: fabrik-stages:rb\nmodel: sonnet\n"
 	if string(out) != want {
 		t.Errorf("got:\n%s\nwant:\n%s", out, want)
 	}
@@ -35,7 +35,7 @@ func TestRewriteSkillRefs_PreservesQuotesCommentsAndCRLF(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "name: X\r\nskill: \"fabrik:fabrik-plan\"   # the plan skill\r\ncomment_skill: 'fabrik:fabrik-plan-comment'\r\nmodel:   sonnet\r\n"
+	want := "name: X\r\nskill: \"fabrik-stages:fabrik-plan\"   # the plan skill\r\ncomment_skill: 'fabrik-stages:fabrik-plan-comment'\r\nmodel:   sonnet\r\n"
 	if string(out) != want {
 		t.Errorf("got %q want %q", out, want)
 	}
@@ -46,13 +46,13 @@ func TestRewriteSkillRefs_NoTrailingNewlineAndTrailingComment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(out) != "name: X\nskill: fabrik:fabrik-plan # c" {
+	if string(out) != "name: X\nskill: fabrik-stages:fabrik-plan # c" {
 		t.Errorf("got %q", out)
 	}
 }
 
 func TestRewriteSkillRefs_LeavesQualifiedAndUnresolvedAlone(t *testing.T) {
-	src := "name: X\nskill: fabrik:fabrik-plan\ncomment_skill: custom\n"
+	src := "name: X\nskill: fabrik-stages:fabrik-plan\ncomment_skill: custom\n"
 	out, changes, err := RewriteSkillRefs([]byte(src), func(key, ref string) (string, bool) {
 		if ref == "custom" {
 			return "", false
@@ -73,7 +73,7 @@ func TestRewriteSkillRefs_IgnoresSkillTextInsideBlockScalarsAndNesting(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := strings.Replace(src, "\nskill: fabrik-plan\n", "\nskill: fabrik:fabrik-plan\n", 1)
+	want := strings.Replace(src, "\nskill: fabrik-plan\n", "\nskill: fabrik-stages:fabrik-plan\n", 1)
 	if string(out) != want || len(changes) != 1 {
 		t.Errorf("got:\n%s\nchanges %+v", out, changes)
 	}
@@ -119,7 +119,7 @@ func TestRewriteSkillRefs_HashInsideUnquotedValue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "skill: fabrik:foo#bar\ncomment_skill: fabrik:baz#q   # a comment\nci_fix_skill: fabrik:plain # note\n"
+	want := "skill: fabrik-stages:foo#bar\ncomment_skill: fabrik-stages:baz#q   # a comment\nci_fix_skill: fabrik-stages:plain # note\n"
 	if string(out) != want {
 		t.Errorf("got %q want %q", out, want)
 	}

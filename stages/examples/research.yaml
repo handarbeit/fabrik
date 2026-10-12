@@ -1,7 +1,7 @@
 name: Research
 order: 1
-skill: fabrik:fabrik-research
-comment_skill: fabrik:fabrik-research-comment
+skill: fabrik-stages:research
+comment_skill: fabrik-stages:research-comment
 model: sonnet
 max_turns: 50
 read_only: true

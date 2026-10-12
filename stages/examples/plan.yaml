@@ -1,7 +1,7 @@
 name: Plan
 order: 2
-skill: fabrik:fabrik-plan
-comment_skill: fabrik:fabrik-plan-comment
+skill: fabrik-stages:plan
+comment_skill: fabrik-stages:plan-comment
 model: sonnet
 max_turns: 50
 read_only: true
