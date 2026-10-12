@@ -766,3 +766,38 @@ func TestAnomalyCatchUpListsOpenEpisodes(t *testing.T) {
 		t.Fatalf("catch-up = %+v", cu)
 	}
 }
+
+// ---- recent divergences (the situation view's memory of a point event, #2171) ----
+
+func TestOpenAnomalyFacts_RecentDivergenceIsBoundedAndWindowed(t *testing.T) {
+	e, sink, clk, ce := anomalyEngine(t)
+	e.seedAPIItem(t, 1, "Implement")
+	e.store.Apply(itemstate.LocalLabelAdded{Repo: "owner/repo", Number: 1, Label: "stage:Implement:in_progress"})
+	clk.set(clk.Now().Add(time.Minute))
+	e.store.Apply(itemstate.ShallowBoardItemUpdated{Repo: "owner/repo", Number: 1, Item: gh.ProjectItem{
+		Number: 1, Repo: "owner/repo", Status: "Implement",
+	}})
+	drain(sink, 200*time.Millisecond)
+
+	_, _, div := e.openAnomalyFacts(clk.Now())
+	if len(div) != 1 || div[0].ref != "owner/repo#1" || div[0].what != "label:stage:Implement:in_progress" || div[0].path != "reconcile" {
+		t.Fatalf("recent divergences = %+v", div)
+	}
+	// Past the window (5 min in this fixture) it is no longer active.
+	clk.set(clk.Now().Add(6 * time.Minute))
+	if _, _, div := e.openAnomalyFacts(clk.Now()); len(div) != 0 {
+		t.Fatalf("a divergence older than the window is still active: %+v", div)
+	}
+
+	// The ring is bounded: the oldest are dropped, never the newest.
+	a := &ce.anom
+	a.mu.Lock()
+	for i := 0; i < maxRecentDivergences+10; i++ {
+		a.noteDivergenceLocked(divergenceNote{ref: "owner/repo#" + strconv.Itoa(i), at: clk.Now()}, time.Hour)
+	}
+	n, last := len(a.recent), a.recent[len(a.recent)-1].ref
+	a.mu.Unlock()
+	if n != maxRecentDivergences || last != "owner/repo#"+strconv.Itoa(maxRecentDivergences+9) {
+		t.Fatalf("ring len=%d last=%s", n, last)
+	}
+}
