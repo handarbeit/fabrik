@@ -2937,9 +2937,9 @@ Claude Code asks for these when you enable the plugin. Both are optional.
 | Setting | Meaning |
 |---------|---------|
 | Subscriber name | A stable name for this session — your topic or session name, never a PID. The overseer actions sign their audit comment with it and refuse without one; pushed events are delivered under it. Leave empty for read-only use. Passed to `fabrik mcp` as `FABRIK_SUBSCRIBER`. |
-| Fabrik directory | The directory of the daemon to talk to. By default the session addresses the daemon of its own working directory. Set it if you run Claude Code somewhere other than your Fabrik project. Passed as `FABRIK_MCP_DIR`. A session addresses one daemon. |
+| Fabrik directory | The directory of the daemon to talk to. By default the session addresses the daemon of the nearest directory at or above its project directory that contains `.fabrik/`, so a session started in a subdirectory of your Fabrik project still finds the project's daemon. Set it if you run Claude Code somewhere other than your Fabrik project; a directory set here is used exactly as given. Passed as `FABRIK_MCP_DIR`. A session addresses one daemon. |
 
-`fabrik mcp` resolves the directory as `--dir`, then `FABRIK_MCP_DIR`, then `CLAUDE_PROJECT_DIR` (the session's project, which the plugin passes through), then its working directory.
+`fabrik mcp` resolves the directory as `--dir`, then `FABRIK_MCP_DIR`, then `CLAUDE_PROJECT_DIR` (the session's project, which the plugin passes through), then its working directory. `--dir` and `FABRIK_MCP_DIR` are used literally. A directory that comes from `CLAUDE_PROJECT_DIR` or the working directory is replaced by the nearest ancestor containing a `.fabrik/` directory; the search stops at your home directory (which it does check) and never looks above it, and a project outside your home is searched up to the filesystem root. With no such ancestor the directory is kept, and the tools answer "Fabrik daemon not running". Pushed channel events start only when the resolved directory contains `.fabrik/`: in a project without Fabrik, a configured subscriber starts no stream, makes no connection attempts and produces no `daemon-unreachable` notice. One limit: a worktree or clone of a repository that itself tracks `.fabrik/` contains its own `.fabrik/`, so a session inside it resolves to that checkout, not to the directory the daemon runs in; use `--dir` or the "Fabrik directory" setting there.
 
 In a project that is not a Fabrik project the server starts quietly and each tool answers that no daemon is running; it prints nothing else.
 
@@ -3856,7 +3856,7 @@ The session ID for the active Claude session is shown in the header when availab
 claude mcp add fabrik -- fabrik mcp
 ```
 
-Claude Code starts the server in *its own* working directory, which is not necessarily your Fabrik directory (the one that contains `.fabrik/`). Point it at the right one with `--dir` (or the `FABRIK_MCP_DIR` environment variable, which is what the plugin's "Fabrik directory" setting sets; with neither, `fabrik mcp` uses `CLAUDE_PROJECT_DIR`, then its working directory):
+Claude Code starts the server in *its own* working directory, which is not necessarily your Fabrik directory (the one that contains `.fabrik/`). Point it at the right one with `--dir` (or the `FABRIK_MCP_DIR` environment variable, which is what the plugin's "Fabrik directory" setting sets; with neither, `fabrik mcp` uses the nearest ancestor containing `.fabrik/` of `CLAUDE_PROJECT_DIR`, then of its working directory):
 
 ```bash
 claude mcp add --scope user fabrik -- fabrik mcp --dir /path/to/your/fabrik-dir
