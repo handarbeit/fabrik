@@ -118,6 +118,17 @@ func (e *Engine) settlePRFacts(board *gh.ProjectBoard) {
 	for _, c := range cands {
 		e.refreshPRFacts(c, pollStart, now, &checkBudget, &restBudget)
 	}
+	// Forget attempt stamps of items that are no longer candidates (closed,
+	// terminal, off the board, PR unlinked) so the map cannot outgrow the board.
+	live := make(map[string]struct{}, len(cands))
+	for _, c := range cands {
+		live[c.key] = struct{}{}
+	}
+	for key := range e.prFactsAttemptAt {
+		if _, ok := live[key]; !ok {
+			delete(e.prFactsAttemptAt, key)
+		}
+	}
 }
 
 // canSpendPRFactsBudget reports whether refreshing this PR can cost a GitHub

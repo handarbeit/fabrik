@@ -381,6 +381,28 @@ func TestSettlePRFacts_DisagreeingHeadsMeanNoVerdict(t *testing.T) {
 	}
 }
 
+// The attempt stamps that order the rotation are dropped once an item stops
+// being a candidate, so the map cannot grow with every item ever seen.
+func TestSettlePRFacts_ForgetsAttemptStampsOfItemsThatLeave(t *testing.T) {
+	env := newPRFactsEnv(t)
+	board := env.seedPR(t, 7, false)
+	env.seedPR(t, 8, false)
+	board = env.board(7, 8)
+	env.runs = []gh.CheckRun{failedRun("Test and vet", 1)}
+	env.e.settlePRFacts(board)
+	if len(env.e.prFactsAttemptAt) != 2 {
+		t.Fatalf("attempt stamps = %v, want one per candidate", env.e.prFactsAttemptAt)
+	}
+	env.e.settlePRFacts(env.board(7)) // item 8 left the board
+	if len(env.e.prFactsAttemptAt) != 1 {
+		t.Errorf("attempt stamps = %v, want only item 7 left", env.e.prFactsAttemptAt)
+	}
+	env.e.settlePRFacts(env.board())
+	if len(env.e.prFactsAttemptAt) != 0 {
+		t.Errorf("attempt stamps = %v, want none on an empty board", env.e.prFactsAttemptAt)
+	}
+}
+
 // cacheReadGuard is a ReadClient whose check-run read must never be used by
 // the refresher: CacheImpl.FetchCheckRuns applies CheckRunCompleted, which
 // stamps LastCIProgressAt (ADR-1410) and so would change what a CI gate that
