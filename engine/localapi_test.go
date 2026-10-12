@@ -232,9 +232,11 @@ func TestLocalAPIStatusWorkerIdleAndUnknownFields(t *testing.T) {
 	}
 
 	e.seedAPIItem(t, 6, "Implement")
+	// An incomplete stage with nothing gating it and no worker is waiting for
+	// dispatch, never idle (#2121 R3).
 	idle := status(t, e, "6")
-	if idle.Attention.State != "idle" {
-		t.Errorf("idle item: %+v", idle.Attention)
+	if idle.Attention.State != "waiting" || idle.Attention.Code != "waiting-for-dispatch" {
+		t.Errorf("dispatchable item: %+v", idle.Attention)
 	}
 	m := toJSON(t, idle)
 	for _, f := range []string{"as_of", "last_poll_attempt_at", "last_poll_success_at", "since_last_poll_success_seconds", "daemon_uptime_seconds"} {

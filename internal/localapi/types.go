@@ -75,12 +75,26 @@ type Limit struct {
 
 // WorkerInfo describes the in-flight worker, if any.
 type WorkerInfo struct {
-	InFlight   bool             `json:"in_flight"`
-	Stage      string           `json:"stage,omitempty"`
+	// InFlight is true only while the worker HOLDS a worker slot. A worker that
+	// is dispatched but still waiting for one is Queued, not in flight (#2121).
+	InFlight bool   `json:"in_flight"`
+	Stage    string `json:"stage,omitempty"`
+	// Kind is what the worker is: stage-run, comment-review, review-reinvoke,
+	// ci-fix-reinvoke, rebase-reinvoke or merge-train-conflict; absent when the
+	// engine does not know. Trigger names what it is addressing (comment or
+	// review-body ids, comma separated), absent when none or unknown (#2121).
+	Kind    string `json:"kind,omitempty"`
+	Trigger string `json:"trigger,omitempty"`
+	// Queued is true while the worker waits for a worker slot; QueuedSince is when
+	// it began waiting and is present only then (#2121).
+	Queued      bool              `json:"queued,omitempty"`
+	QueuedSince *Known[time.Time] `json:"queued_since,omitempty"`
+	// StartedAt is the time the worker acquired its slot and began running;
+	// unknown while it is queued.
 	StartedAt  Known[time.Time] `json:"started_at"`
 	LastSignAt Known[time.Time] `json:"last_sign_at"`
-	// TurnsUsed is always unknown for an in-flight worker: the daemon tracks
-	// turns only for the last completed invocation.
+	// TurnsUsed is the live worker's turns so far when the engine knows them,
+	// otherwise unknown — never zero for "not known" (#2121).
 	TurnsUsed Known[int] `json:"turns_used"`
 	MaxTurns  Known[int] `json:"max_turns"`
 	// LastTurnsUsed is the last completed invocation's turn count for the
@@ -166,6 +180,11 @@ type AttentionInfo struct {
 	// Options lists how a human can act on a decision-bearing item, each with
 	// the MCP tool that performs it when one exists (#2120 R-options-1).
 	Options []OptionInfo `json:"options,omitempty"`
+	// Cause says why the item is in this state, from a fixed vocabulary
+	// (daemon-stop, slot-starved, wall-time-kill, max-turns, gate-hold:<gate>,
+	// rebase-conflict-after-landing); absent when the engine does not know
+	// (#2121).
+	Cause string `json:"cause,omitempty"`
 }
 
 // OptionInfo is one way a human can act on a decision-bearing item. Tool is
@@ -415,7 +434,10 @@ type BackoffHealth struct {
 
 // WorkerSlots is worker concurrency.
 type WorkerSlots struct {
+	// InUse is the number of item workers holding a slot (never more than
+	// MaxConcurrent); Queued the number dispatched and waiting for one (#2121).
 	InUse         int        `json:"in_use"`
+	Queued        int        `json:"queued"`
 	MaxConcurrent Known[int] `json:"max_concurrent"`
 	// TrainInUse / TrainMax describe the reserved merge-train slot (#2115, ADR 2115),
 	// which sits on top of MaxConcurrent and is not counted in InUse. Both are a

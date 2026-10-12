@@ -23,7 +23,8 @@ var labelLiteral = regexp.MustCompile(`^fabrik:[A-Za-z0-9_:%.\-]*$`)
 // (#2121 R5). Everything else the scan finds must have a MeaningOf entry, so a
 // new label cannot ship without one.
 var notStateLabels = map[string]string{
-	"fabrik:": "the bare namespace prefix used to recognise a fabrik label, not a label",
+	"fabrik:":          "the bare namespace prefix used to recognise a fabrik label, not a label",
+	"fabrik:awaiting-": "a prefix that matches the whole awaiting-* family (engine/attention_workers.go); every concrete awaiting-* label has its own meaning",
 }
 
 // scanLabelLiterals returns every label-shaped string literal in the non-test Go

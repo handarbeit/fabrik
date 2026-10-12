@@ -121,17 +121,24 @@ func triggerText(trigger string) string {
 	return fmt.Sprintf("%s and %d more", strings.Join(parts[:show], ", "), len(parts)-show)
 }
 
-// workerTextFor describes the in-flight worker for a summary.
+// workerTextFor names the in-flight worker's kind for a summary.
 func workerTextFor(in Input) string {
-	kind, trigger := in.WorkerKind, in.WorkerTrigger
+	kind := in.WorkerKind
 	if in.Conflict != nil && !in.HasWorker {
-		kind, trigger = WorkerKindTrainConflict, ""
+		kind = WorkerKindTrainConflict
 	}
-	text := kindLabel(kind)
-	if t := triggerText(trigger); t != "" {
-		text += " addressing " + t
+	return kindLabel(kind)
+}
+
+// triggerSuffix is ", addressing <trigger>" when the worker has a trigger.
+func triggerSuffix(in Input) string {
+	if !in.HasWorker {
+		return ""
 	}
-	return text
+	if t := triggerText(in.WorkerTrigger); t != "" {
+		return ", addressing " + t
+	}
+	return ""
 }
 
 func turnsText(in Input) string {
@@ -184,7 +191,7 @@ func workerRow(res Result, in Input) (Result, bool) {
 		if !since.IsZero() {
 			when = " (since " + since.UTC().Format(time.RFC3339) + ")"
 		}
-		res.Summary = "queued: waiting for a worker slot" + when + "; " + what + " will start when one is free"
+		res.Summary = "queued: waiting for a worker slot" + when + "; " + what + triggerSuffix(in) + " will start when one is free"
 		if slotsBusy(in) {
 			res.Summary += " — " + slotsText(in)
 		}
@@ -193,7 +200,7 @@ func workerRow(res Result, in Input) (Result, bool) {
 	}
 	if in.HasWorker && workerOverdue(res, in) {
 		res.State, res.Code, res.Rank = Stalled, CodeWorkerNoProgress, RankStalled
-		res.Summary = fmt.Sprintf("%s is in flight but nothing observable changed for %s", what, res.ProgressAge.Round(time.Second))
+		res.Summary = fmt.Sprintf("%s is in flight%s but nothing observable changed for %s", what, triggerSuffix(in), res.ProgressAge.Round(time.Second))
 		res.Next.Action = "the worker's own inactivity/wall-time limits will end it; the engine then reads its result"
 		return res, true
 	}
@@ -202,7 +209,7 @@ func workerRow(res Result, in Input) (Result, bool) {
 	if what == "a worker" {
 		summary = "a worker is running"
 	}
-	summary += turnsText(in)
+	summary += triggerSuffix(in) + turnsText(in)
 	if in.HasWorker && in.Cfg.StallThreshold > 0 && res.ProgressAge > in.Cfg.StallThreshold {
 		summary += fmt.Sprintf(" (long-running: %s, within its stage's wall-clock budget)", res.ProgressAge.Round(time.Second))
 	}
