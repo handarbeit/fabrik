@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/attention"
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/internal/localapi"
@@ -269,6 +268,7 @@ func (e *Engine) attentionInput(st *itemstate.ItemState, now time.Time, threshol
 		in.LastCIProgressAt = lpr.LastCIProgressAt
 		in.HasOpenUnmergedPR = lpr.Number != 0 && !lpr.Merged && lpr.State != "closed"
 		in.PRNumber = lpr.Number
+		in.CI = e.attentionCIFact(lpr, now)
 	}
 	return in
 }
@@ -299,6 +299,7 @@ func attentionInfo(res attention.Result, now time.Time, threshold time.Duration,
 		Progress: localapi.ProgressInfo{At: localapi.KnownTime(res.ProgressAt)},
 		Cause:    res.Cause,
 	}
+	info.CIFailing = res.CIFailing
 	if !res.ProgressAt.IsZero() {
 		info.Progress.AgeSeconds = localapi.Some(secs(res.ProgressAge))
 	}
@@ -468,7 +469,7 @@ func (b localAPIBackend) Status(p localapi.StatusParams) (*localapi.StatusResult
 		Limits:     b.limits(&st),
 		Worker:     b.worker(&st),
 		LastInvoke: lastInvocation(&st),
-		PR:         b.prInfo(&st),
+		PR:         b.prInfo(&st, now),
 		Blockers:   blockers(&st),
 		Attention:  attentionInfo(res, now, threshold, latestFabrikComment(&st)),
 	}
@@ -628,31 +629,12 @@ func lastInvocation(st *itemstate.ItemState) localapi.InvocationInfo {
 	return info
 }
 
-// ciVerdict summarises the cached check runs only. No cached runs is unknown,
-// not "none": the cache cannot tell "no CI" from "never fetched".
-func ciVerdict(runs []gh.CheckRun) localapi.Known[string] {
-	if len(runs) == 0 {
-		return localapi.Unknown[string]()
-	}
-	pending := false
-	for _, r := range runs {
-		if r.Status != "completed" {
-			pending = true
-			continue
-		}
-		switch r.Conclusion {
-		case "success", "neutral", "skipped":
-		default:
-			return localapi.Some("red")
-		}
-	}
-	if pending {
-		return localapi.Some("pending")
-	}
-	return localapi.Some("green")
-}
-
-func (b localAPIBackend) prInfo(st *itemstate.ItemState) localapi.PRInfo {
+// prInfo renders the linked PR from the Store alone (#2122). The facts and the
+// CI verdict are poll-side records (PRFacts, CIVerdictRecord); they are shown
+// with when they were observed and whether that is older than one poll
+// interval. A fact never observed is unknown, never a healthy default, and a
+// verdict is shown only for the head it was computed for.
+func (b localAPIBackend) prInfo(st *itemstate.ItemState, now time.Time) localapi.PRInfo {
 	pr := localapi.PRInfo{
 		Number:         localapi.Unknown[int](),
 		PRState:        localapi.Unknown[string](),
@@ -662,6 +644,12 @@ func (b localAPIBackend) prInfo(st *itemstate.ItemState) localapi.PRInfo {
 		MergeableState: localapi.Unknown[string](),
 		CI:             localapi.Unknown[string](),
 		HeadSHA:        localapi.Unknown[string](),
+		FactsAsOf:      localapi.Unknown[time.Time](),
+		FactsStale:     localapi.Unknown[bool](),
+		CIAsOf:         localapi.Unknown[time.Time](),
+		CIStale:        localapi.Unknown[bool](),
+		CIHeadSHA:      localapi.Unknown[string](),
+		CIFailing:      []string{},
 	}
 	lpr := st.LinkedPR
 	if lpr == nil || lpr.Number == 0 {
@@ -674,22 +662,65 @@ func (b localAPIBackend) prInfo(st *itemstate.ItemState) localapi.PRInfo {
 	}
 	pr.State = "linked"
 	pr.Number = localapi.Some(lpr.Number)
-	if lpr.State != "" { // PR details were applied at least once
+	pr.HeadSHA = knownString(lpr.ObservedHead())
+
+	staleAfter := b.prFactsStaleAfter()
+	if f := lpr.Facts; !f.ObservedAt.IsZero() && f.State != "" {
+		pr.PRState = localapi.Some(f.State)
+		pr.Draft = localapi.Some(f.Draft)
+		pr.Merged = localapi.Some(f.Merged)
+		if f.Mergeable != nil {
+			if *f.Mergeable {
+				pr.Mergeable = localapi.Some("mergeable")
+			} else {
+				pr.Mergeable = localapi.Some("conflicting")
+			}
+		}
+		pr.MergeableState = knownString(f.MergeableState)
+		pr.FactsAsOf = localapi.KnownTime(f.ObservedAt)
+		pr.FactsStale = staleKnown(now, f.ObservedAt, staleAfter)
+	} else if lpr.State != "" { // PR details applied by a webhook or a gate read: no as-of
 		pr.PRState = localapi.Some(lpr.State)
 		pr.Draft = localapi.Some(lpr.Draft)
 		pr.Merged = localapi.Some(lpr.Merged)
 	}
-	if lpr.Mergeable != nil {
-		if *lpr.Mergeable {
-			pr.Mergeable = localapi.Some("mergeable")
-		} else {
-			pr.Mergeable = localapi.Some("conflicting")
+
+	// The verdict is for one head. A record for any other head is not shown
+	// (the Store clears it on a head change; this is the belt to that braces).
+	if v := lpr.CIVerdict; v.Verdict != "" && v.HeadSHA != "" && v.HeadSHA == lpr.AgreedHead() {
+		pr.CI = localapi.Some(v.Verdict)
+		pr.CIHeadSHA = localapi.Some(v.HeadSHA)
+		pr.CIAsOf = localapi.KnownTime(v.ObservedAt)
+		pr.CIStale = staleKnown(now, v.ObservedAt, staleAfter)
+		if v.Verdict == "red" {
+			pr.CIFailing = append(pr.CIFailing, v.Failing...)
 		}
 	}
-	pr.MergeableState = knownString(lpr.MergeableState)
-	pr.HeadSHA = knownString(lpr.HeadSHA)
-	pr.CI = ciVerdict(lpr.CheckRuns)
 	return pr
+}
+
+// prFactsStaleAfter is the age beyond which a PR fact is stale: one poll
+// interval, the engine's effective one, which stretches under back-off so a
+// deliberate back-off does not read as stale. Zero means not known.
+func (b localAPIBackend) prFactsStaleAfter() time.Duration {
+	return b.e.prFactsStaleAfter()
+}
+
+func (e *Engine) prFactsStaleAfter() time.Duration {
+	d := e.health.pollPeriodSnapshot()
+	if iv := e.pollInterval(); iv > d {
+		d = iv
+	}
+	return d
+}
+
+// staleKnown reports whether observedAt is older than staleAfter; unknown when
+// the fact was never observed or the interval is not known.
+func staleKnown(now, observedAt time.Time, staleAfter time.Duration) localapi.Known[bool] {
+	if observedAt.IsZero() || staleAfter <= 0 {
+		return localapi.Unknown[bool]()
+	}
+	return localapi.Some(now.Sub(observedAt) > staleAfter)
 }
 
 func blockers(st *itemstate.ItemState) localapi.BlockersInfo {

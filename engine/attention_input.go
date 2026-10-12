@@ -260,3 +260,40 @@ func resumeMethodOf(st *itemstate.ItemState) attention.ResumeMethod {
 	}
 	return attention.ResumeUnknown
 }
+
+// attentionCIFact is the linked PR's CI verdict for the attention classifier
+// (#2122): the poll-side record, from the Store alone, and only for the PR's
+// current head. Nil when there is no verdict to report; the classifier decides
+// what a red one means.
+func (e *Engine) attentionCIFact(lpr *itemstate.LinkedPRState, now time.Time) *attention.CIFact {
+	v := lpr.CIVerdict
+	if v.Verdict == "" || v.HeadSHA == "" || v.HeadSHA != lpr.AgreedHead() {
+		return nil
+	}
+	f := lpr.Facts
+	open := f.State == "open" && !f.Merged
+	if !open {
+		return nil
+	}
+	// Attention tolerates a verdict as old as one full refresh rotation: with
+	// more candidates than the per-poll check budget an item is re-read only
+	// every few polls, and a red that is still the verdict for the unchanged
+	// head must not flicker in and out of the attention view in between. The
+	// status tool's own ci_stale still flags it after one poll interval.
+	stale := false
+	if after := e.prFactsStaleAfter(); after > 0 {
+		rot := e.prFactsRotation.Load()
+		if rot < 1 {
+			rot = 1
+		}
+		after *= time.Duration(rot)
+		stale = now.Sub(v.ObservedAt) > after
+	}
+	return &attention.CIFact{
+		Verdict: v.Verdict,
+		Failing: append([]string(nil), v.Failing...),
+		Stale:   stale,
+		Draft:   f.Draft,
+		PROpen:  open,
+	}
+}

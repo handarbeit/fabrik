@@ -1949,6 +1949,14 @@ func (e *Engine) pollCycle(ctx context.Context) (pollResult, error) {
 	// goroutine only; bounded per poll.
 	e.settleDecisionAnchors(board)
 
+	// Overseer PR facts and CI verdict (#2122): fills, for every managed open
+	// item with a linked PR, what the board probe cannot supply and the CI
+	// verdict for the PR's head, so the cache-only local API never reports
+	// unknown for a PR the engine has already looked at. Poll goroutine only;
+	// bounded per poll; quiet (no wake flag).
+	e.setPollStep("pr-facts")
+	e.settlePRFacts(board)
+
 	// Remove stale fabrik:locked labels from closed issues. This handles the case
 	// where an issue was closed while a stage was in-flight, leaving the lock label
 	// behind. We do this every poll so it also catches locks from prior Fabrik runs.

@@ -1054,7 +1054,20 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 				flags |= CheckRunChanged
 			}
 		}
+		// The overseer CI verdict is valid for one head only (#2122, FR-007):
+		// drop it when the head moves, including the first head the engine
+		// records after a verdict was computed for the facts' head.
+		if item.LinkedPR.CIVerdict.HeadSHA != "" && item.LinkedPR.CIVerdict.HeadSHA != v.SHA {
+			item.LinkedPR.CIVerdict = CIVerdictRecord{}
+			flags |= PRFactsChanged
+		}
 		item.LinkedPR.HeadSHA = v.SHA
+		// A head that disagrees with the one the facts were read for has no
+		// agreed head: no verdict applies to either (#2122).
+		if item.LinkedPR.CIVerdict.HeadSHA != "" && item.LinkedPR.AgreedHead() != item.LinkedPR.CIVerdict.HeadSHA {
+			item.LinkedPR.CIVerdict = CIVerdictRecord{}
+			flags |= PRFactsChanged
+		}
 		// Drain any pre-linkage check runs buffered for this SHA.
 		if pending, ok := s.pendingCheckRuns[v.SHA]; ok && len(pending) > 0 {
 			drainedChanged := false
@@ -1080,6 +1093,44 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		item.LinkedPR.Merged = v.Merged
 		item.LinkedPR.Draft = v.Draft
 		return LinkedPRChanged | PRStateChanged
+
+	case PRFactsObserved:
+		if item.LinkedPR == nil || (v.PRNumber != 0 && item.LinkedPR.Number != v.PRNumber) {
+			return 0
+		}
+		lpr := item.LinkedPR
+		facts := v.Facts
+		if facts.State != "open" || facts.Merged {
+			// No open-PR verdict applies to a merged or closed PR.
+			lpr.CIVerdict = CIVerdictRecord{}
+		}
+		changed := !prFactsEqual(lpr.Facts, facts)
+		lpr.Facts = facts
+		// Facts read for a head the engine has not recorded (or the reverse) leave
+		// no agreed head: drop any verdict that is not for the agreed one.
+		if lpr.CIVerdict.HeadSHA != "" && lpr.AgreedHead() != lpr.CIVerdict.HeadSHA {
+			lpr.CIVerdict = CIVerdictRecord{}
+			changed = true
+		}
+		if !changed {
+			return 0
+		}
+		return PRFactsChanged
+
+	case CIVerdictObserved:
+		if item.LinkedPR == nil || v.Verdict.HeadSHA == "" || item.LinkedPR.AgreedHead() != v.Verdict.HeadSHA {
+			return 0
+		}
+		cur := item.LinkedPR.CIVerdict
+		if cur.Verdict == v.Verdict.Verdict && cur.HeadSHA == v.Verdict.HeadSHA &&
+			cur.RunsFingerprint == v.Verdict.RunsFingerprint && cur.ObservedAt.Equal(v.Verdict.ObservedAt) &&
+			stringsEqual(cur.Failing, v.Verdict.Failing) {
+			return 0
+		}
+		nv := v.Verdict
+		nv.Failing = copyStrings(v.Verdict.Failing)
+		item.LinkedPR.CIVerdict = nv
+		return PRFactsChanged
 
 	case ReviewThreadCommentAdded:
 		ensureLinkedPR(item, 0)
@@ -1678,4 +1729,27 @@ func ensureStageStateMaps(item *ItemState) {
 // calls this.
 func (s *Store) SetLegacyLabelBaselineForTest(on bool) {
 	s.legacyLabelBaseline.Store(on)
+}
+
+func prFactsEqual(a, b PRFacts) bool {
+	if a.State != b.State || a.Draft != b.Draft || a.Merged != b.Merged ||
+		a.MergeableState != b.MergeableState || a.HeadSHA != b.HeadSHA || !a.ObservedAt.Equal(b.ObservedAt) {
+		return false
+	}
+	if (a.Mergeable == nil) != (b.Mergeable == nil) {
+		return false
+	}
+	return a.Mergeable == nil || *a.Mergeable == *b.Mergeable
+}
+
+func stringsEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

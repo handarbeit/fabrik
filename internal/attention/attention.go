@@ -270,6 +270,9 @@ type Input struct {
 	Resume ResumeMethod
 	// PRNumber is the linked PR number, for the merge-decision options.
 	PRNumber int
+	// CI is the linked PR's CI verdict when the daemon holds a fresh one for the
+	// PR's current head; nil otherwise (#2122).
+	CI *CIFact
 }
 
 // ParkedBlocker is an open item, sitting in an unmanaged column, that blocks
@@ -388,6 +391,9 @@ type Result struct {
 	// Suspended as a parked blocker only because blocker data is missing, so a
 	// caller tracking a persisted episode must not read it as "decision made".
 	ParkedDataMissing bool
+	// CIFailing names the failing checks of a red CI verdict the item carries
+	// (#2122); empty when the item has no red verdict surfaced.
+	CIFailing []string
 }
 
 // Values of Result.ResumeVia.
@@ -479,7 +485,7 @@ func hasLabel(labels []string, l string) bool {
 // Classify computes the attention Result for one item. It is a pure function
 // of in.
 func Classify(in Input) Result {
-	res := attributePollStall(in, classify(in))
+	res := overlayCI(in, attributePollStall(in, classify(in)))
 	res.ParkedDataMissing = in.ParkedBlockersUnknown
 	return res
 }

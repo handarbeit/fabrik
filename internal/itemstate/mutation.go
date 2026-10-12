@@ -969,6 +969,34 @@ type RebaseCauseSet struct {
 func (RebaseCauseSet) isMutation()       {}
 func (m RebaseCauseSet) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
+// PRFactsObserved records the linked PR's overseer-facing facts (#2122). It is
+// quiet: it returns PRFactsChanged, which is not a wake flag, and it never
+// calls SelfWriteObserved or moves LastSeenPRUpdatedAt/LinkedPRUpdatedAt. A
+// merged or closed PR clears the CI verdict (no open-PR verdict applies).
+type PRFactsObserved struct {
+	Repo   string
+	Number int // issue number
+	// PRNumber, if non-zero, is the PR the facts describe; the facts are dropped
+	// when it differs from the item's linked PR number.
+	PRNumber int
+	Facts    PRFacts
+}
+
+func (PRFactsObserved) isMutation()       {}
+func (m PRFactsObserved) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// CIVerdictObserved records the CI verdict computed for a PR head (#2122). It
+// is dropped when HeadSHA is not the item's current linked-PR head, and never
+// touches LastCIProgressAt (ADR-2059).
+type CIVerdictObserved struct {
+	Repo    string
+	Number  int // issue number
+	Verdict CIVerdictRecord
+}
+
+func (CIVerdictObserved) isMutation()       {}
+func (m CIVerdictObserved) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
 // WorkerExited clears the Worker handle when a Claude invocation finishes.
 type WorkerExited struct {
 	Repo   string

@@ -337,7 +337,23 @@ type BoardProbeItem struct {
 	LinkedPRNumber         int
 	LinkedPRUpdatedAt      time.Time
 	LinkedPRHeadSHA        string // headRefOid from GraphQL probe query; empty if no linked PR
-	Status                 string
+	// LinkedPRFacts are the linked PR's state scalars from the probe (#2122);
+	// Known is false when no linked PR was returned.
+	LinkedPRFacts ProbePRFacts
+	Status        string
+}
+
+// ProbePRFacts are the probe query's linked-PR scalars mapped onto the REST
+// vocabulary (#2122). Known is false when the probe returned no linked PR.
+type ProbePRFacts struct {
+	Known bool
+	// State is "open" or "closed"; Merged is true for a merged PR.
+	State  string
+	Draft  bool
+	Merged bool
+	// Mergeable is nil when GitHub reports UNKNOWN.
+	Mergeable      *bool
+	MergeableState string
 }
 
 // HasReaction returns true if the comment has at least one reaction of the given type.

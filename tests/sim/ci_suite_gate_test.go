@@ -124,6 +124,12 @@ func assertGateHolding(t *testing.T, env *Env, num int, when string) {
 func TestCISuiteGate_IncidentReproduction(t *testing.T) {
 	t.Parallel()
 	env := newSuiteGateEnv(t, time.Now(), 30, nil)
+	// This test counts the gate's own suite reads. The overseer PR-facts
+	// refresher (#2122, ADR 2122) classifies the same head with the same
+	// classifier on the poll goroutine and so reads suites too; that separate,
+	// documented cost is out of this budget, and its non-interference with the
+	// gate is covered by tests/sim/pr_facts_test.go.
+	env.Engine.SetPRFactsRefreshDisabledForTest(true)
 	num, sha1 := reachAwaitingCI(t, env, "sim ci suite gate: incident")
 
 	seedGreenPrefix(t, env, sha1)

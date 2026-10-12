@@ -27,6 +27,9 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 	// never mistaken for a fresh one. Wall clock, not e.now(): the store stamps
 	// engine writes with time.Now() and SetClock only moves e.now().
 	fetchedAt := time.Now()
+	// factsAt stamps the overseer PR facts on the engine clock (#2122), so the
+	// read side compares like with like and a test clock stays coherent.
+	factsAt := e.now()
 	probeItems, _, err := e.client.ProbeProjectBoard(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum, e.cfg.OwnerType)
 	if err != nil {
 		_, graphqlStats := e.client.RateLimitStats()
@@ -258,6 +261,28 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 				Number:      pi.Number,
 				LinkedPRNum: pi.LinkedPRNumber,
 				SHA:         pi.LinkedPRHeadSHA,
+			}})
+		}
+
+		// The probe's linked-PR scalars become the overseer PR facts (#2122, ADR
+		// 2122): quiet (FromProbe + the non-wake PRFactsChanged flag), stamped
+		// with the time the probe query ran, and kept apart from the fields the
+		// gates read. A probe that carried no scalars (or no linked PR) writes
+		// nothing, so a fact is never defaulted.
+		if pf := pi.LinkedPRFacts; pf.Known && pi.LinkedPRNumber != 0 && !e.prFactsRefreshDisabledForTest {
+			e.store.Apply(itemstate.FromProbe{Inner: itemstate.PRFactsObserved{
+				Repo:     repo,
+				Number:   pi.Number,
+				PRNumber: pi.LinkedPRNumber,
+				Facts: itemstate.PRFacts{
+					State:          pf.State,
+					Draft:          pf.Draft,
+					Merged:         pf.Merged,
+					Mergeable:      pf.Mergeable,
+					MergeableState: pf.MergeableState,
+					HeadSHA:        pi.LinkedPRHeadSHA,
+					ObservedAt:     factsAt,
+				},
 			}})
 		}
 

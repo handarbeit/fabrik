@@ -272,6 +272,48 @@ type CommentBreakerState struct {
 	LastAuthor string
 }
 
+// PRFacts are the linked PR's state facts as last observed by the poll (#2122).
+// The zero value (ObservedAt zero) means "never captured" and renders unknown.
+type PRFacts struct {
+	// State is "open" or "closed"; Merged is true for a merged PR.
+	State  string
+	Draft  bool
+	Merged bool
+	// Mergeable is nil when GitHub has not computed it (UNKNOWN).
+	Mergeable *bool
+	// MergeableState uses REST mergeable_state vocabulary ("clean", "blocked",
+	// ...); empty when unknown.
+	MergeableState string
+	// HeadSHA is the head the facts were read for.
+	HeadSHA string
+	// ObservedAt is when the poll last read these facts from GitHub.
+	ObservedAt time.Time
+}
+
+// CIVerdictRecord is the green-and-complete CI verdict for one PR head,
+// computed poll-side by the gates' own classifier (#2122). It is valid only for
+// HeadSHA and is cleared when the head changes.
+type CIVerdictRecord struct {
+	// Verdict is "green", "red", "pending", "none" or "unknown"; empty = never
+	// computed.
+	Verdict string
+	// HeadSHA is the head the verdict was computed for.
+	HeadSHA string
+	// Failing names the failing checks when the verdict is red.
+	Failing []string
+	// RunsFingerprint identifies the check-run set the verdict was computed from,
+	// so an unchanged set is not re-classified.
+	RunsFingerprint string
+	// ObservedAt is when the verdict was last confirmed.
+	ObservedAt time.Time
+	// LiveReadAt is when the check runs behind the verdict were last read from
+	// GitHub rather than from the cache. A verdict may be restamped without a
+	// read only while this is recent: a cached READY set is served on trust
+	// forever and nothing on a poll-only deployment refreshes it, so a rerun
+	// that turns red on the same head would otherwise never be seen.
+	LiveReadAt time.Time
+}
+
 // LinkedPRState holds the state of the closing pull request for an issue.
 type LinkedPRState struct {
 	Number int
@@ -291,6 +333,14 @@ type LinkedPRState struct {
 	ThreadComments      []gh.Comment
 	ResolvedThreadCount int
 	CheckRuns           []gh.CheckRun
+
+	// Facts and CIVerdict are the overseer-facing PR facts (#2122, ADR-2122).
+	// They are separate from State/Draft/Merged/Mergeable/MergeableState/
+	// CheckRuns above, which the gates read: nothing a gate consults is written
+	// by PRFactsObserved or CIVerdictObserved, so populating them cannot change
+	// gate semantics. Written only by the poll goroutine; read by the local API.
+	Facts     PRFacts
+	CIVerdict CIVerdictRecord
 
 	// IsMergeQueueEnabled is true when the repository has the merge queue feature
 	// enabled. Populated from GraphQL via FetchItemDetails; zero until first deep fetch.
@@ -356,6 +406,29 @@ type LinkedPRState struct {
 	// persistence across a restart and GitHub exposes no change-history
 	// equivalent to backfill it from.
 	LastCIProgressAt time.Time
+}
+
+// ObservedHead is the head SHA the overseer view reports for the PR: the one
+// the engine's own paths recorded, else the head the PR facts were read for
+// (an engine without the board probe never records one outside a gate). It
+// only reads; nothing the gates consult is written from it (#2122).
+func (l *LinkedPRState) ObservedHead() string {
+	if l.HeadSHA != "" {
+		return l.HeadSHA
+	}
+	return l.Facts.HeadSHA
+}
+
+// AgreedHead is the head SHA a CI verdict may be computed for or shown against.
+// It is ObservedHead unless the engine-recorded head and the head the PR facts
+// were read for are both known and disagree: then it is "" (unknown), because
+// neither side is known to be the newer one, and a verdict for either could be
+// a false green for a PR that has moved on (#2122).
+func (l *LinkedPRState) AgreedHead() string {
+	if l.HeadSHA != "" && l.Facts.HeadSHA != "" && l.HeadSHA != l.Facts.HeadSHA {
+		return ""
+	}
+	return l.ObservedHead()
 }
 
 // StageState holds per-stage attempt counters and cycle counts.

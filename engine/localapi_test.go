@@ -307,6 +307,14 @@ func TestLocalAPIStatusPRBlockersAndComment(t *testing.T) {
 	e.store.Apply(itemstate.PRDetailsUpdated{Repo: "owner/repo", Number: 8, PRNumber: 20, State: "open"})
 	e.store.Apply(itemstate.PRHeadSHAUpdated{Repo: "owner/repo", Number: 8, SHA: "abc"})
 	e.store.Apply(itemstate.CheckRunCompleted{Repo: "owner/repo", SHA: "abc", Run: gh.CheckRun{ID: 1, Name: "ci", Status: "completed", Conclusion: "failure"}})
+	// Raw cached check runs are not a verdict (#2122): ci stays unknown until
+	// the poll-side record exists.
+	if st := status(t, e, "8"); st.PR.CI.Valid {
+		t.Errorf("ci = %+v from cached runs alone, want unknown", st.PR.CI)
+	}
+	now := e.now()
+	e.store.Apply(itemstate.PRFactsObserved{Repo: "owner/repo", Number: 8, PRNumber: 20, Facts: itemstate.PRFacts{State: "open", HeadSHA: "abc", ObservedAt: now}})
+	e.store.Apply(itemstate.CIVerdictObserved{Repo: "owner/repo", Number: 8, Verdict: itemstate.CIVerdictRecord{Verdict: "red", HeadSHA: "abc", Failing: []string{"ci"}, ObservedAt: now}})
 
 	st := status(t, e, "8")
 	if st.PR.State != "linked" || !st.PR.Number.Valid || st.PR.Number.V != 20 {

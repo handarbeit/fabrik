@@ -122,7 +122,14 @@ type Tokens struct {
 	MaxTurns      int     `json:"max_turns"`
 }
 
-// PRInfo is the linked PR as the cache holds it.
+// PRInfo is the linked PR as the daemon holds it.
+//
+// The facts come from the engine's own poll (the board probe, plus a bounded
+// REST read for PRs the probe cannot see) and the CI verdict from the gates'
+// classifier run on the poll goroutine; this API makes no GitHub call. Each
+// group carries when it was last observed and whether that is older than one
+// poll interval. unknown means never observed since the daemon started; stale
+// means observed, but not recently: the value is shown, not trusted.
 type PRInfo struct {
 	// State is "linked", "none" (the cache has fully read the item and it has
 	// no PR) or "unknown" (never deep-fetched).
@@ -133,10 +140,23 @@ type PRInfo struct {
 	Merged         Known[bool]   `json:"merged"`
 	Mergeable      Known[string] `json:"mergeable"`
 	MergeableState Known[string] `json:"mergeable_state"`
-	// CI is green, red, pending or none, from the cached check runs only.
-	CI         Known[string]  `json:"ci"`
-	HeadSHA    Known[string]  `json:"head_sha"`
-	MergeTrain *TrainPosition `json:"merge_train,omitempty"`
+	// CI is the green-and-complete verdict for CIHeadSHA, as the gates compute
+	// it: green, red, pending, none or unknown. It is never shown for a head
+	// other than the PR's current one.
+	CI      Known[string] `json:"ci"`
+	HeadSHA Known[string] `json:"head_sha"`
+	// FactsAsOf is when the state/draft/merged/mergeable facts were last read
+	// from GitHub; FactsStale is true when that is older than one poll interval
+	// (unknown when never observed or the interval is not known).
+	FactsAsOf  Known[time.Time] `json:"facts_as_of"`
+	FactsStale Known[bool]      `json:"facts_stale"`
+	// CIAsOf, CIStale and CIHeadSHA are the same for the CI verdict and name the
+	// head it was computed for. CIFailing lists the failing checks when red.
+	CIAsOf     Known[time.Time] `json:"ci_as_of"`
+	CIStale    Known[bool]      `json:"ci_stale"`
+	CIHeadSHA  Known[string]    `json:"ci_head_sha"`
+	CIFailing  []string         `json:"ci_failing"`
+	MergeTrain *TrainPosition   `json:"merge_train,omitempty"`
 }
 
 // TrainPosition is the item's place in its (repo, base) merge-train partition.
@@ -185,6 +205,9 @@ type AttentionInfo struct {
 	// rebase-conflict-after-landing); absent when the engine does not know
 	// (#2121).
 	Cause string `json:"cause,omitempty"`
+	// CIFailing names the failing checks of the red CI verdict this item
+	// carries; present only when attention surfaced one (#2122).
+	CIFailing []string `json:"ci_failing,omitempty"`
 }
 
 // OptionInfo is one way a human can act on a decision-bearing item. Tool is
