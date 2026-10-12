@@ -35,16 +35,16 @@ An overseer subscribed to the channel hears about work as soon as it is filed on
 
 ### User Story 2 - A restart never invents arrivals (Priority: P1)
 
-An overseer that stays attached across a daemon restart receives no `item-added` for items that were already on the board before the restart, whatever column they sit in and however late the Store first learns of them.
+An overseer that stays attached across a daemon restart receives no `item-added` for items that were already on the board before the restart, whatever column they sit in and however late the Store first learns of them. An item in a board column with no configured stage never produces `item-added`.
 
 **Why this priority**: A false "new item" after every restart is noise that erodes trust in the channel; the review suspected a path that causes it.
 
-**Independent Test**: Sim: restart with an open item sitting in a board column that has no configured stage and is not unmanaged, subscriber attached across the restart; run through the first reconcile; assert zero `item-added`. Must fail against current `main` if the suspected defect is real; if it does not fail, record in the PR that the path was disproved and keep the test as a guard.
+**Independent Test**: Sim: restart with an open item sitting in a board column that has no configured stage, subscriber attached across the restart; run through the first reconcile; assert zero `item-added`. Must fail against current `main` if the suspected defect is real; if it does not fail, record in the PR that the path was disproved and keep the test as a guard.
 
 **Acceptance Scenarios**:
 
 1. **Given** an open item in a column with no configured stage that existed before the daemon restarted, **When** the first reconcile after restart brings it into the Store, **Then** no `item-added` is published.
-2. **Given** an open item in Backlog that existed before the daemon restarted, **When** the daemon restarts and reconciles, **Then** no `item-added` is published.
+2. **Given** an open item in a configured `unmanaged` column (Backlog) that existed before the daemon restarted, **When** the daemon restarts and reconciles, **Then** no `item-added` is published.
 3. **Given** the same restart, **When** an open issue is genuinely added to a managed column afterwards, **Then** exactly one `item-added` is published.
 
 ---
@@ -68,18 +68,19 @@ A maintainer changing arrival or catch-up code gets a failing test if they break
 
 - An item that arrives in Backlog and has been announced, then moves to a managed column: one `column-changed`, never a second `item-added`.
 - An item moved from a managed column back to Backlog: `column-changed` only (unchanged).
-- A legacy install with no configured `Backlog` stage, where a `Backlog` column is still treated as a parking column: arrivals there are announced like any other column.
+- An item the daemon first saw in a column with no configured stage (no `item-added` then) and that is later moved into a configured column: exactly one `column-changed` and no `item-added`.
+- An item first seen after startup directly in a configured column is an arrival: exactly one `item-added`.
 - An item whose arrival is announced only once its labels become known (a pending arrival) is announced at most once, with the column it has at announcement time (unchanged behaviour).
 
 ## Requirements *(mandatory)*
 
 ### Functional Requirements
 
-- **FR-001**: An open issue added after startup to an `unmanaged` column MUST produce exactly one `item-added` (with that column); moving it into a managed column MUST then produce one `column-changed` and no second `item-added`. This deliberately supersedes #2123 FR-004's clause that unmanaged items MUST NOT produce `item-added`.
-- **FR-002**: An item first entering the Store via a reconcile, a deep fetch or any path other than a real post-startup board addition MUST NOT produce `item-added`, including items in columns with no configured stage.
+- **FR-001**: `item-added` is published for an open, non-PR issue that arrives after startup in any column that has a configured stage — managed or `unmanaged` (Backlog included) — exactly once. Moving an announced item into a managed column MUST produce one `column-changed` and no second `item-added`. This deliberately supersedes #2123 FR-004's clause that unmanaged items MUST NOT produce `item-added`.
+- **FR-002**: An item in a board column with no configured stage is outside Fabrik's known column set and MUST NOT produce `item-added`, whether it is first seen by the probe, a deep fetch or a reconcile. Likewise an item first entering the Store via a reconcile, a deep fetch or any path other than a real post-startup board addition MUST NOT produce `item-added`. The restart test is the case of an unconfigured-column item first seen at the first reconcile after startup.
 - **FR-003**: A test MUST fail if `announceArrival` (or its successor) announces an item whose labels are not yet known (#2123 FR-005).
 - **FR-004**: `TestCatchUpNeverReplaysLifecycleEvents` MUST be replaced or strengthened so that it fails if catch-up emits `item-added`, `column-changed` or `closed` — e.g. by asserting on `catchUpEvents` output for a state that contains a fresh arrival, a recent column move and a recent close.
-- **FR-005**: ADR 2123 and `docs/state-machine.md` §7.14 state the unmanaged-column rule explicitly: unmanaged-column arrivals after startup are announced, and the decision amends #2123 FR-004's exclusion. `docs/llms-full.txt` is regenerated in the same change.
+- **FR-005**: ADR 2123 and `docs/state-machine.md` §7.14 state the arrival rule explicitly, using the wording of FR-001/FR-002: arrivals after startup in any configured-stage column (unmanaged included) are announced, an unconfigured-column item never is, and the decision amends #2123 FR-004's exclusion. They also record what happens when an item first seen in an unconfigured column is later moved into a configured column (see Assumptions). `docs/llms-full.txt` is regenerated in the same change.
 - **FR-006**: A sim test MUST cover a post-startup arrival into an `unmanaged` column (today only a pre-startup Backlog card is tested), asserting one `item-added` followed, on a move to a managed column, by one `column-changed` and no second `item-added`.
 
 ## Success Criteria *(mandatory)*
@@ -93,8 +94,10 @@ A maintainer changing arrival or catch-up code gets a failing test if they break
 ## Assumptions
 
 - **Decision (2026-10-12, @verveguy):** unmanaged-column arrivals SHOULD be announced as `item-added`, superseding #2123 FR-004's "unmanaged items MUST NOT produce `item-added`" clause and Background item 1 above, which treated that behaviour as a defect. The current behaviour from PR #2175 is the desired one; this issue adds the missing test and records the decision.
-- "Unmanaged" means a parking column as the engine already defines it: a configured stage with `unmanaged: true`, or the legacy `Backlog` column when no `Backlog` stage is configured.
-- FR-002 applies to items that were on the board before the daemon started, in any column including Backlog. Distinguishing them from genuine post-startup additions is a design matter for Plan; the observable requirement is that a restart never produces `item-added` for them.
+- **Decision (2026-10-12, @verveguy):** the rule is stated once in FR-001/FR-002 — `item-added` for an open, non-PR issue arriving after startup in any configured-stage column; never for an item in a column with no configured stage.
+- "Configured stage" means a stage loaded from the stage configuration. A `Backlog` column with no configured stage (legacy installs that predate the shipped Backlog stage) therefore falls under the no-configured-stage rule and produces no `item-added`; this is a reversible reading of the stated rule.
+- Chosen behaviour for an item first seen in an unconfigured column and later moved into a configured column: one `column-changed` and no `item-added` (the move is a transition of an item the daemon already knows about). To be documented in ADR 2123.
+- FR-002 applies to items that were on the board before the daemon started, in any column. Distinguishing them from genuine post-startup additions is a design matter for Plan; the observable requirement is that a restart never produces `item-added` for them.
 - If the suspected restart defect (Background item 2) cannot be reproduced, FR-002 is satisfied by the guard test plus a note in the PR that the path was disproved.
 - Timing of announcement relative to label knowledge (pending arrivals) is unchanged by this issue.
 
@@ -103,7 +106,6 @@ A maintainer changing arrival or catch-up code gets a failing test if they break
 - Attributing a `closed` event to `fabrik` when the landing is inferred only from the snapshot, and registering an engine echo for `issues/closed` (documented limitation in `internal/itemstate/mutation.go`). Separate follow-up if wanted.
 - Reporting label changes that happened while the daemon was down (by design; `catch_up` covers it).
 - Any change to `column-changed` or `closed` behaviour.
-- Any engine behaviour change to Backlog arrival announcement (the current behaviour is retained).
 
 ## Source References *(optional)*
 
