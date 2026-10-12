@@ -111,7 +111,7 @@ func (s *Server) notifyChannel(ev channelevents.Event) {
 // initialized (a notification before that could be dropped). A shim launched
 // without a subscriber name has no push: the read tools work unchanged.
 func (s *Server) startStream(ctx context.Context) {
-	if s.Subscriber == "" {
+	if s.Subscriber == "" || s.DisableStream {
 		return
 	}
 	s.streamOnce.Do(func() {
