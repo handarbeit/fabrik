@@ -66,6 +66,36 @@ const (
 // nothing is known against it. Defined here once so every producer shares it.
 const MetaUnverified = "unverified"
 
+// MetaSource is the meta key naming where an event came from (#2169 R3a), with
+// one of the Source* values. There is deliberately no replay value: a restart
+// delivers a catch-up snapshot and real downtime deltas, never a replay.
+const MetaSource = "source"
+
+// Event sources.
+const (
+	// SourceLive: published as the daemon observed the transition (a held event
+	// delivered late is still live).
+	SourceLive = "live"
+	// SourceCatchUp: part of a current-state snapshot, not a transition.
+	SourceCatchUp = "catch_up"
+	// SourceDowntimeDelta: a difference between the persisted last-observed
+	// state and the first observation after a daemon start.
+	SourceDowntimeDelta = "downtime-delta"
+)
+
+// MetaCause is the meta key on a validate-settled that is not the first of its
+// episode chain (#2169 R3a): why the item settled again. The first settle
+// carries no cause.
+const MetaCause = "cause"
+
+// Re-settle causes, in the precedence the engine applies when several hold.
+const (
+	CauseRevalidated     = "revalidated"
+	CauseNewHead         = "new-head"
+	CauseAutonomyChanged = "autonomy-changed"
+	CauseOther           = "other"
+)
+
 // Event is one thing that happened, ready to route and deliver.
 //
 // Repo/Issue/Milestone*/Label are routing attributes the hub matches
