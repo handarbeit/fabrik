@@ -402,17 +402,14 @@ func (c *CacheImpl) BootstrapFromProbe(items []gh.BoardProbeItem, projectID stri
 			Repo:           pi.Repo,
 			UpdatedAt:      pi.EffectiveUpdatedAt,
 			LinkedPRNumber: pi.LinkedPRNumber,
-<<<<<<< HEAD
 			// The probe carries no labels: the first label-bearing population
 			// (deep fetch or reconcile) is then a silent baseline (#2123).
 			LabelsAbsent: true,
-=======
 
 			IssueLayerUpdatedAt:    pi.IssueLayerUpdatedAt,
 			LinkedPRUpdatedAt:      pi.LinkedPRUpdatedAt,
 			IssueCommentTotal:      pi.IssueCommentTotal,
 			IssueCommentTotalKnown: pi.IssueCommentTotalKnown,
->>>>>>> dfd3059f (feat(boardcache): judge cache freshness per layer so a self-write cannot mask an external change)
 		})
 	}
 
