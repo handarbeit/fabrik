@@ -3117,11 +3117,14 @@ that upgraded through each:
    project plugin provides keeps resolving to it: if a plugin the daemon loads besides the
    base plugin (a `plugin_dirs` extra, or a `local-workflows` of your own) provides
    `fabrik-review`, the reference becomes `<that-plugin>:fabrik-review`, the same plugin the
-   runtime would have picked (the first in load order when several provide it), so
-   upgrading never changes which skill a stage runs. The one exception is a base skill you
+   runtime would have picked once the base plugin is refreshed (the first in load order
+   when several provide it), so for a plugin set `fabrik upgrade` can see, the upgrade does
+   not switch a stage to the base skill. Two cases differ. A base skill you
    edited: your edit lives in the moved `local-workflows` copy, which the daemon loads
    before `plugin_dirs`, so that reference keeps pointing at `local-workflows` even when an
-   extra also provides the name. The report names each such
+   extra also provides the name. And a customised, not-yet-refreshed base still named
+   `fabrik` that ships an unedited `fabrik-review` beats an extra at runtime today, so the
+   stage moves to the extra once the base is refreshed. The report names each such
    reference, its stage file and key, and the plugin. The extras are read from
    `plugin_dirs` in `.fabrik/config.yaml`, or `FABRIK_PLUGIN_DIRS` when set; the
    `--plugin-dirs` flag and a value that lives only in `.env` are not visible to
