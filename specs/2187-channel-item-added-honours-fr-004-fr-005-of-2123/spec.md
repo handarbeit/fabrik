@@ -17,18 +17,18 @@
 
 ## User Scenarios & Testing *(mandatory)*
 
-### User Story 1 - Backlog stays quiet (Priority: P1)
+### User Story 1 - Backlog arrivals are announced once (Priority: P1)
 
-An overseer subscribed to the channel sees nothing when someone files a card into Backlog; it hears about the item when it is moved into a managed column.
+An overseer subscribed to the channel hears about work as soon as it is filed onto the board, including into an `unmanaged` column such as Backlog. When the item is later moved into a managed column, the overseer hears about the move, not a second arrival.
 
-**Why this priority**: This is a direct violation of a stated #2123 requirement that produces user-visible noise on every Backlog filing.
+**Why this priority**: The overseer wants to know when work is filed, not only when it reaches a managed column. Today's behaviour is the desired one, but it is untested for a post-startup Backlog arrival, and the move-out must not re-announce the item.
 
-**Independent Test**: Sim: daemon running, a new open issue is added to the board in an `unmanaged` column; assert no `item-added`. Move it to Specify; assert exactly one `column-changed` (Backlog → Specify) and no `item-added`.
+**Independent Test**: Sim: daemon running, a new open issue is added to the board in an `unmanaged` column; assert exactly one `item-added` with that column. Move it to Specify; assert exactly one `column-changed` (Backlog → Specify) and no second `item-added`.
 
 **Acceptance Scenarios**:
 
-1. **Given** a running daemon and a subscriber, **When** an open issue is added to the board in Backlog, **Then** no `item-added` is published.
-2. **Given** that item, **When** a human moves it to Specify, **Then** one `column-changed` is published and no `item-added`.
+1. **Given** a running daemon and a subscriber, **When** an open issue is added to the board in Backlog, **Then** exactly one `item-added` is published, with `column=Backlog`.
+2. **Given** that item, **When** a human moves it to Specify, **Then** one `column-changed` is published and no second `item-added`.
 3. **Given** a running daemon, **When** an open issue is added directly into Specify, **Then** exactly one `item-added` is published (unchanged behaviour).
 
 ---
@@ -44,7 +44,8 @@ An overseer that stays attached across a daemon restart receives no `item-added`
 **Acceptance Scenarios**:
 
 1. **Given** an open item in a column with no configured stage that existed before the daemon restarted, **When** the first reconcile after restart brings it into the Store, **Then** no `item-added` is published.
-2. **Given** the same restart, **When** an open issue is genuinely added to a managed column afterwards, **Then** exactly one `item-added` is published.
+2. **Given** an open item in Backlog that existed before the daemon restarted, **When** the daemon restarts and reconciles, **Then** no `item-added` is published.
+3. **Given** the same restart, **When** an open issue is genuinely added to a managed column afterwards, **Then** exactly one `item-added` is published.
 
 ---
 
@@ -65,20 +66,21 @@ A maintainer changing arrival or catch-up code gets a failing test if they break
 
 ### Edge Cases
 
-- An item that arrives in Backlog and is moved to a managed column *before* its labels are known: one `column-changed` once known, never an `item-added`.
+- An item that arrives in Backlog and has been announced, then moves to a managed column: one `column-changed`, never a second `item-added`.
 - An item moved from a managed column back to Backlog: `column-changed` only (unchanged).
-- An item that arrives in a managed column but is moved to Backlog before its labels are known: no `item-added` (its column at announcement time is unmanaged).
-- A legacy install with no configured `Backlog` stage, where a `Backlog` column is still treated as a parking column: treated as unmanaged for this rule.
+- A legacy install with no configured `Backlog` stage, where a `Backlog` column is still treated as a parking column: arrivals there are announced like any other column.
+- An item whose arrival is announced only once its labels become known (a pending arrival) is announced at most once, with the column it has at announcement time (unchanged behaviour).
 
 ## Requirements *(mandatory)*
 
 ### Functional Requirements
 
-- **FR-001**: `item-added` MUST NOT be published for an item whose column is an `unmanaged` stage, at arrival or later.
+- **FR-001**: An open issue added after startup to an `unmanaged` column MUST produce exactly one `item-added` (with that column); moving it into a managed column MUST then produce one `column-changed` and no second `item-added`. This deliberately supersedes #2123 FR-004's clause that unmanaged items MUST NOT produce `item-added`.
 - **FR-002**: An item first entering the Store via a reconcile, a deep fetch or any path other than a real post-startup board addition MUST NOT produce `item-added`, including items in columns with no configured stage.
 - **FR-003**: A test MUST fail if `announceArrival` (or its successor) announces an item whose labels are not yet known (#2123 FR-005).
 - **FR-004**: `TestCatchUpNeverReplaysLifecycleEvents` MUST be replaced or strengthened so that it fails if catch-up emits `item-added`, `column-changed` or `closed` — e.g. by asserting on `catchUpEvents` output for a state that contains a fresh arrival, a recent column move and a recent close.
-- **FR-005**: ADR 2123 and `docs/state-machine.md` §7.14 state the unmanaged-column rule explicitly.
+- **FR-005**: ADR 2123 and `docs/state-machine.md` §7.14 state the unmanaged-column rule explicitly: unmanaged-column arrivals after startup are announced, and the decision amends #2123 FR-004's exclusion. `docs/llms-full.txt` is regenerated in the same change.
+- **FR-006**: A sim test MUST cover a post-startup arrival into an `unmanaged` column (today only a pre-startup Backlog card is tested), asserting one `item-added` followed, on a move to a managed column, by one `column-changed` and no second `item-added`.
 
 ## Success Criteria *(mandatory)*
 
@@ -90,16 +92,18 @@ A maintainer changing arrival or catch-up code gets a failing test if they break
 
 ## Assumptions
 
-- "Unmanaged" in FR-001 means a parking column as the engine already defines it: a configured stage with `unmanaged: true`, or the legacy `Backlog` column when no `Backlog` stage is configured. A configured `Backlog` stage that is not `unmanaged` keeps its configured meaning.
-- FR-002 applies to items that were on the board before the daemon started. Distinguishing them from genuine post-startup additions is a design matter for Plan; the observable requirement is that a restart never produces `item-added` for them.
+- **Decision (2026-10-12, @verveguy):** unmanaged-column arrivals SHOULD be announced as `item-added`, superseding #2123 FR-004's "unmanaged items MUST NOT produce `item-added`" clause and Background item 1 above, which treated that behaviour as a defect. The current behaviour from PR #2175 is the desired one; this issue adds the missing test and records the decision.
+- "Unmanaged" means a parking column as the engine already defines it: a configured stage with `unmanaged: true`, or the legacy `Backlog` column when no `Backlog` stage is configured.
+- FR-002 applies to items that were on the board before the daemon started, in any column including Backlog. Distinguishing them from genuine post-startup additions is a design matter for Plan; the observable requirement is that a restart never produces `item-added` for them.
 - If the suspected restart defect (Background item 2) cannot be reproduced, FR-002 is satisfied by the guard test plus a note in the PR that the path was disproved.
-- The unmanaged check applies when the arrival is announced (at the item's column at that time), so an arrival that moves into Backlog before announcement is also silent.
+- Timing of announcement relative to label knowledge (pending arrivals) is unchanged by this issue.
 
 ## Out of Scope *(optional)*
 
 - Attributing a `closed` event to `fabrik` when the landing is inferred only from the snapshot, and registering an engine echo for `issues/closed` (documented limitation in `internal/itemstate/mutation.go`). Separate follow-up if wanted.
 - Reporting label changes that happened while the daemon was down (by design; `catch_up` covers it).
 - Any change to `column-changed` or `closed` behaviour.
+- Any engine behaviour change to Backlog arrival announcement (the current behaviour is retained).
 
 ## Source References *(optional)*
 
