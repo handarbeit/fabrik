@@ -331,6 +331,56 @@ func TestSettlePRFacts_RotationCountsOnlyBudgetSpenders(t *testing.T) {
 	}
 }
 
+// The engine records head A (probe/webhook/reconcile) while the facts were read
+// for head B: nothing says which is newer, so no check run is read for either,
+// any recorded verdict is dropped, and the API says unknown rather than showing
+// a possibly false green for a head the PR has moved past.
+func TestSettlePRFacts_DisagreeingHeadsMeanNoVerdict(t *testing.T) {
+	env := newPRFactsEnv(t)
+	board := env.seedPR(t, 7, false)
+	env.runs = []gh.CheckRun{passRun("Test and vet", 1)}
+	env.e.settlePRFacts(board)
+	if got := status(t, env.e, "7"); got.PR.CI.V != "green" {
+		t.Fatalf("precondition: ci = %+v, want green for the agreed head", got.PR.CI)
+	}
+
+	// The probe now reports head B while the engine still records head A.
+	const headB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	env.e.store.Apply(itemstate.PRFactsObserved{Repo: "owner/repo", Number: 7, PRNumber: 57,
+		Facts: itemstate.PRFacts{State: "open", MergeableState: "clean", HeadSHA: headB, ObservedAt: env.clock.t}})
+
+	// GitHub's current head is B too, so the REST facts fallback agrees with the probe.
+	env.client.fetchPRDetailsFn = func(owner, repo string, n int) (*gh.PRDetails, error) {
+		return &gh.PRDetails{Number: n, State: "open", HeadSHA: headB, MergeableState: "clean"}, nil
+	}
+	env.clock.t = env.clock.t.Add(prFactsGreenRecheck + time.Minute)
+	reads := env.reads.Load()
+	env.e.settlePRFacts(board)
+
+	if env.reads.Load() != reads {
+		t.Errorf("check runs were read (%d -> %d) although the engine head and the facts' head disagree", reads, env.reads.Load())
+	}
+	snap, _ := env.e.store.Peek("owner/repo", 7)
+	if v := snap.State().LinkedPR.CIVerdict; v.Verdict != "" {
+		t.Errorf("verdict %+v kept for a head that is not the agreed one", v)
+	}
+	got := status(t, env.e, "7")
+	if got.PR.CI.Valid || got.PR.CIAsOf.Valid || len(got.PR.CIFailing) != 0 {
+		t.Errorf("ci must be unknown while the heads disagree: %+v", got.PR)
+	}
+	if strings.Contains(got.Attention.Summary, "CI is red") {
+		t.Errorf("attention reported CI while the heads disagree: %q", got.Attention.Summary)
+	}
+
+	// Once the engine learns head B the heads agree and a verdict is computed for B.
+	env.e.store.Apply(itemstate.PRHeadSHAUpdated{Repo: "owner/repo", Number: 7, LinkedPRNum: 57, SHA: headB})
+	env.runs = []gh.CheckRun{failedRun("Test and vet", 2)}
+	env.e.settlePRFacts(board)
+	if got := status(t, env.e, "7"); got.PR.CI.V != "red" || got.PR.CIHeadSHA.V != headB {
+		t.Errorf("after the heads agree: ci=%+v head=%+v, want red for %s", got.PR.CI, got.PR.CIHeadSHA, headB)
+	}
+}
+
 // cacheReadGuard is a ReadClient whose check-run read must never be used by
 // the refresher: CacheImpl.FetchCheckRuns applies CheckRunCompleted, which
 // stamps LastCIProgressAt (ADR-1410) and so would change what a CI gate that

@@ -126,3 +126,44 @@ func TestCIVerdictUsesTheFactsHeadUntilTheEngineRecordsOne(t *testing.T) {
 		t.Errorf("a verdict for another head survived the engine recording one: %+v", lpr)
 	}
 }
+
+// When the engine-recorded head and the facts' head are both known and differ
+// there is no agreed head: a verdict for either is dropped, none is accepted,
+// and one is accepted again once they agree (#2122).
+func TestCIVerdictNeedsAnAgreedHead(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	applyExpect(t, s, PRDetailsUpdated{Repo: testRepo, Number: 1, PRNumber: 7}, LinkedPRChanged|PRStateChanged)
+	at := time.Now()
+	mustApply := func(m Mutation) {
+		t.Helper()
+		if _, _, err := s.Apply(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustApply(PRHeadSHAUpdated{Repo: testRepo, Number: 1, LinkedPRNum: 7, SHA: "aaa"})
+	mustApply(PRFactsObserved{Repo: testRepo, Number: 1, PRNumber: 7, Facts: PRFacts{State: "open", HeadSHA: "aaa", ObservedAt: at}})
+	mustApply(CIVerdictObserved{Repo: testRepo, Number: 1, Verdict: CIVerdictRecord{Verdict: "green", HeadSHA: "aaa", ObservedAt: at}})
+	if v := getItem(t, s, testRepo, 1).LinkedPR.CIVerdict; v.Verdict != "green" {
+		t.Fatalf("precondition: verdict = %+v", v)
+	}
+
+	// Facts now name head B while the engine still records A.
+	mustApply(PRFactsObserved{Repo: testRepo, Number: 1, PRNumber: 7, Facts: PRFacts{State: "open", HeadSHA: "bbb", ObservedAt: at.Add(time.Second)}})
+	lpr := getItem(t, s, testRepo, 1).LinkedPR
+	if lpr.AgreedHead() != "" || lpr.CIVerdict.Verdict != "" {
+		t.Errorf("disagreeing heads: agreed=%q verdict=%+v, want none", lpr.AgreedHead(), lpr.CIVerdict)
+	}
+	for _, head := range []string{"aaa", "bbb"} {
+		mustApply(CIVerdictObserved{Repo: testRepo, Number: 1, Verdict: CIVerdictRecord{Verdict: "green", HeadSHA: head, ObservedAt: at}})
+		if v := getItem(t, s, testRepo, 1).LinkedPR.CIVerdict; v.Verdict != "" {
+			t.Errorf("a verdict for %s was accepted while the heads disagree: %+v", head, v)
+		}
+	}
+
+	// The engine learns head B: they agree, and a verdict for B is accepted.
+	mustApply(PRHeadSHAUpdated{Repo: testRepo, Number: 1, LinkedPRNum: 7, SHA: "bbb"})
+	mustApply(CIVerdictObserved{Repo: testRepo, Number: 1, Verdict: CIVerdictRecord{Verdict: "red", HeadSHA: "bbb", ObservedAt: at}})
+	if v := getItem(t, s, testRepo, 1).LinkedPR.CIVerdict; v.Verdict != "red" {
+		t.Errorf("verdict for the agreed head not stored: %+v", v)
+	}
+}

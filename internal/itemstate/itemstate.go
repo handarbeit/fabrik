@@ -419,6 +419,18 @@ func (l *LinkedPRState) ObservedHead() string {
 	return l.Facts.HeadSHA
 }
 
+// AgreedHead is the head SHA a CI verdict may be computed for or shown against.
+// It is ObservedHead unless the engine-recorded head and the head the PR facts
+// were read for are both known and disagree: then it is "" (unknown), because
+// neither side is known to be the newer one, and a verdict for either could be
+// a false green for a PR that has moved on (#2122).
+func (l *LinkedPRState) AgreedHead() string {
+	if l.HeadSHA != "" && l.Facts.HeadSHA != "" && l.HeadSHA != l.Facts.HeadSHA {
+		return ""
+	}
+	return l.ObservedHead()
+}
+
 // StageState holds per-stage attempt counters and cycle counts.
 // Keys are stage names (e.g. "Implement", "Review").
 type StageState struct {

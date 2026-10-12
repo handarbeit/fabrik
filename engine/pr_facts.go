@@ -129,7 +129,7 @@ func canSpendPRFactsBudget(lpr *itemstate.LinkedPRState, now time.Time) bool {
 		return false
 	}
 	rec := lpr.CIVerdict
-	return !(rec.Verdict == string(ciVerdictGreen) && rec.HeadSHA == lpr.ObservedHead() &&
+	return !(rec.Verdict == string(ciVerdictGreen) && rec.HeadSHA == lpr.AgreedHead() &&
 		!rec.LiveReadAt.IsZero() && now.Sub(rec.LiveReadAt) < prFactsGreenRecheck)
 }
 
@@ -190,11 +190,14 @@ func (e *Engine) refreshPRFacts(c prFactsCandidate, pollStart, now time.Time, ch
 	}
 
 	// A verdict applies to an open PR only; facts never observed mean we cannot
-	// tell, so nothing is computed (the API keeps saying unknown).
-	if lpr.Facts.State != "open" || lpr.Facts.Merged || lpr.ObservedHead() == "" {
+	// tell, so nothing is computed (the API keeps saying unknown). The same holds
+	// when the engine-recorded head and the facts' head disagree: neither is known
+	// to be the newer, so there is no agreed head and no verdict is read or kept
+	// (a green for a head the PR has moved past is the worst thing to show).
+	if lpr.Facts.State != "open" || lpr.Facts.Merged || lpr.AgreedHead() == "" {
 		return
 	}
-	head := lpr.ObservedHead()
+	head := lpr.AgreedHead()
 	rec := lpr.CIVerdict
 
 	// A green verdict whose runs were read live within prFactsGreenRecheck is

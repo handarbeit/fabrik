@@ -1062,6 +1062,12 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 			flags |= PRFactsChanged
 		}
 		item.LinkedPR.HeadSHA = v.SHA
+		// A head that disagrees with the one the facts were read for has no
+		// agreed head: no verdict applies to either (#2122).
+		if item.LinkedPR.CIVerdict.HeadSHA != "" && item.LinkedPR.AgreedHead() != item.LinkedPR.CIVerdict.HeadSHA {
+			item.LinkedPR.CIVerdict = CIVerdictRecord{}
+			flags |= PRFactsChanged
+		}
 		// Drain any pre-linkage check runs buffered for this SHA.
 		if pending, ok := s.pendingCheckRuns[v.SHA]; ok && len(pending) > 0 {
 			drainedChanged := false
@@ -1098,14 +1104,21 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 			// No open-PR verdict applies to a merged or closed PR.
 			lpr.CIVerdict = CIVerdictRecord{}
 		}
-		if prFactsEqual(lpr.Facts, facts) {
+		changed := !prFactsEqual(lpr.Facts, facts)
+		lpr.Facts = facts
+		// Facts read for a head the engine has not recorded (or the reverse) leave
+		// no agreed head: drop any verdict that is not for the agreed one.
+		if lpr.CIVerdict.HeadSHA != "" && lpr.AgreedHead() != lpr.CIVerdict.HeadSHA {
+			lpr.CIVerdict = CIVerdictRecord{}
+			changed = true
+		}
+		if !changed {
 			return 0
 		}
-		lpr.Facts = facts
 		return PRFactsChanged
 
 	case CIVerdictObserved:
-		if item.LinkedPR == nil || v.Verdict.HeadSHA == "" || item.LinkedPR.ObservedHead() != v.Verdict.HeadSHA {
+		if item.LinkedPR == nil || v.Verdict.HeadSHA == "" || item.LinkedPR.AgreedHead() != v.Verdict.HeadSHA {
 			return 0
 		}
 		cur := item.LinkedPR.CIVerdict

@@ -687,7 +687,7 @@ func (b localAPIBackend) prInfo(st *itemstate.ItemState, now time.Time) localapi
 
 	// The verdict is for one head. A record for any other head is not shown
 	// (the Store clears it on a head change; this is the belt to that braces).
-	if v := lpr.CIVerdict; v.Verdict != "" && v.HeadSHA != "" && v.HeadSHA == lpr.ObservedHead() {
+	if v := lpr.CIVerdict; v.Verdict != "" && v.HeadSHA != "" && v.HeadSHA == lpr.AgreedHead() {
 		pr.CI = localapi.Some(v.Verdict)
 		pr.CIHeadSHA = localapi.Some(v.HeadSHA)
 		pr.CIAsOf = localapi.KnownTime(v.ObservedAt)
