@@ -1392,7 +1392,6 @@ func TestStatusFactsAreRecordedAndInformationalOnly(t *testing.T) {
 	// Clearing a different gate leaves it.
 	applyExpect(t, s, GateHoldCleared{Repo: testRepo, Number: 1, Gate: "ci"}, 0)
 	applyExpect(t, s, GateHoldCleared{Repo: testRepo, Number: 1, Gate: "feedback"}, StatusFactsChanged)
-	applyExpect(t, s, RetryCleared{Repo: testRepo, Number: 1}, StatusFactsChanged)
 	applyExpect(t, s, ConflictResolutionSet{Repo: testRepo, Number: 1}, StatusFactsChanged)
 	if wakeLike := StatusFactsChanged & (WorkerLifecycleChanged | StatusChanged | LabelsChanged); wakeLike != 0 {
 		t.Error("StatusFactsChanged must not alias a wake flag")

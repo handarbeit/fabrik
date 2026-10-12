@@ -907,7 +907,10 @@ type WorkerTurnsRecorded struct {
 func (WorkerTurnsRecorded) isMutation()       {}
 func (m WorkerTurnsRecorded) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
-// RetryScheduled records a retry the engine has scheduled (#2121).
+// RetryScheduled records a retry the engine has scheduled (#2121). It has no
+// explicit clearing mutation: the retry ends with the next stage-run WorkerEntered
+// (dispatch), and with a pause, a stage:*:complete label, a close or a column move
+// (clearStatusFacts). Every path that gives a retry up escalates to a pause.
 type RetryScheduled struct {
 	Repo   string
 	Number int
@@ -916,16 +919,6 @@ type RetryScheduled struct {
 
 func (RetryScheduled) isMutation()       {}
 func (m RetryScheduled) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
-
-// RetryCleared clears the pending retry (#2121): on dispatch, completion, pause
-// and close.
-type RetryCleared struct {
-	Repo   string
-	Number int
-}
-
-func (RetryCleared) isMutation()       {}
-func (m RetryCleared) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // GateHoldRecorded records a gate hold (#2121). A repeat of the same gate keeps
 // the original Since and refreshes the rest.

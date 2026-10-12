@@ -881,13 +881,6 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		item.PendingRetry = &r
 		return StatusFactsChanged
 
-	case RetryCleared:
-		if item.PendingRetry == nil {
-			return 0
-		}
-		item.PendingRetry = nil
-		return StatusFactsChanged
-
 	case GateHoldRecorded:
 		h := v.Hold
 		h.IDs = copyStrings(v.Hold.IDs)
