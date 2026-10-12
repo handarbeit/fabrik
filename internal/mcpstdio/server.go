@@ -396,7 +396,7 @@ func (s *Server) skewNote(ctx context.Context, daemonVersion string) string {
 
 func subscribeNote(attached string) string {
 	note := "Note: Fabrik cannot tell whether this session receives channel pushes. They appear only if Claude Code was started with Channels enabled for this server " +
-		"(research preview: claude --dangerously-load-development-channels server:fabrik; Team/Enterprise orgs must also allow channels). Otherwise events are dropped silently."
+		"(research preview: claude --dangerously-load-development-channels server:fabrik, or plugin:fabrik@fabrik when installed through the fabrik plugin; Team/Enterprise orgs must also allow channels). Otherwise events are dropped silently."
 	if attached == "" {
 		note += " This server was launched without --subscriber, so it holds no push connection: events for this subscription are held by the daemon and delivered once a server with that name attaches."
 	}

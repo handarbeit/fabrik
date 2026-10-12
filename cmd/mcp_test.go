@@ -113,6 +113,8 @@ func TestExecute_MCPSubcommandDefaultsToCurrentDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
+	t.Setenv("FABRIK_MCP_DIR", "")
+	t.Setenv("CLAUDE_PROJECT_DIR", "")
 	chdirTest(t, dir)
 	wd, _ := os.Getwd()
 	out := runMCPWithStdio(t, mcpHandshake)
@@ -142,5 +144,50 @@ func TestSubscriberNameFlagBeatsEnvAndThereIsNoGeneratedDefault(t *testing.T) {
 	t.Setenv("FABRIK_SUBSCRIBER", "")
 	if got := subscriberName(""); got != "" {
 		t.Errorf("no name must stay empty (push off), got %q", got)
+	}
+}
+
+// The directory precedence is --dir > $FABRIK_MCP_DIR > $CLAUDE_PROJECT_DIR >
+// cwd, and an empty variable (an unset plugin setting) counts as unset (#2141).
+func TestResolveMCPDirPrecedence(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FABRIK_MCP_DIR", "/from/mcp-dir")
+	t.Setenv("CLAUDE_PROJECT_DIR", "/from/project")
+	if got, _ := resolveMCPDir("/from/flag"); got != "/from/flag" {
+		t.Errorf("flag must win: %q", got)
+	}
+	if got, _ := resolveMCPDir(""); got != "/from/mcp-dir" {
+		t.Errorf("FABRIK_MCP_DIR must beat CLAUDE_PROJECT_DIR: %q", got)
+	}
+	t.Setenv("FABRIK_MCP_DIR", "")
+	if got, _ := resolveMCPDir(""); got != "/from/project" {
+		t.Errorf("CLAUDE_PROJECT_DIR fallback: %q", got)
+	}
+	t.Setenv("CLAUDE_PROJECT_DIR", "")
+	if got, _ := resolveMCPDir(""); got != wd {
+		t.Errorf("cwd fallback: got %q want %q", got, wd)
+	}
+}
+
+// With no daemon, `fabrik mcp` writes nothing to stderr at startup — a user-scope
+// plugin install starts it in every project, Fabrik or not (#2141).
+func TestExecute_MCPNoDaemonStartupIsQuietOnStderr(t *testing.T) {
+	errR, errW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldErr := os.Stderr
+	os.Stderr = errW
+	t.Setenv("FABRIK_MCP_DIR", "")
+	t.Setenv("CLAUDE_PROJECT_DIR", "")
+	runMCPWithStdio(t, mcpHandshake, "--dir", t.TempDir())
+	os.Stderr = oldErr
+	errW.Close()
+	b, _ := io.ReadAll(errR)
+	if len(b) != 0 {
+		t.Errorf("fabrik mcp wrote to stderr at startup: %q", b)
 	}
 }

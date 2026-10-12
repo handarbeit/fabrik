@@ -174,7 +174,7 @@ func toolDefs() []map[string]any {
 				"Label events are not a readiness signal: a label such as stage:Validate:complete can appear and be removed again while the PR still needs a rebase, CI or a fix. " +
 				"Only validate-settled (the item is ready for your decision) and settlement-withdrawn (it stopped being ready before you acted) say whether an item is ready; act on decision-pending/validate-settled events using their `options` and do not act on a settled event that a settlement-withdrawn event has since withdrawn. " +
 				"Events are held (persisted, bounded) while no session with this subscriber name is attached and delivered in order on reconnect. " +
-				"Pushes only appear if the session was started with Channels enabled for this server (claude --dangerously-load-development-channels server:fabrik); the daemon cannot tell whether it was, so a successful subscribe does not prove delivery. " +
+				"Pushes only appear if the session was started with Channels enabled for this server (claude --dangerously-load-development-channels server:fabrik, or plugin:fabrik@fabrik when installed through the fabrik plugin); the daemon cannot tell whether it was, so a successful subscribe does not prove delivery. " +
 				"Re-subscribing with the same filters is harmless. " +
 				"The daemon tolerates version skew: an event type it renamed since this server was built is mapped to its new name, and one it does not know is dropped; the response lists both under mapped and rejected, " +
 				"and a request that names only unknown types is refused without touching the existing subscription.",

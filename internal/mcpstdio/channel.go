@@ -247,4 +247,4 @@ const channelInstructions = " Fabrik also pushes events into this session as <ch
 	"A `situation` event is the rolled-up digest of everything that needs you - the same view fabrik_situation returns - with the readable view as its body and the section counts as attributes (`trigger` says why it was sent: catch_up, cadence or request); one is sent when nothing changed since the last. " +
 	"A decision-bearing event carries an `options` attribute (a JSON list of {action, tool}); an event with reminder=\"true\" repeats a decision that is still pending. " +
 	"Use fabrik_subscribe to choose what you hear about and fabrik_unsubscribe to stop. Pushes need this session to have been started with Channels enabled for this server " +
-	"(during the research preview: claude --dangerously-load-development-channels server:fabrik); otherwise Claude Code drops them silently and only the read tools work."
+	"(during the research preview: claude --dangerously-load-development-channels server:fabrik, or plugin:fabrik@fabrik when installed through the fabrik plugin); otherwise Claude Code drops them silently and only the read tools work."
