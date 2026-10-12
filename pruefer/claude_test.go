@@ -191,14 +191,14 @@ func TestBuildReviewArgs_ResolvesSymlinkedScope(t *testing.T) {
 
 func TestEscapeRulePath(t *testing.T) {
 	cases := map[string]string{
-		"/tmp/plain":      "/tmp/plain",
-		"/tmp/a[1]":       `/tmp/a\[1\]`,
-		"/tmp/a*b?c":      `/tmp/a\*b\?c`,
-		"/tmp/a(b)":       `/tmp/a\(b\)`,
-		"/tmp/a!b":        `/tmp/a\!b`,
-		"#lead":           `\#lead`,
-		"/tmp/mid#dle":    "/tmp/mid#dle",
-		`/tmp/back\slash`: `/tmp/back\\slash`,
+		"/scope/plain":      "/scope/plain",
+		"/scope/a[1]":       `/scope/a\[1\]`,
+		"/scope/a*b?c":      `/scope/a\*b\?c`,
+		"/scope/a(b)":       `/scope/a\(b\)`,
+		"/scope/a!b":        `/scope/a\!b`,
+		"#lead":             `\#lead`,
+		"/scope/mid#dle":    "/scope/mid#dle",
+		`/scope/back\slash`: `/scope/back\\slash`,
 	}
 	for in, want := range cases {
 		if got := escapeRulePath(in); got != want {
