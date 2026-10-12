@@ -403,7 +403,7 @@ func renderReviewThreads(b *strings.Builder, threads []gh.PRReviewThread, thread
 // review.go's diff-size guard omitted from what it measured and from
 // inline-comment anchoring (R4). This is load-bearing, not cosmetic: unlike
 // the diff text itself, Claude never receives it as prompt content — it reads
-// the clone and the staged diff file with its own tools, so a passive "FYI,
+// the clone and the staged diff with its own tools, so a passive "FYI,
 // these were excluded" note is what stops it from reading an omitted file
 // directly, which in the motivating scenario (a 17 MB JSONL corpus) could blow
 // its own context. It is backstopped by validRightAnchors demoting any finding
