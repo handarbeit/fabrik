@@ -139,8 +139,29 @@ type ItemState struct {
 	// keep-first and read by gates — this map is read only by the reconcile
 	// protection. In memory only; entries expire after the grace period.
 	EngineWriteAt map[string]time.Time
-	// Worker is present when a worker is in-flight for this item.
+	// Worker is present when a worker is in-flight for this item — or queued
+	// for a worker slot (Worker.Queued, #2121): the handle is the claim on the
+	// item, and the dispatch guards rely on it being non-nil from dispatch.
 	Worker *WorkerHandle
+
+	// PendingRetry is the retry the engine has actually scheduled after a failed
+	// invocation (#2121): written from emitRetryScheduled whether or not a
+	// channel hub runs, cleared on dispatch, completion, pause and close. In
+	// memory only.
+	PendingRetry *PendingRetry
+	// GateHold is the advance/landing gate currently holding the item (#2121),
+	// written from noteGateHold, cleared by noteGateClear. In memory only.
+	GateHold *GateHold
+	// ConflictResolution is set while a merge-train conflict resolution for this
+	// member is queued for, or holding, a worker slot (#2121). A separate field
+	// rather than a Worker handle on purpose: the stale-worker detector,
+	// shutdown pause, janitor and overseer refusals all treat Worker as a stage
+	// worker. In memory only.
+	ConflictResolution *ConflictResolution
+	// RebaseCause records why fabrik:rebase-needed was applied when the engine
+	// knows ("after-landing": a post-landing merge-tree conflict, #2047);
+	// empty = unknown. Cleared when the label is removed. In memory only.
+	RebaseCause string
 
 	// Terminal is set by the engine after a deep-fetch confirms the item satisfies
 	// the terminal predicate (cleanup-stage status + stage:<Name>:complete label + no
@@ -476,9 +497,68 @@ type LockState struct {
 type WorkerHandle struct {
 	PID       int
 	StageName string
+	// StartedAt is the time the worker started running. For a queued worker
+	// (Queued) it is the dispatch time; WorkerSlotAcquired re-stamps it to the
+	// slot-acquired time (#2121).
 	StartedAt time.Time
 	// LastSignAt is updated by worker heartbeats; a stale heartbeat implies the worker died.
 	LastSignAt time.Time
+	// Kind is the worker kind (the WorkerKind* constants); empty = unknown.
+	Kind string
+	// Trigger names what the worker is addressing (comment or review-body ids,
+	// comma separated); empty = none or unknown.
+	Trigger string
+	// Queued is true while the worker is waiting for a worker slot and holds
+	// none (#2121). QueuedSince is when it began waiting.
+	Queued      bool
+	QueuedSince time.Time
+	// TurnsUsed is the live turn count; meaningful only when TurnsKnown.
+	TurnsUsed  int
+	TurnsKnown bool
+}
+
+// Worker kinds (#2121). An empty Kind on a stage dispatch's handle means
+// WorkerKindStageRun.
+const (
+	WorkerKindStageRun       = "stage-run"
+	WorkerKindCommentReview  = "comment-review"
+	WorkerKindReviewReinvoke = "review-reinvoke"
+	WorkerKindCIFixReinvoke  = "ci-fix-reinvoke"
+	WorkerKindRebaseReinvoke = "rebase-reinvoke"
+	WorkerKindTrainConflict  = "merge-train-conflict"
+)
+
+// PendingRetry is a retry the engine has scheduled (#2121).
+type PendingRetry struct {
+	Stage string
+	// Cause is the engine's cause for the retry: wall-time-kill, inactivity-kill,
+	// max-turns, api-error, ...
+	Cause string
+	// Due is when the retry becomes dispatchable; zero = unknown.
+	Due time.Time
+	// At is when the retry was scheduled.
+	At time.Time
+}
+
+// GateHold is an advance/landing gate holding an item (#2121).
+type GateHold struct {
+	// Gate is one of feedback, review, ci, merge.
+	Gate string
+	// Reason is a short engine-worded reason.
+	Reason string
+	// IDs are the pending feedback identifiers when the gate is the feedback gate.
+	IDs []string
+	// Since is when the hold was first recorded; ConfirmedAt when the gate last
+	// confirmed it.
+	Since       time.Time
+	ConfirmedAt time.Time
+}
+
+// ConflictResolution marks a merge-train conflict resolution for a member item
+// (#2121). Queued is true while it waits for a worker slot.
+type ConflictResolution struct {
+	Queued bool
+	Since  time.Time
 }
 
 // TokenUsage records Claude API token counts for a single invocation.

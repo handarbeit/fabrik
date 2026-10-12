@@ -299,6 +299,7 @@ func (s *Store) applySingleItem(m Mutation) (Snapshot, []Change, error) {
 	flags := s.applyToItem(item, m)
 	if existed {
 		s.stampEligibility(item, before)
+		flags |= clearStatusFacts(item, before)
 	}
 
 	// No-op detection: if nothing changed, skip observers. EngineWriteAt is
@@ -555,6 +556,15 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		var flags ChangeFlags = LockChanged
 		if v.Worker != nil {
 			w := *v.Worker
+			if item.Worker != nil {
+				// The placeholder may already carry kind/trigger/turns (#2121).
+				if w.Kind == "" {
+					w.Kind = item.Worker.Kind
+				}
+				if w.Trigger == "" {
+					w.Trigger = item.Worker.Trigger
+				}
+			}
 			item.Worker = &w
 			flags |= WorkerChanged
 		}
@@ -802,12 +812,110 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		return LabelAppliedAtChanged
 
 	case WorkerEntered:
-		item.Worker = &WorkerHandle{StageName: v.StageName, StartedAt: v.StartedAt, LastSignAt: v.StartedAt}
-		return WorkerChanged | WorkerLifecycleChanged
+		w := &WorkerHandle{StageName: v.StageName, StartedAt: v.StartedAt, LastSignAt: v.StartedAt,
+			Kind: v.Kind, Trigger: v.Trigger}
+		if v.Queued {
+			w.Queued = true
+			w.QueuedSince = v.QueuedSince
+			if w.QueuedSince.IsZero() {
+				w.QueuedSince = v.StartedAt
+			}
+		}
+		item.Worker = w
+		var flags ChangeFlags = WorkerChanged | WorkerLifecycleChanged
+		// A stage-run dispatch supersedes any retry it was waiting on.
+		if (v.Kind == "" || v.Kind == WorkerKindStageRun) && item.PendingRetry != nil {
+			item.PendingRetry = nil
+			flags |= StatusFactsChanged
+		}
+		return flags
 
-	case WorkerRefreshed:
-		item.Worker = &WorkerHandle{StageName: v.StageName, StartedAt: v.StartedAt, LastSignAt: v.StartedAt}
+	case WorkerSlotAcquired:
+		if item.Worker == nil {
+			return 0 // no-op: the worker already exited
+		}
+		item.Worker.Queued = false
+		item.Worker.QueuedSince = time.Time{}
+		item.Worker.StartedAt = v.At
+		item.Worker.LastSignAt = v.At
 		return WorkerChanged
+
+	case WorkerKindSet:
+		if item.Worker == nil {
+			return 0
+		}
+		switch item.Worker.Kind {
+		case "", WorkerKindStageRun, WorkerKindCommentReview:
+		default:
+			return 0 // a reinvoke kind is never overridden
+		}
+		if item.Worker.Kind == v.Kind && item.Worker.Trigger == v.Trigger {
+			return 0
+		}
+		item.Worker.Kind = v.Kind
+		item.Worker.Trigger = v.Trigger
+		return WorkerChanged
+
+	case WorkerTriggerSet:
+		if item.Worker == nil || item.Worker.Trigger == v.Trigger {
+			return 0
+		}
+		item.Worker.Trigger = v.Trigger
+		return WorkerChanged
+
+	case WorkerTurnsRecorded:
+		if item.Worker == nil || (item.Worker.TurnsKnown && item.Worker.TurnsUsed == v.Turns) {
+			return 0
+		}
+		item.Worker.TurnsUsed = v.Turns
+		item.Worker.TurnsKnown = true
+		return WorkerChanged
+
+	case RetryScheduled:
+		r := v.Retry
+		item.PendingRetry = &r
+		return StatusFactsChanged
+
+	case RetryCleared:
+		if item.PendingRetry == nil {
+			return 0
+		}
+		item.PendingRetry = nil
+		return StatusFactsChanged
+
+	case GateHoldRecorded:
+		h := v.Hold
+		h.IDs = copyStrings(v.Hold.IDs)
+		if item.GateHold != nil && item.GateHold.Gate == h.Gate && !item.GateHold.Since.IsZero() {
+			h.Since = item.GateHold.Since
+		}
+		item.GateHold = &h
+		return StatusFactsChanged
+
+	case GateHoldCleared:
+		if item.GateHold == nil || (v.Gate != "" && item.GateHold.Gate != v.Gate) {
+			return 0
+		}
+		item.GateHold = nil
+		return StatusFactsChanged
+
+	case ConflictResolutionSet:
+		if !v.Active {
+			if item.ConflictResolution == nil {
+				return 0
+			}
+			item.ConflictResolution = nil
+			return StatusFactsChanged
+		}
+		item.ConflictResolution = &ConflictResolution{Queued: v.Queued, Since: v.Since}
+		return StatusFactsChanged
+
+	case RebaseCauseSet:
+		if item.RebaseCause == v.Cause {
+			return 0
+		}
+		item.RebaseCause = v.Cause
+		return StatusFactsChanged
 
 	case WorkerHeartbeat:
 		if item.Worker == nil {

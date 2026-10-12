@@ -973,7 +973,7 @@ func (e *Engine) acquireLockAndVerify(ctx context.Context, item gh.ProjectItem, 
 			Number:     item.Number,
 			User:       e.lockIdentity(),
 			AcquiredAt: workerStartedAt,
-			Worker:     &itemstate.WorkerHandle{StageName: stage.Name, StartedAt: workerStartedAt, LastSignAt: workerStartedAt},
+			Worker:     &itemstate.WorkerHandle{StageName: stage.Name, StartedAt: workerStartedAt, LastSignAt: workerStartedAt, Kind: itemstate.WorkerKindStageRun},
 		})
 		e.syncLabelAdd(item, lockLabel, true)
 		workerDone = make(chan struct{})
