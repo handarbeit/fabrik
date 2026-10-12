@@ -53,8 +53,9 @@ func resolvePluginDirs(fabrikDir, override string, extras []string) ([]string, e
 	// same validation (readable manifest, unique name, de-duplication by path)
 	// applies. An unreadable manifest is an error, not a silent skip.
 	all := extras
-	if lw := filepath.Join(fabrikDir, filepath.FromSlash(plugin.LocalWorkflowsRelDir)); isDir(lw) {
-		all = append([]string{lw}, extras...)
+	lwDir := filepath.Clean(filepath.Join(fabrikDir, filepath.FromSlash(plugin.LocalWorkflowsRelDir)))
+	if isDir(lwDir) {
+		all = append([]string{lwDir}, extras...)
 	}
 	for _, extra := range all {
 		if extra == "" {
@@ -82,7 +83,14 @@ func resolvePluginDirs(fabrikDir, override string, extras []string) ([]string, e
 			return nil, fmt.Errorf("additional plugin directory %s: %w", dir, err)
 		}
 		if other, dup := names[name]; dup {
-			return nil, fmt.Errorf("plugins %s and %s both declare the manifest name %q; plugin names must be unique", other, dir, name)
+			err := fmt.Errorf("plugins %s and %s both declare the manifest name %q; plugin names must be unique", other, dir, name)
+			if dir == lwDir {
+				// The only way to reach this with the migration's own ordering is
+				// a base plugin recreated (fabrik init, a hand copy) while an
+				// interrupted move still left local-workflows named for it.
+				return nil, fmt.Errorf("%w; %s looks like an unfinished workflow migration: run 'fabrik upgrade' to finish it", err, plugin.LocalWorkflowsRelDir)
+			}
+			return nil, err
 		}
 		names[name] = dir
 		dirs = append(dirs, dir)

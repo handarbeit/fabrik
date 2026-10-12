@@ -313,6 +313,23 @@ func TestResolvePluginDirs_LocalWorkflowsNameClashIsRefused(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "must be unique") {
 		t.Fatalf("err = %v", err)
 	}
+	// The refusal names the remedy for this state: 'fabrik upgrade' finishes
+	// the interrupted migration (cmd's resume tests cover that it does).
+	if !strings.Contains(err.Error(), "fabrik upgrade") {
+		t.Fatalf("err = %v, want it to point at 'fabrik upgrade'", err)
+	}
+}
+
+// The hint is specific to the auto-loaded directory: a clash between
+// configured extras keeps the plain message.
+func TestResolvePluginDirs_ExtraNameClashHasNoMigrationHint(t *testing.T) {
+	root := t.TempDir()
+	a := namedPlugin(t, filepath.Join(root, "a"), "same")
+	b := namedPlugin(t, filepath.Join(root, "b"), "same")
+	_, err := resolvePluginDirs(root, "", []string{a, b})
+	if err == nil || strings.Contains(err.Error(), "fabrik upgrade") {
+		t.Fatalf("err = %v", err)
+	}
 }
 
 func TestResolvePluginDirs_LocalWorkflowsLoadsBesideDevOverride(t *testing.T) {

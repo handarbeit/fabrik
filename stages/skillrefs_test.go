@@ -109,3 +109,21 @@ func TestListSkillRefs(t *testing.T) {
 		t.Errorf("%v %v", refs, err)
 	}
 }
+
+// In an unquoted scalar '#' only starts a comment after whitespace, so a value
+// containing a bare '#' is rewritten whole (not split into value and comment),
+// and a real trailing comment is still preserved.
+func TestRewriteSkillRefs_HashInsideUnquotedValue(t *testing.T) {
+	src := "skill: foo#bar\ncomment_skill: baz#q   # a comment\nci_fix_skill: plain # note\n"
+	out, changes, err := RewriteSkillRefs([]byte(src), qualifyAll)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "skill: fabrik:foo#bar\ncomment_skill: fabrik:baz#q   # a comment\nci_fix_skill: fabrik:plain # note\n"
+	if string(out) != want {
+		t.Errorf("got %q want %q", out, want)
+	}
+	if len(changes) != 3 || changes[0].Old != "foo#bar" || changes[1].Old != "baz#q" || changes[2].Old != "plain" {
+		t.Errorf("changes = %+v", changes)
+	}
+}

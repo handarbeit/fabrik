@@ -25,9 +25,14 @@ type SkillRefChange struct {
 //	1 key, 2 spacing after the colon, 3 opening quote, 4 value, 5 closing quote,
 //	6 trailing (spaces and an optional comment), 7 an optional CR.
 //
+// In an unquoted value a '#' only starts a comment after whitespace (YAML), so
+// `skill: foo#bar` is the scalar "foo#bar" and `skill: foo #bar` is "foo" plus
+// a comment; the lazy value group stops at the first whitespace-then-# (or the
+// end of the line), never at a bare '#'.
+//
 // Only column-0 keys can match: a block scalar's content (a `prompt: |`) is
 // always indented, so text inside it that looks like `skill: x` never does.
-var skillRefLine = regexp.MustCompile(`^(skill|comment_skill|ci_fix_skill|rebase_skill):([ \t]+)(?:(")([^"\r\n]*)(")|(')([^'\r\n]*)(')|([^\s#"'\[\]{}&*!|>%@` + "`" + `][^#\r\n]*?))([ \t]*(?:#[^\r\n]*)?)(\r?)$`)
+var skillRefLine = regexp.MustCompile(`^(skill|comment_skill|ci_fix_skill|rebase_skill):([ \t]+)(?:(")([^"\r\n]*)(")|(')([^'\r\n]*)(')|([^\s#"'\[\]{}&*!|>%@` + "`" + `][^\r\n]*?))([ \t]+#[^\r\n]*|[ \t]*)(\r?)$`)
 
 // RewriteSkillRefs rewrites the skill-valued top-level keys of a stage file
 // and changes nothing else (#2139, FR-001): it edits matching lines in place,

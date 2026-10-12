@@ -295,6 +295,24 @@ func TestMigrate_ResumesFromEveryIntermediateState(t *testing.T) {
 			t.Error("end state differs from an uninterrupted run")
 		}
 	})
+	// The state the loader refuses with a pointer to 'fabrik upgrade': the base
+	// plugin recreated (fabrik init, a hand copy) while the moved tree still
+	// declares the base name.
+	t.Run("base recreated before the manifest rename", func(t *testing.T) {
+		dir, pluginDir, _ := setup(t)
+		if _, err := fabrikplugin.RefreshPluginTo(pluginDir); err != nil {
+			t.Fatal(err)
+		}
+		if err := fabrikplugin.WriteInstalledVersion(pluginDir); err != nil {
+			t.Fatal(err)
+		}
+		if err := runUpgrade(nil); err != nil {
+			t.Fatal(err)
+		}
+		if got := snapshot(t, filepath.Join(dir, ".fabrik")); !reflect.DeepEqual(got, reference) {
+			t.Error("end state differs from an uninterrupted run")
+		}
+	})
 	t.Run("after the base restore", func(t *testing.T) {
 		dir, pluginDir, lw := setup(t)
 		_ = os.Remove(filepath.Join(lw, ".installed-version"))
