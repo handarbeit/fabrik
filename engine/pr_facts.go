@@ -28,11 +28,15 @@ import (
 // move a freshness baseline and never touch LastCIProgressAt. Nothing a gate
 // reads is written here.
 const (
-	// prFactsCheckBudgetPerPoll bounds the head evaluations that can cost a
-	// GitHub read per poll (a check-run fetch that is not served from a READY
-	// cache, and the live suite/required-context reads of classifyLandingCI).
-	// A head whose cached READY set is unchanged is restamped for free and is
-	// not charged. An item beyond the budget is left alone and ages into stale.
+	// prFactsCheckBudgetPerPoll bounds the head evaluations per poll. An
+	// evaluation is a live check-runs read plus, for a ready set, the uncached
+	// check-suite read and (for a required context with no check run) a
+	// combined-status read of classifyLandingCI: 1 to 3 REST calls, nothing
+	// memoised. Only a green verdict read live within prFactsGreenRecheck is
+	// restamped for free and not charged; a pending, red or check-less head, or
+	// a ready set demoted to pending by allCheckRunsPassed, is evaluated every
+	// poll it is reached. An item beyond the budget is left alone and ages into
+	// stale.
 	prFactsCheckBudgetPerPoll = 8
 	// prFactsRESTPerPoll bounds the REST PR-detail reads of the fallback for
 	// items whose linked PR the board probe cannot see (a base:<branch> PR).
