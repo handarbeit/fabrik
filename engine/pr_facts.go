@@ -37,6 +37,12 @@ const (
 	// prFactsRESTPerPoll bounds the REST PR-detail reads of the fallback for
 	// items whose linked PR the board probe cannot see (a base:<branch> PR).
 	prFactsRESTPerPoll = 5
+	// prFactsGreenRecheck is how long a green verdict may be restamped without
+	// reading the head's check runs from GitHub. A cached READY set is trusted
+	// forever by FetchCheckRuns (ADR 2180) and nothing on a poll-only deployment
+	// refreshes it, so a check rerun that fails on the same head would stay
+	// invisible; past this age the verdict is recomputed from a live read.
+	prFactsGreenRecheck = 5 * time.Minute
 )
 
 // SetPRFactsRefreshDisabledForTest switches the overseer PR-fact writers off
@@ -164,8 +170,11 @@ func (e *Engine) refreshPRFacts(c prFactsCandidate, pollStart, now time.Time, ch
 	// A READY cached set whose latest runs are unchanged since a green verdict
 	// is restamped for free: it is exactly the set FetchCheckRuns would serve on
 	// trust (ADR 2180), and the verdict for it was computed with the live suite
-	// and required-context reads.
-	if rec.Verdict == string(ciVerdictGreen) && rec.HeadSHA == head && len(lpr.CheckRuns) > 0 {
+	// and required-context reads. Only while the runs were read live recently
+	// (prFactsGreenRecheck): the cache is never refreshed on a poll-only
+	// deployment, so a restamp alone would keep a green fresh for ever.
+	if rec.Verdict == string(ciVerdictGreen) && rec.HeadSHA == head && len(lpr.CheckRuns) > 0 &&
+		!rec.LiveReadAt.IsZero() && now.Sub(rec.LiveReadAt) < prFactsGreenRecheck {
 		if status, _, _ := gh.ClassifyCheckRuns(lpr.CheckRuns); status == gh.CheckRunsReady && fingerprintCheckRuns(lpr.CheckRuns) == rec.RunsFingerprint {
 			rec.ObservedAt = now
 			e.store.Apply(itemstate.CIVerdictObserved{Repo: c.repo, Number: c.item.Number, Verdict: rec})
@@ -177,7 +186,10 @@ func (e *Engine) refreshPRFacts(c prFactsCandidate, pollStart, now time.Time, ch
 		return
 	}
 	*checkBudget--
-	runs, err := e.readClient.FetchCheckRuns(owner, name, head)
+	// Read live, not through the cache: a cached READY set is served on trust
+	// and would hide a rerun that failed on this head. Nothing is written to the
+	// Store from this read, so what the gates see is unchanged.
+	runs, err := e.client.FetchCheckRuns(owner, name, head)
 	if err != nil {
 		// Keep the previous record, unstamped: it ages into stale rather than
 		// being presented as freshly confirmed.
@@ -190,6 +202,7 @@ func (e *Engine) refreshPRFacts(c prFactsCandidate, pollStart, now time.Time, ch
 		HeadSHA:         head,
 		RunsFingerprint: fingerprintCheckRuns(runs),
 		ObservedAt:      now,
+		LiveReadAt:      now,
 	}
 	if verdict == ciVerdictRed {
 		next.Failing = failingCheckNames(runs)

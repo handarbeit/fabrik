@@ -214,6 +214,39 @@ func TestSettlePRFacts_AttentionToleratesOneRotationOfAge(t *testing.T) {
 	}
 }
 
+// A green verdict is restamped without a read only while the runs were read
+// live recently. On a poll-only deployment nothing refreshes the cached READY
+// set, so a rerun that fails on the same head must still surface once the
+// recheck is due, instead of the green being kept fresh for ever.
+func TestSettlePRFacts_GreenIsReReadLiveAfterTheRecheckWindow(t *testing.T) {
+	env := newPRFactsEnv(t)
+	board := env.seedPR(t, 7, false)
+	pass := passRun("Test and vet", 1)
+	env.runs = []gh.CheckRun{pass}
+	env.e.store.Apply(itemstate.CheckRunCompleted{Repo: "owner/repo", SHA: prFactsSHA, Run: pass})
+	env.e.settlePRFacts(board)
+	if got := status(t, env.e, "7"); got.PR.CI.V != "green" {
+		t.Fatalf("ci = %+v, want green", got.PR.CI)
+	}
+	reads := env.reads.Load()
+
+	// Within the window: restamped without a read.
+	env.clock.t = env.clock.t.Add(time.Minute)
+	env.e.settlePRFacts(board)
+	if env.reads.Load() != reads {
+		t.Fatalf("restamp within the window read check runs again (%d -> %d)", reads, env.reads.Load())
+	}
+
+	// A check was rerun on the same head and failed; the cache never heard.
+	env.runs = []gh.CheckRun{failedRun("Test and vet", 9)}
+	env.clock.t = env.clock.t.Add(prFactsGreenRecheck)
+	env.e.settlePRFacts(board)
+	got := status(t, env.e, "7")
+	if got.PR.CI.V != "red" || len(got.PR.CIFailing) != 1 || got.PR.CIFailing[0] != "Test and vet" {
+		t.Errorf("a same-head rerun failure stayed hidden: ci=%+v failing=%v", got.PR.CI, got.PR.CIFailing)
+	}
+}
+
 func TestSettlePRFacts_NeverObservedIsUnknownNotStale(t *testing.T) {
 	env := newPRFactsEnv(t)
 	env.e.seedAPIItem(t, 7, "Implement")

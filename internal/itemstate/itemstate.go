@@ -306,6 +306,12 @@ type CIVerdictRecord struct {
 	RunsFingerprint string
 	// ObservedAt is when the verdict was last confirmed.
 	ObservedAt time.Time
+	// LiveReadAt is when the check runs behind the verdict were last read from
+	// GitHub rather than from the cache. A verdict may be restamped without a
+	// read only while this is recent: a cached READY set is served on trust
+	// forever and nothing on a poll-only deployment refreshes it, so a rerun
+	// that turns red on the same head would otherwise never be seen.
+	LiveReadAt time.Time
 }
 
 // LinkedPRState holds the state of the closing pull request for an issue.
