@@ -326,6 +326,38 @@ func TestStatusDaemonStopCauseNeedsTheMarker(t *testing.T) {
 	}
 }
 
+// A resume followed by a bare re-pause (no Fabrik comment) leaves the clean-stop
+// marker as the newest state-bearing comment; an observed later eligibility change
+// shows it belongs to an earlier pause, so the cause is absent, not guessed.
+func TestStatusDaemonStopCauseIgnoresAMarkerFromAnEarlierPause(t *testing.T) {
+	e := workerEngine(t)
+	e.seedAPIItem(t, 61, "Implement", "fabrik:paused")
+	stopAt := time.Now().Add(-time.Hour)
+	e.store.Apply(itemstate.IssueCommentCreated{Repo: "owner/repo", Number: 61, Comment: gh.Comment{
+		DatabaseID: 1, CreatedAt: stopAt,
+		Body: "🏭 **Fabrik — paused by a daemon clean stop**\n\nRemove `fabrik:paused` to resume.\n\n" + pauseCauseDaemonStopMarker,
+	}})
+	if c := status(t, e, "61").Attention.Cause; c != attention.CauseDaemonStop {
+		t.Fatalf("control: cause = %q, want daemon-stop", c)
+	}
+	st := &itemstate.ItemState{Comments: []gh.Comment{{
+		DatabaseID: 1, CreatedAt: stopAt,
+		Body: "🏭 **Fabrik — paused by a daemon clean stop**\n\nRemove `fabrik:paused` to resume.\n\n" + pauseCauseDaemonStopMarker,
+	}}}
+	st.EligibilityChangedAt = time.Now()
+	if daemonStopPause(st) {
+		t.Error("an eligibility change an hour after the marker comment must not read as a daemon stop")
+	}
+	st.EligibilityChangedAt = stopAt.Add(30 * time.Second)
+	if !daemonStopPause(st) {
+		t.Error("a change within the slack of the marker comment is the stop itself")
+	}
+	st.EligibilityChangedAt = time.Time{}
+	if !daemonStopPause(st) {
+		t.Error("an unknown stamp proves nothing and must keep the marker's cause")
+	}
+}
+
 // R6: a live worker's turns reach status through the invocation's OnTurn hook
 // (turnCountingWriter → liveTurnRecorder → WorkerTurnsRecorded), exact per turn,
 // against the invocation's own budget, and are forgotten when the next invocation

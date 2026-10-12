@@ -45,6 +45,11 @@ func (e *Engine) fillWorkerInputs(in *attention.Input, st *itemstate.ItemState, 
 	in.Dispatchable = e.dispatchable(st, in, usageLimitedUntil)
 }
 
+// daemonStopMarkerSlack is how far after the clean-stop comment an observed
+// eligibility change may fall before the marker is treated as belonging to an
+// earlier pause.
+const daemonStopMarkerSlack = 2 * time.Minute
+
 // daemonStopPause reports whether the newest pause-bearing Fabrik comment is the
 // daemon clean-stop pause (it carries pauseCauseDaemonStopMarker). Anything else
 // — a different pause comment, a stage comment, no comment at all — is not
@@ -58,6 +63,13 @@ func daemonStopPause(st *itemstate.ItemState) bool {
 		}
 		switch {
 		case strings.Contains(c.Body, pauseCauseDaemonStopMarker):
+			// A later eligibility change the store watched (a resume followed by a
+			// bare re-pause that wrote no Fabrik comment) means this marker belongs
+			// to an earlier pause. A zero stamp is unknown and proves nothing.
+			if !st.EligibilityChangedAt.IsZero() && !c.CreatedAt.IsZero() &&
+				st.EligibilityChangedAt.After(c.CreatedAt.Add(daemonStopMarkerSlack)) {
+				return false
+			}
 			return true
 		case removePausedRE.MatchString(c.Body), commentResumeRE.MatchString(c.Body),
 			strings.HasPrefix(c.Body, fabrikStageCommentPrefix):

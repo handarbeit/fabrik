@@ -1459,6 +1459,9 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 	tcw := &turnCountingWriter{inner: stdoutWriter, issueNumber: issueNumber, maxTurns: maxTurns, onTurn: onTurn}
 	if onTurn != nil {
 		onTurn(0, maxTurns) // invocation start: forget the previous invocation's count, publish this budget
+		// Invocation end: the worker handle outlives Claude (result handling, pushes,
+		// later work), so forget the count and budget rather than leave them stale.
+		defer onTurn(0, 0)
 	}
 	stdoutWriter = &activityWriter{inner: tcw, lastActivity: &lastActivity}
 
