@@ -102,7 +102,9 @@ func redactArgs(args []string, token string) []string {
 // Deliberately outside the clone directory: a file inside the reviewed tree
 // would show up in `git status`, in a Grep/Glob sweep, and — if the repo
 // happens to use the same name — could collide with the repo's own content.
-// The reviewer reads it by absolute path, which its Read tool grant allows.
+// The reviewer reads it by absolute path through a Read/Grep rule scoped to
+// exactly this file (buildReviewToolRules, #2192) — its tool grant is not
+// unscoped, so the rule must name the path resolved by resolveScopePaths.
 func writeDiffFile(diff string, prNumber int) (path string, cleanup func(), err error) {
 	f, err := os.CreateTemp("", fmt.Sprintf("pruefer-pr-%d-*.diff", prNumber))
 	if err != nil {
