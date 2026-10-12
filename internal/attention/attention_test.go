@@ -583,11 +583,82 @@ func TestSuspendedUnknownTimeSaysAtLeast(t *testing.T) {
 	if !strings.Contains(got.Summary, "at least since") {
 		t.Errorf("summary %q must say \"at least since\"", got.Summary)
 	}
-	// Control: the stage comment time is a GitHub proxy and is exact.
+	// The stage comment's time is an estimate, never exact (review of PR 2177): it
+	// is posted before the label, and a rework can leave an older completion's
+	// comment as the latest. It is not presented as the age.
 	in.StageCommentAt = t0.Add(-3 * time.Hour)
 	got = Classify(in)
-	if got.Pending.SinceBasis != SinceStageComment || got.ProgressAge != 3*time.Hour {
-		t.Errorf("stage-comment fallback = %s / %s", got.Pending.SinceBasis, got.ProgressAge)
+	if got.Pending.SinceBasis != SinceStageComment || got.Pending.SinceExact() {
+		t.Errorf("stage-comment fallback = %s exact=%v, want a non-exact estimate", got.Pending.SinceBasis, got.Pending.SinceExact())
+	}
+	if !got.ProgressAt.IsZero() || got.ProgressAge != 0 {
+		t.Errorf("an estimate must not be reported as the progress age: %v / %s", got.ProgressAt, got.ProgressAge)
+	}
+	if !strings.Contains(got.Summary, "about") || !strings.Contains(got.Summary, "label's own time is not known") {
+		t.Errorf("summary %q must say the time is approximate", got.Summary)
+	}
+	// Control: with the label time known the same item is exact again.
+	in.LabelAppliedAt = map[string]time.Time{"stage:Specify:complete": t0.Add(-3 * time.Hour)}
+	if got = Classify(in); !got.Pending.SinceExact() || got.ProgressAge != 3*time.Hour {
+		t.Errorf("label time known: %s / %s", got.Pending.SinceBasis, got.ProgressAge)
+	}
+}
+
+// parkedItem is an item blocked only by parked work; the blocker entry says how
+// the daemon came to know where the blocker is.
+func parkedItem(b ParkedBlocker) Input {
+	in := baseInput()
+	in.Status = "Specify"
+	in.Labels = []string{"fabrik:blocked"}
+	in.BlockedOnlyByParked = true
+	in.ParkedBlockers = []ParkedBlocker{b}
+	in.StatusEnteredAt = t0.Add(-time.Hour) // the daemon started an hour ago
+	in.LabelAppliedAt = map[string]time.Time{"fabrik:blocked": t0.Add(-30 * 24 * time.Hour)}
+	return in
+}
+
+// TestSuspendedParkedBlockerAgeIsNotTheLabelAge pins the review finding on R3
+// case (b): the blocker is moved to Backlog long after the item became blocked,
+// and no label on the item changes, so the 30-day-old fabrik:blocked label must
+// not be reported as an exact 30-day wait.
+func TestSuspendedParkedBlockerAgeIsNotTheLabelAge(t *testing.T) {
+	// The daemon never saw the blocker move (it was parked before the restart).
+	unobserved := parkedItem(ParkedBlocker{Ref: "o/r#9", Column: "Backlog", EnteredAt: t0.Add(-time.Hour)})
+	got := Classify(unobserved)
+	if got.State != Suspended || got.Code != CodeParkedBlocker {
+		t.Fatalf("got %s/%s", got.State, got.Code)
+	}
+	if got.Pending.SinceBasis != SinceFirstSeen || got.Pending.SinceExact() {
+		t.Fatalf("basis = %s: a label 30 days old says nothing about when the blocker was parked", got.Pending.SinceBasis)
+	}
+	if got.ProgressAge != 0 || !strings.Contains(got.Summary, "at least since") {
+		t.Errorf("age %s / %q: want a lower bound, not the 30-day label age", got.ProgressAge, got.Summary)
+	}
+
+	// The daemon watched the blocker move into Backlog 20 minutes ago: the wait
+	// began then, not when the label was applied.
+	observed := parkedItem(ParkedBlocker{Ref: "o/r#9", Column: "Backlog", EnteredAt: t0.Add(-20 * time.Minute), MovedAt: t0.Add(-20 * time.Minute)})
+	got = Classify(observed)
+	if got.Pending.SinceBasis != SinceBlockerParked || got.ProgressAge != 20*time.Minute {
+		t.Fatalf("basis %s age %s, want blocker-parked / 20m", got.Pending.SinceBasis, got.ProgressAge)
+	}
+
+	// The label applied after the move wins: the item became blocked then.
+	observed.LabelAppliedAt["fabrik:blocked"] = t0.Add(-5 * time.Minute)
+	if got = Classify(observed); got.ProgressAge != 5*time.Minute {
+		t.Errorf("later label: age %s, want 5m", got.ProgressAge)
+	}
+
+	// A moved blocker without the label's GitHub time is not exact either.
+	observed.LabelAppliedAt = nil
+	if got = Classify(observed); got.Pending.SinceExact() {
+		t.Errorf("a missing label time must not read as exact: %s", got.Pending.SinceBasis)
+	}
+
+	// A transitive chain involves edges nobody watched: lower bound only.
+	chain := parkedItem(ParkedBlocker{Ref: "o/r#9", Column: "Backlog", EnteredAt: t0.Add(-20 * time.Minute), MovedAt: t0.Add(-20 * time.Minute), Transitive: true})
+	if got = Classify(chain); got.Pending.SinceBasis != SinceFirstSeen {
+		t.Errorf("transitive chain basis = %s, want first-seen", got.Pending.SinceBasis)
 	}
 }
 
@@ -652,7 +723,10 @@ func parkedInput() Input {
 	in.Status = "Specify"
 	in.Labels = []string{"fabrik:blocked"}
 	in.LabelAppliedAt = map[string]time.Time{"fabrik:blocked": t0.Add(-5 * 24 * time.Hour)}
-	in.ParkedBlockers = []ParkedBlocker{{Ref: "o/r#1372", Column: "Backlog"}}
+	// The daemon watched the blocker move into Backlog before the item was
+	// blocked, so the wait began with the label.
+	moved := t0.Add(-6 * 24 * time.Hour)
+	in.ParkedBlockers = []ParkedBlocker{{Ref: "o/r#1372", Column: "Backlog", EnteredAt: moved, MovedAt: moved}}
 	in.BlockedOnlyByParked = true
 	return in
 }

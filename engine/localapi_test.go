@@ -725,6 +725,9 @@ func TestLocalAPISourceDoesNotReachGitHub(t *testing.T) {
 	if err != nil || len(files) == 0 {
 		t.Fatalf("no localapi source files found: %v", err)
 	}
+	// attention_input.go builds the classifier input the local API serves (#2120),
+	// so it is read-path source whatever its name says.
+	files = append(files, "attention_input.go")
 	forbidden := []string{"e.client", "e.readClient", "FetchLabelAppliedAt", "labelAppliedAt(", "store.Get(", "e.cache()", ".FetchItem(", "FetchProjectItem"}
 	for _, f := range files {
 		if strings.HasSuffix(f, "_test.go") {
@@ -741,6 +744,44 @@ func TestLocalAPISourceDoesNotReachGitHub(t *testing.T) {
 			for _, bad := range forbidden {
 				if strings.Contains(line, bad) {
 					t.Errorf("%s:%d reaches a GitHub-capable path (%q): %s", f, i+1, bad, strings.TrimSpace(line))
+				}
+			}
+		}
+	}
+}
+
+// TestReadSideSourcesNeverRunThePollSideAnchorRecorder pins #2120 R3 ("no new
+// per-request GitHub calls") for every file that feeds the classifier on a
+// request or a channel tick: the GitHub time of a pending decision is recorded
+// by settleDecisionAnchors on the poll goroutine (decision_anchor.go) and only
+// read here, so none of these files may call the recorder or any labelAppliedAt
+// path (which falls back to a live FetchLabelAppliedAt).
+func TestReadSideSourcesNeverRunThePollSideAnchorRecorder(t *testing.T) {
+	var files []string
+	for _, pat := range []string{"localapi*.go", "channel_*.go"} {
+		m, err := filepath.Glob(pat)
+		if err != nil || len(m) == 0 {
+			t.Fatalf("no %s files found: %v", pat, err)
+		}
+		files = append(files, m...)
+	}
+	files = append(files, "attention_input.go")
+	forbidden := []string{"settleDecisionAnchors", "labelAppliedAt", "FetchLabelAppliedAt"}
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, line := range strings.Split(string(b), "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "//") {
+				continue
+			}
+			for _, bad := range forbidden {
+				if strings.Contains(line, bad) {
+					t.Errorf("%s:%d runs poll-side anchor code on the read side (%q): %s", f, i+1, bad, strings.TrimSpace(line))
 				}
 			}
 		}

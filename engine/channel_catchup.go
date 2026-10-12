@@ -2,6 +2,7 @@ package engine
 
 import (
 	"sort"
+	"strconv"
 
 	"github.com/handarbeit/fabrik/internal/attention"
 	"github.com/handarbeit/fabrik/internal/channelevents"
@@ -75,6 +76,9 @@ func (e *Engine) catchUpEvents() []channelevents.Event {
 				// (#2120 R6): same event as the live one, tagged catch_up.
 				ev = e.decisionEvent(&st, res)
 				ev.Content = "(catch-up) " + ev.Content
+				// The open episode's key rides along for the hub, which restarts the
+				// subscriber's reminder clock with it and clears it before queueing.
+				ev.DedupKey = e.openDecisionKey(issueRef(st.Repo, st.Number))
 				break
 			}
 			key := pauseFamilyKey(res)
@@ -116,4 +120,20 @@ func (e *Engine) catchUp(subscriber, subID string) int {
 		e.logf(0, "channel", "catch-up for %q: %d event(s)\n", subscriber, n)
 	}
 	return n
+}
+
+// openDecisionKey is the dedup key of the item's open decision-pending episode,
+// or "" when none is open (or no hub runs). Counters are read from the hub, which
+// guards them, so any goroutine may call it.
+func (e *Engine) openDecisionKey(ref string) string {
+	ce := e.channelEvents()
+	if ce == nil {
+		return ""
+	}
+	started, closed := dpKeys(ref)
+	n := ce.hub.Counter(started)
+	if n == 0 || n <= ce.hub.Counter(closed) {
+		return ""
+	}
+	return started + ":" + strconv.Itoa(n)
 }

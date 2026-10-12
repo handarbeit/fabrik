@@ -39,6 +39,10 @@ type Store struct {
 	mu    sync.RWMutex
 	items map[string]*ItemState // key: "owner/repo#N"
 
+	// clock stamps EligibilityChangedAt and StatusMovedAt (SetClock); nil means
+	// time.Now(). Guarded by mu.
+	clock func() time.Time
+
 	// Reverse-lookup indexes maintained on every Apply that touches the relevant fields.
 	shaToKey    map[string]string // LinkedPR.HeadSHA → itemKey
 	itemIDToKey map[string]string // ItemState.ItemID → itemKey
@@ -294,7 +298,7 @@ func (s *Store) applySingleItem(m Mutation) (Snapshot, []Change, error) {
 	}
 	flags := s.applyToItem(item, m)
 	if existed {
-		stampEligibility(item, before.Labels)
+		s.stampEligibility(item, before)
 	}
 
 	// No-op detection: if nothing changed, skip observers. EngineWriteAt is
@@ -1031,7 +1035,7 @@ func (s *Store) applyBoardReconciled(v BoardReconciled) (Snapshot, []Change, err
 		before := newSnapshot(*item).state
 		flags := applyProjectItem(item, pi)
 		if existed {
-			stampEligibility(item, before.Labels)
+			s.stampEligibility(item, before)
 		}
 
 		if reflect.DeepEqual(before, *item) {
@@ -1072,6 +1076,7 @@ func (s *Store) applyProjectV2ItemEdited(v ProjectV2ItemEdited) (Snapshot, []Cha
 		item.Status = v.NewStatus
 		item.Terminal = false
 		item.StatusEnteredAt = time.Now()
+		s.stampEligibility(item, before)
 	}
 	if reflect.DeepEqual(before, *item) {
 		snap := newSnapshot(*item)

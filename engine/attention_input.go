@@ -24,6 +24,10 @@ type blockerNode struct {
 	closed    bool
 	column    string
 	blockedBy []gh.Dependency
+	// enteredAt/movedAt are the item's StatusEnteredAt and StatusMovedAt: when the
+	// daemon first saw it in its column, and when it watched it move there.
+	enteredAt time.Time
+	movedAt   time.Time
 	// hydrated is true once the item was deep-fetched, i.e. blockedBy is known
 	// rather than merely empty.
 	hydrated bool
@@ -38,6 +42,8 @@ func nodeOf(st *itemstate.ItemState) blockerNode {
 		closed:    st.IsClosed,
 		column:    st.Status,
 		blockedBy: append([]gh.Dependency(nil), st.BlockedBy...),
+		enteredAt: st.StatusEnteredAt,
+		movedAt:   st.StatusMovedAt,
 		hydrated:  !st.LastDeepFetchAt.IsZero(),
 	}
 }
@@ -100,7 +106,10 @@ func (e *Engine) resolveParkedBlockers(st *itemstate.ItemState, look blockerLook
 		if node.column != "" && stages.IsParkingColumn(e.cfg.Stages, node.column) {
 			if !seen[ref] {
 				seen[ref] = true
-				leaves = append(leaves, attention.ParkedBlocker{Ref: ref, Column: node.column})
+				leaves = append(leaves, attention.ParkedBlocker{
+					Ref: ref, Column: node.column,
+					EnteredAt: node.enteredAt, MovedAt: node.movedAt, Transitive: depth > 1,
+				})
 			}
 			return true
 		}
@@ -178,24 +187,47 @@ func stageCommentCreatedAt(st *itemstate.ItemState) time.Time {
 	return time.Time{}
 }
 
-var removePausedRE = regexp.MustCompile("(?i)\\bremove\\b[^\\n]{0,100}fabrik:paused")
+var (
+	removePausedRE = regexp.MustCompile("(?i)\\bremove\\b[^\\n]{0,100}fabrik:paused")
+	// commentResumeRE matches the engine's "reply/comment on this issue to
+	// resume" pause wording (push_guard.go, item.go).
+	commentResumeRE = regexp.MustCompile(`(?i)\b(reply|comment)\b[^\n]{0,60}\bto resume\b`)
+)
+
+const (
+	fabrikCommentPrefix = "🏭 **Fabrik"
+	// fabrikStageCommentPrefix opens a stage's output comment, which is also how
+	// an awaiting-input question reaches the issue.
+	fabrikStageCommentPrefix = "🏭 **Fabrik — stage:"
+	// overseerAuditPrefix opens the audit comment of an overseer action
+	// (overseerAuditBody); it never describes a pause.
+	overseerAuditPrefix = "🏭 **Fabrik — overseer action:"
+)
 
 // resumeMethodOf says how the item's pause is lifted according to the engine's
-// own latest Fabrik comment (R-options-2). Only the newest Fabrik comment is
-// consulted: an awaiting-input question posted after an earlier pause comment
-// supersedes it. A comment that tells the operator to remove fabrik:paused is
-// ResumeRemoveLabel; otherwise the method is unknown and the classifier claims
-// nothing the engine's comment does not.
+// own pause comment (R-options-2). It walks back from the newest Fabrik comment
+// to the newest one that is state-bearing, skipping comments that say nothing
+// about a pause: an overseer audit comment or other informational Fabrik comment
+// posted after the pause must not shadow it. A comment telling the operator to
+// remove fabrik:paused is ResumeRemoveLabel; one asking for a reply or comment is
+// ResumeComment. A stage comment with neither (an awaiting-input question)
+// supersedes any older pause comment and leaves the method unknown, so the
+// classifier claims nothing the engine's comment does not.
 func resumeMethodOf(st *itemstate.ItemState) attention.ResumeMethod {
 	for i := len(st.Comments) - 1; i >= 0; i-- {
 		c := st.Comments[i]
-		if c.FromPR != 0 || !strings.HasPrefix(c.Body, "🏭 **Fabrik") {
+		if c.FromPR != 0 || !strings.HasPrefix(c.Body, fabrikCommentPrefix) ||
+			strings.HasPrefix(c.Body, overseerAuditPrefix) {
 			continue
 		}
-		if removePausedRE.MatchString(c.Body) {
+		switch {
+		case removePausedRE.MatchString(c.Body):
 			return attention.ResumeRemoveLabel
+		case commentResumeRE.MatchString(c.Body):
+			return attention.ResumeComment
+		case strings.HasPrefix(c.Body, fabrikStageCommentPrefix):
+			return attention.ResumeUnknown
 		}
-		return attention.ResumeUnknown
 	}
 	return attention.ResumeUnknown
 }

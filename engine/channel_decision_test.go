@@ -167,16 +167,22 @@ func TestDecisionPending_UnknownTimeIsAnnouncedAsALowerBoundAfterTheGrace(t *tes
 
 func TestDecisionPending_ParkedBlockerEvent(t *testing.T) {
 	e, sink := decisionChannel(t)
-	e.seedAPIItem(t, 2, "Backlog")
+	e.seedAPIItem(t, 2, "Implement")
 	e.seedAPIItem(t, 1, "Specify", "fabrik:blocked")
 	e.store.Apply(itemstate.LabelAppliedAtRecorded{Repo: "owner/repo", Number: 1, Label: "fabrik:blocked", At: e.now().Add(-24 * time.Hour)})
 	e.store.Apply(itemstate.ItemDeepFetched{Repo: "owner/repo", Number: 1, FreshState: gh.ProjectItem{
 		ID: "I_B", Number: 1, Repo: "owner/repo", Status: "Specify", Labels: []string{"fabrik:blocked"},
 		BlockedBy: []gh.Dependency{{Number: 2, State: "OPEN"}},
 	}})
+	// The blocker is parked while the daemon watches: the wait starts now, with
+	// both facts known, so the announcement is exact and not held back.
+	e.store.Apply(itemstate.LocalStatusUpdated{Repo: "owner/repo", Number: 2, NewStatus: "Backlog"})
 	ev := sink.nextOfType(t, channelevents.DecisionPending)
 	if ev.Meta["decision"] != "unblock" || ev.Meta["blockers"] != "owner/repo#2" {
 		t.Fatalf("event = %+v", ev)
+	}
+	if ev.Meta["since_basis"] != attention.SinceBlockerParked {
+		t.Errorf("since_basis = %q, want %q (the label alone would date it 24h ago)", ev.Meta["since_basis"], attention.SinceBlockerParked)
 	}
 	if !strings.Contains(ev.Meta["options"], "fabrik_promote") {
 		t.Errorf("options = %s", ev.Meta["options"])
@@ -196,6 +202,31 @@ func TestDecisionPending_CatchUpIncludesSuspendedItems(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].Issue != 1 || got[0].Meta["catch_up"] != "true" || got[0].DedupKey != "" {
 		t.Fatalf("catch-up = %+v", got)
+	}
+}
+
+// TestDecisionPending_CatchUpCarriesTheOpenEpisodeKey: the catch-up snapshot of a
+// decision announced in an open episode hands the hub that episode's dedup key,
+// which is how the hub restarts the subscriber's reminder clock (review of PR
+// 2177, R6a). Without an open episode there is no key to hand over.
+func TestDecisionPending_CatchUpCarriesTheOpenEpisodeKey(t *testing.T) {
+	e, sink := decisionChannel(t)
+	e.seedSpecifyComplete(t, 1, 24*time.Hour)
+	announced := sink.nextOfType(t, channelevents.DecisionPending)
+
+	var got []channelevents.Event
+	for _, ev := range e.catchUpEvents() {
+		if ev.Type == channelevents.DecisionPending {
+			got = append(got, ev)
+		}
+	}
+	if len(got) != 1 || got[0].DedupKey == "" || got[0].DedupKey != announced.DedupKey {
+		t.Fatalf("catch-up key = %+v, want the announced episode's %q", got, announced.DedupKey)
+	}
+
+	// Control: with no episode open the snapshot carries no key.
+	if k := e.openDecisionKey("owner/repo#99"); k != "" {
+		t.Errorf("a ref with no episode returned key %q", k)
 	}
 }
 

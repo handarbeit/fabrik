@@ -350,6 +350,12 @@ func (h *Hub) SubscribeNew(sub Subscription) (Subscription, bool, error) {
 // dedup of live events, and an event the queue already holds for the same
 // (type, repo, issue) is skipped so a held announcement is not doubled. It
 // returns how many events were queued.
+//
+// A DecisionPending event handed in with the open episode's DedupKey also
+// restarts that subscriber's reminder clock (#2120 R6a): the catch-up is a fresh
+// announcement of the same decision, so a reminder due "since the original
+// announcement" must not fire right behind it. The key is read here and cleared
+// before the event is queued, as for every catch-up event.
 func (h *Hub) CatchUp(name, subID string, evs []Event) int {
 	now := h.opt.Now()
 	h.mu.Lock()
@@ -389,6 +395,9 @@ func (h *Hub) CatchUp(name, subID string, evs []Event) int {
 		if ev.At.IsZero() {
 			ev.At = now
 		}
+		if ev.Type == DecisionPending && ev.DedupKey != "" {
+			h.restartReminderClock(name, ev, ev.DedupKey, now)
+		}
 		ev.DedupKey = ""
 		s.mu.Lock()
 		held := false
@@ -406,6 +415,32 @@ func (h *Hub) CatchUp(name, subID string, evs []Event) int {
 		queued++
 	}
 	return queued
+}
+
+// restartReminderClock sets the reminder anchor of (name, episode key) to now,
+// keeping its count, when one of the subscriber's subscriptions matching ev asks
+// for reminders. Nothing is recorded for a subscriber that does not.
+func (h *Hub) restartReminderClock(name string, ev Event, dedupKey string, now time.Time) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return
+	}
+	wants := false
+	for _, sub := range h.subs {
+		if sub.Subscriber == name && sub.RemindAfterSeconds > 0 && sub.Matches(ev) {
+			wants = true
+			break
+		}
+	}
+	if !wants {
+		return
+	}
+	key := name + "|" + dedupKey
+	rem := h.reminders[key]
+	rem.At = now
+	h.reminders[key] = rem
+	h.saveStateLocked()
 }
 
 // Unsubscribe removes one subscription by id, or every subscription of the

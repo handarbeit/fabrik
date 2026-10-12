@@ -76,8 +76,14 @@ const (
 const (
 	// SinceGitHub: the GitHub time the deciding label was applied.
 	SinceGitHub = "github-label"
-	// SinceStageComment: the cached Fabrik stage comment's creation time.
+	// SinceStageComment: the cached Fabrik stage comment's creation time. An
+	// estimate, never exact: the comment is posted before the label, and a rework
+	// or step back can leave an older completion's comment as the latest one.
 	SinceStageComment = "stage-comment"
+	// SinceBlockerParked: a parked-blocker wait dated by both facts that make it
+	// one: the item's fabrik:blocked label (GitHub time) and the daemon having seen
+	// every direct blocker move into its parking column.
+	SinceBlockerParked = "blocker-parked"
 	// SinceEligibility: the daemon-stamped time eligibility to proceed last changed.
 	SinceEligibility = "eligibility-change"
 	// SinceFirstSeen: daemon first-seen only; the wait is at least this long.
@@ -219,6 +225,7 @@ type Input struct {
 	// active-column blocker leaves it false.
 	ParkedBlockers      []ParkedBlocker
 	BlockedOnlyByParked bool
+
 	// Resume says how the item's pause is lifted according to the engine's own
 	// pause comment; ResumeUnknown when the cache cannot say.
 	Resume ResumeMethod
@@ -231,6 +238,16 @@ type Input struct {
 type ParkedBlocker struct {
 	Ref    string
 	Column string
+	// EnteredAt is when the daemon first saw the blocker in Column (or saw it move
+	// there): a lower bound on how long it has been parked. MovedAt is non-zero
+	// only when the daemon watched it move into Column, i.e. EnteredAt is the move
+	// itself and not merely the first sight.
+	EnteredAt time.Time
+	MovedAt   time.Time
+	// Transitive is true when the blocker was reached through an intermediate
+	// blocker. The edges between two other items are not observed, so a wait that
+	// involves one can only be dated by the daemon's first sight, never exactly.
+	Transitive bool
 }
 
 // ResumeMethod is how a pause is lifted, as the engine's own pause comment says.
@@ -267,7 +284,13 @@ type Pending struct {
 
 // SinceExact reports whether Since is the real start of the wait rather than a
 // lower bound.
-func (p Pending) SinceExact() bool { return p.SinceBasis != SinceFirstSeen }
+func (p Pending) SinceExact() bool {
+	switch p.SinceBasis {
+	case SinceGitHub, SinceEligibility, SinceBlockerParked:
+		return true
+	}
+	return false
+}
 
 // Reason is one label (or condition) contributing to the classification.
 type Reason struct {
@@ -695,16 +718,25 @@ func pendingDecision(in Input) (Pending, bool) {
 }
 
 // pendingSince anchors a pending decision on the GitHub time the deciding fact
-// became true: the label's time, else the stage comment's, else the daemon's
-// first sight (a lower bound). A later eligibility change wins: the wait starts
-// again when the item's ability to proceed changed.
+// became true. For a completed stage that is the label's time; when it is not
+// known yet the stage comment's time stands in as an estimate and, failing that,
+// the daemon's first sight (a lower bound). A later eligibility change wins: the
+// wait starts again when the item's ability to proceed changed.
+//
+// A parked-blocker wait has two facts, the item's fabrik:blocked label and the
+// blocker being parked, and starts at the later of them. The label's time alone
+// is not the start (a 30-day-old label says nothing about a blocker parked
+// minutes ago), so it is used only together with a column move the daemon
+// watched for every direct blocker; otherwise the wait is dated by first sight.
 func pendingSince(in Input, label string) (time.Time, string) {
 	var since time.Time
 	var basis string
 	switch {
+	case label == "fabrik:blocked":
+		since, basis = parkedSince(in)
 	case !in.LabelAppliedAt[label].IsZero():
 		since, basis = in.LabelAppliedAt[label], SinceGitHub
-	case label != "fabrik:blocked" && !in.StageCommentAt.IsZero():
+	case !in.StageCommentAt.IsZero():
 		since, basis = in.StageCommentAt, SinceStageComment
 	default:
 		since, basis = in.StatusEnteredAt, SinceFirstSeen
@@ -713,6 +745,33 @@ func pendingSince(in Input, label string) (time.Time, string) {
 		since, basis = in.EligibilityChangedAt, SinceEligibility
 	}
 	return since, basis
+}
+
+func parkedSince(in Input) (time.Time, string) {
+	first := in.StatusEnteredAt
+	moved := time.Time{}
+	allMoved := len(in.ParkedBlockers) > 0
+	transitive := false
+	for _, b := range in.ParkedBlockers {
+		transitive = transitive || b.Transitive
+		if b.EnteredAt.After(first) {
+			first = b.EnteredAt
+		}
+		if b.MovedAt.IsZero() {
+			allMoved = false
+		} else if b.MovedAt.After(moved) {
+			moved = b.MovedAt
+		}
+	}
+	label := in.LabelAppliedAt["fabrik:blocked"]
+	if allMoved && !transitive && !label.IsZero() {
+		since := label
+		if moved.After(since) {
+			since = moved
+		}
+		return since, SinceBlockerParked
+	}
+	return first, SinceFirstSeen
 }
 
 func suspendedResult(res Result, in Input, p Pending) Result {
@@ -753,6 +812,9 @@ func PendingWaitText(p Pending, now time.Time) string {
 		return "waiting for an unknown time"
 	}
 	age := HumanAge(now.Sub(p.Since))
+	if p.SinceBasis == SinceStageComment {
+		return fmt.Sprintf("waiting since about %s (%s; taken from the stage's comment, the label's own time is not known yet)", p.Since.UTC().Format(time.RFC3339), age)
+	}
 	if !p.SinceExact() {
 		return fmt.Sprintf("waiting at least since %s (%s; the daemon first saw it then)", p.Since.UTC().Format(time.RFC3339), age)
 	}

@@ -179,6 +179,51 @@ func TestResolveParkedBlockers_FailsClosed(t *testing.T) {
 	}
 }
 
+// TestParkedBlockerAgeStartsWhenTheBlockerIsParked is the review scenario for R3
+// case (b) end to end, on a sim clock set well before real time: an item blocked
+// for 30 days by an active-column issue, whose blocker is moved to Backlog now.
+// No label on the item changes, so the wait must start at the move, not at the
+// 30-day-old fabrik:blocked label, and the stamps must come from the sim clock
+// (with time.Now() they would land in the classifier's future).
+func TestParkedBlockerAgeStartsWhenTheBlockerIsParked(t *testing.T) {
+	e := apiEngine(t, 0)
+	clk := &adjClock{t: time.Now().Add(-100 * time.Hour)}
+	e.SetClock(clk)
+
+	e.seedAPIItem(t, 6, "Specify", "fabrik:blocked")
+	e.seedAPIItem(t, 7, "Implement")
+	e.deepWithBlockers(6, open(7))
+	e.store.Apply(itemstate.LabelAppliedAtRecorded{Repo: "owner/repo", Number: 6, Label: "fabrik:blocked", At: clk.Now().Add(-30 * 24 * time.Hour)})
+	if res := e.classifyItem(t, 6); res.State == attention.Suspended {
+		t.Fatalf("blocked by an active-column issue must not be suspended: %s", res.Code)
+	}
+
+	clk.set(clk.Now().Add(20 * time.Minute))
+	e.store.Apply(itemstate.LocalStatusUpdated{Repo: "owner/repo", Number: 7, NewStatus: "Backlog"})
+	clk.set(clk.Now().Add(5 * time.Minute))
+
+	res := e.classifyItem(t, 6)
+	if res.State != attention.Suspended || res.Code != attention.CodeParkedBlocker {
+		t.Fatalf("got %s/%s", res.State, res.Code)
+	}
+	if res.Pending.SinceBasis != attention.SinceBlockerParked || res.ProgressAge != 5*time.Minute {
+		t.Fatalf("basis %s age %s, want blocker-parked / 5m (not the 30-day label age, never negative)", res.Pending.SinceBasis, res.ProgressAge)
+	}
+
+	// Control: a daemon that never watched the move (a restart after it) can only
+	// say "at least since it first saw this", never the label's 30 days.
+	r := apiEngine(t, 0)
+	r.SetClock(&adjClock{t: time.Now().Add(-100 * time.Hour)})
+	r.seedAPIItem(t, 6, "Specify", "fabrik:blocked")
+	r.seedAPIItem(t, 7, "Backlog")
+	r.deepWithBlockers(6, open(7))
+	r.store.Apply(itemstate.LabelAppliedAtRecorded{Repo: "owner/repo", Number: 6, Label: "fabrik:blocked", At: r.now().Add(-30 * 24 * time.Hour)})
+	res = r.classifyItem(t, 6)
+	if res.Pending == nil || res.Pending.SinceBasis != attention.SinceFirstSeen || res.Pending.SinceExact() {
+		t.Fatalf("after a restart the wait is a lower bound: %+v", res.Pending)
+	}
+}
+
 func TestResumeMethodOf(t *testing.T) {
 	mk := func(bodies ...string) *itemstate.ItemState {
 		st := &itemstate.ItemState{}
@@ -226,6 +271,47 @@ func TestCleanStopPauseResumeMatchesEngineComment(t *testing.T) {
 	res = e.classifyItem(t, 2)
 	if !strings.Contains(res.Next.Action, "human comment") {
 		t.Fatalf("awaiting-input pause: %q", res.Next.Action)
+	}
+}
+
+// TestResumeMethodSurvivesLaterFabrikComments pins the review finding on
+// R-options-2: a Fabrik comment that is not a pause comment, posted after the
+// clean-stop pause (an overseer audit comment from fabrik_set_autonomy, say),
+// must not shadow the pause comment's own resume method.
+func TestResumeMethodSurvivesLaterFabrikComments(t *testing.T) {
+	pause := cleanStopPauseComment(t)
+	audit := overseerAuditBody("set_autonomy", "set autonomy to cruise on owner/repo#1", "ops-session")
+	info := "🏭 **Fabrik** — opened PR #99"
+
+	e := apiEngine(t, 0)
+	e.seedAPIItem(t, 1, "Specify", "fabrik:paused", "fabrik:awaiting-input")
+	e.store.Apply(itemstate.ItemDeepFetched{Repo: "owner/repo", Number: 1, FreshState: gh.ProjectItem{
+		ID: "I_B", Number: 1, Repo: "owner/repo", Status: "Specify", Labels: []string{"fabrik:paused", "fabrik:awaiting-input"},
+		Comments: []gh.Comment{{DatabaseID: 11, Body: pause}, {DatabaseID: 12, Body: audit}, {DatabaseID: 13, Body: info}},
+	}})
+	res := e.classifyItem(t, 1)
+	if res.ResumeVia != attention.ResumeViaLabel || !strings.Contains(res.Next.Action, "remove fabrik:paused") || strings.Contains(res.Next.Action, "human comment") {
+		t.Fatalf("a later audit/info comment shadowed the pause comment: via=%q action=%q", res.ResumeVia, res.Next.Action)
+	}
+	if len(res.Options) != 1 || !strings.Contains(res.Options[0].Action, "remove the fabrik:paused label") {
+		t.Fatalf("options = %+v", res.Options)
+	}
+
+	mk := func(bodies ...string) *itemstate.ItemState {
+		st := &itemstate.ItemState{}
+		for i, b := range bodies {
+			st.Comments = append(st.Comments, gh.Comment{DatabaseID: i + 1, Body: b})
+		}
+		return st
+	}
+	// A later stage comment (an awaiting-input question) still supersedes the
+	// older pause comment: that is a different pause.
+	if got := resumeMethodOf(mk(pause, audit, "🏭 **Fabrik — stage: Plan**\n\nWhich option do you prefer?")); got != attention.ResumeUnknown {
+		t.Errorf("a later question must supersede the older pause comment, got %q", got)
+	}
+	// A pause that asks for a reply is a comment-resume pause, also past an audit.
+	if got := resumeMethodOf(mk("🏭 **Fabrik — push refused**\n\nInspect the branch, and once it is right, comment on this issue to resume.", audit)); got != attention.ResumeComment {
+		t.Errorf("comment-resume pause = %q", got)
 	}
 }
 

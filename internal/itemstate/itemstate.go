@@ -68,6 +68,13 @@ type ItemState struct {
 	// the GitHub time of the deciding fact, so an unknown stamp can only make an
 	// age longer, never shorter.
 	EligibilityChangedAt time.Time
+	// StatusMovedAt is the time the item was seen to move between two known board
+	// columns while this process was watching (#2120 R3). Like EligibilityChangedAt
+	// it is stamped only for an item the store already held with a known Status, so
+	// a population never stamps and it is zero ("unknown") after a restart. Unlike
+	// StatusEnteredAt it therefore says a real move happened, which is what lets the
+	// classifier date "the blocker was parked" instead of only "first seen".
+	StatusMovedAt time.Time
 	// UpdatedAt is max(issue.updatedAt, projectItem.updatedAt, linkedPR.updatedAt).
 	UpdatedAt time.Time
 

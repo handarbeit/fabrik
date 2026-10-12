@@ -235,3 +235,40 @@ func TestNewEventsAreCatalogued(t *testing.T) {
 		t.Errorf("new events must be subscribable")
 	}
 }
+
+// TestCatchUpRestartsTheReminderClock pins the review finding on R6a: a
+// subscriber that attaches after the interval has already run out gets the
+// decision in its catch-up, and the next tick must not send a reminder right
+// behind it. The catch-up counts as an announcement for that subscriber.
+func TestCatchUpRestartsTheReminderClock(t *testing.T) {
+	run := func(t *testing.T, withKey bool) (afterCatchUp, afterInterval int) {
+		clk := &testClock{t: time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)}
+		h := remindHub(t, t.TempDir(), clk)
+		if _, err := h.Subscribe(Subscription{Subscriber: "X", RemindAfterSeconds: 3600}); err != nil {
+			t.Fatal(err)
+		}
+		e := decision(1)
+		h.Publish(e) // announced while X was detached; the reminder is long overdue by attach time
+		clk.advance(5 * time.Hour)
+		s := newSink()
+		h.Attach("X", s)
+		c := e
+		if !withKey {
+			c.DedupKey = ""
+		}
+		h.CatchUp("X", "", []Event{c})
+		s.wait(t)
+		afterCatchUp = h.PublishReminders(e, e.DedupKey)
+		clk.advance(61 * time.Minute)
+		afterInterval = h.PublishReminders(e, e.DedupKey)
+		return
+	}
+	if a, b := run(t, true); a != 0 || b != 1 {
+		t.Fatalf("with the episode key: reminders right after catch-up = %d (want 0), one interval later = %d (want 1)", a, b)
+	}
+	// Control: without the key the catch-up leaves the clock alone and the
+	// overdue reminder fires immediately, which is the defect.
+	if a, _ := run(t, false); a != 1 {
+		t.Fatalf("control: reminder after a keyless catch-up = %d, want 1 (the unfixed behaviour)", a)
+	}
+}
