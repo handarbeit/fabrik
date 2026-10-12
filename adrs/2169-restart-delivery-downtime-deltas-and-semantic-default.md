@@ -53,6 +53,8 @@ The first settle for an item carries **no `cause`** (not `cause=initial`): after
 
 An autonomy change while the item stays settled ends the open episode without `settlement-withdrawn`, because the item is still settled and this is a human decision, not an engine withdrawal. `autonomy-changed` carries the autonomy writer's actor (`fabrik`, `overseer` with `via`, `human`/`bot` with `actor_login`, `unknown`), taken from the attribution of the `fabrik:cruise` / `fabrik:yolo` deltas; an added label wins over a removed one, since a swap is two deltas.
 
+The autonomy compared is the *effective* mode (`autonomyMode`): the labels and the daemon-wide `yolo` setting. Restarting with `yolo` toggled therefore re-announces every settled item once, with `cause=autonomy-changed` and actor `unknown` (no label write names a writer). This is intended: the flip changes what the engine will do with each of them (merge, or wait for a human), which is exactly the decision a reacting overseer must see. It is a single announcement per item, not a loop, since the ledger records the new autonomy with the re-announced settle.
+
 ## Consequences
 
 - A reacting session sees a deterministic restart sequence and loses no downtime change that the daemon could observe.
