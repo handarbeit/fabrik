@@ -27,7 +27,6 @@ var (
 	selectedStyle = lipgloss.NewStyle().Background(lipgloss.Color("238"))
 )
 
-// fmtDuration formats a duration as MM:SS, mirroring tui/commands.go.
 // truncateLine shortens a possibly-styled line to maxWidth display cells,
 // ending in "…". Width is measured in cells with ANSI escapes excluded:
 // counting runes of the rendered string charged every style's escape bytes
@@ -37,6 +36,7 @@ func truncateLine(line string, maxWidth int) string {
 	return ansi.Truncate(line, maxWidth, "…")
 }
 
+// fmtDuration formats a duration as MM:SS, mirroring tui/commands.go.
 func fmtDuration(d time.Duration) string {
 	if d < 0 {
 		d = 0
