@@ -146,7 +146,10 @@ type pullRequestReviewPayload struct {
 		DatabaseID int    `json:"id"`
 		Body       string `json:"body"`
 		State      string `json:"state"`
-		User       struct {
+		// CommitID is the SHA the review was submitted against (#2127 R5): without
+		// it a review that arrived by webhook cannot be placed at the PR head.
+		CommitID string `json:"commit_id"`
+		User     struct {
 			Login string `json:"login"`
 		} `json:"user"`
 	} `json:"review"`
@@ -834,6 +837,7 @@ func (c *CacheImpl) applyPullRequestReviewDelta(payload []byte) {
 		State:      strings.ToUpper(p.Review.State),
 		Body:       p.Review.Body,
 		DatabaseID: p.Review.DatabaseID,
+		CommitID:   p.Review.CommitID,
 	}
 
 	// Normal path: look up issue via Store's prToKey index (no c.mu held).

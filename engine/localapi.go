@@ -459,7 +459,7 @@ func (b localAPIBackend) Status(p localapi.StatusParams) (*localapi.StatusResult
 		Envelope:  b.envelope(now),
 		Issue:     issueRef(st.Repo, st.Number),
 		Title:     st.Title,
-		URL:       knownString(st.URL),
+		URL:       b.issueURL(&st),
 		Milestone: milestoneField(&st),
 		Cache: localapi.CacheInfo{
 			LastDeepFetchAt: localapi.KnownTime(st.LastDeepFetchAt),
@@ -481,6 +481,16 @@ func (b localAPIBackend) Status(p localapi.StatusParams) (*localapi.StatusResult
 	return out, nil
 }
 
+// issueURL is the cached issue URL, or (#2127 R2) the one derivable from the
+// repo and number when the cache never carried it (the probe bootstrap and a
+// minimal opened item do not).
+func (b localAPIBackend) issueURL(st *itemstate.ItemState) localapi.Known[string] {
+	if st.URL != "" || readPolishDisabled(2) {
+		return knownString(st.URL)
+	}
+	return knownString(b.e.webURL(st.Repo, "issues", st.Number))
+}
+
 func knownString(s string) localapi.Known[string] {
 	if s == "" {
 		return localapi.Unknown[string]()
@@ -495,6 +505,7 @@ func (b localAPIBackend) place(st *itemstate.ItemState) localapi.Place {
 		StatusEnteredBasis: statusEnteredBasis,
 		StageLabels:        []string{},
 		FabrikLabels:       []string{},
+		OtherLabels:        []string{},
 		Autonomy:           "none",
 	}
 	labels := append([]string(nil), st.Labels...)
@@ -505,6 +516,8 @@ func (b localAPIBackend) place(st *itemstate.ItemState) localapi.Place {
 			pl.StageLabels = append(pl.StageLabels, l)
 		case strings.HasPrefix(l, "fabrik:"):
 			pl.FabrikLabels = append(pl.FabrikLabels, l)
+		case !readPolishDisabled(2):
+			pl.OtherLabels = append(pl.OtherLabels, l)
 		}
 	}
 	switch {
@@ -526,8 +539,10 @@ func (b localAPIBackend) limits(st *itemstate.ItemState) []localapi.Limit {
 				stageSet[s] = true
 			}
 		}
-		// The current stage always reports a configured limit, even at zero.
-		if st.Status != "" && max.Kind != "unknown" {
+		// The current stage always reports a configured limit, even at zero —
+		// except a parking or holding column, where the cycle limits mean nothing
+		// (#2127 R2).
+		if st.Status != "" && max.Kind != "unknown" && !b.noCycleLimits(st.Status) {
 			stageSet[st.Status] = true
 		}
 		names := make([]string, 0, len(stageSet))
@@ -540,6 +555,16 @@ func (b localAPIBackend) limits(st *itemstate.ItemState) []localapi.Limit {
 		}
 	}
 	return out
+}
+
+// noCycleLimits reports whether status names an unmanaged (parking) or holding
+// column, where no stage runs and so no cycle limit applies.
+func (b localAPIBackend) noCycleLimits(status string) bool {
+	if readPolishDisabled(2) {
+		return false
+	}
+	k := b.e.attentionStageKind(status)
+	return k == attention.KindUnmanaged || k == attention.KindHolding
 }
 
 func (b localAPIBackend) worker(st *itemstate.ItemState) localapi.WorkerInfo {
@@ -603,6 +628,15 @@ func lastInvocation(st *itemstate.ItemState) localapi.InvocationInfo {
 		DurationSeconds: localapi.Unknown[float64](),
 		Tokens:          localapi.Unknown[localapi.Tokens](),
 	}
+	if !readPolishDisabled(4) {
+		info.FigureBasis = localapi.FigureBasis{
+			DurationSeconds: localapi.BasisPerInvocation,
+			Tokens:          localapi.BasisSessionCumulative,
+			CostUSD:         localapi.BasisSessionCumulative,
+			TurnsUsed:       localapi.BasisPerInvocation,
+			Note:            "bases are as reported by the Claude CLI; on a first, non-resumed invocation per-invocation and session figures coincide",
+		}
+	}
 	tu := st.LastTokenUsage
 	recorded := st.LastInvocationDuration > 0 || tu != (itemstate.TokenUsage{}) || len(st.StageState.LastTurnsUsed) > 0
 	switch {
@@ -650,6 +684,8 @@ func (b localAPIBackend) prInfo(st *itemstate.ItemState, now time.Time) localapi
 		CIStale:        localapi.Unknown[bool](),
 		CIHeadSHA:      localapi.Unknown[string](),
 		CIFailing:      []string{},
+		URL:            localapi.Unknown[string](),
+		Reviewers:      []localapi.ReviewerVerdict{},
 	}
 	lpr := st.LinkedPR
 	if lpr == nil || lpr.Number == 0 {
@@ -662,6 +698,8 @@ func (b localAPIBackend) prInfo(st *itemstate.ItemState, now time.Time) localapi
 	}
 	pr.State = "linked"
 	pr.Number = localapi.Some(lpr.Number)
+	pr.URL = knownString(b.e.webURL(st.Repo, "pull", lpr.Number))
+	pr.Reviewers = b.e.reviewerVerdicts(st)
 	pr.HeadSHA = knownString(lpr.ObservedHead())
 
 	staleAfter := b.prFactsStaleAfter()
@@ -906,9 +944,21 @@ func (b localAPIBackend) Board(p localapi.BoardParams) (*localapi.BoardResult, e
 		kept = append(kept, r)
 	}
 
+	if !readPolishDisabled(3) {
+		res.Matched = len(kept)
+	}
 	switch p.View {
 	case localapi.ViewFlow:
 		res.Flow = b.flow(kept)
+		// The flow lists open items only; say how many matched items it left out
+		// so the columns reconcile with Matched (#2127 R1).
+		if !readPolishDisabled(1) {
+			for _, r := range kept {
+				if r.input.Closed {
+					res.Excluded.Closed++
+				}
+			}
+		}
 	default:
 		res.Attention = b.attentionView(kept, now, threshold)
 	}
