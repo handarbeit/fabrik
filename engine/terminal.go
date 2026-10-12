@@ -76,7 +76,7 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 
 		// Stage-membership guard: whether the item's column has a matching Fabrik stage
 		// that Fabrik actually dispatches work for. Unmanaged stages (e.g. Backlog) are
-		// treated as unconfigured here even though a Stage exists for them — dispatch
+		// not deep-fetched here even though a Stage exists for them — dispatch
 		// never touches them, so deep-fetching them would be wasted work (issue #778).
 		// The guard must come after newKeys[key]=true so unconfigured items are not
 		// falsely evicted from the store by the post-loop tombstoning pass (lines below).
@@ -87,12 +87,15 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 		if snapErr != nil {
 			// New item on board — skip entirely if not in a configured stage.
 			if !configuredStage {
-				// A parking column (Backlog) is still on the board: seed the card's
-				// identity and column so a later hand move out of it is a real
-				// column change (#2123) rather than a first sight. No deep fetch
-				// (#778) and no labels (LabelsAbsent): the first label-bearing
-				// population is the baseline.
-				if matchedStage != nil && matchedStage.Unmanaged {
+				// A parking column is still on the board: seed the card's identity
+				// and column so a later hand move out of it is a real column
+				// change (#2123) rather than a first sight. The predicate is the
+				// shared stages.IsParkingColumn — an unmanaged stage of any name,
+				// plus the legacy Backlog with no stage — so a card there is also
+				// announced as an arrival (#2187). No deep fetch (#778) and no
+				// labels (LabelsAbsent): the first label-bearing population is
+				// the baseline.
+				if stages.IsParkingColumn(e.cfg.Stages, pi.Status) {
 					e.store.Apply(itemstate.FromProbe{Inner: itemstate.IssueOpened{Item: gh.ProjectItem{
 						ID:             pi.ContentID,
 						ItemID:         pi.ItemID,
