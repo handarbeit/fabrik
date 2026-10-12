@@ -4,6 +4,7 @@
 **Status**: Accepted
 **Issue**: #2192 — path-scoped read-only review tools, Task subagents, scrubbed review environment
 **Amends**: ADR 1113 (the "fixed read-only allowlist" statements); builds toward #2190
+**Amended by**: ADR 2190 (decisions 1 and 3: the single staged diff file became a staged directory scoped for Read, Grep and Glob)
 
 ## Context
 
