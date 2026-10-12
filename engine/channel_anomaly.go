@@ -70,9 +70,11 @@ type retryFact struct {
 	stage  string
 	cause  string
 	due    time.Time
-	// deferred: a dispatch of this item was refused for lack of a worker slot
-	// after the fact was recorded.
-	deferred bool
+	// deferredAt is when a dispatch of this item was last refused for lack of a
+	// worker slot after the fact was recorded. Every poll that still defers the
+	// item re-records it, so a deferral older than the lapse no longer explains
+	// why the retry is not running.
+	deferredAt time.Time
 	// dispatched: a worker entered the item after the fact was recorded.
 	dispatched bool
 	announced  bool
@@ -205,7 +207,7 @@ func (ce *channelEvents) recordDeferred(refs []string, now time.Time) {
 	defer a.mu.Unlock()
 	for _, ref := range refs {
 		if f := a.retries[ref]; f != nil {
-			f.deferred = true
+			f.deferredAt = now
 		}
 		if h := a.holds[ref]; h != nil {
 			h.deferredAt = now
@@ -436,21 +438,34 @@ func (ce *channelEvents) checkRetriesLocked(now time.Time, pollOverdue, usageLim
 	sort.Strings(keys)
 	for _, k := range keys {
 		f := a.retries[k]
-		if f.dispatched {
+		// end closes the fact. An announced episode always gets its closing event,
+		// whether the item was dispatched or simply stopped being a retry candidate,
+		// so a consumer never sees retry-starved left open.
+		end := func(how string) {
 			if f.announced {
-				out = append(out, ce.retryResumedEvent(f, now))
+				out = append(out, ce.retryResumedEvent(f, how, now))
 			}
 			delete(a.retries, k)
+		}
+		if f.dispatched {
+			end("dispatched")
 			continue
 		}
 		snap, ok := e.store.Peek(f.repo, f.number)
 		if !ok {
-			delete(a.retries, k)
+			end("gone")
 			continue
 		}
 		st := snap.State()
-		if st.IsClosed || st.Status != f.stage || hasLabelStr(st.Labels, "stage:"+f.stage+":complete") || itemBlockedFromRunning(&st) {
-			delete(a.retries, k)
+		switch {
+		case st.IsClosed:
+			end("closed")
+			continue
+		case st.Status != f.stage || hasLabelStr(st.Labels, "stage:"+f.stage+":complete"):
+			end("advanced")
+			continue
+		case itemBlockedFromRunning(&st):
+			end("held")
 			continue
 		}
 		if f.announced || usageLimited {
@@ -465,7 +480,7 @@ func (ce *channelEvents) checkRetriesLocked(now time.Time, pollOverdue, usageLim
 		}
 		inUse, capacity := len(e.sem), cap(e.sem)
 		switch {
-		case f.deferred || (capacity > 0 && inUse >= capacity):
+		case (!f.deferredAt.IsZero() && !f.deferredAt.Before(f.due) && now.Sub(f.deferredAt) <= e.wedgeLapse()) || (capacity > 0 && inUse >= capacity):
 			f.reason = retryReasonNoSlot
 		case pollOverdue:
 			f.reason = retryReasonPollOverdue
@@ -502,7 +517,15 @@ func (ce *channelEvents) retryStarvedEvent(f *retryFact, st *itemstate.ItemState
 	return ev
 }
 
-func (ce *channelEvents) retryResumedEvent(f *retryFact, now time.Time) channelevents.Event {
+// retryResumedEvent closes a retry-starved episode. how is "dispatched" when a
+// worker entered the item, else why the retry stopped waiting ("closed",
+// "advanced", "held" for a paused/blocked item, "gone").
+func (ce *channelEvents) retryResumedEvent(f *retryFact, how string, now time.Time) channelevents.Event {
+	elapsed := int64(now.Sub(f.openedAt).Seconds())
+	content := fmt.Sprintf("%s: the starved %s retry (after %s) was dispatched, %d s after the episode began", f.ref, f.stage, f.cause, elapsed)
+	if how != "dispatched" {
+		content = fmt.Sprintf("%s: the starved %s retry (after %s) is no longer waiting (%s), %d s after the episode began; it was not dispatched", f.ref, f.stage, f.cause, how, elapsed)
+	}
 	ev := channelevents.Event{
 		Type:     channelevents.RetryResumed,
 		Repo:     f.repo,
@@ -510,10 +533,11 @@ func (ce *channelEvents) retryResumedEvent(f *retryFact, now time.Time) channele
 		Stage:    f.stage,
 		At:       now,
 		DedupKey: retryKey("retry-resumed", f),
-		Content:  fmt.Sprintf("%s: the starved %s retry (after %s) was dispatched, %d s after the episode began", f.ref, f.stage, f.cause, int64(now.Sub(f.openedAt).Seconds())),
+		Content:  content,
 		Meta: map[string]string{
 			"cause":           f.cause,
-			"starved_seconds": strconv.FormatInt(int64(now.Sub(f.openedAt).Seconds()), 10),
+			"how":             how,
+			"starved_seconds": strconv.FormatInt(elapsed, 10),
 		},
 	}
 	if snap, ok := ce.e.store.Peek(f.repo, f.number); ok {
@@ -553,7 +577,7 @@ func (ce *channelEvents) checkWedgesLocked(now time.Time, pollOverdue bool) []ch
 		}
 		snap, ok := e.store.Peek(h.repo, h.number)
 		if !ok {
-			delete(a.holds, k)
+			end("gone")
 			continue
 		}
 		st := snap.State()

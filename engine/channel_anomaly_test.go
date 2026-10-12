@@ -128,13 +128,68 @@ func TestRetryStarved_Reasons(t *testing.T) {
 		e.seedAPIItem(t, 1, "Implement")
 		t0 := clk.Now()
 		e.emitRetryScheduled(anomalyItem(1), implementStage(), "max-turns", t0)
-		e.emitDispatchDeferred([]string{"owner/repo#1"})
 		clk.set(t0.Add(8 * time.Minute))
+		e.emitDispatchDeferred([]string{"owner/repo#1"}) // the poll that still cannot get a slot
 		evs := ofType(checkAndDrain(ce, sink), channelevents.RetryStarved)
 		if len(evs) != 1 || evs[0].Meta["reason"] != "no worker slot" {
 			t.Fatalf("got %+v", evs)
 		}
 	})
+	// A deferral that stopped recurring (the slots freed up) no longer explains why
+	// the retry is not running; the third reason must not be masked.
+	t.Run("a stale deferral does not mask unknown", func(t *testing.T) {
+		e, sink, clk, ce := anomalyEngine(t)
+		e.seedAPIItem(t, 1, "Implement")
+		t0 := clk.Now()
+		e.emitRetryScheduled(anomalyItem(1), implementStage(), "max-turns", t0)
+		e.emitDispatchDeferred([]string{"owner/repo#1"})
+		clk.set(t0.Add(8 * time.Minute))
+		evs := ofType(checkAndDrain(ce, sink), channelevents.RetryStarved)
+		if len(evs) != 1 || evs[0].Meta["reason"] != "unknown" {
+			t.Fatalf("got %+v", evs)
+		}
+	})
+}
+
+// An announced retry-starved episode always gets its closing event, even when the
+// item stops being a retry candidate without ever being dispatched.
+func TestRetryStarved_AnnouncedEpisodeClosesWhenItemStopsWaiting(t *testing.T) {
+	cases := []struct {
+		name, how string
+		end       func(e *Engine)
+	}{
+		{"paused", "held", func(e *Engine) {
+			e.store.Apply(itemstate.LocalLabelAdded{Repo: "owner/repo", Number: 1, Label: "fabrik:paused"})
+		}},
+		{"closed", "closed", func(e *Engine) {
+			e.store.Apply(itemstate.LocalIssueClosed{Repo: "owner/repo", Number: 1})
+		}},
+		{"moved on", "advanced", func(e *Engine) {
+			e.store.Apply(itemstate.LocalLabelAdded{Repo: "owner/repo", Number: 1, Label: "stage:Implement:complete"})
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e, sink, clk, ce := anomalyEngine(t)
+			e.seedAPIItem(t, 1, "Implement")
+			t0 := clk.Now()
+			e.emitRetryScheduled(anomalyItem(1), implementStage(), "wall-time-kill", t0)
+			clk.set(t0.Add(8 * time.Minute))
+			if evs := ofType(checkAndDrain(ce, sink), channelevents.RetryStarved); len(evs) != 1 {
+				t.Fatalf("setup: %+v", evs)
+			}
+			tc.end(e)
+			clk.set(t0.Add(9 * time.Minute))
+			evs := ofType(checkAndDrain(ce, sink), channelevents.RetryResumed)
+			if len(evs) != 1 || evs[0].Meta["how"] != tc.how {
+				t.Fatalf("want one retry-resumed how=%s, got %+v", tc.how, evs)
+			}
+			clk.set(t0.Add(20 * time.Minute))
+			if more := ofType(checkAndDrain(ce, sink), channelevents.RetryResumed); len(more) != 0 {
+				t.Fatalf("closing event repeated: %+v", more)
+			}
+		})
+	}
 }
 
 func TestRetryStarved_PausedOrBlockedItemsAreNotReported(t *testing.T) {
