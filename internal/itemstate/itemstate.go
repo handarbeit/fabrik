@@ -58,6 +58,23 @@ type ItemState struct {
 	// restart) for every item, since there is no durable cross-restart source
 	// for "when did this item truly enter its current Status" — see ADR-1833.
 	StatusEnteredAt time.Time
+	// EligibilityChangedAt is the time the item's eligibility to proceed last
+	// changed while this process was watching: a fabrik:cruise, fabrik:yolo,
+	// fabrik:blocked or fabrik:paused label, or a stage:*:complete label, was
+	// added or removed (#2120 R3). Daemon time, stamped only from a before/after
+	// label diff of an item the store already held — a population or baseline
+	// never stamps — so it is zero ("unknown") after a restart and for changes
+	// made while the daemon was down. The classifier takes the later of this and
+	// the GitHub time of the deciding fact, so an unknown stamp can only make an
+	// age longer, never shorter.
+	EligibilityChangedAt time.Time
+	// StatusMovedAt is the time the item was seen to move between two known board
+	// columns while this process was watching (#2120 R3). Like EligibilityChangedAt
+	// it is stamped only for an item the store already held with a known Status, so
+	// a population never stamps and it is zero ("unknown") after a restart. Unlike
+	// StatusEnteredAt it therefore says a real move happened, which is what lets the
+	// classifier date "the blocker was parked" instead of only "first seen".
+	StatusMovedAt time.Time
 	// UpdatedAt is max(issue.updatedAt, projectItem.updatedAt, linkedPR.updatedAt).
 	UpdatedAt time.Time
 

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/attention"
 	"github.com/handarbeit/fabrik/internal/channelevents"
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
@@ -145,7 +146,14 @@ func (f cachedFeedback) any() bool { return f.Comments+f.Threads+f.Bodies > 0 }
 // rather than fetched live. TestCachedFeedbackMatchesLiveGate pins the
 // agreement.
 func (e *Engine) cachedPendingFeedback(snap itemstate.Snapshot, st *itemstate.ItemState) cachedFeedback {
-	processed := func(id string) bool { return !snap.CommentProcessed(id).IsZero() }
+	return e.cachedPendingFeedbackOf(st)
+}
+
+// cachedPendingFeedbackOf is cachedPendingFeedback over the item state alone
+// (the processed-comment map is part of it), so attentionInput can ask it from
+// inside a Store.Scan visitor, where no Snapshot is at hand.
+func (e *Engine) cachedPendingFeedbackOf(st *itemstate.ItemState) cachedFeedback {
+	processed := func(id string) bool { return !st.StageState.ProcessedComments[id].IsZero() }
 	var f cachedFeedback
 	f.Comments = len(filterNewComments(st.Comments, processed))
 	if lpr := st.LinkedPR; lpr != nil {
@@ -248,22 +256,66 @@ func vsKeys(ref string) (started, closed string) { return "vs:" + ref, "vsclosed
 // label is not (yet) there.
 func vsRelaxedKey(ref string) string { return "vsrelaxed:" + ref }
 
-// closeSettleEpisode closes an open episode whose ending conditions hold.
-// Consumer goroutine only.
+// validateWithdrawalReason says why the engine took a validate-settled item back
+// (#2120 R-unsettle-1): the PR needs a rebase, its head moved so CI must run
+// again, a worker was dispatched, or new feedback arrived. "" when the item
+// merely moved on, was closed or was sent back through Validate on purpose
+// (fabrik:revalidate) — a human or engine decision, not a withdrawal.
+func (e *Engine) validateWithdrawalReason(st *itemstate.ItemState, rebaseSeen bool) string {
+	if st.IsClosed || st.Status != "Validate" || hasLabelStr(st.Labels, "fabrik:revalidate") {
+		return ""
+	}
+	switch {
+	case hasLabelStr(st.Labels, "fabrik:rebase-needed") || rebaseSeen:
+		return reasonRebaseNeeded
+	case func() bool {
+		lpr := st.LinkedPR
+		return lpr != nil && lpr.ValidateCompletedSHA != "" && lpr.HeadSHA != "" && lpr.ValidateCompletedSHA != lpr.HeadSHA
+	}():
+		return reasonCIOnNewHead
+	case st.Worker != nil || hasReworkingLabel(st.Labels):
+		return reasonWorkerDispatched
+	case e.cachedPendingFeedbackOf(st).any():
+		return reasonNewFeedback
+	}
+	return ""
+}
+
+// closeSettleEpisode closes an open episode whose ending conditions hold, and
+// announces one settlement-withdrawn event when the reason is that the engine
+// took the item back. Consumer goroutine only.
 func (ce *channelEvents) closeSettleEpisode(ref string, st *itemstate.ItemState) {
 	started, closed := vsKeys(ref)
 	n := ce.hub.Counter(started)
 	if n <= ce.hub.Counter(closed) {
 		return
 	}
+	relaxed := ce.hub.Counter(vsRelaxedKey(ref)) == n
 	ended := validateSettledEpisodeEnded(st)
-	if ce.hub.Counter(vsRelaxedKey(ref)) == n && !hasLabelStr(st.Labels, "stage:Validate:complete") &&
+	if relaxed && !hasLabelStr(st.Labels, "stage:Validate:complete") &&
 		!st.IsClosed && st.Status == "Validate" && !hasLabelStr(st.Labels, "fabrik:revalidate") &&
 		!hasLabelStr(st.Labels, "fabrik:rebase-needed") {
 		ended = false
 	}
-	if ended {
-		ce.hub.SetCounter(closed, n)
+	m := ce.memo[ref]
+	if m == nil {
+		m = &itemMemo{} // closing an episode never creates the item's memo (derive owns the first-sight baseline)
+	}
+	reason := ce.e.validateWithdrawalReason(st, m.rebaseSeen)
+	// A worker dispatch or new feedback also withdraw a settlement that the
+	// older end conditions do not cover. An episode opened at the landing
+	// decision (yolo) still has its worker, so it is exempt.
+	if !ended && !relaxed && (reason == reasonWorkerDispatched || reason == reasonNewFeedback) {
+		ended = true
+	}
+	if !ended {
+		return
+	}
+	ce.hub.SetCounter(closed, n)
+	if reason != "" && !settlementWithdrawalDisabled.Load() {
+		ev := ce.e.withdrawnEvent(st, string(channelevents.ValidateSettled), reason)
+		ev.DedupKey = fmt.Sprintf("swvs:%s:%d", ref, n)
+		ce.enqueueDerived([]channelevents.Event{ce.withComment(m, st, ev)})
 	}
 }
 
@@ -390,6 +442,12 @@ func (e *Engine) validateSettledEvent(snap itemstate.Snapshot, st *itemstate.Ite
 		unresolved = len(dropOutdatedThreadComments(lpr.ThreadComments))
 	}
 	ev.Meta["next"] = next
+	if next == "waiting-for-human" {
+		// Decision-bearing: say how to act (R-options-1).
+		if o := optionsJSON(attention.MergeDecisionOptions(ev.PR)); o != "" {
+			ev.Meta["options"] = o
+		}
+	}
 	ev.Meta["ci"] = ci
 	if stage != nil && stage.WaitForCI != nil && *stage.WaitForCI {
 		// Reaching the settle point means the engine's own CI gate cleared.

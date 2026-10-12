@@ -203,7 +203,7 @@ func counterStages(ss itemstate.StageState, kind string) []string {
 // attentionInput extracts the classifier input from one item's state. st may
 // point at live Store memory (inside Scan): everything is copied out, nothing
 // retained, nothing blocking.
-func (e *Engine) attentionInput(st *itemstate.ItemState, now time.Time, threshold time.Duration, usageLimitedUntil time.Time) attention.Input {
+func (e *Engine) attentionInput(st *itemstate.ItemState, now time.Time, threshold time.Duration, usageLimitedUntil time.Time, look blockerLookup) attention.Input {
 	in := attention.Input{
 		Now: now,
 		Cfg: attention.Config{
@@ -220,7 +220,20 @@ func (e *Engine) attentionInput(st *itemstate.ItemState, now time.Time, threshol
 		PausedByEngine:          st.StageState.PausedByEngine[st.Status],
 		StatusEnteredAt:         st.StatusEnteredAt,
 		ClaudeUsageLimitedUntil: usageLimitedUntil,
+		EligibilityChangedAt:    st.EligibilityChangedAt,
+		NextStage:               e.decisionNextStage(st.Status),
+		StageCommentAt:          stageCommentCreatedAt(st),
+		Resume:                  resumeMethodOf(st),
 	}
+	if stage := e.stageByName(st.Status); stage != nil {
+		in.AutoAdvances = stageAutoAdvances(e.cfg.Yolo, st.Labels, stage)
+	}
+	if hasLabelStr(st.Labels, "stage:"+st.Status+":complete") {
+		// Only a completed stage can be a pending decision; the feedback scan is
+		// not free, so it is skipped for everything else.
+		in.FeedbackPending = e.cachedPendingFeedbackOf(st).any()
+	}
+	in.ParkedBlockers, in.BlockedOnlyByParked, in.ParkedBlockersUnknown = e.resolveParkedBlockersState(st, look)
 	for _, kind := range counterKinds {
 		in.Counters = append(in.Counters, attention.Counter{
 			Name: kind,
@@ -254,6 +267,7 @@ func (e *Engine) attentionInput(st *itemstate.ItemState, now time.Time, threshol
 	if lpr := st.LinkedPR; lpr != nil {
 		in.LastCIProgressAt = lpr.LastCIProgressAt
 		in.HasOpenUnmergedPR = lpr.Number != 0 && !lpr.Merged && lpr.State != "closed"
+		in.PRNumber = lpr.Number
 	}
 	return in
 }
@@ -294,7 +308,43 @@ func attentionInfo(res attention.Result, now time.Time, threshold time.Duration,
 			Kind: d.Kind, At: localapi.KnownTime(d.At), Basis: d.Basis,
 		})
 	}
+	info.Pending = pendingInfo(res.Pending, now)
+	info.Options = optionInfos(res.Options)
 	return info
+}
+
+func optionInfos(opts []attention.Option) []localapi.OptionInfo {
+	if len(opts) == 0 {
+		return nil
+	}
+	out := make([]localapi.OptionInfo, 0, len(opts))
+	for _, o := range opts {
+		out = append(out, localapi.OptionInfo{Action: o.Action, Tool: o.Tool})
+	}
+	return out
+}
+
+// pendingInfo maps a suspended item's decision onto the wire. A daemon-observed
+// first-seen is only ever a lower bound: it is reported as AtLeastAgeSeconds and
+// never as the age.
+func pendingInfo(p *attention.Pending, now time.Time) *localapi.PendingInfo {
+	if p == nil {
+		return nil
+	}
+	out := &localapi.PendingInfo{
+		Kind: p.Kind, CompletedStage: p.CompletedStage, NextStage: p.NextStage,
+		Since: localapi.KnownTime(p.Since), SinceBasis: p.SinceBasis,
+		AgeSeconds: localapi.Unknown[int64](), AtLeastAgeSeconds: localapi.Unknown[int64](),
+	}
+	if p.SinceExact() {
+		out.AgeSeconds = ageSince(now, p.Since)
+	} else {
+		out.AtLeastAgeSeconds = ageSince(now, p.Since)
+	}
+	for _, b := range p.Blockers {
+		out.Blockers = append(out.Blockers, localapi.PendingBlocker{Issue: b.Ref, Column: b.Column})
+	}
+	return out
 }
 
 func milestoneField(st *itemstate.ItemState) localapi.MilestoneField {
@@ -400,7 +450,7 @@ func (b localAPIBackend) Status(p localapi.StatusParams) (*localapi.StatusResult
 	st := snap.State()
 	now := b.e.now()
 	threshold := b.stallThreshold(0)
-	res := attention.Classify(b.e.attentionInput(&st, now, threshold, b.usageLimitedUntil(now)))
+	res := attention.Classify(b.e.attentionInput(&st, now, threshold, b.usageLimitedUntil(now), b.e.peekBlockerLookup()))
 
 	out := &localapi.StatusResult{
 		Envelope:  b.envelope(now),
@@ -751,6 +801,9 @@ func (b localAPIBackend) Board(p localapi.BoardParams) (*localapi.BoardResult, e
 		filter = *p.Filter
 	}
 
+	// Blockers are resolved from an index built by its own Scan: resolving them
+	// with Peek inside the visitor below would nest the store's read lock.
+	look := b.e.scanBlockerIndex()
 	var rows []boardRow
 	b.e.store.Scan(func(it *itemstate.ItemState) {
 		if it.IsPR {
@@ -764,7 +817,7 @@ func (b localAPIBackend) Board(p localapi.BoardParams) (*localapi.BoardResult, e
 			lastDeep:  it.LastDeepFetchAt,
 			entered:   it.StatusEnteredAt,
 			hasWorker: it.Worker != nil,
-			input:     b.e.attentionInput(it, now, threshold, usageLimited),
+			input:     b.e.attentionInput(it, now, threshold, usageLimited, look),
 		}
 		for _, d := range it.BlockedBy {
 			if strings.EqualFold(d.State, "OPEN") {
@@ -858,6 +911,11 @@ func (b localAPIBackend) attentionView(rows []boardRow, now time.Time, threshold
 		if a.res.Rank != c.res.Rank {
 			return a.res.Rank < c.res.Rank
 		}
+		// Suspended shares needs-human's rank (#2120): within it a pause that
+		// needs an answer sorts ahead of a decision that merely waits.
+		if as, cs := a.res.State == attention.Suspended, c.res.State == attention.Suspended; as != cs {
+			return !as
+		}
 		if a.row.repo != c.row.repo {
 			return a.row.repo < c.row.repo
 		}
@@ -880,6 +938,8 @@ func (b localAPIBackend) attentionView(rows []boardRow, now time.Time, threshold
 				LastDeepFetchAt: localapi.KnownTime(p.row.lastDeep),
 				AgeSeconds:      ageSince(now, p.row.lastDeep),
 			},
+			Pending: pendingInfo(p.res.Pending, now),
+			Options: optionInfos(p.res.Options),
 		})
 	}
 	return out

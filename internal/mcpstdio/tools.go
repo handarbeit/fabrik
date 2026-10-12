@@ -107,7 +107,7 @@ func toolDefs() []map[string]any {
 			"name": ToolStatus,
 			"description": "Everything the Fabrik daemon knows about one issue, from its in-memory cache (no GitHub call): place on the board and time in column, labels, milestone, " +
 				"cycle counters as 'n of max', worker, last invocation, linked PR / CI / merge-train position, blockers, and an `attention` block that answers " +
-				"'stuck, or waiting correctly?' (state, reason with a meaning per label, link to the latest Fabrik comment, and what the engine will do next and when). " +
+				"'stuck, or waiting correctly?' (state, reason with a meaning per label, link to the latest Fabrik comment, and what the engine will do next and when; a suspended item names the decision and its options instead, and no next time). " +
 				"Anything the daemon cannot vouch for is the string \"unknown\".",
 			"inputSchema": obj(map[string]any{
 				"issue": issueSchema(),
@@ -117,7 +117,7 @@ func toolDefs() []map[string]any {
 		{
 			"name": ToolBoard,
 			"description": "Overseer view of the whole board from the daemon's cache (no GitHub call). view=attention lists only items that need looking at, ranked " +
-				"needs-human, escalated, stalled, then settled-at-Validate awaiting a human merge decision (cruise), each with a one-line reason. " +
+				"needs-human and suspended (a completed stage or parked blocker waiting on a human decision, with the options to act and a GitHub-anchored age), escalated, stalled, then settled-at-Validate awaiting a human merge decision (cruise), each with a one-line reason. " +
 				"view=flow gives per column the count, the oldest time-in-column and the in-flight workers. Time-in-column is daemon-observed (resets on restart). " +
 				"Items the cache cannot evaluate for a filter (e.g. milestone not yet captured) are excluded and counted, never guessed.",
 			"inputSchema": obj(map[string]any{
@@ -148,7 +148,10 @@ func toolDefs() []map[string]any {
 				"Scopes combine with AND (entries inside one list with OR): issues, repos, a milestone, and label patterns (* matches any run of characters, e.g. fabrik:* or stage:*:complete; " +
 				"patterns only affect label-applied/label-removed events). By default label events skip high-churn labels (fabrik:locked:*, stage:*:in_progress, fabrik:spawned-child:*, fabrik:credited-pr:*, fabrik:editing); " +
 				"pass exclude_labels: [] to receive every label change. item-added (a new item arrived), column-changed (a board column move) and closed are lifecycle events; progress_via_column replaces the stage-label stream with column moves. events filters by type: " + eventList() + ". " +
-				"digest_seconds (30-3600) batches ordinary events into one message; validate-settled, escalated, paused and daemon-unreachable always arrive at once. " +
+				"digest_seconds (30-3600) batches ordinary events into one message; validate-settled, settlement-withdrawn, escalated, paused and daemon-unreachable always arrive at once. " +
+				"remind_after (seconds, 600 to 2592000; default off) re-sends a still-pending decision-pending event to this session once per interval, marked reminder=true and carrying the original's attributes; it is never sent from daemon uptime and never as `stalled`. " +
+				"Label events are not a readiness signal: a label such as stage:Validate:complete can appear and be removed again while the PR still needs a rebase, CI or a fix. " +
+				"Only validate-settled (the item is ready for your decision) and settlement-withdrawn (it stopped being ready before you acted) say whether an item is ready; act on decision-pending/validate-settled events using their `options` and do not act on a settled event that a settlement-withdrawn event has since withdrawn. " +
 				"Events are held (persisted, bounded) while no session with this subscriber name is attached and delivered in order on reconnect. " +
 				"Pushes only appear if the session was started with Channels enabled for this server (claude --dangerously-load-development-channels server:fabrik); the daemon cannot tell whether it was, so a successful subscribe does not prove delivery. " +
 				"Re-subscribing with the same filters is harmless. " +
@@ -164,6 +167,7 @@ func toolDefs() []map[string]any {
 				"digest_seconds":      map[string]any{"type": "integer", "minimum": 30, "maximum": 3600, "description": "batch ordinary events into one message per interval"},
 				"progress_via_column": map[string]any{"type": "boolean", "description": "drop label-applied/label-removed for stage:*:complete and stage:*:in_progress when column-changed is also taken, so progress arrives as column moves instead of the stage-label stream; overrides labels and exclude_labels for those two patterns; requires column-changed in events when events is set"},
 				"subscriber":          map[string]any{"type": "string", "description": "subscriber name; defaults to the name this server was launched with (--subscriber / FABRIK_SUBSCRIBER)"},
+				"remind_after":        map[string]any{"type": "integer", "minimum": 600, "maximum": 2592000, "description": "seconds between reminders for a still-pending decision-pending episode; omit for none"},
 			}),
 			"annotations": map[string]any{"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},
 		},
@@ -286,6 +290,7 @@ func buildCall(name string, args json.RawMessage, defaultSubscriber string) (met
 			ExcludeLabels *[]string  `json:"exclude_labels"`
 			Events        []string   `json:"events"`
 			DigestSeconds int        `json:"digest_seconds"`
+			RemindAfter   int        `json:"remind_after"`
 			Subscriber    string     `json:"subscriber"`
 
 			ProgressViaColumn bool `json:"progress_via_column"`
@@ -300,6 +305,9 @@ func buildCall(name string, args json.RawMessage, defaultSubscriber string) (met
 		if a.DigestSeconds < 0 {
 			return "", nil, fmt.Errorf("digest_seconds must be positive")
 		}
+		if a.RemindAfter < 0 {
+			return "", nil, fmt.Errorf("remind_after must be positive")
+		}
 		var issues []string
 		for _, i := range a.Issues {
 			issues = append(issues, string(i))
@@ -307,7 +315,8 @@ func buildCall(name string, args json.RawMessage, defaultSubscriber string) (met
 		return localapi.MethodSubscribe, localapi.SubscribeParams{
 			Subscriber: who, Repos: a.Repos, Issues: issues, Milestone: a.Milestone,
 			Labels: a.Labels, ExcludeLabels: a.ExcludeLabels, Events: a.Events, DigestSeconds: a.DigestSeconds,
-			ProgressViaColumn: a.ProgressViaColumn,
+			ProgressViaColumn:  a.ProgressViaColumn,
+			RemindAfterSeconds: a.RemindAfter,
 		}, nil
 	case ToolUnsubscribe:
 		var a struct {

@@ -57,6 +57,13 @@ type itemMemo struct {
 	near map[string]bool
 	// lastComment is the comment link the previous event for this item carried.
 	lastComment string
+	// dp is the open decision-pending episode, if any (channel_decision.go);
+	// dpSeen is when the item was first seen suspended without an exact GitHub
+	// time (real time), for decisionAnchorGrace.
+	dp     *decisionEpisode
+	dpSeen time.Time
+	// rebaseSeen mirrors dirtyItem.rebaseSeen for the evaluation in progress.
+	rebaseSeen bool
 }
 
 // dirtyItem is a pending debounced re-evaluation.
@@ -66,6 +73,11 @@ type dirtyItem struct {
 	// staleCandidate is set when an invocation was recorded while
 	// fabrik:awaiting-input was present at that moment.
 	staleCandidate bool
+	// rebaseSeen is set when fabrik:rebase-needed was applied to the item since
+	// the last evaluation, even if it was removed again before this one ran (the
+	// engine applies it and dispatches the rebase within one pass), so a
+	// withdrawal is attributed to the rebase rather than to the worker it caused.
+	rebaseSeen bool
 }
 
 type channelEvents struct {
@@ -240,6 +252,8 @@ func (ce *channelEvents) seed() {
 	threshold := e.channelStallThreshold()
 	usageLimited := e.channelUsageLimitedUntil(now)
 	ce.claudeLimited = !usageLimited.IsZero()
+	look := e.scanBlockerIndex()
+	var pending []string
 	e.store.Scan(func(st *itemstate.ItemState) {
 		// An item whose labels are not known yet (probe-seeded) has no meaningful
 		// classification; its first label-bearing evaluation is the baseline (#2123).
@@ -248,11 +262,29 @@ func (ce *channelEvents) seed() {
 		}
 		key := issueRef(st.Repo, st.Number)
 		m := ce.memoFor(key)
-		res := attention.Classify(e.attentionInput(st, now, threshold, usageLimited))
+		res := attention.Classify(e.attentionInput(st, now, threshold, usageLimited, look))
 		m.pauseKey = pauseFamilyKey(res)
 		ce.armCounters(m, st, true)
 		m.staleDone = hasLabelStr(st.Labels, "fabrik:awaiting-input")
+		if res.State == attention.Suspended {
+			pending = append(pending, st.Repo+"#"+strconv.Itoa(st.Number))
+		}
 	})
+	// A suspended item with no open persisted episode is announced once; the
+	// scan's read lock is released first, because the step reads the store again.
+	for _, key := range pending {
+		repo, n, ok := parseIssueRef(key)
+		if !ok {
+			continue
+		}
+		snap, ok := e.store.Peek(repo, n)
+		if !ok {
+			continue
+		}
+		st := snap.State()
+		res := attention.Classify(e.attentionInput(&st, now, threshold, usageLimited, e.peekBlockerLookup()))
+		ce.enqueueDerived(ce.decisionStep(key, ce.memoFor(key), &st, res))
+	}
 }
 
 func (ce *channelEvents) memoFor(key string) *itemMemo {
@@ -296,9 +328,13 @@ func (ce *channelEvents) onChange(c itemstate.Change, snap itemstate.Snapshot) {
 	// phantom.
 	evs := ce.noteChangeForDivergence(c, &st, ce.e.now())
 	diverged := len(evs) // events from here on are built from the suspect change
+	rebaseApplied := false
 	for _, d := range c.LabelDeltas {
 		if d.Added && d.Label == "fabrik:landing-verification-failed" {
 			ce.clearLanding(key)
+		}
+		if d.Added && d.Label == "fabrik:rebase-needed" {
+			rebaseApplied = true
 		}
 		le := ce.e.labelEvent(&st, c, d)
 		if closeTrackingLabel(d.Label) && ce.isLanding(key) {
@@ -345,6 +381,7 @@ func (ce *channelEvents) onChange(c itemstate.Change, snap itemstate.Snapshot) {
 		}
 		d.flags |= c.Fields
 		d.staleCandidate = d.staleCandidate || staleCand
+		d.rebaseSeen = d.rebaseSeen || rebaseApplied
 	}
 	ce.mu.Unlock()
 	ce.signal()

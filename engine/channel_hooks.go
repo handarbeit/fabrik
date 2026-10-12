@@ -272,3 +272,21 @@ func (e *Engine) anomalyHookRecover(issue int, what string) {
 		e.logf(issue, "channel", "%s hook panic recovered: %v\n", what, r)
 	}
 }
+
+// channelReevaluate asks the deriver to re-derive one item's events after the
+// debounce, for a change that carries no store flag of its own (the poll-side
+// recorder landing a pending decision's GitHub time, #2120). A void,
+// non-blocking call; a no-op with no hub.
+func (e *Engine) channelReevaluate(repo string, number int) {
+	ce := e.channelEvents()
+	if ce == nil {
+		return
+	}
+	key := issueRef(repo, number)
+	ce.mu.Lock()
+	if ce.dirty[key] == nil {
+		ce.dirty[key] = &dirtyItem{due: time.Now().Add(channelDebounce)}
+	}
+	ce.mu.Unlock()
+	ce.signal()
+}

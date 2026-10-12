@@ -217,6 +217,8 @@ func (r *reachability) stop() {
 // channelInstructions is appended to the server's instructions: how events look
 // in the session and what is required for them to appear at all.
 const channelInstructions = " Fabrik also pushes events into this session as <channel source=\"fabrik\" event=... repo=... issue=...> messages when something needs attention " +
-	"(validate-settled, paused, escalated, label changes, and more); the tag attributes say which issue and event, and the body is a one-line summary. " +
+	"(validate-settled, decision-pending, settlement-withdrawn, paused, escalated, label changes, and more); the tag attributes say which issue and event, and the body is a one-line summary. " +
+	"Label-change events are not a readiness signal; only validate-settled and decision-pending say an item awaits you, and settlement-withdrawn says that stopped being true. " +
+	"A decision-bearing event carries an `options` attribute (a JSON list of {action, tool}); an event with reminder=\"true\" repeats a decision that is still pending. " +
 	"Use fabrik_subscribe to choose what you hear about and fabrik_unsubscribe to stop. Pushes need this session to have been started with Channels enabled for this server " +
 	"(during the research preview: claude --dangerously-load-development-channels server:fabrik); otherwise Claude Code drops them silently and only the read tools work."

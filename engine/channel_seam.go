@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"sync/atomic"
 	"time"
 
 	"github.com/handarbeit/fabrik/internal/channelevents"
@@ -67,4 +68,34 @@ func (e *Engine) SetAnomalyThresholdsForTest(retryStarved, itemWedged, divergenc
 	e.cfg.RetryStarvedThreshold = retryStarved
 	e.cfg.ItemWedgedThreshold = itemWedged
 	e.cfg.CacheDivergenceWindow = divergenceWindow
+}
+
+// Neutralisation seams for #2120's tests: each disables one announcement so a
+// test can show that the assertion it guards fails without it. Production never
+// calls them.
+var (
+	decisionPendingDisabled      atomic.Bool
+	settlementWithdrawalDisabled atomic.Bool
+)
+
+// SetDecisionPendingDisabledForTest turns the decision-pending episode step off
+// (no event, no episode counter) and returns the function that restores it.
+func SetDecisionPendingDisabledForTest() (restore func()) {
+	decisionPendingDisabled.Store(true)
+	return func() { decisionPendingDisabled.Store(false) }
+}
+
+// SetSettlementWithdrawalDisabledForTest stops settlement-withdrawn events from
+// being announced (episodes still close) and returns the restore function.
+func SetSettlementWithdrawalDisabledForTest() (restore func()) {
+	settlementWithdrawalDisabled.Store(true)
+	return func() { settlementWithdrawalDisabled.Store(false) }
+}
+
+// SetDecisionAnchorGraceForTest changes how long a suspended item with no exact
+// GitHub time waits before it is announced, returning the restore function.
+func SetDecisionAnchorGraceForTest(d time.Duration) (restore func()) {
+	old := decisionAnchorGrace
+	decisionAnchorGrace = d
+	return func() { decisionAnchorGrace = old }
 }

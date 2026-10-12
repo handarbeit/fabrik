@@ -188,9 +188,11 @@ func TestPipelineGaugeAsOfMovesOnlyWhenPollRefreshes(t *testing.T) {
 	}
 }
 
-// stuckItemEnv files an item at a completed stage under a manual pipeline (yolo
-// off) and polls twice, so it is cached with a short dispatch cooldown. Only the
-// passage of time can then make it overdue.
+// stuckItemEnv files an item at a completed Validate stage under a manual
+// pipeline (yolo off) and polls twice, so it is cached with a short dispatch
+// cooldown. Only the passage of time can then make it overdue. It is filed at
+// Validate because a completed earlier stage with no autonomy is a pending
+// decision (suspended, #2120), which is never stalled; Validate is excluded.
 func stuckItemEnv(t *testing.T) (*Env, string) {
 	t.Helper()
 	env := NewEnv(t, EnvOptions{
@@ -202,7 +204,7 @@ func stuckItemEnv(t *testing.T) (*Env, string) {
 			cfg.StallThreshold = 20 * time.Second
 		},
 	})
-	num := FileIssue(t, env, "stuck item", "body", "Specify", "stage:Specify:complete")
+	num := FileIssue(t, env, "stuck item", "body", "Validate", "stage:Validate:complete")
 	ref := env.OwnerRepo + "#" + strconv.Itoa(num)
 	for i := 0; i < 2; i++ {
 		if err := env.Engine.PollOnce(context.Background()); err != nil {

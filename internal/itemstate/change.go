@@ -1,6 +1,9 @@
 package itemstate
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // ChangeFlags is a bitmask describing which logical field groups of an ItemState
 // were altered by a mutation. Observers use this to cheaply filter whether a
@@ -218,4 +221,51 @@ func diffLabels(before, after []string) []LabelDelta {
 		}
 	}
 	return out
+}
+
+// eligibilityLabel reports whether adding or removing label changes whether the
+// engine will move the item on by itself or is blocked on a human (#2120 R3).
+func eligibilityLabel(label string) bool {
+	switch label {
+	case "fabrik:cruise", "fabrik:yolo", "fabrik:blocked", "fabrik:paused":
+		return true
+	}
+	return strings.HasPrefix(label, "stage:") && strings.HasSuffix(label, ":complete")
+}
+
+// stampEligibility records the store clock's "now" in item.EligibilityChangedAt
+// when the label change from before to item.Labels touched an eligibility label,
+// and in item.StatusMovedAt when the item moved between two known columns (#2120
+// R3). Called only for an item the store already held, with s.mu held. The time
+// comes from the store clock (SetClock) so a test or sim clock that drives the
+// classifier drives the stamps too: with time.Now() a sim clock set before real
+// time would put the stamp in the classifier's future.
+func (s *Store) stampEligibility(item *ItemState, before ItemState) {
+	now := s.nowLocked()
+	for _, d := range diffLabels(before.Labels, item.Labels) {
+		if eligibilityLabel(d.Label) {
+			item.EligibilityChangedAt = now
+			break
+		}
+	}
+	if before.Status != "" && item.Status != "" && before.Status != item.Status {
+		item.StatusMovedAt = now
+	}
+}
+
+// SetClock makes the store stamp EligibilityChangedAt and StatusMovedAt from now
+// instead of time.Now(). The engine passes its own clock so the stamps and the
+// classifier that reads them agree. nil restores time.Now().
+func (s *Store) SetClock(now func() time.Time) {
+	s.mu.Lock()
+	s.clock = now
+	s.mu.Unlock()
+}
+
+// nowLocked returns the store clock's time; s.mu must be held.
+func (s *Store) nowLocked() time.Time {
+	if s.clock != nil {
+		return s.clock()
+	}
+	return time.Now()
 }
