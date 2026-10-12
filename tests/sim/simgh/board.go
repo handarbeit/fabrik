@@ -379,6 +379,13 @@ func (s *Sim) buildProbeItem(p *projectState, ref itemRef) (*gh.BoardProbeItem, 
 		linkedHead = linked.head
 		probe.LinkedPRNumber = linked.number
 		probe.LinkedPRUpdatedAt = linked.updatedAt
+		// The probe's linked-PR scalars (#2122). Mergeability is reported the
+		// way GitHub lazily computes it, as UNKNOWN: the sim does not run a
+		// merge simulation per probed PR per poll (see FIDELITY.md).
+		probe.LinkedPRFacts = gh.ProbePRFacts{Known: true, State: linked.state, Draft: linked.draft, Merged: linked.merged}
+		if linked.merged {
+			probe.LinkedPRFacts.State = "closed"
+		}
 		probe.EffectiveUpdatedAt = laterOf(probe.EffectiveUpdatedAt, linked.updatedAt)
 	}
 	s.mu.Unlock()
