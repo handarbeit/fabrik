@@ -372,3 +372,73 @@ func TestValidateSettledReannouncedAfterRebaseNeeded(t *testing.T) {
 		t.Fatalf("expected a new episode after the rebase, got %+v (first key %q)", again, first.DedupKey)
 	}
 }
+
+// #2169 R3a: the cause of a re-settle, in the documented precedence, and none on
+// the first settle of an item.
+func TestStampSettleCausePrecedence(t *testing.T) {
+	e, _ := channelEngine(t, 0, settledOnly())
+	ce := e.channelEvents()
+	ev := func(head, autonomy string) *channelevents.Event {
+		return &channelevents.Event{Type: channelevents.ValidateSettled, Meta: map[string]string{"head_sha": head, "autonomy": autonomy}}
+	}
+	step := func(ref string, ep int, head, autonomy string) *channelevents.Event {
+		x := ev(head, autonomy)
+		ce.stampSettleCause(ref, x, ep)
+		return x
+	}
+
+	if x := step("owner/repo#1", 1, "h1", "cruise"); x.Meta["cause"] != "" {
+		t.Fatalf("the first settle carries no cause: %+v", x.Meta)
+	}
+	// Same head, autonomy swapped by a human.
+	ce.noteAutonomyWrite("owner/repo#1", itemstateLabel("fabrik:cruise", false), labelAttribution{Actor: "human", Login: "bob"})
+	ce.noteAutonomyWrite("owner/repo#1", itemstateLabel("fabrik:yolo", true), labelAttribution{Actor: "human", Login: "alice"})
+	ce.noteAutonomyWrite("owner/repo#1", itemstateLabel("fabrik:cruise", false), labelAttribution{Actor: "unknown"}) // a later removal must not override the add
+	x := step("owner/repo#1", 2, "h1", "yolo")
+	if x.Meta["cause"] != "autonomy-changed" || x.Meta["actor"] != "human" || x.Meta["actor_login"] != "alice" {
+		t.Fatalf("autonomy swap: %+v", x.Meta)
+	}
+	// A new head outranks an autonomy change.
+	x = step("owner/repo#1", 3, "h2", "cruise")
+	if x.Meta["cause"] != "new-head" {
+		t.Fatalf("new head: %+v", x.Meta)
+	}
+	// A revalidate outranks both.
+	ce.ledger.MarkRevalidated("owner/repo#1")
+	x = step("owner/repo#1", 4, "h3", "yolo")
+	if x.Meta["cause"] != "revalidated" {
+		t.Fatalf("revalidated: %+v", x.Meta)
+	}
+	// Nothing differs (a worker re-run): still labelled, never silent.
+	x = step("owner/repo#1", 5, "h3", "yolo")
+	if x.Meta["cause"] != "other" {
+		t.Fatalf("other: %+v", x.Meta)
+	}
+	// An autonomy change with no remembered writer is unknown, never guessed.
+	x = step("owner/repo#1", 6, "h3", "cruise")
+	if x.Meta["cause"] != "autonomy-changed" || x.Meta["actor"] != "unknown" {
+		t.Fatalf("unattributed autonomy change: %+v", x.Meta)
+	}
+}
+
+// The ledger is persisted, so a settle right after a restart still knows what the
+// previous one was.
+func TestStampSettleCauseSurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	l := channelevents.OpenLedger(dir, nil, nil)
+	l.SetSettle("owner/repo#1", channelevents.SettleRecord{Episode: 1, HeadSHA: "h1", Autonomy: "cruise"})
+	l.Close()
+	e := apiEngine(t, 0)
+	e.fabrikDir = t.TempDir()
+	e.startChannelEventsIn(dir, false)
+	t.Cleanup(e.closeChannelEvents)
+	x := &channelevents.Event{Meta: map[string]string{"head_sha": "h2", "autonomy": "cruise"}}
+	e.channelEvents().stampSettleCause("owner/repo#1", x, 2)
+	if x.Meta["cause"] != "new-head" {
+		t.Fatalf("cause after a restart: %+v", x.Meta)
+	}
+}
+
+func itemstateLabel(label string, added bool) itemstate.LabelDelta {
+	return itemstate.LabelDelta{Label: label, Added: added}
+}
