@@ -111,3 +111,25 @@ func NoOpCommentReview() CommentScript {
 		return output, false, usage, nil
 	}
 }
+
+// SkillLoadFailed returns a Script mirroring a worker whose own configured
+// skill failed to load at runtime (#2138): the engine's runClaude replaces the
+// outcome with a *claudeerr.SkillLoadError whatever marker the worker printed,
+// so the invoker-level shape is empty completed=false output and the typed
+// error. The engine pauses the item rather than retrying (ADR-2138).
+func SkillLoadFailed(skill string) Script {
+	return func(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts engine.InvokeOptions) (string, bool, engine.TokenUsage, error) {
+		usage := engine.TokenUsage{TurnsUsed: 2, CostUSD: 0.01}
+		return "", false, usage, &claudeerr.SkillLoadError{Skill: skill, ToolUseID: "toolu_sim", Detail: "Unknown skill: " + skill}
+	}
+}
+
+// SkillLoadFailedComment is SkillLoadFailed for the comment-review invocation
+// path (also used by the CI-fix and rebase reinvokes, which run through the
+// stage's CommentSkill).
+func SkillLoadFailedComment(skill string) CommentScript {
+	return func(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts engine.InvokeOptions) (string, bool, engine.TokenUsage, error) {
+		usage := engine.TokenUsage{TurnsUsed: 2, CostUSD: 0.01}
+		return "", false, usage, &claudeerr.SkillLoadError{Skill: skill, ToolUseID: "toolu_sim", Detail: "Unknown skill: " + skill}
+	}
+}
