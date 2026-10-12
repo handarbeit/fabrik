@@ -23,6 +23,7 @@ import (
 	"github.com/handarbeit/fabrik/internal/claudeerr"
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/internal/workerenv"
+	"github.com/handarbeit/fabrik/plugin"
 	"github.com/handarbeit/fabrik/stages"
 )
 
@@ -440,7 +441,7 @@ var claudeGHToken string
 // AppID/AppPrivateKeyPath/AppInstallationID mint a ~1h installation token
 // that a background refresh loop keeps current for the engine's own API
 // calls. Reading it live here (typically Client.Token(), riding that same
-// refresh loop) means a worker's `gh` invocations (e.g. fabrik-validate's
+// refresh loop) means a worker's `gh` invocations (e.g. the validate skill's
 // Pre-Completion Gate) authenticate as the same installation the engine
 // itself uses, without a second minting path. nil (the default, and always
 // true in PAT mode) leaves buildClaudeEnv's claudeGHToken injection exactly
@@ -466,7 +467,7 @@ var claudeGHTokenOverrideFn func() string
 // pattern. Injected into every Claude worker's environment as GH_HOST so the
 // worker's gh invocations target the same GitHub instance as the engine
 // itself (FR-6, ADR-1391) — without this, a stage worker's `gh` calls (e.g.
-// fabrik-validate's Pre-Completion Gate) would silently hit github.com even
+// the validate skill's Pre-Completion Gate) would silently hit github.com even
 // when the engine is talking to a GHES instance. Empty (the default) skips
 // injection entirely, preserving today's behavior byte-for-byte.
 var claudeGHHost string
@@ -1311,6 +1312,25 @@ func sessionNameSentinel(repo string, issueNumber int, stageName string) string 
 	return fmt.Sprintf("fabrik:%s#%d:%s", sanitizeSentinelComponent(repo), issueNumber, sanitizeSentinelComponent(stageName))
 }
 
+// workerSettingsJSON is the inline per-invocation --settings value (#2140,
+// ADR 2140, FR-005): it disables the PM plugin's marketplace identity and
+// nothing else, so a user who has fabrik@fabrik installed does not get it in a
+// worker now that the stage plugin no longer shadows its name. The stage
+// plugins are --plugin-dir entries (<name>@inline), a separate identity that a
+// disabled marketplace plugin does not touch (confirmed live; see ADR 2140).
+// It carries only enabledPlugins, so the apiKeyHelper refusal (ADR 1346) —
+// which scans settings files, never this inline value — is unaffected.
+func workerSettingsJSON() string {
+	b, err := json.Marshal(map[string]any{
+		"enabledPlugins": map[string]bool{plugin.PMPluginID: false},
+	})
+	if err != nil {
+		// Marshalling a map of strings and bools cannot fail.
+		panic(fmt.Sprintf("marshalling worker settings: %v", err))
+	}
+	return string(b)
+}
+
 func buildClaudeArgs(stage *stages.Stage, resumeSessionID string, modelOverride string, maxTurns int, unrestricted bool, workDir string, sessionName string) []string {
 	args := []string{
 		"--output-format", "stream-json",
@@ -1333,6 +1353,10 @@ func buildClaudeArgs(stage *stages.Stage, resumeSessionID string, modelOverride 
 	for _, dir := range claudePluginDirs {
 		args = append(args, "--plugin-dir", dir)
 	}
+
+	// The human-facing PM plugin (fabrik@fabrik) must never load in a worker —
+	// not its skills, not any MCP server it bundles. Applies on every path.
+	args = append(args, "--settings", workerSettingsJSON())
 
 	if resumeSessionID != "" {
 		args = append(args, "--resume", resumeSessionID)

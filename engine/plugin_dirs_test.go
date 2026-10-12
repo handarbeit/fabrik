@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -375,6 +376,49 @@ func TestResolvePluginDirs_LocalWorkflowsSkillsResolveQualified(t *testing.T) {
 		}
 		if res.Name != want {
 			t.Errorf("%s resolved to %q, want %q", ref, res.Name, want)
+		}
+	}
+}
+
+// FR-005 (#2140): every worker invocation disables the PM plugin
+// (fabrik@fabrik) through an inline --settings value that carries nothing else.
+func TestBuildClaudeArgs_DisablesPMPlugin(t *testing.T) {
+	const want = `{"enabledPlugins":{"fabrik@fabrik":false}}`
+	if got := workerSettingsJSON(); got != want {
+		t.Fatalf("workerSettingsJSON = %s, want %s", got, want)
+	}
+	// Only enabledPlugins, and the stage plugins are never named in it.
+	var decoded map[string]map[string]bool
+	if err := json.Unmarshal([]byte(workerSettingsJSON()), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded) != 1 || len(decoded["enabledPlugins"]) != 1 {
+		t.Fatalf("settings carry more than the PM plugin: %v", decoded)
+	}
+	for _, n := range []string{plugin.BasePluginName, plugin.LegacyBasePluginName, plugin.LocalWorkflowsName} {
+		if _, bad := decoded["enabledPlugins"][n]; bad {
+			t.Errorf("settings name %q", n)
+		}
+	}
+
+	stage := &stages.Stage{Name: "Plan", Prompt: "plan"}
+	withPluginDirs(t, []string{"/base", "/lw"})
+	for name, args := range map[string][]string{
+		"restricted":   buildClaudeArgs(stage, "", "", 0, false, "", ""),
+		"unrestricted": buildClaudeArgs(stage, "", "", 0, true, "", ""),
+		"resume":       buildClaudeArgs(stage, "sess", "", 0, false, "", ""),
+	} {
+		var found []string
+		for i := 0; i+1 < len(args); i++ {
+			if args[i] == "--settings" {
+				found = append(found, args[i+1])
+			}
+		}
+		if len(found) != 1 || found[0] != want {
+			t.Errorf("%s: --settings values = %v, want exactly [%s]", name, found, want)
+		}
+		if got := pluginDirArgs(args); !reflect.DeepEqual(got, []string{"/base", "/lw"}) {
+			t.Errorf("%s: plugin dirs = %v", name, got)
 		}
 	}
 }

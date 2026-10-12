@@ -374,7 +374,7 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 	// yet on a same-dispatch edge, so it cannot catch this on its own.
 	// Without this guard, a Validate agent that (against its own skill
 	// instructions — see "If You Discover a Blocking Issue" in
-	// fabrik-validate/SKILL.md) emits a spawn block together with
+	// the validate skill/SKILL.md) emits a spawn block together with
 	// FABRIK_STAGE_COMPLETE on a yolo issue could reach MergePR/auto-merge
 	// before fabrik:blocked is ever applied — reproducing, one dispatch
 	// earlier, the exact silent-merge-past-an-undeclared-blocker danger
