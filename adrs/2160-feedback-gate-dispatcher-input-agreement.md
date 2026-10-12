@@ -33,7 +33,7 @@ R1 ("one answer") is met by the shared builders plus the comparison: a hold the 
 
 - A masked review reaches the dispatcher one poll after the gate first holds on it, with no restart.
 - The gate can now issue one extra cache-served read per hold with review feedback, and at most two real refetches per distinct gap.
-- **Known wider class, out of scope:** the cache masking also affects CI status, thread comments and human comments on non-paused items. This ADR covers review bodies and threads only.
+- **Known wider class, out of scope here:** the cache masking also affects CI status, thread comments and human comments on non-paused items. This ADR covers review bodies and threads only. **Addressed by ADR 2180**, which fixes the class in the cache's freshness rule (per-layer baselines and a comment-count check) and fixes CI in the check-run cache-trust path. This repair is kept: it still guards causes the baseline cannot (the `latestReviews` cap and per-author collapse, a fetch that returns a stale PR). See `adrs/2180-cache-freshness-self-write-anchoring.md`.
 - **Residual:** if a real refetch still returned a cache without the review (the question left open about #2125's 15:21:37Z fetch), the invalidation does not help; the bound and the `last repair` log line make that visible.
 - `latestReviews` is one review per author, so the older of two bodies from one author stays covered by the durable marker only.
 - Test seam: `Engine.MaskReviewFromCacheForTest` (tests/sim) holds a review out of the cached view until the gate has repaired the item; the sim twin is `tests/sim/feedback_gate_dispatcher_gap_test.go`.

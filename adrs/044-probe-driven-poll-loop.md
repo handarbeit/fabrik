@@ -204,3 +204,7 @@ A Fabrik self-comment, self-label-add/remove, self-body-edit, or self-status-mov
 ### Addendum (#2080)
 
 The warm-cache linkage-drift rule above is refined by ADR 2080: terminal items skip the check, a repeated `(cached, probe)` pair invalidates only once, and the probe loop's own writes no longer wake the poll loop. See `adrs/2080-probe-drift-convergence-and-wake.md`.
+
+### Addendum (#2180)
+
+The single-baseline compare above is refined by ADR 2180: the issue layer keeps this self-write baseline, but the linked PR's `updatedAt` is compared against its own never-self-write-anchored baseline (`LastSeenPRUpdatedAt`), and GitHub's issue comment total is compared with the cached issue comments, so a self-write can no longer hide an external change that predates it. Two statements above are corrected: only `SelfWriteObserved` is monotonic (`ItemDeepFetched` assigns the fetched value unconditionally, which is how a real refetch lowers a clock-anchored baseline), and display-field writes (status line, Last activity, Last run) no longer call `SelfWriteObserved` because the parsers already discount their `updatedAt` bump. See `adrs/2180-cache-freshness-self-write-anchoring.md`.

@@ -545,6 +545,7 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		flags := applyProjectItem(item, fresh)
 		item.LastDeepFetchAt = time.Now()
 		item.LastSeenSourceUpdatedAt = v.FreshState.UpdatedAt
+		item.LastSeenPRUpdatedAt = v.FreshState.LinkedPRUpdatedAt
 		item.LastDeepFetchFailureAt = time.Time{} // clear failure on success
 		return flags | DeepFetchChanged
 
@@ -765,10 +766,6 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		}
 		return 0
 
-	case PausedBackstopServed:
-		item.PausedBackstopBaseline = v.Baseline
-		return 0
-
 	case LabelAppliedAtRecorded:
 		if item.LabelAppliedAt == nil {
 			item.LabelAppliedAt = make(map[string]time.Time)
@@ -892,6 +889,7 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 	case DeepFetchInvalidated:
 		item.LastDeepFetchAt = time.Time{}
 		item.LastSeenSourceUpdatedAt = time.Time{}
+		item.LastSeenPRUpdatedAt = time.Time{}
 		return DeepFetchChanged
 
 	case SelfWriteObserved:

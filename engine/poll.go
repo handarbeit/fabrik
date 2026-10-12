@@ -2444,11 +2444,6 @@ func (e *Engine) selectDeepFetchCandidates(board *gh.ProjectBoard, repoFilter st
 		// too, so an expiry coinciding with another admission reason is still used
 		// up instead of re-admitting the item on the next poll.
 		consumedExpired := e.consumeExpiredCooldowns(repo, item, admitSnap, admitErr)
-		// recentBaseline: the item's staleness baseline moved within the last two
-		// recheck intervals — the only window in which a self-write (#1090) can have
-		// masked a concurrent human comment. See the paused skip below (#1944).
-		recentBaseline := admitErr == nil &&
-			e.now().Sub(admitSnap.State().LastSeenSourceUpdatedAt) < 2*e.githubRecheckInterval()
 		if !e.itemMayNeedWork(board.Items[i]) {
 			if consumedExpired || cycleSet[iKey] {
 				e.rearmPeriodicReEval(item)
@@ -2477,42 +2472,28 @@ func (e *Engine) selectDeepFetchCandidates(board *gh.ProjectBoard, repoFilter st
 		// merged-while-paused self-heal (ADR-056 D2) and settleRevalidateScan's FR-5
 		// guarantee — are unaffected; only the FetchItemDetails call itself is skipped.
 		//
-		// Backstop (#1944): a paused item admitted by the periodic re-evaluation IS
-		// fetched while its staleness baseline is recent. cycleSet can miss a genuine
-		// change — the self-write baseline (SelfWriteObserved, #1090) is the local
-		// clock at the engine's own write, so a human comment landing within about a
-		// second of it (typically a reply to the pause comment itself) reads as
-		// already seen. Without this nothing ever refreshed item.Comments and the
-		// resume comment (ADR-1813) was lost for good. Cost stays within #1379's
-		// intent: a long-parked item (old baseline) is still never fetched, and the
-		// backstop fetches at most once per distinct baseline value (#2096). The
-		// fetch re-anchors the baseline to GitHub's own updatedAt, so the baseline
-		// recorded as served is the one read AFTER a successful fetch
-		// (PausedBackstopServed): a fresh pause costs exactly one fetch, and a later
-		// self-write (a new baseline that may mask a new reply) earns one more. A
-		// failed fetch records nothing, so it is retried at the next admission (the
-		// re-armed periodic re-evaluation, or any observer-driven change) — not
-		// necessarily the next poll.
-		var backstopFetch bool
+		// A paused item admitted by the periodic re-evaluation reads its details
+		// through the board cache (#1944, #2180): the cache's freshness rule sees a
+		// human reply that a self-write baseline would otherwise have masked (the
+		// issue comment total differs from the cached list), so the read costs
+		// nothing while the cache is genuinely fresh and refetches once when it is
+		// not. The retired #1944 backstop invalidated the cache by hand instead.
 		if hasLabel(item.Labels, "fabrik:paused") && !cycleSet[iKey] {
 			switch {
 			case admitErr != nil:
 				// Not yet in the store (first sighting): fall through and fetch once to
 				// establish a baseline, mirroring the notInStore bypass in the pre-filter above.
-			case periodicReeval && recentBaseline && !admitSnap.PausedBackstopBaseline().Equal(admitSnap.State().LastSeenSourceUpdatedAt):
-				// Backstop fetch. It must reach GitHub: the board cache judges freshness
-				// by the same masked baseline, so it would otherwise hand back the cached
-				// comments without the reply this fetch exists to find.
-				e.logf(0, "poll", "re-fetching paused item #%d at periodic re-evaluation (recent self-write may have masked a reply)\n", board.Items[i].Number)
-				e.store.Apply(itemstate.DeepFetchInvalidated{Repo: repo, Number: item.Number})
-				backstopFetch = true
+			case periodicReeval && e.cache() != nil && !e.cache().IsPaused():
+				// Fall through to the cached read below. Without a board cache every
+				// read is live, so the #1379 skip is kept: there is no freshness rule
+				// to make the read free.
 			default:
 				e.logf(0, "poll", "skipping deep-fetch for paused item #%d (no new activity)\n", board.Items[i].Number)
 				deepFetchCandidates = append(deepFetchCandidates, board.Items[i])
 				continue
 			}
 		}
-		if c := e.cache(); c != nil && !c.IsPaused() && c.IsItemCacheFresh(board.Items[i].Repo, board.Items[i].Number, board.Items[i].UpdatedAt) {
+		if c := e.cache(); c != nil && !c.IsPaused() && c.IsItemCacheFresh(board.Items[i].Repo, board.Items[i].Number, boardcache.EvidenceFromItem(&board.Items[i])) {
 			e.logf(0, "poll", "reading details for #%d from cache\n", board.Items[i].Number)
 		} else {
 			e.logf(0, "poll", "deep-fetching details for #%d from GitHub\n", board.Items[i].Number)
@@ -2548,11 +2529,6 @@ func (e *Engine) selectDeepFetchCandidates(board *gh.ProjectBoard, repoFilter st
 			Number:     board.Items[i].Number,
 			FreshState: board.Items[i],
 		})
-		if backstopFetch {
-			if post, err := e.store.Get(admitRepo, board.Items[i].Number); err == nil {
-				e.store.Apply(itemstate.PausedBackstopServed{Repo: admitRepo, Number: board.Items[i].Number, Baseline: post.State().LastSeenSourceUpdatedAt})
-			}
-		}
 		// After a successful deep-fetch, check if this item just became terminal.
 		if isTerminalPredicate(board.Items[i].Labels, board.Items[i].Status, e.cfg.Stages) {
 			if admitPreErr != nil || !admitPreSnap.IsTerminal() {

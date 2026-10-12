@@ -55,6 +55,7 @@ func applyProjectItem(item *ItemState, pi gh.ProjectItem) ChangeFlags {
 	if !item.UpdatedAt.Equal(pi.UpdatedAt) {
 		item.UpdatedAt = pi.UpdatedAt
 	}
+	applyLayerEvidence(item, pi.IssueLayerUpdatedAt, pi.LinkedPRUpdatedAt, pi.IssueCommentTotal, pi.IssueCommentTotalKnown)
 
 	// Copy the milestone only when the producer actually observed it, so write
 	// paths that do not carry it (deep fetch, fallback fetch, PR nodes) cannot
@@ -206,6 +207,7 @@ func applyShallowItem(item *ItemState, pi gh.ProjectItem, fetchedAt time.Time, g
 	if !item.UpdatedAt.Equal(pi.UpdatedAt) {
 		item.UpdatedAt = pi.UpdatedAt
 	}
+	applyLayerEvidence(item, pi.IssueLayerUpdatedAt, pi.LinkedPRUpdatedAt, pi.IssueCommentTotal, pi.IssueCommentTotalKnown)
 
 	if pi.MilestoneKnown {
 		flags |= applyMilestone(item, pi.Milestone, true)
@@ -289,12 +291,29 @@ func applyProbeItem(item *ItemState, pi gh.BoardProbeItem, fetchedAt time.Time, 
 	if !item.UpdatedAt.Equal(pi.EffectiveUpdatedAt) {
 		item.UpdatedAt = pi.EffectiveUpdatedAt
 	}
+	applyLayerEvidence(item, pi.IssueLayerUpdatedAt, pi.LinkedPRUpdatedAt, pi.IssueCommentTotal, pi.IssueCommentTotalKnown)
 
 	// Labels are intentionally not touched here. The probe query contains no
 	// label data; setting item.Labels from an empty probe would wipe the
 	// cached label set populated by FetchItemDetails or the bootstrap query.
 
 	return flags
+}
+
+// applyLayerEvidence copies the layered board evidence (#2180) from a producer
+// that captured it. A zero issue layer means the producer did not (a deep or
+// fallback fetch built from elsewhere), so the stored evidence is left alone
+// rather than wiped; the linked-PR time is copied together with the issue layer
+// because zero then genuinely means "no linked PR".
+func applyLayerEvidence(item *ItemState, issueLayer, prAt time.Time, commentTotal int, commentTotalKnown bool) {
+	if !issueLayer.IsZero() {
+		item.IssueLayerUpdatedAt = issueLayer
+		item.LinkedPRUpdatedAt = prAt
+	}
+	if commentTotalKnown {
+		item.IssueCommentTotal = commentTotal
+		item.IssueCommentTotalKnown = true
+	}
 }
 
 func stateFrom(pi gh.ProjectItem) string {

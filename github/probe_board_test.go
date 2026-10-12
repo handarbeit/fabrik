@@ -365,3 +365,44 @@ func TestProbeProjectBoard_SkipsDraftItems(t *testing.T) {
 		t.Errorf("ItemID = %q, want PVTI_real", items[0].ItemID)
 	}
 }
+
+// TestProbeProjectBoard_LayerFields pins #2180: the probe reports the issue
+// layer (content and project item) separately from the linked PR's, plus the
+// issue's comment total, and leaves the comment total unknown when the
+// response omits it.
+func TestProbeProjectBoard_LayerFields(t *testing.T) {
+	t1 := "2024-01-01T10:00:00Z" // content updatedAt
+	t2 := "2024-01-01T09:00:00Z" // item updatedAt (earlier)
+	t3 := "2024-01-01T12:00:00Z" // linkedPR updatedAt (latest)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		withTotal := probeItemResponse("PVTI_1", "I_abc", 10, "Issue", "OPEN", t1, t2, "owner/repo", 99, t3)
+		withTotal["content"].(map[string]interface{})["comments"] = map[string]interface{}{"totalCount": 7}
+		without := probeItemResponse("PVTI_2", "I_def", 11, "Issue", "OPEN", t1, t2, "owner/repo", 0, "")
+		json.NewEncoder(w).Encode(probeResponse("user", "PVT_123", []interface{}{withTotal, without}, 2, false, ""))
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	items, _, err := c.ProbeProjectBoard("owner", "repo", 1, "user")
+	if err != nil {
+		t.Fatalf("ProbeProjectBoard: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("len(items) = %d, want 2", len(items))
+	}
+	issueWant, _ := time.Parse(time.RFC3339, t1)
+	prWant, _ := time.Parse(time.RFC3339, t3)
+	a := items[0]
+	if !a.IssueLayerUpdatedAt.Equal(issueWant) {
+		t.Errorf("IssueLayerUpdatedAt = %v, want %v (without the PR time)", a.IssueLayerUpdatedAt, issueWant)
+	}
+	if !a.LinkedPRUpdatedAt.Equal(prWant) || !a.EffectiveUpdatedAt.Equal(prWant) {
+		t.Errorf("LinkedPRUpdatedAt = %v, EffectiveUpdatedAt = %v, want both %v", a.LinkedPRUpdatedAt, a.EffectiveUpdatedAt, prWant)
+	}
+	if !a.IssueCommentTotalKnown || a.IssueCommentTotal != 7 {
+		t.Errorf("comment total = %d known=%v, want 7 known", a.IssueCommentTotal, a.IssueCommentTotalKnown)
+	}
+	if items[1].IssueCommentTotalKnown {
+		t.Errorf("comment total must be unknown when the response omits it")
+	}
+}
