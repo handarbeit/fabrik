@@ -1405,3 +1405,47 @@ func TestCreateBoardCore_BuiltInNameCollisionIsLeftUntouched(t *testing.T) {
 		t.Errorf("creates = %s", got)
 	}
 }
+
+// The install hint names both marketplace commands and the auto-update pointer
+// (#2141, FR-007).
+func TestPluginInstallHint(t *testing.T) {
+	h := pluginInstallHint()
+	for _, want := range []string{
+		"/plugin marketplace add handarbeit/fabrik",
+		"/plugin install fabrik@fabrik",
+		"auto-update",
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("hint lacks %q:\n%s", want, h)
+		}
+	}
+}
+
+func TestRunInit_PrintsPluginInstallHint(t *testing.T) {
+	dir := t.TempDir()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(orig) //nolint
+
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldOut := os.Stdout
+	os.Stdout = outW
+	runErr := runInit([]string{})
+	os.Stdout = oldOut
+	outW.Close()
+	out, _ := io.ReadAll(outR)
+	if runErr != nil {
+		t.Fatalf("runInit: %v", runErr)
+	}
+	if !strings.Contains(string(out), "/plugin install fabrik@fabrik") {
+		t.Errorf("runInit output lacks the plugin install hint:\n%s", out)
+	}
+}
