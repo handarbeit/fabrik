@@ -116,7 +116,12 @@ func TestKillProcGroup_NilProcess_NoOp(t *testing.T) {
 func startSessionWorker(t *testing.T) (worker *exec.Cmd, childPID int) {
 	t.Helper()
 	pidFile := t.TempDir() + "/child.pid"
-	cmd := exec.Command("sh", "-c", "perl -e '$SIG{INT}=q(DEFAULT); $SIG{QUIT}=q(DEFAULT); setpgrp(0,0); exec @ARGV' sleep 60 &\necho $! > "+pidFile+"\nwait\n")
+	// The child records its own PID only after setpgrp(), written to a temp file
+	// and renamed into place. The shell's `$!` is known before the background
+	// child runs at all, so a reader polling for it could sample the child while
+	// it was still in the worker's group and fail the fixture check below.
+	cmd := exec.Command("sh", "-c", "perl -e '$SIG{INT}=q(DEFAULT); $SIG{QUIT}=q(DEFAULT); setpgrp(0,0); open(my $f, q(>), \"$ENV{PIDFILE}.tmp\") or die; print $f $$; close($f) or die; rename(\"$ENV{PIDFILE}.tmp\", $ENV{PIDFILE}) or die; exec @ARGV' sleep 60 &\nwait\n")
+	cmd.Env = append(os.Environ(), "PIDFILE="+pidFile)
 	setCmdProcAttr(cmd)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
