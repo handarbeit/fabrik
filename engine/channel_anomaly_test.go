@@ -670,9 +670,11 @@ func TestCacheDivergence_NotRaised(t *testing.T) {
 		if len(ofType(evs, channelevents.CacheDivergence)) != 0 {
 			t.Fatalf("reported: %+v", evs)
 		}
-		for _, ev := range evs {
-			if ev.Meta[channelevents.MetaUnverified] != "" {
-				t.Fatalf("an unrelated reconcile change must not be unverified: %+v", ev)
+		// Since #2169 a label change only a reconcile saw (no webhook or engine
+		// write behind it) is unverified, but it is not a cache divergence.
+		for _, ev := range ofType(evs, channelevents.LabelRemoved) {
+			if ev.Meta[channelevents.MetaUnverified] != "true" {
+				t.Fatalf("an unattributable reconcile change must be unverified: %+v", ev)
 			}
 		}
 	})
