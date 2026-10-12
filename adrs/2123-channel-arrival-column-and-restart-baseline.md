@@ -26,7 +26,7 @@ State-derived events (pause family, `cycle-limit-near`) read labels through the 
 
 Matching: `Event.Labels` carries the arrival labels. A subscription's `labels` include patterns match when any of them matches; `exclude_labels` does not apply to `item-added`, so an arrival carrying `fabrik:editing` is not hidden. Repo, issue and milestone scopes apply as usual and an unknown milestone never matches a milestone scope (ADR-1966-a).
 
-Parking columns count as managed: any open on-board issue with a Status qualifies. The probe loop used to skip new items in `Unmanaged` stages entirely, which made a hand move out of Backlog a first sight rather than a move; it now seeds them (minimal `IssueOpened`, `LabelsAbsent`, inside `FromProbe`, still no deep fetch — #778 stands).
+Parking columns count as managed — see the arrival rule below (#2187, which amends the earlier "any open on-board issue with a Status qualifies"). The probe loop used to skip new items in `Unmanaged` stages entirely, which made a hand move out of Backlog a first sight rather than a move; it now seeds them (minimal `IssueOpened`, `LabelsAbsent`, inside `FromProbe`, still no deep fetch — #778 stands).
 
 Residuals, stated plainly: items created between hub start and the end of the first successful poll are silent; an arrival while the daemon is down is not captured (the existing "events during downtime" limit); an item that was absent from a probe (the 0-items guard) and later learned could be announced once.
 
@@ -59,6 +59,20 @@ The new code lives in `engine/channel_lifecycle.go` and the existing channel fil
 - `human` attribution of a column move needs a webhook; `unknown` is the common case and is documented.
 - Amends ADR-1966-b decision 4 ("first creation" → "first label-bearing population") and supersedes ADR 2125's `promote` note.
 - Documented in `docs/state-machine.md` §7.14/§7.15 and the `docs/USER_GUIDE.md` event table.
+
+## Amendment (#2187): the arrival rule
+
+`item-added` is published for an open, non-PR issue that arrives after startup in any column that has a configured stage — managed or `unmanaged` (Backlog included). An item in a board column with no configured stage is outside Fabrik's known column set and never produces `item-added`, whether it is first seen by the probe, a deep fetch or a reconcile.
+
+- **Supersedes #2123 FR-004's unmanaged exclusion.** FR-004 said unmanaged items must not produce `item-added`. The decision (2026-10-12) is the opposite: an overseer wants to know when work is filed, including into Backlog. The behaviour of PR #2175 was already this; it is now specified and tested.
+- **Keyed on the flag, not the name.** "Configured stage" means any stage loaded from the stage configuration (managed, unmanaged, holding such as `Queued`, or cleanup such as `Done`). A second unmanaged stage (e.g. `Triage`) behaves exactly like Backlog. The one name-based case is the one `stages.IsParkingColumn` already defines: a column literally named `Backlog` with no configured stage (installs that predate `backlog.yaml`) is a parking column, so it is seeded by the probe and announced. Any other column without a stage is not. The probe's parking-seed branch (`engine/terminal.go`) and `announceArrival` both use this one definition (`Engine.knownArrivalColumn`).
+- **Decided at evaluation time, in `announceArrival`.** Once the item has a Status, an unknown column drops the pending arrival for good; every entry path (probe, deep fetch, reconcile, webhook) ends there, so no new Store state is needed.
+- **First seen unconfigured, later moved:** one `column-changed` and no `item-added`. The move is a transition of an item the daemon already knows about. If the move happens before the debounced evaluation runs, the evaluation sees only the configured column and announces it once (an accepted race).
+- **Moving an announced item into a managed column** (Backlog → Specify) is one `column-changed` and never a second `item-added`: the move is not `Created`.
+- **Holding and cleanup columns** are configured stages, so an open item arriving directly in `Queued` or `Done` is announced.
+- **Announcement timing.** A parking-column card is seeded by the probe without labels, so its `item-added` waits for the first label-bearing population: a webhook `issues` payload immediately, otherwise the next light reconcile (about three minutes by default). Pending arrivals are dropped after the one-hour prune interval.
+- **Restarts.** `BootstrapFromProbe` → `Reset` puts every board item, unconfigured columns included, into the Store before `boardPopulated` is set and never sets `Created`, so the restart path suspected in the post-merge review does not produce `item-added` (the guard test `TestChannelRestartIsSilentForUnconfiguredColumn` passes on the pre-change code). The real gap was a card added *after* startup to an unconfigured column and first seen by a reconcile (`IssueOpened`, `Created`), now closed by the column check.
+- **Residuals** (unchanged, not extended): a record re-learned after a transient listing gap (`Remove` then `IssueOpened`) and the 0-items probe guard can still announce an existing item once; no seen-keys memory is added.
 
 ## Known limit: landings GitHub completes itself
 
