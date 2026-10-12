@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -56,6 +57,10 @@ func cloneRef(ctx context.Context, remoteURL, token, ref string, prNumber int) (
 		cleanup()
 		return "", func() {}, fmt.Errorf("checking out FETCH_HEAD: %w", err)
 	}
+	// FETCH_HEAD records the fetched URL, and the clone is readable by the
+	// reviewer (#2192): drop it so a credentialed remote URL can never be read
+	// from inside the review scope. Best effort; checkout no longer needs it.
+	_ = os.Remove(filepath.Join(dir, ".git", "FETCH_HEAD"))
 	return dir, cleanup, nil
 }
 
