@@ -142,3 +142,20 @@ func TestCloneURL_EmbedsCredentials(t *testing.T) {
 		t.Errorf("cloneURL = %q, want %q", url, want)
 	}
 }
+
+// TestCloneRef_NoFetchHeadInClone (#2192): FETCH_HEAD records the fetched URL,
+// which for a real review carries the installation token; the clone is
+// readable by the reviewer, so cloneRef must not leave the file behind.
+func TestCloneRef_NoFetchHeadInClone(t *testing.T) {
+	skipIfNoGit(t)
+	repoPath, _ := initSourceRepoWithPullRef(t, 43)
+
+	dir, cleanup, err := cloneRef(context.Background(), repoPath, "tok-123", "refs/pull/43/head", 43)
+	defer cleanup()
+	if err != nil {
+		t.Fatalf("cloneRef: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".git", "FETCH_HEAD")); err == nil {
+		t.Error("FETCH_HEAD left in the review clone")
+	}
+}
