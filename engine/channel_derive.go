@@ -180,6 +180,11 @@ func (e *Engine) pauseEventFor(st *itemstate.ItemState, key string, res attentio
 	ev.Content = fmt.Sprintf("%s %s: %s", issueRef(st.Repo, st.Number), lead, res.Summary)
 	ev.Meta["code"] = res.Code
 	ev.Meta["reason"] = res.Summary
+	// The same cause fabrik_status reports for this state (#2121); absent when
+	// the engine does not know one, never guessed.
+	if res.Cause != "" {
+		ev.Meta["cause"] = res.Cause
+	}
 	// A pause-family event that waits on a human says how to act, in the words
 	// of the engine's own pause comment (R-options-1/2): never a generic resume
 	// method that contradicts it.

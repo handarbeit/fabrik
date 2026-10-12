@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/handarbeit/fabrik/internal/attention"
 	"github.com/handarbeit/fabrik/internal/channelevents"
 	"github.com/handarbeit/fabrik/internal/itemstate"
 )
@@ -640,6 +641,7 @@ func (ce *channelEvents) itemWedgedEvent(h *wedgeHold, st *itemstate.ItemState, 
 	ev.DedupKey = wedgeKey("item-wedged", h)
 	held := int64(now.Sub(h.firstHeld).Seconds())
 	ev.Meta["gate"] = h.gate
+	ev.Meta["cause"] = attention.CauseGateHold(h.gate) // the status vocabulary's name for this hold (#2121)
 	ev.Meta["reason"] = h.reason
 	ev.Meta["held_seconds"] = strconv.FormatInt(held, 10)
 	if len(h.ids) > 0 {
