@@ -255,6 +255,8 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 	diff, err := client.FetchPRDiff(owner, repo, pr.Number)
 	var changedPaths []string
 	var omittedExcludedPaths, omittedTrimmedPaths []string
+	var stageBlocks []diffFileBlock // the blocks the model is told about, staged below
+	var stagePreamble string
 	if err != nil {
 		if !errors.Is(err, gh.ErrDiffTooLarge) {
 			return ReviewOutcome{Err: fmt.Errorf("fetching diff: %w", err)}
@@ -348,6 +350,7 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 		// below, so validRightAnchors (called further down) can never
 		// validate an anchor on an omitted file.
 		diff = joinDiff(preamble, kept)
+		stageBlocks, stagePreamble = kept, preamble
 		omittedExcludedPaths = pathsOf(excludedBlocks)
 		omittedTrimmedPaths = pathsOf(trimmedBlocks)
 
@@ -396,26 +399,27 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 
 	// Hand the model the diff we already have. The clone is a depth-1 fetch
 	// of refs/pull/<N>/head alone, so the base branch is not a ref in it and
-	// the model cannot derive the change from git — see ReviewRequest.DiffPath.
-	// Written outside the clone so it never appears in the reviewed tree,
-	// git status, or a Grep/Glob sweep of the repo.
+	// the model cannot derive the change from git — see ReviewRequest.Staged.
+	// Staged as a directory outside the clone (one entry per changed path or
+	// bounded chunk, plus an index), so it never appears in the reviewed tree,
+	// git status, or a Grep/Glob sweep of the repo, and no part of it sits
+	// behind a single Read call's limit (#2190).
 	// Guard the empty case explicitly. When FetchPRDiff returns 406
-	// too_large the files-API fallback above leaves diff == "", and writing
-	// that would hand the reviewer an empty file the prompt then calls the
+	// too_large the files-API fallback above leaves diff == "", and staging
+	// that would hand the reviewer an empty index the prompt then calls the
 	// authoritative statement of the change while telling it not to fall
-	// back to git — strictly worse than no file, and it would hit exactly
+	// back to git — strictly worse than nothing, and it would hit exactly
 	// the largest PRs.
-	var diffPath string
-	var cleanupDiff func()
+	var staged *StagedDiff
 	if diff == "" {
-		logf(pr.Number, "warn", "no diff text available for %s/%s#%d (size-guard fallback) — review proceeds without a diff file\n", owner, repo, pr.Number)
-	} else if diffPath, cleanupDiff, err = writeDiffFile(diff, pr.Number); err != nil {
+		logf(pr.Number, "warn", "no diff text available for %s/%s#%d (size-guard fallback) — review proceeds without a staged diff\n", owner, repo, pr.Number)
+	} else if s, cleanupStaged, stageErr := stageDiff(stageBlocks, stagePreamble, pr.Number); stageErr != nil {
 		// Non-fatal: the prompt degrades to its older base-branch wording
-		// rather than failing the review outright.
-		logf(pr.Number, "warn", "writing diff file for %s/%s#%d: %v — review will proceed without it\n", owner, repo, pr.Number, err)
-		diffPath = ""
-	} else if cleanupDiff != nil {
-		defer cleanupDiff()
+		// rather than failing the review outright, and coverage is partial.
+		logf(pr.Number, "warn", "staging diff for %s/%s#%d: %v — review will proceed without it\n", owner, repo, pr.Number, stageErr)
+	} else {
+		staged = s
+		defer cleanupStaged()
 	}
 
 	result, err := claude.Review(ctx, ReviewRequest{
@@ -425,19 +429,29 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 		OmittedExcludedPaths: omittedExcludedPaths, OmittedTrimmedPaths: omittedTrimmedPaths,
 		OperatorGuidance: cfg.ReviewGuidance, OperatorGuidanceMode: cfg.ReviewGuidanceMode,
 		RepoGuidance: repoGuidance, RepoGuidanceMode: repoGuidanceMode,
-		DiffPath: diffPath,
+		Staged: staged,
 	})
 	if err != nil {
 		logf(pr.Number, "claude", "review invocation failed for %s/%s#%d: %v — posting nothing\n", owner, repo, pr.Number, err)
 		return ReviewOutcome{Err: fmt.Errorf("claude review invocation: %w", err)}
 	}
 
-	summary, findings, parseInfo := parseReviewFindings(result.Text)
+	// #2190: the coverage report is stripped before the findings are parsed so
+	// it can never be read as part of the summary or the findings fence.
+	reported, reportOK, reviewText := extractCoverage(result.Text)
+	cov := computeCoverage(coverageInput{
+		Staged: staged, ChangedPaths: changedPaths, TrimmedPaths: omittedTrimmedPaths,
+		Reported: reported, ReportOK: reportOK,
+		Transcript: result.Opened, TranscriptAuthoritative: result.OpenedAuthoritative,
+	})
+	logCoverage(pr.Number, cov, result.OpenedAuthoritative)
+
+	summary, findings, parseInfo := parseReviewFindings(reviewText)
 	logSummaryParseInfo(pr.Number, parseInfo)
 	findings = dedupeFindings(findings)
 	event := decideEvent(findings, cfg.RequestChangesThreshold)
 	comments, demoted := partitionFindings(findings, validRightAnchors(diff))
-	body := buildReviewBody(summary, demoted)
+	body := appendCoverage(buildReviewBody(summary, demoted), cov)
 
 	if _, err := client.SubmitPRReview(owner, repo, pr.Number, pr.HeadSHA, body, event, comments); err != nil {
 		return ReviewOutcome{Err: fmt.Errorf("submitting review: %w", err)}

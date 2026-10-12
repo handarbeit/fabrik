@@ -287,7 +287,8 @@ func TestReviewPR_EligiblePR_SubmitsExactlyOneReview(t *testing.T) {
 		t.Fatalf("SubmitPRReview called %d times, want exactly 1", client.submitCallCount())
 	}
 	call := client.submitCalls[0]
-	if call.commitSHA != "sha1" || call.body != "Looks fine, one nit." {
+	// No diff text in this fixture, so nothing is staged and coverage is partial (#2190).
+	if call.commitSHA != "sha1" || call.body != "Looks fine, one nit.\n\nPRUEFER_COVERAGE: partial — no staged diff" {
 		t.Errorf("submitCall = %+v", call)
 	}
 	if call.event != gh.ReviewEventComment {
@@ -1412,7 +1413,7 @@ func TestReviewPR_FindingsMappedToChangedLines_PostsInlineComments(t *testing.T)
 	claude := &mockClaudeInvoker{fn: func(req ReviewRequest) (ReviewResult, error) {
 		return ReviewResult{Text: "Reviewed the change. Looks solid.\n\n```json\n" +
 			`[{"path": "engine/claude.go", "line": 954, "body": "consider a comment here"}]` +
-			"\n```\n"}, nil
+			"\n```\n" + coverageReportAll(req)}, nil
 	}}
 	clone, _ := fakeClone(t, nil)
 
@@ -1432,8 +1433,8 @@ func TestReviewPR_FindingsMappedToChangedLines_PostsInlineComments(t *testing.T)
 	if call.comments[0].Path != "engine/claude.go" || call.comments[0].Line != 954 {
 		t.Errorf("comment = %+v, want Path=engine/claude.go Line=954", call.comments[0])
 	}
-	if call.body != "Reviewed the change. Looks solid." {
-		t.Errorf("body = %q, want the prose summary only (no demoted-findings section)", call.body)
+	if call.body != "Reviewed the change. Looks solid.\n\nPRUEFER_COVERAGE: complete" {
+		t.Errorf("body = %q, want the prose summary only (no demoted-findings section) plus the coverage line", call.body)
 	}
 }
 
@@ -1481,8 +1482,8 @@ func TestReviewPR_NoAnchorableFindings_BodyOnly(t *testing.T) {
 	if len(call.comments) != 0 {
 		t.Errorf("comments = %+v, want none (plain-prose review, no fenced findings)", call.comments)
 	}
-	if call.body != "Looks fine, one nit." {
-		t.Errorf("body = %q, want the unmodified prose", call.body)
+	if !strings.HasPrefix(call.body, "Looks fine, one nit.\n\nPRUEFER_COVERAGE: partial") {
+		t.Errorf("body = %q, want the unmodified prose followed by the partial coverage line", call.body)
 	}
 }
 
