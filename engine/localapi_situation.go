@@ -28,7 +28,10 @@ const situationSectionMax = 10
 
 // situationScope narrows the item sections and item-scoped anomalies to what a
 // subscriber's subscriptions select. A nil scope selects everything. The account
-// sections (merge train, health, pipeline anomalies) are never narrowed.
+// sections (merge train, health, pipeline anomalies) are never narrowed, and
+// neither is the unclassified count: an item whose labels are not read yet cannot
+// be matched against a scope, so it is counted for every subscriber rather than
+// letting a scoped view present itself as complete.
 type situationScope func(channelevents.Event) bool
 
 // situationItem is one placed item before bounding.
