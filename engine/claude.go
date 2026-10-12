@@ -1317,10 +1317,13 @@ func sessionNameSentinel(repo string, issueNumber int, stageName string) string 
 // nothing else, so a user who has fabrik@fabrik installed does not get it in a
 // worker now that the stage plugin no longer shadows its name. The stage
 // plugins are --plugin-dir entries (<name>@inline), a separate identity that a
-// disabled marketplace plugin does not touch. That is the spec's
-// assumption; the live check (worker_settings_live_test.go) has so far shown the stage plugins still load
-// with this setting, but not yet that the PM plugin is absent when installed
-// (see ADR 2140, "Verification of the live assumption").
+// disabled marketplace plugin does not touch.
+//
+// Verification status: UNVERIFIED for the PM plugin. The live check
+// (worker_settings_live_test.go) has shown only that the stage plugins still
+// load with this setting; it has not yet shown the PM plugin absent on a host
+// where it is installed (see ADR 2140, "Verification of the live assumption").
+//
 // It carries only enabledPlugins, so the apiKeyHelper refusal (ADR 1346) —
 // which scans settings files, never this inline value — is unaffected.
 func workerSettingsJSON() string {
