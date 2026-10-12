@@ -623,6 +623,50 @@ func TestMigrate_NewNameReferenceOverPreRenameEditedSkillIsReported(t *testing.T
 	}
 }
 
+// An old-form reference over a plugin tree the binary already refreshed to the
+// renamed plugin, whose skills/plan the operator then edited: at runtime the
+// legacy mapping sends the reference to that edited copy, so the migration must
+// point it at the moved copy under its new name rather than at the restored
+// stock skill.
+func TestMigrate_OldFormReferenceOverNewNameEditIsRedirected(t *testing.T) {
+	dir := t.TempDir()
+	pluginDir := filepath.Join(dir, ".fabrik", "plugin")
+	if _, err := fabrikplugin.RefreshPluginTo(pluginDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := fabrikplugin.WriteInstalledVersion(pluginDir); err != nil {
+		t.Fatal(err)
+	}
+	skill := filepath.Join(pluginDir, "skills", "plan", "SKILL.md")
+	data, _ := os.ReadFile(skill)
+	if err := os.WriteFile(skill, append(data, []byte("\nLocal rule.\n")...), 0644); err != nil {
+		t.Fatal(err)
+	}
+	stagesDir := filepath.Join(dir, ".fabrik", "stages")
+	if err := os.MkdirAll(stagesDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stagesDir, "plan.yaml"), []byte("name: Plan\nskill: fabrik:fabrik-plan\ncomment_skill: fabrik-plan-comment\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	chdirTest(t, dir)
+	plan, err := planMigration(".", true, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := applyMigration(plan, &buf); err != nil {
+		t.Fatal(err)
+	}
+	refs := stageRefs(t, dir)
+	if refs["plan.yaml:skill"] != "local-workflows:plan" {
+		t.Errorf("edited skill not redirected to the moved copy: %v", refs)
+	}
+	if refs["plan.yaml:comment_skill"] != "fabrik-stages:plan-comment" {
+		t.Errorf("unedited skill not moved to the base plugin: %v", refs)
+	}
+}
+
 func TestMigrate_PendingIsFalseForMigratedDeployment(t *testing.T) {
 	dir := deployFixture(t, "v0.0.77")
 	editSkill(t, dir, "fabrik-plan")

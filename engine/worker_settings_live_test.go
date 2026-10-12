@@ -71,9 +71,16 @@ func TestLive_WorkerExcludesPMPluginAndLoadsStagePlugins(t *testing.T) {
 		t.Fatal("no system/init event from claude")
 	}
 
+	// The init event's plugin shape has not been observed on a host that has
+	// the PM plugin installed, so match on every identity it could carry — the
+	// marketplace id in source, or the bare PM plugin name — and log the raw list
+	// so the first such run shows what the fields really hold.
+	t.Logf("init plugins: %+v", init.Plugins)
+	pmName, _, _ := strings.Cut(plugin.PMPluginID, "@")
 	for _, p := range init.Plugins {
-		if p.Source == plugin.PMPluginID || strings.HasPrefix(p.Source, plugin.PMPluginID) {
-			t.Errorf("PM plugin %s is loaded in the worker", p.Source)
+		if p.Source == plugin.PMPluginID || strings.HasPrefix(p.Source, plugin.PMPluginID) ||
+			p.Name == pmName || p.Name == plugin.PMPluginID {
+			t.Errorf("PM plugin is loaded in the worker: %+v", p)
 		}
 	}
 	loaded := false

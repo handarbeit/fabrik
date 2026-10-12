@@ -202,12 +202,22 @@ func planMigration(dir string, isDev bool, devOverride string) (*migrationPlan, 
 			// A pre-#2140 reference to a base skill (the old qualified form or
 			// the bare fabrik-<stage> name; ADR 2140). The same table the runtime
 			// resolver falls back on decides what it maps to. If the operator
-			// edited that skill, the edit lives in local-workflows under its
-			// old name, so the reference points there and the edit survives.
+			// edited that skill, the edit lives in local-workflows, so the
+			// reference points there and the edit survives. edited is keyed by
+			// the skill name on disk: the old name (fabrik-<stage>) for a tree
+			// edited before the rename, the new name (<stage>) for a tree the
+			// binary had already refreshed to the renamed plugin before the
+			// operator edited it — the legacy mapping resolves this reference to
+			// that edited copy at runtime, so both are checked.
 			if newRef, legacy := fabrikplugin.LegacyRef(ref); legacy {
 				_, oldSkill, _ := fabrikplugin.Split(ref)
-				if hasLocal && edited[oldSkill] {
-					return fabrikplugin.Qualify(fabrikplugin.LocalWorkflowsName, oldSkill), true
+				if hasLocal {
+					if edited[oldSkill] {
+						return fabrikplugin.Qualify(fabrikplugin.LocalWorkflowsName, oldSkill), true
+					}
+					if _, newSkill, _ := fabrikplugin.Split(newRef); edited[newSkill] {
+						return fabrikplugin.Qualify(fabrikplugin.LocalWorkflowsName, newSkill), true
+					}
 				}
 				return newRef, true
 			}

@@ -68,9 +68,11 @@ disk, not from what the binary expects.
   `needs-human` state.
 - **Drift is unchanged.** `stages/drift.go` compares key presence only, so bare vs
   qualified is never drift; a test pins that.
-- **Shipped defaults are written qualified** (`fabrik:fabrik-<stage>`), so a fresh `fabrik *(Amended by ADR 2140: the base plugin is now `fabrik-stages` and defaults are written `fabrik-stages:<stage>`.)*
+- **Shipped defaults are written qualified** (`fabrik:fabrik-<stage>`), so a fresh `fabrik
   init` starts without a deprecation notice. Existing configuration is untouched;
   rewriting it and moving customisations is `fabrik upgrade`'s job (#2139).
+  *(Amended by ADR 2140: the base plugin is now `fabrik-stages` and defaults are
+  written `fabrik-stages:<stage>`.)*
 
 ## Consequences
 
