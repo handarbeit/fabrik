@@ -98,3 +98,31 @@ func TestPRFactsSnapshotsAreIsolated(t *testing.T) {
 		t.Errorf("snapshot mutation leaked into the store: %+v %+v", again.LinkedPR.Facts, again.LinkedPR.CIVerdict)
 	}
 }
+
+// An engine without the board probe never records a head outside a gate: the
+// verdict is then keyed to the head the facts were read for, and is dropped
+// when the engine records a different head later (#2122).
+func TestCIVerdictUsesTheFactsHeadUntilTheEngineRecordsOne(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	applyExpect(t, s, PRDetailsUpdated{Repo: testRepo, Number: 1, PRNumber: 7}, LinkedPRChanged|PRStateChanged)
+	at := time.Now()
+	if _, _, err := s.Apply(PRFactsObserved{Repo: testRepo, Number: 1, PRNumber: 7, Facts: PRFacts{State: "open", HeadSHA: "aaa", ObservedAt: at}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := getItem(t, s, testRepo, 1).LinkedPR.ObservedHead(); got != "aaa" {
+		t.Fatalf("ObservedHead = %q, want the facts head", got)
+	}
+	if _, _, err := s.Apply(CIVerdictObserved{Repo: testRepo, Number: 1, Verdict: CIVerdictRecord{Verdict: "red", HeadSHA: "aaa", ObservedAt: at}}); err != nil {
+		t.Fatal(err)
+	}
+	if v := getItem(t, s, testRepo, 1).LinkedPR.CIVerdict; v.Verdict != "red" {
+		t.Fatalf("verdict not stored against the facts head: %+v", v)
+	}
+	if _, _, err := s.Apply(PRHeadSHAUpdated{Repo: testRepo, Number: 1, LinkedPRNum: 7, SHA: "bbb"}); err != nil {
+		t.Fatal(err)
+	}
+	lpr := getItem(t, s, testRepo, 1).LinkedPR
+	if lpr.CIVerdict.Verdict != "" || lpr.ObservedHead() != "bbb" {
+		t.Errorf("a verdict for another head survived the engine recording one: %+v", lpr)
+	}
+}

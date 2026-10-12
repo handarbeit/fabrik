@@ -267,7 +267,7 @@ func resumeMethodOf(st *itemstate.ItemState) attention.ResumeMethod {
 // what a red one means.
 func (e *Engine) attentionCIFact(lpr *itemstate.LinkedPRState, now time.Time) *attention.CIFact {
 	v := lpr.CIVerdict
-	if v.Verdict == "" || v.HeadSHA == "" || v.HeadSHA != lpr.HeadSHA {
+	if v.Verdict == "" || v.HeadSHA == "" || v.HeadSHA != lpr.ObservedHead() {
 		return nil
 	}
 	f := lpr.Facts

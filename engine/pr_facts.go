@@ -154,10 +154,10 @@ func (e *Engine) refreshPRFacts(c prFactsCandidate, pollStart, now time.Time, ch
 
 	// A verdict applies to an open PR only; facts never observed mean we cannot
 	// tell, so nothing is computed (the API keeps saying unknown).
-	if lpr.Facts.State != "open" || lpr.Facts.Merged || lpr.HeadSHA == "" {
+	if lpr.Facts.State != "open" || lpr.Facts.Merged || lpr.ObservedHead() == "" {
 		return
 	}
-	head := lpr.HeadSHA
+	head := lpr.ObservedHead()
 	rec := lpr.CIVerdict
 
 	// A READY cached set whose latest runs are unchanged since a green verdict

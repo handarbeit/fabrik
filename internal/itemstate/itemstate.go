@@ -402,6 +402,17 @@ type LinkedPRState struct {
 	LastCIProgressAt time.Time
 }
 
+// ObservedHead is the head SHA the overseer view reports for the PR: the one
+// the engine's own paths recorded, else the head the PR facts were read for
+// (an engine without the board probe never records one outside a gate). It
+// only reads; nothing the gates consult is written from it (#2122).
+func (l *LinkedPRState) ObservedHead() string {
+	if l.HeadSHA != "" {
+		return l.HeadSHA
+	}
+	return l.Facts.HeadSHA
+}
+
 // StageState holds per-stage attempt counters and cycle counts.
 // Keys are stage names (e.g. "Implement", "Review").
 type StageState struct {

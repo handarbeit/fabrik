@@ -1053,12 +1053,13 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 				item.LinkedPR.CheckRuns = nil
 				flags |= CheckRunChanged
 			}
-			// The overseer CI verdict is valid for one head only (#2122,
-			// FR-007): drop it with the runs it was computed from.
-			if item.LinkedPR.CIVerdict.HeadSHA != "" && item.LinkedPR.CIVerdict.HeadSHA != v.SHA {
-				item.LinkedPR.CIVerdict = CIVerdictRecord{}
-				flags |= PRFactsChanged
-			}
+		}
+		// The overseer CI verdict is valid for one head only (#2122, FR-007):
+		// drop it when the head moves, including the first head the engine
+		// records after a verdict was computed for the facts' head.
+		if item.LinkedPR.CIVerdict.HeadSHA != "" && item.LinkedPR.CIVerdict.HeadSHA != v.SHA {
+			item.LinkedPR.CIVerdict = CIVerdictRecord{}
+			flags |= PRFactsChanged
 		}
 		item.LinkedPR.HeadSHA = v.SHA
 		// Drain any pre-linkage check runs buffered for this SHA.
@@ -1104,7 +1105,7 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		return PRFactsChanged
 
 	case CIVerdictObserved:
-		if item.LinkedPR == nil || v.Verdict.HeadSHA == "" || item.LinkedPR.HeadSHA != v.Verdict.HeadSHA {
+		if item.LinkedPR == nil || v.Verdict.HeadSHA == "" || item.LinkedPR.ObservedHead() != v.Verdict.HeadSHA {
 			return 0
 		}
 		cur := item.LinkedPR.CIVerdict
