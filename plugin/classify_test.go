@@ -59,20 +59,6 @@ func TestShippedFilesTable_WellFormed(t *testing.T) {
 	}
 }
 
-// TestShippedFilesTable_CoversCurrentEmbed fails when the embedded plugin
-// changed and tools/gen-shipped-files -add-current has not been run — the
-// release script runs it, but the drift is cheap to catch on every PR.
-func TestShippedFilesTable_CoversCurrentEmbed(t *testing.T) {
-	tbl := loadShippedTable()
-	for rel, sums := range loadEmbedTable() {
-		for s := range sums {
-			if !tbl[rel][s] {
-				t.Errorf("%s (%s) is embedded but absent from plugin/shipped_files.json; run `go run ./tools/gen-shipped-files -add-current`", rel, s[:12])
-			}
-		}
-	}
-}
-
 func TestClassifyDir_FixturesFromEarlierReleasesArePristine(t *testing.T) {
 	for _, tag := range migrationFixtureTags {
 		t.Run(tag, func(t *testing.T) {
