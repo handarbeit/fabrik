@@ -17,17 +17,7 @@ import (
 func settleCruiseItem(t *testing.T, env *Env, sink *simSink, title string) (int, channelevents.Event) {
 	t.Helper()
 	num := FileIssue(t, env, title, "Re-settle.", "Implement", "fabrik:cruise")
-	WaitForIssueLabel(t, env, num, "fabrik:awaiting-ci", 80)
-	pr, err := env.Sim.FetchLinkedPR(env.Owner, env.Repo, num)
-	if err != nil || pr == nil {
-		t.Fatalf("linked PR: %v", err)
-	}
-	// The sim has no pull_request webhook feed, so give the store the head a
-	// real daemon would hold.
-	env.Engine.SeedLinkedPRHeadForTest(env.OwnerRepo, num, pr.Number, pr.HeadSHA)
-	env.Sim.Sim().SeedCheckRun(env.OwnerRepo, pr.HeadSHA, gh.CheckRun{Name: conjunctiveGateCheck, Status: "completed", Conclusion: "success"})
-	WaitForIssueLabel(t, env, num, "fabrik:awaiting-review", 80)
-	env.Sim.Sim().SeedReview(env.OwnerRepo, pr.Number, gh.PRReview{Author: "reviewer-human", State: "APPROVED"})
+	driveToSettled(t, env, num)
 	AdvanceUntil(t, env, func(*Env) bool {
 		settleWait()
 		return len(sink.ofType(channelevents.ValidateSettled, num)) == 1
@@ -39,6 +29,31 @@ func settleCruiseItem(t *testing.T, env *Env, sink *simSink, title string) (int,
 		t.Fatalf("want exactly one first settle, got %d", len(got))
 	}
 	return num, got[0]
+}
+
+// driveToSettled takes a filed cruise item through the conjunctive gates (CI
+// green, one approving review) so it reaches the settle point.
+func driveToSettled(t *testing.T, env *Env, num int) {
+	t.Helper()
+	WaitForIssueLabel(t, env, num, "fabrik:awaiting-ci", 80)
+	pr, err := env.Sim.FetchLinkedPR(env.Owner, env.Repo, num)
+	if err != nil || pr == nil {
+		t.Fatalf("linked PR: %v", err)
+	}
+	// The sim has no pull_request webhook feed, so give the store the head a
+	// real daemon would hold.
+	env.Engine.SeedLinkedPRHeadForTest(env.OwnerRepo, num, pr.Number, pr.HeadSHA)
+	env.Sim.Sim().SeedCheckRun(env.OwnerRepo, pr.HeadSHA, gh.CheckRun{Name: conjunctiveGateCheck, Status: "completed", Conclusion: "success"})
+	WaitForIssueLabel(t, env, num, "fabrik:awaiting-review", 80)
+	env.Sim.Sim().SeedReview(env.OwnerRepo, pr.Number, gh.PRReview{Author: "reviewer-human", State: "APPROVED"})
+}
+
+// settleOnCruise drives a filed cruise item to settled and lets the consumer publish.
+func settleOnCruise(t *testing.T, env *Env, num int) {
+	t.Helper()
+	driveToSettled(t, env, num)
+	RunPolls(t, env, 12)
+	settleWait()
 }
 
 // swapAutonomy replaces the cruise label with yolo the way a human would: on

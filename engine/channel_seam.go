@@ -6,6 +6,7 @@ import (
 
 	"github.com/handarbeit/fabrik/internal/channelevents"
 	"github.com/handarbeit/fabrik/internal/itemstate"
+	"github.com/handarbeit/fabrik/internal/localapi"
 )
 
 // Test seams for the channel-event hub (#1968), for tests/sim, which drives the
@@ -148,3 +149,8 @@ func (e *Engine) ApplyLabelWebhookForTest(repo string, number int, label string,
 	}
 	e.store.Apply(itemstate.IssueUnlabeled{Repo: repo, Number: number, Label: label, Sender: sender})
 }
+
+// ChannelStreamerForTest returns the localapi.Streamer the daemon hands its
+// socket server (nil when the hub is not running), so a scenario can subscribe
+// and attach through the same code the MCP shim reaches.
+func (e *Engine) ChannelStreamerForTest() localapi.Streamer { return e.channelStreamer() }
