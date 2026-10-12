@@ -732,10 +732,13 @@ func TestAnomalyDetectors_NonVacuous(t *testing.T) {
 		if len(ofType(evs, channelevents.CacheDivergence)) != 0 {
 			t.Fatalf("disabled detector still published: %+v", evs)
 		}
-		// The reconcile-seen label change is still marked unverified, but by its
-		// origin (#2169 R3a: no known write or webhook backs it), not by the
-		// divergence detector: the revert of a recent engine write adds no
-		// cache-divergence event of its own when the detector is off.
+		// The reconcile-seen revert of the engine's label is still marked
+		// unverified, but by its origin (#2169 R3a: no known write or webhook backs
+		// it), not by the divergence detector, which is off and raised nothing.
+		removed := ofType(evs, channelevents.LabelRemoved)
+		if len(removed) != 1 || removed[0].Meta[channelevents.MetaUnverified] != "true" {
+			t.Fatalf("the reconcile-seen label removal must be unverified by origin: %+v", evs)
+		}
 	})
 }
 

@@ -129,6 +129,10 @@ type channelEvents struct {
 	looked  map[string]bool
 	pend    map[string]*priorEntry
 	warmBuf []channelevents.Event
+	// unpub holds the items with a downtime delta still in warmBuf: the ledger
+	// does not follow them until the delta is published, so a hard kill while
+	// warming leaves the old record to be diffed again by the next start.
+	unpub map[string]bool
 	// autonomy is who last wrote each item's fabrik:cruise / fabrik:yolo label,
 	// for the cause of a re-settle (also under dmu).
 	autonomy map[string]autonomyActor
@@ -180,6 +184,7 @@ func (e *Engine) startChannelEventsIn(dir string, warming bool) {
 		memo:     map[string]*itemMemo{},
 		looked:   map[string]bool{},
 		pend:     map[string]*priorEntry{},
+		unpub:    map[string]bool{},
 		wake:     make(chan struct{}, 1),
 		stop:     make(chan struct{}),
 		readyBy:  time.Now().Add(channelReadyTimeout),

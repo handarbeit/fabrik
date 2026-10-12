@@ -58,5 +58,5 @@ An autonomy change while the item stays settled ends the open episode without `s
 - A reacting session sees a deterministic restart sequence and loses no downtime change that the daemon could observe.
 - Old shims keep working; they ignore `origin` and `cause`, which are plain meta.
 - Existing overseers keep their label events until they resubscribe.
-- After a crash the ledger can be one flush window stale, and a change already delivered can be reported once more, marked `unverified`.
+- After a crash the ledger can be one flush window stale, and a change already delivered can be reported once more, marked `unverified`. The reverse loss is closed: an item whose downtime delta is still held in memory while the daemon warms keeps its previous ledger record until the delta is published (`releaseUnpub`), so a kill during warming makes the next start diff it again instead of losing it.
 - `engine/channel_*.go` still reads item state only through the store and the ledger, and costs no GitHub call (R9/R10).

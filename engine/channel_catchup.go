@@ -99,6 +99,13 @@ func (e *Engine) catchUpEvents() []channelevents.Event {
 	out = append(out, e.pipelineCatchUpEvents(now)...)
 	// Open retry-starved and item-wedged episodes are current state too (#2170).
 	out = append(out, e.anomalyCatchUpEvents(now)...)
+	// Whatever a builder stamped before it was tagged (the stall builders finish
+	// their event as live), every event of the snapshot is a catch_up (#2169 R3a).
+	for i := range out {
+		if out[i].Meta["catch_up"] == "true" {
+			out[i].Meta[channelevents.MetaSource] = channelevents.SourceCatchUp
+		}
+	}
 	return out
 }
 

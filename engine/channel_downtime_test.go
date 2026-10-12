@@ -230,3 +230,36 @@ func TestDowntimeClosedIsNotReportedTwice(t *testing.T) {
 		t.Fatalf("one closed event expected, got %d", closed)
 	}
 }
+
+// A downtime delta held back while warming must survive a hard kill: the ledger
+// keeps the previous run's record for that item until the delta is published, so
+// the next start diffs it again instead of finding nothing changed.
+func TestWarmingKeepsLedgerAtPriorStateUntilDeltaPublished(t *testing.T) {
+	dir := t.TempDir()
+	writeLedger(t, dir, map[string]channelevents.Observation{
+		"owner/repo#1": {Labels: []string{"gone"}, LabelsKnown: true, Status: "Implement"},
+		"owner/repo#2": {Labels: []string{"same"}, LabelsKnown: true, Status: "Implement"},
+	})
+	e, sink := downtimeEngine(t, dir, true)
+	e.seedAPIItem(t, 1, "Review", "new")  // moved and relabelled while down: a held delta
+	e.seedAPIItem(t, 2, "Review", "same") // moved while down too, but another item
+	sink.quiet(t, 300*time.Millisecond)   // warming: nothing published
+
+	ce := e.channelEvents()
+	ce.ledger.Flush()
+	// What a restart after a kill here would load.
+	l := channelevents.OpenLedger(dir, nil, nil)
+	r1, _ := l.TakePrior("owner/repo#1")
+	if r1.Status != "Implement" || len(r1.Labels) != 1 || r1.Labels[0] != "gone" {
+		t.Fatalf("the ledger must still hold the prior state of an item with a held delta: %+v", r1)
+	}
+
+	// Once the held deltas are handed to the hub the ledger follows.
+	ce.spillWarm()
+	ce.ledger.Flush()
+	l2 := channelevents.OpenLedger(dir, nil, nil)
+	r1, _ = l2.TakePrior("owner/repo#1")
+	if r1.Status != "Review" || len(r1.Labels) != 1 || r1.Labels[0] != "new" {
+		t.Fatalf("after the delta is published the ledger must record the current state: %+v", r1)
+	}
+}

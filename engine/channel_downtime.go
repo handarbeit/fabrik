@@ -55,8 +55,19 @@ func unattributed(o itemstate.ChangeOrigin) bool {
 }
 
 // observeLedger records the item's state as just observed.
+//
+// An item whose downtime delta is still held back (warmBuf) is not recorded: the
+// ledger keeps the previous run's state for it until the delta has been
+// published, so a crash or kill while warming cannot swallow the delta (the next
+// start diffs it again, at worst delivering it twice, marked unverified).
 func (ce *channelEvents) observeLedger(key string, st *itemstate.ItemState) {
 	if ce.ledger == nil {
+		return
+	}
+	ce.dmu.Lock()
+	held := ce.unpub[key]
+	ce.dmu.Unlock()
+	if held {
 		return
 	}
 	ce.ledger.Observe(key, channelevents.Observation{
@@ -119,6 +130,9 @@ func (ce *channelEvents) downtimeCheck(key string, st *itemstate.ItemState) (evs
 	if p.statusDone && p.labelsDone {
 		delete(ce.pend, key)
 	}
+	if len(evs) > 0 && !ce.ready.Load() {
+		ce.unpub[key] = true
+	}
 	for i := range evs {
 		if evs[i].Meta == nil {
 			evs[i].Meta = map[string]string{}
@@ -164,8 +178,7 @@ func (ce *channelEvents) holdWarm(ev channelevents.Event) bool {
 }
 
 // spillWarm publishes any deltas still held back, so a daemon that exits while
-// warming does not lose them (the ledger has already moved on to the new state).
-// They reach the held queues ahead of the next start's catch-up, which is a
+// warming does not lose them. They reach the held queues ahead of the next start's catch-up, which is a
 // harmless reordering in a rare case. Safe with nothing held.
 func (ce *channelEvents) spillWarm() {
 	ce.dmu.Lock()
@@ -174,6 +187,29 @@ func (ce *channelEvents) spillWarm() {
 	ce.dmu.Unlock()
 	for _, ev := range buf {
 		ce.hub.Publish(finishEvent(ev))
+	}
+	ce.releaseUnpub()
+}
+
+// releaseUnpub lets the ledger follow the items whose held deltas have now been
+// published (or handed to the hub), recording each one's current state.
+func (ce *channelEvents) releaseUnpub() {
+	ce.dmu.Lock()
+	keys := make([]string, 0, len(ce.unpub))
+	for k := range ce.unpub {
+		keys = append(keys, k)
+	}
+	ce.unpub = map[string]bool{}
+	ce.dmu.Unlock()
+	for _, k := range keys {
+		repo, n, ok := parseIssueRef(k)
+		if !ok {
+			continue
+		}
+		if snap, ok := ce.e.store.Peek(repo, n); ok {
+			st := snap.State()
+			ce.observeLedger(k, &st)
+		}
 	}
 }
 
@@ -217,6 +253,7 @@ func (ce *channelEvents) checkReady() {
 	for _, ev := range buf {
 		ce.hub.Publish(finishEvent(ev))
 	}
+	ce.releaseUnpub()
 	if len(buf) > 0 {
 		ce.e.logf(0, "channel", "restart: %d change(s) made while the daemon was down delivered\n", len(buf))
 	}
