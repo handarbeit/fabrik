@@ -58,25 +58,25 @@ When Fabrik is upgraded, it also compares your `.fabrik/stages/*.yaml` files aga
 
 ## Fabrik PM Plugin (Claude Code Companion)
 
-Don't want to install the binary yet? You can still get value from Fabrik by installing the **Fabrik PM plugin** in your interactive Claude Code session. It gives Claude ambient awareness of your Fabrik-managed project so you can ask things like *"what's on the board?"*, *"why is #42 stuck?"*, or *"what's in progress?"* without leaving your editor.
+Install the **Fabrik PM plugin** in your interactive Claude Code session and Claude answers *"what's the status of #42?"*, *"what needs me?"* and *"is the pipeline healthy?"* from your running Fabrik daemon — column, time in column, worker, PR and CI, blockers and what the engine will do next — instead of scraping GitHub.
 
-Run these in any Claude Code session:
+Run these in any Claude Code session (the `fabrik` binary must be on your `PATH`):
 
 ```
 /plugin marketplace add handarbeit/fabrik
 /plugin install fabrik@fabrik
-/reload-plugins
 ```
 
-After install you get:
+`fabrik init` prints the same two commands. After install you get:
 
-- **`fabrik:fabrik` skill** — auto-activates when `.fabrik/` is detected or Fabrik is mentioned. Provides ambient PM awareness of the board, stages, and stuck items.
+- **Daemon-backed tools** — the plugin starts `fabrik mcp`: `fabrik_status`, `fabrik_board` and `fabrik_health` for state, plus audited overseer actions (promote, advance, set autonomy, re-run Validate, clear a Claude usage-limit hold). No action lifts a pause; a human comment does.
+- **`fabrik:fabrik` skill** — auto-activates when `.fabrik/` is detected or Fabrik is mentioned: the PM mental model, the attention states and the steering labels.
 - **`fabrik:fabrik-setup` skill** — one-time onboarding walkthrough for setting up Fabrik from scratch.
-- **`/fabrik:status` command** — board snapshot: what's in each pipeline stage, which workers are running, which worktrees have uncommitted changes.
+- **`/fabrik:status` command** — what needs you, what is in flight and daemon health, from the daemon.
 
-The PM plugin is independent of the engine — install it on its own to chat about a Fabrik-managed repo, or pair it with the binary for the full experience. See [Install the Fabrik PM Plugin](docs/USER_GUIDE.md#install-the-fabrik-pm-plugin) in the User Guide for details and upgrade instructions.
+Each Fabrik release pins the marketplace to its own tag and sets the plugin's version to the binary's, so you only ever get released changes; a session-start notice tells you if your plugin and binary versions differ. See [Install the Fabrik PM Plugin](docs/USER_GUIDE.md#install-the-fabrik-pm-plugin) in the User Guide for settings, auto-update and the optional push-events opt-in.
 
-> **Distinct from `fabrik-workflows`**: the engine's stage skills are embedded in the binary and deployed automatically to `.fabrik/plugin/` by `fabrik init`. You do not — and should not — install `fabrik-workflows` manually.
+> **Distinct from `fabrik-stages`**: the engine's stage skills are embedded in the binary and deployed automatically to `.fabrik/plugin/` by `fabrik init`. You do not — and should not — install them manually, and Fabrik keeps the PM plugin out of every worker it spawns.
 
 ## Entwurf Plugin
 

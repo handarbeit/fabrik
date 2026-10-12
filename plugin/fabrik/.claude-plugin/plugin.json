@@ -7,5 +7,19 @@
     "url": "https://handarbeit.io"
   },
   "homepage": "https://fabrik.handarbeit.io",
-  "repository": "https://github.com/handarbeit/fabrik"
+  "repository": "https://github.com/handarbeit/fabrik",
+  "userConfig": {
+    "subscriber": {
+      "type": "string",
+      "title": "Subscriber name",
+      "description": "Stable name this session attaches to the Fabrik daemon under (your topic or session name, never a PID). Needed for the overseer actions (they sign their audit comment with it) and for pushed channel events. Leave empty for read-only use.",
+      "required": false
+    },
+    "fabrik_dir": {
+      "type": "directory",
+      "title": "Fabrik directory",
+      "description": "Directory of the Fabrik daemon to talk to. Leave empty to use the daemon of the directory your Claude Code session is in.",
+      "required": false
+    }
+  }
 }

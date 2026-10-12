@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/handarbeit/fabrik/internal/localapi"
@@ -14,7 +15,8 @@ import (
 )
 
 // runMCP implements `fabrik mcp`: a stdio MCP server (launched per session by
-// Claude Code — `claude mcp add fabrik -- fabrik mcp`) that proxies the
+// Claude Code — via the `fabrik` plugin's bundled .mcp.json, or by hand with
+// `claude mcp add fabrik -- fabrik mcp`) that proxies the
 // read-only fabrik_status / fabrik_board / fabrik_health / fabrik_situation tools,
 // and the six overseer action tools (#1969, ADR-1966-c), to the running daemon's local
 // socket (#1967, ADR-1966-a).
@@ -25,7 +27,7 @@ import (
 func runMCP(args []string) error {
 	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	dir := fs.String("dir", "", "Fabrik directory of the daemon to talk to (default: the current directory)")
+	dir := fs.String("dir", "", "Fabrik directory of the daemon to talk to (default: $FABRIK_MCP_DIR, else $CLAUDE_PROJECT_DIR, else the current directory)")
 	subscriber := fs.String("subscriber", "", "stable name this server attaches to the daemon under for pushed channel events — your topic or session name, never a PID (default: $FABRIK_SUBSCRIBER; empty disables push)")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: fabrik mcp [--dir <fabrik-dir>] [--subscriber <name>]\n\n")
@@ -35,7 +37,8 @@ func runMCP(args []string) error {
 		fmt.Fprintf(os.Stderr, "audit comment naming it). Register it with: claude mcp add fabrik -- fabrik mcp\n\n")
 		fmt.Fprintf(os.Stderr, "With --subscriber (or FABRIK_SUBSCRIBER) it also pushes events into the session via\n")
 		fmt.Fprintf(os.Stderr, "Claude Code Channels (research preview); start claude with\n")
-		fmt.Fprintf(os.Stderr, "--dangerously-load-development-channels server:fabrik to receive them.\n\n")
+		fmt.Fprintf(os.Stderr, "--dangerously-load-development-channels server:fabrik (plugin install:\n")
+		fmt.Fprintf(os.Stderr, "plugin:fabrik@fabrik) to receive them.\n\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -45,15 +48,11 @@ func runMCP(args []string) error {
 		return fmt.Errorf("fabrik mcp: unexpected argument %q", fs.Arg(0))
 	}
 
-	fabrikDir := *dir
-	if fabrikDir == "" {
-		wd, err := os.Getwd()
-		if err != nil {
-			return fmt.Errorf("fabrik mcp: determining the current directory: %w", err)
-		}
-		fabrikDir = wd
+	fabrikDir, err := resolveMCPDir(*dir)
+	if err != nil {
+		return err
 	}
-	fabrikDir, err := filepath.Abs(fabrikDir)
+	fabrikDir, err = filepath.Abs(fabrikDir)
 	if err != nil {
 		return fmt.Errorf("fabrik mcp: resolving --dir: %w", err)
 	}
@@ -79,8 +78,39 @@ func runMCP(args []string) error {
 // is deliberately no generated default — the name keys the daemon's held queue,
 // so it must be stable across sessions (#1968).
 func subscriberName(flagValue string) string {
-	if flagValue != "" {
-		return flagValue
+	if v := settingValue(flagValue); v != "" {
+		return v
 	}
-	return os.Getenv("FABRIK_SUBSCRIBER")
+	return settingValue(os.Getenv("FABRIK_SUBSCRIBER"))
+}
+
+// settingValue returns v, or "" when v is an unexpanded "${...}" placeholder.
+// The fabrik plugin's .mcp.json passes optional user settings through the
+// environment; if Claude Code leaves the literal ${user_config.X} text in place
+// for a setting the user never filled in, that text must read as "not set", not
+// as a subscriber name or a directory (#2141).
+func settingValue(v string) string {
+	if strings.Contains(v, "${") {
+		return ""
+	}
+	return v
+}
+
+// resolveMCPDir resolves the Fabrik directory: --dir, else $FABRIK_MCP_DIR (the
+// fabrik plugin's optional directory setting, passed through the environment so
+// an unset setting is an empty variable rather than an empty argument), else
+// $CLAUDE_PROJECT_DIR (the session's project, which Claude Code exports to
+// plugin MCP servers whatever their own working directory is), else the
+// current directory (#2141).
+func resolveMCPDir(flagValue string) (string, error) {
+	for _, v := range []string{flagValue, os.Getenv("FABRIK_MCP_DIR"), os.Getenv("CLAUDE_PROJECT_DIR")} {
+		if v = settingValue(v); v != "" {
+			return v, nil
+		}
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("fabrik mcp: determining the current directory: %w", err)
+	}
+	return wd, nil
 }
