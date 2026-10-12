@@ -124,13 +124,11 @@ func (e *Engine) refreshPRFacts(c prFactsCandidate, pollStart, now time.Time, ch
 				e.logf(c.item.Number, "pr-facts", "could not read PR #%d: %v\n", lpr.Number, err)
 			}
 		} else {
-			// The head SHA is written only when the store has never learned one:
-			// PRHeadSHAUpdated feeds the gates' SHA-invalidation scan, so an
-			// overseer-only refresher must never move a head the engine already
-			// holds (the facts record keeps its own HeadSHA either way).
-			if lpr.HeadSHA == "" && d.HeadSHA != "" {
-				e.store.Apply(itemstate.FromProbe{Inner: itemstate.PRHeadSHAUpdated{Repo: c.repo, Number: c.item.Number, LinkedPRNum: lpr.Number, SHA: d.HeadSHA}})
-			}
+			// The refresher never writes the store's HeadSHA: PRHeadSHAUpdated
+			// feeds the gates' SHA-invalidation scan (a head recorded here ahead
+			// of the engine's own paths reads as a push after Validate
+			// completed), so the facts record keeps its own HeadSHA and the
+			// verdict below waits for the engine to learn the head.
 			ms := strings.ToLower(d.MergeableState)
 			if ms == "unknown" {
 				ms = ""
