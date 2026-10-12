@@ -98,10 +98,9 @@ func TestPMPluginSessionStartHookIsWired(t *testing.T) {
 		Hooks map[string][]struct {
 			Matcher string `json:"matcher"`
 			Hooks   []struct {
-				Type    string   `json:"type"`
-				Command string   `json:"command"`
-				Args    []string `json:"args"`
-				Timeout int      `json:"timeout"`
+				Type    string `json:"type"`
+				Command string `json:"command"`
+				Timeout int    `json:"timeout"`
 			} `json:"hooks"`
 		} `json:"hooks"`
 	}
@@ -116,10 +115,13 @@ func TestPMPluginSessionStartHookIsWired(t *testing.T) {
 	if h.Type != "command" || h.Timeout <= 0 || h.Timeout > 30 {
 		t.Errorf("hook = %+v: want a command hook with a short timeout", h)
 	}
-	if len(h.Args) != 1 || !strings.HasPrefix(h.Args[0], "${CLAUDE_PLUGIN_ROOT}/") {
-		t.Fatalf("hook args = %v", h.Args)
+	// A single command string, not an exec-form args array: the latter is
+	// not known to be honoured, and an ignored args field would run bare sh.
+	const prefix = `sh "${CLAUDE_PLUGIN_ROOT}/`
+	if !strings.HasPrefix(h.Command, prefix) || !strings.HasSuffix(h.Command, `"`) {
+		t.Fatalf("hook command = %q, want %s<script>\"", h.Command, prefix)
 	}
-	script := strings.TrimPrefix(h.Args[0], "${CLAUDE_PLUGIN_ROOT}/")
+	script := strings.TrimSuffix(strings.TrimPrefix(h.Command, prefix), `"`)
 	info, err := os.Stat(filepath.Join(pmDir, script))
 	if err != nil {
 		t.Fatalf("hook script %s: %v", script, err)

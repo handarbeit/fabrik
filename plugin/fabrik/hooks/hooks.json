@@ -6,8 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/version-check.sh"],
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/version-check.sh\"",
             "timeout": 10
           }
         ]
