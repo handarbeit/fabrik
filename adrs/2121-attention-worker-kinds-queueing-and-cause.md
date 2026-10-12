@@ -49,7 +49,7 @@ The worker row moved above the wait labels. This changes existing verdicts (an `
 
 ### 8. Live turns are wired through an invocation hook
 
-`InvokeOptions.OnTurn` is called by `turnCountingWriter`; `liveTurnRecorder` applies a throttled `WorkerTurnsRecorded`. The TUI-only `claudeTurnProgress` global (keyed by issue number alone) is untouched. A path that cannot supply a hook leaves turns `unknown`.
+`InvokeOptions.OnTurn` is called by `turnCountingWriter`; `liveTurnRecorder` applies a `WorkerTurnsRecorded` for the invocation start (zero turns: forget the previous invocation's count, record its effective budget `TurnsMax`) and for every turn, so the count is exact and the budget is the invocation's own (comment-review limit, `fabrik:extend-turns`), not the stage default. The TUI-only `claudeTurnProgress` global (keyed by issue number alone) is untouched. A path that cannot supply a hook leaves turns `unknown`.
 
 ### 9. Label meanings are enforced by a scan
 

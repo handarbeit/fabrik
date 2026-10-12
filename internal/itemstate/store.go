@@ -864,11 +864,16 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		return WorkerChanged
 
 	case WorkerTurnsRecorded:
-		if item.Worker == nil || (item.Worker.TurnsKnown && item.Worker.TurnsUsed == v.Turns) {
+		if item.Worker == nil {
+			return 0
+		}
+		known := v.Turns > 0
+		if item.Worker.TurnsKnown == known && item.Worker.TurnsUsed == v.Turns && item.Worker.TurnsMax == v.Max {
 			return 0
 		}
 		item.Worker.TurnsUsed = v.Turns
-		item.Worker.TurnsKnown = true
+		item.Worker.TurnsKnown = known
+		item.Worker.TurnsMax = v.Max
 		return WorkerChanged
 
 	case RetryScheduled:

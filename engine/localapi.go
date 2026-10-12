@@ -584,8 +584,10 @@ func (b localAPIBackend) worker(st *itemstate.ItemState) localapi.WorkerInfo {
 			w.StartedAt = localapi.KnownTime(c.Since)
 		}
 	}
-	if s := b.e.stageByName(stage); s != nil && s.MaxTurns > 0 && w.InFlight && st.Worker != nil {
-		w.MaxTurns = localapi.Some(s.MaxTurns)
+	if w.InFlight && st.Worker != nil && st.Worker.TurnsMax > 0 {
+		// The running invocation's effective budget (it differs from the stage's
+		// max_turns for a comment review or an extended budget).
+		w.MaxTurns = localapi.Some(st.Worker.TurnsMax)
 	}
 	if n, ok := st.StageState.LastTurnsUsed[stage]; ok {
 		w.LastTurnsUsed = localapi.Some(n)

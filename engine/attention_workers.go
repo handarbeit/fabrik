@@ -24,9 +24,9 @@ func (e *Engine) fillWorkerInputs(in *attention.Input, st *itemstate.ItemState, 
 		if w.TurnsKnown && !w.Queued {
 			in.WorkerTurnsKnown, in.WorkerTurnsUsed = true, w.TurnsUsed
 		}
-		if s := e.stageByName(w.StageName); s != nil && s.MaxTurns > 0 {
-			in.WorkerMaxTurns = s.MaxTurns
-		}
+		// The invocation's own budget (comment review limit, fabrik:extend-turns
+		// pre-grant, extensions), not the stage default.
+		in.WorkerMaxTurns = w.TurnsMax
 	}
 	if c := st.ConflictResolution; c != nil {
 		in.Conflict = &attention.ConflictFact{Queued: c.Queued, Since: c.Since}
@@ -127,15 +127,16 @@ func (e *Engine) dispatchable(st *itemstate.ItemState, in *attention.Input, usag
 }
 
 // liveTurnRecorder returns the OnTurn hook for one item's invocation (#2121): it
-// records the running turn count on the live worker so status can report it. The
-// store write is throttled (the first turn, then every third) so a long run does not
-// produce a store mutation per turn; a count of zero is never recorded, so a worker
-// whose turns are not yet known stays "unknown".
-func (e *Engine) liveTurnRecorder(repo string, number int) func(int) {
-	return func(turns int) {
-		if turns < 1 || (turns != 1 && turns%3 != 0) {
+// records the running turn count and the invocation's effective turn budget on the
+// live worker so status can report them. Every turn is recorded — the write is a
+// single in-memory field update that wakes nothing — so the count is exact; the call
+// with zero turns at invocation start clears the previous invocation's count, so a
+// worker whose turns are not yet known stays "unknown".
+func (e *Engine) liveTurnRecorder(repo string, number int) func(turns, budget int) {
+	return func(turns, budget int) {
+		if turns < 0 {
 			return
 		}
-		e.store.Apply(itemstate.WorkerTurnsRecorded{Repo: repo, Number: number, Turns: turns})
+		e.store.Apply(itemstate.WorkerTurnsRecorded{Repo: repo, Number: number, Turns: turns, Max: budget})
 	}
 }

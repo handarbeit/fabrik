@@ -227,7 +227,7 @@ func TestStatusReportsWorkerKindTriggerAndTurns(t *testing.T) {
 			t.Errorf("reason %q reported while a worker runs (F15)", r.Code)
 		}
 	}
-	e.store.Apply(itemstate.WorkerTurnsRecorded{Repo: "owner/repo", Number: 8, Turns: 12})
+	e.store.Apply(itemstate.WorkerTurnsRecorded{Repo: "owner/repo", Number: 8, Turns: 12, Max: 50})
 	st = status(t, e, "8")
 	if !st.Worker.TurnsUsed.Valid || st.Worker.TurnsUsed.V != 12 || !strings.Contains(st.Attention.Summary, "(turn 12 of 50)") {
 		t.Errorf("turns = %+v summary %q", st.Worker.TurnsUsed, st.Attention.Summary)
@@ -327,8 +327,9 @@ func TestStatusDaemonStopCauseNeedsTheMarker(t *testing.T) {
 }
 
 // R6: a live worker's turns reach status through the invocation's OnTurn hook
-// (turnCountingWriter → liveTurnRecorder → WorkerTurnsRecorded), throttled, and
-// stay unknown until the first turn.
+// (turnCountingWriter → liveTurnRecorder → WorkerTurnsRecorded), exact per turn,
+// against the invocation's own budget, and are forgotten when the next invocation
+// under the same worker starts.
 func TestLiveTurnsReachStatusThroughOnTurn(t *testing.T) {
 	e := workerEngine(t)
 	e.seedAPIItem(t, 9, "Implement")
@@ -338,21 +339,31 @@ func TestLiveTurnsReachStatusThroughOnTurn(t *testing.T) {
 		t.Fatalf("turns_used = %+v before any turn, want unknown", st.Worker.TurnsUsed)
 	}
 
+	line := []byte("{\"type\":\"user\"}\n")
+	rec := e.liveTurnRecorder("owner/repo", 9)
+	// An invocation with an extended budget (not the stage's 50): the start call
+	// publishes the budget, each turn is recorded as it happens.
 	var sink strings.Builder
-	w := &turnCountingWriter{inner: &sink, issueNumber: 9, maxTurns: 50, onTurn: e.liveTurnRecorder("owner/repo", 9)}
-	line := "{\"type\":\"user\"}\n"
-	for i := 0; i < 2; i++ { // turn 1 recorded, turn 2 throttled
-		if _, err := w.Write([]byte(line)); err != nil {
+	w := &turnCountingWriter{inner: &sink, issueNumber: 9, maxTurns: 100, onTurn: rec}
+	rec(0, 100)
+	if st := status(t, e, "9"); st.Worker.TurnsUsed.Valid || !st.Worker.MaxTurns.Valid || st.Worker.MaxTurns.V != 100 {
+		t.Errorf("at invocation start: turns %+v max %+v, want unknown turns and budget 100", st.Worker.TurnsUsed, st.Worker.MaxTurns)
+	}
+	for i := 1; i <= 2; i++ {
+		if _, err := w.Write(line); err != nil {
 			t.Fatal(err)
 		}
+		if st := status(t, e, "9"); !st.Worker.TurnsUsed.Valid || st.Worker.TurnsUsed.V != i {
+			t.Errorf("after %d turns turns_used = %+v, want exactly %d", i, st.Worker.TurnsUsed, i)
+		}
 	}
-	if st := status(t, e, "9"); !st.Worker.TurnsUsed.Valid || st.Worker.TurnsUsed.V != 1 {
-		t.Errorf("after 2 turns turns_used = %+v, want the throttled 1", st.Worker.TurnsUsed)
+	if st := status(t, e, "9"); !strings.Contains(st.Attention.Summary, "(turn 2 of 100)") {
+		t.Errorf("summary %q must use the invocation's budget, not the stage's", st.Attention.Summary)
 	}
-	if _, err := w.Write([]byte(line)); err != nil { // turn 3 recorded
-		t.Fatal(err)
-	}
-	if st := status(t, e, "9"); !st.Worker.TurnsUsed.Valid || st.Worker.TurnsUsed.V != 3 {
-		t.Errorf("after 3 turns turns_used = %+v, want 3", st.Worker.TurnsUsed)
+
+	// The next invocation under the same worker must not report the last one's count.
+	rec(0, 15)
+	if st := status(t, e, "9"); st.Worker.TurnsUsed.Valid || !st.Worker.MaxTurns.Valid || st.Worker.MaxTurns.V != 15 {
+		t.Errorf("after a new invocation starts: turns %+v max %+v, want unknown turns and budget 15", st.Worker.TurnsUsed, st.Worker.MaxTurns)
 	}
 }

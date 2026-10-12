@@ -515,6 +515,10 @@ type WorkerHandle struct {
 	// TurnsUsed is the live turn count; meaningful only when TurnsKnown.
 	TurnsUsed  int
 	TurnsKnown bool
+	// TurnsMax is the turn budget the current invocation actually runs with (the
+	// stage's, a comment review's, or an extended one); 0 = unknown or unlimited.
+	// It is set when an invocation starts, so it is known before the first turn.
+	TurnsMax int
 }
 
 // Worker kinds (#2121). An empty Kind on a stage dispatch's handle means

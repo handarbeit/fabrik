@@ -893,12 +893,15 @@ type WorkerTriggerSet struct {
 func (WorkerTriggerSet) isMutation()       {}
 func (m WorkerTriggerSet) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
-// WorkerTurnsRecorded records the live worker's turn count so far (#2121). A
-// no-op when there is no worker, or when the count is unchanged.
+// WorkerTurnsRecorded records the live worker's turn count so far and the turn
+// budget of the invocation it belongs to (#2121). Turns == 0 marks an invocation
+// start: the previous invocation's count is forgotten (turns unknown again) and
+// Max is the new budget. A no-op when there is no worker, or nothing changed.
 type WorkerTurnsRecorded struct {
 	Repo   string
 	Number int
 	Turns  int
+	Max    int
 }
 
 func (WorkerTurnsRecorded) isMutation()       {}

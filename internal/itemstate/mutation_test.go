@@ -1360,10 +1360,16 @@ func TestWorkerTurnsRecorded(t *testing.T) {
 	if st := getItem(t, s, testRepo, 1); st.Worker.TurnsKnown {
 		t.Error("turns must start unknown")
 	}
-	applyExpect(t, s, WorkerTurnsRecorded{Repo: testRepo, Number: 1, Turns: 4}, WorkerChanged)
-	applyExpect(t, s, WorkerTurnsRecorded{Repo: testRepo, Number: 1, Turns: 4}, 0)
-	if st := getItem(t, s, testRepo, 1); !st.Worker.TurnsKnown || st.Worker.TurnsUsed != 4 {
+	applyExpect(t, s, WorkerTurnsRecorded{Repo: testRepo, Number: 1, Turns: 4, Max: 50}, WorkerChanged)
+	applyExpect(t, s, WorkerTurnsRecorded{Repo: testRepo, Number: 1, Turns: 4, Max: 50}, 0)
+	if st := getItem(t, s, testRepo, 1); !st.Worker.TurnsKnown || st.Worker.TurnsUsed != 4 || st.Worker.TurnsMax != 50 {
 		t.Errorf("Worker = %+v", st.Worker)
+	}
+	// Zero turns marks the next invocation's start: the count is forgotten, the new
+	// budget kept.
+	applyExpect(t, s, WorkerTurnsRecorded{Repo: testRepo, Number: 1, Turns: 0, Max: 100}, WorkerChanged)
+	if st := getItem(t, s, testRepo, 1); st.Worker.TurnsKnown || st.Worker.TurnsUsed != 0 || st.Worker.TurnsMax != 100 {
+		t.Errorf("after an invocation start Worker = %+v", st.Worker)
 	}
 }
 
