@@ -189,6 +189,31 @@ func TestSettlePRFacts_FreshnessIsReportedAsStale(t *testing.T) {
 	}
 }
 
+// With more non-green candidates than the per-poll check budget an item is
+// re-read only every few polls; attention must keep a red verdict for the
+// unchanged head across that rotation instead of flickering, while the status
+// tool still flags the age.
+func TestSettlePRFacts_AttentionToleratesOneRotationOfAge(t *testing.T) {
+	env := newPRFactsEnv(t)
+	board := env.seedPR(t, 7, false)
+	env.runs = []gh.CheckRun{failedRun("Test and vet", 1)}
+	env.e.settlePRFacts(board)
+
+	env.e.prFactsRotation.Store(3) // as if 17+ candidates share the budget of 8
+	env.clock.t = env.clock.t.Add(61 * time.Second)
+	got := status(t, env.e, "7")
+	if !got.PR.CIStale.V {
+		t.Errorf("status must still flag the age: %+v", got.PR.CIStale)
+	}
+	if !strings.Contains(got.Attention.Summary, "CI is red on Test and vet") {
+		t.Errorf("red flickered out of attention within one rotation: %q", got.Attention.Summary)
+	}
+	env.clock.t = env.clock.t.Add(60 * time.Second) // 121 s > 3 x 30 s
+	if got := status(t, env.e, "7"); strings.Contains(got.Attention.Summary, "CI is red") {
+		t.Errorf("red surfaced past a full rotation: %q", got.Attention.Summary)
+	}
+}
+
 func TestSettlePRFacts_NeverObservedIsUnknownNotStale(t *testing.T) {
 	env := newPRFactsEnv(t)
 	env.e.seedAPIItem(t, 7, "Implement")

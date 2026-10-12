@@ -91,6 +91,7 @@ func (e *Engine) settlePRFacts(board *gh.ProjectBoard) {
 	}
 	// Oldest verdict first, so a budget shortfall rotates through the items.
 	sort.SliceStable(cands, func(i, j int) bool { return cands[i].order < cands[j].order })
+	e.prFactsRotation.Store(int64(max(1, (len(cands)+prFactsCheckBudgetPerPoll-1)/prFactsCheckBudgetPerPoll)))
 
 	checkBudget, restBudget := prFactsCheckBudgetPerPoll, prFactsRESTPerPoll
 	for _, c := range cands {

@@ -313,6 +313,7 @@ type Engine struct {
 	startupWatches                        map[string]*prStartupState    // key: "owner/repo#PR"; the stage wait_for_ci gate's retrigger state, reset when the PR's head SHA moves (#2052 R6) — in memory only, so a restart may grant one extra retrigger
 	probeDriftConvergenceDisabledForTest  bool                          // neutralisation seam (#2080): the drift ledger never suppresses a repeat, restoring the pre-fix per-poll invalidation
 	probeTerminalDriftSkipDisabledForTest bool                          // neutralisation seam (#2080): terminal items are no longer exempt from the linkage-drift check
+	prFactsRotation                       atomic.Int64                  // polls one full settlePRFacts rotation takes (#2122): ceil(non-green candidates / check budget), >= 1; attention tolerates a verdict that old
 	prFactsRefreshDisabledForTest         bool                          // neutralisation seam (#2122): the overseer PR-fact writers (probe scalar apply, settlePRFacts) are off
 	probeDrift                            probeDriftLedger              // the probe loop's linkage-drift ledger (#2080) — per-item last-invalidated pair and loop counter; in memory only
 	statusLine                            displayFieldState             // the display-only status-line writer's state (#2048) — in memory only; a restart forgets what was written

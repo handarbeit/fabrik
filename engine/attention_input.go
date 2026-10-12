@@ -275,9 +275,19 @@ func (e *Engine) attentionCIFact(lpr *itemstate.LinkedPRState, now time.Time) *a
 	if !open {
 		return nil
 	}
+	// Attention tolerates a verdict as old as one full refresh rotation: with
+	// more candidates than the per-poll check budget an item is re-read only
+	// every few polls, and a red that is still the verdict for the unchanged
+	// head must not flicker in and out of the attention view in between. The
+	// status tool's own ci_stale still flags it after one poll interval.
 	stale := false
-	if after := e.prFactsStaleAfter(); after > 0 && now.Sub(v.ObservedAt) > after {
-		stale = true
+	if after := e.prFactsStaleAfter(); after > 0 {
+		rot := e.prFactsRotation.Load()
+		if rot < 1 {
+			rot = 1
+		}
+		after *= time.Duration(rot)
+		stale = now.Sub(v.ObservedAt) > after
 	}
 	return &attention.CIFact{
 		Verdict: v.Verdict,
