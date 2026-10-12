@@ -260,3 +260,30 @@ func resumeMethodOf(st *itemstate.ItemState) attention.ResumeMethod {
 	}
 	return attention.ResumeUnknown
 }
+
+// attentionCIFact is the linked PR's CI verdict for the attention classifier
+// (#2122): the poll-side record, from the Store alone, and only for the PR's
+// current head. Nil when there is no verdict to report; the classifier decides
+// what a red one means.
+func (e *Engine) attentionCIFact(lpr *itemstate.LinkedPRState, now time.Time) *attention.CIFact {
+	v := lpr.CIVerdict
+	if v.Verdict == "" || v.HeadSHA == "" || v.HeadSHA != lpr.HeadSHA {
+		return nil
+	}
+	f := lpr.Facts
+	open := f.State == "open" && !f.Merged
+	if !open {
+		return nil
+	}
+	stale := false
+	if after := e.prFactsStaleAfter(); after > 0 && now.Sub(v.ObservedAt) > after {
+		stale = true
+	}
+	return &attention.CIFact{
+		Verdict: v.Verdict,
+		Failing: append([]string(nil), v.Failing...),
+		Stale:   stale,
+		Draft:   f.Draft,
+		PROpen:  open,
+	}
+}
