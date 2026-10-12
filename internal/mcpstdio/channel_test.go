@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -445,5 +446,54 @@ func TestSubscribeToolSaysLabelEventsAreOptIn(t *testing.T) {
 		if !strings.Contains(channelInstructions, want) {
 			t.Errorf("channel instructions lack %q", want)
 		}
+	}
+}
+
+// DisableStream keeps the held channel stream from starting even though a
+// subscriber is set (outside a Fabrik project, #2207); without it the stream
+// starts exactly once.
+func TestDisableStreamSuppressesTheStreamButNotTheSubscriber(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		disable bool
+		want    int32
+	}{{"disabled", true, 0}, {"enabled", false, 1}} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int32
+			started := make(chan struct{}, 1)
+			var out, errBuf bytes.Buffer
+			srv := &Server{
+				SocketPath: filepath.Join(shortDir(t), "none.sock"), Version: "v-test",
+				Subscriber: "topic", DisableStream: tc.disable,
+				Stream: func(ctx context.Context, _ localapi.StreamOptions) error {
+					calls.Add(1)
+					select {
+					case started <- struct{}{}:
+					default:
+					}
+					<-ctx.Done()
+					return nil
+				},
+				In: strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}` + "\n" +
+					`{"jsonrpc":"2.0","method":"notifications/initialized"}` + "\n"),
+				Out: &out, Err: &errBuf, CallTimeout: 3 * time.Second,
+			}
+			if err := srv.Serve(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if tc.want == 1 {
+				select {
+				case <-started:
+				case <-time.After(5 * time.Second):
+					t.Fatal("stream never started")
+				}
+			}
+			if got := calls.Load(); got != tc.want {
+				t.Errorf("stream calls = %d, want %d", got, tc.want)
+			}
+			if strings.Contains(out.String(), "daemon-unreachable") {
+				t.Errorf("unexpected daemon-unreachable notice: %s", out.String())
+			}
+		})
 	}
 }

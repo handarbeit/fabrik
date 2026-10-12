@@ -61,6 +61,12 @@ type Server struct {
 	Subscriber string
 	// Stream runs the held connection; nil selects localapi.RunStream.
 	Stream StreamFunc
+	// DisableStream keeps the channel stream from starting even when Subscriber
+	// is set — the shim is outside a Fabrik project, so there is no daemon to
+	// reach and a daemon-unreachable notice would mislead (#2207). Subscriber is
+	// left intact: it is still the audit name for the action tools and the
+	// default for fabrik_subscribe.
+	DisableStream bool
 	// UnreachableGrace overrides DefaultUnreachableGrace.
 	UnreachableGrace time.Duration
 

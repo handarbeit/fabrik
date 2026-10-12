@@ -35,7 +35,7 @@ Claude Code asks for these when you enable the plugin; both are optional.
 | Setting | Meaning |
 |---|---|
 | **Subscriber name** | A stable name for this session (your topic or session name, never a PID). The overseer actions sign their audit comment with it and refuse without one; pushed events are delivered under it. Leave empty for read-only use. |
-| **Fabrik directory** | The directory of the daemon to talk to. Empty means the daemon of the directory your Claude Code session is in. Set it if you run Claude Code somewhere other than the Fabrik project. One session addresses one daemon. |
+| **Fabrik directory** | The directory of the daemon to talk to. Empty means the daemon of the nearest directory at or above your session's project that contains `.fabrik/` (the search stops at your home directory), so a session in a subdirectory still finds it; in a project without Fabrik no channel stream is started. A directory set here is used exactly as given. Set it if you run Claude Code somewhere other than the Fabrik project. One session addresses one daemon. |
 
 ### If you registered the server by hand
 

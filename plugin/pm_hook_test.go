@@ -116,6 +116,8 @@ func TestVersionCheckHook(t *testing.T) {
 			t.Errorf("dev wording: %q", got.SystemMessage)
 		}
 	})
+	// A missing binary yields an empty version, so this guards the empty-version
+	// check (there is no separate `command -v` guard, #2207).
 	t.Run("fabrik not installed is silent", func(t *testing.T) {
 		out, code := runVersionCheck(t, "")
 		if out != "" || code != 0 {
