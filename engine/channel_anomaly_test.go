@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -250,6 +251,39 @@ func TestRetryStarved_EarlyClearedUsageLimitAnchorsAtNow(t *testing.T) {
 	evs := ofType(checkAndDrain(ce, sink), channelevents.RetryStarved)
 	if len(evs) != 1 {
 		t.Fatalf("a retry starved for longer than the threshold after an early clear must be reported: %+v", evs)
+	}
+}
+
+// The catch-up snapshot of an open episode reports the same starved_seconds
+// anchor as the announcement (the later of due and the usage-limit lift), not the
+// original due time, so a late subscriber is not told the hold period counted.
+func TestRetryStarved_CatchUpUsesAnnouncementAnchor(t *testing.T) {
+	e, sink, clk, ce := anomalyEngine(t)
+	e.seedAPIItem(t, 1, "Implement")
+	t0 := clk.Now()
+	e.emitRetryScheduled(anomalyItem(1), implementStage(), "claude-usage-limit", t0.Add(time.Minute))
+	e.activateClaudeUsageLimit(1, &claudeerr.UsageLimitError{Message: "blocking_limit", ResetAt: t0.Add(time.Hour)}, t0)
+	clk.set(t0.Add(10 * time.Minute))
+	checkAndDrain(ce, sink)
+	e.clearClaudeUsageLimit("operator")
+	checkAndDrain(ce, sink)
+	clk.set(t0.Add(17 * time.Minute))
+	evs := ofType(checkAndDrain(ce, sink), channelevents.RetryStarved)
+	if len(evs) != 1 {
+		t.Fatalf("setup: want one retry-starved, got %+v", evs)
+	}
+	clk.set(t0.Add(20 * time.Minute))
+	cu := ofType(e.anomalyCatchUpEvents(clk.Now()), channelevents.RetryStarved)
+	if len(cu) != 1 {
+		t.Fatalf("catch-up = %+v", cu)
+	}
+	got, err := strconv.Atoi(cu[0].Meta["starved_seconds"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Lift at t0+10m, check at t0+20m: 600 s. Measured from due (t0+1m) it would be 1140 s.
+	if got != 600 {
+		t.Fatalf("catch-up starved_seconds = %d, want 600 (measured from the lift, not the due time)", got)
 	}
 }
 

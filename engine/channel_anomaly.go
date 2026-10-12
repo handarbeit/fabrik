@@ -79,10 +79,14 @@ type retryFact struct {
 	dispatched bool
 	announced  bool
 	openedAt   time.Time
-	seq        uint64
-	reason     string
-	slotsInUse int
-	slotsMax   int
+	// starvedSince is the instant starvation is measured from when the episode
+	// opens: the later of the due time and the last usage-limit lift. The
+	// announcement and the catch-up snapshot both report elapsed time from it.
+	starvedSince time.Time
+	seq          uint64
+	reason       string
+	slotsInUse   int
+	slotsMax     int
 }
 
 // wedgeHold is one gate holding one item's advance or landing.
@@ -488,7 +492,7 @@ func (ce *channelEvents) checkRetriesLocked(now time.Time, pollOverdue, usageLim
 			f.reason = retryReasonUnknown
 		}
 		f.slotsInUse, f.slotsMax = inUse, capacity
-		f.announced, f.openedAt, f.seq = true, now, a.nextSeq()
+		f.announced, f.openedAt, f.starvedSince, f.seq = true, now, anchor, a.nextSeq()
 		out = append(out, ce.retryStarvedEvent(f, &st, now, anchor))
 	}
 	return out
@@ -690,7 +694,10 @@ func (e *Engine) anomalyCatchUpEvents(now time.Time) []channelevents.Event {
 			continue
 		}
 		st := snap.State()
-		anchor := f.due
+		anchor := f.starvedSince
+		if anchor.IsZero() {
+			anchor = f.due
+		}
 		ev := ce.retryStarvedEvent(f, &st, now, anchor)
 		out = append(out, catchUpMark(ev))
 	}
