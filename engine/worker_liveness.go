@@ -107,6 +107,12 @@ func (e *Engine) runWorkerDetectorScan() {
 		if w == nil {
 			continue
 		}
+		if w.Queued {
+			// A queued worker (#2121) holds no worker slot, process or lock — there
+			// is nothing to be stale about. Its goroutine's deferred WorkerExited
+			// ends the record; the wait for a slot is deliberately not bounded.
+			continue
+		}
 		if w.PID <= 0 {
 			// PID not yet set (or invalid). Normally this is just a freshly-entered
 			// worker still on its way to onPIDReady — skip this cycle and let it

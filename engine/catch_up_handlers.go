@@ -367,6 +367,9 @@ func (e *Engine) handleReviewGate(pctx *phase1Ctx) bool {
 		e.pauseForReviewTimeout(pctx.board, pctx.item, pctx.stage)
 		return true
 	}
+	// The review gate is not holding the item any more: end the recorded hold so
+	// status does not keep naming it until the lapse (#2121).
+	e.noteGateClear(pctx.item, gateReview)
 	return false
 }
 
@@ -561,6 +564,8 @@ func (e *Engine) handleMergeAndCIGates(pctx *phase1Ctx) bool {
 		})
 		return true // mergeability not yet computed; re-evaluate on next poll
 	}
+	// Mergeability has settled: the merge gate no longer holds the item (#2121).
+	e.noteGateClear(pctx.item, gateMerge)
 
 	// CI gate: evaluate CI status for stages configured with wait_for_ci: true.
 	// Runs in Phase 1 (unconditional) so CI failures are fixed regardless of
@@ -626,6 +631,8 @@ func (e *Engine) handleMergeAndCIGates(pctx *phase1Ctx) bool {
 		e.noteGateHold(pctx.item, gateCI, "waiting for CI checks", nil)
 		return true // CI still pending; re-evaluate on next poll
 	}
+	// CI is no longer pending: end the recorded hold (#2121).
+	e.noteGateClear(pctx.item, gateCI)
 
 	return false
 }

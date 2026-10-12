@@ -224,17 +224,25 @@ func TestLocalAPIStatusWorkerIdleAndUnknownFields(t *testing.T) {
 	if st.Worker.TurnsUsed.Valid {
 		t.Errorf("turns for an in-flight worker must be unknown")
 	}
-	if !st.Worker.MaxTurns.Valid || st.Worker.MaxTurns.V != 50 {
-		t.Errorf("max_turns = %+v, want 50 from the stage", st.Worker.MaxTurns)
+	if st.Worker.MaxTurns.Valid {
+		t.Errorf("max_turns = %+v before the invocation reports its budget, want unknown", st.Worker.MaxTurns)
+	}
+	// The invocation's effective budget (here a fabrik:extend-turns pre-grant of 2x
+	// the stage's 50) is what is reported, not the stage default.
+	e.store.Apply(itemstate.WorkerTurnsRecorded{Repo: "owner/repo", Number: 5, Turns: 0, Max: 100})
+	if st = status(t, e, "5"); !st.Worker.MaxTurns.Valid || st.Worker.MaxTurns.V != 100 {
+		t.Errorf("max_turns = %+v, want the invocation's 100", st.Worker.MaxTurns)
 	}
 	if st.Attention.State != "working" {
 		t.Errorf("attention: %+v", st.Attention)
 	}
 
 	e.seedAPIItem(t, 6, "Implement")
+	// An incomplete stage with nothing gating it and no worker is waiting for
+	// dispatch, never idle (#2121 R3).
 	idle := status(t, e, "6")
-	if idle.Attention.State != "idle" {
-		t.Errorf("idle item: %+v", idle.Attention)
+	if idle.Attention.State != "waiting" || idle.Attention.Code != "waiting-for-dispatch" {
+		t.Errorf("dispatchable item: %+v", idle.Attention)
 	}
 	m := toJSON(t, idle)
 	for _, f := range []string{"as_of", "last_poll_attempt_at", "last_poll_success_at", "since_last_poll_success_seconds", "daemon_uptime_seconds"} {
