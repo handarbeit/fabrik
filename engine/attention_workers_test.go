@@ -437,3 +437,23 @@ func TestMergeGateClearsItsHoldWhenMergeabilitySettles(t *testing.T) {
 		t.Errorf("the merge hold must end once mergeability settles, still %+v", h)
 	}
 }
+
+// fabrik_health.in_use agrees with the pool the classifier reads: a merge-train
+// conflict resolution on a general-pool slot holds one, one on the reserved train
+// slot does not (it is train_in_use), and a queued one counts as queued (#2121).
+func TestHealthCountsAConflictResolutionByThePoolItHolds(t *testing.T) {
+	e := workerEngine(t)
+	e.seedAPIItem(t, 71, "Queued")
+	e.seedAPIItem(t, 72, "Queued")
+	e.seedAPIItem(t, 73, "Queued")
+	set := func(n int, queued, general bool) {
+		e.store.Apply(itemstate.ConflictResolutionSet{Repo: "owner/repo", Number: n, Active: true, Queued: queued, Since: time.Now(), GeneralSlot: general})
+	}
+	set(71, false, true)  // running on a general slot
+	set(72, false, false) // running on the reserved train slot
+	set(73, true, false)  // waiting for a slot
+	h := health(t, e)
+	if h.Workers.InUse != 1 || h.Workers.Queued != 1 {
+		t.Errorf("in_use %d queued %d, want 1 and 1 (general-slot run, queued wait; reserved-slot run uncounted)", h.Workers.InUse, h.Workers.Queued)
+	}
+}

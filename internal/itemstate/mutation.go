@@ -950,6 +950,9 @@ type ConflictResolutionSet struct {
 	Active bool
 	Queued bool
 	Since  time.Time
+	// GeneralSlot: the resolution holds a general-pool slot (not the reserved
+	// merge-train slot).
+	GeneralSlot bool
 }
 
 func (ConflictResolutionSet) isMutation()       {}

@@ -563,6 +563,10 @@ type GateHold struct {
 type ConflictResolution struct {
 	Queued bool
 	Since  time.Time
+	// GeneralSlot is true when the running resolution holds a slot of the general
+	// (max_concurrent) pool rather than the reserved merge-train slot; health
+	// counts it in in_use only then.
+	GeneralSlot bool
 }
 
 // TokenUsage records Claude API token counts for a single invocation.

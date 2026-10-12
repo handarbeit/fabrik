@@ -76,6 +76,9 @@ func TestResolveConflictWithClaude_RecordsQueuedThenRunningThenClears(t *testing
 	if during == nil || during.Queued {
 		t.Errorf("while the invoker ran ConflictResolution = %+v, want present and not queued", during)
 	}
+	if !during.GeneralSlot {
+		t.Errorf("with no reserved train slot the resolution holds a general-pool slot, got %+v", during)
+	}
 	if workerDuring != nil {
 		t.Errorf("a conflict resolution must not create a Worker handle, got %+v", workerDuring)
 	}
@@ -97,5 +100,33 @@ func TestResolveConflictWithClaude_CancelledSlotWaitClearsTheRecord(t *testing.T
 	}
 	if rec := conflictRecord(eng, 6); rec != nil {
 		t.Errorf("ConflictResolution = %+v after a cancelled wait, want cleared", rec)
+	}
+}
+
+// The pool the resolution holds is recorded: the reserved merge-train slot is not
+// a general-pool slot, so health must not count it in in_use (#2121).
+func TestResolveConflictWithClaude_RecordsTheReservedSlotAsNotGeneral(t *testing.T) {
+	skipIfNoGit(t)
+	var eng *Engine
+	var during *itemstate.ConflictResolution
+	claude := &mockClaudeInvoker{
+		invokeForCommentsFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			during = conflictRecord(eng, 5)
+			return "", false, TokenUsage{}, nil
+		},
+	}
+	eng = trainTestEngine(t, &mockGitHubClient{}, claude, nil)
+	eng.EnableTrainReservedSlotForTest()
+	bootstrapItem(t, eng, 5, nil)
+	dir := t.TempDir()
+	if err := exec.Command("git", "-C", dir, "init").Run(); err != nil {
+		t.Fatal(err)
+	}
+	holding := &stages.Stage{Name: "Queued", HoldingStage: true}
+	if _, _, err := eng.resolveConflictWithClaude(context.Background(), "owner/repo", makeTrainItem(5, "member"), dir, holding, "sha", nil, "sha", nil, InvokeOptions{}); err != nil {
+		t.Fatalf("resolveConflictWithClaude: %v", err)
+	}
+	if during == nil || during.Queued || during.GeneralSlot {
+		t.Errorf("on the reserved slot ConflictResolution = %+v, want running and not general", during)
 	}
 }

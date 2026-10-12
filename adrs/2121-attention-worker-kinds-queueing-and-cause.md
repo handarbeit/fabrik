@@ -45,7 +45,7 @@ The worker row moved above the wait labels. This changes existing verdicts (an `
 
 ### 7. Health counts held slots
 
-`workers.in_use` is the number of store workers with `Queued == false`, clamped to `max_concurrent` (the clamp covers the instant between a `WorkerExited` and the next `WorkerEntered`); `queued` is the rest. `len(e.sem)` is used only for the "all slots busy" dispatch reason, where it is the truth. Train conflict slots stay in `train_in_use`.
+`workers.in_use` is the number of store workers with `Queued == false`, plus a merge-train conflict resolution that holds a general-pool slot (recorded on its `ConflictResolution`; one on the reserved train slot is not counted), clamped to `max_concurrent` (the clamp covers the instant between a `WorkerExited` and the next `WorkerEntered`); `queued` is the rest. `len(e.sem)` is used only for the "all slots busy" dispatch reason, where it is the truth. Train conflict slots stay in `train_in_use`.
 
 ### 8. Live turns are wired through an invocation hook
 

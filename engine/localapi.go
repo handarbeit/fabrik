@@ -1117,6 +1117,10 @@ func (b localAPIBackend) Health(localapi.HealthParams) (*localapi.HealthResult, 
 			inUse++
 		case it.ConflictResolution != nil && it.ConflictResolution.Queued:
 			queued++
+		case it.ConflictResolution != nil && it.ConflictResolution.GeneralSlot:
+			// A merge-train conflict resolution on a general-pool slot holds one
+			// like any worker; one on the reserved train slot is train_in_use.
+			inUse++
 		}
 	})
 	if e.cfg.MaxConcurrent > 0 && inUse > e.cfg.MaxConcurrent {

@@ -905,7 +905,7 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 			item.ConflictResolution = nil
 			return StatusFactsChanged
 		}
-		item.ConflictResolution = &ConflictResolution{Queued: v.Queued, Since: v.Since}
+		item.ConflictResolution = &ConflictResolution{Queued: v.Queued, Since: v.Since, GeneralSlot: v.GeneralSlot}
 		return StatusFactsChanged
 
 	case RebaseCauseSet:
