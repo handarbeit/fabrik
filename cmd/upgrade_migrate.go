@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"regexp"
 	"sort"
 	"strings"
 
@@ -121,6 +121,10 @@ func planMigration(dir string, isDev bool, devOverride string) (*migrationPlan, 
 			p.Blocked = fmt.Sprintf("%s already exists and is never overwritten; .fabrik/plugin has local edits that could not be moved. Move or rename one of them, then run 'fabrik upgrade' again", fabrikplugin.LocalWorkflowsRelDir)
 			return p, nil
 		}
+		if err := checkManifestRenamable(pluginDir, fabrikplugin.LocalWorkflowsName); err != nil {
+			p.Blocked = fmt.Sprintf("the customised plugin's manifest cannot be renamed safely, so nothing was moved (%v). Make \"name\" a plain top-level string in %s, then run 'fabrik upgrade' again", err, pluginManifestRel)
+			return p, nil
+		}
 		p.MoveTree, p.NormaliseLocal, p.RestoreBase = true, true, true
 	case custom:
 		// A mixture of shipped versions, no edit: not a customisation. Refresh.
@@ -149,6 +153,10 @@ func planMigration(dir string, isDev bool, devOverride string) (*migrationPlan, 
 		case nameErr == nil && name == fabrikplugin.LocalWorkflowsName:
 			usableLocal = true
 		case errors.Is(nameErr, fs.ErrNotExist) || (nameErr == nil && name == fabrikplugin.BasePluginName):
+			if err := checkManifestRenamable(lwDir, fabrikplugin.LocalWorkflowsName); err != nil {
+				p.Blocked = fmt.Sprintf("the manifest in %s cannot be renamed safely, so nothing was changed (%v). Make \"name\" a plain top-level string in %s, then run 'fabrik upgrade' again", fabrikplugin.LocalWorkflowsRelDir, err, pluginManifestRel)
+				return p, nil
+			}
 			p.NormaliseLocal = true
 			usableLocal = true
 		case nameErr != nil:
@@ -233,11 +241,102 @@ func readManifestName(dir string) (string, error) {
 	return m.Name, nil
 }
 
-var manifestNameRE = regexp.MustCompile(`("name"\s*:\s*)"[^"]*"`)
+// topLevelNameSpan returns the byte span of the top-level "name" string value
+// in a JSON object, ignoring any "name" nested in another object (the shipped
+// manifest has author.name). With duplicate top-level keys it returns the last,
+// which is the one json.Unmarshal keeps.
+func topLevelNameSpan(data []byte) (start, end int, err error) {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	if tok, err := dec.Token(); err != nil {
+		return 0, 0, err
+	} else if d, ok := tok.(json.Delim); !ok || d != '{' {
+		return 0, 0, errors.New("manifest is not a JSON object")
+	}
+	start, end = -1, -1
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return 0, 0, err
+		}
+		key, _ := keyTok.(string)
+		keyEnd := int(dec.InputOffset())
+		if key != "name" {
+			var skip json.RawMessage
+			if err := dec.Decode(&skip); err != nil {
+				return 0, 0, err
+			}
+			continue
+		}
+		valTok, err := dec.Token()
+		if err != nil {
+			return 0, 0, err
+		}
+		if _, ok := valTok.(string); !ok {
+			return 0, 0, errors.New(`the top-level "name" is not a string`)
+		}
+		q := bytes.IndexByte(data[keyEnd:], '"')
+		if q < 0 {
+			return 0, 0, errors.New(`cannot locate the top-level "name" value`)
+		}
+		start, end = keyEnd+q, int(dec.InputOffset())
+	}
+	if start < 0 {
+		return 0, 0, errors.New(`no top-level "name" field`)
+	}
+	return start, end, nil
+}
+
+// renamedManifest returns data with only its top-level name value set to name,
+// verified by decoding both versions. changed is false when it already is.
+func renamedManifest(data []byte, name string) (out []byte, changed bool, err error) {
+	var orig map[string]any
+	if err := json.Unmarshal(data, &orig); err != nil {
+		return nil, false, err
+	}
+	if cur, _ := orig["name"].(string); cur == name {
+		return data, false, nil
+	}
+	start, end, err := topLevelNameSpan(data)
+	if err != nil {
+		return nil, false, err
+	}
+	quoted, err := json.Marshal(name)
+	if err != nil {
+		return nil, false, err
+	}
+	out = append(append(append([]byte{}, data[:start]...), quoted...), data[end:]...)
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		return nil, false, fmt.Errorf("renamed manifest does not parse: %w", err)
+	}
+	orig["name"] = name
+	if !reflect.DeepEqual(orig, got) {
+		return nil, false, errors.New("renaming would change more than the name")
+	}
+	return out, true, nil
+}
+
+// checkManifestRenamable reports whether renameManifest would succeed on the
+// manifest in dir, writing nothing. Planning calls it before any tree is moved,
+// so a manifest that cannot be renamed refuses the migration up front instead
+// of failing after .fabrik/plugin has already been renamed aside.
+func checkManifestRenamable(dir, name string) error {
+	path := filepath.Join(dir, filepath.FromSlash(pluginManifestRel))
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if _, _, err := renamedManifest(data, name); err != nil {
+		return fmt.Errorf("%s: %w", path, err)
+	}
+	return nil
+}
 
 // renameManifest makes the manifest in dir declare name, changing only that
-// value: the replacement is a textual substitution, verified by decoding both
-// versions. A missing manifest is created minimally so the plugin can load.
+// value. A missing manifest is created minimally so the plugin can load.
 // It reports whether the file was written.
 func renameManifest(dir, name string) (bool, error) {
 	path := filepath.Join(dir, filepath.FromSlash(pluginManifestRel))
@@ -252,32 +351,12 @@ func renameManifest(dir, name string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	var orig map[string]any
-	if err := json.Unmarshal(data, &orig); err != nil {
-		return false, fmt.Errorf("parsing %s: %w", path, err)
+	out, changed, err := renamedManifest(data, name)
+	if err != nil {
+		return false, fmt.Errorf("renaming the manifest in %s: %w", path, err)
 	}
-	if cur, _ := orig["name"].(string); cur == name {
+	if !changed {
 		return false, nil
-	}
-	if !manifestNameRE.Match(data) {
-		return false, fmt.Errorf("%s has no \"name\" field to rename", path)
-	}
-	replaced := false
-	out := manifestNameRE.ReplaceAllFunc(data, func(m []byte) []byte {
-		if replaced {
-			return m
-		}
-		replaced = true
-		sub := manifestNameRE.FindSubmatch(m)
-		return []byte(string(sub[1]) + fmt.Sprintf("%q", name))
-	})
-	var got map[string]any
-	if err := json.Unmarshal(out, &got); err != nil {
-		return false, fmt.Errorf("renamed manifest does not parse: %w", err)
-	}
-	orig["name"] = name
-	if !reflect.DeepEqual(orig, got) {
-		return false, fmt.Errorf("renaming the manifest in %s would change more than its name; not written", path)
 	}
 	return true, writeFileAtomic(path, out)
 }

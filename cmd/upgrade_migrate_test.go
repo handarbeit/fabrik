@@ -586,3 +586,53 @@ func TestMigrate_OperatorOwnPluginInLocalWorkflowsIsLeftAlone(t *testing.T) {
 	}
 	assertBaseIsEmbedded(t, dir)
 }
+
+// A manifest whose nested author.name comes before the top-level name (any tool
+// that sorts keys does this) must be renamed at the top level, not at the first
+// "name" token.
+func TestRenameManifest_TargetsTopLevelNameNotNestedOne(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".claude-plugin", "plugin.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	src := "{\n  \"author\": {\n    \"name\": \"Someone\"\n  },\n  \"name\": \"fabrik\",\n  \"version\": \"1.0.0\"\n}\n"
+	if err := os.WriteFile(path, []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := renameManifest(dir, fabrikplugin.LocalWorkflowsName)
+	if err != nil || !changed {
+		t.Fatalf("renameManifest = %v, %v; want changed without error", changed, err)
+	}
+	got, _ := os.ReadFile(path)
+	want := strings.Replace(src, `"name": "fabrik"`, `"name": "local-workflows"`, 1)
+	if string(got) != want {
+		t.Errorf("manifest = %q, want %q", got, want)
+	}
+}
+
+// A manifest that cannot be renamed refuses the migration at plan time, before
+// anything is moved, so the deployment is never left without a base plugin.
+func TestMigrate_UnrenamableManifestRefusesBeforeMovingAnything(t *testing.T) {
+	dir := deployFixture(t, "v0.0.77")
+	editSkill(t, dir, "fabrik-plan")
+	manifest := filepath.Join(dir, ".fabrik", "plugin", ".claude-plugin", "plugin.json")
+	if err := os.WriteFile(manifest, []byte(`{"name": 7}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	before := snapshot(t, filepath.Join(dir, ".fabrik"))
+
+	p, err := planMigration(dir, false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Blocked == "" || p.Pending() {
+		t.Fatalf("plan = %+v, want Blocked and not pending", p)
+	}
+	if err := runUpgrade(nil); err == nil || !strings.Contains(err.Error(), "local customizations") {
+		t.Fatalf("want the customisation refusal, got %v", err)
+	}
+	if got := snapshot(t, filepath.Join(dir, ".fabrik")); !reflect.DeepEqual(before, got) {
+		t.Errorf("a refused migration changed the deployment")
+	}
+}
