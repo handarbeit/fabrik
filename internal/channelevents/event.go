@@ -49,6 +49,11 @@ const (
 	ItemWedged      EventType = "item-wedged"
 	ItemUnwedged    EventType = "item-unwedged"
 	CacheDivergence EventType = "cache-divergence"
+	// Situation is the rolled-up "what needs you" digest (#2171): one
+	// account-scoped event carrying every section of the situation view. It is
+	// published on a subscription's cadence, on request and as the catch-up on
+	// attach, and is deduplicated per subscriber by the hub (PublishSituation).
+	Situation EventType = "situation"
 
 	// EventsDropped is synthetic: the hub inserts it at the head of a
 	// subscriber's queue when overflow discarded the oldest events.
@@ -179,6 +184,7 @@ var catalog = map[EventType]Info{
 	ItemWedged:                {Immediate: true},
 	ItemUnwedged:              {Immediate: true},
 	CacheDivergence:           {},
+	Situation:                 {Immediate: true, AccountWide: true},
 	EventsDropped:             {Immediate: true, AccountWide: true, Synthetic: true},
 	Digest:                    {Immediate: true, AccountWide: true, Synthetic: true},
 	StreamSuperseded:          {Immediate: true, AccountWide: true, ShimGenerated: true, Synthetic: true},
@@ -207,9 +213,30 @@ func Subscribable() []EventType {
 		ItemAdded, ColumnChanged, Closed,
 		RetryStarved, RetryResumed, ItemWedged, ItemUnwedged,
 		CacheDivergence,
+		Situation,
 	}
 	return order
 }
 
 // IsLabelEvent reports whether label patterns apply to t.
 func IsLabelEvent(t EventType) bool { return t == LabelApplied || t == LabelRemoved }
+
+// Situation meta keys and values (#2171). The digest's Content is the readable
+// rendering; Meta carries the counts a session can branch on.
+const (
+	// MetaTrigger says why a situation event was sent: one of the Trigger*
+	// values.
+	MetaTrigger = "trigger"
+)
+
+// Situation triggers.
+const (
+	// TriggerCatchUp: the snapshot a new subscription or a session's first attach
+	// receives, and the restart snapshot (#2169).
+	TriggerCatchUp = "catch_up"
+	// TriggerCadence: the subscription's situation_seconds elapsed and the view
+	// had changed since the last digest sent to the subscriber.
+	TriggerCadence = "cadence"
+	// TriggerRequest: the subscriber asked for one (fabrik_situation push).
+	TriggerRequest = "request"
+)

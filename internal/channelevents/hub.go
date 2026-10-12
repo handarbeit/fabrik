@@ -49,8 +49,11 @@ type Options struct {
 	SubscriberTTL time.Duration
 	// MinDigest is the lower digest bound (default MinDigest); tests shorten it.
 	MinDigest time.Duration
-	Now       func() time.Time
-	Logf      func(format string, args ...any)
+	// MinSituation is the lower situation-cadence bound (default MinSituation);
+	// tests shorten it.
+	MinSituation time.Duration
+	Now          func() time.Time
+	Logf         func(format string, args ...any)
 
 	// beforeDeliver, when set (tests only), runs in the drain loop after a batch
 	// has been taken and before the epoch recheck that precedes Deliver.
@@ -68,6 +71,10 @@ type stateFile struct {
 	// Reminders holds, per "<subscriber>|<episode key>", when a decision was
 	// last announced to that subscriber as a reminder (#2120 R6a).
 	Reminders map[string]Reminder `json:"reminders,omitempty"`
+	// Situation holds, per subscriber, the fingerprint of the situation digest
+	// last sent to it (#2171), so an unchanged view is not re-sent — across a
+	// restart too, since the restart catch-up already delivered one.
+	Situation map[string]string `json:"situation,omitempty"`
 }
 
 // Reminder is the persisted reminder memory for one (subscriber, episode).
@@ -107,6 +114,7 @@ type Hub struct {
 	seen        map[string]time.Time
 	counters    map[string]int
 	reminders   map[string]Reminder
+	situation   map[string]string
 	closed      bool
 
 	// Dedup keys and counters are persisted lazily: stateDirty marks unwritten
@@ -138,6 +146,9 @@ func Open(o Options) (*Hub, error) {
 	if o.MinDigest <= 0 {
 		o.MinDigest = MinDigest
 	}
+	if o.MinSituation <= 0 {
+		o.MinSituation = MinSituation
+	}
 	if o.Now == nil {
 		o.Now = time.Now
 	}
@@ -154,6 +165,7 @@ func Open(o Options) (*Hub, error) {
 		seen:        map[string]time.Time{},
 		counters:    map[string]int{},
 		reminders:   map[string]Reminder{},
+		situation:   map[string]string{},
 	}
 	now := o.Now()
 
@@ -188,6 +200,9 @@ func Open(o Options) (*Hub, error) {
 		}
 		for k, v := range st.Reminders {
 			h.reminders[k] = v
+		}
+		for k, v := range st.Situation {
+			h.situation[k] = v
 		}
 	}
 
@@ -276,6 +291,12 @@ func (h *Hub) flushState() {
 			st.Reminders[k] = v
 		}
 	}
+	if len(h.situation) > 0 {
+		st.Situation = make(map[string]string, len(h.situation))
+		for k, v := range h.situation {
+			st.Situation[k] = v
+		}
+	}
 	h.mu.Unlock()
 	h.stateWrites.Add(1)
 	if err := saveJSON(h.statePath(), st); err != nil {
@@ -323,7 +344,7 @@ func (h *Hub) Subscribe(sub Subscription) (Subscription, error) {
 // SubscribeNew is Subscribe that also reports whether the subscription was newly
 // created (false: an identical one already existed).
 func (h *Hub) SubscribeNew(sub Subscription) (Subscription, bool, error) {
-	if err := sub.Validate(h.opt.MinDigest); err != nil {
+	if err := sub.ValidateMin(h.opt.MinDigest, h.opt.MinSituation); err != nil {
 		return Subscription{}, false, err
 	}
 	h.mu.Lock()
@@ -357,6 +378,13 @@ func (h *Hub) SubscribeNew(sub Subscription) (Subscription, bool, error) {
 // announcement" must not fire right behind it. The key is read here and cleared
 // before the event is queued, as for every catch-up event.
 func (h *Hub) CatchUp(name, subID string, evs []Event) int {
+	return h.CatchUpWhere(name, subID, evs, nil)
+}
+
+// CatchUpWhere is CatchUp restricted to the subscriptions take accepts (nil
+// accepts all). The situation catch-up uses it to give the per-item snapshot only
+// to subscriptions that do not take the digest (#2171).
+func (h *Hub) CatchUpWhere(name, subID string, evs []Event, take func(Subscription) bool) int {
 	now := h.opt.Now()
 	h.mu.Lock()
 	if h.closed {
@@ -365,7 +393,7 @@ func (h *Hub) CatchUp(name, subID string, evs []Event) int {
 	}
 	var subs []Subscription
 	for _, sub := range h.subs {
-		if sub.Subscriber == name && (subID == "" || sub.ID == subID) {
+		if sub.Subscriber == name && (subID == "" || sub.ID == subID) && (take == nil || take(sub)) {
 			subs = append(subs, sub)
 		}
 	}
@@ -489,6 +517,14 @@ func (h *Hub) Unsubscribe(subscriberName, id string) int {
 		sub = h.subscribers[subscriberName]
 		remaining = h.subscriptionsLocked(subscriberName)
 		h.saveRegistryLocked()
+		if !h.takesSituationLocked(subscriberName) {
+			// Nothing left to send it to: forget what was last sent, so a later
+			// subscription starts from a clean slate.
+			if _, ok := h.situation[subscriberName]; ok {
+				delete(h.situation, subscriberName)
+				h.saveStateLocked()
+			}
+		}
 	}
 	h.mu.Unlock()
 	if sub == nil {
@@ -511,6 +547,90 @@ func (h *Hub) Unsubscribe(subscriberName, id string) int {
 	sub.sendMu.Lock()
 	sub.sendMu.Unlock() //nolint:staticcheck // SA2001: the empty critical section is the fence
 	return removed
+}
+
+// takesSituationLocked reports whether any of name's subscriptions takes the
+// situation digest. h.mu held.
+func (h *Hub) takesSituationLocked(name string) bool {
+	for _, s := range h.subs {
+		if s.Subscriber == name && s.TakesSituation() {
+			return true
+		}
+	}
+	return false
+}
+
+// PublishSituation delivers a situation digest to one subscriber (#2171). It is
+// a separate path from Publish because its dedup is not Publish's: Publish drops
+// an event whose DedupKey it has ever seen, which cannot say "A, then B, then A
+// again must be sent again". Here the memory is the fingerprint of the digest
+// last sent to name.
+//
+// It does nothing, and reports false, when none of name's subscriptions takes
+// situation, or when force is false and fingerprint equals the one last sent.
+// Otherwise it replaces any situation digest still held in the queue (so a
+// subscriber that is away holds at most one, however many ticks pass), queues ev
+// and records the fingerprint. Like every publish it never blocks on a session.
+func (h *Hub) PublishSituation(name string, ev Event, fingerprint string, force bool) bool {
+	now := h.opt.Now()
+	if ev.At.IsZero() {
+		ev.At = now
+	}
+	ev.Type = Situation
+	ev.DedupKey = ""
+	h.mu.Lock()
+	if h.closed || !h.takesSituationLocked(name) {
+		h.mu.Unlock()
+		return false
+	}
+	if !force && fingerprint != "" && h.situation[name] == fingerprint {
+		h.mu.Unlock()
+		return false
+	}
+	if fingerprint != "" {
+		h.situation[name] = fingerprint
+		h.saveStateLocked()
+	}
+	s := h.subscribers[name]
+	if s == nil {
+		s = newSubscriber(name, h.heldPath(name), queueFile{})
+		h.subscribers[name] = s
+	}
+	h.mu.Unlock()
+
+	s.mu.Lock()
+	dropped := s.q.dropType(Situation)
+	changed := s.q.push(ev, false, time.Time{}, false, h.opt.HeldMax)
+	if changed || dropped {
+		h.saveQueue(s)
+	}
+	s.mu.Unlock()
+	select {
+	case s.wake <- struct{}{}:
+	default:
+	}
+	return true
+}
+
+// SituationFingerprint returns the fingerprint of the digest last sent to name,
+// "" when none was.
+func (h *Hub) SituationFingerprint(name string) string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.situation[name]
+}
+
+// Attached reports whether a session is bound to name right now.
+func (h *Hub) Attached(name string) bool {
+	h.mu.Lock()
+	s := h.subscribers[name]
+	h.mu.Unlock()
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.att != nil
 }
 
 // subscriptionsLocked lists a subscriber's subscriptions. h.mu held.
@@ -984,6 +1104,7 @@ func (h *Hub) Prune(now time.Time) {
 		}
 		h.subs = kept
 		delete(h.lastAttach, name)
+		delete(h.situation, name)
 		if s := h.subscribers[name]; s != nil {
 			_ = os.Remove(s.path)
 			delete(h.subscribers, name)

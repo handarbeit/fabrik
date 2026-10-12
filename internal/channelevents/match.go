@@ -76,6 +76,14 @@ func (s Subscription) Matches(ev Event) bool {
 	if IsAccountWide(ev.Type) {
 		return true
 	}
+	return s.ScopeMatches(ev)
+}
+
+// ScopeMatches applies the repo, issue, milestone and label scopes to ev,
+// ignoring the event-type filter and whether the type is account-wide. The
+// situation digest uses it to narrow an account-scoped view's items to what a
+// subscription selects (#2171).
+func (s Subscription) ScopeMatches(ev Event) bool {
 	if len(s.Repos) > 0 && !containsString(s.Repos, ev.Repo) {
 		return false
 	}

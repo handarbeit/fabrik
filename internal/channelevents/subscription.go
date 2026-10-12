@@ -20,6 +20,14 @@ const (
 	MaxRemind = 30 * 24 * time.Hour
 )
 
+// Situation digest cadence bounds (#2171). The digest is opt-in, so there is no
+// default; the floor is two of the consumer's 30 s ticks, so a cadence the
+// deriver cannot honour is refused rather than silently rounded.
+const (
+	MinSituation = 60 * time.Second
+	MaxSituation = 24 * time.Hour
+)
+
 // IssueRef scopes a subscription to one issue. Repo may be empty to mean "any
 // repo" when the subscriber gave a number the daemon could not resolve to one.
 type IssueRef struct {
@@ -64,6 +72,12 @@ type Subscription struct {
 	// the original announcement or the previous reminder, never from daemon
 	// uptime.
 	RemindAfterSeconds int `json:"remind_after_seconds,omitempty"`
+	// SituationSeconds pushes the situation digest to this subscriber at most
+	// once per interval, and only when the view changed since the last digest it
+	// was sent (#2171). 0 (the default) means no scheduled digest; the catch-up
+	// and an on-demand request still deliver one. It needs `situation` in the
+	// subscription's event filter (or the semantic default).
+	SituationSeconds int `json:"situation_seconds,omitempty"`
 }
 
 // StageProgressLabels are the labels ProgressViaColumn suppresses.
@@ -78,6 +92,23 @@ func (s Subscription) TakesLabelEvents() bool {
 		return !s.EventsDefault
 	}
 	return containsType(s.Events, LabelApplied) || containsType(s.Events, LabelRemoved)
+}
+
+// TakesSituation reports whether the subscription takes the situation digest:
+// named explicitly, or an empty filter on a semantic-default subscription
+// (#2171). A subscription persisted before the digest existed (an empty filter
+// without EventsDefault) does not: it keeps the per-item catch-up it always had
+// until it names `situation`, so a running overseer never silently changes shape.
+func (s Subscription) TakesSituation() bool {
+	if len(s.Events) == 0 {
+		return s.EventsDefault
+	}
+	return containsType(s.Events, Situation)
+}
+
+// Situation returns the digest cadence, zero when scheduled digests are off.
+func (s Subscription) Situation() time.Duration {
+	return time.Duration(s.SituationSeconds) * time.Second
 }
 
 // TakesColumnChanged reports whether the subscription's event filter admits
@@ -105,6 +136,11 @@ func (s Subscription) Digest() time.Duration { return time.Duration(s.DigestSeco
 // Validate checks the subscription's own fields. minDigest lets tests shorten
 // the lower bound; pass MinDigest in production.
 func (s Subscription) Validate(minDigest time.Duration) error {
+	return s.ValidateMin(minDigest, MinSituation)
+}
+
+// ValidateMin is Validate with the situation cadence floor also given.
+func (s Subscription) ValidateMin(minDigest, minSituation time.Duration) error {
 	if err := ValidateSubscriberName(s.Subscriber); err != nil {
 		return err
 	}
@@ -136,6 +172,14 @@ func (s Subscription) Validate(minDigest time.Duration) error {
 	if s.RemindAfterSeconds != 0 {
 		if d := s.Remind(); d < MinRemind || d > MaxRemind {
 			return fmt.Errorf("remind interval %s out of range [%s, %s]", d, MinRemind, MaxRemind)
+		}
+	}
+	if s.SituationSeconds != 0 {
+		if d := s.Situation(); d < minSituation || d > MaxSituation {
+			return fmt.Errorf("situation interval %s out of range [%s, %s]", d, minSituation, MaxSituation)
+		}
+		if !s.TakesSituation() {
+			return fmt.Errorf("situation_seconds needs situation in events (or an empty events list)")
 		}
 	}
 	if s.Milestone != "" && strings.TrimSpace(s.Milestone) == "" {
