@@ -32,31 +32,49 @@ const maxCoverageListed = 50
 
 var (
 	coverageBlockRE = regexp.MustCompile(`(?ms)^PRUEFER_COVERAGE_BEGIN\r?$(.*?)^PRUEFER_COVERAGE_END\r?$\n?`)
+	coverageBeginRE = regexp.MustCompile(`(?m)^PRUEFER_COVERAGE_BEGIN\r?$\n?`)
 	// coverageLineRE matches a model-written line that imitates the fixed
-	// status line, so it can never be mistaken for the one Go appends.
-	coverageLineRE = regexp.MustCompile(`(?m)^[ \t]*PRUEFER_COVERAGE:.*$\n?`)
+	// status line; appendCoverage defuses it so it can never be mistaken for the
+	// one Go appends.
+	coverageLineRE = regexp.MustCompile(`(?m)^([ \t]*)(PRUEFER_COVERAGE:)`)
 )
 
 // coverageFailOpenForTest flips the fail-closed default so a test can show the
 // missing-report assertions are not vacuous. Never set outside tests.
 var coverageFailOpenForTest bool
 
-// extractCoverage finds the model's coverage report in text. It returns the
-// reported entry IDs, whether a well-formed report was found, and text with
-// every coverage block removed. A malformed block (not a JSON object with an
-// "opened" array) counts as absent. The last well-formed block wins.
+// extractCoverage finds the model's coverage report: the final
+// PRUEFER_COVERAGE_BEGIN/END block, and only when nothing but whitespace
+// follows it (the prompt puts it last). It returns the reported entry IDs,
+// whether a well-formed report was found, and text with that block removed.
+// Anything earlier in the output is left alone, so a summary or finding that
+// quotes the markers (this repo's own contract, for one) is neither deleted nor
+// mistaken for the report. A tail block that is not a JSON object with an
+// "opened" array is removed but counts as absent.
 func extractCoverage(text string) (opened []string, ok bool, rest string) {
-	matches := coverageBlockRE.FindAllStringSubmatch(text, -1)
-	for _, m := range matches {
-		var parsed struct {
-			Opened *[]string `json:"opened"`
-		}
-		if err := json.Unmarshal([]byte(strings.TrimSpace(m[1])), &parsed); err != nil || parsed.Opened == nil {
-			continue
-		}
-		opened, ok = *parsed.Opened, true
+	matches := coverageBlockRE.FindAllStringSubmatchIndex(text, -1)
+	if len(matches) == 0 {
+		return nil, false, text
 	}
-	return opened, ok, coverageBlockRE.ReplaceAllString(text, "")
+	m := matches[len(matches)-1]
+	if strings.TrimSpace(text[m[1]:]) != "" {
+		return nil, false, text
+	}
+	blockStart, body := m[0], text[m[2]:m[3]]
+	// A quoted BEGIN with no END of its own earlier in the output would make the
+	// lazy match start there; the report is what follows the last BEGIN line.
+	if locs := coverageBeginRE.FindAllStringIndex(body, -1); len(locs) > 0 {
+		last := locs[len(locs)-1]
+		blockStart, body = m[2]+last[0], body[last[1]:]
+	}
+	rest = text[:blockStart]
+	var parsed struct {
+		Opened *[]string `json:"opened"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(body)), &parsed); err != nil || parsed.Opened == nil {
+		return nil, false, rest
+	}
+	return *parsed.Opened, true, rest
 }
 
 // Coverage is the computed result for one review.
@@ -156,9 +174,12 @@ func computeCoverage(in coverageInput) Coverage {
 // appendCoverage appends the fixed machine-readable coverage line (and, for a
 // partial review, the unread paths) to body. The line is added to every review,
 // complete or partial, so its absence only ever means a review from before this
-// contract. A model-written imitation of the line is removed first.
+// contract.
 func appendCoverage(body string, cov Coverage) string {
-	body = strings.TrimRight(coverageLineRE.ReplaceAllString(body, ""), "\n")
+	// A model line that starts with the marker is kept (it may be a quotation)
+	// but moved off the start of the line, so `^PRUEFER_COVERAGE:` matches only
+	// the line below.
+	body = strings.TrimRight(coverageLineRE.ReplaceAllString(body, "> $2"), "\n")
 	var b strings.Builder
 	b.WriteString(body)
 	if body != "" {

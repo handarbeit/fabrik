@@ -415,7 +415,7 @@ func renderOmittedPaths(b *strings.Builder, excluded, trimmed []string) {
 		return
 	}
 	b.WriteString("## Files omitted from this review\n\n")
-	b.WriteString("Pruefer's size guard omitted the following files from what it measured against max_diff_bytes and from inline-comment anchoring. They are not in the staged diff file. Do not review them, and do not read them from the working tree:\n\n")
+	b.WriteString("Pruefer's size guard omitted the following files from what it measured against max_diff_bytes and from inline-comment anchoring. They are not in the staged diff. Do not review them, and do not read them from the working tree:\n\n")
 	for _, p := range excluded {
 		fmt.Fprintf(b, "- %s (excluded by `excluded_paths`)\n", p)
 	}

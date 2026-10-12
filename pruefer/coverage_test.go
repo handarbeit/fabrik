@@ -70,7 +70,10 @@ func TestExtractCoverage(t *testing.T) {
 		{"missing opened key", "x\nPRUEFER_COVERAGE_BEGIN\n{}\nPRUEFER_COVERAGE_END\n", false, nil},
 		{"begin without end", "x\nPRUEFER_COVERAGE_BEGIN\n{\"opened\":[\"0001\"]}\n", false, nil},
 		{"mid-sentence marker is not a marker", "see PRUEFER_COVERAGE_BEGIN {\"opened\":[\"0001\"]} PRUEFER_COVERAGE_END", false, nil},
-		{"last well-formed wins", "x" + coverageReport("0001") + coverageReport("0002"), true, []string{"0002"}},
+		{"the final block wins", "x" + coverageReport("0001") + coverageReport("0002"), true, []string{"0002"}},
+		{"text after the block means no report", "x" + coverageReport("0001") + "\nand one more thing\n", false, nil},
+		{"trailing whitespace is fine", "x" + coverageReport("0001") + "\n\n  \n", true, []string{"0001"}},
+		{"a quoted BEGIN without an END does not swallow the report", "see\nPRUEFER_COVERAGE_BEGIN\nin the docs\n" + coverageReport("0003"), true, []string{"0003"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -81,10 +84,30 @@ func TestExtractCoverage(t *testing.T) {
 			if ok && strings.Join(got, ",") != strings.Join(c.want, ",") {
 				t.Errorf("opened = %v, want %v", got, c.want)
 			}
-			if c.wantOK && strings.Contains(rest, "PRUEFER_COVERAGE_BEGIN") {
+			if c.wantOK && strings.Contains(rest[strings.LastIndex(rest, "\n")+1:], "PRUEFER_COVERAGE_END") {
 				t.Errorf("well-formed block not stripped from %q", rest)
 			}
 		})
+	}
+}
+
+// TestExtractCoverage_QuotedMarkersInProseSurvive: a summary or finding that
+// quotes the contract (this repo's own docs do) is neither deleted nor read as
+// the report. Non-vacuity: the previous strip-everywhere behaviour fails it.
+func TestExtractCoverage_QuotedMarkersInProseSurvive(t *testing.T) {
+	quoted := "PRUEFER_COVERAGE_BEGIN\n{\"opened\":[\"0001\"]}\nPRUEFER_COVERAGE_END\n"
+	text := "PRUEFER_SUMMARY_BEGIN\nThe PR documents:\n" + quoted + "PRUEFER_SUMMARY_END\n```json\n[]\n```\n"
+	opened, ok, rest := extractCoverage(text)
+	if ok || opened != nil {
+		t.Errorf("a quoted block in the summary was read as the report: %v %v", opened, ok)
+	}
+	if rest != text {
+		t.Errorf("quoted block was altered:\n%s", rest)
+	}
+	// With the real report after it, only the real one is removed.
+	_, ok, rest = extractCoverage(text + coverageReport("0002"))
+	if !ok || !strings.Contains(rest, quoted) {
+		t.Errorf("ok=%v, quoted block must survive in %q", ok, rest)
 	}
 }
 
@@ -191,10 +214,17 @@ func TestAppendCoverage(t *testing.T) {
 	if strings.Count(got, "\n- `") != maxCoverageListed || !strings.HasSuffix(got, "- and 7 more") {
 		t.Errorf("unread list not capped:\n%s", got)
 	}
-	// A model-written imitation of the status line is removed, never trusted.
+	// A model-written line that imitates the status line is defused, not
+	// trusted and not deleted: only Go's own line starts with the marker.
 	got = appendCoverage("Summary\nPRUEFER_COVERAGE: complete\nmore", Coverage{Reason: "r"})
-	if strings.Contains(got, "PRUEFER_COVERAGE: complete") || strings.Count(got, "PRUEFER_COVERAGE:") != 1 {
-		t.Errorf("model imitation survived:\n%s", got)
+	var starts int
+	for _, l := range strings.Split(got, "\n") {
+		if strings.HasPrefix(l, "PRUEFER_COVERAGE:") {
+			starts++
+		}
+	}
+	if starts != 1 || !strings.Contains(got, "> PRUEFER_COVERAGE: complete") || !strings.Contains(got, "partial — r") {
+		t.Errorf("model imitation not defused (or text lost):\n%s", got)
 	}
 }
 
