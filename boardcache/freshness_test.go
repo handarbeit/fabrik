@@ -30,6 +30,12 @@ func cachedState(base time.Time, prAt time.Time, issueComments int, selfWrite bo
 	return s
 }
 
+// withCachedPR marks the cached copy as knowing a linked PR.
+func withCachedPR(s itemstate.ItemState) itemstate.ItemState {
+	s.LinkedPR = &itemstate.LinkedPRState{Number: 7}
+	return s
+}
+
 // TestCacheIsStale_Layers is the #2180 rule table: each case is a board read
 // against a cached copy that an engine self-write has already anchored.
 func TestCacheIsStale_Layers(t *testing.T) {
@@ -89,14 +95,28 @@ func TestCacheIsStale_Layers(t *testing.T) {
 		},
 		{
 			name:  "no PR baseline captured: falls back to the overall compare (fresh)",
-			state: cachedState(base, time.Time{}, 2, true),
+			state: withCachedPR(cachedState(base, time.Time{}, 2, true)),
 			ev:    Evidence{Overall: base.Add(25 * time.Second), IssueLayer: base.Add(25 * time.Second), PRLayer: base.Add(25 * time.Second)},
 		},
 		{
 			name:      "no PR baseline captured: overall after the baseline is stale",
-			state:     cachedState(base, time.Time{}, 2, true),
+			state:     withCachedPR(cachedState(base, time.Time{}, 2, true)),
 			ev:        Evidence{Overall: afterWrite, IssueLayer: base, PRLayer: afterWrite},
 			wantStale: true,
+		},
+		{
+			// Fetched with no PR; a PR opened and was reviewed before the
+			// engine's issue-side self-write, so the overall compare is masked.
+			name:  "PR appeared since the fetch, change before the self-write: stale",
+			state: cachedState(base, time.Time{}, 2, true),
+			ev: Evidence{Overall: justBeforeWrite, IssueLayer: base, PRLayer: justBeforeWrite,
+				CommentTotal: 2, CommentTotalKnown: true},
+			wantStale: true,
+		},
+		{
+			name:  "no PR cached and none on the board: fresh",
+			state: cachedState(base, time.Time{}, 2, true),
+			ev:    Evidence{Overall: base.Add(25 * time.Second), IssueLayer: base.Add(25 * time.Second), CommentTotal: 2, CommentTotalKnown: true},
 		},
 		{
 			name:  "layers not captured: overall compare, masked by the self-write as before",

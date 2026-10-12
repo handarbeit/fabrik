@@ -779,8 +779,11 @@ func cachedIssueComments(s itemstate.ItemState) int {
 //     baseline.
 //   - ev.Overall is zero (the board read carried no signal): fresh, to avoid a
 //     hot-loop refetch.
-//   - Layers not captured (zero IssueLayer, or no PR baseline): fall back to
-//     comparing Overall against LastSeenSourceUpdatedAt, as before #2180.
+//   - A linked PR on the board that the cache has no record of (no PR baseline
+//     and no cached PR): stale, since a PR appeared after the fetch.
+//   - Layers not captured (zero IssueLayer, or no PR baseline for a cached
+//     PR): fall back to comparing Overall against LastSeenSourceUpdatedAt, as
+//     before #2180.
 //
 // Every refetch re-anchors all baselines to GitHub's values and rebuilds the
 // cached comment list, so no mismatch can persist across polls.
@@ -790,6 +793,13 @@ func cacheIsStale(ev Evidence, s itemstate.ItemState) bool {
 	}
 	lastSeen := s.LastSeenSourceUpdatedAt
 	if lastSeen.IsZero() {
+		return true
+	}
+	// A linked PR the cached copy knows nothing about (no PR baseline and no
+	// cached PR) appeared after the fetch. Its changes are unseen, and the
+	// overall compare below would let an issue-side self-write mask them. The
+	// refetch caches the PR, so this cannot repeat.
+	if !ev.PRLayer.IsZero() && s.LastSeenPRUpdatedAt.IsZero() && (s.LinkedPR == nil || s.LinkedPR.Number == 0) {
 		return true
 	}
 	if !ev.IssueLayer.IsZero() && !s.LastSeenPRUpdatedAt.IsZero() {
