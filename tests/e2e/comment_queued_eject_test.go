@@ -36,18 +36,20 @@ import (
 // the batch worker dispatches before the settle scan in the same poll, so a member
 // in the just-formed batch is ejected via the pending-signal route, which a worker on
 // the singleton fast path can miss. So an occupant M1 is queued first and made to
-// build a trial, holding a worker in flight for the (repo, base) partition for the
-// bed's ~10 min slow-gate. A lone, green, up-to-date member takes the singleton fast
-// path and never opens a trial (member-PR CI on the bed is green within about a
-// minute; only trial branches are slow), so M1's PR is prepared first, main is then
-// advanced by one unrelated commit (AdvanceBaseBranch), and only then is M1 queued:
-// its head is no longer a fast-forward of the pinned base, so the engine must build
-// a trial (engine/merge_train.go: "pinned base is N commit(s) ahead of the member's
-// head"). The first live run of this scenario failed exactly here, waiting 25 min
-// for a trial the fast path had skipped. Once the log shows
+// hold a worker in flight for the (repo, base) partition. A lone, green, up-to-date
+// member takes the singleton fast path at once, so M1's PR is prepared first and
+// main is then advanced by one unrelated commit (AdvanceBaseBranch): M1 is behind
+// the pinned base, so the engine runs the singleton catch-up (#2044) — it merges
+// the base into M1's branch and waits, in the worker, for M1's own CI on the new
+// head — or, where the catch-up does not apply, builds a trial. Either holds the
+// worker. Neither is long on its own (member and trial CI on the bed take about
+// two minutes; the 0.0.84 gate saw M1 caught up and landed in 1.5 minutes), so
+// M1's PR carries slow-ci-every-head: the slow-gate sleeps its 10-minute window on
+// every head, the catch-up's merge commit included (the plain markers skip a
+// merge-commit head). Once the log shows the catch-up starting, or
 // `opened draft CI PR … (1 survivor(s))`, M2 is queued and commented on. M2 is never
-// in the fixed batch, dispatch skips, and the settle scan ejects it directly. The
-// scenario asserts the settle scan's direct-route line for M2 ("not owned by any
+// in the occupant's batch, dispatch skips, and the settle scan ejects it directly.
+// The scenario asserts the settle scan's direct-route line for M2 ("not owned by any
 // live batch … ejecting directly") and fails loudly ("occupant window closed") if it
 // took the pending-signal route instead, rather than reporting an engine regression.
 //
@@ -70,7 +72,7 @@ import (
 // `slow-gate` required check, and whether that fires on a non-default base cannot be
 // confirmed from this repo (its workflow lives on the bed repo).
 //
-// Wall-clock: ~35–60 min (M1's slow-gate trial, then M2's comment processing and
+// Wall-clock: ~35–60 min (M1's slow-gate catch-up, then M2's comment processing and
 // re-queue trial). Cost: one comment-review Claude invocation.
 func TestQueuedMemberCommentEjection(t *testing.T) {
 	env := LoadEnv(t)
@@ -109,8 +111,8 @@ func TestQueuedMemberCommentEjection(t *testing.T) {
 	SubmitPRReview(t, env, reviewerToken, repo, m2PR, "APPROVE")
 
 	// --- Queue the occupant M1 and wait for its trial to be in flight. ---
-	m1, m1PR, m1Item := PrepareMemberExactPath(t, env, repo, base, "ce-m1",
-		fmt.Sprintf("e2e/train/entries/comment-eject-m1-%s.txt", stamp), "comment-eject occupant M1\n")
+	m1, m1PR, m1Item := prepareMemberExactPathSuffix(t, env, repo, base, "ce-m1",
+		fmt.Sprintf("e2e/train/entries/comment-eject-m1-%s.txt", stamp), "comment-eject occupant M1\n", slowCIEveryHeadMarker)
 	// Move main past M1's head so M1 cannot take the singleton fast path.
 	AdvanceBaseBranch(t, env, repo, base,
 		fmt.Sprintf("e2e/train/entries/comment-eject-basebump-%s.txt", stamp), "base bump for the comment-eject occupant\n")
@@ -120,16 +122,20 @@ func TestQueuedMemberCommentEjection(t *testing.T) {
 	t.Logf("occupant M1 = #%d (PR #%d), member under test M2 = #%d (PR #%d)", m1, m1PR, m2, m2PR)
 
 	fastPathTaken := fmt.Sprintf("singleton fast path taken for #%d:", m1)
-	isM1Trial := func(l string) bool {
+	catchUpStarted := fmt.Sprintf("singleton catch-up: #%d is ", m1)
+	isM1Occupying := func(l string) bool {
 		if strings.Contains(l, fastPathTaken) {
-			t.Fatalf("occupant M1 #%d took the singleton fast path despite the base bump, so no trial will open: %s", m1, strings.TrimSpace(l))
+			t.Fatalf("occupant M1 #%d took the singleton fast path before any catch-up or trial held the partition: %s", m1, strings.TrimSpace(l))
+		}
+		if strings.Contains(l, catchUpStarted) {
+			return true
 		}
 		_, survivors, ok := parseOpenedDraftCI(l, repo)
 		return ok && survivors == 1
 	}
-	waitForLogMatch(t, env, offset, 25*time.Minute,
-		"\"opened draft CI PR … (1 survivor(s))\" for "+repo+" — the occupant's trial never started", isM1Trial)
-	t.Logf("occupant trial in flight; queuing M2 and commenting")
+	occupied := waitForLogMatch(t, env, offset, 25*time.Minute,
+		"the occupant's catch-up or trial for "+repo+" never started", isM1Occupying)
+	t.Logf("occupant in flight (%s); queuing M2 and commenting", strings.TrimSpace(occupied))
 
 	// --- Queue M2 and post the unprocessed human comment. ---
 	SetIssueStatus(t, env, m2Item, "Queued")
