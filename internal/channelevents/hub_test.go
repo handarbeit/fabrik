@@ -807,3 +807,30 @@ func TestHubDeliverable(t *testing.T) {
 	d.wait(t)
 	waitFor(t, func() bool { return !h.Deliverable("D") })
 }
+
+// A digest that becomes due only because the injected clock moved must be
+// delivered once the drain polls Deliverable, even though the pump's real-time
+// timer (sized from the old clock delta) has not fired (#2210).
+func TestHubDeliverableWakesPumpAfterClockAdvance(t *testing.T) {
+	now := time.Date(2026, 10, 13, 0, 0, 0, 0, time.UTC)
+	var cmu sync.Mutex
+	clock := now
+	h := openHub(t, t.TempDir(), func(o *Options) {
+		o.Now = func() time.Time { cmu.Lock(); defer cmu.Unlock(); return clock }
+	})
+	h.Subscribe(Subscription{Subscriber: "D", DigestSeconds: 3600})
+	d := newSink()
+	h.Attach("D", d)
+	h.Publish(ev(1, Merged)) // held in an hour-long digest
+	if h.Deliverable("D") {
+		t.Fatal("a held digest must not be deliverable before its due time")
+	}
+	// Let the pump evaluate the held digest and arm its real-time timer on the
+	// old clock; the bug only exists once that timer is sleeping.
+	time.Sleep(100 * time.Millisecond)
+	cmu.Lock()
+	clock = now.Add(2 * time.Hour)
+	cmu.Unlock()
+	waitFor(t, func() bool { return !h.Deliverable("D") && h.Queued("D") == 0 })
+	d.wait(t)
+}
