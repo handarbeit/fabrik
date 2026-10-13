@@ -13,13 +13,23 @@
 //     sets it for every Claude worker, and every descendant inherits it), the
 //     binary exits once the recorded worker is provably gone — its PID absent,
 //     or held by a process with a different start token (a recycled PID). It
-//     never exits on parent death: a `go test -c` binary run directly, or a
-//     background run whose launching shell exited, legitimately has ppid 1.
+//     never infers death from process-tree shape (ppid 1): a worker-launched
+//     `go test -c` binary whose shell exited legitimately has ppid 1.
 //     Anything unresolved or unreadable means "keep running".
 //   - Parent watch: when SIM_TEST_PARENT=<pid>:<start token> is set — only by
 //     ReExecCommand, for a helper the test itself re-execs — the helper exits
 //     once that parent is gone. This covers the re-exec'd helpers that survived
 //     a `go test -timeout` panic of their parent.
+//   - Main parent watch (#2226): a binary with no explicit parent and no owner
+//     marker watches the process that started it (PID plus start token captured
+//     at install), so a `sim.test` reparented to init when its `go test` is gone
+//     exits too. An owner marker takes precedence — the owner watch is then the
+//     authoritative lifetime — and an unreadable identity means "keep running".
+//
+// All three share one bail path with a bounded exit (#2226): before it asks the
+// process to exit it arms a watchdog that SIGKILLs the process itself after
+// KillGrace, so an exit that blocks or spins (seen under -race) cannot leave an
+// orphan.
 //
 // The package is a leaf: stdlib plus internal/sessionreap, internal/workerenv
 // and internal/workerowner. It never signals another process.
@@ -65,6 +75,7 @@ const (
 
 	defaultOwnerPoll    = 5 * time.Second
 	defaultParentPoll   = time.Second
+	defaultKillGrace    = 5 * time.Second
 	defaultResolveEvery = 500 * time.Millisecond
 	defaultResolveFor   = 30 * time.Second
 )
@@ -79,17 +90,32 @@ type Options struct {
 	ParentPoll    time.Duration // 0: 1s
 	ResolveWindow time.Duration // 0: 30s; how long to wait for the engine to write the owner file
 
+	KillGrace time.Duration // 0: 5s; how long exit may take before the process kills itself
+
 	// Seams. Zero values use the real process, environment and clock.
-	Getenv func(string) string
-	Exit   func(code int)
-	Stderr io.Writer
-	Start  func(pid int) string // process start-time token; nil: sessionreap.StartToken
+	Getenv  func(string) string
+	Exit    func(code int)
+	Kill    func()     // forced termination of this process; nil: SIGKILL to os.Getpid()
+	Getppid func() int // nil: os.Getppid
+	Stderr  io.Writer
+	Start   func(pid int) string // process start-time token; nil: sessionreap.StartToken
 
 	// Neutralisation seams: a test sets one to prove the mechanism it covers is
 	// load-bearing. Production never sets them.
 	DisableCeiling     bool
 	DisableOwnerWatch  bool
 	DisableParentWatch bool
+
+	DisableKillFallback    bool
+	DisableMainParentWatch bool
+}
+
+// selfKill terminates this process and only this process: os.Process.Kill is
+// SIGKILL on unix and TerminateProcess on Windows, and the PID is our own.
+func selfKill() {
+	if p, err := os.FindProcess(os.Getpid()); err == nil {
+		_ = p.Kill()
+	}
 }
 
 func (o Options) getenv(k string) string {
@@ -143,8 +169,22 @@ func Guard(o Options) (stop func()) {
 	var once sync.Once
 	bail := func(format string, args ...any) {
 		once.Do(func() {
+			// Armed before anything that can block (the message, the exit), so a
+			// hang in either cannot stop the process being killed (#2226). Only a
+			// fake exit returns; that disarms it.
+			var wd *time.Timer
+			if !o.DisableKillFallback {
+				kill := o.Kill
+				if kill == nil {
+					kill = selfKill
+				}
+				wd = time.AfterFunc(dur(o.KillGrace, defaultKillGrace), kill)
+			}
 			fmt.Fprintf(o.stderr(), "%s: %s\n", o.name(), fmt.Sprintf(format, args...))
 			exit(ExitCode)
+			if wd != nil {
+				wd.Stop()
+			}
 		})
 	}
 	done := make(chan struct{})
@@ -173,7 +213,41 @@ func Guard(o Options) (stop func()) {
 			go watchIdentity(o, workerowner.Info{PID: pid, StartToken: tok}, "re-exec parent", dur(o.ParentPoll, defaultParentPoll), done, bail)
 		}
 	}
+	if info, ok := mainParent(o); ok {
+		go watchIdentity(o, info, "parent process", dur(o.ParentPoll, defaultParentPoll), done, bail)
+	}
 	return stop
+}
+
+// mainParent returns the identity of the process that started this binary, when
+// the main parent watch applies: not neutralised, no explicit ReExecCommand
+// parent (that watch covers it), no owner marker (the owner watch is then the
+// authoritative lifetime), and a parent that is not init with a readable start
+// token. Anything else means no watch, never an exit.
+func mainParent(o Options) (workerowner.Info, bool) {
+	if o.DisableMainParentWatch || o.getenv(workerenv.OwnerVar) != "" {
+		return workerowner.Info{}, false
+	}
+	if _, _, ok := parseParent(o.getenv(ParentEnv)); ok {
+		return workerowner.Info{}, false
+	}
+	getppid := o.Getppid
+	if getppid == nil {
+		getppid = os.Getppid
+	}
+	ppid := getppid()
+	if ppid <= 1 {
+		return workerowner.Info{}, false
+	}
+	start := o.Start
+	if start == nil {
+		start = sessionreap.StartToken
+	}
+	tok := start(ppid)
+	if tok == "" {
+		return workerowner.Info{}, false
+	}
+	return workerowner.Info{PID: ppid, StartToken: tok}, true
 }
 
 func parseParent(v string) (pid int, tok string, ok bool) {
