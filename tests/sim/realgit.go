@@ -14,7 +14,15 @@ import (
 // host). The sim starts real git thousands of times, so TestMain resolves the
 // real binary once and puts its directory first on PATH. Doing it in TestMain
 // covers every caller: the gate's pre-gate, cut-release.sh's race suite and a
-// plain `go test`. SIM_REAL_GIT=off disables it (to measure the difference). Any failure leaves PATH unchanged; it does nothing off darwin.
+// plain `go test`. SIM_REAL_GIT=off disables it (to measure the difference).
+//
+// It only replaces Apple's shim itself: a git the developer put on PATH on
+// purpose (Homebrew, a toolchain manager) is left alone, so the suite runs
+// against the git they chose. Any failure leaves PATH unchanged; it does
+// nothing off darwin.
+
+// appleShimGit is where macOS keeps the xcrun git shim.
+const appleShimGit = "/usr/bin/git"
 
 // realGitDir returns the directory to prepend to PATH, and whether there is one.
 // pathGit is the git found on PATH ("" when none); xcrunGit runs `xcrun -f git`;
@@ -34,6 +42,9 @@ func realGitDir(goos, pathGit string, xcrunGit func() (string, error), executabl
 	}
 	if pathGit != "" && filepath.Clean(pathGit) == filepath.Clean(real) {
 		return "", false // PATH already resolves to the real git
+	}
+	if pathGit != "" && filepath.Clean(pathGit) != appleShimGit {
+		return "", false // PATH's git is not the shim (e.g. Homebrew): the developer's choice stands
 	}
 	return filepath.Dir(real), true
 }

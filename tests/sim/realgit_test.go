@@ -28,8 +28,10 @@ func TestRealGitDir(t *testing.T) {
 		{"empty output", "darwin", shim, xc("  \n", nil), ok, "", false},
 		{"relative output", "darwin", shim, xc("git", nil), ok, "", false},
 		{"not executable", "darwin", shim, xc(real, nil), no, "", false},
+		{"homebrew git on PATH is kept", "darwin", "/opt/homebrew/bin/git", xc(real, nil), ok, "", false},
 		{"same path as PATH's git", "darwin", real, xc(real, nil), ok, "", false},
 		{"same path, unclean", "darwin", "/Library/Developer/CommandLineTools/usr/bin/../bin/git", xc(real, nil), ok, "", false},
+		{"shim path, unclean", "darwin", "/usr/bin/../bin/git", xc(real, nil), ok, "/Library/Developer/CommandLineTools/usr/bin", true},
 	}
 	for _, c := range cases {
 		c := c

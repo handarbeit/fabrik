@@ -12,79 +12,109 @@ import (
 	"testing"
 )
 
-// R5 guard (#2210): a sim test file whose tests never call t.Parallel() runs
-// serially, after every parallel test has finished, and that is how the package
-// crept back to the CI per-package timeout — 73 of 88 files were parallel, the
-// channel files were not, and nothing noticed. This scan fails `go test
-// ./tests/sim` for any *_test.go file that declares a Test function but has no
-// real t.Parallel() call, unless the file is on parallelExempt with a reason.
+// R5 guard (#2210): a sim test that never calls t.Parallel() runs serially,
+// after every parallel test has finished, and that is how the package crept back
+// to the CI per-package timeout — 73 of 88 files were parallel, the channel files
+// were not, and nothing noticed. This scan fails `go test ./tests/sim` for any
+// top-level Test function whose own body has no t.Parallel() call, unless the
+// test (key "file.go:TestName") or its whole file (key "file.go") is on
+// parallelExempt with a reason.
 //
-// The scan parses the source (a comment mentioning t.Parallel() does not count)
-// and is file-granular by design: one parallel test in a file satisfies it. It
-// also rejects a stale exemption (the file is gone, or has become parallel), so
-// the list cannot rot. Modelled on the repo's other static scans, e.g.
-// tests/e2e/registry's ScanPollSeamCallers and internal/workerenv's literal scan.
+// The scan parses the source, so a comment mentioning t.Parallel() does not
+// count, and it looks only at the Test function's own statements: a t.Parallel()
+// inside a t.Run closure parallelises that subtest against its siblings but
+// leaves the top-level test serial against the rest of the package, so it does
+// not satisfy the guard. It also rejects a stale exemption (the file or test is
+// gone, or has become parallel), so the list cannot rot. Modelled on the repo's
+// other static scans, e.g. tests/e2e/registry's ScanPollSeamCallers and
+// internal/workerenv's literal scan.
 
-// parallelExempt lists the sim test files that are deliberately serial, each with
-// the reason. Adding a file here needs a reason that names the process-global or
-// the subprocess it cannot share; "slow" is not one — make it parallel.
+// parallelExempt lists the sim tests that are deliberately serial, each with the
+// reason. A key is a file name (every test in it) or "file.go:TestName". Adding
+// an entry needs a reason that names the process-global or the subprocess it
+// cannot share; "slow" is not one — make it parallel.
 var parallelExempt = map[string]string{
 	"advance_until_test.go":          "re-execs the test binary as a subprocess and asserts on its captured output; the inner half must run alone in that subprocess",
 	"main_guard_test.go":             "re-exec probe for the TestMain testlife guard (#2128): the inner half idles until the 1s ceiling kills the process, so it must be the only thing running in it",
 	"display_field_warnings_test.go": "redirects the process-global warnings.WarningsPathOverride to read the panel file back; parallel tests would write theirs into it (see github_app_auth_test.go for the same constraint)",
+
+	"github_app_auth_test.go:TestGitHubAppAuth_DispatchAdmission_ExcludedRepoBlocksAndWarns": "points the process-global warnings.WarningsPathOverride at a temp file to read the panel back; every parallel sibling's first poll writes to that global (a -race-flagged data race), see the comment on the test",
 }
 
-// scanSerialSimFiles returns the *_test.go files in dir that declare a Test
-// function, call no t.Parallel() and are not exempt, plus any problem with the
-// exemption list itself (an empty reason, a missing file, a file that is in fact
-// parallel).
-func scanSerialSimFiles(dir string, exempt map[string]string) (serial, problems []string, err error) {
+// scanSerialSimTests returns the "file.go:TestName" keys in dir of Test
+// functions with no t.Parallel() in their own body that are not exempt, plus any
+// problem with the exemption list itself (an empty reason, a missing file or
+// test, an entry that is in fact parallel).
+func scanSerialSimTests(dir string, exempt map[string]string) (serial, problems []string, err error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, nil, err
 	}
-	seen := map[string]bool{}
+	type testInfo struct {
+		file, name string
+		parallel   bool
+	}
+	var tests []testInfo
+	files := map[string]bool{}
 	fset := token.NewFileSet()
 	for _, ent := range entries {
 		name := ent.Name()
 		if ent.IsDir() || !strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		seen[name] = true
+		files[name] = true
 		f, perr := parser.ParseFile(fset, filepath.Join(dir, name), nil, 0)
 		if perr != nil {
 			return nil, nil, fmt.Errorf("parsing %s: %w", name, perr)
 		}
-		hasTest, parallel := false, false
-		ast.Inspect(f, func(n ast.Node) bool {
-			switch x := n.(type) {
-			case *ast.FuncDecl:
-				if isTestFunc(x) {
-					hasTest = true
-				}
-			case *ast.CallExpr:
-				if sel, ok := x.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Parallel" && len(x.Args) == 0 {
-					parallel = true
-				}
+		for _, decl := range f.Decls {
+			fd, ok := decl.(*ast.FuncDecl)
+			if !ok || !isTestFunc(fd) || fd.Body == nil {
+				continue
 			}
-			return true
-		})
-		reason, isExempt := exempt[name]
-		switch {
-		case isExempt && strings.TrimSpace(reason) == "":
-			problems = append(problems, name+": exemption has no reason")
-		case isExempt && parallel:
-			problems = append(problems, name+": exempt but calls t.Parallel(); remove it from parallelExempt")
-		case !hasTest && !isExempt:
-			// Helpers only (env.go-style files are not _test.go; a _test.go with no
-			// tests, e.g. a shared helper file, has nothing to run serially).
-		case hasTest && !parallel && !isExempt:
-			serial = append(serial, name)
+			parallel := false
+			ast.Inspect(fd.Body, func(n ast.Node) bool {
+				switch x := n.(type) {
+				case *ast.FuncLit:
+					return false // a subtest's t.Parallel() does not parallelise this test
+				case *ast.CallExpr:
+					if sel, ok := x.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Parallel" && len(x.Args) == 0 {
+						parallel = true
+					}
+				}
+				return true
+			})
+			tests = append(tests, testInfo{name, fd.Name.Name, parallel})
 		}
 	}
-	for name := range exempt {
-		if !seen[name] {
-			problems = append(problems, name+": exempt but the file does not exist")
+	matched := map[string]bool{}
+	for _, tc := range tests {
+		key := tc.file + ":" + tc.name
+		ek := ""
+		if _, ok := exempt[key]; ok {
+			ek = key
+		} else if _, ok := exempt[tc.file]; ok {
+			ek = tc.file
+		}
+		switch {
+		case ek != "" && tc.parallel:
+			matched[ek] = true
+			problems = append(problems, key+": exempt but calls t.Parallel(); remove it from parallelExempt")
+		case ek != "":
+			matched[ek] = true
+		case !tc.parallel:
+			serial = append(serial, key)
+		}
+	}
+	for ek, reason := range exempt {
+		file, _, _ := strings.Cut(ek, ":")
+		switch {
+		case strings.TrimSpace(reason) == "":
+			problems = append(problems, ek+": exemption has no reason")
+		case !files[file]:
+			problems = append(problems, ek+": exempt but the file does not exist")
+		case !matched[ek]:
+			problems = append(problems, ek+": exempt but matches no Test function")
 		}
 	}
 	sort.Strings(serial)
@@ -109,7 +139,7 @@ func isTestFunc(fd *ast.FuncDecl) bool {
 // TestEverySimTestFileIsParallelOrExempt is the guard on the real package.
 func TestEverySimTestFileIsParallelOrExempt(t *testing.T) {
 	t.Parallel()
-	serial, problems, err := scanSerialSimFiles(".", parallelExempt)
+	serial, problems, err := scanSerialSimTests(".", parallelExempt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,9 +147,9 @@ func TestEverySimTestFileIsParallelOrExempt(t *testing.T) {
 		t.Error(p)
 	}
 	if len(serial) > 0 {
-		t.Errorf("sim test file(s) with no t.Parallel(): %s\n"+
+		t.Errorf("sim test(s) with no t.Parallel() in their own body: %s\n"+
 			"A serial test runs after every parallel one has finished and pushes tests/sim toward the CI timeout.\n"+
-			"Call t.Parallel() (channel seams are per-Engine, see channel_settings.go), or add the file to parallelExempt with the process-global it needs.",
+			"Call t.Parallel() (channel seams are per-Engine, see channel_settings.go), or add the test (\"file.go:TestName\") or its file to parallelExempt with the process-global it needs.",
 			strings.Join(serial, ", "))
 	}
 }
@@ -141,39 +171,59 @@ func TestParallelGuardFixtures(t *testing.T) {
 	const mainOnlySrc = "package sim\nimport \"testing\"\nfunc TestMain(m *testing.M) { m.Run() }\n"
 	const subtestSrc = "package sim\nimport \"testing\"\nfunc TestSub(t *testing.T) { t.Run(\"a\", func(t *testing.T) { t.Parallel() }) }\n"
 
+	const mixedSrc = "package sim\nimport \"testing\"\nfunc TestA(t *testing.T) { t.Parallel() }\nfunc TestB(t *testing.T) {}\n"
+	t.Run("one serial test in a parallel file fails and is named", func(t *testing.T) {
+		dir := t.TempDir()
+		write(dir, "mixed_test.go", mixedSrc)
+		serial, problems, err := scanSerialSimTests(dir, nil)
+		if err != nil || len(problems) != 0 || len(serial) != 1 || serial[0] != "mixed_test.go:TestB" {
+			t.Fatalf("serial=%v problems=%v err=%v, want [mixed_test.go:TestB]", serial, problems, err)
+		}
+		serial, problems, err = scanSerialSimTests(dir, map[string]string{"mixed_test.go:TestB": "needs a global"})
+		if err != nil || len(problems) != 0 || len(serial) != 0 {
+			t.Fatalf("per-test exemption: serial=%v problems=%v err=%v", serial, problems, err)
+		}
+	})
 	t.Run("serial file fails and is named", func(t *testing.T) {
 		dir := t.TempDir()
 		write(dir, "serial_test.go", serialSrc)
 		write(dir, "ok_test.go", parallelSrc)
-		serial, problems, err := scanSerialSimFiles(dir, nil)
+		serial, problems, err := scanSerialSimTests(dir, nil)
 		if err != nil || len(problems) != 0 {
 			t.Fatalf("err=%v problems=%v", err, problems)
 		}
-		if len(serial) != 1 || serial[0] != "serial_test.go" {
-			t.Fatalf("serial = %v, want [serial_test.go]", serial)
+		if len(serial) != 1 || serial[0] != "serial_test.go:TestSerial" {
+			t.Fatalf("serial = %v, want [serial_test.go:TestSerial]", serial)
 		}
 	})
 	t.Run("a comment or string is not a call", func(t *testing.T) {
 		dir := t.TempDir()
 		write(dir, "comment_test.go", commentOnlySrc)
-		serial, _, err := scanSerialSimFiles(dir, nil)
+		serial, _, err := scanSerialSimTests(dir, nil)
 		if err != nil || len(serial) != 1 {
 			t.Fatalf("serial = %v err=%v, want the comment-only file flagged", serial, err)
 		}
 	})
-	t.Run("TestMain only and subtest Parallel", func(t *testing.T) {
+	t.Run("TestMain only is not a test", func(t *testing.T) {
 		dir := t.TempDir()
 		write(dir, "main_test.go", mainOnlySrc)
-		write(dir, "sub_test.go", subtestSrc)
-		serial, problems, err := scanSerialSimFiles(dir, nil)
+		serial, problems, err := scanSerialSimTests(dir, nil)
 		if err != nil || len(serial) != 0 || len(problems) != 0 {
 			t.Fatalf("serial=%v problems=%v err=%v", serial, problems, err)
+		}
+	})
+	t.Run("t.Parallel only inside a subtest leaves the test serial", func(t *testing.T) {
+		dir := t.TempDir()
+		write(dir, "sub_test.go", subtestSrc)
+		serial, _, err := scanSerialSimTests(dir, nil)
+		if err != nil || len(serial) != 1 || serial[0] != "sub_test.go:TestSub" {
+			t.Fatalf("serial = %v err=%v, want [sub_test.go:TestSub]", serial, err)
 		}
 	})
 	t.Run("a reasoned exemption passes", func(t *testing.T) {
 		dir := t.TempDir()
 		write(dir, "serial_test.go", serialSrc)
-		serial, problems, err := scanSerialSimFiles(dir, map[string]string{"serial_test.go": "needs a process-global"})
+		serial, problems, err := scanSerialSimTests(dir, map[string]string{"serial_test.go": "needs a process-global"})
 		if err != nil || len(serial) != 0 || len(problems) != 0 {
 			t.Fatalf("serial=%v problems=%v err=%v", serial, problems, err)
 		}
@@ -182,7 +232,7 @@ func TestParallelGuardFixtures(t *testing.T) {
 		dir := t.TempDir()
 		write(dir, "serial_test.go", serialSrc)
 		write(dir, "par_test.go", parallelSrc)
-		_, problems, err := scanSerialSimFiles(dir, map[string]string{
+		_, problems, err := scanSerialSimTests(dir, map[string]string{
 			"serial_test.go": " ",
 			"par_test.go":    "stale",
 			"gone_test.go":   "no such file",
