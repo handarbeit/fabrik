@@ -503,6 +503,9 @@ type StageAttempted struct {
 	Number    int
 	StageName string
 	At        time.Time
+	// Slice marks the invocation as a time slice (turn-cap or max_wall_time
+	// stop): the retry backoff is skipped for the next dispatch (#2232).
+	Slice bool
 }
 
 func (StageAttempted) isMutation()       {}

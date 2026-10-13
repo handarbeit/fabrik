@@ -214,6 +214,12 @@ func (s Snapshot) LabelAppliedAt(label string) time.Time {
 	return s.state.LabelAppliedAt[label]
 }
 
+// BackoffExempt reports whether the stage's last invocation ended as a time
+// slice, so the dispatch retry backoff does not apply (#2232).
+func (s Snapshot) BackoffExempt(stageName string) bool {
+	return s.state.StageState.BackoffExempt[stageName]
+}
+
 // LastAttemptAt returns the last invocation timestamp for a given stage, or zero.
 func (s Snapshot) LastAttemptAt(stageName string) time.Time {
 	return s.state.StageState.LastAttemptAt[stageName]
@@ -456,6 +462,7 @@ func copyStageState(s StageState) StageState {
 	return StageState{
 		Attempts:             copyMap(s.Attempts),
 		LastAttemptAt:        copyMap(s.LastAttemptAt),
+		BackoffExempt:        copyMap(s.BackoffExempt),
 		PausedByEngine:       copyMap(s.PausedByEngine),
 		PRCreationFailed:     copyMap(s.PRCreationFailed),
 		ReviewCycles:         copyMap(s.ReviewCycles),
