@@ -2292,7 +2292,7 @@ func (e *Engine) dispatchCandidates(ctx context.Context, board *gh.ProjectBoard,
 			// Declared last so it runs first: feedback that is already cached when
 			// the worker ends raises no change signal afterwards, so admit it here,
 			// before the WorkerExited wake (FR-001b, #2232).
-			defer e.postRunFeedbackAdmission(issueCtx, item)
+			defer e.postRunFeedbackAdmission(issueCtx, item, e.now())
 			err := e.processItem(issueCtx, board, item)
 			if err != nil {
 				e.logf(item.Number, "error", "%v\n", err)

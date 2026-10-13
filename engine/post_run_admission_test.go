@@ -20,7 +20,10 @@ func mayNeedWorkHas(e *Engine, key string) bool {
 }
 
 func TestPostRunFeedbackAdmission(t *testing.T) {
-	human := gh.Comment{ID: "c1", DatabaseID: 1, Author: "alice", Body: "please change X"}
+	started := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	human := func(id string, at time.Time) gh.Comment {
+		return gh.Comment{ID: id, DatabaseID: 1, Author: "alice", Body: "please change X", CreatedAt: at}
+	}
 	cases := []struct {
 		name     string
 		comments []gh.Comment
@@ -30,12 +33,16 @@ func TestPostRunFeedbackAdmission(t *testing.T) {
 		disabled bool
 		want     bool
 	}{
-		{name: "pending comment admits", comments: []gh.Comment{human}, status: "Implement", want: true},
+		{name: "comment that arrived during the run admits", comments: []gh.Comment{human("c1", started.Add(time.Minute))}, status: "Implement", want: true},
+		{name: "comment created at the run's start admits", comments: []gh.Comment{human("c1", started)}, status: "Implement", want: true},
+		{name: "comment pending before the run started does not admit", comments: []gh.Comment{human("c1", started.Add(-time.Second))}, status: "Implement", want: false},
+		{name: "comment with an unknown timestamp does not admit", comments: []gh.Comment{human("c1", time.Time{})}, status: "Implement", want: false},
+		{name: "an old comment does not mask a new one", comments: []gh.Comment{human("c1", started.Add(-time.Hour)), human("c2", started.Add(time.Minute))}, status: "Implement", want: true},
 		{name: "no feedback does not admit (ADR 039)", status: "Implement", want: false},
-		{name: "fabrik output does not admit", comments: []gh.Comment{{ID: "c2", DatabaseID: 2, Author: "bot", Body: "🏭 **Fabrik — stage: Plan**"}}, status: "Implement", want: false},
-		{name: "paused item is not admitted", comments: []gh.Comment{human}, status: "Implement", labels: []string{"fabrik:paused", "fabrik:awaiting-input"}, want: false},
-		{name: "shutdown skips", comments: []gh.Comment{human}, status: "Implement", ctxDone: true, want: false},
-		{name: "disabled seam skips", comments: []gh.Comment{human}, status: "Implement", disabled: true, want: false},
+		{name: "fabrik output does not admit", comments: []gh.Comment{{ID: "c2", DatabaseID: 2, Author: "bot", Body: "🏭 **Fabrik — stage: Plan**", CreatedAt: started.Add(time.Minute)}}, status: "Implement", want: false},
+		{name: "paused item is not admitted", comments: []gh.Comment{human("c1", started.Add(time.Minute))}, status: "Implement", labels: []string{"fabrik:paused", "fabrik:awaiting-input"}, want: false},
+		{name: "shutdown skips", comments: []gh.Comment{human("c1", started.Add(time.Minute))}, status: "Implement", ctxDone: true, want: false},
+		{name: "disabled seam skips", comments: []gh.Comment{human("c1", started.Add(time.Minute))}, status: "Implement", disabled: true, want: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -50,11 +57,35 @@ func TestPostRunFeedbackAdmission(t *testing.T) {
 			if tc.disabled {
 				defer SetPostRunFeedbackAdmissionDisabledForTest(true)()
 			}
-			eng.postRunFeedbackAdmission(ctx, item)
+			eng.postRunFeedbackAdmission(ctx, item, started)
 			if got := mayNeedWorkHas(eng, issueKey(item, eng.defaultRepo())); got != tc.want {
 				t.Errorf("admitted = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// The restriction to feedback that arrived during the run is what keeps a pass
+// that failed to clear its feedback from re-admitting itself (#2232 FR-001b):
+// lifting it admits the same pre-existing comment.
+func TestPostRunFeedbackAdmission_ArrivalRestrictionIsWhatRefusesPreExisting(t *testing.T) {
+	started := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	before := gh.Comment{ID: "c1", DatabaseID: 1, Author: "alice", Body: "please change X", CreatedAt: started.Add(-time.Minute)}
+	run := func(t *testing.T, lift bool) bool {
+		eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+		item := gh.ProjectItem{Number: 5, Repo: cooldownTestRepo, Title: "x", Status: "Implement", Comments: []gh.Comment{before}}
+		eng.store.Apply(itemstate.IssueOpened{Item: item})
+		if lift {
+			defer SetPostRunArrivalRestrictionDisabledForTest(true)()
+		}
+		eng.postRunFeedbackAdmission(context.Background(), item, started)
+		return mayNeedWorkHas(eng, issueKey(item, eng.defaultRepo()))
+	}
+	if run(t, false) {
+		t.Error("feedback pending before the run started admitted the item")
+	}
+	if !run(t, true) {
+		t.Error("with the restriction lifted the same comment should admit (non-vacuity)")
 	}
 }
 

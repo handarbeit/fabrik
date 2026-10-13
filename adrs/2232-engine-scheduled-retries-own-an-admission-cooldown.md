@@ -42,7 +42,13 @@ retry the engine itself scheduled, so it waits for the periodic interval.
    `WorkerExited` observer, so it stays off the store's apply path and guarantees the entry exists before
    the exit's wake poll. `mayNeedWork` rather than a cooldown: it is drained once, bypasses cooldowns, and
    needs neither a reason name nor a duration; the exit wake already guarantees a poll. Conditional on
-   known pending feedback, so ADR 039 stands.
+   known pending feedback, so ADR 039 stands. Only feedback created at or after the worker's start counts
+   (`cachedFeedbackArrivedSince`): feedback pending before the run is what the run was for, and a pass
+   that ended without clearing it must not re-admit itself past every cooldown; it takes the ordinary
+   `stageRetryBackoff` path. (A comment pass's own `fabrik:editing` label write-through already raises
+   `LabelsChanged`, a pre-existing re-admission bounded by the comment circuit breakers and unrelated to
+   this hook, so this restriction cannot be shown in a sim scenario and is pinned at unit level,
+   `TestPostRunFeedbackAdmission*`.)
 
 ### FR-002 audit — which exits rely on the retry gate
 

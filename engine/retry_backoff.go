@@ -94,6 +94,9 @@ var (
 	intervalCapDisabled              atomic.Bool
 	timeSliceBackoffDisabled         atomic.Bool
 	dispatchOrderDisabled            atomic.Bool
+	// postRunArrivalRestrictionDisabled lifts FR-001b's "arrived during the run"
+	// restriction, so any pending feedback admits (the unbounded-loop shape).
+	postRunArrivalRestrictionDisabled atomic.Bool
 )
 
 // SetTimeSliceBackoffDisabledForTest neutralises (or restores) the time-slice
@@ -139,6 +142,13 @@ func SetPostRunRetryRecordDisabledForTest(disabled bool) (restore func()) {
 func SetPostRunFeedbackAdmissionDisabledForTest(disabled bool) (restore func()) {
 	prev := postRunFeedbackAdmissionDisabled.Swap(disabled)
 	return func() { postRunFeedbackAdmissionDisabled.Store(prev) }
+}
+
+// SetPostRunArrivalRestrictionDisabledForTest lifts (or restores) FR-001b's
+// restriction to feedback created at or after the run's start.
+func SetPostRunArrivalRestrictionDisabledForTest(disabled bool) (restore func()) {
+	prev := postRunArrivalRestrictionDisabled.Swap(disabled)
+	return func() { postRunArrivalRestrictionDisabled.Store(prev) }
 }
 
 // SetIntervalCapDisabledForTest neutralises (or restores) FR-003.

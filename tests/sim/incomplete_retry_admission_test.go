@@ -9,7 +9,6 @@ import (
 
 	"github.com/handarbeit/fabrik/engine"
 	gh "github.com/handarbeit/fabrik/github"
-	"github.com/handarbeit/fabrik/internal/claudeerr"
 	"github.com/handarbeit/fabrik/stages"
 	"github.com/handarbeit/fabrik/tests/sim/simclaude"
 )
@@ -85,9 +84,11 @@ func TestFeedbackCachedDuringRunIsAdmittedAfterWorkerEnds(t *testing.T) {
 		if err := env.Engine.PollOnce(ctx); err != nil {
 			t.Errorf("mid-run poll: %v", err)
 		}
-		// Killed with no output: the engine then writes no stage comment on its way
-		// out, whose own CommentsChanged would re-admit the item and mask the loss.
-		return "", false, engine.TokenUsage{TurnsUsed: 12, MaxTurns: 50}, &claudeerr.KilledError{Cause: claudeerr.KillWallTime, Err: fmt.Errorf("claude exited with error: signal: killed")}
+		// A plain error exit with no output: not a time slice, so the stage's own
+		// retry waits out the hour-long backoff and cannot be what admits the item,
+		// and the engine writes no stage comment on its way out, whose own
+		// CommentsChanged would re-admit it and mask the loss.
+		return "", false, engine.TokenUsage{TurnsUsed: 12, MaxTurns: 50}, fmt.Errorf("claude exited with error: exit status 1")
 	}
 	env.Claude.ForStage("Specify", arrive, simclaude.DefaultScript)
 	num = FileIssue(t, env, "comment arrives mid-run", "body", "Specify")
