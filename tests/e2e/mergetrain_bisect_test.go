@@ -82,7 +82,7 @@ func TestMergeTrainBisectionEjectsPoisoner(t *testing.T) {
 	for _, n := range members {
 		probe := fmt.Sprintf("[#%d cache] probe: ", n)
 		miss := fmt.Sprintf("[cache] miss for #%d ", n)
-		drift := regexp.MustCompile(fmt.Sprintf(`\[reconcile\] .*drifted \(.*#%d[\],]`, n))
+		drift := regexp.MustCompile(fmt.Sprintf(`\[reconcile\] .*drifted \(.*#%d[\] ]`, n))
 		waitForLogMatch(t, env, discoverOffset, 10*time.Minute, fmt.Sprintf("the engine discovering paused member #%d", n),
 			func(l string) bool {
 				return strings.Contains(l, probe) || strings.Contains(l, miss) || drift.MatchString(l)
