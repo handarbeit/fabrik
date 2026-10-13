@@ -26,6 +26,6 @@ Sharding the package and per-PR test selection are out of scope (ADR 1857).
 
 - Channel sim tests run in the parallel pool; two engines in one test binary cannot see each other's seams (`TestChannelSeamsAreScopedToOneEngine`).
 - The engine's own unit tests no longer write package variables, so they could also become parallel.
-- Non-vacuity is preserved: each neutralised test was shown to fail when its seam is made a no-op (recorded in the PR).
+- Non-vacuity rests on each neutralised test asserting the opposite outcome with its seam set on its own engine, and on `TestChannelSeamsAreScopedToOneEngine` pinning that a toggle reaches only that engine. Demonstrating each test failing with its seam made a no-op is a review step recorded in the PR, not a property this ADR certifies.
 - `RunPoll`'s fixed 100 ms `workerYield` per empty poll is unchanged. It is a real-time floor on `AdvanceUntil`-heavy tests and cooldown tests rely on it; it is the next lever if the package needs more margin.
 - The guard checks each `Test` function's own body; a test that parallelises only through its subtests is reported and needs a top-level `t.Parallel()`.
