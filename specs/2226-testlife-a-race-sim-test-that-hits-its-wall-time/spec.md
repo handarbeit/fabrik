@@ -88,13 +88,34 @@ A maintainer can show the new test actually guards the behavior: with the fallba
 
 ---
 
+### User Story 4 - The main test binary exits when the `go test` that started it is gone (Priority: P1)
+
+An operator's `go test` process dies or exits (killed, crashed, or finished after reporting `FAIL`) while the sim test binary it started is still running. The binary notices that its parent is gone and exits through the same bounded bail, instead of being reparented to the init process and running on unnoticed.
+
+**Why this priority**: This is the exact state the incident was found in: the binary was reparented (ppid 1) when `go test` exited and nothing noticed. Bounding the bail alone does not help if no bail is ever triggered; today the parent watch covers only re-exec'd helpers, not the main test binary.
+
+**Independent Test**: Start the guard in the main test binary with a parent identity that is then reported as gone, using a fake exit and a fake forced-termination step; assert the bail is taken with a parent-gone reason and, with a non-returning exit, that the fallback fires.
+
+**Acceptance Scenarios**:
+
+1. **Given** the main test binary's parent process is alive, **When** the guard checks it, **Then** the binary keeps running and no bail occurs.
+2. **Given** the parent process has exited (the binary has been reparented), **When** the next parent check runs, **Then** the binary bails and the process is gone within seconds.
+3. **Given** the parent's PID has been reused by an unrelated process with a different start token, **When** the guard checks it, **Then** the original parent is treated as gone and the binary bails; the recycled PID is never mistaken for the parent.
+4. **Given** the parent's identity cannot be read (the read fails or is inconclusive), **When** the guard checks it, **Then** the binary keeps running.
+
+---
+
 ### Edge Cases
 
 - Ordinary exit returns promptly: the fallback must not fire and must not change the exit code.
-- Several bail triggers fire at once (ceiling and owner watch together): the process is still terminated once, with no panic or double-arming problem.
+- Several bail triggers fire at once (ceiling, owner watch, parent watch): the process is still terminated once, with no panic or double-arming problem.
 - The fallback must only ever target the guard's own process, never another process or process group.
 - The test for the fallback must not terminate the test process itself; the forced-termination step needs a substitutable seam, like the exit step.
 - A guard that is not installed (engine-package test binaries do not adopt it yet) is unchanged.
+- The parent identity cannot be established at startup (unreadable, or the binary is already reparented): the main-binary parent watch does not arm and the binary keeps running; the ceiling and owner watch still apply.
+- Parent identity is unreadable at a later check: keep running, as with the owner watch; a single failed read never causes a bail.
+- The parent's PID is recycled by another process: matching uses PID plus start token, so the recycled process is not the parent.
+- The existing helper parent watch (re-exec'd helpers) keeps its current behavior and is not weakened by the main-binary watch.
 
 ## Requirements *(mandatory)*
 
@@ -109,22 +130,32 @@ A maintainer can show the new test actually guards the behavior: with the fallba
 - **FR-007**: A test must reproduce "exit does not return" with a blocking fake exit and assert that the forced-termination fallback is invoked, for the ceiling path and for the owner-watch and parent-watch paths.
 - **FR-008**: That test must fail when the fallback is removed, and this non-vacuity must be demonstrated before the change is accepted.
 - **FR-009**: The as-built documentation of the guard must record the fallback and its grace period, and the documentation bundle must be regenerated if a canonical doc page is touched.
+- **FR-010**: The main test binary (not only re-exec'd helpers) must watch the process that started it, and must bail, through the same bounded bail path as the other watches, once that parent is gone.
+- **FR-011**: The parent's identity must be captured as PID plus start token when the guard is installed, using the guard's existing identity check, and a later check must treat the parent as gone when the PID no longer exists or its start token differs from the captured one, so a recycled PID is never mistaken for the parent.
+- **FR-012**: If the parent's identity cannot be read, whether at installation or at a later check, the binary must keep running (fail safe, the same as the owner watch); an unreadable identity never causes a bail.
+- **FR-013**: The main-binary parent watch must detect a gone parent within a bounded time of a few seconds to tens of seconds, and a bail it triggers must carry the FR-001 guarantee that the process is gone within seconds of the decision.
+- **FR-014**: The main-binary parent watch must have a test that shows a gone parent causes a bail, a live parent and an unreadable identity do not, and a start-token mismatch (recycled PID) does; this test must be demonstrated non-vacuous by neutralising the watch so it fails.
+- **FR-015**: The as-built documentation of the guard must record the main-binary parent watch alongside the fallback.
 
 ### Key Entities *(if applicable)*
 
 - **Bail path**: The single routine shared by the wall-time ceiling, the owner watch and the parent watch that reports why the binary is stopping and requests exit.
 - **Exit seam**: The existing substitutable exit step tests use to observe a bail without ending the test process.
 - **Forced-termination fallback**: The new last-resort step that kills the process itself if the ordinary exit has not taken effect after a grace period.
+- **Parent identity**: The PID and start token of the process that started the test binary, captured at guard installation and compared on each check to decide whether the parent is still the same live process.
 
 ## Success Criteria *(mandatory)*
 
 ### Measurable Outcomes
 
-- **SC-001**: With a non-returning exit step, the fallback is invoked after the grace period in 100% of runs, for each of the three bail triggers.
+- **SC-001**: With a non-returning exit step, the fallback is invoked after the grace period in 100% of runs, for each of the bail triggers (ceiling, owner watch, parent watch).
 - **SC-002**: With a normally returning exit step, the fallback is never invoked and the exit code is unchanged.
 - **SC-003**: Removing the fallback makes the new test fail.
 - **SC-004**: After a ceiling breach in a release-gate run, no test binary from that run remains alive beyond the grace period plus a few seconds; the gate's next host-load probe finds no orphaned test binary from it.
-- **SC-005**: The full suite, including the new test, passes under the race detector.
+- **SC-005**: The full suite, including the new tests, passes under the race detector.
+- **SC-006**: When the `go test` process that started a sim test binary is killed or exits, the binary is gone within the parent-watch detection interval plus the bail's bounded exit time; no reparented test binary remains.
+- **SC-007**: With a live parent, an unreadable parent identity, or an unchanged identity, the parent watch causes zero bails.
+- **SC-008**: Neutralising the main-binary parent watch makes its new test fail.
 
 ## Assumptions
 
@@ -132,11 +163,14 @@ A maintainer can show the new test actually guards the behavior: with the fallba
 - Forced self-termination by signal is acceptable on the supported platforms (macOS and Linux); the guard already treats these as its targets.
 - The root cause of the spin (suspected race-runtime exit path) is not diagnosed here; a defence that works regardless of cause is sufficient.
 - The ceiling value, its override variable and the guard's other behavior are unchanged.
+- "The parent" of the main test binary is whichever process started it (normally `go test`); if it is launched by hand from a shell, the shell is the parent and its exit also ends the run. This is the intended meaning of "its run is over".
+- The parent-watch detection interval is fixed and need not be operator-configurable; it can be as coarse as the owner watch's, since the aim is to avoid hours-long orphans, not instant exit.
 
 ## Out of Scope *(optional)*
 
 - Diagnosing and fixing the underlying hang in the race runtime's exit path.
 - Reducing the sim suite's duration so it stays below the ceiling (tracked by #2210).
+- The release gate's pre-gate policy (what it runs, how it retries, how it treats a failed pre-gate).
 - Adopting the guard in engine-package test binaries (a recorded follow-up of #2128).
 - Changing the ceiling's default value or its override variable.
 - Reaping other processes the dead test binary may have spawned (covered by the existing worker-reap machinery).
