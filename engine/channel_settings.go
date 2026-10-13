@@ -119,15 +119,18 @@ func (ce *channelEvents) forceDue() {
 }
 
 // DrainChannelEventsForTest blocks until the channel consumer has processed
-// everything the engine has enqueued so far, and everything that processing
-// itself enqueued (#2210). Debounced re-evaluations are made due at once rather
-// than waited out. It returns an error naming the stage when timeout elapses,
-// and nil at once when no hub is running. It is the deterministic replacement
-// for a fixed sleep: a poll's observers run synchronously inside Apply, so once
+// everything the engine has enqueued so far, everything that processing itself
+// enqueued, and the hub has handed every attached subscriber's sink what it was
+// owed (#2210). Debounced re-evaluations are made due at once rather than
+// waited out. It returns an error naming the stage when timeout elapses, and
+// nil at once when no hub is running. It is the deterministic replacement for a
+// fixed sleep: a poll's observers run synchronously inside Apply, so once
 // PollOnce has returned, every change it produced is already enqueued.
 //
-// It does not cover time-driven work (cadence ticks, the decision anchor grace):
-// those need real time to pass and have no drain point.
+// Digest entries the hub deliberately holds for a later due time are not owed
+// (Hub.Deliverable), so they cannot block the drain. Time-driven work (cadence
+// ticks, the decision anchor grace) is not covered: it needs real time to pass
+// and has no drain point.
 func (e *Engine) DrainChannelEventsForTest(timeout time.Duration) error {
 	ce := e.channelEvents()
 	if ce == nil {
@@ -136,11 +139,28 @@ func (e *Engine) DrainChannelEventsForTest(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for {
 		ce.forceDue()
-		if ce.idle() {
+		stage := ""
+		switch {
+		case !ce.idle():
+			stage = "engine consumer"
+		case !ce.ready.Load() && ce.readyToCatchUp():
+			// A warming daemon whose store just became ready: the consumer owes the
+			// restart catch-up and the held downtime deltas. Read outside ce.mu (it
+			// scans the store, whose lock is taken before ce.mu by Apply).
+			stage = "restart readiness pass"
+		default:
+			for _, name := range ce.hub.Subscribers() {
+				if ce.hub.Deliverable(name) {
+					stage = "hub delivery to " + name
+					break
+				}
+			}
+		}
+		if stage == "" {
 			return nil
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("channel consumer did not drain within %s", timeout)
+			return fmt.Errorf("channel did not drain within %s (still waiting on the %s)", timeout, stage)
 		}
 		time.Sleep(time.Millisecond)
 	}

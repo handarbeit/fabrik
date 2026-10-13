@@ -15,16 +15,15 @@ import (
 // pushed on a subscription's cadence only when the view changed, on request, and
 // as the catch-up on subscribe/attach. The sim clock is shared with the engine, so
 // a cadence is crossed with Clock.Advance and nothing sleeps for it; the deriver's
-// tick is shortened. Serial for the same reason as channel_events_test.go: the
-// timing and the dedup seam are process-wide.
+// tick is shortened. Parallel like the rest of the channel family: the
+// timing and the dedup seam are per-Engine (#2210).
 
 // startSituationChannel starts the hub with a fast tick and subscribes "ov" to
 // the semantic default with a 60 s situation cadence, directly on the hub so the
 // subscribe-time catch-up does not precede the first scheduled digest.
 func startSituationChannel(t *testing.T, env *Env) *simSink {
 	t.Helper()
-	restore := engine.SetChannelTimingForTest(20*time.Millisecond, 25*time.Millisecond)
-	t.Cleanup(restore)
+	env.Engine.SetChannelTimingForTest(20*time.Millisecond, 25*time.Millisecond)
 	hub := env.Engine.StartChannelEventsForTest(t.TempDir())
 	if hub == nil {
 		t.Fatal("channel hub did not start")
@@ -52,12 +51,17 @@ func cadenceTick(t *testing.T, env *Env) {
 	t.Helper()
 	RunPolls(t, env, 1)
 	env.Clock.Advance(61 * time.Second)
-	settleWait()
+	// The scheduled digest is evaluated by the deriver's own 25 ms ticker, not by an
+	// enqueued change, so there is no drain point for it: wait a few tick periods,
+	// then drain whatever the tick published.
+	waitRealTime(t, 150*time.Millisecond, "scheduled situation digests are tick-driven (25 ms deriver ticker)")
+	settleWait(env)
 }
 
 func digestsOf(sink *simSink) []channelevents.Event { return sink.ofType(channelevents.Situation, 0) }
 
 func TestSituationDigest_TwoQuietTicksPublishOneAChangePublishesASecond(t *testing.T) {
+	t.Parallel()
 	env := situationEnv(t)
 	sink := startSituationChannel(t, env)
 
@@ -102,9 +106,10 @@ func TestSituationDigest_TwoQuietTicksPublishOneAChangePublishesASecond(t *testi
 // Non-vacuity: against a builder that ignores the dedup, the quiet-ticks
 // assertion above fails — every tick publishes.
 func TestSituationDigest_NonVacuous_DedupIgnoredPublishesEveryTick(t *testing.T) {
-	restore := engine.SetSituationDedupDisabledForTest()
-	defer restore()
+	t.Parallel()
 	env := situationEnv(t)
+	restore := env.Engine.SetSituationDedupDisabledForTest()
+	defer restore()
 	sink := startSituationChannel(t, env)
 	cadenceTick(t, env)
 	cadenceTick(t, env)
@@ -114,9 +119,9 @@ func TestSituationDigest_NonVacuous_DedupIgnoredPublishesEveryTick(t *testing.T)
 }
 
 func TestSituationDigest_NoCadenceMeansNoScheduledDigest(t *testing.T) {
+	t.Parallel()
 	env := situationEnv(t)
-	restore := engine.SetChannelTimingForTest(20*time.Millisecond, 25*time.Millisecond)
-	defer restore()
+	env.Engine.SetChannelTimingForTest(20*time.Millisecond, 25*time.Millisecond)
 	hub := env.Engine.StartChannelEventsForTest(t.TempDir())
 	t.Cleanup(env.Engine.StopChannelEventsForTest)
 	if _, err := hub.Subscribe(channelevents.Subscription{Subscriber: "quiet", EventsDefault: true}); err != nil {
@@ -136,9 +141,9 @@ func TestSituationDigest_NoCadenceMeansNoScheduledDigest(t *testing.T) {
 // The catch-up on subscribe is the digest, equal in content to the digest the
 // tool pushes on request for the same state.
 func TestSituationCatchUp_IsTheDigest(t *testing.T) {
+	t.Parallel()
 	env := situationEnv(t)
-	restore := engine.SetChannelTimingForTest(20*time.Millisecond, time.Hour)
-	defer restore()
+	env.Engine.SetChannelTimingForTest(20*time.Millisecond, time.Hour)
 	hub := env.Engine.StartChannelEventsForTest(t.TempDir())
 	t.Cleanup(env.Engine.StopChannelEventsForTest)
 	num := FileIssue(t, env, "waiting", "body", "Implement", "fabrik:cruise")
@@ -150,7 +155,7 @@ func TestSituationCatchUp_IsTheDigest(t *testing.T) {
 	}
 	sink := &simSink{}
 	hub.Attach("late", sink)
-	settleWait()
+	settleWait(env)
 	catchUps := digestsOf(sink)
 	if len(catchUps) != 1 || catchUps[0].Meta[channelevents.MetaTrigger] != "catch_up" || catchUps[0].Meta["catch_up"] != "true" {
 		t.Fatalf("subscribing delivers exactly one situation catch-up: %+v", catchUps)
@@ -169,7 +174,7 @@ func TestSituationCatchUp_IsTheDigest(t *testing.T) {
 	if err != nil || !res.Pushed {
 		t.Fatalf("request: %+v %v", res, err)
 	}
-	settleWait()
+	settleWait(env)
 	all := digestsOf(sink)
 	if len(all) != 2 {
 		t.Fatalf("catch-up plus the requested digest = %d, want 2", len(all))

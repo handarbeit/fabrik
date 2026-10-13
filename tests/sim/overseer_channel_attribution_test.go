@@ -41,6 +41,7 @@ func labelEventFor(sink *simSink, typ channelevents.EventType, issue int, label 
 }
 
 func TestOverseerActionLabelEventIsAttributedToOverseer(t *testing.T) {
+	t.Parallel()
 	env := NewEnv(t, EnvOptions{Stages: smokeStages(), BoardCache: true})
 	num := pausedTarget(t, env)
 	_, sink := startChannel(t, env)
@@ -51,7 +52,7 @@ func TestOverseerActionLabelEventIsAttributedToOverseer(t *testing.T) {
 		t.Fatalf("SetAutonomy: %v", err)
 	}
 	RunPoll(t, env)
-	settleWait()
+	settleWait(env)
 
 	ev, ok := labelEventFor(sink, channelevents.LabelApplied, num, "fabrik:cruise")
 	if !ok {
@@ -71,6 +72,7 @@ func TestOverseerActionLabelEventIsAttributedToOverseer(t *testing.T) {
 }
 
 func TestEngineAutonomousLabelWriteStaysFabrik(t *testing.T) {
+	t.Parallel()
 	env := NewEnv(t, EnvOptions{Stages: smokeStages(), BoardCache: true})
 	num := pausedTarget(t, env)
 	_, sink := startChannel(t, env)
@@ -82,7 +84,7 @@ func TestEngineAutonomousLabelWriteStaysFabrik(t *testing.T) {
 		t.Fatal(err)
 	}
 	RunPolls(t, env, 3)
-	settleWait()
+	settleWait(env)
 
 	ev, ok := labelEventFor(sink, channelevents.LabelRemoved, num, "fabrik:revalidate")
 	if !ok {
@@ -97,6 +99,7 @@ func TestEngineAutonomousLabelWriteStaysFabrik(t *testing.T) {
 }
 
 func TestFailedOverseerWriteLeavesNoAttribution(t *testing.T) {
+	t.Parallel()
 	env := NewEnv(t, EnvOptions{Stages: smokeStages(), BoardCache: true})
 	num := pausedTarget(t, env)
 	_, sink := startChannel(t, env)
@@ -108,7 +111,7 @@ func TestFailedOverseerWriteLeavesNoAttribution(t *testing.T) {
 		t.Fatal("expected the failed write to be reported")
 	}
 	RunPoll(t, env)
-	settleWait()
+	settleWait(env)
 	if _, ok := labelEventFor(sink, channelevents.LabelApplied, num, "fabrik:cruise"); ok {
 		t.Fatalf("failed write produced an event: %+v", sink.all())
 	}
@@ -119,7 +122,7 @@ func TestFailedOverseerWriteLeavesNoAttribution(t *testing.T) {
 		t.Fatal(err)
 	}
 	RunPolls(t, env, 2)
-	settleWait()
+	settleWait(env)
 	ev, ok := labelEventFor(sink, channelevents.LabelApplied, num, "fabrik:cruise")
 	if !ok {
 		t.Fatalf("no event for the later write; got %+v", sink.all())
@@ -133,6 +136,7 @@ func TestFailedOverseerWriteLeavesNoAttribution(t *testing.T) {
 }
 
 func TestPartialSetAutonomyAttributesLandedWrite(t *testing.T) {
+	t.Parallel()
 	env := NewEnv(t, EnvOptions{Stages: smokeStages(), BoardCache: true})
 	num := pausedTarget(t, env, "fabrik:yolo")
 	_, sink := startChannel(t, env)
@@ -143,7 +147,7 @@ func TestPartialSetAutonomyAttributesLandedWrite(t *testing.T) {
 		Subscriber: "x", Issue: env.OwnerRepo + "#" + strconv.Itoa(num), Mode: "cruise",
 	})
 	t.Logf("SetAutonomy err (partial): %v", err)
-	settleWait()
+	settleWait(env)
 
 	ev, ok := labelEventFor(sink, channelevents.LabelApplied, num, "fabrik:cruise")
 	if !ok {
@@ -160,6 +164,7 @@ func TestPartialSetAutonomyAttributesLandedWrite(t *testing.T) {
 // R2: with no webhook sender, a reconcile-seen label stays unknown, and the
 // channel layer makes no GitHub call to find out.
 func TestUnattributedLabelStaysUnknownWithoutExtraReads(t *testing.T) {
+	t.Parallel()
 	env := NewEnv(t, EnvOptions{Stages: smokeStages(), BoardCache: true})
 	num := pausedTarget(t, env)
 	_, sink := startChannel(t, env)
@@ -169,7 +174,7 @@ func TestUnattributedLabelStaysUnknownWithoutExtraReads(t *testing.T) {
 		t.Fatal(err)
 	}
 	RunPolls(t, env, 2)
-	settleWait()
+	settleWait(env)
 
 	ev, ok := labelEventFor(sink, channelevents.LabelApplied, num, "operator-label")
 	if !ok {

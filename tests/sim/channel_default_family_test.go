@@ -12,6 +12,7 @@ import (
 // events; naming label-applied restores them. Subscriptions are created through
 // the daemon's own Subscribe, as the MCP shim does.
 func TestChannelDefaultFamilyExcludesLabelEvents(t *testing.T) {
+	t.Parallel()
 	env := newChannelGateEnv(t, false, nil)
 	hub, _ := startChannel(t, env) // starts the hub; its "S" subscriber is not used here
 	st := env.Engine.ChannelStreamerForTest()
@@ -69,6 +70,7 @@ func TestChannelDefaultFamilyExcludesLabelEvents(t *testing.T) {
 // (grandfathered, ADR 2169), and re-subscribing with the same filters does not
 // create a second subscription for either kind.
 func TestChannelLegacySubscriptionKeepsLabelEvents(t *testing.T) {
+	t.Parallel()
 	env := newChannelGateEnv(t, false, nil)
 	hub, _ := startChannel(t, env)
 	legacy, err := hub.Subscribe(channelevents.Subscription{Subscriber: "old"}) // no marker: as persisted before
@@ -92,7 +94,7 @@ func TestChannelLegacySubscriptionKeepsLabelEvents(t *testing.T) {
 		t.Fatal(err)
 	}
 	AdvanceUntil(t, env, func(*Env) bool {
-		settleWait()
+		settleWait(env)
 		return len(sink.ofType(channelevents.LabelApplied, num)) > 0
 	}, 40)
 	if len(sink.ofType(channelevents.LabelApplied, num)) == 0 {
@@ -101,6 +103,7 @@ func TestChannelLegacySubscriptionKeepsLabelEvents(t *testing.T) {
 }
 
 func TestChannelSubscribeNotesLabelFiltersWithoutLabelEvents(t *testing.T) {
+	t.Parallel()
 	env := newChannelGateEnv(t, false, nil)
 	startChannel(t, env)
 	st := env.Engine.ChannelStreamerForTest()
