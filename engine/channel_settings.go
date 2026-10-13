@@ -63,6 +63,7 @@ func (e *Engine) chanTick() time.Duration {
 func (e *Engine) chanReadyTimeout() time.Duration {
 	return durOr(e.chanTest.readyTimeout.Load(), defaultChannelReadyTimeout)
 }
+
 // decisionAnchorGrace is stored as nanoseconds+1 so that an explicit zero grace
 // (announce at once) is distinguishable from "unset".
 func (e *Engine) decisionAnchorGrace() time.Duration {
