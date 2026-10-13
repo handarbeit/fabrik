@@ -14,7 +14,7 @@ If the user named a column, label, repo or milestone, call `fabrik_board` with `
 
 ## 2. If the daemon is not running
 
-A tool result saying the Fabrik daemon is not running at some socket path means exactly that. Say so plainly, and tell the user to start it by running `fabrik` in the Fabrik project directory (the one with `.fabrik/`). If this session is not in that directory, point out the plugin's "Fabrik directory" setting. If the user says a daemon is running, it is probably older than 0.0.84 (no local API; it needs upgrading), or its `.fabrik/fabrik.log` has a `local API unavailable` line. If the `fabrik_*` tools are not available at all, `fabrik` is missing from `PATH` or older than this plugin. Stop there: do not fall back to scraping GitHub, `gh` or `ps` for board or worker state, because the answer would not match what the engine believes.
+A tool result saying the Fabrik daemon is not running at some socket path means exactly that. Say so plainly, and tell the user to start it by running `fabrik` in the Fabrik project directory (the one with `.fabrik/`). If this session is not in that directory, point out the plugin's "Fabrik directory" setting. If the user says a daemon is running, it is probably older than 0.0.84 (no local API; it needs upgrading), or it could not open its socket (the warnings panel has a "Local API unavailable" entry, and `.fabrik/fabrik.log` has a `local API unavailable` line). If the `fabrik_*` tools are not available at all, `fabrik` is missing from `PATH` or older than this plugin. Stop there: do not fall back to scraping GitHub, `gh` or `ps` for board or worker state, because the answer would not match what the engine believes.
 
 ## 3. Summarise
 
