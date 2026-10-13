@@ -165,6 +165,9 @@ type EnvOptions struct {
 	// never created it" case).
 	StatusLineFieldMissing bool
 
+	// OwnerType overrides the config's owner type ("User" by default).
+	OwnerType string
+
 	// LastActivityField / LastRunField, when non-empty, turn on the display-only
 	// Last activity (DATE) and Last run (TEXT) fields (#2049) under that name,
 	// seeded on the project unless the matching *Missing flag is set.
@@ -358,11 +361,15 @@ func NewEnv(t *testing.T, opts EnvOptions) *Env {
 		// Multi-repo instance topology — see SecondRepoOptions' doc comment.
 		cfgRepo = ""
 	}
+	ownerType := "User"
+	if opts.OwnerType != "" {
+		ownerType = opts.OwnerType
+	}
 	cfg := engine.Config{
 		Owner:         owner,
 		Repo:          cfgRepo,
 		ProjectNum:    projectNum,
-		OwnerType:     "User",
+		OwnerType:     ownerType,
 		User:          "fabrik-sim-bot",
 		Token:         "sim-token",
 		Yolo:          yolo,

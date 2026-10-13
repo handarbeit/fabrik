@@ -229,6 +229,24 @@ query($projectId: ID!, $name: String!) {
   }
 }' -f projectId="$PROJECT_ID" -f name="Fabrik" > /tmp/wc-fetchtextfield.json
 write_recording fetch_text_field "https://api.github.com/graphql" "$LIVE_PROJECT_OWNER (project #$SANDBOX_PROJECT_NUMBER \"Fabrik Test\", Fabrik text field)" /tmp/wc-fetchtextfield.json
+# Absent-name lookups (#2218): GitHub answers a missing field name with a
+# GraphQL error ("Could not resolve to a Unions::ProjectV2FieldConfiguration
+# with the name ..."), not a null field. gh api exits non-zero on an errors
+# body, so the response is captured regardless.
+for pair in "fetch_text_field_absent:Fabrik" "fetch_date_field_absent:Last activity"; do
+  op="${pair%%:*}"; absent_name="${pair#*:}"
+  gh_ api graphql -f query='
+query($projectId: ID!, $name: String!) {
+  node(id: $projectId) {
+    ... on ProjectV2 {
+      field(name: $name) {
+        ... on ProjectV2Field { id name dataType }
+      }
+    }
+  }
+}' -f projectId="$PROJECT_ID" -f name="${absent_name} (absent)" > "/tmp/wc-$op.json" || true
+  write_recording "$op" "https://api.github.com/graphql" "$LIVE_PROJECT_OWNER (project #$SANDBOX_PROJECT_NUMBER \"Fabrik Test\", deliberately absent field name)" "/tmp/wc-$op.json"
+done
 TEXT_FIELD_ID=$(python3 -c 'import json;print(json.load(open("/tmp/wc-fetchtextfield.json"))["data"]["node"]["field"]["id"])')
 echo "item updatedAt before text write:"
 gh_ api graphql -f query='query($id: ID!) { node(id: $id) { ... on ProjectV2Item { updatedAt project { updatedAt } } } }' -f id="$ITEM" --jq '.data.node'

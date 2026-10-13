@@ -320,6 +320,7 @@ type Engine struct {
 	statusLine                            displayFieldState             // the display-only status-line writer's state (#2048) — in memory only; a restart forgets what was written
 	lastActivity                          displayFieldState             // display-only "Last activity" date field writer state (#2049) — in memory only
 	lastRun                               displayFieldState             // display-only "Last run" text field writer state (#2049) — in memory only
+	displayFieldWarn                      displayFieldWarnState         // last display-field panel aggregate (#2218) — in memory only; a restart recomputes it
 	flakeRerunMu                          sync.Mutex                    // guards flakeReruns and flakeRerunDisabled
 	layer1OffBoardMu                      sync.Mutex                    // guards layer1OffBoard
 	layer1OffBoard                        map[string]time.Time          // key: "<projectID>|<repo>#<n>" → expiry; Layer 1's negative cache of "not on the board" lookups (#2093) — in memory only
