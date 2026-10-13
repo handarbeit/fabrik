@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -83,12 +84,17 @@ func ComputeDiskVersion(pluginDir string) (string, error) {
 	return computePluginFingerprint(entries), nil
 }
 
-// WriteVersionHash writes hash to pluginDir/.installed-version.
+// WriteVersionHash writes hash to pluginDir/.installed-version. A file that
+// already holds exactly hash is not rewritten.
 func WriteVersionHash(pluginDir, hash string) error {
 	if err := os.MkdirAll(pluginDir, 0755); err != nil {
 		return fmt.Errorf("creating plugin dir: %w", err)
 	}
 	dest := filepath.Join(pluginDir, installedVersionFile)
+	// Leave a matching file alone so its mtime is not bumped for no reason.
+	if cur, err := os.ReadFile(dest); err == nil && string(cur) == hash+"\n" {
+		return nil
+	}
 	return os.WriteFile(dest, []byte(hash+"\n"), 0644)
 }
 
@@ -254,19 +260,21 @@ func isKnownEmbedded(hash string, knownVersions []string) bool {
 	return false
 }
 
-// RefreshPlugin overwrites .fabrik/plugin/ with the embedded plugin files.
-// Returns the number of files written.
+// RefreshPlugin brings .fabrik/plugin/ in line with the embedded plugin files.
+// Returns the number of files created, changed or pruned.
 func RefreshPlugin() (int, error) {
 	return RefreshPluginTo(".fabrik/plugin")
 }
 
-// RefreshPluginTo writes the embedded plugin files into pluginDir, overwriting
-// files of the same name, and returns the number of files written. It then
-// prunes the files an earlier release shipped that the embed no longer carries
-// (see prunePluginDir), so a rename such as #2140's skills/fabrik-review ->
-// skills/review does not leave both sets side by side.
+// RefreshPluginTo writes the embedded plugin files into pluginDir and returns
+// the number of files created, changed or pruned. A file whose content already
+// matches the embed is not rewritten (mode and mtime are not compared) and does
+// not count. It then prunes the files an earlier release shipped that the
+// embed no longer carries (see prunePluginDir), so a rename such as #2140's
+// skills/fabrik-review -> skills/review does not leave both sets side by side;
+// each pruned file counts.
 func RefreshPluginTo(pluginDir string) (int, error) {
-	wrote := 0
+	changed := 0
 	embedded := map[string]bool{}
 	err := fs.WalkDir(FabrikPlugin, "fabrik-workflows", func(p string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -286,20 +294,29 @@ func RefreshPluginTo(pluginDir string) (int, error) {
 		if mkErr := os.MkdirAll(filepath.Dir(destPath), 0755); mkErr != nil {
 			return fmt.Errorf("creating directory for %s: %w", destPath, mkErr)
 		}
+		embedded[filepath.ToSlash(rel)] = true
+		cur, curErr := os.ReadFile(destPath)
+		if curErr != nil && !os.IsNotExist(curErr) {
+			return fmt.Errorf("reading %s: %w", destPath, curErr)
+		}
+		if curErr == nil && bytes.Equal(cur, data) {
+			return nil
+		}
 		if writeErr := os.WriteFile(destPath, data, 0644); writeErr != nil {
 			return fmt.Errorf("writing %s: %w", destPath, writeErr)
 		}
-		embedded[filepath.ToSlash(rel)] = true
-		wrote++
+		changed++
 		return nil
 	})
 	if err != nil {
-		return wrote, err
+		return changed, err
 	}
-	if pruneErr := prunePluginDir(pluginDir, embedded); pruneErr != nil {
-		return wrote, pruneErr
+	pruned, pruneErr := prunePluginDir(pluginDir, embedded)
+	changed += pruned
+	if pruneErr != nil {
+		return changed, pruneErr
 	}
-	return wrote, nil
+	return changed, nil
 }
 
 // prunePluginDir removes from pluginDir every file that is not in the embedded
@@ -309,8 +326,10 @@ func RefreshPluginTo(pluginDir string) (int, error) {
 // shipped and is therefore never touched: it stays, and the tree stays
 // classified as customised. The rule is general, so it also covers future
 // renames. .installed-version is metadata and is left alone. Idempotent.
-func prunePluginDir(pluginDir string, embedded map[string]bool) error {
+// Returns the number of files removed (not the directories).
+func prunePluginDir(pluginDir string, embedded map[string]bool) (int, error) {
 	var dirs []string
+	pruned := 0
 	err := filepath.WalkDir(pluginDir, func(p string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -340,15 +359,16 @@ func prunePluginDir(pluginDir string, embedded map[string]bool) error {
 		if rmErr := os.Remove(p); rmErr != nil {
 			return fmt.Errorf("pruning %s: %w", p, rmErr)
 		}
+		pruned++
 		return nil
 	})
 	if err != nil {
-		return err
+		return pruned, err
 	}
 	// Deepest first; os.Remove refuses a non-empty directory, which is exactly
 	// the "keep what the operator left there" behaviour wanted.
 	for i := len(dirs) - 1; i >= 0; i-- {
 		_ = os.Remove(dirs[i]) // intentional: a non-empty directory is kept
 	}
-	return nil
+	return pruned, nil
 }

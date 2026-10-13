@@ -771,7 +771,11 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.header.SetSkillsStaleCount(0)
 			m.header.SetCustomWorkflow(false)
-			m.header.SetStatusMsg(fmt.Sprintf("Plugin skills upgraded: %d file(s)", ev.Wrote))
+			if ev.Wrote == 0 {
+				m.header.SetStatusMsg("Plugin skills already up to date")
+			} else {
+				m.header.SetStatusMsg(fmt.Sprintf("Plugin skills upgraded: %d file(s)", ev.Wrote))
+			}
 		}
 		return m, nil
 
