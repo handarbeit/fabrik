@@ -19,6 +19,7 @@ func (e *Engine) startLocalAPI() {
 	srv := localapi.NewServer(path, e.LocalAPIBackend(), func(format string, args ...any) {
 		e.logf(0, "localapi", format, args...)
 	})
+	srv.Version = e.cfg.Version
 	// Streaming (protocol v2, #1968) is advertised only when the channel hub
 	// is running; a v1-style server is the fallback and read tools still work.
 	if st := e.channelStreamer(); st != nil {
@@ -27,6 +28,9 @@ func (e *Engine) startLocalAPI() {
 	// The mutating action methods (#1969, ADR-1966-c) are a separate optional
 	// interface, dispatched apart from the read switch.
 	srv.Actor = e.overseerActor()
+	// The situation view (#2171) is read-only and in-memory like Backend; it is
+	// a separate optional interface so the three-method contract is unchanged.
+	srv.Situation = localAPIBackend{e: e}
 	if err := srv.Start(); err != nil {
 		e.logf(0, "localapi", "local API unavailable (continuing without it): %v\n", err)
 		return

@@ -1,5 +1,5 @@
-// Package attention classifies one board item as needs-human, escalated,
-// waiting, working, stalled or idle, and says what the engine will do next and
+// Package attention classifies one board item as needs-human, suspended,
+// escalated, waiting, working, stalled or idle, and says what the engine will do next and
 // when (#1967, ADR-1966-a). It answers the overseer's question "stuck, or
 // waiting correctly?".
 //
@@ -28,6 +28,11 @@ type State string
 const (
 	// NeedsHuman: the engine is paused and only a human reply resumes it.
 	NeedsHuman State = "needs-human"
+	// Suspended: nothing is wrong and nothing will move until a human decides
+	// (#2120): a stage is complete and the item does not auto-advance, or it is
+	// blocked only by work parked in an unmanaged column. Derived, never a label;
+	// ranked with needs-human; never stalled.
+	Suspended State = "suspended"
 	// Escalated: the engine gave up (a limit was hit or a settle scan
 	// escalated) and a human must intervene; a plain comment may not suffice.
 	Escalated State = "escalated"
@@ -51,12 +56,44 @@ const (
 	CodeWorkerNoProgress      = "worker-no-progress"
 	CodeNoProgress            = "no-progress"
 	CodeStageCompleteStuck    = "stage-complete-not-advanced"
+	// CodeWaitingForPoll marks an item whose only obstacle is that the daemon's
+	// poll loop is overdue (#2124); the engine, not the item, is stalled.
+	CodeWaitingForPoll = "waiting-for-poll"
+	// CodeDecisionPending is Suspended case (a): a stage is complete and the
+	// item does not auto-advance. CodeParkedBlocker is case (b): every open
+	// blocker sits in an unmanaged parking column.
+	CodeDecisionPending = "decision-pending"
+	CodeParkedBlocker   = "parked-blocker"
+)
+
+// Pending kinds (Result.Pending.Kind).
+const (
+	PendingDecision      = "decision"
+	PendingParkedBlocker = "parked-blocker"
+)
+
+// SinceBasis values say where a pending decision's since-time came from.
+const (
+	// SinceGitHub: the GitHub time the deciding label was applied.
+	SinceGitHub = "github-label"
+	// SinceStageComment: the cached Fabrik stage comment's creation time. An
+	// estimate, never exact: the comment is posted before the label, and a rework
+	// or step back can leave an older completion's comment as the latest one.
+	SinceStageComment = "stage-comment"
+	// SinceBlockerParked: a parked-blocker wait dated by both facts that make it
+	// one: the item's fabrik:blocked label (GitHub time) and the daemon having seen
+	// every direct blocker move into its parking column.
+	SinceBlockerParked = "blocker-parked"
+	// SinceEligibility: the daemon-stamped time eligibility to proceed last changed.
+	SinceEligibility = "eligibility-change"
+	// SinceFirstSeen: daemon first-seen only; the wait is at least this long.
+	SinceFirstSeen = "first-seen"
 )
 
 // Attention-view ranks: lower is more urgent. NotRanked items are omitted from
 // the attention view.
 const (
-	RankNeedsHuman    = 0
+	RankNeedsHuman    = 0 // needs-human and suspended share it
 	RankEscalated     = 1
 	RankStalled       = 2
 	RankMergeDecision = 3
@@ -107,6 +144,18 @@ type Config struct {
 	ReviewWaitTimeout time.Duration
 }
 
+// PollStall describes an overdue poll loop (#2124). The zero value means the
+// poll is healthy (or its state is unknown), so every classification is
+// exactly what it was before the field existed.
+type PollStall struct {
+	// Active is true while the poll loop is overdue.
+	Active bool
+	// Blocked is how long the poll has been in progress or absent.
+	Blocked time.Duration
+	// Step is the poll step the engine reports, or "" when unknown.
+	Step string
+}
+
 // Input is everything the classifier needs, already extracted from the cache.
 // Zero times mean unknown.
 type Input struct {
@@ -127,11 +176,45 @@ type Input struct {
 
 	HasWorker       bool
 	WorkerStartedAt time.Time
+	// WorkerKind and WorkerTrigger name what the worker is (WorkerKind*) and what
+	// it is addressing (comma-separated comment or review-body ids); empty when
+	// unknown (#2121). WorkerQueued is true while the worker holds no worker slot
+	// (WorkerQueuedSince: since when); WorkerStartedAt is then the dispatch time.
+	WorkerKind        string
+	WorkerTrigger     string
+	WorkerQueued      bool
+	WorkerQueuedSince time.Time
+	// WorkerTurnsKnown / WorkerTurnsUsed are the live worker's turns so far;
+	// WorkerMaxTurns is the stage's turn budget (0 = unknown or unlimited).
+	WorkerTurnsKnown bool
+	WorkerTurnsUsed  int
+	WorkerMaxTurns   int
+	// Conflict is set while a merge-train conflict resolution for this member is
+	// queued for, or holding, a worker slot. It is treated like a worker (#2121).
+	Conflict *ConflictFact
 	// WorkerBudget is the wall-clock budget of the in-flight worker's stage:
 	// its max_wall_time, or the Claude inactivity timeout when the stage sets
 	// none. Zero means unknown. A worker is not classified stalled before
 	// WorkerBudget + WorkerStallMargin has elapsed, however low StallThreshold is.
 	WorkerBudget time.Duration
+
+	// Dispatchable is true when the item has work the engine will dispatch (its
+	// stage is incomplete and nothing gates it) but has no worker (#2121 R3).
+	// SlotsBusy/SlotsMax are a snapshot of the worker pool; SlotsMax 0 = unknown.
+	Dispatchable bool
+	SlotsBusy    int
+	SlotsMax     int
+	// Retry is the retry the engine has scheduled after a failed invocation, and
+	// Gate the gate holding the item's advance; nil = none known (#2121). The
+	// caller drops a gate hold the gate stopped confirming.
+	Retry *RetryFact
+	Gate  *GateFact
+	// RebaseAfterLanding is true when fabrik:rebase-needed was applied because main
+	// moved after a sibling landed (the engine recorded it); DaemonStop is true
+	// when the item is paused by the daemon's own clean stop (the pause comment's
+	// marker). Both are explicit recorded facts, never inferred (#2121 causes).
+	RebaseAfterLanding bool
+	DaemonStop         bool
 
 	// Cooldowns maps cooldown reason to expiry.
 	Cooldowns map[string]time.Time
@@ -144,8 +227,111 @@ type Input struct {
 
 	HasOpenUnmergedPR bool
 
-	// ClaudeSuspendedUntil is the account-wide usage-limit suspension end; zero if none.
-	ClaudeSuspendedUntil time.Time
+	// ClaudeUsageLimitedUntil is the account-wide usage-limit hold end; zero if none.
+	ClaudeUsageLimitedUntil time.Time
+
+	// PollStall is set while the daemon's poll loop is overdue.
+	PollStall PollStall
+	// PollRecoveredAt is when the last overdue poll episode ended; zero if none.
+	// It floors the progress anchor so items blocked by the stall get a fresh
+	// stall window instead of reading as stalled the instant the poll recovers.
+	PollRecoveredAt time.Time
+	// EligibilityChangedAt is the daemon-stamped time the item's eligibility to
+	// proceed last changed (an autonomy label, a pause, a blocker or a stage
+	// completion label added or removed). Zero means unknown (after a restart).
+	EligibilityChangedAt time.Time
+	// AutoAdvances reports whether the engine advances this item by itself once
+	// the current stage completes (yolo/cruise label, global yolo, or the
+	// stage's auto_advance).
+	AutoAdvances bool
+	// NextStage is the stage a human advance would move the item to. Empty when
+	// the next stage is the cleanup stage (Validate) or there is none.
+	NextStage string
+	// FeedbackPending reports unprocessed comments, review threads or review
+	// bodies (the feedback gate's definition), read from the cache.
+	FeedbackPending bool
+	// StageCommentAt is the creation time of the cached Fabrik comment for the
+	// current stage: a GitHub-time proxy for "the stage completed". Zero if none.
+	StageCommentAt time.Time
+	// ParkedBlockers lists the parked items the item is blocked on, resolved
+	// cache-only and transitively by the caller. BlockedOnlyByParked is true only
+	// when every open blocker resolved to a parked item; an unknown or
+	// active-column blocker leaves it false.
+	ParkedBlockers      []ParkedBlocker
+	BlockedOnlyByParked bool
+	// ParkedBlockersUnknown is true when BlockedOnlyByParked is false only
+	// because the cache lacked data (a blocker it does not hold, or one not yet
+	// deep-fetched), not because a blocker is definitely not parked. It is
+	// echoed to Result.ParkedDataMissing and changes no classification.
+	ParkedBlockersUnknown bool
+
+	// Resume says how the item's pause is lifted according to the engine's own
+	// pause comment; ResumeUnknown when the cache cannot say.
+	Resume ResumeMethod
+	// PRNumber is the linked PR number, for the merge-decision options.
+	PRNumber int
+	// CI is the linked PR's CI verdict when the daemon holds a fresh one for the
+	// PR's current head; nil otherwise (#2122).
+	CI *CIFact
+}
+
+// ParkedBlocker is an open item, sitting in an unmanaged column, that blocks
+// another item.
+type ParkedBlocker struct {
+	Ref    string
+	Column string
+	// EnteredAt is when the daemon first saw the blocker in Column (or saw it move
+	// there): a lower bound on how long it has been parked. MovedAt is non-zero
+	// only when the daemon watched it move into Column, i.e. EnteredAt is the move
+	// itself and not merely the first sight.
+	EnteredAt time.Time
+	MovedAt   time.Time
+	// Transitive is true when the blocker was reached through an intermediate
+	// blocker. The edges between two other items are not observed, so a wait that
+	// involves one can only be dated by the daemon's first sight, never exactly.
+	Transitive bool
+}
+
+// ResumeMethod is how a pause is lifted, as the engine's own pause comment says.
+type ResumeMethod string
+
+const (
+	// ResumeUnknown: no cached pause comment states a method.
+	ResumeUnknown ResumeMethod = ""
+	// ResumeComment: a human comment created after the pause resumes it.
+	ResumeComment ResumeMethod = "human-comment"
+	// ResumeRemoveLabel: removing fabrik:paused resumes it.
+	ResumeRemoveLabel ResumeMethod = "remove-label"
+)
+
+// Option is one way a human can act on a decision-bearing item. Tool names the
+// MCP tool that performs it, empty when there is none (the human acts directly).
+type Option struct {
+	Action string `json:"action"`
+	Tool   string `json:"tool,omitempty"`
+}
+
+// Pending describes a Suspended item's decision.
+type Pending struct {
+	Kind           string
+	CompletedStage string
+	NextStage      string
+	// Since is when the wait began; SinceBasis says how far to trust it. Zero
+	// Since never occurs: the weakest basis is the daemon's first sight.
+	Since      time.Time
+	SinceBasis string
+	Blockers   []ParkedBlocker
+	Options    []Option
+}
+
+// SinceExact reports whether Since is the real start of the wait rather than a
+// lower bound.
+func (p Pending) SinceExact() bool {
+	switch p.SinceBasis {
+	case SinceGitHub, SinceEligibility, SinceBlockerParked:
+		return true
+	}
+	return false
 }
 
 // Reason is one label (or condition) contributing to the classification.
@@ -189,7 +375,33 @@ type Result struct {
 	ProgressAt time.Time
 	// ProgressAge is Now - ProgressAt, meaningful only when ProgressAt is non-zero.
 	ProgressAge time.Duration
+	// Pending is set for a Suspended item.
+	Pending *Pending
+	// Options lists how a human can act, for decision-bearing results
+	// (Suspended, awaiting-merge-decision, paused/needs-human, escalated).
+	Options []Option
+	// ResumeVia says how a paused or escalated item is resumed, in the words of
+	// the engine's own pause comment: ResumeViaLabel, ResumeViaComment or
+	// ResumeViaPauseComment (the cache cannot say). Empty for other results.
+	ResumeVia string
+	// Cause says why the item is in this state, from the fixed vocabulary (Cause*),
+	// when the engine knows; empty when it does not — never guessed (#2121).
+	Cause string
+	// ParkedDataMissing echoes Input.ParkedBlockersUnknown: the item is not
+	// Suspended as a parked blocker only because blocker data is missing, so a
+	// caller tracking a persisted episode must not read it as "decision made".
+	ParkedDataMissing bool
+	// CIFailing names the failing checks of a red CI verdict the item carries
+	// (#2122); empty when the item has no red verdict surfaced.
+	CIFailing []string
 }
+
+// Values of Result.ResumeVia.
+const (
+	ResumeViaLabel        = "remove-label"
+	ResumeViaComment      = "human-comment"
+	ResumeViaPauseComment = "see-pause-comment"
+)
 
 type labelInfo struct {
 	meaning string
@@ -216,16 +428,50 @@ var labelTable = map[string]labelInfo{
 	"fabrik:rebase-needed":                 {"the linked PR no longer merges cleanly; the engine is dispatching a rebase", true},
 	"fabrik:bot-reprompted":                {"a bot reviewer was re-prompted; the engine pauses if it still has not responded", true},
 	"fabrik:children-spawned":              {"child issues were spawned and block this one", false},
-	"fabrik:claude-limit":                  {"the Claude account usage limit was hit; the engine retries once the suspension lifts", true},
+	"fabrik:claude-limit":                  {"the Claude account usage limit was hit; the engine retries once the usage-limit hold lifts", true},
 	"fabrik:tools-denied":                  {"a tool call was denied by the permission layer; the engine retries, bounded by its own counter", true},
 	"fabrik:api-key-helper-detected":       {"the worktree sets apiKeyHelper, which Fabrik refuses; remove it from the worktree settings", false},
+	"fabrik:skill-unresolved":              {"a stage skill reference matches no loaded plugin; fix the stage YAML or load the plugin", false},
 	"fabrik:toolchain-stale":               {"the daemon's PATH toolchain does not satisfy the repo's declared version (warn-only)", false},
 	"fabrik:landing-verification-failed":   {"the credited PR did not merge; the issue was reopened and needs a human", false},
 	"fabrik:nondefault-base-pr-noted":      {"informational: PR targets a non-default base branch", false},
+	"fabrik:editing":                       {"a comment-review or reinvoke worker is editing this item's branch", false},
+	"fabrik:auto-merge-enabled":            {"auto-merge is enabled on the linked PR; GitHub merges it when its requirements are met", false},
+	"fabrik:revalidate":                    {"operator command: the engine re-enters Validate for this item and removes the label", false},
+	"fabrik:clear-claude-limit":            {"operator command: the engine clears the account-wide Claude usage-limit hold and removes the label", false},
+	"fabrik:cruise":                        {"autonomy: advances through every stage by itself but never merges; a human merges", false},
+	"fabrik:yolo":                          {"autonomy: advances through every stage and merges by itself", false},
+	"fabrik:extend-turns":                  {"operator override: every invocation gets twice the stage's turn budget", false},
+	"fabrik:unrestricted":                  {"operator override: workers run without the tool allowlist (all tool restrictions removed)", false},
+	"fabrik:sub-issue":                     {"informational: this issue was spawned as a child of another", false},
 }
 
-// MeaningOf returns the one-line meaning of a state-bearing label, or "".
-func MeaningOf(label string) string { return labelTable[label].meaning }
+// labelPrefixes are the state-bearing label families whose names carry a
+// variable part (#2121): a stage, a lock holder, a PR or child number.
+var labelPrefixes = []struct {
+	prefix  string
+	meaning string
+}{
+	{"fabrik:reworking:", "the engine is reworking this stage after a comment or review (a rework worker runs, or a killed one left the label behind)"},
+	{"fabrik:locked:", "the engine holds this item's dispatch lock for a worker (a leftover after a kill until the retry runs)"},
+	{"fabrik:credited-pr:", "the merge-train landing credited this PR for the Done transition; the engine verifies it merged"},
+	{"fabrik:spawned-child:", "records a child issue the engine already spawned for this item, so a retried spawn does not duplicate it"},
+}
+
+// MeaningOf returns the one-line meaning of a state-bearing label, or "". Labels
+// with a variable part (fabrik:reworking:<Stage>, fabrik:locked:<id>,
+// fabrik:credited-pr:<N>, fabrik:spawned-child:<i>:<n>) resolve by prefix.
+func MeaningOf(label string) string {
+	if info, ok := labelTable[label]; ok {
+		return info.meaning
+	}
+	for _, p := range labelPrefixes {
+		if strings.HasPrefix(label, p.prefix) {
+			return p.meaning
+		}
+	}
+	return ""
+}
 
 func hasLabel(labels []string, l string) bool {
 	for _, x := range labels {
@@ -239,6 +485,46 @@ func hasLabel(labels []string, l string) bool {
 // Classify computes the attention Result for one item. It is a pure function
 // of in.
 func Classify(in Input) Result {
+	res := overlayCI(in, attributePollStall(in, classify(in)))
+	res.ParkedDataMissing = in.ParkedBlockersUnknown
+	return res
+}
+
+// attributePollStall blames the engine, not the item, when the poll loop is
+// overdue (#2124). A result that says the item itself has stalled becomes an
+// unranked wait for the poll; a wait or idle verdict (whose next step is a
+// poll) keeps its state and code with the cause prepended. Verdicts that need
+// a human or a running worker are untouched. With PollStall inactive the result
+// is returned as is.
+func attributePollStall(in Input, res Result) Result {
+	if !in.PollStall.Active {
+		return res
+	}
+	text := pollWaitText(in.PollStall)
+	switch {
+	case res.State == Stalled && (res.Code == CodeOverdue || res.Code == CodeNoProgress || res.Code == CodeStageCompleteStuck):
+		res.State, res.Code, res.Rank = Waiting, CodeWaitingForPoll, NotRanked
+		res.Summary = text
+		res.Next.Action = text
+	case res.Code == CodeQueuedForSlot:
+		// A queued worker's goroutine is already blocked on the slot semaphore
+		// (#2121): it does not wait for the poll, so the poll is not blamed.
+	case res.State == Waiting, res.State == Idle && res.Code == "idle":
+		res.Summary = text + "; " + res.Summary
+		res.Next.Action = text + "; " + res.Next.Action
+	}
+	return res
+}
+
+func pollWaitText(p PollStall) string {
+	text := fmt.Sprintf("waiting for the poll: blocked for %d s", int64(p.Blocked.Seconds()))
+	if p.Step != "" {
+		text += ", in step " + p.Step
+	}
+	return text
+}
+
+func classify(in Input) Result {
 	res := Result{Rank: NotRanked}
 	res.ProgressAt = progressAnchor(in)
 	if !res.ProgressAt.IsZero() && !in.Now.IsZero() {
@@ -252,6 +538,15 @@ func Classify(in Input) Result {
 		res.State, res.Code, res.Summary, res.Rank = st, code, summary, rank
 		res.Next.Action = action
 		return res
+	}
+	// finishNoSchedule is finish for a state only a human (or an external event)
+	// moves: the engine schedules nothing, so no deadline is reported and next_at
+	// is unknown. A dispatch cooldown's expiry is never a next action here (R5).
+	finishNoSchedule := func(st State, code, summary, action string, rank int, opts []Option) Result {
+		res.Next.Deadlines = nil
+		res.Next.At = time.Time{}
+		res.Options = opts
+		return finish(st, code, summary, action, rank)
 	}
 
 	// 1. Items the engine has nothing to do for.
@@ -273,38 +568,80 @@ func Classify(in Input) Result {
 	// 2. Escalated: the engine has stopped on its own account.
 	if (paused && escalationSignal(in)) || failedLanding {
 		code, summary := escalationCode(in, failedLanding)
-		return finish(Escalated, code, summary,
-			"nothing automatic: the engine has stopped; a human must intervene (fix the cause, then comment or remove fabrik:paused)", RankEscalated)
+		res.ResumeVia = resumeVia(in, true)
+		if paused && in.DaemonStop {
+			res.Cause = CauseDaemonStop
+		}
+		return finishNoSchedule(Escalated, code, summary,
+			"nothing automatic: the engine has stopped; a human must intervene ("+resumeAdvice(in, true)+")", RankEscalated,
+			resumeOptions(in, true))
 	}
 
 	// 3. Needs-human: paused with a question or without an escalation signal.
 	if paused {
-		code, summary := "fabrik:paused", "paused; a human comment resumes it"
+		code, summary := "fabrik:paused", "paused; "+resumeAdvice(in, false)
 		if hasLabel(in.Labels, "fabrik:awaiting-input") {
 			code, summary = "fabrik:awaiting-input", "the engine is waiting for a human reply"
+			if in.Resume != ResumeComment {
+				summary = "the engine paused and is waiting on a human; " + resumeAdvice(in, false)
+			}
 		}
-		return finish(NeedsHuman, code, summary,
-			"nothing automatic: a human comment created after the pause resumes this item", RankNeedsHuman)
+		res.ResumeVia = resumeVia(in, false)
+		if in.DaemonStop {
+			res.Cause = CauseDaemonStop
+		}
+		return finishNoSchedule(NeedsHuman, code, summary,
+			"nothing automatic: "+resumeAdvice(in, false), RankNeedsHuman, resumeOptions(in, false))
 	}
 
 	// 4. Settled at Validate under cruise: only a human merge is left.
 	if in.Status == "Validate" && hasLabel(in.Labels, "stage:Validate:complete") &&
 		hasLabel(in.Labels, "fabrik:cruise") && in.HasOpenUnmergedPR && !in.HasWorker {
-		return finish(NeedsHuman, CodeAwaitingMergeDecision,
+		return finishNoSchedule(NeedsHuman, CodeAwaitingMergeDecision,
 			"Validate is complete under cruise; the PR awaits a human merge decision",
-			"nothing automatic: cruise never merges; a human merges the PR", RankMergeDecision)
+			"nothing automatic: cruise never merges; a human merges the PR", RankMergeDecision,
+			MergeDecisionOptions(in.PRNumber))
 	}
 
 	// 4b. The engine refuses to run until a human edits something it cannot
 	// edit itself; no retry or deadline will ever clear it.
 	if hasLabel(in.Labels, "fabrik:api-key-helper-detected") {
-		return finish(NeedsHuman, "fabrik:api-key-helper-detected",
+		return finishNoSchedule(NeedsHuman, "fabrik:api-key-helper-detected",
 			labelTable["fabrik:api-key-helper-detected"].meaning,
-			"nothing automatic: the engine skips this item until apiKeyHelper is removed from the worktree settings", RankNeedsHuman)
+			"nothing automatic: the engine skips this item until apiKeyHelper is removed from the worktree settings", RankNeedsHuman,
+			[]Option{{Action: "remove apiKeyHelper from the worktree's .claude settings"}})
 	}
 
-	// 5. Waiting on something the engine owns.
-	if code, summary, ok := waitingCause(in); ok {
+	// 4c. Suspended: nothing is wrong and nothing will move until a human decides.
+	if p, ok := pendingDecision(in); ok {
+		return suspendedResult(res, in, p)
+	}
+	if hasLabel(in.Labels, "fabrik:skill-unresolved") {
+		return finish(NeedsHuman, "fabrik:skill-unresolved",
+			labelTable["fabrik:skill-unresolved"].meaning,
+			"nothing automatic: the engine re-resolves each dispatch and runs the stage once the reference resolves", RankNeedsHuman)
+	}
+
+	stalledAge := stallExceeded(res, in)
+
+	// 5a. A worker is in flight or queued for a slot (#2121). It outranks every
+	// wait label and cooldown: the worker is what the item is doing. The
+	// heartbeat is not progress (a hung process keeps beating), but a healthy long
+	// run is: the worker is only stalled once it has outlived its own stage's
+	// wall-clock budget plus a margin.
+	if wr, ok := workerRow(res, in); ok {
+		return wr
+	}
+
+	// waitOutcome turns a wait (a label, a cooldown, the holding stage) into the
+	// item's result, or Stalled when the engine should have acted and has not.
+	waitOutcome := func(code, summary string) Result {
+		if code == "fabrik:blocked" {
+			// An open-ended dependency wait: a dispatch cooldown's expiry is not
+			// what ends it (R5).
+			res.Next.Deadlines = withoutCooldowns(res.Next.Deadlines)
+			res.Next.At = earliestKnown(res.Next.Deadlines)
+		}
 		// An engine-owned wait whose known deadline passed more than the stall
 		// threshold ago means the engine should have acted and has not.
 		if overdue, d := overdueBy(res.Next.Deadlines, in); overdue {
@@ -322,26 +659,34 @@ func Classify(in Input) Result {
 				fmt.Sprintf("%s, with no known deadline and no observable change for %s", summary, res.ProgressAge.Round(time.Second)),
 				"nothing scheduled that the cache can see; the next poll re-evaluates the item", RankStalled)
 		}
+		if code == "fabrik:rebase-needed" && in.RebaseAfterLanding {
+			res.Cause = CauseRebaseConflictAfterLanding
+		}
 		return finish(Waiting, code, summary, actionFor(res.Next.Deadlines, waitAction(code)), NotRanked)
 	}
 
-	stalledAge := stallExceeded(res, in)
+	// 5. Waiting on a state-bearing label the engine owns.
+	if code, summary, ok := labelWait(in); ok {
+		return waitOutcome(code, summary)
+	}
 
-	// 6. A worker is in flight. The heartbeat is not progress (a hung process
-	// keeps beating), but a healthy long run is: the worker is only stalled once
-	// it has outlived its own stage's wall-clock budget plus a margin.
-	if in.HasWorker {
-		if workerOverdue(res, in) {
-			return finish(Stalled, CodeWorkerNoProgress,
-				fmt.Sprintf("a worker is in flight but nothing observable changed for %s", res.ProgressAge.Round(time.Second)),
-				"the worker's own inactivity/wall-time limits will end it; the engine then reads its result", RankStalled)
-		}
-		summary := "a worker is running"
-		if in.Cfg.StallThreshold > 0 && res.ProgressAge > in.Cfg.StallThreshold {
-			summary = fmt.Sprintf("a worker is running (long-running: %s, within its stage's wall-clock budget)", res.ProgressAge.Round(time.Second))
-		}
-		return finish(Working, "worker-in-flight", summary,
-			"the engine reads the invocation result when the worker exits", NotRanked)
+	// 5b. Gaps the engine can explain (#2121): a scheduled retry, a gate holding
+	// the advance. Neither is a stall.
+	if rr, ok := retryRow(res, in); ok {
+		return rr
+	}
+	if gr, ok := gateHoldRow(res, in); ok {
+		return gr
+	}
+
+	// 6. Work to do and no worker: waiting for dispatch, never idle (#2121 R3).
+	if dr, ok := dispatchRow(res, in, stalledAge); ok {
+		return dr
+	}
+
+	// 5c. A dispatch cooldown, or the merge-train holding stage.
+	if code, summary, ok := cooldownOrHoldingWait(in); ok {
+		return waitOutcome(code, summary)
 	}
 
 	// 7. Nothing running and nothing waited on.
@@ -355,6 +700,277 @@ func Classify(in Input) Result {
 		return finish(Stalled, code, summary, "nothing scheduled; the next poll re-evaluates the item", RankStalled)
 	}
 	return finish(Idle, "idle", "nothing to do right now", "the next poll re-evaluates the item", NotRanked)
+}
+
+// resumeAdvice says how a pause is lifted, in the engine's own words when the
+// cached pause comment states the method and in words that claim neither
+// otherwise (R-options-2): a generic method that contradicts the engine's
+// comment is worse than none.
+func resumeAdvice(in Input, escalated bool) string {
+	switch resumeVia(in, escalated) {
+	case ResumeViaLabel:
+		return "remove fabrik:paused to resume it"
+	case ResumeViaComment:
+		return "a human comment created after the pause resumes this item"
+	}
+	return "see the engine's pause comment on the issue for how to resume it"
+}
+
+// resumeVia resolves the resume method: the engine's own comment when the cache
+// has it, a human comment for a plain awaiting-input question, otherwise
+// unknown.
+func resumeVia(in Input, escalated bool) string {
+	switch {
+	case in.Resume == ResumeRemoveLabel:
+		return ResumeViaLabel
+	case in.Resume == ResumeComment:
+		return ResumeViaComment
+	case hasLabel(in.Labels, "fabrik:awaiting-input") && !escalated:
+		return ResumeViaComment
+	}
+	return ResumeViaPauseComment
+}
+
+// resumeOptions are the options of a paused item: the single resume method the
+// engine's own comment gives, or a pointer to that comment when unknown.
+func resumeOptions(in Input, escalated bool) []Option {
+	switch resumeVia(in, escalated) {
+	case ResumeViaLabel:
+		return []Option{{Action: "remove the fabrik:paused label (as the engine's pause comment says)"}}
+	case ResumeViaComment:
+		return []Option{{Action: "comment on the issue with your answer or instruction (a human comment created after the pause resumes it)"}}
+	}
+	return []Option{{Action: "read the engine's pause comment on the issue and follow its instructions"}}
+}
+
+// MergeDecisionOptions are the options of an item settled at Validate under
+// cruise: the human's merge (no tool), or yolo so the engine merges.
+func MergeDecisionOptions(pr int) []Option {
+	merge := "merge the PR"
+	if pr > 0 {
+		merge = fmt.Sprintf("merge PR #%d", pr)
+	}
+	return []Option{
+		{Action: merge},
+		{Action: "set yolo so the engine merges it", Tool: "fabrik_set_autonomy yolo"},
+	}
+}
+
+// DecisionOptions are the options of a completed stage that does not
+// auto-advance.
+func DecisionOptions(nextStage string) []Option {
+	return []Option{
+		{Action: "advance to " + nextStage, Tool: "fabrik_advance"},
+		{Action: "set cruise so it advances through the remaining stages and waits for your merge", Tool: "fabrik_set_autonomy cruise"},
+		{Action: "set yolo so it advances and merges by itself", Tool: "fabrik_set_autonomy yolo"},
+	}
+}
+
+// ParkedBlockerOptions are the options of an item blocked only by parked work.
+func ParkedBlockerOptions(blockers []ParkedBlocker) []Option {
+	var out []Option
+	for _, b := range blockers {
+		out = append(out, Option{Action: fmt.Sprintf("promote blocker %s out of %s", b.Ref, b.Column), Tool: "fabrik_promote"})
+	}
+	return append(out, Option{Action: "remove the blocking dependency (edit the issue's blocked-by relationship)"})
+}
+
+// inFlightMarker reports labels that mean the engine is mid-work on the item.
+func inFlightMarker(l string) bool {
+	return l == "fabrik:editing" || strings.HasPrefix(l, "fabrik:locked:") ||
+		(strings.HasPrefix(l, "stage:") && strings.HasSuffix(l, ":in_progress"))
+}
+
+// suspendedMasked reports whether something the engine owns is still going on,
+// so the item is not simply waiting for a human. Cooldowns never mask: they can
+// only mean "re-check later". exceptBlocked lets case (b) ignore fabrik:blocked,
+// which is what parks the item in the first place.
+func suspendedMasked(in Input, exceptBlocked bool) bool {
+	if hasWorkerLike(in) || paused(in) {
+		return true
+	}
+	for _, l := range in.Labels {
+		if inFlightMarker(l) {
+			return true
+		}
+		if info, ok := labelTable[l]; ok && info.waits && !(exceptBlocked && l == "fabrik:blocked") {
+			return true
+		}
+	}
+	return in.StageKind == KindHolding
+}
+
+func paused(in Input) bool { return hasLabel(in.Labels, "fabrik:paused") }
+
+// pendingDecision derives the Suspended state (#2120 R1). Unknown inputs fail
+// closed: the item stays on the pre-existing path.
+func pendingDecision(in Input) (Pending, bool) {
+	if in.StageKind != KindManaged {
+		return Pending{}, false
+	}
+	// (b) every open blocker is parked in an unmanaged column.
+	if in.BlockedOnlyByParked && len(in.ParkedBlockers) > 0 && !suspendedMasked(in, true) {
+		since, basis := pendingSince(in, "fabrik:blocked")
+		return Pending{
+			Kind: PendingParkedBlocker, CompletedStage: in.Status,
+			Since: since, SinceBasis: basis,
+			Blockers: append([]ParkedBlocker(nil), in.ParkedBlockers...),
+			Options:  ParkedBlockerOptions(in.ParkedBlockers),
+		}, true
+	}
+	// (a) a completed stage that does not auto-advance. Validate is excluded: its
+	// next stage is the cleanup stage, so NextStage is empty there.
+	complete := "stage:" + in.Status + ":complete"
+	if in.Status != "" && in.Status != "Validate" && in.NextStage != "" && hasLabel(in.Labels, complete) &&
+		!in.AutoAdvances && !in.FeedbackPending && !suspendedMasked(in, false) {
+		since, basis := pendingSince(in, complete)
+		return Pending{
+			Kind: PendingDecision, CompletedStage: in.Status, NextStage: in.NextStage,
+			Since: since, SinceBasis: basis,
+			Options: DecisionOptions(in.NextStage),
+		}, true
+	}
+	return Pending{}, false
+}
+
+// pendingSince anchors a pending decision on the GitHub time the deciding fact
+// became true. For a completed stage that is the label's time; when it is not
+// known yet the stage comment's time stands in as an estimate and, failing that,
+// the daemon's first sight (a lower bound). A later eligibility change wins: the
+// wait starts again when the item's ability to proceed changed.
+//
+// A parked-blocker wait has two facts, the item's fabrik:blocked label and the
+// blocker being parked, and starts at the later of them. The label's time alone
+// is not the start (a 30-day-old label says nothing about a blocker parked
+// minutes ago), so it is used only together with a column move the daemon
+// watched for every direct blocker; otherwise the wait is dated by first sight.
+func pendingSince(in Input, label string) (time.Time, string) {
+	var since time.Time
+	var basis string
+	switch {
+	case label == "fabrik:blocked":
+		since, basis = parkedSince(in)
+	case !in.LabelAppliedAt[label].IsZero():
+		since, basis = in.LabelAppliedAt[label], SinceGitHub
+	case !in.StageCommentAt.IsZero():
+		since, basis = in.StageCommentAt, SinceStageComment
+	default:
+		since, basis = in.StatusEnteredAt, SinceFirstSeen
+	}
+	if in.EligibilityChangedAt.After(since) {
+		since, basis = in.EligibilityChangedAt, SinceEligibility
+	}
+	return since, basis
+}
+
+func parkedSince(in Input) (time.Time, string) {
+	first := in.StatusEnteredAt
+	moved := time.Time{}
+	allMoved := len(in.ParkedBlockers) > 0
+	transitive := false
+	for _, b := range in.ParkedBlockers {
+		transitive = transitive || b.Transitive
+		if b.EnteredAt.After(first) {
+			first = b.EnteredAt
+		}
+		if b.MovedAt.IsZero() {
+			allMoved = false
+		} else if b.MovedAt.After(moved) {
+			moved = b.MovedAt
+		}
+	}
+	label := in.LabelAppliedAt["fabrik:blocked"]
+	if allMoved && !transitive && !label.IsZero() {
+		since := label
+		if moved.After(since) {
+			since = moved
+		}
+		return since, SinceBlockerParked
+	}
+	return first, SinceFirstSeen
+}
+
+func suspendedResult(res Result, in Input, p Pending) Result {
+	res.State, res.Rank = Suspended, RankNeedsHuman
+	res.Pending = &p
+	res.Options = p.Options
+	res.Next.Deadlines = nil
+	res.Next.At = time.Time{}
+	// The wait's age is the pending age, never the daemon-observed anchor: a
+	// lower bound is not a progress age.
+	res.ProgressAt, res.ProgressAge = time.Time{}, 0
+	if p.SinceExact() && !p.Since.IsZero() && !in.Now.IsZero() {
+		res.ProgressAt = p.Since
+		res.ProgressAge = in.Now.Sub(p.Since)
+	}
+	waited := PendingWaitText(p, in.Now)
+	switch p.Kind {
+	case PendingParkedBlocker:
+		res.Code = CodeParkedBlocker
+		refs := make([]string, 0, len(p.Blockers))
+		for _, b := range p.Blockers {
+			refs = append(refs, fmt.Sprintf("%s (in %s)", b.Ref, b.Column))
+		}
+		res.Summary = fmt.Sprintf("blocked only by work parked in an unmanaged column: %s; %s", strings.Join(refs, ", "), waited)
+		res.Next.Action = "nothing automatic: " + OptionsText(p.Options) + " — a human decides"
+	default:
+		res.Code = CodeDecisionPending
+		res.Summary = fmt.Sprintf("stage %s is complete and does not advance by itself; a human decides the next step; %s", p.CompletedStage, waited)
+		res.Next.Action = "nothing automatic: " + OptionsText(p.Options)
+	}
+	return res
+}
+
+// PendingWaitText renders how long a pending decision has waited, saying "at
+// least" when only the daemon's first sight is known.
+func PendingWaitText(p Pending, now time.Time) string {
+	if p.Since.IsZero() {
+		return "waiting for an unknown time"
+	}
+	age := HumanAge(now.Sub(p.Since))
+	if p.SinceBasis == SinceStageComment {
+		return fmt.Sprintf("waiting since about %s (%s; taken from the stage's comment, the label's own time is not known yet)", p.Since.UTC().Format(time.RFC3339), age)
+	}
+	if !p.SinceExact() {
+		return fmt.Sprintf("waiting at least since %s (%s; the daemon first saw it then)", p.Since.UTC().Format(time.RFC3339), age)
+	}
+	return fmt.Sprintf("waiting since %s (%s)", p.Since.UTC().Format(time.RFC3339), age)
+}
+
+// HumanAge formats a duration with days when it is long.
+func HumanAge(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	if d >= 48*time.Hour {
+		days := int(d / (24 * time.Hour))
+		return fmt.Sprintf("%dd%dh", days, int((d%(24*time.Hour))/time.Hour))
+	}
+	return d.Round(time.Second).String()
+}
+
+// OptionsText renders options as "a (tool); or b". The engine reuses it for
+// event content so the classifier summary and the events read alike.
+func OptionsText(opts []Option) string {
+	parts := make([]string, 0, len(opts))
+	for _, o := range opts {
+		if o.Tool != "" {
+			parts = append(parts, fmt.Sprintf("%s (%s)", o.Action, o.Tool))
+		} else {
+			parts = append(parts, o.Action)
+		}
+	}
+	return strings.Join(parts, "; or ")
+}
+
+func withoutCooldowns(ds []Deadline) []Deadline {
+	var out []Deadline
+	for _, d := range ds {
+		if !strings.HasPrefix(d.Kind, "cooldown:") {
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 // escalationSignal reports whether a paused item was stopped by the engine on
@@ -386,8 +1002,8 @@ func escalationCode(in Input, failedLanding bool) (string, string) {
 	return "paused-by-engine", "the engine paused this item after exhausting its retries"
 }
 
-// waitingCause finds why the engine is correctly waiting, if it is.
-func waitingCause(in Input) (code, summary string, ok bool) {
+// labelWait finds a state-bearing wait label, if the item carries one.
+func labelWait(in Input) (code, summary string, ok bool) {
 	// Deterministic: sorted label order, first state-bearing wait wins.
 	var waits []string
 	for _, l := range in.Labels {
@@ -399,6 +1015,12 @@ func waitingCause(in Input) (code, summary string, ok bool) {
 	if len(waits) > 0 {
 		return waits[0], labelTable[waits[0]].meaning, true
 	}
+	return "", "", false
+}
+
+// cooldownOrHoldingWait finds an active dispatch cooldown or the holding-stage
+// wait, the engine-owned waits that carry no label.
+func cooldownOrHoldingWait(in Input) (code, summary string, ok bool) {
 	if reason, until, found := activeCooldown(in); found {
 		return "cooldown:" + reason, fmt.Sprintf("cooldown %q active until %s", reason, until.UTC().Format(time.RFC3339)), true
 	}
@@ -465,8 +1087,14 @@ func progressAnchor(in Input) time.Time {
 	consider(in.LastAttemptAt)
 	consider(in.LastCIProgressAt)
 	consider(in.WorkerStartedAt)
+	consider(in.EligibilityChangedAt)
 	for _, t := range in.LabelAppliedAt {
 		consider(t)
+	}
+	// An unknown anchor stays unknown; a known one is floored at the end of the
+	// last overdue poll episode (#2124).
+	if !latest.IsZero() {
+		consider(in.PollRecoveredAt)
 	}
 	return latest
 }
@@ -544,8 +1172,8 @@ func describeKind(kind string) string {
 		return "the review wait times out (bot re-prompt, else pause)"
 	case kind == "bot-reprompt-escalation":
 		return "the bot re-prompt window ends and the engine pauses"
-	case kind == "claude-suspension-end":
-		return "the Claude usage-limit suspension lifts"
+	case kind == "claude-usage-limit-end":
+		return "the Claude usage-limit hold lifts"
 	}
 	return kind
 }
@@ -556,9 +1184,9 @@ func reasonsFor(in Input) []Reason {
 	labels := append([]string(nil), in.Labels...)
 	sort.Strings(labels)
 	for _, l := range labels {
-		if info, ok := labelTable[l]; ok && !seen[l] {
+		if m := MeaningOf(l); m != "" && !seen[l] {
 			seen[l] = true
-			out = append(out, Reason{Code: l, Meaning: info.meaning})
+			out = append(out, Reason{Code: l, Meaning: m})
 		}
 	}
 	var cds []string
@@ -590,8 +1218,14 @@ func deadlinesFor(in Input) []Deadline {
 	}
 	sort.Strings(cds)
 	for _, r := range cds {
-		// The store never deletes cooldown entries: an expired one is history,
-		// not something the engine is still going to act on.
+		// Only an entry still in the future is a deadline. An expired one is either
+		// history or an expiry poll admission has not yet acted on (the engine
+		// deletes it once it has, #2096) — neither is a future action to report.
+		if r == "periodic-re-eval" {
+			// The safety-net re-evaluation can only re-check; it never changes
+			// anything, so presenting its expiry as a next action is a lie (R5).
+			continue
+		}
 		if t := in.Cooldowns[r]; t.After(in.Now) {
 			ds = append(ds, Deadline{Kind: "cooldown:" + r, At: t, Basis: "cooldown expiry"})
 		}
@@ -626,8 +1260,8 @@ func deadlinesFor(in Input) []Deadline {
 	if hasLabel(in.Labels, "fabrik:bot-reprompted") {
 		anchored("bot-reprompt-escalation", "fabrik:bot-reprompted", in.Cfg.ReviewWaitTimeout, "bot-reprompted applied + review wait timeout")
 	}
-	if hasLabel(in.Labels, "fabrik:claude-limit") && in.ClaudeSuspendedUntil.After(in.Now) {
-		ds = append(ds, Deadline{Kind: "claude-suspension-end", At: in.ClaudeSuspendedUntil, Basis: "account-wide usage-limit reset"})
+	if hasLabel(in.Labels, "fabrik:claude-limit") && in.ClaudeUsageLimitedUntil.After(in.Now) {
+		ds = append(ds, Deadline{Kind: "claude-usage-limit-end", At: in.ClaudeUsageLimitedUntil, Basis: "account-wide usage-limit reset"})
 	}
 	return ds
 }

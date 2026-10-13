@@ -248,6 +248,20 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 // itemNeedsWork does full checks including comment inspection.
 // This runs AFTER FetchItemDetails has populated the item's Comments.
 func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
+	needs, _ := e.itemNeedsWorkRetryAt(item)
+	return needs
+}
+
+// itemNeedsWorkRetryAt is itemNeedsWork plus, when the ONLY reason the item is
+// refused is that LastAttemptAt is still inside stageRetryBackoff(), the
+// remaining wait (retryIn > 0). The backoff is the last gate, so a non-zero
+// retryIn means every other gate passed. The caller records a "retry-backoff"
+// cooldown for it so the expiry re-admits the item (#2096, ADR 2096): the backoff
+// records no cooldown of its own, and consumed expiries no longer re-admit.
+//
+// retryIn is measured on the real clock because LastAttemptAt is (ADR 1831);
+// the caller converts it onto the e.now() domain the cooldown map uses.
+func (e *Engine) itemNeedsWorkRetryAt(item gh.ProjectItem) (needs bool, retryIn time.Duration) {
 	stage := stages.FindStage(e.cfg.Stages, item.Status)
 
 	// Mirror of the itemMayNeedWork closed-issue gate (R1, ADR-1387): a closed
@@ -257,15 +271,15 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 	// settleClosedValidateAdvance settle scan, not this dispatch guard.
 	if item.IsClosed {
 		if stage == nil {
-			return false
+			return false, 0
 		}
 		if !stage.CleanupWorktree && !hasLabel(item.Labels, fmt.Sprintf("stage:%s:complete", stage.Name)) {
-			return false
+			return false, 0
 		}
 	}
 
 	if stage == nil {
-		return false
+		return false, 0
 	}
 
 	// A pending no-work-needed decision suppresses all further dispatch,
@@ -273,24 +287,24 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 	// settle scan in poll.go (not the normal dispatch path) is the only thing
 	// that may act on the item while this marker is present.
 	if !stage.CleanupWorktree && hasLabel(item.Labels, "fabrik:awaiting-done") {
-		return false
+		return false, 0
 	}
 
 	// Holding stages are batch-scoped; never dispatch individual items. Unmanaged
 	// stages (e.g. Backlog) are parking columns never dispatched at all.
 	if stage.HoldingStage || stage.Unmanaged {
-		return false
+		return false, 0
 	}
 
 	// Cleanup stages bypass comment processing and cooldown checks.
 	if stage.CleanupWorktree {
 		if hasLabel(item.Labels, "fabrik:paused") {
-			return false
+			return false, 0
 		}
 		if hasLabel(item.Labels, fmt.Sprintf("stage:%s:complete", stage.Name)) {
-			return false
+			return false, 0
 		}
-		return e.worktreeExistsForItem(item) || (item.IsClosed && !item.IsPR)
+		return e.worktreeExistsForItem(item) || (item.IsClosed && !item.IsPR), 0
 	}
 
 	// Awaiting-input items (paused + awaiting-input) bypass the paused guard but
@@ -304,14 +318,14 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 	otherLockPrefix := lockLabelPrefix
 	for _, label := range item.Labels {
 		if strings.HasPrefix(label, otherLockPrefix) && label != lockLabel {
-			return false
+			return false, 0
 		}
 	}
 
 	// Items being edited by a comment-processing worker must not receive a new
 	// stage dispatch — pre-dispatch gate symmetric with fabrik:locked:<other-user>.
 	if hasLabel(item.Labels, "fabrik:editing") {
-		return false
+		return false, 0
 	}
 
 	// Items with fabrik:blocked have an open dependency; suppress re-dispatch
@@ -326,7 +340,7 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 		repo := itemOwnerRepoString(item, e.defaultRepo())
 		if snap, err := e.store.Get(repo, item.Number); err == nil {
 			if cooldown := snap.CooldownAt("dep-blocked"); !cooldown.IsZero() && e.now().Before(cooldown) {
-				return false // cooldown active — #576 short-circuit still holds
+				return false, 0 // cooldown active — #576 short-circuit still holds
 			}
 			// Cooldown expired: fall through to admit for one re-check.
 		}
@@ -354,7 +368,7 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 	// (TestSettleClosedItemsToDone_IgnoresLabelState). Guarding once, ahead of
 	// all three, is what actually establishes the invariant.
 	if item.IsClosed && !stage.CleanupWorktree {
-		return false
+		return false, 0
 	}
 
 	// Awaiting-input items: new human comment = resume trigger; no human
@@ -366,7 +380,7 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 		} else if !ok && len(raw) > 0 {
 			e.logf(item.Number, "skip", "awaiting-input: %d new comment(s), none human-authored — still waiting\n", len(raw))
 		}
-		return ok
+		return ok, 0
 	}
 
 	// Paused items: a new human comment is an implicit "resume and handle
@@ -375,14 +389,14 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 	if isPaused {
 		ok, raw, refused := e.resumeAuthorised(item)
 		if ok {
-			return true // comment triggers unpause — processItem handles label removal
+			return true, 0 // comment triggers unpause — processItem handles label removal
 		}
 		if refused > 0 {
 			e.logf(item.Number, "skip", "paused: %d human comment(s) predate the pause — pause retained\n", refused)
 		} else if len(raw) > 0 {
 			e.logf(item.Number, "skip", "paused: %d new comment(s), none human-authored — pause retained\n", len(raw))
 		}
-		return false
+		return false, 0
 	}
 
 	// New comments are always worth processing (even on completed stages) —
@@ -394,7 +408,7 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 	if !item.IsClosed {
 		newComments := e.findNewComments(item)
 		if len(newComments) > 0 && !item.IsClosed {
-			return true
+			return true, 0
 		}
 	}
 
@@ -405,14 +419,14 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 
 	// PRs only support comment processing
 	if item.IsPR {
-		return false
+		return false, 0
 	}
 
 	// Already completed this stage
 	completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
 	for _, label := range item.Labels {
 		if label == completeLabel {
-			return false
+			return false, 0
 		}
 	}
 
@@ -421,7 +435,7 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 	// stages so a stale label on a non-CI-gated stage does not permanently
 	// suppress dispatch (e.g., if a user manually moves an item to a different stage).
 	if stage.WaitForCI != nil && *stage.WaitForCI && hasLabel(item.Labels, "fabrik:awaiting-ci") {
-		return false
+		return false, 0
 	}
 
 	// Check dispatch cooldown: suppress re-dispatch while LastAttemptAt is within the
@@ -433,13 +447,13 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 		lastAttempt := snap.LastAttemptAt(stage.Name)
 		if !lastAttempt.IsZero() {
 			cooldown := e.stageRetryBackoff()
-			if time.Since(lastAttempt) < cooldown {
-				return false
+			if elapsed := time.Since(lastAttempt); elapsed < cooldown {
+				return false, cooldown - elapsed
 			}
 		}
 	}
 
-	return true
+	return true, 0
 }
 
 func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem) error {
@@ -751,8 +765,9 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 				releaseLock()
 				e.store.Apply(itemstate.StageRetryCleared{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 				e.store.Apply(itemstate.EngineUnpaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
-				if stage.MarkPRReadyOnComplete {
-					e.markPRReady(item, r5PRNum)
+				if stage.MarkPRReadyOnComplete && e.markPRReady(item, r5PRNum) {
+					// Zero-ahead push guard (#2089) paused the item: skip completion.
+					return nil
 				}
 				e.handleStageComplete(ctx, board, item, stage)
 				return nil
@@ -958,7 +973,7 @@ func (e *Engine) acquireLockAndVerify(ctx context.Context, item gh.ProjectItem, 
 			Number:     item.Number,
 			User:       e.lockIdentity(),
 			AcquiredAt: workerStartedAt,
-			Worker:     &itemstate.WorkerHandle{StageName: stage.Name, StartedAt: workerStartedAt, LastSignAt: workerStartedAt},
+			Worker:     &itemstate.WorkerHandle{StageName: stage.Name, StartedAt: workerStartedAt, LastSignAt: workerStartedAt, Kind: itemstate.WorkerKindStageRun},
 		})
 		e.syncLabelAdd(item, lockLabel, true)
 		workerDone = make(chan struct{})
@@ -1043,14 +1058,14 @@ func (e *Engine) acquireLockAndVerify(ctx context.Context, item gh.ProjectItem, 
 // reports how many budget multiples were ultimately used, so the caller can
 // compute a cumulative-budget stats footer.
 func (e *Engine) runInvocationWithExtension(ctx context.Context, item gh.ProjectItem, stage *stages.Stage, baseBranch, workDir string, resume bool) (output string, completed bool, usage TokenUsage, totalMultiple int, err error) {
-	// Check the account-wide usage-limit suspension gate before building InvokeOptions
+	// Check the account-wide usage-limit hold gate before building InvokeOptions
 	// or consuming any armed stall hint (#1146) — consumeStallHint destructively clears
 	// StallHintPending, so it must not run on a dispatch that will never actually invoke
 	// Claude. Otherwise a detected stall's one-shot corrective hint would be silently
 	// discarded here and never reach any invocation at all.
-	if _, suspended := e.claudeSuspendedUntilTime(time.Now()); suspended {
-		e.logf(item.Number, "claude-limit", "Claude dispatch suspended account-wide; skipping invocation")
-		err = &claudeUsageLimitError{Message: "account usage-limit suspension active"}
+	if _, usageLimited := e.claudeUsageLimitedUntilTime(time.Now()); usageLimited {
+		e.logf(item.Number, "claude-limit", "Claude usage limited; dispatch held account-wide; skipping invocation")
+		err = &claudeUsageLimitError{Message: "account usage limit active"}
 		return output, completed, usage, totalMultiple, err
 	}
 
@@ -1060,7 +1075,7 @@ func (e *Engine) runInvocationWithExtension(ctx context.Context, item gh.Project
 	// repo-resident content Fabrik cannot see at engine startup
 	// (checkAPIKeyHelper only covers the managed-policy/user/fabrikDir-project
 	// layers). Check it here, before building InvokeOptions or consuming the
-	// stall hint, for the same reason as the suspension gate above — this
+	// stall hint, for the same reason as the usage-limit hold gate above — this
 	// dispatch will never actually invoke Claude if apiKeyHelper is set.
 	// Detection here fails only this invocation (via apiKeyHelperDetectedError,
 	// mirroring claudeUsageLimitError's shape); it is deliberately not a stage
@@ -1076,6 +1091,20 @@ func (e *Engine) runInvocationWithExtension(ctx context.Context, item gh.Project
 		for _, w := range warns {
 			e.logf(item.Number, "warn", "%s\n", w)
 		}
+	}
+
+	// ADR 2137: qualify the stage's skill reference against the plugins loaded
+	// for the worker, so the prompt names exactly what Claude Code registered.
+	// An unresolved reference means this dispatch can never succeed: refuse it
+	// before the worker is spawned (did-not-run, like the gates above).
+	resolvedStage, resolvedRefs, resolveErr := e.resolveStageSkills(stage, skillKeySkill)
+	if resolveErr != nil {
+		err = resolveErr
+		return output, completed, usage, totalMultiple, err
+	}
+	stage = resolvedStage
+	for _, r := range resolvedRefs {
+		e.clearSkillUnresolved(stage.Name, r.Key)
 	}
 
 	// #1786: detect declared-vs-resolved toolchain drift (.nvmrc, package.json
@@ -1114,6 +1143,7 @@ func (e *Engine) runInvocationWithExtension(ctx context.Context, item gh.Project
 		SigIntGrace:       sigIntGrace,
 		SigTermGrace:      sigTermGrace,
 		OnPIDReady:        func(pid int) { e.store.Apply(itemstate.WorkerPIDSet{Repo: repoStr, Number: item.Number, PID: pid}) },
+		OnTurn:            e.liveTurnRecorder(repoStr, item.Number),
 		CorrectiveHint:    e.consumeStallHint(repoStr, item.Number, stage.Name),
 		FabrikRepo:        e.defaultRepo(),
 		MaxResumeFailures: e.cfg.MaxResumeFailures,
@@ -1153,14 +1183,14 @@ func (e *Engine) runInvocationWithExtension(ctx context.Context, item gh.Project
 
 		var limitErr *claudeUsageLimitError
 		if errors.As(err, &limitErr) {
-			e.activateClaudeSuspension(item.Number, limitErr, time.Now())
+			e.activateClaudeUsageLimit(item.Number, limitErr, time.Now())
 		} else if err == nil {
 			// Only a successful invocation is evidence the limit has cleared (ADR-1120's
 			// "early clear on success"). A generic, unrelated error proves nothing about
 			// account-wide usage-limit state and must not clear it — doing so unconditionally
 			// would race with a concurrently-running worker that just activated the
-			// suspension, undoing it moments after detection.
-			e.clearClaudeSuspension("stage invocation reached Claude")
+			// usage-limit hold, undoing it moments after detection.
+			e.clearClaudeUsageLimit("stage invocation reached Claude")
 		}
 
 		hitLimit := !completed && err == nil && stage.MaxTurns > 0 && invUsage.TurnsUsed >= currentBudget
@@ -1298,7 +1328,7 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 			if claudeRan && !stage.ReadOnly {
 				e.commitWIP(workDir, item.Number, stage.Name)
 				wm := e.worktreesFor(item.Repo)
-				if pushErr := e.pushBranchUnlessQueued(item, wm); pushErr != nil {
+				if pushErr := e.pushBranchOnCancel(item, wm); pushErr != nil {
 					e.logf(item.Number, "warn", "could not push branch after cancellation: %v\n", pushErr)
 				}
 			}
@@ -1323,6 +1353,28 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 		var apiKeyErr *apiKeyHelperDetectedError
 		if errors.As(err, &apiKeyErr) {
 			e.handleAPIKeyHelperDetected(p, apiKeyErr)
+			return
+		}
+
+		// A stage skill reference no loaded plugin provides (ADR 2137) is
+		// likewise a did-not-run: no retry consumed, no failed/paused label.
+		var skillErr *skillUnresolvedError
+		if errors.As(err, &skillErr) {
+			e.handleSkillUnresolved(item, stage, repoStr, skillErr, true)
+			p.release()
+			return
+		}
+
+		// The stage's own skill ran but failed to load in the worker (#2138,
+		// ADR-2138): the worker had no instructions, so whatever marker it printed
+		// is not a completion. Did-not-run shape — no retry consumed, no
+		// stage:<name>:failed, no commitWIP/push — but, unlike the pre-flight case
+		// above, it cannot self-heal, so the item is paused for a human. The
+		// read-only stash restore already ran above this switch.
+		var skillLoadErr *claudeSkillLoadError
+		if errors.As(err, &skillLoadErr) {
+			e.handleSkillLoadFailed(item, stage, skillKeySkill, skillLoadErr)
+			p.release()
 			return
 		}
 
@@ -1391,6 +1443,20 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 	if hasLabel(item.Labels, "fabrik:api-key-helper-detected") {
 		e.removeLabel(item, "fabrik:api-key-helper-detected")
 	}
+	// This invocation only proved the stage's own `skill` resolves; the label is
+	// stage-wide and may stand for a bad comment_skill/ci_fix_skill/rebase_skill.
+	// Clear it only when every reference resolves (as the comment path does), or
+	// the comment-once gate would re-post the failure on each later comment cycle.
+	if hasLabel(item.Labels, skillUnresolvedLabel) {
+		if _, _, allErr := e.resolveStageSkills(stage); allErr == nil {
+			e.removeLabel(item, skillUnresolvedLabel)
+		}
+	}
+	// A skill-load failure short-circuited above, so this invocation's skill
+	// loaded (or none was configured): drop a stale warnings-panel entry (#2138).
+	if stage.Skill != "" {
+		e.clearSkillLoadFailed(stage.Name, skillKeySkill)
+	}
 	// fabrik:tools-denied is gated on !toolsDenied — unlike the two labels
 	// above, this invocation itself may BE the condition (toolsDenied does not
 	// short-circuit), so clearing unconditionally here would immediately erase
@@ -1431,7 +1497,10 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 	if stage.CreateDraftPR && output != "" {
 		prBlock, prBlockErr := ParsePRCreateBlock(output)
 		if prBlockErr != nil {
-			msg := fmt.Sprintf("🏭 **Fabrik — malformed FABRIK_PR_CREATE marker**\n\n%v\n\nRemove `fabrik:paused` after fixing the skill output to retry.", prBlockErr)
+			// #2091: the stage's work must reach the remote before the pause, so an
+			// un-pause resumes on pushed commits instead of redoing them.
+			workNote := e.preserveWorkOnMarkerFailure(item, stage, workDir, claudeRan)
+			msg := fmt.Sprintf("🏭 **Fabrik — malformed FABRIK_PR_CREATE marker**\n\n%v\n\n%sRemove `fabrik:paused` after fixing the skill output to retry.", prBlockErr, workNote)
 			e.postComment(item, msg, false, false) //nolint:errcheck // failure already logged by postComment
 			e.addPausedLabelToItem(owner, repo, item)
 			releaseLock()
@@ -1473,7 +1542,17 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 	// origin therefore always takes the fresh-CreateIssue path, unchanged
 	// from before ADR-1583.
 	if (stage.Name == "Review" || stage.Name == "Validate") && output != "" {
-		if blocks := ParseSpawnBlocks(output); len(blocks) > 0 {
+		blocks, blockErrs := ParseSpawnBlocksDetailed(output)
+		if len(blockErrs) > 0 {
+			// #2091: a malformed block is surfaced, not dropped. Hold the whole
+			// declaration (no spawn), keep the stage's work, then pause —
+			// mirroring the FABRIK_PR_CREATE failure branch above.
+			workNote := e.preserveWorkOnMarkerFailure(item, stage, workDir, claudeRan)
+			_ = e.pauseForMalformedSpawn(item, blockErrs, spawnOriginMidflight, workNote)
+			releaseLock()
+			return
+		}
+		if len(blocks) > 0 {
 			spawnedIDs, _, spawnErr := e.spawnChildren(p.ctx, p.board, item, owner, repo, blocks, false)
 			if spawnErr != nil {
 				// spawnChildren already paused the issue and posted its own
@@ -1619,10 +1698,13 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 	// pushing ejects it. The WIP-preservation push is forgone in that case, which is
 	// acceptable: queue entry happens at Validate completion, so stages rarely run while
 	// queued. No-op on non-queue repos (FR-3).
+	pushRefused := false
 	if claudeRan {
 		wm := e.worktreesFor(item.Repo)
 		if pushErr := e.pushBranchUnlessQueued(item, wm); pushErr != nil {
 			e.logf(item.Number, "warn", "could not push branch: %v\n", pushErr)
+			// The zero-ahead guard (#2089) has already paused the item.
+			pushRefused = errors.Is(pushErr, ErrPushRefusedZeroAhead)
 		}
 	}
 
@@ -1660,6 +1742,15 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 		MaxTurns:    usage.MaxTurns,
 		Duration:    time.Since(p.workerStartedAt),
 	})
+
+	if pushRefused {
+		// Zero-ahead push guard (#2089): the item is paused with awaiting-input.
+		// Do not run the completion/blocked/retry chain — handleStageComplete would
+		// strip awaiting-input and could advance or auto-merge a paused item. The
+		// stage stays incomplete and resumes through the normal human-comment path.
+		releaseLock()
+		return
+	}
 
 	if completed && noWorkNeeded {
 		// No-work path: stage declared itself complete AND signaled no code/doc changes
@@ -1710,8 +1801,9 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 		releaseLock()
 		e.store.Apply(itemstate.StageRetryCleared{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 		e.store.Apply(itemstate.EngineUnpaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
-		if stage.MarkPRReadyOnComplete {
-			e.markPRReady(item, prNumber)
+		if stage.MarkPRReadyOnComplete && e.markPRReady(item, prNumber) {
+			// Zero-ahead push guard (#2089) paused the item: skip completion.
+			return
 		}
 		e.handleStageComplete(p.ctx, p.board, item, stage)
 	} else if blockedOnInput {
@@ -1849,8 +1941,31 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 		} else if willEscalateToolsDenied {
 			e.pauseForToolsDeniedLimit(item, stage, toolsDeniedCount, e.cfg.MaxToolsDeniedRetries, toolsDeniedErr.ToolNames, toolsDeniedErr.Denials)
 			releaseLock() // permanently giving up — release the lock
+		} else {
+			// The retry will happen: tell the channel deriver why and when it is due
+			// (#2170), so a retry that then waits for a slot can be reported.
+			e.emitRetryScheduled(item, stage, retryCause(err, turnLimited, resumeFailed, toolsDenied), e.now().Add(cooldown))
 		}
 	}
+}
+
+// retryCause names why a stage run ended without completing, for the
+// retry-starved event (#2170). It only labels the outcome; no decision reads it.
+func retryCause(err error, turnLimited, resumeFailed, toolsDenied bool) string {
+	var killed *claudeKilledError
+	switch {
+	case errors.As(err, &killed):
+		return killed.Cause
+	case turnLimited:
+		return "max-turns"
+	case resumeFailed:
+		return "resume-failure"
+	case toolsDenied:
+		return "tools-denied"
+	case err != nil:
+		return "error"
+	}
+	return "incomplete"
 }
 
 // detectAndArmStallHint compares this incomplete invocation's turn usage against
@@ -2438,26 +2553,40 @@ func itemHasBaseLabel(item gh.ProjectItem) bool {
 	return false
 }
 
+// baseLabelFor selects the "base:<branch>" label an item resolves to: the first
+// non-empty one in label order. It returns that label's branch value ("" when
+// there is none) and the branch values of any further base: labels it ignored.
+// It is the single selection rule shared by baseBranchForItem and the spawn
+// step that copies a parent's base to its same-repo children (#2090), so a
+// parent and the children inheriting from it can never pick different labels.
+func baseLabelFor(labels []string) (branch string, extras []string) {
+	const prefix = "base:"
+	for _, label := range labels {
+		if !strings.HasPrefix(label, prefix) {
+			continue
+		}
+		b := strings.TrimPrefix(label, prefix)
+		if b == "" {
+			continue
+		}
+		if branch == "" {
+			branch = b
+		} else {
+			extras = append(extras, b)
+		}
+	}
+	return branch, extras
+}
+
 // baseBranchForItem scans item labels for a "base:<branch>" label and returns the
 // named branch if it exists on the remote. If multiple base: labels are present, it
 // uses the first and logs a warning. If the named branch does not exist on the remote,
 // it logs a warning, posts an issue comment, and falls back to DefaultBaseBranch.
 // Returns an error only when DefaultBaseBranch itself fails.
 func (e *Engine) baseBranchForItem(item gh.ProjectItem, wm *WorktreeManager) (string, error) {
-	const prefix = "base:"
-	var candidate string
-	for _, label := range item.Labels {
-		if strings.HasPrefix(label, prefix) {
-			branch := strings.TrimPrefix(label, prefix)
-			if branch == "" {
-				continue
-			}
-			if candidate == "" {
-				candidate = branch
-			} else {
-				e.logf(item.Number, "warn", "multiple base: labels found, using %q (ignoring %q)\n", candidate, branch)
-			}
-		}
+	candidate, extras := baseLabelFor(item.Labels)
+	for _, branch := range extras {
+		e.logf(item.Number, "warn", "multiple base: labels found, using %q (ignoring %q)\n", candidate, branch)
 	}
 
 	if candidate == "" {
@@ -2613,6 +2742,38 @@ func (e *Engine) addFailedLabel(owner, repo string, issueNumber int, stageName s
 
 func (e *Engine) removeFailedLabel(owner, repo string, issueNumber int, stageName string) {
 	e.removeLabel(gh.ProjectItem{Number: issueNumber, Repo: owner + "/" + repo}, fmt.Sprintf("stage:%s:failed", stageName))
+}
+
+// preserveWorkOnMarkerFailure commits and pushes the stage's work before
+// finalizeStageOutcome pauses on a malformed FABRIK_PR_CREATE or
+// FABRIK_SPAWN_CHILD marker (#2091, ADR 2091), so un-pausing resumes on the
+// remote branch instead of redoing the stage's work. It mirrors the R8
+// cancellation path (#1393): commitWIP (a no-op on the clean tree a completed
+// Implement normally leaves) then pushBranchOnCancel, which never pauses — the
+// caller is about to post the parse-failure pause itself, and the zero-ahead
+// guard (#2089) must not add a second one. Failures, including a zero-ahead
+// refusal, are logged only: they never suppress the parse-error comment or the
+// pause. Read-only stages have nothing to commit.
+//
+// It returns a sentence for the pause comment describing what actually
+// happened ("" when there was nothing to preserve), so the comment never
+// claims a push that did not land.
+func (e *Engine) preserveWorkOnMarkerFailure(item gh.ProjectItem, stage *stages.Stage, workDir string, claudeRan bool) string {
+	if !claudeRan || stage.ReadOnly {
+		return ""
+	}
+	e.commitWIP(workDir, item.Number, stage.Name)
+	if prInMergeQueue(item) {
+		// pushBranchOnCancel skips (returning nil) for a queued PR, so a nil
+		// return would not mean the work landed on the remote.
+		return "The stage's work was committed locally but not pushed: the PR is in the merge queue and a push would eject it.\n\n"
+	}
+	wm := e.worktreesFor(item.Repo)
+	if pushErr := e.pushBranchOnCancel(item, wm); pushErr != nil {
+		e.logf(item.Number, "warn", "could not push branch after marker parse failure: %v\n", pushErr)
+		return "The stage's work could not be pushed (see the engine log); it remains in the local worktree.\n\n"
+	}
+	return "The stage's work was committed and pushed.\n\n"
 }
 
 // commitWIP commits any uncommitted changes in the worktree as a partial-progress
@@ -2927,8 +3088,8 @@ func (e *apiKeyHelperDetectedError) Error() string {
 // genuine failed run happens — no commitWIP/push (nothing was produced), no
 // markCommentsSeenByStage, no StageRetryIncremented, no stage:<name>:failed,
 // no fabrik:paused. The actual hammering prevention is the account-wide
-// Claude dispatch suspension activated by runInvocationWithExtension (see
-// activateClaudeSuspension in usage_limit_backoff.go, ADR-1120) before this
+// Claude dispatch usage-limit hold activated by runInvocationWithExtension (see
+// activateClaudeUsageLimit in usage_limit_backoff.go, ADR-1120) before this
 // is even called — the per-issue cooldown here is a secondary guard. The
 // explanatory comment and fabrik:claude-limit label are applied only on the
 // transition into the condition (label absent -> applied); while the label
@@ -2952,18 +3113,21 @@ func (e *Engine) handleUsageLimitExit(p stageOutcomeParams, limitErr *claudeUsag
 		StageName: stage.Name,
 		At:        time.Now(),
 	})
+	// The retry waits out the dispatch cooldown and, on top of it, the account-wide
+	// usage-limit hold; the deriver measures starvation from the hold's lift (#2170).
+	e.emitRetryScheduled(item, stage, "claude-usage-limit", e.now().Add(e.stageRetryBackoff()))
 
 	if !hasLabel(item.Labels, "fabrik:claude-limit") {
 		comment := fmt.Sprintf(
-			"🏭 **Fabrik — Claude usage limit hit**\n\nStage **%s** did not run because the Claude account usage limit was reached%s. This is not a stage failure — it does not count against `max_retries`. Fabrik has suspended Claude dispatch account-wide (not just for this issue) and will resume automatically once the backoff passes, or as soon as any invocation succeeds — no operator action is required. If this looks like a false positive, apply `fabrik:clear-claude-limit` to any open board item to end the suspension immediately, with no engine restart needed. The `fabrik:claude-limit` label clears once the suspension lifts, both on this issue (next non-limit invocation) and account-wide (every open issue still carrying it).",
+			"🏭 **Fabrik — Claude usage limit hit**\n\nStage **%s** did not run because the Claude account usage limit was reached%s. This is not a stage failure — it does not count against `max_retries`. Fabrik has held Claude dispatch account-wide (not just for this issue) and will resume automatically once the backoff passes, or as soon as any invocation succeeds — no operator action is required. If this looks like a false positive, apply `fabrik:clear-claude-limit` to any open board item to end the usage-limit hold immediately, with no engine restart needed. The `fabrik:claude-limit` label clears once the usage-limit hold lifts, both on this issue (next non-limit invocation) and account-wide (every open issue still carrying it).",
 			stage.Name, resetSuffix,
 		)
 		e.postItemComment(item, comment, false)
 		e.addLabel(item, "fabrik:claude-limit")
 		// Only the item whose invocation hit the limit is written (#2048): the
-		// suspension is account-wide, but one write per detection keeps volume low
+		// usage-limit hold is account-wide, but one write per detection keeps volume low
 		// and the per-item label sweep already clears the label.
-		if until, ok := e.claudeSuspendedUntilTime(time.Now()); ok {
+		if until, ok := e.claudeUsageLimitedUntilTime(time.Now()); ok {
 			e.setStatusLine(item, statusLineClaudeLimit(until))
 		}
 	}
@@ -3040,6 +3204,7 @@ func (e *Engine) handleAPIErrorExit(p stageOutcomeParams, apiErr *claudeAPIError
 		StageName: stage.Name,
 		At:        time.Now(),
 	})
+	e.emitRetryScheduled(item, stage, "api-error", e.now().Add(e.stageRetryBackoff()))
 
 	p.release()
 }

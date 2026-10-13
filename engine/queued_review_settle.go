@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
 )
 
@@ -78,7 +79,7 @@ func (e *Engine) settleQueuedReviewFindings(board *gh.ProjectBoard) {
 			// GraphQL cost (#1527) would see per-item log entries with no
 			// visibility into whether each fetch was a cache hit or a live
 			// API call.
-			if c := e.cache(); c != nil && !c.IsPaused() && c.IsItemCacheFresh(item.Repo, item.Number, item.UpdatedAt) {
+			if c := e.cache(); c != nil && !c.IsPaused() && c.IsItemCacheFresh(item.Repo, item.Number, boardcache.EvidenceFromItem(&item)) {
 				e.logf(item.Number, "queued-review-settle", "reading details from cache\n")
 			} else {
 				e.logf(item.Number, "queued-review-settle", "deep-fetching details from GitHub\n")

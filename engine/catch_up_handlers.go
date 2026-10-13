@@ -240,7 +240,7 @@ func (e *Engine) handleReviewGate(pctx *phase1Ctx) bool {
 	// unbounded semaphore wait, where review state may genuinely have moved
 	// on, so it resolves fresh via the no-arg buildReviewFeedbackComments.
 	syntheticComments := e.buildReviewFeedbackCommentsFromReviews(pctx.item, resolvedReviews)
-	if len(syntheticComments) > 0 {
+	if len(syntheticComments) > 0 && !reviewReinvokeDisabledForTest.Load() {
 		// Observability (Pruefer review finding, #1375): when timedOut is also
 		// true here, checkAwaitingReviewTimeout has already removed
 		// fabrik:awaiting-review as its own side effect, but the reinvoke below
@@ -349,6 +349,7 @@ func (e *Engine) handleReviewGate(pctx *phase1Ctx) bool {
 		}
 	}
 	if blocked {
+		e.noteGateHold(pctx.item, gateReview, "waiting for reviewers to respond", nil)
 		// Record CooldownAt["review-blocked"] so itemMayNeedWork's expiry path
 		// re-evaluates this item every 10 × PollSeconds even when nothing bumps
 		// updatedAt. This lets Phase 1/Phase 2 review-reprompt timers fire on a
@@ -366,6 +367,9 @@ func (e *Engine) handleReviewGate(pctx *phase1Ctx) bool {
 		e.pauseForReviewTimeout(pctx.board, pctx.item, pctx.stage)
 		return true
 	}
+	// The review gate is not holding the item any more: end the recorded hold so
+	// status does not keep naming it until the lapse (#2121).
+	e.noteGateClear(pctx.item, gateReview)
 	return false
 }
 
@@ -481,6 +485,10 @@ func (e *Engine) handleAutoMergeConvergence(pctx *phase1Ctx) bool {
 	return true
 }
 
+// mergeUnsettledCooldownReason is the CooldownAt key recorded when the merge
+// gate claims an item on transient merge state (#2096).
+const mergeUnsettledCooldownReason = "merge-unsettled"
+
 // handleMergeAndCIGates runs the merge-conflict gate followed by the CI gate,
 // sharing a single settlePRMergeState call. Merge runs before CI per ADR-028:
 // a PR made unmergeable by a base-branch advance must be rebased before the
@@ -541,8 +549,23 @@ func (e *Engine) handleMergeAndCIGates(pctx *phase1Ctx) bool {
 		// every poll with zero trace in the logs. checkCIGate is never
 		// reached while this is true.
 		e.logf(pctx.item.Number, "ci-gate", "claiming item — merge gate blocked, checkCIGate not reached (%s)\n", settle.Reason)
+		e.noteGateHold(pctx.item, gateMerge, settle.Reason, nil)
+		// #2096: reached only for PRMergeUnsettled/PRMergeQueued (a conflict is the
+		// mergeConflict branch above). The claim sets no awaiting-ci label, and CI
+		// completion moves neither a label nor the issue's updatedAt, so without a
+		// short cooldown the only thing that re-admits the item is the periodic
+		// re-evaluation, 10 × PollSeconds away (#1943). Expiry admits the item once
+		// on the next poll and is then consumed (ExpiredCooldownsConsumed).
+		e.store.Apply(itemstate.CooldownRecorded{
+			Repo:   itemOwnerRepoString(pctx.item, e.defaultRepo()),
+			Number: pctx.item.Number,
+			Reason: mergeUnsettledCooldownReason,
+			Until:  e.now().Add(e.mergeGateRecheckInterval()),
+		})
 		return true // mergeability not yet computed; re-evaluate on next poll
 	}
+	// Mergeability has settled: the merge gate no longer holds the item (#2121).
+	e.noteGateClear(pctx.item, gateMerge)
 
 	// CI gate: evaluate CI status for stages configured with wait_for_ci: true.
 	// Runs in Phase 1 (unconditional) so CI failures are fixed regardless of
@@ -605,8 +628,11 @@ func (e *Engine) handleMergeAndCIGates(pctx *phase1Ctx) bool {
 		)
 	}
 	if ciBlocked {
+		e.noteGateHold(pctx.item, gateCI, "waiting for CI checks", nil)
 		return true // CI still pending; re-evaluate on next poll
 	}
+	// CI is no longer pending: end the recorded hold (#2121).
+	e.noteGateClear(pctx.item, gateCI)
 
 	return false
 }

@@ -5,8 +5,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 // WorktreeManager handles git worktrees for issue isolation.
@@ -16,6 +18,9 @@ type WorktreeManager struct {
 	rootDir  string                            // where worktrees are stored (e.g., .fabrik/worktrees)
 	repoName string                            // repo name used to namespace worktree paths (e.g., "widgets"); empty = legacy flat layout
 	logfFn   func(int, string, string, ...any) // optional; set by Engine after construction
+
+	pureRebaseDisabled    atomic.Bool // test seam: neutralises PrepareCatchUp's pure-rebase tolerance (#2150)
+	restoreRebaseDisabled atomic.Bool // test seam: neutralises RestoreUnpushedRebase (#2150)
 }
 
 // logf calls logfFn if set, otherwise prints directly.
@@ -463,6 +468,28 @@ func (wm *WorktreeManager) adoptRemoteIssueBranch(branch string, issueNumber int
 	}
 	wm.logf(issueNumber, "worktree", "%s already exists on origin — starting the local branch from it\n", branch)
 	return remoteRef, true
+}
+
+// CommitsAheadOfRef returns the literal number of commits on the issue
+// worktree's HEAD that are not in origin/<baseBranch> (git rev-list --count).
+// Unlike commitsAheadOfBase it does not discount spec-only commits: the #2089
+// push guard refuses a push, so it must be conservative. Any git or parse error
+// is returned, never folded into zero — callers treat an error as "unknown".
+// Takes mu so the read cannot interleave with a rebase in EnsureWorktree.
+func (wm *WorktreeManager) CommitsAheadOfRef(issueNumber int, baseBranch string) (int, error) {
+	wm.mu.Lock()
+	defer wm.mu.Unlock()
+	cmd := exec.Command("git", "rev-list", "--count", "origin/"+baseBranch+"..HEAD")
+	cmd.Dir = wm.worktreeDir(issueNumber)
+	out, err := cmd.Output()
+	if err != nil {
+		return 0, fmt.Errorf("counting commits ahead of origin/%s: %w", baseBranch, err)
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return 0, fmt.Errorf("parsing commit count %q: %w", strings.TrimSpace(string(out)), err)
+	}
+	return n, nil
 }
 
 // PushBranch pushes the issue's worktree branch to origin.

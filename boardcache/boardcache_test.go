@@ -29,6 +29,10 @@ type mockClient struct {
 	fetchPRsForSHACount        int
 	fetchProjectItemCount      int
 
+	// fetchProjectBoardHook, when set, runs inside FetchProjectBoard (after the
+	// call is accepted, before it returns) to simulate a write during the fetch.
+	fetchProjectBoardHook func()
+
 	itemDetailsResult  *gh.ProjectItem
 	checkRunsResult    []gh.CheckRun
 	checkRunsErr       error // returned by FetchCheckRuns when non-nil
@@ -47,6 +51,9 @@ type mockClient struct {
 }
 
 func (m *mockClient) FetchProjectBoard(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+	if m.fetchProjectBoardHook != nil {
+		m.fetchProjectBoardHook()
+	}
 	if m.projectBoardErr != nil {
 		return nil, m.projectBoardErr
 	}
@@ -548,7 +555,7 @@ func TestIsItemCacheFreshAgreesWithFetch(t *testing.T) {
 	}}})
 
 	// Pre-deep-fetch: never deep-fetched → not fresh.
-	if c.IsItemCacheFresh("owner/repo", 5, t0) {
+	if c.IsItemCacheFresh("owner/repo", 5, Evidence{Overall: t0}) {
 		t.Error("pre-fetch: want stale, got fresh")
 	}
 
@@ -559,15 +566,15 @@ func TestIsItemCacheFreshAgreesWithFetch(t *testing.T) {
 	}
 
 	// Same UpdatedAt → fresh.
-	if !c.IsItemCacheFresh("owner/repo", 5, t0) {
+	if !c.IsItemCacheFresh("owner/repo", 5, Evidence{Overall: t0}) {
 		t.Error("post-fetch same updatedAt: want fresh, got stale")
 	}
 	// Bumped UpdatedAt → stale.
-	if c.IsItemCacheFresh("owner/repo", 5, t1) {
+	if c.IsItemCacheFresh("owner/repo", 5, Evidence{Overall: t1}) {
 		t.Error("post-fetch bumped updatedAt: want stale, got fresh")
 	}
 	// Zero source updatedAt → fresh (no signal to invalidate).
-	if !c.IsItemCacheFresh("owner/repo", 5, time.Time{}) {
+	if !c.IsItemCacheFresh("owner/repo", 5, Evidence{}) {
 		t.Error("zero source updatedAt: want fresh (no signal), got stale")
 	}
 }
@@ -589,7 +596,8 @@ func TestCacheIsStale(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := cacheIsStale(tc.source, tc.lastSeen); got != tc.wantStale {
+			s := itemstate.ItemState{LastSeenSourceUpdatedAt: tc.lastSeen}
+			if got := cacheIsStale(Evidence{Overall: tc.source}, s); got != tc.wantStale {
 				t.Errorf("cacheIsStale(%v, %v) = %v, want %v", tc.source, tc.lastSeen, got, tc.wantStale)
 			}
 		})
@@ -1037,44 +1045,11 @@ func TestFetchCheckRuns_StaleCachedFailure_RefetchesLive(t *testing.T) {
 	}
 }
 
-// TestFetchCheckRuns_CachedPending_ServedFromCache verifies the stale-cache
-// guard is specific to a FAILED classification — a cached WAIT (pending)
-// classification is still served from cache without a live refetch. #1303:
-// this is deliberately unchanged — the stale-Pending hazard this documents is
-// closed for the one caller where it caused an unbounded stall
-// (settleAwaitingCIScan, via RefreshCheckRunsLive) rather than by inverting
-// this general cache-trust contract for all ~35 FetchCheckRuns/
-// settlePRMergeState call sites.
-func TestFetchCheckRuns_CachedPending_ServedFromCache(t *testing.T) {
-	store := itemstate.NewStore(nil)
-	store.Apply(itemstate.CheckRunCompleted{
-		Repo: "owner/repo",
-		SHA:  "sha_pending",
-		Run:  gh.CheckRun{ID: 1, Name: "build", Status: "in_progress"},
-	})
-
-	mc := &mockClient{}
-	c := NewCacheImpl(mc, store, nopLog)
-
-	runs, err := c.FetchCheckRuns("owner", "repo", "sha_pending")
-	if err != nil {
-		t.Fatalf("FetchCheckRuns: %v", err)
-	}
-	if mc.fetchCheckRunsCount != 0 {
-		t.Errorf("expected cached pending classification served without live refetch, got %d calls", mc.fetchCheckRunsCount)
-	}
-	if len(runs) != 1 {
-		t.Errorf("expected 1 cached run, got %+v", runs)
-	}
-}
-
-// TestRefreshCheckRunsLive_BypassesCacheAndPopulatesStore is a regression test
-// for #1303: RefreshCheckRunsLive must unconditionally consult GitHub — even
-// when the store already holds a fully-populated (but stale) PENDING
-// classification for the sha — and must leave the store primed with the fresh
-// result so a subsequent FetchCheckRuns call for the same sha is served from
-// this fresh data rather than the stale one.
-func TestRefreshCheckRunsLive_BypassesCacheAndPopulatesStore(t *testing.T) {
+// TestFetchCheckRuns_CachedPending_ConfirmedLive pins #2180 (superseding the
+// #1303 per-caller prime): a cached PENDING set is not trusted on its own — a
+// check completion moves no updatedAt and, without a webhook, nothing else
+// supersedes the snapshot. The read goes live and the fresh result is served.
+func TestFetchCheckRuns_CachedPending_ConfirmedLive(t *testing.T) {
 	store := itemstate.NewStore(nil)
 	store.Apply(itemstate.CheckRunCompleted{
 		Repo: "owner/repo",
@@ -1083,45 +1058,45 @@ func TestRefreshCheckRunsLive_BypassesCacheAndPopulatesStore(t *testing.T) {
 	})
 
 	mc := &mockClient{checkRunsResult: []gh.CheckRun{
-		{ID: 1, Name: "build", Status: "completed", Conclusion: "failure"},
+		{ID: 1, Name: "build", Status: "completed", Conclusion: "success"},
 	}}
 	c := NewCacheImpl(mc, store, nopLog)
 
-	if err := c.RefreshCheckRunsLive("owner", "repo", "sha_pending"); err != nil {
-		t.Fatalf("RefreshCheckRunsLive: %v", err)
-	}
-	if mc.fetchCheckRunsCount != 1 {
-		t.Errorf("expected RefreshCheckRunsLive to bypass the cache unconditionally, got %d GitHub calls", mc.fetchCheckRunsCount)
-	}
-
-	// A subsequent FetchCheckRuns call must now be served the fresh (Failed)
-	// classification from the store, not the stale Pending one — proving the
-	// live result was actually applied, not just fetched and discarded.
 	runs, err := c.FetchCheckRuns("owner", "repo", "sha_pending")
 	if err != nil {
-		t.Fatalf("FetchCheckRuns after refresh: %v", err)
+		t.Fatalf("FetchCheckRuns: %v", err)
 	}
-	if status, _, _ := gh.ClassifyCheckRuns(runs); status != gh.CheckRunsFailed {
-		t.Errorf("expected store to reflect the live Failed classification after RefreshCheckRunsLive, got status=%v runs=%+v", status, runs)
+	if mc.fetchCheckRunsCount != 1 {
+		t.Fatalf("a cached PENDING set must be confirmed live, got %d GitHub calls", mc.fetchCheckRunsCount)
 	}
-	// FetchCheckRuns' own FAILED guard forces one more live call to confirm —
-	// that's its existing, unrelated #958-leg-3 behavior, not double-counting
-	// RefreshCheckRunsLive's own call.
-	if mc.fetchCheckRunsCount != 2 {
-		t.Errorf("expected exactly 1 additional GitHub call from FetchCheckRuns' own FAILED-reconfirm guard, got %d total calls", mc.fetchCheckRunsCount)
+	if status, _, _ := gh.ClassifyCheckRuns(runs); status != gh.CheckRunsReady {
+		t.Errorf("expected the live (completed) run set, got status=%v runs=%+v", status, runs)
+	}
+	// The completed set is now READY in the store: served without another call.
+	if _, err := c.FetchCheckRuns("owner", "repo", "sha_pending"); err != nil {
+		t.Fatalf("second FetchCheckRuns: %v", err)
+	}
+	if mc.fetchCheckRunsCount != 1 {
+		t.Errorf("a cached READY set must be served from cache, got %d calls", mc.fetchCheckRunsCount)
 	}
 }
 
-// TestRefreshCheckRunsLive_ErrorPropagates verifies a GitHub fetch failure is
-// returned to the caller (settleAwaitingCIScan treats this as non-fatal and
-// falls through to FetchCheckRuns' own cache-trust decision) rather than
-// silently swallowed.
-func TestRefreshCheckRunsLive_ErrorPropagates(t *testing.T) {
-	mc := &mockClient{checkRunsErr: fmt.Errorf("boom")}
+// TestFetchCheckRuns_PendingConfirmedRecently_NotRefetched pins the cost bound:
+// a PENDING set that was live-confirmed moments ago is served, so several
+// readers in one poll cost one REST call.
+func TestFetchCheckRuns_PendingConfirmedRecently_NotRefetched(t *testing.T) {
+	mc := &mockClient{checkRunsResult: []gh.CheckRun{
+		{ID: 1, Name: "build", Status: "in_progress"},
+	}}
 	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
 
-	if err := c.RefreshCheckRunsLive("owner", "repo", "sha_err"); err == nil {
-		t.Fatal("expected RefreshCheckRunsLive to propagate the fallback error")
+	for i := 0; i < 4; i++ {
+		if _, err := c.FetchCheckRuns("owner", "repo", "sha_pending"); err != nil {
+			t.Fatalf("FetchCheckRuns #%d: %v", i, err)
+		}
+	}
+	if mc.fetchCheckRunsCount != 1 {
+		t.Errorf("repeated reads of a recently confirmed PENDING head cost %d GitHub calls, want 1", mc.fetchCheckRunsCount)
 	}
 }
 
@@ -2923,5 +2898,48 @@ func TestFetchLinkedPR_StaleRecordForcesRefetch(t *testing.T) {
 	}
 	if pr2 == nil || pr2.HeadSHA != "rebased_sha" {
 		t.Fatalf("want fresh HeadSHA=rebased_sha after TTL expiry, got %v", pr2)
+	}
+}
+
+// TestBootstrapFromProbe_LabelsNotKnown is the producer drift guard for #2123:
+// the probe carries no labels, so the bootstrap must leave them unknown. If it
+// stopped marking its items LabelsAbsent, the first deep fetch or reconcile would
+// diff against an empty label list and flood subscribers with false label events.
+func TestBootstrapFromProbe_LabelsNotKnown(t *testing.T) {
+	store := itemstate.NewStore(nil)
+	c := NewCacheImpl(&mockClient{}, store, nopLog)
+	c.BootstrapFromProbe([]gh.BoardProbeItem{{ContentID: "I_1", Number: 1, Repo: "owner/repo", Status: "Research"}}, "PID")
+	if s := testGetState(t, c, "owner/repo", 1); s.LabelsKnown {
+		t.Fatal("probe-bootstrapped item must not have known labels")
+	}
+	var deltas int
+	store.Subscribe(itemstate.ObserverFunc(func(ch itemstate.Change, _ itemstate.Snapshot) { deltas += len(ch.LabelDeltas) }))
+	c.Reconcile(&gh.ProjectBoard{Items: []gh.ProjectItem{{ID: "I_1", Number: 1, Repo: "owner/repo", Status: "Research", Labels: []string{"stage:Specify:complete", "fabrik:cruise"}}}})
+	if deltas != 0 {
+		t.Fatalf("first reconcile of a probe-seeded item emitted %d label deltas, want 0", deltas)
+	}
+	if s := testGetState(t, c, "owner/repo", 1); !s.LabelsKnown || len(s.Labels) != 2 {
+		t.Fatalf("reconcile did not populate labels: %+v", s.Labels)
+	}
+}
+
+// TestDeltaIssueClosedCarriesSenderButNoEcho covers the close attribution plumbing.
+func TestDeltaIssueClosedCarriesSenderButNoEcho(t *testing.T) {
+	store := itemstate.NewStore(nil)
+	c := NewCacheImpl(&mockClient{}, store, nopLog)
+	c.BootstrapFromProbe([]gh.BoardProbeItem{{ContentID: "I_1", Number: 1, Repo: "owner/repo", Status: "Research"}}, "PID")
+	var got itemstate.Change
+	store.Subscribe(itemstate.ObserverFunc(func(ch itemstate.Change, _ itemstate.Snapshot) {
+		if ch.Closed {
+			got = ch
+		}
+	}))
+	// Even a matcher that claims every close is ours must not mark the change as
+	// an engine echo: the engine registers no issues/closed echo, so IssueClosed
+	// carries the sender only.
+	c.SetMatchEchoViaFn(func(typ, action, key string) (bool, string) { return typ == "issues" && action == "closed", "" })
+	c.applyIssuesDelta([]byte(`{"action":"closed","sender":{"login":"alice"},"issue":{"number":1},"repository":{"full_name":"owner/repo"}}`))
+	if !got.Closed || got.Sender != "alice" || got.EchoOfEngine {
+		t.Fatalf("closed change = %+v", got)
 	}
 }

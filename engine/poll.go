@@ -21,6 +21,7 @@ import (
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
 	"github.com/handarbeit/fabrik/tui"
+	"github.com/handarbeit/fabrik/warnings"
 )
 
 const idleUpgradeThreshold = 2 // consecutive idle polls before checking for upgrades
@@ -152,6 +153,32 @@ func logCIWaitTimeoutSemantics(w io.Writer) {
 		"FABRIK_CI_BACKSTOP_TIMEOUT for the new absolute per-poll-cost cap. See docs/USER_GUIDE.md and ADR-1410.\n")
 }
 
+// logFileConditions builds the "log_file" panel conditions (#2135) from the
+// outcome of startup's log rotation and log-file open: an empty result means
+// both worked, which Reconcile turns into clearing any earlier entry.
+func logFileConditions(logPath string, rotateWarnings []string, openErr error) []warnings.Condition {
+	var conds []warnings.Condition
+	if len(rotateWarnings) > 0 {
+		conds = append(conds, warnings.Condition{
+			Subject: "rotation",
+			Title:   "Log rotation failed",
+			Detail: "Fabrik could not rotate fabrik.log at startup:\n" + strings.Join(rotateWarnings, "\n") +
+				"\n\nFix: check permissions and free space in .fabrik/.",
+			LogLine: "log rotation: " + strings.Join(rotateWarnings, "; "),
+		})
+	}
+	if openErr != nil {
+		conds = append(conds, warnings.Condition{
+			Subject: "open",
+			Title:   "Could not open the Fabrik log file",
+			Detail: fmt.Sprintf("Could not open %s: %v\nThe persistent poll log will not be written this run.\n\n"+
+				"Fix: check permissions and free space in .fabrik/.", logPath, openErr),
+			LogLine: fmt.Sprintf("could not open log file %s: %v", logPath, openErr),
+		})
+	}
+	return conds
+}
+
 // warnCIBackstopTimeoutOrdering is the testable core of the ADR-1410/R5
 // startup check: CIBackstopTimeout (settleAwaitingCIScan's unconditional
 // backstop) is only "much larger than" the liveness dwell by convention — no
@@ -165,15 +192,24 @@ func logCIWaitTimeoutSemantics(w io.Writer) {
 // suboptimal ordering (both timeouts remain valid, positive durations) should
 // not prevent the daemon from starting.
 func warnCIBackstopTimeoutOrdering(ciWaitTimeout, ciBackstopTimeout time.Duration, w io.Writer) {
+	const key = "timeout_ordering:ci_backstop"
 	if ciBackstopTimeout > ciWaitTimeout {
+		_ = warnings.Resolve(key)
 		return
 	}
-	fmt.Fprintf(w, "[startup] warning: CIBackstopTimeout (%s) is not greater than CIWaitTimeout (%s) — the "+
+	detail := fmt.Sprintf("CIBackstopTimeout (%s) is not greater than CIWaitTimeout (%s) — the "+
 		"unconditional per-poll-cost backstop (settleAwaitingCIScan) will fire before the CI-gate liveness dwell "+
 		"(classifyCIFromCheckRuns) ever gets a chance to distinguish a stalled CI run from one that is actively "+
-		"progressing, reintroducing the spurious-pause behavior ADR-1410 fixed. Set --ci-backstop-timeout/"+
-		"FABRIK_CI_BACKSTOP_TIMEOUT well above --ci-wait-timeout/FABRIK_CI_WAIT_TIMEOUT. See docs/USER_GUIDE.md "+
-		"and ADR-1410.\n", ciBackstopTimeout, ciWaitTimeout)
+		"progressing, reintroducing the spurious-pause behavior ADR-1410 fixed.\n\n"+
+		"Fix: set --ci-backstop-timeout/FABRIK_CI_BACKSTOP_TIMEOUT well above --ci-wait-timeout/"+
+		"FABRIK_CI_WAIT_TIMEOUT (see docs/USER_GUIDE.md and ADR-1410).", ciBackstopTimeout, ciWaitTimeout)
+	_ = warnings.Report(w, warnings.Condition{
+		Type:    "timeout_ordering",
+		Subject: "ci_backstop",
+		Title:   "CIBackstopTimeout is not greater than CIWaitTimeout",
+		Detail:  detail,
+		LogLine: strings.ReplaceAll(detail, "\n\n", " "),
+	})
 }
 
 // warnDrainDeadlineOrdering is the ADR-1393/R4 startup check: the drain
@@ -186,15 +222,25 @@ func warnCIBackstopTimeoutOrdering(ciWaitTimeout, ciBackstopTimeout time.Duratio
 // both values remain valid, positive durations and only their relative
 // ordering is suboptimal.
 func warnDrainDeadlineOrdering(drainDeadline, sigIntGrace, sigTermGrace time.Duration, w io.Writer) {
+	const key = "timeout_ordering:drain_deadline"
 	killEscalation := sigIntGrace + sigTermGrace
 	if drainDeadline > killEscalation {
+		_ = warnings.Resolve(key)
 		return
 	}
-	fmt.Fprintf(w, "[startup] warning: DrainDeadline (%s) is not greater than the kill escalation window "+
+	detail := fmt.Sprintf("DrainDeadline (%s) is not greater than the kill escalation window "+
 		"KillGraceSigInt+KillGraceSigTerm (%s) — a clean stop's bounded wait (waitGroupTimeout) will fire before "+
 		"killProcGroupGraceful's SIGINT->SIGTERM->SIGKILL escalation has a chance to let a worker exit on its own, "+
-		"preempting the escalation and defeating its purpose. Set --drain-deadline/FABRIK_DRAIN_DEADLINE well above "+
-		"--kill-grace-sigint + --kill-grace-sigterm. See docs/USER_GUIDE.md and ADR-1393.\n", drainDeadline, killEscalation)
+		"preempting the escalation and defeating its purpose.\n\n"+
+		"Fix: set --drain-deadline/FABRIK_DRAIN_DEADLINE well above --kill-grace-sigint + --kill-grace-sigterm "+
+		"(see docs/USER_GUIDE.md and ADR-1393).", drainDeadline, killEscalation)
+	_ = warnings.Report(w, warnings.Condition{
+		Type:    "timeout_ordering",
+		Subject: "drain_deadline",
+		Title:   "DrainDeadline is not greater than the kill escalation window",
+		Detail:  detail,
+		LogLine: strings.ReplaceAll(detail, "\n\n", " "),
+	})
 }
 
 // drainDeadline returns the configured bound on a clean stop's worker drain,
@@ -209,31 +255,37 @@ func (e *Engine) drainDeadline() time.Duration {
 }
 
 func (e *Engine) Run() error {
-	// Acquire an exclusive file lock to prevent multiple Fabrik instances from
-	// processing the same project board concurrently. The lock file lives in
-	// .fabrik/ so it's scoped to the project. syscall.Flock is advisory but
-	// sufficient — it's automatically released on process exit or crash.
-	lockPath := filepath.Join(e.fabrikDir, ".fabrik", "fabrik.lock")
-	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
+	// Acquire the instance locks (#2097, ADR 2097) before anything else touches
+	// disk: refuse to run inside an issue worktree, take the per-directory flock
+	// (.fabrik/fabrik.lock) and then the board-scoped host flock, so two engines
+	// can neither share a directory nor serve one board from different
+	// directories. Taken before log rotation so a refused loser never rotates the
+	// winner's log. flocks are advisory but sufficient — released on process exit
+	// or crash.
+	locks, err := acquireInstanceLocks(e.cfg, e.fabrikDir)
 	if err != nil {
-		return fmt.Errorf("could not open lock file %s: %w", lockPath, err)
+		return err
 	}
-	defer lockFile.Close()
-	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		return fmt.Errorf("another Fabrik instance is already running for this project (lock file: %s)", lockPath)
-	}
-	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
-	// Write our PID for diagnostics (not used for locking — flock handles that).
-	lockFile.Truncate(0)
-	lockFile.Seek(0, 0)
-	fmt.Fprintf(lockFile, "%d\n", os.Getpid())
+	defer locks.Release()
+	// Tolerated (inconclusive) verification failures go to the engine log.
+	locks.warnf = func(format string, args ...any) { e.logf(0, "warn", format+"\n", args...) }
 
-	// Open the persistent poll log file. Truncated on each startup so the file
-	// always reflects the current run only. Non-fatal if the open fails.
+	// Open the persistent poll log file (#2094). The previous run's log is
+	// rotated to fabrik.log.1 … fabrik.log.N first, so the file always holds
+	// only the current run (the live gate depends on that) while earlier runs
+	// stay available. Rotation runs here, under the instance lock and before any
+	// logger holds the file. A failed rotation is reported and never blocks
+	// startup; if the log itself could not be moved it is truncated, as before.
+	// Non-fatal if the open fails.
 	logPath := filepath.Join(e.fabrikDir, ".fabrik", "fabrik.log")
-	if lf, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600); err != nil {
-		fmt.Printf("warning: could not open log file %s: %v\n", logPath, err)
-	} else {
+	rotateWarnings, truncateFallback := rotateEngineLog(logPath, engineLogBackups)
+	openFlags := os.O_CREATE | os.O_WRONLY
+	if truncateFallback {
+		openFlags |= os.O_TRUNC
+	}
+	startupW := io.Writer(os.Stderr)
+	lf, openErr := os.OpenFile(logPath, openFlags, 0600)
+	if openErr == nil {
 		e.logFile = lf
 		pollLogFile = lf
 		defer func() {
@@ -241,37 +293,34 @@ func (e *Engine) Run() error {
 			pollLogFile = nil
 			lf.Close()
 		}()
+		// The banner must be the file's first bytes, ahead of the startup warnings.
+		fmt.Fprint(lf, startBanner(e.now(), e.cfg.Version, os.Getpid(), e.cfg.StartReason))
+		startupW = io.MultiWriter(os.Stderr, lf)
+	}
+	// Both log-file checks ran to completion, so Reconcile also clears an
+	// earlier run's entry once the problem is gone (#2135).
+	if err := warnings.Reconcile(startupW, "log_file", logFileConditions(logPath, rotateWarnings, openErr)); err != nil {
+		fmt.Fprintf(startupW, "[startup] warning: recording log_file warnings: %v\n", err)
 	}
 
 	// Emit stage-config drift warnings, and the FR-7 undeclared-expected_reviewers
 	// notice, to both stderr (visible at startup) and fabrik.log (durable for
 	// post-mortems). Without the log copy, recurrences of "same drift bit us
-	// again" are invisible from the persistent log alone.
+	// again" are invisible from the persistent log alone. startupW is the single
+	// writer for both the log-file-open and log-file-failed cases, so one branch
+	// can never skip a check (or its warnings-panel entry) the other runs.
 	configDir := os.Getenv("CLAUDE_CONFIG_DIR")
-	if e.logFile != nil {
-		w := io.MultiWriter(os.Stderr, e.logFile)
-		stages.WarnStageDrift(e.cfg.Stages, e.cfg.Version, w)
-		stages.WarnUndeclaredReviewers(e.cfg.Stages, w)
-		stages.SweepStaleWarnings(e.cfg.Stages, w)
-		logClaudeConfigDir(configDir, w)
-		logAnthropicAPIKeyOptIn(claudeAnthropicAPIKey != "", w)
-		logAnthropicEnvPassthrough(claudeAnthropicEnvPassthrough, w)
-		logWorkerEnvOptIn(claudeWorkerEnv, w)
-		logCIWaitTimeoutSemantics(w)
-		warnCIBackstopTimeoutOrdering(e.ciWaitTimeout(), e.ciBackstopTimeout(), w)
-		warnDrainDeadlineOrdering(e.drainDeadline(), claudeKillGraceSigInt, claudeKillGraceSigTerm, w)
-	} else {
-		stages.WarnStageDrift(e.cfg.Stages, e.cfg.Version, os.Stderr)
-		stages.WarnUndeclaredReviewers(e.cfg.Stages, os.Stderr)
-		stages.SweepStaleWarnings(e.cfg.Stages, os.Stderr)
-		logClaudeConfigDir(configDir, os.Stderr)
-		logAnthropicAPIKeyOptIn(claudeAnthropicAPIKey != "", os.Stderr)
-		logAnthropicEnvPassthrough(claudeAnthropicEnvPassthrough, os.Stderr)
-		logWorkerEnvOptIn(claudeWorkerEnv, os.Stderr)
-		logCIWaitTimeoutSemantics(os.Stderr)
-		warnCIBackstopTimeoutOrdering(e.ciWaitTimeout(), e.ciBackstopTimeout(), os.Stderr)
-		warnDrainDeadlineOrdering(e.drainDeadline(), claudeKillGraceSigInt, claudeKillGraceSigTerm, os.Stderr)
-	}
+	stages.WarnStageDrift(e.cfg.Stages, e.cfg.Version, startupW)
+	stages.WarnUndeclaredReviewers(e.cfg.Stages, startupW)
+	stages.SweepStaleWarnings(e.cfg.Stages, startupW)
+	e.reportStageSkills(e.cfg.Stages, startupW)
+	logClaudeConfigDir(configDir, startupW)
+	logAnthropicAPIKeyOptIn(claudeAnthropicAPIKey != "", startupW)
+	logAnthropicEnvPassthrough(claudeAnthropicEnvPassthrough, startupW)
+	logWorkerEnvOptIn(claudeWorkerEnv, startupW)
+	logCIWaitTimeoutSemantics(startupW)
+	warnCIBackstopTimeoutOrdering(e.ciWaitTimeout(), e.ciBackstopTimeout(), startupW)
+	warnDrainDeadlineOrdering(e.drainDeadline(), claudeKillGraceSigInt, claudeKillGraceSigTerm, startupW)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -501,6 +550,7 @@ func (e *Engine) Run() error {
 		if cacheImpl != nil {
 			cacheImpl.SetMatchEchoFn(wm.MatchEcho)
 			cacheImpl.SetMatchEchoReportedFn(wm.MatchEchoReported)
+			cacheImpl.SetMatchEchoViaFn(wm.MatchEchoVia)
 		}
 		// Bootstrap the cache before accepting webhook events so no delta is
 		// dropped into an empty cache during the startup window.
@@ -627,6 +677,9 @@ func (e *Engine) Run() error {
 	if cacheImpl != nil {
 		go e.reconcileLoop(ctx, cacheImpl, e.webhookMgr)
 	}
+	if e.events != nil {
+		go e.runWorkerSlotsPublisher(ctx, workerSlotsSampleInterval) // #2115: display-only slot readout
+	}
 
 	// Local read API (#1967): bound after the instance lock is held (so a
 	// leftover socket is provably stale) and after e.webhookMgr is final, and
@@ -666,6 +719,19 @@ func (e *Engine) Run() error {
 	// it set, every automatic trigger (startup, ticker, wake) funnels through the
 	// seam's hold gate here, so no select shape needs restructuring.
 	doPollCycle := func() error {
+		// Per-poll lock verification (#2097 R3). Deliberately here and not in
+		// poll()/PollOnce: the sim seam skips the lock preamble (ADR-1449).
+		if e.lockLost.Load() {
+			return errInstanceLockLost // already reported; a racing wake must not re-report
+		}
+		if err := locks.Verify(); err != nil {
+			msg := fmt.Sprintf("%s (%v)", lockLostMessage, err)
+			fmt.Fprintf(os.Stderr, "\nFATAL: %s\n", msg)
+			e.logf(0, "fatal", "%s\n", msg)
+			e.lockLost.Store(true)
+			cancel()
+			return errInstanceLockLost
+		}
 		if e.pollSeam != nil {
 			return e.pollSeam.ordinary(pollCycle)
 		}
@@ -688,6 +754,9 @@ func (e *Engine) Run() error {
 
 	// Run immediately on start, then on tick
 	firstPollErr := doPollCycle()
+	if e.lockLost.Load() {
+		return e.drainAndExit(locks, restartDone)
+	}
 	if firstPollErr != nil && ctx.Err() == nil {
 		e.logf(0, "warn", "poll error: %v\n", firstPollErr)
 	}
@@ -737,10 +806,10 @@ func (e *Engine) Run() error {
 		if e.wakeCh != nil {
 			select {
 			case <-ctx.Done():
-				return e.drainAndExit(lockFile, restartDone)
+				return e.drainAndExit(locks, restartDone)
 			case <-ticker.C:
 				if ctx.Err() != nil {
-					return e.drainAndExit(lockFile, restartDone)
+					return e.drainAndExit(locks, restartDone)
 				}
 				if err := doPollCycle(); err != nil {
 					e.logf(0, "warn", "poll error: %v\n", err)
@@ -775,10 +844,10 @@ func (e *Engine) Run() error {
 		} else {
 			select {
 			case <-ctx.Done():
-				return e.drainAndExit(lockFile, restartDone)
+				return e.drainAndExit(locks, restartDone)
 			case <-ticker.C:
 				if ctx.Err() != nil {
-					return e.drainAndExit(lockFile, restartDone)
+					return e.drainAndExit(locks, restartDone)
 				}
 				if err := doPollCycle(); err != nil {
 					e.logf(0, "warn", "poll error: %v\n", err)
@@ -808,8 +877,27 @@ func (e *Engine) cleanupLockedIssues() {
 	for _, snap := range locked {
 		owner, repo := parseOwnerRepo(snap.Repo())
 		num := snap.Number()
+		// Skip the removal only when the engine itself recorded removing the lock
+		// label and the cache confirms it is gone (#2159): that call would 404.
+		// A cached label set that merely lacks the label is not proof — the board
+		// query truncates labels and a deep-fetch write-back can drop one — so
+		// without the engine's own record the removal is still attempted, and a
+		// 404 below is success.
+		if _, removed := snap.State().EngineWriteAt[itemstate.EngineWriteLabelKey(lockLabel)]; removed && !hasLabel(snap.Labels(), lockLabel) {
+			e.logf(num, "shutdown", "lock label already removed by the engine, nothing to remove\n")
+			e.store.Apply(itemstate.LocalLockReleased{Repo: snap.Repo(), Number: num})
+			continue
+		}
 		if err := e.client.RemoveLabelFromIssue(owner, repo, num, lockLabel); err != nil {
-			e.logf(num, "warn", "could not remove lock label during shutdown: %v\n", err)
+			if errors.Is(err, gh.ErrNotFound) {
+				// Already removed on GitHub: success, like applyLabelRemove.
+				e.logf(num, "shutdown", "lock label already absent on GitHub\n")
+				if c := e.cache(); c != nil {
+					c.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, num), lockLabel)
+				}
+			} else {
+				e.logf(num, "warn", "could not remove lock label during shutdown: %v\n", err)
+			}
 		} else {
 			e.logf(num, "shutdown", "removed lock label\n")
 			if c := e.cache(); c != nil {
@@ -862,6 +950,7 @@ var transientLifecycleLabels = []string{
 	"fabrik:claude-limit",
 	"fabrik:clear-claude-limit",
 	"fabrik:api-key-helper-detected",
+	"fabrik:skill-unresolved",
 	"fabrik:tools-denied",
 	"fabrik:toolchain-stale",
 }
@@ -1162,23 +1251,29 @@ func (e *Engine) PollWithBackoff(ctx context.Context, configuredInterval time.Du
 				restStats.Remaining, restStats.Limit, restStats.Reset.Format(time.RFC3339))
 			e.emitStructural(tui.RateLimitAlertEvent{Bucket: tui.RateLimitBucketREST, Exhausted: true, Reset: restStats.Reset})
 			e.backoffRestPaused = true
-			e.health.setRestPaused(true)
 		}
-		return PollBackoffResult{NextInterval: restStats.Reset.Sub(e.now()) + rateLimitResetBuffer}, nil
+		// Refreshed on every attempt (not only on a transition), so the as-of
+		// time means "last refreshed by a poll" (#2124).
+		e.health.setRestPaused(true, e.now())
+		restWait := restStats.Reset.Sub(e.now()) + rateLimitResetBuffer
+		e.health.setNextPollDue(e.now().Add(restWait), backoffReasonREST)
+		e.health.setPollPeriod(restWait, backoffReasonREST)
+		return PollBackoffResult{NextInterval: restWait}, nil
 	}
 	if e.backoffRestPaused {
 		e.logf(0, "info", "REST rate limit reset (%d/%d remaining) — resuming work\n",
 			restStats.Remaining, restStats.Limit)
 		e.emitStructural(tui.RateLimitAlertEvent{Bucket: tui.RateLimitBucketREST, Exhausted: false})
 		e.backoffRestPaused = false
-		e.health.setRestPaused(false)
 	}
+	e.health.setRestPaused(false, e.now())
 
 	result, err := e.poll(ctx)
 	if err != nil {
 		return PollBackoffResult{}, err
 	}
 	e.health.notePollSuccess(e.now())
+	e.boardPopulated.Store(true)
 
 	// Update idle timer.
 	if result.Active {
@@ -1220,7 +1315,7 @@ func (e *Engine) PollWithBackoff(ctx context.Context, configuredInterval time.Du
 			e.backoffRateLimitRatio = 1.0
 		}
 		e.backoffLastRemaining = graphqlStats.Remaining
-		e.health.setGraphQLBackoff(e.backoffRateLimitLow, e.backoffRateLimitRatio, graphqlStats.Remaining)
+		e.health.setGraphQLBackoff(e.backoffRateLimitLow, e.backoffRateLimitRatio, graphqlStats.Remaining, e.now())
 	}
 
 	// Compute and apply effective interval.
@@ -1259,6 +1354,17 @@ func (e *Engine) PollWithBackoff(ctx context.Context, configuredInterval time.Du
 		GraphQLStats:      tui.RateLimitStats{Limit: graphqlStats.Limit, Remaining: graphqlStats.Remaining, Reset: graphqlStats.Reset},
 		EffectiveInterval: effectiveInterval,
 	})
+	// Publish the engine's own next-poll-due time (#2124): the overdue verdict
+	// measures "no poll started" from it, so deliberate back-off is not a stall.
+	backoffReason := ""
+	switch {
+	case e.backoffRateLimitLow:
+		backoffReason = backoffReasonGraphQL
+	case effectiveInterval > configuredInterval:
+		backoffReason = backoffReasonIdle
+	}
+	e.health.setNextPollDue(e.now().Add(effectiveInterval), backoffReason)
+	e.health.setPollPeriod(effectiveInterval, backoffReason)
 	return PollBackoffResult{NextInterval: effectiveInterval, Ran: true}, nil
 }
 
@@ -1286,6 +1392,7 @@ func (e *Engine) PollOnce(ctx context.Context) error {
 	_, err := e.poll(ctx)
 	if err == nil {
 		e.health.notePollSuccess(e.now())
+		e.boardPopulated.Store(true)
 	}
 	return err
 }
@@ -1316,7 +1423,30 @@ func (e *Engine) HasInFlightWorker() bool {
 	return e.store.HasInFlightWorker()
 }
 
+// poll runs one poll cycle and records its lifecycle in the health mirror
+// (#2124): start, the step it is in, and — in a defer, so an error or early
+// return cannot leave in_progress stuck — completion. Both PollWithBackoff
+// (production) and PollOnce (the sim seam) come through here.
 func (e *Engine) poll(ctx context.Context) (pollResult, error) {
+	start := e.now()
+	e.health.beginPoll(start, e.pollVerdictFor(e.health.snapshot(), start))
+	defer func() {
+		end := e.now()
+		v := e.pollVerdictFor(e.health.snapshot(), end)
+		// An errored poll leaves the Run() ticker at its previous period, so the
+		// next poll is due after that period (a deliberate back-off included),
+		// not after the configured interval.
+		next := e.pollInterval()
+		if p := e.health.pollPeriodSnapshot(); p > next {
+			next = p
+		}
+		e.health.endPoll(end, v, end.Add(next))
+	}()
+	return e.pollCycle(ctx)
+}
+
+func (e *Engine) pollCycle(ctx context.Context) (pollResult, error) {
+	e.setPollStep("polling: refreshing the board cache")
 	e.emitStructural(tui.PollStartedEvent{Owner: e.cfg.Owner, Repo: e.cfg.Repo, Project: e.cfg.ProjectNum})
 	if c := e.cache(); c != nil && c.IsBootstrapped() && !c.IsPaused() {
 		e.logf(0, "poll", "reading project board from cache: %s/%s#%d\n", e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum)
@@ -1324,6 +1454,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		e.logf(0, "poll", "fetching project board from GitHub: %s/%s#%d\n", e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum)
 	}
 
+	e.setPollStep("layer 2 status sweep")
 	// Layer 2 gate: check project.updatedAt before the board read so the cache
 	// holds fresh Status values when poll() processes items this cycle.
 	// Only active when the in-memory cache is bootstrapped (cacheImpl != nil and
@@ -1372,6 +1503,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			// Paused: FetchProjectBoard below falls through to GitHub directly.
 		case c.IsBootstrapped() || c.ProjectID() != "":
 			// Bootstrapped: use probe-driven refresh (avoids full shallow fetch cost).
+			e.setPollStep("probe and deep fetch")
 			e.runProbeAndDeepFetch(c)
 		default:
 			// Virgin: probe bootstrap (~250 nodes vs ~2350 for full shallow fetch).
@@ -1391,6 +1523,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		}
 	}
 
+	e.setPollStep("fetching the project board")
 	board, err := e.readClient.FetchProjectBoard(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum, e.cfg.OwnerType)
 	if err != nil {
 		pollStatusClear()
@@ -1399,6 +1532,9 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 
 	// Fetch status field metadata (for mutations) on first poll
 	e.mu.Lock()
+	if board.ProjectID != "" {
+		e.boardProjectID = board.ProjectID
+	}
 	if e.statusField == nil && board.ProjectID != "" {
 		sf, err := e.readClient.FetchStatusField(board.ProjectID)
 		if err != nil {
@@ -1463,6 +1599,10 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	// e.store inside the classifier would yield the already-overwritten current
 	// value, silently losing the edge. Keyed by issueKey, mirroring advancedItems.
 	priorInQueue := make(map[string]bool)
+	// Items dispatchCandidates deferred because every worker slot was busy (#2114).
+	// Nothing is recorded against them, so the defer below skips their
+	// periodic-re-eval stamp.
+	slotDeferred := make(map[string]bool)
 	defer func() {
 		// Refresh CooldownAt["periodic-re-eval"] for all non-advanced, non-cleanup
 		// deepFetchCandidates after each full poll cycle. This preserves the #488 fix:
@@ -1473,7 +1613,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		cooldown := e.githubRecheckInterval()
 		for _, item := range deepFetchCandidates {
 			iKey := issueKey(item, e.defaultRepo())
-			if advancedItems[iKey] {
+			if advancedItems[iKey] || slotDeferred[iKey] {
 				continue
 			}
 			if stage := stages.FindStage(e.cfg.Stages, item.Status); stage != nil && !stage.CleanupWorktree {
@@ -1571,6 +1711,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		return s
 	}()
 
+	e.setPollStep("selecting deep-fetch candidates")
 	deepFetchCandidates, deepFetched := e.selectDeepFetchCandidates(board, repoFilter, cycleSet, priorInQueue)
 
 	// Catch-up loop: operates only on deepFetchCandidates so the full label set is available.
@@ -1648,6 +1789,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	// Open-item half only (ADR-1387) — sourced from deepFetchCandidates, which
 	// no longer admits closed items at Validate. The closed-item half is the
 	// board-sourced settleClosedValidateAdvance immediately below.
+	e.setPollStep("settle scans")
 	e.runValidatePRTerminalAdvance(board, deepFetchCandidates, advancedItems)
 
 	// Closed-item Validate terminal advance settle scan (ADR-1387): the
@@ -1709,11 +1851,21 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	// incorrectly pass shallow-label items (labels(first:5) only) to itemNeedsWork,
 	// which could miss stage-complete labels beyond position 5 and re-dispatch
 	// already-completed items on every poll after their updatedAt settles.
-	dispatched := e.dispatchCandidates(ctx, board, deepFetchCandidates)
+	e.setPollStep("dispatch")
+	dispatched, slotDeferredKeys := e.dispatchCandidates(ctx, board, deepFetchCandidates)
+	for _, k := range slotDeferredKeys {
+		slotDeferred[k] = true
+	}
+	e.requeueDeferredDispatch(slotDeferredKeys)
 
 	// Merge-train batch snapshot: log all items currently in the Queued column.
 	// Runs every poll cycle when merge_train: on. No dispatch, no mutation — D1 skeleton only.
 	if e.cfg.MergeTrain == "on" {
+		// #2051: evaluate (and, after a restart, adopt) the persisted merge-train runs
+		// BEFORE Queued routing, so a restarted partition is claimed by its own record and
+		// never formed fresh over it.
+		e.setPollStep("merge train")
+		e.settleTrainRuns(ctx, board)
 		e.handleMergeTrainBatch(ctx, board)
 	}
 
@@ -1733,6 +1885,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	// fabrik:awaiting-member-close. Runs unconditionally, independent of merge_train:
 	// on/off, so a marker written while merge_train was enabled keeps draining even if
 	// the setting is later turned off.
+	e.setPollStep("post-dispatch settle scans")
 	e.settleMergeTrainMemberCloses(board)
 
 	// Runaway guard alert settle scan (ADR-1533): retries the outstanding
@@ -1782,17 +1935,32 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	// Claude usage-limit settle scans (#1183): the operator-triggered restart-free
 	// clear runs first so a clear request and the resulting account-wide label sweep
 	// can both land in the same poll cycle. Both run unconditionally every poll,
-	// independent of itemMayNeedWork/itemNeedsWork — the suspension they manage is
+	// independent of itemMayNeedWork/itemNeedsWork — the usage-limit hold they manage is
 	// account-wide, not scoped to any one item's stage or column. Neither uses the
 	// retry/escalate machinery: a clear request is a one-shot idempotent command, and
-	// the label sweep is purely cosmetic (dispatch is gated by claudeSuspendedUntil,
+	// the label sweep is purely cosmetic (dispatch is gated by claudeUsageLimitedUntil,
 	// not the label), so a failed removal simply self-heals on the next poll.
 	e.settleClaudeLimitClearRequests(board)
 	e.settleClaudeLimitLabelSweep(board)
 
+	// Pending-decision anchors (#2120): reads, once per item, the GitHub time of
+	// the label a suspended item's age is anchored on, so the cache-only
+	// attention classifier can report an honest age after a restart. Poll
+	// goroutine only; bounded per poll.
+	e.settleDecisionAnchors(board)
+
+	// Overseer PR facts and CI verdict (#2122): fills, for every managed open
+	// item with a linked PR, what the board probe cannot supply and the CI
+	// verdict for the PR's head, so the cache-only local API never reports
+	// unknown for a PR the engine has already looked at. Poll goroutine only;
+	// bounded per poll; quiet (no wake flag).
+	e.setPollStep("pr-facts")
+	e.settlePRFacts(board)
+
 	// Remove stale fabrik:locked labels from closed issues. This handles the case
 	// where an issue was closed while a stage was in-flight, leaving the lock label
 	// behind. We do this every poll so it also catches locks from prior Fabrik runs.
+	e.setPollStep("cleanup")
 	e.cleanupClosedIssueLocks(board)
 	// Sweep transient lifecycle labels from closed issues every poll cycle (#617).
 	e.cleanupClosedIssueTransientLabels(board)
@@ -1879,6 +2047,23 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	}, nil
 }
 
+// stageAutoAdvances reports whether the engine advances an item by itself once
+// stage completes: a yolo or cruise label, the global yolo, or the stage's own
+// auto_advance:true. The cruise and yolo labels override auto_advance:false on
+// an individual stage; the global yolo alone does not (it respects a per-stage
+// opt-out). It is runCatchUpPhase2's autonomy gate, extracted so the attention
+// classifier (#2120) asks the engine's own question rather than a copy of it.
+func stageAutoAdvances(cfgYolo bool, labels []string, stage *stages.Stage) bool {
+	isAutoAdvance := hasLabel(labels, "fabrik:yolo") || hasLabel(labels, "fabrik:cruise")
+	if !cfgYolo && !isAutoAdvance && !(stage.AutoAdvance != nil && *stage.AutoAdvance) {
+		return false
+	}
+	if !isAutoAdvance && stage.AutoAdvance != nil && !*stage.AutoAdvance {
+		return false
+	}
+	return true
+}
+
 // runCatchUpPhase2 performs the gated stage-advancement step for an item that
 // passed Phase 1 unclaimed: yolo/cruise/auto_advance-gated advancement to the
 // next stage, or (at Validate) yolo-gated auto-merge enablement via
@@ -1903,13 +2088,7 @@ func (e *Engine) runCatchUpPhase2(ctx context.Context, board *gh.ProjectBoard, i
 	e.refreshAutonomyLabels(&item)
 
 	// Gate: yolo (cfg or label), cruise label, or stage-level auto_advance:true.
-	isAutoAdvance := hasYoloLabel(item) || hasCruiseLabel(item)
-	if !e.cfg.Yolo && !isAutoAdvance && !(stage.AutoAdvance != nil && *stage.AutoAdvance) {
-		return
-	}
-	// cruise and yolo labels override auto_advance:false on individual stages;
-	// cfg.Yolo alone does not (allows per-stage opt-out to be respected).
-	if !isAutoAdvance && stage.AutoAdvance != nil && !*stage.AutoAdvance {
+	if !stageAutoAdvances(e.cfg.Yolo, item.Labels, stage) {
 		return
 	}
 
@@ -1940,7 +2119,12 @@ func (e *Engine) runCatchUpPhase2(ctx context.Context, board *gh.ProjectBoard, i
 		return
 	}
 	if err := e.advanceToNextStage(board, item, stage); err != nil {
+		// A failed advance moved nothing, so there is no StatusChanged entry to
+		// re-admit the item. Leave it out of advancedItems: the poll defer then
+		// re-stamps periodic-re-eval, which is the only thing that retries the
+		// advance now that admission consumes expired cooldowns (#2096).
 		e.logf(item.Number, "warn", "could not advance: %v\n", err)
+		return
 	}
 	// Mark as advanced so the defer doesn't re-cache the old updatedAt.
 	// Board column moves don't bump updatedAt, so re-caching would
@@ -1950,11 +2134,18 @@ func (e *Engine) runCatchUpPhase2(ctx context.Context, board *gh.ProjectBoard, i
 
 // dispatchCandidates checks each deep-fetch candidate against itemNeedsWork and
 // the in-flight worker guard, then dispatches a goroutine per admitted item,
-// gated on an available e.sem slot. It aborts early (without blocking further)
-// if ctx is cancelled while waiting for a slot. Returns the number of items
-// dispatched this cycle.
-func (e *Engine) dispatchCandidates(ctx context.Context, board *gh.ProjectBoard, deepFetchCandidates []gh.ProjectItem) int {
+// gated on an available e.sem slot. The slot acquire is non-blocking (#2114): the
+// poll goroutine must never wait on a worker, because everything poll() runs
+// after dispatch (train evaluation, settle scans) and the next poll would wait
+// with it. A candidate that finds every slot busy is deferred — nothing is
+// recorded against it (no WorkerEntered, cooldown, retry count or label) — and
+// its issueKey is returned so poll() can keep it eligible for the next poll. It
+// aborts early if ctx is cancelled. Returns the number of items dispatched this
+// cycle and the issueKeys deferred for lack of a slot.
+func (e *Engine) dispatchCandidates(ctx context.Context, board *gh.ProjectBoard, deepFetchCandidates []gh.ProjectItem) (int, []string) {
 	var dispatched int
+	var deferredKeys []string
+	var deferredNums []string
 
 	// R5's sentinel check (below) fetches the live process table at most once
 	// per call to dispatchCandidates, lazily on first need, and reuses it for
@@ -1970,11 +2161,16 @@ func (e *Engine) dispatchCandidates(ctx context.Context, board *gh.ProjectBoard,
 	)
 
 	for _, item := range deepFetchCandidates {
+		if ctx.Err() != nil {
+			return dispatched, deferredKeys
+		}
 		item := item
 		iKey := issueKey(item, e.defaultRepo())
 		itemRepo := itemOwnerRepoString(item, e.defaultRepo())
 		// Full check including comments (populated by deep fetch above).
-		if !e.itemNeedsWork(item) {
+		needs, retryIn := e.itemNeedsWorkRetryAt(item)
+		if !needs {
+			e.recordRetryBackoffCooldown(item, retryIn)
 			continue
 		}
 		// Capture stage name up front — both the Worker() != nil guard below (R5)
@@ -2022,15 +2218,19 @@ func (e *Engine) dispatchCandidates(ctx context.Context, board *gh.ProjectBoard,
 			}
 			if result.Err == nil && result.Live {
 				e.logf(item.Number, "worker-liveness", "refusing dispatch: sentinel %q still live for a cleared worker\n", sentinel)
+				e.recordSentinelLiveCooldown(item)
 				continue
 			}
 		}
-		// Acquire semaphore slot, but abort if the context is cancelled so we
-		// don't block indefinitely when all slots are taken at shutdown time.
+		// Acquire a semaphore slot without blocking (#2114). With every slot busy
+		// the candidate is deferred and the loop carries on; ctx cancellation is
+		// checked at the top of each iteration.
 		select {
 		case e.sem <- struct{}{}:
-		case <-ctx.Done():
-			return dispatched
+		default:
+			deferredKeys = append(deferredKeys, iKey)
+			deferredNums = append(deferredNums, fmt.Sprintf("#%d", item.Number))
+			continue
 		}
 		startTime := time.Now()
 		// Apply WorkerEntered synchronously before the goroutine starts so that
@@ -2040,6 +2240,7 @@ func (e *Engine) dispatchCandidates(ctx context.Context, board *gh.ProjectBoard,
 			Number:    item.Number,
 			StageName: stageName,
 			StartedAt: startTime,
+			Kind:      itemstate.WorkerKindStageRun,
 		})
 		// Create a per-issue context so kill-reason annotation can propagate from
 		// the cancellation path (daemon shutdown, supplant) to the kill log.
@@ -2086,7 +2287,100 @@ func (e *Engine) dispatchCandidates(ctx context.Context, board *gh.ProjectBoard,
 		}(issueCtx, issueCancel, iKey, issueHolder)
 	}
 
-	return dispatched
+	if len(deferredKeys) > 0 {
+		e.emitDispatchDeferred(deferredKeys)
+		e.logf(0, "poll", "deferred dispatch of %d candidate(s) %s: all worker slots busy (%d/%d in use)\n",
+			len(deferredKeys), strings.Join(deferredNums, ", "), len(e.sem), cap(e.sem))
+	}
+	return dispatched, deferredKeys
+}
+
+// requeueDeferredDispatch re-adds issueKeys to e.mayNeedWork so the next poll
+// admits them through cycleSet, bypassing any cooldown. It writes the set
+// directly rather than through store.Apply so it triggers no wake (a self-induced
+// wake loop). Used for candidates deferred because every worker slot was busy
+// (#2114): the WorkerExited wake that follows a slot release carries only
+// WorkerLifecycleChanged, which cycleSetFlags excludes (ADR-039), so without this
+// the deferred item would sit behind its cooldown until an unrelated change.
+func (e *Engine) requeueDeferredDispatch(keys []string) {
+	if len(keys) == 0 {
+		return
+	}
+	e.mayNeedWorkMu.Lock()
+	defer e.mayNeedWorkMu.Unlock()
+	for _, k := range keys {
+		e.mayNeedWork[k] = true
+	}
+}
+
+// consumeExpiredCooldowns deletes the item's expired cooldown entries once poll
+// admission has acted on them (ExpiredCooldownsConsumed, #2096), so an expiry
+// admits the item once rather than on every later poll. Cleanup-stage items and
+// items not yet in the store are left alone. Reports whether anything expired
+// (and was therefore consumed).
+func (e *Engine) consumeExpiredCooldowns(repo string, item gh.ProjectItem, snap itemstate.Snapshot, snapErr error) bool {
+	if snapErr != nil {
+		return false
+	}
+	if st := stages.FindStage(e.cfg.Stages, item.Status); st != nil && st.CleanupWorktree {
+		return false
+	}
+	now := e.now()
+	if !snap.HasExpiredCooldown(now) {
+		return false
+	}
+	e.store.Apply(itemstate.ExpiredCooldownsConsumed{Repo: repo, Number: item.Number, Now: now})
+	return true
+}
+
+// recordRetryBackoffCooldown makes the expiry of a stage retry backoff (ADR 1831)
+// re-admit the item (#2096, ADR 2096). retryIn is the remaining wait reported by
+// itemNeedsWorkRetryAt; zero means the item was refused for some other reason and
+// nothing is recorded. The backoff itself records no cooldown, and consumed
+// expiries no longer re-admit an item by accident, so without this a stage that
+// exits incomplete inside the backoff window waits out the periodic re-evaluation
+// (10 x PollSeconds) instead of retrying at the next poll after the backoff.
+//
+// LastAttemptAt is wall-clock (time.Now), the cooldown map is on e.now(); the
+// remaining duration, not an absolute instant, is carried across the two domains.
+func (e *Engine) recordRetryBackoffCooldown(item gh.ProjectItem, retryIn time.Duration) {
+	if retryIn <= 0 {
+		return
+	}
+	e.store.Apply(itemstate.CooldownRecorded{
+		Repo:   itemOwnerRepoString(item, e.defaultRepo()),
+		Number: item.Number,
+		Reason: "retry-backoff",
+		Until:  e.now().Add(retryIn),
+	})
+}
+
+// recordSentinelLiveCooldown re-checks, on the next poll, an item whose dispatch
+// was refused because a cleared worker's process is still alive (R5, #1779). The
+// refusal has no deadline to anchor on, so the cooldown is one poll interval
+// (mergeGateRecheckInterval); the entry is consumed on that admission, so it
+// repeats once per poll only while the process is alive.
+func (e *Engine) recordSentinelLiveCooldown(item gh.ProjectItem) {
+	e.store.Apply(itemstate.CooldownRecorded{
+		Repo:   itemOwnerRepoString(item, e.defaultRepo()),
+		Number: item.Number,
+		Reason: "sentinel-live",
+		Until:  e.now().Add(e.mergeGateRecheckInterval()),
+	})
+}
+
+// rearmPeriodicReEval re-stamps the periodic re-evaluation cooldown for an item
+// that was admitted (and had its expired cooldowns consumed) but dropped before
+// joining deepFetchCandidates, which is the only place the poll defer re-stamps
+// it. Without this the item would have no cooldown entry and nothing would ever
+// re-admit it (ADR 2096, R4).
+func (e *Engine) rearmPeriodicReEval(item gh.ProjectItem) {
+	e.store.Apply(itemstate.CooldownRecorded{
+		Repo:   itemOwnerRepoString(item, e.defaultRepo()),
+		Number: item.Number,
+		Reason: "periodic-re-eval",
+		Until:  e.now().Add(e.githubRecheckInterval()),
+	})
 }
 
 // selectDeepFetchCandidates runs the deep-fetch pre-filter loop: for each board
@@ -2172,12 +2466,15 @@ func (e *Engine) selectDeepFetchCandidates(board *gh.ProjectBoard, repoFilter st
 			}
 			periodicReeval = hasExpiredCooldown
 		}
-		// recentBaseline: the item's staleness baseline moved within the last two
-		// recheck intervals — the only window in which a self-write (#1090) can have
-		// masked a concurrent human comment. See the paused skip below (#1944).
-		recentBaseline := admitErr == nil &&
-			e.now().Sub(admitSnap.State().LastSeenSourceUpdatedAt) < 2*e.githubRecheckInterval()
+		// An expired cooldown admits the item once: consume it now that the
+		// pre-filter has acted on it (#2096, ADR 2096). Done for the cycleSet path
+		// too, so an expiry coinciding with another admission reason is still used
+		// up instead of re-admitting the item on the next poll.
+		consumedExpired := e.consumeExpiredCooldowns(repo, item, admitSnap, admitErr)
 		if !e.itemMayNeedWork(board.Items[i]) {
+			if consumedExpired || cycleSet[iKey] {
+				e.rearmPeriodicReEval(item)
+			}
 			continue
 		}
 		// Cleanup stages don't need comments or linked-PR data — skip FetchItemDetails
@@ -2202,34 +2499,28 @@ func (e *Engine) selectDeepFetchCandidates(board *gh.ProjectBoard, repoFilter st
 		// merged-while-paused self-heal (ADR-056 D2) and settleRevalidateScan's FR-5
 		// guarantee — are unaffected; only the FetchItemDetails call itself is skipped.
 		//
-		// Backstop (#1944): a paused item admitted by the periodic re-evaluation IS
-		// fetched while its staleness baseline is recent. cycleSet can miss a genuine
-		// change — the self-write baseline (SelfWriteObserved, #1090) is the local
-		// clock at the engine's own write, so a human comment landing within about a
-		// second of it (typically a reply to the pause comment itself) reads as
-		// already seen. Without this nothing ever refreshed item.Comments and the
-		// resume comment (ADR-1813) was lost for good. Cost stays within #1379's
-		// intent: a long-parked item (old baseline) is still never fetched, and a
-		// fresh pause costs at most one or two extra fetches — the fetch itself
-		// re-anchors the baseline to GitHub's own updatedAt.
+		// A paused item admitted by the periodic re-evaluation reads its details
+		// through the board cache (#1944, #2180): the cache's freshness rule sees a
+		// human reply that a self-write baseline would otherwise have masked (the
+		// issue comment total differs from the cached list), so the read costs
+		// nothing while the cache is genuinely fresh and refetches once when it is
+		// not. The retired #1944 backstop invalidated the cache by hand instead.
 		if hasLabel(item.Labels, "fabrik:paused") && !cycleSet[iKey] {
 			switch {
 			case admitErr != nil:
 				// Not yet in the store (first sighting): fall through and fetch once to
 				// establish a baseline, mirroring the notInStore bypass in the pre-filter above.
-			case periodicReeval && recentBaseline:
-				// Backstop fetch. It must reach GitHub: the board cache judges freshness
-				// by the same masked baseline, so it would otherwise hand back the cached
-				// comments without the reply this fetch exists to find.
-				e.logf(0, "poll", "re-fetching paused item #%d at periodic re-evaluation (recent self-write may have masked a reply)\n", board.Items[i].Number)
-				e.store.Apply(itemstate.DeepFetchInvalidated{Repo: repo, Number: item.Number})
+			case periodicReeval && e.cache() != nil && !e.cache().IsPaused():
+				// Fall through to the cached read below. Without a board cache every
+				// read is live, so the #1379 skip is kept: there is no freshness rule
+				// to make the read free.
 			default:
 				e.logf(0, "poll", "skipping deep-fetch for paused item #%d (no new activity)\n", board.Items[i].Number)
 				deepFetchCandidates = append(deepFetchCandidates, board.Items[i])
 				continue
 			}
 		}
-		if c := e.cache(); c != nil && !c.IsPaused() && c.IsItemCacheFresh(board.Items[i].Repo, board.Items[i].Number, board.Items[i].UpdatedAt) {
+		if c := e.cache(); c != nil && !c.IsPaused() && c.IsItemCacheFresh(board.Items[i].Repo, board.Items[i].Number, boardcache.EvidenceFromItem(&board.Items[i])) {
 			e.logf(0, "poll", "reading details for #%d from cache\n", board.Items[i].Number)
 		} else {
 			e.logf(0, "poll", "deep-fetching details for #%d from GitHub\n", board.Items[i].Number)
@@ -2241,8 +2532,18 @@ func (e *Engine) selectDeepFetchCandidates(board *gh.ProjectBoard, repoFilter st
 				Number: board.Items[i].Number,
 				At:     time.Now(),
 			})
+			// Re-arm when the item was admitted by an expiry consumed above OR by
+			// cycleSet: a cycleSet entry is drained once per poll, and a slot-deferred
+			// item (#2114) reaches here with its periodic-re-eval stamp skipped, so
+			// without a cooldown nothing would ever re-admit it.
+			if consumedExpired || cycleSet[iKey] {
+				e.rearmPeriodicReEval(item)
+			}
 			// Skip appending to deepFetchCandidates.
-			// The next poll will retry the deep-fetch for this item.
+			// The deep-fetch is retried at the item's next admission: the re-armed
+			// periodic re-evaluation (githubRecheckInterval, which also bounds the
+			// failure backoff in itemMayNeedWork), or any observer-driven change
+			// (cycleSet) sooner.
 			continue
 		}
 		admitRepo := itemOwnerRepoString(board.Items[i], e.defaultRepo())

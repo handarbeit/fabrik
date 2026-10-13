@@ -98,7 +98,7 @@ func channelEngineOn(t *testing.T, e *Engine, ahead time.Duration, sub *channele
 	// move time (a deadline passing) without racing the deriver.
 	e.SetClock(&adjClock{t: time.Now().Add(ahead)})
 	e.fabrikDir = t.TempDir()
-	e.startChannelEvents()
+	e.startChannelEventsIn(channelStateDir(e.fabrikDir), false)
 	t.Cleanup(e.closeChannelEvents)
 	ce := e.channelEvents()
 	if ce == nil {
@@ -155,11 +155,11 @@ func TestChannelLabelActorAttribution(t *testing.T) {
 	e.seedAPIItem(t, 1, "Implement")
 
 	e.store.Apply(itemstate.IssueLabeled{Repo: "owner/repo", Number: 1, Label: "human-label", Sender: "alice"})
-	if ev := sink.nextOfType(t, channelevents.LabelApplied); ev.Meta["actor"] != "human" {
+	if ev := sink.nextOfType(t, channelevents.LabelApplied); ev.Meta["actor"] != "human" || ev.Meta["actor_login"] != "alice" || ev.Meta["via"] != "" {
 		t.Fatalf("human label: %+v", ev)
 	}
 	e.store.Apply(itemstate.IssueLabeled{Repo: "owner/repo", Number: 1, Label: "bot-label", Sender: "dependabot[bot]"})
-	if ev := sink.nextOfType(t, channelevents.LabelApplied); ev.Meta["actor"] != "bot" {
+	if ev := sink.nextOfType(t, channelevents.LabelApplied); ev.Meta["actor"] != "bot" || ev.Meta["actor_login"] != "dependabot[bot]" {
 		t.Fatalf("bot label: %+v", ev)
 	}
 	e.store.Apply(itemstate.IssueUnlabeled{Repo: "owner/repo", Number: 1, Label: "human-label", Sender: "alice"})
@@ -172,6 +172,89 @@ func TestChannelLabelActorAttribution(t *testing.T) {
 	}})
 	if ev := sink.nextOfType(t, channelevents.LabelApplied); ev.Label != "seen-by-poll" || ev.Meta["actor"] != "unknown" {
 		t.Fatalf("reconcile label: %+v", ev)
+	} else if _, ok := ev.Meta["actor_login"]; ok {
+		t.Fatalf("unknown actor must carry no login: %+v", ev)
+	}
+}
+
+// An overseer-requested write is attributed to the overseer (#2125); the same
+// label written autonomously stays fabrik with no via.
+func TestChannelLabelOverseerAttribution(t *testing.T) {
+	e, sink := channelEngine(t, 0, nil)
+	e.seedAPIItem(t, 1, "Implement")
+
+	e.store.Apply(itemstate.LocalLabelAdded{Repo: "owner/repo", Number: 1, Label: "fabrik:cruise", Requester: "x"})
+	ev := sink.nextOfType(t, channelevents.LabelApplied)
+	if ev.Meta["actor"] != "overseer" || ev.Meta["via"] != "x" {
+		t.Fatalf("overseer write: %+v", ev)
+	}
+	if _, ok := ev.Meta["actor_login"]; ok {
+		t.Fatalf("overseer event carries a login: %+v", ev.Meta)
+	}
+	if !strings.Contains(ev.Content, "by overseer x") {
+		t.Fatalf("content = %q", ev.Content)
+	}
+
+	// Both halves of a yolo -> cruise style switch are attributed.
+	e.store.Apply(itemstate.LocalLabelAdded{Repo: "owner/repo", Number: 1, Label: "fabrik:yolo", Requester: "x"})
+	e.store.Apply(itemstate.LocalLabelRemoved{Repo: "owner/repo", Number: 1, Label: "fabrik:yolo", Requester: "x"})
+	if ev := sink.nextOfType(t, channelevents.LabelApplied); ev.Label != "fabrik:yolo" || ev.Meta["actor"] != "overseer" || ev.Meta["via"] != "x" {
+		t.Fatalf("second add: %+v", ev)
+	}
+	if ev := sink.nextOfType(t, channelevents.LabelRemoved); ev.Meta["actor"] != "overseer" || ev.Meta["via"] != "x" {
+		t.Fatalf("removal: %+v", ev)
+	}
+
+	// An engine-autonomous write of the same label: fabrik, no via.
+	e.store.Apply(itemstate.LocalLabelRemoved{Repo: "owner/repo", Number: 1, Label: "fabrik:cruise"})
+	if ev := sink.nextOfType(t, channelevents.LabelRemoved); ev.Meta["actor"] != "fabrik" || ev.Meta["via"] != "" {
+		t.Fatalf("autonomous write: %+v", ev)
+	}
+	e.store.Apply(itemstate.LocalLabelAdded{Repo: "owner/repo", Number: 1, Label: "fabrik:cruise"})
+	if ev := sink.nextOfType(t, channelevents.LabelApplied); ev.Meta["actor"] != "fabrik" || ev.Meta["via"] != "" {
+		t.Fatalf("autonomous re-add: %+v", ev)
+	}
+}
+
+// The webhook echo of an overseer write that the store did not yet hold is the
+// only observer-visible change, and carries the overseer (one event).
+func TestChannelLabelOverseerEchoFirstIsOneEvent(t *testing.T) {
+	e, sink := channelEngine(t, 0, nil)
+	e.seedAPIItem(t, 1, "Implement")
+
+	e.store.Apply(itemstate.IssueLabeled{Repo: "owner/repo", Number: 1, Label: "fabrik:cruise", Sender: "fabrik-app[bot]", EchoOfEngine: true, Requester: "x"})
+	e.store.Apply(itemstate.LocalLabelAdded{Repo: "owner/repo", Number: 1, Label: "fabrik:cruise", Requester: "x"})
+
+	ev := sink.nextOfType(t, channelevents.LabelApplied)
+	if ev.Meta["actor"] != "overseer" || ev.Meta["via"] != "x" {
+		t.Fatalf("echo-first: %+v", ev)
+	}
+	sink.quiet(t, 300*time.Millisecond)
+}
+
+// An unmatched webhook never claims a requester, and labelAttribute follows the
+// documented order (the overseer check precedes the sender checks).
+func TestLabelAttributeOrder(t *testing.T) {
+	e := &Engine{}
+	cases := []struct {
+		name string
+		c    itemstate.Change
+		want labelAttribution
+	}{
+		{"engine", itemstate.Change{Origin: itemstate.OriginEngine}, labelAttribution{Actor: "fabrik"}},
+		{"engine requester", itemstate.Change{Origin: itemstate.OriginEngine, Requester: "x"}, labelAttribution{Actor: "overseer", Via: "x"}},
+		{"echo", itemstate.Change{Origin: itemstate.OriginWebhook, EchoOfEngine: true, Sender: "app[bot]"}, labelAttribution{Actor: "fabrik"}},
+		{"echo requester beats sender", itemstate.Change{Origin: itemstate.OriginWebhook, EchoOfEngine: true, Sender: "app[bot]", Requester: "x"}, labelAttribution{Actor: "overseer", Via: "x"}},
+		{"unechoed requester ignored", itemstate.Change{Origin: itemstate.OriginWebhook, Sender: "alice", Requester: "x"}, labelAttribution{Actor: "human", Login: "alice"}},
+		{"bot", itemstate.Change{Origin: itemstate.OriginWebhook, Sender: "Dependabot[bot]"}, labelAttribution{Actor: "bot", Login: "Dependabot[bot]"}},
+		{"empty sender", itemstate.Change{Origin: itemstate.OriginWebhook}, labelAttribution{Actor: "unknown"}},
+		{"reconcile", itemstate.Change{Origin: itemstate.OriginOther}, labelAttribution{Actor: "unknown"}},
+		{"probe", itemstate.Change{Origin: itemstate.OriginProbe}, labelAttribution{Actor: "unknown"}},
+	}
+	for _, tc := range cases {
+		if got := e.labelAttribute(tc.c); got != tc.want {
+			t.Errorf("%s: got %+v, want %+v", tc.name, got, tc.want)
+		}
 	}
 }
 
@@ -264,7 +347,7 @@ func TestChannelStateSurvivesDaemonRestart(t *testing.T) {
 	start := func() *Engine {
 		e := apiEngine(t, 0)
 		e.fabrikDir = t.TempDir()
-		e.startChannelEventsIn(dir)
+		e.startChannelEventsIn(dir, false)
 		t.Cleanup(e.closeChannelEvents)
 		return e
 	}
@@ -345,8 +428,8 @@ func TestChannelStreamerSubscribeResolvesIssuesAndValidates(t *testing.T) {
 	if len(got) != 2 || got[0] != (channelevents.IssueRef{Repo: apiRepo, Number: 7}) || got[1].Number != 8 {
 		t.Fatalf("issues resolved to %+v", got)
 	}
-	if _, err := st.Subscribe(localapi.SubscribeParams{Subscriber: "S", Events: []string{"nope"}}); err == nil {
-		t.Fatal("unknown event type accepted")
+	if _, err := st.Subscribe(localapi.SubscribeParams{Subscriber: "S", Events: []string{"nope"}}); err == nil || !strings.Contains(err.Error(), `unknown event type nope`) {
+		t.Fatalf("an all-unknown event list must be refused and named, got %v", err)
 	}
 	if _, err := st.Subscribe(localapi.SubscribeParams{Subscriber: ""}); err == nil {
 		t.Fatal("empty subscriber accepted")
@@ -359,6 +442,58 @@ func TestChannelStreamerSubscribeResolvesIssuesAndValidates(t *testing.T) {
 	un, err := st.Unsubscribe(localapi.UnsubscribeParams{Subscriber: "S"})
 	if err != nil || un.Removed != 1 {
 		t.Fatalf("unsubscribe: %+v %v", un, err)
+	}
+}
+
+// A shim built before the #2129 rename still names claude-limit-suspended. The
+// daemon must map it, apply the rest, and say so — never fail the whole request
+// and never leave the session without a subscription (#2168).
+func TestChannelStreamerSubscribeToleratesVersionSkew(t *testing.T) {
+	e, _ := channelEngine(t, 0, nil)
+	ce := e.channelEvents()
+	st := e.channelStreamer()
+	sink := newChanSink()
+	ce.hub.Attach("S", sink)
+
+	res, err := st.Subscribe(localapi.SubscribeParams{Subscriber: "S", Events: []string{"claude-limit-suspended", "validate-settled", "from-the-future"}})
+	if err != nil {
+		t.Fatalf("a stale event name must not fail the subscribe: %v", err)
+	}
+	if got := res.Subscription.Events; len(got) != 2 || got[0] != channelevents.ClaudeUsageLimited || got[1] != channelevents.ValidateSettled {
+		t.Fatalf("stored events = %v", got)
+	}
+	if len(res.Mapped) != 1 || res.Mapped[0] != (localapi.EventMapping{From: "claude-limit-suspended", To: "claude-usage-limited"}) {
+		t.Fatalf("mapped = %+v", res.Mapped)
+	}
+	if len(res.Rejected) != 1 || res.Rejected[0] != "from-the-future" {
+		t.Fatalf("rejected = %+v", res.Rejected)
+	}
+	ce.hub.Publish(channelevents.Event{Type: channelevents.ValidateSettled, Repo: "owner/repo", Issue: 7, Content: "settled"})
+	if ev := sink.nextOfType(t, channelevents.ValidateSettled); ev.Issue != 7 {
+		t.Fatalf("validate-settled not delivered: %+v", ev)
+	}
+
+	// Re-subscribing with the old name is the same subscription, not a new one.
+	again, err := st.Subscribe(localapi.SubscribeParams{Subscriber: "S", Events: []string{"claude-limit-suspended", "claude-usage-limited", "validate-settled", "from-the-future"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Subscription.ID != res.Subscription.ID || len(again.Subscriptions) != 1 {
+		t.Fatalf("legacy and current spellings must collapse to one subscription: %+v vs %+v", again, res)
+	}
+
+	// Current names only: no report fields.
+	clean, err := st.Subscribe(localapi.SubscribeParams{Subscriber: "S", Events: []string{"merged"}})
+	if err != nil || len(clean.Mapped) != 0 || len(clean.Rejected) != 0 {
+		t.Fatalf("clean request reported mapping: %+v %v", clean, err)
+	}
+
+	// Nothing known left: refused, named, and the existing subscriptions survive.
+	if _, err := st.Subscribe(localapi.SubscribeParams{Subscriber: "S", Events: []string{"digest", "nope"}}); err == nil || !strings.Contains(err.Error(), "digest, nope") {
+		t.Fatalf("all-unknown request: %v", err)
+	}
+	if got := ce.hub.Subscriptions("S"); len(got) != 2 {
+		t.Fatalf("an all-unknown request disturbed the subscriptions: %+v", got)
 	}
 }
 
@@ -418,6 +553,10 @@ func TestSelfUpgradeConfigsFlushChannelStateBeforeExec(t *testing.T) {
 // A subscriber that arrives after items already settled or paused still learns
 // about them: a new subscription and a fresh session each get one catch-up
 // snapshot of current state, tagged catch_up=true, while a reconnect does not.
+//
+// The subscriber names its events, so it is not on the semantic default and
+// keeps the per-item snapshot; a default subscription is caught up with the
+// situation digest instead (channel_situation_test.go, #2171).
 func TestCatchUpDeliversWaitingItemsToLateSubscriber(t *testing.T) {
 	e, live := channelEngine(t, 0, settledOnly())
 	seedValidate(t, e, 1, "fabrik:cruise", "stage:Validate:complete")
@@ -428,11 +567,12 @@ func TestCatchUpDeliversWaitingItemsToLateSubscriber(t *testing.T) {
 	e.seedAPIItem(t, 3, "Implement") // nothing waiting on anyone
 
 	st := e.channelStreamer()
-	if _, err := st.Subscribe(localapi.SubscribeParams{Subscriber: "late"}); err != nil {
+	perItem := localapi.SubscribeParams{Subscriber: "late", Events: []string{"validate-settled", "awaiting-input"}}
+	if _, err := st.Subscribe(perItem); err != nil {
 		t.Fatal(err)
 	}
 	// The same subscription again is not a new subscription: no second catch-up.
-	if _, err := st.Subscribe(localapi.SubscribeParams{Subscriber: "late"}); err != nil {
+	if _, err := st.Subscribe(perItem); err != nil {
 		t.Fatal(err)
 	}
 
@@ -491,5 +631,173 @@ func TestCatchUpDoesNotInterfereWithEpisodeDedup(t *testing.T) {
 	ev := live.next(t) // the live settle of the same item is still announced
 	if ev.Meta["catch_up"] == "true" || ev.DedupKey == "" {
 		t.Fatalf("expected the live episode event, got %+v", ev)
+	}
+}
+
+// #2112: on a multi-repo daemon (owner, no repo) a bare issue number in a
+// subscription resolves when the cached issues are all in one repo.
+func TestChannelStreamerSubscribeBareNOnMultiRepoDaemon(t *testing.T) {
+	oldD, oldT := channelDebounce, channelTick
+	channelDebounce, channelTick = 20*time.Millisecond, time.Hour
+	t.Cleanup(func() { channelDebounce, channelTick = oldD, oldT })
+	m := multiRepoAPIEngine()
+	seedRepoItem(m, "owner/repo", 7)
+	e, _ := channelEngineOn(t, m, 0, nil)
+	res, err := e.channelStreamer().Subscribe(localapi.SubscribeParams{Subscriber: "S", Issues: []string{"7"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := res.Subscription.Issues; len(got) != 1 || got[0] != (channelevents.IssueRef{Repo: "owner/repo", Number: 7}) {
+		t.Fatalf("issues resolved to %+v", got)
+	}
+}
+
+// A catch-up snapshot is current state, never history: it must not replay
+// arrivals, column moves or closes (#2123, ADR 2123). The assertion is made on
+// catchUpEvents itself over a state that holds a fresh arrival, a recent column
+// move and a recent close, so a catch-up that emitted any of those types fails
+// here — a subscriber-side scan would pass whether or not it did (#2187).
+func TestCatchUpNeverReplaysLifecycleEvents(t *testing.T) {
+	e, live := channelEngine(t, 0, nil)
+	e.MarkBoardPopulatedForTest()
+	e.seedAPIItem(t, 1, "Specify", "fabrik:cruise")                            // closed below
+	e.seedAPIItem(t, 2, "Implement", "fabrik:paused", "fabrik:awaiting-input") // paused, stays open
+	e.seedAPIItem(t, 3, "Specify", "fabrik:cruise")                            // fresh arrival
+	e.seedAPIItem(t, 4, "Specify", "fabrik:cruise")                            // moved below
+	e.store.Apply(itemstate.LocalStatusUpdated{Repo: "owner/repo", Number: 1, NewStatus: "Research"})
+	e.store.Apply(itemstate.IssueClosed{Repo: "owner/repo", Number: 1})
+	e.store.Apply(itemstate.LocalStatusUpdated{Repo: "owner/repo", Number: 4, NewStatus: "Implement"})
+
+	// The lifecycle events do exist live for these very items.
+	seen := map[channelevents.EventType]bool{}
+	for !(seen[channelevents.ItemAdded] && seen[channelevents.ColumnChanged] && seen[channelevents.Closed]) {
+		seen[live.next(t).Type] = true
+	}
+
+	sawPaused := false
+	for _, ev := range e.catchUpEvents() {
+		switch ev.Type {
+		case channelevents.ItemAdded, channelevents.ColumnChanged, channelevents.Closed:
+			t.Fatalf("catch-up replayed a lifecycle event: %+v", ev)
+		case channelevents.AwaitingInput:
+			sawPaused = sawPaused || ev.Issue == 2
+		}
+	}
+	if !sawPaused {
+		t.Fatalf("the paused item should still be in the snapshot; the scan above would be vacuous: %+v", e.catchUpEvents())
+	}
+}
+
+// An arrival is announced only once its labels are known (#2123 FR-005, #2187):
+// a probe-seeded card has none, and an item-added with an empty label set would
+// make a label-scoped subscriber miss it. Removing the LabelsKnown condition in
+// announceArrival makes this fail.
+func TestChannelItemAddedWaitsForLabels(t *testing.T) {
+	e, sink := channelEngine(t, 0, nil)
+	e.MarkBoardPopulatedForTest()
+	e.store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{
+		ID: "I_X", Number: 5, Repo: "owner/repo", Title: "labelless", Status: "Specify", LabelsAbsent: true,
+	}})
+	sink.quiet(t, 300*time.Millisecond)
+
+	e.store.Apply(itemstate.ItemDeepFetched{Repo: "owner/repo", Number: 5, FreshState: gh.ProjectItem{
+		ID: "I_X", Number: 5, Repo: "owner/repo", Status: "Specify", Labels: []string{"fabrik:cruise"},
+	}})
+	ev := sink.nextOfType(t, channelevents.ItemAdded)
+	if ev.Issue != 5 || len(ev.Labels) == 0 || !hasLabelStr(ev.Labels, "fabrik:cruise") {
+		t.Fatalf("item-added must carry the known labels: %+v", ev)
+	}
+}
+
+// An item whose column has no configured stage is outside Fabrik's known column
+// set: it is never announced, and a later move into a configured column is a
+// column-changed, not a late arrival (#2187, ADR 2123).
+func TestChannelItemAddedSkipsUnconfiguredColumn(t *testing.T) {
+	e, sink := channelEngine(t, 0, nil)
+	e.MarkBoardPopulatedForTest()
+	e.seedAPIItem(t, 6, "Mystery column", "enhancement")
+	sink.quiet(t, 300*time.Millisecond)
+
+	e.store.Apply(itemstate.LocalStatusUpdated{Repo: "owner/repo", Number: 6, NewStatus: "Specify"})
+	ev := sink.nextOfType(t, channelevents.ColumnChanged)
+	if ev.Issue != 6 || ev.Meta["from"] != "Mystery column" || ev.Meta["to"] != "Specify" {
+		t.Fatalf("unexpected column-changed: %+v", ev)
+	}
+	sink.quiet(t, 300*time.Millisecond)
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	for _, got := range sink.got {
+		if got.Type == channelevents.ItemAdded {
+			t.Fatalf("item-added published for an item first seen in an unconfigured column: %+v", got)
+		}
+	}
+}
+
+// A close the snapshot merely suggests is a landing (a close-tracking label, a
+// merged PR) keeps the webhook-derived actor: only an engine-announced landing
+// is attributed to fabrik, so a human's merge or manual close is not read as the
+// engine's own (#2123).
+func TestChannelClosedSnapshotLandingKeepsWebhookActor(t *testing.T) {
+	e, sink := channelEngine(t, 0, nil)
+	e.MarkBoardPopulatedForTest()
+	e.seedAPIItem(t, 1, "Done", "fabrik:awaiting-close")
+	e.store.Apply(itemstate.IssueClosed{Repo: "owner/repo", Number: 1, Sender: "alice"})
+
+	ev := sink.nextOfType(t, channelevents.Closed)
+	if ev.Meta["landing"] != "true" || ev.Meta["actor"] != "human" || ev.Meta["actor_login"] != "alice" {
+		t.Fatalf("snapshot-inferred landing must keep the human actor: %v", ev.Meta)
+	}
+}
+
+// An engine-announced landing is attributed to fabrik whatever the webhook sender.
+func TestChannelClosedAnnouncedLandingIsFabrik(t *testing.T) {
+	e, sink := channelEngine(t, 0, nil)
+	e.MarkBoardPopulatedForTest()
+	e.seedAPIItem(t, 1, "Done")
+	e.channelEvents().markLanding(issueRef("owner/repo", 1))
+	e.store.Apply(itemstate.IssueClosed{Repo: "owner/repo", Number: 1, Sender: "alice"})
+
+	ev := sink.nextOfType(t, channelevents.Closed)
+	if ev.Meta["landing"] != "true" || ev.Meta["actor"] != "fabrik" {
+		t.Fatalf("announced landing must be attributed to fabrik: %v", ev.Meta)
+	}
+}
+
+// A reopened issue ends the announced landing: a later manual close names its own
+// actor and is not tagged as part of the (reversed) landing.
+func TestChannelClosedAfterReopenIsNotAnnouncedLanding(t *testing.T) {
+	e, sink := channelEngine(t, 0, nil)
+	e.MarkBoardPopulatedForTest()
+	e.seedAPIItem(t, 1, "Done")
+	e.channelEvents().markLanding(issueRef("owner/repo", 1))
+	e.store.Apply(itemstate.IssueClosed{Repo: "owner/repo", Number: 1, Sender: "alice"})
+	first := sink.nextOfType(t, channelevents.Closed)
+	if first.Meta["actor"] != "fabrik" {
+		t.Fatalf("announced landing close must be fabrik: %v", first.Meta)
+	}
+
+	e.store.Apply(itemstate.IssueReopened{Repo: "owner/repo", Number: 1})
+	e.store.Apply(itemstate.IssueClosed{Repo: "owner/repo", Number: 1, Sender: "bob"})
+	ev := sink.nextOfType(t, channelevents.Closed)
+	if ev.Meta["actor"] == "fabrik" || ev.Meta["landing"] == "true" {
+		t.Fatalf("a close after a reopen must not inherit the reversed landing: %v", ev.Meta)
+	}
+}
+
+// A failed landing verification ends the announced landing too.
+func TestChannelLandingVerificationFailedClearsLanding(t *testing.T) {
+	e, _ := channelEngine(t, 0, nil)
+	e.MarkBoardPopulatedForTest()
+	e.seedAPIItem(t, 1, "Done")
+	ce := e.channelEvents()
+	key := issueRef("owner/repo", 1)
+	ce.markLanding(key)
+	e.store.Apply(itemstate.LocalLabelAdded{Repo: "owner/repo", Number: 1, Label: "fabrik:landing-verification-failed"})
+	deadline := time.Now().Add(2 * time.Second)
+	for ce.isLanding(key) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if ce.isLanding(key) {
+		t.Fatal("landing mark survived a failed landing verification")
 	}
 }

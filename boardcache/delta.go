@@ -146,7 +146,10 @@ type pullRequestReviewPayload struct {
 		DatabaseID int    `json:"id"`
 		Body       string `json:"body"`
 		State      string `json:"state"`
-		User       struct {
+		// CommitID is the SHA the review was submitted against (#2127 R5): without
+		// it a review that arrived by webhook cannot be placed at the PR head.
+		CommitID string `json:"commit_id"`
+		User     struct {
 			Login string `json:"login"`
 		} `json:"user"`
 	} `json:"review"`
@@ -226,10 +229,14 @@ type projectsV2ItemPayload struct {
 			To json.RawMessage `json:"to"`
 		} `json:"field_value"`
 	} `json:"changes"`
+	Sender struct {
+		Login string `json:"login"`
+	} `json:"sender"`
 	ProjectsV2Item struct {
 		ID            string `json:"id"`
 		ContentNodeID string `json:"content_node_id"`
 		ContentType   string `json:"content_type"`
+		UpdatedAt     string `json:"updated_at"`
 	} `json:"projects_v2_item"`
 }
 
@@ -435,7 +442,7 @@ func (c *CacheImpl) applyIssuesDelta(payload []byte) {
 			c.logFn("[cache] applyIssuesDelta(closed): ensure #%d: %v\n", issNum, err)
 			return
 		}
-		_, changes, _ := c.store.Apply(itemstate.IssueClosed{Repo: fullRepo, Number: issNum})
+		_, changes, _ := c.store.Apply(itemstate.IssueClosed{Repo: fullRepo, Number: issNum, Sender: p.Sender.Login})
 		if len(changes) == 0 {
 			return
 		}
@@ -533,12 +540,29 @@ func (c *CacheImpl) applyIssuesDelta(payload []byte) {
 	}
 }
 
+// matchEcho runs the best available echo matcher for an inbound webhook and
+// reports whether it matched one of the engine's own writes and which overseer
+// requester (if any) registered it. With no matcher injected it reports no match.
+func (c *CacheImpl) matchEcho(eventType, action, key string) (bool, string) {
+	switch {
+	case c.matchEchoViaFn != nil:
+		return c.matchEchoViaFn(eventType, action, key)
+	case c.matchEchoReportedFn != nil:
+		return c.matchEchoReportedFn(eventType, action, key), ""
+	case c.matchEchoFn != nil:
+		c.matchEchoFn(eventType, action, key)
+	}
+	return false, ""
+}
+
 // applyIssueLabelMutationDelta is the shared body for the "labeled"/"unlabeled"
 // cases of applyIssuesDelta: echo the match, ensure the issue is in the Store,
 // apply the given mutation, and bump the local delta on a real change.
 func (c *CacheImpl) applyIssueLabelMutationDelta(owner, fullRepo string, issNum int, key, action, labelName string, mutation itemstate.Mutation) {
-	echoed := false
-	if c.matchEchoReportedFn != nil {
+	echoed, via := false, ""
+	if c.matchEchoViaFn != nil {
+		echoed, via = c.matchEchoViaFn("issues", action, key+"+"+labelName)
+	} else if c.matchEchoReportedFn != nil {
 		echoed = c.matchEchoReportedFn("issues", action, key+"+"+labelName)
 	} else if c.matchEchoFn != nil {
 		c.matchEchoFn("issues", action, key+"+"+labelName)
@@ -546,9 +570,15 @@ func (c *CacheImpl) applyIssueLabelMutationDelta(owner, fullRepo string, issNum 
 	switch v := mutation.(type) {
 	case itemstate.IssueLabeled:
 		v.EchoOfEngine = echoed
+		if echoed {
+			v.Requester = via
+		}
 		mutation = v
 	case itemstate.IssueUnlabeled:
 		v.EchoOfEngine = echoed
+		if echoed {
+			v.Requester = via
+		}
 		mutation = v
 	}
 	if err := c.ensureIssueInStore(owner, fullRepo, issNum); err != nil {
@@ -807,6 +837,7 @@ func (c *CacheImpl) applyPullRequestReviewDelta(payload []byte) {
 		State:      strings.ToUpper(p.Review.State),
 		Body:       p.Review.Body,
 		DatabaseID: p.Review.DatabaseID,
+		CommitID:   p.Review.CommitID,
 	}
 
 	// Normal path: look up issue via Store's prToKey index (no c.mu held).
@@ -1120,9 +1151,7 @@ func (c *CacheImpl) applyProjectsV2ItemDelta(payload []byte) {
 		c.bumpLocalDeltaAt(itemKey(pi.Repo, pi.Number))
 
 	case "edited":
-		if c.matchEchoFn != nil {
-			c.matchEchoFn("projects_v2_item", "edited", p.ProjectsV2Item.ID)
-		}
+		echoed, via := c.matchEcho("projects_v2_item", "edited", p.ProjectsV2Item.ID)
 		// Only a Status (single_select) edit changes anything the cache holds.
 		// A text-field edit — in particular the engine's own display-only
 		// status-line write echoing back (#2048), or a human editing it — is a
@@ -1146,10 +1175,19 @@ func (c *CacheImpl) applyProjectsV2ItemDelta(payload []byte) {
 		if newStatus == "" {
 			return
 		}
-		snap, changes, _ := c.store.Apply(itemstate.ProjectV2ItemEdited{
-			ItemID:    p.ProjectsV2Item.ID,
-			NewStatus: newStatus,
-		})
+		edit := itemstate.ProjectV2ItemEdited{
+			ItemID:       p.ProjectsV2Item.ID,
+			NewStatus:    newStatus,
+			Sender:       p.Sender.Login,
+			EchoOfEngine: echoed,
+		}
+		if echoed {
+			edit.Requester = via
+		}
+		if t, err := time.Parse(time.RFC3339, p.ProjectsV2Item.UpdatedAt); err == nil {
+			edit.At = t
+		}
+		snap, changes, _ := c.store.Apply(edit)
 		if len(changes) == 0 {
 			return
 		}

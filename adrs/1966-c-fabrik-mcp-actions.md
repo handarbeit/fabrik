@@ -1,6 +1,6 @@
 # ADR 1966-c: Fabrik MCP overseer actions
 
-Status: accepted (issue #1969; builds on [ADR-1966-a](1966-a-fabrik-mcp-read-api.md) and [ADR-1966-b](1966-b-fabrik-mcp-channel-events.md); proposed in #1966)
+Status: accepted (issue #1969; **amended 2026-10-11: a fifth action, `advance`, was added by [ADR 2126](2126-overseer-advance.md) — read "four" below as "five" under the same rules**; builds on [ADR-1966-a](1966-a-fabrik-mcp-read-api.md) and [ADR-1966-b](1966-b-fabrik-mcp-channel-events.md); proposed in #1966)
 
 ## Context
 
@@ -62,5 +62,5 @@ The suspension it clears is account-wide, but the engine's settle scan reads the
 - An overseer cannot lift a pause, comment, move an item backwards or into a holding or cleanup column; those stay with a human or the engine.
 - The audit trail is advisory (self-asserted name on an unauthenticated socket) and lives in issue comments, one per action.
 - `promote` and `revalidate` cost one extra GitHub read each (an ID-keyed single query); everything else costs only the write and the comment.
-- An action's own label write appears on the requester's own subscription as a `label-applied` event with actor `fabrik`. Accepted and documented: observation-only, and suppressing it would need the channel layer to learn about actions.
+- ~~An action's own label write appears on the requester's own subscription as a `label-applied` event with actor `fabrik`.~~ **Superseded by ADR 2125:** the requester rides the write, and the event reads `actor=overseer`, `via=<subscriber>`. The engine's autonomous writes keep `actor=fabrik`; the change stays observation-only.
 - Because the daemon acts on its cache (plus one live read for two actions), a stale cache can still refuse a valid action; it cannot make a wrong one succeed for the two expensive transitions.

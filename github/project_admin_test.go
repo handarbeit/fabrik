@@ -350,3 +350,154 @@ func TestSetStatusFieldOptions_QueryOmitsIDForNilPointer(t *testing.T) {
 		t.Fatal("updateProjectV2FieldMutation no longer sends $options as singleSelectOptions — update this test")
 	}
 }
+
+func TestCreateProjectV2Field_SendsNameAndTypeAndReturnsID(t *testing.T) {
+	var gotVars map[string]interface{}
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Query     string                 `json:"query"`
+			Variables map[string]interface{} `json:"variables"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		gotVars, gotQuery = body.Variables, body.Query
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": map[string]interface{}{
+				"createProjectV2Field": map[string]interface{}{
+					"projectV2Field": map[string]interface{}{"id": "F_NEW"},
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	id, err := c.CreateProjectV2Field("P1", "Last run", FieldTypeText)
+	if err != nil {
+		t.Fatalf("CreateProjectV2Field: %v", err)
+	}
+	if id != "F_NEW" {
+		t.Errorf("id = %q, want F_NEW", id)
+	}
+	if gotVars["projectId"] != "P1" || gotVars["name"] != "Last run" || gotVars["dataType"] != "TEXT" {
+		t.Errorf("variables = %+v", gotVars)
+	}
+	if !strings.Contains(gotQuery, "createProjectV2Field") || strings.Contains(gotQuery, "updateProjectV2Field") {
+		t.Errorf("must use createProjectV2Field and never updateProjectV2Field: %s", gotQuery)
+	}
+}
+
+func TestCreateProjectV2Field_RejectsUnsupportedType(t *testing.T) {
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	if _, err := c.CreateProjectV2Field("P1", "X", "SINGLE_SELECT"); err == nil {
+		t.Fatal("expected error for unsupported data type")
+	}
+	if called {
+		t.Error("no request should be made for an unsupported data type")
+	}
+}
+
+func TestCreateProjectV2Field_EmptyIDIsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": map[string]interface{}{
+				"createProjectV2Field": map[string]interface{}{
+					"projectV2Field": map[string]interface{}{},
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	_, err := c.CreateProjectV2Field("P1", "Fabrik", FieldTypeText)
+	if err == nil || !strings.Contains(err.Error(), "Fabrik") {
+		t.Fatalf("expected error naming the field, got %v", err)
+	}
+}
+
+func TestCreateProjectV2Field_GraphQLError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"errors": []map[string]interface{}{{"message": "Name has already been taken"}},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	_, err := c.CreateProjectV2Field("P1", "Fabrik", FieldTypeText)
+	if err == nil || !strings.Contains(err.Error(), "already been taken") {
+		t.Fatalf("expected GitHub's message preserved, got %v", err)
+	}
+}
+
+func TestFetchProjectFields_PaginatesAndReturnsAllTypes(t *testing.T) {
+	calls := 0
+	var afters []interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Variables map[string]interface{} `json:"variables"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		afters = append(afters, body.Variables["after"])
+		calls++
+		var page map[string]interface{}
+		if calls == 1 {
+			page = map[string]interface{}{
+				"nodes": []map[string]interface{}{
+					{"id": "F1", "name": "Title", "dataType": "TITLE"},
+					{"id": "F2", "name": "Fabrik", "dataType": "SINGLE_SELECT"},
+					{}, // a node matching no fragment decodes empty
+				},
+				"pageInfo": map[string]interface{}{"hasNextPage": true, "endCursor": "CUR1"},
+			}
+		} else {
+			page = map[string]interface{}{
+				"nodes": []map[string]interface{}{
+					{"id": "F3", "name": "Last run", "dataType": "TEXT"},
+				},
+				"pageInfo": map[string]interface{}{"hasNextPage": false, "endCursor": ""},
+			}
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": map[string]interface{}{"node": map[string]interface{}{"fields": page}},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	fields, err := c.FetchProjectFields("P1")
+	if err != nil {
+		t.Fatalf("FetchProjectFields: %v", err)
+	}
+	if len(fields) != 3 {
+		t.Fatalf("fields = %+v, want 3", fields)
+	}
+	if fields[1].Name != "Fabrik" || fields[1].DataType != "SINGLE_SELECT" {
+		t.Errorf("fields[1] = %+v", fields[1])
+	}
+	if fields[2].ID != "F3" || fields[2].DataType != "TEXT" {
+		t.Errorf("fields[2] = %+v", fields[2])
+	}
+	if calls != 2 || afters[0] != nil || afters[1] != "CUR1" {
+		t.Errorf("pagination: calls=%d afters=%v", calls, afters)
+	}
+}
+
+func TestFetchProjectFields_ProjectNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{"data": map[string]interface{}{"node": nil}})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	if _, err := c.FetchProjectFields("P1"); err == nil {
+		t.Fatal("expected error when project is not found")
+	}
+}

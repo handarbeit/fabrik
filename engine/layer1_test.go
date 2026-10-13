@@ -2,10 +2,14 @@ package engine
 
 import (
 	"encoding/json"
+	"errors"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/tui"
 )
 
 // issueEventPayload builds a minimal issues / issue_comment webhook payload
@@ -205,4 +209,255 @@ func TestLayer1StatusRefreshEmptyProjectID(t *testing.T) {
 	if len(lookupCalls) != 0 {
 		t.Errorf("LookupIssueProjectItem called %d times with empty projectID, want 0", len(lookupCalls))
 	}
+}
+
+// prCommentPayload builds an issue_comment payload for a PR conversation
+// comment: the issue object carries a pull_request key (#2093).
+func prCommentPayload(repo string, n int, pullRequest any) []byte {
+	b, _ := json.Marshal(map[string]interface{}{
+		"issue": map[string]interface{}{
+			"number":       n,
+			"pull_request": pullRequest,
+		},
+		"repository": map[string]interface{}{"full_name": repo},
+	})
+	return b
+}
+
+func projectsV2ItemPayload(action string) []byte {
+	b, _ := json.Marshal(map[string]interface{}{"action": action})
+	return b
+}
+
+func layer1LookupCalls(c *mockGitHubClient) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.lookupIssueProjectItemCalls)
+}
+
+type layer1TestClock struct{ t time.Time }
+
+func (c *layer1TestClock) Now() time.Time { return c.t }
+
+// offBoardClient returns a mock whose lookup resolves to "not on the board".
+func offBoardClient() *mockGitHubClient {
+	return &mockGitHubClient{
+		lookupIssueProjectItemFn: func(string, string, int) (string, string, error) { return "", "", nil },
+	}
+}
+
+// TestLayer1PRCommentSkipped: a PR conversation comment makes no GraphQL call
+// and logs no warning (R1).
+func TestLayer1PRCommentSkipped(t *testing.T) {
+	client := &mockGitHubClient{
+		lookupIssueProjectItemFn: func(string, string, int) (string, string, error) {
+			return "", "", errors.New("Could not resolve to an Issue")
+		},
+	}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	events := make(chan tui.Event, 16)
+	eng.events = events
+	cache := layer1Cache(eng, client, "PVT_test", true)
+
+	pr := map[string]interface{}{"url": "https://api.github.com/repos/owner/repo/pulls/1"}
+	eng.applyLayer1StatusRefresh("issue_comment", prCommentPayload("owner/repo", 1, pr), cache)
+
+	if n := layer1LookupCalls(client); n != 0 {
+		t.Errorf("LookupIssueProjectItem calls = %d, want 0", n)
+	}
+	client.mu.Lock()
+	fp := len(client.fetchProjectItemStatusCalls)
+	client.mu.Unlock()
+	if fp != 0 {
+		t.Errorf("FetchProjectItemStatus calls = %d, want 0", fp)
+	}
+	select {
+	case ev := <-events:
+		t.Errorf("unexpected log event: %+v", ev)
+	default:
+	}
+}
+
+// TestLayer1PullRequestNullStillLooksUp pins rawPresent: a literal null (or an
+// absent key) is not a PR comment.
+func TestLayer1PullRequestNullStillLooksUp(t *testing.T) {
+	client := offBoardClient()
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	cache := layer1Cache(eng, client, "PVT_test", true)
+
+	eng.applyLayer1StatusRefresh("issue_comment", prCommentPayload("owner/repo", 1, nil), cache)
+	if n := layer1LookupCalls(client); n != 1 {
+		t.Errorf("null pull_request: lookup calls = %d, want 1", n)
+	}
+	eng.applyLayer1StatusRefresh("issues", issueEventPayload("owner/repo", 2), cache)
+	if n := layer1LookupCalls(client); n != 2 {
+		t.Errorf("absent pull_request: lookup calls = %d, want 2", n)
+	}
+}
+
+func TestRawPresent(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{{"", false}, {"null", false}, {"  null ", false}, {"  ", false}, {"{}", true}, {`{"url":"x"}`, true}}
+	for _, c := range cases {
+		if got := rawPresent(json.RawMessage(c.in)); got != c.want {
+			t.Errorf("rawPresent(%q) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
+// TestLayer1OffBoardNegativeCache covers R2: repeats within the TTL make no
+// call, expiry re-looks up, and distinct keys are independent.
+func TestLayer1OffBoardNegativeCache(t *testing.T) {
+	client := offBoardClient()
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	clk := &layer1TestClock{t: time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)}
+	eng.SetClock(clk)
+	cache := layer1Cache(eng, client, "PVT_test", true)
+
+	p1 := issueEventPayload("owner/repo", 1)
+	eng.applyLayer1StatusRefresh("issues", p1, cache)
+	eng.applyLayer1StatusRefresh("issue_comment", p1, cache)
+	if n := layer1LookupCalls(client); n != 1 {
+		t.Fatalf("within TTL: lookup calls = %d, want 1", n)
+	}
+
+	// A different number and a different repo are looked up independently.
+	eng.applyLayer1StatusRefresh("issues", issueEventPayload("owner/repo", 2), cache)
+	eng.applyLayer1StatusRefresh("issues", issueEventPayload("owner/other", 1), cache)
+	if n := layer1LookupCalls(client); n != 3 {
+		t.Fatalf("distinct keys: lookup calls = %d, want 3", n)
+	}
+
+	clk.t = clk.t.Add(layer1OffBoardTTL + time.Second)
+	eng.applyLayer1StatusRefresh("issues", p1, cache)
+	if n := layer1LookupCalls(client); n != 4 {
+		t.Errorf("after TTL: lookup calls = %d, want 4", n)
+	}
+	// Marking swept the expired siblings; only the fresh entry remains.
+	eng.layer1OffBoardMu.Lock()
+	size := len(eng.layer1OffBoard)
+	eng.layer1OffBoardMu.Unlock()
+	if size != 1 {
+		t.Errorf("negative cache size = %d, want 1 after sweep", size)
+	}
+}
+
+// TestLayer1OffBoardErrorNotCached: a failed lookup is retried on the next event.
+func TestLayer1OffBoardErrorNotCached(t *testing.T) {
+	client := &mockGitHubClient{
+		lookupIssueProjectItemFn: func(string, string, int) (string, string, error) {
+			return "", "", errors.New("502")
+		},
+	}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	cache := layer1Cache(eng, client, "PVT_test", true)
+
+	eng.applyLayer1StatusRefresh("issues", issueEventPayload("owner/repo", 1), cache)
+	eng.applyLayer1StatusRefresh("issues", issueEventPayload("owner/repo", 1), cache)
+	if n := layer1LookupCalls(client); n != 2 {
+		t.Errorf("lookup calls = %d, want 2 (errors must not be cached)", n)
+	}
+}
+
+// TestLayer1PositiveResultLeavesNoNegativeEntry: a positive lookup registers
+// the item and clears any stale negative entry.
+func TestLayer1PositiveResultLeavesNoNegativeEntry(t *testing.T) {
+	found := false
+	client := &mockGitHubClient{
+		lookupIssueProjectItemFn: func(string, string, int) (string, string, error) {
+			if found {
+				return "PVTI_1", "Research", nil
+			}
+			return "", "", nil
+		},
+	}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	cache := layer1Cache(eng, client, "PVT_test", true)
+
+	eng.applyLayer1StatusRefresh("issues", issueEventPayload("owner/repo", 1), cache)
+	eng.layer1OffBoardClearAll() // board-add, so the next event looks up again
+	found = true
+	eng.applyLayer1StatusRefresh("issues", issueEventPayload("owner/repo", 1), cache)
+
+	if id, ok := cache.GetItemID(boardcache.ItemKey("owner/repo", 1)); !ok || id != "PVTI_1" {
+		t.Errorf("GetItemID = %q ok=%v, want PVTI_1", id, ok)
+	}
+	eng.layer1OffBoardMu.Lock()
+	size := len(eng.layer1OffBoard)
+	eng.layer1OffBoardMu.Unlock()
+	if size != 0 {
+		t.Errorf("negative cache size = %d, want 0", size)
+	}
+}
+
+// TestLayer1OffBoardClearedOnBoardAdd: a projects_v2_item "created" event
+// clears the negative entries, so the next event looks up again. Other actions
+// do not.
+func TestLayer1OffBoardClearedOnBoardAdd(t *testing.T) {
+	client := offBoardClient()
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	cache := layer1Cache(eng, client, "PVT_test", true)
+	p := issueEventPayload("owner/repo", 1)
+
+	eng.applyLayer1StatusRefresh("issues", p, cache)
+	eng.applyLayer1StatusRefresh("projects_v2_item", projectsV2ItemPayload("edited"), cache)
+	eng.applyLayer1StatusRefresh("issues", p, cache)
+	if n := layer1LookupCalls(client); n != 1 {
+		t.Fatalf("after non-created item event: lookup calls = %d, want 1", n)
+	}
+
+	eng.applyLayer1StatusRefresh("projects_v2_item", projectsV2ItemPayload("created"), cache)
+	eng.applyLayer1StatusRefresh("issues", p, cache)
+	if n := layer1LookupCalls(client); n != 2 {
+		t.Errorf("after created: lookup calls = %d, want 2", n)
+	}
+}
+
+// TestLayer1OffBoardBypassedOnceItemIDKnown: when the cache gains an itemID
+// despite an unexpired negative entry, the fast path is taken.
+func TestLayer1OffBoardBypassedOnceItemIDKnown(t *testing.T) {
+	client := offBoardClient()
+	client.fetchProjectItemStatusFn = func(string) (string, error) { return "Plan", nil }
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	cache := layer1Cache(eng, client, "PVT_test", true)
+	p := issueEventPayload("owner/repo", 1)
+
+	eng.applyLayer1StatusRefresh("issues", p, cache)
+	key := boardcache.ItemKey("owner/repo", 1)
+	cache.RegisterItemID(key, "PVTI_9")
+	eng.applyLayer1StatusRefresh("issues", p, cache)
+
+	if n := layer1LookupCalls(client); n != 1 {
+		t.Errorf("lookup calls = %d, want 1", n)
+	}
+	client.mu.Lock()
+	fp := len(client.fetchProjectItemStatusCalls)
+	client.mu.Unlock()
+	if fp != 1 {
+		t.Errorf("FetchProjectItemStatus calls = %d, want 1", fp)
+	}
+}
+
+// TestLayer1OffBoardConcurrent exercises the mutex under -race.
+func TestLayer1OffBoardConcurrent(t *testing.T) {
+	eng := testEngine(t, offBoardClient(), &mockClaudeInvoker{})
+	var wg sync.WaitGroup
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; i < 200; i++ {
+				k := layer1OffBoardKey("P", "o/r", g*1000+i)
+				eng.layer1OffBoardMark(k)
+				eng.layer1OffBoardHit(k)
+				if i%50 == 0 {
+					eng.layer1OffBoardClearAll()
+				}
+				eng.layer1OffBoardClear(k)
+			}
+		}(g)
+	}
+	wg.Wait()
 }

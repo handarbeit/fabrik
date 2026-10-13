@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/itemstate"
@@ -14,7 +13,7 @@ import (
 
 // reinvokeOpts parameterizes dispatchReinvoke's per-call-site divergences.
 // The three reinvoke dispatchers (CI-fix, review, rebase) share an identical
-// goroutine scaffold (WorkerEntered -> semaphore -> ensureRepoReady -> build
+// goroutine scaffold (queued WorkerEntered -> semaphore -> WorkerSlotAcquired -> ensureRepoReady -> build
 // synthetic comment(s) -> optional stage variant -> heartbeat/lock ->
 // processComments -> optional post-processing); only these fields differ
 // per call site.
@@ -39,6 +38,9 @@ type reinvokeOpts struct {
 	// worktree dir and the processComments error. Used for CI's no-op-SHA
 	// recording and rebase's auto-merge re-enablement.
 	after func(workDir string, err error)
+	// kind is the worker kind recorded on the Worker handle (itemstate.WorkerKind*,
+	// #2121): ci-fix, review or rebase reinvoke.
+	kind string
 	// cycle names the cycle counter(s) charged synchronously before this
 	// dispatch, so dispatchReinvoke can refund them when the invocation
 	// provably never ran (#1812). The zero value refunds nothing.
@@ -53,11 +55,17 @@ type reinvokeOpts struct {
 type didNotRunKind string
 
 const (
-	didNotRunSuspended    didNotRunKind = "account-suspended"
-	didNotRunUsageLimit   didNotRunKind = "usage-limit"
-	didNotRunAPIError     didNotRunKind = "api-error"
-	didNotRunAPIKeyHelper didNotRunKind = "api-key-helper"
-	didNotRunPostMerge    didNotRunKind = "post-merge"
+	didNotRunAccountUsageLimited didNotRunKind = "account-usage-limited"
+	didNotRunUsageLimit          didNotRunKind = "usage-limit"
+	didNotRunAPIError            didNotRunKind = "api-error"
+	didNotRunAPIKeyHelper        didNotRunKind = "api-key-helper"
+	didNotRunPostMerge           didNotRunKind = "post-merge"
+	// didNotRunSkillUnresolved: the stage's skill reference resolved to no
+	// loaded plugin (ADR 2137), so no worker was spawned.
+	didNotRunSkillUnresolved didNotRunKind = "skill-unresolved"
+	// didNotRunSkillLoadFailed: the stage's skill failed to load in the worker
+	// (#2138, ADR-2138), so the run did none of the requested work.
+	didNotRunSkillLoadFailed didNotRunKind = "skill-load-failed"
 )
 
 // classifyDidNotRun maps a processComments error to the did-not-run set the
@@ -83,6 +91,14 @@ func classifyDidNotRun(err error) didNotRunKind {
 	var keyHelperErr *apiKeyHelperDetectedError
 	if errors.As(err, &keyHelperErr) {
 		return didNotRunAPIKeyHelper
+	}
+	var skillErr *skillUnresolvedError
+	if errors.As(err, &skillErr) {
+		return didNotRunSkillUnresolved
+	}
+	var skillLoadErr *claudeSkillLoadError
+	if errors.As(err, &skillLoadErr) {
+		return didNotRunSkillLoadFailed
 	}
 	return ""
 }
@@ -127,11 +143,23 @@ func commentIDsForLog(comments []gh.Comment) string {
 	return strings.Join(ids, "|")
 }
 
+// commentIDsTrigger joins the ids of a synthetic comment batch for the Worker
+// trigger (#2121): "," separated, "" for an empty batch.
+func commentIDsTrigger(comments []gh.Comment) string {
+	ids := make([]string, 0, len(comments))
+	for _, c := range comments {
+		if c.ID != "" {
+			ids = append(ids, c.ID)
+		}
+	}
+	return strings.Join(ids, ",")
+}
+
 // dispatchReinvoke is the shared goroutine scaffold for all three reinvoke
 // dispatchers (dispatchCIFixReinvoke, dispatchReviewReinvoke,
-// dispatchRebaseReinvoke). It performs: optional precheck -> WorkerEntered ->
-// semaphore acquire -> ensureRepoReady (ErrSkipItem skips silently) ->
-// opts.build -> optional opts.stageVariant -> LocalLockAcquired + heartbeat +
+// dispatchRebaseReinvoke). It performs: optional precheck -> queued WorkerEntered ->
+// semaphore acquire -> WorkerSlotAcquired -> ensureRepoReady (ErrSkipItem skips
+// silently) -> opts.build -> WorkerTriggerSet -> optional opts.stageVariant -> heartbeat +
 // onPIDReady -> processCommentsClassified -> (did-not-run refund | optional opts.after) -> error logging
 // (ctx.Err() short-circuit) -> deferred WorkerExited.
 func (e *Engine) dispatchReinvoke(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, opts reinvokeOpts) {
@@ -142,14 +170,20 @@ func (e *Engine) dispatchReinvoke(ctx context.Context, board *gh.ProjectBoard, i
 
 	itemRepo := itemOwnerRepoString(item, e.defaultRepo())
 
-	// Mark in-flight via the Store so the dispatch guard (snap.Worker() != nil) blocks
-	// double-dispatch before the goroutine starts. WorkerExited is deferred inside the
-	// goroutine so any early exit also clears it.
+	// Claim the item via the Store so the dispatch guard (snap.Worker() != nil) blocks
+	// double-dispatch before the goroutine starts — as a QUEUED worker: it holds no
+	// worker slot until the goroutine acquires e.sem, and until then status and
+	// health must not report it as running (#2121, F16). WorkerExited is deferred
+	// inside the goroutine so any early exit also clears it.
+	queuedAt := e.now()
 	e.store.Apply(itemstate.WorkerEntered{
-		Repo:      itemRepo,
-		Number:    item.Number,
-		StageName: stage.Name,
-		StartedAt: time.Now(),
+		Repo:        itemRepo,
+		Number:      item.Number,
+		StageName:   stage.Name,
+		StartedAt:   queuedAt,
+		Kind:        opts.kind,
+		Queued:      true,
+		QueuedSince: queuedAt,
 	})
 	e.wg.Add(1)
 
@@ -165,6 +199,13 @@ func (e *Engine) dispatchReinvoke(ctx context.Context, board *gh.ProjectBoard, i
 		}
 		defer func() { <-e.sem }()
 
+		// The slot is held: the worker is running from here, and the PID<=0
+		// stale-worker detector measures from now rather than from dispatch. A
+		// reinvoke deliberately claims no store Lock: Lock mirrors the
+		// fabrik:locked label, which a reinvoke never applies (its cross-instance
+		// marker is fabrik:editing), so there is nothing to release (#2179, ADR 2179).
+		e.store.Apply(itemstate.WorkerSlotAcquired{Repo: itemRepo, Number: item.Number, At: e.now()})
+
 		if err := e.ensureRepoReady(ctx, item); err != nil {
 			if errors.Is(err, ErrSkipItem) {
 				e.logf(item.Number, opts.tag, "repo not ready, skipping reinvoke\n")
@@ -178,21 +219,15 @@ func (e *Engine) dispatchReinvoke(ctx context.Context, board *gh.ProjectBoard, i
 		workDir := wm.WorktreeDir(item.Number)
 
 		comments := opts.build(workDir)
+		if trigger := commentIDsTrigger(comments); trigger != "" {
+			e.store.Apply(itemstate.WorkerTriggerSet{Repo: itemRepo, Number: item.Number, Trigger: trigger})
+		}
 
 		reinvokeStage := stage
 		if opts.stageVariant != nil {
 			reinvokeStage = opts.stageVariant(stage)
 		}
 
-		// Register WorkerHandle so the heartbeat/liveness system tracks this goroutine.
-		now := time.Now()
-		e.store.Apply(itemstate.LocalLockAcquired{
-			Repo:       itemRepo,
-			Number:     item.Number,
-			User:       e.lockIdentity(),
-			AcquiredAt: now,
-			Worker:     &itemstate.WorkerHandle{StageName: stage.Name, StartedAt: now, LastSignAt: now},
-		})
 		done := make(chan struct{})
 		defer close(done)
 		e.startHeartbeat(ctx, itemRepo, item.Number, done)

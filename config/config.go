@@ -8,6 +8,8 @@ import (
 
 	"github.com/joho/godotenv"
 	"gopkg.in/yaml.v3"
+
+	"github.com/handarbeit/fabrik/warnings"
 )
 
 // ProjectConfig holds the non-secret, project-level settings read from
@@ -57,6 +59,7 @@ type ProjectConfig struct {
 	AutoMergeStrategy          string   `yaml:"auto_merge_strategy"`
 	SingletonCatchUp           string   `yaml:"singleton_catch_up"`
 	MergeTrainOverlapIgnore    []string `yaml:"merge_train_overlap_ignore"`
+	PluginDirs                 []string `yaml:"plugin_dirs"`
 	MaxBatchSize               *int     `yaml:"max_batch_size"`
 	MaxBisectValidations       *int     `yaml:"max_bisect_validations"`
 	MaxTrainRebaseCycles       *int     `yaml:"max_train_rebase_cycles"`
@@ -181,11 +184,20 @@ func LoadProjectConfig() (ProjectConfig, error) {
 // travels with the repo; ignoring it defeats that purpose. The warning is
 // suppressed when no .git entry is present — there is no repo to leak into.
 func WarnIfConfigIgnored() {
-	if _, err := os.Stat(".git"); os.IsNotExist(err) {
-		return
+	var conds []warnings.Condition
+	if _, err := os.Stat(".git"); !os.IsNotExist(err) && isInGitignore(".fabrik/config.yaml") {
+		conds = append(conds, warnings.Condition{
+			Subject: "config.yaml",
+			Title:   ".fabrik/config.yaml is listed in .gitignore",
+			Detail: ".fabrik/config.yaml is listed in .gitignore — this file should be committed to git so project config travels with the repo.\n\n" +
+				"Fix: remove it from .gitignore and commit the file.",
+			LogLine: ".fabrik/config.yaml is listed in .gitignore — this file should be committed to git so project config travels with the repo",
+		})
 	}
-	if isInGitignore(".fabrik/config.yaml") {
-		fmt.Fprintln(os.Stderr, "[warn] .fabrik/config.yaml is listed in .gitignore — this file should be committed to git so project config travels with the repo")
+	// The check always completes, so Reconcile also clears the entry once the
+	// file is no longer ignored (#2135).
+	if err := warnings.Reconcile(os.Stderr, "config_ignored", conds); err != nil {
+		fmt.Fprintf(os.Stderr, "[startup] warning: recording config_ignored warning: %v\n", err)
 	}
 }
 

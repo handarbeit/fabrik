@@ -38,9 +38,12 @@ func applyProjectItem(item *ItemState, pi gh.ProjectItem) ChangeFlags {
 		flags |= StateChanged
 	}
 
-	if !reflect.DeepEqual(item.Labels, pi.Labels) {
-		item.Labels = copyStrings(pi.Labels)
-		flags |= LabelsChanged
+	if !pi.LabelsAbsent {
+		if !reflect.DeepEqual(item.Labels, pi.Labels) {
+			item.Labels = copyStrings(pi.Labels)
+			flags |= LabelsChanged
+		}
+		item.LabelsKnown = true
 	}
 
 	if item.Status != pi.Status {
@@ -52,6 +55,7 @@ func applyProjectItem(item *ItemState, pi gh.ProjectItem) ChangeFlags {
 	if !item.UpdatedAt.Equal(pi.UpdatedAt) {
 		item.UpdatedAt = pi.UpdatedAt
 	}
+	applyLayerEvidence(item, pi.IssueLayerUpdatedAt, pi.LinkedPRUpdatedAt, pi.IssueCommentTotal, pi.IssueCommentTotalKnown)
 
 	// Copy the milestone only when the producer actually observed it, so write
 	// paths that do not carry it (deep fetch, fallback fetch, PR nodes) cannot
@@ -141,8 +145,15 @@ func applyProjectItem(item *ItemState, pi gh.ProjectItem) ChangeFlags {
 // Deep fields (Body, Comments, Assignees, BlockedBy, LinkedPRReviews, etc.)
 // are left unchanged. Used by CacheImpl.Reconcile to apply shallow board
 // updates without wiping deep-fetched data.
-func applyShallowItem(item *ItemState, pi gh.ProjectItem) ChangeFlags {
+func applyShallowItem(item *ItemState, pi gh.ProjectItem, fetchedAt time.Time, grace time.Duration, now time.Time) ChangeFlags {
 	var flags ChangeFlags
+
+	// Engine writes made after the listing was fetched (within the grace
+	// margin) keep their local value; see protectShallow (#2159).
+	view := protectShallow(item, pi, fetchedAt, grace, now)
+	if dropEngineWrites(item, view.Drop) {
+		flags |= EngineWriteRecordedChanged
+	}
 
 	if item.ID != pi.ID && pi.ID != "" {
 		item.ID = pi.ID
@@ -161,20 +172,33 @@ func applyShallowItem(item *ItemState, pi gh.ProjectItem) ChangeFlags {
 		flags |= TitleBodyChanged
 	}
 
-	if item.State != stateFrom(pi) || item.IsClosed != pi.IsClosed || item.IsPR != pi.IsPR {
-		item.State = stateFrom(pi)
-		item.IsClosed = pi.IsClosed
+	state, isClosed := stateFrom(pi), pi.IsClosed
+	if view.KeepClosed {
+		state, isClosed = item.State, item.IsClosed
+	}
+	if item.State != state || item.IsClosed != isClosed || item.IsPR != pi.IsPR {
+		item.State = state
+		item.IsClosed = isClosed
 		item.IsPR = pi.IsPR
 		flags |= StateChanged
 	}
 
-	if !reflect.DeepEqual(item.Labels, pi.Labels) {
-		item.Labels = copyStrings(pi.Labels)
-		flags |= LabelsChanged
+	if !pi.LabelsAbsent {
+		labels := pi.Labels
+		if view.Labels != nil {
+			labels = view.Labels
+		}
+		if view.Labels != nil && sameStringSet(item.Labels, labels) {
+			// Only the order differs from the kept local set: leave it untouched.
+		} else if !reflect.DeepEqual(item.Labels, labels) {
+			item.Labels = copyStrings(labels)
+			flags |= LabelsChanged
+		}
+		item.LabelsKnown = true
 	}
 
-	if item.Status != pi.Status {
-		item.Status = pi.Status
+	if item.Status != view.Status {
+		item.Status = view.Status
 		item.Terminal = false
 		item.StatusEnteredAt = time.Now()
 		flags |= StatusChanged
@@ -183,6 +207,7 @@ func applyShallowItem(item *ItemState, pi gh.ProjectItem) ChangeFlags {
 	if !item.UpdatedAt.Equal(pi.UpdatedAt) {
 		item.UpdatedAt = pi.UpdatedAt
 	}
+	applyLayerEvidence(item, pi.IssueLayerUpdatedAt, pi.LinkedPRUpdatedAt, pi.IssueCommentTotal, pi.IssueCommentTotalKnown)
 
 	if pi.MilestoneKnown {
 		flags |= applyMilestone(item, pi.Milestone, true)
@@ -218,8 +243,19 @@ func applyMilestone(item *ItemState, m *gh.Milestone, known bool) ChangeFlags {
 // applyProbeItem updates only the probe-visible fields of item from pi.
 // Labels are explicitly NOT updated — the probe query fetches no label data.
 // Wiping Labels here would silently discard the cached label set.
-func applyProbeItem(item *ItemState, pi gh.BoardProbeItem) ChangeFlags {
+//
+// Status and closed state honour the engine's recent writes exactly as
+// applyShallowItem does (#2178), through the same protectStatusClosed rule: a
+// listing fetched before the engine's write plus grace keeps the local value,
+// raises no flag and does not reset StatusEnteredAt. Label records are never
+// touched, since a probe listing cannot confirm them.
+func applyProbeItem(item *ItemState, pi gh.BoardProbeItem, fetchedAt time.Time, grace time.Duration, now time.Time) ChangeFlags {
 	var flags ChangeFlags
+
+	view := protectStatusClosed(item, pi.Status, pi.IsClosed, fetchedAt, grace, now)
+	if dropEngineWrites(item, view.Drop) {
+		flags |= EngineWriteRecordedChanged
+	}
 
 	if item.ID != pi.ContentID && pi.ContentID != "" {
 		item.ID = pi.ContentID
@@ -228,27 +264,34 @@ func applyProbeItem(item *ItemState, pi gh.BoardProbeItem) ChangeFlags {
 		item.ItemID = pi.ItemID
 	}
 
+	isClosed := pi.IsClosed
+	if view.KeepClosed {
+		isClosed = item.IsClosed
+	}
 	probeState := "open"
-	if pi.IsClosed {
+	if isClosed {
 		probeState = "closed"
 	}
-	if item.State != probeState || item.IsClosed != pi.IsClosed || item.IsPR != pi.IsPR {
+	if item.State != probeState || item.IsClosed != isClosed || item.IsPR != pi.IsPR {
 		item.State = probeState
-		item.IsClosed = pi.IsClosed
+		item.IsClosed = isClosed
 		item.IsPR = pi.IsPR
 		flags |= StateChanged
 	}
 
-	if item.Status != pi.Status {
-		item.Status = pi.Status
+	if item.Status != view.Status {
+		item.Status = view.Status
 		item.Terminal = false
 		item.StatusEnteredAt = time.Now()
 		flags |= StatusChanged
 	}
 
+	// UpdatedAt is assigned unconditionally, as before: a lagging listing can
+	// move it backwards, which only makes the item look no fresher than it was.
 	if !item.UpdatedAt.Equal(pi.EffectiveUpdatedAt) {
 		item.UpdatedAt = pi.EffectiveUpdatedAt
 	}
+	applyLayerEvidence(item, pi.IssueLayerUpdatedAt, pi.LinkedPRUpdatedAt, pi.IssueCommentTotal, pi.IssueCommentTotalKnown)
 
 	// Labels are intentionally not touched here. The probe query contains no
 	// label data; setting item.Labels from an empty probe would wipe the
@@ -257,9 +300,43 @@ func applyProbeItem(item *ItemState, pi gh.BoardProbeItem) ChangeFlags {
 	return flags
 }
 
+// applyLayerEvidence copies the layered board evidence (#2180) from a producer
+// that captured it. A zero issue layer means the producer did not (a deep or
+// fallback fetch built from elsewhere), so the stored evidence is left alone
+// rather than wiped; the linked-PR time is copied together with the issue layer
+// because zero then genuinely means "no linked PR".
+func applyLayerEvidence(item *ItemState, issueLayer, prAt time.Time, commentTotal int, commentTotalKnown bool) {
+	if !issueLayer.IsZero() {
+		item.IssueLayerUpdatedAt = issueLayer
+		item.LinkedPRUpdatedAt = prAt
+	}
+	if commentTotalKnown {
+		item.IssueCommentTotal = commentTotal
+		item.IssueCommentTotalKnown = true
+	}
+}
+
 func stateFrom(pi gh.ProjectItem) string {
 	if pi.IsClosed {
 		return "closed"
 	}
 	return "open"
+}
+
+// sameStringSet reports whether a and b hold the same strings, ignoring order.
+func sameStringSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	m := make(map[string]int, len(a))
+	for _, x := range a {
+		m[x]++
+	}
+	for _, x := range b {
+		m[x]--
+		if m[x] < 0 {
+			return false
+		}
+	}
+	return true
 }

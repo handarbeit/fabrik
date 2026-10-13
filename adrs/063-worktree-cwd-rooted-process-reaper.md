@@ -1,7 +1,7 @@
 # ADR 063: Worktree cwd-Rooted Process Reaper
 
 **Date**: 2026-07-19
-**Status**: Accepted
+**Status**: Accepted (macOS `lsof` call amended by ADR 1805: bounded by a 10s timeout, skipped with a warning on expiry)
 **Issue**: #975 — bug(cleanup): orphaned child processes survive stage teardown — PGID-scoped 'grandchild cleanup' misses setsid'd descendants (e.g. dev servers)
 
 ## Context

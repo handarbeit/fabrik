@@ -52,6 +52,13 @@ func ClassifyCheckRuns(checkRuns []CheckRun) (status CheckRunStatus, pending, fa
 	return status, pending, failed
 }
 
+// LatestCheckRuns is the exported form of latestCheckRunsByName, for callers
+// that need the latest-per-name reduction without ClassifyCheckRuns's
+// pending/failed split (engine/ci_status.go's "all passed" check).
+func LatestCheckRuns(checkRuns []CheckRun) []CheckRun {
+	return latestCheckRunsByName(checkRuns)
+}
+
 // latestCheckRunsByName reduces checkRuns to one entry per Name, keeping the
 // run with the highest ID (GitHub check-run IDs are monotonically increasing,
 // so the highest ID is the most recent rerun of that check name). Output

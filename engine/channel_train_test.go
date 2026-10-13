@@ -22,7 +22,7 @@ func trainChannelEngine(t *testing.T) (*Engine, *chanSink, *mockGitHubClient) {
 	client := &mockGitHubClient{}
 	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
 	eng.fabrikDir = t.TempDir()
-	eng.startChannelEvents()
+	eng.startChannelEventsIn(channelStateDir(eng.fabrikDir), false)
 	t.Cleanup(eng.closeChannelEvents)
 	ce := eng.channelEvents()
 	if _, err := ce.hub.Subscribe(channelevents.Subscription{Subscriber: "T", Events: []channelevents.EventType{

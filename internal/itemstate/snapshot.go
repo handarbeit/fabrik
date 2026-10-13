@@ -28,6 +28,7 @@ type Snapshot struct {
 //   - ItemState.Milestone (pointer)
 //   - ItemState.CooldownAt
 //   - ItemState.LabelAppliedAt
+//   - ItemState.EngineWriteAt
 //   - ItemState.BaseBranchWarned
 //   - ItemState.StageState.Attempts
 //   - ItemState.StageState.LastAttemptAt
@@ -45,6 +46,8 @@ type Snapshot struct {
 //   - LinkedPRState.ReviewRequests
 //   - LinkedPRState.ThreadComments
 //   - LinkedPRState.CheckRuns
+//   - LinkedPRState.Facts.Mergeable
+//   - LinkedPRState.CIVerdict.Failing
 func newSnapshot(s ItemState) Snapshot {
 	c := s
 
@@ -58,6 +61,7 @@ func newSnapshot(s ItemState) Snapshot {
 	}
 	c.CooldownAt = copyMap(s.CooldownAt)
 	c.LabelAppliedAt = copyMap(s.LabelAppliedAt)
+	c.EngineWriteAt = copyMap(s.EngineWriteAt)
 	c.BaseBranchWarned = copyMap(s.BaseBranchWarned)
 	c.StageState = copyStageState(s.StageState)
 	c.CommentBreaker.InvocationsAt = copyTimes(s.CommentBreaker.InvocationsAt)
@@ -68,6 +72,7 @@ func newSnapshot(s ItemState) Snapshot {
 		lpr.ReviewRequests = copyReviewRequests(s.LinkedPR.ReviewRequests)
 		lpr.ThreadComments = copyComments(s.LinkedPR.ThreadComments)
 		lpr.CheckRuns = copyCheckRuns(s.LinkedPR.CheckRuns)
+		lpr.Facts, lpr.CIVerdict = copyPRFacts(s.LinkedPR.Facts, s.LinkedPR.CIVerdict)
 		c.LinkedPR = &lpr
 	}
 
@@ -79,6 +84,19 @@ func newSnapshot(s ItemState) Snapshot {
 	if s.Worker != nil {
 		w := *s.Worker
 		c.Worker = &w
+	}
+	if s.PendingRetry != nil {
+		pr := *s.PendingRetry
+		c.PendingRetry = &pr
+	}
+	if s.GateHold != nil {
+		gh := *s.GateHold
+		gh.IDs = copyStrings(s.GateHold.IDs)
+		c.GateHold = &gh
+	}
+	if s.ConflictResolution != nil {
+		cr := *s.ConflictResolution
+		c.ConflictResolution = &cr
 	}
 
 	return Snapshot{state: c}
@@ -138,6 +156,7 @@ func (s Snapshot) LinkedPR() *LinkedPRState {
 	lpr.ReviewRequests = copyReviewRequests(s.state.LinkedPR.ReviewRequests)
 	lpr.ThreadComments = copyComments(s.state.LinkedPR.ThreadComments)
 	lpr.CheckRuns = copyCheckRuns(s.state.LinkedPR.CheckRuns)
+	lpr.Facts, lpr.CIVerdict = copyPRFacts(s.state.LinkedPR.Facts, s.state.LinkedPR.CIVerdict)
 	return &lpr
 }
 
@@ -168,10 +187,17 @@ func (s Snapshot) HasActiveCooldown(now time.Time) bool {
 }
 
 // HasExpiredCooldown reports whether any CooldownAt entry is non-zero and
-// has already expired relative to now. Reads directly from the snapshot's
+// has already expired relative to now, ignoring the absolute
+// ArchiveEligibleCooldown cache. Admission consumes expired entries
+// (ExpiredCooldownsConsumed, #2096), so in practice this is true only for
+// expiries the engine has not yet acted on. Reads directly from the snapshot's
 // already-copied map — no additional allocation.
 func (s Snapshot) HasExpiredCooldown(now time.Time) bool {
-	for _, t := range s.state.CooldownAt {
+	for reason, t := range s.state.CooldownAt {
+		// archive-eligible-at is an absolute "eligible since" cache, not a gate.
+		if reason == ArchiveEligibleCooldown {
+			continue
+		}
 		if !t.IsZero() && !now.Before(t) {
 			return true
 		}
@@ -449,4 +475,15 @@ func copyStageState(s StageState) StageState {
 		StallHintPending:     copyMap(s.StallHintPending),
 		StallEpisodeArmed:    copyMap(s.StallEpisodeArmed),
 	}
+}
+
+// copyPRFacts deep-copies the pointer and slice members of the overseer PR
+// facts (#2122).
+func copyPRFacts(f PRFacts, v CIVerdictRecord) (PRFacts, CIVerdictRecord) {
+	if f.Mergeable != nil {
+		m := *f.Mergeable
+		f.Mergeable = &m
+	}
+	v.Failing = copyStrings(v.Failing)
+	return f, v
 }

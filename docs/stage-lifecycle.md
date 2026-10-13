@@ -60,7 +60,7 @@ Each issue gets `.fabrik/worktrees/issue-<N>` on branch `fabrik/issue-<N>`:
 
 #### Dependency Install Responsibility Split
 
-The engine's `updateWorktreeFromMain` rebases the worktree onto main but does not run any dependency install. The Review and Validate skills are responsible for prompting Claude to run the project's install step after the rebase step completes. The project's `CLAUDE.md` is the authoritative source for the install command. This split keeps Fabrik package-manager-agnostic. See `.fabrik/plugin/skills/fabrik-validate/SKILL.md` and `.fabrik/plugin/skills/fabrik-review/SKILL.md` for the skill-side instruction.
+The engine's `updateWorktreeFromMain` rebases the worktree onto main but does not run any dependency install. The Review and Validate skills are responsible for prompting Claude to run the project's install step after the rebase step completes. The project's `CLAUDE.md` is the authoritative source for the install command. This split keeps Fabrik package-manager-agnostic. See `.fabrik/plugin/skills/validate/SKILL.md` and `.fabrik/plugin/skills/review/SKILL.md` for the skill-side instruction.
 
 ### Read-Only Stage Stashing
 
@@ -82,9 +82,24 @@ Before each Claude invocation, the engine writes context documents to `.fabrik-c
 | `.fabrik-context/stage-Review.md` | Review stage comment output |
 | `.fabrik-context/pr-description.md` | Linked PR description (for `post_to_pr` stages) |
 | `.fabrik-context/codebase-changes.md` | Files changed on `origin/<baseBranch>` since the prior stage ran (omitted on first stage or when no changes) |
-| `.fabrik-context/ci-status.md` | PR number, live PR head SHA, CI verdict for that head (`green`, `red`, `pending`, `none`, `unknown`), `ci_gated` (the stage's `wait_for_ci`) and a timestamp; written for stage and comment invocations whenever the item has a linked open PR, removed otherwise |
+| `.fabrik-context/ci-status.md` | PR number, live PR head SHA, CI verdict for that head (`green`, `red`, `pending`, `none`, `unknown`), `ci_gated` (the stage's `wait_for_ci`), `ci_gate_ahead` (a later stage has `wait_for_ci`), a timestamp and, for a `red` verdict, a `## Failing checks` section; written for stage and comment invocations whenever the item has a linked open PR, removed otherwise |
 
-**`ci-status.md` and the redundant-suite skip** (#1997, ADR-1997): the verdict comes from live, uncached reads (`FindPRForIssue`, `FetchPRDetails`, `FetchCheckRuns`) fed through the landing paths' `classifyLandingCI` (and so `ciSuiteHold`) unmodified. Zero check runs is always `none` — never the ADR-933 `mergeable_state` green — a read error is `unknown`, and a classifier `green` is demoted to `pending` unless every latest check run is completed with `success` or `neutral` (`skipped` is not passing — a path-filtered test job reports it without running the suite). The test-running skills skip the local full-suite run only when `verdict` is `green`, `git rev-parse HEAD` equals `head_sha` and `git status --porcelain` is empty; after a code change or rebase in a `ci_gated` stage they run build plus targeted tests and rely on the `wait_for_ci` gate on the new head. The `-comment` variants never take that shortcut: comment processing does not complete the stage, so no gate runs on a comment-pushed head and they treat `ci_gated` as `false`. The file is a snapshot taken at invocation start: a mid-run push moves HEAD and makes it inert.
+**`ci-status.md` and what to run locally** (#1997, ADR-1997; #2130, ADR-2130; #2116, ADR-2116): the verdict comes from live, uncached reads (`FindPRForIssue`, `FetchPRDetails`, `FetchCheckRuns`) fed through the landing paths' `classifyLandingCI` (and so `ciSuiteHold`) unmodified. Zero check runs is always `none` — never the ADR-933 `mergeable_state` green — a read error is `unknown`, and a classifier `green` is demoted to `pending` unless every latest check run is completed with `success` or `neutral` (`skipped` is not passing — a path-filtered test job reports it without running the suite). A CI gate *stands behind* a push when `ci_gated` (the current stage's `wait_for_ci`) or `ci_gate_ahead` (any later managed stage has it, computed from stage config) is `true`. The test-running skills (`validate`, `review`, `implement` and their `-comment` variants) read the file to decide what to run locally:
+
+- `ci-status.md` absent, or no gate stands behind the push (`ci_gated` and `ci_gate_ahead` both `false`): the full-suite step, unchanged, reported as `PASSED`. For a `red` verdict the reproduction is still targeted first; the full suite comes only after the fix, as the stand-in for the missing gate.
+- A gate stands behind the push, `verdict` `green`, `git rev-parse HEAD` equal to `head_sha` and `git status --porcelain` empty: skip the test invocation, reported as `SKIPPED — CI green on <sha>`.
+- A gate stands behind the push, `verdict` `red`: read the `## Failing checks` section (then `gh pr checks`, or the run log, if it is thin) and reproduce only what it names — never the full suite as a first step. A test check is narrowed to the failing tests or the smallest unit containing them; a lint, build or format check runs its own command. After a fix the skill re-runs those tests plus the tests covering the changed code and leaves the full-suite verdict to CI.
+- A gate stands behind the push, `verdict` `pending`, `unknown` or `none`, or HEAD differs from `head_sha` (this run pushed or rebased, or a previous invocation pushed the head), or a dirty tree: the build plus the tests covering the changed files, once.
+
+Both targeted cases are reported as `TARGETED — <packages>; full suite left to CI on <sha>`. Where a gate stands behind the push the full suite is never run locally; CI and the `wait_for_ci` gate on the pushed head decide it.
+
+**Red verdict — `## Failing checks`** (#2116): for a red head the engine adds the latest run of each check name that is `failure`, `timed_out` or `action_required` (the `gh.ClassifyCheckRuns` predicate itself, so the section and the verdict cannot disagree and a re-run that passed supersedes its earlier failure), with name, conclusion, details URL and the CI-fix prompt's rendering of `output.title`, `output.summary`/`output.text` and annotations (`checkRunFailureDetail`, ADR-1991's bounds). At most 10 failing checks are listed ("N more omitted" beyond that) and annotations — one REST call each, `checks:read` only — are read for the first 5; a failed or unavailable annotation read is logged and the section keeps the check-level fields. Test names are not parsed out of annotations or job logs (no language-specific parsing, no `actions` permission). A red verdict with no failing run (a required status failed) says so. Other verdicts add no section and make no extra reads.
+
+**Which pushes are re-gated** (#2116): a stage dispatch, comment review or review reinvoke in a `wait_for_ci` stage is re-gated by `checkCIGate` on the new head; the CI-fix and rebase reinvokes are dispatched from the gate of such a stage; merge-train auto-repair is an ordinary Validate dispatch followed by the train's own CI. In a stage that does not wait for CI the push is not gated in-stage, but a later gated stage re-gates it when `ci_gate_ahead` is `true`. The `-comment` variants follow the same table: a comment-pushed change is verified with the targeted run where a gate stands behind it.
+
+**Load and hard rules** (#2116, #2130): every local test command carries a framework timeout of 5m or less per test process (never raised to fit a broader run — narrow the run instead), runs synchronously in the foreground and is never backgrounded and polled, and a worker never waits on a suite in a `sleep` loop past that timeout. Before any local run broader than the failing tests the skills check `uptime` against the CPU count. A run that times out or fails is answered by checking host load and rerunning only the failing test, once; a failure that does not reproduce in isolation and passes in CI on the same head is reported as load-induced / host load — not a fix trigger and not a failure of the change. The shipped skills name no single toolchain's commands.
+
+The file is a snapshot taken at invocation start: a mid-run push moves HEAD and makes it inert.
 
 **Stage invocation**: Writes only stages *prior* to the current stage. Implement sees Specify, Research, Plan but not its own output.
 
@@ -194,7 +209,7 @@ Before the Claude invocation on every Implement dispatch, the engine calls `preI
   <scoped spec body>
   FABRIK_SPAWN_CHILD_END
   ```
-  Parsed by `ParseSpawnBlocks()`. If no blocks are found, `preImplement` returns immediately. `DEPENDS_ON:`, when present, must immediately follow `TITLE:` (no blank line between) — see [State Machine §6.7](state-machine.md#67-pre-implement-spawn-path) for the full grammar and validation rules (ADR-1337).
+  Parsed by `ParseSpawnBlocksDetailed()` (header keys are case- and whitespace-tolerant, #2091). If no blocks are found, `preImplement` returns immediately. If any block is malformed, `preImplement` creates nothing and pauses via `pauseForMalformedSpawn` with a comment naming each bad block's index and quoted line; the same failure in Review/Validate output commits and pushes the stage's work first (`preserveWorkOnMarkerFailure`), as does a malformed `FABRIK_PR_CREATE` in Implement. `DEPENDS_ON:`, when present, must immediately follow `TITLE:` (no blank line between) — see [State Machine §6.7](state-machine.md#67-pre-implement-spawn-path) for the full grammar and validation rules (ADR-1337).
 - **`fabrik:children-spawned` label** — idempotency guard. If present on the parent issue, `preImplement` returns immediately without making any mutations.
 
 ### Flow (when spawn blocks are present and guard label is absent)
@@ -295,6 +310,8 @@ Context files are available in .fabrik-context/
 
 ```
 --plugin-dir <absolute-path-to-.fabrik/plugin>
+--plugin-dir <absolute-path-to-.fabrik/plugins/local-workflows>  (only when that directory exists; #2139, state-machine §7.19)
+--plugin-dir <absolute-path-of-each-configured-plugin_dirs-entry>  (zero or more, in configured order; ADR 2136)
 --output-format json
 --verbose
 --disallowedTools <tool> ...  (always: ScheduleWakeup, Workflow, Monitor, CronCreate — see below)
@@ -304,6 +321,8 @@ Context files are available in .fabrik-context/
 --allowedTools <tool> ...     (if restricted)
 --name <sentinel>             (if claude supports --name; probed once at startup)
 ```
+
+**Skill name in the prompt (ADR 2137).** The skill the prompt tells the worker to follow is the fully-qualified `<plugin>:<skill>` name. Before the invocation (after the suspension and `apiKeyHelper` gates, ahead of the toolchain check and `InvokeOptions`), `runInvocationWithExtension` resolves the stage's `skill` against the plugins loaded for the worker — the same directories the `--plugin-dir` arguments above name — into a copy of the stage; comment review, CI-fix and rebase do the same for `comment_skill` in `processCommentsClassified`. A bare name is qualified to the loaded plugin that provides it; a reference no loaded plugin provides is refused before a worker is spawned (no retry consumed, `fabrik:skill-unresolved`). See `docs/state-machine.md` §7.18.
 
 `--disallowedTools` is emitted unconditionally, outside the `--dangerously-skip-permissions`/`--permission-mode dontAsk` branch, so it applies on both invocation paths — it is a construction-time exclusion from the tool schema Claude is offered, not a call-time permission check like `--allowedTools`. `ScheduleWakeup`, `Workflow`, `Monitor`, and `CronCreate` are suppressed because each promises delivery to a future turn, session, or external callback a headless stage cannot receive — the membership test and full sweep (adds and rejects) are recorded in ADR-1365's #1558 amendment (see `disallowedTools` in `engine/claude.go`). `Agent` is deliberately not suppressed — subagents complete within the parent turn.
 
@@ -330,7 +349,7 @@ The Claude worker subprocess's environment is assembled as `mergeEnv(os.Environ(
 
 Worker git inherits its credentials from the same base environment (minus the Fabrik daemon secrets — see "Worker Environment: Fabrik Daemon Secret Scrub" below). Under App auth with HTTPS git, `Run()`'s startup (`setUpAppGitCredential`, `engine/app_git_credential.go`) injects a `credential.https://github.com.helper` into the engine's own process environment via `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>` — an empty reset entry followed by a helper reading `.fabrik/state/github-app-git-token` — so engine and worker git both authenticate as the installation regardless of host helpers, and pick up token rotations mid-invocation. `mergeEnv` passes these entries through unchanged. Under `git_ssh`/an SSH rewrite, or in PAT mode, no helper is injected and any left by a previous exec is stripped. See ADR-1846.
 
-`extraEnv` also includes `GH_HOST`, set to the engine's resolved GHES host (`Config.GHESHost`, the same value used for the engine's own client construction via `gh.NewClientForHost` — see ADR-1391), immediately after `GH_TOKEN`/`GITHUB_TOKEN` — but only when `Config.GHESHost` is non-empty. This is the `gh` CLI's own established convention for pointing it at a non-github.com host, so it requires no extra wiring on the worker side: `fabrik-validate`'s Pre-Completion Gate (which runs `gh pr view --json baseRefName` on every Validate invocation) and any other stage's ambient `gh` calls automatically target the same GHES instance as the engine rather than silently falling through to github.com. Unlike `GH_TOKEN`/`GITHUB_TOKEN`, absence is the default and expected case — when no GHES host is configured, `GH_HOST` is omitted from `extraEnv` entirely (not emitted as an empty value), preserving today's behavior byte-for-byte. `GH_HOST` is a Fabrik-computed override like `GH_TOKEN`, not part of the Anthropic auth namespace described below, so it is never subject to the scrub or passthrough machinery.
+`extraEnv` also includes `GH_HOST`, set to the engine's resolved GHES host (`Config.GHESHost`, the same value used for the engine's own client construction via `gh.NewClientForHost` — see ADR-1391), immediately after `GH_TOKEN`/`GITHUB_TOKEN` — but only when `Config.GHESHost` is non-empty. This is the `gh` CLI's own established convention for pointing it at a non-github.com host, so it requires no extra wiring on the worker side: `validate`'s Pre-Completion Gate (which runs `gh pr view --json baseRefName` on every Validate invocation) and any other stage's ambient `gh` calls automatically target the same GHES instance as the engine rather than silently falling through to github.com. Unlike `GH_TOKEN`/`GITHUB_TOKEN`, absence is the default and expected case — when no GHES host is configured, `GH_HOST` is omitted from `extraEnv` entirely (not emitted as an empty value), preserving today's behavior byte-for-byte. `GH_HOST` is a Fabrik-computed override like `GH_TOKEN`, not part of the Anthropic auth namespace described below, so it is never subject to the scrub or passthrough machinery.
 
 ### Worker Environment: Anthropic Auth Namespace Scrub
 
@@ -348,6 +367,10 @@ Worker git inherits its credentials from the same base environment (minus the Fa
 
 **`apiKeyHelper` is refused outright, not scrubbed.** `apiKeyHelper` is a `settings.json` key, not an environment variable — a command Claude Code shells out to for credentials — so no amount of environment scrubbing can prevent it from supplying an API key. `checkAPIKeyHelper` (`engine/startup.go`) fails startup (non-zero exit) if it is set anywhere in the resolved managed-policy/user/`fabrikDir`-project settings chain; see "apiKeyHelper Detection Path (Worktree)" below for the structurally identical per-invocation check against a worktree's own repo-resident settings, and `docs/USER_GUIDE.md`/[ADR-1346](../adrs/1346-scrub-anthropic-auth-env-namespace.md) for the full rationale and accepted residual risks.
 
+### Worker Environment: PM Plugin Exclusion
+
+`buildClaudeArgs` (`engine/claude.go`, the one argument builder for stage dispatch and for comment, CI-fix, rebase and merge-train conflict invocations) appends `--settings <json>` after the `--plugin-dir` entries. The JSON is built with `json.Marshal` and holds only `{"enabledPlugins":{"fabrik@fabrik":false}}` (`plugin.PMPluginID`), so the human-facing PM plugin installed in the user's own settings is not loaded in a worker (#2140, ADR 2140). The stage plugins are `--plugin-dir` entries, identified separately from the marketplace plugin, and are unaffected. The inline JSON carries no `apiKeyHelper` and is not read by the file-scanning `apiKeyHelper` preflight.
+
 ### Worker Environment: Fabrik Daemon Secret Scrub
 
 Root cause (#2027, ADR-2027): `cmd/root.go` calls `config.LoadDotenv()`, so every `.env` entry lands in the daemon's process environment, and `buildClaudeEnv` builds the worker environment from `os.Environ()`. Before this scrub only the Anthropic namespace and the invocation facts were removed, so a worker inherited `FABRIK_TOKEN`, the App key path, the webhook secret, and anything else in `.env`.
@@ -364,7 +387,7 @@ Root cause (#2027, ADR-2027): `cmd/root.go` calls `config.LoadDotenv()`, so ever
 
 ### Worker Environment: Invocation Facts (`FABRIK_*`)
 
-Alongside GitHub identity, `buildClaudeEnv` (`engine/claude.go`) also injects five facts Fabrik uniquely holds about the current invocation, so repo-side scripts running inside the worktree can provision or namespace a resource (a database schema, a port, a fixture namespace, a preview environment) without guessing. This is deliberately **expose-the-facts**, not a lifecycle-hook mechanism: Fabrik publishes what it knows; the consuming repo owns what happens, when, and how (see ADR-1288). No credential is added to this set, and nothing in the engine reads or branches on these variables — they exist solely for repo-side consumption.
+Alongside GitHub identity, `buildClaudeEnv` (`engine/claude.go`) also injects six facts Fabrik uniquely holds about the current invocation, so repo-side scripts running inside the worktree can provision or namespace a resource (a database schema, a port, a fixture namespace, a preview environment) without guessing. This is deliberately **expose-the-facts**, not a lifecycle-hook mechanism: Fabrik publishes what it knows; the consuming repo owns what happens, when, and how (see ADR-1288). No credential is added to this set, and nothing in the engine reads or branches on these variables — they exist solely for repo-side consumption.
 
 | Variable | Value | Presence |
 |---|---|---|
@@ -373,6 +396,7 @@ Alongside GitHub identity, `buildClaudeEnv` (`engine/claude.go`) also injects fi
 | `FABRIK_WORKTREE` | Absolute path to the issue's worktree (the process's working directory) | Always |
 | `FABRIK_ROOT` | Absolute path to `fabrikDir` (where `.fabrik/` config, stages, and plugin live) | Always |
 | `FABRIK_PR` | The linked pull request number | Only once a PR exists |
+| `FABRIK_WORKER_OWNER` | Path of this invocation's owner file (`.fabrik/state/worker-owners/<nonce>.json`, holding the worker's PID and start token). An internal marker, not a value for scripts to use: every descendant inherits it, which is how the engine reaps orphans by owner and how a test binary notices its worker is gone (#2128, see "Kill escalation") | Always |
 
 `FABRIK_ISSUE` and `FABRIK_WORKTREE` are derived directly from the `issue.Number`/`workDir` values `buildClaudeEnv`'s callers already hold — `workDir` is guaranteed non-empty on every real invocation, since it also becomes the subprocess's `cmd.Dir`. `FABRIK_ROOT` and `FABRIK_PR` require `Engine`-only state (`e.fabrikDir`, `e.readClient`) and are resolved by the shared `Engine.resolveFabrikEnvOpts` helper (`engine/repo.go`), called from every `InvokeOptions`-constructing site — stage invocation (`item.go`), comment processing (`comments.go`), and merge-train conflict resolution (`merge_train.go`, `FABRIK_ROOT` only; see below) — so the worker environment is identical across invocation paths.
 
@@ -445,7 +469,11 @@ After `cmd.Run()` returns, two cleanup steps run unconditionally:
 
    **Surviving an engine restart.** Each newly sampled command session is persisted in `.fabrik/state/workers.json` as a child record of the worker's record (`parent_id`, `pid` = the session leader's PID, `start_token`). The proc-janitor reaps a command session only once its parent worker record is confirmed dead or recycled, or no longer recorded — never while the worker lives — and only if the start token still validates; a command-session record is never swept as a worker. At invocation end the records of now-empty sessions are removed; a session with a surviving member keeps its record for the janitor, which prunes it after two consecutive empty scans.
 
-   **Known gaps.** A command that starts and orphans itself between two samples, after which the worker exits cleanly, is not seen by the sweep; the cwd-rooted worktree-teardown reaper below is the cover, for processes whose cwd is in the worktree. A process that calls `setsid()` and is not below the worker in the parent chain at any sample (a double-forked daemon whose intermediate parent exited between samples) is likewise only covered by that reaper.
+   **Reaping by owner marker (#2128).** Process-tree shape is never a kill signal: a backgrounded Bash-tool command that is still in use looks exactly like an orphan by ppid/pgid (ppid 1, own session, empty group). Ownership is instead positive evidence carried by the process. `runClaude` sets `FABRIK_WORKER_OWNER=<owner file path>` (under `.fabrik/state/worker-owners/`) in every worker's environment and, right after `cmd.Start()`, writes `{pid, start_token}` into that file; the path is also stored as `Owner` on the worker's `workers.json` record. Every descendant inherits the variable, whatever its session, group, parent or cwd. The post-exit sweep and the periodic proc-janitor (which also serves as the startup sweep, since it reads `workers.json` across engine restarts) then call `sessionreap.ReapMarked`, which reads each process's initial environment (`kern.procargs2` on macOS, `/proc/<pid>/environ` on Linux), matches the exact marker, and sends SIGTERM then SIGKILL to those exact PIDs after re-checking the start token and marker and applying the `CheckSID`/`CheckPGID` refusals. **Only for records `classifyWorker` reports dead or recycled** — a live or inconclusive worker's marked processes are never reached. A process with no marker is never signalled on shape alone. A record is pruned (and its owner file removed) only after its session and marked set were both empty on two consecutive scans; the janitor also removes owner files with no record that are older than 24 h. Limitation: macOS returns only a stub environment for SIP-protected platform binaries, so those are invisible to the marker (Go test binaries are readable). See ADR-2128.
+
+   **Test binaries bound themselves (#2128).** `tests/sim`'s `TestMain` installs `internal/testlife.Guard`: a hard wall-time ceiling (`SIM_TEST_CEILING`, default 30m, independent of `-test.timeout`, exit status 2 with a message naming the ceiling), an owner watch (exit within about 5 s once the worker named by `FABRIK_WORKER_OWNER` is provably gone — PID absent or a different start token; never on parent death alone, and never when the owner is unresolved or unreadable), and, for helpers started through `testlife.ReExecCommand`, a parent watch plus an explicit `-test.timeout`.
+
+   **Known gaps.** A command that starts and orphans itself between two samples, after which the worker exits cleanly, is not seen by the session sweep; it is reaped by the owner marker above unless its environment was scrubbed or it is a SIP-protected macOS binary, and the cwd-rooted worktree-teardown reaper below is the further cover, for processes whose cwd is in the worktree. A process that calls `setsid()` and is not below the worker in the parent chain at any sample (a double-forked daemon whose intermediate parent exited between samples) is likewise covered by the marker, then by that reaper. The `engine` package's own test binaries do not yet install the testlife guard (ADR-2128 follow-up).
 
 2. **WaitDelay bound**: `cmd.WaitDelay` is set to 30s (configurable via `--claude-wait-delay` / `FABRIK_CLAUDE_WAIT_DELAY`). When grandchild processes hold the stdout pipe open after Claude exits, Go's `cmd.Wait()` would otherwise block indefinitely. With `WaitDelay`, Go forcibly closes its end of the pipe after the deadline and returns `exec.ErrWaitDelay`. The engine detects this error, logs a diagnostic warning, clears the error, and processes the buffered output normally — including any `FABRIK_STAGE_COMPLETE` marker. This prevents the worker goroutine from being permanently stuck when Claude uses `run_in_background` or the Monitor tool.
 
@@ -490,8 +518,8 @@ The process-group `SIGKILL` above is **PGID-scoped**: it can only reach descenda
 `reapWorktreeProcesses` (`engine/reaper_unix.go`) closes this gap with a **cwd-rooted** reaper, run immediately before every worktree directory removal: it enumerates live processes whose current working directory is the worktree path or a subdirectory of it — regardless of process-group membership — and sends SIGKILL to each. It is a package-level function (not a `WorktreeManager` method), so it can be called from contexts with no `WorktreeManager` instance available.
 
 **Platform implementations:**
-- **Linux**: scans `/proc/*/cwd` symlinks and prefix-matches each against the worktree directory. Immediately before killing a match, it re-reads `/proc/<pid>/cwd` to close the TOCTOU window in which the pid could have been recycled for an unrelated process between enumeration and kill.
-- **macOS**: runs `lsof -a -d cwd -n -P -Fpcn`, which inspects only each process's cwd file descriptor (not every open fd, unlike `lsof +D`) — kept fast and non-hanging on the synchronous teardown path even for a `node_modules`-heavy worktree. macOS has no `/proc`-equivalent cheap re-check primitive, so the same TOCTOU window is accepted rather than mitigated here.
+- **Linux**: scans `/proc/*/cwd` symlinks and prefix-matches each against the worktree directory. It makes no external call and spawns no process, so there is nothing to bound. Immediately before killing a match, it re-reads `/proc/<pid>/cwd` to close the TOCTOU window in which the pid could have been recycled for an unrelated process between enumeration and kill.
+- **macOS**: runs `lsof -a -d cwd -n -P -Fpcn`, which inspects only each process's cwd file descriptor (not every open fd, unlike `lsof +D`) — kept fast on the synchronous teardown path even for a `node_modules`-heavy worktree. The call is **bounded**: it runs under a 10-second timeout (`worktreeReapLsofTimeout`, ADR 1805), because it is made under the per-repo worktree mutex and an unbounded `lsof` would stall every worktree operation for that repo. On timeout `lsof` is killed, its partial output is discarded, one `[#N kill] warn: worktree process reap: lsof timed out after 10s for <worktree>; skipping reap` line is logged, and the reap is skipped — worktree removal proceeds. macOS has no `/proc`-equivalent cheap re-check primitive, so the same TOCTOU window is accepted rather than mitigated here.
 - **Windows**: no-op (`engine/reaper_windows.go`), matching `killProcGroup`'s existing Windows precedent.
 
 Both platform paths resolve symlinks in the worktree directory before matching (`filepath.EvalSymlinks`), since `/proc/*/cwd` and `lsof`'s reported path are both fully-resolved real paths (e.g. macOS resolves `/tmp` → `/private/tmp`), which would otherwise defeat a literal prefix match.
@@ -506,6 +534,7 @@ Each kill is logged via the existing `[#N kill] ...` convention: `[#N kill] send
 
 **Documented residual risks** (see ADR 063):
 - **PID-reuse TOCTOU on macOS**: unlike Linux, there is no cheap re-check between enumeration and kill, so a small window exists where a recycled pid could receive an unintended SIGKILL.
+- **A timed-out reap leaves orphans on macOS**: on a very loaded host `lsof` can exceed its 10-second bound; the reap is then skipped (with the warning above) and a `setsid`'d descendant rooted in the worktree is not killed by this path (ADR 1805).
 - **`chdir`'d descendants are not caught**: this reaper is cwd-based by design (matching the issue's reported failure mode); a process that opened a file in the worktree and then `chdir`'d elsewhere is out of scope and will still leak.
 
 ### Progress Baseline Snapshot
@@ -702,7 +731,7 @@ because the account's usage limit was hit, not because the stage genuinely faile
 result object only — never from anything the assistant wrote: `classifyUsageLimitExit` checks
 `resp.TerminalReason == "blocking_limit"` (the same `terminal_reason` field the turn-cap check
 consults) or `resp.TerminalReason == "api_error"` with `api_error_status == 429` (the CLI's other
-session-limit shape, #1811 / ADR-1811; other `api_error` statuses stay transient and never suspend),
+session-limit shape, #1811 / ADR-1811; other `api_error` statuses stay transient and never trigger it),
 and only when a result object actually parsed. The `result` text is never matched. When Claude exited non-zero without a
 `FABRIK_STAGE_COMPLETE` marker, no turn cap, and `TerminalReason` matches, it returns a
 `*claudeUsageLimitError` sentinel in place of the generic error; an unparseable-JSON invocation is
@@ -726,10 +755,10 @@ engine-shutdown guard — before the normal `claudeRan`/retry classification log
 `fabrik:claude-limit` clears per-issue on the next invocation that is not itself classified as a
 usage-limit exit (success, blocked-on-input, incomplete/genuine-failure, or PR-creation failure alike),
 and account-wide via `settleClaudeLimitLabelSweep`, a per-poll settle scan that removes it from every
-open item once the account-wide suspension has lifted — so an issue that is paused, blocked, or simply
-never redispatched no longer keeps the label indefinitely. An operator can also end an active suspension
+open item once the account-wide usage-limit hold has lifted — so an issue that is paused, blocked, or simply
+never redispatched no longer keeps the label indefinitely. An operator can also end an active usage-limit hold
 early, without restarting the engine, by applying `fabrik:clear-claude-limit` to any open board item;
-`settleClaudeLimitClearRequests` reads it each poll and clears the suspension. See
+`settleClaudeLimitClearRequests` reads it each poll and clears the usage-limit hold. See
 `docs/state-machine.md` §7.3, [ADR-1119](../adrs/1119-claude-usage-limit-detection.md), and
 [ADR-1183](../adrs/1183-structural-claude-usage-limit-detection.md) for the full rationale, including
 why this reuses the same `StageAttempted`-without-`StageRetryIncremented` split as the Post-Run Boundary
@@ -739,7 +768,7 @@ boundary violation is not).
 ### apiKeyHelper Detection Path (Worktree)
 
 A fifth outcome, checked in `runInvocationWithExtension` immediately alongside the account-wide
-usage-limit suspension gate above — before `InvokeOptions` is built or the stall hint consumed, and
+usage-limit hold gate above — before `InvokeOptions` is built or the stall hint consumed, and
 before Claude is ever invoked. `findAPIKeyHelper` (`engine/startup.go`, shared with the engine-startup
 preflight — see "Worker Environment: Anthropic Auth Namespace Scrub" above) checks the worktree's own
 `.claude/settings.json` and `.claude/settings.local.json` (mirroring the startup preflight's file
@@ -936,8 +965,8 @@ An `unmanaged: true` stage (the default `Backlog`, `stages/examples/backlog.yaml
 ```yaml
 name: Research              # Required: matches board column name
 order: 2                    # Required: processing priority (lower = earlier)
-skill: fabrik-research      # Plugin skill name (recommended)
-comment_skill: fabrik-research-comment  # Plugin skill for comment processing
+skill: fabrik-stages:research  # Plugin skill name, <plugin>:<skill> (recommended)
+comment_skill: fabrik-stages:research-comment  # Plugin skill for comment processing
 prompt: |                   # Inline prompt (legacy, used when skill not set)
   ...
 comment_prompt: |           # Inline comment prompt (legacy)

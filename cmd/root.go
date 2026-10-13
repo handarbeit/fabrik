@@ -3,6 +3,7 @@ package cmd
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	fabrikplugin "github.com/handarbeit/fabrik/plugin"
 	"github.com/handarbeit/fabrik/stages"
 	"github.com/handarbeit/fabrik/tui"
+	"github.com/handarbeit/fabrik/warnings"
 	"github.com/mattn/go-isatty"
 )
 
@@ -52,6 +54,9 @@ type Config struct {
 	MaxReviewCycles            int    // 0 means use default (5)
 	CIWaitTimeout              int    // minutes; CI-gate liveness-stall dwell; 0 means use default (30) (ADR-1410)
 	ChannelHeldMax             int    // events held per MCP channel subscriber while no session is attached; 0 means use default (200); oldest are dropped with a notice (#1968)
+	RetryStarvedThreshold      int    // minutes a due stage retry may go undispatched before a retry-starved channel event; 0 means use default (5) (#2170)
+	ItemWedgedThreshold        int    // minutes a gate may hold an item with no worker dispatched or queued before an item-wedged channel event; 0 means use default (10) (#2170)
+	CacheDivergenceWindow      int    // minutes within which a reconcile/deep-fetch/probe reverting an engine write is reported as cache-divergence; 0 means use default (5) (#2170)
 	StallThreshold             int    // minutes; how long an item may show no observable progress before the local read API (fabrik mcp) classifies it stalled; 0 means use default (30) (#1967)
 	CIBackstopTimeout          int    // minutes; absolute fabrik:awaiting-ci cap independent of CI duration; 0 means use default (240 = 4h) (ADR-1410, R5)
 	WorkerStaleMins            int    // minutes; 0 means use default (5)
@@ -82,6 +87,8 @@ type Config struct {
 	SymlinkEnv                 bool
 	WorktreeBoundaryAudit      bool
 	PluginDir                  string
+	PluginDirs                 string   // comma-separated --plugin-dirs flag / FABRIK_PLUGIN_DIRS value (ADR 2136)
+	PluginDirList              []string // resolved additional workflow plugin directories, loaded after the base plugin (ADR 2136)
 	Webhooks                   bool
 	WebhookPort                int
 	WebhookEvents              string // comma-separated; empty means default event set
@@ -117,6 +124,7 @@ type Config struct {
 }
 
 func Execute() error {
+	resetConfigFallbacks()
 	// Install a custom usage function before any subcommand dispatch so it fires
 	// for the main daemon path (subcommands return early and never reach flag.Parse).
 	// We set both flag.Usage (package-level) and flag.CommandLine.Usage (FlagSet
@@ -133,7 +141,7 @@ func Execute() error {
 		fmt.Fprintf(out, "  resume <issue-number>     Resume an interactive Claude session for an issue\n")
 		fmt.Fprintf(out, "  upgrade                   Upgrade the Fabrik binary and plugin skills\n")
 		fmt.Fprintf(out, "  refresh-stages            Show (or apply) missing stage YAML keys from embedded defaults\n")
-		fmt.Fprintf(out, "  repair-board [--apply]    Show (or apply) missing Status columns on the configured project board\n")
+		fmt.Fprintf(out, "  repair-board [--apply]    Show (or apply) missing Status columns and display fields on the configured project board\n")
 		fmt.Fprintf(out, "  mcp [--dir <fabrik-dir>]  Run a stdio MCP server with read-only overseer tools backed by the running daemon\n")
 		fmt.Fprintf(out, "  stream-filter             Filter and pretty-print Claude streaming JSON (stdin → stdout)\n\n")
 		fmt.Fprintf(out, "Flags:\n")
@@ -199,6 +207,9 @@ func Execute() error {
 	flag.IntVar(&cfg.MaxReviewCycles, "max-review-cycles", 0, "Maximum number of review-and-fix cycles per issue (0 = use default of 5; also FABRIK_MAX_REVIEW_CYCLES)")
 	flag.IntVar(&cfg.CIWaitTimeout, "ci-wait-timeout", 0, "CI-gate liveness-stall dwell in minutes: how long CI may show no observable progress before pausing (0 = use default of 30; also FABRIK_CI_WAIT_TIMEOUT). Does NOT bound total CI duration — a suite that is alive and progressing waits indefinitely; see --ci-backstop-timeout for the absolute cap (ADR-1410)")
 	flag.IntVar(&cfg.ChannelHeldMax, "channel-held-max", 0, "Events held per fabrik mcp channel subscriber while no session with that name is attached; beyond it the oldest are dropped with a notice (0 = use default of 200; also FABRIK_CHANNEL_HELD_MAX)")
+	flag.IntVar(&cfg.RetryStarvedThreshold, "retry-starved-threshold", 0, "Minutes a due stage retry may go undispatched before a retry-starved channel event is published (0 = use default of 5; also FABRIK_RETRY_STARVED_THRESHOLD)")
+	flag.IntVar(&cfg.ItemWedgedThreshold, "item-wedged-threshold", 0, "Minutes a gate may hold an item with no worker dispatched or queued before an item-wedged channel event is published (0 = use default of 10; also FABRIK_ITEM_WEDGED_THRESHOLD)")
+	flag.IntVar(&cfg.CacheDivergenceWindow, "cache-divergence-window", 0, "Minutes within which a reconcile, deep fetch or probe that reverts an engine write is reported as cache-divergence (0 = use default of 5; also FABRIK_CACHE_DIVERGENCE_WINDOW)")
 	flag.IntVar(&cfg.StallThreshold, "stall-threshold", 0, "Minutes an item may show no observable progress (no worker activity, no status or label change) before the fabrik mcp overseer tools classify it stalled (0 = use default of 30; also FABRIK_STALL_THRESHOLD)")
 	flag.IntVar(&cfg.CIBackstopTimeout, "ci-backstop-timeout", 0, "Absolute cap in minutes on how long an item may sit in fabrik:awaiting-ci under any classification, bounding per-poll cost independent of CI duration (0 = use default of 240 = 4h; also FABRIK_CI_BACKSTOP_TIMEOUT; ADR-1410)")
 	flag.IntVar(&cfg.WorkerStaleMins, "worker-stale-timeout", 0, "Minutes before a stale worker heartbeat triggers PID-liveness check (0 = use default of 5; also FABRIK_WORKER_STALE_TIMEOUT)")
@@ -225,7 +236,8 @@ func Execute() error {
 	flag.BoolVar(&cfg.DebugOutput, "debug-output", false, "Save Claude stage output to .fabrik/debug/ for debugging")
 	flag.BoolVar(&cfg.SymlinkEnv, "symlink-env", false, "Symlink the fabrik-dir .env file into each issue worktree at creation time (also FABRIK_SYMLINK_ENV)")
 	flag.BoolVar(&cfg.WorktreeBoundaryAudit, "worktree-boundary-audit", false, "Enable Layer 2 cross-repo ref-mutation audit (default off pending #808 root-cause fix; also FABRIK_WORKTREE_BOUNDARY_AUDIT)")
-	flag.StringVar(&cfg.PluginDir, "plugin-dir", "", "Path to Fabrik plugin directory (for development; overrides installed plugin)")
+	flag.StringVar(&cfg.PluginDir, "plugin-dir", "", "Path to Fabrik plugin directory (for development; REPLACES the base Fabrik plugin — use --plugin-dirs to add plugins alongside it; also FABRIK_PLUGIN_DIR, no config.yaml key)")
+	flag.StringVar(&cfg.PluginDirs, "plugin-dirs", "", "Comma-separated additional workflow plugin directories passed to every worker after the base Fabrik plugin; relative paths resolve against the Fabrik directory; each needs a .claude-plugin/plugin.json with a unique name (also FABRIK_PLUGIN_DIRS or plugin_dirs in config.yaml; ADR 2136)")
 	flag.BoolVar(&cfg.Webhooks, "webhooks", false, "Enable webhook-driven event delivery via gh webhook forward (requires gh ≥ 2.32.0; also FABRIK_WEBHOOKS)")
 	flag.IntVar(&cfg.WebhookPort, "webhook-port", 0, "Local port for the webhook HTTP listener (0 = OS-assigned; also FABRIK_WEBHOOK_PORT)")
 	flag.StringVar(&cfg.WebhookEvents, "webhook-events", "", "Comma-separated list of GitHub event types to subscribe to (default: all supported events; also FABRIK_WEBHOOK_EVENTS)")
@@ -282,6 +294,8 @@ func Execute() error {
 	// Warn (non-fatal) about any top-level config.yaml key with no matching
 	// ProjectConfig field — most commonly a knob that is actually CLI/env-only.
 	if unrecognized, err := config.UnrecognizedTopLevelKeys(); err != nil {
+		// The check itself failed, so nothing is known about the keys: log only,
+		// and do NOT reconcile (an empty set would wrongly clear real entries).
 		fmt.Fprintf(os.Stderr, "[startup] warning: checking .fabrik/config.yaml for unrecognized keys: %v\n", err)
 	} else {
 		warnUnrecognizedConfigKeys(unrecognized, os.Stderr)
@@ -363,11 +377,11 @@ func Execute() error {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
 				cfg.PollSeconds = n
 			} else {
-				fmt.Fprintf(os.Stderr, "[warn] FABRIK_POLL=%q is invalid (must be a positive integer); using default %d\n", v, cfg.PollSeconds)
+				warnConfigFallback("FABRIK_POLL=%q is invalid (must be a positive integer); using default %d\n", v, cfg.PollSeconds)
 			}
 		} else if pc.Poll != nil {
 			if *pc.Poll <= 0 {
-				fmt.Fprintf(os.Stderr, "[warn] config.yaml poll=%d is invalid (must be a positive integer); using default %d\n", *pc.Poll, cfg.PollSeconds)
+				warnConfigFallback("config.yaml poll=%d is invalid (must be a positive integer); using default %d\n", *pc.Poll, cfg.PollSeconds)
 			} else {
 				cfg.PollSeconds = *pc.Poll
 			}
@@ -380,7 +394,7 @@ func Execute() error {
 		// An explicit --retry-backoff below 1 skips the resolution above. Zero would
 		// reach the engine as "unset" and silently fall back to 10 × poll — the
 		// exact coupling #1831 removes — so reject it here.
-		fmt.Fprintf(os.Stderr, "[warn] --retry-backoff=%d is invalid (must be >= 1 second); using default %d\n", cfg.RetryBackoffSeconds, defaultRetryBackoffSeconds)
+		warnConfigFallback("--retry-backoff=%d is invalid (must be >= 1 second); using default %d\n", cfg.RetryBackoffSeconds, defaultRetryBackoffSeconds)
 		cfg.RetryBackoffSeconds = defaultRetryBackoffSeconds
 	}
 	if cfg.MaxConcurrent == 5 {
@@ -388,11 +402,11 @@ func Execute() error {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
 				cfg.MaxConcurrent = n
 			} else {
-				fmt.Fprintf(os.Stderr, "[warn] FABRIK_MAX_CONCURRENT=%q is invalid (must be a positive integer); using default %d\n", v, cfg.MaxConcurrent)
+				warnConfigFallback("FABRIK_MAX_CONCURRENT=%q is invalid (must be a positive integer); using default %d\n", v, cfg.MaxConcurrent)
 			}
 		} else if pc.MaxConcurrent != nil {
 			if *pc.MaxConcurrent <= 0 {
-				fmt.Fprintf(os.Stderr, "[warn] config.yaml max_concurrent=%d is invalid (must be a positive integer); using default %d\n", *pc.MaxConcurrent, cfg.MaxConcurrent)
+				warnConfigFallback("config.yaml max_concurrent=%d is invalid (must be a positive integer); using default %d\n", *pc.MaxConcurrent, cfg.MaxConcurrent)
 			} else {
 				cfg.MaxConcurrent = *pc.MaxConcurrent
 			}
@@ -403,11 +417,11 @@ func Execute() error {
 			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 				cfg.MaxRetries = n
 			} else {
-				fmt.Fprintf(os.Stderr, "[warn] FABRIK_MAX_RETRIES=%q is invalid (must be a non-negative integer); using default %d\n", v, cfg.MaxRetries)
+				warnConfigFallback("FABRIK_MAX_RETRIES=%q is invalid (must be a non-negative integer); using default %d\n", v, cfg.MaxRetries)
 			}
 		} else if pc.MaxRetries != nil {
 			if *pc.MaxRetries < 0 {
-				fmt.Fprintf(os.Stderr, "[warn] config.yaml max_retries=%d is invalid (must be a non-negative integer); using default %d\n", *pc.MaxRetries, cfg.MaxRetries)
+				warnConfigFallback("config.yaml max_retries=%d is invalid (must be a non-negative integer); using default %d\n", *pc.MaxRetries, cfg.MaxRetries)
 			} else {
 				cfg.MaxRetries = *pc.MaxRetries
 			}
@@ -433,6 +447,15 @@ func Execute() error {
 	}
 	if !explicitFlags["channel-held-max"] {
 		cfg.ChannelHeldMax = resolveInt(cfg.ChannelHeldMax, "FABRIK_CHANNEL_HELD_MAX", "", 200)
+	}
+	if !explicitFlags["retry-starved-threshold"] {
+		cfg.RetryStarvedThreshold = resolveInt(cfg.RetryStarvedThreshold, "FABRIK_RETRY_STARVED_THRESHOLD", "of minutes", 5)
+	}
+	if !explicitFlags["item-wedged-threshold"] {
+		cfg.ItemWedgedThreshold = resolveInt(cfg.ItemWedgedThreshold, "FABRIK_ITEM_WEDGED_THRESHOLD", "of minutes", 10)
+	}
+	if !explicitFlags["cache-divergence-window"] {
+		cfg.CacheDivergenceWindow = resolveInt(cfg.CacheDivergenceWindow, "FABRIK_CACHE_DIVERGENCE_WINDOW", "of minutes", 5)
 	}
 	if !explicitFlags["stall-threshold"] {
 		cfg.StallThreshold = resolveInt(cfg.StallThreshold, "FABRIK_STALL_THRESHOLD", "of minutes", 30)
@@ -493,11 +516,11 @@ func Execute() error {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
 				cfg.MaxBatchSize = n
 			} else {
-				fmt.Fprintf(os.Stderr, "[warn] FABRIK_MAX_BATCH_SIZE=%q is invalid (must be a positive integer); using default 5\n", v)
+				warnConfigFallback("FABRIK_MAX_BATCH_SIZE=%q is invalid (must be a positive integer); using default 5\n", v)
 			}
 		} else if pc.MaxBatchSize != nil {
 			if *pc.MaxBatchSize <= 0 {
-				fmt.Fprintf(os.Stderr, "[warn] config.yaml max_batch_size=%d is invalid (must be a positive integer); using default 5\n", *pc.MaxBatchSize)
+				warnConfigFallback("config.yaml max_batch_size=%d is invalid (must be a positive integer); using default 5\n", *pc.MaxBatchSize)
 			} else {
 				cfg.MaxBatchSize = *pc.MaxBatchSize
 			}
@@ -508,11 +531,11 @@ func Execute() error {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
 				cfg.MaxBisectValidations = n
 			} else {
-				fmt.Fprintf(os.Stderr, "[warn] FABRIK_MAX_BISECT_VALIDATIONS=%q is invalid (must be a positive integer); using derived default\n", v)
+				warnConfigFallback("FABRIK_MAX_BISECT_VALIDATIONS=%q is invalid (must be a positive integer); using derived default\n", v)
 			}
 		} else if pc.MaxBisectValidations != nil {
 			if *pc.MaxBisectValidations < 0 {
-				fmt.Fprintf(os.Stderr, "[warn] config.yaml max_bisect_validations=%d is invalid (must be a non-negative integer); using derived default\n", *pc.MaxBisectValidations)
+				warnConfigFallback("config.yaml max_bisect_validations=%d is invalid (must be a non-negative integer); using derived default\n", *pc.MaxBisectValidations)
 			} else {
 				cfg.MaxBisectValidations = *pc.MaxBisectValidations
 			}
@@ -523,11 +546,11 @@ func Execute() error {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
 				cfg.MaxTrainRebaseCycles = n
 			} else {
-				fmt.Fprintf(os.Stderr, "[warn] FABRIK_MAX_TRAIN_REBASE_CYCLES=%q is invalid (must be a positive integer); using default 3\n", v)
+				warnConfigFallback("FABRIK_MAX_TRAIN_REBASE_CYCLES=%q is invalid (must be a positive integer); using default 3\n", v)
 			}
 		} else if pc.MaxTrainRebaseCycles != nil {
 			if *pc.MaxTrainRebaseCycles <= 0 {
-				fmt.Fprintf(os.Stderr, "[warn] config.yaml max_train_rebase_cycles=%d is invalid (must be a positive integer); using default 3\n", *pc.MaxTrainRebaseCycles)
+				warnConfigFallback("config.yaml max_train_rebase_cycles=%d is invalid (must be a positive integer); using default 3\n", *pc.MaxTrainRebaseCycles)
 			} else {
 				cfg.MaxTrainRebaseCycles = *pc.MaxTrainRebaseCycles
 			}
@@ -535,7 +558,7 @@ func Execute() error {
 	}
 	if explicitFlags["max-train-auto-repair-attempts"] {
 		if cfg.MaxTrainAutoRepairAttempts < 0 {
-			fmt.Fprintf(os.Stderr, "[warn] --max-train-auto-repair-attempts=%d is invalid (must be a non-negative integer); using default %d\n", cfg.MaxTrainAutoRepairAttempts, defaultMaxTrainAutoRepairAttempts)
+			warnConfigFallback("--max-train-auto-repair-attempts=%d is invalid (must be a non-negative integer); using default %d\n", cfg.MaxTrainAutoRepairAttempts, defaultMaxTrainAutoRepairAttempts)
 			cfg.MaxTrainAutoRepairAttempts = defaultMaxTrainAutoRepairAttempts
 		}
 	} else {
@@ -543,11 +566,11 @@ func Execute() error {
 			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 				cfg.MaxTrainAutoRepairAttempts = n
 			} else {
-				fmt.Fprintf(os.Stderr, "[warn] FABRIK_MAX_TRAIN_AUTO_REPAIR_ATTEMPTS=%q is invalid (must be a non-negative integer; 0 disables); using default %d\n", v, defaultMaxTrainAutoRepairAttempts)
+				warnConfigFallback("FABRIK_MAX_TRAIN_AUTO_REPAIR_ATTEMPTS=%q is invalid (must be a non-negative integer; 0 disables); using default %d\n", v, defaultMaxTrainAutoRepairAttempts)
 			}
 		} else if pc.MaxTrainAutoRepairAttempts != nil {
 			if *pc.MaxTrainAutoRepairAttempts < 0 {
-				fmt.Fprintf(os.Stderr, "[warn] config.yaml max_train_auto_repair_attempts=%d is invalid (must be a non-negative integer; 0 disables); using default %d\n", *pc.MaxTrainAutoRepairAttempts, defaultMaxTrainAutoRepairAttempts)
+				warnConfigFallback("config.yaml max_train_auto_repair_attempts=%d is invalid (must be a non-negative integer; 0 disables); using default %d\n", *pc.MaxTrainAutoRepairAttempts, defaultMaxTrainAutoRepairAttempts)
 			} else {
 				cfg.MaxTrainAutoRepairAttempts = *pc.MaxTrainAutoRepairAttempts
 			}
@@ -558,11 +581,11 @@ func Execute() error {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
 				cfg.MaxTrainTrialsPerWindow = n
 			} else {
-				fmt.Fprintf(os.Stderr, "[warn] FABRIK_MAX_TRAIN_TRIALS_PER_WINDOW=%q is invalid (must be a positive integer); using default 20\n", v)
+				warnConfigFallback("FABRIK_MAX_TRAIN_TRIALS_PER_WINDOW=%q is invalid (must be a positive integer); using default 20\n", v)
 			}
 		} else if pc.MaxTrainTrialsPerWindow != nil {
 			if *pc.MaxTrainTrialsPerWindow <= 0 {
-				fmt.Fprintf(os.Stderr, "[warn] config.yaml max_train_trials_per_window=%d is invalid (must be a positive integer); using default 20\n", *pc.MaxTrainTrialsPerWindow)
+				warnConfigFallback("config.yaml max_train_trials_per_window=%d is invalid (must be a positive integer); using default 20\n", *pc.MaxTrainTrialsPerWindow)
 			} else {
 				cfg.MaxTrainTrialsPerWindow = *pc.MaxTrainTrialsPerWindow
 			}
@@ -573,11 +596,11 @@ func Execute() error {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
 				cfg.TrainTrialWindowMinutes = n
 			} else {
-				fmt.Fprintf(os.Stderr, "[warn] FABRIK_TRAIN_TRIAL_WINDOW=%q is invalid (must be a positive integer of minutes); using default 60\n", v)
+				warnConfigFallback("FABRIK_TRAIN_TRIAL_WINDOW=%q is invalid (must be a positive integer of minutes); using default 60\n", v)
 			}
 		} else if pc.TrainTrialWindow != nil {
 			if *pc.TrainTrialWindow <= 0 {
-				fmt.Fprintf(os.Stderr, "[warn] config.yaml train_trial_window=%d is invalid (must be a positive integer of minutes); using default 60\n", *pc.TrainTrialWindow)
+				warnConfigFallback("config.yaml train_trial_window=%d is invalid (must be a positive integer of minutes); using default 60\n", *pc.TrainTrialWindow)
 			} else {
 				cfg.TrainTrialWindowMinutes = *pc.TrainTrialWindow
 			}
@@ -588,11 +611,11 @@ func Execute() error {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
 				cfg.MaxCommentCyclesPerWindow = n
 			} else {
-				fmt.Fprintf(os.Stderr, "[warn] FABRIK_MAX_COMMENT_CYCLES_PER_WINDOW=%q is invalid (must be a positive integer); using default 10\n", v)
+				warnConfigFallback("FABRIK_MAX_COMMENT_CYCLES_PER_WINDOW=%q is invalid (must be a positive integer); using default 10\n", v)
 			}
 		} else if pc.MaxCommentCyclesPerWindow != nil {
 			if *pc.MaxCommentCyclesPerWindow <= 0 {
-				fmt.Fprintf(os.Stderr, "[warn] config.yaml max_comment_cycles_per_window=%d is invalid (must be a positive integer); using default 10\n", *pc.MaxCommentCyclesPerWindow)
+				warnConfigFallback("config.yaml max_comment_cycles_per_window=%d is invalid (must be a positive integer); using default 10\n", *pc.MaxCommentCyclesPerWindow)
 			} else {
 				cfg.MaxCommentCyclesPerWindow = *pc.MaxCommentCyclesPerWindow
 			}
@@ -603,11 +626,11 @@ func Execute() error {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
 				cfg.CommentCycleWindowMinutes = n
 			} else {
-				fmt.Fprintf(os.Stderr, "[warn] FABRIK_COMMENT_CYCLE_WINDOW=%q is invalid (must be a positive integer of minutes); using default 30\n", v)
+				warnConfigFallback("FABRIK_COMMENT_CYCLE_WINDOW=%q is invalid (must be a positive integer of minutes); using default 30\n", v)
 			}
 		} else if pc.CommentCycleWindow != nil {
 			if *pc.CommentCycleWindow <= 0 {
-				fmt.Fprintf(os.Stderr, "[warn] config.yaml comment_cycle_window=%d is invalid (must be a positive integer of minutes); using default 30\n", *pc.CommentCycleWindow)
+				warnConfigFallback("config.yaml comment_cycle_window=%d is invalid (must be a positive integer of minutes); using default 30\n", *pc.CommentCycleWindow)
 			} else {
 				cfg.CommentCycleWindowMinutes = *pc.CommentCycleWindow
 			}
@@ -618,11 +641,11 @@ func Execute() error {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
 				cfg.MaxNoOpCommentCycles = n
 			} else {
-				fmt.Fprintf(os.Stderr, "[warn] FABRIK_MAX_NO_OP_COMMENT_CYCLES=%q is invalid (must be a positive integer); using default 10\n", v)
+				warnConfigFallback("FABRIK_MAX_NO_OP_COMMENT_CYCLES=%q is invalid (must be a positive integer); using default 10\n", v)
 			}
 		} else if pc.MaxNoOpCommentCycles != nil {
 			if *pc.MaxNoOpCommentCycles <= 0 {
-				fmt.Fprintf(os.Stderr, "[warn] config.yaml max_no_op_comment_cycles=%d is invalid (must be a positive integer); using default 10\n", *pc.MaxNoOpCommentCycles)
+				warnConfigFallback("config.yaml max_no_op_comment_cycles=%d is invalid (must be a positive integer); using default 10\n", *pc.MaxNoOpCommentCycles)
 			} else {
 				cfg.MaxNoOpCommentCycles = *pc.MaxNoOpCommentCycles
 			}
@@ -634,11 +657,11 @@ func Execute() error {
 				if n > 0 {
 					cfg.ClaudeWaitDelay = n
 				} else if n < 0 {
-					fmt.Fprintf(os.Stderr, "[warn] FABRIK_CLAUDE_WAIT_DELAY=%q is invalid (must be 0 or a positive integer of seconds); using default 30\n", v)
+					warnConfigFallback("FABRIK_CLAUDE_WAIT_DELAY=%q is invalid (must be 0 or a positive integer of seconds); using default 30\n", v)
 				}
 				// n == 0: silently use default (same semantics as --claude-wait-delay 0)
 			} else {
-				fmt.Fprintf(os.Stderr, "[warn] FABRIK_CLAUDE_WAIT_DELAY=%q is invalid (must be 0 or a positive integer of seconds); using default 30\n", v)
+				warnConfigFallback("FABRIK_CLAUDE_WAIT_DELAY=%q is invalid (must be 0 or a positive integer of seconds); using default 30\n", v)
 			}
 		}
 	}
@@ -650,7 +673,7 @@ func Execute() error {
 				}
 				// n == 0: silently use default (same semantics as --post-push-dwell 0)
 			} else {
-				fmt.Fprintf(os.Stderr, "[warn] FABRIK_POST_PUSH_DWELL=%q is invalid (must be 0 or a positive integer of seconds); using default 90\n", v)
+				warnConfigFallback("FABRIK_POST_PUSH_DWELL=%q is invalid (must be 0 or a positive integer of seconds); using default 90\n", v)
 			}
 		}
 	}
@@ -659,7 +682,7 @@ func Execute() error {
 			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 				cfg.ReconcileInterval = n // 0 → use engine default (lightReconcileInterval = 3 min)
 			} else {
-				fmt.Fprintf(os.Stderr, "[warn] FABRIK_RECONCILE_INTERVAL=%q is invalid (must be a non-negative integer of seconds; 0 = use default 180); using default 180\n", v)
+				warnConfigFallback("FABRIK_RECONCILE_INTERVAL=%q is invalid (must be a non-negative integer of seconds; 0 = use default 180); using default 180\n", v)
 			}
 		}
 	}
@@ -668,11 +691,11 @@ func Execute() error {
 			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 				cfg.JanitorIntervalHours = n
 			} else {
-				fmt.Fprintf(os.Stderr, "[warn] FABRIK_JANITOR_INTERVAL=%q is invalid (must be a non-negative integer of hours; 0 = disable); using default 1\n", v)
+				warnConfigFallback("FABRIK_JANITOR_INTERVAL=%q is invalid (must be a non-negative integer of hours; 0 = disable); using default 1\n", v)
 			}
 		} else if pc.JanitorIntervalHours != nil {
 			if *pc.JanitorIntervalHours < 0 {
-				fmt.Fprintf(os.Stderr, "[warn] config.yaml janitor_interval_hours=%d is invalid (must be a non-negative integer; 0 = disable); using default 1\n", *pc.JanitorIntervalHours)
+				warnConfigFallback("config.yaml janitor_interval_hours=%d is invalid (must be a non-negative integer; 0 = disable); using default 1\n", *pc.JanitorIntervalHours)
 			} else {
 				cfg.JanitorIntervalHours = *pc.JanitorIntervalHours
 			}
@@ -683,11 +706,11 @@ func Execute() error {
 			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 				cfg.LogRetentionDays = n
 			} else {
-				fmt.Fprintf(os.Stderr, "[warn] FABRIK_LOG_RETENTION_DAYS=%q is invalid (must be a non-negative integer of days; 0 = disable); using default 14\n", v)
+				warnConfigFallback("FABRIK_LOG_RETENTION_DAYS=%q is invalid (must be a non-negative integer of days; 0 = disable); using default 14\n", v)
 			}
 		} else if pc.LogRetentionDays != nil {
 			if *pc.LogRetentionDays < 0 {
-				fmt.Fprintf(os.Stderr, "[warn] config.yaml log_retention_days=%d is invalid (must be a non-negative integer; 0 = disable); using default 14\n", *pc.LogRetentionDays)
+				warnConfigFallback("config.yaml log_retention_days=%d is invalid (must be a non-negative integer; 0 = disable); using default 14\n", *pc.LogRetentionDays)
 			} else {
 				cfg.LogRetentionDays = *pc.LogRetentionDays
 			}
@@ -698,11 +721,11 @@ func Execute() error {
 			if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
 				cfg.LogMaxBytes = n
 			} else {
-				fmt.Fprintf(os.Stderr, "[warn] FABRIK_LOG_MAX_BYTES=%q is invalid (must be a non-negative integer of bytes; 0 = disable); using default 2147483648\n", v)
+				warnConfigFallback("FABRIK_LOG_MAX_BYTES=%q is invalid (must be a non-negative integer of bytes; 0 = disable); using default 2147483648\n", v)
 			}
 		} else if pc.LogMaxBytes != nil {
 			if *pc.LogMaxBytes < 0 {
-				fmt.Fprintf(os.Stderr, "[warn] config.yaml log_max_bytes=%d is invalid (must be a non-negative integer; 0 = disable); using default 2147483648\n", *pc.LogMaxBytes)
+				warnConfigFallback("config.yaml log_max_bytes=%d is invalid (must be a non-negative integer; 0 = disable); using default 2147483648\n", *pc.LogMaxBytes)
 			} else {
 				cfg.LogMaxBytes = *pc.LogMaxBytes
 			}
@@ -713,11 +736,11 @@ func Execute() error {
 			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 				cfg.SessionRetentionDays = n
 			} else {
-				fmt.Fprintf(os.Stderr, "[warn] FABRIK_SESSION_RETENTION_DAYS=%q is invalid (must be a non-negative integer of days; 0 = disable); using default 14\n", v)
+				warnConfigFallback("FABRIK_SESSION_RETENTION_DAYS=%q is invalid (must be a non-negative integer of days; 0 = disable); using default 14\n", v)
 			}
 		} else if pc.SessionRetentionDays != nil {
 			if *pc.SessionRetentionDays < 0 {
-				fmt.Fprintf(os.Stderr, "[warn] config.yaml session_retention_days=%d is invalid (must be a non-negative integer; 0 = disable); using default 14\n", *pc.SessionRetentionDays)
+				warnConfigFallback("config.yaml session_retention_days=%d is invalid (must be a non-negative integer; 0 = disable); using default 14\n", *pc.SessionRetentionDays)
 			} else {
 				cfg.SessionRetentionDays = *pc.SessionRetentionDays
 			}
@@ -768,6 +791,22 @@ func Execute() error {
 			cfg.PluginDir = v
 		}
 	}
+	// Flag and env are comma-separated and split here; the config.yaml list is
+	// kept as a list so an entry containing a comma survives intact (ADR 2136).
+	if !explicitFlags["plugin-dirs"] {
+		if v := os.Getenv("FABRIK_PLUGIN_DIRS"); v != "" {
+			cfg.PluginDirs = v
+		}
+	}
+	if cfg.PluginDirs != "" {
+		cfg.PluginDirList = splitGlobList(cfg.PluginDirs)
+	} else {
+		for _, d := range pc.PluginDirs {
+			if d = strings.TrimSpace(d); d != "" {
+				cfg.PluginDirList = append(cfg.PluginDirList, d)
+			}
+		}
+	}
 	if !explicitFlags["webhooks"] {
 		cfg.Webhooks = resolveBool("FABRIK_WEBHOOKS", pc.Webhooks)
 	}
@@ -776,13 +815,13 @@ func Execute() error {
 			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 				cfg.WebhookPort = n
 			} else {
-				fmt.Fprintf(os.Stderr, "[warn] FABRIK_WEBHOOK_PORT=%q is invalid (must be 0 or a positive integer); using OS-assigned port\n", v)
+				warnConfigFallback("FABRIK_WEBHOOK_PORT=%q is invalid (must be 0 or a positive integer); using OS-assigned port\n", v)
 			}
 		} else if pc.WebhookPort != nil {
 			if *pc.WebhookPort >= 0 {
 				cfg.WebhookPort = *pc.WebhookPort
 			} else {
-				fmt.Fprintf(os.Stderr, "[warn] webhook_port=%d is invalid (must be 0 or a positive integer); using OS-assigned port\n", *pc.WebhookPort)
+				warnConfigFallback("webhook_port=%d is invalid (must be 0 or a positive integer); using OS-assigned port\n", *pc.WebhookPort)
 			}
 		}
 	}
@@ -817,11 +856,11 @@ func Execute() error {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
 				cfg.StatusPollSeconds = n
 			} else {
-				fmt.Fprintf(os.Stderr, "[warn] FABRIK_STATUS_POLL=%q is invalid (must be a positive integer); using default 15\n", v)
+				warnConfigFallback("FABRIK_STATUS_POLL=%q is invalid (must be a positive integer); using default 15\n", v)
 			}
 		} else if pc.StatusPoll != nil {
 			if *pc.StatusPoll <= 0 {
-				fmt.Fprintf(os.Stderr, "[warn] config.yaml status_poll=%d is invalid (must be a positive integer); using default 15\n", *pc.StatusPoll)
+				warnConfigFallback("config.yaml status_poll=%d is invalid (must be a positive integer); using default 15\n", *pc.StatusPoll)
 			} else {
 				cfg.StatusPollSeconds = *pc.StatusPoll
 			}
@@ -844,9 +883,7 @@ func Execute() error {
 		return fmt.Errorf("GitHub credentials required: use --token, FABRIK_TOKEN, or GITHUB_TOKEN, or configure GitHub App authentication (--github-app-id/--github-app-private-key-path/--github-app-installation-id)")
 	}
 
-	if strings.HasPrefix(cfg.Token, "github_pat_") {
-		fmt.Fprintf(os.Stderr, "[warn] Fine-grained personal access tokens (github_pat_...) do not support GitHub Projects v2 GraphQL. Switch to a classic personal access token with 'repo', 'project', and 'workflow' scopes. See: https://github.com/settings/tokens\n")
-	}
+	reportTokenWarning(cfg.Token)
 
 	// user is the operator's identity and only PAT mode has one: under GitHub
 	// App auth the App installation is the identity (commit author, lock label,
@@ -889,7 +926,11 @@ func Execute() error {
 		fmt.Printf("  yolo:    %v\n", cfg.Yolo)
 		fmt.Printf("  auto-upgrade: %v\n", cfg.AutoUpgrade)
 		fmt.Printf("  poll:    %ds\n", cfg.PollSeconds)
-		fmt.Printf("  workers: %d\n", cfg.MaxConcurrent)
+		if cfg.MergeTrain == "on" {
+			fmt.Printf("  workers: %d (+1 reserved merge-train slot)\n", cfg.MaxConcurrent)
+		} else {
+			fmt.Printf("  workers: %d\n", cfg.MaxConcurrent)
+		}
 		if cfg.MaxRetries == 0 {
 			fmt.Printf("  max-retries: unlimited\n")
 		} else {
@@ -904,6 +945,9 @@ func Execute() error {
 	// If the process was re-exec'd after an auto-upgrade or a SIGHUP restart,
 	// conditionally refresh embedded plugin skills (three-way comparison: skip
 	// refresh when the operator has local customizations).
+	// Capture why this process started before the markers are consumed: the
+	// engine reports it in the fabrik.log banner (#2094).
+	startReason := reexecStartReason()
 	handleReexecPluginRefresh("FABRIK_AUTO_UPGRADED", "")
 	handleReexecPluginRefresh("FABRIK_SIGHUP_RESTART", " after SIGHUP restart")
 
@@ -933,6 +977,7 @@ func Execute() error {
 		User:                       cfg.User,
 		Token:                      cfg.Token,
 		Version:                    Version,
+		StartReason:                startReason,
 		Yolo:                       cfg.Yolo,
 		AutoUpgrade:                cfg.AutoUpgrade,
 		GitSSH:                     cfg.GitSSH,
@@ -948,6 +993,9 @@ func Execute() error {
 		CIWaitTimeout:              ciWaitTimeout(cfg.CIWaitTimeout),
 		CIBackstopTimeout:          ciBackstopTimeout(cfg.CIBackstopTimeout),
 		StallThreshold:             stallThreshold(cfg.StallThreshold),
+		RetryStarvedThreshold:      minutesOrDefault(cfg.RetryStarvedThreshold, 5),
+		ItemWedgedThreshold:        minutesOrDefault(cfg.ItemWedgedThreshold, 10),
+		CacheDivergenceWindow:      minutesOrDefault(cfg.CacheDivergenceWindow, 5),
 		ChannelHeldMax:             cfg.ChannelHeldMax,
 		RequiredStatusContexts:     pc.RequiredStatusContexts, // keyed by "owner/repo"; nil = no behavior change (ADR-933)
 		PostPushDwell:              postPushDwell(cfg.PostPushDwell),
@@ -982,6 +1030,7 @@ func Execute() error {
 		SymlinkEnv:                 cfg.SymlinkEnv,
 		WorktreeBoundaryAudit:      cfg.WorktreeBoundaryAudit,
 		PluginDir:                  cfg.PluginDir,
+		PluginDirs:                 cfg.PluginDirList,
 		Stages:                     stageCfgs,
 		Webhooks:                   cfg.Webhooks,
 		WebhookPort:                cfg.WebhookPort,
@@ -1015,15 +1064,54 @@ func Execute() error {
 	// .fabrik/plugin/ dir) always report stale count 0.
 	var skillsStaleCount int
 	var customWorkflow bool
+	var pluginEvalErr error
 	if _, statErr := os.Stat(".fabrik/plugin"); statErr == nil {
 		cw, _, staleCount, evalErr := evaluatePluginStartupState(".fabrik/plugin", strings.HasPrefix(Version, "dev"))
 		if evalErr != nil {
-			fmt.Fprintf(os.Stderr, "[upgrade] warning: plugin state check failed: %v\n", evalErr)
+			pluginEvalErr = evalErr
 		} else {
 			customWorkflow = cw
 			skillsStaleCount = staleCount
 		}
 	}
+
+	// Every configuration value has been resolved by now (the helper calls
+	// above and in the engine.Config literal included), so the aggregated
+	// "invalid setting, using default" entry can be recorded — or cleared.
+	reportConfigFallbacks()
+
+	// Plugin conditions reach the panel in both modes; stderr only in plain-text
+	// mode, where the TUI is not drawing over it.
+	pluginState := pluginStateReport{EvalErr: pluginEvalErr, Customized: customWorkflow}
+	if customWorkflow {
+		pluginState.CustomizedMsg = pluginCustomizationWarning(".fabrik/plugin", skillsStaleCount)
+		pluginState.RefreshSkipped = true
+	} else if skillsStaleCount > 0 {
+		if useTUI {
+			// The refresh is not attempted under the TUI; a failure recorded
+			// by an earlier plain-text start must survive this one.
+			pluginState.RefreshSkipped = true
+		} else {
+			pluginState.RefreshErr = checkPluginSkillsWithReader(".fabrik/plugin", false, nil)
+		}
+	} else if pluginEvalErr != nil {
+		// Staleness is unknown when the state check itself failed.
+		pluginState.RefreshSkipped = true
+	}
+	// A pending workflow migration (#2139) is only ever reported here — the
+	// daemon never moves files or rewrites stage YAML; `fabrik upgrade` does.
+	// A vendored development plugin set is not migratable, so it is not pending.
+	if cfg.PluginDir == "" && pluginEvalErr == nil {
+		if plan, planErr := planMigration(".", strings.HasPrefix(Version, "dev"), ""); planErr == nil && plan.Pending() {
+			pluginState.MigrationPending = true
+			pluginState.MigrationDetail = migrationPendingDetail(plan)
+		}
+	}
+	var pluginW io.Writer
+	if !useTUI {
+		pluginW = os.Stderr
+	}
+	reportPluginState(pluginW, pluginState)
 
 	// When TUI is enabled (and we have a real terminal), run the bubbletea
 	// TUI. Otherwise fall through to plain-text mode.
@@ -1033,13 +1121,6 @@ func Execute() error {
 		stopCh := make(chan tui.StopRequest, 1)
 		eng.SetStopCh(stopCh)
 		return runTUI(eng, cfg.PollSeconds, buildProjectInfo(cfg, pc), cfg.PluginDir, wakeCh, stopCh, skillsStaleCount, customWorkflow)
-	}
-	if customWorkflow {
-		fmt.Fprintf(os.Stderr, "%s", pluginCustomizationWarning(".fabrik/plugin", skillsStaleCount))
-	} else if skillsStaleCount > 0 {
-		if refreshErr := checkPluginSkillsWithReader(".fabrik/plugin", false, nil); refreshErr != nil {
-			fmt.Fprintf(os.Stderr, "[upgrade] warning: plugin skill refresh failed: %v\n", refreshErr)
-		}
 	}
 	return eng.Run()
 }
@@ -1138,7 +1219,7 @@ func resolveInt(current int, envVar, unit string, defaultVal int) int {
 	if unit != "" {
 		unitSuffix = " " + unit
 	}
-	fmt.Fprintf(os.Stderr, "[warn] %s=%q is invalid (must be a positive integer%s); using default %d\n", envVar, v, unitSuffix, defaultVal)
+	warnConfigFallback("%s=%q is invalid (must be a positive integer%s); using default %d\n", envVar, v, unitSuffix, defaultVal)
 	return current
 }
 
@@ -1150,6 +1231,27 @@ func resolveDuration(current string, envVar string) string {
 		return v
 	}
 	return current
+}
+
+// reexecStartReason names why this process started, from the re-exec markers
+// the previous process set, for the fabrik.log start banner (#2094). It must run
+// before handleReexecPluginRefresh unsets FABRIK_AUTO_UPGRADED and
+// FABRIK_SIGHUP_RESTART. FABRIK_DEV_REEXEC has no plugin-refresh handler, so it
+// is unset here, which also keeps it from ever reaching a worker. Precedence
+// matches the order the markers could have been set in: an explicit SIGHUP
+// restart wins, then the upgrade re-execs.
+func reexecStartReason() string {
+	devReexec := os.Getenv("FABRIK_DEV_REEXEC") == "1"
+	os.Unsetenv("FABRIK_DEV_REEXEC")
+	switch {
+	case os.Getenv("FABRIK_SIGHUP_RESTART") == "1":
+		return "SIGHUP restart"
+	case os.Getenv("FABRIK_AUTO_UPGRADED") == "1":
+		return "self-upgrade re-exec"
+	case devReexec:
+		return "self-upgrade re-exec (dev build)"
+	}
+	return "fresh start"
 }
 
 // handleReexecPluginRefresh checks and unsets envVar (a re-exec marker set
@@ -1232,7 +1334,7 @@ func pluginCustomizationWarning(pluginDir string, staleCount int) string {
 	if diffing, diffErr := diffingPluginFiles(pluginDir); diffErr == nil && len(diffing) > 0 {
 		msg += fmt.Sprintf(" (differing: %s)", strings.Join(diffing, ", "))
 	}
-	msg += "; run 'fabrik upgrade --force' to overwrite, or 'fabrik upgrade --reconcile' for a reconciliation prompt"
+	msg += "; run 'fabrik upgrade' to move your edits into .fabrik/plugins/local-workflows and restore upgrades, 'fabrik upgrade --force' to overwrite them, or 'fabrik upgrade --reconcile' for a reconciliation prompt"
 	if staleCount > 0 {
 		msg += stalenessNote(pluginDir, staleCount)
 	}
@@ -1274,6 +1376,16 @@ func ciWaitTimeout(minutes int) time.Duration {
 func stallThreshold(minutes int) time.Duration {
 	if minutes <= 0 {
 		return 30 * time.Minute
+	}
+	return time.Duration(minutes) * time.Minute
+}
+
+// minutesOrDefault converts a minutes config value to a time.Duration, using
+// def minutes when the value is unset (zero or negative). Used by the channel
+// anomaly thresholds (#2170), which are read once at startup.
+func minutesOrDefault(minutes, def int) time.Duration {
+	if minutes <= 0 {
+		minutes = def
 	}
 	return time.Duration(minutes) * time.Minute
 }
@@ -1438,11 +1550,11 @@ func killGraceSigInt(s string) time.Duration {
 	}
 	d, err := time.ParseDuration(s)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[warn] FABRIK_KILL_GRACE_SIGINT=%q is invalid (Go duration syntax required, e.g. 10s, 0s); using default 10s\n", s)
+		warnConfigFallback("FABRIK_KILL_GRACE_SIGINT=%q is invalid (Go duration syntax required, e.g. 10s, 0s); using default 10s\n", s)
 		return 10 * time.Second
 	}
 	if d < 0 {
-		fmt.Fprintf(os.Stderr, "[warn] FABRIK_KILL_GRACE_SIGINT=%q is negative; using default 10s\n", s)
+		warnConfigFallback("FABRIK_KILL_GRACE_SIGINT=%q is negative; using default 10s\n", s)
 		return 10 * time.Second
 	}
 	return d
@@ -1457,11 +1569,11 @@ func killGraceSigTerm(s string) time.Duration {
 	}
 	d, err := time.ParseDuration(s)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[warn] FABRIK_KILL_GRACE_SIGTERM=%q is invalid (Go duration syntax required, e.g. 10s); using default 10s\n", s)
+		warnConfigFallback("FABRIK_KILL_GRACE_SIGTERM=%q is invalid (Go duration syntax required, e.g. 10s); using default 10s\n", s)
 		return 10 * time.Second
 	}
 	if d < 0 {
-		fmt.Fprintf(os.Stderr, "[warn] FABRIK_KILL_GRACE_SIGTERM=%q is negative; using default 10s\n", s)
+		warnConfigFallback("FABRIK_KILL_GRACE_SIGTERM=%q is negative; using default 10s\n", s)
 		return 10 * time.Second
 	}
 	return d
@@ -1480,11 +1592,11 @@ func drainDeadline(s string) time.Duration {
 	}
 	d, err := time.ParseDuration(s)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[warn] FABRIK_DRAIN_DEADLINE=%q is invalid (Go duration syntax required, e.g. 30s, 1m); using default 30s\n", s)
+		warnConfigFallback("FABRIK_DRAIN_DEADLINE=%q is invalid (Go duration syntax required, e.g. 30s, 1m); using default 30s\n", s)
 		return 30 * time.Second
 	}
 	if d <= 0 {
-		fmt.Fprintf(os.Stderr, "[warn] FABRIK_DRAIN_DEADLINE=%q is not positive — a clean stop has no unbounded-wait mode; using default 30s\n", s)
+		warnConfigFallback("FABRIK_DRAIN_DEADLINE=%q is not positive — a clean stop has no unbounded-wait mode; using default 30s\n", s)
 		return 30 * time.Second
 	}
 	return d
@@ -1502,11 +1614,11 @@ func archiveAfter(s string) time.Duration {
 	}
 	d, err := time.ParseDuration(s)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[warn] FABRIK_ARCHIVE_AFTER=%q is invalid (Go duration syntax required, e.g. 168h, 24h); using default 168h\n", s)
+		warnConfigFallback("FABRIK_ARCHIVE_AFTER=%q is invalid (Go duration syntax required, e.g. 168h, 24h); using default 168h\n", s)
 		return 168 * time.Hour
 	}
 	if d < 0 {
-		fmt.Fprintf(os.Stderr, "[warn] FABRIK_ARCHIVE_AFTER=%q is negative; using default 168h\n", s)
+		warnConfigFallback("FABRIK_ARCHIVE_AFTER=%q is negative; using default 168h\n", s)
 		return 168 * time.Hour
 	}
 	return d
@@ -1526,7 +1638,7 @@ func archiveDoneMode(s string) string {
 	case "on", "off":
 		return lower
 	default:
-		fmt.Fprintf(os.Stderr, "[warn] FABRIK_ARCHIVE_DONE=%q is invalid (must be on or off); using default on\n", s)
+		warnConfigFallback("FABRIK_ARCHIVE_DONE=%q is invalid (must be on or off); using default on\n", s)
 		return "on"
 	}
 }
@@ -1541,11 +1653,11 @@ func convergenceBudget(s string) time.Duration {
 	}
 	d, err := time.ParseDuration(s)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[warn] FABRIK_CONVERGENCE_BUDGET=%q is invalid (Go duration syntax required, e.g. 30m, 1h); using default 30m\n", s)
+		warnConfigFallback("FABRIK_CONVERGENCE_BUDGET=%q is invalid (Go duration syntax required, e.g. 30m, 1h); using default 30m\n", s)
 		return 30 * time.Minute
 	}
 	if d < 0 {
-		fmt.Fprintf(os.Stderr, "[warn] FABRIK_CONVERGENCE_BUDGET=%q is negative; using default 30m\n", s)
+		warnConfigFallback("FABRIK_CONVERGENCE_BUDGET=%q is negative; using default 30m\n", s)
 		return 30 * time.Minute
 	}
 	return d
@@ -1564,7 +1676,7 @@ func autoMergeStrategy(s string) string {
 	case "MERGE", "SQUASH", "REBASE":
 		return upper
 	default:
-		fmt.Fprintf(os.Stderr, "[warn] FABRIK_AUTO_MERGE_STRATEGY=%q is invalid (must be MERGE, SQUASH, or REBASE); using default MERGE\n", s)
+		warnConfigFallback("FABRIK_AUTO_MERGE_STRATEGY=%q is invalid (must be MERGE, SQUASH, or REBASE); using default MERGE\n", s)
 		return "MERGE"
 	}
 }
@@ -1581,7 +1693,7 @@ func mergeQueueMode(s string) string {
 	case "auto", "off":
 		return lower
 	default:
-		fmt.Fprintf(os.Stderr, "[warn] FABRIK_MERGE_QUEUE=%q is invalid (must be auto or off); using default auto\n", s)
+		warnConfigFallback("FABRIK_MERGE_QUEUE=%q is invalid (must be auto or off); using default auto\n", s)
 		return "auto"
 	}
 }
@@ -1598,13 +1710,13 @@ func mergeTrainMode(s string) string {
 	case "on", "off":
 		return lower
 	default:
-		fmt.Fprintf(os.Stderr, "[warn] FABRIK_MERGE_TRAIN=%q is invalid (must be on or off); using default off\n", s)
+		warnConfigFallback("FABRIK_MERGE_TRAIN=%q is invalid (must be on or off); using default off\n", s)
 		return "off"
 	}
 }
 
-// splitGlobList parses the comma-separated --merge-train-overlap-ignore value
-// into trimmed, non-empty globs (#2047). Empty input yields nil.
+// splitGlobList parses a comma-separated flag/env value (--merge-train-overlap-ignore,
+// --plugin-dirs) into trimmed, non-empty entries (#2047, ADR 2136). Empty input yields nil.
 func splitGlobList(s string) []string {
 	var out []string
 	for _, g := range strings.Split(s, ",") {
@@ -1628,7 +1740,7 @@ func singletonCatchUpMode(s string) string {
 	case "merge", "off":
 		return lower
 	default:
-		fmt.Fprintf(os.Stderr, "[warn] FABRIK_SINGLETON_CATCH_UP=%q is invalid (must be merge or off); using default merge\n", s)
+		warnConfigFallback("FABRIK_SINGLETON_CATCH_UP=%q is invalid (must be merge or off); using default merge\n", s)
 		return "merge"
 	}
 }
@@ -1743,14 +1855,14 @@ func resolveRetryBackoff(envVal string, yamlVal *int, current int) int {
 		if n, err := strconv.Atoi(envVal); err == nil && n >= 1 {
 			return n
 		}
-		fmt.Fprintf(os.Stderr, "[warn] FABRIK_RETRY_BACKOFF=%q is invalid (must be an integer >= 1 second); using %d\n", envVal, current)
+		warnConfigFallback("FABRIK_RETRY_BACKOFF=%q is invalid (must be an integer >= 1 second); using %d\n", envVal, current)
 		return current
 	}
 	if yamlVal != nil {
 		if *yamlVal >= 1 {
 			return *yamlVal
 		}
-		fmt.Fprintf(os.Stderr, "[warn] config.yaml retry_backoff=%d is invalid (must be an integer >= 1 second); using %d\n", *yamlVal, current)
+		warnConfigFallback("config.yaml retry_backoff=%d is invalid (must be an integer >= 1 second); using %d\n", *yamlVal, current)
 	}
 	return current
 }
@@ -1759,3 +1871,22 @@ func resolveRetryBackoff(envVal string, yamlVal *int, current int) int {
 // cap (#2045). It is applied here rather than in the engine because the engine
 // cannot tell an explicit 0 ("disabled") from an unset field.
 const defaultMaxTrainAutoRepairAttempts = 1
+
+// reportTokenWarning records (or clears) the fine-grained-PAT panel entry: such
+// a token cannot drive GitHub Projects v2. The check always completes, so
+// Reconcile also clears the entry once a classic token is configured (#2135).
+func reportTokenWarning(token string) {
+	var tokenConds []warnings.Condition
+	if strings.HasPrefix(token, "github_pat_") {
+		tokenConds = append(tokenConds, warnings.Condition{
+			Subject: "fine_grained_pat",
+			Title:   "Fine-grained personal access token cannot drive GitHub Projects v2",
+			Detail: "Fine-grained personal access tokens (github_pat_...) do not support GitHub Projects v2 GraphQL.\n\n" +
+				"Fix: switch to a classic personal access token with 'repo', 'project', and 'workflow' scopes (https://github.com/settings/tokens).",
+			LogLine: "Fine-grained personal access tokens (github_pat_...) do not support GitHub Projects v2 GraphQL. Switch to a classic personal access token with 'repo', 'project', and 'workflow' scopes. See: https://github.com/settings/tokens",
+		})
+	}
+	if err := warnings.Reconcile(os.Stderr, "config_token", tokenConds); err != nil {
+		fmt.Fprintf(os.Stderr, "[startup] warning: recording config_token warning: %v\n", err)
+	}
+}

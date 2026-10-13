@@ -29,6 +29,7 @@ type Config struct {
 	User                       string
 	Token                      string
 	Version                    string
+	StartReason                string // why this process started ("fresh start", "SIGHUP restart", …), shown in the fabrik.log banner (#2094); empty renders as unknown
 	Yolo                       bool
 	AutoUpgrade                bool
 	GitSSH                     bool
@@ -43,6 +44,9 @@ type Config struct {
 	ReconcileInterval          time.Duration       // Reconcile ticker cadence (0 = use lightReconcileInterval default of 3m)
 	MaxReviewCycles            int                 // Max review re-invocation cycles per issue before pausing (default 5)
 	ChannelHeldMax             int                 // per-subscriber bound on events held for the MCP channel push while no session is attached (default 200; oldest dropped with a notice; #1968)
+	RetryStarvedThreshold      time.Duration       // how long a due stage retry may go undispatched before a retry-starved channel event (default 5m; #2170, docs/state-machine.md §7.14). Never below 2 × the poll interval.
+	ItemWedgedThreshold        time.Duration       // how long a gate may hold an item with no worker dispatched or queued before an item-wedged channel event (default 10m; #2170). Never below 2 × the poll interval.
+	CacheDivergenceWindow      time.Duration       // how recent an engine label/column write must be for a reverting reconcile, deep fetch or probe to be reported as cache-divergence (default 5m; #2170)
 	StallThreshold             time.Duration       // how long an item may show no observable progress (no worker activity, no status or label change) before the local read API classifies it stalled (default 30m; #1967, docs/state-machine.md §7.9). Zero disables stall classification.
 	CIWaitTimeout              time.Duration       // CI-gate liveness-stall dwell: how long CI may show no observable progress before pausing (default 30m; ADR-1410 — no longer a total-wait bound, see CIBackstopTimeout)
 	CIBackstopTimeout          time.Duration       // Absolute cap on how long an item may sit in fabrik:awaiting-ci under any classification, bounding per-poll cost independent of CI duration (default 4h; ADR-1410, R5)
@@ -79,6 +83,7 @@ type Config struct {
 	SymlinkEnv                 bool
 	WorktreeBoundaryAudit      bool
 	PluginDir                  string
+	PluginDirs                 []string // additional workflow plugin directories, loaded after the base plugin (ADR 2136)
 	Stages                     []*stages.Stage
 	Webhooks                   bool
 	WebhookPort                int
@@ -188,9 +193,11 @@ type Engine struct {
 	hostClient            *gh.Client             // same host as client, concretely typed; used by the GHES-only startup version-floor preflight (checkGHESVersionFloor), which needs FetchInstalledVersion and isn't worth adding to the GitHubClient interface for one startup-only call, and by checkHookdeckInstallationCoverage (#1142), which needs a live installation token via Token() for the R5 App-mode coverage check. nil outside New() (e.g. NewWithDeps-constructed test engines); checkGHESVersionFloor is a standalone function tested directly against a *gh.Client, not through the Engine.
 	appIdent              *appIdentity           // App-mode identity (bot login, bot user ID, lock ID) resolved once in New() (#1893); nil in PAT mode. Read via appID() — never assign after Run() starts.
 	ghAppAuth             *githubauth.Reconciler // non-nil only when Config.GitHubApp* fields configure App-auth (#1713); nil in PAT mode (the default). Run() starts and, on shutdown, joins its refresh-loop goroutines when non-nil — see poll.go's Run().
+	skillResolver         *skillResolver         // resolves stage skill references against the loaded plugin dirs (ADR 2137); nil on NewWithDeps engines, where references pass through unchanged.
 	readClient            boardcache.ReadClient  // read-only GitHub calls; may be CacheImpl or GitHubAdapter
 	claude                ClaudeInvoker
 	statusField           *gh.StatusField
+	boardProjectID        string                      // the project id of the last polled board (guarded by mu); the overseer's advance uses it when no boardcache is wired
 	worktreeManagers      map[string]*WorktreeManager // key: "owner/repo"; one WM per discovered repo
 	fabrikDir             string                      // directory containing .fabrik/ (always os.Getwd() at startup)
 	mu                    sync.Mutex
@@ -254,6 +261,14 @@ type Engine struct {
 	// starts it (and when the hub failed to open). Guarded by channelMu.
 	channelMu sync.Mutex
 	channel   *channelEvents
+	// boardPopulated is set once the first poll has completed successfully: the
+	// board is then "initially populated" and an item the store learns about
+	// afterwards is an arrival (item-added, #2123). Items created before it —
+	// the startup population, whichever path delivers it — are never announced.
+	boardPopulated atomic.Bool
+	// decisionAnchors is the poll-side recorder's retry memory (#2120,
+	// decision_anchor.go).
+	decisionAnchors decisionAnchorState
 	// logThrottle is the shared dedup state behind logfThrottled (R4,
 	// logthrottle.go) — collapses repeated identical log lines (e.g. the
 	// per-poll rate-limit stats lines) into one emission per throttle window
@@ -262,14 +277,20 @@ type Engine struct {
 	// stalenessCompareFn overrides selfupgrade.CompareDevBuild when non-nil.
 	// Used by tests to inject a synthetic DevBuildStatus without real git
 	// subprocesses. Production leaves this nil.
-	stalenessCompareFn                    func(selfupgrade.DevBuildConfig) (selfupgrade.DevBuildStatus, error)
-	lastProjectUpdatedAt                  time.Time                     // last seen project.updatedAt from FetchProjectUpdatedAt gate; zero = not yet checked
-	pollSeam                              *pollSeam                     // TEST-ONLY (#1978): bed poll hold/trigger seam; nil unless Config.PollControlFile is set; built in Run()
-	wakeCh                                chan struct{}                 // TUI sends on this to wake the poll loop immediately; nil if no TUI
-	stopCh                                chan tui.StopRequest          // TUI sends on this to stop a specific in-flight issue; nil if no TUI
-	sem                                   chan struct{}                 // semaphore bounding concurrent workers across poll cycles
-	wg                                    sync.WaitGroup                // tracks in-flight workers for graceful shutdown; also tracks the shutdown pause-write phase (runShutdownPause, shutdown.go) so one waitGroupTimeout call bounds both (ADR-1393)
-	cloneInFlight                         sync.Map                      // key: "owner/repo" string, value: *cloneCall; per-repo bare-clone coordination
+	stalenessCompareFn   func(selfupgrade.DevBuildConfig) (selfupgrade.DevBuildStatus, error)
+	lastProjectUpdatedAt time.Time            // last seen project.updatedAt from FetchProjectUpdatedAt gate; zero = not yet checked
+	pollSeam             *pollSeam            // TEST-ONLY (#1978): bed poll hold/trigger seam; nil unless Config.PollControlFile is set; built in Run()
+	wakeCh               chan struct{}        // TUI sends on this to wake the poll loop immediately; nil if no TUI
+	stopCh               chan tui.StopRequest // TUI sends on this to stop a specific in-flight issue; nil if no TUI
+	sem                  chan struct{}        // semaphore bounding concurrent workers across poll cycles
+	trainSem             chan struct{}        // reserved merge-train worker slot (#2115, ADR 2115); nil when merge_train is off (and on NewWithDeps engines unless EnableTrainReservedSlotForTest); touched only by acquireTrainSlotEp
+	wg                   sync.WaitGroup       // tracks in-flight workers for graceful shutdown; also tracks the shutdown pause-write phase (runShutdownPause, shutdown.go) so one waitGroupTimeout call bounds both (ADR-1393)
+	cloneInFlight        sync.Map             // key: "owner/repo" string, value: *cloneCall; per-repo bare-clone coordination
+	// trainRuns is the table of persisted merge-train runs (#2051, ADR 2051). Non-nil only
+	// on engines that run the asynchronous driver (New()); nil — the synchronous driver —
+	// everywhere else, so every NewWithDeps engine and its tests are unchanged.
+	trainRuns                             *trainRunStore
+	trainRunsLoadOnce                     sync.Once                     // loads persisted run records on the first settleTrainRuns
 	mergeTrainInFlight                    sync.Map                      // key: trainKey ("owner/repo:baseBranch", mergeTrainKey — since #1648, was bare "owner/repo"), value: *mergeTrainWorkerState; per-(repo,base) train dispatch guard, so one base's train cannot block or be mistaken for another base's train in the same repo
 	mergeTrainEjectionsMu                 sync.Mutex                    // guards mergeTrainEjectionCounts
 	mergeTrainEjectionCounts              map[string]int                // key: "owner/repo#N", ejection count per member — deliberately stays issue-scoped, not re-keyed by base (#1648): an issue belongs to exactly one partition at a time
@@ -283,19 +304,29 @@ type Engine struct {
 	mergeTrainTrials                      map[string][]time.Time        // key: trainKey ("owner/repo:baseBranch", mergeTrainKey — since #1648, was bare "owner/repo"), trial timestamps for runaway guard (ADR-059 D8); one base's trials never count toward a sibling base's threshold in the same repo
 	mergeTrainInfraMu                     sync.Mutex                    // guards mergeTrainInfraCooldown (#2052)
 	mergeTrainInfraCooldown               map[string]time.Time          // key: trainKey; earliest time a train for that (repo,base) partition may be re-dispatched after a trial was abandoned for CI infrastructure (TrainCIInfra) — see ADR 2052
-	actionsDegradeLogged                  atomic.Bool                   // set once the optional-`actions`-permission-missing notice has been logged (#2052 R7)
+	pushGuardDisabled                     atomic.Bool                   // test seam: SetPushZeroAheadGuardDisabledForTest (#2089)
+	restoreRebaseDisabledForTest          bool                          // test seam: SetCommentRebaseRestoreDisabledForTest (#2150); guarded by mu, applied to managers registered later too
+	pureRebaseDisabledForTest             bool                          // test seam: SetCatchUpPureRebaseDisabledForTest (#2150); guarded by mu, applied to managers registered later too
+	actionsDegradeLogged                  atomic.Bool                   // set once the notice that a workflow-run read or re-run was refused (`actions` revoked at runtime or never accepted) has been logged (#2052 R7)
 	ciInfraTiming                         ciInfraTiming                 // test-shrinkable CI-infrastructure dwells (#2052); zero = defaults
 	startupWatchMu                        sync.Mutex                    // guards startupWatches
 	startupWatches                        map[string]*prStartupState    // key: "owner/repo#PR"; the stage wait_for_ci gate's retrigger state, reset when the PR's head SHA moves (#2052 R6) — in memory only, so a restart may grant one extra retrigger
 	probeDriftConvergenceDisabledForTest  bool                          // neutralisation seam (#2080): the drift ledger never suppresses a repeat, restoring the pre-fix per-poll invalidation
 	probeTerminalDriftSkipDisabledForTest bool                          // neutralisation seam (#2080): terminal items are no longer exempt from the linkage-drift check
+	prFactsRotation                       atomic.Int64                  // polls one full settlePRFacts rotation takes (#2122): ceil(candidates that can spend check budget / check budget), >= 1; attention tolerates a verdict that old
+	prFactsAttemptAt                      map[string]time.Time          // last poll a candidate spent REST/check budget, keyed repo#number; poll goroutine only (#2122), so a failing or closed item rotates to the back instead of holding the front
+	prFactsRefreshDisabledForTest         bool                          // neutralisation seam (#2122): the overseer PR-fact writers (probe scalar apply, settlePRFacts) are off
 	probeDrift                            probeDriftLedger              // the probe loop's linkage-drift ledger (#2080) — per-item last-invalidated pair and loop counter; in memory only
 	statusLine                            displayFieldState             // the display-only status-line writer's state (#2048) — in memory only; a restart forgets what was written
 	lastActivity                          displayFieldState             // display-only "Last activity" date field writer state (#2049) — in memory only
 	lastRun                               displayFieldState             // display-only "Last run" text field writer state (#2049) — in memory only
 	flakeRerunMu                          sync.Mutex                    // guards flakeReruns and flakeRerunDisabled
+	layer1OffBoardMu                      sync.Mutex                    // guards layer1OffBoard
+	layer1OffBoard                        map[string]time.Time          // key: "<projectID>|<repo>#<n>" → expiry; Layer 1's negative cache of "not on the board" lookups (#2093) — in memory only
 	flakeReruns                           map[string]*prFlakeState      // key: "owner/repo#PR"; the stage wait_for_ci gate's flake re-run budget (#2072), reset when the PR's head SHA moves — in memory only, so a restart may grant one extra re-run
 	flakeRerunDisabled                    bool                          // test-only neutralisation seam (SetCIFlakeRerunDisabledForTest)
+	feedbackGapMu                         sync.Mutex                    // guards feedbackGaps
+	feedbackGaps                          map[string]int                // key: "owner/repo#N:<sorted held feedback IDs>"; value: how many times the feedback gate repaired the dispatcher's input for exactly that gap (#2160, ADR 2160) — in memory only, so a restart may grant a fresh budget
 	mergeTrainRunawayMu                   sync.Mutex                    // guards mergeTrainRunawayAlerted AND serializes fireRunawayGuard's pause+alert critical section across all three call sites (Hook 1 x2, Hook 2) — see fireRunawayGuard (#1533). Still a single engine-wide mutex, not sharded per (repo,base) — #1648 widens its blast radius to also serialize concurrent per-base workers within the same repo, not just across repos, but the trade-off (rare/exceptional event) is unchanged.
 	mergeTrainRunawayAlerted              map[string]int                // key: "trainKey#N" (trainKey a mergeTrainKey "owner/repo:baseBranch" since #1648, was bare "owner/repo#N"); value: the trial count in effect when this member was last alerted. A later call is treated as already-alerted only while its own count is <= the recorded value — trials cannot increase while the guard keeps the queue paused, so an increase can only mean an operator manually resumed the member (removing fabrik:paused) and it genuinely tripped again, which must produce a fresh alert (#1533 review, finding 2). Also cleared wholesale per-trainKey by resetTrialCounter (the guard's own "episode ends" signal — a successful land) (#1533)
 	queuedReviewEjectsMu                  sync.Mutex                    // guards queuedReviewEjects
@@ -311,8 +342,8 @@ type Engine struct {
 	ciBackstopLiveEvaluated               sync.Map                      // key: "owner/repo#N"; items settleAwaitingCIScan has run the live-data handler chain for since this process started (#2059 R2). Until set, the CIBackstopTimeout backstop may not escalate the item blind. In memory by design: a restart clears it, granting each awaiting-ci item one live evaluation per daemon start. Not deleted when the label clears — bounded by item count.
 	ciBackstopResumeSeen                  sync.Map                      // key: "owner/repo#N"; value: time.Time — the newest fabrik:paused removal time the CIBackstopTimeout backstop read live (#2059 R1). Shared by every effectiveAnchor caller since #2064 (each tests it against its own timeout window). Skip-only memo: a memoised resume still inside the caller's timeout lets it skip without re-paging the events log; escalation is never decided from it, always from a fresh live read.
 	mergeTrainBatchSnapshotSeen           sync.Map                      // key: trainKey ("owner/repo:baseBranch", mergeTrainKey — since #1648, was bare "owner/repo"), value: string signature (sorted item numbers) of the last-logged Queued batch snapshot
-	claudeSuspendMu                       sync.Mutex                    // guards claudeSuspendedUntil
-	claudeSuspendedUntil                  time.Time                     // zero = not suspended; account-wide Claude dispatch suspension deadline (see usage_limit_backoff.go)
+	claudeUsageLimitMu                    sync.Mutex                    // guards claudeUsageLimitedUntil
+	claudeUsageLimitedUntil               time.Time                     // zero = not usage limited; account-wide Claude dispatch usage-limit hold deadline (see usage_limit_backoff.go)
 	events                                chan tui.Event                // nil in tests / plain-text mode; TUI goroutine consumes
 	logFile                               *os.File                      // persistent log file at .fabrik/fabrik.log; nil if not opened
 	logMu                                 sync.Mutex                    // serializes concurrent writes to logFile
@@ -330,6 +361,11 @@ type Engine struct {
 	// (#1420 R1) so seam-based tests can exercise the ejection-comment diagnostic content,
 	// not only ejection sequencing. Production leaves this nil. See assembleAndValidate.
 	trainValidateFn func(ctx context.Context, members []trainMember) (TrainCIResult, *trainCIDiagnostic)
+	// trainValidateHoldForTest, when it returns true, makes the per-poll evaluator
+	// (settleTrainRuns) treat an open trial as "no verdict yet" under the trainValidateFn
+	// seam — the seam otherwise answers at once, which would leave nothing for a restart or
+	// a deadline to interrupt (#2051). Test-only; nil in production.
+	trainValidateHoldForTest func() bool
 	// trainLiveBaseFn replaces the live origin/<base> read used by the red-singleton R3
 	// "already fixed" check (#2045) when non-nil, for tests that run no real git.
 	trainLiveBaseFn func(p trialParams) (string, error)
@@ -375,6 +411,12 @@ type Engine struct {
 	// sighupRequested is set by the SIGHUP handler goroutine to signal that the
 	// main loop should re-exec after draining workers (Unix only).
 	sighupRequested atomic.Bool
+
+	// lockLost is set by Run() when per-poll verification finds a held instance
+	// lock replaced or removed (#2097). drainAndExit then skips lock-label cleanup
+	// (another engine may legitimately hold fabrik:locked:<user>) and Run() returns
+	// errInstanceLockLost.
+	lockLost atomic.Bool
 	// sighupExecFn overrides syscall.Exec in tests to prevent the test process
 	// from actually being replaced. Production code leaves this nil.
 	sighupExecFn func(argv0 string, argv []string, envv []string) error
@@ -465,19 +507,12 @@ func New(cfg Config) (*Engine, error) {
 	// Default to .fabrik/plugin in the fabrik dir (created by fabrik init).
 	// --plugin-dir flag overrides this for development.
 	// Path must be absolute since Claude runs in the worktree, not the repo root.
-	pluginDir := cfg.PluginDir
-	if pluginDir == "" {
-		defaultPluginDir := filepath.Join(fabrikDir, ".fabrik", "plugin")
-		if fi, err := os.Stat(defaultPluginDir); err == nil && fi.IsDir() {
-			pluginDir = defaultPluginDir
-		}
+	// Configured extras (--plugin-dirs) load after the base; see ADR 2136.
+	pluginDirs, err := resolvePluginDirs(fabrikDir, cfg.PluginDir, cfg.PluginDirs)
+	if err != nil {
+		return nil, err
 	}
-	if pluginDir != "" {
-		if abs, err := filepath.Abs(pluginDir); err == nil {
-			pluginDir = abs
-		}
-		claudePluginDir = pluginDir
-	}
+	claudePluginDirs = pluginDirs
 	claudeWaitDelay = cfg.ClaudeWaitDelay
 	// KillGraceSigInt >= 0: 0 = skip SIGINT step, positive = use that duration.
 	// Execute() maps "" → 10s, so 0 only arrives when user explicitly passed 0s.
@@ -624,6 +659,7 @@ func New(cfg Config) (*Engine, error) {
 		hostClient:                ghClient,
 		ghAppAuth:                 ghAppReconciler,
 		appIdent:                  appIdent,
+		skillResolver:             newSkillResolver(pluginDirs),
 		claude:                    &RealClaudeInvoker{DebugOutput: cfg.DebugOutput},
 		worktreeManagers:          make(map[string]*WorktreeManager),
 		fabrikDir:                 fabrikDir,
@@ -633,6 +669,7 @@ func New(cfg Config) (*Engine, error) {
 		checkedAutoMergeRepos:     make(map[string]bool),
 		repoAccess:                make(map[string]gh.RepoAccess),
 		sem:                       make(chan struct{}, cfg.MaxConcurrent),
+		trainSem:                  newTrainSlot(cfg),
 		mergeTrainEjectionCounts:  make(map[string]int),
 		mergeTrainCIDeferred:      make(map[string]string),
 		mergeTrainCloneSkipCounts: make(map[string]int),
@@ -646,6 +683,9 @@ func New(cfg Config) (*Engine, error) {
 		backoffRateLimitRatio:     1.0,
 	}
 	eng.health.markStarted(time.Now())
+	// #2051: the production engine runs the asynchronous merge-train driver — trial state
+	// is persisted under .fabrik/state/merge-train/ and evaluated per poll.
+	eng.trainRuns = newTrainRunStore(trainRunStateDir(fabrikDir))
 
 	// App-auth's per-repo access signal (#1750 R1): fetched once, eagerly,
 	// here — rather than lazily inside resolveRepoAccess — so this single API
@@ -798,6 +838,8 @@ func (e *Engine) RegisterWorktreeManagerForTest(nameWithOwner string, wm *Worktr
 	wm.logfFn = e.logf
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	wm.restoreRebaseDisabled.Store(e.restoreRebaseDisabledForTest)
+	wm.pureRebaseDisabled.Store(e.pureRebaseDisabledForTest)
 	e.worktreeManagers[nameWithOwner] = wm
 }
 
@@ -983,6 +1025,8 @@ func (e *Engine) registerWorktrees(nameWithOwner, baseDir, worktreeRoot string) 
 	dirName := owner + "-" + rname
 	wm := NewWorktreeManagerForRepo(baseDir, worktreeRoot, dirName)
 	wm.logfFn = e.logf
+	wm.restoreRebaseDisabled.Store(e.restoreRebaseDisabledForTest)
+	wm.pureRebaseDisabled.Store(e.pureRebaseDisabledForTest)
 	e.worktreeManagers[nameWithOwner] = wm
 	return wm
 }
@@ -1341,4 +1385,62 @@ func (e *Engine) postSpawnCloneError(parentOwner, parentRepo string, parentItem 
 		awaitingInput: true,
 	})
 	e.logf(parentItem.Number, "error", "cannot clone spawn target %s/%s: %v — pausing parent\n", targetOwner, targetRepo, cloneErr)
+}
+
+// trainSlotCapacity is the size of the reserved merge-train worker slot (#2115,
+// ADR 2115): one when merge_train is on, none otherwise. It is a fixed count — there
+// is deliberately no configuration key for it.
+func trainSlotCapacity(cfg Config) int {
+	if cfg.MergeTrain == "on" {
+		return 1
+	}
+	return 0
+}
+
+// newTrainSlot builds the reserved-slot channel for cfg, or nil when merge_train is
+// off so "merge_train off changes nothing" holds structurally.
+func newTrainSlot(cfg Config) chan struct{} {
+	n := trainSlotCapacity(cfg)
+	if n == 0 {
+		return nil
+	}
+	return make(chan struct{}, n)
+}
+
+// EnableTrainReservedSlotForTest creates the reserved merge-train slot on an engine
+// built by NewWithDeps, which leaves it nil by default so the #2046 slot tests keep
+// observing a single pool. A no-op unless merge_train is on.
+func (e *Engine) EnableTrainReservedSlotForTest() {
+	e.trainSem = newTrainSlot(e.cfg)
+}
+
+// trainSlotUsage reports the reserved merge-train slot's occupancy: slots in use and
+// its capacity (0, 0 when no slot exists). Exact and safe to call concurrently.
+func (e *Engine) trainSlotUsage() (inUse, capacity int) {
+	return len(e.trainSem), cap(e.trainSem)
+}
+
+// HoldGeneralWorkerSlotsForTest occupies every general (max_concurrent) worker slot, as
+// a saturated pool of stage workers would, and returns the function that frees them.
+// Test seam only (#2115, tests/sim); never called in production.
+func (e *Engine) HoldGeneralWorkerSlotsForTest() (release func()) {
+	n := cap(e.sem)
+	for i := 0; i < n; i++ {
+		e.sem <- struct{}{}
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			for i := 0; i < n; i++ {
+				<-e.sem
+			}
+		})
+	}
+}
+
+// WorkerSlotUsageForTest reports general-pool and reserved-train-slot occupancy.
+// Test seam only (#2115, tests/sim).
+func (e *Engine) WorkerSlotUsageForTest() (general, train, trainMax int) {
+	train, trainMax = e.trainSlotUsage()
+	return len(e.sem), train, trainMax
 }

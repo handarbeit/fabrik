@@ -75,12 +75,9 @@ func ParsePRCreateBlock(s string) (*PRCreateBlock, error) {
 
 	blockContent := afterBegin[:endIdx]
 
-	title, body := parsePRCreateTitleAndBody(blockContent)
-	if title == "" {
-		return nil, fmt.Errorf("FABRIK_PR_CREATE block is malformed: missing TITLE line")
-	}
-	if strings.TrimSpace(body) == "" {
-		return nil, fmt.Errorf("FABRIK_PR_CREATE block is malformed: PR body is empty")
+	title, body, err := parsePRCreateTitleAndBody(blockContent)
+	if err != nil {
+		return nil, err
 	}
 
 	return &PRCreateBlock{
@@ -90,31 +87,30 @@ func ParsePRCreateBlock(s string) (*PRCreateBlock, error) {
 	}, nil
 }
 
-// parsePRCreateTitleAndBody extracts the TITLE: line and remaining body from inside
-// a FABRIK_PR_CREATE_BEGIN/END block. Returns ("", "") when no TITLE: line is found.
-func parsePRCreateTitleAndBody(content string) (title, body string) {
-	lines := strings.Split(content, "\n")
-	titleIdx := -1
-	for i, l := range lines {
-		l = strings.TrimRight(l, "\r")
-		trimmed := strings.TrimSpace(l)
-		if trimmed == "" {
-			continue
-		}
-		if strings.HasPrefix(trimmed, "TITLE:") {
-			title = strings.TrimSpace(strings.TrimPrefix(trimmed, "TITLE:"))
-			titleIdx = i
-			break
-		}
-		// First non-empty line isn't TITLE: — malformed.
-		return "", ""
+// parsePRCreateTitleAndBody extracts the TITLE header and remaining body from
+// inside a FABRIK_PR_CREATE_BEGIN/END block. The TITLE key is matched
+// case-insensitively and whitespace-tolerantly (matchHeader). Every failure
+// quotes the line the parser actually found (sanitised and truncated by
+// quoteFoundLine), or says the block was empty, so an operator can tell a
+// casing slip from a truly absent title. Every message contains "TITLE" or
+// "body" so the failure is recognisable.
+func parsePRCreateTitleAndBody(content string) (title, body string, err error) {
+	first, idx := firstNonEmptyLine(content)
+	if idx == -1 {
+		return "", "", fmt.Errorf("FABRIK_PR_CREATE block is malformed: block is empty (expected a TITLE: <title> line)")
 	}
-	if title == "" || titleIdx == -1 {
-		return "", ""
+	title, ok := matchHeader(first, "TITLE")
+	if !ok {
+		return "", "", fmt.Errorf("FABRIK_PR_CREATE block is malformed: missing TITLE line — expected `TITLE: <title>` as the first line, found `%s`", quoteFoundLine(first))
 	}
-	bodyLines := lines[titleIdx+1:]
-	body = strings.Join(bodyLines, "\n")
-	return title, body
+	if title == "" {
+		return "", "", fmt.Errorf("FABRIK_PR_CREATE block is malformed: TITLE line has no value, found `%s`", quoteFoundLine(first))
+	}
+	body = strings.Join(strings.Split(content, "\n")[idx+1:], "\n")
+	if strings.TrimSpace(body) == "" {
+		return "", "", fmt.Errorf("FABRIK_PR_CREATE block is malformed: PR body is empty after TITLE line `%s`", quoteFoundLine(first))
+	}
+	return title, body, nil
 }
 
 // processPRCreateMarker handles a parsed FABRIK_PR_CREATE block: validates the
@@ -154,7 +150,7 @@ func (e *Engine) processPRCreateMarker(ctx context.Context, item gh.ProjectItem,
 
 	// Push the branch before creating the PR (non-fatal: mirrors ensureDraftPR behavior).
 	// Merge-queue awareness (ADR-058 D3 FR-1): skip the push when queued (ejects it).
-	if err := e.pushBranchUnlessQueued(item, wm); err != nil {
+	if err := e.pushBranchForNewPR(item, wm); err != nil {
 		e.logf(item.Number, "warn", "could not push branch: pushing branch fabrik/issue-%d: %v\n", item.Number, err)
 	}
 

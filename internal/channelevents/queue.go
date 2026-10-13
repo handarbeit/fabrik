@@ -79,6 +79,23 @@ func (q *queueFile) push(ev Event, digest bool, due time.Time, away bool, max in
 	return true
 }
 
+// dropType discards every queued entry of type t, reporting whether any was
+// there. It is how a newer situation digest supersedes an undelivered one
+// (#2171): the queue holds at most one, however long the subscriber is away.
+func (q *queueFile) dropType(t EventType) bool {
+	changed := false
+	out := q.Entries[:0:0]
+	for _, e := range q.Entries {
+		if e.Event.Type == t {
+			changed = true
+			continue
+		}
+		out = append(out, e)
+	}
+	q.Entries = out
+	return changed
+}
+
 // remove deletes the entries with the given sequence numbers.
 func (q *queueFile) remove(seqs map[uint64]bool) {
 	out := q.Entries[:0:0]
@@ -88,6 +105,35 @@ func (q *queueFile) remove(seqs map[uint64]bool) {
 		}
 	}
 	q.Entries = out
+}
+
+// retainMatching discards every entry that none of subs matches, reporting
+// whether the queue changed. With no subscriptions left it also clears the
+// drop counters, since a drop notice for a subscriber with nothing subscribed
+// would itself be a delivery after an unsubscribe.
+func (q *queueFile) retainMatching(subs []Subscription) bool {
+	changed := false
+	out := q.Entries[:0:0]
+	for _, e := range q.Entries {
+		matched := false
+		for _, sub := range subs {
+			if sub.Matches(e.Event) {
+				matched = true
+				break
+			}
+		}
+		if matched {
+			out = append(out, e)
+			continue
+		}
+		changed = true
+	}
+	q.Entries = out
+	if len(subs) == 0 && (q.Dropped != 0 || q.Expired != 0 || len(q.DroppedTypes) != 0) {
+		q.Dropped, q.Expired, q.DroppedTypes = 0, 0, nil
+		changed = true
+	}
+	return changed
 }
 
 // pruneOlderThan drops entries older than cutoff, counting them (by type) as

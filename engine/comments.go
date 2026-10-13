@@ -231,7 +231,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 // Claude invocation. The user-comment callers keep using processComments (whose
 // error contract is unchanged); dispatchReinvoke uses this variant to refund
 // the reinvoke cycle counter charged before dispatch. The kind is deliberately
-// NOT folded into the returned error: a usage-limit or suspension skip returns
+// NOT folded into the returned error: a usage-limit or usage-limit hold skip returns
 // a nil error today (excluded from the comment circuit breakers), and changing
 // that would alter what every caller and breaker sees.
 //
@@ -240,14 +240,41 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 func (e *Engine) processCommentsClassified(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, comments []gh.Comment, onPIDReady ...func(int)) (didNotRunKind, error) {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 
-	// Account-wide Claude usage-limit suspension gate (ADR-1120): checked before
-	// any side effect (reactions, labels, worktree setup) so a suspended cycle is
+	// Account-wide Claude usage-limit hold gate (ADR-1120): checked before
+	// any side effect (reactions, labels, worktree setup) so a usage limited cycle is
 	// a full no-op — the comment remains "new" and is retried on the next poll
 	// once dispatch resumes, rather than being consumed by a doomed invocation.
-	if _, suspended := e.claudeSuspendedUntilTime(time.Now()); suspended {
-		e.logf(item.Number, "claude-limit", "Claude dispatch suspended account-wide; skipping comment review\n")
-		return didNotRunSuspended, nil
+	if _, usageLimited := e.claudeUsageLimitedUntilTime(time.Now()); usageLimited {
+		e.logf(item.Number, "claude-limit", "Claude usage limited; dispatch held account-wide; skipping comment review\n")
+		return didNotRunAccountUsageLimited, nil
 	}
+
+	// ADR 2137: qualify the comment skill against the loaded plugins, or refuse
+	// before any side effect when it cannot resolve (the stage variants for
+	// ci_fix_skill and rebase_skill have already been swapped into
+	// CommentSkill). The comments stay "new" and are retried once the
+	// configuration or plugin is fixed; no breaker or reinvoke cycle is charged.
+	resolvedStage, resolvedRefs, resolveErr := e.resolveStageSkills(stage, skillKeyCommentSkill)
+	if resolveErr != nil {
+		var ue *skillUnresolvedError
+		if errors.As(resolveErr, &ue) {
+			e.handleSkillUnresolved(item, stage, itemOwnerRepoString(item, e.defaultRepo()), ue, false)
+			return didNotRunSkillUnresolved, nil
+		}
+		return "", resolveErr
+	}
+	for _, r := range resolvedRefs {
+		e.clearSkillUnresolved(stage.Name, r.Key)
+	}
+	// The comment path never reaches finalizeStageOutcome, which is where the
+	// label is otherwise cleared. Clear it here once every skill reference of
+	// the stage resolves, so a fixed configuration does not leave it behind.
+	if len(resolvedRefs) > 0 && hasLabel(item.Labels, skillUnresolvedLabel) {
+		if _, _, allErr := e.resolveStageSkills(stage); allErr == nil {
+			e.removeLabel(item, skillUnresolvedLabel)
+		}
+	}
+	stage = resolvedStage
 
 	// Merge any unresolved PR review thread comments into the working slice.
 	// This ensures that when a user nudge arrives (e.g. "please address Copilot
@@ -287,7 +314,7 @@ func (e *Engine) processCommentsClassified(ctx context.Context, board *gh.Projec
 	// dispatchers' build() output are not otherwise filtered, and this is what
 	// closes that gap. If every candidate comment was a bot notice, return
 	// before any reaction/label/worktree/invocation side effect, mirroring the
-	// claudeSuspendedUntilTime early-return above.
+	// claudeUsageLimitedUntilTime early-return above.
 	comments = filterBotServiceNotices(comments)
 	if len(comments) == 0 {
 		e.logf(item.Number, "comments", "all candidate comments were bot service notices; skipping\n")
@@ -299,6 +326,15 @@ func (e *Engine) processCommentsClassified(ctx context.Context, board *gh.Projec
 	// side effect below, so a guarded cycle is a no-op that feeds no breaker.
 	if e.postMergeCommentGuard(item, comments) {
 		return didNotRunPostMerge, nil
+	}
+
+	// Name what this worker is (#2121): a comment review runs inside the stage
+	// worker goroutine under the stage placeholder handle, which would otherwise
+	// read as a plain stage run. WorkerKindSet never overrides a reinvoke kind
+	// (this function also serves the three reinvokes), and the prior kind is
+	// restored when the review ends.
+	if restore := e.markCommentReviewWorker(itemOwnerRepoString(item, e.defaultRepo()), item.Number, comments); restore != nil {
+		defer restore()
 	}
 
 	e.logf(item.Number, "comments", "processing %d new comment(s) — stage: %s\n",
@@ -371,6 +407,10 @@ func (e *Engine) processCommentsClassified(ctx context.Context, board *gh.Projec
 	// in the queue (FR-1) or the repo is queue-enabled (FR-2). Both ProjectItem-sourced
 	// signals are false-by-default, preserving legacy behavior on non-queue repos (FR-3).
 	skipUpdate := prInMergeQueue(item) || e.suppressPreemptiveRebase(item)
+	// #2150: the head before EnsureWorktree's rebase, so a pass that commits nothing
+	// can put the branch back instead of leaving an unpushed rebase behind. Empty when
+	// the worktree does not exist yet (nothing to restore to).
+	preRebaseSHA, _ := gitHeadSHA(wm.worktreeDir(item.Number))
 	workDir, err := wm.EnsureWorktree(item.Number, baseBranch, skipUpdate)
 	if err != nil {
 		e.endStageRework(item, stage, wasReworking, false)
@@ -420,6 +460,7 @@ func (e *Engine) processCommentsClassified(ctx context.Context, board *gh.Projec
 		PRNumber:          prNumber,
 		FabrikRepo:        e.defaultRepo(),
 		MaxResumeFailures: e.cfg.MaxResumeFailures,
+		OnTurn:            e.liveTurnRecorder(itemOwnerRepoString(item, e.defaultRepo()), item.Number),
 	}
 	if len(onPIDReady) > 0 && onPIDReady[0] != nil {
 		invokeOpts.OnPIDReady = onPIDReady[0]
@@ -444,6 +485,19 @@ func (e *Engine) processCommentsClassified(ctx context.Context, board *gh.Projec
 	if postInvokeSHA, shaErr := gitHeadSHA(workDir); shaErr == nil && postInvokeSHA != preInvokeSHA {
 		headChanged = true
 		e.resetCommentBreaker(item)
+	}
+	// #2150: nothing was committed, so nothing will be pushed — undo the engine's own
+	// pre-invocation rebase rather than leave the branch diverged from its remote.
+	// Placed before either editing-label removal and before finalizeComments' possible
+	// markPRReady push, so every exit is covered and the pushed head is the one CI saw.
+	if !headChanged && preRebaseSHA != "" && preRebaseSHA != preInvokeSHA {
+		restored, reason := wm.RestoreUnpushedRebase(item.Number, baseBranch, preRebaseSHA, preInvokeSHA)
+		switch {
+		case restored:
+			e.logf(item.Number, "worktree", "no commit this pass — restored the branch to its pre-rebase head %s\n", preRebaseSHA)
+		case reason != "":
+			e.logf(item.Number, "worktree", "no commit this pass, but the engine rebase was left in place: %s\n", reason)
+		}
 	}
 
 	if line := formatStatsLogLine(usage); line != "" {
@@ -504,7 +558,7 @@ func (e *Engine) processCommentsClassified(ctx context.Context, board *gh.Projec
 		}
 		// A Claude usage-limit hit is not "no forward progress" — it's an
 		// account-wide condition unrelated to this issue's comment thread, already
-		// handled by activateClaudeSuspension above. Counting it toward the
+		// handled by activateClaudeUsageLimit above. Counting it toward the
 		// circuit breaker would risk tripping the breaker purely because the
 		// account ran dry, not because this issue is stuck.
 		var limitErr *claudeUsageLimitError
@@ -533,6 +587,16 @@ func (e *Engine) processCommentsClassified(ctx context.Context, board *gh.Projec
 			}
 			return "", err
 		}
+		// The comment skill (also the stage variant's ci_fix_skill / rebase_skill)
+		// failed to load in the worker (#2138, ADR-2138): the run did none of the
+		// requested work. Pause for a human (the condition cannot self-heal) and
+		// bypass both comment breakers like the usage-limit arm; the kind lets
+		// dispatchReinvoke refund the pre-charged cycle (#1812).
+		var skillLoadErr *claudeSkillLoadError
+		if errors.As(err, &skillLoadErr) {
+			e.handleSkillLoadFailed(item, stage, skillKeyCommentSkill, skillLoadErr)
+			return didNotRunSkillLoadFailed, nil
+		}
 		// Deliberately NO exclusion for *claudeResumeFailureError here (#1414),
 		// unlike the usage-limit exclusion immediately above: a resume failure
 		// is specific to this issue's own session, not an account-wide
@@ -558,6 +622,11 @@ func (e *Engine) processCommentsClassified(ctx context.Context, board *gh.Projec
 	}
 	if err != nil {
 		e.logf(item.Number, "warn", "claude comment review exited with error but stage completed (marker found) — proceeding: %v\n", err)
+	}
+	// The comment skill loaded (a failure returned above): drop a stale
+	// warnings-panel entry (#2138).
+	if stage.CommentSkill != "" {
+		e.clearSkillLoadFailed(stage.Name, skillKeyCommentSkill)
 	}
 
 	summary := e.publishCommentOutput(owner, repo, item, stage, comments, output, workDir, baseBranch)
@@ -826,12 +895,12 @@ func (e *Engine) runCommentExtensionLoop(ctx context.Context, stage *stages.Stag
 
 		var limitErr *claudeUsageLimitError
 		if errors.As(err, &limitErr) {
-			e.activateClaudeSuspension(item.Number, limitErr, time.Now())
+			e.activateClaudeUsageLimit(item.Number, limitErr, time.Now())
 		} else if err == nil {
 			// Only a successful invocation is evidence the limit has cleared — a generic,
 			// unrelated error proves nothing about account-wide usage-limit state and must
 			// not clear it (see the matching comment in item.go's runInvocationWithExtension).
-			e.clearClaudeSuspension("comment review invocation reached Claude")
+			e.clearClaudeUsageLimit("comment review invocation reached Claude")
 		}
 
 		// hitLimit uses currentBudget > 0 (not base > 0) so that extension only fires
@@ -1035,8 +1104,13 @@ func (e *Engine) finalizeComments(ctx context.Context, board *gh.ProjectBoard, i
 			prNumber, _ = e.ensureDraftPR(item, baseBranch)
 			e.updatePRVerification(item, prNumber, summary)
 		}
-		if stage.MarkPRReadyOnComplete {
-			e.markPRReady(item, prNumber)
+		if stage.MarkPRReadyOnComplete && e.markPRReady(item, prNumber) {
+			// Zero-ahead push guard (#2089) paused the item: do not run
+			// completion handling (it would advance or auto-merge a paused
+			// item). Restore the pre-rework state exactly as the
+			// non-completing branch does.
+			e.endStageRework(item, stage, wasReworking, false)
+			return
 		}
 		e.handleStageComplete(ctx, board, item, stage)
 		// Only now — after handleStageComplete has durably written
@@ -1110,5 +1184,34 @@ func (e *Engine) markCommentsProcessed(item gh.ProjectItem, comments []gh.Commen
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
 	for _, c := range comments {
 		e.store.Apply(itemstate.CommentProcessed{Repo: repoStr, Number: item.Number, CommentID: c.ID, At: time.Now()})
+	}
+}
+
+// markCommentReviewWorker labels the item's live Worker handle as a comment
+// review addressing comments, and returns a func restoring the previous kind and
+// trigger. It returns nil when there is no worker handle or it already carries a
+// reinvoke kind, in which case nothing was changed (#2121).
+func (e *Engine) markCommentReviewWorker(repoStr string, number int, comments []gh.Comment) func() {
+	snap, ok := e.store.Peek(repoStr, number)
+	if !ok {
+		return nil
+	}
+	w := snap.Worker()
+	if w == nil {
+		return nil
+	}
+	switch w.Kind {
+	case "", itemstate.WorkerKindStageRun, itemstate.WorkerKindCommentReview:
+	default:
+		return nil
+	}
+	prevKind, prevTrigger := w.Kind, w.Trigger
+	if prevKind == "" {
+		prevKind = itemstate.WorkerKindStageRun
+	}
+	e.store.Apply(itemstate.WorkerKindSet{Repo: repoStr, Number: number,
+		Kind: itemstate.WorkerKindCommentReview, Trigger: commentIDsTrigger(comments)})
+	return func() {
+		e.store.Apply(itemstate.WorkerKindSet{Repo: repoStr, Number: number, Kind: prevKind, Trigger: prevTrigger})
 	}
 }

@@ -257,8 +257,17 @@ func isKnownEmbedded(hash string, knownVersions []string) bool {
 // RefreshPlugin overwrites .fabrik/plugin/ with the embedded plugin files.
 // Returns the number of files written.
 func RefreshPlugin() (int, error) {
-	pluginDir := ".fabrik/plugin"
+	return RefreshPluginTo(".fabrik/plugin")
+}
+
+// RefreshPluginTo writes the embedded plugin files into pluginDir, overwriting
+// files of the same name, and returns the number of files written. It then
+// prunes the files an earlier release shipped that the embed no longer carries
+// (see prunePluginDir), so a rename such as #2140's skills/fabrik-review ->
+// skills/review does not leave both sets side by side.
+func RefreshPluginTo(pluginDir string) (int, error) {
 	wrote := 0
+	embedded := map[string]bool{}
 	err := fs.WalkDir(FabrikPlugin, "fabrik-workflows", func(p string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -280,8 +289,66 @@ func RefreshPlugin() (int, error) {
 		if writeErr := os.WriteFile(destPath, data, 0644); writeErr != nil {
 			return fmt.Errorf("writing %s: %w", destPath, writeErr)
 		}
+		embedded[filepath.ToSlash(rel)] = true
 		wrote++
 		return nil
 	})
-	return wrote, err
+	if err != nil {
+		return wrote, err
+	}
+	if pruneErr := prunePluginDir(pluginDir, embedded); pruneErr != nil {
+		return wrote, pruneErr
+	}
+	return wrote, nil
+}
+
+// prunePluginDir removes from pluginDir every file that is not in the embedded
+// set (embedded: slash-separated paths relative to the plugin root) but is
+// byte-identical to a version some release shipped, then removes the
+// directories that emptied. A file the operator edited, or added, is never
+// shipped and is therefore never touched: it stays, and the tree stays
+// classified as customised. The rule is general, so it also covers future
+// renames. .installed-version is metadata and is left alone. Idempotent.
+func prunePluginDir(pluginDir string, embedded map[string]bool) error {
+	var dirs []string
+	err := filepath.WalkDir(pluginDir, func(p string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			if p != pluginDir {
+				dirs = append(dirs, p)
+			}
+			return nil
+		}
+		rel, relErr := filepath.Rel(pluginDir, p)
+		if relErr != nil {
+			return relErr
+		}
+		rel = filepath.ToSlash(rel)
+		if embedded[rel] || rel == installedVersionFile || strings.HasSuffix(rel, "/"+installedVersionFile) {
+			return nil
+		}
+		data, readErr := os.ReadFile(p)
+		if readErr != nil {
+			return fmt.Errorf("reading %s: %w", p, readErr)
+		}
+		sum := sha256.Sum256(data)
+		if !IsShippedFile(rel, hex.EncodeToString(sum[:])) {
+			return nil
+		}
+		if rmErr := os.Remove(p); rmErr != nil {
+			return fmt.Errorf("pruning %s: %w", p, rmErr)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	// Deepest first; os.Remove refuses a non-empty directory, which is exactly
+	// the "keep what the operator left there" behaviour wanted.
+	for i := len(dirs) - 1; i >= 0; i-- {
+		_ = os.Remove(dirs[i]) // intentional: a non-empty directory is kept
+	}
+	return nil
 }

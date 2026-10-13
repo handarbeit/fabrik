@@ -164,6 +164,44 @@ func TestCheckAndRebuildDev_SHAMismatchTriggersRebuildWithoutFetch(t *testing.T)
 	}
 }
 
+// TestCheckAndRebuildDev_ExtraEnvReachesExec verifies cfg.ExtraEnv is appended
+// to the re-exec environment, and that nil ExtraEnv leaves it equal to
+// os.Environ().
+func TestCheckAndRebuildDev_ExtraEnvReachesExec(t *testing.T) {
+	skipIfNoGit(t)
+	for _, tc := range []struct {
+		name  string
+		extra []string
+	}{
+		{"with extra env", []string{"FABRIK_DEV_REEXEC=1"}},
+		{"nil extra env", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := initDevSourceCheckout(t, "handarbeit/fabrik")
+			cfg, _, execCalled, logs := testDevBuildConfig(t, dir, "dev(0000000)", "handarbeit/fabrik")
+			cfg.ExtraEnv = tc.extra
+			var gotEnv []string
+			execFn = func(argv0 string, argv []string, envv []string) error {
+				gotEnv = envv
+				return nil
+			}
+			CheckAndRebuildDev(cfg)
+			if !*execCalled && gotEnv == nil {
+				t.Fatalf("exec not reached, logs: %v", *logs)
+			}
+			want := append(os.Environ(), tc.extra...)
+			if len(gotEnv) != len(want) {
+				t.Fatalf("exec env has %d entries, want %d", len(gotEnv), len(want))
+			}
+			for i := range want {
+				if gotEnv[i] != want[i] {
+					t.Fatalf("exec env[%d] = %q, want %q", i, gotEnv[i], want[i])
+				}
+			}
+		})
+	}
+}
+
 // TestCheckAndRebuildDev_PostBuildHookFailureIsNonFatal verifies that a
 // PostBuildHook error is logged but does not prevent re-exec — the specific
 // gap flagged as untested prior to this extraction.

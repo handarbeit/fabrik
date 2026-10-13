@@ -419,8 +419,8 @@ or a completed run with `JobCount` 0) sits here while `checkRuns` stays empty.
   `DetailsURL` from a workflow run, so a scenario that expects the engine to
   find the run to re-run must seed `DetailsURL` of the form
   `…/actions/runs/<id>/job/<n>` on the failing check run itself.
-- **Permissions are not modelled.** The optional `actions` permission is
-  emulated by faulting `FetchWorkflowRuns` / `RerunFailedJobs` with an error
+- **Permissions are not modelled.** A runtime revocation of the `actions` permission
+  (required at startup since #2105) is emulated by faulting `FetchWorkflowRuns` / `RerunFailedJobs` with an error
   wrapping `gh.ErrForbidden`.
 - **Live coverage gap.** A `startup_failure` cannot be induced on demand against
   the e2e bed, so there is no live twin; the sim and unit tests carry the proof
@@ -1526,6 +1526,17 @@ production's live `unlabeled` events read. It is what the CI settle scan's
 `CIBackstopTimeout` backstop uses to find an item's most recent resume (the
 removal of `fabrik:paused`). Because `RemoveLabelFromIssue` deletes the
 applied-at entry, the log is the only place the removal time survives.
+
+### Probe linked-PR scalars (#2122)
+
+`ProbeProjectBoard` carries `BoardProbeItem.LinkedPRFacts` (state, draft,
+merged) for the linked PR, as the real probe query's `state isDraft merged`
+selection does. **Mergeability is always reported as UNKNOWN** (`Mergeable` nil,
+`MergeableState` empty): GitHub computes `mergeable`/`mergeStateStatus` lazily and
+answers UNKNOWN on a cold read, and the sim does not run a merge simulation per
+probed PR per poll. A scenario that needs a mergeable fact reads it through
+`FetchPRMergeableFields`/`FetchPRDetails`, which the engine's REST fallback also
+uses. The probe is therefore not a source of mergeability in the sim.
 
 ---
 

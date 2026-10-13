@@ -3,7 +3,6 @@ package engine
 import (
 	"context"
 	"fmt"
-	"os"
 	"sync"
 	"time"
 
@@ -149,6 +148,13 @@ func (e *Engine) runShutdownPause(inFlight []itemstate.Snapshot) {
 	wg.Wait()
 }
 
+// pauseCauseDaemonStopMarker is the stable HTML-comment marker the daemon clean
+// stop pause comment carries (#2121). It is the only evidence the `daemon-stop`
+// attention cause accepts: it survives a restart because it is on GitHub, and a
+// pause with no marker (a crash, a stale in_progress label) leaves the cause
+// absent rather than guessed.
+const pauseCauseDaemonStopMarker = "<!-- fabrik:pause-cause=daemon-stop -->"
+
 // pauseIssueForDaemonShutdown performs the R1/R2 per-issue work for one
 // in-flight issue found by runShutdownPause: clear stage:<Name>:in_progress
 // directly (R2 — not delegated to the cancelled worker goroutine's own
@@ -186,8 +192,8 @@ func (e *Engine) pauseIssueForDaemonShutdown(snap itemstate.Snapshot) {
 	comment := fmt.Sprintf(
 		"🏭 **Fabrik — paused by a daemon clean stop**\n\nStage **%s** was interrupted by a daemon clean stop (SIGINT/SIGTERM). "+
 			"Fabrik attempts to commit and push any in-progress worktree changes automatically as part of the stop — check the branch "+
-			"(and the engine log, if the push did not land) before assuming it succeeded. Remove `fabrik:paused` to resume.",
-		stageName,
+			"(and the engine log, if the push did not land) before assuming it succeeded. Remove `fabrik:paused` to resume.\n\n%s",
+		stageName, pauseCauseDaemonStopMarker,
 	)
 	e.pauseInterruptedIssue(item, comment)
 }
@@ -202,13 +208,24 @@ func (e *Engine) pauseIssueForDaemonShutdown(snap itemstate.Snapshot) {
 // proceeds to return exactly as a completed drain would — R5 requires this
 // path to always terminate; abandoning any still-running goroutines on
 // timeout is deliberate (see waitGroupTimeout's doc comment).
-func (e *Engine) drainAndExit(lockFile *os.File, restartDone chan struct{}) error {
+func (e *Engine) drainAndExit(locks *instanceLocks, restartDone chan struct{}) error {
+	if e.lockLost.Load() {
+		// #2097: the instance lock was lost, so another engine may own this board.
+		// Skip cleanupLockedIssues — in PAT mode it would strip a
+		// fabrik:locked:<user> label the other engine legitimately holds — and
+		// never take the SIGHUP branch. Still give in-flight workers the bounded
+		// drain, then exit with an error.
+		if !waitGroupTimeout(&e.wg, e.drainDeadline()) {
+			e.logf(0, "shutdown", "drain deadline (%s) exceeded — some in-flight work may not have finished cleanly\n", e.drainDeadline())
+		}
+		return errInstanceLockLost
+	}
 	e.cleanupLockedIssues()
 	if !waitGroupTimeout(&e.wg, e.drainDeadline()) {
 		e.logf(0, "shutdown", "drain deadline (%s) exceeded — some in-flight work may not have finished cleanly\n", e.drainDeadline())
 	}
 	if e.sighupRequested.Load() {
-		performSighupRestart(e, lockFile)
+		performSighupRestart(e, locks)
 		close(restartDone) // reached only on exec failure
 	}
 	return nil

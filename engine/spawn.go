@@ -121,18 +121,54 @@ func (e *Engine) logUnparsedSpawnMarkers(number int, planBody string) {
 		spawnBeginMarker, spawnBeginMarker+" owner/repo", spawnEndMarker)
 }
 
-// ParseSpawnBlocks scans body for all FABRIK_SPAWN_CHILD_BEGIN/END pairs and
-// returns the parsed spawn blocks in order. Malformed or incomplete pairs are
-// skipped.
+// SpawnBlockError describes a FABRIK_SPAWN_CHILD_BEGIN/END pair that could not
+// be parsed into a SpawnBlock (#2091). Index is the 1-based position among ALL
+// BEGIN/END pairs in the scanned text — what a human counts in the Plan — which
+// intentionally differs from the position in the well-formed list that
+// validateSpawnDependsOn and the fabrik:spawned-child:<index>:<n> markers use:
+// the two never coexist, because any SpawnBlockError holds the whole spawn.
+// Found is the first non-empty line inside the block, already sanitised for
+// inline rendering ("" when the block was empty).
+type SpawnBlockError struct {
+	Index  int
+	Repo   string
+	Found  string
+	Reason string
+}
+
+// String renders the error for a log line or a comment bullet.
+func (e SpawnBlockError) String() string {
+	if e.Found == "" {
+		return fmt.Sprintf("block %d (%s): %s", e.Index, e.Repo, e.Reason)
+	}
+	return fmt.Sprintf("block %d (%s): %s — found `%s`", e.Index, e.Repo, e.Reason, e.Found)
+}
+
+// ParseSpawnBlocks returns the well-formed spawn blocks in body, in order.
+// Malformed pairs are skipped; callers that must report them use
+// ParseSpawnBlocksDetailed. See that function for the scanning rules.
+func ParseSpawnBlocks(body string) []SpawnBlock {
+	blocks, _ := ParseSpawnBlocksDetailed(body)
+	return blocks
+}
+
+// ParseSpawnBlocksDetailed scans body for all FABRIK_SPAWN_CHILD_BEGIN/END
+// pairs and returns the parsed spawn blocks in order plus one SpawnBlockError
+// per pair that failed to parse (#2091), so a malformed block is never dropped
+// silently.
 //
 // Both markers must stand on their own line — the same convention
 // FABRIK_STAGE_COMPLETE follows (stageCompleteRE in engine/claude.go) and that
 // CLAUDE.md states for markers generally. The BEGIN line carries the target
 // repo: "FABRIK_SPAWN_CHILD_BEGIN owner/repo". The first non-empty line inside
-// the block is the TITLE: line; the body is everything after it.
-func ParseSpawnBlocks(body string) []SpawnBlock {
+// the block is the TITLE header (case- and whitespace-tolerant, matchHeader);
+// the body is everything after it. A BEGIN with no END ends the scan with no
+// error entry (unchanged; see logUnparsedSpawnMarkers).
+func ParseSpawnBlocksDetailed(body string) ([]SpawnBlock, []SpawnBlockError) {
 	var blocks []SpawnBlock
+	var errs []SpawnBlockError
 	lines := strings.Split(body, "\n")
+	pair := 0
 
 	for i := 0; i < len(lines); i++ {
 		repo := spawnBeginRepo(lines[i])
@@ -151,8 +187,10 @@ func ParseSpawnBlocks(body string) []SpawnBlock {
 			// No matching END — nothing further can be well-formed.
 			break
 		}
+		pair++
 
-		if title, dependsOnDeclared, dependsOnRaw, dependsOn, blockBody := parseTitleAndBody(strings.Join(lines[i+1:end], "\n")); title != "" {
+		content := strings.Join(lines[i+1:end], "\n")
+		if title, dependsOnDeclared, dependsOnRaw, dependsOn, blockBody := parseTitleAndBody(content); title != "" {
 			blocks = append(blocks, SpawnBlock{
 				Repo:              repo,
 				Title:             title,
@@ -161,13 +199,33 @@ func ParseSpawnBlocks(body string) []SpawnBlock {
 				DependsOnRaw:      dependsOnRaw,
 				DependsOn:         dependsOn,
 			})
+		} else {
+			errs = append(errs, spawnBlockFailure(pair, repo, content))
 		}
 
 		// Resume after this block's END whether or not it was well-formed, so a
 		// malformed block cannot re-open scanning inside its own content.
 		i = end
 	}
-	return blocks
+	return blocks, errs
+}
+
+// spawnBlockFailure classifies why content (the inside of a BEGIN/END pair)
+// yielded no title and quotes the line found.
+func spawnBlockFailure(index int, repo, content string) SpawnBlockError {
+	first, idx := firstNonEmptyLine(content)
+	e := SpawnBlockError{Index: index, Repo: repo, Found: quoteFoundLine(first)}
+	switch {
+	case idx == -1:
+		e.Reason = "block is empty (expected a TITLE: <title> line)"
+	default:
+		if _, ok := matchHeader(first, "TITLE"); ok {
+			e.Reason = "TITLE line has no value"
+		} else {
+			e.Reason = "missing TITLE line (expected `TITLE: <title>` as the first line)"
+		}
+	}
+	return e
 }
 
 // stripSpawnBlocks removes every well-formed FABRIK_SPAWN_CHILD_BEGIN/END
@@ -176,8 +234,9 @@ func ParseSpawnBlocks(body string) []SpawnBlock {
 // so it strips exactly the set of blocks ParseSpawnBlocks would parse and
 // spawnChildren would act on, no more and no less. A malformed block (one
 // ParseSpawnBlocks itself skips, e.g. a missing TITLE: line) is left
-// visible rather than silently discarded, matching ParseSpawnBlocks's own
-// judgment that it was never really a block.
+// visible rather than silently discarded. Since #2091 a malformed block in
+// Review/Validate output pauses the item before this function runs
+// (pauseForMalformedSpawn), so that branch is defensive only.
 //
 // Used by the Review/Validate mid-flight spawn hook (finalizeStageOutcome,
 // engine/item.go) so a successfully-processed declaration does not also leak
@@ -222,8 +281,8 @@ func stripSpawnBlocks(body string) string {
 	return strings.Join(out, "\n")
 }
 
-// parseTitleAndBody extracts the title (from the "TITLE: ..." line), the
-// optional DEPENDS_ON: header, and the remaining body content from the
+// parseTitleAndBody extracts the title (from the "TITLE: ..." line; key matched
+// case-insensitively, #2091), the optional DEPENDS_ON: header, and the remaining body content from the
 // inside of a FABRIK_SPAWN_CHILD_BEGIN/END block.
 //
 // DEPENDS_ON:, when present, must appear on the line immediately following
@@ -233,31 +292,21 @@ func stripSpawnBlocks(body string) string {
 // optional header.
 func parseTitleAndBody(content string) (title string, dependsOnDeclared bool, dependsOnRaw string, dependsOn int, body string) {
 	lines := strings.Split(content, "\n")
-	titleIdx := -1
-	for i, l := range lines {
-		l = strings.TrimRight(l, "\r")
-		trimmed := strings.TrimSpace(l)
-		if trimmed == "" {
-			continue
-		}
-		if strings.HasPrefix(trimmed, "TITLE:") {
-			title = strings.TrimSpace(strings.TrimPrefix(trimmed, "TITLE:"))
-			titleIdx = i
-			break
-		}
-		// First non-empty line that isn't a TITLE: prefix — malformed.
+	first, titleIdx := firstNonEmptyLine(content)
+	if titleIdx == -1 {
 		return "", false, "", 0, ""
 	}
-	if title == "" || titleIdx == -1 {
+	// First non-empty line that isn't a TITLE header — malformed.
+	title, ok := matchHeader(first, "TITLE")
+	if !ok || title == "" {
 		return "", false, "", 0, ""
 	}
 
 	bodyStart := titleIdx + 1
 	if bodyStart < len(lines) {
-		next := strings.TrimSpace(strings.TrimRight(lines[bodyStart], "\r"))
-		if strings.HasPrefix(next, "DEPENDS_ON:") {
+		if raw, ok := matchHeader(lines[bodyStart], "DEPENDS_ON"); ok {
 			dependsOnDeclared = true
-			dependsOnRaw = strings.TrimSpace(strings.TrimPrefix(next, "DEPENDS_ON:"))
+			dependsOnRaw = raw
 			if spawnDependsOnRE.MatchString(dependsOnRaw) {
 				if n, err := strconv.Atoi(dependsOnRaw); err == nil {
 					dependsOn = n
@@ -267,10 +316,44 @@ func parseTitleAndBody(content string) (title string, dependsOnDeclared bool, de
 		}
 	}
 
-	// Body is everything after the TITLE: (and optional DEPENDS_ON:) line, trimmed.
+	// Body is everything after the TITLE (and optional DEPENDS_ON) line, trimmed.
 	bodyLines := lines[bodyStart:]
 	body = strings.TrimSpace(strings.Join(bodyLines, "\n"))
 	return title, dependsOnDeclared, dependsOnRaw, dependsOn, body
+}
+
+// Spawn origins for pauseForMalformedSpawn's guidance text.
+const (
+	spawnOriginPlan      = "plan"      // blocks read from the stored Plan comment (preImplement / recovery)
+	spawnOriginMidflight = "midflight" // blocks parsed from a Review/Validate dispatch's own output
+)
+
+// pauseForMalformedSpawn surfaces FABRIK_SPAWN_CHILD blocks that failed to
+// parse (#2091, ADR 2091): one log line per block, then a self-authored
+// "🏭 **Fabrik — malformed FABRIK_SPAWN_CHILD marker**" comment naming each
+// block's 1-based index and the (sanitised) offending line, and a pause. The
+// whole declaration is held — no child is created — because dropping the bad
+// block and spawning its siblings would shift the DEPENDS_ON indexes and the
+// ADR-1583 fabrik:spawned-child:<index>:<n> markers, and would leave the
+// parent's blockedBy set half-populated. workNote, when non-empty, is a
+// sentence (ending in a blank line) stating what happened to the stage's work.
+// Returns the error preImplement hands its caller (the "parent paused" contract).
+func (e *Engine) pauseForMalformedSpawn(item gh.ProjectItem, errs []SpawnBlockError, origin, workNote string) error {
+	var bullets []string
+	for _, be := range errs {
+		e.logf(item.Number, "spawn", "malformed FABRIK_SPAWN_CHILD %s\n", be.String())
+		bullets = append(bullets, "- "+be.String())
+	}
+	var guidance string
+	if origin == spawnOriginPlan {
+		guidance = "The Plan comment is stored as-is, so removing `fabrik:paused` alone will pause again until the Plan is corrected — edit the Plan comment, or comment asking for a revised Plan, then remove `fabrik:paused` to retry."
+	} else {
+		guidance = "Remove `fabrik:paused` to retry; the stage will be re-run and re-emit the declaration."
+	}
+	msg := fmt.Sprintf("🏭 **Fabrik — malformed FABRIK_SPAWN_CHILD marker**\n\n%d block(s) could not be parsed:\n\n%s\n\nNo sub-issues were created — the whole declaration is held so dependency indexes stay consistent. Expected `TITLE: <title>` as the first non-empty line inside each block.\n\n%s%s",
+		len(errs), strings.Join(bullets, "\n"), workNote, guidance)
+	e.pauseIssue(item, msg, pauseOpts{labelEcho: true})
+	return fmt.Errorf("spawn: %d malformed FABRIK_SPAWN_CHILD block(s)", len(errs))
 }
 
 // validateSpawnDependsOn performs the purely structural DEPENDS_ON validation
@@ -441,9 +524,10 @@ const spawnRetryInstruction = "Remove `fabrik:paused`, then re-advance to retry 
 // column, or the first non-unmanaged, non-terminal column as a fallback. Returns
 // "" when no suitable option exists or sf is nil (caller skips the status-set).
 // stagesCfg is consulted to skip any column backed by an `unmanaged: true`
-// stage (e.g. a declared Backlog), generalizing beyond the literal name
-// "Backlog" — the literal check is kept alongside as the same compat net used
-// in checkStageColumnAlignment, for installs with no matching stage declared.
+// stage (e.g. a declared Backlog) or, for installs with no Backlog stage, the
+// legacy literal "Backlog" — both via stages.IsParkingColumn, the single
+// parking-column predicate. A configured Backlog stage that is not unmanaged
+// keeps its configured meaning and is therefore not skipped.
 func resolveSpecifyOptionID(sf *gh.StatusField, stagesCfg []*stages.Stage) string {
 	if sf == nil {
 		return ""
@@ -452,18 +536,15 @@ func resolveSpecifyOptionID(sf *gh.StatusField, stagesCfg []*stages.Stage) strin
 	if id, ok := sf.Options["Specify"]; ok {
 		return id
 	}
-	// Fallback: first option that is not "Backlog", not an unmanaged column,
-	// and not the last column.
+	// Fallback: first option that is not a parking column and not the last
+	// column.
 	names := sf.OrderedOptionNames
 	if len(names) < 2 {
 		return ""
 	}
 	last := names[len(names)-1]
 	for _, name := range names {
-		if name == "Backlog" || name == last {
-			continue
-		}
-		if st := stages.FindStage(stagesCfg, name); st != nil && st.Unmanaged {
+		if name == last || stages.IsParkingColumn(stagesCfg, name) {
 			continue
 		}
 		return sf.Options[name]
@@ -510,7 +591,10 @@ func (e *Engine) preImplement(ctx context.Context, board *gh.ProjectBoard, item 
 		return false, nil
 	}
 
-	blocks := ParseSpawnBlocks(planComment.Body)
+	blocks, blockErrs := ParseSpawnBlocksDetailed(planComment.Body)
+	if len(blockErrs) > 0 {
+		return false, e.pauseForMalformedSpawn(item, blockErrs, spawnOriginPlan, "")
+	}
 	if len(blocks) == 0 {
 		e.logUnparsedSpawnMarkers(item.Number, planComment.Body)
 		return false, nil
@@ -563,7 +647,10 @@ func (e *Engine) recoverMissingPlanComment(ctx context.Context, board *gh.Projec
 		return false, nil
 	}
 
-	blocks := ParseSpawnBlocks(planComment.Body)
+	blocks, blockErrs := ParseSpawnBlocksDetailed(planComment.Body)
+	if len(blockErrs) > 0 {
+		return false, e.pauseForMalformedSpawn(item, blockErrs, spawnOriginPlan, "")
+	}
 	if len(blocks) == 0 {
 		e.logf(item.Number, "spawn", "pre-Implement: live re-read recovered Plan comment with no spawn blocks — nothing to spawn\n")
 		e.logUnparsedSpawnMarkers(item.Number, planComment.Body)
@@ -594,6 +681,49 @@ func (e *Engine) spawnTargetServedByThisInstance(childOwner, childRepo string) b
 		return true
 	}
 	return childOwner == e.cfg.Owner && childRepo == e.cfg.Repo
+}
+
+// inheritChildLabels copies the parent's inheritable labels onto a spawned
+// child (#2090, ADR 2090): the label baseLabelFor selects from the parent
+// ("base:<branch>", same owner/repo only — the branch may not exist elsewhere),
+// then fabrik:yolo and fabrik:cruise (any repo).
+//
+// The base: write is fail-closed: if it fails, inheritChildLabels returns the
+// error immediately (before the autonomy labels) and the caller aborts the
+// spawn ahead of the child's Status placement — a child placed without its
+// base: would fork from and target the default branch, and under yolo land on
+// it. fabrik:yolo/fabrik:cruise stay best-effort: a failure is logged at warn
+// and only reduces automation.
+//
+// When resuming, childLabels is the child's live label set from
+// FetchProjectItem and labels it already carries are not written again, so a
+// second retry makes no label writes (and a retry after a failed base: write
+// writes exactly the missing label). A fresh child passes resuming=false and
+// always gets the adds. It never touches the child's board Status.
+func (e *Engine) inheritChildLabels(parent gh.ProjectItem, parentOwner, parentRepo, blockRepo, childOwner, childRepo string, childNumber int, resuming bool, childLabels []string) error {
+	var baseWant string
+	if strings.EqualFold(blockRepo, parentOwner+"/"+parentRepo) {
+		if branch, _ := baseLabelFor(parent.Labels); branch != "" {
+			baseWant = "base:" + branch
+		}
+	}
+	if baseWant != "" && !(resuming && hasLabel(childLabels, baseWant)) {
+		if err := e.client.AddLabelToIssue(childOwner, childRepo, childNumber, baseWant); err != nil {
+			return fmt.Errorf("adding %s to %s#%d: %w", baseWant, blockRepo, childNumber, err)
+		}
+	}
+	for _, l := range []string{"fabrik:yolo", "fabrik:cruise"} {
+		if !hasLabel(parent.Labels, l) {
+			continue
+		}
+		if resuming && hasLabel(childLabels, l) {
+			continue
+		}
+		if err := e.client.AddLabelToIssue(childOwner, childRepo, childNumber, l); err != nil {
+			e.logf(parent.Number, "warn", "could not add %s to %s#%d: %v\n", l, blockRepo, childNumber, err)
+		}
+	}
+	return nil
 }
 
 // spawnChildren creates the child issues described by blocks, adds them to the
@@ -745,6 +875,7 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 		resuming := false
 		var childNumber int
 		var childNodeID string
+		var resumedLabels []string
 		if n, ok := alreadyCreated[blockIndex]; ok {
 			// This block's child was already created by a previous attempt —
 			// resolve its node ID instead of creating a duplicate.
@@ -760,6 +891,7 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 				return spawned, false, fmt.Errorf("spawn: resuming block %d (child %s#%d): %w", blockIndex, block.Repo, childNumber, err)
 			}
 			childNodeID = pi.ID
+			resumedLabels = pi.Labels
 			e.logf(item.Number, "spawn", "resuming block %d: child %s/%s#%d already created\n", blockIndex, childOwner, childRepo, childNumber)
 		} else {
 			// PAT mode: every spawned child is assigned to cfg.User — the user
@@ -877,6 +1009,26 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 			e.logf(item.Number, "warn", "could not add fabrik:sub-issue to %s#%d: %v\n", block.Repo, childNumber, err)
 		}
 
+		// Inherit the parent's base: (same repo only), fabrik:yolo and fabrik:cruise
+		// BEFORE the Status placement below (#2090, ADR 2090): placement is what
+		// makes the child dispatchable, and the first dispatch's EnsureWorktree
+		// reads base:, so a label added afterwards could lose that race. On resume
+		// only the labels the child lacks are written; this runs even when the
+		// child already has a Status (placement is then skipped, the labels are not).
+		//
+		// A failed base: write is fail-closed: abort before placement. The child
+		// has no Status yet, so it is not dispatchable; on a resumable origin its
+		// fabrik:spawned-child marker is already written, so the retry resumes it
+		// and the resume path's missing-label check writes base: then.
+		if err := e.inheritChildLabels(item, owner, repo, block.Repo, childOwner, childRepo, childNumber, resuming, resumedLabels); err != nil {
+			msg := fmt.Sprintf("🏭 **Fabrik — spawn failed**\n\nCould not apply the inherited base branch label to child `%s#%d` (spawn block #%d): `%v`. The child was not placed on the board column, so it cannot be dispatched against the wrong base branch.\n\nCreated so far: %s\n\n%s",
+				block.Repo, childNumber, blockIndex, err, formatSpawnedList(spawned), spawnRetryInstruction)
+			e.pauseIssue(item, msg, pauseOpts{
+				labelEcho: true,
+			})
+			return spawned, false, fmt.Errorf("spawn: inheriting base label for child %s#%d: %w", block.Repo, childNumber, err)
+		}
+
 		// Set child's project Status to Specify (or first processing stage) when statusField is available.
 		// Any failure here is non-fatal to spawning (the child issue, board item, and
 		// blockedBy link already exist) but leaves the child stranded in whatever column
@@ -903,18 +1055,6 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 		} else {
 			e.logf(item.Number, "warn", "no Specify/processing status option found for %s#%d; child lands in Backlog\n", block.Repo, childNumber)
 			e.recordChildPlacementFailure(childOwner, childRepo, childNumber)
-		}
-
-		// Inherit fabrik:yolo and fabrik:cruise from parent (idempotent add; enables autonomous child pipeline).
-		if hasLabel(item.Labels, "fabrik:yolo") {
-			if err := e.client.AddLabelToIssue(childOwner, childRepo, childNumber, "fabrik:yolo"); err != nil {
-				e.logf(item.Number, "warn", "could not add fabrik:yolo to %s#%d: %v\n", block.Repo, childNumber, err)
-			}
-		}
-		if hasLabel(item.Labels, "fabrik:cruise") {
-			if err := e.client.AddLabelToIssue(childOwner, childRepo, childNumber, "fabrik:cruise"); err != nil {
-				e.logf(item.Number, "warn", "could not add fabrik:cruise to %s#%d: %v\n", block.Repo, childNumber, err)
-			}
 		}
 	}
 

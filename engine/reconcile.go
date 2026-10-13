@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -120,8 +121,26 @@ func transitionMgrHealthState(mgr eventIngestionManager, newState WebhookHealthS
 //     both itemID and Status in one query. Skipped when cache.ProjectID() == ""
 //     (Bootstrap not yet complete).
 //
+// PR conversation comments (an issue_comment whose issue carries a
+// pull_request key) are skipped outright: LookupIssueProjectItem queries
+// repository.issue(number:) and cannot resolve a PR number (#2093). A
+// successful "not on the board" fallback lookup is negative-cached per
+// (project, repo, number) for layer1OffBoardTTL so repeated events on an
+// off-board issue repeat no call; errors are never cached. The entry is
+// bypassed once the cache holds an itemID (the fast path is checked first) and
+// cleared on every projects_v2_item "created" event.
+//
 // All errors are best-effort: logged as warnings and never returned.
 func (e *Engine) applyLayer1StatusRefresh(eventType string, payload []byte, cache *boardcache.CacheImpl) {
+	if eventType == "projects_v2_item" {
+		var pv struct {
+			Action string `json:"action"`
+		}
+		if err := json.Unmarshal(payload, &pv); err == nil && pv.Action == "created" {
+			e.layer1OffBoardClearAll()
+		}
+		return
+	}
 	if cache.IsPaused() {
 		return
 	}
@@ -130,7 +149,8 @@ func (e *Engine) applyLayer1StatusRefresh(eventType string, payload []byte, cach
 	}
 	var ev struct {
 		Issue struct {
-			Number int `json:"number"`
+			Number      int             `json:"number"`
+			PullRequest json.RawMessage `json:"pull_request"`
 		} `json:"issue"`
 		Repository struct {
 			FullName string `json:"full_name"`
@@ -141,6 +161,9 @@ func (e *Engine) applyLayer1StatusRefresh(eventType string, payload []byte, cach
 		return
 	}
 	if ev.Repository.FullName == "" || ev.Issue.Number == 0 {
+		return
+	}
+	if rawPresent(ev.Issue.PullRequest) {
 		return
 	}
 	key := boardcache.ItemKey(ev.Repository.FullName, ev.Issue.Number)
@@ -155,15 +178,22 @@ func (e *Engine) applyLayer1StatusRefresh(eventType string, payload []byte, cach
 		if projectID == "" {
 			return
 		}
+		offKey := layer1OffBoardKey(projectID, ev.Repository.FullName, ev.Issue.Number)
+		if e.layer1OffBoardHit(offKey) {
+			return
+		}
 		fetchedItemID, fetchedStatus, err := e.client.LookupIssueProjectItem(projectID, ev.Repository.FullName, ev.Issue.Number)
 		if err != nil {
 			e.logf(ev.Issue.Number, "warn", "layer1 fallback lookup failed for %s#%d: %v\n", ev.Repository.FullName, ev.Issue.Number, err)
 			return
 		}
 		if fetchedItemID == "" {
-			// Issue is not on the project fabrik manages — silently skip.
+			// Issue is not on the project fabrik manages — remember that for a
+			// while and silently skip.
+			e.layer1OffBoardMark(offKey)
 			return
 		}
+		e.layer1OffBoardClear(offKey)
 		cache.RegisterItemID(key, fetchedItemID)
 		cache.UpdateItemStatus(key, fetchedStatus)
 		return
@@ -174,4 +204,11 @@ func (e *Engine) applyLayer1StatusRefresh(eventType string, payload []byte, cach
 		return
 	}
 	cache.UpdateItemStatus(key, status)
+}
+
+// rawPresent reports whether a JSON value was present and meaningful: false
+// for a missing key, a literal null, or whitespace only.
+func rawPresent(raw json.RawMessage) bool {
+	t := bytes.TrimSpace(raw)
+	return len(t) > 0 && !bytes.Equal(t, []byte("null"))
 }

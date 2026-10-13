@@ -81,6 +81,10 @@ type IssueLabeled struct {
 	// EchoOfEngine is true when the engine's echo registry matched this
 	// webhook, i.e. it is the echo of a label write Fabrik made itself.
 	EchoOfEngine bool
+	// Requester is the sanitised overseer subscriber behind the write (#2125);
+	// "" for an engine-autonomous write. A webhook mutation carries it only when
+	// the engine's echo registry matched and recorded one.
+	Requester string
 }
 
 func (IssueLabeled) isMutation()       {}
@@ -96,6 +100,10 @@ type IssueUnlabeled struct {
 	// EchoOfEngine is true when the engine's echo registry matched this
 	// webhook, i.e. it is the echo of a label write Fabrik made itself.
 	EchoOfEngine bool
+	// Requester is the sanitised overseer subscriber behind the write (#2125);
+	// "" for an engine-autonomous write. A webhook mutation carries it only when
+	// the engine's echo registry matched and recorded one.
+	Requester string
 }
 
 func (IssueUnlabeled) isMutation()       {}
@@ -105,6 +113,12 @@ func (m IssueUnlabeled) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 type IssueClosed struct {
 	Repo   string
 	Number int
+	// Sender is the GitHub login that closed the issue, from the webhook
+	// payload; empty when unknown (#2123).
+	Sender string
+	// There is no echo flag: the engine registers no issues/closed echo, so a
+	// close Fabrik made is attributable only through its LocalIssueClosed
+	// write-through (OriginEngine), never through this webhook mutation.
 }
 
 func (IssueClosed) isMutation()       {}
@@ -177,6 +191,16 @@ type ProjectV2ItemEdited struct {
 	// ItemID is the GitHub Project item node ID (matches ItemState.ItemID).
 	ItemID    string
 	NewStatus string
+	// Sender is the GitHub login behind a webhook-delivered move; empty for a
+	// sweep- or poll-delivered one (#2123).
+	Sender string
+	// EchoOfEngine is true when the webhook matched the engine's own echo
+	// registry for this write (#2123).
+	EchoOfEngine bool
+	// Requester is the overseer subscriber recorded with the engine echo.
+	Requester string
+	// At is the GitHub time of the move when known; zero otherwise.
+	At time.Time
 }
 
 func (ProjectV2ItemEdited) isMutation() {}
@@ -243,16 +267,34 @@ type LocalStatusUpdated struct {
 	Repo      string
 	Number    int
 	NewStatus string
+	// Requester is the sanitised overseer subscriber that requested the move
+	// (#2123); empty for an engine-autonomous advance.
+	Requester string
 }
 
 func (LocalStatusUpdated) isMutation()       {}
 func (m LocalStatusUpdated) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// LocalIssueClosed is applied after fabrik closes an issue. Unlike the webhook
+// IssueClosed it records an engine write so a reconcile listing fetched before
+// the close cannot reopen the cached item (#2159). Its Change has OriginEngine
+// (#2123).
+type LocalIssueClosed struct {
+	Repo   string
+	Number int
+}
+
+func (LocalIssueClosed) isMutation()       {}
+func (m LocalIssueClosed) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // LocalLabelAdded is applied after fabrik adds a label to an issue.
 type LocalLabelAdded struct {
 	Repo   string
 	Number int
 	Label  string
+	// Requester is the sanitised overseer subscriber that requested the write
+	// (#2125); "" for an engine-autonomous write.
+	Requester string
 }
 
 func (LocalLabelAdded) isMutation()       {}
@@ -263,6 +305,8 @@ type LocalLabelRemoved struct {
 	Repo   string
 	Number int
 	Label  string
+	// Requester: see LocalLabelAdded.
+	Requester string
 }
 
 func (LocalLabelRemoved) isMutation()       {}
@@ -423,6 +467,10 @@ type ShallowBoardItemUpdated struct {
 	Repo   string
 	Number int
 	Item   gh.ProjectItem
+	// FetchedAt is the instant the listing was requested (#2159). Fields the
+	// engine wrote more recently than FetchedAt (plus a grace margin) keep their
+	// local value. Zero means unknown: no protection, the listing wins.
+	FetchedAt time.Time
 }
 
 func (ShallowBoardItemUpdated) isMutation()       {}
@@ -431,11 +479,17 @@ func (m ShallowBoardItemUpdated) itemKey() string { return itemKeyFor(m.Repo, m.
 // ProbeBoardItemUpdated updates only the probe-visible fields of an existing item
 // from a ProbeProjectBoard result. Unlike ShallowBoardItemUpdated, it does NOT
 // touch Labels (the probe query fetches no labels). Updates ID, ItemID, State,
-// IsClosed, IsPR, Status, and UpdatedAt only.
+// IsClosed, IsPR, Status, and UpdatedAt only. Status and closed state go through
+// the engine-write protection (protectStatusClosed, #2178).
 type ProbeBoardItemUpdated struct {
 	Repo   string
 	Number int
 	Item   gh.BoardProbeItem
+	// FetchedAt is the instant the probe listing was requested, taken before the
+	// query was issued (#2178). Status and closed state the engine wrote more
+	// recently than FetchedAt (plus a grace margin) keep their local value. Zero
+	// means unknown: no protection, the listing wins.
+	FetchedAt time.Time
 }
 
 func (ProbeBoardItemUpdated) isMutation()       {}
@@ -718,6 +772,26 @@ type CooldownRecorded struct {
 func (CooldownRecorded) isMutation()       {}
 func (m CooldownRecorded) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
+// ArchiveEligibleCooldown is the CooldownAt key that holds an absolute
+// "eligible since" timestamp rather than a gate expiry. ExpiredCooldownsConsumed
+// never deletes it: past its instant it means "eligible", not "expired".
+const ArchiveEligibleCooldown = "archive-eligible-at"
+
+// ExpiredCooldownsConsumed deletes every CooldownAt entry that is non-zero and
+// has expired relative to Now (!Now.Before(entry)), except ArchiveEligibleCooldown
+// (#2096, ADR 2096). Applied when poll admission acts on an item's expired
+// cooldown, so that expiry admits the item exactly once instead of for ever:
+// HasExpiredCooldown then reports only expiries not yet acted on. Reports
+// CooldownChanged only when it deleted something.
+type ExpiredCooldownsConsumed struct {
+	Repo   string
+	Number int
+	Now    time.Time
+}
+
+func (ExpiredCooldownsConsumed) isMutation()       {}
+func (m ExpiredCooldownsConsumed) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
 // LabelAppliedAtRecorded records the time the engine itself applied Label to
 // this issue (record-at-write, #1314). Always overwrites any prior entry for
 // the same label — a genuine re-application (applied → removed → re-applied)
@@ -760,15 +834,168 @@ func (m WorkerPIDSet) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 // the goroutine is started, closing the window between goroutine launch and
 // LocalLockAcquired (which fires only after the GitHub lock label is acquired).
 // LocalLockAcquired overwrites the placeholder with full details.
+//
+// Queued (#2121) marks a worker that has been dispatched but holds no worker slot
+// yet; QueuedSince is when it began waiting. WorkerSlotAcquired clears it. The
+// handle is non-nil either way: it is the claim on the item.
 type WorkerEntered struct {
-	Repo      string
-	Number    int
-	StageName string
-	StartedAt time.Time
+	Repo        string
+	Number      int
+	StageName   string
+	StartedAt   time.Time
+	Kind        string
+	Trigger     string
+	Queued      bool
+	QueuedSince time.Time
 }
 
 func (WorkerEntered) isMutation()       {}
 func (m WorkerEntered) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// WorkerSlotAcquired records that a queued worker now holds a worker slot (#2121):
+// Queued is cleared and StartedAt/LastSignAt are re-stamped to At, so the PID<=0
+// stale-worker detector and the reported start time measure from the slot, not
+// from dispatch. It claims no lock (Lock mirrors the fabrik:locked:<id> label,
+// which only stage dispatch applies, #2179, ADR 2179). It carries WorkerChanged
+// only — never WorkerLifecycleChanged, so it cannot wake the poll. A no-op when
+// the worker has already exited.
+type WorkerSlotAcquired struct {
+	Repo   string
+	Number int
+	At     time.Time
+}
+
+func (WorkerSlotAcquired) isMutation()       {}
+func (m WorkerSlotAcquired) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// WorkerKindSet sets the live worker's kind (and trigger) (#2121). It only
+// replaces an empty, stage-run or comment-review kind, so a comment review
+// started inside a reinvoke worker never overrides the reinvoke kind. A no-op
+// when there is no worker.
+type WorkerKindSet struct {
+	Repo    string
+	Number  int
+	Kind    string
+	Trigger string
+}
+
+func (WorkerKindSet) isMutation()       {}
+func (m WorkerKindSet) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// WorkerTriggerSet records what the live worker is addressing (#2121). A no-op
+// when there is no worker.
+type WorkerTriggerSet struct {
+	Repo    string
+	Number  int
+	Trigger string
+}
+
+func (WorkerTriggerSet) isMutation()       {}
+func (m WorkerTriggerSet) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// WorkerTurnsRecorded records the live worker's turn count so far and the turn
+// budget of the invocation it belongs to (#2121). Turns == 0 marks an invocation
+// start: the previous invocation's count is forgotten (turns unknown again) and
+// Max is the new budget. A no-op when there is no worker, or nothing changed.
+type WorkerTurnsRecorded struct {
+	Repo   string
+	Number int
+	Turns  int
+	Max    int
+}
+
+func (WorkerTurnsRecorded) isMutation()       {}
+func (m WorkerTurnsRecorded) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// RetryScheduled records a retry the engine has scheduled (#2121). It has no
+// explicit clearing mutation: the retry ends with the next stage-run WorkerEntered
+// (dispatch), and with a pause, a stage:*:complete label, a close or a column move
+// (clearStatusFacts). Every path that gives a retry up escalates to a pause.
+type RetryScheduled struct {
+	Repo   string
+	Number int
+	Retry  PendingRetry
+}
+
+func (RetryScheduled) isMutation()       {}
+func (m RetryScheduled) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// GateHoldRecorded records a gate hold (#2121). A repeat of the same gate keeps
+// the original Since and refreshes the rest.
+type GateHoldRecorded struct {
+	Repo   string
+	Number int
+	Hold   GateHold
+}
+
+func (GateHoldRecorded) isMutation()       {}
+func (m GateHoldRecorded) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// GateHoldCleared clears the gate hold (#2121). When Gate is non-empty only a
+// hold of that gate is cleared.
+type GateHoldCleared struct {
+	Repo   string
+	Number int
+	Gate   string
+}
+
+func (GateHoldCleared) isMutation()       {}
+func (m GateHoldCleared) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// ConflictResolutionSet marks (or, with Active false, clears) a merge-train
+// conflict resolution for a member (#2121).
+type ConflictResolutionSet struct {
+	Repo   string
+	Number int
+	Active bool
+	Queued bool
+	Since  time.Time
+	// GeneralSlot: the resolution holds a general-pool slot (not the reserved
+	// merge-train slot).
+	GeneralSlot bool
+}
+
+func (ConflictResolutionSet) isMutation()       {}
+func (m ConflictResolutionSet) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// RebaseCauseSet records why fabrik:rebase-needed was applied; an empty Cause
+// clears it (#2121).
+type RebaseCauseSet struct {
+	Repo   string
+	Number int
+	Cause  string
+}
+
+func (RebaseCauseSet) isMutation()       {}
+func (m RebaseCauseSet) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// PRFactsObserved records the linked PR's overseer-facing facts (#2122). It is
+// quiet: it returns PRFactsChanged, which is not a wake flag, and it never
+// calls SelfWriteObserved or moves LastSeenPRUpdatedAt/LinkedPRUpdatedAt. A
+// merged or closed PR clears the CI verdict (no open-PR verdict applies).
+type PRFactsObserved struct {
+	Repo   string
+	Number int // issue number
+	// PRNumber, if non-zero, is the PR the facts describe; the facts are dropped
+	// when it differs from the item's linked PR number.
+	PRNumber int
+	Facts    PRFacts
+}
+
+func (PRFactsObserved) isMutation()       {}
+func (m PRFactsObserved) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// CIVerdictObserved records the CI verdict computed for a PR head (#2122). It
+// is dropped when HeadSHA is not the item's current linked-PR head, and never
+// touches LastCIProgressAt (ADR-2059).
+type CIVerdictObserved struct {
+	Repo    string
+	Number  int // issue number
+	Verdict CIVerdictRecord
+}
+
+func (CIVerdictObserved) isMutation()       {}
+func (m CIVerdictObserved) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // WorkerExited clears the Worker handle when a Claude invocation finishes.
 type WorkerExited struct {

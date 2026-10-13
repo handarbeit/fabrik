@@ -18,6 +18,15 @@ import (
 	"strings"
 )
 
+// OwnerVar is the per-invocation worker owner marker (#2128, ADR-2128): the
+// path of the invocation's owner file (.fabrik/state/worker-owners/<nonce>.json,
+// holding the worker's PID and start token), which the engine sets in every
+// worker's environment. Every descendant of the worker — go test, sim.test, its
+// re-exec'd helpers — inherits it, which is what lets the engine reap them by
+// owner rather than by process-tree shape, and lets a test binary find the
+// owner file that says who its worker is.
+const OwnerVar = "FABRIK_WORKER_OWNER"
+
 // Group tags a scrubbed variable with why it is daemon-only.
 type Group string
 
@@ -75,11 +84,12 @@ var Scrubbed = []Var{
 	ident("FABRIK_OWNER"), ident("FABRIK_PROJECT_NUMBER"), ident("FABRIK_USER"),
 	ident("FABRIK_STAGES"), ident("FABRIK_YOLO"), ident("FABRIK_GIT_SSH"),
 	ident("FABRIK_NO_BROWSER"), ident("FABRIK_GHES_HOST"), ident("FABRIK_INSTANCE_ID"),
-	ident("FABRIK_PLUGIN_DIR"), ident("FABRIK_AUTO_UPGRADE"), ident("FABRIK_TUI"),
+	ident("FABRIK_PLUGIN_DIR"), ident("FABRIK_PLUGIN_DIRS"), ident("FABRIK_AUTO_UPGRADE"), ident("FABRIK_TUI"),
 	ident("FABRIK_DEBUG_OUTPUT"), ident("FABRIK_SYMLINK_ENV"),
 	ident("FABRIK_WORKTREE_BOUNDARY_AUDIT"), ident("FABRIK_EVENT_SOURCE"),
 	ident("FABRIK_WEBHOOKS"), ident("FABRIK_WEBHOOK_PORT"), ident("FABRIK_WEBHOOK_EVENTS"),
 	ident("FABRIK_STATUS_POLL"), ident("FABRIK_TEST_POLL_CONTROL"),
+	ident("FABRIK_LOCK_DIR"),
 
 	tune("FABRIK_POLL"), tune("FABRIK_RETRY_BACKOFF"), tune("FABRIK_MAX_CONCURRENT"),
 	tune("FABRIK_MAX_RETRIES"), tune("FABRIK_MAX_SLICE_RETRIES"),
@@ -91,7 +101,8 @@ var Scrubbed = []Var{
 	tune("FABRIK_MAX_COMMENT_CYCLES_PER_WINDOW"), tune("FABRIK_MAX_NO_OP_COMMENT_CYCLES"),
 	tune("FABRIK_REVIEW_WAIT_TIMEOUT"), tune("FABRIK_CI_WAIT_TIMEOUT"),
 	tune("FABRIK_CI_BACKSTOP_TIMEOUT"), tune("FABRIK_STALL_THRESHOLD"),
-	tune("FABRIK_CHANNEL_HELD_MAX"), ident("FABRIK_SUBSCRIBER"),
+	tune("FABRIK_RETRY_STARVED_THRESHOLD"), tune("FABRIK_ITEM_WEDGED_THRESHOLD"), tune("FABRIK_CACHE_DIVERGENCE_WINDOW"),
+	tune("FABRIK_CHANNEL_HELD_MAX"), ident("FABRIK_SUBSCRIBER"), ident("FABRIK_MCP_DIR"),
 	tune("FABRIK_WORKER_STALE_TIMEOUT"), tune("FABRIK_CONVERGENCE_BUDGET"),
 	tune("FABRIK_AUTO_MERGE_STRATEGY"), tune("FABRIK_MERGE_QUEUE"), tune("FABRIK_MERGE_TRAIN"),
 	tune("FABRIK_TRAIN_TRIAL_WINDOW"), tune("FABRIK_COMMENT_CYCLE_WINDOW"),
@@ -104,6 +115,7 @@ var Scrubbed = []Var{
 
 	{"FABRIK_SIGHUP_RESTART", GroupReexec, "re-exec marker, consumed at startup (defensive)"},
 	{"FABRIK_AUTO_UPGRADED", GroupReexec, "re-exec marker, consumed at startup (defensive)"},
+	{"FABRIK_DEV_REEXEC", GroupReexec, "dev-build self-upgrade re-exec marker, consumed at startup (defensive)"},
 }
 
 // EngineSet is the forwarded class: variables the engine itself sets for
@@ -115,6 +127,7 @@ var EngineSet = []Var{
 	{"FABRIK_WORKTREE", "", "invocation fact: the worker's worktree"},
 	{"FABRIK_ROOT", "", "invocation fact: the fabrik directory"},
 	{"FABRIK_PR", "", "invocation fact: linked PR number (omitted when none)"},
+	{OwnerVar, "", "invocation fact: per-invocation owner marker (#2128); inherited by every descendant so orphans are reaped by owner, never by process shape"},
 }
 
 // NotEnv lists FABRIK_* string literals that are output markers or prose, not

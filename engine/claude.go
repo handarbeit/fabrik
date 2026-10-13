@@ -23,6 +23,7 @@ import (
 	"github.com/handarbeit/fabrik/internal/claudeerr"
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/internal/workerenv"
+	"github.com/handarbeit/fabrik/plugin"
 	"github.com/handarbeit/fabrik/stages"
 )
 
@@ -55,7 +56,7 @@ const apiErrorRateLimitStatus = 429
 // "429") erase every classification, blocking_limit included. Only a JSON
 // integer is accepted; absent, null, string, float, or anything else reads as
 // 0, i.e. "not a 429" (fail-safe: under-detecting costs retries,
-// over-detecting suspends a healthy account).
+// over-detecting holds a healthy account).
 type apiErrorStatus int
 
 // UnmarshalJSON implements json.Unmarshaler. It never returns an error.
@@ -82,13 +83,15 @@ type claudeTurnLimitError = claudeerr.TurnLimitError
 type claudeAPIErrorExit = claudeerr.APIErrorExit
 type claudeResumeFailureError = claudeerr.ResumeFailureError
 type claudeToolsDeniedError = claudeerr.ToolsDeniedError
+type claudeSkillLoadError = claudeerr.SkillLoadError
+type claudeKilledError = claudeerr.KilledError
 
 // apiErrorTerminalReason is the CLI's structural terminal_reason value for an
 // Anthropic-side API error — observed live on 2026-08-08 (#1458) as eight
 // exits across two issues, each at 1 turn and $0.0000. For a non-429
 // api_error_status this is per-invocation and self-resolving: it says nothing
 // about the account as a whole, so it must never trigger
-// activateClaudeSuspension (see claudeAPIErrorExit's doc comment and #1458 R3).
+// activateClaudeUsageLimit (see claudeAPIErrorExit's doc comment and #1458 R3).
 // An api_error carrying api_error_status 429 is a session/usage limit, not a
 // transient blip (ADR-1811): classifyUsageLimitExit claims it first, so only
 // the remaining statuses reach classifyAPIErrorExit.
@@ -128,7 +131,7 @@ func classifyAPIErrorExit(resp claudeResponse, usage TokenUsage) (msg string, de
 //
 // That was not hypothetical in this repository: on 2026-07-27 issue #1178's
 // Implement stage, which was writing tests about usage-limit detection,
-// quoted #1084's example message and suspended Claude dispatch account-wide
+// quoted #1084's example message and held Claude dispatch account-wide
 // for ~11 hours after a plain turn-cap exit (51 turns, $2.28). See #1183.
 //
 // resp.TerminalReason == "blocking_limit" is the CLI's structural signal for
@@ -147,7 +150,7 @@ func classifyAPIErrorExit(resp claudeResponse, usage TokenUsage) (msg string, de
 // and falls through to classifyAPIErrorExit. The same exclusion gate applies
 // to both triggers, so a mid-session 429 after real work (turns and cost both
 // non-zero) is deliberately not detected. This function decides only *whether*
-// the exit is a usage limit; the suspension's end instant is supplied separately
+// the exit is a usage limit; the usage-limit hold's end instant is supplied separately
 // by extractUsageLimitReset from the CLI's structured rate_limit_event line
 // (ADR-1815) — never from the result text, which would let prose reach a
 // behavioural decision.
@@ -390,9 +393,10 @@ var claudeTurnProgress func(issueNumber, turnsUsed, maxTurns int)
 // process stderr is sent only to the log file (not the terminal).
 var claudeTUI bool
 
-// claudePluginDir is the path to the Fabrik plugin directory. Set by the Engine
-// during construction. When non-empty, --plugin-dir is added to Claude args.
-var claudePluginDir string
+// claudePluginDirs are the plugin directories passed to every worker, base
+// plugin first, then any configured extras (ADR 2136). Set by the Engine
+// during construction. One --plugin-dir is added to Claude args per entry.
+var claudePluginDirs []string
 
 // claudeNameFlagSupported records whether the installed claude binary accepts
 // -n/--name, as determined once at startup by probeClaudeNameFlagSupport (see
@@ -437,7 +441,7 @@ var claudeGHToken string
 // AppID/AppPrivateKeyPath/AppInstallationID mint a ~1h installation token
 // that a background refresh loop keeps current for the engine's own API
 // calls. Reading it live here (typically Client.Token(), riding that same
-// refresh loop) means a worker's `gh` invocations (e.g. fabrik-validate's
+// refresh loop) means a worker's `gh` invocations (e.g. the validate skill's
 // Pre-Completion Gate) authenticate as the same installation the engine
 // itself uses, without a second minting path. nil (the default, and always
 // true in PAT mode) leaves buildClaudeEnv's claudeGHToken injection exactly
@@ -463,7 +467,7 @@ var claudeGHTokenOverrideFn func() string
 // pattern. Injected into every Claude worker's environment as GH_HOST so the
 // worker's gh invocations target the same GitHub instance as the engine
 // itself (FR-6, ADR-1391) — without this, a stage worker's `gh` calls (e.g.
-// fabrik-validate's Pre-Completion Gate) would silently hit github.com even
+// the validate skill's Pre-Completion Gate) would silently hit github.com even
 // when the engine is talking to a GHES instance. Empty (the default) skips
 // injection entirely, preserving today's behavior byte-for-byte.
 var claudeGHHost string
@@ -535,6 +539,7 @@ type turnCountingWriter struct {
 	inner       io.Writer
 	issueNumber int
 	maxTurns    int
+	onTurn      func(turns, budget int) // optional per-invocation hook (#2121)
 	buf         []byte
 	count       int
 }
@@ -552,6 +557,9 @@ func (w *turnCountingWriter) Write(p []byte) (int, error) {
 			w.count++
 			if claudeTurnProgress != nil {
 				claudeTurnProgress(w.issueNumber, w.count, w.maxTurns)
+			}
+			if w.onTurn != nil {
+				w.onTurn(w.count, w.maxTurns)
 			}
 		}
 	}
@@ -813,7 +821,7 @@ func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem
 	extraEnv := buildClaudeEnv(stage, issue, workDir, opts, os.Environ())
 	sigIntGrace, sigTermGrace := effectiveKillGrace(opts.SigIntGrace, opts.SigTermGrace)
 	wallTime := scaledWallTime(stage.MaxWallTime, effectiveBudget, stage.MaxTurns)
-	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name, issue.Repo, sessFilePath, ld, extraEnv, wallTime, effectiveBudget, opts.OnPIDReady, sigIntGrace, sigTermGrace, resumeSessionID, opts.MaxResumeFailures)
+	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name, issue.Repo, sessFilePath, ld, extraEnv, wallTime, effectiveBudget, opts.OnPIDReady, opts.OnTurn, sigIntGrace, sigTermGrace, resumeSessionID, opts.MaxResumeFailures, stage.Skill)
 	usage.MaxTurns = effectiveBudget
 	if err != nil {
 		return output, completed, usage, err
@@ -859,7 +867,7 @@ func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.
 	extraEnv := buildClaudeEnv(stage, issue, workDir, opts, os.Environ())
 	sigIntGrace, sigTermGrace := effectiveKillGrace(opts.SigIntGrace, opts.SigTermGrace)
 	wallTime := scaledWallTime(stage.MaxWallTime, limit, base)
-	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name+"-comment-review", issue.Repo, sessFilePath, ld, extraEnv, wallTime, limit, opts.OnPIDReady, sigIntGrace, sigTermGrace, resumeSessionID, opts.MaxResumeFailures)
+	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name+"-comment-review", issue.Repo, sessFilePath, ld, extraEnv, wallTime, limit, opts.OnPIDReady, opts.OnTurn, sigIntGrace, sigTermGrace, resumeSessionID, opts.MaxResumeFailures, stage.CommentSkill)
 	usage.MaxTurns = limit
 	return output, completed, usage, err
 }
@@ -1025,6 +1033,10 @@ func buildClaudeEnv(stage *stages.Stage, issue gh.ProjectItem, workDir string, o
 	} else {
 		env = append(env, "FABRIK_PR")
 	}
+	// The owner marker is per-invocation and set by runClaude after Start's
+	// owner path is allocated; strip any ambient copy (an engine run from inside
+	// a worker) so a worker can never inherit its parent's marker (#2128).
+	env = append(env, workerenv.OwnerVar)
 
 	passthrough := passthroughSet(claudeAnthropicEnvPassthrough)
 	env = append(env, scrubAnthropicAuthEnv(baseEnv, passthrough)...)
@@ -1304,6 +1316,31 @@ func sessionNameSentinel(repo string, issueNumber int, stageName string) string 
 	return fmt.Sprintf("fabrik:%s#%d:%s", sanitizeSentinelComponent(repo), issueNumber, sanitizeSentinelComponent(stageName))
 }
 
+// workerSettingsJSON is the inline per-invocation --settings value (#2140,
+// ADR 2140, FR-005): it disables the PM plugin's marketplace identity and
+// nothing else, so a user who has fabrik@fabrik installed does not get it in a
+// worker now that the stage plugin no longer shadows its name. The stage
+// plugins are --plugin-dir entries (<name>@inline), a separate identity that a
+// disabled marketplace plugin does not touch.
+//
+// Verification status: UNVERIFIED for the PM plugin. The live check
+// (worker_settings_live_test.go) has shown only that the stage plugins still
+// load with this setting; it has not yet shown the PM plugin absent on a host
+// where it is installed (see ADR 2140, "Verification of the live assumption").
+//
+// It carries only enabledPlugins, so the apiKeyHelper refusal (ADR 1346) —
+// which scans settings files, never this inline value — is unaffected.
+func workerSettingsJSON() string {
+	b, err := json.Marshal(map[string]any{
+		"enabledPlugins": map[string]bool{plugin.PMPluginID: false},
+	})
+	if err != nil {
+		// Marshalling a map of strings and bools cannot fail.
+		panic(fmt.Sprintf("marshalling worker settings: %v", err))
+	}
+	return string(b)
+}
+
 func buildClaudeArgs(stage *stages.Stage, resumeSessionID string, modelOverride string, maxTurns int, unrestricted bool, workDir string, sessionName string) []string {
 	args := []string{
 		"--output-format", "stream-json",
@@ -1323,9 +1360,13 @@ func buildClaudeArgs(stage *stages.Stage, resumeSessionID string, modelOverride 
 		args = append(args, "--disallowedTools", tool)
 	}
 
-	if claudePluginDir != "" {
-		args = append(args, "--plugin-dir", claudePluginDir)
+	for _, dir := range claudePluginDirs {
+		args = append(args, "--plugin-dir", dir)
 	}
+
+	// The human-facing PM plugin (fabrik@fabrik) must never load in a worker —
+	// not its skills, not any MCP server it bundles. Applies on every path.
+	args = append(args, "--settings", workerSettingsJSON())
 
 	if resumeSessionID != "" {
 		args = append(args, "--resume", resumeSessionID)
@@ -1399,7 +1440,7 @@ type claudeResponse struct {
 	} `json:"usage"`
 }
 
-func runClaude(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string, repo string, sessFilePath string, logDir string, extraEnv []string, maxWallTime time.Duration, maxTurns int, onPIDReady func(int), sigIntGrace, sigTermGrace time.Duration, resumeSessionID string, maxResumeFailures int) (string, bool, TokenUsage, error) {
+func runClaude(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string, repo string, sessFilePath string, logDir string, extraEnv []string, maxWallTime time.Duration, maxTurns int, onPIDReady func(int), onTurn func(turns, budget int), sigIntGrace, sigTermGrace time.Duration, resumeSessionID string, maxResumeFailures int, expectedSkill string) (string, bool, TokenUsage, error) {
 	claudeLog(issueNumber, "claude", "invoking (%s) in %s\n", label, workDir)
 
 	// Best-effort HEAD capture, before/after the invocation, so a tools-denied
@@ -1445,11 +1486,25 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 	lastActivity.Store(time.Now().UnixNano())
 	// Wrap stdoutWriter with a turn-counting writer that fires claudeTurnProgress on
 	// each user event (logical turn start), then with the activity writer for inactivity tracking.
-	tcw := &turnCountingWriter{inner: stdoutWriter, issueNumber: issueNumber, maxTurns: maxTurns}
+	tcw := &turnCountingWriter{inner: stdoutWriter, issueNumber: issueNumber, maxTurns: maxTurns, onTurn: onTurn}
+	if onTurn != nil {
+		onTurn(0, maxTurns) // invocation start: forget the previous invocation's count, publish this budget
+		// Invocation end: the worker handle outlives Claude (result handling, pushes,
+		// later work), so forget the count and budget rather than leave them stale.
+		defer onTurn(0, 0)
+	}
 	stdoutWriter = &activityWriter{inner: tcw, lastActivity: &lastActivity}
 
 	cmd := exec.CommandContext(stageCtx, "claude", args...)
 	cmd.Dir = workDir
+	// Owner marker (#2128): FABRIK_WORKER_OWNER names an owner file whose
+	// {pid, start token} is written right after Start (the PID does not exist
+	// yet). Every descendant inherits it. A path that cannot be allocated leaves
+	// the worker unmarked, exactly as before.
+	ownerPath := newWorkerOwnerPath()
+	if ownerPath != "" {
+		extraEnv = append(append([]string(nil), extraEnv...), workerenv.OwnerVar+"="+ownerPath)
+	}
 	cmd.Env = mergeEnv(os.Environ(), extraEnv)
 	cmd.Stdin = strings.NewReader(prompt)
 	cmd.Stderr = stderrWriter
@@ -1502,6 +1557,11 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 	// cmd.Process is written once by cmd.Start and never modified again.
 	// Capture it here (same goroutine, post-Start) for the watchdog.
 	pid := cmd.Process.Pid
+	if ownerPath != "" {
+		if err := writeWorkerOwnerFile(ownerPath, pid); err != nil {
+			claudeLog(issueNumber, "warn", "could not write worker owner file for PID %d: %v\n", pid, err)
+		}
+	}
 	if onPIDReady != nil {
 		onPIDReady(pid)
 	}
@@ -1547,7 +1607,7 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 	// trackWorkerDescendants's tick never recorded. If the fingerprint capture
 	// failed, retry it in the background so the record's live-worker phase stays
 	// identifiable.
-	workerRec := beginWorkerRecord(pid, issueNumber, repo, label)
+	workerRec := beginWorkerRecordWithOwner(pid, issueNumber, repo, label, ownerPath)
 	// #1989: the sessions Claude's Bash-tool commands create for themselves
 	// (setsid) are invisible to a SID == worker-PID filter. Sample them while the
 	// parent chain still exists; Escalate and the post-exit sweep consult the
@@ -1641,7 +1701,45 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 		}
 	}
 
-	return interpretClaudeResult(ctx, issueNumber, rawOutput, runErr, wasTimedOut, sessFilePath, logDir, resumeSessionID, maxResumeFailures, commitsPushed)
+	text, completed, usage, err := interpretClaudeResult(ctx, issueNumber, rawOutput, runErr, wasTimedOut, sessFilePath, logDir, resumeSessionID, maxResumeFailures, commitsPushed)
+	if sle := skillLoadOverride(ctx, rawOutput, expectedSkill, wasTimedOut, completed, err); sle != nil {
+		claudeLog(issueNumber, "claude", "skill %q failed to load (tool_use_id=%s) — stage did not run; not charged against max_retries\n", sle.Skill, sle.ToolUseID)
+		return text, false, usage, sle
+	}
+	return text, completed, usage, wrapKilledError(err, completed, wasTimedOut, inactivityFired.Load())
+}
+
+// skillLoadOverride decides whether interpretClaudeResult's outcome must be
+// replaced by a *claudeSkillLoadError (#2138, ADR-2138): a skill-configured
+// stage whose own skill demonstrably failed to load did none of the stage's
+// work, whatever marker it printed. It overrides only an unclassified outcome
+// (err == nil) and the marker-wins non-zero exit (completed with a generic
+// error); usage-limit, api-error, tools-denied, turn-limit and resume-failure
+// classifications keep precedence (they all return completed=false with an
+// error). It is skipped when the engine itself is shutting down (ctx cancelled
+// and not our own timeout), where the output is partial for a different reason.
+func skillLoadOverride(ctx context.Context, rawOutput []byte, expectedSkill string, wasTimedOut, completed bool, err error) *claudeSkillLoadError {
+	if expectedSkill == "" || (err != nil && !completed) || (ctx.Err() != nil && !wasTimedOut) {
+		return nil
+	}
+	return detectSkillLoadFailure(rawOutput, expectedSkill)
+}
+
+// wrapKilledError records why the engine killed an invocation (#2170): a
+// timed-out run that did not complete returns its error wrapped in a
+// claudeerr.KilledError naming the wall-time deadline or the inactivity
+// watchdog. The wrapper is transparent (Unwrap), so every errors.As
+// classification and the retry accounting built on it see the original error.
+// A run that completed (the marker was emitted before the kill) is left alone.
+func wrapKilledError(err error, completed, wasTimedOut, inactivity bool) error {
+	if err == nil || completed || !wasTimedOut {
+		return err
+	}
+	cause := claudeerr.KillWallTime
+	if inactivity {
+		cause = claudeerr.KillInactivity
+	}
+	return &claudeerr.KilledError{Cause: cause, Err: err}
 }
 
 // openStageLog opens (creating logDir if necessary) a new timestamped .log
@@ -2011,7 +2109,7 @@ func buildPrompt(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Com
 	if stage.PostToPR {
 		b.WriteString("- `.fabrik-context/pr-description.md` — the linked PR description\n")
 	}
-	b.WriteString("- `.fabrik-context/ci-status.md` — PR head SHA and CI verdict for that head (present only when the item has a linked PR)\n")
+	b.WriteString("- `.fabrik-context/ci-status.md` — PR head SHA and CI verdict for that head, plus the failing checks when it is red (present only when the item has a linked PR)\n")
 	b.WriteString("- `.fabrik-context/merge-train-repair.md` — present only when the merge train started this Validate run to repair a failure caused by the base branch moving; read it first and follow its instructions\n")
 	b.WriteString("\n")
 	if stage.PostToPR {
@@ -2132,7 +2230,7 @@ func buildCommentReviewPrompt(stage *stages.Stage, item gh.ProjectItem, comments
 	b.WriteString("Context files are available in `.fabrik-context/` in your working directory:\n")
 	b.WriteString("- `.fabrik-context/issue.md` — the issue body (spec)\n")
 	b.WriteString("- `.fabrik-context/stage-{Name}.md` — the current stage output (e.g. `.fabrik-context/stage-Specify.md`) and prior stage outputs\n")
-	b.WriteString("- `.fabrik-context/ci-status.md` — head SHA of the linked pull request and the CI verdict for that head (present only when one exists)\n")
+	b.WriteString("- `.fabrik-context/ci-status.md` — head SHA of the linked pull request and the CI verdict for that head, plus the failing checks when it is red (present only when one exists)\n")
 	b.WriteString("\n")
 	b.WriteString("First, perform any actions requested in the comments using available tools.\n")
 	if item.IsPR {
@@ -2207,7 +2305,22 @@ Your job is to:
 // own output. See the stage.Name == "Plan" gate at the call site in
 // finalizeStageOutcome (engine/item.go).
 func formatSpawnReceiptNote(output string) string {
-	n := len(ParseSpawnBlocks(output))
+	blocks, blockErrs := ParseSpawnBlocksDetailed(output)
+	n := len(blocks)
+	if len(blockErrs) > 0 {
+		// Early warning only (#2091): the pause itself happens at Implement
+		// dispatch (preImplement), so the human sees the problem the moment
+		// Plan posts. Quoted lines are already sanitised.
+		var parts []string
+		for _, be := range blockErrs {
+			if be.Found == "" {
+				parts = append(parts, fmt.Sprintf("block %d — %s", be.Index, be.Reason))
+			} else {
+				parts = append(parts, fmt.Sprintf("block %d — %s, found `%s`", be.Index, be.Reason, be.Found))
+			}
+		}
+		return fmt.Sprintf("\n\n---\n⚠️ %d spawn block(s) could not be parsed: %s. Implement will pause until the Plan is corrected, and no sub-issues will be created.", len(blockErrs), strings.Join(parts, "; "))
+	}
 	if n == 0 {
 		return ""
 	}

@@ -175,7 +175,7 @@ func TestInitializeToolsListAndOneCallEach(t *testing.T) {
 		}
 		readOnly := m["annotations"].(map[string]any)["readOnlyHint"] == true
 		switch m["name"] {
-		case ToolSubscribe, ToolUnsubscribe, ToolPromote, ToolSetAutonomy, ToolRevalidate, ToolClearClaudeLimit:
+		case ToolSubscribe, ToolUnsubscribe, ToolPromote, ToolSetAutonomy, ToolRevalidate, ToolClearClaudeLimit, ToolAdvance, ToolMoveParked:
 			if readOnly {
 				t.Errorf("tool %v changes state and must not be annotated read-only", m["name"])
 			}
@@ -185,7 +185,7 @@ func TestInitializeToolsListAndOneCallEach(t *testing.T) {
 			}
 		}
 	}
-	if strings.Join(names, ",") != "fabrik_status,fabrik_board,fabrik_health,fabrik_subscribe,fabrik_unsubscribe,fabrik_promote,fabrik_set_autonomy,fabrik_revalidate,fabrik_clear_claude_limit" {
+	if strings.Join(names, ",") != "fabrik_status,fabrik_board,fabrik_health,fabrik_situation,fabrik_subscribe,fabrik_unsubscribe,fabrik_promote,fabrik_set_autonomy,fabrik_revalidate,fabrik_advance,fabrik_move_parked,fabrik_clear_claude_limit" {
 		t.Errorf("tools = %v", names)
 	}
 
@@ -206,9 +206,21 @@ func TestInitializeToolsListAndOneCallEach(t *testing.T) {
 		t.Errorf("daemon saw %+v (filter %+v)", be.lastBoard, be.lastBoard.Filter)
 	}
 
-	text, isErr = toolText(t, ids["6"])
-	if isErr || !strings.Contains(text, "stub-v") {
-		t.Errorf("health call: err=%v text=%s", isErr, text)
+	// Health carries the daemon's JSON, a line naming both builds, and — because
+	// the stub's "stub-v" differs from the server's "v-test" — the skew note.
+	blocks := ids["6"]["result"].(map[string]any)["content"].([]any)
+	if len(blocks) != 3 {
+		t.Fatalf("health call: want 3 content blocks, got %v", blocks)
+	}
+	text = blocks[0].(map[string]any)["text"].(string)
+	if !strings.Contains(text, "stub-v") {
+		t.Errorf("health call text=%s", text)
+	}
+	if got := blocks[1].(map[string]any)["text"].(string); got != "Versions — daemon: stub-v, MCP server: v-test" {
+		t.Errorf("versions line = %q", got)
+	}
+	if got := blocks[2].(map[string]any)["text"].(string); !strings.Contains(got, "restart the Claude session") {
+		t.Errorf("skew note = %q", got)
 	}
 }
 

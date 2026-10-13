@@ -1,6 +1,10 @@
 package channelevents
 
-import "testing"
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
 
 func TestGlobMatch(t *testing.T) {
 	cases := []struct {
@@ -78,8 +82,8 @@ func TestSubscriptionScopes(t *testing.T) {
 		{"milestone unknown never matches", Subscription{Milestone: "v1"}, Event{Type: Paused, Repo: "o/r", Issue: 5}, false},
 		{"event filter miss", Subscription{Events: []EventType{Merged}}, ev, false},
 		{"event filter hit", Subscription{Events: []EventType{Paused, Merged}}, ev, true},
-		{"account-wide ignores scope", Subscription{Repos: []string{"o/x"}, Issues: []IssueRef{{Number: 1}}, Milestone: "v9"}, Event{Type: ClaudeLimitSuspended}, true},
-		{"account-wide still honours event filter", Subscription{Events: []EventType{Merged}}, Event{Type: ClaudeLimitSuspended}, false},
+		{"account-wide ignores scope", Subscription{Repos: []string{"o/x"}, Issues: []IssueRef{{Number: 1}}, Milestone: "v9"}, Event{Type: ClaudeUsageLimited}, true},
+		{"account-wide still honours event filter", Subscription{Events: []EventType{Merged}}, Event{Type: ClaudeUsageLimited}, false},
 	}
 	for _, c := range cases {
 		if got := c.sub.Matches(c.ev); got != c.want {
@@ -110,7 +114,7 @@ func TestSubscriptionValidate(t *testing.T) {
 }
 
 func TestCatalogImmediateSet(t *testing.T) {
-	for _, e := range []EventType{ValidateSettled, Escalated, Paused, DaemonUnreachable} {
+	for _, e := range []EventType{ValidateSettled, Escalated, Paused, DaemonUnreachable, PipelineStalled, PipelineResumed} {
 		if !IsImmediate(e) {
 			t.Errorf("%s must be immediate", e)
 		}
@@ -119,5 +123,181 @@ func TestCatalogImmediateSet(t *testing.T) {
 		if IsImmediate(e) {
 			t.Errorf("%s must not be immediate", e)
 		}
+	}
+}
+
+func TestPipelineEventsAreAccountWideAndSubscribable(t *testing.T) {
+	narrow := Subscription{Subscriber: "x", Repos: []string{"o/x"}, Issues: []IssueRef{{Number: 1}}, Milestone: "v9"}
+	for _, e := range []EventType{PipelineStalled, PipelineResumed} {
+		if !IsAccountWide(e) {
+			t.Errorf("%s must be account-wide", e)
+		}
+		if !narrow.Matches(Event{Type: e, Repo: "o/other"}) {
+			t.Errorf("%s must reach a narrowly scoped subscriber", e)
+		}
+		found := false
+		for _, s := range Subscribable() {
+			found = found || s == e
+		}
+		if !found {
+			t.Errorf("%s must be subscribable", e)
+		}
+		if err := (Subscription{Subscriber: "x", Events: []EventType{e}}).Validate(MinDigest); err != nil {
+			t.Errorf("events filter rejects %s: %v", e, err)
+		}
+	}
+}
+
+func TestItemAddedMatchesArrivalLabels(t *testing.T) {
+	ev := Event{Type: ItemAdded, Repo: "o/r", Issue: 4, Labels: []string{"fabrik:cruise", "fabrik:editing"}}
+	if !(Subscription{Subscriber: "x"}).Matches(ev) {
+		t.Error("an unscoped subscription takes item-added")
+	}
+	if !(Subscription{Subscriber: "x", Labels: []string{"fabrik:cruise"}}).Matches(ev) {
+		t.Error("a label scope must match an arrival label")
+	}
+	if (Subscription{Subscriber: "x", Labels: []string{"fabrik:yolo"}}).Matches(ev) {
+		t.Error("a label scope with no matching arrival label must not match")
+	}
+	// The default exclude list is not applied: arriving with fabrik:editing is
+	// still an arrival.
+	if !(Subscription{Subscriber: "x", Labels: []string{"fabrik:editing"}}).Matches(ev) {
+		t.Error("exclude list must not hide an arrival")
+	}
+	if (Subscription{Subscriber: "x", Repos: []string{"o/other"}}).Matches(ev) {
+		t.Error("repo scope must apply to item-added")
+	}
+	if (Subscription{Subscriber: "x", Milestone: "v1"}).Matches(ev) {
+		t.Error("unknown milestone must not match a milestone scope")
+	}
+}
+
+func TestProgressViaColumn(t *testing.T) {
+	stage := []Event{
+		{Type: LabelApplied, Label: "stage:Plan:complete"},
+		{Type: LabelRemoved, Label: "stage:Plan:in_progress"},
+	}
+	none := []string{}
+	on := Subscription{Subscriber: "x", ProgressViaColumn: true, ExcludeLabels: &none, Labels: []string{"stage:*"}}
+	for _, ev := range stage {
+		if on.Matches(ev) {
+			t.Errorf("progress_via_column should drop %q even past labels/exclude_labels", ev.Label)
+		}
+	}
+	if !on.Matches(Event{Type: ColumnChanged}) {
+		t.Error("column-changed must still be delivered")
+	}
+	other := Subscription{Subscriber: "x", ProgressViaColumn: true}
+	if !other.Matches(Event{Type: LabelApplied, Label: "fabrik:paused"}) {
+		t.Error("other labels must still be delivered")
+	}
+	off := Subscription{Subscriber: "x"}
+	if !off.Matches(stage[0]) {
+		t.Error("without the option delivery is unchanged")
+	}
+	// Events list that omits column-changed: Validate rejects the combination.
+	bad := Subscription{Subscriber: "x", ProgressViaColumn: true, Events: []EventType{LabelApplied}}
+	if err := bad.Validate(MinDigest); err == nil {
+		t.Error("progress_via_column without column-changed must be rejected")
+	}
+	ok := Subscription{Subscriber: "x", ProgressViaColumn: true, Events: []EventType{LabelApplied, ColumnChanged}}
+	if err := ok.Validate(MinDigest); err != nil {
+		t.Errorf("valid combination rejected: %v", err)
+	}
+}
+
+func TestProgressViaColumnPersistedCompat(t *testing.T) {
+	// An old persisted subscription (no field) loads with the option off, and the
+	// canonical form of an option-off subscription omits the key.
+	var s Subscription
+	if err := json.Unmarshal([]byte(`{"id":"a","subscriber":"x"}`), &s); err != nil || s.ProgressViaColumn {
+		t.Fatalf("old subscription: %v %+v", err, s)
+	}
+	if strings.Contains(s.canonical(), "progress_via_column") {
+		t.Error("option-off canonical form must omit the key")
+	}
+}
+
+func TestAnomalyEventsAreItemScopedAndSubscribable(t *testing.T) {
+	immediate := []EventType{RetryStarved, RetryResumed, ItemWedged, ItemUnwedged}
+	for _, e := range append(append([]EventType{}, immediate...), CacheDivergence) {
+		if IsAccountWide(e) {
+			t.Errorf("%s must be item-scoped, not account-wide", e)
+		}
+		if IsImmediate(e) != (e != CacheDivergence) {
+			t.Errorf("%s immediacy = %v", e, IsImmediate(e))
+		}
+		found := false
+		for _, s := range Subscribable() {
+			found = found || s == e
+		}
+		if !found {
+			t.Errorf("%s must be subscribable", e)
+		}
+		if err := (Subscription{Subscriber: "x", Events: []EventType{e}}).Validate(0); err != nil {
+			t.Errorf("%s must validate: %v", e, err)
+		}
+		other := Subscription{Subscriber: "x", Repos: []string{"o/x"}}
+		if other.Matches(Event{Type: e, Repo: "o/other", Issue: 1}) {
+			t.Errorf("%s must respect the repo scope", e)
+		}
+	}
+}
+
+func TestSubscribableHasNoDuplicates(t *testing.T) {
+	seen := map[EventType]bool{}
+	for _, e := range Subscribable() {
+		if seen[e] {
+			t.Errorf("%s is listed twice in Subscribable()", e)
+		}
+		seen[e] = true
+	}
+}
+
+func TestSemanticDefaultFamily(t *testing.T) {
+	semantic := Subscription{Subscriber: "S", EventsDefault: true}
+	legacy := Subscription{Subscriber: "S"}
+	named := Subscription{Subscriber: "S", Events: []EventType{LabelApplied}, EventsDefault: true}
+	label := Event{Type: LabelApplied, Label: "x"}
+	unlabel := Event{Type: LabelRemoved, Label: "x"}
+	settled := Event{Type: ValidateSettled}
+	if semantic.Matches(label) || semantic.Matches(unlabel) {
+		t.Error("a semantic-default subscription must not receive raw label events")
+	}
+	if !semantic.Matches(settled) || !semantic.Matches(Event{Type: ColumnChanged}) || !semantic.Matches(Event{Type: DaemonReachable}) {
+		t.Error("a semantic-default subscription must receive every other type")
+	}
+	if !legacy.Matches(label) || !legacy.Matches(unlabel) {
+		t.Error("a grandfathered subscription (no marker) keeps receiving every type")
+	}
+	if !named.Matches(label) || named.Matches(unlabel) {
+		t.Error("naming label-applied delivers exactly it")
+	}
+	if semantic.TakesLabelEvents() || !legacy.TakesLabelEvents() || !named.TakesLabelEvents() {
+		t.Error("TakesLabelEvents disagrees with Matches")
+	}
+	if !semantic.TakesColumnChanged() {
+		t.Error("the default family includes column-changed")
+	}
+}
+
+func TestEventsDefaultIsNotPartOfIdentityAndRoundTrips(t *testing.T) {
+	a := Subscription{ID: "1", Subscriber: "S", EventsDefault: true}
+	b := Subscription{ID: "2", Subscriber: "S"}
+	if a.canonical() != b.canonical() {
+		t.Fatal("EventsDefault must not change the canonical key (re-subscribe must stay idempotent)")
+	}
+	// A subscription persisted before the field existed has no marker.
+	var old Subscription
+	if err := json.Unmarshal([]byte(`{"id":"1","subscriber":"S"}`), &old); err != nil || old.EventsDefault {
+		t.Fatalf("legacy JSON: %+v %v", old, err)
+	}
+	data, _ := json.Marshal(a)
+	var back Subscription
+	if err := json.Unmarshal(data, &back); err != nil || !back.EventsDefault {
+		t.Fatalf("round trip: %s %+v %v", data, back, err)
+	}
+	if data, _ := json.Marshal(b); json.Valid(data) && string(data) != `{"id":"2","subscriber":"S"}` {
+		t.Fatalf("an unmarked subscription must serialise as before: %s", data)
 	}
 }

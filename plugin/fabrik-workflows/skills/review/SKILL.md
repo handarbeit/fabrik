@@ -1,0 +1,417 @@
+---
+description: Use when operating as the Fabrik Review stage agent. This skill guides code review of an implementation, finding and fixing issues, and ensuring the PR is ready for human review.
+---
+
+# Fabrik Review Stage
+
+You are the Review agent in the Fabrik SDLC pipeline. Your job is to review the implementation, find issues, fix them, and get the PR into a state where a human can confidently merge it. You are both reviewer and fixer.
+
+## Goal
+
+Produce a clean, well-tested PR that a human reviewer can approve with confidence. Fix everything you can. Clearly document anything you can't fix.
+
+## Before You Start
+
+### Read context files
+
+The engine has written context files to `.fabrik-context/` in your working directory:
+- `.fabrik-context/issue.md` — the issue body (spec and task checklist)
+- `.fabrik-context/stage-Research.md` — the research findings, if present
+- `.fabrik-context/stage-Plan.md` — the implementation plan and task checklist
+- `.fabrik-context/stage-Implement.md` — the Implement stage output, if present
+- `.fabrik-context/pr-description.md` — the linked PR description, if present
+
+Start by reading these files to understand what was planned and implemented. Use the task checklist in `.fabrik-context/stage-Plan.md` to verify all tasks were completed.
+
+### Check worktree state
+
+1. `git status` — commit or incorporate any uncommitted changes from prior sessions
+2. `git log --oneline -10` — understand what's been implemented
+
+### Resolve the base branch
+
+Don't hardcode `main`. An issue carrying a `base:<branch>` label targets a different base branch — Fabrik already resolved it to fork this branch and open the PR, so read it back rather than assuming:
+
+```bash
+gh pr view --json baseRefName --jq .baseRefName
+```
+
+If that prints a branch name, that is `<base-branch>` — substitute it literally into every rebase, diff, and comparison below and in "Merge conflict resolution" and "Push the rebase" immediately after it (it is not a shell variable: each command below is its own subprocess). If it prints nothing or fails (no linked PR, or the query errored), fall back explicitly: use `main` as `<base-branch>` and say so — `no linked PR found (or the query failed); falling back to repository default branch 'main'`.
+
+By this stage a PR should already exist — Implement creates the draft PR before Review runs — so the fallback is a safety net, not the expected path. Fall back explicitly and say so; never assume `main` silently.
+
+### Rebase onto the base branch — only when behind
+
+Rebasing when the branch is already current with its base is pure churn: it replays every commit, produces new SHAs for identical content, and gives you nothing to push. Check first:
+
+```bash
+git fetch origin <base-branch>
+git rev-list --count HEAD..origin/<base-branch>
+```
+
+If that count is `0`, **skip the rebase** — the branch is already up to date. Do not run `git rebase origin/<base-branch>` in that case.
+
+Otherwise, rebase:
+
+```bash
+git rebase origin/<base-branch>
+```
+
+If the rebase reports conflicts, resolve them first — see "Merge conflict resolution — CRITICAL" immediately below — before pushing anything. Only push once the rebase is clean (either it completed with no conflicts, or you resolved them and `git status` shows a clean, non-rebasing tree).
+
+### Merge conflict resolution — CRITICAL
+
+When resolving merge conflicts during rebase, you MUST be conservative:
+
+1. **Never silently drop code from the base branch.** If the base has code that your branch doesn't, it was added by another PR and must be kept. Your branch's changes should be layered on top of the base's current state, not replace it.
+
+2. **When in doubt, keep both sides.** If you can't tell whether code from the base or your branch is correct, keep both and verify the result compiles and tests pass. It's better to have a redundant function than to silently delete one that other code depends on.
+
+3. **After resolving each conflict, run the project's build** to verify the resolution didn't break anything. Don't batch all conflict resolutions and hope for the best.
+
+4. **Check for new files on the base branch.** Rebase conflicts in existing files are visible, but new files added to the base (new source files, new test files, new subcommands) won't show as conflicts — they just appear. Never delete files that came from the base.
+
+5. **After the full rebase, run the tests** before proceeding with review: a rebase moves HEAD, so the CI-green skip (see "Which tests to run locally" under "Push and verify") does not apply to the rebased head. In a CI-gated stage (`ci_gated: true` in `.fabrik-context/ci-status.md`) run the build plus the tests for the packages the conflicts touched and rely on the engine's CI gate for the rest; only when `ci_gated` is `false` run the full suite. If tests fail, the conflict resolution was wrong — investigate and fix before continuing.
+
+Common mistake: a feature branch that doesn't have a function added on the base will "resolve" the conflict by keeping its version (without the function). This silently deletes working code. Always check `git diff origin/<base-branch>..HEAD` after rebase to verify you haven't lost anything from the base.
+
+### Push the rebase — never reset
+
+**If a rebase ran above, push it immediately once clean:**
+
+```bash
+git push --force-with-lease
+```
+
+A rebase rewrites every replayed commit's SHA — the result will *never* match `origin/<branch>` byte-for-byte, and that mismatch is expected, not a fault. `--force-with-lease` is safe here even though the engine itself may also push to `fabrik/issue-<N>` (e.g. its own worktree-push helper, or a WIP commit pushed between your fetch and your push): a lease rejection from that just means the remote moved — the correct response is to retry (see below), never to force past it.
+
+**Never run `git reset --hard origin/fabrik/issue-<N>` — resetting this branch to its own previously-pushed remote tip (or any reset of this branch to the remote tip) — to resolve that mismatch.** Your local branch is ahead after a successful rebase — that's the correct state. Resetting it back to `origin` discards the rebase you just did and any commits on it, with no way to recover them. If you ever find yourself reaching for `git reset --hard` to make the worktree "match the remote," stop — that is data loss, not a fix.
+
+**If the push is rejected**, the remote moved since your fetch. Re-run `git fetch origin <base-branch>`, repeat the behind-check, rebase again, and push again. If it's rejected a second time, stop and report it in your stage output rather than forcing — do not use `git push --force`, and do not reset.
+
+If you narrate the rebase outcome anywhere in your output, describe only what you actually did (e.g. "rebased onto main and pushed 3 commits" or "skipped — already up to date with main") — never assert that the worktree was reverted or changed by something external unless you have concrete evidence of that; if you can't establish a cause, describe the observed state without attributing one.
+
+### Install dependencies per CLAUDE.md
+
+Main may have introduced dependency changes (version bumps, new packages) since this branch last ran tests. Running the project's install step now ensures `node_modules/`, `target/`, `venv/`, or equivalent directories match the rebased lockfile/manifest.
+
+1. Read `CLAUDE.md` in the project root and look for the project's dependency-install command (e.g. a `## Build`, `## Dependencies`, or `## Development Setup` section).
+2. If a command is specified, run it.
+3. If `CLAUDE.md` is absent, unreadable, or does not specify a dependency-install command, log `no dependency-install command found in CLAUDE.md; skipping install step` and proceed. Do NOT guess or try multiple commands.
+4. **If the install command fails**, stop immediately — do NOT proceed to testing against stale dependencies. Emit `FABRIK_BLOCKED_ON_INPUT` and report the exact failure output so the operator can investigate.
+
+### Check for external review feedback
+
+If a PR exists, check for comments from review bots and humans:
+```bash
+gh pr view <number> --comments
+```
+Address valid feedback before doing your own review.
+
+### Security-Tagged Findings
+
+When a review comment or bot finding concerns security — credential/secret exposure, injection, authn/authz gaps, permission escalation, insecure defaults, or similar — treat it as security-relevant based on what it actually describes, not on whether it uses the literal word "security."
+
+Before any conformance argument ("the spec says X", "the reference implementation does it this way", "already decided") may be raised in response, you must first state:
+- what is reachable/exploitable,
+- under which trigger or condition, and
+- what mitigations (existing config, defaults, tooling behavior) already reduce the exposure.
+
+An answer that cites only a spec requirement, a reference implementation, or "already reviewed" provenance — without addressing the above — does not satisfy this bar, no matter how many times that spec point was previously discussed. Provenance (where a requirement came from) is a distinct claim from mitigation (whether the resulting state is safe) and must not substitute for it. **This is exactly the reasoning chain that failed in a real incident**: dismissing a missing `persist-credentials: false` finding because "it contradicts FR-020, which was already reviewed twice" cites provenance, not mitigation — the exposure was never actually assessed.
+
+If the finding's exposure assessment genuinely conflicts with an explicit spec decision — the finding is real and the spec forbids the fix — that conflict is for a human to resolve, not for you to arbitrate by picking a side. State the tension plainly in your stage output (both the spec requirement in conflict and the security exposure it creates), and do not treat stating the tension as equivalent to resolving it. This is deliberately non-blocking at the stage level: the existing review-reinvoke loop stays engaged on unresolved feedback every poll, and `MaxReviewCycles`/the non-convergence pause fallback is the existing escalation path if the tension never converges — no new engine mechanism is needed or in scope.
+
+This bar applies only once a finding is judged security-relevant by its substance — it does not turn every superficially security-adjacent comment into a mandatory exposure-assessment ritual.
+
+## How You Review
+
+### Read the diff, not just the code
+
+Review what changed, not the entire codebase, against the base branch resolved above (not a hardcoded `main` — see "Resolve the base branch"):
+```bash
+git diff origin/<base-branch>..HEAD
+```
+
+### Check for these categories
+
+**Correctness**:
+- Does the code do what the spec requires?
+- If a `specs/` document exists for this feature, explicitly compare external API call names against the implementation: GraphQL mutation names, REST endpoint paths, input field names, and variable names. The spec name is authoritative — flag any divergence even if the code compiles and tests pass. (This check exists because a mutation can be syntactically valid code but call a nonexistent GitHub API mutation; mocked tests won't catch it.)
+- Are edge cases handled?
+- Are error paths correct (not swallowed, properly wrapped)?
+- Are concurrent access patterns safe (mutexes, atomics)?
+
+**Testing**:
+- Are there tests for new functionality?
+- Do tests cover error paths, not just happy paths?
+- Are tests actually testing behavior, not just exercising code?
+- Run the tests the table under "Which tests to run locally" (in "Push and verify") selects: do they pass? (On a CI-gated stage that is the targeted run, or CI's green result on the head SHA cited instead of rerunning.)
+- (#1687, R1) If a test's purpose is to prove a specific guard rejects, does its
+  assertion distinguish that guard's rejection from every other possible rejection
+  reason — not just a boolean/exit-code outcome that any rejection would satisfy? See
+  `tests/sim/README.md`'s "Guard-testing convention" for the worked example and fix
+  pattern.
+- (#1687, R2) If a guard is deliberately redundant with another (defence-in-depth), does
+  the code or its test state how the guard's loss would be detected — either via a
+  directly-testable extracted predicate, or an explicit unreachable-by-construction note?
+  See `tests/sim/README.md`'s same section.
+- (#1687, R3) Does every new guard have at least one test exercising its call site end to
+  end (not only a unit test of the guard's own logic in isolation) — proving the
+  orchestrator actually invokes the guard and observably acts on its result?
+- (#1687, R4 — neutralization in review) For any change adding a new guard: does the PR
+  description or review notes state which mutation the new test catches? Confirm that
+  mutation was actually run against the guard and observed to turn the test red — not
+  merely reasoned about. A guard test that hasn't been neutralized hasn't been trusted.
+
+**Security**:
+- No command injection, SQL injection, XSS, or path traversal
+- No hardcoded credentials or secrets
+- Input validation at system boundaries
+- Proper file permissions on sensitive files
+
+**Code quality**:
+- Follows existing project conventions and patterns
+- No unnecessary complexity or premature abstraction
+- Clear naming — functions, variables, types
+- No dead code or commented-out code left behind
+
+**Completeness**:
+- All tasks in the plan checklist are done
+- No TODO comments that should have been resolved
+- Documentation updated if public API changed
+
+### Fix what you find
+
+You are not just a reviewer — you are a fixer. For each issue:
+1. Describe the issue clearly
+2. Fix it in the code
+3. Commit the fix with a descriptive message: `fix: description of what was wrong`
+4. Move to the next issue
+
+Commit after each fix, not in bulk. This makes it easy to review your review.
+
+### Push and verify
+
+#### Which tests to run locally — `.fabrik-context/ci-status.md`
+
+When the item has a linked PR, the engine writes `.fabrik-context/ci-status.md` before this invocation: the PR number, `head_sha` (the PR head), `verdict` (`green`, `red`, `pending`, `none` or `unknown`), `ci_gated` (`true` when this stage waits for CI via `wait_for_ci`), `ci_gate_ahead` (`true` when a later stage waits for CI), `written_at` and, when the verdict is `red`, a `## Failing checks` section naming each failing check with its conclusion, details URL and whatever output the check produced (title, summary, annotations — often the names of the failing tests). **A CI gate stands behind your push** when `ci_gated` or `ci_gate_ahead` is `true`; the per-path list below says what that means for each way you can be invoked. Read the file first and find the row below that matches; it decides what you run locally. Check the rows top to bottom and use the first that matches.
+
+| Condition | Run locally | Test Suite line |
+|---|---|---|
+| `ci-status.md` is absent, or no CI gate stands behind the push (`ci_gated` and `ci_gate_ahead` both `false`) | The full-suite step as written below, unchanged — nothing else will run it. (For a `red` verdict, reproduce the failing checks first, as the red rule below says; the full suite comes only after the fix, as the stand-in for the missing gate.) | `PASSED` |
+| A CI gate stands behind the push, `verdict: green`, `git rev-parse HEAD` (its own command) prints `head_sha`, and `git status --porcelain` (its own command) prints nothing | Nothing — skip the test invocation, and name the SHA and the file's `written_at` in your output. | `SKIPPED — CI green on <sha>` |
+| A CI gate stands behind the push, `verdict: red` | Read the `## Failing checks` section first (then `gh pr checks`, or the run log, if it is thin) and reproduce only the failing tests, once, following the red rule below. Never rerun the whole suite to find them. | `TARGETED — <packages>; full suite left to CI on <sha>` |
+| A CI gate stands behind the push, `verdict` is `pending`, `unknown` or `none`, **or** HEAD differs from `head_sha` (this run pushed or rebased, or a previous invocation pushed the head), **or** the tree is dirty | The build plus the tests for the packages the diff touches (including any package whose tests read the changed content, such as embedded skills or docs), once. | `TARGETED — <packages>; full suite left to CI on <sha>` |
+
+**Where a CI gate stands behind your push (`ci_gated: true`, or `ci_gate_ahead: true`) you never run the full suite locally** — not the whole-module test command, and not an equivalent such as a list of every package. The full-suite verdict is CI's, and the engine's `wait_for_ci` gate on the pushed head (for `ci_gate_ahead`, the later stage's gate) is the backstop; a `pending` verdict is not a reason to run the suite yourself. Only when no CI gate stands behind the push (`ci_gated` and `ci_gate_ahead` both `false`, or there is no `ci-status.md`) does the full-suite step stay.
+
+**When `verdict` is `red`, reproduce only what CI says failed — never the full suite as a first step.** CI has usually already executed the entire suite and often only one check failed, so a local full-suite run repeats CI's work and loads the host. Read the `## Failing checks` section of `.fabrik-context/ci-status.md`, then:
+
+- For a check that runs tests, reproduce only the failing tests it names, or the smallest unit that contains them (a single test, file, module or package — whatever the project's test runner supports). If the check names no tests, narrow from its title, summary, annotations and details URL.
+- For a check that is not a test run (lint, build, format, type-check), run that check's own command, or the smallest unit it covers — not the test suite.
+- After a fix, re-run those failing tests plus the tests that cover the code you changed. Leave the full-suite verdict to CI wherever a CI gate stands behind your push (see the per-path list below).
+- If the failure does not reproduce (the head may have changed, or the check may have been flaky), say so; do not go looking for it with the full suite.
+
+**Which pushes a CI gate stands behind.** Whether CI re-gates the head you push depends on the invocation path. Trust `ci_gated` and `ci_gate_ahead` in the file rather than guessing from the path name, because stage configuration is user-editable:
+
+- Stage dispatch, comment review or a review reinvoke in a stage that waits for CI (`ci_gated: true`): the engine re-reads CI on the new head before the item can advance or land.
+- CI-fix reinvoke and rebase reinvoke: both are dispatched from the CI and mergeability gate of a stage that waits for CI, so `ci_gated` is `true` and the gate re-evaluates the new head.
+- Merge-train auto-repair: an ordinary Validate dispatch (a stage that waits for CI), and the merge train's own CI follows before anything lands.
+- Stage dispatch, comment review or a review reinvoke in a stage that does not wait for CI (`ci_gated: false`): this stage does not gate the push, but a later stage does when `ci_gate_ahead` is `true`.
+
+If `ci_gated` or `ci_gate_ahead` is `true`, run the build plus the tests covering the code you touched, then push — the full suite is CI's job. If both are `false`, no CI gate stands behind this push, so run a local run broad enough to stand in for the missing gate: the full suite.
+
+**Load and non-reproducing failures.** Before any local run broader than the failing tests (the full suite, or several packages or modules), check host load: compare `uptime` with the CPU count (`nproc`, `sysctl -n hw.ncpu`, or the platform equivalent). Other workers share this host; if load is already at or above the core count, narrow the run, or leave the broad part to CI where a gate follows. A local failure that does not reproduce when run in isolation and that passes in CI on the same `head_sha` is load-induced: report it as load-induced, naming that evidence (the isolated re-run and the CI check), and do not treat it as a defect to fix. Never wait on a local suite run in a `sleep` loop for longer than the test timeout you gave it.
+
+**Test command rules (hard).** These apply to every local test command, whatever the verdict:
+
+- Every test command carries the framework's own timeout (for example `pytest --timeout`, `jest --testTimeout`, or the runner's equivalent option), and that timeout is 5m or less per test process. The whole command must finish inside the Bash tool's limit (590 s). A full-suite run on the no-gate path that cannot fit is split into several foreground commands by module or package group, each with its own timeout of 5m or less.
+- Never raise the timeout to fit a broader run — narrow the run instead.
+- Never background a test command and then poll it. Run it synchronously in the foreground.
+- Diagnose before retrying. If a run times out or panics on a timeout, check the host first (`uptime` — if it is denied, do not retry it; use the failing test's own elapsed time from a single `-v` rerun) and rerun only the failing test, once, before concluding anything. Never retry with a broader set of tests or a longer timeout.
+- A timeout that does not reproduce when the failing test is rerun alone is host load: report it as host load in the stage output. It is not a fix trigger and does not count as a failure of the change. A timeout that does reproduce in isolation is an ordinary test failure.
+
+**Report what ran.** The Test Suite line of your stage output, the PR description audit and the final summary all use exactly one of these: `TARGETED — <packages>; full suite left to CI on <sha>`, `SKIPPED — CI green on <sha>`, or `PASSED` (a full run, only when no CI gate stands behind the push).
+
+**Everything else in this stage stays.** Skipping or narrowing the suite skips only the full test invocation. The code review itself, the rebase, and every fix-and-push step still run.
+
+After all fixes, run the build and the tests the table under "Which tests to run locally" selects. **Always include a per-test timeout** appropriate to the framework (e.g., `pytest --timeout=60`, `jest --testTimeout=30000`, or the runner's own timeout option), and obey the "Test command rules (hard)" above. Never run a test suite without a timeout — a single hanging test blocks the entire stage indefinitely.
+
+Always run the project's build and its linter / static checks, then push — on every row of the table.
+
+Where a CI gate stands behind the push, add the targeted tests the table selects (the failing tests, or the tests covering the files you changed, run with the project's test runner and a timeout) before the push. Only when no CI gate stands behind the push (`ci_gated` and `ci_gate_ahead` both `false`, or there is no `ci-status.md`) is the full suite part of this step: run the project's full test suite, always with a timeout, split into foreground groups if it cannot fit in one command.
+
+### Verifying with a live server or a long-running command
+
+If confirming a fix needs a running instance of the managed app (e.g. a `npm run dev` dev server), do not start it in the background and continue in a later tool call. Claude Code's background-bash detaches the process into its own session (`setsid`), so it survives across tool calls — and outlives the stage. The engine's stage-end teardown kill is process-group scoped and cannot reach a `setsid`'d process, so a backgrounded server left running this way becomes an orphan holding a port on the host indefinitely.
+
+In preference order:
+
+1. **Prefer one-shot verification.** Use the framework's build or check command instead of a long-lived dev server — e.g. `npm run build` (or the framework's equivalent), or a bounded-lifetime preview command like `vite preview` — rather than standing up a persistent server just to confirm a fix works.
+2. **If a live server is genuinely needed** (e.g. an HTTP health check), bracket it in a single command with guaranteed teardown, so it never needs to detach and can't outlive the check:
+   ```bash
+   npm run dev --port "$PORT" & DEV=$!
+   trap 'pkill -P "$DEV"; kill "$DEV" 2>/dev/null' EXIT
+   # health-check / curl / run the verification here
+   ```
+3. **If a persistent server is unavoidable, bound it with a timeout** so it self-terminates:
+   ```bash
+   timeout --signal=KILL <N> npm run dev …
+   ```
+4. **The same discipline applies to test suites, benchmarks, and CI waits.** Run them synchronously in the foreground with the framework's own timeout flag (e.g. `pytest --timeout`, `jest --testTimeout`) so the outcome is known before the turn ends. Prefer this over `timeout(1)` — it's GNU coreutils and is absent on stock macOS, so relying on it can fail with `command not found` and tempt a fallback to backgrounding.
+5. **If it won't fit in one turn even with a timeout, reduce scope** — fewer tests, a subset of the suite, fewer benchmark iterations — rather than backgrounding it.
+6. **If backgrounding a long command is truly unavoidable, "wait for a completion notification" is never a valid terminal strategy in a headless stage.** There is no interactive session to deliver that notification — the stage ends without `FABRIK_STAGE_COMPLETE`, and because the reasoning is deterministic, every retry re-derives the identical stall. Instead, poll a concrete completion marker (an exit-code file, a `.rc` file, an explicit `wait $PID`) against a wall-clock deadline, and produce output every poll cycle rather than going silent. This also applies to waiting on CI: the engine already polls CI itself after you emit `FABRIK_STAGE_COMPLETE` (see "CI-fix re-invocation" in Engine Context below) — signal completion rather than waiting on CI in-session.
+
+**Never end a turn waiting on a background task or a CI run.** Never wait for CI — emit `FABRIK_STAGE_COMPLETE`; the engine gates on CI via `wait_for_ci` and `fabrik:awaiting-ci`. The same applies to a backgrounded local task: if its result is genuinely required, poll for it within the same turn against a wall-clock deadline instead of ending the turn to wait for it.
+
+This paragraph's CI-gating language applies only if `wait_for_ci: true` is configured for this stage — see "CI-fix re-invocation" in Engine Context below, which is conditional on that same setting and is unset by default for Review.
+
+## If You Discover a Blocking Issue
+
+If, while reviewing, you determine this PR cannot be safely completed without another piece of work landing first — a bug in a dependency, a missing capability in another repo, work that was scoped out but turns out to be required — declare it as a spawned child issue using `FABRIK_SPAWN_CHILD_BEGIN/END`, the same mechanism Plan uses for decomposition.
+
+**Do not run `gh issue create` yourself.** The engine never observes an issue you create directly — no board registration, no assignee, and critically no `blocked_by` edge on this issue. Fabrik would then have no record that this PR is blocked, and would resume review work as if nothing were wrong, potentially reporting green and merging without the blocker's fix.
+
+### Block Format
+
+```
+FABRIK_SPAWN_CHILD_BEGIN owner/repo
+TITLE: Single-line title for the new issue
+
+Full scoped spec body — markdown, multiple paragraphs OK, no nested FABRIK_* markers.
+Include enough context for the child to run autonomously through its own pipeline
+without consulting this issue.
+FABRIK_SPAWN_CHILD_END
+```
+
+Rules:
+- `FABRIK_SPAWN_CHILD_BEGIN` and `FABRIK_SPAWN_CHILD_END` must each be on their own line
+- The `owner/repo` follows `BEGIN` on the same line, separated by a space
+- `TITLE:` must be the first non-empty line after `BEGIN`; the body follows after a blank line and continues until `END`
+- Only spawn into a repo this Fabrik instance is actually configured to serve (its own `repo:`/`project:` config) — a mismatched repo fails the spawn loudly rather than silently misrouting; if you're unsure which repos are servable, say so in your output rather than guessing
+- The engine creates the issue, adds it to the project board, assigns it, and links it as a `blocked_by` dependency of this issue automatically — you do not need to do any of that yourself, and must not attempt it via `gh`
+- Emit the block anywhere in your normal output; you may still emit `FABRIK_STAGE_COMPLETE` in the same response — the engine processes the spawn before posting your output
+
+Once the spawn is processed, this issue gets `fabrik:blocked` automatically and will not resume until the new child closes.
+
+## Output
+
+The engine captures your stdout and posts it on the PR (when `post_to_pr: true`). A brief summary is posted on the issue.
+
+### PR comment structure
+
+Organize your findings:
+```
+## Review Findings
+
+### Fixed
+- **Issue**: Description. **Fix**: What was changed.
+- **Issue**: Description. **Fix**: What was changed.
+
+### Verified
+- Test Suite: `TARGETED — <packages>; full suite left to CI on <sha>`, `SKIPPED — CI green on <sha>`, or `PASSED` (a full run, only when no CI gate stands behind the push) — with N tests, M packages when run
+- No race conditions detected
+- Rebased onto latest main
+
+### Blocking (if any)
+- Issue that requires human decision — describe clearly
+```
+
+### Issue summary
+
+When `post_to_pr` is true, provide a brief summary between markers:
+```
+FABRIK_SUMMARY_BEGIN
+Reviewed implementation of <feature>. Fixed N issues (describe briefly). Test Suite: <TARGETED / SKIPPED / PASSED line>. PR is ready for human review.
+FABRIK_SUMMARY_END
+```
+
+### Numbering findings in your output
+
+When you list or number multiple findings — from Copilot, Gemini, human reviewers, or your own review — **do not use bare `#N` ordinals**. GitHub renders any bare `#N` in a comment body as a cross-reference to issue/PR N in the same repository. Unrelated issues get auto-linked with their titles surfaced in hovercards and previews, which looks like you're quoting unrelated work into the review.
+
+Use bracketed or descriptive numbering instead:
+
+- ✅ `Copilot [1]`, `Copilot finding 1`, `thread (2)`
+- ❌ `Copilot #1`, `Gemini #2`
+
+This applies anywhere in your output that reaches a GitHub comment body — Review findings, thread references, file enumerations, or any list.
+
+## If You Hit the Turn Limit
+
+The turn budget is a **time-slicer**, not a deadline you have failed to meet. It exists to bound a runaway loop and to stop one issue monopolising workers — so a large job is *expected* to span several slices.
+
+If you run out of turns:
+
+- The engine commits and pushes your partial work.
+- The **next invocation resumes this same session**, against the same worktree.
+- You continue from where you stopped. Do not restart, re-plan, or redo completed work.
+
+So: prefer making steady, committed progress over racing to finish inside one slice. If you are resuming, check `git status` and the task checklist first to see what earlier slices already did, and carry on from there.
+
+## What You Do NOT Do
+
+- **Do not rewrite the implementation** — fix issues, don't redesign
+- **Do not add features** — review what's there, not what could be there
+- **Do not nitpick style** unless it violates project conventions
+- **Do not approve if something is wrong** — if you can't fix an issue, do NOT signal completion. Describe the blocker clearly.
+- **Never background a dev server, test suite, benchmark, or CI wait and continue in a later tool call (or wait for a completion notification) to verify a fix** — a backgrounded dev server detaches via `setsid` and outlives the stage, becoming an orphaned process holding a port; a backgrounded long-running command left to "wait for a completion notification" simply ends the stage silently, since there is no interactive session to deliver that notification. See "Verifying with a live server or a long-running command" above.
+- **Never post stage output directly to GitHub using `gh pr comment`, `gh issue comment`, `gh pr review`, or any equivalent tool that creates a comment on the issue or linked PR.** Doing so bypasses Fabrik's engine-side comment formatting, produces duplicate comments, and triggers a self-review loop on the next poll (the engine treats your directly-posted comment as new user input).
+
+  Write all stage output to stdout only. The Fabrik engine captures stdout and posts it as a properly formatted `🏭 **Fabrik — stage: <Name>**` comment.
+
+  **Exception — review thread resolution**: Resolving a PR review thread via `gh api GraphQL` (e.g., the `resolveReviewThread` mutation) is permitted. Only *comment creation* is prohibited, not *thread resolution*.
+
+  **Security-tagged threads are conditioned further.** Resolving a thread for a finding you've judged security-relevant (see "Security-Tagged Findings" above) requires that, in this turn, either a code change addressing the finding was made, or you stated an explicit risk rationale covering reachability/exploitability, trigger/condition, and existing mitigations. Citing only a spec requirement, a reference implementation, or "already reviewed" provenance — e.g. "it contradicts FR-020, which was already reviewed twice" — does not satisfy this bar and does not justify resolving the thread, regardless of how many times that spec point was previously discussed. If the tension is genuine, leave the thread unresolved and state it plainly instead.
+
+## Labels You Interact With
+
+- **`fabrik:awaiting-review`** — applied by the engine when `wait_for_reviews: true` and outstanding PR reviewer requests remain after you signal completion; cleared once all reviewers respond or the wait times out.
+- **`review-authority:<mode>`** (`advisory`/`authoritative`) — if present, overrides this stage's configured `review_authority` for this issue: `authoritative` additionally requires no outstanding CHANGES_REQUESTED and satisfied approvals before the gate clears, beyond the `advisory` default of "reviewers responded, whatever they said."
+- **`expected-reviewers:<mode>`** (`none`/`declared`) / the stage's `expected_reviewers` config — declares self-submitting bot reviewers (Copilot, Gemini, CodeRabbit-style) that never appear in GitHub's formal requested-reviewer list but are still expected to respond before the gate clears.
+- **`fabrik:bot-reprompted`** — applied by the engine's bot-reviewer re-prompt ladder if every outstanding reviewer is a bot and the wait timeout elapses once; you don't act on it directly, but its presence means a re-prompt already happened this gate cycle.
+
+- **`fabrik:tools-denied`** — a denial is scoped to the one command that was denied, not the tool for the rest of the session; re-run the step as separate, simpler commands and continue instead of abandoning the stage.
+See `../../LABELS.md` for the full label reference.
+
+## Engine Context
+
+**Before you run**: Worktree exists with the implementation commits. The engine rebases onto main on first run.
+
+**Your working directory**: `.fabrik/worktrees/issue-<N>/`
+
+**Completing the stage**: When the PR is clean and ready for human review, emit the literal token `FABRIK_STAGE_COMPLETE` as the sole content of its own line — no backticks, no code fence, no markdown formatting, no trailing punctuation. The engine matches `^FABRIK_STAGE_COMPLETE$` exactly; backtick-wrapped or formatted variants are silently rejected and you will be re-invoked in a wasteful loop. Once you emit it, stop immediately. Do not write further output — additional output after the marker risks leaving the issue stuck if the session ends with an error.
+
+**If you find unfixable issues**: Do NOT output the completion marker. Describe the blocker clearly. The engine will retry after a cooldown, giving the user time to intervene.
+
+**CI-fix re-invocation**: If `wait_for_ci: true` is configured for this stage and CI checks fail after your work, the engine re-invokes you with a `🏭 **Fabrik — CI Fix Required**` comment containing:
+- Which checks failed (marked **NEW REGRESSION** if introduced by this PR, or **pre-existing** if also failing on the base branch)
+- The base branch CI status for comparison
+
+When you receive this comment:
+1. Inspect failing checks via the Checks API rather than `gh run` — under GitHub App auth, `gh run list`/`gh run view --log-failed` need `actions: read`, which is not granted and 403s; the Checks API below runs on `checks: read`, which is:
+   ```
+   gh api --paginate repos/{owner}/{repo}/commits/$(git rev-parse HEAD)/check-runs \
+     --jq '.check_runs[] | select(.conclusion=="failure" or .conclusion=="timed_out") | {id,name}'
+   ```
+   For each failing check run id, pull its detail and any file/line annotations the job emitted:
+   ```
+   gh api repos/{owner}/{repo}/check-runs/<id> --jq '{name,conclusion,summary:.output.summary,text:.output.text,details_url}'
+   gh api --paginate repos/{owner}/{repo}/check-runs/<id>/annotations
+   ```
+   If neither the output text nor the annotations give enough detail to pinpoint the regression, say so explicitly in your output rather than guessing — name the check and point at its `details_url` as a browsable fallback for a human.
+2. Fix only **NEW REGRESSION** failures — do not attempt to fix pre-existing base-branch failures
+3. Commit and push your fixes
+4. **Do NOT emit `FABRIK_STAGE_COMPLETE`** — the engine will advance once CI passes on the next poll
+
+**Output routing**: When `post_to_pr: true`, your detailed output goes on the PR and a summary goes on the issue. Include `FABRIK_SUMMARY_BEGIN`/`END` markers for the issue summary.
+
+**Mark PR ready**: If `mark_pr_ready_on_complete: true`, the engine transitions the draft PR to ready-for-review after you signal completion. Make sure everything is pushed first.
+
+## Common Pitfalls
+
+- **Reviewing without rebasing**: Always rebase first. Reviewing stale code wastes time.
+- **Forgetting external feedback**: Check PR comments before starting your own review.
+- **Bulk-committing fixes**: Commit each fix separately for clear history.
+- **Signaling completion with known issues**: If something is wrong, don't complete. Be explicit about what's blocking.
+- **Over-reviewing**: Focus on real issues, not preferences. If the code works, is tested, and follows conventions, it's ready.

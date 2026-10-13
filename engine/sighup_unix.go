@@ -55,7 +55,7 @@ func registerSighupHandler(ctx context.Context, cancel context.CancelFunc, e *En
 // performSighupRestart stops the webhook manager, releases the lockfile, and
 // re-execs the current binary in place. On success, this function never returns.
 // On exec failure, it logs the error and returns so Run() can exit cleanly.
-func performSighupRestart(e *Engine, lockFile *os.File) {
+func performSighupRestart(e *Engine, locks *instanceLocks) {
 	if e.webhookMgr != nil {
 		e.webhookMgr.Stop()
 	}
@@ -64,16 +64,14 @@ func performSighupRestart(e *Engine, lockFile *os.File) {
 	e.closeLocalAPI()
 	e.closeChannelEvents()
 
-	// Release the lock explicitly before exec. O_CLOEXEC means the fd is also
-	// closed atomically at exec time, but doing it here makes the intent clear.
-	// There is a negligible window between this unlock and syscall.Exec during
-	// which another instance could theoretically acquire the lock; in practice
-	// this is harmless because exec is called immediately after and the PID is
-	// unchanged, so any competing instance would fail on its next poll cycle.
-	syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN) //nolint:errcheck
-	if err := lockFile.Close(); err != nil {
-		e.logf(0, "signal", "SIGHUP restart: could not close lock file: %v\n", err)
-	}
+	// Release both instance locks explicitly before exec. O_CLOEXEC means the fds
+	// are also closed atomically at exec time, but doing it here makes the intent
+	// clear. There is a negligible window between this unlock and syscall.Exec in
+	// which another instance could acquire a lock; if one does, whichever process
+	// holds the flock keeps it and the loser — here, the re-exec'd image — fails
+	// its acquire in Run() and exits. The PID is unchanged across exec, so the
+	// recorded-pid check in per-poll verification stays valid.
+	locks.Release()
 
 	exe, err := os.Executable()
 	if err != nil {

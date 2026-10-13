@@ -163,6 +163,11 @@ listed out of scope). **If CI latency becomes a problem, file it as its own issu
   included), and PR #2061 timed out at 300.02 s with no failing test. The cap was raised
   to 10m in `ci.yml` and `scripts/ci/worker-shaped-test.sh` as a stopgap. The decision
   here (no per-PR test selection) stands; speeding up the sim package is the follow-up.
+  **Triggered again 2026-10-12:** `tests/sim` grew from 362 s to 579 s on CI in eight
+  hours as the MCP flight added 34 sim tests (266 s), and PR #2209 timed out at 600 s with
+  no failing test. The cap was raised to 20m (PR #2211) as a second stopgap. The real fix
+  is #2210: engine-scoped test seams so the channel tests can run in parallel, and a
+  drain-driven wait in place of fixed sleeps, with a 420 s target.
 - #1439 moves Pruefer-only code out of `github/`, shrinking its blast radius so more PRs
   narrow meaningfully.
 - The shape of PR traffic changes so that a large share of PRs touch only leaf packages.

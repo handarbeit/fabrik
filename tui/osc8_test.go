@@ -76,7 +76,7 @@ func TestHistoryRowOSC8_Present(t *testing.T) {
 	h.history = []HistoryEntry{
 		{IssueNumber: 42, StageName: "Research", Success: true, CompletedAt: time.Now()},
 	}
-	h.SetLayout(120, 20, false, 0)
+	h.SetLayout(120, 20)
 
 	// The viewport content should contain the OSC 8 URL for issue 42.
 	content := h.historyVP.View()
@@ -96,7 +96,7 @@ func TestHistoryRowOSC8_Absent(t *testing.T) {
 	h.history = []HistoryEntry{
 		{IssueNumber: 42, StageName: "Research", Success: true, CompletedAt: time.Now()},
 	}
-	h.SetLayout(120, 20, false, 0)
+	h.SetLayout(120, 20)
 
 	content := h.historyVP.View()
 	if strings.Contains(content, "https://github.com/acme/fabrik/issues/42") {
@@ -117,7 +117,7 @@ func TestHistoryRowOSC8_PerEntryRepoTakesPrecedence(t *testing.T) {
 	h.history = []HistoryEntry{
 		{IssueNumber: 99, Repo: "specific/repo", StageName: "Plan", Success: true, CompletedAt: time.Now()},
 	}
-	h.SetLayout(120, 20, false, 0)
+	h.SetLayout(120, 20)
 
 	content := h.historyVP.View()
 	if !strings.Contains(content, "https://github.com/specific/repo/issues/99") {

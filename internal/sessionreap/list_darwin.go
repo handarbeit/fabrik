@@ -79,3 +79,8 @@ func startToken(pid int) string {
 	}
 	return fmt.Sprintf("%d.%06d", st.Sec, st.Usec)
 }
+
+// StartToken returns pid's start-time token ("" when unreadable). It is the same
+// token Tracker, RecordStart and OwnerOf record, so a token captured by one side
+// can be compared with one read by another (#2128).
+func StartToken(pid int) string { return startToken(pid) }

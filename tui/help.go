@@ -20,7 +20,7 @@ KEYBOARD SHORTCUTS
     ↑/↓  k/j  Navigate items in the focused pane
     enter      Toggle inline detail panel (History); toggle detail (Warnings)
     esc        Close open panels; with none open, triggers quit confirmation
-    n / N      Cancel quit or clear-all confirmation
+    n / N      Cancel an armed confirmation (any other key, or 10 s, also cancels)
 
   Active Jobs (In Progress pane)
     l          Open fabrik watch for selected issue (live output)
@@ -34,7 +34,7 @@ KEYBOARD SHORTCUTS
     C          Clear all history (with confirmation)
 
   Warnings pane
-    F          Fix selected warning (runs fix command in foreground)
+    F          Fix selected warning (runs fix command in foreground; no-op when it has none)
     D          Dismiss / undismiss selected warning (sticky across restarts)
     S          Show / hide dismissed warnings
     enter      Toggle expanded detail for selected warning
@@ -48,6 +48,8 @@ KEYBOARD SHORTCUTS
                [2] Overwrite — prompts you to type OVERWRITE to confirm
                    (destructive: discards all local changes in .fabrik/plugin/)
                [3] Cancel — dismisses the dialog
+               To keep your edits AND get skill updates again, quit and run
+               "fabrik upgrade" (moves them to .fabrik/plugins/local-workflows)
     w          Wake: reset idle backoff and poll immediately
     ctrl+r     Force refresh (same as SIGHUP)
     ?          Toggle this help panel

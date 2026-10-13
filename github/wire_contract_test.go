@@ -101,6 +101,8 @@ var wireContractRegistry = []wireOperation{
 	{"createProjectV2Mutation", []string{createProjectV2Mutation}},
 	{"updateProjectV2ShortDescriptionMutation", []string{updateProjectV2ShortDescriptionMutation}},
 	{"updateProjectV2FieldMutation", []string{updateProjectV2FieldMutation}},
+	{"fetchProjectFieldsQuery", []string{fetchProjectFieldsQuery}},
+	{"createProjectV2FieldMutation", []string{createProjectV2FieldMutation}},
 
 	// comments.go
 	{"resolveReviewThreadMutation", []string{resolveReviewThreadMutation}},

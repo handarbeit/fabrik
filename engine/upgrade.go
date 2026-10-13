@@ -53,10 +53,17 @@ func (e *Engine) devBuildConfig() selfupgrade.DevBuildConfig {
 		StatusFn:       pollStatus,
 		StatusClearFn:  pollStatusClear,
 		PreExecHook:    e.flushChannelEvents,
+		// A dedicated marker, not FABRIK_AUTO_UPGRADED: that one triggers the
+		// plugin refresh on startup, which PostBuildHook below already did. It
+		// only tells the new process why it started (the fabrik.log banner, #2094).
+		ExtraEnv: []string{"FABRIK_DEV_REEXEC=1"},
 		PostBuildHook: func(exe, dir string) error {
-			// Refresh plugin skills from the new binary.
+			// Refresh plugin skills from the new binary. --no-migrate: this runs
+			// unattended in the daemon's working tree, and the workflow migration
+			// (#2139) moves files and edits tracked stage YAML, which only an
+			// operator running `fabrik upgrade` by hand should do.
 			e.logf(0, "upgrade", "refreshing plugin skills\n")
-			upgradeCmd := exec.Command(exe, "upgrade")
+			upgradeCmd := exec.Command(exe, "upgrade", "--no-migrate")
 			upgradeCmd.Dir = dir
 			if out, err := upgradeCmd.CombinedOutput(); err != nil {
 				return fmt.Errorf("%w\n%s", err, out)
@@ -173,17 +180,25 @@ func (e *Engine) checkVersionSkew(ctx context.Context) {
 	key := "version_skew:" + exe
 
 	if diskVersion == running {
-		_ = warnings.Clear(key)
+		if err := warnings.Resolve(key); err != nil {
+			e.logf(0, "upgrade", "version-skew check: clearing warning: %v\n", err)
+		}
 		return
 	}
 
-	e.logf(0, "upgrade", "WARNING: on-disk binary version (%s) differs from running version (%s) — a pending upgrade may be stuck; restart with 'kill -HUP %d' to pick it up\n", diskVersion, running, os.Getpid())
-	_ = warnings.Record(warnings.Entry{
-		Key:       key,
-		Type:      "version_skew",
-		Title:     "Running version differs from on-disk binary",
-		Detail:    fmt.Sprintf("The daemon is running version %s but the binary on disk at %s reports %s. This can happen when an upgrade replaced the binary but the process failed to re-exec, or when another process replaced the binary externally.\n\nFix: kill -HUP %d (restarts in place, picking up the on-disk binary).", running, exe, diskVersion, os.Getpid()),
-		FixAction: "shell_command",
-		FixParams: map[string]string{"cmd": fmt.Sprintf("kill -HUP %d", os.Getpid())},
-	})
+	// The detail carries the PID (new on every restart), so the dismissal
+	// fingerprint is the pair of versions: a dismissed skew stays dismissed
+	// across restarts until the versions involved change.
+	if err := warnings.Report(e.warnWriter("upgrade"), warnings.Condition{
+		Type:        "version_skew",
+		Subject:     exe,
+		Fingerprint: running + "|" + diskVersion,
+		LogLine:     fmt.Sprintf("on-disk binary version (%s) differs from running version (%s) — a pending upgrade may be stuck; restart with 'kill -HUP %d' to pick it up", diskVersion, running, os.Getpid()),
+		Title:       "Running version differs from on-disk binary",
+		Detail:      fmt.Sprintf("The daemon is running version %s but the binary on disk at %s reports %s. This can happen when an upgrade replaced the binary but the process failed to re-exec, or when another process replaced the binary externally.\n\nFix: kill -HUP %d (restarts in place, picking up the on-disk binary).", running, exe, diskVersion, os.Getpid()),
+		FixAction:   "shell_command",
+		FixParams:   map[string]string{"cmd": fmt.Sprintf("kill -HUP %d", os.Getpid())},
+	}); err != nil {
+		e.logf(0, "upgrade", "version-skew check: recording warning: %v\n", err)
+	}
 }

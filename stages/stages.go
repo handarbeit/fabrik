@@ -7,8 +7,11 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/handarbeit/fabrik/plugin"
 )
 
 // Stage defines a single workflow stage and its Claude Code configuration.
@@ -23,10 +26,11 @@ type Stage struct {
 	// Optional when Skill is set — the skill provides the instructions.
 	Prompt string `yaml:"prompt,omitempty"`
 
-	// Skill names a Fabrik plugin skill (e.g., "fabrik-research") that Claude
-	// should follow for this stage. When set, the engine sends a directive
-	// prompt instead of the Prompt field. The skill must be installed in the
-	// user's Claude Code plugin configuration.
+	// Skill names the plugin skill Claude should follow for this stage, as
+	// "<plugin>:<skill>" (e.g., "fabrik-stages:research", or a project plugin's
+	// "myorg:review"). A bare name ("research") is deprecated: the engine
+	// qualifies it against the plugins loaded for the worker (ADR 2137). When
+	// set, the engine sends a directive prompt instead of the Prompt field.
 	Skill string `yaml:"skill,omitempty"`
 
 	// Model to use (e.g., "opus", "sonnet"). Optional.
@@ -291,6 +295,23 @@ func expectedReviewerNormalize(name string) string {
 	return strings.ToLower(name)
 }
 
+// validateSkillRef checks the shape of a skill reference: either a bare skill
+// name or "<plugin>:<skill>" (ADR 2137). Only the format is checked here;
+// whether the plugin is loaded is decided by the engine at startup and dispatch.
+func validateSkillRef(ref string) error {
+	if ref == "" {
+		return nil
+	}
+	if strings.IndexFunc(ref, unicode.IsSpace) >= 0 {
+		return fmt.Errorf("must not contain whitespace")
+	}
+	pn, skill, qualified := plugin.Split(ref)
+	if qualified && (pn == "" || skill == "") {
+		return fmt.Errorf("expected <plugin>%s<skill> with both parts non-empty", plugin.NamespaceSep)
+	}
+	return nil
+}
+
 // validateExpectedReviewers trims each declared identity and rejects any
 // entry that would not resolve as a live GitHub @mention (FR-8): empty after
 // trimming, a leading "@" (the declaration is a bare handle, not mention
@@ -354,6 +375,12 @@ func loadOne(path string) (*Stage, error) {
 			s.Completion.Type = "claude"
 		} else if s.Completion.Type != "claude" {
 			return nil, fmt.Errorf("stage %q: unsupported completion type %q (only \"claude\" is supported)", s.Name, s.Completion.Type)
+		}
+	}
+
+	for _, kv := range [][2]string{{"skill", s.Skill}, {"comment_skill", s.CommentSkill}, {"ci_fix_skill", s.CIFixSkill}, {"rebase_skill", s.RebaseSkill}} {
+		if err := validateSkillRef(kv[1]); err != nil {
+			return nil, fmt.Errorf("stage %q: invalid %s %q: %w", s.Name, kv[0], kv[1], err)
 		}
 	}
 
@@ -433,6 +460,25 @@ func FindStage(stages []*Stage, name string) *Stage {
 		}
 	}
 	return nil
+}
+
+// legacyParkingColumn is the board column name treated as an unmanaged parking
+// column on installs that predate stages/examples/backlog.yaml and so have no
+// Backlog stage configured.
+const legacyParkingColumn = "Backlog"
+
+// IsParkingColumn reports whether the board column name is an unmanaged
+// parking column — one Fabrik runs no workflow for. It is the single predicate
+// behind every such decision: a configured stage decides by its own Unmanaged
+// flag (so a configured Backlog stage that is not unmanaged keeps its
+// configured meaning), and a column with no stage is a parking column only when
+// it is the literal "Backlog" (case-sensitive), the compat net for installs that
+// ran `fabrik init` before backlog.yaml existed.
+func IsParkingColumn(stages []*Stage, name string) bool {
+	if s := FindStage(stages, name); s != nil {
+		return s.Unmanaged
+	}
+	return name == legacyParkingColumn
 }
 
 // IsFirstStage reports whether stageName is the first stage in the pipeline

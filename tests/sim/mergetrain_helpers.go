@@ -108,6 +108,15 @@ type mergeTrainEnvOptions struct {
 	// mergetrain_overlap_test.go opt in.
 	OverlapAware bool
 
+	// AsyncTrain switches the engine from the synchronous merge-train driver (one worker
+	// goroutine per episode, the shape every scenario that predates #2051 asserts on: a whole
+	// episode inside one poll) to the production, asynchronous one (#2051, ADR 2051): the
+	// worker exits once the trial PR is open, the trial's CI is evaluated per poll, and the
+	// persisted run record survives RestartEnv. Only mergetrain_resume_test.go opts in;
+	// both drivers execute the same state machine, which the synchronous scenarios and the
+	// engine's parity oracle pin.
+	AsyncTrain bool
+
 	// StatusLineField / StatusLineFieldMissing: see EnvOptions (#2048).
 	StatusLineField        string
 	StatusLineFieldMissing bool
@@ -199,6 +208,13 @@ func mergeTrainEnv(t *testing.T, opts mergeTrainEnvOptions) *Env {
 			}
 		},
 	})
+	if opts.AsyncTrain {
+		env.TrainStateDir = t.TempDir()
+		env.Engine.EnableTrainRunsForTest(env.TrainStateDir)
+	}
+	// Production (New) creates the reserved merge-train worker slot whenever
+	// merge_train is on (#2115); NewWithDeps does not by default, so enable it to match.
+	env.Engine.EnableTrainReservedSlotForTest()
 	env.Engine.SetTrainCIPollIntervalForTest(15 * time.Millisecond)
 	env.Engine.SetMergeTrainOverlapDisabledForTest(!opts.OverlapAware)
 	env.Engine.SetMergeTrainInvalidationDisabledForTest(!opts.OverlapAware)
@@ -219,6 +235,7 @@ func restartMergeTrainEnv(t *testing.T, env *Env) *Env {
 	t.Helper()
 	restarted := RestartEnv(t, env)
 	restarted.Engine.SetTrainCIPollIntervalForTest(15 * time.Millisecond)
+	restarted.Engine.EnableTrainReservedSlotForTest()
 	// As mergeTrainEnv: the restart scenarios predate #2047 and do not opt in.
 	restarted.Engine.SetMergeTrainOverlapDisabledForTest(true)
 	restarted.Engine.SetMergeTrainInvalidationDisabledForTest(true)

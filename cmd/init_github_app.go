@@ -98,8 +98,7 @@ type githubAppSetupResult struct {
 // githubAppSetupPermissions returns the permission set runGitHubAppSetup
 // verifies (the engine's own startup rule, so init never accepts an
 // installation the engine would then refuse) and the set it puts in a new
-// App's manifest — always including contents:write (and the optional
-// permissions, #2052), since the App outlives
+// App's manifest — always including contents:write, since the App outlives
 // this machine's git transport and HTTPS is the default (#1846). On the
 // adopt path the manifest set is never sent anywhere, so it equals verify.
 func githubAppSetupPermissions(opts githubAppSetupOptions) (verify, manifest map[string]string, httpsGit bool) {
@@ -108,11 +107,6 @@ func githubAppSetupPermissions(opts githubAppSetupOptions) (verify, manifest map
 	manifest = verify
 	if opts.AppID == 0 {
 		manifest = engine.RequiredGitHubAppPermissionsForGit(opts.Webhooks, true)
-		// #2052: a new App also asks for the optional permissions (never verified,
-		// never required — see engine.OptionalGitHubAppPermissions).
-		for k, v := range engine.OptionalGitHubAppPermissions() {
-			manifest[k] = v
-		}
 	}
 	return verify, manifest, httpsGit
 }
@@ -254,35 +248,22 @@ func runGitHubAppSetup(ctx context.Context, opts githubAppSetupOptions) (*github
 	}
 	if len(shortfalls) > 0 {
 		// R5: a permission change never reaches an already-installed
-		// installation automatically — name the per-installation approval
-		// page rather than appearing to succeed.
-		approvalURL := fmt.Sprintf("https://github.com/settings/installations/%d", installationID)
+		// installation automatically — name the manual steps (#2105) rather
+		// than appearing to succeed.
+		slug := strings.TrimSuffix(reconciler.BotLogin(), "[bot]")
 		hint := ""
 		for _, sf := range shortfalls {
 			if sf.Permission == "contents" && httpsGit {
 				// An App created before #1846 never requested contents:write,
 				// so there is nothing to approve until the App itself asks.
-				slug := strings.TrimSuffix(reconciler.BotLogin(), "[bot]")
-				hint = fmt.Sprintf(" (contents:write is needed because git runs over HTTPS as the installation — "+
-					"if the App does not request it yet, set Contents to \"Read and write\" at "+
-					"https://github.com/organizations/%s/settings/apps/%s/permissions first; or set git_ssh: true "+
-					"in .fabrik/config.yaml to keep using your SSH key)", opts.Owner, slug)
+				hint = " (contents:write is needed because git runs over HTTPS as the installation; " +
+					"alternatively set git_ssh: true in .fabrik/config.yaml to keep using your SSH key)"
 			}
 		}
-		return nil, fmt.Errorf("GitHub App installation %d is missing required permissions: %s%s — approve the "+
-			"permission change at %s (an org admin may be required), then re-run `fabrik init --github-app`",
-			installationID, engine.FormatPermissionShortfalls(shortfalls), hint, approvalURL)
-	}
-
-	// Optional permissions (#2071): advisory only, never fails init.
-	optShortfalls, err := reconciler.VerifyGrants(engine.OptionalGitHubAppPermissions())
-	if err != nil {
-		fmt.Printf("  github-app: warning: could not check optional permissions: %v\n", err)
-	} else {
-		slug := strings.TrimSuffix(reconciler.BotLogin(), "[bot]")
-		for _, n := range engine.OptionalPermissionNotices(optShortfalls, opts.Owner, slug, installationID) {
-			fmt.Printf("  github-app: %s\n", n)
-		}
+		return nil, fmt.Errorf("GitHub App installation %d is missing required permissions: %s%s%s\n"+
+			"then re-run `fabrik init --github-app`",
+			installationID, engine.FormatPermissionShortfalls(shortfalls), hint,
+			engine.PermissionShortfallRemedy(shortfalls, opts.Owner, slug, installationID))
 	}
 
 	fmt.Printf("  github-app: authenticated as %s (installation %d, organization %q)\n", reconciler.BotLogin(), installationID, opts.Owner)

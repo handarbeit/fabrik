@@ -248,7 +248,7 @@ func TestMergeTrainCIInfra_PersistentStartupFailureAbandonedUncharged(t *testing
 	}
 }
 
-// A refused workflow-run read (the optional Actions permission is absent)
+// A refused workflow-run read (the Actions permission was revoked at runtime)
 // leaves the pre-#2052 behaviour: the trial polls on, the dead run is invisible.
 func TestMergeTrainCIInfra_PermissionRefusedDegradesQuietly(t *testing.T) {
 	t.Parallel()

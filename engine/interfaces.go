@@ -62,9 +62,10 @@ type GitHubClient interface {
 	FetchCheckRuns(owner, repo, sha string) ([]gh.CheckRun, error)
 	FetchCombinedStatus(owner, repo, ref string) ([]gh.CommitStatus, error)
 	FetchCheckSuites(owner, repo, sha string) ([]gh.CheckSuite, error)
-	// FetchWorkflowRuns / RerunFailedJobs (#2052) need the optional `actions`
-	// permission; a refusal (gh.ErrForbidden / gh.ErrNotFound) must be
-	// degraded to the pre-#2052 behaviour by the caller, never fatal.
+	// FetchWorkflowRuns / RerunFailedJobs (#2052) need the `actions`
+	// permission (required at startup since #2105); a refusal at runtime
+	// (revocation: gh.ErrForbidden / gh.ErrNotFound) must be degraded to the
+	// pre-#2052 behaviour by the caller, never fatal.
 	FetchWorkflowRuns(owner, repo, sha string) ([]gh.WorkflowRun, error)
 	RerunFailedJobs(owner, repo string, runID int64) error
 	FetchPRClosingIssues(owner, repo string, prNumber int) ([]int, error)
@@ -131,6 +132,12 @@ type InvokeOptions struct {
 	// OnPIDReady, if non-nil, is called once after cmd.Start() with the Claude subprocess PID.
 	// Used by the heartbeat/liveness system to record the PID in the store.
 	OnPIDReady func(pid int)
+	// OnTurn, if non-nil, is called with the running turn count and the invocation's
+	// effective turn budget after each logical turn (#2121), and once with turns == 0 when
+	// the invocation starts (so a previous invocation's count is not carried over). The
+	// engine wires it to a store write so status can report a live worker's turns; nil
+	// leaves them unknown.
+	OnTurn func(turns, budget int)
 	// CorrectiveHint, when non-empty, is prepended to the prompt as a callout (#1146).
 	// Set by consumeStallHint when a stall was detected on the stage's previous
 	// incomplete attempt (a turn-capped run followed by one using fewer turns).

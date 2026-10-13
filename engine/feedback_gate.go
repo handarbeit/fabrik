@@ -24,6 +24,10 @@ type pendingFeedback struct {
 	// Live is false when any read backing the answer failed, so "nothing found"
 	// cannot be trusted.
 	Live bool
+	// DispatcherGap is the subset of Threads and Bodies the dispatcher's own
+	// cache-sourced view of the item lacks (#2160). Non-empty means the board
+	// cache is lagging GitHub and Phase 1 cannot dispatch what the gate holds on.
+	DispatcherGap []gh.Comment
 }
 
 func (p pendingFeedback) empty() bool {
@@ -43,6 +47,7 @@ func (p pendingFeedback) empty() bool {
 // empty). Any read error yields Live=false.
 func (e *Engine) unprocessedFeedback(item gh.ProjectItem, alreadyLive bool) pendingFeedback {
 	pf := pendingFeedback{Live: true}
+	orig := item
 	if !alreadyLive {
 		fresh := item
 		if err := e.client.FetchItemDetails(&fresh); err != nil {
@@ -65,6 +70,7 @@ func (e *Engine) unprocessedFeedback(item gh.ProjectItem, alreadyLive bool) pend
 	threads, reviews := e.dropCatchUpFeedback(item, e.currentHeadReviewThreadComments(item), reviews)
 	pf.Threads = threads
 	pf.Bodies = e.buildReviewBodyCommentsFromReviews(item, reviews)
+	pf.DispatcherGap = e.dispatcherGap(orig, pf)
 	return pf
 }
 
@@ -80,6 +86,11 @@ func (e *Engine) unprocessedFeedback(item gh.ProjectItem, alreadyLive bool) pend
 // bounds: the held feedback is dispatched through the ordinary paths, under
 // MaxReviewCycles, the no-op and frequency comment breakers and the #1555
 // marker, so feedback that can never be satisfied ends in a pause, not a loop.
+// That promise only holds if the dispatcher can see what the gate sees: the gate
+// reads live while Phase 1 reads the board cache, which an engine self-write can
+// mask (#2160, ADR 2160). When the gate holds on review feedback the dispatcher's
+// view lacks, repairDispatcherBlindness invalidates the cache and forces the next
+// admission — bounded, and the gate keeps holding either way.
 //
 // On a hold it records a "feedback-pending" cooldown, mirroring handleReviewGate's
 // "review-blocked", so itemMayNeedWork's expiry path re-evaluates the item every
@@ -87,12 +98,16 @@ func (e *Engine) unprocessedFeedback(item gh.ProjectItem, alreadyLive bool) pend
 func (e *Engine) feedbackGateBlocks(item gh.ProjectItem, alreadyLive bool, where string) bool {
 	pf := e.unprocessedFeedback(item, alreadyLive)
 	if pf.empty() && pf.Live {
+		e.noteGateClear(item, gateFeedback)
 		return false
 	}
 	if pf.empty() {
 		e.logf(item.Number, "feedback-gate", "holding %s — live feedback read failed, feedback state unknown\n", where)
+		e.noteGateHold(item, gateFeedback, "live feedback read failed, feedback state unknown", nil)
 	} else {
-		e.logf(item.Number, "feedback-gate", "holding %s — %s\n", where, describePendingFeedback(pf))
+		reason := describePendingFeedback(pf)
+		e.logf(item.Number, "feedback-gate", "holding %s — %s\n", where, reason)
+		e.noteGateHold(item, gateFeedback, reason, pendingFeedbackIDs(pf))
 	}
 	e.store.Apply(itemstate.CooldownRecorded{
 		Repo:   itemOwnerRepoString(item, e.defaultRepo()),
@@ -100,6 +115,9 @@ func (e *Engine) feedbackGateBlocks(item gh.ProjectItem, alreadyLive bool, where
 		Reason: "feedback-pending",
 		Until:  e.now().Add(e.githubRecheckInterval()),
 	})
+	if len(pf.DispatcherGap) > 0 {
+		e.repairDispatcherBlindness(item, pf.DispatcherGap)
+	}
 	return true
 }
 
@@ -121,6 +139,19 @@ func describePendingFeedback(pf pendingFeedback) string {
 		parts = append(parts, fmt.Sprintf("%d unprocessed %s (%s)", n, noun, feedbackIDs(pf.Bodies)))
 	}
 	return strings.Join(parts, ", ")
+}
+
+// pendingFeedbackIDs lists every pending feedback identifier, in the order
+// describePendingFeedback names them, for the item-wedged event (#2170).
+func pendingFeedbackIDs(pf pendingFeedback) []string {
+	var ids []string
+	for _, group := range [][]gh.Comment{pf.Comments, pf.Threads, pf.Bodies} {
+		if len(group) == 0 {
+			continue
+		}
+		ids = append(ids, strings.Split(feedbackIDs(group), ", ")...)
+	}
+	return ids
 }
 
 // feedbackIDs lists comment identifiers for logging: the numeric database ID

@@ -772,31 +772,31 @@ func TestUpdateLayout_AlertBannerHeightBudget(t *testing.T) {
 	}
 }
 
-// TestUpdate_ClaudeUsageLimitAlertEvent_Suspended verifies that after
-// receiving a ClaudeUsageLimitAlertEvent{Suspended: true}, the usage-limit
+// TestUpdate_ClaudeUsageLimitAlertEvent_UsageLimited verifies that after
+// receiving a ClaudeUsageLimitAlertEvent{UsageLimited: true}, the usage-limit
 // banner becomes active and visible — mirrors
 // TestUpdate_RateLimitAlertEvent_Exhausted, but for the distinct
-// account-wide Claude suspension condition (ADR-1120).
-func TestUpdate_ClaudeUsageLimitAlertEvent_Suspended(t *testing.T) {
+// account-wide Claude usage-limit hold condition (ADR-1120).
+func TestUpdate_ClaudeUsageLimitAlertEvent_UsageLimited(t *testing.T) {
 	m := New(30, ProjectInfo{}, "", nil, nil, 0, false)
 	reset := time.Now().Add(time.Hour)
 
-	next, _ := m.Update(ClaudeUsageLimitAlertEvent{Suspended: true, Reset: reset})
+	next, _ := m.Update(ClaudeUsageLimitAlertEvent{UsageLimited: true, Reset: reset})
 	m = next.(Model)
 
 	if !m.usageLimit.active {
-		t.Error("expected usageLimit.active=true after ClaudeUsageLimitAlertEvent{Suspended: true}")
+		t.Error("expected usageLimit.active=true after ClaudeUsageLimitAlertEvent{UsageLimited: true}")
 	}
 	if !m.usageLimit.reset.Equal(reset) {
 		t.Errorf("expected usageLimit.reset=%v, got %v", reset, m.usageLimit.reset)
 	}
 	if !m.usageLimit.isVisible() {
-		t.Error("expected usage-limit banner to be visible after Suspended=true event")
+		t.Error("expected usage-limit banner to be visible after UsageLimited=true event")
 	}
 }
 
 // TestUpdate_ClaudeUsageLimitAlertEvent_Cleared verifies that after receiving
-// a ClaudeUsageLimitAlertEvent{Suspended: false}, the banner's active flag is
+// a ClaudeUsageLimitAlertEvent{UsageLimited: false}, the banner's active flag is
 // cleared and it stops being visible — mirrors
 // TestUpdate_RateLimitAlertEvent_Recovered.
 func TestUpdate_ClaudeUsageLimitAlertEvent_Cleared(t *testing.T) {
@@ -804,27 +804,27 @@ func TestUpdate_ClaudeUsageLimitAlertEvent_Cleared(t *testing.T) {
 	m.usageLimit.active = true
 	m.usageLimit.reset = time.Now().Add(time.Hour)
 
-	next, _ := m.Update(ClaudeUsageLimitAlertEvent{Suspended: false})
+	next, _ := m.Update(ClaudeUsageLimitAlertEvent{UsageLimited: false})
 	m = next.(Model)
 
 	if m.usageLimit.active {
-		t.Error("expected usageLimit.active=false after ClaudeUsageLimitAlertEvent{Suspended: false}")
+		t.Error("expected usageLimit.active=false after ClaudeUsageLimitAlertEvent{UsageLimited: false}")
 	}
 	if m.usageLimit.isVisible() {
-		t.Error("expected usage-limit banner to be hidden after Suspended=false event")
+		t.Error("expected usage-limit banner to be hidden after UsageLimited=false event")
 	}
 }
 
 // TestClaudeUsageLimitBanner_SelfClearsOnTickPastReset verifies that the
 // banner stops rendering once a TickEvent's At time reaches or passes the
-// computed reset, even with no explicit Suspended=false event — the
+// computed reset, even with no explicit UsageLimited=false event — the
 // cosmetic self-clear behavior documented on
 // ClaudeUsageLimitBannerComponent.isVisible.
 func TestClaudeUsageLimitBanner_SelfClearsOnTickPastReset(t *testing.T) {
 	m := New(30, ProjectInfo{}, "", nil, nil, 0, false)
 	reset := time.Now().Add(time.Hour)
 
-	next, _ := m.Update(ClaudeUsageLimitAlertEvent{Suspended: true, Reset: reset})
+	next, _ := m.Update(ClaudeUsageLimitAlertEvent{UsageLimited: true, Reset: reset})
 	m = next.(Model)
 	if !m.usageLimit.isVisible() {
 		t.Fatal("precondition: banner should be visible right after activation")
@@ -1225,17 +1225,18 @@ func TestUpdate_UKey_WhenStale_SetsConfirmUpgrade(t *testing.T) {
 	if !nm.confirmUpgrade {
 		t.Error("expected confirmUpgrade=true after pressing u with stale skills")
 	}
-	if !strings.Contains(nm.header.statusMsg, "3") {
-		t.Errorf("statusMsg should mention file count, got %q", nm.header.statusMsg)
+	if !strings.Contains(bannerText(nm), "Upgrade 3 plugin file(s)?") {
+		t.Errorf("banner should mention file count, got %q", bannerText(nm))
 	}
 }
 
 // TestUpdate_TickEvent_ConfirmUpgrade_PromptPersists verifies that the upgrade
-// confirmation prompt is re-shown after a TickEvent clears statusMsg.
+// confirmation prompt stays visible across a TickEvent (it is derived, not a
+// status message the tick can clear).
 func TestUpdate_TickEvent_ConfirmUpgrade_PromptPersists(t *testing.T) {
 	m := New(30, ProjectInfo{}, "", nil, nil, 2, false)
-	m.confirmUpgrade = true
-	m.header.SetStatusMsg("Upgrade 2 plugin file(s)? Active invocations pick up changes on next run. [y/N]")
+	m.width, m.height = 80, 24
+	m.armConfirm(confirmKindUpgrade)
 
 	next, _ := m.Update(TickEvent{At: time.Now()})
 	nm := next.(Model)
@@ -1243,11 +1244,8 @@ func TestUpdate_TickEvent_ConfirmUpgrade_PromptPersists(t *testing.T) {
 	if !nm.confirmUpgrade {
 		t.Error("expected confirmUpgrade still true after tick")
 	}
-	if nm.header.statusMsg == "" {
-		t.Error("expected prompt to be re-shown after tick cleared statusMsg")
-	}
-	if !strings.Contains(nm.header.statusMsg, "2") {
-		t.Errorf("re-shown prompt should mention file count, got %q", nm.header.statusMsg)
+	if !strings.Contains(bannerText(nm), "Upgrade 2 plugin file(s)?") {
+		t.Errorf("prompt should stay visible after tick, got %q", bannerText(nm))
 	}
 }
 
@@ -1437,14 +1435,11 @@ func TestUKey_CustomWorkflow(t *testing.T) {
 	if !nm.confirmReconcile {
 		t.Error("expected confirmReconcile=true after u key with customWorkflow")
 	}
-	if !strings.Contains(nm.header.statusMsg, "[1]") {
-		t.Errorf("statusMsg should show 3-option dialog, got %q", nm.header.statusMsg)
-	}
-	if !strings.Contains(nm.header.statusMsg, "[2]") {
-		t.Errorf("statusMsg should show overwrite option, got %q", nm.header.statusMsg)
-	}
-	if !strings.Contains(nm.header.statusMsg, "[3]") {
-		t.Errorf("statusMsg should show cancel option, got %q", nm.header.statusMsg)
+	b := bannerText(nm)
+	for _, want := range []string{"[1]", "[2]", "[3]"} {
+		if !strings.Contains(b, want) {
+			t.Errorf("banner should show option %s, got %q", want, b)
+		}
 	}
 }
 
@@ -1463,14 +1458,15 @@ func TestUKey_CustomWorkflowAndStale(t *testing.T) {
 	if !nm.confirmReconcile {
 		t.Error("expected confirmReconcile=true after u key with customWorkflow")
 	}
-	if !strings.Contains(nm.header.statusMsg, "3") {
-		t.Errorf("statusMsg should name the stale count, got %q", nm.header.statusMsg)
+	b := bannerText(nm)
+	if !strings.Contains(b, "3 skill file(s)") {
+		t.Errorf("banner should name the stale count, got %q", b)
 	}
-	if !strings.Contains(nm.header.statusMsg, "stale") {
-		t.Errorf("statusMsg should mention staleness, got %q", nm.header.statusMsg)
+	if !strings.Contains(b, "stale") {
+		t.Errorf("banner should mention staleness, got %q", b)
 	}
-	if !strings.Contains(nm.header.statusMsg, "[1]") || !strings.Contains(nm.header.statusMsg, "[2]") || !strings.Contains(nm.header.statusMsg, "[3]") {
-		t.Errorf("statusMsg should still show the reconcile/overwrite/cancel dialog, got %q", nm.header.statusMsg)
+	if !strings.Contains(b, "[1]") || !strings.Contains(b, "[2]") || !strings.Contains(b, "[3]") {
+		t.Errorf("banner should still show the reconcile/overwrite/cancel dialog, got %q", b)
 	}
 }
 
@@ -1512,8 +1508,8 @@ func TestUKey_CustomWorkflow_Key2_EntersConfirmOverwrite(t *testing.T) {
 	if !nm.confirmOverwrite {
 		t.Error("expected confirmOverwrite=true after [2]")
 	}
-	if !strings.Contains(nm.header.statusMsg, "OVERWRITE") {
-		t.Errorf("statusMsg should prompt for OVERWRITE, got %q", nm.header.statusMsg)
+	if !strings.Contains(bannerText(nm), "Type 'OVERWRITE' to confirm") {
+		t.Errorf("banner should prompt for OVERWRITE, got %q", bannerText(nm))
 	}
 }
 
@@ -1631,11 +1627,11 @@ func TestUpdate_SkillsStaleEvent_Zero_PreservesCustomWorkflow(t *testing.T) {
 }
 
 // TestUpdate_TickEvent_ConfirmReconcile_PromptPersists verifies the reconcile
-// dialog prompt is re-shown after a TickEvent clears statusMsg.
+// dialog prompt stays visible across a TickEvent.
 func TestUpdate_TickEvent_ConfirmReconcile_PromptPersists(t *testing.T) {
 	m := New(30, ProjectInfo{}, "", nil, nil, 0, true)
-	m.confirmReconcile = true
-	m.header.SetStatusMsg("[1] Reconcile  [2] Overwrite  [3] Cancel")
+	m.width, m.height = 80, 24
+	m.armConfirm(confirmKindReconcile)
 
 	next, _ := m.Update(TickEvent{At: time.Now()})
 	nm := next.(Model)
@@ -1643,8 +1639,8 @@ func TestUpdate_TickEvent_ConfirmReconcile_PromptPersists(t *testing.T) {
 	if !nm.confirmReconcile {
 		t.Error("expected confirmReconcile still true after tick")
 	}
-	if nm.header.statusMsg == "" {
-		t.Error("expected dialog prompt to be re-shown after tick")
+	if !strings.Contains(bannerText(nm), "[1] Reconcile via Claude Code") {
+		t.Errorf("expected dialog prompt to stay visible after tick, got %q", bannerText(nm))
 	}
 }
 

@@ -35,6 +35,12 @@ type eventIngestionManager interface {
 	// implementations are no-ops (see the type doc above).
 	RegisterEcho(eventType, action, key string)
 	RegisterEchoIfSubscribed(eventType, action, key string)
+	// RegisterEchoIfSubscribedVia is RegisterEchoIfSubscribed recording the
+	// overseer requester behind a board column move (#2123); a no-op on hookdeck.
+	RegisterEchoIfSubscribedVia(eventType, action, key, requester string)
+	// RegisterEchoVia is RegisterEcho recording the overseer requester behind
+	// the write (#2125); a no-op on hookdeck, like RegisterEcho.
+	RegisterEchoVia(eventType, action, key, requester string)
 	MatchEcho(eventType, action, key string)
 }
 

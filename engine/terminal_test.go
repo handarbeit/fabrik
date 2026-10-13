@@ -697,7 +697,7 @@ func TestSeedTerminalFromProbeItems_SC5(t *testing.T) {
 // ---- stage-membership guard tests ----
 
 // TestRunProbeAndDeepFetch_UnconfiguredColumn_ColdCache_SkipsDeepFetch verifies
-// that a probe item in an unconfigured board column (e.g. "Backlog") does not
+// that a probe item in an unconfigured board column (e.g. "Mystery") does not
 // trigger FetchItemDetails when the item is not yet in the store (cold cache /
 // new-item path). The item must still appear in newKeys so it is not tombstoned.
 func TestRunProbeAndDeepFetch_UnconfiguredColumn_ColdCache_SkipsDeepFetch(t *testing.T) {
@@ -711,7 +711,7 @@ func TestRunProbeAndDeepFetch_UnconfiguredColumn_ColdCache_SkipsDeepFetch(t *tes
 					Status: "Research", EffectiveUpdatedAt: time.Now()},
 				// Unconfigured column item (must NOT be deep-fetched).
 				{ItemID: "PVTI_002", ContentID: "I_002", Number: 2, Repo: "owner/repo",
-					Status: "Backlog", EffectiveUpdatedAt: time.Now()},
+					Status: "Mystery", EffectiveUpdatedAt: time.Now()},
 			}, "PVT_1", nil
 		},
 		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
@@ -732,9 +732,46 @@ func TestRunProbeAndDeepFetch_UnconfiguredColumn_ColdCache_SkipsDeepFetch(t *tes
 		t.Errorf("expected exactly 1 FetchItemDetails call (for Research item); got %d", deepFetchCalls)
 	}
 
-	// The Backlog item must NOT be in the store (guard fired before IssueOpened).
+	// The Mystery item must NOT be in the store (guard fired before IssueOpened).
 	if _, err := eng.store.Get("owner/repo", 2); err == nil {
-		t.Error("Backlog item should not be seeded into the store (guard must fire before IssueOpened)")
+		t.Error("Mystery item should not be seeded into the store (guard must fire before IssueOpened)")
+	}
+}
+
+// TestRunProbeAndDeepFetch_LegacyBacklog_ColdCache_SeedsWithoutDeepFetch pins the
+// #2187 change: a column literally named Backlog with no configured stage
+// (installs that predate backlog.yaml) is a parking column per
+// stages.IsParkingColumn, so a new card there is seeded (no deep fetch, no
+// labels) exactly as an unmanaged stage's card is.
+func TestRunProbeAndDeepFetch_LegacyBacklog_ColdCache_SeedsWithoutDeepFetch(t *testing.T) {
+	var deepFetchCalls int
+	client := &mockGitHubClient{
+		probeProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) ([]gh.BoardProbeItem, string, error) {
+			return []gh.BoardProbeItem{
+				{ItemID: "PVTI_002", ContentID: "I_002", Number: 2, Repo: "owner/repo",
+					Status: "Backlog", EffectiveUpdatedAt: time.Now()},
+			}, "PVT_1", nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			deepFetchCalls++
+			return nil
+		},
+	}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
+	eng.readClient = cache
+
+	eng.runProbeAndDeepFetch(cache)
+
+	if deepFetchCalls != 0 {
+		t.Errorf("a parking-column card must not be deep-fetched; got %d calls", deepFetchCalls)
+	}
+	snap, err := eng.store.Get("owner/repo", 2)
+	if err != nil {
+		t.Fatalf("legacy Backlog card should be seeded into the store: %v", err)
+	}
+	if snap.State().LabelsKnown {
+		t.Error("a probe-seeded parking card carries no labels")
 	}
 }
 
@@ -818,8 +855,18 @@ func TestRunProbeAndDeepFetch_UnmanagedStage_ColdCache_SkipsDeepFetch(t *testing
 		t.Errorf("expected exactly 1 FetchItemDetails call (for Research item); got %d", deepFetchCalls)
 	}
 
-	if _, err := eng.store.Get("owner/repo", 2); err == nil {
-		t.Error("Backlog item should not be seeded into the store (unmanaged guard must fire before IssueOpened)")
+	// #2123: a parking-column card is seeded (identity + column only) so a later
+	// hand move out of it is a real column change, but it is never deep-fetched
+	// and carries no labels (the first label-bearing population is the baseline).
+	snap, ok := eng.store.Peek("owner/repo", 2)
+	if !ok {
+		t.Fatal("Backlog item should be seeded with its identity and column (#2123)")
+	}
+	if snap.Status() != "Backlog" {
+		t.Errorf("seeded Backlog item Status = %q, want Backlog", snap.Status())
+	}
+	if len(snap.Labels()) != 0 {
+		t.Errorf("seeded Backlog item must carry no labels, got %v", snap.Labels())
 	}
 }
 

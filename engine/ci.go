@@ -463,11 +463,24 @@ type checkRunAnnotationFetcher interface {
 // error is logged and the prompt degrades to the check name and conclusion.
 // Returns "" or a string beginning with a newline.
 func (e *Engine) ciFailureDetail(item gh.ProjectItem, owner, repo string, cr gh.CheckRun) string {
+	return e.checkRunFailureDetail(item, "ci-fix-reinvoke", owner, repo, cr, true)
+}
+
+// checkRunFailureDetail is ciFailureDetail with the log tag supplied by the
+// caller, so the ci-status.md writer (#2116) shares the CI-fix prompt's
+// annotation rendering and bounds (ADR-1991) rather than keeping a second set.
+//
+// fetchAnnotations false skips the annotation read (one REST call) and renders
+// only what the check run itself carries.
+func (e *Engine) checkRunFailureDetail(item gh.ProjectItem, logTag, owner, repo string, cr gh.CheckRun, fetchAnnotations bool) string {
 	var parts []string
-	if f, ok := e.client.(checkRunAnnotationFetcher); ok && cr.ID != 0 {
+	if t := strings.TrimSpace(cr.OutputTitle); t != "" {
+		parts = append(parts, "title: "+truncateMiddle(t, ciFixAnnotationMax, ciFixAnnotationMax*3/4, ciFixAnnotationMax/4))
+	}
+	if f, ok := e.client.(checkRunAnnotationFetcher); ok && cr.ID != 0 && fetchAnnotations {
 		anns, err := f.FetchCheckRunAnnotations(owner, repo, cr.ID)
 		if err != nil {
-			e.logf(item.Number, "ci-fix-reinvoke", "warn: could not fetch annotations for check %q (run %d): %v\n", cr.Name, cr.ID, err)
+			e.logf(item.Number, logTag, "warn: could not fetch annotations for check %q (run %d): %v\n", cr.Name, cr.ID, err)
 		}
 		generic := []string{}
 		n := 0
@@ -630,7 +643,8 @@ func (e *Engine) dispatchCIFixReinvoke(ctx context.Context, board *gh.ProjectBoa
 	var headBefore string
 
 	e.dispatchReinvoke(ctx, board, item, stage, reinvokeOpts{
-		tag: "ci-fix-reinvoke",
+		tag:  "ci-fix-reinvoke",
+		kind: itemstate.WorkerKindCIFixReinvoke,
 		// #1812: refunded by dispatchReinvoke when the invocation provably never
 		// ran; the after hook (and its no-op-SHA debounce) is skipped then.
 		cycle: cycleCharge{

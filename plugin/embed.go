@@ -7,10 +7,17 @@ import "embed"
 // pipeline stages).
 //
 // `fabrik init` extracts these files to .fabrik/plugin/ in the current project,
-// and `fabrik upgrade` overwrites that directory from the embedded copy. The
-// engine then passes `--plugin-dir .fabrik/plugin/` to every worker invocation.
-// This is distinct from the user-facing `fabrik` plugin (plugin/fabrik/) which
-// is installed via Claude Code's plugin marketplace, not embedded.
+// and `fabrik upgrade` refreshes that directory from the embedded copy — after
+// first moving any operator-edited copy to .fabrik/plugins/local-workflows
+// (#2139, ADR 2139), so the base is always Fabrik's own. The engine then passes
+// `--plugin-dir .fabrik/plugin/` (plus local-workflows when it exists, and one
+// `--plugin-dir` per configured `plugin_dirs` entry, ADR 2136) to every worker
+// invocation.
+// This is distinct from the user-facing `fabrik` plugin (plugin/fabrik/): that
+// one is never embedded or loaded into workers (the engine disables it with
+// --settings, ADR 2140). It is installed via Claude Code's plugin marketplace,
+// bundles the `fabrik mcp` server and a session-start version check, and is
+// versioned and pinned with each release (ADR 2141).
 //
 //go:embed fabrik-workflows/.claude-plugin/plugin.json
 //go:embed fabrik-workflows/README.md

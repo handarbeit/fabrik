@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/handarbeit/fabrik/internal/attention"
@@ -23,7 +24,7 @@ import (
 //   - explicit, nil-safe emitEvent calls at engine transition points that have
 //     no store signal of their own;
 //   - a ticker for the time-driven events (stalled, a lazily lifted Claude
-//     suspension).
+//     usage-limit hold).
 //
 // Zero-GitHub-cost rule (R9) and observation-only rule (R10): nothing here
 // reaches GitHub — no e.client/e.readClient, no Store.Get (it has a GitHub
@@ -57,6 +58,13 @@ type itemMemo struct {
 	near map[string]bool
 	// lastComment is the comment link the previous event for this item carried.
 	lastComment string
+	// dp is the open decision-pending episode, if any (channel_decision.go);
+	// dpSeen is when the item was first seen suspended without an exact GitHub
+	// time (real time), for decisionAnchorGrace.
+	dp     *decisionEpisode
+	dpSeen time.Time
+	// rebaseSeen mirrors dirtyItem.rebaseSeen for the evaluation in progress.
+	rebaseSeen bool
 }
 
 // dirtyItem is a pending debounced re-evaluation.
@@ -66,6 +74,11 @@ type dirtyItem struct {
 	// staleCandidate is set when an invocation was recorded while
 	// fabrik:awaiting-input was present at that moment.
 	staleCandidate bool
+	// rebaseSeen is set when fabrik:rebase-needed was applied to the item since
+	// the last evaluation, even if it was removed again before this one ran (the
+	// engine applies it and dispatches the rebase within one pass), so a
+	// withdrawal is attributed to the rebase rather than to the worker it caused.
+	rebaseSeen bool
 }
 
 type channelEvents struct {
@@ -79,12 +92,54 @@ type channelEvents struct {
 	// "gates clear" point (runCatchUpPhase2) since the last drain.
 	settleCand map[string]settleCandidate
 	// nudge asks the consumer to re-check account-wide state (the Claude
-	// usage-limit suspension) without waiting for the next tick.
+	// usage-limit hold) without waiting for the next tick.
 	nudge bool
+	// arrivals are items created after the board was populated that have not been
+	// announced yet (key → when noted); each is held until the item's labels are
+	// known and it carries a board Status, so item-added never reports an empty
+	// label set (FR-005). landings are items whose landing was announced by
+	// emitLanded (#2123). Both guarded by mu; see channel_lifecycle.go.
+	arrivals map[string]time.Time
+	landings map[string]time.Time
 
 	// consumer-owned (no lock): only run() touches these.
 	memo          map[string]*itemMemo
 	claudeLimited bool
+	// pollEp / partEp are the open pipeline stall episodes (#2124); in memory
+	// only, so a still-stalled daemon re-raises after a restart.
+	pollEp stallEpisode
+	partEp map[string]*stallEpisode
+	// episodeSeq numbers pipeline stall episodes for their dedup keys.
+	episodeSeq uint64
+
+	// sitEval is when each subscriber's situation cadence last evaluated
+	// (#2171); consumer-owned.
+	sitEval map[string]time.Time
+
+	// anom is the retry/wedge episode memory and the divergence ledger
+	// (#2170); it has its own mutex because hooks and the observer write it.
+	anom anomalyState
+
+	// ledger is the persisted last-observed per-item state a restart diffs its
+	// first observation against (#2169); nil when it could not be opened.
+	ledger *channelevents.Ledger
+	// ready is false from start until the readiness pass has queued the restart
+	// catch-up (see channel_downtime.go); readyBy is the real-time deadline.
+	ready   atomic.Bool
+	readyBy time.Time
+	// dmu guards the downtime-diff bookkeeping: looked/pend (first-observation
+	// state per item) and warmBuf (deltas held back until the catch-up is queued).
+	dmu     sync.Mutex
+	looked  map[string]bool
+	pend    map[string]*priorEntry
+	warmBuf []channelevents.Event
+	// unpub holds the items with a downtime delta still in warmBuf: the ledger
+	// does not follow them until the delta is published, so a hard kill while
+	// warming leaves the old record to be diffed again by the next start.
+	unpub map[string]bool
+	// autonomy is who last wrote each item's fabrik:cruise / fabrik:yolo label,
+	// for the cause of a re-settle (also under dmu).
+	autonomy map[string]autonomyActor
 
 	wake  chan struct{}
 	stop  chan struct{}
@@ -103,14 +158,21 @@ func channelStateDir(fabrikDir string) string {
 // the observer and starts the consumer. Failure is non-fatal: without a hub the
 // read API keeps working and push is simply off.
 func (e *Engine) startChannelEvents() {
-	e.startChannelEventsIn(channelStateDir(e.fabrikDir))
+	e.startChannelEventsIn(channelStateDir(e.fabrikDir), true)
 }
 
-func (e *Engine) startChannelEventsIn(dir string) {
+// startChannelEventsIn starts the hub under dir. warming is true in production:
+// every daemon start is a restart, so the first catch-up waits for the readiness
+// pass (channel_downtime.go) and downtime deltas are held until it has run. The
+// test seam StartChannelEventsForTest passes false (ready at once, no restart
+// catch-up); StartChannelEventsWarmingForTest passes true.
+func (e *Engine) startChannelEventsIn(dir string, warming bool) {
 	hub, err := channelevents.Open(channelevents.Options{
 		Dir:     dir,
 		HeldMax: e.cfg.ChannelHeldMax,
-		Now:     e.now,
+		// Zero keeps the production floor; the test seam shortens it.
+		MinSituation: time.Duration(situationMinOverride.Load()),
+		Now:          e.now,
 		Logf: func(format string, args ...any) {
 			e.logf(0, "channel", format, args...)
 		},
@@ -120,13 +182,23 @@ func (e *Engine) startChannelEventsIn(dir string) {
 		return
 	}
 	ce := &channelEvents{
-		e:     e,
-		hub:   hub,
-		dirty: map[string]*dirtyItem{},
-		memo:  map[string]*itemMemo{},
-		wake:  make(chan struct{}, 1),
-		stop:  make(chan struct{}),
+		e:        e,
+		hub:      hub,
+		arrivals: map[string]time.Time{},
+		landings: map[string]time.Time{},
+		dirty:    map[string]*dirtyItem{},
+		memo:     map[string]*itemMemo{},
+		looked:   map[string]bool{},
+		pend:     map[string]*priorEntry{},
+		unpub:    map[string]bool{},
+		wake:     make(chan struct{}, 1),
+		stop:     make(chan struct{}),
+		readyBy:  time.Now().Add(channelReadyTimeout),
 	}
+	ce.ledger = channelevents.OpenLedger(dir, e.now, func(format string, args ...any) {
+		e.logf(0, "channel", format, args...)
+	})
+	ce.ready.Store(!warming)
 	ce.seed()
 	ce.unsub = e.store.Subscribe(itemstate.ObserverFunc(ce.onChange))
 	e.channelMu.Lock()
@@ -144,6 +216,8 @@ func (e *Engine) startChannelEventsIn(dir string) {
 // leaves this process running. Safe with no hub, and idempotent.
 func (e *Engine) flushChannelEvents() {
 	if ce := e.channelEvents(); ce != nil {
+		ce.spillWarm()
+		ce.ledger.Flush()
 		ce.hub.Flush()
 	}
 }
@@ -163,6 +237,8 @@ func (e *Engine) closeChannelEvents() {
 	}
 	close(ce.stop)
 	ce.wg.Wait()
+	ce.spillWarm()
+	ce.ledger.Close()
 	ce.hub.Close()
 }
 
@@ -194,7 +270,7 @@ func (ce *channelEvents) enqueue(evs ...channelevents.Event) {
 }
 
 // channelNudge asks the deriver to re-check account-wide state. Called from the
-// Claude suspension transition points; a void, non-blocking observation call.
+// Claude usage-limit hold transition points; a void, non-blocking observation call.
 func (e *Engine) channelNudge() {
 	ce := e.channelEvents()
 	if ce == nil {
@@ -219,19 +295,52 @@ func (ce *channelEvents) seed() {
 	e := ce.e
 	now := e.now()
 	threshold := e.channelStallThreshold()
-	suspended := e.channelSuspendedUntil(now)
-	ce.claudeLimited = !suspended.IsZero()
+	usageLimited := e.channelUsageLimitedUntil(now)
+	ce.claudeLimited = !usageLimited.IsZero()
+	look := e.scanBlockerIndex()
+	var pending []string
 	e.store.Scan(func(st *itemstate.ItemState) {
 		if st.IsPR {
 			return
 		}
-		key := issueRef(st.Repo, st.Number)
+		// The previous run's persisted state is diffed against this first
+		// observation (column and closed state now, labels once they are known)
+		// and the ledger starts following the item (#2169).
+		ref := issueRef(st.Repo, st.Number)
+		if evs, _, _ := ce.downtimeCheck(ref, st); len(evs) > 0 {
+			ce.enqueue(evs...)
+		}
+		ce.observeLedger(ref, st)
+		// An item whose labels are not known yet (probe-seeded) has no meaningful
+		// classification; its first label-bearing evaluation is the baseline (#2123).
+		if !st.LabelsKnown {
+			return
+		}
+		key := ref
 		m := ce.memoFor(key)
-		res := attention.Classify(e.attentionInput(st, now, threshold, suspended))
+		res := attention.Classify(e.attentionInput(st, now, threshold, usageLimited, look))
 		m.pauseKey = pauseFamilyKey(res)
 		ce.armCounters(m, st, true)
 		m.staleDone = hasLabelStr(st.Labels, "fabrik:awaiting-input")
+		if res.State == attention.Suspended {
+			pending = append(pending, st.Repo+"#"+strconv.Itoa(st.Number))
+		}
 	})
+	// A suspended item with no open persisted episode is announced once; the
+	// scan's read lock is released first, because the step reads the store again.
+	for _, key := range pending {
+		repo, n, ok := parseIssueRef(key)
+		if !ok {
+			continue
+		}
+		snap, ok := e.store.Peek(repo, n)
+		if !ok {
+			continue
+		}
+		st := snap.State()
+		res := attention.Classify(e.attentionInput(&st, now, threshold, usageLimited, e.peekBlockerLookup()))
+		ce.enqueueDerived(ce.decisionStep(key, ce.memoFor(key), &st, res))
+	}
 }
 
 func (ce *channelEvents) memoFor(key string) *itemMemo {
@@ -259,19 +368,85 @@ func (ce *channelEvents) onChange(c itemstate.Change, snap itemstate.Snapshot) {
 	if st.IsPR {
 		return
 	}
-	var evs []channelevents.Event
+	key := issueRef(c.Repo, c.Number)
+	if c.Fields&itemstate.WorkerLifecycleChanged != 0 && st.Worker != nil {
+		ce.noteWorkerEntered(key)
+	}
+	// A reopened issue or a failed landing verification ends the announced
+	// landing, so a later close is attributed from its own change, not from a
+	// stale mark.
+	if c.Fields&itemstate.StateChanged != 0 && !st.IsClosed {
+		ce.clearLanding(key)
+	}
+	// A reconcile, deep fetch or probe that reverts a recent engine write is
+	// reported once, ahead of the label events it caused, and those are marked
+	// unverified (#2170): the cache and GitHub disagree, so the change may be a
+	// phantom.
+	// The first observation after a restart is diffed against the previous run's
+	// persisted state; what differs is a change made while the daemon was down
+	// (#2169). Its column and closed deltas replace the live column-changed and
+	// closed for this change, which would otherwise report the same move again.
+	dtEvs, dtColumn, dtClosed := ce.downtimeCheck(key, &st)
+	ce.observeLedger(key, &st)
+	evs := append(dtEvs, ce.noteChangeForDivergence(c, &st, ce.e.now())...)
+	diverged := len(evs) // events from here on are built from the suspect change
+	rebaseApplied := false
 	for _, d := range c.LabelDeltas {
-		evs = append(evs, ce.e.labelEvent(&st, c, d))
+		if d.Added && d.Label == "fabrik:landing-verification-failed" {
+			ce.clearLanding(key)
+		}
+		if d.Added && d.Label == "fabrik:rebase-needed" {
+			rebaseApplied = true
+		}
+		if d.Added && d.Label == "fabrik:revalidate" && ce.ledger != nil {
+			// Sent back through Validate on purpose: the next settle says so.
+			ce.ledger.MarkRevalidated(key)
+		}
+		ce.noteAutonomyWrite(key, d, ce.e.labelAttribute(c))
+		le := ce.e.labelEvent(&st, c, d)
+		if closeTrackingLabel(d.Label) && ce.isLanding(key) {
+			le.Meta["landing"] = "true"
+		}
+		evs = append(evs, le)
 		evs = append(evs, ce.e.labelDerivedEvents(&st, d)...)
+	}
+	if c.Fields&itemstate.StatusChanged != 0 && !c.Created && c.PrevStatus != "" && st.Status != "" && st.Status != c.PrevStatus && !dtColumn {
+		evs = append(evs, ce.e.columnEvent(&st, c))
+	}
+	if c.Closed && !dtClosed {
+		evs = append(evs, ce.closedEvent(key, &st, c))
+	}
+	if diverged > len(dtEvs) || unattributed(c.Origin) {
+		// Every event built from a change a cache-divergence was raised for (label
+		// events, the label-derived merged / blocker-cleared / landing-verification-
+		// failed, column-changed, closed) may be a phantom (#2170 R3). So is one
+		// built from a change only a reconcile, deep fetch or probe saw: no known
+		// write or webhook backs it (#2169 R3a).
+		start := diverged
+		if start < len(dtEvs) {
+			start = len(dtEvs)
+		}
+		for i := start; i < len(evs); i++ {
+			if evs[i].Meta == nil {
+				evs[i].Meta = map[string]string{}
+			}
+			evs[i].Meta[channelevents.MetaUnverified] = "true"
+		}
 	}
 	staleCand := c.Fields&itemstate.InvocationChanged != 0 && hasLabelStr(st.Labels, "fabrik:awaiting-input")
 	const interesting = itemstate.LabelsChanged | itemstate.StageStateChanged | itemstate.StatusChanged |
 		itemstate.StateChanged | itemstate.InvocationChanged | itemstate.BlockedByChanged |
 		itemstate.LinkedPRChanged | itemstate.WorkerLifecycleChanged
-	key := issueRef(c.Repo, c.Number)
 	ce.mu.Lock()
 	ce.queue = append(ce.queue, evs...)
-	if c.Fields&interesting != 0 {
+	// An item the running store learns about after the board was populated is an
+	// arrival; it is announced once its labels and column are known (see
+	// announceArrival), so every later change to it re-evaluates it.
+	if c.Created && ce.e.boardPopulated.Load() {
+		ce.noteArrival(key)
+	}
+	_, arrivalPending := ce.arrivals[key]
+	if c.Fields&interesting != 0 || arrivalPending {
 		d := ce.dirty[key]
 		if d == nil {
 			d = &dirtyItem{due: time.Now().Add(channelDebounce)}
@@ -279,6 +454,7 @@ func (ce *channelEvents) onChange(c itemstate.Change, snap itemstate.Snapshot) {
 		}
 		d.flags |= c.Fields
 		d.staleCandidate = d.staleCandidate || staleCand
+		d.rebaseSeen = d.rebaseSeen || rebaseApplied
 	}
 	ce.mu.Unlock()
 	ce.signal()
@@ -312,6 +488,7 @@ func (ce *channelEvents) run() {
 			ce.safely("tick", ce.onTick)
 		case <-prune.C:
 			ce.hub.Prune(ce.e.now())
+			ce.pruneLifecycle()
 		}
 	}
 }
@@ -366,8 +543,12 @@ func (ce *channelEvents) drain() {
 	}
 	ce.mu.Unlock()
 	for _, ev := range q {
+		if ce.holdWarm(ev) {
+			continue
+		}
 		ce.hub.Publish(finishEvent(ev))
 	}
+	ce.checkReady()
 	for _, k := range due {
 		ce.evaluateItem(k, flags[k])
 	}
@@ -377,30 +558,72 @@ func (ce *channelEvents) drain() {
 	if nudged {
 		ce.checkClaudeLimit()
 	}
+	ce.checkAnomalies()
 }
 
-// actorOf attributes a label change: fabrik (the engine's own write, or the
-// webhook echo of one), human, bot (another bot), or unknown (a reconcile or
-// deep fetch saw it first and no webhook told us who did it).
-func (e *Engine) labelActor(c itemstate.Change) string {
+// labelAttribution is who caused a label change, as pushed on a label event.
+type labelAttribution struct {
+	// Actor is fabrik, overseer, human, bot or unknown.
+	Actor string
+	// Login is the GitHub login of a human or bot actor; empty otherwise.
+	Login string
+	// Via is the sanitised overseer subscriber behind an overseer actor.
+	Via string
+}
+
+// labelAttribute attributes a label change (#1968 R3, #2125). In order:
+//  1. a requester carried by an engine write or a matched webhook echo: an
+//     overseer action, whatever the App-sender check would say;
+//  2. the engine's own write, or the webhook echo of one: fabrik;
+//  3. a webhook without a sender, and everything first seen by a reconcile,
+//     deep fetch or probe (no read the engine already makes names the actor, so
+//     none is added; ADR 2125): unknown;
+//  4. a sender equal to the App's own login under App auth: fabrik;
+//  5. a sender ending in [bot]: bot, with its login;
+//  6. any other sender: human, with its login.
+func (e *Engine) labelAttribute(c itemstate.Change) labelAttribution {
 	switch c.Origin {
 	case itemstate.OriginEngine:
-		return "fabrik"
+		if c.Requester != "" {
+			return labelAttribution{Actor: "overseer", Via: c.Requester}
+		}
+		return labelAttribution{Actor: "fabrik"}
 	case itemstate.OriginWebhook:
 		switch {
+		case c.EchoOfEngine && c.Requester != "":
+			return labelAttribution{Actor: "overseer", Via: c.Requester}
 		case c.EchoOfEngine:
-			return "fabrik"
+			return labelAttribution{Actor: "fabrik"}
 		case c.Sender == "":
-			return "unknown"
+			return labelAttribution{Actor: "unknown"}
 		case e.ghAppAuth != nil && strings.EqualFold(c.Sender, e.selfLogin()):
-			return "fabrik"
+			return labelAttribution{Actor: "fabrik"}
 		case strings.HasSuffix(strings.ToLower(c.Sender), "[bot]"):
-			return "bot"
+			return labelAttribution{Actor: "bot", Login: c.Sender}
 		default:
-			return "human"
+			return labelAttribution{Actor: "human", Login: c.Sender}
 		}
 	}
-	return "unknown"
+	return labelAttribution{Actor: "unknown"}
+}
+
+// maxPushTitleRunes caps the title a push carries.
+const maxPushTitleRunes = 200
+
+// pushTitle renders an issue title for a push: line breaks and backticks become
+// spaces (the value is shown inline), runs of whitespace collapse, and a long
+// title is cut at maxPushTitleRunes with an ellipsis.
+func pushTitle(title string) string {
+	t := strings.Join(strings.Fields(strings.Map(func(r rune) rune {
+		if r == '`' || r == '\n' || r == '\r' {
+			return ' '
+		}
+		return r
+	}, title)), " ")
+	if r := []rune(t); len(r) > maxPushTitleRunes {
+		t = string(r[:maxPushTitleRunes-1]) + "…"
+	}
+	return t
 }
 
 // baseEvent fills the routing and identity fields shared by every event.
@@ -416,6 +639,11 @@ func (e *Engine) baseEvent(st *itemstate.ItemState, typ channelevents.EventType)
 	if lpr := st.LinkedPR; lpr != nil && lpr.Number != 0 {
 		ev.PR = lpr.Number
 	}
+	// Every item-scoped push says what the item is, so a reacting session does
+	// not need a fabrik_status round trip (#2127 R8).
+	if t := pushTitle(st.Title); t != "" && !readPolishDisabled(8) {
+		ev.Meta["title"] = t
+	}
 	if st.MilestoneKnown {
 		ev.MilestoneKnown = true
 		if st.Milestone != nil {
@@ -430,12 +658,21 @@ func (e *Engine) labelEvent(st *itemstate.ItemState, c itemstate.Change, d items
 	if d.Added {
 		typ, verb = channelevents.LabelApplied, "applied"
 	}
-	actor := e.labelActor(c)
+	attr := e.labelAttribute(c)
 	ev := e.baseEvent(st, typ)
 	ev.Label = d.Label
 	ev.Meta["label"] = d.Label
-	ev.Meta["actor"] = actor
-	ev.Content = fmt.Sprintf("%s %s on %s (by %s)", d.Label, verb, issueRef(st.Repo, st.Number), actor)
+	ev.Meta["actor"] = attr.Actor
+	by := attr.Actor
+	if attr.Via != "" {
+		ev.Meta["via"] = attr.Via
+		by += " " + attr.Via
+	}
+	if attr.Login != "" {
+		ev.Meta["actor_login"] = attr.Login
+		by += " " + attr.Login
+	}
+	ev.Content = fmt.Sprintf("%s %s on %s (by %s)", d.Label, verb, issueRef(st.Repo, st.Number), by)
 	if st.Status != "" {
 		ev.Content += " at " + st.Status
 	}
@@ -453,6 +690,13 @@ func finishEvent(ev channelevents.Event) channelevents.Event {
 		ev.Meta["issue"] = strconv.Itoa(ev.Issue)
 	}
 	ev.Meta["event"] = string(ev.Type)
+	if ev.Meta[channelevents.MetaSource] == "" {
+		if ev.Meta["catch_up"] == "true" {
+			ev.Meta[channelevents.MetaSource] = channelevents.SourceCatchUp
+		} else {
+			ev.Meta[channelevents.MetaSource] = channelevents.SourceLive
+		}
+	}
 	if ev.Stage != "" {
 		ev.Meta["stage"] = ev.Stage
 	}

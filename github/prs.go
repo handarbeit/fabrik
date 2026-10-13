@@ -597,6 +597,9 @@ type CheckRun struct {
 	Name       string
 	Status     string // "queued", "in_progress", "completed"
 	Conclusion string // "success", "failure", "neutral", "cancelled", "skipped", "timed_out", "action_required", or ""
+	// OutputTitle is the check run's output.title field — the one-line
+	// headline the check author chose (e.g. "3 tests failed"). May be empty.
+	OutputTitle string
 	// OutputSummary is the check run's output.summary field — a short
 	// Markdown summary the check author chose to surface. May be empty even
 	// on a failing run if the check never set it.
@@ -634,6 +637,7 @@ func (c *Client) FetchCheckRuns(owner, repo, sha string) ([]CheckRun, error) {
 		Status     string `json:"status"`
 		Conclusion string `json:"conclusion"`
 		Output     struct {
+			Title   string `json:"title"`
 			Summary string `json:"summary"`
 			Text    string `json:"text"`
 		} `json:"output"`
@@ -682,6 +686,7 @@ func (c *Client) FetchCheckRuns(owner, repo, sha string) ([]CheckRun, error) {
 			Name:          cr.Name,
 			Status:        cr.Status,
 			Conclusion:    cr.Conclusion,
+			OutputTitle:   cr.Output.Title,
 			OutputSummary: cr.Output.Summary,
 			OutputText:    cr.Output.Text,
 			DetailsURL:    cr.DetailsURL,

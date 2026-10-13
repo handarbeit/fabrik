@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -17,25 +18,30 @@ import (
 // diagnoses an existing board's Status column set against the configured
 // stages and, only with --apply, adds whatever is missing — never removing
 // a column, never reordering existing options, and (R4, the single highest-
-// risk part of this issue) never regenerating an existing option's id. See
-// adrs/1714-board-admin-create-and-repair.md.
+// risk part of this issue) never regenerating an existing option's id. Since
+// #2110 it also diagnoses and, with --apply, creates the display-only fields
+// (status line, Last activity, Last run) — create-only, never touching a
+// field that already exists. See adrs/1714-board-admin-create-and-repair.md
+// and adrs/2110-board-admin-creates-display-fields.md.
 
 // runRepairBoard implements the `fabrik repair-board` subcommand.
 func runRepairBoard(args []string) error {
 	fset := flag.NewFlagSet("repair-board", flag.ContinueOnError)
-	apply := fset.Bool("apply", false, "Add missing stage columns to the board (never removes columns, never reorders or regenerates existing options)")
+	apply := fset.Bool("apply", false, "Add missing stage columns and display fields to the board (never removes columns or fields, never reorders or regenerates existing options)")
 	tokenFlag := fset.String("token", "", "GitHub token (or FABRIK_TOKEN / GITHUB_TOKEN)")
 	ghesHostFlag := fset.String("ghes-host", "", "GitHub Enterprise Server hostname (also FABRIK_GHES_HOST)")
 	stagesDirFlag := fset.String("stages", "", "Stage configs directory (default: .fabrik/config.yaml's stages:, or ./.fabrik/stages)")
 
 	fset.Usage = func() {
 		fmt.Fprintf(fset.Output(), "Usage: fabrik repair-board [--apply]\n\n")
-		fmt.Fprintf(fset.Output(), "Diagnose (or, with --apply, add) missing Status columns on the project\n")
+		fmt.Fprintf(fset.Output(), "Diagnose (or, with --apply, add) missing Status columns and display-only\n")
+		fmt.Fprintf(fset.Output(), "fields (project_fields.*: Fabrik, Last activity, Last run) on the project\n")
 		fmt.Fprintf(fset.Output(), "board configured in .fabrik/config.yaml, derived from .fabrik/stages/.\n\n")
-		fmt.Fprintf(fset.Output(), "By default (no flags): print which columns are missing; make no changes.\n")
-		fmt.Fprintf(fset.Output(), "  --apply    Add the missing columns. Never removes a column or reorders\n")
-		fmt.Fprintf(fset.Output(), "             existing options; existing option ids are always preserved\n")
-		fmt.Fprintf(fset.Output(), "             so no item loses its current Status.\n\n")
+		fmt.Fprintf(fset.Output(), "By default (no flags): print what is missing; make no changes.\n")
+		fmt.Fprintf(fset.Output(), "  --apply    Add the missing columns and fields. Never removes a column or\n")
+		fmt.Fprintf(fset.Output(), "             field, never reorders existing options; existing option ids are\n")
+		fmt.Fprintf(fset.Output(), "             always preserved so no item loses its current Status. A field\n")
+		fmt.Fprintf(fset.Output(), "             that exists with the wrong type is reported, never touched.\n\n")
 		fmt.Fprintf(fset.Output(), "Organization-owned boards only (see #770) — refuses on a user-owned board.\n")
 		fset.PrintDefaults()
 	}
@@ -83,7 +89,7 @@ func runRepairBoard(args []string) error {
 		client = newBoardGHClient(token, ghesHost)
 	}
 
-	return repairBoardCore(client, pc.Owner, pc.Repo, *pc.ProjectNum, pc.OwnerType, allStages, *apply, os.Stdout)
+	return repairBoardCore(client, pc.Owner, pc.Repo, *pc.ProjectNum, pc.OwnerType, allStages, pc.ProjectFields, *apply, os.Stdout)
 }
 
 // repairBoardCore is the testable core of runRepairBoard, taking an
@@ -93,7 +99,7 @@ func runRepairBoard(args []string) error {
 // refusal check is always board.OwnerType, resolved live by FetchProjectBoard,
 // never the hint (which is advisory/legacy — see project_admin.go and the
 // Research findings this issue's Plan stage recorded).
-func repairBoardCore(client *gh.Client, owner, repo string, projectNum int, ownerTypeHint string, allStages []*stages.Stage, apply bool, w io.Writer) error {
+func repairBoardCore(client *gh.Client, owner, repo string, projectNum int, ownerTypeHint string, allStages []*stages.Stage, pf config.ProjectFieldsConfig, apply bool, w io.Writer) error {
 	board, err := client.FetchProjectBoard(owner, repo, projectNum, ownerTypeHint)
 	if err != nil {
 		return fmt.Errorf("fetching project board: %w", err)
@@ -101,6 +107,7 @@ func repairBoardCore(client *gh.Client, owner, repo string, projectNum int, owne
 	if board.ProjectID == "" {
 		return fmt.Errorf("project board has no ID")
 	}
+	// The user-owned refusal precedes every mutation, Status and display field alike.
 	if err := refuseIfUserOwnedBoard(board.OwnerType); err != nil {
 		return err
 	}
@@ -113,17 +120,56 @@ func repairBoardCore(client *gh.Client, owner, repo string, projectNum int, owne
 	required := boardColumnNames(allStages)
 	missing := missingStageColumns(required, sf)
 
-	if len(missing) == 0 {
-		fmt.Fprintf(w, "repair-board: board already has all %d required stage column(s); nothing to do.\n", len(required))
+	// Display fields (#2110) are diagnosed together with the Status columns
+	// but repaired independently of them: neither failing blocks the other.
+	plan, planErr := planBoardDisplayFields(client, board.ProjectID, pf)
+	fieldsMissing := countDisplayFields(plan, displayFieldMissing)
+	enabledFields := len(requiredDisplayFields(pf))
+
+	if len(missing) > 0 {
+		fmt.Fprintf(w, "repair-board: %d missing column(s): %s\n", len(missing), strings.Join(missing, ", "))
+	}
+	printDisplayFields(w, "repair-board", plan, true)
+
+	if len(missing) == 0 && planErr == nil && countDisplayFields(plan, displayFieldPresent) == len(plan) {
+		fmt.Fprintf(w, "repair-board: board already has all %d required stage column(s) and all %d enabled display field(s); nothing to do.\n", len(required), enabledFields)
 		return nil
 	}
 
-	fmt.Fprintf(w, "repair-board: %d missing column(s): %s\n", len(missing), strings.Join(missing, ", "))
 	if !apply {
-		fmt.Fprintf(w, "Dry run — no changes made. Re-run with --apply to add the missing column(s).\n")
-		return nil
+		if len(missing) > 0 || fieldsMissing > 0 {
+			fmt.Fprintf(w, "Dry run — no changes made. Re-run with --apply to add the missing column(s) and display field(s).\n")
+		}
+		return planErr
 	}
 
+	var errs []error
+	if planErr != nil {
+		errs = append(errs, planErr)
+	}
+	if len(missing) > 0 {
+		if err := addMissingStatusColumns(client, sf, missing); err != nil {
+			errs = append(errs, err)
+		} else {
+			fmt.Fprintf(w, "repair-board: added %d column(s): %s\n", len(missing), strings.Join(missing, ", "))
+		}
+	}
+	if fieldsMissing > 0 {
+		applyDisplayFields(client, board.ProjectID, plan)
+		for _, st := range plan {
+			if st.State == displayFieldCreated || st.State == displayFieldFailed {
+				fmt.Fprintf(w, "repair-board: %s\n", displayFieldLine(st))
+			}
+		}
+		if err := displayFieldsErr(plan); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// addMissingStatusColumns appends the missing Status columns.
+func addMissingStatusColumns(client *gh.Client, sf *gh.StatusField, missing []string) error {
 	// R4/R6: build the option list by echoing every existing option's
 	// id/color/description back UNCHANGED (never omitted, never
 	// regenerated — that would silently clear every item's Status) and
@@ -152,6 +198,5 @@ func repairBoardCore(client *gh.Client, owner, repo string, projectNum int, owne
 	if err := client.SetStatusFieldOptions(sf.FieldID, options); err != nil {
 		return fmt.Errorf("adding missing column(s): %w", err)
 	}
-	fmt.Fprintf(w, "repair-board: added %d column(s): %s\n", len(missing), strings.Join(missing, ", "))
 	return nil
 }

@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -223,17 +224,25 @@ func TestLocalAPIStatusWorkerIdleAndUnknownFields(t *testing.T) {
 	if st.Worker.TurnsUsed.Valid {
 		t.Errorf("turns for an in-flight worker must be unknown")
 	}
-	if !st.Worker.MaxTurns.Valid || st.Worker.MaxTurns.V != 50 {
-		t.Errorf("max_turns = %+v, want 50 from the stage", st.Worker.MaxTurns)
+	if st.Worker.MaxTurns.Valid {
+		t.Errorf("max_turns = %+v before the invocation reports its budget, want unknown", st.Worker.MaxTurns)
+	}
+	// The invocation's effective budget (here a fabrik:extend-turns pre-grant of 2x
+	// the stage's 50) is what is reported, not the stage default.
+	e.store.Apply(itemstate.WorkerTurnsRecorded{Repo: "owner/repo", Number: 5, Turns: 0, Max: 100})
+	if st = status(t, e, "5"); !st.Worker.MaxTurns.Valid || st.Worker.MaxTurns.V != 100 {
+		t.Errorf("max_turns = %+v, want the invocation's 100", st.Worker.MaxTurns)
 	}
 	if st.Attention.State != "working" {
 		t.Errorf("attention: %+v", st.Attention)
 	}
 
 	e.seedAPIItem(t, 6, "Implement")
+	// An incomplete stage with nothing gating it and no worker is waiting for
+	// dispatch, never idle (#2121 R3).
 	idle := status(t, e, "6")
-	if idle.Attention.State != "idle" {
-		t.Errorf("idle item: %+v", idle.Attention)
+	if idle.Attention.State != "waiting" || idle.Attention.Code != "waiting-for-dispatch" {
+		t.Errorf("dispatchable item: %+v", idle.Attention)
 	}
 	m := toJSON(t, idle)
 	for _, f := range []string{"as_of", "last_poll_attempt_at", "last_poll_success_at", "since_last_poll_success_seconds", "daemon_uptime_seconds"} {
@@ -298,6 +307,14 @@ func TestLocalAPIStatusPRBlockersAndComment(t *testing.T) {
 	e.store.Apply(itemstate.PRDetailsUpdated{Repo: "owner/repo", Number: 8, PRNumber: 20, State: "open"})
 	e.store.Apply(itemstate.PRHeadSHAUpdated{Repo: "owner/repo", Number: 8, SHA: "abc"})
 	e.store.Apply(itemstate.CheckRunCompleted{Repo: "owner/repo", SHA: "abc", Run: gh.CheckRun{ID: 1, Name: "ci", Status: "completed", Conclusion: "failure"}})
+	// Raw cached check runs are not a verdict (#2122): ci stays unknown until
+	// the poll-side record exists.
+	if st := status(t, e, "8"); st.PR.CI.Valid {
+		t.Errorf("ci = %+v from cached runs alone, want unknown", st.PR.CI)
+	}
+	now := e.now()
+	e.store.Apply(itemstate.PRFactsObserved{Repo: "owner/repo", Number: 8, PRNumber: 20, Facts: itemstate.PRFacts{State: "open", HeadSHA: "abc", ObservedAt: now}})
+	e.store.Apply(itemstate.CIVerdictObserved{Repo: "owner/repo", Number: 8, Verdict: itemstate.CIVerdictRecord{Verdict: "red", HeadSHA: "abc", Failing: []string{"ci"}, ObservedAt: now}})
 
 	st := status(t, e, "8")
 	if st.PR.State != "linked" || !st.PR.Number.Valid || st.PR.Number.V != 20 {
@@ -555,10 +572,10 @@ func TestLocalAPIHealth(t *testing.T) {
 	e.health.notePollSuccess(now.Add(-45 * time.Second))
 	e.health.noteReconcileOK(now.Add(-2 * time.Minute))
 	e.health.noteWebhookEvent(now.Add(-10 * time.Second))
-	e.health.setGraphQLBackoff(true, 0.15, 750)
-	e.claudeSuspendMu.Lock()
-	e.claudeSuspendedUntil = now.Add(3 * time.Hour)
-	e.claudeSuspendMu.Unlock()
+	e.health.setGraphQLBackoff(true, 0.15, 750, time.Now())
+	e.claudeUsageLimitMu.Lock()
+	e.claudeUsageLimitedUntil = now.Add(3 * time.Hour)
+	e.claudeUsageLimitMu.Unlock()
 	e.seedAPIItem(t, 1, "Queued")
 	e.deepFetched(1)
 	e.store.Apply(itemstate.ItemDeepFetched{Repo: "owner/repo", Number: 1, FreshState: gh.ProjectItem{ID: "I_B", Number: 1, Repo: "owner/repo", Status: "Queued"}})
@@ -581,8 +598,31 @@ func TestLocalAPIHealth(t *testing.T) {
 	if h.Reconcile.SinceSuccessSeconds.V != 120 || h.Webhook.SinceEventSeconds.V != 10 || h.Webhook.Mode != "off" {
 		t.Errorf("reconcile/webhook = %+v / %+v", h.Reconcile, h.Webhook)
 	}
-	if !h.Claude.Suspended || !h.Claude.SuspendedUntil.Valid || !h.Claude.SuspendedUntil.V.Equal(now.Add(3*time.Hour).UTC()) {
+	if !h.Claude.UsageLimited || !h.Claude.UsageLimitedUntil.Valid || !h.Claude.UsageLimitedUntil.V.Equal(now.Add(3*time.Hour).UTC()) {
 		t.Errorf("claude = %+v", h.Claude)
+	}
+	// The wire contract (#2129): the hold is reported as usage_limited /
+	// usage_limited_until under claude_usage_limit, with no suspended keys.
+	raw, err := json.Marshal(h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatal(err)
+	}
+	var claude map[string]any
+	if err := json.Unmarshal(wire["claude_usage_limit"], &claude); err != nil {
+		t.Fatalf("claude_usage_limit: %v (wire %s)", err, raw)
+	}
+	if claude["usage_limited"] != true || claude["usage_limited_until"] == nil {
+		t.Errorf("claude_usage_limit wire = %v, want usage_limited/usage_limited_until", claude)
+	}
+	if _, ok := claude["suspended"]; ok {
+		t.Errorf("claude_usage_limit still carries a suspended key: %v", claude)
+	}
+	if _, ok := claude["suspended_until"]; ok {
+		t.Errorf("claude_usage_limit still carries a suspended_until key: %v", claude)
 	}
 	if b := h.Backoff; !b.Observed || !b.Low.V || b.Remaining.V != 750 || b.RestPaused.V {
 		t.Errorf("backoff = %+v", b)
@@ -701,6 +741,9 @@ func TestLocalAPISourceDoesNotReachGitHub(t *testing.T) {
 	if err != nil || len(files) == 0 {
 		t.Fatalf("no localapi source files found: %v", err)
 	}
+	// attention_input.go builds the classifier input the local API serves (#2120),
+	// so it is read-path source whatever its name says.
+	files = append(files, "attention_input.go")
 	forbidden := []string{"e.client", "e.readClient", "FetchLabelAppliedAt", "labelAppliedAt(", "store.Get(", "e.cache()", ".FetchItem(", "FetchProjectItem"}
 	for _, f := range files {
 		if strings.HasSuffix(f, "_test.go") {
@@ -717,6 +760,44 @@ func TestLocalAPISourceDoesNotReachGitHub(t *testing.T) {
 			for _, bad := range forbidden {
 				if strings.Contains(line, bad) {
 					t.Errorf("%s:%d reaches a GitHub-capable path (%q): %s", f, i+1, bad, strings.TrimSpace(line))
+				}
+			}
+		}
+	}
+}
+
+// TestReadSideSourcesNeverRunThePollSideAnchorRecorder pins #2120 R3 ("no new
+// per-request GitHub calls") for every file that feeds the classifier on a
+// request or a channel tick: the GitHub time of a pending decision is recorded
+// by settleDecisionAnchors on the poll goroutine (decision_anchor.go) and only
+// read here, so none of these files may call the recorder or any labelAppliedAt
+// path (which falls back to a live FetchLabelAppliedAt).
+func TestReadSideSourcesNeverRunThePollSideAnchorRecorder(t *testing.T) {
+	var files []string
+	for _, pat := range []string{"localapi*.go", "channel_*.go"} {
+		m, err := filepath.Glob(pat)
+		if err != nil || len(m) == 0 {
+			t.Fatalf("no %s files found: %v", pat, err)
+		}
+		files = append(files, m...)
+	}
+	files = append(files, "attention_input.go")
+	forbidden := []string{"settleDecisionAnchors", "labelAppliedAt", "FetchLabelAppliedAt"}
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, line := range strings.Split(string(b), "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "//") {
+				continue
+			}
+			for _, bad := range forbidden {
+				if strings.Contains(line, bad) {
+					t.Errorf("%s:%d runs poll-side anchor code on the read side (%q): %s", f, i+1, bad, strings.TrimSpace(line))
 				}
 			}
 		}
@@ -746,7 +827,7 @@ func TestLocalAPIConcurrentWithPollSideWrites(t *testing.T) {
 			e.store.Apply(itemstate.ReviewCycleIncremented{Repo: "owner/repo", Number: n, StageName: "Implement"})
 			e.health.notePollAttempt(time.Now())
 			e.health.notePollSuccess(time.Now())
-			e.health.setGraphQLBackoff(i%2 == 0, 0.5, i)
+			e.health.setGraphQLBackoff(i%2 == 0, 0.5, i, time.Now())
 			e.store.Apply(itemstate.LocalLabelRemoved{Repo: "owner/repo", Number: n, Label: "fabrik:awaiting-ci"})
 		}
 	}()
@@ -762,4 +843,72 @@ func TestLocalAPIConcurrentWithPollSideWrites(t *testing.T) {
 		close(stop)
 	}()
 	wg.Wait()
+}
+
+// multiRepoAPIEngine is a multi-repo daemon: the board owner is configured but
+// no repo, so defaultRepo() is the owner-only "owner/".
+func multiRepoAPIEngine() *Engine {
+	return NewWithDeps(Config{Owner: "owner", Stages: apiStages(), StallThreshold: time.Minute},
+		&noGitHubClient{}, &mockClaudeInvoker{}, nil)
+}
+
+func seedRepoItem(e *Engine, repo string, number int) {
+	e.store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{
+		ID: fmt.Sprintf("%s#%d", repo, number), Number: number, Repo: repo, Status: "Implement",
+	}})
+}
+
+// #2112: a multi-repo daemon whose cached issues are all in one repo resolves a
+// bare N and #N. Restoring the owner-only defaultRepo() seed in managedRepos
+// makes this fail with an ambiguous error naming "owner/".
+func TestLocalAPIBareNResolvesOnMultiRepoDaemonWithOneRepo(t *testing.T) {
+	e := multiRepoAPIEngine()
+	if got := e.defaultRepo(); got != "owner/" {
+		t.Fatalf("precondition: defaultRepo() = %q, want the owner-only key", got)
+	}
+	seedRepoItem(e, "owner/fabrik", 2050)
+	b := e.LocalAPIBackend()
+	for _, ref := range []string{"2050", "#2050", " #2050 ", "owner/fabrik#2050"} {
+		res, err := b.Status(localapi.StatusParams{Issue: ref})
+		if err != nil {
+			t.Errorf("Status(%q): %v", ref, err)
+			continue
+		}
+		if res.Issue != "owner/fabrik#2050" {
+			t.Errorf("Status(%q).Issue = %q", ref, res.Issue)
+		}
+	}
+}
+
+func TestLocalAPIAmbiguityListsOnlyRealReposOnMultiRepoDaemon(t *testing.T) {
+	e := multiRepoAPIEngine()
+	seedRepoItem(e, "owner/a", 1)
+	seedRepoItem(e, "owner/b", 1)
+	_, err := e.LocalAPIBackend().Status(localapi.StatusParams{Issue: "1"})
+	pe, ok := err.(*localapi.Error)
+	if !ok || pe.Code != localapi.CodeAmbiguous {
+		t.Fatalf("err = %v, want %s", err, localapi.CodeAmbiguous)
+	}
+	if !strings.Contains(pe.Message, "2 repos (owner/a, owner/b)") || strings.Contains(pe.Message, "owner/,") || strings.Contains(pe.Message, "owner/)") {
+		t.Errorf("message = %q, want exactly the two real repos", pe.Message)
+	}
+}
+
+func TestLocalAPIBareNOnMultiRepoDaemonWithNoItemsIsNotFound(t *testing.T) {
+	_, err := multiRepoAPIEngine().LocalAPIBackend().Status(localapi.StatusParams{Issue: "5"})
+	if pe, ok := err.(*localapi.Error); !ok || pe.Code != localapi.CodeNotFound {
+		t.Fatalf("err = %v, want %s", err, localapi.CodeNotFound)
+	}
+}
+
+func TestManagedReposIgnoresMalformedRepoKeys(t *testing.T) {
+	e := multiRepoAPIEngine()
+	seedRepoItem(e, "owner/", 1)
+	seedRepoItem(e, "/repo", 2)
+	seedRepoItem(e, "noslash", 3)
+	seedRepoItem(e, "owner/real", 4)
+	got := localAPIBackend{e: e}.managedRepos()
+	if len(got) != 1 || got[0] != "owner/real" {
+		t.Fatalf("managedRepos() = %v, want [owner/real]", got)
+	}
 }

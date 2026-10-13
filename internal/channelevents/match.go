@@ -70,9 +70,20 @@ func (s Subscription) Matches(ev Event) bool {
 	if len(s.Events) > 0 && !containsType(s.Events, ev.Type) {
 		return false
 	}
+	if len(s.Events) == 0 && s.EventsDefault && IsLabelEvent(ev.Type) {
+		return false
+	}
 	if IsAccountWide(ev.Type) {
 		return true
 	}
+	return s.ScopeMatches(ev)
+}
+
+// ScopeMatches applies the repo, issue, milestone and label scopes to ev,
+// ignoring the event-type filter and whether the type is account-wide. The
+// situation digest uses it to narrow an account-scoped view's items to what a
+// subscription selects (#2171).
+func (s Subscription) ScopeMatches(ev Event) bool {
 	if len(s.Repos) > 0 && !containsString(s.Repos, ev.Repo) {
 		return false
 	}
@@ -93,10 +104,28 @@ func (s Subscription) Matches(ev Event) bool {
 			return false
 		}
 	}
-	if IsLabelEvent(ev.Type) && !s.labelAllowed(ev.Label) {
+	if IsLabelEvent(ev.Type) {
+		if !s.labelAllowed(ev.Label) {
+			return false
+		}
+		if s.ProgressViaColumn && s.TakesColumnChanged() && matchAny(StageProgressLabels, ev.Label) {
+			return false
+		}
+	}
+	if ev.Type == ItemAdded && len(s.Labels) > 0 && !anyMatches(s.Labels, ev.Labels) {
 		return false
 	}
 	return true
+}
+
+// anyMatches reports whether any name matches any pattern.
+func anyMatches(patterns, names []string) bool {
+	for _, n := range names {
+		if matchAny(patterns, n) {
+			return true
+		}
+	}
+	return false
 }
 
 // milestoneMatches compares a subscription's milestone (a title, or "#N" for a

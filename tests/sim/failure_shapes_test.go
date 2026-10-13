@@ -91,7 +91,7 @@ func TestFailureShape_UsageLimitExit(t *testing.T) {
 	}
 
 	// A genuine usage-limit exit also activates an account-wide Claude
-	// dispatch suspension (ADR-1120) anchored on real time.Now(), not the
+	// dispatch usage-limit hold (ADR-1120) anchored on real time.Now(), not the
 	// injected Clock (claudeUsageLimitFallbackBackoff is 1 real hour) — not
 	// something this harness can fast-forward. fabrik:clear-claude-limit is
 	// the documented operator escape hatch (CLAUDE.md) for exactly this

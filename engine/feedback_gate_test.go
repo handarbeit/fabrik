@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
@@ -237,5 +238,191 @@ func TestRunCatchUpPhase2_HoldsAdvanceForUnprocessedReviewBody(t *testing.T) {
 	}
 	if advanced["owner/repo#1"] {
 		t.Error("a held item must not be marked advanced")
+	}
+}
+
+// laggingReadClient models a board cache that lags GitHub (#2160): its deep
+// fetch leaves the item exactly as the caller passed it, so reviews the live
+// client can see are absent from the dispatcher's view.
+type laggingReadClient struct {
+	boardcache.ReadClient
+	fetches int
+}
+
+func (l *laggingReadClient) FetchItemDetails(*gh.ProjectItem) error {
+	l.fetches++
+	return nil
+}
+
+// gapItem is the item a gap scenario passes: it has a linked PR (the cached copy a
+// stale board cache serves does too — an unlinked item with no review data is
+// re-read over REST on both sides, #1962), and no reviews of its own.
+func gapItem() gh.ProjectItem {
+	return feedbackItem(func(i *gh.ProjectItem) { i.LinkedPRNumber = 10 })
+}
+
+// gapEngine builds an engine whose live client sees bodyOnlyReview while its
+// readClient (the dispatcher's source) does not, with the item seeded in the
+// store as deep-fetched.
+func gapEngine(t *testing.T) (*Engine, *laggingReadClient) {
+	t.Helper()
+	client := landingClient()
+	client.fetchItemDetailsFn = func(item *gh.ProjectItem) error {
+		item.LinkedPRReviews = []gh.PRReview{bodyOnlyReview}
+		return nil
+	}
+	eng := testEngineForMerge(t, client)
+	lag := &laggingReadClient{ReadClient: eng.readClient}
+	eng.readClient = lag
+	eng.store.Apply(itemstate.ItemDeepFetched{Repo: "owner/repo", Number: 1, FreshState: gapItem()})
+	return eng, lag
+}
+
+// R3: the gate holds on a review body the dispatcher's cached view lacks → it
+// invalidates the deep cache and records a short admission cooldown, so the next
+// poll's ordinary Phase 1 can dispatch. It never loosens the hold.
+func TestFeedbackGate_DispatcherGapRepairsInput(t *testing.T) {
+	eng, lag := gapEngine(t)
+	if snap, _ := eng.store.Get("owner/repo", 1); snap.State().LastDeepFetchAt.IsZero() {
+		t.Fatal("setup: item should be seeded as deep-fetched")
+	}
+	if !eng.feedbackGateBlocks(gapItem(), false, "advance") {
+		t.Fatal("the gate must keep holding on a live-visible review body")
+	}
+	if lag.fetches == 0 {
+		t.Error("the dispatcher's view must be read through readClient")
+	}
+	snap, _ := eng.store.Get("owner/repo", 1)
+	if !snap.State().LastDeepFetchAt.IsZero() {
+		t.Error("expected DeepFetchInvalidated (LastDeepFetchAt zeroed)")
+	}
+	until := snap.CooldownAt("feedback-dispatcher-gap")
+	if until.IsZero() {
+		t.Fatal("expected a feedback-dispatcher-gap cooldown")
+	}
+	if want := eng.now().Add(eng.mergeGateRecheckInterval()); until.After(want.Add(time.Second)) {
+		t.Errorf("gap cooldown %v should expire within one merge-gate recheck (%v)", until, want)
+	}
+}
+
+// R3 / no cost in the steady state: when the dispatcher's view agrees with the
+// gate, nothing is invalidated and no gap cooldown is recorded.
+func TestFeedbackGate_AgreeingViewDoesNotRepair(t *testing.T) {
+	client := landingClient()
+	client.fetchItemDetailsFn = func(item *gh.ProjectItem) error {
+		item.LinkedPRReviews = []gh.PRReview{bodyOnlyReview}
+		return nil
+	}
+	eng := testEngineForMerge(t, client) // readClient is the pass-through adapter: same facts
+	eng.store.Apply(itemstate.ItemDeepFetched{Repo: "owner/repo", Number: 1, FreshState: gapItem()})
+	if !eng.feedbackGateBlocks(gapItem(), false, "advance") {
+		t.Fatal("the gate must hold on the review body")
+	}
+	snap, _ := eng.store.Get("owner/repo", 1)
+	if snap.State().LastDeepFetchAt.IsZero() {
+		t.Error("no gap: the deep cache must not be invalidated")
+	}
+	if !snap.CooldownAt("feedback-dispatcher-gap").IsZero() {
+		t.Error("no gap: no feedback-dispatcher-gap cooldown")
+	}
+}
+
+// R3 bound: a gap that never resolves is repaired at most
+// feedbackGapRepairBudget times, then the gate just keeps holding.
+func TestFeedbackGate_DispatcherGapRepairIsBounded(t *testing.T) {
+	eng, _ := gapEngine(t)
+	for i := 1; i <= feedbackGapRepairBudget+2; i++ {
+		eng.store.Apply(itemstate.ItemDeepFetched{Repo: "owner/repo", Number: 1, FreshState: gapItem()})
+		if !eng.feedbackGateBlocks(gapItem(), false, "advance") {
+			t.Fatalf("round %d: gate must keep holding", i)
+		}
+		snap, _ := eng.store.Get("owner/repo", 1)
+		invalidated := snap.State().LastDeepFetchAt.IsZero()
+		if want := i <= feedbackGapRepairBudget; invalidated != want {
+			t.Errorf("round %d: invalidated = %v, want %v", i, invalidated, want)
+		}
+	}
+}
+
+// A dispatcher-view read error never loosens the hold and never repairs.
+func TestFeedbackGate_DispatcherViewReadErrorFailsSoft(t *testing.T) {
+	eng, _ := gapEngine(t)
+	eng.readClient = errReadClient{eng.readClient}
+	if !eng.feedbackGateBlocks(gapItem(), false, "advance") {
+		t.Fatal("the gate must keep holding")
+	}
+	snap, _ := eng.store.Get("owner/repo", 1)
+	if !snap.CooldownAt("feedback-dispatcher-gap").IsZero() {
+		t.Error("an unreadable view must not trigger a repair")
+	}
+}
+
+type errReadClient struct{ boardcache.ReadClient }
+
+func (errReadClient) FetchItemDetails(*gh.ProjectItem) error { return errors.New("boom") }
+
+// R1: after the cache catches up, the gate and the dispatcher builders agree.
+func TestFeedbackGate_DispatcherAndGateAgreeOnSameFacts(t *testing.T) {
+	eng := testEngineForMerge(t, landingClient())
+	other := bodyOnlyReview
+	other.DatabaseID, other.NodeID, other.Author = 777, "PRR_other", "someone-else"
+	item := feedbackItem(func(i *gh.ProjectItem) { i.LinkedPRReviews = []gh.PRReview{bodyOnlyReview, other} })
+	pf := eng.unprocessedFeedback(item, true)
+	view := eng.buildReviewFeedbackCommentsFromReviews(item, eng.resolveReviewsForFeedback(item))
+	if len(pf.Bodies) != 2 {
+		t.Fatalf("gate bodies = %d, want 2", len(pf.Bodies))
+	}
+	if gap := feedbackGap(pf.Bodies, view); len(gap) != 0 {
+		t.Errorf("gate and dispatcher disagree on identical facts: gap %v", gap)
+	}
+	if len(pf.DispatcherGap) != 0 {
+		t.Errorf("DispatcherGap = %v, want none", pf.DispatcherGap)
+	}
+	// Once the first body is recorded processed, both drop it together.
+	eng.store.Apply(itemstate.CommentProcessed{Repo: "owner/repo", Number: 1, CommentID: reviewBodyIDPrefix + "5356334497", At: time.Now()})
+	pf = eng.unprocessedFeedback(item, true)
+	view = eng.buildReviewFeedbackCommentsFromReviews(item, eng.resolveReviewsForFeedback(item))
+	if len(pf.Bodies) != 1 || len(feedbackGap(pf.Bodies, view)) != 0 {
+		t.Errorf("after marking one processed: gate bodies %d, gap %v", len(pf.Bodies), feedbackGap(pf.Bodies, view))
+	}
+}
+
+func TestFeedbackGap_Pure(t *testing.T) {
+	a := gh.Comment{ID: "review-body:1"}
+	b := gh.Comment{ID: "review-body:2"}
+	nodeless := gh.Comment{DatabaseID: 42}
+	cases := []struct {
+		name       string
+		held, view []gh.Comment
+		want       int
+	}{
+		{"empty", nil, nil, 0},
+		{"full overlap", []gh.Comment{a, b}, []gh.Comment{b, a}, 0},
+		{"partial", []gh.Comment{a, b}, []gh.Comment{a}, 1},
+		{"none visible", []gh.Comment{a, b}, nil, 2},
+		{"database id only", []gh.Comment{nodeless}, []gh.Comment{{DatabaseID: 42}}, 0},
+		{"view superset", []gh.Comment{a}, []gh.Comment{a, b}, 0},
+	}
+	for _, tc := range cases {
+		if got := feedbackGap(tc.held, tc.view); len(got) != tc.want {
+			t.Errorf("%s: gap = %d, want %d", tc.name, len(got), tc.want)
+		}
+	}
+}
+
+// R2: a pass records as processed only the comments it was given, so the second
+// review body of the #2125 shape stays outstanding after a reinvoke that
+// addressed the first.
+func TestMarkCommentsProcessed_OnlyGivenBatch(t *testing.T) {
+	eng := testEngineForMerge(t, landingClient())
+	item := gapItem()
+	first := gh.Comment{ID: reviewBodyIDPrefix + "5483754852"}
+	eng.markCommentsProcessed(item, []gh.Comment{first})
+	snap, _ := eng.store.Get("owner/repo", 1)
+	if snap.CommentProcessed(first.ID).IsZero() {
+		t.Error("the given comment must be recorded")
+	}
+	if !snap.CommentProcessed(reviewBodyIDPrefix + "5483772616").IsZero() {
+		t.Error("a comment outside the batch must not be recorded")
 	}
 }

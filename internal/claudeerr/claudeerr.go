@@ -54,7 +54,7 @@ type UsageLimitError struct {
 }
 
 // Reasons a UsageLimitError carries no structured reset instant. The engine
-// logs the applicable one whenever it falls back to a fixed suspension.
+// logs the applicable one whenever it falls back to a fixed usage-limit hold.
 const (
 	// ResetReasonAbsent: no rate_limit_event, or none carried unifiedWindows.
 	ResetReasonAbsent = "absent"
@@ -107,7 +107,7 @@ func (e *TurnLimitError) Error() string {
 // Deliberately a distinct type from UsageLimitError, not a second value
 // recognized by classifyUsageLimitExit itself: UsageLimitError is also the
 // trigger, by Go type, for two behaviors that must NOT apply here —
-// activateClaudeSuspension (engine/item.go, engine/comments.go, forbidden by
+// activateClaudeUsageLimit (engine/item.go, engine/comments.go, forbidden by
 // R3 of #1458, since an api_error is per-invocation, not account-wide) and
 // the comment-processing circuit breaker bypass (engine/comments.go,
 // forbidden by R6's spirit, since exempting api_error from the breaker would
@@ -220,3 +220,61 @@ type ToolDenial struct {
 func (e *ToolsDeniedError) Error() string {
 	return fmt.Sprintf("claude tool call(s) denied by permission configuration: %s", strings.Join(e.ToolNames, ", "))
 }
+
+// SkillLoadError signals that the Claude invocation's own configured skill
+// demonstrably failed to load at runtime: the stream holds a failed Skill
+// tool call for it (tool_result.is_error) and no successful one. For a
+// skill-configured stage the skill is the stage's instructions, so a worker
+// that never loaded it did none of the stage's work whatever markers it
+// printed (#2138, ADR-2138).
+//
+// Detected structurally from the worker's own tool-call record, never from
+// output prose. Unlike the pre-flight skillUnresolvedError (ADR 2137) the
+// condition cannot self-heal — resolution already passed — so the engine
+// pauses the item for a human instead of retrying. It short-circuits like the
+// did-not-run family (the run did none of the stage's work) and is exempt from
+// StageRetryIncremented.
+type SkillLoadError struct {
+	// Skill is the invocation's configured (resolved) skill name.
+	Skill string
+	// Called is the name the worker passed to the Skill tool, when it differs
+	// from Skill (for example the bare name of a qualified configuration).
+	Called string
+	// ToolUseID is the failed call's tool_use id, for logging.
+	ToolUseID string
+	// Detail is the failed tool_result's content, collapsed to one line and
+	// truncated. It is untrusted model-side text.
+	Detail string
+}
+
+func (e *SkillLoadError) Error() string {
+	if e.Detail != "" {
+		return fmt.Sprintf("skill %q failed to load: %s", e.Skill, e.Detail)
+	}
+	return fmt.Sprintf("skill %q failed to load", e.Skill)
+}
+
+// Kill causes carried by KilledError.
+const (
+	// KillWallTime is a stage killed because its max_wall_time deadline passed.
+	KillWallTime = "wall-time-kill"
+	// KillInactivity is a stage killed by the inactivity watchdog (no output).
+	KillInactivity = "inactivity-kill"
+)
+
+// KilledError wraps the error of an invocation the engine itself killed on a
+// timeout (#2170): the wall-time deadline or the inactivity watchdog. Both
+// otherwise surface as a generic "claude exited with error", so nothing
+// downstream could say why the stage did not complete. It is a pure wrapper —
+// Unwrap exposes Err, so every errors.As/errors.Is classification of the wrapped
+// error, and the retry accounting built on it, is unchanged.
+type KilledError struct {
+	// Cause is KillWallTime or KillInactivity.
+	Cause string
+	// Err is the error the invocation would have returned unwrapped.
+	Err error
+}
+
+func (e *KilledError) Error() string { return e.Err.Error() }
+
+func (e *KilledError) Unwrap() error { return e.Err }

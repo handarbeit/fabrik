@@ -19,7 +19,7 @@ Confirm the user has — or help them obtain — each of these. Don't proceed pa
    ```
    Note this value rotates whenever the user re-runs `gh auth login` or `gh auth refresh` — a `.env` pinned to a stale copy will start failing after a re-auth. A classic PAT (create at https://github.com/settings/tokens, select "Tokens (classic)") is the alternative if they want a token independent of their `gh` CLI session.
 
-   **Identity-mismatch trap:** if they're reusing a token copied from another Fabrik project's `.env`, it may belong to a *different* GitHub account than the one the Project board is under — a classic, correctly-scoped token, so nothing about it looks wrong. It fails as `NOT_FOUND: Could not resolve to a ProjectV2`, which reads like a wrong project number, not a wrong identity. Have them check: `gh api graphql -f query='{ viewer { login } }'` should match `user:` in `config.yaml`.
+   **Identity-mismatch trap:** if they're reusing a token copied from another Fabrik project's `.env`, it may belong to a *different* GitHub account than the one the Project board is under — a classic, correctly-scoped token, so nothing about it looks wrong. It fails as `NOT_FOUND: Could not resolve to a ProjectV2`, which reads like a wrong project number, not a wrong identity. Have them check: `gh api user --jq .login` should match `user:` in `config.yaml`.
 4. **`gh` CLI authenticated** (`gh auth status`) — needed for the binary download path, for `FABRIK_TOKEN=$(gh auth token)` above, and convenient for many Fabrik workflows.
 5. **Go 1.26.1+** — only required if they want to build from source instead of downloading a release binary.
 
@@ -83,7 +83,7 @@ If the user runs `fabrik init` without `--create-board` or a URL, it falls back 
 `fabrik init` also updates `.git/info/exclude` (when run inside a git checkout) with `.fabrik/repos/`, `.fabrik/worktrees/`, `.fabrik/debug/`, `.fabrik/history.json`, and `.fabrik/warnings.json` — **not** `.fabrik/plugin/`. Two things worth telling the user:
 
 - `.git/info/exclude` is **machine-local** — it doesn't travel with the repo. A second machine or a fresh clone starts without any of it. If they want the exclusion to travel with the repo, recommend a `.gitignore` snippet instead (see below).
-- A few runtime artifacts a fresh setup will produce aren't excluded by `fabrik init` at all: `.fabrik/fabrik.lock`, `.fabrik/fabrik.log`, `.fabrik/logs/`, `.fabrik/sessions/`, `.fabrik/plugin/.installed-version`.
+- A few runtime artifacts a fresh setup will produce aren't excluded by `fabrik init` at all: `.fabrik/fabrik.lock`, `.fabrik/fabrik.log` (plus its rotated `.fabrik/fabrik.log.N` backups), `.fabrik/logs/`, `.fabrik/sessions/`, `.fabrik/plugin/.installed-version`.
 
 Suggested `.gitignore` snippet for anyone who wants this to travel (note `.fabrik/plugin/` is deliberately *not* in this list — see above):
 
@@ -95,6 +95,7 @@ Suggested `.gitignore` snippet for anyone who wants this to travel (note `.fabri
 .fabrik/warnings.json
 .fabrik/fabrik.lock
 .fabrik/fabrik.log
+.fabrik/fabrik.log.*
 .fabrik/logs/
 .fabrik/sessions/
 .fabrik/plugin/.installed-version
@@ -122,7 +123,7 @@ Otherwise, the Project board needs a status column for each stage. `fabrik init`
 
 `Queued` is easy to miss by eye since it's a holding column, not a pipeline stage — it's only used when the merge-train feature (`merge_train: on`) is enabled, but `fabrik init` extracts its stage YAML unconditionally, so a board built without it produces a startup warning immediately, and outright fails startup if `merge_train` is later turned on without the column existing. See the User Guide's merge-train section for what it's for.
 
-Column names must match `name:` in the stage YAML files **exactly** (case-sensitive). On startup, Fabrik validates this and refuses to start if any non-cleanup stage is missing from the board — so it's worth getting right before the first run. If the board already exists and is missing columns (e.g. it predates `Queued`), run `fabrik repair-board --apply` to add them without disturbing any item's current status, instead of editing the board by hand.
+Column names must match `name:` in the stage YAML files **exactly** (case-sensitive). On startup, Fabrik validates this and refuses to start if any non-cleanup stage is missing from the board — so it's worth getting right before the first run. If the board already exists and is missing columns (e.g. it predates `Queued`), run `fabrik repair-board --apply` to add them without disturbing any item's current status, instead of editing the board by hand. `repair-board --apply` also creates the display-only project fields (`Fabrik`, `Last activity`, `Last run`) when they are missing.
 
 If the user wants a custom pipeline they should edit `.fabrik/stages/*.yaml` and rename columns to match. This is a deeper customization — point them at the User Guide before going down that road.
 
@@ -141,6 +142,17 @@ Useful flags for the first run:
 - `fabrik --debug-output` — saves raw Claude output to `.fabrik/debug/` for troubleshooting a stage.
 - `fabrik --notui` — disables the TUI dashboard (plain log output instead).
 - The TUI dashboard is the default UI; press `?` for keybinds.
+
+## Step 6 — install the `fabrik` plugin in the user's own session (optional)
+
+This plugin is what lets Claude answer "what's the status of #N?" from the running daemon. If they are reading this skill they probably have it, but the *version* has to match their binary. In Claude Code:
+
+```
+/plugin marketplace add handarbeit/fabrik
+/plugin install fabrik@fabrik
+```
+
+The plugin starts `fabrik mcp` for the session, so `fabrik` must be on `PATH`. It asks for two optional settings: a **subscriber name** (needed only for the overseer actions and pushed events; pick a stable name such as the topic you are working on, never a PID) and a **Fabrik directory** (leave empty to use the session's own directory). Marketplace auto-update is off by default for third-party marketplaces; the user can turn it on from the marketplace's entry in `/plugin`. A session-start notice tells them if the plugin and the binary versions differ. If they previously registered the server by hand with `claude mcp add fabrik -- fabrik mcp`, have them remove that (`claude mcp remove fabrik`) so there is only one.
 
 ## Compatibility gotcha
 

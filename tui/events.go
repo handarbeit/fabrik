@@ -93,6 +93,18 @@ type TrainRowEvent struct {
 
 func (TrainRowEvent) tuiEvent() {}
 
+// WorkerSlotsEvent reports worker-slot occupancy for the In Progress title (#2115,
+// ADR 2115): the general max_concurrent pool and the reserved merge-train slot,
+// shown separately (e.g. "slots 5/5 + train 1/1"). TrainMax is 0 when merge_train is
+// off, in which case no train segment is rendered. Delivered structurally so the
+// latest value is never dropped.
+type WorkerSlotsEvent struct {
+	InUse, Max           int
+	TrainInUse, TrainMax int
+}
+
+func (WorkerSlotsEvent) tuiEvent() {}
+
 // IssueBlockedEvent is emitted when an issue is held at the dependency gate.
 // It is emitted each time checkDependencies fires for a blocked issue.
 type IssueBlockedEvent struct {
@@ -235,9 +247,9 @@ type RateLimitAlertEvent struct {
 func (RateLimitAlertEvent) tuiEvent() {}
 
 // ClaudeUsageLimitAlertEvent is emitted by the engine when the account-wide
-// Claude usage-limit suspension state changes: Suspended=true when a worker
-// observes the account's usage limit (session or weekly) and suspends new
-// Claude dispatch account-wide; Suspended=false when the suspension clears,
+// Claude usage-limit hold state changes: UsageLimited=true when a worker
+// observes the account's usage limit (session or weekly) and holds new
+// Claude dispatch account-wide; UsageLimited=false when the usage-limit hold clears,
 // either because the computed reset time passed or because an invocation
 // succeeded ahead of it. Reset is the time dispatch is expected to resume
 // (zero if unknown).
@@ -247,8 +259,8 @@ func (RateLimitAlertEvent) tuiEvent() {}
 // at the same time. Conflating the two under one name would make it
 // impossible to tell which budget is exhausted from the log/TUI alone.
 type ClaudeUsageLimitAlertEvent struct {
-	Suspended bool
-	Reset     time.Time
+	UsageLimited bool
+	Reset        time.Time
 }
 
 func (ClaudeUsageLimitAlertEvent) tuiEvent() {}

@@ -16,7 +16,7 @@ or the fabrik source itself — wins.
 
 ## Pause & Block
 
-Labels that suspend processing entirely.
+Labels that stop processing entirely.
 
 - **`fabrik:paused`** — Processing stopped on active stages. Applied after
   retry exhaustion, `FABRIK_BLOCKED_ON_INPUT`, a review/CI/rebase timeout or
@@ -38,7 +38,7 @@ Labels that suspend processing entirely.
   discovered on some later poll — so the parent picks up this label on its
   very next evaluation, not eventually. Cleared as soon as
   all blockers close — either immediately (a push-based observer) or within
-  one dependency re-check cycle. Suspends all stage dispatch while present.
+  one dependency re-check cycle. Blocks all stage dispatch while present.
 
 ## Gates
 
@@ -220,9 +220,9 @@ except where noted.
   Applied to a non-Validate issue: only the trigger label is removed, with
   a warning. Safe to apply mid-flight — held until the active worker exits.
 - **`fabrik:clear-claude-limit`** — One-shot operator command: clears an
-  active account-wide Claude usage-limit suspension without an engine
+  active account-wide Claude usage-limit hold without an engine
   restart. Consumed and removed from every carrying item in the same poll
-  pass. Not scoped to the issue it's applied to — the suspension it clears
+  pass. Not scoped to the issue it's applied to — the usage-limit hold it clears
   is account-wide.
 
 ## Engine-Internal & Informational
@@ -310,7 +310,7 @@ and should recognize.
   counts toward the normal dispatch cooldown, but not against
   `max_retries` — the stage never actually ran. Cleared on the issue's
   next invocation that isn't itself a usage-limit exit, or account-wide
-  once the suspension lifts. Distinct from GitHub's own API rate limiting.
+  once the usage-limit hold lifts. Distinct from GitHub's own API rate limiting.
 - **`fabrik:api-key-helper-detected`** — Set when a stage invocation is
   skipped because the worktree's own `.claude/settings.json` or
   `settings.local.json` sets `apiKeyHelper` — a repo-resident setting Fabrik cannot see until the
@@ -318,6 +318,12 @@ and should recognize.
   against `max_retries`, no `fabrik:paused`/`stage:<name>:failed`. Clears
   automatically once `apiKeyHelper` is removed and a later invocation
   reaches Claude successfully — no manual removal needed.
+- **`fabrik:skill-unresolved`** — Set when a stage's skill reference
+  (`skill`, `comment_skill`, `ci_fix_skill` or `rebase_skill`, written
+  `<plugin>:<skill>`) matches no plugin loaded for the worker, so the stage
+  is not run and no worker is spawned. Does not count against `max_retries`;
+  no `fabrik:paused`/`stage:<name>:failed`. Clears automatically on the next
+  invocation that resolves — fix the stage YAML or load the plugin.
 - **`fabrik:tools-denied`** — Set when a Claude invocation's tool call(s)
   were denied by the CLI's own permission layer (detected structurally
   from the CLI's `permission_denials` result field, never from output

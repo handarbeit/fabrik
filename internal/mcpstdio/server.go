@@ -61,8 +61,19 @@ type Server struct {
 	Subscriber string
 	// Stream runs the held connection; nil selects localapi.RunStream.
 	Stream StreamFunc
+	// DisableStream keeps the channel stream from starting even when Subscriber
+	// is set — the shim is outside a Fabrik project, so there is no daemon to
+	// reach and a daemon-unreachable notice would mislead (#2207). Subscriber is
+	// left intact: it is still the audit name for the action tools and the
+	// default for fabrik_subscribe.
+	DisableStream bool
 	// UnreachableGrace overrides DefaultUnreachableGrace.
 	UnreachableGrace time.Duration
+
+	skewMu      sync.Mutex
+	skewDone    bool      // the skew note has been shown; never repeated
+	skewChecked time.Time // when a check last found no skew; zero = never
+	skewNow     func() time.Time
 
 	wmu        sync.Mutex
 	streamOnce sync.Once
@@ -242,10 +253,11 @@ func (s *Server) initialize(params json.RawMessage) map[string]any {
 			"experimental": map[string]any{"claude/channel": map[string]any{}},
 		},
 		"serverInfo": map[string]any{"name": "fabrik", "version": s.Version},
-		"instructions": "View of a running Fabrik daemon's in-memory state, served from the daemon's cache at no GitHub cost (fabrik_status, fabrik_board, fabrik_health). " +
+		"instructions": "View of a running Fabrik daemon's in-memory state, served from the daemon's cache at no GitHub cost (fabrik_status, fabrik_board, fabrik_health, fabrik_situation). " +
 			"Every response states how fresh it is (as_of); a value the daemon cannot vouch for is the string \"unknown\", never a default. " +
-			"Start with fabrik_board (attention) to see what needs looking at, then fabrik_status for one issue. " +
-			"Four action tools (fabrik_promote, fabrik_set_autonomy, fabrik_revalidate, fabrik_clear_claude_limit) make the daemon write to GitHub and leave a Fabrik audit comment naming this session's --subscriber name; they refuse, with the current state, when a precondition does not hold. " +
+			"Start with fabrik_situation for the one rolled-up answer to what needs you (merge decisions, gated items, items waiting for input, pending decisions, merge-train and poll health, anomalies), or fabrik_board (attention) to see what needs looking at, then fabrik_status for one issue. " +
+			"When the poll loop itself is stalled, fabrik_health.poll.overdue says so, items that only need the poll read as waiting-for-poll rather than stalled, and a pipeline-stalled event is pushed. " +
+			"Six action tools (fabrik_promote, fabrik_set_autonomy, fabrik_revalidate, fabrik_advance, fabrik_move_parked, fabrik_clear_claude_limit) make the daemon write to GitHub and leave a Fabrik audit comment naming this session's --subscriber name; they refuse, with the current state, when a precondition does not hold. " +
 			"There is no tool to lift a pause or to comment: answer a paused item with a comment on the issue itself." + channelInstructions,
 	}
 }
@@ -298,6 +310,19 @@ func (s *Server) toolsCall(ctx context.Context, req request) {
 		pretty.Write(result)
 	}
 	res := textResult(pretty.String(), false)
+	daemonVersion := ""
+	if p.Name == ToolHealth {
+		var h struct {
+			Version string `json:"version"`
+		}
+		if json.Unmarshal(result, &h) == nil {
+			daemonVersion = h.Version
+			res.Content = append(res.Content, toolContent{Type: "text", Text: versionsLine(h.Version, s.Version)})
+		}
+	}
+	if note := s.skewNote(ctx, daemonVersion); note != "" {
+		res.Content = append(res.Content, toolContent{Type: "text", Text: note})
+	}
 	if p.Name == ToolSubscribe {
 		// The daemon cannot know whether this session loaded the shim as a channel;
 		// say so rather than let a successful subscribe imply delivery.
@@ -306,9 +331,78 @@ func (s *Server) toolsCall(ctx context.Context, req request) {
 	s.reply(req.ID, res)
 }
 
+// versionsLine is the fabrik_health line naming both builds.
+func versionsLine(daemon, shim string) string {
+	if daemon == "" {
+		daemon = "unknown"
+	}
+	if shim == "" {
+		shim = "unknown"
+	}
+	return fmt.Sprintf("Versions — daemon: %s, MCP server: %s", daemon, shim)
+}
+
+// skewRecheckInterval is how long a check that found no skew is trusted before
+// the next tool call asks the daemon again. A daemon that upgrades mid-session
+// is therefore noticed within this long, while a session whose builds match
+// does not pay a hello round trip on every call.
+const skewRecheckInterval = 5 * time.Minute
+
+// skewNote returns the version-skew notice the first time this server sees a
+// daemon build different from its own, and "" every other time (#2168). The
+// daemon self-upgrades while this server lives as long as its Claude session,
+// so skew is the normal case; the notice says what to do about it. daemonVersion
+// is the daemon's version when the calling tool already returned it, otherwise
+// one hello asks. Until the notice is shown a check that finds no skew (equal
+// builds, or a daemon that reports no version) is trusted for
+// skewRecheckInterval and then repeated, so a mid-session upgrade is noticed
+// without a hello per call; a failed hello is simply "unknown": no note, no
+// error, retried on the next call. The hello runs outside skewMu so concurrent
+// tool calls never queue behind it. Versions are compared as opaque strings. A
+// server with no version of its own has nothing to compare.
+func (s *Server) skewNote(ctx context.Context, daemonVersion string) string {
+	if s.Version == "" {
+		return ""
+	}
+	now := time.Now
+	if s.skewNow != nil {
+		now = s.skewNow
+	}
+	s.skewMu.Lock()
+	skip := s.skewDone || (daemonVersion == "" && !s.skewChecked.IsZero() && now().Sub(s.skewChecked) < skewRecheckInterval)
+	s.skewMu.Unlock()
+	if skip {
+		return ""
+	}
+	if daemonVersion == "" {
+		cctx, cancel := context.WithTimeout(ctx, s.CallTimeout)
+		defer cancel()
+		var hello struct {
+			DaemonVersion string `json:"daemon_version"`
+		}
+		if err := s.Call(cctx, s.SocketPath, localapi.MethodHello, nil, &hello); err != nil {
+			return ""
+		}
+		daemonVersion = hello.DaemonVersion
+	}
+	s.skewMu.Lock()
+	defer s.skewMu.Unlock()
+	if s.skewDone {
+		return "" // a concurrent call showed it first
+	}
+	if daemonVersion == "" || daemonVersion == s.Version {
+		s.skewChecked = now()
+		return ""
+	}
+	s.skewDone = true
+	return fmt.Sprintf("Note: the Fabrik daemon is %s but this MCP server is %s. The daemon has been upgraded or rebuilt since this session started; "+
+		"restart the Claude session to pick up the new server. Until then a tool or event name the daemon changed may be rejected or mapped (the response says which).",
+		daemonVersion, s.Version)
+}
+
 func subscribeNote(attached string) string {
 	note := "Note: Fabrik cannot tell whether this session receives channel pushes. They appear only if Claude Code was started with Channels enabled for this server " +
-		"(research preview: claude --dangerously-load-development-channels server:fabrik; Team/Enterprise orgs must also allow channels). Otherwise events are dropped silently."
+		"(research preview: claude --dangerously-load-development-channels server:fabrik, or plugin:fabrik@fabrik when installed through the fabrik plugin; Team/Enterprise orgs must also allow channels). Otherwise events are dropped silently."
 	if attached == "" {
 		note += " This server was launched without --subscriber, so it holds no push connection: events for this subscription are held by the daemon and delivered once a server with that name attaches."
 	}
@@ -320,6 +414,9 @@ func subscribeNote(attached string) string {
 // "does not support actions" rather than an opaque protocol code.
 func describeToolError(tool string, err error) string {
 	var pe *localapi.Error
+	if tool == ToolSituation && errors.As(err, &pe) && pe.Code == localapi.CodeUnknownMethod {
+		return "this Fabrik daemon predates fabrik_situation; upgrade and restart it (fabrik_board with view=attention and fabrik_health give the pieces meanwhile)"
+	}
 	if IsActionTool(tool) && errors.As(err, &pe) && pe.Code == localapi.CodeUnknownMethod {
 		return "this Fabrik daemon does not support overseer actions (it predates them or has them disabled); upgrade and restart it, or make the change as a human on GitHub"
 	}

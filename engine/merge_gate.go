@@ -128,7 +128,8 @@ func (e *Engine) buildRebaseComment(item gh.ProjectItem, stage *stages.Stage, ba
 // lives in reinvoke.go.
 func (e *Engine) dispatchRebaseReinvoke(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) {
 	e.dispatchReinvoke(ctx, board, item, stage, reinvokeOpts{
-		tag: "rebase-reinvoke",
+		tag:  "rebase-reinvoke",
+		kind: itemstate.WorkerKindRebaseReinvoke,
 		// #1812: refunded by dispatchReinvoke when the invocation provably never
 		// ran; the after hook (auto-merge re-enable) is skipped then.
 		cycle: cycleCharge{
@@ -205,6 +206,7 @@ func (e *Engine) reenableAutoMergeAfterRebase(item gh.ProjectItem) {
 				e.logf(item.Number, "warn", "direct merge fallback after rebase failed: %v\n", mergeErr)
 			} else {
 				e.logf(item.Number, "info", "PR #%d merged directly after rebase push (already-clean fallback)\n", pr.Number)
+				e.emitLanded(item, pr.Number) // #2123
 			}
 		} else {
 			e.logf(item.Number, "warn", "auto-merge re-enable after rebase failed: %v\n", rerr)
@@ -706,6 +708,11 @@ func (e *Engine) advanceConvergedPRToDone(board *gh.ProjectBoard, item gh.Projec
 	// doc comment (advance_settle.go) for why that's safe even when
 	// recordAdvanceOutcome just failed.
 	if merged {
+		// #2123: announce the landing before any close tracking, once the Done
+		// advance actually happened (the same condition as the marker below).
+		if advErr == nil {
+			e.emitLanded(item, prNumber)
+		}
 		e.closeIssueIfNonDefaultBase(item, prNumber)
 		// #1616: mark for post-Done landing verification — but only once the
 		// item actually reached Done (advErr == nil). Unlike

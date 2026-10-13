@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -317,5 +318,182 @@ func TestShimTellsItsSessionWhenAnotherSessionTakesTheName(t *testing.T) {
 	}
 	if c, _ := n["content"].(string); !strings.Contains(c, "took over") {
 		t.Fatalf("the notice must explain what happened: %q", c)
+	}
+}
+
+// The label-event attribution keys (#2125) are identifier keys and survive the filter.
+func TestChannelNotificationKeepsAttributionKeys(t *testing.T) {
+	ev := channelevents.Event{
+		Type: channelevents.LabelApplied, Repo: "o/r", Issue: 3, Label: "fabrik:cruise",
+		Meta: map[string]string{"actor": "overseer", "via": "x", "actor_login": "alice"},
+	}
+	meta := channelNotification(ev)["meta"].(map[string]string)
+	for k, v := range map[string]string{"actor": "overseer", "via": "x", "actor_login": "alice"} {
+		if meta[k] != v {
+			t.Errorf("meta[%q] = %q, want %q", k, meta[k], v)
+		}
+	}
+}
+
+func TestSubscribeToolPassesProgressViaColumn(t *testing.T) {
+	_, p, err := buildCall(ToolSubscribe, json.RawMessage(`{"progress_via_column":true,"events":["column-changed"]}`), "topic-x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sp := p.(localapi.SubscribeParams); !sp.ProgressViaColumn {
+		t.Fatalf("progress_via_column dropped: %+v", sp)
+	}
+	_, p, _ = buildCall(ToolSubscribe, json.RawMessage(`{}`), "topic-x")
+	if p.(localapi.SubscribeParams).ProgressViaColumn {
+		t.Fatal("option must default off")
+	}
+	// The new event names are offered in the tool schema.
+	for _, want := range []string{"item-added", "column-changed", "closed"} {
+		if !strings.Contains(eventList(), want) {
+			t.Errorf("event list lacks %q", want)
+		}
+	}
+}
+
+func TestSubscribeToolPassesRemindAfterAndRejectsNegative(t *testing.T) {
+	_, p, err := buildCall(ToolSubscribe, json.RawMessage(`{"issues":["7"],"remind_after":3600}`), "topic-x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sp := p.(localapi.SubscribeParams); sp.RemindAfterSeconds != 3600 {
+		t.Fatalf("remind_after not passed through: %+v", sp)
+	}
+	_, p, err = buildCall(ToolSubscribe, json.RawMessage(`{"issues":["7"]}`), "topic-x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sp := p.(localapi.SubscribeParams); sp.RemindAfterSeconds != 0 {
+		t.Fatalf("reminders must be off by default: %+v", sp)
+	}
+	if _, _, err := buildCall(ToolSubscribe, json.RawMessage(`{"remind_after":-5}`), "topic-x"); err == nil {
+		t.Fatal("a negative remind_after must be rejected")
+	}
+}
+
+func TestSubscribeToolDescribesReadinessAndNewEvents(t *testing.T) {
+	var sub map[string]any
+	for _, d := range toolDefs() {
+		if d["name"] == ToolSubscribe {
+			sub = d
+		}
+	}
+	if sub == nil {
+		t.Fatal("no subscribe tool")
+	}
+	desc := sub["description"].(string)
+	for _, want := range []string{"not a readiness signal", "validate-settled", "settlement-withdrawn", "decision-pending", "remind_after", "options"} {
+		if !strings.Contains(desc, want) {
+			t.Errorf("fabrik_subscribe description lacks %q", want)
+		}
+	}
+	props := sub["inputSchema"].(map[string]any)["properties"].(map[string]any)
+	if _, ok := props["remind_after"]; !ok {
+		t.Error("remind_after missing from the input schema")
+	}
+	enum := props["events"].(map[string]any)["items"].(map[string]any)["enum"].([]string)
+	got := strings.Join(enum, ",")
+	for _, ev := range []string{"decision-pending", "settlement-withdrawn"} {
+		if !strings.Contains(got, ev) {
+			t.Errorf("events enum lacks %s", ev)
+		}
+	}
+	if !strings.Contains(channelInstructions, "not a readiness signal") {
+		t.Error("channel instructions must repeat that label events are not a readiness signal")
+	}
+}
+
+// #2169: the provenance key is `source` on the hub but `origin` on the wire,
+// because Claude Code sets the <channel> tag's own `source` from the server name.
+func TestChannelNotificationRenamesSourceToOriginAndDefaultsLive(t *testing.T) {
+	ev := channelevents.Event{Type: channelevents.ColumnChanged, Meta: map[string]string{channelevents.MetaSource: channelevents.SourceDowntimeDelta, "unverified": "true"}}
+	meta := channelNotification(ev)["meta"].(map[string]string)
+	if _, clash := meta["source"]; clash {
+		t.Fatalf("`source` must not reach the wire (it clashes with the channel tag's own attribute): %+v", meta)
+	}
+	if meta["origin"] != "downtime-delta" || meta["unverified"] != "true" {
+		t.Fatalf("meta = %+v", meta)
+	}
+	// Shim-built events carry no source of their own: they are live.
+	bare := channelNotification(channelevents.Event{Type: channelevents.DaemonReachable})["meta"].(map[string]string)
+	if bare["origin"] != "live" {
+		t.Fatalf("a shim-generated event must be origin=live: %+v", bare)
+	}
+}
+
+func TestSubscribeToolSaysLabelEventsAreOptIn(t *testing.T) {
+	var desc, evDesc string
+	for _, d := range toolDefs() {
+		if d["name"] == ToolSubscribe {
+			desc = d["description"].(string)
+			props := d["inputSchema"].(map[string]any)["properties"].(map[string]any)
+			evDesc = props["events"].(map[string]any)["description"].(string)
+		}
+	}
+	for _, want := range []string{"semantic event family", "opt-in", "not a readiness signal", "downtime-delta"} {
+		if !strings.Contains(desc, want) {
+			t.Errorf("fabrik_subscribe description lacks %q", want)
+		}
+	}
+	if strings.Contains(evDesc, "default: all") || !strings.Contains(evDesc, "semantic") {
+		t.Errorf("events schema must describe the semantic default: %q", evDesc)
+	}
+	for _, want := range []string{"opt-in", "origin", "cause", "downtime-delta"} {
+		if !strings.Contains(channelInstructions, want) {
+			t.Errorf("channel instructions lack %q", want)
+		}
+	}
+}
+
+// DisableStream keeps the held channel stream from starting even though a
+// subscriber is set (outside a Fabrik project, #2207); without it the stream
+// starts exactly once.
+func TestDisableStreamSuppressesTheStreamButNotTheSubscriber(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		disable bool
+		want    int32
+	}{{"disabled", true, 0}, {"enabled", false, 1}} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int32
+			started := make(chan struct{}, 1)
+			var out, errBuf bytes.Buffer
+			srv := &Server{
+				SocketPath: filepath.Join(shortDir(t), "none.sock"), Version: "v-test",
+				Subscriber: "topic", DisableStream: tc.disable,
+				Stream: func(ctx context.Context, _ localapi.StreamOptions) error {
+					calls.Add(1)
+					select {
+					case started <- struct{}{}:
+					default:
+					}
+					<-ctx.Done()
+					return nil
+				},
+				In: strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}` + "\n" +
+					`{"jsonrpc":"2.0","method":"notifications/initialized"}` + "\n"),
+				Out: &out, Err: &errBuf, CallTimeout: 3 * time.Second,
+			}
+			if err := srv.Serve(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if tc.want == 1 {
+				select {
+				case <-started:
+				case <-time.After(5 * time.Second):
+					t.Fatal("stream never started")
+				}
+			}
+			if got := calls.Load(); got != tc.want {
+				t.Errorf("stream calls = %d, want %d", got, tc.want)
+			}
+			if strings.Contains(out.String(), "daemon-unreachable") {
+				t.Errorf("unexpected daemon-unreachable notice: %s", out.String())
+			}
+		})
 	}
 }

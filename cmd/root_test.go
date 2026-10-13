@@ -728,3 +728,55 @@ func TestStallThreshold(t *testing.T) {
 		t.Errorf("stallThreshold(10) = %v, want 10m", got)
 	}
 }
+
+func TestReexecStartReason(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{"fresh", nil, "fresh start"},
+		{"sighup", map[string]string{"FABRIK_SIGHUP_RESTART": "1"}, "SIGHUP restart"},
+		{"release upgrade", map[string]string{"FABRIK_AUTO_UPGRADED": "1"}, "self-upgrade re-exec"},
+		{"dev upgrade", map[string]string{"FABRIK_DEV_REEXEC": "1"}, "self-upgrade re-exec (dev build)"},
+		{"marker not 1", map[string]string{"FABRIK_SIGHUP_RESTART": "0"}, "fresh start"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, k := range []string{"FABRIK_SIGHUP_RESTART", "FABRIK_AUTO_UPGRADED", "FABRIK_DEV_REEXEC"} {
+				t.Setenv(k, "")
+			}
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			if got := reexecStartReason(); got != tc.want {
+				t.Errorf("reexecStartReason() = %q, want %q", got, tc.want)
+			}
+			if os.Getenv("FABRIK_DEV_REEXEC") != "" {
+				t.Error("FABRIK_DEV_REEXEC must be unset after the read")
+			}
+		})
+	}
+}
+
+func TestMinutesOrDefault(t *testing.T) {
+	for _, tc := range []struct {
+		minutes, def int
+		want         time.Duration
+	}{
+		{0, 5, 5 * time.Minute},
+		{-3, 10, 10 * time.Minute},
+		{7, 5, 7 * time.Minute},
+	} {
+		if got := minutesOrDefault(tc.minutes, tc.def); got != tc.want {
+			t.Errorf("minutesOrDefault(%d, %d) = %v, want %v", tc.minutes, tc.def, got, tc.want)
+		}
+	}
+}
+
+func TestAnomalyThresholdFlagsAreDefined(t *testing.T) {
+	for _, name := range []string{"retry-starved-threshold", "item-wedged-threshold", "cache-divergence-window"} {
+		if flag.Lookup(name) == nil {
+			t.Errorf("flag --%s is not registered", name)
+		}
+	}
+}

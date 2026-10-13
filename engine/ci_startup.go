@@ -251,8 +251,8 @@ func describeStartupRun(r gh.WorkflowRun) string {
 }
 
 // isPermissionRefusal reports whether err is GitHub refusing the credential
-// access to an endpoint (403/404) — the soft, degradable condition for the
-// optional `actions` permission (R7).
+// access to an endpoint (403/404) — the soft, degradable condition for an
+// `actions` permission revoked at runtime (R7; required at startup since #2105).
 func isPermissionRefusal(err error) bool {
 	return errors.Is(err, gh.ErrForbidden) || errors.Is(err, gh.ErrNotFound)
 }
@@ -274,11 +274,13 @@ func (e *Engine) fetchWorkflowRunsSoft(logRepo, owner, repo, sha string) (runs [
 	return nil, false, false
 }
 
-// logActionsDegradedOnce logs, once per process, that the optional Actions
-// permission is missing and CI-infrastructure handling is therefore off.
+// logActionsDegradedOnce logs, once per process, that the Actions permission was
+// refused at runtime and CI-infrastructure handling is therefore off. Startup
+// guarantees `actions: write` was granted (#2105), so this means it was revoked
+// or the request was never accepted after startup.
 func (e *Engine) logActionsDegradedOnce(logRepo string, err error) {
 	if e.actionsDegradeLogged.CompareAndSwap(false, true) {
-		e.logfRepo(logRepo, "ci-infra", "warn: the GitHub credential lacks the optional `actions` permission (%v) — CI startup-failure detection and failed-job re-run are disabled; behaving as before. Grant `actions: read` (detection) and `actions: write` (re-run) to enable.\n", err)
+		e.logfRepo(logRepo, "ci-infra", "warn: the GitHub credential was refused the `actions` permission (%v) — it was granted at startup, so it has likely been revoked since. CI startup-failure detection and failed-job re-run are disabled until `actions: write` is granted again.\n", err)
 	}
 }
 
@@ -408,7 +410,7 @@ func infraNote(diag *trainCIDiagnostic) string {
 
 // markInfraAbandon starts the post-abandon cooldown for a train partition.
 func (e *Engine) markInfraAbandon(trainKey string) {
-	until := time.Now().Add(e.ciInfraTimingOrDefault().abandonCooldown)
+	until := e.now().Add(e.ciInfraTimingOrDefault().abandonCooldown)
 	e.mergeTrainInfraMu.Lock()
 	defer e.mergeTrainInfraMu.Unlock()
 	if e.mergeTrainInfraCooldown == nil {
@@ -426,9 +428,27 @@ func (e *Engine) infraCooldownRemaining(trainKey string) (time.Duration, bool) {
 	if !ok {
 		return 0, false
 	}
-	remaining := time.Until(until)
+	remaining := until.Sub(e.now())
 	if remaining <= 0 {
 		delete(e.mergeTrainInfraCooldown, trainKey)
+		return 0, false
+	}
+	return remaining, true
+}
+
+// infraCooldownPeek is infraCooldownRemaining without the side effect: an
+// elapsed entry is reported as not held and left in place. The read-only
+// health path (#2124) uses it so observing the cooldown never mutates engine
+// state.
+func (e *Engine) infraCooldownPeek(trainKey string) (time.Duration, bool) {
+	e.mergeTrainInfraMu.Lock()
+	defer e.mergeTrainInfraMu.Unlock()
+	until, ok := e.mergeTrainInfraCooldown[trainKey]
+	if !ok {
+		return 0, false
+	}
+	remaining := until.Sub(e.now())
+	if remaining <= 0 {
 		return 0, false
 	}
 	return remaining, true

@@ -10,7 +10,7 @@ import (
 // This file is R5's Claude-limit-path coverage beyond what
 // failure_shapes_test.go's TestFailureShape_UsageLimitExit already
 // establishes (fabrik:claude-limit applied without stage:*:failed/
-// fabrik:paused; fabrik:clear-claude-limit lifting the suspension on the
+// fabrik:paused; fabrik:clear-claude-limit lifting the usage-limit hold on the
 // *same* issue that hit it). Two properties remain unproven there:
 //
 //  1. settleClaudeLimitLabelSweep (engine/claude_limit_settle.go) —
@@ -25,16 +25,16 @@ import (
 //     consequence of handleUsageLimitExit's own doc comment
 //     ("StageRetryIncremented is deliberately never called").
 //
-// Neither test needs the account-wide suspension's real 1-hour fallback
-// backoff to actually elapse — activateClaudeSuspension/
-// claudeSuspendedUntilTime are anchored to real time.Now(), not the
+// Neither test needs the account-wide usage-limit hold's real 1-hour fallback
+// backoff to actually elapse — activateClaudeUsageLimit/
+// claudeUsageLimitedUntilTime are anchored to real time.Now(), not the
 // injected Clock (see restart_recovery_test.go's sibling comment on the
 // same asymmetry; ADR-1449's engine-seam minimalism deliberately did not
 // extend the Clock seam to this path), so fast-forwarding it is not
 // available to this harness without a new production seam. Both scenarios
 // instead use fabrik:clear-claude-limit — the same deterministic,
 // real-time-independent lever CLAUDE.md documents as the operator escape
-// hatch for exactly this situation — to end the suspension on demand.
+// hatch for exactly this situation — to end the usage-limit hold on demand.
 //
 // The contrasting positive case ("a genuine repeated stage failure DOES
 // reach stage:<name>:failed/fabrik:paused at MaxRetries") is not
@@ -48,8 +48,8 @@ import (
 // TestClaudeLimitLabelSweep proves settleClaudeLimitLabelSweep — not
 // merely a per-issue redispatch that happens to also clear
 // fabrik:claude-limit — is what removes the label account-wide once the
-// suspension lifts. Two issues: #A actually hits the usage limit (a real
-// invocation, a real suspension); #B is seeded directly with
+// usage-limit hold lifts. Two issues: #A actually hits the usage limit (a real
+// invocation, a real usage-limit hold); #B is seeded directly with
 // fabrik:claude-limit + fabrik:paused and never dispatches again (paused
 // items are excluded from ordinary dispatch), so the *only* mechanism that
 // could ever remove #B's label is the unconditional per-poll sweep — not
@@ -64,12 +64,12 @@ func TestClaudeLimitLabelSweep(t *testing.T) {
 	numB := FileIssue(t, env, "claude-limit sweep: bystander", "body", "Specify", "fabrik:paused")
 
 	WaitForIssueLabel(t, env, numA, "fabrik:claude-limit", 80)
-	t.Logf("#%d hit the usage limit — account-wide suspension now active", numA)
+	t.Logf("#%d hit the usage limit — account-wide usage-limit hold now active", numA)
 
-	// #B's own fabrik:claude-limit is seeded only now, with the suspension
+	// #B's own fabrik:claude-limit is seeded only now, with the usage-limit hold
 	// already genuinely active — seeding it up front (before any real
-	// suspension exists) would race: settleClaudeLimitLabelSweep correctly
-	// treats "carries the label but nothing is suspended" as stale state and
+	// usage-limit hold exists) would race: settleClaudeLimitLabelSweep correctly
+	// treats "carries the label but nothing is usage limited" as stale state and
 	// clears it on the very first poll, before #A ever dispatches, which
 	// would make this scenario vacuous (B's label gone for the wrong
 	// reason, coincidentally before the assertion below even runs).
@@ -78,18 +78,18 @@ func TestClaudeLimitLabelSweep(t *testing.T) {
 	}
 	RunPoll(t, env)
 
-	// #B's label must NOT have cleared while the suspension is still active
+	// #B's label must NOT have cleared while the usage-limit hold is still active
 	// — the "not one poll early" half of non-vacuity: if the sweep ran
-	// unconditionally regardless of suspension state, this would already be
+	// unconditionally regardless of usage-limit hold state, this would already be
 	// false.
 	if !hasLabel(IssueLabels(t, env, numB), "fabrik:claude-limit") {
-		t.Fatal("#B's fabrik:claude-limit already cleared before the suspension lifted — the sweep must not run while still suspended")
+		t.Fatal("#B's fabrik:claude-limit already cleared before the usage-limit hold lifted — the sweep must not run while still usage limited")
 	}
 
 	if err := env.Sim.AddLabelToIssue(env.Owner, env.Repo, numA, "fabrik:clear-claude-limit"); err != nil {
 		t.Fatalf("AddLabelToIssue(fabrik:clear-claude-limit): %v", err)
 	}
-	t.Logf("cleared the suspension via #%d — settleClaudeLimitLabelSweep should now sweep every open item, including the bystander", numA)
+	t.Logf("cleared the usage-limit hold via #%d — settleClaudeLimitLabelSweep should now sweep every open item, including the bystander", numA)
 
 	// #B never dispatches (still fabrik:paused throughout), so its label
 	// clearing can only be the unconditional sweep, not a per-issue path.
@@ -104,7 +104,7 @@ func TestClaudeLimitLabelSweep(t *testing.T) {
 // consecutive usage-limit exits on the same issue with MaxRetries=1 — the
 // smallest budget that would, if StageRetryIncremented were ever called,
 // already escalate the issue by the second exit (count 2 >= MaxRetries 1).
-// Between the two, the suspension is lifted via fabrik:clear-claude-limit
+// Between the two, the usage-limit hold is lifted via fabrik:clear-claude-limit
 // (a real hour of wall-clock waiting is not something this scenario can
 // afford — see this file's own doc comment) so the second dispatch is
 // actually reached, not just theoretically eligible.
