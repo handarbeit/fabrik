@@ -58,6 +58,7 @@ The operator reads the entry and can act on it without reading source. Where no 
 - **FR-002**: The entry is resolved (`warnings.Resolve`) when a later start succeeds, including after a SIGHUP restart or self-upgrade re-exec.
 - **FR-003**: `FixAction` is set only where a concrete command applies. Otherwise the detail says what to check: the socket path's directory and permissions, and that a non-socket file at the path is never replaced.
 - **FR-004**: The existing log line stays (one line per failure).
+- **FR-005**: The PM plugin's troubleshooting text (`plugin/fabrik/skills/fabrik/SKILL.md` and `plugin/fabrik/commands/status.md`) names the warnings-panel entry as well as the log line, so it ships with the same release.
 
 ## Success Criteria *(mandatory)*
 
@@ -69,7 +70,7 @@ The operator reads the entry and can act on it without reading source. Where no 
 ## Notes
 
 - Target release: 0.0.85.
-- The PM plugin's troubleshooting text (PR #2222) points users at the log line until this lands.
+- The PM plugin's troubleshooting text (PR #2222) pointed users at the log line only; this change adds the panel entry to it (FR-005).
 
 ## Assumptions
 
@@ -82,5 +83,5 @@ The operator reads the entry and can act on it without reading source. Where no 
 
 - Retrying the local API start while the daemon runs, or replacing a non-socket file at the socket path.
 - Changing how `fabrik mcp` words its "daemon not running" message.
-- Any change to the PM plugin's troubleshooting text (PR #2222 owns it).
+- Any change to the PM plugin's troubleshooting text beyond naming the panel entry (FR-005).
 - Other operator-level conditions not already in the panel.
