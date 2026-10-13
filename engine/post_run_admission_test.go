@@ -119,3 +119,43 @@ func TestEarliestShortCooldown(t *testing.T) {
 		t.Fatalf("earliest = %v, want start+20s", got)
 	}
 }
+
+// SC-002 (#2232): with idle backoff active, the next poll lands at a due
+// engine-scheduled retry rather than the idle interval; a long cooldown does not
+// cap; the cap is the only thing that does it.
+func TestPollWithBackoff_IdleIntervalCappedToDueRetry(t *testing.T) {
+	run := func(t *testing.T, reason string, disableCap bool) time.Duration {
+		client := &mockGitHubClient{
+			fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+				return &gh.ProjectBoard{}, nil
+			},
+			rateLimitStatsFn: func() (gh.RateLimitStats, gh.RateLimitStats) {
+				healthy := gh.RateLimitStats{Remaining: 5000, Limit: 5000, Reset: time.Now().Add(time.Hour)}
+				return healthy, healthy
+			},
+		}
+		eng := testEngine(t, client, &mockClaudeInvoker{})
+		now := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+		eng.SetClock(stubClock{t: now})
+		eng.idleStart = time.Now().Add(-time.Hour) // idle backoff at its maximum
+		eng.store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{Number: 7, Repo: cooldownTestRepo, Title: "x", Status: "Implement"}})
+		eng.store.Apply(itemstate.CooldownRecorded{Repo: cooldownTestRepo, Number: 7, Reason: reason, Until: now.Add(90 * time.Second)})
+		if disableCap {
+			defer SetIntervalCapDisabledForTest(true)()
+		}
+		res, err := eng.PollWithBackoff(context.Background(), 30*time.Second)
+		if err != nil {
+			t.Fatalf("PollWithBackoff: %v", err)
+		}
+		return res.NextInterval
+	}
+	if got := run(t, "retry-backoff", false); got != 90*time.Second {
+		t.Errorf("capped interval = %v, want 90s", got)
+	}
+	if got := run(t, "retry-backoff", true); got <= 90*time.Second {
+		t.Errorf("with the cap disabled the interval = %v, want the idle interval (> 90s)", got)
+	}
+	if got := run(t, "periodic-re-eval", false); got <= 90*time.Second {
+		t.Errorf("a long cooldown must not cap the idle interval, got %v", got)
+	}
+}
