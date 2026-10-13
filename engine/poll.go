@@ -2169,7 +2169,7 @@ func (e *Engine) dispatchCandidates(ctx context.Context, board *gh.ProjectBoard,
 		procListErr     error
 	)
 
-	for _, item := range deepFetchCandidates {
+	for _, item := range e.orderDispatchCandidates(deepFetchCandidates) {
 		if ctx.Err() != nil {
 			return dispatched, deferredKeys
 		}

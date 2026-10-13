@@ -440,6 +440,10 @@ type StageState struct {
 	// LastAttemptAt records the last invocation timestamp per stage.
 	// Replaces engine.processedSet[stageKey] for retry-suppression.
 	LastAttemptAt map[string]time.Time
+	// BackoffExempt marks a stage whose last invocation ended as a time slice
+	// (turn-cap or max_wall_time stop, #2232): the dispatch retry backoff does not
+	// apply to it. Rewritten by every StageAttempted; in memory only.
+	BackoffExempt map[string]bool
 	// PausedByEngine records engine-initiated pauses (vs user-initiated).
 	// Replaces engine.pausedDueToRetries[stageKey].
 	PausedByEngine map[string]bool

@@ -3,6 +3,7 @@ package sim
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -116,4 +117,111 @@ func TestFeedbackCachedDuringRunIsAdmittedAfterWorkerEnds(t *testing.T) {
 		}
 	}
 	t.Fatalf("comment never processed within 12 polls\n\n%s", diagnostics(env))
+}
+
+// recordingScript wraps next, appending the invoked issue number to *order.
+func recordingScript(mu *sync.Mutex, order *[]int, next simclaude.Script) simclaude.Script {
+	return func(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts engine.InvokeOptions) (string, bool, engine.TokenUsage, error) {
+		mu.Lock()
+		*order = append(*order, issue.Number)
+		mu.Unlock()
+		return next(ctx, stage, issue, newComments, resume, workDir, opts)
+	}
+}
+
+// Revised SC-001: a turn-cap stop is a time slice, so the item is re-dispatched
+// on one of the first polls with no retry backoff — even with an hour-long one.
+func TestTimeSliceRetriesOnNextPollWithoutBackoff(t *testing.T) {
+	t.Parallel()
+	env := incompleteRetryEnv(t, time.Hour, false)
+	env.Claude.ForStage("Specify", simclaude.TurnLimitExhausted(50), simclaude.DefaultScript)
+	FileIssue(t, env, "turn cap", "body", "Specify")
+
+	RunPoll(t, env) // dispatches; the worker is stopped by the turn cap
+	if got := env.Claude.StageCallCount("Specify"); got != 1 {
+		t.Fatalf("after the first poll: %d invocation(s), want 1", got)
+	}
+	for poll := 1; poll <= 12; poll++ {
+		RunPoll(t, env)
+		if env.Claude.StageCallCount("Specify") >= 2 {
+			if poll > 3 {
+				t.Fatalf("retried only on poll %d after the slice, want <= 3\n\n%s", poll, diagnostics(env))
+			}
+			return
+		}
+	}
+	t.Fatalf("a time slice waited out its backoff instead of retrying on the next poll\n\n%s", diagnostics(env))
+}
+
+// Revised SC-001, second half: an exit that returns quickly with an error is not
+// a slice and still waits out RetryBackoff.
+func TestFastErrorExitStillWaitsRetryBackoff(t *testing.T) {
+	t.Parallel()
+	env := incompleteRetryEnv(t, time.Hour, false)
+	fast := func(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts engine.InvokeOptions) (string, bool, engine.TokenUsage, error) {
+		return "", false, engine.TokenUsage{}, fmt.Errorf("claude exited with error: exit status 1")
+	}
+	env.Claude.ForStage("Specify", fast, simclaude.DefaultScript)
+	FileIssue(t, env, "fast error", "body", "Specify")
+
+	RunPoll(t, env)
+	if got := env.Claude.StageCallCount("Specify"); got != 1 {
+		t.Fatalf("after the first poll: %d invocation(s), want 1", got)
+	}
+	for poll := 1; poll <= 8; poll++ {
+		RunPoll(t, env)
+		if got := env.Claude.StageCallCount("Specify"); got != 1 {
+			t.Fatalf("a fast error exit was re-dispatched on poll %d, inside its backoff\n\n%s", poll, diagnostics(env))
+		}
+	}
+}
+
+// FR-006: with one worker slot, the sliced item goes behind the item that has
+// waited longer; it takes the slot only when nobody longer-waiting wants it.
+func TestSlicedItemYieldsSlotToLongerWaitingItem(t *testing.T) {
+	t.Parallel()
+	env := NewEnv(t, EnvOptions{
+		Stages:        failureShapeStages(),
+		MaxConcurrent: 1,
+		ConfigureCfg: func(cfg *engine.Config) {
+			cfg.PollSeconds = incompleteRetryPollSeconds
+			cfg.RetryBackoff = time.Hour
+		},
+	})
+	var (
+		mu    sync.Mutex
+		order []int
+		calls int
+	)
+	// The first invocation (A, the lower issue number) hits its turn cap; every
+	// later one completes.
+	script := func(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts engine.InvokeOptions) (string, bool, engine.TokenUsage, error) {
+		mu.Lock()
+		calls++
+		first := calls == 1
+		mu.Unlock()
+		if first {
+			return simclaude.TurnLimitExhausted(50)(ctx, stage, issue, newComments, resume, workDir, opts)
+		}
+		return simclaude.DefaultScript(ctx, stage, issue, newComments, resume, workDir, opts)
+	}
+	env.Claude.ForStage("Specify", recordingScript(&mu, &order, script))
+	a := FileIssue(t, env, "A: long job", "body", "Specify")
+	b := FileIssue(t, env, "B: waiting", "body", "Specify")
+
+	for poll := 1; poll <= 8; poll++ {
+		RunPoll(t, env)
+		mu.Lock()
+		got := append([]int(nil), order...)
+		mu.Unlock()
+		if len(got) >= 3 {
+			if got[0] != a || got[1] != b || got[2] != a {
+				t.Fatalf("dispatch order = %v, want [A=%d B=%d A=%d]: the sliced item must yield its slot\n\n%s", got, a, b, a, diagnostics(env))
+			}
+			return
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	t.Fatalf("expected A, B, A within 8 polls, got %v\n\n%s", order, diagnostics(env))
 }

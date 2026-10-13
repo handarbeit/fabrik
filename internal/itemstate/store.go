@@ -599,6 +599,11 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 	case StageAttempted:
 		ensureStageStateMaps(item)
 		item.StageState.LastAttemptAt[v.StageName] = v.At
+		if v.Slice {
+			item.StageState.BackoffExempt[v.StageName] = true
+		} else {
+			delete(item.StageState.BackoffExempt, v.StageName)
+		}
 		return StageStateChanged
 
 	case StageRetryIncremented:
@@ -1665,6 +1670,9 @@ func ensureStageStateMaps(item *ItemState) {
 	}
 	if ss.LastAttemptAt == nil {
 		ss.LastAttemptAt = make(map[string]time.Time)
+	}
+	if ss.BackoffExempt == nil {
+		ss.BackoffExempt = make(map[string]bool)
 	}
 	if ss.PausedByEngine == nil {
 		ss.PausedByEngine = make(map[string]bool)

@@ -55,6 +55,24 @@ retry the engine itself scheduled, so it waits for the periodic interval.
 | PR creation failed below `MaxRetries` | Record `now + backoff` (`StageAttempted` was stamped) |
 | apiKeyHelper detected, skill unresolved / load failed, boundary violation, escalations and pauses | Exempt: a human or config fix is needed, or the item is paused |
 
+## Time slices and dispatch order (amendment)
+
+The backoff only protects against a stage that exits incomplete *immediately*. A turn-cap stop or a
+`max_wall_time` kill has just run a full slice and is already bounded by `SliceRetries` and `max_retries`,
+so waiting `retry_backoff` there only idles the item. `isTimeSlice` classifies them from the engine's own
+structural signals (`TurnLimitError`, `KilledError{KillWallTime}`), deliberately not from run duration, so a
+fast error exit can never qualify (and an inactivity kill, a hang, keeps the backoff). Such an attempt is
+stamped `StageAttempted{Slice: true}` (`StageState.BackoffExempt`, rewritten by every attempt), both retry
+gates skip the backoff for it, an already-due `retry-backoff` cooldown is recorded and the log says
+`will retry on the next poll (time slice)`; the `WorkerExited` wake runs the poll. A duration threshold
+("ran longer than N × `retry_backoff`") was considered and rejected: it is a heuristic, and the structural
+signals already cover the cases the cap and the wall-time limit exist for.
+
+Without the backoff, board-order dispatch would let an item near the top of the board retake its own slot,
+starving everything behind it. Stage dispatch candidates are therefore ordered by time without a worker,
+longest first (`orderDispatchCandidates`: oldest `LastAttemptAt`, never-run first, ties by issue number).
+Seams: `SetTimeSliceBackoffDisabledForTest`, `SetDispatchOrderDisabledForTest`.
+
 ## Alternatives rejected
 
 - Moving the retry gate onto `e.now()`: `LastAttemptAt` is stamped with real time at many sites

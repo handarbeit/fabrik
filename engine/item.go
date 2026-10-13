@@ -445,7 +445,9 @@ func (e *Engine) itemNeedsWorkRetryAt(item gh.ProjectItem) (needs bool, retryIn 
 	repo := itemOwnerRepoString(item, e.defaultRepo())
 	if snap, snapErr := e.store.Get(repo, item.Number); snapErr == nil {
 		lastAttempt := snap.LastAttemptAt(stage.Name)
-		if !lastAttempt.IsZero() {
+		// A time slice (turn-cap / max_wall_time stop) is not a fast failure: the
+		// retry backoff does not apply (#2232).
+		if !lastAttempt.IsZero() && !snap.BackoffExempt(stage.Name) {
 			cooldown := e.stageRetryBackoff()
 			if elapsed := time.Since(lastAttempt); elapsed < cooldown {
 				return false, cooldown - elapsed
@@ -649,6 +651,10 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	var lastAttempt time.Time
 	if snap, snapErr := e.store.Get(repoStr, item.Number); snapErr == nil {
 		lastAttempt = snap.LastAttemptAt(stage.Name)
+		if snap.BackoffExempt(stage.Name) {
+			// The last run ended as a time slice: no retry backoff (#2232).
+			lastAttempt = time.Time{}
+		}
 	}
 	if !lastAttempt.IsZero() {
 		// If stage completed, the completion label above would have caught it.
@@ -1675,6 +1681,7 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 			Number:    item.Number,
 			StageName: stage.Name,
 			At:        time.Now(),
+			Slice:     isTimeSlice(err, turnLimited),
 		})
 	}
 
@@ -1815,7 +1822,14 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 		e.blockOnInput(item, stage, output)
 	} else {
 		cooldown := e.stageRetryBackoff()
-		if claudeRan {
+		slice := claudeRan && isTimeSlice(err, turnLimited)
+		if slice {
+			// A full slice just ran (turn cap or max_wall_time), so the backoff that
+			// stops a fast failure from looping does not apply; SliceRetries and
+			// max_retries still bound it (#2232).
+			cooldown = 0
+			e.logf(item.Number, "wait", "stage %q did not complete — will retry on the next poll (time slice)\n", stage.Name)
+		} else if claudeRan {
 			e.logf(item.Number, "wait", "stage %q did not complete — will retry after %v\n", stage.Name, cooldown)
 		} else {
 			// No StageAttempted was recorded, so no backoff applies.

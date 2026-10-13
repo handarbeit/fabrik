@@ -1,10 +1,12 @@
 package engine
 
 import (
+	"errors"
 	"sync/atomic"
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/claudeerr"
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
 )
@@ -90,7 +92,42 @@ var (
 	postRunRetryRecordDisabled       atomic.Bool
 	postRunFeedbackAdmissionDisabled atomic.Bool
 	intervalCapDisabled              atomic.Bool
+	timeSliceBackoffDisabled         atomic.Bool
+	dispatchOrderDisabled            atomic.Bool
 )
+
+// SetTimeSliceBackoffDisabledForTest neutralises (or restores) the time-slice
+// exemption from the retry backoff.
+func SetTimeSliceBackoffDisabledForTest(disabled bool) (restore func()) {
+	prev := timeSliceBackoffDisabled.Swap(disabled)
+	return func() { timeSliceBackoffDisabled.Store(prev) }
+}
+
+// SetDispatchOrderDisabledForTest neutralises (or restores) FR-006's
+// longest-waiting-first dispatch order, restoring board order.
+func SetDispatchOrderDisabledForTest(disabled bool) (restore func()) {
+	prev := dispatchOrderDisabled.Swap(disabled)
+	return func() { dispatchOrderDisabled.Store(prev) }
+}
+
+// isTimeSlice reports whether an incomplete invocation ended because the engine
+// bounded it, not because it failed: a turn-cap stop (error_max_turns) or a
+// max_wall_time kill. The worker just ran a full slice, and the existing
+// counters (SliceRetries, max_retries) bound the retries, so the backoff that
+// exists to stop a fast failure from looping does not apply (#2232). An
+// inactivity kill is a hang, not a slice, and keeps the backoff. Deciding by the
+// engine's own structural signals rather than by run duration keeps a fast
+// error exit from ever qualifying.
+func isTimeSlice(err error, turnLimited bool) bool {
+	if timeSliceBackoffDisabled.Load() {
+		return false
+	}
+	if turnLimited {
+		return true
+	}
+	var killed *claudeKilledError
+	return errors.As(err, &killed) && killed.Cause == claudeerr.KillWallTime
+}
 
 // SetPostRunRetryRecordDisabledForTest neutralises (or restores) FR-001.
 func SetPostRunRetryRecordDisabledForTest(disabled bool) (restore func()) {
@@ -134,10 +171,11 @@ func (e *Engine) recordStageRetryCooldownUntil(item gh.ProjectItem, until time.T
 // recordPostRunRetryCooldown is recordStageRetryCooldown for the post-run exits
 // (honours the FR-001 test switch; the dispatch-time backstop does not).
 func (e *Engine) recordPostRunRetryCooldown(item gh.ProjectItem, d time.Duration) {
-	if postRunRetryRecordDisabled.Load() {
+	if postRunRetryRecordDisabled.Load() || d < 0 {
 		return
 	}
-	e.recordStageRetryCooldown(item, d)
+	// d == 0 is a time slice: already due, so the very next poll admits the item.
+	e.recordStageRetryCooldownUntil(item, e.now().Add(d))
 }
 
 // capIntervalToDue shortens effective so the next poll lands at due, floored at
