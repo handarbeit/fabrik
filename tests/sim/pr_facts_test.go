@@ -81,6 +81,7 @@ func newPRFactsEnv(t *testing.T, boardCache bool) (*Env, func()) {
 }
 
 func TestSimRedCIOnLinkedPRIsVisibleOutsideAnyCIGate(t *testing.T) {
+	t.Parallel()
 	for _, stage := range []string{"Implement", "Review"} {
 		for _, boardCache := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/boardCache=%v", stage, boardCache), func(t *testing.T) {
@@ -146,6 +147,7 @@ func TestSimRedCIOnLinkedPRIsVisibleOutsideAnyCIGate(t *testing.T) {
 // The same scenario fails without the poll-side refresher: the assertions above
 // are not satisfied by something else.
 func TestSimRedCIOnLinkedPR_RefresherDisabledStaysUnknown(t *testing.T) {
+	t.Parallel()
 	env, _ := newPRFactsEnv(t, true)
 	env.Engine.SetPRFactsRefreshDisabledForTest(true)
 	num, _ := seedPRFactsItem(t, env, "Implement", false)
@@ -157,6 +159,7 @@ func TestSimRedCIOnLinkedPR_RefresherDisabledStaysUnknown(t *testing.T) {
 }
 
 func TestSimStatusToolMakesNoGitHubCall(t *testing.T) {
+	t.Parallel()
 	env, _ := newPRFactsEnv(t, true)
 	num, _ := seedPRFactsItem(t, env, "Implement", false)
 	RunPoll(t, env)
@@ -173,6 +176,7 @@ func TestSimStatusToolMakesNoGitHubCall(t *testing.T) {
 }
 
 func TestSimRedCIClearsOnRerunAndDropsOnNewHead(t *testing.T) {
+	t.Parallel()
 	env, _ := newPRFactsEnv(t, true)
 	num, sha := seedPRFactsItem(t, env, "Implement", false)
 	RunPoll(t, env)
@@ -202,6 +206,7 @@ func TestSimRedCIClearsOnRerunAndDropsOnNewHead(t *testing.T) {
 }
 
 func TestSimPRFactsAgeIntoStale(t *testing.T) {
+	t.Parallel()
 	env, _ := newPRFactsEnv(t, true)
 	num, _ := seedPRFactsItem(t, env, "Implement", false)
 	RunPoll(t, env)
@@ -224,6 +229,7 @@ func TestSimPRFactsAgeIntoStale(t *testing.T) {
 }
 
 func TestSimRedCIWithAWorkerInFlightSaysSo(t *testing.T) {
+	t.Parallel()
 	env := NewEnv(t, EnvOptions{Stages: prFactsStages(), MaxConcurrent: 2, Yolo: boolPtr(false), BoardCache: true})
 	t.Cleanup(env.Engine.RegisterObservers())
 	started := make(chan struct{})
