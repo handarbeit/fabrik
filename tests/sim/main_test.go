@@ -19,8 +19,10 @@ import (
 //   - testlife.Guard installs the hard wall-time ceiling (SIM_TEST_CEILING,
 //     default 30m, ignoring -test.timeout), the owner watch (exit once the worker
 //     named by FABRIK_WORKER_OWNER is provably gone; a live worker with its
-//     launching shell long gone is left alone) and, for a helper started through
-//     testlife.ReExecCommand, the parent watch.
+//     launching shell long gone is left alone), for a helper started through
+//     testlife.ReExecCommand the parent watch, and (#2226) a main-binary parent
+//     watch (exit once the `go test` that started an unmarked binary is gone).
+//     Every bail is bounded: the process SIGKILLs itself if exit does not return.
 //   - testenv.ScrubProcess keeps the suite hermetic against a worker's inherited
 //     credentials (#2027), as the cmd and engine packages' TestMain do.
 //   - testenv.IsolateWarningsProcess: the engine under test writes the warnings
