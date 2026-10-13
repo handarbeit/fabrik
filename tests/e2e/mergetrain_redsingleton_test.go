@@ -48,8 +48,7 @@ import (
 // so it is the only Queued item in its (repo, base) partition (ADR-1648) however many
 // other train tests run alongside, and the arity guard it exists to exercise cannot be
 // bypassed by a sibling's clean members joining the batch. Before #1977 the test was
-// non-parallel on RepoAlpha/main for exactly that reason. A private base also stops
-// the "advance the base past the member" step from writing to shared main. The
+// non-parallel on RepoAlpha/main for exactly that reason. The
 // train-poison-guard workflow fires on any pull_request and is only REQUIRED on main
 // (assertTrainPoisonGuardRequired still checks main: it proves the workflow is
 // enrolled); the trial's red result comes from the check run either way.
