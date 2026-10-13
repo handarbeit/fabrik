@@ -21,7 +21,9 @@ import (
 // by TestCachedFeedbackMatchesLiveGate — so it costs no GitHub call, and it runs
 // on the worker goroutine rather than in a WorkerExited observer so nothing slow
 // sits on the store's apply path. Only known pending feedback admits the item:
-// admitting every exit would undo ADR 039.
+// admitting every exit would undo ADR 039. Admission is not a dispatch: the
+// pass that follows is still bounded by the comment circuit breakers and the
+// review cycle limit, and a paused item is never admitted.
 func (e *Engine) postRunFeedbackAdmission(ctx context.Context, item gh.ProjectItem) {
 	if postRunFeedbackAdmissionDisabled.Load() || ctx.Err() != nil {
 		return
@@ -33,6 +35,13 @@ func (e *Engine) postRunFeedbackAdmission(ctx context.Context, item gh.ProjectIt
 	}
 	st := snap.State()
 	if st.IsPR || st.IsClosed {
+		return
+	}
+	// A paused item (a breaker trip or escalation at the end of this very run)
+	// only resumes on a human comment created after the pause, so the feedback
+	// already cached cannot lift it: admitting it would cost a deep fetch for a
+	// refusal, and a failing pass must not re-admit itself through here.
+	if hasLabel(st.Labels, "fabrik:paused") {
 		return
 	}
 	if s := stages.FindStage(e.cfg.Stages, st.Status); s != nil && s.CleanupWorktree {

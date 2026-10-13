@@ -25,6 +25,7 @@ func TestPostRunFeedbackAdmission(t *testing.T) {
 		name     string
 		comments []gh.Comment
 		status   string
+		labels   []string
 		ctxDone  bool
 		disabled bool
 		want     bool
@@ -32,13 +33,14 @@ func TestPostRunFeedbackAdmission(t *testing.T) {
 		{name: "pending comment admits", comments: []gh.Comment{human}, status: "Implement", want: true},
 		{name: "no feedback does not admit (ADR 039)", status: "Implement", want: false},
 		{name: "fabrik output does not admit", comments: []gh.Comment{{ID: "c2", DatabaseID: 2, Author: "bot", Body: "🏭 **Fabrik — stage: Plan**"}}, status: "Implement", want: false},
+		{name: "paused item is not admitted", comments: []gh.Comment{human}, status: "Implement", labels: []string{"fabrik:paused", "fabrik:awaiting-input"}, want: false},
 		{name: "shutdown skips", comments: []gh.Comment{human}, status: "Implement", ctxDone: true, want: false},
 		{name: "disabled seam skips", comments: []gh.Comment{human}, status: "Implement", disabled: true, want: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
-			item := gh.ProjectItem{Number: 5, Repo: cooldownTestRepo, Title: "x", Status: tc.status, Comments: tc.comments}
+			item := gh.ProjectItem{Number: 5, Repo: cooldownTestRepo, Title: "x", Status: tc.status, Comments: tc.comments, Labels: tc.labels}
 			eng.store.Apply(itemstate.IssueOpened{Item: item})
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()

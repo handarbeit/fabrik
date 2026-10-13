@@ -100,6 +100,18 @@ func TestFeedbackCachedDuringRunIsAdmittedAfterWorkerEnds(t *testing.T) {
 			if poll > 3 {
 				t.Fatalf("comment pass started only on poll %d after the worker ended, want <= 3\n\n%s", poll, diagnostics(env))
 			}
+			// Admission is not a hot loop: once the comment is handled, the stage's
+			// own retry still waits out its (hour-long) backoff.
+			stageCalls, commentCalls := env.Claude.StageCallCount("Specify"), env.Claude.CommentCallCount("Specify")
+			for i := 0; i < 4; i++ {
+				RunPoll(t, env)
+			}
+			if got := env.Claude.StageCallCount("Specify"); got != stageCalls {
+				t.Fatalf("stage re-dispatched inside its backoff: %d -> %d invocations\n\n%s", stageCalls, got, diagnostics(env))
+			}
+			if got := env.Claude.CommentCallCount("Specify"); got > commentCalls+1 {
+				t.Fatalf("comment pass kept re-running: %d -> %d invocations\n\n%s", commentCalls, got, diagnostics(env))
+			}
 			return
 		}
 	}
