@@ -70,18 +70,21 @@ func TestMergeTrainRedSingletonReroutesOffQueued(t *testing.T) {
 	logStart := LogOffset(t, env)
 
 	// The member's own PR CI is pending at queue time (train-poison-guard delays its
-	// member-branch failure so #1821's admission gate admits it), which already makes
-	// the singleton fast path ineligible. Advancing main past the member's head
-	// before queuing makes that structural rather than timing-dependent: the fast
-	// path is refused ("pinned base is N commit(s) ahead of the member's head"), so
-	// the train must build the single-member trial whose red result this tests.
+	// member-branch failure so #1821's admission gate admits it), which makes the
+	// singleton fast path ineligible: it needs the member's own CI green and complete.
+	// The member is up to date with its base, so the train builds the single-member
+	// trial whose red result this tests.
+	//
+	// The base is deliberately NOT advanced past the member (it was, from #1913 until
+	// the v0.0.84 gate): since #2044 a singleton behind its pinned base goes to the
+	// singleton catch-up — merge the base into its own branch, wait for its own CI —
+	// instead of a trial, so the bump routed the member around the arity guard this
+	// test exists for. The catch-up's own red disposition is covered by its own tests.
 	stamp := time.Now().UTC().Format("20060102-150405.000")
 	issue, _, itemID := PrepareMemberExactPathOnBase(t, env, repo, base, "redsingleton",
 		fmt.Sprintf("e2e/train/entries/redsingleton-%s.txt", stamp),
 		"POISON — #1545 red-singleton e2e member\n",
 	)
-	AdvanceBaseBranch(t, env, repo, base,
-		fmt.Sprintf("e2e/train/entries/redsingleton-basebump-%s.txt", stamp), "base bump for the red-singleton member\n")
 	SetIssueStatus(t, env, itemID, "Queued")
 	AwaitBoardItemVisible(t, env, repo, issue, awaitSeedTimeout)
 	t.Logf("queued single poison member (issue #%d); awaiting red-singleton disposition", issue)
