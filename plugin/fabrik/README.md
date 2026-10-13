@@ -54,7 +54,7 @@ If you earlier ran `claude mcp add fabrik -- fabrik mcp`, remove it (`claude mcp
 | `fabrik_promote`, `fabrik_move_parked`, `fabrik_advance`, `fabrik_set_autonomy`, `fabrik_revalidate`, `fabrik_clear_claude_limit` | Audited overseer actions; each leaves a comment on the item naming your subscriber name. **No action lifts a pause or posts a free-form comment** — a paused item resumes when a human comments on it after the pause, or when you remove `fabrik:paused` (and `fabrik:awaiting-input`). |
 | `fabrik_subscribe`, `fabrik_unsubscribe` | Choose which events are pushed into the session (see below) |
 
-When no daemon is reachable, Claude says so and tells you how to start it; it does not fall back to scraping GitHub.
+When no daemon is reachable, Claude says so and tells you how to start it; it does not fall back to scraping GitHub. The live tools need a daemon from Fabrik 0.0.84 or later: an older daemon has no local API and looks "not running". If Claude has no `fabrik_*` tools at all, the server did not start: check that `fabrik` is on your `PATH` and `fabrik --version` is not older than the plugin.
 
 ### Pushed events (opt-in)
 

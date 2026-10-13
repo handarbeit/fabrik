@@ -65,6 +65,12 @@ The running Fabrik daemon already knows where every item is and what it will do 
 
 **If a tool answers that the daemon is not running**, say so plainly and tell the user how to start it: run `fabrik` in the Fabrik project directory (the one holding `.fabrik/`). If the session is in some other directory, the plugin's "Fabrik directory" setting points it at the right one. Do not fall back to scraping GitHub for board or worker state: the answer would not match what the engine believes.
 
+**When the tools are missing or misleading**, diagnose; never work around them:
+
+- **No `fabrik_*` tools at all.** The plugin's MCP server (`fabrik mcp`) did not start. Ask the user to check that `fabrik` is on `PATH` and that `fabrik --version` is at least the plugin's version: `fabrik mcp` first shipped in 0.0.84, so an older binary cannot serve it.
+- **"Not running", but a daemon is running** (its TUI is open, or starting `fabrik` says the instance lock is held). Either the daemon is older than 0.0.84, which has no local API (upgrade it, see "Upgrading a project"), or it could not open its socket: its `.fabrik/fabrik.log` then has a `local API unavailable` line saying why.
+- **A tool says the daemon predates it.** The daemon is older than the plugin; upgrading the daemon fixes it, and the other tools still work.
+
 **Attention states.** `fabrik_status` and `fabrik_board` classify every item. Read the `reason` and `next_action` fields rather than guessing from labels; they explain engine-managed state in full.
 
 | State | Meaning | Your move |
