@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -16,11 +17,25 @@ import (
 // Plan comment with "@/tmp/…".
 var rawFieldFromFile = regexp.MustCompile(`(?:^|\s)(?:-f|--raw-field)[ =]+['"]?[A-Za-z0-9_\[\]]+=@`)
 
-// TestShippedPluginsNeverPassAFileToRawField scans every text file the plugins
-// ship (the embedded stage plugin and the PM plugin) for the -f form.
+// TestShippedPluginsNeverPassAFileToRawField scans every text file of every
+// plugin in this directory (any subdirectory holding a .claude-plugin manifest
+// directory) for the -f form.
 func TestShippedPluginsNeverPassAFileToRawField(t *testing.T) {
+	manifests, err := filepath.Glob("*/.claude-plugin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var roots []string
+	for _, m := range manifests {
+		roots = append(roots, filepath.Dir(m))
+	}
+	for _, want := range []string{"fabrik-workflows", "fabrik"} {
+		if !slices.Contains(roots, want) {
+			t.Fatalf("plugin %q not found among %v", want, roots)
+		}
+	}
 	scanned := 0
-	for _, root := range []string{"fabrik-workflows", "fabrik"} {
+	for _, root := range roots {
 		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 			if err != nil || d.IsDir() {
 				return err
