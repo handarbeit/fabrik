@@ -1713,9 +1713,10 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 	// trigger the awaiting-input unblock logic on subsequent polls.
 	if claudeRan {
 		e.markCommentsSeenByStage(item, item.Comments)
-		// The InvocationObserver fires on InvocationChanged (from InvocationRecorded
-		// below) and adds this item to e.mayNeedWork, ensuring it is re-evaluated in
-		// the next poll cycle. No explicit eviction is needed.
+		// InvocationChanged is in neither the poll wake set nor cycleSet, so nothing
+		// here re-admits the item: a stage that ends incomplete records its own
+		// retry-backoff cooldown below (#2232), and feedback already cached is
+		// admitted by postRunFeedbackAdmission.
 	}
 
 	// Store completion/blocked/usage state for TUI event emission in poll.go.
@@ -1784,6 +1785,9 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 					// Below MaxRetries threshold — record flag so next poll retries PR creation
 					// before re-invoking Claude, then release lock and let cooldown expire.
 					e.store.Apply(itemstate.PRCreationFailedRecorded{Repo: repoStr, Number: item.Number, StageName: stage.Name})
+					// StageAttempted was stamped above, so the retry waits out the
+					// backoff; own its admission (#2232).
+					e.recordPostRunRetryCooldown(item, e.stageRetryBackoff())
 					releaseLock()
 					return
 				}
@@ -1811,7 +1815,12 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 		e.blockOnInput(item, stage, output)
 	} else {
 		cooldown := e.stageRetryBackoff()
-		e.logf(item.Number, "wait", "stage %q did not complete — will retry after %v\n", stage.Name, cooldown)
+		if claudeRan {
+			e.logf(item.Number, "wait", "stage %q did not complete — will retry after %v\n", stage.Name, cooldown)
+		} else {
+			// No StageAttempted was recorded, so no backoff applies.
+			e.logf(item.Number, "wait", "stage %q did not start — will retry on the next poll\n", stage.Name)
+		}
 		// Escalation is decided before stall-hint arming (see below) so arming can be
 		// skipped on the attempt that triggers it.
 		//
@@ -1945,6 +1954,13 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 			// The retry will happen: tell the channel deriver why and when it is due
 			// (#2170), so a retry that then waits for a slot can be reported.
 			e.emitRetryScheduled(item, stage, retryCause(err, turnLimited, resumeFailed, toolsDenied), e.now().Add(cooldown))
+			// The same value as the log line above (FR-004): record the instant the
+			// retry falls due, so its expiry admits the item rather than leaving it
+			// to the periodic re-evaluation (FR-001, #2232). Only when the backoff
+			// actually applies, i.e. StageAttempted was stamped (claudeRan).
+			if claudeRan {
+				e.recordPostRunRetryCooldown(item, cooldown)
+			}
 		}
 	}
 }
@@ -3115,7 +3131,17 @@ func (e *Engine) handleUsageLimitExit(p stageOutcomeParams, limitErr *claudeUsag
 	})
 	// The retry waits out the dispatch cooldown and, on top of it, the account-wide
 	// usage-limit hold; the deriver measures starvation from the hold's lift (#2170).
-	e.emitRetryScheduled(item, stage, "claude-usage-limit", e.now().Add(e.stageRetryBackoff()))
+	retryAt := e.now().Add(e.stageRetryBackoff())
+	e.emitRetryScheduled(item, stage, "claude-usage-limit", retryAt)
+	// Admit the item when both the dispatch cooldown and the account-wide hold
+	// have passed, so an expiry during the hold is not admitted only to be
+	// refused (#2232).
+	if hold, held := e.claudeUsageLimitedUntilTime(e.now()); held && hold.After(retryAt) {
+		retryAt = hold
+	}
+	if !postRunRetryRecordDisabled.Load() {
+		e.recordStageRetryCooldownUntil(item, retryAt)
+	}
 
 	if !hasLabel(item.Labels, "fabrik:claude-limit") {
 		comment := fmt.Sprintf(
@@ -3205,6 +3231,7 @@ func (e *Engine) handleAPIErrorExit(p stageOutcomeParams, apiErr *claudeAPIError
 		At:        time.Now(),
 	})
 	e.emitRetryScheduled(item, stage, "api-error", e.now().Add(e.stageRetryBackoff()))
+	e.recordPostRunRetryCooldown(item, e.stageRetryBackoff())
 
 	p.release()
 }

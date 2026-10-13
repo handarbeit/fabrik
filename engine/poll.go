@@ -1328,6 +1328,16 @@ func (e *Engine) PollWithBackoff(ctx context.Context, configuredInterval time.Du
 		e.logf(0, "webhook", "poll-only mode active — webhook subscription disabled; restart Fabrik to retry\n")
 	}
 	effectiveInterval := computeEffectiveInterval(configuredInterval, idleDuration, e.backoffRateLimitRatio, webhookHealthy)
+	// FR-003 (#2232): idle backoff must not hold the poll past a retry the engine
+	// itself scheduled. Skipped under GraphQL rate-limit backoff so the cap can
+	// never spend a depleted budget.
+	if !e.backoffRateLimitLow && !intervalCapDisabled.Load() {
+		now := e.now()
+		if capped := capIntervalToDue(effectiveInterval, e.earliestShortCooldown(now), now, minDueWakeInterval); capped < effectiveInterval {
+			e.logf(0, "poll", "next poll capped to %v: engine-scheduled retry due\n", capped)
+			effectiveInterval = capped
+		}
+	}
 
 	// Notify webhook manager of any new repos discovered during this poll.
 	if e.webhookMgr != nil && result.SeenRepos != nil {
@@ -2279,6 +2289,10 @@ func (e *Engine) dispatchCandidates(ctx context.Context, board *gh.ProjectBoard,
 			// against a freed slot.
 			defer e.store.Apply(itemstate.WorkerExited{Repo: itemRepo, Number: item.Number})
 			defer func() { <-e.sem }()
+			// Declared last so it runs first: feedback that is already cached when
+			// the worker ends raises no change signal afterwards, so admit it here,
+			// before the WorkerExited wake (FR-001b, #2232).
+			defer e.postRunFeedbackAdmission(issueCtx, item)
 			err := e.processItem(issueCtx, board, item)
 			if err != nil {
 				e.logf(item.Number, "error", "%v\n", err)
@@ -2343,15 +2357,7 @@ func (e *Engine) consumeExpiredCooldowns(repo string, item gh.ProjectItem, snap 
 // LastAttemptAt is wall-clock (time.Now), the cooldown map is on e.now(); the
 // remaining duration, not an absolute instant, is carried across the two domains.
 func (e *Engine) recordRetryBackoffCooldown(item gh.ProjectItem, retryIn time.Duration) {
-	if retryIn <= 0 {
-		return
-	}
-	e.store.Apply(itemstate.CooldownRecorded{
-		Repo:   itemOwnerRepoString(item, e.defaultRepo()),
-		Number: item.Number,
-		Reason: "retry-backoff",
-		Until:  e.now().Add(retryIn),
-	})
+	e.recordStageRetryCooldown(item, retryIn)
 }
 
 // recordSentinelLiveCooldown re-checks, on the next poll, an item whose dispatch

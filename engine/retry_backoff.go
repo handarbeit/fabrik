@@ -1,6 +1,13 @@
 package engine
 
-import "time"
+import (
+	"sync/atomic"
+	"time"
+
+	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
+	"github.com/handarbeit/fabrik/stages"
+)
 
 // Two timing concepts used to share one expression, 10 × PollSeconds, and so
 // were silently coupled (#1831). They answer different questions and must not
@@ -56,4 +63,125 @@ func (e *Engine) mergeGateRecheckInterval() time.Duration {
 		d = time.Second
 	}
 	return d
+}
+
+// Engine-scheduled retries own an admission cooldown (#2232, ADR 2232). The
+// engine's own commits, pushes and label writes are self-writes that raise no
+// change signal, so an item whose stage ended incomplete is admitted by nothing
+// until the periodic re-evaluation (10 × PollSeconds) unless the decision to
+// retry also records the instant it falls due.
+
+// shortAdmissionCooldownReasons are the engine-scheduled retries whose due time
+// the poll loop must not sleep past (FR-003). Long cooldowns (periodic-re-eval,
+// dep-blocked, review-blocked, feedback-pending, spawn-*) are deliberately
+// absent: capping on them would shrink the webhook-healthy idle interval to
+// 10 × PollSeconds.
+var shortAdmissionCooldownReasons = map[string]bool{
+	"retry-backoff":   true,
+	"sentinel-live":   true,
+	"merge-unsettled": true,
+}
+
+// minDueWakeInterval floors the FR-003 cap, matching the retry_backoff minimum.
+const minDueWakeInterval = time.Second
+
+// Test-only switches (non-vacuity of the #2232 requirements). Not for production.
+var (
+	postRunRetryRecordDisabled       atomic.Bool
+	postRunFeedbackAdmissionDisabled atomic.Bool
+	intervalCapDisabled              atomic.Bool
+)
+
+// SetPostRunRetryRecordDisabledForTest neutralises (or restores) FR-001.
+func SetPostRunRetryRecordDisabledForTest(disabled bool) (restore func()) {
+	prev := postRunRetryRecordDisabled.Swap(disabled)
+	return func() { postRunRetryRecordDisabled.Store(prev) }
+}
+
+// SetPostRunFeedbackAdmissionDisabledForTest neutralises (or restores) FR-001b.
+func SetPostRunFeedbackAdmissionDisabledForTest(disabled bool) (restore func()) {
+	prev := postRunFeedbackAdmissionDisabled.Swap(disabled)
+	return func() { postRunFeedbackAdmissionDisabled.Store(prev) }
+}
+
+// SetIntervalCapDisabledForTest neutralises (or restores) FR-003.
+func SetIntervalCapDisabledForTest(disabled bool) (restore func()) {
+	prev := intervalCapDisabled.Swap(disabled)
+	return func() { intervalCapDisabled.Store(prev) }
+}
+
+// recordStageRetryCooldown records the "retry-backoff" admission cooldown that
+// makes the item admissible at e.now()+d (FR-001). It is the single writer: the
+// post-run decision points pass the same value they log and hand to
+// emitRetryScheduled (FR-004), and the dispatch-time backstop
+// (recordRetryBackoffCooldown) passes the remaining wait. d <= 0 records nothing.
+func (e *Engine) recordStageRetryCooldown(item gh.ProjectItem, d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	e.recordStageRetryCooldownUntil(item, e.now().Add(d))
+}
+
+func (e *Engine) recordStageRetryCooldownUntil(item gh.ProjectItem, until time.Time) {
+	e.store.Apply(itemstate.CooldownRecorded{
+		Repo:   itemOwnerRepoString(item, e.defaultRepo()),
+		Number: item.Number,
+		Reason: "retry-backoff",
+		Until:  until,
+	})
+}
+
+// recordPostRunRetryCooldown is recordStageRetryCooldown for the post-run exits
+// (honours the FR-001 test switch; the dispatch-time backstop does not).
+func (e *Engine) recordPostRunRetryCooldown(item gh.ProjectItem, d time.Duration) {
+	if postRunRetryRecordDisabled.Load() {
+		return
+	}
+	e.recordStageRetryCooldown(item, d)
+}
+
+// capIntervalToDue shortens effective so the next poll lands at due, floored at
+// floor. A zero due, or a due that is not earlier than now+effective, leaves
+// effective unchanged: the cap only ever shortens the interval.
+func capIntervalToDue(effective time.Duration, due, now time.Time, floor time.Duration) time.Duration {
+	if due.IsZero() {
+		return effective
+	}
+	d := due.Sub(now)
+	if d >= effective {
+		return effective
+	}
+	if d < floor {
+		d = floor
+	}
+	if d > effective {
+		return effective
+	}
+	return d
+}
+
+// earliestShortCooldown returns the earliest unexpired short engine-scheduled
+// cooldown across the store (zero if none). Expired entries are ignored — they
+// are admitted (and consumed) by the next poll, and counting them would pin the
+// interval at the floor — as are cleanup-stage items, which the engine never
+// admits for work. In memory only; no GitHub call.
+func (e *Engine) earliestShortCooldown(now time.Time) time.Time {
+	var earliest time.Time
+	e.store.Scan(func(st *itemstate.ItemState) {
+		if st.IsClosed {
+			return
+		}
+		if s := stages.FindStage(e.cfg.Stages, st.Status); s != nil && s.CleanupWorktree {
+			return
+		}
+		for reason, t := range st.CooldownAt {
+			if !shortAdmissionCooldownReasons[reason] || !now.Before(t) {
+				continue
+			}
+			if earliest.IsZero() || t.Before(earliest) {
+				earliest = t
+			}
+		}
+	})
+	return earliest
 }
