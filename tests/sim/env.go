@@ -165,14 +165,15 @@ type EnvOptions struct {
 	// never created it" case).
 	StatusLineFieldMissing bool
 
+	// OwnerType overrides the config's owner type ("User" by default).
+	OwnerType string
+
 	// LastActivityField / LastRunField, when non-empty, turn on the display-only
 	// Last activity (DATE) and Last run (TEXT) fields (#2049) under that name,
 	// seeded on the project unless the matching *Missing flag is set.
 	// LastActivityFieldWrongType seeds Last activity as a TEXT field instead
 	// (the "wrong type reads as missing" case). Off by default so every
 	// pre-existing scenario's mutation log is unchanged.
-	// OwnerType overrides the config's owner type ("User" by default).
-	OwnerType                  string
 	LastActivityField          string
 	LastActivityFieldMissing   bool
 	LastActivityFieldWrongType bool
