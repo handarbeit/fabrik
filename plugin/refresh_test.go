@@ -4,7 +4,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"testing"
+	"time"
 )
 
 // TestFabrikPlugin_EmbedsLabelsMd is the direct assertion for #1339 AC1:
@@ -610,5 +612,166 @@ func TestRefreshPluginTo_KeepsEditedAndOperatorFiles(t *testing.T) {
 	}
 	if !c.Customised() {
 		t.Errorf("tree with kept operator files must stay customised")
+	}
+}
+
+// embedFileCount counts the files in the embedded plugin tree.
+func embedFileCount(t *testing.T) int {
+	t.Helper()
+	n := 0
+	err := fs.WalkDir(FabrikPlugin, "fabrik-workflows", func(_ string, d fs.DirEntry, walkErr error) error {
+		if walkErr == nil && !d.IsDir() {
+			n++
+		}
+		return walkErr
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// fileMtimes returns every regular file under dir keyed by relative path.
+func fileMtimes(t *testing.T, dir string) map[string]time.Time {
+	t.Helper()
+	out := map[string]time.Time{}
+	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil || d.IsDir() {
+			return walkErr
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(dir, p)
+		out[rel] = info.ModTime()
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// TestRefreshPluginTo_CountsChangesNotWrites pins #2219 SC-001: the first run
+// returns the embed's file count, the second returns 0 and rewrites nothing.
+func TestRefreshPluginTo_CountsChangesNotWrites(t *testing.T) {
+	dir := t.TempDir()
+	n, err := RefreshPluginTo(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := embedFileCount(t); n != want {
+		t.Fatalf("first refresh = %d, want embed size %d", n, want)
+	}
+	// Age every file so a rewrite is visible whatever the mtime granularity.
+	old := time.Now().Add(-48 * time.Hour).Truncate(time.Second)
+	for rel := range fileMtimes(t, dir) {
+		if err := os.Chtimes(filepath.Join(dir, rel), old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before := fileMtimes(t, dir)
+	n, err = RefreshPluginTo(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Errorf("second refresh = %d, want 0", n)
+	}
+	for rel, mt := range fileMtimes(t, dir) {
+		if !mt.Equal(before[rel]) {
+			t.Errorf("%s was rewritten by a no-op refresh", rel)
+		}
+	}
+}
+
+// TestRefreshPluginTo_CountsOnlyAffectedFiles covers a deleted file, an edited
+// file and an obsolete shipped file: three changes, and only those are touched.
+func TestRefreshPluginTo_CountsOnlyAffectedFiles(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := RefreshPluginTo(dir); err != nil {
+		t.Fatal(err)
+	}
+	var files []string
+	for rel := range fileMtimes(t, dir) {
+		files = append(files, rel)
+	}
+	sort.Strings(files)
+	var data []string
+	for _, f := range files {
+		if f != installedVersionFile {
+			data = append(data, f)
+		}
+	}
+	if len(data) < 3 {
+		t.Fatalf("embed too small for the test: %v", data)
+	}
+	deleted, edited := data[0], data[1]
+	if err := os.Remove(filepath.Join(dir, deleted)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, edited), []byte("edited\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	obsolete := filepath.Join("skills", "fabrik-review", "SKILL.md")
+	src, err := os.ReadFile(filepath.Join("testdata", "migration", "v0.0.77", "plugin", obsolete))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, obsolete)), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, obsolete), src, 0644); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-48 * time.Hour).Truncate(time.Second)
+	for _, f := range data[2:] {
+		if err := os.Chtimes(filepath.Join(dir, f), old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	n, err := RefreshPluginTo(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 3 {
+		t.Errorf("refresh = %d, want 3 (created + changed + pruned)", n)
+	}
+	for _, f := range data[2:] {
+		info, err := os.Stat(filepath.Join(dir, f))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !info.ModTime().Equal(old) {
+			t.Errorf("untouched file %s was rewritten", f)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, obsolete)); !os.IsNotExist(err) {
+		t.Errorf("obsolete shipped file survived (err=%v)", err)
+	}
+}
+
+func TestWriteVersionHash_SkipsMatchingFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := WriteVersionHash(dir, "abc"); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, installedVersionFile)
+	old := time.Now().Add(-48 * time.Hour).Truncate(time.Second)
+	if err := os.Chtimes(p, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteVersionHash(dir, "abc"); err != nil {
+		t.Fatal(err)
+	}
+	if info, _ := os.Stat(p); !info.ModTime().Equal(old) {
+		t.Errorf("matching .installed-version was rewritten")
+	}
+	if err := WriteVersionHash(dir, "def"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := ReadInstalledVersion(dir); got != "def" {
+		t.Errorf("stale .installed-version not updated: %q", got)
 	}
 }
