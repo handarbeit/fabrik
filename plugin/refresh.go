@@ -269,9 +269,10 @@ func RefreshPlugin() (int, error) {
 // RefreshPluginTo writes the embedded plugin files into pluginDir and returns
 // the number of files created, changed or pruned. A file whose content already
 // matches the embed is not rewritten (mode and mtime are not compared) and does
-// not count. It then prunes the files an earlier release shipped that the embed no longer carries
-// (see prunePluginDir), so a rename such as #2140's skills/fabrik-review ->
-// skills/review does not leave both sets side by side; each pruned file counts.
+// not count. It then prunes the files an earlier release shipped that the
+// embed no longer carries (see prunePluginDir), so a rename such as #2140's
+// skills/fabrik-review -> skills/review does not leave both sets side by side;
+// each pruned file counts.
 func RefreshPluginTo(pluginDir string) (int, error) {
 	changed := 0
 	embedded := map[string]bool{}
