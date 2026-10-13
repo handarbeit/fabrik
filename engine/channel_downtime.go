@@ -2,7 +2,6 @@ package engine
 
 import (
 	"sort"
-	"sync/atomic"
 	"time"
 
 	"github.com/handarbeit/fabrik/internal/channelevents"
@@ -31,14 +30,11 @@ import (
 // Observation only (R10): nothing here reads GitHub; item state comes from the
 // store's Scan/Peek and the ledger.
 
-// channelReadyTimeout bounds the warming period (real time, a var so tests can
-// shorten it): an open item that is never deep-fetched must not postpone the
-// catch-up for ever.
-var channelReadyTimeout = 3 * time.Minute
-
-// downtimeDisabled neutralises the downtime diff (tests only), so a restart
-// behaves as before #2169: every first observation is a silent baseline.
-var downtimeDisabled atomic.Bool
+// The warming period is bounded by chanReadyTimeout (real time, per-engine so
+// tests can shorten it): an open item that is never deep-fetched must not
+// postpone the catch-up for ever. The downtimeOff seam neutralises the downtime
+// diff (tests only), so a restart behaves as before #2169: every first
+// observation is a silent baseline.
 
 // priorEntry is the previous run's record for one item while parts of it still
 // await a comparable observation.
@@ -87,7 +83,7 @@ func (ce *channelEvents) observeLedger(key string, st *itemstate.ItemState) {
 // so the live path does not report the same move or close again. An item
 // with no record is a baseline and yields nothing.
 func (ce *channelEvents) downtimeCheck(key string, st *itemstate.ItemState) (evs []channelevents.Event, column, closed bool) {
-	if ce.ledger == nil || downtimeDisabled.Load() {
+	if ce.ledger == nil || ce.e.chanTest.downtimeOff.Load() {
 		return nil, false, false
 	}
 	ce.dmu.Lock()

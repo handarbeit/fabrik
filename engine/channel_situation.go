@@ -7,7 +7,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/handarbeit/fabrik/internal/channelevents"
@@ -20,9 +19,9 @@ import (
 // view is not re-sent merely because time passed. Like the rest of channel_*.go
 // it reads engine state only through the builder and never GitHub (R9).
 
-// situationDedupDisabled neutralises the dedup (every digest is sent), so a test
-// can show that "two quiet ticks publish one digest" is not vacuous.
-var situationDedupDisabled atomic.Bool
+// The per-engine situationDedupOff seam (channel_settings.go) neutralises the
+// dedup (every digest is sent), so a test can show that "two quiet ticks publish
+// one digest" is not vacuous.
 
 // ---- delivery ----
 
@@ -66,7 +65,7 @@ func (e *Engine) pushSituation(name, trigger string, force bool) bool {
 	}
 	v := e.buildSituation(scope)
 	ev := finishEvent(renderSituation(v, e.now(), trigger))
-	if situationDedupDisabled.Load() {
+	if e.chanTest.situationDedupOff.Load() {
 		force = true
 	}
 	return ce.hub.PublishSituation(name, ev, situationFingerprint(v), force)

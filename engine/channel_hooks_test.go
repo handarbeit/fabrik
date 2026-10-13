@@ -201,9 +201,6 @@ func TestChannelLandingVerificationFailedBlockerClearedAndMerged(t *testing.T) {
 // attached. build supplies the engine (testEngineWithStages, spawnTestEngine, ...).
 func hookedEngine(t *testing.T, eng *Engine, sub *channelevents.Subscription) (*Engine, *chanSink) {
 	t.Helper()
-	oldD, oldT := channelDebounce, channelTick
-	channelDebounce, channelTick = 20*time.Millisecond, time.Hour
-	t.Cleanup(func() { channelDebounce, channelTick = oldD, oldT })
 	eng.health.markStarted(time.Now().Add(-time.Hour))
 	return channelEngineOn(t, eng, 0, sub)
 }

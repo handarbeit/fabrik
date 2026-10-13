@@ -1221,3 +1221,27 @@ func (h *Hub) Queued(name string) int {
 	defer s.mu.Unlock()
 	return len(s.q.Entries)
 }
+
+// Deliverable reports whether the hub would hand name's attached session a
+// batch right now: a non-digest entry, the dropped notice, or a digest already
+// due. A subscriber with no attached session is never deliverable (nothing
+// will take the entry), and digests the queue is deliberately holding until
+// their due time are not deliverable either. An entry leaves the queue only
+// after the sink's Deliver has returned, so false means the sink has seen
+// everything it was owed. Test seam for the drain wait (#2210): unlike Queued
+// it cannot block forever on a held digest.
+func (h *Hub) Deliverable(name string) bool {
+	h.mu.Lock()
+	s := h.subscribers[name]
+	h.mu.Unlock()
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.att == nil {
+		return false
+	}
+	_, _, ok := s.q.next(h.opt.Now())
+	return ok
+}

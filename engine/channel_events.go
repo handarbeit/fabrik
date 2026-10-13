@@ -38,15 +38,6 @@ import (
 // goroutine drains the queue, owns every piece of per-item memory and is the
 // only caller of Hub.Publish, which is what serialises ordering and dedup.
 
-// These are vars so tests can shorten them. The debounce and the ticker are
-// real-time mechanisms (wall clock, not the e.now() seam): a debounce that
-// followed a frozen test clock would never elapse.
-var (
-	channelDebounce = 750 * time.Millisecond
-	channelTick     = 30 * time.Second
-	channelPrune    = time.Hour
-)
-
 // itemMemo is the consumer-owned memory for one item.
 type itemMemo struct {
 	// pauseKey is the last pause-family classification key ("" = none).
@@ -94,6 +85,9 @@ type channelEvents struct {
 	// nudge asks the consumer to re-check account-wide state (the Claude
 	// usage-limit hold) without waiting for the next tick.
 	nudge bool
+	// busy is true while drain() holds events it has taken off the queue but not
+	// yet published or evaluated; idle() (channel_settings.go) reads it.
+	busy bool
 	// arrivals are items created after the board was populated that have not been
 	// announced yet (key → when noted); each is held until the item's labels are
 	// known and it carries a board Status, so item-added never reports an empty
@@ -171,7 +165,7 @@ func (e *Engine) startChannelEventsIn(dir string, warming bool) {
 		Dir:     dir,
 		HeldMax: e.cfg.ChannelHeldMax,
 		// Zero keeps the production floor; the test seam shortens it.
-		MinSituation: time.Duration(situationMinOverride.Load()),
+		MinSituation: time.Duration(e.chanTest.situationMin.Load()),
 		Now:          e.now,
 		Logf: func(format string, args ...any) {
 			e.logf(0, "channel", format, args...)
@@ -193,7 +187,7 @@ func (e *Engine) startChannelEventsIn(dir string, warming bool) {
 		unpub:    map[string]bool{},
 		wake:     make(chan struct{}, 1),
 		stop:     make(chan struct{}),
-		readyBy:  time.Now().Add(channelReadyTimeout),
+		readyBy:  time.Now().Add(e.chanReadyTimeout()),
 	}
 	ce.ledger = channelevents.OpenLedger(dir, e.now, func(format string, args ...any) {
 		e.logf(0, "channel", format, args...)
@@ -449,7 +443,7 @@ func (ce *channelEvents) onChange(c itemstate.Change, snap itemstate.Snapshot) {
 	if c.Fields&interesting != 0 || arrivalPending {
 		d := ce.dirty[key]
 		if d == nil {
-			d = &dirtyItem{due: time.Now().Add(channelDebounce)}
+			d = &dirtyItem{due: time.Now().Add(ce.e.chanDebounce())}
 			ce.dirty[key] = d
 		}
 		d.flags |= c.Fields
@@ -463,7 +457,7 @@ func (ce *channelEvents) onChange(c itemstate.Change, snap itemstate.Snapshot) {
 // run is the single consumer goroutine.
 func (ce *channelEvents) run() {
 	defer ce.wg.Done()
-	tick := time.NewTicker(channelTick)
+	tick := time.NewTicker(ce.e.chanTick())
 	defer tick.Stop()
 	prune := time.NewTicker(channelPrune)
 	defer prune.Stop()
@@ -525,6 +519,12 @@ func (ce *channelEvents) nextDue() time.Duration {
 // debounce has elapsed.
 func (ce *channelEvents) drain() {
 	ce.mu.Lock()
+	ce.busy = true
+	defer func() {
+		ce.mu.Lock()
+		ce.busy = false
+		ce.mu.Unlock()
+	}()
 	q := ce.queue
 	ce.queue = nil
 	nudged := ce.nudge

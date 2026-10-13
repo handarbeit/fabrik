@@ -20,9 +20,6 @@ import (
 // builder must answer from memory alone. ahead ages every seeded item.
 func situationEngine(t *testing.T, ahead time.Duration) (*Engine, *chanSink, *adjClock, *channelEvents, *countingFetcher) {
 	t.Helper()
-	oldD, oldT := channelDebounce, channelTick
-	channelDebounce, channelTick = 20*time.Millisecond, time.Hour
-	t.Cleanup(func() { channelDebounce, channelTick = oldD, oldT })
 	e := apiEngine(t, 0)
 	fb := &countingFetcher{}
 	e.store = itemstate.NewStore(fb)

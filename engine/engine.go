@@ -259,6 +259,8 @@ type Engine struct {
 	localAPI   *localapi.Server
 	// channel is the MCP channel-event deriver and hub (#1968); nil until Run()
 	// starts it (and when the hub failed to open). Guarded by channelMu.
+	// chanTest holds the channel test seams, per engine (#2210, channel_settings.go).
+	chanTest  channelTestSettings
 	channelMu sync.Mutex
 	channel   *channelEvents
 	// boardPopulated is set once the first poll has completed successfully: the
