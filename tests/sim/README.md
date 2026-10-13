@@ -1174,6 +1174,10 @@ Some effects have no drain point: scheduled situation digests, reminders, anomal
 
 `parallel_guard_test.go` (`TestEverySimTestFileIsParallelOrExempt`) parses every `*_test.go` here and fails, naming the file, when it declares a `Test` function but calls no `t.Parallel()` and is not on `parallelExempt`. It is file-granular, ignores comments and strings, and also rejects a stale or reasonless exemption. `TestParallelGuardFixtures` proves it fails on a serial fixture file. Current exemptions, each with its reason in the map: `advance_until_test.go` and `main_guard_test.go` (re-exec the test binary as a subprocess), `display_field_warnings_test.go` (redirects the process-global `warnings.WarningsPathOverride`). A file is exempt only for a named process-global or subprocess, never because it is slow.
 
+## Real git ahead of the macOS xcrun shim (#2210 R6)
+
+On macOS `/usr/bin/git` is Apple's `xcrun` shim: every call resolves the developer directory and then execs the real git (about 10-13 ms against about 6 ms for the real binary, measured over 200 runs on the release host). The sim starts real `git` thousands of times, so `TestMain` calls `preferRealGit` (`realgit.go`): on `darwin` it runs `xcrun -f git` once and, when that yields an absolute, executable path different from the `git` on `PATH`, prepends its directory to `PATH` before any test runs and logs one line naming the git chosen. Any failure (no `xcrun`, empty or relative output, a non-executable path, the same git as `PATH`'s) leaves `PATH` unchanged, and it does nothing off darwin. It runs after `testenv.ScrubProcess` and does not touch the git-config isolation `testenv.IsolateGit` provides. `SIM_REAL_GIT=off` disables it, to measure the difference. `TestRealGitDir` covers the fallback cases against the pure resolver `realGitDir`.
+
 ## Test-binary lifetime (#2128)
 
 `tests/sim/main_test.go` installs `internal/testlife.Guard`, so a `sim.test` cannot outlive the run that started it:

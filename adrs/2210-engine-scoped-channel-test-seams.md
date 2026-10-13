@@ -20,6 +20,8 @@ Sharding the package and per-PR test selection are out of scope (ADR 1857).
 3. **Time-driven effects keep a documented real-time wait.** Scheduled digests, reminders, anomaly detectors and stall events are driven by the deriver's ticker and have no drain point. `tests/sim`'s `waitRealTime(t, d, why)` requires a reason at every use.
 4. **A guard keeps the package parallel.** `tests/sim/parallel_guard_test.go` parses every `*_test.go` and fails, naming the file, when it declares a test, calls no `t.Parallel()` and is not on the reasoned `parallelExempt` list. It is file-granular (as the issue specifies), ignores comments and strings, and rejects stale or reasonless exemptions.
 
+5. **The sim prefers the real git on macOS (R6).** `tests/sim`'s `TestMain` resolves `xcrun -f git` once and prepends its directory to `PATH` (darwin only; any failure leaves `PATH` alone; `SIM_REAL_GIT=off` opts out), avoiding the shim's per-call developer-directory lookup across thousands of git starts.
+
 ## Consequences
 
 - Channel sim tests run in the parallel pool; two engines in one test binary cannot see each other's seams (`TestChannelSeamsAreScopedToOneEngine`).
