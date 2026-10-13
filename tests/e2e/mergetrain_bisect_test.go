@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -74,10 +75,18 @@ func TestMergeTrainBisectionEjectsPoisoner(t *testing.T) {
 	repauseOnFailure(t, env, repo, poisonIssue)
 	members := []int{clean1Issue, clean2Issue, poisonIssue}
 
+	// The engine can learn of a member by more than one route: the probe's
+	// "new item discovered", or a light reconcile that caches it first, after
+	// which the probe logs "stale" for it instead (0.0.84 gate: #7761). Any of
+	// them means the member is in the cache.
 	for _, n := range members {
-		seen := fmt.Sprintf("[#%d cache] probe: new item discovered", n)
+		probe := fmt.Sprintf("[#%d cache] probe: ", n)
+		miss := fmt.Sprintf("[cache] miss for #%d ", n)
+		drift := regexp.MustCompile(fmt.Sprintf(`\[reconcile\] .*drifted \(.*#%d[\],]`, n))
 		waitForLogMatch(t, env, discoverOffset, 10*time.Minute, fmt.Sprintf("the engine discovering paused member #%d", n),
-			func(l string) bool { return strings.Contains(l, seen) })
+			func(l string) bool {
+				return strings.Contains(l, probe) || strings.Contains(l, miss) || drift.MatchString(l)
+			})
 	}
 	t.Logf("engine has discovered all three paused members %v; releasing them together", members)
 
