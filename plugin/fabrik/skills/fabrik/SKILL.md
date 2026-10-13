@@ -159,7 +159,7 @@ How to steer well:
 
 - **In the pipeline, comment; never edit the body.** Once an issue has entered Specify, the body is the spec the engine maintains, and Specify rewrites it. A hand edit is silently overwritten and leaves no record; a comment is processed and stays visible.
 - **In Backlog, edit the body.** Before an issue first enters the pipeline, nothing has processed it yet, so rewrite the spec directly.
-- **Don't comment on an issue whose current stage has not run yet.** A comment that is waiting when an item enters a stage is processed *instead of* the stage: the comment pass can complete the stage without the stage ever running (Specify not expanding the spec, Plan posting no plan). Wait until the stage has posted its output, then comment.
+- **Don't comment on an issue until its current stage has started.** A comment that is already waiting when an item enters a stage is processed *instead of* the stage: the comment pass can complete the stage without the stage ever running (Specify not expanding the spec, Plan posting no plan). Once the stage's worker has started (`fabrik_status` shows it, or `stage:<name>:in_progress` is set), comment freely: the comment is handled after the stage run.
 - **Never post approval comments** ("looks good", "approved", "go ahead"). Each comment costs a worker cycle and can spuriously pause the item. Advance with labels or the overseer actions instead: `fabrik_advance` for a completed stage, `fabrik_set_autonomy` to `yolo` to let a cruise item merge.
 
 **The 👀 → 🚀 reaction flow** is durable processed-state:
