@@ -231,7 +231,7 @@ assert_eq "allowed_dirty_regex: modified plugin/known_embedded_versions.go is fi
 assert_eq "allowed_dirty_regex: modified plugin/shipped_files.json is filtered (allowed)" \
   "filtered" "$(allowed_line_survives " M plugin/shipped_files.json")"
 assert_eq "allowed_dirty_regex: modified plugin/*/.claude-plugin/plugin.json is filtered (allowed)" \
-  "filtered" "$(allowed_line_survives " M plugin/entwurf/.claude-plugin/plugin.json")"
+  "filtered" "$(allowed_line_survives " M plugin/fabrik/.claude-plugin/plugin.json")"
 assert_eq "allowed_dirty_regex: modified .claude-plugin/marketplace.json is filtered (allowed, #2141 ref pinning)" \
   "filtered" "$(allowed_line_survives " M .claude-plugin/marketplace.json")"
 assert_eq "allowed_dirty_regex: staged .claude-plugin/marketplace.json is filtered (allowed)" \

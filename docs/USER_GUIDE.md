@@ -2973,40 +2973,6 @@ Auto-update is off by default for third-party marketplaces, and Fabrik does not 
 
 ---
 
-### Entwurf Plugin
-
-The **Entwurf plugin** (`entwurf`) is a separate, optional Claude Code plugin that turns a project into buildable specifications, one expert role at a time. It interviews the three people a project needs — the product owner, the technical architect, and the experience lead — each about their own side of the product, and never asks anyone to answer for a role they don't hold. The product-owner path needs no terminal, git, or technical background. Output is a standard GitHub [Spec Kit](https://github.com/github/spec-kit) `specs/NNN-feature-name/` folder — byte-compatible with upstream Spec Kit, so it can be handed to Fabrik, or to any development team, without translation. It is not installed by `fabrik init` and carries no relationship to the engine's own worker plugin.
-
-#### Skills
-
-| Skill | Purpose |
-|-------|---------|
-| `onboard` | A 30–45 minute interview about the project as a whole — the problem it solves, who it serves, what's in and out of scope, hard constraints, and domain vocabulary. Writes `.specify/memory/constitution.md`, the ground rules every later spec inherits. Run once at the start of a project. |
-| `write-spec` | Turns a feature described in plain language into a structured spec — user stories, requirements, success criteria, and a graded quality checklist — under `specs/NNN-feature-name/`. |
-| `clarify` | Reads an existing spec, finds what's vague or missing, and asks up to five targeted questions one at a time, writing each answer straight into the document. |
-| `architecture-foundations` | Interviews the architect about what is already fixed — existing systems, regulatory obligations, platform commitments — plus the shared domain model with per-field ownership, interface contracts, shared state vocabularies, and the authority model. Runs early and is re-run as specs accumulate, because a shared model created near the beginning is what stops features drifting apart. |
-| `experience-baseline` | Interviews the experience lead about conditions of use per surface class, the independent status dimensions and their states, the component and content vocabulary, the accessibility floor, and interaction budgets. Decided once for the whole product. |
-| `architecture-baseline` | Converts user-facing guarantees into system guarantees — stack, cross-cutting mechanisms, non-functional budgets, build order, and the fitness functions that make the baseline binding rather than advisory. Ratifies. |
-
-The three baseline skills assume the person being interviewed **is** the expert, so they invert the product-owner rule: rather than avoiding questions only an engineer could answer, they never default a decision inside the expert's own domain, and always flag a default made in a neighbouring one. They write `.specify/memory/architecture.md`, `experience.md`, a decision register, and per-stage quality gates — all additive to upstream Spec Kit's layout (see the plugin's `NOTICE.md`).
-
-#### Install
-
-In an interactive Claude Code session:
-
-```
-/plugin marketplace add handarbeit/fabrik
-/plugin install entwurf@fabrik
-```
-
-The plugin's primary audience installs it through the Claude desktop app's Cowork UI instead (**Cowork** → **Customize** → **Plugins** → **Add marketplace** → `handarbeit/fabrik` → install **Entwurf**); the commands above are the developer-facing equivalent. See the plugin's own [GETTING-STARTED.md](https://github.com/handarbeit/fabrik/blob/main/plugin/entwurf/GETTING-STARTED.md) for the full non-technical walkthrough.
-
-#### Attribution
-
-The `write-spec` and `clarify` skills are adapted from [github/spec-kit](https://github.com/github/spec-kit) (MIT licensed); `onboard` is a Fabrik-original interview skill mapped onto Spec Kit's constitution output shape. See the plugin's own `NOTICE.md` for the full license text and a detailed account of what was kept, removed, and changed from upstream.
-
----
-
 ### How Skills Work
 
 Each stage references a **skill** -- a markdown file that contains detailed methodology
@@ -3363,7 +3329,7 @@ The `fabrik:yolo` label means Fabrik will pick it up automatically and run it th
 Claude Code detects a new plugin release by comparing the cached `plugin.json` `version` against what the marketplace entry resolves to — same version number means no refresh fires, even if the source changed — and a marketplace entry that tracks `main` would hand users unreleased commits. `cut-release.sh` therefore pins what a release ships (step 6b), and publishes it atomically (step 7):
 
 - **The binary-paired plugin (`plugin/fabrik`)** gets its `plugin.json` `version` set to the release version (the tag without the `v`, exactly what `fabrik --version` prints) on **every** release, whether or not its files changed. The plugin and the binary are one product, their versions are compared by the plugin's session-start hook, and a changed version string is what makes Claude Code see an update. A release with no plugin change still ships a new plugin version; that is intended.
-- **Every other plugin listed in `marketplace.json` with a `git-subdir` source** (currently `entwurf`) keeps the older rule: its manifest is patch-bumped (e.g. `0.2.0` → `0.2.1`) only if its source changed since the previous tag, with a changelog line in `release-notes/<version>.md`. Skipped on a first release (no previous tag).
+- **Every other plugin listed in `marketplace.json` with a `git-subdir` source** (none at present) keeps the older rule: its manifest is patch-bumped (e.g. `0.2.0` → `0.2.1`) only if its source changed since the previous tag, with a changelog line in `release-notes/<version>.md`. Skipped on a first release (no previous tag).
 - **Every `git-subdir` entry's `ref` is pinned to the release tag** (`"ref": "v0.0.91"`), so users receive exactly that tag's plugin and never a later commit to `main`. The list of plugins is derived from `marketplace.json`, not hardcoded. A `sha` pin cannot work: the commit that contains it cannot know its own SHA. Between releases the checked-in `ref` names the previous release's tag.
 - **One commit, published with the tag.** The manifests, `marketplace.json` and the release-notes lines land in a single `@arbeithand` commit, made locally. Step 7 then tags it and pushes `main` and the tag in **one atomic push** (`git push --atomic`), so `main` never names a tag that does not exist and a rejected push publishes neither. If it fails, nothing was published: retry the same push, or discard the local tag and commit (the script prints the exact commands).
 - **Escape hatch**: `--no-plugin-bump` skips the whole step (versions and ref pins); the marketplace then keeps pointing at the previous release's tag.

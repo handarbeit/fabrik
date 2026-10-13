@@ -80,10 +80,10 @@ const marketplace = `{
       }
     },
     {
-      "name": "entwurf",
+      "name": "other",
       "source": {
         "source": "git-subdir",
-        "path": "plugin/entwurf",
+        "path": "plugin/other",
         "ref":"main"
       }
     }
@@ -139,8 +139,9 @@ func TestRealMarketplaceIsPinnable(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := write(t, string(src))
-	if n, err := pinMarketplaceRefs(p, "v9.9.9"); err != nil || n < 2 {
-		t.Fatalf("real marketplace.json: %d, %v", n, err)
+	want := strings.Count(string(src), `"git-subdir"`)
+	if n, err := pinMarketplaceRefs(p, "v9.9.9"); err != nil || want == 0 || n != want {
+		t.Fatalf("real marketplace.json: pinned %d of %d git-subdir entries, %v", n, want, err)
 	}
 }
 

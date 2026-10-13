@@ -78,17 +78,6 @@ Each Fabrik release pins the marketplace to its own tag and sets the plugin's ve
 
 > **Distinct from `fabrik-stages`**: the engine's stage skills are embedded in the binary and deployed automatically to `.fabrik/plugin/` by `fabrik init`. You do not — and should not — install them manually, and Fabrik keeps the PM plugin out of every worker it spawns.
 
-## Entwurf Plugin
-
-Another optional Claude Code plugin, aimed at a product manager or business owner rather than an engineer — no terminal, git, or technical background needed. It interviews you about your project's goals, users, scope, constraints, and vocabulary, then turns individual feature ideas into a standard GitHub [Spec Kit](https://github.com/github/spec-kit) `specs/NNN-feature-name/` folder, ready to hand to Fabrik for build.
-
-```
-/plugin marketplace add handarbeit/fabrik
-/plugin install entwurf@fabrik
-```
-
-It is not installed by `fabrik init`. See [Entwurf Plugin](docs/USER_GUIDE.md#entwurf-plugin) in the User Guide for the full skill list, installation options, and attribution.
-
 ## How It Works
 
 ```
