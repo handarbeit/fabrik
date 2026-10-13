@@ -1,6 +1,7 @@
 package github
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -24,11 +25,38 @@ func TestFetchDateField_Success(t *testing.T) {
 	}
 }
 
-func TestFetchDateField_MissingOrNotDate(t *testing.T) {
+func TestFetchDateField_TypeMismatch(t *testing.T) {
 	for name, resp := range map[string]string{
-		"missing field": `{"data":{"node":{"field":null}}}`,
 		"no id (union)": `{"data":{"node":{"field":{}}}}`,
 		"text field":    `{"data":{"node":{"field":{"id":"F","name":"Last activity","dataType":"TEXT"}}}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Write([]byte(resp))
+			}))
+			defer srv.Close()
+			f, err := NewClientWithBaseURL("token", srv.URL).FetchDateField("PVT_1", "Last activity")
+			var mm *FieldTypeMismatchError
+			if !errors.As(err, &mm) || f != nil || mm.Want != "DATE" {
+				t.Fatalf("want *FieldTypeMismatchError for DATE, got %+v, %v", f, err)
+			}
+		})
+	}
+}
+
+// SC-001 (#2218), date twin: see TestFetchTextField_AbsentFieldGraphQLError.
+func TestFetchDateField_AbsentFieldGraphQLError(t *testing.T) {
+	srv := textFieldServer(t, "fetch_date_field_absent", func(q string, vars map[string]interface{}) {})
+	defer srv.Close()
+	f, err := NewClientWithBaseURL("token", srv.URL).FetchDateField("PVT_1", "Last activity")
+	if err != nil || f != nil {
+		t.Fatalf("an absent field must resolve to (nil, nil), got %+v, %v", f, err)
+	}
+}
+
+func TestFetchDateField_Missing(t *testing.T) {
+	for name, resp := range map[string]string{
+		"missing field": `{"data":{"node":{"field":null}}}`,
 		"non-project":   `{"data":{"node":{}}}`,
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -53,8 +81,9 @@ func TestFetchTextField_RejectsDateField(t *testing.T) {
 	}))
 	defer srv.Close()
 	f, err := NewClientWithBaseURL("token", srv.URL).FetchTextField("PVT_1", "Last run")
-	if err != nil || f != nil {
-		t.Fatalf("a date field must read as missing for a text lookup, got %+v, %v", f, err)
+	var mm *FieldTypeMismatchError
+	if !errors.As(err, &mm) || f != nil || mm.Found != "DATE" {
+		t.Fatalf("a date field must read as a type mismatch for a text lookup, got %+v, %v", f, err)
 	}
 }
 

@@ -208,6 +208,19 @@ func (c *Client) RateLimitStats() (rest, graphql RateLimitStats) {
 	return c.restStats, c.graphqlStats
 }
 
+// GraphQLError is the first entry of a GraphQL response's errors array. Its
+// text is exactly what graphqlRequest has always returned ("GraphQL error:
+// <message>"), so callers that classify by message keep working; Path is kept
+// for the callers that need to know which field the error belongs to (#2218).
+type GraphQLError struct {
+	Message string
+	Path    []interface{} // path segments: strings (fields) and numbers (list indexes)
+}
+
+func (e *GraphQLError) Error() string {
+	return "GraphQL error: " + e.Message
+}
+
 // graphqlRequest performs a GraphQL query and unmarshals the response.
 func (c *Client) graphqlRequest(query string, variables map[string]interface{}, result interface{}) error {
 	body := map[string]interface{}{
@@ -257,11 +270,12 @@ func (c *Client) graphqlRequest(query string, variables map[string]interface{}, 
 	// Check for GraphQL errors
 	var gqlResp struct {
 		Errors []struct {
-			Message string `json:"message"`
+			Message string        `json:"message"`
+			Path    []interface{} `json:"path"`
 		} `json:"errors"`
 	}
 	if err := json.Unmarshal(respBody, &gqlResp); err == nil && len(gqlResp.Errors) > 0 {
-		return fmt.Errorf("GraphQL error: %s", gqlResp.Errors[0].Message)
+		return &GraphQLError{Message: gqlResp.Errors[0].Message, Path: gqlResp.Errors[0].Path}
 	}
 
 	return json.Unmarshal(respBody, result)
