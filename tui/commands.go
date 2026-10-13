@@ -16,7 +16,7 @@ import (
 
 // pluginUpgradeResultMsg is returned by upgradePluginCmd when RefreshPlugin completes.
 type pluginUpgradeResultMsg struct {
-	Wrote int
+	Wrote int // files created, changed or pruned; 0 means the plugin was already current
 	Err   error
 }
 

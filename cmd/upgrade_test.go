@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"flag"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -699,5 +700,79 @@ func TestRunUpgrade_DeliversLabelsMdToExistingInstall(t *testing.T) {
 	}
 	if !bytes.Equal(embeddedData, diskData) {
 		t.Fatal("LABELS.md on disk does not match embedded content after upgrade")
+	}
+}
+
+// runUpgradeCaptured runs runUpgrade and returns what it printed to stdout.
+func runUpgradeCaptured(t *testing.T, args []string) (string, error) {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := os.Stdout
+	os.Stdout = w
+	runErr := runUpgrade(args)
+	os.Stdout = orig
+	w.Close()
+	out, _ := io.ReadAll(r)
+	r.Close()
+	return string(out), runErr
+}
+
+// TestRunUpgrade_ReportsChangesNotWrites pins #2219: a refresh that changed
+// files says how many, and one that changed nothing says the plugin is current.
+func TestRunUpgrade_ReportsChangesNotWrites(t *testing.T) {
+	dir := t.TempDir()
+	chdirTest(t, dir)
+
+	out, err := runUpgradeCaptured(t, nil)
+	if err != nil {
+		t.Fatalf("first runUpgrade: %v", err)
+	}
+	if !strings.Contains(out, "fabrik upgrade: refreshed ") || strings.Contains(out, "already up to date") {
+		t.Errorf("first run output = %q, want a refreshed count", out)
+	}
+
+	out, err = runUpgradeCaptured(t, nil)
+	if err != nil {
+		t.Fatalf("second runUpgrade: %v", err)
+	}
+	if !strings.Contains(out, "fabrik upgrade: plugin already up to date") || strings.Contains(out, "refreshed") {
+		t.Errorf("second run output = %q, want the up-to-date line", out)
+	}
+
+	// Drift one file: the reported count is exactly 1.
+	pluginDir := filepath.Join(dir, ".fabrik", "plugin")
+	skills, _ := filepath.Glob(filepath.Join(pluginDir, "skills", "*", "SKILL.md"))
+	if len(skills) == 0 {
+		t.Fatal("no SKILL.md files found")
+	}
+	if err := os.Remove(skills[0]); err != nil {
+		t.Fatal(err)
+	}
+	out, err = runUpgradeCaptured(t, nil)
+	if err != nil {
+		t.Fatalf("third runUpgrade: %v", err)
+	}
+	// A missing file takes the migration's base-restore path, which reports the
+	// same corrected count (FR-003).
+	if !strings.Contains(out, "restored .fabrik/plugin from the binary (1 file(s))") {
+		t.Errorf("third run output = %q, want a restore note counting 1 file", out)
+	}
+}
+
+func TestRunUpgrade_ForceOnCurrentPluginReportsUpToDate(t *testing.T) {
+	dir := t.TempDir()
+	chdirTest(t, dir)
+	if _, err := runUpgradeCaptured(t, nil); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runUpgradeCaptured(t, []string{"--force"})
+	if err != nil {
+		t.Fatalf("--force: %v", err)
+	}
+	if !strings.Contains(out, "plugin already up to date (nothing to overwrite)") {
+		t.Errorf("--force output = %q", out)
 	}
 }

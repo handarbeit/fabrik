@@ -1371,6 +1371,23 @@ func TestUpdate_PluginUpgradeResultMsg_Success(t *testing.T) {
 	}
 }
 
+// TestUpdate_PluginUpgradeResultMsg_NothingChanged verifies #2219: a refresh
+// that changed no file says the plugin is already current, not "0 file(s)".
+func TestUpdate_PluginUpgradeResultMsg_NothingChanged(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", nil, nil, 3, false)
+	m.confirmUpgrade = true
+
+	next, _ := m.Update(pluginUpgradeResultMsg{Wrote: 0, Err: nil})
+	nm := next.(Model)
+
+	if !strings.Contains(nm.header.statusMsg, "already up to date") {
+		t.Errorf("statusMsg = %q, want it to say the plugin is already up to date", nm.header.statusMsg)
+	}
+	if strings.Contains(nm.header.statusMsg, "0 file") {
+		t.Errorf("statusMsg = %q must not report a zero count", nm.header.statusMsg)
+	}
+}
+
 // TestUpdate_PluginUpgradeResultMsg_Error verifies a failed upgrade retains the
 // badge and shows an error message.
 func TestUpdate_PluginUpgradeResultMsg_Error(t *testing.T) {

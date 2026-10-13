@@ -114,6 +114,10 @@ func runUpgrade(args []string) error {
 		if err := fabrikplugin.WriteInstalledVersion(".fabrik/plugin"); err != nil {
 			return fmt.Errorf("writing installed version: %w", err)
 		}
+		if wrote == 0 {
+			fmt.Println("fabrik upgrade --force: plugin already up to date (nothing to overwrite)")
+			return nil
+		}
 		fmt.Printf("fabrik upgrade --force: overwrote %d plugin file(s) (customizations discarded)\n", wrote)
 		return nil
 	}
@@ -167,6 +171,10 @@ func runUpgrade(args []string) error {
 	}
 	if err := fabrikplugin.WriteInstalledVersion(".fabrik/plugin"); err != nil {
 		return fmt.Errorf("writing installed version: %w", err)
+	}
+	if wrote == 0 {
+		fmt.Println("fabrik upgrade: plugin already up to date")
+		return nil
 	}
 	fmt.Printf("fabrik upgrade: refreshed %d plugin file(s)\n", wrote)
 	return nil
