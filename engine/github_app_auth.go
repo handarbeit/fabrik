@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/githubauth"
@@ -369,6 +370,17 @@ func RefuseUserOwnedBoardForAppAuth(client *gh.Client, owner string) error {
 		"for a user-owned board instead — App auth is not available for this case, permanently", owner)
 }
 
+// appAuthLogf receives the GitHub App reconciler's log lines. It prints until
+// SetEvents routes it through Engine.logf: the reconciler's token-refresh loops
+// keep logging after the TUI owns the terminal, and a bare print lands on top
+// of the display.
+var appAuthLogf atomic.Pointer[func(format string, args ...any)]
+
+func init() {
+	f := func(format string, args ...any) { fmt.Printf("[startup] github-app: "+format+"\n", args...) }
+	appAuthLogf.Store(&f)
+}
+
 // setUpGitHubAppAuth performs R1/R3/R4's App-auth construction: reconciling
 // the pinned installation (skipping discovery/manifest entirely — see
 // Reconcile's compat-mode pin), obtaining a single owner-scoped client (the
@@ -415,7 +427,7 @@ func setUpGitHubAppAuth(ctx context.Context, cfg Config, fabrikDir, baseURL stri
 		AppHomepageURL:    GitHubAppHomepageURL,
 		ProductName:       GitHubAppProductName,
 		NoBrowser:         cfg.NoBrowser, // #1763, R1/R2: cmd/root.go resolves this to true by default for the engine
-		Logf:              func(format string, args ...any) { fmt.Printf("[startup] github-app: "+format+"\n", args...) },
+		Logf:              func(format string, args ...any) { (*appAuthLogf.Load())(format, args...) },
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("reconciling GitHub App auth: %w", err)

@@ -248,6 +248,8 @@ func (e *Engine) setUpAppGitCredential(ctx context.Context, httpsGit bool) error
 		return fmt.Errorf("GitHub App auth: injecting HTTPS git credential helper: %w", err)
 	}
 	go e.runAppGitTokenWriter(ctx, tokenFn, path, tok)
-	fmt.Printf("[startup] HTTPS git authenticates as the GitHub App installation (credential helper for https://github.com)\n")
+	// Run() calls this after the TUI owns the terminal, so it must go through
+	// logf: a bare print lands on top of the display.
+	e.logf(0, "startup", "HTTPS git authenticates as the GitHub App installation (credential helper for https://github.com)\n")
 	return nil
 }
