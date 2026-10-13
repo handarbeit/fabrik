@@ -224,6 +224,13 @@ recreates a field. A failure creating one field does not stop the others or the 
 repair; the command exits non-zero and names the field that failed. A second `--apply`
 is a no-op that reports everything present.
 
+If an enabled display field is missing from the board, Fabrik also records a **Display fields
+missing** entry in the TUI warnings panel at startup, naming the fields and offering
+`fabrik repair-board --apply` as the fix (on a user-owned board, which `repair-board` cannot
+change, it asks you to create them by hand). A field whose name is taken by a field of another
+type gets its own entry with no fix. The entry clears the next time Fabrik starts after the fields
+exist, or once you set the missing ones to `off`.
+
 Repair never removes a column and never reorders existing ones. Most importantly, it
 never regenerates an existing column's underlying id — doing so would silently clear
 every item's Status, since GitHub's `updateProjectV2Field` mutation replaces the entire

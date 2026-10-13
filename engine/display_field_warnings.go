@@ -88,7 +88,7 @@ func (e *Engine) reportDisplayFieldWarnings() {
 	defer w.mu.Unlock()
 
 	snaps := e.displayFieldSnapshots()
-	userOwned := e.cfg.OwnerType == "user"
+	userOwned := strings.EqualFold(e.cfg.OwnerType, "user")
 
 	var sig strings.Builder
 	var missing []displayFieldSnapshot

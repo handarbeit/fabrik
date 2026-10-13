@@ -171,6 +171,8 @@ type EnvOptions struct {
 	// LastActivityFieldWrongType seeds Last activity as a TEXT field instead
 	// (the "wrong type reads as missing" case). Off by default so every
 	// pre-existing scenario's mutation log is unchanged.
+	// OwnerType overrides the config's owner type ("User" by default).
+	OwnerType                  string
 	LastActivityField          string
 	LastActivityFieldMissing   bool
 	LastActivityFieldWrongType bool
@@ -358,11 +360,15 @@ func NewEnv(t *testing.T, opts EnvOptions) *Env {
 		// Multi-repo instance topology — see SecondRepoOptions' doc comment.
 		cfgRepo = ""
 	}
+	ownerType := "User"
+	if opts.OwnerType != "" {
+		ownerType = opts.OwnerType
+	}
 	cfg := engine.Config{
 		Owner:         owner,
 		Repo:          cfgRepo,
 		ProjectNum:    projectNum,
-		OwnerType:     "User",
+		OwnerType:     ownerType,
 		User:          "fabrik-sim-bot",
 		Token:         "sim-token",
 		Yolo:          yolo,
