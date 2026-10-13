@@ -77,15 +77,16 @@ func TestMergeTrainBisectionEjectsPoisoner(t *testing.T) {
 
 	// The engine can learn of a member by more than one route: the probe's
 	// "new item discovered", or a light reconcile that caches it first, after
-	// which the probe logs "stale" for it instead (0.0.84 gate: #7761). Any of
-	// them means the member is in the cache.
+	// which the probe logs "stale" for it instead (0.0.84 gate: #7761). Either
+	// means the member is in the cache. The reconcile line names at most five
+	// keys, so the probe line remains the fallback for a member it truncates.
 	for _, n := range members {
-		probe := fmt.Sprintf("[#%d cache] probe: ", n)
-		miss := fmt.Sprintf("[cache] miss for #%d ", n)
+		discovered := fmt.Sprintf("[#%d cache] probe: new item discovered", n)
+		stale := fmt.Sprintf("[#%d cache] probe: stale", n)
 		drift := regexp.MustCompile(fmt.Sprintf(`\[reconcile\] .*drifted \(.*#%d[\] ]`, n))
 		waitForLogMatch(t, env, discoverOffset, 10*time.Minute, fmt.Sprintf("the engine discovering paused member #%d", n),
 			func(l string) bool {
-				return strings.Contains(l, probe) || strings.Contains(l, miss) || drift.MatchString(l)
+				return strings.Contains(l, discovered) || strings.Contains(l, stale) || drift.MatchString(l)
 			})
 	}
 	t.Logf("engine has discovered all three paused members %v; releasing them together", members)
