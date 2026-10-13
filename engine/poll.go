@@ -1547,8 +1547,7 @@ func (e *Engine) pollCycle(ctx context.Context) (pollResult, error) {
 
 	// Resolve the display-only status-line field (#2048) once the project id is
 	// known; a no-op after the first successful lookup.
-	e.resolveStatusLineField(board.ProjectID)
-	e.resolveRunFields(board.ProjectID)
+	e.resolveDisplayFields(board.ProjectID)
 
 	e.logf(0, "poll", "found %d items on board\n", len(board.Items))
 
