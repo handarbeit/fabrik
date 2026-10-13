@@ -32,6 +32,7 @@ func newAnomalyEnv(t *testing.T) *Env {
 // a worker slot. The retry is due, every slot is held, and the overseer is told
 // once - with the cause and the reason - and told again when it finally runs.
 func TestRetryStarved_WallTimeKillWaitingForASlot(t *testing.T) {
+	t.Parallel()
 	env := newAnomalyEnv(t)
 	_, sink := startPipelineChannel(t, env)
 	env.Claude.ForStage("Specify", simclaude.WallTimeKilled(), simclaude.DefaultScript)
@@ -44,7 +45,7 @@ func TestRetryStarved_WallTimeKillWaitingForASlot(t *testing.T) {
 	release := env.Engine.HoldGeneralWorkerSlotsForTest()
 	defer release()
 
-	time.Sleep(150 * time.Millisecond)
+	waitRealTime(t, 150*time.Millisecond, "negative window over the 25 ms deriver ticker: retry-starved is tick-driven, nothing to drain")
 	if n := len(sink.ofType(channelevents.RetryStarved, 0)); n != 0 {
 		t.Fatalf("retry-starved fired before the retry was %d minutes overdue", 5)
 	}
@@ -70,12 +71,12 @@ func TestRetryStarved_WallTimeKillWaitingForASlot(t *testing.T) {
 
 // Non-vacuity (FR-014): with the detector neutralised the same run publishes nothing.
 func TestRetryStarved_NonVacuous(t *testing.T) {
+	t.Parallel()
 	env := newAnomalyEnv(t)
 	_, sink := startPipelineChannel(t, env)
 	env.Claude.ForStage("Specify", simclaude.WallTimeKilled(), simclaude.DefaultScript)
-	// Process-wide switch: kept for the whole test, restored afterwards. This test
-	// is why these tests are serial (as channel_events_test.go is).
-	restore := engine.SetAnomalyDetectorsDisabledForTest(true, false, false)
+	// Per-engine switch (#2210): kept for the whole test, and visible to no other.
+	restore := env.Engine.SetAnomalyDetectorsDisabledForTest(true, false, false)
 	defer restore()
 
 	FileIssue(t, env, "wall-time kill", "body", "Specify")
@@ -83,7 +84,7 @@ func TestRetryStarved_NonVacuous(t *testing.T) {
 	release := env.Engine.HoldGeneralWorkerSlotsForTest()
 	defer release()
 	env.Clock.Advance(10 * time.Minute)
-	time.Sleep(300 * time.Millisecond)
+	waitRealTime(t, 300*time.Millisecond, "negative window over the 25 ms deriver ticker: the neutralised detector must stay silent across several ticks")
 	if n := len(sink.ofType(channelevents.RetryStarved, 0)); n != 0 {
 		t.Fatalf("a disabled detector published %d retry-starved events", n)
 	}
@@ -115,15 +116,16 @@ func pollMinutes(t *testing.T, env *Env, n int) {
 	for i := 0; i < n; i++ {
 		env.Clock.Advance(time.Minute)
 		RunPoll(t, env)
-		time.Sleep(60 * time.Millisecond)
+		waitRealTime(t, 60*time.Millisecond, "the deriver observes the engine on its own 25 ms ticker between polls; the wedge detector reads the hold from that tick")
 	}
 }
 
 func TestItemWedged_FeedbackHoldWithNoDispatch(t *testing.T) {
+	t.Parallel()
 	// The reinvoke that would clear the hold is suppressed, which reproduces #2160's
 	// shape without depending on that defect staying unfixed.
-	defer engine.SetReviewReinvokeDisabledForTest()()
 	env := wedgeEnv(t)
+	defer env.Engine.SetReviewReinvokeDisabledForTest()()
 	_, sink := startPipelineChannel(t, env)
 	num := FileIssue(t, env, "wedged gate", "body", "Implement", "fabrik:yolo")
 	WaitForIssueLabel(t, env, num, "stage:Review:complete", 80)
@@ -154,6 +156,7 @@ func TestItemWedged_FeedbackHoldWithNoDispatch(t *testing.T) {
 // The same hold, but the reinvoke the engine normally dispatches goes out inside
 // the threshold: nothing is wedged.
 func TestItemWedged_NotRaisedWhenAReinvokeIsDispatched(t *testing.T) {
+	t.Parallel()
 	env := wedgeEnv(t)
 	_, sink := startPipelineChannel(t, env)
 	num := FileIssue(t, env, "dispatched gate", "body", "Implement", "fabrik:yolo")
@@ -171,9 +174,10 @@ func TestItemWedged_NotRaisedWhenAReinvokeIsDispatched(t *testing.T) {
 
 // Non-vacuity (FR-014): with the detector neutralised the wedge publishes nothing.
 func TestItemWedged_NonVacuous(t *testing.T) {
-	defer engine.SetReviewReinvokeDisabledForTest()()
-	defer engine.SetAnomalyDetectorsDisabledForTest(false, true, false)()
+	t.Parallel()
 	env := wedgeEnv(t)
+	defer env.Engine.SetReviewReinvokeDisabledForTest()()
+	defer env.Engine.SetAnomalyDetectorsDisabledForTest(false, true, false)()
 	_, sink := startPipelineChannel(t, env)
 	num := FileIssue(t, env, "disabled detector", "body", "Implement", "fabrik:yolo")
 	WaitForIssueLabel(t, env, num, "stage:Review:complete", 80)

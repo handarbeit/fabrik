@@ -35,10 +35,10 @@ import (
 // Everything here reads the store through Peek/Scan only (R9) and is
 // observation-only (R10).
 
-// decisionAnchorGrace is how long a suspended item whose GitHub time is unknown
-// waits for the recorder before it is announced with a lower-bound age. A var so
-// tests can shorten it; real (wall-clock) time, like the debounce.
-var decisionAnchorGrace = 3 * time.Minute
+// decisionAnchorGrace (channel_settings.go) is how long a suspended item whose
+// GitHub time is unknown waits for the recorder before it is announced with a
+// lower-bound age. Per-engine so tests can shorten it; real (wall-clock) time,
+// like the debounce.
 
 // Withdrawal reasons (settlement-withdrawn meta.reason).
 const (
@@ -107,7 +107,7 @@ func (e *Engine) decisionEvent(st *itemstate.ItemState, res attention.Result) ch
 // events to publish. Consumer goroutine (or seed, before it starts); m is the
 // item's memo.
 func (ce *channelEvents) decisionStep(ref string, m *itemMemo, st *itemstate.ItemState, res attention.Result) []channelevents.Event {
-	if decisionPendingDisabled.Load() {
+	if ce.e.chanTest.decisionPendingOff.Load() {
 		return nil
 	}
 	e := ce.e
@@ -143,7 +143,7 @@ func (ce *channelEvents) decisionStep(ref string, m *itemMemo, st *itemstate.Ite
 			if m.dpSeen.IsZero() {
 				m.dpSeen = time.Now()
 			}
-			if time.Since(m.dpSeen) < decisionAnchorGrace {
+			if time.Since(m.dpSeen) < e.decisionAnchorGrace() {
 				return nil
 			}
 		}
@@ -178,7 +178,7 @@ func (ce *channelEvents) decisionStep(ref string, m *itemMemo, st *itemstate.Ite
 	// The episode ended. A withdrawal is announced only when the engine took the
 	// item back; a human acting (or the item moving on) is silent.
 	var out []channelevents.Event
-	if reason := e.decisionWithdrawalReason(st, m.dp, m.rebaseSeen); reason != "" && !settlementWithdrawalDisabled.Load() {
+	if reason := e.decisionWithdrawalReason(st, m.dp, m.rebaseSeen); reason != "" && !e.chanTest.withdrawalOff.Load() {
 		ev := e.withdrawnEvent(st, string(channelevents.DecisionPending), reason)
 		ev.DedupKey = fmt.Sprintf("swdp:%s:%d", ref, n)
 		out = append(out, ce.withComment(m, st, ev))

@@ -311,7 +311,7 @@ func (e *Engine) channelReevaluate(repo string, number int) {
 	key := issueRef(repo, number)
 	ce.mu.Lock()
 	if ce.dirty[key] == nil {
-		ce.dirty[key] = &dirtyItem{due: time.Now().Add(channelDebounce)}
+		ce.dirty[key] = &dirtyItem{due: time.Now().Add(e.chanDebounce())}
 	}
 	ce.mu.Unlock()
 	ce.signal()

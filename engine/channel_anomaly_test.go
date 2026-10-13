@@ -24,9 +24,6 @@ func anomalyEngine(t *testing.T) (*Engine, *chanSink, *adjClock, *channelEvents)
 
 func anomalyEngineWithPoll(t *testing.T, pollSeconds int) (*Engine, *chanSink, *adjClock, *channelEvents) {
 	t.Helper()
-	oldD, oldT := channelDebounce, channelTick
-	channelDebounce, channelTick = 20*time.Millisecond, time.Hour
-	t.Cleanup(func() { channelDebounce, channelTick = oldD, oldT })
 	e := apiEngine(t, 0)
 	e.cfg.PollSeconds = pollSeconds
 	e.SetAnomalyThresholdsForTest(5*time.Minute, 10*time.Minute, 5*time.Minute)
@@ -318,9 +315,6 @@ func wedgeEngine(t *testing.T) (*Engine, *chanSink, *adjClock, *channelEvents) {
 
 func wedgeEngineWithPoll(t *testing.T, pollSeconds int) (*Engine, *chanSink, *adjClock, *channelEvents) {
 	t.Helper()
-	oldD, oldT := channelDebounce, channelTick
-	channelDebounce, channelTick = 20*time.Millisecond, time.Hour
-	t.Cleanup(func() { channelDebounce, channelTick = oldD, oldT })
 	e := testEngineForMerge(t, landingClient())
 	e.cfg.PollSeconds = pollSeconds
 	e.SetAnomalyThresholdsForTest(5*time.Minute, 10*time.Minute, 5*time.Minute)
@@ -705,8 +699,8 @@ func TestCacheDivergence_NotRaised(t *testing.T) {
 
 func TestAnomalyDetectors_NonVacuous(t *testing.T) {
 	t.Run("retry-starved", func(t *testing.T) {
-		defer SetAnomalyDetectorsDisabledForTest(true, false, false)()
 		e, sink, clk, ce := anomalyEngine(t)
+		defer e.SetAnomalyDetectorsDisabledForTest(true, false, false)()
 		e.seedAPIItem(t, 1, "Implement")
 		t0 := clk.Now()
 		e.emitRetryScheduled(anomalyItem(1), implementStage(), "wall-time-kill", t0)
@@ -716,15 +710,15 @@ func TestAnomalyDetectors_NonVacuous(t *testing.T) {
 		}
 	})
 	t.Run("item-wedged", func(t *testing.T) {
-		defer SetAnomalyDetectorsDisabledForTest(false, true, false)()
 		e, sink, clk, ce := wedgeEngine(t)
+		defer e.SetAnomalyDetectorsDisabledForTest(false, true, false)()
 		if evs := holdFor(t, e, clk, ce, sink, wedgedItem(), 14, time.Minute); len(ofType(evs, channelevents.ItemWedged)) != 0 {
 			t.Fatalf("disabled detector still published: %+v", evs)
 		}
 	})
 	t.Run("cache-divergence", func(t *testing.T) {
-		defer SetAnomalyDetectorsDisabledForTest(false, false, true)()
 		e, sink, _, _ := anomalyEngine(t)
+		defer e.SetAnomalyDetectorsDisabledForTest(false, false, true)()
 		e.seedAPIItem(t, 1, "Implement")
 		e.store.Apply(itemstate.LocalLabelAdded{Repo: "owner/repo", Number: 1, Label: "x"})
 		e.store.Apply(itemstate.ShallowBoardItemUpdated{Repo: "owner/repo", Number: 1, Item: gh.ProjectItem{Number: 1, Repo: "owner/repo", Status: "Implement"}})

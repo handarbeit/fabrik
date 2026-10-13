@@ -235,10 +235,6 @@ func TestCachedAddressedReviewIDsOnlyTrustsFabrik(t *testing.T) {
 // started and one yolo item at Validate in the store.
 func landingEngine(t *testing.T, client *mockGitHubClient, train string) (*Engine, *chanSink) {
 	t.Helper()
-	oldD, oldT := channelDebounce, channelTick
-	channelDebounce, channelTick = 20*time.Millisecond, time.Hour
-	t.Cleanup(func() { channelDebounce, channelTick = oldD, oldT })
-
 	e := testEngineWithStages(t, client, testStagesWithValidateAndHolding())
 	e.cfg.MergeTrain = train
 	e.health.markStarted(time.Now().Add(-time.Hour))

@@ -1221,3 +1221,39 @@ func (h *Hub) Queued(name string) int {
 	defer s.mu.Unlock()
 	return len(s.q.Entries)
 }
+
+// Deliverable reports whether the hub would hand name's attached session a
+// batch right now: a non-digest entry, the dropped notice, or a digest already
+// due. A subscriber with no attached session is never deliverable (nothing
+// will take the entry), and digests the queue is deliberately holding until
+// their due time are not deliverable either. An entry leaves the queue only
+// after the sink's Deliver has returned, so false means the sink has seen
+// everything it was owed. A true result also wakes the attachment's pump, so a
+// digest that became due only because the clock was advanced is delivered
+// without waiting out the pump's real-time timer. Test seam for the drain wait
+// (#2210): unlike Queued it cannot block forever on a held digest.
+func (h *Hub) Deliverable(name string) bool {
+	h.mu.Lock()
+	s := h.subscribers[name]
+	h.mu.Unlock()
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.att == nil {
+		return false
+	}
+	_, _, ok := s.q.next(h.opt.Now())
+	if ok {
+		// The pump sleeps on a real-time timer sized from the (possibly test-
+		// controlled) clock delta, so a digest that has just become due on an
+		// advanced clock is not seen until that timer fires. Wake it so the
+		// drain wait observes the delivery instead of spinning to its cap.
+		select {
+		case s.wake <- struct{}{}:
+		default:
+		}
+	}
+	return ok
+}

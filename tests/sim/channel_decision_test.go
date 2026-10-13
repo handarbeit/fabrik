@@ -17,8 +17,8 @@ import (
 )
 
 // #2120 scenarios: the Suspended (pending decision) state, its one-per-episode
-// push, opt-in reminders and withdrawn settlements. Serial, like the other
-// channel scenarios: SetChannelTimingForTest changes package-level timing.
+// push, opt-in reminders and withdrawn settlements. Parallel, like the other
+// channel scenarios: the timing and neutralisation seams are per-Engine (#2210).
 
 func decisionStages() []*stages.Stage {
 	no := false
@@ -36,8 +36,7 @@ func decisionStages() []*stages.Stage {
 // parts, and an optional extra subscription.
 func startChannelAt(t *testing.T, env *Env, dir string, subs ...channelevents.Subscription) (*channelevents.Hub, *simSink) {
 	t.Helper()
-	restore := engine.SetChannelTimingForTest(20*time.Millisecond, 40*time.Millisecond)
-	t.Cleanup(restore)
+	env.Engine.SetChannelTimingForTest(20*time.Millisecond, 40*time.Millisecond)
 	hub := env.Engine.StartChannelEventsForTest(dir)
 	if hub == nil {
 		t.Fatal("channel hub did not start")
@@ -69,10 +68,11 @@ func newDecisionEnv(t *testing.T, age time.Duration) *Env {
 // first sight), and is announced exactly once per episode — across polls, over
 // several stall thresholds, and across a restart.
 func TestSimDecisionPendingFirstBoardAfterRestartAndOneEventPerEpisode(t *testing.T) {
+	t.Parallel()
 	// A lower-bound announcement must never preempt the exact one.
-	defer engine.SetDecisionAnchorGraceForTest(time.Hour)()
 	const age = 68 * 24 * time.Hour
 	env := newDecisionEnv(t, age)
+	defer env.Engine.SetDecisionAnchorGraceForTest(time.Hour)()
 	num := FileIssue(t, env, "pending decision", "Specify is done; nothing advances it.", "Specify", "stage:Specify:complete")
 	env.Clock.Advance(age) // the label is now 68 days old
 
@@ -100,7 +100,7 @@ func TestSimDecisionPendingFirstBoardAfterRestartAndOneEventPerEpisode(t *testin
 	}
 
 	AdvanceUntil(t, env, func(*Env) bool {
-		settleWait()
+		settleWait(env)
 		return len(sink.ofType(channelevents.DecisionPending, num)) > 0
 	}, 10)
 	// Several stall thresholds pass; polls and ticks run; nothing is repeated and
@@ -108,7 +108,7 @@ func TestSimDecisionPendingFirstBoardAfterRestartAndOneEventPerEpisode(t *testin
 	for i := 0; i < 6; i++ {
 		env.Clock.Advance(31 * time.Minute)
 		RunPoll(t, env)
-		settleWait()
+		settleWait(env)
 	}
 	if got := sink.ofType(channelevents.DecisionPending, num); len(got) != 1 {
 		t.Fatalf("decision-pending published %d times, want exactly 1: %+v", len(got), got)
@@ -139,7 +139,7 @@ func TestSimDecisionPendingFirstBoardAfterRestartAndOneEventPerEpisode(t *testin
 	for i := 0; i < 4; i++ {
 		env2.Clock.Advance(31 * time.Minute)
 		RunPoll(t, env2)
-		settleWait()
+		settleWait(env2)
 	}
 	if got := sink2.ofType(channelevents.DecisionPending, num); len(got) != 0 {
 		t.Fatalf("a restart re-announced an episode already announced: %+v", got)
@@ -148,12 +148,13 @@ func TestSimDecisionPendingFirstBoardAfterRestartAndOneEventPerEpisode(t *testin
 
 // TestSimDecisionPendingNeutralised shows the scenario above is not vacuous.
 func TestSimDecisionPendingNeutralised(t *testing.T) {
-	defer engine.SetDecisionPendingDisabledForTest()()
+	t.Parallel()
 	env := newDecisionEnv(t, time.Hour)
+	defer env.Engine.SetDecisionPendingDisabledForTest()()
 	num := FileIssue(t, env, "pending decision", "x", "Specify", "stage:Specify:complete")
 	_, sink := startChannelAt(t, env, t.TempDir())
 	RunPolls(t, env, 3)
-	settleWait()
+	settleWait(env)
 	if got := sink.ofType(channelevents.DecisionPending, num); len(got) != 0 {
 		t.Fatalf("seam on, yet %d events", len(got))
 	}
@@ -163,8 +164,9 @@ func TestSimDecisionPendingNeutralised(t *testing.T) {
 // over many stall thresholds; with remind_after the decision is re-sent at that
 // interval, marked as a reminder, with the original's attributes and comment link.
 func TestSimDecisionPendingReminders(t *testing.T) {
-	defer engine.SetDecisionAnchorGraceForTest(time.Hour)()
+	t.Parallel()
 	env := newDecisionEnv(t, 2*time.Hour)
+	defer env.Engine.SetDecisionAnchorGraceForTest(time.Hour)()
 	num := FileIssue(t, env, "pending decision", "x", "Specify", "stage:Specify:complete")
 	env.Clock.Advance(2 * time.Hour)
 	hub, plain := startChannelAt(t, env, t.TempDir())
@@ -176,14 +178,14 @@ func TestSimDecisionPendingReminders(t *testing.T) {
 	hub.Attach("R", remind)
 
 	AdvanceUntil(t, env, func(*Env) bool {
-		settleWait()
+		settleWait(env)
 		return len(plain.ofType(channelevents.DecisionPending, num)) > 0 && len(remind.ofType(channelevents.DecisionPending, num)) > 0
 	}, 20)
 	orig := remind.ofType(channelevents.DecisionPending, num)[0]
 
 	// 30 minutes in, nothing is due yet.
 	env.Clock.Advance(30 * time.Minute)
-	settleWait()
+	settleWait(env)
 	if got := remind.ofType(channelevents.DecisionPending, num); len(got) != 1 {
 		t.Fatalf("reminder before the interval: %d events", len(got))
 	}
@@ -191,7 +193,7 @@ func TestSimDecisionPendingReminders(t *testing.T) {
 	env.Clock.Advance(31 * time.Minute)
 	RunPoll(t, env)
 	AdvanceUntil(t, env, func(*Env) bool {
-		settleWait()
+		settleWait(env)
 		return len(remind.ofType(channelevents.DecisionPending, num)) >= 2
 	}, 10)
 	got := remind.ofType(channelevents.DecisionPending, num)
@@ -211,7 +213,7 @@ func TestSimDecisionPendingReminders(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		env.Clock.Advance(31 * time.Minute)
 		RunPoll(t, env)
-		settleWait()
+		settleWait(env)
 	}
 	if got := plain.ofType(channelevents.DecisionPending, num); len(got) != 1 {
 		t.Fatalf("a subscriber with no remind_after got %d events, want 1", len(got))
@@ -252,6 +254,7 @@ func rebaseResolveScript() simclaude.CommentScript {
 // rebase, exactly one settlement-withdrawn event says it is no longer ready (with
 // the reason), and a fresh validate-settled follows once it resettles.
 func TestSimSettlementWithdrawnWhenTheBaseMoves(t *testing.T) {
+	t.Parallel()
 	env := newChannelGateEnv(t, false, func(cfg *engine.Config) { cfg.MaxRebaseCycles = 3 })
 	env.Claude.ForStageComments("Validate", rebaseResolveScript())
 	_, sink := startChannel(t, env)
@@ -266,7 +269,7 @@ func TestSimSettlementWithdrawnWhenTheBaseMoves(t *testing.T) {
 	WaitForIssueLabel(t, env, num, "fabrik:awaiting-review", 80)
 	env.Sim.Sim().SeedReview(env.OwnerRepo, pr.Number, gh.PRReview{Author: "reviewer-human", State: "APPROVED"})
 	AdvanceUntil(t, env, func(*Env) bool {
-		settleWait()
+		settleWait(env)
 		return len(sink.ofType(channelevents.ValidateSettled, num)) == 1
 	}, 40)
 
@@ -276,7 +279,7 @@ func TestSimSettlementWithdrawnWhenTheBaseMoves(t *testing.T) {
 		t.Fatalf("SeedCommit: %v", err)
 	}
 	AdvanceUntil(t, env, func(*Env) bool {
-		settleWait()
+		settleWait(env)
 		return len(sink.ofType(channelevents.SettlementWithdrawn, num)) > 0
 	}, 40)
 	w := sink.ofType(channelevents.SettlementWithdrawn, num)
@@ -299,11 +302,11 @@ func TestSimSettlementWithdrawnWhenTheBaseMoves(t *testing.T) {
 		return true
 	}, 80)
 	AdvanceUntil(t, env, func(*Env) bool {
-		settleWait()
+		settleWait(env)
 		return len(sink.ofType(channelevents.ValidateSettled, num)) == 2
 	}, 80)
 	RunPolls(t, env, 6)
-	settleWait()
+	settleWait(env)
 	if n := len(sink.ofType(channelevents.SettlementWithdrawn, num)); n != 1 {
 		t.Fatalf("%d withdrawals across the whole run, want exactly 1", n)
 	}

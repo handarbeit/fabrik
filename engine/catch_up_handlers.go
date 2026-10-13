@@ -240,7 +240,7 @@ func (e *Engine) handleReviewGate(pctx *phase1Ctx) bool {
 	// unbounded semaphore wait, where review state may genuinely have moved
 	// on, so it resolves fresh via the no-arg buildReviewFeedbackComments.
 	syntheticComments := e.buildReviewFeedbackCommentsFromReviews(pctx.item, resolvedReviews)
-	if len(syntheticComments) > 0 && !reviewReinvokeDisabledForTest.Load() {
+	if len(syntheticComments) > 0 && !e.chanTest.reviewReinvokeOff.Load() {
 		// Observability (Pruefer review finding, #1375): when timedOut is also
 		// true here, checkAwaitingReviewTimeout has already removed
 		// fabrik:awaiting-review as its own side effect, but the reinvoke below

@@ -19,9 +19,6 @@ func situationDigests(sink *chanSink, window time.Duration) []channelevents.Even
 // cadenceEngine is situationEngine with subscriber "T" on a 60 s cadence.
 func cadenceEngine(t *testing.T) (*Engine, *chanSink, *adjClock, *channelEvents) {
 	t.Helper()
-	oldD, oldT := channelDebounce, channelTick
-	channelDebounce, channelTick = 20*time.Millisecond, time.Hour
-	t.Cleanup(func() { channelDebounce, channelTick = oldD, oldT })
 	e := apiEngine(t, 0)
 	e.store = itemstate.NewStore(&countingFetcher{})
 	e, sink := channelEngineOn(t, e, 0, &channelevents.Subscription{EventsDefault: true, SituationSeconds: 60})
@@ -163,9 +160,9 @@ func TestSituationCadence_TwoQuietTicksPublishOneDigestAChangePublishesASecond(t
 // The same scenario against a builder that ignores the dedup must fail the
 // one-digest assertion — so that assertion is not vacuous.
 func TestSituationCadence_NonVacuous_NoDedupSendsEveryTick(t *testing.T) {
-	restore := SetSituationDedupDisabledForTest()
-	defer restore()
 	e, sink, clk, ce := cadenceEngine(t)
+	restore := e.SetSituationDedupDisabledForTest()
+	defer restore()
 	e.seedAPIItem(t, 1, "Implement", "fabrik:paused", "fabrik:awaiting-input")
 	drain(sink, 100*time.Millisecond)
 	n := 0

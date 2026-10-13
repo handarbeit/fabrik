@@ -25,6 +25,7 @@ func attentionWorkerStages() []*stages.Stage {
 }
 
 func TestSimCruiseItemWithAllSlotsBusyIsWaitingForDispatchThenDispatched(t *testing.T) {
+	t.Parallel()
 	env := NewEnv(t, EnvOptions{Stages: attentionWorkerStages(), MaxConcurrent: 2})
 	env.Claude.ForStage("Specify", simclaude.DefaultScript)
 	num := FileIssue(t, env, "slot starved cruise", "Specify has not started.", "Specify", "fabrik:cruise")

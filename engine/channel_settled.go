@@ -5,7 +5,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync/atomic"
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/attention"
@@ -321,7 +320,7 @@ func (ce *channelEvents) closeSettleEpisode(ref string, st *itemstate.ItemState)
 		return
 	}
 	ce.hub.SetCounter(closed, n)
-	if reason != "" && !settlementWithdrawalDisabled.Load() {
+	if reason != "" && !ce.e.chanTest.withdrawalOff.Load() {
 		ev := ce.e.withdrawnEvent(st, string(channelevents.ValidateSettled), reason)
 		ev.DedupKey = fmt.Sprintf("swvs:%s:%d", ref, n)
 		ce.enqueueDerived([]channelevents.Event{ce.withComment(m, st, ev)})
@@ -492,10 +491,9 @@ func (e *Engine) validateSettledEvent(snap itemstate.Snapshot, st *itemstate.Ite
 	return ev
 }
 
-// settleCauseDisabled neutralises the re-settle cause (tests only): no cause,
-// no actor, and an autonomy change no longer ends the episode, which is how an
-// item behaved before #2169.
-var settleCauseDisabled atomic.Bool
+// The settleCauseOff seam (channel_settings.go) neutralises the re-settle cause
+// (tests only): no cause, no actor, and an autonomy change no longer ends the
+// episode, which is how an item behaved before #2169.
 
 // autonomyActor is who last wrote the item's autonomy label, as attributed by
 // the observer; added says whether that write was an addition.
@@ -535,7 +533,7 @@ func (ce *channelEvents) takeAutonomyWrite(key string) (autonomyActor, bool) {
 // under a different autonomy than the item has now, while it is otherwise still
 // settled.
 func (ce *channelEvents) autonomyChangedSinceSettle(ref string, n int, st *itemstate.ItemState) bool {
-	if settleCauseDisabled.Load() || ce.ledger == nil {
+	if ce.e.chanTest.settleCauseOff.Load() || ce.ledger == nil {
 		return false
 	}
 	rec, ok := ce.ledger.Settle(ref)
@@ -561,7 +559,7 @@ func (ce *channelEvents) stampSettleCause(ref string, ev *channelevents.Event, e
 	actor, haveActor := ce.takeAutonomyWrite(ref)
 	head, autonomy := ev.Meta["head_sha"], ev.Meta["autonomy"]
 	ce.ledger.SetSettle(ref, channelevents.SettleRecord{Episode: episode, HeadSHA: head, Autonomy: autonomy})
-	if !havePrev || settleCauseDisabled.Load() {
+	if !havePrev || ce.e.chanTest.settleCauseOff.Load() {
 		return
 	}
 	cause := channelevents.CauseOther
