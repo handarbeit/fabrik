@@ -577,7 +577,10 @@ or as a follow-up comment on handarbeit/fabrik#1355 once run.
     the PR push, and Review's latency eats into it before `fabrik:awaiting-ci`
     appears, so the plain 10-minute marker is too short for this test. The
     test reads `slow-gate`'s real state and fails as a fixture problem, not an
-    engine regression, when too little window is left.
+    engine regression, when too little window is left. Either marker sleeps
+    only when the PR head is **not** a merge commit: a merge-train singleton
+    catch-up re-runs CI on a merge-commit head after the window has been used,
+    and a second sleep only stalls the `alpha:main` partition behind it.
 12. **The engine process must actually authenticate as `FABRIK_TOKEN`'s
     identity** — no shell export shadowing it. `config.Token()`'s precedence
     is `FABRIK_TOKEN > GITHUB_TOKEN`, and `godotenv.Load(".env")` does not
