@@ -35,6 +35,17 @@ func TestMain(m *testing.M) {
 		// Starts a guarded child via ReExecCommand, reports its PID, then idles.
 		cmd, _ := ReExecCommand(time.Minute)
 		cmd.Env = append(cmd.Env, "TESTLIFE_HELPER=guard", "TESTLIFE_PARENT_POLL=100ms")
+		if os.Getenv("TESTLIFE_MAINPARENT") == "1" {
+			// Arm the child through os.Getppid instead of an explicit parent.
+			var env []string
+			for _, e := range cmd.Env {
+				if strings.HasPrefix(e, ParentEnv+"=") || strings.HasPrefix(e, workerenv.OwnerVar+"=") {
+					continue
+				}
+				env = append(env, e)
+			}
+			cmd.Env = env
+		}
 		cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
 		if err := cmd.Start(); err != nil {
 			os.Stderr.WriteString("start: " + err.Error() + "\n")
@@ -64,6 +75,8 @@ func helperOptions() Options {
 			o.DisableOwnerWatch = true
 		case "parent":
 			o.DisableParentWatch = true
+		case "mainparent":
+			o.DisableMainParentWatch = true
 		}
 	}
 	return o
@@ -259,9 +272,9 @@ func TestReExecCommand_NeutralisedParentWatchLeavesChild(t *testing.T) {
 	}
 }
 
-func startParentAndChild(t *testing.T, env string) (int, *helper) {
+func startParentAndChild(t *testing.T, env ...string) (int, *helper) {
 	t.Helper()
-	p := startHelper(t, "parent", env)
+	p := startHelper(t, "parent", env...)
 	childPID, err := strconv.Atoi(p.cmd.Args[len(p.cmd.Args)-1])
 	if err != nil {
 		t.Fatalf("parent did not report a child pid: %v (%v)", err, p.cmd.Args)
@@ -356,6 +369,319 @@ func TestCeilingEnvParsing(t *testing.T) {
 	o.Getenv = func(k string) string { return map[string]string{CeilingEnv: "90m"}[k] }
 	if got := o.ceiling(); got != 90*time.Minute {
 		t.Fatalf("ceiling = %v", got)
+	}
+}
+
+// recorder is a fake Exit/Kill pair. blockExit makes Exit never return, the
+// "exit does not return" of the incident.
+type recorder struct {
+	exits, kills chan int
+	release      chan struct{}
+}
+
+func newRecorder(blockExit bool) *recorder {
+	r := &recorder{exits: make(chan int, 4), kills: make(chan int, 4), release: make(chan struct{})}
+	if !blockExit {
+		close(r.release)
+	}
+	return r
+}
+
+func (r *recorder) opts(o Options) Options {
+	o.Exit = func(c int) { r.exits <- c; <-r.release }
+	o.Kill = func() { r.kills <- 1 }
+	o.Stderr = &bytes.Buffer{}
+	o.KillGrace = 150 * time.Millisecond
+	return o
+}
+
+func (r *recorder) cleanup(t *testing.T) { t.Cleanup(func() { close(r.release) }) }
+
+// sleeper starts a process and returns its PID and a kill func.
+func sleeper(t *testing.T) (int, func()) {
+	t.Helper()
+	cmd := exec.Command("sleep", "120")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(done) }()
+	t.Cleanup(func() { _ = cmd.Process.Kill(); <-done })
+	if sessionreap.StartToken(cmd.Process.Pid) == "" {
+		t.Skip("no start token on this platform")
+	}
+	return cmd.Process.Pid, func() { _ = cmd.Process.Kill(); <-done }
+}
+
+func noEnv(string) string { return "" }
+
+// bailTriggers drive each of the three bail paths with a fake Exit. Each returns
+// the Options that make the trigger fire quickly.
+func bailTriggers() map[string]func(t *testing.T) Options {
+	return map[string]func(t *testing.T) Options{
+		"ceiling": func(t *testing.T) Options {
+			return Options{Getenv: noEnv, Ceiling: 50 * time.Millisecond, DisableMainParentWatch: true}
+		},
+		"owner watch": func(t *testing.T) Options {
+			owner, _ := standIn(t)
+			info, _ := workerowner.Read(owner)
+			info.StartToken += "-recycled"
+			if err := workerowner.Write(owner, info); t.Failed() || err != nil {
+				t.Fatal(err)
+			}
+			return Options{
+				Getenv:    func(k string) string { return map[string]string{workerenv.OwnerVar: owner}[k] },
+				OwnerPoll: 20 * time.Millisecond, Ceiling: time.Hour,
+			}
+		},
+		"re-exec parent watch": func(t *testing.T) Options {
+			pid, _ := sleeper(t)
+			return Options{
+				Getenv: func(k string) string {
+					return map[string]string{ParentEnv: strconv.Itoa(pid) + ":not-its-token"}[k]
+				},
+				ParentPoll: 20 * time.Millisecond, Ceiling: time.Hour,
+			}
+		},
+		"main parent watch": func(t *testing.T) Options {
+			pid, kill := sleeper(t)
+			kill()
+			return Options{
+				Getenv:  noEnv,
+				Getppid: func() int { return pid },
+				Start: func(p int) string {
+					if p == pid {
+						return "tok"
+					}
+					return sessionreap.StartToken(p)
+				},
+				ParentPoll: 20 * time.Millisecond, Ceiling: time.Hour,
+			}
+		},
+	}
+}
+
+// R3 / FR-007: with an Exit that never returns, every bail path still ends in a
+// forced kill, and not before the grace.
+func TestBail_ExitThatNeverReturnsIsKilled(t *testing.T) {
+	for name, mk := range bailTriggers() {
+		t.Run(name, func(t *testing.T) {
+			r := newRecorder(true)
+			r.cleanup(t)
+			stop := Guard(r.opts(mk(t)))
+			defer stop()
+			select {
+			case c := <-r.exits:
+				if c != ExitCode {
+					t.Fatalf("exit code = %d, want %d", c, ExitCode)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("trigger never fired")
+			}
+			select {
+			case <-r.kills:
+			case <-time.After(10 * time.Second):
+				t.Fatal("exit never returned and the process was not killed")
+			}
+		})
+	}
+}
+
+// FR-008: with the fallback neutralised, the same hang is never killed — the
+// test above is non-vacuous.
+func TestBail_NeutralisedKillFallbackNeverKills(t *testing.T) {
+	r := newRecorder(true)
+	r.cleanup(t)
+	o := r.opts(bailTriggers()["ceiling"](t))
+	o.DisableKillFallback = true
+	stop := Guard(o)
+	defer stop()
+	<-r.exits
+	select {
+	case <-r.kills:
+		t.Fatal("kill fired with the fallback neutralised: the fallback test is vacuous")
+	case <-time.After(700 * time.Millisecond):
+	}
+}
+
+// FR-005: a prompt exit is unchanged, and the fallback never acts.
+func TestBail_ReturningExitDisarmsFallback(t *testing.T) {
+	r := newRecorder(false)
+	var buf bytes.Buffer
+	o := r.opts(bailTriggers()["ceiling"](t))
+	o.Stderr = &buf
+	stop := Guard(o)
+	defer stop()
+	if c := <-r.exits; c != ExitCode {
+		t.Fatalf("exit code = %d", c)
+	}
+	if !strings.Contains(buf.String(), "hard wall-time ceiling") {
+		t.Fatalf("message = %q", buf.String())
+	}
+	select {
+	case <-r.kills:
+		t.Fatal("fallback fired although exit returned")
+	case <-time.After(600 * time.Millisecond):
+	}
+}
+
+func TestBail_KillNotBeforeGrace(t *testing.T) {
+	r := newRecorder(true)
+	r.cleanup(t)
+	o := r.opts(bailTriggers()["ceiling"](t))
+	o.KillGrace = 600 * time.Millisecond
+	stop := Guard(o)
+	defer stop()
+	<-r.exits
+	select {
+	case <-r.kills:
+		t.Fatal("killed before the grace elapsed")
+	case <-time.After(300 * time.Millisecond):
+	}
+	select {
+	case <-r.kills:
+	case <-time.After(5 * time.Second):
+		t.Fatal("never killed after the grace")
+	}
+}
+
+func mainParentOpts(getppid func() int, start func(int) string) Options {
+	return Options{Getenv: noEnv, Getppid: getppid, Start: start, ParentPoll: 20 * time.Millisecond, Ceiling: time.Hour}
+}
+
+// US4: a live parent, an unchanged identity and an unreadable identity never bail.
+func TestMainParent_LiveOrUnreadableNeverBails(t *testing.T) {
+	pid, _ := sleeper(t)
+	var calls int
+	var mu sync.Mutex
+	cases := map[string]Options{
+		"live parent":           mainParentOpts(func() int { return pid }, nil),
+		"unreadable at install": mainParentOpts(func() int { return pid }, func(int) string { return "" }),
+		"ppid 1":                mainParentOpts(func() int { return 1 }, nil),
+		"unreadable later": mainParentOpts(func() int { return pid }, func(p int) string {
+			mu.Lock()
+			defer mu.Unlock()
+			calls++
+			if calls == 1 {
+				return sessionreap.StartToken(p)
+			}
+			return ""
+		}),
+	}
+	for name, o := range cases {
+		t.Run(name, func(t *testing.T) {
+			r := newRecorder(false)
+			stop := Guard(r.opts(o))
+			defer stop()
+			select {
+			case <-r.exits:
+				t.Fatal("bailed although the parent was alive or unreadable")
+			case <-time.After(500 * time.Millisecond):
+			}
+		})
+	}
+}
+
+func TestMainParent_GoneParentBails(t *testing.T) {
+	pid, kill := sleeper(t)
+	r := newRecorder(false)
+	var buf bytes.Buffer
+	o := r.opts(mainParentOpts(func() int { return pid }, nil))
+	o.Stderr = &buf
+	stop := Guard(o)
+	defer stop()
+	select {
+	case <-r.exits:
+		t.Fatal("bailed with a live parent")
+	case <-time.After(300 * time.Millisecond):
+	}
+	kill()
+	select {
+	case <-r.exits:
+	case <-time.After(10 * time.Second):
+		t.Fatal("did not bail after the parent was killed")
+	}
+	if !strings.Contains(buf.String(), "parent process") {
+		t.Fatalf("message = %q", buf.String())
+	}
+}
+
+// A recycled parent PID (same PID, different start token) is gone.
+func TestMainParent_RecycledPIDBails(t *testing.T) {
+	pid, _ := sleeper(t)
+	var mu sync.Mutex
+	first := true
+	r := newRecorder(false)
+	o := r.opts(mainParentOpts(func() int { return pid }, func(p int) string {
+		mu.Lock()
+		defer mu.Unlock()
+		if first {
+			first = false
+			return "captured-at-install"
+		}
+		return sessionreap.StartToken(p)
+	}))
+	stop := Guard(o)
+	defer stop()
+	select {
+	case <-r.exits:
+	case <-time.After(10 * time.Second):
+		t.Fatal("a recycled parent PID was mistaken for the parent")
+	}
+}
+
+// FR-014: neutralising the watch, or an owner marker, leaves a gone parent alone.
+func TestMainParent_NeutralisedOrOwnerMarkedDoesNotBail(t *testing.T) {
+	for name, mod := range map[string]func(*Options){
+		"neutralised": func(o *Options) { o.DisableMainParentWatch = true },
+		"owner marker": func(o *Options) {
+			o.Getenv = func(k string) string {
+				if k == workerenv.OwnerVar {
+					return filepath.Join(t.TempDir(), "never.json")
+				}
+				return ""
+			}
+			o.ResolveWindow = 50 * time.Millisecond
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pid, kill := sleeper(t)
+			kill()
+			r := newRecorder(false)
+			o := mainParentOpts(func() int { return pid }, func(p int) string { return "tok" })
+			mod(&o)
+			stop := Guard(r.opts(o))
+			defer stop()
+			select {
+			case <-r.exits:
+				t.Fatal("bailed: the main parent watch should not be armed")
+			case <-time.After(500 * time.Millisecond):
+			}
+		})
+	}
+}
+
+// Real processes: killing the process that started a binary ends the binary.
+func TestMainParent_ChildExitsWhenParentIsKilled(t *testing.T) {
+	childPID, parent := startParentAndChild(t, "TESTLIFE_MAINPARENT=1")
+	_ = parent.cmd.Process.Kill()
+	if !waitGone(childPID, 10*time.Second) {
+		t.Fatal("binary outlived the process that started it")
+	}
+}
+
+func TestMainParent_NeutralisedLeavesChild(t *testing.T) {
+	childPID, parent := startParentAndChild(t, "TESTLIFE_MAINPARENT=1", "TESTLIFE_DISABLE=mainparent")
+	_ = parent.cmd.Process.Kill()
+	if waitGone(childPID, 1500*time.Millisecond) {
+		t.Fatal("child exited with the main parent watch neutralised: the test is vacuous")
+	}
+}
+
+func TestMainParent_ChildSurvivesLiveParent(t *testing.T) {
+	childPID, _ := startParentAndChild(t, "TESTLIFE_MAINPARENT=1")
+	if waitGone(childPID, 1500*time.Millisecond) {
+		t.Fatal("child exited while its parent was alive")
 	}
 }
 
