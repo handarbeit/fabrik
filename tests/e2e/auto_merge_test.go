@@ -87,10 +87,14 @@ func TestYoloAutoMergeLabel(t *testing.T) {
 	// seed gives the member PR's number up front — no WaitForLinkedPR needed.
 	logStart := LogOffset(t, env)
 	num, prNum, _ := seedAtStage(t, env, env.RepoAlpha, seedspec.Spec{
-		Column:      "Validate",
-		Title:       fmt.Sprintf("e2e yolo auto-merge (%s)", stamp),
-		IssueBody:   fmt.Sprintf("e2e verification of the yolo landing contract (#829, #980). marker=%s", marker),
-		ExtraLabels: []string{"fabrik:yolo"},
+		Column:    "Validate",
+		Title:     fmt.Sprintf("e2e yolo auto-merge (%s)", stamp),
+		IssueBody: fmt.Sprintf("e2e verification of the yolo landing contract (#829, #980). marker=%s", marker),
+		// expected-reviewers:none keeps the review gate out of the way: review is
+		// not this test's subject, and the seeded PR carries pruefer:ignore, so the
+		// bed's declared reviewer (handarbeit-pruefer) never reviews it and the
+		// gate would wait for it indefinitely.
+		ExtraLabels: []string{"fabrik:yolo", "expected-reviewers:none"},
 		Path:        markerPath("TestYoloAutoMergeLabel"),
 		PathMode:    seedspec.PathUnique,
 		Content:     fmt.Sprintf("# e2e yolo auto-merge marker\n\nmarker=%s\n", marker),
@@ -164,7 +168,9 @@ func TestYoloAutoMergeLabel(t *testing.T) {
 		// of auto-merge being enabled — so we don't poll for the transient
 		// fabrik:auto-merge-enabled label here. We let the issue close and then
 		// audit the timeline.
-		WaitForIssueClosedWithReviewCheck(t, env, env.RepoAlpha, num, 45*time.Minute)
+		// Plain wait: the seeded PR opts out of review (see the seed above), so the
+		// review-check fail-fast has nothing to detect.
+		WaitForIssueClosed(t, env, env.RepoAlpha, num, 45*time.Minute)
 		t.Logf("%s#%d closed — checking the auto-merge path was taken", env.RepoAlpha, num)
 
 		// Race-free verification that auto-merge enablement happened: scan the
