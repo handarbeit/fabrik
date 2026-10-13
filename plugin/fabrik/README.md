@@ -47,10 +47,11 @@ If you earlier ran `claude mcp add fabrik -- fabrik mcp`, remove it (`claude mcp
 
 | Tool | Purpose |
 |---|---|
+| `fabrik_situation` | The rolled-up answer to "what needs me?": merge decisions, gated items, items waiting for input, pending decisions, stalled items, merge-train and poll health, anomalies |
 | `fabrik_status` | Everything the daemon knows about one issue: column, time in column, worker, PR and CI, blockers, attention state, next action |
 | `fabrik_board` | The board's attention view (what needs you, ranked) or flow view, with filters |
 | `fabrik_health` | Daemon version, uptime, poll and webhook freshness, worker slots, merge-train state |
-| `fabrik_promote`, `fabrik_move_parked`, `fabrik_advance`, `fabrik_set_autonomy`, `fabrik_revalidate`, `fabrik_clear_claude_limit` | Audited overseer actions; each leaves a comment on the item naming your subscriber name. **No action lifts a pause or posts a free-form comment** — a paused item resumes when a human comments on it. |
+| `fabrik_promote`, `fabrik_move_parked`, `fabrik_advance`, `fabrik_set_autonomy`, `fabrik_revalidate`, `fabrik_clear_claude_limit` | Audited overseer actions; each leaves a comment on the item naming your subscriber name. **No action lifts a pause or posts a free-form comment** — a paused item resumes when a human comments on it after the pause, or when you remove `fabrik:paused` (and `fabrik:awaiting-input`). |
 | `fabrik_subscribe`, `fabrik_unsubscribe` | Choose which events are pushed into the session (see below) |
 
 When no daemon is reachable, Claude says so and tells you how to start it; it does not fall back to scraping GitHub.
@@ -76,7 +77,7 @@ Without that, the read tools and actions still work; events are simply not deliv
 
 | Command | Purpose |
 |---|---|
-| `/fabrik:status` | The board's attention view and daemon health, from the daemon |
+| `/fabrik:status` | What needs you (`fabrik_situation`) and daemon health, from the daemon |
 
 ## More information
 
