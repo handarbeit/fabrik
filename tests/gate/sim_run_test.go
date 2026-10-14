@@ -479,7 +479,7 @@ func TestSimSuite_ReaperIsWiredToTheChildSession(t *testing.T) {
 	if sid != 777 {
 		t.Errorf("reaper watched session %d, want the child's 777", sid)
 	}
-	if !strings.Contains(out.String(), "SIGKILLed test binary pid(s) [4242]") && !strings.Contains(out.String(), "SIGKILLed") {
+	if !strings.Contains(out.String(), "the gate SIGKILLed test binary pid(s) [4242]") {
 		t.Errorf("failure summary does not mention the reap:\n%s", out.String())
 	}
 }
@@ -512,12 +512,13 @@ func TestPrunePregateSimArchive_KeepsNewestHeadsAndNeverTheRecord(t *testing.T) 
 	g.prunePregateSimArchive(dir, "zzz")
 
 	exists := func(n string) bool { _, err := os.Stat(filepath.Join(dir, n)); return err == nil }
-	for _, n := range []string{"aaa.sim.jsonl", "aaa.sim.log", "bbb.sim.jsonl", "zzz.sim.jsonl", "sim-timings.json"} {
+	// CoverageKeepSHAs = 2 counts the current head: it plus the newest one other.
+	for _, n := range []string{"aaa.sim.jsonl", "aaa.sim.log", "zzz.sim.jsonl", "sim-timings.json"} {
 		if !exists(n) {
 			t.Errorf("%s was pruned", n)
 		}
 	}
-	for _, n := range []string{"ccc.sim.jsonl", "ccc.sim.log", "ddd.sim.jsonl"} {
+	for _, n := range []string{"bbb.sim.jsonl", "ccc.sim.jsonl", "ccc.sim.log", "ddd.sim.jsonl"} {
 		if exists(n) {
 			t.Errorf("%s survived", n)
 		}
@@ -526,5 +527,31 @@ func TestPrunePregateSimArchive_KeepsNewestHeadsAndNeverTheRecord(t *testing.T) 
 		if !exists(h+".json") || !exists(h+".retries.jsonl") {
 			t.Errorf("coverage record of %s was touched", h)
 		}
+	}
+}
+
+// The current head holds a slot even when it has written no files yet (the
+// prune runs before the attempt opens its archive), so the total after the run
+// is CoverageKeepSHAs heads.
+func TestPrunePregateSimArchive_CurrentHeadWithoutFilesTakesASlot(t *testing.T) {
+	g, _, _, _ := testGate(t)
+	g.Cfg.CoverageKeepSHAs = 2
+	dir := t.TempDir()
+	now := time.Now()
+	for i, h := range []string{"aaa", "bbb", "ccc"} {
+		p := filepath.Join(dir, h+".sim.jsonl")
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		age := time.Duration(i+1) * time.Hour
+		if err := os.Chtimes(p, now.Add(-age), now.Add(-age)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	g.prunePregateSimArchive(dir, "new")
+	exists := func(n string) bool { _, err := os.Stat(filepath.Join(dir, n)); return err == nil }
+	if !exists("aaa.sim.jsonl") || exists("bbb.sim.jsonl") || exists("ccc.sim.jsonl") {
+		t.Errorf("want only aaa kept beside the new head: aaa=%v bbb=%v ccc=%v",
+			exists("aaa.sim.jsonl"), exists("bbb.sim.jsonl"), exists("ccc.sim.jsonl"))
 	}
 }

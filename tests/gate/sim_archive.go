@@ -128,12 +128,17 @@ func (g *Gate) prunePregateSimArchive(dir, current string) {
 		heads = append(heads, h)
 	}
 	sort.Slice(heads, func(i, j int) bool { return byHead[heads[i]].newest > byHead[heads[j]].newest })
+	// The current head always keeps its files and takes one of the keep slots —
+	// even before it has written any (this runs ahead of the new attempt's files),
+	// so the total after the run is keep heads, not keep+1.
+	others := keep - 1
 	kept := 0
 	for _, h := range heads {
-		if h == current || kept < keep {
-			if h != current {
-				kept++
-			}
+		if h == current {
+			continue
+		}
+		if kept < others {
+			kept++
 			continue
 		}
 		for _, f := range byHead[h].files {
