@@ -97,6 +97,14 @@ classify_path() {
   REASON="matches no skippable rule"
 }
 
+# log_safe <string> prints the string with every control character (newline
+# included) replaced by '?', so a hostile file name cannot start a line in the
+# job log with `::` and be read as a runner workflow command (::add-mask::,
+# ::stop-commands::, ...). Display only: classification uses the raw path.
+log_safe() {
+  printf '%s' "${1//[[:cntrl:]]/?}"
+}
+
 # classify_paths reads NUL-delimited paths from stdin and sets the globals
 # RESULT_SKIP, OUT_CUT_RELEASE, OUT_KILLGROUP, OUT_ADR_REFS, RESULT_REASON.
 # Logs one line per path.
@@ -106,8 +114,8 @@ classify_paths() {
   while IFS= read -r -d '' p; do
     n=$((n + 1))
     classify_path "$p"
-    printf '  %-5s %s  (%s)\n' "$CLASS" "$p" "$REASON"
-    if [ "$CLASS" = run ] && [ -z "$first_run" ]; then first_run="$p: $REASON"; fi
+    printf '  %-5s %s  (%s)\n' "$CLASS" "$(log_safe "$p")" "$REASON"
+    if [ "$CLASS" = run ] && [ -z "$first_run" ]; then first_run="$(log_safe "$p"): $REASON"; fi
     case "$p" in
       scripts/cut-release.sh|scripts/cut_release_gate_test.sh|scripts/lib/*) cut=true ;;
     esac

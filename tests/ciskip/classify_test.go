@@ -363,3 +363,25 @@ func TestClassifier_NotARepoFailsSafe(t *testing.T) {
 		t.Errorf("no repository must run everything:\n%s", r.Stdout)
 	}
 }
+
+// A file name is attacker-controlled and `git diff -z` preserves newlines, so a
+// name carrying "\n::add-mask::..." must not put a line starting with `::` in
+// the job log, where the runner would execute it as a workflow command.
+func TestClassifier_LogNeverStartsALineWithAWorkflowCommand(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{
+		"docs/x\n::add-mask::secret",
+		"engine/x.go\n::stop-commands::token",
+		"docs/x\r::warning::y",
+	} {
+		r := classifyPaths(t, nil, name)
+		for _, line := range strings.Split(r.Stdout, "\n") {
+			if strings.HasPrefix(strings.TrimLeft(line, " \t"), "::") {
+				t.Errorf("path %q put a workflow-command line in the log: %q\n%s", name, line, r.Stdout)
+			}
+		}
+		if strings.ContainsAny(r.Stdout, "\r") {
+			t.Errorf("path %q left a carriage return in the log:\n%q", name, r.Stdout)
+		}
+	}
+}
