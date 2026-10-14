@@ -446,6 +446,16 @@ type HealthResult struct {
 	Backoff    BackoffHealth    `json:"graphql_backoff"`
 	Workers    WorkerSlots      `json:"workers"`
 	MergeTrain []TrainPartition `json:"merge_train"`
+	// Draining is present only while the daemon drains for a SIGHUP restart
+	// (#2259, ADR 2259).
+	Draining *DrainHealth `json:"draining,omitempty"`
+}
+
+// DrainHealth describes a SIGHUP drain: the first SIGHUP stops dispatch and polling
+// and waits for the in-flight workers; a second SIGHUP restarts now.
+type DrainHealth struct {
+	Since            Known[time.Time] `json:"since"`
+	WorkersRemaining int              `json:"workers_remaining"`
 }
 
 // PollHealth describes the poll loop.

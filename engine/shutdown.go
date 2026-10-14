@@ -208,7 +208,7 @@ func (e *Engine) pauseIssueForDaemonShutdown(snap itemstate.Snapshot) {
 // proceeds to return exactly as a completed drain would — R5 requires this
 // path to always terminate; abandoning any still-running goroutines on
 // timeout is deliberate (see waitGroupTimeout's doc comment).
-func (e *Engine) drainAndExit(locks *instanceLocks, restartDone chan struct{}) error {
+func (e *Engine) drainAndExit(locks *instanceLocks, _ chan struct{}) error {
 	if e.lockLost.Load() {
 		// #2097: the instance lock was lost, so another engine may own this board.
 		// Skip cleanupLockedIssues — in PAT mode it would strip a
@@ -225,8 +225,7 @@ func (e *Engine) drainAndExit(locks *instanceLocks, restartDone chan struct{}) e
 		e.logf(0, "shutdown", "drain deadline (%s) exceeded — some in-flight work may not have finished cleanly\n", e.drainDeadline())
 	}
 	if e.sighupRequested.Load() {
-		performSighupRestart(e, locks)
-		close(restartDone) // reached only on exec failure
+		performSighupRestart(e, locks) // returns only on exec failure
 	}
 	return nil
 }

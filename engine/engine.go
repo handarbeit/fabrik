@@ -415,6 +415,11 @@ type Engine struct {
 	// main loop should re-exec after draining workers (Unix only).
 	sighupRequested atomic.Bool
 
+	// drain is the two-phase SIGHUP state (#2259, ADR 2259): the first SIGHUP
+	// begins a drain that gates every dispatch and cancels nothing, the second
+	// cancels. The zero value is usable.
+	drain drainState
+
 	// lockLost is set by Run() when per-poll verification finds a held instance
 	// lock replaced or removed (#2097). drainAndExit then skips lock-label cleanup
 	// (another engine may legitimately hold fabrik:locked:<user>) and Run() returns

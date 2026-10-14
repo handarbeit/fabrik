@@ -48,6 +48,12 @@ type daemonHealth struct {
 	// restPausedAsOf when it last refreshed the REST pause flag.
 	backoffAsOf    time.Time
 	restPausedAsOf time.Time
+
+	// Draining for a SIGHUP restart (#2259): set when the first SIGHUP begins the
+	// drain; drainLeft is the in-flight worker count last published.
+	draining   bool
+	drainSince time.Time
+	drainLeft  int
 }
 
 // backoffMirror is a copy of the poll loop's backoff state.
@@ -79,6 +85,18 @@ type healthSnapshot struct {
 	// BackoffAsOf / RestPausedAsOf are zero until the poll first refreshes them.
 	BackoffAsOf    time.Time
 	RestPausedAsOf time.Time
+
+	// Draining is true while the daemon drains for a SIGHUP restart (#2259).
+	Draining   bool
+	DrainSince time.Time
+	DrainLeft  int
+}
+
+// setDraining publishes the SIGHUP drain state (#2259).
+func (h *daemonHealth) setDraining(since time.Time, left int) {
+	h.mu.Lock()
+	h.draining, h.drainSince, h.drainLeft = true, since, left
+	h.mu.Unlock()
 }
 
 // markStarted records the process start time. The zero daemonHealth is usable
@@ -227,5 +245,8 @@ func (h *daemonHealth) snapshot() healthSnapshot {
 		LastStallEndAt:  h.lastStallEndAt,
 		BackoffAsOf:     h.backoffAsOf,
 		RestPausedAsOf:  h.restPausedAsOf,
+		Draining:        h.draining,
+		DrainSince:      h.drainSince,
+		DrainLeft:       h.drainLeft,
 	}
 }

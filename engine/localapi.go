@@ -1230,6 +1230,9 @@ func (b localAPIBackend) Health(localapi.HealthParams) (*localapi.HealthResult, 
 	res.Workers.TrainMax = localapi.Some(trainMax)
 
 	res.MergeTrain = b.partitions(now, h)
+	if h.Draining {
+		res.Draining = &localapi.DrainHealth{Since: localapi.KnownTime(h.DrainSince), WorkersRemaining: h.DrainLeft}
+	}
 	return res, nil
 }
 

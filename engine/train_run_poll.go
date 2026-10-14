@@ -107,6 +107,11 @@ func (e *Engine) pollTrainRun(ctx context.Context, board *gh.ProjectBoard, r *tr
 
 // launchStep starts a step goroutine for r; the caller holds r.stepping.
 func (e *Engine) launchStep(ctx context.Context, r *trainRun, v *trialVerdict) {
+	// #2259: a SIGHUP drain starts no step; the persisted run resumes after the exec.
+	if e.isDraining() {
+		r.stepping.Store(false)
+		return
+	}
 	e.store.EnterRepoWorker(r.trainKey)
 	e.wg.Add(1)
 	go func() {

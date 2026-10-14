@@ -163,6 +163,10 @@ func commentIDsTrigger(comments []gh.Comment) string {
 // onPIDReady -> processCommentsClassified -> (did-not-run refund | optional opts.after) -> error logging
 // (ctx.Err() short-circuit) -> deferred WorkerExited.
 func (e *Engine) dispatchReinvoke(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, opts reinvokeOpts) {
+	// #2259: a SIGHUP drain starts nothing new; the next process re-dispatches.
+	if e.isDraining() {
+		return
+	}
 	if opts.precheck != nil && !opts.precheck() {
 		e.logf(item.Number, opts.tag, "precheck failed; skipping re-invocation\n")
 		return
@@ -196,8 +200,17 @@ func (e *Engine) dispatchReinvoke(ctx context.Context, board *gh.ProjectBoard, i
 		case <-ctx.Done():
 			e.logf(item.Number, opts.tag, "context cancelled before semaphore acquired\n")
 			return
+		case <-e.drainGateCh():
+			// #2259: queued but not started — abandon; the new process re-dispatches.
+			e.logf(item.Number, opts.tag, "SIGHUP drain: abandoning queued re-invocation\n")
+			return
 		}
 		defer func() { <-e.sem }()
+		if e.isDraining() {
+			// The drain began between the slot being taken and this check.
+			e.logf(item.Number, opts.tag, "SIGHUP drain: abandoning queued re-invocation\n")
+			return
+		}
 		// Runs first on exit, ahead of the WorkerExited wake (FR-001b, #2232).
 		defer e.postRunFeedbackAdmission(ctx, item, e.now())
 

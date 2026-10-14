@@ -98,9 +98,14 @@ func (TrainRowEvent) tuiEvent() {}
 // shown separately (e.g. "slots 5/5 + train 1/1"). TrainMax is 0 when merge_train is
 // off, in which case no train segment is rendered. Delivered structurally so the
 // latest value is never dropped.
+//
+// Draining is true while the daemon drains for a SIGHUP restart (#2259), with
+// DrainLeft the number of workers still running; the title then says so.
 type WorkerSlotsEvent struct {
 	InUse, Max           int
 	TrainInUse, TrainMax int
+	Draining             bool
+	DrainLeft            int
 }
 
 func (WorkerSlotsEvent) tuiEvent() {}
