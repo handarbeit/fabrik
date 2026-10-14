@@ -82,10 +82,12 @@ built for the experiment, were not kept.
   (one line).
 - **The ceiling also reaches the rest of the module, unmeasured.** CI's `go test -race -parallel
   "$(default_race_parallel)" ./...` and the `worker-shaped` job pass the same value to every package
-  binary. `-parallel` only matters to tests that call `t.Parallel()`, and outside `tests/sim` only
-  `cmd/root_test.go` (2 calls) and `tests/gate/phases_test.go` (1 call) do — `engine`, `github` and
-  the rest are serial, so the higher value changes nothing for them. The measured package is the
-  one that is affected; CI is the validation for the other two.
+  binary. `-parallel` only matters to tests that call `t.Parallel()`. Outside `tests/sim`, the
+  packages in a plain `go test ./...` that do are `cmd` (`root_test.go`, 2 calls), `tests/gate`
+  (`phases_test.go`, 1 call) and `tests/e2e/registry` (`registry_test.go`, 8 calls); the many
+  `t.Parallel()` calls in `tests/e2e/*_test.go` sit behind the `e2e` build tag and are not run in
+  CI. `engine`, `github` and the rest are serial, so the higher value changes nothing for them. The
+  measured package is the one most affected; CI is the validation for the other three.
 - **The post-R1 single-job time was not measured.** The experiment compared layouts at `-parallel 4`.
   The R2 verdict does not depend on it: at 16 the single job can only get faster, and the minutes
   bar already fails. The first real PRs after this change will show the actual number.
