@@ -219,10 +219,10 @@ func TestSampleWaiting_RestartShapedOmitsSince(t *testing.T) {
 func TestSampleWaiting_HumanRowAndExclusions(t *testing.T) {
 	e := waitingEngine(t)
 	e.seedAPIItem(t, 1, "Implement", "fabrik:paused", "fabrik:awaiting-input") // human
-	e.seedAPIItem(t, 2, "Implement", "fabrik:blocked")                          // own event path
-	e.seedAPIItem(t, 3, "Backlog", "fabrik:awaiting-ci")                        // unmanaged column
-	e.seedAPIItem(t, 4, "Implement")                                            // idle / nothing
-	e.seedAPIItem(t, 5, "Implement")                                            // running worker
+	e.seedAPIItem(t, 2, "Implement", "fabrik:blocked")                         // own event path
+	e.seedAPIItem(t, 3, "Backlog", "fabrik:awaiting-ci")                       // unmanaged column
+	e.seedAPIItem(t, 4, "Implement")                                           // idle / nothing
+	e.seedAPIItem(t, 5, "Implement")                                           // running worker
 	e.store.Apply(itemstate.WorkerEntered{Repo: "owner/repo", Number: 5, StageName: "Implement", StartedAt: e.now()})
 
 	ev := e.sampleWaiting(e.now())
