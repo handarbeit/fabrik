@@ -49,6 +49,23 @@ func startStreamServer(t *testing.T, idle, hb time.Duration) (*Server, *channele
 	return srv, hub
 }
 
+// waitAttached blocks until the hub holds a bound session for name. The server
+// writes the attach ack before it binds the session, so an ack (or a client's
+// Connected state) does not mean the hub has registered it yet. A test that
+// attaches a second session to supersede the first must wait here first, or the
+// two binds can land in either order and the first session is never told. The
+// deadline is only a failure backstop; the wait is on the hub's state.
+func waitAttached(t *testing.T, hub *channelevents.Hub, name string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !hub.Attached(name) {
+		if time.Now().After(deadline) {
+			t.Fatalf("hub never bound a session for %q", name)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 // rawAttach dials, attaches as name and returns a frame reader.
 func rawAttach(t *testing.T, path, name string) (net.Conn, func(time.Duration) (Frame, bool)) {
 	t.Helper()
@@ -176,6 +193,7 @@ func TestSecondAttachSupersedesFirst(t *testing.T) {
 	srv, hub := startStreamServer(t, 0, 0)
 	Call(context.Background(), srv.Path(), MethodSubscribe, SubscribeParams{Subscriber: "X"}, nil)
 	_, readA := rawAttach(t, srv.Path(), "X")
+	waitAttached(t, hub, "X") // the ack precedes the bind; B must bind after A
 	_, readB := rawAttach(t, srv.Path(), "X")
 
 	f, ok := readA(2 * time.Second)
