@@ -96,9 +96,10 @@ func TestWriteContextFiles_PostToPR_NoPR_SkipsPRDescription(t *testing.T) {
 	}
 }
 
-// TestMarkCommentsSeenByStage_AddsRocketToUnseenUserComments verifies that
-// markCommentsSeenByStage adds rocket reactions to user comments without a
-// rocket reaction (excluding bot comments and already-seen comments).
+// TestMarkCommentsSeenByStage_SkipsPendingComments verifies that
+// markCommentsSeenByStage leaves comments that findNewComments still reports
+// as pending alone (#2220), while still recording non-pending ones such as a
+// bot service notice.
 func TestMarkCommentsSeenByStage_SkipsPendingComments(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng := testEngine(t, client, &mockClaudeInvoker{})
@@ -122,7 +123,7 @@ func TestMarkCommentsSeenByStage_SkipsPendingComments(t *testing.T) {
 		},
 	}
 	if len(eng.findNewComments(item)) != 1 {
-		t.Skipf("fixture assumption: only C_1 is pending, got %d", len(eng.findNewComments(item)))
+		t.Fatalf("fixture assumption: only C_1 is pending, got %d", len(eng.findNewComments(item)))
 	}
 
 	eng.markCommentsSeenByStage(item, item.Comments)
@@ -139,6 +140,9 @@ func TestMarkCommentsSeenByStage_SkipsPendingComments(t *testing.T) {
 	}
 	if !snap.CommentProcessed("C_3").IsZero() {
 		t.Error("C_3 (already had rocket) should NOT be recorded in store")
+	}
+	if snap.CommentProcessed("C_4").IsZero() {
+		t.Error("C_4 (bot service notice, not pending) should still be recorded by the stage run")
 	}
 	if len(eng.findNewComments(item)) != 1 {
 		t.Error("C_1 must still be pending after markCommentsSeenByStage")
