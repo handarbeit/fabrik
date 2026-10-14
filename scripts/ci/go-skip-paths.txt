@@ -45,6 +45,7 @@ never CLAUDE.md
 never docs/state-machine.md
 never docs/USER_GUIDE.md
 never adrs/1966-b-*.md
+never scripts/lib/parallel_test.sh
 
 # --- skip: never compiled, embedded or read by a Go test ---------------------
 skip docs/*
