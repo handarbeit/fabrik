@@ -2647,18 +2647,29 @@ func groupQueuedItemsByRepoUnordered(items []gh.ProjectItem, holdingStatus, defa
 	return groups
 }
 
+// queueOrderSkewTolerance is how far a GitHub move time may run ahead of the time
+// this process observed the move before it is treated as implausible (clock skew)
+// and ignored (#2246, ADR-2246, FR-007).
+const queueOrderSkewTolerance = 30 * time.Second
+
 // queueOrderTime is the time a Queued member is ordered by (#2246, ADR-2246):
-// GitHub's own time for the move into the Status (atGitHub) when known, else the
-// time this process observed the move (observed). A GitHub time orders moves seen
-// together in one reconcile/probe pass by when they happened rather than by
-// listing order. Zero atGitHub is unknown (direct-GraphQL path, the engine's own
-// write, a payload without the time), never the epoch. One helper serves the
-// batch sort and the local API's train position so the two cannot drift.
+// GitHub's own time for the move into the Status (atGitHub) when known and
+// plausible, else the time this process observed the move (observed). A GitHub
+// time orders moves seen together in one reconcile/probe pass by when they
+// happened rather than by listing order. Zero atGitHub is unknown (direct-GraphQL
+// path, the engine's own write, a payload without the time), never the epoch. A
+// GitHub time more than queueOrderSkewTolerance after the observation is skew, not
+// a move time, and falls back to the observation so a future timestamp cannot sort
+// ahead of genuinely later moves. One helper serves the batch sort and the local
+// API's train position so the two cannot drift.
 func queueOrderTime(atGitHub, observed time.Time) time.Time {
-	if !atGitHub.IsZero() {
-		return atGitHub
+	if atGitHub.IsZero() {
+		return observed
 	}
-	return observed
+	if !observed.IsZero() && atGitHub.After(observed.Add(queueOrderSkewTolerance)) {
+		return observed
+	}
+	return atGitHub
 }
 
 // sortQueuedGroupsByEntry sorts each group's items in place, ascending by

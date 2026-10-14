@@ -20,7 +20,7 @@ ADR-1833 rejected a GitHub source because no cheap one existed (no REST event fo
   - The engine's own write (`LocalStatusUpdated`) clears it: the engine is the writer, so daemon time is the move time.
   - A nil value, missing or unparseable time, and the direct-GraphQL `GitHubAdapter` path leave it zero. Zero is never read as the epoch.
 - **Stamped once per transition.** It is assigned inside the same `Status != new` guard as `StatusEnteredAt` at the five existing sites, so a no-op re-apply, a stale listing or a replayed webhook for the same Status never moves it, and a formed batch stays stable. ADR-2159/2178 protection is safe by construction: when it keeps the local Status the guard does not fire; when it fires, the Status and its time come from the same `view`/`pi`.
-- **Ordering.** `queueOrderTime(atGitHub, observed)` returns the GitHub time when known, else the observation time. The batch sort and the local API's train position both use it, so they cannot drift. The sort key is `(queueOrderTime, Number)`.
+- **Ordering.** `queueOrderTime(atGitHub, observed)` returns the GitHub time when known and plausible, else the observation time. A GitHub time more than 30 s (`queueOrderSkewTolerance`) after the observation is treated as clock skew and ignored, so a future timestamp cannot sort ahead of genuinely later moves. The batch sort and the local API's train position both use it, so they cannot drift. The sort key is `(queueOrderTime, Number)`.
 - **Restart.** `Store.Reset` and the probe bootstrap go through `applyProjectItem` with an empty prior Status, so they seed true entry times from GitHub. That removes ADR-1833's "restart reshuffles the batch once" limitation for items whose time is known.
 
 ## Accepted limits

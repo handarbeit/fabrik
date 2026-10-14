@@ -58,7 +58,7 @@ func newQueueOrderEngine() *Engine {
 // numbers are chosen so neither listing order nor Number order equals the answer.
 func TestQueuedOrder_FollowsGitHubMoveTimeNotListingOrder(t *testing.T) {
 	const a, b, c, p = 4, 3, 2, 1
-	t0 := time.Date(2026, 10, 14, 21, 43, 0, 0, time.UTC)
+	t0 := time.Date(2026, 1, 14, 21, 43, 0, 0, time.UTC)
 	eng := newQueueOrderEngine()
 	seedOtherThenQueue(eng, []int{a, p, b, c}, map[int]time.Time{
 		a: t0, b: t0.Add(1 * time.Second), c: t0.Add(2 * time.Second), p: t0.Add(3 * time.Second),
@@ -72,7 +72,7 @@ func TestQueuedOrder_FollowsGitHubMoveTimeNotListingOrder(t *testing.T) {
 // so equal times carry no order information and fall to Number, independent of
 // listing order.
 func TestQueuedOrder_SameSecondTiesFallToNumber(t *testing.T) {
-	t0 := time.Date(2026, 10, 14, 21, 43, 0, 0, time.UTC)
+	t0 := time.Date(2026, 1, 14, 21, 43, 0, 0, time.UTC)
 	eng := newQueueOrderEngine()
 	seedOtherThenQueue(eng, []int{4, 1, 3, 2}, map[int]time.Time{1: t0, 2: t0, 3: t0, 4: t0})
 	if got, want := queuedOrder(t, eng), []int{1, 2, 3, 4}; !reflect.DeepEqual(got, want) {
@@ -108,6 +108,21 @@ func TestQueueOrderTime(t *testing.T) {
 	}
 	if got := queueOrderTime(time.Time{}, time.Time{}); !got.IsZero() {
 		t.Errorf("both unknown = %v, want zero", got)
+	}
+}
+
+// TestQueueOrderTime_ImplausibleFutureTimeFallsBack: a GitHub time later than the
+// observation by more than the skew tolerance is ignored (FR-007); within the
+// tolerance it is used.
+func TestQueueOrderTime_ImplausibleFutureTimeFallsBack(t *testing.T) {
+	obs := time.Date(2026, 1, 14, 12, 0, 0, 0, time.UTC)
+	near := obs.Add(queueOrderSkewTolerance)
+	if got := queueOrderTime(near, obs); !got.Equal(near) {
+		t.Errorf("time within tolerance = %v, want %v", got, near)
+	}
+	far := obs.Add(queueOrderSkewTolerance + time.Second)
+	if got := queueOrderTime(far, obs); !got.Equal(obs) {
+		t.Errorf("future time = %v, want observation %v", got, obs)
 	}
 }
 
