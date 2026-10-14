@@ -45,6 +45,13 @@
 # ceiling here — it is the single place CI, the worker-shaped job and
 # SIM_RACE=1 all read.
 #
+# Unmeasured: the 16 was measured only on 4-vCPU runners, but it applies to
+# every Linux host, including a many-core workstation running SIM_RACE=1 or a
+# hand-run `go test -race`. ADR 1677's macOS crash appeared on a 28-core host,
+# so a Linux box with many cores is the case most like it and has not been
+# tried. Set SIM_PARALLEL (scripts/sim/run.sh) or pass -parallel explicitly to
+# stay lower there; the ceiling is not scoped to CI.
+#
 # getconf _NPROCESSORS_ONLN is POSIX and portable across macOS and Linux;
 # nproc is a GNU-coreutils fallback for the rare shell where getconf lacks
 # that variable, and the OS ceiling itself is the last-resort fallback if

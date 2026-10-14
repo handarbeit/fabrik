@@ -76,6 +76,13 @@ its completeness check, built for the experiment, were not kept.
 
 ## Caveats
 
+- **The Linux ceiling of 16 is unmeasured on many-core hosts.** It was measured only on 4-vCPU
+  x86-64 runners but `default_race_parallel` returns it for every Linux host, including a many-core
+  workstation running `SIM_RACE=1` or a hand-run `go test -race`. ADR 1677's macOS crash appeared on a
+  28-core host, so a many-core Linux box is the case most like it and has not been tried. The ceiling
+  was not scoped to CI (that would need an env override in `ci.yml` and `worker-shaped-test.sh`);
+  the header comment in `scripts/lib/parallel.sh` says so, and `-parallel` can always be set
+  explicitly. If a crash shows up on such a host, lower the Linux ceiling or add the override.
 - **Five runs per level do not prove "no crash".** Five clean runs bound the crash rate at roughly
   45% or less (95% confidence). ADR 1677's macOS rate was ~1 in 5, which five runs would miss about
   a third of the time. The standing validation is CI: every PR now runs `-race` at 16 on Linux. If a
