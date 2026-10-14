@@ -1,0 +1,58 @@
+# scripts/ci/go-skip-paths.txt — the path rules behind scripts/ci/classify-diff.sh
+# (#2254, ADR-2254, amending ADR-1857).
+#
+# A PR whose every changed path is classified `skip` here cannot change the
+# result of `go build` or `go test`, so CI's two Go test jobs end early with
+# success. Anything else — a `never` path, a path matching no rule, or a path
+# that cannot be parsed — runs the full suite. Fail safe: when in doubt, run.
+#
+# Format: one rule per line, `<kind> <pattern>`; blank lines and `#` comments
+# are ignored. Patterns are bash `[[ == ]]` patterns matched against the whole
+# repo-relative path, so `*` DOES cross `/` (`docs/*` is everything under docs/).
+#
+#   never      forces the full suite. Wins over every `skip*` rule.
+#   skip       skippable at any depth that the pattern matches.
+#   skip-top   skippable only for a path with no `/` (a top-level file).
+#
+# tests/ciskip/readers_test.go fails when a file read by a Go test is
+# classified skip, so a new reading test cannot silently make CI skip it.
+
+# --- never: Go build inputs --------------------------------------------------
+never *.go
+never go.mod
+never */go.mod
+never go.sum
+never */go.sum
+never go.work
+never go.work.*
+never testdata/*
+never */testdata/*
+# //go:embed targets and the trees Go tests walk.
+never plugin/*
+never stages/*
+never tests/*
+never tools/*
+never .claude-plugin/*
+# --- never: CI itself --------------------------------------------------------
+# The workflow, the classifier, its rules and its test, plus the scripts the Go
+# jobs execute (worker-shaped-test.sh, parallel.sh). A change to the gate is
+# itself tested.
+never .github/*
+never scripts/ci/*
+never scripts/lib/parallel.sh
+# --- never: non-Go files that Go tests read ----------------------------------
+never CLAUDE.md
+never docs/state-machine.md
+never docs/USER_GUIDE.md
+never adrs/1966-b-*.md
+never scripts/lib/parallel_test.sh
+
+# --- skip: never compiled, embedded or read by a Go test ---------------------
+skip docs/*
+skip adrs/*
+skip specs/*
+skip release-notes/*
+skip notes/*
+skip .claude/*
+skip scripts/*
+skip-top *.md
