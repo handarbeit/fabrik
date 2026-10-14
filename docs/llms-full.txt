@@ -751,6 +751,15 @@ local `HEAD`:
 - **Remote `origin/main` ahead of HEAD**: run `git pull --ff-only` to update, then
   rebuild.
 
+A build from a checkout with uncommitted or untracked files reports `dev(<sha>)+dirty`; it is
+compared by its SHA exactly like a clean build, so a stale dirty binary is rebuilt. A dirty binary
+whose SHA already equals `HEAD` is *not* rebuilt (that would only produce another dirty binary),
+and the log says so. Every upgrade check logs one `[upgrade]` line stating its outcome (up to
+date, local ahead of or diverged from `origin/main`, not a source checkout, or a rebuild), and
+the first time a check finds the checkout dirty it also logs the dirty paths once per process —
+the usual reason a dev daemon stops upgrading. On an idle board that is about one outcome line a
+minute.
+
 After rebuilding, Fabrik runs `fabrik upgrade --no-migrate` (non-interactive, silent — see
 below; it never runs the [workflow migration](#workflow-migration-fabrik-upgrade)
 unattended) and re-execs the new binary. This keeps dev builds current with the same hands-off
@@ -9978,7 +9987,10 @@ precondition to honor: there's nothing here that would kill a live Claude invoca
 warning and the real upgrade decision are structurally unable to disagree. Applicability
 mirrors `checkAndUpgrade`'s own fork (`e.cfg.Version` must start with `"dev"`, then
 `CompareDevBuild`'s own `IsSourceCheckout` gate) — a release build never calls into
-`selfupgrade` for this check at all, so it never runs a `git fetch`. Recorded via the same
+`selfupgrade` for this check at all, so it never runs a `git fetch`. `CompareDevBuild` also returns `DevBuildStatus.Reason` (why no rebuild is needed) and
+`BinaryDirty` (the `+dirty` version suffix, #2234); it does not log them — only
+`CheckAndRebuildDev` does, so this reporter gains no log output. A `+dirty` binary is compared by
+SHA like a clean one. Recorded via the same
 `warnings.Record`/`warnings.Clear` pattern as `version_skew`, under the single fixed key
 `"source_staleness"` (§7.11 above); the `FixAction` differs depending on `e.cfg.AutoUpgrade`,
 since `kill -HUP` only self-heals staleness when the startup-time `checkAndUpgrade()` call that
