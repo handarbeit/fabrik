@@ -127,6 +127,13 @@ func TestRun_PATMode_HTTPSNoRewrite_Unaffected(t *testing.T) {
 	}
 	eng := testEngine(t, client, &mockClaudeInvoker{})
 	eng.cfg.PollSeconds = 300
+	// IsolateGit moved the working directory outside any repository, so give
+	// the engine an explicit fabrikDir instead of relying on the cwd for its
+	// lock file.
+	eng.fabrikDir = t.TempDir()
+	if err := os.MkdirAll(filepath.Join(eng.fabrikDir, ".fabrik"), 0755); err != nil {
+		t.Fatal(err)
+	}
 	// eng.ghAppAuth stays nil (PAT mode); eng.cfg.GitSSH stays false.
 	runEngineUntilShutdown(t, eng)
 }
