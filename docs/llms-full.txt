@@ -5879,7 +5879,7 @@ Every terminal `pollTrainCI` decision now logs the specific check runs (name, st
 
 **Guards:**
 - **Reset on evidence of a healthy session:** the sidecar counter resets to 0 on (a) a clean process exit (`runErr == nil`), (b) `FABRIK_STAGE_COMPLETE` found despite a trailing error, and (c) a turn-cap exit (`*claudeTurnLimitError`) — by construction a turn-cap exit consumed real turns and real cost, the strongest possible evidence the session is not the poisoned-session symptom this mechanism targets.
-- **Untouched on a did-not-run exit:** a usage-limit (`blocking_limit`) or `api_error` exit neither increments nor resets the counter — the stage never ran, so the outcome says nothing about session health either way.
+- **Untouched on a did-not-run exit:** a usage-limit (`blocking_limit`) or `api_error` exit neither increments nor resets the counter — the stage never ran, so the outcome says nothing about session health either way. This holds on a resumed session too (#1949): the real-work guard behind those classifications judges the invocation's own usage, so an `api_error`/429 on `--resume` is a usage-limit exit that leaves the counter and the session pointer intact, however many times it repeats.
 - **Untouched on a cold start's own failure:** if the failing invocation's own `--resume` session ID was empty (this call was itself a cold start), the failure is not attributable to a resumed session — the counter resets to 0 (clearing any stale leftover from a since-abandoned or since-pruned prior session lineage) and the plain, unwrapped error is returned. Normal `MaxRetries` accounting applies to this outcome exactly as before this mechanism existed.
 - **No label, no issue comment:** unlike `fabrik:claude-limit` (which comments once per episode because the operator can act — wait, or clear the usage-limit hold), this condition is self-healing by construction: its entire purpose is that the *next* attempt succeeds without intervention. A comment or label here would be indistinguishable from the orphaned-durable-state leak §"`fabrik:claude-limit`" and ADR-1183 were written to clean up. If the guaranteed cold-start attempt also fails, that outcome has no `--resume` session ID attached (see the guard above) and is therefore a genuine, unexempted failure — it flows into the normal `MaxRetries` → `stage:<name>:failed` → `fabrik:paused` path, which already comments.
 - **Independent of `MaxRetries`, by design:** every consecutive resume failure up to `MaxResumeFailures` is exempted from `StageRetryIncremented`, not only the abandoning one. If only the abandoning failure were exempted, the earlier ones would still burn `MaxRetries` budget and could pause the issue before the cold-start attempt this mechanism exists to produce is ever reached — reproducing, one layer up, the exact indefinite-retry bug this mechanism fixes.
@@ -8638,6 +8638,18 @@ immediately, before any work is billed, so an invocation that consumed turns *an
 have hit one regardless of what `TerminalReason` says. The exclusion is conjunctive (turns **and**
 cost) so a partially-recorded usage struct cannot suppress a genuine detection.
 
+**The guard judges this invocation's own usage (#1949, ADR-1949).** On a `--resume` invocation the CLI
+reports the resumed session's *cumulative* turns and cost, so a limit rejected before any work (a
+`$0.6891` / 1-turn result inherited from an earlier run) would otherwise look like real work and fall
+through to the resume-failure counter. `interpretClaudeResult` therefore passes both classifiers
+`invocationGuardUsage(usage, rawOutput, resumeSessionID != "")` (`engine/claude_invocation_usage.go`):
+a fresh invocation's usage is returned unchanged; a resumed one has its turns and cost zeroed unless its
+own stream carries at least one `type:"user"` line (a tool result — the same definition of a turn as
+`turnCountingWriter`), in which case it did real work and the guard declines exactly as before. Only line
+types are read, never content, and no pre-invocation baseline is needed, so a restart cannot make it
+wrong. A rejected `rate_limit_event` is deliberately *not* a classification input (a limit hit mid-work
+also emits one), and a mid-session 429 after real work is still not detected (ADR-1811 unchanged).
+
 This replaces the original `usageLimitHitRE`/`usageLimitResetRE`/`detectUsageLimitExit` prose match
 over raw NDJSON stdout bytes, which matched Anthropic's usage-limit exit message wherever it appeared
 in output — including text the assistant itself had written. Without a structural check, any stage
@@ -8814,7 +8826,7 @@ green.
 mirrors `classifyUsageLimitExit` exactly — structural-only (`resp.TerminalReason == "api_error"`, never
 output prose), with the same conjunctive `usage.TurnsUsed > 0 && usage.CostUSD > 0` exclusion carried
 over unchanged (a real `api_error` sample's `CostUSD` could not be empirically captured during Research,
-so the guard is reused rather than dropped or re-derived — see ADR-1458). `interpretClaudeResult`
+so the guard is reused rather than dropped or re-derived — see ADR-1458). Like the usage-limit classifier it is fed this invocation's own usage via `invocationGuardUsage` (#1949), so a resumed session's cumulative totals never trip the guard. `interpretClaudeResult`
 checks this immediately after the `classifyUsageLimitExit` branch and before the diagnostic-only
 unmatched-`terminal_reason` log line, returning a `*claudeAPIErrorExit{TerminalReason, NumTurns,
 CostUSD}` sentinel in place of the generic error wrapper.
