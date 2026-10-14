@@ -207,6 +207,27 @@ type statusLineValue struct {
 	UpdatedAt string `json:"updatedAt"`
 }
 
+// statusValue is the Status single-select value selected by the shallow board
+// and probe queries: its name and its own updatedAt, which only a Status write
+// bumps (unlike the project item's updatedAt, which every field write bumps).
+type statusValue struct {
+	Name      string `json:"name"`
+	UpdatedAt string `json:"updatedAt"`
+}
+
+// movedAt is GitHub's time for the Status value, or the zero time when the
+// timestamp is absent or unparseable (unknown, never epoch) (#2246).
+func (v *statusValue) movedAt() time.Time {
+	if v == nil || v.UpdatedAt == "" {
+		return time.Time{}
+	}
+	t, err := parseTime(v.UpdatedAt)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
+
 // statusLineUpdatedAtTolerance absorbs timestamp skew between the field
 // value's updatedAt and the project item's updatedAt, which one mutation
 // bumps at (nearly) the same instant. A real change newer than this

@@ -132,17 +132,22 @@ type ProjectItem struct {
 	// cheap durable "entered this Status" signal exists via REST/GraphQL for
 	// Project v2 items. See ADR-1833.
 	StatusEnteredAt time.Time
-	URL             string
-	Repo            string // "owner/repo" (e.g., "acme/widgets")
-	IsPR            bool   // True if this item is a Pull Request (vs an Issue)
-	IsClosed        bool   // True if the underlying GitHub Issue is closed (always false for PRs)
-	UpdatedAt       time.Time
-	Labels          []string
-	Assignees       []string
-	Comments        []Comment
-	Author          string
-	BlockedBy       []Dependency // Issues that must be closed before this one can advance
-	LinkedPRNumber  int          // PR number of the first linked PR (0 if none); for REST re-request calls
+	// StatusAtGitHub is GitHub's own time for the Status value (the Status
+	// single-select value's updatedAt), i.e. when the item last moved column.
+	// Zero means unknown (nil value, unparseable time, GitHubAdapter paths that
+	// do not select it). It orders the merge-train batch; see ADR-2246.
+	StatusAtGitHub time.Time
+	URL            string
+	Repo           string // "owner/repo" (e.g., "acme/widgets")
+	IsPR           bool   // True if this item is a Pull Request (vs an Issue)
+	IsClosed       bool   // True if the underlying GitHub Issue is closed (always false for PRs)
+	UpdatedAt      time.Time
+	Labels         []string
+	Assignees      []string
+	Comments       []Comment
+	Author         string
+	BlockedBy      []Dependency // Issues that must be closed before this one can advance
+	LinkedPRNumber int          // PR number of the first linked PR (0 if none); for REST re-request calls
 	// LinkedPRNumberShallow is the PR number of the first linked PR from the shallow board query (0 if none).
 	// Populated only during shallow board parse. Linkage drift detection was previously performed
 	// by Reconcile using this field; that responsibility has moved to the probe loop
@@ -341,6 +346,8 @@ type BoardProbeItem struct {
 	// Known is false when no linked PR was returned.
 	LinkedPRFacts ProbePRFacts
 	Status        string
+	// StatusAtGitHub is GitHub's time for the Status value; zero = unknown (#2246).
+	StatusAtGitHub time.Time
 }
 
 // ProbePRFacts are the probe query's linked-PR scalars mapped onto the REST
