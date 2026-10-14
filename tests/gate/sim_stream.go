@@ -143,7 +143,7 @@ type simStreamWriter struct {
 	dumpShown   int
 	dumpHidden  int
 	ceilingLine string
-	dumpPath    string
+	dumpPaths   []string // one per hung test binary: each writes its own PID-named file
 }
 
 func newSimStreamWriter(tr *simTracker, scan *crashScanner, term, raw, log io.Writer) *simStreamWriter {
@@ -246,7 +246,7 @@ func (w *simStreamWriter) output(e Event) {
 		w.ceilingLine = text // the first mention is the ceiling's own message, not the dump header repeating it
 	}
 	if m := dumpWrittenRE.FindStringSubmatch(text); m != nil {
-		w.dumpPath = m[1]
+		w.dumpPaths = append(w.dumpPaths, m[1])
 	}
 	if strings.Contains(text, testlife.DumpHeaderPrefix) {
 		w.dumpSeen = true
@@ -284,8 +284,10 @@ func (w *simStreamWriter) ceiling() string {
 	return w.ceilingLine
 }
 
-func (w *simStreamWriter) dump() string {
+// dumps is the path of every goroutine dump the run wrote, in order (several
+// test binaries can hit their ceiling in one run).
+func (w *simStreamWriter) dumps() []string {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return w.dumpPath
+	return append([]string(nil), w.dumpPaths...)
 }

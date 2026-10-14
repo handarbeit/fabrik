@@ -5,6 +5,7 @@ package testlife
 import (
 	"bufio"
 	"bytes"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -240,6 +241,9 @@ func TestGuard_CeilingExitsWithClearMessage(t *testing.T) {
 		t.Fatal("helper outlived its ceiling")
 	}
 	msg := h.stderrString()
+	// The binary's PID goes before the extension, so binaries sharing DumpEnv
+	// (go test runs several at once) each keep their own file.
+	dump = strings.TrimSuffix(dump, ".txt") + "." + strconv.Itoa(h.cmd.Process.Pid) + ".txt"
 	if !strings.Contains(msg, DumpHeaderPrefix) || !strings.Contains(msg, "goroutine dump written to "+dump) {
 		t.Fatalf("ceiling exit carries no goroutine dump: %q", msg)
 	}
@@ -830,7 +834,12 @@ func TestDumpPath_DefaultsOutsideWorkingDirectory(t *testing.T) {
 		t.Fatalf("unexpected name %q", got)
 	}
 	o.Getenv = func(k string) string { return map[string]string{DumpEnv: "/x/y.txt"}[k] }
-	if o.dumpPath() != "/x/y.txt" {
-		t.Fatal("DumpEnv ignored")
+	want := fmt.Sprintf("/x/y.%d.txt", os.Getpid())
+	if o.dumpPath() != want {
+		t.Fatalf("DumpEnv path = %q, want %q (PID before the extension, so concurrent binaries do not overwrite each other)", o.dumpPath(), want)
+	}
+	o.Getenv = func(k string) string { return map[string]string{DumpEnv: "/x/noext"}[k] }
+	if want := fmt.Sprintf("/x/noext.%d", os.Getpid()); o.dumpPath() != want {
+		t.Fatalf("extensionless DumpEnv path = %q, want %q", o.dumpPath(), want)
 	}
 }

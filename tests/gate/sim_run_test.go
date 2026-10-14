@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -78,11 +79,18 @@ func TestSimSuite_HeartbeatAndStillRunningForATestThatNeverFinishes(t *testing.T
 		case <-released:
 		case <-ctx.Done():
 		}
-		dump := envValue(c.Env, testlife.DumpEnv)
+		// Two test binaries of one run hit their ceiling; testlife puts each PID
+		// before the extension of the shared SIM_TEST_DUMP_FILE value.
+		base := envValue(c.Env, testlife.DumpEnv)
+		dumpFor := func(pid int) string {
+			return strings.TrimSuffix(base, ".txt") + "." + strconv.Itoa(pid) + ".txt"
+		}
+		dump := dumpFor(4242)
 		writeStdout(c, jsonLine("output", "TestHang", "tests/sim: test binary exceeded its hard wall-time ceiling of 40m0s (override with SIM_TEST_CEILING); exiting\n", 0))
 		writeStdout(c, jsonLine("output", "TestHang", "tests/sim: goroutine dump written to "+dump+"\n", 0))
 		writeStdout(c, jsonLine("output", "TestHang", testlife.DumpHeaderPrefix+" (tests/sim) pid 1: x ===\n", 0))
 		writeStdout(c, jsonLine("output", "TestHang", "goroutine 17 [chan receive, 6 minutes]:\n", 0))
+		writeStdout(c, jsonLine("output", "", "tests/sim/other: goroutine dump written to "+dumpFor(4343)+"\n", 0))
 		writeStdout(c, jsonLine("fail", "", "", 2640))
 		return Result{ExitCode: 1}
 	})
@@ -113,7 +121,7 @@ func TestSimSuite_HeartbeatAndStillRunningForATestThatNeverFinishes(t *testing.T
 		"running 6m0s", "TestHang", "SLOW: over 5m0s (no history)",
 		"== sim suite failed: 0 test(s) failed, 1 still running when it ended ==",
 		"still running after 6m0s", "hard wall-time ceiling of 40m0s",
-		"goroutine dump: ", ".sim.dump.txt", "archive: ",
+		"goroutine dump: ", ".sim.dump.4242.txt", ".sim.dump.4343.txt", "archive: ",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("output lacks %q:\n%s", want, s)

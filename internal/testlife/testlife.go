@@ -84,7 +84,9 @@ const (
 	ParentEnv = "SIM_TEST_PARENT"
 
 	// DumpEnv names the file the goroutine dump is written to when the bail path
-	// fires (#2247). Unset: a file in the temp directory.
+	// fires (#2247); the process ID is inserted before its extension so binaries
+	// sharing one value do not overwrite each other. Unset: a file in the temp
+	// directory.
 	DumpEnv = "SIM_TEST_DUMP_FILE"
 
 	// DumpHeaderPrefix begins the first line of every dump, so a reader of the
@@ -114,7 +116,7 @@ type Options struct {
 
 	KillGrace time.Duration // 0: 5s; how long exit may take before the process kills itself
 
-	DumpPath   string        // "": DumpEnv, else <tmp>/<name>-goroutines-<pid>.txt
+	DumpPath   string        // "": DumpEnv with the PID inserted before its extension, else <tmp>/<name>-goroutines-<pid>.txt
 	DumpBudget time.Duration // 0: 3s (never more than 3/5 of KillGrace); how long the bail path waits for the dump
 
 	// Seams. Zero values use the real process, environment and clock.
@@ -167,7 +169,12 @@ func (o Options) dumpPath() string {
 		return o.DumpPath
 	}
 	if v := strings.TrimSpace(o.getenv(DumpEnv)); v != "" {
-		return v
+		// `go test ./...` runs several test binaries at once, all inheriting this
+		// one path: a shared name would let the second hung binary truncate the
+		// first's dump. The PID goes before the extension, so every binary keeps
+		// its own file and the gate (which reads the "written to" line) finds each.
+		ext := filepath.Ext(v)
+		return fmt.Sprintf("%s.%d%s", strings.TrimSuffix(v, ext), os.Getpid(), ext)
 	}
 	name := strings.Map(func(r rune) rune {
 		switch {

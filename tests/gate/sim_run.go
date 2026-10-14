@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -91,12 +91,17 @@ func (g *Gate) printSimFailure(tr *simTracker, sw *simStreamWriter, a *simArchiv
 	if len(reaped) > 0 {
 		g.outf("   the gate SIGKILLed test binary pid(s) %v: they outlived their ceiling and did not exit\n", reaped)
 	}
-	switch path := sw.dump(); {
-	case path != "":
-		g.outf("   goroutine dump: %s\n", path)
-	case dumpFile != "":
-		if _, err := os.Stat(dumpFile); err == nil {
-			g.outf("   goroutine dump: %s\n", dumpFile)
+	if paths := sw.dumps(); len(paths) > 0 {
+		for _, path := range paths {
+			g.outf("   goroutine dump: %s\n", path)
+		}
+	} else if dumpFile != "" {
+		// No "written to" line reached us (killed mid-stream): the binaries name
+		// their files <dump>.<pid>.<ext>, so look for them beside the base name.
+		ext := filepath.Ext(dumpFile)
+		matches, _ := filepath.Glob(strings.TrimSuffix(dumpFile, ext) + ".*" + ext)
+		for _, m := range matches {
+			g.outf("   goroutine dump: %s\n", m)
 		}
 	}
 	if a != nil {
