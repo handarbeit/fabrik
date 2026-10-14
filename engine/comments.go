@@ -411,7 +411,7 @@ func (e *Engine) processCommentsClassified(ctx context.Context, board *gh.Projec
 	// can put the branch back instead of leaving an unpushed rebase behind. Empty when
 	// the worktree does not exist yet (nothing to restore to).
 	preRebaseSHA, _ := gitHeadSHA(wm.worktreeDir(item.Number))
-	workDir, err := wm.EnsureWorktree(item.Number, baseBranch, skipUpdate)
+	workDir, err := wm.EnsureWorktree(item.Number, baseBranch, skipUpdate, e.worktreeAdoptionOptions(item)...)
 	if err != nil {
 		e.endStageRework(item, stage, wasReworking, false)
 		e.removeEditingLabel(owner, repo, item.Number)
