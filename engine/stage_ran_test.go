@@ -38,10 +38,17 @@ func TestStageRanOnEntry(t *testing.T) {
 		})
 	}
 
-	t.Run("stage comment alone is not a signal", func(t *testing.T) {
-		item := gh.ProjectItem{Number: 1, Comments: []gh.Comment{{ID: "C1", Body: "🏭 **Fabrik — stage: Plan**\npartial"}}}
+	t.Run("the stage's own output comment is a signal", func(t *testing.T) {
+		item := gh.ProjectItem{Number: 1, Comments: []gh.Comment{{ID: "C1", Body: "🏭 **Fabrik — stage: Plan**\noutput"}}}
+		if !eng.stageRanOnEntry(item, stage, false, false) {
+			t.Error("a stage output comment means the stage has run")
+		}
+	})
+
+	t.Run("another stage's output comment is not", func(t *testing.T) {
+		item := gh.ProjectItem{Number: 1, Comments: []gh.Comment{{ID: "C1", Body: "🏭 **Fabrik — stage: Research**\noutput"}}}
 		if eng.stageRanOnEntry(item, stage, false, false) {
-			t.Error("a partial stage comment must not count as the stage having run")
+			t.Error("Research's comment must not count for Plan")
 		}
 	})
 

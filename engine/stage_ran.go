@@ -19,12 +19,14 @@ func (e *Engine) SetStageFirstRoutingDisabledForTest(disabled bool) {
 // ADR 2220). When it has not, the stage itself runs first and the comments stay
 // unprocessed for the comment pass that follows it.
 //
-// The decision reads labels and the store's engine-pause record only: both
-// survive a restart, and neither lags the way the deep Comments field can (a
-// stale read of a stage comment would re-run a finished stage). A stage comment
-// is deliberately not a signal — an incomplete run posts its partial output as
-// one, and handing a pending comment to the comment skill then could complete
-// the stage from that partial output. Anything undeterminable counts as "not
+// The decision reads durable state only: labels, the store's engine-pause record
+// and the stage's own output comment (FR-002). The comment is what covers a
+// stage that blocked on input and was resumed by a comment pass that did not
+// complete it — that leaves no label. It is a weaker signal than the labels
+// (Comments is a deep field and can lag; an incomplete run also posts partial
+// output), but a stage that has posted output is one the comment skills are
+// written for, and it matches FR-003 ("whether the stage completed, blocked on
+// input or is still being reworked"). Anything undeterminable counts as "not
 // run", so the stage runs.
 func (e *Engine) stageRanOnEntry(item gh.ProjectItem, stage *stages.Stage, enginePaused, resumedFromPause bool) bool {
 	if e.stageFirstRoutingOff.Load() {
@@ -45,5 +47,5 @@ func (e *Engine) stageRanOnEntry(item gh.ProjectItem, stage *stages.Stage, engin
 			return true
 		}
 	}
-	return false
+	return findStageComment(item.Comments, stage.Name) != nil
 }
