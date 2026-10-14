@@ -1230,6 +1230,11 @@ func (b localAPIBackend) Health(localapi.HealthParams) (*localapi.HealthResult, 
 	res.Workers.TrainMax = localapi.Some(trainMax)
 
 	res.MergeTrain = b.partitions(now, h)
+	if h.Draining {
+		// The count is read live from the Store: the mirror's value is only refreshed
+		// by awaitDrain, which starts once the poll in progress at the SIGHUP returns.
+		res.Draining = &localapi.DrainHealth{Since: localapi.KnownTime(h.DrainSince), WorkersRemaining: len(b.e.drainWorkers())}
+	}
 	return res, nil
 }
 

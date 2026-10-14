@@ -289,7 +289,11 @@ func (e *Engine) Run() error {
 		e.logFile = lf
 		pollLogFile = lf
 		defer func() {
+			// Under logMu (#2259): the SIGHUP goroutine outlives the run context now
+			// and may still be logging when Run() returns.
+			e.logMu.Lock()
 			e.logFile = nil
+			e.logMu.Unlock()
 			pollLogFile = nil
 			lf.Close()
 		}()
@@ -323,6 +327,9 @@ func (e *Engine) Run() error {
 	warnDrainDeadlineOrdering(e.drainDeadline(), claudeKillGraceSigInt, claudeKillGraceSigTerm, startupW)
 
 	ctx, cancel := context.WithCancel(context.Background())
+	if fn := e.drain.runCtxHook; fn != nil {
+		fn(ctx) // test seam (#2259)
+	}
 
 	// GitHub App auth refresh loop (#1713): only started when e.ghAppAuth was
 	// wired in New() (App-auth mode). waitGitHubAppRefreshLoops is a no-op in
@@ -364,9 +371,10 @@ func (e *Engine) Run() error {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
-	// restartDone is closed after performSighupRestart returns (exec failure path)
-	// so the SIGHUP goroutine stays alive for the full drain window.
+	// restartDone is closed when Run() returns (#2259), so the SIGHUP goroutine
+	// stays alive — counting signals — for the whole drain and any exec attempt.
 	restartDone := make(chan struct{})
+	defer close(restartDone)
 	registerSighupHandler(ctx, cancel, e, restartDone)
 	if e.cfg.ReadyCh != nil {
 		close(e.cfg.ReadyCh)
@@ -384,6 +392,11 @@ func (e *Engine) Run() error {
 			// launch the durable clean-stop pause, then cancel — see
 			// beginShutdownPause's doc comment for why the internal ordering is
 			// load-bearing and must not be reordered inline here.
+			//
+			// #2259 FR-008: a SIGINT/SIGTERM during a SIGHUP drain is a stop, not a
+			// restart — clear the restart intent so drainAndExit does not exec.
+			e.drain.stopped.Store(true)
+			e.sighupRequested.Store(false)
 			e.beginShutdownPause(cancel)
 		case <-ctx.Done():
 			return
@@ -803,19 +816,37 @@ func (e *Engine) Run() error {
 		}()
 	}
 
+	// drainThenExit is the first-SIGHUP path (#2259, ADR 2259): polling has
+	// stopped, so wait — with no deadline — for the in-flight workers to finish,
+	// then take the ordinary drain tail (which re-execs). A second SIGHUP or a
+	// SIGINT/SIGTERM cancels ctx, which ends the wait early.
+	drainThenExit := func() error {
+		e.awaitDrain(ctx.Done())
+		return e.drainAndExit(locks, restartDone)
+	}
+	drainBegan := e.drain.drainBegan()
+
 	for {
 		if e.wakeCh != nil {
 			select {
 			case <-ctx.Done():
 				return e.drainAndExit(locks, restartDone)
+			case <-drainBegan:
+				return drainThenExit()
 			case <-ticker.C:
 				if ctx.Err() != nil {
 					return e.drainAndExit(locks, restartDone)
+				}
+				if e.drainActive() {
+					return drainThenExit()
 				}
 				if err := doPollCycle(); err != nil {
 					e.logf(0, "warn", "poll error: %v\n", err)
 				}
 			case <-e.wakeCh:
+				if e.drainActive() {
+					return drainThenExit()
+				}
 				// R1 (#1716): a wake arriving while GraphQL or REST rate-limit
 				// backoff is active must not trigger an immediate poll — that
 				// was the wake-path bypass that turned a throttle into a
@@ -846,9 +877,14 @@ func (e *Engine) Run() error {
 			select {
 			case <-ctx.Done():
 				return e.drainAndExit(locks, restartDone)
+			case <-drainBegan:
+				return drainThenExit()
 			case <-ticker.C:
 				if ctx.Err() != nil {
 					return e.drainAndExit(locks, restartDone)
+				}
+				if e.drainActive() {
+					return drainThenExit()
 				}
 				if err := doPollCycle(); err != nil {
 					e.logf(0, "warn", "poll error: %v\n", err)
@@ -1203,6 +1239,11 @@ type PollBackoffResult struct {
 // own ticker and resets it from the returned NextInterval; a test driving
 // this repeatedly has no ticker to reset in the first place.
 func (e *Engine) PollWithBackoff(ctx context.Context, configuredInterval time.Duration) (PollBackoffResult, error) {
+	// A SIGHUP drain (#2259) stops polling: nothing new may start, and this also
+	// covers the test-only poll seam's triggered poll.
+	if e.isDraining() {
+		return PollBackoffResult{NextInterval: configuredInterval}, nil
+	}
 	// R3 (#1716) minimum-poll-interval floor: defense-in-depth against any
 	// wake source — present or future — driving unbounded immediate polls,
 	// independent of R1's wake-path gate above (which this method has no way
@@ -2172,6 +2213,10 @@ func (e *Engine) dispatchCandidates(ctx context.Context, board *gh.ProjectBoard,
 
 	for _, item := range e.orderDispatchCandidates(deepFetchCandidates) {
 		if ctx.Err() != nil {
+			return dispatched, deferredKeys
+		}
+		// #2259: a SIGHUP drain starts nothing new (stage runs and comment passes).
+		if e.isDraining() {
 			return dispatched, deferredKeys
 		}
 		item := item

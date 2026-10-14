@@ -3736,7 +3736,7 @@ silently hiding the other.
 | `a` | Open abtop AI session monitor (shows token usage, context window, rate limits for all Claude sessions) |
 | `u` | Upgrade plugin skills. When the `[u] skills out of date` badge is shown (embedded changed, no local edits), pressing `u` shows a `y/N` confirmation and applies the upgrade. When the `[u] custom workflow` (or combined `[u] custom workflow (N stale)`) badge is shown (local edits detected, possibly also stale), pressing `u` opens a three-option dialog: **[1] Reconcile** — quits the TUI and prints a Claude Code prompt to stderr for merging customizations (quitting stops the engine, so with jobs in progress `1` first asks the same active-workers quit confirmation as `q`; cancelling it prints nothing); **[2] Overwrite** — prompts you to type `OVERWRITE` to confirm destructive reset; **[3] Cancel** — dismisses the dialog. When also stale, the dialog's status line names the stale count so reconciling is known to also pick up upstream changes. Active stage invocations pick up new files on next run. |
 | `w` | Wake: reset idle backoff and poll immediately |
-| `ctrl+r` | Force refresh: drain in-flight workers and restart in place (same as SIGHUP — see [Recovering from Wedged State](#recovering-from-wedged-state)) |
+| `ctrl+r` | Restart gracefully: stop starting work, let in-flight workers finish, then restart in place (same as SIGHUP). Press again to restart now, cancelling the remaining workers — see [Recovering from Wedged State](#recovering-from-wedged-state) |
 | `?` | Toggle help panel (keybindings and labels reference) |
 | `q` | Quit |
 
@@ -5026,13 +5026,13 @@ If Claude doesn't seem to follow the skill instructions:
 
 ### Recovering from Wedged State
 
-Cache-stale bugs can occasionally leave Fabrik's in-memory state stuck — an issue that should advance doesn't, or a label that should clear doesn't. The safest escape hatch is a SIGHUP restart, which drops all in-memory state and re-execs the same binary in place, without tearing down the terminal session or TUI.
+Cache-stale bugs can occasionally leave Fabrik's in-memory state stuck — an issue that should advance doesn't, or a label that should clear doesn't. The safest escape hatch is a SIGHUP restart, which waits for running workers to finish, then drops all in-memory state and re-execs the same binary in place, without tearing down the terminal session or TUI.
 
 **If the only symptom is a suspected false-positive Claude usage-limit hold**, prefer applying `fabrik:clear-claude-limit` to any open board item instead — see [Claude Usage-Limit Hold](#claude-usage-limit-hold). It clears just that one piece of state without dropping the board cache, observers, or `mayNeedWork` map a full SIGHUP restart discards. Reach for SIGHUP when something else is also wedged, or the lighter clear doesn't help.
 
 **How to trigger:**
 
-If you are using the TUI dashboard, press **`ctrl+r`** — this sends SIGHUP to the Fabrik process and triggers the same restart without leaving the TUI to open another terminal window.
+If you are using the TUI dashboard, press **`ctrl+r`** — this sends SIGHUP to the Fabrik process and triggers the same restart without leaving the TUI to open another terminal window. Pressing it a second time is the second SIGHUP (below).
 
 From the command line:
 
@@ -5044,14 +5044,17 @@ kill -HUP <fabrik-pid>
 pkill -HUP fabrik
 ```
 
-**What happens:**
+**What happens (drain, then restart):**
 
-1. Fabrik logs `[signal] received SIGHUP — restarting in place to clear in-memory state` to `fabrik.log`.
-2. In-flight Claude workers are cancelled (same drain as Ctrl-C).
-3. `fabrik:locked:<user>` labels are removed from any issues that were mid-run.
-4. The directory lock (`.fabrik/fabrik.lock`) and the board lock are released.
-5. `syscall.Exec` replaces the process image in place — the PID stays the same, the parent shell and TUI remain attached, and a brief TUI redraw may occur.
-6. The new process starts with a clean in-memory cache, Store, observers, and `mayNeedWork` set.
+SIGHUP is a two-step signal. The first one drains; a second one restarts now.
+
+1. **First SIGHUP — drain.** Fabrik logs `[signal] received SIGHUP — draining in-flight workers before restarting`, then the in-flight set (`#issue stage kind elapsed` per worker) and `send SIGHUP again to restart now`. It stops polling and stops starting new work of every kind — stage runs, comment passes, review/CI-fix/rebase reinvokes, merge-train steps and conflict resolutions. Workers already running keep their context and run to their own end: a worker that finishes completes normally (labels, comments, push, 🚀). A reinvoke that was only queued for a worker slot had started nothing and is dropped; the new process re-dispatches it. No item is paused and `fabrik:paused` is not applied.
+2. The in-flight line is logged again every minute until none is left, the TUI title shows `draining for restart (N left)` and `fabrik_health` reports a `draining` object with `workers_remaining` (the poll is reported as not overdue while draining). The first-phase drain has no deadline of its own: each worker is bounded by the stage's `max_wall_time` and the 15-minute inactivity timeout.
+3. A merge-train run that is between steps (a trial waiting on CI) is not a worker and does not delay the restart; its persisted run resumes after the restart. A train step or conflict resolution that is executing counts as in flight, and a conflict resolution that has not started is not started — the member is left alone, uncharged.
+4. Once no worker is left (immediately, if none was running), `fabrik:locked:<user>` labels are removed from any issues that were mid-run, the directory lock (`.fabrik/fabrik.lock`) and the board lock are released, and `syscall.Exec` replaces the process image in place — the PID stays the same, the parent shell and TUI remain attached, and a brief TUI redraw may occur.
+5. The new process starts with a clean in-memory cache, Store, observers, and `mayNeedWork` set.
+
+**Second SIGHUP — restart now.** If you do not want to wait for a long-running worker, send SIGHUP again (or press `ctrl+r` again). The remaining workers are cancelled (same drain as Ctrl-C, bounded by `--drain-deadline`, default 30 s) and Fabrik re-execs. It no longer force-quits with exit status 1. Further SIGHUPs have no additional effect. A SIGINT or SIGTERM during a SIGHUP drain stops Fabrik as it always does (clean stop, no restart).
 
 **Terminal restore:** The terminal alt-screen is properly released before the process
 is replaced or exits — no `reset` command is needed after a SIGINT, SIGTERM, or SIGHUP.
@@ -5080,7 +5083,7 @@ silently overwriting your changes. Run `fabrik upgrade` to move them into
 - Rocket-reaction durability: comments that were fully processed before the SIGHUP already carry a 🚀 reaction; the new process skips them
 - Worktrees and uncommitted work in `.fabrik/worktrees/`
 
-**In-flight Claude runs:** Any Claude session interrupted by the SIGHUP drain did not emit `FABRIK_STAGE_COMPLETE`, so the new process will re-dispatch those stages. The rocket-reaction guard prevents double-posting of already-processed comments. Expect the interrupted stage to restart from its session file.
+**In-flight Claude runs:** after the first SIGHUP they are not interrupted — they finish before the restart. Only a second SIGHUP cancels them; a session cancelled that way did not emit `FABRIK_STAGE_COMPLETE`, so the new process re-dispatches that stage, and the rocket-reaction guard prevents double-posting of already-processed comments. Expect the interrupted stage to restart from its session file. Work that finishes during the drain but would normally trigger follow-up (advance, next stage, reinvoke) is picked up by the new process.
 
 **Log rotation:** the pre-restart log is not lost. On startup `fabrik.log` is rotated to `fabrik.log.1` and the new process opens a fresh `fabrik.log` whose first line is a banner with `reason=SIGHUP restart` (see [Poll Log](#poll-log)). No manual copy is needed before sending the signal:
 

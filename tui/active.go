@@ -480,7 +480,11 @@ func (a ActivePaneComponent) slotsSuffix() string {
 	if a.slots == nil {
 		return ""
 	}
-	out := fmt.Sprintf(" · slots %d/%d", a.slots.InUse, a.slots.Max)
+	out := ""
+	if a.slots.Draining {
+		out = fmt.Sprintf(" · draining for restart (%d left)", a.slots.DrainLeft)
+	}
+	out += fmt.Sprintf(" · slots %d/%d", a.slots.InUse, a.slots.Max)
 	if a.slots.TrainMax > 0 {
 		out += fmt.Sprintf(" + train %d/%d", a.slots.TrainInUse, a.slots.TrainMax)
 	}

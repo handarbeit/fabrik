@@ -4819,6 +4819,30 @@ The merge-train conflict resolver's stage has no skill keys and skips resolution
 
 **Startup.** After the plugin state check, `cmd/root.go` computes the plan (skipped under `--plugin-dir`) and `reportPluginState` records `plugin_state:migration_pending` through `warnings.Reconcile`; it clears on the first start after the migration ran. The daemon changes nothing.
 
+### 7.20 SIGHUP Drain-Then-Restart (#2259, ADR 2259)
+
+SIGHUP is the graceful restart, and it drains before it restarts (amends ADR-1393's "SIGHUP inherits the bounded wait", for the first signal only). `registerSighupHandler` keeps one long-lived `signal.Notify` channel and counts signals (no gap in which the default terminating action could apply):
+
+| SIGHUP | Effect |
+|---|---|
+| 1st | `Engine.onFirstSighup`: set `sighupRequested`, `beginDrain` (closes the drain channel, sets the draining flag), log the in-flight set and `send SIGHUP again to restart now` once, start the one-minute repeater. **Nothing is cancelled.** |
+| 2nd | `cancel()` the run context. The main loop reaches `drainAndExit`: `cleanupLockedIssues`, the `drainDeadline()` bounded wait, `performSighupRestart`. No `os.Exit(1)`. |
+| 3rd+ | No effect. |
+
+**Main loop.** On the drain channel (and, defensively, at the top of the ticker and wake cases) the loop stops polling and calls `awaitDrain(ctx.Done())`, which returns when `drainWorkers()` is empty or the run context is cancelled (second SIGHUP, SIGINT/SIGTERM), then `drainAndExit`. It checks emptiness before its first wait, so an idle SIGHUP restarts at once. It polls the store (250 ms) instead of calling `e.wg.Wait()`, which must never race an `Add` from zero (ADR-1393). The first-phase wait has no deadline: workers are bounded by `max_wall_time` and the 15-minute inactivity timeout. A poll already running when the signal lands finishes first (polls run on the main goroutine); the gates below stop its dispatches.
+
+**What is in flight** (`drainWorkers`, one `Scan` plus `RepoWorkerKeys`): items with a `Worker` (queued ones included), items with a `ConflictResolution`, and merge-train worker/step goroutines (`EnterRepoWorker`). A train run waiting on a trial's CI is in none of them, so it never holds the restart; its persisted run (ADR 2051) resumes after the exec.
+
+**Dispatch gate** (`isDraining`): `dispatchCandidates` (stage runs and comment passes), `dispatchReinvoke` (review, CI-fix, rebase; at the top, and again after the slot is taken), `dispatchMergeTrainWorker`, `launchStep`, `resolveConflictWithClaude` and `acquireTrainSlotIn` (return `errDrainingNotAttempted`, which `trainCancelled` reads as "could not attempt": no ejection, no `recordTrial`, no dissolve) and `PollWithBackoff` (covers the test-only poll seam's trigger). A reinvoke goroutine queued for a slot also waits on the drain channel and abandons itself: it began no run, its `WorkerExited` is deferred, and the new process re-dispatches it.
+
+**SIGINT/SIGTERM during a drain.** The run context is live during a drain, so the signal goroutine fires; it clears `sighupRequested` before `beginShutdownPause`, so `drainAndExit` stops instead of re-exec'ing (ADR-1393 unchanged). A lock loss still wins (`drainAndExit` handles `lockLost` before any SIGHUP branch).
+
+**No pause, no lost work.** SIGHUP never pauses an item or applies `fabrik:paused`. A worker that finishes during the drain completes normally; follow-up it would trigger (advance, next stage, reinvoke) is not dispatched and is picked up by the new process.
+
+**Visibility.** `[signal]` log lines list `#issue stage kind elapsed` per worker, repeated every minute (`drainLogInterval`) until the set is empty. `daemonHealth.setDraining` feeds `fabrik_health.draining` (`since`, `workers_remaining`; absent when not draining); `tui.WorkerSlotsEvent` carries `Draining`/`DrainLeft` for the title (`draining for restart (N left)`). While draining, `pollVerdictFor` returns the unknown verdict, so the stopped poll is never reported as a `pipeline-stalled`/`item-wedged` stall.
+
+**Unchanged:** the idle-only self-upgrade re-exec, SIGINT/SIGTERM behaviour and Windows (no SIGHUP; the drain state is untagged). Seams (per-Engine): `SetSighupDrainDisabledForTest`, `SetDrainDispatchGateDisabledForTest`, `SetDrainLogIntervalForTest`, `SetDrainPollIntervalForTest`, `SetRunCtxHookForTest`. Tests: `engine/sighup_drain_test.go`.
+
 ## 8. Invalid / Unexpected States
 
 The engine handles unexpected label combinations (from manual human manipulation) through its guard chain. The behavior is defined by the order of checks in `itemMayNeedWork()`, `itemNeedsWork()`, and `processItem()`.

@@ -248,3 +248,7 @@ failed shutdown-time `fabrik:paused` write — see R2's rationale above for why 
 (retry across future poll cycles) does not apply to a process that is exiting immediately.
 
 **References:** [ADR-054: SIGINT→SIGTERM→SIGKILL Escalation and Kill-Reason Propagation](054-sigint-kill-escalation-and-reason-propagation.md), [ADR-1422: Terminal Advance Escalation and Settle Scan](1422-terminal-advance-escalation-and-settle-scan.md), [ADR-1097: Non-Default-Base Explicit Close Retry](1097-non-default-base-close-retry.md), ADR-002 (GitHub as state store), ADR-036 (reactive-cache single-owner store), #1379 (`fabrik:paused` suppresses deep-fetch)
+
+## Amendment (ADR 2259)
+
+The "SIGHUP inherits the bounded wait" decision now applies only to the *second* SIGHUP. The first SIGHUP no longer cancels the run context: it drains in-flight workers with no deadline and then restarts (see [ADR 2259](2259-sighup-drains-before-restart.md)). SIGINT/SIGTERM behaviour, `beginShutdownPause`'s ordering and the bounded `drainAndExit` wait are unchanged, and a SIGINT/SIGTERM during a SIGHUP drain clears the restart intent so it stops rather than re-execs.
