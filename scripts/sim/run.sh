@@ -6,6 +6,9 @@
 #   scripts/sim/run.sh --all          # full tree (tests/sim/... incl. simgh/simclaude/ghfault)
 #   scripts/sim/run.sh -run TestFoo    # forwarded to `go test`, e.g. one scenario
 #   scripts/sim/run.sh --all -run Foo  # forwarded, against the full tree
+#   scripts/sim/run.sh --all -json     # forwarded too: the gate's sim step runs it this way and decodes the
+#                                      # per-test stream (tests/gate/sim_run.go, #2247); SIM_TEST_DUMP_FILE
+#                                      # (if set) is where a ceiling hit writes its goroutine dump
 #
 # This is BOTH the frictionless manual entry point ("run the sim layer by
 # hand at any point before committing to a full live e2e run") AND what
@@ -53,8 +56,8 @@
 # explicit cap rather than inheriting GOMAXPROCS uncapped.
 #
 # The default comes from scripts/lib/parallel.sh's default_race_parallel
-# (`min(4, host cores)`) — lowered from #1624's original `min(8, host
-# cores)` after #1677's own measurement on the 28-core host found 8 still
+# (`min(4, host cores)` on macOS; Linux's ceiling is 16 since #2228 / ADR 2228)
+# — lowered from #1624's original `min(8, host cores)` after #1677's own measurement on the 28-core host found 8 still
 # reproduces the TSan fork/exec SIGSEGV roughly 1 run in 5, not reliable
 # enough for a release gate (all of it measured under -race; the race-free
 # default below is 16), while 4 showed zero SIGSEGVs across multiple
@@ -110,7 +113,8 @@ source "$REPO_ROOT/scripts/lib/parallel.sh"
 # shellcheck source=../lib/killgroup.sh
 source "$REPO_ROOT/scripts/lib/killgroup.sh"
 
-# Default is min(4, host cores) — see the "Parallelism cap" comment above,
+# Default is default_race_parallel() (min(4, cores) off Linux, min(16, cores) on
+# Linux since #2228) — see the "Parallelism cap" comment above,
 # and scripts/lib/parallel.sh's own header, for the full rationale and why
 # this helper is shared rather than duplicated per call site.
 # Without -race the TSan fork/exec failure the cap of 4 exists for does not

@@ -141,3 +141,13 @@ func TestParseResetArgs(t *testing.T) {
 		}
 	}
 }
+
+func TestSplitSubcommand_Sim(t *testing.T) {
+	sub, rest := splitSubcommand([]string{"sim", "-run", "TestFoo"})
+	if sub != "sim" || len(rest) != 2 || rest[0] != "-run" {
+		t.Fatalf("got %q %v", sub, rest)
+	}
+	if sub, _ := splitSubcommand([]string{"-run", "x"}); sub != "run" {
+		t.Fatalf("default subcommand = %q", sub)
+	}
+}

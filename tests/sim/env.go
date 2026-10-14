@@ -10,6 +10,7 @@
 package sim
 
 import (
+	"io"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -120,6 +121,10 @@ type Env struct {
 // EnvOptions configures NewEnv. Every field has a working default; a
 // scenario only sets what it cares about.
 type EnvOptions struct {
+	// LogOut receives the engine's attributed, timestamped log lines (#2247).
+	// Default os.Stdout.
+	LogOut io.Writer
+
 	// Owner/Repo identify the managed repo. Default "acme"/"widgets".
 	Owner string
 	Repo  string
@@ -405,6 +410,7 @@ func NewEnv(t *testing.T, opts EnvOptions) *Env {
 		eng = engine.NewWithDeps(cfg, inst, claude, wm)
 	}
 	eng.SetClock(clk)
+	installLogSink(t, eng, opts.LogOut)
 	var boardCache *boardcache.CacheImpl
 	var wake <-chan struct{}
 	if opts.BoardCache {

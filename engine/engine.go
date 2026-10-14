@@ -307,6 +307,7 @@ type Engine struct {
 	mergeTrainInfraMu                     sync.Mutex                    // guards mergeTrainInfraCooldown (#2052)
 	mergeTrainInfraCooldown               map[string]time.Time          // key: trainKey; earliest time a train for that (repo,base) partition may be re-dispatched after a trial was abandoned for CI infrastructure (TrainCIInfra) — see ADR 2052
 	pushGuardDisabled                     atomic.Bool                   // test seam: SetPushZeroAheadGuardDisabledForTest (#2089)
+	stageFirstRoutingOff                  atomic.Bool                   // test seam: SetStageFirstRoutingDisabledForTest (#2220)
 	restoreRebaseDisabledForTest          bool                          // test seam: SetCommentRebaseRestoreDisabledForTest (#2150); guarded by mu, applied to managers registered later too
 	pureRebaseDisabledForTest             bool                          // test seam: SetCatchUpPureRebaseDisabledForTest (#2150); guarded by mu, applied to managers registered later too
 	actionsDegradeLogged                  atomic.Bool                   // set once the notice that a workflow-run read or re-run was refused (`actions` revoked at runtime or never accepted) has been logged (#2052 R7)
@@ -350,6 +351,7 @@ type Engine struct {
 	events                                chan tui.Event                // nil in tests / plain-text mode; TUI goroutine consumes
 	logFile                               *os.File                      // persistent log file at .fabrik/fabrik.log; nil if not opened
 	logMu                                 sync.Mutex                    // serializes concurrent writes to logFile
+	logSink                               atomic.Pointer[LogSink]       // optional per-Engine plain-text sink (#2247); nil: print to stdout
 	webhookMgr                            eventIngestionManager         // nil when no event-ingestion transport is active (#1142)
 	// heartbeatIntervalOverride overrides the package-level heartbeatInterval constant
 	// when non-zero. Used by tests to reduce the heartbeat period to sub-millisecond.
@@ -1133,7 +1135,12 @@ func (e *Engine) logfRepo(repoKey string, tag, format string, args ...any) {
 // logEvent is the shared implementation behind logf and logfRepo.
 func (e *Engine) logEvent(issueNumber int, repo, tag, format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
-	if e.events != nil {
+	if sink := e.logSink.Load(); sink != nil && e.events == nil {
+		// A per-Engine sink (the sim bed, #2247) replaces the shared stdout. It is
+		// a branch ahead of the TUI and stdout paths, not nested inside the stdout
+		// one, so the plain-text block below stays exactly as it was on main.
+		(*sink)(issueNumber, tag, msg)
+	} else if e.events != nil {
 		select {
 		case e.events <- tui.LogEvent{IssueNumber: issueNumber, Repo: repo, Tag: tag, Message: msg}:
 		default:

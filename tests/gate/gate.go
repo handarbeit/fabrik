@@ -110,6 +110,15 @@ type Gate struct {
 	// one TSan-crash retry (#1973 R5); recordPregatePass folds it into the record.
 	pregateRetry *pregateRetryNote
 
+	// The sim pre-gate step (#2247). The pre-gate runs on the root Gate only, so
+	// these are not copied to per-bed views. simAttempt counts the attempts of the
+	// current sim step (a TSan-crash retry is the second); simExtraArgs are
+	// forwarded to `go test`; simReaperOpsFn replaces the process-table operations
+	// in tests.
+	simAttempt     int
+	simExtraArgs   []string
+	simReaperOpsFn func() *simReaperOps
+
 	// leftInconclusive is every "leg: test" still INCONCLUSIVE after its leg's
 	// retries (#1973): uncovered, not failed. run() turns a non-empty set into
 	// ExitCoverageIncomplete so an uncovered leg never reads as success.

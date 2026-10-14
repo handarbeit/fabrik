@@ -46,6 +46,11 @@ type Cmd struct {
 	WaitDelay time.Duration
 	// Grace is the SIGTERM → SIGKILL window when reaping; 0 uses 10s.
 	Grace time.Duration
+	// OnStart, if set, is called with the child's PID right after it started
+	// (before Run waits). With Session the PID is also the session ID. It lets a
+	// caller watch the child's tree (the sim pre-gate's runaway-binary reaper,
+	// #2247); it must not block.
+	OnStart func(pid int)
 }
 
 // Result is how a Cmd ended.
@@ -138,6 +143,9 @@ func (o OSExec) Run(ctx context.Context, c Cmd) Result {
 	// The child holds its own copy of each write end now; ours must close or the
 	// copiers never see EOF.
 	closeParentEnds()
+	if c.OnStart != nil {
+		c.OnStart(cmd.Process.Pid)
+	}
 
 	opts := sessionreap.Options{Log: o.Log}
 	var tracker *sessionreap.Tracker

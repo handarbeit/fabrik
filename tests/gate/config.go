@@ -110,6 +110,12 @@ type Config struct {
 
 	TmpDir string // $TMPDIR, default /tmp
 
+	// The sim pre-gate's diagnostics (#2247, ADR-2247). A zero interval disables
+	// that watcher, so a Config built by hand (the tests') runs none.
+	PregateHeartbeat time.Duration // how often the running tests are listed (3m)
+	PregateReapPoll  time.Duration // how often the stuck-binary reaper looks (30s)
+	PregateReapGrace time.Duration // how long past SIM_TEST_CEILING a binary may live before it is killed (2m)
+
 	// The per-SHA coverage ledger (#1972, ADR-1972).
 	CoverageDir        string        // E2E_COVERAGE_DIR, default <RepoRoot>/.e2e-coverage ("" disables the ledger)
 	CoverageKeepSHAs   int           // E2E_COVERAGE_KEEP_SHAS: SHAs whose bulky archive logs are kept (default 5)
@@ -163,6 +169,9 @@ func LoadConfig(getenv func(string) string, repoRoot string) (Config, error) {
 		BannerWait:         90 * time.Second,
 		StopWait:           60 * time.Second,
 		KillGrace:          10 * time.Second,
+		PregateHeartbeat:   3 * time.Minute,
+		PregateReapPoll:    30 * time.Second,
+		PregateReapGrace:   2 * time.Minute,
 		TmpDir:             orDefault(getenv("TMPDIR"), "/tmp"),
 
 		CoverageDir:        orDefault(getenv("E2E_COVERAGE_DIR"), filepath.Join(repoRoot, ".e2e-coverage")),

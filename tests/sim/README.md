@@ -552,7 +552,8 @@ suite *less* reliable, backwards from the intended relationship.
 the e2e gate runner's pre-gate (behind `scripts/e2e/run.sh`) go through — see that script's own header
 comment) passes an explicit `-parallel "$SIM_PARALLEL"`, defaulting to
 `scripts/lib/parallel.sh`'s `default_race_parallel` — **`min(4, host
-cores)`**, overridable via the environment — not a flat number: a flat cap
+cores)`** when it was written (since #2228 that is the macOS/non-Linux value;
+Linux is `min(16, host cores)`, see below), overridable via the environment — not a flat number: a flat cap
 would *increase* concurrent git-spawning on any host with fewer cores than
 the cap, versus the previous `GOMAXPROCS`-derived default, so a low-core
 host is never worse off than before this change, while every host still
@@ -569,12 +570,21 @@ is why `scripts/sim/run.sh` now also passes an explicit `-timeout
 has room to actually finish instead of looking nonviable against a hidden
 default.
 
+**The ceiling is now per OS (#2228, ADR 2228).** The 4 above was measured on
+macOS. On Linux (GitHub Actions `ubuntu-latest`, x86-64, 4 vCPU; 15 runs, five
+each at 4, 8 and 16) every `-race` run was clean at every level and the wall
+time fell from ~405 s at 4 to ~182 s at 16, so `default_race_parallel` is
+`min(cores, 16)` on Linux and `min(cores, 4)` elsewhere. The crash is treated
+as macOS-specific; CI re-validates the Linux value on every PR. Sharding the
+sim across CI jobs was measured and rejected in the same ADR.
+
 **This now also applies to a bare `go test -race ./...`** (CI's own
 `go test` step, REQ3/REQ4, #1677; `scripts/cut-release.sh` step 4 ran one too
 until v0.0.84, when the local race run was removed) — the previous version of this section stated the cap did *not*
 apply there, reasoning that CI's 2–4-core runners never hit this class of
-contention. That reasoning still holds for CI (the cap is a no-op there in
-practice), but not for a bare `go test -race ./...` run by hand on a
+contention. That reasoning held for CI while the ceiling was 4 (a no-op on
+2–4-core runners); since #2228 CI's Linux value is 16 and is measured, not
+assumed. It never held for a bare `go test -race ./...` run by hand on a
 high-core-count release-cutting workstation, which exercises the exact same
 `tests/sim` package as `scripts/sim/run.sh` and is just as capable of
 reproducing the SIGSEGV — confirmed during the same v0.0.81 release cut
@@ -1187,3 +1197,9 @@ On macOS `/usr/bin/git` is Apple's `xcrun` shim: every call resolves the develop
 - **Main parent watch (#2226).** Without an owner marker, the binary watches the process that started it (normally `go test`; PID plus start token captured at install) and exits within about a second of that parent being gone, so a reparented `sim.test` cannot run on unnoticed. An owner marker takes precedence (the owner watch is then the lifetime); an unreadable parent identity, or a parent that is already init at start, never causes an exit.
 - **Bounded exit (#2226).** Every bail (ceiling, owner watch, parent watches) arms a watchdog before requesting exit; if the process is still alive after 5 s it `SIGKILL`s itself, so an exit that hangs under `-race` still leaves no orphan.
 - **Re-exec'd helpers.** Tests that re-exec the test binary (`os.Args[0]`) must use `testlife.ReExecCommand(timeout, args...)`, not a bare `exec.Command`: it adds an explicit `-test.timeout`, a context deadline and a parent-liveness check so the helper dies with its parent.
+- **Goroutine dump (#2247).** Before any bail exits it writes every goroutine's stack (`runtime/pprof` goroutine profile, `debug=2`) to a file and then to stderr, so a hang and a merely slow run no longer look the same. The file is `SIM_TEST_DUMP_FILE` when set with the PID inserted before its extension, so test binaries running side by side each keep their own dump (the gate sets it to `.e2e-coverage/pregate/<head>.sim.dump.txt`, so dumps land at `<head>.sim.dump.<pid>.txt`), otherwise `<tmp>/<name>-goroutines-<pid>.txt` — never the working directory, which is this package's source tree. The dump is built in its own goroutine and waited for at most 3 s (inside the 5 s self-kill grace, which it never extends); a dump that is not ready in time is skipped, and a failed write is reported and ignored. `Options.DisableDump` is the neutralisation seam. The dump only matters when the ceiling is below `-test.timeout` (an ordinary timeout panic already dumps).
+- **A binary stuck inside exit.** The self-kill above is a Go timer in the process it kills, so it cannot fire when the process is stuck in its exit path — seen on 2026-10-13 with two `-race` binaries spinning for about an hour after "exiting". The gate therefore also reaps from outside (see `tests/gate/README.md`, "Sim pre-gate diagnostics"): it SIGKILLs a `.test` member of the sim's session that has been seen, with the same start token, for ceiling + 2 min. A bare `go test` or a hand-run `scripts/sim/run.sh` has no such cover.
+
+## Log attribution (#2247)
+
+`NewEnv` installs a per-Engine log sink (`engine.SetLogSinkForTest`, `logsink.go`), so every engine log line a sim Env prints reads `2026-10-14T16:11:02.123Z [TestName] [#N tag] message`: wall-clock time and the owning test's name, written in one mutex-guarded `Write` so lines never interleave mid-line. Lines written after the test's cleanup are dropped. `EnvOptions.LogOut` redirects them (default stdout). Only `logEvent` lines are attributed; the engine's few direct prints (`claude.go`, `worktree.go`) and the package-global `gh.Logf` stay anonymous because they have no Engine to route through. With `go test -json` the gate archives these lines in `<head>.sim.log`.

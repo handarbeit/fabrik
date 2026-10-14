@@ -62,9 +62,24 @@ func TestIncompleteStageRetriesAfterBackoffNotPeriodicReEval(t *testing.T) {
 
 // SC-004: a human comment that reaches the cache while the worker runs is
 // handled by the first poll after the worker ends. The retry backoff is an hour
-// so the stage's own retry cannot be what admits the item.
+// so the stage's own retry cannot be what admits the item. The stage already
+// posted output on an earlier, incomplete run (the item has no complete label),
+// so it counts as having run and the comment goes to the comment path (#2220).
 func TestFeedbackCachedDuringRunIsAdmittedAfterWorkerEnds(t *testing.T) {
 	t.Parallel()
+	runFeedbackDuringRun(t, true)
+}
+
+// A stage that has produced no output yet runs before any pending comment
+// (#2220): the comment that arrived mid-run waits for the stage's own retry, and
+// is not a reason to dispatch inside the backoff.
+func TestFeedbackDuringRunOfUnrunStageWaitsForStageRetry(t *testing.T) {
+	t.Parallel()
+	runFeedbackDuringRun(t, false)
+}
+
+func runFeedbackDuringRun(t *testing.T, stageHasRun bool) {
+	t.Helper()
 	env := incompleteRetryEnv(t, time.Hour, true)
 	t.Cleanup(env.Engine.RegisterObservers())
 	var num int
@@ -92,10 +107,23 @@ func TestFeedbackCachedDuringRunIsAdmittedAfterWorkerEnds(t *testing.T) {
 	}
 	env.Claude.ForStage("Specify", arrive, simclaude.DefaultScript)
 	num = FileIssue(t, env, "comment arrives mid-run", "body", "Specify")
+	if stageHasRun {
+		env.Sim.Sim().SeedComment(env.OwnerRepo, num, "fabrik-sim-bot", "🏭 **Fabrik — stage: Specify**\nearlier, incomplete output")
+	}
 
 	// The board cache warms over the first polls; the worker then ends incomplete
 	// with the comment cached.
 	AdvanceUntil(t, env, func(env *Env) bool { return env.Claude.StageCallCount("Specify") >= 1 }, 10)
+	if !stageHasRun {
+		RunPolls(t, env, 6)
+		if n := env.Claude.CommentCallCount("Specify"); n != 0 {
+			t.Fatalf("comment pass ran %d time(s) before the stage had produced output\n\n%s", n, diagnostics(env))
+		}
+		if n := env.Claude.StageCallCount("Specify"); n != 1 {
+			t.Fatalf("stage re-dispatched inside its backoff: %d invocations\n\n%s", n, diagnostics(env))
+		}
+		return
+	}
 	for poll := 1; poll <= 12; poll++ {
 		RunPoll(t, env)
 		if env.Claude.CommentCallCount("Specify") >= 1 || env.Claude.StageCallCount("Specify") >= 2 {
