@@ -208,6 +208,11 @@ func (e *Engine) pauseIssueForDaemonShutdown(snap itemstate.Snapshot) {
 // proceeds to return exactly as a completed drain would — R5 requires this
 // path to always terminate; abandoning any still-running goroutines on
 // timeout is deliberate (see waitGroupTimeout's doc comment).
+//
+// #2259: after a first-SIGHUP drain (awaitDrain returned with no worker left,
+// run context still live) the wait here only covers goroutine tails; after a
+// second SIGHUP it is the bounded drain of the cancelled workers. Either way
+// SIGHUP execs, and it no longer closes restartDone (Run() does, by defer).
 func (e *Engine) drainAndExit(locks *instanceLocks, _ chan struct{}) error {
 	if e.lockLost.Load() {
 		// #2097: the instance lock was lost, so another engine may own this board.

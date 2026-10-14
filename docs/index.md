@@ -511,7 +511,7 @@ fabrik --auto-upgrade</pre>
         <span class="feature-icon">🔃</span>
         <div class="feature-title">In-Place Restart</div>
         <div class="feature-desc">
-          SIGHUP drains in-flight runs and re-execs the binary in place — pick up a new build without terminal disruption.
+          SIGHUP lets in-flight runs finish (a second SIGHUP restarts now) and re-execs the binary in place — pick up a new build without terminal disruption.
         </div>
       </a>
       <a class="feature-card" href="{{ '/USER_GUIDE' | relative_url }}#command-line-flags" aria-label="Big-Board Efficiency — open documentation">

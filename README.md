@@ -218,8 +218,8 @@ for setup details and the self-mention caveat.
 
 ### In-Place Restart
 
-Sending `SIGHUP` to the Fabrik process drains in-flight Claude runs, then
-re-execs the binary in place — no terminal disruption, no lost state. Use it
+Sending `SIGHUP` to the Fabrik process stops new work, lets in-flight Claude runs
+finish, then re-execs the binary in place (a second `SIGHUP` restarts immediately) — no terminal disruption, no lost state. Use it
 to pick up a new binary after `go install` without restarting the session.
 The terminal alt-screen is properly restored on signal-driven exit, so no
 `reset` is needed after a SIGINT, SIGTERM, or SIGHUP. Plugin-skills are checked and
