@@ -22,6 +22,27 @@ import (
 // installation on an app leg, the bed token's user on a pat leg — plus the user
 // of the harness token it runs with, which is the same bed .env FABRIK_TOKEN.
 
+// Role is how a cell uses an identity (#2263, ADR-2263).
+type Role int
+
+const (
+	// RoleEngine: the identity the bed ENGINE authenticates as on this leg — an
+	// App installation on an app leg, the bed token's user on a pat leg. Held
+	// exclusively: no other cell may hold the identity in any role.
+	RoleEngine Role = iota
+	// RoleHarness: the bed token's user when it is not also the engine identity.
+	// Only the live harness spends it, so any number of cells may hold it at once
+	// (above the budget floor); it still excludes an engine holder.
+	RoleHarness
+)
+
+func (r Role) String() string {
+	if r == RoleHarness {
+		return "harness"
+	}
+	return "engine"
+}
+
 // Identity is one GitHub identity a cell charges.
 type Identity struct {
 	// Key is what the scheduler serializes on: "app:<installation id>" (D3),
@@ -33,6 +54,11 @@ type Identity struct {
 	// a token per probe from appBed's .env instead. Never logged.
 	token  string
 	appBed string
+	// Role is how the cell uses the identity. AlsoHarness marks an engine
+	// identity that is the bed token's user too (a pat leg): the exclusive role
+	// wins the key, and the budget line says both.
+	Role        Role
+	AlsoHarness bool
 }
 
 // IdentityOps is the seam over every network call identity scheduling makes.
@@ -41,9 +67,11 @@ type Identity struct {
 type IdentityOps interface {
 	// ResolveLogin is the GitHub login a token authenticates as (GET /user).
 	ResolveLogin(ctx context.Context, token string) (string, error)
-	// Budget is the token's identity's remaining GraphQL budget and its reset
-	// instant (GraphQL's inline rateLimit; see GraphQLBudgetRemaining).
-	Budget(ctx context.Context, token string) (remaining int, resetAt string, err error)
+	// Budget is the token's identity's remaining GraphQL budget, its limit and its
+	// reset instant (GraphQL's inline rateLimit; see GraphQLBudgetRemaining). The
+	// limit is the real one — an App installation's exceeds 5,000 — falling back
+	// to defaultRateLimit when GitHub does not report it.
+	Budget(ctx context.Context, token string) (remaining, limit int, resetAt string, err error)
 	// MintAppToken mints an installation token for the App configured in
 	// bedDir/.env (E2E_APP_ID, E2E_APP_PRIVATE_KEY_PATH, E2E_APP_INSTALLATION_ID).
 	MintAppToken(ctx context.Context, bedDir string) (string, error)
@@ -82,18 +110,33 @@ func (o osIdentityOps) ResolveLogin(ctx context.Context, token string) (string, 
 	return login, nil
 }
 
-func (o osIdentityOps) Budget(ctx context.Context, token string) (int, string, error) {
-	out, err := o.gh(ctx, token, "api", "graphql", "-f", "query=query { rateLimit { remaining resetAt } }",
-		"--jq", `"\(.data.rateLimit.remaining) \(.data.rateLimit.resetAt)"`)
+// defaultRateLimit is a user's hourly GraphQL limit, assumed when the probe
+// reports none.
+const defaultRateLimit = 5000
+
+func (o osIdentityOps) Budget(ctx context.Context, token string) (int, int, string, error) {
+	out, err := o.gh(ctx, token, "api", "graphql", "-f", "query=query { rateLimit { limit remaining resetAt } }",
+		"--jq", `"\(.data.rateLimit.limit) \(.data.rateLimit.remaining) \(.data.rateLimit.resetAt)"`)
 	if err != nil {
-		return 0, "", err
+		return 0, 0, "", err
 	}
-	rem, reset, _ := strings.Cut(out, " ")
+	return parseBudget(out)
+}
+
+// parseBudget reads "<limit> <remaining> <resetAt>". A missing or non-positive
+// limit falls back to defaultRateLimit; an unparseable remaining is an error.
+func parseBudget(out string) (remaining, limit int, resetAt string, err error) {
+	lim, rest, _ := strings.Cut(out, " ")
+	rem, reset, _ := strings.Cut(rest, " ")
 	n, perr := strconv.Atoi(rem)
 	if perr != nil {
-		return 0, "", fmt.Errorf("unparseable budget %q", out)
+		return 0, 0, "", fmt.Errorf("unparseable budget %q", out)
 	}
-	return n, reset, nil
+	l, lerr := strconv.Atoi(lim)
+	if lerr != nil || l <= 0 {
+		l = defaultRateLimit
+	}
+	return n, l, reset, nil
 }
 
 func (o osIdentityOps) MintAppToken(ctx context.Context, bedDir string) (string, error) {
@@ -245,20 +288,42 @@ func (g *Gate) engineIdentity(auth string) (Identity, bool) {
 
 // identitySet is every identity a cell of this auth mode charges on this bed:
 // the engine identity plus the harness token's (D4), deduplicated and sorted —
-// the order the scheduler acquires them in.
+// the order the scheduler acquires them in. The engine identity carries
+// RoleEngine; the harness token's user carries RoleHarness unless it IS the
+// engine identity (a pat leg), when the one entry stays RoleEngine (#2263).
+// roleSplitDisabledForTest restores the pre-#2263 rule: every identity engine.
 func (g *Gate) identitySet(auth string) []Identity {
 	var set []Identity
-	seen := map[string]bool{}
-	add := func(id Identity, ok bool) {
-		if ok && !seen[id.Key] {
-			seen[id.Key] = true
-			set = append(set, id)
+	if eng, ok := g.engineIdentity(auth); ok {
+		eng.Role = RoleEngine
+		set = append(set, eng)
+	}
+	if h, ok := g.tokenIdentity(); ok {
+		h.Role = RoleHarness
+		if g.root().roleSplitDisabledForTest {
+			h.Role = RoleEngine
+		}
+		dup := false
+		for i := range set {
+			if set[i].Key == h.Key {
+				set[i].AlsoHarness = true
+				dup = true
+			}
+		}
+		if !dup {
+			set = append(set, h)
 		}
 	}
-	add(g.engineIdentity(auth))
-	add(g.tokenIdentity())
 	sort.Slice(set, func(i, j int) bool { return set[i].Key < set[j].Key })
 	return set
+}
+
+// roleLabel is the role marker of a budget line.
+func (id Identity) roleLabel() string {
+	if id.Role == RoleEngine && id.AlsoHarness {
+		return "engine+harness"
+	}
+	return id.Role.String()
 }
 
 // identityLabel is how a budget line names an identity.
@@ -310,12 +375,12 @@ func (g *Gate) logIdentityBudget(ctx context.Context, cell Cell, which string) {
 			g.errf("warning: identity budget (leg: %s, %s): no token for %s\n", label, which, id.Key)
 			continue
 		}
-		rem, reset, err := g.Identity.Budget(ctx, token)
+		rem, _, reset, err := g.Identity.Budget(ctx, token)
 		if err != nil {
 			g.errf("warning: identity budget (leg: %s, %s): reading %s's budget failed: %v\n", label, which, g.identityLabel(id), err)
 			continue
 		}
-		g.outf("== identity budget (leg: %s, %s): %s — %d remaining, resets %s ==\n", label, which, g.identityLabel(id), rem, reset)
+		g.outf("== identity budget (leg: %s, %s): %s (%s) — %d remaining, resets %s ==\n", label, which, g.identityLabel(id), id.roleLabel(), rem, reset)
 	}
 }
 

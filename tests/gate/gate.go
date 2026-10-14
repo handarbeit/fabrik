@@ -144,7 +144,13 @@ type Gate struct {
 
 	// schedWaitHook, if set, observes each identity wait the multi-bed scheduler
 	// logs (tests synchronise on it instead of sleeping).
-	schedWaitHook func(bed string, c Cell, identity string)
+	// reason is "exclusive", "reserved" or "floor" (#2263).
+	schedWaitHook func(bed string, c Cell, identity, reason string)
+
+	// roleSplitDisabledForTest (root only) makes identitySet treat every
+	// identity as RoleEngine — the pre-#2263 exclusive-everything rule — so the
+	// split's tests can show they fail without it.
+	roleSplitDisabledForTest bool
 }
 
 // NewGate wires a Gate around the real OS.
