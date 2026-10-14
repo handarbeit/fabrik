@@ -701,7 +701,7 @@ func (e *Engine) halfOutcome(ctx context.Context, r *trainRun, trialName string,
 		// #2046: a cancelled sub-trial is neither red nor green — abort the episode
 		// (members stay Queued) instead of degrading to a fallback that would start more work.
 		e.logfRepo(repoKey, "merge-train", "bisection cancelled: %v — leaving members in Queued\n", err)
-		return e.abortBisection(ctx, r, bisectAbortInfra)
+		return e.abortBisection(ctx, r, bisectAbortCancelled)
 	}
 	if err != nil {
 		e.logfRepo(repoKey, "merge-train", "bisection trial failed to assemble: %v — degrading to one-at-a-time fallback\n", err)
@@ -733,6 +733,10 @@ type bisectAbort int
 const (
 	bisectAbortInfra bisectAbort = iota
 	bisectAbortRunaway
+	// bisectAbortCancelled is a sub-trial that could not be attempted: the context was
+	// cancelled, or (#2259) a SIGHUP drain refused a conflict resolution with the context
+	// still live. Never a CI infrastructure failure.
+	bisectAbortCancelled
 )
 
 // abortBisection ends the episode when a sub-trial was cancelled, hit a CI infrastructure
@@ -750,7 +754,7 @@ func (e *Engine) abortBisection(ctx context.Context, r *trainRun, why bisectAbor
 		ep.noteAbandoned("runaway guard fired")
 		e.fireRunawayGuard(ctx, p.owner, p.repo, r.rec.PartitionBase, membersToItems(origin), count)
 	default:
-		if ctx.Err() != nil {
+		if why == bisectAbortCancelled || ctx.Err() != nil {
 			// #2046: bisect reuses the infra abort shape for a cancelled sub-trial. A cancel is
 			// not a CI infrastructure failure, so don't log it as one or start the infra cooldown.
 			e.logfRepo(repoKey, "merge-train", "bisection for %s cancelled; %d member(s) left in Queued, nothing charged\n", trainKey, len(origin))

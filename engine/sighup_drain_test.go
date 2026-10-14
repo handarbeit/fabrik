@@ -529,3 +529,25 @@ func TestSighupDrain_HealthCountsLive(t *testing.T) {
 		t.Fatalf("want 1 worker remaining from the live Store, got %+v, %v", res.Draining, err)
 	}
 }
+
+// A bisection sub-trial refused by the drain (errDrainingNotAttempted, ctx still
+// live) is a cancellation, not a CI infrastructure failure: no infra cooldown.
+func TestSighupDrain_BisectionRefusalIsNotInfraFailure(t *testing.T) {
+	for _, why := range []bisectAbort{bisectAbortCancelled, bisectAbortInfra} {
+		eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+		key := mergeTrainKey("owner/repo", "main")
+		r := &trainRun{
+			e: eng, trainKey: key, detached: true,
+			p:     trialParams{owner: "owner", repo: "repo", trainKey: key},
+			state: &mergeTrainWorkerState{bisecting: true},
+			rec:   trainRunRecord{TrainKey: key, Owner: "owner", Repo: "repo"},
+		}
+		if out := eng.abortBisection(context.Background(), r, why); out != outDone {
+			t.Fatalf("abortBisection = %v, want outDone", out)
+		}
+		_, held := eng.infraCooldownRemaining(key)
+		if wantHeld := why == bisectAbortInfra; held != wantHeld {
+			t.Errorf("why=%d: infra cooldown held = %v, want %v", why, held, wantHeld)
+		}
+	}
+}
