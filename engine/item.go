@@ -775,7 +775,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// GraphQL-populated ProjectItem fields; both are false-by-default (FR-3 no-op on
 	// non-queue repos). EnsureWorktree's existing skipUpdate arg bypasses the rebase.
 	skipUpdate := !lastAttempt.IsZero() || prInMergeQueue(item) || e.suppressPreemptiveRebase(item)
-	workDir, err := wm.EnsureWorktree(item.Number, baseBranch, skipUpdate)
+	workDir, err := wm.EnsureWorktree(item.Number, baseBranch, skipUpdate, e.worktreeAdoptionOptions(item)...)
 	if err != nil {
 		releaseLock()
 		return fmt.Errorf("setting up worktree for %s/%s: %w", owner, repo, err)
