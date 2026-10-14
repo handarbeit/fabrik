@@ -213,6 +213,19 @@ the guard audit; this is the map.
 | `pregate_signature.go`, `pregate.go` | `crashScanner`/`IsTSanForkCrash` (streamed, per-line, vetoed by any panic / `fatal error:` / `WARNING: DATA RACE` / goroutine dump) and `runPregateStep`'s one-shot retry |
 | `ledger_wire.go` | `pregateRetryNote` → `pregate/<head>.retries.jsonl`; `retried`/`load_avg` on the pass record; the pre-gate line in the coverage summary |
 
+### Sim pre-gate diagnostics (#2247, ADR-2247)
+
+The sim step runs `scripts/sim/run.sh --all -json` (`runSimSuite`, shared by `RunPregate` and the `gate sim` subcommand `scripts/cut-release.sh` runs) and decodes the stream as it arrives.
+
+| File | Holds |
+|---|---|
+| `sim_stream.go` | `simTracker` (per top-level test: running since when — the clock restarts on `cont`, since `-parallel` queueing is not run time —, queued, ended; subtests fold into the parent) and `simStreamWriter` (raw JSONL, rendered timeline, terminal, and the **decoded** output text fed to `crashScanner`) |
+| `sim_run.go` | `runSimSuite`/`RunSim`; the heartbeat (`PregateHeartbeat`, 3 min, advisory only — never changes the exit code); `simThreshold` (SLOW past 3× the last recorded duration, at least 1 min, 5 min with no history); the failure summary (still-running tests with elapsed, the ceiling message, the dump path, the archive) and the passing run's slowest-10 table |
+| `sim_archive.go` | `.e2e-coverage/pregate/<head>.sim[.aN].{jsonl,log,dump.txt,timings.json}` (a TSan-crash retry is `.a2`); `prunePregateSimArchive` keeps the newest `CoverageKeepSHAs` heads' files and never touches `<head>.json`, `<head>.retries.jsonl` or `sim-timings.json` (the rolling baseline, written by passing runs only). With the ledger disabled the files go to a fresh temp directory whose path is printed |
+| `sim_reaper*.go` | the stuck-binary reaper: ADR-2128's positive-evidence rule applied from outside the process (member of the sim's own session, `.test` command, same start token seen for `SIM_TEST_CEILING` + `PregateReapGrace` (2 min), start token re-read immediately before a single-PID SIGKILL). It is wired by `Cmd.OnStart`, which hands it the child's PID (= SID) |
+
+Deliberate deltas: the terminal no longer shows every test's output — it shows non-JSON lines, package-level output, only the first line of a goroutine dump, and a failed test's own output (the full stream is in the archive, whose path is printed); `crashScanner` is fed decoded text and additionally vetoes the testlife ceiling message and dump header (a hang that hit its ceiling is never a TSan crash). A hang can be forced locally by adding a temporary `t.Parallel()` test that blocks forever and running `SIM_TEST_CEILING=15s gate sim -run <Test>`: the summary names the test and `<head>.sim.dump.txt` shows where it blocked. The `-race` exit hang itself cannot be unit-tested; the reaper's rule is covered with a fake process table.
+
 Deltas this adds: the suite step of `RunLeg` is now `runSuiteAttempt` and may run more than once
 per leg (only for the leg's own inconclusive tests, before the post-suite watchdog and the RUN
 INVALID scan); a clean run can now exit `8` without `--resume`; `RunPregate` captures (scans, never

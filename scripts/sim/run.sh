@@ -6,6 +6,9 @@
 #   scripts/sim/run.sh --all          # full tree (tests/sim/... incl. simgh/simclaude/ghfault)
 #   scripts/sim/run.sh -run TestFoo    # forwarded to `go test`, e.g. one scenario
 #   scripts/sim/run.sh --all -run Foo  # forwarded, against the full tree
+#   scripts/sim/run.sh --all -json     # forwarded too: the gate's sim step runs it this way and decodes the
+#                                      # per-test stream (tests/gate/sim_run.go, #2247); SIM_TEST_DUMP_FILE
+#                                      # (if set) is where a ceiling hit writes its goroutine dump
 #
 # This is BOTH the frictionless manual entry point ("run the sim layer by
 # hand at any point before committing to a full live e2e run") AND what
