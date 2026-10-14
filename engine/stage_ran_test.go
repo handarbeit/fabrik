@@ -2,8 +2,10 @@ package engine
 
 import (
 	"testing"
+	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
 )
 
@@ -61,11 +63,15 @@ func TestStageRanOnEntry(t *testing.T) {
 	})
 }
 
-// TestItemNeedsWork_PendingCommentOnStageNotRun covers admission for #2220:
-// a pending comment admits the item whether or not the stage has run (the stage
-// run or the comment pass follows), and the seam keeps today's behaviour.
+// TestItemNeedsWork_PendingCommentOnStageNotRun covers admission for #2220.
+// A pending comment on a stage that has run admits the item (the comment pass
+// runs). On a stage that has not run it no longer short-circuits admission: the
+// ordinary checks apply, so an item inside its retry backoff is not admitted
+// just because a comment is waiting. The seam restores the old behaviour, so the
+// backoff case is what proves the mirrored guard bites.
 func TestItemNeedsWork_PendingCommentOnStageNotRun(t *testing.T) {
 	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+	eng.cfg.RetryBackoff = time.Hour
 	comments := []gh.Comment{{ID: "C1", Author: "testuser", Body: "also cover offline"}}
 
 	notRun := gh.ProjectItem{Number: 1, Status: "Research", Comments: comments}
@@ -78,8 +84,17 @@ func TestItemNeedsWork_PendingCommentOnStageNotRun(t *testing.T) {
 		t.Error("a completed stage with a pending comment must be admitted (the comment pass runs)")
 	}
 
+	// A stage that has not run to completion and is inside its retry backoff:
+	// the pending comment must not admit it, or a worker would be dispatched
+	// every poll only for processItem to return without running anything.
+	backoff := gh.ProjectItem{Number: 3, Status: "Research", Comments: comments}
+	eng.store.Apply(itemstate.StageAttempted{Repo: "owner/repo", Number: 3, StageName: "Research", At: time.Now()})
+	if eng.itemNeedsWork(backoff) {
+		t.Error("a not-run stage inside its retry backoff must not be admitted by a pending comment")
+	}
+
 	eng.SetStageFirstRoutingDisabledForTest(true)
-	if !eng.itemNeedsWork(notRun) {
+	if !eng.itemNeedsWork(backoff) {
 		t.Error("with the seam on, the pending comment admits the item as before")
 	}
 }
