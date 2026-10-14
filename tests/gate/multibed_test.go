@@ -25,6 +25,8 @@ type schedHarness struct {
 	maxActive map[string]int
 	ran       []string
 
+	lastStarted string
+
 	started  chan string
 	waits    chan string
 	finished chan string
@@ -43,7 +45,9 @@ func newSchedHarness(t *testing.T, loginA, loginB string, matrix string) *schedH
 		finishers: map[string]chan error{}, active: map[string]int{}, maxActive: map[string]int{},
 		started: make(chan string, 32), waits: make(chan string, 32), finished: make(chan string, 32),
 	}
-	g.schedWaitHook = func(bed string, c Cell, id string) { h.waits <- bed + " " + cellDesc(c) + " " + id }
+	g.schedWaitHook = func(bed string, c Cell, id, reason string) {
+		h.waits <- bed + " " + cellDesc(c) + " " + id + " " + reason
+	}
 	for i, b := range g.beds() {
 		b.schedWaitHook = g.schedWaitHook
 		b.login = []string{loginA, loginB}[i]
@@ -123,6 +127,24 @@ func (h *schedHarness) expectStarts(want ...string) {
 		case <-time.After(failsafe):
 			h.t.Fatalf("never started: %v", pending)
 		}
+	}
+}
+
+// expectStartOneOf is expectStart for a leg either bed may take; the key that
+// started is left in lastStarted.
+func (h *schedHarness) expectStartOneOf(want ...string) {
+	h.t.Helper()
+	select {
+	case got := <-h.started:
+		for _, w := range want {
+			if got == w {
+				h.lastStarted = got
+				return
+			}
+		}
+		h.t.Fatalf("started %q, want one of %v", got, want)
+	case <-time.After(failsafe):
+		h.t.Fatalf("none of %v started", want)
 	}
 }
 
@@ -241,29 +263,34 @@ func TestMultiBedDefaultAssignmentRunsConcurrently(t *testing.T) {
 	}
 }
 
-// R3 / D4: two cells sharing an identity (here the harness login both beds'
-// tokens resolve to) never overlap; the later one waits, and the wait is logged.
-// Bed A gets first claim.
-func TestMultiBedSerializesASharedIdentity(t *testing.T) {
+// #2263 R1: a harness use of an identity is shared. Both beds' tokens resolve to
+// the same login, so bed B's app/off (engine: its own App; harness: user:arbeithand)
+// runs concurrently with bed A's app/on instead of waiting for its whole leg;
+// only bed B's pat cells — whose ENGINE identity is that user — wait for it.
+func TestMultiBedSharesTheHarnessUserBetweenAppCells(t *testing.T) {
 	h := newSchedHarness(t, "arbeithand", "arbeithand", MatrixSparse)
 	_, done := h.run(context.Background(), sparseAll)
-	h.expectStart("A app/on")
-	h.expectWait("B app/off user:arbeithand")
-	h.noStart()
-	if !strings.Contains(h.out(), "[bed B] == waiting: app/off on bed B needs user:arbeithand, held by bed A (app/on) ==") {
-		t.Errorf("the wait must be logged naming the identity and its holder:\n%s", h.out())
+	h.expectStarts("A app/on", "B app/off")
+	h.mu.Lock()
+	shared := h.maxActive["user:arbeithand"]
+	h.mu.Unlock()
+	if shared != 2 {
+		t.Fatalf("both app legs must hold user:arbeithand as harness at once, got %d", shared)
 	}
-	// Drive the rest: finish whatever starts. Never two at once on the login.
+	if strings.Contains(h.out(), "== waiting:") {
+		t.Errorf("sharing a harness user never waits:\n%s", h.out())
+	}
+	h.finish("B app/off", nil)
+	// B's pat/on needs user:arbeithand EXCLUSIVELY: A's app/on still holds it as harness.
+	h.expectWait("B pat/on user:arbeithand exclusive")
+	h.noStart()
+	if !strings.Contains(h.out(), "[bed B] == waiting: pat/on on bed B needs user:arbeithand exclusively, held by bed A (app/on) as harness ==") {
+		t.Errorf("the wait must say the use is exclusive and name the holder:\n%s", h.out())
+	}
 	h.finish("A app/on", nil)
-	for n := 0; n < 3; n++ {
+	for n := 0; n < 2; n++ {
 		select {
 		case key := <-h.started:
-			h.mu.Lock()
-			concurrent := h.maxActive["user:arbeithand"]
-			h.mu.Unlock()
-			if concurrent > 1 {
-				t.Fatalf("user:arbeithand held by %d legs at once", concurrent)
-			}
 			h.finish(key, nil)
 		case <-time.After(failsafe):
 			t.Fatalf("stalled after %d more legs; ran %v", n, h.ran)
@@ -272,9 +299,81 @@ func TestMultiBedSerializesASharedIdentity(t *testing.T) {
 	if err := h.result(done); err != nil {
 		t.Fatal(err)
 	}
-	if h.maxActive["user:arbeithand"] != 1 || len(h.ran) != 4 {
-		t.Errorf("max concurrent=%d ran=%v", h.maxActive["user:arbeithand"], h.ran)
+}
+
+// Non-vacuity of the above: with the role split neutralised (every identity
+// exclusive) bed B's app/off waits for bed A's whole leg, as before #2263.
+func TestMultiBedSharedHarnessUserIsVacuousWithoutTheRoleSplit(t *testing.T) {
+	h := newSchedHarness(t, "arbeithand", "arbeithand", MatrixSparse)
+	h.g.roleSplitDisabledForTest = true
+	_, done := h.run(context.Background(), sparseAll)
+	h.expectStart("A app/on")
+	h.expectWait("B app/off user:arbeithand exclusive")
+	h.noStart()
+	h.finish("A app/on", nil)
+	for n := 0; n < 3; n++ {
+		select {
+		case key := <-h.started:
+			h.finish(key, nil)
+		case <-time.After(failsafe):
+			t.Fatalf("stalled after %d more legs; ran %v", n, h.ran)
+		}
 	}
+	if err := h.result(done); err != nil {
+		t.Fatal(err)
+	}
+	if h.maxActive["user:arbeithand"] != 1 {
+		t.Errorf("without the split the login is held by one leg at a time, got %d", h.maxActive["user:arbeithand"])
+	}
+}
+
+// #2263 R1: a pat cell's engine identity is the bed token's user, so it is
+// exclusive both ways — it waits while the other bed holds that user in ANY role,
+// and an app cell (harness use) waits while a pat cell holds it as engine.
+func TestMultiBedPatCellIsExclusiveOnTheHarnessUser(t *testing.T) {
+	t.Run("a pat cell waits while another bed holds the user as harness", func(t *testing.T) {
+		h := newSchedHarness(t, "arbeithand", "arbeithand", MatrixSparse)
+		_, done := h.run(context.Background(), []Cell{cAppOn, cPatOn})
+		h.expectStart("A app/on")
+		h.expectWait("B pat/on user:arbeithand exclusive")
+		h.noStart()
+		h.finish("A app/on", nil)
+		h.expectStart("B pat/on")
+		h.finish("B pat/on", nil)
+		if err := h.result(done); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("a pat cell on bed A waits while bed B's app cell holds the user as harness", func(t *testing.T) {
+		h := newSchedHarness(t, "arbeithand", "arbeithand", MatrixFull)
+		// Full matrix, no baseline split: every bed serves one queue in order.
+		_, done := h.run(context.Background(), []Cell{cAppOff, cPatOn})
+		h.expectStart("A app/off")
+		h.expectWait("B pat/on user:arbeithand exclusive")
+		h.noStart()
+		h.finish("A app/off", nil)
+		h.expectStartOneOf("A pat/on", "B pat/on") // whichever bed is free first
+		h.finish(h.lastStarted, nil)
+		if err := h.result(done); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("an app cell waits while a pat cell holds the user as engine", func(t *testing.T) {
+		h := newSchedHarness(t, "arbeithand", "arbeithand", MatrixFull)
+		_, done := h.run(context.Background(), []Cell{cPatOn, cAppOff})
+		h.expectStart("A pat/on")
+		h.expectWait("B app/off user:arbeithand exclusive")
+		h.noStart()
+		if !strings.Contains(h.out(), "[bed B] == waiting: app/off on bed B needs user:arbeithand (harness), held exclusively by bed A (pat/on) ==") {
+			t.Errorf("out:\n%s", h.out())
+		}
+		h.finish("A pat/on", nil)
+		h.expectStartOneOf("A app/off", "B app/off")
+		h.finish(h.lastStarted, nil)
+		if err := h.result(done); err != nil {
+			t.Fatal(err)
+		}
+	})
 }
 
 // D6's greedy fallback: no baseline in the plan (a --resume or partial run), so
@@ -298,7 +397,7 @@ func TestMultiBedFullMatrixSerializesTwoPatCells(t *testing.T) {
 	h := newSchedHarness(t, "arbeithand", "arbeithand", MatrixFull)
 	_, done := h.run(context.Background(), []Cell{cPatOff, cPatOn})
 	h.expectStart("A pat/off")
-	h.expectWait("B pat/on user:arbeithand")
+	h.expectWait("B pat/on user:arbeithand exclusive")
 	h.noStart()
 	h.finish("A pat/off", nil)
 	select {
@@ -320,14 +419,14 @@ func TestMultiBedFullMatrixSerializesTwoPatCells(t *testing.T) {
 func TestMultiBedFreeBedSkipsABlockedCell(t *testing.T) {
 	h := newSchedHarness(t, "alice", "bob", MatrixFull)
 	s := newMultiSched(h.g, []Cell{cAppOff, cPatOn})
-	s.held["app:88"] = holder{bed: "X", cell: "elsewhere"} // bed B's App is busy
-	q, set, wait, done, _ := s.next(context.Background(), 1)
-	if done || wait != nil || q == nil || q.cell.Label() != "pat/on" || len(set) != 1 || set[0].Key != "user:bob" {
-		t.Fatalf("bed B must skip the blocked app/off for pat/on: q=%v set=%v wait=%v done=%v", q, set, wait != nil, done)
+	s.held["app:88"] = &idHold{excl: &holder{bed: "X", cell: "elsewhere"}} // bed B's App is busy
+	d := s.next(context.Background(), 1)
+	if d.done || d.wait != nil || d.q == nil || d.q.cell.Label() != "pat/on" || len(d.set) != 1 || d.set[0].Key != "user:bob" {
+		t.Fatalf("bed B must skip the blocked app/off for pat/on: q=%v set=%v wait=%v done=%v", d.q, d.set, d.wait != nil, d.done)
 	}
 	// With pat/on taken, bed B now has only a blocked cell: it waits.
-	if _, _, wait, done, hooks := s.next(context.Background(), 1); done || wait == nil || len(hooks) != 1 || hooks[0].identity != "app:88" {
-		t.Errorf("only the blocked app/off is left, so bed B waits on its App: wait=%v done=%v hooks=%v", wait != nil, done, hooks)
+	if d := s.next(context.Background(), 1); d.done || d.wait == nil || len(d.hooks) != 1 || d.hooks[0].identity != "app:88" || d.hooks[0].reason != waitExclusive {
+		t.Errorf("only the blocked app/off is left, so bed B waits on its App: wait=%v done=%v hooks=%v", d.wait != nil, d.done, d.hooks)
 	}
 }
 
@@ -413,9 +512,9 @@ func TestMultiBedFirstFailureByTimeWins(t *testing.T) {
 func TestMultiBedCancelReleasesEveryIdentity(t *testing.T) {
 	h := newSchedHarness(t, "arbeithand", "arbeithand", MatrixSparse)
 	ctx, cancel := context.WithCancel(context.Background())
-	s, done := h.run(ctx, sparseAll)
+	s, done := h.run(ctx, []Cell{cAppOn, cPatOn})
 	h.expectStart("A app/on")
-	h.expectWait("B app/off user:arbeithand")
+	h.expectWait("B pat/on user:arbeithand exclusive")
 	cancel()
 	if err := h.result(done); !errors.Is(err, context.Canceled) {
 		t.Fatalf("got %v", err)
@@ -446,26 +545,55 @@ func TestDescribeAssignment(t *testing.T) {
 // the baseline.
 func TestMultiBedReservationKeepsBedAFirst(t *testing.T) {
 	h := newSchedHarness(t, "arbeithand", "arbeithand", MatrixSparse)
-	s := newMultiSched(h.g, sparseAll)
+	s := newMultiSched(h.g, []Cell{cAppOn, cPatOn})
 	ctx := context.Background()
-	s.held["user:arbeithand"] = holder{bed: "B", cell: "app/off"} // bed B's leg is running
-	if q, _, wait, done, _ := s.next(ctx, 0); q != nil || wait == nil || done {
-		t.Fatal("bed A's head must wait while bed B holds the login")
+	s.held["user:arbeithand"] = &idHold{excl: &holder{bed: "B", cell: "pat/off"}} // bed B's pat leg is running
+	if d := s.next(ctx, 0); d.q != nil || d.wait == nil || d.done {
+		t.Fatal("bed A's head must wait while bed B holds the login exclusively")
 	}
-	if s.reserved["user:arbeithand"] != 0 || s.reserved["app:77"] != 0 {
-		t.Fatalf("bed A's waiting head must reserve its set: %v", s.reserved)
+	if r := s.reserved["user:arbeithand"]; r != (resv{bed: 0, excl: false}) || s.reserved["app:77"] != (resv{bed: 0, excl: true}) {
+		t.Fatalf("bed A's waiting head must reserve its set, each in its role: %v", s.reserved)
 	}
 	delete(s.held, "user:arbeithand") // bed B's leg finished
-	q, _, wait, done, hooks := s.next(ctx, 1)
-	if q != nil || wait == nil || done || len(hooks) == 0 || hooks[0].identity != "user:arbeithand" {
-		t.Fatalf("bed B must not take the identity bed A is waiting for: q=%v wait=%v done=%v hooks=%v", q, wait != nil, done, hooks)
+	d := s.next(ctx, 1)
+	if d.q != nil || d.wait == nil || d.done || len(d.hooks) == 0 || d.hooks[0].identity != "user:arbeithand" || d.hooks[0].reason != waitReserved {
+		t.Fatalf("bed B must not take the identity bed A is waiting for: q=%v wait=%v done=%v hooks=%v", d.q, d.wait != nil, d.done, d.hooks)
 	}
-	if !strings.Contains(h.out(), "[bed B] == waiting: pat/on on bed B needs user:arbeithand, reserved for bed A's next cell ==") {
+	if !strings.Contains(h.out(), "[bed B] == waiting: pat/on on bed B needs user:arbeithand exclusively, reserved for bed A's next cell ==") {
 		t.Errorf("out:\n%s", h.out())
 	}
-	q, _, _, _, _ = s.next(ctx, 0)
-	if q == nil || q.cell.Label() != "app/on" || len(s.reserved) != 0 {
-		t.Errorf("bed A then takes its head and drops the reservation: q=%v reserved=%v", q, s.reserved)
+	d = s.next(ctx, 0)
+	if d.q == nil || d.q.cell.Label() != "app/on" || len(s.reserved) != 0 {
+		t.Errorf("bed A then takes its head and drops the reservation: q=%v reserved=%v", d.q, s.reserved)
+	}
+}
+
+// #2263: a reservation carries its role. A strict-queue head that needs the
+// harness user only as HARNESS blocks another bed's engine use of it but not
+// another bed's harness join — otherwise sharing would stop whenever bed A waits.
+// An ENGINE reservation blocks both.
+func TestMultiBedReservationRoleDecidesWhoItBlocks(t *testing.T) {
+	h := newSchedHarness(t, "arbeithand", "arbeithand", MatrixSparse)
+	ctx := context.Background()
+
+	s := newMultiSched(h.g, []Cell{cAppOn, cAppOff, cPatOn})
+	s.held["app:77"] = &idHold{excl: &holder{bed: "X", cell: "elsewhere"}} // bed A's App is busy: its head waits
+	if d := s.next(ctx, 0); d.q != nil || d.wait == nil {
+		t.Fatal("bed A's head must wait on its App")
+	}
+	if r := s.reserved["user:arbeithand"]; r.excl {
+		t.Fatalf("bed A needs the login only as harness: %v", r)
+	}
+	if d := s.next(ctx, 1); d.q == nil || d.q.cell.Label() != "app/off" {
+		t.Errorf("bed B's app/off shares the login as harness despite bed A's harness reservation: %+v", d)
+	}
+
+	// An engine reservation (not reachable from the real assignment, where bed A's
+	// baseline is app/on, but the rule is the registry's) blocks a harness use too.
+	s = newMultiSched(h.g, []Cell{cAppOff})
+	s.reserved["user:arbeithand"] = resv{bed: 0, excl: true}
+	if d := s.next(ctx, 1); d.q != nil || d.wait == nil || len(d.hooks) == 0 || d.hooks[0].reason != waitReserved {
+		t.Errorf("an engine reservation blocks bed B's harness use too: %+v", d)
 	}
 }
 
@@ -482,16 +610,16 @@ func TestMultiBedStopsAnIdleBedsEngine(t *testing.T) {
 	defer engine.Process.Kill()
 	mustWrite(t, h.g.Cfg.BedDirs[1]+"/.fabrik/fabrik.lock", strconv.Itoa(engine.Process.Pid)+"\n")
 
-	_, done := h.run(context.Background(), sparseAll)
+	_, done := h.run(context.Background(), []Cell{cAppOn, cPatOn})
 	h.expectStart("A app/on")
-	h.expectWait("B app/off user:arbeithand")
+	h.expectWait("B pat/on user:arbeithand exclusive")
 	select {
 	case <-exited:
 	case <-time.After(failsafe):
 		t.Fatal("the waiting bed's engine was not stopped")
 	}
 	h.finish("A app/on", nil)
-	for n := 0; n < 3; n++ {
+	for n := 0; n < 1; n++ {
 		select {
 		case key := <-h.started:
 			h.finish(key, nil)
@@ -526,9 +654,9 @@ func TestMultiBedRunInvalidWithoutAnIdentityStopsNewCells(t *testing.T) {
 // longer be polling with it (#1684's shape, between two beds).
 func TestMultiBedStopsTheEngineBeforeReleasingALegsIdentities(t *testing.T) {
 	h := newSchedHarness(t, "arbeithand", "arbeithand", MatrixSparse)
-	_, done := h.run(context.Background(), []Cell{cAppOn, cAppOff})
+	_, done := h.run(context.Background(), []Cell{cAppOn, cPatOn})
 	h.expectStart("A app/on")
-	h.expectWait("B app/off user:arbeithand")
+	h.expectWait("B pat/on user:arbeithand exclusive")
 
 	// The leg's restart step started bed A's engine.
 	engine := exec.Command("sleep", "30")
@@ -541,7 +669,7 @@ func TestMultiBedStopsTheEngineBeforeReleasingALegsIdentities(t *testing.T) {
 	mustWrite(t, h.g.Cfg.BedDirs[0]+"/.fabrik/fabrik.lock", strconv.Itoa(engine.Process.Pid)+"\n")
 
 	h.finish("A app/on", nil)
-	h.expectStart("B app/off")
+	h.expectStart("B pat/on")
 	// Bed B could start only after bed A released user:arbeithand, so the stop
 	// must already be in the output.
 	if !strings.Contains(h.out(), "[bed A] == stopping this bed's engine while its leg's identities are released") {
@@ -552,7 +680,7 @@ func TestMultiBedStopsTheEngineBeforeReleasingALegsIdentities(t *testing.T) {
 	case <-time.After(failsafe):
 		t.Fatal("bed A's engine was not stopped")
 	}
-	h.finish("B app/off", nil)
+	h.finish("B pat/on", nil)
 	if err := h.result(done); err != nil {
 		t.Fatal(err)
 	}
@@ -565,25 +693,25 @@ func TestMultiBedDroppingAReservationWakesWaiters(t *testing.T) {
 	h := newSchedHarness(t, "arbeithand", "arbeithand", MatrixSparse)
 	s := newMultiSched(h.g, []Cell{cAppOn, cPatOn})
 	ctx := context.Background()
-	s.held["user:arbeithand"] = holder{bed: "B", cell: "app/off"}
-	if q, _, wait, _, _ := s.next(ctx, 0); q != nil || wait == nil {
+	s.held["user:arbeithand"] = &idHold{excl: &holder{bed: "B", cell: "pat/off"}}
+	if d := s.next(ctx, 0); d.q != nil || d.wait == nil {
 		t.Fatal("bed A's head must wait and reserve while bed B holds the login")
 	}
 	delete(s.held, "user:arbeithand")
-	_, _, waitB, _, _ := s.next(ctx, 1)
+	waitB := s.next(ctx, 1).wait
 	if waitB == nil {
 		t.Fatal("bed B must wait on bed A's reservation")
 	}
 	s.exhausted["app:77"] = true // bed A's head can no longer run
-	if q, _, _, done, _ := s.next(ctx, 0); q != nil || !done {
-		t.Fatalf("bed A drops its exhausted head and is done: q=%v done=%v", q, done)
+	if d := s.next(ctx, 0); d.q != nil || !d.done {
+		t.Fatalf("bed A drops its exhausted head and is done: q=%v done=%v", d.q, d.done)
 	}
 	select {
 	case <-waitB:
 	default:
 		t.Fatal("bed B was not woken when bed A dropped its reservation")
 	}
-	if q, _, _, _, _ := s.next(ctx, 1); q == nil || q.cell.Label() != "pat/on" {
-		t.Errorf("bed B then takes pat/on: q=%v", q)
+	if d := s.next(ctx, 1); d.q == nil || d.q.cell.Label() != "pat/on" {
+		t.Errorf("bed B then takes pat/on: q=%v", d.q)
 	}
 }
