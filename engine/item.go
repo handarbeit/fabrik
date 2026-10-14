@@ -408,7 +408,12 @@ func (e *Engine) itemNeedsWorkRetryAt(item gh.ProjectItem) (needs bool, retryIn 
 	if !item.IsClosed {
 		newComments := e.findNewComments(item)
 		if len(newComments) > 0 && !item.IsClosed {
-			return true, 0
+			// A stage that has not run on this entry runs first (#2220); mirror
+			// processItem's routing so admission and dispatch agree. Falls through
+			// to the ordinary complete-label / cooldown checks below otherwise.
+			if e.pendingCommentRoutesToCommentPath(item, stage) {
+				return true, 0
+			}
 		}
 	}
 
@@ -456,6 +461,19 @@ func (e *Engine) itemNeedsWorkRetryAt(item gh.ProjectItem) (needs bool, retryIn 
 	}
 
 	return true, 0
+}
+
+// pendingCommentRoutesToCommentPath is itemNeedsWork's mirror of the routing
+// condition in processItem for a pending comment on an item that is neither
+// paused nor awaiting input (both returned earlier). It reads only what
+// processItem reads before its own decision.
+func (e *Engine) pendingCommentRoutesToCommentPath(item gh.ProjectItem, stage *stages.Stage) bool {
+	enginePaused := false
+	repoStr := itemOwnerRepoString(item, e.defaultRepo())
+	if snap, err := e.store.Get(repoStr, item.Number); err == nil {
+		enginePaused = snap.PausedByEngine(stage.Name)
+	}
+	return e.stageRanOnEntry(item, stage, enginePaused, false)
 }
 
 func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem) error {
@@ -553,10 +571,12 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// comment processing. Otherwise skip. A human comment on a paused issue
 	// is an implicit "resume and handle this." Bot-only chatter does not
 	// unpause (#1083 — pause must remain an effective operator kill-switch).
+	resumedFromPause := false
 	for _, label := range item.Labels {
 		if label == "fabrik:paused" {
 			ok, _, refused := e.resumeAuthorised(item)
 			if ok {
+				resumedFromPause = true
 				e.logf(item.Number, "unpause", "user commented on paused issue — unpausing\n")
 				e.removeLabel(item, "fabrik:paused")
 				// Also clear any failed label so the stage retries cleanly
@@ -628,8 +648,17 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// so this is a redundant-but-explicit ownership boundary, not a
 	// load-bearing filter — matching the same idiom used elsewhere in
 	// ADR-1387 (e.g. runValidatePRTerminalAdvance's own IsClosed skip).
+	//
+	// A stage that has not yet run on this entry runs first (#2220, ADR 2220): the
+	// comment skills assume the stage already produced its output, and would
+	// otherwise complete it alone. The comments stay unprocessed through the
+	// stage run (markCommentsSeenByStage skips them); feedbackGateBlocks holds
+	// the advance, and the comment pass follows.
 	if len(newComments) > 0 && !item.IsClosed {
-		return e.processComments(ctx, board, item, stage, newComments)
+		if e.stageRanOnEntry(item, stage, wasPaused, resumedFromPause) {
+			return e.processComments(ctx, board, item, stage, newComments)
+		}
+		e.logf(item.Number, "stage-first", "%d pending comment(s) but stage %q has not run — running the stage first (#2220)\n", len(newComments), stage.Name)
 	}
 
 	// PRs only support comment processing — skip stage invocation

@@ -1160,10 +1160,24 @@ func isReviewReinvoke(comments []gh.Comment) bool {
 // (item.Comments at dispatch time) — it must NOT be item.Comments from a
 // re-fetch, as that would include comments that arrived during the run and were
 // never processed by the stage.
+//
+// Comments findNewComments still reports as pending are skipped (#2220): a stage
+// entered with a pending comment runs first and leaves that comment for the
+// comment pass, which feedbackGateBlocks guarantees happens before the item
+// advances. Marking it here would consume it silently. What remains are the
+// Fabrik-prefix and bot-notice cases, which findNewComments already ignores.
 func (e *Engine) markCommentsSeenByStage(item gh.ProjectItem, preStageComments []gh.Comment) {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
+	snap, _ := e.store.Get(repoStr, item.Number)
+	pending := make(map[string]bool)
+	for _, c := range filterNewComments(preStageComments, func(id string) bool { return !snap.CommentProcessed(id).IsZero() }) {
+		pending[c.ID] = true
+	}
 	for _, c := range preStageComments {
+		if pending[c.ID] {
+			continue
+		}
 		if strings.HasPrefix(c.Body, "🏭 **Fabrik") {
 			continue
 		}
