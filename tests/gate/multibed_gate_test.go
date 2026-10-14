@@ -3,10 +3,67 @@ package gate
 import (
 	"context"
 	"os"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
+
+// bedRendezvous makes "both beds ran legs" deterministic (#2284). Fake suite
+// commands return instantly, so without it whichever bed reaches the shared
+// queue first can drain it before the other takes a cell, and the split depends
+// on goroutine scheduling. hook blocks every suite command until suite commands
+// have been seen from n distinct FABRIK_TEST_DIR values: a bed stuck in its
+// first suite cannot take the next cell, so the other bed must. If the
+// scheduler gave every cell to one bed, that bed's first suite would never see
+// a second dir and the failsafe records the timeout instead of hanging. Once
+// open (or timed out) later calls pass straight through.
+type bedRendezvous struct {
+	mu       sync.Mutex
+	n        int
+	dirs     map[string]bool
+	both     chan struct{}
+	opened   bool
+	timedOut bool
+}
+
+func newBedRendezvous(n int) *bedRendezvous {
+	return &bedRendezvous{n: n, dirs: map[string]bool{}, both: make(chan struct{})}
+}
+
+func (r *bedRendezvous) hook(c Cmd) {
+	r.mu.Lock()
+	r.dirs[envValue(c.Env, "FABRIK_TEST_DIR")] = true
+	if !r.opened && len(r.dirs) >= r.n {
+		r.opened = true
+		close(r.both)
+	}
+	r.mu.Unlock()
+	select {
+	case <-r.both:
+	case <-time.After(failsafe):
+		r.mu.Lock()
+		r.timedOut = true
+		r.mu.Unlock()
+	}
+}
+
+// check fails the test if the rendezvous timed out, naming the beds that arrived.
+func (r *bedRendezvous) check(t *testing.T) {
+	t.Helper()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.timedOut {
+		return
+	}
+	var seen []string
+	for d := range r.dirs {
+		seen = append(seen, d)
+	}
+	sort.Strings(seen)
+	t.Errorf("rendezvous timed out: suites ran on %v, wanted %d distinct beds running concurrently (one bed took every cell?)", seen, r.n)
+}
 
 // Gate.Run end to end over two stubbed beds (#1976): bed A is newRunGate's own
 // bed (the default repos and board #2), bed B a second bed with its own token,
@@ -67,10 +124,13 @@ func TestMultiBedRunEndToEnd(t *testing.T) {
 	}
 	g.LivePreflights = DefaultLivePreflights()
 	g.Cfg.LagProbeThreshold, g.Cfg.ProbeInterval, g.Cfg.ProbeWaitMax = 30*time.Second, time.Second, time.Second
+	rdv := newBedRendezvous(2)
+	rf.suiteHook = rdv.hook
 
 	if code := g.Run(context.Background(), []string{"--clean"}); code != 0 {
 		t.Fatalf("exit %d\n%s\n%s", code, g.Out, g.Err)
 	}
+	rdv.check(t)
 	out := g.Out.(interface{ String() string }).String()
 
 	// The pre-gate runs once per invocation, never once per bed (D10).
@@ -176,9 +236,12 @@ func TestMultiBedRunSharesOneLedger(t *testing.T) {
 	mustWrite(t, bedB+"/.env", "FABRIK_TOKEN=token-b\nFABRIK_TEST_PROJECT_NUMBER=3\n")
 	f.g.Cfg.BedDirs = []string{f.g.Cfg.TestBed, bedB}
 	f.lf.suiteOut = stream(pass("TestAlpha"), pass("TestBravo"))
+	rdv := newBedRendezvous(2)
+	f.lf.suiteHook = rdv.hook
 	if code := f.g.Run(context.Background(), nil); code != 0 {
 		t.Fatalf("exit %d\n%s", code, f.g.Err)
 	}
+	rdv.check(t)
 	l := f.ledger(t)
 	s := l.Load()
 	// Every raw record (not only the latest per pair, which a later cell of the
