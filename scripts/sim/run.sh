@@ -111,7 +111,17 @@ source "$REPO_ROOT/scripts/lib/killgroup.sh"
 # Default is min(4, host cores) — see the "Parallelism cap" comment above,
 # and scripts/lib/parallel.sh's own header, for the full rationale and why
 # this helper is shared rather than duplicated per call site.
-SIM_PARALLEL="${SIM_PARALLEL:-$(default_race_parallel)}"
+# Without -race the TSan fork/exec failure the cap of 4 exists for does not
+# arise, and the suite is wait-bound rather than CPU-bound: -parallel 16 ran
+# the full tree in 242s against 534s at 4 on the 28-core release host (0.0.84
+# gate, 2026-10-13). So the race-free default is min(16, host cores); SIM_RACE=1
+# keeps default_race_parallel.
+if [ "${SIM_RACE:-0}" = "1" ]; then
+  SIM_PARALLEL="${SIM_PARALLEL:-$(default_race_parallel)}"
+else
+  _cores=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
+  SIM_PARALLEL="${SIM_PARALLEL:-$(( _cores < 16 ? _cores : 16 ))}"
+fi
 
 # See the "Suite timeout" comment above for why this is no longer left at
 # go test's undocumented 10-minute default.
