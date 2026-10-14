@@ -403,9 +403,18 @@ ok "FABRIK_TOKEN authenticated as @$BOT_LOGIN"
 # own comment. This does NOT weaken the check: it still runs here, in full,
 # exactly as before; it only stops step 5 from paying for it a second time.
 step "Sim + wire-contract pre-gate"
-if ! "$REPO_ROOT/scripts/sim/run.sh" --all; then
-  die "sim suite failed — fix it before cutting a release (scripts/sim/run.sh --all to reproduce)"
+# The sim runs through the gate runner's `sim` entry (#2247), not scripts/sim/run.sh
+# directly: same suite, but decoded per test, with a heartbeat naming the tests
+# still running, a goroutine-dump pointer and an archive under
+# .e2e-coverage/pregate/ if it hangs. Built and exec'd (not `go run`) so the
+# runner itself receives INT/TERM and reaps the tree, like scripts/e2e/run.sh.
+SIM_GATE_BIN="$(mktemp -d "${TMPDIR:-/tmp}/cut-release-gate.XXXXXX")/gate"
+go build -o "$SIM_GATE_BIN" ./tests/gate/cmd/gate || die "building the gate runner (./tests/gate/cmd/gate) failed"
+if ! "$SIM_GATE_BIN" sim; then
+  rm -rf "$(dirname "$SIM_GATE_BIN")"
+  die "sim suite failed — fix it before cutting a release (the output above names the tests still running and the archive; scripts/sim/run.sh --all to reproduce)"
 fi
+rm -rf "$(dirname "$SIM_GATE_BIN")"
 ok "sim suite passed"
 if ! go test -race -count=1 ./github/... >/tmp/cut-release-pregate-test.log 2>&1; then
   tail -40 /tmp/cut-release-pregate-test.log >&2

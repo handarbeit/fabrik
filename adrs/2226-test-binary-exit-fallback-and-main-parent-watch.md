@@ -26,3 +26,7 @@ ADR 2128 refused to infer death from process-tree shape because killing on ppid 
 ## Residual risk
 
 If the hang stalled the Go scheduler as a whole, the watchdog goroutine would not run. The observed spin was a single thread in `sched_yield`, so other Ms should still run the timer, but this cannot be verified without reproducing the hang. SIGKILL also loses buffered output and a goroutine dump; the ceiling message has already been printed by then.
+
+## Amendment (#2247, ADR 2247)
+
+The "Residual risk" above materialised: on 2026-10-13 two `-race` `sim.test` binaries hit their 40-minute ceiling, printed "exiting", then spun at ~97% CPU for about an hour inside the race runtime's exit path, and the in-process `time.AfterFunc` never fired. The rejection of "an external killer process" is therefore narrowed: a *pre-armed helper process* is still rejected, but the gate, which already owns the sim's session, now kills a stuck `.test` binary from outside by PID and start token after ceiling + grace (ADR 2247). The in-process fallback stays as the first line of defence for every `testlife` user; the gate's reaper covers runs made through the gate.
