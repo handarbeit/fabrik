@@ -370,7 +370,7 @@ func newReaper(f *fakeTable, clk *fakeClock) *simReaper {
 
 func TestSimReaper_KillsOnlyAfterCeilingPlusGraceByStartToken(t *testing.T) {
 	clk := &fakeClock{t: time.Unix(1000, 0)}
-	f := &fakeTable{members: []int{10, 11, 12, 13}, comm: map[int]string{10: "/bin/bash", 11: "go", 12: "/tmp/x/sim.test", 13: "/tmp/y/other"}, tok: map[int]string{10: "a", 11: "b", 12: "c", 13: "d"}}
+	f := &fakeTable{members: []int{10, 11, 12, 13}, comm: map[int]string{10: "/bin/bash", 11: "go", 12: "/work/x/sim.test", 13: "/work/y/other"}, tok: map[int]string{10: "a", 11: "b", 12: "c", 13: "d"}}
 	r := newReaper(f, clk)
 	r.check(10)
 	clk.Advance(31 * time.Minute)
