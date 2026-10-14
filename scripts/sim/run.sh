@@ -86,6 +86,15 @@
 # Linux idiom for this, is not shipped on macOS by default, so this uses
 # portable bash job control instead.
 
+# No race detector by default. The sim is a behavioural pre-gate; the race
+# detector adds nothing it is there to catch, CI already runs the whole module
+# (tests/sim included) under `go test -race` on Linux for every PR, and on macOS
+# a -race test binary forking git dies intermittently between fork and exec
+# (a SIGSEGV'd git child, a ThreadSanitizer abort, or a hang that only the
+# suite timeout ends: 0.0.84 gate, 2026-10-13, a 44-minute ceiling hit on a
+# suite that otherwise takes about 10). SIM_RACE=1 restores -race for a
+# deliberate local race run.
+
 set -euo pipefail
 set -m
 
@@ -114,7 +123,12 @@ if [ "${1:-}" = "--all" ]; then
   shift
 fi
 
-echo "== sim suite: go test -race -count=1 -parallel $SIM_PARALLEL -timeout $SIM_TIMEOUT $TARGET $* =="
+RACE_FLAG=()
+if [ "${SIM_RACE:-0}" = "1" ]; then
+  RACE_FLAG=(-race)
+fi
+
+echo "== sim suite: go test ${RACE_FLAG[*]:+${RACE_FLAG[*]} }-count=1 -parallel $SIM_PARALLEL -timeout $SIM_TIMEOUT $TARGET $* =="
 
 START_TS=$(date +%s)
 # GO_TEST_PID is declared and the trap installed BEFORE backgrounding, not
@@ -127,7 +141,7 @@ START_TS=$(date +%s)
 # `|| true`.
 GO_TEST_PID=""
 trap 'kill_own_group "$GO_TEST_PID" TERM 2>/dev/null || true' EXIT INT TERM
-go test -race -count=1 -parallel "$SIM_PARALLEL" -timeout "$SIM_TIMEOUT" "$TARGET" "$@" &
+go test ${RACE_FLAG[@]+"${RACE_FLAG[@]}"} -count=1 -parallel "$SIM_PARALLEL" -timeout "$SIM_TIMEOUT" "$TARGET" "$@" &
 GO_TEST_PID=$!
 
 set +e
