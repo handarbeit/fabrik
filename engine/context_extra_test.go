@@ -99,40 +99,49 @@ func TestWriteContextFiles_PostToPR_NoPR_SkipsPRDescription(t *testing.T) {
 // TestMarkCommentsSeenByStage_AddsRocketToUnseenUserComments verifies that
 // markCommentsSeenByStage adds rocket reactions to user comments without a
 // rocket reaction (excluding bot comments and already-seen comments).
-func TestMarkCommentsSeenByStage_AddsRocketToUnseenUserComments(t *testing.T) {
+func TestMarkCommentsSeenByStage_SkipsPendingComments(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	item := gh.ProjectItem{
 		Number: 30,
 		Comments: []gh.Comment{
-			// User comment, no rocket — should get rocket
+			// Pending user comment — must stay unprocessed (#2220): the stage ran
+			// first and the comment pass follows.
 			{ID: "C_1", DatabaseID: 601, Author: "testuser", Body: "please help",
 				Reactions: []gh.ReactionGroup{}},
-			// Fabrik bot comment — should be skipped
+			// Fabrik bot comment — skipped
 			{ID: "C_2", DatabaseID: 602, Author: "testuser",
 				Body: "🏭 **Fabrik — stage: Research**\nsome output"},
-			// User comment with rocket already — should be skipped
+			// User comment with rocket already — skipped
 			{ID: "C_3", DatabaseID: 603, Author: "testuser", Body: "already seen",
 				Reactions: []gh.ReactionGroup{{Content: "ROCKET", Count: 1}}},
+			// Bot service notice — not pending, so still marked seen
+			{ID: "C_4", DatabaseID: 604, Author: "coderabbitai[bot]",
+				Body: "You have reached your daily quota limit"},
 		},
+	}
+	if len(eng.findNewComments(item)) != 1 {
+		t.Skipf("fixture assumption: only C_1 is pending, got %d", len(eng.findNewComments(item)))
 	}
 
 	eng.markCommentsSeenByStage(item, item.Comments)
 
-	// Verify via the store: C_1 should be recorded, C_2 (bot) and C_3 (rocket) should not.
 	snap, err := eng.store.Get("owner/repo", 30)
 	if err != nil {
 		t.Fatalf("store.Get: %v", err)
 	}
-	if snap.CommentProcessed("C_1").IsZero() {
-		t.Error("C_1 should be recorded in store after markCommentsSeenByStage")
+	if !snap.CommentProcessed("C_1").IsZero() {
+		t.Error("C_1 (pending) must NOT be recorded by the stage run")
 	}
 	if !snap.CommentProcessed("C_2").IsZero() {
 		t.Error("C_2 (bot comment) should NOT be recorded in store")
 	}
 	if !snap.CommentProcessed("C_3").IsZero() {
 		t.Error("C_3 (already had rocket) should NOT be recorded in store")
+	}
+	if len(eng.findNewComments(item)) != 1 {
+		t.Error("C_1 must still be pending after markCommentsSeenByStage")
 	}
 }
 
