@@ -70,8 +70,9 @@ least 25% faster **and** total runner-minutes stay within 1.5× of the single jo
 - After R1, the sim is no longer the long pole (~182 s against `engine`'s ~320 s job), so sharding
   it would buy almost nothing at any K.
 
-`.github/workflows/ci.yml` is not changed, and the partition helper and its completeness check,
-built for the experiment, were not kept.
+No CI layout or workflow behaviour changes: the only edit to `.github/workflows/ci.yml` is the
+comment above the `go test` step, reworded to describe the per-OS ceiling. The partition helper and
+its completeness check, built for the experiment, were not kept.
 
 ## Caveats
 
