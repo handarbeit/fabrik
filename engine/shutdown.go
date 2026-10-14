@@ -229,7 +229,7 @@ func (e *Engine) drainAndExit(locks *instanceLocks, _ chan struct{}) error {
 	if !waitGroupTimeout(&e.wg, e.drainDeadline()) {
 		e.logf(0, "shutdown", "drain deadline (%s) exceeded — some in-flight work may not have finished cleanly\n", e.drainDeadline())
 	}
-	if e.sighupRequested.Load() {
+	if e.sighupRequested.Load() && !e.drain.stopped.Load() {
 		performSighupRestart(e, locks) // returns only on exec failure
 	}
 	return nil

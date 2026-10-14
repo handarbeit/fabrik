@@ -26,6 +26,9 @@ type drainState struct {
 	began     chan struct{} // closed when the drain begins; lazily created
 	draining  atomic.Bool
 	startedAt time.Time
+	// stopped is set once a SIGINT/SIGTERM stop begins. drainAndExit never execs
+	// after it, whatever order the SIGHUP goroutine's sighupRequested store raced in.
+	stopped atomic.Bool
 
 	// Test seams (per-Engine, zero value = production).
 	gateDisabled  atomic.Bool           // SetDrainDispatchGateDisabledForTest: dispatch sites ignore the drain

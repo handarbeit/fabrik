@@ -455,3 +455,77 @@ func TestSighupDrain_SlotsEventCarriesDrain(t *testing.T) {
 		t.Fatal("no WorkerSlotsEvent")
 	}
 }
+
+// A drain starts no stage run or comment pass: dispatchCandidates (the original
+// $5.76 loss path) enters no worker while draining, and does with the gate off.
+func TestSighupDrain_DispatchCandidatesStartsNothing(t *testing.T) {
+	for _, gateOff := range []bool{false, true} {
+		eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+		eng.cfg.MaxConcurrent = 1
+		eng.sem = make(chan struct{}, 1)
+		eng.SetDrainDispatchGateDisabledForTest(gateOff)
+		eng.beginDrain()
+
+		board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+		item := gh.ProjectItem{Number: 3, Title: "Test", Status: "Research"}
+		dispatched, _ := eng.dispatchCandidates(context.Background(), board, []gh.ProjectItem{item})
+		eng.wg.Wait()
+
+		if started := dispatched == 1; started != gateOff {
+			t.Errorf("gate off = %v: dispatched = %d", gateOff, dispatched)
+		}
+		if !gateOff && len(eng.drainWorkers()) != 0 {
+			t.Errorf("a worker entered the store during a drain: %+v", eng.drainWorkers())
+		}
+	}
+}
+
+// A drain starts no merge-train worker.
+func TestSighupDrain_DispatchMergeTrainWorkerStartsNothing(t *testing.T) {
+	for _, gateOff := range []bool{false, true} {
+		eng, _, v, _ := infraSeamEngine(t, TrainCIInfra)
+		eng.SetDrainDispatchGateDisabledForTest(gateOff)
+		eng.beginDrain()
+		eng.dispatchMergeTrainWorker(context.Background(), makeSeamBatch(2), "PVT_test", "main")
+		eng.wg.Wait()
+		if ran := v.count() > 0; ran != gateOff {
+			t.Errorf("gate off = %v: validations = %d", gateOff, v.count())
+		}
+		if !gateOff {
+			if _, ok := eng.mergeTrainInFlight.Load(mergeTrainKey("owner/repo", "main")); ok {
+				t.Error("a train worker claim was registered during a drain")
+			}
+		}
+	}
+}
+
+// A drain starts no train step goroutine: the claim on the run is released and
+// no repo worker is entered, so the persisted run resumes after the exec.
+func TestSighupDrain_LaunchStepStartsNothing(t *testing.T) {
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+	eng.beginDrain()
+	// Detached, parked on an open trial: a step that did start would return at once
+	// and (detached) leave its repo-worker marker behind, which is what the test sees.
+	r := &trainRun{e: eng, trainKey: "owner/repo:main", detached: true, rec: trainRunRecord{Step: stepMain}}
+	r.stepping.Store(true)
+	eng.launchStep(context.Background(), r, nil)
+	eng.wg.Wait()
+	if r.stepping.Load() {
+		t.Error("launchStep kept the run claimed during a drain")
+	}
+	if keys := eng.store.RepoWorkerKeys(); len(keys) != 0 {
+		t.Errorf("a repo worker was entered during a drain: %v", keys)
+	}
+}
+
+// Health reports the live in-flight count, not the last value the drain published.
+func TestSighupDrain_HealthCountsLive(t *testing.T) {
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+	eng.beginDrain()
+	eng.publishDrainStatus() // mirror says 0 left
+	eng.store.Apply(itemstate.WorkerEntered{Repo: "owner/repo", Number: 6, StageName: "Implement", StartedAt: time.Now(), Kind: itemstate.WorkerKindStageRun})
+	res, err := eng.LocalAPIBackend().Health(localapi.HealthParams{})
+	if err != nil || res.Draining == nil || res.Draining.WorkersRemaining != 1 {
+		t.Fatalf("want 1 worker remaining from the live Store, got %+v, %v", res.Draining, err)
+	}
+}

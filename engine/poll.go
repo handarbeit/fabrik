@@ -395,6 +395,7 @@ func (e *Engine) Run() error {
 			//
 			// #2259 FR-008: a SIGINT/SIGTERM during a SIGHUP drain is a stop, not a
 			// restart — clear the restart intent so drainAndExit does not exec.
+			e.drain.stopped.Store(true)
 			e.sighupRequested.Store(false)
 			e.beginShutdownPause(cancel)
 		case <-ctx.Done():
