@@ -289,7 +289,11 @@ func (e *Engine) Run() error {
 		e.logFile = lf
 		pollLogFile = lf
 		defer func() {
+			// Under logMu (#2259): the SIGHUP goroutine outlives the run context now
+			// and may still be logging when Run() returns.
+			e.logMu.Lock()
 			e.logFile = nil
+			e.logMu.Unlock()
 			pollLogFile = nil
 			lf.Close()
 		}()
