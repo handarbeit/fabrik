@@ -2732,11 +2732,13 @@ func (e *Engine) groupQueuedByRepoAndBase(items []gh.ProjectItem, holdingStatus,
 				wm, ok := e.worktreeManagers[rg.repoKey]
 				e.mu.Unlock()
 				if !ok {
-					// Narrow same-poll cold-start window (fail-closed, mirroring
-					// #1647's nonDefaultBaseExclusion posture) — in practice
-					// unreachable once this item has passed through any earlier
-					// pipeline stage, since every stage already requires a
-					// registered WM for its own repo before this point.
+					// Fail-closed (mirroring #1647's nonDefaultBaseExclusion
+					// posture). handleMergeTrainBatch registers the manager first
+					// (ensureQueuedBaseReposReady, #2250), so this is reached only
+					// when that clone failed or has not finished — or by a caller
+					// that ran before it in the same poll (settleQueuedReviewFindings).
+					// Not "unreachable": after a restart nothing else registers a
+					// repo whose only open items are Queued.
 					e.logf(item.Number, "merge-train", "WorktreeManager not yet registered for %s — excluding #%d from batching this poll, will retry\n", rg.repoKey, item.Number)
 					continue
 				}
@@ -2794,6 +2796,7 @@ func (e *Engine) handleMergeTrainBatch(ctx context.Context, board *gh.ProjectBoa
 	if hs == nil {
 		return
 	}
+	e.ensureQueuedBaseReposReady(ctx, board.Items, hs.Name)
 	for _, g := range e.groupQueuedByRepoAndBase(board.Items, hs.Name, e.defaultRepo()) {
 		e.routeQueuedGroup(ctx, g, board.ProjectID)
 	}
