@@ -1,0 +1,91 @@
+# TEMPORARY (#2228): measurement workflow for R1 (Linux -race parallelism) and
+# R2 (sim sharding). Stored here, not under .github/workflows, because the
+# Fabrik GitHub App has no `workflows` permission and cannot push workflow
+# files. A maintainer copies it to .github/workflows/ on the issue branch to
+# run it (push trigger, this branch only), reads job timings and the R1RESULT
+# log lines, then deletes it.
+name: sim-shard-experiment
+
+on:
+  push:
+    branches:
+      - fabrik/issue-2228
+    paths:
+      - .github/workflows/sim-shard-experiment.yml
+
+permissions:
+  contents: read
+
+jobs:
+  r1:
+    name: r1 p${{ matrix.parallel }} run${{ matrix.run }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        parallel: [4, 8, 16]
+        run: [1, 2, 3, 4, 5]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: race sim at -parallel ${{ matrix.parallel }}
+        run: |
+          set +e
+          echo "cpus=$(getconf _NPROCESSORS_ONLN) arch=$(uname -m)"
+          start=$(date +%s)
+          go test -race -count=1 -timeout 20m -parallel ${{ matrix.parallel }} ./tests/sim/... 2>&1 | tee /tmp/out.log
+          rc=${PIPESTATUS[0]}
+          echo "R1RESULT parallel=${{ matrix.parallel }} run=${{ matrix.run }} seconds=$(( $(date +%s) - start )) exit=$rc segv=$(grep -c 'signal: segmentation fault' /tmp/out.log) tsan=$(grep -c tsan_rtl /tmp/out.log) forkexec=$(grep -Ec 'fork/exec' /tmp/out.log)"
+          exit $rc
+
+  baseline:
+    name: baseline single job
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: |
+          source scripts/lib/parallel.sh
+          go test -race -timeout 20m -parallel "$(default_race_parallel)" ./...
+
+  shard:
+    name: k${{ matrix.k }} sim ${{ matrix.index }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {k: 2, index: 0}
+          - {k: 2, index: 1}
+          - {k: 3, index: 0}
+          - {k: 3, index: 1}
+          - {k: 3, index: 2}
+          - {k: 4, index: 0}
+          - {k: 4, index: 1}
+          - {k: 4, index: 2}
+          - {k: 4, index: 3}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: |
+          source scripts/lib/parallel.sh
+          go run ./tools/sim-shard -k ${{ matrix.k }} -verify
+          go test -race -timeout 20m -parallel "$(default_race_parallel)" -run "$(go run ./tools/sim-shard -k ${{ matrix.k }} -index ${{ matrix.index }})" ./tests/sim
+
+  rest:
+    name: rest of module
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: |
+          source scripts/lib/parallel.sh
+          go test -race -timeout 20m -parallel "$(default_race_parallel)" $(go list ./... | grep -v '/tests/sim$')
