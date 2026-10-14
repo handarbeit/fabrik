@@ -13,6 +13,7 @@ func TestIsTransientGitHubError(t *testing.T) {
 		{"HTTP 502: Bad Gateway (https://api.github.com/graphql)", true},
 		{"HTTP 503: Service Unavailable", true},
 		{"Post \"https://api.github.com/graphql\": net/http: request canceled (Client.Timeout exceeded) timed out", true},
+		{"GraphQL: Base branch was modified. Review and try the merge again. (mergePullRequest)", true},
 		{"GraphQL: Pull Request is not mergeable (mergePullRequest)", false},
 		{"X Pull request handarbeit/fabrik-test-alpha#1 is not mergeable: the base branch policy prohibits the merge.", false},
 		{"", false},
