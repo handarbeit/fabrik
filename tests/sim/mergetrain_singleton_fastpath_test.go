@@ -133,11 +133,14 @@ func TestMergeTrainSingletonFastPath_BaseMoved_StillBuildsTrial(t *testing.T) {
 }
 
 // TestMergeTrainSingletonFastPath_SkippedGoJobsReportSuccess_Lands is #2254's
-// R4: a docs-only member's two Go test jobs end early through the diff
-// classifier (scripts/ci/classify-diff.sh), which GitHub reports as ordinary
-// completed/success check runs under the unchanged required-check names. The
-// fast path must treat that as green and complete and land the member's own PR
-// directly — no trial. The classifier needs no engine change; this pins that.
+// R4 regression pin. A docs-only member whose two Go test jobs ended early
+// through the diff classifier (scripts/ci/classify-diff.sh) shows up on GitHub
+// as ordinary completed/success check runs under the unchanged required-check
+// names. This seeds exactly that and asserts the fast path lands the member's
+// own PR with no trial. It does not run the classifier, and it is close to
+// TestMergeTrainSingletonFastPath_UpToDateAndGreen_LandsWithoutTrial by design:
+// the point is that no engine change is needed for a skipped job, so a future
+// engine change that treated those names or that shape differently turns it red.
 func TestMergeTrainSingletonFastPath_SkippedGoJobsReportSuccess_Lands(t *testing.T) {
 	t.Parallel()
 	env := mergeTrainEnv(t, mergeTrainEnvOptions{})

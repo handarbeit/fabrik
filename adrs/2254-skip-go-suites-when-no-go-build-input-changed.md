@@ -4,6 +4,7 @@
 **Status**: Accepted
 **Issue**: #2254 — ci: skip the Go test suites when a PR changes no Go build input
 **Amends**: ADR 1857
+**Rollout**: the classifier, rules and tests land first; the `ci.yml` gating is held in `notes/2254-ci-workflow.patch` because the GitHub App cannot push `.github/workflows/`. Until that patch is applied (and the file deleted) CI still runs the whole module on every PR and this ADR describes the intended behavior.
 
 ## Context
 
