@@ -3773,6 +3773,19 @@ In terminals that support OSC 8 hyperlinks (Ghostty, iTerm2, WezTerm, Kitty), is
 
 Since #1648, a single repo can run multiple concurrent trains — one per resolved `(repo, base)` partition — when `Queued` holds items targeting different base branches. The TUI row is keyed by repo, not by partition, so two or more concurrently-training partitions in the same repo **share one row**: the later-started partition's title overwrites the earlier one's, and the first partition to finish removes the row while a sibling partition may still be running (its subsequent status lines then have no row to land in). This is a **display-only** limitation — no guard, counter, or landing decision reads the row, so engine behavior is unaffected. To make the shared row at least self-identifying, a non-default partition's title is prefixed with its base branch (e.g. `[maint/1.2] 2 of 2: #1701 #1702`); the default partition's title is unchanged.
 
+**Waiting rows (#2238).** Below the running and dependency-blocked rows, In Progress also lists the open items Fabrik is *holding on a known gate*, in the same shape as a blocked row — so an item that is quietly being watched never looks forgotten. `⏳` marks something external that Fabrik is waiting on; `✋` marks something only a person can resolve, so a glance tells you whether anything needs you:
+
+```
+⏳#2232 Validate     waiting for: CI on PR #2236 (5/7 checks, since 13:52)  retry backoff
+⏳#2240 Implement    waiting for: review from handarbeit-pruefer (since 13:50)
+⏳#2241 Implement    waiting for: retry at 14:03 (time slice)
+⏳#2243 Validate     waiting for: rebase (fabrik:rebase-needed)
+⏳#2245 Queued       waiting for: landing in merge train (Queued, position 2 of 3)
+✋#2250 Implement    waiting for: human reply (paused)
+```
+
+The rows come from the same classification `fabrik_status` and the channel events use, read from Fabrik's in-memory item state — the TUI makes no GitHub calls for them. A detail Fabrik does not know (the PR number or a "since" time right after a restart, a reviewer who was never formally requested, a merge-train position) is left out rather than guessed. `✋` rows come first; `⏳` rows follow, soonest known deadline first, then longest-waiting. At most five rows are shown, then `+K more waiting`. Dependency-blocked items keep their `🔒` rows, an item with a running worker shows only its running row, and the between-polls states (queued for a worker slot, waiting for the next dispatch) and stalled items are not listed here. When the poll found nothing to dispatch but waits are open, the header reads `waiting on N item(s)` (`, M need you` when any are `✋`) instead of `[poll] nothing to do`.
+
 Pressing `Enter` on an active item opens the inline detail panel, which shows Issue, Stage, Elapsed, and a live `Turns: N/M` counter for in-progress stages.
 
 **History**: Issue number, stage name, success/fail icon, duration, timestamp, turns used,
@@ -9946,6 +9959,22 @@ The catch-up loop only processes items with the complete label, so `fabrik:await
 
 **Multiple `stage:<X>:in_progress` labels:**
 No special handling. Each is independent. The engine only checks the in_progress label for the current stage's column.
+
+### 7.20 TUI Waiting Rows and Header Wait Count (#2238, ADR 2238)
+
+The In Progress pane lists items the engine is holding on a known gate, and the header says so instead of reading idle. It is a **sampled, display-only snapshot** like the worker-slot readout (ADR 2115) and the status-line field (§7.17): nothing reads it back and it adds no detection.
+
+**Publisher.** `Engine.runWaitingPublisher` (`engine/waiting_publish.go`; started in `Run()` beside `runWorkerSlotsPublisher`, only when `e.events != nil`) samples once per second. `sampleWaiting` builds the blocker index and merge-train rows with their own `Scan`s first, then one `store.Scan` over open, non-PR, `LabelsKnown` items in a managed or holding column, skipping `fabrik:blocked` items (those keep the `IssueBlockedEvent` path). Each item goes through the shared `attentionInput` → `attention.Classify` path (§7.13). Kept: `waiting`, `needs-human`, `escalated`, `suspended`. Dropped: `working` (it has its running row), `idle`, `stalled`, the `ci:red` overlay, and the between-polls `waiting-for-dispatch` / `queued-for-slot` codes. The result is a full-replacement `tui.WaitingItemsEvent{Items, Omitted, HumanCount, WaitCount}` sent with `emitStructural` only when it differs from the last one.
+
+**Read-only guarantee.** The file reads item state through `Scan` only and never `e.client`, `e.readClient`, `store.Get(`, `labelAppliedAt(` or a live gate (`TestWaitingPublisherSourceDoesNotReachGitHub`); the tests run it over a client that panics on any call.
+
+**Row text.** `waitingText(res, facts)` is a pure function of the classifier's `(State, Code, Cause)` and a few cache-only facts (`LinkedPR.Number`, check runs completed/total, requested reviewers, `LabelAppliedAt`, `PendingRetry.Due`, merge-train position via `trainSlot`). Unknown facts are omitted. Times are minute-resolution absolute clock times so the snapshot is stable between samples. Codes with no tailored wording fall back to the first clause of `Result.Summary`. The status-line text is not a source (ADR 2048).
+
+**Order and cap.** `✋` (needs-human, escalated, suspended) rows first by attention rank then ref; `⏳` rows (all unranked) by earliest known deadline, then longest-waiting, then ref. At most `waitingRowsMax` (5) rows are sent; `Omitted` carries the rest and `HumanCount`/`WaitCount` the totals.
+
+**TUI.** `ActivePaneComponent` renders the rows after the blocked rows (suppressing an item that has a running row), a dim `+K more waiting` line, and counts them in `Height()` and the title. `HeaderComponent` keeps the counts as separate state (the next poll-level `LogEvent` overwrites `statusLine`) and renders `waiting on N item(s)[, M need you]` in place of the exact status `[poll] nothing to do` (`tui.HeaderNothingToDo`, pinned against `engine/poll.go` by `TestPollNothingToDoWordingMatchesTheHeader`); any other status is untouched.
+
+**Known gap.** A `🔒` row is removed only when a worker starts for the item (§9.8), so an item that was blocked and later unblocked keeps its row; this feature does not change that.
 
 ---
 
