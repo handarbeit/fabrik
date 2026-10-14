@@ -131,3 +131,39 @@ func TestMergeTrainSingletonFastPath_BaseMoved_StillBuildsTrial(t *testing.T) {
 		t.Errorf("expected the merged PR to be a dedicated integration PR, not the member's own PR #%d", prNum)
 	}
 }
+
+// TestMergeTrainSingletonFastPath_SkippedGoJobsReportSuccess_Lands is #2254's
+// R4: a docs-only member's two Go test jobs end early through the diff
+// classifier (scripts/ci/classify-diff.sh), which GitHub reports as ordinary
+// completed/success check runs under the unchanged required-check names. The
+// fast path must treat that as green and complete and land the member's own PR
+// directly — no trial. The classifier needs no engine change; this pins that.
+func TestMergeTrainSingletonFastPath_SkippedGoJobsReportSuccess_Lands(t *testing.T) {
+	t.Parallel()
+	env := mergeTrainEnv(t, mergeTrainEnvOptions{})
+
+	num, prNum := QueueMember(t, env, "fastpath-docsonly", map[string]string{"release-notes/v0.0.85.md": "notes\n"})
+
+	pr, err := env.Sim.Sim().FetchLinkedPR(env.Owner, env.Repo, num)
+	if err != nil || pr == nil {
+		t.Fatalf("could not resolve queued member's own linked PR: %v", err)
+	}
+	// What a skipped job reports: the same job names a full run uses, success,
+	// on the member's real head SHA.
+	for _, name := range []string{"Test and vet", "Test in a worker-shaped environment"} {
+		env.Sim.Sim().SeedCheckRun(env.OwnerRepo, pr.HeadSHA, greenCheckRun(name))
+	}
+
+	RunPoll(t, env)
+
+	WaitForProjectStatus(t, env, num, "Done", 20)
+	WaitForIssueClosed(t, env, num, 5)
+
+	if got := draftPRCount(env); got != 0 {
+		t.Errorf("expected no draft CI PR (the skipped jobs' success is green and complete), got %d", got)
+	}
+	merges := env.Sim.Log().ByMethod("MergePRAtHeadSHA")
+	if len(merges) != 1 || merges[0].Args.Number != prNum {
+		t.Errorf("expected exactly one direct merge of the member's own PR #%d, got %d merges: %+v", prNum, len(merges), merges)
+	}
+}
