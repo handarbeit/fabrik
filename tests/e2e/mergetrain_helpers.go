@@ -533,7 +533,10 @@ func waitForPRClosed(t *testing.T, env *Env, repo string, prNumber int, timeout 
 // member PR directly rather than minting a landing PR — so callers comparing
 // the captured number against the member PR must treat equality as legitimate
 // there. See waitForLandingPRNumber's contract below.
-var landedPRPattern = regexp.MustCompile(`Landed (?:via batch|one-at-a-time via singleton|via singleton fast path) PR #(\d+)\.`)
+// The fast-path form after a singleton catch-up (#2044) reads "PR #N after a
+// catch-up." — without the optional group the wait timed out on a correct landing
+// (TestYoloAutoMergeLabel/train-mode=on, 0.0.85 gate).
+var landedPRPattern = regexp.MustCompile(`Landed (?:via batch|one-at-a-time via singleton|via singleton fast path) PR #(\d+)(?: after a catch-up)?\.`)
 
 // waitForLandingPRNumber polls the member's own PR comments (memberPRNum) for
 // the engine's "landed via ..." comment and returns the distinct
