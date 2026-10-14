@@ -29,8 +29,6 @@ type Procs interface {
 // osProcs is the real Procs.
 type osProcs struct{}
 
-func (osProcs) Alive(pid int) bool { return pidAlive(pid) }
-
 func (osProcs) Token(pid int) string { return sessionreap.StartToken(pid) }
 
 func (osProcs) SignalGroup(owner sessionreap.Owner, sig syscall.Signal) error {

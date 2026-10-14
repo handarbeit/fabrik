@@ -8,6 +8,22 @@ import (
 	"syscall"
 )
 
+// Alive reports whether a live process holds pid. The gate launches the bed
+// engine detached and releases it without ever waiting, so once that engine
+// exits it stays a zombie of the gate: kill(pid, 0) still succeeds on it. A
+// non-blocking wait4 reaps it (and reports it dead); for any pid that is not our
+// child it fails with ECHILD and the plain liveness probe decides.
+func (osProcs) Alive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	var ws syscall.WaitStatus
+	if got, err := syscall.Wait4(pid, &ws, syscall.WNOHANG, nil); err == nil && got == pid {
+		return false
+	}
+	return pidAlive(pid)
+}
+
 func (osProcs) Signal(pid int, sig syscall.Signal) error { return syscall.Kill(pid, sig) }
 
 // LockHeld probes the engine's instance flock with a shared, non-blocking lock:

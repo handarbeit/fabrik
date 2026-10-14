@@ -4,9 +4,11 @@ package gate
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // LockHeld reads the engine's real flock: true only while another open file
@@ -37,5 +39,29 @@ func TestOSProcsLockHeld(t *testing.T) {
 	}
 	if (osProcs{}).LockHeld(bed) {
 		t.Error("released: not held")
+	}
+}
+
+// The gate Starts the bed engine detached and Releases it without waiting, so an
+// engine that exits stays an unreaped zombie of the gate. Alive must report it
+// dead, or a successful stop reads as a failure and burns every wait.
+func TestOSProcsAliveSeesReleasedChildExit(t *testing.T) {
+	cmd := exec.Command("sh", "-c", "exit 0")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := cmd.Process.Pid
+	if err := cmd.Process.Release(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for (osProcs{}).Alive(pid) {
+		if time.Now().After(deadline) {
+			t.Fatalf("pid %d exited but Alive still reports it live (unreaped zombie)", pid)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if (osProcs{}).Alive(0) {
+		t.Error("pid 0 is never alive")
 	}
 }
