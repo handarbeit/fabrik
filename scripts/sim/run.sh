@@ -17,7 +17,8 @@
 # "Runtime and the `sim` tag decision") and already runs unconditionally
 # inside `go test -race ./...` on every PR — this script exists to give it a
 # distinct, nameable identity for manual/pre-gate use, not to change how CI
-# invokes it.
+# invokes it. Unlike CI, this script runs the sim WITHOUT -race unless
+# SIM_RACE=1 (see "No race detector by default" below).
 #
 # Default target is the scenario layer only (./tests/sim, not ./tests/sim/...)
 # — that's the part that matters for a pre-gate (fast, and the layer that
@@ -55,7 +56,8 @@
 # (`min(4, host cores)`) — lowered from #1624's original `min(8, host
 # cores)` after #1677's own measurement on the 28-core host found 8 still
 # reproduces the TSan fork/exec SIGSEGV roughly 1 run in 5, not reliable
-# enough for a release gate, while 4 showed zero SIGSEGVs across multiple
+# enough for a release gate (all of it measured under -race; the race-free
+# default below is 16), while 4 showed zero SIGSEGVs across multiple
 # consecutive runs (only exceeding the previously-undeclared 10-minute `go
 # test` default timeout, hence SIM_TIMEOUT below). That helper is shared —
 # not duplicated — with cut-release.sh step 4's repo-wide `go test -race
@@ -91,8 +93,8 @@
 # (tests/sim included) under `go test -race` on Linux for every PR, and on macOS
 # a -race test binary forking git dies intermittently between fork and exec
 # (a SIGSEGV'd git child, a ThreadSanitizer abort, or a hang that only the
-# suite timeout ends: 0.0.84 gate, 2026-10-13, a 44-minute ceiling hit on a
-# suite that otherwise takes about 10). SIM_RACE=1 restores -race for a
+# suite timeout ends: 0.0.84 gate, 2026-10-13, two binaries hit the 40-minute
+# ceiling on a suite that otherwise takes about 10, then hung inside exit). SIM_RACE=1 restores -race for a
 # deliberate local race run.
 
 set -euo pipefail
