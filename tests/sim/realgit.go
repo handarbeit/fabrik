@@ -13,7 +13,7 @@ import (
 // against about 6 ms for the real binary, 200-run measurement on the release
 // host). The sim starts real git thousands of times, so TestMain resolves the
 // real binary once and puts its directory first on PATH. Doing it in TestMain
-// covers every caller: the gate's pre-gate, cut-release.sh's race suite and a
+// covers every caller: the gate's pre-gate, cut-release.sh's own pre-gate and a
 // plain `go test`. SIM_REAL_GIT=off disables it (to measure the difference).
 //
 // It only replaces Apple's shim itself: a git the developer put on PATH on
