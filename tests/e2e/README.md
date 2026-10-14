@@ -2570,8 +2570,10 @@ that never got converted (`TestMergeTrainColdCacheBaseMember` is the one documen
 exemption: it files a cheap blocked primer to warm a cache).
 
 **Measuring.** `gate report [--sha S] [--baseline B]` totals each test's `go test -json`
-`Elapsed` per cell from the per-leg archive and joins the registry's `entry`/`traversal`
-columns; with `--baseline` it prints the per-test and total runtime delta, taking the
+`Elapsed` per cell from the per-leg archive — every `go-test.<phase>.json` stream and its
+`go-test.retry-N.<phase>.json` retries (a bare `go-test.json` only in the no-registry /
+pre-#1977 layout) — and joins the registry's `entry`/`traversal` columns. It also prints
+each cell invocation's per-phase wall-clock from its `phases.json`. With `--baseline` it prints the per-test and total runtime delta, taking the
 baseline's entry stages from the registry *as of the baseline SHA* (a baseline from before
 #1992 has none, so its entry column reads `-` and its proxy is omitted). Model-quota use
 is **not recorded** by the ledger or the archive (the engine log carries no token counts;
