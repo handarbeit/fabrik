@@ -46,9 +46,7 @@ input** — no `paths:` filter and no dependency-graph test selection, by decisi
 sharded). The one carve-out (#2254, `adrs/2254-skip-go-suites-when-no-go-build-input-changed.md`):
 a PR whose every changed path is on the explicit skippable list in `scripts/ci/go-skip-paths.txt`
 skips the Go steps and still ends `success` (see the classifier bullet below); any doubt runs
-everything. **Not live until the workflow patch is applied:** the App cannot push `.github/workflows/`, so
-`ci.yml` stays ungated (every PR still runs the whole suite) until `notes/2254-ci-workflow.patch` is applied
-and deleted; remove this sentence then. `scripts/cut-release.sh` no longer runs
+everything. `scripts/cut-release.sh` no longer runs
 a local `go test -race ./...` (v0.0.84): CI already runs it on every PR, and on macOS a `-race`
 binary forking git flakes; `--skip-tests` is accepted and ignored.
 
