@@ -505,6 +505,7 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 			item.Status = v.NewStatus
 			item.Terminal = false
 			item.StatusEnteredAt = time.Now()
+			item.StatusAtGitHub = time.Time{} // the engine is the writer: daemon time is the move time
 			return StatusChanged | EngineWriteRecordedChanged
 		}
 		return EngineWriteRecordedChanged
@@ -1238,6 +1239,7 @@ func (s *Store) applyProjectV2ItemEdited(v ProjectV2ItemEdited) (Snapshot, []Cha
 		item.Status = v.NewStatus
 		item.Terminal = false
 		item.StatusEnteredAt = time.Now()
+		item.StatusAtGitHub = v.At // zero when the payload carried no updated_at
 		s.stampEligibility(item, before)
 	}
 	if reflect.DeepEqual(before, *item) {

@@ -2597,8 +2597,8 @@ type queuedRepoGroup struct {
 
 // groupQueuedByRepo collects board items in the holding (Queued) column and groups
 // them by owner/repo. Within each repo group, members are ordered deterministically —
-// ascending by (StatusEnteredAt, Number), so a member that has waited longest to enter
-// Queued goes first, with issue number as the tie-break (#1833, ADR-1833) — regardless
+// ascending by (queueOrderTime, Number), so a member that moved into Queued first
+// goes first, with issue number as the tie-break (#1833, ADR-1833, ADR-2246) — regardless
 // of what order the underlying board-state source (in-memory cache map iteration, or
 // direct GraphQL) hands items back in. This replaces the former flat cross-repo batch
 // (which anchored the whole set on batch[0]'s repo and would shove repo B's items into
@@ -2647,18 +2647,35 @@ func groupQueuedItemsByRepoUnordered(items []gh.ProjectItem, holdingStatus, defa
 	return groups
 }
 
+// queueOrderTime is the time a Queued member is ordered by (#2246, ADR-2246):
+// GitHub's own time for the move into the Status (atGitHub) when known, else the
+// time this process observed the move (observed). A GitHub time orders moves seen
+// together in one reconcile/probe pass by when they happened rather than by
+// listing order. Zero atGitHub is unknown (direct-GraphQL path, the engine's own
+// write, a payload without the time), never the epoch. One helper serves the
+// batch sort and the local API's train position so the two cannot drift.
+func queueOrderTime(atGitHub, observed time.Time) time.Time {
+	if !atGitHub.IsZero() {
+		return atGitHub
+	}
+	return observed
+}
+
 // sortQueuedGroupsByEntry sorts each group's items in place, ascending by
-// (StatusEnteredAt, Number). Number is unique within a repo, so the comparator is
+// (queueOrderTime, Number). Number is unique within a repo, so the comparator is
 // total — the same input permutation always produces the same output order
-// (#1833 AC1). A zero-value StatusEnteredAt (the direct-GraphQL GitHubAdapter path,
-// which has no cheap durable "entered Queued" signal to populate it with — see
-// ADR-1833) sorts before any non-zero time, so items sharing the zero value fall
-// through entirely to Number ordering: deterministic, just not wait-time-ordered.
+// (#1833 AC1). GitHub times have one-second resolution, so moves inside one
+// second tie and fall through to Number (ADR-2246). A zero-value order time (the
+// direct-GraphQL GitHubAdapter path, which has no cheap durable "entered Queued"
+// signal to populate it with — see ADR-1833) sorts before any non-zero time, so
+// items sharing the zero value fall through entirely to Number ordering:
+// deterministic, just not wait-time-ordered.
 func sortQueuedGroupsByEntry(groups []queuedRepoGroup) {
 	for i := range groups {
 		items := groups[i].items
 		sort.Slice(items, func(a, b int) bool {
-			ta, tb := items[a].StatusEnteredAt, items[b].StatusEnteredAt
+			ta := queueOrderTime(items[a].StatusAtGitHub, items[a].StatusEnteredAt)
+			tb := queueOrderTime(items[b].StatusAtGitHub, items[b].StatusEnteredAt)
 			if !ta.Equal(tb) {
 				return ta.Before(tb)
 			}
@@ -2764,7 +2781,7 @@ func (e *Engine) groupQueuedByRepoAndBase(items []gh.ProjectItem, holdingStatus,
 			})
 		}
 	}
-	// Sort within each (repo, base) partition, ascending by (StatusEnteredAt, Number) —
+	// Sort within each (repo, base) partition, ascending by (queueOrderTime, Number) —
 	// #1833. Applied after partitioning so ordering never crosses a partition boundary
 	// (ADR-1648 R4). Skippable only via mergeTrainQueueSortDisabledForTest, a narrow
 	// production-code seam that lets a sim scenario reproduce the pre-#1833 churn (an

@@ -57,7 +57,18 @@ type ItemState struct {
 	// meaning themselves. Reset to "now" on every fresh Store.Reset (bootstrap/
 	// restart) for every item, since there is no durable cross-restart source
 	// for "when did this item truly enter its current Status" — see ADR-1833.
+	// It is "first seen by this process" (attention, local API); the merge-train
+	// order uses StatusAtGitHub where known (ADR-2246).
 	StatusEnteredAt time.Time
+	// StatusAtGitHub is GitHub's own time for the move into the current Status:
+	// the Status single-select value's updatedAt from a listing or probe, or the
+	// projects_v2_item webhook's updated_at (#2246, ADR-2246). Zero means unknown
+	// (direct-GraphQL path, engine's own write, a payload without the time) and
+	// callers fall back to StatusEnteredAt. Assigned only inside the same
+	// "Status changed" guard as StatusEnteredAt, so it is once per transition and
+	// never moves backwards on a stale re-read. Second resolution: same-second
+	// moves tie.
+	StatusAtGitHub time.Time
 	// EligibilityChangedAt is the time the item's eligibility to proceed last
 	// changed while this process was watching: a fabrik:cruise, fabrik:yolo,
 	// fabrik:blocked or fabrik:paused label, or a stage:*:complete label, was
