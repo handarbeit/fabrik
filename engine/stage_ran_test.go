@@ -47,6 +47,22 @@ func TestStageRanOnEntry(t *testing.T) {
 		}
 	})
 
+	// Pins the accepted trade-off recorded in ADR 2220 ("Labels only"): an
+	// incomplete run (turn cap) that posted partial output leaves no complete
+	// label, yet its output comment counts as "ran", so a later comment goes to
+	// the comment path as it did before #2220. Changing this needs a durable
+	// "stage output complete" marker, which is a separate change.
+	t.Run("partial output without a complete label counts as ran", func(t *testing.T) {
+		item := gh.ProjectItem{
+			Number:   1,
+			Labels:   []string{"stage:Research:complete"},
+			Comments: []gh.Comment{{ID: "C1", Body: "🏭 **Fabrik — stage: Plan**\npartial output"}},
+		}
+		if !eng.stageRanOnEntry(item, stage, false, false) {
+			t.Error("a stage output comment counts as ran even without stage:Plan:complete (ADR 2220)")
+		}
+	})
+
 	t.Run("another stage's output comment is not", func(t *testing.T) {
 		item := gh.ProjectItem{Number: 1, Comments: []gh.Comment{{ID: "C1", Body: "🏭 **Fabrik — stage: Research**\noutput"}}}
 		if eng.stageRanOnEntry(item, stage, false, false) {
