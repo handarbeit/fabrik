@@ -101,6 +101,7 @@ func testGate(t *testing.T, env ...string) (*Gate, *fakeExec, *bytes.Buffer, *by
 		Sleep: func(time.Duration) {}, Now: time.Now, Self: os.Getpid(),
 		ProcCwd: func(context.Context, int) string { return "" },
 	}
+	g.Procs = newFakeProcs()
 	g.Scheduler = SerialScheduler{}
 	g.Preflights = DefaultPreflights()
 	return g, fe, &out, &errb

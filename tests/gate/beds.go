@@ -139,6 +139,7 @@ func (g *Gate) newBedGate(spec BedSpec, outLock, errLock *sync.Mutex) *Gate {
 		Out:           &prefixWriter{mu: outLock, w: g.Out, prefix: prefix},
 		Err:           &prefixWriter{mu: errLock, w: g.Err, prefix: prefix},
 		Exec:          g.Exec,
+		Procs:         g.Procs,
 		Env:           g.Env,
 		OnLeg:         g.OnLeg,
 		Sleep:         g.Sleep,
