@@ -49,6 +49,12 @@ description: >-
       (it talks to your running <code>fabrik</code> daemon, so the binary must be on your <code>PATH</code>) and start asking "what's on the board?", "why is #42 stuck?" right in your interactive session.
     </p>
 
+    <p style="margin-top: 12px; font-size: 0.95rem; color: var(--color-text-muted, #8b949e); max-width: 640px; margin-left: auto; margin-right: auto;">
+      New in v0.0.84: a Claude Code session can oversee a running daemon. It reads the daemon's state at no GitHub API cost, takes audited actions (promote, advance, set autonomy, revalidate) and receives pushed events. See
+      <a href="{{ '/USER_GUIDE' | relative_url }}#overseer-tools-fabrik-mcp">Overseer Tools</a>
+      and the <a href="{{ '/USER_GUIDE' | relative_url }}#install-the-fabrik-pm-plugin">PM plugin install</a>.
+    </p>
+
     <div class="hero-diagram">
       <div class="diagram-line">
         <span class="dl-icon">📋</span>
