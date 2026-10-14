@@ -131,7 +131,8 @@ func rewriteSelection(args []string, names []string) ([]string, error) {
 // the union, over the plan's cells that share the label, of each cell's
 // selection. It is taken from PlanCells' own output, never a hard-coded matrix,
 // so #1975's sparse plan changes the required set with no change here. Legs are
-// returned in plan order.
+// returned in plan order. The leg's own restart step (TestSwitchTrainMode) is
+// never required: see withoutRestartStep.
 func RequiredTests(live []string, cells []Cell) (legs []string, required map[string][]string, err error) {
 	required = map[string][]string{}
 	for _, c := range cells {
@@ -139,6 +140,7 @@ func RequiredTests(live []string, cells []Cell) (legs []string, required map[str
 		if err != nil {
 			return nil, nil, err
 		}
+		sel = withoutRestartStep(sel)
 		l := c.Label()
 		if _, ok := required[l]; !ok {
 			legs = append(legs, l)
@@ -151,6 +153,22 @@ func RequiredTests(live []string, cells []Cell) (legs []string, required map[str
 		required[l] = dedupSorted(ts)
 	}
 	return legs, required, nil
+}
+
+// withoutRestartStep drops the leg's restart step from a selection. RunLeg runs
+// TestSwitchTrainMode itself before the first phase (restartBed, outside the
+// recorder) and PlanPhases never puts it in a phase, so no invocation can record
+// an outcome for it: left in the required set it is "missing" for ever and the
+// baseline cell can never be complete (0.0.84 gate). Every other record on the
+// leg already depends on that restart having succeeded.
+func withoutRestartStep(sel []string) []string {
+	out := sel[:0:0]
+	for _, t := range sel {
+		if t != switchTrainModeTest {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 func dedupSorted(s []string) []string {
@@ -178,6 +196,7 @@ func ResumeCells(ctx context.Context, cells []Cell, live []string, ev *Evaluator
 		if err != nil {
 			return nil, 0, err
 		}
+		sel = withoutRestartStep(sel)
 		var todo []string
 		for _, t := range sel {
 			if ev.Eval(ctx, c.Label(), t).Status.Resolved() {
