@@ -22,10 +22,10 @@
 # enough for a release gate — while 4 showed zero SIGSEGVs across multiple
 # consecutive runs. So the ceiling here is 4, not 8, and this helper is now
 # shared by every invocation that exercises the same git-forking scenarios
-# under -race: scripts/sim/run.sh (SIM_PARALLEL's default), cut-release.sh
-# step 4's repo-wide `go test -race ./...` (which runs the identical
-# tests/sim package as part of `./...`), and the CI workflow's equivalent
-# step. One number, one algorithm, all three coherent — see #1677's own
+# under -race: scripts/sim/run.sh (SIM_PARALLEL's default, when SIM_RACE=1)
+# and the CI workflow's repo-wide step. (cut-release.sh step 4 ran a third
+# copy until v0.0.84, when the local race run was removed.) One number, one
+# algorithm, all coherent — see #1677's own
 # Research findings on why capping only some of the three left the others
 # free to reproduce the exact crash the cap exists to prevent.
 #

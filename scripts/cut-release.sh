@@ -3,7 +3,7 @@
 #
 # Usage:
 #   scripts/cut-release.sh v0.0.67
-#   scripts/cut-release.sh v0.0.67 --skip-tests       # skip race-tested suite (last-resort)
+#   scripts/cut-release.sh v0.0.67 --skip-tests       # no-op (the local race suite was removed)
 #   scripts/cut-release.sh v0.0.67 --no-doc-issue     # skip filing the doc-update issue
 #   scripts/cut-release.sh v0.0.67 --no-plugin-bump   # skip the marketplace plugin version auto-bumps
 #   scripts/cut-release.sh v0.0.67 --skip-integration=<reason>
@@ -28,10 +28,8 @@
 #   3. Sim suite + github wire-contract tests — unconditional pre-gate (R1/R2, #1454).
 #      Exports FABRIK_PREGATE_VERIFIED_SHA on success so step 5 doesn't pay for the
 #      identical pre-gate a second time (R5, #1624) — see export_pregate_verified_sha.
-#   4. go build + go test -race, -parallel capped via scripts/lib/parallel.sh
-#      (REQ3, #1677 — same cap scripts/sim/run.sh uses, since this run covers
-#      the same git-forking tests/sim package; skippable with --skip-tests,
-#      the pre-gate above never is)
+#   4. go build, plugin hash and shipped-file table. No local go test -race:
+#      CI runs it on every PR, and on macOS it only flaked (removed in v0.0.84)
 #   5. Live e2e integration gate — mandatory by default; --skip-integration=<reason> is the
 #      one sanctioned, loud, release-notes-recorded escape hatch (R2, #1454). Always
 #      passes --clean (REQ1, #1677) to reset the shared bed first — a release cut and
@@ -90,9 +88,6 @@ BOT_EMAIL="handarbeit@handarbeit.io"
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
-
-# shellcheck source=lib/parallel.sh
-source "$REPO_ROOT/scripts/lib/parallel.sh"
 
 step() { printf '\n\033[1;34m▶ %s\033[0m\n' "$*"; }
 ok()   { printf '  \033[1;32m✓\033[0m %s\n' "$*"; }
@@ -393,8 +388,7 @@ PAT_OWNER="$(GH_TOKEN="$FABRIK_TOKEN" gh api user --jq .login)"
 ok "FABRIK_TOKEN authenticated as @$BOT_LOGIN"
 
 # ─── 3. sim + wire-contract pre-gate (unconditional — R1/R2, #1454) ──────────
-# Unlike the full go test -race ./... below, this step is NEVER skippable —
-# not even by --skip-tests. It's the same free, fast pre-gate
+# This step is NEVER skippable. It's the same free, fast pre-gate
 # scripts/e2e/run.sh runs ahead of its own live suite (see the gate runner's
 # RunPregate in tests/gate/pregate.go), re-run here so a release cut through this script pays the
 # same "cheap layers first" ordering even if someone hand-invokes
@@ -448,27 +442,15 @@ go run ./tools/gen-shipped-files -add-current || die "gen-shipped-files -add-cur
 go run ./tools/gen-shipped-files -check || die "$SHIPPED_FILES_FILE does not cover every release and the current embed"
 ok "$SHIPPED_FILES_FILE covers every release and the current embed"
 
+# No local `go test -race ./...` (dropped for v0.0.84). CI's "Test and vet" job
+# runs the whole module under -race on Linux for every PR, and every landing is
+# CI-checked (the merge train's trial or fast path). Here, on macOS, a -race
+# binary forking git dies or hangs intermittently between fork and exec, so the
+# local run only added a ~20-minute flake source. The sim + wire-contract
+# pre-gate above and the live gate below still run. --skip-tests is accepted
+# and ignored so existing invocations keep working.
 if [ "$SKIP_TESTS" -eq 1 ]; then
-  warn "--skip-tests was passed; go test -race ./... was NOT run (the sim + wire-contract pre-gate above still ran unconditionally)"
-else
-  step "Race-tested suite"
-  # -parallel capped (REQ3, #1677): this repo-wide invocation includes the
-  # same git-forking tests/sim package that scripts/sim/run.sh's own
-  # SIM_PARALLEL caps — left uncapped here, it inherits GOMAXPROCS (28 on
-  # the host that produced #1677) and reliably reproduces the TSan
-  # fork/exec SIGSEGV #1624's cap was meant to prevent, just via a
-  # different entry point. FABRIK_RACE_PARALLEL is a narrow override (for
-  # experimentation); default_race_parallel (scripts/lib/parallel.sh) is
-  # the same helper scripts/sim/run.sh uses, so the two never drift into
-  # incoherent caps for overlapping concurrency. -timeout matches
-  # scripts/sim/run.sh's own SIM_TIMEOUT rationale — see that script's
-  # header comment.
-  RACE_PARALLEL="${FABRIK_RACE_PARALLEL:-$(default_race_parallel)}"
-  if ! go test -race -parallel "$RACE_PARALLEL" -timeout 20m ./... >/tmp/cut-release-test.log 2>&1; then
-    tail -40 /tmp/cut-release-test.log >&2
-    die "go test -race ./... failed (full log: /tmp/cut-release-test.log)"
-  fi
-  ok "all tests pass with -race (-parallel $RACE_PARALLEL)"
+  warn "--skip-tests has no effect any more: the local race suite was removed (CI runs it on every PR)"
 fi
 
 # Capture the previous release tag now, before this release's tag exists,
@@ -480,8 +462,7 @@ PREV_TAG="$(git describe --tags --abbrev=0 --match='v*' 2>/dev/null || true)"
 # The live suite is the only layer that exercises real Claude, real review
 # bots, and real GitHub wire behaviour — nothing else in this pipeline can
 # substitute for it, and it is never retired or reduced (see
-# adrs/1454-sim-pre-gate-not-replacement.md). So unlike --skip-tests above,
-# there is no quiet default here: either the suite runs, or a human
+# adrs/1454-sim-pre-gate-not-replacement.md). So there is no quiet default here: either the suite runs, or a human
 # explicitly said why not, and that "why not" ships in the release notes
 # where anyone reading them can see it. A --skip-integration that silently
 # produced an unvalidated release was rejected outright (R2's option (a) vs

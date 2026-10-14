@@ -42,9 +42,9 @@ recorded per test in `tests/e2e/registry/registry.json` (ADR-1933) and enforced 
 
 CI's layer-1 `go test` step runs the **whole module on every PR** — no `paths:` filter
 and no dependency-graph test selection, by decision (`adrs/1857-no-per-pr-test-selection.md`,
-which also records why `tests/sim/simgh` is not sharded). The release gate runs the full
-suite by default; `scripts/cut-release.sh`'s `--skip-tests` is a last-resort escape hatch
-that skips the `go test -race ./...` step (with a warning), never a narrowed run.
+which also records why `tests/sim/simgh` is not sharded). `scripts/cut-release.sh` no longer runs
+a local `go test -race ./...` (v0.0.84): CI already runs it on every PR, and on macOS a `-race`
+binary forking git flakes; `--skip-tests` is accepted and ignored.
 
 ## Documentation bundle (docs/llms-full.txt)
 
