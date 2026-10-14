@@ -1,0 +1,160 @@
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 18a546a3..c9265c22 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -23,8 +23,23 @@ jobs:
+     steps:
+       - name: Checkout
+         uses: actions/checkout@v7
++        with:
++          fetch-depth: 2
++
++      # #2254, ADR-2254 (amending ADR-1857): decide whether this diff can affect
++      # any Go build or test input. If every changed path is skippable the Go
++      # steps below are skipped by their `if:` and the job still ends `success`
++      # under the same name — a step-level early exit, never a workflow `paths:`
++      # filter, which would leave the required checks pending forever. Any doubt
++      # (unreadable diff, unknown path, not a merge commit) runs everything: the
++      # `!= 'true'` conditions also run everything if this step's output is missing.
++      # fetch-depth 2 gives the synthetic PR merge commit its base parent (HEAD^1).
++      - name: Classify the diff (skip Go suites when no Go build input changed)
++        id: classify
++        run: bash scripts/ci/classify-diff.sh
+ 
+       - name: Set up Go
++        if: steps.classify.outputs.skip != 'true'
+         uses: actions/setup-go@v7
+         with:
+           go-version-file: go.mod
+@@ -33,6 +48,7 @@ jobs:
+       # contributors to run locally (`gofmt -s -d .` / `gofmt -s -w .`).
+       # Cheapest check in the job (no build), so it runs first.
+       - name: gofmt
++        if: steps.classify.outputs.skip != 'true'
+         run: |
+           files=$(gofmt -s -l .)
+           if [ -n "$files" ]; then
+@@ -47,9 +63,11 @@ jobs:
+       # `go vet ./...` matches no packages under tests/e2e, so that code is
+       # never vetted at all.
+       - name: go vet
++        if: steps.classify.outputs.skip != 'true'
+         run: go vet -tags e2e ./...
+ 
+       - name: Test hygiene lint
++        if: steps.classify.outputs.skip != 'true'
+         run: |
+           if grep -rn '"/tmp/' --include="*_test.go" .; then
+             echo "ERROR: hardcoded /tmp/ paths found in test files. Use t.TempDir() instead."
+@@ -61,6 +79,7 @@ jobs:
+           fi
+ 
+       - name: go test
++        if: steps.classify.outputs.skip != 'true'
+         # -parallel capped via scripts/lib/parallel.sh's default_race_parallel
+         # (REQ4, #1677): this invocation includes the same git-forking
+         # tests/sim package that scripts/sim/run.sh's own SIM_PARALLEL caps
+@@ -84,6 +103,7 @@ jobs:
+       # package code) and exits without executing a scenario or making any
+       # network call. There is no TestMain, so nothing runs. Takes <1s.
+       - name: compile e2e suite (not run)
++        if: steps.classify.outputs.skip != 'true'
+         run: go test -tags e2e -run '^$' ./tests/e2e/...
+ 
+       # The live-gate runner (scripts/e2e/run.sh is a shim over tests/gate,
+@@ -103,6 +123,7 @@ jobs:
+       # helper directly: R4 refusals, live own group, post-exit grandchild,
+       # foreign leader.
+       - name: killgroup helper test (#1957)
++        if: steps.classify.outputs.killgroup != 'false'
+         run: bash scripts/lib/killgroup_test.sh
+ 
+       # cut-release.sh's flag parsing — in particular --skip-integration's
+@@ -111,6 +132,7 @@ jobs:
+       # bed, network, git remote, or publish path touched; see that script's
+       # own dispatch-guard comment for why sourcing it here is safe.
+       - name: cut-release flag/gate regression test (#1454)
++        if: steps.classify.outputs.cut_release != 'false'
+         run: bash scripts/cut_release_gate_test.sh
+ 
+       # ADR citation integrity. ADRs are numbered after their originating
+@@ -122,6 +144,7 @@ jobs:
+       # sources rather than verifying any claim. Pure text/filesystem check —
+       # no build, no network.
+       - name: ADR reference integrity
++        if: steps.classify.outputs.adr_refs != 'false'
+         run: bash scripts/check-adr-references.sh
+ 
+   # The suite again, in a worker-shaped environment (#2027, ADR-2027): dummy
+@@ -136,9 +159,17 @@ jobs:
+     steps:
+       - name: Checkout
+         uses: actions/checkout@v7
++        with:
++          fetch-depth: 2
++      # See the classify step in the `test` job (#2254, ADR-2254).
++      - name: Classify the diff (skip Go suites when no Go build input changed)
++        id: classify
++        run: bash scripts/ci/classify-diff.sh
+       - name: Set up Go
++        if: steps.classify.outputs.skip != 'true'
+         uses: actions/setup-go@v7
+         with:
+           go-version-file: go.mod
+       - name: go test (worker-shaped env)
++        if: steps.classify.outputs.skip != 'true'
+         run: bash scripts/ci/worker-shaped-test.sh
+diff --git a/tests/ciskip/workflow_test.go b/tests/ciskip/workflow_test.go
+new file mode 100644
+index 00000000..9bb40fa9
+--- /dev/null
++++ b/tests/ciskip/workflow_test.go
+@@ -0,0 +1,48 @@
++package ciskip
++
++import (
++	"os"
++	"path/filepath"
++	"regexp"
++	"strings"
++	"testing"
++)
++
++// TestWorkflowShape pins the properties of .github/workflows/ci.yml that make
++// the skip safe (FR-003, FR-010, SC-006): required-check names unchanged, no
++// workflow-level path filter, and every Go step gated on the classifier.
++func TestWorkflowShape(t *testing.T) {
++	t.Parallel()
++	b, err := os.ReadFile(filepath.Join(repoRoot(t), ".github", "workflows", "ci.yml"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	ci := string(b)
++
++	for _, name := range []string{"name: Test and vet", "name: Test in a worker-shaped environment"} {
++		if !strings.Contains(ci, "    "+name+"\n") {
++			t.Errorf("required-check job name %q must not change", name)
++		}
++	}
++	if regexp.MustCompile(`(?m)^\s*paths(-ignore)?:`).MatchString(ci) {
++		t.Error("ci.yml must not use a workflow-level paths:/paths-ignore: filter; a filtered workflow leaves required checks pending")
++	}
++	if got := strings.Count(ci, "id: classify"); got != 2 {
++		t.Errorf("both Go jobs need a classify step, found %d", got)
++	}
++	if got := strings.Count(ci, "fetch-depth: 2"); got != 2 {
++		t.Errorf("both Go jobs need fetch-depth: 2 for the merge commit's base parent, found %d", got)
++	}
++
++	// Every step other than checkout and classify is gated on a classifier output.
++	steps := strings.Split(ci, "\n      - name: ")
++	for _, st := range steps[1:] {
++		name, _, _ := strings.Cut(st, "\n")
++		if name == "Checkout" || strings.HasPrefix(name, "Classify the diff") {
++			continue
++		}
++		if !strings.Contains(st, "if: steps.classify.outputs.") {
++			t.Errorf("step %q is not gated on the classifier; a skipped job would still run it", name)
++		}
++	}
++}
