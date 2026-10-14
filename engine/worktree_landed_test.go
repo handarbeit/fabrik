@@ -136,3 +136,44 @@ func TestWorktreeAdoptionOptions_PRBase(t *testing.T) {
 		}
 	})
 }
+
+// A restart leaves the cache without Merged (only a rich PR fetch sets it), so
+// a squash/rebase-merged linked PR must be recognised by one live read, shared
+// with the base probe.
+func TestWorktreeAdoptionOptions_LinkedPRMergedFoundLiveWhenCacheBlank(t *testing.T) {
+	var calls atomic.Int32
+	client := &mockGitHubClient{fetchPRDetailsFn: func(owner, repo string, n int) (*gh.PRDetails, error) {
+		calls.Add(1)
+		if n != 50 {
+			t.Errorf("FetchPRDetails(#%d), want the linked #50", n)
+		}
+		return &gh.PRDetails{Number: 50, State: "closed", Merged: true, HeadSHA: "5ca1ab"}, nil
+	}}
+	e := testEngine(t, client, &mockClaudeInvoker{})
+	item := gh.ProjectItem{Number: 5, Repo: "owner/repo", LinkedPRNumber: 50, LinkedPRHeadSHA: "5ca1ab"}
+
+	eo := landedOptsFor(t, e, item)
+	if calls.Load() != 0 {
+		t.Fatalf("building the options made %d GitHub calls, want 0 (lazy)", calls.Load())
+	}
+	if got := eo.landedPRHeads(); len(got) != 1 || got[0] != "5ca1ab" {
+		t.Errorf("landed heads = %v, want [5ca1ab]", got)
+	}
+	if _, ok := eo.prBaseProbe(); ok {
+		t.Error("probe should be unknown for a merged PR")
+	}
+	if calls.Load() != 1 {
+		t.Errorf("FetchPRDetails calls = %d, want 1 (shared read)", calls.Load())
+	}
+}
+
+func TestWorktreeAdoptionOptions_LinkedPRLiveReadErrorYieldsNothing(t *testing.T) {
+	client := &mockGitHubClient{fetchPRDetailsFn: func(string, string, int) (*gh.PRDetails, error) {
+		return nil, fmt.Errorf("boom")
+	}}
+	e := testEngine(t, client, &mockClaudeInvoker{})
+	eo := landedOptsFor(t, e, gh.ProjectItem{Number: 5, Repo: "owner/repo", LinkedPRNumber: 50})
+	if got := eo.landedPRHeads(); len(got) != 0 {
+		t.Errorf("landed heads = %v, want none", got)
+	}
+}

@@ -13,8 +13,10 @@ import (
 // timeouts and fails soft — an error means "unknown", never a verdict.
 //
 //   - Landed heads (R2): the linked PR's head when the cached state says it is
-//     merged, and the head of the item's fabrik:credited-pr:<N> PR when a live
-//     read shows it merged. Cache lag can only make R2 miss, which falls back
+//     merged, else when one live read of the linked PR shows it merged (the
+//     cache only learns Merged from a rich PR fetch, so it is blank after a
+//     restart), and the head of the item's fabrik:credited-pr:<N> PR when a
+//     live read shows it merged. A failed read means unknown, which falls back
 //     to the ancestry check (R1): a missed skip, never data loss.
 //   - PR base (R3): the base of the item's open linked PR, for the warning only.
 func (e *Engine) worktreeAdoptionOptions(item gh.ProjectItem) []EnsureWorktreeOption {
@@ -36,11 +38,41 @@ func (e *Engine) worktreeAdoptionOptions(item gh.ProjectItem) []EnsureWorktreeOp
 		return st.LinkedPR.Number, st.LinkedPR.State, st.LinkedPR.Merged, st.LinkedPR.HeadSHA
 	}
 
+	// linkedLive reads the item's linked PR live, at most once per option set
+	// (both callbacks share it). The cache's Merged/State come only from a rich
+	// PRDetails fetch, so after a restart they are unset even for a merged PR;
+	// the cached head alone cannot say "merged". Nil means unknown.
+	var (
+		linkedRead bool
+		linkedPR   *gh.PRDetails
+	)
+	linkedLive := func(number int) *gh.PRDetails {
+		if linkedRead {
+			return linkedPR
+		}
+		linkedRead = true
+		if number == 0 {
+			return nil
+		}
+		pr, err := e.client.FetchPRDetails(owner, repo, number)
+		if err != nil {
+			e.logf(item.Number, "worktree", "warn: could not read linked PR #%d (%v) — treating its state as unknown\n", number, err)
+			return nil
+		}
+		linkedPR = pr
+		return linkedPR
+	}
+
 	landedHeads := func() []string {
 		var heads []string
 		linkedNum, _, merged, head := cachedLinked()
+		if linkedNum == 0 {
+			linkedNum = item.LinkedPRNumber
+		}
 		if merged && head != "" {
 			heads = append(heads, head)
+		} else if pr := linkedLive(linkedNum); pr != nil && pr.Merged && pr.HeadSHA != "" {
+			heads = append(heads, pr.HeadSHA)
 		}
 		if credited, ok := creditedPRFromLabel(item); ok && credited != linkedNum {
 			pr, err := e.client.FetchPRDetails(owner, repo, credited)
@@ -62,8 +94,8 @@ func (e *Engine) worktreeAdoptionOptions(item gh.ProjectItem) []EnsureWorktreeOp
 		if number == 0 || merged || state == "closed" {
 			return "", false
 		}
-		pr, err := e.client.FetchPRDetails(owner, repo, number)
-		if err != nil || pr == nil || pr.State != "open" || pr.BaseRef == "" {
+		pr := linkedLive(number)
+		if pr == nil || pr.State != "open" || pr.BaseRef == "" {
 			return "", false
 		}
 		return pr.BaseRef, true
