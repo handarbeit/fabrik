@@ -11377,7 +11377,8 @@ Shallow query: ~16 points/poll. Deep fetch: ~2 points per active item. Typical p
 ### Worktree Setup
 
 Each issue gets `.fabrik/worktrees/issue-<N>` on branch `fabrik/issue-<N>`:
-- **First run**: Created from `origin/main`, rebased onto latest
+- **First run**: Created from `origin/main`, rebased onto latest. When the local branch is missing but `origin/fabrik/issue-<N>` exists (lost local copy, branch pushed elsewhere), the worktree starts from that branch instead, so unmerged work is kept and pushes keep a valid lease (#1916)
+- **Already-landed origin branch is not adopted** (#1917, ADR 1917): after fetching the branch, adoption is declined and the worktree forks from base (one log line says why) when the branch tip is an ancestor of `origin/<base>` (every commit is on base), or when the tip equals the head SHA of a merged PR the engine already knows (the item's linked PR, or its `fabrik:credited-pr:<N>` PR; this catches squash and rebase merges). An unknown merged-PR head falls back to the ancestry check only. Any git error in the ancestry check adopts the branch as before (adopting is lossless; forking on doubt would reintroduce the stale-lease loop). When an adopted branch's open PR targets a base other than the item's resolved base, a `WARNING` naming both bases is logged; adoption is unchanged and the stage rebases
 - **Retry** (`attempted=true`): Returned as-is — no rebase, preserves Claude's context
 - **Rebase conflicts**: Silently aborted (`git rebase --abort`) — Claude works from current base
 
