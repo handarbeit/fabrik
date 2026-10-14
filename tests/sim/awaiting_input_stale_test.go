@@ -106,14 +106,13 @@ func TestFailedPauseRemovalAtResumeRetriesNextPoll(t *testing.T) {
 	}, 1, ghfault.ServerError())
 
 	RunPolls(t, env, 1)
-	if hasLabel(IssueLabels(t, env, num), "fabrik:paused") {
-		// Fault fired (or not yet resumed): the item must still be resumable.
-		if got := env.Claude.CommentCallCount("Specify"); got != 0 {
-			t.Fatalf("comment processed (%d calls) although the pause could not be lifted", got)
-		}
-	}
 	if env.Sim.Faults().FiredCount("RemoveLabelFromIssue") != 1 {
 		t.Fatalf("fault did not fire; the scenario is vacuous")
+	}
+	// The fault fired, so the pause could not be lifted: the comment must not
+	// have been processed, whatever the labels look like now.
+	if got := env.Claude.CommentCallCount("Specify"); got != 0 {
+		t.Fatalf("comment processed (%d calls) although the pause could not be lifted", got)
 	}
 
 	WaitForLabelAbsent(t, env, num, "fabrik:awaiting-input", 80)
