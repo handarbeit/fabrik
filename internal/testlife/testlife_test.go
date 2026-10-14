@@ -5,6 +5,7 @@ package testlife
 import (
 	"bufio"
 	"bytes"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -233,11 +234,18 @@ func TestGuard_ExitsWhenOwnerPIDIsRecycled(t *testing.T) {
 
 // Acceptance 3: the ceiling names itself in the exit message.
 func TestGuard_CeilingExitsWithClearMessage(t *testing.T) {
-	h := startHelper(t, "guard", CeilingEnv+"=400ms")
+	dump := filepath.Join(t.TempDir(), "dump.txt")
+	h := startHelper(t, "guard", CeilingEnv+"=400ms", DumpEnv+"="+dump)
 	if !h.exited(10 * time.Second) {
 		t.Fatal("helper outlived its ceiling")
 	}
 	msg := h.stderrString()
+	if !strings.Contains(msg, DumpHeaderPrefix) || !strings.Contains(msg, "goroutine dump written to "+dump) {
+		t.Fatalf("ceiling exit carries no goroutine dump: %q", msg)
+	}
+	if b, err := os.ReadFile(dump); err != nil || !strings.Contains(string(b), "goroutine ") {
+		t.Fatalf("dump file = %q, %v", b, err)
+	}
 	if !strings.Contains(msg, "hard wall-time ceiling of 400ms") || !strings.Contains(msg, CeilingEnv) {
 		t.Fatalf("exit message does not name the ceiling: %q", msg)
 	}
@@ -392,6 +400,7 @@ func (r *recorder) opts(o Options) Options {
 	o.Kill = func() { r.kills <- 1 }
 	o.Stderr = &bytes.Buffer{}
 	o.KillGrace = 150 * time.Millisecond
+	o.DisableDump = true // the dump tests build their own Options; do not litter the temp dir
 	return o
 }
 
@@ -691,4 +700,137 @@ func errorsAs(err error, target **exec.ExitError) bool {
 		*target = ee
 	}
 	return ok
+}
+
+// dumpOpts is the ceiling trigger with a dump-capable recorder.
+func dumpOpts(t *testing.T, r *recorder) (Options, *bytes.Buffer, string) {
+	t.Helper()
+	var buf bytes.Buffer
+	o := r.opts(bailTriggers()["ceiling"](t))
+	o.DisableDump = false
+	o.Stderr = &buf
+	o.DumpPath = filepath.Join(t.TempDir(), "dump.txt")
+	return o, &buf, o.DumpPath
+}
+
+// blocked is a goroutine the dump must show, parked in a recognisable function.
+func testlifeBlockedGoroutineMarker(release <-chan struct{}) { <-release }
+
+// R3 (#2247): the ceiling writes every goroutine's stack to a file and stderr
+// before it exits, and the message names the file.
+func TestBail_CeilingWritesGoroutineDumpBeforeExit(t *testing.T) {
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	go testlifeBlockedGoroutineMarker(release)
+
+	r := newRecorder(false)
+	o, buf, path := dumpOpts(t, r)
+	exited := make(chan struct{})
+	inner := o.Exit
+	o.Exit = func(c int) {
+		// The dump must already be on disk when exit is requested.
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("dump not written before exit: %v", err)
+		}
+		close(exited)
+		inner(c)
+	}
+	stop := Guard(o)
+	defer stop()
+	select {
+	case <-exited:
+	case <-time.After(10 * time.Second):
+		t.Fatal("ceiling never fired")
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, got := range map[string]string{"file": string(b), "stderr": buf.String()} {
+		if !strings.Contains(got, DumpHeaderPrefix) || !strings.Contains(got, "testlifeBlockedGoroutineMarker") {
+			t.Errorf("%s lacks the header or the blocked goroutine:\n%.400s", name, got)
+		}
+	}
+	if !strings.Contains(buf.String(), "goroutine dump written to "+path) {
+		t.Errorf("message does not name the dump path: %q", buf.String()[:min(len(buf.String()), 400)])
+	}
+}
+
+// The neutralisation seam: with the dump disabled nothing is written, so the
+// test above is non-vacuous.
+func TestBail_DisableDumpWritesNothing(t *testing.T) {
+	r := newRecorder(false)
+	o, buf, path := dumpOpts(t, r)
+	o.DisableDump = true
+	stop := Guard(o)
+	defer stop()
+	<-r.exits
+	if _, err := os.Stat(path); err == nil {
+		t.Fatal("dump file written with the dump disabled")
+	}
+	if strings.Contains(buf.String(), DumpHeaderPrefix) {
+		t.Fatal("dump on stderr with the dump disabled")
+	}
+}
+
+// A dump that does not finish inside its budget is skipped; exit still happens
+// and the self-kill grace is not extended.
+func TestBail_SlowDumpIsSkippedAndExitStillHappens(t *testing.T) {
+	r := newRecorder(false)
+	o, buf, path := dumpOpts(t, r)
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	o.Profile = func(io.Writer) error { <-release; return nil }
+	o.DumpBudget = 50 * time.Millisecond
+	o.KillGrace = time.Second
+	stop := Guard(o)
+	defer stop()
+	select {
+	case <-r.exits:
+	case <-time.After(10 * time.Second):
+		t.Fatal("a stuck dump blocked the exit")
+	}
+	if !strings.Contains(buf.String(), "goroutine dump skipped") {
+		t.Fatalf("no skip note: %q", buf.String())
+	}
+	if _, err := os.Stat(path); err == nil {
+		t.Fatal("dump file written although the profile never finished")
+	}
+}
+
+// An unwritable path is reported and ignored.
+func TestBail_UnwritableDumpPathStillExits(t *testing.T) {
+	r := newRecorder(false)
+	o, buf, _ := dumpOpts(t, r)
+	o.DumpPath = filepath.Join(t.TempDir(), "no-such-dir", "dump.txt")
+	stop := Guard(o)
+	defer stop()
+	select {
+	case <-r.exits:
+	case <-time.After(10 * time.Second):
+		t.Fatal("exit never requested")
+	}
+	if !strings.Contains(buf.String(), "goroutine dump not written") {
+		t.Fatalf("failure not reported: %q", buf.String())
+	}
+	if !strings.Contains(buf.String(), DumpHeaderPrefix) {
+		t.Fatal("stderr dump should still be attempted")
+	}
+}
+
+// The default path is in the temp dir, never the working directory, and DumpEnv
+// overrides it.
+func TestDumpPath_DefaultsOutsideWorkingDirectory(t *testing.T) {
+	o := Options{Getenv: noEnv, Name: "tests/sim"}
+	got := o.dumpPath()
+	if filepath.Dir(got) != filepath.Clean(os.TempDir()) {
+		t.Fatalf("default dump path %q is not in %q", got, os.TempDir())
+	}
+	if !strings.Contains(filepath.Base(got), "tests_sim-goroutines-") {
+		t.Fatalf("unexpected name %q", got)
+	}
+	o.Getenv = func(k string) string { return map[string]string{DumpEnv: "/x/y.txt"}[k] }
+	if o.dumpPath() != "/x/y.txt" {
+		t.Fatal("DumpEnv ignored")
+	}
 }

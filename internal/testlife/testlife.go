@@ -31,16 +31,29 @@
 // KillGrace, so an exit that blocks or spins (seen under -race) cannot leave an
 // orphan.
 //
+// Goroutine dump (#2247): after the watchdog is armed and the reason printed,
+// the bail path writes every goroutine's stack (runtime/pprof goroutine profile,
+// debug=2) to a file (DumpEnv, else the temp directory — never the working
+// directory, which is the package source tree) and then to stderr, so a hang and
+// a merely slow run no longer look the same. The dump is built in its own
+// goroutine and waited for at most DumpBudget (inside KillGrace): a stop-the-world
+// profile under a stuck runtime is skipped, never allowed to delay the exit. A
+// failed dump is reported and ignored.
+//
 // The package is a leaf: stdlib plus internal/sessionreap, internal/workerenv
 // and internal/workerowner. It never signals another process.
 package testlife
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime/pprof"
 	"strconv"
 	"strings"
 	"sync"
@@ -70,6 +83,14 @@ const (
 	// re-executing parent.
 	ParentEnv = "SIM_TEST_PARENT"
 
+	// DumpEnv names the file the goroutine dump is written to when the bail path
+	// fires (#2247). Unset: a file in the temp directory.
+	DumpEnv = "SIM_TEST_DUMP_FILE"
+
+	// DumpHeaderPrefix begins the first line of every dump, so a reader of the
+	// output stream can find it.
+	DumpHeaderPrefix = "=== testlife goroutine dump"
+
 	// ExitCode is the process exit status for every watchdog exit.
 	ExitCode = 2
 
@@ -78,6 +99,7 @@ const (
 	defaultKillGrace    = 5 * time.Second
 	defaultResolveEvery = 500 * time.Millisecond
 	defaultResolveFor   = 30 * time.Second
+	defaultDumpBudget   = 3 * time.Second
 )
 
 // Options configures Guard. The zero value is production behaviour.
@@ -92,13 +114,17 @@ type Options struct {
 
 	KillGrace time.Duration // 0: 5s; how long exit may take before the process kills itself
 
+	DumpPath   string        // "": DumpEnv, else <tmp>/<name>-goroutines-<pid>.txt
+	DumpBudget time.Duration // 0: 3s (never more than 3/5 of KillGrace); how long the bail path waits for the dump
+
 	// Seams. Zero values use the real process, environment and clock.
 	Getenv  func(string) string
 	Exit    func(code int)
 	Kill    func()     // forced termination of this process; nil: SIGKILL to os.Getpid()
 	Getppid func() int // nil: os.Getppid
 	Stderr  io.Writer
-	Start   func(pid int) string // process start-time token; nil: sessionreap.StartToken
+	Start   func(pid int) string  // process start-time token; nil: sessionreap.StartToken
+	Profile func(io.Writer) error // writes the goroutine dump; nil: pprof goroutine profile, debug=2
 
 	// Neutralisation seams: a test sets one to prove the mechanism it covers is
 	// load-bearing. Production never sets them.
@@ -108,6 +134,7 @@ type Options struct {
 
 	DisableKillFallback    bool
 	DisableMainParentWatch bool
+	DisableDump            bool
 }
 
 // selfKill terminates this process and only this process: os.Process.Kill is
@@ -130,6 +157,87 @@ func (o Options) stderr() io.Writer {
 		return o.Stderr
 	}
 	return os.Stderr
+}
+
+// dumpPath is where the goroutine dump goes. Never the working directory: a
+// test binary's cwd is its package directory, and a file there would dirty the
+// tree the gate records a pass against.
+func (o Options) dumpPath() string {
+	if o.DumpPath != "" {
+		return o.DumpPath
+	}
+	if v := strings.TrimSpace(o.getenv(DumpEnv)); v != "" {
+		return v
+	}
+	name := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '.':
+			return r
+		}
+		return '_'
+	}, o.name())
+	return filepath.Join(os.TempDir(), fmt.Sprintf("%s-goroutines-%d.txt", name, os.Getpid()))
+}
+
+// dumpBudget is how long the bail path waits for the dump. It stays inside the
+// self-kill grace so the dump can never extend it.
+func (o Options) dumpBudget() time.Duration {
+	b := dur(o.DumpBudget, defaultDumpBudget)
+	if !o.DisableKillFallback {
+		if max := dur(o.KillGrace, defaultKillGrace) * 3 / 5; b > max {
+			b = max
+		}
+	}
+	return b
+}
+
+// dump writes the goroutine dump to a file and then stderr (#2247). Every
+// failure is reported and swallowed: the caller is about to exit and must.
+func (o Options) dump(reason string) {
+	if o.DisableDump {
+		return
+	}
+	path := o.dumpPath()
+	profile := o.Profile
+	if profile == nil {
+		profile = func(w io.Writer) error {
+			p := pprof.Lookup("goroutine")
+			if p == nil {
+				return errors.New("no goroutine profile")
+			}
+			return p.WriteTo(w, 2)
+		}
+	}
+	type result struct {
+		data []byte
+		err  error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		var buf bytes.Buffer
+		fmt.Fprintf(&buf, "%s (%s) pid %d: %s ===\n", DumpHeaderPrefix, o.name(), os.Getpid(), reason)
+		err := profile(&buf)
+		ch <- result{buf.Bytes(), err}
+	}()
+	budget := time.NewTimer(o.dumpBudget())
+	defer budget.Stop()
+	var r result
+	select {
+	case r = <-ch:
+	case <-budget.C:
+		fmt.Fprintf(o.stderr(), "%s: goroutine dump skipped: not produced within %s\n", o.name(), o.dumpBudget())
+		return
+	}
+	if r.err != nil {
+		fmt.Fprintf(o.stderr(), "%s: goroutine dump incomplete: %v\n", o.name(), r.err)
+	}
+	if err := os.WriteFile(path, r.data, 0o644); err != nil {
+		fmt.Fprintf(o.stderr(), "%s: goroutine dump not written to %s: %v\n", o.name(), path, err)
+	} else {
+		fmt.Fprintf(o.stderr(), "%s: goroutine dump written to %s\n", o.name(), path)
+	}
+	// File first: stderr may be a broken pipe once the parent is gone.
+	_, _ = o.stderr().Write(r.data) // a broken pipe changes nothing: we are exiting
 }
 
 func (o Options) name() string {
@@ -180,7 +288,9 @@ func Guard(o Options) (stop func()) {
 				}
 				wd = time.AfterFunc(dur(o.KillGrace, defaultKillGrace), kill)
 			}
-			fmt.Fprintf(o.stderr(), "%s: %s\n", o.name(), fmt.Sprintf(format, args...))
+			reason := fmt.Sprintf(format, args...)
+			fmt.Fprintf(o.stderr(), "%s: %s\n", o.name(), reason)
+			o.dump(reason)
 			exit(ExitCode)
 			if wd != nil {
 				wd.Stop()
