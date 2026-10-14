@@ -569,6 +569,14 @@ is why `scripts/sim/run.sh` now also passes an explicit `-timeout
 has room to actually finish instead of looking nonviable against a hidden
 default.
 
+**The ceiling is now per OS (#2228, ADR 2228).** The 4 above was measured on
+macOS. On Linux (GitHub Actions `ubuntu-latest`, x86-64, 4 vCPU; 15 runs, five
+each at 4, 8 and 16) every `-race` run was clean at every level and the wall
+time fell from ~405 s at 4 to ~182 s at 16, so `default_race_parallel` is
+`min(cores, 16)` on Linux and `min(cores, 4)` elsewhere. The crash is treated
+as macOS-specific; CI re-validates the Linux value on every PR. Sharding the
+sim across CI jobs was measured and rejected in the same ADR.
+
 **This now also applies to a bare `go test -race ./...`** (CI's own
 `go test` step, REQ3/REQ4, #1677; `scripts/cut-release.sh` step 4 ran one too
 until v0.0.84, when the local race run was removed) — the previous version of this section stated the cap did *not*

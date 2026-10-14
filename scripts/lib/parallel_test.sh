@@ -24,6 +24,11 @@ check() { # name expected os getconf-output nproc-output
 }
 
 check "darwin 28 cores"        4 Darwin 28 ""
+check "linux 4 cores (CI)"    16 Linux 4 ""
+check "linux 28 cores"        16 Linux 28 ""
+check "linux 2 cores"          2 Linux 2 ""
+check "linux getconf fails"   16 Linux "" 8
+check "linux no count at all" 16 Linux "" ""
 check "darwin 2 cores"         2 Darwin 2 ""
 check "darwin 1 core"          1 Darwin 1 ""
 check "getconf fails, nproc"   4 Darwin "" 16

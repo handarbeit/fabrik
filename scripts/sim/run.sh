@@ -53,7 +53,7 @@
 # explicit cap rather than inheriting GOMAXPROCS uncapped.
 #
 # The default comes from scripts/lib/parallel.sh's default_race_parallel
-# (`min(4, host cores)`) — lowered from #1624's original `min(8, host
+# (`min(4, host cores)` on macOS; Linux's ceiling is 16 since #2228 / ADR 2228) — lowered from #1624's original `min(8, host
 # cores)` after #1677's own measurement on the 28-core host found 8 still
 # reproduces the TSan fork/exec SIGSEGV roughly 1 run in 5, not reliable
 # enough for a release gate (all of it measured under -race; the race-free

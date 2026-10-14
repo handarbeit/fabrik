@@ -5,6 +5,8 @@
 **Issue**: #1677 — four release-gate defects found cutting v0.0.81 — bed accumulation,
 uncapped `-race`, unreachable parallelism band, dead pre-gate guard
 
+> **Amended by [ADR 2228](2228-sim-race-linux-parallelism-and-sharding.md):** the `-race` parallelism ceiling of 4 was measured on macOS. On Linux (CI) it is 16 — 15 `-race` runs at 4, 8 and 16 were all clean — so `default_race_parallel` is now per-OS. macOS stays at 4.
+
 ## Context
 
 Cutting v0.0.81 took ten attempts. None of the failures were defects in the code being

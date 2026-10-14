@@ -4,6 +4,8 @@
 **Status**: Accepted
 **Issue**: #1857 — ci: select tests from the dependency graph instead of running the whole module on every PR
 
+> **Amended by [ADR 2228](2228-sim-race-linux-parallelism-and-sharding.md):** the revisit trigger "`tests/sim` grows toward its timeout" was acted on. Raising Linux `-race` parallelism took the sim from ~405 s to ~182 s; sharding the sim across CI jobs was measured and rejected. Per-PR selection is still not built.
+
 ## Context
 
 `.github/workflows/ci.yml` runs `go test -race … ./...` over every package on every pull
