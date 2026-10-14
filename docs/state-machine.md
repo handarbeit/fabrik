@@ -4909,7 +4909,10 @@ precondition to honor: there's nothing here that would kill a live Claude invoca
 warning and the real upgrade decision are structurally unable to disagree. Applicability
 mirrors `checkAndUpgrade`'s own fork (`e.cfg.Version` must start with `"dev"`, then
 `CompareDevBuild`'s own `IsSourceCheckout` gate) — a release build never calls into
-`selfupgrade` for this check at all, so it never runs a `git fetch`. Recorded via the same
+`selfupgrade` for this check at all, so it never runs a `git fetch`. `CompareDevBuild` also returns `DevBuildStatus.Reason` (why no rebuild is needed) and
+`BinaryDirty` (the `+dirty` version suffix, #2234); it does not log them — only
+`CheckAndRebuildDev` does, so this reporter gains no log output. A `+dirty` binary is compared by
+SHA like a clean one. Recorded via the same
 `warnings.Record`/`warnings.Clear` pattern as `version_skew`, under the single fixed key
 `"source_staleness"` (§7.11 above); the `FixAction` differs depending on `e.cfg.AutoUpgrade`,
 since `kill -HUP` only self-heals staleness when the startup-time `checkAndUpgrade()` call that

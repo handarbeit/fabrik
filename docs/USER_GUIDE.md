@@ -753,6 +753,15 @@ local `HEAD`:
 - **Remote `origin/main` ahead of HEAD**: run `git pull --ff-only` to update, then
   rebuild.
 
+A build from a checkout with uncommitted or untracked files reports `dev(<sha>)+dirty`; it is
+compared by its SHA exactly like a clean build, so a stale dirty binary is rebuilt. A dirty binary
+whose SHA already equals `HEAD` is *not* rebuilt (that would only produce another dirty binary),
+and the log says so. Every upgrade check logs one `[upgrade]` line stating its outcome (up to
+date, local ahead of or diverged from `origin/main`, not a source checkout, or a rebuild), and
+the first time a check finds the checkout dirty it also logs the dirty paths once per process —
+the usual reason a dev daemon stops upgrading. On an idle board that is about one outcome line a
+minute.
+
 After rebuilding, Fabrik runs `fabrik upgrade --no-migrate` (non-interactive, silent — see
 below; it never runs the [workflow migration](#workflow-migration-fabrik-upgrade)
 unattended) and re-execs the new binary. This keeps dev builds current with the same hands-off
