@@ -98,6 +98,25 @@ func TestCommentLandingGateHolds(t *testing.T) {
 	// decision runs, so the scenario would observe nothing.
 	AwaitPRMergeableSettled(t, env, repo, pr, 10*time.Minute)
 
+	// The bed's inert "claude" App suite (queued, never any runs) holds the merge
+	// gate until it is older than the post-push dwell (#1822, ciSuiteHold), and a
+	// fast-path slow-gate is green about a minute after the push. Exposing the item
+	// inside that window lets the merge gate claim it, so the comment is processed
+	// before any landing decision and the hold is never observed (0.0.84 gate,
+	// app/off: three inconclusive attempts, each exposed ~70s after the push).
+	suitesDeadline := time.Now().Add(5 * time.Minute)
+	for {
+		out, serr := outstandingSuitesOnPRHead(env, repo, pr)
+		if serr == nil && len(out) == 0 {
+			break
+		}
+		if time.Now().After(suitesDeadline) {
+			Inconclusive(t, "PR #%d still had outstanding check suites after 5m (err=%v, outstanding=%d) — "+
+				"the merge gate would claim the item before the landing decision", pr, serr, len(out))
+		}
+		time.Sleep(10 * time.Second)
+	}
+
 	offset := LogOffset(t, env)
 	SetIssueStatus(t, env, itemID, "Validate")
 	AwaitBoardItemVisible(t, env, repo, issue, awaitSeedTimeout)
