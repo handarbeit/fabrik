@@ -41,9 +41,13 @@ for n in $LEVELS; do
     rc=$?
     secs=$(( $(date +%s) - start ))
     sig=""
-    grep -q 'signal: segmentation fault' "$log" && sig="${sig}git-segv,"
-    grep -q 'tsan_rtl' "$log" && sig="${sig}tsan-check,"
-    grep -Eq 'fork/exec|resource temporarily unavailable' "$log" && sig="${sig}fork-exec,"
+    # Only a failing run can have crashed: a passing run may legitimately print
+    # these strings (e.g. a deliberate fork/exec-failure fixture).
+    if [ "$rc" -ne 0 ]; then
+      grep -q 'signal: segmentation fault' "$log" && sig="${sig}git-segv,"
+      grep -q 'tsan_rtl' "$log" && sig="${sig}tsan-check,"
+      grep -Eq 'fork/exec|resource temporarily unavailable' "$log" && sig="${sig}fork-exec,"
+    fi
     crashes=0
     [ -n "$sig" ] && crashes=1
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$n" "$r" "$secs" "$rc" "$crashes" "${sig%,}" | tee -a "$tsv"
