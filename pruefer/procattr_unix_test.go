@@ -220,6 +220,15 @@ func waitDead(pid int, d time.Duration) bool {
 	return !processLive(pid)
 }
 
+func TestSetCmdProcAttr_MakesSessionLeader(t *testing.T) {
+	cmd := startSleeper(t)
+	sid, err := unix.Getsid(cmd.Process.Pid)
+	if err != nil || sid != cmd.Process.Pid {
+		t.Errorf("Getsid = %d, %v; want the worker's own PID %d", sid, err, cmd.Process.Pid)
+	}
+	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+}
+
 func TestKillProcGroupGraceful_ReapsSameSessionChild(t *testing.T) {
 	worker, child := startSessionWorker(t)
 	killProcGroupGraceful(worker.Process.Pid, 1, "t", "max_wall_time", 200*time.Millisecond, 200*time.Millisecond)
