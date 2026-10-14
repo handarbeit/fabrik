@@ -23,7 +23,9 @@
 #
 # E2E_BEDS (comma-separated bed directories, bed A first) defaults to the single
 # FABRIK_TEST_DIR bed. scripts/e2e/reset.sh resets every configured bed, or one
-# with --bed <dir>.
+# with --bed <dir>. On a multi-bed run a GitHub identity the beds only use as
+# harness is shared; it is joined only while its remaining GraphQL budget is at
+# least E2E_SHARED_IDENTITY_FLOOR percent of its limit (default 40; 0 disables, #2263).
 #
 # Exit codes: 3 budget exhausted (RUN INVALID), 4 bed preflight failed, 5 pre-gate
 # failed, 6 post-suite watchdog, 7 operational precondition failed, 8 (--resume and

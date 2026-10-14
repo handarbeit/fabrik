@@ -269,8 +269,8 @@ process**, serialized only where they share a GitHub identity.
 |---|---|
 | `config.go` | `Config.BedDirs`, `parseBeds` (absolute paths; an empty entry, a duplicate by real path — symlinks included — or more than 26 beds is `ExitUsage`) |
 | `beds.go` | `BedSpec`, `resolveBedSpec`, the per-bed views (`buildBedGates`/`newBedGate`), `bedEnv`, `prefixWriter`, `CheckBedTopology`, `prepareBeds` |
-| `identity.go` | `Identity`, `IdentityOps`/`osIdentityOps`, `ResolveBedIdentities`, `identitySet`, `parseBedAppBanner`/`verifyBedAppIdentity`, `logIdentityBudget` |
-| `multibed.go` | `MultiBedScheduler`: assignment, identity-set registry, D8 failure semantics, the closing summary |
+| `identity.go` | `Identity` + `Role` (engine/harness, #2263), `IdentityOps`/`osIdentityOps` (`Budget` returns the limit too), `ResolveBedIdentities`, `identitySet`, `parseBedAppBanner`/`verifyBedAppIdentity`, `logIdentityBudget` |
+| `multibed.go` | `MultiBedScheduler`: assignment, the role-aware identity registry (`idHold`/`resv`), the shared-identity budget floor and its epoch-versioned probe, D8 failure semantics, the closing summary |
 | `consumers.go` | `FindCompetingTokenConsumersExcluding`; the #1684 check per bed |
 | `reset.go`, `cmd/gate/main.go` | `ResetBeds`, `gate reset --bed <dir>` |
 | `ledger.go`, `ledger_recorder.go`, `archive.go` | `Record.Bed`, `VoidBed`, `bed.json`, per-bed `NoteBedConfig` |
@@ -295,7 +295,7 @@ process**, serialized only where they share a GitHub identity.
   **serially**, followed by the engine-SHA check. Nothing live runs before the pre-gate.
 * **Topology refusal (exit 7, before the pre-gate).** Two beds with the same App installation (when an
   app leg is planned), the same board, or a shared repo, or a bed with no `FABRIK_TOKEN`. Two beds
-  sharing a harness login are **not** refused — they serialize.
+  sharing a harness login are **not** refused — their harness use of it is shared (#2263, below).
 * **Competing consumers (D5).** The #1684 check runs per bed against that bed's token with **every**
   configured bed's directory excluded, over one process listing, using all requested auth modes
   (the greedy fallback can send any cell to any bed). Another bed's engine is never a competitor; any
@@ -303,9 +303,11 @@ process**, serialized only where they share a GitHub identity.
 * **Engine SHA (D11).** `E2E_BED_REF`, `E2E_BED_NO_BUILD` and `E2E_SKIP_PREP` apply to every bed;
   beds resolving to different engine SHAs (including `E2E_SKIP_PREP`'s bed-HEAD path) refuse with
   exit 7, because the ledger is per SHA.
-* **Identities (D3/D4).** A cell charges a **set**: `app:<installation id>` on an app leg, plus
+* **Identities (D3/D4, roles #2263).** A cell charges a **set**: `app:<installation id>` on an app leg, plus
   `user:<login>` of the bed's `FABRIK_TOKEN` (the engine's PAT on a pat leg and the harness's token
-  on every leg), deduplicated and sorted. An unresolvable login refuses (exit 7); with no resolver
+  on every leg), deduplicated and sorted. Each carries a **role**: the engine's identity is `engine`
+  (exclusive — no other cell holds it in any role), the harness token's user is `harness` (shared
+  by any number of cells). On a pat leg both are one key and `engine` wins (`engine+harness`). An unresolvable login refuses (exit 7); with no resolver
   configured, the key falls back to `token:<hash>` so equal tokens still collide. After every app
   leg's restart, `verifyBedAppIdentity` reads the last startup in `bed-run.log` and refuses (exit 7)
   unless its `identity: GitHub App installation <N>` line names the `.env` installation;
@@ -319,8 +321,25 @@ process**, serialized only where they share a GitHub identity.
   in order, each after the previous one has claimed a cell or registered a wait, so bed A gets first
   claim on a shared identity, and while bed A's next cell waits it **reserves** that cell's
   identities, so a shared-queue bed cannot keep re-acquiring them ahead of it. Each wait is
-  logged once: `== waiting: <cell> on bed B needs <identity>, held by bed A (<cell>) ==` (or
-  `…, reserved for bed A's next cell ==`).
+  logged once per distinct reason: `== waiting: <cell> on bed B needs <identity> exclusively, held by
+  bed A (<cell>) ==` (`… as harness` when the holder only shares it; `needs <identity> (harness),
+  held exclusively by …` for a harness use blocked by an engine holder), `…, reserved for bed A's next
+  cell ==`, or the budget floor (below). Reservations carry the role: an engine reservation blocks
+  every other bed, a harness reservation only another bed's engine use.
+* **Shared-identity budget floor (#2263, ADR-2263).** A cell joining an identity others already hold
+  as harness starts only if its remaining GraphQL budget is at least `E2E_SHARED_IDENTITY_FLOOR`
+  percent (default 40; `0` disables the floor and its probe; non-numeric or outside 0-100 is
+  `ExitUsage`) of its real limit (`rateLimit { limit remaining resetAt }`; 5,000 if GitHub reports
+  none). The first holder is never probed. `next()` does no I/O: it returns the identities to read,
+  the bed's loop probes them outside the scheduler lock (`probeShared`, bounded by `GHAPITimeout`,
+  with the joiner's own harness token) and calls `next()` again; a reading is valid only for the
+  epoch it was taken in (the epoch moves on every acquire and release), so one reading admits at
+  most one join. A bed waiting on the floor re-probes when the next leg finishes or after
+  `Config.SharedIdentityReprobe` (5m) and logs `… shares user:x (harness) with bed A (app/on), but its
+  budget is below the floor: 1500 of 5000 remaining (floor 40%), resets <t> …` (or `could not be
+  read (<err>)`: an unreadable budget counts as below the floor). Its engine is stopped like in any
+  other wait. `Gate.roleSplitDisabledForTest` makes every identity `engine` (the pre-#2263 rule) so
+  the tests can show they fail without the split.
 * **Idle engines are stopped.** A running engine polls with its identity whether or not a leg is
   using it, so a bed's engine is stopped (`stopIdleEngine`, SIGTERM via `StopBedInstance`) while
   the bed waits for an identity and once it has no more cells; every leg's `TestSwitchTrainMode`
@@ -329,15 +348,17 @@ process**, serialized only where they share a GitHub identity.
   leaves its bed running after the last leg, as before.)
 * **Failure (D8).** A failing leg lets the other beds' **running** legs finish but no new cell starts.
   RUN INVALID (exit 3) is narrower: that bed's records for the cell are voided (`VoidBed`), its
-  engine identity is marked exhausted, cells charging it are not started, and everything else goes on.
+  engine identity is marked exhausted, cells charging it **in either role** are not started, and
+  everything else goes on.
   The exit code is the first failure's, by time; a cancel returns 130. The per-identity budget
   probes at a leg's end share one `GHAPITimeout` bound, so they can never trip the post-suite
   watchdog. `== multi-bed summary ==` lists
   every bed's cells with their outcome, every cell that never started with why, and any exhausted
   identity.
 * **Budget lines (R5, also on one bed).** At leg start and end, one
-  `== identity budget (leg: app/on, start): app:12345 fabrik-bed[bot] — 4210 remaining, resets … ==`
-  line per identity in the cell's set (`rateLimit { remaining resetAt }`; App identities mint an
+  `== identity budget (leg: app/on, start): app:12345 fabrik-bed[bot] (engine) — 4210 remaining, resets … ==`
+  line per identity in the cell's set, marked `(engine)`, `(harness)` or `(engine+harness)`
+  (`rateLimit { limit remaining resetAt }`; App identities mint an
   installation token per probe). A failure warns and never gates; no token text reaches the output.
   The existing `budget_before`/`budget_after` harness-token lines are unchanged.
 * **Ledger and archive (R4).** Every bed writes the one per-SHA ledger. Records carry `bed` (the
@@ -357,8 +378,18 @@ process**, serialized only where they share a GitHub identity.
 Single-bed behaviour (R6) is unchanged by construction: no views, `SerialScheduler`, no prefix, no
 bed variables in a leg's environment. The only additions are the identity budget lines, the
 `bed-identity` live preflight (a warning, not a refusal, when the login cannot be resolved), the
-banner cross-check on app legs, and the bed attribution in records and archives. The live two-bed
-run, and standing up the second bed, are #1990's.
+banner cross-check on app legs, and the bed attribution in records and archives (plus, since #2263,
+the role marker on a budget line). The live two-bed run, and standing up the second bed, are #1990's.
+
+### Second bed (#2263, #1990)
+
+The prerequisites for bed B, how to verify each, the bed `.env` keys and how to retire a bed are in
+`tests/e2e/README.md`, "Second bed: prerequisites, verification, retirement". In short: App
+`fabrik-bed-2`, repos `handarbeit/fabrik-test-gamma`/`-delta`, board `handarbeit` #7, checkout
+`~/dev/fabrik-test-2`, and a bed `.env` with `FABRIK_TOKEN`, `FABRIK_TEST_REPO_ALPHA`/`_BETA`,
+`FABRIK_TEST_PROJECT_OWNER`/`_NUMBER` and `E2E_APP_ID`/`E2E_APP_PRIVATE_KEY_PATH`/
+`E2E_APP_INSTALLATION_ID`. Run `E2E_BEDS=~/dev/fabrik-test,~/dev/fabrik-test-2 scripts/e2e/run.sh`.
+Tune the sharing with `E2E_SHARED_IDENTITY_FLOOR` (percent of the limit; default 40).
 
 ## Behaviour deltas and quirks
 
