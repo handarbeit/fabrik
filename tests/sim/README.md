@@ -552,7 +552,8 @@ suite *less* reliable, backwards from the intended relationship.
 the e2e gate runner's pre-gate (behind `scripts/e2e/run.sh`) go through — see that script's own header
 comment) passes an explicit `-parallel "$SIM_PARALLEL"`, defaulting to
 `scripts/lib/parallel.sh`'s `default_race_parallel` — **`min(4, host
-cores)`**, overridable via the environment — not a flat number: a flat cap
+cores)`** when it was written (since #2228 that is the macOS/non-Linux value;
+Linux is `min(16, host cores)`, see below), overridable via the environment — not a flat number: a flat cap
 would *increase* concurrent git-spawning on any host with fewer cores than
 the cap, versus the previous `GOMAXPROCS`-derived default, so a low-core
 host is never worse off than before this change, while every host still
@@ -569,12 +570,21 @@ is why `scripts/sim/run.sh` now also passes an explicit `-timeout
 has room to actually finish instead of looking nonviable against a hidden
 default.
 
+**The ceiling is now per OS (#2228, ADR 2228).** The 4 above was measured on
+macOS. On Linux (GitHub Actions `ubuntu-latest`, x86-64, 4 vCPU; 15 runs, five
+each at 4, 8 and 16) every `-race` run was clean at every level and the wall
+time fell from ~405 s at 4 to ~182 s at 16, so `default_race_parallel` is
+`min(cores, 16)` on Linux and `min(cores, 4)` elsewhere. The crash is treated
+as macOS-specific; CI re-validates the Linux value on every PR. Sharding the
+sim across CI jobs was measured and rejected in the same ADR.
+
 **This now also applies to a bare `go test -race ./...`** (CI's own
 `go test` step, REQ3/REQ4, #1677; `scripts/cut-release.sh` step 4 ran one too
 until v0.0.84, when the local race run was removed) — the previous version of this section stated the cap did *not*
 apply there, reasoning that CI's 2–4-core runners never hit this class of
-contention. That reasoning still holds for CI (the cap is a no-op there in
-practice), but not for a bare `go test -race ./...` run by hand on a
+contention. That reasoning held for CI while the ceiling was 4 (a no-op on
+2–4-core runners); since #2228 CI's Linux value is 16 and is measured, not
+assumed. It never held for a bare `go test -race ./...` run by hand on a
 high-core-count release-cutting workstation, which exercises the exact same
 `tests/sim` package as `scripts/sim/run.sh` and is just as capable of
 reproducing the SIGSEGV — confirmed during the same v0.0.81 release cut
