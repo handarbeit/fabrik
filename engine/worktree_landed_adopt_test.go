@@ -264,7 +264,7 @@ func TestEnsureWorktree_BaseMismatchWarnsAndStillAdopts(t *testing.T) {
 	if got := gitOut(t, wtDir, "rev-parse", "HEAD"); got != tip {
 		t.Errorf("HEAD = %s, want adopted tip %s", got, tip)
 	}
-	if !log.has("WARNING") || !log.has(`"release/1.x"`) || !log.has(`"main"`) {
+	if !log.has("base mismatch") || !log.has(`"release/1.x"`) || !log.has(`"main"`) {
 		t.Errorf("warning must name both bases: %v", log.lines)
 	}
 }
@@ -285,7 +285,7 @@ func TestEnsureWorktree_MatchingOrUnknownPRBaseDoesNotWarn(t *testing.T) {
 			if _, err := wm.EnsureWorktree(7, "main", true, WithPRBaseProbe(probe)); err != nil {
 				t.Fatalf("EnsureWorktree: %v", err)
 			}
-			if log.has("WARNING") {
+			if log.has("base mismatch") {
 				t.Errorf("unexpected warning: %v", log.lines)
 			}
 		})

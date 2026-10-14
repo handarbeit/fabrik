@@ -572,7 +572,7 @@ func (wm *WorktreeManager) adoptRemoteIssueBranch(branch string, issueNumber int
 
 	if eo.prBaseProbe != nil {
 		if prBase, ok := eo.prBaseProbe(); ok && prBase != "" && prBase != baseBranch {
-			wm.logf(issueNumber, "worktree", "WARNING: adopting %s whose open PR targets base %q but the item's resolved base is %q — the stage must rebase onto %q\n", branch, prBase, baseBranch, baseBranch)
+			wm.logf(issueNumber, "worktree", "warn: base mismatch — adopting %s whose open PR targets base %q but the item's resolved base is %q — the stage must rebase onto %q\n", branch, prBase, baseBranch, baseBranch)
 		}
 	}
 	wm.logf(issueNumber, "worktree", "%s already exists on origin — starting the local branch from it\n", branch)
