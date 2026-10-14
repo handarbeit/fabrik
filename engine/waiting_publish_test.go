@@ -341,3 +341,19 @@ func TestWaitingPublisherSourceDoesNotReachGitHub(t *testing.T) {
 		}
 	}
 }
+
+// TestPollNothingToDoWordingMatchesTheHeader pins the log line the header's wait
+// count replaces (#2238 R4): the header matches the displayed string, so the
+// engine's wording and tui.HeaderNothingToDo must not drift apart.
+func TestPollNothingToDoWordingMatchesTheHeader(t *testing.T) {
+	b, err := os.ReadFile("poll.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tui.HeaderNothingToDo != "[poll] nothing to do" {
+		t.Fatalf("HeaderNothingToDo = %q", tui.HeaderNothingToDo)
+	}
+	if !strings.Contains(string(b), `e.logf(0, "poll", "nothing to do\n")`) {
+		t.Error(`poll.go no longer logs [poll] nothing to do; update tui.HeaderNothingToDo and its header test`)
+	}
+}

@@ -35,6 +35,7 @@ type ActivePaneComponent struct {
 	now            time.Time
 	defaultRepo    string            // "owner/repo" fallback for single-repo projects where activeJob.Repo is empty
 	slots          *WorkerSlotsEvent // latest worker-slot reading (#2115); nil until the first event, so the title is unchanged until then
+	waiting        WaitingItemsEvent // latest waiting-items snapshot (#2238); the zero value renders nothing
 }
 
 func (a ActivePaneComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
@@ -101,6 +102,9 @@ func (a ActivePaneComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
 	case WorkerSlotsEvent:
 		slots := ev
 		a.slots = &slots
+
+	case WaitingItemsEvent:
+		a.waiting = ev
 
 	case TrainRowEvent:
 		// Update-only: a late event for a row that has already been removed
@@ -181,7 +185,7 @@ func (a ActivePaneComponent) View(width int) string {
 	if a.focused {
 		focusIndicator = "▸"
 	}
-	title := activeStyle.Render(fmt.Sprintf("%s In Progress (%d)%s", focusIndicator, len(a.active)+len(a.blocked), a.slotsSuffix()))
+	title := activeStyle.Render(fmt.Sprintf("%s In Progress (%d)%s", focusIndicator, len(a.active)+len(a.blocked)+len(a.waitingRows()), a.slotsSuffix()))
 
 	maxWidth := max(width-6, 20)
 
@@ -268,6 +272,13 @@ func (a ActivePaneComponent) View(width int) string {
 		lines = append(lines, line)
 	}
 
+	for _, w := range a.waitingRows() {
+		lines = append(lines, a.waitingLine(w, maxWidth))
+	}
+	if a.waiting.Omitted > 0 {
+		lines = append(lines, dimStyle.Render(fmt.Sprintf("  +%d more waiting", a.waiting.Omitted)))
+	}
+
 	totalLines := len(lines)
 	maxLines := a.Height() - 3
 	if len(lines) > maxLines && maxLines > 0 {
@@ -350,8 +361,57 @@ func (a ActivePaneComponent) Height() int {
 	// No cap: if the terminal can't fit everything, the history viewport
 	// truncates first and, in the extreme, the View() "… N more" fallback
 	// inside Active handles anything that still can't fit.
-	n := len(a.active) + len(a.blocked)
+	n := len(a.active) + len(a.blocked) + len(a.waitingRows())
+	if a.waiting.Omitted > 0 {
+		n++ // the "+K more waiting" line
+	}
 	return max(n+1, 2) + 2
+}
+
+// waitingRows returns the waiting items to render: the engine's snapshot minus any
+// item that already has a running row (a worker started since the last sample), so
+// one item is never shown twice (#2238).
+func (a ActivePaneComponent) waitingRows() []WaitingItem {
+	if len(a.waiting.Items) == 0 {
+		return nil
+	}
+	rows := make([]WaitingItem, 0, len(a.waiting.Items))
+	for _, w := range a.waiting.Items {
+		if _, running := a.active[activeJobKey(w.Repo, w.Number)]; running {
+			continue
+		}
+		rows = append(rows, w)
+	}
+	return rows
+}
+
+// waitingMarker is the glyph that separates "Fabrik is waiting on something
+// external" from "a human must act" at a glance (#2238 R3).
+func waitingMarker(k WaitingKind) string {
+	if k == WaitingHuman {
+		return "✋"
+	}
+	return "⏳"
+}
+
+// waitingLine renders one waiting row in the shape of a blocked row. Both markers
+// are wide glyphs, so the cut is by visible width, not rune count.
+func (a ActivePaneComponent) waitingLine(w WaitingItem, maxWidth int) string {
+	titleStr := ""
+	if w.Title != "" {
+		titleStr = dimStyle.Render(w.Title)
+	}
+	stageDisplay := w.Stage
+	if pad := 12 - lipgloss.Width(stageDisplay); pad > 0 {
+		stageDisplay += strings.Repeat(" ", pad)
+	}
+	line := fmt.Sprintf("%s#%-4d %s waiting for: %s  %s", waitingMarker(w.Kind), w.Number, stageDisplay, w.Text, titleStr)
+	line = ansi.Truncate(line, maxWidth, "…")
+	repo := w.Repo
+	if repo == "" {
+		repo = a.defaultRepo
+	}
+	return injectIssueLink(line, repo, w.Number)
 }
 
 // turnBadge returns a turn counter badge string that fits within available rune columns.
