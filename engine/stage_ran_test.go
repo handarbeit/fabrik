@@ -53,3 +53,26 @@ func TestStageRanOnEntry(t *testing.T) {
 		}
 	})
 }
+
+// TestItemNeedsWork_PendingCommentOnStageNotRun covers admission for #2220:
+// a pending comment admits the item whether or not the stage has run (the stage
+// run or the comment pass follows), and the seam keeps today's behaviour.
+func TestItemNeedsWork_PendingCommentOnStageNotRun(t *testing.T) {
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+	comments := []gh.Comment{{ID: "C1", Author: "testuser", Body: "also cover offline"}}
+
+	notRun := gh.ProjectItem{Number: 1, Status: "Research", Comments: comments}
+	if !eng.itemNeedsWork(notRun) {
+		t.Error("a never-run stage with a pending comment must be admitted (the stage runs)")
+	}
+
+	ran := gh.ProjectItem{Number: 2, Status: "Research", Labels: []string{"stage:Research:complete"}, Comments: comments}
+	if !eng.itemNeedsWork(ran) {
+		t.Error("a completed stage with a pending comment must be admitted (the comment pass runs)")
+	}
+
+	eng.SetStageFirstRoutingDisabledForTest(true)
+	if !eng.itemNeedsWork(notRun) {
+		t.Error("with the seam on, the pending comment admits the item as before")
+	}
+}
