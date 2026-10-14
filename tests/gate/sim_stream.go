@@ -117,7 +117,7 @@ func (t *simTracker) snapshot() []Event {
 const (
 	simPendingMaxLines = 300
 	simPendingMaxBytes = 128 << 10
-	simDumpTermLines   = 40 // lines of a goroutine dump the terminal shows; the archive has all
+	simDumpTermLines   = 1 // lines of a goroutine dump the terminal shows (its header); the file has all
 )
 
 var dumpWrittenRE = regexp.MustCompile(`goroutine dump written to (.+?)\s*$`)
@@ -242,8 +242,8 @@ func (w *simStreamWriter) output(e Event) {
 	}
 	_, _ = w.scan.Write([]byte(e.Output))
 	text := strings.TrimRight(e.Output, "\n")
-	if strings.Contains(text, "hard wall-time ceiling") {
-		w.ceilingLine = text
+	if w.ceilingLine == "" && strings.Contains(text, "hard wall-time ceiling") {
+		w.ceilingLine = text // the first mention is the ceiling's own message, not the dump header repeating it
 	}
 	if m := dumpWrittenRE.FindStringSubmatch(text); m != nil {
 		w.dumpPath = m[1]
