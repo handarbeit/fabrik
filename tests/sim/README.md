@@ -552,7 +552,8 @@ suite *less* reliable, backwards from the intended relationship.
 the e2e gate runner's pre-gate (behind `scripts/e2e/run.sh`) go through — see that script's own header
 comment) passes an explicit `-parallel "$SIM_PARALLEL"`, defaulting to
 `scripts/lib/parallel.sh`'s `default_race_parallel` — **`min(4, host
-cores)`**, overridable via the environment — not a flat number: a flat cap
+cores)`** when it was written (since #2228 that is the macOS/non-Linux value;
+Linux is `min(16, host cores)`, see below), overridable via the environment — not a flat number: a flat cap
 would *increase* concurrent git-spawning on any host with fewer cores than
 the cap, versus the previous `GOMAXPROCS`-derived default, so a low-core
 host is never worse off than before this change, while every host still
@@ -581,8 +582,9 @@ sim across CI jobs was measured and rejected in the same ADR.
 `go test` step, REQ3/REQ4, #1677; `scripts/cut-release.sh` step 4 ran one too
 until v0.0.84, when the local race run was removed) — the previous version of this section stated the cap did *not*
 apply there, reasoning that CI's 2–4-core runners never hit this class of
-contention. That reasoning still holds for CI (the cap is a no-op there in
-practice), but not for a bare `go test -race ./...` run by hand on a
+contention. That reasoning held for CI while the ceiling was 4 (a no-op on
+2–4-core runners); since #2228 CI's Linux value is 16 and is measured, not
+assumed. It never held for a bare `go test -race ./...` run by hand on a
 high-core-count release-cutting workstation, which exercises the exact same
 `tests/sim` package as `scripts/sim/run.sh` and is just as capable of
 reproducing the SIGSEGV — confirmed during the same v0.0.81 release cut
