@@ -122,6 +122,21 @@ const (
 
 var dumpWrittenRE = regexp.MustCompile(`goroutine dump written to (.+?)\s*$`)
 
+// simDumpState is one package's goroutine dump in progress. A dump is
+// thousands of lines the terminal shows only the header of; it is scoped to the
+// package that wrote it (several test binaries run at once) and ends at the
+// first line that is not dump text, so the FAIL lines that follow it, and any
+// other binary's output, are never swallowed.
+type simDumpState struct {
+	shown  int
+	hidden int
+}
+
+// dumpEndRE matches the lines a package prints after its dump: test2json's
+// package result ("FAIL\tpkg\t12s", "ok ..."), the go tool's "exit status N"
+// and a test's own "--- FAIL". Goroutine-dump text never starts with these.
+var dumpEndRE = regexp.MustCompile(`^(FAIL|ok|PASS|exit status |--- )`)
+
 type simPending struct {
 	lines   []string
 	bytes   int
@@ -139,9 +154,7 @@ type simStreamWriter struct {
 	mu          sync.Mutex
 	buf         []byte
 	pending     map[string]*simPending
-	dumpSeen    bool
-	dumpShown   int
-	dumpHidden  int
+	openDumps   map[string]*simDumpState // by package: only the binary that dumped has its output folded
 	ceilingLine string
 	dumpPaths   []string // one per hung test binary: each writes its own PID-named file
 }
@@ -176,10 +189,21 @@ func (w *simStreamWriter) Flush() {
 		w.line(string(w.buf))
 		w.buf = nil
 	}
-	if w.dumpHidden > 0 {
-		fmt.Fprintf(w.term, "   … %d more goroutine-dump lines in the archive\n", w.dumpHidden)
-		w.dumpHidden = 0
+	for pkg := range w.openDumps {
+		w.endDump(pkg)
 	}
+}
+
+// endDump closes pkg's dump, reporting how much of it only the archive holds.
+func (w *simStreamWriter) endDump(pkg string) {
+	d := w.openDumps[pkg]
+	if d == nil {
+		return
+	}
+	if d.hidden > 0 {
+		fmt.Fprintf(w.term, "   … %d more goroutine-dump lines in the archive\n", d.hidden)
+	}
+	delete(w.openDumps, pkg)
 }
 
 func (w *simStreamWriter) render(format string, args ...any) {
@@ -248,18 +272,24 @@ func (w *simStreamWriter) output(e Event) {
 	if m := dumpWrittenRE.FindStringSubmatch(text); m != nil {
 		w.dumpPaths = append(w.dumpPaths, m[1])
 	}
-	if strings.Contains(text, testlife.DumpHeaderPrefix) {
-		w.dumpSeen = true
+	if w.openDumps == nil {
+		w.openDumps = map[string]*simDumpState{}
 	}
-	switch {
-	case w.dumpSeen:
+	if d := w.openDumps[e.Package]; d != nil && dumpEndRE.MatchString(text) {
+		w.endDump(e.Package)
+	}
+	if w.openDumps[e.Package] == nil && strings.Contains(text, testlife.DumpHeaderPrefix) {
+		w.openDumps[e.Package] = &simDumpState{}
+	}
+	switch d := w.openDumps[e.Package]; {
+	case d != nil:
 		// The dump is attributed by test2json to whichever test ran last, and is
 		// thousands of lines: show its head, archive all of it.
-		if w.dumpShown < simDumpTermLines {
-			w.dumpShown++
+		if d.shown < simDumpTermLines {
+			d.shown++
 			fmt.Fprintln(w.term, text)
 		} else {
-			w.dumpHidden++
+			d.hidden++
 		}
 	case e.Test == "":
 		fmt.Fprintln(w.term, text)

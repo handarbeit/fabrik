@@ -1,6 +1,7 @@
 package gate
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -561,5 +562,57 @@ func TestPrunePregateSimArchive_CurrentHeadWithoutFilesTakesASlot(t *testing.T) 
 	if !exists("aaa.sim.jsonl") || exists("bbb.sim.jsonl") || exists("ccc.sim.jsonl") {
 		t.Errorf("want only aaa kept beside the new head: aaa=%v bbb=%v ccc=%v",
 			exists("aaa.sim.jsonl"), exists("bbb.sim.jsonl"), exists("ccc.sim.jsonl"))
+	}
+}
+
+// pkgLine renders a test2json line for an explicit package.
+func pkgLine(pkg, action, test, output string) string {
+	b, _ := json.Marshal(map[string]any{
+		"Time": "2026-10-14T16:11:02.123Z", "Action": action, "Package": pkg,
+		"Test": test, "Output": output,
+	})
+	return string(b) + "\n"
+}
+
+// A goroutine dump folds only the output of the package that wrote it, and only
+// until the dump ends: another binary's failing test and the package FAIL lines
+// that follow the dump stay on the terminal, and a second binary's dump still
+// shows its header.
+func TestSimStreamWriter_DumpFoldingIsScopedToItsPackageAndEnds(t *testing.T) {
+	var term bytes.Buffer
+	tr := newSimTracker(time.Now)
+	sw := newSimStreamWriter(tr, &crashScanner{}, &term, nil, nil)
+	const a, b, c = "x/tests/sim", "x/tests/other", "x/tests/third"
+	in := strings.Join([]string{
+		pkgLine(a, "output", "TestHang", testlife.DumpHeaderPrefix+" (a) pid 1: ceiling ===\n"),
+		pkgLine(a, "output", "TestHang", "goroutine 17 [chan receive]:\n"),
+		pkgLine(a, "output", "TestHang", "main.blocked()\n"),
+		pkgLine(b, "run", "TestBroken", ""),
+		pkgLine(b, "output", "TestBroken", "    broken_test.go:9: expected 1 got 2\n"),
+		pkgLine(b, "fail", "TestBroken", ""),
+		pkgLine(c, "output", "TestStuck", testlife.DumpHeaderPrefix+" (c) pid 3: ceiling ===\n"),
+		pkgLine(c, "output", "TestStuck", "goroutine 1 [select]:\n"),
+		pkgLine(a, "output", "", "FAIL\tx/tests/sim\t2640.239s\n"),
+	}, "")
+	if _, err := sw.Write([]byte(in)); err != nil {
+		t.Fatal(err)
+	}
+	sw.Flush()
+	s := term.String()
+	for _, want := range []string{
+		"(a) pid 1", "(c) pid 3", // each binary's dump header
+		"expected 1 got 2",             // another package's failing test
+		"FAIL\tx/tests/sim\t2640.239s", // the package result after the dump
+		"2 more goroutine-dump lines in the archive",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("terminal lacks %q:\n%s", want, s)
+		}
+	}
+	if strings.Contains(s, "main.blocked()") {
+		t.Errorf("dump body leaked onto the terminal:\n%s", s)
+	}
+	if got := sw.dumps(); len(got) != 0 {
+		t.Errorf("no 'written to' line was sent, dumps() = %v", got)
 	}
 }
