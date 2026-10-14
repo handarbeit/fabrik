@@ -8,15 +8,17 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Event is one decoded `go test -json` (test2json) line.
 type Event struct {
-	Action  string  `json:"Action"`
-	Package string  `json:"Package"`
-	Test    string  `json:"Test"`
-	Output  string  `json:"Output"`
-	Elapsed float64 `json:"Elapsed"`
+	Time    time.Time `json:"Time"` // zero when the line carries none
+	Action  string    `json:"Action"`
+	Package string    `json:"Package"`
+	Test    string    `json:"Test"`
+	Output  string    `json:"Output"`
+	Elapsed float64   `json:"Elapsed"`
 }
 
 // DecodeEvent decodes one line of the stream. Non-JSON lines — `go: downloading`
