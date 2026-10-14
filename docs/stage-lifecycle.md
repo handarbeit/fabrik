@@ -689,7 +689,7 @@ Used 41/250 turns, 26.0M input (476 raw + 25.0M cache-read + 993k cache-write) /
 
 ### Comments Marked as Seen
 
-After a stage runs, any pre-existing user comments get a rocket reaction via `markCommentsSeenByStage`. They were included in the prompt as context and should not trigger the awaiting-input unblock logic on subsequent polls.
+After a stage runs, pre-existing user comments that are not pending get a rocket reaction via `markCommentsSeenByStage`. A comment that was already waiting when the stage was entered (pending per `findNewComments`) is deliberately left untouched (#2220): it appears in the prompt under "Prior Discussion", but the stage run does not process it. After the stage completes, the feedback gate holds the advance until the comment pass has handled it, so the order is always stage run, then one comment pass, then advance. See `docs/state-machine.md` §4.4 "Stage first".
 
 ### Completion Path
 
