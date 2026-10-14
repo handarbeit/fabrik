@@ -715,3 +715,234 @@ func TestMultiBedDroppingAReservationWakesWaiters(t *testing.T) {
 		t.Errorf("bed B then takes pat/on: q=%v", d.q)
 	}
 }
+
+// floorHarness is a two-bed sparse run where both beds' tokens are the same
+// user, with the budget floor on and a fake budget probe. Bed A's token is
+// token-a, bed B's token-b: the joiner (bed B) is the one probed.
+func newFloorHarness(t *testing.T, fi *fakeIdentity) *schedHarness {
+	t.Helper()
+	h := newSchedHarness(t, "arbeithand", "arbeithand", MatrixSparse)
+	h.g.Identity = fi
+	h.g.Cfg.SharedIdentityFloor = 40
+	h.g.Cfg.SharedIdentityReprobe = 20 * time.Millisecond
+	return h
+}
+
+// #2263 R2: a second holder of a shared harness identity starts only if the
+// identity's remaining budget is at least the floor. Below it, the cell waits and
+// says why — the identity, what remains of the limit and when it resets — and
+// starts once the budget recovers.
+func TestMultiBedBelowFloorBlocksASecondHolderUntilItRecovers(t *testing.T) {
+	fi := &fakeIdentity{budgets: map[string]int{"token-b": 1500}} // 30% of 5000: below the 40% floor
+	h := newFloorHarness(t, fi)
+	_, done := h.run(context.Background(), []Cell{cAppOn, cAppOff})
+	h.expectStart("A app/on")
+	h.expectWait("B app/off user:arbeithand floor")
+	h.noStart()
+	for _, want := range []string{
+		"[bed B] == waiting: app/off on bed B shares user:arbeithand (harness) with bed A (app/on), but its budget is below the floor: 1500 of 5000 remaining (floor 40%), resets 2026-10-02T10:15:00Z;",
+	} {
+		if !strings.Contains(h.out(), want) {
+			t.Errorf("missing %q in:\n%s", want, h.out())
+		}
+	}
+	// The budget recovers; the bed's re-probe timer finds it and the cell starts
+	// beside bed A's.
+	fi.mu.Lock()
+	fi.budgets["token-b"] = 4000
+	fi.mu.Unlock()
+	h.expectStart("B app/off")
+	if h.maxActive["user:arbeithand"] != 2 {
+		t.Errorf("the recovered cell must share the user with bed A's: %d", h.maxActive["user:arbeithand"])
+	}
+	h.finish("B app/off", nil)
+	h.finish("A app/on", nil)
+	if err := h.result(done); err != nil {
+		t.Fatal(err)
+	}
+	// An unchanged below-floor reading across re-probes is logged once, not each time.
+	if n := strings.Count(h.out(), "below the floor"); n != 1 {
+		t.Errorf("the same wait must be logged once, got %d:\n%s", n, h.out())
+	}
+}
+
+// The floor is what holds the cell back: without a floor the same budget shares.
+func TestMultiBedBelowFloorIsVacuousWithoutTheFloor(t *testing.T) {
+	fi := &fakeIdentity{budgets: map[string]int{"token-b": 1500}}
+	h := newFloorHarness(t, fi)
+	h.g.Cfg.SharedIdentityFloor = 0
+	_, done := h.run(context.Background(), []Cell{cAppOn, cAppOff})
+	h.expectStarts("A app/on", "B app/off")
+	h.finish("B app/off", nil)
+	h.finish("A app/on", nil)
+	if err := h.result(done); err != nil {
+		t.Fatal(err)
+	}
+	if len(fi.probes) != 0 {
+		t.Errorf("a disabled floor probes nothing: %v", fi.probes)
+	}
+}
+
+// The floor is a share of the REAL limit, not of 5,000.
+func TestMultiBedFloorUsesTheRealLimit(t *testing.T) {
+	// 6000 of 15000 = 40%: exactly at the floor, so it shares.
+	fi := &fakeIdentity{budgets: map[string]int{"token-b": 6000}, limits: map[string]int{"token-b": 15000}}
+	h := newFloorHarness(t, fi)
+	_, done := h.run(context.Background(), []Cell{cAppOn, cAppOff})
+	h.expectStarts("A app/on", "B app/off")
+	h.finish("B app/off", nil)
+	h.finish("A app/on", nil)
+	if err := h.result(done); err != nil {
+		t.Fatal(err)
+	}
+	// 5999 of 15000 is below it, though far above 40% of 5000.
+	fi = &fakeIdentity{budgets: map[string]int{"token-b": 5999}, limits: map[string]int{"token-b": 15000}}
+	h = newFloorHarness(t, fi)
+	_, done = h.run(context.Background(), []Cell{cAppOn, cAppOff})
+	h.expectStart("A app/on")
+	h.expectWait("B app/off user:arbeithand floor")
+	fi.mu.Lock()
+	fi.budgets["token-b"] = 9000
+	fi.mu.Unlock()
+	h.expectStart("B app/off")
+	h.finish("B app/off", nil)
+	h.finish("A app/on", nil)
+	if err := h.result(done); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// R2: an unreadable budget is "below floor" for a second holder — never a
+// failure — and the wait says it could not be read.
+func TestMultiBedUnreadableBudgetBlocksASecondHolderWithoutFailing(t *testing.T) {
+	fi := &fakeIdentity{budgetErr: errors.New("gh exited 1: HTTP 502")}
+	h := newFloorHarness(t, fi)
+	_, done := h.run(context.Background(), []Cell{cAppOn, cAppOff})
+	h.expectStart("A app/on")
+	h.expectWait("B app/off user:arbeithand floor")
+	h.noStart()
+	if !strings.Contains(h.out(), "but its budget could not be read (gh exited 1: HTTP 502)") {
+		t.Errorf("out:\n%s", h.out())
+	}
+	fi.mu.Lock()
+	fi.budgetErr = nil
+	fi.budgets = map[string]int{"token-b": 4000}
+	fi.mu.Unlock()
+	h.expectStart("B app/off")
+	h.finish("B app/off", nil)
+	h.finish("A app/on", nil)
+	if err := h.result(done); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// R2: the first holder of an identity needs no probe, so a one-bed-shaped run is
+// unchanged; a waiting bed's engine is stopped on a floor wait like on any other.
+func TestMultiBedFirstHolderIsNeverProbed(t *testing.T) {
+	fi := &fakeIdentity{budgets: map[string]int{"token-a": 1, "token-b": 1}}
+	h := newFloorHarness(t, fi)
+	_, done := h.run(context.Background(), []Cell{cAppOn})
+	h.expectStart("A app/on")
+	h.finish("A app/on", nil)
+	if err := h.result(done); err != nil {
+		t.Fatal(err)
+	}
+	if len(fi.probes) != 0 {
+		t.Errorf("a sole holder is never probed: %v", fi.probes)
+	}
+}
+
+// A leg finishing re-probes at once, without waiting for the timer: the finished
+// leg's release moves the epoch, so the stale reading is not reused.
+func TestMultiBedLegFinishReprobesWithoutTheTimer(t *testing.T) {
+	fi := &fakeIdentity{budgets: map[string]int{"token-b": 1500}}
+	h := newFloorHarness(t, fi)
+	h.g.Cfg.SharedIdentityReprobe = time.Hour
+	_, done := h.run(context.Background(), []Cell{cAppOn, cAppOff})
+	h.expectStart("A app/on")
+	h.expectWait("B app/off user:arbeithand floor")
+	fi.mu.Lock()
+	fi.budgets["token-b"] = 4000
+	fi.mu.Unlock()
+	h.noStart() // nothing has changed for the scheduler yet
+	h.finish("A app/on", nil)
+	h.expectStart("B app/off") // sole holder now: not even a probe is needed
+	h.finish("B app/off", nil)
+	if err := h.result(done); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// R3: RUN INVALID on an identity two beds share stops every cell that charges it,
+// in either role — here bed A's pat cell exhausts the login, and bed B's app cell,
+// which would only have used it as harness, is not started. (Control: without the
+// RUN INVALID that app cell runs.)
+func TestMultiBedRunInvalidOnASharedIdentityStopsCellsInEitherRole(t *testing.T) {
+	cells := []Cell{cPatOn, cAppOff}
+	t.Run("exhausted", func(t *testing.T) {
+		h := newSchedHarness(t, "arbeithand", "arbeithand", MatrixFull)
+		_, done := h.run(context.Background(), cells)
+		h.expectStart("A pat/on")
+		h.expectWait("B app/off user:arbeithand exclusive")
+		h.finish("A pat/on", &ExitError{Code: ExitBudgetExhausted})
+		err := h.result(done)
+		if exitCode(err) != ExitBudgetExhausted {
+			t.Fatalf("got %v", err)
+		}
+		if len(h.ran) != 1 {
+			t.Errorf("the harness-role cell must not start on an exhausted login: %v", h.ran)
+		}
+		if !strings.Contains(h.out(), "app/off — not started (identity user:arbeithand budget exhausted (RUN INVALID))") {
+			t.Errorf("out:\n%s", h.out())
+		}
+	})
+	t.Run("control: no exhaustion, the app cell runs", func(t *testing.T) {
+		h := newSchedHarness(t, "arbeithand", "arbeithand", MatrixFull)
+		_, done := h.run(context.Background(), cells)
+		h.expectStart("A pat/on")
+		h.expectWait("B app/off user:arbeithand exclusive")
+		h.finish("A pat/on", nil)
+		h.expectStartOneOf("A app/off", "B app/off")
+		h.finish(h.lastStarted, nil)
+		if err := h.result(done); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+// R3, the other direction: an exhausted login stops later cells on EITHER bed that
+// would have shared it as harness, while an exhausted App does not touch the
+// login's other users.
+func TestMultiBedExhaustedAppDoesNotStopTheSharedLoginsOtherCells(t *testing.T) {
+	h := newSchedHarness(t, "arbeithand", "arbeithand", MatrixSparse)
+	_, done := h.run(context.Background(), []Cell{cAppOn, cAppOff})
+	h.expectStarts("A app/on", "B app/off")
+	h.finish("A app/on", &ExitError{Code: ExitBudgetExhausted}) // exhausts app:77 only
+	h.finish("B app/off", nil)                                  // bed B's cell, on the login and app:88, is unaffected
+	if exitCode(h.result(done)) != ExitBudgetExhausted {
+		t.Fatal("exit code is the first failure's")
+	}
+	if !strings.Contains(h.out(), "exhausted identities: app:77\n") {
+		t.Errorf("out:\n%s", h.out())
+	}
+}
+
+// Non-vacuity of the floor tests: with the role split neutralised the second
+// cell is held back by exclusivity, not by the floor, and nothing is probed.
+func TestMultiBedFloorIsVacuousWithoutTheRoleSplit(t *testing.T) {
+	fi := &fakeIdentity{budgets: map[string]int{"token-b": 1500}}
+	h := newFloorHarness(t, fi)
+	h.g.roleSplitDisabledForTest = true
+	_, done := h.run(context.Background(), []Cell{cAppOn, cAppOff})
+	h.expectStart("A app/on")
+	h.expectWait("B app/off user:arbeithand exclusive")
+	h.finish("A app/on", nil)
+	h.expectStart("B app/off")
+	h.finish("B app/off", nil)
+	if err := h.result(done); err != nil {
+		t.Fatal(err)
+	}
+	if len(fi.probes) != 0 || strings.Contains(h.out(), "below the floor") {
+		t.Errorf("without the split there is no sharing to probe: probes=%v\n%s", fi.probes, h.out())
+	}
+}
