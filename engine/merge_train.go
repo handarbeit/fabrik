@@ -451,7 +451,7 @@ func (e *Engine) effectiveMaxTrainRebaseCycles() int {
 
 // capBatch returns the first max items of the batch. Its caller
 // (groupQueuedByRepoAndBase, engine/poll.go) sorts items ascending by
-// (StatusEnteredAt, Number) before this ever runs, so "first max" means the max
+// (queueOrderTime, Number) before this ever runs, so "first max" means the max
 // members that have waited longest to enter Queued — the ADR-059 D2 / FR-4
 // "ordered by entry" intent, now actually enforced (#1833, ADR-1833) rather than
 // merely asserted: before that fix, this comment claimed an ordering the caller

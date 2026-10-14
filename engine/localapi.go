@@ -825,7 +825,7 @@ func (b localAPIBackend) trainRows() []trainRow {
 		if it.IsPR || it.Status != hs.Name || it.IsClosed || hasLabelStr(it.Labels, "fabrik:paused") || it.LastDeepFetchAt.IsZero() {
 			return
 		}
-		rows = append(rows, trainRow{repo: it.Repo, base: trainBase(it.Labels), number: it.Number, entered: it.StatusEnteredAt})
+		rows = append(rows, trainRow{repo: it.Repo, base: trainBase(it.Labels), number: it.Number, entered: queueOrderTime(it.StatusAtGitHub, it.StatusEnteredAt)})
 	})
 	sort.Slice(rows, func(i, j int) bool {
 		if !rows[i].entered.Equal(rows[j].entered) {
