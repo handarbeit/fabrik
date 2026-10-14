@@ -95,7 +95,7 @@ All 29 functions of the bash `run.sh`, plus its top-level code.
 | `check_reviewer_reachable` | `consumers.go`: `Gate.CheckReviewerReachable` |
 | `run_pregate` | `pregate.go`: `Gate.RunPregate` |
 | `preflight_bed` | `bed.go`: `Gate.PreflightBed` |
-| `stop_bed_instance` | `bed.go`: `Gate.StopBedInstance` |
+| `stop_bed_instance` | `bed.go`: `Gate.StopBedInstance` (preflight/idle stop, SIGTERM); the exit-time stop is `teardown.go` (below) |
 | `write_isolated_bed_gitconfig` | `bed.go`: `Gate.WriteIsolatedBedGitconfig` |
 | `preflight_bed_start` | `bed.go`: `Gate.StartBed` and `Gate.BedStartCmd` — which also enables the test-only poll hold/trigger seam (#1978) via `pollctl.Env`; `lifecycle.go`'s `StartFabrikTestBed` appends the same entry so a restarted bed keeps it |
 | `prepare_bed_and_reset` | `bed.go`: `Gate.PrepareBedAndReset` |
@@ -344,8 +344,9 @@ process**, serialized only where they share a GitHub identity.
   using it, so a bed's engine is stopped (`stopIdleEngine`, SIGTERM via `StopBedInstance`) while
   the bed waits for an identity and once it has no more cells; every leg's `TestSwitchTrainMode`
   restart starts it again. This is what keeps D5's exclusion of the beds' own engines from the
-  #1684 check safe: no bed's engine spends an identity another bed's leg holds. (A single-bed run
-  leaves its bed running after the last leg, as before.)
+  #1684 check safe: no bed's engine spends an identity another bed's leg holds. Every bed's
+  engine is also stopped when the gate exits (see "Bed engine teardown on every exit"), cancel
+  included.
 * **Failure (D8).** A failing leg lets the other beds' **running** legs finish but no new cell starts.
   RUN INVALID (exit 3) is narrower: that bed's records for the cell are voided (`VoidBed`), its
   engine identity is marked exhausted, cells charging it **in either role** are not started, and
@@ -390,6 +391,34 @@ The prerequisites for bed B, how to verify each, the bed `.env` keys and how to 
 `FABRIK_TEST_PROJECT_OWNER`/`_NUMBER` and `E2E_APP_ID`/`E2E_APP_PRIVATE_KEY_PATH`/
 `E2E_APP_INSTALLATION_ID`. Run `E2E_BEDS=~/dev/fabrik-test,~/dev/fabrik-test-2 scripts/e2e/run.sh`.
 Tune the sharing with `E2E_SHARED_IDENTITY_FLOOR` (percent of the limit; default 40).
+
+## Bed engine teardown on every exit (#2245, ADR-2245)
+
+`Gate.run` defers `teardown.go`'s stop once it reaches the point where it mutates the bed (after
+the pre-gate and live preflights, so a pre-gate or precondition failure still touches nothing,
+ADR-1454). It runs on every return from there — suite pass or failure, post-suite watchdog, a
+failure after the engine was started, SIGINT/SIGTERM of the gate (on a context detached from the
+cancelled one, bounded by counted waits) — and in a multi-bed run covers each bed's view, in
+parallel. It never changes the exit code; a failed stop only warns.
+
+* **Ownership (R2).** The engine that outlives a gate is the harness's successor from the
+  last `TestSwitchTrainMode` restart, not the PID `StartBed` launched, so a PID recorded at start
+  is stale. The gate instead snapshots the lock-holder that existed before it touched the bed
+  (`pid` + start token). At exit the engine in `<bed>/.fabrik/fabrik.lock` is stopped only if it
+  is live, its start token is readable and differs from the snapshot, and it still holds the
+  lock's flock (a stale pid recycled by an unrelated process does not). Anything else is left
+  running, with the reason in the log line.
+* **Ladder (R1).** SIGINT to the engine, wait `StopWait`; a second SIGINT (the engine's force-quit,
+  ADR-1393), wait `KillGrace`; then `sessionreap.SignalGroup` (PID + start token re-checked,
+  ADR-1957) SIGTERM and SIGKILL, `KillGrace` each. No new knob.
+* **Log line (R3).** One per bed: `== bed engine: stopped pid N (...) ==`, `== bed engine: none
+  running at exit, nothing to stop ==`, or `warning: bed engine: left pid N running — <why>`.
+* **Seam.** `Gate.Procs` (`procs.go`; real `osProcs`, scripted `fakeProcs` in tests) covers
+  liveness, signals, start tokens and the flock probe, which are direct syscalls outside the
+  `Commander`.
+* **Gaps.** SIGKILL of the gate itself cannot run a `defer`. An engine an operator starts by hand
+  in the bed *during* a run is indistinguishable from the harness's and is stopped too.
+  `E2E_SKIP_PREP` leaves a pre-existing engine alone unless a leg's restart replaced it.
 
 ## Behaviour deltas and quirks
 

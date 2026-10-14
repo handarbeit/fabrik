@@ -69,6 +69,10 @@ type Gate struct {
 	// once, so it must be safe for concurrent use.
 	OnLeg func(LegResult)
 
+	// Procs is the seam onto host processes for the bed-engine teardown (#2245);
+	// nil means the real one. Stateless, so per-bed views share it.
+	Procs Procs
+
 	// Seams for time and the OS.
 	Sleep func(time.Duration)
 	Now   func() time.Time
@@ -373,6 +377,11 @@ func (g *Gate) run(ctx context.Context, argv []string) error {
 			return err
 		}
 	}
+	// From here the gate mutates the bed (and may start its engine): whatever
+	// way run returns — suite failure, watchdog, a failed start, cancellation —
+	// the engine it left behind is stopped (#2245). Registered only now, so a
+	// pre-gate or preflight failure still spends and touches nothing (ADR-1454).
+	defer g.snapshotBeds()()
 	var preflightText string
 	if g.multiBed() {
 		preflightText, err = g.prepareBeds(ctx, plan.Clean)

@@ -101,6 +101,9 @@ is untouched. `scripts/e2e/run.sh` builds it and `exec`s it, so the runner — n
 `go run` wrapper — receives INT/TERM and reaps everything it started. Every flag and
 environment variable below keeps its meaning. `scripts/e2e/reset.sh` is likewise a shim
 (`gate reset`). The shim builds into `${E2E_GATE_BIN_DIR:-$TMPDIR/fabrik-e2e-gate-<uid>}`.
+On every exit — pass, failure, watchdog or INT/TERM — the gate stops the bed engine it left
+running (SIGINT, then escalation) and logs one `bed engine:` line; see "Bed engine teardown on
+every exit" in the gate README (#2245).
 
 ## Test bed prerequisites
 
