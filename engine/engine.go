@@ -350,6 +350,7 @@ type Engine struct {
 	events                                chan tui.Event                // nil in tests / plain-text mode; TUI goroutine consumes
 	logFile                               *os.File                      // persistent log file at .fabrik/fabrik.log; nil if not opened
 	logMu                                 sync.Mutex                    // serializes concurrent writes to logFile
+	logSink                               atomic.Pointer[LogSink]       // optional per-Engine plain-text sink (#2247); nil: print to stdout
 	webhookMgr                            eventIngestionManager         // nil when no event-ingestion transport is active (#1142)
 	// heartbeatIntervalOverride overrides the package-level heartbeatInterval constant
 	// when non-zero. Used by tests to reduce the heartbeat period to sub-millisecond.
@@ -1134,12 +1135,17 @@ func (e *Engine) logEvent(issueNumber int, repo, tag, format string, args ...any
 		default:
 		}
 	} else {
-		// Plain-text mode: clear any transient status line before printing.
-		pollStatusClear()
-		if issueNumber == 0 {
-			fmt.Printf("[%s] %s", tag, msg)
+		if sink := e.logSink.Load(); sink != nil {
+			// A per-Engine sink (the sim bed, #2247) replaces the shared stdout.
+			(*sink)(issueNumber, tag, msg)
 		} else {
-			fmt.Printf("[#%d %s] %s", issueNumber, tag, msg)
+			// Plain-text mode: clear any transient status line before printing.
+			pollStatusClear()
+			if issueNumber == 0 {
+				fmt.Printf("[%s] %s", tag, msg)
+			} else {
+				fmt.Printf("[#%d %s] %s", issueNumber, tag, msg)
+			}
 		}
 	}
 	// Write to persistent log file in both TUI and plain-text modes.
