@@ -569,9 +569,9 @@ is why `scripts/sim/run.sh` now also passes an explicit `-timeout
 has room to actually finish instead of looking nonviable against a hidden
 default.
 
-**This now also applies to a bare `go test -race ./...`** (both
-`scripts/cut-release.sh` step 4 and CI's own `go test` step, REQ3/REQ4,
-#1677) — the previous version of this section stated the cap did *not*
+**This now also applies to a bare `go test -race ./...`** (CI's own
+`go test` step, REQ3/REQ4, #1677; `scripts/cut-release.sh` step 4 ran one too
+until v0.0.84, when the local race run was removed) — the previous version of this section stated the cap did *not*
 apply there, reasoning that CI's 2–4-core runners never hit this class of
 contention. That reasoning still holds for CI (the cap is a no-op there in
 practice), but not for a bare `go test -race ./...` run by hand on a

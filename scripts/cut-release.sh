@@ -28,8 +28,8 @@
 #   3. Sim suite + github wire-contract tests — unconditional pre-gate (R1/R2, #1454).
 #      Exports FABRIK_PREGATE_VERIFIED_SHA on success so step 5 doesn't pay for the
 #      identical pre-gate a second time (R5, #1624) — see export_pregate_verified_sha.
-#   4. go build, plugin hash and shipped-file table (no local go test -race:
-#      CI runs it on every PR; on macOS it only flaked — see step 4)
+#   4. go build, plugin hash and shipped-file table. No local go test -race:
+#      CI runs it on every PR, and on macOS it only flaked (removed in v0.0.84)
 #   5. Live e2e integration gate — mandatory by default; --skip-integration=<reason> is the
 #      one sanctioned, loud, release-notes-recorded escape hatch (R2, #1454). Always
 #      passes --clean (REQ1, #1677) to reset the shared bed first — a release cut and
@@ -462,8 +462,7 @@ PREV_TAG="$(git describe --tags --abbrev=0 --match='v*' 2>/dev/null || true)"
 # The live suite is the only layer that exercises real Claude, real review
 # bots, and real GitHub wire behaviour — nothing else in this pipeline can
 # substitute for it, and it is never retired or reduced (see
-# adrs/1454-sim-pre-gate-not-replacement.md). So unlike --skip-tests above,
-# there is no quiet default here: either the suite runs, or a human
+# adrs/1454-sim-pre-gate-not-replacement.md). So there is no quiet default here: either the suite runs, or a human
 # explicitly said why not, and that "why not" ships in the release notes
 # where anyone reading them can see it. A --skip-integration that silently
 # produced an unvalidated release was rejected outright (R2's option (a) vs
