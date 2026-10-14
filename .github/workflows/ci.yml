@@ -61,15 +61,13 @@ jobs:
           fi
 
       - name: go test
-        # -parallel capped via scripts/lib/parallel.sh's default_race_parallel
-        # (REQ4, #1677): this invocation includes the same git-forking
-        # tests/sim package that scripts/sim/run.sh's own SIM_PARALLEL caps
-        # locally — capping it here too keeps both entry points coherent
-        # rather than one being a no-op protection. CI's runners are 2-4
-        # cores (well below the min(4, cores) ceiling), so this is a no-op
-        # in practice today and exists for future-proofing / consistency,
-        # not because CI has ever reproduced the fork/exec SIGSEGV this cap
-        # guards against — see scripts/lib/parallel.sh's own header comment.
+        # -parallel comes from scripts/lib/parallel.sh's default_race_parallel
+        # (#1677, ADR-2228): 16 on Linux, 4 elsewhere (or the core count when
+        # lower). The cap of 4 exists for macOS, where a -race binary forking
+        # git from many goroutines crashed; Linux at 16 was clean across 15 CI
+        # runs (ADR-2228) and cuts tests/sim from ~405 s to ~182 s here. Every
+        # PR's run at 16 is the standing validation — a fork/exec SIGSEGV or
+        # tsan CHECK failure in this step is the signal to revisit it.
         run: |
           source scripts/lib/parallel.sh
           go test -race -timeout 20m -parallel "$(default_race_parallel)" ./...
