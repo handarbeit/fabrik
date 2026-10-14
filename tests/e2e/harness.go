@@ -851,6 +851,10 @@ func isTransientGitHubError(out string) bool {
 		"HTTP 502", "HTTP 503", "HTTP 504",
 		"Bad Gateway", "Service Unavailable", "Gateway Timeout",
 		"timed out", "connection reset",
+		// mergePullRequest refuses while another merge moves the base under it.
+		// Parallel tests merge into the same main, so this is a race, not a
+		// failure: TestPausedMergedPRRecovery/awaiting-review, 0.0.85 gate.
+		"Base branch was modified",
 	} {
 		if strings.Contains(out, s) {
 			return true
