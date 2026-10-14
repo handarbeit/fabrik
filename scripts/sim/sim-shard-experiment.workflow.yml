@@ -1,6 +1,9 @@
 # TEMPORARY (#2228): measurement workflow for R1 (Linux -race parallelism) and
-# R2 (sim sharding). Runs on pushes to the issue branch only and is deleted
-# before the PR is final. Results are read from job timings and logs.
+# R2 (sim sharding). Stored here, not under .github/workflows, because the
+# Fabrik GitHub App has no `workflows` permission and cannot push workflow
+# files. A maintainer copies it to .github/workflows/ on the issue branch to
+# run it (push trigger, this branch only), reads job timings and the R1RESULT
+# log lines, then deletes it.
 name: sim-shard-experiment
 
 on:
