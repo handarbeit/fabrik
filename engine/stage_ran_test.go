@@ -63,6 +63,13 @@ func TestStageRanOnEntry(t *testing.T) {
 		}
 	})
 
+	t.Run("a PR item always routes to the comment path", func(t *testing.T) {
+		item := gh.ProjectItem{Number: 1, IsPR: true}
+		if !eng.stageRanOnEntry(item, stage, false, false) {
+			t.Error("PR items are never stage-run, so their comments must keep going to the comment path")
+		}
+	})
+
 	t.Run("another stage's output comment is not", func(t *testing.T) {
 		item := gh.ProjectItem{Number: 1, Comments: []gh.Comment{{ID: "C1", Body: "🏭 **Fabrik — stage: Research**\noutput"}}}
 		if eng.stageRanOnEntry(item, stage, false, false) {
@@ -107,6 +114,13 @@ func TestItemNeedsWork_PendingCommentOnStageNotRun(t *testing.T) {
 	eng.store.Apply(itemstate.StageAttempted{Repo: "owner/repo", Number: 3, StageName: "Research", At: time.Now()})
 	if eng.itemNeedsWork(backoff) {
 		t.Error("a not-run stage inside its retry backoff must not be admitted by a pending comment")
+	}
+
+	// A PR board item is never stage-run; its pending comment must still admit it
+	// for the comment path, exactly as before #2220.
+	prItem := gh.ProjectItem{Number: 4, Status: "Research", IsPR: true, Comments: comments}
+	if !eng.itemNeedsWork(prItem) {
+		t.Error("a PR item with a pending comment must be admitted for the comment path")
 	}
 
 	eng.SetStageFirstRoutingDisabledForTest(true)

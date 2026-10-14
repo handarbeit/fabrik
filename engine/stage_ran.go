@@ -28,11 +28,15 @@ func (e *Engine) SetStageFirstRoutingDisabledForTest(disabled bool) {
 // written for, and it matches FR-003 ("whether the stage completed, blocked on
 // input or is still being reworked"). Anything undeterminable counts as "not
 // run", so the stage runs.
+//
+// A PR board item is never stage-run (processItem and itemNeedsWork return
+// early for it), so it always counts as ran: its pending comments keep going to
+// the comment path exactly as before #2220.
 func (e *Engine) stageRanOnEntry(item gh.ProjectItem, stage *stages.Stage, enginePaused, resumedFromPause bool) bool {
 	if e.stageFirstRoutingOff.Load() {
 		return true
 	}
-	if resumedFromPause || enginePaused {
+	if item.IsPR || resumedFromPause || enginePaused {
 		return true
 	}
 	for _, l := range []string{
