@@ -133,9 +133,12 @@ type simDumpState struct {
 }
 
 // dumpEndRE matches the lines a package prints after its dump: test2json's
-// package result ("FAIL\tpkg\t12s", "ok ..."), the go tool's "exit status N"
-// and a test's own "--- FAIL". Goroutine-dump text never starts with these.
-var dumpEndRE = regexp.MustCompile(`^(FAIL|ok|PASS|exit status |--- )`)
+// package result ("FAIL\tpkg\t12s", a bare "FAIL", "ok  \tpkg", "PASS"), the go
+// tool's "exit status N" and a test's own "--- FAIL". The patterns end at the
+// real terminator (tab, whitespace, end of line) rather than a bare prefix: a
+// debug=2 dump frame starts at column 0 with a package-qualified name, so
+// `okta.Client.Do(...)` or `FAILSAFE.run(...)` must not end the fold.
+var dumpEndRE = regexp.MustCompile(`^(FAIL(\t|$)|ok\s|PASS$|exit status \d|--- )`)
 
 type simPending struct {
 	lines   []string

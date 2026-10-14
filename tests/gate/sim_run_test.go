@@ -587,6 +587,9 @@ func TestSimStreamWriter_DumpFoldingIsScopedToItsPackageAndEnds(t *testing.T) {
 		pkgLine(a, "output", "TestHang", testlife.DumpHeaderPrefix+" (a) pid 1: ceiling ===\n"),
 		pkgLine(a, "output", "TestHang", "goroutine 17 [chan receive]:\n"),
 		pkgLine(a, "output", "TestHang", "main.blocked()\n"),
+		pkgLine(a, "output", "TestHang", "okta.Client.Do(0x1)\n"),   // a frame that merely starts with "ok"
+		pkgLine(a, "output", "TestHang", "FAILSAFE.run(0x2)\n"),     // ... or "FAIL"
+		pkgLine(a, "output", "TestHang", "PASSTHROUGH.copy(0x3)\n"), // ... or "PASS"
 		pkgLine(b, "run", "TestBroken", ""),
 		pkgLine(b, "output", "TestBroken", "    broken_test.go:9: expected 1 got 2\n"),
 		pkgLine(b, "fail", "TestBroken", ""),
@@ -603,14 +606,16 @@ func TestSimStreamWriter_DumpFoldingIsScopedToItsPackageAndEnds(t *testing.T) {
 		"(a) pid 1", "(c) pid 3", // each binary's dump header
 		"expected 1 got 2",             // another package's failing test
 		"FAIL\tx/tests/sim\t2640.239s", // the package result after the dump
-		"2 more goroutine-dump lines in the archive",
+		"5 more goroutine-dump lines in the archive",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("terminal lacks %q:\n%s", want, s)
 		}
 	}
-	if strings.Contains(s, "main.blocked()") {
-		t.Errorf("dump body leaked onto the terminal:\n%s", s)
+	for _, leaked := range []string{"main.blocked()", "okta.Client.Do", "FAILSAFE.run", "PASSTHROUGH.copy"} {
+		if strings.Contains(s, leaked) {
+			t.Errorf("dump body line %q leaked onto the terminal:\n%s", leaked, s)
+		}
 	}
 	if got := sw.dumps(); len(got) != 0 {
 		t.Errorf("no 'written to' line was sent, dumps() = %v", got)
