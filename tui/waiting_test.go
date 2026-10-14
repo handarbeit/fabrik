@@ -94,8 +94,8 @@ func TestWaitingRows_OmittedLineAndHeight(t *testing.T) {
 	if lines := strings.Count(view, "\n") + 1; lines > m.active.Height() {
 		t.Errorf("rendered %d lines in a pane of height %d", lines, m.active.Height())
 	}
-	if !strings.Contains(view, "In Progress (5)") {
-		t.Errorf("title should count the visible rows:\n%s", view)
+	if !strings.Contains(view, "In Progress (8)") {
+		t.Errorf("title should count the visible rows plus the omitted ones, matching the header:\n%s", view)
 	}
 }
 

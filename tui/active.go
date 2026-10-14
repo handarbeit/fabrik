@@ -185,7 +185,7 @@ func (a ActivePaneComponent) View(width int) string {
 	if a.focused {
 		focusIndicator = "▸"
 	}
-	title := activeStyle.Render(fmt.Sprintf("%s In Progress (%d)%s", focusIndicator, len(a.active)+len(a.blocked)+len(a.waitingRows()), a.slotsSuffix()))
+	title := activeStyle.Render(fmt.Sprintf("%s In Progress (%d)%s", focusIndicator, len(a.active)+len(a.blocked)+len(a.waitingRows())+a.waiting.Omitted, a.slotsSuffix()))
 
 	maxWidth := max(width-6, 20)
 
