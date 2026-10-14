@@ -64,10 +64,11 @@ jobs:
         # -parallel comes from scripts/lib/parallel.sh's default_race_parallel
         # (#1677, ADR-2228): 16 on Linux, 4 elsewhere (or the core count when
         # lower). The cap of 4 exists for macOS, where a -race binary forking
-        # git from many goroutines crashed; Linux at 16 was clean across 15 CI
-        # runs (ADR-2228) and cuts tests/sim from ~405 s to ~182 s here. Every
-        # PR's run at 16 is the standing validation — a fork/exec SIGSEGV or
-        # tsan CHECK failure in this step is the signal to revisit it.
+        # git from many goroutines crashed. On CI's 4-vCPU Linux runner one
+        # measurement run (ADR-2228) saw no crash in 5 runs at 16 (and 5 each at
+        # 4 and 8), cutting tests/sim from ~405 s to ~182 s. Five runs only bound
+        # the crash rate loosely, so every PR's run at 16 is the real validation:
+        # a fork/exec SIGSEGV or tsan CHECK failure in this step means revisit it.
         run: |
           source scripts/lib/parallel.sh
           go test -race -timeout 20m -parallel "$(default_race_parallel)" ./...
