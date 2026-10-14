@@ -106,10 +106,10 @@ index 18a546a3..c9265c22 100644
          run: bash scripts/ci/worker-shaped-test.sh
 diff --git a/tests/ciskip/workflow_test.go b/tests/ciskip/workflow_test.go
 new file mode 100644
-index 00000000..9bb40fa9
+index 00000000..da0e3afb
 --- /dev/null
 +++ b/tests/ciskip/workflow_test.go
-@@ -0,0 +1,48 @@
+@@ -0,0 +1,78 @@
 +package ciskip
 +
 +import (
@@ -146,15 +146,45 @@ index 00000000..9bb40fa9
 +		t.Errorf("both Go jobs need fetch-depth: 2 for the merge commit's base parent, found %d", got)
 +	}
 +
-+	// Every step other than checkout and classify is gated on a classifier output.
++	// Every step other than checkout and classify carries exactly the condition
++	// it must have. A Go step gated on a shell-check output (or the reverse), or
++	// a new step nobody classified, fails here instead of silently running or
++	// skipping the wrong thing.
++	const goGate = "if: steps.classify.outputs.skip != 'true'"
++	want := map[string]string{
++		"Set up Go":                     goGate,
++		"gofmt":                         goGate,
++		"go vet":                        goGate,
++		"Test hygiene lint":             goGate,
++		"go test":                       goGate,
++		"compile e2e suite (not run)":   goGate,
++		"go test (worker-shaped env)":   goGate,
++		"killgroup helper test (#1957)": "if: steps.classify.outputs.killgroup != 'false'",
++		"cut-release flag/gate regression test (#1454)": "if: steps.classify.outputs.cut_release != 'false'",
++		"ADR reference integrity":                       "if: steps.classify.outputs.adr_refs != 'false'",
++	}
++	seen := map[string]bool{}
 +	steps := strings.Split(ci, "\n      - name: ")
 +	for _, st := range steps[1:] {
-+		name, _, _ := strings.Cut(st, "\n")
++		name, body, _ := strings.Cut(st, "\n")
 +		if name == "Checkout" || strings.HasPrefix(name, "Classify the diff") {
 +			continue
 +		}
-+		if !strings.Contains(st, "if: steps.classify.outputs.") {
-+			t.Errorf("step %q is not gated on the classifier; a skipped job would still run it", name)
++		cond, ok := want[name]
++		if !ok {
++			t.Errorf("step %q has no expected classifier condition; add it to this table", name)
++			continue
++		}
++		seen[name] = true
++		// The step's own `if:` line (indented 8), not a mention in a comment.
++		if !regexp.MustCompile(`(?m)^        ` + regexp.QuoteMeta(cond) + `$`).MatchString(body) {
++			t.Errorf("step %q must be gated by exactly %q", name, cond)
++		}
++	}
++	// "Set up Go" and "go test" appear in both jobs; the rest once.
++	for name := range want {
++		if !seen[name] {
++			t.Errorf("expected step %q is missing from ci.yml", name)
 +		}
 +	}
 +}
