@@ -21,6 +21,7 @@ const (
 	landedBatchBody    = "🏭 **Fabrik merge-train** — Landed via batch PR #77."
 	landedFastPathBody = "🏭 **Fabrik merge-train** — Landed via singleton fast path PR #42. That is this PR: the pinned base was already an ancestor of this head, this PR was mergeable, and its own CI was green and complete, so it was landed directly — no trial branch was assembled and no separate integration PR exists. See ADR-1644."
 	landedOneByOneBody = "🏭 **Fabrik merge-train** — Landed one-at-a-time via singleton PR #55."
+	landedCatchUpBody  = "🏭 **Fabrik merge-train** — Landed via singleton fast path PR #42 after a catch-up. That is this PR: it was behind the pinned base, so Fabrik merged base `376cbc4bb0` into its own branch (head `94bffdca25`), its own CI was then green and complete on that head and it was mergeable, so it was landed directly — no trial branch was assembled and no separate integration PR exists. See ADR-1644 and ADR-2044."
 	postMergeReplyBody = "🏭 comment not applied: this item's work has already landed."
 	ejectionNoticeBody = "🏭 **Fabrik merge-train** — ejected from the batch."
 )
@@ -36,6 +37,7 @@ func TestLandingCommentPattern_MatchesAllThreeEngineForms(t *testing.T) {
 		"batch":      landedBatchBody,
 		"fast path":  landedFastPathBody,
 		"one-by-one": landedOneByOneBody,
+		"catch-up":   landedCatchUpBody,
 	} {
 		if !landingCommentPattern.MatchString(body) {
 			t.Errorf("%s: counting pattern does not match engine comment %q", name, body)
@@ -217,5 +219,17 @@ func TestLandingSettleWait_ScalesWithBedPollInterval(t *testing.T) {
 	t.Setenv("E2E_BED_POLL_SECONDS", "30")
 	if got := landingSettleWait(); got != 90*time.Second {
 		t.Errorf("30s poll: got %s, want 90s", got)
+	}
+}
+
+// The catch-up form must yield the member's own PR number and read as the fast
+// path, exactly as waitForLandingPRDetail interprets it.
+func TestLandedPRPattern_CatchUpFastPathForm(t *testing.T) {
+	m := landedPRPattern.FindStringSubmatch(landedCatchUpBody)
+	if m == nil || m[1] != "42" {
+		t.Fatalf("landedPRPattern on the catch-up form: got %v, want PR 42", m)
+	}
+	if !strings.Contains(m[0], "via singleton fast path") {
+		t.Errorf("catch-up form not read as the fast path: %q", m[0])
 	}
 }
