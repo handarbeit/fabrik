@@ -3775,6 +3775,19 @@ In terminals that support OSC 8 hyperlinks (Ghostty, iTerm2, WezTerm, Kitty), is
 
 Since #1648, a single repo can run multiple concurrent trains — one per resolved `(repo, base)` partition — when `Queued` holds items targeting different base branches. The TUI row is keyed by repo, not by partition, so two or more concurrently-training partitions in the same repo **share one row**: the later-started partition's title overwrites the earlier one's, and the first partition to finish removes the row while a sibling partition may still be running (its subsequent status lines then have no row to land in). This is a **display-only** limitation — no guard, counter, or landing decision reads the row, so engine behavior is unaffected. To make the shared row at least self-identifying, a non-default partition's title is prefixed with its base branch (e.g. `[maint/1.2] 2 of 2: #1701 #1702`); the default partition's title is unchanged.
 
+**Waiting rows (#2238).** Below the running and dependency-blocked rows, In Progress also lists the open items Fabrik is *holding on a known gate*, in the same shape as a blocked row — so an item that is quietly being watched never looks forgotten. `⏳` marks something external that Fabrik is waiting on; `✋` marks something only a person can resolve, so a glance tells you whether anything needs you:
+
+```
+⏳#2232 Validate     waiting for: CI on PR #2236 (5/7 checks, since 13:52)  retry backoff
+⏳#2240 Implement    waiting for: review from handarbeit-pruefer (since 13:50)
+⏳#2241 Implement    waiting for: retry at 14:03 (time slice)
+⏳#2243 Validate     waiting for: rebase (fabrik:rebase-needed)
+⏳#2245 Queued       waiting for: landing in merge train (Queued, position 2 of 3)
+✋#2250 Implement    waiting for: human reply (paused)
+```
+
+The rows come from the same classification `fabrik_status` and the channel events use, read from Fabrik's in-memory item state — the TUI makes no GitHub calls for them. A detail Fabrik does not know (the PR number or a "since" time right after a restart, a reviewer who was never formally requested, a merge-train position) is left out rather than guessed. `✋` rows come first; `⏳` rows follow, soonest known deadline first, then longest-waiting. At most five rows are shown, then `+K more waiting`. Dependency-blocked items keep their `🔒` rows, an item with a running worker shows only its running row, and the between-polls states (queued for a worker slot, waiting for the next dispatch) and stalled items are not listed here. When the poll found nothing to dispatch but waits are open, the header reads `waiting on N item(s)` (`, M need you` when any are `✋`) instead of `[poll] nothing to do`.
+
 Pressing `Enter` on an active item opens the inline detail panel, which shows Issue, Stage, Elapsed, and a live `Turns: N/M` counter for in-progress stages.
 
 **History**: Issue number, stage name, success/fail icon, duration, timestamp, turns used,

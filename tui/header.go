@@ -20,7 +20,14 @@ type HeaderComponent struct {
 	statusMsg         string
 	skillsStaleCount  int  // number of plugin skill files differing from embedded; 0 = up to date
 	customWorkflow    bool // operator has local customizations in .fabrik/plugin/
+	waitCount         int  // open items the engine is waiting on (#2238); kept apart from statusLine, which the next poll-level log line overwrites
+	humanCount        int  // of those, the ones that need a person
 }
+
+// HeaderNothingToDo is the status the poll loop logs when a poll dispatched nothing
+// (engine/poll.go: "[poll] nothing to do"). While waits are open it must not read
+// as idle, so it is rendered as the wait count instead (#2238 R4).
+const HeaderNothingToDo = "[poll] nothing to do"
 
 func (h HeaderComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
 	switch ev := msg.(type) {
@@ -44,6 +51,9 @@ func (h HeaderComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
 		if ev.IssueNumber == 0 {
 			h.statusLine = fmt.Sprintf("[%s] %s", ev.Tag, strings.TrimRight(ev.Message, "\n"))
 		}
+	case WaitingItemsEvent:
+		h.waitCount = ev.WaitCount
+		h.humanCount = ev.HumanCount
 	case SkillsStaleEvent:
 		h.skillsStaleCount = ev.Count
 	case CustomWorkflowEvent:
@@ -70,6 +80,9 @@ func (h HeaderComponent) View(width int) string {
 	displayStatus := h.statusMsg
 	if displayStatus == "" {
 		displayStatus = h.statusLine
+	}
+	if displayStatus == HeaderNothingToDo {
+		displayStatus = h.idleStatus(displayStatus)
 	}
 
 	status := ""
@@ -133,6 +146,20 @@ func (h HeaderComponent) View(width int) string {
 	}
 	gap := max(width-4-leftWidth-timerWidth, 0)
 	return " " + left + strings.Repeat(" ", gap) + timerStr
+}
+
+// idleStatus replaces the "nothing to do" status with the open-wait count when any
+// wait is open: "waiting on 2 item(s)", plus ", 1 need you" when a person must act.
+func (h HeaderComponent) idleStatus(idle string) string {
+	total := h.waitCount + h.humanCount
+	if total == 0 {
+		return idle
+	}
+	out := fmt.Sprintf("waiting on %d item(s)", total)
+	if h.humanCount > 0 {
+		out += fmt.Sprintf(", %d need you", h.humanCount)
+	}
+	return out
 }
 
 func (h HeaderComponent) Height() int {

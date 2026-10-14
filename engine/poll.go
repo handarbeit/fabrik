@@ -679,6 +679,7 @@ func (e *Engine) Run() error {
 	}
 	if e.events != nil {
 		go e.runWorkerSlotsPublisher(ctx, workerSlotsSampleInterval) // #2115: display-only slot readout
+		go e.runWaitingPublisher(ctx, waitingSampleInterval)         // #2238: display-only waiting rows
 	}
 
 	// Local read API (#1967): bound after the instance lock is held (so a

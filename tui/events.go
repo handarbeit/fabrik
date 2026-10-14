@@ -105,6 +105,41 @@ type WorkerSlotsEvent struct {
 
 func (WorkerSlotsEvent) tuiEvent() {}
 
+// WaitingKind distinguishes "Fabrik is waiting on something external" from "a human
+// must act" in the In Progress panel (#2238).
+type WaitingKind int
+
+const (
+	// WaitingExternal is an engine-held wait (CI, reviews, retry, rebase, merge train).
+	WaitingExternal WaitingKind = iota
+	// WaitingHuman is a wait that only a human can resolve (paused, decision pending).
+	WaitingHuman
+)
+
+// WaitingItem is one row of the waiting section of the In Progress pane.
+type WaitingItem struct {
+	Repo   string // "owner/repo" — empty for single-repo projects
+	Number int
+	Title  string
+	Stage  string
+	Kind   WaitingKind
+	Text   string // short description of what the item is waiting for
+}
+
+// WaitingItemsEvent is a full-replacement snapshot of the items the engine is
+// waiting on (#2238, ADR 2238), sampled from the item store by the engine and
+// delivered structurally so the latest value is never dropped. Items is already
+// ordered and capped by the engine; Omitted is how many further rows were cut.
+// HumanCount and WaitCount are the totals before the cap and drive the header.
+type WaitingItemsEvent struct {
+	Items      []WaitingItem
+	Omitted    int
+	HumanCount int
+	WaitCount  int
+}
+
+func (WaitingItemsEvent) tuiEvent() {}
+
 // IssueBlockedEvent is emitted when an issue is held at the dependency gate.
 // It is emitted each time checkDependencies fires for a blocked issue.
 type IssueBlockedEvent struct {

@@ -732,6 +732,14 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.active = comp.(ActivePaneComponent)
 		return m, nil
 
+	case WaitingItemsEvent:
+		comp, _ := m.active.Update(msg)
+		m.active = comp.(ActivePaneComponent)
+		hcomp, _ := m.header.Update(msg)
+		m.header = hcomp.(HeaderComponent)
+		m.updateLayout(false)
+		return m, nil
+
 	case TrainRowEvent:
 		comp, _ := m.active.Update(msg)
 		m.active = comp.(ActivePaneComponent)

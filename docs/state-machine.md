@@ -4869,6 +4869,22 @@ The catch-up loop only processes items with the complete label, so `fabrik:await
 **Multiple `stage:<X>:in_progress` labels:**
 No special handling. Each is independent. The engine only checks the in_progress label for the current stage's column.
 
+### 7.20 TUI Waiting Rows and Header Wait Count (#2238, ADR 2238)
+
+The In Progress pane lists items the engine is holding on a known gate, and the header says so instead of reading idle. It is a **sampled, display-only snapshot** like the worker-slot readout (ADR 2115) and the status-line field (§7.17): nothing reads it back and it adds no detection.
+
+**Publisher.** `Engine.runWaitingPublisher` (`engine/waiting_publish.go`; started in `Run()` beside `runWorkerSlotsPublisher`, only when `e.events != nil`) samples once per second. `sampleWaiting` builds the blocker index and merge-train rows with their own `Scan`s first, then one `store.Scan` over open, non-PR, `LabelsKnown` items in a managed or holding column, skipping `fabrik:blocked` items (those keep the `IssueBlockedEvent` path). Each item goes through the shared `attentionInput` → `attention.Classify` path (§7.13). Kept: `waiting`, `needs-human`, `escalated`, `suspended`. Dropped: `working` (it has its running row), `idle`, `stalled`, the `ci:red` overlay, and the between-polls `waiting-for-dispatch` / `queued-for-slot` codes. The result is a full-replacement `tui.WaitingItemsEvent{Items, Omitted, HumanCount, WaitCount}` sent with `emitStructural` only when it differs from the last one.
+
+**Read-only guarantee.** The file reads item state through `Scan` only and never `e.client`, `e.readClient`, `store.Get(`, `labelAppliedAt(` or a live gate (`TestWaitingPublisherSourceDoesNotReachGitHub`); the tests run it over a client that panics on any call.
+
+**Row text.** `waitingText(res, facts)` is a pure function of the classifier's `(State, Code, Cause)` and a few cache-only facts (`LinkedPR.Number`, check runs completed/total, requested reviewers, `LabelAppliedAt`, `PendingRetry.Due`, merge-train position via `trainSlot`). Unknown facts are omitted. Times are minute-resolution absolute clock times so the snapshot is stable between samples. Codes with no tailored wording fall back to the first clause of `Result.Summary`. The status-line text is not a source (ADR 2048).
+
+**Order and cap.** `✋` (needs-human, escalated, suspended) rows first by attention rank then ref; `⏳` rows (all unranked) by earliest known deadline, then longest-waiting, then ref. At most `waitingRowsMax` (5) rows are sent; `Omitted` carries the rest and `HumanCount`/`WaitCount` the totals.
+
+**TUI.** `ActivePaneComponent` renders the rows after the blocked rows (suppressing an item that has a running row), a dim `+K more waiting` line, and counts them in `Height()` and the title. `HeaderComponent` keeps the counts as separate state (the next poll-level `LogEvent` overwrites `statusLine`) and renders `waiting on N item(s)[, M need you]` in place of the exact status `[poll] nothing to do` (`tui.HeaderNothingToDo`, pinned against `engine/poll.go` by `TestPollNothingToDoWordingMatchesTheHeader`); any other status is untouched.
+
+**Known gap.** A `🔒` row is removed only when a worker starts for the item (§9.8), so an item that was blocked and later unblocked keeps its row; this feature does not change that.
+
 ---
 
 ## 9. Concurrency Model
