@@ -1059,6 +1059,11 @@ func (e *Engine) finalizeComments(ctx context.Context, board *gh.ProjectBoard, i
 	}
 	e.removeEditingLabel(owner, repo, item.Number)
 
+	// A comment-review run that did not block on input leaves no orphaned
+	// fabrik:awaiting-input behind (#1970). Covers comment review and the
+	// review/ci-fix/rebase reinvokes, which all end here.
+	e.clearOrphanAwaitingInput(item)
+
 	resolvedThreads := make(map[string]bool)
 	for _, c := range comments {
 		if e.reactToReviewBody(item.Number, c, "rocket", "🚀") {
