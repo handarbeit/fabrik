@@ -130,6 +130,22 @@ func NoOpCommentReview() CommentScript {
 	}
 }
 
+// CommentReviewNoMarker returns a CommentScript for a comment-review run that
+// does the requested work (a real commit, so headChanged is true) but, like the
+// shipped comment skills, never signals FABRIK_STAGE_COMPLETE and never emits
+// FABRIK_BLOCKED_ON_INPUT: completed=false. CommentReviewCompleted always emits
+// the completion marker, which reaches handleStageComplete and hides the
+// stale-fabrik:awaiting-input class this shape exposes (#1970).
+func CommentReviewNoMarker() CommentScript {
+	return func(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts engine.InvokeOptions) (string, bool, engine.TokenUsage, error) {
+		if err := commitStageMarker(workDir, stage.Name+"-comment", issue.Number); err != nil {
+			return "", false, engine.TokenUsage{}, err
+		}
+		output := fmt.Sprintf("Applied the requested change on %s.\n", stage.Name)
+		return output, false, defaultUsage(), nil
+	}
+}
+
 // SkillLoadFailed returns a Script mirroring a worker whose own configured
 // skill failed to load at runtime (#2138): the engine's runClaude replaces the
 // outcome with a *claudeerr.SkillLoadError whatever marker the worker printed,

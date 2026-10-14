@@ -557,7 +557,12 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// bot-comment backlog to be picked up as a separate invocation next poll.
 	if isAwaitingInput(item) {
 		if ok, raw, refused := e.resumeAuthorised(item); ok {
-			e.unblockAwaitingInput(item, stage)
+			if !e.unblockAwaitingInput(item, stage) {
+				// The pause could not be lifted: leave the comment unprocessed so
+				// the next poll resumes it, rather than marking it done and
+				// leaving the item paused with nothing to resume it (#1970).
+				return nil
+			}
 			return e.processComments(ctx, board, item, stage, raw)
 		} else if refused > 0 {
 			e.logf(item.Number, "skip", "awaiting user input: %d human comment(s) predate the pause — resume refused (ADR-1813)\n", refused)
@@ -578,7 +583,10 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 			if ok {
 				resumedFromPause = true
 				e.logf(item.Number, "unpause", "user commented on paused issue — unpausing\n")
-				e.removeLabel(item, "fabrik:paused")
+				if err := e.removeLabelChecked(item, "fabrik:paused"); err != nil {
+					e.logf(item.Number, "warn", "could not remove paused label, retrying next poll: %v\n", err)
+					return nil
+				}
 				// Also clear any failed label so the stage retries cleanly
 				e.clearFailedStage(item, stage)
 				break // fall through to comment processing below
@@ -590,6 +598,12 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 			}
 			return nil
 		}
+	}
+
+	// Both pause gates have passed: a bare fabrik:awaiting-input (the operator
+	// removed only fabrik:paused) is an orphan, not a pause (#1970).
+	if hasLabel(item.Labels, "fabrik:awaiting-input") && !hasLabel(item.Labels, "fabrik:paused") {
+		e.clearOrphanAwaitingInput(item)
 	}
 
 	// Dependency gate: block stage start if open blockers exist. This check runs
@@ -2505,12 +2519,21 @@ func (e *Engine) blockOnInput(item gh.ProjectItem, stage *stages.Stage, output s
 
 // unblockAwaitingInput is called when a user comment arrives on an issue that
 // was paused via blockOnInput. It removes both labels and clears LastAttemptAt
-// so the stage re-runs promptly after comment processing.
-func (e *Engine) unblockAwaitingInput(item gh.ProjectItem, stage *stages.Stage) {
+// so the stage re-runs promptly after comment processing. It returns false,
+// touching no counters, when fabrik:paused could not be removed (#1970): the
+// caller must not process the comment then, or it would be marked processed
+// with the pause still in force. A failed awaiting-input removal alone is
+// tolerated; clearOrphanAwaitingInput strips the bare label later.
+func (e *Engine) unblockAwaitingInput(item gh.ProjectItem, stage *stages.Stage) bool {
 	e.logf(item.Number, "unblock", "user comment received — removing awaiting-input pause\n")
 
-	e.removeLabel(item, "fabrik:paused")
-	e.removeLabel(item, "fabrik:awaiting-input")
+	if err := e.removeLabelChecked(item, "fabrik:paused"); err != nil {
+		e.logf(item.Number, "warn", "could not remove paused label, retrying next poll: %v\n", err)
+		return false
+	}
+	if err := e.removeLabelChecked(item, "fabrik:awaiting-input"); err != nil {
+		e.logf(item.Number, "warn", "could not remove awaiting-input label (orphan rule will clear it): %v\n", err)
+	}
 
 	// Clear LastAttemptAt so the stage re-runs immediately after comment processing,
 	// and reset retry/pause state that may have accumulated before the block.
@@ -2531,6 +2554,7 @@ func (e *Engine) unblockAwaitingInput(item gh.ProjectItem, stage *stages.Stage) 
 	// forward progress the pause was waiting for (#1555 review finding).
 	e.store.Apply(itemstate.EngineCyclesCleared{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 	e.resetCommentBreaker(item)
+	return true
 }
 
 // extractModelOverride scans item labels for the first "model:<name>" label and returns <name>.
