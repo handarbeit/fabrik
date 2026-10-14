@@ -38,7 +38,7 @@ Turning a rough issue into a clear spec. A vague issue produces a vague PR, so S
 
 ### Do I need the binary, or can I just use the plugin?
 
-There's a companion Claude Code plugin (the "Fabrik PM plugin") that needs no binary install. It gives your interactive Claude Code session awareness of your Fabrik board, so you can ask "what's on the board?" or "why is #42 stuck?" without leaving Claude Code. To actually run the pipeline, you need the CLI.
+There's a companion Claude Code plugin (the "Fabrik PM plugin"). It runs `fabrik mcp`, so the `fabrik` binary must be on your `PATH`, and it reads from your running daemon. It gives your interactive Claude Code session awareness of your Fabrik board, so you can ask "what's on the board?" or "why is #42 stuck?" without leaving Claude Code. To actually run the pipeline, you need the CLI.
 
 ### Can I change the stages and prompts?
 
