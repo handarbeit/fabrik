@@ -691,15 +691,18 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// Determine if we need to run the stage. LastAttemptAt is set only when Claude
 	// actually runs — never refreshed by observation — so it accurately reflects
 	// real invocation recency and prevents hot-looping after an incomplete run.
+	//
+	// lastAttempt stays the true last-attempt time: "has run before" drives the
+	// session resume and the worktree-sync skip below. backoffExempt is separate
+	// and gates only the cooldown — a time slice skips the backoff (#2232) but
+	// must still resume its session (#2292).
 	var lastAttempt time.Time
+	var backoffExempt bool
 	if snap, snapErr := e.store.Get(repoStr, item.Number); snapErr == nil {
 		lastAttempt = snap.LastAttemptAt(stage.Name)
-		if snap.BackoffExempt(stage.Name) {
-			// The last run ended as a time slice: no retry backoff (#2232).
-			lastAttempt = time.Time{}
-		}
+		backoffExempt = snap.BackoffExempt(stage.Name)
 	}
-	if !lastAttempt.IsZero() {
+	if !lastAttempt.IsZero() && !backoffExempt {
 		// If stage completed, the completion label above would have caught it.
 		// If we're here, the stage was attempted but didn't complete.
 		// Apply a cooldown to avoid hot-looping.
