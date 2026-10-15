@@ -351,10 +351,17 @@ func TestCauseVocabulary(t *testing.T) {
 			func(in *Input) { in.Labels = []string{"fabrik:paused"}; in.PausedByEngine = true; in.DaemonStop = true },
 			func(in *Input) { in.Labels = []string{"fabrik:paused"}; in.PausedByEngine = true }},
 		{"unknown-merge-state", CauseUnknownMergeState,
-			func(in *Input) { in.Labels = []string{"fabrik:paused", "fabrik:awaiting-input"}; in.UnknownMergeState = true },
+			func(in *Input) {
+				in.Labels = []string{"fabrik:paused", "fabrik:awaiting-input"}
+				in.UnknownMergeState = true
+			},
 			func(in *Input) { in.Labels = []string{"fabrik:paused", "fabrik:awaiting-input"} }},
 		{"unknown-merge-state on an escalated pause", CauseUnknownMergeState,
-			func(in *Input) { in.Labels = []string{"fabrik:paused"}; in.PausedByEngine = true; in.UnknownMergeState = true },
+			func(in *Input) {
+				in.Labels = []string{"fabrik:paused"}
+				in.PausedByEngine = true
+				in.UnknownMergeState = true
+			},
 			func(in *Input) { in.Labels = []string{"fabrik:paused"}; in.PausedByEngine = true }},
 		{"slot-starved (queued)", CauseSlotStarved,
 			func(in *Input) { in.HasWorker, in.WorkerQueued = true, true },
