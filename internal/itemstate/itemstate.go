@@ -375,7 +375,13 @@ type LinkedPRState struct {
 	// stage:Validate:complete was last applied. The SHA-invalidation scan in
 	// engine/poll.go compares this against the current HeadSHA to detect force-pushes
 	// or external commits after Validate finished. Empty string means "not recorded"
-	// (pre-feature or no Validate completion in this session).
+	// (pre-feature, or a restart that has not yet been rebuilt).
+	//
+	// After a restart the engine rebuilds it from the Validate stage comment's commit:
+	// header before the landing decision (#2343, ADR-2343). That header holds an
+	// ABBREVIATED SHA, so the rebuilt value is the full live head when the head is
+	// unchanged and the abbreviated commit otherwise. Consumers must therefore only
+	// compare it for (in)equality with a full head; never use it as a git revision.
 	ValidateCompletedSHA string
 
 	// LastHeadSHAUpdate records when the linked PR's HeadSHA was last observed to
