@@ -2341,13 +2341,12 @@ func TestMergeTrainWorker_PendingReviewEject_DiscardsGreenTrialAndReforms(t *tes
 	eng.worktreeManagers["owner/repo"] = wm
 	eng.mu.Unlock()
 
-	// Flag #1 for a pending review-finding eject once the run is claimed, BEFORE the worker runs — simulates
-	// settleQueuedReviewFindings having observed an unresolved thread on #1 while a
-	// worker was already in flight for this repo.
-
 	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1"), makeTrainItem(2, "Issue 2")}
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_1", trialName: fmt.Sprintf("merge-train-repo-%d", time.Now().Unix())}
 	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
+	// Flag #1 for a pending review-finding eject, stamped with the claimed run, BEFORE the
+	// worker runs — simulates settleQueuedReviewFindings having observed an unresolved
+	// thread on #1 while a worker was already in flight for this repo.
 	eng.markPendingReviewEject("owner/repo", 1, 2, state)
 	eng.store.EnterRepoWorker(mergeTrainKey("owner/repo", "main"))
 
@@ -4957,13 +4956,12 @@ func TestMergeTrainWorker_SingletonWithPendingReviewEject_EjectsInsteadOfFastPat
 	eng.worktreeManagers["owner/repo"] = wm
 	eng.mu.Unlock()
 
-	// Flag #1 for a pending review-finding eject once the run is claimed, BEFORE the worker runs —
-	// simulates settleQueuedReviewFindings having observed an unresolved
-	// thread on #1 while a worker was already in flight for this repo.
-
 	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1")}
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_1", trialName: fmt.Sprintf("merge-train-repo-%d", time.Now().Unix())}
 	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
+	// Flag #1 for a pending review-finding eject, stamped with the claimed run, BEFORE the
+	// worker runs — simulates settleQueuedReviewFindings having observed an unresolved
+	// thread on #1 while a worker was already in flight for this repo.
 	eng.markPendingReviewEject("owner/repo", 1, 2, state)
 	eng.store.EnterRepoWorker(mergeTrainKey("owner/repo", "main"))
 
