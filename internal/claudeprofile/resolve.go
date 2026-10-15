@@ -1,6 +1,7 @@
 package claudeprofile
 
 import (
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -26,16 +27,45 @@ const (
 	LayerAmbient  Layer = BareEnv
 )
 
+// Names are the operator-facing spellings of the layers a daemon owns. The zero
+// value is Fabrik's own (--claude-config-dir, FABRIK_CLAUDE_CONFIG_DIR,
+// .fabrik/config.yaml); Pruefer sets its own so the startup line and the
+// disagreement warning name what its operator actually typed (#2294). The
+// precedence itself is not configurable.
+type Names struct {
+	// Flag is the command-line flag as written, e.g. "-claude-config-dir".
+	Flag string
+	// Env is the deliberate, daemon-owned variable. It is also the key looked up
+	// in Inputs.Dotenv.
+	Env string
+	// YAML is the config file's name, e.g. ".pruefer/config.yaml".
+	YAML string
+}
+
+func (n Names) withDefaults() Names {
+	if n.Flag == "" {
+		n.Flag = string(LayerFlag)
+	}
+	if n.Env == "" {
+		n.Env = DeliberateEnv
+	}
+	if n.YAML == "" {
+		n.YAML = string(LayerYAML)
+	}
+	return n
+}
+
 // Inputs carries every source as data; Resolve reads no environment, file or
 // clock, so the caller decides what the process environment looked like.
 type Inputs struct {
 	// Flag is the --claude-config-dir value.
 	Flag string
-	// ShellFabrik is FABRIK_CLAUDE_CONFIG_DIR from the shell environment,
-	// captured before .env was loaded.
+	// ShellFabrik is the deliberate variable (FABRIK_CLAUDE_CONFIG_DIR unless
+	// Names.Env says otherwise) from the shell environment, captured before .env
+	// was loaded.
 	ShellFabrik string
 	// Dotenv is the parsed .env file (read as data, never exported for these
-	// two names). Only DeliberateEnv and BareEnv are consulted.
+	// two names). Only the deliberate name and BareEnv are consulted.
 	Dotenv map[string]string
 	// YAML is config.yaml's claude_config_dir.
 	YAML string
@@ -49,6 +79,8 @@ type Inputs struct {
 	// would otherwise resolve ".claude-work" against a different base than the
 	// startup line and footer did. Empty leaves relative values as written.
 	Cwd string
+	// Names overrides the layer spellings; the zero value is Fabrik's.
+	Names Names
 }
 
 // Source is one layer that supplied a non-empty value.
@@ -77,6 +109,7 @@ type Resolution struct {
 // any layer means "not set".
 func Resolve(in Inputs) Resolution {
 	var r Resolution
+	n := in.Names.withDefaults()
 	add := func(layer Layer, name, raw string) {
 		if raw == "" {
 			return
@@ -87,17 +120,34 @@ func Resolve(in Inputs) Resolution {
 		}
 		r.Sources = append(r.Sources, Source{Layer: layer, Name: name, Dir: dir})
 	}
-	add(LayerFlag, string(LayerFlag), in.Flag)
-	add(LayerShellEnv, DeliberateEnv, in.ShellFabrik)
-	add(LayerDotenv, ".env "+DeliberateEnv, in.Dotenv[DeliberateEnv])
+	add(LayerFlag, n.Flag, in.Flag)
+	add(LayerShellEnv, n.Env, in.ShellFabrik)
+	add(LayerDotenv, ".env "+n.Env, in.Dotenv[n.Env])
 	add(LayerDotenv, ".env "+BareEnv, in.Dotenv[BareEnv])
-	add(LayerYAML, ".fabrik/config.yaml claude_config_dir", in.YAML)
+	add(LayerYAML, n.YAML+" claude_config_dir", in.YAML)
 	add(LayerAmbient, BareEnv+" (environment)", in.Ambient)
 	if len(r.Sources) > 0 {
 		r.Dir = r.Sources[0].Dir
 		r.Winner = r.Sources[0].Layer
 	}
 	return r
+}
+
+// ResolveHost fills Home and Cwd from the process when the caller left them
+// empty, resolves, and fills each source's account email. It is the one wrapper
+// both daemons (fabrik, pruefer) call, so neither carries its own copy.
+func ResolveHost(in Inputs) Resolution {
+	if in.Home == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			in.Home = home
+		}
+	}
+	if in.Cwd == "" {
+		if cwd, err := os.Getwd(); err == nil {
+			in.Cwd = cwd
+		}
+	}
+	return Resolve(in).FillAccounts(Account)
 }
 
 // normalize expands a leading "~", anchors a relative path at cwd and cleans

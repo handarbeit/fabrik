@@ -1160,17 +1160,7 @@ func resolveBool(envVar string, pcVal bool) bool {
 // is the single value every consumer (workers, the apiKeyHelper check, the
 // startup line, the TUI footer) reads via claudeprofile.Current().
 func resolveClaudeProfile(in claudeprofile.Inputs) claudeprofile.Resolution {
-	if in.Home == "" {
-		if home, err := os.UserHomeDir(); err == nil {
-			in.Home = home
-		}
-	}
-	if in.Cwd == "" {
-		if cwd, err := os.Getwd(); err == nil {
-			in.Cwd = cwd
-		}
-	}
-	return claudeprofile.Resolve(in).FillAccounts(claudeprofile.Account)
+	return claudeprofile.ResolveHost(in)
 }
 
 // resolveGHESHost resolves the GHES host from flag > FABRIK_GHES_HOST env var

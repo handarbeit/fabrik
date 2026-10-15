@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+
+	"github.com/handarbeit/fabrik/internal/claudeprofile"
 )
 
 // ReviewEnvPassthroughVar names the operator opt-in that forwards additional,
@@ -29,6 +31,10 @@ const ReviewEnvPassthroughVar = "PRUEFER_REVIEW_ENV_PASSTHROUGH"
 // documented deployment is subscription-backed (credentials live in the
 // CLAUDE_CONFIG_DIR profile; adrs/1113). A host that authenticates through a
 // variable names it with ReviewEnvPassthroughVar.
+//
+// CLAUDE_CONFIG_DIR is listed only so checkReviewEnvScrubbed accepts the value
+// buildReviewEnv emits (#2294): reviewProcessEnv never copies it from the
+// daemon environment, and listing it in ReviewEnvPassthroughVar has no effect.
 var reviewEnvAllowExact = map[string]bool{
 	"PATH": true, "HOME": true, "USER": true, "LOGNAME": true,
 	"SHELL": true, "TERM": true, "TMPDIR": true, "TEMP": true, "TMP": true,
@@ -117,6 +123,12 @@ func reviewProcessEnv(environ []string, req ReviewRequest) []string {
 			continue
 		}
 		name := kv[:i]
+		if name == claudeprofile.BareEnv {
+			// Never inherited (#2294): the profile a review runs under is the
+			// resolved ReviewRequest.ClaudeConfigDir, emitted by buildReviewEnv, so
+			// an overridden or unset daemon value cannot reach the subprocess.
+			continue
+		}
 		if reviewEnvAllowed(name) || passthrough[name] {
 			base = append(base, kv)
 		}

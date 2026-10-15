@@ -20,6 +20,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/handarbeit/fabrik/internal/claudeprofile"
 )
 
 type probeDenial struct {
@@ -46,6 +48,11 @@ func runProbe(t *testing.T, req ReviewRequest, prompt string) probeOutcome {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "claude", args...)
 	cmd.Dir = req.WorkDir
+	if req.ClaudeConfigDir == "" {
+		// The probe runs under the operator's own profile; production reviews get
+		// theirs from the resolver rather than by inheritance (#2294).
+		req.ClaudeConfigDir = os.Getenv(claudeprofile.BareEnv)
+	}
 	cmd.Env = reviewProcessEnv(os.Environ(), req)
 	cmd.Stdin = strings.NewReader(prompt)
 	var out bytes.Buffer

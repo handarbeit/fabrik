@@ -218,6 +218,26 @@ func LoadDotenv() error {
 	return godotenv.Load(".env")
 }
 
+// ReadDotenv returns the contents of .env in the current directory as data and
+// exports nothing (#2294). It applies the same gitignore guard as every other
+// loader. It returns nil when there is no .env. A daemon re-reads it on reload
+// through this function so a name added to .env after startup is never newly
+// exported into the process environment.
+func ReadDotenv() (map[string]string, error) {
+	present, err := checkDotenv()
+	if err != nil || !present {
+		return nil, err
+	}
+	data, err := godotenv.Read(".env")
+	if err != nil {
+		return nil, err
+	}
+	if data == nil {
+		data = map[string]string{}
+	}
+	return data, nil
+}
+
 // LoadDotenvWithholding is LoadDotenv for callers that resolve some names
 // themselves (#2293). It applies the same guards and the same "never overwrite
 // a variable that is already set" rule, but does not export the withheld
@@ -229,12 +249,8 @@ func LoadDotenv() error {
 // withheld name can never reappear there looking like an inherited value. A
 // caller must also never os.Setenv the resolved result for the same reason.
 func LoadDotenvWithholding(withheld ...string) (map[string]string, error) {
-	present, err := checkDotenv()
-	if err != nil || !present {
-		return nil, err
-	}
-	data, err := godotenv.Read(".env")
-	if err != nil {
+	data, err := ReadDotenv()
+	if err != nil || data == nil {
 		return nil, err
 	}
 	skip := make(map[string]bool, len(withheld))

@@ -211,3 +211,14 @@ type UnrecognizedInstallationsEvent struct {
 }
 
 func (UnrecognizedInstallationsEvent) tuiEvent() {}
+
+// ClaudeAccountEvent reports the email of the Claude profile reviews now run
+// under (#2294). Emitted when a SIGHUP reload changes the effective profile
+// directory, so the footer does not keep naming the previous account; the
+// startup value arrives through Info. Empty Account means the profile's email
+// is unreadable (or the default profile has none).
+type ClaudeAccountEvent struct {
+	Account string
+}
+
+func (ClaudeAccountEvent) tuiEvent() {}

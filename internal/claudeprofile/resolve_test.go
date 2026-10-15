@@ -138,3 +138,70 @@ func TestFillAccounts_DoesNotMutateReceiver(t *testing.T) {
 		t.Errorf("a=%+v b=%+v", a, b)
 	}
 }
+
+var prueferNames = Names{Flag: "-claude-config-dir", Env: "PRUEFER_CLAUDE_CONFIG_DIR", YAML: ".pruefer/config.yaml"}
+
+// #2294: a daemon with its own names gets the same precedence, spelled in its
+// own terms, and never reads Fabrik's .env key.
+func TestResolve_CustomNames(t *testing.T) {
+	in := Inputs{
+		Flag:        "/flag",
+		ShellFabrik: "/shell",
+		Dotenv: map[string]string{
+			"PRUEFER_CLAUDE_CONFIG_DIR": "/dotenv-own",
+			DeliberateEnv:               "/dotenv-fabrik-must-be-ignored",
+			BareEnv:                     "/dotenv-bare",
+		},
+		YAML:    "/yaml",
+		Ambient: "/ambient",
+		Names:   prueferNames,
+	}
+	r := Resolve(in)
+	want := []Source{
+		{Layer: LayerFlag, Name: "-claude-config-dir", Dir: "/flag"},
+		{Layer: LayerShellEnv, Name: "PRUEFER_CLAUDE_CONFIG_DIR", Dir: "/shell"},
+		{Layer: LayerDotenv, Name: ".env PRUEFER_CLAUDE_CONFIG_DIR", Dir: "/dotenv-own"},
+		{Layer: LayerDotenv, Name: ".env CLAUDE_CONFIG_DIR", Dir: "/dotenv-bare"},
+		{Layer: LayerYAML, Name: ".pruefer/config.yaml claude_config_dir", Dir: "/yaml"},
+		{Layer: LayerAmbient, Name: "CLAUDE_CONFIG_DIR (environment)", Dir: "/ambient"},
+	}
+	if len(r.Sources) != len(want) {
+		t.Fatalf("sources = %+v, want %+v", r.Sources, want)
+	}
+	for i := range want {
+		if r.Sources[i] != want[i] {
+			t.Errorf("source %d = %+v, want %+v", i, r.Sources[i], want[i])
+		}
+	}
+	for _, s := range r.Sources {
+		if strings.Contains(s.Name, "FABRIK") || strings.Contains(s.Name, ".fabrik") {
+			t.Errorf("source name %q leaks a Fabrik spelling", s.Name)
+		}
+	}
+}
+
+// The zero Names value is Fabrik's own spelling, byte for byte.
+func TestResolve_ZeroNamesIsFabriks(t *testing.T) {
+	r := Resolve(fullInputs())
+	var names []string
+	for _, s := range r.Sources {
+		names = append(names, s.Name)
+	}
+	got := strings.Join(names, "|")
+	want := "--claude-config-dir|FABRIK_CLAUDE_CONFIG_DIR|.env FABRIK_CLAUDE_CONFIG_DIR|.env CLAUDE_CONFIG_DIR|.fabrik/config.yaml claude_config_dir|CLAUDE_CONFIG_DIR (environment)"
+	if got != want {
+		t.Errorf("names = %q, want %q", got, want)
+	}
+}
+
+func TestResolveHost_AnchorsRelativeAndFillsAccounts(t *testing.T) {
+	cwd := t.TempDir()
+	r := ResolveHost(Inputs{YAML: "rel", Cwd: cwd, Home: "/h"})
+	if want := cwd + "/rel"; r.Dir != want {
+		t.Errorf("Dir = %q, want %q", r.Dir, want)
+	}
+	r = ResolveHost(Inputs{YAML: "~/p", Home: "/h", Cwd: cwd})
+	if r.Dir != "/h/p" {
+		t.Errorf("Dir = %q, want /h/p", r.Dir)
+	}
+}

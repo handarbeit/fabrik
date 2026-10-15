@@ -24,10 +24,12 @@ func useTUI(cfg Config) bool {
 		(isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd()))
 }
 
-// tuiInfo gathers the header/footer's standing context. Read once at startup:
-// the working directory, build and Claude profile cannot change without a
-// re-exec, which rebuilds the TUI anyway.
-func tuiInfo(botLogin string) ptui.Info {
+// tuiInfo gathers the header/footer's standing context at startup: the working
+// directory and build cannot change without a re-exec, which rebuilds the TUI
+// anyway. The Claude profile can change on a SIGHUP reload, so the footer's
+// account is refreshed by a ptui.ClaudeAccountEvent (see handleReload);
+// claudeConfigDir is the resolved directory, "" for the default profile.
+func tuiInfo(botLogin, claudeConfigDir string) ptui.Info {
 	cwd, err := os.Getwd()
 	if err != nil {
 		cwd = ""
@@ -39,7 +41,7 @@ func tuiInfo(botLogin string) ptui.Info {
 		CWD:           cwd,
 		Version:       Version,
 		Identity:      botLogin,
-		ClaudeAccount: claudeprofile.Account(os.Getenv("CLAUDE_CONFIG_DIR")),
+		ClaudeAccount: claudeprofile.Account(claudeConfigDir),
 	}
 }
 
@@ -61,7 +63,7 @@ func runTUI(ctx context.Context, d *Daemon) error {
 		}
 	}
 
-	tuiModel := ptui.New(derivedRepoNames(d.derivedSet()), time.Now()).WithInfo(tuiInfo(d.BotLogin))
+	tuiModel := ptui.New(derivedRepoNames(d.derivedSet()), time.Now()).WithInfo(tuiInfo(d.BotLogin, d.config().ClaudeConfigDir))
 	p := tea.NewProgram(tuiModel, tea.WithAltScreen(), tea.WithoutSignalHandler())
 
 	go func() {

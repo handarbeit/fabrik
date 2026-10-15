@@ -57,7 +57,7 @@ func TestReviewProcessEnv_PassesAllowlisted(t *testing.T) {
 	m := envMap(reviewProcessEnv(daemonEnv(), ReviewRequest{Effort: "max"}))
 	for name, want := range map[string]string{
 		"PATH": "/usr/bin:/bin", "HOME": "/home/pruefer", "USER": "pruefer", "LANG": "en_US.UTF-8",
-		"LC_ALL": "en_US.UTF-8", "CLAUDE_CONFIG_DIR": "/home/pruefer/.claude-reviewer",
+		"LC_ALL": "en_US.UTF-8",
 		"TMPDIR": "/tmp", "HTTPS_PROXY": "http://proxy:3128", "SSL_CERT_FILE": "/etc/ssl/ca.pem",
 		"CLAUDE_CODE_EFFORT_LEVEL":              "max",
 		"CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING": "1",
@@ -65,6 +65,53 @@ func TestReviewProcessEnv_PassesAllowlisted(t *testing.T) {
 		if m[name] != want {
 			t.Errorf("%s = %q, want %q", name, m[name], want)
 		}
+	}
+}
+
+// #2294 R3: the review's profile is the resolved one, never the daemon's
+// inherited value. The daemon env holds CLAUDE_CONFIG_DIR=/home/pruefer/
+// .claude-reviewer ("A"); the resolved directory is "B".
+func TestReviewProcessEnv_ProfileIsTheResolvedOne(t *testing.T) {
+	env := reviewProcessEnv(daemonEnv(), ReviewRequest{ClaudeConfigDir: "/profiles/B"})
+	var got []string
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "CLAUDE_CONFIG_DIR") {
+			got = append(got, kv)
+		}
+	}
+	if len(got) != 1 || got[0] != "CLAUDE_CONFIG_DIR=/profiles/B" {
+		t.Errorf("CLAUDE_CONFIG_DIR entries = %v, want exactly [CLAUDE_CONFIG_DIR=/profiles/B]", got)
+	}
+	if err := checkReviewEnvScrubbed(env, nil); err != nil {
+		t.Errorf("built env fails the scrub check: %v", err)
+	}
+}
+
+// #2294 R3: nothing resolved means no CLAUDE_CONFIG_DIR at all, even though
+// the daemon inherited one.
+func TestReviewProcessEnv_NothingResolvedMeansNoProfileVariable(t *testing.T) {
+	for _, kv := range reviewProcessEnv(daemonEnv(), ReviewRequest{}) {
+		if strings.HasPrefix(kv, "CLAUDE_CONFIG_DIR") {
+			t.Errorf("review env holds %q though nothing resolved", kv)
+		}
+	}
+}
+
+// #2294 R3/R7: PRUEFER_CLAUDE_CONFIG_DIR is Pruefer's own setting. It never
+// reaches the subprocess, neither inherited nor through the opt-in list.
+func TestReviewProcessEnv_PrueferProfileVariableNeverForwarded(t *testing.T) {
+	env := append(daemonEnv(), PrueferClaudeConfigDirEnv+"=/profiles/X",
+		ReviewEnvPassthroughVar+"="+PrueferClaudeConfigDirEnv)
+	built := reviewProcessEnv(env, ReviewRequest{ClaudeConfigDir: "/profiles/B"})
+	if _, ok := envMap(built)[PrueferClaudeConfigDirEnv]; ok {
+		t.Errorf("%s reached the review process", PrueferClaudeConfigDirEnv)
+	}
+	if err := checkReviewEnvScrubbed(append(built, PrueferClaudeConfigDirEnv+"=/x"), nil); err == nil {
+		t.Errorf("checker accepted %s", PrueferClaudeConfigDirEnv)
+	}
+	_, refused := parseReviewEnvPassthrough(PrueferClaudeConfigDirEnv)
+	if len(refused) != 1 {
+		t.Errorf("%s was not refused by the opt-in list", PrueferClaudeConfigDirEnv)
 	}
 }
 

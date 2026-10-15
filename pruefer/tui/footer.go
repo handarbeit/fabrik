@@ -78,6 +78,8 @@ func (f FooterComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
 		f.skipCounts[ev.Reason] = ev.Total // cumulative: overwrite, never add
 	case SignatureDriftEvent:
 		f.sigDriftActive = ev.Active
+	case ClaudeAccountEvent:
+		f.info.ClaudeAccount = ev.Account
 	case UnrecognizedInstallationsEvent:
 		f.unrecognizedAccounts = append([]string(nil), ev.Accounts...)
 		f.unrecognizedCount = ev.Count
