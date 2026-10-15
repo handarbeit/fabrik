@@ -45,20 +45,51 @@ func cellDesc(c Cell) string { return c.Label() }
 // holder is who holds an identity.
 type holder struct{ bed, cell string }
 
-// idHold is everyone holding one identity (#2263): at most one ENGINE holder
-// (exclusive — nobody else holds the key in any role), or any number of HARNESS
-// holders (shared, above the budget floor). Never both.
+// use is how a cell holds one identity: an exclusive engine (an App
+// installation, or a pat engine with sharing disabled), a pat engine that shares
+// its user with other beds' harness use (Identity.SharesHarness), or harness.
+type use int
+
+const (
+	useHarness use = iota
+	useSharedEngine
+	useExclusive
+)
+
+func useOf(id Identity) use {
+	switch {
+	case id.Role != RoleEngine:
+		return useHarness
+	case id.SharesHarness:
+		return useSharedEngine
+	default:
+		return useExclusive
+	}
+}
+
+// conflicts says whether two uses of one identity by different beds cannot
+// overlap: an exclusive use excludes everything, and two engines never poll as
+// one user. Every other pair shares, above the budget floor.
+func conflicts(a, b use) bool {
+	return a == useExclusive || b == useExclusive || (a == useSharedEngine && b == useSharedEngine)
+}
+
+// idHold is everyone holding one identity (#2263): an EXCLUSIVE engine holder
+// (nobody else holds the key in any role), or at most one SHARED engine holder (a
+// pat engine on the bed token's user) plus any number of HARNESS holders, all
+// above the budget floor.
 type idHold struct {
 	excl   *holder
+	eng    *holder
 	shared []holder
 }
 
-// resv is a strict-queue head's reservation of an identity: excl for an engine
-// use (blocks every other bed), otherwise a harness use (blocks only another
-// bed's engine use, so harness sharing is not stopped by it).
+// resv is a strict-queue head's reservation of an identity, in the use the head
+// will hold it: it blocks another bed's use only where the two conflict, so
+// harness sharing is not stopped by it.
 type resv struct {
-	bed  int
-	excl bool
+	bed int
+	use use
 }
 
 // reading is one budget probe of a shared identity, valid only for the epoch it
@@ -268,20 +299,23 @@ func (s *multiSched) reprobeInterval() time.Duration {
 func (s *multiSched) check(i int, set []Identity) verdict {
 	var needFloor []Identity
 	for _, id := range set {
-		excl := id.Role == RoleEngine
+		u := useOf(id)
 		h := s.held[id.Key]
 		if h != nil {
 			if h.excl != nil {
-				return verdict{key: id.Key, reason: waitExclusive, text: s.heldText(id, *h.excl, true)}
+				return verdict{key: id.Key, reason: waitExclusive, text: s.heldText(id, *h.excl, useExclusive)}
 			}
-			if excl && len(h.shared) > 0 {
-				return verdict{key: id.Key, reason: waitExclusive, text: s.heldText(id, h.shared[0], false)}
+			if h.eng != nil && conflicts(u, useSharedEngine) {
+				return verdict{key: id.Key, reason: waitExclusive, text: s.heldText(id, *h.eng, useSharedEngine)}
+			}
+			if u == useExclusive && len(h.shared) > 0 {
+				return verdict{key: id.Key, reason: waitExclusive, text: s.heldText(id, h.shared[0], useHarness)}
 			}
 		}
-		if r, ok := s.reserved[id.Key]; ok && r.bed != i && (excl || r.excl) {
-			return verdict{key: id.Key, reason: waitReserved, text: fmt.Sprintf("needs %s%s, reserved for bed %s's next cell", id.Key, usesLabel(excl), s.beds[r.bed].bed.Name)}
+		if r, ok := s.reserved[id.Key]; ok && r.bed != i && conflicts(u, r.use) {
+			return verdict{key: id.Key, reason: waitReserved, text: fmt.Sprintf("needs %s%s, reserved for bed %s's next cell", id.Key, usesLabel(u), s.beds[r.bed].bed.Name)}
 		}
-		if !excl && h != nil && len(h.shared) > 0 && s.floorOn() {
+		if u != useExclusive && h != nil && (h.eng != nil || len(h.shared) > 0) && s.floorOn() {
 			needFloor = append(needFloor, id)
 		}
 	}
@@ -297,35 +331,60 @@ func (s *multiSched) check(i int, set []Identity) verdict {
 	}
 	for _, id := range needFloor {
 		r := s.budget[id.Key]
-		other := s.held[id.Key].shared[0]
+		h := s.held[id.Key]
+		other, otherUse := holder{}, useHarness
+		if h.eng != nil {
+			other, otherUse = *h.eng, useSharedEngine
+		} else {
+			other = h.shared[0]
+		}
 		floor := s.g.Cfg.SharedIdentityFloor
 		switch {
 		case r.err != nil:
-			return verdict{key: id.Key, reason: waitFloor, text: fmt.Sprintf("shares %s (harness) with bed %s (%s), but its budget could not be read (%v); re-probing when a leg finishes or in %s", id.Key, other.bed, other.cell, r.err, s.reprobeInterval())}
+			return verdict{key: id.Key, reason: waitFloor, text: fmt.Sprintf("shares %s (%s) with bed %s (%s, %s), but its budget could not be read (%v); re-probing when a leg finishes or in %s", id.Key, useName(useOf(id)), other.bed, other.cell, useName(otherUse), r.err, s.reprobeInterval())}
 		case r.remaining*100 < r.limit*floor:
-			return verdict{key: id.Key, reason: waitFloor, text: fmt.Sprintf("shares %s (harness) with bed %s (%s), but its budget is below the floor: %d of %d remaining (floor %d%%), resets %s; re-probing when a leg finishes or in %s", id.Key, other.bed, other.cell, r.remaining, r.limit, floor, r.resetAt, s.reprobeInterval())}
+			return verdict{key: id.Key, reason: waitFloor, text: fmt.Sprintf("shares %s (%s) with bed %s (%s, %s), but its budget is below the floor: %d of %d remaining (floor %d%%), resets %s; re-probing when a leg finishes or in %s", id.Key, useName(useOf(id)), other.bed, other.cell, useName(otherUse), r.remaining, r.limit, floor, r.resetAt, s.reprobeInterval())}
 		}
 	}
 	return verdict{ok: true}
 }
 
-func usesLabel(excl bool) string {
-	if excl {
-		return " exclusively"
+func useName(u use) string {
+	switch u {
+	case useExclusive:
+		return "engine"
+	case useSharedEngine:
+		return "pat engine"
+	default:
+		return "harness"
 	}
-	return " (harness)"
 }
 
-// heldText is the wait line's predicate for an identity another bed holds.
-func (s *multiSched) heldText(id Identity, by holder, exclusive bool) string {
-	if id.Role == RoleEngine {
+func usesLabel(u use) string {
+	if u == useExclusive {
+		return " exclusively"
+	}
+	return " (" + useName(u) + ")"
+}
+
+// heldText is the wait line's predicate for an identity another bed holds in
+// use by.
+func (s *multiSched) heldText(id Identity, by holder, byUse use) string {
+	if useOf(id) == useExclusive {
 		role := ""
-		if !exclusive {
+		switch byUse {
+		case useHarness:
 			role = " as harness"
+		case useSharedEngine:
+			role = " as pat engine"
 		}
 		return fmt.Sprintf("needs %s exclusively, held by bed %s (%s)%s", id.Key, by.bed, by.cell, role)
 	}
-	return fmt.Sprintf("needs %s (harness), held exclusively by bed %s (%s)", id.Key, by.bed, by.cell)
+	how := "exclusively"
+	if byUse == useSharedEngine {
+		how = "as pat engine"
+	}
+	return fmt.Sprintf("needs %s%s, held %s by bed %s (%s)", id.Key, usesLabel(useOf(id)), how, by.bed, by.cell)
 }
 
 // acquire takes every identity of set for bed i's cell q, each in its own role.
@@ -338,9 +397,12 @@ func (s *multiSched) acquire(i int, q *queued, set []Identity) {
 			h = &idHold{}
 			s.held[id.Key] = h
 		}
-		if id.Role == RoleEngine {
+		switch useOf(id) {
+		case useExclusive:
 			h.excl = &me
-		} else {
+		case useSharedEngine:
+			h.eng = &me
+		default:
 			h.shared = append(h.shared, me)
 		}
 	}
@@ -356,11 +418,16 @@ func (s *multiSched) release(i int, set []Identity) {
 		if h == nil {
 			continue
 		}
-		if id.Role == RoleEngine {
+		switch useOf(id) {
+		case useExclusive:
 			if h.excl != nil && h.excl.bed == name {
 				h.excl = nil
 			}
-		} else {
+		case useSharedEngine:
+			if h.eng != nil && h.eng.bed == name {
+				h.eng = nil
+			}
+		default:
 			for k, sh := range h.shared {
 				if sh.bed == name {
 					h.shared = append(h.shared[:k:k], h.shared[k+1:]...)
@@ -368,7 +435,7 @@ func (s *multiSched) release(i int, set []Identity) {
 				}
 			}
 		}
-		if h.excl == nil && len(h.shared) == 0 {
+		if h.excl == nil && h.eng == nil && len(h.shared) == 0 {
 			delete(s.held, id.Key)
 		}
 	}
@@ -434,7 +501,7 @@ func (s *multiSched) next(ctx context.Context, i int) decision {
 		}
 		if !v.ok {
 			for _, id := range hs {
-				s.reserved[id.Key] = resv{bed: i, excl: id.Role == RoleEngine}
+				s.reserved[id.Key] = resv{bed: i, use: useOf(id)}
 			}
 			noteWait(head, v)
 			return decision{wait: s.wake, hooks: hooks, reprobe: v.reason == waitFloor}

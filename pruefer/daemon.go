@@ -218,6 +218,12 @@ type Daemon struct {
 	// so concurrent writers are the normal case, not an edge case.
 	dropMu     sync.Mutex
 	dropCounts map[events.DropReason]int
+
+	// skipMu guards skipCounts (#2230 R4): cumulative per-reason counts of the
+	// heads skipped as a saving — patch unchanged, trial equivalent, pure
+	// catch-up. Written from the concurrent review goroutines.
+	skipMu     sync.Mutex
+	skipCounts map[string]int
 }
 
 // clientForOwner resolves the per-owner installation client, falling back to
@@ -657,6 +663,10 @@ func (d *Daemon) Run(ctx context.Context) (err error) {
 	// lifecycle in internal/githubauth.Reconciler.RunRefreshLoops).
 	go d.runRederivationTicker(ctx)
 
+	if msg := trustAnchorStartupNotice(d.config()); msg != "" {
+		logf(0, "startup", "%s\n", msg)
+	}
+
 	if d.EventSource != nil {
 		return d.runEventDriven(ctx)
 	}
@@ -861,6 +871,61 @@ func (d *Daemon) recordDrop(reason events.DropReason) {
 	}
 	d.dropCounts[reason]++
 	d.emit(ptui.DropEvent{Reason: string(reason), Total: d.dropCounts[reason], At: time.Now()})
+}
+
+// Saving-skip keys (#2230 R4), the plain strings used in the log and in
+// ptui.SkipEvent.Reason.
+const (
+	skipKeyPatchUnchanged  = "patch_unchanged"
+	skipKeyTrialEquivalent = "trial_equivalent"
+	skipKeyCatchUp         = "catch_up"
+)
+
+// savingSkipKey maps a skip reason to its counter key; ok is false for every
+// reason that is not a saving (draft, excluded, already reviewed, ...).
+func savingSkipKey(r SkipReason) (string, bool) {
+	switch r {
+	case SkipPatchUnchanged:
+		return skipKeyPatchUnchanged, true
+	case SkipTrialEquivalent:
+		return skipKeyTrialEquivalent, true
+	case SkipCatchUp:
+		return skipKeyCatchUp, true
+	}
+	return "", false
+}
+
+// recordSkip counts one saving skip, logs the running totals and emits a TUI
+// SkipEvent carrying the new cumulative total (a total, not a delta, so a
+// message lost to TUI backpressure self-heals — same reasoning as recordDrop).
+// Reasons that are not savings are ignored. Emission stays under the lock so
+// concurrent callers deliver totals in order.
+func (d *Daemon) recordSkip(prNumber int, reason SkipReason) {
+	key, ok := savingSkipKey(reason)
+	if !ok {
+		return
+	}
+	d.skipMu.Lock()
+	defer d.skipMu.Unlock()
+	if d.skipCounts == nil {
+		d.skipCounts = make(map[string]int)
+	}
+	d.skipCounts[key]++
+	logf(prNumber, "skips", "saved a review (%s); totals: patch_unchanged=%d trial_equivalent=%d catch_up=%d\n",
+		key, d.skipCounts[skipKeyPatchUnchanged], d.skipCounts[skipKeyTrialEquivalent], d.skipCounts[skipKeyCatchUp])
+	d.emit(ptui.SkipEvent{Reason: key, Total: d.skipCounts[key], At: time.Now()})
+}
+
+// SkipCounts returns a locked snapshot of the saving-skip counters. Exported
+// for tests.
+func (d *Daemon) SkipCounts() map[string]int {
+	d.skipMu.Lock()
+	defer d.skipMu.Unlock()
+	out := make(map[string]int, len(d.skipCounts))
+	for k, v := range d.skipCounts {
+		out[k] = v
+	}
+	return out
 }
 
 // DropCounts returns a locked snapshot of every recorded drop reason's
@@ -1436,6 +1501,9 @@ func (d *Daemon) executeReview(ctx context.Context, client GitHubLister, owner, 
 	}
 	if outcome.Err != nil {
 		logf(pr.Number, "warn", "reviewing %s/%s#%d: %v\n", owner, repo, pr.Number, outcome.Err)
+	}
+	if outcome.Skipped {
+		d.recordSkip(pr.Number, outcome.Reason)
 	}
 	errText := ""
 	if outcome.Err != nil {

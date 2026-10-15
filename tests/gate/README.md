@@ -318,9 +318,11 @@ process**, serialized only where they share a GitHub identity.
   exit 7, because the ledger is per SHA.
 * **Identities (D3/D4, roles #2263).** A cell charges a **set**: `app:<installation id>` on an app leg, plus
   `user:<login>` of the bed's `FABRIK_TOKEN` (the engine's PAT on a pat leg and the harness's token
-  on every leg), deduplicated and sorted. Each carries a **role**: the engine's identity is `engine`
-  (exclusive — no other cell holds it in any role), the harness token's user is `harness` (shared
-  by any number of cells). On a pat leg both are one key and `engine` wins (`engine+harness`). An unresolvable login refuses (exit 7); with no resolver
+  on every leg), deduplicated and sorted. Each carries a **role**: the engine's identity is `engine`, the harness token's user is
+  `harness` (shared by any number of cells). An App installation used as `engine` is exclusive: no
+  other cell holds it in any role. On a pat leg both are one key and `engine` wins
+  (`engine+harness`); that engine use **shares** the user with other beds' harness use (ADR 1990),
+  so only a second engine on the same user waits. An unresolvable login refuses (exit 7); with no resolver
   configured, the key falls back to `token:<hash>` so equal tokens still collide. After every app
   leg's restart, `verifyBedAppIdentity` reads the last startup in `bed-run.log` and refuses (exit 7)
   unless its `identity: GitHub App installation <N>` line names the `.env` installation;
@@ -336,9 +338,11 @@ process**, serialized only where they share a GitHub identity.
   identities, so a shared-queue bed cannot keep re-acquiring them ahead of it. Each wait is
   logged once per distinct reason: `== waiting: <cell> on bed B needs <identity> exclusively, held by
   bed A (<cell>) ==` (`… as harness` when the holder only shares it; `needs <identity> (harness),
-  held exclusively by …` for a harness use blocked by an engine holder), `…, reserved for bed A's next
-  cell ==`, or the budget floor (below). Reservations carry the role: an engine reservation blocks
-  every other bed, a harness reservation only another bed's engine use.
+  held exclusively by …` for a harness use blocked by an App engine holder; `needs <identity> (pat
+  engine), held as pat engine by …` for a second engine on one user), `…, reserved for bed A's next
+  cell ==`, or the budget floor (below). Reservations carry the use: an exclusive reservation blocks
+  every other bed, a pat-engine reservation another engine use, and a harness reservation only an
+  exclusive use.
 * **Shared-identity budget floor (#2263, ADR-2263).** A cell joining an identity others already hold
   as harness starts only if its remaining GraphQL budget is at least `E2E_SHARED_IDENTITY_FLOOR`
   percent (default 40; `0` disables the floor and its probe; non-numeric or outside 0-100 is

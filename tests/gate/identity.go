@@ -32,7 +32,9 @@ const (
 	RoleEngine Role = iota
 	// RoleHarness: the bed token's user when it is not also the engine identity.
 	// Only the live harness spends it, so any number of cells may hold it at once
-	// (above the budget floor); it still excludes an engine holder.
+	// (above the budget floor); it still excludes an exclusive engine holder. A
+	// pat leg's engine (Identity.SharesHarness) is not exclusive: it shares with
+	// harness holders too.
 	RoleHarness
 )
 
@@ -59,6 +61,13 @@ type Identity struct {
 	// wins the key, and the budget line says both.
 	Role        Role
 	AlsoHarness bool
+	// SharesHarness relaxes RoleEngine for a pat leg's engine identity, the bed
+	// token's user: it still excludes every other ENGINE holder of the key (two
+	// engines never poll as one user), but other cells may hold the key as
+	// harness alongside it, above the budget floor. An App installation is never
+	// shared. The v0.0.85 gate measured a pat engine plus the other bed's
+	// harness traffic at well under the user's hourly budget (#1990).
+	SharesHarness bool
 }
 
 // IdentityOps is the seam over every network call identity scheduling makes.
@@ -290,8 +299,10 @@ func (g *Gate) engineIdentity(auth string) (Identity, bool) {
 // the engine identity plus the harness token's (D4), deduplicated and sorted —
 // the order the scheduler acquires them in. The engine identity carries
 // RoleEngine; the harness token's user carries RoleHarness unless it IS the
-// engine identity (a pat leg), when the one entry stays RoleEngine (#2263).
-// roleSplitDisabledForTest restores the pre-#2263 rule: every identity engine.
+// engine identity (a pat leg), when the one entry stays RoleEngine (#2263) and
+// is marked SharesHarness. roleSplitDisabledForTest restores the pre-#2263
+// rule: every identity engine, nothing shared. patEngineShareDisabledForTest
+// restores the #2263 rule: a pat engine is exclusive.
 func (g *Gate) identitySet(auth string) []Identity {
 	var set []Identity
 	if eng, ok := g.engineIdentity(auth); ok {
@@ -307,6 +318,7 @@ func (g *Gate) identitySet(auth string) []Identity {
 		for i := range set {
 			if set[i].Key == h.Key {
 				set[i].AlsoHarness = true
+				set[i].SharesHarness = !g.root().roleSplitDisabledForTest && !g.root().patEngineShareDisabledForTest
 				dup = true
 			}
 		}

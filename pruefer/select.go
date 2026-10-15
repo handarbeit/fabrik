@@ -48,6 +48,17 @@ const (
 	// (#2066) the engine has vouched for via its marker comment, over a head
 	// Pruefer already reviewed. Decided in ReviewPR (catchup.go), not Eligible.
 	SkipCatchUp SkipReason = "pure merge-train catch-up of an already-reviewed head"
+
+	// SkipPatchUnchanged is reported when the PR's whole change against its
+	// merge base at this head is patch-identical to the change at the last head
+	// Pruefer completed a review of (#2230, patchskip.go): a rebase, a clean
+	// catch-up, a restored head. Decided in ReviewPR, not Eligible.
+	SkipPatchUnchanged SkipReason = "patch unchanged since the last reviewed head"
+
+	// SkipTrialEquivalent is reported for an engine-authored merge-train trial
+	// or integration PR whose every file is covered by a member PR's already
+	// reviewed patch (#2230, trialpr.go).
+	SkipTrialEquivalent SkipReason = "merge-train trial equivalent to its already-reviewed members"
 )
 
 // IgnoreLabel is the built-in opt-out: a PR carrying it is never reviewed, on

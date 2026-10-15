@@ -51,6 +51,22 @@ import (
 type ReviewTracker struct {
 	mu       sync.Mutex
 	reviewed map[reviewKey]struct{}
+	// patchChains counts, per PR, how many consecutive patch-unchanged skips
+	// (#2230, distinct heads) have been taken over the same last-reviewed head. Reset by any
+	// real review (Record). In memory only, like everything here.
+	patchChains map[prKey]patchChain
+}
+
+// prKey identifies a PR regardless of head.
+type prKey struct {
+	owner, repo string
+	prNumber    int
+}
+
+// patchChain is one PR's run of consecutive patch-unchanged skips.
+type patchChain struct {
+	reviewedSHA string              // the head every skip in the run was compared against
+	heads       map[string]struct{} // the distinct heads skipped in the run
 }
 
 // reviewKey identifies one (owner, repo, PR, head SHA) tuple. owner/repo are
@@ -104,4 +120,50 @@ func (t *ReviewTracker) Record(owner, repo string, prNumber int, headSHA string)
 		t.reviewed = make(map[reviewKey]struct{})
 	}
 	t.reviewed[newReviewKey(owner, repo, prNumber, headSHA)] = struct{}{}
+	delete(t.patchChains, prKey{strings.ToLower(owner), strings.ToLower(repo), prNumber})
+}
+
+// PatchSkips returns the number of consecutive patch-unchanged skips already
+// taken for owner/repo#prNumber over reviewedSHA (#2230), counted in distinct
+// skipped heads and not counting headSHA itself: re-evaluating a head that was
+// skipped but not memoised (a degraded read, an event racing a poll) is not a
+// longer chain. A nil receiver, a PR with no run, or a run over a different
+// reviewed head all report 0.
+func (t *ReviewTracker) PatchSkips(owner, repo string, prNumber int, reviewedSHA, headSHA string) int {
+	if t == nil {
+		return 0
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	c := t.patchChains[prKey{strings.ToLower(owner), strings.ToLower(repo), prNumber}]
+	if c.reviewedSHA != reviewedSHA {
+		return 0
+	}
+	n := len(c.heads)
+	if _, seen := c.heads[headSHA]; seen {
+		n--
+	}
+	return n
+}
+
+// NotePatchSkip records that headSHA was skipped over reviewedSHA and returns
+// the run's length in distinct heads. Noting the same head again does not
+// lengthen it. A nil receiver is a no-op returning 1.
+func (t *ReviewTracker) NotePatchSkip(owner, repo string, prNumber int, reviewedSHA, headSHA string) int {
+	if t == nil {
+		return 1
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.patchChains == nil {
+		t.patchChains = make(map[prKey]patchChain)
+	}
+	k := prKey{strings.ToLower(owner), strings.ToLower(repo), prNumber}
+	c := t.patchChains[k]
+	if c.reviewedSHA != reviewedSHA {
+		c = patchChain{reviewedSHA: reviewedSHA, heads: make(map[string]struct{})}
+	}
+	c.heads[headSHA] = struct{}{}
+	t.patchChains[k] = c
+	return len(c.heads)
 }

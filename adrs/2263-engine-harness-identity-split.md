@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (#2263). Amends ADR-1976 §2 (identity sets) and §4 (what a shared identity serializes); everything else in ADR-1976 stands. Builds on ADR-1975 (the sparse plan) and #1678 (the GraphQL budget numbers). **ADR-1454 is unchanged:** no live scenario moves to the sim. The live two-bed certification run, and standing up the second bed, are #1990.
+Accepted (#2263). **Amended by ADR 1990:** a pat leg's engine use of the bed token's user now shares it with other beds' harness use, above the same floor; only App engine identities stay exclusive. Amends ADR-1976 §2 (identity sets) and §4 (what a shared identity serializes); everything else in ADR-1976 stands. Builds on ADR-1975 (the sparse plan) and #1678 (the GraphQL budget numbers). **ADR-1454 is unchanged:** no live scenario moves to the sim. The live two-bed certification run, and standing up the second bed, are #1990.
 
 ## Context
 
