@@ -130,8 +130,11 @@ type trainRunRecord struct {
 
 	// RebaseCycles is the run's spent rebuild budget (#2298 R2): one per stale trial
 	// rebuilt on a moved base (handleStaleTrial) and one per main-moved landing rebase
-	// (landGreenBatchRun), bounded together by effectiveMaxTrainRebaseCycles(). It is
-	// persisted write-ahead so neither a restart nor a second actor can spend it twice.
+	// (landGreenBatchRun), bounded together by effectiveMaxTrainRebaseCycles(). The stale
+	// rebuild cycle is persisted write-ahead so neither a restart nor a second actor can
+	// spend it twice. A landing cycle is only incremented in memory: stepLanding is never
+	// resumed (adoptTrainRun drops the record and reconstructTrainState finishes the
+	// landing from GitHub's state), so no landing cycle needs to survive a restart.
 	RebaseCycles int `json:"rebase_cycles,omitempty"`
 	// StaleTrial is the name of the trial whose stale verdict has already been counted
 	// and acted on (re-pin, re-form set); replaying the verdict for the same trial after
