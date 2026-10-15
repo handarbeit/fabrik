@@ -437,8 +437,10 @@ func TestSettle_MergeableStateUnstable_PendingCheckRun_ReturnsUnsettled(t *testi
 }
 
 // TestSettle_MergeableStateUnstable_SkippedChecksOnly_ReturnsReady covers R5:
-// skipped/neutral/cancelled conclusions must not block. A PR that is
-// unstable purely because of non-blocking check conclusions still clears.
+// skipped/neutral conclusions must not block. A PR that is unstable purely
+// because of non-blocking check conclusions still clears. (#2296: cancelled
+// used to be listed here; a cancelled check has no result and no longer
+// clears — see TestSettle_CancelledCheck_ReturnsBlockedNamingConclusion.)
 func TestSettle_MergeableStateUnstable_SkippedChecksOnly_ReturnsReady(t *testing.T) {
 	client := &mockGitHubClient{
 		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
@@ -451,14 +453,13 @@ func TestSettle_MergeableStateUnstable_SkippedChecksOnly_ReturnsReady(t *testing
 			return []gh.CheckRun{
 				{Name: "optional-lint", Status: "completed", Conclusion: "skipped"},
 				{Name: "optional-preview", Status: "completed", Conclusion: "neutral"},
-				{Name: "optional-canary", Status: "completed", Conclusion: "cancelled"},
 			}, nil
 		},
 	}
 	eng := testEngineForMerge(t, client)
 	r := eng.settlePRMergeState(settleItem(1), &stages.Stage{Name: "Validate"})
 	if r.Status != PRMergeReady {
-		t.Errorf("expected PRMergeReady for mergeable_state=unstable with only skipped/neutral/cancelled checks, got %v (%s)", r.Status, r.Reason)
+		t.Errorf("expected PRMergeReady for mergeable_state=unstable with only skipped/neutral checks, got %v (%s)", r.Status, r.Reason)
 	}
 }
 

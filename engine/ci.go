@@ -283,6 +283,18 @@ func (e *Engine) ciProgressStalledSince(owner, repo string, item gh.ProjectItem)
 func (e *Engine) classifyCIFromCheckRuns(owner, repo string, item gh.ProjectItem, checkRuns []gh.CheckRun) (blocked, ciFailure, timedOut bool) {
 	status, pending, failed := gh.ClassifyCheckRuns(checkRuns)
 
+	if status == gh.CheckRunsNonPassing {
+		// #2296: a cancelled/stale/unrecognised latest run is a verdict, never a
+		// wait (FR-006, ADR-1410): it has no result and none is coming. Same
+		// routing as a failure — flake re-run, then the CI-fix path — with the
+		// real conclusion in the log.
+		e.logf(item.Number, "ci-gate", "CI check(s) did not pass: %s\n", describeNonPassing(gh.NonPassingCheckRuns(checkRuns)))
+		if !hasLabel(item.Labels, "fabrik:awaiting-ci") {
+			e.applyLabelAdd(item, "fabrik:awaiting-ci", false)
+		}
+		return true, true, false
+	}
+
 	if status == gh.CheckRunsFailed {
 		// CI failed — apply fabrik:awaiting-ci idempotently. A verdict, never
 		// a timeout (R3): fires unconditionally regardless of elapsed time.
@@ -547,32 +559,34 @@ func (e *Engine) buildCIFixComment(item gh.ProjectItem, stage *stages.Stage, wor
 	}
 
 	// Classify PR failures.
-	var failedLines []string
+	var failedLines, nonPassingLines []string
 	baseFailedNames := make(map[string]bool)
 	for _, cr := range baseRuns {
-		if cr.Status == "completed" {
-			switch cr.Conclusion {
-			case "failure", "timed_out", "action_required":
-				baseFailedNames[cr.Name] = true
-			}
+		if cr.Status == "completed" && gh.IsFailureConclusion(cr.Conclusion) {
+			baseFailedNames[cr.Name] = true
 		}
 	}
 	for _, cr := range prFailures {
-		if cr.Status == "completed" {
-			switch cr.Conclusion {
-			case "failure", "timed_out", "action_required":
-				note := "NEW REGRESSION"
-				if baseFailedNames[cr.Name] {
-					note = "pre-existing (also fails on base branch)"
-				}
-				line := fmt.Sprintf("- **%s**: %s [%s]", cr.Name, cr.Conclusion, note)
-				if !baseFailedNames[cr.Name] {
-					// Only NEW REGRESSION checks get failure detail: the
-					// instructions tell the agent not to touch pre-existing ones.
-					line += e.ciFailureDetail(item, owner, repo, cr)
-				}
-				failedLines = append(failedLines, line)
+		if cr.Status != "completed" {
+			continue
+		}
+		switch {
+		case gh.IsFailureConclusion(cr.Conclusion):
+			note := "NEW REGRESSION"
+			if baseFailedNames[cr.Name] {
+				note = "pre-existing (also fails on base branch)"
 			}
+			line := fmt.Sprintf("- **%s**: %s [%s]", cr.Name, cr.Conclusion, note)
+			if !baseFailedNames[cr.Name] {
+				// Only NEW REGRESSION checks get failure detail: the
+				// instructions tell the agent not to touch pre-existing ones.
+				line += e.ciFailureDetail(item, owner, repo, cr)
+			}
+			failedLines = append(failedLines, line)
+		case !gh.IsPassingConclusion(cr.Conclusion):
+			// #2296: cancelled/stale/unrecognised — no result, not a failure.
+			// Shown under its real conclusion with no regression framing.
+			nonPassingLines = append(nonPassingLines, fmt.Sprintf("- **%s**: %s — %s", cr.Name, nonPassingConclusion(cr), nonPassingNote))
 		}
 	}
 
@@ -587,14 +601,28 @@ func (e *Engine) buildCIFixComment(item gh.ProjectItem, stage *stages.Stage, wor
 	branchName := fmt.Sprintf("fabrik/issue-%d", item.Number)
 	var sb strings.Builder
 	sb.WriteString("🏭 **Fabrik — CI Fix Required**\n\n")
-	sb.WriteString(fmt.Sprintf("The following CI check runs failed for this PR (branch: `%s`):\n\n", branchName))
+	switch {
+	case len(failedLines) == 0 && len(nonPassingLines) > 0:
+		sb.WriteString(fmt.Sprintf("The following CI check runs did not produce a passing result for this PR (branch: `%s`) — they were cancelled or otherwise did not complete, which is not a test failure:\n\n", branchName))
+	default:
+		sb.WriteString(fmt.Sprintf("The following CI check runs failed for this PR (branch: `%s`):\n\n", branchName))
+	}
 
-	if len(failedLines) > 0 {
-		sb.WriteString("**Failed checks on PR branch:**\n")
-		for _, l := range failedLines {
-			sb.WriteString(l + "\n")
+	if len(failedLines) > 0 || len(nonPassingLines) > 0 {
+		if len(failedLines) > 0 {
+			sb.WriteString("**Failed checks on PR branch:**\n")
+			for _, l := range failedLines {
+				sb.WriteString(l + "\n")
+			}
+			sb.WriteString("\n")
 		}
-		sb.WriteString("\n")
+		if len(nonPassingLines) > 0 {
+			sb.WriteString("**Checks with no result on PR branch (cancelled/stale — not failures):**\n")
+			for _, l := range nonPassingLines {
+				sb.WriteString(l + "\n")
+			}
+			sb.WriteString("\n")
+		}
 	} else if settle.RequiredContextsStatus == gh.RequiredContextsFailed && len(settle.RequiredFailed) > 0 {
 		// ADR-933: the failure may have no check-run footprint at all — its
 		// only producer can be a classic commit status (the local-CI-takeover
@@ -619,8 +647,14 @@ func (e *Engine) buildCIFixComment(item gh.ProjectItem, stage *stages.Stage, wor
 	}
 
 	sb.WriteString("**Instructions:**\n")
-	sb.WriteString("1. Checks marked **NEW REGRESSION** were introduced by this PR — fix these.\n")
-	sb.WriteString("2. Checks marked **pre-existing** also fail on the base branch — note them but do NOT attempt to fix them.\n")
+	if len(nonPassingLines) > 0 && len(failedLines) == 0 {
+		sb.WriteString("1. The check(s) above were cancelled or otherwise produced no result — there is no failure to fix. Do NOT invent a code change. Check whether the PR head already has a fresh run (`gh run list --branch " + branchName + " --limit 5`); if not, push a commit that is actually warranted or re-run the check (`gh run rerun <run-id>`).\n")
+	} else {
+		sb.WriteString("1. Checks marked **NEW REGRESSION** were introduced by this PR — fix these.\n")
+	}
+	if len(failedLines) > 0 || len(nonPassingLines) == 0 {
+		sb.WriteString("2. Checks marked **pre-existing** also fail on the base branch — note them but do NOT attempt to fix them.\n")
+	}
 	sb.WriteString(fmt.Sprintf("3. To investigate failure logs: `gh run list --branch %s --limit 5` then `gh run view <run-id> --log-failed`\n", branchName))
 	sb.WriteString("4. After fixing, commit and push. The engine will re-evaluate CI on the next poll cycle.\n")
 	sb.WriteString(fmt.Sprintf("5. Do not signal `FABRIK_STAGE_COMPLETE` — the engine will advance once CI passes.\n"))
