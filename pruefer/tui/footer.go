@@ -24,6 +24,7 @@ type FooterComponent struct {
 	now       time.Time
 
 	dropCounts     map[string]int
+	skipCounts     map[string]int // saving skips by reason (SkipEvent, #2230)
 	sigDriftActive bool
 
 	// unrecognizedAccounts/unrecognizedCount mirror the most recently
@@ -70,6 +71,11 @@ func (f FooterComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
 		// cumulative count for this reason (see Daemon.recordDrop), so
 		// incrementing here would double-count.
 		f.dropCounts[ev.Reason] = ev.Total
+	case SkipEvent:
+		if f.skipCounts == nil {
+			f.skipCounts = make(map[string]int)
+		}
+		f.skipCounts[ev.Reason] = ev.Total // cumulative: overwrite, never add
 	case SignatureDriftEvent:
 		f.sigDriftActive = ev.Active
 	case UnrecognizedInstallationsEvent:
@@ -121,6 +127,21 @@ func (f FooterComponent) dropBreakdownSegment() string {
 	return dimStyle.Render(plain)
 }
 
+// skipSegment renders the "saved: patch N · trial M · catch-up K" footer
+// segment (#2230 R4) — the reviews not run because the change was already
+// reviewed — or "" until the first saving skip.
+func (f FooterComponent) skipSegment() string {
+	p, t, c := f.skipCounts["patch_unchanged"], f.skipCounts["trial_equivalent"], f.skipCounts["catch_up"]
+	if p+t+c == 0 {
+		return ""
+	}
+	return dimStyle.Render(fmt.Sprintf("skipped: patch %d · trial %d · catch-up %d", p, t, c))
+}
+
+// SkipCount returns the cumulative saving-skip count for reason (a SkipEvent
+// key), or 0. Exported for tests.
+func (f FooterComponent) SkipCount(reason string) int { return f.skipCounts[reason] }
+
 // driftBannerSegment renders the high-contrast signature-drift banner while
 // sigDriftActive (R4), or "" otherwise.
 func (f FooterComponent) driftBannerSegment() string {
@@ -160,6 +181,9 @@ func (f FooterComponent) View(width int) string {
 	}
 	if breakdown := f.dropBreakdownSegment(); breakdown != "" {
 		rightParts = append(rightParts, breakdown)
+	}
+	if skipped := f.skipSegment(); skipped != "" {
+		rightParts = append(rightParts, skipped)
 	}
 	if f.restStats.Limit > 0 {
 		countdown := fmtRateLimitCountdown(f.restStats.Reset, f.now)
