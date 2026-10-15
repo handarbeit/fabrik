@@ -323,6 +323,15 @@ func (e *Engine) postLandingFailure(owner, repo string, prNum int, survivors []t
 	}
 	e.landing.posted[key] = struct{}{}
 	e.landing.mu.Unlock()
+	// A post that fails must not count as done: forget the key so the next attempt retries.
+	posted := false
+	defer func() {
+		if !posted {
+			e.landing.mu.Lock()
+			delete(e.landing.posted, key)
+			e.landing.mu.Unlock()
+		}
+	}()
 
 	state := res.state
 	if state == "" {
@@ -340,5 +349,7 @@ func (e *Engine) postLandingFailure(owner, repo string, prNum int, survivors []t
 		prNum, res.reason, state, outcomeLine, marker)
 	if _, err := e.client.AddComment(owner, repo, survivors[0].item.Number, msg); err != nil {
 		e.logfRepo(owner+"/"+repo, "merge-train", "warn: could not post merge-failure comment: %v\n", err)
+		return
 	}
+	posted = true
 }

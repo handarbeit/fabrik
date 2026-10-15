@@ -23,13 +23,14 @@ type landingRig struct {
 	client *mockGitHubClient
 	wm     *WorktreeManager
 
-	mu        sync.Mutex
-	states    []string
-	mergeErrs []error
-	events    []string
-	reads     int
-	comments  []string
-	deleted   []bool // deletedBranch of each release, in order
+	mu              sync.Mutex
+	states          []string
+	mergeErrs       []error
+	events          []string
+	reads           int
+	comments        []string
+	deleted         []bool // deletedBranch of each release, in order
+	commentFailures int    // the next N AddComment calls fail
 }
 
 type landingRigOpts struct {
@@ -84,6 +85,10 @@ func newLandingRig(t *testing.T, states []string, mergeErrs []error, o landingRi
 		addCommentFn: func(owner, repo string, n int, body string) (int, error) {
 			r.mu.Lock()
 			defer r.mu.Unlock()
+			if r.commentFailures > 0 {
+				r.commentFailures--
+				return 0, fmt.Errorf("HTTP 502")
+			}
 			r.comments = append(r.comments, body)
 			return 1, nil
 		},
@@ -325,6 +330,28 @@ func TestLanding_FailureCommentMarkerSurvivesRestart(t *testing.T) {
 	if n := r.failureComments(); n != 0 {
 		t.Errorf("failure comments = %d, want 0 when the marker is already on the member", n)
 	}
+}
+
+// A failed AddComment must not mark the PR as already commented: the next attempt in the same
+// process retries the post, so a kept trial that keeps failing still gives a visible signal.
+func TestLanding_FailureCommentRetriedAfterPostError(t *testing.T) {
+	forEachLandingPath(t, func(t *testing.T, lp landingPath) {
+		r := newLandingRig(t, []string{"blocked"}, nil, landingRigOpts{})
+		r.commentFailures = 1
+		survivors := landingSurvivors()
+		lp.run(context.Background(), r, survivors)
+		if n := r.failureComments(); n != 0 {
+			t.Fatalf("failure comments after a failed post = %d, want 0", n)
+		}
+		lp.run(context.Background(), r, survivors)
+		if n := r.failureComments(); n != 1 {
+			t.Errorf("failure comments after the retry = %d, want 1", n)
+		}
+		lp.run(context.Background(), r, survivors)
+		if n := r.failureComments(); n != 1 {
+			t.Errorf("failure comments after a third attempt = %d, want still 1", n)
+		}
+	})
 }
 
 func TestLanding_BaseMoved_BoundExpiryCleansUp(t *testing.T) {
