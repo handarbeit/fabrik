@@ -27,7 +27,7 @@ Two prerequisite issues shaped what this issue could do before it started: #1456
 `buildReviewPrompt` is split into three ordered parts, each in its own function:
 
 1. **`renderDynamicContext`** — the reviewer-identity preamble, base-branch diff instruction, omitted-paths disclosure, PR body, and `renderReviewThreads`. Go-supplied, per-review runtime data (C7) — never affected by any guidance layer or mode.
-2. **The composed guidance** — `resolveGuidance(req ReviewRequest) string`, described below.
+2. **The composed guidance** — `resolveGuidance(req ReviewRequest)`, described below. (Superseded by ADR 2306: it now returns `(guidance string, replacesDefault bool)` for the operator and repo layers only, and the default layer is the embedded `pruefer-review:review` skill rather than composed text.)
 3. **`renderContract`** — the no-approval-language rule and the two-part output format (summary delimiters, findings JSON schema, severity enum, anchoring rules). Go-owned, never overridable (C5).
 
 This is the same order the pre-split monolithic function wrote them in, so `buildReviewPrompt(ReviewRequest{})` — the zero-config case — produces a prompt byte-identical to the pre-#1446 output (C2/AC1). `TestBuildReviewPrompt_ZeroConfig_ByteIdenticalToPreSplitOutput` pins this against a literal captured from, and confirmed byte-for-byte against, the pre-split commit (checked out into a scratch worktree during implementation, not hand-transcribed from reading the source).
