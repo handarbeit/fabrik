@@ -460,3 +460,52 @@ func TestSingletonCatchUp_MarkerRetriesTransientPostFailure(t *testing.T) {
 		t.Errorf("marker posted=%v after %d attempts; want posted on the third", markerPosted.Load(), attempts.Load())
 	}
 }
+
+// #2296: a caught-up head whose own latest run stays cancelled after the one
+// re-run falls through to the trial, uncharged — it never reaches the
+// red-singleton ejection.
+func TestSingletonCatchUp_CancelledAfterReRunFallsBackToTheTrialUncharged(t *testing.T) {
+	w := newCatchUpWorld(t)
+	w.checks.Store([]gh.CheckRun{{ID: 7, Name: "build", Status: "completed", Conclusion: "cancelled", DetailsURL: "https://github.com/owner/repo/actions/runs/555/job/1"}})
+	var reruns atomic.Int32
+	w.client.rerunFailedJobsFn = func(owner, repo string, runID int64) error { reruns.Add(1); return nil }
+
+	got, decided := w.run()
+	if decided {
+		t.Fatal("a still-cancelled catch-up must fall back to the trial, not decide the poll")
+	}
+	if got.headSHA != cuCaughtHead {
+		t.Errorf("the trial must be built from the caught-up head, got %s", got.headSHA)
+	}
+	if reruns.Load() != 1 {
+		t.Errorf("cancelled jobs were re-run %d time(s), want exactly once", reruns.Load())
+	}
+	w.assertNothingLandedOrCharged()
+	for _, c := range w.comments() {
+		if strings.Contains(c, "validation failed") {
+			t.Errorf("a cancellation must not post a red comment: %s", c)
+		}
+	}
+}
+
+// Neutralised twin: with the pre-fix charge-as-red reading the same setup pauses.
+func TestSingletonCatchUp_CancelledNeutralisedPauses(t *testing.T) {
+	w := newCatchUpWorld(t)
+	w.eng.SetTrainNotPassedAsRedForTest(true)
+	w.checks.Store([]gh.CheckRun{{ID: 7, Name: "build", Status: "completed", Conclusion: "cancelled", DetailsURL: "https://github.com/owner/repo/actions/runs/555/job/1"}})
+	w.client.rerunFailedJobsFn = func(owner, repo string, runID int64) error { return nil }
+	if _, decided := w.run(); !decided {
+		t.Fatal("with the seam on a cancelled catch-up reads red and decides the poll")
+	}
+	w.client.mu.Lock()
+	defer w.client.mu.Unlock()
+	var paused bool
+	for _, c := range w.client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			paused = true
+		}
+	}
+	if !paused {
+		t.Error("expected the red-singleton pause under the neutralising seam")
+	}
+}

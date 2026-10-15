@@ -304,6 +304,11 @@ func (e *Engine) trySingletonCatchUp(ctx context.Context, state *mergeTrainWorke
 	case memberCINoCI:
 		e.logf(m.item.Number, "merge-train", "singleton catch-up: CI did not start on the caught-up head %s of #%d — building trial\n", caughtUp.headSHA, m.item.Number)
 		return caughtUp, false
+	case memberCINotPassed:
+		// #2296: cancelled/stale after the one re-run — not red. Fall through to the
+		// trial, uncharged; never the red-singleton ejection.
+		e.logf(m.item.Number, "merge-train", "singleton catch-up: #%d has no passing CI result on its caught-up head %s — building trial\n", m.item.Number, caughtUp.headSHA)
+		return caughtUp, false
 	default: // memberCIPending, memberCIMoved, memberCIEjected
 		// Decided for this poll: the member stays Queued (or was already ejected) and the
 		// next poll re-evaluates it. Nothing is charged.
@@ -460,6 +465,11 @@ const (
 	memberCINoCI                           // no check run appeared within the dwell
 	memberCIMoved                          // the PR head moved, the PR closed/merged, or base conflicts again
 	memberCIEjected                        // a pending review-finding/comment eject was applied
+	// memberCINotPassed: the caught-up head's own latest run is still cancelled/stale/
+	// unrecognised after the one re-run (#2296). Not a failure — the caller builds the
+	// trial, uncharged, and never reaches the red-singleton ejection. Appended last so
+	// existing values do not shift.
+	memberCINotPassed
 )
 
 // waitMemberCI blocks, in the worker, until the member PR's own CI on the caught-up head
@@ -539,6 +549,26 @@ func (e *Engine) waitMemberCI(ctx context.Context, state *mergeTrainWorkerState,
 				}
 				break
 			}
+			if status == gh.CheckRunsNonPassing {
+				// #2296: the same single re-run as a failure, but a still-non-passing
+				// head is not red — nothing the member did produced it.
+				np := gh.NonPassingCheckRuns(runs)
+				rerunPastDwell := rr.done && infra.now().Sub(rr.at) >= infra.rerunSettleDwell
+				rerunWaiting := rerunPastDwell && infra.now().Sub(rr.at) < infra.rerunSettleDwell+infra.rerunMaxWait &&
+					e.rerunInFlight(logRepo, p.owner, p.repo, m.headSHA, rr.runIDs)
+				if !rr.done {
+					if ids, ok := e.rerunFailedWorkflowRuns(logRepo, p.owner, p.repo, np); ok {
+						rr = rerunState{done: true, runIDs: ids, firstFailedIDs: checkRunIDSet(np), at: infra.now()}
+						e.logfRepo(logRepo, "merge-train", "singleton catch-up: #%d check(s) did not pass: %s — re-running them once before building a trial\n", n, describeNonPassing(np))
+						break
+					}
+					return e.memberNonPassingVerdict(logRepo, m, np)
+				}
+				if hasNewCheckRun(np, rr.firstFailedIDs) || (rerunPastDwell && !rerunWaiting) {
+					return e.memberNonPassingVerdict(logRepo, m, np)
+				}
+				break
+			}
 			result, detail := e.classifyLandingCI(p.owner, p.repo, pr.MergeableState, m.headSHA, runs)
 			switch result {
 			case TrainCIGreen:
@@ -555,6 +585,17 @@ func (e *Engine) waitMemberCI(ctx context.Context, state *mergeTrainWorkerState,
 		case <-time.After(e.trainCIPollIntervalOrDefault()):
 		}
 	}
+}
+
+// memberNonPassingVerdict is waitMemberCI's terminal verdict for a caught-up head
+// whose latest runs are still cancelled/stale/unrecognised (#2296):
+// memberCINotPassed, or — under SetTrainNotPassedAsRedForTest — the pre-fix red.
+func (e *Engine) memberNonPassingVerdict(logRepo string, m trainMember, np []gh.CheckRun) (memberCIVerdict, *trainCIDiagnostic) {
+	if e.trainNotPassedAsRed.Load() {
+		return memberCIRed, catchUpRedDiag(m, np, nil)
+	}
+	e.logfRepo(logRepo, "merge-train", "singleton catch-up: #%d check(s) still did not pass after the re-run: %s — building trial, nothing charged\n", m.item.Number, describeNonPassing(np))
+	return memberCINotPassed, nil
 }
 
 // catchUpRedDiag builds the diagnostic for a red caught-up head. The Note says plainly
