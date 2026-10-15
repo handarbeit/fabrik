@@ -10,6 +10,7 @@ import (
 
 	"github.com/handarbeit/fabrik/config"
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/claudeprofile"
 	"github.com/handarbeit/fabrik/internal/events/hookdeck"
 	"github.com/handarbeit/fabrik/internal/githubauth"
 )
@@ -24,16 +25,24 @@ import (
 // Pruefer's existing logf-based structured logging with identical review
 // behavior.
 func Execute() error {
-	if err := config.LoadDotenv(); err != nil {
+	// Snapshot the ambient CLAUDE_CONFIG_DIR BEFORE .env is read, and load .env
+	// without exporting either Claude profile name (#2294): .env is read as data
+	// and resolved by claudeprofile, so a value in it can outrank an inherited
+	// one. Anything exported here would come back from a self-upgrade re-exec
+	// (which passes os.Environ()) looking inherited, losing its provenance.
+	ambientConfigDir := os.Getenv(claudeprofile.BareEnv)
+	dotenv, err := config.LoadDotenvWithholding(PrueferClaudeConfigDirEnv, claudeprofile.BareEnv)
+	if err != nil {
 		return fmt.Errorf("loading .env: %w", err)
 	}
+	captureProfileSnapshot(ambientConfigDir, dotenv)
 
 	// Captured once so a later SIGHUP-triggered reload (handleReload) can
 	// re-run LoadConfig against the same argument list, rather than
 	// re-reading a possibly-stale os.Args.
 	args := os.Args[1:]
 
-	cfg, err := LoadConfig(args)
+	cfg, profile, err := loadConfig(args)
 	if err != nil {
 		return err
 	}
@@ -73,6 +82,11 @@ func Execute() error {
 	// doesn't immediately exit, e.g. a test, would observe the leak).
 	closeLog := wireLogf(cfg, useTUI(cfg))
 	defer closeLog()
+
+	// Which account reviews bill to is always visible, set or not, and a
+	// disagreement between sources is called out. After wireLogf so it reaches
+	// the log file rather than raw stderr.
+	reportClaudeProfile("startup", profile, true)
 
 	// Wire the github package's diagnostic logger so pagination-cap warnings
 	// (e.g. FetchAppInstallations/FetchInstallationRepositories hitting the
@@ -240,12 +254,23 @@ func Execute() error {
 // mint/detach logic here — reusing the exact same re-derivation path
 // installation events and the periodic ticker already use.
 func handleReload(ctx context.Context, args []string, daemon *Daemon) {
-	cand, err := LoadConfig(args)
+	// .env is re-read as data (nothing is exported) so an edit to it is picked up;
+	// the ambient value stays the one captured at process start. A failed read
+	// fails the whole reload, like any other load error.
+	dotenv, err := config.ReadDotenv()
 	if err != nil {
+		logf(0, "reload", "config reload failed: loading .env: %v — keeping current config\n", err)
+		return
+	}
+	prevDotenv := swapProfileDotenv(dotenv)
+	cand, profile, err := loadConfig(args)
+	if err != nil {
+		swapProfileDotenv(prevDotenv)
 		logf(0, "reload", "config reload failed: %v — keeping current config\n", err)
 		return
 	}
 	if cand.VersionRequested {
+		swapProfileDotenv(prevDotenv)
 		// --version on the original invocation would already have made
 		// Execute print the version and return before a daemon (and thus
 		// this handler) ever existed. Reaching here means the *current*
@@ -261,6 +286,7 @@ func handleReload(ctx context.Context, args []string, daemon *Daemon) {
 	merged, diff := applyConfigReload(old, cand)
 	daemon.ApplyReload(merged, nil, nil)
 	logReloadSummary(diff)
+	reportClaudeProfile("reload", profile, fieldChanged(diff.FieldsChanged, "ClaudeConfigDir"))
 
 	if len(diff.ReposAdded) > 0 || len(diff.ReposRemoved) > 0 ||
 		fieldChanged(diff.FieldsChanged, "MaxDerivedRepos") || fieldChanged(diff.FieldsChanged, "ServedAccounts") {

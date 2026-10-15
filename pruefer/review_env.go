@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+
+	"github.com/handarbeit/fabrik/internal/claudeprofile"
 )
 
 // ReviewEnvPassthroughVar names the operator opt-in that forwards additional,
@@ -117,6 +119,12 @@ func reviewProcessEnv(environ []string, req ReviewRequest) []string {
 			continue
 		}
 		name := kv[:i]
+		if name == claudeprofile.BareEnv {
+			// Never inherited (#2294): the profile a review runs under is the
+			// resolved ReviewRequest.ClaudeConfigDir, emitted by buildReviewEnv, so
+			// an overridden or unset daemon value cannot reach the subprocess.
+			continue
+		}
 		if reviewEnvAllowed(name) || passthrough[name] {
 			base = append(base, kv)
 		}

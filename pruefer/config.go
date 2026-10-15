@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/handarbeit/fabrik/internal/claudeprofile"
 	"gopkg.in/yaml.v3"
 )
 
@@ -149,8 +150,20 @@ type Config struct {
 	PollInterval   time.Duration `reload:"live"`
 	Model          string        `reload:"live"`
 	Effort         string        `reload:"live"`
-	ConcurrencyCap int           `reload:"live"`
-	MaxDiffBytes   int64         `reload:"live"`
+	// ClaudeConfigDir is the resolved Claude profile directory every review
+	// subprocess runs under (#2294); "" means nothing resolved and reviews get no
+	// CLAUDE_CONFIG_DIR at all. Resolved by claudeprofile.Resolve from
+	// -claude-config-dir, PRUEFER_CLAUDE_CONFIG_DIR, .env, claude_config_dir and
+	// the ambient CLAUDE_CONFIG_DIR (see resolveClaudeProfile), never read from
+	// the environment directly. Operator-only: a reviewed repo's
+	// .pruefer/config.yaml cannot set it. Live: each review copies it into its
+	// ReviewRequest at dispatch, so a review already running keeps the value it
+	// started with. Only the resolved directory lives here; the per-source detail
+	// is returned beside the Config by loadConfig, because an extra unexported
+	// field would panic applyConfigReload's reflect loop.
+	ClaudeConfigDir string `reload:"live"`
+	ConcurrencyCap  int    `reload:"live"`
+	MaxDiffBytes    int64  `reload:"live"`
 	// MaxDerivedRepos bounds the size of a single installation-derivation
 	// result (R5) — applied last, after the full installation-grant union
 	// and any WatchedRepos filter (R3) are computed, over a deterministic
@@ -410,6 +423,7 @@ type yamlConfig struct {
 	PollIntervalSec         *int     `yaml:"poll_interval_seconds"`
 	Model                   string   `yaml:"model"`
 	Effort                  string   `yaml:"effort"`
+	ClaudeConfigDir         string   `yaml:"claude_config_dir"`
 	ConcurrencyCap          *int     `yaml:"concurrency_cap"`
 	MaxDiffBytes            *int64   `yaml:"max_diff_bytes"`
 	MaxWallTimeSec          *int     `yaml:"max_wall_time_seconds"`
@@ -492,6 +506,7 @@ type flagValues struct {
 	pollIntervalSec         int
 	model                   string
 	effort                  string
+	claudeConfigDir         string
 	concurrencyCap          int
 	maxDiffBytes            int64
 	maxWallTimeSec          int
@@ -533,12 +548,21 @@ type flagValues struct {
 // default precedence convention. args is the program's argument list
 // excluding argv[0] (os.Args[1:] in production; injectable for tests).
 func LoadConfig(args []string) (Config, error) {
+	cfg, _, err := loadConfig(args)
+	return cfg, err
+}
+
+// loadConfig is LoadConfig plus the Claude profile Resolution behind
+// cfg.ClaudeConfigDir. Execute and handleReload use it so the line they log is
+// exactly the resolution of the Config they applied.
+func loadConfig(args []string) (Config, claudeprofile.Resolution, error) {
 	fs := flag.NewFlagSet("pruefer", flag.ContinueOnError)
 	var fv flagValues
 	fs.StringVar(&fv.repos, "repos", "", "Comma-separated list of owner/repo to watch")
 	fs.StringVar(&fv.servedAccounts, "served-accounts", "", "Comma-separated list of account logins this deployment is authorized to serve; an App installation outside this list is deleted (R4). Empty (default) means no allowlist is configured — an unrecognized installation is reported, never deleted")
 	fs.IntVar(&fv.pollIntervalSec, "poll-interval", 0, "Poll interval in seconds")
 	fs.StringVar(&fv.model, "model", "", "Claude model to use for reviews")
+	fs.StringVar(&fv.claudeConfigDir, "claude-config-dir", "", "Claude Code profile directory (CLAUDE_CONFIG_DIR) the review subprocesses run under, and so the account they bill to; outranks PRUEFER_CLAUDE_CONFIG_DIR, .env, claude_config_dir and the inherited CLAUDE_CONFIG_DIR")
 	fs.StringVar(&fv.effort, "effort", "", "Claude thinking effort level (low, medium, high, max)")
 	fs.IntVar(&fv.concurrencyCap, "concurrency", 0, "Max concurrent claude invocations")
 	fs.Int64Var(&fv.maxDiffBytes, "max-diff-bytes", 0, "Skip PRs whose diff exceeds this many bytes")
@@ -571,11 +595,11 @@ func LoadConfig(args []string) (Config, error) {
 	fs.IntVar(&fv.maxDerivedRepos, "max-derived-repos", 0, "Cap on the number of repos a single installation-derivation may yield (R5); 0 or negative disables the cap")
 	fs.StringVar(&fv.repoRederivationInterval, "repo-rederivation-interval", "", "How often to re-derive the watched repo set from the App's installations on a timer (Go duration, e.g. 10m)")
 	if err := fs.Parse(args); err != nil {
-		return Config{}, err
+		return Config{}, claudeprofile.Resolution{}, err
 	}
 
 	if fv.versionRequested {
-		return Config{VersionRequested: true}, nil
+		return Config{VersionRequested: true}, claudeprofile.Resolution{}, nil
 	}
 
 	explicit := make(map[string]bool)
@@ -590,7 +614,7 @@ func LoadConfig(args []string) (Config, error) {
 
 	yc, err := loadYAMLConfig(configPath)
 	if err != nil {
-		return Config{}, err
+		return Config{}, claudeprofile.Resolution{}, err
 	}
 
 	cfg := Config{
@@ -658,7 +682,7 @@ func LoadConfig(args []string) (Config, error) {
 	if yc.RepoRederivationInterval != "" {
 		d, err := time.ParseDuration(yc.RepoRederivationInterval)
 		if err != nil {
-			return Config{}, fmt.Errorf("parsing repo_rederivation_interval %q: %w", yc.RepoRederivationInterval, err)
+			return Config{}, claudeprofile.Resolution{}, fmt.Errorf("parsing repo_rederivation_interval %q: %w", yc.RepoRederivationInterval, err)
 		}
 		cfg.RepoRederivationInterval = d
 	}
@@ -695,7 +719,7 @@ func LoadConfig(args []string) (Config, error) {
 	if yc.AppName != "" {
 		trimmed := strings.TrimSpace(yc.AppName)
 		if trimmed == "" {
-			return Config{}, fmt.Errorf("github_app_name: must not be empty or whitespace-only")
+			return Config{}, claudeprofile.Resolution{}, fmt.Errorf("github_app_name: must not be empty or whitespace-only")
 		}
 		cfg.AppName = trimmed
 	}
@@ -705,7 +729,7 @@ func LoadConfig(args []string) (Config, error) {
 	if yc.AppOrganization != "" {
 		org, err := validateAppOrganization(yc.AppOrganization)
 		if err != nil {
-			return Config{}, err
+			return Config{}, claudeprofile.Resolution{}, err
 		}
 		cfg.AppOrganization = org
 	}
@@ -733,7 +757,7 @@ func LoadConfig(args []string) (Config, error) {
 		if yc.Reconciliation.FallbackInterval != "" {
 			d, err := time.ParseDuration(yc.Reconciliation.FallbackInterval)
 			if err != nil {
-				return Config{}, fmt.Errorf("parsing reconciliation.fallback_interval %q: %w", yc.Reconciliation.FallbackInterval, err)
+				return Config{}, claudeprofile.Resolution{}, fmt.Errorf("parsing reconciliation.fallback_interval %q: %w", yc.Reconciliation.FallbackInterval, err)
 			}
 			cfg.ReconciliationFallbackInterval = d
 		}
@@ -825,7 +849,7 @@ func LoadConfig(args []string) (Config, error) {
 	if explicit["repo-rederivation-interval"] {
 		d, err := time.ParseDuration(fv.repoRederivationInterval)
 		if err != nil {
-			return Config{}, fmt.Errorf("parsing -repo-rederivation-interval %q: %w", fv.repoRederivationInterval, err)
+			return Config{}, claudeprofile.Resolution{}, fmt.Errorf("parsing -repo-rederivation-interval %q: %w", fv.repoRederivationInterval, err)
 		}
 		cfg.RepoRederivationInterval = d
 	}
@@ -834,13 +858,13 @@ func LoadConfig(args []string) (Config, error) {
 	}
 	if explicit["hookdeck-api-key-env"] {
 		if fv.hookdeckAPIKeyEnv == "" {
-			return Config{}, fmt.Errorf("-hookdeck-api-key-env cannot be empty")
+			return Config{}, claudeprofile.Resolution{}, fmt.Errorf("-hookdeck-api-key-env cannot be empty")
 		}
 		cfg.HookdeckAPIKeyEnv = fv.hookdeckAPIKeyEnv
 	}
 	if explicit["hookdeck-webhook-secret-env"] {
 		if fv.hookdeckWebhookSecretEnv == "" {
-			return Config{}, fmt.Errorf("-hookdeck-webhook-secret-env cannot be empty")
+			return Config{}, claudeprofile.Resolution{}, fmt.Errorf("-hookdeck-webhook-secret-env cannot be empty")
 		}
 		cfg.HookdeckWebhookSecretEnv = fv.hookdeckWebhookSecretEnv
 	}
@@ -850,17 +874,17 @@ func LoadConfig(args []string) (Config, error) {
 	if explicit["reconciliation-fallback-interval"] {
 		d, err := time.ParseDuration(fv.reconciliationFallbackInterval)
 		if err != nil {
-			return Config{}, fmt.Errorf("parsing -reconciliation-fallback-interval %q: %w", fv.reconciliationFallbackInterval, err)
+			return Config{}, claudeprofile.Resolution{}, fmt.Errorf("parsing -reconciliation-fallback-interval %q: %w", fv.reconciliationFallbackInterval, err)
 		}
 		cfg.ReconciliationFallbackInterval = d
 	}
 
 	if cfg.EventSource != EventSourcePoll && cfg.EventSource != EventSourceHookdeck {
-		return Config{}, fmt.Errorf("invalid event_source %q: must be %q or %q", cfg.EventSource, EventSourcePoll, EventSourceHookdeck)
+		return Config{}, claudeprofile.Resolution{}, fmt.Errorf("invalid event_source %q: must be %q or %q", cfg.EventSource, EventSourcePoll, EventSourceHookdeck)
 	}
 
 	if cfg.RequestChangesThreshold != "" && !validSeverity(cfg.RequestChangesThreshold) {
-		return Config{}, fmt.Errorf("request_changes_threshold: %q is not a recognized severity tier (must be one of low, medium, high, critical, or empty to disable)", cfg.RequestChangesThreshold)
+		return Config{}, claudeprofile.Resolution{}, fmt.Errorf("request_changes_threshold: %q is not a recognized severity tier (must be one of low, medium, high, critical, or empty to disable)", cfg.RequestChangesThreshold)
 	}
 
 	// ReviewGuidanceMode is operator-authored config, not untrusted repo
@@ -868,31 +892,37 @@ func LoadConfig(args []string) (Config, error) {
 	// repo skill's own mode value, which always degrades instead (see
 	// reviewguidance.go's normalizeGuidanceMode).
 	if cfg.ReviewGuidanceMode != "" && cfg.ReviewGuidanceMode != GuidanceModeAppend && cfg.ReviewGuidanceMode != GuidanceModeReplace {
-		return Config{}, fmt.Errorf("review_guidance_mode: %q is not recognized (must be %q, %q, or empty to default to %q)", cfg.ReviewGuidanceMode, GuidanceModeAppend, GuidanceModeReplace, GuidanceModeAppend)
+		return Config{}, claudeprofile.Resolution{}, fmt.Errorf("review_guidance_mode: %q is not recognized (must be %q, %q, or empty to default to %q)", cfg.ReviewGuidanceMode, GuidanceModeAppend, GuidanceModeReplace, GuidanceModeAppend)
 	}
 
 	switch cfg.KeepTranscripts {
 	case KeepTranscriptsPartial, KeepTranscriptsAll, KeepTranscriptsOff:
 	default:
-		return Config{}, fmt.Errorf("keep_transcripts: %q is not recognized (must be %q, %q or %q)", cfg.KeepTranscripts, KeepTranscriptsPartial, KeepTranscriptsAll, KeepTranscriptsOff)
+		return Config{}, claudeprofile.Resolution{}, fmt.Errorf("keep_transcripts: %q is not recognized (must be %q, %q or %q)", cfg.KeepTranscripts, KeepTranscriptsPartial, KeepTranscriptsAll, KeepTranscriptsOff)
 	}
 
 	if !validCadence(cfg.Cadence) {
-		return Config{}, fmt.Errorf("cadence: %q is not a recognized cadence mode (must be %q, %q, or %q)", cfg.Cadence, CadenceEveryPush, CadenceOnce, CadenceOnRequest)
+		return Config{}, claudeprofile.Resolution{}, fmt.Errorf("cadence: %q is not a recognized cadence mode (must be %q, %q, or %q)", cfg.Cadence, CadenceEveryPush, CadenceOnce, CadenceOnRequest)
 	}
 	for repoKey, c := range cfg.RepoCadence {
 		if !validCadence(c) {
-			return Config{}, fmt.Errorf("repo_cadence[%q]: %q is not a recognized cadence mode (must be %q, %q, or %q)", repoKey, c, CadenceEveryPush, CadenceOnce, CadenceOnRequest)
+			return Config{}, claudeprofile.Resolution{}, fmt.Errorf("repo_cadence[%q]: %q is not a recognized cadence mode (must be %q, %q, or %q)", repoKey, c, CadenceEveryPush, CadenceOnce, CadenceOnRequest)
 		}
 	}
 
 	for _, a := range cfg.CatchUpMarkerAuthors {
 		if a == "" || strings.HasPrefix(a, "@") || strings.ContainsAny(a, " \t\r\n") {
-			return Config{}, fmt.Errorf("catch_up_marker_authors: %q is not a bare login (no leading \"@\", no whitespace; an App login is \"<slug>[bot]\")", a)
+			return Config{}, claudeprofile.Resolution{}, fmt.Errorf("catch_up_marker_authors: %q is not a bare login (no leading \"@\", no whitespace; an App login is \"<slug>[bot]\")", a)
 		}
 	}
 
-	return cfg, nil
+	// The Claude profile resolves last, after the flag layer: -claude-config-dir
+	// and PRUEFER_CLAUDE_CONFIG_DIR both outrank the YAML key, which outranks the
+	// ambient CLAUDE_CONFIG_DIR (#2294).
+	res := resolveClaudeProfile(fv.claudeConfigDir, yc.ClaudeConfigDir)
+	cfg.ClaudeConfigDir = res.Dir
+
+	return cfg, res, nil
 }
 
 // applyEnv overlays PRUEFER_* environment variables onto cfg, between the

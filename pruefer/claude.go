@@ -17,6 +17,7 @@ import (
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/claudeprofile"
 )
 
 // reviewShellAllow lists the read-only shell commands the reviewer may run
@@ -184,17 +185,22 @@ var reviewKillGrace = 10 * time.Second
 // diff purely as prompt text, so it can use git/Read/Grep/Glob for
 // surrounding-code context.
 type ReviewRequest struct {
-	Owner       string
-	Repo        string
-	PRNumber    int
-	Title       string
-	Body        string
-	HeadSHA     string
-	BaseBranch  string
-	Model       string
-	Effort      string
-	WorkDir     string        // ephemeral clone directory; claude's cwd
-	MaxWallTime time.Duration // 0 = no wall-time cap
+	Owner      string
+	Repo       string
+	PRNumber   int
+	Title      string
+	Body       string
+	HeadSHA    string
+	BaseBranch string
+	Model      string
+	Effort     string
+	// ClaudeConfigDir is the resolved Claude profile directory this review runs
+	// under (#2294), copied from Config at dispatch so a review already running
+	// keeps the value it started with across a reload. Empty means nothing
+	// resolved: the review process then carries no CLAUDE_CONFIG_DIR at all.
+	ClaudeConfigDir string
+	WorkDir         string        // ephemeral clone directory; claude's cwd
+	MaxWallTime     time.Duration // 0 = no wall-time cap
 	// ReviewThreads carries existing review threads (resolved and
 	// unresolved) on the PR, fetched by ReviewPR via
 	// GitHubReviewer.FetchPRReviewThreads (R1). nil when the fetch failed
@@ -631,7 +637,8 @@ func buildReviewPrompt(req ReviewRequest) string {
 // Excluding the *operator's* settings is newer, and is about
 // reproducibility rather than trust. This previously passed
 // "--setting-sources user", which made every review depend on whichever
-// profile the daemon happened to inherit via CLAUDE_CONFIG_DIR. Switching
+// profile the daemon happened to inherit via CLAUDE_CONFIG_DIR (the profile is now
+// declared explicitly: see ReviewRequest.ClaudeConfigDir). Switching
 // accounts silently rewired the reviewer: one profile carried a PreToolUse
 // hook (an output-compressing proxy applied to the reviewer's own git and
 // file reads), "permissions.defaultMode": "auto", and an "effortLevel" —
@@ -679,10 +686,17 @@ func buildReviewEnv(req ReviewRequest) []string {
 	if effort == "" {
 		effort = DefaultEffort
 	}
-	return []string{
+	env := []string{
 		"CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1",
 		"CLAUDE_CODE_EFFORT_LEVEL=" + effort,
 	}
+	if req.ClaudeConfigDir != "" {
+		// The resolved profile is the only source of this variable
+		// (reviewProcessEnv drops the inherited one), so the account a review
+		// bills to is declared, not whatever the daemon happened to inherit.
+		env = append(env, claudeprofile.BareEnv+"="+req.ClaudeConfigDir)
+	}
+	return env
 }
 
 // mergeEnv builds a subprocess environment from base (typically

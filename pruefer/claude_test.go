@@ -331,6 +331,17 @@ func TestBuildReviewEnv_HonorsExplicitEffort(t *testing.T) {
 	}
 }
 
+func TestBuildReviewEnv_ProfileOnlyWhenResolved(t *testing.T) {
+	if env := buildReviewEnv(ReviewRequest{ClaudeConfigDir: "/p/B"}); !slices.Contains(env, "CLAUDE_CONFIG_DIR=/p/B") {
+		t.Errorf("env = %v, want CLAUDE_CONFIG_DIR=/p/B", env)
+	}
+	for _, kv := range buildReviewEnv(ReviewRequest{}) {
+		if strings.HasPrefix(kv, "CLAUDE_CONFIG_DIR") {
+			t.Errorf("env holds %q with nothing resolved", kv)
+		}
+	}
+}
+
 func TestMergeEnv_OverridesTakePrecedence(t *testing.T) {
 	base := []string{"FOO=old", "BAR=keep"}
 	overrides := []string{"FOO=new"}
