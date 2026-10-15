@@ -2266,6 +2266,24 @@ to resume it.
 > invocation that isn't denied. The outcome is identical whether or not the
 > worker also emitted `FABRIK_BLOCKED_ON_INPUT` in its own output — Fabrik's
 > classification does not depend on it. See #1523, #1704, ADR-1775.
+>
+> **A denied file edit that no rule can grant pauses at once (#2301).** Claude
+> Code refuses writes to its protected paths (`.git/`, `.claude/`, `.vscode/`,
+> `.idea/`, `.husky/` and others — the list depends on the CLI version) in the
+> non-interactive mode Fabrik uses, and `allowed_tools` rules do not change
+> that. When an `Edit`, `Write`, `MultiEdit` or `NotebookEdit` call is denied on
+> a path inside the issue's worktree that Fabrik's own allow rule already
+> covers, retrying cannot succeed, so Fabrik pauses the issue on the **first**
+> occurrence (`fabrik:paused` + `fabrik:awaiting-input`; no `stage:<name>:failed`,
+> no `--max-retries` charge, commits still pushed) instead of after
+> `--max-tools-denied-retries`. The pause comment names the tool and each denied
+> file relative to the worktree. You can: (1) make the change by hand on the
+> `fabrik/issue-N` branch, push it, then remove `fabrik:paused`; (2) restructure
+> the work so it does not need to write there; or (3) add `fabrik:unrestricted`
+> for the issue — this lets the worker write protected paths but removes all
+> tool restrictions, so use it deliberately. Denied Bash commands, paths outside
+> the worktree and tools your stage's `allowed_tools` omits keep the bounded
+> retries described above. See ADR-2301.
 
 ### Stages Waiting for Input
 

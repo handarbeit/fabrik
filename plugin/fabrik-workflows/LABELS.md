@@ -337,7 +337,10 @@ and should recognize.
   the first remedy to try is re-running the step as separate, simpler
   commands, or adding a matching `allowed_tools` rule — `fabrik:unrestricted`
   is a last resort, not the headline fix, since it removes all tool
-  restrictions rather than just the denied one. Does not count against
+  restrictions rather than just the denied one. A denied file edit that no
+  rule can grant (inside the worktree, already covered by Fabrik's own allow
+  rule — e.g. under `.claude/`) pauses on the first occurrence instead and
+  does not apply this label (#2301). Does not count against
   `max_retries` (bounded independently, default 3 consecutive detections,
   before pausing with `fabrik:paused` + `fabrik:awaiting-input` — never
   `stage:<name>:failed`). Clears automatically once the permission
