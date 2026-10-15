@@ -283,11 +283,14 @@ func TestCheckSourceStaleness_RealCompareDevBuild(t *testing.T) {
 		}
 	}
 
-	// The origin remote's URL must contain "handarbeit/fabrik" to satisfy
-	// IsSourceCheckout — using that literal path segment on local disk lets a
-	// real (non-network) git remote clear the same substring gate production
-	// traffic does.
-	originDir := filepath.Join(t.TempDir(), "handarbeit", "fabrik")
+	// IsSourceCheckout requires a github.com origin, which a local clone can
+	// never have; present the clone's local-path origin as the real repo's
+	// GitHub URL through the selfupgrade seam. Every other git operation
+	// (fetch, rev-parse, rev-list) stays real.
+	t.Cleanup(selfupgrade.SetOriginURLFnForTest(func(string) (string, error) {
+		return "https://github.com/handarbeit/fabrik.git", nil
+	}))
+	originDir := filepath.Join(t.TempDir(), "origin")
 	if err := os.MkdirAll(originDir, 0755); err != nil {
 		t.Fatal(err)
 	}

@@ -2,6 +2,7 @@ package selfupgrade
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,7 +20,7 @@ type DevBuildConfig struct {
 	Dir            string // path to the source checkout to rebuild from
 	Version        string // running version, expected to be a "dev(<sha>)" string
 	BaseBranch     string // upstream branch to compare/pull against, e.g. "main"
-	ExpectedRemote string // substring the origin remote URL must contain, e.g. "handarbeit/fabrik"
+	ExpectedRemote string // owner/repo the origin remote must be on github.com, e.g. "handarbeit/fabrik"
 	Logf           func(string, ...any)
 	// StatusFn, if non-nil, is called with transient "checking origin/..."
 	// progress messages before any decision to rebuild is made.
@@ -376,18 +377,137 @@ func reportDirtyCheckout(cfg DevBuildConfig) {
 		len(paths), strings.Join(listed, ", "), more)
 }
 
+// sourceCheckoutHost is the only git host a source checkout may live on. It is
+// fixed inside the package (owner/repo stays caller-supplied) because every
+// consumer's source of truth is GitHub-hosted; see ADR 1209.
+const sourceCheckoutHost = "github.com"
+
 // IsSourceCheckout reports whether dir is a git checkout whose origin remote
-// URL contains expectedRemoteSubstring (e.g. "handarbeit/fabrik"). Returns
-// false on any error (no git, no remote, wrong remote, etc.).
-func IsSourceCheckout(dir, expectedRemoteSubstring string) bool {
+// is exactly the GitHub repository expectedOwnerRepo (e.g. "handarbeit/fabrik").
+// The remote URL is parsed structurally — host and owner/repo must both match,
+// not merely appear somewhere in the string. Returns false on any error (no
+// git, no remote, unparseable remote, wrong host or repo, etc.): this gate
+// authorises a build and re-exec, so it fails closed.
+func IsSourceCheckout(dir, expectedOwnerRepo string) bool {
+	out, err := originURLFn(dir)
+	if err != nil {
+		return false
+	}
+	return matchGitHubRemote(out, expectedOwnerRepo)
+}
+
+// gitOriginURL returns the origin remote URL of the checkout at dir, as git
+// would contact it (url.<base>.insteadOf rewrites applied).
+func gitOriginURL(dir string) (string, error) {
 	cmd := exec.Command("git", "remote", "get-url", "origin")
 	cmd.Dir = dir
 	out, err := cmd.Output()
 	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// matchGitHubRemote reports whether rawURL is a recognised git remote form
+// for github.com/<expectedOwnerRepo>. It is a strict allow-list:
+//
+//	https://github.com/o/r[.git][/]
+//	ssh://git@github.com/o/r[.git][/]
+//	git@github.com:o/r[.git][/]
+//
+// Userinfo on https, ports, other schemes, percent-encoding, queries,
+// fragments, extra path segments and empty segments are all rejected. Host
+// and owner/repo compare case-insensitively (GitHub treats both as such).
+func matchGitHubRemote(rawURL, expectedOwnerRepo string) bool {
+	expOwner, expRepo, ok := splitOwnerRepo(expectedOwnerRepo)
+	if !ok {
 		return false
 	}
-	url := strings.TrimSuffix(strings.TrimSpace(string(out)), ".git")
-	return strings.Contains(url, expectedRemoteSubstring)
+	raw := strings.TrimSpace(rawURL)
+	if raw == "" || strings.ContainsAny(raw, "%?#\\") {
+		return false
+	}
+	for _, r := range raw {
+		if r < 0x20 || r == 0x7f || r == ' ' {
+			return false
+		}
+	}
+
+	var path string
+	if strings.Contains(raw, "://") {
+		u, err := url.Parse(raw)
+		if err != nil || u.RawQuery != "" || u.Fragment != "" {
+			return false
+		}
+		switch u.Scheme {
+		case "https":
+			if u.User != nil {
+				return false
+			}
+		case "ssh":
+			if u.User == nil || u.User.Username() != "git" {
+				return false
+			}
+			if _, hasPw := u.User.Password(); hasPw {
+				return false
+			}
+		default:
+			return false
+		}
+		if !strings.EqualFold(u.Host, sourceCheckoutHost) { // u.Host includes any port
+			return false
+		}
+		if !strings.HasPrefix(u.Path, "/") {
+			return false
+		}
+		path = u.Path[1:]
+	} else {
+		// scp-like shorthand: git@host:owner/repo
+		colon := strings.Index(raw, ":")
+		if colon < 0 || strings.Contains(raw[:colon], "/") {
+			return false
+		}
+		user, host, found := strings.Cut(raw[:colon], "@")
+		if !found || user != "git" || !strings.EqualFold(host, sourceCheckoutHost) {
+			return false
+		}
+		path = raw[colon+1:]
+		if strings.HasPrefix(path, "/") {
+			return false
+		}
+	}
+
+	path = strings.TrimSuffix(path, "/")
+	path = strings.TrimSuffix(path, ".git")
+	owner, repo, ok := splitOwnerRepo(path)
+	if !ok {
+		return false
+	}
+	return strings.EqualFold(owner, expOwner) && strings.EqualFold(repo, expRepo)
+}
+
+// splitOwnerRepo splits "owner/repo" into exactly two non-empty segments, each
+// drawn from GitHub's name alphabet and not "." or "..".
+func splitOwnerRepo(s string) (owner, repo string, ok bool) {
+	owner, repo, found := strings.Cut(s, "/")
+	if !found || !validGitHubName(owner) || !validGitHubName(repo) {
+		return "", "", false
+	}
+	return owner, repo, true
+}
+
+func validGitHubName(n string) bool {
+	if n == "" || n == "." || n == ".." {
+		return false
+	}
+	for _, r := range n {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // gitRevParse resolves ref to a commit SHA in the git checkout at dir.

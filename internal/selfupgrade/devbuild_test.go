@@ -28,7 +28,7 @@ func runGit(t *testing.T, dir string, args ...string) {
 
 // initDevSourceCheckout creates a minimal, buildable Go source checkout
 // (go.mod + main.go) as a git repo with one commit and an origin remote
-// whose URL contains remoteSubstring. Returns the checkout dir.
+// whose URL is https://github.com/<remoteSubstring>.git. Returns the checkout dir.
 func initDevSourceCheckout(t *testing.T, remoteSubstring string) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -43,7 +43,7 @@ func initDevSourceCheckout(t *testing.T, remoteSubstring string) string {
 	runGit(t, dir, "config", "user.name", "Test")
 	runGit(t, dir, "add", "-A")
 	runGit(t, dir, "commit", "-m", "initial")
-	runGit(t, dir, "remote", "add", "origin", "https://example.com/"+remoteSubstring+".git")
+	runGit(t, dir, "remote", "add", "origin", "https://github.com/"+remoteSubstring+".git")
 	return dir
 }
 
@@ -66,15 +66,37 @@ func buildPlaceholderExe(t *testing.T, path string) {
 	}
 }
 
+// testSourceRemote is the owner/repo the clone-based tests expect.
+const testSourceRemote = "handarbeit/fabrik"
+
+// stubOriginURL replaces the origin-URL reader for the test's duration.
+func stubOriginURL(t *testing.T, fn func(dir string) (string, error)) {
+	t.Helper()
+	t.Cleanup(SetOriginURLFnForTest(fn))
+}
+
 // testDevBuildConfig builds a DevBuildConfig wired with stubbed
-// executableFn/execFn seams and an ExpectedRemote matching whatever remote
-// substring dir's origin was actually configured with (initDevSourceCheckout
-// or a real clone both need this to line up with IsSourceCheckout's check).
+// executableFn/execFn seams and an owner/repo ExpectedRemote. A real clone's
+// local-path origin is presented as a github.com URL for that owner/repo;
+// initDevSourceCheckout's github.com origin is used as-is and must line up
+// with expectedRemote.
 func testDevBuildConfig(t *testing.T, dir, version, expectedRemote string) (DevBuildConfig, *bool, *bool, *[]string) {
 	t.Helper()
 	var logs []string
 	postBuildCalled := false
 	execCalled := false
+
+	// A real clone's origin is a local filesystem path, which can never satisfy
+	// the github.com host check; present it as a github.com URL for
+	// expectedRemote while every other git operation stays real. Remotes that
+	// are already URLs (initDevSourceCheckout) pass through untouched.
+	stubOriginURL(t, func(d string) (string, error) {
+		u, err := gitOriginURL(d)
+		if err == nil && strings.HasPrefix(u, "/") {
+			return "https://github.com/" + expectedRemote + ".git", nil
+		}
+		return u, err
+	})
 
 	origExecutableFn := executableFn
 	scratchExe := filepath.Join(t.TempDir(), "rebuilt-binary")
@@ -265,9 +287,9 @@ func TestCheckAndRebuildDev_RemoteAheadFetchesPullsAndRebuilds(t *testing.T) {
 
 	// Version is not a "dev(...)" string, so extractBinarySHA returns "" and
 	// the SHA-mismatch shortcut never fires — forcing the remote-check path.
-	// ExpectedRemote is originDir itself: `git clone <originDir> .` sets
-	// origin's URL to that literal path.
-	cfg, postBuildCalled, execCalled, logs := testDevBuildConfig(t, localDir, "", originDir)
+	// The clone's real origin is the local originDir path; testDevBuildConfig
+	// presents it as a github.com URL for testSourceRemote.
+	cfg, postBuildCalled, execCalled, logs := testDevBuildConfig(t, localDir, "", testSourceRemote)
 	CheckAndRebuildDev(cfg)
 
 	if !*postBuildCalled {
@@ -316,7 +338,7 @@ func TestCheckAndRebuildDev_LocalAheadDoesNotPull(t *testing.T) {
 	// Local gets an unpushed commit; origin does not change.
 	runGit(t, localDir, "commit", "--allow-empty", "-m", "local-only")
 
-	cfg, postBuildCalled, execCalled, logs := testDevBuildConfig(t, localDir, "", originDir)
+	cfg, postBuildCalled, execCalled, logs := testDevBuildConfig(t, localDir, "", testSourceRemote)
 	CheckAndRebuildDev(cfg)
 
 	if *postBuildCalled {
@@ -415,7 +437,7 @@ func TestCompareDevBuild_RemoteAhead(t *testing.T) {
 
 	// Version is not a "dev(...)" string, so extractBinarySHA returns "" and
 	// the SHA-mismatch shortcut never fires — forcing the remote-check path.
-	cfg, _, _, logs := testDevBuildConfig(t, localDir, "", originDir)
+	cfg, _, _, logs := testDevBuildConfig(t, localDir, "", testSourceRemote)
 	status, err := CompareDevBuild(cfg)
 	if err != nil {
 		t.Fatalf("CompareDevBuild returned error: %v, logs: %v", err, *logs)
@@ -448,9 +470,9 @@ func TestCompareDevBuild_RemoteAhead(t *testing.T) {
 // matches origin/BaseBranch reports NeedsRebuild=false.
 func TestCompareDevBuild_UpToDate(t *testing.T) {
 	skipIfNoGit(t)
-	originDir, localDir := initOriginAndClone(t)
+	_, localDir := initOriginAndClone(t)
 
-	cfg, _, _, logs := testDevBuildConfig(t, localDir, "", originDir)
+	cfg, _, _, logs := testDevBuildConfig(t, localDir, "", testSourceRemote)
 	status, err := CompareDevBuild(cfg)
 	if err != nil {
 		t.Fatalf("CompareDevBuild returned error: %v, logs: %v", err, *logs)
@@ -471,10 +493,10 @@ func TestCompareDevBuild_UpToDate(t *testing.T) {
 // unpushed local commit must never be flagged for rebuild.
 func TestCompareDevBuild_LocalAheadNoRebuild(t *testing.T) {
 	skipIfNoGit(t)
-	originDir, localDir := initOriginAndClone(t)
+	_, localDir := initOriginAndClone(t)
 	runGit(t, localDir, "commit", "--allow-empty", "-m", "local-only")
 
-	cfg, _, _, logs := testDevBuildConfig(t, localDir, "", originDir)
+	cfg, _, _, logs := testDevBuildConfig(t, localDir, "", testSourceRemote)
 	status, err := CompareDevBuild(cfg)
 	if err != nil {
 		t.Fatalf("CompareDevBuild returned error: %v, logs: %v", err, *logs)
@@ -500,7 +522,7 @@ func TestCompareDevBuild_NeverBuildsOrExecs(t *testing.T) {
 	originDir, localDir := initOriginAndClone(t)
 	runGit(t, originDir, "commit", "--allow-empty", "-m", "second")
 
-	cfg, postBuildCalled, execCalled, logs := testDevBuildConfig(t, localDir, "", originDir)
+	cfg, postBuildCalled, execCalled, logs := testDevBuildConfig(t, localDir, "", testSourceRemote)
 
 	exePath, err := executableFn()
 	if err != nil {
@@ -534,22 +556,57 @@ func TestCompareDevBuild_NeverBuildsOrExecs(t *testing.T) {
 	}
 }
 
-// TestIsSourceCheckout verifies the git-remote substring match used to gate
-// dev-build rebuilds to an actual source checkout.
+// isolateGitConfig keeps the host's global/system git config (insteadOf rules
+// in particular) out of `git remote get-url`.
+func isolateGitConfig(t *testing.T) {
+	t.Helper()
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+}
+
+// TestIsSourceCheckout drives IsSourceCheckout against real git checkouts.
 func TestIsSourceCheckout(t *testing.T) {
 	skipIfNoGit(t)
+	isolateGitConfig(t)
 
-	t.Run("matching remote", func(t *testing.T) {
+	withOrigin := func(t *testing.T, url string) string {
+		t.Helper()
+		dir := initDevSourceCheckout(t, "placeholder/placeholder")
+		runGit(t, dir, "remote", "set-url", "origin", url)
+		return dir
+	}
+
+	tests := []struct {
+		name string
+		url  string
+		want bool
+	}{
+		{"https", "https://github.com/handarbeit/fabrik", true},
+		{"https .git", "https://github.com/handarbeit/fabrik.git", true},
+		{"scp", "git@github.com:handarbeit/fabrik", true},
+		{"scp .git", "git@github.com:handarbeit/fabrik.git", true},
+		{"ssh url", "ssh://git@github.com/handarbeit/fabrik", true},
+		{"ssh url .git", "ssh://git@github.com/handarbeit/fabrik.git", true},
+		{"substring near-miss", "https://github.com/attacker/handarbeit-fabrik-fork", false},
+		{"repo suffix near-miss", "https://github.com/handarbeit/fabrik-fork.git", false},
+		{"same repo other host", "https://gitlab.com/handarbeit/fabrik.git", false},
+		{"same repo self-hosted ssh", "git@git.example.com:handarbeit/fabrik.git", false},
+		{"someoneelse", "https://github.com/someoneelse/otherrepo.git", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := withOrigin(t, tt.url)
+			if got := IsSourceCheckout(dir, "handarbeit/fabrik"); got != tt.want {
+				t.Errorf("IsSourceCheckout(origin=%q) = %v, want %v", tt.url, got, tt.want)
+			}
+		})
+	}
+
+	t.Run("no origin remote", func(t *testing.T) {
 		dir := initDevSourceCheckout(t, "handarbeit/fabrik")
-		if !IsSourceCheckout(dir, "handarbeit/fabrik") {
-			t.Error("expected IsSourceCheckout to return true for a matching remote")
-		}
-	})
-
-	t.Run("non-matching remote", func(t *testing.T) {
-		dir := initDevSourceCheckout(t, "someoneelse/otherrepo")
+		runGit(t, dir, "remote", "remove", "origin")
 		if IsSourceCheckout(dir, "handarbeit/fabrik") {
-			t.Error("expected IsSourceCheckout to return false for a non-matching remote")
+			t.Error("expected false with no origin remote")
 		}
 	})
 
@@ -558,6 +615,108 @@ func TestIsSourceCheckout(t *testing.T) {
 			t.Error("expected IsSourceCheckout to return false outside a git repo")
 		}
 	})
+
+	t.Run("get-url failure", func(t *testing.T) {
+		stubOriginURL(t, func(string) (string, error) { return "", fmt.Errorf("boom") })
+		if IsSourceCheckout(t.TempDir(), "handarbeit/fabrik") {
+			t.Error("expected false when the origin reader errors")
+		}
+	})
+}
+
+// TestMatchGitHubRemote is the exhaustive table for the pure remote parser.
+func TestMatchGitHubRemote(t *testing.T) {
+	const exp = "handarbeit/fabrik"
+	accept := []string{
+		"https://github.com/handarbeit/fabrik",
+		"https://github.com/handarbeit/fabrik.git",
+		"https://github.com/handarbeit/fabrik/",
+		"https://github.com/handarbeit/fabrik.git/",
+		"git@github.com:handarbeit/fabrik",
+		"git@github.com:handarbeit/fabrik.git",
+		"git@github.com:handarbeit/fabrik/",
+		"git@github.com:handarbeit/fabrik.git/",
+		"ssh://git@github.com/handarbeit/fabrik",
+		"ssh://git@github.com/handarbeit/fabrik.git",
+		"ssh://git@github.com/handarbeit/fabrik/",
+		"ssh://git@github.com/handarbeit/fabrik.git/",
+		"  https://github.com/handarbeit/fabrik.git\n",
+		// Deliberate: GitHub names and hosts are case-insensitive.
+		"https://GitHub.com/Handarbeit/Fabrik.git",
+		"git@github.com:HANDARBEIT/FABRIK",
+	}
+	for _, u := range accept {
+		if !matchGitHubRemote(u, exp) {
+			t.Errorf("matchGitHubRemote(%q) = false, want true", u)
+		}
+	}
+
+	reject := []string{
+		"",
+		"   ",
+		// substring / look-alike
+		"https://github.com/attacker/handarbeit-fabrik-fork",
+		"https://github.com/handarbeit/fabrik-fork",
+		"https://github.com/xhandarbeit/fabrik",
+		"https://github.com/handarbeit/fabrik/extra",
+		"https://github.com/handarbeit/fabrik/.git",
+		"https://github.com/extra/handarbeit/fabrik",
+		// hosts
+		"https://github.com.evil.com/handarbeit/fabrik",
+		"https://evil.com/github.com/handarbeit/fabrik",
+		"https://gitlab.com/handarbeit/fabrik.git",
+		"https://ssh.github.com/handarbeit/fabrik",
+		"git@gitlab.com:handarbeit/fabrik.git",
+		"git@github.com.evil.com:handarbeit/fabrik.git",
+		"ssh://git@gitlab.com/handarbeit/fabrik",
+		// empty / malformed segments
+		"https://github.com/handarbeit/",
+		"https://github.com/handarbeit",
+		"https://github.com//fabrik",
+		"https://github.com/handarbeit/.git",
+		"https://github.com/handarbeit/..",
+		"git@github.com:handarbeit/",
+		"git@github.com:/fabrik",
+		"git@github.com:/handarbeit/fabrik",
+		"git@github.com:handarbeit",
+		// userinfo, ports
+		"https://user:tok@github.com/handarbeit/fabrik",
+		"https://tok@github.com/handarbeit/fabrik",
+		"https://github.com:443/handarbeit/fabrik",
+		"ssh://git@github.com:22/handarbeit/fabrik",
+		"ssh://other@github.com/handarbeit/fabrik",
+		"ssh://git:pw@github.com/handarbeit/fabrik",
+		"ssh://github.com/handarbeit/fabrik",
+		"other@github.com:handarbeit/fabrik",
+		"github.com:handarbeit/fabrik",
+		// query, fragment, encoding
+		"https://github.com/handarbeit/fabrik?x=1",
+		"https://github.com/handarbeit/fabrik#frag",
+		"https://github.com/handarbeit/fab%72ik",
+		// schemes / local paths
+		"http://github.com/handarbeit/fabrik",
+		"git://github.com/handarbeit/fabrik",
+		"git+ssh://git@github.com/handarbeit/fabrik",
+		"file:///tmp/handarbeit/fabrik",
+		"/tmp/handarbeit/fabrik",
+		"handarbeit/fabrik",
+		"github.com/handarbeit/fabrik",
+		// whitespace / control characters inside
+		"https://github.com/handarbeit/fab rik",
+		"https://github.com/handarbeit/fabrik\n/x",
+	}
+	for _, u := range reject {
+		if matchGitHubRemote(u, exp) {
+			t.Errorf("matchGitHubRemote(%q) = true, want false", u)
+		}
+	}
+
+	badExpectations := []string{"", "handarbeit", "handarbeit/", "/fabrik", "a/b/c", "a b/c", "a/..", "../b", "a/b%"}
+	for _, e := range badExpectations {
+		if matchGitHubRemote("https://github.com/handarbeit/fabrik", e) {
+			t.Errorf("expectation %q accepted, want fail-closed", e)
+		}
+	}
 }
 
 // TestExtractBinarySHA covers the dev(<sha>) version-string parsing used to
@@ -620,9 +779,9 @@ func headOf(t *testing.T, dir string) string {
 // check fell through to "up to date".
 func TestCompareDevBuild_DirtyBinaryOldSHARebuilds(t *testing.T) {
 	skipIfNoGit(t)
-	originDir, localDir := initOriginAndClone(t)
+	_, localDir := initOriginAndClone(t)
 
-	cfg, _, _, logs := testDevBuildConfig(t, localDir, "dev(0ld5ha1)+dirty", originDir)
+	cfg, _, _, logs := testDevBuildConfig(t, localDir, "dev(0ld5ha1)+dirty", testSourceRemote)
 	status, err := CompareDevBuild(cfg)
 	if err != nil {
 		t.Fatalf("CompareDevBuild returned error: %v, logs: %v", err, *logs)
@@ -637,10 +796,10 @@ func TestCompareDevBuild_DirtyBinaryOldSHARebuilds(t *testing.T) {
 
 func TestCompareDevBuild_DirtyBinarySameSHANoRebuild(t *testing.T) {
 	skipIfNoGit(t)
-	originDir, localDir := initOriginAndClone(t)
+	_, localDir := initOriginAndClone(t)
 	head := headOf(t, localDir)
 
-	cfg, _, _, logs := testDevBuildConfig(t, localDir, "dev("+head[:7]+")+dirty", originDir)
+	cfg, _, _, logs := testDevBuildConfig(t, localDir, "dev("+head[:7]+")+dirty", testSourceRemote)
 	status, err := CompareDevBuild(cfg)
 	if err != nil {
 		t.Fatalf("CompareDevBuild returned error: %v, logs: %v", err, *logs)
@@ -662,7 +821,7 @@ func TestCompareDevBuild_DirtyBinaryRemoteAheadRebuilds(t *testing.T) {
 	head := headOf(t, localDir)
 	runGit(t, originDir, "commit", "--allow-empty", "-m", "second")
 
-	cfg, _, _, logs := testDevBuildConfig(t, localDir, "dev("+head[:7]+")+dirty", originDir)
+	cfg, _, _, logs := testDevBuildConfig(t, localDir, "dev("+head[:7]+")+dirty", testSourceRemote)
 	status, err := CompareDevBuild(cfg)
 	if err != nil {
 		t.Fatalf("CompareDevBuild returned error: %v, logs: %v", err, *logs)
@@ -681,9 +840,9 @@ func TestCompareDevBuild_NoRebuildReasons(t *testing.T) {
 	skipIfNoGit(t)
 
 	t.Run("up to date", func(t *testing.T) {
-		originDir, localDir := initOriginAndClone(t)
+		_, localDir := initOriginAndClone(t)
 		head := headOf(t, localDir)
-		cfg, _, _, _ := testDevBuildConfig(t, localDir, "dev("+head[:7]+")", originDir)
+		cfg, _, _, _ := testDevBuildConfig(t, localDir, "dev("+head[:7]+")", testSourceRemote)
 		status, err := CompareDevBuild(cfg)
 		if err != nil {
 			t.Fatal(err)
@@ -693,10 +852,10 @@ func TestCompareDevBuild_NoRebuildReasons(t *testing.T) {
 		}
 	})
 	t.Run("local ahead", func(t *testing.T) {
-		originDir, localDir := initOriginAndClone(t)
+		_, localDir := initOriginAndClone(t)
 		runGit(t, localDir, "commit", "--allow-empty", "-m", "local-only")
 		head := headOf(t, localDir)
-		cfg, _, _, _ := testDevBuildConfig(t, localDir, "dev("+head[:7]+")", originDir)
+		cfg, _, _, _ := testDevBuildConfig(t, localDir, "dev("+head[:7]+")", testSourceRemote)
 		status, err := CompareDevBuild(cfg)
 		if err != nil {
 			t.Fatal(err)
@@ -710,7 +869,7 @@ func TestCompareDevBuild_NoRebuildReasons(t *testing.T) {
 		runGit(t, originDir, "commit", "--allow-empty", "-m", "remote-only")
 		runGit(t, localDir, "commit", "--allow-empty", "-m", "local-only")
 		head := headOf(t, localDir)
-		cfg, _, _, _ := testDevBuildConfig(t, localDir, "dev("+head[:7]+")", originDir)
+		cfg, _, _, _ := testDevBuildConfig(t, localDir, "dev("+head[:7]+")", testSourceRemote)
 		status, err := CompareDevBuild(cfg)
 		if err != nil {
 			t.Fatal(err)
@@ -721,8 +880,8 @@ func TestCompareDevBuild_NoRebuildReasons(t *testing.T) {
 	})
 	for _, version := range []string{"", "v0.0.84", "dev()", "garbage"} {
 		t.Run("unparseable "+version, func(t *testing.T) {
-			originDir, localDir := initOriginAndClone(t)
-			cfg, _, _, _ := testDevBuildConfig(t, localDir, version, originDir)
+			_, localDir := initOriginAndClone(t)
+			cfg, _, _, _ := testDevBuildConfig(t, localDir, version, testSourceRemote)
 			status, err := CompareDevBuild(cfg)
 			if err != nil {
 				t.Fatal(err)
@@ -752,9 +911,9 @@ func TestCheckAndRebuildDev_LogsOneOutcomeLine(t *testing.T) {
 	t.Cleanup(resetDirtyReportedForTest)
 
 	t.Run("up to date", func(t *testing.T) {
-		originDir, localDir := initOriginAndClone(t)
+		_, localDir := initOriginAndClone(t)
 		head := headOf(t, localDir)
-		cfg, _, execCalled, logs := testDevBuildConfig(t, localDir, "dev("+head[:7]+")", originDir)
+		cfg, _, execCalled, logs := testDevBuildConfig(t, localDir, "dev("+head[:7]+")", testSourceRemote)
 		CheckAndRebuildDev(cfg)
 		if *execCalled {
 			t.Error("unexpected re-exec")
@@ -771,9 +930,9 @@ func TestCheckAndRebuildDev_LogsOneOutcomeLine(t *testing.T) {
 		}
 	})
 	t.Run("dirty binary at current commit", func(t *testing.T) {
-		originDir, localDir := initOriginAndClone(t)
+		_, localDir := initOriginAndClone(t)
 		head := headOf(t, localDir)
-		cfg, _, _, logs := testDevBuildConfig(t, localDir, "dev("+head[:7]+")+dirty", originDir)
+		cfg, _, _, logs := testDevBuildConfig(t, localDir, "dev("+head[:7]+")+dirty", testSourceRemote)
 		CheckAndRebuildDev(cfg)
 		if len(*logs) != 1 || !strings.Contains((*logs)[0], "dirty tree at the current commit") {
 			t.Errorf("logs = %q, want one line explaining the dirty build", *logs)
@@ -788,9 +947,9 @@ func TestCheckAndRebuildDev_DirtyBinaryOldSHAFromPulledCheckout(t *testing.T) {
 	skipIfNoGit(t)
 	resetDirtyReportedForTest()
 	t.Cleanup(resetDirtyReportedForTest)
-	originDir, localDir := initOriginAndClone(t)
+	_, localDir := initOriginAndClone(t)
 
-	cfg, postBuildCalled, execCalled, logs := testDevBuildConfig(t, localDir, "dev(0ld5ha1)+dirty", originDir)
+	cfg, postBuildCalled, execCalled, logs := testDevBuildConfig(t, localDir, "dev(0ld5ha1)+dirty", testSourceRemote)
 	CheckAndRebuildDev(cfg)
 	if !*postBuildCalled || !*execCalled {
 		t.Errorf("expected rebuild and re-exec, logs: %q", *logs)
@@ -801,7 +960,7 @@ func TestCheckAndRebuildDev_ReportsDirtyPathsOncePerProcess(t *testing.T) {
 	skipIfNoGit(t)
 	resetDirtyReportedForTest()
 	t.Cleanup(resetDirtyReportedForTest)
-	originDir, localDir := initOriginAndClone(t)
+	_, localDir := initOriginAndClone(t)
 	head := headOf(t, localDir)
 	if err := os.WriteFile(filepath.Join(localDir, "stray.txt"), []byte("x"), 0644); err != nil {
 		t.Fatal(err)
@@ -819,7 +978,7 @@ func TestCheckAndRebuildDev_ReportsDirtyPathsOncePerProcess(t *testing.T) {
 		return n
 	}
 
-	cfg, _, _, logs := testDevBuildConfig(t, localDir, "dev("+head[:7]+")+dirty", originDir)
+	cfg, _, _, logs := testDevBuildConfig(t, localDir, "dev("+head[:7]+")+dirty", testSourceRemote)
 	CheckAndRebuildDev(cfg)
 	if n := count(*logs); n != 1 {
 		t.Fatalf("first check: %d dirty lines, want 1; logs: %q", n, *logs)
@@ -838,10 +997,10 @@ func TestCheckAndRebuildDev_CleanCheckoutLogsNoDirtyLine(t *testing.T) {
 	skipIfNoGit(t)
 	resetDirtyReportedForTest()
 	t.Cleanup(resetDirtyReportedForTest)
-	originDir, localDir := initOriginAndClone(t)
+	_, localDir := initOriginAndClone(t)
 	head := headOf(t, localDir)
 
-	cfg, _, _, logs := testDevBuildConfig(t, localDir, "dev("+head[:7]+")", originDir)
+	cfg, _, _, logs := testDevBuildConfig(t, localDir, "dev("+head[:7]+")", testSourceRemote)
 	CheckAndRebuildDev(cfg)
 	for _, l := range *logs {
 		if strings.Contains(l, "uncommitted") {
@@ -857,13 +1016,13 @@ func TestReportDirtyCheckout_CapsPaths(t *testing.T) {
 	skipIfNoGit(t)
 	resetDirtyReportedForTest()
 	t.Cleanup(resetDirtyReportedForTest)
-	originDir, localDir := initOriginAndClone(t)
+	_, localDir := initOriginAndClone(t)
 	for i := 0; i < maxDirtyPathsListed+3; i++ {
 		if err := os.WriteFile(filepath.Join(localDir, fmt.Sprintf("f%02d.txt", i)), []byte("x"), 0644); err != nil {
 			t.Fatal(err)
 		}
 	}
-	cfg, _, _, logs := testDevBuildConfig(t, localDir, "", originDir)
+	cfg, _, _, logs := testDevBuildConfig(t, localDir, "", testSourceRemote)
 	reportDirtyCheckout(cfg)
 	if len(*logs) != 1 || !strings.Contains((*logs)[0], "and 3 more") || !strings.Contains((*logs)[0], "(13 paths)") {
 		t.Errorf("logs = %q, want one capped line with 'and 3 more'", *logs)
