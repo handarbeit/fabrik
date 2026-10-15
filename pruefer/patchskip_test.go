@@ -135,8 +135,21 @@ func TestReviewPR_PatchUnchanged_ChainBound(t *testing.T) {
 	}
 	// The real review reset the run: the review it posted is now the anchor, and
 	// the tracker holds no stale run.
-	if n := f.tracker.PatchSkips("o", "r", 7, psPrev); n != 0 {
+	if n := f.tracker.PatchSkips("o", "r", 7, psPrev, ""); n != 0 {
 		t.Errorf("chain after a real review = %d, want 0", n)
+	}
+}
+
+// The same head evaluated again and again (a non-memoised outcome — a degraded
+// read, an event racing a poll) is one skipped head, not a chain: it must never
+// push a genuinely unchanged-patch head into a forced review.
+func TestReviewPR_PatchUnchanged_ReEvaluatingOneHeadDoesNotLengthenChain(t *testing.T) {
+	f := newPSFixture(t)
+	for i := 1; i <= 3*maxPatchSkipChain; i++ {
+		out := f.review()
+		if !out.Skipped || out.Reason != SkipPatchUnchanged {
+			t.Fatalf("evaluation %d of the same head: outcome = %+v, want a patch-unchanged skip", i, out)
+		}
 	}
 }
 
@@ -223,24 +236,35 @@ func TestReviewPR_PatchUnchanged_ChangeInExcludedPathStillCounts(t *testing.T) {
 
 func TestReviewTracker_PatchChain(t *testing.T) {
 	var nilT *ReviewTracker
-	if nilT.PatchSkips("o", "r", 1, "x") != 0 || nilT.NotePatchSkip("o", "r", 1, "x") != 1 {
+	if nilT.PatchSkips("o", "r", 1, "x", "h") != 0 || nilT.NotePatchSkip("o", "r", 1, "x", "h") != 1 {
 		t.Fatal("nil tracker must be inert")
 	}
 	tr := NewReviewTracker()
-	if got := tr.NotePatchSkip("O", "R", 1, "x"); got != 1 {
+	if got := tr.NotePatchSkip("O", "R", 1, "x", "h1"); got != 1 {
 		t.Fatalf("first skip = %d", got)
 	}
-	if got := tr.NotePatchSkip("o", "r", 1, "x"); got != 2 {
-		t.Fatalf("second skip (case-insensitive repo) = %d", got)
+	if got := tr.NotePatchSkip("o", "r", 1, "x", "h2"); got != 2 {
+		t.Fatalf("second distinct head (case-insensitive repo) = %d", got)
 	}
-	if tr.PatchSkips("o", "r", 1, "other") != 0 {
+	// Re-evaluating an already-skipped head (non-memoised outcome) is not a
+	// longer chain, and does not count against its own bound check.
+	if got := tr.NotePatchSkip("o", "r", 1, "x", "h2"); got != 2 {
+		t.Fatalf("same head again = %d, want 2", got)
+	}
+	if got := tr.PatchSkips("o", "r", 1, "x", "h2"); got != 1 {
+		t.Fatalf("PatchSkips excluding the re-evaluated head = %d, want 1", got)
+	}
+	if got := tr.PatchSkips("o", "r", 1, "x", "h3"); got != 2 {
+		t.Fatalf("PatchSkips for a new head = %d, want 2", got)
+	}
+	if tr.PatchSkips("o", "r", 1, "other", "h1") != 0 {
 		t.Error("a run over a different reviewed head must read as 0")
 	}
-	if got := tr.NotePatchSkip("o", "r", 1, "other"); got != 1 {
+	if got := tr.NotePatchSkip("o", "r", 1, "other", "h1"); got != 1 {
 		t.Errorf("a new reviewed head restarts the run, got %d", got)
 	}
 	tr.Record("o", "r", 1, "newhead")
-	if tr.PatchSkips("o", "r", 1, "other") != 0 {
+	if tr.PatchSkips("o", "r", 1, "other", "h1") != 0 {
 		t.Error("Record must reset the run")
 	}
 }

@@ -113,7 +113,7 @@ func patchUnchangedSkip(client GitHubReviewer, cfg Config, botLogin, owner, repo
 	if !reviewBodyComplete(last.Body) {
 		return patchVerdict{Detail: fmt.Sprintf("last review (head %s) is not marked PRUEFER_COVERAGE: complete", shortSHA(last.CommitID))}
 	}
-	if n := tracker.PatchSkips(owner, repo, pr.Number, last.CommitID); n >= maxPatchSkipChain {
+	if n := tracker.PatchSkips(owner, repo, pr.Number, last.CommitID, pr.HeadSHA); n >= maxPatchSkipChain {
 		return patchVerdict{Detail: fmt.Sprintf("%d consecutive patch-unchanged skips over %s; forcing a real review", n, shortSHA(last.CommitID))}
 	}
 	cur, ok := patchFingerprint(diff)
@@ -127,7 +127,7 @@ func patchUnchangedSkip(client GitHubReviewer, cfg Config, botLogin, owner, repo
 	if prev.Whole != cur.Whole {
 		return patchVerdict{Detail: fmt.Sprintf("the change differs from reviewed head %s", shortSHA(last.CommitID))}
 	}
-	n := tracker.NotePatchSkip(owner, repo, pr.Number, last.CommitID)
+	n := tracker.NotePatchSkip(owner, repo, pr.Number, last.CommitID, pr.HeadSHA)
 	return patchVerdict{Skip: true, Detail: fmt.Sprintf("head %s has the same patch as reviewed head %s (fp=%s, chain %d/%d)",
 		shortSHA(pr.HeadSHA), shortSHA(last.CommitID), cur.Whole[:8], n, maxPatchSkipChain)}
 }
