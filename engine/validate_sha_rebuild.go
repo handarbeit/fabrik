@@ -114,9 +114,10 @@ func (e *Engine) hydrateValidateCompletionSHAs(candidates []gh.ProjectItem) map[
 			continue
 		}
 		lpr := snap.LinkedPR()
-		if lpr == nil || lpr.HeadSHA == "" {
+		if lpr == nil || lpr.ObservedHead() == "" {
 			continue // PR or head not known yet — retry next poll; not an R3 case.
 		}
+		liveHead := lpr.ObservedHead()
 		if snap.Worker() != nil {
 			continue // FR-6: the running Validate will record its own SHA.
 		}
@@ -126,9 +127,9 @@ func (e *Engine) hydrateValidateCompletionSHAs(candidates []gh.ProjectItem) map[
 		if lpr.Number != 0 && e.catchUpPushInFlight(owner, repo, lpr.Number) {
 			continue
 		}
-		sha, ok := rebuildValidateSHA(item.Comments, e.selfLogin(), lpr.HeadSHA)
+		sha, ok := rebuildValidateSHA(item.Comments, e.selfLogin(), liveHead)
 		if !ok {
-			e.logf(item.Number, "validate-sha", "no Validate completion SHA recoverable after restart — re-running Validate instead of trusting head %s\n", lpr.HeadSHA)
+			e.logf(item.Number, "validate-sha", "no Validate completion SHA recoverable after restart — re-running Validate instead of trusting head %s\n", liveHead)
 			e.handleValidateSHAInvalidation(item, owner, repo)
 			if invalidated == nil {
 				invalidated = map[string]bool{}

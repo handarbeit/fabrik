@@ -132,6 +132,13 @@ func (e *Engine) checkValidateSHAInvalidation(item gh.ProjectItem) bool {
 		return false
 	}
 	lpr := snap.LinkedPR()
+	if lpr != nil && lpr.HeadSHA == "" {
+		// Right after a restart the engine-recorded head can still be empty while the
+		// poll's PR facts already name the head (#2343): fall back to the observed head.
+		withHead := *lpr
+		withHead.HeadSHA = lpr.ObservedHead()
+		lpr = &withHead
+	}
 	if lpr == nil || lpr.HeadSHA == "" || lpr.HeadSHA == completedSHA {
 		return false
 	}
