@@ -270,7 +270,9 @@ func (e *Engine) dispatchReinvoke(ctx context.Context, board *gh.ProjectBoard, i
 			// Refund the cycle so the bound is free once the human replies, record
 			// no did-not-run state, and skip opts.after: its HEAD-based hooks (CI
 			// no-op-SHA debounce, rebase auto-merge re-enable, review refund) are
-			// wrong on a just-paused item.
+			// wrong on a just-paused item. The invocation did run, so it ends any
+			// streak of never-ran reinvokes like every other charged outcome.
+			e.store.Apply(itemstate.DidNotRunReinvokesReset{Repo: itemRepo, Number: item.Number, StageName: stage.Name})
 			if opts.cycle.refund != nil {
 				for _, m := range opts.cycle.refund(itemRepo, item.Number, stage.Name) {
 					e.store.Apply(m)

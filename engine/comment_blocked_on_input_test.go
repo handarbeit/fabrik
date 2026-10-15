@@ -114,6 +114,10 @@ func TestDispatchReinvoke_BlockedOnInputRefundsAndSkipsAfter(t *testing.T) {
 	stage := &stages.Stage{Name: "Review", Order: 1, Completion: stages.CompletionCriteria{Type: "claude"}}
 	item := gh.ProjectItem{Number: 2280, Repo: "owner/repo", Body: "spec", Labels: []string{"stage:Review:complete"}}
 
+	// A stale never-ran streak from an earlier outage: the blocked run executed,
+	// so it must end the streak.
+	eng.store.Apply(itemstate.DidNotRunReinvokeRecorded{Repo: "owner/repo", Number: 2280, StageName: "Review"})
+
 	refunds, afterCalls := 0, 0
 	eng.dispatchReinvoke(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, item, stage, reinvokeOpts{
 		tag: "test",
