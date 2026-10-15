@@ -404,7 +404,9 @@ func cachedCIVerdict(lpr *itemstate.LinkedPRState) string {
 	switch status {
 	case gh.CheckRunsPending:
 		return "pending"
-	case gh.CheckRunsFailed:
+	case gh.CheckRunsFailed, gh.CheckRunsNonPassing:
+		// #2296: a cancelled/stale/unrecognised latest run has no result and is
+		// never green; the worker's ci-status.md and the gates call it red too.
 		return "red"
 	}
 	if allCheckRunsPassed(lpr.CheckRuns) {

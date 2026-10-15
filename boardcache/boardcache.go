@@ -991,7 +991,9 @@ func (c *CacheImpl) FetchCheckRuns(owner, repo, sha string) ([]gh.CheckRun, erro
 		// hazard — a superseded/rerun check would keep shadowing its own fresh
 		// rerun (#958 leg 3). Both are confirmed live. A PENDING set that was
 		// confirmed live moments ago is served, so one poll's repeated reads of
-		// the same head cost one REST call, not one per reader.
+		// the same head cost one REST call, not one per reader. A NON-PASSING set
+		// (cancelled/stale/unrecognised latest run, #2296) is likewise not READY: a
+		// cancelled run is never served on trust, so a superseding rerun is seen.
 		status, _, _ := gh.ClassifyCheckRuns(runs)
 		switch {
 		case status == gh.CheckRunsReady:

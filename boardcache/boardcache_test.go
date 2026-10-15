@@ -2969,3 +2969,31 @@ func TestStatusAtGitHubReachesProjectItem(t *testing.T) {
 		t.Errorf("#2 StatusAtGitHub = %v, want zero", got[2])
 	}
 }
+
+// #2296: a cached set whose latest run is cancelled is not READY, so it is
+// confirmed live instead of being served on trust.
+func TestFetchCheckRuns_CachedCancelled_ConfirmedLive(t *testing.T) {
+	store := itemstate.NewStore(nil)
+	store.Apply(itemstate.CheckRunCompleted{
+		Repo: "owner/repo",
+		SHA:  "sha_cancelled",
+		Run:  gh.CheckRun{ID: 1, Name: "test", Status: "completed", Conclusion: "cancelled"},
+	})
+	// Live GitHub reports the cancelled run superseded by a successful rerun.
+	mc := &mockClient{checkRunsResult: []gh.CheckRun{
+		{ID: 1, Name: "test", Status: "completed", Conclusion: "cancelled"},
+		{ID: 2, Name: "test", Status: "completed", Conclusion: "success"},
+	}}
+	c := NewCacheImpl(mc, store, nopLog)
+
+	runs, err := c.FetchCheckRuns("owner", "repo", "sha_cancelled")
+	if err != nil {
+		t.Fatalf("FetchCheckRuns: %v", err)
+	}
+	if mc.fetchCheckRunsCount != 1 {
+		t.Errorf("a cached cancelled set must be confirmed live, got %d fetches", mc.fetchCheckRunsCount)
+	}
+	if len(runs) != 2 {
+		t.Errorf("expected the live run set, got %+v", runs)
+	}
+}
