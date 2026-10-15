@@ -663,6 +663,10 @@ func (d *Daemon) Run(ctx context.Context) (err error) {
 	// lifecycle in internal/githubauth.Reconciler.RunRefreshLoops).
 	go d.runRederivationTicker(ctx)
 
+	if msg := trustAnchorStartupNotice(d.config()); msg != "" {
+		logf(0, "startup", "%s\n", msg)
+	}
+
 	if d.EventSource != nil {
 		return d.runEventDriven(ctx)
 	}
