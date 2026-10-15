@@ -249,6 +249,9 @@ func snapshotToProjectItem(snap itemstate.Snapshot) gh.ProjectItem {
 		pi.LinkedPRReviewRequests = s.LinkedPR.ReviewRequests
 		pi.LinkedPRReviewThreadComments = s.LinkedPR.ThreadComments
 		pi.LinkedPRResolvedThreadCount = s.LinkedPR.ResolvedThreadCount
+		pi.LinkedPRIsMergeQueueEnabled = s.LinkedPR.IsMergeQueueEnabled
+		pi.LinkedPRIsInMergeQueue = s.LinkedPR.IsInMergeQueue
+		pi.LinkedPRMergeQueueEntry = cloneMergeQueueEntry(s.LinkedPR.MergeQueueEntry)
 	}
 	return pi
 }
@@ -1542,9 +1545,13 @@ func (c *CacheImpl) LightReconcile(owner, repo string, projectNum int, ownerType
 // copyDeepFieldsFromState overlays deep fields from an ItemState onto a *gh.ProjectItem.
 // Deep fields: Body, URL, Author, Assignees, BlockedBy, Comments, LinkedPRNumber,
 // LinkedPRHeadSHA, LinkedPRReviews, LinkedPRReviewRequests, LinkedPRReviewThreadComments,
-// LinkedPRResolvedThreadCount. Shallow fields (Labels, Status, Title, UpdatedAt) are left
-// unchanged in dst.
+// LinkedPRResolvedThreadCount and the merge-queue facts (LinkedPRIsMergeQueueEnabled,
+// LinkedPRIsInMergeQueue, LinkedPRMergeQueueEntry). Shallow fields (Labels, Status,
+// Title, UpdatedAt) are left unchanged in dst. DeepFetchLive is cleared: this is a
+// cache hit, not a read from GitHub (#2344). TestCopyDeepFields_CarriesEveryLinkedPRField
+// fails when a LinkedPR* field is added to gh.ProjectItem without being carried here.
 func copyDeepFieldsFromState(dst *gh.ProjectItem, s itemstate.ItemState) {
+	dst.DeepFetchLive = false
 	dst.Body = s.Body
 	dst.URL = s.URL
 	dst.Author = s.Author
@@ -1558,7 +1565,20 @@ func copyDeepFieldsFromState(dst *gh.ProjectItem, s itemstate.ItemState) {
 		dst.LinkedPRReviewRequests = cloneReviewRequests(s.LinkedPR.ReviewRequests)
 		dst.LinkedPRReviewThreadComments = cloneComments(s.LinkedPR.ThreadComments)
 		dst.LinkedPRResolvedThreadCount = s.LinkedPR.ResolvedThreadCount
+		dst.LinkedPRIsMergeQueueEnabled = s.LinkedPR.IsMergeQueueEnabled
+		dst.LinkedPRIsInMergeQueue = s.LinkedPR.IsInMergeQueue
+		dst.LinkedPRMergeQueueEntry = cloneMergeQueueEntry(s.LinkedPR.MergeQueueEntry)
 	}
+}
+
+// cloneMergeQueueEntry returns an independent copy so the cached state and the
+// caller's working item never share the pointer.
+func cloneMergeQueueEntry(e *gh.MergeQueueEntry) *gh.MergeQueueEntry {
+	if e == nil {
+		return nil
+	}
+	c := *e
+	return &c
 }
 
 // fabrikManagedLabelKey returns an order-independent canonical key of the

@@ -75,7 +75,114 @@ func applyProjectItem(item *ItemState, pi gh.ProjectItem) ChangeFlags {
 		flags |= CommentsChanged
 	}
 
-	// Sync LinkedPR fields from ProjectItem.
+	flags |= applyLinkedPRFields(item, pi)
+
+	if flags == 0 && item.Repo == "" {
+		// First-time population of identity fields.
+		item.Repo = pi.Repo
+		item.Number = pi.Number
+		return TitleBodyChanged | StatusChanged | LabelsChanged
+	}
+
+	item.Repo = pi.Repo
+	item.Number = pi.Number
+
+	return flags
+}
+
+// applyDeepFetched applies the result of a deep fetch (live or served from the
+// board cache) to item. It writes only the facts a deep fetch produces: title,
+// body, URL, author, assignees, blocked-by, comments, milestone, layer evidence
+// and the LinkedPR block. Status, labels and closed state in pi come from the
+// poll-start listing (the deep fetch never reads Status, and a cache hit copies
+// none of the three), so they are written only as a first population — when the
+// Store holds nothing yet. After that they reach the Store only through the
+// listing paths and their engine-write protection (#2344, ADR 2344).
+func applyDeepFetched(item *ItemState, pi gh.ProjectItem) ChangeFlags {
+	var flags ChangeFlags
+	// State is empty only until the first population: getOrCreate pre-sets
+	// Repo/Number, so they cannot tell a new record from a known one.
+	closedUnheld := item.State == ""
+
+	if item.ID != pi.ID && pi.ID != "" {
+		item.ID = pi.ID
+	}
+	if item.ItemID != pi.ItemID {
+		item.ItemID = pi.ItemID
+	}
+
+	if item.Title != pi.Title || item.Body != pi.Body || item.URL != pi.URL || item.Author != pi.Author {
+		item.Title = pi.Title
+		item.Body = pi.Body
+		item.URL = pi.URL
+		item.Author = pi.Author
+		flags |= TitleBodyChanged
+	}
+
+	if !reflect.DeepEqual(item.Assignees, pi.Assignees) {
+		item.Assignees = copyStrings(pi.Assignees)
+		flags |= AssigneesChanged
+	}
+
+	if closedUnheld && (item.State != stateFrom(pi) || item.IsClosed != pi.IsClosed || item.IsPR != pi.IsPR) {
+		item.State = stateFrom(pi)
+		item.IsClosed = pi.IsClosed
+		item.IsPR = pi.IsPR
+		flags |= StateChanged
+	}
+
+	if !pi.LabelsAbsent && !item.LabelsKnown {
+		if !reflect.DeepEqual(item.Labels, pi.Labels) {
+			item.Labels = copyStrings(pi.Labels)
+			flags |= LabelsChanged
+		}
+		item.LabelsKnown = true
+	}
+
+	if item.Status == "" && pi.Status != "" {
+		item.Status = pi.Status
+		item.StatusEnteredAt = time.Now()
+		item.StatusAtGitHub = pi.StatusAtGitHub
+		flags |= StatusChanged
+	}
+
+	// UpdatedAt is a listing fact: only ever move it forward.
+	if pi.UpdatedAt.After(item.UpdatedAt) {
+		item.UpdatedAt = pi.UpdatedAt
+	}
+	applyLayerEvidence(item, pi.IssueLayerUpdatedAt, pi.LinkedPRUpdatedAt, pi.IssueCommentTotal, pi.IssueCommentTotalKnown)
+
+	if pi.MilestoneKnown {
+		flags |= applyMilestone(item, pi.Milestone, true)
+	}
+
+	if !reflect.DeepEqual(item.BlockedBy, pi.BlockedBy) {
+		item.BlockedBy = copyDeps(pi.BlockedBy)
+		flags |= BlockedByChanged
+	}
+
+	if !reflect.DeepEqual(item.Comments, pi.Comments) {
+		item.Comments = copyComments(pi.Comments)
+		flags |= CommentsChanged
+	}
+
+	flags |= applyLinkedPRFields(item, pi)
+
+	if flags == 0 && item.Repo == "" {
+		item.Repo = pi.Repo
+		item.Number = pi.Number
+		return TitleBodyChanged | StatusChanged | LabelsChanged
+	}
+	item.Repo = pi.Repo
+	item.Number = pi.Number
+	return flags
+}
+
+// applyLinkedPRFields syncs the LinkedPR fields from pi into item and returns
+// the flags it raised. Shared by applyProjectItem and applyDeepFetched so there
+// is one copy of the field-by-field comparison.
+func applyLinkedPRFields(item *ItemState, pi gh.ProjectItem) ChangeFlags {
+	var flags ChangeFlags
 	if pi.LinkedPRNumber != 0 {
 		if item.LinkedPR == nil {
 			item.LinkedPR = &LinkedPRState{}
@@ -120,7 +227,12 @@ func applyProjectItem(item *ItemState, pi gh.ProjectItem) ChangeFlags {
 				flags |= LinkedPRChanged
 			}
 			if !reflect.DeepEqual(lpr.MergeQueueEntry, pi.LinkedPRMergeQueueEntry) {
-				lpr.MergeQueueEntry = pi.LinkedPRMergeQueueEntry
+				if e := pi.LinkedPRMergeQueueEntry; e != nil {
+					c := *e
+					lpr.MergeQueueEntry = &c
+				} else {
+					lpr.MergeQueueEntry = nil
+				}
 				flags |= LinkedPRChanged
 			}
 		}
@@ -128,17 +240,6 @@ func applyProjectItem(item *ItemState, pi gh.ProjectItem) ChangeFlags {
 		// PR was delinked — only clear the number, preserve any richer state.
 		// (Full removal would need an explicit IssuePRDelinked mutation.)
 	}
-
-	if flags == 0 && item.Repo == "" {
-		// First-time population of identity fields.
-		item.Repo = pi.Repo
-		item.Number = pi.Number
-		return TitleBodyChanged | StatusChanged | LabelsChanged
-	}
-
-	item.Repo = pi.Repo
-	item.Number = pi.Number
-
 	return flags
 }
 

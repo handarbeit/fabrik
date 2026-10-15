@@ -34,8 +34,8 @@ func TestStatusEnteredAtStampedByProjectItem(t *testing.T) {
 
 	pi := testProjectItem(testRepo, 1)
 	pi.Status = "Review"
-	if _, _, err := s.Apply(ItemDeepFetched{Repo: testRepo, Number: 1, FreshState: pi}); err != nil {
-		t.Fatalf("Apply(ItemDeepFetched): %v", err)
+	if _, _, err := s.Apply(ShallowBoardItemUpdated{Repo: testRepo, Number: 1, Item: pi}); err != nil {
+		t.Fatalf("Apply(ShallowBoardItemUpdated): %v", err)
 	}
 
 	after := getItem(t, s, testRepo, 1).StatusEnteredAt

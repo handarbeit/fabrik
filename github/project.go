@@ -1009,6 +1009,7 @@ func (c *Client) FetchItemDetails(item *ProjectItem) error {
 	if err := c.graphqlRequest(fetchItemDetailsQuery, vars, &result); err != nil {
 		return fmt.Errorf("fetching details for item #%d: %w", item.Number, err)
 	}
+	item.DeepFetchLive = true
 	if result.Data.Node == nil {
 		return fmt.Errorf("fetching details for item #%d: node not found", item.Number)
 	}

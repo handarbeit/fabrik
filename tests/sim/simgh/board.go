@@ -469,7 +469,15 @@ func (s *Sim) FetchItemDetails(item *gh.ProjectItem) error {
 	if full == nil {
 		return fmt.Errorf("simgh: project item %q has no content", item.ID)
 	}
+	// The real deep fetch never reads Status: the caller's (listing) value
+	// stays. Mirror that so a Status that moved after the listing is not
+	// silently refreshed through the deep fetch (#2344).
+	listingStatus := item.Status
 	*item = *full
+	if listingStatus != "" {
+		item.Status = listingStatus
+	}
+	item.DeepFetchLive = true
 	return nil
 }
 

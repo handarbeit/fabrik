@@ -191,6 +191,12 @@ type ProjectItem struct {
 	// known, so the first label-bearing population is a silent baseline (#2123).
 	// Negative on purpose: a producer that forgets it fails noisy, never silent.
 	LabelsAbsent bool
+	// DeepFetchLive is true when this item's deep fields were just read from
+	// GitHub (FetchItemDetails), false when they were copied from the board
+	// cache or the item is a plain listing entry. The Store assigns its
+	// LastSeen* freshness baselines from a live fetch but never lets a cache
+	// hit move them backwards (#2344, amends ADR 2180).
+	DeepFetchLive bool
 
 	// IssueLayerUpdatedAt is the issue-and-project-item part of UpdatedAt: the
 	// later of content.updatedAt and the project item's updatedAt (display-field

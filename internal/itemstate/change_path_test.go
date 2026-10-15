@@ -16,7 +16,7 @@ func TestChangePath_ReconcileDeepFetchProbeAreNamed(t *testing.T) {
 	moved := item
 	moved.Status = "Implement"
 	s.Apply(ShallowBoardItemUpdated{Repo: testRepo, Number: 1, Item: moved})
-	moved.Status = "Review"
+	moved.Title = "retitled by the deep fetch"
 	s.Apply(ItemDeepFetched{Repo: testRepo, Number: 1, FreshState: moved})
 	s.Apply(FromProbe{Inner: ProbeBoardItemUpdated{Repo: testRepo, Number: 1, Item: gh.BoardProbeItem{Repo: testRepo, Number: 1, Status: "Validate"}}})
 
@@ -29,8 +29,8 @@ func TestChangePath_ReconcileDeepFetchProbeAreNamed(t *testing.T) {
 		from, to string
 	}{
 		{PathReconcile, "Plan", "Implement"},
-		{PathDeepFetch, "Implement", "Review"},
-		{PathProbe, "Review", "Validate"},
+		{PathDeepFetch, "", ""}, // a deep fetch no longer moves Status (#2344)
+		{PathProbe, "Implement", "Validate"},
 	}
 	for i, w := range want {
 		if got[i].Path != w.path || got[i].StatusFrom != w.from || got[i].StatusTo != w.to {

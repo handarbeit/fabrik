@@ -36,6 +36,11 @@ type Store struct {
 	// caused. Test seam only (SetLegacyLabelBaselineForTest).
 	legacyLabelBaseline atomic.Bool
 
+	// legacyDeepFetchApply restores the pre-#2344 ItemDeepFetched behaviour
+	// (applyProjectItem over the whole poll-start snapshot, unconditional
+	// freshness baselines). Test seam only (SetLegacyDeepFetchApplyForTest).
+	legacyDeepFetchApply atomic.Bool
+
 	mu    sync.RWMutex
 	items map[string]*ItemState // key: "owner/repo#N"
 
@@ -587,10 +592,27 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		// it is cleared here rather than relying on every caller to (#2123).
 		fresh := v.FreshState
 		fresh.LabelsAbsent = false
-		flags := applyProjectItem(item, fresh)
+		var flags ChangeFlags
+		if s.legacyDeepFetchApply.Load() {
+			flags = applyProjectItem(item, fresh)
+		} else {
+			flags = applyDeepFetched(item, fresh)
+		}
 		item.LastDeepFetchAt = time.Now()
-		item.LastSeenSourceUpdatedAt = v.FreshState.UpdatedAt
-		item.LastSeenPRUpdatedAt = v.FreshState.LinkedPRUpdatedAt
+		// A live refetch re-anchors the freshness baselines to GitHub's values
+		// (ADR 2180: that cures masking and clock skew). A cache hit carries the
+		// poll-start listing's values, so it may only raise them (#2344, R4).
+		if v.FreshState.DeepFetchLive || s.legacyDeepFetchApply.Load() {
+			item.LastSeenSourceUpdatedAt = v.FreshState.UpdatedAt
+			item.LastSeenPRUpdatedAt = v.FreshState.LinkedPRUpdatedAt
+		} else {
+			if v.FreshState.UpdatedAt.After(item.LastSeenSourceUpdatedAt) {
+				item.LastSeenSourceUpdatedAt = v.FreshState.UpdatedAt
+			}
+			if v.FreshState.LinkedPRUpdatedAt.After(item.LastSeenPRUpdatedAt) {
+				item.LastSeenPRUpdatedAt = v.FreshState.LinkedPRUpdatedAt
+			}
+		}
 		item.LastDeepFetchFailureAt = time.Time{} // clear failure on success
 		return flags | DeepFetchChanged
 
@@ -1745,6 +1767,14 @@ func ensureStageStateMaps(item *ItemState) {
 // calls this.
 func (s *Store) SetLegacyLabelBaselineForTest(on bool) {
 	s.legacyLabelBaseline.Store(on)
+}
+
+// SetLegacyDeepFetchApplyForTest restores the pre-#2344 ItemDeepFetched apply: the
+// whole poll-start snapshot is written back and the freshness baselines are
+// assigned unconditionally. Test seam only, used to show the deep-fetch tests are
+// not vacuous; production never calls this.
+func (s *Store) SetLegacyDeepFetchApplyForTest(on bool) {
+	s.legacyDeepFetchApply.Store(on)
 }
 
 func prFactsEqual(a, b PRFacts) bool {
