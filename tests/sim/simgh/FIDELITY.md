@@ -415,6 +415,15 @@ or a completed run with `JobCount` 0) sits here while `checkRuns` stays empty.
   supersedes the failure. With no step scripted it stays `in_progress` forever.
   The sim does not re-run only the *failed* jobs of a run; the scenario scripts
   which check runs the re-run produces.
+- **Cancelled runs (#2296).** A `completed`/`cancelled` workflow run with
+  `JobCount > 0` is re-runnable by `RerunFailedJobs` (the sim re-runs any
+  completed run with jobs), and `checkVerdict` already maps a cancelled check
+  run to a failing mergeable-state contribution. Whether the real
+  `rerun-failed-jobs` endpoint re-runs *cancelled* jobs is not documented by
+  GitHub and has not been verified live, so the sim assumes it does; the
+  scenarios in `ci_cancelled_gate_test.go` and `mergetrain_ci_cancelled_test.go`
+  script the re-run's outcome either way. A real no-op re-run (201, nothing
+  runs) is not modelled.
 - **Runs and check runs are not linked.** Nothing derives a check run's
   `DetailsURL` from a workflow run, so a scenario that expects the engine to
   find the run to re-run must seed `DetailsURL` of the form
