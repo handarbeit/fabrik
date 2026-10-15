@@ -654,6 +654,12 @@ func SessionDir(issueNumber int) string {
 //   - multi-repo:  <cwd>/.fabrik/sessions/<owner>-<repo>/issue-N/
 func sessionDirForItem(issue gh.ProjectItem) string {
 	cwd, _ := os.Getwd()
+	return sessionDirForItemUnder(cwd, issue)
+}
+
+// sessionDirForItemUnder is sessionDirForItem rooted at base instead of the
+// working directory.
+func sessionDirForItemUnder(cwd string, issue gh.ProjectItem) string {
 	issuePart := fmt.Sprintf("issue-%d", issue.Number)
 	if issue.Repo == "" {
 		return filepath.Join(cwd, ".fabrik", "sessions", issuePart)

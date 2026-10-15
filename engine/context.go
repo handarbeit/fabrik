@@ -69,6 +69,15 @@ func parseMainSHA(commentBody string) string {
 //
 // Errors are non-fatal — Claude can still run without the files; log and continue.
 func (e *Engine) writeContextFiles(item gh.ProjectItem, currentStage *stages.Stage, workDir string, isCommentProcessing bool) {
+	e.writeContextFilesWithCurrent(item, currentStage, workDir, isCommentProcessing, false)
+}
+
+// writeContextFilesWithCurrent is writeContextFiles with includeCurrentStage:
+// a stage invocation that starts a fresh session on a re-entry (ADR 2300, R4)
+// also gets the stage's own most recent output (stage-<Current>.md), which a
+// resumed session would already hold in its conversation. Stages after the
+// current one are never written for a stage invocation.
+func (e *Engine) writeContextFilesWithCurrent(item gh.ProjectItem, currentStage *stages.Stage, workDir string, isCommentProcessing, includeCurrentStage bool) {
 	// Use .fabrik-context/ instead of .fabrik/ to avoid colliding with
 	// the tracked .fabrik/ directory (which contains stages/ and plugin/).
 	fabrikDir := filepath.Join(workDir, ".fabrik-context")
@@ -102,7 +111,7 @@ func (e *Engine) writeContextFiles(item gh.ProjectItem, currentStage *stages.Sta
 	for _, stage := range e.cfg.Stages {
 		// For stage invocations, only include prior stages (Order < current).
 		// For comment processing, include all stages including current.
-		if !isCommentProcessing && stage.Order >= currentStage.Order {
+		if !isCommentProcessing && stage.Order >= currentStage.Order && !(includeCurrentStage && stage.Name == currentStage.Name) {
 			continue
 		}
 		comment := findStageComment(item.Comments, stage.Name)
