@@ -280,3 +280,37 @@ func TestFooter_UnrecognizedInstallationsBannerAppearsOnlyWhileCount(t *testing.
 		t.Errorf("View() still shows the banner after the condition clears:\n%s", f.View(120))
 	}
 }
+
+// #2230 R4: the footer shows a cumulative count per saving-skip reason, from
+// totals (overwrite, never accumulate), and nothing before the first skip.
+func TestFooter_SkipSegment(t *testing.T) {
+	var f FooterComponent
+	if strings.Contains(f.View(160), "skipped") {
+		t.Fatalf("View() shows a skip segment before any SkipEvent:\n%s", f.View(160))
+	}
+	for _, ev := range []SkipEvent{
+		{Reason: "patch_unchanged", Total: 1},
+		{Reason: "patch_unchanged", Total: 3},
+		{Reason: "trial_equivalent", Total: 2},
+		{Reason: "catch_up", Total: 1},
+	} {
+		comp, _ := f.Update(ev)
+		f = comp.(FooterComponent)
+	}
+	if got := f.SkipCount("patch_unchanged"); got != 3 {
+		t.Errorf("SkipCount(patch_unchanged) = %d, want 3 (cumulative total overwrites)", got)
+	}
+	view := f.View(200)
+	if !strings.Contains(view, "skipped: patch 3 · trial 2 · catch-up 1") {
+		t.Errorf("View() missing the per-reason skip counts:\n%s", view)
+	}
+}
+
+func TestModel_SkipEventRoutesToFooter(t *testing.T) {
+	m := New(nil, time.Now())
+	next, _ := m.Update(SkipEvent{Reason: "catch_up", Total: 4})
+	m = next.(Model)
+	if got := m.footer.SkipCount("catch_up"); got != 4 {
+		t.Errorf("footer.SkipCount(catch_up) = %d, want 4", got)
+	}
+}

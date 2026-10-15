@@ -976,6 +976,58 @@ func (c *Client) FetchPRDiff(owner, repo string, prNumber int) (string, error) {
 	return string(respBody), nil
 }
 
+// FetchCompareDiff returns the unified diff of GET compare/{base}...{head}
+// via GitHub's diff media type: the change `head` carries relative to its
+// merge base with `base`. Pruefer uses it to re-derive the patch of a head it
+// reviewed earlier (#2230) from GitHub alone, so nothing is stored locally.
+// A head GitHub no longer has returns an error wrapping ErrNotFound or
+// ErrUnprocessableEntity; a diff over GitHub's ceiling wraps ErrDiffTooLarge.
+func (c *Client) FetchCompareDiff(owner, repo, base, head string) (string, error) {
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/compare/%s...%s", c.baseURL, owner, repo,
+		url.PathEscape(base), url.PathEscape(head))
+	_, respBody, err := c.doWithAccept("GET", apiURL, "application/vnd.github.v3.diff", nil)
+	if err != nil {
+		return "", fmt.Errorf("fetching compare diff %s...%s: %w", base, head, err)
+	}
+	return string(respBody), nil
+}
+
+// FindPRByHead returns the pull requests (any state) whose head is the branch
+// headRef in owner/repo itself, most recently updated first. Used by Pruefer
+// to resolve a merge-train member's PR from its `fabrik/issue-<N>` branch
+// (#2230).
+func (c *Client) FindPRByHead(owner, repo, headRef string) ([]PRDetails, error) {
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/pulls?state=all&sort=updated&direction=desc&per_page=10&head=%s",
+		c.baseURL, owner, repo, url.QueryEscape(owner+":"+headRef))
+	var raw []struct {
+		Number int    `json:"number"`
+		Title  string `json:"title"`
+		State  string `json:"state"`
+		Draft  bool   `json:"draft"`
+		User   struct {
+			Login string `json:"login"`
+		} `json:"user"`
+		Head struct {
+			SHA string `json:"sha"`
+			Ref string `json:"ref"`
+		} `json:"head"`
+		Base struct {
+			Ref string `json:"ref"`
+		} `json:"base"`
+	}
+	if err := c.restGetJSON(apiURL, &raw); err != nil {
+		return nil, fmt.Errorf("listing PRs for head %s in %s/%s: %w", headRef, owner, repo, err)
+	}
+	out := make([]PRDetails, len(raw))
+	for i, pr := range raw {
+		out[i] = PRDetails{
+			Number: pr.Number, Title: pr.Title, State: pr.State, Draft: pr.Draft,
+			HeadSHA: pr.Head.SHA, HeadRefName: pr.Head.Ref, Author: pr.User.Login, BaseRef: pr.Base.Ref,
+		}
+	}
+	return out, nil
+}
+
 // FetchPRFiles returns the list of file paths changed by a pull request via
 // the paginated GET /pulls/{n}/files endpoint, which has no line-count
 // ceiling (unlike the .diff media type FetchPRDiff uses) — the fallback path

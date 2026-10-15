@@ -77,6 +77,21 @@ type fakeReviewer struct {
 	parentCalls    int
 	behindCalls    int
 
+	// Patch-identity skips (#2230). compareDiffs is keyed by head SHA; an
+	// unlisted SHA yields compareDefaultErr (default: gh.ErrNotFound).
+	// memberDiffs/memberReviews/prsByHead describe merge-train member PRs:
+	// FetchPRDiff/FetchPRReviews for a PR number listed there use them instead
+	// of f.diff/f.reviews.
+	compareDiffs      map[string]string
+	compareErrs       map[string]error
+	compareDefaultErr error
+	compareCalls      int
+	prDiffs           map[int]string
+	prReviews         map[int][]gh.PRReview
+	prsByHead         map[string][]gh.PRDetails
+	findErr           error
+	findCalls         int
+
 	mu             sync.Mutex
 	submitCalls    []submitCall
 	diffCalls      int
@@ -162,10 +177,45 @@ func (f *fakeReviewer) FetchCommitsBehind(owner, repo, base, head string) (int, 
 	return f.behindBy[base], nil
 }
 
+func (f *fakeReviewer) FetchCompareDiff(owner, repo, base, head string) (string, error) {
+	f.mu.Lock()
+	f.compareCalls++
+	f.mu.Unlock()
+	if err, ok := f.compareErrs[head]; ok {
+		return "", err
+	}
+	if d, ok := f.compareDiffs[head]; ok {
+		return d, nil
+	}
+	if f.compareDefaultErr != nil {
+		return "", f.compareDefaultErr
+	}
+	return "", gh.ErrNotFound
+}
+
+func (f *fakeReviewer) FindPRByHead(owner, repo, headRef string) ([]gh.PRDetails, error) {
+	f.mu.Lock()
+	f.findCalls++
+	f.mu.Unlock()
+	if f.findErr != nil {
+		return nil, f.findErr
+	}
+	return f.prsByHead[headRef], nil
+}
+
+func (f *fakeReviewer) compareCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.compareCalls
+}
+
 func (f *fakeReviewer) FetchPRDiff(owner, repo string, prNumber int) (string, error) {
 	f.mu.Lock()
 	f.diffCalls++
 	f.mu.Unlock()
+	if d, ok := f.prDiffs[prNumber]; ok {
+		return d, nil
+	}
 	if f.diffErr != nil {
 		return "", f.diffErr
 	}
@@ -192,6 +242,9 @@ func (f *fakeReviewer) FetchPRReviews(owner, repo string, prNumber int) ([]gh.PR
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.reviewsFetches++
+	if rs, ok := f.prReviews[prNumber]; ok {
+		return rs, nil
+	}
 	if f.reviewsErr != nil {
 		return nil, f.reviewsErr
 	}
