@@ -2587,11 +2587,7 @@ func (e *Engine) selectDeepFetchCandidates(board *gh.ProjectBoard, repoFilter st
 		// Capture prior-poll merge-queue membership BEFORE ItemDeepFetched
 		// overwrites it (ADR-058 D4 OQ-3 — the "left the queue" edge is otherwise lost).
 		priorInQueue[iKey] = admitPreErr == nil && admitPreSnap.LinkedPR() != nil && admitPreSnap.LinkedPR().IsInMergeQueue
-		e.store.Apply(itemstate.ItemDeepFetched{
-			Repo:       admitRepo,
-			Number:     board.Items[i].Number,
-			FreshState: board.Items[i],
-		})
+		e.applyDeepFetched(admitRepo, board.Items[i])
 		// After a successful deep-fetch, check if this item just became terminal.
 		if isTerminalPredicate(board.Items[i].Labels, board.Items[i].Status, e.cfg.Stages) {
 			if admitPreErr != nil || !admitPreSnap.IsTerminal() {

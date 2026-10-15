@@ -664,12 +664,22 @@ func TestCacheDivergence_ProbeAndDeepFetchAreNamedAndColumnReverts(t *testing.T)
 		t.Fatalf("column revert by probe: %+v", div)
 	}
 
+	// Since #2344 a deep fetch no longer writes the poll-start listing's labels
+	// back over an engine write, so there is no revert to report. The legacy
+	// apply (the seam) still reverts, which keeps the path naming exercised.
 	e.seedAPIItem(t, 2, "Implement")
 	e.store.Apply(itemstate.LocalLabelAdded{Repo: "owner/repo", Number: 2, Label: "fabrik:awaiting-ci"})
 	e.store.Apply(itemstate.ItemDeepFetched{Repo: "owner/repo", Number: 2, FreshState: gh.ProjectItem{Number: 2, Repo: "owner/repo", Status: "Implement"}})
+	if div = ofType(drain(sink, 300*time.Millisecond), channelevents.CacheDivergence); len(div) != 0 {
+		t.Fatalf("deep fetch reverted an engine label write: %+v", div)
+	}
+	e.seedAPIItem(t, 3, "Implement")
+	e.store.SetLegacyDeepFetchApplyForTest(true)
+	e.store.Apply(itemstate.LocalLabelAdded{Repo: "owner/repo", Number: 3, Label: "fabrik:awaiting-ci"})
+	e.store.Apply(itemstate.ItemDeepFetched{Repo: "owner/repo", Number: 3, FreshState: gh.ProjectItem{Number: 3, Repo: "owner/repo", Status: "Implement"}})
 	div = ofType(drain(sink, 300*time.Millisecond), channelevents.CacheDivergence)
-	if len(div) != 1 || div[0].Meta["path"] != "deep-fetch" || div[0].Issue != 2 {
-		t.Fatalf("label revert by deep fetch: %+v", div)
+	if len(div) != 1 || div[0].Meta["path"] != "deep-fetch" || div[0].Issue != 3 {
+		t.Fatalf("label revert by deep fetch (legacy apply): %+v", div)
 	}
 }
 

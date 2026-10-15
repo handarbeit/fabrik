@@ -217,7 +217,9 @@ func TestDowntimeClosedIsNotReportedTwice(t *testing.T) {
 	}})
 	drainFor(sink, 200*time.Millisecond)
 	// One mutation gives it a column and closes it.
-	e.store.Apply(itemstate.ItemDeepFetched{Repo: "owner/repo", Number: 7, FreshState: gh.ProjectItem{
+	// A listing path delivers the column and the close: a deep fetch no longer
+	// writes either over a known item (#2344).
+	e.store.Apply(itemstate.ShallowBoardItemUpdated{Repo: "owner/repo", Number: 7, Item: gh.ProjectItem{
 		ID: "I_7", Number: 7, Repo: "owner/repo", Status: "Implement", Labels: []string{"x"}, IsClosed: true,
 	}})
 	closed := 0

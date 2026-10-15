@@ -280,3 +280,35 @@ func toString(v any) string {
 	}
 	return ""
 }
+
+// TestBeforeCallRunsBeforeTheCallAndTheFault pins the #2344 seam: the hook runs
+// on the call that is about to be made, before the fault table is consulted and
+// before the model sees it, so a scenario can land a change at an exact point (the fault still fires after it).
+func TestBeforeCallRunsBeforeTheCallAndTheFault(t *testing.T) {
+	in, _ := newInstrumented(t)
+	var order []string
+	in.Faults().BeforeCall("AddLabelToIssue", func(a Args) {
+		order = append(order, "hook")
+	})
+	in.Faults().FailOnce("AddLabelToIssue", ErrRateLimit())
+
+	if err := in.AddLabelToIssue("acme", "widgets", 7, "x"); err == nil {
+		t.Fatal("injected failure did not fire after the hook")
+	}
+	if err := in.AddLabelToIssue("acme", "widgets", 7, "x"); err != nil {
+		t.Fatal(err)
+	}
+	if len(order) != 2 {
+		t.Errorf("hook ran %d times, want once per call (2)", len(order))
+	}
+}
+
+func TestBeforeCallOnAnUnknownMethodPanics(t *testing.T) {
+	in, _ := newInstrumented(t)
+	defer func() {
+		if recover() == nil {
+			t.Error("BeforeCall on an unknown method did not panic")
+		}
+	}()
+	in.Faults().BeforeCall("NoSuchMethod", func(Args) {})
+}

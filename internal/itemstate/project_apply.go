@@ -93,11 +93,16 @@ func applyProjectItem(item *ItemState, pi gh.ProjectItem) ChangeFlags {
 // applyDeepFetched applies the result of a deep fetch (live or served from the
 // board cache) to item. It writes only the facts a deep fetch produces: title,
 // body, URL, author, assignees, blocked-by, comments, milestone, layer evidence
-// and the LinkedPR block. Status, labels and closed state in pi come from the
-// poll-start listing (the deep fetch never reads Status, and a cache hit copies
-// none of the three), so they are written only as a first population — when the
-// Store holds nothing yet. After that they reach the Store only through the
-// listing paths and their engine-write protection (#2344, ADR 2344).
+// and the LinkedPR block.
+//
+// Status is never read by a deep fetch, and a cache hit copies none of Status,
+// labels or closed state, so for those the value in pi is the poll-start
+// listing's. They are written only as a first population (the Store holds
+// nothing yet), after which they reach the Store through the listing paths and
+// their engine-write protection. Labels and closed state are the exception when
+// pi.DeepFetchLive: a live fetch read them from GitHub just now, and they are
+// how a change that arrived without a webhook reaches the Store (the probe
+// carries no labels), so they are written. (#2344, ADR 2344)
 func applyDeepFetched(item *ItemState, pi gh.ProjectItem) ChangeFlags {
 	var flags ChangeFlags
 	// State is empty only until the first population: getOrCreate pre-sets
@@ -124,14 +129,14 @@ func applyDeepFetched(item *ItemState, pi gh.ProjectItem) ChangeFlags {
 		flags |= AssigneesChanged
 	}
 
-	if closedUnheld && (item.State != stateFrom(pi) || item.IsClosed != pi.IsClosed || item.IsPR != pi.IsPR) {
+	if (closedUnheld || pi.DeepFetchLive) && (item.State != stateFrom(pi) || item.IsClosed != pi.IsClosed || item.IsPR != pi.IsPR) {
 		item.State = stateFrom(pi)
 		item.IsClosed = pi.IsClosed
 		item.IsPR = pi.IsPR
 		flags |= StateChanged
 	}
 
-	if !pi.LabelsAbsent && !item.LabelsKnown {
+	if !pi.LabelsAbsent && (!item.LabelsKnown || pi.DeepFetchLive) {
 		if !reflect.DeepEqual(item.Labels, pi.Labels) {
 			item.Labels = copyStrings(pi.Labels)
 			flags |= LabelsChanged

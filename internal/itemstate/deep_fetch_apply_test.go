@@ -194,3 +194,23 @@ func TestDeepFetchApply_LiveRefetchReanchorsBaselines(t *testing.T) {
 		t.Errorf("a live refetch must assign the baseline (ADR 2180): got %v want %v", got, early)
 	}
 }
+
+// A live fetch read labels and closed state from GitHub just now; they are how
+// a change without a webhook reaches the Store, so they are written (Status
+// never is: the deep fetch does not read it).
+func TestDeepFetchApply_LiveFetchWritesLabelsAndClosedButNotStatus(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	s.Apply(LocalStatusUpdated{Repo: testRepo, Number: 1, NewStatus: "Review"})
+	pi := staleListing()
+	pi.Labels = []string{"bug", "added-externally"}
+	pi.IsClosed = true
+	pi.DeepFetchLive = true
+	s.Apply(ItemDeepFetched{Repo: testRepo, Number: 1, FreshState: pi})
+	got := getItem(t, s, testRepo, 1)
+	if !hasLabel(got.Labels, "added-externally") || !got.IsClosed {
+		t.Errorf("live labels/closed not written: labels=%v closed=%v", got.Labels, got.IsClosed)
+	}
+	if got.Status != "Review" {
+		t.Errorf("a deep fetch must not write Status; got %q", got.Status)
+	}
+}

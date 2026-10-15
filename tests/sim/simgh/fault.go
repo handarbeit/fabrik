@@ -110,6 +110,9 @@ type FaultTable struct {
 	// calls counts every intercepted call per method, whether it failed or
 	// not. This is what FailOnCall's K counts.
 	calls map[string]int
+	// hooks are the BeforeCall callbacks, keyed by method name. They are not
+	// part of a Sim snapshot (they are scenario closures, like match).
+	hooks map[string][]func(Args)
 }
 
 // NewFaultTable returns an empty table.
@@ -117,6 +120,34 @@ func NewFaultTable() *FaultTable {
 	return &FaultTable{
 		rules: make(map[string][]*faultRule),
 		calls: make(map[string]int),
+		hooks: make(map[string][]func(Args)),
+	}
+}
+
+// BeforeCall registers fn to run on every call to method, immediately before
+// the call reaches the model and before any fault rule is consulted. It is how
+// a scenario makes a change land at an exact point in the engine's sequence —
+// for example between a poll's board listing and an item's deep fetch (#2344) —
+// which a fail-only injector cannot express. fn runs on the caller's goroutine
+// with no simgh lock held, so it may call back into the Sim; it must be
+// idempotent or guard itself (a scenario usually wants "the first call only").
+func (f *FaultTable) BeforeCall(method string, fn func(Args)) {
+	validateMethod(method)
+	if fn == nil {
+		panic(fmt.Sprintf("simgh: BeforeCall(%s): nil hook", method))
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.hooks[method] = append(f.hooks[method], fn)
+}
+
+// runHooks invokes the BeforeCall hooks registered for method.
+func (f *FaultTable) runHooks(method string, args Args) {
+	f.mu.Lock()
+	hooks := append([]func(Args){}, f.hooks[method]...)
+	f.mu.Unlock()
+	for _, h := range hooks {
+		h(args)
 	}
 }
 
@@ -232,6 +263,8 @@ func (f *FaultTable) FiredCount(method string) int {
 // nil to let it through. Every intercepted call goes through here exactly
 // once, before the underlying Sim call.
 func (f *FaultTable) next(method string, args Args) error {
+	f.runHooks(method, args)
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
