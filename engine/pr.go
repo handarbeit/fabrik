@@ -271,7 +271,12 @@ func (e *Engine) markPRReady(item gh.ProjectItem, knownPR int) (pushRefused bool
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	wm := e.worktreesFor(item.Repo)
 	// Merge-queue awareness (ADR-058 D3 FR-1): skip the push when queued (ejects it).
-	if err := e.pushBranchUnlessQueued(item, wm); err != nil {
+	if err := e.pushBranchUnlessQueued(item, wm); errors.Is(err, ErrPushSkippedPRMerged) {
+		// #2299 R5: the linked PR already merged — there is nothing to mark ready
+		// and no push to make. handleStageComplete's live check takes the terminal path.
+		e.logf(item.Number, "push", "not marking PR ready: %v\n", err)
+		return false
+	} else if err != nil {
 		e.logf(item.Number, "warn", "could not push branch: %v\n", err)
 		if errors.Is(err, ErrPushRefusedZeroAhead) {
 			// The zero-ahead guard (#2089) paused the item: do not flip a stale

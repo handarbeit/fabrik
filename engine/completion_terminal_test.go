@@ -236,6 +236,63 @@ func TestSettleAwaitingCIScan_DoneColumnMergedPR_NoOrphanPause(t *testing.T) {
 	if !containsLabel(removedLabelNames(client.removeLabelCalls), "fabrik:awaiting-ci") {
 		t.Error("the leftover awaiting-ci label must be cleared")
 	}
+	// The withheld completion label is back-filled so the item is not hidden from
+	// merged-but-open sweeps (FR-010).
+	if !containsLabel(addedLabelNames(client.addLabelCalls), "stage:Validate:complete") {
+		t.Errorf("stage:Validate:complete must be back-filled; added %v", addedLabelNames(client.addLabelCalls))
+	}
+}
+
+// A closed issue is skipped by the settle scan (ADR-1387); its leftover
+// fabrik:awaiting-ci is cleared by the closed-issue sweep instead, and the scan
+// never pauses it. Pins US5 scenario 2 so neither half regresses.
+func TestClosedDoneItemWithMergedPR_AwaitingCICleared_NoPause(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, n int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, Merged: true, State: "closed"}, nil
+		},
+	}
+	eng := testEngineWithStages(t, client, terminalAdvanceStages())
+	eng.cfg.MaxRetries = 2
+	board := &gh.ProjectBoard{Items: []gh.ProjectItem{{
+		Number: 23, Repo: "owner/repo", Status: "Done", IsClosed: true, Labels: []string{"fabrik:awaiting-ci"},
+	}}}
+
+	for i := 0; i < 4; i++ {
+		eng.settleAwaitingCIScan(context.Background(), board, map[string]bool{})
+	}
+	eng.cleanupClosedIssueTransientLabels(board)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if containsLabel(addedLabelNames(client.addLabelCalls), "fabrik:paused") {
+		t.Error("a closed landed item must never be paused")
+	}
+	for _, c := range client.addCommentCalls {
+		if strings.Contains(c.body, "move the issue back") {
+			t.Errorf("unexpected 'move back to Validate' advice: %s", c.body)
+		}
+	}
+	if !containsLabel(removedLabelNames(client.removeLabelCalls), "fabrik:awaiting-ci") {
+		t.Error("the leftover awaiting-ci label on a closed item must be cleared")
+	}
+}
+
+// markPRReady must not touch a merged PR when the push is skipped (#2299 R5):
+// no MarkPRReady call and no warning-shaped failure path.
+func TestMarkPRReady_MergedPR_SkipsPushAndReady(t *testing.T) {
+	g := newPushGuardEnv(t, 7, &gh.PRDetails{Number: 5, State: "closed", Merged: true}, nil)
+	if refused := g.e.markPRReady(gh.ProjectItem{Number: 7}, 5); refused {
+		t.Error("a merged-PR skip is not a zero-ahead refusal")
+	}
+	g.client.mu.Lock()
+	defer g.client.mu.Unlock()
+	if len(g.client.markPRReadyCalls) != 0 {
+		t.Errorf("MarkPRReady must not be called on a merged PR: %v", g.client.markPRReadyCalls)
+	}
+	if g.remoteRef("fabrik/issue-7") != "" {
+		t.Error("the remote branch of a merged PR must not be created")
+	}
 }
 
 func TestEscalateAwaitingCIOrphanFailure_MergedPR_DoesNotPause(t *testing.T) {

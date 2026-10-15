@@ -998,7 +998,9 @@ func (e *Engine) publishCommentOutput(owner, repo string, item gh.ProjectItem, s
 		// rounds never push on their own, so push only when a commit was made —
 		// clarification rounds then reach the remote. Skipped on FABRIK_NO_WORK_NEEDED.
 		if !noWorkNeeded && e.persistSpec(item, stage, workDir, updatedBody) {
-			if pushErr := e.pushBranchUnlessQueued(item, e.worktreesFor(item.Repo)); pushErr != nil {
+			if pushErr := e.pushBranchUnlessQueued(item, e.worktreesFor(item.Repo)); errors.Is(pushErr, ErrPushSkippedPRMerged) {
+				e.logf(item.Number, "push", "spec commit not pushed: %v\n", pushErr)
+			} else if pushErr != nil {
 				e.logf(item.Number, "warn", "could not push spec commit: %v\n", pushErr)
 			}
 		}

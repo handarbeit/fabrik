@@ -143,31 +143,12 @@ func (e *Engine) classifyLinkedPRTerminal(owner, repo string, number int, tag st
 	return pr, linkedPRClosedUnmerged
 }
 
-// advanceMergedValidateItem is the merged-PR branch of
-// advanceValidateTerminalItem, shared with the stage-completion path (#2299):
-// fills missing gate-checked stage:*:complete labels, clears the gate labels,
-// advances to Done, closes the issue where GitHub will not, and marks landing
-// verification. item.Labels must be live for the caller's purposes. Idempotent;
-// advancedItems may be nil (the worker goroutine has no per-poll map).
-func (e *Engine) advanceMergedValidateItem(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, pr *gh.PRDetails, advancedItems map[string]bool) {
-	owner, repo := itemOwnerRepo(item, e.defaultRepo())
-	iKey := issueKey(item, e.defaultRepo())
-	// Guard against the unpause/retry/re-escalate loop Pruefer flagged in
-	// PR #1469 review (#1422 follow-up): this branch is re-entered every
-	// poll for a merged item regardless of pause state (deliberately — see
-	// the self-heal rationale above), and unconditionally strips
-	// fabrik:paused below. Without this check, a pause applied by
-	// escalateAwaitingAdvanceFailure would be stripped and retried right
-	// back off on the very next poll, failing and re-escalating forever
-	// instead of settling into a stable paused state. See
-	// awaitingAdvanceStuckOrReset's doc comment for why this can't be a
-	// blanket "skip whenever paused" check.
-	if e.awaitingAdvanceStuckOrReset(item) {
-		e.logf(item.Number, "awaiting-advance", "still escalated after %d attempt(s) — skipping self-heal to avoid an unpause/retry/re-escalate loop; remove fabrik:paused once the board is fixed to retry\n", e.cfg.MaxRetries)
-		return
-	}
-	e.logf(item.Number, "pr-terminal", "PR #%d merged — filling gate-checked completion labels and advancing to Done\n", pr.Number)
-
+// fillGateCheckedCompleteLabels adds the stage:<X>:complete label of every
+// gate-checked stage that sits after the highest already-complete stage and is
+// missing it (EC-3). Idempotent; it stops at the first failed write and reports
+// it so the caller can retry on a later poll (EC-2). item.Labels must be live
+// for the caller's purposes.
+func (e *Engine) fillGateCheckedCompleteLabels(owner, repo string, item gh.ProjectItem) (fillFailed bool) {
 	// Find the highest-order stage that already has a :complete label so we
 	// only fill in stages that are missing their completion label (EC-3).
 	highestCompleteOrder := -1
@@ -183,7 +164,6 @@ func (e *Engine) advanceMergedValidateItem(board *gh.ProjectBoard, item gh.Proje
 	// highest already-complete stage, stopping before the cleanup-terminal
 	// stage. For each gate-checked stage missing its :complete label, add
 	// it. Fail-fast on error to preserve idempotent retry (EC-2).
-	fillFailed := false
 	for _, s := range e.cfg.Stages {
 		// An Unmanaged stage never receives gate-checked bookkeeping here,
 		// regardless of any other flag it carries — it was never actually
@@ -221,7 +201,35 @@ func (e *Engine) advanceMergedValidateItem(board *gh.ProjectBoard, item gh.Proje
 		}
 		e.logf(item.Number, "pr-terminal", "added %s\n", completeLabel)
 	}
-	if fillFailed {
+	return fillFailed
+}
+
+// advanceMergedValidateItem is the merged-PR branch of
+// advanceValidateTerminalItem, shared with the stage-completion path (#2299):
+// fills missing gate-checked stage:*:complete labels, clears the gate labels,
+// advances to Done, closes the issue where GitHub will not, and marks landing
+// verification. item.Labels must be live for the caller's purposes. Idempotent;
+// advancedItems may be nil (the worker goroutine has no per-poll map).
+func (e *Engine) advanceMergedValidateItem(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, pr *gh.PRDetails, advancedItems map[string]bool) {
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	iKey := issueKey(item, e.defaultRepo())
+	// Guard against the unpause/retry/re-escalate loop Pruefer flagged in
+	// PR #1469 review (#1422 follow-up): this branch is re-entered every
+	// poll for a merged item regardless of pause state (deliberately — see
+	// the self-heal rationale above), and unconditionally strips
+	// fabrik:paused below. Without this check, a pause applied by
+	// escalateAwaitingAdvanceFailure would be stripped and retried right
+	// back off on the very next poll, failing and re-escalating forever
+	// instead of settling into a stable paused state. See
+	// awaitingAdvanceStuckOrReset's doc comment for why this can't be a
+	// blanket "skip whenever paused" check.
+	if e.awaitingAdvanceStuckOrReset(item) {
+		e.logf(item.Number, "awaiting-advance", "still escalated after %d attempt(s) — skipping self-heal to avoid an unpause/retry/re-escalate loop; remove fabrik:paused once the board is fixed to retry\n", e.cfg.MaxRetries)
+		return
+	}
+	e.logf(item.Number, "pr-terminal", "PR #%d merged — filling gate-checked completion labels and advancing to Done\n", pr.Number)
+
+	if e.fillGateCheckedCompleteLabels(owner, repo, item) {
 		return
 	}
 

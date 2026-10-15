@@ -1399,7 +1399,9 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 			if claudeRan && !stage.ReadOnly {
 				e.commitWIP(workDir, item.Number, stage.Name)
 				wm := e.worktreesFor(item.Repo)
-				if pushErr := e.pushBranchOnCancel(item, wm); pushErr != nil {
+				if pushErr := e.pushBranchOnCancel(item, wm); errors.Is(pushErr, ErrPushSkippedPRMerged) {
+					e.logf(item.Number, "push", "branch not pushed after cancellation: %v\n", pushErr)
+				} else if pushErr != nil {
 					e.logf(item.Number, "warn", "could not push branch after cancellation: %v\n", pushErr)
 				}
 			}
@@ -2911,7 +2913,11 @@ func (e *Engine) preserveWorkOnMarkerFailure(item gh.ProjectItem, stage *stages.
 		return "The stage's work was committed locally but not pushed: the PR is in the merge queue and a push would eject it.\n\n"
 	}
 	wm := e.worktreesFor(item.Repo)
-	if pushErr := e.pushBranchOnCancel(item, wm); pushErr != nil {
+	if pushErr := e.pushBranchOnCancel(item, wm); errors.Is(pushErr, ErrPushSkippedPRMerged) {
+		// #2299 R5: the linked PR already merged; pushing would re-create its deleted branch.
+		e.logf(item.Number, "push", "branch not pushed after marker parse failure: %v\n", pushErr)
+		return "The stage's work was committed locally but not pushed: the linked PR has already merged.\n\n"
+	} else if pushErr != nil {
 		e.logf(item.Number, "warn", "could not push branch after marker parse failure: %v\n", pushErr)
 		return "The stage's work could not be pushed (see the engine log); it remains in the local worktree.\n\n"
 	}

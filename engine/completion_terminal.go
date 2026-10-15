@@ -113,8 +113,14 @@ func (e *Engine) mergedPRPushRefused(item gh.ProjectItem, branch string) bool {
 // clearMergedOrphanAwaitingCI is settleAwaitingCIScan's R6 handling for a
 // fabrik:awaiting-ci item at a column that is not a wait_for_ci stage: when its
 // linked PR is merged the label is a leftover, not a CI wait. It clears the label
-// and makes sure the issue is closed where GitHub will not do it. Returns true
-// when handled (the caller skips the orphan retry/escalation).
+// and makes sure the issue is closed where GitHub will not do it. A withheld
+// stage:<X>:complete label (the completion was deferred behind the CI gate that
+// never ran) is back-filled first, so the item is not hidden from the operator's
+// merged-but-open sweeps; the full advance and the landing-verification marker
+// are not repeated here — the item already left the CI-waiting column, and those
+// belong to the transition that moved it. A failed back-fill leaves the label in
+// place so the next poll retries. Returns true when handled (the caller skips the
+// orphan retry/escalation).
 func (e *Engine) clearMergedOrphanAwaitingCI(item gh.ProjectItem) bool {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	pr, state := e.classifyLinkedPRTerminal(owner, repo, item.Number, "awaiting-ci-settle")
@@ -122,6 +128,9 @@ func (e *Engine) clearMergedOrphanAwaitingCI(item gh.ProjectItem) bool {
 		return false
 	}
 	e.logf(item.Number, "awaiting-ci-settle", "fabrik:awaiting-ci at column %q but linked PR #%d is already merged — clearing the label, not escalating\n", item.Status, pr.Number)
+	if e.fillGateCheckedCompleteLabels(owner, repo, item) {
+		return true // retry the whole clear on the next poll; still never a pause
+	}
 	e.removeAwaitingCILabel(owner, repo, item)
 	e.closeIssueIfNonDefaultBase(item, pr.Number)
 	return true
