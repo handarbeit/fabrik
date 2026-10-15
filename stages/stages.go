@@ -113,6 +113,20 @@ type Stage struct {
 	// See ADR-1250.
 	ReviewAuthority string `yaml:"review_authority,omitempty"`
 
+	// ResumeSession governs whether a comment-review-family invocation or a
+	// stage re-entry resumes the stage's saved Claude session (ADR 2300):
+	// "resume" (default, empty string behaves identically) always resumes,
+	// "fresh" always starts a new session, "auto" resumes only while the saved
+	// session's measured context size is at or below ResumeThresholdTokens (an
+	// unknown size resumes). A continuation (the next run after a time slice,
+	// an incomplete or errored run) always resumes whatever this says.
+	ResumeSession string `yaml:"resume_session,omitempty"`
+
+	// ResumeThresholdTokens is the context size, in tokens, above which
+	// resume_session: auto starts a fresh session. 0 (unset) means
+	// DefaultResumeThresholdTokens; negative is refused at load.
+	ResumeThresholdTokens int `yaml:"resume_threshold_tokens,omitempty"`
+
 	// ExpectedReviewers declares unrequested reviewers (e.g. self-submitting
 	// review bots like Pruefer, Gemini, CodeRabbit) that are expected to post a
 	// review on the PR without ever appearing in GitHub's formal review-request
@@ -394,6 +408,14 @@ func loadOne(path string) (*Stage, error) {
 		return nil, fmt.Errorf("stage %q: invalid review_authority %q (must be one of: advisory, authoritative)", s.Name, s.ReviewAuthority)
 	}
 
+	validResumeSessions := map[string]bool{"": true, ResumeSessionResume: true, ResumeSessionFresh: true, ResumeSessionAuto: true}
+	if !validResumeSessions[s.ResumeSession] {
+		return nil, fmt.Errorf("stage %q: invalid resume_session %q (must be one of: resume, fresh, auto)", s.Name, s.ResumeSession)
+	}
+	if s.ResumeThresholdTokens < 0 {
+		return nil, fmt.Errorf("stage %q: invalid resume_threshold_tokens %d (must be zero or a positive number of tokens)", s.Name, s.ResumeThresholdTokens)
+	}
+
 	if s.ExpectedReviewers != nil {
 		validated, err := validateExpectedReviewers(s.Name, *s.ExpectedReviewers)
 		if err != nil {
@@ -485,4 +507,32 @@ func IsParkingColumn(stages []*Stage, name string) bool {
 // (i.e., stages[0].Name == stageName). Returns false for an empty slice.
 func IsFirstStage(stages []*Stage, stageName string) bool {
 	return len(stages) > 0 && stages[0].Name == stageName
+}
+
+// resume_session values (ADR 2300).
+const (
+	ResumeSessionResume = "resume"
+	ResumeSessionFresh  = "fresh"
+	ResumeSessionAuto   = "auto"
+)
+
+// DefaultResumeThresholdTokens is the resume_threshold_tokens default: the
+// context size above which resume_session: auto starts a fresh session.
+const DefaultResumeThresholdTokens = 250000
+
+// ResumeMode returns the effective resume_session value ("resume" when unset).
+func (s *Stage) ResumeMode() string {
+	if s == nil || s.ResumeSession == "" {
+		return ResumeSessionResume
+	}
+	return s.ResumeSession
+}
+
+// ResumeThreshold returns the effective resume_threshold_tokens
+// (DefaultResumeThresholdTokens when unset or zero).
+func (s *Stage) ResumeThreshold() int {
+	if s == nil || s.ResumeThresholdTokens <= 0 {
+		return DefaultResumeThresholdTokens
+	}
+	return s.ResumeThresholdTokens
 }
