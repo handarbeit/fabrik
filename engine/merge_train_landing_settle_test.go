@@ -244,7 +244,24 @@ func TestLanding_Dirty_FailsCleansUpAndCommentsOnce(t *testing.T) {
 		if n := r.failureComments(); n != 1 {
 			t.Errorf("failure comments = %d, want 1", n)
 		}
+		assertFailureCommentSaysRemoved(t, r)
 	})
+}
+
+// assertFailureCommentSaysRemoved checks the one failure comment tells the truth for a trial
+// that was deleted: it must not claim the trial is kept and retried.
+func assertFailureCommentSaysRemoved(t *testing.T, r *landingRig) {
+	t.Helper()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.comments) == 0 {
+		t.Error("no failure comment posted")
+		return
+	}
+	body := r.comments[0]
+	if strings.Contains(body, "keeps a still-green trial") || !strings.Contains(body, "were removed") {
+		t.Errorf("a removed trial's comment must say it was removed, not kept: %s", body)
+	}
 }
 
 func TestLanding_HeadMoved_FailsAndCleansUp(t *testing.T) {
@@ -261,6 +278,7 @@ func TestLanding_HeadMoved_FailsAndCleansUp(t *testing.T) {
 		if n := r.failureComments(); n != 1 {
 			t.Errorf("failure comments = %d, want 1", n)
 		}
+		assertFailureCommentSaysRemoved(t, r)
 	})
 }
 
@@ -282,6 +300,9 @@ func TestLanding_BlockedBoundExpires_KeepsTrialAndCommentsOnce(t *testing.T) {
 			t.Fatalf("failure comments = %d, want 1", n)
 		}
 		body := r.comments[0]
+		if !strings.Contains(body, "keeps a still-green trial") || strings.Contains(body, "were removed") {
+			t.Errorf("a kept trial's comment must say it is kept, not removed: %s", body)
+		}
 		for _, want := range []string{"#100", "blocked", "merge failure"} {
 			if !strings.Contains(body, want) {
 				t.Errorf("failure comment lacks %q: %s", want, body)

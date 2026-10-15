@@ -1910,7 +1910,7 @@ func (e *Engine) landSingleton(ctx context.Context, state *mergeTrainWorkerState
 		res := e.settleAndMerge(ctx, p.owner, p.repo, prNum, expectedHead)
 		if res.outcome != outcomeMerged {
 			keepTrial = e.keepGreenTrial(p.owner, p.repo, p.baseBranch, trialBranch, res)
-			e.postLandingFailure(p.owner, p.repo, prNum, []trainMember{m}, res)
+			e.postLandingFailure(p.owner, p.repo, prNum, []trainMember{m}, res, keepTrial)
 			return // leave in Queued
 		}
 		e.logf(m.item.Number, "merge-train", "merged singleton landing PR #%d for #%d\n", prNum, m.item.Number)
@@ -4528,7 +4528,7 @@ func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorke
 		res := e.settleAndMerge(ctx, owner, repo, integrationPRNum, expectedHead)
 		if res.outcome != outcomeMerged {
 			keepTrial = e.keepGreenTrial(owner, repo, baseBranch, trialBranch, res)
-			e.postLandingFailure(owner, repo, integrationPRNum, survivors, res)
+			e.postLandingFailure(owner, repo, integrationPRNum, survivors, res, keepTrial)
 			// Leave members in Queued.
 			return
 		}

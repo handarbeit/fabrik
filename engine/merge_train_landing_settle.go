@@ -299,8 +299,10 @@ func (e *Engine) releaseLandingTrial(repoKey string, wm *WorktreeManager, trialN
 // failed for a reason in landingOutcome.commentable. A waiting landing never calls it. The
 // comment names the PR, the mergeable_state observed and the reason, and is not reposted for
 // the same PR: a hidden body marker found in the first survivor's comments survives a
-// restart, and an in-memory set covers the window before the cache sees the comment.
-func (e *Engine) postLandingFailure(owner, repo string, prNum int, survivors []trainMember, res landingResult) {
+// restart, and an in-memory set covers the window before the cache sees the comment. kept
+// is the keepGreenTrial decision for this attempt: the wording must say what actually
+// happened to the trial PR and branch.
+func (e *Engine) postLandingFailure(owner, repo string, prNum int, survivors []trainMember, res landingResult, kept bool) {
 	if !res.outcome.commentable() || len(survivors) == 0 {
 		return
 	}
@@ -326,11 +328,16 @@ func (e *Engine) postLandingFailure(owner, repo string, prNum int, survivors []t
 	if state == "" {
 		state = "unknown"
 	}
+	outcomeLine := "Fabrik keeps a still-green trial and retries it on the next train cycle; " +
+		"manual intervention may be required if this repeats."
+	if !kept {
+		outcomeLine = "The trial branch and PR were removed; the next train cycle builds a fresh trial. " +
+			"Manual intervention may be required if this repeats."
+	}
 	msg := fmt.Sprintf("🏭 **Fabrik merge-train — merge failure**\n\n"+
 		"Could not land integration PR #%d: %s (mergeable_state observed: `%s`).\n\n"+
-		"Batch members remain in the Queued column. Fabrik keeps a still-green trial and retries it on the next train cycle; "+
-		"manual intervention may be required if this repeats.\n\n%s",
-		prNum, res.reason, state, marker)
+		"Batch members remain in the Queued column. %s\n\n%s",
+		prNum, res.reason, state, outcomeLine, marker)
 	if _, err := e.client.AddComment(owner, repo, survivors[0].item.Number, msg); err != nil {
 		e.logfRepo(owner+"/"+repo, "merge-train", "warn: could not post merge-failure comment: %v\n", err)
 	}
