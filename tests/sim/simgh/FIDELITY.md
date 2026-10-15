@@ -1581,6 +1581,22 @@ probed PR per poll. A scenario that needs a mergeable fact reads it through
 `FetchPRMergeableFields`/`FetchPRDetails`, which the engine's REST fallback also
 uses. The probe is therefore not a source of mergeability in the sim.
 
+### `FetchItemDetails` keeps the caller's Status; `BeforeCall` lands a change mid-poll — **Modelled** (#2344)
+
+The real deep fetch never reads the Status field, so the caller's (listing)
+value survives it. The sim's `FetchItemDetails` projects the whole card, but now
+restores the Status the caller passed in (when it passed one) and sets
+`ProjectItem.DeepFetchLive`, as the real client does for a live read. Without
+that the sim would silently refresh Status through the deep fetch and no scenario
+could show the poll-start snapshot going stale.
+
+`FaultTable.BeforeCall(method, fn)` runs `fn` on every call to `method` before
+the call reaches the model and before any fault rule is consulted, with no simgh
+lock held. It is how a scenario makes a change land at an exact point in the
+engine's sequence (for example between a poll's snapshot and the deep-fetch
+apply); a fail-only injector cannot express that. Hooks are scenario closures and
+are not part of a snapshot/restore. `nonvacuity.sh` neutralises it.
+
 ---
 
 ## Time

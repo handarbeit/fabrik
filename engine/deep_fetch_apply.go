@@ -25,3 +25,23 @@ func (e *Engine) applyDeepFetched(repo string, item gh.ProjectItem) {
 	}
 	e.store.Apply(itemstate.ItemDeepFetched{Repo: repo, Number: item.Number, FreshState: item})
 }
+
+// SetLegacyDeepFetchApplyForTest restores the pre-#2344 ItemDeepFetched apply on
+// the engine's store (the whole poll-start snapshot written back, baselines
+// assigned unconditionally) so a scenario can show it is not vacuous. Test seam
+// only (tests/sim); production never calls this.
+func (e *Engine) SetLegacyDeepFetchApplyForTest(on bool) { e.store.SetLegacyDeepFetchApplyForTest(on) }
+
+// StoreItemForTest returns the store's record for an item with no GitHub
+// fallback. Test seam only (tests/sim); production never calls this.
+func (e *Engine) StoreItemForTest(repo string, number int) (itemstate.ItemState, bool) {
+	snap, ok := e.store.Peek(repo, number)
+	if !ok {
+		return itemstate.ItemState{}, false
+	}
+	return snap.State(), true
+}
+
+// SubscribeStoreForTest registers an observer on the engine's store. Test seam
+// only (tests/sim); production never calls this.
+func (e *Engine) SubscribeStoreForTest(o itemstate.Observer) { e.store.Subscribe(o) }
