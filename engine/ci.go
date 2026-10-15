@@ -233,6 +233,17 @@ func (e *Engine) ciBackstopTimeout() time.Duration {
 	return 4 * time.Hour
 }
 
+// mergeStateUnknownTimeout returns the configured bound on a continuously
+// unknown PR merge state at the merge gate (#2302), defaulting to 30 minutes
+// when unconfigured. Deliberately much shorter than ciBackstopTimeout: GitHub
+// resolves a null mergeability on request within seconds to minutes.
+func (e *Engine) mergeStateUnknownTimeout() time.Duration {
+	if e.cfg.MergeStateUnknownTimeout > 0 {
+		return e.cfg.MergeStateUnknownTimeout
+	}
+	return 30 * time.Minute
+}
+
 // ciProgressStalledSince returns the time CI was last observed to make
 // progress for item's linked PR (LinkedPRState.LastCIProgressAt), and whether
 // that value is meaningful. "Progress" is set by applyCheckRunCompleted

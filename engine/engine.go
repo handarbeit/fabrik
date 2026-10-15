@@ -49,6 +49,7 @@ type Config struct {
 	CacheDivergenceWindow      time.Duration       // how recent an engine label/column write must be for a reverting reconcile, deep fetch or probe to be reported as cache-divergence (default 5m; #2170)
 	StallThreshold             time.Duration       // how long an item may show no observable progress (no worker activity, no status or label change) before the local read API classifies it stalled (default 30m; #1967, docs/state-machine.md §7.9). Zero disables stall classification.
 	CIWaitTimeout              time.Duration       // CI-gate liveness-stall dwell: how long CI may show no observable progress before pausing (default 30m; ADR-1410 — no longer a total-wait bound, see CIBackstopTimeout)
+	MergeStateUnknownTimeout   time.Duration       // How long a PR's merge state may stay continuously unknown (mergeable=null / mergeable_state=unknown) at the merge gate before the item is paused (default 30m; #2302)
 	CIBackstopTimeout          time.Duration       // Absolute cap on how long an item may sit in fabrik:awaiting-ci under any classification, bounding per-poll cost independent of CI duration (default 4h; ADR-1410, R5)
 	RequiredStatusContexts     map[string][]string // Per "owner/repo" required status/check-run context names the ci-gate must confirm success on before clearing (ADR-933); unconfigured repos = no behavior change
 	PostPushDwell              time.Duration       // How long to wait after a PR push before clearing CI gate as 'no CI configured' (default 90s)

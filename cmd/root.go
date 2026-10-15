@@ -59,6 +59,7 @@ type Config struct {
 	ItemWedgedThreshold        int    // minutes a gate may hold an item with no worker dispatched or queued before an item-wedged channel event; 0 means use default (10) (#2170)
 	CacheDivergenceWindow      int    // minutes within which a reconcile/deep-fetch/probe reverting an engine write is reported as cache-divergence; 0 means use default (5) (#2170)
 	StallThreshold             int    // minutes; how long an item may show no observable progress before the local read API (fabrik mcp) classifies it stalled; 0 means use default (30) (#1967)
+	MergeStateUnknownTimeout   int    // minutes; bound on a continuously unknown PR merge state at the merge gate; 0 means use default (30) (#2302)
 	CIBackstopTimeout          int    // minutes; absolute fabrik:awaiting-ci cap independent of CI duration; 0 means use default (240 = 4h) (ADR-1410, R5)
 	WorkerStaleMins            int    // minutes; 0 means use default (5)
 	MaxCiFixCycles             int    // 0 means use default (5)
@@ -213,6 +214,7 @@ func Execute() error {
 	flag.IntVar(&cfg.ItemWedgedThreshold, "item-wedged-threshold", 0, "Minutes a gate may hold an item with no worker dispatched or queued before an item-wedged channel event is published (0 = use default of 10; also FABRIK_ITEM_WEDGED_THRESHOLD)")
 	flag.IntVar(&cfg.CacheDivergenceWindow, "cache-divergence-window", 0, "Minutes within which a reconcile, deep fetch or probe that reverts an engine write is reported as cache-divergence (0 = use default of 5; also FABRIK_CACHE_DIVERGENCE_WINDOW)")
 	flag.IntVar(&cfg.StallThreshold, "stall-threshold", 0, "Minutes an item may show no observable progress (no worker activity, no status or label change) before the fabrik mcp overseer tools classify it stalled (0 = use default of 30; also FABRIK_STALL_THRESHOLD)")
+	flag.IntVar(&cfg.MergeStateUnknownTimeout, "merge-state-unknown-timeout", 0, "Minutes a PR's merge state may stay unknown (mergeable=null / mergeable_state=unknown) at the merge gate before the item is paused (0 = use default of 30; also FABRIK_MERGE_STATE_UNKNOWN_TIMEOUT; #2302)")
 	flag.IntVar(&cfg.CIBackstopTimeout, "ci-backstop-timeout", 0, "Absolute cap in minutes on how long an item may sit in fabrik:awaiting-ci under any classification, bounding per-poll cost independent of CI duration (0 = use default of 240 = 4h; also FABRIK_CI_BACKSTOP_TIMEOUT; ADR-1410)")
 	flag.IntVar(&cfg.WorkerStaleMins, "worker-stale-timeout", 0, "Minutes before a stale worker heartbeat triggers PID-liveness check (0 = use default of 5; also FABRIK_WORKER_STALE_TIMEOUT)")
 	flag.IntVar(&cfg.MaxCiFixCycles, "max-ci-fix-cycles", 0, "Maximum number of CI-fix cycles per issue before pausing (0 = use default of 5; also FABRIK_MAX_CI_FIX_CYCLES)")
@@ -475,6 +477,9 @@ func Execute() error {
 	}
 	if !explicitFlags["stall-threshold"] {
 		cfg.StallThreshold = resolveInt(cfg.StallThreshold, "FABRIK_STALL_THRESHOLD", "of minutes", 30)
+	}
+	if !explicitFlags["merge-state-unknown-timeout"] {
+		cfg.MergeStateUnknownTimeout = resolveInt(cfg.MergeStateUnknownTimeout, "FABRIK_MERGE_STATE_UNKNOWN_TIMEOUT", "of minutes", 30)
 	}
 	if !explicitFlags["ci-backstop-timeout"] {
 		cfg.CIBackstopTimeout = resolveInt(cfg.CIBackstopTimeout, "FABRIK_CI_BACKSTOP_TIMEOUT", "of minutes", 240)
@@ -1007,6 +1012,7 @@ func Execute() error {
 		ReviewWaitTimeout:          reviewWaitTimeout(cfg.ReviewWaitTimeout),
 		MaxReviewCycles:            maxReviewCycles(cfg.MaxReviewCycles),
 		CIWaitTimeout:              ciWaitTimeout(cfg.CIWaitTimeout),
+		MergeStateUnknownTimeout:   mergeStateUnknownTimeout(cfg.MergeStateUnknownTimeout),
 		CIBackstopTimeout:          ciBackstopTimeout(cfg.CIBackstopTimeout),
 		StallThreshold:             stallThreshold(cfg.StallThreshold),
 		RetryStarvedThreshold:      minutesOrDefault(cfg.RetryStarvedThreshold, 5),
@@ -1421,6 +1427,17 @@ func minutesOrDefault(minutes, def int) time.Duration {
 func ciBackstopTimeout(minutes int) time.Duration {
 	if minutes <= 0 {
 		return 240 * time.Minute
+	}
+	return time.Duration(minutes) * time.Minute
+}
+
+// mergeStateUnknownTimeout converts a MergeStateUnknownTimeout config value
+// (minutes) to a time.Duration. When minutes is 0 (unset), the default of 30
+// minutes is used: well above GitHub's seconds-to-minutes merge computation and
+// well below ciBackstopTimeout (#2302).
+func mergeStateUnknownTimeout(minutes int) time.Duration {
+	if minutes <= 0 {
+		return 30 * time.Minute
 	}
 	return time.Duration(minutes) * time.Minute
 }
