@@ -108,6 +108,8 @@ GitHub Project Board (source of truth)
 >
 > **v0.0.84 highlights:** an **overseer MCP server** (`fabrik mcp`, bundled in the PM plugin) lets a Claude Code session read board and daemon state from the running daemon with no GitHub calls, act through audited tools, and receive pushed events — see [Overseer Tools](docs/USER_GUIDE.md#overseer-tools-fabrik-mcp). Stage skills are addressed as `plugin:skill` (`fabrik-stages:review`); the built-in plugin is now `fabrik-stages`, and `fabrik upgrade` moves your edits to `.fabrik/plugins/local-workflows/` — see [Skill references](docs/USER_GUIDE.md#skill-references) and [Workflow migration](docs/USER_GUIDE.md#workflow-migration-fabrik-upgrade). The [merge train](docs/USER_GUIDE.md#merge-train--queued) gains singleton catch-up, red-singleton auto-repair, overlap-aware batching and restart-safe runs. Three display-only board fields (`Fabrik`, `Last activity`, `Last run`) show what each item is doing — add them with `fabrik repair-board --apply` ([Project Board Status Line](docs/USER_GUIDE.md#project-board-status-line)) — and a TUI warnings panel lists operator-level faults. Upgrading? Follow the ordered steps in [Workflow migration](docs/USER_GUIDE.md#workflow-migration-fabrik-upgrade); GitHub App installations now require `actions: write`.
 
+> **v0.0.85 highlights:** a **stage now runs before a comment that was waiting when the item entered it**, so the stage's skill and stage comment are never skipped by a comment pass — see [Steering with Comments](docs/USER_GUIDE.md#steering-with-comments). **SIGHUP (or `ctrl+r`) is a graceful restart**: the first signal stops starting new work and waits for running workers to finish, and a second restarts now — see [Restarting](docs/USER_GUIDE.md#recovering-from-wedged-state). The TUI's In Progress panel lists items Fabrik is waiting on (CI, reviews, a retry, a rebase, the merge train, a human reply) instead of saying "nothing to do". No configuration changes are needed; a SIGHUP restart can now take as long as the longest running worker.
+
 ### Webhook Mode (Optional)
 
 Fabrik can receive GitHub events in near-real-time (within ~2 seconds) instead of waiting for the next poll tick by spawning `gh webhook forward` as a background subprocess. Enable with `--webhooks`. With the default in-memory board cache active, the webhook stream also drives a reconcile-based health check (default every 3 minutes) that reduces full-board polling to at most once every 60 minutes.
@@ -146,6 +148,8 @@ Comments from all authors trigger processing — human colleagues, code-review b
 (Copilot, Gemini), and other Fabrik instances alike. Only two categories are skipped:
 comments that start with `🏭 **Fabrik` (Fabrik's own output) and comments that already
 carry a 🚀 rocket reaction (already processed).
+
+If you comment on an item before it reaches a stage, the stage runs first and one comment pass applies your comment afterwards; the item does not advance until that pass has run (see [Steering with Comments](docs/USER_GUIDE.md#steering-with-comments)).
 
 This allows iterative refinement — comment to answer questions, provide feedback,
 or steer the work, and Fabrik incorporates the input into the issue.

@@ -326,6 +326,8 @@ To restrict processing to a single repository, pass `--repo owner/repo`.
 
 The `.fabrik/` directory (config, stages, plugin) always lives in the directory where you run `fabrik`.
 
+**An already-landed issue branch is not reused.** When the local `fabrik/issue-N` branch is missing, Fabrik normally recreates it from `origin/fabrik/issue-N`. After a `fabrik:revalidate`, a reopen or a landing-verification failure, that remote branch can be merged history, and adopting it would give phantom diffs and conflicts. Fabrik instead forks a fresh branch from the base, with one log line saying why, when the origin tip is already on the base branch, or equals the head of a merged PR for the item (its linked PR, or the PR named by its `fabrik:credited-pr:<N>` label, which covers squash and rebase merges). A branch with unmerged commits is still adopted, and so is one whose ancestry check fails. Adopting a branch whose open PR targets a different base logs `warn: base mismatch`, naming both bases.
+
 ### Multi-Repo Support
 
 Fabrik can manage issues across every repository on the board in a single run. To enable multi-repo mode, omit (or comment out) the `repo:` field in `.fabrik/config.yaml` — Fabrik then discovers repositories lazily from the project board and processes issues from all of them. Each repository gets its own bare clone at `.fabrik/repos/<owner>-<repo>.git` and its own set of worktrees, all driven by the same poll loop.
@@ -1734,6 +1736,8 @@ When you post a comment:
 
 The rocket reaction is durable -- on restart, Fabrik skips comments that already have it.
 
+**A stage runs before a comment that was waiting when the item entered it.** If you comment on an item before it reaches a stage (for example while it sits in Backlog), the stage itself runs first and produces its own output; one comment pass then applies your comment. That is one more invocation than the comment pass alone, and it means the stage's skill always runs and posts its stage comment, rather than the comment pass completing the stage on its own. Fabrik treats the stage as already run on this entry when durable state says so: `stage:<S>:complete` or `stage:<S>:failed`, `fabrik:reworking:<S>`, the stage's CI, review or done wait marker, an engine pause, the stage's own `🏭 **Fabrik — stage: <S>**` comment, or a resume from a pause. Anything Fabrik cannot determine counts as "not run". A comment on an item whose stage has already run goes straight to the comment pass, as above. The stage run does not give the pending comment a rocket reaction, so the comment pass still happens, and the item does not advance until it has. If the stage run is incomplete, it is retried as a stage run under its normal backoff.
+
 **A comment holds the merge until it is processed.** If you comment on an issue that has
 already completed Validate -- for example a last request just before swapping `fabrik:cruise`
 for `fabrik:yolo` -- Fabrik will not merge the PR (or, with the merge train on, advance the
@@ -2120,7 +2124,10 @@ When a stage doesn't complete (Claude doesn't output `FABRIK_STAGE_COMPLETE`):
      `--max-tools-denied-retries` instead. See below.
 
 To resume after escalation: remove the `fabrik:paused` label. Fabrik will clear the
-failed label, reset the retry count, and try again immediately.
+failed label, reset the retry count, and try again immediately. If Fabrik cannot remove
+`fabrik:paused` when a human comment resumes an item, the comment is left unprocessed
+(no rocket reaction) and the next poll retries, so the item is never left paused with nothing
+to resume it.
 
 > **Troubleshooting: an issue is paused with a "slice budget exceeded" comment,
 > not a failure comment.** `--max-retries` bounds genuine failures only — errors,
@@ -2159,6 +2166,14 @@ failed label, reset the retry count, and try again immediately.
 > successful invocation resets the counter to zero. If the cold-started
 > attempt also fails, that *is* a genuine failure and flows into the normal
 > `--max-retries` → `fabrik:paused` path described above. See #1414.
+>
+> A usage-limit exit on a resumed session is not a resume failure. On `--resume`,
+> Claude reports the session's cumulative turns and cost, so a limit that rejected the
+> invocation before it did anything used to look like a failed resume. A resumed
+> invocation whose own output contains no user turn is now judged on zero usage: the exit
+> is classified as a Claude usage limit (see the `fabrik:claude-limit` note above), and
+> the session pointer and the resume-failure counter are left alone. A limit hit after
+> real work in the same invocation is still not detected as a usage limit.
 
 > **Troubleshooting: an issue carries `fabrik:tools-denied` instead of
 > `stage:<name>:failed`.** Claude's own permission layer denied one or more
@@ -2238,7 +2253,7 @@ author when unassigned, or nobody when neither is a human), and never a bot logi
 > flag ([#671](https://github.com/handarbeit/fabrik/issues/671)) will make this separation
 > easier once implemented.
 
-**Operator note:** If `fabrik:paused` is removed manually (without also removing `fabrik:awaiting-input`), the orphaned `fabrik:awaiting-input` label will be cleared automatically the next time the stage emits `FABRIK_STAGE_COMPLETE` — the issue will not remain visibly "awaiting input" after the stage has advanced.
+**Operator note:** If `fabrik:paused` is removed manually (without also removing `fabrik:awaiting-input`), the orphaned `fabrik:awaiting-input` label is cleared automatically: Fabrik removes it after every comment pass and reinvoke, and whenever it processes the item, as soon as a live read shows `fabrik:paused` is absent. A real pause is never lifted this way — the label stays while `fabrik:paused` is present.
 
 ### No-Work Short-Circuit
 
@@ -2256,6 +2271,9 @@ When both markers are present, the engine:
 2. Adds `stage:<name>:complete` labels for all subsequent non-cleanup stages (audit trail)
 3. Posts a one-line `_Skipped: no work needed_` comment per skipped stage
 4. Moves the issue directly to Done — **no PR is created**
+
+If a comment is pending on the issue, the stage is marked complete but the issue does not move
+to Done until the comment pass has run (see [Steering with Comments](#steering-with-comments)).
 
 The primary use case is the **Plan stage**: after Research finds the issue is already
 resolved or that no changes are required, Plan emits both markers instead of writing an
@@ -3550,7 +3568,7 @@ added after it:
 | `fabrik:locked:<user>` | Issue being processed by this user's instance |
 | `fabrik:editing` | Issue body being updated (comment processing) |
 | `fabrik:paused` | Processing paused (max retries exceeded or manual) |
-| `fabrik:awaiting-input` | Stage paused waiting for user input; auto-clears on a new human comment posted after the pause, or when a subsequent `FABRIK_STAGE_COMPLETE` is emitted (clears any orphaned label that survived a manual `fabrik:paused` removal) |
+| `fabrik:awaiting-input` | Stage paused waiting for user input; auto-clears on a new human comment posted after the pause, and an orphaned label that survived a manual `fabrik:paused` removal is removed after every comment pass and reinvoke, and whenever the item is processed, once a live read shows `fabrik:paused` absent (a real pause is never lifted this way) |
 | `fabrik:awaiting-review` | Set when a `wait_for_reviews: true` stage completes with outstanding reviewer requests; cleared when no requested reviewers are outstanding **and** at least one review has been submitted (then re-invocation fires unconditionally), or when the `FABRIK_REVIEW_WAIT_TIMEOUT` elapses (then issue is paused with `fabrik:awaiting-input`). With `review_authority: authoritative` (default: `advisory`), the same clearing condition additionally requires no outstanding `CHANGES_REQUESTED` review and required approvals satisfied — see [§3 Authoritative Mode](#authoritative-mode). With `expected_reviewers: []` declared and nothing requested, the gate skips waiting entirely and clears immediately — see [§3 Declaring Expected Reviewers](#declaring-expected-reviewers) |
 | `fabrik:awaiting-ci` | Applied immediately when a `wait_for_ci: true` stage emits `FABRIK_STAGE_COMPLETE`; means "CI gate active" and covers both pending and failed CI states; `stage:X:complete` is applied only when CI passes — not when this label is cleared by timeout (conjunctive gate, ADR 032). Triggers `itemMayNeedWork` cache bypass so CI results are re-evaluated on every poll. Cleared when all checks pass, or when a genuine liveness dwell elapses (then issue is paused with `fabrik:awaiting-input`) — a confirmed CI failure does not clear this via a timeout; it triggers CI-fix re-invocation instead and the label stays applied (ADR-1410). See [§3 CI Gate](USER_GUIDE.md#ci-gate-and-ci-fix-workflow). |
 | `fabrik:rebase-needed` | Set when GitHub reports the linked PR as `mergeable: false` on a `wait_for_ci: true` stage — typically because another PR merged into the base branch during the CI-await window. The engine dispatches a rebase re-invocation instructing Claude to `git fetch && git rebase origin/<base>`, resolve conflicts conservatively (watching for semantic collisions like duplicated ADR numbers), and force-push. The label clears when GitHub flips `mergeable` back to `true`. Triggers `itemMayNeedWork` cache bypass because base-branch advances don't bump the item's `updatedAt`. |
@@ -4549,6 +4567,11 @@ This is a separate mechanism from GitHub rate-limit monitoring above — it trac
 Claude account's own usage limit (session or weekly), not GitHub's API budget. Board
 polling, settle scans, and label reconciliation are unaffected; only the *start* of new
 Claude invocations is gated.
+
+A usage-limit exit on a resumed (`--resume`) session is classified the same way: when the
+resumed invocation's own output has no user turn it is judged on zero usage, so it counts as a
+usage limit rather than a resume failure and leaves the session and its resume-failure counter
+alone. A limit hit after real work in the same invocation is still not detected as a usage limit.
 
 When any worker's Claude invocation exits because the account's usage limit was hit —
 detected structurally from the CLI's own result object (`terminal_reason ==
