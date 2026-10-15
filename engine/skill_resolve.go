@@ -1,12 +1,9 @@
 package engine
 
 import (
-	"fmt"
 	"slices"
-	"strings"
-	"sync"
-	"sync/atomic"
 
+	"github.com/handarbeit/fabrik/internal/skillref"
 	"github.com/handarbeit/fabrik/plugin"
 	"github.com/handarbeit/fabrik/stages"
 )
@@ -19,153 +16,25 @@ const (
 	skillKeyRebaseSkill  = "rebase_skill"
 )
 
-// resolvedSkill is the outcome of resolving one reference.
-type resolvedSkill struct {
-	Name       string   // fully-qualified name the prompt carries
-	Deprecated bool     // the reference was bare, or the pre-#2140 base-plugin form, and was resolved by lookup
-	Others     []string // other qualified providers of an ambiguous bare name
-}
+// Aliases keep the engine's call sites unchanged over the shared package
+// (ADR 2305).
+type (
+	resolvedSkill        = skillref.Resolved
+	skillUnresolvedError = skillref.UnresolvedError
+	skillResolver        = skillref.Resolver
+	skillCatalogue       = skillref.Catalogue
+)
 
-// skillUnresolvedError reports a reference no loaded plugin provides. It is
-// returned before any worker is spawned (ADR 2137, FR-005).
-type skillUnresolvedError struct {
-	Stage string // stage name
-	Key   string // stage key the reference came from
-	Ref   string
-	Why   string
-	Cat   *skillCatalogue
-}
-
-func (e *skillUnresolvedError) Error() string {
-	return fmt.Sprintf("stage %q: %s %q is unresolved: %s; plugins searched: %s",
-		e.Stage, e.Key, e.Ref, e.Why, e.Cat.describe())
-}
-
-// describe lists the searched plugins and their paths.
-func (c *skillCatalogue) describe() string {
-	if c.empty() {
-		return "(none)"
-	}
-	parts := make([]string, 0, len(c.plugins))
-	for _, p := range c.plugins {
-		parts = append(parts, fmt.Sprintf("%s (%s)", p.Name, p.Dir))
-	}
-	return strings.Join(parts, ", ")
-}
-
-// resolve resolves ref against the snapshot. ok=false means unresolved and why
-// explains it. An empty catalogue (no plugin directories) passes the reference
-// through unchanged: the plugin then comes from Claude Code's own install,
-// which the engine cannot see (ADR 2137).
-//
-// The as-is lookup always runs first, so an operator-customised copy of the
-// pre-#2140 base plugin (still named "fabrik", still carrying fabrik-review)
-// keeps winning. Only on a miss does the legacy mapping (plugin.LegacyRef, the
-// same table `fabrik upgrade` rewrites with) turn a pre-rename reference —
-// "fabrik:fabrik-review" or bare "fabrik-review" — into the renamed skill
-// "fabrik-stages:review", flagged Deprecated (#2140, FR-004).
-func (c *skillCatalogue) resolve(ref string) (res resolvedSkill, why string, ok bool) {
-	res, why, ok = c.resolveAsIs(ref)
-	if ok || c.empty() {
-		return res, why, ok
-	}
-	if mapped, legacy := plugin.LegacyRef(ref); legacy {
-		if mres, _, mok := c.resolveAsIs(mapped); mok {
-			mres.Deprecated = true
-			return mres, "", true
-		}
-	}
-	return res, why, ok
-}
-
-// resolveAsIs is resolve without the legacy mapping.
-func (c *skillCatalogue) resolveAsIs(ref string) (res resolvedSkill, why string, ok bool) {
-	if c.empty() {
-		return resolvedSkill{Name: ref}, "", true
-	}
-	if pn, skill, qualified := plugin.Split(ref); qualified {
-		p, found := c.plugin(pn)
-		if !found {
-			return resolvedSkill{}, fmt.Sprintf("plugin %q is not loaded", pn), false
-		}
-		if _, has := p.Skills[skill]; !has {
-			return resolvedSkill{}, fmt.Sprintf("plugin %q has no skill %q", pn, skill), false
-		}
-		return resolvedSkill{Name: ref}, "", true
-	}
-
-	// Bare: the base plugin wins, otherwise load order.
-	var providers []loadedPlugin
-	for _, p := range c.plugins {
-		if _, has := p.Skills[ref]; has {
-			providers = append(providers, p)
-		}
-	}
-	if len(providers) == 0 {
-		return resolvedSkill{}, fmt.Sprintf("no loaded plugin provides a skill named %q", ref), false
-	}
-	chosen := providers[0]
-	for _, name := range []string{plugin.BasePluginName, plugin.LegacyBasePluginName} {
-		found := false
-		for _, p := range providers {
-			if p.Name == name {
-				chosen, found = p, true
-				break
-			}
-		}
-		if found {
-			break
-		}
-	}
-	res = resolvedSkill{Name: plugin.Qualify(chosen.Name, ref), Deprecated: true}
-	for _, p := range providers {
-		if p.Dir != chosen.Dir {
-			res.Others = append(res.Others, plugin.Qualify(p.Name, ref))
-		}
-	}
-	return res, "", true
-}
-
-// skillResolver resolves stage skill references against the plugins loaded for
-// the workers. The snapshot is immutable; on an unresolved lookup it is rebuilt
-// once from disk (under a mutex) and the lookup retried, so a plugin edited or
-// upgraded while the daemon runs is picked up without a scan per dispatch.
-type skillResolver struct {
-	dirs []string
-	mu   sync.Mutex // serialises rebuilds
-	cat  atomic.Pointer[skillCatalogue]
+// fabrikSkillOptions is Fabrik's wiring of the shared resolver: a bare name
+// prefers the renamed base plugin, then a customised pre-#2140 one, and the
+// pre-rename references map through plugin.LegacyRef (ADR 2137, ADR 2140).
+var fabrikSkillOptions = skillref.Options{
+	PreferredBases: []string{plugin.BasePluginName, plugin.LegacyBasePluginName},
+	LegacyRef:      plugin.LegacyRef,
 }
 
 func newSkillResolver(dirs []string) *skillResolver {
-	r := &skillResolver{dirs: append([]string(nil), dirs...)}
-	r.cat.Store(buildSkillCatalogue(r.dirs))
-	return r
-}
-
-// Resolve resolves ref. On failure the returned catalogue is the one searched.
-func (r *skillResolver) Resolve(ref string) (resolvedSkill, string, *skillCatalogue, bool) {
-	cat := r.cat.Load()
-	if res, _, ok := cat.resolve(ref); ok {
-		return res, "", cat, true
-	}
-	fresh := r.rebuildIfStale(cat)
-	res, why, ok := fresh.resolve(ref)
-	return res, why, fresh, ok
-}
-
-// rebuildIfStale rescans the plugin directories unless another goroutine has
-// already replaced the snapshot the caller missed on, in which case that newer
-// snapshot is returned as is. Concurrent misses therefore share one rescan
-// instead of queueing a redundant one each behind the mutex.
-func (r *skillResolver) rebuildIfStale(seen *skillCatalogue) *skillCatalogue {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if cur := r.cat.Load(); cur != seen {
-		return cur
-	}
-	fresh := buildSkillCatalogue(r.dirs)
-	r.cat.Store(fresh)
-	return fresh
+	return skillref.NewResolver(dirs, fabrikSkillOptions)
 }
 
 // stageSkillRefs returns the non-empty skill-valued keys of a stage in a

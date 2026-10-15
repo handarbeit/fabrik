@@ -1,20 +1,23 @@
-package engine
+package skillref
 
 import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"strings"
+	"unicode/utf8"
 
+	"github.com/handarbeit/fabrik/internal/claudeerr"
 	"github.com/handarbeit/fabrik/plugin"
 )
 
-// detectSkillLoadFailure reports whether the invocation's own configured skill
+// DetectLoadFailure reports whether the invocation's own configured skill
 // demonstrably failed to load (#2138, ADR-2138). It reads only the structured
 // tool-call record of the run — the stream-json NDJSON — never output prose:
 //
 //   - an assistant "tool_use" block named "Skill" whose input.skill is the
-//     expected skill (skillNamesMatch) is an own-skill call;
+//     expected skill (SkillNamesMatch) is an own-skill call;
 //   - its "tool_result" block, matched by tool_use_id, carries is_error. The
 //     result's content text is never inspected for a decision — it only fills
 //     Detail for the operator.
@@ -29,7 +32,7 @@ import (
 // (a stage configured with prompt: and no skill) makes the detector inert.
 //
 // Returns nil when there is no demonstrated failure.
-func detectSkillLoadFailure(rawOutput []byte, expectedSkill string) *claudeSkillLoadError {
+func DetectLoadFailure(rawOutput []byte, expectedSkill string) *claudeerr.SkillLoadError {
 	if expectedSkill == "" || len(rawOutput) == 0 {
 		return nil
 	}
@@ -41,8 +44,7 @@ func detectSkillLoadFailure(rawOutput []byte, expectedSkill string) *claudeSkill
 	called := map[string]string{}  // id → input.skill as the worker typed it
 	results := map[string]result{} // tool_use_id → result
 	scanner := bufio.NewScanner(bytes.NewReader(rawOutput))
-	// Same sizing as forEachAssistantText: one NDJSON line can never be longer
-	// than the whole input.
+	// One NDJSON line can never be longer than the whole input.
 	scanner.Buffer(make([]byte, 0, 64*1024), len(rawOutput)+1)
 	for scanner.Scan() {
 		line := bytes.TrimSpace(scanner.Bytes())
@@ -84,7 +86,7 @@ func detectSkillLoadFailure(rawOutput []byte, expectedSkill string) *claudeSkill
 				var in struct {
 					Skill string `json:"skill"`
 				}
-				if json.Unmarshal(b.Input, &in) != nil || !skillNamesMatch(expectedSkill, in.Skill) {
+				if json.Unmarshal(b.Input, &in) != nil || !SkillNamesMatch(expectedSkill, in.Skill) {
 					continue
 				}
 				ownOrder = append(ownOrder, b.ID)
@@ -94,7 +96,7 @@ func detectSkillLoadFailure(rawOutput []byte, expectedSkill string) *claudeSkill
 			}
 		}
 	}
-	var failed *claudeSkillLoadError
+	var failed *claudeerr.SkillLoadError
 	for _, id := range ownOrder {
 		r, ok := results[id]
 		if !ok {
@@ -104,7 +106,7 @@ func detectSkillLoadFailure(rawOutput []byte, expectedSkill string) *claudeSkill
 			return nil // the skill loaded at least once
 		}
 		if failed == nil {
-			failed = &claudeSkillLoadError{Skill: expectedSkill, ToolUseID: id, Detail: sanitizeSkillLoadDetail(r.detail)}
+			failed = &claudeerr.SkillLoadError{Skill: expectedSkill, ToolUseID: id, Detail: SanitizeDetail(r.detail)}
 			if called[id] != expectedSkill {
 				failed.Called = called[id]
 			}
@@ -113,13 +115,13 @@ func detectSkillLoadFailure(rawOutput []byte, expectedSkill string) *claudeSkill
 	return failed
 }
 
-// skillNamesMatch reports whether the name a worker passed to the Skill tool
+// SkillNamesMatch reports whether the name a worker passed to the Skill tool
 // (called) refers to the invocation's configured skill. Base names must be
 // equal; when both sides are plugin-qualified the plugin parts must be equal
 // too, while a bare side matches any plugin (a worker may type the bare name of
 // a qualified configuration, and an empty catalogue passes names through
 // unqualified). A same-named skill from a different plugin does not match.
-func skillNamesMatch(configured, called string) bool {
+func SkillNamesMatch(configured, called string) bool {
 	cp, cs, cq := plugin.Split(strings.TrimSpace(configured))
 	kp, ks, kq := plugin.Split(strings.TrimSpace(called))
 	if cs == "" || cs != ks {
@@ -158,14 +160,45 @@ func toolResultText(raw json.RawMessage) string {
 	return sb.String()
 }
 
-// skillLoadDetailReplacer strips the CLI's <tool_use_error> wrapper tags so the
-// text is not interpreted as markup when rendered.
-var skillLoadDetailReplacer = strings.NewReplacer("<tool_use_error>", "", "</tool_use_error>", "")
+const (
+	detailMaxLen  = 200
+	detailHeadLen = 140
+	detailTailLen = 40
+)
 
-// sanitizeSkillLoadDetail makes the failed call's tool_result text safe for an
+// detailReplacer strips the CLI's <tool_use_error> wrapper tags so the text is
+// not interpreted as markup when rendered.
+var detailReplacer = strings.NewReplacer("<tool_use_error>", "", "</tool_use_error>", "")
+
+// lineReplacer collapses line breaks and neutralises backticks.
+var lineReplacer = strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ", "`", "'")
+
+// SanitizeDetail makes the failed call's tool_result text safe for an
 // operator-facing comment and warnings-panel entry: it is untrusted model-side
 // text, so it is stripped of the CLI's wrapper tags, collapsed to one line with
-// backticks neutralised, and truncated (same helper as the tools-denied path).
-func sanitizeSkillLoadDetail(s string) string {
-	return sanitizeToolsDeniedCommand(skillLoadDetailReplacer.Replace(s))
+// backticks neutralised, and truncated in the middle with an explicit
+// "chars omitted" marker. The engine's tools-denied sanitiser applies the same
+// rule; an engine test pins the two to identical output.
+func SanitizeDetail(s string) string {
+	s = detailReplacer.Replace(s)
+	if s == "" {
+		return ""
+	}
+	s = strings.TrimSpace(lineReplacer.Replace(s))
+	if s == "" {
+		return ""
+	}
+	if len(s) > detailMaxLen {
+		omitted := len(s) - detailHeadLen - detailTailLen
+		headEnd := detailHeadLen
+		for headEnd > 0 && headEnd < len(s) && !utf8.RuneStart(s[headEnd]) {
+			headEnd--
+		}
+		tailStart := len(s) - detailTailLen
+		for tailStart < len(s) && !utf8.RuneStart(s[tailStart]) {
+			tailStart++
+		}
+		s = fmt.Sprintf("%s … (%d chars omitted) … %s", s[:headEnd], omitted, s[tailStart:])
+	}
+	return s
 }

@@ -14,15 +14,6 @@ import (
 // "<stage>.<key>", like the pre-flight skillUnresolvedType.
 const skillLoadType = "skill_load"
 
-// describe lists the plugins the resolver loaded. Nil-safe: NewWithDeps engines
-// have no resolver, and an empty catalogue reads "(none)".
-func (r *skillResolver) describe() string {
-	if r == nil {
-		return "(none)"
-	}
-	return r.cat.Load().describe()
-}
-
 // skillLoadCondition builds the warnings-panel entry for a runtime skill-load
 // failure. The fingerprint is stable (skill + sanitised detail) so a dismissal
 // follows the cause, not the stage.
@@ -58,7 +49,7 @@ func skillLoadDetailOrNone(detail string) string {
 // CI-fix and rebase paths, which all run through the stage's CommentSkill).
 func (e *Engine) handleSkillLoadFailed(item gh.ProjectItem, stage *stages.Stage, key string, sle *claudeSkillLoadError) {
 	e.logf(item.Number, "skill", "stage %q: %s %q failed to load — pausing (not a stage failure): %v\n", stage.Name, key, sle.Skill, sle)
-	plugins := e.skillResolver.describe()
+	plugins := e.skillResolver.Describe()
 	if err := warnings.Report(e.warnWriter("skill"), skillLoadCondition(stage.Name, key, sle, plugins)); err != nil {
 		e.logf(item.Number, "skill", "recording %s: %v\n", skillLoadType, err)
 	}

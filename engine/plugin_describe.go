@@ -1,6 +1,9 @@
 package engine
 
-import "github.com/handarbeit/fabrik/plugin"
+import (
+	"github.com/handarbeit/fabrik/internal/skillref"
+	"github.com/handarbeit/fabrik/plugin"
+)
 
 // PluginInfo describes one plugin directory the way the skill resolver sees it.
 type PluginInfo struct {
@@ -14,8 +17,8 @@ type PluginInfo struct {
 // reference only to a plugin the workers would actually load it from (#2203).
 // A directory that cannot be read yields a plugin with no skills.
 func DescribePlugin(dir string) PluginInfo {
-	p := discoverPlugin(dir)
-	return PluginInfo{Name: p.Name, Dir: p.Dir, Skills: p.skillNames()}
+	p := skillref.Discover(dir)
+	return PluginInfo{Name: p.Name, Dir: p.Dir, Skills: p.SkillNames()}
 }
 
 // ResolveSkillForTest resolves ref against the plugins in dirs (load order) with
@@ -27,7 +30,7 @@ func ResolveSkillForTest(dirs []string, ref string) (qualified, skillFile string
 		return "", "", false
 	}
 	if pn, skill, q := plugin.Split(res.Name); q {
-		if p, found := cat.plugin(pn); found {
+		if p, found := cat.Plugin(pn); found {
 			return res.Name, p.Skills[skill], true
 		}
 	}
