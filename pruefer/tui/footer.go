@@ -7,22 +7,21 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
-// FooterComponent renders the bottom status bar: the running session-total
-// cost/turns (accumulated in-memory across every reviewed PR, reset on
-// daemon restart — matching Fabrik's own session-scoped TUI totals, see
-// adrs/1114-pruefer-tui-architecture.md), the GitHub REST API rate-limit
+// FooterComponent renders the bottom status bar, laid out like Fabrik's: who
+// and where this daemon is (working directory and review identity) on the
+// left, the Claude account it reviews with in the centre, and on the right
+// the GitHub REST API rate-limit
 // gauge (github.Client.RateLimitStats()'s "rest" return value — Pruefer
 // issues no GraphQL requests, so "graphql" would always read zero), a
 // per-category event-drop breakdown, and a signature-drift banner (both
 // ADR-1563 — see DropEvent/SignatureDriftEvent).
 type FooterComponent struct {
-	reviewedCount int
-	totalTurns    int
-	totalCostUSD  float64
-	restStats     rateLimitStats
-	now           time.Time
+	info      Info
+	restStats rateLimitStats
+	now       time.Time
 
 	dropCounts     map[string]int
 	sigDriftActive bool
@@ -61,12 +60,6 @@ func (f FooterComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
 	switch ev := msg.(type) {
 	case TickEvent:
 		f.now = ev.At
-	case ReviewCompletedEvent:
-		if ev.Reviewed {
-			f.reviewedCount++
-			f.totalTurns += ev.NumTurns
-			f.totalCostUSD += ev.CostUSD
-		}
 	case RateLimitSnapshotEvent:
 		f.restStats = rateLimitStats{Limit: ev.Stats.Limit, Remaining: ev.Stats.Remaining, Reset: ev.Stats.Reset}
 	case DropEvent:
@@ -150,8 +143,13 @@ func (f FooterComponent) unrecognizedInstallationsBannerSegment() string {
 }
 
 func (f FooterComponent) View(width int) string {
-	leftPlain := fmt.Sprintf("session: %d reviewed  ·  %d turns  ·  $%.4f", f.reviewedCount, f.totalTurns, f.totalCostUSD)
-	left := dimStyle.Render(leftPlain)
+	var leftParts []string
+	for _, p := range []string{f.info.CWD, f.info.Identity} {
+		if p != "" {
+			leftParts = append(leftParts, p)
+		}
+	}
+	left := dimStyle.Render(strings.Join(leftParts, " · "))
 
 	var rightParts []string
 	if drift := f.driftBannerSegment(); drift != "" {
@@ -184,36 +182,33 @@ func (f FooterComponent) View(width int) string {
 	if maxWidth < 1 {
 		maxWidth = 1
 	}
-	if right == "" {
-		if lipgloss.Width(left) > maxWidth {
-			runes := []rune(leftPlain)
-			for len(runes) > 0 && lipgloss.Width(dimStyle.Render(string(runes)+"…")) > maxWidth {
-				runes = runes[:len(runes)-1]
-			}
-			left = dimStyle.Render(string(runes) + "…")
-		}
-		return left
+	rightWidth := lipgloss.Width(right)
+	// The right side is operational state (banners, rate limit) and is never
+	// shortened; the left side gives way to it, keeping at least one space.
+	availLeft := maxWidth - rightWidth
+	if right != "" {
+		availLeft--
+	}
+	if availLeft < 0 {
+		availLeft = 0
+	}
+	if lipgloss.Width(left) > availLeft {
+		left = ansi.Truncate(left, availLeft, "…")
+	}
+	gap := maxWidth - lipgloss.Width(left) - rightWidth
+	if gap < 0 {
+		gap = 0
 	}
 
-	rightWidth := lipgloss.Width(right)
-	gap := maxWidth - lipgloss.Width(left) - rightWidth
-	if gap < 1 {
-		availLeft := maxWidth - rightWidth - 1
-		if availLeft < 0 {
-			availLeft = 0
-		}
-		runes := []rune(leftPlain)
-		for len(runes) > 0 && lipgloss.Width(dimStyle.Render(string(runes)+"…")) > availLeft {
-			runes = runes[:len(runes)-1]
-		}
-		if len(runes) == 0 {
-			left = ""
-		} else {
-			left = dimStyle.Render(string(runes) + "…")
-		}
-		gap = maxWidth - lipgloss.Width(left) - rightWidth
-		if gap < 0 {
-			gap = 0
+	// Centre the Claude account in the gap when it fits with at least one
+	// space either side. It is the first thing dropped as the terminal
+	// narrows: it is standing context, while left and right are what an
+	// operator scans for — the same priority as Fabrik's footer.
+	if account := f.info.ClaudeAccount; account != "" {
+		rendered := dimStyle.Render(account)
+		if w := lipgloss.Width(rendered); gap >= w+2 {
+			leftPad := (gap - w) / 2
+			return left + strings.Repeat(" ", leftPad) + rendered + strings.Repeat(" ", gap-w-leftPad) + right
 		}
 	}
 	return left + strings.Repeat(" ", gap) + right
@@ -221,21 +216,6 @@ func (f FooterComponent) View(width int) string {
 
 func (f FooterComponent) Height() int {
 	return 1
-}
-
-// TotalCostUSD returns the accumulated session-total review cost.
-func (f FooterComponent) TotalCostUSD() float64 {
-	return f.totalCostUSD
-}
-
-// TotalTurns returns the accumulated session-total review turns.
-func (f FooterComponent) TotalTurns() int {
-	return f.totalTurns
-}
-
-// ReviewedCount returns the accumulated session-total number of reviewed PRs.
-func (f FooterComponent) ReviewedCount() int {
-	return f.reviewedCount
 }
 
 // DropCount returns the most recently reported cumulative count for reason

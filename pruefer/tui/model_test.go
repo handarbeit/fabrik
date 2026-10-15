@@ -98,7 +98,7 @@ func TestModel_DerivedRepoSetEventRoutesToRepoPane(t *testing.T) {
 	}
 }
 
-func TestModel_ReviewLifecycleRoutesToActiveHistoryAndFooter(t *testing.T) {
+func TestModel_ReviewLifecycleRoutesToActiveAndHistory(t *testing.T) {
 	m := New(nil, time.Now())
 	start := time.Now()
 	next, _ := m.Update(ReviewStartedEvent{Repo: "o/r", PRNumber: 9, StartedAt: start})
@@ -117,9 +117,6 @@ func TestModel_ReviewLifecycleRoutesToActiveHistoryAndFooter(t *testing.T) {
 	}
 	if m.history.Count() != 1 {
 		t.Errorf("history.Count() = %d, want 1 after ReviewCompletedEvent", m.history.Count())
-	}
-	if m.footer.ReviewedCount() != 1 {
-		t.Errorf("footer.ReviewedCount() = %d, want 1", m.footer.ReviewedCount())
 	}
 }
 

@@ -3,12 +3,14 @@ package pruefer
 import (
 	"context"
 	"os"
+	"strings"
 	"syscall"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/mattn/go-isatty"
 
+	"github.com/handarbeit/fabrik/internal/claudeprofile"
 	ptui "github.com/handarbeit/fabrik/pruefer/tui"
 )
 
@@ -20,6 +22,25 @@ func useTUI(cfg Config) bool {
 	return cfg.TUI &&
 		(isatty.IsTerminal(os.Stdin.Fd()) || isatty.IsCygwinTerminal(os.Stdin.Fd())) &&
 		(isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd()))
+}
+
+// tuiInfo gathers the header/footer's standing context. Read once at startup:
+// the working directory, build and Claude profile cannot change without a
+// re-exec, which rebuilds the TUI anyway.
+func tuiInfo(botLogin string) ptui.Info {
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = ""
+	}
+	if home, herr := os.UserHomeDir(); herr == nil && home != "" && (cwd == home || strings.HasPrefix(cwd, home+string(os.PathSeparator))) {
+		cwd = "~" + cwd[len(home):]
+	}
+	return ptui.Info{
+		CWD:           cwd,
+		Version:       Version,
+		Identity:      botLogin,
+		ClaudeAccount: claudeprofile.Account(os.Getenv("CLAUDE_CONFIG_DIR")),
+	}
 }
 
 // runTUI wires the event channel, starts the bubbletea program, and runs the
@@ -40,7 +61,7 @@ func runTUI(ctx context.Context, d *Daemon) error {
 		}
 	}
 
-	tuiModel := ptui.New(derivedRepoNames(d.derivedSet()), time.Now())
+	tuiModel := ptui.New(derivedRepoNames(d.derivedSet()), time.Now()).WithInfo(tuiInfo(d.BotLogin))
 	p := tea.NewProgram(tuiModel, tea.WithAltScreen(), tea.WithoutSignalHandler())
 
 	go func() {

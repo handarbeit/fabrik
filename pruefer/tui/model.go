@@ -54,6 +54,24 @@ func New(watchedRepos []string, startedAt time.Time) Model {
 	}
 }
 
+// Info is the standing context the header and footer show about this daemon:
+// where it runs, which build, which GitHub identity it reviews as, and which
+// Claude account it reviews with. With one daemon per App realm, these are
+// what tell two Pruefer windows apart.
+type Info struct {
+	CWD           string // working directory, home-relative when under $HOME
+	Version       string // pruefer.Version: a release tag or dev(<sha>)
+	Identity      string // the review identity's login, e.g. "<slug>[bot]"
+	ClaudeAccount string // email of the Claude profile reviews run under
+}
+
+// WithInfo returns m showing info in its header and footer.
+func (m Model) WithInfo(info Info) Model {
+	m.header.version = info.Version
+	m.footer.info = info
+	return m
+}
+
 // Init starts the 1-second tick.
 func (m Model) Init() tea.Cmd {
 	return tickCmd()

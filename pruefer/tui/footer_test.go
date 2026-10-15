@@ -5,34 +5,111 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/muesli/termenv"
 )
 
-func TestFooter_SessionTotalsAccumulateFromReviewedOnly(t *testing.T) {
-	var f FooterComponent
-	comp, _ := f.Update(ReviewCompletedEvent{Reviewed: true, NumTurns: 5, CostUSD: 0.10})
-	f = comp.(FooterComponent)
-	comp, _ = f.Update(ReviewCompletedEvent{Reviewed: true, NumTurns: 3, CostUSD: 0.05})
-	f = comp.(FooterComponent)
-	// Skipped and errored completions must not contribute to the session total.
-	comp, _ = f.Update(ReviewCompletedEvent{Skipped: true, Reason: "draft"})
-	f = comp.(FooterComponent)
-	comp, _ = f.Update(ReviewCompletedEvent{Err: "boom"})
-	f = comp.(FooterComponent)
+// footerForceANSI makes lipgloss emit escapes, so width assertions see what a
+// real terminal gets rather than go test's plain-text rendering.
+func footerForceANSI(t *testing.T) {
+	t.Helper()
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI256)
+	t.Cleanup(func() { lipgloss.SetColorProfile(prev) })
+}
 
-	if f.ReviewedCount() != 2 {
-		t.Errorf("ReviewedCount() = %d, want 2", f.ReviewedCount())
+func footerWith(info Info, remaining int) FooterComponent {
+	f := FooterComponent{info: info}
+	comp, _ := f.Update(RateLimitSnapshotEvent{Stats: gh.RateLimitStats{
+		Limit: 5000, Remaining: remaining, Reset: time.Now().Add(10 * time.Minute),
+	}})
+	f = comp.(FooterComponent)
+	comp, _ = f.Update(TickEvent{At: time.Now()})
+	return comp.(FooterComponent)
+}
+
+var testInfo = Info{
+	CWD:           "~/dev/fabrik",
+	Version:       "dev(9ede632)",
+	Identity:      "handarbeit-pruefer[bot]",
+	ClaudeAccount: "someone@example.com",
+}
+
+// The footer mirrors Fabrik's: where and as whom on the left, the Claude
+// account centred, the rate limit on the right — and no session cost/turns.
+func TestFooter_LayoutMatchesFabrik(t *testing.T) {
+	footerForceANSI(t)
+	f := footerWith(testInfo, 4773)
+	const width = 140
+	view := ansi.Strip(f.View(width))
+
+	if !strings.HasPrefix(view, "~/dev/fabrik · handarbeit-pruefer[bot]") {
+		t.Errorf("left side should be cwd · identity, got %q", view)
 	}
-	if f.TotalTurns() != 8 {
-		t.Errorf("TotalTurns() = %d, want 8", f.TotalTurns())
+	if !strings.Contains(view, "rest 4773/5000") {
+		t.Errorf("right side should carry the rest gauge, got %q", view)
 	}
-	if got, want := f.TotalCostUSD(), 0.15; got < want-1e-9 || got > want+1e-9 {
-		t.Errorf("TotalCostUSD() = %v, want %v", got, want)
+	acct := strings.Index(view, "someone@example.com")
+	if acct < 0 {
+		t.Fatalf("Claude account missing at width %d: %q", width, view)
+	}
+	if left, rest := strings.Index(view, "[bot]"), strings.Index(view, "rest "); !(left < acct && acct < rest) {
+		t.Errorf("account should sit between left and right segments: %q", view)
+	}
+	for _, gone := range []string{"session:", "turns", "$"} {
+		if strings.Contains(view, gone) {
+			t.Errorf("footer still shows %q: %q", gone, view)
+		}
+	}
+	if w := ansi.StringWidth(f.View(width)); w > width-2 {
+		t.Errorf("footer is %d cells, budget %d", w, width-2)
+	}
+}
+
+// As the terminal narrows the account goes first; the rate-limit gauge is
+// never shortened, and the left side truncates with "…" to make room.
+func TestFooter_NarrowDropsAccountThenTruncatesLeft(t *testing.T) {
+	footerForceANSI(t)
+	f := footerWith(testInfo, 4773)
+
+	mid := ansi.Strip(f.View(70))
+	if strings.Contains(mid, "someone@example.com") {
+		t.Errorf("account should be dropped at width 70: %q", mid)
+	}
+	if !strings.Contains(mid, "handarbeit-pruefer[bot]") || !strings.Contains(mid, "rest 4773/5000") {
+		t.Errorf("width 70 should still show identity and gauge: %q", mid)
 	}
 
-	view := f.View(120)
-	if !strings.Contains(view, "2 reviewed") || !strings.Contains(view, "8 turns") {
-		t.Errorf("View() does not show session totals:\n%s", view)
+	narrowView := f.View(40)
+	narrow := ansi.Strip(narrowView)
+	if !strings.Contains(narrow, "rest 4773/5000") {
+		t.Errorf("gauge must never be shortened: %q", narrow)
+	}
+	if !strings.Contains(narrow, "…") {
+		t.Errorf("left side should truncate with an ellipsis: %q", narrow)
+	}
+	if w := ansi.StringWidth(narrowView); w > 38 {
+		t.Errorf("footer is %d cells at width 40, budget 38: %q", w, narrow)
+	}
+}
+
+func TestFooter_EmptyInfoRendersGaugeOnly(t *testing.T) {
+	f := footerWith(Info{}, 4773)
+	view := ansi.Strip(f.View(100))
+	if strings.Contains(view, "·") {
+		t.Errorf("no separators expected with empty info: %q", view)
+	}
+	if !strings.Contains(view, "rest 4773/5000") {
+		t.Errorf("gauge missing: %q", view)
+	}
+}
+
+func TestHeader_ShowsVersion(t *testing.T) {
+	m := New([]string{"handarbeit/fabrik"}, time.Now()).WithInfo(testInfo)
+	if got := ansi.Strip(m.header.View(120)); !strings.Contains(got, "Pruefer dev(9ede632)") {
+		t.Errorf("header should show the version beside the name: %q", got)
 	}
 }
 

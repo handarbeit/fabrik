@@ -34,6 +34,8 @@ The spec's second open question — retention window for "recently completed rev
 
 ### 6. Session-total cost/turns: in-memory, reset on restart, accumulated in the footer
 
+> **Superseded (2026-10-12).** The footer no longer shows session totals. It now matches Fabrik's footer: working directory and review identity on the left, the Claude account in the centre, and the rate-limit gauge and banners on the right. Cost is notional on a subscription, and the Completed Reviews pane already shows the count. Per-review turns and cost stay on each history row. The original decision is kept below for the record.
+
 The spec's third open question — whether the session aggregate persists across restarts — is resolved as in-memory-only, reset on every daemon restart, matching Fabrik's own session-scoped TUI state. Fabrik's TUI has no existing footer/header precedent for this (confirmed in Research: only a per-entry `HistoryEntry.CostUSD`, summed ad hoc in one test), so `pruefer/tui/footer.go`'s running total was designed fresh — accumulated from each `ReviewCompletedEvent` and displayed alongside the rate-limit gauge, consistent with where Fabrik places session-adjacent gauges without copying a component that doesn't exist.
 
 ### 7. Rate-limit surfacing via an optional interface, not a required one
@@ -57,7 +59,7 @@ Confirms the spec's default assumption: the existing `/pruefer review` GitHub-co
 
 **Negative / Trade-offs:**
 - `pruefer/tui` duplicates a non-trivial amount of structure from Fabrik's `tui/` (styles, `Component` interface, header/detail/footer shapes). Two copies to keep conceptually in sync if either evolves, accepted per Decision 1's rationale and the issue's explicit "extraction is a follow-up" scoping.
-- Completed-review history and the session-total cost/turn count are both lost on every daemon restart (Decisions 5 and 6) — a deliberate trade against unbounded growth and new disk I/O, but it means a long-running daemon's "session total" resets more often than an operator might expect from the name.
+- Completed-review history is lost on every daemon restart (Decision 5) — a deliberate trade against unbounded growth and new disk I/O. (The session-total cost/turn count this bullet originally also covered was removed from the footer when Decision 6 was superseded.)
 - `ClaudeInvoker.Review`'s signature change is a breaking change to the interface, requiring every caller and test mock in `pruefer/` to update in the same change set (compile-time enforced, not a runtime risk, but a wider diff than a purely additive change would have been).
 
 ## Related Work

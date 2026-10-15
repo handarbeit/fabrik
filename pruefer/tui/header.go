@@ -8,8 +8,10 @@ import (
 )
 
 // HeaderComponent renders the top title bar: program name, watched-repo
-// count, and elapsed session time.
+// count, and elapsed session time, with the running build's version beside
+// the name as Fabrik's header has it.
 type HeaderComponent struct {
+	version   string
 	repoCount int
 	startedAt time.Time
 	now       time.Time
@@ -24,6 +26,9 @@ func (h HeaderComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
 
 func (h HeaderComponent) View(width int) string {
 	title := titleStyle.Render("Pruefer")
+	if h.version != "" {
+		title += " " + dimStyle.Render(h.version)
+	}
 	elapsed := fmtDuration(h.now.Sub(h.startedAt))
 	info := dimStyle.Render(fmt.Sprintf("watching %d repo(s)  ·  up %s", h.repoCount, elapsed))
 	return title + "  " + info

@@ -2,7 +2,6 @@ package engine
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +17,7 @@ import (
 
 	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/claudeprofile"
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
 	"github.com/handarbeit/fabrik/tui"
@@ -96,19 +96,12 @@ func pollStatusClear() {
 // another's credentials. That is precisely the ambiguity this read exists to
 // remove, so it must come from the file rather than being inferred from the path.
 func ClaudeProfileAccount(configDir string) string {
-	data, err := os.ReadFile(filepath.Join(configDir, ".claude.json"))
-	if err != nil {
+	// Unset means "no profile override" to the engine's notice and footer,
+	// which name an account only when CLAUDE_CONFIG_DIR selects one.
+	if configDir == "" {
 		return ""
 	}
-	var parsed struct {
-		OAuthAccount struct {
-			EmailAddress string `json:"emailAddress"`
-		} `json:"oauthAccount"`
-	}
-	if err := json.Unmarshal(data, &parsed); err != nil {
-		return ""
-	}
-	return parsed.OAuthAccount.EmailAddress
+	return claudeprofile.Account(configDir)
 }
 
 // logClaudeConfigDir is the testable core of the R1/R3 startup notice: when
