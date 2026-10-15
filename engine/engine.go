@@ -309,6 +309,7 @@ type Engine struct {
 	pushGuardDisabled                     atomic.Bool                   // test seam: SetPushZeroAheadGuardDisabledForTest (#2089)
 	stageFirstRoutingOff                  atomic.Bool                   // test seam: SetStageFirstRoutingDisabledForTest (#2220)
 	orphanAwaitingInputOff                atomic.Bool                   // test seam: SetOrphanAwaitingInputClearDisabledForTest (#1970)
+	commentBlockedOnInputOff              atomic.Bool                   // test seam: SetCommentBlockedOnInputDisabledForTest (#2280)
 	restoreRebaseDisabledForTest          bool                          // test seam: SetCommentRebaseRestoreDisabledForTest (#2150); guarded by mu, applied to managers registered later too
 	pureRebaseDisabledForTest             bool                          // test seam: SetCatchUpPureRebaseDisabledForTest (#2150); guarded by mu, applied to managers registered later too
 	actionsDegradeLogged                  atomic.Bool                   // set once the notice that a workflow-run read or re-run was refused (`actions` revoked at runtime or never accepted) has been logged (#2052 R7)
