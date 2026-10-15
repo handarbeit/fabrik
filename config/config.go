@@ -74,6 +74,12 @@ type ProjectConfig struct {
 	// default) means github.com — no behavior change from before GHES
 	// support existed. See NormalizeGHESHost.
 	GHESHost string `yaml:"ghes_host"`
+
+	// ClaudeConfigDir is the Claude Code profile directory every stage worker
+	// runs under (#2293). It ranks below the flag, FABRIK_CLAUDE_CONFIG_DIR and
+	// .env, and above a bare inherited CLAUDE_CONFIG_DIR. See
+	// internal/claudeprofile.Resolve.
+	ClaudeConfigDir string `yaml:"claude_config_dir"`
 	// GitHubAppID, GitHubAppPrivateKeyPath, and GitHubAppInstallationID
 	// together configure GitHub App authentication (#1713) as a second,
 	// co-equal path alongside a PAT (Token()) — all three must be set
@@ -205,18 +211,64 @@ func WarnIfConfigIgnored() {
 // Returns nil if no .env file is present. When no .git entry exists in CWD there is no
 // git repository that could leak secrets, so the gitignore check is skipped.
 func LoadDotenv() error {
+	present, err := checkDotenv()
+	if err != nil || !present {
+		return err
+	}
+	return godotenv.Load(".env")
+}
+
+// LoadDotenvWithholding is LoadDotenv for callers that resolve some names
+// themselves (#2293). It applies the same guards and the same "never overwrite
+// a variable that is already set" rule, but does not export the withheld
+// names, and it returns the file's full contents as data (nil when there is no
+// .env).
+//
+// Withholding is what keeps provenance intact across the SIGHUP and
+// self-upgrade re-execs: both pass os.Environ() to the next process, so a
+// withheld name can never reappear there looking like an inherited value. A
+// caller must also never os.Setenv the resolved result for the same reason.
+func LoadDotenvWithholding(withheld ...string) (map[string]string, error) {
+	present, err := checkDotenv()
+	if err != nil || !present {
+		return nil, err
+	}
+	data, err := godotenv.Read(".env")
+	if err != nil {
+		return nil, err
+	}
+	skip := make(map[string]bool, len(withheld))
+	for _, n := range withheld {
+		skip[n] = true
+	}
+	for k, v := range data {
+		if skip[k] {
+			continue
+		}
+		if _, set := os.LookupEnv(k); set {
+			continue
+		}
+		if err := os.Setenv(k, v); err != nil {
+			return data, err
+		}
+	}
+	return data, nil
+}
+
+// checkDotenv reports whether a .env file exists in CWD, after enforcing the
+// gitignore safety check. Shared by every loader so none can bypass the guard.
+func checkDotenv() (bool, error) {
 	if _, err := os.Stat(".env"); os.IsNotExist(err) {
-		return nil
+		return false, nil
 	}
 
 	if _, err := os.Stat(".git"); !os.IsNotExist(err) {
 		// A git repo is present — enforce the gitignore safety check.
 		if !isInGitignore(".env") {
-			return fmt.Errorf(".env file found but not listed in .gitignore — add '.env' to .gitignore to prevent accidental token leaks")
+			return false, fmt.Errorf(".env file found but not listed in .gitignore — add '.env' to .gitignore to prevent accidental token leaks")
 		}
 	}
-
-	return godotenv.Load(".env")
+	return true, nil
 }
 
 // isInGitignore checks whether the given filename is covered by an entry in .gitignore.
