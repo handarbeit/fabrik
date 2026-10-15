@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -162,19 +163,28 @@ func (e *Engine) pauseForUnknownMergeState(board *gh.ProjectBoard, item gh.Proje
 // escalation path, like suiteTimeoutNote: an error degrades to a note saying so
 // and never blocks the pause.
 func (e *Engine) checkRunStateNote(item gh.ProjectItem, headSHA string) string {
+	counts, err := e.checkRunCounts(item, headSHA)
+	if err != nil {
+		return "check-run state could not be read"
+	}
+	return formatCheckRunCounts(counts)
+}
+
+// checkRunCounts is the one live read behind the escalation notes.
+func (e *Engine) checkRunCounts(item gh.ProjectItem, headSHA string) (gh.CheckRunCounts, error) {
 	if headSHA == "" {
 		headSHA = item.LinkedPRHeadSHA
 	}
 	if headSHA == "" {
-		return "check-run state could not be read (no head SHA)"
+		return gh.CheckRunCounts{}, errors.New("no head SHA")
 	}
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	runs, err := e.readClient.FetchCheckRuns(owner, repo, headSHA)
 	if err != nil {
 		e.logf(item.Number, "merge-gate", "could not read check runs for the escalation note: %v\n", err)
-		return "check-run state could not be read"
+		return gh.CheckRunCounts{}, err
 	}
-	return formatCheckRunCounts(gh.SummarizeCheckRuns(runs))
+	return gh.SummarizeCheckRuns(runs), nil
 }
 
 func formatCheckRunCounts(c gh.CheckRunCounts) string {

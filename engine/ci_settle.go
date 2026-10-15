@@ -263,7 +263,7 @@ func (e *Engine) settleAwaitingCIScan(ctx context.Context, board *gh.ProjectBoar
 				e.logf(item.Number, "awaiting-ci-settle", "fabrik:awaiting-ci exceeded CIBackstopTimeout (%s) since it was applied, but the item was resumed %s ago — backstop skipped\n", e.ciBackstopTimeout(), time.Since(anchor).Round(time.Second))
 			} else {
 				e.logf(item.Number, "awaiting-ci-settle", "fabrik:awaiting-ci exceeded CIBackstopTimeout (%s) while never reaching the CI gate — escalating\n", e.ciBackstopTimeout())
-				e.pauseForCITimeout(board, item, stage)
+				e.pauseForCIBackstop(board, item, stage, appliedAt)
 				continue
 			}
 		}
