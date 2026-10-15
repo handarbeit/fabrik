@@ -164,6 +164,10 @@ type Gate struct {
 	// identity as RoleEngine — the pre-#2263 exclusive-everything rule — so the
 	// split's tests can show they fail without it.
 	roleSplitDisabledForTest bool
+	// patEngineShareDisabledForTest (root only) makes a pat leg's engine
+	// identity exclusive again — the #2263 rule — so the tests can show that
+	// sharing it with another bed's harness use is what lets the cells overlap.
+	patEngineShareDisabledForTest bool
 }
 
 // NewGate wires a Gate around the real OS.
