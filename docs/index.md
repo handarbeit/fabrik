@@ -50,9 +50,9 @@ description: >-
     </p>
 
     <p style="margin-top: 12px; font-size: 0.95rem; color: var(--color-text-muted, #8b949e); max-width: 640px; margin-left: auto; margin-right: auto;">
-      New in v0.0.84: a Claude Code session can oversee a running daemon. It reads the daemon's state at no GitHub API cost, takes audited actions (promote, advance, set autonomy, revalidate) and receives pushed events. See
-      <a href="{{ '/USER_GUIDE' | relative_url }}#overseer-tools-fabrik-mcp">Overseer Tools</a>
-      and the <a href="{{ '/USER_GUIDE' | relative_url }}#install-the-fabrik-pm-plugin">PM plugin install</a>.
+      New in v0.0.86: stricter, safer gates. A cancelled check no longer counts as a pass, a diverged issue branch pauses instead of being force-pushed, and the merge train rebuilds a trial whose base moved instead of blaming its members. See
+      <a href="{{ '/USER_GUIDE' | relative_url }}#ci-gate-and-ci-fix-workflow">CI Gate and CI-Fix Workflow</a>
+      and <a href="{{ '/USER_GUIDE' | relative_url }}#issue-branch-diverged-from-origin">Issue branch diverged from origin</a>.
     </p>
 
     <div class="hero-diagram">
