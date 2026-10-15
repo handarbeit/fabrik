@@ -361,7 +361,27 @@ func (s *Server) toolsCall(ctx context.Context, req request) {
 		// say so rather than let a successful subscribe imply delivery.
 		res.Content = append(res.Content, toolContent{Type: "text", Text: subscribeNote(s.Subscriber, s.SubscriberSource)})
 	}
+	if p.Name == ToolSituation && s.SubscriberSource == SourceDefault && wantsPush(p.Arguments) {
+		// The digest was queued under the shared default name, which this server
+		// never attaches a stream for: it is held, not delivered here.
+		res.Content = append(res.Content, toolContent{Type: "text", Text: situationPushNote(s.Subscriber)})
+	}
 	s.reply(req.ID, res)
+}
+
+// wantsPush reports whether fabrik_situation's arguments ask for a push.
+func wantsPush(args json.RawMessage) bool {
+	var a struct {
+		Push bool `json:"push"`
+	}
+	return json.Unmarshal(args, &a) == nil && a.Push
+}
+
+// situationPushNote tells a default-named session that a pushed situation digest
+// was held under the shared name rather than delivered to this session (#2322).
+func situationPushNote(name string) string {
+	return "Note: this server's name (" + name + ") came from the OS-username default, which holds no push connection, so a pushed digest is held by the daemon under that name and is not delivered to this session. " +
+		"To receive pushes, set FABRIK_SUBSCRIBER to a name of its own before starting Claude Code (or run it under `topic`, which sets CLAUDE_TOPIC)."
 }
 
 // versionsLine is the fabrik_health line naming both builds.

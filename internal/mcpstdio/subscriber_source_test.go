@@ -3,6 +3,7 @@ package mcpstdio
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"strings"
 	"testing"
@@ -113,5 +114,39 @@ func TestSubscribeNoteNamesTheDefault(t *testing.T) {
 	}
 	if n := subscribeNote("topic", SourceTopic); strings.Contains(n, "holds no push connection") {
 		t.Errorf("an explicit name holds a push connection: %q", n)
+	}
+}
+
+// A pushed situation digest under the shared default name is held, not delivered;
+// the result says so. Other sources, and a call without push, get no such note.
+func TestSituationPushNoteOnlyForDefaultName(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		src  NameSource
+		args string
+		want bool
+	}{
+		{"default push", SourceDefault, `{"push":true}`, true},
+		{"default no push", SourceDefault, `{}`, false},
+		{"default push false", SourceDefault, `{"push":false}`, false},
+		{"topic push", SourceTopic, `{"push":true}`, false},
+		{"flag push", SourceFlag, `{"push":true}`, false},
+	} {
+		var out bytes.Buffer
+		s := &Server{
+			SocketPath: "unused", Version: "v", Subscriber: "alice", SubscriberSource: tc.src,
+			Call: func(_ context.Context, _, _ string, _, res any) error {
+				return json.Unmarshal([]byte(`{}`), res)
+			},
+			CallTimeout: time.Second,
+			In:          strings.NewReader(callTool(1, ToolSituation, tc.args) + "\n"),
+			Out:         &out, Err: io.Discard,
+		}
+		if err := s.Serve(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Contains(out.String(), "holds no push connection"); got != tc.want {
+			t.Errorf("%s: note present = %v, want %v\n%s", tc.name, got, tc.want, out.String())
+		}
 	}
 }
