@@ -1957,6 +1957,39 @@ func TestApplyIssueClosedNoopOnUnknownKey(t *testing.T) {
 	}
 }
 
+func TestApplyIssueBodyUpdated(t *testing.T) {
+	c := seedCache(t)
+	key := ItemKey("owner/repo", 1)
+	before := testGetState(t, c, "owner/repo", 1)
+
+	c.ApplyIssueBodyUpdated(key, "rewritten spec")
+
+	s := testGetState(t, c, "owner/repo", 1)
+	if s.Body != "rewritten spec" {
+		t.Errorf("Body = %q; want %q", s.Body, "rewritten spec")
+	}
+	if s.Title != before.Title {
+		t.Errorf("Title = %q; want unchanged %q", s.Title, before.Title)
+	}
+	c.mu.RLock()
+	deltaAt := c.localDeltaAt[key]
+	c.mu.RUnlock()
+	if deltaAt.IsZero() {
+		t.Error("want localDeltaAt bumped after ApplyIssueBodyUpdated")
+	}
+}
+
+func TestApplyIssueBodyUpdatedNoopOnUnknownKey(t *testing.T) {
+	c := seedCache(t)
+	key := ItemKey("owner/repo", 99) // never bootstrapped
+
+	c.ApplyIssueBodyUpdated(key, "body") // must not create a phantom entry
+
+	if _, err := c.store.Get("owner/repo", 99); err == nil {
+		t.Error("ApplyIssueBodyUpdated created a phantom Store entry for an unknown key")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Subscribe tests
 // ---------------------------------------------------------------------------

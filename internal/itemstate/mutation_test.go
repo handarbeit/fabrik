@@ -2250,3 +2250,50 @@ func TestFromProbe_NoOpNotifiesNoObserver(t *testing.T) {
 		t.Errorf("no-op wrapped mutation notified observers: calls=%d changes=%d", calls, len(changes))
 	}
 }
+
+// ---- LocalIssueBodyUpdated (#2346) ----
+
+func TestApplyLocalIssueBodyUpdated_SetsBodyLeavesTitle(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	title := getItem(t, s, testRepo, 1).Title
+	snap, changes, err := s.Apply(LocalIssueBodyUpdated{Repo: testRepo, Number: 1, Body: "new spec"})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(changes) != 1 || changes[0].Fields&TitleBodyChanged == 0 {
+		t.Fatalf("changes = %+v; want one TitleBodyChanged change", changes)
+	}
+	if changes[0].Origin != OriginEngine {
+		t.Errorf("Origin = %v; want OriginEngine", changes[0].Origin)
+	}
+	if changes[0].Fields != TitleBodyChanged {
+		t.Errorf("Fields = %b; want only TitleBodyChanged (no wake flags)", changes[0].Fields)
+	}
+	st := snap.State()
+	if st.Body != "new spec" {
+		t.Errorf("Body = %q; want %q", st.Body, "new spec")
+	}
+	if st.Title != title {
+		t.Errorf("Title = %q; want unchanged %q", st.Title, title)
+	}
+}
+
+func TestApplyLocalIssueBodyUpdated_IdenticalBodyIsNoOp(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	if _, _, err := s.Apply(LocalIssueBodyUpdated{Repo: testRepo, Number: 1, Body: "same"}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	_, changes, err := s.Apply(LocalIssueBodyUpdated{Repo: testRepo, Number: 1, Body: "same"})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(changes) != 0 {
+		t.Errorf("identical body produced %d changes; want 0", len(changes))
+	}
+	// A webhook echo carrying the same body and title is likewise a no-op.
+	st := getItem(t, s, testRepo, 1)
+	_, changes, _ = s.Apply(IssueEdited{Repo: testRepo, Number: 1, Title: st.Title, Body: "same"})
+	if len(changes) != 0 {
+		t.Errorf("echo of the written body produced %d changes; want 0", len(changes))
+	}
+}

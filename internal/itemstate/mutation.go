@@ -287,6 +287,19 @@ type LocalIssueClosed struct {
 func (LocalIssueClosed) isMutation()       {}
 func (m LocalIssueClosed) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
+// LocalIssueBodyUpdated is applied after fabrik rewrites an issue body on
+// GitHub (#2346). It sets Body only — never Title — so the cached copy that
+// feeds .fabrik-context/issue.md matches what the engine just wrote, with no
+// webhook echo needed. An identical body is a no-op. Its Change has OriginEngine.
+type LocalIssueBodyUpdated struct {
+	Repo   string
+	Number int
+	Body   string
+}
+
+func (LocalIssueBodyUpdated) isMutation()       {}
+func (m LocalIssueBodyUpdated) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
 // LocalLabelAdded is applied after fabrik adds a label to an issue.
 type LocalLabelAdded struct {
 	Repo   string
