@@ -178,13 +178,13 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 	// item durable in the "CI await" state so the dispatcher skips it and the
 	// catch-up loop can evaluate CI on every poll (R1, R2, R3).
 	if waitForCI {
-		alreadyAwaitingCI := false
-		for _, l := range item.Labels {
-			if l == "fabrik:awaiting-ci" {
-				alreadyAwaitingCI = true
-				break
-			}
+		// #2299 R1-R3: the PR may have reached a terminal state while this worker
+		// ran (item.Labels is live as of refreshAutonomyLabels above). Merged → the
+		// terminal path; closed unmerged → the pause; a read error arms as before.
+		if e.completionTerminalCheck(board, item, stage) {
+			return
 		}
+		alreadyAwaitingCI := hasLabel(item.Labels, "fabrik:awaiting-ci")
 		if !alreadyAwaitingCI {
 			if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-ci"); err != nil {
 				e.logf(item.Number, "warn", "could not add fabrik:awaiting-ci label: %v\n", err)

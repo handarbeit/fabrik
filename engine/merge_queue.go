@@ -57,6 +57,9 @@ func (e *Engine) pushBranchUnlessQueued(item gh.ProjectItem, wm *WorktreeManager
 		e.logf(item.Number, "merge-queue", "PR in merge queue — skipping push (would eject from queue)\n")
 		return nil
 	}
+	if e.mergedPRPushRefused(item, wm.branchName(item.Number)) {
+		return ErrPushSkippedPRMerged
+	}
 	if e.zeroAheadPushRefused(item, wm) {
 		return ErrPushRefusedZeroAhead
 	}
@@ -89,6 +92,9 @@ func (e *Engine) pushBranchOnCancel(item gh.ProjectItem, wm *WorktreeManager) er
 	if prInMergeQueue(item) {
 		e.logf(item.Number, "merge-queue", "PR in merge queue — skipping push (would eject from queue)\n")
 		return nil
+	}
+	if e.mergedPRPushRefused(item, wm.branchName(item.Number)) {
+		return ErrPushSkippedPRMerged
 	}
 	if e.zeroAheadCheck(item, wm, false) {
 		return ErrPushRefusedZeroAhead

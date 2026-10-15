@@ -75,153 +75,12 @@ func (e *Engine) advanceValidateTerminalItem(board *gh.ProjectBoard, item gh.Pro
 	}
 
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
-	pr, err := e.client.FetchLinkedPR(owner, repo, item.Number)
-	if err != nil {
-		e.logf(item.Number, "pr-terminal", "could not fetch linked PR: %v — skipping\n", err)
-		return
-	}
-	if pr == nil || pr.Number == 0 {
-		return // no linked PR
-	}
-	if !pr.Merged && pr.State != "closed" {
-		return // PR is still open; not terminal
-	}
-	// FetchLinkedPR reads the PR list endpoint, whose `merged` flag is unreliable
-	// (false for seconds after a merge). For a closed PR, confirm against the
-	// authoritative single-PR endpoint before deciding advance-vs-pause — otherwise
-	// a PR the engine just merged (e.g. the direct-merge fallback) gets misread as
-	// "closed without merging" and the issue is wrongly paused.
-	if !pr.Merged && pr.State == "closed" {
-		if merged, mErr := e.client.FetchPRMerged(owner, repo, pr.Number); mErr != nil {
-			e.logf(item.Number, "pr-terminal", "PR #%d closed; could not confirm merged state: %v — skipping (re-check next poll)\n", pr.Number, mErr)
-			return
-		} else if merged {
-			pr.Merged = true
-		}
-	}
-
-	if pr.Merged {
-		// Guard against the unpause/retry/re-escalate loop Pruefer flagged in
-		// PR #1469 review (#1422 follow-up): this branch is re-entered every
-		// poll for a merged item regardless of pause state (deliberately — see
-		// the self-heal rationale above), and unconditionally strips
-		// fabrik:paused below. Without this check, a pause applied by
-		// escalateAwaitingAdvanceFailure would be stripped and retried right
-		// back off on the very next poll, failing and re-escalating forever
-		// instead of settling into a stable paused state. See
-		// awaitingAdvanceStuckOrReset's doc comment for why this can't be a
-		// blanket "skip whenever paused" check.
-		if e.awaitingAdvanceStuckOrReset(item) {
-			e.logf(item.Number, "awaiting-advance", "still escalated after %d attempt(s) — skipping self-heal to avoid an unpause/retry/re-escalate loop; remove fabrik:paused once the board is fixed to retry\n", e.cfg.MaxRetries)
-			return
-		}
-		e.logf(item.Number, "pr-terminal", "PR #%d merged — filling gate-checked completion labels and advancing to Done\n", pr.Number)
-
-		// Find the highest-order stage that already has a :complete label so we
-		// only fill in stages that are missing their completion label (EC-3).
-		highestCompleteOrder := -1
-		for _, s := range e.cfg.Stages {
-			if !s.CleanupWorktree && hasLabel(item.Labels, fmt.Sprintf("stage:%s:complete", s.Name)) {
-				if s.Order > highestCompleteOrder {
-					highestCompleteOrder = s.Order
-				}
-			}
-		}
-
-		// Iterate stages in ascending Order starting from the one after the
-		// highest already-complete stage, stopping before the cleanup-terminal
-		// stage. For each gate-checked stage missing its :complete label, add
-		// it. Fail-fast on error to preserve idempotent retry (EC-2).
-		fillFailed := false
-		for _, s := range e.cfg.Stages {
-			// An Unmanaged stage never receives gate-checked bookkeeping here,
-			// regardless of any other flag it carries — it was never actually
-			// dispatched to or through. This must be a `continue`, not folded into
-			// the CleanupWorktree break below: an Unmanaged stage combining
-			// unmanaged: true with cleanup_worktree: true (e.g. a misconfigured
-			// Backlog) is also never the real terminal/cleanup stage — see
-			// cleanupStage() in engine/stages.go, which applies the same exclusion
-			// when resolving "the" Done stage elsewhere — so it must be skipped
-			// over, not treated as a break point that would stop the fill loop
-			// before any real gate-checked stage is ever considered.
-			if s.Unmanaged {
-				continue
-			}
-			if s.CleanupWorktree {
-				break
-			}
-			if s.Order <= highestCompleteOrder {
-				continue
-			}
-			isGateChecked := (s.WaitForCI != nil && *s.WaitForCI) || (s.WaitForReviews != nil && *s.WaitForReviews)
-			if !isGateChecked {
-				continue
-			}
-			completeLabel := fmt.Sprintf("stage:%s:complete", s.Name)
-			if hasLabel(item.Labels, completeLabel) {
-				continue // already present — idempotent no-op
-			}
-			if addErr := e.client.AddLabelToIssue(owner, repo, item.Number, completeLabel); addErr != nil {
-				e.logf(item.Number, "warn", "pr-terminal: could not add %s: %v — skipping item\n", completeLabel, addErr)
-				fillFailed = true
-				break
-			} else if c := e.cache(); c != nil {
-				c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), completeLabel)
-			}
-			e.logf(item.Number, "pr-terminal", "added %s\n", completeLabel)
-		}
-		if fillFailed {
-			return
-		}
-
-		// Clear all gate labels now that all completion labels have been added.
-		if hasLabel(item.Labels, "fabrik:awaiting-ci") {
-			e.removeAwaitingCILabel(owner, repo, item)
-		}
-		if hasLabel(item.Labels, "fabrik:awaiting-review") {
-			e.removeAwaitingReviewLabel(owner, repo, item)
-		}
-		if hasLabel(item.Labels, "fabrik:rebase-needed") {
-			e.removeRebaseNeededLabel(owner, repo, item)
-		}
-		for _, lbl := range []string{"fabrik:paused", "fabrik:awaiting-input"} {
-			if hasLabel(item.Labels, lbl) {
-				if rerr := e.client.RemoveLabelFromIssue(owner, repo, item.Number, lbl); rerr != nil {
-					if errors.Is(rerr, gh.ErrNotFound) {
-						// Label already absent on GitHub — desired end state achieved; sync cache.
-						if c := e.cache(); c != nil {
-							c.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, item.Number), lbl)
-						}
-					} else {
-						e.logf(item.Number, "warn", "pr-terminal: could not remove %s: %v\n", lbl, rerr)
-					}
-				} else if c := e.cache(); c != nil {
-					c.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, item.Number), lbl)
-				}
-			}
-		}
-
-		aerr := e.recordAdvanceOutcome(board, item, stage)
-		if aerr != nil {
-			e.logf(item.Number, "warn", "pr-terminal: could not advance to Done: %v\n", aerr)
-		}
-		// closeIssueIfNonDefaultBase runs unconditionally, regardless of the
-		// advance's outcome above — see awaitingAdvanceLabel's doc comment
-		// (advance_settle.go) for why that's safe even when recordAdvanceOutcome
-		// just failed.
-		if aerr == nil {
-			e.emitLanded(item, pr.Number) // #2123: before any close tracking
-		}
-		e.closeIssueIfNonDefaultBase(item, pr.Number)
-		// #1616: mark for post-Done landing verification — but only once the
-		// item actually reached Done (aerr == nil). See the equivalent comment
-		// in advanceConvergedPRToDone (merge_gate.go) for why this can't be
-		// unconditional the way closeIssueIfNonDefaultBase is. No
-		// fabrik:credited-pr:<N> label is needed here.
-		if aerr == nil {
-			e.addLabel(item, awaitingLandingVerificationLabel)
-		}
-		advancedItems[iKey] = true
+	pr, state := e.classifyLinkedPRTerminal(owner, repo, item.Number, "pr-terminal")
+	switch state {
+	case linkedPRReadErr, linkedPRNone, linkedPROpen:
+		return // read failed (logged), no linked PR, or PR still open: not terminal
+	case linkedPRMerged:
+		e.advanceMergedValidateItem(board, item, stage, pr, advancedItems)
 		return
 	}
 
@@ -232,6 +91,198 @@ func (e *Engine) advanceValidateTerminalItem(board *gh.ProjectBoard, item gh.Pro
 	}
 	e.logf(item.Number, "pr-terminal", "PR #%d closed without merging — pausing\n", pr.Number)
 	e.pauseForPRClosedNotMerged(board, item, stage, pr.Number)
+}
+
+// linkedPRState is the live terminal classification of an item's linked PR.
+type linkedPRState int
+
+const (
+	linkedPRNone           linkedPRState = iota // no linked PR
+	linkedPROpen                                // linked PR exists and is open
+	linkedPRMerged                              // linked PR is merged (confirmed)
+	linkedPRClosedUnmerged                      // linked PR closed without merging (confirmed)
+	linkedPRReadErr                             // the live read (or the merged confirmation) failed
+)
+
+// classifyLinkedPRTerminal reads the linked PR live (e.client, never the board
+// cache) and classifies it. The list endpoint behind FetchLinkedPR reports
+// `merged=false` for seconds after a merge, so a closed PR is confirmed against
+// the single-PR endpoint (FetchPRMerged) before it is called merged or
+// closed-unmerged. Any read failure is logged under tag and returned as
+// linkedPRReadErr — callers decide whether that fails open or closed (#2299).
+func (e *Engine) classifyLinkedPRTerminal(owner, repo string, number int, tag string) (*gh.PRDetails, linkedPRState) {
+	pr, err := e.client.FetchLinkedPR(owner, repo, number)
+	if err != nil {
+		e.logf(number, tag, "could not fetch linked PR: %v — skipping\n", err)
+		return nil, linkedPRReadErr
+	}
+	if pr == nil || pr.Number == 0 {
+		return nil, linkedPRNone
+	}
+	if !pr.Merged && pr.State != "closed" {
+		return pr, linkedPROpen
+	}
+	// FetchLinkedPR reads the PR list endpoint, whose `merged` flag is unreliable
+	// (false for seconds after a merge). For a closed PR, confirm against the
+	// authoritative single-PR endpoint before deciding advance-vs-pause — otherwise
+	// a PR the engine just merged (e.g. the direct-merge fallback) gets misread as
+	// "closed without merging" and the issue is wrongly paused.
+	if !pr.Merged && pr.State == "closed" {
+		merged, mErr := e.client.FetchPRMerged(owner, repo, pr.Number)
+		if mErr != nil {
+			e.logf(number, tag, "PR #%d closed; could not confirm merged state: %v — skipping (re-check next poll)\n", pr.Number, mErr)
+			return pr, linkedPRReadErr
+		}
+		if merged {
+			pr.Merged = true
+		}
+	}
+	if pr.Merged {
+		return pr, linkedPRMerged
+	}
+	return pr, linkedPRClosedUnmerged
+}
+
+// fillGateCheckedCompleteLabels adds the stage:<X>:complete label of every
+// gate-checked stage that sits after the highest already-complete stage and is
+// missing it (EC-3). Idempotent; it stops at the first failed write and reports
+// it so the caller can retry on a later poll (EC-2). item.Labels must be live
+// for the caller's purposes.
+func (e *Engine) fillGateCheckedCompleteLabels(owner, repo string, item gh.ProjectItem) (fillFailed bool) {
+	// Find the highest-order stage that already has a :complete label so we
+	// only fill in stages that are missing their completion label (EC-3).
+	highestCompleteOrder := -1
+	for _, s := range e.cfg.Stages {
+		if !s.CleanupWorktree && hasLabel(item.Labels, fmt.Sprintf("stage:%s:complete", s.Name)) {
+			if s.Order > highestCompleteOrder {
+				highestCompleteOrder = s.Order
+			}
+		}
+	}
+
+	// Iterate stages in ascending Order starting from the one after the
+	// highest already-complete stage, stopping before the cleanup-terminal
+	// stage. For each gate-checked stage missing its :complete label, add
+	// it. Fail-fast on error to preserve idempotent retry (EC-2).
+	for _, s := range e.cfg.Stages {
+		// An Unmanaged stage never receives gate-checked bookkeeping here,
+		// regardless of any other flag it carries — it was never actually
+		// dispatched to or through. This must be a `continue`, not folded into
+		// the CleanupWorktree break below: an Unmanaged stage combining
+		// unmanaged: true with cleanup_worktree: true (e.g. a misconfigured
+		// Backlog) is also never the real terminal/cleanup stage — see
+		// cleanupStage() in engine/stages.go, which applies the same exclusion
+		// when resolving "the" Done stage elsewhere — so it must be skipped
+		// over, not treated as a break point that would stop the fill loop
+		// before any real gate-checked stage is ever considered.
+		if s.Unmanaged {
+			continue
+		}
+		if s.CleanupWorktree {
+			break
+		}
+		if s.Order <= highestCompleteOrder {
+			continue
+		}
+		isGateChecked := (s.WaitForCI != nil && *s.WaitForCI) || (s.WaitForReviews != nil && *s.WaitForReviews)
+		if !isGateChecked {
+			continue
+		}
+		completeLabel := fmt.Sprintf("stage:%s:complete", s.Name)
+		if hasLabel(item.Labels, completeLabel) {
+			continue // already present — idempotent no-op
+		}
+		if addErr := e.client.AddLabelToIssue(owner, repo, item.Number, completeLabel); addErr != nil {
+			e.logf(item.Number, "warn", "pr-terminal: could not add %s: %v — skipping item\n", completeLabel, addErr)
+			fillFailed = true
+			break
+		} else if c := e.cache(); c != nil {
+			c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), completeLabel)
+		}
+		e.logf(item.Number, "pr-terminal", "added %s\n", completeLabel)
+	}
+	return fillFailed
+}
+
+// advanceMergedValidateItem is the merged-PR branch of
+// advanceValidateTerminalItem, shared with the stage-completion path (#2299):
+// fills missing gate-checked stage:*:complete labels, clears the gate labels,
+// advances to Done, closes the issue where GitHub will not, and marks landing
+// verification. item.Labels must be live for the caller's purposes. Idempotent;
+// advancedItems may be nil (the worker goroutine has no per-poll map).
+func (e *Engine) advanceMergedValidateItem(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, pr *gh.PRDetails, advancedItems map[string]bool) {
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	iKey := issueKey(item, e.defaultRepo())
+	// Guard against the unpause/retry/re-escalate loop Pruefer flagged in
+	// PR #1469 review (#1422 follow-up): this branch is re-entered every
+	// poll for a merged item regardless of pause state (deliberately — see
+	// the self-heal rationale above), and unconditionally strips
+	// fabrik:paused below. Without this check, a pause applied by
+	// escalateAwaitingAdvanceFailure would be stripped and retried right
+	// back off on the very next poll, failing and re-escalating forever
+	// instead of settling into a stable paused state. See
+	// awaitingAdvanceStuckOrReset's doc comment for why this can't be a
+	// blanket "skip whenever paused" check.
+	if e.awaitingAdvanceStuckOrReset(item) {
+		e.logf(item.Number, "awaiting-advance", "still escalated after %d attempt(s) — skipping self-heal to avoid an unpause/retry/re-escalate loop; remove fabrik:paused once the board is fixed to retry\n", e.cfg.MaxRetries)
+		return
+	}
+	e.logf(item.Number, "pr-terminal", "PR #%d merged — filling gate-checked completion labels and advancing to Done\n", pr.Number)
+
+	if e.fillGateCheckedCompleteLabels(owner, repo, item) {
+		return
+	}
+
+	// Clear all gate labels now that all completion labels have been added.
+	if hasLabel(item.Labels, "fabrik:awaiting-ci") {
+		e.removeAwaitingCILabel(owner, repo, item)
+	}
+	if hasLabel(item.Labels, "fabrik:awaiting-review") {
+		e.removeAwaitingReviewLabel(owner, repo, item)
+	}
+	if hasLabel(item.Labels, "fabrik:rebase-needed") {
+		e.removeRebaseNeededLabel(owner, repo, item)
+	}
+	for _, lbl := range []string{"fabrik:paused", "fabrik:awaiting-input"} {
+		if hasLabel(item.Labels, lbl) {
+			if rerr := e.client.RemoveLabelFromIssue(owner, repo, item.Number, lbl); rerr != nil {
+				if errors.Is(rerr, gh.ErrNotFound) {
+					// Label already absent on GitHub — desired end state achieved; sync cache.
+					if c := e.cache(); c != nil {
+						c.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, item.Number), lbl)
+					}
+				} else {
+					e.logf(item.Number, "warn", "pr-terminal: could not remove %s: %v\n", lbl, rerr)
+				}
+			} else if c := e.cache(); c != nil {
+				c.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, item.Number), lbl)
+			}
+		}
+	}
+
+	aerr := e.recordAdvanceOutcome(board, item, stage)
+	if aerr != nil {
+		e.logf(item.Number, "warn", "pr-terminal: could not advance to Done: %v\n", aerr)
+	}
+	// closeIssueIfNonDefaultBase runs unconditionally, regardless of the
+	// advance's outcome above — see awaitingAdvanceLabel's doc comment
+	// (advance_settle.go) for why that's safe even when recordAdvanceOutcome
+	// just failed.
+	if aerr == nil {
+		e.emitLanded(item, pr.Number) // #2123: before any close tracking
+	}
+	e.closeIssueIfNonDefaultBase(item, pr.Number)
+	// #1616: mark for post-Done landing verification — but only once the
+	// item actually reached Done (aerr == nil). See the equivalent comment
+	// in advanceConvergedPRToDone (merge_gate.go) for why this can't be
+	// unconditional the way closeIssueIfNonDefaultBase is. No
+	// fabrik:credited-pr:<N> label is needed here.
+	if aerr == nil {
+		e.addLabel(item, awaitingLandingVerificationLabel)
+	}
+	if advancedItems != nil {
+		advancedItems[iKey] = true
+	}
 }
 
 // runValidatePRTerminalAdvance is the open-item owner of the "Validate-stage

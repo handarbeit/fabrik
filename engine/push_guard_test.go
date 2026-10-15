@@ -187,7 +187,6 @@ func TestPushGuard_NoOpenPRPushes(t *testing.T) {
 	}{
 		"no PR":     {nil, nil},
 		"closed PR": {&gh.PRDetails{Number: 5, State: "closed"}, nil},
-		"merged PR": {&gh.PRDetails{Number: 5, State: "closed", Merged: true}, nil},
 		"read err":  {nil, errors.New("boom")},
 	}
 	for name, c := range cases {
@@ -203,6 +202,30 @@ func TestPushGuard_NoOpenPRPushes(t *testing.T) {
 				t.Errorf("unexpected comments: %v", g.comments())
 			}
 		})
+	}
+}
+
+// A merged PR is no longer pushed to (#2299 R5, superseding the ADR 2089 "merged
+// PR allows the push" case): the remote branch was deleted on merge and a push
+// would re-create it.
+func TestPushGuard_MergedPRSkipsPush(t *testing.T) {
+	g := newPushGuardEnv(t, 7, &gh.PRDetails{Number: 5, State: "closed", Merged: true}, nil)
+	err := g.e.pushBranchUnlessQueued(gh.ProjectItem{Number: 7}, g.wm)
+	if !errors.Is(err, ErrPushSkippedPRMerged) {
+		t.Fatalf("want ErrPushSkippedPRMerged, got %v", err)
+	}
+	if g.remoteRef("fabrik/issue-7") != "" {
+		t.Error("the remote branch of a merged PR must not be created")
+	}
+	if len(g.comments()) != 0 {
+		t.Errorf("a merged-PR skip must not pause or comment: %v", g.comments())
+	}
+	g.e.SetMergedPushGuardDisabledForTest(true)
+	if err := g.e.pushBranchUnlessQueued(gh.ProjectItem{Number: 7}, g.wm); err != nil {
+		t.Fatalf("non-vacuity: with the guard disabled the push proceeds: %v", err)
+	}
+	if g.remoteRef("fabrik/issue-7") == "" {
+		t.Error("non-vacuity: with the guard disabled the branch is pushed")
 	}
 }
 

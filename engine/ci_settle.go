@@ -113,6 +113,10 @@ func (e *Engine) settleAwaitingCIScan(ctx context.Context, board *gh.ProjectBoar
 		stage := stages.FindStage(e.cfg.Stages, item.Status)
 		isWaitForCI := stage != nil && stage.WaitForCI != nil && *stage.WaitForCI
 		if stage == nil || !isWaitForCI || stage.HoldingStage || stage.Unmanaged || stage.CleanupWorktree {
+			// #2299 R6: a merged linked PR makes the label a leftover, not a CI wait.
+			if e.clearMergedOrphanAwaitingCI(item) {
+				continue
+			}
 			e.logf(item.Number, "awaiting-ci-settle", "fabrik:awaiting-ci item stranded at column %q — not a wait_for_ci stage, cannot evaluate CI gate here; will retry\n", item.Status)
 			e.recordAwaitingCIOrphanRetry(item)
 			continue
@@ -341,6 +345,12 @@ func (e *Engine) recordAwaitingCIOrphanRetry(item gh.ProjectItem) {
 // recovery step — mirroring escalateNonDefaultBaseCloseFailure/
 // escalateMergeTrainMemberCloseFailure.
 func (e *Engine) escalateAwaitingCIOrphanFailure(item gh.ProjectItem) {
+	// #2299 R6: never pause a landed item as "stranded" — and never tell its
+	// owner to move it back to Validate. Covers a retry counter that was already
+	// accumulating before the PR merged.
+	if e.clearMergedOrphanAwaitingCI(item) {
+		return
+	}
 	e.logf(item.Number, "escalate", "fabrik:awaiting-ci item could not be settled %d time(s) — pausing issue\n", e.cfg.MaxRetries)
 
 	e.escalateSettle(item, "fabrik:awaiting-ci", awaitingCIOrphanRetryStage, func(item gh.ProjectItem) {
