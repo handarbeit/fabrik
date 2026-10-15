@@ -181,7 +181,7 @@ func (e *Engine) pauseForUngrantableDenial(item gh.ProjectItem, stage *stages.St
 	lines, protectedNote := ungrantableDenialLines(ungrantable)
 	other := ""
 	if n := len(all) - len(ungrantable); n > 0 {
-		other = fmt.Sprintf("\n\nThe same run also had %d other denied tool call(s), which are not the cause of this pause.", n)
+		other = fmt.Sprintf("\n\nThe same run also had %d other denied tool call(s), which may not be the cause of this pause.", n)
 	}
 	comment := fmt.Sprintf(
 		"🏭 **Fabrik — tool permission denied (cannot be granted)**\n\nStage **%s** had a file edit denied by the CLI's permission configuration:\n\n%s%s\n\n"+
