@@ -184,6 +184,16 @@ type Config struct {
 	// it is deliberately absent from the repo-resident allowlist (ADR 1642).
 	CatchUpMarkerAuthors []string `reload:"live"`
 
+	// PatchSkip (#2230) is the kill switch for the patch-identity skips: a
+	// head whose whole change against the merge base equals the change at the
+	// last head Pruefer reviewed (a rebase, a clean catch-up) is not reviewed
+	// again, and a merge-train trial/integration PR that adds nothing beyond
+	// its already-reviewed members is skipped or reviewed on the difference
+	// only. Default true (LoadConfig); false restores the pre-#2230 behaviour
+	// exactly. CatchUpMarkerAuthors doubles as the list of engine logins that
+	// may author trial PRs.
+	PatchSkip bool `reload:"live"`
+
 	// RequestChangesThreshold gates Pruefer's severity-based REQUEST_CHANGES
 	// escalation (see decideEvent in pruefer/review.go). The zero value
 	// ("") means the feature is off: every review submits COMMENT,
@@ -407,6 +417,7 @@ type yamlConfig struct {
 	ExcludedPaths           []string `yaml:"excluded_paths"`
 	ExcludedLabels          []string `yaml:"excluded_labels"`
 	CatchUpMarkerAuthors    []string `yaml:"catch_up_marker_authors"`
+	PatchSkip               *bool    `yaml:"patch_skip"`
 	RequestChangesThreshold string   `yaml:"request_changes_threshold"`
 	// ReviewGuidance/ReviewGuidanceMode are #1446's operator-level review
 	// guidance override — see Config.ReviewGuidance's doc comment.
@@ -488,6 +499,7 @@ type flagValues struct {
 	excludedPaths           string
 	excludedLabels          string
 	catchUpMarkerAuthors    string
+	patchSkip               bool
 	requestChangesThreshold string
 	reviewGuidance          string
 	reviewGuidanceMode      string
@@ -532,6 +544,7 @@ func LoadConfig(args []string) (Config, error) {
 	fs.Int64Var(&fv.maxDiffBytes, "max-diff-bytes", 0, "Skip PRs whose diff exceeds this many bytes")
 	fs.IntVar(&fv.maxWallTimeSec, "max-wall-time", 0, "Wall-clock cap in seconds for a single claude review invocation (0 = no cap)")
 	fs.StringVar(&fv.excludedAuthors, "excluded-authors", "", "Comma-separated PR authors to skip")
+	fs.BoolVar(&fv.patchSkip, "patch-skip", true, "Skip re-reviewing a head whose change is identical to the last reviewed head (rebases, clean catch-ups) and merge-train trial PRs that add nothing beyond their reviewed members (#2230); false is the kill switch")
 	fs.StringVar(&fv.catchUpMarkerAuthors, "catch-up-marker-authors", "", "Comma-separated logins trusted to author merge-train catch-up markers (the engine's login); empty disables the pure catch-up skip")
 	fs.StringVar(&fv.excludedPaths, "excluded-paths", "", "Comma-separated path globs, filtered per file before max_diff_bytes is measured; a PR is skipped whole only if all touched paths match")
 	fs.StringVar(&fv.excludedLabels, "excluded-labels", "", "Comma-separated labels to skip (any match)")
@@ -592,6 +605,7 @@ func LoadConfig(args []string) (Config, error) {
 		ExcludedPaths:        yc.ExcludedPaths,
 		ExcludedLabels:       yc.ExcludedLabels,
 		CatchUpMarkerAuthors: yc.CatchUpMarkerAuthors,
+		PatchSkip:            true,
 		Cadence:              DefaultCadence,
 		RepoCadence:          yc.RepoCadence,
 		AppPrivateKeyPath:    DefaultPrivateKeyPath,
@@ -634,6 +648,9 @@ func LoadConfig(args []string) (Config, error) {
 	}
 	if yc.AutoUpgrade != nil {
 		cfg.AutoUpgrade = *yc.AutoUpgrade
+	}
+	if yc.PatchSkip != nil {
+		cfg.PatchSkip = *yc.PatchSkip
 	}
 	if yc.MaxDerivedRepos != nil {
 		cfg.MaxDerivedRepos = *yc.MaxDerivedRepos
@@ -750,6 +767,9 @@ func LoadConfig(args []string) (Config, error) {
 	}
 	if explicit["excluded-authors"] {
 		cfg.ExcludedAuthors = splitCSV(fv.excludedAuthors)
+	}
+	if explicit["patch-skip"] {
+		cfg.PatchSkip = fv.patchSkip
 	}
 	if explicit["catch-up-marker-authors"] {
 		cfg.CatchUpMarkerAuthors = splitCSV(fv.catchUpMarkerAuthors)
@@ -969,6 +989,11 @@ func applyEnv(cfg *Config) {
 	// used above, is what makes that distinction possible.
 	if v, ok := os.LookupEnv("PRUEFER_LOG_FILE"); ok {
 		cfg.LogFile = v
+	}
+	if v := os.Getenv("PRUEFER_PATCH_SKIP"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			cfg.PatchSkip = b
+		}
 	}
 	if v := os.Getenv("PRUEFER_AUTO_UPGRADE"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
