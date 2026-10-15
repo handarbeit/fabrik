@@ -143,11 +143,10 @@ These tests assume:
    legs, its **own** App (`E2E_APP_*`; an App installs once per org, so a second bed needs
    a second App such as `fabrik-bed-2`). The gate refuses two beds that share an App
    installation, a board or a repo. Two beds whose tokens
-   resolve to the same login share that user's 5,000/h GraphQL budget. Since #2263 that
-   user is held **exclusively** only where a bed's engine spends it (a `pat` leg) and is
-   **shared** where only the harness does (every `app` leg), above a budget floor — so
-   same-login beds still overlap their app cells, and only pat cells serialize on the
-   user (a distinct `FABRIK_TOKEN` user per bed removes even that). Pruefer must cover
+   resolve to the same login share that user's 5,000/h GraphQL budget. Since #2263 and ADR 1990
+   that user is **shared** above a budget floor, both where only the harness spends it (every
+   `app` leg) and where one bed's engine does (a `pat` leg); only two pat cells on the same
+   user serialize, because two engines never poll as one user. Pruefer must cover
    every bed's repos. Standing up the second bed is #1990; its prerequisites are listed
    under "Second bed" below.
 
