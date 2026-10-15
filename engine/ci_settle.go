@@ -219,7 +219,7 @@ func (e *Engine) settleAwaitingCIScan(ctx context.Context, board *gh.ProjectBoar
 		// live-data-informed evaluation (checkCIGate et al., below) to get a
 		// correct verdict, not be escalated blind from a stale appliedAt. So
 		// when hasCIGatePauseComment is already true, this backstop does NOT
-		// call pauseForCITimeout and does NOT continue — it falls through to
+		// call pauseForCIBackstop (#2302) and does NOT continue — it falls through to
 		// the handler chain, which either clears the gate cleanly (green CI,
 		// no pause-label churn at all) or re-derives timedOut/ciFailure from
 		// the same stale appliedAt and calls back into
