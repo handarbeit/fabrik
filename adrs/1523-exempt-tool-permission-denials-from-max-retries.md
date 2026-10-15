@@ -246,3 +246,45 @@ and the precedent for "a distinct sentinel type, not a reused one, to avoid coup
 behaviors"), ADR-1199/#1199 (`SliceRetries`/`MaxSliceRetries`, the structural precedent for an
 independently-bounded, non-failure counter), ADR-1414 (`ResumeFailureError`'s continue-processing,
 non-short-circuiting shape, mirrored here for the same "real work may precede the failure" reason).
+
+## Amendment (#1556, 2026-10-14): the exemption is causal
+
+**Problem.** The exemption fired for any non-empty `permission_denials` on a non-completing run. That
+establishes a denial occurred, not that it is why the stage did not complete. A model denied once early,
+working around it and then failing for an unrelated reason (a real bug, a stall, an underspecified issue)
+was exempted from `max_retries` and its operator was pointed at a permission misconfiguration that did not
+exist — Fabrik asserting a false cause.
+
+**Decision.** `interpretClaudeResult` keeps the structural detection and the `!completed` gate, and now
+also requires `denialCausal` (`engine/tools_denied_causal.go`). A run is denial-caused only if all hold:
+(1) no measured progress (`commitsPushed <= 0`); (2) a denial's `tool_use_id` joins a main-thread
+`tool_use` in the stream-json (verified against a stream captured from CLI 2.1.299: the id matches, and
+the denied call's own `tool_result` carries `is_error: true`); (3) a joined denial names a write-capable
+tool (`Edit`, `Write`, `NotebookEdit`, `Bash`); (4) no main-thread `Edit`/`Write`/`NotebookEdit` call other
+than the denied ones succeeded (or lacks a result) after the last relevant denial, so an early incidental denial cannot
+mask a final blocking one (a denied `git commit` after successful edits stays denial-caused). `Bash` is not a
+recovery signal, because #1523's incident had read-only `Bash` succeeding beside denied writes. A
+non-causal run returns no sentinel, so it flows down the ordinary failure path (`StageRetryIncremented`,
+`max_retries`), posts no tools-denied comment and applies no label; one engine-log line records the
+verdict and reason. Both invocation paths (stage dispatch and comment/reinvoke, ADR-1704) share the one
+decision point, and ADR-1775's wording is unchanged for denial-caused runs.
+
+**Why not the other directions.** *Recency/adjacency* alone misreads a model that tries a denied tool once
+and gives up at once. *Proportion* (denied vs total calls) is distorted by routine denials, which #1372's
+`PreToolUse` boundary hook will produce by design; rules 1–4 depend on what happened after a denial and on
+produced work, never on how many denials occurred, so they stay correct when Fabrik's own enforcement
+denies routinely. Distinguishing Fabrik-originated denials as a category remains out of scope for #1372.
+
+**Error direction (deliberate, FR-005).** Insufficient evidence (no stream, a truncated stream, an empty
+or unmatched `tool_use_id`, sub-agent-only denials) resolves to an ordinary failure. A real permission
+failure that looks mixed (for instance a hook denying `Bash` but not `Edit`) costs `max_retries` attempts
+instead of the denial budget; a wrongly counted permission failure costs one retry, whereas a wrongly
+exempted genuine failure costs several wasted invocations and misleads the operator. Residual false
+positive: a single incidental `Bash` denial followed only by reads or `Bash` with no commit (typically a
+`read_only` stage such as Research) still looks denial-caused; it is bounded by `MaxToolsDeniedRetries`.
+Closing it needs stage awareness in `interpretClaudeResult` (a signature change across ~50 call sites) and
+is a follow-up if production logs show it.
+
+**Tests.** The single-incidental-denial test was red before `denialCausal` was wired in and goes red again
+under `SetToolsDeniedCausalityDisabledForTest` (non-vacuity, FR-011). The #1523 shape (every write denied,
+no commit) stays exempt.

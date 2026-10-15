@@ -184,7 +184,7 @@ cannot be unit-tested (external binary behavior). If a future CLI version report
 blocks as `permission_denials` entries instead of omitting the tool, this fix silently stops working
 for the "no denial reaches the model" half of its guarantee — the tool would still be unavailable,
 but `classifyToolsDenied`'s exemption could fire again. #1556 (narrowing that exemption's causality)
-remains on the roadmap for exactly this reason; it is complementary to this ADR, not superseded by it.
+has since landed (see the #1556 amendment to ADR-1523) for exactly this reason; it is complementary to this ADR, not superseded by it.
 
 **Reachability/catalogue-composition caveat**: the #1558 re-probe also found the tool catalogue
 visible to a probe session is *not* determined by CLI version alone — `Monitor` did not appear in the

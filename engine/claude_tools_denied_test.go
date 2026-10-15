@@ -173,7 +173,7 @@ func TestClassifyToolsDenied_CommandDecode(t *testing.T) {
 // returns a *claudeToolsDeniedError — this is the seam finalizeStageOutcome
 // classifies on (AC1).
 func TestInterpretClaudeResult_ToolsDenied_ReturnsSentinelError(t *testing.T) {
-	raw := []byte(`{"result":"I could not write the file — permission denied.","session_id":"sid-1","is_error":false,"subtype":"success","terminal_reason":"completed","num_turns":3,"total_cost_usd":0.05,"permission_denials":[{"tool_name":"Write","tool_use_id":"toolu_1","tool_input":{}}]}`)
+	raw := []byte(deniedCallLines("toolu_1", "Write") + `{"type":"result","result":"I could not write the file — permission denied.","session_id":"sid-1","is_error":false,"subtype":"success","terminal_reason":"completed","num_turns":3,"total_cost_usd":0.05,"permission_denials":[{"tool_name":"Write","tool_use_id":"toolu_1","tool_input":{}}]}`)
 
 	text, completed, usage, err := interpretClaudeResult(context.Background(), 1, raw, nil, false, t.TempDir()+"/sess", t.TempDir(), "", 2, -1)
 
@@ -244,7 +244,8 @@ func TestInterpretClaudeResult_ToolsDenied_UnparseableJSON_NotClassified(t *test
 // structurally unreachable for a detected denial — no explicit
 // marker-suppression code is needed anywhere else.
 func TestInterpretClaudeResult_ToolsDenied_MarkerIndependence(t *testing.T) {
-	raw := []byte(`{"result":"Permission to use Edit has been denied because Claude Code is running in don't ask mode.\nFABRIK_BLOCKED_ON_INPUT","is_error":false,"subtype":"success","terminal_reason":"completed","permission_denials":[{"tool_name":"Edit"}]}`)
+	raw := []byte(`{"type":"result","result":"Permission to use Edit has been denied because Claude Code is running in don't ask mode.\nFABRIK_BLOCKED_ON_INPUT","is_error":false,"subtype":"success","terminal_reason":"completed","permission_denials":[{"tool_name":"Edit","tool_use_id":"toolu_e"}]}`)
+	raw = append([]byte(deniedCallLines("toolu_e", "Edit")), raw...)
 
 	_, completed, _, err := interpretClaudeResult(context.Background(), 1, raw, nil, false, t.TempDir()+"/sess", t.TempDir(), "", 2, -1)
 

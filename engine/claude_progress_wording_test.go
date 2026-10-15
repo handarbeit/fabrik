@@ -13,9 +13,11 @@ import (
 // tools-denied exit must never assert "did not make progress" (a claim it
 // never measured), and must upgrade to a measured commit count whenever the
 // caller (runClaude) supplied one, degrading cleanly to completion-only
-// wording when it didn't.
+// wording when it didn't. Since #1556 a measured commit count > 0 means the
+// run is not denial-caused at all (see TestDenialCausal), so only the
+// unmeasured and zero cases reach the tools-denied log line.
 func TestInterpretClaudeResult_ToolsDenied_ProgressWording(t *testing.T) {
-	raw := []byte(`{"result":"denied","is_error":false,"subtype":"success","terminal_reason":"completed","permission_denials":[{"tool_name":"Bash","tool_input":{"command":"git status"}}]}`)
+	raw := []byte(deniedCallLines("toolu_b", "Bash") + `{"type":"result","result":"denied","is_error":false,"subtype":"success","terminal_reason":"completed","permission_denials":[{"tool_name":"Bash","tool_use_id":"toolu_b","tool_input":{"command":"git status"}}]}`)
 
 	tests := []struct {
 		name           string
@@ -38,14 +40,6 @@ func TestInterpretClaudeResult_ToolsDenied_ProgressWording(t *testing.T) {
 				"stage did not signal completion",
 			},
 			wantAbsent: []string{"commit(s) pushed", "0 commit(s)"},
-		},
-		{
-			name:          "measured commit count is reported",
-			commitsPushed: 3,
-			wantSubstrings: []string{
-				"3 commit(s) pushed, stage did not signal completion",
-			},
-			wantAbsent: []string{"0 commit(s)"},
 		},
 	}
 
