@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -28,14 +29,15 @@ func runMCP(args []string) error {
 	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	dir := fs.String("dir", "", "Fabrik directory of the daemon to talk to, used as given (default: $FABRIK_MCP_DIR, used as given, else the nearest ancestor of $CLAUDE_PROJECT_DIR or the current directory that contains .fabrik/)")
-	subscriber := fs.String("subscriber", "", "stable name this server attaches to the daemon under for pushed channel events — your topic or session name, never a PID (default: $FABRIK_SUBSCRIBER; empty disables push)")
+	subscriber := fs.String("subscriber", "", "stable name this server attaches to the daemon under for pushed channel events and names in action audit comments — your topic or session name, never a PID (default: $FABRIK_SUBSCRIBER, else $CLAUDE_TOPIC, else the OS username; the OS-username default names audit comments but does not start the push stream)")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: fabrik mcp [--dir <fabrik-dir>] [--subscriber <name>]\n\n")
 		fmt.Fprintf(os.Stderr, "Run a stdio MCP server exposing overseer tools backed by the running daemon's\n")
 		fmt.Fprintf(os.Stderr, "local socket: read-only status/board/health, plus promote / set_autonomy /\n")
-		fmt.Fprintf(os.Stderr, "revalidate / clear_claude_limit actions that need --subscriber (they leave an\n")
-		fmt.Fprintf(os.Stderr, "audit comment naming it). Register it with: claude mcp add fabrik -- fabrik mcp\n\n")
-		fmt.Fprintf(os.Stderr, "With --subscriber (or FABRIK_SUBSCRIBER) it also pushes events into the session via\n")
+		fmt.Fprintf(os.Stderr, "revalidate / clear_claude_limit actions (they leave an audit comment naming the\n")
+		fmt.Fprintf(os.Stderr, "subscriber: --subscriber, else FABRIK_SUBSCRIBER, else CLAUDE_TOPIC, else the OS\n")
+		fmt.Fprintf(os.Stderr, "username). Register it with: claude mcp add fabrik -- fabrik mcp\n\n")
+		fmt.Fprintf(os.Stderr, "With --subscriber, FABRIK_SUBSCRIBER or CLAUDE_TOPIC it also pushes events into the session via\n")
 		fmt.Fprintf(os.Stderr, "Claude Code Channels (research preview); start claude with\n")
 		fmt.Fprintf(os.Stderr, "--dangerously-load-development-channels server:fabrik (plugin install:\n")
 		fmt.Fprintf(os.Stderr, "plugin:fabrik@fabrik) to receive them.\n\n")
@@ -76,25 +78,65 @@ func newMCPServer(flagDir, flagSubscriber string) (*mcpstdio.Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("fabrik mcp: resolving --dir: %w", err)
 	}
+	name, source := resolveSubscriber(flagSubscriber, osUsername)
 	return &mcpstdio.Server{
-		SocketPath:    localapi.SocketPath(fabrikDir),
-		Version:       Version,
-		Subscriber:    subscriberName(flagSubscriber),
-		DisableStream: !hasFabrikDir(fabrikDir),
-		In:            os.Stdin,
-		Out:           os.Stdout,
-		Err:           os.Stderr,
+		SocketPath:       localapi.SocketPath(fabrikDir),
+		Version:          Version,
+		Subscriber:       name,
+		SubscriberSource: source,
+		DisableStream:    !hasFabrikDir(fabrikDir),
+		In:               os.Stdin,
+		Out:              os.Stdout,
+		Err:              os.Stderr,
 	}, nil
 }
 
-// subscriberName resolves the subscriber: the flag, else FABRIK_SUBSCRIBER. There
-// is deliberately no generated default — the name keys the daemon's held queue,
-// so it must be stable across sessions (#1968).
-func subscriberName(flagValue string) string {
-	if v := settingValue(flagValue); v != "" {
-		return v
+// resolveSubscriber resolves the subscriber name and says which input produced
+// it (#2322, ADR 2322): --subscriber, else FABRIK_SUBSCRIBER, else CLAUDE_TOPIC
+// (exported by `topic` on every session it launches, stable across restarts),
+// else the fixed default — the OS username. Every source goes through
+// subscriberValue, so an unexpanded "${...}" placeholder or a blank value counts
+// as unset. lookupUser supplies the username when $USER is empty; no name at all
+// comes back as ("", SourceNone).
+//
+// There is deliberately no PID- or session-id-derived default: the name keys the
+// daemon's held queue and must be stable across restarts (#1968). A fixed
+// default is stable; its only cost is that default-named sessions share a name.
+func resolveSubscriber(flagValue string, lookupUser func() string) (string, mcpstdio.NameSource) {
+	if v := subscriberValue(flagValue); v != "" {
+		return v, mcpstdio.SourceFlag
 	}
-	return settingValue(os.Getenv("FABRIK_SUBSCRIBER"))
+	if v := subscriberValue(os.Getenv("FABRIK_SUBSCRIBER")); v != "" {
+		return v, mcpstdio.SourceEnv
+	}
+	if v := subscriberValue(os.Getenv("CLAUDE_TOPIC")); v != "" {
+		return v, mcpstdio.SourceTopic
+	}
+	if v := subscriberValue(os.Getenv("USER")); v != "" {
+		return v, mcpstdio.SourceDefault
+	}
+	if lookupUser != nil {
+		if v := subscriberValue(lookupUser()); v != "" {
+			return v, mcpstdio.SourceDefault
+		}
+	}
+	return "", mcpstdio.SourceNone
+}
+
+// osUsername is the os/user fallback for the default name; "" when the lookup
+// fails (static binaries and containers without a passwd entry).
+func osUsername() string {
+	u, err := user.Current()
+	if err != nil {
+		return ""
+	}
+	return u.Username
+}
+
+// subscriberValue is settingValue for a subscriber name: it also trims, and a
+// blank value is unset.
+func subscriberValue(v string) string {
+	return strings.TrimSpace(settingValue(v))
 }
 
 // settingValue returns v, or "" when v is an unexpanded "${...}" placeholder.

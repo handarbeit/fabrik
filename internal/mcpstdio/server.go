@@ -55,10 +55,17 @@ type Server struct {
 	CallTimeout time.Duration
 
 	// Subscriber is the stable name this shim attaches to the daemon under (the
-	// operator's topic or session name — never a PID). Empty disables push:
-	// the read tools work unchanged and fabrik_subscribe reports why it cannot
-	// default a name. #1968.
+	// operator's topic or session name, or the OS username default — never a
+	// PID). Empty means no name could be resolved at all: the read tools work
+	// unchanged and fabrik_subscribe reports why it cannot default a name. #1968.
 	Subscriber string
+	// SubscriberSource says where Subscriber came from (#2322). A name from
+	// SourceDefault is shared by every session on the machine, so it names the
+	// audit comments of the action tools and is fabrik_subscribe's default but
+	// never starts the push stream: nothing the handshake offers tells an
+	// interactive session from a `claude -p` one, and a stream under a shared
+	// name would let the latter supersede the former (see StreamName).
+	SubscriberSource NameSource
 	// Stream runs the held connection; nil selects localapi.RunStream.
 	Stream StreamFunc
 	// DisableStream keeps the channel stream from starting even when Subscriber
@@ -78,6 +85,32 @@ type Server struct {
 	wmu        sync.Mutex
 	streamOnce sync.Once
 	streamWG   sync.WaitGroup
+}
+
+// NameSource says which input produced the subscriber name (#2322, ADR 2322).
+type NameSource int
+
+const (
+	// SourceNone: no name could be resolved.
+	SourceNone NameSource = iota
+	// SourceFlag: --subscriber.
+	SourceFlag
+	// SourceEnv: FABRIK_SUBSCRIBER.
+	SourceEnv
+	// SourceTopic: CLAUDE_TOPIC, exported by `topic` on every session it launches.
+	SourceTopic
+	// SourceDefault: the OS username, the fixed fallback.
+	SourceDefault
+)
+
+// StreamName is the name the push stream attaches under: Subscriber, except for
+// the shared default, which never streams (#2322 FR-008). It is "" when the
+// stream must not start.
+func (s *Server) StreamName() string {
+	if s.SubscriberSource == SourceDefault {
+		return ""
+	}
+	return s.Subscriber
 }
 
 type request struct {
@@ -257,7 +290,7 @@ func (s *Server) initialize(params json.RawMessage) map[string]any {
 			"Every response states how fresh it is (as_of); a value the daemon cannot vouch for is the string \"unknown\", never a default. " +
 			"Start with fabrik_situation for the one rolled-up answer to what needs you (merge decisions, gated items, items waiting for input, pending decisions, merge-train and poll health, anomalies), or fabrik_board (attention) to see what needs looking at, then fabrik_status for one issue. " +
 			"When the poll loop itself is stalled, fabrik_health.poll.overdue says so, items that only need the poll read as waiting-for-poll rather than stalled, and a pipeline-stalled event is pushed. " +
-			"Six action tools (fabrik_promote, fabrik_set_autonomy, fabrik_revalidate, fabrik_advance, fabrik_move_parked, fabrik_clear_claude_limit) make the daemon write to GitHub and leave a Fabrik audit comment naming this session's --subscriber name; they refuse, with the current state, when a precondition does not hold. " +
+			"Six action tools (fabrik_promote, fabrik_set_autonomy, fabrik_revalidate, fabrik_advance, fabrik_move_parked, fabrik_clear_claude_limit) make the daemon write to GitHub and leave a Fabrik audit comment naming this session's subscriber name (--subscriber, else FABRIK_SUBSCRIBER, else CLAUDE_TOPIC, else the OS username); they refuse, with the current state, when a precondition does not hold. " +
 			"There is no tool to lift a pause or to comment: answer a paused item with a comment on the issue itself." + channelInstructions,
 	}
 }
@@ -326,7 +359,7 @@ func (s *Server) toolsCall(ctx context.Context, req request) {
 	if p.Name == ToolSubscribe {
 		// The daemon cannot know whether this session loaded the shim as a channel;
 		// say so rather than let a successful subscribe imply delivery.
-		res.Content = append(res.Content, toolContent{Type: "text", Text: subscribeNote(s.Subscriber)})
+		res.Content = append(res.Content, toolContent{Type: "text", Text: subscribeNote(s.Subscriber, s.SubscriberSource)})
 	}
 	s.reply(req.ID, res)
 }
@@ -400,11 +433,15 @@ func (s *Server) skewNote(ctx context.Context, daemonVersion string) string {
 		daemonVersion, s.Version)
 }
 
-func subscribeNote(attached string) string {
+func subscribeNote(name string, source NameSource) string {
 	note := "Note: Fabrik cannot tell whether this session receives channel pushes. They appear only if Claude Code was started with Channels enabled for this server " +
 		"(research preview: claude --dangerously-load-development-channels server:fabrik, or plugin:fabrik@fabrik when installed through the fabrik plugin; Team/Enterprise orgs must also allow channels). Otherwise events are dropped silently."
-	if attached == "" {
-		note += " This server was launched without --subscriber, so it holds no push connection: events for this subscription are held by the daemon and delivered once a server with that name attaches."
+	switch {
+	case name == "":
+		note += " This server could not resolve a subscriber name (set FABRIK_SUBSCRIBER or --subscriber), so it holds no push connection: events for this subscription are held by the daemon and delivered once a server with that name attaches."
+	case source == SourceDefault:
+		note += " This server's name (" + name + ") came from the OS-username default, which is shared by every session on this machine, so it holds no push connection: events for this subscription are held by the daemon and delivered once a server with that name attaches. " +
+			"To receive pushes in this session, set FABRIK_SUBSCRIBER to a name of its own before starting Claude Code (or run it under `topic`, which sets CLAUDE_TOPIC)."
 	}
 	return note
 }

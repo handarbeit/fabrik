@@ -156,7 +156,7 @@ func toolDefs() []map[string]any {
 				"Every item entry carries its title, link and the options to act, each with the MCP tool that performs it when one exists. Each section is ordered by attention rank and bounded: `omitted` counts the entries cut, and an item appears in one section only (an item already reported as item-wedged is under anomalies, not gates). " +
 				"A fact the daemon cannot vouch for (a hold that began before the daemon started, labels it has not read yet) is \"unknown\", never a default; `nothing_needs_you` is true only when there is nothing to report and every open item could be classified. " +
 				"The same view is what a `situation` event carries and what the catch-up on attach delivers. With push: true the view is also queued to this session's channel as a `situation` event, " +
-				"unless it equals the last one sent to this subscriber (force: true sends it anyway); that writes nothing to GitHub or the board and needs this server to have been launched with --subscriber.",
+				"unless it equals the last one sent to this subscriber (force: true sends it anyway); that writes nothing to GitHub or the board and needs this server to have a subscriber name (--subscriber, FABRIK_SUBSCRIBER or CLAUDE_TOPIC; the OS-username default cannot receive pushes).",
 			"inputSchema": obj(map[string]any{
 				"push":  map[string]any{"type": "boolean", "description": "also queue this view to this session as a situation event (deduplicated unless force)"},
 				"force": map[string]any{"type": "boolean", "description": "with push, send even when the view equals the last digest sent to this subscriber"},
@@ -190,7 +190,7 @@ func toolDefs() []map[string]any {
 				"events":              map[string]any{"type": "array", "items": map[string]any{"type": "string", "enum": eventNames()}, "description": "event types to receive (default: the semantic family - every type except label-applied and label-removed; name those to opt in)"},
 				"digest_seconds":      map[string]any{"type": "integer", "minimum": 30, "maximum": 3600, "description": "batch ordinary events into one message per interval"},
 				"progress_via_column": map[string]any{"type": "boolean", "description": "drop label-applied/label-removed for stage:*:complete and stage:*:in_progress when column-changed is also taken, so progress arrives as column moves instead of the stage-label stream; overrides labels and exclude_labels for those two patterns; requires column-changed in events when events is set"},
-				"subscriber":          map[string]any{"type": "string", "description": "subscriber name; defaults to the name this server was launched with (--subscriber / FABRIK_SUBSCRIBER)"},
+				"subscriber":          map[string]any{"type": "string", "description": "subscriber name; defaults to this server's resolved name (--subscriber, else FABRIK_SUBSCRIBER, else CLAUDE_TOPIC, else the OS username)"},
 				"remind_after":        map[string]any{"type": "integer", "minimum": 600, "maximum": 2592000, "description": "seconds between reminders for a still-pending decision-pending episode; omit for none"},
 				"situation_seconds":   map[string]any{"type": "integer", "minimum": 60, "maximum": 86400, "description": "push the situation digest at most this often, only when it changed since the last one sent; omit for none (the catch-up and fabrik_situation push still deliver one)"},
 			}),
@@ -209,7 +209,7 @@ func toolDefs() []map[string]any {
 		{
 			"name": ToolPromote,
 			"description": "Move an item out of an unmanaged parking column (e.g. Backlog) into a pipeline column. The daemon writes the board Status itself, with the ids it already holds (one live read of the item's current column confirms the cache first); it refuses, with the current state, when the item is not in a parking column, `to` is not a pipeline stage (holding, cleanup and unmanaged columns are engine-managed), or the daemon cannot establish a fact; the refusal lists the valid targets only when the item is in a parking column. An item already in a pipeline column is refused with a pointer to fabrik_advance, which moves a completed stage one column forward. A legacy Backlog column with no configured stage counts as a parking column. " +
-				"If the item carries fabrik:cruise or fabrik:yolo the result says it will auto-advance through the stages from `to`. Posts a short Fabrik audit comment on the issue naming the requesting subscriber. Requires the server to be launched with --subscriber.",
+				"If the item carries fabrik:cruise or fabrik:yolo the result says it will auto-advance through the stages from `to`. Posts a short Fabrik audit comment on the issue naming the requesting subscriber. Needs a subscriber name (--subscriber, else FABRIK_SUBSCRIBER, CLAUDE_TOPIC or the OS username).",
 			"inputSchema": obj(map[string]any{
 				"issue": issueSchema(),
 				"to":    map[string]any{"type": "string", "description": "the pipeline column to move the item into, e.g. Specify"},
@@ -220,7 +220,7 @@ func toolDefs() []map[string]any {
 			"name": ToolSetAutonomy,
 			"description": "Make an item's autonomy exactly the requested mode: cruise (auto-advance every stage but never auto-merge), yolo (auto-advance AND auto-merge the PR when Validate completes) or none. " +
 				"Setting one mode removes the other label, so the outcome is exactly what was asked (cruise would otherwise silently beat yolo). Already in the requested mode: nothing is written and no comment is posted. " +
-				"yolo can cause a merge: prefer cruise unless the item should land unattended. Posts a Fabrik audit comment naming the requesting subscriber. Requires --subscriber.",
+				"yolo can cause a merge: prefer cruise unless the item should land unattended. Posts a Fabrik audit comment naming the requesting subscriber. Needs a subscriber name (defaults to the OS username).",
 			"inputSchema": obj(map[string]any{
 				"issue":    issueSchema(),
 				"autonomy": map[string]any{"type": "string", "enum": []string{"cruise", "yolo", "none"}, "description": "the autonomy the item should end up with"},
@@ -230,7 +230,7 @@ func toolDefs() []map[string]any {
 		{
 			"name": ToolRevalidate,
 			"description": "Force a Validate re-run: applies fabrik:revalidate to an item sitting in the Validate column, and the engine clears the Validate completion and CI labels and re-dispatches on a following poll (deferred until an in-flight Validate worker exits). " +
-				"Refused, with the current state, when the item is not in Validate, already carries the label, or is paused or awaiting input: a pause is lifted only by a human comment on the issue, never by this tool. Posts a Fabrik audit comment naming the requesting subscriber. Requires --subscriber.",
+				"Refused, with the current state, when the item is not in Validate, already carries the label, or is paused or awaiting input: a pause is lifted only by a human comment on the issue, never by this tool. Posts a Fabrik audit comment naming the requesting subscriber. Needs a subscriber name (defaults to the OS username).",
 			"inputSchema": obj(map[string]any{
 				"issue": issueSchema(),
 			}, "issue"),
@@ -241,7 +241,7 @@ func toolDefs() []map[string]any {
 			"description": "Move an item whose current stage is complete (stage:<X>:complete) exactly one configured stage forward, using the engine's own advance (the one auto-advance uses); the engine then dispatches the next stage on its next poll. " +
 				"Use it for the decision \"this finished stage should move on\" without changing the item's autonomy (cruise/yolo apply to every remaining stage). The daemon confirms the item's column and labels live and fails closed. " +
 				"Refused, with the current state and the specific reason, when a worker is running, the stage is not complete, the item is paused/awaiting input (a human comment resumes it; this tool never lifts a pause), blocked, or held by a CI wait, review wait, unresolved dependency or unprocessed feedback the engine would also apply. " +
-				"Validate -> Done and moves into a holding stage such as Queued are refused (use the PR merge); a parking column is refused (use fabrik_promote). Posts a Fabrik audit comment naming the requesting subscriber. Requires --subscriber.",
+				"Validate -> Done and moves into a holding stage such as Queued are refused (use the PR merge); a parking column is refused (use fabrik_promote). Posts a Fabrik audit comment naming the requesting subscriber. Needs a subscriber name (defaults to the OS username).",
 			"inputSchema": obj(map[string]any{
 				"issue": issueSchema(),
 			}, "issue"),
@@ -252,7 +252,7 @@ func toolDefs() []map[string]any {
 			"description": "Move an item from one unmanaged parking column (e.g. Triage) to another (e.g. Backlog). This starts no work: the engine never dispatches for a parking column, so it is the \"accepted, not yet\" decision, not a promotion; use fabrik_promote to move an item into the pipeline. " +
 				"It only moves BETWEEN parking columns and never pulls work out of the pipeline. The daemon confirms the item's current column live and fails closed. " +
 				"Refused, with the current state and writing nothing, when the item is not in a parking column, `to` is not another parking column that exists on the board (holding, cleanup and pipeline columns are refused; the refusal lists the valid parking destinations), or `to` is the item's current column. " +
-				"A legacy Backlog column with no configured stage counts as a parking column. Changes no labels and lifts no pause. Posts a Fabrik audit comment naming the requesting subscriber. Requires --subscriber.",
+				"A legacy Backlog column with no configured stage counts as a parking column. Changes no labels and lifts no pause. Posts a Fabrik audit comment naming the requesting subscriber. Needs a subscriber name (defaults to the OS username).",
 			"inputSchema": obj(map[string]any{
 				"issue": issueSchema(),
 				"to":    map[string]any{"type": "string", "description": "the parking column to move the item into, e.g. Backlog"},
@@ -262,7 +262,7 @@ func toolDefs() []map[string]any {
 		{
 			"name": ToolClearClaudeLimit,
 			"description": "Clear an active account-wide Claude usage-limit hold without restarting the daemon, by applying fabrik:clear-claude-limit to one managed open issue (the daemon picks it: one already carrying fabrik:claude-limit first, else the lowest-numbered, and names it in the result and its audit comment). " +
-				"Refused when no usage limit is active. The hold is account-wide, so the chosen issue is only the carrier of the label. Posts a Fabrik audit comment on that issue naming the requesting subscriber. Requires --subscriber.",
+				"Refused when no usage limit is active. The hold is account-wide, so the chosen issue is only the carrier of the label. Posts a Fabrik audit comment on that issue naming the requesting subscriber. Needs a subscriber name (defaults to the OS username).",
 			"inputSchema": obj(map[string]any{}),
 			"annotations": action(true),
 		},
@@ -489,9 +489,10 @@ func buildCall(name string, args json.RawMessage, defaultSubscriber string) (met
 }
 
 // subscriberName resolves the subscriber a subscribe/unsubscribe call acts for:
-// the explicit argument, else the name this shim was launched with. There is no
-// generated or PID-derived fallback — the name keys the held queue and must
-// survive the session, so a call with neither is refused with the fix.
+// the explicit argument, else the name this shim resolved (flag, environment or
+// the fixed OS-username default). There is no PID-derived fallback — the name
+// keys the held queue and must survive the session, so a call with neither is
+// refused with the fix.
 func subscriberName(explicit, launched string) (string, error) {
 	switch {
 	case explicit != "":
@@ -499,7 +500,7 @@ func subscriberName(explicit, launched string) (string, error) {
 	case launched != "":
 		return launched, nil
 	}
-	return "", fmt.Errorf("no subscriber name: launch this server with --subscriber <name> (or FABRIK_SUBSCRIBER), using a stable name such as your topic or session name, or pass subscriber in the call")
+	return "", fmt.Errorf("no subscriber name: no OS username could be found either, so launch this server with --subscriber <name> (or set FABRIK_SUBSCRIBER), using a stable name such as your topic or session name, or pass subscriber in the call")
 }
 
 // requesterName is the subscriber an action is attributed to: only the name this
@@ -508,7 +509,7 @@ func subscriberName(explicit, launched string) (string, error) {
 // refused when the server has none.
 func requesterName(launched string) (string, error) {
 	if launched == "" {
-		return "", fmt.Errorf("this action is refused: it posts an audit comment naming who requested it, and this server was launched without a subscriber name — launch it with --subscriber <name> (or FABRIK_SUBSCRIBER), using a stable name such as your topic or session name")
+		return "", fmt.Errorf("this action is refused: it posts an audit comment naming who requested it, and this server could not resolve a subscriber name (no --subscriber, FABRIK_SUBSCRIBER, CLAUDE_TOPIC or OS username) — launch it with --subscriber <name> (or set FABRIK_SUBSCRIBER), using a stable name such as your topic or session name")
 	}
 	return launched, nil
 }
