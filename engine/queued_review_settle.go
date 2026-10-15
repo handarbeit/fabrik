@@ -58,7 +58,15 @@ func (e *Engine) settleQueuedReviewFindings(board *gh.ProjectBoard) {
 		return
 	}
 	for _, g := range e.groupQueuedByRepoAndBase(board.Items, hs.Name, e.defaultRepo()) {
-		batchNumbers, _ := e.mergeTrainBatchMembers(g.trainKey)
+		// The live run is read once per group and its pointer stamps every signal raised
+		// below (#1557): a signal is only ever acted on by the run it was raised for, so one
+		// that lands after that run has ended (this scan deep-fetches over the network
+		// between this read and the mark) is inert instead of leaking into a later batch.
+		runState := e.mergeTrainRunState(g.trainKey)
+		var batchNumbers map[int]bool
+		if runState != nil {
+			batchNumbers = runState.batchNumbers
+		}
 		for _, item := range g.items {
 			// Precedence rule 1 (FR-3, mirrors routeQueuedGroup): a native-merge-queue
 			// member is not an internal-train member — ejectMember has no meaning here.
@@ -96,13 +104,13 @@ func (e *Engine) settleQueuedReviewFindings(board *gh.ProjectBoard) {
 
 			findings := e.queuedReviewFindings(item)
 			if len(findings) == 0 {
-				e.settleQueuedCommentCause(board.ProjectID, g.repoKey, g.trainKey, item, batchNumbers[item.Number])
+				e.settleQueuedCommentCause(board.ProjectID, g.repoKey, g.trainKey, item, batchNumbers[item.Number], runState)
 				continue
 			}
 
 			if batchNumbers[item.Number] {
 				e.logf(item.Number, "queued-review-settle", "%d unprocessed review finding(s) (threads or review bodies) on Queued member #%d — owned by the live batch for %s, flagging pending eject\n", len(findings), item.Number, g.trainKey)
-				e.markPendingReviewEject(g.repoKey, item.Number, len(findings))
+				e.markPendingReviewEject(g.repoKey, item.Number, len(findings), runState)
 				continue
 			}
 			e.logf(item.Number, "queued-review-settle", "%d unprocessed review finding(s) (threads or review bodies) on Queued member #%d — not owned by any live batch for %s, ejecting directly\n", len(findings), item.Number, g.trainKey)
@@ -155,7 +163,7 @@ func (e *Engine) queuedReviewFindings(item gh.ProjectItem) []gh.Comment {
 // in-batch member that is no longer flagged has any stale signal cleared, so it cannot
 // fire later on a re-queued member. The eject is not train churn — see
 // ejectQueuedMemberForComments.
-func (e *Engine) settleQueuedCommentCause(projectID, repoKey, trainKey string, item gh.ProjectItem, inLiveBatch bool) {
+func (e *Engine) settleQueuedCommentCause(projectID, repoKey, trainKey string, item gh.ProjectItem, inLiveBatch bool, runState *mergeTrainWorkerState) {
 	comments := filterHuman(e.findNewComments(item))
 	if len(comments) == 0 {
 		if inLiveBatch {
@@ -165,7 +173,7 @@ func (e *Engine) settleQueuedCommentCause(projectID, repoKey, trainKey string, i
 	}
 	if inLiveBatch {
 		e.logf(item.Number, "queued-review-settle", "%d unprocessed human comment(s) on Queued member #%d — owned by the live batch for %s, flagging pending eject\n", len(comments), item.Number, trainKey)
-		e.markPendingCommentEject(repoKey, item.Number)
+		e.markPendingCommentEject(repoKey, item.Number, runState)
 		return
 	}
 	e.logf(item.Number, "queued-review-settle", "%d unprocessed human comment(s) on Queued member #%d — not owned by any live batch for %s, ejecting directly\n", len(comments), item.Number, trainKey)

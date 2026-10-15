@@ -287,7 +287,7 @@ func (e *Engine) trySingletonCatchUp(ctx context.Context, state *mergeTrainWorke
 		// Re-enter the existing fast path, whose eligibility checks (live head ==
 		// caughtUp.headSHA — R5's TOCTOU check — pinned base an ancestor, mergeable,
 		// non-zero green and complete CI) are the landing gate, unmodified.
-		if remaining, ejected := e.applyPendingReviewEjectsEp(p.episode, state.projectID, p.repoKey(), []trainMember{caughtUp}); ejected > 0 || len(remaining) == 0 {
+		if remaining, ejected := e.applyPendingReviewEjectsEp(p.episode, state, state.projectID, p.repoKey(), []trainMember{caughtUp}); ejected > 0 || len(remaining) == 0 {
 			return caughtUp, true
 		}
 		if e.trySingletonFastPath(ctx, state, p, caughtUp) {
@@ -500,7 +500,7 @@ func (e *Engine) waitMemberCI(ctx context.Context, state *mergeTrainWorkerState,
 			e.logfRepo(logRepo, "merge-train", "singleton catch-up: CI wait timed out for #%d on %s — leaving it in Queued\n", n, m.headSHA)
 			return memberCIPending, nil
 		}
-		if _, ejected := e.applyPendingReviewEjects(state.projectID, logRepo, []trainMember{m}); ejected > 0 {
+		if _, ejected := e.applyPendingReviewEjects(state, state.projectID, logRepo, []trainMember{m}); ejected > 0 {
 			return memberCIEjected, nil
 		}
 

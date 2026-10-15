@@ -443,7 +443,7 @@ func (e *Engine) stepForm(ctx context.Context, r *trainRun) stepOut {
 		// Apply any pending review-finding eject signal (#1208) before considering the
 		// fast path: the fast path never calls assembleAndValidate, so without this it
 		// would silently bypass every one of applyPendingReviewEjects' checkpoints.
-		if remaining, ejectedCount := e.applyPendingReviewEjectsEp(ep, state.projectID, repoKey, current); ejectedCount > 0 {
+		if remaining, ejectedCount := e.applyPendingReviewEjectsEp(ep, state, state.projectID, repoKey, current); ejectedCount > 0 {
 			e.logfRepo(repoKey, "merge-train", "%d member(s) ejected for unresolved review findings or unprocessed comments before the singleton fast path — re-forming for %s\n", ejectedCount, trainKey)
 			r.setCurrent(remaining)
 			r.persist()
@@ -545,7 +545,7 @@ func (e *Engine) mainOutcome(ctx context.Context, r *trainRun, trialName string,
 	// was assembling/CI-polling (#1208). A flagged member's trial is always discarded here,
 	// regardless of its own CI result: a green trial containing a flagged member must never
 	// reach landGreenBatch.
-	if remaining, ejectedCount := e.applyPendingReviewEjectsEp(ep, state.projectID, repoKey, survivors); ejectedCount > 0 {
+	if remaining, ejectedCount := e.applyPendingReviewEjectsEp(ep, state, state.projectID, repoKey, survivors); ejectedCount > 0 {
 		e.logfRepo(repoKey, "merge-train", "%d member(s) ejected for unresolved review findings or unprocessed comments mid-trial — discarding trial and re-forming for %s\n", ejectedCount, trainKey)
 		e.cleanupTrialArtifacts(p.repoKey(), p.wm, trialName)
 		r.setCurrent(remaining)
@@ -1022,7 +1022,7 @@ func (e *Engine) singleOutcome(ctx context.Context, r *trainRun, m trainMember, 
 
 	// Hook 2: apply any pending review-finding eject flagged externally while this singleton
 	// trial was assembling/CI-polling (#1208).
-	if _, ejectedCount := e.applyPendingReviewEjects(state.projectID, repoKey, survivors); ejectedCount > 0 {
+	if _, ejectedCount := e.applyPendingReviewEjects(state, state.projectID, repoKey, survivors); ejectedCount > 0 {
 		e.logf(m.item.Number, "merge-train", "pending review-finding or unprocessed-comment eject flagged for singleton #%d — discarding trial\n", m.item.Number)
 		e.cleanupTrialArtifacts(p.repoKey(), p.wm, trialName)
 		return e.oatNext(r)

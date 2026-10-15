@@ -181,7 +181,7 @@ func TestAdmitTrainMembers_FailedRerouteExcludesWithoutSideEffects(t *testing.T)
 		updateProjectItemStatusFn: func(string, string, string, string) error { return fmt.Errorf("boom") },
 	}
 	eng := admissionEngine(t, client)
-	eng.markPendingReviewEject("owner/repo", 1, 2)
+	eng.markPendingReviewEject("owner/repo", 1, 2, nil)
 
 	got := eng.admitTrainMembers(context.Background(), &mergeTrainWorkerState{projectID: "PVT_1"}, "owner", "repo", admissionMembers(1))
 	if len(got) != 0 {
@@ -292,7 +292,7 @@ func TestAdmitTrainMembers_ConsumesPendingReviewEjectOnDeferral(t *testing.T) {
 		fetchCheckRunsFn: func(_, _, _ string) ([]gh.CheckRun, error) { return []gh.CheckRun{redRun()}, nil },
 	}
 	eng := admissionEngine(t, client)
-	eng.markPendingReviewEject("owner/repo", 1, 2)
+	eng.markPendingReviewEject("owner/repo", 1, 2, nil)
 	eng.admitTrainMembers(context.Background(), &mergeTrainWorkerState{projectID: "PVT_1"}, "owner", "repo", admissionMembers(1))
 	if _, ok := eng.takePendingReviewEject("owner/repo", 1); ok {
 		t.Errorf("pending review-eject signal must be consumed on a successful deferral")

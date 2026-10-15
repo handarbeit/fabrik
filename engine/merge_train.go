@@ -648,8 +648,20 @@ func (p trialParams) repoKey() string {
 // runMergeTrainWorker call graph must rely on one of those two defers rather
 // than clearing either marker directly — see ADR-067.
 func (e *Engine) finishTrain(trainKey string) {
-	e.mergeTrainInFlight.Delete(trainKey)
+	e.releaseTrainClaim(trainKey)
 	e.store.ExitRepoWorker(trainKey)
+}
+
+// releaseTrainClaim clears trainKey's in-flight claim after draining every pending
+// eject signal stamped with the run that held it (#1557). It is the one place the claim
+// is released, so no exit path can drop the claim and leave the run's signals behind.
+// The drain is hygiene only: a signal stamped with a finished run can never be acted on
+// by a later one (takePendingReviewEjectFor), however late it lands.
+func (e *Engine) releaseTrainClaim(trainKey string) {
+	if state := e.mergeTrainRunState(trainKey); state != nil {
+		e.purgePendingEjectsFor(state)
+	}
+	e.mergeTrainInFlight.Delete(trainKey)
 }
 
 // mergeTrainWorkerActiveForRepo reports whether a merge-train worker is
@@ -690,6 +702,18 @@ func (e *Engine) mergeTrainBatchMembers(trainKey string) (map[int]bool, bool) {
 		return nil, false
 	}
 	return v.(*mergeTrainWorkerState).batchNumbers, true
+}
+
+// mergeTrainRunState returns the state of the run currently claiming trainKey, or nil.
+// The pointer is the run's identity (#1557): it is created once at dispatch (or on
+// restart adoption), shared by every step goroutine of the run and removed when the
+// claim is released, so a pending-eject signal stamped with it belongs to exactly that run.
+func (e *Engine) mergeTrainRunState(trainKey string) *mergeTrainWorkerState {
+	v, ok := e.mergeTrainInFlight.Load(trainKey)
+	if !ok {
+		return nil
+	}
+	return v.(*mergeTrainWorkerState)
 }
 
 // mergeTrainMaxTurnsOverride computes the fabrik:extend-turns pre-grant for
@@ -3734,6 +3758,13 @@ func (e *Engine) ejectQueuedMemberForReviewFindings(projectID string, item gh.Pr
 	e.ejectMember(owner, repo, item, reason, nil, nil, false)
 }
 
+// pendingReviewEject is one review-finding eject signal: the unresolved-finding count and
+// the run it was raised for (#1557).
+type pendingReviewEject struct {
+	count int
+	owner *mergeTrainWorkerState
+}
+
 // markPendingReviewEject records that issueNumber (in repoKey) has count unresolved
 // review-thread findings and should be ejected at the worker's next checkpoint (#1208),
 // rather than immediately — used by settleQueuedReviewFindings when a merge-train
@@ -3742,35 +3773,91 @@ func (e *Engine) ejectQueuedMemberForReviewFindings(projectID string, item gh.Pr
 // the settle scan racing that goroutine's own in-memory batch state. Mirrors the
 // existing isRunawayTripped/mergeTrainTrials "poll writes a signal, worker consumes it
 // at a checkpoint" shape.
-func (e *Engine) markPendingReviewEject(repoKey string, issueNumber, count int) {
+//
+// owner is the run the signal is raised for (#1557): only that run's checkpoints act on
+// it (takePendingReviewEjectFor), so a signal that outlives its run is inert.
+func (e *Engine) markPendingReviewEject(repoKey string, issueNumber, count int, owner *mergeTrainWorkerState) {
 	e.queuedReviewEjectsMu.Lock()
 	defer e.queuedReviewEjectsMu.Unlock()
 	if e.queuedReviewEjects[repoKey] == nil {
-		e.queuedReviewEjects[repoKey] = make(map[int]int)
+		e.queuedReviewEjects[repoKey] = make(map[int]pendingReviewEject)
 	}
-	e.queuedReviewEjects[repoKey][issueNumber] = count
+	e.queuedReviewEjects[repoKey][issueNumber] = pendingReviewEject{count: count, owner: owner}
 }
 
 // takePendingReviewEject returns and clears the pending-eject finding count for
-// issueNumber in repoKey, if any. Clearing on read makes this a one-shot signal: once a
-// worker checkpoint consumes it, the same flag can't be double-applied by a later
-// checkpoint in the same or a subsequent worker run.
+// issueNumber in repoKey, if any, whatever run it was raised for. Clearing on read makes
+// this a one-shot signal. Used by the sites that have just rerouted the member off
+// Queued (deferMember, rerouteInvalidatedMember), where any signal is moot; the worker
+// checkpoints use takePendingReviewEjectFor.
 func (e *Engine) takePendingReviewEject(repoKey string, issueNumber int) (int, bool) {
 	e.queuedReviewEjectsMu.Lock()
 	defer e.queuedReviewEjectsMu.Unlock()
-	byIssue := e.queuedReviewEjects[repoKey]
-	if byIssue == nil {
-		return 0, false
-	}
-	count, ok := byIssue[issueNumber]
+	sig, ok := e.removeReviewEjectLocked(repoKey, issueNumber)
+	return sig.count, ok
+}
+
+// takePendingReviewEjectFor is takePendingReviewEject for a worker checkpoint of the run
+// owner: a signal stamped with a different run is stale — it was raised for a run that
+// has since ended — so it is discarded (logged) and reported absent rather than acted on
+// (#1557). The still-Queued member is not lost by this: settleQueuedReviewFindings is
+// level-triggered and re-raises the signal against the live run on its next poll while
+// the finding is unresolved.
+func (e *Engine) takePendingReviewEjectFor(repoKey string, issueNumber int, owner *mergeTrainWorkerState) (int, bool) {
+	e.queuedReviewEjectsMu.Lock()
+	sig, ok := e.removeReviewEjectLocked(repoKey, issueNumber)
+	e.queuedReviewEjectsMu.Unlock()
 	if !ok {
 		return 0, false
+	}
+	if sig.owner != owner {
+		e.logf(issueNumber, "merge-train", "discarding stale review-finding eject signal (%d finding(s)) raised for an earlier run — the settle scan re-raises it while the finding is unresolved\n", sig.count)
+		return 0, false
+	}
+	return sig.count, true
+}
+
+// removeReviewEjectLocked deletes and returns the review signal for issueNumber.
+// queuedReviewEjectsMu must be held.
+func (e *Engine) removeReviewEjectLocked(repoKey string, issueNumber int) (pendingReviewEject, bool) {
+	byIssue := e.queuedReviewEjects[repoKey]
+	sig, ok := byIssue[issueNumber]
+	if !ok {
+		return pendingReviewEject{}, false
 	}
 	delete(byIssue, issueNumber)
 	if len(byIssue) == 0 {
 		delete(e.queuedReviewEjects, repoKey)
 	}
-	return count, true
+	return sig, true
+}
+
+// purgePendingEjectsFor drops every review and comment eject signal stamped with owner
+// (#1557) — the run-end drain, called when the run's claim is released. Signals of other
+// runs (another partition of the same repo, ADR-1648) are untouched.
+func (e *Engine) purgePendingEjectsFor(owner *mergeTrainWorkerState) {
+	e.queuedReviewEjectsMu.Lock()
+	defer e.queuedReviewEjectsMu.Unlock()
+	for repoKey, byIssue := range e.queuedReviewEjects {
+		for n, sig := range byIssue {
+			if sig.owner == owner {
+				delete(byIssue, n)
+			}
+		}
+		if len(byIssue) == 0 {
+			delete(e.queuedReviewEjects, repoKey)
+		}
+	}
+	for repoKey, byIssue := range e.queuedCommentEjects {
+		for n, o := range byIssue {
+			if o == owner {
+				delete(byIssue, n)
+			}
+		}
+		if len(byIssue) == 0 {
+			delete(e.queuedCommentEjects, repoKey)
+		}
+	}
 }
 
 // applyPendingReviewEjects checks every member in members for a pending review-finding
@@ -3790,10 +3877,13 @@ func (e *Engine) takePendingReviewEject(repoKey string, issueNumber int) (int, b
 // review-finding signal takes precedence — the ordinary comment path handles both
 // causes in one invocation, and the review-finding path stays byte-identical — and
 // drops any comment signal for the same member.
-func (e *Engine) applyPendingReviewEjects(projectID, repoKey string, members []trainMember) (remaining []trainMember, ejectedCount int) {
+//
+// state is the calling run (#1557): signals stamped with any other run are stale and are
+// discarded, not applied.
+func (e *Engine) applyPendingReviewEjects(state *mergeTrainWorkerState, projectID, repoKey string, members []trainMember) (remaining []trainMember, ejectedCount int) {
 	for _, m := range members {
-		count, reviewOK := e.takePendingReviewEject(repoKey, m.item.Number)
-		commentOK := e.takePendingCommentEject(repoKey, m.item.Number)
+		count, reviewOK := e.takePendingReviewEjectFor(repoKey, m.item.Number, state)
+		commentOK := e.takePendingCommentEjectFor(repoKey, m.item.Number, state)
 		if reviewOK {
 			e.logf(m.item.Number, "merge-train", "applying pending review-finding eject flagged mid-trial (%d finding(s))\n", count)
 			e.ejectQueuedMemberForReviewFindings(projectID, m.item, count)
@@ -3814,8 +3904,8 @@ func (e *Engine) applyPendingReviewEjects(projectID, repoKey string, members []t
 // applyPendingReviewEjectsEp is applyPendingReviewEjects plus the #2050 episode
 // bookkeeping: each member it ejected is recorded on ep (and the TUI row title
 // refreshed). Behaviour of the ejection itself is unchanged.
-func (e *Engine) applyPendingReviewEjectsEp(ep *trainEpisode, projectID, repoKey string, members []trainMember) (remaining []trainMember, ejectedCount int) {
-	remaining, ejectedCount = e.applyPendingReviewEjects(projectID, repoKey, members)
+func (e *Engine) applyPendingReviewEjectsEp(ep *trainEpisode, state *mergeTrainWorkerState, projectID, repoKey string, members []trainMember) (remaining []trainMember, ejectedCount int) {
+	remaining, ejectedCount = e.applyPendingReviewEjects(state, projectID, repoKey, members)
 	if ejectedCount > 0 {
 		for _, n := range droppedNumbers(members, remaining) {
 			e.noteTrainEjected(ep, repoKey, n, "review feedback", false)
@@ -3861,33 +3951,59 @@ func (e *Engine) ejectQueuedMemberForComments(projectID string, item gh.ProjectI
 // markPendingCommentEject records that issueNumber (in repoKey) has an unprocessed human
 // comment and should be ejected at the worker's next checkpoint (#1863) — the
 // comment-cause sibling of markPendingReviewEject, kept as a parallel map so the
-// review-finding signal's shape is untouched.
-func (e *Engine) markPendingCommentEject(repoKey string, issueNumber int) {
+// review-finding signal's shape is untouched. owner is the run it is raised for (#1557).
+func (e *Engine) markPendingCommentEject(repoKey string, issueNumber int, owner *mergeTrainWorkerState) {
 	e.queuedReviewEjectsMu.Lock()
 	defer e.queuedReviewEjectsMu.Unlock()
 	if e.queuedCommentEjects == nil {
-		e.queuedCommentEjects = make(map[string]map[int]struct{})
+		e.queuedCommentEjects = make(map[string]map[int]*mergeTrainWorkerState)
 	}
 	if e.queuedCommentEjects[repoKey] == nil {
-		e.queuedCommentEjects[repoKey] = make(map[int]struct{})
+		e.queuedCommentEjects[repoKey] = make(map[int]*mergeTrainWorkerState)
 	}
-	e.queuedCommentEjects[repoKey][issueNumber] = struct{}{}
+	e.queuedCommentEjects[repoKey][issueNumber] = owner
 }
 
 // takePendingCommentEject reports whether a comment-eject signal was pending for
-// issueNumber in repoKey, clearing it on read (one-shot, like takePendingReviewEject).
+// issueNumber in repoKey, whatever run it was raised for, clearing it on read (one-shot,
+// like takePendingReviewEject).
 func (e *Engine) takePendingCommentEject(repoKey string, issueNumber int) bool {
 	e.queuedReviewEjectsMu.Lock()
 	defer e.queuedReviewEjectsMu.Unlock()
-	byIssue := e.queuedCommentEjects[repoKey]
-	if _, ok := byIssue[issueNumber]; !ok {
+	_, ok := e.removeCommentEjectLocked(repoKey, issueNumber)
+	return ok
+}
+
+// takePendingCommentEjectFor is takePendingCommentEject for a checkpoint of the run
+// owner; a signal stamped with another run is discarded as stale (#1557), exactly like
+// takePendingReviewEjectFor.
+func (e *Engine) takePendingCommentEjectFor(repoKey string, issueNumber int, owner *mergeTrainWorkerState) bool {
+	e.queuedReviewEjectsMu.Lock()
+	stamp, ok := e.removeCommentEjectLocked(repoKey, issueNumber)
+	e.queuedReviewEjectsMu.Unlock()
+	if !ok {
 		return false
+	}
+	if stamp != owner {
+		e.logf(issueNumber, "merge-train", "discarding stale unprocessed-comment eject signal raised for an earlier run — the settle scan re-raises it while the comment is unprocessed\n")
+		return false
+	}
+	return true
+}
+
+// removeCommentEjectLocked deletes and returns the comment signal's owner for
+// issueNumber. queuedReviewEjectsMu must be held.
+func (e *Engine) removeCommentEjectLocked(repoKey string, issueNumber int) (*mergeTrainWorkerState, bool) {
+	byIssue := e.queuedCommentEjects[repoKey]
+	owner, ok := byIssue[issueNumber]
+	if !ok {
+		return nil, false
 	}
 	delete(byIssue, issueNumber)
 	if len(byIssue) == 0 {
 		delete(e.queuedCommentEjects, repoKey)
 	}
-	return true
+	return owner, true
 }
 
 // clearPendingCommentEject drops a pending comment-eject signal without acting on it —
@@ -4824,7 +4940,7 @@ func (e *Engine) landGreenBatchRun(ctx context.Context, r *trainRun, state *merg
 		// preemption" granularity the runaway guard and the other Hook 2 already
 		// have, rather than threading a resume-with-reduced-membership path back
 		// into this loop.
-		if _, ejectedCount := e.applyPendingReviewEjectsEp(state.ep(), state.projectID, p.owner+"/"+p.repo, newSurvivors); ejectedCount > 0 {
+		if _, ejectedCount := e.applyPendingReviewEjectsEp(state.ep(), state, state.projectID, p.owner+"/"+p.repo, newSurvivors); ejectedCount > 0 {
 			e.logfRepo(p.repoKey(), "merge-train", "%d member(s) ejected for unresolved review findings or unprocessed comments during main-moved rebase for %s/%s — discarding trial; remaining survivors will re-form on a future poll\n", ejectedCount, p.owner, p.repo)
 			e.cleanupTrialArtifacts(p.repoKey(), p.wm, newTrialName)
 			return

@@ -38,8 +38,8 @@ func TestPendingCommentEject_OneShotAndPerRepo(t *testing.T) {
 	if eng.takePendingCommentEject("owner/repo", 1) {
 		t.Fatal("expected no signal before mark")
 	}
-	eng.markPendingCommentEject("owner/repo", 1)
-	eng.markPendingCommentEject("owner/other", 1)
+	eng.markPendingCommentEject("owner/repo", 1, nil)
+	eng.markPendingCommentEject("owner/other", 1, nil)
 	if !eng.takePendingCommentEject("owner/repo", 1) {
 		t.Fatal("expected pending signal for owner/repo#1")
 	}
@@ -50,7 +50,7 @@ func TestPendingCommentEject_OneShotAndPerRepo(t *testing.T) {
 		t.Error("per-repo isolation: owner/other#1 must be independent")
 	}
 
-	eng.markPendingCommentEject("owner/repo", 2)
+	eng.markPendingCommentEject("owner/repo", 2, nil)
 	eng.clearPendingCommentEject("owner/repo", 2)
 	if eng.takePendingCommentEject("owner/repo", 2) {
 		t.Error("cleared signal must not be taken")
@@ -119,9 +119,9 @@ func TestApplyPendingReviewEjects_CommentSignal(t *testing.T) {
 		{item: gh.ProjectItem{Number: 2, ItemID: "PVTI_2", Repo: "owner/repo", Status: "Queued"}},
 		{item: gh.ProjectItem{Number: 3, ItemID: "PVTI_3", Repo: "owner/repo", Status: "Queued"}},
 	}
-	eng.markPendingCommentEject("owner/repo", 2)
+	eng.markPendingCommentEject("owner/repo", 2, nil)
 
-	remaining, ejected := eng.applyPendingReviewEjects("PVT_1", "owner/repo", members)
+	remaining, ejected := eng.applyPendingReviewEjects(nil, "PVT_1", "owner/repo", members)
 	if ejected != 1 || len(remaining) != 2 {
 		t.Fatalf("expected 1 ejected / 2 remaining, got %d / %d", ejected, len(remaining))
 	}
@@ -134,7 +134,7 @@ func TestApplyPendingReviewEjects_CommentSignal(t *testing.T) {
 		t.Errorf("comment eject must not count, got %d", n)
 	}
 	// One-shot.
-	if _, ejected2 := eng.applyPendingReviewEjects("PVT_1", "owner/repo", members); ejected2 != 0 {
+	if _, ejected2 := eng.applyPendingReviewEjects(nil, "PVT_1", "owner/repo", members); ejected2 != 0 {
 		t.Errorf("second apply must be a no-op, ejected %d", ejected2)
 	}
 }
@@ -143,10 +143,10 @@ func TestApplyPendingReviewEjects_BothCauses_ReviewWinsSingleEject(t *testing.T)
 	client := &mockGitHubClient{}
 	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
 	members := []trainMember{{item: gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Repo: "owner/repo", Status: "Queued"}}}
-	eng.markPendingReviewEject("owner/repo", 1, 2)
-	eng.markPendingCommentEject("owner/repo", 1)
+	eng.markPendingReviewEject("owner/repo", 1, 2, nil)
+	eng.markPendingCommentEject("owner/repo", 1, nil)
 
-	remaining, ejected := eng.applyPendingReviewEjects("PVT_1", "owner/repo", members)
+	remaining, ejected := eng.applyPendingReviewEjects(nil, "PVT_1", "owner/repo", members)
 	if ejected != 1 || len(remaining) != 0 {
 		t.Fatalf("expected a single eject, got ejected=%d remaining=%d", ejected, len(remaining))
 	}
@@ -170,7 +170,7 @@ func TestApplyPendingReviewEjects_BothCauses_ReviewWinsSingleEject(t *testing.T)
 func TestDeferRedMember_DropsPendingCommentEject(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng := admissionEngine(t, client)
-	eng.markPendingCommentEject("owner/repo", 1)
+	eng.markPendingCommentEject("owner/repo", 1, nil)
 
 	eng.deferRedMember("PVT_1", "owner", "repo", admissionMembers(1)[0], nil, "")
 
@@ -360,11 +360,12 @@ func TestSettleQueuedComment_StaleSignalClearedWhenUnflagged(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng := settleCommentEngine(t, client, map[int][]gh.Comment{1: nil})
 	eng.store.EnterRepoWorker(mergeTrainKey("owner/repo", defaultPartitionBase))
-	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", defaultPartitionBase), &mergeTrainWorkerState{
+	live := &mergeTrainWorkerState{
 		projectID:    "PVT_1",
 		batchNumbers: map[int]bool{1: true},
-	})
-	eng.markPendingCommentEject("owner/repo", 1)
+	}
+	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", defaultPartitionBase), live)
+	eng.markPendingCommentEject("owner/repo", 1, live)
 
 	eng.settleQueuedReviewFindings(settleCommentBoard(queuedCommentItem(1)))
 
