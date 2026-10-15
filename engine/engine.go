@@ -293,82 +293,82 @@ type Engine struct {
 	// on engines that run the asynchronous driver (New()); nil — the synchronous driver —
 	// everywhere else, so every NewWithDeps engine and its tests are unchanged.
 	trainRuns                             *trainRunStore
-	trainRunsLoadOnce                     sync.Once                     // loads persisted run records on the first settleTrainRuns
-	mergeTrainInFlight                    sync.Map                      // key: trainKey ("owner/repo:baseBranch", mergeTrainKey — since #1648, was bare "owner/repo"), value: *mergeTrainWorkerState; per-(repo,base) train dispatch guard, so one base's train cannot block or be mistaken for another base's train in the same repo
-	mergeTrainEjectionsMu                 sync.Mutex                    // guards mergeTrainEjectionCounts
-	mergeTrainEjectionCounts              map[string]int                // key: "owner/repo#N", ejection count per member — deliberately stays issue-scoped, not re-keyed by base (#1648): an issue belongs to exactly one partition at a time
-	invalidate                            invalidateState               // post-landing invalidation state: landed-member record, comment dedupe, test seam (#2047)
-	overlap                               overlapState                  // fresh-batch overlap filter state: file-list cache, skip counts, test seam (#2047)
-	mergeTrainCIDeferredMu                sync.Mutex                    // guards mergeTrainCIDeferred
-	mergeTrainCIDeferred                  map[string]string             // key: "owner/repo#N", value: head SHA last deferred at by the #1821 admission gate — suppresses a repeat comment when the same SHA is re-deferred (R9 ping-pong backstop); in-memory only, cleared when the member is next admitted non-red
-	mergeTrainCloneSkipMu                 sync.Mutex                    // guards mergeTrainCloneSkipCounts
-	mergeTrainCloneSkipCounts             map[string]int                // key: "owner/repo"; consecutive ensureRepoReady ErrSkipItem streak for prepareTrainWorker's batch[0] anchor call — batch[0] can differ across polls, so this is repo-keyed rather than item-keyed like mergeTrainEjectionCounts (#1543 follow-up: identity-gated retry boundary can wedge behind a since-rotated anchor). Deliberately NOT re-keyed by base (#1648): a bare-clone failure is a property of the repo's git remote, shared by every base partition — re-keying would fragment one genuine repo-level failure signal into N spurious per-base ones.
-	mergeTrainTrialsMu                    sync.Mutex                    // guards mergeTrainTrials
-	mergeTrainTrials                      map[string][]time.Time        // key: trainKey ("owner/repo:baseBranch", mergeTrainKey — since #1648, was bare "owner/repo"), trial timestamps for runaway guard (ADR-059 D8); one base's trials never count toward a sibling base's threshold in the same repo
-	mergeTrainInfraMu                     sync.Mutex                    // guards mergeTrainInfraCooldown (#2052)
-	mergeTrainInfraCooldown               map[string]time.Time          // key: trainKey; earliest time a train for that (repo,base) partition may be re-dispatched after a trial was abandoned for CI infrastructure (TrainCIInfra) — see ADR 2052
-	trainNotPassedAsRed                   atomic.Bool                   // test seam: SetTrainNotPassedAsRedForTest (#2296)
-	trainStaleAsRed                       atomic.Bool                   // test seam: SetTrainStaleAsRedForTest (#2298)
-	landing                               landingState                  // merge-train landing settle wait, keep-green-trial seams and failure-comment dedup (#2297)
-	pushGuardDisabled                     atomic.Bool                   // test seam: SetPushZeroAheadGuardDisabledForTest (#2089)
-	completionMergedCheckOff              atomic.Bool                   // test seam: SetCompletionMergedCheckDisabledForTest (#2299)
-	mergeInFlightGuardOff                 atomic.Bool                   // test seam: SetMergeInFlightGuardDisabledForTest (#2299)
-	mergedPushGuardOff                    atomic.Bool                   // test seam: SetMergedPushGuardDisabledForTest (#2299)
-	stageFirstRoutingOff                  atomic.Bool                   // test seam: SetStageFirstRoutingDisabledForTest (#2220)
-	sessionForcedResumeOff                atomic.Bool                   // test seam: SetSessionDecisionForcedResumeForTest (#2300) — the option-governed decision always resumes
-	continuationExemptionOff              atomic.Bool                   // test seam: SetContinuationExemptionDisabledForTest (#2300) — a continuation is governed by the option like a re-entry
-	sessionRootForTest                    atomic.Pointer[string]        // test seam: SetSessionDirForTest (#2300) — root under which the session decision looks for session files
-	ungrantableDenialOff                  atomic.Bool                   // test seam: SetUngrantableDenialDisabledForTest (#2301)
-	orphanAwaitingInputOff                atomic.Bool                   // test seam: SetOrphanAwaitingInputClearDisabledForTest (#1970)
-	commentBlockedOnInputOff              atomic.Bool                   // test seam: SetCommentBlockedOnInputDisabledForTest (#2280)
-	restoreRebaseDisabledForTest          bool                          // test seam: SetCommentRebaseRestoreDisabledForTest (#2150); guarded by mu, applied to managers registered later too
-	branchSyncDisabledForTest             bool                          // test seam: SetBranchSyncDisabledForTest (#2295); guarded by mu, applied to managers registered later too
-	bareLeasePushForTest                  bool                          // test seam: SetBareLeasePushForTest (#2295); guarded by mu, applied to managers registered later too
-	pureRebaseDisabledForTest             bool                          // test seam: SetCatchUpPureRebaseDisabledForTest (#2150); guarded by mu, applied to managers registered later too
-	actionsDegradeLogged                  atomic.Bool                   // set once the notice that a workflow-run read or re-run was refused (`actions` revoked at runtime or never accepted) has been logged (#2052 R7)
-	ciInfraTiming                         ciInfraTiming                 // test-shrinkable CI-infrastructure dwells (#2052); zero = defaults
-	startupWatchMu                        sync.Mutex                    // guards startupWatches
-	startupWatches                        map[string]*prStartupState    // key: "owner/repo#PR"; the stage wait_for_ci gate's retrigger state, reset when the PR's head SHA moves (#2052 R6) — in memory only, so a restart may grant one extra retrigger
-	probeDriftConvergenceDisabledForTest  bool                          // neutralisation seam (#2080): the drift ledger never suppresses a repeat, restoring the pre-fix per-poll invalidation
-	probeTerminalDriftSkipDisabledForTest bool                          // neutralisation seam (#2080): terminal items are no longer exempt from the linkage-drift check
-	prFactsRotation                       atomic.Int64                  // polls one full settlePRFacts rotation takes (#2122): ceil(candidates that can spend check budget / check budget), >= 1; attention tolerates a verdict that old
-	prFactsAttemptAt                      map[string]time.Time          // last poll a candidate spent REST/check budget, keyed repo#number; poll goroutine only (#2122), so a failing or closed item rotates to the back instead of holding the front
-	prFactsRefreshDisabledForTest         bool                          // neutralisation seam (#2122): the overseer PR-fact writers (probe scalar apply, settlePRFacts) are off
-	probeDrift                            probeDriftLedger              // the probe loop's linkage-drift ledger (#2080) — per-item last-invalidated pair and loop counter; in memory only
-	statusLine                            displayFieldState             // the display-only status-line writer's state (#2048) — in memory only; a restart forgets what was written
-	lastActivity                          displayFieldState             // display-only "Last activity" date field writer state (#2049) — in memory only
-	lastRun                               displayFieldState             // display-only "Last run" text field writer state (#2049) — in memory only
-	displayFieldWarn                      displayFieldWarnState         // last display-field panel aggregate (#2218) — in memory only; a restart recomputes it
-	flakeRerunMu                          sync.Mutex                    // guards flakeReruns and flakeRerunDisabled
-	layer1OffBoardMu                      sync.Mutex                    // guards layer1OffBoard
-	layer1OffBoard                        map[string]time.Time          // key: "<projectID>|<repo>#<n>" → expiry; Layer 1's negative cache of "not on the board" lookups (#2093) — in memory only
-	flakeReruns                           map[string]*prFlakeState      // key: "owner/repo#PR"; the stage wait_for_ci gate's flake re-run budget (#2072), reset when the PR's head SHA moves — in memory only, so a restart may grant one extra re-run
-	flakeRerunDisabled                    bool                          // test-only neutralisation seam (SetCIFlakeRerunDisabledForTest)
-	feedbackGapMu                         sync.Mutex                    // guards feedbackGaps
-	feedbackGaps                          map[string]int                // key: "owner/repo#N:<sorted held feedback IDs>"; value: how many times the feedback gate repaired the dispatcher's input for exactly that gap (#2160, ADR 2160) — in memory only, so a restart may grant a fresh budget
-	mergeTrainRunawayMu                   sync.Mutex                    // guards mergeTrainRunawayAlerted AND serializes fireRunawayGuard's pause+alert critical section across all three call sites (Hook 1 x2, Hook 2) — see fireRunawayGuard (#1533). Still a single engine-wide mutex, not sharded per (repo,base) — #1648 widens its blast radius to also serialize concurrent per-base workers within the same repo, not just across repos, but the trade-off (rare/exceptional event) is unchanged.
-	mergeTrainRunawayAlerted              map[string]int                // key: "trainKey#N" (trainKey a mergeTrainKey "owner/repo:baseBranch" since #1648, was bare "owner/repo#N"); value: the trial count in effect when this member was last alerted. A later call is treated as already-alerted only while its own count is <= the recorded value — trials cannot increase while the guard keeps the queue paused, so an increase can only mean an operator manually resumed the member (removing fabrik:paused) and it genuinely tripped again, which must produce a fresh alert (#1533 review, finding 2). Also cleared wholesale per-trainKey by resetTrialCounter (the guard's own "episode ends" signal — a successful land) (#1533)
-	queuedReviewEjectsMu                  sync.Mutex                    // guards queuedReviewEjects
-	queuedReviewEjects                    map[string]map[int]int        // key: "owner/repo" -> issue number -> unresolved finding count; pending-eject signal a settle scan leaves for an in-flight merge-train worker to consume at its own checkpoints (#1208). Deliberately NOT re-keyed by base (#1648): keyed by issue number within the repo bucket, and an issue belongs to exactly one partition's live batch at a time, so two workers sharing this repo-level map never collide.
-	queuedCommentEjects                   map[string]map[int]struct{}   // key: "owner/repo" -> issue number; pending-eject signal for an unprocessed human comment on a Queued member (#1863), the comment-cause sibling of queuedReviewEjects. Guarded by queuedReviewEjectsMu, keyed by bare repo for the same ADR-1648 reason.
-	sentinelProbeFailuresMu               sync.Mutex                    // guards sentinelProbeFailures
-	sentinelProbeFailures                 map[string]int                // key: "owner/repo#N"; consecutive scan cycles in which probeSentinelLive itself failed (R4, #1779) for a PID<=0 worker whose sentinel could not be verified either way. Bounded by sentinelProbeUnverifiableCycleLimit before falling back to the plain timeout clear, logged as unverified. Scan-goroutine-local bookkeeping, mirroring mergeTrainRunawayAlerted's per-episode map shape rather than itemstate.Store state — nothing outside the scan needs to observe it. Cleared whenever the worker leaves the unverifiable state: found live (PID adopted), found dead (cleared), or itself cleared.
-	issueCtxs                             sync.Map                      // key: issueKey string, value: issueCtxEntry; per-issue context for kill-reason propagation
-	pauseIssueMuGuard                     sync.Mutex                    // guards pauseIssueMu itself (creation, refcounting, deletion) — distinct from the per-issue *sync.Mutex each entry embeds
-	pauseIssueMu                          map[string]*pauseIssueMuEntry // key: issueKey string; refcounted per-issue mutex serializing concurrent pauseInterruptedIssue calls for the same issue (ADR-1393 — a TUI stop and a daemon shutdown pause can race for the same in-flight issue). Entries are deleted once no caller holds a reference, so this does not grow unboundedly over the daemon's lifetime (review finding on #1393).
-	baseBranchWarnedSet                   sync.Map                      // key: "owner/repo#N:branch"; prevents repeated fallback comments for bad base: labels
-	ciGateCoverageWarnedSet               sync.Map                      // key: "owner/repo|stage"; dedups the R4 degenerate-CI-gate-coverage log warning (ADR-1441)
-	unknownMergeClocks                    unknownMergeClocks            // per item+PR-head continuous unknown-merge-state clocks (#2302); in memory by design — a restart starts them again
-	ciBackstopLiveEvaluated               sync.Map                      // key: "owner/repo#N"; items settleAwaitingCIScan has run the live-data handler chain for since this process started (#2059 R2). Until set, the CIBackstopTimeout backstop may not escalate the item blind. In memory by design: a restart clears it, granting each awaiting-ci item one live evaluation per daemon start. Not deleted when the label clears — bounded by item count.
-	ciBackstopResumeSeen                  sync.Map                      // key: "owner/repo#N"; value: time.Time — the newest fabrik:paused removal time the CIBackstopTimeout backstop read live (#2059 R1). Shared by every effectiveAnchor caller since #2064 (each tests it against its own timeout window). Skip-only memo: a memoised resume still inside the caller's timeout lets it skip without re-paging the events log; escalation is never decided from it, always from a fresh live read.
-	mergeTrainBatchSnapshotSeen           sync.Map                      // key: trainKey ("owner/repo:baseBranch", mergeTrainKey — since #1648, was bare "owner/repo"), value: string signature (sorted item numbers) of the last-logged Queued batch snapshot
-	claudeUsageLimitMu                    sync.Mutex                    // guards claudeUsageLimitedUntil
-	claudeUsageLimitedUntil               time.Time                     // zero = not usage limited; account-wide Claude dispatch usage-limit hold deadline (see usage_limit_backoff.go)
-	events                                chan tui.Event                // nil in tests / plain-text mode; TUI goroutine consumes
-	logFile                               *os.File                      // persistent log file at .fabrik/fabrik.log; nil if not opened
-	logMu                                 sync.Mutex                    // serializes concurrent writes to logFile
-	logSink                               atomic.Pointer[LogSink]       // optional per-Engine plain-text sink (#2247); nil: print to stdout
-	webhookMgr                            eventIngestionManager         // nil when no event-ingestion transport is active (#1142)
+	trainRunsLoadOnce                     sync.Once                                 // loads persisted run records on the first settleTrainRuns
+	mergeTrainInFlight                    sync.Map                                  // key: trainKey ("owner/repo:baseBranch", mergeTrainKey — since #1648, was bare "owner/repo"), value: *mergeTrainWorkerState; per-(repo,base) train dispatch guard, so one base's train cannot block or be mistaken for another base's train in the same repo
+	mergeTrainEjectionsMu                 sync.Mutex                                // guards mergeTrainEjectionCounts
+	mergeTrainEjectionCounts              map[string]int                            // key: "owner/repo#N", ejection count per member — deliberately stays issue-scoped, not re-keyed by base (#1648): an issue belongs to exactly one partition at a time
+	invalidate                            invalidateState                           // post-landing invalidation state: landed-member record, comment dedupe, test seam (#2047)
+	overlap                               overlapState                              // fresh-batch overlap filter state: file-list cache, skip counts, test seam (#2047)
+	mergeTrainCIDeferredMu                sync.Mutex                                // guards mergeTrainCIDeferred
+	mergeTrainCIDeferred                  map[string]string                         // key: "owner/repo#N", value: head SHA last deferred at by the #1821 admission gate — suppresses a repeat comment when the same SHA is re-deferred (R9 ping-pong backstop); in-memory only, cleared when the member is next admitted non-red
+	mergeTrainCloneSkipMu                 sync.Mutex                                // guards mergeTrainCloneSkipCounts
+	mergeTrainCloneSkipCounts             map[string]int                            // key: "owner/repo"; consecutive ensureRepoReady ErrSkipItem streak for prepareTrainWorker's batch[0] anchor call — batch[0] can differ across polls, so this is repo-keyed rather than item-keyed like mergeTrainEjectionCounts (#1543 follow-up: identity-gated retry boundary can wedge behind a since-rotated anchor). Deliberately NOT re-keyed by base (#1648): a bare-clone failure is a property of the repo's git remote, shared by every base partition — re-keying would fragment one genuine repo-level failure signal into N spurious per-base ones.
+	mergeTrainTrialsMu                    sync.Mutex                                // guards mergeTrainTrials
+	mergeTrainTrials                      map[string][]time.Time                    // key: trainKey ("owner/repo:baseBranch", mergeTrainKey — since #1648, was bare "owner/repo"), trial timestamps for runaway guard (ADR-059 D8); one base's trials never count toward a sibling base's threshold in the same repo
+	mergeTrainInfraMu                     sync.Mutex                                // guards mergeTrainInfraCooldown (#2052)
+	mergeTrainInfraCooldown               map[string]time.Time                      // key: trainKey; earliest time a train for that (repo,base) partition may be re-dispatched after a trial was abandoned for CI infrastructure (TrainCIInfra) — see ADR 2052
+	trainNotPassedAsRed                   atomic.Bool                               // test seam: SetTrainNotPassedAsRedForTest (#2296)
+	trainStaleAsRed                       atomic.Bool                               // test seam: SetTrainStaleAsRedForTest (#2298)
+	landing                               landingState                              // merge-train landing settle wait, keep-green-trial seams and failure-comment dedup (#2297)
+	pushGuardDisabled                     atomic.Bool                               // test seam: SetPushZeroAheadGuardDisabledForTest (#2089)
+	completionMergedCheckOff              atomic.Bool                               // test seam: SetCompletionMergedCheckDisabledForTest (#2299)
+	mergeInFlightGuardOff                 atomic.Bool                               // test seam: SetMergeInFlightGuardDisabledForTest (#2299)
+	mergedPushGuardOff                    atomic.Bool                               // test seam: SetMergedPushGuardDisabledForTest (#2299)
+	stageFirstRoutingOff                  atomic.Bool                               // test seam: SetStageFirstRoutingDisabledForTest (#2220)
+	sessionForcedResumeOff                atomic.Bool                               // test seam: SetSessionDecisionForcedResumeForTest (#2300) — the option-governed decision always resumes
+	continuationExemptionOff              atomic.Bool                               // test seam: SetContinuationExemptionDisabledForTest (#2300) — a continuation is governed by the option like a re-entry
+	sessionRootForTest                    atomic.Pointer[string]                    // test seam: SetSessionDirForTest (#2300) — root under which the session decision looks for session files
+	ungrantableDenialOff                  atomic.Bool                               // test seam: SetUngrantableDenialDisabledForTest (#2301)
+	orphanAwaitingInputOff                atomic.Bool                               // test seam: SetOrphanAwaitingInputClearDisabledForTest (#1970)
+	commentBlockedOnInputOff              atomic.Bool                               // test seam: SetCommentBlockedOnInputDisabledForTest (#2280)
+	restoreRebaseDisabledForTest          bool                                      // test seam: SetCommentRebaseRestoreDisabledForTest (#2150); guarded by mu, applied to managers registered later too
+	branchSyncDisabledForTest             bool                                      // test seam: SetBranchSyncDisabledForTest (#2295); guarded by mu, applied to managers registered later too
+	bareLeasePushForTest                  bool                                      // test seam: SetBareLeasePushForTest (#2295); guarded by mu, applied to managers registered later too
+	pureRebaseDisabledForTest             bool                                      // test seam: SetCatchUpPureRebaseDisabledForTest (#2150); guarded by mu, applied to managers registered later too
+	actionsDegradeLogged                  atomic.Bool                               // set once the notice that a workflow-run read or re-run was refused (`actions` revoked at runtime or never accepted) has been logged (#2052 R7)
+	ciInfraTiming                         ciInfraTiming                             // test-shrinkable CI-infrastructure dwells (#2052); zero = defaults
+	startupWatchMu                        sync.Mutex                                // guards startupWatches
+	startupWatches                        map[string]*prStartupState                // key: "owner/repo#PR"; the stage wait_for_ci gate's retrigger state, reset when the PR's head SHA moves (#2052 R6) — in memory only, so a restart may grant one extra retrigger
+	probeDriftConvergenceDisabledForTest  bool                                      // neutralisation seam (#2080): the drift ledger never suppresses a repeat, restoring the pre-fix per-poll invalidation
+	probeTerminalDriftSkipDisabledForTest bool                                      // neutralisation seam (#2080): terminal items are no longer exempt from the linkage-drift check
+	prFactsRotation                       atomic.Int64                              // polls one full settlePRFacts rotation takes (#2122): ceil(candidates that can spend check budget / check budget), >= 1; attention tolerates a verdict that old
+	prFactsAttemptAt                      map[string]time.Time                      // last poll a candidate spent REST/check budget, keyed repo#number; poll goroutine only (#2122), so a failing or closed item rotates to the back instead of holding the front
+	prFactsRefreshDisabledForTest         bool                                      // neutralisation seam (#2122): the overseer PR-fact writers (probe scalar apply, settlePRFacts) are off
+	probeDrift                            probeDriftLedger                          // the probe loop's linkage-drift ledger (#2080) — per-item last-invalidated pair and loop counter; in memory only
+	statusLine                            displayFieldState                         // the display-only status-line writer's state (#2048) — in memory only; a restart forgets what was written
+	lastActivity                          displayFieldState                         // display-only "Last activity" date field writer state (#2049) — in memory only
+	lastRun                               displayFieldState                         // display-only "Last run" text field writer state (#2049) — in memory only
+	displayFieldWarn                      displayFieldWarnState                     // last display-field panel aggregate (#2218) — in memory only; a restart recomputes it
+	flakeRerunMu                          sync.Mutex                                // guards flakeReruns and flakeRerunDisabled
+	layer1OffBoardMu                      sync.Mutex                                // guards layer1OffBoard
+	layer1OffBoard                        map[string]time.Time                      // key: "<projectID>|<repo>#<n>" → expiry; Layer 1's negative cache of "not on the board" lookups (#2093) — in memory only
+	flakeReruns                           map[string]*prFlakeState                  // key: "owner/repo#PR"; the stage wait_for_ci gate's flake re-run budget (#2072), reset when the PR's head SHA moves — in memory only, so a restart may grant one extra re-run
+	flakeRerunDisabled                    bool                                      // test-only neutralisation seam (SetCIFlakeRerunDisabledForTest)
+	feedbackGapMu                         sync.Mutex                                // guards feedbackGaps
+	feedbackGaps                          map[string]int                            // key: "owner/repo#N:<sorted held feedback IDs>"; value: how many times the feedback gate repaired the dispatcher's input for exactly that gap (#2160, ADR 2160) — in memory only, so a restart may grant a fresh budget
+	mergeTrainRunawayMu                   sync.Mutex                                // guards mergeTrainRunawayAlerted AND serializes fireRunawayGuard's pause+alert critical section across all three call sites (Hook 1 x2, Hook 2) — see fireRunawayGuard (#1533). Still a single engine-wide mutex, not sharded per (repo,base) — #1648 widens its blast radius to also serialize concurrent per-base workers within the same repo, not just across repos, but the trade-off (rare/exceptional event) is unchanged.
+	mergeTrainRunawayAlerted              map[string]int                            // key: "trainKey#N" (trainKey a mergeTrainKey "owner/repo:baseBranch" since #1648, was bare "owner/repo#N"); value: the trial count in effect when this member was last alerted. A later call is treated as already-alerted only while its own count is <= the recorded value — trials cannot increase while the guard keeps the queue paused, so an increase can only mean an operator manually resumed the member (removing fabrik:paused) and it genuinely tripped again, which must produce a fresh alert (#1533 review, finding 2). Also cleared wholesale per-trainKey by resetTrialCounter (the guard's own "episode ends" signal — a successful land) (#1533)
+	queuedReviewEjectsMu                  sync.Mutex                                // guards queuedReviewEjects
+	queuedReviewEjects                    map[string]map[int]pendingReviewEject     // key: "owner/repo" -> issue number -> unresolved finding count + owning run; pending-eject signal a settle scan leaves for an in-flight merge-train worker to consume at its own checkpoints (#1208). Each signal is stamped with the run it was raised for and acted on only by that run (#1557). Deliberately NOT re-keyed by base (#1648): keyed by issue number within the repo bucket, and an issue belongs to exactly one partition's live batch at a time, so two workers sharing this repo-level map never collide.
+	queuedCommentEjects                   map[string]map[int]*mergeTrainWorkerState // key: "owner/repo" -> issue number -> owning run; pending-eject signal for an unprocessed human comment on a Queued member (#1863), the comment-cause sibling of queuedReviewEjects (same run stamp, #1557). Guarded by queuedReviewEjectsMu, keyed by bare repo for the same ADR-1648 reason.
+	sentinelProbeFailuresMu               sync.Mutex                                // guards sentinelProbeFailures
+	sentinelProbeFailures                 map[string]int                            // key: "owner/repo#N"; consecutive scan cycles in which probeSentinelLive itself failed (R4, #1779) for a PID<=0 worker whose sentinel could not be verified either way. Bounded by sentinelProbeUnverifiableCycleLimit before falling back to the plain timeout clear, logged as unverified. Scan-goroutine-local bookkeeping, mirroring mergeTrainRunawayAlerted's per-episode map shape rather than itemstate.Store state — nothing outside the scan needs to observe it. Cleared whenever the worker leaves the unverifiable state: found live (PID adopted), found dead (cleared), or itself cleared.
+	issueCtxs                             sync.Map                                  // key: issueKey string, value: issueCtxEntry; per-issue context for kill-reason propagation
+	pauseIssueMuGuard                     sync.Mutex                                // guards pauseIssueMu itself (creation, refcounting, deletion) — distinct from the per-issue *sync.Mutex each entry embeds
+	pauseIssueMu                          map[string]*pauseIssueMuEntry             // key: issueKey string; refcounted per-issue mutex serializing concurrent pauseInterruptedIssue calls for the same issue (ADR-1393 — a TUI stop and a daemon shutdown pause can race for the same in-flight issue). Entries are deleted once no caller holds a reference, so this does not grow unboundedly over the daemon's lifetime (review finding on #1393).
+	baseBranchWarnedSet                   sync.Map                                  // key: "owner/repo#N:branch"; prevents repeated fallback comments for bad base: labels
+	ciGateCoverageWarnedSet               sync.Map                                  // key: "owner/repo|stage"; dedups the R4 degenerate-CI-gate-coverage log warning (ADR-1441)
+	unknownMergeClocks                    unknownMergeClocks                        // per item+PR-head continuous unknown-merge-state clocks (#2302); in memory by design — a restart starts them again
+	ciBackstopLiveEvaluated               sync.Map                                  // key: "owner/repo#N"; items settleAwaitingCIScan has run the live-data handler chain for since this process started (#2059 R2). Until set, the CIBackstopTimeout backstop may not escalate the item blind. In memory by design: a restart clears it, granting each awaiting-ci item one live evaluation per daemon start. Not deleted when the label clears — bounded by item count.
+	ciBackstopResumeSeen                  sync.Map                                  // key: "owner/repo#N"; value: time.Time — the newest fabrik:paused removal time the CIBackstopTimeout backstop read live (#2059 R1). Shared by every effectiveAnchor caller since #2064 (each tests it against its own timeout window). Skip-only memo: a memoised resume still inside the caller's timeout lets it skip without re-paging the events log; escalation is never decided from it, always from a fresh live read.
+	mergeTrainBatchSnapshotSeen           sync.Map                                  // key: trainKey ("owner/repo:baseBranch", mergeTrainKey — since #1648, was bare "owner/repo"), value: string signature (sorted item numbers) of the last-logged Queued batch snapshot
+	claudeUsageLimitMu                    sync.Mutex                                // guards claudeUsageLimitedUntil
+	claudeUsageLimitedUntil               time.Time                                 // zero = not usage limited; account-wide Claude dispatch usage-limit hold deadline (see usage_limit_backoff.go)
+	events                                chan tui.Event                            // nil in tests / plain-text mode; TUI goroutine consumes
+	logFile                               *os.File                                  // persistent log file at .fabrik/fabrik.log; nil if not opened
+	logMu                                 sync.Mutex                                // serializes concurrent writes to logFile
+	logSink                               atomic.Pointer[LogSink]                   // optional per-Engine plain-text sink (#2247); nil: print to stdout
+	webhookMgr                            eventIngestionManager                     // nil when no event-ingestion transport is active (#1142)
 	// heartbeatIntervalOverride overrides the package-level heartbeatInterval constant
 	// when non-zero. Used by tests to reduce the heartbeat period to sub-millisecond.
 	heartbeatIntervalOverride time.Duration
@@ -701,8 +701,8 @@ func New(cfg Config) (*Engine, error) {
 		mergeTrainCloneSkipCounts: make(map[string]int),
 		mergeTrainTrials:          make(map[string][]time.Time),
 		mergeTrainRunawayAlerted:  make(map[string]int),
-		queuedReviewEjects:        make(map[string]map[int]int),
-		queuedCommentEjects:       make(map[string]map[int]struct{}),
+		queuedReviewEjects:        make(map[string]map[int]pendingReviewEject),
+		queuedCommentEjects:       make(map[string]map[int]*mergeTrainWorkerState),
 		pauseIssueMu:              make(map[string]*pauseIssueMuEntry),
 		sentinelProbeFailures:     make(map[string]int),
 		backoffPrevMultiplier:     1,
@@ -818,8 +818,8 @@ func NewWithDeps(cfg Config, client GitHubClient, claude ClaudeInvoker, worktree
 		mergeTrainCloneSkipCounts: make(map[string]int),
 		mergeTrainTrials:          make(map[string][]time.Time),
 		mergeTrainRunawayAlerted:  make(map[string]int),
-		queuedReviewEjects:        make(map[string]map[int]int),
-		queuedCommentEjects:       make(map[string]map[int]struct{}),
+		queuedReviewEjects:        make(map[string]map[int]pendingReviewEject),
+		queuedCommentEjects:       make(map[string]map[int]*mergeTrainWorkerState),
 		pauseIssueMu:              make(map[string]*pauseIssueMuEntry),
 		sentinelProbeFailures:     make(map[string]int),
 		backoffPrevMultiplier:     1,

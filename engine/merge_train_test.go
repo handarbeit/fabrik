@@ -1637,7 +1637,7 @@ func TestTakePendingReviewEject_UnflaggedMember_NoOp(t *testing.T) {
 func TestMarkAndTakePendingReviewEject_TakeClearsTheSignal(t *testing.T) {
 	eng := trainTestEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
 
-	eng.markPendingReviewEject("owner/repo", 1, 3)
+	eng.markPendingReviewEject("owner/repo", 1, 3, nil)
 
 	count, ok := eng.takePendingReviewEject("owner/repo", 1)
 	if !ok || count != 3 {
@@ -1654,9 +1654,9 @@ func TestMarkAndTakePendingReviewEject_TakeClearsTheSignal(t *testing.T) {
 func TestMarkPendingReviewEject_ScopedPerRepoAndIssue(t *testing.T) {
 	eng := trainTestEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
 
-	eng.markPendingReviewEject("owner/repo", 1, 1)
-	eng.markPendingReviewEject("owner/repo", 2, 5)
-	eng.markPendingReviewEject("owner/other", 1, 9)
+	eng.markPendingReviewEject("owner/repo", 1, 1, nil)
+	eng.markPendingReviewEject("owner/repo", 2, 5, nil)
+	eng.markPendingReviewEject("owner/other", 1, 9, nil)
 
 	if count, ok := eng.takePendingReviewEject("owner/repo", 1); !ok || count != 1 {
 		t.Errorf("owner/repo#1: got (%d, %v), want (1, true)", count, ok)
@@ -1679,9 +1679,9 @@ func TestApplyPendingReviewEjects_EjectsFlaggedMembersOnly(t *testing.T) {
 		{item: gh.ProjectItem{Number: 2, ItemID: "PVTI_2", Repo: "owner/repo", Status: "Queued"}},
 		{item: gh.ProjectItem{Number: 3, ItemID: "PVTI_3", Repo: "owner/repo", Status: "Queued"}},
 	}
-	eng.markPendingReviewEject("owner/repo", 2, 4)
+	eng.markPendingReviewEject("owner/repo", 2, 4, nil)
 
-	remaining, ejectedCount := eng.applyPendingReviewEjects("PVT_1", "owner/repo", members)
+	remaining, ejectedCount := eng.applyPendingReviewEjects(nil, "PVT_1", "owner/repo", members)
 
 	if ejectedCount != 1 {
 		t.Fatalf("expected ejectedCount=1, got %d", ejectedCount)
@@ -1700,7 +1700,7 @@ func TestApplyPendingReviewEjects_EjectsFlaggedMembersOnly(t *testing.T) {
 	}
 
 	// The signal is one-shot — a second call with the same members must not re-eject.
-	remaining2, ejectedCount2 := eng.applyPendingReviewEjects("PVT_1", "owner/repo", members)
+	remaining2, ejectedCount2 := eng.applyPendingReviewEjects(nil, "PVT_1", "owner/repo", members)
 	if ejectedCount2 != 0 || len(remaining2) != 3 {
 		t.Errorf("expected second apply to be a no-op (signal already consumed), got ejectedCount=%d remaining=%d", ejectedCount2, len(remaining2))
 	}
@@ -1714,7 +1714,7 @@ func TestApplyPendingReviewEjects_NoFlags_ReturnsAllUnchanged(t *testing.T) {
 		{item: gh.ProjectItem{Number: 2, ItemID: "PVTI_2", Repo: "owner/repo", Status: "Queued"}},
 	}
 
-	remaining, ejectedCount := eng.applyPendingReviewEjects("PVT_1", "owner/repo", members)
+	remaining, ejectedCount := eng.applyPendingReviewEjects(nil, "PVT_1", "owner/repo", members)
 	if ejectedCount != 0 {
 		t.Errorf("expected ejectedCount=0, got %d", ejectedCount)
 	}
@@ -2341,14 +2341,13 @@ func TestMergeTrainWorker_PendingReviewEject_DiscardsGreenTrialAndReforms(t *tes
 	eng.worktreeManagers["owner/repo"] = wm
 	eng.mu.Unlock()
 
-	// Flag #1 for a pending review-finding eject BEFORE the worker runs — simulates
-	// settleQueuedReviewFindings having observed an unresolved thread on #1 while a
-	// worker was already in flight for this repo.
-	eng.markPendingReviewEject("owner/repo", 1, 2)
-
 	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1"), makeTrainItem(2, "Issue 2")}
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_1", trialName: fmt.Sprintf("merge-train-repo-%d", time.Now().Unix())}
 	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
+	// Flag #1 for a pending review-finding eject, stamped with the claimed run, BEFORE the
+	// worker runs — simulates settleQueuedReviewFindings having observed an unresolved
+	// thread on #1 while a worker was already in flight for this repo.
+	eng.markPendingReviewEject("owner/repo", 1, 2, state)
 	eng.store.EnterRepoWorker(mergeTrainKey("owner/repo", "main"))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -4957,14 +4956,13 @@ func TestMergeTrainWorker_SingletonWithPendingReviewEject_EjectsInsteadOfFastPat
 	eng.worktreeManagers["owner/repo"] = wm
 	eng.mu.Unlock()
 
-	// Flag #1 for a pending review-finding eject BEFORE the worker runs —
-	// simulates settleQueuedReviewFindings having observed an unresolved
-	// thread on #1 while a worker was already in flight for this repo.
-	eng.markPendingReviewEject("owner/repo", 1, 2)
-
 	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1")}
 	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_1", trialName: fmt.Sprintf("merge-train-repo-%d", time.Now().Unix())}
 	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
+	// Flag #1 for a pending review-finding eject, stamped with the claimed run, BEFORE the
+	// worker runs — simulates settleQueuedReviewFindings having observed an unresolved
+	// thread on #1 while a worker was already in flight for this repo.
+	eng.markPendingReviewEject("owner/repo", 1, 2, state)
 	eng.store.EnterRepoWorker(mergeTrainKey("owner/repo", "main"))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -6487,13 +6485,14 @@ func TestLandOneAtATime_PendingReviewEject_SkipsLandingAndEjectsInstead(t *testi
 	// trial validates — simulating settleQueuedReviewFindings having flagged it
 	// mid-CI-wait, just before landOneAtATime's own checkpoint would otherwise
 	// decide its fate via the normal green/red switch.
+	var state *mergeTrainWorkerState
 	eng.trainValidateFn = func(_ context.Context, members []trainMember) (TrainCIResult, *trainCIDiagnostic) {
 		present := make(map[int]bool, len(members))
 		for _, m := range members {
 			present[m.item.Number] = true
 		}
 		if len(members) == 1 && members[0].item.Number == 2 {
-			eng.markPendingReviewEject("owner/repo", 2, 5)
+			eng.markPendingReviewEject("owner/repo", 2, 5, state)
 		}
 		if present[1] && present[2] {
 			return TrainCIRed, &trainCIDiagnostic{Note: "interaction", PRNum: 900, TrialSHA: "seam-sha"}
@@ -6502,7 +6501,7 @@ func TestLandOneAtATime_PendingReviewEject_SkipsLandingAndEjectsInstead(t *testi
 	}
 
 	batch := makeSeamBatch(2)
-	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_1"}
+	state = &mergeTrainWorkerState{assembling: true, projectID: "PVT_1"}
 	eng.mergeTrainInFlight.Store(mergeTrainKey("owner/repo", "main"), state)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -6953,7 +6952,7 @@ func TestLandGreenBatch_PendingReviewEjectDuringRebase_DiscardsTrialWithoutLandi
 
 	// Flag #1 for a pending review-finding eject — simulates settleQueuedReviewFindings
 	// observing an unresolved thread on #1 while the rebase re-validate is in flight.
-	eng.markPendingReviewEject("owner/repo", 1, 3)
+	eng.markPendingReviewEject("owner/repo", 1, 3, state)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

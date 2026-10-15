@@ -401,7 +401,7 @@ func TestSingletonCatchUp_TOCTOU_HeadChangesBetweenGreenAndLanding(t *testing.T)
 func TestSingletonCatchUp_PendingReviewEjectIsHonouredDuringTheWait(t *testing.T) {
 	w := newCatchUpWorld(t)
 	w.checks.Store([]gh.CheckRun{{ID: 1, Name: "build", Status: "in_progress"}})
-	w.eng.markPendingReviewEject("owner/repo", 9, 1)
+	w.eng.markPendingReviewEject("owner/repo", 9, 1, w.state)
 
 	if _, decided := w.run(); !decided {
 		t.Fatal("an applied eject decides the poll")

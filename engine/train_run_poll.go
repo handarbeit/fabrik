@@ -373,11 +373,11 @@ func (e *Engine) adoptTrainRun(ctx context.Context, board *gh.ProjectBoard, rec 
 	for _, it := range items {
 		switch e.liveLandingState(state, p, it) {
 		case liveMoved:
-			e.mergeTrainInFlight.Delete(rec.TrainKey)
+			e.releaseTrainClaim(rec.TrainKey)
 			e.discardTrainRun(rec, wm, fmt.Sprintf("member #%d already moved off %s (live status)", it.Number, hs.Name))
 			return
 		case liveReadFailed:
-			e.mergeTrainInFlight.Delete(rec.TrainKey)
+			e.releaseTrainClaim(rec.TrainKey)
 			return // a live read failed: try again next poll
 		}
 	}
