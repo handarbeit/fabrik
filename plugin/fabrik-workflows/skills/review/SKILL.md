@@ -294,6 +294,32 @@ Rules:
 
 Once the spawn is processed, this issue gets `fabrik:blocked` automatically and will not resume until the new child closes.
 
+#### Declaring sibling ordering with `DEPENDS_ON`
+
+If one block in the same output needs another block's result, declare it with an optional `DEPENDS_ON:` line placed **immediately after** `TITLE:` (no blank line between them), instead of writing "depends on slice N" in prose. Prose is invisible to the engine's dependency gate; `DEPENDS_ON:` is not.
+
+```
+FABRIK_SPAWN_CHILD_BEGIN owner/repo
+TITLE: Second slice
+DEPENDS_ON: 1
+
+Full scoped spec body...
+FABRIK_SPAWN_CHILD_END
+```
+
+- The value is a **1-based, forward-only index** into this output's own block list: a block may depend only on a strictly earlier block. An out-of-range or non-forward index is a hard error at spawn time and pauses this issue.
+- Omit it for independent siblings. At most one `DEPENDS_ON:` per block.
+
+### Child specs start from the base branch
+
+A child's spec is read by an agent that starts from the **base branch**, not from your worktree. For a same-repo child, the base is the repository default branch or this issue's `base:<branch>` label, which same-repo children inherit; a cross-repo child starts from that repo's default branch. This issue's `fabrik/issue-N` branch and its open PR are never visible to the child.
+
+- **Unmerged work is not present.** Do not state or imply that files, symbols or behaviour that exist only in your worktree already exist, and do not make them part of any acceptance criterion. This includes the engine-committed `specs/<N>-<slug>/spec.md`, which sits on this issue's branch until the PR merges.
+- **Still allowed:** reference files that exist on the base branch and are merely modified by the PR; treat already-merged work as present; mention unmerged work as clearly marked in-flight background that no acceptance criterion requires.
+- **The child blocks its parent.** The engine always links the child as a blocker of the issue that spawned it, so a child must never be written to depend on its parent's unmerged work: the parent waits for the child, so that would be a circular wait and neither could finish.
+- **Reframe it to stand on the base branch.** When the child needs something that exists only in the parent's work, reframe it so it is satisfiable from the base branch alone: the child produces what it needs itself, or the in-flight work becomes non-required background. If no honest reframing exists, do not spawn a child; say so in your output instead.
+- **`DEPENDS_ON:` covers siblings only.** Ordering between sibling blocks in one output must be declared with `DEPENDS_ON:`, not prose. It is the only declarable ordering: a forward-only, 1-based index into the same output's block list, and it cannot point at the parent or at other in-flight work.
+
 ## Output
 
 The engine captures your stdout and posts it on the PR (when `post_to_pr: true`). A brief summary is posted on the issue.
