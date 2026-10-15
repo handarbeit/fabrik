@@ -70,7 +70,7 @@ Run these in any Claude Code session (the `fabrik` binary must be on your `PATH`
 `fabrik init` prints the same two commands. After install you get:
 
 - **Daemon-backed tools** — the plugin starts `fabrik mcp`: `fabrik_status`, `fabrik_board`, `fabrik_health` and the rolled-up `fabrik_situation` for state, plus audited overseer actions (promote, advance, set autonomy, re-run Validate, clear a Claude usage-limit hold). No action lifts a pause; a human comment does.
-- **Pushed events** — with a subscriber name set, `fabrik_subscribe` / `fabrik_unsubscribe` have the daemon push events into your session as they happen (a settled Validate, a pause, a stalled poll loop, a merge) instead of you polling.
+- **Pushed events** — with a subscriber name from `FABRIK_SUBSCRIBER` or `CLAUDE_TOPIC` set, `fabrik_subscribe` / `fabrik_unsubscribe` have the daemon push events into your session as they happen (a settled Validate, a pause, a stalled poll loop, a merge) instead of you polling.
 - **`fabrik:fabrik` skill** — auto-activates when `.fabrik/` is detected or Fabrik is mentioned: the PM mental model, the attention states and the steering labels.
 - **`fabrik:fabrik-setup` skill** — one-time onboarding walkthrough for setting up Fabrik from scratch.
 - **`/fabrik:status` command** — what needs you, what is in flight and daemon health, from the daemon.

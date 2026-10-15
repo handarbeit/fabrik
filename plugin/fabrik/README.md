@@ -30,12 +30,21 @@ For local testing: `claude --plugin-dir /path/to/fabrik/plugin/fabrik`.
 
 ### Settings
 
-Claude Code asks for these when you enable the plugin; both are optional.
+Claude Code asks for this when you enable the plugin; it is optional.
 
 | Setting | Meaning |
 |---|---|
-| **Subscriber name** | A stable name for this session (your topic or session name, never a PID). The overseer actions sign their audit comment with it and refuse without one; pushed events are delivered under it. Leave empty for read-only use. |
 | **Fabrik directory** | The directory of the daemon to talk to. Empty means the daemon of the nearest directory at or above your session's project that contains `.fabrik/` (the search stops at your home directory), so a session in a subdirectory still finds it; in a project without Fabrik no channel stream is started. A directory set here is used exactly as given. Set it if you run Claude Code somewhere other than the Fabrik project. One session addresses one daemon. |
+
+### Subscriber name
+
+There is no plugin setting for it: one setting would be shared by every session, and a value the plugin set would override one a session exports. The server takes its name from the first of `--subscriber`, `FABRIK_SUBSCRIBER`, `CLAUDE_TOPIC` (set by [`topic`](https://github.com/verveguy/claude-topics) on every session it launches) and, failing those, your OS username. The overseer actions sign their audit comment with it, so they work out of the box under your username. The username default is shared by every session on the machine, so it does **not** start the push stream; to receive pushed events, export a name of your own before starting Claude Code (shell profile, direnv or inline):
+
+```
+FABRIK_SUBSCRIBER=my-session claude --dangerously-load-development-channels plugin:fabrik@fabrik
+```
+
+Upgrading from a version with the "Subscriber name" setting: that value is no longer read; export `FABRIK_SUBSCRIBER` instead.
 
 ### If you registered the server by hand
 
@@ -58,7 +67,7 @@ When no daemon is reachable, Claude says so and tells you how to start it; it do
 
 ### Pushed events (opt-in)
 
-With a subscriber name set, the daemon can push events into your session (a decision is pending, an item is wedged, a PR merged…). This uses Claude Code **channels**, a research-preview feature: it needs a claude.ai or Console login, a per-session flag and, on Team/Enterprise plans, an organization that allows channels. During the preview, start Claude Code with:
+With a subscriber name from `FABRIK_SUBSCRIBER` or `CLAUDE_TOPIC` (or `--subscriber` on a hand-registered server), the daemon can push events into your session (a decision is pending, an item is wedged, a PR merged…). This uses Claude Code **channels**, a research-preview feature: it needs a claude.ai or Console login, a per-session flag and, on Team/Enterprise plans, an organization that allows channels. During the preview, start Claude Code with:
 
 ```
 claude --dangerously-load-development-channels plugin:fabrik@fabrik

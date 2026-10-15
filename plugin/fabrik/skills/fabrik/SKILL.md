@@ -112,13 +112,13 @@ These tools write, and each one posts an audit comment on the item naming who as
 | `fabrik_revalidate` | Force a Validate re-run |
 | `fabrik_clear_claude_limit` | Clear an account-wide Claude usage-limit suspension without restarting the daemon |
 
-Use these instead of editing labels or board columns by hand. They need a **subscriber name** (the plugin's "Subscriber name" setting); without one they refuse and say so, and the read tools still work. Each refusal carries the item's current state, so relay that rather than retrying.
+Use these instead of editing labels or board columns by hand. They sign their audit comment with a **subscriber name** (`--subscriber`, else `FABRIK_SUBSCRIBER`, else `CLAUDE_TOPIC`, else the OS username), so they work without configuration; they refuse only if no name resolves, and the read tools work regardless. Each refusal carries the item's current state, so relay that rather than retrying.
 
 **Limits you must state plainly:** no action lifts a pause, and none posts a free-form comment. A paused item (`fabrik:paused`, usually with `fabrik:awaiting-input`) resumes when a **human comments on the item** after the pause, or when the user removes those labels. If the user asks you to resume a paused item, show what the engine is waiting for (`fabrik_status`): if it asked a question, the answer belongs in a comment; if nothing needs saying (for example the daemon was stopped mid-run and paused its in-flight items), removing the labels is enough. Also: `fabrik_revalidate` refuses a paused item, and `fabrik_advance` refuses Validate (the PR merge ends Validate).
 
 ### Events pushed into the session (opt-in)
 
-With a subscriber name set and Claude Code started with channels enabled for this plugin, the daemon can push events (decision pending, item wedged, merged…) so you don't have to poll. This is a research-preview Claude Code feature that needs a per-session flag and claude.ai or Console login; never assume it is on. Use `fabrik_subscribe` / `fabrik_unsubscribe` to choose what arrives, and see the plugin README for the launch flag.
+With a subscriber name from `FABRIK_SUBSCRIBER` or `CLAUDE_TOPIC` (the OS-username default does not start the stream) and Claude Code started with channels enabled for this plugin, the daemon can push events (decision pending, item wedged, merged…) so you don't have to poll. This is a research-preview Claude Code feature that needs a per-session flag and claude.ai or Console login; never assume it is on. Use `fabrik_subscribe` / `fabrik_unsubscribe` to choose what arrives, and see the plugin README for the launch flag.
 
 ### Filing issue chains with `blocked_by` dependencies
 
