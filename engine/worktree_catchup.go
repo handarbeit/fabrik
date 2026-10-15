@@ -39,7 +39,7 @@ var (
 // advances) could then overwrite the catch-up commit.
 func (wm *WorktreeManager) PrepareCatchUp(issueNumber int, baseBranch, expectedHead string) (string, error) {
 	// skipUpdate=true: never rebase the member's branch onto main as a side effect.
-	wtDir, err := wm.EnsureWorktree(issueNumber, baseBranch, true)
+	wtDir, err := wm.EnsureWorktree(issueNumber, baseBranch, true, WithoutIssueBranchSync())
 	if err != nil {
 		return "", fmt.Errorf("ensuring member worktree: %w", err)
 	}
@@ -48,22 +48,10 @@ func (wm *WorktreeManager) PrepareCatchUp(issueNumber int, baseBranch, expectedH
 	defer wm.mu.Unlock()
 	branch := wm.branchName(issueNumber)
 
-	if out, err := gitOutputIn(wtDir, "rev-parse", "--abbrev-ref", "HEAD"); err != nil || out != branch {
-		return "", fmt.Errorf("%w: worktree is not on %s (HEAD %q)", ErrCatchUpBusy, branch, out)
-	}
-	status, err := gitOutputIn(wtDir, "status", "--porcelain")
-	if err != nil {
-		return "", fmt.Errorf("reading worktree status: %w", err)
-	}
-	if status != "" {
-		return "", fmt.Errorf("%w: worktree has uncommitted changes", ErrCatchUpBusy)
-	}
-	// An in-progress merge/rebase/cherry-pick means a session (or a crash) left the
-	// tree mid-operation even though `status` can look empty.
-	for _, marker := range []string{"MERGE_HEAD", "REBASE_HEAD", "CHERRY_PICK_HEAD"} {
-		if _, err := gitOutputIn(wtDir, "rev-parse", "-q", "--verify", marker); err == nil {
-			return "", fmt.Errorf("%w: %s present", ErrCatchUpBusy, marker)
-		}
+	if reason, err := worktreeBusyReason(wtDir, branch); err != nil {
+		return "", err
+	} else if reason != "" {
+		return "", fmt.Errorf("%w: %s", ErrCatchUpBusy, reason)
 	}
 
 	tracking := "refs/remotes/origin/" + branch
@@ -129,15 +117,25 @@ func (wm *WorktreeManager) localIsPureRebase(wtDir, branch, remoteRef, baseBranc
 	if out, err := fetch.CombinedOutput(); err != nil {
 		return false, fmt.Sprintf("could not fetch base %s: %s", baseBranch, strings.TrimSpace(string(out)))
 	}
-	localOnly, err := gitOutputIn(wtDir, "rev-list", "--right-only", "--cherry-pick", "--no-merges", "--count",
-		remoteRef+"...HEAD", "^"+baseRef)
+	return holdsNothingBeyond(wtDir, "HEAD", remoteRef, baseRef)
+}
+
+// holdsNothingBeyond reports whether subject carries nothing other lacks (#2295, shared
+// by the #2150 pure-rebase test and the issue-branch sync): no subject-only non-merge
+// patch (compared by patch-id, base history excluded) and no subject-only merge commit.
+// The second return is a reason when the answer is "no" because of doubt (a git error)
+// or a merge commit rather than because of a subject-only patch. Merge commits are
+// invisible to patch-ids, so they are counted separately. Called with wm.mu held.
+func holdsNothingBeyond(wtDir, subject, other, baseRef string) (bool, string) {
+	patches, err := gitOutputIn(wtDir, "rev-list", "--right-only", "--cherry-pick", "--no-merges", "--count",
+		other+"..."+subject, "^"+baseRef)
 	if err != nil {
-		return false, fmt.Sprintf("patch-id comparison failed: %s", localOnly)
+		return false, fmt.Sprintf("patch-id comparison failed: %s", patches)
 	}
-	if n, convErr := strconv.Atoi(localOnly); convErr != nil || n != 0 {
+	if n, convErr := strconv.Atoi(patches); convErr != nil || n != 0 {
 		return false, ""
 	}
-	merges, err := gitOutputIn(wtDir, "rev-list", "--merges", "--count", "HEAD", "^"+remoteRef, "^"+baseRef)
+	merges, err := gitOutputIn(wtDir, "rev-list", "--merges", "--count", subject, "^"+other, "^"+baseRef)
 	if err != nil {
 		return false, fmt.Sprintf("merge-commit count failed: %s", merges)
 	}
@@ -145,6 +143,30 @@ func (wm *WorktreeManager) localIsPureRebase(wtDir, branch, remoteRef, baseBranc
 		return false, "local-only merge commit"
 	}
 	return true, ""
+}
+
+// worktreeBusyReason reports why the issue worktree must not be mutated right now: it is
+// not on the issue branch, has uncommitted changes, or a session (or a crash) left a
+// merge/rebase/cherry-pick in progress even though `status` can look empty. An empty
+// reason means the tree is clean and idle; err is a failure to read the status.
+// Shared by PrepareCatchUp (#2044) and the issue-branch sync (#2295 R2).
+func worktreeBusyReason(wtDir, branch string) (string, error) {
+	if out, err := gitOutputIn(wtDir, "rev-parse", "--abbrev-ref", "HEAD"); err != nil || out != branch {
+		return fmt.Sprintf("worktree is not on %s (HEAD %q)", branch, out), nil
+	}
+	status, err := gitOutputIn(wtDir, "status", "--porcelain")
+	if err != nil {
+		return "", fmt.Errorf("reading worktree status: %w", err)
+	}
+	if status != "" {
+		return "worktree has uncommitted changes", nil
+	}
+	for _, marker := range []string{"MERGE_HEAD", "REBASE_HEAD", "CHERRY_PICK_HEAD"} {
+		if _, err := gitOutputIn(wtDir, "rev-parse", "-q", "--verify", marker); err == nil {
+			return marker + " present", nil
+		}
+	}
+	return "", nil
 }
 
 // CatchUpPushError is PushCatchUp's failure: git's combined output is kept raw so the
@@ -183,6 +205,9 @@ func (wm *WorktreeManager) PushCatchUp(issueNumber int, expectedHead string) err
 	}
 	if out, err := gitOutputIn(wtDir, "update-ref", "refs/remotes/origin/"+branch, "HEAD"); err != nil {
 		wm.logf(issueNumber, "worktree", "warn: could not advance the remote-tracking ref after the catch-up push: %s\n", out)
+	}
+	if head, err := gitRevParse(wtDir, "HEAD"); err == nil {
+		wm.setReconciled(issueNumber, head) // the next stage push takes the "remote unchanged" path (#2295)
 	}
 	wm.logf(issueNumber, "worktree", "pushed catch-up commit to %s\n", branch)
 	return nil

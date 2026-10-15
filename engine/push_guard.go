@@ -19,13 +19,19 @@ import (
 //
 // This guard is a safety net, not a resync (R3/FR-006): it never fetches the
 // issue branch, fast-forwards or resets the local branch, or sets an explicit
-// lease. It refuses exactly one shape — literal zero commits ahead of the
+// lease. (The resync and the explicit lease are #2295's: worktree_sync.go and
+// branch_sync.go; this guard stays in front of them, unchanged.) It refuses exactly one shape — literal zero commits ahead of the
 // resolved base while an open linked PR exists — and fails open on every
 // unreadable input (the log line surfaces it).
 
+// ErrPushRefused is the base of every deliberate engine push refusal (#2295): the zero-ahead
+// guard and the divergence check. A refusal has already paused the item (or logged why not),
+// so consumers that must stop the completion chain test errors.Is(err, ErrPushRefused).
+var ErrPushRefused = errors.New("push refused")
+
 // ErrPushRefusedZeroAhead is returned (wrapped) by pushBranchUnlessQueued when
 // the zero-ahead guard refused the push and has already paused the item.
-var ErrPushRefusedZeroAhead = errors.New("push refused: issue branch has no commits ahead of base while its PR is open")
+var ErrPushRefusedZeroAhead = fmt.Errorf("%w: issue branch has no commits ahead of base while its PR is open", ErrPushRefused)
 
 // zeroAheadPauseFragment is the stable prose a refusal comment's body starts
 // with; hasPauseComment (#1408 episode dedup) matches on it.

@@ -322,6 +322,8 @@ type Engine struct {
 	orphanAwaitingInputOff                atomic.Bool                   // test seam: SetOrphanAwaitingInputClearDisabledForTest (#1970)
 	commentBlockedOnInputOff              atomic.Bool                   // test seam: SetCommentBlockedOnInputDisabledForTest (#2280)
 	restoreRebaseDisabledForTest          bool                          // test seam: SetCommentRebaseRestoreDisabledForTest (#2150); guarded by mu, applied to managers registered later too
+	branchSyncDisabledForTest             bool                          // test seam: SetBranchSyncDisabledForTest (#2295); guarded by mu, applied to managers registered later too
+	bareLeasePushForTest                  bool                          // test seam: SetBareLeasePushForTest (#2295); guarded by mu, applied to managers registered later too
 	pureRebaseDisabledForTest             bool                          // test seam: SetCatchUpPureRebaseDisabledForTest (#2150); guarded by mu, applied to managers registered later too
 	actionsDegradeLogged                  atomic.Bool                   // set once the notice that a workflow-run read or re-run was refused (`actions` revoked at runtime or never accepted) has been logged (#2052 R7)
 	ciInfraTiming                         ciInfraTiming                 // test-shrinkable CI-infrastructure dwells (#2052); zero = defaults
@@ -864,6 +866,8 @@ func (e *Engine) RegisterWorktreeManagerForTest(nameWithOwner string, wm *Worktr
 	defer e.mu.Unlock()
 	wm.restoreRebaseDisabled.Store(e.restoreRebaseDisabledForTest)
 	wm.pureRebaseDisabled.Store(e.pureRebaseDisabledForTest)
+	wm.branchSyncDisabled.Store(e.branchSyncDisabledForTest)
+	wm.bareLeasePush.Store(e.bareLeasePushForTest)
 	e.worktreeManagers[nameWithOwner] = wm
 }
 
@@ -1051,6 +1055,8 @@ func (e *Engine) registerWorktrees(nameWithOwner, baseDir, worktreeRoot string) 
 	wm.logfFn = e.logf
 	wm.restoreRebaseDisabled.Store(e.restoreRebaseDisabledForTest)
 	wm.pureRebaseDisabled.Store(e.pureRebaseDisabledForTest)
+	wm.branchSyncDisabled.Store(e.branchSyncDisabledForTest)
+	wm.bareLeasePush.Store(e.bareLeasePushForTest)
 	e.worktreeManagers[nameWithOwner] = wm
 	return wm
 }

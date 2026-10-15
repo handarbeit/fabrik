@@ -63,7 +63,7 @@ func (e *Engine) pushBranchUnlessQueued(item gh.ProjectItem, wm *WorktreeManager
 	if e.zeroAheadPushRefused(item, wm) {
 		return ErrPushRefusedZeroAhead
 	}
-	return wm.PushBranch(item.Number)
+	return e.pushVerified(item, wm, true)
 }
 
 // pushBranchForNewPR is the push for the PR-creation paths (ensureDraftPR,
@@ -76,7 +76,7 @@ func (e *Engine) pushBranchForNewPR(item gh.ProjectItem, wm *WorktreeManager) er
 		e.logf(item.Number, "merge-queue", "PR in merge queue — skipping push (would eject from queue)\n")
 		return nil
 	}
-	return wm.PushBranch(item.Number)
+	return e.pushVerified(item, wm, true)
 }
 
 // pushBranchOnCancel is the WIP-preservation push for a cancelled worker (R8,
@@ -99,5 +99,5 @@ func (e *Engine) pushBranchOnCancel(item gh.ProjectItem, wm *WorktreeManager) er
 	if e.zeroAheadCheck(item, wm, false) {
 		return ErrPushRefusedZeroAhead
 	}
-	return wm.PushBranch(item.Number)
+	return e.pushVerified(item, wm, false)
 }

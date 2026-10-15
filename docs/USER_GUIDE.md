@@ -5015,13 +5015,29 @@ A stage that never outputs `FABRIK_STAGE_COMPLETE` retries after each cooldown. 
 After `--max-retries` failures, the issue is paused with `fabrik:paused`. Remove the
 label to resume.
 
+### Issue branch diverged from origin
+
+You (or a teammate) pushed a fix to `fabrik/issue-N`, for example a conflict resolution, while Fabrik held its own copy of the branch with commits of its own. Fabrik never decides which side wins and never overwrites out-of-band work:
+
+- **Before every stage run** Fabrik compares its local branch with a freshly fetched `origin/fabrik/issue-N`. A local branch that is only behind is fast-forwarded to your commit; a local branch that holds nothing the remote lacks (for example Fabrik's own unpushed rebase) is reset to the remote head; unpushed local work that the remote has not touched is kept and pushed normally.
+- **Before every push** Fabrik verifies the remote head again and pushes with an explicit lease on it, so a commit that arrives between the check and the push is rejected rather than overwritten. If it cannot read the remote it does not push and retries on a later poll.
+- **When both sides hold commits the other lacks**, Fabrik changes nothing: no rebase, merge, reset or push, and no stage runs on the branch. The issue gets `fabrik:paused` + `fabrik:awaiting-input` and one comment, **🏭 Fabrik — issue branch diverged from origin**, naming the branch and the local and remote heads.
+
+To resume, make the branches agree, then comment on the issue (a comment made before the pause does not resume it):
+
+1. Keep both sides: merge or rebase them yourself and push the result to `fabrik/issue-N`; Fabrik's local copy is then behind (or identical) and is fast-forwarded on the next run. Or
+2. Keep only the remote: remove the local worktree and branch (`git worktree remove --force .fabrik/worktrees/<owner>-<repo>/issue-N` and `git branch -D fabrik/issue-N` in the bare clone) so Fabrik starts again from the remote branch. Local commits that were never pushed are lost.
+
+If the branch is still diverged when you comment, Fabrik re-applies the pause without posting a second comment.
+
 ### Stale Worktrees
 
 Worktrees are at `.fabrik/worktrees/<owner>-<repo>/issue-N/` on branch `fabrik/issue-N`. On each stage
 invocation, Fabrik rebases onto the latest base branch (or the branch specified by a
 `base:<branch>` label), unless it's a retry, which preserves the worktree as-is to
 maintain Claude's context. If the rebase conflicts, it's silently aborted and Claude
-works from the current base.
+works from the current base. Before rebasing, Fabrik syncs the local branch from
+`origin/fabrik/issue-N` (see *Issue branch diverged from origin* above).
 
 To manually clean up:
 ```bash

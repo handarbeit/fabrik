@@ -119,6 +119,8 @@ func TestPushGuard_StaleZeroAheadWorktree_GuardDisabledOverwrites(t *testing.T) 
 	var humanSHA string
 	env := NewEnv(t, EnvOptions{Stages: pushGuardStages(), Yolo: boolPtr(true), StartTime: time.Now()})
 	env.Engine.SetPushZeroAheadGuardDisabledForTest(true)
+	// #2295: the verified-lease push independently refuses this overwrite; restore the bare lease so the guard alone is under test.
+	env.Engine.SetBareLeasePushForTest(true)
 	env.Claude.ForStage("Review", staleWorktreeReview(env, &humanSHA))
 	num := FileIssue(t, env, "stale worktree", "Reproduce the #2058 stale-worktree shape.", "Implement")
 

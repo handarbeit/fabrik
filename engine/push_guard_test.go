@@ -142,6 +142,8 @@ func TestPushGuard_NonVacuous_DisabledGuardOverwritesRemote(t *testing.T) {
 	g := newPushGuardEnv(t, 7, openPR(55), nil)
 	human := g.humanPush("fabrik/issue-7")
 	g.e.SetPushZeroAheadGuardDisabledForTest(true)
+	// #2295: the verified-lease push independently refuses this overwrite; restore the bare lease so the guard alone is under test.
+	g.e.SetBareLeasePushForTest(true)
 
 	if err := g.e.pushBranchUnlessQueued(gh.ProjectItem{Number: 7}, g.wm); err != nil {
 		t.Fatalf("push with guard disabled: %v", err)
@@ -398,6 +400,8 @@ func TestPushGuard_CancelPushRefusesWithoutPausing(t *testing.T) {
 
 	// Non-vacuity: guard off -> the stale branch overwrites the remote.
 	g.e.SetPushZeroAheadGuardDisabledForTest(true)
+	// #2295: the verified-lease push independently refuses this overwrite; restore the bare lease so the guard alone is under test.
+	g.e.SetBareLeasePushForTest(true)
 	if err := g.e.pushBranchOnCancel(gh.ProjectItem{Number: 7}, g.wm); err != nil {
 		t.Fatalf("push with guard disabled: %v", err)
 	}

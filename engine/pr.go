@@ -278,8 +278,8 @@ func (e *Engine) markPRReady(item gh.ProjectItem, knownPR int) (pushRefused bool
 		return false
 	} else if err != nil {
 		e.logf(item.Number, "warn", "could not push branch: %v\n", err)
-		if errors.Is(err, ErrPushRefusedZeroAhead) {
-			// The zero-ahead guard (#2089) paused the item: do not flip a stale
+		if errors.Is(err, ErrPushRefused) {
+			// The zero-ahead guard (#2089) or the divergence check (#2295) paused the item: do not flip a stale
 			// PR to ready-for-review (it would trigger review bots on no diff).
 			return true
 		}
