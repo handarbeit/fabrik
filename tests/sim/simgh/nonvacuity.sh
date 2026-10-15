@@ -200,6 +200,10 @@ mutate "recompute window never opens" \
   'TestMergeableRecomputeWindow|TestMergePRRefusesDuringRecomputeWindow' \
   'prs.go::s{if pr\.mergeableRecomputeReads > 0 \{}{if false \{}'
 
+mutate "the clock-driven unknown window never opens" \
+  'TestMergeableUnknownUntilWindow' \
+  'prs.go::s{if !pr\.mergeableUnknownUntil\.IsZero\(\) && s\.now\(\)\.Before\(pr\.mergeableUnknownUntil\) \{}{if false \{}'
+
 mutate "MergePR skips its mergeable_state gate" \
   'TestMergePRGatesOnDerivedState' \
   'prs.go::s{if !gh\.MergeableStateAccepted\(state\) \{}{if false \{}'
@@ -724,6 +728,10 @@ mutate "the review schedule is not carried across a restore" \
 mutate "the recompute counter is not carried across a restore" \
   'TestRestoreResumesTheRecomputeCounter' \
   'snapshot.go::s{\t\tmergeableRecomputeReads: p\.mergeableRecomputeReads,\n}{}'
+
+mutate "the clock-driven unknown window is not carried across a restore" \
+  'TestRestoreResumesTheUnknownUntilWindow' \
+  'snapshot.go::s{\t\tmergeableUnknownUntil:   p\.mergeableUnknownUntil,\n}{}'
 
 mutate "restore does not repoint bareDir at the new baseDir" \
   'TestRestoredModelIsIndependentOfTheOriginal' \

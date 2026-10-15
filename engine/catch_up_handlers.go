@@ -510,6 +510,10 @@ func (e *Engine) handleMergeAndCIGates(pctx *phase1Ctx) bool {
 	}
 
 	mergeBlocked, mergeConflict := e.checkMergeabilityGate(pctx.item, pctx.stage, settle)
+	if settle.MergeObs == MergeObsComputed {
+		// GitHub returned a computed merge state: the unknown-state clock ends (#2302).
+		e.clearUnknownMergeClock(pctx.item)
+	}
 	if mergeConflict {
 		// Merge-queue awareness (ADR-058 D3 FR-1): never dispatch a rebase reinvoke
 		// for a PR the queue currently owns — the synthetic rebase+force-push ejects
@@ -562,6 +566,9 @@ func (e *Engine) handleMergeAndCIGates(pctx *phase1Ctx) bool {
 			Reason: mergeUnsettledCooldownReason,
 			Until:  e.now().Add(e.mergeGateRecheckInterval()),
 		})
+		// #2302: an unknown merge state (mergeable null / state unknown) has its own
+		// short bound; the claim holds either way, the bound only adds the pause.
+		e.checkUnknownMergeBound(pctx, settle)
 		return true // mergeability not yet computed; re-evaluate on next poll
 	}
 	// Mergeability has settled: the merge gate no longer holds the item (#2121).

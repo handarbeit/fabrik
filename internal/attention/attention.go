@@ -215,6 +215,10 @@ type Input struct {
 	// marker). Both are explicit recorded facts, never inferred (#2121 causes).
 	RebaseAfterLanding bool
 	DaemonStop         bool
+	// UnknownMergeState is true when the item is paused by the merge gate's
+	// unknown-merge-state bound (the pause comment's marker; #2302) — an explicit
+	// recorded fact, like DaemonStop.
+	UnknownMergeState bool
 
 	// Cooldowns maps cooldown reason to expiry.
 	Cooldowns map[string]time.Time
@@ -572,6 +576,9 @@ func classify(in Input) Result {
 		if paused && in.DaemonStop {
 			res.Cause = CauseDaemonStop
 		}
+		if paused && in.UnknownMergeState {
+			res.Cause = CauseUnknownMergeState
+		}
 		return finishNoSchedule(Escalated, code, summary,
 			"nothing automatic: the engine has stopped; a human must intervene ("+resumeAdvice(in, true)+")", RankEscalated,
 			resumeOptions(in, true))
@@ -589,6 +596,9 @@ func classify(in Input) Result {
 		res.ResumeVia = resumeVia(in, false)
 		if in.DaemonStop {
 			res.Cause = CauseDaemonStop
+		}
+		if in.UnknownMergeState {
+			res.Cause = CauseUnknownMergeState
 		}
 		return finishNoSchedule(NeedsHuman, code, summary,
 			"nothing automatic: "+resumeAdvice(in, false), RankNeedsHuman, resumeOptions(in, false))

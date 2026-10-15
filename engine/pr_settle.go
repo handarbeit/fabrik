@@ -64,7 +64,36 @@ type PRSettleResult struct {
 	// only ever populated for a stage gated by wait_for_ci, and handleMergeAndCIGates
 	// routes it to pauseForCIStartupFailure ahead of every other gate.
 	StartupFailure *CIStartupFailure
+
+	// MergeObs / MergeUnknownValue (#2302 R1): the typed observation of GitHub's
+	// merge computation, so the unknown-merge-state bound never matches Reason
+	// text. MergeObsUnknown is set only on the two unknown returns (mergeable
+	// null, mergeable_state "unknown"); MergeObsComputed once a computed state was
+	// read; the zero value MergeObsNone covers every return that never reached the
+	// mergeable fields (read errors included).
+	MergeObs          MergeObservation
+	MergeUnknownValue string
 }
+
+// MergeObservation classifies what a settle pass learned about GitHub's merge
+// computation (#2302).
+type MergeObservation int
+
+const (
+	// MergeObsNone: no observation (zero value) — the mergeable fields were not
+	// read or the read failed.
+	MergeObsNone MergeObservation = iota
+	// MergeObsUnknown: mergeable is null or mergeable_state is "unknown".
+	MergeObsUnknown
+	// MergeObsComputed: GitHub returned a computed merge state.
+	MergeObsComputed
+)
+
+// The values MergeUnknownValue takes, as shown in the pause comment.
+const (
+	mergeUnknownNull  = "mergeable=null"
+	mergeUnknownState = "mergeable_state=unknown"
+)
 
 // CIStartupFailure describes a PR whose CI never started (#2052 R6).
 type CIStartupFailure struct {
@@ -99,7 +128,20 @@ func (e *Engine) settlePRMergeStateForCIGate(item gh.ProjectItem, stage *stages.
 	return e.settlePRMergeStateWith(item, stage, true)
 }
 
+// settlePRMergeStateWith runs the settle pass and stamps PRSettleResult.MergeObs
+// (#2302): the inner pass reports through computed whether GitHub returned a
+// computed merge state, so every return after the unknown checks is classified
+// without editing each one.
 func (e *Engine) settlePRMergeStateWith(item gh.ProjectItem, stage *stages.Stage, ciInfra bool) PRSettleResult {
+	computed := false
+	r := e.settlePRMergeStateInner(item, stage, ciInfra, &computed)
+	if r.MergeObs == MergeObsNone && computed {
+		r.MergeObs = MergeObsComputed
+	}
+	return r
+}
+
+func (e *Engine) settlePRMergeStateInner(item gh.ProjectItem, stage *stages.Stage, ciInfra bool, computed *bool) PRSettleResult {
 	ciInfra = ciInfra && stage != nil && stage.WaitForCI != nil && *stage.WaitForCI
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	itemRepo := itemOwnerRepoString(item, e.defaultRepo())
@@ -167,12 +209,15 @@ func (e *Engine) settlePRMergeStateWith(item gh.ProjectItem, stage *stages.Stage
 
 	if mergeable == nil {
 		e.logf(item.Number, "settle", "PR #%d mergeable=null — GitHub still computing\n", pr.Number)
-		return PRSettleResult{Status: PRMergeUnsettled, Reason: "mergeable=null (GitHub computing)", MergeableState: mergeableState, PR: pr}
+		return PRSettleResult{Status: PRMergeUnsettled, Reason: "mergeable=null (GitHub computing)", MergeableState: mergeableState, PR: pr,
+			MergeObs: MergeObsUnknown, MergeUnknownValue: mergeUnknownNull}
 	}
 	if mergeableState == "unknown" {
 		e.logf(item.Number, "settle", "PR #%d mergeable_state=unknown — transient\n", pr.Number)
-		return PRSettleResult{Status: PRMergeUnsettled, Reason: "mergeable_state=unknown", MergeableState: mergeableState, PR: pr}
+		return PRSettleResult{Status: PRMergeUnsettled, Reason: "mergeable_state=unknown", MergeableState: mergeableState, PR: pr,
+			MergeObs: MergeObsUnknown, MergeUnknownValue: mergeUnknownState}
 	}
+	*computed = true
 	if !*mergeable {
 		e.logf(item.Number, "settle", "PR #%d not mergeable (base conflict)\n", pr.Number)
 		return PRSettleResult{Status: PRMergeConflicting, Reason: "mergeable=false", MergeableState: mergeableState, PR: pr}

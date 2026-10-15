@@ -603,6 +603,32 @@ func TestCiBackstopTimeout_Default(t *testing.T) {
 	}
 }
 
+func TestMergeStateUnknownTimeout_Conversion(t *testing.T) {
+	if got := mergeStateUnknownTimeout(0); got != 30*time.Minute {
+		t.Errorf("mergeStateUnknownTimeout(0) = %v, want default 30m", got)
+	}
+	if got := mergeStateUnknownTimeout(-5); got != 30*time.Minute {
+		t.Errorf("mergeStateUnknownTimeout(-5) = %v, want default 30m", got)
+	}
+	if got := mergeStateUnknownTimeout(10); got != 10*time.Minute {
+		t.Errorf("mergeStateUnknownTimeout(10) = %v, want 10m", got)
+	}
+}
+
+func TestExecute_MergeStateUnknownTimeoutFlag(t *testing.T) {
+	resetFlags()
+	stagesDir := t.TempDir()
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--token", "tok", "--stages", stagesDir, "--merge-state-unknown-timeout", "20"}
+
+	err := Execute()
+	if err == nil {
+		t.Fatal("expected error (no stages)")
+	}
+	if err.Error() == "unknown flag: --merge-state-unknown-timeout" {
+		t.Error("--merge-state-unknown-timeout flag not registered")
+	}
+}
+
 func TestExecute_CIBackstopTimeoutFlag(t *testing.T) {
 	resetFlags()
 	stagesDir := t.TempDir()

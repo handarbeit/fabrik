@@ -233,6 +233,17 @@ func (e *Engine) ciBackstopTimeout() time.Duration {
 	return 4 * time.Hour
 }
 
+// mergeStateUnknownTimeout returns the configured bound on a continuously
+// unknown PR merge state at the merge gate (#2302), defaulting to 30 minutes
+// when unconfigured. Deliberately much shorter than ciBackstopTimeout: GitHub
+// resolves a null mergeability on request within seconds to minutes.
+func (e *Engine) mergeStateUnknownTimeout() time.Duration {
+	if e.cfg.MergeStateUnknownTimeout > 0 {
+		return e.cfg.MergeStateUnknownTimeout
+	}
+	return 30 * time.Minute
+}
+
 // ciProgressStalledSince returns the time CI was last observed to make
 // progress for item's linked PR (LinkedPRState.LastCIProgressAt), and whether
 // that value is meaningful. "Progress" is set by applyCheckRunCompleted
@@ -758,7 +769,10 @@ func (e *Engine) dispatchCIFixReinvoke(ctx context.Context, board *gh.ProjectBoa
 func hasCIGatePauseComment(item gh.ProjectItem, stage *stages.Stage) bool {
 	timeoutWant := fmt.Sprintf("The CI gate for stage **%s** timed out", stage.Name)
 	cycleWant := fmt.Sprintf("The stage **%s** has been re-invoked to fix CI failures", stage.Name)
-	return hasPauseComment(item, timeoutWant, cycleWant)
+	// #2302: the CIBackstopTimeout comment for an item that never reached the CI
+	// gate names the gate that held it instead (pauseForCIBackstop).
+	backstopWant := fmt.Sprintf("The awaiting-CI wait for stage **%s** timed out", stage.Name)
+	return hasPauseComment(item, timeoutWant, cycleWant, backstopWant)
 }
 
 // pauseForCITimeout pauses the issue when the CI wait timeout in the catch-up
@@ -776,6 +790,13 @@ func hasCIGatePauseComment(item gh.ProjectItem, stage *stages.Stage) bool {
 // Returns escalated: true when a fresh pause comment was posted (a genuine
 // new episode), false when an existing episode's pause was merely reapplied.
 func (e *Engine) pauseForCITimeout(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) (escalated bool) {
+	return e.pauseForCITimeoutNoted(board, item, stage, "")
+}
+
+// pauseForCITimeoutNoted is pauseForCITimeout with an optional extra paragraph
+// (ending in a blank line) inserted after the fixed text; the backstop uses it
+// to name the recorded hold when a check genuinely failed (#2302 R5).
+func (e *Engine) pauseForCITimeoutNoted(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, extra string) (escalated bool) {
 	if hasCIGatePauseComment(item, stage) {
 		e.logf(item.Number, "ci-timeout", "CI-gate pause comment already exists for this episode — reapplying pause without reposting\n")
 		e.reapplyPauseLabels(item)
@@ -785,14 +806,91 @@ func (e *Engine) pauseForCITimeout(board *gh.ProjectBoard, item gh.ProjectItem, 
 
 	msg := fmt.Sprintf(
 		"🏭 **Fabrik — CI wait timeout**\n\nThe CI gate for stage **%s** timed out waiting for checks to pass.\n\n"+
-			"%s"+
+			"%s%s"+
 			"Fabrik has paused this issue. Please check the PR's CI status, address any failures, and then remove the `fabrik:paused` label to resume.",
-		stage.Name, e.suiteTimeoutNote(item),
+		stage.Name, e.suiteTimeoutNote(item), extra,
 	)
 	e.pauseIssue(item, msg, pauseOpts{
 		awaitingInput: true,
 		reactRocket:   true,
 	})
+	e.emitCITimeout(item, stage) // observation only (#1968)
+	return true
+}
+
+// recordedGateHold returns the gate hold the engine recorded for item, or nil
+// when there is none or it lapsed unconfirmed (the same rule the attention
+// classifier applies), so a hold the gate stopped confirming never names a
+// blocker that is no longer holding.
+func (e *Engine) recordedGateHold(item gh.ProjectItem) *itemstate.GateHold {
+	snap, ok := e.store.Peek(itemOwnerRepoString(item, e.defaultRepo()), item.Number)
+	if !ok {
+		return nil
+	}
+	h := snap.State().GateHold
+	if h == nil || e.now().Sub(h.ConfirmedAt) > e.wedgeLapseFor(h.Gate) {
+		return nil
+	}
+	cp := *h
+	return &cp
+}
+
+// pauseForCIBackstop is the CIBackstopTimeout backstop's pause, for an item that
+// never reached the CI gate (#2302 R5). pauseForCITimeout's text blames CI
+// ("timed out waiting for checks to pass… address any failures"), which is wrong
+// when the recorded hold was another gate: in the #1809 incident every check had
+// been green for hours. So:
+//
+//   - the recorded hold is the CI gate → today's text (the gate was in fact waiting on CI);
+//   - a check failed → today's text, plus one sentence naming the hold;
+//   - otherwise → a body that names the gate that held the item, its reason and
+//     how long it was observed holding, and the check-run state, and neither
+//     claims the wait was for checks nor asks for failures to be addressed.
+//
+// The hold's Since is bounded by daemon uptime, so the wording says "at least",
+// and the total awaiting-ci time comes from the label's own timestamp.
+func (e *Engine) pauseForCIBackstop(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, appliedAt time.Time) (escalated bool) {
+	if hasCIGatePauseComment(item, stage) {
+		return e.pauseForCITimeout(board, item, stage) // reapply branch, unchanged (#1408)
+	}
+	hold := e.recordedGateHold(item)
+	if hold != nil && hold.Gate == gateCI {
+		return e.pauseForCITimeout(board, item, stage)
+	}
+	headSHA := item.LinkedPRHeadSHA
+	counts, countsErr := e.checkRunCounts(item, headSHA)
+	if countsErr == nil && counts.Failed > 0 {
+		extra := ""
+		if hold != nil {
+			extra = fmt.Sprintf("The %s gate was holding the item (%s), and %d check(s) failed.\n\n", hold.Gate, hold.Reason, counts.Failed)
+		}
+		return e.pauseForCITimeoutNoted(board, item, stage, extra)
+	}
+
+	e.logf(item.Number, "ci-timeout", "CIBackstopTimeout elapsed while the item never reached the CI gate — pausing for human intervention\n")
+	var what string
+	if hold != nil {
+		what = fmt.Sprintf(" while the PR was held by the %s gate: %s.\n\nThe %s gate was observed holding this item for at least %s (since %s UTC).",
+			hold.Gate, hold.Reason, hold.Gate, e.now().Sub(hold.Since).Round(time.Second), hold.Since.UTC().Format("2006-01-02 15:04"))
+	} else {
+		what = "; Fabrik has no recorded gate holding the PR (the hold may have lapsed, or another handler claimed the item)."
+	}
+	total := ""
+	if !appliedAt.IsZero() {
+		total = fmt.Sprintf("\n\n`fabrik:awaiting-ci` has been set for %s.", time.Since(appliedAt).Round(time.Minute))
+	}
+	state := "check-run state could not be read"
+	if countsErr == nil {
+		state = formatCheckRunCounts(counts)
+	}
+	msg := fmt.Sprintf(
+		"🏭 **Fabrik — awaiting-CI wait timeout**\n\nThe awaiting-CI wait for stage **%s** timed out%s%s\n\n"+
+			"Check-run state at escalation: %s. The CI gate itself was never reached.\n\n"+
+			"%s"+
+			"Fabrik has paused this issue. Open the PR to see what is holding it (mergeability, required checks, check suites), then comment or remove the `fabrik:paused` label to resume.",
+		stage.Name, what, total, state, e.suiteTimeoutNote(item),
+	)
+	e.pauseIssue(item, msg, pauseOpts{awaitingInput: true, reactRocket: true})
 	e.emitCITimeout(item, stage) // observation only (#1968)
 	return true
 }

@@ -385,6 +385,7 @@ func clonePRRecord(p *prRecord) *prRecord {
 		inMergeQueue:            p.inMergeQueue,
 		readyBlockedReads:       p.readyBlockedReads,
 		mergeableRecomputeReads: p.mergeableRecomputeReads,
+		mergeableUnknownUntil:   p.mergeableUnknownUntil,
 		createdAt:               p.createdAt,
 		updatedAt:               p.updatedAt,
 	}
@@ -664,6 +665,7 @@ var snapshotFieldRegistry = map[string]map[string]fieldDisposition{
 		"queueEntry":              fieldCopied,
 		"readyBlockedReads":       fieldCopied,
 		"mergeableRecomputeReads": fieldCopied,
+		"mergeableUnknownUntil":   fieldCopied,
 		"createdAt":               fieldCopied,
 		"updatedAt":               fieldCopied,
 	},

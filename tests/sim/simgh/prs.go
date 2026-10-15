@@ -369,6 +369,11 @@ func (s *Sim) FetchPRMergeableFields(owner, repo string, prNumber int) (*bool, s
 		s.mu.Unlock()
 		return nil, stateUnknown, nil
 	}
+	// #2302: the clock-driven window — unresolved until the seeded instant.
+	if !pr.mergeableUnknownUntil.IsZero() && s.now().Before(pr.mergeableUnknownUntil) {
+		s.mu.Unlock()
+		return nil, stateUnknown, nil
+	}
 	head, base, draft := pr.head, pr.base, pr.draft
 	if pr.readyBlockedReads > 0 && !draft {
 		// The ready_for_review window (#2297): a conflict still wins, so only a

@@ -140,3 +140,39 @@ func latestCheckRunsByName(checkRuns []CheckRun) []CheckRun {
 	}
 	return out
 }
+
+// CheckRunCounts is a latest-per-name tally of a PR head's check runs (#2302).
+// Total = Passed + Failed + Pending + NonPassing.
+type CheckRunCounts struct {
+	Total      int
+	Passed     int
+	Failed     int
+	Pending    int
+	NonPassing int // completed with cancelled, stale, empty or unrecognised conclusion
+}
+
+// SummarizeCheckRuns tallies the latest run per check name, using the same
+// classification as ClassifyCheckRuns so the counts agree with the CI gate.
+func SummarizeCheckRuns(checkRuns []CheckRun) CheckRunCounts {
+	var c CheckRunCounts
+	for _, cr := range latestCheckRunsByName(checkRuns) {
+		c.Total++
+		switch cr.Status {
+		case "queued", "in_progress":
+			c.Pending++
+		case "completed":
+			switch {
+			case IsFailureConclusion(cr.Conclusion):
+				c.Failed++
+			case IsPassingConclusion(cr.Conclusion):
+				c.Passed++
+			default:
+				c.NonPassing++
+			}
+		default:
+			// Unknown status (e.g. waiting, requested): not yet a result.
+			c.Pending++
+		}
+	}
+	return c
+}
