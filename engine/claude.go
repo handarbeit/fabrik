@@ -183,7 +183,10 @@ func classifyUsageLimitExit(resp claudeResponse, usage TokenUsage) (msg string, 
 // is CLI-version-specific and undocumented (ADR-1523), so this type only
 // declares what's needed to reach it, not its contents.
 type permissionDenial struct {
-	ToolName  string          `json:"tool_name"`
+	ToolName string `json:"tool_name"`
+	// ToolUseID joins the denial to the stream's tool_use block (#1556); the
+	// CLI emits it on every entry (ADR-1523, confirmed against CLI 2.1.299).
+	ToolUseID string          `json:"tool_use_id"`
 	ToolInput json.RawMessage `json:"tool_input"`
 }
 
