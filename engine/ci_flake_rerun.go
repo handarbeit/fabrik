@@ -173,7 +173,16 @@ func (e *Engine) ciFlakeRerun(pctx *phase1Ctx, settle PRSettleResult) bool {
 		return false
 	}
 	status, _, failed := gh.ClassifyCheckRuns(settle.CheckRuns)
-	if status != gh.CheckRunsFailed || len(failed) == 0 {
+	if status == gh.CheckRunsNonPassing {
+		// #2296: a cancelled/stale/unrecognised latest run rides the same budget,
+		// stale-failure guard and degradation as a failure. The re-run targets are
+		// the non-passing runs; a genuine failure in the same set classifies as
+		// Failed above and re-runs the failed jobs as before.
+		failed = gh.NonPassingCheckRuns(settle.CheckRuns)
+	} else if status != gh.CheckRunsFailed {
+		failed = nil
+	}
+	if len(failed) == 0 {
 		// A required-context or classic-status failure has no check run to re-run.
 		return false
 	}

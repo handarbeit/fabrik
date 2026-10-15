@@ -223,6 +223,7 @@ func (e *Engine) refreshPRFacts(c prFactsCandidate, pollStart, now time.Time, ch
 		unchanged := len(lpr.CheckRuns) == 0
 		if !unchanged {
 			status, _, _ := gh.ClassifyCheckRuns(lpr.CheckRuns)
+			// READY only: a cancelled/stale/unrecognised set (#2296) is not a green head.
 			unchanged = status == gh.CheckRunsReady && fingerprintCheckRuns(lpr.CheckRuns) == rec.RunsFingerprint
 		}
 		if unchanged {

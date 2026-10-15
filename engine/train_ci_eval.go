@@ -103,6 +103,30 @@ func (e *Engine) evalTrialCI(ctx context.Context, owner, repo string, prNum int,
 			// Otherwise the re-run was accepted but its check runs have not replaced
 			// the stale failure yet: keep polling rather than count the same failure twice.
 		}
+		if status == gh.CheckRunsNonPassing {
+			// #2296: a cancelled/stale/unrecognised latest run has no result. It gets
+			// the same single failed-job re-run as a failure (an operator cancelling
+			// CI to free a runner is exactly the case a re-run fixes), but if the
+			// trial is still non-passing after it, the verdict is INFRASTRUCTURE, not
+			// red: nothing the members did produced it, so nothing is charged,
+			// bisected, ejected or paused, and the partition cooldown applies
+			// (TrainCIInfra, #2052). A genuine failure in the same set classifies as
+			// Failed above and is red as always.
+			np := gh.NonPassingCheckRuns(checkRuns)
+			st.lastFailed = np
+			if !st.rr.done {
+				if rerunIDs, ok := e.rerunFailedWorkflowRuns(logRepo, owner, repo, np); ok {
+					st.rr = rerunState{done: true, runIDs: rerunIDs, firstFailedIDs: checkRunIDSet(np), at: timing.now()}
+					e.logfRepo(logRepo, "merge-train", "trial %s: check(s) did not pass: %s — re-running them once before abandoning the trial\n", trialSHA, describeNonPassing(np))
+				} else {
+					return e.trialNonPassingVerdict(logRepo, trialSHA, prNum, np, "and no re-run could be made")
+				}
+			} else if hasNewCheckRun(np, st.rr.firstFailedIDs) || (rerunPastDwell && !rerunWaiting) {
+				return e.trialNonPassingVerdict(logRepo, trialSHA, prNum, np, "after the re-run")
+			}
+			// Otherwise the re-run was accepted but has not replaced the stale
+			// non-passing run yet: keep polling rather than count it twice.
+		}
 		if status == gh.CheckRunsReady {
 			// ADR-933: don't declare the trial green until any configured
 			// required context has confirmed success on this exact trial
@@ -222,3 +246,23 @@ func (e *Engine) logTrialCITimeout(owner, repo string, prNum int, st *trialCISta
 		e.logfRepo(owner+"/"+repo, "merge-train", "CI wait timeout for integration PR #%d\n", prNum)
 	}
 }
+
+// trialNonPassingVerdict is the terminal disposition of a trial whose latest
+// runs are still cancelled/stale/unrecognised (#2296): TrainCIInfra with a note
+// naming the real conclusions, uncharged and with members left Queued. The
+// SetTrainNotPassedAsRedForTest seam restores the pre-fix charge-as-red reading
+// so a test can show it depends on this disposition.
+func (e *Engine) trialNonPassingVerdict(logRepo, trialSHA string, prNum int, np []gh.CheckRun, when string) (TrainCIResult, *trainCIDiagnostic, bool) {
+	if e.trainNotPassedAsRed.Load() {
+		return TrainCIRed, &trainCIDiagnostic{FailedChecks: np, PRNum: prNum, TrialSHA: trialSHA}, true
+	}
+	note := fmt.Sprintf("CI produced no result on the trial (%s): %s", when, describeNonPassing(np))
+	e.logfRepo(logRepo, "merge-train", "trial %s: %s — abandoning the trial; members stay Queued, nothing charged\n", trialSHA, note)
+	return TrainCIInfra, &trainCIDiagnostic{Note: note, PRNum: prNum, TrialSHA: trialSHA}, true
+}
+
+// SetTrainNotPassedAsRedForTest makes a still-non-passing trial or catch-up
+// member CI read as red (the pre-#2296 charge-as-failure disposition), so a
+// test can show the uncharged infrastructure disposition is what it asserts.
+// Test-only: production never calls it.
+func (e *Engine) SetTrainNotPassedAsRedForTest(v bool) { e.trainNotPassedAsRed.Store(v) }

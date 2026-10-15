@@ -201,15 +201,29 @@ func (e *Engine) settlePRMergeStateWith(item gh.ProjectItem, stage *stages.Stage
 		// checks reports, and it would clear the gate with CI never run. The
 		// shortcut never reads check runs, so for a wait_for_ci stage it reads them
 		// here (the cached read) and only on zero runs consults the workflow runs.
+		//
+		// #2296: the same cached read also catches a cancelled/stale/unrecognised
+		// latest run. GitHub reports "clean" when only a non-required check was
+		// cancelled, and that is no evidence CI ran — such a head falls through to
+		// the classified path below (which returns PRMergeBlocked) instead of
+		// clearing the gate. Failure behaviour of the shortcut is unchanged
+		// (ADR-1441).
+		nonPassingShortcut := false
 		if ciInfra {
-			if runs, rerr := e.readClient.FetchCheckRuns(owner, repo, pr.HeadSHA); rerr == nil && len(runs) == 0 {
-				if r, handled := e.ciStartupCheck(item, owner, repo, itemRepo, pr); handled {
-					return r
+			if runs, rerr := e.readClient.FetchCheckRuns(owner, repo, pr.HeadSHA); rerr == nil {
+				if len(runs) == 0 {
+					if r, handled := e.ciStartupCheck(item, owner, repo, itemRepo, pr); handled {
+						return r
+					}
+				} else if st, _, _ := gh.ClassifyCheckRuns(runs); st == gh.CheckRunsNonPassing {
+					nonPassingShortcut = true
 				}
 			}
 		}
-		e.logf(item.Number, "settle", "PR #%d mergeable_state=%q — ready\n", pr.Number, mergeableState)
-		return PRSettleResult{Status: PRMergeReady, Reason: fmt.Sprintf("mergeable_state=%q", mergeableState), MergeableState: mergeableState, PR: pr}
+		if !nonPassingShortcut {
+			e.logf(item.Number, "settle", "PR #%d mergeable_state=%q — ready\n", pr.Number, mergeableState)
+			return PRSettleResult{Status: PRMergeReady, Reason: fmt.Sprintf("mergeable_state=%q", mergeableState), MergeableState: mergeableState, PR: pr}
+		}
 	}
 
 	if pr.HeadSHA == "" {
@@ -321,6 +335,11 @@ func (e *Engine) settlePRMergeStateWith(item gh.ProjectItem, stage *stages.Stage
 	switch status, _, _ := gh.ClassifyCheckRuns(checkRuns); status {
 	case gh.CheckRunsFailed:
 		return PRSettleResult{Status: PRMergeBlocked, Reason: "CI checks failed", MergeableState: mergeableState, CheckRuns: checkRuns, PR: pr}
+	case gh.CheckRunsNonPassing:
+		// #2296: a cancelled/stale/unrecognised latest run has no result. It is a
+		// verdict (Blocked), never Unsettled: an Unsettled claim would wait for
+		// CIBackstopTimeout on a run that will never finish (ADR-1410).
+		return PRSettleResult{Status: PRMergeBlocked, Reason: "CI checks did not pass: " + describeNonPassing(gh.NonPassingCheckRuns(checkRuns)), MergeableState: mergeableState, CheckRuns: checkRuns, PR: pr}
 	case gh.CheckRunsPending:
 		return PRSettleResult{Status: PRMergeUnsettled, Reason: "CI checks pending", MergeableState: mergeableState, CheckRuns: checkRuns, PR: pr}
 	default:

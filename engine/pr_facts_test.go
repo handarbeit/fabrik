@@ -574,3 +574,41 @@ func TestAttention_RedCIOnDraftIsReportedNotRanked(t *testing.T) {
 		t.Errorf("draft: rank=%d summary=%q", r.Rank, r.Summary)
 	}
 }
+
+// #2296: a head whose rerun was cancelled never keeps a stale green verdict.
+func TestSettlePRFacts_CancelledRerunIsNotGreen(t *testing.T) {
+	env := newPRFactsEnv(t)
+	board := env.seedPR(t, 7, false)
+	pass := passRun("Test and vet", 1)
+	env.runs = []gh.CheckRun{pass}
+	env.e.store.Apply(itemstate.CheckRunCompleted{Repo: "owner/repo", SHA: prFactsSHA, Run: pass})
+	env.e.settlePRFacts(board)
+	if got := status(t, env.e, "7"); got.PR.CI.V != "green" {
+		t.Fatalf("ci = %+v, want green", got.PR.CI)
+	}
+
+	// The check was re-run on the same head and cancelled; the cache never heard.
+	env.runs = []gh.CheckRun{{ID: 9, Name: "Test and vet", Status: "completed", Conclusion: "cancelled"}}
+	env.clock.t = env.clock.t.Add(prFactsGreenRecheck)
+	env.e.settlePRFacts(board)
+	got := status(t, env.e, "7")
+	if got.PR.CI.V != "red" || len(got.PR.CIFailing) != 1 || got.PR.CIFailing[0] != "Test and vet" {
+		t.Errorf("a cancelled rerun stayed green: ci=%+v failing=%v", got.PR.CI, got.PR.CIFailing)
+	}
+}
+
+func TestCachedCIVerdict_NonPassingIsRed(t *testing.T) {
+	for _, conclusion := range []string{"cancelled", "stale", "", "future_value"} {
+		lpr := &itemstate.LinkedPRState{CheckRuns: []gh.CheckRun{
+			{ID: 1, Name: "build", Status: "completed", Conclusion: "success"},
+			{ID: 2, Name: "test", Status: "completed", Conclusion: conclusion},
+		}}
+		if got := cachedCIVerdict(lpr); got != "red" {
+			t.Errorf("conclusion %q: cachedCIVerdict = %q, want red", conclusion, got)
+		}
+	}
+	skipped := &itemstate.LinkedPRState{CheckRuns: []gh.CheckRun{{ID: 1, Name: "x", Status: "completed", Conclusion: "skipped"}}}
+	if got := cachedCIVerdict(skipped); got != "passed-with-skips" {
+		t.Errorf("skipped: cachedCIVerdict = %q, want passed-with-skips (unchanged)", got)
+	}
+}
