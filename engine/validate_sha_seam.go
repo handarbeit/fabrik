@@ -17,3 +17,11 @@ func (e *Engine) SeedValidateCompletedSHAForTest(repo string, number int, sha st
 func (e *Engine) SeedLinkedPRHeadForTest(repo string, number, prNumber int, sha string) {
 	e.store.Apply(itemstate.PRHeadSHAUpdated{Repo: repo, Number: number, LinkedPRNum: prNumber, SHA: sha})
 }
+
+// SetValidateSHARebuildDisabledForTest turns off the post-restart rebuild of the Validate
+// completion SHA (#2343), restoring the FR-5 "empty SHA means do nothing" behaviour, and
+// returns the restore function. It is how the restart twins show they are not vacuous.
+func (e *Engine) SetValidateSHARebuildDisabledForTest() (restore func()) {
+	e.validateSHARebuildOff.Store(true)
+	return func() { e.validateSHARebuildOff.Store(false) }
+}
