@@ -107,11 +107,13 @@ func TestMergeTrainLandingSettle_BoundExpiryKeepsTrialAndNextPassReusesIt(t *tes
 	t.Parallel()
 	env := mergeTrainEnv(t, mergeTrainEnvOptions{})
 	num, _ := QueueMember(t, env, "settle-bound", map[string]string{"a.txt": "a\n"})
-	env.Engine.SetLandingBlockedBoundForTest(100 * time.Millisecond)
-	// A sim read costs a git merge (~100ms+), so one 100ms attempt makes two reads: the first
-	// attempt runs out of bound inside the window (3 blocked reads), and the next pass's reads
-	// see the window close.
-	startTrialSeeder(t, env, allGreenVerdict, &simgh.ReadyForReviewStep{BlockedReads: 3})
+	// Count-driven, not wall-clock-driven: a 1ns bound expires on the first green-but-blocked
+	// read whatever a sim read costs, and the window holds far more blocked reads than one
+	// attempt can consume, so the first attempt always ends without a merge. The bound is
+	// restored to its default after the first pass, so the later passes wait the rest of the
+	// window out and always settle.
+	env.Engine.SetLandingBlockedBoundForTest(time.Nanosecond)
+	startTrialSeeder(t, env, allGreenVerdict, &simgh.ReadyForReviewStep{BlockedReads: 6})
 
 	RunPoll(t, env)
 
@@ -126,6 +128,7 @@ func TestMergeTrainLandingSettle_BoundExpiryKeepsTrialAndNextPassReusesIt(t *tes
 		t.Error("the expired bound posted no merge-failure comment")
 	}
 	kept := trialPRs[0]
+	env.Engine.SetLandingBlockedBoundForTest(0)
 
 	for i := 0; i < 15; i++ {
 		if projectItem(t, env, num).Status == "Done" {
