@@ -204,12 +204,17 @@ func appendCoverage(body string, cov Coverage) string {
 }
 
 // logCoverage logs the computed coverage at the call site that has the PR number.
-func logCoverage(prNumber int, cov Coverage, authoritative bool) {
+// transcriptPath, when non-empty, is the saved transcript a partial line names (#2303).
+func logCoverage(prNumber int, cov Coverage, authoritative bool, transcriptPath string) {
 	if cov.Complete {
 		logf(prNumber, "review", "coverage: complete (%d entries; transcript authoritative=%t)\n", cov.TotalEntries, authoritative)
 		return
 	}
-	logf(prNumber, "warn", "coverage: partial — %s (%d unread path(s); transcript authoritative=%t)\n", cov.Reason, len(cov.Unread), authoritative)
+	saved := ""
+	if transcriptPath != "" {
+		saved = "; transcript saved: " + transcriptPath
+	}
+	logf(prNumber, "warn", "coverage: partial — %s (%d unread path(s); transcript authoritative=%t)%s\n", cov.Reason, len(cov.Unread), authoritative, saved)
 }
 
 // streamEvent is the subset of a stream-json line deriveOpened reads.

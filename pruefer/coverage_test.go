@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -559,5 +560,93 @@ func TestReadLineRE_AcceptsArrowSeparator(t *testing.T) {
 	}
 	if readLineRE.MatchString("no number here") {
 		t.Error("matched a line with no number")
+	}
+}
+
+// --- #2303: transcript retention end to end ------------------------------------
+
+func reviewWithTranscript(t *testing.T, cfg Config, text string, transcript string) (ReviewOutcome, *fakeReviewer, []string) {
+	t.Helper()
+	logs := captureLogs(t)
+	client := newFakeReviewer()
+	client.diff = reviewTestDiff
+	claude := &mockClaudeInvoker{fn: func(req ReviewRequest) (ReviewResult, error) {
+		if text == "" {
+			text = "All read." + coverageReportAll(req)
+		}
+		return ReviewResult{Text: text, Transcript: []byte(transcript)}, nil
+	}}
+	clone, _ := fakeClone(t, nil)
+	pr := gh.PRDetails{Number: 1, Author: "alice", HeadSHA: "sha1"}
+	outcome := ReviewPR(context.Background(), client, claude, clone, cfg, "pruefer-bot[bot]", "owner", "repo", pr, nil)
+	return outcome, client, logs()
+}
+
+func TestReviewPR_PartialCoverageKeepsTranscript(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "transcripts")
+	outcome, _, logs := reviewWithTranscript(t, Config{TranscriptDir: dir}, "mock review", `{"type":"result"}`+"\n")
+	if !outcome.Reviewed || outcome.Err != nil {
+		t.Fatalf("outcome = %+v", outcome)
+	}
+	files := transcriptFiles(t, dir)
+	if len(files) != 1 {
+		t.Fatalf("transcripts = %v, want exactly one", files)
+	}
+	var partialLine string
+	for _, l := range logs {
+		if strings.Contains(l, "coverage: partial") {
+			partialLine = l
+		}
+	}
+	if !strings.Contains(partialLine, filepath.Join(dir, files[0])) {
+		t.Errorf("partial warn line %q does not name the saved file", partialLine)
+	}
+}
+
+func TestReviewPR_CompleteCoverageKeepsNoTranscriptByDefault(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "transcripts")
+	outcome, _, _ := reviewWithTranscript(t, Config{TranscriptDir: dir}, "", `{"type":"result"}`)
+	if !outcome.Reviewed {
+		t.Fatalf("outcome = %+v", outcome)
+	}
+	if files := transcriptFiles(t, dir); len(files) != 0 {
+		t.Errorf("complete review left %v", files)
+	}
+}
+
+func TestReviewPR_KeepTranscriptsAllAndOff(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "all")
+	reviewWithTranscript(t, Config{TranscriptDir: dir, KeepTranscripts: KeepTranscriptsAll}, "", "x")
+	if files := transcriptFiles(t, dir); len(files) != 1 {
+		t.Errorf("keep_transcripts=all kept %v for a complete review, want one", files)
+	}
+	dir = filepath.Join(t.TempDir(), "off")
+	reviewWithTranscript(t, Config{TranscriptDir: dir, KeepTranscripts: KeepTranscriptsOff}, "mock review", "x")
+	if files := transcriptFiles(t, dir); len(files) != 0 {
+		t.Errorf("keep_transcripts=off kept %v", files)
+	}
+}
+
+func TestReviewPR_TranscriptWriteFailureStillSubmits(t *testing.T) {
+	blocker := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outcome, client, logs := reviewWithTranscript(t, Config{TranscriptDir: filepath.Join(blocker, "t")}, "mock review", "x")
+	if !outcome.Reviewed || outcome.Err != nil || len(client.submitCalls) != 1 {
+		t.Fatalf("review must still be submitted: %+v", outcome)
+	}
+	for _, l := range logs {
+		if strings.Contains(l, "coverage: partial") && strings.Contains(l, "transcript saved") {
+			t.Errorf("warn line claims a saved path after a failed write: %q", l)
+		}
+	}
+}
+
+func TestReviewPR_EmptyTranscriptCreatesNoDir(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "transcripts")
+	reviewWithTranscript(t, Config{TranscriptDir: dir}, "mock review", "")
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("transcript dir created for an empty transcript: %v", err)
 	}
 }

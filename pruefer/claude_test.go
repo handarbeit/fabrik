@@ -426,6 +426,25 @@ func TestRealClaudeInvoker_Review_Success(t *testing.T) {
 	}
 }
 
+// #2303: Review hands the invocation's raw stdout back, byte for byte, so
+// ReviewPR can keep it when coverage is partial.
+func TestRealClaudeInvoker_Review_ReturnsRawTranscript(t *testing.T) {
+	const stream = `{"type":"system","subtype":"init"}` + "\n" +
+		`{"type":"result","result":"ok","is_error":false,"num_turns":1,"total_cost_usd":0.01}` + "\n"
+	writeFakeClaude(t, "printf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\"}' '{\"type\":\"result\",\"result\":\"ok\",\"is_error\":false,\"num_turns\":1,\"total_cost_usd\":0.01}'\n")
+
+	r := &RealClaudeInvoker{}
+	result, err := r.Review(context.Background(), ReviewRequest{
+		Owner: "o", Repo: "r", PRNumber: 1, HeadSHA: "abc", WorkDir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("Review: %v", err)
+	}
+	if string(result.Transcript) != stream {
+		t.Errorf("Transcript = %q, want %q", result.Transcript, stream)
+	}
+}
+
 func TestRealClaudeInvoker_Review_ProcessError(t *testing.T) {
 	writeFakeClaude(t, "exit 1\n")
 

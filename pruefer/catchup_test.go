@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -312,5 +313,53 @@ func TestParseCatchUpMarker(t *testing.T) {
 	}
 	if got := ParseCatchUpMarker("<!-- fabrik:train-catch-up head=zz base=yy pure=true -->"); len(got) != 0 {
 		t.Errorf("malformed marker parsed: %+v", got)
+	}
+}
+
+func TestTrustAnchorStartupNotice(t *testing.T) {
+	if got := trustAnchorStartupNotice(Config{PatchSkip: true}); !strings.Contains(got, "catch_up_marker_authors") {
+		t.Errorf("empty setting must produce a notice naming catch_up_marker_authors, got %q", got)
+	}
+	if got := trustAnchorStartupNotice(Config{PatchSkip: true, CatchUpMarkerAuthors: []string{cuEngine}}); got != "" {
+		t.Errorf("a set trust anchor needs no notice, got %q", got)
+	}
+	if got := trustAnchorStartupNotice(Config{PatchSkip: false}); got != "" {
+		t.Errorf("with the feature off there is nothing to say, got %q", got)
+	}
+}
+
+// #2230 R0: a catch-up marker from a login that is not trusted is reported once
+// per login, and trust is not widened — the head is still reviewed.
+func TestCatchUpSkip_UntrustedMarkerAuthorIsReportedOnceAndNotTrusted(t *testing.T) {
+	untrustedMarkerNoticed.Range(func(k, _ any) bool { untrustedMarkerNoticed.Delete(k); return true })
+	var mu sync.Mutex
+	var lines []string
+	old := Logf
+	Logf = func(pr int, tag, format string, args ...any) {
+		mu.Lock()
+		lines = append(lines, tag+": "+fmt.Sprintf(format, args...))
+		mu.Unlock()
+	}
+	t.Cleanup(func() { Logf = old })
+
+	f := newCUFixture(t)
+	f.client.comments = []gh.Comment{{Author: "someone-else[bot]", Body: cuMarker(cuHead, cuBase, true)}}
+	for i := 0; i < 2; i++ {
+		out := f.review()
+		if !out.Reviewed {
+			t.Fatalf("round %d: outcome = %+v, want a review: the untrusted marker must not be honoured", i, out)
+		}
+		f.client.reviews = []gh.PRReview{{Author: cuBot, CommitID: cuPrev, State: "COMMENTED"}}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	n := 0
+	for _, l := range lines {
+		if strings.Contains(l, "someone-else[bot]") && strings.Contains(l, "catch_up_marker_authors") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("untrusted-marker notices = %d, want exactly 1 across two sightings; lines: %v", n, lines)
 	}
 }

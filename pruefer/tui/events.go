@@ -106,6 +106,17 @@ type DropEvent struct {
 
 func (DropEvent) tuiEvent() {}
 
+// SkipEvent reports the cumulative count of heads skipped under one saving
+// reason (#2230 R4): "patch_unchanged", "trial_equivalent" or "catch_up". Total
+// is cumulative, not a delta, for the same reason as DropEvent.
+type SkipEvent struct {
+	Reason string
+	Total  int
+	At     time.Time
+}
+
+func (SkipEvent) tuiEvent() {}
+
 // DerivedInstallationSummary is one installation's contribution to a
 // DerivedRepoSetEvent — a plain re-expression of
 // internal/githubauth.DerivedInstallation, kept dependency-free the same

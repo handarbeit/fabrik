@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
@@ -247,6 +248,12 @@ func catchUpSkip(ctx context.Context, client GitHubReviewer, cfg Config, botLogi
 			mk, status = findCatchUpMarker(comments, cfg.CatchUpMarkerAuthors, candidate)
 		}
 
+		if status == markerAbsent {
+			if login, ok := untrustedMarkerAuthor(comments, cfg.CatchUpMarkerAuthors, candidate); ok {
+				noteUntrustedMarker(pr.Number, login)
+			}
+		}
+
 		switch status {
 		case markerAbsent:
 			return catchUpVerdict{Detail: fmt.Sprintf("no catch-up marker for %s from a configured catch_up_marker_authors login", shortSHA(candidate))}
@@ -265,6 +272,54 @@ func catchUpSkip(ctx context.Context, client GitHubReviewer, cfg Config, botLogi
 		candidate = parents[0] // a skipped catch-up leaves no review: follow the chain
 	}
 	return catchUpVerdict{Detail: fmt.Sprintf("no reviewed head within %d consecutive catch-ups", maxCatchUpChain)}
+}
+
+// R0 / FR-016 (#2230): the #2066 skip, and the trial-PR recognition, are inert
+// until the operator names the engine's login in catch_up_marker_authors, and
+// Pruefer cannot infer that login (it is the Fabrik App slug or the operator's
+// user, both deployment-specific) — defaulting one would widen trust to a
+// login nobody nominated. So the setting is made visible instead: once at
+// startup when it is empty, and once per login when an engine catch-up marker
+// is seen from a login that is not trusted. Neither changes any decision.
+
+// trustAnchorStartupNotice returns the one-line startup notice for cfg, or ""
+// when there is nothing to say (the feature is off, or the setting is set).
+func trustAnchorStartupNotice(cfg Config) string {
+	if !cfg.PatchSkip || len(cfg.CatchUpMarkerAuthors) > 0 {
+		return ""
+	}
+	return "catch_up_marker_authors is empty: the merge-train catch-up skip (#2066) and merge-train trial-PR recognition (#2230) are inactive. " +
+		"Set it (--catch-up-marker-authors / PRUEFER_CATCH_UP_MARKER_AUTHORS / catch_up_marker_authors) to the login the Fabrik engine posts as — " +
+		"the App's \"<slug>[bot]\" under GitHub App auth, the operator's user login under PAT auth. Patch-identity skipping of rebases does not need it."
+}
+
+// untrustedMarkerNoticed remembers the logins already reported by
+// noteUntrustedMarker, so each is reported once per process.
+var untrustedMarkerNoticed sync.Map
+
+// untrustedMarkerAuthor returns the login of a comment that carries a
+// well-formed catch-up marker for head but is not authored by a trusted login.
+func untrustedMarkerAuthor(comments []gh.Comment, authors []string, head string) (string, bool) {
+	for _, c := range comments {
+		if loginIn(authors, c.Author) {
+			continue
+		}
+		for _, mk := range ParseCatchUpMarker(c.Body) {
+			if mk.Head == head {
+				return c.Author, true
+			}
+		}
+	}
+	return "", false
+}
+
+// noteUntrustedMarker logs, once per login, that an engine catch-up marker was
+// ignored because its author is not in catch_up_marker_authors.
+func noteUntrustedMarker(prNumber int, login string) {
+	if _, seen := untrustedMarkerNoticed.LoadOrStore(strings.ToLower(login), struct{}{}); seen {
+		return
+	}
+	logf(prNumber, "startup", "a merge-train catch-up marker from %q was ignored: that login is not in catch_up_marker_authors. If it is the Fabrik engine's login, add it to enable the catch-up skip; trust is never widened automatically.\n", login)
 }
 
 func shortSHA(s string) string {

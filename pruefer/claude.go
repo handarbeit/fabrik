@@ -219,6 +219,11 @@ type ReviewRequest struct {
 	// model so it never silently assumes it saw the whole change — see
 	// renderOmittedPaths.
 	OmittedTrimmedPaths []string
+	// OmittedReviewedPaths lists the files of an engine-authored merge-train
+	// trial PR that review.go withheld because each is the already-reviewed
+	// patch of exactly one member PR (#2230); only the remaining files — the
+	// conflict-resolution edits — are in the staged diff.
+	OmittedReviewedPaths []string
 	// OperatorGuidance/OperatorGuidanceMode carry #1446's operator-level
 	// review-guidance override (Config.ReviewGuidance/ReviewGuidanceMode),
 	// composed onto the embedded default guidance by resolveGuidance before
@@ -277,6 +282,10 @@ type ReviewResult struct {
 	// visible in the transcript (see deriveOpened): coverage then refuses to
 	// credit what only an invisible subagent could have read.
 	UnobservedSubagents bool
+	// Transcript is the invocation's raw stream-json stdout, unmodified. It is
+	// empty for an invoker that has no transcript. ReviewPR keeps it only when
+	// coverage is partial (see maybeKeepTranscript, #2303).
+	Transcript []byte
 }
 
 // RealClaudeInvoker invokes the real claude CLI via exec.CommandContext,
@@ -410,8 +419,8 @@ func renderReviewThreads(b *strings.Builder, threads []gh.PRReviewThread, thread
 // Claude reports on an omitted file anyway (R6) rather than trusting the
 // instruction alone. (#2192: the old `git diff ... -- . ':!path'` example is
 // gone — git is not available to the reviewer and the clone has no base ref.)
-func renderOmittedPaths(b *strings.Builder, excluded, trimmed []string) {
-	if len(excluded) == 0 && len(trimmed) == 0 {
+func renderOmittedPaths(b *strings.Builder, excluded, trimmed, reviewed []string) {
+	if len(excluded) == 0 && len(trimmed) == 0 && len(reviewed) == 0 {
 		return
 	}
 	b.WriteString("## Files omitted from this review\n\n")
@@ -421,6 +430,9 @@ func renderOmittedPaths(b *strings.Builder, excluded, trimmed []string) {
 	}
 	for _, p := range trimmed {
 		fmt.Fprintf(b, "- %s (dropped to fit within max_diff_bytes)\n", p)
+	}
+	for _, p := range reviewed {
+		fmt.Fprintf(b, "- %s (identical to a member PR's patch that was already reviewed; this merge-train trial PR is being reviewed only for what the members' patches do not already cover)\n", p)
 	}
 	b.WriteString("\n")
 }
@@ -542,7 +554,7 @@ func renderDynamicContext(b *strings.Builder, req ReviewRequest) {
 	} else if req.BaseBranch != "" {
 		fmt.Fprintf(b, "The PR targets %q. The checkout is a shallow, single-commit fetch of the PR head with no git history or base ref, and no staged diff is available: read the changed files in the working tree directly.\n\n", req.BaseBranch)
 	}
-	renderOmittedPaths(b, req.OmittedExcludedPaths, req.OmittedTrimmedPaths)
+	renderOmittedPaths(b, req.OmittedExcludedPaths, req.OmittedTrimmedPaths, req.OmittedReviewedPaths)
 	if req.Body != "" {
 		b.WriteString("## PR description\n\n")
 		b.WriteString(req.Body)
@@ -888,5 +900,5 @@ func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (Revi
 	}
 	opened, authoritative := deriveOpened(stdout.Bytes(), req.Staged)
 	return ReviewResult{Text: resp.Result, NumTurns: resp.NumTurns, CostUSD: resp.CostUSD, Opened: opened, OpenedAuthoritative: authoritative,
-		UnobservedSubagents: req.Staged != nil && !authoritative}, nil
+		UnobservedSubagents: req.Staged != nil && !authoritative, Transcript: stdout.Bytes()}, nil
 }

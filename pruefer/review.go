@@ -31,6 +31,14 @@ type GitHubReviewer interface {
 	FetchCommit(owner, repo, sha string) (gh.CommitInfo, error)
 	FetchCommitsBehind(owner, repo, base, head string) (int, error)
 	FetchPRDiff(owner, repo string, prNumber int) (string, error)
+	// FetchCompareDiff and FindPRByHead back the patch-identity skips (#2230):
+	// the diff a previously reviewed head carried relative to its merge base
+	// with the PR's base, and the PR a merge-train member branch belongs to.
+	// Required unconditionally, not type-asserted, for the same structural
+	// reason as FetchCommit — a fake silently lacking them would silently
+	// disable a check.
+	FetchCompareDiff(owner, repo, base, head string) (string, error)
+	FindPRByHead(owner, repo, headRef string) ([]gh.PRDetails, error)
 	// FetchPRFiles returns the changed-path list via the paginated
 	// /pulls/{n}/files endpoint, which has no 20,000-line ceiling — the
 	// fallback source of changed paths when FetchPRDiff returns
@@ -254,7 +262,7 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 
 	diff, err := client.FetchPRDiff(owner, repo, pr.Number)
 	var changedPaths []string
-	var omittedExcludedPaths, omittedTrimmedPaths []string
+	var omittedExcludedPaths, omittedTrimmedPaths, omittedReviewedPaths []string
 	var stageBlocks []diffFileBlock // the blocks the model is told about, staged below
 	var stagePreamble string
 	if err != nil {
@@ -304,6 +312,40 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 		// divergence structurally rather than requiring the two call sites
 		// to be kept in sync by hand.
 		blocks, preamble := splitDiffFiles(diff)
+
+		// #2230: patch-identity skips, on the raw diff (before exclusion or
+		// trimming, so a change confined to an excluded path still counts as a
+		// change). Bypassed by forceReview — a human asked. Every uncertain
+		// input falls through to a normal review.
+		if !forceReview && cfg.PatchSkip {
+			pv := patchUnchangedSkip(client, cfg, botLogin, owner, repo, pr, reviews, diff, tracker)
+			if pv.Degraded {
+				degraded = true
+			}
+			if pv.Skip {
+				logf(pr.Number, "select", "skipping %s/%s#%d: %s (%s)\n", owner, repo, pr.Number, SkipPatchUnchanged, pv.Detail)
+				return ReviewOutcome{Skipped: true, Reason: SkipPatchUnchanged}
+			}
+			if pv.Detail != "" {
+				logf(pr.Number, "select", "patch-identity check on %s/%s#%d: reviewing (%s)\n", owner, repo, pr.Number, pv.Detail)
+			}
+			tv := trialCheck(client, cfg, botLogin, owner, repo, pr, diff)
+			if tv.Degraded {
+				degraded = true
+			}
+			if tv.Skip {
+				logf(pr.Number, "select", "skipping %s/%s#%d: %s (%s)\n", owner, repo, pr.Number, SkipTrialEquivalent, tv.Detail)
+				return ReviewOutcome{Skipped: true, Reason: SkipTrialEquivalent}
+			}
+			if tv.Detail != "" {
+				logf(pr.Number, "select", "trial check on %s/%s#%d: reviewing (%s)\n", owner, repo, pr.Number, tv.Detail)
+			}
+			if len(tv.Covered) > 0 {
+				blocks, omittedReviewedPaths = withholdCovered(blocks, tv.Covered)
+				diff = joinDiff(preamble, blocks)
+			}
+		}
+
 		changedPaths = pathsOf(blocks)
 
 		// R1/R3: path exclusion is checked before the size gate. The
@@ -427,7 +469,8 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 		HeadSHA: pr.HeadSHA, BaseBranch: pr.BaseRef, Model: cfg.Model, Effort: cfg.Effort,
 		WorkDir: dir, MaxWallTime: cfg.MaxWallTime, ReviewThreads: threads, ReviewThreadsTruncated: threadsTruncated,
 		OmittedExcludedPaths: omittedExcludedPaths, OmittedTrimmedPaths: omittedTrimmedPaths,
-		OperatorGuidance: cfg.ReviewGuidance, OperatorGuidanceMode: cfg.ReviewGuidanceMode,
+		OmittedReviewedPaths: omittedReviewedPaths,
+		OperatorGuidance:     cfg.ReviewGuidance, OperatorGuidanceMode: cfg.ReviewGuidanceMode,
 		RepoGuidance: repoGuidance, RepoGuidanceMode: repoGuidanceMode,
 		Staged: staged,
 	})
@@ -445,7 +488,10 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 		Transcript: result.Opened, TranscriptAuthoritative: result.OpenedAuthoritative,
 		UnobservedSubagents: result.UnobservedSubagents,
 	})
-	logCoverage(pr.Number, cov, result.OpenedAuthoritative)
+	// #2303: keep the raw transcript while the temp dirs still exist (their
+	// removal is deferred above) and before the review is submitted.
+	transcriptPath := maybeKeepTranscript(cfg, pr.Number, owner, repo, pr.HeadSHA, cov, result.Transcript)
+	logCoverage(pr.Number, cov, result.OpenedAuthoritative, transcriptPath)
 
 	summary, findings, parseInfo := parseReviewFindings(reviewText)
 	logSummaryParseInfo(pr.Number, parseInfo)
