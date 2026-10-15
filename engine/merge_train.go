@@ -4824,6 +4824,9 @@ func membersToItems(members []trainMember) []gh.ProjectItem {
 // The rebase path is deliberately disjoint from red-batch bisection: a red
 // re-validation here dissolves rather than bisecting, so the rebase-cycle budget
 // and the bisection cost cap never interact (compose-not-duplicate).
+//
+// Since #2298 the rebase-cycle budget is a per-run, persisted count shared with
+// handleStaleTrial's rebuilds of trials that went stale mid-CI (see landGreenBatchRun).
 func (e *Engine) landGreenBatch(ctx context.Context, state *mergeTrainWorkerState, p trialParams, survivors []trainMember) {
 	e.landGreenBatchRun(ctx, nil, state, p, survivors)
 }
