@@ -145,3 +145,86 @@ func TestClassifyCheckRuns_FailedOrder_MatchesFirstAppearance(t *testing.T) {
 		}
 	}
 }
+
+func TestClassifyCheckRuns_ConclusionTable(t *testing.T) {
+	cases := []struct {
+		conclusion string
+		want       CheckRunStatus
+	}{
+		{"success", CheckRunsReady},
+		{"neutral", CheckRunsReady},
+		{"skipped", CheckRunsReady},
+		{"failure", CheckRunsFailed},
+		{"timed_out", CheckRunsFailed},
+		{"action_required", CheckRunsFailed},
+		{"cancelled", CheckRunsNonPassing},
+		{"stale", CheckRunsNonPassing},
+		{"", CheckRunsNonPassing},
+		{"some_future_conclusion", CheckRunsNonPassing},
+	}
+	for _, tc := range cases {
+		t.Run("conclusion="+tc.conclusion, func(t *testing.T) {
+			runs := []CheckRun{
+				{ID: 1, Name: "build", Status: "completed", Conclusion: "success"},
+				{ID: 2, Name: "test", Status: "completed", Conclusion: tc.conclusion},
+			}
+			status, pending, failed := ClassifyCheckRuns(runs)
+			if status != tc.want {
+				t.Fatalf("status = %v, want %v", status, tc.want)
+			}
+			if len(pending) != 0 {
+				t.Errorf("pending = %v, want none", pending)
+			}
+			wantFailed := 0
+			if tc.want == CheckRunsFailed {
+				wantFailed = 1
+			}
+			if len(failed) != wantFailed {
+				t.Errorf("len(failed) = %d, want %d", len(failed), wantFailed)
+			}
+			np := NonPassingCheckRuns(runs)
+			wantNP := 0
+			if tc.want == CheckRunsNonPassing {
+				wantNP = 1
+			}
+			if len(np) != wantNP {
+				t.Errorf("len(NonPassingCheckRuns) = %d, want %d", len(np), wantNP)
+			}
+			// Pending beats every class.
+			withPending := append([]CheckRun{{ID: 3, Name: "lint", Status: "in_progress"}}, runs...)
+			if s, _, _ := ClassifyCheckRuns(withPending); s != CheckRunsPending {
+				t.Errorf("with pending run: status = %v, want CheckRunsPending", s)
+			}
+		})
+	}
+}
+
+func TestClassifyCheckRuns_FailureBeatsNonPassing(t *testing.T) {
+	status, _, failed := ClassifyCheckRuns([]CheckRun{
+		{ID: 1, Name: "a", Status: "completed", Conclusion: "cancelled"},
+		{ID: 2, Name: "b", Status: "completed", Conclusion: "failure"},
+	})
+	if status != CheckRunsFailed || len(failed) != 1 || failed[0].Name != "b" {
+		t.Fatalf("status=%v failed=%v, want Failed with [b]", status, failed)
+	}
+}
+
+func TestClassifyCheckRuns_NewerSuccessSupersedesOlderCancelled(t *testing.T) {
+	status, _, _ := ClassifyCheckRuns([]CheckRun{
+		{ID: 1, Name: "test", Status: "completed", Conclusion: "cancelled"},
+		{ID: 2, Name: "test", Status: "completed", Conclusion: "success"},
+	})
+	if status != CheckRunsReady {
+		t.Errorf("newer success over older cancelled: status = %v, want Ready", status)
+	}
+}
+
+func TestClassifyCheckRuns_NewerCancelledSupersedesOlderSuccess(t *testing.T) {
+	status, _, _ := ClassifyCheckRuns([]CheckRun{
+		{ID: 1, Name: "test", Status: "completed", Conclusion: "success"},
+		{ID: 2, Name: "test", Status: "completed", Conclusion: "cancelled"},
+	})
+	if status != CheckRunsNonPassing {
+		t.Errorf("newer cancelled over older success: status = %v, want NonPassing", status)
+	}
+}
