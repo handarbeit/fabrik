@@ -485,3 +485,40 @@ func TestWarnIfConfigIgnored_PanelRecordsAndClears(t *testing.T) {
 		t.Errorf("not cleared: %+v", es)
 	}
 }
+
+func TestReadDotenv_NoEnvFile(t *testing.T) {
+	chdir(t, t.TempDir())
+	data, err := ReadDotenv()
+	if err != nil || data != nil {
+		t.Errorf("got (%v, %v), want (nil, nil)", data, err)
+	}
+}
+
+func TestReadDotenv_GitignoreGuard(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, ".git"), 0755)
+	os.WriteFile(filepath.Join(dir, ".env"), []byte("A=1\n"), 0600)
+	os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("*.log\n"), 0644)
+	chdir(t, dir)
+	if _, err := ReadDotenv(); err == nil {
+		t.Error("expected the gitignore guard to refuse an unignored .env")
+	}
+}
+
+func TestReadDotenv_ReturnsDataAndExportsNothing(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, ".env"), []byte("FABRIK_READDOTENV_X=1\n"), 0600)
+	chdir(t, dir)
+	os.Unsetenv("FABRIK_READDOTENV_X")
+	t.Cleanup(func() { os.Unsetenv("FABRIK_READDOTENV_X") })
+	data, err := ReadDotenv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if data["FABRIK_READDOTENV_X"] != "1" {
+		t.Errorf("data = %v", data)
+	}
+	if _, set := os.LookupEnv("FABRIK_READDOTENV_X"); set {
+		t.Error("ReadDotenv exported a variable")
+	}
+}
