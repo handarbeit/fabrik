@@ -5,8 +5,10 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/claudeerr"
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
 )
@@ -523,4 +525,107 @@ func TestMaxRetriesEscalation_UnaffectedBySliceCounterChanges(t *testing.T) {
 			t.Errorf("must not immediately re-escalate on the resumed dispatch (Attempts=1 is well under MaxRetries=%d), got label %q", eng.cfg.MaxRetries, c.labelName)
 		}
 	}
+}
+
+// TestSliceContinuation_SkipsBackoffButResumes pins #2292: a stage that ended as a
+// time slice (turn cap or max_wall_time) is redispatched without waiting out the
+// retry backoff (#2232) AND resumes its Claude session. "Skip the backoff" and
+// "has run before" are independent; the first must not erase the second.
+func TestSliceContinuation_SkipsBackoffButResumes(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{"turn cap", &claudeTurnLimitError{TerminalReason: "max_turns", NumTurns: 50}},
+		{"max_wall_time", &claudeKilledError{Cause: claudeerr.KillWallTime, Err: errors.New("wall time exceeded")}},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			skipIfNoGit(t)
+			repoDir := initBareRepo(t)
+			wm := NewWorktreeManager(repoDir)
+
+			client := &mockGitHubClient{}
+			claude := &mockClaudeInvoker{
+				invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+					return "partial output", false, TokenUsage{TurnsUsed: 50, MaxTurns: 50}, tc.err
+				},
+			}
+
+			eng := NewWithDeps(
+				Config{Owner: "owner", Repo: "repo", ProjectNum: 1, User: "testuser", Token: "token",
+					MaxRetries: 2, MaxSliceRetries: 5, RetryBackoff: time.Hour, Stages: testStages()},
+				client, claude, wm,
+			)
+
+			board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+			item := gh.ProjectItem{Number: 2920 + i, Title: "Slice continuation", Status: "Research", ItemID: "PVTI_2920"}
+
+			if err := eng.processItem(context.Background(), board, item); err != nil {
+				t.Fatalf("first processItem: %v", err)
+			}
+			if err := eng.processItem(context.Background(), board, item); err != nil {
+				t.Fatalf("second processItem: %v", err)
+			}
+
+			if len(claude.calls) != 2 {
+				t.Fatalf("claude calls = %d, want 2 (a slice must not wait out the 1h backoff)", len(claude.calls))
+			}
+			if claude.calls[0].resume {
+				t.Error("first call must start a fresh session")
+			}
+			if !claude.calls[1].resume {
+				t.Error("slice continuation must resume the stage's session, not start fresh (#2292)")
+			}
+		})
+	}
+}
+
+// TestIncompleteRetry_KeepsBackoffAndResume verifies an ordinary (non-slice)
+// incomplete run is unchanged by #2292: it waits out the retry backoff, and
+// the retry after the backoff resumes.
+func TestIncompleteRetry_KeepsBackoffAndResume(t *testing.T) {
+	skipIfNoGit(t)
+	newEng := func(backoff time.Duration) (*Engine, *mockClaudeInvoker) {
+		claude := &mockClaudeInvoker{
+			invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+				return "output without completion marker", false, TokenUsage{}, nil
+			},
+		}
+		eng := NewWithDeps(
+			Config{Owner: "owner", Repo: "repo", ProjectNum: 1, User: "testuser", Token: "token",
+				MaxRetries: 2, MaxSliceRetries: 5, RetryBackoff: backoff, Stages: testStages()},
+			&mockGitHubClient{}, claude, NewWorktreeManager(initBareRepo(t)),
+		)
+		return eng, claude
+	}
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 2925, Title: "Ordinary incomplete", Status: "Research", ItemID: "PVTI_2925"}
+
+	t.Run("held inside backoff", func(t *testing.T) {
+		eng, claude := newEng(time.Hour)
+		for i := 0; i < 2; i++ {
+			if err := eng.processItem(context.Background(), board, item); err != nil {
+				t.Fatalf("processItem: %v", err)
+			}
+		}
+		if len(claude.calls) != 1 {
+			t.Errorf("claude calls = %d, want 1 (an ordinary incomplete run must wait out the backoff)", len(claude.calls))
+		}
+	})
+
+	t.Run("resumes after backoff", func(t *testing.T) {
+		eng, claude := newEng(time.Nanosecond)
+		for i := 0; i < 2; i++ {
+			if err := eng.processItem(context.Background(), board, item); err != nil {
+				t.Fatalf("processItem: %v", err)
+			}
+		}
+		if len(claude.calls) != 2 {
+			t.Fatalf("claude calls = %d, want 2", len(claude.calls))
+		}
+		if !claude.calls[1].resume {
+			t.Error("retry after the backoff must resume the session")
+		}
+	})
 }
