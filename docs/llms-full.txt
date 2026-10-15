@@ -2845,7 +2845,7 @@ The CI gate operates on two different paths depending on whether the item is bei
 
 #### CI Gate Recovery
 
-Beyond the normal pending→failure→fix→pass loop, the CI gate handles four additional edge cases:
+Beyond the normal pending→failure→fix→pass loop, the CI gate handles five additional edge cases:
 
 **R1 — Merged PR:** If the linked PR is merged while `fabrik:awaiting-ci` is active, Fabrik clears the gate immediately, removes `fabrik:awaiting-ci` and the withheld `stage:X:complete` state, and advances the issue to Done. No manual action required.
 
