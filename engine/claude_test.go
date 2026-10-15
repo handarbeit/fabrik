@@ -10,6 +10,7 @@ import (
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/claudeprofile"
 	"github.com/handarbeit/fabrik/stages"
 )
 
@@ -92,7 +93,8 @@ func TestScaledWallTime(t *testing.T) {
 	}
 }
 
-// TestInvokeClaude_ClaudeConfigDirSurvives pins #1350's R4/R5: CLAUDE_CONFIG_DIR,
+// TestInvokeClaude_ClaudeConfigDirSurvives pins #1350's R4/R5 for an engine
+// with no recorded resolution (tests), plus the #2293 override cases: CLAUDE_CONFIG_DIR,
 // when present in the engine's own environment (typically via .env, per
 // config.LoadDotenv), must survive into the environment constructed for a real
 // Claude invocation. Neither buildClaudeEnv nor mergeEnv ever add an override
@@ -160,6 +162,47 @@ printf '%%s\n' '{"result":"claude config dir test\nFABRIK_STAGE_COMPLETE\n","ses
 		env := string(data)
 		if strings.Contains(env, "CLAUDE_CONFIG_DIR") {
 			t.Errorf("expected CLAUDE_CONFIG_DIR to be entirely absent, got:\n%s", env)
+		}
+	})
+
+	// #2293: with a resolution recorded, workers get exactly the resolved value,
+	// whatever the daemon's own environment holds, and never the Fabrik-owned name.
+	runWorker := func(t *testing.T) string {
+		t.Helper()
+		_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, InvokeOptions{})
+		if err != nil {
+			t.Fatalf("InvokeClaude: %v", err)
+		}
+		data, err := os.ReadFile(envFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+
+	t.Run("resolved value overrides a different ambient value", func(t *testing.T) {
+		t.Cleanup(claudeprofile.Reset)
+		claudeprofile.Set(claudeprofile.Resolve(claudeprofile.Inputs{YAML: "/profiles/c", Ambient: "/profiles/a"}))
+		t.Setenv("CLAUDE_CONFIG_DIR", "/profiles/a")
+		t.Setenv("FABRIK_CLAUDE_CONFIG_DIR", "/profiles/d")
+		env := runWorker(t)
+		if !strings.Contains(env, "CLAUDE_CONFIG_DIR=/profiles/c\n") || strings.Contains(env, "/profiles/a") {
+			t.Errorf("want exactly CLAUDE_CONFIG_DIR=/profiles/c, got:\n%s", env)
+		}
+		if strings.Contains(env, "FABRIK_CLAUDE_CONFIG_DIR") {
+			t.Errorf("FABRIK_CLAUDE_CONFIG_DIR must not reach a worker, got:\n%s", env)
+		}
+		if n := strings.Count(env, "CLAUDE_CONFIG_DIR="); n != 1 {
+			t.Errorf("want one CLAUDE_CONFIG_DIR entry, got %d", n)
+		}
+	})
+
+	t.Run("nothing resolved strips an ambient value", func(t *testing.T) {
+		t.Cleanup(claudeprofile.Reset)
+		claudeprofile.Set(claudeprofile.Resolution{})
+		t.Setenv("CLAUDE_CONFIG_DIR", "/profiles/a")
+		if env := runWorker(t); strings.Contains(env, "CLAUDE_CONFIG_DIR") {
+			t.Errorf("expected no CLAUDE_CONFIG_DIR, got:\n%s", env)
 		}
 	})
 }

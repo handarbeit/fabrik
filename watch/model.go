@@ -3,7 +3,6 @@ package watch
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -14,6 +13,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/claudeprofile"
 	"github.com/handarbeit/fabrik/stages"
 	"github.com/handarbeit/fabrik/tui"
 )
@@ -813,7 +813,7 @@ func (m WatchModel) openClaudeInlineCmd() tea.Cmd {
 		args = append(args, "--plugin-dir", m.pluginDir)
 	}
 
-	cmd := exec.Command("claude", args...)
+	cmd := claudeprofile.Command("claude", args...)
 	cmd.Dir = workDir
 
 	return tea.ExecProcess(cmd, func(err error) tea.Msg {

@@ -3,6 +3,9 @@
 # Keep secrets (FABRIK_TOKEN, GITHUB_TOKEN) in .env (gitignored).
 #
 # Precedence: CLI flag > shell env var > .env > .fabrik/config.yaml > built-in default
+# A bare CLAUDE_CONFIG_DIR inherited from the environment ranks below this file
+# (claude_config_dir), because it belongs to Claude Code and unrelated tools set it;
+# use FABRIK_CLAUDE_CONFIG_DIR to override from the environment.
 
 # Required: GitHub repository owner (org or username)
 owner: handarbeit

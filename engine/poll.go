@@ -104,33 +104,6 @@ func ClaudeProfileAccount(configDir string) string {
 	return claudeprofile.Account(configDir)
 }
 
-// logClaudeConfigDir is the testable core of the R1/R3 startup notice: when
-// CLAUDE_CONFIG_DIR is set in the engine's environment, Claude Code invocations
-// use that directory's credentials/profile instead of the default account, and
-// this is otherwise unobservable (ps eww only shows exec-time env, not vars set
-// by godotenv during startup — see #1350). A no-op when configDir is empty, so
-// the unset case stays byte-for-byte silent (R2). Emitted once, from the
-// environment snapshot at process start — if CLAUDE_CONFIG_DIR ever became
-// reloadable without a full re-exec, this notice would go stale.
-//
-// The notice names the resolved account alongside the directory when it can be
-// read. Naming only the directory is not enough to answer "which account is
-// this instance billing?", because the two are independent — a profile dir
-// holds whatever account it was last logged in as. Operating three instances
-// against one profile dir and inferring the account from its name cost a long
-// diagnostic detour once; printing the email makes it a glance.
-func logClaudeConfigDir(configDir string, w io.Writer) {
-	if configDir == "" {
-		return
-	}
-	account := ""
-	if email := ClaudeProfileAccount(configDir); email != "" {
-		account = fmt.Sprintf(" (logged in as %s)", email)
-	}
-	fmt.Fprintf(w, "[startup] notice: CLAUDE_CONFIG_DIR is set to %q%s — Claude invocations will use this profile "+
-		"directory instead of the default account. See docs/USER_GUIDE.md.\n", configDir, account)
-}
-
 // logCIWaitTimeoutSemantics is the testable core of the ADR-1410/R8 startup
 // notice: CIWaitTimeout's meaning changed from "cap on total CI wait" to
 // "CI-gate liveness-stall dwell" — an operator who tuned it must not
@@ -306,12 +279,11 @@ func (e *Engine) Run() error {
 	// again" are invisible from the persistent log alone. startupW is the single
 	// writer for both the log-file-open and log-file-failed cases, so one branch
 	// can never skip a check (or its warnings-panel entry) the other runs.
-	configDir := os.Getenv("CLAUDE_CONFIG_DIR")
 	stages.WarnStageDrift(e.cfg.Stages, e.cfg.Version, startupW)
 	stages.WarnUndeclaredReviewers(e.cfg.Stages, startupW)
 	stages.SweepStaleWarnings(e.cfg.Stages, startupW)
 	e.reportStageSkills(e.cfg.Stages, startupW)
-	logClaudeConfigDir(configDir, startupW)
+	reportClaudeProfile(claudeprofile.Current(), startupW)
 	logAnthropicAPIKeyOptIn(claudeAnthropicAPIKey != "", startupW)
 	logAnthropicEnvPassthrough(claudeAnthropicEnvPassthrough, startupW)
 	logWorkerEnvOptIn(claudeWorkerEnv, startupW)

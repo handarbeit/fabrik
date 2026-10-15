@@ -10,6 +10,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/handarbeit/fabrik/internal/claudeprofile"
 	fabrikplugin "github.com/handarbeit/fabrik/plugin"
 	"github.com/handarbeit/fabrik/warnings"
 )
@@ -155,7 +156,7 @@ func openResumeInlineCmd(pluginDir, repo string, issueNumber int, stageName, sta
 	if pluginDir != "" {
 		args = append(args, "--plugin-dir", pluginDir)
 	}
-	cmd := exec.Command("claude", args...)
+	cmd := claudeprofile.Command("claude", args...)
 	cmd.Dir = worktreePath
 	return tea.ExecProcess(cmd, func(err error) tea.Msg {
 		return claudeResumeFinishedMsg{Err: err}
@@ -206,7 +207,7 @@ func runWarningsFixCmd(entry warnings.Entry) tea.Cmd {
 				return warningsFixFinishedMsg{Key: key, ExitErr: fmt.Errorf("claude not found in PATH: install Claude Code to use this fix")}
 			}
 		}
-		cmd := exec.Command("claude", "--system-prompt", entry.FixParams["system_prompt"])
+		cmd := claudeprofile.Command("claude", "--system-prompt", entry.FixParams["system_prompt"])
 		if cwd := entry.FixParams["cwd"]; cwd != "" {
 			cmd.Dir = cwd
 		}

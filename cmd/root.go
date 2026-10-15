@@ -13,6 +13,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/handarbeit/fabrik/config"
 	"github.com/handarbeit/fabrik/engine"
+	"github.com/handarbeit/fabrik/internal/claudeprofile"
 	"github.com/handarbeit/fabrik/internal/pollctl"
 	fabrikplugin "github.com/handarbeit/fabrik/plugin"
 	"github.com/handarbeit/fabrik/stages"
@@ -103,6 +104,7 @@ type Config struct {
 	SessionRetentionDays       int    // days; 14 = default; 0 disables age-based session pruning
 	ArchiveAfter               string // Go duration string; "" means use default (168h = 1 week); also FABRIK_ARCHIVE_AFTER
 	ArchiveDone                string // on or off; "" means use default (on); also FABRIK_ARCHIVE_DONE
+	ClaudeConfigDir            string // Claude profile dir flag value (also FABRIK_CLAUDE_CONFIG_DIR, .env, claude_config_dir); resolved by internal/claudeprofile
 	GHESHost                   string // GitHub Enterprise Server hostname, e.g. "github.example.com"; "" means github.com (also FABRIK_GHES_HOST)
 	// GitHubAppID, GitHubAppPrivateKeyPath, and GitHubAppInstallationID
 	// together configure GitHub App authentication (#1713) as a second,
@@ -256,6 +258,7 @@ func Execute() error {
 	flag.StringVar(&cfg.ArchiveAfter, "archive-after", "", "Grace period since an item settled into Done before it is auto-archived off the project board (Go duration: 168h, 24h; also FABRIK_ARCHIVE_AFTER; default 168h = 1 week)")
 	flag.StringVar(&cfg.ArchiveDone, "archive-done", "", "Auto-archive Done items after archive-after elapses: on or off (also FABRIK_ARCHIVE_DONE; default on)")
 	flag.StringVar(&cfg.GHESHost, "ghes-host", "", "GitHub Enterprise Server hostname, e.g. github.example.com (also FABRIK_GHES_HOST; default: unset, meaning github.com)")
+	flag.StringVar(&cfg.ClaudeConfigDir, "claude-config-dir", "", "Claude Code profile directory every stage worker runs under (also FABRIK_CLAUDE_CONFIG_DIR; ranks above .env, config.yaml and a bare CLAUDE_CONFIG_DIR; default: unset, meaning Claude Code's own default)")
 	flag.Int64Var(&cfg.GitHubAppID, "github-app-id", 0, "GitHub App ID for App-installation auth, co-equal with --token (also FABRIK_GITHUB_APP_ID; must be set together with --github-app-private-key-path and --github-app-installation-id, or not at all)")
 	flag.StringVar(&cfg.GitHubAppPrivateKeyPath, "github-app-private-key-path", "", "Path to the GitHub App's private key PEM file (also FABRIK_GITHUB_APP_PRIVATE_KEY_PATH)")
 	flag.Int64Var(&cfg.GitHubAppInstallationID, "github-app-installation-id", 0, "GitHub App installation ID to authenticate as (also FABRIK_GITHUB_APP_INSTALLATION_ID)")
@@ -277,8 +280,14 @@ func Execute() error {
 		return nil
 	}
 
-	// Load .env file if present (fatal if .env exists but not in .gitignore)
-	if err := config.LoadDotenv(); err != nil {
+	// Snapshot the two Claude profile variables BEFORE .env is read, then load
+	// .env without exporting those names (#2293). Both re-exec paths pass
+	// os.Environ() to the next process, so anything exported here would come back
+	// looking like an inherited value and provenance would be lost.
+	shellFabrikConfigDir := os.Getenv(claudeprofile.DeliberateEnv)
+	ambientConfigDir := os.Getenv(claudeprofile.BareEnv)
+	dotenv, err := config.LoadDotenvWithholding(claudeprofile.DeliberateEnv, claudeprofile.BareEnv)
+	if err != nil {
 		return fmt.Errorf("config: %w", err)
 	}
 
@@ -361,6 +370,13 @@ func Execute() error {
 		cfg.GitSSH = resolveBool("FABRIK_GIT_SSH", pc.GitSSH)
 	}
 	cfg.GHESHost = resolveGHESHost(cfg.GHESHost, pc)
+	claudeprofile.Set(resolveClaudeProfile(claudeprofile.Inputs{
+		Flag:        cfg.ClaudeConfigDir,
+		ShellFabrik: shellFabrikConfigDir,
+		Dotenv:      dotenv,
+		YAML:        pc.ClaudeConfigDir,
+		Ambient:     ambientConfigDir,
+	}))
 	if err := resolveGitHubAppConfig(cfg, pc); err != nil {
 		return err
 	}
@@ -1139,6 +1155,24 @@ func resolveBool(envVar string, pcVal bool) bool {
 	return pcVal
 }
 
+// resolveClaudeProfile resolves the Claude profile directory through
+// internal/claudeprofile and fills in each source's account email. The result
+// is the single value every consumer (workers, the apiKeyHelper check, the
+// startup line, the TUI footer) reads via claudeprofile.Current().
+func resolveClaudeProfile(in claudeprofile.Inputs) claudeprofile.Resolution {
+	if in.Home == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			in.Home = home
+		}
+	}
+	if in.Cwd == "" {
+		if cwd, err := os.Getwd(); err == nil {
+			in.Cwd = cwd
+		}
+	}
+	return claudeprofile.Resolve(in).FillAccounts(claudeprofile.Account)
+}
+
 // resolveGHESHost resolves the GHES host from flag > FABRIK_GHES_HOST env var
 // > config.yaml's ghes_host, normalizing whichever value wins (stripping a
 // scheme and trailing slash) so downstream consumers always see a bare
@@ -1772,9 +1806,9 @@ func buildProjectInfo(cfg *Config, pc config.ProjectConfig) tui.ProjectInfo {
 		Repo:          repo,
 		Version:       version,
 		FabrikVersion: Version,
-		// Same resolver the startup notice uses, so the footer and the log can
+		// Same resolution the startup line uses, so the footer and the log can
 		// never disagree about which account this instance is billing.
-		ClaudeAccount: engine.ClaudeProfileAccount(os.Getenv("CLAUDE_CONFIG_DIR")),
+		ClaudeAccount: engine.ClaudeProfileAccount(claudeprofile.Current().Dir),
 	}
 }
 

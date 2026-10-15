@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/handarbeit/fabrik/internal/claudeprofile"
 )
 
 // TestFindAPIKeyHelper_Missing confirms a missing settings file is not an
@@ -115,7 +117,7 @@ func TestFindAPIKeyHelper_FirstMatchWins(t *testing.T) {
 // TestCheckAPIKeyHelper_NoFilesAnywhere confirms startup proceeds normally
 // (nil error) when no settings file exists at any layer.
 func TestCheckAPIKeyHelper_NoFilesAnywhere(t *testing.T) {
-	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	setResolvedClaudeProfile(t, t.TempDir())
 
 	eng := NewWithDeps(Config{Owner: "owner", Repo: "repo"}, &mockGitHubClient{}, &mockClaudeInvoker{}, nil)
 	eng.fabrikDir = t.TempDir()
@@ -130,7 +132,7 @@ func TestCheckAPIKeyHelper_NoFilesAnywhere(t *testing.T) {
 // apiKeyHelper.
 func TestCheckAPIKeyHelper_NoFilesButPresentWithoutKey(t *testing.T) {
 	userDir := t.TempDir()
-	t.Setenv("CLAUDE_CONFIG_DIR", userDir)
+	setResolvedClaudeProfile(t, userDir)
 	if err := os.WriteFile(filepath.Join(userDir, "settings.json"), []byte(`{"theme": "dark"}`), 0644); err != nil {
 		t.Fatalf("write user settings: %v", err)
 	}
@@ -147,7 +149,7 @@ func TestCheckAPIKeyHelper_NoFilesButPresentWithoutKey(t *testing.T) {
 // the file, when apiKeyHelper is present in the user layer ($CLAUDE_CONFIG_DIR).
 func TestCheckAPIKeyHelper_UserLayer(t *testing.T) {
 	userDir := t.TempDir()
-	t.Setenv("CLAUDE_CONFIG_DIR", userDir)
+	setResolvedClaudeProfile(t, userDir)
 	settingsPath := filepath.Join(userDir, "settings.json")
 	if err := os.WriteFile(settingsPath, []byte(`{"apiKeyHelper": "/bin/echo fake-key"}`), 0644); err != nil {
 		t.Fatalf("write user settings: %v", err)
@@ -172,7 +174,7 @@ func TestCheckAPIKeyHelper_UserLayer(t *testing.T) {
 // variant of the user layer is checked too.
 func TestCheckAPIKeyHelper_UserLocalLayer(t *testing.T) {
 	userDir := t.TempDir()
-	t.Setenv("CLAUDE_CONFIG_DIR", userDir)
+	setResolvedClaudeProfile(t, userDir)
 	settingsPath := filepath.Join(userDir, "settings.local.json")
 	if err := os.WriteFile(settingsPath, []byte(`{"apiKeyHelper": "/bin/echo fake-key"}`), 0644); err != nil {
 		t.Fatalf("write user local settings: %v", err)
@@ -194,7 +196,7 @@ func TestCheckAPIKeyHelper_UserLocalLayer(t *testing.T) {
 // the file, when apiKeyHelper is present in the fabrikDir project layer
 // (.claude/settings.json).
 func TestCheckAPIKeyHelper_ProjectLayer(t *testing.T) {
-	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	setResolvedClaudeProfile(t, t.TempDir())
 
 	fabrikDir := t.TempDir()
 	claudeDir := filepath.Join(fabrikDir, ".claude")
@@ -248,7 +250,7 @@ func TestCheckAPIKeyHelper_ManagedPolicyLayer(t *testing.T) {
 // successful (nil-error) startup, not a crash.
 func TestCheckAPIKeyHelper_MalformedProducesWarningNotCrash(t *testing.T) {
 	userDir := t.TempDir()
-	t.Setenv("CLAUDE_CONFIG_DIR", userDir)
+	setResolvedClaudeProfile(t, userDir)
 	if err := os.WriteFile(filepath.Join(userDir, "settings.json"), []byte("{not valid json"), 0644); err != nil {
 		t.Fatalf("write malformed user settings: %v", err)
 	}
@@ -326,5 +328,41 @@ func TestLogAnthropicEnvPassthrough_NonEmpty(t *testing.T) {
 	}
 	if strings.Count(out, "\n") != 1 {
 		t.Fatalf("expected exactly one line, got: %q", out)
+	}
+}
+
+// setResolvedClaudeProfile records dir as the process's resolved Claude profile
+// (#2293) for the test and restores the unconfigured zero value afterwards.
+// Tests using it must not run in parallel. The ambient CLAUDE_CONFIG_DIR is
+// deliberately left alone: consumers must follow the resolution, not the
+// environment.
+func setResolvedClaudeProfile(t *testing.T, dir string) {
+	t.Helper()
+	claudeprofile.Set(claudeprofile.Resolve(claudeprofile.Inputs{Flag: dir}))
+	t.Cleanup(claudeprofile.Reset)
+}
+
+// SC-005 (#2293): the user-layer scan follows the resolved profile directory,
+// not whatever CLAUDE_CONFIG_DIR the daemon happened to inherit.
+func TestCheckAPIKeyHelper_ScansResolvedDirNotAmbient(t *testing.T) {
+	ambient, resolved := t.TempDir(), t.TempDir()
+	helper := []byte(`{"apiKeyHelper": "/bin/get-key"}`)
+	if err := os.WriteFile(filepath.Join(ambient, "settings.json"), helper, 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLAUDE_CONFIG_DIR", ambient)
+	setResolvedClaudeProfile(t, resolved)
+
+	eng := NewWithDeps(Config{Owner: "owner", Repo: "repo"}, &mockGitHubClient{}, &mockClaudeInvoker{}, nil)
+	eng.fabrikDir = t.TempDir()
+	if err := eng.checkAPIKeyHelper(); err != nil {
+		t.Fatalf("checkAPIKeyHelper() = %v; the ambient dir's settings.json must not be scanned", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(resolved, "settings.json"), helper, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.checkAPIKeyHelper(); err == nil {
+		t.Error("checkAPIKeyHelper() = nil, want an error for apiKeyHelper in the resolved dir")
 	}
 }

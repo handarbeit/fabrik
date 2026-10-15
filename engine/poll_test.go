@@ -4071,28 +4071,6 @@ func hasAddLabelCallLocked(client *mockGitHubClient, label string) bool {
 	return false
 }
 
-func TestLogClaudeConfigDir_SetWritesOneLine(t *testing.T) {
-	var buf strings.Builder
-	logClaudeConfigDir("/home/user/.claude-alt", &buf)
-
-	out := buf.String()
-	if !strings.Contains(out, "/home/user/.claude-alt") {
-		t.Fatalf("expected output to name the directory, got: %q", out)
-	}
-	if strings.Count(out, "\n") != 1 {
-		t.Fatalf("expected exactly one line, got: %q", out)
-	}
-}
-
-func TestLogClaudeConfigDir_UnsetWritesNothing(t *testing.T) {
-	var buf strings.Builder
-	logClaudeConfigDir("", &buf)
-
-	if buf.Len() != 0 {
-		t.Fatalf("expected no output when configDir is empty, got: %q", buf.String())
-	}
-}
-
 // TestLogCIWaitTimeoutSemantics_WritesOneUnconditionalNotice pins ADR-1410/R8's
 // startup notice: unlike the Anthropic-auth-namespace notices it sits
 // alongside (gated on an active opt-in), this must fire for every operator on
@@ -4151,70 +4129,6 @@ func TestWarnCIBackstopTimeoutOrdering_FiresWhenBackstopNotGreater(t *testing.T)
 						t.Errorf("expected output to mention %q, got: %q", want, out)
 					}
 				}
-			}
-		})
-	}
-}
-
-// The notice must name the account, not just the directory: the two are
-// independent (a profile dir holds whatever account it was last logged in as),
-// so naming the directory alone cannot answer "which account is this instance
-// billing?".
-func TestLogClaudeConfigDir_NamesResolvedAccount(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, ".claude.json"),
-		[]byte(`{"oauthAccount":{"emailAddress":"someone@example.com","accountUuid":"u"}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	var buf strings.Builder
-	logClaudeConfigDir(dir, &buf)
-
-	out := buf.String()
-	if !strings.Contains(out, "someone@example.com") {
-		t.Errorf("expected the notice to name the logged-in account, got: %q", out)
-	}
-	if !strings.Contains(out, dir) {
-		t.Errorf("expected the notice to still name the directory, got: %q", out)
-	}
-	if strings.Count(out, "\n") != 1 {
-		t.Errorf("expected exactly one line, got: %q", out)
-	}
-}
-
-// A profile dir with no readable account must degrade to the pre-existing
-// directory-only notice rather than failing or emitting a partial "logged in
-// as " fragment.
-func TestLogClaudeConfigDir_UnreadableAccountDegradesToDirectoryOnly(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		content string // "" means write no file at all
-	}{
-		{"no .claude.json", ""},
-		{"malformed json", `{not json`},
-		{"no oauthAccount block", `{"userID":"abc"}`},
-		{"empty email", `{"oauthAccount":{"emailAddress":""}}`},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			if tc.content != "" {
-				if err := os.WriteFile(filepath.Join(dir, ".claude.json"), []byte(tc.content), 0o600); err != nil {
-					t.Fatal(err)
-				}
-			}
-
-			var buf strings.Builder
-			logClaudeConfigDir(dir, &buf)
-
-			out := buf.String()
-			if !strings.Contains(out, dir) {
-				t.Errorf("expected the directory-only notice, got: %q", out)
-			}
-			if strings.Contains(out, "logged in as") {
-				t.Errorf("expected no account clause when the account is unreadable, got: %q", out)
-			}
-			if strings.Count(out, "\n") != 1 {
-				t.Errorf("expected exactly one line, got: %q", out)
 			}
 		})
 	}

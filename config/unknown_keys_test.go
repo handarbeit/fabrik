@@ -124,7 +124,7 @@ func TestKnownConfigKeys_MatchesProjectConfigTags(t *testing.T) {
 	// every field kind without special-casing.
 	for _, key := range []string{
 		"owner", "repo", "project", "user", "max_retries", "merge_train",
-		"required_status_contexts", "ghes_host",
+		"required_status_contexts", "ghes_host", "claude_config_dir",
 	} {
 		if !known[key] {
 			t.Errorf("knownConfigKeys() missing %q — reflection walk should derive it from ProjectConfig's yaml tag", key)
