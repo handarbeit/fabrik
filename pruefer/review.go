@@ -445,7 +445,10 @@ func ReviewPR(ctx context.Context, client GitHubReviewer, claude ClaudeInvoker, 
 		Transcript: result.Opened, TranscriptAuthoritative: result.OpenedAuthoritative,
 		UnobservedSubagents: result.UnobservedSubagents,
 	})
-	logCoverage(pr.Number, cov, result.OpenedAuthoritative)
+	// #2303: keep the raw transcript while the temp dirs still exist (their
+	// removal is deferred above) and before the review is submitted.
+	transcriptPath := maybeKeepTranscript(cfg, pr.Number, owner, repo, pr.HeadSHA, cov, result.Transcript)
+	logCoverage(pr.Number, cov, result.OpenedAuthoritative, transcriptPath)
 
 	summary, findings, parseInfo := parseReviewFindings(reviewText)
 	logSummaryParseInfo(pr.Number, parseInfo)

@@ -277,6 +277,10 @@ type ReviewResult struct {
 	// visible in the transcript (see deriveOpened): coverage then refuses to
 	// credit what only an invisible subagent could have read.
 	UnobservedSubagents bool
+	// Transcript is the invocation's raw stream-json stdout, unmodified. It is
+	// empty for an invoker that has no transcript. ReviewPR keeps it only when
+	// coverage is partial (see maybeKeepTranscript, #2303).
+	Transcript []byte
 }
 
 // RealClaudeInvoker invokes the real claude CLI via exec.CommandContext,
@@ -888,5 +892,5 @@ func (r *RealClaudeInvoker) Review(ctx context.Context, req ReviewRequest) (Revi
 	}
 	opened, authoritative := deriveOpened(stdout.Bytes(), req.Staged)
 	return ReviewResult{Text: resp.Result, NumTurns: resp.NumTurns, CostUSD: resp.CostUSD, Opened: opened, OpenedAuthoritative: authoritative,
-		UnobservedSubagents: req.Staged != nil && !authoritative}, nil
+		UnobservedSubagents: req.Staged != nil && !authoritative, Transcript: stdout.Bytes()}, nil
 }

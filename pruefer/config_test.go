@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1324,5 +1325,51 @@ func TestLoadConfig_CatchUpMarkerAuthorsRejectsMalformedLogin(t *testing.T) {
 				t.Fatalf("err = %v, want a catch_up_marker_authors validation error", err)
 			}
 		})
+	}
+}
+
+// #2303: keep_transcripts defaults to partial and follows flag > env > YAML.
+func TestLoadConfig_KeepTranscripts(t *testing.T) {
+	dir := t.TempDir()
+	cfg, err := LoadConfig([]string{"-config", filepath.Join(dir, "missing.yaml")})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.KeepTranscripts != KeepTranscriptsPartial || cfg.TranscriptDir != DefaultTranscriptDir {
+		t.Errorf("defaults = %q / %q, want %q / %q", cfg.KeepTranscripts, cfg.TranscriptDir, KeepTranscriptsPartial, DefaultTranscriptDir)
+	}
+
+	tdir := filepath.Join(dir, "transcripts-x")
+	path := writeYAMLConfig(t, dir, "keep_transcripts: all\ntranscript_dir: "+strconv.Quote(tdir)+"\n")
+	cfg, err = LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.KeepTranscripts != KeepTranscriptsAll || cfg.TranscriptDir != tdir {
+		t.Errorf("YAML = %q / %q", cfg.KeepTranscripts, cfg.TranscriptDir)
+	}
+
+	t.Setenv("PRUEFER_KEEP_TRANSCRIPTS", "off")
+	cfg, err = LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.KeepTranscripts != KeepTranscriptsOff {
+		t.Errorf("env should override YAML, got %q", cfg.KeepTranscripts)
+	}
+
+	cfg, err = LoadConfig([]string{"-config", path, "-keep-transcripts", "partial"})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.KeepTranscripts != KeepTranscriptsPartial {
+		t.Errorf("flag should override env, got %q", cfg.KeepTranscripts)
+	}
+}
+
+func TestLoadConfig_KeepTranscriptsRejectsUnrecognizedValue(t *testing.T) {
+	path := writeYAMLConfig(t, t.TempDir(), `keep_transcripts: sometimes`)
+	if _, err := LoadConfig([]string{"-config", path}); err == nil {
+		t.Fatal("LoadConfig: expected an error for an unrecognized keep_transcripts value, got nil")
 	}
 }

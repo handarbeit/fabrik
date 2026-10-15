@@ -444,6 +444,7 @@ Every field is classified as either **live** (applied immediately) or **restart-
 | `request_changes_threshold` | Live. |
 | `review_guidance` | Live. |
 | `review_guidance_mode` | Live. |
+| `keep_transcripts` | Live. |
 | `cadence` | Live. |
 | `repo_cadence` | Live. A changed map is diffed and applied like any other live field (`reflect.DeepEqual`), rendered in the reload log as a plain before/after map dump rather than a per-repo added/removed summary. |
 | `auto_upgrade` | Live, effective starting the next poll boundary. |
@@ -456,6 +457,7 @@ Every field is classified as either **live** (applied immediately) or **restart-
 | `github_app_homepage_url` | Restart-only. |
 | `tui` | Restart-only — the interactive dashboard is started once, before the daemon begins running. |
 | `log_file` | Restart-only. |
+| `transcript_dir` | Restart-only. |
 | `event_source` | Restart-only — switching between `poll` and `hookdeck` means constructing or tearing down a whole event source, including its WebSocket session and dedupe ring. |
 | `hookdeck.api_key_env` | Restart-only. |
 | `hookdeck.webhook_secret_env` | Restart-only. |
@@ -645,6 +647,7 @@ A review of a large diff used to read only part of it and say so only in prose, 
 - **Open every entry.** The prompt (its Go-owned halves, so no guidance override can drop it) requires the review to open every index entry, whether it reads alone or splits the diff across subagents, and to report the IDs it opened in a `PRUEFER_COVERAGE_BEGIN`/`PRUEFER_COVERAGE_END` block.
 - **Go computes the result.** An entry no reader reports counts as unread, and a missing or unparseable report is `partial`, never `complete`. When the stream-json transcript shows all subagent traffic, the report is intersected with what the transcript proves was read, so a claim cannot outrun the evidence. `Read` can stop early without any error or notice, so a `Read` counts only when the numbered lines it returned cover the whole entry (across as many calls as it took); an entry holding a line over 2000 bytes is flagged `wide-line` in the index, which `Read` would cut mid-line, and is credited only to a `cat` whose output contains the whole entry. A `Task`/`Agent` call whose traffic is not tagged in the transcript cannot be verified, so entries only it could have read count as unread. Files dropped to fit `max_diff_bytes` were never reviewed and force `partial`; files removed by `excluded_paths` are intentional and do not. With no staged diff (the 406 `too_large` fallback), coverage is `partial` against the changed-files list.
 - **Review body.** Every review ends with one fixed line: `PRUEFER_COVERAGE: complete`, or `PRUEFER_COVERAGE: partial — <reason>` followed by up to 50 unread paths as a bullet list. `grep '^PRUEFER_COVERAGE: partial'` finds partial reviews.
+- **Transcript of a partial review.** When coverage is partial, the review invocation's raw stream-json transcript is saved under `.pruefer/transcripts/` as `<UTC timestamp>_<owner>_<repo>_pr<N>_<head sha>.jsonl`, and the `coverage: partial` log line ends with `; transcript saved: <path>`. It is the only evidence for deciding whether the check undercounted (the reviewer read the entries in a way it does not credit) or the reviewer's own account was wrong. The file is the invocation's stdout unmodified, written before the review's temp directory is removed, mode `0600` in a `0700` directory. Only the newest 50 files are kept. A failure to save is logged and never fails the review. **The transcript contains the file contents the reviewer read, including private-repo code, and is not redacted**, so treat `.pruefer/` accordingly. `keep_transcripts` is `partial` (default), `all` (also keep complete reviews' transcripts) or `off`; it is operator-only and a reviewed repo's own config cannot change it. See [adrs/2303-pruefer-partial-coverage-transcript-retention.md](../../adrs/2303-pruefer-partial-coverage-transcript-retention.md).
 - **What it does not do.** The event is unchanged (coverage never feeds the `REQUEST_CHANGES` decision), and a partial review is still submitted and recorded, so the head is not re-reviewed automatically. Comment `/pruefer review` to re-run it. Fabrik's gate does not yet treat a partial review differently; that is a separate follow-up recorded in the ADR.
 
 ## Configuration reference
@@ -683,6 +686,8 @@ Precedence, highest to lowest: **flag > environment variable > YAML config file 
 | `--no-browser` | `PRUEFER_NO_BROWSER` | `no_browser` | `false` | Skip attempting to open a local browser during first-run manifest setup — the setup URL is always printed regardless |
 | `--config` | `PRUEFER_CONFIG` | — | `.pruefer/config.yaml` | Path to the YAML config file itself |
 | `-notui` | `PRUEFER_TUI` | `tui` | `true` | Set `-notui` / `PRUEFER_TUI=0` / `tui: false` to disable the interactive TUI and fall back to console logging. The TUI is further gated on a real terminal being detected on both stdin and stdout, regardless of this setting. |
+| `--keep-transcripts` | `PRUEFER_KEEP_TRANSCRIPTS` | `keep_transcripts` | `partial` | `partial`, `all` or `off`; which reviews keep their raw transcript under `.pruefer/transcripts/`. An unrecognized value fails `LoadConfig` at startup. See [Coverage](#diff-coverage). |
+| (none) | (none) | `transcript_dir` | `.pruefer/transcripts` | Directory kept transcripts are written to, resolved against the working directory. YAML only. |
 | `--log-file` | `PRUEFER_LOG_FILE` | `log_file` | `.pruefer/pruefer.log` | Path daemon log lines are written to, resolved against the process's working directory (same convention as `github_app_private_key_path`). An explicitly empty value (`--log-file ""`, `PRUEFER_LOG_FILE=`, or `log_file: ""`) disables file logging entirely. See [Logging](#logging). |
 | `--auto-upgrade` | `PRUEFER_AUTO_UPGRADE` | `auto_upgrade` | `false` | Check for a newer version at the poll boundary and self-upgrade (dev-rebuild or release-download, depending on the running build — see [Version & self-upgrade](#version--self-upgrade)). Recommended for long-running deployments. |
 | `--version` | — | — | — | Print the running version (a stamped release tag, or `dev(<sha>)`) and exit. |
