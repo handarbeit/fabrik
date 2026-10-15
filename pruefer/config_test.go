@@ -1326,3 +1326,48 @@ func TestLoadConfig_CatchUpMarkerAuthorsRejectsMalformedLogin(t *testing.T) {
 		})
 	}
 }
+
+// #2303: keep_transcripts defaults to partial and follows flag > env > YAML.
+func TestLoadConfig_KeepTranscripts(t *testing.T) {
+	dir := t.TempDir()
+	cfg, err := LoadConfig([]string{"-config", filepath.Join(dir, "missing.yaml")})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.KeepTranscripts != KeepTranscriptsPartial || cfg.TranscriptDir != DefaultTranscriptDir {
+		t.Errorf("defaults = %q / %q, want %q / %q", cfg.KeepTranscripts, cfg.TranscriptDir, KeepTranscriptsPartial, DefaultTranscriptDir)
+	}
+
+	path := writeYAMLConfig(t, dir, "keep_transcripts: all\ntranscript_dir: /tmp/x\n")
+	cfg, err = LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.KeepTranscripts != KeepTranscriptsAll || cfg.TranscriptDir != "/tmp/x" {
+		t.Errorf("YAML = %q / %q", cfg.KeepTranscripts, cfg.TranscriptDir)
+	}
+
+	t.Setenv("PRUEFER_KEEP_TRANSCRIPTS", "off")
+	cfg, err = LoadConfig([]string{"-config", path})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.KeepTranscripts != KeepTranscriptsOff {
+		t.Errorf("env should override YAML, got %q", cfg.KeepTranscripts)
+	}
+
+	cfg, err = LoadConfig([]string{"-config", path, "-keep-transcripts", "partial"})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.KeepTranscripts != KeepTranscriptsPartial {
+		t.Errorf("flag should override env, got %q", cfg.KeepTranscripts)
+	}
+}
+
+func TestLoadConfig_KeepTranscriptsRejectsUnrecognizedValue(t *testing.T) {
+	path := writeYAMLConfig(t, t.TempDir(), `keep_transcripts: sometimes`)
+	if _, err := LoadConfig([]string{"-config", path}); err == nil {
+		t.Fatal("LoadConfig: expected an error for an unrecognized keep_transcripts value, got nil")
+	}
+}

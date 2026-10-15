@@ -49,6 +49,9 @@ const (
 	// Never written into config.yaml itself.
 	DefaultAppStatePath = ".pruefer/app-state.json"
 	DefaultLogPath      = ".pruefer/pruefer.log"
+	// DefaultTranscriptDir is where a review's raw stream-json transcript is
+	// kept (#2303); cwd-relative like DefaultLogPath.
+	DefaultTranscriptDir = ".pruefer/transcripts"
 )
 
 // Defaults for the event-driven (Hookdeck) ingestion surface, justified in
@@ -211,6 +214,17 @@ type Config struct {
 	// dynamic context (PR body, base branch, prior review threads) — see
 	// resolveGuidance in claude.go and adrs/1446-pruefer-review-guidance-skill.md.
 	ReviewGuidanceMode string `reload:"live"`
+
+	// KeepTranscripts is #2303's retention policy for a review invocation's
+	// raw stream-json transcript: KeepTranscriptsPartial (the default when
+	// empty) keeps it only when coverage is partial, KeepTranscriptsAll keeps
+	// every review's, KeepTranscriptsOff none. Operator-only: deliberately
+	// absent from the repo-resident config, so a reviewed repo cannot change
+	// retention. LoadConfig fails loud on an unrecognized value.
+	KeepTranscripts string `reload:"live"`
+	// TranscriptDir is the directory kept transcripts are written to
+	// (default DefaultTranscriptDir, cwd-relative). YAML-only.
+	TranscriptDir string `reload:"restart"`
 
 	// Cadence governs how often Pruefer automatically reviews a PR (#1610).
 	// Operator-only, never settable from a reviewed repo's own resident
@@ -398,6 +412,10 @@ type yamlConfig struct {
 	// guidance override — see Config.ReviewGuidance's doc comment.
 	ReviewGuidance     string `yaml:"review_guidance"`
 	ReviewGuidanceMode string `yaml:"review_guidance_mode"`
+	// KeepTranscripts/TranscriptDir are #2303's operator-only transcript
+	// retention settings — see Config.KeepTranscripts.
+	KeepTranscripts string `yaml:"keep_transcripts"`
+	TranscriptDir   string `yaml:"transcript_dir"`
 	// Cadence/RepoCadence are #1610's operator-only review cadence setting —
 	// see Config.Cadence/RepoCadence's doc comments. Deliberately absent
 	// from yamlRepoConfig (reporeconfig.go): a repo-resident config has no
@@ -473,6 +491,7 @@ type flagValues struct {
 	requestChangesThreshold string
 	reviewGuidance          string
 	reviewGuidanceMode      string
+	keepTranscripts         string
 	cadence                 string
 	appID                   int64
 	appPrivateKeyPath       string
@@ -518,6 +537,7 @@ func LoadConfig(args []string) (Config, error) {
 	fs.StringVar(&fv.excludedLabels, "excluded-labels", "", "Comma-separated labels to skip (any match)")
 	fs.StringVar(&fv.requestChangesThreshold, "request-changes-threshold", "", "Severity tier (low, medium, high, critical) at or above which Pruefer submits REQUEST_CHANGES instead of COMMENT; empty disables severity-gated REQUEST_CHANGES entirely")
 	fs.StringVar(&fv.reviewGuidance, "review-guidance", "", "Operator-level review guidance text, composed onto the embedded default (and, per repo, a repo's own .pruefer/skills/review/SKILL.md) per -review-guidance-mode")
+	fs.StringVar(&fv.keepTranscripts, "keep-transcripts", "", "Which reviews keep their raw transcript under .pruefer/transcripts: partial (default, only partial-coverage reviews), all or off")
 	fs.StringVar(&fv.reviewGuidanceMode, "review-guidance-mode", "", "How -review-guidance composes onto the embedded default guidance: append (default) or replace")
 	fs.StringVar(&fv.cadence, "cadence", "", "Review cadence: every-push (default, one automatic review per pushed head SHA), once (at most one automatic review per PR), or on-request (no automatic review; only /pruefer review triggers one)")
 	fs.Int64Var(&fv.appID, "github-app-id", 0, "GitHub App ID")
@@ -578,6 +598,8 @@ func LoadConfig(args []string) (Config, error) {
 		AppStatePath:         DefaultAppStatePath,
 		TUI:                  true,
 		LogFile:              DefaultLogPath,
+		KeepTranscripts:      KeepTranscriptsPartial,
+		TranscriptDir:        DefaultTranscriptDir,
 		AutoUpgrade:          false,
 		MaxDerivedRepos:      DefaultMaxDerivedRepos,
 
@@ -597,6 +619,12 @@ func LoadConfig(args []string) (Config, error) {
 	}
 	if yc.ReviewGuidanceMode != "" {
 		cfg.ReviewGuidanceMode = yc.ReviewGuidanceMode
+	}
+	if yc.KeepTranscripts != "" {
+		cfg.KeepTranscripts = yc.KeepTranscripts
+	}
+	if yc.TranscriptDir != "" {
+		cfg.TranscriptDir = yc.TranscriptDir
 	}
 	if yc.Cadence != "" {
 		cfg.Cadence = yc.Cadence
@@ -741,6 +769,9 @@ func LoadConfig(args []string) (Config, error) {
 	if explicit["review-guidance-mode"] {
 		cfg.ReviewGuidanceMode = fv.reviewGuidanceMode
 	}
+	if explicit["keep-transcripts"] {
+		cfg.KeepTranscripts = fv.keepTranscripts
+	}
 	if explicit["cadence"] {
 		cfg.Cadence = fv.cadence
 	}
@@ -820,6 +851,12 @@ func LoadConfig(args []string) (Config, error) {
 		return Config{}, fmt.Errorf("review_guidance_mode: %q is not recognized (must be %q, %q, or empty to default to %q)", cfg.ReviewGuidanceMode, GuidanceModeAppend, GuidanceModeReplace, GuidanceModeAppend)
 	}
 
+	switch cfg.KeepTranscripts {
+	case KeepTranscriptsPartial, KeepTranscriptsAll, KeepTranscriptsOff:
+	default:
+		return Config{}, fmt.Errorf("keep_transcripts: %q is not recognized (must be %q, %q or %q)", cfg.KeepTranscripts, KeepTranscriptsPartial, KeepTranscriptsAll, KeepTranscriptsOff)
+	}
+
 	if !validCadence(cfg.Cadence) {
 		return Config{}, fmt.Errorf("cadence: %q is not a recognized cadence mode (must be %q, %q, or %q)", cfg.Cadence, CadenceEveryPush, CadenceOnce, CadenceOnRequest)
 	}
@@ -893,6 +930,9 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("PRUEFER_REVIEW_GUIDANCE_MODE"); v != "" {
 		cfg.ReviewGuidanceMode = v
+	}
+	if v := os.Getenv("PRUEFER_KEEP_TRANSCRIPTS"); v != "" {
+		cfg.KeepTranscripts = v
 	}
 	if v := os.Getenv("PRUEFER_CADENCE"); v != "" {
 		cfg.Cadence = v
