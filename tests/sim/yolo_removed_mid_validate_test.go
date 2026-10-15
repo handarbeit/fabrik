@@ -158,7 +158,7 @@ func yoloMidValidateNegative(t *testing.T, waitForCI bool) {
 	if hasLabel(labels, "fabrik:auto-merge-enabled") || labelAdds(env, num, "fabrik:auto-merge-enabled") != 0 {
 		t.Errorf("fabrik:auto-merge-enabled was applied after merge authority was withdrawn; labels = %v", labels)
 	}
-	for _, m := range []string{"MergePR", "MergePRAtHeadSHA", "EnablePullRequestAutoMerge"} {
+	for _, m := range []string{"MergePRAtHeadSHA", "MergePRAtHeadSHA", "EnablePullRequestAutoMerge"} {
 		if n := len(env.Sim.Log().ByMethod(m)); n != 0 {
 			t.Errorf("%s called %d time(s) after fabrik:yolo was removed mid-Validate — the landing used a stale autonomy snapshot (ADR-1769)", m, n)
 		}
@@ -195,7 +195,7 @@ func yoloMidValidatePositiveControl(t *testing.T, waitForCI bool) {
 	if !linkedPRMerged(env, num) {
 		t.Fatal("issue closed but the PR is not merged — the setup cannot land, so the negative case proves nothing")
 	}
-	if n := len(env.Sim.Log().ByMethod("MergePR")); n != 1 {
+	if n := len(env.Sim.Log().ByMethod("MergePRAtHeadSHA")); n != 1 {
 		t.Errorf("MergePR called %d time(s), want 1", n)
 	}
 }

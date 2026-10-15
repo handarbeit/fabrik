@@ -164,7 +164,7 @@ func TestMergeTrainStaleSnapshot_FastPathRestartBetweenMergeAndDone(t *testing.T
 	if got := landedCommentCount(t, restarted, num, prNum); got != 1 {
 		t.Errorf("expected the interrupted landing completed exactly once (1 \"Landed via\" comment), got %d", got)
 	}
-	if got := len(restarted.Sim.Log().ByMethod("MergePRAtHeadSHA")) + len(restarted.Sim.Log().ByMethod("MergePR")); got != 0 {
+	if got := len(restarted.Sim.Log().ByMethod("MergePRAtHeadSHA")); got != 0 {
 		t.Errorf("an already-merged PR must never be re-merged, got %d merge call(s)", got)
 	}
 }

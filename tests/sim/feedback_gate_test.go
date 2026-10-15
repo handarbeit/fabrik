@@ -83,7 +83,7 @@ func (p *feedbackProbe) script(env *Env) simclaude.CommentScript {
 		p.mu.Lock()
 		p.calls++
 		n := p.calls
-		p.merges = append(p.merges, len(env.Sim.Log().ByMethod("MergePR")))
+		p.merges = append(p.merges, len(env.Sim.Log().ByMethod("MergePRAtHeadSHA")))
 		var ids []string
 		for _, c := range comments {
 			ids = append(ids, c.ID)

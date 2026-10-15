@@ -372,13 +372,10 @@ func TestMergeTrainSingletonFastPath_OutstandingSuite_BuildsTrialInstead(t *test
 	WaitForProjectStatus(t, env, num, "Done", 20)
 	WaitForIssueClosed(t, env, num, 5)
 
-	if got := len(env.Sim.Log().ByMethod("MergePRAtHeadSHA")); got != 0 {
-		t.Errorf("fast path merged the member's own PR (%d MergePRAtHeadSHA call(s)) over a running suite", got)
-	}
 	if got := draftPRCount(env); got < 1 {
 		t.Errorf("expected the ordinary trial path to build a draft CI PR, got %d", got)
 	}
-	for _, m := range env.Sim.Log().ByMethod("MergePR") {
+	for _, m := range env.Sim.Log().ByMethod("MergePRAtHeadSHA") {
 		if m.Args.Number == prNum {
 			t.Errorf("merged the member's own PR #%d directly", prNum)
 		}

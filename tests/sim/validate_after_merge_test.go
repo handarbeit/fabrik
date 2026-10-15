@@ -92,7 +92,7 @@ func armHeldValidate(t *testing.T, env *Env, h *heldValidateWorker) int {
 }
 
 func mergeCalls(env *Env) int {
-	return len(env.Sim.Log().ByMethod("MergePR")) + len(env.Sim.Log().ByMethod("MergePRAtHeadSHA")) +
+	return len(env.Sim.Log().ByMethod("MergePRAtHeadSHA")) +
 		len(env.Sim.Log().ByMethod("EnablePullRequestAutoMerge"))
 }
 

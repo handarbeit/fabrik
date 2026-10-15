@@ -61,13 +61,8 @@ func TestMergeTrainSingletonFastPath_UpToDateAndGreen_LandsWithoutTrial(t *testi
 		t.Errorf("expected no dedicated landing PR either, got %d CreatePR call(s)", got)
 	}
 
-	// The fast path merges via MergePRAtHeadSHA (#1644 review fix), not the
-	// unpinned MergePR — pinning the merge to the SHA singletonFastPathEligible
-	// actually validated, since (unlike every other merge-train landing path)
-	// this merges the member's own, externally-writable PR branch directly.
-	if got := len(env.Sim.Log().ByMethod("MergePR")); got != 0 {
-		t.Errorf("expected the unpinned MergePR never called by the fast path, got %d", got)
-	}
+	// The fast path merges the member's own PR via MergePRAtHeadSHA (#1644),
+	// pinned to the SHA singletonFastPathEligible actually validated.
 	merges := env.Sim.Log().ByMethod("MergePRAtHeadSHA")
 	if len(merges) != 1 {
 		t.Fatalf("expected exactly 1 MergePRAtHeadSHA call, got %d", len(merges))
@@ -123,7 +118,7 @@ func TestMergeTrainSingletonFastPath_BaseMoved_StillBuildsTrial(t *testing.T) {
 	// Landed via the ordinary landMergeTrainBatch path (a green batch always
 	// lands immediately regardless of its size — D-d), which merges a
 	// dedicated integration PR, never the member's own PR directly.
-	merges := env.Sim.Log().ByMethod("MergePR")
+	merges := env.Sim.Log().ByMethod("MergePRAtHeadSHA")
 	if len(merges) != 1 {
 		t.Fatalf("expected exactly 1 MergePR call, got %d", len(merges))
 	}

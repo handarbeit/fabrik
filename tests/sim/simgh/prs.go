@@ -76,6 +76,7 @@ func (s *Sim) FetchLinkedPR(owner, repo string, issueNumber int) (*gh.PRDetails,
 		return nil, nil
 	}
 	snap := *found
+	queueEnabled := r.mergeQueueEnabled
 	s.mu.Unlock()
 
 	headSHA, headGone, err := s.resolvePRHead(owner, repo, snap.number, snap.head)
@@ -95,7 +96,10 @@ func (s *Sim) FetchLinkedPR(owner, repo string, issueNumber int) (*gh.PRDetails,
 		Body:                snap.body,
 		MergeableState:      "", // omitted by the list endpoint — see doc comment
 		AutoMergeEnabled:    snap.autoMergeEnabled,
-		IsMergeQueueEnabled: false, // GraphQL-only field; REST leaves it false
+		// Production reports this only on a boardcache hit (GraphQL-populated); the
+		// engine's landing decision reads it that way (#2342), so the model reports
+		// the repo flag rather than the REST fallback's false.
+		IsMergeQueueEnabled: queueEnabled,
 		IsInMergeQueue:      false,
 		Author:              snap.author,
 		Labels:              cloneStrings(snap.labels),

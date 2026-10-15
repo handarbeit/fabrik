@@ -236,7 +236,7 @@ func TestMergeTrainCIInfra_PersistentStartupFailureAbandonedUncharged(t *testing
 	if got := mutationsOn(env, pr, "CloseIssue", "ReopenIssue"); len(got) < 2 || got[0] != "CloseIssue" || got[1] != "ReopenIssue" {
 		t.Errorf("trial PR #%d mutations = %v, want a retrigger (close, reopen) before abandoning", pr, got)
 	}
-	if n := len(env.Sim.Log().ByMethod("MergePR")); n != 0 {
+	if n := len(env.Sim.Log().ByMethod("MergePRAtHeadSHA")); n != 0 {
 		t.Errorf("MergePR calls = %d, want 0", n)
 	}
 

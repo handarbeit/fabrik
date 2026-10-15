@@ -198,7 +198,7 @@ func runBatchCapScenario(t *testing.T, sortDisabled bool) {
 
 	// Exactly two merges, one per batch (batch order is pinned by the
 	// per-poll landing assertions above).
-	if got := len(env.Sim.Log().ByMethod("MergePR")); got != 2 {
+	if got := len(env.Sim.Log().ByMethod("MergePRAtHeadSHA")); got != 2 {
 		t.Errorf("MergePR called %d times, want exactly 2 (one per batch)", got)
 	}
 

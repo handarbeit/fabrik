@@ -46,7 +46,7 @@ func (p *gateWorkerProbe) script(env *Env, num int) simclaude.CommentScript {
 		p.mu.Lock()
 		defer p.mu.Unlock()
 		p.calls++
-		p.merges = len(env.Sim.Log().ByMethod("MergePR"))
+		p.merges = len(env.Sim.Log().ByMethod("MergePRAtHeadSHA"))
 		p.queued = queuedMoves(env)
 		out, completed, usage, err := simclaude.DefaultCommentScript(ctx, stage, issue, comments, workDir, opts)
 		if err == nil {
