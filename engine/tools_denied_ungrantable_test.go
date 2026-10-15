@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 
 	gh "github.com/handarbeit/fabrik/github"
@@ -15,7 +16,9 @@ import (
 // ungrantableTestWorkDir is the worktree the captured stream was recorded in,
 // read from the stream's own init event so the fixture and the tests cannot
 // disagree about it.
-var ungrantableTestWorkDir = capturedWorkDir()
+// It is resolved lazily: this test binary is also re-executed as a helper from
+// other working directories, where an init-time read of testdata would panic.
+var ungrantableTestWorkDir = sync.OnceValue(capturedWorkDir)
 
 func capturedWorkDir() string {
 	raw, err := os.ReadFile("testdata/protected_path_edit_denied_stream.jsonl")
@@ -89,7 +92,7 @@ func TestToolsDeniedLogSummary_ShowsFirstPath(t *testing.T) {
 }
 
 func TestUngrantableDenial_Predicate(t *testing.T) {
-	w := ungrantableTestWorkDir
+	w := ungrantableTestWorkDir()
 	edit := func(p string) toolDenial { return toolDenial{ToolName: "Edit", Path: p} }
 	cases := []struct {
 		name     string
@@ -144,33 +147,33 @@ func TestUngrantableDenial_RealCapturedStream(t *testing.T) {
 	}
 
 	te := interpret()
-	if len(te.Denials) != 1 || te.Denials[0].ToolName != "Edit" || te.Denials[0].Path != ungrantableTestWorkDir+"/.claude/skills/x/SKILL.md" {
+	if len(te.Denials) != 1 || te.Denials[0].ToolName != "Edit" || te.Denials[0].Path != ungrantableTestWorkDir()+"/.claude/skills/x/SKILL.md" {
 		t.Fatalf("decoded denials = %+v", te.Denials)
 	}
 
 	implement := &stages.Stage{Name: "Implement"}
-	markUngrantableDenials(te, buildClaudeArgs(implement, "", "", 0, false, ungrantableTestWorkDir, ""), ungrantableTestWorkDir)
+	markUngrantableDenials(te, buildClaudeArgs(implement, "", "", 0, false, ungrantableTestWorkDir(), ""), ungrantableTestWorkDir())
 	d := te.Denials[0]
-	if !d.Ungrantable || d.RelPath != ".claude/skills/x/SKILL.md" || d.CoveredBy != "Edit("+ungrantableTestWorkDir+"/**)" {
+	if !d.Ungrantable || d.RelPath != ".claude/skills/x/SKILL.md" || d.CoveredBy != "Edit("+ungrantableTestWorkDir()+"/**)" {
 		t.Errorf("default stage: denial = %+v, want ungrantable and covered by the boundary rule", d)
 	}
 
 	te = interpret()
-	markUngrantableDenials(te, buildClaudeArgs(implement, "", "", 0, true, ungrantableTestWorkDir, ""), ungrantableTestWorkDir)
+	markUngrantableDenials(te, buildClaudeArgs(implement, "", "", 0, true, ungrantableTestWorkDir(), ""), ungrantableTestWorkDir())
 	if te.Denials[0].Ungrantable {
 		t.Error("unrestricted invocation must never be ungrantable")
 	}
 
 	te = interpret()
 	readOnly := &stages.Stage{Name: "Research", ReadOnly: true, AllowedTools: []string{"Read", "Grep"}}
-	markUngrantableDenials(te, buildClaudeArgs(readOnly, "", "", 0, false, ungrantableTestWorkDir, ""), ungrantableTestWorkDir)
+	markUngrantableDenials(te, buildClaudeArgs(readOnly, "", "", 0, false, ungrantableTestWorkDir(), ""), ungrantableTestWorkDir())
 	if te.Denials[0].Ungrantable {
 		t.Error("a tool absent from the stage's custom allowed_tools must not be ungrantable")
 	}
 
 	te = interpret()
 	bare := &stages.Stage{Name: "Plan", ReadOnly: true, AllowedTools: []string{"Read", "Edit"}}
-	markUngrantableDenials(te, buildClaudeArgs(bare, "", "", 0, false, ungrantableTestWorkDir, ""), ungrantableTestWorkDir)
+	markUngrantableDenials(te, buildClaudeArgs(bare, "", "", 0, false, ungrantableTestWorkDir(), ""), ungrantableTestWorkDir())
 	if !te.Denials[0].Ungrantable || te.Denials[0].CoveredBy != "Edit" {
 		t.Errorf("bare Edit in a read-only stage covers the path, got %+v", te.Denials[0])
 	}
@@ -214,8 +217,8 @@ func ungrantableEditDenial() *claudeToolsDeniedError {
 	return &claudeToolsDeniedError{
 		ToolNames: []string{"Edit"},
 		Denials: []toolDenial{{
-			ToolName: "Edit", Path: ungrantableTestWorkDir + "/.claude/skills/x/SKILL.md",
-			Ungrantable: true, RelPath: ".claude/skills/x/SKILL.md", CoveredBy: "Edit(" + ungrantableTestWorkDir + "/**)",
+			ToolName: "Edit", Path: ungrantableTestWorkDir() + "/.claude/skills/x/SKILL.md",
+			Ungrantable: true, RelPath: ".claude/skills/x/SKILL.md", CoveredBy: "Edit(" + ungrantableTestWorkDir() + "/**)",
 		}},
 	}
 }
@@ -256,7 +259,7 @@ func assertUngrantablePauseComment(t *testing.T, client *mockGitHubClient, issue
 			t.Errorf("pause comment missing %q:\n%s", want, body)
 		}
 	}
-	if strings.Contains(body, ungrantableTestWorkDir) {
+	if strings.Contains(body, ungrantableTestWorkDir()) {
 		t.Errorf("pause comment must name the path relative to the worktree:\n%s", body)
 	}
 }
