@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -420,4 +421,42 @@ func TestCatchUpPushInFlight_CountsOverlap(t *testing.T) {
 	if eng.catchUpPushInFlight("o", "r", 5) {
 		t.Error("PR must not be in flight after both ended")
 	}
+}
+
+// TestSHAInvalidation_ResetsCommentBreaker pins #1575: SHA invalidation clears
+// the #1089 comment breaker together with the cycle counters.
+func TestSHAInvalidation_ResetsCommentBreaker(t *testing.T) {
+	item := gh.ProjectItem{Number: 42, ItemID: "PVTI_42", Status: "Validate", Repo: "owner/repo",
+		Labels: []string{"stage:Validate:complete"}}
+	eng := testEngineWithStages(t, &mockGitHubClient{}, testStagesForSHAInvalidation())
+	seedBreakerAndCycles(t, eng, item.Number)
+
+	eng.handleValidateSHAInvalidation(item, "owner", "repo")
+
+	assertBreakerAndCycles(t, eng, item, true)
+}
+
+// TestSHAInvalidation_DefersCommentBreakerResetWithCycles pins #1575 R3: a
+// failed label removal applies neither reset; the retry applies both.
+func TestSHAInvalidation_DefersCommentBreakerResetWithCycles(t *testing.T) {
+	item := gh.ProjectItem{Number: 42, ItemID: "PVTI_42", Status: "Validate", Repo: "owner/repo",
+		Labels: []string{"stage:Validate:complete"}}
+	fail := true
+	client := &mockGitHubClient{
+		removeLabelFromIssueFn: func(owner, repo string, n int, label string) error {
+			if fail && label == "stage:Validate:complete" {
+				return errors.New("boom")
+			}
+			return nil
+		},
+	}
+	eng := testEngineWithStages(t, client, testStagesForSHAInvalidation())
+	seedBreakerAndCycles(t, eng, item.Number)
+
+	eng.handleValidateSHAInvalidation(item, "owner", "repo")
+	assertBreakerAndCycles(t, eng, item, false)
+
+	fail = false
+	eng.handleValidateSHAInvalidation(item, "owner", "repo")
+	assertBreakerAndCycles(t, eng, item, true)
 }

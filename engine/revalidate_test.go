@@ -320,3 +320,68 @@ func TestReenterValidate_ReportsCompletionAndDeferral(t *testing.T) {
 		}
 	}
 }
+
+// seedBreakerAndCycles records comment-breaker invocations and a Validate
+// review cycle so a resume path's resets are observable (#1575).
+func seedBreakerAndCycles(t *testing.T, eng *Engine, number int) {
+	t.Helper()
+	for i := 0; i < 3; i++ {
+		eng.store.Apply(itemstate.CommentBreakerInvocationRecorded{Repo: "owner/repo", Number: number, At: time.Now().Add(-time.Duration(i) * time.Minute), Author: "a"})
+	}
+	eng.store.Apply(itemstate.ReviewCycleIncremented{Repo: "owner/repo", Number: number, StageName: "Validate"})
+}
+
+// assertBreakerAndCycles checks both resets are applied together (cleared) or
+// both absent (retained).
+func assertBreakerAndCycles(t *testing.T, eng *Engine, item gh.ProjectItem, cleared bool) {
+	t.Helper()
+	snap, err := eng.store.Get("owner/repo", item.Number)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	breaker, cycles := len(snap.CommentBreakerInvocationsAt()), snap.ReviewCycles("Validate")
+	if cleared && (breaker != 0 || cycles != 0) {
+		t.Errorf("breaker invocations = %d, review cycles = %d, want both 0", breaker, cycles)
+	}
+	if !cleared && (breaker == 0 || cycles == 0) {
+		t.Errorf("breaker invocations = %d, review cycles = %d, want both retained", breaker, cycles)
+	}
+}
+
+// TestRevalidate_ResetsCommentBreaker pins #1575: re-entry clears the #1089
+// comment breaker together with the cycle counters.
+func TestRevalidate_ResetsCommentBreaker(t *testing.T) {
+	item := gh.ProjectItem{Number: 42, ItemID: "PVTI_42", Status: "Validate", Repo: "owner/repo",
+		Labels: []string{"stage:Validate:complete", "fabrik:revalidate"}}
+	eng := testEngineWithStages(t, &mockGitHubClient{}, testStagesForRevalidate())
+	seedBreakerAndCycles(t, eng, item.Number)
+
+	eng.handleRevalidateLabel(item, "owner", "repo")
+
+	assertBreakerAndCycles(t, eng, item, true)
+}
+
+// TestRevalidate_DefersCommentBreakerResetWithCycles pins #1575 R3: a failed
+// label removal applies neither reset; the retry applies both.
+func TestRevalidate_DefersCommentBreakerResetWithCycles(t *testing.T) {
+	item := gh.ProjectItem{Number: 42, ItemID: "PVTI_42", Status: "Validate", Repo: "owner/repo",
+		Labels: []string{"stage:Validate:complete", "fabrik:revalidate"}}
+	fail := true
+	client := &mockGitHubClient{
+		removeLabelFromIssueFn: func(owner, repo string, n int, label string) error {
+			if fail && label == "stage:Validate:complete" {
+				return errors.New("boom")
+			}
+			return nil
+		},
+	}
+	eng := testEngineWithStages(t, client, testStagesForRevalidate())
+	seedBreakerAndCycles(t, eng, item.Number)
+
+	eng.handleRevalidateLabel(item, "owner", "repo")
+	assertBreakerAndCycles(t, eng, item, false)
+
+	fail = false
+	eng.handleRevalidateLabel(item, "owner", "repo")
+	assertBreakerAndCycles(t, eng, item, true)
+}

@@ -2420,6 +2420,9 @@ func (e *Engine) reenterValidate(item gh.ProjectItem, owner, repo string) bool {
 	e.store.Apply(itemstate.EngineUnpaused{Repo: repoStr, Number: item.Number, StageName: "Validate"})
 	e.store.Apply(itemstate.StageLastAttemptCleared{Repo: repoStr, Number: item.Number, StageName: "Validate"})
 	e.store.Apply(itemstate.EngineCyclesCleared{Repo: repoStr, Number: item.Number, StageName: "Validate"})
+	// Circuit breaker (#1089, #1575): reset together with the cycle counters,
+	// on the success side of the deferral returns above (as clearFailedStage).
+	e.resetCommentBreaker(item)
 	e.logf(item.Number, "revalidate", "store reset complete; Validate will dispatch on next poll\n")
 	return true
 }
@@ -2468,6 +2471,10 @@ func (e *Engine) handleValidateSHAInvalidation(item gh.ProjectItem, owner, repo 
 	e.store.Apply(itemstate.EngineUnpaused{Repo: repoStr, Number: item.Number, StageName: "Validate"})
 	e.store.Apply(itemstate.StageLastAttemptCleared{Repo: repoStr, Number: item.Number, StageName: "Validate"})
 	e.store.Apply(itemstate.EngineCyclesCleared{Repo: repoStr, Number: item.Number, StageName: "Validate"})
+	// Circuit breaker (#1089, #1575): every resume path clears both breakers
+	// together; this sits after the hasError return so a deferred attempt
+	// resets neither.
+	e.resetCommentBreaker(item)
 	e.logf(item.Number, "validate-sha", "store reset complete; Validate will dispatch on next poll\n")
 }
 
