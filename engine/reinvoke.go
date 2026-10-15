@@ -68,6 +68,14 @@ const (
 	didNotRunSkillLoadFailed didNotRunKind = "skill-load-failed"
 )
 
+// commentRunBlockedOnInput is the sentinel kind processCommentsClassified returns
+// when a comment-path run emitted FABRIK_BLOCKED_ON_INPUT and paused the item
+// (#2280, ADR 2280). It is deliberately not a did-not-run: the invocation ran, so
+// it must not feed the never-ran tally. dispatchReinvoke gives it its own branch:
+// the pre-charged cycle is refunded (a question is not a failed convergence
+// attempt) and opts.after is skipped.
+const commentRunBlockedOnInput didNotRunKind = "blocked-on-input"
+
 // classifyDidNotRun maps a processComments error to the did-not-run set the
 // stage-dispatch path already exempts from max_retries: claudeUsageLimitError,
 // claudeAPIErrorExit (whose classifier already refuses a run that consumed
@@ -257,7 +265,19 @@ func (e *Engine) dispatchReinvoke(ctx context.Context, board *gh.ProjectBoard, i
 		// converge: refund the pre-dispatch cycle charge and skip opts.after,
 		// whose HEAD-based logic (CI no-op-SHA debounce, rebase auto-merge
 		// re-enable, #1045 no-op refund) is meaningless when nothing ran.
-		if kind != "" {
+		if kind == commentRunBlockedOnInput {
+			// The run executed and paused the item for a human answer (#2280).
+			// Refund the cycle so the bound is free once the human replies, record
+			// no did-not-run state, and skip opts.after: its HEAD-based hooks (CI
+			// no-op-SHA debounce, rebase auto-merge re-enable, review refund) are
+			// wrong on a just-paused item.
+			if opts.cycle.refund != nil {
+				for _, m := range opts.cycle.refund(itemRepo, item.Number, stage.Name) {
+					e.store.Apply(m)
+				}
+			}
+			e.logf(item.Number, opts.tag, "invocation blocked on input (%s) — refunding %s cycle counter for stage %q (#2280)\n", kind, opts.cycle.label, stage.Name)
+		} else if kind != "" {
 			e.refundDidNotRunCycle(item, itemRepo, stage, opts.tag, kind, opts.cycle)
 		} else {
 			// The reinvoke stays charged (it ran, or is ambiguous): a genuine

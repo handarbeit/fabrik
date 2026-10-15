@@ -237,6 +237,9 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 //
 // The kind is "" (ran, or ambiguous) at every exit other than the three that
 // positively establish the invocation never ran; ambiguity is charged (R4).
+// The one other non-empty kind is commentRunBlockedOnInput (#2280): the run
+// executed, emitted FABRIK_BLOCKED_ON_INPUT without completing, and the item was
+// paused. It is not a did-not-run; it only tells dispatchReinvoke what happened.
 func (e *Engine) processCommentsClassified(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, comments []gh.Comment, onPIDReady ...func(int)) (didNotRunKind, error) {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 
@@ -631,7 +634,26 @@ func (e *Engine) processCommentsClassified(ctx context.Context, board *gh.Projec
 
 	summary := e.publishCommentOutput(owner, repo, item, stage, comments, output, workDir, baseBranch)
 
+	// FABRIK_BLOCKED_ON_INPUT (#2280, ADR 2280), with finalizeStageOutcome's
+	// precedence: completion beats the marker, and an error vetoed it above
+	// (err != nil && !completed returned). Detected on the raw output, since
+	// publishCommentOutput stripped markers only from its own copy. The pause lands
+	// before finalizeComments so clearOrphanAwaitingInput sees fabrik:paused and
+	// leaves the pair alone, while finalizeComments still marks the triggering
+	// comments processed (🚀): only a later human comment can resume the item.
+	blocked := !completed && !e.commentBlockedOnInputOff.Load() && CheckBlockedOnInput(output)
+	if blocked {
+		e.blockOnInput(item, stage, output)
+	}
+
 	e.finalizeComments(ctx, board, item, stage, comments, owner, repo, baseBranch, completed, wasReworking, summary)
+
+	if blocked {
+		// A question is not "no progress": bypass both comment breakers, as the
+		// tools-denied and skill-load arms do, so a blocked run never adds a second
+		// pause comment. unblockAwaitingInput resets them on resume.
+		return commentRunBlockedOnInput, nil
+	}
 
 	// Checked last so any reset applied above (stage-complete inside
 	// finalizeComments, or an issue-body update inside publishCommentOutput)
