@@ -4446,8 +4446,10 @@ This is the same order as every other Fabrik setting. A bare `CLAUDE_CONFIG_DIR`
 sits below `config.yaml` because its presence says nothing about intent toward
 Fabrik; `FABRIK_CLAUDE_CONFIG_DIR` keeps the environment layer, so an operator can
 still override a committed `config.yaml` from the shell. An empty value at any layer
-means "not set". A leading `~` is expanded and paths are cleaned before sources are
-compared.
+means "not set". A leading `~` is expanded, a relative path is made absolute against
+the directory Fabrik was started in (workers run in their own worktrees, so a relative
+value would otherwise point somewhere else for them), and paths are cleaned before
+sources are compared.
 
 Record a project's profile in `.fabrik/config.yaml` (commit it) or `.env`:
 

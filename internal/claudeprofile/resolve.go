@@ -44,6 +44,11 @@ type Inputs struct {
 	Ambient string
 	// Home expands a leading "~" in any value; empty disables expansion.
 	Home string
+	// Cwd anchors a relative value, so every consumer sees one absolute
+	// directory: a worker runs in its worktree, not the daemon's directory, and
+	// would otherwise resolve ".claude-work" against a different base than the
+	// startup line and footer did. Empty leaves relative values as written.
+	Cwd string
 }
 
 // Source is one layer that supplied a non-empty value.
@@ -76,7 +81,7 @@ func Resolve(in Inputs) Resolution {
 		if raw == "" {
 			return
 		}
-		dir := normalize(raw, in.Home)
+		dir := normalize(raw, in.Home, in.Cwd)
 		if dir == "" {
 			return
 		}
@@ -95,9 +100,10 @@ func Resolve(in Inputs) Resolution {
 	return r
 }
 
-// normalize expands a leading "~" and cleans the path. Symlinks are not
-// resolved, so two spellings of one directory through a link still differ.
-func normalize(p, home string) string {
+// normalize expands a leading "~", anchors a relative path at cwd and cleans
+// it. Symlinks are not resolved, so two spellings of one directory through a
+// link still differ.
+func normalize(p, home, cwd string) string {
 	p = strings.TrimSpace(p)
 	if home != "" {
 		switch {
@@ -109,6 +115,9 @@ func normalize(p, home string) string {
 	}
 	if p == "" {
 		return ""
+	}
+	if cwd != "" && !filepath.IsAbs(p) {
+		p = filepath.Join(cwd, p)
 	}
 	return filepath.Clean(p)
 }

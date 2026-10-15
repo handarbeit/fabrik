@@ -100,6 +100,22 @@ func TestResolve_TildeNotExpandedWithoutHome(t *testing.T) {
 	}
 }
 
+func TestResolve_RelativeValueAnchoredAtCwd(t *testing.T) {
+	r := Resolve(Inputs{Cwd: "/proj", YAML: ".claude-work", Ambient: "/proj/.claude-work/"})
+	if r.Dir != "/proj/.claude-work" {
+		t.Errorf("Dir = %q, want /proj/.claude-work", r.Dir)
+	}
+	if r.Disagree() {
+		t.Errorf("relative and absolute spellings of one directory must agree: %+v", r)
+	}
+}
+
+func TestResolve_RelativeValueKeptWithoutCwd(t *testing.T) {
+	if r := Resolve(Inputs{YAML: ".claude-work"}); r.Dir != ".claude-work" {
+		t.Errorf("got %q", r.Dir)
+	}
+}
+
 func TestFingerprint_StableAndEmailFree(t *testing.T) {
 	a := Resolve(Inputs{Ambient: "/a", Dotenv: map[string]string{BareEnv: "/b"}})
 	b := a.FillAccounts(func(dir string) string { return "user" + dir + "@x.com" })

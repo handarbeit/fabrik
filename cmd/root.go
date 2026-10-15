@@ -1165,6 +1165,11 @@ func resolveClaudeProfile(in claudeprofile.Inputs) claudeprofile.Resolution {
 			in.Home = home
 		}
 	}
+	if in.Cwd == "" {
+		if cwd, err := os.Getwd(); err == nil {
+			in.Cwd = cwd
+		}
+	}
 	return claudeprofile.Resolve(in).FillAccounts(claudeprofile.Account)
 }
 

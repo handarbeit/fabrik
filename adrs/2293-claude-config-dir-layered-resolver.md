@@ -64,7 +64,8 @@ inherited value in the next one.
   keep `LoadDotenv` (they start no engine workers and no `claude`). `fabrik watch` resolves and records the
   profile like the daemon (`loadWatchConfig`), since it launches interactive `claude`. `pruefer/tui_run.go` keeps one
   audited raw read until #2294.
-- Same-directory comparison is `~` expansion plus `filepath.Clean`; symlinks are not
+- Same-directory comparison is `~` expansion plus `filepath.Clean` (after the relative-path anchoring below); symlinks are not
   resolved. Low-impact and reversible.
+- A relative value is made absolute against the daemon's working directory at resolve time (`Inputs.Cwd`, injected so `Resolve` stays pure). Workers and interactive launches run with their own `cmd.Dir`, so a relative `CLAUDE_CONFIG_DIR` would otherwise name a different directory for them than for the startup line and footer.
 - No sim twin: this is process-start configuration, which `tests/sim` (built through
   `NewWithDeps`) does not model.
