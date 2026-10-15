@@ -140,6 +140,23 @@ func TestDefaultCommentScript_CommitIsReal(t *testing.T) {
 	}
 }
 
+// TestCommentReviewBlocked_EmitsMarkerAndQuestion pins the script's shape: the
+// blocked marker and the question, and no completion (#2280).
+func TestCommentReviewBlocked_EmitsMarkerAndQuestion(t *testing.T) {
+	workDir := newGitWorkDir(t)
+
+	out, completed, _, err := CommentReviewBlocked("which approach?")(context.Background(), testStage, testIssue, nil, workDir, engine.InvokeOptions{})
+	if err != nil {
+		t.Fatalf("CommentReviewBlocked: %v", err)
+	}
+	if completed {
+		t.Error("a blocked run must not report completed")
+	}
+	if !strings.Contains(out, "FABRIK_BLOCKED_ON_INPUT") || !strings.Contains(out, "which approach?") {
+		t.Errorf("output lacks the marker or question:\n%s", out)
+	}
+}
+
 // TestInvoker_Invoke_UsesDefaultScriptWhenUnregistered confirms an Invoker
 // with no ForStage registration falls through to DefaultScript rather than
 // erroring or returning a zero value.
