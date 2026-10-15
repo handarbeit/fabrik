@@ -543,8 +543,10 @@ func (e *Engine) checkRunFailureDetail(item gh.ProjectItem, logTag, owner, repo 
 func (e *Engine) buildCIFixComment(item gh.ProjectItem, stage *stages.Stage, workDir string, settle PRSettleResult) gh.Comment {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 
-	// Use PR-head check runs already fetched by settlePRMergeState.
-	prFailures := settle.CheckRuns
+	// Use PR-head check runs already fetched by settlePRMergeState, reduced to
+	// the latest run per check name: the raw list also holds superseded runs
+	// (a cancelled run whose rerun succeeded must not be reported, #2296).
+	prFailures := gh.LatestCheckRuns(settle.CheckRuns)
 	var baseRuns []gh.CheckRun
 	var baseBranch string
 
@@ -598,17 +600,21 @@ func (e *Engine) buildCIFixComment(item gh.ProjectItem, stage *stages.Stage, wor
 		}
 	}
 
+	requiredFailed := settle.RequiredContextsStatus == gh.RequiredContextsFailed && len(settle.RequiredFailed) > 0
+	// A set with only cancelled/stale runs and no other failing signal.
+	nonPassingOnly := len(failedLines) == 0 && len(nonPassingLines) > 0 && !requiredFailed
+
 	branchName := fmt.Sprintf("fabrik/issue-%d", item.Number)
 	var sb strings.Builder
 	sb.WriteString("🏭 **Fabrik — CI Fix Required**\n\n")
 	switch {
-	case len(failedLines) == 0 && len(nonPassingLines) > 0:
+	case nonPassingOnly:
 		sb.WriteString(fmt.Sprintf("The following CI check runs did not produce a passing result for this PR (branch: `%s`) — they were cancelled or otherwise did not complete, which is not a test failure:\n\n", branchName))
 	default:
 		sb.WriteString(fmt.Sprintf("The following CI check runs failed for this PR (branch: `%s`):\n\n", branchName))
 	}
 
-	if len(failedLines) > 0 || len(nonPassingLines) > 0 {
+	if len(failedLines) > 0 || len(nonPassingLines) > 0 || requiredFailed {
 		if len(failedLines) > 0 {
 			sb.WriteString("**Failed checks on PR branch:**\n")
 			for _, l := range failedLines {
@@ -623,17 +629,19 @@ func (e *Engine) buildCIFixComment(item gh.ProjectItem, stage *stages.Stage, wor
 			}
 			sb.WriteString("\n")
 		}
-	} else if settle.RequiredContextsStatus == gh.RequiredContextsFailed && len(settle.RequiredFailed) > 0 {
-		// ADR-933: the failure may have no check-run footprint at all — its
-		// only producer can be a classic commit status (the local-CI-takeover
-		// case #933 was filed for). Naming it here, instead of the generic
-		// "check GitHub Actions" fallback below, points the reinvoked stage
-		// at the actual failing signal rather than a place it will never find it.
-		sb.WriteString("**Required status context(s) failed (not a GitHub Actions check run):**\n")
-		for _, name := range settle.RequiredFailed {
-			sb.WriteString(fmt.Sprintf("- **%s**: failed [required, reported via commit status or check run]\n", name))
+		if requiredFailed && len(failedLines) == 0 {
+			// ADR-933: the failure may have no check-run footprint at all — its
+			// only producer can be a classic commit status (the local-CI-takeover
+			// case #933 was filed for). Naming it here, instead of the generic
+			// "check GitHub Actions" fallback below, points the reinvoked stage
+			// at the actual failing signal rather than a place it will never find it.
+			// Shown even beside a cancelled run: that must not mask a real failure.
+			sb.WriteString("**Required status context(s) failed (not a GitHub Actions check run):**\n")
+			for _, name := range settle.RequiredFailed {
+				sb.WriteString(fmt.Sprintf("- **%s**: failed [required, reported via commit status or check run]\n", name))
+			}
+			sb.WriteString("\n")
 		}
-		sb.WriteString("\n")
 	} else {
 		sb.WriteString("*(Could not determine specific failed checks — check GitHub Actions for details)*\n\n")
 	}
@@ -647,17 +655,20 @@ func (e *Engine) buildCIFixComment(item gh.ProjectItem, stage *stages.Stage, wor
 	}
 
 	sb.WriteString("**Instructions:**\n")
-	if len(nonPassingLines) > 0 && len(failedLines) == 0 {
+	if nonPassingOnly {
 		sb.WriteString("1. The check(s) above were cancelled or otherwise produced no result — there is no failure to fix. Do NOT invent a code change. Check whether the PR head already has a fresh run (`gh run list --branch " + branchName + " --limit 5`); if not, push a commit that is actually warranted or re-run the check (`gh run rerun <run-id>`).\n")
+		sb.WriteString("2. After any push, the engine will re-evaluate CI on the next poll cycle.\n")
+		sb.WriteString("3. Do not signal `FABRIK_STAGE_COMPLETE` — the engine will advance once CI passes.\n")
 	} else {
 		sb.WriteString("1. Checks marked **NEW REGRESSION** were introduced by this PR — fix these.\n")
-	}
-	if len(failedLines) > 0 || len(nonPassingLines) == 0 {
 		sb.WriteString("2. Checks marked **pre-existing** also fail on the base branch — note them but do NOT attempt to fix them.\n")
+		if len(nonPassingLines) > 0 {
+			sb.WriteString("   Checks listed as cancelled/stale produced no result: they are not failures to fix; a fresh run (push, or re-run the check) is what they need.\n")
+		}
+		sb.WriteString(fmt.Sprintf("3. To investigate failure logs: `gh run list --branch %s --limit 5` then `gh run view <run-id> --log-failed`\n", branchName))
+		sb.WriteString("4. After fixing, commit and push. The engine will re-evaluate CI on the next poll cycle.\n")
+		sb.WriteString("5. Do not signal `FABRIK_STAGE_COMPLETE` — the engine will advance once CI passes.\n")
 	}
-	sb.WriteString(fmt.Sprintf("3. To investigate failure logs: `gh run list --branch %s --limit 5` then `gh run view <run-id> --log-failed`\n", branchName))
-	sb.WriteString("4. After fixing, commit and push. The engine will re-evaluate CI on the next poll cycle.\n")
-	sb.WriteString(fmt.Sprintf("5. Do not signal `FABRIK_STAGE_COMPLETE` — the engine will advance once CI passes.\n"))
 
 	return gh.Comment{
 		ID:         "ci-fix-synthetic",

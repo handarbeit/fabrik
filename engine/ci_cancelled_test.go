@@ -171,3 +171,66 @@ func TestBuildCIFixComment_MixedCancelledAndFailed_ShowsBoth(t *testing.T) {
 		}
 	}
 }
+
+// A cancelled run superseded by a successful rerun of the same check is not
+// the head's state and must not reach the CI-fix context.
+func TestBuildCIFixComment_SupersededCancelledRunIsIgnored(t *testing.T) {
+	eng := testEngineForMerge(t, &mockGitHubClient{})
+	tr := true
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+	settle := PRSettleResult{
+		Status: PRMergeBlocked,
+		CheckRuns: []gh.CheckRun{
+			cancelledCheck(1),
+			{ID: 2, Name: "test", Status: "completed", Conclusion: "success"},
+			{ID: 3, Name: "build", Status: "completed", Conclusion: "failure"},
+		},
+		PR: &gh.PRDetails{Number: 5, HeadSHA: "sha7"},
+	}
+	body := eng.buildCIFixComment(gh.ProjectItem{Number: 1}, stage, "/tmp", settle).Body
+	if strings.Contains(body, "cancelled") || strings.Contains(body, "no result") {
+		t.Errorf("superseded cancelled run leaked into the CI-fix context:\n%s", body)
+	}
+	if !strings.Contains(body, "**build**: failure [NEW REGRESSION]") {
+		t.Errorf("body missing the real failure:\n%s", body)
+	}
+}
+
+// A required-context failure must still be named beside a cancelled run, and the
+// worker must not be told there is no failure to fix.
+func TestBuildCIFixComment_RequiredContextFailureNotMaskedByCancelled(t *testing.T) {
+	eng := testEngineForMerge(t, &mockGitHubClient{})
+	tr := true
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+	settle := PRSettleResult{
+		Status:                 PRMergeBlocked,
+		CheckRuns:              []gh.CheckRun{cancelledCheck(1)},
+		RequiredContextsStatus: gh.RequiredContextsFailed,
+		RequiredFailed:         []string{"local-ci"},
+		PR:                     &gh.PRDetails{Number: 5, HeadSHA: "sha7"},
+	}
+	body := eng.buildCIFixComment(gh.ProjectItem{Number: 1}, stage, "/tmp", settle).Body
+	if !strings.Contains(body, "**local-ci**: failed") {
+		t.Errorf("required-context failure missing:\n%s", body)
+	}
+	if strings.Contains(body, "there is no failure to fix") || strings.Contains(body, "which is not a test failure") {
+		t.Errorf("cancelled run must not mask a required-context failure:\n%s", body)
+	}
+}
+
+// The cancelled-only instructions are numbered consecutively.
+func TestBuildCIFixComment_CancelledOnly_InstructionsNumberedConsecutively(t *testing.T) {
+	eng := testEngineForMerge(t, &mockGitHubClient{})
+	tr := true
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+	settle := PRSettleResult{Status: PRMergeBlocked, CheckRuns: []gh.CheckRun{cancelledCheck(1)}, PR: &gh.PRDetails{Number: 5, HeadSHA: "sha7"}}
+	body := eng.buildCIFixComment(gh.ProjectItem{Number: 1}, stage, "/tmp", settle).Body
+	for _, want := range []string{"\n1. ", "\n2. ", "\n3. "} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body missing %q:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "\n4. ") || strings.Contains(body, "\n5. ") {
+		t.Errorf("unexpected trailing items:\n%s", body)
+	}
+}
