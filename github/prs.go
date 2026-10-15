@@ -1267,6 +1267,37 @@ func (c *Client) AddReviewRequest(owner, repo string, prNumber int, reviewers []
 	return nil
 }
 
+// ErrHeadMoved is returned by MergePRAtHeadSHA, EnablePullRequestAutoMerge and
+// EnqueuePullRequest when the PR head is no longer the commit the caller
+// pinned the request to (#2342). It is an expected, benign outcome: the caller
+// defers and re-judges the new head on a later poll. It is only returned when
+// the live head was positively observed to differ from the pinned one, never
+// on message text alone, so a different refusal is never mistaken for it.
+var ErrHeadMoved = errors.New("PR head moved since it was judged")
+
+// prLiveHeadSHA reads the PR's current head commit via REST.
+func (c *Client) prLiveHeadSHA(owner, repo string, prNumber int) (string, error) {
+	prURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d", c.baseURL, owner, repo, prNumber)
+	var prData struct {
+		Head struct {
+			SHA string `json:"sha"`
+		} `json:"head"`
+	}
+	if err := c.restGetJSON(prURL, &prData); err != nil {
+		return "", err
+	}
+	return prData.Head.SHA, nil
+}
+
+// headMovedAfterRefusal classifies a refusal that has already happened: it
+// reports true only when a fresh read positively shows the head differs from
+// expected. It is not a head read for a merge, so it cannot open a window. An
+// unreadable or empty head is "not known to have moved".
+func (c *Client) headMovedAfterRefusal(owner, repo string, prNumber int, expected string) bool {
+	live, err := c.prLiveHeadSHA(owner, repo, prNumber)
+	return err == nil && live != "" && live != expected
+}
+
 // ErrAutoMergeNotEnabled is returned by EnablePullRequestAutoMerge when the
 // repository has not enabled the auto-merge feature in its settings.
 var ErrAutoMergeNotEnabled = errors.New("repository has not enabled auto-merge")
@@ -1284,16 +1315,22 @@ var ErrAutoMergeAlreadyClean = errors.New("PR is already in clean status — mer
 //
 // enablePullRequestAutoMergeMutation is the GraphQL mutation used by EnablePullRequestAutoMerge.
 const enablePullRequestAutoMergeMutation = `
-mutation($prId: ID!, $method: PullRequestMergeMethod!) {
-  enablePullRequestAutoMerge(input: { pullRequestId: $prId, mergeMethod: $method }) {
+mutation($prId: ID!, $method: PullRequestMergeMethod!, $expectedHeadOid: GitObjectID!) {
+  enablePullRequestAutoMerge(input: { pullRequestId: $prId, mergeMethod: $method, expectedHeadOid: $expectedHeadOid }) {
     pullRequest {
       id
     }
   }
 }`
 
+// The request is pinned to expectedHeadOID (#2342): GitHub refuses it when the
+// PR head differs, surfaced as ErrHeadMoved. expectedHeadOID must be non-empty.
+//
 // Returns ErrAutoMergeNotEnabled when the repository setting is disabled.
-func (c *Client) EnablePullRequestAutoMerge(owner, repo string, prNumber int, strategy string) error {
+func (c *Client) EnablePullRequestAutoMerge(owner, repo string, prNumber int, strategy, expectedHeadOID string) error {
+	if expectedHeadOID == "" {
+		return fmt.Errorf("EnablePullRequestAutoMerge: expectedHeadOID must not be empty")
+	}
 	nodeID, err := c.prNodeID(owner, repo, prNumber)
 	if err != nil {
 		return err
@@ -1301,14 +1338,20 @@ func (c *Client) EnablePullRequestAutoMerge(owner, repo string, prNumber int, st
 
 	mutation := enablePullRequestAutoMergeMutation
 	mutVars := map[string]interface{}{
-		"prId":   nodeID,
-		"method": strategy,
+		"prId":            nodeID,
+		"method":          strategy,
+		"expectedHeadOid": expectedHeadOID,
 	}
 	var mutResult struct{}
 	if err := c.graphqlRequest(mutation, mutVars, &mutResult); err != nil {
 		// Surface a recognizable sentinel when the repo setting is disabled.
 		if isAutoMergeNotEnabledError(err) {
 			return fmt.Errorf("%w: %v", ErrAutoMergeNotEnabled, err)
+		}
+		// A refusal because the head moved (#2342). Classified from the live
+		// head, not the message text, which GitHub does not document.
+		if c.headMovedAfterRefusal(owner, repo, prNumber, expectedHeadOID) {
+			return fmt.Errorf("%w: %v", ErrHeadMoved, err)
 		}
 		// Surface a recognizable sentinel when the PR is already CLEAN.
 		// GitHub refuses auto-merge on a PR that is immediately mergeable.
@@ -1409,6 +1452,9 @@ func (c *Client) EnqueuePullRequest(owner, repo string, prNumber int, expectedHe
 	}
 	var mutResult struct{}
 	if err := c.graphqlRequest(mutation, mutVars, &mutResult); err != nil {
+		if c.headMovedAfterRefusal(owner, repo, prNumber, expectedHeadOID) {
+			return fmt.Errorf("enqueueing PR #%d: %w: %v", prNumber, ErrHeadMoved, err)
+		}
 		return fmt.Errorf("enqueueing PR #%d: %w", prNumber, err)
 	}
 	return nil
@@ -1519,10 +1565,9 @@ func mergeMethodAttemptOrder(strategy string) []string {
 // methods (merge, squash, rebase, minus the one already tried) until one
 // succeeds or a non-405 error occurs.
 //
-// Every existing caller merges a Fabrik-owned branch (a trial, integration,
-// or landing PR nobody else pushes to), so a plain re-read of mergeable/
-// mergeable_state immediately before merging is sufficient staleness
-// protection. See MergePRAtHeadSHA for the externally-writable case.
+// MergePR is unpinned and no engine path calls it any more (#2342): the
+// PR branch of an ordinary landing is externally writable, so every engine
+// merge goes through MergePRAtHeadSHA. It remains for tests and tooling.
 func (c *Client) MergePR(owner, repo string, prNumber int) error {
 	return c.mergePR(owner, repo, prNumber, "")
 }
@@ -1561,12 +1606,19 @@ func (c *Client) mergePR(owner, repo string, prNumber int, expectedHeadSHA strin
 	var prData struct {
 		Merged    bool  `json:"merged"`
 		Mergeable *bool `json:"mergeable"`
+		Head      struct {
+			SHA string `json:"sha"`
+		} `json:"head"`
 	}
 	if err := c.restGetJSON(prURL, &prData); err != nil {
 		return fmt.Errorf("fetching PR mergeable status: %w", err)
 	}
 	if prData.Merged {
 		return nil // already merged (e.g., human merged manually) — nothing to do
+	}
+	// A pinned merge whose head is already seen to differ never reaches the PUT.
+	if expectedHeadSHA != "" && prData.Head.SHA != "" && prData.Head.SHA != expectedHeadSHA {
+		return fmt.Errorf("merging PR at expected head %s (live head %s): %w", expectedHeadSHA, prData.Head.SHA, ErrHeadMoved)
 	}
 	if prData.Mergeable == nil || !*prData.Mergeable {
 		return ErrNotMergeable
@@ -1605,6 +1657,13 @@ func (c *Client) mergePR(owner, repo string, prNumber int, expectedHeadSHA strin
 			// method would hit the identical mismatch. Surface it as-is so the
 			// caller re-reads and decides afresh, exactly as it would for a
 			// mergeable_state that moved.
+			//
+			// A 409 is not always a head mismatch: only a live head that
+			// positively differs earns ErrHeadMoved (#2342); any other 409 is
+			// returned as a plain ErrConflict so it is never deferred silently.
+			if c.headMovedAfterRefusal(owner, repo, prNumber, expectedHeadSHA) {
+				return fmt.Errorf("merging PR at expected head %s: %w: %w", expectedHeadSHA, ErrHeadMoved, err)
+			}
 			return fmt.Errorf("merging PR at expected head %s: %w", expectedHeadSHA, err)
 		}
 		if !errors.Is(err, ErrMethodNotAllowed) {

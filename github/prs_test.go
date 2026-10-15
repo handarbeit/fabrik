@@ -1084,10 +1084,130 @@ func TestEnablePullRequestAutoMerge(t *testing.T) {
 		if got, ok := vars["method"].(string); !ok || got != "SQUASH" {
 			t.Errorf("mutation vars[method] = %v, want SQUASH", vars["method"])
 		}
+		if got, ok := vars["expectedHeadOid"].(string); !ok || got != "headA" {
+			t.Errorf("mutation vars[expectedHeadOid] = %v, want headA", vars["expectedHeadOid"])
+		}
 	})
 
-	if err := c.EnablePullRequestAutoMerge("owner", "repo", 42, "SQUASH"); err != nil {
+	if err := c.EnablePullRequestAutoMerge("owner", "repo", 42, "SQUASH", "headA"); err != nil {
 		t.Fatalf("EnablePullRequestAutoMerge: %v", err)
+	}
+}
+
+func TestEnablePullRequestAutoMerge_EmptyHeadRefused(t *testing.T) {
+	c := NewClientWithBaseURL("t", "http://127.0.0.1:1")
+	if err := c.EnablePullRequestAutoMerge("owner", "repo", 42, "SQUASH", ""); err == nil {
+		t.Fatal("empty expectedHeadOID must be refused")
+	}
+}
+
+// headMovedGraphQLServer answers the node-id query, fails the mutation with
+// mutationMsg, and serves GET pulls/42 with the given live head.
+func headMovedGraphQLServer(t *testing.T, mutationMsg, liveHead string) *Client {
+	t.Helper()
+	mux := http.NewServeMux()
+	calls := 0
+	mux.HandleFunc("/graphql", func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		if calls == 1 {
+			json.NewEncoder(w).Encode(map[string]interface{}{"data": map[string]interface{}{
+				"repository": map[string]interface{}{"pullRequest": map[string]interface{}{"id": "PR_x"}}}})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{"errors": []map[string]interface{}{{"message": mutationMsg}}})
+	})
+	mux.HandleFunc("/repos/owner/repo/pulls/42", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{"head": map[string]string{"sha": liveHead}})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return NewClientWithBaseURL("test-token", srv.URL)
+}
+
+// TestGraphQLPinnedWrites_HeadMovedClassifiedFromLiveHead pins that a refused
+// auto-merge / enqueue is ErrHeadMoved only when the live head differs,
+// whatever the (undocumented) message says.
+func TestGraphQLPinnedWrites_HeadMovedClassifiedFromLiveHead(t *testing.T) {
+	enable := func(c *Client) error { return c.EnablePullRequestAutoMerge("owner", "repo", 42, "SQUASH", "headA") }
+	enqueue := func(c *Client) error { return c.EnqueuePullRequest("owner", "repo", 42, "headA") }
+	for name, call := range map[string]func(*Client) error{"enable": enable, "enqueue": enqueue} {
+		t.Run(name+"/moved", func(t *testing.T) {
+			c := headMovedGraphQLServer(t, "some unrecognised wording", "headB")
+			if err := call(c); !errors.Is(err, ErrHeadMoved) {
+				t.Fatalf("err = %v, want ErrHeadMoved", err)
+			}
+		})
+		t.Run(name+"/unmoved", func(t *testing.T) {
+			c := headMovedGraphQLServer(t, "expected head oid mismatch", "headA")
+			if err := call(c); err == nil || errors.Is(err, ErrHeadMoved) {
+				t.Fatalf("err = %v, want a non-ErrHeadMoved failure (head did not move)", err)
+			}
+		})
+	}
+	t.Run("enable/already-clean-and-moved", func(t *testing.T) {
+		c := headMovedGraphQLServer(t, "Pull request is in clean status", "headB")
+		if err := enable(c); !errors.Is(err, ErrHeadMoved) {
+			t.Fatalf("err = %v, want ErrHeadMoved", err)
+		}
+	})
+	t.Run("enable/already-clean-unmoved", func(t *testing.T) {
+		c := headMovedGraphQLServer(t, "Pull request is in clean status", "headA")
+		if err := enable(c); !errors.Is(err, ErrAutoMergeAlreadyClean) {
+			t.Fatalf("err = %v, want ErrAutoMergeAlreadyClean", err)
+		}
+	})
+}
+
+func TestMergePRAtHeadSHA_HeadMoved(t *testing.T) {
+	putCalled := false
+	srv, c := fakePRServer(t, 42,
+		func(w http.ResponseWriter, r *http.Request) {
+			json.NewEncoder(w).Encode(map[string]interface{}{"mergeable": true, "mergeable_state": "clean", "head": map[string]string{"sha": "headB"}})
+		},
+		func(w http.ResponseWriter, r *http.Request) { putCalled = true })
+	defer srv.Close()
+	err := c.MergePRAtHeadSHA("owner", "repo", 42, "headA")
+	if !errors.Is(err, ErrHeadMoved) {
+		t.Fatalf("err = %v, want ErrHeadMoved", err)
+	}
+	if putCalled {
+		t.Error("merge PUT must not be issued when the head is already seen to differ")
+	}
+}
+
+// TestMergePRAtHeadSHA_409Disambiguation: a 409 is ErrHeadMoved only when the
+// live head differs; otherwise a plain ErrConflict.
+func TestMergePRAtHeadSHA_409Disambiguation(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		liveAfter string
+		wantMoved bool
+	}{{"moved", "headB", true}, {"same head", "headA", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			gets := 0
+			srv, c := fakePRServer(t, 42,
+				func(w http.ResponseWriter, r *http.Request) {
+					gets++
+					head := "headA"
+					if gets > 2 { // pre-check + mergeable_state reads see headA; the post-409 read differs
+						head = tc.liveAfter
+					}
+					json.NewEncoder(w).Encode(map[string]interface{}{"mergeable": true, "mergeable_state": "clean", "head": map[string]string{"sha": head}})
+				},
+				func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(409)
+					w.Write([]byte(`{"message":"Head branch was modified"}`))
+				})
+			defer srv.Close()
+			err := c.MergePRAtHeadSHA("owner", "repo", 42, "headA")
+			if !errors.Is(err, ErrConflict) {
+				t.Fatalf("err = %v, want ErrConflict preserved", err)
+			}
+			if got := errors.Is(err, ErrHeadMoved); got != tc.wantMoved {
+				t.Fatalf("errors.Is(ErrHeadMoved) = %v, want %v (err=%v)", got, tc.wantMoved, err)
+			}
+		})
 	}
 }
 
