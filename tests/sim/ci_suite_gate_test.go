@@ -329,12 +329,17 @@ func TestCISuiteGate_StuckSuiteEscalatesAtBackstop(t *testing.T) {
 	}
 	var found bool
 	for _, c := range comments {
-		if strings.HasPrefix(c.Body, "🏭 **Fabrik — CI wait timeout**") && strings.Contains(c.Body, "github-actions (in_progress, 2 runs)") {
+		// #2302: the item never reached the CI gate — the merge gate held it on the
+		// suite — so the backstop comment names that gate and the stuck suite
+		// instead of blaming CI.
+		if strings.HasPrefix(c.Body, "🏭 **Fabrik — awaiting-CI wait timeout**") &&
+			strings.Contains(c.Body, "held by the merge gate") &&
+			strings.Contains(c.Body, "github-actions (in_progress, 2 runs)") {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("no CI wait timeout comment naming the stuck suite\n\n%s", diagnostics(env))
+		t.Fatalf("no backstop comment naming the merge gate and the stuck suite\n\n%s", diagnostics(env))
 	}
 }
 
