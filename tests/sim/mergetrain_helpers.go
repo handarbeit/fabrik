@@ -471,6 +471,15 @@ func parseClosesNumbers(body string) []int {
 // constructs a new *Env with its own Sim).
 func startTrialVerdictSeeder(t *testing.T, env *Env, verdictFor func(members []int) []gh.CheckRun) (stop func()) {
 	t.Helper()
+	return startTrialSeeder(t, env, verdictFor, nil)
+}
+
+// startTrialSeeder is startTrialVerdictSeeder that can also script what marking each trial
+// PR ready does (#2297): when ready is non-nil, the step is queued for every new trial PR
+// (SHA filled in from the PR's head) BEFORE its verdict is seeded, so the script is always
+// armed by the time the trial can go green and be landed.
+func startTrialSeeder(t *testing.T, env *Env, verdictFor func(members []int) []gh.CheckRun, ready *simgh.ReadyForReviewStep) (stop func()) {
+	t.Helper()
 	done := make(chan struct{})
 	var stopOnce sync.Once
 	var wg sync.WaitGroup
@@ -491,6 +500,11 @@ func startTrialVerdictSeeder(t *testing.T, env *Env, verdictFor func(members []i
 						continue
 					}
 					seen[pr.Number] = true
+					if ready != nil {
+						step := *ready
+						step.SHA = pr.HeadSHA
+						env.Sim.Sim().SeedReadyForReviewSteps(env.OwnerRepo, pr.Number, step)
+					}
 					members := parseClosesNumbers(pr.Body)
 					verdict := verdictFor(members)
 					for _, cr := range verdict {

@@ -276,6 +276,7 @@ func cloneRepoState(r *repoState) *repoState {
 		checkSuites:       make(map[string][]gh.CheckSuite, len(r.checkSuites)),
 		workflowRuns:      make(map[string][]gh.WorkflowRun, len(r.workflowRuns)),
 		reopenScripts:     make(map[int][]ReopenStep, len(r.reopenScripts)),
+		readyScripts:      make(map[int][]ReadyForReviewStep, len(r.readyScripts)),
 		rerunScripts:      make(map[int64]RerunStep, len(r.rerunScripts)),
 		nextWorkflowRunID: r.nextWorkflowRunID,
 		commitStatuses:    make(map[string][]gh.CommitStatus, len(r.commitStatuses)),
@@ -305,6 +306,9 @@ func cloneRepoState(r *repoState) *repoState {
 	}
 	for k, v := range r.reopenScripts {
 		out.reopenScripts[k] = append([]ReopenStep(nil), v...)
+	}
+	for k, v := range r.readyScripts {
+		out.readyScripts[k] = append([]ReadyForReviewStep(nil), v...)
 	}
 	for k, v := range r.rerunScripts {
 		out.rerunScripts[k] = v
@@ -379,6 +383,7 @@ func clonePRRecord(p *prRecord) *prRecord {
 		autoMergeEnabled:        p.autoMergeEnabled,
 		autoMergeStrategy:       p.autoMergeStrategy,
 		inMergeQueue:            p.inMergeQueue,
+		readyBlockedReads:       p.readyBlockedReads,
 		mergeableRecomputeReads: p.mergeableRecomputeReads,
 		createdAt:               p.createdAt,
 		updatedAt:               p.updatedAt,
@@ -602,6 +607,7 @@ var snapshotFieldRegistry = map[string]map[string]fieldDisposition{
 		"checkSuites":       fieldCopied,
 		"workflowRuns":      fieldCopied,
 		"reopenScripts":     fieldCopied,
+		"readyScripts":      fieldCopied,
 		"rerunScripts":      fieldCopied,
 		"nextWorkflowRunID": fieldCopied,
 		"commitStatuses":    fieldCopied,
@@ -656,6 +662,7 @@ var snapshotFieldRegistry = map[string]map[string]fieldDisposition{
 		"autoMergeStrategy":       fieldCopied,
 		"inMergeQueue":            fieldCopied,
 		"queueEntry":              fieldCopied,
+		"readyBlockedReads":       fieldCopied,
 		"mergeableRecomputeReads": fieldCopied,
 		"createdAt":               fieldCopied,
 		"updatedAt":               fieldCopied,

@@ -285,8 +285,14 @@ func (s *Sim) MarkPRReady(owner, repo string, prNumber int) error {
 	if err != nil {
 		return err
 	}
+	wasDraft := pr.draft
 	pr.draft = false
 	pr.updatedAt = s.now()
+	if wasDraft {
+		if r, rerr := s.lookupRepo(owner, repo); rerr == nil {
+			s.applyReadyForReviewStep(r, pr)
+		}
+	}
 	return nil
 }
 
@@ -364,6 +370,18 @@ func (s *Sim) FetchPRMergeableFields(owner, repo string, prNumber int) (*bool, s
 		return nil, stateUnknown, nil
 	}
 	head, base, draft := pr.head, pr.base, pr.draft
+	if pr.readyBlockedReads > 0 && !draft {
+		// The ready_for_review window (#2297): a conflict still wins, so only a
+		// PR GitHub could otherwise call mergeable reads blocked here.
+		pr.readyBlockedReads--
+		s.mu.Unlock()
+		if facts, gerr := s.gitFacts(r, base, head); gerr == nil && !facts.conflict {
+			mergeable := true
+			return &mergeable, stateBlocked, nil
+		}
+		s.mu.Lock()
+		pr.readyBlockedReads = 0
+	}
 	s.mu.Unlock()
 
 	facts, err := s.gitFacts(r, base, head)

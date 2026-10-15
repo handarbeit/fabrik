@@ -102,6 +102,7 @@ type repoState struct {
 	// workflowruns.go. nextWorkflowRunID auto-assigns run IDs.
 	workflowRuns      map[string][]gh.WorkflowRun
 	reopenScripts     map[int][]ReopenStep
+	readyScripts      map[int][]ReadyForReviewStep
 	rerunScripts      map[int64]RerunStep
 	nextWorkflowRunID int64
 
@@ -265,6 +266,12 @@ type prRecord struct {
 
 	inMergeQueue bool
 	queueEntry   *gh.MergeQueueEntry
+
+	// readyBlockedReads is the ready_for_review window (#2297): while non-zero, each
+	// read of a mergeable field reports mergeable=true with mergeable_state "blocked"
+	// and decrements it, ahead of the git-derived answer. Armed by MarkPRReady from a
+	// ReadyForReviewStep; see workflowruns.go.
+	readyBlockedReads int
 
 	// mergeableRecomputeReads models GitHub's recompute window, during which
 	// it reports mergeable as null and mergeableState as "unknown". While

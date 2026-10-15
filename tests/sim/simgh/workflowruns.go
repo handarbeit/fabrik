@@ -30,6 +30,28 @@ type ReopenStep struct {
 	CheckRuns    []gh.CheckRun
 }
 
+// ReadyForReviewStep is what marking a draft PR ready produces (#2297): marking ready fires
+// pull_request: ready_for_review, which starts a new workflow run on the same head, and for
+// a short window GitHub reports mergeable_state "blocked". Steps are consumed one per
+// draft→ready transition, in order; a transition with no step queued produces nothing (a
+// workflow whose `on.pull_request.types` omits ready_for_review, or a repo with no CI).
+type ReadyForReviewStep struct {
+	// BlockedReads is how many mergeable-field reads report "blocked" before the real
+	// derived state shows. It models the not-yet-visible check and GitHub not yet counting
+	// it; it is read-count driven, so it needs no clock advance. Note that MergePR's own
+	// mergeability check is such a read too.
+	BlockedReads int
+	// SHA is the head the new check run attaches to; empty means the PR's last observed
+	// head, and with none known no check run is added. Scenarios that script CheckName pass it.
+	SHA string
+	// CheckName, when non-empty, adds a pending check run of that name on SHA at once (give
+	// it a name in the base's required contexts for the PR to read blocked while it is
+	// pending). It completes with Conclusion Delay later, on the sim clock.
+	CheckName  string
+	Delay      time.Duration
+	Conclusion string // default "success"; "skipped" models a workflow that does nothing
+}
+
 // RerunStep is what re-running a workflow run's failed jobs produces.
 type RerunStep struct {
 	// Delay is how long after the call the re-run finishes.
@@ -225,5 +247,51 @@ func (s *Sim) applyReopenStep(r *repoState, prNumber int) {
 		for _, cr := range checks {
 			rs.checkRuns[sha] = upsertCheckRun(rs.checkRuns[sha], cr)
 		}
+	})
+}
+
+// SeedReadyForReviewSteps queues, for a PR, the outcomes its successive draft→ready
+// transitions produce. See ReadyForReviewStep.
+func (s *Sim) SeedReadyForReviewSteps(ownerRepo string, prNumber int, steps ...ReadyForReviewStep) *Sim {
+	r, ok := s.repoForSeed(ownerRepo)
+	if !ok {
+		return s
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r.readyScripts[prNumber] = append(r.readyScripts[prNumber], steps...)
+	return s
+}
+
+// applyReadyForReviewStep consumes the next scripted ready_for_review outcome for pr.
+// Caller must hold mu.
+func (s *Sim) applyReadyForReviewStep(r *repoState, pr *prRecord) {
+	queue := r.readyScripts[pr.number]
+	if len(queue) == 0 {
+		return
+	}
+	step := queue[0]
+	r.readyScripts[pr.number] = queue[1:]
+	pr.readyBlockedReads = step.BlockedReads
+	if step.CheckName == "" {
+		return
+	}
+	sha := step.SHA
+	if sha == "" {
+		sha = pr.lastHeadSHA
+	}
+	if sha == "" {
+		return // no head known without a git read, which mu forbids here; scenarios pass SHA
+	}
+	conclusion := step.Conclusion
+	if conclusion == "" {
+		conclusion = "success"
+	}
+	pending := s.reserveCheckRunID(gh.CheckRun{Name: step.CheckName, Status: "in_progress"})
+	r.checkRuns[sha] = upsertCheckRun(r.checkRuns[sha], pending)
+	done := pending
+	done.Status, done.Conclusion = "completed", conclusion
+	r.ciSchedule.add(s.now().Add(step.Delay), func(rs *repoState) {
+		rs.checkRuns[sha] = upsertCheckRun(rs.checkRuns[sha], done)
 	})
 }

@@ -104,3 +104,50 @@ func TestRerunStepSupersedesFailedCheckRun(t *testing.T) {
 		t.Errorf("run after re-run = %+v", runs[0])
 	}
 }
+
+// Marking a draft ready consumes one ReadyForReviewStep: the next BlockedReads reads of the
+// mergeable fields report "blocked" before the derived "clean" shows, and a scripted pending
+// check completes Delay later. A second ready (no draft transition) and an unscripted ready
+// consume nothing.
+func TestMarkPRReadyConsumesReadyForReviewStep(t *testing.T) {
+	s, clk := newSim(t)
+	s.SeedRepo("acme/widgets").
+		SeedCommit("acme/widgets", "fabrik/issue-7", map[string]string{"a.txt": "a"}, "work").
+		SeedPR("acme/widgets", PRSeed{Number: 8, Title: "PR", Head: "fabrik/issue-7", Draft: true})
+	if err := s.Err(); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+	sha := mustHeadSHA(t, s, "acme/widgets", "fabrik/issue-7")
+	s.SeedReadyForReviewSteps("acme/widgets", 8,
+		ReadyForReviewStep{BlockedReads: 2, SHA: sha, CheckName: "test", Delay: time.Minute})
+
+	if err := s.MarkPRReady("acme", "widgets", 8); err != nil {
+		t.Fatalf("MarkPRReady: %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		pr, err := s.FetchPRDetails("acme", "widgets", 8)
+		if err != nil || pr.MergeableState != "blocked" {
+			t.Fatalf("read %d = %+v, %v; want blocked", i, pr, err)
+		}
+	}
+	runs, _ := s.FetchCheckRuns("acme", "widgets", sha)
+	if len(runs) != 1 || runs[0].Status == "completed" {
+		t.Fatalf("pending check not visible right after ready: %+v", runs)
+	}
+	clk.Advance(2 * time.Minute)
+	runs, _ = s.FetchCheckRuns("acme", "widgets", sha)
+	if len(runs) != 1 || runs[0].Conclusion != "success" {
+		t.Fatalf("scripted check did not settle: %+v", runs)
+	}
+	if pr, _ := s.FetchPRDetails("acme", "widgets", 8); pr.MergeableState == "blocked" {
+		t.Errorf("blocked window outlived its scripted reads: %+v", pr)
+	}
+
+	// Idempotent ready and an unscripted second step: nothing more is produced.
+	if err := s.MarkPRReady("acme", "widgets", 8); err != nil {
+		t.Fatal(err)
+	}
+	if pr, _ := s.FetchPRDetails("acme", "widgets", 8); pr.MergeableState == "blocked" {
+		t.Errorf("an already-ready PR re-armed the window: %+v", pr)
+	}
+}
