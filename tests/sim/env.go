@@ -155,6 +155,14 @@ type EnvOptions struct {
 	// sets this false explicitly.
 	Yolo *bool
 
+	// ValidateSHARebuild turns the post-restart rebuild of the Validate completion SHA
+	// (#2343) on for the first engine. Default false: most scenarios seed
+	// stage:Validate:complete as a bare label on an item that never ran Validate, which
+	// has no completion SHA and no Validate stage comment — exactly the "nothing
+	// recoverable" case the rebuild answers by re-running Validate (R3). A scenario about
+	// restart behaviour sets this true (a RestartEnv engine always has it on).
+	ValidateSHARebuild bool
+
 	// StartTime seeds the shared Clock. Default 2026-01-01 00:00:00 UTC — an
 	// arbitrary fixed instant, deliberately not time.Now(), so a scenario
 	// asserting durations never depends on wall-clock reality.
@@ -410,6 +418,9 @@ func NewEnv(t *testing.T, opts EnvOptions) *Env {
 		eng = engine.NewWithDeps(cfg, inst, claude, wm)
 	}
 	eng.SetClock(clk)
+	if !opts.ValidateSHARebuild {
+		eng.SetValidateSHARebuildDisabledForTest()
+	}
 	installLogSink(t, eng, opts.LogOut)
 	var boardCache *boardcache.CacheImpl
 	var wake <-chan struct{}

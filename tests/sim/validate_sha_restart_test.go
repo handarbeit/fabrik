@@ -27,8 +27,9 @@ import (
 func validateSHARestartEnv(t *testing.T) (env *Env, num int, firstHead string) {
 	t.Helper()
 	env = NewEnv(t, EnvOptions{
-		Stages:    ciFixStages(),
-		StartTime: time.Now(),
+		Stages:             ciFixStages(),
+		StartTime:          time.Now(),
+		ValidateSHARebuild: true,
 		ConfigureCfg: func(cfg *engine.Config) {
 			cfg.MaxCiFixCycles = 5
 			// simgh posts as simgh-bot; the rebuild trusts only the engine's own comments.
