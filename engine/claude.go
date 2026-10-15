@@ -183,7 +183,10 @@ func classifyUsageLimitExit(resp claudeResponse, usage TokenUsage) (msg string, 
 // is CLI-version-specific and undocumented (ADR-1523), so this type only
 // declares what's needed to reach it, not its contents.
 type permissionDenial struct {
-	ToolName  string          `json:"tool_name"`
+	ToolName string `json:"tool_name"`
+	// ToolUseID joins the denial to the stream's tool_use block (#1556); the
+	// CLI emits it on every entry (ADR-1523, confirmed against CLI 2.1.299).
+	ToolUseID string          `json:"tool_use_id"`
 	ToolInput json.RawMessage `json:"tool_input"`
 }
 
@@ -229,7 +232,9 @@ type toolDenial = claudeerr.ToolDenial
 //
 // Callers are expected to gate this on !completed (see interpretClaudeResult)
 // — a denial the model worked around and still finished the stage is
-// ordinary success, not a condition to exempt from anything.
+// ordinary success, not a condition to exempt from anything — and, since
+// #1556, on denialCausal: this function only establishes that a denial
+// occurred somewhere in the run, not that it caused the non-completion.
 //
 // toolNames is deduplicated (preserving first-seen order) so a tool denied
 // repeatedly across multiple attempts within the same invocation is named
@@ -2023,23 +2028,23 @@ func interpretClaudeResult(ctx context.Context, issueNumber int, rawOutput []byt
 	// #1632/#1782 defect, discovered only a stage later before this guard.
 	completed := stageCompleteRE.MatchString(text) && !artifactMissingOnComplete(text)
 	// Gated on !completed: a denial the model worked around and still
-	// completed the stage is ordinary success — no exemption, no label. See
+	// completed the stage is ordinary success — no exemption, no label. Also
+	// gated on causality (#1556): a denial that did not plausibly cause the
+	// non-completion is an ordinary failure that counts against max_retries.
+	// See denialCausal's doc comment (including its error direction), and
 	// classifyToolsDenied's doc comment and ADR-1523.
 	if !completed && ok {
 		if toolNames, denials, detected := classifyToolsDenied(resp); detected {
-			// "did not signal completion" is exactly what !completed
-			// establishes — free to state, always true on this branch. Unlike
-			// its predecessor's "did not make progress," it is never asserted
-			// without having been measured (#1743): commitsPushed > 0 upgrades
-			// this to the measured form when the caller could determine one
-			// (see runClaude's headBefore/headAfter capture); -1 or 0 means
-			// "not measured" or "no commits," and the wording degrades to the
-			// completion-only phrasing rather than printing "0 commit(s)".
-			progress := "stage did not signal completion"
-			if commitsPushed > 0 {
-				progress = fmt.Sprintf("%d commit(s) pushed, stage did not signal completion", commitsPushed)
+			if causal, reason := denialCausal(resp, rawOutput, commitsPushed); !causal {
+				claudeLog(issueNumber, "claude", "tool permission denial(s) present (%s) but judged incidental (%s) — treated as an ordinary failure, charged against max_retries\n", toolsDeniedLogSummary(toolNames, denials), reason)
+				return text, completed, usage, nil
 			}
-			claudeLog(issueNumber, "claude", "tool permission denial(s) detected (%s) — %s; not charged against max_retries\n", toolsDeniedLogSummary(toolNames, denials), progress)
+			// "did not signal completion" is exactly what !completed
+			// establishes — free to state, always true on this branch. It is
+			// never asserted without having been measured (#1743): a causal
+			// run has commitsPushed <= 0 by construction (denialCausal rule 1),
+			// so the wording is completion-only.
+			claudeLog(issueNumber, "claude", "tool permission denial(s) detected (%s) — stage did not signal completion; not charged against max_retries\n", toolsDeniedLogSummary(toolNames, denials))
 			return text, false, usage, &claudeToolsDeniedError{ToolNames: toolNames, Denials: denials}
 		}
 	}

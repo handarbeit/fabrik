@@ -1,0 +1,5 @@
+{"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","id":"toolu_01HDzdFpmUjU9STpkBAR3ny7","name":"Bash","input":{}}]}}
+{"type":"user","parent_tool_use_id":null,"message":{"content":[{"type":"tool_result","tool_use_id":"toolu_01HDzdFpmUjU9STpkBAR3ny7","is_error":false,"content":"redacted"}]}}
+{"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","id":"toolu_01GoN5GCWjydJyKTtbpRz8Yn","name":"Write","input":{}}]}}
+{"type":"user","parent_tool_use_id":null,"message":{"content":[{"type":"tool_result","tool_use_id":"toolu_01GoN5GCWjydJyKTtbpRz8Yn","is_error":true,"content":"redacted"}]}}
+{"type":"result","subtype":"success","is_error":false,"terminal_reason":"completed","num_turns":3,"result":"redacted","session_id":"redacted","permission_denials":[{"tool_name":"Write","tool_use_id":"toolu_01GoN5GCWjydJyKTtbpRz8Yn","tool_input":{}}]}
