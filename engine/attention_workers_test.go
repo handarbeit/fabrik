@@ -457,3 +457,28 @@ func TestHealthCountsAConflictResolutionByThePoolItHolds(t *testing.T) {
 		t.Errorf("in_use %d queued %d, want 1 and 1 (general-slot run, queued wait; reserved-slot run uncounted)", h.Workers.InUse, h.Workers.Queued)
 	}
 }
+
+// unknown-merge-state (#2302) comes only from its own marker, and a daemon-stop
+// marker never reads as it (or the reverse).
+func TestStatusUnknownMergeStateCauseNeedsItsMarker(t *testing.T) {
+	e := workerEngine(t)
+	e.seedAPIItem(t, 62, "Implement", "fabrik:paused", "fabrik:awaiting-input", "stage:Implement:in_progress")
+	if c := status(t, e, "62").Attention.Cause; c != "" {
+		t.Fatalf("a paused item with no evidence has cause %q", c)
+	}
+	e.store.Apply(itemstate.IssueCommentCreated{Repo: "owner/repo", Number: 62, Comment: gh.Comment{
+		DatabaseID: 1, Body: "🏭 **Fabrik — merge state unknown**\n\nGitHub has not reported a computed mergeability for PR #9.\n\n" + pauseCauseUnknownMergeStateMarker,
+	}})
+	if c := status(t, e, "62").Attention.Cause; c != attention.CauseUnknownMergeState {
+		t.Errorf("cause = %q, want unknown-merge-state", c)
+	}
+	st := &itemstate.ItemState{Comments: []gh.Comment{{
+		DatabaseID: 2, Body: "🏭 **Fabrik — merge state unknown**\n\nx\n\n" + pauseCauseUnknownMergeStateMarker,
+	}}}
+	if daemonStopPause(st) {
+		t.Error("an unknown-merge-state marker must not read as a daemon stop")
+	}
+	if !pausedByMarker(st, pauseCauseUnknownMergeStateMarker) {
+		t.Error("marker not recognised")
+	}
+}

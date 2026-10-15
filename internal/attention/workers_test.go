@@ -350,6 +350,12 @@ func TestCauseVocabulary(t *testing.T) {
 		{"daemon-stop on an escalated pause", CauseDaemonStop,
 			func(in *Input) { in.Labels = []string{"fabrik:paused"}; in.PausedByEngine = true; in.DaemonStop = true },
 			func(in *Input) { in.Labels = []string{"fabrik:paused"}; in.PausedByEngine = true }},
+		{"unknown-merge-state", CauseUnknownMergeState,
+			func(in *Input) { in.Labels = []string{"fabrik:paused", "fabrik:awaiting-input"}; in.UnknownMergeState = true },
+			func(in *Input) { in.Labels = []string{"fabrik:paused", "fabrik:awaiting-input"} }},
+		{"unknown-merge-state on an escalated pause", CauseUnknownMergeState,
+			func(in *Input) { in.Labels = []string{"fabrik:paused"}; in.PausedByEngine = true; in.UnknownMergeState = true },
+			func(in *Input) { in.Labels = []string{"fabrik:paused"}; in.PausedByEngine = true }},
 		{"slot-starved (queued)", CauseSlotStarved,
 			func(in *Input) { in.HasWorker, in.WorkerQueued = true, true },
 			func(in *Input) { in.HasWorker = true }},
@@ -397,7 +403,7 @@ func TestCauseVocabulary(t *testing.T) {
 }
 
 func TestCauseVocabularyIsPinned(t *testing.T) {
-	want := []string{"daemon-stop", "slot-starved", "wall-time-kill", "max-turns", "gate-hold:<gate>", "rebase-conflict-after-landing"}
+	want := []string{"daemon-stop", "slot-starved", "wall-time-kill", "max-turns", "gate-hold:<gate>", "rebase-conflict-after-landing", "unknown-merge-state"}
 	got := Causes()
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("cause vocabulary = %v, want %v (a new cause is a documented addition)", got, want)

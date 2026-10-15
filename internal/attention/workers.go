@@ -44,6 +44,7 @@ const (
 	CauseWallTimeKill               = "wall-time-kill"
 	CauseMaxTurns                   = "max-turns"
 	CauseRebaseConflictAfterLanding = "rebase-conflict-after-landing"
+	CauseUnknownMergeState          = "unknown-merge-state"
 	causeGateHoldPrefix             = "gate-hold:"
 )
 
@@ -54,7 +55,7 @@ func CauseGateHold(gate string) string { return causeGateHoldPrefix + gate }
 // gate-hold:<gate>. Used by the docs and by tests that pin the vocabulary.
 func Causes() []string {
 	return []string{CauseDaemonStop, CauseSlotStarved, CauseWallTimeKill, CauseMaxTurns,
-		causeGateHoldPrefix + "<gate>", CauseRebaseConflictAfterLanding}
+		causeGateHoldPrefix + "<gate>", CauseRebaseConflictAfterLanding, CauseUnknownMergeState}
 }
 
 // RetryFact is a retry the engine has scheduled after a failed invocation.

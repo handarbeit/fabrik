@@ -49,3 +49,17 @@ func TestItemWedgedEventUsesTheGateHoldCause(t *testing.T) {
 		t.Fatalf("item-wedged = %+v, want cause gate-hold:feedback", w)
 	}
 }
+
+// The R6 escalation's push carries the same unknown-merge-state cause as status,
+// never a CI-timeout one (#2302).
+func TestPauseEventCarriesUnknownMergeStateCause(t *testing.T) {
+	e := workerEngine(t)
+	e.seedAPIItem(t, 71, "Implement", "fabrik:paused", "fabrik:awaiting-input", "stage:Implement:in_progress")
+	e.store.Apply(itemstate.IssueCommentCreated{Repo: "owner/repo", Number: 71, Comment: gh.Comment{
+		DatabaseID: 1, Body: "🏭 **Fabrik — merge state unknown**\n\nGitHub has not reported a computed mergeability for PR #9.\n\n" + pauseCauseUnknownMergeStateMarker,
+	}})
+	m := pauseEventForItem(t, e, 71, "paused")
+	if m["cause"] != attention.CauseUnknownMergeState || m["cause"] != status(t, e, "71").Attention.Cause {
+		t.Errorf("push cause = %q, status cause = %q, want unknown-merge-state on both", m["cause"], status(t, e, "71").Attention.Cause)
+	}
+}

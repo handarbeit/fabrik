@@ -41,7 +41,9 @@ func (e *Engine) fillWorkerInputs(in *attention.Input, st *itemstate.ItemState, 
 		in.Gate = &attention.GateFact{Gate: h.Gate, Reason: h.Reason, IDs: append([]string(nil), h.IDs...), Since: h.Since}
 	}
 	in.RebaseAfterLanding = st.RebaseCause == rebaseCauseAfterLanding && hasLabelStr(st.Labels, "fabrik:rebase-needed")
-	in.DaemonStop = hasLabelStr(st.Labels, "fabrik:paused") && daemonStopPause(st)
+	paused := hasLabelStr(st.Labels, "fabrik:paused")
+	in.DaemonStop = paused && pausedByMarker(st, pauseCauseDaemonStopMarker)
+	in.UnknownMergeState = paused && pausedByMarker(st, pauseCauseUnknownMergeStateMarker)
 	in.Dispatchable = e.dispatchable(st, in, usageLimitedUntil)
 }
 
@@ -51,10 +53,16 @@ func (e *Engine) fillWorkerInputs(in *attention.Input, st *itemstate.ItemState, 
 const daemonStopMarkerSlack = 2 * time.Minute
 
 // daemonStopPause reports whether the newest pause-bearing Fabrik comment is the
-// daemon clean-stop pause (it carries pauseCauseDaemonStopMarker). Anything else
+// daemon clean-stop pause (it carries pauseCauseDaemonStopMarker).
+func daemonStopPause(st *itemstate.ItemState) bool {
+	return pausedByMarker(st, pauseCauseDaemonStopMarker)
+}
+
+// pausedByMarker reports whether the newest pause-bearing Fabrik comment carries
+// the given stable cause marker (daemon-stop #2121, unknown-merge-state #2302). Anything else
 // — a different pause comment, a stage comment, no comment at all — is not
 // evidence, so a crash or a bare stale in-progress label never reads as a stop.
-func daemonStopPause(st *itemstate.ItemState) bool {
+func pausedByMarker(st *itemstate.ItemState, marker string) bool {
 	for i := len(st.Comments) - 1; i >= 0; i-- {
 		c := st.Comments[i]
 		if c.FromPR != 0 || !strings.HasPrefix(c.Body, fabrikCommentPrefix) ||
@@ -62,7 +70,7 @@ func daemonStopPause(st *itemstate.ItemState) bool {
 			continue
 		}
 		switch {
-		case strings.Contains(c.Body, pauseCauseDaemonStopMarker):
+		case strings.Contains(c.Body, marker):
 			// A later eligibility change the store watched (a resume followed by a
 			// bare re-pause that wrote no Fabrik comment) means this marker belongs
 			// to an earlier pause. A zero stamp is unknown and proves nothing.
