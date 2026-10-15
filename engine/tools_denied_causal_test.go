@@ -248,3 +248,11 @@ func TestInterpretClaudeResult_IncidentalDenialLogsDiagnostic(t *testing.T) {
 		t.Errorf("logs = %q", joined)
 	}
 }
+
+// deniedCallLines returns the stream lines of one denied main-thread call
+// (tool_use plus an is_error tool_result), for fixtures that carry their own
+// terminal result line.
+func deniedCallLines(id, tool string) string {
+	return fmt.Sprintf(`{"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","id":%q,"name":%q,"input":{}}]}}`+"\n"+
+		`{"type":"user","parent_tool_use_id":null,"message":{"content":[{"type":"tool_result","tool_use_id":%q,"is_error":true,"content":"x"}]}}`+"\n", id, tool, id)
+}
